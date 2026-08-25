@@ -7,17 +7,17 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::preset::PresetRegistry;
-use engram_dashboard_core::agent::profile::{
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::profile::{
     AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, SpawnMode,
 };
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, OutputEvent, OutputFrame, OutputPayload,
     OutputSink, SinkError, SinkId, StatusSink,
 };
-use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
@@ -343,7 +343,7 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     let mut profile = AgentProfile::new(
         "sheller".to_string(),
         AgentCommand::Shell {
-            program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+            program: engram_dashboard_agent::manager::default_shell().to_string(),
             args: vec![],
         },
         std::path::PathBuf::from("."),
@@ -608,12 +608,12 @@ mod obs_seam {
     use std::sync::atomic::AtomicU8;
     use std::sync::{Arc, Mutex};
 
-    use engram_dashboard_core::agent::backend::InputEncoder;
-    use engram_dashboard_core::agent::manager::AgentManager;
-    use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
-    use engram_dashboard_core::agent::session::AgentSession;
-    use engram_dashboard_core::agent::transport::AgentTransport;
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::backend::InputEncoder;
+    use engram_dashboard_agent::manager::AgentManager;
+    use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
+    use engram_dashboard_agent::session::AgentSession;
+    use engram_dashboard_agent::transport::AgentTransport;
+    use engram_dashboard_agent::types::{
         AgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent, ModelCaps,
         OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
     };
@@ -621,7 +621,7 @@ mod obs_seam {
     struct NoopStatus;
     impl StatusSink for NoopStatus {
         fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
-        fn agent_list_updated(&self, _a: Vec<engram_dashboard_core::agent::types::AgentInfo>) {}
+        fn agent_list_updated(&self, _a: Vec<engram_dashboard_agent::types::AgentInfo>) {}
     }
 
     /// `structured`: 이 캐리어가 구조화 출력(= 턴 신호)을 내는가. **기본은 true(json claude 대역)**이고,
@@ -708,7 +708,7 @@ mod obs_seam {
         ));
         // ★종점 전이(pump 단독 소유 — ADR-0005)를 직접 부른다★: 이 세션엔 pump 가 없어 finalize 경쟁자가
         //   없다. 결과 = 맵에 남은 채 상태만 terminal(Killed).
-        core.finish(engram_dashboard_core::agent::types::TerminalReason::Killed);
+        core.finish(engram_dashboard_agent::types::TerminalReason::Killed);
         let session = Arc::new(AgentSession::new(
             id,
             std::path::PathBuf::from(format!("seam-root/{name}")),
@@ -791,11 +791,10 @@ mod obs_seam {
         let core = manager.wired_test_core(
             id,
             0,
-            engram_dashboard_core::agent::backend::turn_classifier(
-                &engram_dashboard_core::agent::profile::AgentCommand::Claude {
+            engram_dashboard_agent::backend::turn_classifier(
+                &engram_dashboard_agent::profile::AgentCommand::Claude {
                     extra_args: vec![],
-                    output_format:
-                        engram_dashboard_core::agent::profile::ClaudeOutputFormat::StreamJson,
+                    output_format: engram_dashboard_agent::profile::ClaudeOutputFormat::StreamJson,
                 },
             ),
         );
@@ -873,7 +872,7 @@ mod obs_seam {
 // ── ADR-0088(FIX-4): 배달 관측 core 단언을 claude 없이 — seam 수신자에 성공 relay ──────────────
 #[tokio::test]
 async fn control_send_delivery_observation_via_seam_no_claude() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_agent::backend::InputEncoder;
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
     use engram_dashboard_messaging::envelope::Entrance;
@@ -967,7 +966,7 @@ async fn control_send_delivery_observation_via_seam_no_claude() {
 //   한 함수에 두 필터가 있으므로 **둘 다** 회귀 커버가 필요하다(셸 축 = messaging_host 실 spawn 테스트).
 #[tokio::test]
 async fn roster_includes_a_terminal_agent_without_a_turn_signal_no_claude() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_agent::backend::InputEncoder;
     use engram_dashboard_daemon::messaging_host::ManagerDeliveryPort;
     use engram_dashboard_messaging::service::DeliveryPort;
 
@@ -1006,7 +1005,7 @@ async fn roster_includes_a_terminal_agent_without_a_turn_signal_no_claude() {
 //   단언이 된다(약한 포함 검사와 달리).
 #[tokio::test]
 async fn control_send_adds_a_separate_submit_write_only_for_terminal_recipients_no_claude() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_agent::backend::InputEncoder;
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
     use engram_dashboard_messaging::envelope::Entrance;
@@ -1397,7 +1396,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 ///       golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 가 커버한다.
 #[tokio::test]
 async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_agent::backend::InputEncoder;
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
     use engram_dashboard_messaging::envelope::Entrance;
@@ -1580,7 +1579,7 @@ async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {
 ///   session→transport handoff 에서의 truncation·오염을 못 잡는다.
 #[tokio::test]
 async fn stage1_body_size_boundary_bytes_not_chars() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
+    use engram_dashboard_agent::backend::InputEncoder;
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
     use engram_dashboard_daemon::control::registry::BoundIdentity;
     use engram_dashboard_messaging::envelope::Entrance;
@@ -2126,7 +2125,7 @@ async fn c2_a_resumed_transcript_never_bootstraps_busy() {
 //   죽은 에이전트에게 60초마다 도어벨을 울린다(프로세스 수명 내내).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
-    use engram_dashboard_core::agent::types::TerminalReason;
+    use engram_dashboard_agent::types::TerminalReason;
 
     let (manager, _registry, _base, data_dir, handle, _messaging, busy) = wire("c2-ghost").await;
     let (b_id, _captured, core) = obs_seam::insert_observed_seam_recipient(&manager, false);
@@ -2359,11 +2358,11 @@ async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {
 /// ★설계 의도★: 메일은 논리 에이전트(안정 주소)를 향하므로 epoch pinning 을 **하지 않는다**(ADR-0086 §F5).
 #[tokio::test]
 async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
-    use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
-    use engram_dashboard_core::agent::session::AgentSession;
-    use engram_dashboard_core::agent::transport::AgentTransport;
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::backend::InputEncoder;
+    use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
+    use engram_dashboard_agent::session::AgentSession;
+    use engram_dashboard_agent::transport::AgentTransport;
+    use engram_dashboard_agent::types::{
         AgentId as CoreAgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent,
         ModelCaps, OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
     };
@@ -2377,7 +2376,7 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
     struct NoopStatus;
     impl StatusSink for NoopStatus {
         fn status_changed(&self, _id: CoreAgentId, _s: AgentStatus, _e: u32) {}
-        fn agent_list_updated(&self, _a: Vec<engram_dashboard_core::agent::types::AgentInfo>) {}
+        fn agent_list_updated(&self, _a: Vec<engram_dashboard_agent::types::AgentInfo>) {}
     }
     struct EpochSeam {
         captured: Arc<Mutex<Vec<Vec<u8>>>>,
@@ -2557,11 +2556,11 @@ async fn stage1_lifecycle_epoch_rotation_delivers_to_current_incarnation() {
 ///   담는다**는 계약이다.
 #[tokio::test]
 async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_deterministic() {
-    use engram_dashboard_core::agent::backend::InputEncoder;
-    use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
-    use engram_dashboard_core::agent::session::AgentSession;
-    use engram_dashboard_core::agent::transport::AgentTransport;
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::backend::InputEncoder;
+    use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
+    use engram_dashboard_agent::session::AgentSession;
+    use engram_dashboard_agent::transport::AgentTransport;
+    use engram_dashboard_agent::types::{
         AgentId as CoreAgentId, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent,
         ModelCaps, OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
     };
@@ -2573,7 +2572,7 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     struct NoopStatus;
     impl StatusSink for NoopStatus {
         fn status_changed(&self, _id: CoreAgentId, _s: AgentStatus, _e: u32) {}
-        fn agent_list_updated(&self, _a: Vec<engram_dashboard_core::agent::types::AgentInfo>) {}
+        fn agent_list_updated(&self, _a: Vec<engram_dashboard_agent::types::AgentInfo>) {}
     }
     struct EpochSeam {
         captured: Arc<Mutex<Vec<Vec<u8>>>>,

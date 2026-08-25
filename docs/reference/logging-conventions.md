@@ -2,7 +2,7 @@
 
 **상태:** crates(core/daemon/discovery) de-facto 관행을 명문화. 마스킹은 *목표*가 아니라 **명시적으로 거부된 방향**이다(아래 보안 — ADR-0138). load-bearing 경로 작성·리뷰 시 이 문서가 단일 출처.
 
-> "무엇을·언제·어느 레벨로 로깅하나"(컨벤션)다. "어떻게 켜고 끄나"(인프라)는 `crates/engram-dashboard-core/src/logging/mod.rs`.
+> "무엇을·언제·어느 레벨로 로깅하나"(컨벤션)다. "어떻게 켜고 끄나"(인프라)는 `crates/engram-dashboard-agent/src/logging/mod.rs`.
 
 ## 인프라 (요약 — 정본은 코드)
 
@@ -13,7 +13,7 @@
 - **로그 폴더는 호출자가 넘긴다** — 코어가 데이터 폴더를 해석하면 「코어 격리」(ADR-0003)가 깨진다. 1차 폴더를 못 쓰면 `%TEMP%/engram-dashboard/logs/`로 물러나고, 둘 다 실패하면 파일 sink 없이 뜬다(그 경우의 주인 = 클라이언트 사전 점검, ADR-0135).
 - **보존 = 종류별 최신 10개**(이번 실행분을 포함한 상한). 정리 대상은 `<종류>-YYYYMMDD-HHMMSS-<pid>.log` **문법에 맞는 이름만**이다 — 접두사 일치로 바꾸면 다른 종류의 파일과 손으로 둔 파일까지 후보가 된다.
 - **파일 첫 줄 = 실행 머리글**(`==== engram <종류> | <UTC> | pid <n> | <exe 경로> ====`). 로그 이벤트가 아니라 이벤트 평면 밖의 한 줄이다 — 기본 레벨이 `warn`이라 정상 기동은 한 줄도 안 남아 **머리글이 없으면 파일이 통째로 빈다**. 이걸 메우려고 기동 알림 레벨을 올리지 말 것.
-- 정본: `crates/engram-dashboard-core/src/logging/mod.rs`. 결정·거부한 대안 = **ADR-0138**.
+- 정본: `crates/engram-dashboard-agent/src/logging/mod.rs`. 결정·거부한 대안 = **ADR-0138**.
 
 ## 레벨 — 무엇을 어디에 (de-facto)
 

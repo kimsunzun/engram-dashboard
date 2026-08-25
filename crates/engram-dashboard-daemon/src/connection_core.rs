@@ -19,26 +19,26 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::manager::RenameOutcome as CoreRenameOutcome;
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
 // 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
 #[cfg(test)]
-use engram_dashboard_core::agent::manager::default_shell;
-use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
-use engram_dashboard_core::agent::profile::SpawnMode;
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::manager::default_shell;
+use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
+use engram_dashboard_agent::profile::SpawnMode;
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputSink, ReplayKind, SinkId,
     SubscribeOutcome,
 };
 
-use engram_dashboard_core::agent::failure::AgentFailureKind as CoreFailureKind;
-use engram_dashboard_core::agent::preset::Preset as CorePreset;
-use engram_dashboard_core::agent::profile::{
+use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
+use engram_dashboard_agent::preset::Preset as CorePreset;
+use engram_dashboard_agent::profile::{
     AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
     ClaudeOutputFormat as CoreClaudeOutputFormat, RestartPolicy as CoreRestartPolicy,
     RestoreOutcome as CoreRestoreOutcome,
 };
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::types::{
     Capabilities as CoreCaps, OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
 };
 
@@ -1869,32 +1869,32 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
-        use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
-        use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
-        use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+        use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
+        use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
+        use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
         #[derive(Default)]
         struct MemStore {
-            saved: StdMutex<Vec<engram_dashboard_core::agent::profile::AgentProfile>>,
+            saved: StdMutex<Vec<engram_dashboard_agent::profile::AgentProfile>>,
         }
         impl ProfileStore for MemStore {
-            fn save(&self, p: &[engram_dashboard_core::agent::profile::AgentProfile]) {
+            fn save(&self, p: &[engram_dashboard_agent::profile::AgentProfile]) {
                 *self.saved.lock().unwrap() = p.to_vec();
             }
-            fn load(&self) -> Vec<engram_dashboard_core::agent::profile::AgentProfile> {
+            fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
                 self.saved.lock().unwrap().clone()
             }
         }
 
         #[derive(Default)]
         struct MemPresetStore {
-            saved: StdMutex<Vec<engram_dashboard_core::agent::preset::Preset>>,
+            saved: StdMutex<Vec<engram_dashboard_agent::preset::Preset>>,
         }
         impl PresetStore for MemPresetStore {
-            fn save(&self, p: &[engram_dashboard_core::agent::preset::Preset]) {
+            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) {
                 *self.saved.lock().unwrap() = p.to_vec();
             }
-            fn load(&self) -> Vec<engram_dashboard_core::agent::preset::Preset> {
+            fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
                 self.saved.lock().unwrap().clone()
             }
         }
@@ -1940,9 +1940,9 @@ mod tests {
     #[tokio::test]
     async fn ws_spawn_profile_announces_the_profile_list_even_when_activation_fails() {
         let (core, fanout) = test_core_recording();
-        let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
+        let profile = engram_dashboard_agent::profile::AgentProfile::new(
             "ws-parity".into(),
-            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+            engram_dashboard_agent::profile::AgentCommand::Shell {
                 // 실재하지 않는 실행파일 — 활성화가 결정적으로 실패한다.
                 program: format!("engram-not-a-real-program-{}.exe", uuid::Uuid::new_v4()),
                 args: vec![],
@@ -1988,9 +1988,9 @@ mod tests {
     #[tokio::test]
     async fn subscribe_emits_ack_then_replay_then_complete_in_order() {
         let (core, _rx) = test_core();
-        let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
+        let profile = engram_dashboard_agent::profile::AgentProfile::new(
             "t".into(),
-            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+            engram_dashboard_agent::profile::AgentCommand::Shell {
                 program: default_shell().to_string(),
                 args: vec![],
             },
@@ -2093,9 +2093,9 @@ mod tests {
         }
 
         let (core, _rx) = test_core();
-        let profile = engram_dashboard_core::agent::profile::AgentProfile::new(
+        let profile = engram_dashboard_agent::profile::AgentProfile::new(
             "t".into(),
-            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+            engram_dashboard_agent::profile::AgentCommand::Shell {
                 program: default_shell().to_string(),
                 args: vec![],
             },
@@ -2248,9 +2248,9 @@ mod tests {
     #[tokio::test]
     async fn reparent_rejected_emits_error_no_ack_no_broadcast() {
         let (core, _rx) = test_core();
-        let child = engram_dashboard_core::agent::profile::AgentProfile::new(
+        let child = engram_dashboard_agent::profile::AgentProfile::new(
             "c".into(),
-            engram_dashboard_core::agent::profile::AgentCommand::Shell {
+            engram_dashboard_agent::profile::AgentCommand::Shell {
                 program: default_shell().to_string(),
                 args: vec![],
             },
@@ -3404,7 +3404,7 @@ mod tests {
     // ── core→wire AgentInfo 변환 roundtrip ───────────────────────────────────────
     #[test]
     fn core_agent_info_converts_to_wire() {
-        use engram_dashboard_core::agent::types::{
+        use engram_dashboard_agent::types::{
             AgentInfo as Ci, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
             SessionCaps,
         };
@@ -3457,7 +3457,7 @@ mod tests {
     // ── (M3) core::AgentStatus 모든 variant 가 wire 로 roundtrip 되는지 ────────────────
     #[test]
     fn all_core_status_variants_roundtrip_to_wire() {
-        use engram_dashboard_core::agent::types::{
+        use engram_dashboard_agent::types::{
             AgentInfo as Ci, Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps,
             SessionCaps,
         };
@@ -3547,7 +3547,7 @@ mod tests {
     // ── (적용1) core::RestoreOutcome 전 variant → wire 명시 변환 ──────────────────────
     #[test]
     fn all_restore_outcomes_convert_to_wire() {
-        use engram_dashboard_core::agent::profile::RestoreOutcome as Co;
+        use engram_dashboard_agent::profile::RestoreOutcome as Co;
         use engram_dashboard_protocol::RestoreOutcome as Wo;
 
         let old = uuid::Uuid::new_v4();
@@ -3697,9 +3697,9 @@ mod tests {
 
         // (1) 프로필 2개 — boss(곧 산 세션이 된다) · sleepy(계속 잠들어 있다 = 파킹 수신자).
         let mk = |name: &str| {
-            engram_dashboard_core::agent::profile::AgentProfile::new(
+            engram_dashboard_agent::profile::AgentProfile::new(
                 name.into(),
-                engram_dashboard_core::agent::profile::AgentCommand::Shell {
+                engram_dashboard_agent::profile::AgentCommand::Shell {
                     program: default_shell().to_string(),
                     args: vec![],
                 },

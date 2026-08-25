@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::types::{
     CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
 };
 
@@ -377,7 +377,7 @@ impl PrimingProvider for FixedPrimingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
+    use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
     use std::io::Write as _;
     use std::sync::Mutex;
 

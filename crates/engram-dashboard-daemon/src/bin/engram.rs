@@ -110,7 +110,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::types::{
     AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
     CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS,
     CLI_MAIL_VERBS, MAIL_MARKER_ENV, MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED,
@@ -2731,7 +2731,7 @@ fn print_error(code: &str, hint: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_core::agent::types::MAIL_MARKER_ON;
+    use engram_dashboard_agent::types::MAIL_MARKER_ON;
 
     /// 표식 없는 프로세스(= 전부 보이는 기본 표면)로 파싱한다. **표면 축을 보는 테스트만**
     /// `super::parse_command` 를 직접 불러 `MailSurface` 를 명시한다 — 나머지는 그 축과 무관하다.

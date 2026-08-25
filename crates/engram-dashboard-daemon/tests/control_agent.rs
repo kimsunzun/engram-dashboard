@@ -7,18 +7,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engram_dashboard_command::{CommandEnvelope, CommandReply};
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::manager::MAX_ROSTER_SIZE;
-use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
-use engram_dashboard_core::agent::profile::{
-    AgentCommand, AgentProfile, ProfileRegistry, ProfileStore,
-};
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::manager::MAX_ROSTER_SIZE;
+use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
+use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, ProfileStore};
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
     CLI_CONTROL_READ_TIMEOUT_SECS,
 };
+use engram_dashboard_command::{CommandEnvelope, CommandReply};
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandDeliveries};
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
@@ -404,7 +402,7 @@ fn seed_shell_agent(manager: &Arc<AgentManager>, name: &str) -> AgentId {
     let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Shell {
-            program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+            program: engram_dashboard_agent::manager::default_shell().to_string(),
             args: vec![],
         },
         cwd,
@@ -456,10 +454,7 @@ async fn list_reports_both_live_and_sleeping_agents() {
     let live = seed_shell_agent(&f.manager, "awake");
     let profile = f.manager.agent_snapshot(live).expect("스냅샷");
     f.manager
-        .activate_profile(
-            &profile,
-            engram_dashboard_core::agent::profile::SpawnMode::Fresh,
-        )
+        .activate_profile(&profile, engram_dashboard_agent::profile::SpawnMode::Fresh)
         .expect("셸 스폰");
 
     let (status, body) = f.post(serde_json::json!({ "verb": "list" })).await;
@@ -825,7 +820,7 @@ async fn a_duplicate_name_is_refused_rather_than_guessed() {
         let mut p = AgentProfile::new(
             "twin".to_string(),
             AgentCommand::Shell {
-                program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+                program: engram_dashboard_agent::manager::default_shell().to_string(),
                 args: vec![],
             },
             std::env::temp_dir(),
@@ -1140,7 +1135,7 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
         let mut p = AgentProfile::new(
             format!("filler-{i}"),
             AgentCommand::Shell {
-                program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+                program: engram_dashboard_agent::manager::default_shell().to_string(),
                 args: vec![],
             },
             std::env::temp_dir(),
@@ -1815,8 +1810,8 @@ async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_a
 /// 픽스처를 전부 산 것으로 두고 규칙만 맞댄다(정의역까지 같게 만드는 것은 이 슬라이스의 결정이 아니다).
 mod resolver_alignment {
     use super::*;
+    use engram_dashboard_agent::commands::{resolve_in, AgentRosterRow};
     use engram_dashboard_command::ErrorCode;
-    use engram_dashboard_core::agent::commands::{resolve_in, AgentRosterRow};
     use engram_dashboard_messaging::envelope::{DeliveryObservation, Entrance, EnvelopeFormat};
     use engram_dashboard_messaging::service::{
         AddressingSources, ControlPlanePort, DeliveryPort, FailCode, InjectReceipt, LiveAgent,

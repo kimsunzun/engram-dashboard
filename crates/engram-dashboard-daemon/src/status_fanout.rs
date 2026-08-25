@@ -20,8 +20,8 @@
 // ADR-0005
 // ADR-0028
 
-use engram_dashboard_core::agent::profile::RestoreReport as CoreRestoreReport;
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, StatusSink,
 };
 use engram_dashboard_protocol::AgentEvent;
@@ -79,8 +79,8 @@ impl StatusSink for DaemonStatusSink {
 mod tests {
     use super::*;
     use crate::test_doubles::RecordingFanout;
-    use engram_dashboard_core::agent::profile::RestoreOutcome as CoreRestoreOutcome;
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::profile::RestoreOutcome as CoreRestoreOutcome;
+    use engram_dashboard_agent::types::{
         Capabilities, ControlCaps, InputCaps, ModelCaps, OutputCaps, SessionCaps,
     };
     use serde_json::json;

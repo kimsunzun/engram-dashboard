@@ -992,8 +992,8 @@ version = "0.2.0"
 dependencies = [
  "arc-swap",
  "dunce",
+ "engram-dashboard-agent",
  "engram-dashboard-command",
- "engram-dashboard-core",
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",
  "engram-dashboard-net",
@@ -1016,17 +1016,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "engram-dashboard-command"
-version = "0.1.0"
-dependencies = [
- "inventory",
- "serde",
- "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "engram-dashboard-core"
+name = "engram-dashboard-agent"
 version = "0.1.0"
 dependencies = [
  "dunce",
@@ -1044,12 +1034,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-dashboard-command"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "engram-dashboard-daemon"
 version = "0.2.0"
 dependencies = [
  "axum",
+ "engram-dashboard-agent",
  "engram-dashboard-command",
- "engram-dashboard-core",
  "engram-dashboard-daemon",
  "engram-dashboard-discovery",
  "engram-dashboard-messaging",
@@ -1078,7 +1078,7 @@ name = "engram-dashboard-discovery"
 version = "0.1.0"
 dependencies = [
  "dunce",
- "engram-dashboard-core",
+ "engram-dashboard-agent",
  "engram-dashboard-net",
  "engram-dashboard-protocol",
  "serde_json",
@@ -1101,7 +1101,7 @@ dependencies = [
 name = "engram-dashboard-net"
 version = "0.1.0"
 dependencies = [
- "engram-dashboard-core",
+ "engram-dashboard-agent",
  "engram-dashboard-protocol",
  "futures-util",
  "serde",

@@ -31,7 +31,7 @@ path = "src/lib.rs"
 [features]
 default = []
 server = [
-    "dep:engram-dashboard-core",
+    "dep:engram-dashboard-agent",
     "dep:engram-dashboard-protocol",
     "dep:futures-util",
     "dep:serde_json",
@@ -75,7 +75,7 @@ engram-dashboard-protocol = { path = "../engram-dashboard-protocol", optional = 
 #   (ADR-0129 결정: 격리 게이트는 crate 단위가 아니라 **타입 단위**다).
 #   ★optional 이어도 게이트 3 의 기대값은 3 그대로다★ — 그 게이트는 `--all-features` 로 읽으므로
 #   optional 간선이 그대로 드러난다(그게 애초에 그 플래그를 붙인 이유다).
-engram-dashboard-core = { path = "../engram-dashboard-core", optional = true }
+engram-dashboard-agent = { path = "../engram-dashboard-agent", optional = true }
 
 # macros = `tokio::select!`(write_task 의 큐/close_signal/keepalive 3-arm) + `#[tokio::test]`.
 # net/sync/time = TcpStream·mpsc·Notify·timeout/interval. daemon 과 같은 1.x 핀.

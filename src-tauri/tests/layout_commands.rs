@@ -1486,7 +1486,7 @@ fn with_view(bridge: Arc<ViewCommandBridge>) -> (World, Arc<InboundReceiver>) {
 #[tokio::test]
 async fn the_registration_packet_never_carries_a_name_the_daemon_answers_itself() {
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
-    let daemon_answers: Vec<&str> = engram_dashboard_core::agent::commands::COMMAND_SPECS
+    let daemon_answers: Vec<&str> = engram_dashboard_agent::commands::COMMAND_SPECS
         .iter()
         .map(|spec| spec.name)
         .collect();

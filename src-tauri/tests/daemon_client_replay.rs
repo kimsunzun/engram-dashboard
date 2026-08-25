@@ -97,7 +97,7 @@ fn flight() -> ReplayFlightSet {
 }
 
 // 마커 프레임에서 gen(BE u64)과 failed 플래그(bit1)를 도로 꺼낸다 — 레이아웃 정본은
-// `engram_dashboard_core::replay_flight::encode_marker_frame` 문단이고, 여기선 그 값을 읽기만 한다.
+// `engram_dashboard_agent::replay_flight::encode_marker_frame` 문단이고, 여기선 그 값을 읽기만 한다.
 fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
     assert_eq!(frame.len(), MARKER_FRAME_LEN, "마커 프레임 길이");
     assert_eq!(frame[0], MARKER_TAG, "tag=255");

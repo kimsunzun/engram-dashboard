@@ -39,11 +39,11 @@
 //! ★확인 레시피 — **워크스페이스-로컬 forward 폐포**를 볼 것★:
 //!   `cargo tree -p engram-dashboard-net -e normal --target all --all-features --prefix none`
 //!   `| rg "^engram-dashboard" | sort -u`
-//!   → 자기 자신 + `core` + `protocol`. 목록에 `discovery` 가 없다 = **이 crate 는 discovery 에 도달하지
+//!   → 자기 자신 + `agent` + `protocol`. 목록에 `discovery` 가 없다 = **이 crate 는 discovery 에 도달하지
 //!   않는다**. 그래서 `discovery → 이 crate` 를 더해도 닫히는 고리가 없다.
 //!   ★`--target all --all-features` 를 빼지 말 것★: 호스트 target 만 보면 `cfg(unix)` 같은 **비활성 target**
 //!   의존과 **optional** 의존이 출력에서 사라진다(실측). 외부 crate 까지 다 찍히면 수백 줄이라 워크스페이스
-//!   것만 걸러 본다. `core → protocol` 은 core 의 dev-의존이라 `-e normal` 엔 나오지 않는데, 결론에는
+//!   것만 걸러 본다. `agent → protocol` 은 agent 의 dev-의존이라 `-e normal` 엔 나오지 않는데, 결론에는
 //!   영향이 없다 — 없는 간선은 도달을 늘리지 못한다.
 //!   ★`--invert` 를 쓰지 말 것(unsound)★: invert 는 이 crate 의 **조상**을 나열하는데, 순환 성립 조건은
 //!   `이 crate →* discovery` 이므로 순환이 있는 세계에서도 invert 출력은 **바이트 동일**하다 — 즉 그
@@ -56,9 +56,9 @@
 //! 게이트를 손보면 **편집 후 비자기일치 성질을 다시 실측할 것**:
 //!   · **게이트 1 — 소스 참조**(`src/` 범위):
 //!     `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` → **0줄**
-//!   · **게이트 2 — core 심볼 allowlist**(`src/` 범위):
-//!     `rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/`
-//!     `| sort -u` → **정확히 2줄**, 둘 다 `agent::platform::` 아래 프로세스 liveness 헬퍼
+//!   · **게이트 2 — agent 심볼 allowlist**(`src/` 범위):
+//!     `rg -o --no-filename "engram_dashboard_agent::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/`
+//!     `| sort -u` → **정확히 2줄**, 둘 다 `platform::` 아래 프로세스 liveness 헬퍼
 //!     (`pid_alive_with_start_time` · `current_process_start_time` — portfile 의 stale 판정 전용).
 //!     ★기대값을 **파일 이름**으로 두지 말 것★: "`portfile.rs` 만" 은 그 파일 **안에** 에이전트 어휘
 //!     import 를 새로 넣어도 여전히 참이라 게이트가 통과한다. 불변식은 파일 단위가 아니라 **심볼 단위**다
@@ -66,12 +66,12 @@
 //!   · **게이트 3 — 직접 워크스페이스 의존 상한**(해석된 의존 그래프 범위):
 //!     `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all`
 //!     `--all-features | rg "^engram-dashboard" | sort -u`
-//!     → **정확히 3줄** = 자기 자신 · `engram-dashboard-core` · `engram-dashboard-protocol`.
+//!     → **정확히 3줄** = 자기 자신 · `engram-dashboard-agent` · `engram-dashboard-protocol`.
 //!     ★이 게이트가 닫는 것(딱 이만큼)★: **선언된 직접 워크스페이스 의존**이 매니페스트 문법에 관계없이
 //!     드러난다 — rename · `[dependencies.<이름>]` 테이블 형 · 들여쓴 선언 · `[build-dependencies]` ·
 //!     비활성 target(`cfg(unix)`) · `optional` 6형태를 **주입→관측→원복으로 실측**해 전부 잡는 것을 확인했다.
-//!     ★닫지 **않는** 것★: 허용된 간선(protocol·core) **안에서** 어떤 심볼을 쓰는지는 보지 않는다 —
-//!     core 쪽은 게이트 2가 묶고, protocol 쪽은 게이트 4가 **두 이름만** 못 박는다. 즉 protocol 심볼
+//!     ★닫지 **않는** 것★: 허용된 간선(protocol·agent) **안에서** 어떤 심볼을 쓰는지는 보지 않는다 —
+//!     agent 쪽은 게이트 2가 묶고, protocol 쪽은 게이트 4가 **두 이름만** 못 박는다. 즉 protocol 심볼
 //!     **일반**의 allowlist 는 여전히 없다(알려진 공백 — ADR-0129 §영향/불변식의 2026-08-05 note 안
 //!     ★알려진 공백★ 절, 의도적 유보. 그 ADR 에 "Note A" 라는 라벨은 없다). 게이트 4를
 //!     그 일반 allowlist 로 키우지 말 것 — 그건 별도 결정이다(0-4 범위 밖).

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use engram_dashboard_core::agent::types::AgentId;
+use engram_dashboard_agent::types::AgentId;
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot,
 };
@@ -372,7 +372,7 @@ async fn revoked_mid_session_request_is_rejected() {
 // registry 회전(issue)의 구 토큰 evict 는 registry unit 이 커버한다 — 여기선 config 파일 수명까지 본다.
 #[tokio::test]
 async fn epoch_rotation_revokes_old_token_and_config_file() {
-    use engram_dashboard_core::agent::types::ControlChannel;
+    use engram_dashboard_agent::types::ControlChannel;
     use engram_dashboard_daemon::control::mcp_config;
     use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
     use engram_dashboard_daemon::control::DaemonControlChannel;

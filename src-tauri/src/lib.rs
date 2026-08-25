@@ -15,7 +15,7 @@ mod tray;
 // 셸이다(창/트레이/로컬 제어 command + 데몬 discovery). 에이전트는 데몬이 호스팅한다.
 // 그래서 옛 in-proc 배선(AgentManager/ConnectionCore/embedded
 // carrier/AppState/TauriStatusSink/모드 시스템)은 전부 제거됐다.
-use engram_dashboard_core::logging;
+use engram_dashboard_agent::logging;
 
 use tauri::Manager;
 

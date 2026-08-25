@@ -31,8 +31,8 @@
 // ADR-0155
 // ADR-0157
 
+use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
 use engram_dashboard_command::{CommandError, CommandTable, ErrorCode};
-use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
 
 use super::ingress::ControlQueryResult;
 
@@ -288,7 +288,7 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
 
 #[cfg(test)]
 mod tests {
-    use engram_dashboard_core::agent::types::CLI_AGENT_VERBS;
+    use engram_dashboard_agent::types::CLI_AGENT_VERBS;
 
     use super::*;
 

@@ -19,7 +19,7 @@ path = "src/lib.rs"
 #   운영 dep 그래프(무-feature)엔 유니피케이션되지 않는다.
 [features]
 test-harness = [
-    "engram-dashboard-core/test-harness",
+    "engram-dashboard-agent/test-harness",
     # ADR-0110: 메시징 커널이 자체 선언한 같은-이름 기능(하네스 seam)으로 전이한다.
     "engram-dashboard-messaging/test-harness",
 ]
@@ -76,7 +76,7 @@ path = "src/bin/drain_latency.rs"
 required-features = ["test-harness"]
 
 [dependencies]
-engram-dashboard-core = { path = "../engram-dashboard-core" }
+engram-dashboard-agent = { path = "../engram-dashboard-agent" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # data_dir 단일 출처(ADR-0024) — embedded·daemon 이 같은 default_data_dir() 을 보게(순환 없음).
 engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
@@ -177,7 +177,7 @@ engram-dashboard-daemon = { path = ".", features = ["test-harness"] }
 #   seam)을 cross-crate 로 쓰려면 core 의 `test-harness` 기능을 켜야 한다. dev-dependency 로만 켜므로
 #   운영 daemon 바이너리 의존 그래프(위 [dependencies] 의 무-feature core)엔 유니피케이션되지 않는다 —
 #   운영 빌드는 seam 을 컴파일하지 않는다(no-leak). (feature-only dev-dep 재선언 — path 는 위와 동일 crate.)
-engram-dashboard-core = { path = "../engram-dashboard-core", features = ["test-harness"] }
+engram-dashboard-agent = { path = "../engram-dashboard-agent", features = ["test-harness"] }
 # ★ADR-0110★: 같은 계열 — 데몬 테스트가 메시징 커널의 하네스 seam(`MessagingService::contract_outcome_for_test`
 #   — connection_core 의 삭제 정리 테스트가 계약 **종결 사유**를 본다)을 cross-crate 로 쓰므로 dev 그래프
 #   에서만 그 기능을 켠다(운영 daemon 바이너리엔 미유니피케이션).

@@ -9,14 +9,14 @@
 
 use std::sync::{Arc, Mutex};
 
-use engram_dashboard_core::agent::backend::accepts_mcp_config;
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
-use engram_dashboard_core::agent::profile::{
+use engram_dashboard_agent::backend::accepts_mcp_config;
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
+use engram_dashboard_agent::profile::{
     AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, ProfileStore,
 };
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};

@@ -13,8 +13,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::types::{
     AgentId, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
 };
 use engram_dashboard_protocol::{
@@ -473,7 +473,7 @@ mod tests {
     // ── 1b. (S15 B7) Event(구조화) payload 를 tag1 frame 으로 인코딩하는지 ──────
     #[tokio::test]
     async fn frame_output_sink_encodes_event_as_tag1_structured_frame() {
-        use engram_dashboard_core::agent::types::OutputEvent as CoreOutputEvent;
+        use engram_dashboard_agent::types::OutputEvent as CoreOutputEvent;
         use engram_dashboard_protocol::{
             decode_frame, StructuredEvent as WireStructuredEvent, FRAME_TAG_STRUCTURED_EVENT,
         };
@@ -638,9 +638,9 @@ mod tests {
         commands: CommandRoster,
         deliveries: CommandDeliveries,
     ) -> AgentConnections {
-        use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
-        use engram_dashboard_core::agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
-        use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
+        use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
+        use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+        use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
         struct NoStore;
         impl ProfileStore for NoStore {

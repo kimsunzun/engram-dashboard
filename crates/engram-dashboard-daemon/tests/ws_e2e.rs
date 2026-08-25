@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
+use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, SpawnMode};
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
@@ -2335,7 +2335,7 @@ mod real_process {
     #[tokio::test]
     #[ignore = "실프로세스/Job 필요 — `-- --ignored` 로 실행(Windows 전용)"]
     async fn ignored_daemon_kill_cleans_pty_child() {
-        use engram_dashboard_core::agent::platform::{
+        use engram_dashboard_agent::platform::{
             child_pids, pid_alive_with_start_time, process_creation_time,
         };
 

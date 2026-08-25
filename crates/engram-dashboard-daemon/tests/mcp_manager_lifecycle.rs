@@ -7,16 +7,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::preset::PresetRegistry;
-use engram_dashboard_core::agent::profile::{
-    AgentCommand, AgentProfile, ProfileRegistry, SpawnMode,
-};
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{
-    AgentId, AgentInfo, AgentStatus, ControlChannel, StatusSink,
-};
-use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::{AgentId, AgentInfo, AgentStatus, ControlChannel, StatusSink};
 
 use engram_dashboard_daemon::control::mcp_config;
 use engram_dashboard_daemon::control::mcp_server::{
@@ -168,9 +164,7 @@ fn make_manager_with_injected(
 //   is_err() 가 "claude 미설치" 로 우연히 초록이 되는 경로가 없다.
 #[tokio::test]
 async fn claude_spawn_fails_closed_when_provision_errors() {
-    use engram_dashboard_core::agent::types::{
-        AgentId as CoreAgentId, ControlEndpoint, ProvisionError,
-    };
+    use engram_dashboard_agent::types::{AgentId as CoreAgentId, ControlEndpoint, ProvisionError};
 
     struct FailingControl;
     impl ControlChannel for FailingControl {
@@ -191,7 +185,7 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
         "claude-fail-closed".into(),
         AgentCommand::Claude {
             extra_args: vec![],
-            output_format: engram_dashboard_core::agent::profile::ClaudeOutputFormat::Terminal,
+            output_format: engram_dashboard_agent::profile::ClaudeOutputFormat::Terminal,
         },
         PathBuf::from("."),
         vec![],
@@ -215,9 +209,7 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
 // ── round-2 F3: shell(제어 채널 미소비) spawn ────────────────────────────────────────
 #[tokio::test]
 async fn shell_spawn_succeeds_with_failing_control_channel() {
-    use engram_dashboard_core::agent::types::{
-        AgentId as CoreAgentId, ControlEndpoint, ProvisionError,
-    };
+    use engram_dashboard_agent::types::{AgentId as CoreAgentId, ControlEndpoint, ProvisionError};
 
     struct FailingControl;
     impl ControlChannel for FailingControl {
@@ -237,7 +229,7 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
     let profile = AgentProfile::new(
         "shell-succeeds".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+            program: engram_dashboard_agent::manager::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),
@@ -273,7 +265,7 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
 //   여기선 guard 가 drop 시 부르는 것과 **같은** revoke 가 실존 자원을 회수하는지만 본다.
 #[tokio::test]
 async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
-    use engram_dashboard_core::agent::types::ControlChannel;
+    use engram_dashboard_agent::types::ControlChannel;
 
     let (_manager, registry, data_dir, handle) =
         make_manager_with_control("provision-reclaim").await;
@@ -325,7 +317,7 @@ async fn kill_revokes_token_before_pump_join() {
     let profile = AgentProfile::new(
         "kill-revoke".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+            program: engram_dashboard_agent::manager::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),

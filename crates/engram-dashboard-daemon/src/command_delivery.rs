@@ -160,7 +160,7 @@ const fn fits_caller_silence_window(deadline: Duration) -> bool {
     deadline.as_millis()
         + CommandDeliveries::SWEEP_INTERVAL.as_millis()
         + CommandDeliveries::CALLER_MARGIN.as_millis()
-        <= (engram_dashboard_core::agent::types::CLI_CONTROL_READ_TIMEOUT_SECS as u128) * 1_000
+        <= (engram_dashboard_agent::types::CLI_CONTROL_READ_TIMEOUT_SECS as u128) * 1_000
 }
 
 const _: () = assert!(
@@ -2108,7 +2108,7 @@ impl CommandBus {
                 // ★목적지 주인은 `route` 가 명부 조회 결과로 **덮어 쓴다**★(그 함수) — 여기서 지어낸 값은
                 //   어디서도 읽히지 않는다. 자칭 신원을 실어 보내는 자리가 아니다(`CommandEnvelope::owner`).
                 owner: OwnerToken::new(""),
-                proto_ver: engram_dashboard_core::agent::commands::CATALOG_VERSION,
+                proto_ver: engram_dashboard_agent::commands::CATALOG_VERSION,
                 args,
             },
             ENTRANCE_CONTROL,

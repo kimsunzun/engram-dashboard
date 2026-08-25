@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
-use engram_dashboard_core::agent::types::AgentId;
+use engram_dashboard_agent::types::AgentId;
 
 // ADR-0110
 use engram_dashboard_messaging::envelope::{DeliveryObservation, DeliveryObserver, EnvelopeFormat};

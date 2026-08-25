@@ -201,7 +201,7 @@ impl ViewDispatch for TauriViewDispatch {
 /// ★데몬 어휘를 **전부** 덮지는 못한다(알려진 한계)★ — 데몬 crate 가 자기 이름을 선언하면(TRD §6 Step 2
 /// 의 `mail.*`) 셸은 그것을 컴파일에 안 들여 못 본다. 그때의 방어선은 데몬의 반려 하나뿐이다.
 pub fn reserved_names() -> BTreeSet<String> {
-    engram_dashboard_core::agent::commands::COMMAND_SPECS
+    engram_dashboard_agent::commands::COMMAND_SPECS
         .iter()
         .chain(crate::layout::commands::COMMAND_SPECS.iter())
         .map(|spec| spec.name.to_string())

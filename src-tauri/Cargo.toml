@@ -57,7 +57,7 @@ tracing = "0.1"
 thiserror = "1"   # discovery::DiscoveryError
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
 # logging::init_logging 만 코어에서 쓴다(ADR-0029 — in-proc 에이전트 호스팅 제거).
-engram-dashboard-core = { path = "../crates/engram-dashboard-core" }
+engram-dashboard-agent = { path = "../crates/engram-dashboard-agent" }
 # ADR-0155: 이 셸이 `window`/`tab`/`slot` 을 **선언**하는 주인이라 선언 매크로·표·봉투·배달이 필요하다.
 #   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 core 를 타고 이미
 #   이 셸의 의존 그래프에 링크돼 있었다(직접 간선만 는다).

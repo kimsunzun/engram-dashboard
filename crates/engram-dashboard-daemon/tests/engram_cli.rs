@@ -10,7 +10,7 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::types::{
     CLI_EXE_NAME, CLI_GROUP_MAIL, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
 };
 

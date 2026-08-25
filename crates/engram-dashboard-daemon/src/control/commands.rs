@@ -17,11 +17,11 @@
 
 use std::sync::Arc;
 
+use engram_dashboard_agent::commands::{make_table, RosterChanged};
+use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_command::{
     CommandDecl, CommandError, CommandFuture, CommandTable, Effect, ErrorCode,
 };
-use engram_dashboard_core::agent::commands::{make_table, RosterChanged};
-use engram_dashboard_core::agent::manager::AgentManager;
 use futures_util::FutureExt as _;
 
 use crate::command_delivery::LocalCommands;
@@ -193,14 +193,14 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use engram_dashboard_command::testing::block_on;
-    use engram_dashboard_command::CommandError;
-    use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
-    use engram_dashboard_core::agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
-    use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
+    use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+    use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+    use engram_dashboard_agent::types::{
         AgentId, AgentInfo, AgentStatus, StatusSink, CLI_AGENT_VERBS,
     };
+    use engram_dashboard_command::testing::block_on;
+    use engram_dashboard_command::CommandError;
     use serde_json::json;
 
     use super::super::agent::RosterBroadcast;

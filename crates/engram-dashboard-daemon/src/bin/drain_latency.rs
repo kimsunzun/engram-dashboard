@@ -18,19 +18,19 @@ use std::sync::atomic::AtomicU8;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use engram_dashboard_core::agent::backend::InputEncoder;
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::output_core::{OutputCore, TurnWiring};
-use engram_dashboard_core::agent::preset::PresetRegistry;
-use engram_dashboard_core::agent::profile::ProfileRegistry;
-use engram_dashboard_core::agent::session::AgentSession;
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::transport::AgentTransport;
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::backend::InputEncoder;
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
+use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::profile::ProfileRegistry;
+use engram_dashboard_agent::session::AgentSession;
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::transport::AgentTransport;
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent, ModelCaps,
     OutputCaps, PtyError, SessionCaps, StatusSink, TransportCaps,
 };
-use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, ControlResult};
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};

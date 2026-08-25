@@ -216,7 +216,7 @@ jobs:
       # 이 스위트가 `src-tauri/bindings/*.ts` 를 다시 굽는다(ts-rs derive 가 `#[ts(export)]` 타입마다
       #   만드는 `export_bindings_*` 가 그 안에 있다) — 그래서 이 스텝은 아래 'Gate: ts-rs bindings …'
       #   보다 반드시 **앞**에 있어야 한다. 바인딩 **대조**는 여기서 하지 않는다: 그 게이트 한 곳이 세
-      #   디렉터리를 모아서 본다(core 와 같은 모양 — 재생성 스텝 따로, diff 게이트 하나).
+      #   디렉터리를 모아서 본다(agent 와 같은 모양 — 재생성 스텝 따로, diff 게이트 하나).
       # `-- --test-threads=4` 는 붙이지 않는다 — 이 스위트는 인메모리 하네스·소켓뿐이라 자식 프로세스가 없다.
       - name: cargo test -p engram-dashboard --test lib_unit
         shell: bash
@@ -225,9 +225,9 @@ jobs:
       # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
-      - name: cargo test -p engram-dashboard-core
+      - name: cargo test -p engram-dashboard-agent
         shell: bash
-        run: cargo test --locked -p engram-dashboard-core
+        run: cargo test --locked -p engram-dashboard-agent
 
       # ADR-0134: 명령 버스 도구 crate(신설) — 워크스페이스 crate 의존 0 이 존재 이유라 이 crate 도
       # 위와 같은 단독 기립 축으로 확인한다(TRD S20 §6 Step 1).
@@ -245,7 +245,7 @@ jobs:
       # ★줄바꿈 잡음으로는 안 터진다★: index blob 이 LF 이고 git 이 비교 전에 작업본을 같은 방식으로
       #   정규화하므로 CRLF 차이만으로는 diff 가 나지 않는다(autocrlf=true 인 Windows 에서 재생성 후
       #   `git diff --exit-code` → 0 실측). 잡음이 보이는 것은 `git status` 쪽이지 `git diff` 가 아니다.
-      # core/bindings/ 도 같은 게이트에 든다(ADR-0134): 위 `cargo test -p engram-dashboard-core` 가
+      # agent/bindings/ 도 같은 게이트에 든다(ADR-0134): 위 `cargo test -p engram-dashboard-agent` 가
       #   `agent.*` 선언에서 .ts 와 commands.schema.json 을 재생성하므로, 선언을 고치고 생성물을 안 밀면
       #   여기서 걸린다. **생성 지점이 crate 마다로 흩어졌으므로 이 경로 목록도 함께 늘어난다.**
       # ★`git diff` 는 untracked 파일을 보지 않는다★: 처음 생성되는 .ts 는 아직 커밋된 적이 없어
@@ -268,8 +268,8 @@ jobs:
       - name: 'Gate: ts-rs bindings are in sync with the wire contract'
         shell: bash
         run: |
-          git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/ src-tauri/bindings/
-          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/ src-tauri/bindings/; then
+          git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
+          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/; then
             echo "FAIL — 재생성된 바인딩이 커밋본과 다르다(선언 ↔ 생성물 drift, 신규 미커밋 파일 포함). 위 diff 를 반영해 커밋할 것."
             exit 1
           fi
@@ -377,11 +377,13 @@ jobs:
       # `set +e` 가 필요한 이유: Actions 의 bash 는 `set -e` 로 도는데 `hits=$(rg …)` 는 rg 의 종료코드를
       # 그대로 물려받아, 매치가 없는 **정상 통과** 경로에서 스텝이 먼저 죽는다.
 
-      - name: 'Gate: core isolation — no `use tauri` in core'
+      # 옛 게이트명은 'Gate: core isolation — no `use tauri` in core' 였다(crate 개명 ADR-0175 전).
+      #   ADR-0003 의 코어 격리 불변식 그대로이고 대상 crate 이름만 `core` → `agent` 로 바뀌었다.
+      - name: 'Gate: agent crate isolation — no `use tauri` in the agent crate'
         shell: bash
         run: |
           set +e
-          hits=$(rg "^\s*use tauri" crates/engram-dashboard-core/src/)
+          hits=$(rg "^\s*use tauri" crates/engram-dashboard-agent/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -396,7 +398,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -478,11 +480,17 @@ jobs:
 
       # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
       # 매치 유무가 아니라 정확한 줄 수를 단언한다(2 를 넘어도 모자라도 실패).
-      - name: 'net gate 2: core symbol allowlist — exactly 2'
+      # ★기대값을 「0줄」로 바꾸지 말 것★ — 개명(ADR-0175) 으로 옛 문자열(`engram_dashboard_core::`)이
+      #   어디에도 없으니 그대로 두면 **어떤 위반으로도 깨질 수 없는 죽은 게이트**가 된다. 새 이름으로
+      #   재조준하고 기대값은 **2 그대로**다: net 이 무는 심볼 수는 개명으로 변하지 않았다(모듈 접기로
+      #   경로만 `::agent::platform::` → `::platform::` 로 짧아졌다).
+      #   `base` crate 가 서서 PID 헬퍼가 그리로 이사하면(ADR-0175 결정 1) 그때 이 게이트를 0 기대로
+      #   내리고 `engram_dashboard_base::` allowlist 를 새로 세운다 — 지금은 아직 아니다.
+      - name: 'net gate 2: agent symbol allowlist — exactly 2'
         shell: bash
         run: |
           set +e
-          raw=$(rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
+          raw=$(rg -o --no-filename "engram_dashboard_agent::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
           rc=$?
           set -e
           if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
@@ -703,7 +711,7 @@ jobs:
       #      packages[""].version 이라는 사본이 하나 더 있지만 따로 안 본다 — npm 이 둘을 항상 같이 쓰므로
       #      현실의 drift 는 "lock 을 아예 갱신 안 함"이고 그건 루트 단언이 그대로 잡는다.
       # ── 일부러 뺀 것 ──
-      #   - 라이브러리 crate 5종(core·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
+      #   - 라이브러리 crate 5종(agent·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
       #     내부 semver. 정적 링크돼 사용자에게 보이지 않는다. 첫 비-0.1.0 태그부터 제품 버전과 갈리는데
       #     그건 의도된 결과다.
       #   - PROTOCOL_VERSION(protocol crate, 현재 3): wire 계약 버전이라 릴리즈가 아니라 계약이 바뀔 때

@@ -10,7 +10,7 @@ thiserror = "1"   # DiscoveryError
 tracing = "0.1"   # M1 복구 warn 로그
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
 # liveness 판정(pid_alive_with_start_time) 공유 — daemon portfile is_stale 과 동일 로직(DRY).
-engram-dashboard-core = { path = "../engram-dashboard-core" }
+engram-dashboard-agent = { path = "../engram-dashboard-agent" }
 # daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # 핸드셰이크 프레임(`auth::AuthFrame`) — send_stop 의 첫 프레임(ADR-0129 0-4). ★비순환★: 네트워크 lib 의
