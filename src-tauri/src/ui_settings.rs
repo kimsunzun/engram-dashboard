@@ -414,7 +414,7 @@ fn describe_value(raw: &str) -> String {
     }
     // ★게이트를 통과한 값에도 마스킹은 남긴다★ — 길이·charset 을 다 만족하면서 키 모양인 것이 있다
     // (`AKIA` + 대문자 16자 = 20자 영숫자). 게이트를 넓히면 이 겹이 먼저 받아 준다.
-    format!("{:?}", engram_dashboard_agent::logging::mask_secrets(raw))
+    format!("{:?}", engram_dashboard_base::logging::mask_secrets(raw))
 }
 
 /// 테마 이름·창 label 처럼 **생겼나** — ASCII 영숫자와 하이픈만, 그리고 짧을 것.

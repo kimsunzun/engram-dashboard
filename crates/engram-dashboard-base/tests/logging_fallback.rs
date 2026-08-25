@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use engram_dashboard_agent::logging::{init_logging_with_file, LogKind};
+use engram_dashboard_base::logging::{init_logging_with_file, LogKind};
 
 #[test]
 fn daemon_failure_reason_survives_when_the_data_dir_cannot_hold_logs() {

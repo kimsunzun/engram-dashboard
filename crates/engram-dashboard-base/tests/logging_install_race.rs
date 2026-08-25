@@ -6,7 +6,7 @@
 //! ★별도 프로세스가 필요하다★: 전역 subscriber 는 프로세스당 한 번뿐이라, 남이 먼저 깐 상태를
 //! 만들려면 이 파일이 그 프로세스를 통째로 소유해야 한다.
 
-use engram_dashboard_agent::logging::{init_logging_with_file, LogKind};
+use engram_dashboard_base::logging::{init_logging_with_file, LogKind};
 
 #[test]
 fn losing_the_subscriber_install_creates_and_prunes_nothing() {

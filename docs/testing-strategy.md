@@ -39,26 +39,38 @@
 - **② 계약**: `tests/codec_golden.rs`(binary frame wire 표현 박제), `tests/ts_export.rs`(ts-rs 바인딩 export 검증).
 - 실행: `cargo test -p engram-dashboard-protocol`.
 
+### base (`crates/engram-dashboard-base`) — 2026-08-25 신설(ADR-0175 결정 1)
+- **① 단위**: `src/` 내 `#[cfg(test)]`(`logging` = 로그 파일명 규약·보존 정리·머리글·마스킹 · `platform` = PID 생존 판정·creation time 대조·자식 PID 열거). `agent` 에서 그대로 옮겨 온 것들이다.
+- **② 격리 통합**: `tests/logging_fallback.rs`·`tests/logging_install_race.rs`. **각각 파일 하나 = 테스트 하나**인 것이 의도다 — 전역 subscriber 는 프로세스당 한 번뿐이라 설치 경합을 재려면 그 프로세스를 통째로 소유해야 한다(각 파일 헤더가 정본).
+- **격리 하네스 = crate 경계 그 자체**: 워크스페이스 crate 를 하나도 의존하지 않는 잎이라 에이전트 런타임·Tauri·wire 계약 없이 단독으로 돈다.
+- 실행: `cargo test -p engram-dashboard-base -- --test-threads=4` — `platform` 의 자식 PID 테스트가 실 `cmd.exe` 를 띄운다(플래그 판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」).
+- 격리 게이트 3종(실명령·기대값 정본 = `/qa` 바인딩):
+  - ① 의존 상한 `cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 1줄(자기 자신). 입주 조건 ②(도메인 지식 0)의 벽.
+  - ② `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0줄. ADR-0003 의 짝 — ①이 못 덮는 축이다. ①은 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 세므로 서드파티 `tauri` 가 그대로 통과하고, 이 crate 는 headless 데몬·`net`·`discovery` 에 링크되므로 여기서 Tauri 를 부르면 창도 webview 도 없는 셋이 함께 전송 방식에 묶인다. **`logging`·`platform` 이 `agent` 에서 이리로 오면서 agent 게이트의 스캔 범위를 벗어났다 — 이 줄이 그 자리를 받는다.**
+  - ③ `rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/` → 0줄. 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽 — 엮이면 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든 소비자에게 딸려 간다(`bevy_core` 실패의 시작점). ★`crate::` 단독으로 넓히지 말 것★ — 평범한 Rust 라 게이트가 아니라 잡음이 된다.
+  - **워크스페이스 crate 이름을 훑는 소스 정규식 짝은 없다** — 이 crate 는 남을 안 부르는 것이 불변식이라 부르는 이름의 알파벳을 관리할 대상이 없다(메시징과 갈리는 지점).
+
 ### agent (`crates/engram-dashboard-agent` — 2026-08-25 개명 전 이름 `engram-dashboard-core`, ADR-0175)
-- **① 단위**: `src/` 내 `#[test]`(OutputCore seq/replay/finalize, session, transport, backend, platform liveness, persistence 등).
+- **① 단위**: `src/` 내 `#[test]`(OutputCore seq/replay/finalize, session, transport, backend, persistence 등). ★로깅·PID liveness 단위는 여기 없다 — `base` 로 이사했다(ADR-0175 결정 1)★.
 - **② 격리 통합(단언, 실 PTY)**: `tests/headless.rs`(manager 전체, 프론트 없이 spawn→subscribe→write→resize→kill — PTY out 수신·Exiting→Killed 전이·kill 후 list count=0·hang 없음 단언), `tests/transport_smoke.rs`·`tests/session_smoke.rs`(manager 없이 PtyTransport/AgentSession 직접 — shutdown→pump EOF→finish(Killed) 인과·resize cols/rows 반영 단언). 기록형 RecordingSink(받은 OutputFrame 바이트·status 전이를 `Mutex<Vec<..>>`에 push)로 로그 eyeball 대신 단언. 실 셸 spawn이지만 가볍고 전역 경합 없어 default(자동 실행). `examples/spike*.rs`는 throwaway 스파이크 보존.
-- 실행: `cargo test -p engram-dashboard-agent` — 좁혀 돌릴 때도 `scripts/run-detached.ps1` 을 거친다(근거·실측 정본 = `/qa` 바인딩 「분리 실행」).
+- 실행: `cargo test -p engram-dashboard-agent -- --test-threads=4` — 실 PTY = 실 자식 프로세스라 플래그가 붙는다(판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」). 좁혀 돌릴 때도 `scripts/run-detached.ps1` 을 거친다(근거·실측 정본 = `/qa` 바인딩 「분리 실행」).
 - 격리 게이트: `rg "^\s*use tauri" crates/engram-dashboard-agent/src/` → 0줄(import 라인 앵커 — 게이트 규칙을 자기 인용한 주석의 오탐 방지, ADR-0003 실측 2026-07-13) · `rg "engram_dashboard_protocol" crates/engram-dashboard-agent/src/` → 0줄.
 
 ### messaging (`crates/engram-dashboard-messaging`) — 2026-07-28 신설(ADR-0110)
 - **① 단위**: `src/` 내 단위테스트(mailbox 파킹·TTL, ledger 이력/회신 계약, groups 해석, envelope 렌더·이스케이프, service 3분기/flush/sweep, busy 게이트 상태머신). 전부 clock injection(주입 `now`)이라 실시간 sleep 0.
 - **격리 하네스 = crate 경계 그 자체**: 이 crate 는 워크스페이스 crate 무의존(ADR-0110 결정 2)이라 `AgentManager`·PTY·Tauri 없이 단독으로 돈다 — 외부 의존은 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TurnFacts`·`IdleNotifier`·`FlushTrigger`)의 fake 로만 들어온다.
 - 실행: `cargo test -p engram-dashboard-messaging`.
-- 격리 게이트 2종(실명령·기대값 정본 = `/qa` 바인딩): ① 소스 참조 `rg "engram_dashboard_(agent|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` → 0. ★괄호 안 이름은 손으로 박은 알파벳이라 **새 워크스페이스 crate가 생기면 여기 더해야 보인다**★ — 그 구멍이 ②를 부른 계기다. ② 직접 워크스페이스 의존 상한 `cargo tree`(→ 정확히 1줄 = 자기 자신). 텍스트가 아니라 **해석된 의존 그래프**를 읽어, 정규식이 못 보는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 덮는다. net 게이트 3과 같은 계기다.
+- 격리 게이트 2종(실명령·기대값 정본 = `/qa` 바인딩): ① 소스 참조 `rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` → 0. ★괄호 안 이름은 손으로 박은 알파벳이라 **새 워크스페이스 crate가 생기면 여기 더해야 보인다**★ — 그 구멍이 ②를 부른 계기다. ② 직접 워크스페이스 의존 상한 `cargo tree`(→ 정확히 1줄 = 자기 자신). 텍스트가 아니라 **해석된 의존 그래프**를 읽어, 정규식이 못 보는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 덮는다. net 게이트 3과 같은 계기다.
 - **호스트 어댑터는 daemon 쪽 테스트**: 배달·턴 사실 조회 어댑터(`messaging_host::ManagerDeliveryPort`·`ManagerTurnFacts`)는 daemon crate 단위 테스트가 덮는다. 출력 이벤트→턴 신호 분류는 백엔드 지식이라 코어 `backend/` seam 뒤로 내려갔고(`AgentBackend::turn_classifier`, ADR-0127) agent crate 테스트가 덮는다.
 
 ### net (`crates/engram-dashboard-net`) — 2026-08-05 신설(ADR-0129 슬라이스 1)
 - **① 단위**: `src/` 내 `#[cfg(test)]`(ws 연결 수명·Origin 허용목록·auth 핸드셰이크·연결당 단일 writer·keepalive 판정, portfile IO/stale 판정, instance 단일 인스턴스 가드). 데몬 crate 에서 이사해 온 것들이다.
-- **격리 하네스 = crate 경계 그 자체**: 실소켓(127.0.0.1:0) 또는 합성 프레임열로 돌고 에이전트 시스템 실물(`AgentManager`·실 PTY)을 쓰지 않는다. daemon·messaging·discovery 를 못 박는 것은 소스가 이름조차 부르지 않는다는 게이트 1과 직접 의존으로 선언돼 있지 않다는 게이트 3이다. `AgentManager`·`PtyTransport` 는 **agent crate 안**에 있고 그 crate 는 허용된 직접 의존이라 그 둘이 잡지 못한다 — 이 자리는 게이트 2의 agent 심볼 allowlist(허용 심볼이 전부 `platform::` 아래의 프로세스 liveness 헬퍼 — 개명 때 안쪽 `agent/` 모듈을 crate 루트로 접어 옛 `agent::platform::` 이 `platform::` 이 됐다)가 맡는다.
+- **격리 하네스 = crate 경계 그 자체**: 실소켓(127.0.0.1:0) 또는 합성 프레임열로 돌고 에이전트 시스템 실물(`AgentManager`·실 PTY)을 쓰지 않는다. daemon·messaging·discovery 를 못 박는 것은 소스가 이름조차 부르지 않는다는 게이트 1과 직접 의존으로 선언돼 있지 않다는 게이트 3이다. `AgentManager`·`PtyTransport` 가 사는 agent crate 는 **ADR-0175 결정 1 로 직접 의존에서 빠졌다**(그 자리를 잎 crate `base` 가 받았다) — 그래서 이제 게이트 3 이 그 반입도 함께 잡는다. 남은 허용 심볼 둘(`platform::` 아래 프로세스 liveness 헬퍼)은 게이트 2a 가 개수로 못 박고, 에이전트 런타임 심볼의 **재유입**은 게이트 2b 가 0줄로 잰다.
 - 실행: `cargo test -p engram-dashboard-net --all-features`. 기본 feature 가 비어 있어(ADR-0129 — 서버 행은 데몬이 명시로 켠다) `--all-features` 없이는 `server` 아래 모듈이 컴파일되지 않는다 — 맨 명령 6개 / `--all-features` 31개(실측 2026-08-05).
 - **격리 게이트** — 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더. **이 절의 역할 = 전략 서술**(왜 이 게이트인가) · **`/qa` 바인딩 = 실행되는 사본** · **CLAUDE.md = 규칙만**(게이트 명령을 싣지 않는다 — 거기서 명령을 찾지 말 것) · **net `lib.rs` 헤더 = 명령 텍스트·기대값·근거의 정본**. 명령이 갈리면 그 헤더를 따르고 갈린 쪽을 고친다 — **단 헤더는 게이트 2·3 을 `//!` 주석에서 손으로 줄바꿈해 싣는다. 재조립할 때 플래그를 하나도 빠뜨리지 말 것**(`--all-features` 하나가 빠져 6개만 돌던 실측 전례가 있다 — 헤더의 권위는 바이트가 아니라 플래그·의미에 있다). 사본을 유지하는 근거 = 독자가 다르다(전략 이해 / 실행 / 진입). 지우지 말고 각자 이 역할선을 지킬 것:
   - 게이트 1(소스 참조): `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` → 0줄.
-  - 게이트 2(agent 심볼 allowlist — 파일 단위가 아니라 **심볼 단위**): `rg -o --no-filename "engram_dashboard_agent::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/ | sort -u` → 정확히 2줄. ★개명(ADR-0175) 뒤에도 **2 그대로**★ — 옛 문자열이 사라졌다고 0 기대로 내리면 깨질 수 없는 게이트가 된다.
+  - 게이트 2a(base 심볼 allowlist — 파일 단위가 아니라 **심볼 단위**): `rg -o --no-filename "engram_dashboard_base::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/ | sort -u` → 정확히 2줄.
+  - 게이트 2b(에이전트 런타임 재유입 금지 — 2a 의 짝): `rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/` → 0줄. ★**둘 중 하나만 남기지 말 것**★ — ADR-0175 결정 1 로 PID 헬퍼가 crate 를 옮기면서 기대값 2 가 이름을 갈아탔다. 0 기대 홀로는 어떤 위반으로도 안 깨지고, 2 기대 홀로는 런타임 재유입을 못 본다. **총량은 여전히 2 다.** ★패턴이 **맨 crate 이름**이고 괄호가 붙은 것은 의도다★ — 0 기대 게이트는 심볼 모양을 요구할 이유가 없고, 심볼 꼬리를 붙였던 옛 형태는 중괄호 전개·별칭 import 를 못 잡았다(실측). 괄호는 net 헤더의 자기일치 방어이고 근거의 정본은 그 헤더다. ★값어치를 부풀리지 말 것★ — 살아 있는 벽은 게이트 3 이다(의존 선언 없이는 심볼을 부를 수조차 없다). 2b 가 맡는 것은 주석·테스트 헬퍼로 어휘가 먼저 새는 것이다.
   - 게이트 3(직접 워크스페이스 의존 상한 — **해석된 의존 그래프**): `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 3줄. 매니페스트 텍스트 grep 으로 바꾸지 말 것(rename·`[dependencies.<이름>]` 테이블 형·들여쓴 선언·`[build-dependencies]`·비활성 target·`optional` 이 빠져나간다 — 실측), 플래그도 줄이지 말 것.
   - 게이트 4(auth 어휘 재유입 금지 — 0-4 가 닫은 구멍의 회귀 방어): `rg "(A)gentCommand|(P)ROTOCOL_VERSION" crates/engram-dashboard-net/src/` → 0줄. 매치 유무로 판정한다(종료코드 아님). 패턴의 `_(이름)` 괄호 형태를 풀어 쓰지 말 것 — 그 근거는 위 헤더의 게이트4 절.
   - 게이트 5(두 feature 조합이 각각 컴파일된다 — `default = []` 전환이 추가): `cargo test -p engram-dashboard-net` 과 `cargo test -p engram-dashboard-net --all-features` 둘 다 **성공해야 PASS**. 앞 넷과 달리 출력이 아니라 **성공 여부**로 판정한다. 두 줄인 이유는 맨 명령이 `server` 아래 모듈을 컴파일조차 하지 않고(가려진 코드는 오류를 내지 않는다), 워크스페이스 스코프 명령은 데몬이 `server` 를 켜므로 ON 쪽만 보기 때문이다 — 각 줄이 상대가 못 보는 조합을 맡는다. `build` 가 아니라 `test` 인 것은 dev-의존 경로(`auth.rs` golden 의 `serde_json`)까지 물기 위해서다. 이 게이트가 닫지 **않는** 것(`optional` 없이 적은 새 의존의 조용한 반입)은 net `Cargo.toml` 의 `[features]` 주석이 정본.
@@ -120,22 +132,27 @@
 cargo test --workspace -- --test-threads=4   # 전 멤버 회귀 — 2026-08-24부터 셸 패키지(`engram-dashboard`)도 든다(옛 --exclude 는 걷혔다: 0xc0000139 즉사는 ADR-0174 로, 알려진 실패는 전부 고쳐지며 사라졌다). 루트 bare cargo test 금지는 그대로. 이 플래그는 로컬 전용이며 빼지 말 것 — 규칙 정본 = CLAUDE.md 「빌드·검증 명령」
 cargo test -p engram-dashboard --test <이름>  # 같은 패키지의 타깃을 하나씩 — 위 회귀와 겹치지만 실패한 스위트를 이름으로 짚고 타깃 부재를 실패로 만든다(목록·근거는 위 §1 src-tauri 절)
 cargo test -p engram-dashboard --test lib_unit  # 같은 패키지의 단위 스위트(판정 = 실패 0 · 건수 정본 = CLAUDE.md 「빌드·검증 명령」). ★--lib·--all-targets 로 부르지 말 것 — 그쪽은 아직 0xc0000139 로 즉사한다(설명 정본 = src-tauri/Cargo.toml 주석)★
+# ★`-- --test-threads=4` 는 crate 마다 갈린다★ — 실 자식 프로세스를 띄우는 crate 에만 붙는다(base·agent·daemon).
+#   판정 규칙·근거의 정본 = CLAUDE.md 「빌드·검증 명령」. 여기서 붙고 안 붙고를 새로 판정하지 말 것.
 cargo test -p engram-dashboard-protocol     # 단위+golden+ts_export
-cargo test -p engram-dashboard-agent        # 단위+통합(headless/transport_smoke/session_smoke, 실 PTY)
+cargo test -p engram-dashboard-base -- --test-threads=4    # 바닥 crate 단위 + 로깅 통합 2종 — 워크스페이스 crate 무의존, ADR-0175 결정 1 (platform 의 자식 PID 테스트가 실 cmd.exe 를 띄운다)
+cargo test -p engram-dashboard-agent -- --test-threads=4   # 단위+통합(headless/transport_smoke/session_smoke, 실 PTY)
 cargo test -p engram-dashboard-command      # 명령 버스 도구 단위 — 워크스페이스 crate 무의존, ADR-0155
 cargo test -p engram-dashboard-messaging    # 메시징 커널 단위 — 워크스페이스 crate 무의존, ADR-0110
 cargo test -p engram-dashboard-net --all-features  # 네트워크 행 단위 (실소켓·합성 프레임열 — `--all-features` 없이는 server 행이 안 붙는다, 위 §1 net 절)
-cargo test -p engram-dashboard-daemon       # src/ 단위 + tests/(ws_e2e 등 — #[ignore] 분은 빠짐. engram_cli 가 실 .exe 를 띄운다)
-cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture  # 위 ws_e2e 안의 #[ignore] 실프로세스 분
+cargo test -p engram-dashboard-daemon -- --test-threads=4  # src/ 단위 + tests/(ws_e2e 등 — #[ignore] 분은 빠짐. engram_cli 가 실 .exe 를 띄운다)
+cargo test -p engram-dashboard-daemon --test ws_e2e -- --ignored --nocapture --test-threads=4  # 위 ws_e2e 안의 #[ignore] 실프로세스 분
 cargo clippy --workspace --all-targets -- -D warnings   # ★게이트가 아니다 — 참고용★(정본에 없어 CI 에도 없다, §2 항목 6). 초록을 게이트 통과로 보고하지 말 것
 
 # 프론트
 npx tsc --noEmit                            # 타입 게이트
 npm test                                    # 로직 단위 게이트 (vitest run)
 
-# 격리 게이트(코어가 tauri/protocol 안 물었나)
+# 격리 게이트(코어·바닥 crate 가 tauri/protocol 안 물었나 · 바닥 crate 입주자끼리 안 엮였나)
 rg "^\s*use tauri" crates/engram-dashboard-agent/src/      # → 0줄 (import 라인 앵커 — 자기 인용 주석 오탐 방지)
 rg "engram_dashboard_protocol" crates/engram-dashboard-agent/src/   # → 0줄
+rg "^\s*use tauri" crates/engram-dashboard-base/src/       # → 0줄 (같은 ADR-0003 불변식의 짝 — 위 §1 base 절)
+rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/   # → 0줄 (입주 조건 ③)
 
 # ③ 실앱/시각 (CDP — EDR 탐지 대상, 최소 사용)
 # 실명령 정본 = /qa 바인딩 §full (여기 베끼지 않는다).

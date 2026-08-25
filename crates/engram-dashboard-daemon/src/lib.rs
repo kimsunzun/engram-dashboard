@@ -26,13 +26,13 @@ mod test_doubles;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use engram_dashboard_agent::logging;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::CLI_EXE_NAME;
+use engram_dashboard_base::logging;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -422,7 +422,7 @@ pub async fn run() -> Result<(), i32> {
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
     //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
     //    ★이 줄이 어디에 남는지가 이 실패의 전부다★: 폴더를 못 쓰면 파일 로그도 같은 폴더에서
-    //    막히므로, 코어가 `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(agent `logging` 머리말).
+    //    막히므로, `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(base `logging` 머리말).
     //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
     //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
     if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
@@ -694,7 +694,7 @@ pub async fn run() -> Result<(), i32> {
     let expected_token = Arc::new(token.clone());
 
     // 8) daemon.json 기록.
-    let start_time = engram_dashboard_agent::platform::current_process_start_time().unwrap_or(0);
+    let start_time = engram_dashboard_base::platform::current_process_start_time().unwrap_or(0);
     let info = engram_dashboard_net::portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),

@@ -21,7 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use crate::logging::mask_secrets;
+use engram_dashboard_base::logging::mask_secrets;
+
 use crate::output_core::OutputCore;
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{

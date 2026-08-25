@@ -1,8 +1,10 @@
 //! PID liveness + 프로세스 시작시각(creation time) 헬퍼.
 //!
-//! ★왜 agent 에 두나★: daemon(portfile)·tauri(discovery) 양쪽이 "데몬 PID 가 살아있는가"를
-//! 판정해야 한다. 두 crate 모두 agent 에 의존하고 agent 는 이미 windows 에 의존하므로,
-//! 판정 로직을 여기 한 곳에 두고 양쪽이 재사용한다(DRY — 사본 중복/무테스트 제거).
+//! ★왜 바닥 crate 인가★: "그 PID 가 아직 그 프로세스인가" 를 판정하는 곳이 셋이다 — `net`(portfile 의
+//! stale 판정) · `discovery`(데몬 발견) · `daemon`(daemon.json 에 자기 시작시각 기록). 셋 다 판정 로직을
+//! 사본으로 갖지 않으려면 한 곳을 봐야 하는데, 그 한 곳이 에이전트 런타임 안이면 셋이 런타임 전체를
+//! 의존하게 된다(ADR-0175 §맥락이 잰 그 상태). 여기는 도메인 지식이 0 이고 소비자가 여럿이라 입주 조건을
+//! 채운다.
 //!
 //! ★왜 creation time 까지 보나★: PID 는 OS 가 재사용한다. 데몬이 죽고 같은 PID 를 다른
 //! 프로세스가 받으면 "PID 살아있음"만으로는 false-live(엉뚱한 프로세스를 데몬으로 오인)가

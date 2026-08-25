@@ -26,7 +26,6 @@ pub mod transport;
 pub mod turn;
 pub mod types;
 
-pub mod logging;
 pub mod persistence;
 // ADR-0046
 pub mod replay_flight;

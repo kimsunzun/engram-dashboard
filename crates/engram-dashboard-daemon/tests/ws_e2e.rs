@@ -2335,7 +2335,7 @@ mod real_process {
     #[tokio::test]
     #[ignore = "실프로세스/Job 필요 — `-- --ignored` 로 실행(Windows 전용)"]
     async fn ignored_daemon_kill_cleans_pty_child() {
-        use engram_dashboard_agent::platform::{
+        use engram_dashboard_base::platform::{
             child_pids, pid_alive_with_start_time, process_creation_time,
         };
 

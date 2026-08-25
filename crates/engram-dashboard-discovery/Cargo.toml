@@ -9,12 +9,14 @@ description = "데몬 발견(discovery) — daemon.json 으로 데몬을 찾고,
 thiserror = "1"   # DiscoveryError
 tracing = "0.1"   # M1 복구 warn 로그
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
-# liveness 판정(pid_alive_with_start_time) 공유 — daemon portfile is_stale 과 동일 로직(DRY).
-engram-dashboard-agent = { path = "../engram-dashboard-agent" }
+# liveness 판정(pid_alive_with_start_time) 공유 — net portfile 의 stale 판정과 동일 로직(DRY).
+#   ★ADR-0175 결정 1 로 이 자리가 `agent` 에서 바닥 crate 로 바뀌었다 — 그 한 함수 때문에 에이전트
+#   런타임 전체(portable-pty·Job Object)를 지던 것이 끝났다. 되돌리지 말 것.
+engram-dashboard-base = { path = "../engram-dashboard-base" }
 # daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # 핸드셰이크 프레임(`auth::AuthFrame`) — send_stop 의 첫 프레임(ADR-0129 0-4). ★비순환★: 네트워크 lib 의
-#   워크스페이스-로컬 forward 폐포는 {net, agent, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
+#   워크스페이스-로컬 forward 폐포는 {net, base, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
 #   crate 의 lib.rs 헤더). 슬라이스 1 전이었다면 인증 타입이 daemon 에 있어 daemon→discovery 와 고리를
 #   이뤘을 자리다 — 그래서 0-4 가 슬라이스 1 **뒤**로 밀렸다.
 #   ★feature 를 켜지 말 것(load-bearing)★: 여기서 필요한 것은 `auth::AuthFrame` 하나뿐이고, 그건 net 의
@@ -36,8 +38,10 @@ serde_json = "1"
 #   `cargo tree -p engram-dashboard-discovery -e normal --prefix none --target all`
 #   `| rg -i "^(tokio|mio|tokio-tungstenite|futures-util) "` → **0줄**.
 #   ★`^…␣` 앵커를 빼지 말 것★: `--prefix none` 이라 crate 이름이 줄 맨 앞에 오므로 앵커가 정확한데,
-#   맨 부분문자열로 적으면 `ter(mio)s`(agent→portable-pty)와 **이 줄의 동기 `tungstenite`** 가 걸려
-#   기대값이 0 이 아니게 되고, 그러면 "몇 줄이 정상인지" 를 사람이 매번 판정해야 한다(= 게이트가 죽는다).
+#   맨 부분문자열로 적으면 **이름 안에 그 조각을 품은 무관한 crate** 가 걸린다 — `mio` 가 `ter(mio)s` 를
+#   무는 것이 그 형태다. 기대값이 0 이 아니게 되는 순간 "몇 줄이 정상인지" 를 사람이 매번 판정해야 하고
+#   그때 게이트는 죽는다. (그 `termios` 는 `agent → portable-pty` 를 타고 들어오던 것이라 ADR-0175 로
+#   이 트리에서 빠졌다 — 지금은 앵커를 떼도 매치 0 이다. 실측 2026-08-26.)
 #   비자기일치 확인: `--features engram-dashboard-net/server` 를 붙이면 같은 명령이 6줄을 낸다(실측).
 tungstenite = "0.26"
 

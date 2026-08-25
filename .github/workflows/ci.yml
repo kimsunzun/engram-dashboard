@@ -222,9 +222,19 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard --test lib_unit
 
-      # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
+      # 아래 5개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
+
+      # ADR-0175 결정 1: 바닥 crate(`base` — 로깅 + PID 판정). 워크스페이스 crate 의존 0 이 존재 이유라
+      # 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 의 `platform` 스위트가 실 `cmd.exe` 를 띄우긴
+      #   하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그 플래그가 겨냥하는
+      #   조건이 러너에 없다). 로컬 명령에는 붙는다.
+      - name: cargo test -p engram-dashboard-base
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-base
+
       - name: cargo test -p engram-dashboard-agent
         shell: bash
         run: cargo test --locked -p engram-dashboard-agent
@@ -393,12 +403,14 @@ jobs:
           esac
 
       # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   메시징엔 net 같은 의존 상한 게이트가 없어 **이 정규식이 유일한 벽**이다(ADR-0110 불변식).
+      #   ADR-0175 가 `base` 를 더했다 — 같은 이유로 알파벳에 넣는다. ★새 워크스페이스 crate 가 생길
+      #   때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래
+      #   상한 게이트가 그 구멍을 덮는다).
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(agent|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -465,6 +477,73 @@ jobs:
           if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
           echo "PASS"
 
+      # ADR-0175 결정 1: 바닥 crate(`base`)의 입주 조건 ②는 "도메인 지식 0" 이고, 그 실물이 워크스페이스
+      # crate 의존 0 이다(그 crate lib.rs 헤더가 정본). 여기가 그 벽이다 — 컴파일러는 잎을 강제하지 않는다.
+      # 위 두 게이트와 같은 형태·같은 플래그다(줄이면 rename·비활성 target·optional 이 샌다).
+      # ★소스 정규식 게이트를 따로 두지 않는 이유★: `base` 는 남을 안 부르는 것이 불변식이라 상한 게이트
+      #   하나로 충분하다(메시징처럼 "부르는 이름 알파벳" 을 손으로 관리할 필요가 없다).
+      - name: 'Gate: base leaf crate — direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
+
+      # ADR-0003 의 격리 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 다.
+      #   `base` 는 headless 데몬 · `net` · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
+      #   webview 도 없는 그 셋이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
+      # ★"잎 crate 라 안전하다" 로 이 스텝을 지우지 말 것★: 잎 성질은 **워크스페이스 crate** 축의 말이고,
+      #   바로 위 상한 게이트도 `rg "^engram-dashboard"` 로 워크스페이스 멤버만 센다. 서드파티인 `tauri` 는
+      #   그 게이트를 그대로 통과한다 — 두 게이트는 서로 다른 축이다.
+      # ADR-0175 결정 1 이 `logging`·`platform` 을 이리로 옮기면서 그 둘이 agent 게이트의 스캔 범위
+      #   (`crates/engram-dashboard-agent/src/`)를 벗어났다. 이 스텝이 없으면 그 두 모듈은 어느 게이트도
+      #   안 보는 상태가 된다 — `logging::init_logging_with_file` 이 "이벤트 하나만 쏘면 편한" 대표 자리다.
+      - name: 'Gate: base crate isolation — no `use tauri` in the base crate'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "^\s*use tauri" crates/engram-dashboard-base/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # ADR-0175 결정 1 의 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽. ①②와 달리 이 조건에는
+      #   기계 검증이 없었다 — ②는 위 상한 게이트가, ①은 사람이 본다.
+      # ★왜 지켜야 하나★: 입주자가 서로 엮이면 그건 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든
+      #   소비자에게 딸려 간다 — crate 헤더가 이름 붙인 `bevy_core` 실패의 시작점이 정확히 여기다.
+      # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
+      #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
+      # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
+      #   오탐된다. 그때는 상대 경로(`super::`)로 부르거나 이 게이트를 다시 판정한다.
+      - name: 'Gate: base leaf crate — tenants must not reference each other'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
       - name: 'net gate 1: source refs — no daemon/messaging/discovery'
         shell: bash
         run: |
@@ -479,18 +558,18 @@ jobs:
           esac
 
       # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
-      # 매치 유무가 아니라 정확한 줄 수를 단언한다(2 를 넘어도 모자라도 실패).
-      # ★기대값을 「0줄」로 바꾸지 말 것★ — 개명(ADR-0175) 으로 옛 문자열(`engram_dashboard_core::`)이
-      #   어디에도 없으니 그대로 두면 **어떤 위반으로도 깨질 수 없는 죽은 게이트**가 된다. 새 이름으로
-      #   재조준하고 기대값은 **2 그대로**다: net 이 무는 심볼 수는 개명으로 변하지 않았다(모듈 접기로
-      #   경로만 `::agent::platform::` → `::platform::` 로 짧아졌다).
-      #   `base` crate 가 서서 PID 헬퍼가 그리로 이사하면(ADR-0175 결정 1) 그때 이 게이트를 0 기대로
-      #   내리고 `engram_dashboard_base::` allowlist 를 새로 세운다 — 지금은 아직 아니다.
-      - name: 'net gate 2: agent symbol allowlist — exactly 2'
+      # 매치 유무가 아니라 정확한 줄 수를 단언한다(넘어도 모자라도 실패).
+      # ★ADR-0175 결정 1 로 이 게이트가 **두 스텝**이 됐다★ — PID 헬퍼가 `agent` 에서 잎 crate `base` 로
+      #   이사했으므로 기대값 2 가 crate 이름을 갈아타고 옮겨 갔다. **총량은 그대로 2 다.**
+      #   ★2b 를 「죽은 게이트」로 보고 지우지 말 것★: 그것만 떼면 net 이 에이전트 런타임을 다시 무는
+      #   회귀를 아무도 안 보게 된다. 0 기대가 홀로 서면 안 깨지는 벽이지만, 2a 의 2 기대와 **짝으로**
+      #   서면 "심볼이 사라진 게 아니라 옮겨 갔다" 를 단언하는 살아 있는 벽이다.
+      #   기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더의 게이트 2 절.
+      - name: 'net gate 2a: base symbol allowlist — exactly 2'
         shell: bash
         run: |
           set +e
-          raw=$(rg -o --no-filename "engram_dashboard_agent::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
+          raw=$(rg -o --no-filename "engram_dashboard_base::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
           rc=$?
           set -e
           if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
@@ -504,6 +583,31 @@ jobs:
           printf '%s\n' "$out"
           if [ "$n" -ne 2 ]; then echo "FAIL — expected exactly 2"; exit 1; fi
           echo "PASS"
+
+      # 2a 의 짝. 여긴 매치 유무로 판정한다(게이트 1·4 와 같은 규칙) — 한 줄이라도 나오면 net 이
+      # 에이전트 런타임을 다시 문 것이다.
+      # ★패턴이 **맨 crate 이름**인 것은 의도다★: 0 기대 게이트는 심볼 모양을 요구할 이유가 없고, 심볼
+      #   꼬리를 붙인 옛 형태(`::[A-Za-z0-9_:]+`)는 `::` 뒤가 문자클래스 밖이면 안 물어 **가장 흔한 두
+      #   형태를 놓쳤다** — 중괄호 전개(`use …::{platform::pid_alive, …}`)와 별칭(`use … as ag;`)이 그대로
+      #   빠져나갔다(실측). 이름만 보면 셋 다 걸린다.
+      # ★괄호는 오타가 아니다 — 게이트 4 와 같은 자기일치 방어다★: 맨 이름으로 적으면 이 게이트를 설명하는
+      #   net crate 헤더가 자기 자신에 걸려 영원히 통과하지 못한다. 옛 패턴은 `::` 뒤에 `[` 가 오는 **우연**
+      #   덕에만 자기일치를 면했고, 헤더에 예시 심볼을 하나 적는 순간 죽는 방어였다.
+      # ★이 게이트가 사는 값어치를 부풀리지 말 것★: 살아 있는 벽은 게이트 3(직접 의존 상한 = 정확히 3)이다
+      #   — net 은 의존을 선언하지 않고는 에이전트 심볼을 부를 수조차 없어 그쪽이 먼저 빨개진다. 2b 가 맡는
+      #   것은 **주석·테스트 헬퍼로 어휘가 먼저 새는 것**과, 게이트가 제 이름값(`0 matches`)대로 도는 것이다.
+      - name: 'net gate 2b: no agent runtime symbols — 0 matches'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
 
       # 매니페스트 텍스트가 아니라 **해석된 의존 그래프**를 읽는다 — rename·테이블 형·비활성 target·
       # optional 같은 정상 Cargo 문법이 텍스트 grep 을 빠져나가기 때문. 플래그를 줄이면 그만큼 형태가
