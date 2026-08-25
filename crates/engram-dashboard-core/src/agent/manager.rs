@@ -1388,13 +1388,17 @@ impl AgentManager {
     ///
     /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 **비정상 종료하거나 진단 스트림이
     /// 실패를 말하면**(빈/미대화/손상 세션이면 claude 가 "No conversation found ..." 를 stderr 로 낸다)
-    /// **새 대화(fresh)를 자동으로 만들지 않고** Failed(시체) 종점으로 직행한다 — 사유를 로그로 남겨
+    /// **새 대화(fresh)를 자동으로 만들지 않고** 종점(시체)으로 직행한다 — 사유를 로그로 남겨
     /// LLM 이 읽고 에스컬레이션한다.
+    /// ★그 종점은 `AgentStatus::Failed` 가 아니다★: 상태는 `TerminalReason` 하나로만 갈리고
+    ///   (`OutputCore::finish`) 이 경로엔 상태를 쓰는 줄이 없다 — resume child 가 스스로 죽으므로
+    ///   `Exited{code}`(대개 code≠0)로 간다. 아래 `RestoreOutcome::Failed` 는 **다른 축**(활성화 결과)이다.
     /// ★"즉사" 가 아니다(실측 2026-08-23 정정)★: claude 는 그 진단을 내고도 종료 훅이 도는 동안 몇 초
     ///   더 산다. 그래서 판정은 죽음이 아니라 증거로도 선다(`EarlyVerdict::Diagnosed`).
     /// ★아무것도 kill·재spawn 하지 않는다★: resume child 는 자기 pump 가 EOF→finish 하고, reaper 가
     ///   그 세션을 맵에서 수거하며 프로필을 `auto_restore=false`(KeepDisableAutoRestore)로 내려
-    ///   트리에 `Failed` 시체로 남긴다(profile 은 지워지지 않음 — exit≠0/불명은 삭제 대상이 아님).
+    ///   트리에 **관측된 종점 그대로** 시체로 남긴다(대개 `Exited{code≠0}` — profile 은 지워지지 않음:
+    ///   exit≠0/불명은 삭제 대상이 아님).
     ///   이 헬퍼는 종료를 관측만 하고 어떤 파괴 동작도 하지 않는다(옛 fallback_fresh 의 remove_session·
     ///   화신 표식 재발급·respawn 을 전부 걷어냈다 — ADR-0082 사용자 결정: "아무것도 죽지마, 새로 만들지마").
     /// 이 로직을 restore_one(부팅 복원)과 activate_profile(수동 활성화)이 **똑같이** 재사용한다.
@@ -1413,7 +1417,7 @@ impl AgentManager {
                 tracing::warn!(
                     agent = %profile.id,
                     %reason,
-                    "ADR-0082: resume 실패 → Failed(시체), fresh-fallback 없음"
+                    "ADR-0082: resume 실패 → 종점(시체), fresh-fallback 없음"
                 );
                 return (RestoreOutcome::Failed { reason }, None);
             }
@@ -1464,7 +1468,7 @@ impl AgentManager {
                         agent = %profile.id,
                         %reason,
                         ?kind,
-                        "ADR-0082: resume 조기종료 → Failed(시체), fresh-fallback 없음 — LLM 에스컬레이션 대상"
+                        "ADR-0082: resume 조기종료 → 종점(시체), fresh-fallback 없음 — LLM 에스컬레이션 대상"
                     );
                 }
                 (RestoreOutcome::Failed { reason }, Some(spawned))
@@ -1531,6 +1535,11 @@ impl AgentManager {
         let session = match self.get_session(id) {
             Ok(s) => s,
             // 명부에 없다 = 아직 안 올랐거나 이미 거둬졌다 → 어느 쪽이든 종료로 간주(위 doc).
+            // ★이 `AgentStatus::Failed` 는 **공표되지 않는다**★: `StatusSink` 에 닿지 않는 지역값이라
+            //   화면·프론트에는 안 나가고, 아래 `format!("resume 조기 종료({status:?})")` 의 사유 문자열과
+            //   `matches!(status, AgentStatus::Killed)` 판정에만 쓰인다. 그래서 "공표되는 `Failed` 는
+            //   pump 패닉 전용"이 그대로 성립한다 — 다만 *코드에 두 곳뿐*이라고 적으면 여기서 거짓이 된다
+            //   (문서가 그렇게 적었다가 2026-08-25 에 정정됐다. 정본 = architecture-overview 「세션 복원 / 활성화」).
             Err(_) => {
                 return EarlyVerdict::Terminal {
                     status: AgentStatus::Failed {

@@ -3,6 +3,8 @@
 - 상태: 확정 (2026-07-14, 근거: 정상 실행 중 에이전트 재활성화 → 터미널·JSON 둘 다 Failed+빈 슬롯 유저 실측 + a4aac1a 체인 코드/git 확정)
 - 관련: Supersedes ADR-0077 · Amends ADR-0008 (resume 조기종료 → fresh-fallback 조항 폐지) · Amends ADR-0076 (fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지) · `agent/manager.rs::activate_profile`/`resume_with_fresh_fallback`/`fallback_fresh` · `daemon/connection_core.rs::SpawnProfile` · CLAUDE.md §5(LLM-우선 제어) · step-log
 
+> ★**제목의 "Failed" 는 일상어다 — `AgentStatus::Failed` 가 아니다**★(주석 2026-08-25, 결정 무변경). 아래 결정은 "실패 = **종점(terminal)** 으로 끝낸다"라 적고 그 경로를 "resume child 가 스스로 종료(주로 exit code≠0)"로 특정한다 — 그 매핑은 **`Exited{code}`** 다. `AgentStatus::Failed` 는 `TerminalReason::Error` 전용이고, **StatusSink 로 공표되는 생산자는 pump 패닉 두 곳뿐이다**(`transport/pty.rs`·`transport/stdio.rs`). ★"코드 전체에 두 곳뿐"은 아니다★ — `manager.rs::early_activation_verdict` 안에 `AgentStatus::Failed{message:"session gone"}` 지역값이 하나 더 있고, 하필 이 절이 말하는 그 resume 경로 안에 있다. 다만 그 값은 sink 에 닿지 않고 로그 문구와 `matches!` 판정에만 쓰여 화면·프론트에는 나가지 않는다(실측 2026-08-25). 이 제목을 enum 으로 읽은 서술이 CLAUDE.md 와 ADR 인덱스로 번져 있었고 같은 날 함께 고쳤다. **제목·파일명은 이력이라 남긴다.**
+
 ## 맥락
 ADR-0008/0076/0077 이 확정한 **fresh-fallback**(resume 가 실패·조기종료하면 새 sid 로 빈 새 대화를 자동 시작)을 사용자가 번복한다.
 

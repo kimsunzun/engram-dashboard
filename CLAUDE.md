@@ -143,7 +143,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 ### 세션 복원
 
-spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실 복원. 복원 정확성은 이 sid에만 의존한다(추적 파일은 best-effort — 이걸로 기능 확장 금지). **resume 조기 종료는 fresh fallback 하지 않는다** — `Failed`로 직행하고 원인을 로그로 남긴다(자동 재spawn 없음. ADR-0082가 ADR-0008의 그 조항을 폐지). (정본 ADR-0008 + ADR-0082)
+spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실 복원. 복원 정확성은 이 sid에만 의존한다(추적 파일은 best-effort — 이걸로 기능 확장 금지). **resume 조기 종료는 fresh fallback 하지 않는다** — 종점으로 직행하고 원인을 로그로 남긴다(자동 재spawn 없음. ADR-0082가 ADR-0008의 그 조항을 폐지). ★**그 종점은 `AgentStatus::Failed`가 아니다**★ — ADR-0082 제목의 "Failed"는 일상어이고 실제 상태는 `Exited{code}`다. **매핑 근거·예외·혼동쌍은 여기 되올리지 않는다** — 정본은 `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」. (결정 정본 ADR-0008 + ADR-0082)
 
 ## 프론트 구조 (`src/`)
 
