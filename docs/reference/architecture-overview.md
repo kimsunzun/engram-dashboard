@@ -22,7 +22,7 @@
 - **클라이언트(client)** = 앱 실행파일(`engram-dashboard.exe`, src-tauri 셸). 데몬에 붙는 손님.
 - **데몬(daemon)** = 에이전트 호스팅 서버(`engram-dashboard-daemon.exe`). 생사·출력·상태의 진짜 주인.
 - **웹뷰(webview)** = 창(WebView2) · **슬롯(slot)** = 그 창 안 레이아웃 한 칸.
-- **replay** = 데몬이 보관한 출력 되감기(리로드·신규 구독 때 과거 복원). **epoch**(필드명) = 화신마다 새로 뽑는 32비트 난수 표식(낡은 프레임 거르는 기준). ★카운터가 아니다 — 비교는 일치/불일치만이고 대소로 「더 새 것」을 유도하지 않는다★(ADR-0163).
+- **replay** = 데몬이 보관한 출력 되감기(리로드·신규 구독 때 과거 복원). **epoch**(필드명) = 화신마다 새로 뽑는 난수 표식 — 낡은 프레임을 거르는 기준. ★카운터가 아니다★ (비교·저장 규약 전문은 [§용어 사전](#용어-사전-혼동쌍-고정)에 한 번만 적혀 있다 — ADR-0163).
 
 ## 5분 요약 — 핵심 6문장
 
@@ -85,7 +85,7 @@ flowchart TD
 |------|--------|------|
 | 에이전트 생사·세션 | 데몬 `AgentManager` | 단일 출처 |
 | 출력 버퍼(replay) | 데몬 `OutputCore` 링 | 클라이언트는 미러 안 함 |
-| 프로필 영속(session-id·트리 부모·표시 이름) | 데몬 `ProfileRegistry` → agents.json | 세이브데이터 · **종료해도 보존(시체)**, ADR-0083. ★화신 표식(`epoch`)은 여기 안 실린다 — 읽기는 건너뛰고 쓰기는 `0` 자리채움(ADR-0163)★ |
+| 프로필 영속(session-id·트리 부모·표시 이름) | 데몬 `ProfileRegistry` → agents.json | 세이브데이터 · **종료해도 보존(시체)**, ADR-0083. ★화신 표식(`epoch`)의 값은 여기 안 실린다★ — 읽기는 건너뛰고 쓰기는 `0` 자리채움이라, 이 비대칭이 의도인 이유는 [§용어 사전](#용어-사전-혼동쌍-고정)(ADR-0163) |
 | 제어 토큰((AgentId, 화신 표식)별) | 데몬 `ControlRegistry` | 스폰 시 발급 · 화신 교체(표식 재발급)·kill 시 폐기 (S17) |
 | 턴 관측(busy) 명단 | 데몬이 아니라 **코어** (분류는 backend seam 뒤) | 메시징 커널은 이 사실을 포트로 받아 쓴다 · 정리 지점은 `finish` + `emit` 둘뿐, ADR-0127 |
 | 에이전트 간 메시지(보관함·회신 장부·주소록) | 데몬 메시징 커널 `MessagingService` (S18) | **인메모리** — 데몬 재시작 시 소실(영속화 없음, ADR-0103) |
@@ -214,7 +214,7 @@ flowchart TD
   AM --> TR["tracker: Arc&lt;SessionTracker&gt; ·· sid 추적 파일(best-effort)"]
   AM --> TT["turns: Arc&lt;TurnObservations&gt; ·· 턴 관측 표(ADR-0113/0127)<br/>이 매니저가 띄운 모든 OutputCore가 공유 — leaf 락"]
 
-  AS["각 AgentSession = 에이전트 1개 (조립체)<br/>id · cwd · epoch(화신 표식 — 재spawn 카운터가 아니라 화신마다 새로 뽑는 32비트 난수) · cols/rows · intent(kill 의도)<br/>backend_caps · encoder(입력 포장) · reads_messages(우편 수신자 자격) · submit_pacing"]
+  AS["각 AgentSession = 에이전트 1개 (조립체)<br/>id · cwd · epoch(화신 표식 — ★재spawn 카운터가 아니다★, ADR-0163) · cols/rows · intent(kill 의도)<br/>backend_caps · encoder(입력 포장) · reads_messages(우편 수신자 자격) · submit_pacing"]
   SES -.-> AS
 
   AS --> OC["Arc&lt;OutputCore&gt; ·· 출력 두뇌<br/>seq(순번) · status · finalized(종료 1회 게이트) · turn(TurnWiring: 공용 표 + backend 분류자, new의 필수 인자)"]
@@ -285,13 +285,13 @@ flowchart TD
   KILL["유저 kill: set_intent → transport.shutdown()<br/>child.kill+wait → TerminateJobObject → master drop"]
   DIE["claude 종료 → 펌프가 EOF 감지"]
   FIN["OutputCore.finish() [finalized.swap 1회 게이트 — 딱 한 번만]"]
-  JOIN["core.join_pump(5s) ·· 두 번째 동사<br/>★두 동사를 한 동사로 합치지 말 것(ADR-0001)★"]
+  JOIN["core.join_pump(5s) ·· 두 번째 동사<br/>master drop → reader EOF → pump break → done_tx 를 여기서 기다린다<br/>★두 동사를 한 동사로 합치지 말 것(ADR-0001)★"]
   TURN["턴 관측 표에서 이 화신 제거(turn.forget)<br/>★reaper가 아니라 여기★ — finalized 플래그와 같은 지점이어야<br/>지각 emit과의 경쟁이 순서로 닫힌다(ADR-0127 결정 5)"]
   ST["status → terminal(Killed/Exited/Failed)"]
   SC["StatusSink.status_changed()"]
   HOOK["on_terminal 훅: intent · shutting_down 을 '얼려서(freeze-frame)' ReapMsg 발사"]
   REAPER["Reaper 스레드 (단일 소비자)"]
-  R1["① 화신 표식 일치 검증(둘): 산 세션 객체와 다르면 맵에서 아예 제거하지 않고,<br/>프로필과 다르면 강등도 skip — 대소가 아니라 일치(ADR-0084/0163)"]
+  R1["① 화신 표식 일치 검증(둘): 산 세션 객체와 다르면 맵에서 아예 제거하지 않고,<br/>프로필과 다르면 강등도 skip (ADR-0084/0163)"]
   R2["② 세션 맵에서 제거 → Arc drop(자원 해제) → 제어 토큰 revoke(표식 동봉)"]
   R3["③ 처분(Disposition): 데몬 셧다운=KeepAsIs / 그 외 전부(kill·정상·크래시)=KeepDisableAutoRestore<br/>= 프로필+session_id 보존, auto_restore만 끔 (ADR-0083 — 자동 삭제 폐지)"]
   R4["④ StatusSink.agent_list_updated() ──▶ 앱 목록 갱신"]
@@ -308,7 +308,7 @@ flowchart TD
 ```
 
 - **핵심 변경(ADR-0083):** 옛 reaper는 "유저 의도 kill이면 프로필 삭제"를 했으나, 이제 **어떤 종료도 프로필을 지우지 않는다.** 모든 종료가 "시체"(session_id 보존 · auto_restore off)로 남는다. 진짜 삭제는 사용자의 명시적 `DeleteProfile` 명령으로만. → 목록에 종료된 에이전트가 쌓이는 게 정상(의도).
-- **epoch-guard(ADR-0084/0163):** 재활성화(resume)로 화신 표식이 갈린 뒤 늦게 도착한 옛 사망 메시지가 산 세션을 강등하지 못하게, **표식 일치**를 확인한다(대소 비교가 아니다).
+- **epoch-guard(ADR-0084/0163):** 재활성화(resume)로 화신 표식이 갈린 뒤 늦게 도착한 옛 사망 메시지가 산 세션을 강등하지 못하게, **표식 일치**를 확인한다.
 - **등록 순서(ADR-0019):** `sessions.insert`가 pump 시작보다 **먼저**다 — 뒤집히면 즉시 종료하는 세션이 명부에 오르기 전에 끝나 수거되지 않는다. 런타임엔 아무 신호도 없고 reaper 테스트가 그 회귀를 잡는다.
 - **턴 관측 정리는 두 지점뿐(ADR-0127):** `finish`와 `emit`의 finalize 재확인. 세 번째 호출자를 늘리면 인과가 갈라진다. 빠지면 턴 중 죽은 에이전트가 "진행 중"으로 남아 소비자(우편 파킹)가 상한이 풀 때까지 막힌다.
 
@@ -321,7 +321,7 @@ flowchart TD
 - **활성화(activate) = 이어받기(resume) 전용이다 (ADR-0082).** 종료된 에이전트를 다시 켜면 그 session_id로 resume한다.
 - **fresh fallback 폐지:** 옛 설계는 "resume 실패 시 새 대화(fresh)를 만든다"였으나 이제 **하지 않는다.** resume가 실패/조기종료하면 → **관측된 종료 상태 그대로 종점 직행** + 시체 보존 + 실패 원인 기록(자동 재spawn 없음). 복구는 사람/LLM 판단 — 자동으로 새 세션을 파지 않는다(무손실 원칙 우선).
 - ★**그 종점은 `Failed`가 아니라 `Exited`다**★ — 상태 매핑은 `TerminalReason` 하나로만 갈리고(`OutputCore::finish`), resume 경로엔 상태를 쓰는 줄이 없다. 그래서 대개 `Exited{code≠0}`이고 **code 0 조기종료도 `Exited`**다. `AgentStatus::Failed`는 `TerminalReason::Error` 전용 = 사실상 pump 패닉 전용이다. resume 실패는 상태 축이 아니라 **활성화 결과** 축(`RestoreOutcome::Failed`)과 프로필의 「마지막 실패」(ADR-0172)에 선다 — ADR-0082 본문도 "종점(주로 Exited code≠0)"이라 적는다. ★CLAUDE.md 「세션 복원」의 "`Failed`로 직행"은 이 축을 혼동한 표현이니 그 문장을 근거로 삼지 말 것★.
-- **재활성화도 맵 교체 = 화신 표식 재발급 (ADR-0084/0163):** resume respawn은 같은 AgentId의 세션 객체를 갈아끼우므로 표식을 **새 난수로 다시 뽑는다**(증분이 아니다 — 발급 단일점 = `ProfileRegistry::epoch_for_spawn`). **비교는 일치/불일치뿐이고 대소는 뜻이 없다** — 대소로 지각 신호를 거르던 옛 방식은 난수로 바뀐 뒤 절반의 확률로 통과했다. 디스크에서는 읽기를 건너뛰고 쓰기는 `0` 자리채움이다(앞 릴리스 리더 보호 — ADR-0163). 프론트 구독 deps에는 이 값을 넣지 않는다(ADR-0164).
+- **재활성화도 맵 교체 = 화신 표식 재발급 (ADR-0084/0163):** resume respawn은 같은 AgentId의 세션 객체를 갈아끼우므로 표식을 **다시 뽑는다**(증분이 아니다 — 발급 단일점 = `ProfileRegistry::epoch_for_spawn`). 그 표식의 비교·저장 규약은 [§용어 사전](#용어-사전-혼동쌍-고정)이 한 번만 정의한다. 프론트 구독 deps에는 이 값을 넣지 않는다(ADR-0164).
 
 결정: resume 전용·fresh 폐지 = ADR-0082(Supersedes 0077, Amends 0008) · sid 통제 = ADR-0008 · 실패 기록 = ADR-0172 · 화신 표식 = ADR-0163.
 
@@ -356,7 +356,7 @@ flowchart TD
 
 ### 인증 — 신원은 토큰에서만 나온다
 
-- **토큰 단위 = (AgentId, 화신 표식).** 같은 에이전트라도 표식이 다르면 다른 토큰이고, **비교는 일치/불일치뿐**이다. **화신 회전(재활성화/재시작)·kill = 구 토큰 즉시 폐기** → 죽은/낡은 신원으로는 메시지 못 보냄 (ADR-0084/0163 연동 — ADR-0007의 「맵 교체마다 +1」 조항은 0163이 폐기).
+- **토큰 단위 = (AgentId, 화신 표식).** 같은 에이전트라도 표식이 다르면 다른 토큰이다. **화신 회전(재활성화/재시작)·kill = 구 토큰 즉시 폐기** → 죽은/낡은 신원으로는 메시지 못 보냄 (ADR-0084/0163 연동 — ★ADR-0007의 「맵 교체마다 +1」 조항은 0163이 **폐기**했다★).
 - **`from`은 항상 토큰에서 파생.** 페이로드의 발신자 필드는 무시한다 → 프롬프트 주입/오작동 에이전트의 사칭 차단(같은 OS 유저라 하드 격리는 불가 — 최종 방어는 데몬측 검증 단일점).
 - MCP = mcp-config에 토큰을 박아 연결 시 1회 바인딩(`Mcp-Session-Id`↔신원 고정). CLI = 콜마다 env 토큰 제시.
 
@@ -469,7 +469,7 @@ flowchart TD
 
 결정: v1 본체 = ADR-0103/0104(각각 0107·0111 / 0112로 부분 폐기) · 발송 개편 = ADR-0111(0117/0121로 범위 축소)·0112 · 입구 3분기 = ADR-0116(정본 — 0120/0121이 부분 폐기)·0117 · 계약 수명 = ADR-0108 → 0114 → 0118 · 동기 드레인 = ADR-0125(0124 폐기) · 그룹 어휘 = ADR-0121 · 병렬화 = ADR-0142 · 구조 = ADR-0110(0127로 부분 폐기).
 
-구현 계약 정본(필드·에러 어휘·수용 기준)은 `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`. 관련 ADR 목록은 [ADR 근거 맵](#adr-근거-맵-더-파려면-여기).
+구현 계약 정본(필드·에러 어휘·수용 기준)은 `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md`. 관련 ADR은 이 절 안에서 인용된다(대개 절 끝 `결정:` 줄이지만 본문에만 있는 것도 있다 — 봉투 wrap seam이 그 예다). 폐기 도장까지 붙은 전수 목록은 `docs/decisions/README.md`다([ADR 근거 맵](#adr-근거-맵-더-파려면-여기)이 그 이유를 적는다).
 
 ## 클라이언트측 — src-tauri 셸 + 프론트
 
@@ -552,7 +552,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   IN["데몬에서 온 바이너리 프레임/마커"]
-  ML["connection.rs main_loop (WS 수신)<br/>decode_frame → {tag, agentId, epoch, seq, payload}<br/>decide_epoch: 화신 표식이 불일치면 드롭 (등가 비교뿐 — 대소 아님, ADR-0163)"]
+  ML["connection.rs main_loop (WS 수신)<br/>decode_frame → {tag, agentId, epoch, seq, payload}<br/>decide_epoch: 화신 표식이 불일치면 드롭 (ADR-0163)"]
   RT["OutputRouter.targets(agentId) → Arc&lt;[window_label]&gt; (lock-free, ArcSwap)<br/>(레이아웃 바뀔 때만 rebuild: agentId→[창] 역인덱스)"]
   STW["send_to_windows(registry, labels, bytes) ← 버퍼 X, 커서 X, raw 그대로<br/>WindowChannelRegistry: window_label → Tauri Channel"]
   OUT["각 웹뷰 창의 OutputChannel"]
@@ -589,7 +589,7 @@ stateDiagram-v2
   detached : 요청 0 · 프레임 fan-out 대상에서 제외
   buffering : buffering
   buffering : 프레임 들어오면 buffer[]에 쌓음
-  buffering : (표식 불일치 프레임은 그냥 버림 — 대소 비교 없음 / 오버플로면 폐기 후 재요청)
+  buffering : (표식 불일치 프레임은 그냥 버림 / 오버플로면 폐기 후 재요청)
   live : live
   live : 프레임 = 즉시 dedup(seq＞lastDeliveredSeq) → onChunk
   error : error
@@ -605,8 +605,7 @@ stateDiagram-v2
 
 - **gen 펜스(핵심):** replay 요청마다 고유 `myGen`(BigInt) 발급. 도착한 마커의 `gen`이 내 `myGen`보다 작으면 **무시**(옛/남의 replay가 dedup 하한선을 오염시키는 것 차단). `gen ≥ myGen`이고 화신 표식이 일치할 때만 buffering→live 전환.
 - **팬아웃:** 한 agentId 프레임 → 그 agentId를 보는 **모든 viewId**에 각자 dedup 후 전달.
-- **재부착 계기는 소켓이 아니라 권위 명부다(ADR-0164).** 소켓 재연결·remount가 아니라 `observeRoster` 한 곳이 부착·화신 회전·error 회복을 전부 낸다 — 계기가 둘이면 같은 질문에 두 답이 생긴다.
-- **표식은 일치/불일치만 본다(ADR-0163).** "더 새 것"을 대소로 유도하지 않는다 — 난수라 순서가 없다.
+- **재부착 계기는 소켓이 아니라 권위 명부다(ADR-0164).** 소켓 재연결·remount가 아니라 `observeRoster` 한 곳이 부착·화신 회전·error 회복을 전부 낸다 — 계기가 둘이면 같은 질문에 두 답이 생긴다. 그래서 구독 effect deps는 `[viewId, agentId]`뿐이고 ★표식을 넣지 말 것★ — 넣으면 replay 도착 전에 화면이 지워지고 표식까지 잃어 회전 판정이 못 선다.
 
 결정: 구독 키=viewId·gen 펜스 = ADR-0046(재연결 계기 조항은 ADR-0164가 폐기) · **재부착 계기 = ADR-0164** · 화신 표식 비교 규약 = ADR-0163 · carrier 고정 = ADR-0036 · 제어표면 단일 = ADR-0011.
 
@@ -669,7 +668,7 @@ flowchart TD
 flowchart TD
   O1["[데몬] claude stdout → 펌프 → OutputCore.emit → replay 저장 + FrameOutputSink"]
   O2["WS Binary [tag·agentId·epoch·seq·payload] ──▶ [Rust] connection.rs"]
-  O3["decode_frame → decide_epoch(★표식 불일치면 드롭★ — 등가 비교뿐, 대소 아님) → OutputRouter.targets(agentId)=['main','popup']"]
+  O3["decode_frame → decide_epoch(★표식 불일치면 드롭★, ADR-0163) → OutputRouter.targets(agentId)=['main','popup']"]
   O4["send_to_windows → 각 창 Channel.send(raw) ← Rust는 여기까지 무상태 중계"]
   O5["[프론트] 각 창 OutputChannel.onmessage → decodeOutputFrame"]
   O6["ProtocolClient.handleOutput → 그 agentId 보는 모든 viewId에 팬아웃"]
@@ -752,44 +751,41 @@ flowchart TD
 
 ## 핵심 불변식 (서버 + 클라이언트)
 
-**변경 금지.** 정본은 CLAUDE.md 「핵심 불변식 (변경 금지)」이고 여기는 그 확장 서술이다 — 어긋나면 CLAUDE.md가 이긴다. 근거·거부 대안은 각 ADR에 있다.
+**변경 금지.** 정본은 CLAUDE.md 「핵심 불변식 (변경 금지)」이고 어긋나면 CLAUDE.md가 이긴다.
 
-- **kill 2동사:** `transport.shutdown()`(child.kill+wait → TerminateJobObject → master drop) → `core.join_pump(5s)`. master drop → reader EOF → pump break → `core.finish` → done_tx. **순서 뒤집으면 hang.** (ADR-0001)
-- **finalize 1회:** `OutputCore.finalized.swap(AcqRel)` — terminal 전이·알림 정확히 1회, **pump 단독**. (ADR-0005)
-- **등록 순서:** sessions insert가 pump 시작보다 **먼저**. 뒤집히면 즉시 종료하는 세션이 명부에 오르기 전에 끝나 수거되지 않는다 — 런타임엔 무신호고 reaper 테스트만이 회귀를 잡는다. (ADR-0019)
-- **락 순서:** sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers 스냅샷 후 락 미보유 send. subscribe만 예외로 **두 락을 순서대로 잡는다 — `subscribers` → `replay`**(그 보유 중 replay를 내보내 replay→live 역전을 막는다). ★데드락 부재는 "어느 락을 쥐었나"가 아니라 **취득 순서**에 달려 있다 — 순서를 빼면 이 예외가 왜 안전한지가 사라진다★. (ADR-0006)
-- **상태 알림 분담:** 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. 프론트는 `status_changed`로 terminal 판정 금지 → `agent-list-updated`로 판정. (ADR-0005)
-- **sink 2평면:** `OutputSink`(고빈도·구독단위 출력=data plane) ≠ `StatusSink`(저빈도·전역 상태/목록=control plane). (ADR-0003/0005)
-- **턴 관측 정리 = 두 지점뿐:** `OutputCore::finish` + `emit`의 finalize 재확인. **세 번째 호출자를 늘리면 인과가 갈라진다.** 빠지면 턴 도중 죽은 에이전트가 "진행 중"으로 남아 30분 상한(fail-open)이 풀 때까지 우편이 막힌다. 명단은 코어 소유, 분류는 `backend` seam 뒤, 데몬은 중계만. (ADR-0127 · 승격 전 = ADR-0113)
-- **화신 표식(필드명은 아직 `epoch`):** 화신마다 새로 뽑는 32비트 난수 — **비교는 일치/불일치만**(대소로 "더 새 것"을 유도 금지). 보장은 직전 화신과 다르다는 인접 보장 하나. 발급 단일점 = `ProfileRegistry::epoch_for_spawn`. 읽기는 건너뛰고 쓰기는 `0` 자리채움 — ★이 비대칭은 의도★. (ADR-0163)
-- **재부착 계기 = 권위 명부 관측 단독:** 소켓 전이가 아니다(`observeRoster` — 브로드캐스트와 조회 두 문). 끊기면 뷰는 `detached`로 내려앉기만 하고 화면·커서·표식을 보존한다. 구독 effect deps = `[viewId, agentId]` — ★표식을 넣지 않는다★(넣으면 replay 도착 전에 화면이 지워지고 표식까지 잃어 회전 판정이 못 선다). (ADR-0164)
-- **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows.
-- **freeze-frame 수거:** 사망 순간의 intent·shutting_down을 얼려 판정 → 크래시↔kill 오분류 경쟁 차단. (ADR-0019)
-- **시체 보존:** 종료된 에이전트 프로필을 reaper가 자동 삭제하지 않는다 — 모든 종료가 `KeepDisableAutoRestore`. 삭제는 명시적 `DeleteProfile` 명령으로만. (ADR-0083)
-- **활성화=resume 전용:** fresh fallback 폐지. resume 실패 시 새 세션을 만들지 않고 **관측된 종료 상태 그대로 종점 직행**(대개 `Exited`) + 시체 보존 + 로그. (ADR-0082)
-- **제어 토큰 수명 = (AgentId, 화신 표식):** 화신 회전·kill = 즉시 폐기. `from`은 토큰에서만 파생(사칭 차단). stale revoke는 현재 표식이 일치할 때만. (ADR-0086/0084/0163)
-- **봉투 단일 wrap point:** 봉투 조립은 `wrap_message`/`wrap_notice` 두 함수에만 있고, 조립 시점은 park이 아니라 **주입**이다. (ADR-0086/0096/0103)
-- **`delivered` = 실제 주입 시점:** busy 중에 stdin으로 선주입하고 delivered를 찍으면 장부 신뢰가 깨진다. busy는 **관측된 사실**일 때만 참(모르면 idle = 즉시 주입). (ADR-0104 · 동기 드레인 재확립 = ADR-0125)
-- **메시징 커널은 워크스페이스 crate를 모른다:** 접합은 커널 소유 포트 trait으로만. 컴파일 에러 = 설계된 멈춤. (ADR-0110)
-- **백엔드 격리:** claude 전용 인자·JSON 스키마는 `backend/claude.rs`에만. session=encoder 태그만, transport=스키마 모르는 "바보 파이프". (ADR-0004)
-- **capability 합성:** `Capabilities::compose(transport, backend)` — input/output/control은 transport, session/model은 backend가 소유(타입으로 강제). (ADR-0030)
+**이 절은 한자리 점검표다** — 흩어져 있는 불변식을 *한 번에 훑기* 위해 있고, 각 줄은 **지켜야 할 것 + 근거 ADR**만 남긴다. *왜·어떻게*는 PART 2가 이미 그림과 함께 펴 놓았으므로 여기서 다시 적지 않고 그 절로 링크한다. 링크가 없는 줄은 이 자리가 그 조항의 유일한 서술이라는 뜻이다.
+
+- **kill 2동사:** `transport.shutdown()` → `core.join_pump(5s)`, **순서 뒤집으면 hang**. ★두 동사를 한 동사로 합치지 말 것★ (ADR-0001 · 인과 전개 = [죽음 흐름](#죽음-흐름-종료--정리))
+- **finalize 1회:** `OutputCore.finalized.swap(AcqRel)` — terminal 전이·알림 정확히 1회, **pump 단독**. (ADR-0005 · [죽음 흐름](#죽음-흐름-종료--정리))
+- **등록 순서:** sessions insert가 pump 시작보다 **먼저**. (ADR-0019 · [죽음 흐름](#죽음-흐름-종료--정리))
+- **락 순서:** sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers 스냅샷 후 락 미보유 send. **subscribe만 예외로 두 락을 순서대로 잡는다 — `subscribers` → `replay`**(그 보유 중 replay를 내보내 replay→live 역전을 막는다. 프론트 seq dedup이 나머지 절반이다). ★데드락 부재는 "어느 락을 쥐었나"가 아니라 **취득 순서**에 달려 있다 — 순서를 빼면 이 예외가 왜 안전한지가 사라진다★. (ADR-0006 · emit 쪽 = [출력 흐름](#출력-흐름-메인-claude--앱))
+- **상태 알림 분담:** 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. ★프론트는 `status_changed`로 terminal 판정 금지★ → `agent-list-updated`로 판정. (ADR-0005 · [죽음 흐름](#죽음-흐름-종료--정리))
+- **sink 2평면:** `OutputSink`(고빈도·구독단위 출력 = data plane) ≠ `StatusSink`(저빈도·전역 상태/목록 = control plane). (ADR-0003/0005 · [seam](#seam-교체점))
+- **턴 관측 정리 = 두 지점뿐:** `OutputCore::finish` + `emit`의 finalize 재확인. ★세 번째 호출자를 늘리지 말 것 — 인과가 갈라진다★. 명단은 코어 소유, 분류는 `backend` seam 뒤, 데몬은 중계만. (ADR-0127 · 승격 전 = 0113 · 빠뜨리면 무엇이 막히나 = [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18))
+- **화신 표식(필드명은 아직 `epoch`):** 화신마다 새로 뽑는 32비트 난수 · **비교는 일치/불일치만** · 발급 단일점 = `ProfileRegistry::epoch_for_spawn` · 디스크는 읽기 건너뜀·쓰기 `0` 자리채움(★이 비대칭은 의도★). (ADR-0163 · 규약 전문 = [§용어 사전](#용어-사전-혼동쌍-고정))
+- **재부착 계기 = 권위 명부 관측 단독:** 소켓 전이가 아니다. 끊기면 뷰는 `detached`로 내려앉기만 하고 화면·커서·표식을 보존한다. 구독 effect deps = `[viewId, agentId]` — ★표식을 넣지 말 것★. (ADR-0164 · [프론트 제어표면](#프론트-제어표면--protocolclient-상태기계))
+- **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows. ([core 클래스 구조](#core-클래스-구조-소유-관계))
+- **freeze-frame 수거:** 사망 순간의 intent·shutting_down을 얼려 판정 → 크래시↔kill 오분류 경쟁 차단. (ADR-0019 · [죽음 흐름](#죽음-흐름-종료--정리))
+- **시체 보존:** 어떤 종료도 프로필을 지우지 않는다 — 전부 `KeepDisableAutoRestore`, 삭제는 명시적 `DeleteProfile`뿐. (ADR-0083 · [죽음 흐름](#죽음-흐름-종료--정리))
+- **활성화 = resume 전용:** fresh fallback 폐지 — resume가 실패해도 새 세션을 만들지 않는다. (ADR-0082 · 종점이 어느 축에 서나 = [세션 복원](#세션-복원--활성화-resume-전용--adr-0082))
+- **제어 토큰 수명 = (AgentId, 화신 표식):** 화신 회전·kill = 즉시 폐기 · `from`은 토큰에서만 파생(사칭 차단) · stale revoke는 현재 표식이 일치할 때만. (ADR-0086/0084/0163 · [인증](#인증--신원은-토큰에서만-나온다))
+- **봉투 단일 wrap point:** `wrap_message`/`wrap_notice` 두 함수에만 있고, 조립 시점은 park이 아니라 **주입**이다. (ADR-0086/0096/0103 · [봉투 조립](#봉투는-주입-시점에-딱-한-곳에서-조립한다))
+- **`delivered` = 실제 주입 시점:** busy는 **관측된 사실**일 때만 참(모르면 idle = 즉시 주입). (ADR-0104 · 동기 드레인 재확립 = 0125 · [배달 3분기](#배달-3분기--배달--파킹--반려))
+- **메시징 커널은 워크스페이스 crate를 모른다:** 접합은 커널 소유 포트 trait으로만 — 컴파일 에러 = 설계된 멈춤. (ADR-0110 · [구조](#구조--커널-lib--데몬-어댑터-adr-0110))
+- **백엔드 격리:** claude 전용 인자·JSON 스키마는 `backend/claude.rs`에만. session=encoder 태그만, transport=스키마 모르는 "바보 파이프". (ADR-0004 · [seam](#seam-교체점))
+- **capability 합성:** `Capabilities::compose(transport, backend)` — input/output/control은 transport, session/model은 backend가 소유(타입으로 강제). (ADR-0002/0030 · [seam](#seam-교체점))
 
 ## ADR 근거 맵 (더 파려면 여기)
 
-> **인덱스가 정본이다**(`docs/decisions/README.md`) — 여기는 이 문서가 기댄 것만 추린 발췌이고, 폐기 도장은 인덱스가 갖는다. 개수를 세지 않는다.
+> **인덱스가 정본이다**(`docs/decisions/README.md`) — 전수 목록도 폐기 도장도 거기가 갖는다. 개수를 세지 않는다.
 
-- **코어 인과:** **0001** kill 2동사 · **0005** finalize 1회·알림 분담 · **0006** 락 순서 · **0019** reaper freeze-frame 수거 + 등록 순서 · **0127** 턴 관측 명단 코어 승격(분류는 backend seam 뒤, 데몬은 중계만 — 0110/0113 개정)
-- **seam idiom:** **0002/0030** capability 합성(transport ⊕ backend) · **0003** OutputSink/StatusSink 코어 Tauri 격리 · **0004** 백엔드 격리 · **0012** 모듈 격리·TDD
-- **출력·정제:** **0044** json 모드 배선(통로 무정제 조항은 **0045**가 폐기) · **0045** 출력 정제 백엔드 이동 · **0079** resume 스크롤백 seed
-- **화신·재부착:** **0007** epoch 재구독(★"맵 교체마다 +1" 조항 **폐기** by **0163**★) · **0163** 화신 신원 = 순서 없는 난수 표식(읽기 건너뜀·쓰기 0 자리채움) · **0084** 재활성화 화신 회전 + reap epoch-guard · **0046** 미러 버퍼 제거·뷰 직결 replay·gen 펜스(0040 폐기 / 재연결 계기 조항은 **0164**가 폐기) · **0164** 재부착 계기 = 권위 명부, 구독 deps에 표식 금지
-- **전송·클라이언트:** **0029** embedded 제거·데몬 단일(데이터 스코프는 **0134**가 대체) · **0036** transport 단일화 · **0037** 전송 의미론 Rust 단독(진도 거처 조항은 0046이 폐기) · **0011** 제어표면 단일(agentClient) · **0041** 프론트 직접 Subscribe 금지
-- **레이아웃·창:** **0035** 레이아웃 권위=src-tauri(탭 소유 모델은 **0057**, 제어 표면 조항은 **0169**가 부분 폐기) · **0056** 탭 keep-alive · **0057** 런타임 팝아웃·창별 탭 소유 · **0148/0149/0165** 부재 슬롯 = 마지막 모드 유지 + 세 슬롯 공용 막 · **0166** UI 설정 = 디스크 파일 정본 + `ui.refresh` 재읽기 · **0167** 창별 테마는 설정 파일, 죽은 창 항목은 부팅 때 정리 · **0168** 프레임 시각 정리 · **0169** 챗 스타일은 명령이 아니라 설정 데이터(버스 이전 곁문 둘 철거 — 0035/0051/0055/0156 부분 폐기)
-- **crate 지형:** **0129** 데몬 lib 3층 분리(net 신설 — 0130이 결정 2·3 보류) · **0130** 추가 분리 보류(판정 기준은 **0151**이 대체) · **0151** crate 분리 판정 기준 = 독립적으로 쓸 수 있는가 · **0155** 통합 command 버스(선언은 생산자 옆·배달은 홉마다 3단계·명부는 런타임 등록만 — **0022/0081 결정 1·2 대체**, 주인 토큰 산출은 **0150**이 부분 폐기)
-- **명령 버스 후속:** **0150** 명부 주인 = 클라이언트가 만든 식별자 · **0153** 식별자 위협 모형 · **0154** 대상 지목은 데몬이 자기 표로(확실성 분류는 **0159**가 부분 폐기) · **0156** 명령 발견(인자·반환 모양 동봉) · **0157** 모르는 칸(입구 거절·배선 관용) · **0158** 버전 불일치는 끊지 않고 알린다 · **0159** 재시도 지시 기준 · **0160/0161/0162** 에이전트 명령 중계(제어 라우트 확장·요청 번호는 호출자·상태 조회로 해소)
-- **생명주기:** **0082** resume 전용·fresh 폐지 · **0083** 시체 보존·자동삭제 폐지 · **0119** 에이전트 명부 단일 입구 · **0122** 트리 삭제 = 생애 종료 · **0171** 상태의 거처는 누가 보나와 언제까지 사나로 정한다 · **0172** 에이전트 실패는 미리 감지하지 않고 실패한 자리에서 기록한다 · **0173** 실패 표시는 트리에서 기호를 갈아끼운다(슬롯 조항은 **0165**로 대체)
-- **제어 채널:** **0086** 듀얼 입구(사다리 조항은 0087이 부분 폐기) · **0087** send_message 시맨틱(→0088) · **0088** 배달 관측 seam(→0091) · **0092** 프라이밍 seam · **0096** 봉투 wrap seam · **0099** mcp-config 발급(**0126/0128**이 런타임 폴백 폐지) · **0101** 이름 주소 · **0132** 제어 평면 CLI 단일 실행파일 · **0133** 우편 노출 표식
-- **메시징:** **0103** v1 본체(0105/0107/0111 부분 폐기) · **0104** idle 게이트·일괄 flush(0112 부분 폐기) · **0105** 파킹 TTL 24h · **0106** 내장 SendMessage deny · **0107** 메일박스 용량·순서 v2(유계 2레인 — 0111/0114 부분 폐기) · **0108/0116/0118** 회신 계약 수명·입구 3분기 재편(0116은 0120/0121이 부분 폐기) · **0110** 커널 lib 분리(0127 부분 폐기) · **0111/0112/0117** 발송 개편(부재 반려·다중 수신자 직접 발송·**사용자 정의 그룹 제거** — 0111은 0117/0121이 부분 폐기) · **0113** 턴 관측 공용 승격(0119/0127 부분 폐기) · **0114** 통지 상한·반려 층위 · **0115/0120/0123** 이름 유일성(0115 → 0120 → 0123으로 순차 개정) · **0121** `@all`/`@here` 분리(FIFO 조항은 0124 → 0125가 승계) · **0125** 발송이 자기 턴에 큐를 비운다(동기 드레인·delivered 복원 — 0124 폐기, 겹침 가드 서술은 0142가 부분 폐기) · **0142** 배달 병렬화 축
-- **빌드·배포:** **0131** CI(windows 단일 러너·검증 전용·릴리즈는 태그 트리거) · **0134/0136** 릴리스 데이터 폴더 · **0135** 잠금 파일이 접속 정보 동반 · **0137** dev 빌드 별도 번들 identifier · **0138** 릴리스 로그 파일 동기 기록 · **0139** 런처는 자기 배포판 데몬만 kill · **0174** 셸 유닛테스트는 lib 내장 타깃을 끄고 명시 `[[test]]` 타깃으로 옮겨 세운다
+**여기 손으로 베낀 색인을 두지 않는다.** 베낀 목록은 인덱스보다 먼저 낡고, 낡은 목록은 폐기된 결정을 살아 있는 근거처럼 보이게 한다. 이 문서가 기댄 ADR은 **각 절이 그 자리에서** 인용하므로(대개 절 끝 `결정:` 줄이지만 본문 안에만 있는 것도 많다) 절을 읽으면 근거가 따라온다 — 번호로 거슬러 찾을 땐 `rg "ADR-0NNN" docs/reference/`.
+
+남기는 것은 아래뿐이다 — **어느 흐름 그림에도 걸리지 않아 `결정:` 줄이 인용할 자리가 없지만**, 이 문서 전체의 모양을 정한 진입점들.
+
+- **0012 — 모듈 격리·TDD.** 모든 모듈이 외부 의존을 seam으로 끊고 단독 검증된다는 전제. 이 문서의 [seam 지도](#seam-교체점)와 crate별 격리 게이트가 전부 여기서 나온다.
+- **0151 — crate 분리 판정 기준 = "독립적으로 쓸 수 있는가".** [crate 계층](#crate-계층-의존-아래위)이 왜 지금 모양인지, 다음 분리를 언제 할지의 기준(ADR-0130의 판정 기준을 대체).
+- **0171 — 상태의 거처는 "누가 보나 · 언제까지 사나"로 정한다.** PART 1 [소유권 지도](#상태는-누가-갖나--소유권-지도)의 각 행이 왜 그 소유자로 갔는지의 규칙.
 
 ## 용어 사전 (혼동쌍 고정)
 
@@ -808,7 +804,11 @@ flowchart TD
 
 **출력·복원:**
 - **replay** = 데몬 ring 되감기(리로드·신규구독 복원). **gen 펜스** = 옛/남의 replay 무시하는 세대 검사.
-- **epoch**(필드명) = 화신마다 새로 뽑는 32비트 난수 표식. 낡은 프레임·사망메시지 거르는 기준. ★카운터가 아니다 — 비교는 일치/불일치만이고 대소로 「더 새 것」을 유도하지 않는다★(ADR-0163).
+- **epoch**(필드명 · 뜻은 「화신 표식」) = 화신마다 새로 뽑는 **32비트 난수**. 낡은 프레임·지각한 사망 메시지·죽은 신원의 토큰을 거르는 기준이고, **이 문서에서 표식을 말하는 모든 자리가 이 정의를 쓴다** — 다른 절은 여기를 가리킬 뿐 규약을 다시 적지 않는다. (전부 ADR-0163)
+  - ★**카운터가 아니다 — 비교는 일치/불일치만이고 대소로 「더 새 것」을 유도하지 않는다**★. 난수라 순서가 없다: 대소로 지각 신호를 거르던 옛 방식은 난수로 바뀐 뒤 **절반의 확률로 그냥 통과했다**.
+  - 보장은 **직전 화신과 다르다**는 인접 보장 하나뿐. 발급 단일점 = `ProfileRegistry::epoch_for_spawn`.
+  - **디스크는 비대칭이다 — 읽기는 건너뛰고 쓰기는 `0` 자리채움**(앞 릴리스 리더 보호). ★이 비대칭은 의도★ — 그래서 `agents.json`에 적힌 값은 신원이 아니다.
+  - 프론트 구독 effect deps에는 넣지 않는다(ADR-0164).
 - **화신(incarnation)** = 한 AgentId 아래에서 프로세스가 새로 서는 사건. 옛 문서의 "epoch 교체"가 이것이다. 소비자 가드 = reap epoch-guard·제어 채널 토큰·턴 관측 표·프론트 재부착 회전 판정.
 - **권위 명부(roster)** = 데몬이 말하는 "지금 있는 에이전트" 목록. 재부착 계기의 단일 출처다(소켓 상태가 아니다 — ADR-0164).
 - **detached** = 연결이 끊겨 파이프만 사라진 뷰 상태. 화면·진도 커서·화신 표식을 그대로 들고 아무 요청도 내지 않는다.
