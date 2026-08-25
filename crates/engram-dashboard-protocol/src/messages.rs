@@ -1,4 +1,4 @@
-//! wire 메시지 — UI→core [`AgentCommand`], core→UI [`AgentEvent`].
+//! wire 메시지 — 클→데몬 [`AgentCommand`], 데몬→클 [`AgentEvent`].
 //! 둘 다 externally-tagged JSON(serde 기본).
 
 use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandReply, OwnerToken};
@@ -20,7 +20,7 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 //   ★여기에 다시 넣지 말 것★: 두 정의가 공존하면 조용히 갈라진다. 프론트 바인딩(`bindings/AgentCommand.ts`)
 //   에도 그래서 `Auth` 가 없다(프론트 `wsTransport` 는 원래 타입 없이 객체 리터럴로 만든다).
 //
-// ★이름 충돌★ — core `agent::profile::AgentCommand` 는 뜻이 다르다(프로필이 띄울 프로그램).
+// ★이름 충돌★ — agent `profile::AgentCommand` 는 뜻이 다르다(프로필이 띄울 프로그램).
 //   그쪽의 wire 미러는 이 enum 이 아니라 `AgentSpawnCommand` 다. crate 를 빼고
 //   "AgentCommand" 라 부르면 뜻이 안 정해진다.
 pub enum AgentCommand {
@@ -554,20 +554,20 @@ pub enum SubscribeAction {
     Resume,
 }
 
-/// 구조화 출력 이벤트 wire 미러(ADR-0045 tag1 StructuredEvent) — core `OutputEvent`의 **충실한 미러**.
+/// 구조화 출력 이벤트 wire 미러(ADR-0045 tag1 StructuredEvent) — agent `OutputEvent`의 **충실한 미러**.
 ///
 /// ★왜 새 타입인가(OutputChunk 확장 아님)★: 기존 wire `OutputChunk`(아래)는 S14 잔재라 `turn_id`/
 /// `id`/`message_id`가 없고 `MessageDone`/`Error` variant도 없다. 게다가 `AgentEvent::Output`·
 /// `export_all_to` 사용처에 묶여 있어 확장하면 그 계약이 깨질 위험이 있다. ADR-0045 "self-describing +
-/// 교체성(optional turn_id/message_id 보존)"을 만족하려면 core `OutputEvent`를 필드 유실 0으로 미러해야
+/// 교체성(optional turn_id/message_id 보존)"을 만족하려면 agent `OutputEvent`를 필드 유실 0으로 미러해야
 /// 하므로, 오염 없는 **새 wire 타입**을 신설한다(OutputChunk 는 GetSnapshot 스냅샷 전용으로 그대로 둔다).
 ///
-/// ★core↔wire 변환은 daemon adapter★(ADR-0003 격리): core `OutputEvent`(도메인 타입, Serialize 미부착)
+/// ★agent↔wire 변환은 daemon adapter★(ADR-0003 격리): agent `OutputEvent`(도메인 타입, Serialize 미부착)
 /// → 이 wire 타입은 daemon `connection_core::output_event_to_wire` 가 명시 매핑한다. protocol 은 wire
-/// 타입만 소유(core 무의존).
+/// 타입만 소유(agent 무의존).
 ///
 /// ★TerminalBytes 는 제외★: 콘솔 raw 바이트는 tag0 terminal frame(payload=raw bytes)으로만 흐르고
-/// tag1 payload 에 실리지 않는다. 따라서 이 미러에는 TerminalBytes variant 를 두지 않는다 — core
+/// tag1 payload 에 실리지 않는다. 따라서 이 미러에는 TerminalBytes variant 를 두지 않는다 — agent
 /// `OutputEvent::TerminalBytes` 가 이 변환에 오면 adapter 가 방어적으로 흡수(근거 주석은 output_event_to_wire).
 ///
 /// ★self-describing serde★: internally-tagged(`#[serde(tag="type")]`) — payload JSON 에 `"type"` 판별자가

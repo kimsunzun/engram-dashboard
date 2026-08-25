@@ -44,7 +44,7 @@ use crate::connection_core::sanitize_for_log;
 ///
 /// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. claude backend 가 CLI 용
 ///   base URL(ENGRAM_CONTROL_URL)을 파생할 때 이 리터럴 suffix("/mcp")를 **문자열로 벗긴다** —
-///   `crates/engram-dashboard-agent/src/agent/backend/claude.rs`(strip_suffix("/mcp")). 이 값을 바꾸면
+///   `crates/engram-dashboard-agent/src/backend/claude.rs`(strip_suffix("/mcp")). 이 값을 바꾸면
 ///   거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이 틀어지고 CLI 가
 ///   조용히 404 를 받는다.
 const MCP_PATH: &str = "/mcp";

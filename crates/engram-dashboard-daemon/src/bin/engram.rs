@@ -8,7 +8,7 @@
 //!   어휘** 쪽이고, 아래 exit code 판정자들이 §6 을 인용하는 것도 그 축이다. 표면 결정 = ADR-0132.
 //!
 //! ★표면 = `engram <계열> <동사>`★: 계열·동사 없이 플래그만 친 호출은 인자 오류다(기본 동사 없음).
-//!   실행파일 이름은 core 의 `CLI_EXE_NAME` 이 정본이고 help 문구도 거기서 만들어진다 — grant·프라이밍·
+//!   실행파일 이름은 agent 의 `CLI_EXE_NAME` 이 정본이고 help 문구도 거기서 만들어진다 — grant·프라이밍·
 //!   PATH 해석이 그 한 이름에 정렬돼야 하기 때문이다(ADR-0094).
 //!
 //! ★발견은 help 로만★(ADR-0132 결정 4 — MCP 가 툴 스키마를 스스로 드러내는 것의 CLI 대응): 인자 없는
@@ -131,7 +131,7 @@ use engram_dashboard_agent::types::{
 /// ★이 값이 **총 대기 상한이 아니다**★ — 아래에서 `set_read_timeout`/`set_write_timeout` 에 들어가므로
 /// 재는 것은 **연속 무응답 구간**이다. 답 하나가 통째로 이 시간 안에 와야 한다는 뜻이 아니고, 반대로
 /// 서버가 중간에 바이트를 흘리면 총 소요는 이것을 넘어도 끊지 않는다. 지금 제어 라우트가 답 전에 아무
-/// 것도 안 보내서 두 해석이 같아 보일 뿐이다(그 사실의 정본 = core 쪽 상수 doc).
+/// 것도 안 보내서 두 해석이 같아 보일 뿐이다(그 사실의 정본 = agent 쪽 상수 doc).
 // ADR-0161
 const TIMEOUT: Duration = Duration::from_secs(CLI_CONTROL_READ_TIMEOUT_SECS);
 
@@ -3518,7 +3518,7 @@ mod tests {
         }
     }
 
-    /// ★공용 어휘 ↔ 파서 드리프트 가드★: core 의 목록에 플래그·동사를 더하고 파서 arm 을 안 고치면 값 자리
+    /// ★공용 어휘 ↔ 파서 드리프트 가드★: agent 의 목록에 플래그·동사를 더하고 파서 arm 을 안 고치면 값 자리
     ///   방어와 프라이밍 판정이 그 새 표기를 못 본다 — 여기서 잡는다.
     #[test]
     fn the_parser_recognises_every_flag_and_verb_in_the_shared_vocabulary() {

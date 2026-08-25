@@ -19,7 +19,7 @@ export type ConnectionState = 'connected' | 'reconnecting' | 'down'
 
 /** 디코드된 출력 청크 — transport 무관(base64/binary frame 은 클라 내부에서 이미 풀림). */
 export interface OutputChunk {
-  /** core OutputCore 발급 seq(단조 증가). */
+  /** agent OutputCore 발급 seq(단조 증가). */
   seq: number
   /**
    * frame 종류(wsFrame.ts): 0=터미널 raw 바이트(xterm write) / 1=StructuredEvent JSON(ADR-0045 tag1).

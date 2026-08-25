@@ -1,8 +1,8 @@
 //! canonical 이름 **배선** 통합테스트(ADR-0101 WYSIWYA — 생산 경로 회귀 그물).
 //!
-//! ★왜 이 파일이 따로 있나(뮤테이션 프로브 D9-b)★: `agent/name.rs` 의 파생 테스트는 헬퍼를
+//! ★왜 이 파일이 따로 있나(뮤테이션 프로브 D9-b)★: `src/name.rs` 의 파생 테스트는 헬퍼를
 //!   **직접** 부른다 — 그래서 생산 코드가 그 헬퍼를 **쓰지 않게 되어도** 전부 초록이다. 실제로
-//!   `manager::resolve_canonical_name` 에 다음 세 뮤테이션을 넣어도 core 290 + daemon 412 테스트가 모두
+//!   `manager::resolve_canonical_name` 에 다음 세 뮤테이션을 넣어도 agent 290 + daemon 412 테스트가 모두
 //!   통과했다: ① `session.cwd` 대신 `profile.cwd` ② 가드 있는 `canonical_name_or_id_fallback` 대신
 //!   `resolve_display_name` ③ 파생을 건너뛰고 저장된 `AgentProfile.name` 필드 반환. ③은 ADR-0101 이 고친
 //!   버그 그 자체(저장 이름 = 종종 full cwd 문자열을 라우팅 주소로 사용 → 트리 표시 ≠ 라우팅 주소)다.

@@ -28,7 +28,7 @@ pub mod stdio;
 ///   요구하고 `Sync` 는 요구하지 않는다(공유 접근 없음). epoch 교체 = 새 transport = 새 decoder 라
 ///   리셋이 자동이다.
 ///
-/// core 도메인 타입(OutputEvent)만 생성한다 — Serialize 무관(ADR-0003: core 는 wire 를 모른다).
+/// agent 도메인 타입(OutputEvent)만 생성한다 — Serialize 무관(ADR-0003: agent 는 wire 를 모른다).
 pub trait OutputDecoder: Send {
     /// 임의 크기 바이트 청크를 밀어 넣고, 이번 청크로 **완성된** 이벤트만 돌려준다.
     /// 미완성 꼬리(개행 없는 부분 라인 등)는 구현체가 내부 버퍼에 남겨 다음 청크와 합친다.

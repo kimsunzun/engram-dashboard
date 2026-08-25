@@ -1,6 +1,6 @@
 # 로깅 컨벤션 (engram-dashboard)
 
-**상태:** crates(core/daemon/discovery) de-facto 관행을 명문화. 마스킹은 *목표*가 아니라 **명시적으로 거부된 방향**이다(아래 보안 — ADR-0138). load-bearing 경로 작성·리뷰 시 이 문서가 단일 출처.
+**상태:** crates(agent/daemon/discovery) de-facto 관행을 명문화. 마스킹은 *목표*가 아니라 **명시적으로 거부된 방향**이다(아래 보안 — ADR-0138). load-bearing 경로 작성·리뷰 시 이 문서가 단일 출처.
 
 > "무엇을·언제·어느 레벨로 로깅하나"(컨벤션)다. "어떻게 켜고 끄나"(인프라)는 `crates/engram-dashboard-agent/src/logging/mod.rs`.
 
@@ -50,7 +50,7 @@
 
 - **토큰·자격증명·비밀번호를 평문 로깅 금지.** 에러에도 넣지 않는다 — 실측: net crate `ws.rs` 의 `handle_connection`(토큰 불일치 분기, `constant_time_eq` 비교부)이 토큰 값을 로그에서 제외, `daemon_client` 접속 실패 에러는 url만 싣고 token 제외.
 - **★로그용 마스킹·레닥션 레이어는 거부됐다(ADR-0138)★** — 토큰은 이미 **같은 폴더에 평문으로** 있다(연결키 파일). 그 사본을 가리는 것은 아무것도 보호하지 않는다. **대신 채택한 규율 = 우리가 쓰는 문장에는 자격증명을 넣지 않는다**(위 첫 항목이 그 규율이다).
-- **`mask_secrets` 헬퍼는 남아 있으나 호출처 0**(`core/src/logging/mod.rs`) = 자동 적용 안 됨. PTY 텍스트 등 민감 가능 출력을 로깅하게 되면 **호출자가 명시 적용**해야 한다(자동 "경유" 아님). 파일 sink 는 이 헬퍼를 경유하지 않는다.
+- **`mask_secrets` 헬퍼는 남아 있으나 호출처 0**(`agent/src/logging/mod.rs`) = 자동 적용 안 됨. PTY 텍스트 등 민감 가능 출력을 로깅하게 되면 **호출자가 명시 적용**해야 한다(자동 "경유" 아님). 파일 sink 는 이 헬퍼를 경유하지 않는다.
 
 ## 안티패턴
 

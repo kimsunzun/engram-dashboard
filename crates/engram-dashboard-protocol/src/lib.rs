@@ -12,11 +12,10 @@
 //!
 //! ## Tauri import 금지. 도메인 로직 금지(순수 타입·serde·codec 만).
 //!
-//! ## ★ 이름 충돌 메모 (phase 1 reconcile):
-//! 이 crate 의 [`AgentCommand`] = **UI→core 요청 envelope**(설계 §3 명칭).
-//! 기존 `core(profile.rs)::AgentCommand` = **spawn 종류**(Claude/Shell).
-//! 둘은 다른 개념이라 phase 1(core 가 이 crate 의존) 시 spawn 종류를 `SpawnSpec` 등으로 개명해야
-//! TS 생성 바인딩 충돌(동명 export)을 막는다. 지금은 독립 crate 라 충돌 없음.
+//! ## ★ 이름 충돌 메모:
+//! 이 crate 의 [`AgentCommand`] = **클→데몬 요청 envelope**(설계 §3 명칭).
+//! 기존 `agent(profile.rs)::AgentCommand` = **spawn 종류**(Claude/Shell) — 그쪽의 wire 미러는 이 enum 이
+//! 아니라 [`AgentSpawnCommand`] 다. crate 를 빼고 "AgentCommand" 라 부르면 뜻이 안 정해진다.
 //!
 //! ## seq 의 TS 매핑
 //! u64 seq 는 ts-rs 기본 매핑이 `bigint` 이지만, 기존 프론트(`PtyEvent.seq: number`)와

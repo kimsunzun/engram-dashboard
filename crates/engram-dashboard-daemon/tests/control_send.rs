@@ -1389,7 +1389,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 /// ── ADR-0088 Stage 1-오라클 1: 동시 **입구** exact-once + N 개 distinct 본체 무결 배달(seam handoff) ──
 /// ★증명하지 않는다(커버리지 공백)★:
 ///   (1) **물리 OS-pipe 바이트 무인터리브** — 그 직렬화는 이 seam 이 우회하는 `stdin.lock()` 계층
-///       소관이라, 그 응용계층 직렬화를 지우는 회귀는 여기서 **안 잡힌다**. ▶ core 크레이트
+///       소관이라, 그 응용계층 직렬화를 지우는 회귀는 여기서 **안 잡힌다**. ▶ agent 크레이트
 ///       `tests/stdio_physical_pipe.rs` :: `physical_pipe_concurrent_sends_no_interleave` 가 커버한다.
 ///   (2) **encoder 내부 정확성** — actual·expected 가 같은 encoder 를 쓰므로 encoder 자체 결함(예:
 ///       wrap_user_turn 이 개행을 빠뜨림)은 양쪽을 똑같이 오염시켜 여기선 안 걸린다. ▶ claude.rs 의
@@ -2281,7 +2281,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
 /// ── ADR-0088 Stage 1-오라클 4(write 실패): 실패 **관측 형태** — 단일 실패 레코드(부분/중복 관측 없음) ──
 /// ★증명하지 않는다(커버리지 공백)★: **실제 OS write 가 prefix 를 쓴 뒤 Err 를 내는 부분 배달** — 이 seam
 ///   은 send_input 이 push **전에** 통째로 Err 를 반환하므로(원자 all-or-nothing 모사) "prefix 만 쓰이고
-///   실패" 상황 자체가 발생하지 않는다. ▶ core 크레이트 `tests/stdio_physical_pipe.rs` ::
+///   실패" 상황 자체가 발생하지 않는다. ▶ agent 크레이트 `tests/stdio_physical_pipe.rs` ::
 ///   `physical_pipe_partial_write_then_err_surfaces_as_err` 가 커버한다.
 #[tokio::test]
 async fn stage1_lifecycle_write_error_single_failure_no_partial_dup() {

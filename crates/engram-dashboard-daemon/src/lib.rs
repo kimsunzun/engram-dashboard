@@ -422,7 +422,7 @@ pub async fn run() -> Result<(), i32> {
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
     //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
     //    ★이 줄이 어디에 남는지가 이 실패의 전부다★: 폴더를 못 쓰면 파일 로그도 같은 폴더에서
-    //    막히므로, 코어가 `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(core `logging` 머리말).
+    //    막히므로, 코어가 `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(agent `logging` 머리말).
     //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
     //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
     if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
@@ -847,7 +847,7 @@ async fn start_test_server_inner(
     //   같은 Arc 라 dispatch 가 쓴 값을 그 서버 수명 동안 관측할 수 있다(운영은 control_registry 공유).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
     // 프리셋 persist 를 검증하는 테스트는 없다 — 필요해지면 store 주입형을 추가한다(현재 프리셋 unit 은
-    //   core 에서 격리 검증).
+    //   agent 에서 격리 검증).
     let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
     // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 control::mcp_server 쪽이 담당).
     let control: Arc<dyn engram_dashboard_agent::types::ControlChannel> =

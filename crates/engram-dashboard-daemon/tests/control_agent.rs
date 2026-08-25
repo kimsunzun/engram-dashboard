@@ -280,7 +280,7 @@ impl Fixture {
     /// 호출하되 **호출자 예산 안에서** 답을 요구한다 — 실 클라이언트가 그 예산으로 끊기 때문이다.
     ///
     /// ★같은 수를 **다른 뜻으로** 쓴다 — 알고 쓰는 것이다★: 실 CLI 는 `CLI_CONTROL_READ_TIMEOUT_SECS` 를
-    /// `set_read_timeout` 에 넣어 **연속 무응답 구간**을 재는데(정본 = core 쪽 그 상수 doc), 여기 `reqwest` 의
+    /// `set_read_timeout` 에 넣어 **연속 무응답 구간**을 재는데(정본 = agent 쪽 그 상수 doc), 여기 `reqwest` 의
     /// `.timeout()` 은 **요청 전체의 총 예산**이다. 오늘 이 라우트가 답 전에 바이트를 하나도 안 흘려 두 뜻이
     /// 같은 값이 되고, 총 예산 쪽이 **더 엄격**하므로 이 시험이 거짓 초록을 내지는 않는다.
     /// ★그러나 그 등가는 라우트의 성질에 기댄 것이다★ — 중간에 청크·진행 알림을 흘리는 형태로 바뀌면 실
@@ -1802,7 +1802,7 @@ async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_a
 /// 해석된 것이고, `RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS` 면 각각 부재·모호로 해석된 것이다.
 ///
 /// ★제어 쪽은 **입구가 실제로 태우는 해석기**를 부른다★: `agent.*` 표의 동사들이 지목을 푸는 함수가
-/// `core::agent::commands::resolve_in` 하나이고(그 표를 `/control/agent` 가 부른다), 이 대조가 그 함수를
+/// `agent::commands::resolve_in` 하나이고(그 표를 `/control/agent` 가 부른다), 이 대조가 그 함수를
 /// 직접 태운다. 사본을 재면 사본만 초록이고 실입구는 아무 보장도 못 받는다.
 ///
 /// ★이 대조가 덮는 축과 안 덮는 축★: 덮는 것은 **매칭 규칙**(정확 일치 · id 우선 · 동명 거부)이다. 두

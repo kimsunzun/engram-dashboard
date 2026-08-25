@@ -1,7 +1,7 @@
 # ADR-0175: 코어를 agent 와 base 로 가른다
 
 - 상태: 확정 (2026-08-25, 근거: 사용자 결정 + trd full 리뷰 2인)
-- 관련: ADR-0151(crate 판정 기준 — §영향의 「덩어리별 판정」 기대와 일부 갈린다, 아래 §거부한 대안) · ADR-0003(코어 격리) · ADR-0155(command crate) · ADR-0046(replay single-flight) · ADR-0174(셸 lib 테스트 하네스) · `docs/refactoring/core-split-plan-2026-08-25.md` · step-log S21 · Amends ADR-0151 (바닥 crate 구성)
+- 관련: ADR-0151(crate 판정 기준 — §영향의 「덩어리별 판정」 기대와 일부 갈린다, 아래 §거부한 대안) · ADR-0003(코어 격리) · ADR-0155(command crate) · ADR-0046(replay single-flight) · ADR-0174(셸 lib 테스트 하네스) · step-log S21 · Amends ADR-0151 (바닥 crate 구성)
 
 ## 맥락
 
@@ -55,9 +55,11 @@
 - **`base` 입주 조건(헤더에 박는다):** ① 소비자가 둘 이상 ② 도메인 지식 0 ③ 이 crate 안에서 서로를 참조하지 않을 것. ★**세 번째 입주자가 생기면 위 「거부한 대안」 첫 항목을 다시 연다**★ — 그때가 `bevy_core` 경로에 들어서는 지점이다.
 - **개명이 조용히 깨뜨리는 게이트(같은 커밋에서 함께 고친다):**
   - `.github/workflows/ci.yml:399` — 메시징 격리 정규식이 crate 이름 알파벳을 손으로 박는다. 새 이름을 안 더하면 벽에 구멍이 난다.
-  - `ci.yml:481-498` — net 의 core 심볼 allowlist(정확히 2줄). 개명 후 「0줄 기대」로 고치면 **어떤 위반으로도 깨질 수 없는 죽은 게이트**가 된다 → `engram_dashboard_agent::` 0 기대로 재조준 + `engram_dashboard_base::` allowlist 신설.
+  - `ci.yml:481-498` — net 의 core 심볼 allowlist(정확히 2줄). 개명 후 「0줄 기대」로 고치면 **어떤 위반으로도 깨질 수 없는 죽은 게이트**가 된다 → `engram_dashboard_agent::` 로 재조준하되 ★**기대값은 2 그대로**★다. net 이 무는 심볼 수는 개명으로 변하지 않았다 — 모듈 접기로 경로만 `::agent::platform::` → `::platform::` 으로 짧아졌을 뿐이다. **0 기대로 내리고 `engram_dashboard_base::` allowlist 를 새로 세우는 것은 결정 1 의 `base` 가 실제로 서서 PID 헬퍼가 그리로 이사한 뒤**다(같은 문장이 `ci.yml` 의 그 게이트 주석에도 박혀 있다).
   - `ci.yml:271-272` — 생성물 sync 게이트의 `crates/engram-dashboard-core/bindings/` 경로.
-  - **`.claude/skill-bindings/qa.md` 7곳**(`:59,60,106,107,125,144,276`) — 그중 `:125`·`:276` 이 **코어 격리 게이트**인데 CI 와 달리 경로 부재 분기가 없어, 개명 후 **없는 경로를 훑고 통과로 읽힌다**. ADR-0003 을 지키는 로컬 유일 게이트다.
+  - **`.claude/skill-bindings/qa.md`** — 이 파일의 **코어 격리 게이트 두 자리**(standard 블록의 `use tauri` 줄 + 맨 끝 「코어 격리 불변식」 절)가 CI 와 달리 경로 부재 분기가 없어, 개명 후 **없는 경로를 훑고 통과로 읽힌다**. ADR-0003 을 지키는 로컬 유일 게이트다.
+    - ★**여기에 줄 번호 목록을 박지 않는다**★ — 개명 커밋이 그 게이트 앞에 경로 존재 가드(4-pre)를 끼워 넣으며 뒤 자리가 한 줄씩 밀렸다. 자리는 세지 말고 찾을 것: `rg -n "engram-dashboard-agent|engram_dashboard_agent" .claude/skill-bindings/qa.md`.
+    - ★**그 문자열 grep 이 전부가 아니다**★ — 개명 커밋이 이 파일에서 실제로 고친 자리는 **12줄**이다(`git show bd38d324 --numstat -- .claude/skill-bindings/qa.md` → 13 추가 / 12 삭제. 추가가 한 줄 더 많은 것은 순수 신설인 4-pre 경로 부재 가드 때문이다 — 실측 2026-08-25). 그중 옛 crate 이름 문자열은 **7줄**뿐이고, 나머지 **5줄**은 이름 grep 에 안 걸리는 세 갈래다: 이름 없이 「core」로만 부르던 산문 **3줄** · 메시징 격리 정규식이 손으로 박아 둔 이름 알파벳 **1줄** · 그 신설 가드를 설명하려 함께 고친 판정 산문 **1줄**(이 한 줄은 개명 수정이 아니라 가드 문서다). 다음 개명도 같은 사각을 만난다.
   - 새 crate 는 게이트를 **세 곳**(`ci.yml` · CLAUDE.md 「빌드·검증 명령」 · `qa.md`)에 등록해야 한다. 이름 접두 `engram-dashboard-` 를 지켜야 상한 게이트가 본다(ADR-0151 「개명 함정」).
 - **`replay_flight` 이사 뒤 침묵 축:** 그 단위테스트 494줄이 셸 `lib_unit` 타깃 아래로 들어간다. **ADR-0174 의 세 다리 중 `[[test]] lib_unit` 선언이 사라지면 실패가 아니라 침묵으로 증발**한다 — 이사가 그 지붕 아래 물량을 늘린다는 사실을 함께 안다.
 - **검증 잣대:** 워크스페이스 회귀의 **총 통과 개수가 그대로**여야 한다(2,102 통과·0 실패, 실측 2026-08-25). 타깃별 분포는 바뀌지만 합계가 어긋나면 무언가 사라진 것이다. 개명 커밋의 diff 는 "이름 말고 바뀐 게 있나 → 없다"로 검토된다.

@@ -711,7 +711,7 @@ jobs:
       #      packages[""].version 이라는 사본이 하나 더 있지만 따로 안 본다 — npm 이 둘을 항상 같이 쓰므로
       #      현실의 drift 는 "lock 을 아예 갱신 안 함"이고 그건 루트 단언이 그대로 잡는다.
       # ── 일부러 뺀 것 ──
-      #   - 라이브러리 crate 5종(agent·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
+      #   - 라이브러리 crate(agent·command·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
       #     내부 semver. 정적 링크돼 사용자에게 보이지 않는다. 첫 비-0.1.0 태그부터 제품 버전과 갈리는데
       #     그건 의도된 결과다.
       #   - PROTOCOL_VERSION(protocol crate, 현재 3): wire 계약 버전이라 릴리즈가 아니라 계약이 바뀔 때

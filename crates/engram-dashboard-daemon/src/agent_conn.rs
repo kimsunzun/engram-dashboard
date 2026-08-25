@@ -66,7 +66,7 @@ impl OutputSink for FrameOutputSink {
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
         // ★S15 B5/B7 payload 분기(ADR-0045)★: 콘솔 바이트는 tag0 terminal frame, 구조화 이벤트는 tag1
         //   structured frame 으로 인코딩한다. sink 가 wire 인코딩을 소유(코어는 wire 모름, ADR-0003) —
-        //   Bytes 는 raw payload 를, Event 는 core `OutputEvent` → wire `StructuredEvent`(daemon adapter)
+        //   Bytes 는 raw payload 를, Event 는 agent `OutputEvent` → wire `StructuredEvent`(daemon adapter)
         //   → JSON payload 를 헤더에 실어 보낸다.
         //   ★현 배선 상태★: 구조화 이벤트 생산자(B3 decoder→pump 배선)는 아직 미배선이라 런타임엔 Bytes 만
         //   흐른다 — Event arm 은 B7 단위테스트(합성 OutputEvent)로만 도달·검증된다(정상).
@@ -74,11 +74,11 @@ impl OutputSink for FrameOutputSink {
             OutputPayload::Bytes(b) => {
                 encode_terminal_frame(frame.agent_id, frame.epoch, frame.seq, b)
             }
-            // ★tag1 인코딩(B7)★: core OutputEvent → wire StructuredEvent(adapter) → JSON payload →
+            // ★tag1 인코딩(B7)★: agent OutputEvent → wire StructuredEvent(adapter) → JSON payload →
             //   tag1 structured frame. codec 은 payload 스키마 무지(opaque) — 직렬화 형식(JSON)·이벤트
             //   타입은 여기(daemon)가 소유한다(ADR-0045 self-describing).
             OutputPayload::Event(ev) => {
-                // (1) core→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류
+                // (1) agent→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류
                 //     배선 버그) 매핑 불가(None) → debug 는 조기 발견, release 는 warn 후 drop(연결 유지).
                 let wire = match output_event_to_wire(ev) {
                     Some(w) => w,

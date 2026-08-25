@@ -80,7 +80,7 @@ pub enum SpawnMode {
 /// 자동 재시작 정책. **예약(reserved) — 죽은 필드 아님.** 동작은 미구현(게이트)이나
 /// ADR-0016이 "부팅 복원·가드 카운터·Failed 영속은 유효(추후 재검토)"로 명시한 미래 기능용
 /// seam이다. 미리 필드를 둬서 추후 schema/wire 마이그레이션 비용을 아낀다(H-3).
-/// ※제거 금지: core→protocol wire(domain.rs)→ts-rs 바인딩→daemon 변환→프론트까지 걸쳐
+/// ※제거 금지: agent→protocol wire(domain.rs)→ts-rs 바인딩→daemon 변환→프론트까지 걸쳐
 /// PROTOCOL_VERSION bump를 유발하고 ADR-0016 "추후 재검토" 의도와 충돌한다.
 /// "런타임 자동재시작" 해석만 폐기(ADR-0019) — 부팅 복원/가드/Failed는 유효.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -148,7 +148,7 @@ pub struct AgentProfile {
     pub command: AgentCommand,
 
     /// ★저장된 값은 **raw** 다 — 정규화되지 않는다(리뷰 fix N3 · load-bearing)★: 이 필드를 canonicalize
-    /// 하는 코드는 core·persistence 어디에도 없다. 그래서 `"."`·`".."`·심링크·대소문자 다른 Windows 경로가
+    /// 하는 코드는 agent·persistence 어디에도 없다. 그래서 `"."`·`".."`·심링크·대소문자 다른 Windows 경로가
     /// 그대로 앉아 있을 수 있고, 정규화는 이 값을 쓰는 쪽(spawn 의 `session.cwd`,
     /// `canonical_name_when_live`)이 각자 한다.
     pub cwd: PathBuf,

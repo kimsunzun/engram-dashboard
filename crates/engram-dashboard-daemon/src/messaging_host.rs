@@ -88,7 +88,7 @@ impl ManagerDeliveryPort {
 
 /// ★로스터 술어(load-bearing — 이 파일의 **유일한** 멤버십 조건)★.
 ///
-/// ★정의는 core `AgentStatus::is_live`(ADR-0119 결정 4 — 에이전트 "사실" 계층은 코어)★: 명부
+/// ★정의는 agent `AgentStatus::is_live`(ADR-0119 결정 4 — 에이전트 "사실" 계층은 코어)★: 명부
 ///   (`AgentManager::roster`)도 같은 술어를 써야 하는데 코어는 데몬을 의존할 수 없다. 여기 남은 건
 ///   `AgentInfo` 를 받는 데몬측 호출 어댑터다. (`pub(crate)` 는 크로스-모듈 호출의 잔재로 남겨 둔다.)
 // ADR-0119
@@ -124,7 +124,7 @@ impl DeliveryPort for ManagerDeliveryPort {
     /// ★`submit_stdin_observed` 여야 한다(`write_stdin_observed` 로 되돌리지 마라)★: 봉투 바이트만 쓰면
     ///   터미널(TUI) 수신자는 그걸 입력창에 담아 둔 채 턴을 시작하지 않는다 — 배달은 "바이트가 닿았다" 가
     ///   아니라 "수신자가 턴으로 받았다" 까지다(`DeliveryPort::inject` 계약). 제출이 필요한 백엔드인지의
-    ///   판정은 core seam 뒤 backend 소유라(ADR-0004) 이 어댑터는 동사만 고른다.
+    ///   판정은 agent seam 뒤 backend 소유라(ADR-0004) 이 어댑터는 동사만 고른다.
     fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
         self.manager
             .submit_stdin_observed(to_id, bytes)
@@ -382,7 +382,7 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
 /// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: `DaemonStatusSink` 를 **감싸** 로스터 변화를
 ///   데몬측에서 관측하고, 새로 살아났거나 화신이 갈린 이름 앞으로 파킹된 메시지를 flush 시킨다.
 ///
-/// ★왜 sink 를 감싸나(core seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
+/// ★왜 sink 를 감싸나(agent seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
 ///   AgentManager 의 상태 sink 가 이미 `agent_list_updated(Vec<AgentInfo>)` 로 로스터 스냅샷을 push 하므로
 ///   (ADR-0028 single-push broadcast), 그 사실을 **데몬측에서 diff** 해 flush 를 건다 — 코어에 새 seam 을
 ///   내지 않고 이미 흐르는 이벤트에 얹는다. wrap 이라 기존 broadcast(프론트 fanout)는 그대로 delegate 된다.
@@ -605,7 +605,7 @@ impl FlushWorkerHandles {
     ///   프로세스·스레드 강제 종료 등)을 도입하지 않는다 — 비용은 크고 막는 실패는 가정상 존재하지 않는다.
     ///
     /// ★파이프를 닫아도 **제출 페이싱 대기는 풀리지 않는다**(잔여 지연의 실체)★: 배달 1건은 본문 write →
-    ///   `core::agent::backend::SUBMIT_PACING`(0.5초) 대기 → 제출 write 다. ①의 파이프 닫힘은 **write** 를
+    ///   `agent::backend::SUBMIT_PACING`(0.5초) 대기 → 제출 write 다. ①의 파이프 닫힘은 **write** 를
     ///   에러로 풀지만 그 대기는 그대로 잔다. 그래서 진행 중인 배달 클로저는 abort 뒤에도 최대 ~0.5초(+ write)
     ///   더 돌고 나서 반환한다.
     /// ★데몬 프로세스 종료가 그 ~0.5초를 실제로 기다린다★: bin 은 `#[tokio::main]` 이고 종료 경로에
@@ -1120,7 +1120,7 @@ mod tests {
 
             let sources = port.addressing_sources();
             // ★전제가 바뀌었다★: 산 쪽은 셸이라 배달 명단엔 안 오른다(`reads_messages`). 그래도 이 테스트가
-            //   보는 축은 그대로다 — 차집합은 **core `roster()`** 가 id 로 끝내고 어댑터는 그 뒤에서 거를
+            //   보는 축은 그대로다 — 차집합은 **agent `roster()`** 가 id 로 끝내고 어댑터는 그 뒤에서 거를
             //   뿐이라, 이름 축으로 빼는 회귀가 생기면 산 `twin` 이 잠든 `twin` 을 삼켜 아래가 비어 버린다.
             assert_eq!(
                 sources.dormant_names,

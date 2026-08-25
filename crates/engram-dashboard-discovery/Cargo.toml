@@ -14,7 +14,7 @@ engram-dashboard-agent = { path = "../engram-dashboard-agent" }
 # daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # 핸드셰이크 프레임(`auth::AuthFrame`) — send_stop 의 첫 프레임(ADR-0129 0-4). ★비순환★: 네트워크 lib 의
-#   워크스페이스-로컬 forward 폐포는 {net, core, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
+#   워크스페이스-로컬 forward 폐포는 {net, agent, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
 #   crate 의 lib.rs 헤더). 슬라이스 1 전이었다면 인증 타입이 daemon 에 있어 daemon→discovery 와 고리를
 #   이뤘을 자리다 — 그래서 0-4 가 슬라이스 1 **뒤**로 밀렸다.
 #   ★feature 를 켜지 말 것(load-bearing)★: 여기서 필요한 것은 `auth::AuthFrame` 하나뿐이고, 그건 net 의
@@ -36,7 +36,7 @@ serde_json = "1"
 #   `cargo tree -p engram-dashboard-discovery -e normal --prefix none --target all`
 #   `| rg -i "^(tokio|mio|tokio-tungstenite|futures-util) "` → **0줄**.
 #   ★`^…␣` 앵커를 빼지 말 것★: `--prefix none` 이라 crate 이름이 줄 맨 앞에 오므로 앵커가 정확한데,
-#   맨 부분문자열로 적으면 `ter(mio)s`(core→portable-pty)와 **이 줄의 동기 `tungstenite`** 가 걸려
+#   맨 부분문자열로 적으면 `ter(mio)s`(agent→portable-pty)와 **이 줄의 동기 `tungstenite`** 가 걸려
 #   기대값이 0 이 아니게 되고, 그러면 "몇 줄이 정상인지" 를 사람이 매번 판정해야 한다(= 게이트가 죽는다).
 #   비자기일치 확인: `--features engram-dashboard-net/server` 를 붙이면 같은 명령이 6줄을 낸다(실측).
 tungstenite = "0.26"

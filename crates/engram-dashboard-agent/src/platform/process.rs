@@ -1,7 +1,7 @@
 //! PID liveness + 프로세스 시작시각(creation time) 헬퍼.
 //!
-//! ★왜 core 에 두나★: daemon(portfile)·tauri(discovery) 양쪽이 "데몬 PID 가 살아있는가"를
-//! 판정해야 한다. 두 crate 모두 core 에 의존하고 core 는 이미 windows 에 의존하므로,
+//! ★왜 agent 에 두나★: daemon(portfile)·tauri(discovery) 양쪽이 "데몬 PID 가 살아있는가"를
+//! 판정해야 한다. 두 crate 모두 agent 에 의존하고 agent 는 이미 windows 에 의존하므로,
 //! 판정 로직을 여기 한 곳에 두고 양쪽이 재사용한다(DRY — 사본 중복/무테스트 제거).
 //!
 //! ★왜 creation time 까지 보나★: PID 는 OS 가 재사용한다. 데몬이 죽고 같은 PID 를 다른

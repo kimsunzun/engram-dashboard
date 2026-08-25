@@ -2253,7 +2253,7 @@ mod real_process {
             .env("ENGRAM_DATA_DIR", data_dir)
             .env("RUST_LOG", "info")
             .stdin(std::process::Stdio::null())
-            // ★stdout 캡처(진단)★: core 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
+            // ★stdout 캡처(진단)★: agent 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
             //   daemon.json 을 못 쓰는지(잠금 거부? data_dir? panic?)를 실패 시 인용하려고 stdout 을
             //   piped 로 받는다. (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
             .stdout(std::process::Stdio::piped())

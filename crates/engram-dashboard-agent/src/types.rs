@@ -28,7 +28,7 @@ impl AgentStatus {
 ///
 /// ★ADR-0045 (출력 정제를 백엔드로)★: 콘솔은 `TerminalBytes`(VT 바이트 스트림) 그대로,
 /// 구조화 백엔드(claude stream-json 등)는 backend decoder가 파싱해 아래 구조화 variant로 emit한다.
-/// 이 타입은 **core 도메인 타입**이지 protocol wire 타입이 아니다 — core↔wire 변환은 daemon
+/// 이 타입은 **agent 도메인 타입**이지 protocol wire 타입이 아니다 — agent↔wire 변환은 daemon
 /// adapter가 한다(ADR-0003 격리: core는 wire를 모른다). core에 tauri import 금지(serde는 허용).
 ///
 /// `turn_id`/`message_id`는 대화 추적용 optional 필드다 — claude는 안 채워도 되고, codex/gemini의
@@ -42,7 +42,7 @@ pub enum OutputEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// `args_json` = backend 스키마 그대로의 직렬화 인자(core 무정제).
+    /// `args_json` = backend 스키마 그대로의 직렬화 인자(agent 무정제).
     ToolCall {
         name: String,
         args_json: String,
@@ -145,13 +145,13 @@ pub struct CommandSpec {
     pub cwd: std::path::PathBuf,
 }
 
-// ── ADR-0086: 제어 채널 입구(MCP) — core seam ──────────────────────────────────────
+// ── ADR-0086: 제어 채널 입구(MCP) — agent seam ──────────────────────────────────────
 //
-// ★왜 core 에 추상 descriptor + seam 을 두는가★: 스폰되는 에이전트가 데몬의 제어 채널(MCP 입구)에
+// ★왜 agent 에 추상 descriptor + seam 을 두는가★: 스폰되는 에이전트가 데몬의 제어 채널(MCP 입구)에
 //   붙으려면 (a) 데몬이 (AgentId,epoch)별 토큰을 발급하고 (b) 그 토큰+엔드포인트를 backend 명령줄에
 //   주입해야 한다. 그러나 **토큰 발급·MCP 서버·mcp-config 파일**은 전부 데몬 관심사(rmcp/axum/HTTP)라
-//   core 에 들어오면 tauri-import-0 격리와 같은 정신(전송·인프라 무의존)이 깨진다. 그래서 OutputSink/
-//   StatusSink 와 **동일한 idiom(ADR-0003)** 으로, core 는 순수 trait(`ControlChannel`) + 추상
+//   agent 에 들어오면 tauri-import-0 격리와 같은 정신(전송·인프라 무의존)이 깨진다. 그래서 OutputSink/
+//   StatusSink 와 **동일한 idiom(ADR-0003)** 으로, agent 는 순수 trait(`ControlChannel`) + 추상
 //   descriptor(`ControlEndpoint`)만 알고 실제 구현은 데몬(`DaemonControlChannel`)이 준다.
 
 /// 스폰 에이전트가 셸에서 **실제로 치는 bare 실행파일 이름**(경로·확장자 없음). 배포되는 실행파일의
@@ -170,7 +170,7 @@ pub const CLI_EXE_NAME: &str = "engram";
 
 /// CLI 우편 계열 이름 — `engram mail <동사>` 의 가운데 토큰(ADR-0132 그룹 구조).
 ///
-/// ★왜 core 가 이걸 아는가★: 우편 채널의 **교육↔배선 등호**(ADR-0128/0099)를 지키는 판정자들이 프라이밍
+/// ★왜 agent 가 이걸 아는가★: 우편 채널의 **교육↔배선 등호**(ADR-0128/0099)를 지키는 판정자들이 프라이밍
 ///   **본문에서 우편 CLI 교육을 찾아내야** 하는데, 그 판정 토큰이 CLI 가 실제로 받는 표기와 갈리면 판정이
 ///   조용히 뒤집힌다. 그래서 CLI 의 디스패치와 그 판정자들이 같은 값을 본다.
 /// ★bare 실행파일 이름만으로는 그 판정을 할 수 없다★: MCP 프라이밍이 같은 단어를 MCP **서버 이름**으로
@@ -194,7 +194,7 @@ pub const CLI_GROUP_MAIL: &str = "mail";
 /// 쪽 하나다(daemon `command_delivery` 의 `fits_caller_silence_window` — 기본값은 `const` 단언으로,
 /// 주입값은 생성자에서 판정한다). 이 값을 줄이면 그 단언이 깨져 빌드가 멈춘다. **여기서 그 셈을 다시
 /// 적지 말 것** — 두 사본이 갈리는 날 어느 쪽도 못 믿는다.
-/// ★초 단위 정수인 이유★: `Duration` 은 core 의 이 목록이 드는 다른 CLI 어휘와 결이 다르고, 두 소비자가
+/// ★초 단위 정수인 이유★: `Duration` 은 agent 의 이 목록이 드는 다른 CLI 어휘와 결이 다르고, 두 소비자가
 /// 각자 자기 타입으로 감싸는 편이 이 상수를 순수한 **숫자**로 남긴다.
 pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
 
@@ -250,7 +250,7 @@ pub const CLI_MAIL_FLAGS: [&str; 6] = [
 /// CLI 제어 계열 이름 — `engram agent <동사>` 의 가운데 토큰.
 ///
 /// ★우편 계열(`CLI_GROUP_MAIL`)과 달리 프라이밍 판정에 쓰이지 않는다★: 우편은 "가르친 채널 = 깐 배선"
-///   등호(ADR-0128)를 판정자가 지켜야 해서 core 가 그 토큰을 알아야 했지만, 제어는 그런 등호가 없다
+///   등호(ADR-0128)를 판정자가 지켜야 해서 agent 가 그 토큰을 알아야 했지만, 제어는 그런 등호가 없다
 ///   (ADR-0132 결정 5 — 권한은 전원 개방). 여기 있는 이유는 **CLI 파서·help·드리프트 테스트가 한 문자열을
 ///   보게** 하는 것뿐이다.
 // ADR-0132
@@ -273,7 +273,7 @@ pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
 
 /// 제어 응답이 싣는 **에이전트 상태 축**(살아 있음·잠듦·없음)의 wire 표기.
 ///
-/// ★왜 core 에 있나★: 이 문자열의 생산자(`agent::commands` 의 표)와 소비자(CLI 의 응답 판정기)가 **다른
+/// ★왜 agent 에 있나★: 이 문자열의 생산자(`agent::commands` 의 표)와 소비자(CLI 의 응답 판정기)가 **다른
 ///   crate** 라, 각자 리터럴을 적으면 한쪽만 바뀌어도 아무도 못 본다 — 증상은 정상 응답이 "읽을 수 없는
 ///   shape"(exit 2)로 튀는 거짓 경보다. 한 값을 양쪽이 본다.
 /// ★"없음" 에 해당하는 값이 없는 것은 의도다★ — 부재는 상태값이 아니라 반려 코드(`NOT_FOUND`)로
@@ -282,7 +282,7 @@ pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
 pub const AGENT_STATE_LIVE: &str = "live";
 pub const AGENT_STATE_SLEEPING: &str = "sleeping";
 
-/// 개명 응답의 `outcome` 어휘 — 위와 같은 이유로 core 가 소유한다. 실패 두 갈래(부재·이름 공간 소진)는
+/// 개명 응답의 `outcome` 어휘 — 위와 같은 이유로 agent 가 소유한다. 실패 두 갈래(부재·이름 공간 소진)는
 /// 반려 코드로 나가므로 여기 없다.
 // ADR-0132
 pub const RENAME_OUTCOME_RENAMED: &str = "renamed";
@@ -293,7 +293,7 @@ pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
 ///
 /// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
 ///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
-///   core 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
+///   agent 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
 ///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
 ///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
 /// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 이 *목록*을 넓히려면 명시적 결정(ADR-0094 개정).
@@ -311,7 +311,7 @@ pub enum ToolGrant {
 
 /// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
 /// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude.rs 단독,
-/// ADR-0004). core/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
+/// ADR-0004). agent/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
     /// 데몬 MCP Streamable HTTP 엔드포인트 URL(예: `http://127.0.0.1:<port>/mcp`).
@@ -343,7 +343,7 @@ pub struct ControlEndpoint {
     ///   **우편을 정상적으로 쓴다**. 채널은 백엔드 capability 로만 갈리고 런타임 폴백이 없다(ADR-0128
     ///   결정 1) — 이 값은 그 설계에서 닫혀 있어야 할 쪽 입구(CLI/HTTP)만 가리킨다.
     ///
-    /// ★core 는 정책을 파생하지 않는다★: 이 값은 데몬이 판정해 실어 주는 **사실**이고, backend 는 실린
+    /// ★agent 는 정책을 파생하지 않는다★: 이 값은 데몬이 판정해 실어 주는 **사실**이고, backend 는 실린
     ///   대로 주입만 한다. `config_path` 유무 같은 다른 필드에서 이 값을 다시 유도하지 말 것 — 두 곳이
     ///   갈리면 교육과 강제가 어긋난다.
     /// ★교육 수단이지 강제가 아니다★: 강제는 데몬이 자격증명으로 하는 거절뿐이다(`MAIL_MARKER_ENV` 주석).
@@ -352,7 +352,7 @@ pub struct ControlEndpoint {
     /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
     /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
     /// backend/claude.rs 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
-    /// 파일을 **직접 읽음** — 데몬/core 는 내용을 안 읽는다). MCP 와 직교하는 broker-주입 데이터지만,
+    /// 파일을 **직접 읽음** — 데몬/agent 는 내용을 안 읽는다). MCP 와 직교하는 broker-주입 데이터지만,
     /// 데몬이 이미 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지
     /// 않는다.
     pub priming_file: Option<std::path::PathBuf>,
@@ -374,7 +374,7 @@ pub struct ControlEndpoint {
 /// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일
 /// **의도가 있었으나 실패**"한 경우다 — spawn 이 이 Err 를 만나면 fail-closed 로 스폰을 중단한다(제어
 /// 채널 없이 도는 에이전트를 만들지 않는다). ★absence 와 구분★: Ok(None)=제어 채널을 안 쓰는 정당한
-/// 부재(Noop·shell), Err=쓰려다 실패(치명). core 는 문자열만 나른다(rmcp/io 타입 누수 방지, ADR-0003).
+/// 부재(Noop·shell), Err=쓰려다 실패(치명). agent 는 문자열만 나른다(rmcp/io 타입 누수 방지, ADR-0003).
 #[derive(Debug)]
 pub struct ProvisionError(pub String);
 
@@ -553,7 +553,7 @@ pub struct PtyEvent {
 /// 코어→sink 출력 payload (S15 B5 payload-generic). **빌려서** 전달 — 코어는 wire 를 모른다(ADR-0003).
 /// ★ADR-0002 (출력 종류 비가정)★: 출력을 터미널 바이트로 강제하지 않는다 — Bytes/Event 두 갈래로
 /// 나눠 sink 가 종류별로 처리(Bytes→tag0 terminal frame, Event→tag1 structured frame, B7)한다.
-/// 참조만 담아 Copy 유지(OutputFrame Copy 계약 보존) — Serialize 미부착(core 도메인 타입, ADR-0003).
+/// 참조만 담아 Copy 유지(OutputFrame Copy 계약 보존) — Serialize 미부착(agent 도메인 타입, ADR-0003).
 #[derive(Debug, Clone, Copy)]
 pub enum OutputPayload<'a> {
     /// 콘솔 raw 바이트(터미널·tag0 경로). PtyTransport·터미널 모드의 payload.

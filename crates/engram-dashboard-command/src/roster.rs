@@ -77,7 +77,7 @@ impl Roster {
     ///
     /// ★이름은 등록 패킷이 실어 온 **문자열**이지 빌드 상수가 아니다★ — 상한이 없으면 오작동하거나
     /// 악의적인 주인 하나가 붙어 있는 동안 명부를 무한히 불린다.
-    /// 값의 근거: 지금 어휘 전량이 60 남짓이고(화면 33 · core 5 · daemon 3 · `src-tauri` 17) 가장 큰
+    /// 값의 근거: 지금 어휘 전량이 60 남짓이고(화면 33 · agent 5 · daemon 3 · `src-tauri` 17) 가장 큰
     /// 주인이 33이다. 512 = 그 여덟 배 — 실무가 닿지 않으면서 폭주는 막는 자리다.
     pub const MAX_NAMES_PER_OWNER: usize = 512;
 
@@ -94,7 +94,7 @@ impl Roster {
     ///
     /// ★이 문자열은 그 주인이 붙어 있는 동안 상주한다★ — 상한이 없으면 과장된 `help` 하나가 명부의
     /// 메모리를 통째로 먹는다.
-    /// 값의 근거: 지금 가장 큰 항목이 `agent.spawn` 의 591바이트다(`core/bindings/commands.schema.json`
+    /// 값의 근거: 지금 가장 큰 항목이 `agent.spawn` 의 591바이트다(`agent/bindings/commands.schema.json`
     /// 실측). 4096 = 그 일곱 배로, 중첩 struct 를 몇 겹 더 편 선언도 넉넉히 든다.
     /// 두 상한을 합치면 명부의 상주 상한이 [`Roster::MAX_NAMES`] × (128 + 4096) ≈ 16 MiB 로 닫힌다.
     pub const MAX_HELP_BYTES: usize = 4096;

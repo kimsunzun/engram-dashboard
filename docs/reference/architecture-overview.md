@@ -50,7 +50,7 @@ flowchart TD
 
   subgraph DAEMON["engram-dashboard-daemon.exe (데몬 = 백엔드 서버, daemon crate)"]
     direction TB
-    AM["AgentManager (core 엔진 소유)<br/>sessions · profiles · reaper · 턴 관측 표"]
+    AM["AgentManager (agent 엔진 소유)<br/>sessions · profiles · reaper · 턴 관측 표"]
     NET["네트워크 행 (net crate)<br/>WS 서버·Origin·토큰 핸드셰이크·팬아웃·portfile·단일 인스턴스"]
     CTL["제어 엔드포인트 (S17~S20)<br/>MCP 서버 · 토큰 레지스트리 · /control 라우트"]
     ROSTER["명령 명부 (command_roster)<br/>런타임 등록만 · 대상 지목"]
@@ -159,7 +159,7 @@ flowchart TD
 
 > **주의 — 통신선이 두 개다.** 기존 PTY(데몬이 에이전트를 *부리는* 선)와, S17 제어선(에이전트가 데몬으로 *되전화하는* 선)은 물리적으로 다르다. 전자는 데몬→에이전트 stdin, 후자는 에이전트→데몬 MCP/HTTP. 헷갈리면 흐름을 반대로 읽는다.
 
-## 서버측 — 데몬 + core 엔진
+## 서버측 — 데몬 + agent 엔진
 
 ### crate 계층 (의존 아래→위)
 
@@ -169,20 +169,20 @@ flowchart TD
 flowchart BT
   command["command [lib]<br/>명령 버스 ★도구★ — 봉투·오류 어휘·선언 매크로·표·라우팅(명령 0개)<br/>워크스페이스 crate 의존 0 · 불변식 정본 = 그 crate lib.rs 헤더(ADR-0155)"]
   protocol["protocol [lib]<br/>앱↔데몬 공용 언어(명령·이벤트 타입 + 프레임 codec + ts-rs)"]
-  core["core [lib]<br/>에이전트 엔진(tauri import 0 · protocol 무의존 — wire 타입을 모른다)<br/>seam: transport/backend/sink/control · agent.* 명령 선언(commands.rs)"]
+  agent["agent [lib]<br/>에이전트 엔진(tauri import 0 · protocol 무의존 — wire 타입을 모른다)<br/>seam: transport/backend/sink/control · agent.* 명령 선언(commands.rs)"]
   discovery["discovery [lib]<br/>데몬 찾기/띄우기 + default_data_dir 단일결정"]
   messaging["messaging [lib]<br/>메시징 커널(보관함·장부·그룹·봉투·발송·busy 게이트)<br/>워크스페이스 crate 무의존 — 접합은 포트 trait 뿐(ADR-0110)"]
   net["net [lib]<br/>네트워크 행(WS 서버·Origin·토큰 핸드셰이크·연결 수명·단일 writer·keepalive<br/>팬아웃 레지스트리 · 프레임 포트 계약 · 단일인스턴스 · 포트파일)<br/>경계·격리 게이트의 정본 = 그 crate lib.rs 헤더(ADR-0129)"]
   daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host) · 명령 배달·명부(command_delivery/roster)<br/>· bin: engram-dashboard-daemon / engram"]
 
   protocol -->|"의존"| command
-  core -->|"의존"| command
+  agent -->|"의존"| command
   net -->|"의존(server feature)"| protocol
-  net -->|"의존(server feature)"| core
+  net -->|"의존(server feature)"| agent
   discovery -->|"의존"| protocol
-  discovery -->|"의존"| core
+  discovery -->|"의존"| agent
   discovery -->|"의존"| net
-  daemon -->|"의존"| core
+  daemon -->|"의존"| agent
   daemon -->|"의존"| protocol
   daemon -->|"의존"| command
   daemon -->|"의존"| net
@@ -190,13 +190,13 @@ flowchart BT
   daemon -->|"의존"| messaging
 ```
 
-- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **core에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정). 이후 명령 버스(ADR-0155)가 둘을 더 들였다 — `inventory`(선언 링커 수집. S20 Step 1의 **유일한 신규 서드파티 crate**이고 `core`를 타고 릴리즈 바이너리에 링크된다)와, `core`의 **production** 의존이 된 `ts-rs`(선언 매크로가 인자·반환 struct에 `TS` derive를 단다 — 코어가 TS 생성 도구를 운영 그래프에 안고 있다는 뜻이다).
-- **command(2026-08-14 · ADR-0155)** 는 명령 버스 **도구**만 담고 명령은 0개다 — 어휘는 생산자 옆에서 선언한다(`core` = `agent.*`, `src-tauri` = `window/tab/slot`). **화살표는 들어오는 쪽 한 방향뿐**이고, 그중 `core → command`가 **코어의 첫 워크스페이스 의존**이다(그래도 `core → protocol`은 여전히 없다 — 도구 crate가 그 유입을 막는 것이 이 분리의 요점). 워크스페이스 의존 0·명령 0개는 CI 의존 상한 게이트가 지키고, 불변식 정본은 그 crate `src/lib.rs` 헤더다.
-- **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(core 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
+- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **agent에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정). 이후 명령 버스(ADR-0155)가 둘을 더 들였다 — `inventory`(선언 링커 수집. S20 Step 1의 **유일한 신규 서드파티 crate**이고 `agent`를 타고 릴리즈 바이너리에 링크된다)와, `agent`의 **production** 의존이 된 `ts-rs`(선언 매크로가 인자·반환 struct에 `TS` derive를 단다 — 코어가 TS 생성 도구를 운영 그래프에 안고 있다는 뜻이다).
+- **command(2026-08-14 · ADR-0155)** 는 명령 버스 **도구**만 담고 명령은 0개다 — 어휘는 생산자 옆에서 선언한다(`agent` = `agent.*`, `src-tauri` = `window/tab/slot`). **화살표는 들어오는 쪽 한 방향뿐**이고, 그중 `agent → command`가 **코어의 첫 워크스페이스 의존**이다(그래도 `agent → protocol`은 여전히 없다 — 도구 crate가 그 유입을 막는 것이 이 분리의 요점). 워크스페이스 의존 0·명령 0개는 CI 의존 상한 게이트가 지키고, 불변식 정본은 그 crate `src/lib.rs` 헤더다.
+- **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(agent 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
 - **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 범위와 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3의 이동 대상이었으나 **ADR-0130 으로 보류** — 옮기지 않는다). 격리 게이트와 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다. 그 뒤 0-4가 핸드셰이크 프레임을 이 crate 소유(`auth::AuthFrame`)로 옮기면서 `discovery → net` 간선이 생겼다 — **기본 feature(비어 있음)로만 쓴다**(`server`를 켜면 동기 crate인 discovery가 async 런타임을 진다).
 - **daemon(2026-08-05 · ADR-0130)** 은 응용 층(연결 코어 · 연결 어댑터 · 상태 팬아웃 · 메시징 호스트 · 제어 평면)과 조립을 **한 crate 로 유지**한다. ADR-0129 는 이 crate 를 다시 "에이전트 시스템 lib + 얇은 조립 바이너리" 로 가르려 했으나 **그 결정 2·3 은 보류됐다** — 재사용 목적은 net 분리로 달성·측정됐고(측정치와 재확인 명령 = ADR-0130 §근거 ①), 나머지 두 덩어리엔 따로 쓸 소비자가 없으며, 벽 없이도 production 의존 그래프가 이미 단방향이다. **재개 조건은 ADR-0130 §영향**(그 조건이 관측되기 전까지 이 crate 를 더 쪼개지 않는다). 한편 **데몬 살림의 *구현*은 이 crate 에 없다** — 단일 인스턴스 가드와 portfile 은 net 이 소유하고, 여기 남은 것은 그것들을 부르는 순서다(`run()`).
 
-### core 클래스 구조 (소유 관계)
+### agent 클래스 구조 (소유 관계)
 
 **데몬이 `AgentManager` 하나를 소유하고, 그 아래 에이전트마다 세션 조립체가 달린다.**
 
@@ -446,7 +446,7 @@ flowchart TD
 
   HOST["데몬 messaging_host.rs — 어댑터 + 조립실<br/>ManagerDeliveryPort · ManagerTurnFacts · ControlRegistry 어댑터 · 조립 헬퍼"]
   REAL["데몬 실물: AgentManager · ControlRegistry"]
-  CORE["코어 agent/turn.rs — 턴 관측 표(AgentManager 소유)<br/>정리 = OutputCore::emit·finish 두 지점뿐<br/>분류는 backend seam 뒤(AgentBackend::turn_classifier)<br/>도어벨 = StatusSink::turn_ended"]
+  CORE["코어 turn.rs — 턴 관측 표(AgentManager 소유)<br/>정리 = OutputCore::emit·finish 두 지점뿐<br/>분류는 backend seam 뒤(AgentBackend::turn_classifier)<br/>도어벨 = StatusSink::turn_ended"]
 
   HOST -->|"포트 구현을 꽂는다"| PORT
   HOST -->|"이 실물을 아는 유일한 자리"| REAL
@@ -737,7 +737,7 @@ flowchart TD
 
 - **`ControlChannel`의 성격이 다른 이유:** 나머지 코어 seam이 *출력·상태를 코어 밖으로 흘리는* 출구라면, `ControlChannel`은 *에이전트가 되전화할 인바운드 엔드포인트를 스폰 때 세우고 종료 때 거두는* 생명주기 seam이다. 코어는 `ControlEndpoint`(url·token·config 경로 문자열)만 나르고 rmcp/axum/HTTP를 모른다(ADR-0003 idiom 동형).
 - **코어 안 나머지:** `AgentCommandHost`·`RosterChanged`(명령 버스가 `AgentManager` 전체 대신 좁게 잡는 주입점 — ADR-0155) · `PresetStore`·`ProfileStore`(영속 교체점).
-- **신설 crate가 들인 seam:** `command` = `CommandLink`·`InboundCommands`·`OwnerLookupSource`·`CommandHandler`(ADR-0155) · `net` = `FrameSink`·`FrameFanout`·`ConnectionHandler`·`ConnectionHandlerFactory`(ADR-0129). 둘 다 워크스페이스 crate 의존 0이 벽이고, **`core`가 `command`를 의존한다 — 코어의 첫 워크스페이스 의존이다.**
+- **신설 crate가 들인 seam:** `command` = `CommandLink`·`InboundCommands`·`OwnerLookupSource`·`CommandHandler`(ADR-0155) · `net` = `FrameSink`·`FrameFanout`·`ConnectionHandler`·`ConnectionHandlerFactory`(ADR-0129). 둘 다 워크스페이스 crate 의존 0이 벽이고, **`agent`가 `command`를 의존한다 — 코어의 첫 워크스페이스 의존이다.**
 - **메시징 포트는 이 표에 없다 — 다른 가문이다.** 위 표는 *코어*가 소유한 seam이고, `DeliveryPort`·`ControlPlanePort`·`FlushTrigger`·`BusyGate`·`TurnFacts`·`IdleNotifier`·`DeliveryObserver`·`GroupSource`는 *메시징 커널 lib*이 소유한 포트다(구현은 데몬 `messaging_host.rs` · **명단을 세지 말 것 — 정본은 `rg "pub trait" crates/engram-dashboard-messaging/src/`**). 옛 `TapHost` 포트는 ADR-0127이 폐지했다 — 턴 관측 명단은 코어로 올라갔다. 방향은 같은 idiom(정책이 실물을 모른다)이지만 소유자와 crate가 다르므로 섞지 않는다. 상세는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
 
 **설계 지향(CLAUDE.md 「LLM-우선 제어」):** UI 컴포넌트는 store 액션 호출만, 그 액션을 LLM도 동일하게 부르는 단일 control surface로 모은다.
@@ -764,7 +764,7 @@ flowchart TD
 - **턴 관측 정리 = 두 지점뿐:** `OutputCore::finish` + `emit`의 finalize 재확인. ★세 번째 호출자를 늘리지 말 것 — 인과가 갈라진다★. 명단은 코어 소유, 분류는 `backend` seam 뒤, 데몬은 중계만. (ADR-0127 · 승격 전 = 0113 · 빠뜨리면 무엇이 막히나 = [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18))
 - **화신 표식(필드명은 아직 `epoch`):** 화신마다 새로 뽑는 32비트 난수 · **비교는 일치/불일치만** · 발급 단일점 = `ProfileRegistry::epoch_for_spawn` · 디스크는 읽기 건너뜀·쓰기 `0` 자리채움(★이 비대칭은 의도★). (ADR-0163 · 규약 전문 = [§용어 사전](#용어-사전-혼동쌍-고정))
 - **재부착 계기 = 권위 명부 관측 단독:** 소켓 전이가 아니다. 끊기면 뷰는 `detached`로 내려앉기만 하고 화면·커서·표식을 보존한다. 구독 effect deps = `[viewId, agentId]` — ★표식을 넣지 말 것★. (ADR-0164 · [프론트 제어표면](#프론트-제어표면--protocolclient-상태기계))
-- **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows. ([core 클래스 구조](#core-클래스-구조-소유-관계))
+- **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows. ([agent 클래스 구조](#agent-클래스-구조-소유-관계))
 - **freeze-frame 수거:** 사망 순간의 intent·shutting_down을 얼려 판정 → 크래시↔kill 오분류 경쟁 차단. (ADR-0019 · [죽음 흐름](#죽음-흐름-종료--정리))
 - **시체 보존:** 어떤 종료도 프로필을 지우지 않는다 — 전부 `KeepDisableAutoRestore`, 삭제는 명시적 `DeleteProfile`뿐. (ADR-0083 · [죽음 흐름](#죽음-흐름-종료--정리))
 - **활성화 = resume 전용:** fresh fallback 폐지 — resume가 실패해도 새 세션을 만들지 않는다. (ADR-0082 · 종점이 어느 축에 서나 = [세션 복원](#세션-복원--활성화-resume-전용--adr-0082))

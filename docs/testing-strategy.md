@@ -71,7 +71,7 @@
 
 ### src-tauri (`src-tauri`)
 - **① 단위**: `src/**` 의 `#[cfg(test)]` 전부(discovery DTO 변환, `ensure_with` OS/WMI/clock trait 주입 순수 검증, ComGuard 분류 등). ★**건수를 여기 적지 않는다**★ — 실행이 막혀 있던 시절의 "18건", 그것을 고친 날의 수치가 차례로 낡았다. 세야 하면 정본은 CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄이다.
-- thin command wrapper(spawn/kill/write/profile)는 로직이 core 에 있어 여기선 배선만.
+- thin command wrapper(spawn/kill/write/profile)는 로직이 agent 에 있어 여기선 배선만.
 - 실행: ★**2026-08-24부터 이 패키지의 단위 스위트도 돈다**★ — `cargo test -p engram-dashboard --test lib_unit`(★자식 프로세스를 하나도 안 띄우므로 `-- --test-threads=4` 를 붙이지 않는다★ — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」). `[lib] test = false` + `[[test]] name = "lib_unit" / path = "src/lib.rs"` 로 kind=test 타깃을 만들고 `build.rs` 가 `cargo:rustc-link-arg-tests=` 로 Windows `RT_MANIFEST` 를 그쪽에도 링크한 결과이며, **왜 이 모양이고 무엇을 거부했는지는 ADR-0174** 가 갖는다(옛 `0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 의 원인이 그 manifest 부재였다). ★**그리고 전 멤버 회귀도 이제 이 패키지를 함께 돈다**★ — `cargo test --workspace -- --test-threads=4`(옛 `--exclude engram-dashboard` 는 걷혔다). 제외를 떠받치던 사유 둘이 다 죽었기 때문이다: 즉사는 위 ADR-0174 로, **알려진 선재 실패는 전부 고쳐지면서.** 루트 bare `cargo test` 금지도 그대로(§3 치트시트).
   - ★**판정은 초록 하나뿐이다**★ — 이 스위트에 알려진 선재 실패는 없고, 빨간 줄은 그대로 회귀 신호다. ★**"이만큼까지는 빨개도 정상" 갈래를 다시 만들지 말 것**★ — 옛 판정은 `daemon_client::tests::` 축의 하네스 부패(`daemon_client::start_connection` 의 `app: None` 단락)를 건수 상한과 함께 눈감아 줬는데, 그 실패가 사라진 지금 그런 상한은 **그만큼의 회귀를 조용히 통과시키는 문**일 뿐이다. ★**수치를 여기 베끼지 않는다**★ — 정본 = CLAUDE.md 「빌드·검증 명령」의 `lib_unit` 줄(한 번 베꼈더니 하루 만에 낡았다).
   - ★**`--lib`·`--all-targets` 는 여전히 함정이다**★ — `[lib] test = false` 는 *기본 선택*에서만 빼므로, 명시로 부르면 manifest 없는 내장 타깃이 그대로 골라져 `0xc0000139` 로 즉사한다(실측 2026-08-24 · 설명 정본 = `src-tauri/Cargo.toml` 주석). 부르는 법은 `--test lib_unit` 하나뿐이고, 통합 타깃도 `--test <이름>` 으로 각각 집는다 — ★`-p` 단독·`--tests` 는 즉사 축이 아니다★(기본 선택을 따라 그 내장 타깃을 안 고른다). 그렇게 넓히지 않는 이유는 **다섯 타깃이 한 스텝에 뭉쳐 어느 타깃이 깨졌는지가 섞이기** 때문이다.
@@ -95,7 +95,7 @@
 
 ### HIGH
 1. **~~프론트 로직 단위테스트 도입 (vitest)~~ → 도입 완료** — vitest + `npm test`(= `vitest run`)가 게이트로 서 있고, 테스트는 `*.test.ts(x)` **코로케이션**이다. 애초 목표였던 축(decodeOutputFrame·high-water dedup·재연결 resume·request_id 매칭·clientFactory 모드·store 전이)이 여기로 내려왔다 — 재연결 버그류 회귀를 ①에서 잡는 그물이자 ②③ 부하·EDR 마찰 감소의 핵심. **남은 것은 커버리지 확장이지 도입이 아니다.**
-2. **core `examples/` 검증 하네스 → `tests/` 이관(§0-a)** — `examples/{headless,transport_smoke,session_smoke}` 의 "로그 eyeball" 을 **단언 기반 통합테스트**(`crates/engram-dashboard-agent/tests/`)로 전환: spawn→write→resize→kill 인과, hang 없음, finish(Killed) 종점 등. 그러면 `cargo test` 가 core 격리까지 자동 회귀(현 구멍 메움). `spike*.rs` 는 스파이크라 `examples/` 잔류.
+2. **agent `examples/` 검증 하네스 → `tests/` 이관(§0-a)** — `examples/{headless,transport_smoke,session_smoke}` 의 "로그 eyeball" 을 **단언 기반 통합테스트**(`crates/engram-dashboard-agent/tests/`)로 전환: spawn→write→resize→kill 인과, hang 없음, finish(Killed) 종점 등. 그러면 `cargo test` 가 「코어 격리」까지 자동 회귀(현 구멍 메움). `spike*.rs` 는 스파이크라 `examples/` 잔류.
 3. **CDP 역할 재정의 + 최소화** — CDP eval 로 로직 검증하던 관행 중단. CDP = 시각(shot)·레이아웃·실앱 최종 스모크 전용. `/qa` 바인딩 §full 의 "검증은 스샷보다 eval 텍스트 유리" 문구도 이 분리에 맞게 보정 검토(eval 은 실앱 스모크 한정).
 
 ### MED
@@ -105,9 +105,9 @@
 ### LOW
 5. **실프로세스 테스트 실행 시점 문서화** — `#[ignore]` 3건은 수동 전용. "데몬 수명주기·Job·discovery 변경 시 반드시 `--ignored` 실행"을 PR 체크리스트화.
 6. **~~CI 부재~~ → 도입 완료(ADR-0131)** — 어느 브랜치든 push하면 `.github/workflows/ci.yml` 이 검증 명령 + 격리 게이트 전부를 windows 러너에서 돈다. `v*` 태그면 릴리즈까지. **CI 미커버 3건(로컬 몫)** = GUI 실측 · 실 claude 의존 테스트(워크플로가 `--skip`) · ADR-0130 재론 트리거. 분담 정본 = `/qa` 바인딩 「CI와의 분담」. (clippy 는 정본에 없어 CI 에도 넣지 않았다.)
-7. **`net → protocol` 심볼 게이트 부재** — 허용된 그 간선에는 core 쪽 같은 심볼 allowlist 게이트가 없어, 간선을 타고 에이전트 어휘가 늘어도 어느 게이트도 울리지 않는다(ADR-0129 슬라이스 1 note 가 의도적 유예로 기록 — 작업항목 0-4 뒤의 자연스러운 후속).
+7. **`net → protocol` 심볼 게이트 부재** — 허용된 그 간선에는 agent 쪽 같은 심볼 allowlist 게이트가 없어, 간선을 타고 에이전트 어휘가 늘어도 어느 게이트도 울리지 않는다(ADR-0129 슬라이스 1 note 가 의도적 유예로 기록 — 작업항목 0-4 뒤의 자연스러운 후속).
 8. **~~src-tauri 단위테스트가 로컬 회귀에서 안 돈다~~ → 닫혔다(2026-08-24).** 두 단계로 닫혔다: ① **실행이 뚫렸다** — 옛 서술(`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 로 죽어 아예 실행 불가 — 실측 2026-08-05)은 `[lib] test = false` + `[[test]] lib_unit` + `build.rs` 의 `cargo:rustc-link-arg-tests=` 로 해소됐다(§1 src-tauri 실행 항목 · **결정과 거부한 대안 = ADR-0174**) ② **회귀망에 실렸다** — 남아 있던 알려진 실패가 전부 고쳐지면서 CI 가 이 스위트를 **통째로** 돌고(옛 이름 필터 없음) 워크스페이스 회귀도 `--exclude` 를 걷어 이 패키지를 함께 돈다. 그래서 `#[cfg(test)]` 에 새로 쓰는 단언의 CI 신호는 이제 통합 타깃과 같다. 이력은 `docs/process/step-log.md` 494/532/761행 부근.
-   - **~~부수 갭: `src-tauri/bindings/` 를 보는 CI 동기 게이트가 없다~~ → 닫혔다(2026-08-24).** 기존 sync 게이트가 이제 세 디렉터리(`protocol`·`core`·`src-tauri`)를 전부 대조하고, 그보다 앞에서 `lib_unit` 이 그 `.ts` 를 실제로 다시 굽는다(CI 에선 워크스페이스 회귀와 `--test lib_unit` 스텝 양쪽에서). **「게이트 확장은 실패 수정이 먼저다」던 순서 의존은 남아 있지 않다.**
+   - **~~부수 갭: `src-tauri/bindings/` 를 보는 CI 동기 게이트가 없다~~ → 닫혔다(2026-08-24).** 기존 sync 게이트가 이제 세 디렉터리(`protocol`·`agent`·`src-tauri`)를 전부 대조하고, 그보다 앞에서 `lib_unit` 이 그 `.ts` 를 실제로 다시 굽는다(CI 에선 워크스페이스 회귀와 `--test lib_unit` 스텝 양쪽에서). **「게이트 확장은 실패 수정이 먼저다」던 순서 의존은 남아 있지 않다.**
    - ★그 스위트에서 가장 값어치가 큰 것 = `output_router.rs`(ArcSwap·RMW 동시성)와 `commands/popout.rs`(팝업 label 발급)★ — 앞의 「구독 재동기는 락 안」 계약이 기대는 코드가 바로 전자다. ★목록을 여기 손으로 베끼지 않는다. 정본 = `rg -l "#\[cfg\(test\)\]" src-tauri/src/`★
 
 ## 3. 명령 치트시트 (workspace 루트에서 실행 — 경로는 워크트리마다 다르므로 여기 박지 않는다)

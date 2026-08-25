@@ -230,7 +230,7 @@ fn an_absent_option_option_field_is_refused_while_null_is_a_value() {
     assert!(absent.to_string().contains("parent"), "{absent}");
 }
 
-/// 링커 수집이 **다른 crate 의 선언까지** 훑는지 — 이 테스트 바이너리에 링크된 것은 core 의 5개뿐이다.
+/// 링커 수집이 **다른 crate 의 선언까지** 훑는지 — 이 테스트 바이너리에 링크된 것은 agent 의 5개뿐이다.
 #[test]
 fn linker_collection_sees_the_declaring_crate() {
     let mut collected: Vec<&str> = command_specs().map(|s| s.name).collect();

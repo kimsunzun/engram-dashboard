@@ -1220,7 +1220,7 @@ impl LocalCommands for NoLocalCommands {
 /// 자리를 **거둘 수 없다**(본문이 도는 동안 자리를 붙들기 때문 — [`Pending::local`]). 그러면 서로 다른
 /// 번호로 들어오는 명령마다 자리 하나 + 풀 작업 하나가 쌓여, 그 둘이 I/O 가 돌아올 때까지 함께 부푼다.
 /// ★값의 근거 — 처리량이 아니라 **버스트 흡수량**이다★: 이 계열의 쓰기 동사는 전부 프로필 락 하나를 두고
-/// 줄을 서므로(core `ProfileRegistry` 의 락 규율) 동시성을 늘려도 처리량은 안 는다. 그래서 이 수는 「동시에
+/// 줄을 서므로(agent `ProfileRegistry` 의 락 규율) 동시성을 늘려도 처리량은 안 는다. 그래서 이 수는 「동시에
 /// 얼마나 빨리 처리하나」가 아니라 「몇 개까지 물고 있다가 큰 소리로 거절하나」이고, 넘치면 조용히 큐를
 /// 늘리는 대신 반려한다(명부가 자기 상주에 상한을 두는 것과 같은 논거 — `Roster::MAX_NAMES`).
 /// tokio 기본 blocking 풀(512 스레드)에도 넉넉히 여유를 남긴다.
@@ -1317,7 +1317,7 @@ type LocalJoin = Result<
 ///
 /// - **`Read` 는 놓는다** — 다시 돌아도 상태가 안 바뀌고, 붙들면 흔한 조회가 그 번호를 막는다.
 /// - **놓는 실패 셋 = `INVALID_ARGUMENT`·`NOT_FOUND`·`CONFLICT`.** 오늘 다섯 동사에서 이 셋은 전부 명부를
-///   건드리기 **전**의 반려다(빈 값 · 지목 실패 · 구조 거부 — core 쪽 `a_rejection_from_the_mutating_verbs_
+///   건드리기 **전**의 반려다(빈 값 · 지목 실패 · 구조 거부 — agent 쪽 `a_rejection_from_the_mutating_verbs_
 ///   leaves_the_roster_untouched` 가 그 사실을 못박는다). 이 셋을 놓아야 오타를 고쳐 같은 번호로 다시 보낸
 ///   호출자가 「돌지도 않은 명령」을 `ALREADY_APPLIED` 로 돌려받지 않는다.
 /// - **나머지는 전부 붙든다** — `INTERNAL`·`OUTCOME_UNKNOWN` 이 여기 든다. 특히 후자는 「일부가 이미
@@ -1327,7 +1327,7 @@ type LocalJoin = Result<
 /// - **죽음은 붙든다** — 어디까지 갔는지 모른다.
 ///
 /// ★알려진 과보유 하나 — `agent.new` 의 `INTERNAL`★: 그 동사의 유일한 변경 호출(`register`)이 저장 실패를
-/// 통째로 `internal(...)` 로 접으므로(core `register` 의 catch-all), 그것은 사실 **손대기 전** 실패다.
+/// 통째로 `internal(...)` 로 접으므로(agent `register` 의 catch-all), 그것은 사실 **손대기 전** 실패다.
 /// 그런데 이 판정은 코드만 보고 붙들므로, 저장이 실패한 호출자가 창 안에 다시 보내면 **에이전트가 없는
 /// 상태**를 두고 `ALREADY_APPLIED` 를 받는다. 위 비대칭에 따라 감수한다 — 새 번호로 다시 보내면 통한다.
 /// ★진짜 해법은 이 함수가 아니다★: 포트에 「무엇을 적용했나」를 말하는 칸이 없어(결말은 `Ok`/`Err` 뿐)
@@ -1349,7 +1349,7 @@ fn retains_the_id(effect: Effect, joined: &LocalJoin) -> bool {
 /// 1단계 본문을 **blocking 풀에** 내보낸다 — 그 계약의 근거는 [`LocalCommands::run`].
 ///
 /// ★`spawn_blocking` 인 이유★: 이 표의 핸들러는 프로필 락을 쥔 채 디스크를 쓰고 resume 조기 종료를 약
-/// 3초 폴링한다(core `make_table` doc). 그대로 async 태스크에서 폴링하면 그 시간 내내 런타임 워커 하나가
+/// 3초 폴링한다(agent `make_table` doc). 그대로 async 태스크에서 폴링하면 그 시간 내내 런타임 워커 하나가
 /// 막히고, 같은 워커에 얹힌 다른 연결의 프레임 처리가 함께 선다.
 /// ★그 대가 — **취소가 안 된다**★: 한 번 나간 본문은 되부를 수 없으므로 마감이 지나도 계속 돈다. 그
 /// 사실이 [`Pending::local`] 과 [`Seat::LocalStillRunning`] 이 존재하는 이유 전부다.
@@ -2691,7 +2691,7 @@ pub(crate) mod tests {
     }
 
     /// ★본문은 **런타임 워커가 아닌 곳**에서 돈다★ — 이 표의 핸들러는 프로필 락을 쥔 채 디스크를 쓰고
-    /// 조기 종료를 수 초 폴링하므로(core `make_table` doc), 배달 태스크에서 그대로 돌면 그 시간 내내
+    /// 조기 종료를 수 초 폴링하므로(agent `make_table` doc), 배달 태스크에서 그대로 돌면 그 시간 내내
     /// 워커 하나가 막혀 같은 워커의 다른 연결이 함께 선다.
     ///
     /// ★현재 스레드 런타임이라 이 대조가 성립한다★: 배달 future 는 이 테스트 스레드에서 돌고,

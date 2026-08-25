@@ -88,7 +88,7 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
 
 // ── FIX 6: 제어 채널 provision 레이스 가드 — 같은 id 동시 spawn 이 서로를 짓밟지 않는다 ──────────
 //
-// 실 DaemonControlChannel 없이 core 의 예약(SpawnReservation) 인과만 격리 검증한다(ADR-0012 seam).
+// 실 DaemonControlChannel 없이 agent 의 예약(SpawnReservation) 인과만 격리 검증한다(ADR-0012 seam).
 #[derive(Clone, Default)]
 struct CountingControl {
     live: Arc<Mutex<std::collections::HashSet<(AgentId, u32)>>>,
@@ -227,10 +227,10 @@ fn concurrent_same_id_spawn_does_not_clobber() {
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
 }
 
-// ── round-2 F3: backend-conditional provisioning (core seam) ──────────────────────────────
+// ── round-2 F3: backend-conditional provisioning (agent seam) ──────────────────────────────
 // 제어 채널을 소비하지 않는 backend(shell)는 provision 을 **아예 부르지 않는다** — 따라서 항상 실패하는
 // ControlChannel 을 주입해도 셸 스폰은 성공한다. 반대로 소비 backend(claude)는 provision Err 에
-// fail-closed(스폰 중단)한다. 두 인과를 core 레벨에서 격리 검증한다(seam — 실 DaemonControlChannel 불요).
+// fail-closed(스폰 중단)한다. 두 인과를 agent 레벨에서 격리 검증한다(seam — 실 DaemonControlChannel 불요).
 #[derive(Clone, Default)]
 struct FailingControl {
     calls: Arc<std::sync::atomic::AtomicUsize>,

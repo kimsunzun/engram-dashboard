@@ -46,7 +46,7 @@ fn wait_alive(data_dir: &Path, timeout: Duration) -> Option<u32> {
 
 /// ★왜 daemon_status 대신 tasklist 인가(load-bearing)★: 본 테스트는 데몬을 std::process 로 직접
 /// spawn 하므로 부모(테스트)가 Child 의 프로세스 HANDLE 을 쥔다. 그 핸들이 열려 있는 한 데몬이
-/// **종료(exit code 0)해도** OpenProcess+GetProcessTimes(=core liveness 가 쓰는 API)가 죽은 PID 에
+/// **종료(exit code 0)해도** OpenProcess+GetProcessTimes(=agent liveness 가 쓰는 API)가 죽은 PID 에
 /// 대해 계속 creation_time 을 돌려준다(Windows 동작 — 핸들이 프로세스 객체를 유지). 그래서
 /// daemon_status 는 false-live 가 된다(테스트 하네스 인공물 — 운영 트레이는 데몬을 자식으로 두지
 /// 않고 WMI detached spawn 후 폴링하므로 무관). tasklist 는 **활성 프로세스만** 보여줘 핸들 보유와

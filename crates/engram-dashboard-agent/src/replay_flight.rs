@@ -47,7 +47,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-/// 에이전트 식별자(core 는 protocol 무의존 — `AgentId = uuid::Uuid` alias 를 그대로 받는다, ADR-0003).
+/// 에이전트 식별자(agent 는 protocol 무의존 — `AgentId = uuid::Uuid` alias 를 그대로 받는다, ADR-0003).
 type AgentId = Uuid;
 
 /// replay 경계 마커의 wire tag. 데몬 codec(tag0/tag1)엔 없는 **src-tauri↔웹뷰 Channel 내부 계약** 값 —
