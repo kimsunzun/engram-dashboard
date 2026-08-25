@@ -544,6 +544,39 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
+      # ADR-0175 결정 3 이 `replay_flight` 를 코어에서 셸 패키지 안으로 옮기며, 그 파일 헤더가 내세우던
+      #   순수성 주장(소켓·tokio·Tauri·protocol 의존 0)이 **어느 게이트의 스캔 범위에도 안 들어가게 됐다**
+      #   — 위 소스 정규식 게이트는 전부 `crates/…/src/` 로 스코프돼 있고 `src-tauri/src/` 를 보는 것은
+      #   하나도 없었다. 결정 1(`base` 신설)은 새 집에 게이트를 세웠는데 결정 3 은 세우지 않았다.
+      # ★형제 crate 게이트와 달리 컴파일러 backstop 이 없다★ — `agent`·`base` 는 `tauri` 를 Cargo.toml 에
+      #   아예 안 물어 위반이 컴파일 에러로 먼저 죽고 `use tauri` grep 은 값싼 조기 신호일 뿐이다. 반면
+      #   이 패키지는 `tauri`·`tokio`·`engram-dashboard-protocol` 을 전부 의존하므로 위반이 그냥 컴파일된다.
+      #   그래서 여기서는 이 정규식이 **유일한 벽**이고, `use` 줄만 보는 형태로는 인라인 완전경로
+      #   (`tokio::spawn(...)`) 한 줄에 그대로 뚫린다 — 그 형태를 함께 잡는 이유가 이것이다.
+      # ★접두 가드 `^(?:[^/]|/[^/])*?` = 「이 줄에서 아직 `//` 를 만나지 않았다」★ — 그래서 `//!`·`///`·꼬리
+      #   주석 안의 자기인용이 오탐되지 않는다(대상 파일의 헤더가 이 게이트를 인용한다). Rust regex 는
+      #   lookaround 가 없어 이 형태 말고는 「주석 밖」을 표현할 수단이 없다.
+      # ★`\b` + `::` 요구가 정당한 이웃을 가른다★ — 이 모듈은 `std::time::Instant` 를 쓴다(결정론 하네스의
+      #   주입점). `tokio::time::Instant` 만 잡고 std 쪽은 안 잡아야 해서 crate 뿌리 이름을 물었고, `\b` 가
+      #   `my_tauri::` 같은 부분일치를 막는다.
+      # ★알려진 한계 = 블록 주석(`/* */`)★ — 그 안쪽은 접두 가드가 못 막는다. 대상 파일은 `//` 만 쓴다.
+      # ★`test -f` 를 지우지 말 것★ — 파일이 또 이사하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이 조용히
+      #   사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다). `-d` 가 아니라 `-f` 다 — 대상이 파일이다.
+      - name: 'Gate: replay_flight purity — no transport/wire ingress'
+        shell: bash
+        run: |
+          set +e
+          f=src-tauri/src/daemon_client/replay_flight.rs
+          if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (또 이사했나)"; exit 1; fi
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::" "$f")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
       - name: 'net gate 1: source refs — no daemon/messaging/discovery'
         shell: bash
         run: |

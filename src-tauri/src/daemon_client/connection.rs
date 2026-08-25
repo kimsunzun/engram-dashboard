@@ -1222,7 +1222,7 @@ fn emit_broadcast(events: &dyn DaemonEvents, ev: &AgentEvent) {
 //
 // ★반환★: `true` = wire 로 나감, `false` = 직렬화/송신 실패. Unsubscribe·Fire·CommandOutcome 은 반환을
 // 무시(fire-and-forget)하지만, **replay `Subscribe` 세 자리는 전부 `false` 에서 연결을 끊는다** — 옛
-// `abort_in_flight` 롤백은 삭제됐고 되살리지 않는다(그 근거는 agent `replay_flight` 의 "송신 실패 롤백
+// `abort_in_flight` 롤백은 삭제됐고 되살리지 않는다(그 근거는 형제 모듈 `replay_flight` 의 "송신 실패 롤백
 // 진입점은 의도적으로 없다" 주석, 끊는 쪽 근거는 `RequestReplay` 팔의 주석이 정본).
 // ★두 실패가 한 값으로 접힌다★: 직렬화 실패는 소켓이 멀쩡한 채로도 나므로, 호출자가 이 `false` 를
 // "소켓이 곧 끊긴다" 로 읽으면 안 된다.
@@ -1327,7 +1327,7 @@ pub fn apply_replay_event(
         }
         // ★거절 = single-flight 슬롯의 해제 계기★. 거절된 Subscribe 엔 Ack 도 Complete 도 뒤따르지 않으므로
         //   (데몬 `handle_subscribe` 가 Ack 발행 전 return) 슬롯을 지금 풀어도 오귀속될 응답이 없다 —
-        //   만료(좀비) 해제를 택하지 않은 이유가 이 차이다(근거 정본 = agent `replay_flight::check_deadlines`).
+        //   만료(좀비) 해제를 택하지 않은 이유가 이 차이다(근거 정본 = `replay_flight::check_deadlines`).
         //   ★안 풀면 어떻게 되나★: 그 에이전트의 Subscribe 가 두 번 다시 못 나가 재spawn 해도 출력이 모든
         //   창에서 영구 두절된다(실측 2026-08-19).
         // ★warn 유지★: 거절이 `Error` 를 떠났으니 `emit_broadcast` 의 error 팔이 더는 이걸 못 잡는다. 이

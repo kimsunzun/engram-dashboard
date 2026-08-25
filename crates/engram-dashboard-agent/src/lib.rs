@@ -27,5 +27,3 @@ pub mod turn;
 pub mod types;
 
 pub mod persistence;
-// ADR-0046
-pub mod replay_flight;

@@ -59,10 +59,11 @@ dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI �
 # 파일 로그 초기화(`logging::init_logging_with_file`)와 `mask_secrets` — ADR-0175 결정 1 로 코어에서
 #   잎 crate 로 이사했다.
 engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
-# ★남은 것은 `agent::commands::COMMAND_SPECS` 와 `agent::replay_flight` 둘뿐이다★(ADR-0029 — in-proc
-#   에이전트 호스팅은 없다). 이 간선은 방치가 아니라 **같은 브랜치의 뒤 단계**에서 닫힌다:
-#   `ui.` 접두로 이름 충돌을 없앤 뒤 그 상수를 읽는 필터를 지우고(결정 4·5), `replay_flight` 는 이 셸
-#   안의 모듈로 옮긴다(결정 3). 그때까지 남긴다.
+# ★남은 것은 `agent::commands::COMMAND_SPECS` 하나뿐이다★(ADR-0029 — in-proc 에이전트 호스팅은 없다).
+#   이 간선은 방치가 아니라 **같은 브랜치의 뒤 단계**에서 닫힌다: 웹뷰가 답하는 명령에 `ui.` 접두를
+#   붙여 이름 충돌을 없앤 뒤(ADR-0175 결정 5) 그 상수를 읽는 필터를 지운다(결정 4). 그때까지 남긴다.
+#   ★그래도 이 패키지의 테스트 빌드는 `agent` 를 계속 컴파일한다★ — 아래 dev-dependencies 의 `daemon`
+#   이 전량 물고 온다. 결정 4 가 닫히면 이득은 릴리스 빌드 쪽이다(ADR-0175 §남는 무검증/미측정).
 engram-dashboard-agent = { path = "../crates/engram-dashboard-agent" }
 # ADR-0155: 이 셸이 `window`/`tab`/`slot` 을 **선언**하는 주인이라 선언 매크로·표·봉투·배달이 필요하다.
 #   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 agent 를 타고 이미
