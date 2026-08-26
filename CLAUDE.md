@@ -147,7 +147,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **락 순서:** sessions RwLock은 Arc clone 후 즉시 해제 → 그 뒤 내부 접근. status lock 보유 중 외부 호출 금지. emit은 subscribers clone 후 lock 미보유 send. (ADR-0006)
 - **상태 알림 분담:** 과도기 `Exiting`=manager, terminal(`Killed`/`Exited`/`Failed`)=pump 단독. 프론트는 `status_changed`로 terminal 판정 금지 → `agent-list-updated`로 판정. (ADR-0005)
 - **replay→live:** subscribers lock 보유 중 replay 전송(순서 역전 방지) + 프론트 seq dedup.
-- **화신 표식(필드명은 아직 `epoch`):** 화신마다 새로 뽑는 32비트 난수 — **비교는 일치/불일치만**(대소로 "더 새 것"을 유도 금지). 읽기는 건너뛰고 쓰기는 `0` 자리채움 — ★이 비대칭은 의도★(ADR-0163). 재부착 계기는 소켓이 아니라 **권위 명부 관측 단독**이고, 구독 effect deps는 `[viewId, agentId]` — ★표식을 넣지 않는다★(넣으면 replay 도착 전에 화면이 지워지고 표식까지 잃어 회전 판정이 못 선다. ADR-0164).
+- **화신 표식(필드명은 아직 `epoch`):** 화신마다 새로 뽑는 32비트 난수 — **비교는 일치/불일치만**(대소로 "더 새 것"을 유도 금지). 읽기는 건너뛰고 쓰기는 `0` 자리채움 — ★이 비대칭은 의도★(ADR-0163). ★**그 비대칭의 범위는 `agents.json` 디스크 serde 뿐이다 — wire 로 넓히지 말 것**★: 소켓으로 흐르는 표식에서 `0` 은 2^-32 확률로 실제 뽑히는 정당한 값이라, 거기서 `0` 을 특별취급하면 그것이 회귀다. 재부착 계기는 소켓이 아니라 **권위 명부 관측 단독**이고, 구독 effect deps는 `[viewId, agentId]` — ★표식을 넣지 않는다★(넣으면 replay 도착 전에 화면이 지워지고 표식까지 잃어 회전 판정이 못 선다. ADR-0164).
 - **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows.
 - **턴 관측 정리 = 두 지점뿐:** `finish` + `emit`의 finalize 재확인. **세 번째 호출자를 늘리면 인과가 갈라진다.** 빠지면 턴 도중 죽은 에이전트가 "진행 중"으로 남아 30분 상한(fail-open)이 풀 때까지 우편이 막힌다. (ADR-0127)
 - **등록 순서:** sessions insert가 pump 시작보다 **먼저** — 뒤집히면 즉시 종료하는 세션이 명부에 오르기 전에 끝나 수거되지 않는다(런타임엔 무신호 — reaper 테스트가 회귀를 잡는다). (ADR-0019)

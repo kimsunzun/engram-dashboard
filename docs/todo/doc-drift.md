@@ -2,11 +2,20 @@
 
 > **상태:** 착수 가능 · **정본 색인:** [`../todo.md`](../todo.md)
 
-한 브랜치(`v0.3.0/chore/misc`)에 모아 처리한다. 순서 없음, 서로 무관.
+순서 없음, 서로 무관.
 
-- ★**`0` 자리채움 범위 누락 — 이것부터**★. `CLAUDE.md` 「핵심 불변식」과 `.claude/skill-bindings/review.md` 가 「읽기는 건너뛰고 쓰기는 `0` 자리채움」을 **범위 없이** 적는다. 그 비대칭은 디스크 serde 전용이고, wire 에서 `0` 은 정당하게 뽑히는 표식이라 특별취급이 오히려 회귀다. **한 줄 수정인데, 직전 세션 구현 시도의 3분의 1이 이걸 다시 규명하는 데 들었다.**
-- ADR-0175 본문 사실 오류 5종.
-- `README.md` 의 `--exclude engram-dashboard` 드리프트(그 제외는 2026-08-25 에 걷혔다 — 정본은 `CLAUDE.md` 「빌드·검증 명령」).
-- `../reference/architecture-overview.md` 에 `base` crate 절이 없다.
-- 게이트 정규식이 못 닫은 구멍 — `use   tokio :: time;` 같은 공백형.
-- `daemon` 의 미사용 `tracing-subscriber` 선언(`crates/engram-dashboard-daemon/Cargo.toml`). 걷을지는 판단 필요 — 사용 0줄 실측됨.
+★**`v0.3.0/chore/misc` 는 버려진 브랜치다 — 재사용도, master 로 들이려는 시도도 하지 말 것(2026-08-26 실측)**★. crate 경계 재편(ADR-0175) **이전**에 갈라져 나왔고, master 를 끌어오면 대규모 diff 에 더해 **modify/delete 충돌 셋**이 난다 — master 가 `.claude/skills/` 를 통째로 지웠기 때문이다(스킬 정본이 이 저장소 밖으로 옮겨 갔다).
+
+**그 브랜치가 물고 있던 것은 회수됐다.** 머지 안 된 커밋 셋의 내용(스킬 피드백 적립 + ADR 채번 규율)은 2026-08-26 에 스킬 정본 쪽으로 **원문 그대로 옮겼다** — 옮기기 전에 내용 대조로 부재를 확인했고(대표 문구 다섯 전부 0건), 옮긴 뒤 원문 일치와 충돌 마커 0 을 검증했다. ★즉 이 브랜치에 남은 고유 내용은 없다★. 새 작업은 master 에서 새 브랜치를 판다. **브랜치 자체는 지우지 않는다**(이 저장소는 브랜치를 지우지 않는 규약이다).
+
+**남은 것:**
+
+- ADR-0175 본문 사실 오류 5종. ★어느 다섯인지가 아직 어디에도 안 적혀 있다 — 착수 첫 걸음이 그 목록을 세우는 것이다.★
+- `../reference/architecture-overview.md` 에 `base` crate 절이 없다. (한 줄 수정이 아니라 절을 새로 쓰는 일이다.)
+- 게이트 정규식이 못 닫은 구멍 — `use   tokio :: time;` 같은 공백형. ★`.github/workflows/ci.yml` 을 건드리므로 게이트 변경이다 — 고친 뒤 위반 입력으로 실제 발화시켜 보고, 정상 코드에 오탐이 없는지도 함께 볼 것.★
+- `daemon` 의 미사용 `tracing-subscriber` 선언(`crates/engram-dashboard-daemon/Cargo.toml`). 걷을지는 판단 필요 — 사용 0줄 실측됨. 걷으면 매니페스트가 바뀌므로 빌드 확인이 따라온다.
+
+**닫힌 것(2026-08-26):**
+
+- ~~`0` 자리채움 범위 누락~~ → **닫혔다.** `CLAUDE.md` 「핵심 불변식」과 `.claude/skill-bindings/review.md` 양쪽에 「범위는 `agents.json` 디스크 serde 뿐 · wire 의 `0` 은 정당한 표식이라 특별취급이 회귀」를 박았다.
+- ~~`README.md` 의 `--exclude engram-dashboard` 드리프트~~ → **닫혔다.** 명령줄에서 그 플래그를 걷고, 위 주석도 「알려진 실패가 남아 있다」에서 「사유 둘이 차례로 죽어 더는 제외하지 않는다」로 갈았다.
