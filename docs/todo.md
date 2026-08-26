@@ -33,6 +33,7 @@
 | 명부 정합 | 착수 가능 | 큼 | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
 | 문서 드리프트 묶음 | 착수 가능 | 작음~중간 | [`todo/doc-drift.md`](todo/doc-drift.md) |
 | 게이트 스코프 이탈 검사 — 규약에 넣을지 | 착수 가능 | 작음 | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
+| CI 실행 범위를 좁힐지 — 경로 필터 조사 | 착수 가능 | 중간 | [`todo/ci-scope.md`](todo/ci-scope.md) |
 | 검증 절차 (결정·미룬 정리) | 트리거 대기 | 불명 | [`todo/verification.md`](todo/verification.md) |
 | 명령 표면 — 주인이 선언되지 않는다 | 트리거 대기 | 중간~큼 | [`todo/command-ownership.md`](todo/command-ownership.md) |
 | 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | 큼 | [`todo/display-policy.md`](todo/display-policy.md) |
@@ -51,6 +52,7 @@
 - **표시 정책 = 큼** — 1단계(터미널만)는 작지만 2단계가 앱 전역 seam 교체이고 ADR 번복이 따라온다.
 - **이름·기록 = 큼** — `epoch` 개명 하나가 코드 식별자 885곳이다(실측). 미루기로 한 사유도 그것이다.
 - **프론트엔드 모듈 분리 = 불명** — 범위가 안 정해졌다. 크기 압력은 없다(비테스트 11,285줄, 최대 파일 992줄 — 실측 2026-08-26)
+- **CI 실행 범위 = 중간** — 조사가 몸통이다. 고치는 것 자체는 워크플로 몇 줄인데, ★태그 push 에 경로 필터가 걸리는지가 릴리스 안전성을 가른다★(미확인). 게이트 변경이라 사용자 결정이 선행한다.
 
 ---
 
