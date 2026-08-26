@@ -1,7 +1,7 @@
 # ADR-0175: 코어를 agent 와 base 로 가른다
 
-- 상태: 확정 (2026-08-25, 근거: 사용자 결정 + trd full 리뷰 2인)
-- 관련: ADR-0151(crate 판정 기준 — §영향의 「덩어리별 판정」 기대와 일부 갈린다, 아래 §거부한 대안) · ADR-0003(코어 격리) · ADR-0155(command crate) · ADR-0046(replay single-flight) · ADR-0174(셸 lib 테스트 하네스) · step-log S21 · Amends ADR-0151 (바닥 crate 구성)
+- 상태: 확정 (2026-08-25, 근거: 사용자 결정 + trd full 리뷰 2인) · 부분 폐기 by ADR-0176 (결정 4와 5 보류)
+- 관련: ADR-0151(crate 판정 기준 — §영향의 「덩어리별 판정」 기대와 일부 갈린다, 아래 §거부한 대안) · ADR-0003(코어 격리) · ADR-0155(command crate) · ADR-0046(replay single-flight) · ADR-0174(셸 lib 테스트 하네스) · step-log S21 · Amends ADR-0151 (바닥 crate 구성) · Amended by ADR-0176 (결정 4와 5 보류)
 
 ## 맥락
 
