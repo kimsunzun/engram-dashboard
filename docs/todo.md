@@ -22,21 +22,35 @@
 - **소유됨** — 지금 누가 잡고 있음.
 - **확인만 됨** — 관측만 됐고 판단 보류.
 
+**작업 강도 — 고정 기준 없다, 집는 사람이 다시 판단한다**
+
+한 눈에 크기를 가늠하라고 붙인 값일 뿐 계약이 아니다. **적힌 강도와 실제가 다르면 그 자리에서 고쳐 적는다** — 여기 숫자를 맞추려고 작업을 늘리거나 줄이지 않는다. 대략 이런 뜻으로 쓴다: **작음** = 한 세션 안에 끝난다 · **중간** = 설계 판단이 한두 개 낀다 · **큼** = 사용자 결정이나 굵은 설계가 선행한다 · **불명** = 조사부터 해야 크기가 나온다.
+
 ---
 
-| 항목 | 상태 | 상세 |
-|---|---|---|
-| 명부 정합 | 착수 가능 | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
-| 문서 드리프트 묶음 | 착수 가능 | [`todo/doc-drift.md`](todo/doc-drift.md) |
-| 게이트 스코프 이탈 검사 — 규약에 넣을지 | 착수 가능 | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
-| 검증 절차 (결정·미룬 정리) | 트리거 대기 | [`todo/verification.md`](todo/verification.md) |
-| 명령 표면 — 주인이 선언되지 않는다 | 트리거 대기 | [`todo/command-ownership.md`](todo/command-ownership.md) |
-| 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | [`todo/display-policy.md`](todo/display-policy.md) |
-| 터미널 치수 전파 | 트리거 대기 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
-| 재생·구독 | 트리거 대기 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
-| 이름·기록 | 트리거 대기 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
-| 프론트엔드 모듈 분리 | 소유됨 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
-| 확인만 된 것 (판단 보류) | 확인만 됨 | [`todo/observed-only.md`](todo/observed-only.md) |
+| 항목 | 상태 | 강도 | 상세 |
+|---|---|---|---|
+| 명부 정합 | 착수 가능 | 큼 | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
+| 문서 드리프트 묶음 | 착수 가능 | 작음~중간 | [`todo/doc-drift.md`](todo/doc-drift.md) |
+| 게이트 스코프 이탈 검사 — 규약에 넣을지 | 착수 가능 | 작음 | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
+| 검증 절차 (결정·미룬 정리) | 트리거 대기 | 불명 | [`todo/verification.md`](todo/verification.md) |
+| 명령 표면 — 주인이 선언되지 않는다 | 트리거 대기 | 중간~큼 | [`todo/command-ownership.md`](todo/command-ownership.md) |
+| 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | 큼 | [`todo/display-policy.md`](todo/display-policy.md) |
+| 터미널 치수 전파 | 트리거 대기 | 중간 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
+| 재생·구독 | 트리거 대기 | 중간 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
+| 이름·기록 | 트리거 대기 | 큼 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
+| 프론트엔드 모듈 분리 | 소유됨 | 불명 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
+| 확인만 된 것 (판단 보류) | 확인만 됨 | — | [`todo/observed-only.md`](todo/observed-only.md) |
+
+**강도를 그렇게 매긴 이유**(한 줄씩 — 상세 문서가 정본):
+
+- **명부 정합 = 큼** — 조사는 끝났지만 후보 다섯 중 선택이 사용자 결정이고, 요구가 셋(순서·유실 복구·상태 알림과의 경쟁)으로 늘었다.
+- **문서 드리프트 = 작음~중간** — 남은 넷 중 둘(게이트 정규식·미사용 의존)이 CI·매니페스트를 건드려 검증이 따라붙는다.
+- **검증 절차 = 불명** — 로컬 재현이 전패라 무엇을 고칠 대상으로 삼을지가 안 선다. 크기를 잴 수단이 없다.
+- **명령 표면 = 중간~큼** — 데몬 명령 인자 변경 + 프론트 명령 삭제 + 소유권 정리가 한 몸이고, 에이전트 트리 작업에 묶여 있다.
+- **표시 정책 = 큼** — 1단계(터미널만)는 작지만 2단계가 앱 전역 seam 교체이고 ADR 번복이 따라온다.
+- **이름·기록 = 큼** — `epoch` 개명 하나가 코드 식별자 885곳이다(실측). 미루기로 한 사유도 그것이다.
+- **프론트엔드 모듈 분리 = 불명** — 범위가 안 정해졌다. 크기 압력은 없다(비테스트 11,285줄, 최대 파일 992줄 — 실측 2026-08-26)
 
 ---
 
