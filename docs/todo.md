@@ -26,10 +26,10 @@
 
 | 항목 | 상태 | 상세 |
 |---|---|---|
-| 검증 절차 (결정·미룬 정리) | 착수 가능 | [`todo/verification.md`](todo/verification.md) |
 | 명부 정합 | 착수 가능 | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
 | 문서 드리프트 묶음 | 착수 가능 | [`todo/doc-drift.md`](todo/doc-drift.md) |
 | 게이트 스코프 이탈 검사 — 규약에 넣을지 | 착수 가능 | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
+| 검증 절차 (결정·미룬 정리) | 트리거 대기 | [`todo/verification.md`](todo/verification.md) |
 | 명령 표면 — 주인이 선언되지 않는다 | 트리거 대기 | [`todo/command-ownership.md`](todo/command-ownership.md) |
 | 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | [`todo/display-policy.md`](todo/display-policy.md) |
 | 터미널 치수 전파 | 트리거 대기 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
