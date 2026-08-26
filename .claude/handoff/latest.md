@@ -17,7 +17,7 @@
 
 ## ★이번 세션이 만든 것 — `docs/todo.md` 체계★
 
-**미결 목록의 구조가 바뀌었다. 다음 세션은 이걸 입구로 쓴다.**
+**옛 `docs/backlog.md` 가 이름과 구조를 바꾼 것이다. ★입구가 바뀐 게 아니다★** — 입구는 그대로 `CLAUDE.md` → `docs/README.md` 이고, todo 는 그 문서 종류 표에 든 여럿 중 하나다(「아직 안 한 것」 칸).
 
 ```
 docs/todo.md        색인 — 항목 한 줄 + 상태 + 강도 + 상세 링크
@@ -98,7 +98,7 @@ docs/todo/*.md      펼친 상세 11종
 
 ## 참조 (읽어야 할 것만)
 
-- `docs/todo.md` — **입구.** 「착수 가능」 줄만 보면 된다.
+- `docs/todo.md` — 미결 목록(옛 `backlog.md`). 집을 것을 고를 때 「착수 가능」 줄만 보면 된다.
 - `docs/research/roster-broadcast-ordering.md` — 명부 정합 조사 전문(후보 다섯 · 적대 리뷰 적출 10건).
 - `docs/todo/roster-consistency.md` · `docs/todo/doc-drift.md` — 착수 가능 중 큰 것과 작은 것.
 - `docs/tracking.md` T-10 — 종결 근거.
