@@ -1,0 +1,47 @@
+# TODO — 할 일 목록
+
+**이 파일은 색인이다** — 항목당 한 줄, 상세는 `todo/` 아래 개별 문서가 갖는다. 결정 기록(`decisions/`)은 *왜 그렇게 정했나*, `process/step-log.md`는 *언제 무엇을 했나*를 담고, 이 파일은 **아직 안 한 것**을 담는다.
+
+**규칙 넷**
+
+1. 항목당 1~3줄. 길어지면 `todo/<이름>.md`로 승격하고 여기엔 한 줄 + 포인터만 남긴다.
+2. **"왜 지금 안 하나"를 반드시 적는다.** 없으면 다음에 읽는 사람이 판단을 못 하고 그냥 쌓인다.
+3. ★해결되면 **지운다**★. 결정 기록은 append-only지만 이건 살아 있는 목록이라, 지워져야 짧게 유지된다.
+   - **지울 땐 `todo/` 상세 파일도 같이 지운다.** 색인 줄만 지우면 폴더에 고아가 쌓인다.
+   - ★**지우기 전에 정본 편입이 실제로 됐는지 확인한다**★ — 편입처는 항목마다 다르다(결정이면 `decisions/`, 언제·무엇이면 `process/step-log.md`, 코드 동기 규약이면 `reference/`). 편입 없이 지우면 그 항목은 어디에도 안 남고 증발한다. 「확인만 됨」 항목은 *해결*되는 게 아니라 **판단이 내려지는** 것이라, 판단이 ADR로 박힌 시점이 지울 시점이다.
+4. 근거·거부한 대안은 여기 쓰지 않는다 — 결정 기록에 두고 번호만 가리킨다.
+
+**`tracking.md` 와의 경계 — 정책이 정반대다**
+
+`todo` 는 **지워서 짧게 유지**하고, `tracking.md` 는 **종결 도장을 찍고 남긴다**(폐기와 보류를 구분해 보존하는 것이 그 파일의 목적이다). 그래서 *나중에 왜 그렇게 됐는지를 되짚어야 할 것*은 `tracking.md` 의 T- 항목으로 가고, *하면 없어질 일감*이 여기로 온다. 한 사안이 양쪽에 걸치면 T- 번호를 정본으로 두고 여기엔 한 줄 + 포인터만 남긴다.
+
+**상태 값 넷**
+
+- **착수 가능** — 손 비면 집어가도 되는 것.
+- **트리거 대기** — 조건이 와야 여는 것.
+- **소유됨** — 지금 누가 잡고 있음.
+- **확인만 됨** — 관측만 됐고 판단 보류.
+
+---
+
+| 항목 | 상태 | 상세 |
+|---|---|---|
+| 검증 절차 (결정·미룬 정리) | 착수 가능 | [`todo/verification.md`](todo/verification.md) |
+| 명부 정합 | 착수 가능 | [`todo/roster-consistency.md`](todo/roster-consistency.md) |
+| 문서 드리프트 묶음 | 착수 가능 | [`todo/doc-drift.md`](todo/doc-drift.md) |
+| 게이트 스코프 이탈 검사 — 규약에 넣을지 | 착수 가능 | [`todo/gate-scope-check.md`](todo/gate-scope-check.md) |
+| 명령 표면 — 주인이 선언되지 않는다 | 트리거 대기 | [`todo/command-ownership.md`](todo/command-ownership.md) |
+| 표시 정책이 표면마다 흩어져 있다 | 트리거 대기 | [`todo/display-policy.md`](todo/display-policy.md) |
+| 터미널 치수 전파 | 트리거 대기 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
+| 재생·구독 | 트리거 대기 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
+| 이름·기록 | 트리거 대기 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
+| 프론트엔드 모듈 분리 | 소유됨 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
+| 확인만 된 것 (판단 보류) | 확인만 됨 | [`todo/observed-only.md`](todo/observed-only.md) |
+
+---
+
+## 공통 — 어느 항목이든
+
+- 커밋 제목 스텝 번호는 `process/step-log.md` 의 마지막 스텝을 잇는다. **새 스텝을 임의로 올리지 않는다**(사용자 결정 사항).
+- 소스가 한 줄이라도 바뀌면 커밋 전 `/qa`. 비자명 변경이면 코더 스폰 + `/review`.
+- 브랜치는 master 에서 판다. **master 를 상시 체크아웃하지 않는다** — 통합 절차의 정본은 `CLAUDE.md` 「브랜치·커밋」.
