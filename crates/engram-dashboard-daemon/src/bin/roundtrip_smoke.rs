@@ -87,17 +87,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::preset::PresetRegistry;
-use engram_dashboard_core::agent::profile::{
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::preset::PresetRegistry;
+use engram_dashboard_agent::profile::{
     AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, SpawnMode,
 };
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, OutputEvent, OutputFrame, OutputPayload,
     OutputSink, SinkError, SinkId, StatusSink, CLI_EXE_NAME,
 };
-use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
 use engram_dashboard_daemon::control::mcp_server::{

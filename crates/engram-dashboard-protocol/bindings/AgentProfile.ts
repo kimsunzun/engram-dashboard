@@ -36,7 +36,7 @@ failed_reason: string | null,
 /**
  * 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). `null` = 실패 기록 없음.
  *
- * ★데몬 메모리에만 산다★ — core 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
+ * ★데몬 메모리에만 산다★ — agent 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
  *   재기동하면 사라진다(앱 창 재시작은 견딘다).
  * `#[serde(default)]` 라 이 필드 없는 옛 wire → None(PROTOCOL_VERSION 유지 — display_name·
  * parent_id 와 동형 additive). 모르는 **값**은 `Other` 로 흡수된다(`AgentFailureKind` 의

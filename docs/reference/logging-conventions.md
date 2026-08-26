@@ -1,8 +1,8 @@
 # 로깅 컨벤션 (engram-dashboard)
 
-**상태:** crates(core/daemon/discovery) de-facto 관행을 명문화. 마스킹은 *목표*가 아니라 **명시적으로 거부된 방향**이다(아래 보안 — ADR-0138). load-bearing 경로 작성·리뷰 시 이 문서가 단일 출처.
+**상태:** crates(agent/daemon/discovery) de-facto 관행을 명문화. 마스킹은 *목표*가 아니라 **명시적으로 거부된 방향**이다(아래 보안 — ADR-0138). load-bearing 경로 작성·리뷰 시 이 문서가 단일 출처.
 
-> "무엇을·언제·어느 레벨로 로깅하나"(컨벤션)다. "어떻게 켜고 끄나"(인프라)는 `crates/engram-dashboard-core/src/logging/mod.rs`.
+> "무엇을·언제·어느 레벨로 로깅하나"(컨벤션)다. "어떻게 켜고 끄나"(인프라)는 `crates/engram-dashboard-base/src/logging/mod.rs`.
 
 ## 인프라 (요약 — 정본은 코드)
 
@@ -10,10 +10,10 @@
 - `set_log_level(level)` 런타임 토글(`EnvFilter` reload).
 - 기본 레벨 **warn**(릴리스 평상시 거의 무출력 = 기본 OFF). `RUST_LOG` 우선. 디버깅 = `RUST_LOG=debug`. **단 릴리스 데몬에는 `RUST_LOG`가 닿지 않는다**(부모 환경 미상속) — 그래서 파일 sink 가 있다.
 - **파일 sink = `<데이터 폴더>/logs/<종류>-<UTC>-<pid>.log`**(종류 = `daemon` · `app`). **동기 쓰기**(이벤트 한 줄 = write 한 번), ANSI 없음. ★**비동기 writer(`tracing_appender::non_blocking`)를 도입하지 말 것**★ — 데몬은 `std::process::exit`로 끝나 버퍼에 남은 줄, 즉 **기동 실패 직전의 마지막 줄**이 사라진다. (ADR-0138)
-- **로그 폴더는 호출자가 넘긴다** — 코어가 데이터 폴더를 해석하면 「코어 격리」(ADR-0003)가 깨진다. 1차 폴더를 못 쓰면 `%TEMP%/engram-dashboard/logs/`로 물러나고, 둘 다 실패하면 파일 sink 없이 뜬다(그 경우의 주인 = 클라이언트 사전 점검, ADR-0135).
+- **로그 폴더는 호출자가 넘긴다** — 데이터 폴더 해석은 `engram-dashboard-discovery`의 몫인데 그 crate가 로깅이 사는 `base`를 의존하므로, 로깅이 그것을 부르면 고리가 된다(잎 crate 불변식 — ADR-0175 결정 1. 옛 근거였던 「코어 격리」 ADR-0003도 그대로 같은 방향이다). 1차 폴더를 못 쓰면 `%TEMP%/engram-dashboard/logs/`로 물러나고, 둘 다 실패하면 파일 sink 없이 뜬다(그 경우의 주인 = 클라이언트 사전 점검, ADR-0135).
 - **보존 = 종류별 최신 10개**(이번 실행분을 포함한 상한). 정리 대상은 `<종류>-YYYYMMDD-HHMMSS-<pid>.log` **문법에 맞는 이름만**이다 — 접두사 일치로 바꾸면 다른 종류의 파일과 손으로 둔 파일까지 후보가 된다.
 - **파일 첫 줄 = 실행 머리글**(`==== engram <종류> | <UTC> | pid <n> | <exe 경로> ====`). 로그 이벤트가 아니라 이벤트 평면 밖의 한 줄이다 — 기본 레벨이 `warn`이라 정상 기동은 한 줄도 안 남아 **머리글이 없으면 파일이 통째로 빈다**. 이걸 메우려고 기동 알림 레벨을 올리지 말 것.
-- 정본: `crates/engram-dashboard-core/src/logging/mod.rs`. 결정·거부한 대안 = **ADR-0138**.
+- 정본: `crates/engram-dashboard-base/src/logging/mod.rs`. 결정·거부한 대안 = **ADR-0138**.
 
 ## 레벨 — 무엇을 어디에 (de-facto)
 
@@ -50,7 +50,7 @@
 
 - **토큰·자격증명·비밀번호를 평문 로깅 금지.** 에러에도 넣지 않는다 — 실측: net crate `ws.rs` 의 `handle_connection`(토큰 불일치 분기, `constant_time_eq` 비교부)이 토큰 값을 로그에서 제외, `daemon_client` 접속 실패 에러는 url만 싣고 token 제외.
 - **★로그용 마스킹·레닥션 레이어는 거부됐다(ADR-0138)★** — 토큰은 이미 **같은 폴더에 평문으로** 있다(연결키 파일). 그 사본을 가리는 것은 아무것도 보호하지 않는다. **대신 채택한 규율 = 우리가 쓰는 문장에는 자격증명을 넣지 않는다**(위 첫 항목이 그 규율이다).
-- **`mask_secrets` 헬퍼는 남아 있으나 호출처 0**(`core/src/logging/mod.rs`) = 자동 적용 안 됨. PTY 텍스트 등 민감 가능 출력을 로깅하게 되면 **호출자가 명시 적용**해야 한다(자동 "경유" 아님). 파일 sink 는 이 헬퍼를 경유하지 않는다.
+- **`mask_secrets` 헬퍼는 남아 있으나 호출처 0**(`base/src/logging/mod.rs`) = 자동 적용 안 됨. PTY 텍스트 등 민감 가능 출력을 로깅하게 되면 **호출자가 명시 적용**해야 한다(자동 "경유" 아님). 파일 sink 는 이 헬퍼를 경유하지 않는다.
 
 ## 안티패턴
 

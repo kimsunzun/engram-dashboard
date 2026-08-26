@@ -26,13 +26,13 @@ mod test_doubles;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::preset::{PresetRegistry, PresetStore};
-use engram_dashboard_core::agent::profile::{ProfileRegistry, ProfileStore};
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::CLI_EXE_NAME;
-use engram_dashboard_core::logging;
-use engram_dashboard_core::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
+use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
+use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::CLI_EXE_NAME;
+use engram_dashboard_base::logging;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -84,7 +84,7 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 // 그것들이 안 읽는다는 게 확인되면 이 함수와 호출부(run 의 0.6)를 함께 지운다 — 형제 블록
 // locate_send_exe 의 "지우지 말 것" 과 상태가 반대다(그쪽은 지우면 CLI 입구가 사라진다).
 //
-// ★core 를 안 건드린다★: env 를 CommandSpec/manager.spawn_agent 로 threading 하면 core crate 가
+// ★agent 를 안 건드린다★: env 를 CommandSpec/manager.spawn_agent 로 threading 하면 agent crate 가
 // "형제 exe 경로" 개념을 알게 된다 — 주입은 데몬 부팅 1지점에 가둔다.
 //
 // ★best-effort★: 앱 exe 를 못 찾아도(개발 중 부분 빌드 등) env 만 미세팅으로 남고 데몬 기동은 막지
@@ -245,7 +245,7 @@ impl DaemonWiring {
 
 fn build_daemon_wiring(
     data_dir: &std::path::Path,
-    control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+    control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
@@ -264,7 +264,7 @@ fn build_daemon_wiring(
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
     preset_store: Arc<dyn PresetStore>,
-    control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+    control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
@@ -422,7 +422,7 @@ pub async fn run() -> Result<(), i32> {
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
     //    "폴더를 지웠는데 명부가 살아 있다"가 되고, 그게 포터블 배포가 없애려는 혼란 그 자체다.
     //    ★이 줄이 어디에 남는지가 이 실패의 전부다★: 폴더를 못 쓰면 파일 로그도 같은 폴더에서
-    //    막히므로, 코어가 `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(core `logging` 머리말).
+    //    막히므로, `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(base `logging` 머리말).
     //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
     //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
     if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
@@ -564,7 +564,7 @@ pub async fn run() -> Result<(), i32> {
 
     // ★핸들은 프로세스 수명 동안 살아 있어야 한다★(drop = 서버 종료).
     let (control, mut mcp_server_handle): (
-        Arc<dyn engram_dashboard_core::agent::types::ControlChannel>,
+        Arc<dyn engram_dashboard_agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
     ) = match control::mcp_server::start_mcp_server(
         control_registry.clone(),
@@ -694,8 +694,7 @@ pub async fn run() -> Result<(), i32> {
     let expected_token = Arc::new(token.clone());
 
     // 8) daemon.json 기록.
-    let start_time =
-        engram_dashboard_core::agent::platform::current_process_start_time().unwrap_or(0);
+    let start_time = engram_dashboard_base::platform::current_process_start_time().unwrap_or(0);
     let info = engram_dashboard_net::portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),
@@ -848,11 +847,11 @@ async fn start_test_server_inner(
     //   같은 Arc 라 dispatch 가 쓴 값을 그 서버 수명 동안 관측할 수 있다(운영은 control_registry 공유).
     let control_registry = Arc::new(control::registry::ControlRegistry::new());
     // 프리셋 persist 를 검증하는 테스트는 없다 — 필요해지면 store 주입형을 추가한다(현재 프리셋 unit 은
-    //   core 에서 격리 검증).
+    //   agent 에서 격리 검증).
     let preset_store: Arc<dyn PresetStore> = Arc::new(MemPresetStore::default());
     // WS 테스트는 제어 채널 미사용 → Noop(제어 채널 통합 테스트는 control::mcp_server 쪽이 담당).
-    let control: Arc<dyn engram_dashboard_core::agent::types::ControlChannel> =
-        Arc::new(engram_dashboard_core::agent::types::NoopControlChannel);
+    let control: Arc<dyn engram_dashboard_agent::types::ControlChannel> =
+        Arc::new(engram_dashboard_agent::types::NoopControlChannel);
     // WS 테스트는 send/flush 를 검증하지 않지만 status sink wrapper 가 채널을 요구하므로 메시징 배선을
     //   함께 세운다.
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
@@ -945,14 +944,14 @@ async fn start_test_server_inner(
 /// 운영의 `FileProfileStore` 를 대신해 테스트 격리(디스크/Embedded 비오염)를 만든다.
 #[derive(Default)]
 struct MemProfileStore {
-    saved: std::sync::Mutex<Vec<engram_dashboard_core::agent::profile::AgentProfile>>,
+    saved: std::sync::Mutex<Vec<engram_dashboard_agent::profile::AgentProfile>>,
 }
 
 impl ProfileStore for MemProfileStore {
-    fn save(&self, profiles: &[engram_dashboard_core::agent::profile::AgentProfile]) {
+    fn save(&self, profiles: &[engram_dashboard_agent::profile::AgentProfile]) {
         *self.saved.lock().expect("mem store poisoned") = profiles.to_vec();
     }
-    fn load(&self) -> Vec<engram_dashboard_core::agent::profile::AgentProfile> {
+    fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
         self.saved.lock().expect("mem store poisoned").clone()
     }
 }
@@ -960,14 +959,14 @@ impl ProfileStore for MemProfileStore {
 /// `MemProfileStore` 의 프리셋판 — 운영의 `FilePresetStore` 를 대신한다.
 #[derive(Default)]
 struct MemPresetStore {
-    saved: std::sync::Mutex<Vec<engram_dashboard_core::agent::preset::Preset>>,
+    saved: std::sync::Mutex<Vec<engram_dashboard_agent::preset::Preset>>,
 }
 
 impl PresetStore for MemPresetStore {
-    fn save(&self, presets: &[engram_dashboard_core::agent::preset::Preset]) {
+    fn save(&self, presets: &[engram_dashboard_agent::preset::Preset]) {
         *self.saved.lock().expect("mem preset store poisoned") = presets.to_vec();
     }
-    fn load(&self) -> Vec<engram_dashboard_core::agent::preset::Preset> {
+    fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
         self.saved
             .lock()
             .expect("mem preset store poisoned")

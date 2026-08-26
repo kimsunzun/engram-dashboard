@@ -216,18 +216,28 @@ jobs:
       # 이 스위트가 `src-tauri/bindings/*.ts` 를 다시 굽는다(ts-rs derive 가 `#[ts(export)]` 타입마다
       #   만드는 `export_bindings_*` 가 그 안에 있다) — 그래서 이 스텝은 아래 'Gate: ts-rs bindings …'
       #   보다 반드시 **앞**에 있어야 한다. 바인딩 **대조**는 여기서 하지 않는다: 그 게이트 한 곳이 세
-      #   디렉터리를 모아서 본다(core 와 같은 모양 — 재생성 스텝 따로, diff 게이트 하나).
+      #   디렉터리를 모아서 본다(agent 와 같은 모양 — 재생성 스텝 따로, diff 게이트 하나).
       # `-- --test-threads=4` 는 붙이지 않는다 — 이 스위트는 인메모리 하네스·소켓뿐이라 자식 프로세스가 없다.
       - name: cargo test -p engram-dashboard --test lib_unit
         shell: bash
         run: cargo test --locked -p engram-dashboard --test lib_unit
 
-      # 아래 4개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
+      # 아래 5개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
-      - name: cargo test -p engram-dashboard-core
+
+      # ADR-0175 결정 1: 바닥 crate(`base` — 로깅 + PID 판정). 워크스페이스 crate 의존 0 이 존재 이유라
+      # 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 의 `platform` 스위트가 실 `cmd.exe` 를 띄우긴
+      #   하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그 플래그가 겨냥하는
+      #   조건이 러너에 없다). 로컬 명령에는 붙는다.
+      - name: cargo test -p engram-dashboard-base
         shell: bash
-        run: cargo test --locked -p engram-dashboard-core
+        run: cargo test --locked -p engram-dashboard-base
+
+      - name: cargo test -p engram-dashboard-agent
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-agent
 
       # ADR-0134: 명령 버스 도구 crate(신설) — 워크스페이스 crate 의존 0 이 존재 이유라 이 crate 도
       # 위와 같은 단독 기립 축으로 확인한다(TRD S20 §6 Step 1).
@@ -245,7 +255,7 @@ jobs:
       # ★줄바꿈 잡음으로는 안 터진다★: index blob 이 LF 이고 git 이 비교 전에 작업본을 같은 방식으로
       #   정규화하므로 CRLF 차이만으로는 diff 가 나지 않는다(autocrlf=true 인 Windows 에서 재생성 후
       #   `git diff --exit-code` → 0 실측). 잡음이 보이는 것은 `git status` 쪽이지 `git diff` 가 아니다.
-      # core/bindings/ 도 같은 게이트에 든다(ADR-0134): 위 `cargo test -p engram-dashboard-core` 가
+      # agent/bindings/ 도 같은 게이트에 든다(ADR-0134): 위 `cargo test -p engram-dashboard-agent` 가
       #   `agent.*` 선언에서 .ts 와 commands.schema.json 을 재생성하므로, 선언을 고치고 생성물을 안 밀면
       #   여기서 걸린다. **생성 지점이 crate 마다로 흩어졌으므로 이 경로 목록도 함께 늘어난다.**
       # ★`git diff` 는 untracked 파일을 보지 않는다★: 처음 생성되는 .ts 는 아직 커밋된 적이 없어
@@ -268,8 +278,8 @@ jobs:
       - name: 'Gate: ts-rs bindings are in sync with the wire contract'
         shell: bash
         run: |
-          git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/ src-tauri/bindings/
-          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-core/bindings/ src-tauri/bindings/; then
+          git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
+          if ! git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/; then
             echo "FAIL — 재생성된 바인딩이 커밋본과 다르다(선언 ↔ 생성물 drift, 신규 미커밋 파일 포함). 위 diff 를 반영해 커밋할 것."
             exit 1
           fi
@@ -377,11 +387,13 @@ jobs:
       # `set +e` 가 필요한 이유: Actions 의 bash 는 `set -e` 로 도는데 `hits=$(rg …)` 는 rg 의 종료코드를
       # 그대로 물려받아, 매치가 없는 **정상 통과** 경로에서 스텝이 먼저 죽는다.
 
-      - name: 'Gate: core isolation — no `use tauri` in core'
+      # 옛 게이트명은 'Gate: core isolation — no `use tauri` in core' 였다(crate 개명 ADR-0175 전).
+      #   ADR-0003 의 코어 격리 불변식 그대로이고 대상 crate 이름만 `core` → `agent` 로 바뀌었다.
+      - name: 'Gate: agent crate isolation — no `use tauri` in the agent crate'
         shell: bash
         run: |
           set +e
-          hits=$(rg "^\s*use tauri" crates/engram-dashboard-core/src/)
+          hits=$(rg "^\s*use tauri" crates/engram-dashboard-agent/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -391,12 +403,14 @@ jobs:
           esac
 
       # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   메시징엔 net 같은 의존 상한 게이트가 없어 **이 정규식이 유일한 벽**이다(ADR-0110 불변식).
+      #   ADR-0175 가 `base` 를 더했다 — 같은 이유로 알파벳에 넣는다. ★새 워크스페이스 crate 가 생길
+      #   때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래
+      #   상한 게이트가 그 구멍을 덮는다).
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(core|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -463,6 +477,106 @@ jobs:
           if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
           echo "PASS"
 
+      # ADR-0175 결정 1: 바닥 crate(`base`)의 입주 조건 ②는 "도메인 지식 0" 이고, 그 실물이 워크스페이스
+      # crate 의존 0 이다(그 crate lib.rs 헤더가 정본). 여기가 그 벽이다 — 컴파일러는 잎을 강제하지 않는다.
+      # 위 두 게이트와 같은 형태·같은 플래그다(줄이면 rename·비활성 target·optional 이 샌다).
+      # ★소스 정규식 게이트를 따로 두지 않는 이유★: `base` 는 남을 안 부르는 것이 불변식이라 상한 게이트
+      #   하나로 충분하다(메시징처럼 "부르는 이름 알파벳" 을 손으로 관리할 필요가 없다).
+      - name: 'Gate: base leaf crate — direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
+
+      # ADR-0003 의 격리 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 다.
+      #   `base` 는 headless 데몬 · `net` · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
+      #   webview 도 없는 그 셋이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
+      # ★"잎 crate 라 안전하다" 로 이 스텝을 지우지 말 것★: 잎 성질은 **워크스페이스 crate** 축의 말이고,
+      #   바로 위 상한 게이트도 `rg "^engram-dashboard"` 로 워크스페이스 멤버만 센다. 서드파티인 `tauri` 는
+      #   그 게이트를 그대로 통과한다 — 두 게이트는 서로 다른 축이다.
+      # ADR-0175 결정 1 이 `logging`·`platform` 을 이리로 옮기면서 그 둘이 agent 게이트의 스캔 범위
+      #   (`crates/engram-dashboard-agent/src/`)를 벗어났다. 이 스텝이 없으면 그 두 모듈은 어느 게이트도
+      #   안 보는 상태가 된다 — `logging::init_logging_with_file` 이 "이벤트 하나만 쏘면 편한" 대표 자리다.
+      - name: 'Gate: base crate isolation — no `use tauri` in the base crate'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "^\s*use tauri" crates/engram-dashboard-base/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # ADR-0175 결정 1 의 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽. ①②와 달리 이 조건에는
+      #   기계 검증이 없었다 — ②는 위 상한 게이트가, ①은 사람이 본다.
+      # ★왜 지켜야 하나★: 입주자가 서로 엮이면 그건 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든
+      #   소비자에게 딸려 간다 — crate 헤더가 이름 붙인 `bevy_core` 실패의 시작점이 정확히 여기다.
+      # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
+      #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
+      # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
+      #   오탐된다. 그때는 상대 경로(`super::`)로 부르거나 이 게이트를 다시 판정한다.
+      - name: 'Gate: base leaf crate — tenants must not reference each other'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # ADR-0175 결정 3 이 `replay_flight` 를 코어에서 셸 패키지 안으로 옮기며, 그 파일 헤더가 내세우던
+      #   순수성 주장(소켓·tokio·Tauri·protocol 의존 0)이 **어느 게이트의 스캔 범위에도 안 들어가게 됐다**
+      #   — 위 소스 정규식 게이트는 전부 `crates/…/src/` 로 스코프돼 있고 `src-tauri/src/` 를 보는 것은
+      #   하나도 없었다. 결정 1(`base` 신설)은 새 집에 게이트를 세웠는데 결정 3 은 세우지 않았다.
+      # ★형제 crate 게이트와 달리 컴파일러 backstop 이 없다★ — `agent`·`base` 는 `tauri` 를 Cargo.toml 에
+      #   아예 안 물어 위반이 컴파일 에러로 먼저 죽고 `use tauri` grep 은 값싼 조기 신호일 뿐이다. 반면
+      #   이 패키지는 `tauri`·`tokio`·`engram-dashboard-protocol` 을 전부 의존하므로 위반이 그냥 컴파일된다.
+      #   그래서 여기서는 이 정규식이 **유일한 벽**이고, `use` 줄만 보는 형태로는 인라인 완전경로
+      #   (`tokio::spawn(...)`) 한 줄에 그대로 뚫린다 — 그 형태를 함께 잡는 이유가 이것이다.
+      # ★접두 가드 `^(?:[^/]|/[^/])*?` = 「이 줄에서 아직 `//` 를 만나지 않았다」★ — 그래서 `//!`·`///`·꼬리
+      #   주석 안의 자기인용이 오탐되지 않는다(대상 파일의 헤더가 이 게이트를 인용한다). Rust regex 는
+      #   lookaround 가 없어 이 형태 말고는 「주석 밖」을 표현할 수단이 없다.
+      # ★`\b` + `::` 요구가 정당한 이웃을 가른다★ — 이 모듈은 `std::time::Instant` 를 쓴다(결정론 하네스의
+      #   주입점). `tokio::time::Instant` 만 잡고 std 쪽은 안 잡아야 해서 crate 뿌리 이름을 물었고, `\b` 가
+      #   `my_tauri::` 같은 부분일치를 막는다.
+      # ★알려진 한계 = 블록 주석(`/* */`)★ — 그 안쪽은 접두 가드가 못 막는다. 대상 파일은 `//` 만 쓴다.
+      # ★`test -f` 를 지우지 말 것★ — 파일이 또 이사하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이 조용히
+      #   사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다). `-d` 가 아니라 `-f` 다 — 대상이 파일이다.
+      - name: 'Gate: replay_flight purity — no transport/wire ingress'
+        shell: bash
+        run: |
+          set +e
+          f=src-tauri/src/daemon_client/replay_flight.rs
+          if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (또 이사했나)"; exit 1; fi
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::" "$f")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
       - name: 'net gate 1: source refs — no daemon/messaging/discovery'
         shell: bash
         run: |
@@ -477,12 +591,18 @@ jobs:
           esac
 
       # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
-      # 매치 유무가 아니라 정확한 줄 수를 단언한다(2 를 넘어도 모자라도 실패).
-      - name: 'net gate 2: core symbol allowlist — exactly 2'
+      # 매치 유무가 아니라 정확한 줄 수를 단언한다(넘어도 모자라도 실패).
+      # ★ADR-0175 결정 1 로 이 게이트가 **두 스텝**이 됐다★ — PID 헬퍼가 `agent` 에서 잎 crate `base` 로
+      #   이사했으므로 기대값 2 가 crate 이름을 갈아타고 옮겨 갔다. **총량은 그대로 2 다.**
+      #   ★2b 를 「죽은 게이트」로 보고 지우지 말 것★: 그것만 떼면 net 이 에이전트 런타임을 다시 무는
+      #   회귀를 아무도 안 보게 된다. 0 기대가 홀로 서면 안 깨지는 벽이지만, 2a 의 2 기대와 **짝으로**
+      #   서면 "심볼이 사라진 게 아니라 옮겨 갔다" 를 단언하는 살아 있는 벽이다.
+      #   기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더의 게이트 2 절.
+      - name: 'net gate 2a: base symbol allowlist — exactly 2'
         shell: bash
         run: |
           set +e
-          raw=$(rg -o --no-filename "engram_dashboard_core::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
+          raw=$(rg -o --no-filename "engram_dashboard_base::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
           rc=$?
           set -e
           if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
@@ -496,6 +616,31 @@ jobs:
           printf '%s\n' "$out"
           if [ "$n" -ne 2 ]; then echo "FAIL — expected exactly 2"; exit 1; fi
           echo "PASS"
+
+      # 2a 의 짝. 여긴 매치 유무로 판정한다(게이트 1·4 와 같은 규칙) — 한 줄이라도 나오면 net 이
+      # 에이전트 런타임을 다시 문 것이다.
+      # ★패턴이 **맨 crate 이름**인 것은 의도다★: 0 기대 게이트는 심볼 모양을 요구할 이유가 없고, 심볼
+      #   꼬리를 붙인 옛 형태(`::[A-Za-z0-9_:]+`)는 `::` 뒤가 문자클래스 밖이면 안 물어 **가장 흔한 두
+      #   형태를 놓쳤다** — 중괄호 전개(`use …::{platform::pid_alive, …}`)와 별칭(`use … as ag;`)이 그대로
+      #   빠져나갔다(실측). 이름만 보면 셋 다 걸린다.
+      # ★괄호는 오타가 아니다 — 게이트 4 와 같은 자기일치 방어다★: 맨 이름으로 적으면 이 게이트를 설명하는
+      #   net crate 헤더가 자기 자신에 걸려 영원히 통과하지 못한다. 옛 패턴은 `::` 뒤에 `[` 가 오는 **우연**
+      #   덕에만 자기일치를 면했고, 헤더에 예시 심볼을 하나 적는 순간 죽는 방어였다.
+      # ★이 게이트가 사는 값어치를 부풀리지 말 것★: 살아 있는 벽은 게이트 3(직접 의존 상한 = 정확히 3)이다
+      #   — net 은 의존을 선언하지 않고는 에이전트 심볼을 부를 수조차 없어 그쪽이 먼저 빨개진다. 2b 가 맡는
+      #   것은 **주석·테스트 헬퍼로 어휘가 먼저 새는 것**과, 게이트가 제 이름값(`0 matches`)대로 도는 것이다.
+      - name: 'net gate 2b: no agent runtime symbols — 0 matches'
+        shell: bash
+        run: |
+          set +e
+          hits=$(rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
 
       # 매니페스트 텍스트가 아니라 **해석된 의존 그래프**를 읽는다 — rename·테이블 형·비활성 target·
       # optional 같은 정상 Cargo 문법이 텍스트 grep 을 빠져나가기 때문. 플래그를 줄이면 그만큼 형태가
@@ -703,7 +848,7 @@ jobs:
       #      packages[""].version 이라는 사본이 하나 더 있지만 따로 안 본다 — npm 이 둘을 항상 같이 쓰므로
       #      현실의 drift 는 "lock 을 아예 갱신 안 함"이고 그건 루트 단언이 그대로 잡는다.
       # ── 일부러 뺀 것 ──
-      #   - 라이브러리 crate 5종(core·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
+      #   - 라이브러리 crate(agent·command·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
       #     내부 semver. 정적 링크돼 사용자에게 보이지 않는다. 첫 비-0.1.0 태그부터 제품 버전과 갈리는데
       #     그건 의도된 결과다.
       #   - PROTOCOL_VERSION(protocol crate, 현재 3): wire 계약 버전이라 릴리즈가 아니라 계약이 바뀔 때

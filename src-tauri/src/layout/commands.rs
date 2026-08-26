@@ -741,7 +741,7 @@ fn not_applied(detail: String) -> CommandError {
 
 /// ★공백만 있는 값은 부재로 접지 않고 반려한다★ — 셸에서 미설정 변수가 빈 인자로 펼쳐지는 형태
 /// (`--window "$UNSET"`)가 현실적으로 들어오고, 그것을 「안 준 것」으로 접으면 오타 하나가 다른 창을
-/// 건드린다(core `agent.*` 의 같은 조항).
+/// 건드린다(agent 쪽 `agent.*` 의 같은 조항).
 fn text<'a>(field: &str, given: &'a str) -> Result<&'a str, CommandError> {
     if given.trim().is_empty() {
         return Err(CommandError::invalid_argument(format!(

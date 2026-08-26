@@ -85,7 +85,7 @@ const NOTICE_SENDER_LABEL: &str = "engram";
 
 // ★삭제됨(R1) — 옛 `STALE_RESERVATION_AFTER`(5초 유예)★: 예약 회수를 **나이**로 판정하던 상수다. 되살리지
 //   말 것 — 어떤 값도 안전하지 않다. 예약 구간의 락 밖 주입은 자식 stdin write 이고 그건 backpressure 로
-//   **무계로 블록될 수 있다**(core `stdio.rs`). 즉 "N초 넘었으면 버려진 것" 은 아직 일하는 소유자를 오판하고,
+//   **무계로 블록될 수 있다**(agent `stdio.rs`). 즉 "N초 넘었으면 버려진 것" 은 아직 일하는 소유자를 오판하고,
 //   그 오판의 결과가 **계약 없는 request 배달**이었다(실패 사슬 전문 = `ledger::ReservationLiveness` 헤더).
 //   회수 기준은 이제 소유자 가드의 **생존**이다(`ledger::reclaim_abandoned_reservations`).
 // ★7차 보정 — 위 논거의 전제가 바뀌었다(ADR-0125). 결론은 그대로다★: 전부-큐가 되면서 예약 창(open→settle)이
@@ -264,7 +264,7 @@ pub struct ProfileDeletedOutcome {
 /// ★주입 영수증(ADR-0110 결정 2 — 이 crate 자체 타입)★ — `DeliveryPort` 가 "봉투 바이트를 실제로
 ///   꽂았다" 를 증명하며 돌려주는 4필드 값. 호스트 어댑터가 자기 write 결과를 이 모양으로 복사해 준다.
 ///
-/// ★왜 호스트 타입을 그대로 안 받나★: 그러면 이 crate 가 호스트 crate(core)를 알아야 해 완전 상호무지가
+/// ★왜 호스트 타입을 그대로 안 받나★: 그러면 이 crate 가 호스트 crate(agent)를 알아야 해 완전 상호무지가
 ///   깨진다. 필드 넷은 전부 순수 스칼라라 경계 변환 비용이 1회 복사뿐이다(ADR-0110 근거).
 /// ★의미(관측 상관 — ADR-0088)★: `msg_uuid` 는 수신자 세션이 이 유저 턴에 부여한 replay-dedup 키,
 ///   `epoch` 은 write 를 **집행한** incarnation 의 세대다(해석 시점 스냅샷이 아니다 — 그 비대칭이
@@ -1410,7 +1410,7 @@ impl MessagingService {
     ///     수 없다**. 이름으로만 게이트하면 힌트로 배달되는 경로가 게이트를 우회한다. drain 후 복원은
     ///     같은 락 구간 안이고 무손실·순서 보존이므로(restore_ordered) 외부에 관측 가능한 차이가 없다.
     ///   게이트가 안전한 전제는 관측이 **라이브 출력에서만** 시작한다는 것이다(재개 transcript 는 관측하지
-    ///   않는다 — core `OutputCore::seed`). busy = 지금 진행 중인 실제 턴이므로 그 종료 통지가 반드시 온다
+    ///   않는다 — agent `OutputCore::seed`). busy = 지금 진행 중인 실제 턴이므로 그 종료 통지가 반드시 온다
     ///   (과거 기록으로 인한 깨울 수 없는 busy 없음). 그 통지가
     ///   유실되는 비정상 턴은 `BUSY_MAX_TURN` 상한 sweep 이 fail-open 으로 깨운다(busy.rs).
     /// ★미배달분은 **큐를 떠나지 않는다**(락 원자성 — load-bearing)★: drain·타깃 분할·게이트·스킵분 복원을
@@ -1831,7 +1831,7 @@ impl MessagingService {
 
     /// ★턴 종료(idle 전이) flush(C2 · ADR-0104 결정 3)★: **id 로** 지목된 flush — 그 에이전트의 canonical
     ///   이름을 풀어 `flush_for` 에 위임한다. 왜 id 입구가 따로 있나: 턴 종료 통지는 출력 경계에서 나와
-    ///   **id/epoch 만 안다**(이름을 모른다 — 이름은 프로필·cwd 파생이라 core 출력 경계에 없다).
+    ///   **id/epoch 만 안다**(이름을 모른다 — 이름은 프로필·cwd 파생이라 agent 출력 경계에 없다).
     ///   반면 파킹은 이름-키다(respawn 생존 — canonical_park_key 주석). 그 간극을 여기서 한 번 메운다:
     ///   id → canonical name → 기존 flush 경로(경로 2벌 금지 — ADR-0104 "flush = 일괄·오래된 순" 공유).
     ///

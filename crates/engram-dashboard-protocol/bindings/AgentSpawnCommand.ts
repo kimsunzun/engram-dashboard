@@ -2,6 +2,6 @@
 import type { ClaudeOutputFormat } from "./ClaudeOutputFormat";
 
 /**
- * core `profile::AgentCommand` 와 동일.
+ * agent `profile::AgentCommand` 와 동일.
  */
 export type AgentSpawnCommand = { "kind": "Claude", extra_args: Array<string>, output_format: ClaudeOutputFormat, } | { "kind": "Shell", program: string, args: Array<string>, };

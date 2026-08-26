@@ -26,7 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use engram_dashboard_core::agent::types::AgentId;
+use engram_dashboard_agent::types::AgentId;
 
 /// 다른 산출물(agents.json 등)과 섞이지 않게 전용 폴더로 격리한다.
 /// ★이름은 `mcp-config` 로 유지★: 폴더명을 바꾸면 옛 데이터 디렉토리에 남은 파일이 스윕 대상에서 빠져

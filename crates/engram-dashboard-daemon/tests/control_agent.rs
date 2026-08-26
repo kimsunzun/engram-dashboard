@@ -7,18 +7,16 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use engram_dashboard_command::{CommandEnvelope, CommandReply};
-use engram_dashboard_core::agent::manager::AgentManager;
-use engram_dashboard_core::agent::manager::MAX_ROSTER_SIZE;
-use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
-use engram_dashboard_core::agent::profile::{
-    AgentCommand, AgentProfile, ProfileRegistry, ProfileStore,
-};
-use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::manager::AgentManager;
+use engram_dashboard_agent::manager::MAX_ROSTER_SIZE;
+use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
+use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, ProfileStore};
+use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
     CLI_CONTROL_READ_TIMEOUT_SECS,
 };
+use engram_dashboard_command::{CommandEnvelope, CommandReply};
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandDeliveries};
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
@@ -282,7 +280,7 @@ impl Fixture {
     /// 호출하되 **호출자 예산 안에서** 답을 요구한다 — 실 클라이언트가 그 예산으로 끊기 때문이다.
     ///
     /// ★같은 수를 **다른 뜻으로** 쓴다 — 알고 쓰는 것이다★: 실 CLI 는 `CLI_CONTROL_READ_TIMEOUT_SECS` 를
-    /// `set_read_timeout` 에 넣어 **연속 무응답 구간**을 재는데(정본 = core 쪽 그 상수 doc), 여기 `reqwest` 의
+    /// `set_read_timeout` 에 넣어 **연속 무응답 구간**을 재는데(정본 = agent 쪽 그 상수 doc), 여기 `reqwest` 의
     /// `.timeout()` 은 **요청 전체의 총 예산**이다. 오늘 이 라우트가 답 전에 바이트를 하나도 안 흘려 두 뜻이
     /// 같은 값이 되고, 총 예산 쪽이 **더 엄격**하므로 이 시험이 거짓 초록을 내지는 않는다.
     /// ★그러나 그 등가는 라우트의 성질에 기댄 것이다★ — 중간에 청크·진행 알림을 흘리는 형태로 바뀌면 실
@@ -404,7 +402,7 @@ fn seed_shell_agent(manager: &Arc<AgentManager>, name: &str) -> AgentId {
     let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Shell {
-            program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+            program: engram_dashboard_agent::manager::default_shell().to_string(),
             args: vec![],
         },
         cwd,
@@ -456,10 +454,7 @@ async fn list_reports_both_live_and_sleeping_agents() {
     let live = seed_shell_agent(&f.manager, "awake");
     let profile = f.manager.agent_snapshot(live).expect("스냅샷");
     f.manager
-        .activate_profile(
-            &profile,
-            engram_dashboard_core::agent::profile::SpawnMode::Fresh,
-        )
+        .activate_profile(&profile, engram_dashboard_agent::profile::SpawnMode::Fresh)
         .expect("셸 스폰");
 
     let (status, body) = f.post(serde_json::json!({ "verb": "list" })).await;
@@ -825,7 +820,7 @@ async fn a_duplicate_name_is_refused_rather_than_guessed() {
         let mut p = AgentProfile::new(
             "twin".to_string(),
             AgentCommand::Shell {
-                program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+                program: engram_dashboard_agent::manager::default_shell().to_string(),
                 args: vec![],
             },
             std::env::temp_dir(),
@@ -1140,7 +1135,7 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
         let mut p = AgentProfile::new(
             format!("filler-{i}"),
             AgentCommand::Shell {
-                program: engram_dashboard_core::agent::manager::default_shell().to_string(),
+                program: engram_dashboard_agent::manager::default_shell().to_string(),
                 args: vec![],
             },
             std::env::temp_dir(),
@@ -1807,7 +1802,7 @@ async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_a
 /// 해석된 것이고, `RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS` 면 각각 부재·모호로 해석된 것이다.
 ///
 /// ★제어 쪽은 **입구가 실제로 태우는 해석기**를 부른다★: `agent.*` 표의 동사들이 지목을 푸는 함수가
-/// `core::agent::commands::resolve_in` 하나이고(그 표를 `/control/agent` 가 부른다), 이 대조가 그 함수를
+/// `agent::commands::resolve_in` 하나이고(그 표를 `/control/agent` 가 부른다), 이 대조가 그 함수를
 /// 직접 태운다. 사본을 재면 사본만 초록이고 실입구는 아무 보장도 못 받는다.
 ///
 /// ★이 대조가 덮는 축과 안 덮는 축★: 덮는 것은 **매칭 규칙**(정확 일치 · id 우선 · 동명 거부)이다. 두
@@ -1815,8 +1810,8 @@ async fn without_the_command_table_the_call_is_unavailable_but_discovery_still_a
 /// 픽스처를 전부 산 것으로 두고 규칙만 맞댄다(정의역까지 같게 만드는 것은 이 슬라이스의 결정이 아니다).
 mod resolver_alignment {
     use super::*;
+    use engram_dashboard_agent::commands::{resolve_in, AgentRosterRow};
     use engram_dashboard_command::ErrorCode;
-    use engram_dashboard_core::agent::commands::{resolve_in, AgentRosterRow};
     use engram_dashboard_messaging::envelope::{DeliveryObservation, Entrance, EnvelopeFormat};
     use engram_dashboard_messaging::service::{
         AddressingSources, ControlPlanePort, DeliveryPort, FailCode, InjectReceipt, LiveAgent,

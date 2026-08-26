@@ -1,0 +1,24 @@
+[package]
+name = "engram-dashboard-base"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 바닥 인프라 — tracing 전역 초기화·파일 로그(logging)와 PID liveness·프로세스 시작시각·자식 PID 열거(platform). 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 결정 1)."
+
+# ★워크스페이스 crate 를 여기 적지 않는다★ — 입주 조건 ②(도메인 지식 0)의 실물이 이 빈 자리다.
+#   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).
+[dependencies]
+# logging 의 `mask_secrets` 가 무는 Bearer/API 키 패턴.
+regex = "1.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Foundation = CloseHandle·FILETIME · Threading = OpenProcess/GetProcessTimes/GetExitCodeProcess ·
+#   ToolHelp = child_pids 의 프로세스 트리 열거.
+# ★Job Object 쪽 feature(`Win32_System_JobObjects`·`Win32_Security`)는 여기 없다★ — 그 래퍼는 소비자가
+#   agent 안뿐이라 거기 남았다(ADR-0175 결정 2). 이쪽으로 끌어오면 입주 조건 ①(소비자 둘 이상)이 깨진다.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

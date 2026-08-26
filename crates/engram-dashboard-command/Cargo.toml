@@ -5,7 +5,7 @@ edition = "2021"
 description = "Engram Dashboard 명령 버스 도구 — 봉투·오류·선언 매크로·표·라우팅. 워크스페이스 crate 의존 0, 명령 0개."
 
 # ★test-support (ADR-0012)★: 하네스가 쓰는 최소 실행기(`testing::block_on`)를 여는 기능 플래그. 기본 OFF —
-#   운영 빌드에 테스트 전용 실행기를 남기지 않는다. 소비 crate 는 dev-dependency 에서만 켠다(core 의
+#   운영 빌드에 테스트 전용 실행기를 남기지 않는다. 소비 crate 는 dev-dependency 에서만 켠다(agent 의
 #   `test-harness` 와 같은 형태).
 [features]
 test-support = []

@@ -14,7 +14,7 @@ pub mod registry;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::types::{
     AgentId, ControlChannel, ControlEndpoint, ProvisionError, ToolGrant, CLI_EXE_NAME,
 };
 
@@ -238,7 +238,7 @@ impl ControlChannel for DaemonControlChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::types::{
         CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
     };
     use std::path::Path;
@@ -613,9 +613,9 @@ mod tests {
         id: AgentId,
         ep: ControlEndpoint,
         profile_env: Vec<(String, String)>,
-    ) -> engram_dashboard_core::agent::types::CommandSpec {
-        use engram_dashboard_core::agent::backend::{AgentBackend, ClaudeBackend};
-        use engram_dashboard_core::agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+    ) -> engram_dashboard_agent::types::CommandSpec {
+        use engram_dashboard_agent::backend::{AgentBackend, ClaudeBackend};
+        use engram_dashboard_agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
         ClaudeBackend.build_spec(
             &AgentCommand::Claude {
                 extra_args: vec![],

@@ -6,7 +6,7 @@
 #   **반드시 같은 디렉토리(release/)에 동거**해야 런타임이 서로를 찾는다:
 #     - 실행되는 앱(engram-dashboard.exe)은 형제 engram-dashboard-daemon.exe 를 spawn 한다.
 #     - 데몬은 형제 engram.exe(제어 평면 CLI)를 locate_send_exe(current_exe().parent())로 찾는다(ADR-0086 F1).
-#       ★그 파일명의 정본은 core 의 CLI_EXE_NAME★ — 아래 manifest 는 그 값을 손으로 복사한 것이다.
+#       ★그 파일명의 정본은 agent 의 CLI_EXE_NAME★ — 아래 manifest 는 그 값을 손으로 복사한 것이다.
 #       어긋남은 보통 요란하게 깨진다: [[bin]] 개명이면 아래 빌드 단계의 --bin 인자가 실패하고, 상수만
 #       어긋나면 CI 의 배송-파일명 가드 테스트(daemon tests/engram_cli.rs)가 빨개진다.
 #       ★단 하나 조용한 구멍이 있다 — cargo 산출 디렉토리의 stale 파일★: 이 스크립트는 target/release 를

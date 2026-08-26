@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use engram_dashboard_core::agent::manager::AgentManager;
+use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_messaging::envelope::{new_msg_id, Entrance, EnvelopeFormat};
 
 use super::registry::{BoundIdentity, ControlRegistry};
@@ -604,7 +604,7 @@ fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> Stri
     // ★`canonical_name_when_live()` 로 바꾸지 말 것(동작 보존)★: 그쪽은 display_name 이 있으면 fs 를 안
     //   보는 단축이 있어 cwd 정규화 유무가 갈리고 결과가 달라진다.
     if let Some(p) = manager.agent_snapshot(from.agent_id) {
-        return engram_dashboard_core::agent::name::canonical_name_or_id_fallback(
+        return engram_dashboard_agent::name::canonical_name_or_id_fallback(
             p.display_name.as_deref(),
             &p.cwd.to_string_lossy(),
             from.agent_id,
@@ -617,7 +617,7 @@ fn sender_display_name(manager: &Arc<AgentManager>, from: BoundIdentity) -> Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_core::agent::types::AgentId;
+    use engram_dashboard_agent::types::AgentId;
 
     fn ident(id: AgentId) -> BoundIdentity {
         BoundIdentity {

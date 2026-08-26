@@ -1,13 +1,13 @@
 //! # engram-dashboard-command — 명령 버스 **도구** (명령 0개)
 //!
 //! 봉투 · 오류 어휘 · 선언 매크로 · 표 · 라우팅만 담는다. 명령 자체는 **생산자 모듈 옆**에서 선언한다
-//! (`core` = `agent.*`, `daemon` = `mail.*`, `src-tauri` = `window/tab/slot`).
+//! (`agent` = `agent.*`, `daemon` = `mail.*`, `src-tauri` = `window/tab/slot`).
 //!
 //! ## 불변식 셋 (어기면 이 crate 의 존재 이유가 사라진다)
 //!
 //! 1. **워크스페이스 crate 의존 0.** 게이트 = `rg "path\s*=" crates/engram-dashboard-command/Cargo.toml`
 //!    → 0줄. 남이 이 crate 를 의존하는 것은 이 불변식과 무관하다 — 화살표는 한 방향뿐이다.
-//!    이 벽이 있어야 `core` 가 명령을 선언하면서도 wire 계약(`protocol`)을 안 볼 수 있다.
+//!    이 벽이 있어야 `agent` 가 명령을 선언하면서도 wire 계약(`protocol`)을 안 볼 수 있다.
 //! 2. **명령 0개.** 이 파일 트리에 [`declare_commands!`] 호출이 있으면 위반이다. 도구가 어휘를 갖는 순간
 //!    「선언은 생산자 옆」이 무너지고 중앙 카탈로그가 다른 문으로 돌아온다.
 //! 3. **★T-1★ 링커 수집이 담는 것은 [`CommandSpec`] 까지.** `static`·링커 수집이

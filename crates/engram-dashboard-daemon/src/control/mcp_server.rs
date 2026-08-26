@@ -20,7 +20,7 @@ use axum::extract::State;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use engram_dashboard_core::agent::manager::AgentManager;
+use engram_dashboard_agent::manager::AgentManager;
 use http::{Method, Request, StatusCode};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -44,7 +44,7 @@ use crate::connection_core::sanitize_for_log;
 ///
 /// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. claude backend 가 CLI 용
 ///   base URL(ENGRAM_CONTROL_URL)을 파생할 때 이 리터럴 suffix("/mcp")를 **문자열로 벗긴다** —
-///   `crates/engram-dashboard-core/src/agent/backend/claude.rs`(strip_suffix("/mcp")). 이 값을 바꾸면
+///   `crates/engram-dashboard-agent/src/backend/claude.rs`(strip_suffix("/mcp")). 이 값을 바꾸면
 ///   거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이 틀어지고 CLI 가
 ///   조용히 404 를 받는다.
 const MCP_PATH: &str = "/mcp";
@@ -213,7 +213,7 @@ const MAIL_NOT_ALLOWED_HINT: &str =
 // ADR-0160
 fn mail_by_name(name: &str) -> bool {
     name.split_once('.')
-        .is_some_and(|(group, _)| group == engram_dashboard_core::agent::types::CLI_GROUP_MAIL)
+        .is_some_and(|(group, _)| group == engram_dashboard_agent::types::CLI_GROUP_MAIL)
 }
 
 /// ★manager 늦은 주입 슬롯(순환 해소)★: 데몬 기동은 MCP 서버를 **먼저** 띄우고(그 URL 로 mcp-config 를
@@ -1526,7 +1526,7 @@ mod tests {
             };
             let binding = axum::Extension(crate::control::registry::TokenBinding {
                 identity: BoundIdentity {
-                    agent_id: engram_dashboard_core::agent::types::AgentId::new_v4(),
+                    agent_id: engram_dashboard_agent::types::AgentId::new_v4(),
                     epoch: 0,
                 },
                 mail_allowed: false,

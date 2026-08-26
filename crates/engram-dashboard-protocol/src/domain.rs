@@ -1,5 +1,6 @@
-//! 도메인 타입(wire 표현). 현 `core::agent::types` / `core::agent::profile` 의 직렬화 형태를 미러.
-//! phase 1 에서 core 가 이 crate 에 의존하며 단일 진실원으로 합쳐진다(중복 제거).
+//! 도메인 타입(wire 표현). 현 `agent::types` / `agent::profile` 의 직렬화 형태를 미러.
+//! ★이 중복을 합치려 `agent` 가 이 crate 를 의존하게 만들지 말 것★ — 그 crate 의 protocol-무의존이
+//! 불변식이라 미러가 그 대가다(정본 = `crates/engram-dashboard-agent/Cargo.toml` `[dependencies]` 주석).
 
 use ts_rs::TS;
 
@@ -126,8 +127,8 @@ pub struct RestoreReport {
 
 // ── 프로필 wire 미러(phase4 1단계) ──────────────────────────────────────────────
 //
-// core 는 protocol 무의존(§1 불변)이라 core 타입을 여기 쓸 수 없다 — 그래서 같은 JSON 형태의
-// 독립 타입을 두고, core↔wire 명시 변환은 데몬이 한다(reflection 왕복 금지 — agent_info_to_wire 패턴).
+// agent 는 protocol 무의존(§1 불변)이라 agent 타입을 여기 쓸 수 없다 — 그래서 같은 JSON 형태의
+// 독립 타입을 두고, agent↔wire 명시 변환은 데몬이 한다(reflection 왕복 금지 — agent_info_to_wire 패턴).
 // 프론트 `src/api/types.ts` 의 AgentProfile/AgentCommand/RestartPolicy 와 글자 그대로 일치.
 
 /// Terminal=PTY 대화형, StreamJson=헤드리스 NDJSON.
@@ -161,7 +162,7 @@ pub enum EnvelopeFormat {
     Colon,
 }
 
-/// core `profile::AgentCommand` 와 동일.
+/// agent `profile::AgentCommand` 와 동일.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export)]
@@ -180,7 +181,7 @@ pub enum AgentSpawnCommand {
 }
 
 /// **예약(reserved) — 죽은 필드 아님.** 동작 미구현이나 ADR-0016 "추후 재검토" 유효(2026-06-18 결정).
-/// 제거 시 core·ts-rs 바인딩·프론트 동반 + PROTOCOL_VERSION bump 유발 → 제거 금지.
+/// 제거 시 agent·ts-rs 바인딩·프론트 동반 + PROTOCOL_VERSION bump 유발 → 제거 금지.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub enum RestartPolicy {
@@ -205,7 +206,7 @@ macro_rules! declare_failure_kinds {
         $( $(#[$vmeta:meta])* $variant:ident ),+ $(,)?
         ; absorbing = $absorbing:ident
     ) => {
-        /// core `failure::AgentFailureKind` 와 동일. 「마지막 실패」의 종류 어휘 — **화면 문구는 여기
+        /// agent `failure::AgentFailureKind` 와 동일. 「마지막 실패」의 종류 어휘 — **화면 문구는 여기
         /// 없다**: 종류 → {다시 해볼 가치 · 문구 · 권하는 행동} 표는 프론트가 진다
         /// (ADR-0172 결정 5 · ADR-0173).
         ///
@@ -325,7 +326,7 @@ pub struct AgentProfile {
     pub failed_reason: Option<String>,
     /// 이 항목이 마지막으로 활성화에 실패한 종류(ADR-0172). `null` = 실패 기록 없음.
     ///
-    /// ★데몬 메모리에만 산다★ — core 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
+    /// ★데몬 메모리에만 산다★ — agent 쪽 원본이 `#[serde(skip)]` 이라 `agents.json` 에 없고, 데몬을
     ///   재기동하면 사라진다(앱 창 재시작은 견딘다).
     /// `#[serde(default)]` 라 이 필드 없는 옛 wire → None(PROTOCOL_VERSION 유지 — display_name·
     /// parent_id 와 동형 additive). 모르는 **값**은 `Other` 로 흡수된다(`AgentFailureKind` 의
@@ -355,7 +356,7 @@ pub struct Preset {
     pub name: Option<String>,
 }
 
-/// core `types::OutputChunk` 와 일치.
+/// agent `types::OutputChunk` 와 일치.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct SnapshotChunk {

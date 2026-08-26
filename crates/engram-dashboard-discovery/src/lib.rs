@@ -1009,7 +1009,7 @@ struct RealLiveness;
 
 impl PidLiveness for RealLiveness {
     fn is_dead(&self, pid: u32, start_time: u64) -> bool {
-        !engram_dashboard_core::agent::platform::pid_alive_with_start_time(pid, start_time)
+        !engram_dashboard_base::platform::pid_alive_with_start_time(pid, start_time)
     }
 }
 

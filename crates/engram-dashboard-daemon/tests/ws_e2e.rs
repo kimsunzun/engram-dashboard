@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_core::agent::profile::{AgentCommand, AgentProfile, SpawnMode};
+use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, SpawnMode};
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
@@ -2253,7 +2253,7 @@ mod real_process {
             .env("ENGRAM_DATA_DIR", data_dir)
             .env("RUST_LOG", "info")
             .stdin(std::process::Stdio::null())
-            // ★stdout 캡처(진단)★: core 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
+            // ★stdout 캡처(진단)★: agent 의 tracing fmt::layer() 는 기본 stdout 으로 쓴다. 데몬이 왜
             //   daemon.json 을 못 쓰는지(잠금 거부? data_dir? panic?)를 실패 시 인용하려고 stdout 을
             //   piped 로 받는다. (토큰 등 민감값은 데몬이 애초에 로그에 안 찍는다 — port/pid 만.)
             .stdout(std::process::Stdio::piped())
@@ -2335,7 +2335,7 @@ mod real_process {
     #[tokio::test]
     #[ignore = "실프로세스/Job 필요 — `-- --ignored` 로 실행(Windows 전용)"]
     async fn ignored_daemon_kill_cleans_pty_child() {
-        use engram_dashboard_core::agent::platform::{
+        use engram_dashboard_base::platform::{
             child_pids, pid_alive_with_start_time, process_creation_time,
         };
 

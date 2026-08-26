@@ -19,7 +19,7 @@
 
 use std::path::PathBuf;
 
-use engram_dashboard_core::agent::types::{
+use engram_dashboard_agent::types::{
     CLI_EXE_ENV, CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
 };
 
@@ -149,7 +149,7 @@ fn normalized_token(raw: &str) -> String {
 ///   거부한다. 그래서 판정은 **계열 토큰과의 인접**이고, 그 매치는 낱말 경계로 끊는다(`engram mailbox` 제외).
 /// ★동사까지 요구한다★: `engram mail` 만으로는 **실행되지 않는 조각**이라 "가르쳤다" 가 거짓이 된다.
 ///   그 조각을 교육으로 세면 `--cli-only` 요구 게이트가 만족돼, 동사를 모르는 B 의 미발신이 정상 negative 로
-///   채점된다 — 이 판정기가 막으려는 오귀속 그 자체다. 동사 목록은 core `CLI_MAIL_VERBS`(파서와 공유).
+///   채점된다 — 이 판정기가 막으려는 오귀속 그 자체다. 동사 목록은 agent `CLI_MAIL_VERBS`(파서와 공유).
 /// ★이 게이트가 **못 잡는** 것(알려진 한계 — 늘리려 하기 전에 읽을 것)★:
 ///   - **부정문**: `Do NOT use engram mail send; use MCP instead.` 는 여전히 "가르침" 으로 잡힌다. 문장의
 ///     부정 여부를 텍스트로 판정하는 것은 휴리스틱 늪이라 **의도적으로 시도하지 않는다**(사용자 결정
@@ -256,7 +256,7 @@ const REL_CLI_ONLY: &str = "prompts/agent-priming-cli.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
 /// ★cmd.exe 부패 위험 문자(ADR-0092, Codex #1+#5)★: Windows 에서 claude 인자는 `console_command`
-///   (core/backend/mod.rs)가 `cmd.exe /c claude …` 로 감싸 실행한다 — 이 경로가 `%VAR%` 를 **따옴표
+///   (agent/backend/mod.rs)가 `cmd.exe /c claude …` 로 감싸 실행한다 — 이 경로가 `%VAR%` 를 **따옴표
 ///   안에서도** 확장하고, `& ^ | < >` 를 셸 메타로 해석해 인자를 부패시킨다. 프라이밍 경로에 이 문자가
 ///   있으면 claude 가 엉뚱한/잘린 경로를 받으므로 아예 주입하지 않는다(None).
 ///   ★PRE-EXISTING·별도 follow-up(scope, ADR-0092)★: `console_command` 자체의 cmd.exe 이스케이프 결함은
@@ -377,7 +377,7 @@ impl PrimingProvider for FixedPrimingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_core::agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
+    use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
     use std::io::Write as _;
     use std::sync::Mutex;
 

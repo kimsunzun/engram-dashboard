@@ -15,9 +15,9 @@ path = "src/lib.rs"
 test-harness = []
 
 # ★의존성 상한(load-bearing — ADR-0110 결정 2 "완전 상호무지")★: 워크스페이스 crate 를 **하나도**
-#   넣지 않는다(core 포함). 외부 의존도 uuid·tracing 둘로 고정 — 그 밖은 std 로 푼다. 여기에 crate 를
+#   넣지 않는다(agent 포함). 외부 의존도 uuid·tracing 둘로 고정 — 그 밖은 std 로 푼다. 여기에 crate 를
 #   추가하려는 충동이 들면 그건 포트를 파야 한다는 신호다(호스트가 어댑터로 꽂는다).
 [dependencies]
-# 참여자 id(PeerId)·메시지 id 생성. core/protocol 과 동일 1.x(AgentId=Uuid 와 같은 바닥 타입).
+# 참여자 id(PeerId)·메시지 id 생성. agent/protocol 과 동일 1.x(AgentId=Uuid 와 같은 바닥 타입).
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"

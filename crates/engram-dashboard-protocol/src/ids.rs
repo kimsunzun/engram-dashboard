@@ -1,12 +1,12 @@
 use ts_rs::TS;
 
-/// core 의 `AgentId = uuid::Uuid` 와 동일 표현.
+/// agent 의 `AgentId = uuid::Uuid` 와 동일 표현.
 pub type AgentId = uuid::Uuid;
 
-/// 현 core 의 profile id 와 동일.
+/// 현 agent 의 profile id 와 동일.
 pub type ProfileId = uuid::Uuid;
 
-/// core `preset::PresetId` 와 동일 표현(ADR-0061).
+/// agent `preset::PresetId` 와 동일 표현(ADR-0061).
 pub type PresetId = uuid::Uuid;
 
 /// side-effect command 의 idempotency 키(설계 §3). 데몬이 짧은 TTL dedup table 로 중복 흡수.

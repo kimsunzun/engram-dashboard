@@ -5,7 +5,7 @@
 //!   명령 버스 배달의 1단계(`command_delivery`). 셋 다 [`call_daemon_command`] 하나로 들어오므로 입구
 //!   검문(ADR-0157)을 건너뛰는 표면이 없다. 표가 슬롯에 안 꽂혀 있으면 두 라우트는 503 이고 배달은
 //!   1단계 미스다.
-//! ★선언은 여기 없다★ — `agent.*` 의 계약은 core 가 소유하고(ADR-0155 결정 1: 선언이 사는 곳이 곧
+//! ★선언은 여기 없다★ — `agent.*` 의 계약은 agent 가 소유하고(ADR-0155 결정 1: 선언이 사는 곳이 곧
 //!   주인이다) 이 파일은 그 선언에 데몬의 실물(매니저 · 명부 통지 팬아웃)을 꽂기만 한다. 데몬 자기
 //!   명령(`mail.*`)이 생기면 그때 선언 블록이 이 crate 로 들어온다.
 //!
@@ -17,11 +17,11 @@
 
 use std::sync::Arc;
 
+use engram_dashboard_agent::commands::{make_table, RosterChanged};
+use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_command::{
     CommandDecl, CommandError, CommandFuture, CommandTable, Effect, ErrorCode,
 };
-use engram_dashboard_core::agent::commands::{make_table, RosterChanged};
-use engram_dashboard_core::agent::manager::AgentManager;
 use futures_util::FutureExt as _;
 
 use crate::command_delivery::LocalCommands;
@@ -31,12 +31,12 @@ use super::mcp_server::{CommandTableSlot, RosterBroadcastSlot};
 /// `agent.*` 표에 데몬 실물을 꽂는다.
 ///
 /// ★blocking 계약이 그대로 딸려 온다★: 핸들러 본문은 프로필 락을 쥔 채 디스크를 쓰고 resume 조기
-///   종료를 폴링한다(core `make_table` doc). 그래서 이 표는 [`call_daemon_command`] 로만 부르고, 그
+///   종료를 폴링한다(agent `make_table` doc). 그래서 이 표는 [`call_daemon_command`] 로만 부르고, 그
 ///   호출은 blocking 풀 위에 있어야 한다.
 /// ★`broadcast` 가 값이 아니라 **슬롯**인 이유(load-bearing)★: 명부 통지 팬아웃은 연결 레지스트리에서
 ///   파생돼 이 표보다 **뒤에** 조립된다. 조립 시점의 값을 받으면 그때 비어 있던 슬롯이 프로세스 수명
 ///   내내 "통지 없음" 으로 굳고, 증상은 에러도 로그도 없이 **명부를 바꿔도 트리가 옛 명부를 보여
-///   주는 것**이다(core `RosterChanged` 포트 doc). 슬롯을 받으면 읽는 시점이 호출 때로 밀려 **표 조립
+///   주는 것**이다(agent `RosterChanged` 포트 doc). 슬롯을 받으면 읽는 시점이 호출 때로 밀려 **표 조립
 ///   순서**는 그 증상을 만들 수 없다 — 인자 형태가 순서 규율을 산문 대신 타입으로 지고 있다.
 ///   ★단 이게 닫는 건 조립 순서뿐이다★: 서버가 뜨고 나서 이 슬롯이 채워지기 전에 도착한 변경 요청은
 ///   여전히 통지를 건너뛴 채 성공(ok)으로 응답한다 — 그 창은 슬롯을 늦게 채우는 조립이 있는 한 남는다.
@@ -62,7 +62,7 @@ pub fn make_daemon_table(
 ///   `check_args` 가 통과시키고, 그 관용이 홉 간 additive 진화를 살린다(TRD §4-③ · 그 함수 doc).
 ///
 /// ★blocking 함수다(호출자 계약)★: 이 표의 핸들러는 전부 blocking 이다 — resume 모드의 조기 종료를 약
-///   3초 폴링하고, 이름 변경·계층 이동은 프로필 락을 쥔 채 디스크에 저장한다(core `make_table` doc).
+///   3초 폴링하고, 이름 변경·계층 이동은 프로필 락을 쥔 채 디스크에 저장한다(agent `make_table` doc).
 ///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 제어 라우트는
 ///   `mcp_server::control_agent_handler` 의 `spawn_blocking`, 배달은 `command_delivery::run_locally` 가
 ///   그 자리다.
@@ -193,14 +193,14 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use engram_dashboard_command::testing::block_on;
-    use engram_dashboard_command::CommandError;
-    use engram_dashboard_core::agent::preset::{Preset, PresetRegistry, PresetStore};
-    use engram_dashboard_core::agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
-    use engram_dashboard_core::agent::session_tracker::{SessionTracker, TrackerConfig};
-    use engram_dashboard_core::agent::types::{
+    use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
+    use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+    use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
+    use engram_dashboard_agent::types::{
         AgentId, AgentInfo, AgentStatus, StatusSink, CLI_AGENT_VERBS,
     };
+    use engram_dashboard_command::testing::block_on;
+    use engram_dashboard_command::CommandError;
     use serde_json::json;
 
     use super::super::agent::RosterBroadcast;
@@ -279,7 +279,7 @@ mod tests {
         call(table, "agent.new", json!({ "cwd": "C:/work/probe" })).expect("등록 성공");
     }
 
-    /// ★CLI 동사 명단에서 기대값을 **파생**한다★ — 손으로 적으면 core 에 동사가 늘어도 이 단언이 옛
+    /// ★CLI 동사 명단에서 기대값을 **파생**한다★ — 손으로 적으면 agent 에 동사가 늘어도 이 단언이 옛
     ///   명단을 그대로 통과시킨다. 선언 없이 늘어난 동사는 CLI 가 부를 수 없는 채로 남는다.
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {

@@ -26,7 +26,7 @@ const { join } = require('node:path')
 const ROOT = process.cwd()
 
 const BUILD_SCRIPT = 'build-client-shell.mjs'
-// 클라이언트 셸을 직접 짓는 형태만 잡는다 — `-p engram-dashboard-daemon`·`-core` 등 형제 crate 는
+// 클라이언트 셸을 직접 짓는 형태만 잡는다 — `-p engram-dashboard-daemon`·`-agent` 등 형제 crate 는
 //   정당하므로 이름 뒤에 이어지는 문자가 없을 때만 매치한다.
 const BARE_CLIENT_BUILD = /cargo\s+build\b[^\n]*-p\s+engram-dashboard(?![-\w])/
 
