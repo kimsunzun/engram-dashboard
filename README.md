@@ -12,8 +12,8 @@
 > 개발 중입니다. 현재는 Windows와 Claude Code만 지원합니다.
 
 <p align="center">
-  <a href="https://youtu.be/40I0b4Sf5cI">
-    <img src="https://img.youtube.com/vi/40I0b4Sf5cI/hqdefault.jpg" alt="Engram Dashboard 시연 영상" width="640">
+  <a href="https://youtu.be/C48aNPskxLo">
+    <img src="https://img.youtube.com/vi/C48aNPskxLo/hqdefault.jpg" alt="Engram Dashboard 시연 영상" width="640">
   </a>
   <br>
   <em>▶ 시연 영상 (약 5분 25초)</em>
@@ -21,10 +21,10 @@
 
 | 구간 | 내용 |
 |---|---|
-| [0:00](https://youtu.be/40I0b4Sf5cI) | 클로드코드 JSON · 터미널 띄우기 |
-| [0:36](https://youtu.be/40I0b4Sf5cI?t=36) | 창과 슬롯 배치 |
-| [2:10](https://youtu.be/40I0b4Sf5cI?t=130) | 데몬 테스트 |
-| [2:59](https://youtu.be/40I0b4Sf5cI?t=179) | 에이전트 제어와 오케스트레이션 |
+| [0:00](https://youtu.be/C48aNPskxLo) | 클로드코드 JSON · 터미널 띄우기 |
+| [0:36](https://youtu.be/C48aNPskxLo?t=36) | 창과 슬롯 배치 |
+| [2:10](https://youtu.be/C48aNPskxLo?t=130) | 데몬 테스트 |
+| [2:59](https://youtu.be/C48aNPskxLo?t=179) | 에이전트 제어와 오케스트레이션 |
 
 ## 현재 구현된 것
 
