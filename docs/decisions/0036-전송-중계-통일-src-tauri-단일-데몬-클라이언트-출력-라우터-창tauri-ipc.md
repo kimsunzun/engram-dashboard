@@ -1,7 +1,7 @@
 # ADR-0036: 전송 중계 통일 — src-tauri 단일 데몬 클라이언트 + 출력 라우터 (창=Tauri IPC)
 
-- 상태: 확정 (2026-06-27, 근거: `/research` deep 보고서 + 사용자 결정)
-- 관련: ADR-0035(레이아웃 권위=src-tauri — 이 결정의 권위 짝)·ADR-0020(단일 프로토콜 + transport-중립 dispatch core·swappable carrier — 본 ADR이 carrier 토폴로지를 개정)·ADR-0029(daemon-only·앱=데몬 클라이언트)·ADR-0011(agentClient 제어표면)·ADR-0028(이벤트버스 단일 push) · `docs/research/multi-window-layout-authority-topology-research-2026-06-27.md` · step-log S14
+- 상태: 확정 (2026-06-27, 근거: `/research` deep 보고서 + 사용자 결정) · 부분 폐기 by ADR-0179 (데몬이 보는 연결 수)
+- 관련: ADR-0035(레이아웃 권위=src-tauri — 이 결정의 권위 짝)·ADR-0020(단일 프로토콜 + transport-중립 dispatch core·swappable carrier — 본 ADR이 carrier 토폴로지를 개정)·ADR-0029(daemon-only·앱=데몬 클라이언트)·ADR-0011(agentClient 제어표면)·ADR-0028(이벤트버스 단일 push) · `docs/research/multi-window-layout-authority-topology-research-2026-06-27.md` · step-log S14 · Amended by ADR-0179 (데몬이 보는 연결 수)
 
 ## 맥락
 ADR-0035로 레이아웃 권위가 src-tauri로 오면서 토폴로지 불일치가 드러났다. 현행은 **각 창(WebView)이 데몬에 WS 직접 연결**(`wsTransport.ts`가 브라우저 WebSocket으로 데몬 attach; src-tauri는 데몬 위치만 알려줄 뿐 데이터 경로 밖). 그런데 레이아웃은 src-tauri 경유, 에이전트 출력만 창↔데몬 직결이면 ① 토폴로지 비일관 ② 라우팅 중복(src-tauri가 이미 "어느 창이 어느 에이전트를 보는지" 레이아웃 테이블을 쥐는데 각 창이 재유도) ③ 같은 에이전트를 N창이 보면 데몬 구독 N개·출력 N중복(원격 데몬이면 네트워크로 N배).
