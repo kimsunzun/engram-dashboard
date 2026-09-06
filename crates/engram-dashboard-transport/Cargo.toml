@@ -1,0 +1,40 @@
+[package]
+name = "engram-dashboard-transport"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard 재사용 전송 lib — 프레임 경계·요청/응답 상관·스트림 살림·연결 수명·상대 N개 명부. 타입 seam 은 `Wire` 제네릭, 전송·시간은 dyn. 워크스페이스 crate 의존 0(ADR-0177)."
+
+[lib]
+name = "engram_dashboard_transport"
+path = "src/lib.rs"
+
+# ★`default = []` — 사유는 `net` 과 같다: 조용한 회귀보다 시끄러운 실패★. 하네스가 필요한 소비자가
+#   `features = ["test-support"]` 를 명시로 켠다(선례 = `engram-dashboard-command`).
+#   ★이 저장소에서 빈 default 의 실이득을 넘겨 읽지 말 것★ — feature 합집합은 cargo 호출 1회 단위라
+#   루트 빌드에서는 어차피 켜진다. 얻는 것은 **소비자 쪽 실수가 컴파일 오류로 말하는 것**이다.
+# ★TRD §11 이 든 `ws` feature 는 아직 없다★ — WS 어댑터(`ws.rs`)가 이번 범위 밖이라(TRD §2 파일표에서
+#   유일하게 빠진 파일) 뒤에 아무것도 없는 feature 가 된다. 빈 feature 는 `--all-features` 게이트에
+#   아무 코드도 더하지 않으면서 "구현이 있다" 는 인상만 준다. 어댑터를 들이는 커밋이 그 feature 와
+#   `tokio-tungstenite = { version = "0.26", optional = true }` 를 함께 세운다(버전은 워크스페이스 핀).
+[features]
+default = []
+test-support = []
+
+# ★워크스페이스 crate 를 여기 적지 않는다★ — ADR-0177 결정 1(재사용 lib)의 실물이 이 빈 자리다.
+#   기계 강제 = lib.rs 헤더의 게이트 1(해석된 의존 그래프를 읽는다 — 매니페스트 텍스트 grep 이 아니다).
+[dependencies]
+# rt = 상대마다 감독 태스크 + 연결마다 reader 태스크 spawn · sync = mpsc(나가는 큐·인바운드 한 줄)·
+#   watch(PeerState)·oneshot(대기 슬롯) · time = `SystemClock::sleep` · macros = `select!` 와 `#[tokio::test]`.
+# ★`rt-multi-thread` 를 넣지 않는다★ — 이 crate 에 런타임 빌더도 `flavor = "multi_thread"` 도 없고,
+#   감독 태스크는 `rt` 만으로 뜬다. 소비자가 멀티스레드 런타임을 쓰는 것은 그쪽 feature 선택이다.
+tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
+# `BoxFuture` — dyn seam(`Dialer`·`LinkTx`·`LinkRx`·`Clock`)이 `async fn` in trait 을 못 써서 수동 박싱한다
+#   (net 의 `frame_port` 가 같은 이유로 같은 형태다). `with_deadline` 의 `select` 도 여기서 온다.
+futures-util = "0.3"
+
+# ★들이지 않은 것과 그 이유(TRD §11)★:
+#   tracing — 사건 스트림(`event.rs`)이 그 자리다. 대가 = 소비자가 사건을 안 읽는 동안 흔적이 0.
+#   serde/serde_json — 직렬화는 `Wire` 몫이다.
+#   thiserror — 오류 타입이 적어 `Display` 를 손으로 쓴다(net 도 같다).
+#   rand — 지터 난수원은 `Clock::now()` 하위 나노초 + `PeerId` 해시다(선례 = agent 의 profile.rs).
+#   uuid — `Tag`·`StreamKey` 가 제네릭이라 이 crate 는 uuid 를 보지 않는다.
