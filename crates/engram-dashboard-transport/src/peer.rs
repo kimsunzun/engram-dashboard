@@ -1878,7 +1878,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_pending_request_does_not_hang_when_reconnect_then_exhausts_the_budget() {
-        let (mut h, _endpoint) = live().await;
+        let (h, _endpoint) = live().await;
         let pending = spawn_request(&h.peer, 12);
         settle().await;
 
@@ -2005,7 +2005,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_request_deadline_still_fires_under_load() {
-        let (mut h, endpoint) = live().await;
+        let (h, endpoint) = live().await;
         let pending = spawn_request(&h.peer, 31);
         settle().await;
         let feeder = flood(&endpoint);

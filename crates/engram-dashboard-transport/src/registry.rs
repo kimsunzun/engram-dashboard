@@ -528,7 +528,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_flooding_peer_does_not_sever_a_healthy_peer() {
-        let mut f = Fixture::new(Policy {
+        let f = Fixture::new(Policy {
             inbound_queue: 2,
             ..Policy::default()
         });
