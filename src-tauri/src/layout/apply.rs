@@ -30,6 +30,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
@@ -442,10 +443,10 @@ pub fn set_slot_content(
 // 않는다**(하드 롤백 없음). 에이전트는 데몬에 살아 있고 목록 조회로 재부착 가능하다 — 스폰 뒤 모든
 // early-return 은 `alive_err` 로 생존 agent id 를 박아 invisible 에이전트를 막는다(락 획득 실패 포함).
 //
-// ## ★backend — 아는 낱말은 흘려보내고 모르는 낱말만 막는다★
+// ## ★backend — 두 축으로 막는다: 모르는 낱말 · 이 표면이 안 만드는 백엔드★
 // 데몬 스폰 wire 에 backend 칸이 생겼으므로(`SpawnByCwd.backend`) 요청은 이제 **데몬까지 흐른다**. 그래서
-// 명시된 값을 거부할 이유가 없어졌다 — 예전의 전량 거부는 「고를 칸이 wire 에 없다」를 근거로 서 있었고
-// 그 근거가 죽었다(ADR-0058 폐기 대상).
+// **wire 가 아는 낱말이라는 이유만으로** 거부할 근거는 죽었다 — 예전의 전량 거부는 「고를 칸이 wire 에
+// 없다」 위에 서 있었다(ADR-0058 폐기 대상). 남는 거절은 둘이고 근거가 서로 다르다(모르는 낱말 · 아래 정책).
 // ★그래도 게이트를 통째로 걷지 않는다★: 오탈자(`codx`)를 그냥 흘리면 데몬이 그것을 모르는 낱말로 거절할
 // 때 **스폰 왕복 한 번을 낭비한 뒤**에야 알려지고, 옛 데몬을 만나면 그 칸째 무시돼 조용히 다른 백엔드가
 // 뜬다. ADR-0058 이 지키려던 성질(호출자가 원한 것과 다른 에이전트를 조용히 받지 않는다)은 살아 있고,
@@ -455,11 +456,31 @@ pub fn set_slot_content(
 // 갈린다.
 // ★미지정은 여기서 안 막는다★ — 부재의 거절은 데몬이 지고(어느 칸을 채우라는 문구까지 데몬이 낸다),
 // 셸이 그것을 흉내 내면 같은 규칙이 두 곳에 살게 된다.
+//
+// ## ★그 그물 뒤에 축이 하나 더 있다 — 아는 낱말이어도 이 표면이 지금 만드나★
+// 위 그물이 「그런 백엔드가 있나」를 묻는다면 아래 게이트는 「**사람이 아닌 호출자**가 그것을 만들어도
+// 되나」를 묻는다. 두 축이 갈리는 실물이 codex 다: 이 저장소가 아는 정당한 백엔드이고 사람이 트리에서
+// 고르는 문은 그대로 열려 있는데, 이 문(LLM 제어 표면)으로는 지금 안 만든다.
+// ★두 거절을 한 문구로 뭉치지 말 것★ — 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.
 /// 오탈자 그물 — ★어휘를 손으로 적지 않는다★. 판정도 「무엇이 통하는가」 문구도 wire enum 자신에게서
 /// 나오므로(serde 의 unknown-variant 오류가 기대 낱말을 나열한다) 여기와 데몬이 갈릴 수 없다.
 fn parse_backend(word: &str) -> Result<AgentBackendKind, String> {
     serde_json::from_value::<AgentBackendKind>(serde_json::Value::String(word.to_string()))
         .map_err(|e| format!("backend '{word}' 를 모른다({e}). 스폰 안 함."))
+}
+
+/// 오탈자 그물 + LLM 표면 정책. ★판정은 여기 없다★ — 정본은
+/// [`engram_dashboard_agent::commands::llm_creation_refusal`] 한 곳이고 `agent.new` 도 같은 표를 본다
+/// (사용자 결정 2026-09-07 · TRD S21 §6-G). 두 문이 함께 열리는지를 재는 자리 =
+/// `tests/layout_apply.rs::both_creation_doors_read_one_backend_policy`.
+fn gate_backend(word: &str) -> Result<AgentBackendKind, String> {
+    let kind = parse_backend(word)?;
+    match llm_creation_refusal(word) {
+        None => Ok(kind),
+        Some(reason) => Err(format!(
+            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함."
+        )),
+    }
 }
 
 pub async fn spawn_into(
@@ -476,7 +497,7 @@ pub async fn spawn_into(
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
-        Some(word) => Some(parse_backend(word)?),
+        Some(word) => Some(gate_backend(word)?),
     };
     if tab.is_none() && slot.is_some() {
         return Err(

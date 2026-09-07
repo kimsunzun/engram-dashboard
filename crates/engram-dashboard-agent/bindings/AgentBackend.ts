@@ -11,5 +11,7 @@
  * **`agents.json` 에 그대로 적힌다**. 새 빌드가 새 kind 를 쓴 프로필을 저장하고 나면 옛 빌드는 그
  * 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다** — 그 빌드에서
  * 에이전트가 전부 사라진다(persistence `FileProfileStore::load`). 넓힐 때 그 이주를 함께 설계할 것.
+ * ★**왜** 좁은지와 **언제** 넓어지는지는 [`LLM_BACKEND_POLICY`] 가 진다★ — 그 표를 두 번째 생성
+ * 문(`agent.spawnInto`)도 본다.
  */
 export type AgentBackend = "Claude";

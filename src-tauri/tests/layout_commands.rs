@@ -476,9 +476,10 @@ fn the_table_holds_exactly_the_declared_commands() {
 #[test]
 fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     // ★이름 수가 안 늘어도 올라간다★ — 세대 4 는 `ui.refresh` 의 **답 모양**이, 세대 5 는
-    //   `agent.spawnInto` 의 `backend` 가 받는 **어휘**가 바뀐 세대다(둘 다 선언이라 올린다). 아래 선언
-    //   수가 그대로인 것이 그 구분의 실물이다.
-    assert_eq!(CATALOG_VERSION, 5);
+    //   `agent.spawnInto` 의 `backend` 가 받는 **어휘**가, 세대 6 은 그 칸의 **정책**(아는 낱말 하나를 이
+    //   표면이 안 만든다)이 바뀐 세대다(셋 다 선언이라 올린다). 아래 선언 수가 그대로인 것이 그 구분의
+    //   실물이다.
+    assert_eq!(CATALOG_VERSION, 6);
     assert_eq!(COMMAND_SPECS.len(), 17);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,

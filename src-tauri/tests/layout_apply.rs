@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use engram_dashboard_agent::commands::{llm_creation_refusal, AgentNewArgs, LLM_BACKEND_POLICY};
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
@@ -1055,12 +1056,15 @@ async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
 }
 
 /// 아는 낱말은 **포트까지 그대로 간다** — 이 줄이 초록이면 ADR-0058 의 전량 거부가 실제로 걷힌 것이다.
+///
+/// ★한때 여기 있던 codex 두 줄은 지워진 게 아니라 옮겨 갔다★ — 그 낱말은 이제 이 문에서 정책으로
+/// 거절되므로(아래 `both_creation_doors_read_one_backend_policy`) 「통과」를 재는 이 목록에 설 수 없다.
+/// 공백 다듬기는 claude 로 그대로 잰다.
 #[tokio::test]
 async fn spawn_into_forwards_a_known_backend() {
     for (word, expected) in [
         ("claude", AgentBackendKind::Claude),
-        ("codex", AgentBackendKind::Codex),
-        (" codex ", AgentBackendKind::Codex),
+        (" claude ", AgentBackendKind::Claude),
     ] {
         let w = World::new();
         let agent = Uuid::new_v4();
@@ -1086,6 +1090,137 @@ async fn spawn_into_forwards_a_known_backend() {
             &[Some(expected)],
             "{word}"
         );
+    }
+}
+
+// ── ★두 생성 문이 한 정책 표를 본다★ ─────────────────────────────────────────────────────────
+//
+// Phase 2 는 두 문을 **함께** 연다 — 한쪽만 열리면 「`agent.new` 로는 못 만드는데 `agent.spawnInto` 로는
+// 만든다」가 되고, 그게 이 게이트가 막으려던 상태 그대로다(실제로 그 모양이 한 번 있었다: wire 에
+// backend 칸이 생기면서 spawnInto 만 codex 를 통과시켰다).
+// ★이 시험이 재는 것은 두 목록이 오늘 우연히 같은지가 아니라 **같은 출처에서 나오는지**다.★
+
+/// wire 백엔드 전량. ★손으로 채우지만 빈칸이 조용히 남지 않는다★ — 변형이 늘면 `wire_slot` 의 match 가
+/// 컴파일 에러를 내고, 슬롯을 늘리면 이 배열 길이가 안 맞아 다시 컴파일 에러다(코어
+/// `backend::tests::BACKEND_VARIANTS` 와 같은 수법).
+const WIRE_BACKENDS: [AgentBackendKind; 2] = [AgentBackendKind::Claude, AgentBackendKind::Codex];
+
+fn wire_slot(kind: AgentBackendKind) -> usize {
+    match kind {
+        AgentBackendKind::Claude => 0,
+        AgentBackendKind::Codex => 1,
+    }
+}
+
+/// wire 철자 — 손으로 적지 않고 enum 자신에게서 받는다(`spawn_into` 가 받는 낱말이 바로 이것이다).
+fn wire_word(kind: AgentBackendKind) -> String {
+    serde_json::to_value(kind)
+        .expect("wire 직렬화")
+        .as_str()
+        .expect("unit variant 는 문자열")
+        .to_string()
+}
+
+/// `agent.new` 가 **실제로 광고하는** backend 낱말 — 선언 스키마에서 읽는다. 손으로 적으면 이 시험이
+/// 세 번째 목록이 되어, 재려던 바로 그 갈림을 자기가 만든다.
+fn advertised_new_backends() -> Vec<String> {
+    let schema: serde_json::Value =
+        serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
+    schema["properties"]["backend"]["anyOf"]
+        .as_array()
+        .expect("Option 칸은 anyOf")
+        .iter()
+        .filter_map(|branch| branch.get("enum"))
+        .flat_map(|values| values.as_array().expect("enum 배열").clone())
+        .map(|value| value.as_str().expect("문자열").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn both_creation_doors_read_one_backend_policy() {
+    // ① wire 백엔드 전량이 정책 표에 **선언돼** 있다. 빠진 낱말은 fail-closed 로 닫히지만 그건 「아직 안
+    //    정했다」이지 「닫기로 정했다」가 아니다 — 그 둘을 구별하지 않으면 표가 조용히 낡는다.
+    let mut declared = [false; WIRE_BACKENDS.len()];
+    for kind in WIRE_BACKENDS {
+        let word = wire_word(kind);
+        assert!(
+            LLM_BACKEND_POLICY
+                .iter()
+                .any(|policy| policy.word.eq_ignore_ascii_case(&word)),
+            "wire 백엔드 '{word}' 에 LLM 표면 정책이 선언되지 않았다"
+        );
+        declared[wire_slot(kind)] = true;
+    }
+    assert!(
+        declared.iter().all(|d| *d),
+        "슬롯이 빈 채 지나갔다: {declared:?}"
+    );
+
+    // ② `agent.new` 가 받는 집합 == 정책이 여는 집합. 철자는 대소문자만 다르다(선언 어휘 `Claude` vs
+    //    wire `claude` — 그 차이의 사유는 두 enum 의 doc 이 진다).
+    let mut opened: Vec<String> = LLM_BACKEND_POLICY
+        .iter()
+        .filter(|policy| policy.refusal.is_none())
+        .map(|policy| policy.word.to_ascii_lowercase())
+        .collect();
+    let mut advertised: Vec<String> = advertised_new_backends()
+        .iter()
+        .map(|word| word.to_ascii_lowercase())
+        .collect();
+    assert!(
+        !advertised.is_empty(),
+        "광고가 비면 이 시험이 무장 해제된다"
+    );
+    opened.sort();
+    advertised.sort();
+    assert_eq!(
+        advertised, opened,
+        "두 문이 갈렸다 — `agent.new` 의 `AgentBackend` 어휘와 `LLM_BACKEND_POLICY` 가 여는 집합은 같아야 한다"
+    );
+
+    // ③ `agent.spawnInto` 가 그 정책대로 **실제로** 움직인다 — 목록 대조만으로는 게이트를 통째로 걷어내도
+    //    초록이다.
+    for kind in WIRE_BACKENDS {
+        let word = wire_word(kind);
+        let w = World::new();
+        let agent = Uuid::new_v4();
+        let spawner = Spawner::ok(&w.state, agent);
+
+        let out = apply::spawn_into(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            &spawner,
+            MAIN_WINDOW_LABEL,
+            None,
+            None,
+            Some(word.clone()),
+            "C:/tmp".to_string(),
+        )
+        .await;
+
+        match llm_creation_refusal(&word) {
+            None => {
+                let id = out.unwrap_or_else(|e| panic!("{word}: 정책이 연 백엔드가 막혔다 — {e}"));
+                assert_eq!(id, agent.to_string(), "{word}");
+                assert_eq!(&*spawner.backends.lock().unwrap(), &[Some(kind)], "{word}");
+            }
+            Some(reason) => {
+                let err = out.expect_err("정책이 닫은 백엔드가 통과했다");
+                assert!(
+                    err.contains(reason),
+                    "{word}: 거절이 사유를 안 싣는다 — {err}"
+                );
+                assert!(err.contains("스폰 안 함"), "{word}: {err}");
+                assert_eq!(spawner.calls(), 0, "{word}: ★스폰 전에 거부★");
+                // ★두 거절이 뭉치면 안 된다★ — 모르는 낱말 쪽 문구는 「모른다」로 시작한다. 뭉치면
+                //   호출자가 있지도 않은 오탈자를 고치려 든다.
+                assert!(
+                    !err.contains("를 모른다"),
+                    "{word}: 정책 거절이 오탈자 거절 문구로 뭉쳤다 — {err}"
+                );
+            }
+        }
     }
 }
 

@@ -47,6 +47,8 @@ declare_commands! {
     /// **`agents.json` 에 그대로 적힌다**. 새 빌드가 새 kind 를 쓴 프로필을 저장하고 나면 옛 빌드는 그
     /// 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다** — 그 빌드에서
     /// 에이전트가 전부 사라진다(persistence `FileProfileStore::load`). 넓힐 때 그 이주를 함께 설계할 것.
+    /// ★**왜** 좁은지와 **언제** 넓어지는지는 [`LLM_BACKEND_POLICY`] 가 진다★ — 그 표를 두 번째 생성
+    /// 문(`agent.spawnInto`)도 본다.
     enum AgentBackend {
         Claude,
     }
@@ -255,6 +257,78 @@ impl AgentCommandHost for AgentManager {
 ///   기본을 주면 "만들었는데 화면이 다르다" 가 된다.
 /// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
 pub const NEW_AGENT_OUTPUT_FORMAT: ClaudeOutputFormat = ClaudeOutputFormat::StreamJson;
+
+// ── LLM 제어 표면의 백엔드 생성 정책(사용자 결정 2026-09-07 · TRD S21 §6-G) ──────────────────────
+//
+// ★정책의 집은 여기 하나다★ — 이 판정을 묻는 문이 둘이고 서로 다른 crate 에 산다:
+//   ① `agent.new`(이 파일) — 선언 어휘 `AgentBackend` 가 어휘 자체로 좁혀 서고, 그 위에 이 표가 한 겹
+//      더 선다(어휘를 넓히면서 정책을 안 넓히는 편집을 런타임에서 멈춘다).
+//   ② `agent.spawnInto`(셸 `src-tauri/src/layout/apply.rs`) — wire 낱말을 들고 와 이 표에 묻는다.
+// 두 문이 각자 목록을 들면 「한 문으로는 만드는데 다른 문으로는 못 만드는 백엔드」가 생긴다. 그 어긋남을
+// 재는 자리 = `src-tauri/tests/layout_apply.rs::both_creation_doors_read_one_backend_policy`.
+//
+// ★왜 타입이 아니라 낱말로 묻나★ — ②가 들고 오는 타입은 wire enum `protocol::AgentBackendKind` 인데 이
+// crate 는 protocol 을 의존하지 않는다(그 금지의 정본 = 이 crate `Cargo.toml` 의 `[dependencies]` 주석).
+// 두 crate 가 공유할 수 있는 것은 낱말뿐이고, 철자가 갈리는 것은 위 시험이 잡는다.
+
+/// 정책 표의 한 줄.
+pub struct LlmBackendPolicy {
+    /// 백엔드 낱말. **대소문자를 무시하고** 비교한다 — 이 crate 의 선언 어휘는 `Claude`, wire 어휘는
+    /// `claude` 로 적히고(그 차이의 사유는 두 enum 의 doc 이 이미 진다) 같은 백엔드를 두 줄로 적을
+    /// 이유가 없다.
+    pub word: &'static str,
+    /// `None` = 이 표면이 만든다. `Some` = 안 만든다 — **사유와 여는 시점**을 함께 싣는다.
+    pub refusal: Option<&'static str>,
+}
+
+/// ★LLM 제어 표면이 어느 백엔드를 만들 수 있나 — 그 정책의 유일한 자리★.
+///
+/// Phase 2 에서 codex 를 열 때 손대는 곳이 여기다. ★그 한 줄만으로는 안 끝난다★ — `AgentBackend` 어휘에
+/// `Codex` 를 더하고 [`backend_command`] 의 짝을 채워야 `agent.new` 가 실제로 만든다(그 enum 의 doc 이
+/// 경고하는 `agents.json` 이주가 거기 매달린다). 이 표만 먼저 열고 그 둘을 안 하면 위 시험이 빨개진다 —
+/// 그게 이 표를 여는 사람에게 남는 유일한 안내다.
+pub const LLM_BACKEND_POLICY: &[LlmBackendPolicy] = &[
+    LlmBackendPolicy {
+        word: "claude",
+        refusal: None,
+    },
+    LlmBackendPolicy {
+        word: "codex",
+        refusal: Some(CODEX_NEEDS_A_HUMAN_AT_THE_TRUST_MODAL),
+    },
+];
+
+/// codex 가 **이 표면에서만** 닫혀 있는 사유. ★사유와 여는 시점을 함께 적는다★ — 반년 뒤 이 거절을
+/// 만난 사람이 무엇을 기다리는지 문구 하나로 알아야 한다.
+const CODEX_NEEDS_A_HUMAN_AT_THE_TRUST_MODAL: &str = "codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(키를 넣어도 안 먹는다 — 실측 2026-09-07). 지금 열면 「만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성 ▶ 코덱스 터미널」). 여는 시점 = Phase 2, codex 신뢰 확인 모달 처리가 정해질 때(사용자 결정 2026-09-07 · TRD S21 §6-G).";
+
+/// 표에 없는 낱말의 사유 — ★없음은 열림이 아니라 닫힘이다★. 새 백엔드가 정책 선언 없이 조용히 열리면
+/// 이 게이트는 아무것도 안 지킨 셈이 된다.
+const NO_POLICY_DECLARED: &str = "이 백엔드에는 LLM 제어 표면 정책이 아직 선언되지 않았다 — 선언 전에는 닫힘이다(engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 에 한 줄을 더할 것).";
+
+/// 이 낱말의 백엔드를 **LLM 제어 표면이 지금 만들 수 있나** — `None` = 만든다, `Some(사유)` = 안 만든다.
+///
+/// ★「모르는 낱말」과는 다른 축이다★ — 여기서 `Some` 이 나오는 값도 이 저장소가 아는 정당한 백엔드이고,
+/// 사람이 쓰는 문에서는 그대로 만들어진다. 막는 것은 **사람이 아닌 호출자**뿐이라, 두 거절을 한 문구로
+/// 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다. 호출자는 두 축을 각각 다른 문구로 낼 것.
+///
+/// 표에 없는 낱말도 `Some` 이다(fail-closed).
+pub fn llm_creation_refusal(backend_word: &str) -> Option<&'static str> {
+    LLM_BACKEND_POLICY
+        .iter()
+        .find(|policy| policy.word.eq_ignore_ascii_case(backend_word))
+        .map_or(Some(NO_POLICY_DECLARED), |policy| policy.refusal)
+}
+
+/// 선언 어휘의 낱말 — 정책 표에 물어보려면 낱말이 필요하다. `AgentBackend` 는 unit variant 뿐이라 serde
+/// 직렬화가 곧 그 낱말이고, 손으로 적으면 변형이 늘 때 조용히 어긋난다. 직렬화가 실패하면 빈 낱말이
+/// 되어 정책이 닫는다(fail-closed).
+fn backend_word(backend: &AgentBackend) -> String {
+    serde_json::to_value(backend)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
 
 /// 선언 어휘 → 실행 명령.
 ///
@@ -527,14 +601,21 @@ fn verb_new(
             stored
         }
     };
+    let backend = args.backend.clone().unwrap_or(AgentBackend::Claude);
+    let word = backend_word(&backend);
+    // ★두 생성 문이 같은 표를 본다★ — 오늘 이 갈래는 닿지 않는다(선언 어휘에 닫힌 값이 없어 닫힌 낱말은
+    //   그 전에 역직렬화가 반려한다). 그래도 두는 이유: 어휘를 넓히면서 [`LLM_BACKEND_POLICY`] 를 안
+    //   넓히는 편집이 **여기서** 멈춘다.
+    if let Some(reason) = llm_creation_refusal(&word) {
+        return Err(CommandError::invalid_argument(format!(
+            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
+        )));
+    }
     let stored = register(
         host,
         &cwd,
         name.map(str::to_string),
-        backend_command(
-            args.backend.unwrap_or(AgentBackend::Claude),
-            output_format(args.output_format),
-        ),
+        backend_command(backend, output_format(args.output_format)),
     )?;
     notify.roster_changed();
     Ok(AgentNewOk {
