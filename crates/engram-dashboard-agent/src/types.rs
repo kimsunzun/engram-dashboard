@@ -294,12 +294,12 @@ pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
 /// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
 ///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
 ///   agent 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
-///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
+///   backend/claude/ 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
 ///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
 /// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 이 *목록*을 넓히려면 명시적 결정(ADR-0094 개정).
 ///   주의: 2026-07-22 사용자 결정으로 스폰 자체는 `--permission-mode bypassPermissions`(auto) 하에 돈다 —
 ///   이 grant 는 지금 런타임 게이트가 아니라 **미래 공용 제약 레이어용 정책 표면 + 문서화**로 남는 것이다
-///   (backend/claude.rs 참조, step-log 백로그 "전 LLM 공용 제약 레이어").
+///   (backend/claude/ 참조, step-log 백로그 "전 LLM 공용 제약 레이어").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGrant {
     /// MCP 서버의 툴 1개. backend 가 `mcp__{server}__{tool}` 로 번역한다(claude).
@@ -310,7 +310,7 @@ pub enum ToolGrant {
 }
 
 /// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
-/// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude.rs 단독,
+/// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude/ 단독,
 /// ADR-0004). agent/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
@@ -319,7 +319,7 @@ pub struct ControlEndpoint {
     /// 이 (AgentId,epoch) 전용 bearer 토큰(HTTP Authorization 헤더에 실린다).
     /// ★보안★: 이 값은 로그에 찍지 않는다(mcp-config 파일에만 기록 — 파일은 revoke 시 삭제).
     pub token: String,
-    /// 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다). backend/claude.rs 가 이 파일에
+    /// 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다). backend/claude/ 가 이 파일에
     /// url+token 을 써서 `--mcp-config` 로 주입한다.
     /// ★Option = 부재를 타입으로 인코딩(ADR-0099)★: MCP-capable 백엔드(claude)면 `Some(path)`(mcp-config
     ///   물리 존재), 비-MCP 백엔드(codex/gemini stub)면 `None` — mcp-config 를 **아예 쓰지 않는다**(MCP
@@ -351,7 +351,7 @@ pub struct ControlEndpoint {
     pub mail_allowed: bool,
     /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
     /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
-    /// backend/claude.rs 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
+    /// backend/claude/ 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
     /// 파일을 **직접 읽음** — 데몬/agent 는 내용을 안 읽는다). MCP 와 직교하는 broker-주입 데이터지만,
     /// 데몬이 이미 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지
     /// 않는다.
@@ -362,7 +362,7 @@ pub struct ControlEndpoint {
     pub grants: Vec<ToolGrant>,
     /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
     /// 데몬이 provision 때 `<data_dir>/mcp-config/<id>-<epoch>.settings.json` 에 쓰고 revoke 때 지운다.
-    /// backend/claude.rs 가 `--settings <abs-path>` 로 번역한다(그 플래그 지식은 거기 단독 — ADR-0004).
+    /// backend/claude/ 가 `--settings <abs-path>` 로 번역한다(그 플래그 지식은 거기 단독 — ADR-0004).
     ///
     /// ★왜 필요한가(실측 2026-07-24)★: 유저 전역 설정의 `allowedMcpServers: []`(= 전면 차단)가 **스폰
     ///   에이전트에도 그대로 적용**돼 engram MCP 서버가 툴 목록에 뜨지 않았다. 이 조각이 그 세션에만

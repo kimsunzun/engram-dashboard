@@ -1,7 +1,7 @@
 //! 에이전트 프로필 — 재시작·세션 복원의 단일 진실원(single source of truth).
 //!
 //! 이 모듈은 의도적으로 transport·claude 중립이다. claude 전용 인자 조립
-//! (`--session-id` / `--resume`)은 `backend/claude.rs`가 맡고, 여기엔 "무엇을 실행하고
+//! (`--session-id` / `--resume`)은 `backend/claude/`가 맡고, 여기엔 "무엇을 실행하고
 //! 어떤 세션을 이어받을지"라는 중립 데이터만 둔다.
 //!
 //! tauri import 0 — 격리 규칙 준수.

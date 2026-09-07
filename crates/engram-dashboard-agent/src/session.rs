@@ -131,7 +131,7 @@ impl AgentSession {
     ///   **항상 Raw 바이트**로 transport에 넘긴다. transport는 바보 파이프라 형태를 모른다.
     ///   - Raw(터미널·shell): `encode`가 바이트를 그대로 복사 → 기존 경로와 **바이트 동일**.
     ///   - ClaudeStreamJson(json 모드): 텍스트를 claude 유저 JSON 라인으로 감싼다(escape·스키마는
-    ///     backend/claude.rs 단독 — session은 태그만 들고 형태를 모른다, ADR-0004 격리).
+    ///     backend/claude/ 단독 — session은 태그만 들고 형태를 모른다, ADR-0004 격리).
     ///
     /// ★호출 계약(FIX 6a) — json 모드에서 `1 write_input 호출 == 완결된 유저 턴 1개`★:
     ///   ClaudeStreamJson 인코더는 매 호출을 `{"type":"user",…}\n` 라인 **하나**로 감싼다. 즉 호출
@@ -158,7 +158,7 @@ impl AgentSession {
         //   라인(encode)과 (b) 입력-시점 합성 에코(input_echo_event) **양쪽에 같은 값**으로 넘긴다.
         //   json 모드에서 claude 가 replay 로 이 uuid 를 그대로 되울린다(실측). session 은 불투명 Uuid
         //   토큰만 알고 json 형태·uuid 부착 위치는 모른다(ADR-0004 격리 — 스키마 지식은
-        //   backend/claude.rs 단독). Raw(터미널) encoder 는 이 uuid 를 무시한다.
+        //   backend/claude/ 단독). Raw(터미널) encoder 는 이 uuid 를 무시한다.
         let msg_uuid = uuid::Uuid::new_v4();
         let encoded = self.encoder.encode(bytes, msg_uuid);
         self.transport.send_input(InputEvent::Raw(encoded))?;
@@ -168,7 +168,7 @@ impl AgentSession {
         //   유저 메시지가 화면에 안 뜬다. 그래서 send_input **성공 후**, encoder 가 json 모드면 동일한
         //   유저 이벤트를 즉시 core.emit 해 터미널의 즉시 에코를 흉내낸다(체감 반응성). 이후 claude 가
         //   되울린 replay 중복은 프론트 accumulator 가 uuid 로 dedup 한다(같은 msg_uuid) — decoder 는
-        //   억제하지 않고 uuid 를 실어 그대로 통과시킨다(backend/claude.rs). 과거/비매칭 uuid 의 user
+        //   억제하지 않고 uuid 를 실어 그대로 통과시킨다(backend/claude/). 과거/비매칭 uuid 의 user
         //   text(resume 재개분)는 dedup 되지 않아 전부 보존된다(vanish 회귀 제거).
         //   ★락 규율(ADR-0006)★: 새 락 없이 core.emit 재사용 — emit 이 replay/subscribers 락을 짧게만
         //   잡고 lock 밖 send 하는 규율을 그대로 탄다. send_input 성공 후 emit 이라 순서도 자연스럽다.

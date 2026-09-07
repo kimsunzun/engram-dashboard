@@ -206,7 +206,7 @@ fn backend_table() -> Vec<BackendRow> {
             declared: Declared {
                 // ★현재 stub 이 신고하는 값을 그대로 적는다 — 실측이 맞다고 도장 찍은 값이 아니다★:
                 //   TRD §4-2 는 `needs_session` 을 false 로 뒤집으라 한다(호출자가 sid 를 못 정한다).
-                //   Phase 1 이 codex.rs 를 고치면 이 항목이 빨개져 표 갱신을 강제한다 — 그것이 이 열의 일.
+                //   Phase 1 이 `backend/codex/` 를 고치면 이 항목이 빨개져 표 갱신을 강제한다 — 그것이 이 열의 일.
                 needs_session: true,
                 supports_control_channel: false,
                 accepts_mcp_config: false,

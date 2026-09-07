@@ -1,5 +1,9 @@
 //! CodexBackend — Codex CLI 전용 CommandSpec 산출 stub.
 //!
+//! ★이 폴더가 세우는 규칙 = codex 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
+//! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
+//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
+//!
 //! AgentCommand에 Codex variant가 없으므로 backend_for dispatch에서 이 backend로 라우팅되지
 //! 않는다. 이 파일은 구조 확보 목적의 stub이며, AgentCommand::Codex variant 추가와
 //! backend_for 매칭은 CLI spike 완료 후 별도 작업에서 확정한다.

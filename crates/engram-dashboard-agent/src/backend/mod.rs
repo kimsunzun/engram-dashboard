@@ -1,7 +1,11 @@
 //! AgentBackend — 백엔드별 명령 명세 산출 trait + 자유 함수 dispatch.
 //!
 //! transport(PtyTransport)는 claude/codex를 모른다. 누가 어떤 프로그램인지 아는 곳은
-//! 오직 backend/다.
+//! 오직 `backend/<이름>/` 폴더다.
+//!
+//! ★이 파일은 어느 백엔드의 항목도 이름으로 부르지 않는다★: 백엔드 이름이 적히는 자리는 **등록부**
+//! (`pub mod`·`pub use`·정적 싱글턴)와 **두 dispatch 표**(`backend_for` · `backend_for_encoder`)뿐이고,
+//! 백엔드별 지식은 전부 [`AgentBackend`] 메서드로만 나온다. 게이트는 `backend/claude/mod.rs` 헤더.
 //!
 //! tauri import 0.
 
@@ -83,8 +87,8 @@ pub trait AgentBackend: Send + Sync {
     /// cwd·env는 manager가 정규화한 값을 전달한다.
     ///
     /// `control`(ADR-0086): 데몬이 발급한 제어 채널 엔드포인트(추상 descriptor). 있으면 backend 가
-    ///   자기 프로그램 방식으로 명령줄에 주입한다(claude=`--mcp-config <path>` — 그 지식은 claude.rs
-    ///   단독, ADR-0004). None 이거나 제어 채널을 안 쓰는 backend(shell)면 무시한다.
+    ///   자기 프로그램 방식으로 명령줄에 주입한다(claude=`--mcp-config <path>` — 그 지식은
+    ///   `backend/claude/` 단독, ADR-0004). None 이거나 제어 채널을 안 쓰는 backend(shell)면 무시한다.
     fn build_spec(
         &self,
         command: &AgentCommand,
@@ -153,6 +157,66 @@ pub trait AgentBackend: Send + Sync {
     fn reads_messages(&self) -> bool {
         true
     }
+
+    /// 이 backend 가 `command` 에 대해 쓰는 **입력 인코딩 태그**. 세션이 spawn 때 한 번 받아 보관한다.
+    ///
+    /// ★왜 backend 인가(ADR-0004)★: "이 프로그램이 stdin 을 무엇으로 읽나" 는 프로그램별 지식이다.
+    ///   dispatch 층이 명령 모양을 직접 보고 태그를 고르면 그 지식이 공용 층으로 샌다.
+    /// ★기본값 = `Raw`★: 모르는 프로그램의 stdin 에 지어낸 봉투를 씌우면 그 프로그램은 입력을 통째로
+    ///   못 읽는다 — 그래서 선언하지 않은 backend 는 바이트를 그대로 통과시킨다.
+    // ADR-0004
+    // ADR-0044
+    fn input_encoder(&self, _command: &AgentCommand) -> InputEncoder {
+        InputEncoder::Raw
+    }
+
+    /// 텍스트 1턴을 이 backend 의 구조화 입력 라인으로 감싼다 — [`InputEncoder::encode`] 의 실물.
+    ///
+    /// `msg_uuid` 는 [`AgentBackend::input_echo_event`] 에 넘어가는 값과 **반드시 같다**(호출자가 한 번
+    /// 생성해 양쪽에 넘긴다 — dedup 키).
+    /// ★기본값 = 감싸지 않음★: `input_encoder` 가 `Raw` 인 backend 는 [`backend_for_encoder`] 가 `None` 을
+    ///   줘 이 경로를 아예 타지 않는다. 계약을 총(total)으로 두려는 자리채움이고, 불려도 `Raw` 와 같은
+    ///   바이트를 낸다.
+    fn wrap_input_turn(&self, text: &str, _msg_uuid: Uuid) -> Vec<u8> {
+        text.as_bytes().to_vec()
+    }
+
+    /// 입력 성공 직후 세션 층이 emit 할 입력-시점 유저 에코 이벤트. `None` = 만들지 않는다.
+    ///
+    /// ★이벤트 shape 는 그 backend 의 decoder 가 replay 에 대해 만드는 것과 같아야 한다★ — 프론트가
+    ///   uuid 로 둘을 합치므로 어긋나면 화면에 두 개로 남는다. 그 shape 는 구현체 소유다.
+    /// ★기본값 = 없음★: PTY 가 입력을 즉시 로컬 에코하는 채널은 합성 에코를 만들면 중복이 된다.
+    // ADR-0044
+    // ADR-0045
+    fn input_echo_event(&self, _text: &str, _msg_uuid: Uuid) -> Option<OutputEvent> {
+        None
+    }
+
+    /// pump→core 앞에 꽂히는 출력 정제 decoder. `None` = 바이트 직통.
+    ///
+    /// [`AgentBackend::input_encoder`] 의 출력 방향 짝 — 감싼 쪽이 푸는 쪽도 소유한다.
+    /// ★기본값 = 없음★: 선언하지 않은 backend 의 출력은 정제 없이 그대로 흐른다(터미널·평문 불변).
+    // ADR-0004
+    // ADR-0044
+    fn output_decoder(&self, _command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+        None
+    }
+
+    /// resume 스폰 시 이 명령의 과거 대화를 복원한 이벤트 목록. 빈 Vec = seed 안 함.
+    ///
+    /// transcript 의 파일 배치·포맷 지식은 전부 구현체 몫이다 — manager 는 이 호출만 하고 경로 규칙을
+    /// 모른다.
+    /// ★기본값 = 빈 Vec★: 선언하지 않은 backend 는 과거를 복원하지 않는다(fresh 버퍼 동작 불변).
+    // ADR-0004
+    // ADR-0079
+    fn resume_transcript_events(
+        &self,
+        _command: &AgentCommand,
+        _cwd: &std::path::Path,
+        _session_id: Uuid,
+    ) -> Vec<OutputEvent> {
+        Vec::new()
+    }
 }
 
 /// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
@@ -179,6 +243,19 @@ fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
     match c {
         AgentCommand::Claude { .. } => &CLAUDE_BACKEND,
         AgentCommand::Shell { .. } => &SHELL_BACKEND,
+    }
+}
+
+/// 인코딩 태그를 **소유한 backend**. `backend_for`(명령 축)의 인코더 축 짝이다 — 세션 층은 태그만 들고
+/// 명령은 갖고 있지 않아(소유권 분할) 여기서 되짚는다.
+///
+/// `None` = 그 태그에는 backend 지식이 없다(바이트 통과).
+/// ★백엔드 이름은 이 표와 바로 위 `backend_for`, 그리고 싱글턴 선언에만 적는다★ — 그 바깥에서 백엔드
+///   이름이 나오면 `backend/<이름>/` 폴더 격리가 샌 것이다(ADR-0004).
+fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
+    match e {
+        InputEncoder::Raw => None,
+        InputEncoder::ClaudeStreamJson => Some(&CLAUDE_BACKEND),
     }
 }
 
@@ -230,28 +307,27 @@ pub fn reads_messages(c: &AgentCommand) -> bool {
 ///
 /// ★설계 의도★: transport 는 항상 raw 바이트만 쓴다(바보 파이프 — ADR-0044). "텍스트 턴을
 /// claude JSON 라인으로 감싸는" 지식은 backend 소유다. session 은 이 enum(태그)만 들고, 실제
-/// 스키마는 `claude::wrap_user_turn` 안에만 산다(ADR-0004 격리 — session/transport 는 형태 모름).
+/// 스키마는 [`AgentBackend::wrap_input_turn`] 구현체 안에만 산다(ADR-0004 격리 — 이 모듈도 session 도
+/// transport 도 형태를 모른다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEncoder {
     /// 바이트 그대로 통과(PTY/터미널·shell). 기존 동작과 **바이트 동일**.
     Raw,
-    /// claude stream-json: 텍스트 1턴을 user JSON 라인(`\n` 종단)으로 감싼다(스키마=claude.rs).
+    /// claude stream-json: 텍스트 1턴을 user JSON 라인(`\n` 종단)으로 감싼다(스키마 = `backend/claude/`).
     ClaudeStreamJson,
 }
 
 impl InputEncoder {
     /// `msg_uuid`: 이 유저 턴의 메시지 uuid(replay dedup 키). ClaudeStreamJson 은 stdin user 라인에
-    ///   심어 claude 가 replay 시 그대로 되울리게 한다(uuid dedup 계약 — claude.rs wrap_user_turn).
+    ///   심어 claude 가 replay 시 그대로 되울리게 한다(uuid dedup 계약 = `backend/claude/`).
     ///   같은 write_input 이 이 uuid 를 input_echo_event 에도 넘겨 합성 에코와 replay 를 uuid 로 합친다.
     ///   Raw(터미널·shell)는 uuid 를 쓰지 않는다(무시) — 바이트 동일 보장 유지.
     pub fn encode(&self, bytes: &[u8], msg_uuid: Uuid) -> Vec<u8> {
-        match self {
-            InputEncoder::Raw => bytes.to_vec(),
-            // ※from_utf8_lossy(FIX 6b): 비-UTF8 입력은 U+FFFD 로 치환돼 손상될 수 있으나, json 모드
-            //   입력은 텍스트 챗 메시지라 UTF-8 이 전제다(MVP=텍스트 챗, ADR-0044) → 허용.
-            InputEncoder::ClaudeStreamJson => {
-                claude::wrap_user_turn(&String::from_utf8_lossy(bytes), msg_uuid)
-            }
+        match backend_for_encoder(*self) {
+            None => bytes.to_vec(),
+            // ※from_utf8_lossy(FIX 6b): 비-UTF8 입력은 U+FFFD 로 치환돼 손상될 수 있으나, 구조화 입력은
+            //   텍스트 챗 메시지라 UTF-8 이 전제다(MVP=텍스트 챗, ADR-0044) → 허용.
+            Some(b) => b.wrap_input_turn(&String::from_utf8_lossy(bytes), msg_uuid),
         }
     }
 
@@ -274,13 +350,7 @@ impl InputEncoder {
         bytes: &[u8],
         msg_uuid: Uuid,
     ) -> Option<crate::types::OutputEvent> {
-        match self {
-            InputEncoder::Raw => None,
-            InputEncoder::ClaudeStreamJson => Some(crate::types::OutputEvent::Structured {
-                kind: "user".to_string(),
-                json: claude::user_text_echo_json(&String::from_utf8_lossy(bytes), msg_uuid),
-            }),
-        }
+        backend_for_encoder(*self)?.input_echo_event(&String::from_utf8_lossy(bytes), msg_uuid)
     }
 
     /// 인코딩된 본문 뒤에 **별도 write** 로 한 번 더 내보내야 하는 제출(턴 시작) 바이트.
@@ -324,48 +394,35 @@ impl InputEncoder {
 pub const SUBMIT_PACING: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub fn input_encoder(c: &AgentCommand) -> InputEncoder {
-    if c.is_json_mode() {
-        InputEncoder::ClaudeStreamJson
-    } else {
-        InputEncoder::Raw
-    }
+    backend_for(c).input_encoder(c)
 }
 
 // ── 출력 정제(ADR-0044/0004/0045) — 입력 인코더의 대칭 짝 ──────────────────────────
 
 /// pump→core 앞에 꽂히는 출력 정제 decoder. None = 바이트 직통(터미널·평문 불변).
 ///
-/// ★대칭★: `input_encoder`(입력 방향)의 출력 방향 짝이다. 둘 다 "claude 스키마 지식"을
-/// backend/claude.rs 에만 두는 격리(ADR-0004) — session 은 encoder 태그만, transport 는
-/// `dyn OutputDecoder` 만 알고 claude 를 모른다. `Box<dyn OutputDecoder>` 반환이라 새 backend(codex 등)는
-/// 자기 decoder 를 여기 분기에 추가하면 된다(교체성).
+/// ★대칭★: `input_encoder`(입력 방향)의 출력 방향 짝이다. 판정도 decoder 실물도
+/// [`AgentBackend::output_decoder`] 가 소유하고 이 함수는 dispatch 뿐이다 — session 은 encoder 태그만,
+/// transport 는 `dyn OutputDecoder` 만 안다(ADR-0004). 새 backend 는 자기 폴더에서 그 메서드를 구현하면
+/// 되고 이 함수는 손대지 않는다(교체성).
 pub fn output_decoder(c: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
-    if c.is_json_mode() {
-        Some(Box::new(claude::ClaudeStreamDecoder::new()))
-    } else {
-        None
-    }
+    backend_for(c).output_decoder(c)
 }
 
 // ── ADR-0079: resume 시 `.jsonl` transcript → 과거 이벤트 seed (backend dispatch) ──────
 
-/// ADR-0079: resume 스폰 시 이 명령의 과거 대화를 복원한 `OutputEvent` 목록. json 모드 claude 만
-/// `.jsonl` transcript 를 읽어 seed 한다(터미널 claude 는 TUI 가 PTY repaint 로 복원하므로 불필요,
-/// shell 은 대화 개념 없음). 그 외 전부 빈 Vec(seed 안 함 = 기존 fresh 버퍼 동작 불변).
+/// ADR-0079: resume 스폰 시 이 명령의 과거 대화를 복원한 `OutputEvent` 목록. 빈 Vec = seed 안 함
+/// (기존 fresh 버퍼 동작 불변).
 ///
-/// ★claude 지식 격리(ADR-0004)★: transcript 경로(cwd→슬러그)·파싱은 claude.rs 단독. manager 는 이
-///   dispatch 만 부르고 파일 포맷·경로 규칙을 모른다. `output_decoder`(라이브 정제)의 resume 방향 짝.
+/// ★backend 지식 격리(ADR-0004)★: transcript 의 파일 배치·포맷·seed 가부 판정은 전부
+///   [`AgentBackend::resume_transcript_events`] 구현체 몫이고 이 함수는 dispatch 뿐이다. manager 도 이
+///   dispatch 만 부르고 경로 규칙을 모른다. `output_decoder`(라이브 정제)의 resume 방향 짝.
 pub fn resume_transcript_events(
     c: &AgentCommand,
     cwd: &std::path::Path,
     session_id: Uuid,
 ) -> Vec<crate::types::OutputEvent> {
-    match c {
-        AgentCommand::Claude { .. } if c.is_json_mode() => {
-            claude::read_transcript_events(cwd, session_id)
-        }
-        _ => Vec::new(),
-    }
+    backend_for(c).resume_transcript_events(c, cwd, session_id)
 }
 
 #[cfg(test)]
@@ -599,6 +656,59 @@ mod tests {
         assert!(
             covered.iter().all(|c| *c),
             "샘플이 안 닿은 variant 가 있다(그 variant 는 reads_messages 가 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
+        );
+    }
+
+    // ── 코덱 축 트립와이어: 새 variant·새 출력 모드는 입출력 코덱을 의식적으로 선언해야 한다 ──────────
+    //
+    // ★와일드카드를 추가하지 말 것★ — 이 축의 기본값(`Raw` · decoder 없음)은 둘 다 fail-open 이라
+    // 아무 선언 없이도 컴파일되고 조용히 초록이 된다. 그런데 구조화 stdin 을 요구하는 프로그램에 `Raw`
+    // 가 물리면 그 에이전트는 **입력을 통째로 못 읽고**, 런타임엔 아무 신호도 안 난다. `AgentCommand`
+    // variant 든 `ClaudeOutputFormat` 값이든 늘어나면 아래 match 가 컴파일 에러를 낸다.
+    //
+    // 채우는 법 — CLI spike 실측값으로:
+    //   ① input_encoder — 그 프로그램이 stdin 을 무엇으로 읽나(감쌀 게 없으면 `Raw`)
+    //   ② output_decoder 유무 — 출력이 구조화라 정제가 필요한가
+    //
+    // ★이 표가 덮지 않는 것 = resume transcript seed★: `resume_transcript_events` 도 같은 fail-open
+    //   기본값(빈 Vec)을 갖지만, 판정하려면 실제 transcript 파일이 있어야 해서 "seed 안 함" 과 "파일이
+    //   없어서 빈 Vec" 이 여기서 구별되지 않는다. 그쪽 회귀망은 `backend/claude/` 의 transcript 단위
+    //   테스트가 진다 — 여기 세 번째 열을 만들면 아무 것도 재지 않는 열이 하나 생길 뿐이다.
+    fn expected_codec_axis(c: &AgentCommand) -> (InputEncoder, bool) {
+        // (input_encoder, output_decoder 유무)
+        match c {
+            AgentCommand::Claude {
+                output_format: ClaudeOutputFormat::Terminal,
+                ..
+            } => (InputEncoder::Raw, false),
+            AgentCommand::Claude {
+                output_format: ClaudeOutputFormat::StreamJson,
+                ..
+            } => (InputEncoder::ClaudeStreamJson, true),
+            AgentCommand::Shell { .. } => (InputEncoder::Raw, false),
+        }
+    }
+
+    #[test]
+    fn codec_axis_is_consciously_declared_for_every_backend() {
+        let mut covered = [false; BACKEND_VARIANTS];
+        for c in &mail_eligibility_samples() {
+            covered[variant_slot(c)] = true;
+            let (expected_encoder, expects_decoder) = expected_codec_axis(c);
+            assert_eq!(
+                input_encoder(c),
+                expected_encoder,
+                "variant {c:?}: input_encoder 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+            );
+            assert_eq!(
+                output_decoder(c).is_some(),
+                expects_decoder,
+                "variant {c:?}: output_decoder 유무 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+            );
+        }
+        assert!(
+            covered.iter().all(|c| *c),
+            "샘플이 안 닿은 variant 가 있다(그 variant 는 코덱 축이 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
         );
     }
 

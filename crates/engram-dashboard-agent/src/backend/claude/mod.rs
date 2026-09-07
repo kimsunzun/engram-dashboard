@@ -1,8 +1,25 @@
 //! ClaudeBackend — claude CLI 전용 CommandSpec 산출.
 //!
-//! ★claude 지식 격리(ADR-0004)★: claude 플래그·env 규약 · stream-json 스키마 · `.jsonl` transcript
-//! 파일 배치 지식은 **이 파일 안에만** 둔다. generic 층(manager·backend dispatch)·transport·core 는
-//! 추상 descriptor 와 바이트만 나른다.
+//! ★이 폴더가 세우는 규칙 = claude 지식은 여기 안에만 산다(ADR-0004)★: claude 플래그·env 규약 ·
+//! stream-json 입출력 스키마 · `.jsonl` transcript 파일 배치 · 이어받기 실패 문구 · 턴 신호 매핑이
+//! 전부 이 폴더다. 바깥(manager · `backend/mod.rs` dispatch · transport · core)은 추상 descriptor 와
+//! 바이트만 나른다.
+//! ★파일이 아니라 폴더인 이유가 그것이다★ — 맨 `claude.rs` 는 "여기까지가 claude 다" 를 이름으로 말하지
+//! 못해서, 지식이 dispatch 로 새어도 아무도 위반으로 읽지 않는다. 실제로 샜다: `backend/mod.rs` 가 입력
+//! 인코딩·합성 에코·출력 decoder·transcript seed 넷을 이 모듈의 함수로 직접 불렀고, 한 파일에 살던
+//! 동안은 그것이 보이지 않았다.
+//!
+//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나★: 바깥이 새 지식을 필요로 하면
+//!   그 trait 에 메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라.
+//! ★격리 게이트(백엔드 폴더 넷 공통 — 이름만 바꿔 돌린다)★:
+//!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
+//!   ★히트를 세지 않는다★ — 각 히트가 `backend/mod.rs` 의 **등록부**(`pub use claude::ClaudeBackend;`)
+//!   인지 판정한다. 등록부와 dispatch 표는 이름을 적을 수밖에 없는 자리이고, 그 밖의 히트는 위반이다.
+//!   ★못 보는 것 — 부풀리지 말 것★: ① **vendor 이름을 안 달고 새는 지식**(매직 타임아웃·맨 `pid` 필드
+//!   처럼 이름이 없는 규약)은 애초에 안 걸린다 — 이 게이트가 재는 건 이름뿐이다 ② 백엔드 알파벳을 손으로
+//!   적으므로 **새 백엔드는 누가 그 이름을 게이트에 더할 때까지 안 보인다** ③ 별칭 import
+//!   (`use crate::backend::claude as c;` → `c::foo()`)와 `#[path]` 재배치는 `claude::` 를 안 남겨
+//!   빠져나간다.
 //!
 //! tauri import 0.
 
@@ -10,9 +27,10 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::backend::{console_command, AgentBackend, TurnClassifier};
+use crate::backend::{console_command, AgentBackend, InputEncoder, TurnClassifier};
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+use crate::transport::OutputDecoder;
 use crate::turn::TurnSignal;
 use crate::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
@@ -292,6 +310,55 @@ impl AgentBackend for ClaudeBackend {
             return Some(AgentFailureKind::NoConversationToResume);
         }
         None
+    }
+
+    /// ※알려진 미확인 → step ②(vendor 이름 제거)가 손댈 자리: `is_json_mode` 는
+    ///   `AgentCommand::Claude{output_format: StreamJson}` 을 그대로 되묻는 술어라 **claude 지식이
+    ///   `profile` 에 남아 있다**. 그 단계에서 판정이 이 폴더 안으로 접히면 바뀌는 것은 아래 세 본문뿐이고
+    ///   trait 시그니처는 그대로다 — 그래서 술어를 인자로 올리지 않았다.
+    fn input_encoder(&self, command: &AgentCommand) -> InputEncoder {
+        if command.is_json_mode() {
+            InputEncoder::ClaudeStreamJson
+        } else {
+            InputEncoder::Raw
+        }
+    }
+
+    fn wrap_input_turn(&self, text: &str, msg_uuid: Uuid) -> Vec<u8> {
+        wrap_user_turn(text, msg_uuid)
+    }
+
+    /// ★조건 없이 `Some`★: 이 메서드는 `input_encoder` 가 고른 태그를 통해서만 불린다
+    /// ([`crate::backend::backend_for_encoder`]) — 터미널 모드는 `Raw` 라 여기 닿지 않는다. 여기서
+    /// 모드를 다시 보면 같은 판정이 두 집에 살게 된다.
+    fn input_echo_event(&self, text: &str, msg_uuid: Uuid) -> Option<OutputEvent> {
+        Some(OutputEvent::Structured {
+            kind: "user".to_string(),
+            json: user_text_echo_json(text, msg_uuid),
+        })
+    }
+
+    fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+        if command.is_json_mode() {
+            Some(Box::new(ClaudeStreamDecoder::new()))
+        } else {
+            None
+        }
+    }
+
+    /// 터미널 claude 는 TUI 가 PTY repaint 로 복원하므로 seed 하지 않는다 — 하면 화면에 두 벌이 된다.
+    // ADR-0079
+    fn resume_transcript_events(
+        &self,
+        command: &AgentCommand,
+        cwd: &std::path::Path,
+        session_id: Uuid,
+    ) -> Vec<OutputEvent> {
+        if command.is_json_mode() {
+            read_transcript_events(cwd, session_id)
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -1065,7 +1132,7 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
 mod tests {
     use super::*;
 
-    // ── backend/claude.rs 단위 테스트 ─────────────────────────────────────────
+    // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], None)
