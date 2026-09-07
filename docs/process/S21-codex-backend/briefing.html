@@ -348,6 +348,11 @@
       <li><b>새 타입의 통과 시험 =</b> 양쪽 번역기가 다 낼 수 있나. 한쪽만 내면 중립 타입이 아니다.</li>
     </ul>
     <div class="rule">꾸밈이 죄가 아니다. <b>칸 없이 꾸민 것</b>이 죄다.</div>
+    <div class="warnbox">
+      <b>단 번역기를 고르는 갈림길은 백엔드 계약 밖에 있다</b> — 백엔드에 구현을 얹는 형태가 아니라,
+      “claude인가”를 묻는 판정 하나가 입력·출력·전송을 동시에 고른다. codex 번역기를 붙이려면
+      <b>그 판정 자체를 고쳐야</b> 한다. 2단계 청구서다.
+    </div>
   </section>
 
   <!-- 6 -->
@@ -406,6 +411,10 @@
     <h2>세 단계로 나눈다</h2>
     <div class="steps">
       <div class="step">
+        <span class="n">0단계</span>
+        <span class="what"><b>터전 + 실측. 배선보다 먼저.</b> <code>cargo test</code>로 도는 백엔드 계약 시험대를 세우고, 거기서 <b>codex를 실제로 띄워</b> 우리가 도움말로만 아는 것들을 잰다. 백엔드가 늘 때마다 질문표에 열이 하나 는다.</span>
+      </div>
+      <div class="step">
         <span class="n">1단계</span>
         <span class="what"><b>대화형 화면으로 띄우기.</b> 번역기 0줄. 스폰·명부·wire 칸·화면 붙기만 증명한다. 어느 얼굴로 가든 이 넷은 똑같이 필요하다.</span>
       </div>
@@ -417,11 +426,8 @@
         <span class="n">3단계</span>
         <span class="what"><b>프론트에 샌 해석 회수.</b> claude 쪽 정리라 codex와 독립이다. 끝나면 두 백엔드를 같은 코드가 그린다.</span>
       </div>
-      <div class="step">
-        <span class="n">상시</span>
-        <span class="what"><b>백엔드 계약 테스트 자리.</b> <code>cargo test</code>로 도는 한 자리를 열어 두고 백엔드가 늘 때마다 줄을 더한다. CLI 버전이 올라갈 때 우리 가정이 깨졌는지 여기서 잡는다.</span>
-      </div>
     </div>
+    <div class="rule">0단계에는 게이트가 달려 있다.<br>실측이 <b>다섯 관측 중 하나라도</b> 내면 배선을 시작하지 않고 설계를 다시 연다.</div>
     <div class="warnbox">
       1단계의 대부분은 <b>저쪽 transport 작업과 파일이 하나도 안 겹친다.</b> 접합부(wire 칸·데몬 스폰·프론트 스폰)만 겹친다.
     </div>
