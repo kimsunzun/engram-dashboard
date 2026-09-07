@@ -302,6 +302,81 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard-net --all-features
 
+      # ADR-0177: 재사용 전송 lib(`transport` — 신설). 워크스페이스 crate 의존 0 이 존재 이유라
+      #   위 crate 들과 같은 단독 기립 축으로 확인한다 — 기대값의 정본은 그 crate lib.rs 헤더
+      #   「격리 게이트」의 게이트 ④이고 아래 세 스텝(4a·4b·4d)은 부르기만 한다. 4c 는 같은 헤더의
+      #   게이트 ⑤(실소켓 스위트가 비지 않았나)를 부른다.
+      # ★net 게이트 5 와 똑같은 이유로 두 줄이다 — 한 줄로 줄이지 말 것★: 이 crate 도 `default = []` 라
+      #   맨 명령은 `test-support` 뒤의 하네스를 컴파일 대상에서 아예 빼고(가려진 코드는 오류를 내지
+      #   않는다), 반대로 `--all-features` 쪽만 두면 "소비자가 feature 없이 이 crate 를 쓸 수 있나" 를
+      #   아무도 안 본다. 워크스페이스 회귀는 feature 합집합이 cargo 호출 1회 단위라 항상 ON 쪽만 본다.
+      # ★feature 목록을 손으로 박아 `--all-features` 를 대체하지 말 것★ — TRD §11 의 `ws` 어댑터가
+      #   들어오면 `--all-features` 쪽이 그 optional 서드파티와 실소켓 테스트까지 컴파일한다. 그게 의도다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md
+      #   「빌드·검증 명령」 — 그 플래그가 겨냥하는 사내 보안 에이전트 조건이 러너에 없고, 낮추면 CI 만
+      #   느려진다). 로컬 명령에도 이 crate 에는 안 붙는다 — 자식 프로세스를 하나도 안 띄운다.
+      - name: 'transport gate 4a: cargo test -p engram-dashboard-transport (features off)'
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-transport
+
+      - name: 'transport gate 4b: cargo test -p engram-dashboard-transport --all-features'
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-transport --all-features
+
+      # ★위 4a/4b 는 「명령이 성공했나」만 본다 — 스위트가 통째로 비어도 그대로 초록이다★. `tests/` 의
+      #   실소켓 파일 셋은 각각 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]` 뒤에
+      #   살아서, 그 조건이 거짓이 되면(feature 이름 오타·개명·다른 feature 로 접기) 세 바이너리가
+      #   **테스트 0개로 컴파일되고 통과한다.** 그래서 이 스텝은 종료코드를 믿지 않고 **기대하는 것의
+      #   이름과 최소 개수를 CI 가 직접 말한다**(선례 = ts-rs 바인딩 게이트가 vacuous 였던 사건,
+      #   ADR-0131 「적대 리뷰가 적출한 것」 1). 기대값의 정본 = 그 crate lib.rs 헤더의 게이트 ⑤.
+      # `-- --list` 는 하네스가 자기 목록만 찍고 아무것도 돌리지 않는다 — `: test` 로 끝나는 줄 하나가
+      #   테스트 하나다(`: bench` 는 벤치라 안 센다). 패턴 끝의 `\s*` 는 줄끝 CR 방어다.
+      # ★기대값은 「1개 이상」이고 실수를 올리지 않는다★ — 테스트를 더하거나 합칠 때마다 빨개지면 개수의
+      #   정본이 둘이 된다. 이 게이트가 겨냥하는 실패는 **0개**다.
+      # ★잡는 것 / 못 잡는 것★ — 잡는다: 타깃 소실(`--test <이름>` 이 0 아닌 종료코드로 죽는다) · 파일
+      #   수준 cfg 가 거짓(목록이 0줄) · 파일 삭제. 못 잡는다: 남은 테스트가 **무엇을 재나**(본문이 빈
+      #   `#[tokio::test]` 도 1개로 센다) · 개별 테스트의 `#[ignore]`(목록에는 그대로 오른다) · 스위트
+      #   **안쪽**에서 개별 테스트에 걸린 `#[cfg]`.
+      - name: 'transport gate 4c: socket suites are not hollowed out (named targets + non-empty)'
+        shell: bash
+        run: |
+          for t in ws_dial ws_reject ws_write_deadline; do
+            set +e
+            out=$(cargo test --locked -p engram-dashboard-transport --all-features --test "$t" -- --list)
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "FAIL — cargo test --test $t exited $rc (타깃이 사라졌나·개명했나)"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+            set +e
+            n=$(printf '%s\n' "$out" | rg -c ': test\s*$')
+            rgrc=$?
+            set -e
+            if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+            if [ "$rgrc" -eq 1 ]; then n=0; fi
+            echo "$t: $n test(s) listed"
+            if [ "$n" -lt 1 ]; then
+              echo "FAIL — $t 이 테스트 0개로 컴파일됐다 — 파일 수준 cfg(feature ws + test-support)가 거짓이다"
+              printf '%s\n' "$out"
+              exit 1
+            fi
+          done
+          echo "PASS — 세 실소켓 스위트가 각각 1개 이상 등재됐다"
+
+      # ★소비자의 운영 조합(`features = ["ws"]`)을 컴파일하는 유일한 레인이다★ — 4a 는 feature 0개라
+      #   어댑터를 **아예 컴파일하지 않고**, 4b 는 `--all-features` 라 테스트 전용 `test-support` 를 **켠 채**
+      #   컴파일한다. 그래서 어댑터가 `crate::testing`(그 feature 뒤에 사는 하네스)을 참조하면 위 두 레인은
+      #   둘 다 초록이고 **소비자 빌드에서만 깨진다** — `features = ["ws"]` 는 소비자의 정당한 운영 선택이다.
+      # ★`check` 이고 `test` 가 아닌 것이 요점이다★ — 이 조합에는 `test-support` 가 없어 돌 테스트가 0개이고,
+      #   0개를 도는 `cargo test` 는 위 4c 가 막는 「비었는데 성공」을 새로 하나 만든다.
+      # 재는 것은 컴파일 성립 하나뿐이다 — 어댑터의 런타임 동작은 4b 가 잰다.
+      # 기대값의 정본 = 그 crate lib.rs 헤더 「격리 게이트」의 게이트 ④ 셋째 줄.
+      - name: 'transport gate 4d: cargo check -p engram-dashboard-transport --features ws (consumer combo)'
+        shell: bash
+        run: cargo check --locked -p engram-dashboard-transport --features ws
+
       # 워크스페이스 전체 빌드(회귀 명령이 제외한 src-tauri 까지 여기서 컴파일된다).
       - name: cargo build
         shell: bash
@@ -569,6 +644,83 @@ jobs:
           f=src-tauri/src/daemon_client/replay_flight.rs
           if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (또 이사했나)"; exit 1; fi
           hits=$(rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::" "$f")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # ADR-0177: 재사용 전송 lib(`transport` — 신설)의 격리 게이트 셋. 기대값·근거·「지우지 말 것」의
+      #   정본은 `crates/engram-dashboard-transport/src/lib.rs` 헤더의 「격리 게이트」 절이고 여기는
+      #   부르기만 한다 — 기대값을 이 워크플로에 다시 해설해 두 번째 정본을 만들지 않는다.
+      #   그 헤더의 게이트 ④(세 feature 조합이 각각 컴파일된다)와 ⑤(실소켓 스위트가 비지 않았나)는
+      #   컴파일이 필요해 backend 잡에 있다(`transport gate 4a`/`4b`/`4c`/`4d`).
+      # ★셋이 각각 다른 축이라 하나로 줄이지 말 것★ — ①은 워크스페이스 멤버만 세므로 서드파티 `tauri` 를
+      #   그냥 통과시키고(그 축이 ②), ③은 crate **안쪽** 층 경계라 ①②가 아예 안 본다.
+      # 종료코드 반전·`set +e` 함정은 이 잡 위쪽 공통 주석 그대로다.
+
+      # 형태·플래그는 messaging·command·base 상한 게이트와 같다(줄이면 rename·`[dependencies.<이름>]`
+      #   테이블 형·`[build-dependencies]`·비활성 target·optional 이 전부 정상 Cargo 문법으로 샌다).
+      # ★이 게이트에만 경로 존재 사전점검이 없다 — 필요가 없어서다★: rg 가 읽는 것은 파일이 아니라
+      #   cargo tree 의 stdout 이고, 패키지가 사라지거나 개명하면 `cargo tree -p` 자체가 0 이 아닌
+      #   종료코드로 죽어 아래 첫 분기가 잡는다. 아래 ②③은 경로를 직접 훑으므로 사전점검이 있다.
+      - name: 'transport gate 1: direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-transport --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
+
+      # ADR-0003 의 격리 불변식. ★위 ①이 이 축을 덮는다고 읽지 말 것★ — ①은 `rg "^engram-dashboard"` 로
+      #   워크스페이스 멤버만 세므로 서드파티 `tauri` 는 그 게이트를 그대로 통과한다.
+      # ★`test -d` 를 지우지 말 것★ — crate 를 옮기거나 개명하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이
+      #   조용히 사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다).
+      - name: 'transport gate 2: no `use tauri` in the transport crate'
+        shell: bash
+        run: |
+          set +e
+          d=crates/engram-dashboard-transport/src
+          if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+          hits=$(rg "^\s*use tauri" "$d/")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # 순수 층(`pending.rs`·`stream.rs`·`machine.rs`)이 런타임·소켓·워크스페이스 crate 를 안 무는 벽.
+      # ★같은 crate 안이라 컴파일러 backstop 이 없다★ — `tokio` 한 줄이 그냥 컴파일되므로 이 정규식이
+      #   유일한 벽이다. 형태의 근거는 위 `replay_flight` 순수성 게이트 주석과 같다(접두
+      #   `^(?:[^/]|/[^/])*?` = 「아직 `//` 를 안 만났다」 → 주석 밖만 잡아 헤더 자기인용이 오탐되지 않고 ·
+      #   `use` 줄만 앵커하면 인라인 완전경로 `tokio::spawn(…)` 한 줄에 뚫리며 · `\b`+`::` 가 정당한 이웃
+      #   `std::time::Instant` 를 가른다).
+      # ★파일이 사라져도 매치는 0 = PASS 라 세 파일의 존재를 먼저 본다★(`-d` 가 아니라 `-f` — 대상이 파일이다).
+      # ★`$files` 를 따옴표로 감싸지 말 것★ — 세 경로로 갈라져 rg 인자가 돼야 한다(경로에 공백이 없다).
+      - name: 'transport gate 3: pure layer isolation (pending/stream/machine)'
+        shell: bash
+        run: |
+          set +e
+          files='crates/engram-dashboard-transport/src/pending.rs crates/engram-dashboard-transport/src/stream.rs crates/engram-dashboard-transport/src/machine.rs'
+          for f in $files; do
+            if [ ! -f "$f" ]; then echo "FAIL — 게이트 대상 파일이 없다: $f (개명했나·이사했나)"; exit 1; fi
+          done
+          hits=$(rg "^(?:[^/]|/[^/])*?\b(tokio|futures_util|futures|engram_dashboard_[a-z_]+|std::net)::" $files)
           rc=$?
           set -e
           case "$rc" in

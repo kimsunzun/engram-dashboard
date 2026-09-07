@@ -12,13 +12,16 @@ path = "src/lib.rs"
 #   `features = ["test-support"]` 를 명시로 켠다(선례 = `engram-dashboard-command`).
 #   ★이 저장소에서 빈 default 의 실이득을 넘겨 읽지 말 것★ — feature 합집합은 cargo 호출 1회 단위라
 #   루트 빌드에서는 어차피 켜진다. 얻는 것은 **소비자 쪽 실수가 컴파일 오류로 말하는 것**이다.
-# ★TRD §11 이 든 `ws` feature 는 아직 없다★ — WS 어댑터(`ws.rs`)가 이번 범위 밖이라(TRD §2 파일표에서
-#   유일하게 빠진 파일) 뒤에 아무것도 없는 feature 가 된다. 빈 feature 는 `--all-features` 게이트에
-#   아무 코드도 더하지 않으면서 "구현이 있다" 는 인상만 준다. 어댑터를 들이는 커밋이 그 feature 와
-#   `tokio-tungstenite = { version = "0.26", optional = true }` 를 함께 세운다(버전은 워크스페이스 핀).
 [features]
 default = []
 test-support = []
+# ★`tokio/net` 은 오늘 이 줄 없이도 켜진다★ — `tokio-tungstenite` 0.26.2 의 default feature `connect` 가
+#   `tokio/net` 을 함의한다(그 매니페스트: `connect = ["stream", "tokio/net", "handshake"]`). 그래도
+#   명시로 적는다: 받는 쪽(`ws::WsListener`)이 `TcpListener`·`TcpStream` 을 직접 쓰는데 무조건 의존의
+#   tokio 는 `rt`·`sync`·`time`·`macros` 뿐이라, 안 적으면 **남의 default feature 에 조용히 얹힌 상태**가
+#   된다. TLS 결정 등으로 아래 `tokio-tungstenite` 에 `default-features = false` 를 걸면 그 경로가 끊긴다.
+#   (선례 = `net` 도 tokio 의 `net` 을 자기 목록에 적는다 — 같은 `tokio-tungstenite` 0.26 을 물고서다.)
+ws = ["dep:tokio-tungstenite", "tokio/net"]
 
 # ★워크스페이스 crate 를 여기 적지 않는다★ — ADR-0177 결정 1(재사용 lib)의 실물이 이 빈 자리다.
 #   기계 강제 = lib.rs 헤더의 게이트 1(해석된 의존 그래프를 읽는다 — 매니페스트 텍스트 grep 이 아니다).
@@ -31,6 +34,13 @@ tokio = { version = "1", features = ["rt", "sync", "time", "macros"] }
 # `BoxFuture` — dyn seam(`Dialer`·`LinkTx`·`LinkRx`·`Clock`)이 `async fn` in trait 을 못 써서 수동 박싱한다
 #   (net 의 `frame_port` 가 같은 이유로 같은 형태다). `with_deadline` 의 `select` 도 여기서 온다.
 futures-util = "0.3"
+
+# 실소켓 WS 어댑터(`ws.rs`) 전용 — 거는 쪽 `connect_async`, 받는 쪽 `accept_async`, 그리고 `Message`.
+# ★버전 0.26 은 워크스페이스 핀이다★ — `net`(`crates/engram-dashboard-net/Cargo.toml`)·`daemon`·
+#   `src-tauri` 가 전부 그 판이고, 같은 crate 두 판이 한 그래프에 서는 것 자체가 결함이다.
+# default feature(`connect` + `handshake`) 를 그대로 쓴다 — 거는 쪽과 받는 쪽이 각각 그 둘을 요구한다.
+#   TLS 는 켜지 않는다(로컬 평문 WS — `net` 도 같다).
+tokio-tungstenite = { version = "0.26", optional = true }
 
 # ★들이지 않은 것과 그 이유(TRD §11)★:
 #   tracing — 사건 스트림(`event.rs`)이 그 자리다. 대가 = 소비자가 사건을 안 읽는 동안 흔적이 0.

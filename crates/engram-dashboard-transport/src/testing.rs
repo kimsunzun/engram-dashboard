@@ -230,8 +230,13 @@ impl MemoryEndpoint {
         let _ = self.to_client.send(ServerMsg::Fail(LinkError::new(why)));
     }
 
-    /// 켜면 클라의 쓰기가 멈춘다. ★끄면 **실제로 깨어난다**★ — 깨울 길 없는 `pending()` 으로 막으면
-    /// 그 멈춤은 장식이고, 그 위에서 통과한 테스트는 아무것도 재지 않은 것이다.
+    /// 켜면 클라의 쓰기가 멈춘다 — `send`·`ping`·`close` **셋 다**다(실소켓에서 그 셋이 한 통로를
+    /// 쓰므로). ★끄면 **실제로 깨어난다**★ — 깨울 길 없는 `pending()` 으로 막으면 그 멈춤은 장식이고,
+    /// 그 위에서 통과한 테스트는 아무것도 재지 않은 것이다.
+    ///
+    /// ★막힌 채로 통로가 버려지는 테스트는 걸린 닫기까지 계산해야 한다★ — `drop_link` 의 닫기가
+    /// 여기서 멈추면 그 뒤 단계(백오프 대기·유실 신고)가 시작되지 않는다. 푸는 길은 둘이다: 이것을
+    /// 끄거나, 시계를 `write_deadline` 만큼 더 밀어 그 닫기를 시한으로 자르거나.
     ///
     /// ★커널 버퍼가 있어야 재는 「상대가 안 읽을 때」 는 이것으로 못 잰다★ — 그건 실소켓 몫이고,
     /// 여기서 재는 것은 **우리 쪽 시한·큐 로직**이다.
@@ -277,8 +282,14 @@ impl LinkTx for MemTx {
         })
     }
 
+    /// ★닫기도 `send`/`ping` 과 **같은 통로**로 나가므로 같이 막힌다★ — 실소켓에서는 닫기 프레임이
+    /// 잘린 프레임의 나머지 뒤에 줄을 서고, 그것이 감독의 `drop_link` 가 `write_deadline` 만큼 먹는
+    /// 자리다. ★이 `wait_writable` 을 지우지 말 것★ — 없던 동안 하네스는 「이미 막힌 쓰기 뒤에 닫기가
+    /// 걸린다」를 표현할 수 없었고, 그래서 `drop_link` 가 그 동안 제어를 못 듣는 결함이 무검으로
+    /// 남아 있었다(2026-09-07).
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            self.wait_writable().await;
             let _ = self.put(ClientMsg::Close(close));
         })
     }
@@ -689,6 +700,32 @@ mod tests {
             .expect("멈춤을 풀었는데도 쓰기가 안 깨어났다")
             .unwrap();
         assert_eq!(endpoint.frames(), vec![Frame::Text("payload".into())]);
+    }
+
+    // ── H1b: 멈춘 **닫기**도 실제로 깨어나야 한다 ──
+    #[tokio::test]
+    async fn clearing_the_stall_actually_wakes_the_parked_close() {
+        let net = MemoryNetwork::new();
+        let (mut tx, _rx) = net.dial(&Address::new("mem://x")).await.unwrap();
+        let endpoint = net.accept().unwrap();
+        endpoint.stall_writes(true);
+
+        let mut close = Box::pin(tx.close(Close::going_away()));
+        assert!(
+            futures_util::poll!(close.as_mut()).is_pending(),
+            "★닫기도 막혀야 한다★ — 안 막히면 하네스가 실소켓의 모양을 표현하지 못한다"
+        );
+        assert!(endpoint.drain().is_empty());
+
+        endpoint.stall_writes(false);
+        // ★유계 대기★ — 깨울 길 없는 멈춤으로 되돌아가면 매달리는 대신 깨끗이 실패해야 한다.
+        tokio::time::timeout(Duration::from_secs(5), close)
+            .await
+            .expect("멈춤을 풀었는데도 닫기가 안 깨어났다");
+        assert!(matches!(
+            endpoint.drain().as_slice(),
+            [ClientMsg::Close(c)] if c.code == crate::frame::CloseCode::GOING_AWAY
+        ));
     }
 
     // ── H2: 버려진 타이머가 쌓이지 않고, 깨우는 순서가 시한 순이다 ──

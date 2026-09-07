@@ -374,6 +374,7 @@ pub(crate) fn spawn_peer<W: Wire>(cfg: PeerConfig<W>) -> Peer<W> {
         inbound: cfg.inbound,
         data_rx,
         ctl_rx,
+        held_ctl: None,
         state_tx,
         generations: cfg.generations,
         generation,
@@ -436,6 +437,12 @@ struct Supervisor<W: Wire> {
     inbound: mpsc::Sender<Incoming<W>>,
     data_rx: mpsc::Receiver<PeerCmd<W>>,
     ctl_rx: mpsc::UnboundedReceiver<Ctl>,
+    /// `select!` 로 이미 큐에서 꺼냈지만 아직 [`Input`] 으로 못 옮긴 제어 신호 한 개.
+    ///
+    /// ★[`Supervisor::drop_link`] 때문에 있다★ — 그 함수는 `()` 를 돌려주므로 이긴 신호를 후속 입력으로
+    /// 넘길 자리가 없고, 그냥 버리면 「닫아라」가 사라져 감독이 영영 안 접힌다. [`Supervisor::drain_ctl`]
+    /// 이 큐보다 이것을 먼저 읽어 되돌려 놓는다.
+    held_ctl: Option<Ctl>,
     state_tx: watch::Sender<PeerState>,
     /// 이 이름표가 발행한 세대의 공용 계수기(D1).
     generations: Arc<AtomicU64>,
@@ -514,8 +521,14 @@ impl<W: Wire> Supervisor<W> {
     ///
     /// ★연달아 온 `ReconnectNow` 를 하나로 접는 것이 요점이다★ — 접지 않으면, 셸이 감독보다 빠르게
     /// 누를 때 매번 dial 을 **폴링되기도 전에** 취소해 「끊고 → 걸다 말고」를 무한히 되풀이한다.
+    ///
+    /// ★[`Supervisor::held_ctl`] 을 큐보다 먼저 읽는다★ — 그것이 더 먼저 온 신호이고, 여기서 안 읽으면
+    /// 아무도 안 읽는다.
     fn drain_ctl(&mut self) -> Option<Ctl> {
-        let mut seen = None;
+        let mut seen = self.held_ctl.take();
+        if let Some(Ctl::Close) = seen {
+            return Some(Ctl::Close);
+        }
         while let Ok(signal) = self.ctl_rx.try_recv() {
             match signal {
                 Ctl::Close => return Some(Ctl::Close),
@@ -1093,17 +1106,41 @@ impl<W: Wire> Supervisor<W> {
 
     // ── 정리 ────────────────────────────────────────────────────────────────
 
+    /// 통로를 버린다 — 닫기 코드를 실어 보내려 하고, 읽는 태스크를 접는다.
+    ///
+    /// ★[`Supervisor::write`] 와 같은 이유로 여기서도 제어를 듣는다★ — 닫기 프레임도 같은 혼잡한
+    /// 통로로 나가므로, 안 들으면 `close()` 가 `write_deadline` 만큼 늦게 들린다. 이 갈래는 실제로
+    /// 도달한다: 쓰기 시한으로 끊길 때 `FailPending` → `Emit` → `DropLink` 순으로 오는데, 그때 통로에는
+    /// 잘린 프레임의 나머지가 그대로 걸려 있어 닫기 프레임이 **줄에 서지도** 못한다.
+    ///
+    /// ★제어가 이기면 닫기 코드는 버린다★ — 혼잡한 소켓에서 코드가 상대에게 안 닿는 것은 이 crate 가
+    /// 이미 인정한 한계다(`lib.rs` 「닫기 코드가 상대에게 닿는 자리는 좁다」).
     async fn drop_link(&mut self, code: CloseCode) {
         if let Some(mut tx) = self.tx.take() {
             let clock = self.clock.clone();
             let deadline = self.policy.write_deadline;
-            let _ = with_deadline(&*clock, deadline, tx.close(Close::new(code, "closing"))).await;
+            let ctl = &mut self.ctl_rx;
+            let held = &mut self.held_ctl;
+            tokio::select! {
+                signal = ctl.recv() => {
+                    // 이긴 신호를 [`Supervisor::held_ctl`] 에 되돌려 놓는다 — 여기서 버리면 「닫아라」가
+                    //   사라진다. 보내는 쪽이 전부 떨어진 것(`None`)도 접으라는 뜻이라 같이 실어 둔다
+                    //   ([`Supervisor::write`] 가 그것을 `Input::Close` 로 옮기는 것과 같은 판정).
+                    *held = Some(signal.unwrap_or(Ctl::Close));
+                }
+                _ = with_deadline(&*clock, deadline, tx.close(Close::new(code, "closing"))) => {}
+            }
         }
         self.rx_raw = None;
         self.frames_rx = None;
         self.fresh_link = false;
         if let Some(reader) = self.reader.take() {
             reader.abort();
+            // ★취소를 기다린다★ — 읽는 태스크가 통로의 나머지 절반을 쥐고 있어서, 그것이 떨어지기 전에는
+            //   소켓이 안 닫힌다(`ws::split_link` 의 그 계약). 안 기다리면 닫힘 시점이 런타임의 회수
+            //   시점이 되고, 상대가 붙은 통로를 세면 한동안 둘로 보인다. `read_link` 는 항상 `await`
+            //   자리에서 멈춰 있어 이 대기가 한 바퀴를 넘지 않는다.
+            let _ = reader.await;
         }
     }
 
@@ -2547,6 +2584,10 @@ mod tests {
 
         h.clock.advance(Duration::from_secs(5));
         settle().await;
+        // ★막힌 통로에서는 `drop_link` 의 닫기도 함께 걸린다★ — 그것을 풀지 않으면 백오프 대기가
+        //   시작되지 않아 아래 재연결이 오지 않는다(`stall_writes` rustdoc 의 그 계산).
+        endpoint.stall_writes(false);
+        settle().await;
         h.clock.advance(Duration::from_millis(500));
         settle_until("재연결", || h.peer.peer_state() == PeerState::Live).await;
 
@@ -2642,6 +2683,11 @@ mod tests {
 
         h.clock.advance(Duration::from_secs(5));
         settle().await;
+        // ★막힌 통로에서는 `drop_link` 의 닫기도 함께 걸린다★ — 유실 신고는 그 다음 단계(백오프 대기)에서
+        //   나오므로, 풀지 않으면 아래 신고가 아직 안 나온 채로 단언을 만난다. 시계로 자르지 않는 이유는
+        //   그러면 백오프까지 지나가 「아직 안 붙었다」가 깨지기 때문이다.
+        endpoint.stall_writes(false);
+        settle().await;
         assert_eq!(
             h.peer.peer_state(),
             PeerState::Backoff,
@@ -2693,5 +2739,40 @@ mod tests {
         settle().await;
         h.peer.close();
         settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+    }
+
+    // ── M4: **닫기** 도중에도 제어를 듣는다 ──
+    //
+    // ★쓰기가 이미 막힌 통로에서 닫기도 함께 막힌다★ — 하네스의 `stall_writes` 가 `send`·`ping`·`close`
+    //   셋 다 막으므로(`testing::MemoryEndpoint::stall_writes`) 실소켓의 그 모양이 여기서 재진다.
+    #[tokio::test]
+    async fn close_is_heard_while_the_closing_frame_itself_is_parked() {
+        let (h, endpoint) = live().await;
+        endpoint.stall_writes(true);
+        endpoint.fail("link died");
+        settle_until("통로가 죽어 백오프로 내려갔다", || {
+            h.peer.peer_state() == PeerState::Backoff
+        })
+        .await;
+        assert!(
+            !endpoint
+                .drain()
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Close(_))),
+            "★닫기가 실제로 걸려 있어야 이 테스트가 무언가를 잰다★ — 나갔으면 아래 단언은 공짜다"
+        );
+        // 시계를 안 밀므로 `write_deadline` 은 안 온다 — 걸린 닫기를 깨는 길은 제어뿐이다.
+        h.peer.close();
+        settle_until("걸린 닫기 위에서도 제어가 들린다", || {
+            h.peer.peer_state() == PeerState::Closed
+        })
+        .await;
+        assert!(
+            !endpoint
+                .drain()
+                .iter()
+                .any(|m| matches!(m, ClientMsg::Close(_))),
+            "제어가 이기면 닫기 코드는 버린다 — `lib.rs` 가 인정한 그 한계다"
+        );
     }
 }

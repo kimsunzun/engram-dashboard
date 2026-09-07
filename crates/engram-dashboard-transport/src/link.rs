@@ -66,7 +66,13 @@ impl std::error::Error for LinkError {}
 /// 그 판정 재료가 이 코드다.
 pub enum LinkRead {
     Frame(Frame),
-    /// 상대가 닫았다. `Some` 이면 **코드와 문구를 실어** 닫았다는 뜻이고, `None` 이면 말 없이 끊긴 것이다.
+    /// 상대가 **닫았다고 말했다**. `Some` 이면 코드와 문구를 실어서, `None` 이면 코드 없이 닫기만.
+    ///
+    /// ★말 없이 사라진 상대는 이 갈래로 오지 않는다★ — 실전송은 그것을 `Err(LinkError)` 로 낸다
+    /// (WS 어댑터가 그 예다: 닫기 핸드셰이크 없이 버려진 소켓은 tungstenite 가
+    /// `ResetWithoutClosingHandshake` 오류로 낸다). 그래서 **`Closed(None)` 을 「조용히 죽었다」의
+    /// 신호로 분기하지 말 것** — 그렇게 짜면 인메모리 하네스에서는 초록이고 실소켓에서는 안 탄다.
+    /// 두 갈래를 다르게 다루려면 어댑터 양쪽을 먼저 이 계약에 맞춰야 한다.
     Closed(Option<Close>),
 }
 
@@ -93,6 +99,10 @@ pub trait Dialer: Send + Sync + 'static {
 }
 
 /// 통로의 나가는 쪽. ★감독 태스크 하나만 이것을 쥔다(단일 writer)★.
+///
+/// ★양 끝이 **둘 다** 떨어져야 통로가 닫힌다★ — 한 끝만 놓고 다른 끝을 쥐고 있으면 상대는 끊김을 못
+/// 보고, 그건 소켓 누수다. 두 끝은 [`Dialer::dial`] 이 한 쌍으로 주고 한 쌍으로 버려야 한다. 구현체가
+/// 하나의 하위 스트림을 공유하는 것이 보통이라(WS 어댑터는 `BiLock` 이다) **부르는 쪽이 이 의무를 진다.**
 pub trait LinkTx: Send + 'static {
     /// ★반환 future 가 취소되면 부르는 쪽이 통로를 통째로 버린다★ — 절반 나간 프레임 뒤에 더 쓰지 않는다.
     fn send(&mut self, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>>;
@@ -102,10 +112,19 @@ pub trait LinkTx: Send + 'static {
     fn ping(&mut self) -> BoxFuture<'_, Result<(), LinkError>>;
 
     /// 코드와 문구를 실어 닫는다. 실패해도 알릴 데가 없으므로 반환값이 없다.
+    ///
+    /// ★[`Close::reason`] 은 유계이고 넘치면 잘려서 나간다★ — 전송이 그것을 제어 프레임에 실으면
+    /// 상한이 있다(WS 는 코드까지 합쳐 125 **바이트**이고 문구 몫은 123 바이트다). ★상한의 단위는
+    /// 글자가 아니라 바이트★라 한글·이모지는 세 배 이상 빨리 찬다. 자르는 것이 안 자르는 것보다 나은
+    /// 이유는 상한을 넘긴 닫기 프레임을 **받는 쪽이 읽기 오류로 끊어서**, 「붙었는데 거절」이 「못
+    /// 붙었다」로 도착하고 재연결 예산까지 태우기 때문이다. 문구에 판정 재료를 담지 말 것 — 분기는
+    /// [`Close::code`] 로만 한다.
     fn close(&mut self, close: Close) -> BoxFuture<'_, ()>;
 }
 
 /// 통로의 들어오는 쪽.
+///
+/// ★[`LinkTx`] 와 한 쌍이다 — 양 끝이 둘 다 떨어져야 통로가 닫힌다★(그쪽 rustdoc 이 사유를 든다).
 pub trait LinkRx: Send + 'static {
     /// keepalive 응답은 [`Frame::Keepalive`] 로 올라온다.
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>>;
@@ -139,6 +158,10 @@ pub enum HandshakeStep {
     Done,
     /// ★붙었는데 거절★ — `last` 를 보내고 닫는다. 재시도해도 결과가 같으므로 **재연결 예산을 쓰지
     /// 않는다**(ADR-0180 결정 5).
+    ///
+    /// ★`reason` 은 유계다★ — 이것이 닫기 프레임의 문구로 나가므로 전송의 상한에 걸리고 넘치면
+    /// **잘린다**(WS 는 123 바이트, ★글자가 아니라 바이트★). 상세와 그 사유는 [`LinkTx::close`].
+    /// 길게 남길 진단은 소비자 쪽 로그로 보내고 여기엔 상대가 읽을 한 줄만 담는다.
     Reject { last: Option<Frame>, reason: String },
 }
 

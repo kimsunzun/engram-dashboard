@@ -1140,6 +1140,7 @@ version = "0.1.0"
 dependencies = [
  "futures-util",
  "tokio",
+ "tokio-tungstenite",
 ]
 
 [[package]]

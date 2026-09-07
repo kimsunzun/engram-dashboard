@@ -28,7 +28,7 @@
 //! ★[`machine`]·[`pending`]·[`stream`] 이 공개인 것은 의도★ — 순수 층이라 소비자가 자기 하네스에서
 //! 그대로 돌려 볼 수 있다(ADR-0012). **지지되는 표면**은 위 진입점이고, 순수 층은 관측용이다.
 //!
-//! ## 격리 게이트 — 넷이고 각각 다른 축이다
+//! ## 격리 게이트 — 각각 다른 축이고 아래 목록이 정본이다
 //!
 //! **① 직접 워크스페이스 의존 상한**(해석된 의존 그래프 범위):
 //! `cargo tree -p engram-dashboard-transport --depth 1 --prefix none -e normal,dev,build --target all`
@@ -56,11 +56,25 @@
 //! 옮긴 뒤엔 `test -f` 로 세 파일의 존재를 먼저 본다.
 //! ★TRD §9-2 의 초안은 `machine.rs` 만 겨눴다★ — 파일표는 셋 다 ★순수★로 표시하므로 셋으로 넓혔다.
 //!
-//! **④ 두 feature 조합이 각각 컴파일된다**(`-p` 범위):
+//! **④ 세 feature 조합이 각각 컴파일된다**(`-p` 범위):
 //! `cargo test -p engram-dashboard-transport` → **성공해야 PASS**(feature 0개)
-//! `cargo test -p engram-dashboard-transport --all-features` → **성공해야 PASS**(`test-support` 포함)
+//! `cargo test -p engram-dashboard-transport --all-features` → **성공해야 PASS**(`test-support`·`ws`)
+//! `cargo check -p engram-dashboard-transport --features ws` → **성공해야 PASS**(소비자의 운영 조합)
 //! ★판정 방식이 위 셋과 다르다★ — ①·③ 은 줄 수로, ②는 매치 유무로 읽지만 이건 **성공 여부**로 읽는다.
 //! 가려진 코드는 오류를 내지 않으므로 한 줄로 줄이지 말 것.
+//! ★셋째 줄이 `check` 인 것은 의도★ — 그 조합에는 `test-support` 가 없어 돌 테스트가 0개다. 그 줄만이
+//! 어댑터가 `test-support` 뒤의 하네스(`crate::testing`)를 참조하는 것을 잡는다: 첫 줄은 어댑터를 아예
+//! 컴파일하지 않고 둘째 줄은 그 feature 를 켠 채 컴파일하므로 **둘 다 초록이고 소비자 빌드에서만 깨진다**
+//! (실측: 그 참조를 넣으면 셋째 줄만 `E0433` 로 죽는다).
+//!
+//! **⑤ 실소켓 스위트 셋이 비지 않았다**(`tests/` 범위):
+//! `cargo test -p engram-dashboard-transport --all-features --test <ws_dial|ws_reject|ws_write_deadline>`
+//! `-- --list` → 각각 **`: test` 로 끝나는 줄이 1개 이상**.
+//! ★④가 이 축을 못 본다★ — 세 파일이 파일 수준 `#![cfg(all(feature = "ws", feature = "test-support"))]`
+//! 뒤에 있어 그 조건이 거짓이 되면(이름 오타·개명·다른 feature 로 접기) 세 바이너리가 **테스트 0개로
+//! 컴파일되고 성공**하고, ④의 판정이 성공 여부라 그대로 통과한다.
+//! ★기대값은 최소 1이고 실수를 올리지 않는다★ — 올리면 개수의 정본이 둘이 된다. 그래서 이 게이트는
+//! 스위트가 **완전히** 빈 것과 타깃이 사라진 것만 잡고, 3개가 1개로 줄어드는 것은 못 잡는다.
 //!
 //! ## 알려진 한계 (보증으로 읽지 말 것)
 //!
@@ -113,17 +127,27 @@
 //!   같은 이름표를 다시 올릴 때 그 겹침이 해롭지 않은 것은 **세대 바닥값** 덕이지 순서 덕이 아니다.
 //! - ★**하네스는 current_thread 런타임 전용이다**★ — [`testing::settle`] 이 협조적 양보로만 동기화하고,
 //!   그 위반을 스스로 패닉으로 잡는다.
-//! - ★**받는 쪽(accept)이 아직 없다**★ — [`Handshake`] 는 이미 방향 대칭이지만 `Listener` 는 이 범위에
-//!   없다. 들어오면 [`Registry::new`] 시그니처가 바뀐다(TRD §12-7 의 열린 질문).
-//! - ★**WS 어댑터가 아직 없다**★ — [`Dialer`]/[`LinkTx`]/[`LinkRx`] 구현체가 이 crate 에 하나도 없고,
-//!   있는 것은 `test-support` 뒤의 인메모리 하네스뿐이다. 그래서 **실소켓 검증(쓰기 시한이 커널 버퍼
-//!   앞에서 실제로 잘라내나)은 아직 아무도 안 잰다.**
+//! - ★**받는 쪽 seam 이 아직 없다**★ — [`Handshake`] 는 이미 방향 대칭이고 `ws::WsListener` 가 실소켓
+//!   통로를 받아 오지만, `link.rs` 에 `Listener` trait 이 없고 [`Registry`] 는 **들어오는 연결을 모른다**
+//!   (받은 통로를 감독 태스크에 얹는 일을 아무도 안 한다). 그 seam 이 들어오면 [`Registry::new`]
+//!   시그니처가 바뀐다(TRD §12-7 의 열린 질문).
+//! - ★**어댑터가 하나뿐이고 그 한계는 그 파일 헤더가 정본이다**★ — [`ws`](feature `ws`) 가 유일한
+//!   실전송 구현체이고, 정본은 `src/ws.rs` 헤더의 「알려진 한계」·「통로 성질」 두 절이다(**미검** 항목도
+//!   그 안에 있다). ★그 목록을 여기 일부라도 베끼지 않는다★ — 손으로 옮긴 목록은 낡고, 넷만 적혀 있으면
+//!   다음 세션은 그 넷이 전부라고 읽는다.
 //!
 //! ## 단독 검증 (ADR-0012)
 //!
-//! `cargo test -p engram-dashboard-transport --all-features` 가 이 crate 만으로 돈다 — 소켓도 실시간도
-//! 자식 프로세스도 없다. 백오프·keepalive·쓰기 시한은 [`testing::ManualClock`] 위에서 **실제로 기다리지
-//! 않고** 잰다(ADR-0177 결정 8).
+//! `cargo test -p engram-dashboard-transport --all-features` 가 이 crate 만으로 돈다 — 다른 crate 도
+//! 외부 프로세스도 부르지 않는다. 인메모리 스위트는 [`testing::ManualClock`] 위에서 시간을 손으로 돌려
+//! **아무것도 기다리지 않는다**(ADR-0177 결정 8). ★단 feature 로 가려진 실소켓 스위트 셋은 **실시간과
+//! 실 TCP 소켓** 위에서 돌아 실제로 기다린다★.
+//!
+//! 그 셋은 `tests/` 의 `ws_dial`·`ws_reject`·`ws_write_deadline` 이고 전부
+//! `all(feature = "ws", feature = "test-support")` 뒤에 있다. 그 셋만이
+//! 인메모리로 못 재는 것을 잰다 — 그중 **쓰기 시한이 커널 버퍼 앞에서 실제로 잘라내나**는 원리상
+//! 하네스로 만들 수 없다(ADR-0177 결정 8). 포트는 **0번을 요청하고 되읽는다**.
+//! ★그 셋을 「인메모리 하네스로 옮기면 빨라진다」로 읽지 말 것★ — 옮기는 순간 재던 것이 사라진다.
 //!
 //! ★`-- --test-threads=4` 를 붙이지 않는다★ — 이 crate 는 자식 프로세스를 하나도 안 띄운다.
 //! CLAUDE.md 「빌드·검증 명령」의 판정 규칙 그대로이고 `command`·`protocol`·`messaging`·`net` 과 같은 처지다.
@@ -148,10 +172,13 @@ pub mod wire;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
+#[cfg(feature = "ws")]
+pub mod ws;
+
 pub use clock::{with_deadline, Clock, Elapsed, SystemClock};
 pub use event::{Arrival, Direction, Incoming, PeerId, TransportEvent};
 pub use frame::{Close, CloseCode, Frame};
-pub use link::{Address, Dialer, Handshake, HandshakeStep, LinkError, LinkRx, LinkTx};
+pub use link::{Address, Dialer, Handshake, HandshakeStep, LinkError, LinkRead, LinkRx, LinkTx};
 pub use machine::{
     Action, ConnectFailure, DisconnectCause, GaveUpReason, Generation, Input, Machine,
     MachineEvent, PeerState,
