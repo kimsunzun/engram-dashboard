@@ -820,7 +820,7 @@ defaultRenderMode(agent)                 src/components/slot/renderMode.ts:23-25
 
 | 결정 | 무엇을 | 근거 |
 |---|---|---|
-| **G → 안 연다** | 명령 버스 `AgentBackend` 어휘를 `Claude` 하나로 **그대로 둔다**. LLM 이 codex 를 만드는 경로는 **Phase 2** | ★신뢰 확인 창을 그대로 두기로 했으므로(위) **LLM 은 그 창을 못 지난다**★ — 지금 열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 신뢰 창 처리가 정해질 때 함께 연다. `commands.rs:1511-1531` 의 거부 목록에 `"Codex"` 가 이미 박혀 있으므로 **할 일이 없다**(그 그물이 그대로 통과한다) |
+| **G → 안 연다** | 명령 버스 `AgentBackend` 어휘를 `Claude` 하나로 **그대로 둔다**. LLM 이 codex 를 만드는 경로는 **Phase 2** | ★신뢰 확인 창을 그대로 두기로 했으므로(위) **LLM 은 그 창을 못 지난다**★ — 지금 열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 신뢰 창 처리가 정해질 때 함께 연다. ~~`commands.rs:1511-1531` 의 거부 목록에 `"Codex"` 가 이미 박혀 있으므로 **할 일이 없다**~~ ★**이 문장은 틀렸다(2026-09-07 실증)**★ — 문이 **둘**이었다. `agent.new` 는 그 그물이 막았지만 `agent.spawnInto` 는 열려 있었고, Phase 1 배선이 「모든 명시값 거부」를 「모르는 낱말만 거부」로 좁히면서 codex 가 그리로 통과했다. 지금은 `agent` crate 의 정책 표 하나가 두 문을 같이 정하고, 갈리면 `layout_apply.rs::both_creation_doors_read_one_backend_policy` 가 빨개진다 |
 | **E → 안 넣는다** | 백엔드 종류 배너를 Phase 1 에 넣지 않는다. `AgentInfo` 에 wire 칸을 더하지 않는다 | 같은 범위 판정 — 띄우는 데 필요하지 않다. Phase 2 로 |
 
 ★**그래도 wire 의 백엔드 선택 칸(§6-B)은 Phase 1 에 필요하다**★ — 사람이 프론트에서 codex 를 고르는 경로도 그 칸을 탄다(`SpawnByCwd` 핸들러가 claude 를 하드코딩한다). **LLM 표면을 닫는 것과 wire 칸을 여는 것은 다른 축이다** — 전자는 명령 버스 어휘, 후자는 스폰 패킷이다.
