@@ -215,7 +215,14 @@ impl MemoryEndpoint {
         let _ = self.to_client.send(ServerMsg::Frame(frame));
     }
 
-    /// 말 없이 종료 — 클라는 사유를 못 얻는다.
+    /// ★코드 **없이** 닫는다고 말한다★ — `LinkRead::Closed(None)` 이고, 계약상 이것도 「상대가 닫았다고
+    /// 말했다」다(말 없이 사라진 것은 [`MemoryEndpoint::fail`] 쪽 = `Err`). 클라는 닫힘은 알고 사유는
+    /// 못 얻는다.
+    ///
+    /// ★단 하네스와 실 어댑터는 아직 한 자리에서 어긋난다★ — 이 통로를 **그냥 떨어뜨리면**(엔드포인트
+    /// 를 drop) `MemRx` 가 채널 소진을 `Closed(None)` 으로 올리는데, 실소켓에서 같은 일은 읽기 오류다.
+    /// `link.rs` 의 [`crate::LinkRead::Closed`] rustdoc 이 그 어긋남을 그대로 인정하고 있고, 그래서
+    /// **`Closed(None)` 으로 「조용히 죽었다」를 분기하는 코드는 여기서만 초록이 된다**.
     pub fn close(&self) {
         let _ = self.to_client.send(ServerMsg::Closed(None));
     }
@@ -297,16 +304,27 @@ impl LinkTx for MemTx {
 
 struct MemRx {
     from_server: mpsc::UnboundedReceiver<ServerMsg>,
+    /// 이미 읽기가 실패했다 — [`LinkRx::recv`] 계약(실패 뒤에는 닫기를 내지 않는다)의 실물.
+    failed: bool,
 }
 
 impl LinkRx for MemRx {
     fn recv(&mut self) -> BoxFuture<'_, Result<LinkRead, LinkError>> {
         Box::pin(async move {
+            // ★실 어댑터와 같은 계약을 진다★ — 하네스가 실패 뒤에 `Closed(None)` 을 내면, 그 값으로
+            //   분기하는 코드가 여기서는 초록이고 실소켓에서는 안 탄다(그 함정의 정본 = `link.rs` 의
+            //   [`crate::LinkRead::Closed`] rustdoc).
+            if self.failed {
+                return Err(LinkError::new("link already failed"));
+            }
             match self.from_server.recv().await {
                 Some(ServerMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(ServerMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
                 None => Ok(LinkRead::Closed(None)),
-                Some(ServerMsg::Fail(e)) => Err(e),
+                Some(ServerMsg::Fail(e)) => {
+                    self.failed = true;
+                    Err(e)
+                }
             }
         })
     }
@@ -415,7 +433,10 @@ impl Dialer for MemoryNetwork {
                 to_server,
                 stall_rx,
             });
-            let rx: Box<dyn LinkRx> = Box::new(MemRx { from_server });
+            let rx: Box<dyn LinkRx> = Box::new(MemRx {
+                from_server,
+                failed: false,
+            });
             Ok((tx, rx))
         })
     }
@@ -679,6 +700,11 @@ mod tests {
     use super::*;
 
     // ── H1: 멈춘 쓰기는 실제로 깨어나야 한다 ──
+    //
+    // ★멈춘 작업을 **다른 태스크**에 둔다★ — 같은 태스크에서 손으로 poll 하면 멈춤을 푼 뒤 우리가 직접
+    //   다시 poll 하게 되고, 그러면 **waker 를 등록하지 않는 구현도 통과한다**. 그 형태로 쓴 옛 판은
+    //   반례 변이(멈춤 중 `Pending` 을 내고 waker 는 등록하지 않는 `poll_fn`)를 하나도 못 잡았다
+    //   (실측 2026-09-07). 태스크에 두면 깨우는 것 말고는 완료로 가는 길이 없다.
     #[tokio::test]
     async fn clearing_the_stall_actually_wakes_the_parked_write() {
         let net = MemoryNetwork::new();
@@ -686,18 +712,18 @@ mod tests {
         let endpoint = net.accept().unwrap();
         endpoint.stall_writes(true);
 
-        let mut write = Box::pin(tx.send(Frame::Text("payload".into())));
-        assert!(
-            futures_util::poll!(write.as_mut()).is_pending(),
-            "막혀 있어야 한다"
-        );
+        let parked = tokio::spawn(async move { tx.send(Frame::Text("payload".into())).await });
+        settle().await;
+        assert!(!parked.is_finished(), "막혀 있어야 한다");
         assert!(endpoint.frames().is_empty());
 
+        // ★멈춤을 푸는 것은 잠든 태스크가 아니라 이쪽이다★ — 저쪽을 깨우는 유일한 수단이 waker 다.
         endpoint.stall_writes(false);
         // ★유계 대기★ — 깨울 길 없는 멈춤으로 되돌아가면 매달리는 대신 깨끗이 실패해야 한다.
-        tokio::time::timeout(Duration::from_secs(5), write)
+        tokio::time::timeout(Duration::from_secs(5), parked)
             .await
             .expect("멈춤을 풀었는데도 쓰기가 안 깨어났다")
+            .expect("쓰기 태스크가 패닉했다")
             .unwrap();
         assert_eq!(endpoint.frames(), vec![Frame::Text("payload".into())]);
     }
@@ -710,18 +736,20 @@ mod tests {
         let endpoint = net.accept().unwrap();
         endpoint.stall_writes(true);
 
-        let mut close = Box::pin(tx.close(Close::going_away()));
+        let parked = tokio::spawn(async move { tx.close(Close::going_away()).await });
+        settle().await;
         assert!(
-            futures_util::poll!(close.as_mut()).is_pending(),
+            !parked.is_finished(),
             "★닫기도 막혀야 한다★ — 안 막히면 하네스가 실소켓의 모양을 표현하지 못한다"
         );
         assert!(endpoint.drain().is_empty());
 
         endpoint.stall_writes(false);
         // ★유계 대기★ — 깨울 길 없는 멈춤으로 되돌아가면 매달리는 대신 깨끗이 실패해야 한다.
-        tokio::time::timeout(Duration::from_secs(5), close)
+        tokio::time::timeout(Duration::from_secs(5), parked)
             .await
-            .expect("멈춤을 풀었는데도 닫기가 안 깨어났다");
+            .expect("멈춤을 풀었는데도 닫기가 안 깨어났다")
+            .expect("닫기 태스크가 패닉했다");
         assert!(matches!(
             endpoint.drain().as_slice(),
             [ClientMsg::Close(c)] if c.code == crate::frame::CloseCode::GOING_AWAY

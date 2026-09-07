@@ -1,17 +1,22 @@
 //! 실소켓 ③ — 버전 거절 왕복(TRD §9-1).
 //!
-//! ★재는 것이 둘이다★ ① 상대가 실은 닫기 **코드와 문구**가 소켓을 건너와 [`LinkRead::Closed`] 로
-//! 올라오나 ② 그 거절이 **재연결 예산을 안 태우나**(ADR-0180 결정 5). ①이 없으면 ②의 판정 재료가
-//! 없어서 「거절은 예산을 안 쓴다」가 코드로 성립하지 않는다 — `link.rs` 의 [`LinkRead`] rustdoc 이
-//! 못박은 그 자리다.
+//! ★이 파일이 재는 것 = 실 소켓을 건너온 닫기를 **어떻게 분류하나**★ — 상대가 실은 닫기 **코드와
+//! 문구**가 소켓을 건너와 [`LinkRead::Closed`] 로 올라오나, 그리고 그 분류가 **재연결 예산을 태우나**
+//! (ADR-0180 결정 5). 앞의 것이 없으면 뒤의 것은 판정 재료가 없어서 「거절은 예산을 안 쓴다」가 코드로
+//! 성립하지 않는다 — `link.rs` 의 [`LinkRead`] rustdoc 이 못박은 그 자리다. 자극은 갈래마다 세운다:
+//! 거절인 닫기 · 코드를 실었지만 거절이 **아닌** 닫기 · 말 없이 사라진 상대.
+//!
+//! ★스위트 크기를 세지 말 것★ — 손으로 적은 개수는 테스트가 하나 늘 때마다 조용히 어긋나고, 낡은 개수는
+//! 아예 없는 것보다 나쁘다(다음 읽는 사람이 그것을 믿는다). 무엇을 재는 파일인지는 위 문단이 말한다.
 //!
 //! ★인메모리로도 재던 것이지만 여기서 다시 재는 이유★ — 하네스의 `reject()` 는 닫기를 **값으로** 건네고,
 //! 여기서는 실 WS 닫기 프레임이 커널을 건너간다. 코드·문구가 그 왕복에서 살아남는지는 어댑터의 성질이다.
+//! ★이 문단이 `lib.rs` 「단독 검증」이 이 파일을 가리켜 부르는 그 정본이다 — 지우지 말 것★.
 //!
-//! ★못 붙은 갈래가 둘이고 결과로는 구별이 안 된다★ — 「상대가 말하고 끊었다」와 「읽기가 실패했다」는
-//! 분류([`ConnectFailure::Unreachable`])·예산 소비·종점이 전부 같다. 그래서 아래 두 테스트는
-//! `LinkError` 문구로 **어느 팔이 돌았는지**까지 못 박는다 — 안 박으면 자극이 사라져도(닫기
-//! 프레임 유실·RST·의존성 변경) 판정이 그대로 초록이다.
+//! ★못 붙었다는 결과 하나에 서로 다른 팔이 모인다★ — 「상대가 말하고 끊었다」와 「읽기가 실패했다」는
+//! 분류([`ConnectFailure::Unreachable`])·예산 소비·종점이 전부 같다. 그래서 그 결과를 단언하는 자리는
+//! `LinkError` 문구로 **어느 팔이 돌았는지**까지 못 박는다 — 안 박으면 자극이 사라져도(닫기 프레임
+//! 유실·RST·의존성 변경) 판정이 그대로 초록이다.
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
 mod common;
@@ -36,7 +41,10 @@ const CLOSED_DURING_HANDSHAKE: &str = "peer closed during handshake";
 /// 읽기가 실패했을 때 어댑터가 붙이는 접두(`ws.rs`).
 const READ_ERROR_PREFIX: &str = "ws read:";
 
-/// 예산 소진을 재는 두 테스트가 쓰는 정책.
+/// 이미 실패한 통로를 다시 읽었을 때 어댑터의 걸쇠가 내는 문구(`ws.rs` 의 `WsRx::recv`).
+const LATCHED_READ: &str = "ws read: link already failed";
+
+/// 예산 소진을 재는 테스트가 쓰는 정책.
 ///
 /// ★기본 백오프(500ms→1s→2s = 3.5초)를 실시간으로 앉아 기다리지 않는다★ — 백오프 **일정**은 주입
 /// 시계로 인메모리에서 재는 몫이고(`policy.rs`·`peer.rs` 단위 스위트), 이 파일이 실소켓으로 재는 것은
@@ -196,7 +204,7 @@ async fn a_peer_that_vanishes_without_speaking_is_unreachable_and_does_spend_bud
 async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     // ★`is_rejection` 의 반대편이다★ — 상대가 **코드를 실어** 닫았지만 그 코드가 「정상 종료」면 거절이
     //   아니고 예산을 쓴다(데몬 재시작 중이면 다음 시도에 붙는다). 이 갈래가 없으면 「코드가 실려
-    //   있으면 무엇이든 거절」인 구현이 위 두 테스트를 그대로 통과한다.
+    //   있으면 무엇이든 거절」인 구현이 앞의 갈래들을 그대로 통과한다.
     let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.dial_address().expect("dial_address");
     let accepted = Arc::new(AtomicUsize::new(0));
@@ -215,7 +223,10 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     // ① ★전제: 이 서버의 닫기 코드가 실제로 소켓을 건너온다★ — 안 재면 아래 ②가 「프레임이 유실돼
     //    읽기 오류 팔이 돌았다」와 구별되지 않는다. 두 팔은 분류·예산 소비·종점이 전부 같아서 어느
     //    쪽이든 ②가 초록이고, 그러면 `is_rejection` 의 정상 종료 예외를 지워도 초록이다.
-    let (probe_tx, mut probe_rx) = WsDialer.dial(&addr).await.expect("직접 dial");
+    let (probe_tx, mut probe_rx) = tokio::time::timeout(common::PATIENCE, WsDialer.dial(&addr))
+        .await
+        .expect("직접 dial 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다")
+        .expect("직접 dial");
     let read = tokio::time::timeout(common::PATIENCE, probe_rx.recv())
         .await
         .expect("닫기 상한")
@@ -292,4 +303,55 @@ async fn a_graceful_going_away_is_not_a_rejection_and_does_spend_budget() {
     assert_eq!(settled, PeerState::GaveUp(GaveUpReason::BudgetExhausted));
 
     server.abort();
+}
+
+#[tokio::test]
+async fn a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close() {
+    // ★[`LinkRead::Closed`] 는 「상대가 닫았다고 **말했다**」는 뜻이다★ — 아무도 말하지 않은 닫기가 그
+    //   이름으로 올라오면, 그 값으로 분기하는 소비자가 「거절당했다/곱게 갔다」를 「끊겼다」와 맞바꾼다.
+    //   위 `vanishes_without_speaking` 은 그 자극에 대한 **감독의 분류**를 재고, 여기서는 그 분류가 앉아
+    //   있는 바닥 — 어댑터에서 읽기를 **두 번** 하는 자리 — 을 잰다.
+    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.dial_address().expect("dial_address");
+
+    // 거는 쪽과 받는 쪽이 서로를 기다리므로 함께 폴링해야 핸드셰이크가 끝난다.
+    let (accepted, dialed) = tokio::time::timeout(common::PATIENCE, async {
+        tokio::join!(listener.accept(), WsDialer.dial(&addr))
+    })
+    .await
+    .expect("핸드셰이크 상한 — TCP 는 붙었는데 WS 업그레이드가 안 끝난 것이 첫 가설이다");
+    let server = accepted.expect("accept");
+    let (_client_tx, mut client_rx) = dialed.expect("dial");
+
+    // ★닫기 프레임 없이 사라진다★ — 양 끝을 다 놓아야 소켓이 닫힌다(`ws.rs` 의 `split_link`).
+    drop(server);
+
+    let first = tokio::time::timeout(common::PATIENCE, client_rx.recv())
+        .await
+        .expect("첫 읽기 상한")
+        .expect_err("말 없이 사라진 상대의 첫 읽기는 오류여야 한다");
+    assert!(
+        first.message.starts_with(READ_ERROR_PREFIX),
+        "첫 읽기가 어댑터의 읽기 오류가 아니다: {first}"
+    );
+    // ★첫 실패가 걸쇠 문구면 자극이 아니라 걸쇠가 먼저 걸린 것이다★ — 그러면 아래 단언이 자기 자신을
+    //   재게 되므로 여기서 갈라 둔다.
+    assert_ne!(
+        first.message, LATCHED_READ,
+        "자극이 통로에 닿기 전에 걸쇠가 걸려 있었다"
+    );
+
+    match tokio::time::timeout(common::PATIENCE, client_rx.recv())
+        .await
+        .expect("두 번째 읽기 상한")
+    {
+        Err(again) => assert_eq!(
+            again.message, LATCHED_READ,
+            "두 번째 읽기가 걸쇠가 아닌 다른 오류를 냈다 — 걸쇠 없이 통로를 다시 폴링한 것이 첫 가설이다"
+        ),
+        Ok(read) => panic!(
+            "읽기가 실패한 뒤 두 번째 읽기가 값으로 올라왔다 — `Closed` 면 아무도 말하지 않은 닫기를 \
+             보고한 것이다: {read:?}"
+        ),
+    }
 }

@@ -1,12 +1,13 @@
-//! 실소켓 ② — 상대가 안 읽을 때 쓰기 시한이 실제로 잘라내나(TRD §9-1 · ADR-0177 결정 8).
+//! 실소켓 ② — 상대가 안 읽을 때 쓰기 시한이 실제로 잘라내나, 그리고 그 쓰기 경로가 실패를 **값으로**
+//! 신고하나(TRD §9-1 · ADR-0177 결정 8).
 //!
 //! ★인메모리로는 원리상 못 재는 유일한 성질이다★ — 하네스의 `stall_writes` 는 **우리 쪽** 시한·큐
 //! 로직을 재고, 여기서 재는 것은 그 앞에 있는 **커널 send buffer** 다. 그것이 차서 쓰기가 영원히 안
 //! 끝나는 상태를 만들 수 있는 것은 실소켓뿐이다.
 //!
-//! ★재는 자리가 둘이다★ — 통로 seam(`LinkTx::send` + `with_deadline`)과 감독의 쓰기 경로
-//! (`DisconnectCause::WriteDeadline` 신고). 앞은 어댑터가 배압을 실제로 `Pending` 으로 옮기는지를,
-//! 뒤는 그 `Pending` 이 정책 값에 걸려 연결을 버리고 **사유를 이름 붙여** 올리는지를 잰다.
+//! ★재는 자리★ — 통로 seam(`LinkTx::send` + `with_deadline`)과 감독의 쓰기 경로. 앞은 어댑터가 배압을
+//! 실제로 `Pending` 으로 옮기는지를, 뒤는 그 `Pending` 과 통로가 낸 오류가 각각 연결을 버리고 **사유를
+//! 이름 붙여** 올리는지를 잰다.
 //!
 //! ## 이 파일의 모양이 왜 이런가
 //!
@@ -19,8 +20,8 @@
 //!   테스트였다. 멀리 밀면 그 창 안에서 `WriteDeadline` 을 만들 수 있는 것이 flood 하나뿐이 된다.
 //!   ★단 그 성질을 정책 값 두 줄에만 맡기지 않는다★ — 감독 테스트가 사건 도착 시각을 벽시계로 직접
 //!   재므로, 그 두 줄을 지우거나 [`common::PATIENCE`] 를 올려도 동전 던지기가 조용히 돌아오지 않는다.
-//! - ★세 테스트를 직렬로 돈다★ — libtest 는 한 바이너리의 테스트를 동시에 돌리는데, 아래 두 테스트는
-//!   일부러 loopback 을 포화시키고 나머지 하나는 「어떤 쓰기도 시한에 안 걸렸다」를 단언한다. 같은 커널
+//! - ★직렬로 돈다★ — libtest 는 한 바이너리의 테스트를 동시에 돌리는데, 이 파일에는 일부러 loopback 을
+//!   포화시키는 테스트와 「어떤 쓰기도 시한에 안 걸렸다」를 단언하는 테스트가 함께 있다. 같은 커널
 //!   스택에서 겹치면 남의 부하가 그 단언을 빨갛게 만들 수 있다(작은 러너에서 실제 위험).
 #![cfg(all(feature = "ws", feature = "test-support"))]
 
@@ -36,8 +37,8 @@ use engram_dashboard_transport::link::LinkRead;
 use engram_dashboard_transport::testing::{ImmediateHandshake, TestOut};
 use engram_dashboard_transport::ws::{WsDialer, WsListener};
 use engram_dashboard_transport::{
-    with_deadline, Dialer, DisconnectCause, Elapsed, Frame, LinkRx, LinkTx, PeerId, Policy,
-    SystemClock, TransportEvent,
+    with_deadline, Dialer, DisconnectCause, Elapsed, Frame, Generation, LinkRx, LinkTx, PeerId,
+    Policy, SystemClock, TransportEvent,
 };
 
 /// 한 번에 미는 프레임 크기.
@@ -72,7 +73,14 @@ const SUPERVISOR_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// (`ws.rs` 헤더).
 const PARKED_BLOBS: usize = 16;
 
-/// 이 바이너리의 테스트를 한 번에 하나만 돌린다 — 사유는 파일 헤더 「세 테스트를 직렬로 돈다」.
+/// 받는 쪽 상한을 **한 바이트** 넘는 payload. 상한 자체는 legal 이다(어댑터가 `>` 로 본다).
+///
+/// ★임계값의 정본은 `ws.rs` 의 `MAX_OUTGOING_PAYLOAD` 이고 그것은 비공개라 여기서 부를 수 없다★ — 두
+/// 값이 어긋나면 이 프레임이 상한 아래로 내려앉아 아무 오류도 안 나고, 그때 아래 테스트는 조용히
+/// 통과하는 대신 상한에서 「끊김 사건이 안 왔다」로 빨개진다. 맞출 자리가 여기다.
+const OVER_LIMIT: usize = (16 << 20) + 1;
+
+/// 이 바이너리의 테스트를 한 번에 하나만 돌린다 — 사유는 파일 헤더 「직렬로 돈다」.
 static SOCKET_LOCK: Mutex<()> = Mutex::const_new(());
 
 /// 지금 이 파일에서 몇 개가 돌고 있나. ★잠금을 지우면 여기가 1을 넘어 그 자리가 빨개진다★ — 직렬성을
@@ -261,4 +269,59 @@ async fn the_supervisor_names_the_write_deadline_when_it_drops_a_parked_link() {
         "WriteDeadline 이 {waited:?} 만에 왔다 — keepalive 주기({SUPERVISOR_PING_INTERVAL:?})에 가까우면 \
          사유의 출처가 flood 가 아니라 그 주기의 쓰기일 수 있다"
     );
+}
+
+#[tokio::test]
+async fn an_oversized_frame_is_reported_as_a_link_error_instead_of_killing_the_supervisor() {
+    // ★재는 것은 「값으로 실패하나」다★ — 이 자리가 패닉이면 감독 태스크가 그 안에서 죽고, 그
+    //   `JoinHandle` 을 아무도 안 쥐고 있어 패닉을 **관측하는 자리가 없다**: 발행된 상태가 `Live` 에
+    //   영구히 얼고 끊김 사건도 재연결도 안 난다. 그래서 이 테스트가 재는 것은 사건이 **오는지**다.
+    let _one_at_a_time = one_at_a_time().await;
+    let listener = WsListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.dial_address().expect("dial_address");
+
+    // ★받은 통로를 붙들고만 있는다★ — 재연결이 실제로 붙어야 아래 둘째 세대 단언이 선다. 폴링하지
+    //   않는 것은 이 파일의 다른 테스트와 같은 이유이고, 여기 프레임은 애초에 소켓에 닿지 않는다.
+    let server = tokio::spawn(async move {
+        let mut links = Vec::new();
+        while let Ok(link) = listener.accept().await {
+            links.push(link);
+        }
+    });
+
+    let (registry, mut inbound) = common::registry(Arc::new(WsDialer), Policy::default());
+    let peer = registry.add(PeerId::new("d1"), addr, Arc::new(ImmediateHandshake));
+    common::wait_state(&peer, "운영 단계", |state| state.is_live()).await;
+
+    peer.notify(TestOut::Blob(vec![0u8; OVER_LIMIT]))
+        .expect("나가는 큐");
+
+    let cause = common::wait_incoming(
+        &mut inbound,
+        "Disconnected 사건(첫 가설 = 그 쓰기가 값 대신 패닉으로 실패해 감독이 죽었다)",
+        |msg| match msg.as_event() {
+            Some(TransportEvent::Disconnected { cause, .. }) => Some(*cause),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(
+        cause,
+        DisconnectCause::LinkError,
+        "상한을 넘은 프레임을 다른 사유로 끊었다"
+    );
+
+    // ★감독이 살아 있다는 증거는 다음 통로다★ — 죽은 감독은 재연결하지 않는다.
+    let generation = common::wait_incoming(
+        &mut inbound,
+        "재연결의 Connected 사건(첫 가설 = 감독이 그 쓰기에서 죽었다)",
+        |msg| match msg.as_event() {
+            Some(TransportEvent::Connected { generation, .. }) => Some(*generation),
+            _ => None,
+        },
+    )
+    .await;
+    assert_eq!(generation, Generation(2), "끊김 뒤 다음 통로가 안 붙었다");
+
+    server.abort();
 }

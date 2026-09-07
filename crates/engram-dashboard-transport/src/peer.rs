@@ -441,7 +441,22 @@ struct Supervisor<W: Wire> {
     ///
     /// ★[`Supervisor::drop_link`] 때문에 있다★ — 그 함수는 `()` 를 돌려주므로 이긴 신호를 후속 입력으로
     /// 넘길 자리가 없고, 그냥 버리면 「닫아라」가 사라져 감독이 영영 안 접힌다. [`Supervisor::drain_ctl`]
-    /// 이 큐보다 이것을 먼저 읽어 되돌려 놓는다.
+    /// 이 큐보다 이것을 먼저 읽어 되돌려 놓는다(그 순서가 「`Close` 가 `ReconnectNow` 를 이긴다」와
+    /// 「먼저 온 신호가 먼저」를 함께 지킨다).
+    ///
+    /// ★**한 칸으로 충분한 이유가 불변식이다**★ — 이 칸을 채우는 곳은 [`Supervisor::drop_link`] 하나고,
+    /// 그 뒤 통로를 다시 얻는(`tx` 가 다시 `Some` 이 되는) 자리는 [`Supervisor::dial`] 과
+    /// [`Supervisor::shake_hands`] 둘뿐인데 **둘 다 첫 문장이 `drain_ctl()`** 이다. 백오프·정박
+    /// ([`Supervisor::wait`]·[`Supervisor::park`])도 루프 머리에서 같은 것을 부른다. 그래서 둘째 신호가
+    /// 이 칸에 오기 전에 첫 신호가 반드시 빠져 나가고, `take()` 가 같은 신호의 두 번 소비를 막는다.
+    /// ★이 순서를 뒤집으면 조용히 깨진다★ — 컴파일러도, 지금 있는 어느 테스트도 안 잡는다. 통로를
+    /// 다시 얻는 자리를 새로 만들거나 `drain_ctl()` 을 그 첫 문장에서 내리려면 칸을 큐로 바꾸는 것이
+    /// 먼저다.
+    ///
+    /// ★미검★ — 이 칸에 [`Ctl::ReconnectNow`] 가 들어가는 경로(걸린 닫기 위에 「지금 다시 붙어라」가
+    /// 도착)는 재는 테스트가 없다. 재는 것은 `Close` 가 들어가는 쪽뿐이다
+    /// (`close_is_heard_while_the_closing_frame_itself_is_parked`). 새면 증상은 「누른 재연결이 한 번
+    /// 무시된다」이고, 다음 `ReconnectNow` 나 백오프 만료가 그것을 덮으므로 조용하다.
     held_ctl: Option<Ctl>,
     state_tx: watch::Sender<PeerState>,
     /// 이 이름표가 발행한 세대의 공용 계수기(D1).
@@ -544,6 +559,8 @@ impl<W: Wire> Supervisor<W> {
     /// 만큼 늦게 들린다. 제어가 이기면 통로는 취소된 future 와 함께 닫힌다.
     async fn dial(&mut self, deadline: Instant) -> Input {
         // 이미 쌓여 있던 「지금 다시 붙어라」는 지금 하려는 일 그 자체이므로 삼킨다.
+        // ★이 줄이 [`Supervisor::held_ctl`] 이 한 칸으로 충분한 근거의 절반이다★ — 통로를 다시 얻는
+        //   자리의 **첫 문장**이 슬롯을 비운다(나머지 절반 = `shake_hands` 의 같은 줄). 내리지 말 것.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
@@ -570,6 +587,7 @@ impl<W: Wire> Supervisor<W> {
     }
 
     async fn shake_hands(&mut self, deadline: Instant) -> Input {
+        // ★`dial` 의 같은 줄과 짝이다★ — 사유는 [`Supervisor::held_ctl`]. 내리지 말 것.
         if let Some(Ctl::Close) = self.drain_ctl() {
             return Input::Close;
         }
@@ -1114,21 +1132,56 @@ impl<W: Wire> Supervisor<W> {
     /// 잘린 프레임의 나머지가 그대로 걸려 있어 닫기 프레임이 **줄에 서지도** 못한다.
     ///
     /// ★제어가 이기면 닫기 코드는 버린다★ — 혼잡한 소켓에서 코드가 상대에게 안 닿는 것은 이 crate 가
-    /// 이미 인정한 한계다(`lib.rs` 「닫기 코드가 상대에게 닿는 자리는 좁다」).
+    /// 이미 인정한 한계다(`lib.rs` 「닫기 코드가 상대에게 닿는 자리는 좁다」). ★단 그 한계는 **배압**
+    /// 이야기다★ — 아래 `Drained` 갈래가 그것과 다른 사유로 코드를 잃는 것을 막는다.
     async fn drop_link(&mut self, code: CloseCode) {
         if let Some(mut tx) = self.tx.take() {
             let clock = self.clock.clone();
             let deadline = self.policy.write_deadline;
-            let ctl = &mut self.ctl_rx;
-            let held = &mut self.held_ctl;
-            tokio::select! {
-                signal = ctl.recv() => {
-                    // 이긴 신호를 [`Supervisor::held_ctl`] 에 되돌려 놓는다 — 여기서 버리면 「닫아라」가
-                    //   사라진다. 보내는 쪽이 전부 떨어진 것(`None`)도 접으라는 뜻이라 같이 실어 둔다
-                    //   ([`Supervisor::write`] 가 그것을 `Input::Close` 로 옮기는 것과 같은 판정).
-                    *held = Some(signal.unwrap_or(Ctl::Close));
+            let closing = with_deadline(&*clock, deadline, tx.close(Close::new(code, "closing")));
+            // ★종료가 확정된 뒤에는 제어 팔을 아예 걸지 않는다★ — [`PeerState::Closed`] 에서 기계는
+            //   모든 입력을 무시하므로(그 자리 테스트: `Close` 뒤의 `ReconnectNow`·`Start`·`Connected`
+            //   가 행동 0개) 여기서 들을 수 있는 신호는 하나도 **새 정보가 아니다**. 그런데 그 상태의
+            //   제어 채널은 `recv()` 가 곧바로 `Ready` 를 내는 상태다(보내는 쪽이 다 떨어졌으면 `None`,
+            //   같은 종료를 두 입구로 들었으면 남은 `Close`). `select!` 는 `biased` 가 없으면 폴링마다
+            //   시작 팔을 난수로 고르므로(외부 사실), 그 팔을 걸어 두면 닫기 future 가 **한 번도
+            //   폴링되지 않은 채** 절반쯤 버려진다 — 실측 2026-09-07: 100회 중 54회(고친 뒤 0회).
+            // ★그 손실은 문구가 아니라 소비자가 분기하는 값을 뒤집는다★ — 닫기 프레임이 나가면 상대는
+            //   「말하고 갔다」로 읽고, 안 나가면 tungstenite 가 `ResetWithoutClosingHandshake` 를 올려
+            //   「통로 오류」로 읽는다. 그래서 이 갈래는 「혼잡한 소켓에서 코드가 안 닿는다」는 이미
+            //   인정된 한계에 **들지 않는다**(혼잡한 것이 없다).
+            if self.machine.state() == PeerState::Closed {
+                let _ = closing.await;
+            } else {
+                let mut closing = std::pin::pin!(closing);
+                enum Won {
+                    Signal(Ctl),
+                    /// 보내는 쪽이 전부 떨어졌다 — 큐도 비었다.
+                    Drained,
+                    Closed,
                 }
-                _ = with_deadline(&*clock, deadline, tx.close(Close::new(code, "closing"))) => {}
+                let won = {
+                    let ctl = &mut self.ctl_rx;
+                    tokio::select! {
+                        signal = ctl.recv() => match signal {
+                            Some(signal) => Won::Signal(signal),
+                            None => Won::Drained,
+                        },
+                        _ = &mut closing => Won::Closed,
+                    }
+                };
+                match won {
+                    // 이긴 신호를 [`Supervisor::held_ctl`] 에 되돌려 놓는다 — 여기서 버리면 「닫아라」가
+                    //   사라진다.
+                    Won::Signal(signal) => self.held_ctl = Some(signal),
+                    // 마른 채널은 위와 같은 이유로 승자가 아니다. 여기(종료 확정 전)서도 그 `None` 은
+                    //   버려도 되는 것이 아니라 **다시 관측된다** — 뒤이은 `run_live`·`wait`·`park` 의
+                    //   제어 팔이 모두 `None` 을 `Input::Close` 로 옮긴다.
+                    Won::Drained => {
+                        let _ = closing.await;
+                    }
+                    Won::Closed => {}
+                }
             }
         }
         self.rx_raw = None;
@@ -2731,6 +2784,10 @@ mod tests {
     }
 
     // ── M4: 쓰기 도중에도 제어를 듣는다 ──
+    //
+    // ★발행된 상태가 `Closed` 인 것으로는 감독이 접혔다는 뜻이 안 된다★ — `run` 이 행동을 **적용하기
+    //   전에** 상태를 발행하므로(그 루프의 두 `publish` 사이), 아래 `settle_until` 은 정리가 아직 걸린
+    //   닫기 위에 멈춰 있는 동안에도 통과한다. 그래서 멈춤을 풀고 **그 뒤까지** 잰다.
     #[tokio::test]
     async fn close_is_heard_while_a_write_is_parked() {
         let (h, endpoint) = live().await;
@@ -2739,6 +2796,44 @@ mod tests {
         settle().await;
         h.peer.close();
         settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+
+        endpoint.stall_writes(false);
+        let mut seen = Vec::new();
+        settle_until("걸려 있던 goodbye 가 나갔다", || {
+            seen.extend(endpoint.drain());
+            seen.iter()
+                .any(|m| matches!(m, ClientMsg::Close(c) if c.code == CloseCode::GOING_AWAY))
+        })
+        .await;
+        // 걸린 채 취소된 쓰기는 통로에 아무것도 남기지 않는다 — 절반 나간 프레임 뒤에 더 쓰지 않는다는
+        //   [`LinkTx::send`] 계약의 관측 가능한 면이다.
+        assert!(
+            !seen.iter().any(|m| matches!(m, ClientMsg::Frame(_))),
+            "취소된 쓰기가 뒤늦게 나갔다: {seen:?}"
+        );
+    }
+
+    // ── 종료: goodbye 코드가 **실제로** 통로로 나간다 ──
+    //
+    // ★이 crate 에서 감독이 닫기 코드를 내보내는 것을 재는 유일한 자리다★ — 다른 종료 테스트는 전부
+    //   「안 나갔다」의 **부재**를 잰다(제어가 이겼을 때 코드를 버리는 쪽). 부재만 재면 코드가 아예 안
+    //   나가는 회귀가 통째로 무검이 된다.
+    // ★마지막 핸들까지 놓는 모양인 것은 의도★ — `Registry::remove` 가 그 모양이고(닫으라 한 뒤 핸들을
+    //   버린다), 그 상태에서 제어 채널은 곧바로 `Ready(None)` 을 낸다. `select!` 의 팔 순서가 무작위라
+    //   `drop_link` 가 그 `None` 을 승자로 치면 닫기 future 가 폴링되기도 전에 버려졌다 — 실측으로 약
+    //   절반이었다(2026-09-07). 핸들을 쥔 채로 닫으면 그 갈래에 아예 못 들어간다.
+    #[tokio::test]
+    async fn closing_speaks_the_goodbye_code_on_the_wire() {
+        let (h, endpoint) = live().await;
+        h.peer.close();
+        drop(h);
+        let mut seen = Vec::new();
+        settle_until("goodbye 가 통로로 나갔다", || {
+            seen.extend(endpoint.drain());
+            seen.iter()
+                .any(|m| matches!(m, ClientMsg::Close(c) if c.code == CloseCode::GOING_AWAY))
+        })
+        .await;
     }
 
     // ── M4: **닫기** 도중에도 제어를 듣는다 ──

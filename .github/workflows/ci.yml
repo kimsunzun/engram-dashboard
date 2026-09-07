@@ -306,12 +306,8 @@ jobs:
       #   위 crate 들과 같은 단독 기립 축으로 확인한다 — 기대값의 정본은 그 crate lib.rs 헤더
       #   「격리 게이트」의 게이트 ④이고 아래 세 스텝(4a·4b·4d)은 부르기만 한다. 4c 는 같은 헤더의
       #   게이트 ⑤(실소켓 스위트가 비지 않았나)를 부른다.
-      # ★net 게이트 5 와 똑같은 이유로 두 줄이다 — 한 줄로 줄이지 말 것★: 이 crate 도 `default = []` 라
-      #   맨 명령은 `test-support` 뒤의 하네스를 컴파일 대상에서 아예 빼고(가려진 코드는 오류를 내지
-      #   않는다), 반대로 `--all-features` 쪽만 두면 "소비자가 feature 없이 이 crate 를 쓸 수 있나" 를
-      #   아무도 안 본다. 워크스페이스 회귀는 feature 합집합이 cargo 호출 1회 단위라 항상 ON 쪽만 본다.
-      # ★feature 목록을 손으로 박아 `--all-features` 를 대체하지 말 것★ — TRD §11 의 `ws` 어댑터가
-      #   들어오면 `--all-features` 쪽이 그 optional 서드파티와 실소켓 테스트까지 컴파일한다. 그게 의도다.
+      # ★feature 목록을 손으로 박아 `--all-features` 를 대체하지 말 것★ — `--all-features` 쪽이 `ws`
+      #   어댑터의 optional 서드파티와 실소켓 테스트까지 컴파일한다. 그게 의도다.
       # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md
       #   「빌드·검증 명령」 — 그 플래그가 겨냥하는 사내 보안 에이전트 조건이 러너에 없고, 낮추면 CI 만
       #   느려진다). 로컬 명령에도 이 crate 에는 안 붙는다 — 자식 프로세스를 하나도 안 띄운다.
@@ -365,14 +361,7 @@ jobs:
           done
           echo "PASS — 세 실소켓 스위트가 각각 1개 이상 등재됐다"
 
-      # ★소비자의 운영 조합(`features = ["ws"]`)을 컴파일하는 유일한 레인이다★ — 4a 는 feature 0개라
-      #   어댑터를 **아예 컴파일하지 않고**, 4b 는 `--all-features` 라 테스트 전용 `test-support` 를 **켠 채**
-      #   컴파일한다. 그래서 어댑터가 `crate::testing`(그 feature 뒤에 사는 하네스)을 참조하면 위 두 레인은
-      #   둘 다 초록이고 **소비자 빌드에서만 깨진다** — `features = ["ws"]` 는 소비자의 정당한 운영 선택이다.
-      # ★`check` 이고 `test` 가 아닌 것이 요점이다★ — 이 조합에는 `test-support` 가 없어 돌 테스트가 0개이고,
-      #   0개를 도는 `cargo test` 는 위 4c 가 막는 「비었는데 성공」을 새로 하나 만든다.
-      # 재는 것은 컴파일 성립 하나뿐이다 — 어댑터의 런타임 동작은 4b 가 잰다.
-      # 기대값의 정본 = 그 crate lib.rs 헤더 「격리 게이트」의 게이트 ④ 셋째 줄.
+      # 기대값·근거의 정본 = 그 crate lib.rs 헤더 「격리 게이트」의 게이트 ④ 셋째 줄.
       - name: 'transport gate 4d: cargo check -p engram-dashboard-transport --features ws (consumer combo)'
         shell: bash
         run: cargo check --locked -p engram-dashboard-transport --features ws
