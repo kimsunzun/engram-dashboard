@@ -93,6 +93,327 @@ Phase 3  프론트 해석 회수   (범위 밖)
 
 ---
 
+## 2.5. 구조도 — 타입·소유권 · 코드·데이터 흐름
+
+> **왜 이 절이 여기 있나:** §3의 질문표와 §4의 결정 전부가 아래 타입들 위에 서 있다. 그림 없이 읽으면 "어느 칸이 누구 소유인가"를 매번 코드로 되짚어야 하는데, ★**그 되짚기가 실제로 한 번 틀렸다**★ — 승인된 설계 브리핑이 `output.structured`를 backend 칸으로 잘못 적었다(§4-8). 이 절은 그 소유권 경계를 **타입 정의 줄로** 못 박는다.
+>
+> ★**여기 그린 것은 전부 코드에서 확인한 것뿐이다**★ — 확인하지 못한 것은 그리지 않고 **미확인**으로 적었다. 줄 번호는 §5와 같은 규율(2026-09-07 판독)이고, 코더는 앵커 주변을 다시 읽고 들어간다.
+
+### 2.5-1. 타입·소유권 구조도
+
+#### (가) 데이터 흐름 척추 — 누가 무엇을 든다
+
+```mermaid
+flowchart TD
+  MGR["AgentManager<br/>manager.rs:353"]
+  SES["AgentSession<br/>session.rs:25"]
+  CORE["OutputCore<br/>output_core.rs:42"]
+  TR["dyn AgentTransport<br/>transport/mod.rs:41"]
+  PTY["PtyTransport<br/>transport/pty.rs:25"]
+  STDIO["StdioTransport<br/>transport/stdio.rs:36"]
+  RING["Ring · replay 버퍼<br/>output_core.rs:759"]
+  OSINK["dyn OutputSink<br/>types.rs:705"]
+  SSINK["dyn StatusSink<br/>types.rs:711"]
+
+  MGR -->|"sessions 맵 · manager.rs:354<br/>Arc 로 소유"| SES
+  SES -->|"core: Arc · session.rs:54"| CORE
+  SES -->|"transport: Box · session.rs:55"| TR
+  TR -.->|"select_transport 가 고른다<br/>manager.rs:77-94"| PTY
+  TR -.-> STDIO
+  CORE -->|"replay: Mutex · :56"| RING
+  CORE -->|"subscribers: Mutex · :53"| OSINK
+  CORE -->|"status_sink · :65"| SSINK
+  PTY ==>|"pump → emit<br/>pty.rs:216"| CORE
+  STDIO ==>|"pump → emit<br/>stdio.rs:231 / :234"| CORE
+```
+
+**★소유권 분할 — CLAUDE.md 「핵심 불변식」의 그 줄을 코드 줄로 옮긴 것★**
+
+| 소유자 | 드는 것 | file:line |
+|---|---|---|
+| `AgentSession` | `id` · `cwd` · `epoch` · `cols` · `rows` | `session.rs:26-30` |
+| (같은 자리, 불변식 문장엔 없는 것) | `intent` · `backend_caps` · `encoder` · `reads_messages` · `submit_pacing` · `sleeper` | `session.rs:32`·`:35`·`:38`·`:45`·`:50`·`:53` |
+| `OutputCore` | `subscribers` · `replay`(Ring) · `seq` · `status` · `finalized` · `drain_handle` | `output_core.rs:53`·`:56`·`:48`·`:49`·`:50`·`:68` |
+| (같은 자리, 불변식 문장엔 없는 것) | `diagnostics` · `status_sink` · `on_terminal` · `turn`(턴 관측 배선) | `output_core.rs:62`·`:65`·`:73`·`:77` |
+| `PtyTransport` | `master` · `writer` · `child` · `shutdown` · `reader` · `job_handle` | `transport/pty.rs:28-35` |
+| `StdioTransport` | `child` · `stdin` · `stdout` · `stderr` · `shutdown` · `structured` · `decoder` | `transport/stdio.rs:39-53` |
+
+★**이 표에서 Phase 1이 읽어야 할 한 줄**★ — **decoder 칸을 드는 transport는 `StdioTransport` 하나뿐이다**(`stdio.rs:53`). `PtyTransport`에는 그 칸이 **없다**(`pty.rs:25-36`). 결과는 §2.5-2 (다)에서 다시 나온다.
+
+#### (나) 백엔드 dispatch — ★trait을 타는 것과 안 타는 것★
+
+```mermaid
+flowchart TD
+  CMD["AgentCommand<br/>profile.rs:44 · serde(tag=kind)"]
+  BF["backend_for<br/>backend/mod.rs:178-183"]
+  TRAIT["dyn AgentBackend<br/>backend/mod.rs:50"]
+  CB["ClaudeBackend<br/>claude.rs"]
+  SB["ShellBackend<br/>shell.rs"]
+  CX["CodexBackend<br/>codex.rs:23 · 미배선"]
+  GM["GeminiBackend<br/>gemini.rs · 미배선"]
+  ENC["input_encoder<br/>backend/mod.rs:326"]
+  DEC["output_decoder<br/>backend/mod.rs:342"]
+  RTE["resume_transcript_events<br/>backend/mod.rs:358"]
+
+  CMD -->|"자유 함수 8개가 이걸 부른다<br/>mod.rs:187-224"| BF
+  BF --> TRAIT
+  TRAIT --> CB
+  TRAIT --> SB
+  CX -.->|"static 싱글턴 없음<br/>mod.rs:174-175 에 안 선다"| TRAIT
+  GM -.-> TRAIT
+  CMD ==>|"★backend_for 를 안 탄다★<br/>is_json_mode() 로 직접 분기"| ENC
+  CMD ==> DEC
+  CMD ==> RTE
+```
+
+**`AgentBackend` trait의 메서드 — 필수와 기본값**
+
+| 메서드 | 종류 | 기본값 | file:line |
+|---|---|---|---|
+| `needs_session()` | **필수** | — | `mod.rs:52` |
+| `supports_control_channel()` | **필수** | — | `mod.rs:62` |
+| `accepts_mcp_config()` | **필수** | — | `mod.rs:81` |
+| `build_spec(...)` | **필수** | — | `mod.rs:88-96` |
+| `capabilities(&command)` → `BackendCaps` | **필수** | — | `mod.rs:106` |
+| `turn_classifier()` | 기본값 있음 | `no_turn_signals`(침묵) | `mod.rs:121-123` · 기본 함수 `:168-170` |
+| `resume_failure_kind(evidence)` | 기본값 있음 | `None`(모름) | `mod.rs:140-142` |
+| `reads_messages()` | 기본값 있음 | ★**`true`(fail-open)**★ | `mod.rs:153-155` |
+
+trait은 `pub` 이지만 **바깥에서 쓰는 표면은 자유 함수 8개다** — `needs_session`(`:187`) · `supports_control_channel`(`:191`) · `accepts_mcp_config`(`:195`) · `build_command_spec`(`:199`) · `backend_caps`(`:210`) · `turn_classifier`(`:214`) · `resume_failure_kind`(`:218`) · `reads_messages`(`:222`). 전부 `backend_for(c).<메서드>()` 한 줄이다.
+
+★**그런데 backend 지식을 나르는 함수 셋은 그 dispatch를 안 탄다**★ — Phase 2를 설계할 때 이것을 모르면 자리를 못 찾는다.
+
+| 함수 | 무엇을 하나 | 어떻게 고르나 | file:line |
+|---|---|---|---|
+| `input_encoder` | `InputEncoder` 태그 선택 | `c.is_json_mode()` **직접 검사** | `mod.rs:326-332` |
+| `output_decoder` | `Option<Box<dyn OutputDecoder>>` | `c.is_json_mode()` **직접 검사** → `ClaudeStreamDecoder` 하드코딩 | `mod.rs:342-348` |
+| `resume_transcript_events` | 과거 대화 seed | `AgentCommand::Claude` + json 모드 match | `mod.rs:358-369` |
+
+★**이 셋은 `AgentBackend` 메서드가 아니다**★ — 즉 **`CodexBackend`에 메서드를 하나 더 구현해도 여기 안 걸린다.** codex 번역기(Phase 2)를 붙이려면 `impl AgentBackend`가 아니라 **이 자유 함수들의 분기를 고쳐야 한다.** `output_decoder`의 doc 주석(`mod.rs:340-341`)이 그 자리를 이미 지목한다 — 「새 backend(codex 등)는 자기 decoder 를 여기 분기에 추가하면 된다」.
+
+#### (다) capability 합성 — ★소유권이 타입으로 박혀 있다★
+
+```mermaid
+flowchart LR
+  TC["TransportCaps<br/>types.rs:461-465"]
+  BC["BackendCaps<br/>types.rs:470-473"]
+  CP["Capabilities::compose<br/>types.rs:477-485"]
+  CAP["Capabilities<br/>types.rs:451-457"]
+  RM["defaultRenderMode<br/>src/components/slot/renderMode.ts:23-25"]
+
+  TC -->|"input · output · control"| CP
+  BC -->|"session · model"| CP
+  CP --> CAP
+  CAP -->|"output.structured 한 칸만 읽는다"| RM
+```
+
+| 영역 | 출처 | 어디서 만들어지나 |
+|---|---|---|
+| `input` · **`output`** · `control` | ★**transport**★ | `AgentTransport::capabilities()` — `transport/mod.rs:56`. PTY 구현 = `pty.rs:312-333` |
+| `session` · `model` | ★**backend**★ | `AgentBackend::capabilities(&command)` — `mod.rs:106`. claude 구현 = `claude.rs:263-277`, shell = `shell.rs:62` |
+
+**★브리핑이 틀린 자리를 줄로 못 박는다★**
+
+- `BackendCaps`에는 **`session`과 `model` 두 칸뿐이다** — `types.rs:470-473`. 그 바로 위 doc(`types.rs:467-468`)이 이유를 적는다: 「input/output/control 이 여기 없는 건 의도다 — backend 는 그걸 만들 수 없다(**소유권을 타입으로 강제**)」.
+- `TransportCaps`에는 **`input`·`output`·`control` 세 칸뿐이다** — `types.rs:461-465`. 대칭 doc(`types.rs:459`): 「session/model 이 여기 없는 건 의도다」.
+- `output.structured`는 **`OutputCaps`의 칸**이고(`types.rs:501`), `OutputCaps`는 `TransportCaps.output`에 들어간다(`types.rs:463`). ★따라서 **backend는 이 값을 신고할 수 없다**★ — `BackendCaps`에 `output` 칸 자체가 없어 컴파일이 막는다.
+- 합성 지점은 **한 곳뿐이다** — `AgentSession::capabilities()`(`session.rs:257-259`)가 `Capabilities::compose(self.transport.capabilities(), self.backend_caps.clone())`을 부른다. `compose`가 「유일한 정상 생성 경로」라고 doc이 적는다(`types.rs:476`).
+
+**그래서 codex(PTY)의 `structured`는 자동으로 false다:** `is_json_mode()`가 codex에 false(`profile.rs:61-69` — `AgentCommand::Claude` + `StreamJson`일 때만 true) → `select_transport`가 `PtyTransport`를 고르고(`manager.rs:84-92`) → `PtyTransport::capabilities()`가 `structured: false` **고정**(`pty.rs:321`) → 프론트가 `'terminal'`을 고른다(`renderMode.ts:23-25`). **§4-8의 "렌더러 코드 변경 0줄" 결론이 이 사슬이다.**
+
+#### (라) `AgentCommand`와 디스크 · `OutputEvent`와 링
+
+```mermaid
+flowchart TD
+  PROF["AgentProfile<br/>profile.rs:128"]
+  CMD["AgentCommand<br/>profile.rs:44-58"]
+  PF["ProfilesFile<br/>persistence/mod.rs:33-37"]
+  DISK["agents.json<br/>from_slice 한 번에 · persistence/mod.rs:120"]
+
+  PROF -->|"command 칸 · profile.rs:148"| CMD
+  PF -->|"profiles: Vec&lt;AgentProfile&gt;"| PROF
+  PF --> DISK
+  CMD -.->|"serde(tag=kind) · profile.rs:45<br/>디스크에 kind 문자열이 그대로"| DISK
+```
+
+`AgentCommand`의 오늘 변형은 둘뿐이다 — `Claude { extra_args, output_format }`(`profile.rs:49-53`, `output_format`은 `#[serde(default)]`)과 `Shell { program, args }`(`:54-57`). §4-6의 위험이 서는 자리가 위 점선이다: **`kind` 문자열이 디스크에 적히고, 파일은 `serde_json::from_slice` 한 번으로 통째 파싱된다**(`persistence/mod.rs:120`).
+
+**`OutputEvent` — 링에 실제로 남는 것**(`types.rs:37-69`)
+
+| variant | 필드 | file:line | 누가 만드나 |
+|---|---|---|---|
+| `TerminalBytes(Vec<u8>)` | 콘솔 raw 바이트 | `types.rs:39` | PTY pump(`pty.rs:216`) · decoder 없는 stdio pump(`stdio.rs:234`) |
+| `TextDelta` | `text`·`turn_id`·`message_id` | `types.rs:40-44` | decoder |
+| `ToolCall` | `name`·`args_json`·`id`·`turn_id`·`message_id` | `types.rs:46-53` | decoder |
+| `Usage` | `input_tokens`·`output_tokens`·`turn_id` | `types.rs:54-58` | decoder |
+| `MessageDone` | `turn_id`·`message_id` | `types.rs:60-63` | decoder |
+| `Error(String)` | 스트림 내부 오류(종료 아님) | `types.rs:65` | decoder |
+| `Structured { kind, json }` | ★백엔드별 탈출구 — **core는 내용을 해석하지 않는다**★ | `types.rs:66-68` | decoder · 입력 에코(`mod.rs:279-282`) |
+
+`Ring`(`output_core.rs:759-764`)은 `StoredOutput { seq, event, cost_bytes }`(`:707-712`)를 담고 **상한이 둘**이다 — `max_bytes = 2MB`(`:771`)와 `max_events = 4096`(`:774`), **둘 중 하나만 넘어도 앞부터 evict**(`:789-797`). `cost_bytes`는 정확한 wire 크기가 아니라 payload 문자열 길이 합의 **근사**다(`estimate_cost_bytes`, `:721-745`) — 코어는 직렬화를 못 하기 때문(`:716-717`). ★**메모리 전용이다**★ — 디스크 영속 경로가 이 타입에 없다(`Ring`은 `VecDeque` 하나, `:760`). 최신 1건은 상한을 넘겨도 항상 남긴다(`:789` `len() > 1` 가드).
+
+#### (마) 둘째 백엔드가 더하는 것 · ★건드리지 않는 것★
+
+| 더하는 것 | 어디 | 근거 절 |
+|---|---|---|
+| `AgentCommand::Codex` 변형 하나 | `profile.rs:44-58` | §4-1 |
+| `static CODEX_BACKEND` + `backend_for` 팔 하나 | `backend/mod.rs:174-175` · `:178-183` | §4-2 |
+| `impl AgentBackend for CodexBackend`의 값들 | `backend/codex.rs` | §4-2 표 |
+| 트립와이어 match 팔·배열 길이 | `backend/mod.rs` 테스트 · `commands.rs` | §4-4 |
+| wire 선택 칸 하나 + 데몬 변환 갈래 | `protocol/messages.rs:99` · `daemon/connection_core.rs:963-980` | §4-5 |
+
+| ★건드리지 않는 것★ | 왜 안 건드리는가 | 근거 |
+|---|---|---|
+| `AgentSession` · `OutputCore` · `Ring` | 백엔드를 모르는 타입들이다 — 필드 하나도 백엔드 지식이 아니다 | `session.rs:25-56` · `output_core.rs:42-78` |
+| `AgentTransport` trait과 두 구현체 | codex는 PTY를 그대로 탄다(`[실측 M1]` PTY가 유일 경로) | `transport/mod.rs:41-57` |
+| `Capabilities` / `compose` / `TransportCaps` | 소유권 분할을 무너뜨리는 변경이다 — §4-8이 명시로 금지 | `types.rs:451-486` |
+| `OutputEvent` 변형 목록 | Phase 1은 번역기 0줄이라 새 변형이 필요 없다 | §0 범위 밖 표 |
+| 프론트 렌더 분기 | `structured` 한 칸이 이미 맞게 돈다 | `renderMode.ts:23-25` · §4-8 |
+| `input_encoder` · `output_decoder` 분기 | Phase 1은 `Raw` + `None`으로 충분하다(터미널) | `mod.rs:326-348` · §4-2 |
+
+★**마지막 줄이 Phase 2의 청구서다**★ — Phase 1이 저 둘을 안 건드리는 것은 **터미널 모드라 안 건드려도 되기 때문**이지 codex가 그 분기에 안 들어가서가 아니다. Phase 2가 상주 JSON 서버를 켜는 순간 `output_decoder`(`mod.rs:342`)와 `select_transport`(`manager.rs:77-94`) 둘 다 열린다 — 후자는 **decoder를 PTY 갈래에서 버리기 때문**이다(`manager.rs:89-91`).
+
+---
+
+### 2.5-2. 코드·데이터 흐름도
+
+세 프로세스를 지난다 — **데몬**(`AgentManager` 소유) · **셸**(`src-tauri`, 데몬 클라이언트) · **웹뷰**(React). 각 홉에 **[중립]**(백엔드를 모른다) / **[claude 전용]**(claude 지식이 산다)을 붙인다.
+
+#### (가) 출력 한 덩이 — CLI 프로세스에서 픽셀까지
+
+```mermaid
+flowchart TD
+  subgraph D["데몬 프로세스"]
+    CLI["codex / claude 프로세스<br/>PTY 또는 파이프"]
+    PUMP["pump 스레드<br/>pty.rs:203-216 · stdio.rs:216-236"]
+    DECD["dyn OutputDecoder<br/>stdio 경로에만 · stdio.rs:230"]
+    EMIT["OutputCore::emit<br/>→ Ring push + subscribers"]
+    SINK["FrameOutputSink::send<br/>daemon/agent_conn.rs:66"]
+  end
+  subgraph S["셸 프로세스 · src-tauri"]
+    RELAY["binary 프레임 무상태 통과<br/>daemon_client/connection.rs:978-1006"]
+  end
+  subgraph W["웹뷰 프로세스"]
+    CHAN["Channel onmessage<br/>src/api/tauriTransport.ts:319-348"]
+    DEDUP["seq dedup<br/>src/api/protocolClient.ts:266-268"]
+    ACC["structuredAccumulator<br/>:65-139"]
+    XT["TerminalSlot · xterm"]
+    RS["RichSlot · 챗"]
+  end
+
+  CLI -->|"바이트 청크 최대 4096B"| PUMP
+  PUMP -->|"decoder 있으면"| DECD
+  DECD -->|"Vec&lt;OutputEvent&gt;"| EMIT
+  PUMP -->|"decoder 없으면 TerminalBytes"| EMIT
+  EMIT --> SINK
+  SINK -->|"tag0 = raw 바이트<br/>tag1 = StructuredEvent JSON"| RELAY
+  RELAY -->|"원본 bytes 그대로"| CHAN
+  CHAN --> DEDUP
+  DEDUP -->|"terminal 모드"| XT
+  DEDUP -->|"rich 모드"| ACC
+  ACC --> RS
+```
+
+| # | 홉 | 그 지점의 데이터 모양 | 해석하나 | 등급 |
+|---|---|---|---|---|
+| 1 | CLI 프로세스 → pump `read` | 임의 크기 바이트 청크(라인·문자 경계 무시) | 아니오 | **[중립]** |
+| 2 | decoder `decode(&[u8]) -> Vec<OutputEvent>` (`transport/mod.rs:35`) | 한 청크가 **N개 이벤트로 갈라진다**. 미완성 꼬리는 내부 버퍼에 남아 다음 청크와 합쳐진다(`ClaudeStreamDecoder.buffer`, `claude.rs:594`) | ★**예 — 여기가 유일한 해석 지점이다**★ | **[claude 전용]** — 오늘 있는 구현체는 `ClaudeStreamDecoder` 하나(`claude.rs:586`) |
+| 3 | pump → `core.emit` (`pty.rs:216` · `stdio.rs:231`/`:234`) | `OutputEvent`. decoder가 `None`이면 `TerminalBytes`로 **그대로 통과** | 아니오 | **[중립]** |
+| 4 | `emit` → `Ring` + subscribers | `StoredOutput { seq, event, cost_bytes }`. seq 부여·finalize 재확인이 여기 | 아니오 | **[중립]** |
+| 5 | `FrameOutputSink::send` (`agent_conn.rs:66-...`) | `Bytes`→tag0 terminal frame(`:74-76`), `Event`→`output_event_to_wire` 뒤 JSON→tag1(`:80-...`) | 아니오 — **1:1 미러**(`connection_core.rs:504-553`, `Structured{kind,json}`은 `:548-551`에서 필드 복사뿐) | **[중립]** |
+| 6 | codec (`protocol/codec.rs:48-64`) | `[tag 1B][agent_id 16B][epoch 4B][seq 8B][payload]`. payload는 `&[u8]` — ★**스키마 무지**★ | 아니오 | **[중립]** |
+| 7 | 셸 relay (`daemon_client/connection.rs:978-1006`) | **헤더만 읽는다**(agent_id·epoch). epoch 필터 통과분을 `send_to_windows(registry, &labels, &bytes)`로 **원본 바이트 그대로** 보낸다(`:1002`) | 아니오 | **[중립]** |
+| 8 | 웹뷰 수신 (`tauriTransport.ts:319-348`) | `decodeOutputFrame`(`src/api/wsFrame.ts:25-48`) → `InboundMessage`의 output 갈래 `{ kind, tag, agentId, epoch, seq, bytes }`(`src/api/transport.ts:20`) | 아니오 | **[중립]** |
+| 9 | seq dedup (`protocolClient.ts:266-268`) | `f.seq <= st.lastDeliveredSeq`면 버린다(`SubState.lastDeliveredSeq`, `:94`). flush 재정렬분도 같은 가드(`:388-390`) | 아니오 | **[중립]** |
+| 10a | terminal 렌더 | 바이트를 xterm에 그대로 write(`TerminalSlot.tsx`) | 아니오 | **[중립]** |
+| 10b | rich 렌더 — accumulator (`structuredAccumulator.ts:65-139`) | `StructuredEvent` JSON을 접어 `StructuredItem`(`:21-29`, `text｜tool｜usage｜error｜structured｜separator`) 배열로 | ★**부분적으로 예**★ — `kind === 'user'`일 때만 `extractUserUuid`(`:174-187`)가 claude의 `{"type":"text","uuid":…}`를 파싱한다. 나머지 `kind`는 불투명 문자열로 통과(`:126`) | **[claude 전용]** — §0의 「Phase 3 프론트에 샌 claude 스키마 해석 회수」가 바로 이 줄 |
+| 11 | 렌더러 선택 (`renderMode.ts:23-25` → `ViewLayoutRenderer.tsx:209-220`) | `capabilities.output.structured` 한 칸으로 `'rich'`(RichSlot) / `'terminal'`(TerminalSlot) | 아니오 | **[중립]** |
+
+★**Phase 1 codex는 2·10b를 아예 안 지난다**★ — PTY라 decoder가 `None`이고(§2.5-1 (나)) `structured: false`라 xterm으로 간다. **즉 출력 방향에서 codex가 무는 claude 전용 홉은 0개다.** 이것이 「번역기 0줄」의 실물이다.
+
+> **주의 — 코드 주석 하나가 낡았다:** `agent_conn.rs:71-72`가 「구조화 이벤트 생산자(B3 decoder→pump 배선)는 아직 미배선이라 런타임엔 Bytes 만 흐른다」고 적는데, `stdio.rs:228-231`이 그 배선이다. 이 절의 판정은 코드를 따랐다.
+
+#### (나) 입력 한 덩이 — 되돌아가는 길
+
+```mermaid
+flowchart TD
+  subgraph W["웹뷰"]
+    KEY["xterm onData<br/>TerminalSlot.tsx:322-330"]
+    CHAT["RichSlot send<br/>RichSlot.tsx:226-250"]
+    WS["protocolClient.writeStdin<br/>:846-850"]
+  end
+  subgraph S["셸"]
+    TCMD["agent_write_stdin<br/>src-tauri/src/commands/agent.rs:75-88"]
+  end
+  subgraph D["데몬"]
+    HDL["WriteStdin 핸들러<br/>connection_core.rs:814-828"]
+    MW["manager.write_stdin :1618<br/>manager.submit_stdin_observed :1640"]
+    ENC["InputEncoder::encode<br/>backend/mod.rs:247-256"]
+    SUB["submit_sequence + SUBMIT_PACING<br/>session.rs:203-225"]
+    TX["transport.send_input"]
+  end
+
+  KEY -->|"UTF-8 바이트 · 개행 부착 없음"| WS
+  CHAT -->|"trim 한 원문 · 개행 부착 없음"| WS
+  WS -->|"WriteStdin { data: number[] }"| TCMD
+  TCMD -->|"Vec&lt;u8&gt; 그대로"| HDL
+  HDL --> MW
+  MW --> ENC
+  ENC -->|"우편 경로만"| SUB
+  ENC --> TX
+  SUB --> TX
+```
+
+| # | 홉 | 그 지점의 데이터 모양 | 감싸나 | 등급 |
+|---|---|---|---|---|
+| 1 | 프론트 입력 | ★**평문 UTF-8 바이트뿐 — 프론트는 아무것도 감싸지 않고 개행도 안 붙인다**★. xterm은 Enter를 이미 `\r`로 준다(`TerminalSlot.tsx:322-330`); RichSlot은 `trim()`한 원문만 보내고 주석이 그 금지를 명시한다(`RichSlot.tsx:227-228`) | 아니오 | **[중립]** |
+| 2 | `writeStdin` (`protocolClient.ts:846-850`) | `WriteStdin { agent_id, data: Array.from(bytes), request_id }` — wire 타입은 `Vec<u8>`/`number[]`(`protocol/messages.rs:43-49`) | 아니오 | **[중립]** |
+| 3 | 셸 `agent_write_stdin` (`src-tauri/src/commands/agent.rs:75-88`) | `Vec<u8>`를 봉투에 넣어 데몬으로 릴레이할 뿐 | 아니오 | **[중립]** |
+| 4 | 데몬 핸들러 (`connection_core.rs:814-828`) | lease 확인 후 `manager.write_stdin(agent_id, &data)`(`:821`) | 아니오 | **[중립]** |
+| 5 | `InputEncoder::encode` (`backend/mod.rs:247-256`) | `Raw` → `bytes.to_vec()` **바이트 동일**(`:249`) · `ClaudeStreamJson` → `wrap_user_turn`이 `{"type":"user",…}` **JSON 한 줄 + `\n`**(`claude.rs:508-540`, 종단은 `:537-539`) | ★**여기서만 감싼다**★ | **[claude 전용]** — 스키마는 `claude.rs` 단독 |
+| 6 | 입력 에코 (`mod.rs:272-284`) | `Raw`는 `None`(PTY가 이미 로컬 에코) · `ClaudeStreamJson`은 `Structured{kind:"user",…}`를 즉시 `core.emit` | — | **[claude 전용]** |
+| 7 | 제출 — **경로가 둘로 갈린다** | 아래 표 | — | — |
+| 8 | `transport.send_input(InputEvent::Raw(...))` | 바이트를 PTY writer/파이프 stdin에 그대로 | 아니오 | **[중립]** |
+
+**★제출(턴 시작)이 갈리는 두 경로 — 여기를 헷갈리면 codex 탭이 읽기 전용이 된다★**
+
+| 경로 | 부르는 동사 | 제출 바이트를 쓰나 | 실호출자 |
+|---|---|---|---|
+| **사람이 직접 타이핑** | `write_input` → `write_input_observed`(`session.rs:142`·`:156`) | ★**안 쓴다**★ — `submit_sequence`를 아예 안 부른다. 사람이 Enter를 직접 치기 때문(`mod.rs:299-301`) | 데몬 WriteStdin 핸들러(`connection_core.rs:821`) |
+| **우편(에이전트 간 메시지) 주입** | `submit_input_observed`(`session.rs:203-225`) | **쓴다** — 본문 write → `SUBMIT_PACING`(500ms, `mod.rs:324`)만큼 자고(`session.rs:208`) → 제출 바이트를 **별도 write**(`:214`) | `messaging_host.rs:130` → `manager.submit_stdin_observed`(`manager.rs:1640`) |
+
+`submit_sequence`(`mod.rs:303-308`)의 값: **`Raw` → `b"\r"`**(터미널 Enter = CR, `:305`) · **`ClaudeStreamJson` → `None`**(`encode`가 붙인 종단 `\n`이 그 프로토콜의 제출이라, CR을 더하면 페이로드가 오염된다 — `:297-298`).
+
+★**Phase 0 Q4가 재는 것이 정확히 이 표의 아랫줄이다**★ — codex의 `InputEncoder`는 Phase 1에서 `Raw`이므로 제출 = `\r` + 500ms 간격이고, 그 계약은 **claude TUI에서만 실측됐다**(§2 미확인 목록). Phase 1이 우편을 끄기 때문에(§4-3) **Phase 1 codex는 아랫줄을 아예 안 탄다** — 하지만 §3-5 게이트가 그것을 미리 재는 이유는, Q4가 아니오면 Phase 2에서 `InputEncoder`에 변형이 하나 더 필요해져 **배선의 모양이 달라지기 때문**이다.
+
+#### (다) 복원(resume) — ★claude 전용이 가장 굵은 자리★
+
+```mermaid
+flowchart LR
+  RES["SpawnMode::Resume<br/>manager.rs:1042-1048"]
+  DISP["resume_transcript_events<br/>backend/mod.rs:358-369"]
+  READ["claude::read_transcript_events<br/>claude.rs:1012"]
+  PATH["~/.claude/projects/&lt;slug&gt;/&lt;sid&gt;.jsonl<br/>claude.rs:922-937"]
+  SEED["OutputCore::seed → Ring<br/>output_core.rs:182 · manager.rs:1258"]
+
+  RES --> DISP
+  DISP -->|"Claude + is_json_mode 일 때만"| READ
+  READ --> PATH
+  READ --> SEED
+  DISP -.->|"그 외 전부 빈 Vec"| SEED
+```
+
+| 홉 | 내용 | 등급 |
+|---|---|---|
+| dispatch (`mod.rs:358-369`) | `AgentCommand::Claude { .. } if c.is_json_mode()`일 때만 읽는다. 그 외는 빈 `Vec`(`:367`) | **[중립]** — 분기 자체는 중립 |
+| 경로 조립 (`claude.rs:922-937`) | ★**claude가 만드는 디렉터리 규칙을 우리가 재현한다**★ — cwd를 비영숫자→`-`로 슬러그화(`claude.rs:907-918`)해 `~/.claude/projects/<slug>/<sid>.jsonl` | ★**[claude 전용]**★ |
+| 파싱 (`claude.rs:1012`) | claude의 `.jsonl` transcript 포맷 | ★**[claude 전용]**★ |
+| seed (`output_core.rs:182` · `manager.rs:1251-1258`) | 링에 push. ★**sessions 맵 insert 전에 끝낸다**★(`manager.rs:1241-1250` — empty-ring replay와 seq interleave 두 창을 원천 차단) | **[중립]** |
+
+★**codex는 이 그림 전체를 안 탄다**★ — 두 이유가 겹친다: `[실측 M2]` 호출자가 sid를 못 정하고, Phase 1이 `session.resume = false`를 신고한다(§4-2). **codex 쪽 transcript가 어디 어떤 형식으로 있는지는 미확인이고**(§2), Phase 2가 그것을 열 때 위 표의 가운데 두 줄과 **같은 모양의 claude 전용 코드가 codex 몫으로 하나 더 생긴다** — `backend/codex.rs` 안에.
+
+---
+
 ## 3. Phase 0 — 백엔드 계약 시험대
 
 ### 3-1. 어디 사는가 · 이름 · 어떻게 부르는가
@@ -206,6 +527,8 @@ pub enum AgentCommand {
 ### 4-2. `backend_for` dispatch + `CodexBackend`
 
 **dispatch:** `crates/engram-dashboard-agent/src/backend/mod.rs:178-183`. 정적 싱글턴 `static CODEX_BACKEND: CodexBackend = CodexBackend;`를 `:174-175` 옆에 세우고 match 팔을 하나 더한다. **와일드카드를 넣지 않는다** — `:177`의 주석이 그 이유를 이미 적었고, §4-4의 트립와이어가 그 위에 선다.
+
+★**trait이 나르지 않는 백엔드 지식 셋이 따로 있다 — §2.5-1 (나)**★. `input_encoder`(`mod.rs:326`) · `output_decoder`(`mod.rs:342`) · `resume_transcript_events`(`mod.rs:358`)는 **`backend_for` dispatch를 안 타고** `is_json_mode()`를 직접 본다. 즉 `CodexBackend`에 메서드를 아무리 채워도 저 셋은 안 바뀐다 — Phase 1은 셋 다 기본값(`Raw`·`None`·빈 `Vec`)으로 충분하지만, **Phase 2가 번역기를 켤 때 열리는 자리가 저기다.**
 
 **각 trait 메서드가 Phase 1에 무엇을 돌려줘야 하는가:**
 
@@ -329,7 +652,9 @@ variant를 하나 더하면 아래가 **컴파일 에러 또는 단언 실패**�
 
 **지시서가 말한 것:** 「`capabilities().output.structured`를 false로 두면 렌더러가 terminal을 고른다」.
 
-**★코드는 그렇지 않다.★** `AgentBackend::capabilities()`는 `BackendCaps`를 돌려주고, 그 타입에는 `session`·`model` **두 영역뿐**이다(`agent/src/types.rs`의 `BackendCaps`). `output.structured`는 **`TransportCaps`의 칸**이다(`types.rs:496-501`, 주석: 「프론트 `defaultRenderMode`가 이 값 하나로 렌더러를 가른다」). 최종 `Capabilities`는 `compose(transport_caps, backend_caps)`로 합쳐진다.
+**★코드는 그렇지 않다.★** `AgentBackend::capabilities()`는 `BackendCaps`를 돌려주고, 그 타입에는 `session`·`model` **두 영역뿐**이다(`agent/src/types.rs:470-473`). `output.structured`는 **`TransportCaps`의 칸**이다(`OutputCaps.structured` = `types.rs:501`, 주석 `:498-500`: 「프론트 `defaultRenderMode`가 이 값 하나로 렌더러를 가른다」 — `OutputCaps`는 `TransportCaps.output`에 실린다, `:463`). 최종 `Capabilities`는 `compose(transport_caps, backend_caps)`로 합쳐진다(`types.rs:477-485`, 유일한 합성 지점 = `session.rs:257-259`).
+
+★**소유권 경계의 전체 그림은 §2.5-1 (다)**★ — 두 타입의 doc 주석이 「소유권을 타입으로 강제」한다고 적는 자리(`types.rs:459`·`:467-468`)까지 거기서 인용한다.
 
 **그래서 실제로 무슨 일이 일어나는가 — 우리가 아무것도 안 해도 맞는다:**
 
