@@ -811,7 +811,7 @@ defaultRenderMode(agent)                 src/components/slot/renderMode.ts:23-25
 
 **범위 확장이 무엇을 포함하고 무엇을 포함하지 않나 — 선을 긋는다:**
 
-- **걷는다(범용 개념에 벤더 이름이 붙은 것):** `claude_session_id` → 중립 이름 · `is_json_mode()` → 백엔드가 선언하는 전송 축 · 갈림길이 `claude::` 를 직접 부르는 넷 → 계약 메서드 · `session_tracker.rs` 488 줄 → `backend/claude/` 안.
+- **걷는다(범용 개념에 벤더 이름이 붙은 것):** `claude_session_id` → **`backend_session_id`**(확정 2026-09-07 — 이 저장소가 그 축을 이미 `backend` 로 부르고, **누가 뽑는지를 말하지 않아** claude(우리가 건넨다)와 codex(자기가 뽑아 알린다) 양쪽에 똑같이 읽힌다. 맨 `session_id` 는 데몬 연결 세션·tracker 와 충돌한다) · `is_json_mode()` → 백엔드가 선언하는 전송 축 · 갈림길이 `claude::` 를 직접 부르는 넷 → 계약 메서드 · `session_tracker.rs` 488 줄 → `backend/claude/` 안.
 - ★**안 걷는다(식별자 그 자체):**★ `AgentCommand::Claude` · `AgentSpawnCommand::Claude` 의 **variant 이름**. 백엔드를 고르는 칸에 백엔드 이름이 드는 것은 누수가 아니라 그 칸의 존재 이유다. 여기서 이름을 지우면 무엇을 띄울지 못 고른다.
 - **`ClaudeOutputFormat` 은 반만 걷는다** — 터미널/stream-json 은 **실제로 claude 의 축**이고 codex 엔 대응이 없다(codex 는 TUI/상주서버라 축이 다르다). 타입은 Claude variant 의 payload 로 남기고, **claude 아닌 코드가 그 이름을 부르는 호출부만** 걷는다.
 - **프론트의 claude 스키마 해석은 이번에 안 걷는다** — 이름 문제가 아니라 **번역기가 덜 채워져서** 원본 JSON 이 화면까지 가는 것이다. 중립 낱말을 정하는 것은 codex 번역기를 짜는 2 단계이고, 지금 claude 만 먼저 하면 낱말을 두 번 정하게 된다(사용자도 「클라 쪽에서 처리해야 되는 건 어쩔 수 없다」로 이 갈래를 열어 뒀다).

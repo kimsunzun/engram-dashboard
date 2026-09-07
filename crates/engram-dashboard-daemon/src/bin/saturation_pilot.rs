@@ -256,7 +256,7 @@ async fn run_one(
     };
 
     let session_id = manager
-        .agent_claude_session_id(agent.id)
+        .agent_backend_session_id(agent.id)
         .map(|s| s.to_string());
     let transcript_path = match &session_id {
         Some(sid) => locate_transcript_with_wait(sid, TRANSCRIPT_APPEAR_TIMEOUT),

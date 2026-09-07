@@ -158,7 +158,7 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
     let id = profile.id;
     profiles.upsert(profile.clone());
 
-    let sid_before = profiles.get(id).and_then(|p| p.claude_session_id);
+    let sid_before = profiles.get(id).and_then(|p| p.backend_session_id);
     let old_sids_before = profiles
         .get(id)
         .map(|p| p.old_session_ids.len())
@@ -184,7 +184,7 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
     );
 
     assert_eq!(
-        profiles.get(id).and_then(|p| p.claude_session_id),
+        profiles.get(id).and_then(|p| p.backend_session_id),
         sid_before,
         "resume 실패로 새 sid 가 발급되면 안 됨(fresh-fallback 폐지)"
     );
@@ -416,7 +416,7 @@ fn reactivate_after_kill_bumps_epoch() {
 }
 
 /// ★ADR-0083 회귀 가드★ — 유저 kill 이 프로필을 지우면 재활성화가 "profile not found"(화면엔 "실패")로
-/// 깨진다. 옛 reaper 가 UserKill → DeleteProfile 로 claude_session_id 째 지워 실제로 그랬다.
+/// 깨진다. 옛 reaper 가 UserKill → DeleteProfile 로 backend_session_id 째 지워 실제로 그랬다.
 ///
 /// 여기서 증명되는 건 **프로필 조회 경로가 온전하다**까지다 — 실제 `--resume <sid>` 조립은
 ///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 가 실증한다.
@@ -428,11 +428,11 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let id = profile.id;
 
     // ★seeded 프로필을 spawn/activate/kill 전부에 넘겨야 한다★: spawn 은 넘겨받은 스냅샷을
-    //   upsert_preserving_hierarchy 로 그대로 심으므로, claude_session_id=None 인 원본을 넘기면
+    //   upsert_preserving_hierarchy 로 그대로 심으므로, backend_session_id=None 인 원본을 넘기면
     //   심어둔 sid 가 덮여 유실된다. auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
-    seeded.claude_session_id = Some(sid);
+    seeded.backend_session_id = Some(sid);
     seeded.auto_restore = true;
     profiles.upsert(seeded.clone());
 
@@ -465,9 +465,9 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
         "유저 kill 후 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083 회귀)"
     );
     assert_eq!(
-        profiles.get(id).and_then(|p| p.claude_session_id),
+        profiles.get(id).and_then(|p| p.backend_session_id),
         Some(sid),
-        "유저 kill 로 claude_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
+        "유저 kill 로 backend_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
     );
 
     let reactivated = manager

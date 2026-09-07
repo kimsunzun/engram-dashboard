@@ -428,7 +428,7 @@ fn wake_existing(
     };
     // ★모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076)★: 저장된 세션이 있으면 이어받기, 없으면
     //   새로. 여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다.
-    let mode = if profile.claude_session_id.is_some() {
+    let mode = if profile.backend_session_id.is_some() {
         SpawnMode::Resume
     } else {
         SpawnMode::Fresh
@@ -924,7 +924,7 @@ mod tests {
             let mut profile = profile;
             profile.display_name = Some(name.to_string());
             if resumable {
-                profile.claude_session_id = Some(uuid::Uuid::new_v4());
+                profile.backend_session_id = Some(uuid::Uuid::new_v4());
             }
             self.profiles.lock().unwrap().insert(id, profile);
             self.rows.lock().unwrap().push(AgentRosterRow {

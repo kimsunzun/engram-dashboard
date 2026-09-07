@@ -35,7 +35,7 @@ function profile(
     command,
     cwd,
     env: [],
-    claude_session_id: null,
+    backend_session_id: null,
     old_session_ids: [],
     epoch: 0,
     auto_restore: false,

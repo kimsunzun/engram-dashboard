@@ -458,7 +458,7 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
         command: spawn_command_to_wire(&p.command),
         cwd: p.cwd.to_string_lossy().into_owned(),
         env: p.env.clone(),
-        claude_session_id: p.claude_session_id.map(|u| u.to_string()),
+        backend_session_id: p.backend_session_id.map(|u| u.to_string()),
         old_session_ids: p.old_session_ids.iter().map(|u| u.to_string()).collect(),
         epoch: p.epoch,
         auto_restore: p.auto_restore,
@@ -1088,7 +1088,7 @@ impl ConnectionCore {
                 //     문구는 그 기록이 없던 시절의 것이다.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        let mode = if resume || profile.claude_session_id.is_some() {
+                        let mode = if resume || profile.backend_session_id.is_some() {
                             SpawnMode::Resume
                         } else {
                             SpawnMode::Fresh

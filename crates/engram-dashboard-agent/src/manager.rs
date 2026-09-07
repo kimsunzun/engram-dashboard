@@ -648,8 +648,8 @@ impl AgentManager {
         self.profiles.list()
     }
 
-    pub fn agent_claude_session_id(&self, id: AgentId) -> Option<uuid::Uuid> {
-        self.profiles.get(id).and_then(|p| p.claude_session_id)
+    pub fn agent_backend_session_id(&self, id: AgentId) -> Option<uuid::Uuid> {
+        self.profiles.get(id).and_then(|p| p.backend_session_id)
     }
 
     /// 에이전트 신규 등록(트리 "만들기"). 등록 전에 명부 전역 이름 유일성을 강제한다(ADR-0120).
@@ -1373,7 +1373,7 @@ impl AgentManager {
 
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
         let resumable =
-            backend::needs_session(&profile.command) && profile.claude_session_id.is_some();
+            backend::needs_session(&profile.command) && profile.backend_session_id.is_some();
 
         if !resumable {
             // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.

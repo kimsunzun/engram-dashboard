@@ -61,7 +61,7 @@ pub enum AgentCommand {
 pub enum SpawnMode {
     /// 새 세션 시작(claude면 `--session-id <새 uuid>`).
     Fresh,
-    /// 기존 세션 이어받기(claude면 `--resume <claude_session_id>`).
+    /// 기존 세션 이어받기(claude면 `--resume <backend_session_id>`).
     Resume,
 }
 
@@ -143,9 +143,15 @@ pub struct AgentProfile {
     /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
     pub env: Vec<(String, String)>,
 
-    /// 현재 claude 세션 id. **가변** — 최초엔 우리가 생성하고, `/clear` 등으로 바뀌면
+    /// 현재 백엔드 세션 id. **가변** — 최초엔 우리가 생성하고, `/clear` 등으로 바뀌면
     /// session_tracker watcher가 갱신한다. None이면 아직 세션이 없다는 뜻.
-    pub claude_session_id: Option<Uuid>,
+    ///
+    /// ★이름이 중립인 것은 의도★ — **누가 id 를 뽑는지를 말하지 않는다.** claude 는 우리가 정한
+    /// id 를 `--session-id` 로 건네받고, codex 는 자기가 뽑은 id 를 우리에게 알린다. 어느 쪽이든
+    /// 「그 백엔드의 세션 이름공간에 있는 id」라는 뜻은 같다.
+    /// ※2026-09-07 까지 이 칸의 이름은 `claude_session_id` 였다(디스크·wire 포함).
+    ///   하위호환 shim 을 두지 않은 근거 = `docs/tracking.md` T-33 · S21 TRD §6-1.
+    pub backend_session_id: Option<Uuid>,
 
     /// fallback·clear로 폐기된 과거 세션 id 이력(감사·디버깅용).
     pub old_session_ids: Vec<Uuid>,
@@ -231,7 +237,7 @@ impl AgentProfile {
             command,
             cwd,
             env,
-            claude_session_id: None,
+            backend_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
             last_failure: None,
@@ -572,17 +578,17 @@ impl ProfileRegistry {
         }
     }
 
-    /// 세션 id 확보 — `claude_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
+    /// 세션 id 확보 — `backend_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
     ///
     /// ★Resume 전용(ADR-0076)★: 기존 대화를 이어받으려면 저장된 sid 를 그대로 써야 한다.
     ///   Fresh 모드는 절대 이걸 쓰면 안 된다 — Fresh 는 `new_session_id`(항상 새 uuid).
     pub fn ensure_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            if p.claude_session_id.is_none() {
-                p.claude_session_id = Some(Uuid::new_v4());
+            if p.backend_session_id.is_none() {
+                p.backend_session_id = Some(Uuid::new_v4());
             }
-            p.claude_session_id
+            p.backend_session_id
         })
     }
 
@@ -597,11 +603,11 @@ impl ProfileRegistry {
     pub fn new_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            if let Some(old) = p.claude_session_id.take() {
+            if let Some(old) = p.backend_session_id.take() {
                 p.old_session_ids.push(old);
             }
             let fresh = Uuid::new_v4();
-            p.claude_session_id = Some(fresh);
+            p.backend_session_id = Some(fresh);
             Some(fresh)
         })
     }
@@ -611,11 +617,11 @@ impl ProfileRegistry {
     /// 같은 값으로의 호출은 no-op(불필요한 디스크 쓰기 회피).
     pub fn observe_session_id(&self, id: AgentId, new_sid: Uuid) -> bool {
         self.mutate_if(|m| match m.get_mut(&id) {
-            Some(p) if p.claude_session_id != Some(new_sid) => {
-                if let Some(old) = p.claude_session_id.take() {
+            Some(p) if p.backend_session_id != Some(new_sid) => {
+                if let Some(old) = p.backend_session_id.take() {
                     p.old_session_ids.push(old);
                 }
-                p.claude_session_id = Some(new_sid);
+                p.backend_session_id = Some(new_sid);
                 p.last_active = now_millis();
                 true
             }
@@ -805,7 +811,7 @@ mod tests {
 
         assert!(reg.observe_session_id(id, sid2));
         let got = reg.get(id).unwrap();
-        assert_eq!(got.claude_session_id, Some(sid2));
+        assert_eq!(got.backend_session_id, Some(sid2));
         assert!(
             got.old_session_ids.contains(&sid1),
             "옛 sid가 이력에 남아야 함"
@@ -814,7 +820,7 @@ mod tests {
         assert!(!reg.observe_session_id(id, sid2));
 
         let persisted = store.load();
-        assert_eq!(persisted[0].claude_session_id, Some(sid2));
+        assert_eq!(persisted[0].backend_session_id, Some(sid2));
     }
 
     #[test]
@@ -833,7 +839,7 @@ mod tests {
         );
         let got = reg.get(id).unwrap();
         assert_eq!(
-            got.claude_session_id,
+            got.backend_session_id,
             Some(sid2),
             "현재 sid = 새로 발급한 값"
         );
@@ -841,7 +847,7 @@ mod tests {
             got.old_session_ids.contains(&sid1),
             "옛 sid 는 이력으로 밀려야 함"
         );
-        assert_eq!(store.load()[0].claude_session_id, Some(sid2));
+        assert_eq!(store.load()[0].backend_session_id, Some(sid2));
     }
 
     #[test]
@@ -852,7 +858,7 @@ mod tests {
         reg.upsert(p);
         let sid = reg.new_session_id(id).unwrap();
         let got = reg.get(id).unwrap();
-        assert_eq!(got.claude_session_id, Some(sid));
+        assert_eq!(got.backend_session_id, Some(sid));
         assert!(
             got.old_session_ids.is_empty(),
             "세션 없던 프로필은 밀 옛 sid 가 없음"
@@ -869,7 +875,7 @@ mod tests {
         let b = reg.new_session_id(id).unwrap();
         assert_ne!(a, b, "연속 Fresh 는 매번 다른 sid");
         let got = reg.get(id).unwrap();
-        assert_eq!(got.claude_session_id, Some(b));
+        assert_eq!(got.backend_session_id, Some(b));
         assert!(got.old_session_ids.contains(&a), "직전 sid 는 이력에");
     }
 
@@ -1398,7 +1404,7 @@ mod tests {
             "command": { "kind": "Claude", "extra_args": [] },
             "cwd": ".",
             "env": [],
-            "claude_session_id": null,
+            "backend_session_id": null,
             "old_session_ids": [],
             "epoch": 0,
             "auto_restore": true,
@@ -1520,7 +1526,7 @@ mod tests {
             "command": { "kind": "Claude", "extra_args": [] },
             "cwd": ".",
             "env": [],
-            "claude_session_id": null,
+            "backend_session_id": null,
             "old_session_ids": [],
             "epoch": 3,
             "auto_restore": true,

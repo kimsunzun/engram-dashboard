@@ -135,7 +135,7 @@ export interface AgentProfile {
   command: AgentCommand
   cwd: string
   env: [string, string][]
-  claude_session_id: string | null
+  backend_session_id: string | null
   old_session_ids: string[]
   epoch: number
   auto_restore: boolean

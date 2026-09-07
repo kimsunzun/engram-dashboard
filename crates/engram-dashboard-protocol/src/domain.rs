@@ -312,7 +312,7 @@ pub struct AgentProfile {
     /// ※자격증명 금지(평문 persist).
     pub env: Vec<(String, String)>,
     #[ts(type = "string | null")]
-    pub claude_session_id: Option<String>,
+    pub backend_session_id: Option<String>,
     #[ts(type = "string[]")]
     pub old_session_ids: Vec<String>,
     pub epoch: u32,
