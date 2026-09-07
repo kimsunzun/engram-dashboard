@@ -3356,7 +3356,13 @@ mod tests {
         let profiles = core.manager.agent_snapshots();
         assert_eq!(profiles.len(), 1, "프로필 1개 등록");
         assert!(
-            profiles[0].command.is_json_mode(),
+            matches!(
+                &profiles[0].command,
+                CoreSpawnCommand::Claude {
+                    output_format: CoreClaudeOutputFormat::StreamJson,
+                    ..
+                }
+            ),
             "StreamJson 으로 만든 프로필은 json 모드여야 함"
         );
     }

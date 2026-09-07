@@ -150,7 +150,6 @@ fn concurrent_same_id_spawn_does_not_clobber() {
     let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },
@@ -262,7 +261,6 @@ fn make_manager_with(control: Arc<dyn ControlChannel>) -> Arc<AgentManager> {
     let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },
@@ -353,7 +351,6 @@ fn manager_spawn_write_resize_kill() {
     let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },

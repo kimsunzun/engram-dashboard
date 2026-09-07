@@ -148,7 +148,6 @@ fn make_manager_with_injected(
     let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },

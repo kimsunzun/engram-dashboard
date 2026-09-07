@@ -23,21 +23,40 @@
 //!
 //! tauri import 0.
 
+mod session_file;
+
 use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::backend::{console_command, AgentBackend, InputEncoder, TurnClassifier};
+use crate::backend::{console_command, AgentBackend, InputEncoder, TransportShape, TurnClassifier};
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+use crate::session_tracker::SessionIdSource;
 use crate::transport::OutputDecoder;
 use crate::turn::TurnSignal;
 use crate::types::{
-    BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
-    CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps,
+    ToolGrant, CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
+
+/// claude 가 `--output-format stream-json` 으로 뜨나 = 이 폴더 안의 네 축(통로·입력 인코딩·출력
+/// decoder·transcript seed)이 함께 갈리는 지점.
+///
+/// ★이 술어를 `profile` 로 되돌리지 말 것★(ADR-0004): 거기 있으면 claude 의 출력 형식 축이 공용 층의
+///   통로 선택을 직접 굴린다. 밖으로 나가는 것은 [`AgentBackend::transport_shape`] 같은 중립 축의
+///   값뿐이다.
+fn is_stream_json(command: &AgentCommand) -> bool {
+    matches!(
+        command,
+        AgentCommand::Claude {
+            output_format: ClaudeOutputFormat::StreamJson,
+            ..
+        }
+    )
+}
 
 /// claude 가 `--resume <sid>` 로 이어받을 대화를 못 찾았을 때 내는 문구의 **소문자 조각**.
 ///
@@ -312,12 +331,17 @@ impl AgentBackend for ClaudeBackend {
         None
     }
 
-    /// ※알려진 미확인 → step ②(vendor 이름 제거)가 손댈 자리: `is_json_mode` 는
-    ///   `AgentCommand::Claude{output_format: StreamJson}` 을 그대로 되묻는 술어라 **claude 지식이
-    ///   `profile` 에 남아 있다**. 그 단계에서 판정이 이 폴더 안으로 접히면 바뀌는 것은 아래 세 본문뿐이고
-    ///   trait 시그니처는 그대로다 — 그래서 술어를 인자로 올리지 않았다.
+    /// stream-json 은 파이프를 요구한다 — TUI 가 아니라 줄단위 JSON 을 stdout 으로 흘리기 때문.
+    fn transport_shape(&self, command: &AgentCommand) -> TransportShape {
+        if is_stream_json(command) {
+            TransportShape::StdioNdjson
+        } else {
+            TransportShape::Pty
+        }
+    }
+
     fn input_encoder(&self, command: &AgentCommand) -> InputEncoder {
-        if command.is_json_mode() {
+        if is_stream_json(command) {
             InputEncoder::ClaudeStreamJson
         } else {
             InputEncoder::Raw
@@ -339,7 +363,7 @@ impl AgentBackend for ClaudeBackend {
     }
 
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
-        if command.is_json_mode() {
+        if is_stream_json(command) {
             Some(Box::new(ClaudeStreamDecoder::new()))
         } else {
             None
@@ -354,11 +378,24 @@ impl AgentBackend for ClaudeBackend {
         cwd: &std::path::Path,
         session_id: Uuid,
     ) -> Vec<OutputEvent> {
-        if command.is_json_mode() {
+        if is_stream_json(command) {
             read_transcript_events(cwd, session_id)
         } else {
             Vec::new()
         }
+    }
+
+    /// 모드로 가르지 않는다 — 터미널이든 stream-json 이든 claude 는 같은 `sessions/<pid>.json` 을 쓰고,
+    /// sid 가 갈아타는 것도 양쪽 다다.
+    // ADR-0004
+    fn session_id_source(
+        &self,
+        agent_id: AgentId,
+        child_pid: u32,
+        expected_sid: Uuid,
+    ) -> Option<Box<dyn SessionIdSource>> {
+        session_file::ClaudeSessionIdSource::new(agent_id, child_pid, expected_sid)
+            .map(|s| Box::new(s) as Box<dyn SessionIdSource>)
     }
 }
 
@@ -984,20 +1021,25 @@ fn project_slug(cwd: &std::path::Path) -> String {
         .collect()
 }
 
-/// `~/.claude/projects/<slug>/<sid>.jsonl` 경로. `CLAUDE_CONFIG_DIR` 이 설정돼 있으면 우선한다
-/// (session_tracker 의 default_sessions_dir 과 동일 규약). home 을 못 찾으면 None.
-fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
-    let base = if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        if dir.is_empty() {
-            claude_home()?.join(".claude")
-        } else {
-            PathBuf::from(dir)
+/// claude 가 자기 상태를 두는 디렉토리 = `CLAUDE_CONFIG_DIR`(비어 있지 않을 때) 아니면 `~/.claude`.
+/// home 도 못 찾으면 None.
+///
+/// ★이 폴더의 claude 파일 경로는 전부 여기서 갈라져 나간다★ — transcript(`projects/`)도 세션 파일
+/// (`sessions/`)도. 같은 규약을 두 곳에 적으면 한쪽만 고쳐져 override 가 반쪽만 듣는다.
+pub(super) fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
         }
-    } else {
-        claude_home()?.join(".claude")
-    };
+    }
+    claude_home().map(|h| h.join(".claude"))
+}
+
+/// `<config dir>/projects/<slug>/<sid>.jsonl` 경로. home 을 못 찾으면 None.
+fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
     Some(
-        base.join("projects")
+        config_dir()?
+            .join("projects")
             .join(project_slug(cwd))
             .join(format!("{sid}.jsonl")),
     )

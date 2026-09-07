@@ -16,7 +16,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, SpawnMode};
+use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ClaudeOutputFormat, SpawnMode};
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
@@ -1879,12 +1879,17 @@ async fn case35_ws_create_profile() {
         "StreamJson 으로 만든 프로필이 wire 로 json 모드로 돌아와야"
     );
     assert!(
-        server
-            .manager
-            .agent_snapshot(created_json.id)
-            .expect("json 프로필 등록됨")
-            .command
-            .is_json_mode(),
+        matches!(
+            &server
+                .manager
+                .agent_snapshot(created_json.id)
+                .expect("json 프로필 등록됨")
+                .command,
+            AgentCommand::Claude {
+                output_format: ClaudeOutputFormat::StreamJson,
+                ..
+            }
+        ),
         "core 레지스트리 프로필이 json 모드여야(wire output_format→core 매핑)"
     );
 

@@ -243,7 +243,6 @@ fn stage() -> Stage {
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },

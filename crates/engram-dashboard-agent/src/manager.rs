@@ -19,7 +19,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::backend;
-use crate::backend::InputEncoder;
+use crate::backend::{InputEncoder, TransportShape};
 use crate::failure::AgentFailureKind;
 use crate::output_core::{OutputCore, TurnWiring};
 use crate::preset::PresetRegistry;
@@ -63,33 +63,38 @@ pub fn default_shell() -> &'static str {
     "bash"
 }
 
-/// 별도 함수로 뺀 이유 = 실 claude 없이 선택 로직을 단위 테스트하기 위함
-/// (ADR-0012 격리 — json→structured caps / 터미널→아님).
+/// 별도 함수로 뺀 이유 = 실 CLI 없이 선택 로직을 단위 테스트하기 위함
+/// (ADR-0012 격리 — 파이프 모양→structured caps / 터미널 모양→아님).
 ///
-/// ★조립점 — "mode → 통로가 나르는 것"의 단일 위치(FIX 2, 사용자 요청: 한 곳에 모음)★:
-///   transport 종류 선택뿐 아니라 **출력이 구조화(NDJSON)인지도 여기서 결정해 주입**한다. 파이프
-///   자체는 내용을 모르므로(통로 무정제 불변) StdioTransport 는 structured 를 하드코딩하지 않고
-///   이 지점의 주입값을 받아 caps 로 신고한다. json 모드 = claude `--output-format stream-json` →
-///   NDJSON 캐리어 → structured=true. 터미널(PtyTransport)은 그 자체로 terminal-bytes(구조화 아님).
-///   출처 분리(output=transport 소유, ADR-0030)는 유지 — 값만 이 조립점에서 주입한다.
+/// ★조립점 — "backend 가 요구한 통로 모양 → 그 통로가 나르는 것"의 단일 위치(FIX 2, 사용자 요청: 한
+///   곳에 모음)★: transport 종류 선택뿐 아니라 **출력이 구조화(NDJSON)인지도 여기서 결정해 주입**한다.
+///   파이프 자체는 내용을 모르므로(통로 무정제 불변) StdioTransport 는 structured 를 하드코딩하지 않고
+///   이 지점의 주입값을 받아 caps 로 신고한다. 터미널(PtyTransport)은 그 자체로 terminal-bytes(구조화
+///   아님). 출처 분리(output=transport 소유, ADR-0030)는 유지 — 값만 이 조립점에서 주입한다.
+///
+/// ★이 함수는 어느 backend 도 이름으로 모른다★: 모양은 [`backend::transport_shape`] 가 신고한 것을
+///   그대로 받는다(ADR-0004).
 // ADR-0044
 // ADR-0030
 fn select_transport(
-    json_mode: bool,
+    shape: TransportShape,
     spec: &CommandSpec,
     cols: u16,
     rows: u16,
     decoder: Option<Box<dyn OutputDecoder>>,
 ) -> Result<(Box<dyn AgentTransport>, Option<u32>), PtyError> {
-    if json_mode {
-        // cols/rows 는 파이프에 개념이 없어 무시된다.
-        let (t, pid) = StdioTransport::open(spec, true, decoder)?;
-        Ok((Box::new(t), pid))
-    } else {
-        // decoder 는 여기서 버려진다 — `backend::output_decoder` 가 json 모드에만 Some 을 주므로
-        // non-json 은 애초에 None 이 온다.
-        let (t, pid) = PtyTransport::open(spec, cols, rows)?;
-        Ok((Box::new(t), pid))
+    match shape {
+        TransportShape::StdioNdjson => {
+            // cols/rows 는 파이프에 개념이 없어 무시된다.
+            let (t, pid) = StdioTransport::open(spec, true, decoder)?;
+            Ok((Box::new(t), pid))
+        }
+        TransportShape::Pty => {
+            // decoder 는 여기서 버려진다 — `backend::output_decoder` 가 구조화 모양에만 Some 을 주므로
+            // 터미널 모양엔 애초에 None 이 온다.
+            let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+            Ok((Box::new(t), pid))
+        }
     }
 }
 
@@ -1028,8 +1033,8 @@ impl AgentManager {
         let bcaps = backend::backend_caps(&profile.command);
 
         // ADR-0044: 판정은 프로필 command 단일 출처 — spawn_session 은 backend 를 모르므로
-        // encoder/decoder/turn_classifier 를 여기서 뽑아 넘긴다.
-        let json_mode = profile.command.is_json_mode();
+        // 통로 모양·encoder·decoder·turn_classifier 를 여기서 뽑아 넘긴다.
+        let transport_shape = backend::transport_shape(&profile.command);
         let encoder = backend::input_encoder(&profile.command);
         let decoder = backend::output_decoder(&profile.command);
         let turn_classifier = backend::turn_classifier(&profile.command);
@@ -1054,7 +1059,7 @@ impl AgentManager {
             encoder,
             reads_messages,
             decoder,
-            json_mode,
+            transport_shape,
             epoch,
             seed_events,
             turn_classifier,
@@ -1064,10 +1069,16 @@ impl AgentManager {
             g.disarm();
         }
 
-        // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
+        // sid drift 관측 부착(best-effort). 관측기를 만드는 것도 "만들 게 없다"고 답하는 것도 backend
+        //   몫이라(ADR-0004) 여기서는 그 프로그램이 무엇을 읽는지 모른다. `needs` 게이트는 그대로다 —
+        //   sid 를 발급하지 않은 세션은 관측할 기준값이 없다.
         if let (Some(s), Some(pid)) = (sid, child_pid) {
             if needs {
-                self.tracker.watch(profile.id, pid, s);
+                if let Some(source) =
+                    backend::session_id_source(&profile.command, profile.id, pid, s)
+                {
+                    self.tracker.watch(profile.id, source);
+                }
             }
         }
 
@@ -1221,13 +1232,13 @@ impl AgentManager {
         encoder: InputEncoder,
         reads_messages: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
-        json_mode: bool,
+        transport_shape: TransportShape,
         epoch: u32,
         seed_events: Vec<OutputEvent>,
         turn_classifier: backend::TurnClassifier,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
         let (transport, child_pid) =
-            select_transport(json_mode, &spec, DEFAULT_COLS, DEFAULT_ROWS, decoder)?;
+            select_transport(transport_shape, &spec, DEFAULT_COLS, DEFAULT_ROWS, decoder)?;
 
         // ADR-0113: 공용 턴 관측 표 + 이 백엔드의 신호 분류자를 함께 꽂는다 — 안 꽂으면 이 세션만
         //   조용히 관측 밖으로 빠진다.
@@ -1926,14 +1937,19 @@ mod tests {
     // ── ADR-0044 ──
     #[cfg(windows)]
     #[test]
-    fn select_transport_json_mode_picks_stdio_structured() {
-        let (transport, _pid) =
-            select_transport(true, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS, None)
-                .expect("select");
+    fn select_transport_stdio_ndjson_shape_picks_structured_pipe() {
+        let (transport, _pid) = select_transport(
+            TransportShape::StdioNdjson,
+            &probe_spec(),
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            None,
+        )
+        .expect("select");
         let caps = transport.capabilities();
         assert!(
             caps.output.structured && !caps.output.terminal_bytes,
-            "json 모드 → StdioTransport(structured 출력, 터미널 바이트 아님)"
+            "StdioNdjson 모양 → StdioTransport(structured 출력, 터미널 바이트 아님)"
         );
         assert!(!caps.control.resize, "파이프 resize 불가");
         transport.shutdown();
@@ -1942,10 +1958,15 @@ mod tests {
     // ── 회귀 ──
     #[cfg(windows)]
     #[test]
-    fn select_transport_terminal_mode_picks_pty() {
-        let (transport, _pid) =
-            select_transport(false, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS, None)
-                .expect("select");
+    fn select_transport_pty_shape_picks_pty() {
+        let (transport, _pid) = select_transport(
+            TransportShape::Pty,
+            &probe_spec(),
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            None,
+        )
+        .expect("select");
         let caps = transport.capabilities();
         assert!(
             caps.output.terminal_bytes && !caps.output.structured,
@@ -2023,7 +2044,6 @@ mod tests {
         ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
-                sessions_dir: None,
                 enabled: false,
                 poll_interval: Duration::from_secs(1),
             },
@@ -2475,7 +2495,6 @@ mod tests {
         ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
-                sessions_dir: None,
                 enabled: false,
                 poll_interval: Duration::from_secs(1),
             },

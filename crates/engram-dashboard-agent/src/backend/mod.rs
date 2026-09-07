@@ -25,9 +25,10 @@ use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, SpawnMode};
+use crate::session_tracker::SessionIdSource;
 use crate::transport::OutputDecoder;
 use crate::turn::TurnSignal;
-use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, OutputEvent};
+use crate::types::{AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent};
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
 /// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
@@ -108,6 +109,23 @@ pub trait AgentBackend: Send + Sync {
     /// backend 가 session caps 의 출처(ADR-0030)이고 mode 는 command 에 있으므로, 여기서 command 를
     /// 보고 정직하게 산출한다(type split 유지 — output/control 은 여전히 transport 소관).
     fn capabilities(&self, command: &AgentCommand) -> BackendCaps;
+
+    /// 이 backend 가 `command` 에 대해 요구하는 **물리 통로 모양**.
+    ///
+    /// ★왜 backend 인가(ADR-0004)★: "이 프로그램을 어떤 통로로 띄워야 하나" 는 프로그램별 지식이다.
+    /// ★공용 층에 판정 술어를 되살리지 말 것★: 조립점이 `AgentCommand` payload 를 직접 되묻는 순간 한
+    ///   backend 의 출력 형식 축이 전원의 통로 선택을 굴리게 되고, 그 backend 를 안 쓰는 항목까지 그
+    ///   축을 통과한다.
+    /// ★렌더 모드 축과 같은 것이 아니다★: 그 프로그램이 무엇을 그리나(터미널 TUI ↔ 구조화 스트림)는
+    ///   그 backend 의 명령 payload 가 갖는 축이고, 이것은 그 선택이 **우리 쪽 통로**에 무엇을 요구하나다.
+    ///   한 backend 안에서 둘이 1:1 로 붙어 있어도 어휘를 합치지 말 것 — 합치면 새 backend 가 자기 렌더
+    ///   모드를 우리 통로 이름으로 신고해야 한다.
+    /// ★기본값 = `Pty`★: 선언하지 않은 backend 는 터미널로 뜬다.
+    // ADR-0004
+    // ADR-0044
+    fn transport_shape(&self, _command: &AgentCommand) -> TransportShape {
+        TransportShape::Pty
+    }
 
     /// 이 backend 의 **턴 신호 분류자**(ADR-0113 사실 계층의 백엔드 지식 몫).
     ///
@@ -217,6 +235,27 @@ pub trait AgentBackend: Send + Sync {
     ) -> Vec<OutputEvent> {
         Vec::new()
     }
+
+    /// 이 화신의 **세션 id 가 바뀐 것을 밖에서 알아볼 수 있나** — 알아본다면 그 관측기.
+    ///
+    /// 우리가 spawn 때 지정한 sid 는 그 프로그램 안에서 바뀔 수 있다(claude 는 `/clear`·`/resume` 로
+    /// 프로세스는 그대로인 채 갈아탄다 — spike 실측). 바뀐 값을 못 따라잡으면 다음 복원이 옛 세션을
+    /// 살린다. 그것을 어디서 어떻게 읽나(파일 경로·JSON 스키마·PID 우회)는 전부 구현체 몫이고,
+    /// 러너([`crate::session_tracker`])는 주기·명부·콜백만 갖는다.
+    ///
+    /// `agent_id` 는 구현체 진단 로그의 상관 키로만 쓴다 — 관측 대상을 고르는 데 쓰지 않는다.
+    /// ★기본값 = `None`(관측 없음)★: 선언하지 않은 backend 는 추적 대상이 아니다. 근거 없는 관측기를
+    ///   기본으로 두면 남의 파일을 읽고 엉뚱한 sid 를 프로필에 적는다.
+    /// ★`None` 은 실패가 아니다★: 관측이 없어도 복원은 최초 지정 sid 로 정상 동작한다(best-effort).
+    // ADR-0004
+    fn session_id_source(
+        &self,
+        _agent_id: AgentId,
+        _child_pid: u32,
+        _expected_sid: Uuid,
+    ) -> Option<Box<dyn SessionIdSource>> {
+        None
+    }
 }
 
 /// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
@@ -288,6 +327,10 @@ pub fn backend_caps(c: &AgentCommand) -> BackendCaps {
     backend_for(c).capabilities(c)
 }
 
+pub fn transport_shape(c: &AgentCommand) -> TransportShape {
+    backend_for(c).transport_shape(c)
+}
+
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
     backend_for(c).turn_classifier()
 }
@@ -300,6 +343,15 @@ pub fn reads_messages(c: &AgentCommand) -> bool {
     backend_for(c).reads_messages()
 }
 
+pub fn session_id_source(
+    c: &AgentCommand,
+    agent_id: AgentId,
+    child_pid: u32,
+    expected_sid: Uuid,
+) -> Option<Box<dyn SessionIdSource>> {
+    backend_for(c).session_id_source(agent_id, child_pid, expected_sid)
+}
+
 // ── 입력 인코딩(ADR-0044/0004) ────────────────────────────────────────────────
 
 /// 세션 입력(write_input)을 transport 로 보내기 **직전** 인코딩 방식. AgentSession 이 spawn 시
@@ -309,6 +361,21 @@ pub fn reads_messages(c: &AgentCommand) -> bool {
 /// claude JSON 라인으로 감싸는" 지식은 backend 소유다. session 은 이 enum(태그)만 들고, 실제
 /// 스키마는 [`AgentBackend::wrap_input_turn`] 구현체 안에만 산다(ADR-0004 격리 — 이 모듈도 session 도
 /// transport 도 형태를 모른다).
+/// backend 가 요구하는 물리 통로 모양 — `manager::select_transport` 의 입력.
+///
+/// ★출력 구조화 여부가 여기 함의돼 있다★: `StdioNdjson` 은 그 파이프가 나르는 바이트가 줄단위 JSON
+/// 이라는 뜻이고, 통로 자신은 그것을 모른다(바보 파이프 — ADR-0044). 그래서 조립점이 이 값을 보고
+/// `structured` output caps 를 주입한다.
+// ADR-0004
+// ADR-0044
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportShape {
+    /// 터미널(ConPTY/pty) — 바이트 그대로, resize 있음.
+    Pty,
+    /// stdio 파이프 + 줄단위 JSON 출력 — resize 개념 없음.
+    StdioNdjson,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputEncoder {
     /// 바이트 그대로 통과(PTY/터미널·shell). 기존 동작과 **바이트 동일**.
@@ -669,23 +736,32 @@ mod tests {
     // 채우는 법 — CLI spike 실측값으로:
     //   ① input_encoder — 그 프로그램이 stdin 을 무엇으로 읽나(감쌀 게 없으면 `Raw`)
     //   ② output_decoder 유무 — 출력이 구조화라 정제가 필요한가
+    //   ③ transport_shape — 그 출력을 받으려면 터미널이어야 하나 파이프여야 하나
+    //
+    // ★③ 은 ①②와 붙어 다니지만 같은 축이 아니다★: 통로 모양은 잘못 골라도 컴파일되고 **런타임에도
+    // 그럴싸하게 뜬다** — TUI 를 파이프로 받으면 화면이 깨지고, 줄단위 JSON 을 PTY 로 받으면 이스케이프가
+    // 섞인다. 기본값(`Pty`)이 fail-open 이라 여기 열이 없으면 새 backend 가 조용히 그것을 물려받는다.
     //
     // ★이 표가 덮지 않는 것 = resume transcript seed★: `resume_transcript_events` 도 같은 fail-open
     //   기본값(빈 Vec)을 갖지만, 판정하려면 실제 transcript 파일이 있어야 해서 "seed 안 함" 과 "파일이
     //   없어서 빈 Vec" 이 여기서 구별되지 않는다. 그쪽 회귀망은 `backend/claude/` 의 transcript 단위
     //   테스트가 진다 — 여기 세 번째 열을 만들면 아무 것도 재지 않는 열이 하나 생길 뿐이다.
-    fn expected_codec_axis(c: &AgentCommand) -> (InputEncoder, bool) {
-        // (input_encoder, output_decoder 유무)
+    fn expected_codec_axis(c: &AgentCommand) -> (InputEncoder, bool, TransportShape) {
+        // (input_encoder, output_decoder 유무, transport_shape)
         match c {
             AgentCommand::Claude {
                 output_format: ClaudeOutputFormat::Terminal,
                 ..
-            } => (InputEncoder::Raw, false),
+            } => (InputEncoder::Raw, false, TransportShape::Pty),
             AgentCommand::Claude {
                 output_format: ClaudeOutputFormat::StreamJson,
                 ..
-            } => (InputEncoder::ClaudeStreamJson, true),
-            AgentCommand::Shell { .. } => (InputEncoder::Raw, false),
+            } => (
+                InputEncoder::ClaudeStreamJson,
+                true,
+                TransportShape::StdioNdjson,
+            ),
+            AgentCommand::Shell { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
         }
     }
 
@@ -694,7 +770,7 @@ mod tests {
         let mut covered = [false; BACKEND_VARIANTS];
         for c in &mail_eligibility_samples() {
             covered[variant_slot(c)] = true;
-            let (expected_encoder, expects_decoder) = expected_codec_axis(c);
+            let (expected_encoder, expects_decoder, expected_shape) = expected_codec_axis(c);
             assert_eq!(
                 input_encoder(c),
                 expected_encoder,
@@ -704,6 +780,11 @@ mod tests {
                 output_decoder(c).is_some(),
                 expects_decoder,
                 "variant {c:?}: output_decoder 유무 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+            );
+            assert_eq!(
+                transport_shape(c),
+                expected_shape,
+                "variant {c:?}: transport_shape 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
             );
         }
         assert!(

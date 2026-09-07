@@ -57,18 +57,6 @@ pub enum AgentCommand {
     },
 }
 
-impl AgentCommand {
-    pub fn is_json_mode(&self) -> bool {
-        matches!(
-            self,
-            AgentCommand::Claude {
-                output_format: ClaudeOutputFormat::StreamJson,
-                ..
-            }
-        )
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
     /// 새 세션 시작(claude면 `--session-id <새 uuid>`).
@@ -1609,7 +1597,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0044: output_format serde 하위호환 + is_json_mode 판정 ──────────────
+    // ── ADR-0044: output_format serde 하위호환 ─────────────────────────────────
     #[test]
     fn claude_command_without_output_format_defaults_terminal() {
         // 옛 wire/agents.json 은 output_format 필드가 없다 → #[serde(default)] = Terminal.
@@ -1624,24 +1612,17 @@ mod tests {
             ),
             "output_format 부재 → Terminal + extra_args 보존"
         );
-        assert!(!cmd.is_json_mode(), "Terminal 은 json 모드 아님");
     }
 
     #[test]
-    fn stream_json_command_roundtrips_and_is_json_mode() {
+    fn stream_json_command_roundtrips() {
         let cmd = AgentCommand::Claude {
             extra_args: vec![],
             output_format: ClaudeOutputFormat::StreamJson,
         };
-        assert!(cmd.is_json_mode(), "StreamJson 은 json 모드");
         let json = serde_json::to_string(&cmd).unwrap();
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(cmd, back);
-        assert!(!AgentCommand::Shell {
-            program: "cmd.exe".into(),
-            args: vec![]
-        }
-        .is_json_mode());
     }
 
     #[test]
