@@ -347,10 +347,10 @@ jobs:
               exit 1
             fi
             set +e
-            n=$(printf '%s\n' "$out" | rg -c ': test\s*$')
+            n=$(printf '%s\n' "$out" | grep -cE ': test[[:space:]]*$')
             rgrc=$?
             set -e
-            if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+            if [ "$rgrc" -gt 1 ]; then echo "FAIL — grep errored (exit $rgrc)"; exit 1; fi
             if [ "$rgrc" -eq 1 ]; then n=0; fi
             echo "$t: $n test(s) listed"
             if [ "$n" -lt 1 ]; then
