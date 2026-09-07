@@ -28,7 +28,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 import './agentCommands' // side-effect register
-import { run } from './registry'
+import { run, runAsHuman } from './registry'
+import { fireAndForget } from './dispatch'
 import { buildSlotMenu } from './slotMenu'
 import { useAgentStore } from '../store/agentStore'
 
@@ -136,11 +137,12 @@ describe('agent_list 생성 계열 라우팅', () => {
 
   // ★사람이 codex 를 고르는 문★ — 출력 포맷 인자가 **없다**(그 축은 claude 의 것이다). 형제와 마찬가지로
   //   등록만 하고 스폰하지 않는다 — 뜨는 것은 활성화(더블클릭)에서다.
-  it('createCodex → createCodexProfile 호출(출력 포맷 인자 없음)', async () => {
+  // ★`run` 이 아니라 `runAsHuman` 이다★ — 이 문은 `humanOnly` 라 LLM 진입점으로는 반려된다(아래 별도 항목).
+  it('createCodex(사람 경로) → createCodexProfile 호출(출력 포맷 인자 없음)', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
-    await run('agentlist.createCodex', {})
+    await runAsHuman('agentlist.createCodex', {})
 
     expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
       'C:/work/engram', 'C:/work/engram', [], [], false,
@@ -149,6 +151,32 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
     expect(useAgentStore.getState().profiles).toEqual([createdProfile])
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+  })
+
+  // ★세 번째 생성 문 — LLM 은 못 지나고 사람은 지난다★(2026-09-08 리뷰 FIX 2).
+  //
+  // 이 항목은 **사람 메뉴이면서 동시에 LLM command** 다. wire `CreateProfile` 까지 닿는데 그 핸들러는
+  // 정책을 하나도 안 본다 — 그래서 닫는 축이 백엔드 낱말이 아니라 **호출자**다. 아래 둘이 그 축을
+  // 양쪽에서 잰다: 게이트를 지우면 첫째가, 사람 경로를 게이트 뒤로 옮기면 둘째가 빨개진다.
+  it('createCodex: LLM 진입점(registry.run)은 사유를 실어 반려하고 아무것도 만들지 않는다', () => {
+    expect(() => run('agentlist.createCodex', {})).toThrow(/LLM·버스/)
+    expect(() => run('agentlist.createCodex', {})).toThrow(/Phase 2/)
+    expect(clientMock.createCodexProfile).not.toHaveBeenCalled()
+    // ★다이얼로그가 뜨기도 전에 막힌다★ — 「모달이 LLM 을 막는다」에 기대지 않는다는 것이 이 줄의 뜻이다.
+    expect(dialogMock.open).not.toHaveBeenCalled()
+  })
+
+  it('createCodex: 사람 경로(트리 메뉴 → fireAndForget)는 그대로 codex 를 만든다', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    // `SlotContextMenu` 가 메뉴 항목에 쓰는 바로 그 호출이다(그 파일의 `fireAndForget(id, …)`).
+    fireAndForget('agentlist.createCodex')
+
+    await vi.waitFor(() => expect(clientMock.createCodexProfile).toHaveBeenCalled())
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false,
+    )
   })
 
   it('createAgent(파라미터형): 인자 없으면 StreamJson 기본, args.outputFormat 주면 그 값 사용', async () => {

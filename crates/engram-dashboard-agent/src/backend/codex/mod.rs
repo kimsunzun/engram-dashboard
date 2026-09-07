@@ -4,9 +4,18 @@
 //! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
 //! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
 //!
-//! ★여기 적힌 codex 사실은 전부 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-07)★. 그 실측을
-//! 다시 재는 자리는 `tests/backend_contract.rs` 이고, 이 파일의 선언이 그 표와 어긋나면 그 시험대가
-//! 빨개진다.
+//! ★여기 적힌 codex 사실은 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-08 재확인)★.
+//! `tests/backend_contract.rs` 가 이 파일의 `build_spec` 이 낸 argv 를 **그대로 띄우므로**, 여기서 인자를
+//! 바꾸면 그 레인이 바뀐 argv 로 실 codex 를 겪는다 — ★단 그 레인은 `#[ignore]` 라 부를 때만 돈다(CI 아님)★.
+//!
+//! ★시험대가 **다시 재지 않는 것** — 「전부 실측」이라 적던 옛 문장이 거짓이었다(리뷰 적출 2026-09-08)★:
+//!   1. `workspace-write`·`on-request` 정책 **아래의 모델 동작** — 시험대는 그 argv 로 뜨는 것과 컴포저
+//!      기립까지만 잰다(재려면 쓰기 권한을 가진 에이전트를 자동 레인에서 실제로 돌려야 한다).
+//!   2. 우리가 안 쓰는 인자(`-m` · MCP `-c mcp_servers.…` 오버라이드 문법 · `codex resume <id>`) — 이
+//!      파일 주석에만 있고 재는 곳이 없다.
+//!   3. 아래 `build_spec` 의 `%VAR%` 한계(그 자리 주석이 정본).
+//!
+//! capability 선언이 그 표와 어긋나면 시험대의 **비-`#[ignore]`** 항목이 빨개진다.
 //!
 //! tauri import 0.
 
@@ -99,6 +108,21 @@ impl AgentBackend for CodexBackend {
                 // 우리 인자를 먼저 소진하고 호출자 패스스루를 뒤에 잇는다 — 위 셋은 전부 값 하나짜리라
                 //   뒤 인자를 흡수하지 않는다(claude 의 variadic `--allowedTools` 와 다른 점).
                 args.extend(extra_args.iter().cloned());
+                // ★알려진 한계 — `%VAR%` 가 든 경로는 shim 을 지나며 치환된다(2026-09-08, 고치지 않기로
+                //   한 결정)★. 아래 `console_command` 가 Windows 에서 `cmd.exe /c` 로 감싸는데, cmd 는
+                //   명령줄의 `%NAME%` 을 **따옴표 안에서도** 환경변수로 편다. 그래서 이름에 `%…%` 가
+                //   들어간 실제 폴더(`C:\x\%USERNAME%\y`)를 받으면 codex 는 **다른 폴더**를 워크스페이스로
+                //   본다. 위 `CD_FLAG` 값과 `extra_args` 가 그 경로를 탄다.
+                //   ★왜 안 고치나★ — ① shim 은 걷을 수 없다(사용자 결정 · TRD §6-H: `codex` 를 이름
+                //   그대로 띄운다. PATH 의 `codex` 는 `.cmd` 라 `CreateProcessW` 가 직접 못 띄운다)
+                //   ② 알려진 해법이 **일반적인 이스케이프가 아니다**: rust std 가 `.bat` 을 띄울 때 쓰는
+                //   수법은 `%` 마다 `%%cd:~,%`(no-op 치환)를 끼워 넣는 것이고 `cmd /e:ON` + `/c "한 문자열"`
+                //   형태를 전제한다(RUSTSEC-2024-0006 대응). 우리 경로는 그 형태가 아니고(인자 배열을
+                //   portable-pty 가 직접 조립해 `CreateProcessW` 로 넘긴다 — `%` 처리 0줄), 그 수법을 그
+                //   전제 밖으로 옮기는 것은 검증되지 않은 이식이다 ③ 그 이식은 **claude 와 공용인**
+                //   `console_command` 를 건드리므로, 틀리면 오늘 도는 스폰 전부가 죽는다.
+                //   ★고칠 때 무엇이 필요한가★: 위 셋을 뒤집을 실측(그 형태로 감싼 `cmd` 아래에서 claude·
+                //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
                 // ADR-0004
                 let (program, args) = console_command(CODEX_PROGRAM, args);
                 CommandSpec {

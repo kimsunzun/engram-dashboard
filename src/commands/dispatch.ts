@@ -3,7 +3,7 @@
 //   - run(id, args)            ← cdp/__engramCmd/await 호출부: 반환·throw 를 그대로 노출(await·에러 관찰).
 //   click/keybinding 소비자는 반드시 이 helper 를 재사용한다(안전망 재구현 금지 — 이 파일이 복사 템플릿).
 
-import { run } from './registry'
+import { runAsHuman } from './registry'
 import type { CommandArgs } from './registry'
 
 /**
@@ -14,7 +14,10 @@ import type { CommandArgs } from './registry'
  */
 export function fireAndForget(id: string, args?: CommandArgs): void {
   try {
-    const result = run(id, args)
+    // ★`registry.run` 이 아니라 `runAsHuman` 이다★: 이 경로의 호출자는 사람 클릭·키바인딩이라
+    //   `humanOnly` 게이트를 지나지 않는다(그 칸의 doc 이 정본). 여기를 `run` 으로 되돌리면 사람이
+    //   트리 메뉴에서 codex 를 만드는 길이 막힌다 — 게이트가 겨냥한 것은 LLM 경로뿐이다.
+    const result = runAsHuman(id, args)
     Promise.resolve(result).catch((err) => console.warn(`[commands] '${id}' 실패(async):`, err))
   } catch (err) {
     console.warn(`[commands] '${id}' 실패:`, err)

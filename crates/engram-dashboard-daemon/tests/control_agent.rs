@@ -478,7 +478,7 @@ async fn new_registers_a_sleeping_agent_and_refreshes_the_clients() {
     let f = fixture("new").await;
     let cwd = std::env::temp_dir().to_string_lossy().to_string();
     let (status, body) = f
-        .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "fresh-one" }))
+        .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "fresh-one", "backend": "Claude" }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK);
     // 성공 본문은 평평하다 — 반환을 명령마다 선언하므로 한 겹 더 감싸지 않는다(ADR-0155).
@@ -514,11 +514,11 @@ async fn new_falls_back_to_the_folder_name_and_appends_a_number_when_it_is_taken
     let cwd = dir.to_string_lossy().to_string();
 
     let (_, first) = f
-        .post(serde_json::json!({ "verb": "new", "cwd": cwd }))
+        .post(serde_json::json!({ "verb": "new", "cwd": cwd, "backend": "Claude" }))
         .await;
     assert_eq!(first["name"], base, "이름을 안 주면 폴더 이름: {first}");
     let (_, second) = f
-        .post(serde_json::json!({ "verb": "new", "cwd": cwd }))
+        .post(serde_json::json!({ "verb": "new", "cwd": cwd, "backend": "Claude" }))
         .await;
     // ★요청 이름이 아니라 **확정된 이름**을 돌려준다★(ADR-0120/0123) — 아니면 화면·주소와 어긋난다.
     assert_eq!(
@@ -1148,13 +1148,13 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
 
     // 마지막 한 자리는 통과한다 — 경계가 "미만" 이 아니라 "이상" 에서 막힌다는 것까지 본다.
     let (_, last) = f
-        .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "last-one" }))
+        .post(serde_json::json!({ "verb": "new", "cwd": cwd, "name": "last-one", "backend": "Claude" }))
         .await;
     assert_eq!(last["name"], "last-one", "{last}");
     assert_eq!(f.manager.roster().len(), MAX_ROSTER_SIZE);
 
     for body in [
-        serde_json::json!({ "verb": "new", "cwd": cwd, "name": "one-too-many" }),
+        serde_json::json!({ "verb": "new", "cwd": cwd, "name": "one-too-many", "backend": "Claude" }),
         serde_json::json!({ "verb": "spawn", "cwd": cwd, "name": "one-too-many" }),
     ] {
         let (status, resp) = f.post(body.clone()).await;
@@ -1389,7 +1389,7 @@ async fn the_catalog_routes_refuse_a_body_past_the_limit() {
             .header("Authorization", format!("Bearer {}", f.token))
             // 상한이 안 걸리면 **에이전트가 하나 생기는** 바디다 — 아래 명부 대조가 그것을 잡는다.
             .body(format!(
-                r#"{{"name":"agent.new","args":{{"cwd":"C:/","name":"past-the-limit"}},"pad":"{over}"}}"#
+                r#"{{"name":"agent.new","args":{{"cwd":"C:/","name":"past-the-limit","backend":"Claude"}},"pad":"{over}"}}"#
             ))
             .send()
             .await;
@@ -1424,7 +1424,7 @@ async fn a_full_name_call_runs_a_daemon_owned_command() {
     let (status, body) = f
         .call(serde_json::json!({
             "name": "agent.new",
-            "args": { "cwd": cwd, "name": "by-full-name" }
+            "args": { "cwd": cwd, "name": "by-full-name", "backend": "Claude" }
         }))
         .await;
     assert_eq!(status, reqwest::StatusCode::OK, "{body}");

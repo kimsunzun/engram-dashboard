@@ -1058,7 +1058,7 @@ async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
 /// 아는 낱말은 **포트까지 그대로 간다** — 이 줄이 초록이면 ADR-0058 의 전량 거부가 실제로 걷힌 것이다.
 ///
 /// ★한때 여기 있던 codex 두 줄은 지워진 게 아니라 옮겨 갔다★ — 그 낱말은 이제 이 문에서 정책으로
-/// 거절되므로(아래 `both_creation_doors_read_one_backend_policy`) 「통과」를 재는 이 목록에 설 수 없다.
+/// 거절되므로(아래 `every_creation_door_reads_one_backend_policy`) 「통과」를 재는 이 목록에 설 수 없다.
 /// 공백 다듬기는 claude 로 그대로 잰다.
 #[tokio::test]
 async fn spawn_into_forwards_a_known_backend() {
@@ -1126,9 +1126,15 @@ fn wire_word(kind: AgentBackendKind) -> String {
 fn advertised_new_backends() -> Vec<String> {
     let schema: serde_json::Value =
         serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
-    schema["properties"]["backend"]["anyOf"]
-        .as_array()
-        .expect("Option 칸은 anyOf")
+    // ★두 모양을 다 읽는다★ — 필수 칸은 `{"enum":[…]}`, 생략 가능한 칸은 `{"anyOf":[{"enum":[…]},…]}`
+    //   다. `backend` 는 2026-09-08 에 선택 → 필수가 됐고, 한 모양만 읽으면 그런 이동이 이 목록을 조용히
+    //   비운다(아래 `is_empty` 단언이 마지막 방어다).
+    let property = &schema["properties"]["backend"];
+    let branches = match property.get("anyOf") {
+        Some(any_of) => any_of.as_array().expect("anyOf 는 배열").clone(),
+        None => vec![property.clone()],
+    };
+    branches
         .iter()
         .filter_map(|branch| branch.get("enum"))
         .flat_map(|values| values.as_array().expect("enum 배열").clone())
@@ -1136,8 +1142,16 @@ fn advertised_new_backends() -> Vec<String> {
         .collect()
 }
 
+/// ★생성 문은 셋이다 — 이 시험이 **전부**를 재지는 않는다★(2026-09-08 리뷰: 옛 이름 `both_…` 은 둘로
+/// 세고 있었다). 나뉜 자리를 여기 적어 둔다:
+///   ① `agent.new` — 실행 판정은 그 crate 안에서 잰다(`FakeHost` 가 거기 산다):
+///      `engram-dashboard-agent` 의 `commands::tests::new_creates_exactly_what_the_llm_backend_policy_opens`.
+///      **여기서는 그 문이 광고하는 어휘만** 표와 맞춰 본다(아래 ②) — 두 crate 를 잇는 자리가 여기라서.
+///   ② `agent.spawnInto`(이 패키지) — 아래 ③에서 **실제로 불러** 결말을 본다.
+///   ③ 프론트 `agentlist.createCodex` — 언어가 달라 여기서 못 잰다:
+///      `src/commands/agentCommands.test.ts` 가 진다.
 #[tokio::test]
-async fn both_creation_doors_read_one_backend_policy() {
+async fn every_creation_door_reads_one_backend_policy() {
     // ① wire 백엔드 전량이 정책 표에 **선언돼** 있다. 빠진 낱말은 fail-closed 로 닫히지만 그건 「아직 안
     //    정했다」이지 「닫기로 정했다」가 아니다 — 그 둘을 구별하지 않으면 표가 조용히 낡는다.
     let mut declared = [false; WIRE_BACKENDS.len()];

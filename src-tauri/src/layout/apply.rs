@@ -472,7 +472,8 @@ fn parse_backend(word: &str) -> Result<AgentBackendKind, String> {
 /// 오탈자 그물 + LLM 표면 정책. ★판정은 여기 없다★ — 정본은
 /// [`engram_dashboard_agent::commands::llm_creation_refusal`] 한 곳이고 `agent.new` 도 같은 표를 본다
 /// (사용자 결정 2026-09-07 · TRD S21 §6-G). 두 문이 함께 열리는지를 재는 자리 =
-/// `tests/layout_apply.rs::both_creation_doors_read_one_backend_policy`.
+/// `tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` (그 시험의 doc 이 문 셋과
+/// 각 문을 재는 스위트를 나눠 적는다 — 이 파일이 지는 것은 그중 ②다).
 fn gate_backend(word: &str) -> Result<AgentBackendKind, String> {
     let kind = parse_backend(word)?;
     match llm_creation_refusal(word) {

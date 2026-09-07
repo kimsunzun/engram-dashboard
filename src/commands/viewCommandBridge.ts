@@ -46,10 +46,15 @@ export interface OfferedCommand {
  * ★셸·데몬이 답하는 이름을 여기서 거르지 않는다★: 그 판정의 재료(셸 17개 선언 · 데몬 어휘)는 Rust 쪽에
  * 있고, 거기 한 번만 둔다(`src-tauri/src/view_commands.rs` 의 `reserved_names`). 여기에 사본을 두면 두
  * 목록이 갈리고, 갈린 쪽이 옳다고 믿는 순간 등록 패킷 하나가 통째로 반려된다.
+ *
+ * ★`humanOnly` 인 것도 뺀다 — 다만 그것이 **닫는 수단은 아니다**★. 실제로 막는 자리는 `registry.run`
+ * 하나이고(그 다리의 `settle` 은 이름만 있으면 그것을 부른다), 여기서 빼는 것은 「부르면 반드시 반려될
+ * 이름을 명부에 광고하지 않는다」는 위생일 뿐이다. 이 filter 를 게이트로 읽지 말 것.
  */
 export function offeredCommands(): OfferedCommand[] {
   return list()
     .filter((cmd): cmd is typeof cmd & { help: CommandHelp } => Boolean(cmd.help?.summary?.trim()))
+    .filter(cmd => !cmd.humanOnly)
     .map(cmd => ({ name: cmd.id, help: cmd.help }))
 }
 

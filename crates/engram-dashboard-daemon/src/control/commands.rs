@@ -275,7 +275,12 @@ mod tests {
 
     /// 명부에 항목을 하나 더하는 동사 — 통지가 걸리는 가장 싼 자리다(띄우지 않으므로 백엔드가 없다).
     fn register_one(table: &CommandTable) {
-        call(table, "agent.new", json!({ "cwd": "C:/work/probe" })).expect("등록 성공");
+        call(
+            table,
+            "agent.new",
+            json!({ "cwd": "C:/work/probe", "backend": "Claude" }),
+        )
+        .expect("등록 성공");
     }
 
     /// ★CLI 동사 명단에서 기대값을 **파생**한다★ — 손으로 적으면 agent 에 동사가 늘어도 이 단언이 옛

@@ -139,6 +139,19 @@ register({
   // ★사람이 codex 를 고르는 유일한 문★ — 형제 둘과 같은 자리에 서고, 여기서 만들어진 예약 노드를
   //   활성화하면 codex 가 그 폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에
   //   그대로 뜨고 사람이 지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다).
+  //
+  // ★그런데 이 항목은 **사람 메뉴이면서 동시에 LLM 이 부를 수 있는 command** 였다(2026-09-08 리뷰)★ —
+  //   `registry.register` 로 오르는 것은 전부 `window.__engramCmd` 와 버스 다리가 부를 수 있고, 이
+  //   갈래는 wire `CreateProfile` 까지 닿는데 그 핸들러는 정책을 **아무것도** 보지 않는다
+  //   (`crates/engram-dashboard-daemon/src/connection_core.rs`). LLM 을 막고 있던 것은 아래
+  //   `createReserved` 의 네이티브 폴더 다이얼로그뿐이었고 — 그건 게이트가 아니라 사고다.
+  //   그래서 **호출자 축**으로 닫는다: 사람 클릭은 `dispatch.fireAndForget`(→ `runAsHuman`)이라 그대로
+  //   지나고, LLM 경로(`registry.run`)만 아래 사유로 반려된다.
+  // ★사유의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
+  //   codex 행이고, 형제 문 둘(`agent.new` · `agent.spawnInto`)이 그 표를 본다. 그 표가 codex 를 여는
+  //   날(Phase 2, 신뢰 확인 모달 처리가 정해질 때) 이 줄도 함께 지운다.
+  humanOnly:
+    'codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(실측 2026-09-07). 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성 ▶ 코덱스 터미널」). 여는 시점 = Phase 2 — 사유의 정본은 engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 이고 claude 를 만드는 LLM 경로는 `agent.new` 다.',
   run: async () => createReservedCodexProfile(),
 })
 

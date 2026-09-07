@@ -1,7 +1,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { __resetRegistryForTest, getCommand, list, register, run } from './registry'
+import { __resetRegistryForTest, getCommand, list, register, run, runAsHuman } from './registry'
 
 beforeEach(() => {
   __resetRegistryForTest()
@@ -124,5 +124,43 @@ describe('command registry (ADR-0055)', () => {
     expect(run('guarded')).toBe('original')
     expect(getCommand('guarded')!.id).toBe('guarded')
     expect(getCommand('없음')).toBeUndefined()
+  })
+})
+
+// ── humanOnly — 호출자 축으로 닫는 문(2026-09-08) ─────────────────────────
+//
+// 레지스트리 항목 하나가 사람 메뉴와 LLM 표면을 겸직한다. 둘 중 한쪽에만 열려야 하는 동작은 `when` 으로 못
+// 가른다(`when` 은 양쪽에 똑같이 적용된다) — 그래서 진입점을 둘로 갈랐고, 이 구획이 그 갈람을 재는 자리다.
+describe('humanOnly 게이트', () => {
+  it('run(LLM 진입점): 사유를 실어 throw 하고 handler 를 부르지 않는다', () => {
+    const spy = vi.fn(() => 'ran')
+    register({ id: 'closed.door', title: 'c', humanOnly: '사람이 지나야 하는 문이다', run: spy })
+    expect(() => run('closed.door')).toThrow(/사람이 지나야 하는 문이다/)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('runAsHuman(사람 진입점): 같은 항목을 그대로 실행한다', () => {
+    const spy = vi.fn(() => 'ran')
+    register({ id: 'closed.door', title: 'c', humanOnly: '사람이 지나야 하는 문이다', run: spy })
+    expect(runAsHuman('closed.door')).toBe('ran')
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+
+  it('humanOnly 가 없는 항목은 두 진입점이 같다', () => {
+    register({ id: 'open.door', title: 'o', run: () => 'ran' })
+    expect(run('open.door')).toBe('ran')
+    expect(runAsHuman('open.door')).toBe('ran')
+  })
+
+  it('runAsHuman 도 모르는 id 는 throw 한다(조용한 no-op 금지)', () => {
+    expect(() => runAsHuman('nope.nope')).toThrow(/알 수 없는 command id/)
+  })
+
+  it('list: humanOnly 사유를 함께 낸다(부르기 전에 닫힌 것을 알 수 있게)', () => {
+    register({ id: 'closed.door', title: 'c', humanOnly: '이유', run: () => 1 })
+    register({ id: 'open.door', title: 'o', run: () => 1 })
+    const items = list()
+    expect(items.find(i => i.id === 'closed.door')!.humanOnly).toBe('이유')
+    expect(items.find(i => i.id === 'open.door')!.humanOnly).toBeUndefined()
   })
 })

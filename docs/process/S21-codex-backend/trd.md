@@ -596,13 +596,23 @@ variant를 하나 더하면 아래가 **컴파일 에러 또는 단언 실패**�
 - 기본값 — `None` = 오늘의 고정 대상(claude·StreamJson)을 그대로 뜻하게 할 것인가, 아니면 wire에 명시적 `Claude`를 두고 `None`을 별도로 다룰 것인가.
 - 이름 — `backend` / `backend_kind` / `command` 중. ★`command`는 피하는 것이 좋다★ — 이 저장소에서 그 낱말은 이미 세 뜻이다(`protocol::AgentCommand` = wire 명령 · `agent::AgentCommand` = 실행 명령 · 명령 버스). `messages.rs:24`와 `profile.rs:41-43`이 그 충돌을 이미 경고한다.
 
-**★`PROTOCOL_VERSION`을 올리지 않는다★** — 근거는 같은 저장소의 선례다.
+> ★**아래 네 문단은 논파됐다(2026-09-08 · 리뷰 두 건).**★ 결론은 뒤집혔다 — **`PROTOCOL_VERSION`은 3 → 4로 올린다**(정본 = §6-1 표의 뒤집힌 행 + `crates/engram-dashboard-protocol/src/lib.rs`의 v4 항목). 무엇이 틀렸는지는 아래 원문 바로 뒤에 적는다. **원문을 지우지 않는다** — 이 저장소는 결정과 그 번복을 함께 남긴다.
+
+~~**★`PROTOCOL_VERSION`을 올리지 않는다★** — 근거는 같은 저장소의 선례다.~~
 
 - `CreateProfile.output_format`이 **정확히 이 일을 했다**: `crates/engram-dashboard-protocol/src/messages.rs:113-114`에 `#[serde(default)]`가 붙어 있고, 바로 위 `:111-112` 주석이 「이 필드 없는 옛 프론트/wire는 Terminal로 흡수(기존 동작 불변, **PROTOCOL_VERSION 유지**)」라고 적는다. 같은 패턴이 `domain.rs`에도 셋 더 있다(`AgentProfile.display_name` `:300` · `AgentProfile.parent_id` `:305-306` · `AgentSpawnCommand::Claude.output_format` `:174`).
 - bump 규칙은 `crates/engram-dashboard-protocol/src/lib.rs:47-59` — 「깨지는 변경(필드 의미 변경·제거)에서만 +1」. 현재 값은 `:60`의 `3`.
 - ★**v3으로 올린 그 사례가 오히려 경계선을 정확히 그린다**★(`lib.rs:55-59`): 그때 올린 이유는 **새 enum variant**를 더한 것이었다 — externally-tagged 봉투에서 모르는 키는 옛 데몬이 **거부**한다. 즉 **봉투에 변형을 더하면 bump, 기존 변형 안에 `#[serde(default)]` 칸을 더하면 유지**다. 우리는 후자다.
 
 **★조용한 실패의 대가 — 명시해 둔다★:** 새 클라이언트가 codex를 지정해 **옛 데몬**에 보내면, 그 데몬은 모르는 칸을 버리고 **claude를 대신 띄운다.** 오류도 경고도 없다. 이것은 버전을 안 올리기로 한 선택의 **직접적 대가**이고, 브리핑의 「주의」 절 셋째 항이 그것을 적는다. ★게다가 그 claude는 **StreamJson**이라 rich 렌더러로 그려진다★ — 요청한 codex 터미널 화면과 겉보기부터 다르므로, 사용자가 "다른 것이 떴다"는 것 자체는 알아본다(원인은 모른다).
+
+**★위 판정이 어디서 틀렸나(2026-09-08)★** — 셋째 항목의 경계선 자체는 맞는데 **우리가 선 쪽을 잘못 짚었다.**
+
+- 이번 변경은 「기존 변형 안에 `#[serde(default)]` 칸을 더한 것」에 **그치지 않는다** — `AgentSpawnCommand`에 **`Codex` 변형을 더했다**(`crates/engram-dashboard-protocol/src/domain.rs`). 그 enum은 `#[serde(tag = "kind")]`라 모르는 `kind`는 관용되는 미지 필드가 아니라 **역직렬화 실패**다. 즉 우리는 셋째 항목이 「bump」라고 적어 둔 **전자**다.
+- 그래서 실패 모드가 위 「대가」 한 줄보다 크다. **신데몬 + 구셸**에서 `ProfileList`는 실패 단위가 응답 전체라, 구셸이 codex 행 하나가 아니라 **명부를 통째로** 잃는다.
+- **구데몬 + 신셸**의 조용한 claude 대치(위 「대가」)도 그대로 남는데, 그것은 `AgentBackendKind`가 기본값을 두지 않기로 한 결정이 **막으려던 바로 그 실패**다. 그 결정은 그 결정을 아는 데몬에만 닿는다.
+- **「출시 전이라 지켜 줄 상대가 없다」가 이 축에서는 성립하지 않는다** — 데몬은 설계상 셸 재빌드보다 오래 산다(셸을 다시 지어도 떠 있던 데몬에 그대로 붙는다). 두 조합은 출시 뒤가 아니라 **로컬 개발 중에** 일상적으로 만들어진다.
+- bump가 둘 다 시끄럽게 만든다: auth의 version check(`crates/engram-dashboard-net/src/ws.rs`) + discovery의 version-mismatch 거부가 짝이 안 맞는 데몬을 재사용하지 않고 거부/재기동한다. 회귀망은 이미 있다 — discovery의 `version_mismatch_live_daemon_errors_without_spawn`.
 
 **데몬 쪽 변환:** `connection_core.rs:963-980`의 갈래가 그 칸을 읽어 `CoreSpawnCommand`를 고른다. **선례가 바로 아래에 있다** — `CreateProfile` 갈래(`:1006-1028`)가 이미 wire enum → core enum 변환을 손으로 match한다(`:1015-1018`). 같은 모양으로 쓴다.
 
@@ -798,11 +808,13 @@ defaultRenderMode(agent)                 src/components/slot/renderMode.ts:23-25
 
 ★**아래 셋은 「출시 전이라 지켜 줄 상대가 없다」는 같은 근거 하나에서 나온다.**★ 릴리스가 한 번 나가면 셋 다 근거가 죽는다 — 그 시점이 T-33 의 재도입 트리거다.
 
+> ★**단 그 근거는 셋 중 하나에서 이미 죽었다(2026-09-08).**★ `PROTOCOL_VERSION` 행은 뒤집혀 **3 → 4** 다 — 「지켜 줄 상대」가 릴리스된 빌드만이 아니라 **지금 떠 있는 데몬**이기도 했기 때문이다(데몬이 셸 재빌드보다 오래 사는 것은 설계다). 나머지 둘(A3 · 범위 확장)은 그 축을 안 타서 그대로 산다 — A3 은 **디스크 파일**의 앞뒤 호환이고 그쪽은 릴리스만이 상대다.
+
 | 결정 | 무엇을 | 근거 |
 |---|---|---|
 | **A → A3** | `agents.json` 하위호환을 **지금은 수용**한다(코드 변경 0). 구버전이 미지 `kind` 를 만나 명부를 잃어도 받아들인다 | 개발 중이라 명부를 새로 만들면 된다. 재도입 시점·선택지 셋은 `docs/tracking.md` T-33 |
-| **PROTOCOL_VERSION** | **올리지 않는다.** 칸 이름을 바꾸는 깨는 변경이어도 그대로 둔다 | 출시 전이라 호환 대상이 없다. 실제 영향은 「낡은 데몬 + 새 셸이면 둘 다 다시 띄운다」 하나뿐 |
-| **범위 확장** | ★**벤더 이름 누수를 2 단계로 미루지 않고 이번에 걷는다**★ | 미루면 릴리스 뒤에 같은 일이 다시 온다. 그리고 A3·버전 미승격 덕에 **지금이 가장 싸다** — 이행 비용이 0 인 창이 열려 있다 |
+| ~~**PROTOCOL_VERSION**~~ → ★**뒤집혔다: 3 → 4로 올린다**★(2026-09-08 · 사용자) | ~~올리지 않는다~~ → **올린다.** 값·근거의 정본 = `crates/engram-dashboard-protocol/src/lib.rs`의 v4 항목 | ~~출시 전이라 호환 대상이 없다. 실제 영향은 「낡은 데몬 + 새 셸이면 둘 다 다시 띄운다」 하나뿐~~ ★**이 근거가 사실관계에서 틀렸다**★ — 이번 변경은 `#[serde(default)]` 칸 추가에 그치지 않고 `#[serde(tag="kind")]` enum에 **`Codex` 변형을 더했다.** 모르는 변형은 관용되는 미지 필드가 아니라 **역직렬화 실패**라, 신데몬+구셸에서 구셸이 codex 행 하나가 아니라 **명부를 통째로** 잃는다. 그리고 「출시 전」이 이 축을 덮지 못한다 — **데몬이 셸 재빌드보다 오래 사는 것은 설계**라 두 조합은 **로컬 개발 중에** 온다. 논파 상세 = §4-5 끝 |
+| **범위 확장** | ★**벤더 이름 누수를 2 단계로 미루지 않고 이번에 걷는다**★ | 미루면 릴리스 뒤에 같은 일이 다시 온다. 그리고 A3 덕에 **지금이 가장 싸다** — 이행 비용이 0 인 창이 열려 있다(~~버전 미승격~~ 은 이 근거에서 빠졌다 — 위 행에서 뒤집혔다. 남은 근거만으로도 결론은 같다) |
 
 **Phase 0 실측이 만든 결정 둘 (2026-09-07 · 사용자):**
 
@@ -820,7 +832,7 @@ defaultRenderMode(agent)                 src/components/slot/renderMode.ts:23-25
 
 | 결정 | 무엇을 | 근거 |
 |---|---|---|
-| **G → 안 연다** | 명령 버스 `AgentBackend` 어휘를 `Claude` 하나로 **그대로 둔다**. LLM 이 codex 를 만드는 경로는 **Phase 2** | ★신뢰 확인 창을 그대로 두기로 했으므로(위) **LLM 은 그 창을 못 지난다**★ — 지금 열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 신뢰 창 처리가 정해질 때 함께 연다. ~~`commands.rs:1511-1531` 의 거부 목록에 `"Codex"` 가 이미 박혀 있으므로 **할 일이 없다**~~ ★**이 문장은 틀렸다(2026-09-07 실증)**★ — 문이 **둘**이었다. `agent.new` 는 그 그물이 막았지만 `agent.spawnInto` 는 열려 있었고, Phase 1 배선이 「모든 명시값 거부」를 「모르는 낱말만 거부」로 좁히면서 codex 가 그리로 통과했다. 지금은 `agent` crate 의 정책 표 하나가 두 문을 같이 정하고, 갈리면 `layout_apply.rs::both_creation_doors_read_one_backend_policy` 가 빨개진다 |
+| **G → 안 연다** | 명령 버스 `AgentBackend` 어휘를 `Claude` 하나로 **그대로 둔다**. LLM 이 codex 를 만드는 경로는 **Phase 2** | ★신뢰 확인 창을 그대로 두기로 했으므로(위) **LLM 은 그 창을 못 지난다**★ — 지금 열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 신뢰 창 처리가 정해질 때 함께 연다. ~~`commands.rs:1511-1531` 의 거부 목록에 `"Codex"` 가 이미 박혀 있으므로 **할 일이 없다**~~ ★**이 문장은 틀렸다(2026-09-07 실증)**★ — 문이 **둘**이었다. `agent.new` 는 그 그물이 막았지만 `agent.spawnInto` 는 열려 있었고, Phase 1 배선이 「모든 명시값 거부」를 「모르는 낱말만 거부」로 좁히면서 codex 가 그리로 통과했다. ~~지금은 `agent` crate 의 정책 표 하나가 **두 문**을 같이 정하고~~ ★**그 「둘」도 틀렸다(2026-09-08 리뷰)**★ — 문은 **셋**이었다. 프론트 `agentlist.createCodex`(`src/commands/agentCommands.ts`)가 `registry.register` 로 오르는 LLM 호출 가능 command 인데 wire `CreateProfile` 까지 닿고 그 핸들러는 정책을 하나도 안 본다. LLM 을 막고 있던 것은 네이티브 폴더 다이얼로그뿐이었다(게이트가 아니라 사고). ★셋째 문은 **사람 메뉴와 같은 문**이라 백엔드 낱말이 아니라 **호출자 축**으로 닫았다★ — 사람 클릭(`dispatch.fireAndForget` → `registry.runAsHuman`)은 그대로 지나고 LLM 경로(`registry.run`)만 `humanOnly` 로 반려된다. 사유의 정본은 여전히 `LLM_BACKEND_POLICY` 다. 재는 자리 셋 = `agent` 의 `commands::tests::new_creates_exactly_what_the_llm_backend_policy_opens` · `layout_apply.rs::every_creation_door_reads_one_backend_policy` · `src/commands/agentCommands.test.ts` |
 | **E → 안 넣는다** | 백엔드 종류 배너를 Phase 1 에 넣지 않는다. `AgentInfo` 에 wire 칸을 더하지 않는다 | 같은 범위 판정 — 띄우는 데 필요하지 않다. Phase 2 로 |
 
 ★**그래도 wire 의 백엔드 선택 칸(§6-B)은 Phase 1 에 필요하다**★ — 사람이 프론트에서 codex 를 고르는 경로도 그 칸을 탄다(`SpawnByCwd` 핸들러가 claude 를 하드코딩한다). **LLM 표면을 닫는 것과 wire 칸을 여는 것은 다른 축이다** — 전자는 명령 버스 어휘, 후자는 스폰 패킷이다.

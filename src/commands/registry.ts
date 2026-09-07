@@ -53,6 +53,23 @@ export interface Command {
    * 얹는 것은 이 칸을 가진 것뿐이다(`commands/viewCommandBridge.ts` 의 `offeredCommands`).
    */
   help?: CommandHelp
+  /**
+   * ★있으면 이 command 는 **사람 경로에서만** 돈다 — 값은 그 사유(거절 문구에 그대로 실린다)★.
+   *
+   * 이 레지스트리의 항목 하나가 **두 소비자를 겸한다**: 사람 클릭·키바인딩(`dispatch.fireAndForget` →
+   * [`runAsHuman`])과 LLM 표면(`window.__engramCmd` · 버스 다리 → [`run`]). 대부분은 그것이 장점이지만
+   * (§5 「같은 핸들을 흔든다」), **둘 중 한쪽에만 열려야 하는 동작**이 생기면 그 겸직이 곧 구멍이 된다.
+   * 그때 닫는 축은 **인자 값이 아니라 호출자**라 `when` 으로는 못 가른다 — `when` 은 양쪽에 똑같이 적용된다.
+   *
+   * ★쓰기 전에 확인할 것 — 이 칸은 §5 의 예외이고, 예외에는 사유가 필요하다★: 「LLM 이 못 지나는 UI 가
+   * 뒤에 있다」는 사유가 **아니다**(그건 고칠 결함이지 닫을 근거가 아니다). 정당한 사유는 「사람이 그
+   * 자리에 있어야 한다는 **정책 결정**이 있고, 그 결정의 정본이 딴 데 있다」다. 오늘 유일한 사용처
+   * (`agentlist.createCodex`)의 정본 = `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY`.
+   *
+   * ★이 칸은 `help` 와 다른 축이다★ — `help` 없음 = 데몬 명부에 **광고 안 함**이고, 그것은 실행을 막지
+   * 않는다(버스 다리의 `settle` 은 이름만 있으면 `run` 을 부른다). 광고를 빼는 것으로 닫았다고 읽지 말 것.
+   */
+  humanOnly?: string
   /** 노출/실행 가능 조건(후속 when-context 는 골격 밖, ADR-0055). */
   when?: () => boolean
   /**
@@ -75,16 +92,46 @@ export function register(cmd: Command): void {
   registry.set(cmd.id, cmd)
 }
 
-/**
- * 모르는 id 는 명확히 throw 한다(조용한 no-op 은 LLM/cdp 디버깅을 어렵게 함).
- * handler 반환을 그대로 반환 → 호출부가 Promise 를 await 할 수 있다.
- */
-export function run(id: string, args?: CommandArgs): unknown {
+/** 두 진입점의 공통부 — id 해소만 한다(게이트는 호출자별로 다르다). */
+function resolve(id: string): Command {
   const cmd = registry.get(id)
   if (!cmd) {
     throw new Error(`[commands] 알 수 없는 command id: '${id}'`)
   }
+  return cmd
+}
+
+/**
+ * ★LLM 표면의 진입점★ — `window.__engramCmd.run` · 버스 다리(`viewCommandBridge`) · cdp eval 이 여기로
+ * 온다. 사람 클릭·키바인딩은 [`runAsHuman`] 으로 간다(`dispatch.fireAndForget` 경유).
+ *
+ * 모르는 id 는 명확히 throw 한다(조용한 no-op 은 LLM/cdp 디버깅을 어렵게 함).
+ * handler 반환을 그대로 반환 → 호출부가 Promise 를 await 할 수 있다.
+ *
+ * ★`humanOnly` 는 여기서만 막힌다★ — 그 칸의 doc 이 언제 쓰는지를 진다. 거절은 조용하지 않다(사유를
+ * 실어 throw): LLM 이 「눌렸는데 아무 일도 안 일어났다」로 읽고 같은 자리를 맴도는 것을 막는다.
+ */
+export function run(id: string, args?: CommandArgs): unknown {
+  const cmd = resolve(id)
+  if (cmd.humanOnly) {
+    throw new Error(
+      `[commands] '${id}' 는 이 표면(LLM·버스)으로는 실행하지 않는다 — ${cmd.humanOnly}`,
+    )
+  }
   return cmd.run(args)
+}
+
+/**
+ * ★사람 경로의 진입점★ — 클릭·키바인딩만 부른다(`dispatch.fireAndForget` 이 유일한 호출자이고, 그
+ * 파일이 복사 템플릿이다). `humanOnly` 게이트를 지나지 않는 것이 이 함수의 존재 이유다.
+ *
+ * ★이것을 `__engramCmd`(`store/eventBus.ts`)나 버스 다리(`commands/viewCommandBridge.ts`)에 노출하지
+ * 말 것★ — 노출하는 순간 [`run`] 의 게이트가 우회로를 얻어 아무것도 안 지킨 셈이 된다. ★그 금지를 재는
+ * 게이트는 없다(호출부 규율이다)★ — `commands/registry.test.ts` 가 재는 것은 두 진입점이 실제로 다르게
+ * 행동한다는 것까지다.
+ */
+export function runAsHuman(id: string, args?: CommandArgs): unknown {
+  return resolve(id).run(args)
 }
 
 /**
@@ -123,15 +170,25 @@ export function getCommand(id: string): Command | undefined {
   return cmd ? { ...cmd, help: copyHelp(cmd.help) } : undefined
 }
 
-/** 등록된 command 의 메타 스냅샷(발견용 — 팔레트·LLM introspection). */
-export function list(): Array<Pick<Command, 'id' | 'title' | 'category' | 'keybinding' | 'help'>> {
-  return Array.from(registry.values()).map(({ id, title, category, keybinding, help }) => ({
-    id,
-    title,
-    category,
-    keybinding,
-    help: copyHelp(help),
-  }))
+/**
+ * 등록된 command 의 메타 스냅샷(발견용 — 팔레트·LLM introspection).
+ *
+ * ★`humanOnly` 도 싣는다★ — 이 목록을 읽는 쪽이 곧 [`run`] 이 막을 쪽이라, 안 실으면 LLM 이 목록에서
+ * 본 것을 부르고 나서야 닫힌 것을 안다(그 왕복이 §5 가 없애려던 바로 그 되묻기다).
+ */
+export function list(): Array<
+  Pick<Command, 'id' | 'title' | 'category' | 'keybinding' | 'help' | 'humanOnly'>
+> {
+  return Array.from(registry.values()).map(
+    ({ id, title, category, keybinding, help, humanOnly }) => ({
+      id,
+      title,
+      category,
+      keybinding,
+      help: copyHelp(help),
+      humanOnly,
+    }),
+  )
 }
 
 /** 테스트 전용 — 레지스트리 초기화(테스트 간 격리). 프로덕션 코드에서 호출 금지. */

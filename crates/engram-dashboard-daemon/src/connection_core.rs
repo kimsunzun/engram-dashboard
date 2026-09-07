@@ -4080,7 +4080,7 @@ mod tests {
         core.dispatch(
             bus_command_with(
                 "agent.new",
-                serde_json::json!({ "cwd": "C:/work/bus", "name": "from-bus" }),
+                serde_json::json!({ "cwd": "C:/work/bus", "name": "from-bus", "backend": "Claude" }),
                 made,
             ),
             &session,

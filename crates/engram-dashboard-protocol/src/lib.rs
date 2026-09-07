@@ -57,4 +57,25 @@ pub use messages::{
 /// 키) deserialize 에서 막힌다. 그러면 신클라가 Ack 를 기다리며 무한 대기할 수 있으므로(v2 bump 사유와
 /// 동일한 시나리오), auth 의 version check(ws.rs) + discovery 의 version-mismatch 거부가 구 데몬을
 /// **재사용하지 않고 거부/재기동**하게 강제한다.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: codex 배선 — [`AgentSpawnCommand::Codex`] **변형 추가** + `SpawnByCwd`·`CreateProfile` 에
+/// `backend`([`AgentBackendKind`]) 칸 신설.
+/// ★변형을 더한 것이라 v3 과 같은 **비관용** 축이다★ — `AgentSpawnCommand` 는 `#[serde(tag = "kind")]`
+/// 라 모르는 `kind` 는 관용되는 미지 **필드**가 아니라 역직렬화 **실패**다. 「기존 변형 안에
+/// `#[serde(default)]` 칸을 더하면 버전 유지」(v2·v3 사이에 여러 번 그렇게 지나갔다)는 이 변경에
+/// 해당하지 않는다. 두 방향이 각각 조용히 깨진다:
+///   - **신데몬 + 구셸**: codex 프로필이 하나라도 명부에 있으면 `ProfileList` 의
+///     `AgentProfile.command` 에서 디코드가 실패하고, 실패 단위가 **응답 전체**라 구셸은 그 한 행이
+///     아니라 **명부를 통째로** 잃는다.
+///   - **구데몬 + 신셸**: 새 `backend` 칸은 `#[serde(default)]` 라 구데몬이 그것을 **버리고** 옛
+///     하드코딩(claude·StreamJson)을 띄운다 — 사람이 「코덱스 터미널」을 골랐는데 codex 라벨이 붙은
+///     노드 뒤에서 claude 가 돈다. [`AgentBackendKind`] 가 기본값을 안 두기로 한 결정이 막으려던 바로
+///     그 실패인데, 그 결정을 모르는 데몬에는 그 결정이 닿지 않는다.
+/// ★출시 뒤가 아니라 로컬 개발에서 먼저 온다★ — 데몬은 설계상 셸 재빌드보다 오래 산다(셸을 다시 지어도
+/// 떠 있던 데몬에 그대로 붙는다). 그래서 위 두 조합은 개발 중에 일상적으로 만들어진다. 「출시 전이라
+/// 지켜 줄 상대가 없다」로 이 bump 를 건너뛰려던 판단이 틀렸던 지점이 여기다.
+/// bump 가 둘 다 시끄럽게 만든다: auth 의 version check(`net` 의 `ws.rs`) + discovery 의
+/// version-mismatch 거부(`discovery` 의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
+/// 거부/재기동**한다. 그 강제를 재는 자리 = discovery 의
+/// `version_mismatch_live_daemon_errors_without_spawn`.
+pub const PROTOCOL_VERSION: u32 = 4;
