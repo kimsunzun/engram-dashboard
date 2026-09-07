@@ -1135,6 +1135,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-dashboard-transport"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "tokio",
+ "tokio-tungstenite",
+]
+
+[[package]]
 name = "enumflags2"
 version = "0.7.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

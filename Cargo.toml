@@ -1,8 +1,9 @@
 # Cargo workspace 루트 (S12 phase 1). 정적 링크.
-# 멤버 9: protocol(경계 계약) · base(바닥 인프라 — 로깅·PID 판정, 잎 crate, ADR-0175) ·
+# 멤버 10: protocol(경계 계약) · base(바닥 인프라 — 로깅·PID 판정, 잎 crate, ADR-0175) ·
 #   agent(에이전트 코어, Tauri import 0 — 옛 core, ADR-0175) · command(명령 버스 도구 — 워크스페이스
 #   crate 의존 0·명령 0개, ADR-0155) · discovery(데몬 발견) · messaging(메시징 커널 — 워크스페이스 crate
 #   무의존, ADR-0110) · net(네트워크 행 — WS·프레임 포트·단일 인스턴스·portfile, ADR-0129) ·
+#   transport(재사용 전송 lib — 워크스페이스 crate 의존 0, ADR-0177) ·
 #   daemon(에이전트 호스트 + 조립실) · src-tauri(데몬 클라이언트 셸).
 [workspace]
 resolver = "2"
@@ -21,6 +22,10 @@ members = [
     # ADR-0129 슬라이스 1: 네트워크 행 lib(에이전트 어휘를 타입으로도 모른다 — **단 auth 핸드셰이크의
     #   두 이름은 0-4 이월분으로 예외**). 그 crate lib.rs 헤더가 격리 게이트·예외 근거의 정본.
     "crates/engram-dashboard-net",
+    # ADR-0177: 재사용 전송 lib(워크스페이스 crate 의존 0 · 타입 seam 은 `Wire` 제네릭 · 전송/시간은 dyn).
+    #   ★기존 net 을 뜯지 않는다★ — 새로 세워 독립 검증한 뒤 단계별로 붙인다. 순수 층(machine·pending·
+    #   stream)의 tokio 0줄 게이트를 포함해 격리 게이트의 정본은 그 crate lib.rs 헤더다.
+    "crates/engram-dashboard-transport",
     "crates/engram-dashboard-daemon",
     "src-tauri",
 ]
