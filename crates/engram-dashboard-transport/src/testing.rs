@@ -219,10 +219,9 @@ impl MemoryEndpoint {
     /// 말했다」다(말 없이 사라진 것은 [`MemoryEndpoint::fail`] 쪽 = `Err`). 클라는 닫힘은 알고 사유는
     /// 못 얻는다.
     ///
-    /// ★단 하네스와 실 어댑터는 아직 한 자리에서 어긋난다★ — 이 통로를 **그냥 떨어뜨리면**(엔드포인트
-    /// 를 drop) `MemRx` 가 채널 소진을 `Closed(None)` 으로 올리는데, 실소켓에서 같은 일은 읽기 오류다.
-    /// `link.rs` 의 [`crate::LinkRead::Closed`] rustdoc 이 그 어긋남을 그대로 인정하고 있고, 그래서
-    /// **`Closed(None)` 으로 「조용히 죽었다」를 분기하는 코드는 여기서만 초록이 된다**.
+    /// ★이 통로를 **그냥 떨어뜨리는 것**(엔드포인트를 drop)은 이 갈래가 아니다★ — 그건 말 없이 사라진
+    /// 것이라 `MemRx` 가 읽기 오류로 낸다(실소켓과 같은 모양). 「닫았다고 말했다」를 만들려면 이것이나
+    /// [`MemoryEndpoint::reject`] 를 불러야 한다.
     pub fn close(&self) {
         let _ = self.to_client.send(ServerMsg::Closed(None));
     }
@@ -320,7 +319,15 @@ impl LinkRx for MemRx {
             match self.from_server.recv().await {
                 Some(ServerMsg::Frame(f)) => Ok(LinkRead::Frame(f)),
                 Some(ServerMsg::Closed(close)) => Ok(LinkRead::Closed(close)),
-                None => Ok(LinkRead::Closed(None)),
+                // ★채널 소진 = 말 없이 사라졌다★ — 실소켓에서 같은 일(닫기 핸드셰이크 없이 버려진 소켓)은
+                //   읽기 오류이므로 여기서도 오류다. `Ok(Closed(None))` 으로 올리던 판은
+                //   [`crate::LinkRead::Closed`] 계약(「상대가 **말했다**」)을 하네스에서만 거짓으로 만들어,
+                //   엔드포인트를 떨어뜨려 죽음을 흉내내는 테스트가 `PeerClosed` 로 초록이고 실소켓에서는
+                //   `LinkError` 로 갈리게 했다.
+                None => {
+                    self.failed = true;
+                    Err(LinkError::new("peer endpoint gone"))
+                }
                 Some(ServerMsg::Fail(e)) => {
                     self.failed = true;
                     Err(e)
@@ -825,6 +832,26 @@ mod tests {
         let _link = net.dial(&Address::new("mem://x")).await.unwrap();
         assert_eq!(net.open_endpoints(), 1);
         assert_eq!(net.dials(), 1);
+    }
+
+    // ── H5: 하네스도 「실패 뒤에는 닫기를 내지 않는다」 걸쇠를 진다 ──
+    //
+    // ★실패 **뒤에 닫기를 줄 세우는** 것이 요점이다★ — 걸쇠가 없으면 둘째 읽기가 큐에 남은 그것을
+    //   「상대가 말했다」로 올려, [`crate::LinkRead::Closed`] 계약이 하네스에서만 거짓이 된다.
+    //   실 어댑터 쪽 짝 = `tests/ws_reject.rs` 의
+    //   `a_read_after_a_failed_read_is_still_an_error_never_a_spoken_close`.
+    #[tokio::test]
+    async fn a_read_after_a_failed_read_is_still_an_error_in_the_harness_too() {
+        let net = MemoryNetwork::new();
+        let (_tx, mut rx) = net.dial(&Address::new("mem://x")).await.unwrap();
+        let endpoint = net.accept().unwrap();
+        endpoint.fail("boom");
+        endpoint.close();
+        assert!(rx.recv().await.is_err(), "첫 읽기는 실패다");
+        match rx.recv().await {
+            Err(_) => {}
+            Ok(other) => panic!("실패 뒤에 닫기가 나왔다: {other:?}"),
+        }
     }
 
     #[tokio::test]
