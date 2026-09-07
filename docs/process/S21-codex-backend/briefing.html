@@ -1,4 +1,4 @@
-<title>codex 백엔드 브리핑</title>
+<title>codex 백엔드 착지</title>
 
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 
@@ -212,24 +212,26 @@
 
   <!-- 1 -->
   <section class="slide cover" data-n="01">
-    <div class="kicker">engram dashboard · 백엔드 확장</div>
-    <h1>codex 백엔드</h1>
+    <div class="kicker">engram dashboard · 백엔드 확장 · Phase 1 완료</div>
+    <h1>codex 가 뜬다</h1>
     <p class="lede">
-      새 파이프를 짓는 일이 아니다. <strong>파이프는 이미 중립이고</strong>,
-      claude 지식이 세 군데로 샜을 뿐이다.
+      트리에서 폴더를 고르면 <strong>codex TUI 가 슬롯에 뜨고 타이핑된다.</strong>
+      실제 앱에서 확인했다. 새 파이프를 짓지 않았다 — 파이프는 이미 중립이었고,
+      claude 지식이 샌 자리를 <strong>제자리로 돌렸을 뿐이다.</strong>
     </p>
   </section>
 
   <!-- 2 -->
   <section class="slide" data-n="02">
-    <div class="kicker">지금 상태</div>
-    <h2>이미 되어 있는 것과, 새는 세 곳</h2>
+    <div class="kicker">무엇이 바뀌었나</div>
+    <h2>새는 곳 셋을 제자리로 돌렸다</h2>
     <ul class="points">
-      <li><b>출력 이벤트 여섯 중 다섯은 이미 백엔드를 모른다.</b> 글·도구 호출·사용량·턴 종료·오류.</li>
-      <li><b>새는 곳 ①</b> — 판정 하나(<code>is_json_mode</code>)가 “claude인가”를 물어서 입력·출력·전송 방식 셋을 동시에 고른다.</li>
-      <li><b>새는 곳 ②</b> — 도구 <em>결과</em>와 생각 블록은 고정 칸이 없어 프론트가 claude 원본을 직접 읽는다.</li>
-      <li><b>새는 곳 ③</b> — wire에 백엔드를 고르는 칸이 없다. 지금은 claude 고정이라 셸조차 못 고른다.</li>
+      <li><b>백엔드마다 폴더 하나가 됐다.</b> 그 전엔 파일 하나여서 「여기 전부 넣어야 한다」가 안 보였고, 실제로 샜다 — 갈림길 파일이 claude 함수를 직접 넷 부르고 있었다. 계약으로 올렸다.</li>
+      <li><b>claude 세션 파일을 읽던 488 줄이 claude 폴더 안으로 들어갔다.</b> 규약을 실제로 어기던 유일한 자리였다. codex 는 세션 id 를 못 정해서 두 번째 구현이 영영 안 생긴다 — 안전하게 옮길 수 있었다.</li>
+      <li><b>범용 개념에 붙어 있던 벤더 이름을 걷었다</b> — 세션 id 칸(16 파일 50 건)과 「claude 인가」를 묻던 판정. 그 판정 하나가 입력·출력·전송 셋을 동시에 고르고 있었다.</li>
+      <li><b>안 걷은 것도 있다</b> — 백엔드를 <em>고르는</em> 칸에 백엔드 이름이 든 것은 누수가 아니라 식별자 그 자체다. 지우면 무엇을 띄울지 못 고른다.</li>
     </ul>
+    <div class="rule">지금이 가장 쌌다 — 출시 전이라 이행 비용이 0 인 창이 열려 있었다.<br>릴리스가 한 번 나가면 그 창이 닫힌다.</div>
   </section>
 
   <!-- 3 -->
@@ -433,8 +435,27 @@
     </div>
   </section>
 
-  <!-- 9 -->
+  <!-- 리뷰 -->
   <section class="slide" data-n="10">
+    <div class="kicker">2 인 적대 리뷰</div>
+    <h2>리뷰가 내 보고 셋을 반증했다</h2>
+    <p class="lede">
+      두 렌즈(불변식 · 다른 모델 신선 렌즈) 모두 <strong>FIX</strong>. 적출 12 건 중 10 반영, 2 는 사유와 함께 보류.
+      ★<strong>그중 셋은 내가 「됐다」고 보고한 것을 정면으로 뒤집었다</strong>★ — 그게 이 리뷰의 값어치다.
+    </p>
+    <ul class="points">
+      <li><b>「문이 둘이다」 → 셋이었다.</b> 트리 메뉴 항목이 <em>사람 메뉴이자 LLM 표면을 겸직</em>한다. 백엔드 낱말로는 못 닫아서(사람 길까지 닫힌다) <b>호출자 축</b>으로 갈랐다.</li>
+      <li><b>「버전 안 올려도 된다」 → 근거가 거짓이었다.</b> 칸을 더한 게 아니라 <b>종류</b>를 더한 거라 모르는 쪽은 파싱이 통째로 실패한다. 그리고 <b>데몬은 셸 재빌드보다 오래 산다</b> — 「출시 전」이 이 실패를 안 막는다. 4 로 올렸다.</li>
+      <li><b>「drift 시험이 갈림을 잡는다」 → 지워도 초록이었다.</b> 한쪽 문은 어휘만 비교하고 있었다. 이제 각 검사를 지우면 실제로 빨개진다 — <b>지워 보고 확인했다.</b></li>
+      <li><b>「argv 가 실측됐다」 → 반만 맞았다.</b> 실 argv 는 화면 실측이 OS 에서 읽어 맞았지만, <b>시험대는 그걸 안 쟀다</b> — 같은 파일 상수를 자기와 비교하는 동어반복이었다.</li>
+    </ul>
+    <div class="warnbox">
+      <b>안 고친 것 둘</b> — 폴더 이름에 <code>%VAR%</code> 가 실제로 들어 있으면 셸이 확장한다(유일 해법이 claude 공용 코드를 건드려 틀리면 모든 스폰이 죽는다) · codex 프로필이 디스크에 박혀 옛 빌드로 되돌리면 명부를 잃는다(수용하기로 한 것). <b>둘 다 그 자리 주석과 추적 항목에 남겼다.</b>
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section class="slide" data-n="11">
     <div class="kicker">주의</div>
     <h2>아무것도 안 하면 이렇게 된다</h2>
     <ul class="points">
@@ -445,17 +466,23 @@
   </section>
 
   <!-- 10 -->
-  <section class="slide" data-n="11">
+  <section class="slide" data-n="12">
     <div class="kicker">검증 상태</div>
-    <h2>안 해 본 것</h2>
+    <h2>무엇으로 확인했나</h2>
     <ul class="points">
-      <li><b>codex를 대화형으로 띄워 보지 않았다.</b> 엔터가 진짜 제출인지, 전체화면 모드가 우리 화면에서 어떻게 도는지 미상.</li>
-      <li><b>상주 서버는 손잡이까지만 확인했다.</b> 대화를 만들어 id를 받는 데까지는 실행했지만 <b>실제 턴은 안 돌렸다.</b></li>
-      <li><b>프로세스 N개의 메모리 값은 안 쟀다.</b> 공개 자료에도 baseline이 없다 — 선례를 따르기로 해서 생략했다.</li>
+      <li><b>화면 실측 PASS</b> — 트리 메뉴 → 폴더 → 활성화 → 슬롯에 codex TUI. <b>실 argv 를 OS 에서 직접 읽어</b> 명세와 대조했고, 신뢰 확인 창을 엔터로 지나 입력 프롬프트까지 진행했다.</li>
+      <li><b>워크스페이스 회귀 2116 통과 · 0 실패</b> — 두 갈래 작업을 <b>합친 상태에서 다시</b> 돌린 값이다.</li>
+      <li><b>시험대 11/11</b> — 백엔드마다 같은 질문표. 셋째 백엔드는 파일이 아니라 <b>열 하나</b>가 는다.</li>
+      <li><b>2 인 적대 리뷰</b> — 두 렌즈 모두 FIX, 반영 후 push 완료.</li>
     </ul>
+    <div class="warnbox">
+      <b>안 재는 것을 안 잰다고 적어 뒀다</b> — 쓰기 권한 아래의 모델 동작 · 우리가 안 쓰는 인자 · <code>%VAR%</code> 한계.
+      「전부 실측」이라 적던 옛 문장이 거짓이었고, 리뷰가 잡아 고쳤다. <b>정본은 그 파일 헤더다.</b>
+    </div>
     <footer>
-      <div><b>근거:</b> codex-cli 0.151.0 실측(이 PC) · 저장소 코드·ADR 정적 판독 · 피어 3갈래 병렬 조사 + 외부 모델 적대 리뷰 1회</div>
-      <div><b>이어지는 것:</b> 2026-06-22 조사가 “벤더가 다중 세션을 노출하면 다시 본다”로 남겨 둔 미결 항목 — 오늘 그 조건이 충족됐다</div>
+      <div><b>다음:</b> 기록 셋(결정 기록 · 타임라인 · 이 브리핑) → CI 결론 확인 → master 머지</div>
+      <div><b>Phase 2:</b> codex 상주 JSON 서버 — 세션 복원 · 우편 · 구조화 챗이 <b>거기서 함께 열린다.</b> 프로세스 모델은 「대화마다 하나」로 확정(성숙 피어 선례)</div>
+      <div><b>Phase 3:</b> 프론트에 샌 claude 스키마 해석 회수 — claude 쪽 정리라 codex 와 독립</div>
     </footer>
   </section>
 
