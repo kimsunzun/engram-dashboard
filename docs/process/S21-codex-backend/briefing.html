@@ -1,0 +1,456 @@
+<title>codex 백엔드 브리핑</title>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    --paper:      #EDF1F1;
+    --surface:    #F7FAFA;
+    --surface-2:  #E3E9E9;
+    --ink:        #121A1D;
+    --ink-2:      #3E4C51;
+    --muted:      #6C7C82;
+    --line:       #C3CFD0;
+    --line-soft:  #D8E0E0;
+    --accent:     #0E6B72;
+    --accent-ink: #0A4F55;
+    --warn:       #A85D16;
+    --warn-bg:    #F2E4D3;
+    --absent:     #8E2F38;
+    --ok-bg:      #DCE9E8;
+
+    --mono: "IBM Plex Mono", "Cascadia Mono", ui-monospace, Consolas, monospace;
+    --sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, system-ui, sans-serif;
+    --serif: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
+    --r: 3px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0F1518; --surface: #161F22; --surface-2: #1E282B;
+      --ink: #DEE7E8; --ink-2: #B3C1C4; --muted: #7D8E93;
+      --line: #2E3B3F; --line-soft: #253034;
+      --accent: #59B7BC; --accent-ink: #7FCBCF;
+      --warn: #DE9A48; --warn-bg: #302617;
+      --absent: #DB7B84; --ok-bg: #17302F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0F1518; --surface: #161F22; --surface-2: #1E282B;
+    --ink: #DEE7E8; --ink-2: #B3C1C4; --muted: #7D8E93;
+    --line: #2E3B3F; --line-soft: #253034;
+    --accent: #59B7BC; --accent-ink: #7FCBCF;
+    --warn: #DE9A48; --warn-bg: #302617;
+    --absent: #DB7B84; --ok-bg: #17302F;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .deck { max-width: 900px; margin: 0 auto; padding: 2rem 1.5rem 5rem; display: flex; flex-direction: column; gap: 1.25rem; }
+
+  .slide {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 2.1rem 2.2rem 2.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    position: relative;
+  }
+  .slide::after {
+    content: attr(data-n);
+    position: absolute;
+    top: 1.1rem; right: 1.3rem;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .slide.cover { background: var(--ink); color: var(--paper); border-color: var(--ink); padding-block: 3rem; }
+  .slide.cover::after { color: color-mix(in srgb, var(--paper) 45%, transparent); }
+  .slide.cover h1 { color: var(--paper); }
+  .slide.cover .lede { color: color-mix(in srgb, var(--paper) 80%, transparent); }
+  .slide.cover .kicker { color: var(--accent-ink); }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .slide.cover { background: #060A0C; border-color: #223034; }
+  }
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  h1 { font-family: var(--serif); font-size: clamp(2.1rem, 5.5vw, 3.2rem); line-height: 1.1; font-weight: 600; letter-spacing: -0.02em; margin: 0; text-wrap: balance; }
+  h2 { font-family: var(--serif); font-size: clamp(1.45rem, 3.4vw, 2rem); line-height: 1.2; font-weight: 600; letter-spacing: -0.015em; margin: 0; text-wrap: balance; }
+
+  .lede { font-size: 1.05rem; color: var(--ink-2); max-width: 54ch; text-wrap: pretty; }
+  .lede strong { color: var(--ink); font-weight: 650; }
+  .slide.cover .lede strong { color: var(--paper); }
+
+  p { margin: 0; }
+  code { font-family: var(--mono); font-size: 0.86em; background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(--r); }
+
+  ul.points { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0.65rem; }
+  ul.points li {
+    position: relative;
+    padding-left: 1.7rem;
+    font-size: 0.97rem;
+    line-height: 1.55;
+    color: var(--ink-2);
+  }
+  ul.points li::before {
+    content: "—";
+    position: absolute;
+    left: 0;
+    top: 0;
+    color: var(--accent);
+    font-family: var(--mono);
+    font-size: 0.85rem;
+    line-height: 1.75;
+  }
+  ul.points li b { color: var(--ink); font-weight: 650; }
+
+  .rule {
+    border-left: 3px solid var(--accent);
+    background: var(--ok-bg);
+    border-radius: 0 var(--r) var(--r) 0;
+    padding: 1rem 1.2rem;
+    font-size: 1.02rem;
+    line-height: 1.55;
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+  .warnbox {
+    border-left: 3px solid var(--warn);
+    background: var(--warn-bg);
+    border-radius: 0 var(--r) var(--r) 0;
+    padding: 0.9rem 1.15rem;
+    font-size: 0.92rem;
+    line-height: 1.55;
+    color: var(--warn);
+  }
+  .warnbox b { color: var(--warn); }
+
+  /* 흐름도 */
+  .flow { display: flex; flex-direction: column; gap: 0.55rem; overflow-x: auto; }
+  .flowrow { display: grid; grid-template-columns: 7.5rem 1fr; gap: 1rem; align-items: center; min-width: 34rem; }
+  .flowrow .who { font-size: 0.82rem; font-weight: 650; color: var(--ink); text-align: right; }
+  .flowrow .who span { display: block; font-weight: 400; font-size: 0.72rem; color: var(--muted); }
+  .chain { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+  .box {
+    font-family: var(--mono); font-size: 0.76rem; line-height: 1.4;
+    padding: 0.4rem 0.65rem; border: 1px solid var(--line);
+    border-radius: var(--r); background: var(--paper); color: var(--ink-2); white-space: nowrap;
+  }
+  .box.raw  { border-style: dashed; color: var(--muted); }
+  .box.mid  { border-color: var(--accent); background: var(--ok-bg); color: var(--accent-ink); font-weight: 600; }
+  .box.out  { background: var(--surface-2); color: var(--ink); }
+  .arw { font-family: var(--mono); color: var(--muted); font-size: 0.78rem; }
+
+  /* 프로세스 띠 */
+  .pipeline { display: flex; flex-direction: column; gap: 1px; background: var(--line-soft); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+  .band { background: var(--surface); padding: 1rem 1.2rem; display: flex; flex-direction: column; gap: 0.7rem; }
+  .band > .bandhead {
+    font-family: var(--mono); font-size: 0.67rem; letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--accent);
+  }
+  .band > .bandhead em { font-style: normal; color: var(--muted); text-transform: none; letter-spacing: 0; }
+  .hop { display: grid; grid-template-columns: 8.5rem 1fr; gap: 1rem; align-items: baseline; }
+  .hop > .stage { font-size: 0.78rem; font-weight: 650; color: var(--ink); text-align: right; }
+  .hop > .carry { font-size: 0.85rem; line-height: 1.5; color: var(--ink-2); }
+  .hop > .carry b { color: var(--ink); font-weight: 650; }
+  .hop > .carry .tag {
+    font-family: var(--mono); font-size: 0.73rem;
+    background: var(--surface-2); padding: 0.1em 0.4em; border-radius: var(--r); color: var(--ink);
+  }
+  .bandsep { text-align: center; font-family: var(--mono); font-size: 0.68rem; color: var(--muted); padding: 0.15rem 0; }
+
+  .shape {
+    border: 1px solid var(--line); background: var(--paper); border-radius: var(--r);
+    padding: 0.9rem 1.1rem; font-family: var(--mono); font-size: 0.78rem; line-height: 1.75;
+    color: var(--ink-2); overflow-x: auto; white-space: pre;
+  }
+  .shape b { color: var(--accent-ink); font-weight: 600; }
+
+  /* 2열 */
+  .two { display: grid; gap: 1px; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); background: var(--line-soft); border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+  .col { background: var(--surface); padding: 1.1rem 1.25rem; display: flex; flex-direction: column; gap: 0.55rem; }
+  .col h3 { margin: 0; font-family: var(--serif); font-size: 1.1rem; font-weight: 600; color: var(--ink); }
+  .col .tagline { font-family: var(--mono); font-size: 0.72rem; color: var(--muted); }
+  .col p { font-size: 0.89rem; line-height: 1.55; color: var(--ink-2); }
+  .col.pick { background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+  .col .badge {
+    align-self: flex-start; font-family: var(--mono); font-size: 0.65rem; letter-spacing: 0.08em;
+    text-transform: uppercase; background: var(--ok-bg); color: var(--accent-ink);
+    padding: 0.15rem 0.45rem; border-radius: 999px;
+  }
+
+  /* 단계 */
+  .steps { display: flex; flex-direction: column; gap: 0.5rem; }
+  .step { display: grid; grid-template-columns: 5.5rem 1fr; gap: 1rem; align-items: baseline; padding: 0.85rem 0; border-bottom: 1px solid var(--line-soft); }
+  .step:last-child { border-bottom: 0; }
+  .step .n { font-family: var(--mono); font-size: 0.75rem; letter-spacing: 0.06em; color: var(--accent-ink); text-transform: uppercase; }
+  .step .what { font-size: 0.97rem; line-height: 1.5; color: var(--ink-2); }
+  .step .what b { color: var(--ink); font-weight: 650; }
+
+  footer { border-top: 1px solid var(--line-soft); padding-top: 1rem; font-size: 0.79rem; color: var(--muted); line-height: 1.7; display: flex; flex-direction: column; gap: 0.3rem; }
+  footer b { color: var(--ink-2); font-weight: 650; }
+</style>
+
+<div class="deck">
+
+  <!-- 1 -->
+  <section class="slide cover" data-n="01">
+    <div class="kicker">engram dashboard · 백엔드 확장</div>
+    <h1>codex 백엔드</h1>
+    <p class="lede">
+      새 파이프를 짓는 일이 아니다. <strong>파이프는 이미 중립이고</strong>,
+      claude 지식이 세 군데로 샜을 뿐이다.
+    </p>
+  </section>
+
+  <!-- 2 -->
+  <section class="slide" data-n="02">
+    <div class="kicker">지금 상태</div>
+    <h2>이미 되어 있는 것과, 새는 세 곳</h2>
+    <ul class="points">
+      <li><b>출력 이벤트 여섯 중 다섯은 이미 백엔드를 모른다.</b> 글·도구 호출·사용량·턴 종료·오류.</li>
+      <li><b>새는 곳 ①</b> — 판정 하나(<code>is_json_mode</code>)가 “claude인가”를 물어서 입력·출력·전송 방식 셋을 동시에 고른다.</li>
+      <li><b>새는 곳 ②</b> — 도구 <em>결과</em>와 생각 블록은 고정 칸이 없어 프론트가 claude 원본을 직접 읽는다.</li>
+      <li><b>새는 곳 ③</b> — wire에 백엔드를 고르는 칸이 없다. 지금은 claude 고정이라 셸조차 못 고른다.</li>
+    </ul>
+  </section>
+
+  <!-- 3 -->
+  <section class="slide" data-n="03">
+    <div class="kicker">실측</div>
+    <h2>codex는 얼굴이 둘이다</h2>
+    <div class="two">
+      <div class="col">
+        <h3>대화형 화면</h3>
+        <div class="tagline">codex --cd &lt;폴더&gt;</div>
+        <p>사람이 보는 진짜 codex 화면. <b>PTY가 없으면 아예 안 뜬다.</b> 번역기가 필요 없다 — 바이트를 그대로 흘린다.</p>
+        <p>대신 <b>세션 id를 알 길이 없다</b> → 복원 불가.</p>
+      </div>
+      <div class="col">
+        <h3>상주 JSON 서버</h3>
+        <div class="tagline">codex app-server</div>
+        <p>claude의 JSON 모드에 대응하는 물건. 대화를 만들면 <b>id를 그 자리에서 돌려준다.</b> 복원·중단·중간 개입까지 있다.</p>
+        <p>대신 <b>실험 딱지</b>가 붙어 있고 버전마다 흔들린다.</p>
+      </div>
+    </div>
+    <div class="warnbox">
+      <b>claude와 다른 점:</b> claude는 한 프로세스가 두 모드를 다 한다. codex는 <b>얼굴마다 다른 프로세스</b>이고 능력도 다르다.
+    </div>
+  </section>
+
+  <!-- 4 -->
+  <section class="slide" data-n="04">
+    <div class="kicker">핵심 규율</div>
+    <h2>번역은 백엔드 안에서 끝낸다</h2>
+    <div class="flow">
+      <div class="flowrow">
+        <div class="who">codex<span>원본</span></div>
+        <div class="chain">
+          <span class="box raw">CodexTalk</span>
+          <span class="arw">→</span>
+          <span class="box mid">codex 번역기</span>
+          <span class="arw">→</span>
+          <span class="box out">글</span>
+        </div>
+      </div>
+      <div class="flowrow">
+        <div class="who">claude<span>원본</span></div>
+        <div class="chain">
+          <span class="box raw">Talk</span>
+          <span class="arw">→</span>
+          <span class="box mid">claude 번역기</span>
+          <span class="arw">→</span>
+          <span class="box out">글</span>
+        </div>
+      </div>
+      <div class="flowrow">
+        <div class="who">화면<span>React</span></div>
+        <div class="chain">
+          <span class="box out">글</span>
+          <span class="arw">·</span>
+          <span class="box out">도구 호출</span>
+          <span class="arw">·</span>
+          <span class="box out">도구 결과</span>
+          <span class="arw">·</span>
+          <span class="box raw">미해석</span>
+        </div>
+      </div>
+    </div>
+    <p class="lede">
+      화면은 <strong>“codex”라는 낱말을 평생 못 본다.</strong> 도착할 때는 이미 한 종류다.
+      백엔드가 열 개로 늘어도 화면 코드는 안 늘어난다.
+    </p>
+    <div class="rule">타입으로 가른다. 백엔드로 가르지 않는다.<br>타입 이름에 백엔드 이름이 들어가면 그건 위장한 백엔드 분기다.</div>
+  </section>
+
+  <!-- 5 -->
+  <section class="slide" data-n="05">
+    <div class="kicker">전체 흐름</div>
+    <h2>CLI 한 줄이 화면에 닿기까지</h2>
+
+    <div class="pipeline">
+
+      <div class="band">
+        <div class="bandhead">데몬 프로세스 <em>— 에이전트를 소유한다</em></div>
+        <div class="hop"><span class="stage">CLI</span><span class="carry">claude · codex가 뱉은 <b>원본 바이트</b></span></div>
+        <div class="hop"><span class="stage">전송</span><span class="carry">PTY(터미널 모드) 또는 파이프(JSON 모드) — <b>내용을 모른다</b></span></div>
+        <div class="hop"><span class="stage">★번역기</span><span class="carry"><b>백엔드마다 하나.</b> 여기서 원본이 고정 칸으로 바뀐다. 터미널 모드엔 아예 없다(바이트 직통)</span></div>
+        <div class="hop"><span class="stage">코어</span><span class="carry">번호를 매겨 <b>메모리 링 버퍼</b>에 쌓고 구독자에게 뿌린다. <b>내용을 안 본다</b></span></div>
+        <div class="hop"><span class="stage">wire 변환</span><span class="carry">칸을 1:1로 옮긴다 — 해석 없음</span></div>
+      </div>
+
+      <div class="bandsep">↓ 소켓 ↓</div>
+
+      <div class="band">
+        <div class="bandhead">셸 프로세스 <em>— 창을 소유한다</em></div>
+        <div class="hop"><span class="stage">데몬 클라이언트</span><span class="carry">받아서 창으로 넘긴다. <b>내용을 안 본다</b></span></div>
+      </div>
+
+      <div class="bandsep">↓ 창 내부 통로 ↓</div>
+
+      <div class="band">
+        <div class="bandhead">웹뷰 <em>— React</em></div>
+        <div class="hop"><span class="stage">수신</span><span class="carry">번호로 <b>중복 제거</b>. 여기까지 내용은 아직 안 본다</span></div>
+        <div class="hop"><span class="stage">누적기</span><span class="carry">칸을 <b>화면 낱말</b>로 접는다 — <span class="tag">글</span> <span class="tag">도구</span> <span class="tag">사용량</span> <span class="tag">오류</span> <span class="tag">미해석</span> <span class="tag">구분선</span></span></div>
+        <div class="hop"><span class="stage">렌더러</span><span class="carry"><b>rich</b> = 챗 상자들 · <b>terminal</b> = xterm. 고르는 건 capability 한 칸</span></div>
+      </div>
+
+    </div>
+
+    <div class="rule">번역기 아래로는 아무도 백엔드를 모른다.<br>그래서 새 백엔드는 <b>번역기 하나</b>만 늘면 흡수된다.</div>
+  </section>
+
+  <!-- 6 -->
+  <section class="slide" data-n="06">
+    <div class="kicker">꾸밈</div>
+    <h2>예쁜 상자마다 고정 칸이 하나씩</h2>
+    <ul class="points">
+      <li><b>안 꾸민 것은 이미 백엔드 무관하게 돈다.</b> 고정 칸이 있어서다.</li>
+      <li><b>꾸민 것이 claude에 묶여 있다.</b> 도구 결과 상자·생각 블록 접기. 칸 없이 원본에서 바로 읽는다.</li>
+      <li><b>지금 codex를 붙이면 그 꾸밈만 안 걸린다.</b> 안 죽고 내용도 다 보인다 — JSON 덩어리로 떨어질 뿐이다.</li>
+      <li><b>새 타입의 통과 시험 =</b> 양쪽 번역기가 다 낼 수 있나. 한쪽만 내면 중립 타입이 아니다.</li>
+    </ul>
+    <div class="rule">꾸밈이 죄가 아니다. <b>칸 없이 꾸민 것</b>이 죄다.</div>
+  </section>
+
+  <!-- 6 -->
+  <section class="slide" data-n="07">
+    <div class="kicker">저장</div>
+    <h2>우리는 대화를 저장하지 않는다</h2>
+    <ul class="points">
+      <li><b>우리 것 = 메모리 링 버퍼 하나.</b> 화면 다시 붙었을 때 되뿌리는 용도. 앱 끄면 없어진다. 여기 들어가는 건 <b>번역본</b>이다.</li>
+      <li><b>원본 = CLI가 자기 폴더에 남긴다.</b> claude도 codex도 각자. 우리가 안 건드린다.</li>
+      <li><b>번역 못 한 것은 원본 JSON 그대로</b> 미해석 칸에 실려 온다.</li>
+    </ul>
+    <div class="shape"><b>링 버퍼에 실제로 쌓이는 것</b> — 번호 + 이벤트 + 크기(퇴출 예산용)
+
+  글        { 텍스트, 턴id?, 메시지id? }
+  도구 호출  { 이름, <b>인자는 원본 그대로</b>, 호출id?, 턴id?, 메시지id? }
+  사용량     { 입력토큰, 출력토큰, 턴id? }
+  턴 종료    { 턴id?, 메시지id? }
+  오류       { 문구 }
+  미해석     { 종류 태그, <b>원본 JSON 통째로</b> }
+  터미널     { 원본 바이트 }          ← 터미널 모드는 이것뿐이다</div>
+    <p class="lede">
+      버퍼는 <strong>건수와 바이트 양쪽으로 상한</strong>이 걸려 있다 — 큰 도구 인자나 미해석 덩어리가
+      상한을 우회하지 못하게 크기를 근사해 예산에 넣는다.
+    </p>
+    <div class="warnbox">
+      화면이 보는 건 번역본뿐이다 → <b>번역에서 떨어뜨린 정보는 화면에서 영영 안 보인다.</b>
+      그래서 애매하면 버리지 말고 미해석으로 통과시킨다.
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section class="slide" data-n="08">
+    <div class="kicker">프로세스 모델 · 확정</div>
+    <h2>대화마다 프로세스 하나</h2>
+    <div class="two">
+      <div class="col pick">
+        <span class="badge">채택</span>
+        <h3>대화마다 하나</h3>
+        <p>가장 성숙한 독립 피어 둘이 이 형태다 — 그중 하나는 28k 스타에 우리와 같은 Rust 스택.</p>
+        <p><b>지금 우리 구조가 그대로 산다.</b></p>
+      </div>
+      <div class="col">
+        <h3>작업공간마다 하나</h3>
+        <p>OpenAI 자기 플러그인이 이 형태. 우리는 에이전트가 대개 자기 폴더에서 돌아 <b>실제로는 거의 같은 그림</b>이 된다.</p>
+      </div>
+      <div class="col">
+        <h3>전역 하나</h3>
+        <p>codex 문서가 의도한 모양. 하지만 메모리가 부풀어 강제 종료된 보고가 여럿이고, 그러면 <b>안의 대화가 전부 같이 죽는다.</b></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section class="slide" data-n="09">
+    <div class="kicker">계획</div>
+    <h2>세 단계로 나눈다</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="n">1단계</span>
+        <span class="what"><b>대화형 화면으로 띄우기.</b> 번역기 0줄. 스폰·명부·wire 칸·화면 붙기만 증명한다. 어느 얼굴로 가든 이 넷은 똑같이 필요하다.</span>
+      </div>
+      <div class="step">
+        <span class="n">2단계</span>
+        <span class="what"><b>상주 서버 + 번역기.</b> 여기서 세션 복원·우편·구조화 화면이 함께 열린다. 고정 칸을 몇 개 늘릴지가 실제 작업이다.</span>
+      </div>
+      <div class="step">
+        <span class="n">3단계</span>
+        <span class="what"><b>프론트에 샌 해석 회수.</b> claude 쪽 정리라 codex와 독립이다. 끝나면 두 백엔드를 같은 코드가 그린다.</span>
+      </div>
+      <div class="step">
+        <span class="n">상시</span>
+        <span class="what"><b>백엔드 계약 테스트 자리.</b> <code>cargo test</code>로 도는 한 자리를 열어 두고 백엔드가 늘 때마다 줄을 더한다. CLI 버전이 올라갈 때 우리 가정이 깨졌는지 여기서 잡는다.</span>
+      </div>
+    </div>
+    <div class="warnbox">
+      1단계의 대부분은 <b>저쪽 transport 작업과 파일이 하나도 안 겹친다.</b> 접합부(wire 칸·데몬 스폰·프론트 스폰)만 겹친다.
+    </div>
+  </section>
+
+  <!-- 9 -->
+  <section class="slide" data-n="10">
+    <div class="kicker">주의</div>
+    <h2>아무것도 안 하면 이렇게 된다</h2>
+    <ul class="points">
+      <li><b>우편이 켜진다.</b> 기본값이 “받는다”이고, 턴 신호를 선언 안 하면 막지 않고 <b>항상 즉시 꽂는다</b> — 생각 중인 codex에 우편이 들어간다. 그래서 1단계는 끄고 간다.</li>
+      <li><b>디스크 하위호환이 진짜 일이다.</b> 종류 칸이 늘면 구버전이 프로필 파일 <b>전체</b>를 못 읽고 명부가 빈다.</li>
+      <li><b>옛 데몬이 codex 지정을 조용히 무시한다.</b> 버전을 안 올리기로 했으므로 모르는 칸은 버려지고 <b>claude가 대신 뜬다.</b></li>
+    </ul>
+  </section>
+
+  <!-- 10 -->
+  <section class="slide" data-n="11">
+    <div class="kicker">검증 상태</div>
+    <h2>안 해 본 것</h2>
+    <ul class="points">
+      <li><b>codex를 대화형으로 띄워 보지 않았다.</b> 엔터가 진짜 제출인지, 전체화면 모드가 우리 화면에서 어떻게 도는지 미상.</li>
+      <li><b>상주 서버는 손잡이까지만 확인했다.</b> 대화를 만들어 id를 받는 데까지는 실행했지만 <b>실제 턴은 안 돌렸다.</b></li>
+      <li><b>프로세스 N개의 메모리 값은 안 쟀다.</b> 공개 자료에도 baseline이 없다 — 선례를 따르기로 해서 생략했다.</li>
+    </ul>
+    <footer>
+      <div><b>근거:</b> codex-cli 0.151.0 실측(이 PC) · 저장소 코드·ADR 정적 판독 · 피어 3갈래 병렬 조사 + 외부 모델 적대 리뷰 1회</div>
+      <div><b>이어지는 것:</b> 2026-06-22 조사가 “벤더가 다중 세션을 노출하면 다시 본다”로 남겨 둔 미결 항목 — 오늘 그 조건이 충족됐다</div>
+    </footer>
+  </section>
+
+</div>
