@@ -1481,6 +1481,11 @@ mod tests {
                 // ★`Shell` 이 `None` 인 것은 빈칸이 아니라 결정이다★ — 이 입구로는 만들 수 없다
                 //   (프로필 생성 경로가 그것으로 도는지 확인된 바 없다 — `AgentBackend` 선언).
                 AgentCommand::Shell { .. } => None,
+                // ★`Codex` 도 결정이다(사용자 결정 2026-09-07)★ — codex 는 처음 보는 폴더에서 신뢰 확인
+                //   모달을 띄우고 **LLM 은 그 모달을 못 지난다**(키를 넣어도 안 먹는다 — 실측). 여기를
+                //   열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 그 모달 처리가
+                //   정해질 때 함께 연다.
+                AgentCommand::Codex { .. } => None,
             }
         }
         let backends = advertised("backend");

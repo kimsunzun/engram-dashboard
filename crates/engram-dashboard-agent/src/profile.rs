@@ -55,6 +55,17 @@ pub enum AgentCommand {
         program: String,
         args: Vec<String>,
     },
+    /// codex CLI(대화형 TUI). `extra_args` 는 대화형 인자(`--cd`·`-s`·`-a` — 조립은 `backend/codex/`)를
+    /// 제외한 사용자 추가 인자.
+    ///
+    /// ★칸이 이것 하나뿐인 것은 결정이다(사용자 결정 2026-09-07)★: 이 enum 은 `#[serde(tag = "kind")]`
+    /// 라 여기 적은 모양이 그대로 `agents.json` 에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록
+    /// 싸다**. 샌드박스·승인 모드 같은 값은 아직 `--help` 텍스트 등급이라(TRD §2) 지금 타입으로 굳히면
+    /// 그 등급인 채로 굳는다. 칸을 더할 땐 `#[serde(default)]` 를 달면 옛 프로필이 그대로 흡수된다
+    /// (형제 `output_format` 이 그 선례).
+    Codex {
+        extra_args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

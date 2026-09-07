@@ -53,7 +53,10 @@ use crate::ui_settings::UiSettingsRefresh;
 //   버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) · `ui.refresh`(프론트에 대응 명령이
 //   없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만 만지던 화면 명령 둘은 ADR-0167 이
 //   내렸다).
-// ★세대 4 = `ui.refresh` 의 답에 `source` 가 붙은 세대★(세대 3 = `ui.refresh` 자체 · 세대 2 =
+// ★세대 5 = `agent.spawnInto` 의 `backend` 가 실제로 고를 수 있게 된 세대★ — 인자의 **타입은 그대로**고
+//   (`Option<String>`) 바뀐 것은 그 칸이 받는 어휘와 그것을 광고하는 summary 다. 그 둘이 곧 선언이라 올린다:
+//   안 올리면 「값을 적으면 거부된다」고 광고하는 셸과 codex 를 띄우는 셸이 같은 세대를 보고한다.
+//   (세대 4 = `ui.refresh` 의 답에 `source` 가 붙은 세대 · 세대 3 = `ui.refresh` 자체 · 세대 2 =
 //   `slot.popout`). ★이름이 늘 때만 올리는 번호가 아니다★ — **선언이 바뀌면** 올린다(답 모양도 선언이다).
 //   매크로 계약 = `declare_commands!` 의 `CATALOG_VERSION` 항목. 안 올리면 어휘가 다른 두 셸이 같은 세대를
 //   보고해 진단이 거짓말을 한다.
@@ -61,7 +64,7 @@ use crate::ui_settings::UiSettingsRefresh;
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 4;
+    catalog_version: 5;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -237,7 +240,8 @@ declare_commands! {
 
     /// 에이전트를 새로 띄우고 그 자리에 배치한다(스폰 + 필요하면 새 탭 + 슬롯 배정).
     /// view_id 를 빼면 새 탭을 만들어 거기 넣는다 — 그 경우 slot_id 는 줄 수 없다.
-    /// backend 는 아직 고를 수 없다(값을 적으면 스폰 전에 거부된다 — 데몬 wire 가 기본 백엔드만 띄운다).
+    /// backend 는 `"claude"` 또는 `"codex"`. 모르는 낱말은 스폰 전에 거부되고, 빼면 데몬이 거절한다
+    /// (기본 백엔드는 없다).
     #[effect(Write)]
     #[since(1)]
     "agent.spawnInto" => args AgentSpawnIntoArgs {

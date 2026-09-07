@@ -178,6 +178,28 @@ pub enum AgentSpawnCommand {
         program: String,
         args: Vec<String>,
     },
+    /// extra_args 는 대화형 인자(`--cd`·`-s`·`-a`)를 제외한 사용자 추가 인자 — 그 조립은 코어의
+    /// codex backend 가 하고 이 wire 는 그 목록만 나른다.
+    Codex {
+        extra_args: Vec<String>,
+    },
+}
+
+/// 스폰 패킷이 **어느 백엔드를 띄울지** 고르는 칸. `AgentSpawnCommand` 가 「무엇을 어떤 인자로」라면
+/// 이것은 「어느 프로그램인가」 하나만 고르는 좁은 어휘다 — 인자를 아직 못 정하는 입구(`SpawnByCwd`)가
+/// 쓴다.
+///
+/// ★부재의 뜻 = 오류다(사용자 결정 2026-09-07)★: 이 칸을 안 채운 패킷은 데몬이 거절한다. 기본값을 두면
+/// 새 스폰 입구가 생길 때마다 **고르지 않은 것**과 **claude 를 고른 것**이 구별되지 않고, 그 조용한
+/// 기본값이 곧 「요청한 것과 다른 에이전트가 떴다」가 된다.
+/// ★철자가 lowercase 인 이유★: 이 값은 invoke 표면(`spawn_into` 의 `backend` 인자)에서 오는 문자열과
+/// 같은 낱말이어야 하고 그 자리는 이미 `"claude"` 로 적혀 있었다(형제 `EnvelopeFormat` 과 같은 사유).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(export)]
+pub enum AgentBackendKind {
+    Claude,
+    Codex,
 }
 
 /// **예약(reserved) — 죽은 필드 아님.** 동작 미구현이나 ADR-0016 "추후 재검토" 유효(2026-06-18 결정).

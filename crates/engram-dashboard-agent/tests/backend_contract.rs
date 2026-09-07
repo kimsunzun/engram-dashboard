@@ -196,21 +196,15 @@ fn backend_table() -> Vec<BackendRow> {
         BackendRow {
             name: "codex",
             backend: &CODEX_BACKEND,
-            // `AgentCommand` 에 Codex variant 가 아직 없다(Phase 1 이 만든다). `CodexBackend` 의 선언
-            // 메서드는 command 를 보지 않으므로 이 표본은 자리채움이고, variant 가 생기면 **이 한 줄만**
-            // 바뀐다.
-            sample: AgentCommand::Claude {
-                extra_args: vec![],
-                output_format: ClaudeOutputFormat::Terminal,
-            },
+            sample: AgentCommand::Codex { extra_args: vec![] },
             declared: Declared {
-                // ★현재 stub 이 신고하는 값을 그대로 적는다 — 실측이 맞다고 도장 찍은 값이 아니다★:
-                //   TRD §4-2 는 `needs_session` 을 false 로 뒤집으라 한다(호출자가 sid 를 못 정한다).
-                //   Phase 1 이 `backend/codex/` 를 고치면 이 항목이 빨개져 표 갱신을 강제한다 — 그것이 이 열의 일.
-                needs_session: true,
+                // ★실측이 도장 찍은 값이다★ — 호출자가 세션 id 를 정할 수 없고(`session_id_flag: None`
+                //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
+                //   정본은 `backend/codex/`.
+                needs_session: false,
                 supports_control_channel: false,
                 accepts_mcp_config: false,
-                reads_messages: true,
+                reads_messages: false,
                 session_resume: false,
                 session_snapshot: false,
                 session_cwd_env: true,

@@ -102,7 +102,7 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     clientMock.spawnAgent.mockResolvedValueOnce({ id: 'brand-new' })
     await run('slot.createAgentHere', CTX)
     expect(dialogMock.open).toHaveBeenCalledWith(expect.objectContaining({ directory: true, multiple: false }))
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/picked')
+    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/picked', 'claude')
     expect(vs.assignAgent).toHaveBeenCalledWith('v1', 's1', 'brand-new')
   })
   it('slot.createAgentHere: 다이얼로그 취소(null) → spawn/assign 없음(no-op)', async () => {

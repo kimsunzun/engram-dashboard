@@ -1,12 +1,12 @@
-//! CodexBackend — Codex CLI 전용 CommandSpec 산출 stub.
+//! CodexBackend — codex CLI 전용 CommandSpec 산출.
 //!
 //! ★이 폴더가 세우는 규칙 = codex 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
 //! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
 //! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
 //!
-//! AgentCommand에 Codex variant가 없으므로 backend_for dispatch에서 이 backend로 라우팅되지
-//! 않는다. 이 파일은 구조 확보 목적의 stub이며, AgentCommand::Codex variant 추가와
-//! backend_for 매칭은 CLI spike 완료 후 별도 작업에서 확정한다.
+//! ★여기 적힌 codex 사실은 전부 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-07)★. 그 실측을
+//! 다시 재는 자리는 `tests/backend_contract.rs` 이고, 이 파일의 선언이 그 표와 어긋나면 그 시험대가
+//! 빨개진다.
 //!
 //! tauri import 0.
 
@@ -14,94 +14,110 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::backend::AgentBackend;
+use crate::backend::{console_command, AgentBackend};
 use crate::profile::{AgentCommand, SpawnMode};
 use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
-/// Codex 실행 파일명. PATH로 해석된다.
+/// PATH 로 해석되는 이름 그대로 띄운다(사용자 결정 2026-09-07 · TRD §6-H).
 ///
-/// ※ best-guess: Codex CLI의 실제 바이너리명이 "codex"인지 확인 필요.
-/// CLI spike에서 `which codex` / `codex --help` 로 확정할 것.
+/// ★실 바이너리를 찾아 직접 띄우지 않는 이유★: Windows 에서 PATH 의 `codex` 는
+/// `codex.cmd → node → codex.exe` 사슬이고 그 끝의 실 바이너리는 **버전이 박힌 `node_modules` 벤더
+/// 경로** 아래 있다(실측). codex 는 스스로 자동 업데이트하므로 그 경로는 우리가 모르는 시점에 바뀐다 —
+/// 하드코딩하면 업데이트 한 번에 죽고, 탐색·폴백을 짜면 그 사슬을 우리가 재구현하게 된다.
+/// ★한 겹 더 깊은 shim 이 kill 인과를 바꾸지 않는다★: Job Object 가 트리를 통째로 끝내므로
+/// (ADR-0001 의 2 동사) 손자·증손자까지 함께 내려간다(실측).
 const CODEX_PROGRAM: &str = "codex";
+
+/// codex 가 작업 폴더를 받는 플래그. ★프로세스 cwd 와 별개다★ — `CommandSpec.cwd` 는 우리가 프로세스를
+/// 어디서 띄우나이고, 이 값은 codex 가 **어느 폴더를 워크스페이스로 신뢰·편집하나**다. 둘을 같은 값으로
+/// 주지만 같은 칸이 아니다.
+const CD_FLAG: &str = "--cd";
+
+/// 샌드박스 모드 — 모델이 내는 명령을 **작업 폴더 안에서는 쓰기까지** 허용한다.
+const SANDBOX_FLAG: &str = "-s";
+const SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
+
+/// 승인 모드 — 샌드박스 밖으로 나가는 동작만 사람에게 묻는다.
+const APPROVAL_FLAG: &str = "-a";
+const APPROVAL_ON_REQUEST: &str = "on-request";
 
 pub struct CodexBackend;
 
 impl AgentBackend for CodexBackend {
+    /// ★호출자가 세션 id 를 정할 수 없다(실측)★ — codex 에는 `--session-id` 류 플래그가 없고 id 는
+    /// codex 가 스스로 발급한다. true 로 두면 manager 가 우리 uuid 를 발급해 추적기를 붙이는데, 그 값은
+    /// codex 가 쓰지 않으므로 영영 나타나지 않을 파일을 폴링하게 된다.
     fn needs_session(&self) -> bool {
-        // best-guess: Codex도 세션 개념이 있다고 가정해 true.
-        // CLI spike에서 실측 후 확정. 세션 없는 CLI라면 false로 변경.
-        true
+        false
     }
 
     fn supports_control_channel(&self) -> bool {
-        // 보수적 stub(ADR-0086 F3) — Codex 의 MCP 지원 여부는 CLI spike 전이라 미상이다. capabilities
-        //   stub 가 전부 false 인 것과 같은 정신으로 false(미측정 backend 는 제어 채널을 소비한다고
-        //   주장하지 않는다). spike 후 실측값으로 교체.
         false
     }
 
+    /// ★"codex 가 MCP 를 못 쓴다" 가 아니다★ — 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수
+    /// 있나**이고 그 답이 아니오다. codex 의 MCP 주입은 전역 TOML 오버라이드
+    /// (`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 **기제가 다르다**(실측).
+    /// 그 다른 기제를 배선하는 것은 이 단계의 범위가 아니다.
+    // ADR-0099
     fn accepts_mcp_config(&self) -> bool {
-        // 보수적 stub(ADR-0099) — 미측정 backend 는 MCP-capable 을 주장하지 않는다 → false(비-MCP 스폰:
-        //   mcp-config 미기록 + CLI-only 프라이밍 + [Cli] grant). Codex 의 실제 MCP config 지원은 CLI
-        //   spike 후 실측값으로 교체(ADR-0004 backend 지식).
-        // ADR-0099
         false
     }
 
+    /// ★분류 사유가 shell 과 다르다★ — shell 이 false 인 것은 입력이 **명령으로 실행되기** 때문이고,
+    /// codex 가 false 인 것은 **바쁜 때를 못 가리기** 때문이다. 이 backend 는 턴 신호를 하나도 선언하지
+    /// 않는데(터미널 모드엔 구조화 이벤트가 없다) 바쁨 게이트가 fail-open 이라, 선언 없는 백엔드는 늘
+    /// 한가한 것으로 읽혀 **생각하는 도중에 편지가 꽂힌다**. 그래서 수신자 명단에서 아예 뺀다.
+    /// ★여는 조건도 다르다★: 턴을 관측할 수 있게 되면(상주 JSON 서버) 이 값이 열린다 — shell 쪽 사유는
+    /// 그때도 그대로 남으므로 둘을 같이 열지 말 것.
+    fn reads_messages(&self) -> bool {
+        false
+    }
+
+    /// ★세션 인자를 조립하지 않는다★ — `--session-id` 는 존재하지 않고, 재개는 플래그가 아니라 하위
+    /// 명령 + 위치 인자(`codex resume <id>`)라 이 자리의 문법이 아니다(실측). `session_id` 는
+    /// `needs_session()` 이 false 라 항상 `None` 이지만, 계약상 받는 값이므로 무시한다는 것을 적어 둔다.
+    // ADR-0004
     fn build_spec(
         &self,
         command: &AgentCommand,
-        mode: SpawnMode,
-        session_id: Option<Uuid>,
+        _mode: SpawnMode,
+        _session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
-        // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
-        // TODO(ADR-0094): translate ControlEndpoint.grants to codex permission flags
-        //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e}:*)+PowerShell({e}:*); codex 방언은 CLI spike 후 확정).
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
-        let mut args: Vec<String> = Vec::new();
-
-        if let Some(sid) = session_id {
-            // codex CLI의 세션 재개 플래그가 --session / --resume / --continue 등인지 미확인.
-            let flag = match mode {
-                SpawnMode::Fresh => "--session",
-                SpawnMode::Resume => "--resume",
-            };
-            args.push(flag.to_string());
-            args.push(sid.to_string());
-        }
-
         match command {
-            AgentCommand::Claude { extra_args, .. } => {
+            AgentCommand::Codex { extra_args } => {
+                let mut args = Vec::with_capacity(6 + extra_args.len());
+                args.push(CD_FLAG.to_string());
+                args.push(cwd.to_string_lossy().into_owned());
+                args.push(SANDBOX_FLAG.to_string());
+                args.push(SANDBOX_WORKSPACE_WRITE.to_string());
+                args.push(APPROVAL_FLAG.to_string());
+                args.push(APPROVAL_ON_REQUEST.to_string());
+                // 우리 인자를 먼저 소진하고 호출자 패스스루를 뒤에 잇는다 — 위 셋은 전부 값 하나짜리라
+                //   뒤 인자를 흡수하지 않는다(claude 의 variadic `--allowedTools` 와 다른 점).
                 args.extend(extra_args.iter().cloned());
-            }
-            AgentCommand::Shell {
-                program,
-                args: shell_args,
-            } => {
-                return CommandSpec {
-                    program: CODEX_PROGRAM.to_string(),
-                    args: {
-                        let _ = program;
-                        shell_args.clone()
-                    },
+                // ADR-0004
+                let (program, args) = console_command(CODEX_PROGRAM, args);
+                CommandSpec {
+                    program,
+                    args,
                     env,
                     cwd,
-                };
+                }
             }
-        }
-
-        CommandSpec {
-            program: CODEX_PROGRAM.to_string(),
-            args,
-            env,
-            cwd,
+            AgentCommand::Claude { .. } | AgentCommand::Shell { .. } => {
+                unreachable!("CodexBackend 는 Codex variant 만 처리한다. dispatch 버그.")
+            }
         }
     }
 
-    /// 보수적 stub — CLI spike 전이라 실제 resume/model 능력 미상 → 전부 false.
-    /// spike 후 실측값으로 교체.
+    /// `session.resume = false` 인 이유는 "아직 안 재 봤다" 가 아니라 **호출자가 sid 를 못 정하므로
+    /// 무손실 복원이 성립하지 않는다**는 것이다(실측 — `needs_session` 참조).
+    /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
+    /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
     fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {
@@ -122,45 +138,105 @@ impl AgentBackend for CodexBackend {
 mod tests {
     use super::*;
 
-    fn spec(mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
+    fn codex(extra_args: Vec<&str>) -> AgentCommand {
+        AgentCommand::Codex {
+            extra_args: extra_args.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn spec(command: &AgentCommand, cwd: &str) -> CommandSpec {
         CodexBackend.build_spec(
-            &AgentCommand::Claude {
-                extra_args: vec![],
-                output_format: crate::profile::ClaudeOutputFormat::Terminal,
-            },
-            mode,
-            sid,
-            PathBuf::from("."),
+            command,
+            SpawnMode::Fresh,
+            None,
+            PathBuf::from(cwd),
             vec![],
             None,
         )
     }
 
-    #[test]
-    fn codex_program_name_is_correct() {
-        let s = spec(SpawnMode::Fresh, None);
-        assert_eq!(s.program, CODEX_PROGRAM);
-        assert_eq!(s.program, "codex");
+    /// `console_command` 래핑을 걷어 낸 codex 자신의 argv. Windows 는 `cmd.exe /c codex …` 로 한 겹
+    /// 감싸이므로(shim 해석) 두 플랫폼의 단언을 하나로 쓰려면 그 겹을 여기서 벗긴다.
+    fn codex_argv(spec: &CommandSpec) -> Vec<String> {
+        #[cfg(windows)]
+        {
+            assert_eq!(spec.program, "cmd.exe");
+            assert_eq!(spec.args[0], "/c");
+            assert_eq!(spec.args[1], CODEX_PROGRAM);
+            spec.args[2..].to_vec()
+        }
+        #[cfg(not(windows))]
+        {
+            assert_eq!(spec.program, CODEX_PROGRAM);
+            spec.args.clone()
+        }
     }
 
     #[test]
-    fn codex_fresh_uses_session_flag_best_guess() {
+    fn interactive_args_are_the_measured_ones() {
+        let s = spec(&codex(vec![]), "C:/workspace");
+        assert_eq!(
+            codex_argv(&s),
+            vec![
+                "--cd",
+                "C:/workspace",
+                "-s",
+                "workspace-write",
+                "-a",
+                "on-request"
+            ]
+        );
+    }
+
+    #[test]
+    fn extra_args_come_last() {
+        let s = spec(&codex(vec!["-m", "gpt-5"]), "C:/workspace");
+        let argv = codex_argv(&s);
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            &["-m".to_string(), "gpt-5".to_string()]
+        );
+    }
+
+    /// ★세션 인자가 조립되면 안 된다★ — 존재하지 않는 문법이라 붙는 순간 codex 가 기동에 실패한다.
+    #[test]
+    fn session_id_never_reaches_the_command_line() {
         let sid = Uuid::new_v4();
-        let s = spec(SpawnMode::Fresh, Some(sid));
-        assert_eq!(s.program, CODEX_PROGRAM);
-        assert_eq!(s.args, vec!["--session".to_string(), sid.to_string()]);
+        let s = CodexBackend.build_spec(
+            &codex(vec![]),
+            SpawnMode::Resume,
+            Some(sid),
+            PathBuf::from("."),
+            vec![],
+            None,
+        );
+        assert!(
+            !s.args.iter().any(|a| a.contains(&sid.to_string())),
+            "sid 가 argv 에 실렸다: {:?}",
+            s.args
+        );
+        assert!(
+            !s.args
+                .iter()
+                .any(|a| a == "--session-id" || a == "--resume" || a == "--session"),
+            "존재하지 않는 세션 플래그가 실렸다: {:?}",
+            s.args
+        );
     }
 
     #[test]
-    fn codex_resume_uses_resume_flag_best_guess() {
-        let sid = Uuid::new_v4();
-        let s = spec(SpawnMode::Resume, Some(sid));
-        assert_eq!(s.args, vec!["--resume".to_string(), sid.to_string()]);
+    fn needs_session_is_false() {
+        assert!(!CodexBackend.needs_session());
     }
 
     #[test]
-    fn needs_session_is_true() {
-        assert!(CodexBackend.needs_session());
+    fn reads_messages_is_false() {
+        assert!(!CodexBackend.reads_messages());
+    }
+
+    #[test]
+    fn capabilities_resume_is_false() {
+        assert!(!CodexBackend.capabilities(&codex(vec![])).session.resume);
     }
 
     #[test]
@@ -168,10 +244,7 @@ mod tests {
         let cwd = PathBuf::from("C:/workspace");
         let env = vec![("BAR".to_string(), "baz".to_string())];
         let s = CodexBackend.build_spec(
-            &AgentCommand::Claude {
-                extra_args: vec![],
-                output_format: crate::profile::ClaudeOutputFormat::Terminal,
-            },
+            &codex(vec![]),
             SpawnMode::Fresh,
             None,
             cwd.clone(),

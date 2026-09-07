@@ -23,7 +23,7 @@ cwd: string,
 /**
  * ※자격증명 금지(평문 persist).
  */
-env: Array<[string, string]>, claude_session_id: string | null, old_session_ids: string[], epoch: number, auto_restore: boolean, restart_policy: RestartPolicy, 
+env: Array<[string, string]>, backend_session_id: string | null, old_session_ids: string[], epoch: number, auto_restore: boolean, restart_policy: RestartPolicy, 
 /**
  * 크래시 가드 카운터(수동 재시작 시 0 리셋). **예약(reserved)** — 동작 미구현, ADR-0016 유효.
  */

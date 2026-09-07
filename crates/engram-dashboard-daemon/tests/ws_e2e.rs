@@ -22,8 +22,8 @@ use engram_dashboard_daemon::{
 };
 use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{
-    decode_frame, AgentCommand as WireCommand, AgentEvent, ClaudeOutputFormat as WireOutputFormat,
-    RequestId, SubscribeAction, PROTOCOL_VERSION,
+    decode_frame, AgentBackendKind as WireBackendKind, AgentCommand as WireCommand, AgentEvent,
+    ClaudeOutputFormat as WireOutputFormat, RequestId, SubscribeAction, PROTOCOL_VERSION,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -1842,6 +1842,7 @@ async fn case35_ws_create_profile() {
         env: vec![],
         auto_restore: true,
         output_format: WireOutputFormat::Terminal,
+        backend: Some(WireBackendKind::Claude),
         request_id: req,
     })
     .await;
@@ -1869,6 +1870,7 @@ async fn case35_ws_create_profile() {
         env: vec![],
         auto_restore: false,
         output_format: WireOutputFormat::StreamJson,
+        backend: Some(WireBackendKind::Claude),
         request_id: req_json,
     })
     .await;
@@ -2018,6 +2020,7 @@ async fn case40_ws_spawn_by_cwd() {
     let req = RequestId::new();
     c.send(&WireCommand::SpawnByCwd {
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+        backend: Some(WireBackendKind::Claude),
         request_id: req,
     })
     .await;

@@ -36,6 +36,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
+use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
 use engram_dashboard_lib::commands::popout::PopupCounter;
@@ -201,6 +202,8 @@ struct Spawner {
     reply: Result<String, String>,
     calls: AtomicUsize,
     cwds: Mutex<Vec<String>>,
+    /// ★고른 백엔드가 포트까지 갔나★ — 스폰 호출 횟수만으로는 그 값이 흘렀는지 안 흘렀는지 못 가른다.
+    backends: Mutex<Vec<Option<AgentBackendKind>>>,
 }
 
 impl Spawner {
@@ -218,6 +221,7 @@ impl Spawner {
             reply,
             calls: AtomicUsize::new(0),
             cwds: Mutex::new(Vec::new()),
+            backends: Mutex::new(Vec::new()),
         }
     }
 
@@ -230,6 +234,7 @@ impl AgentSpawner for Spawner {
     fn spawn_by_cwd<'a>(
         &'a self,
         cwd: String,
+        backend: Option<AgentBackendKind>,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
             // 락 안에서 await 하면 명령 future 가 Send 를 잃어 컴파일도 안 되지만, 그 벽이 서 있는지를
@@ -237,6 +242,7 @@ impl AgentSpawner for Spawner {
             self.probe.assert_outside("AgentSpawner::spawn_by_cwd");
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.cwds.lock().unwrap().push(cwd);
+            self.backends.lock().unwrap().push(backend);
             self.reply.clone()
         })
     }
@@ -1019,8 +1025,10 @@ async fn spawn_into_creates_tab_and_places_agent() {
     assert_eq!(w.layout_events(), 1);
 }
 
+/// ★모르는 낱말만 막는다★ — 오탈자가 통과하면 그 왕복은 데몬에서 죽거나(새 데몬) 조용히 다른 백엔드를
+/// 띄운다(칸을 모르는 옛 데몬). 거절 문구는 어휘를 손으로 적지 않고 wire enum 에서 받아 온다.
 #[tokio::test]
-async fn spawn_into_rejects_explicit_backend_before_spawning() {
+async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
     let w = World::new();
     let spawner = Spawner::ok(&w.state, Uuid::new_v4());
 
@@ -1032,14 +1040,53 @@ async fn spawn_into_rejects_explicit_backend_before_spawning() {
         MAIN_WINDOW_LABEL,
         None,
         None,
-        Some("claude".to_string()),
+        Some("codx".to_string()),
         "C:/tmp".to_string(),
     )
     .await
     .unwrap_err();
 
     assert!(err.contains("스폰 안 함"), "err={err}");
-    assert_eq!(spawner.calls(), 0, "★스폰 전에 거부★ — ADR-0058");
+    assert!(
+        err.contains("claude") && err.contains("codex"),
+        "무엇이 통하는지 말해야: {err}"
+    );
+    assert_eq!(spawner.calls(), 0, "★스폰 전에 거부★");
+}
+
+/// 아는 낱말은 **포트까지 그대로 간다** — 이 줄이 초록이면 ADR-0058 의 전량 거부가 실제로 걷힌 것이다.
+#[tokio::test]
+async fn spawn_into_forwards_a_known_backend() {
+    for (word, expected) in [
+        ("claude", AgentBackendKind::Claude),
+        ("codex", AgentBackendKind::Codex),
+        (" codex ", AgentBackendKind::Codex),
+    ] {
+        let w = World::new();
+        let agent = Uuid::new_v4();
+        let spawner = Spawner::ok(&w.state, agent);
+
+        let id = apply::spawn_into(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            &spawner,
+            MAIN_WINDOW_LABEL,
+            None,
+            None,
+            Some(word.to_string()),
+            "C:/tmp".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(id, agent.to_string());
+        assert_eq!(
+            &*spawner.backends.lock().unwrap(),
+            &[Some(expected)],
+            "{word}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1069,6 +1116,9 @@ async fn spawn_into_accepts_blank_backend_as_unspecified() {
     // 공백 backend 가 "미지정"으로 통과했는지는 스폰 호출만으로는 안 잡힌다 — 그 뒤 배치까지 끝나야
     // 통과 경로와 거절 경로가 갈린다(거절 경로는 스폰도 배치도 0).
     assert_eq!(spawner.calls(), 1);
+    // ★셸은 기본값을 지어내지 않는다★ — 미지정은 미지정인 채로 포트에 간다(그 부재를 거절하는 것은
+    //   데몬이고, 그래야 「어느 칸을 채워라」 문구가 한 곳에서만 나온다).
+    assert_eq!(&*spawner.backends.lock().unwrap(), &[None]);
     assert_eq!(id, agent.to_string());
     let placed = w.main_active();
     assert_eq!(

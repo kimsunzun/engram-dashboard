@@ -54,6 +54,7 @@ export const ko = {
     create: '에이전트 생성', // ADR-0078 생성 서브메뉴 컨테이너 라벨과 값 재사용.
     createTerminal: '클로드코드 터미널', // 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
     createJson: '클로드코드 JSON', // 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
+    createCodex: '코덱스 터미널', // codex 는 대화형 TUI 하나뿐이라 렌더 모드를 안 묻는다.
     spawnInto: '스폰 + 배치',
     kill: '에이전트 종료',
     monitor: '에이전트 모니터링',

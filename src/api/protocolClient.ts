@@ -29,6 +29,7 @@ import type {
 } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import type {
+  AgentBackendKind,
   AgentInfo,
   AgentProfile,
   AgentStatus,
@@ -832,8 +833,8 @@ export class ProtocolClient implements AgentClient {
   }
 
   // ── 명령(인터페이스 → wire) ───────────────────────────────────────────────────────
-  spawnAgent(cwd: string): Promise<AgentInfo> {
-    return this.sendCommand<AgentInfo>((request_id) => ({ SpawnByCwd: { cwd, request_id } }))
+  spawnAgent(cwd: string, backend: AgentBackendKind): Promise<AgentInfo> {
+    return this.sendCommand<AgentInfo>((request_id) => ({ SpawnByCwd: { cwd, backend, request_id } }))
   }
   killAgent(agentId: string): Promise<void> {
     return this.sendCommand<void>((request_id) => ({ Kill: { agent_id: agentId, request_id } }))
@@ -890,6 +891,28 @@ export class ProtocolClient implements AgentClient {
         env,
         auto_restore: autoRestore,
         output_format: outputFormat,
+        backend: 'claude',
+        request_id,
+      },
+    }))
+  }
+  createCodexProfile(
+    name: string,
+    cwd: string,
+    extraArgs: string[],
+    env: [string, string][],
+    autoRestore: boolean,
+  ): Promise<AgentProfile> {
+    return this.sendCommand<AgentProfile>((request_id) => ({
+      CreateProfile: {
+        name,
+        cwd,
+        extra_args: extraArgs,
+        env,
+        auto_restore: autoRestore,
+        // wire 는 이 칸을 요구하지만 codex 갈래는 읽지 않는다(claude 의 축이다).
+        output_format: 'Terminal',
+        backend: 'codex',
         request_id,
       },
     }))

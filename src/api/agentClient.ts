@@ -7,6 +7,7 @@
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
 import type {
+  AgentBackendKind,
   AgentInfo,
   AgentProfile,
   AgentStatus,
@@ -175,7 +176,11 @@ export interface AgentClient {
   onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
 
   // ── 명령 ──────────────────────────────────────────────────────────────────
-  spawnAgent(cwd: string): Promise<AgentInfo>
+  /**
+   * ad-hoc 스폰 — 프로필을 미리 만들지 않고 cwd 와 백엔드만으로 띄운다(데몬이 프로필을 즉석 생성해
+   * 명부에 올린다). `backend` 는 **필수다** — 안 실으면 데몬이 거절한다(기본값 없음).
+   */
+  spawnAgent(cwd: string, backend: AgentBackendKind): Promise<AgentInfo>
   killAgent(agentId: string): Promise<void>
   interruptAgent(agentId: string): Promise<void>
   writeStdin(agentId: string, data: Uint8Array): Promise<void>
@@ -203,6 +208,18 @@ export interface AgentClient {
     env: [string, string][],
     autoRestore: boolean,
     outputFormat?: ClaudeOutputFormat,
+  ): Promise<AgentProfile>
+  /**
+   * codex 프로필 생성 — 형제 `createClaudeProfile` 과 같은 자리에 등록만 하고 스폰하지 않는다.
+   * ★출력 포맷 인자가 없는 것은 빠뜨린 게 아니다★: 그 축은 claude 의 것이고 codex 는 대화형 TUI 하나뿐이라
+   * 고를 것이 없다(화면은 늘 xterm 이다).
+   */
+  createCodexProfile(
+    name: string,
+    cwd: string,
+    extraArgs: string[],
+    env: [string, string][],
+    autoRestore: boolean,
   ): Promise<AgentProfile>
   deleteProfile(agentId: string): Promise<void>
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>

@@ -55,8 +55,8 @@ impl AgentBackend for ShellBackend {
                 env,
                 cwd,
             },
-            AgentCommand::Claude { .. } => {
-                unreachable!("ShellBackend는 Claude variant를 처리하지 않음. dispatch 버그.")
+            AgentCommand::Claude { .. } | AgentCommand::Codex { .. } => {
+                unreachable!("ShellBackend는 Shell variant만 처리함. dispatch 버그.")
             }
         }
     }

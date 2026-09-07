@@ -276,12 +276,14 @@ pub fn no_turn_signals(_event: &OutputEvent) -> Option<TurnSignal> {
 
 static CLAUDE_BACKEND: ClaudeBackend = ClaudeBackend;
 static SHELL_BACKEND: ShellBackend = ShellBackend;
+static CODEX_BACKEND: CodexBackend = CodexBackend;
 
 // 새 variant 연결 시: tests::expected_channel_matrix(tripwire)가 의식적 capability 선언을 강제한다 — ADR-0099
 fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
     match c {
         AgentCommand::Claude { .. } => &CLAUDE_BACKEND,
         AgentCommand::Shell { .. } => &SHELL_BACKEND,
+        AgentCommand::Codex { .. } => &CODEX_BACKEND,
     }
 }
 
@@ -515,6 +517,9 @@ mod tests {
         match c {
             AgentCommand::Claude { .. } => (true, true),
             AgentCommand::Shell { .. } => (false, false),
+            // codex 는 MCP 를 쓸 수 있지만 그 주입이 전역 TOML 오버라이드라 **이 mcp-config 파일**을
+            //   먹일 수는 없다(실측) — 두 칸의 뜻 차이는 `backend/codex/` 가 적는다.
+            AgentCommand::Codex { .. } => (false, false),
         }
     }
 
@@ -529,6 +534,7 @@ mod tests {
                 program: "cmd.exe".into(),
                 args: vec![],
             },
+            AgentCommand::Codex { extra_args: vec![] },
         ];
 
         for c in &variants {
@@ -673,12 +679,13 @@ mod tests {
     //
     // 분류 기준: 입력을 **읽고 해석하는** 에이전트(CLI 코딩 에이전트 등)면 true, 입력을 **실행**하는
     //   채널(셸·REPL 류)이면 false. 판단이 서지 않으면 false 로 두고 사용자에게 올린다.
-    const BACKEND_VARIANTS: usize = 2;
+    const BACKEND_VARIANTS: usize = 3;
 
     fn variant_slot(c: &AgentCommand) -> usize {
         match c {
             AgentCommand::Claude { .. } => 0,
             AgentCommand::Shell { .. } => 1,
+            AgentCommand::Codex { .. } => 2,
         }
     }
 
@@ -686,6 +693,10 @@ mod tests {
         match c {
             AgentCommand::Claude { .. } => true,
             AgentCommand::Shell { .. } => false,
+            // ★shell 과 같은 값이지만 사유가 다르다★ — 여기 false 는 「입력이 실행된다」가 아니라
+            //   「턴을 관측할 수 없어 바쁜 때를 못 가린다」다(정본 = `backend/codex/`). 사유가 갈리므로
+            //   나중에 여는 조건도 갈린다.
+            AgentCommand::Codex { .. } => false,
         }
     }
 
@@ -700,6 +711,7 @@ mod tests {
                 program: "cmd.exe".into(),
                 args: vec![],
             },
+            AgentCommand::Codex { extra_args: vec![] },
         ];
         let mut all = per_variant.to_vec();
         all.push(AgentCommand::Claude {
@@ -762,6 +774,9 @@ mod tests {
                 TransportShape::StdioNdjson,
             ),
             AgentCommand::Shell { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
+            // codex 는 대화형 TUI 라 PTY 가 유일한 통로다(파이프로 stdin 을 주면 그 자리에서 거부한다 —
+            //   실측). 번역기는 없다: 터미널 바이트가 그대로 xterm 으로 간다.
+            AgentCommand::Codex { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
         }
     }
 

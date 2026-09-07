@@ -5,7 +5,7 @@
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { t } from '../i18n'
-import type { ClaudeOutputFormat } from '../api/types'
+import type { AgentProfile, ClaudeOutputFormat } from '../api/types'
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
@@ -15,16 +15,25 @@ import { registerSlotMenu } from './slotMenu'
 // ★ADR-0078★: 렌더 모드(Terminal=xterm PTY / StreamJson=headless NDJSON→RichSlot)는 생성 시점에 고정하고
 //   이후 불변이다 — pane "에이전트 생성" 서브메뉴에서 모드를 골라 예약 프로필을 만든다(활성화-시점 override 는
 //   거부됨: 활성화 행 메뉴는 단일 "활성화" 유지). claude reserved(비활성) 프로필을 등록만 한다(스폰하지 않음).
-async function createReservedProfile(outputFormat: ClaudeOutputFormat) {
+async function createReserved(make: (cwd: string) => Promise<AgentProfile>) {
   const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
   const cwd = typeof picked === 'string' ? picked : null
   if (!cwd) return // 취소 — no-op
-  const profile = await agentClient.createClaudeProfile(cwd, cwd, [], [], false, outputFormat)
+  const profile = await make(cwd)
   // broadcast 는 유실 가능(ws 큐 포화, ws.rs:145)·구독이 레이아웃 초기화 이후(eventBus.ts)라, 생성 직후
   // 명시 refetch 로 예약 노드 표시를 보장한다(activateReserved 의 .then(refreshProfiles) 와 동형
   // belt-and-suspenders).
   await refreshProfiles()
   return profile
+}
+
+async function createReservedProfile(outputFormat: ClaudeOutputFormat) {
+  return createReserved(cwd => agentClient.createClaudeProfile(cwd, cwd, [], [], false, outputFormat))
+}
+
+// 렌더 모드를 안 묻는다 — codex 는 대화형 TUI 하나뿐이라 고를 축이 없다(화면은 늘 xterm).
+async function createReservedCodexProfile() {
+  return createReserved(cwd => agentClient.createCodexProfile(cwd, cwd, [], [], false))
 }
 
 // ★ADR-0078★: ClaudeOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
@@ -68,7 +77,10 @@ register({
     if (!cwd || !cwd.trim()) {
       throw new Error(`agent.spawn: cwd 가 비어 있음: ${String(cwd)}`)
     }
-    return agentClient.spawnAgent(cwd.trim())
+    // ★이 문은 claude 만 낸다(사용자 결정 2026-09-07 — TRD §6-G)★: 부르는 주체가 LLM 인데 codex 는 처음
+    //   보는 폴더에서 신뢰 확인 모달을 띄우고 **LLM 은 그 모달을 못 지난다**. 여기를 넓히면 「만들 수는
+    //   있는데 쓸 수는 없는 에이전트」가 생긴다. 그 모달 처리가 정해질 때 함께 연다.
+    return agentClient.spawnAgent(cwd.trim(), 'claude')
   },
 })
 
@@ -121,6 +133,16 @@ register({
 })
 
 register({
+  id: 'agentlist.createCodex',
+  title: t('agent.createCodex'),
+  category: 'agent',
+  // ★사람이 codex 를 고르는 유일한 문★ — 형제 둘과 같은 자리에 서고, 여기서 만들어진 예약 노드를
+  //   활성화하면 codex 가 그 폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에
+  //   그대로 뜨고 사람이 지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다).
+  run: async () => createReservedCodexProfile(),
+})
+
+register({
   id: 'agentlist.createJson',
   title: t('agent.createJson'),
   category: 'agent',
@@ -139,6 +161,7 @@ registerSlotMenu('agent_list', [
     children: [
       { commandId: 'agentlist.createJson', group: 'content', order: 10 },
       { commandId: 'agentlist.createTerminal', group: 'content', order: 20 },
+      { commandId: 'agentlist.createCodex', group: 'content', order: 30 },
     ],
   },
 ])

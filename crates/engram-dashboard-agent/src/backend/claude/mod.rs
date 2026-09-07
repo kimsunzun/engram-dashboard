@@ -291,6 +291,9 @@ impl AgentBackend for ClaudeBackend {
                 env,
                 cwd,
             },
+            AgentCommand::Codex { .. } => {
+                unreachable!("ClaudeBackend 는 Codex variant 를 처리하지 않음. dispatch 버그.")
+            }
         }
     }
 

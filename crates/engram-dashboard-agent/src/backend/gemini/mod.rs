@@ -91,6 +91,11 @@ impl AgentBackend for GeminiBackend {
                     cwd,
                 };
             }
+            // 이 backend 는 dispatch 에 배선되지 않았고, 배선된 형제(codex)의 인자를 흉내 내면
+            //   그 형제의 지식이 여기로 샌다(ADR-0004).
+            AgentCommand::Codex { .. } => {
+                unreachable!("GeminiBackend 는 Codex variant 를 처리하지 않음. dispatch 버그.")
+            }
         }
 
         CommandSpec {

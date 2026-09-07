@@ -133,10 +133,12 @@ describe('request_id pending 매칭', () => {
   it('spawnAgent → SpawnByCwd{request_id} 전송 + Spawned{request_id,agent} resolve', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
-    const p = c.spawnAgent('C:/work')
+    const p = c.spawnAgent('C:/work', 'codex')
     await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; cwd: string }>('SpawnByCwd')!
+    const sent = t.lastSent<{ request_id: string; cwd: string; backend: string }>('SpawnByCwd')!
     expect(sent.cwd).toBe('C:/work')
+    // 고른 낱말이 봉투에 실려야 한다 — 안 실으면 데몬이 거절한다(기본값 없음).
+    expect(sent.backend).toBe('codex')
     t.control({ Spawned: { request_id: sent.request_id, agent: { id: 'a1' } } })
     expect(await p).toEqual({ id: 'a1' })
   })

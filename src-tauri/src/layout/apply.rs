@@ -30,6 +30,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
 use super::manager::{
@@ -129,10 +130,15 @@ pub trait LabelSource: Send + Sync {
 ///
 /// 반환 오류는 그대로 호출자에게 나간다(fail-loud). 응답 해석(어떤 프레임이 성공인가)은 구현 몫이다 —
 /// 그건 전송 계약이라 이 서비스가 알 일이 아니다.
+///
+/// `backend` 가 **wire 어휘 그대로**인 이유: 여기서 자체 어휘를 세우면 셸이 통과시킨 낱말과 데몬이 아는
+/// 낱말이 갈릴 수 있고, 그 갈림은 조용히 다른 백엔드가 뜨는 형태로만 발현한다. `None` = 고르지 않음 —
+/// **데몬이 거절한다**(셸은 기본값을 지어내지 않는다).
 pub trait AgentSpawner: Send + Sync {
     fn spawn_by_cwd<'a>(
         &'a self,
         cwd: String,
+        backend: Option<AgentBackendKind>,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 }
 
@@ -436,15 +442,26 @@ pub fn set_slot_content(
 // 않는다**(하드 롤백 없음). 에이전트는 데몬에 살아 있고 목록 조회로 재부착 가능하다 — 스폰 뒤 모든
 // early-return 은 `alive_err` 로 생존 agent id 를 박아 invisible 에이전트를 막는다(락 획득 실패 포함).
 //
-// ## ★backend fail-loud(USER DECISION 1a — ADR-0058)★
-// 현 데몬 스폰 wire 는 **cwd 만** 받고 backend 선택 인자가 없다 → 요청한 `backend` 는 데몬까지 흐르지
-// 못하고 데몬은 무조건 고정된 기본 백엔드를 스폰한다 — ★오늘 그 값은 **claude · StreamJson 출력**★
-// (`crates/engram-dashboard-daemon/src/connection_core.rs` 의 `SpawnByCwd` 갈래가 정본). 그래서
-// **명시된 backend 요청은 스폰 전에 거부**한다(호출자가 원한 것과 다른 에이전트를 조용히 받는 것 방지).
-// 통과 = `backend` 미지정(`None`/빈/공백)뿐 — ★**`"claude"` 도 거부한다**★: 그 값이 오늘의 고정 대상과
-// 우연히 같아도 **요청이 데몬까지 흐르지 않으므로** 승낙은 지킬 수 없는 약속이고, 고정 대상이 바뀌면
-// 그 승낙만 조용히 거짓이 된다. backend 선택은 데몬 spawn-protocol 확장이 필요하다(미구현 — 별도
-// ADR/후속).
+// ## ★backend — 아는 낱말은 흘려보내고 모르는 낱말만 막는다★
+// 데몬 스폰 wire 에 backend 칸이 생겼으므로(`SpawnByCwd.backend`) 요청은 이제 **데몬까지 흐른다**. 그래서
+// 명시된 값을 거부할 이유가 없어졌다 — 예전의 전량 거부는 「고를 칸이 wire 에 없다」를 근거로 서 있었고
+// 그 근거가 죽었다(ADR-0058 폐기 대상).
+// ★그래도 게이트를 통째로 걷지 않는다★: 오탈자(`codx`)를 그냥 흘리면 데몬이 그것을 모르는 낱말로 거절할
+// 때 **스폰 왕복 한 번을 낭비한 뒤**에야 알려지고, 옛 데몬을 만나면 그 칸째 무시돼 조용히 다른 백엔드가
+// 뜬다. ADR-0058 이 지키려던 성질(호출자가 원한 것과 다른 에이전트를 조용히 받지 않는다)은 살아 있고,
+// 폐기되는 것은 그 성질을 지키던 수단(전량 거부)뿐이다.
+// ★이 판정은 약속이 아니라 오탈자 그물이다★ — 통과시켰다고 그 백엔드가 뜬다는 보장은 여기가 못 한다
+// (그건 데몬이 한다). 그래서 어휘를 손으로 적지 않고 **wire 어휘 자신에게 물어본다** — 두 곳에 적으면
+// 갈린다.
+// ★미지정은 여기서 안 막는다★ — 부재의 거절은 데몬이 지고(어느 칸을 채우라는 문구까지 데몬이 낸다),
+// 셸이 그것을 흉내 내면 같은 규칙이 두 곳에 살게 된다.
+/// 오탈자 그물 — ★어휘를 손으로 적지 않는다★. 판정도 「무엇이 통하는가」 문구도 wire enum 자신에게서
+/// 나오므로(serde 의 unknown-variant 오류가 기대 낱말을 나열한다) 여기와 데몬이 갈릴 수 없다.
+fn parse_backend(word: &str) -> Result<AgentBackendKind, String> {
+    serde_json::from_value::<AgentBackendKind>(serde_json::Value::String(word.to_string()))
+        .map_err(|e| format!("backend '{word}' 를 모른다({e}). 스폰 안 함."))
+}
+
 pub async fn spawn_into(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -457,15 +474,10 @@ pub async fn spawn_into(
     cwd: String,
 ) -> Result<String, String> {
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
-    // ADR-0058 FIX 1(1a)
-    if let Some(b) = &backend {
-        let norm = b.trim();
-        if !norm.is_empty() {
-            return Err(format!(
-                "backend '{b}' 선택은 아직 spawn_into 로 지원되지 않음 — 데몬 SpawnByCwd 는 항상 기본 백엔드(현재 claude, StreamJson 출력)를 스폰하며 backend 선택 wire 가 없다(데몬 spawn-protocol 확장 필요, 후속). backend 를 생략하면 기본 백엔드로 스폰된다. 스폰 안 함."
-            ));
-        }
-    }
+    let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
+        None => None,
+        Some(word) => Some(parse_backend(word)?),
+    };
     if tab.is_none() && slot.is_some() {
         return Err(
             "새로 생성될 탭에 특정 slot 을 지정할 수 없음 — slot 을 생략하거나 tab 을 지정하시오. 스폰 안 함."
@@ -474,7 +486,7 @@ pub async fn spawn_into(
     }
 
     // ── 1) 스폰(락 미보유 async — 데몬 왕복) ──────────────────────────────────────────────────
-    let agent_id = spawner.spawn_by_cwd(cwd).await?;
+    let agent_id = spawner.spawn_by_cwd(cwd, backend).await?;
 
     // ── 2) 배치(락 보유 단일 임계구역) ────────────────────────────────────────────────────────
     let alive_err = |detail: String| {

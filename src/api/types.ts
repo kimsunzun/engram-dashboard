@@ -102,6 +102,14 @@ export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
 export type AgentCommand =
   | { kind: 'Claude'; extra_args: string[]; output_format: ClaudeOutputFormat }
   | { kind: 'Shell'; program: string; args: string[] }
+  | { kind: 'Codex'; extra_args: string[] }
+
+/**
+ * 스폰 패킷이 고르는 백엔드 — wire `AgentBackendKind` 미러. ★부재는 기본값이 아니라 오류다★: 이 낱말을
+ * 안 실은 스폰 패킷은 데몬이 거절한다(고르지 않은 것과 claude 를 고른 것을 구별하려는 결정).
+ * ★화면 분기에 쓰지 말 것★ — 렌더러는 `capabilities.output.structured` 한 칸으로 갈린다.
+ */
+export type AgentBackendKind = 'claude' | 'codex'
 
 export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'
 

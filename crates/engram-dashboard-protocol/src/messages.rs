@@ -5,8 +5,8 @@ use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandReply, Owner
 use ts_rs::TS;
 
 use crate::domain::{
-    AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat, EnvelopeFormat, Preset,
-    RestoreReport, SnapshotChunk,
+    AgentBackendKind, AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat,
+    EnvelopeFormat, Preset, RestoreReport, SnapshotChunk,
 };
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
@@ -93,15 +93,24 @@ pub enum AgentCommand {
     },
 
     // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────────
-    /// cwd 만으로 ad-hoc 셸 에이전트 spawn — 호출자가 미리 만들어 둔 프로필이 필요 없다. 기본 셸 명령
-    /// 프로필을 즉석 생성(생성 시 auto_restore=false)해 Fresh spawn 하고, spawn 경로가 그 프로필을
-    /// registry 에 등록·persist 한다.
-    SpawnByCwd { cwd: String, request_id: RequestId },
+    /// cwd 와 백엔드만으로 ad-hoc spawn — 호출자가 미리 만들어 둔 프로필이 필요 없다. 프로필을 즉석
+    /// 생성(생성 시 auto_restore=false)해 Fresh spawn 하고, spawn 경로가 그 프로필을 registry 에
+    /// 등록·persist 한다.
+    ///
+    /// `backend` 는 `#[serde(default)]` 라 **옛 클라이언트의 패킷도 역직렬화는 된다**(PROTOCOL_VERSION
+    /// 유지 — 봉투에 변형을 더한 게 아니라 기존 변형에 칸을 더했다). 그 대신 **핸들러가 부재를
+    /// 거절한다** — 조용한 기본 백엔드를 두지 않기로 한 결정의 실물이다(`AgentBackendKind` 참조).
+    SpawnByCwd {
+        cwd: String,
+        #[serde(default)]
+        backend: Option<AgentBackendKind>,
+        request_id: RequestId,
+    },
 
     /// 응답은 request_id 동봉 [`AgentEvent::ProfileList`](전용 reply).
     ListProfiles { request_id: RequestId },
 
-    /// claude 프로필 생성(스폰하지 않음 — 등록·persist만). ※env 에 자격증명 금지(평문 persist).
+    /// 프로필 생성(스폰하지 않음 — 등록·persist만). ※env 에 자격증명 금지(평문 persist).
     CreateProfile {
         name: String,
         cwd: String,
@@ -110,8 +119,12 @@ pub enum AgentCommand {
         auto_restore: bool,
         /// `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
         /// PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
+        /// ★claude 의 축이다★ — codex 에는 대응이 없어(TUI 하나뿐) 그 백엔드에선 읽히지 않는다.
         #[serde(default)]
         output_format: ClaudeOutputFormat,
+        /// 부재 = 오류(형제 `SpawnByCwd.backend` 와 같은 계약 — `AgentBackendKind` 참조).
+        #[serde(default)]
+        backend: Option<AgentBackendKind>,
         request_id: RequestId,
     },
 
