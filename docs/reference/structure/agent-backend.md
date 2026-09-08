@@ -205,4 +205,4 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 - **설계 근거·거부한 대안** = `docs/process/S21-codex-backend/trd.md` — ★그 문서 §2.5 의 그림은 **2026-09-07 판독 스냅샷**이라 줄번호가 낡았다★.
 - **착지 브리핑** = `docs/process/S21-codex-backend/briefing.html`
-- **이 파일의 그림을 처음 그린 덱** = `docs/process/S21-codex-backend/structure-deck.html` — ★시점 스냅샷이라 제자리 수정 대상이 아니다★.
+- **개략 전달본** = `agent-backend.html`(이 폴더) — 같은 mermaid 소스를 쓰는 프레젠테이션이다. ★**그 페이지는 「그 당시 문서」라 구조가 바뀔 때마다 갱신하지 않는다**★ — 디테일과 최신은 이 파일이 갖는다.
