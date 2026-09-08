@@ -52,14 +52,7 @@ impl PtyTransport {
             })
             .map_err(|e| PtyError::SpawnFailed(format!("openpty: {e}")))?;
 
-        let mut cmd = CommandBuilder::new(&spec.program);
-        for a in &spec.args {
-            cmd.arg(a);
-        }
-        cmd.cwd(&spec.cwd);
-        for (k, v) in &spec.env {
-            cmd.env(k, v);
-        }
+        let cmd = build_pty_command(spec);
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -101,6 +94,38 @@ impl PtyTransport {
 
         Ok((transport, child_pid))
     }
+}
+
+/// open() 에서 분리해 둔 이유: 터미널 선언 env 의 기본값 주입 규칙이 load-bearing 이라 실제 spawn
+/// 없이 단위테스트로 직접 검증할 수 있게 한다.
+fn build_pty_command(spec: &CommandSpec) -> CommandBuilder {
+    let mut cmd = CommandBuilder::new(&spec.program);
+    for a in &spec.args {
+        cmd.arg(a);
+    }
+    cmd.cwd(&spec.cwd);
+    // ADR-0184: PTY transport 가 자식에게 터미널 정체성을 선언한다(거부한 대안 넷 = 그 ADR).
+    // 데몬은 WMI(WmiPrvSE.exe 가 부모)로 뜨므로 상속 환경이 **서비스 환경**이라 TERM·COLORTERM 이
+    //   아예 없다. portable-pty 는 상속 환경 전체(+Windows 는 HKLM/HKCU `Environment` 하이브)를
+    //   base env 로 그대로 싣지만 **TERM 을 합성하지는 않는다**(합성하는 건 unix 의 SHELL 뿐).
+    //   없으면 codex TUI 가 헤더 박스 아래 테두리와 프롬프트 배경 블록을 잃는다(실측 2026-09-08 —
+    //   이 두 변수만 주면 Windows Terminal 과 동일해진다). PTY 를 내주는 이 계층이 곧 터미널이라,
+    //   백엔드를 가리지 않고 여기서 "우리가 어떤 터미널인가"를 단언한다.
+    // ★상속값은 덮는다★ — 자식은 데몬을 띄운 무언가가 아니라 우리 xterm.js 위젯에 그린다. 상속
+    //   TERM 은 그 위젯을 서술하지 않으므로 기본값이 이긴다. 양보 대상은 프로필(spec.env)뿐이다.
+    // ADR-0049 의 env 기본값 규율을 그대로 따른다 — ★explicit-skip★: 프로필이 같은 키를 이미 주면
+    //   주입하지 않는다(병합 순서 last-wins 에 기대지 않는 결정적 방식). ★대소문자 무시★: Windows
+    //   환경변수는 대소문자 무구분이고, unix 에서는 소문자 `term` 이 `TERM` 을 덮는 대신 **둘 다**
+    //   자식 블록에 실려 나간다 — eq_ignore_ascii_case 가 그 갈래를 막는다.
+    for (key, value) in [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")] {
+        if !spec.env.iter().any(|(k, _)| k.eq_ignore_ascii_case(key)) {
+            cmd.env(key, value);
+        }
+    }
+    for (k, v) in &spec.env {
+        cmd.env(k, v);
+    }
+    cmd
 }
 
 /// B-2. pump 클로저에서 분리해 둔 이유: 이 매핑이 load-bearing(panic→Failed 전이)이라 실제 PTY
@@ -357,6 +382,81 @@ mod tests {
             self.statuses.lock().unwrap().push(status);
         }
         fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+    }
+
+    // ── 터미널 선언 env(TERM/COLORTERM) ──
+
+    fn spec_with_env(env: Vec<(String, String)>) -> CommandSpec {
+        CommandSpec {
+            program: "cmd.exe".to_string(),
+            args: Vec::new(),
+            env,
+            cwd: std::path::PathBuf::from("."),
+        }
+    }
+
+    /// ★`get_env` 로 단언하지 말 것★ — 그건 base env(= `std::env::vars_os()` + Windows 레지스트리
+    /// 하이브)까지 조회하므로, TERM·COLORTERM 이 이미 있는 개발 셸에서는 **주입 코드를 지워도**
+    /// 통과한다(실측). `iter_extra_env_as_str` 는 호출자가 직접 넣은 항목만 돌려줘 "이 코드가
+    /// 넣었다"를 잰다. 값 sentinel 도 같은 이유 — 주변 환경이 우연히 만들 수 있는 값(`dumb` 등)을
+    /// 쓰면 프로필 우선 단언이 다시 무의미해진다.
+    fn extra_env(cmd: &CommandBuilder) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = cmd
+            .iter_extra_env_as_str()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    const SENTINEL_TERM: &str = "engram-sentinel-term";
+
+    #[test]
+    fn pty_command_declares_terminal_env_by_default() {
+        let cmd = build_pty_command(&spec_with_env(Vec::new()));
+        assert_eq!(
+            extra_env(&cmd),
+            vec![
+                ("COLORTERM".to_string(), "truecolor".to_string()),
+                ("TERM".to_string(), "xterm-256color".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_env_overrides_terminal_default() {
+        let cmd = build_pty_command(&spec_with_env(vec![(
+            "TERM".to_string(),
+            SENTINEL_TERM.to_string(),
+        )]));
+        assert_eq!(
+            extra_env(&cmd),
+            vec![
+                ("COLORTERM".to_string(), "truecolor".to_string()),
+                ("TERM".to_string(), SENTINEL_TERM.to_string()),
+            ],
+            "프로필 키는 기본값 미주입(정확히 1개) · 프로필이 안 준 키는 기본값 유지"
+        );
+    }
+
+    /// ADR-0049 대소문자 무시 규율. ★Windows 에서는 `eq_ignore_ascii_case` 를 `==` 로 되돌려도
+    /// 이 테스트가 초록이다(실측 2026-09-08)★ — `CommandBuilder` 의 내부 맵이 Windows 에선 키를
+    /// 소문자로 접어 `TERM`/`term` 이 어차피 한 항목으로 합쳐지기 때문. 갈라지는 건 unix 로,
+    /// 거기선 두 항목이 **둘 다** 자식 블록에 실려 나가 3개가 된다 — 이 단언은 그쪽 회귀망이다.
+    /// (주입 자체를 지우는 회귀는 COLORTERM 항목이 사라져 여기서도 잡힌다.)
+    #[test]
+    fn lowercase_profile_key_suppresses_terminal_default() {
+        let cmd = build_pty_command(&spec_with_env(vec![(
+            "term".to_string(),
+            SENTINEL_TERM.to_string(),
+        )]));
+        assert_eq!(
+            extra_env(&cmd),
+            vec![
+                ("COLORTERM".to_string(), "truecolor".to_string()),
+                ("term".to_string(), SENTINEL_TERM.to_string()),
+            ]
+        );
     }
 
     // ── B-2: panic catch_unwind 결과가 Error reason 으로 매핑되는지 ──
