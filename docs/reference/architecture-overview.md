@@ -8,6 +8,8 @@
 >
 > 기준: **S24**(프레임 시각 정리 — ADR-0168) · S20 통합 command 버스(선언은 생산자 옆·데몬 자기 표·`command` crate 신설 — ADR-0154/0155/0156) · S20.14~15 화신 표식 난수화·재부착 계기 교정 + UI 설정 파일·창별 테마(ADR-0163/0164/0166/0167) · S19 제어 평면 CLI 단일 실행파일 `engram`(ADR-0132/0133) · S18 메시징 v1 + 커널 lib 분리(ADR-0103/0110, 턴 관측은 0127이 코어로) · S18.16~24 네트워크 행 lib 분리(`net` — ADR-0129/0130) 반영.
 >
+> **주제별 상세는 여기 없다** — 이 문서는 조감도이고, 한 주제의 상세 구조(그림·argv·capability 선언·정책 표)는 `structure/`(`ls docs/reference/structure/`)가 갖는다. 상세를 이 문서로 되올리지 않는다(ADR-0179).
+>
 > 다이어그램은 전부 Mermaid다 — 렌더 뷰 전제(GitLab·IDE 미리보기). **화살표 = 데이터 흐름 방향**(라벨의 "A→B"가 그 방향을 다시 못박는다).
 
 ---
@@ -729,7 +731,7 @@ flowchart TD
 | seam(trait) | 무엇을 끊나 | 성격 | 현재 구현 | 미래 확장 |
 |-------------|-------------|------|-----------|-----------|
 | `AgentTransport` | 전송 방식(물리) | 출력·입력 손발 | PtyTransport / StdioTransport | ApiTransport(골격만 · 미배선 — HTTP 코드 0줄) / 원격 transport |
-| `AgentBackend` | 백엔드 프로그램(claude 인자·스키마 + 턴 분류 — `TurnClassifier`는 `OutputCore::new` 필수 인자로 이 seam 뒤에 산다, ADR-0127) | spawn 순간 | ClaudeBackend / ShellBackend | CodexBackend·GeminiBackend(골격만 · 미배선 — CLI 미실측이고 `AgentCommand`에 variant 자체가 없다) |
+| `AgentBackend` | 백엔드 프로그램(claude 인자·스키마 + 턴 분류 — `TurnClassifier`는 `OutputCore::new` 필수 인자로 이 seam 뒤에 산다, ADR-0127) | spawn 순간 | ClaudeBackend / ShellBackend / **CodexBackend**(배선됨 — S21) | GeminiBackend(골격만 · 미배선 — `AgentCommand`에 variant 가 없다). codex 의 상세(argv·capability 선언·닫힌 창구)는 `structure/agent-backend.md` |
 | `OutputSink` | 출력이 나가는 wire | data plane 출구 | 데몬 FrameOutputSink(`agent_conn`) / 테스트 sink | 새 전송 경로 |
 | `StatusSink` | 상태·목록 알림 | control plane 출구 | 데몬 broadcast | — |
 | `ControlChannel` (S17) | 인바운드 제어 엔드포인트 | spawn=provision · terminal=revoke | DaemonControlChannel(MCP) / NoopControlChannel | 새 입구·명령 |
