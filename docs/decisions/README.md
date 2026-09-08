@@ -55,7 +55,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0005](0005-finalize-1회.md) | finalize 정확히 1회 (pump 단독) | 확정 |
 | [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 |
 | [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다 / ADR-0163: 맵 교체마다 epoch +1 증분과 재구독 deps 두 조항) |
-| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음) |
+| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음 / ADR-0185: sid 발급 주체) |
 | [0009](0009-tauri-2x-핀.md) | tauri 최신 2.x 핀 (Channel 무손실 실측) | 확정 |
 | [0010](0010-cargo-workspace-분리.md) | Cargo workspace 3-crate 분리 | 확정 |
 | [0011](0011-agentclient-제어표면.md) | agentClient 제어 표면 facade (데몬 대비) | 확정 |
@@ -123,13 +123,13 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 |
 | [0074](0074-json-stream-json-모드-resume-활성화-adr0044-후속-완료-통제-sid-adr0008-재사용.md) | json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용) | 확정 |
 | [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
-| [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효) |
+| [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효 / ADR-0185: 우리 쪽 sid 발급 전제) |
 | [0077](0077-수동-활성화도-resume-조기종료-시-fresh-fallback-공유-adr-0076-정련.md) | 수동 활성화도 resume 조기종료 시 fresh-fallback 공유 — ADR-0076 정련 | 폐기 (Superseded by ADR-0082) |
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
 | [0079](0079-jsonrichslot-모드-resume-시-대화-스크롤백-복원-데몬이-claude-jsonl-transcript를-읽어-history-프레임으로-전달.md) | JSON(RichSlot) 모드 resume 시 대화 스크롤백 복원 — 데몬이 Claude `.jsonl`을 읽어 OutputCore 버퍼에 seed(단일 소스 · pump 전) | 확정 |
 | [0080](0080-llm-제어-표면-아키텍처-bashengram-ctl데몬-ws백엔드-직행-데몬-opaque-relay앱-viewmanagerui.md) | LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI) | 폐기 (Superseded by ADR-0085) |
 | [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0155: 결정 1과 2 대체 / ADR-0154: 대상 주소지정 불요 전제) |
-| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (제목의 "Failed" 는 일상어 — `AgentStatus::Failed` 가 아니다. 실제 종점은 `Exited{code}`(대개 code≠0)이고 본문 결정도 "종점(terminal)"이라 적는다. 제목·파일명은 이력이라 안 고친다 — 본문 머리 주석 참조) |
+| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (부분 폐기 by ADR-0185: 살아남는 상위 결정 중 sid 발급 조항 / 제목의 "Failed" 는 일상어 — `AgentStatus::Failed` 가 아니다. 실제 종점은 `Exited{code}`(대개 code≠0)이고 본문 결정도 "종점(terminal)"이라 적는다. 제목·파일명은 이력이라 안 고친다 — 본문 머리 주석 참조) |
 | [0083](0083-종료-시-프로필-자동-삭제-폐지-유저-kill정상-exit-포함-모든-종료는-시체-보존-삭제는-명시적-사용자-명령으로만.md) | 종료 시 프로필 자동 삭제 폐지 — 유저 kill·정상 exit 포함 모든 종료는 시체 보존, 삭제는 명시적 사용자 명령으로만 | 확정 |
 | [0084](0084-재활성화resume-epoch-bump-apply-disposition-epoch-guard-stale-reap-산-세션-강등프론트-재구독-누락-차단.md) | 재활성화(resume) epoch bump + apply_disposition epoch-guard — stale reap 산-세션 강등·프론트 재구독 누락 차단 | 확정 |
 | [0085](0085-cli-백엔드-제어-채널-in-band-출력-마커m3-engram-ctl-폐기.md) | CLI 백엔드 제어 채널 = in-band 출력 마커(M3) — engram-ctl 폐기 | 폐기 (Superseded by ADR-0086) |
@@ -225,3 +225,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0176](0176-명령-이름-접두를-넣지-않고-셸-필터를-남긴다.md) | 명령 이름 접두를 넣지 않고 셸 필터를 남긴다 | 확정 |
 | [0179](0179-주제별-상세-구조-문서를-referencestructure-에-모은다-파일-하나-주제-하나.md) | 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나 | 확정 |
 | [0184](0184-pty-transport-가-자식에게-터미널-정체성을-선언한다.md) | PTY transport 가 자식에게 터미널 정체성을 선언한다 | 확정 |
+| [0185](0185-세션-복원-불변식을-발급-주체-중립으로-codex는-발급받은-thread-id를-수령해-쓴다.md) | 세션 복원 불변식을 발급 주체 중립으로 — codex는 발급받은 thread id를 수령해 쓴다 | 확정 |

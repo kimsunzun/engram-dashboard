@@ -318,14 +318,18 @@ flowchart TD
 
 ### 세션 복원 / 활성화 (resume 전용 — ADR-0082)
 
-**spawn 시 `--session-id`로 sid를 우리가 통제 → `--resume` 무손실 복원.** 복원 정확성은 이 sid에만 의존한다(추적 파일은 best-effort).
+**복원은 프로필에 저장된 backend sid 단독에 의존한다 — 발급 주체는 백엔드가 정한다**(추적 파일은 best-effort). claude는 spawn 시 `--session-id`로 우리가 발급해 넘기고 `--resume`으로 **무손실** 복원한다(ADR-0008). ★**무손실은 claude 축의 말이다 — 발급 주체 중립 불변식에 붙이지 말 것**★: codex는 스레드를 만들어 본 적조차 없고 `capabilities().session.resume`이 `false`다. ★발급 주체를 불변식에 되올리지 말 것★ — 새 매핑·새 필드도 만들지 않는다(우리 id = `AgentId`, 백엔드 id = `backend_session_id`, 매핑 = 프로필 레코드).
+
+- ★**발급받는 백엔드(codex)는 아직 배선이 없다 — 「지금 이렇게 돈다」로 읽지 말 것**★ (ADR-0185). codex는 클라이언트 지정을 아예 받지 않으므로(`ThreadStartParams`에 id 계열 속성 0개) 스레드 생성 **응답**에서 받아야 하는데, 그 응답을 `observe_session_id`로 넘기는 줄이 없다 — 그 함수의 유일한 생산 호출자는 claude `/clear` watcher다(`daemon/src/lib.rs:288`). ★**그 watcher를 codex의 수령 경로로 오해하지 말 것**★ — `backend::session_id_source`는 **우리가 발급한 기준 sid**(`expected_sid: Uuid`)를 요구하는 파일 폴러이고(`backend/mod.rs:348-353`), codex의 id는 JSON-RPC 응답으로 온다. 즉 수령을 켜는 것은 **새 배선 하나**이고 `needs_session()`을 쪼개는 일이 그것을 열어 주지 않는다.
+- ★**그 가드가 없으면 조용한 대화 유실이다**★ — 활성화 입구 둘(`commands.rs:521` · `connection_core.rs:1126`)은 저장된 sid **하나만** 보고 `SpawnMode::Resume`을 유도하고 `needs_session()`을 보지 않는다(반면 `manager.rs:1376`의 부팅 복원은 본다). codex 프로필에 sid가 실린 채 그 입구를 타면 `spawn_agent`이 sid를 안 넘기고(`manager.rs:954-962`) `build_spec`은 `_mode`를 무시해(`backend/codex/mod.rs:93`) **새 대화가 열린다.** ★**그리고 그것이 새 대화라는 표식이 wire에 하나도 없다**★ — `AgentSpawnOk`(`commands.rs:807-814`)도 `AgentEvent::Spawned`(`protocol/src/messages.rs:468-471`)도 resume 여부를 안 실어서, 화면·소켓 어느 쪽으로도 구분되지 않는다. ★**`resumed` 를 grep 해 찾으려 하지 말 것**★ — 그 이름은 `commands.rs:1090` 의 `#[cfg(test)]` 테스트 더블 지역변수 하나뿐이다. `commands.rs:519-520`의 주석은 **다른 위험**(두 입구가 서로 다른 규칙을 쓰는 경우)을 적은 것이라 이 갭을 덮지 않는다 — 두 입구는 같은 규칙을 쓰고 있고, 그 규칙이 `needs_session()`을 안 보는 것이 여기서 문제다.
+- **미검(2026-09-09):** app-server 로 **실제 스레드를 만들어 id 를 받아 본 적이 없다** — `initialize` 왕복만 실측했다. 그리고 「받은 sid 를 첫 턴 허용 전에 persist 한다」는 순서 요구는 **아직 아무것도 강제하지 않는다** — `turn/start` 라는 이름이 저장소 코드·문서에 하나도 없고 근거는 스키마 읽기뿐이다. 그래서 지금은 **Phase 2 가 지켜야 할 요구사항**이지 성립한 불변식이 아니다.
 
 - **활성화(activate) = 이어받기(resume) 전용이다 (ADR-0082).** 종료된 에이전트를 다시 켜면 그 session_id로 resume한다.
 - **fresh fallback 폐지:** 옛 설계는 "resume 실패 시 새 대화(fresh)를 만든다"였으나 이제 **하지 않는다.** resume가 실패/조기종료하면 → **관측된 종료 상태 그대로 종점 직행** + 시체 보존 + 실패 원인 기록(자동 재spawn 없음). 복구는 사람/LLM 판단 — 자동으로 새 세션을 파지 않는다(무손실 원칙 우선).
 - ★**그 종점은 `Failed`가 아니라 `Exited`다**★ — 상태 매핑은 `TerminalReason` 하나로만 갈리고(`OutputCore::finish`), resume 경로엔 상태를 쓰는 줄이 없다. 그래서 대개 `Exited{code≠0}`이고 **code 0 조기종료도 `Exited`**다. `AgentStatus::Failed`는 `TerminalReason::Error` 전용 = 사실상 pump 패닉 전용이다. ★"사실상"을 "코드에 두 곳뿐"으로 굳히지 말 것★ — `manager.rs::early_activation_verdict` 의 `AgentStatus::Failed{message:"session gone"}` 지역값이 하필 이 resume 경로 안에 있다. 그것은 `StatusSink` 에 닿지 않고 로그 문구와 `matches!` 판정에만 쓰여 화면에는 안 나가므로 결론은 그대로지만, **공표되는 생산자**로 범위를 좁혀 읽어야 참이다. resume 실패는 상태 축이 아니라 **활성화 결과** 축(`RestoreOutcome::Failed`)과 프로필의 「마지막 실패」(ADR-0172)에 선다 — ADR-0082 본문도 "종점(주로 Exited code≠0)"이라 적는다. ★CLAUDE.md 「세션 복원」이 2026-08-25 까지 쓰던 "`Failed`로 직행"이 이 축을 혼동한 표현이었다 — 같은 날 고쳤으므로 **지금 CLAUDE.md 에는 그 문장이 없다.** 옛 커밋·옛 사본에서 만나거든 근거로 삼지 말 것★.
 - **재활성화도 맵 교체 = 화신 표식 재발급 (ADR-0084/0163):** resume respawn은 같은 AgentId의 세션 객체를 갈아끼우므로 표식을 **다시 뽑는다**(증분이 아니다 — 발급 단일점 = `ProfileRegistry::epoch_for_spawn`). 그 표식의 비교·저장 규약은 [§용어 사전](#용어-사전-혼동쌍-고정)이 한 번만 정의한다. 프론트 구독 deps에는 이 값을 넣지 않는다(ADR-0164).
 
-결정: resume 전용·fresh 폐지 = ADR-0082(Supersedes 0077, Amends 0008) · sid 통제 = ADR-0008 · 실패 기록 = ADR-0172 · 화신 표식 = ADR-0163.
+결정: resume 전용·fresh 폐지 = ADR-0082(Supersedes 0077, Amends 0008) · sid 발급(claude) = ADR-0008 · 발급 주체 중립 불변식 = ADR-0185(Amends 0008) · 실패 기록 = ADR-0172 · 화신 표식 = ADR-0163.
 
 ## 제어 채널 (에이전트 간 메시지 — S17)
 

@@ -154,7 +154,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 ### 세션 복원
 
-spawn 시 `--session-id`로 **sid를 우리가 통제** → `--resume` 무손실 복원. 복원 정확성은 이 sid에만 의존한다(추적 파일은 best-effort — 이걸로 기능 확장 금지). **resume 조기 종료는 fresh fallback 하지 않는다** — 종점으로 직행하고 원인을 로그로 남긴다(자동 재spawn 없음. ADR-0082가 ADR-0008의 그 조항을 폐지). ★**그 종점은 `AgentStatus::Failed`가 아니다**★ — ADR-0082 제목의 "Failed"는 일상어이고 실제 상태는 `Exited{code}`다. **매핑 근거·예외·혼동쌍은 여기 되올리지 않는다** — 정본은 `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」. (결정 정본 ADR-0008 + ADR-0082)
+**복원은 프로필에 저장된 backend sid 단독에 의존한다 — 발급 주체는 백엔드가 정한다**(추적 파일은 best-effort — 이걸로 기능 확장 금지). ★**발급 주체를 이 불변식에 넣지 말 것**★ — claude는 우리가 발급해 `--resume`으로 무손실 복원하고, codex는 발급받는다(**무손실은 claude 축의 말이다** — ADR-0185가 ADR-0008·0076의 발급 주체 조항을 개정). ★**단 발급받는 쪽은 배선이 아직 없다 — 그 상태로 sid를 심으면 codex가 새 대화를 열고, 그것이 새 대화라는 표식이 wire에 하나도 없다**★(활성화 입구가 `needs_session()`을 안 본다. 가드는 ADR-0185 결정 2 = Phase 2 요구사항). **resume 조기 종료는 fresh fallback 하지 않는다** — 종점으로 직행하고 원인을 로그로 남긴다(자동 재spawn 없음. ADR-0082가 ADR-0008의 그 조항을 폐지). ★**그 종점은 `AgentStatus::Failed`가 아니다**★ — ADR-0082 제목의 "Failed"는 일상어이고 실제 상태는 `Exited{code}`다. **매핑 근거·예외·혼동쌍은 여기 되올리지 않는다** — 정본은 `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」. (결정 정본 ADR-0008 + ADR-0082 + ADR-0185)
 
 ## 프론트 구조 (`src/`)
 
