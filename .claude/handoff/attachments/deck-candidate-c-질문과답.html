@@ -1,0 +1,467 @@
+<title>에이전트 백엔드 — 질문과 답</title>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,400;6..72,600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  /* 팔레트·서체는 같은 스텝의 briefing.html 과 같은 계보를 쓴다 — 두 문서가 한 세트로 읽히게. */
+  :root {
+    --paper:      #EDF1F1;
+    --surface:    #F7FAFA;
+    --surface-2:  #E3E9E9;
+    --ink:        #121A1D;
+    --ink-2:      #3E4C51;
+    --muted:      #6C7C82;
+    --line:       #C3CFD0;
+    --line-soft:  #D8E0E0;
+    --accent:     #0E6B72;
+    --accent-ink: #0A4F55;
+    --warn:       #A85D16;
+    --warn-bg:    #F2E4D3;
+    --absent:     #8E2F38;
+    --absent-bg:  #F2DEDF;
+    --ok-bg:      #DCE9E8;
+
+    /* 그림 카드는 두 테마에서 같은 값을 쓴다 — mermaid 가 자기 밝은 팔레트로 그리므로
+       바탕까지 어두워지면 대비가 무너진다. 의도된 테마 불변 토큰. */
+    --figure-bg:  #F7FAFA;
+    --figure-line:#C3CFD0;
+    /* 카드 배경이 테마 불변이므로 글자 색도 같이 고정한다 — 한쪽만 고정하면
+       다크 테마에서 밝은 글자가 밝은 카드에 올라가 안 보인다(실발생 2026-09-08). */
+    --figure-ink: #121A1D;
+
+    --mono: "IBM Plex Mono", "Cascadia Mono", ui-monospace, Consolas, monospace;
+    --sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, system-ui, sans-serif;
+    --serif: "Newsreader", ui-serif, Georgia, "Times New Roman", serif;
+    --r: 3px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0F1518; --surface: #161F22; --surface-2: #1E282B;
+      --ink: #DEE7E8; --ink-2: #B3C1C4; --muted: #7D8E93;
+      --line: #2E3B3F; --line-soft: #253034;
+      --accent: #59B7BC; --accent-ink: #7FCBCF;
+      --warn: #DE9A48; --warn-bg: #302617;
+      --absent: #DB7B84; --absent-bg: #2E1A1C;
+      --ok-bg: #17302F;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0F1518; --surface: #161F22; --surface-2: #1E282B;
+    --ink: #DEE7E8; --ink-2: #B3C1C4; --muted: #7D8E93;
+    --line: #2E3B3F; --line-soft: #253034;
+    --accent: #59B7BC; --accent-ink: #7FCBCF;
+    --warn: #DE9A48; --warn-bg: #302617;
+    --absent: #DB7B84; --absent-bg: #2E1A1C;
+    --ok-bg: #17302F;
+  }
+
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 15px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .deck {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    max-width: 1040px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  .slide {
+    padding: 56px 0 52px;
+    border-top: 1px solid var(--line-soft);
+  }
+  .slide:first-child { border-top: 0; padding-top: 72px; }
+
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .kicker .n {
+    color: var(--accent);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+  }
+
+  h1, h2, h3 { font-family: var(--serif); font-weight: 600; text-wrap: balance; margin: 0; }
+  h1 { font-size: 46px; line-height: 1.12; letter-spacing: -0.01em; }
+  h2 { font-size: 29px; line-height: 1.22; }
+  h3 { font-size: 17px; line-height: 1.35; }
+
+  .lede {
+    font-family: var(--serif);
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    max-width: 62ch;
+    margin-top: 18px;
+  }
+  p { max-width: 68ch; margin: 14px 0 0; }
+  .slide > h2 + p, .slide > h2 + .points { margin-top: 18px; }
+
+  code, .mono { font-family: var(--mono); font-size: 0.9em; }
+  code { background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(--r); }
+
+  .cover .stamp {
+    margin-top: 34px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--muted);
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 18px;
+  }
+  .cover .stamp dt { color: var(--ink-2); }
+  .cover .stamp dd { margin: 0; }
+
+  /* 근거 앵커 — 파일·심볼까지만 적고 줄번호는 적지 않는다(줄번호는 옮겨 붙는 순간 낡는다). */
+  .anchor {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 12px;
+    padding-left: 11px;
+    border-left: 2px solid var(--line);
+    line-height: 1.7;
+  }
+
+  figure { margin: 24px 0 0; }
+  .figure-body {
+    background: var(--figure-bg);
+    color: var(--figure-ink);
+    border: 1px solid var(--figure-line);
+    border-radius: var(--r);
+    padding: 18px 14px;
+    overflow-x: auto;
+  }
+  /* mermaid 가 안 그려진 경우(렌더러 없는 환경)엔 소스가 그대로 보인다 —
+     그때도 읽히게 색·서체를 준다. 그려지면 이 규칙은 SVG 아래로 사라진다. */
+  .figure-body pre.mermaid {
+    margin: 0;
+    min-width: 520px;
+    color: var(--figure-ink);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+  figcaption {
+    margin-top: 10px;
+    font-size: 13.5px;
+    color: var(--ink-2);
+    max-width: 66ch;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .points { list-style: none; padding: 0; margin: 18px 0 0; display: flex; flex-direction: column; gap: 11px; }
+  .points li { padding-left: 17px; position: relative; max-width: 70ch; }
+  .points li::before {
+    content: ""; position: absolute; left: 0; top: 0.62em;
+    width: 6px; height: 1px; background: var(--accent);
+  }
+
+  table { border-collapse: collapse; width: 100%; margin-top: 20px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 8px 12px 8px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.07em;
+    text-transform: uppercase; color: var(--muted); font-weight: 500;
+    border-bottom: 1px solid var(--line);
+  }
+  .table-wrap { overflow-x: auto; }
+
+  .tag {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em;
+    padding: 2px 7px; border-radius: var(--r); white-space: nowrap;
+  }
+  .tag.open   { background: var(--ok-bg);     color: var(--accent-ink); }
+  .tag.shut   { background: var(--absent-bg); color: var(--absent); }
+  .tag.later  { background: var(--warn-bg);   color: var(--warn); }
+
+  .note {
+    margin-top: 20px;
+    background: var(--warn-bg);
+    border-radius: var(--r);
+    padding: 13px 16px;
+    font-size: 13.5px;
+    color: var(--ink);
+    max-width: 72ch;
+  }
+  .note b { color: var(--warn); }
+
+  .rule {
+    margin-top: 26px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.5;
+    color: var(--ink);
+    max-width: 64ch;
+  }
+
+  @media (max-width: 640px) {
+    h1 { font-size: 34px; }
+    h2 { font-size: 24px; }
+    .lede { font-size: 18px; }
+    .slide { padding: 40px 0 36px; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    html { scroll-behavior: smooth; }
+  }
+</style>
+
+<div class="deck">
+
+  <!-- 표지 -->
+  <section class="slide cover">
+    <div class="kicker"><span class="n">Q&amp;A</span><span>engram dashboard · 에이전트 백엔드</span></div>
+    <h1>물어본 순서대로</h1>
+    <p class="lede">답을 <b>한 문장으로 먼저</b> 적었다. 첫 문장에서 멈춰도 답은 손에 남는다 — 그 아래는 근거다.</p>
+    <dl class="stamp">
+      <dt>기준</dt><dd>브랜치 v0.3.0/feat/codex-backend · 코드 실측 2026-09-08</dd>
+      <dt>범위</dt><dd>codex Phase 1 — 띄우기까지</dd>
+      <dt>정본</dt><dd>agent-backend.md — 디테일과 최신은 그쪽이 갖는다</dd>
+    </dl>
+  </section>
+
+  <!-- Q1 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q1</span><span>만들기와 띄우기</span></div>
+    <h2>에이전트를 만들었는데 왜 아무 일도 안 일어나나?</h2>
+    <p class="lede">첫 클릭은 명부에 「예약」 항목만 적어 두기 때문이다 — 이 시점에는 <b>프로세스가 없고</b>, 트리에 뜬 그 예약 노드를 <b>더블클릭하거나 「활성화」를 눌러야</b> 비로소 실제 CLI 가 뜬다.</p>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart TD
+  subgraph G1["제스처 1 — 만든다 (프로세스 없음)"]
+    A["에이전트 목록 패널의 빈 곳 우클릭"] -->|"에이전트 생성 ▶ 백엔드 항목"| B["agentlist.create* 명령"]
+    B -->|"사람 경로만 통과"| C["폴더 선택 대화상자"]
+    C -->|"CreateProfile · backend 칸"| D["데몬: 프로필 등록 + agents.json 영속"]
+  end
+  subgraph G2["제스처 2 — 띄운다"]
+    E["예약 노드 더블클릭 · 활성화"] -->|"SpawnProfile"| F["데몬: 모드 유도"]
+    F -->|"activate_profile"| G["AgentManager.spawn_agent"]
+  end
+  D -.->|"사람이 한 번 더 누를 때까지 아무 일도 없다"| E
+</pre>
+      </div>
+      <figcaption><b>메뉴가 안 뜨면 우클릭 자리를 확인한다.</b> 자리는 <b>에이전트 목록 패널의 빈 곳(pane 배경)</b> 이고 <b>행 우클릭 메뉴가 아니다</b> — 행을 우클릭하면 행 메뉴가 이겨서 상위 슬롯 메뉴가 아예 뜨지 않는다(ADR-0064).</figcaption>
+    </figure>
+    <div class="anchor">
+      src/commands/agentCommands.ts — registerSlotMenu('agent_list', …) · createReserved<br>
+      src/components/agent/AgentList.tsx — 파일 헤더의 버블 규칙 · onContextMenu 의 stopPropagation · activateReserved<br>
+      crates/engram-dashboard-daemon/src/connection_core.rs — CreateProfile · SpawnProfile 처리
+    </div>
+  </section>
+
+  <!-- Q2 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q2</span><span>왜 갈랐나</span></div>
+    <h2>왜 클릭을 두 번 하게 만들었나?</h2>
+    <p class="lede">폴더를 고르는 일과 프로그램을 띄우는 일이 <b>서로 다른 실패를 하기</b> 때문이다.</p>
+    <ul class="points">
+      <li>붙여 두면 <b>폴더를 잘못 골랐을 때 프로세스까지 함께 치워야 한다.</b></li>
+      <li>첫 제스처의 산출물은 <code>agents.json</code> 에 영속되는 프로필 한 건뿐이다.</li>
+      <li>그 뒤 <b>사람이 한 번 더 누를 때까지 아무 일도 없다.</b></li>
+    </ul>
+  </section>
+
+  <!-- Q3 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q3</span><span>스폰 사슬</span></div>
+    <h2>새 백엔드를 붙이면 그 아래 배관도 고쳐야 하나?</h2>
+    <p class="lede">아니다 — 「어느 프로그램을 어떤 인자로 띄우나」를 아는 코드는 <b>백엔드별 폴더 하나</b>에 갇혀 있고, 그 폴더가 명령줄 한 벌을 만들어 넘기면 <b>그 아래로는 아무도 백엔드를 모른다.</b></p>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart TD
+  M["AgentManager.spawn_agent"] -->|"AgentCommand 변형"| BF["backend_for — 명령 축 dispatch 표"]
+  BF --> CB["그 백엔드의 build_spec"]
+  CB -->|"CommandSpec · program+args+cwd"| ST["select_transport — shape 는 backend.transport_shape 가 고른다"]
+  ST -->|"Pty · decoder 를 버린다"| PT["PtyTransport.open"]
+  ST -->|"StdioNdjson · decoder 를 받는다"| SD["StdioTransport.open"]
+  PT -->|"원시 바이트"| OC["OutputCore · 링 + seq"]
+  SD -->|"구조화 이벤트"| OC
+  OC -->|"OutputEvent 팬아웃"| PC["ProtocolClient (프론트 TS)"]
+  PC -->|"AgentInfo.capabilities"| RM["renderMode"]
+</pre>
+      </div>
+      <figcaption>통로는 바이트만 나르고, 코어는 그 바이트에 번호를 붙여 링에 쌓고, 데몬은 구독자에게 뿌리고, 프론트는 받아 그린다. <b>백엔드 이름이 실제로 적히는 자리는 등록부와 두 개의 갈림 표뿐이다.</b></figcaption>
+    </figure>
+    <div class="note">★<b><code>build_spec</code> 안에서 끝난다고 적지 말 것</b>★ — 같은 파일이 <code>needs_session</code>·<code>supports_control_channel</code>·<code>accepts_mcp_config</code>·<code>reads_messages</code>·<code>capabilities</code> 도 선언하고, 백엔드에 따라 <code>transport_shape</code>·<code>output_decoder</code> 까지 선언한다. 끝나는 것은 그 <b>함수</b>가 아니라 그 <b>폴더</b>다(ADR-0004).</div>
+    <div class="anchor">
+      crates/engram-dashboard-agent/src/backend/mod.rs — 파일 헤더 · backend_for · backend_for_encoder · 트립와이어 셋<br>
+      crates/engram-dashboard-agent/src/manager.rs — select_transport<br>
+      crates/engram-dashboard-agent/src/transport/pty.rs
+    </div>
+  </section>
+
+  <!-- Q4 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q4</span><span>렌더 분기</span></div>
+    <h2>슬롯에 챗이 뜰지 터미널이 뜰지는 누가 정하나?</h2>
+    <p class="lede">그 슬롯에 사람이나 LLM 이 걸어 둔 <b>강제값이 먼저</b>이고, <b>없을 때만</b> 에이전트가 신고한 capability 한 칸으로 떨어진다.</p>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart LR
+  OV["renderModeOverride 의 그 슬롯 칸"] -->|"값이 있으면 그것"| M["슬롯 렌더러 — terminal · rich · dom"]
+  OV -.->|"키가 없을 때만 ?? 로 떨어진다"| DF["defaultRenderMode(agent)"]
+  TSH["backend.transport_shape — 구조화 모양을 고른다"] --> CO["Capabilities.compose"]
+  BC["BackendCaps — 그 백엔드의 선언"] --> CO
+  CO -->|"output.structured"| DF
+  DF -->|"true → rich · false → terminal"| M
+  TSH -.->|"StdioNdjson 에만 붙는다 — Pty 경로는 버린다"| DEC["output_decoder"]
+</pre>
+      </div>
+      <figcaption>그 칸이 묻는 것은 「출력이 구조화되어 있나」다. 렌더러는 백엔드 이름을 <b>한 번도 보지 않는다</b> — 그래서 새 백엔드가 들어와도 프론트는 안 바뀐다. <b>자주 틀리는 둘:</b> 렌더 모드는 <b>셋</b>이고(<code>terminal|rich|dom</code>) 이분법으로 적으면 dom 이 사라진다 · <b>rich 로 가는 축은 decoder 가 아니다</b> — 통로 모양(<code>TransportShape::StdioNdjson</code>)이 구조화를 고르고 decoder 는 그 모양에만 붙는다.</figcaption>
+    </figure>
+    <div class="note">★<b>ADR-0044 를 렌더 모드 우선순위의 근거로 인용하지 말 것</b>★ — 그 ADR 은 JSON 모드 배선·<code>StdioTransport</code> 신설 결정이고 <code>override</code> 라는 낱말이 한 번도 안 나온다. 우선순위 정본은 <b>ADR-0078</b> 이다.</div>
+    <div class="anchor">
+      src/store/viewStore.ts — renderModeOverride 필드 JSDoc<br>
+      src/components/layout/ViewLayoutRenderer.tsx — renderModeOverride[slotId] ?? defaultRenderMode(agent)<br>
+      src/components/slot/renderMode.ts — RENDER_MODES · src/api/types.ts
+    </div>
+  </section>
+
+  <!-- Q5 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q5</span><span>사람만 통과</span></div>
+    <h2>LLM 이 대신 만들면 안 되나?</h2>
+    <p class="lede">codex 는 안 된다 — 처음 보는 폴더에서 <b>자기 신뢰 확인 모달</b>을 띄우는데 사람이 아닌 호출자는 <b>그 모달을 못 지난다.</b></p>
+    <ul class="points">
+      <li>키를 넣어도 안 먹는다(<b>실측 2026-09-07</b>). 지금 열면 「만들 수는 있는데 <b>쓸 수는 없는</b> 에이전트」가 생긴다.</li>
+      <li><b>여는 시점 = Phase 2</b>, codex 신뢰 확인 모달 처리가 정해질 때. <b>사람이 만드는 문은 그대로 열려 있다.</b></li>
+      <li>반려 문구에는 <b>사유와 여는 시점을 항상 함께 적는다</b> — 코드가 그렇게 못 박아 뒀다(<code>LlmBackendPolicy.refusal</code> 의 doc). 반년 뒤 그 거절을 만난 사람이 무엇을 기다리는지 문구 하나로 알아야 한다는 뜻이다.</li>
+    </ul>
+  </section>
+
+  <!-- Q6 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q6</span><span>닫힌 문</span></div>
+    <h2>닫혀 있다면 정확히 어디가 닫혀 있나?</h2>
+    <p class="lede"><b>정책은 표 한 장</b>이고 입구 셋이 그 표를 함께 본다 — 표에 이름이 없는 백엔드는 열린 게 아니라 <b>막힌 것</b>이다(fail-closed).</p>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart TD
+  P["LLM_BACKEND_POLICY — 표에 없으면 반려(fail-closed)"]
+  H["사람 — 빈 곳 우클릭 메뉴"] -->|"runAsHuman — 게이트를 지나지 않는다"| OK["통과 → 프로필 생성"]
+  L["LLM · 명령 버스"] -->|"프론트 레지스트리 registry.run"| D1["문 1 — humanOnly · 호출자 축으로 반려"]
+  L -->|"셸 agent.spawnInto"| D2["문 2 — 받은 낱말을 정책에 물어 반려"]
+  L -->|"코어 agent.new"| D3["문 3 — backend 는 필수 인자 · 선언 어휘에 없으면 역직렬화가 먼저 반려"]
+  P --- D2
+  P --- D3
+  X["backend 칸을 비운 스폰 패킷"] -->|"기본값 없음"| ERR["데몬 거절 — MISSING_BACKEND"]
+</pre>
+      </div>
+      <figcaption><b>문 하나는 낱말로 닫을 수 없다.</b> 프론트 레지스트리에 오른 항목은 <b>사람 클릭과 LLM 호출이 같은 등록물</b>이라 낱말로 닫으면 사람 길까지 함께 닫힌다 — 그래서 그 문만 <b>호출자 축</b>으로 갈랐다. 셸 문은 낱말을 <b>받아서</b> 정책이 닫는 쪽이고(런타임 거절이 실제로 닿는 유일한 문), 코어 문은 선언 어휘에 낱말이 없어 <b>역직렬화가 먼저</b> 반려한다.</figcaption>
+    </figure>
+    <ul class="points">
+      <li>★<b>「못 고른다」와 「골라도 정책이 닫는다」는 다른 축이다</b>★ — 뭉개면 어느 문을 열 때 무엇을 손대야 하는지가 사라진다. 「모르는 낱말」과 「아는데 이 표면이 안 만든다」도 한 문구로 뭉치지 않는다 — 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.</li>
+      <li><b>코어 입구의 정책 팔은 오늘 발화하지 않는다</b> — 선언 어휘가 정책 표보다 좁아서 닫힌 낱말이 그 팔에 닿기 전에 역직렬화가 반려한다. ★그래도 지우지 말 것★ — 그 팔이 막는 편집은 「어휘를 넓히면서 정책 표는 안 넓히는 것」이고, 그 조합이 오는 날 유일한 런타임 방어가 된다.</li>
+      <li><b><code>backend</code> 칸은 필수다</b> — 빈 칸을 데몬이 거절하고 어느 칸을 채우라는 문구까지 데몬이 낸다. 「안 적으면 claude」 같은 조용한 기본값을 두면 <b>고르지 않은 것과 claude 를 고른 것이 구별되지 않는다.</b></li>
+    </ul>
+    <div class="anchor">
+      crates/engram-dashboard-agent/src/commands.rs — LLM_BACKEND_POLICY · llm_creation_refusal · NO_POLICY_DECLARED<br>
+      src-tauri/src/layout/apply.rs — parse_backend · gate_backend<br>
+      src/commands/registry.ts — humanOnly 칸 doc · run vs runAsHuman<br>
+      crates/engram-dashboard-daemon/src/connection_core.rs — MISSING_BACKEND
+    </div>
+  </section>
+
+  <!-- Q7 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">Q7</span><span>백엔드 비교</span></div>
+    <h2>그래서 지금 어느 백엔드가 무엇을 하나?</h2>
+    <p class="lede">배선된 것은 <b>claude 둘과 codex</b> 이고, gemini 는 폴더와 stub 이 서 있지만 <b>명령 변형이 없어 dispatch 에 배선되지 않았다.</b></p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>백엔드</th><th>전송 모양</th><th>렌더 기본</th><th>세션 복원</th><th>우편 수신</th><th>제어 채널 · MCP</th><th>LLM 창구</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>claude</code> (터미널)</td>
+            <td><code>Pty</code></td>
+            <td>terminal</td>
+            <td>무손실 <code>--resume</code></td>
+            <td>받는다</td>
+            <td>있다 · <code>--mcp-config</code></td>
+            <td><span class="tag open">열림</span></td>
+          </tr>
+          <tr>
+            <td><code>claude</code> (stream-json)</td>
+            <td><code>StdioNdjson</code></td>
+            <td>rich (챗)</td>
+            <td>무손실 <code>--resume</code></td>
+            <td>받는다</td>
+            <td>있다 · <code>--mcp-config</code></td>
+            <td><span class="tag open">열림</span></td>
+          </tr>
+          <tr>
+            <td><code>codex</code></td>
+            <td><code>Pty</code></td>
+            <td>terminal</td>
+            <td>없음 — 항상 Fresh</td>
+            <td>명단에서 제외</td>
+            <td>없다</td>
+            <td><span class="tag shut">사람만</span></td>
+          </tr>
+          <tr>
+            <td><code>gemini</code> <span class="tag later">미배선</span></td>
+            <td><code>Pty</code> (trait 기본)</td>
+            <td>terminal (스텁)</td>
+            <td>없음 (보수적 스텁)</td>
+            <td>선언 안 함 — trait 기본</td>
+            <td>없다</td>
+            <td><span class="tag shut">낱말 미등록</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <ul class="points">
+      <li>각 칸은 <b>백엔드가 스스로 없다고 신고</b>하고 코어가 그 신고대로 배관을 잠근다 — 기능이 「빠진」 게 아니다. 그래서 이 표의 <code>false</code> 칸이 곧 다음 단계에 열 항목의 목록이 된다.</li>
+      <li>★<b><code>codex</code> 의 MCP 칸을 오독하지 말 것</b>★ — 「codex 가 MCP 를 못 쓴다」가 아니라 <b>우리가 만든 mcp-config 파일을 먹일 수 있나</b>를 묻는 칸이다. codex 의 MCP 주입은 전역 TOML 오버라이드라 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.</li>
+      <li><code>codex</code> 의 상주 JSON-RPC(<code>codex app-server</code>)가 서면 <b>그 행의 여러 칸이 한꺼번에 열린다</b> — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다.</li>
+    </ul>
+    <div class="rule"><b>새 백엔드는 파일이 아니라 열 하나가 는다.</b> 이 표가 백엔드가 갈리는 유일한 자리이고, Q1~Q6 의 배관은 새 열이 들어와도 한 줄도 바뀌지 않는다 — <b>정본과 최신은 <code>agent-backend.md</code></b> 가 갖는다.</div>
+    <div class="anchor">
+      crates/engram-dashboard-agent/src/backend/mod.rs — AgentBackend trait 의 기본값 · 트립와이어 셋<br>
+      crates/engram-dashboard-agent/src/backend/&lt;이름&gt;/mod.rs — 그 백엔드의 선언과 사유 주석
+    </div>
+  </section>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.15.0/mermaid.min.js"></script>
+<script>
+  // 이 파일이 기록이므로 혼자서도 그려져야 한다(로컬에서 그냥 열어도 그림이 나오게).
+  // 단 mermaid 를 자체 렌더하는 호스트에서 열리면 이미 그려져 있으므로 아무것도 하지 않는다 —
+  // 그린 자리를 다시 파싱하면 그림이 오류 텍스트로 바뀐다.
+  window.addEventListener('load', function () {
+    // 호스트 렌더러가 비동기로 그리는 경우 먼저 양보한다 — 둘이 같이 그리면 그림이 두 장 된다.
+    setTimeout(function () {
+    var blocks = document.querySelectorAll('pre.mermaid:not([data-processed])');
+    if (!blocks.length || !window.mermaid) return;
+    if (document.querySelector('.figure-body svg')) return;
+    try {
+      window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
+      window.mermaid.run({ nodes: blocks });
+    } catch (e) {
+      // 실패해도 위 CSS 가 소스를 읽을 수 있게 남겨 둔다.
+    }
+    }, 400);
+  });
+</script>

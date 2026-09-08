@@ -246,83 +246,21 @@
 
   <!-- 01 -->
   <section class="slide cover">
-    <div class="kicker"><span class="n">01</span><span>engram dashboard · 에이전트 백엔드 · 확장 축</span></div>
-    <h1>에이전트 백엔드 구조</h1>
-    <p class="lede">백엔드는 <b>한 표에서 갈리고</b> 그 아래로는 아무도 백엔드를 모른다 — 그래서 새 백엔드는 파일이 아니라 <b>열 하나</b>가 는다.</p>
+    <div class="kicker"><span class="n">01</span><span>engram dashboard · 에이전트 백엔드</span></div>
+    <h1>새 백엔드는 파일이 아니라 표의 열 하나가 는다</h1>
+    <p class="lede">claude 든 codex 든 gemini 든 <b>같은 파이프를 타고</b>, 백엔드마다 다른 것은 그 파이프 입구에 무엇을 밀어 넣느냐뿐이다.</p>
     <dl class="stamp">
       <dt>기준</dt><dd>브랜치 v0.3.0/feat/codex-backend · 코드 실측 2026-09-08</dd>
-      <dt>지금 배선된 것</dt><dd>claude(터미널) · claude(stream-json) · codex</dd>
+      <dt>배선된 것</dt><dd>claude(터미널) · claude(stream-json) · codex</dd>
       <dt>아직 아닌 것</dt><dd>gemini — 폴더·stub 만 서 있고 dispatch 미배선</dd>
     </dl>
-    <div class="note"><b>이 페이지는 2026-09-08 기준 개략 설명이다.</b> 구조가 바뀔 때마다 갱신하지 않는다 — <b>디테일과 최신은 <code>agent-backend.md</code></b> 가 갖는다. 두 쪽이 어긋나 보이면 md 가 맞다.</div>
+    <div class="note">이 페이지는 <b>2026-09-08 기준 개략</b>이다. 구조가 바뀔 때마다 갱신하지 않는다 — 디테일과 최신은 같은 폴더의 <code>agent-backend.md</code> 가 갖는다.</div>
   </section>
 
   <!-- 02 -->
   <section class="slide">
-    <div class="kicker"><span class="n">02</span><span>백엔드 한눈에</span></div>
-    <h2>백엔드가 갈리는 자리는 이 표 하나다</h2>
-    <p>아래가 백엔드마다 다른 칸 전부다. 이 표 밖의 배관 — 통로·코어·데몬 팬아웃·프론트 — 은 백엔드 이름을 모른다.</p>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th>백엔드</th><th>전송 모양</th><th>렌더</th><th>세션 복원</th><th>우편 수신</th><th>LLM 창구</th><th>상태</th></tr></thead>
-        <tbody>
-          <tr>
-            <td><code>claude</code> (터미널)</td>
-            <td><code>Pty</code></td>
-            <td>terminal (xterm)</td>
-            <td>무손실 <code>--resume</code></td>
-            <td>받는다</td>
-            <td><span class="tag open">열림</span></td>
-            <td><span class="tag open">배선됨</span></td>
-          </tr>
-          <tr>
-            <td><code>claude</code> (stream-json)</td>
-            <td><code>StdioNdjson</code></td>
-            <td>rich (챗)</td>
-            <td>무손실 <code>--resume</code></td>
-            <td>받는다</td>
-            <td><span class="tag open">열림</span></td>
-            <td><span class="tag open">배선됨</span></td>
-          </tr>
-          <tr>
-            <td><code>codex</code></td>
-            <td><code>Pty</code></td>
-            <td>terminal (xterm)</td>
-            <td>없음 — 항상 Fresh</td>
-            <td>명단에서 제외</td>
-            <td><span class="tag shut">사람만</span></td>
-            <td><span class="tag open">배선됨</span></td>
-          </tr>
-          <tr>
-            <td><code>gemini</code></td>
-            <td><code>Pty</code> (스텁)</td>
-            <td>terminal (스텁)</td>
-            <td>없음 (보수적 스텁)</td>
-            <td>선언 안 함 — trait 기본</td>
-            <td><span class="tag shut">낱말 미등록</span></td>
-            <td><span class="tag later">미배선</span></td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-    <ul class="points">
-      <li><b>각 칸은 백엔드 폴더 하나가 스스로 신고하고, 코어는 그 신고대로 배관을 잠근다</b> — 기능이 「빠진」 게 아니다. 그래서 새 백엔드는 파일이 아니라 <b>열 하나</b>가 늘고, 아래 척추는 한 줄도 안 바뀐다.</li>
-      <li><b>미배선 = 폴더와 stub 은 서 있는데 명령 변형이 없어 dispatch 로 라우팅되지 않는다.</b> 그래서 gemini 의 칸은 전부 stub 값(trait 기본·best-guess)이고 실측이 아니다.</li>
-      <li><b>렌더 열은 강제값이 없을 때의 기본값이다</b> — 슬롯에 걸린 <code>renderModeOverride</code> 가 먼저다(「렌더 분기」).</li>
-      <li><b>LLM 창구 열은 결과만 적는다</b> — 「못 고른다」와 「골라도 정책이 닫는다」는 다른 축이고, 그 갈림은 「닫힌 문」이 가른다.</li>
-      <li><code>codex</code> 의 상주 JSON-RPC(<code>codex app-server</code>)가 서면 <b>그 행의 여러 칸이 한꺼번에 열린다</b> — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다.</li>
-    </ul>
-    <div class="anchor">
-      crates/engram-dashboard-agent/src/backend/mod.rs — AgentBackend trait 기본값 · backend_for · 트립와이어 셋<br>
-      crates/engram-dashboard-agent/src/backend/&lt;이름&gt;/mod.rs — 그 백엔드의 선언과 사유 주석
-    </div>
-  </section>
-
-  <!-- 03 -->
-  <section class="slide">
-    <div class="kicker"><span class="n">03</span><span>중립 척추 · 두 제스처</span></div>
-    <h2>만들기와 띄우기가 갈려 있다</h2>
-    <p>에이전트를 <b>만드는 것</b>과 실제로 <b>프로그램을 띄우는 것</b>은 클릭 두 번으로 갈려 있다. 첫 클릭은 <b>에이전트 목록 패널의 빈 곳</b>을 우클릭해 폴더를 고른 뒤 명부에 「예약」 항목만 적어 둘 뿐이라, 이 시점에는 프로세스가 없다. 트리에 뜬 그 예약 노드를 더블클릭하거나 「활성화」를 눌러야 비로소 실제 CLI 가 뜬다.</p>
+    <div class="kicker"><span class="n">02</span><span>두 제스처</span></div>
+    <h2>첫 클릭은 명부에 「예약」만 적고 프로세스는 만들지 않는다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
@@ -339,21 +277,38 @@ flowchart TD
   D -.->|"사람이 한 번 더 누를 때까지 아무 일도 없다"| E
 </pre>
       </div>
-      <figcaption><b>주장:</b> 갈라 둔 이유는 <b>폴더를 고르는 일과 프로그램을 띄우는 일이 서로 다른 실패를 하기</b> 때문이다 — 붙여 두면 폴더를 잘못 골랐을 때 프로세스까지 함께 치워야 한다. 이 그림에는 백엔드 이름이 한 번도 나오지 않는다.</figcaption>
+      <figcaption>갈라 둔 이유는 <b>폴더를 고르는 일과 프로그램을 띄우는 일이 서로 다른 실패를 하기</b> 때문이다 — 붙여 두면 폴더를 잘못 골랐을 때 프로세스까지 함께 치워야 한다.</figcaption>
     </figure>
-    <div class="note"><b>우클릭 자리는 pane 배경이고 행 우클릭 메뉴가 아니다.</b> 행을 우클릭하면 행 메뉴가 이겨서 상위 슬롯 메뉴가 아예 뜨지 않으므로(ADR-0064), 이 구분을 뭉개면 메뉴를 못 찾는다.</div>
-    <div class="anchor">
-      src/commands/agentCommands.ts — registerSlotMenu('agent_list', …) · createReserved<br>
-      src/components/agent/AgentList.tsx — 파일 헤더의 버블 규칙 · onContextMenu 의 stopPropagation · activateReserved<br>
-      crates/engram-dashboard-daemon/src/connection_core.rs — CreateProfile · SpawnProfile 처리
-    </div>
+  </section>
+
+  <!-- 03 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">03</span><span>두 제스처 · 우클릭 자리</span></div>
+    <h2>행을 우클릭하면 행 메뉴가 이겨서 생성 메뉴가 아예 뜨지 않는다</h2>
+    <figure>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>우클릭 자리</th><th>뜨는 것</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>에이전트 목록 패널의 <b>빈 곳(pane 배경)</b></td>
+              <td>상위 슬롯 메뉴 — 「에이전트 생성 ▶ 백엔드 항목」</td>
+            </tr>
+            <tr>
+              <td>목록의 <b>행</b></td>
+              <td>행 메뉴가 이긴다 — 상위 슬롯 메뉴는 뜨지 않는다</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>이 구분을 뭉개면 메뉴를 못 찾는다.</figcaption>
+    </figure>
   </section>
 
   <!-- 04 -->
   <section class="slide">
-    <div class="kicker"><span class="n">04</span><span>중립 척추 · 스폰 사슬</span></div>
-    <h2>CLI 한 줄이 슬롯에 닿기까지</h2>
-    <p>「어느 프로그램을 어떤 인자로 띄우나」를 아는 코드는 <b>백엔드별 폴더 하나</b>에 갇혀 있다. 그 폴더가 명령줄 한 벌을 만들어 넘기면 그 아래로는 아무도 백엔드를 모른다 — 통로는 바이트만 나르고, 코어는 그 바이트에 번호를 붙여 링에 쌓고, 데몬은 구독자에게 뿌리고, 프론트는 받아 그린다. <b>백엔드 이름이 실제로 적히는 자리는 등록부와 두 개의 갈림 표뿐이다.</b></p>
+    <div class="kicker"><span class="n">04</span><span>스폰 사슬</span></div>
+    <h2>백엔드 이름이 적히는 자리는 등록부와 두 갈림 표뿐이고, 그 아래로는 아무도 백엔드를 모른다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
@@ -369,67 +324,74 @@ flowchart TD
   PC -->|"AgentInfo.capabilities"| RM["renderMode"]
 </pre>
       </div>
-      <figcaption>★<b><code>build_spec</code> 안에서 끝난다고 적지 말 것</b>★ — 같은 파일이 <code>needs_session</code>·<code>supports_control_channel</code>·<code>accepts_mcp_config</code>·<code>reads_messages</code>·<code>capabilities</code> 도 선언하고, 백엔드에 따라 <code>transport_shape</code>·<code>output_decoder</code> 까지 선언한다. 끝나는 것은 그 <b>함수</b>가 아니라 그 <b>폴더</b>다(ADR-0004).</figcaption>
+      <figcaption>통로는 바이트만 나르고, 코어는 그 바이트에 번호를 붙여 링에 쌓고, 데몬은 구독자에게 뿌리고, 프론트는 받아 그린다.</figcaption>
     </figure>
-    <div class="anchor">
-      crates/engram-dashboard-agent/src/backend/mod.rs — 파일 헤더 · backend_for · backend_for_encoder · 트립와이어 셋<br>
-      crates/engram-dashboard-agent/src/manager.rs — select_transport<br>
-      crates/engram-dashboard-agent/src/transport/pty.rs
-    </div>
   </section>
 
   <!-- 05 -->
   <section class="slide">
-    <div class="kicker"><span class="n">05</span><span>배선된 백엔드 · argv</span></div>
-    <h2>실제로 띄우는 명령줄</h2>
-    <div class="cmd">claude   cmd.exe /c claude [extra_args…] --session-id|--resume &lt;sid&gt; [--mcp-config &lt;path&gt;] [--allowedTools &lt;패턴&gt;…]
-codex    cmd.exe /c codex --cd &lt;고른 폴더&gt; -s workspace-write -a on-request [extra_args…]</div>
-    <ul class="points">
-      <li><b>Windows 는 <code>cmd.exe /c</code> 를 한 겹 씌운다</b> — PATH 에 있는 그 이름이 실제 실행파일이 아니라 <code>.cmd</code> shim 이라서다(직접 띄우면 error 193 으로 죽는다). 실 경로를 찾아 부르지 않는 이유는 그 경로가 버전에 묶여 있고 CLI 가 스스로 업데이트해 옮기기 때문이다.</li>
-      <li><b><code>extra_args</code> 자리가 백엔드마다 다르다</b> — 취향이 아니라 각 CLI 의 인자 문법에 딸린 결과다. claude 는 <code>--allowedTools</code> 가 variadic 이라 그 그룹을 맨 끝에 두고 extras 를 <b>먼저</b> 소진하며, codex 는 호출자가 우리 인자를 덮을 수 있게 extras 를 <b>맨 마지막</b>에 둔다.</li>
-      <li><b>claude 의 stream-json 갈래는 같은 줄에 <code>-p --input-format stream-json --output-format stream-json --verbose</code> 를 더한다</b> — 실행 파일과 세션·MCP·grant 인자는 터미널 갈래와 같다.</li>
-      <li><b>codex 는 우리가 발급한 sid 를 넘기지 않는다</b> — 「argv 에 <b>절대</b> 안 실린다」가 아니다. <code>extra_args</code> 는 그대로 통과하므로 호출자가 넣으면 실린다. 전용 테스트가 단언하는 것은 <b>빈 extras 기준</b>으로 sid 가 조립되지 않는다는 것이다.</li>
-    </ul>
-    <div class="anchor">
-      crates/engram-dashboard-agent/src/backend/claude/mod.rs — CLAUDE_PROGRAM · build_spec<br>
-      crates/engram-dashboard-agent/src/backend/codex/mod.rs — CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · argv 단위 테스트<br>
-      crates/engram-dashboard-agent/src/backend/mod.rs — console_command
-    </div>
+    <div class="kicker"><span class="n">05</span><span>스폰 사슬 · 어디서 끝나나</span></div>
+    <h2>백엔드 전용 코드는 함수 하나가 아니라 폴더 하나에서 끝난다</h2>
+    <figure>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>그 폴더가 선언하는 것</th><th>코어가 그 값으로 잠그는 것</th></tr></thead>
+          <tbody>
+            <tr><td><code>build_spec</code></td><td>program + args + cwd — 실제 명령줄 한 벌</td></tr>
+            <tr><td><code>needs_session</code></td><td><code>true</code> 면 sid 발급 + watcher · <code>false</code> 면 부팅 복원 대상 아님 · 항상 Fresh</td></tr>
+            <tr><td><code>reads_messages</code></td><td><code>false</code> 면 우편 수신자 명단에서 제외</td></tr>
+            <tr><td><code>supports_control_channel</code></td><td><code>true</code> 면 spawn 전에 provision(토큰+mcp-config 발급)</td></tr>
+            <tr><td><code>accepts_mcp_config</code></td><td>프라이밍 변형과 우편 표식이 이 값으로 갈린다</td></tr>
+            <tr><td><code>transport_shape</code></td><td><code>select_transport</code> 가 이 값으로 통로를 고른다</td></tr>
+            <tr><td><code>output_decoder</code></td><td>구조화 이벤트의 유무</td></tr>
+            <tr><td><code>capabilities().session.resume</code></td><td>무손실 복원 가능 여부</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <figcaption>끝나는 것은 <b><code>build_spec</code> 이라는 함수</b>가 아니라 그 <b>폴더</b>다.</figcaption>
+    </figure>
   </section>
 
   <!-- 06 -->
   <section class="slide">
-    <div class="kicker"><span class="n">06</span><span>중립 척추 · 렌더 분기</span></div>
-    <h2>override 가 먼저, 그다음 capability</h2>
-    <p>슬롯에 무엇을 그릴지는 두 층으로 정해진다. <b>먼저</b> 그 슬롯에 사람이나 LLM 이 걸어 둔 강제값(<code>renderModeOverride</code>)이 있는지 보고, <b>없을 때만</b> 에이전트가 신고한 capability 한 칸으로 떨어진다. 그 칸이 「출력이 구조화되어 있나」다. 렌더러는 백엔드 이름을 <b>한 번도 보지 않는다</b> — 그래서 새 백엔드가 들어와도 프론트는 안 바뀐다.</p>
+    <div class="kicker"><span class="n">06</span><span>렌더 분기 · 첫째 층</span></div>
+    <h2>강제값이 없을 때만 에이전트가 신고한 값으로 떨어진다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
 flowchart LR
   OV["renderModeOverride 의 그 슬롯 칸"] -->|"값이 있으면 그것"| M["슬롯 렌더러 — terminal · rich · dom"]
   OV -.->|"키가 없을 때만 ?? 로 떨어진다"| DF["defaultRenderMode(agent)"]
-  TSH["backend.transport_shape — 구조화 모양을 고른다"] --> CO["Capabilities.compose"]
-  BC["BackendCaps — 그 백엔드의 선언"] --> CO
-  CO -->|"output.structured"| DF
   DF -->|"true → rich · false → terminal"| M
-  TSH -.->|"StdioNdjson 에만 붙는다 — Pty 경로는 버린다"| DEC["output_decoder"]
 </pre>
       </div>
-      <figcaption><b>자주 틀리는 둘.</b> 첫째, <b>렌더 모드는 셋이다</b>(<code>terminal|rich|dom</code>) — 이분법으로 적으면 dom 이 사라진다. 둘째, <b>rich 로 가는 축은 decoder 가 아니다</b>: 통로 모양(<code>TransportShape::StdioNdjson</code>)이 구조화를 고르고 <b>decoder 는 그 모양에만 붙는다</b> — <code>select_transport</code> 의 <code>Pty</code> 팔은 받은 decoder 를 그냥 버린다.</figcaption>
+      <figcaption>렌더 모드는 <b>셋</b>이다 — <code>terminal|rich|dom</code>. 렌더러는 백엔드 이름을 한 번도 보지 않는다.</figcaption>
     </figure>
-    <div class="note">★<b>ADR-0044 를 렌더 모드 우선순위의 근거로 인용하지 말 것</b>★ — 그 ADR 은 JSON 모드 배선·<code>StdioTransport</code> 신설 결정이고 <code>override</code> 라는 낱말이 한 번도 안 나온다. 우선순위 정본은 <b>ADR-0078</b> 이다.</div>
-    <div class="anchor">
-      src/store/viewStore.ts — renderModeOverride 필드 JSDoc<br>
-      src/components/layout/ViewLayoutRenderer.tsx — renderModeOverride[slotId] ?? defaultRenderMode(agent)<br>
-      src/components/slot/renderMode.ts — RENDER_MODES · src/api/types.ts
-    </div>
   </section>
 
   <!-- 07 -->
   <section class="slide">
-    <div class="kicker"><span class="n">07</span><span>중립 척추 · 닫힌 문</span></div>
-    <h2>사람은 통과, LLM 은 정책이 닫는다</h2>
-    <p>에이전트를 만드는 입구가 여럿이라, 「어느 백엔드를 만들 수 있나」를 입구마다 따로 적으면 반드시 어긋난다. 그래서 <b>정책은 표 한 장</b>이고 입구 셋이 그 표를 함께 본다. 표에 이름이 없는 백엔드는 열린 게 아니라 <b>막힌 것</b>이다(fail-closed). 문 하나는 낱말로 닫을 수 없다 — 프론트 레지스트리에 오른 항목은 <b>사람 클릭과 LLM 호출이 같은 등록물</b>이라, 낱말로 닫으면 사람 길까지 함께 닫힌다. 그래서 그 문만 <b>호출자 축</b>으로 갈랐다.</p>
+    <div class="kicker"><span class="n">07</span><span>렌더 분기 · 둘째 층</span></div>
+    <h2>구조화를 고르는 것은 통로 모양이고, decoder 는 그 모양에만 붙는다</h2>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart LR
+  TSH["backend.transport_shape — 구조화 모양을 고른다"] --> CO["Capabilities.compose"]
+  BC["BackendCaps — 그 백엔드의 선언"] --> CO
+  CO -->|"output.structured"| DF["defaultRenderMode(agent)"]
+  DF -->|"true → rich · false → terminal"| M["슬롯 렌더러 — terminal · rich · dom"]
+  TSH -.->|"StdioNdjson 에만 붙는다 — Pty 경로는 버린다"| DEC["output_decoder"]
+</pre>
+      </div>
+      <figcaption>「decoder 를 선언하면 오른쪽으로 간다」는 <b>인과가 뒤집힌 서술</b>이다 — <code>select_transport</code> 의 <code>Pty</code> 팔은 받은 decoder 를 그냥 버린다.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 08 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">08</span><span>닫힌 문</span></div>
+    <h2>사람 경로는 게이트를 지나지 않고, LLM 경로만 사유를 실은 오류로 반려된다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
@@ -444,56 +406,101 @@ flowchart TD
   X["backend 칸을 비운 스폰 패킷"] -->|"기본값 없음"| ERR["데몬 거절 — MISSING_BACKEND"]
 </pre>
       </div>
-      <figcaption><b>주장:</b> 반려 문구에는 <b>사유와 여는 시점을 항상 함께 적는다</b> — 코드가 그렇게 못 박아 뒀다(<code>LlmBackendPolicy.refusal</code> 의 doc). 반년 뒤 그 거절을 만난 사람이 무엇을 기다리는지 문구 하나로 알아야 한다는 뜻이다.</figcaption>
+      <figcaption>정책은 <b>표 한 장</b>이고 입구 셋이 그 표를 함께 본다. 표에 이름이 없는 백엔드는 열린 게 아니라 <b>막힌 것</b>이다.</figcaption>
     </figure>
-    <ul class="points">
-      <li><b>오늘 닫혀 있는 것은 codex 의 LLM 창구다.</b> codex 는 처음 보는 폴더에서 <b>자기 신뢰 확인 모달</b>을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다 — 키를 넣어도 안 먹는다(실측 2026-09-07). 지금 열면 「만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. <b>여는 시점 = Phase 2</b>, codex 신뢰 확인 모달 처리가 정해질 때. 사람이 만드는 문은 그대로 열려 있다.</li>
-      <li><b>「모르는 낱말」과 「아는데 이 표면이 안 만든다」는 다른 축</b>이라 한 문구로 뭉치지 않는다 — 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.</li>
-      <li><b>코어 입구의 정책 팔은 오늘 발화하지 않는다</b> — 선언 어휘가 정책 표보다 좁아서 닫힌 낱말이 그 팔에 닿기 전에 역직렬화가 반려한다. ★그래도 지우지 말 것★ — 그 팔이 막는 편집은 「어휘를 넓히면서 정책 표는 안 넓히는 것」이고, 그 조합이 오는 날 유일한 런타임 방어가 된다.</li>
-    </ul>
-    <div class="anchor">
-      crates/engram-dashboard-agent/src/commands.rs — LLM_BACKEND_POLICY · llm_creation_refusal · NO_POLICY_DECLARED<br>
-      src-tauri/src/layout/apply.rs — parse_backend · gate_backend<br>
-      src/commands/registry.ts — humanOnly 칸 doc · run vs runAsHuman<br>
-      crates/engram-dashboard-daemon/src/connection_core.rs — MISSING_BACKEND
-    </div>
-  </section>
-
-  <!-- 08 -->
-  <section class="slide">
-    <div class="kicker"><span class="n">08</span><span>확장 축 · wire 계약</span></div>
-    <h2>백엔드를 하나 늘리면 낱말이 네 곳에 선다</h2>
-    <p>코어의 실행 명령 변형, 소켓으로 흐르는 wire 낱말, LLM 입구의 선언 어휘, 그리고 dispatch 배선이다. <b>넷 중 하나만 넓히면 나머지가 그 낱말을 모르는 채로 남는다</b> — gemini 가 「미배선」인 것이 그 상태다.</p>
-    <ul class="points">
-      <li><b>변형 추가는 경성 파손이다</b> — 스폰 명령은 <code>kind</code> 태그로 갈리는 열거형이라 모르는 변형은 무시되지 않고 역직렬화 실패가 된다. 데몬이 셸 재빌드보다 오래 사는 것은 설계라서 「릴리스 상대가 없다」가 이 실패를 막아 주지 않는다. 그래서 <code>PROTOCOL_VERSION</code> 을 <b>4</b> 로 올렸다.</li>
-      <li>★<b>버전 인상의 값어치는 「분명한 거부」다</b>★ — <code>daemon.json</code> 의 <code>protocol_version</code> 이 클라이언트와 다르면 판정이 <b>살아있는 데몬을 spawn 으로 덮지 않고</b> <code>DiscoveryError::VersionMismatch</code> 로 실패한다. 그 판정이 보는 것은 같은지 다른지뿐이라 어느 쪽이 새것인지는 묻지 않는다. 안 올렸으면 두 빌드가 악수를 지나 <b>서로 다른 낱말을 같은 것으로 읽었을</b> 자리다.</li>
-      <li><b>디스크는 통째로 파싱된다</b> — 모르는 <code>kind</code> 가 한 건이라도 있으면 그 한 건이 아니라 파싱 <b>전체</b>가 실패하고, 파일을 <code>.corrupt</code> 로 밀어낸 뒤 <b>빈 명부로 부팅</b>한다. 새 백엔드로 띄운 에이전트 하나가 나머지 전부를 데리고 사라진다. 이 하위호환은 개발 중이라 수용했고 재도입 트리거는 추적표에 걸려 있다(<code>docs/tracking.md</code> T-33).</li>
-      <li><b><code>backend</code> 칸은 필수다</b> — 빈 칸을 데몬이 거절하고 어느 칸을 채우라는 문구까지 데몬이 낸다. 「안 적으면 claude」 같은 조용한 기본값을 두면 <b>고르지 않은 것과 claude 를 고른 것이 구별되지 않는다</b>.</li>
-    </ul>
-    <div class="anchor">
-      crates/engram-dashboard-protocol/src/domain.rs — AgentBackendKind · 부재=오류 주석<br>
-      crates/engram-dashboard-protocol/src/lib.rs — PROTOCOL_VERSION · 체인지로그<br>
-      crates/engram-dashboard-agent/src/profile.rs — AgentCommand · serde(tag = "kind")<br>
-      crates/engram-dashboard-discovery/src/lib.rs — check_acceptable · DiscoveryError::VersionMismatch<br>
-      crates/engram-dashboard-agent/src/persistence/mod.rs — FileProfileStore::load · docs/tracking.md T-33
-    </div>
   </section>
 
   <!-- 09 -->
   <section class="slide">
-    <div class="kicker"><span class="n">09</span><span>미검 · 부채</span></div>
-    <h2>무엇이 미검인가</h2>
-    <div class="split">
-      <div>
-        <h3>구조에 달린 한계</h3>
-        <p><code>%VAR%</code> 가 든 폴더 경로는 여전히 <b>다른 폴더로 샌다</b> — <code>cmd.exe</code> 가 따옴표 안에서도 <code>%NAME%</code> 을 펴고, 알려진 해법이 일반적인 이스케이프가 아니라 미이식 상태다. 위 디스크 하위호환을 잡아 줄 <b>미지 <code>kind</code> 회귀 테스트가 없다.</b> 그리고 <b>실 모델 턴이 측정되지 않았다</b> — 계약 시험대의 상시 레인은 선언표 대조뿐이고, 실 CLI 를 띄우는 레인은 <code>#[ignore]</code> 라 부를 때만 돈다.</p>
+    <div class="kicker"><span class="n">09</span><span>닫힌 문 · codex</span></div>
+    <h2>codex 는 사람만 만들 수 있다 — LLM 이 만들면 첫 실행의 신뢰 확인 창을 지나지 못한다</h2>
+    <figure>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>창구</th><th><code>claude</code></th><th><code>codex</code></th></tr></thead>
+          <tbody>
+            <tr>
+              <td>사람 — 빈 곳 우클릭 메뉴</td>
+              <td>만든다 — <code>createClaudeProfile</code> 로 코드에 박혀 있다</td>
+              <td><span class="tag open">만든다</span> 사람 클릭만</td>
+            </tr>
+            <tr>
+              <td>LLM · 프론트 레지스트리 <code>registry.run</code></td>
+              <td>통과</td>
+              <td><span class="tag shut">반려</span> <code>humanOnly</code> — 호출자 축</td>
+            </tr>
+            <tr>
+              <td>LLM · 셸 <code>agent.spawnInto</code></td>
+              <td>통과</td>
+              <td><span class="tag shut">반려</span> <code>gate_backend</code> — 런타임 거절이 실제로 닿는 유일한 문</td>
+            </tr>
+            <tr>
+              <td>LLM · 코어 <code>agent.new</code></td>
+              <td>통과 — <code>backend</code> 는 필수 인자</td>
+              <td><span class="tag shut">반려</span> 선언 어휘에 <code>Codex</code> 가 없어 역직렬화가 먼저 반려</td>
+            </tr>
+            <tr>
+              <td>LLM · <code>agent.spawn</code>(cwd 즉시 스폰)</td>
+              <td><code>'claude'</code> 가 코드에 박혀 있다</td>
+              <td><span class="tag shut">못 고른다</span> 낱말을 받는 칸이 없다</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <div>
-        <h3>기록 부채</h3>
-        <p>굵은 결정 넷에 <b>ADR 이 없다</b> — <code>PROTOCOL_VERSION</code> 4 인상 · wire enum 신설 · <code>backend_session_id</code> 하드 rename · 「사람만」 예외(<code>humanOnly</code>).</p>
+      <figcaption>codex 는 처음 보는 폴더에서 <b>자기 신뢰 확인 모달</b>을 띄우는데 사람이 아닌 호출자는 그것을 못 지난다 — 키를 넣어도 안 먹는다(실측 2026-09-07). <b>여는 시점 = Phase 2</b>, 그 모달 처리가 정해질 때.</figcaption>
+    </figure>
+  </section>
+
+  <!-- 10 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">10</span><span>백엔드 비교</span></div>
+    <h2>기능이 「빠진」 게 아니라 백엔드가 스스로 없다고 신고한다</h2>
+    <figure>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>백엔드</th><th>전송 모양</th><th>렌더 기본값</th><th>세션 복원</th><th>우편 수신</th><th>LLM 창구</th><th>상태</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>claude</code> (터미널)</td>
+              <td><code>Pty</code></td>
+              <td>terminal</td>
+              <td>무손실 <code>--resume</code></td>
+              <td>받는다</td>
+              <td><span class="tag open">열림</span></td>
+              <td><span class="tag open">배선됨</span></td>
+            </tr>
+            <tr>
+              <td><code>claude</code> (stream-json)</td>
+              <td><code>StdioNdjson</code></td>
+              <td>rich</td>
+              <td>무손실 <code>--resume</code></td>
+              <td>받는다</td>
+              <td><span class="tag open">열림</span></td>
+              <td><span class="tag open">배선됨</span></td>
+            </tr>
+            <tr>
+              <td><code>codex</code></td>
+              <td><code>Pty</code></td>
+              <td>terminal</td>
+              <td>없음 — 항상 Fresh</td>
+              <td>명단에서 제외</td>
+              <td><span class="tag shut">사람만</span></td>
+              <td><span class="tag open">배선됨</span></td>
+            </tr>
+            <tr>
+              <td><code>gemini</code></td>
+              <td><code>Pty</code> (trait 기본)</td>
+              <td>terminal</td>
+              <td>없음 (보수적 stub)</td>
+              <td>선언 안 함 — trait 기본</td>
+              <td><span class="tag shut">낱말 미등록</span></td>
+              <td><span class="tag later">미배선</span></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-    </div>
-    <div class="rule"><b>정본과 최신은 <code>agent-backend.md</code> 가 갖는다.</b> 이 페이지는 그 문서의 <b>2026-09-08 시점 개략</b>이고 같은 mermaid 소스를 쓰므로, 구조가 움직여도 여기서 다시 그리지 않는다 — 고치는 곳은 md 다. 시스템 쪽 사실은 그대로다: 새 백엔드는 파일이 아니라 <b>열 하나</b>가 는다.</div>
+      <figcaption>gemini 열은 실측이 아니라 <b>stub 값</b>이다 — 명령 변형이 없어 dispatch 로 라우팅되지 않는다. 그리고 codex 의 상주 JSON-RPC(<code>codex app-server</code>)가 서면 <b>그 행의 여러 칸이 한꺼번에 열린다</b>.</figcaption>
+    </figure>
   </section>
 
 </div>
