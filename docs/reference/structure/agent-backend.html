@@ -25,6 +25,9 @@
        바탕까지 어두워지면 대비가 무너진다. 의도된 테마 불변 토큰. */
     --figure-bg:  #F7FAFA;
     --figure-line:#C3CFD0;
+    /* 카드 배경이 테마 불변이므로 글자 색도 같이 고정한다 — 한쪽만 고정하면
+       다크 테마에서 밝은 글자가 밝은 카드에 올라가 안 보인다(실발생 2026-09-08). */
+    --figure-ink: #121A1D;
 
     --mono: "IBM Plex Mono", "Cascadia Mono", ui-monospace, Consolas, monospace;
     --sans: "Segoe UI Variable Text", "Segoe UI", -apple-system, system-ui, sans-serif;
@@ -139,12 +142,22 @@
   figure { margin: 24px 0 0; }
   .figure-body {
     background: var(--figure-bg);
+    color: var(--figure-ink);
     border: 1px solid var(--figure-line);
     border-radius: var(--r);
     padding: 18px 14px;
     overflow-x: auto;
   }
-  .figure-body pre.mermaid { margin: 0; min-width: 520px; }
+  /* mermaid 가 안 그려진 경우(렌더러 없는 환경)엔 소스가 그대로 보인다 —
+     그때도 읽히게 색·서체를 준다. 그려지면 이 규칙은 SVG 아래로 사라진다. */
+  .figure-body pre.mermaid {
+    margin: 0;
+    min-width: 520px;
+    color: var(--figure-ink);
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+  }
   figcaption {
     margin-top: 10px;
     font-size: 13.5px;
@@ -484,3 +497,24 @@ flowchart TD
   </section>
 
 </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/11.15.0/mermaid.min.js"></script>
+<script>
+  // 이 파일이 기록이므로 혼자서도 그려져야 한다(로컬에서 그냥 열어도 그림이 나오게).
+  // 단 mermaid 를 자체 렌더하는 호스트에서 열리면 이미 그려져 있으므로 아무것도 하지 않는다 —
+  // 그린 자리를 다시 파싱하면 그림이 오류 텍스트로 바뀐다.
+  window.addEventListener('load', function () {
+    // 호스트 렌더러가 비동기로 그리는 경우 먼저 양보한다 — 둘이 같이 그리면 그림이 두 장 된다.
+    setTimeout(function () {
+    var blocks = document.querySelectorAll('pre.mermaid:not([data-processed])');
+    if (!blocks.length || !window.mermaid) return;
+    if (document.querySelector('.figure-body svg')) return;
+    try {
+      window.mermaid.initialize({ startOnLoad: false, theme: 'neutral', securityLevel: 'strict' });
+      window.mermaid.run({ nodes: blocks });
+    } catch (e) {
+      // 실패해도 위 CSS 가 소스를 읽을 수 있게 남겨 둔다.
+    }
+    }, 400);
+  });
+</script>
