@@ -129,7 +129,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0079](0079-jsonrichslot-모드-resume-시-대화-스크롤백-복원-데몬이-claude-jsonl-transcript를-읽어-history-프레임으로-전달.md) | JSON(RichSlot) 모드 resume 시 대화 스크롤백 복원 — 데몬이 Claude `.jsonl`을 읽어 OutputCore 버퍼에 seed(단일 소스 · pump 전) | 확정 |
 | [0080](0080-llm-제어-표면-아키텍처-bashengram-ctl데몬-ws백엔드-직행-데몬-opaque-relay앱-viewmanagerui.md) | LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI) | 폐기 (Superseded by ADR-0085) |
 | [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0155: 결정 1과 2 대체 / ADR-0154: 대상 주소지정 불요 전제) |
-| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (부분 폐기 by ADR-0185: 살아남는 상위 결정 중 sid 발급 조항 / 제목의 "Failed" 는 일상어 — `AgentStatus::Failed` 가 아니다. 실제 종점은 `Exited{code}`(대개 code≠0)이고 본문 결정도 "종점(terminal)"이라 적는다. 제목·파일명은 이력이라 안 고친다 — 본문 머리 주석 참조) |
+| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (부분 폐기 by ADR-0185: 살아남는 상위 결정 중 sid 발급 조항) |
 | [0083](0083-종료-시-프로필-자동-삭제-폐지-유저-kill정상-exit-포함-모든-종료는-시체-보존-삭제는-명시적-사용자-명령으로만.md) | 종료 시 프로필 자동 삭제 폐지 — 유저 kill·정상 exit 포함 모든 종료는 시체 보존, 삭제는 명시적 사용자 명령으로만 | 확정 |
 | [0084](0084-재활성화resume-epoch-bump-apply-disposition-epoch-guard-stale-reap-산-세션-강등프론트-재구독-누락-차단.md) | 재활성화(resume) epoch bump + apply_disposition epoch-guard — stale reap 산-세션 강등·프론트 재구독 누락 차단 | 확정 |
 | [0085](0085-cli-백엔드-제어-채널-in-band-출력-마커m3-engram-ctl-폐기.md) | CLI 백엔드 제어 채널 = in-band 출력 마커(M3) — engram-ctl 폐기 | 폐기 (Superseded by ADR-0086) |
@@ -144,7 +144,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0094](0094-s17-에이전트-간-발신-권한-런타임-최소권한-pre-authorization-grant-seam.md) | S17 에이전트 간 발신 권한 — 런타임 최소권한 pre-authorization (grant seam) | 확정 (부분 폐기 by ADR-0097: 발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지 / ADR-0098: CLI 발신 grant 번역을 절대경로 Bash({exe} *)에서 bare-name Bash/PowerShell({exe}:*) + PATH 주입으로 정렬(claude 권한 매처 미매칭 0/38 해소·배포 이식성)) |
 | [0095](0095-봉투-포맷-스위칭-구조-기본-colon대체-xml-bracket-기각.md) | 봉투 포맷 스위칭 구조 — 기본 colon·대체 xml (bracket 기각) | 확정 (부분 폐기 by ADR-0096: 봉투 포맷 스위치 저장 위치·노출 방식 (결정 5)) |
 | [0096](0096-봉투-포맷-운영-스위치-데몬-전역-상태-invoke-커맨드-조종-표면-전용워커-mcp-미노출.md) | 봉투 포맷 운영 스위치 — 데몬 전역 상태 + invoke 커맨드 (조종 표면 전용·워커 MCP 미노출) | 확정 |
-| [0097](0097-스폰-에이전트-기본-auto-modebypasspermissions-채택-헤드리스-워커-권한-현실화.md) | 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화 | 확정 |
+| [0097](0097-스폰-에이전트-기본-auto-modebypasspermissions-채택-헤드리스-워커-권한-현실화.md) | 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화 | 확정 (부분 폐기 by ADR-0188: 권한 값을 백엔드 코드에 고정하던 부분) |
 | [0098](0098-cli-발신-grant를-bare-name-path-주입으로-정렬-절대경로-미매칭-해소.md) | CLI 발신 grant를 bare-name + PATH 주입으로 정렬 — 절대경로 미매칭 해소 | 확정 |
 | [0099](0099-채널-선택-백엔드-capability-스위치-프라이밍-정적-2파일mcp-capableboth-teaching-비-mcpcli-only.md) | 채널 선택 = 백엔드 capability 스위치 + 프라이밍 정적 2파일(MCP-capable=both-teaching / 비-MCP=CLI-only) | 확정 (부분 폐기 by ADR-0126: engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화 / ADR-0128: 결정 2 engram-send 물리 주입) |
 | [0100](0100-릴리즈-패키징-포터블-폴더-조립-스크립트-co-location-불변식.md) | 릴리즈 패키징 — 포터블 폴더 조립 스크립트 (co-location 불변식) | 확정 (부분 폐기 by ADR-0134: 런타임 데이터 위치를 실행 폴더 하위로 대체) |
@@ -227,3 +227,5 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0184](0184-pty-transport-가-자식에게-터미널-정체성을-선언한다.md) | PTY transport 가 자식에게 터미널 정체성을 선언한다 | 확정 |
 | [0185](0185-세션-복원-불변식을-발급-주체-중립으로-codex는-발급받은-thread-id를-수령해-쓴다.md) | 세션 복원 불변식을 발급 주체 중립으로 — codex는 발급받은 thread id를 수령해 쓴다 | 확정 (부분 폐기 by ADR-0186: 원칙 문서 두 곳 조항) |
 | [0186](0186-claudemd-는-매-세션-필요한-것만-담는다-에피소딕-지식은-adr코드-앵커핸드오프가-진다.md) | CLAUDE.md 는 매 세션 필요한 것만 담는다 — 에피소딕 지식은 ADR·코드 앵커·핸드오프가 진다 | 확정 |
+| [0187](0187-codex-phase-2-통로를-app-server-로-확정한다-exec-는-글자를-흘리지-않는다.md) | codex Phase 2 통로를 app-server 로 확정한다 — exec 는 글자를 흘리지 않는다 | 확정 |
+| [0188](0188-권한과-승인을-백엔드-중립-축으로-추상화한다-값-설계는-후속.md) | 권한과 승인을 백엔드 중립 축으로 추상화한다 — 값 설계는 후속 | 확정 |

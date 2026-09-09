@@ -1,7 +1,7 @@
 # ADR-0097: 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화
 
-- 상태: 확정 (2026-07-22, 근거: 사용자 결정 + CLI 발신 0/38 실측)
-- 관련: Amends ADR-0094 (발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지) · ADR-0004(백엔드 지식 격리)
+- 상태: 확정 (2026-07-22, 근거: 사용자 결정 + CLI 발신 0/38 실측) · 부분 폐기 by ADR-0188 (권한 값을 백엔드 코드에 고정하던 부분)
+- 관련: Amends ADR-0094 (발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지) · ADR-0004(백엔드 지식 격리) · Amended by ADR-0188 (권한 값을 백엔드 코드에 고정하던 부분)
 
 ## 맥락
 ADR-0094는 "발신 입구만 pre-authorize, 전부-허용(bypassPermissions)은 거부"를 택했다 — 왕복(메시지 주고받기) MVP엔 발신 grant만으로 충분하고 인젝션 표면을 최소화한다는 근거였다. 그러나 두 가지가 드러났다:

@@ -323,6 +323,14 @@
 - **회귀망 없음:** 미지 `kind` 를 만났을 때의 동작을 재는 테스트가 워크스페이스에 **0 건**이다(S21 TRD 조사). 어느 안을 고르든 그 테스트가 함께 와야 한다.
 - **딸린 사실:** 임시 스폰 경로도 프로필을 디스크에 올린다(`manager.rs:875-899`) — 그래서 이 위험은 "언젠가"가 아니라 **codex 를 처음 띄우는 순간** 파일에 새겨진다.
 
+### T-34. 중단(interrupt) 기능이 반쯤 배선된 채 멈춰 있다
+- **상태:** 보류(미착수). codex 작업 중 발견했으나 **codex 와 무관한 선재 미완**이라 그 범위에서 손대지 않았다.
+- **출처:** S21 codex Phase 2a 설계 중 실측(2026-09-09).
+- **증상:** wire 의 `capabilities.control.interrupt` 를 읽어 트리 노드에 `canInterrupt` 를 만드는데(`src/components/agent/mergeTreeNodes.ts:94`), **그 값을 읽는 화면 코드가 하나도 없다.** `rg "canInterrupt" src/ -g '!*.test.*'` 가 같은 파일 세 줄(타입 선언 `:55` · 대입 `:94` · 예약 노드 기본값 `:111`)만 낸다. 즉 사람이 중단을 누를 표면이 없다.
+- **반대편도 비어 있다:** `StdioTransport::interrupt()` 는 `Unsupported` 를 돌려주고(`crates/engram-dashboard-agent/src/transport/stdio.rs:316-321`), 같은 파일의 caps 가 `control.interrupt: false` 를 리터럴로 신고한다(`:363-384`). 즉 **신고도 거짓이고 실행 경로도 없다.**
+- **왜 지금 값이 올라갔나:** codex app-server 는 `turn/interrupt` 가 **실측 18ms 에 성공**하고 중단 뒤 같은 대화가 그대로 쓰인다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md`). 즉 **되는 기능인데 신고도 화면도 없는** 상태가 codex 에서 처음으로 실재하게 됐다.
+- **묶인 결정:** Phase 2a 설계 문서 §10 의 capability 신고 항목(그 값을 정직하게 낼 것인가 · 레버는 무엇인가)과 transport 계약 항목. 그 둘이 정해지면 이 항목의 절반이 따라온다 — **나머지 절반(사람이 누를 표면)은 그래도 남는다.**
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)
