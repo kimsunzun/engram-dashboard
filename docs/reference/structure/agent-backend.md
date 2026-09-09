@@ -147,6 +147,8 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ★**MCP 칸을 오독하지 말 것**★ — 「codex 가 MCP 를 못 쓴다」가 아니다. 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수 있나**다. codex 의 MCP 주입은 전역 TOML 오버라이드(`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.
 
+★**`needs_session` 과 `capabilities().session.resume` 두 행을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이고, codex 의 `false` 는 **영구 속성이 아니라 배선 상태**다(수령 배선 · `needs_session()` 세 역할 분리 · 활성화 입구 가드 = ADR-0185 결정 2 의 Phase 2 요구사항 셋). 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
+
 비슷한 오독이 모델 선택 칸에도 있다. codex 에는 `-m` 이 있는데도 `false` 인데, 이 칸은 **그 프로그램이 할 수 있는 것**이 아니라 **이 스폰이 실제로 쓰는 것**을 신고하기 때문이다. codex 의 상주 JSON-RPC(`codex app-server`)가 서면 이 표의 여러 칸이 한꺼번에 열린다 — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다.
 
 **앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(`AgentBackend` trait 의 기본값 · 트립와이어 셋) · 각 `backend/<이름>/mod.rs`(그 백엔드의 선언과 사유 주석)

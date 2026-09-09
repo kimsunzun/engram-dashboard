@@ -118,7 +118,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
   - **ttyd** — PTY를 웹소켓으로 나르고 **크기를 협상하는** 최소 구현(리사이즈 메시지 → ConPTY·POSIX 양쪽).
   - **orca** — 여러 에이전트 백엔드(Codex·ClaudeCode·OpenCode 등)를 **워크트리별로 나란히** 돌리는 오케스트레이터 + GUI. 「백엔드 확장」과 겹친다. 정본 주소 = `stablyai/orca`.
   - **paseo** — **데몬이 에이전트를 소유하고 desktop·web·mobile·CLI 가 붙는다**. 다중 클라이언트 재부착이 우리와 겹친다. ★단 에이전트 경로에 PTY가 없어★(백엔드마다 SDK·JSON-RPC) 전송 계층은 참조가 안 된다. AGPL-3.0.
-  - **octoally** — Claude·Codex 대시보드. 세션 생존을 tmux/dtach에 맡긴다. ★**SQLite 되감기는 순수 셸 탭 전용 — 우리 replay 버퍼의 디스크 선례로 읽지 말 것**★(에이전트 탭은 `tmux capture-pane`). sid 회수는 「세션 복원」의 반례. Apache-2.0 + Commons Clause(OSI 아님).
+  - **octoally** — Claude·Codex 대시보드. 세션 생존을 tmux/dtach에 맡긴다. ★**SQLite 되감기는 순수 셸 탭 전용 — 우리 replay 버퍼의 디스크 선례로 읽지 말 것**★(에이전트 탭은 `tmux capture-pane`). sid 회수는 「세션 복원」(정본 = `docs/reference/architecture-overview.md`)의 반례. Apache-2.0 + Commons Clause(OSI 아님).
 
 ---
 
@@ -151,10 +151,6 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **소유권 분할:** transport=master/writer/child/shutdown/job · core=subscribers/replay/seq/status/finalized/drain_handle · session=id/cwd/epoch/cols/rows.
 - **턴 관측 정리 = 두 지점뿐:** `finish` + `emit`의 finalize 재확인. **세 번째 호출자를 늘리면 인과가 갈라진다.** 빠지면 턴 도중 죽은 에이전트가 "진행 중"으로 남아 30분 상한(fail-open)이 풀 때까지 우편이 막힌다. (ADR-0127)
 - **등록 순서:** sessions insert가 pump 시작보다 **먼저** — 뒤집히면 즉시 종료하는 세션이 명부에 오르기 전에 끝나 수거되지 않는다(런타임엔 무신호 — reaper 테스트가 회귀를 잡는다). (ADR-0019)
-
-### 세션 복원
-
-**복원은 프로필에 저장된 backend sid 단독에 의존한다 — 발급 주체는 백엔드가 정한다**(추적 파일은 best-effort — 이걸로 기능 확장 금지). ★**발급 주체를 이 불변식에 넣지 말 것**★ — claude는 우리가 발급해 `--resume`으로 무손실 복원하고, codex는 발급받는다(**무손실은 claude 축의 말이다** — ADR-0185가 ADR-0008·0076의 발급 주체 조항을 개정). ★**단 발급받는 쪽은 배선이 아직 없다 — 그 상태로 sid를 심으면 codex가 새 대화를 열고, 그것이 새 대화라는 표식이 wire에 하나도 없다**★(활성화 입구가 `needs_session()`을 안 본다. 가드는 ADR-0185 결정 2 = Phase 2 요구사항). **resume 조기 종료는 fresh fallback 하지 않는다** — 종점으로 직행하고 원인을 로그로 남긴다(자동 재spawn 없음. ADR-0082가 ADR-0008의 그 조항을 폐지). ★**그 종점은 `AgentStatus::Failed`가 아니다**★ — ADR-0082 제목의 "Failed"는 일상어이고 실제 상태는 `Exited{code}`다. **매핑 근거·예외·혼동쌍은 여기 되올리지 않는다** — 정본은 `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」. (결정 정본 ADR-0008 + ADR-0082 + ADR-0185)
 
 ## 프론트 구조 (`src/`)
 

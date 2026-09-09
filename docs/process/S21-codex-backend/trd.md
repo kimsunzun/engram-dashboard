@@ -6,7 +6,7 @@
 >
 > **★사용자 결정 대기 항목은 §6에 모아 두었고 이 문서는 그중 어느 것도 고르지 않는다★** — CLAUDE.md 「개발 스텝」의 순서 불변(선택지 → 사용자 결정 → 구현)에 따른다.
 >
-> 앵커: **ADR-0004**(백엔드 지식 격리 — 이 작업 전체의 근거) · **ADR-0058**(spawn_into 명시 backend fail-loud — ★Phase 1이 폐기해야 한다, §4-6★) · ADR-0099(채널 capability 트립와이어) · ADR-0113(턴 신호 분류자) · ADR-0044(입력 인코딩·출력 정제) · ADR-0002/0030(capability 산출) · ADR-0019(reaper 등록 순서) · ADR-0001(kill 인과) · ADR-0012(모듈 격리·테스트 하네스) · ADR-0155(명령 버스 선언) · CLAUDE.md 「백엔드 확장」·「핵심 불변식」·「세션 복원」·「LLM-우선 제어」.
+> 앵커: **ADR-0004**(백엔드 지식 격리 — 이 작업 전체의 근거) · **ADR-0058**(spawn_into 명시 backend fail-loud — ★Phase 1이 폐기해야 한다, §4-6★) · ADR-0099(채널 capability 트립와이어) · ADR-0113(턴 신호 분류자) · ADR-0044(입력 인코딩·출력 정제) · ADR-0002/0030(capability 산출) · ADR-0019(reaper 등록 순서) · ADR-0001(kill 인과) · ADR-0012(모듈 격리·테스트 하네스) · ADR-0155(명령 버스 선언) · CLAUDE.md 「백엔드 확장」·「핵심 불변식」·「LLM-우선 제어」 · `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」(옛 CLAUDE.md 「세션 복원」 절은 ADR-0186 으로 삭제 — 정본이 여기다).
 
 ---
 
@@ -66,7 +66,7 @@ Phase 3  프론트 해석 회수   (범위 밖)
 | # | 사실 | Phase 1에 미치는 영향 |
 |---|---|---|
 | M1 | 파이프로 stdin을 주면 `Error: stdin is not a terminal`, exit 1 | **PTY가 유일한 대화형 경로**다 — transport 선택 여지가 없다 |
-| M2 | 호출자가 세션 id를 정할 수 없다. `--session-id`류 플래그가 **없다** | `needs_session()` = **false**(§4-2). 「세션 복원」 절의 claude 계약(sid를 우리가 통제)이 codex엔 성립하지 않는다 |
+| M2 | 호출자가 세션 id를 정할 수 없다. `--session-id`류 플래그가 **없다** | `needs_session()` = **false**(§4-2). 「세션 복원 / 활성화」(`docs/reference/architecture-overview.md`)의 claude 계약(sid를 우리가 통제)이 codex엔 성립하지 않는다 — 그 불변식은 ADR-0185 로 발급 주체 중립으로 개정됐다 |
 | M3 | 재개는 플래그가 아니라 **하위 명령 + 위치 인자**다(`codex resume <id>` / `--last`) | stub의 `--resume <uuid>` 조립이 문법부터 틀렸다 |
 | M4 | Windows에서 PATH의 `codex`는 `codex.cmd → node → codex.exe` 사슬. 실 바이너리는 **버전이 박힌 `node_modules` 벤더 경로** 아래 | 하드코딩 불가. shim을 건너뛰려면 탐색·폴백이 따로 필요하다(§4-10 · §6-H) |
 | M5 | 호출마다 MCP를 끼우는 길은 있다 — 전역 TOML 오버라이드 `-c mcp_servers.<name>={...}`. `--mcp-config <file>` 같은 플래그는 **없다** | Phase 1은 안 쓴다. Phase 2가 쓸 때 claude와 **모양이 다른** 주입이라는 사실만 기록 |

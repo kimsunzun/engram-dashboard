@@ -1,7 +1,7 @@
 # ADR-0185: 세션 복원 불변식을 발급 주체 중립으로 — codex는 발급받은 thread id를 수령해 쓴다
 
-- 상태: 확정 (2026-09-09, 근거: 사용자 결정 — 「고치고 진행」)
-- 관련: Amends ADR-0008 (sid 발급 주체) · ADR-0082(resume 조기종료 종점) · CLAUDE.md 「세션 복원」 · `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」 · `docs/process/S21-codex-backend/trd.md` §0(Phase 2 범위) · `crates/engram-dashboard-agent/src/profile.rs:165,629` · Amends ADR-0076 (우리 쪽 sid 발급 전제) · Amends ADR-0082 (살아남는 상위 결정 중 sid 발급 조항)
+- 상태: 확정 (2026-09-09, 근거: 사용자 결정 — 「고치고 진행」) · 부분 폐기 by ADR-0186 (원칙 문서 두 곳 조항)
+- 관련: Amends ADR-0008 (sid 발급 주체) · ADR-0082(resume 조기종료 종점) · CLAUDE.md 「세션 복원」 · `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」 · `docs/process/S21-codex-backend/trd.md` §0(Phase 2 범위) · `crates/engram-dashboard-agent/src/profile.rs:165,629` · Amends ADR-0076 (우리 쪽 sid 발급 전제) · Amends ADR-0082 (살아남는 상위 결정 중 sid 발급 조항) · Amended by ADR-0186 (원칙 문서 두 곳 조항)
 
 ## 맥락
 Phase 2가 codex를 상주 JSON 서버(`codex app-server`)로 띄우면 세션 복원이 열린다. 그런데 **codex는 스레드 id를 클라이언트가 지정하게 해주지 않는다** — `ThreadStartParams` 27개 속성에 id·threadId·sessionId·name·title이 하나도 없고, `Thread.id`는 codex가 UUIDv7로 발급한다고 문서가 적는다. 그 파라미터를 넣자는 요청(`session_id` + `--session-id` 플래그, 구현까지 제시)이 상류에 올라왔으나 OpenAI 메인테이너가 닫았다(openai/codex#15767).
