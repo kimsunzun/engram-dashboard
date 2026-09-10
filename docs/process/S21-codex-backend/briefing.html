@@ -210,18 +210,19 @@
 
 <div class="deck">
 
-  <!-- 1 -->
+  <!-- 01 -->
   <section class="slide cover" data-n="01">
-    <div class="kicker">engram dashboard · 백엔드 확장 · Phase 1 완료</div>
+    <div class="kicker">engram dashboard · 백엔드 확장 · Phase 1 완료 · Phase 2 통로 확정</div>
     <h1>codex 가 뜬다</h1>
     <p class="lede">
       트리에서 폴더를 고르면 <strong>codex TUI 가 슬롯에 뜨고 타이핑된다.</strong>
       실제 앱에서 확인했다. 새 파이프를 짓지 않았다 — 파이프는 이미 중립이었고,
       claude 지식이 샌 자리를 <strong>제자리로 돌렸을 뿐이다.</strong>
+      그리고 다음 얼굴로 가는 <strong>통로가 실측 위에서 정해졌다.</strong>
     </p>
   </section>
 
-  <!-- 2 -->
+  <!-- 02 -->
   <section class="slide" data-n="02">
     <div class="kicker">무엇이 바뀌었나</div>
     <h2>새는 곳 셋을 제자리로 돌렸다</h2>
@@ -234,31 +235,88 @@
     <div class="rule">지금이 가장 쌌다 — 출시 전이라 이행 비용이 0 인 창이 열려 있었다.<br>릴리스가 한 번 나가면 그 창이 닫힌다.</div>
   </section>
 
-  <!-- 3 -->
+  <!-- 03 -->
   <section class="slide" data-n="03">
-    <div class="kicker">실측</div>
-    <h2>codex는 얼굴이 둘이다</h2>
+    <div class="kicker">실측 · 통로 확정</div>
+    <h2>얼굴이 셋이었고, 재 보고 하나를 골랐다</h2>
     <div class="two">
       <div class="col">
         <h3>대화형 화면</h3>
         <div class="tagline">codex --cd &lt;폴더&gt;</div>
-        <p>사람이 보는 진짜 codex 화면. <b>PTY가 없으면 아예 안 뜬다.</b> 번역기가 필요 없다 — 바이트를 그대로 흘린다.</p>
+        <p>사람이 보는 진짜 codex 화면. <b>PTY가 없으면 아예 안 뜬다.</b> 번역기 없이 바이트를 그대로 흘린다. <b>Phase 1 이 이걸로 떴다.</b></p>
         <p>대신 <b>세션 id를 알 길이 없다</b> → 복원 불가.</p>
       </div>
       <div class="col">
+        <h3>한 번 시키고 끝</h3>
+        <div class="tagline">codex exec --json</div>
+        <p>★<b>글자가 흐르지 않는다</b>★ — 이벤트가 넷뿐이고 본문은 완성된 채 한 번에 온다. 「30까지 세라」를 4.5초에 끊었을 때 나온 것은 <b>두 줄</b>, 같은 시각 상주 서버는 조각을 <b>10개</b> 보내고 있었다.</p>
+        <p>챗 표면에 얹으면 <b>턴이 끝날 때까지 화면이 빈다.</b> 기각.</p>
+      </div>
+      <div class="col pick">
+        <span class="badge">채택</span>
         <h3>상주 JSON 서버</h3>
         <div class="tagline">codex app-server</div>
-        <p>claude의 JSON 모드에 대응하는 물건. 대화를 만들면 <b>id를 그 자리에서 돌려준다.</b> 복원·중단·중간 개입까지 있다.</p>
-        <p>대신 <b>실험 딱지</b>가 붙어 있고 버전마다 흔들린다.</p>
+        <p>조각이 흐르고, 대화 id 를 <b>그 자리에서 돌려준다.</b> 턴 중단이 <b>18ms 에 성공하고 대화가 살아남는다</b> — 프로세스를 죽일 필요가 없다.</p>
+        <p>복원 · 중단 · 중간 개입이 여기서 함께 열린다.</p>
+        <p>★대신 <b>공급자가 실험적이라 못박아 둔 물건</b>이다★ — 그 딱지는 「app-server 명령과 WebSocket 전송」을 가리키고 <b>우리가 쓰는 stdio 도 면제가 아니다.</b> 게다가 주고받는 규약에 <b>버전 칸이 없어</b> 깨지는 변경이 와도 접속 때 안 걸리고 <b>돌다가 터진다.</b></p>
       </div>
     </div>
     <div class="warnbox">
-      <b>claude와 다른 점:</b> claude는 한 프로세스가 두 모드를 다 한다. codex는 <b>얼굴마다 다른 프로세스</b>이고 능력도 다르다.
+      <b>공식 SDK 는 없다(실측)</b> — 도움말·설치 패키지 검색 0 건. 셋 중에 고른 게 아니라 <b>둘 중에 골랐다.</b>
+      그리고 claude 는 한 프로세스가 두 모드를 다 하지만 codex 는 <b>얼굴마다 다른 프로세스</b>이고 능력도 다르다.
+      ★잰 대상은 <code>codex-cli 0.153.4</code>다 — <b>버전이 바뀌면 이 수치가 낡는다.</b>★
     </div>
   </section>
 
-  <!-- 4 -->
+  <!-- 04 -->
   <section class="slide" data-n="04">
+    <div class="kicker">층 구조 · 확정</div>
+    <h2>새 부품은 통로 자리에 앉는다</h2>
+    <div class="flow">
+      <div class="flowrow">
+        <div class="who">척추<span>데몬 안</span></div>
+        <div class="chain">
+          <span class="box out">AgentManager</span>
+          <span class="arw">→</span>
+          <span class="box out">AgentSession</span>
+          <span class="arw">=</span>
+          <span class="box out">OutputCore</span>
+          <span class="arw">+</span>
+          <span class="box mid">dyn AgentTransport</span>
+        </div>
+      </div>
+      <div class="flowrow">
+        <div class="who">밖으로 나가는 길<span>계약 둘뿐</span></div>
+        <div class="chain">
+          <span class="box out">OutputSink</span>
+          <span class="arw">·</span>
+          <span class="box out">StatusSink</span>
+          <span class="arw">→</span>
+          <span class="box raw">구독자</span>
+        </div>
+      </div>
+      <div class="flowrow">
+        <div class="who">통로 종류<span>이제 셋</span></div>
+        <div class="chain">
+          <span class="box">터미널</span>
+          <span class="arw">·</span>
+          <span class="box">파이프</span>
+          <span class="arw">·</span>
+          <span class="box mid">파이프 + 양방향 JSON</span>
+        </div>
+      </div>
+    </div>
+    <ul class="points">
+      <li><b>새 부품이 앉는 자리 = 통로 하나.</b> codex 폴더 안에 살고 세션마다 하나씩 생긴다. 보낸 요청과 돌아온 응답을 짝짓는 일, 서버 알림을 번역하는 일이 <b>전부 그 안에서 끝난다.</b></li>
+      <li><b>공용 계약은 한 줄도 안 는다.</b> 세션은 지금과 똑같이 여섯 메서드만 부른다 — 계약에 요청·응답 개념을 더하는 안은 기각했다(그 개념을 안 쓰는 나머지 통로에 「지원 안 함」이 늘어난다).</li>
+      <li><b>가르는 축은 통로 종류다.</b> 오늘 앉은 것 = 터미널에 claude·codex 둘, 파이프에 claude JSON, 새 자리에 codex 상주 서버. ★<b>백엔드 이름으로 가르지 않는다</b>★.</li>
+      <li><b>「턴 중단」이 파이프 쪽에서 처음 열린다.</b> 터미널 통로는 이미 Ctrl-C 를 보내 끊는다 — 막혀 있는 건 <b>파이프 통로</b> 하나다(그 요청에 「지원 안 함」을 돌려주고, 할 수 있다는 신고 값도 <b>false</b> 로 박혀 있다). 새 통로가 생기면 그 값이 통로마다 정직해져야 한다. ★단 중단이 깨끗하진 않다 — 끊긴 메시지의 완료 통지가 오지 않아 <b>시작 표식이 열린 채 남는다.</b>★</li>
+    </ul>
+    <div class="rule">새 통로가 「구조화된 출력」으로 신고하면 화면이 자동으로 챗 상자 쪽을 고른다.<br>프론트에 분기를 더하지 않는다 — 조립점 한 줄이 그 답을 정한다.</div>
+  </section>
+
+  <!-- 05 -->
+  <section class="slide" data-n="05">
     <div class="kicker">핵심 규율</div>
     <h2>번역은 백엔드 안에서 끝낸다</h2>
     <div class="flow">
@@ -302,8 +360,8 @@
     <div class="rule">타입으로 가른다. 백엔드로 가르지 않는다.<br>타입 이름에 백엔드 이름이 들어가면 그건 위장한 백엔드 분기다.</div>
   </section>
 
-  <!-- 5 -->
-  <section class="slide" data-n="05">
+  <!-- 06 -->
+  <section class="slide" data-n="06">
     <div class="kicker">전체 흐름</div>
     <h2>CLI 한 줄이 화면에 닿기까지</h2>
 
@@ -312,8 +370,8 @@
       <div class="band">
         <div class="bandhead">데몬 프로세스 <em>— 에이전트를 소유한다</em></div>
         <div class="hop"><span class="stage">CLI</span><span class="carry">claude · codex가 뱉은 <b>원본 바이트</b></span></div>
-        <div class="hop"><span class="stage">전송</span><span class="carry">PTY(터미널 모드) 또는 파이프(JSON 모드) — <b>내용을 모른다</b></span></div>
-        <div class="hop"><span class="stage">★번역기</span><span class="carry"><b>백엔드마다 하나.</b> 여기서 원본이 고정 칸으로 바뀐다. 터미널 모드엔 아예 없다(바이트 직통)</span></div>
+        <div class="hop"><span class="stage">전송</span><span class="carry">터미널 또는 파이프 — <b>내용을 모른다.</b> 셋째 통로만 예외다: 그건 codex 폴더 안에 있어 <b>자기 스키마를 안다</b></span></div>
+        <div class="hop"><span class="stage">★번역기</span><span class="carry"><b>백엔드마다 하나.</b> 여기서 원본이 고정 칸으로 바뀐다. 터미널엔 아예 없고(바이트 직통), 셋째 통로는 <b>번역까지 통로 안에서 끝낸다</b></span></div>
         <div class="hop"><span class="stage">코어</span><span class="carry">번호를 매겨 <b>메모리 링 버퍼</b>에 쌓고 구독자에게 뿌린다. <b>내용을 안 본다</b></span></div>
         <div class="hop"><span class="stage">wire 변환</span><span class="carry">칸을 1:1로 옮긴다 — 해석 없음</span></div>
       </div>
@@ -336,11 +394,11 @@
 
     </div>
 
-    <div class="rule">번역기 아래로는 아무도 백엔드를 모른다.<br>그래서 새 백엔드는 <b>번역기 하나</b>만 늘면 흡수된다.</div>
+    <div class="rule">번역기 아래로는 아무도 백엔드를 모른다.<br>그래서 새 백엔드는 <b>자기 폴더 안만</b> 늘면 흡수된다 — 이번엔 그 안에 번역기와 통로가 함께 든다.</div>
   </section>
 
-  <!-- 6 -->
-  <section class="slide" data-n="06">
+  <!-- 07 -->
+  <section class="slide" data-n="07">
     <div class="kicker">꾸밈</div>
     <h2>예쁜 상자마다 고정 칸이 하나씩</h2>
     <ul class="points">
@@ -351,14 +409,14 @@
     </ul>
     <div class="rule">꾸밈이 죄가 아니다. <b>칸 없이 꾸민 것</b>이 죄다.</div>
     <div class="warnbox">
-      <b>단 번역기를 고르는 갈림길은 백엔드 계약 밖에 있다</b> — 백엔드에 구현을 얹는 형태가 아니라,
-      “claude인가”를 묻는 판정 하나가 입력·출력·전송을 동시에 고른다. codex 번역기를 붙이려면
-      <b>그 판정 자체를 고쳐야</b> 한다. 2단계 청구서다.
+      <b>갈림길은 이제 백엔드 계약 위에 있다</b> — 「claude 인가」를 묻던 판정 하나가 입력·출력·전송을 동시에 고르던 시절은
+      Phase 1 에서 끝났다. codex 번역기는 <b>codex 폴더에 자기 것을 얹으면</b> 붙는다.
+      남은 청구서는 꾸밈 쪽이다 — 칸 없이 claude 원본에서 바로 읽는 상자들(3단계).
     </div>
   </section>
 
-  <!-- 6 -->
-  <section class="slide" data-n="07">
+  <!-- 08 -->
+  <section class="slide" data-n="08">
     <div class="kicker">저장</div>
     <h2>우리는 대화를 저장하지 않는다</h2>
     <ul class="points">
@@ -385,8 +443,8 @@
     </div>
   </section>
 
-  <!-- 7 -->
-  <section class="slide" data-n="08">
+  <!-- 09 -->
+  <section class="slide" data-n="09">
     <div class="kicker">프로세스 모델 · 확정</div>
     <h2>대화마다 프로세스 하나</h2>
     <div class="two">
@@ -394,7 +452,7 @@
         <span class="badge">채택</span>
         <h3>대화마다 하나</h3>
         <p>가장 성숙한 독립 피어 둘이 이 형태다 — 그중 하나는 28k 스타에 우리와 같은 Rust 스택.</p>
-        <p><b>지금 우리 구조가 그대로 산다.</b></p>
+        <p><b>지금 우리 구조가 그대로 산다.</b> 상주 서버를 고른 뒤에도 그림이 같다.</p>
       </div>
       <div class="col">
         <h3>작업공간마다 하나</h3>
@@ -405,40 +463,47 @@
         <p>codex 문서가 의도한 모양. 하지만 메모리가 부풀어 강제 종료된 보고가 여럿이고, 그러면 <b>안의 대화가 전부 같이 죽는다.</b></p>
       </div>
     </div>
+    <div class="warnbox">
+      <b>다시 열릴 조건은 이 슬라이드가 아니라 통로 선택 쪽에 걸려 있다</b> — ① ★승인을 실제로 받기로 하면★
+      서버가 우리에게 묻는 요청 11 종이 살아나 「실측 0 건」 면제가 죽는다(권한 축 값 설계가 진행되면 거의 확실히 발화한다) ·
+      ② 상주 프로세스가 대화마다 사는 비용이 아프거나, 인증 만료로 서버가 죽어 기록이 잘리는 사고(상류에 보고돼 있다)가
+      우리에게 나면 기각한 「한 번 시키고 끝」이 다시 후보가 된다.
+    </div>
   </section>
 
-  <!-- 8 -->
-  <section class="slide" data-n="09">
+  <!-- 10 -->
+  <section class="slide" data-n="10">
     <div class="kicker">계획</div>
     <h2>세 단계로 나눈다</h2>
     <div class="steps">
       <div class="step">
-        <span class="n">0단계</span>
-        <span class="what"><b>터전 + 실측. 배선보다 먼저.</b> <code>cargo test</code>로 도는 백엔드 계약 시험대를 세우고, 거기서 <b>codex를 실제로 띄워</b> 우리가 도움말로만 아는 것들을 잰다. 백엔드가 늘 때마다 질문표에 열이 하나 는다.</span>
+        <span class="n">0단계 · 끝</span>
+        <span class="what"><b>터전 + 실측. 배선보다 먼저.</b> <code>cargo test</code>로 도는 백엔드 계약 시험대를 세우고, 거기서 <b>codex를 실제로 띄워</b> 도움말로만 알던 것들을 쟀다. 백엔드가 늘 때마다 질문표에 열이 하나 는다. 여기 달려 있던 게이트는 <b>1단계로 넘어가는 문</b>이었고 이미 지난 문이다.</span>
       </div>
       <div class="step">
-        <span class="n">1단계</span>
-        <span class="what"><b>대화형 화면으로 띄우기.</b> 번역기 0줄. 스폰·명부·wire 칸·화면 붙기만 증명한다. 어느 얼굴로 가든 이 넷은 똑같이 필요하다.</span>
+        <span class="n">1단계 · 끝</span>
+        <span class="what"><b>대화형 화면으로 띄우기.</b> 번역기 0줄. 스폰·명부·wire 칸·화면 붙기를 증명했다. 어느 얼굴로 가든 이 넷은 똑같이 필요했다.</span>
       </div>
       <div class="step">
-        <span class="n">2단계</span>
-        <span class="what"><b>상주 서버 + 번역기.</b> 여기서 세션 복원·우편·구조화 화면이 함께 열린다. 고정 칸을 몇 개 늘릴지가 실제 작업이다.</span>
+        <span class="n">2단계 · 지금</span>
+        <span class="what"><b>상주 서버 + 번역기.</b> 굵은 것 넷이 정해졌다 — <b>통로</b>(상주 JSON 서버) · <b>자리</b>(codex 폴더 안의 통로 구현체) · <b>권한을 백엔드 중립 축으로</b> · <b>JSON 모드 입력은 큐로</b>. 설계 문서는 그 넷 위에서 <b>다시 쓰는 중</b>이다.</span>
       </div>
       <div class="step">
         <span class="n">3단계</span>
         <span class="what"><b>프론트에 샌 해석 회수.</b> claude 쪽 정리라 codex와 독립이다. 끝나면 두 백엔드를 같은 코드가 그린다.</span>
       </div>
     </div>
-    <div class="rule">0단계에는 게이트가 달려 있다.<br>실측이 <b>다섯 관측 중 하나라도</b> 내면 배선을 시작하지 않고 설계를 다시 연다.</div>
+    <div class="rule">2단계가 한꺼번에 여는 것 — 세션 복원 · 우편 · 구조화 챗 · <b>턴 중단의 절반</b>.<br>넷이 같은 통로에 매달려 있어서 통로를 고르는 것이 먼저였다. ★절반인 이유 — 신고 값이 정직해져도 <b>사람이 누를 표면은 그래도 남는다.</b>★</div>
     <div class="warnbox">
-      1단계의 대부분은 <b>저쪽 transport 작업과 파일이 하나도 안 겹친다.</b> 접합부(wire 칸·데몬 스폰·프론트 스폰)만 겹친다.
+      ★<b>아직 안 정한 것 셋</b>★ — 권한 축의 값 설계(축 몇 개, 값 이름 무엇) · 입력 큐의 상한(길이·대기 시간) ·
+      대기 중임을 화면에 알리는 수단. <b>비워 둔 채로 확정했다</b> — 재 보고 정한다.
     </div>
   </section>
 
-  <!-- 리뷰 -->
-  <section class="slide" data-n="10">
-    <div class="kicker">2 인 적대 리뷰</div>
-    <h2>리뷰가 내 보고 셋을 반증했다</h2>
+  <!-- 11 -->
+  <section class="slide" data-n="11">
+    <div class="kicker">2 인 적대 리뷰 · Phase 1 코드</div>
+    <h2>리뷰가 셋을 반증했고, 한 번은 판정이 뒤집혔다</h2>
     <p class="lede">
       두 렌즈(불변식 · 다른 모델 신선 렌즈) 모두 <strong>FIX</strong>. 적출 12 건 중 10 반영, 2 는 사유와 함께 보류.
       ★<strong>그중 셋은 내가 「됐다」고 보고한 것을 정면으로 뒤집었다</strong>★ — 그게 이 리뷰의 값어치다.
@@ -449,40 +514,53 @@
       <li><b>「drift 시험이 갈림을 잡는다」 → 지워도 초록이었다.</b> 한쪽 문은 어휘만 비교하고 있었다. 이제 각 검사를 지우면 실제로 빨개진다 — <b>지워 보고 확인했다.</b></li>
       <li><b>「argv 가 실측됐다」 → 반만 맞았다.</b> 실 argv 는 화면 실측이 OS 에서 읽어 맞았지만, <b>시험대는 그걸 안 쟀다</b> — 같은 파일 상수를 자기와 비교하는 동어반복이었다.</li>
     </ul>
+    <div class="kicker">같은 절차 · Phase 2a 설계 문서 (위와 별건)</div>
+    <div class="rule">그쪽은 <b>두 판 다 BLOCK</b> 이었다 — 부품이 앉을 자리를 층 이름 위에서 추측했고, 막힌 것이 맞았다.<br>★그 지적들 중 <b>한 건</b>이 뒤집혔다★ — 통로 배치를 막은 근거 주석의 <b>주어가 범용 파이프 구현체</b>였음이 원문 재독으로 드러났다. <b>뒤집은 주체는 사용자 판정이다</b> — 메인이 임의로 확정하지 않았다. 나머지 지적은 살아서 3판으로 넘어갔다.</div>
     <div class="warnbox">
       <b>안 고친 것 둘</b> — 폴더 이름에 <code>%VAR%</code> 가 실제로 들어 있으면 셸이 확장한다(유일 해법이 claude 공용 코드를 건드려 틀리면 모든 스폰이 죽는다) · codex 프로필이 디스크에 박혀 옛 빌드로 되돌리면 명부를 잃는다(수용하기로 한 것). <b>둘 다 그 자리 주석과 추적 항목에 남겼다.</b>
     </div>
   </section>
 
-  <!-- 9 -->
-  <section class="slide" data-n="11">
-    <div class="kicker">주의</div>
-    <h2>아무것도 안 하면 이렇게 된다</h2>
+  <!-- 12 -->
+  <section class="slide" data-n="12">
+    <div class="kicker">이번 결정의 파장</div>
+    <h2>codex 를 붙이는데 claude 가 바뀐다</h2>
     <ul class="points">
-      <li><b>우편이 켜진다.</b> 기본값이 “받는다”이고, 턴 신호를 선언 안 하면 막지 않고 <b>항상 즉시 꽂는다</b> — 생각 중인 codex에 우편이 들어간다. 그래서 1단계는 끄고 간다.</li>
-      <li><b>디스크 하위호환이 진짜 일이다.</b> 종류 칸이 늘면 구버전이 프로필 파일 <b>전체</b>를 못 읽고 명부가 빈다.</li>
-      <li><b>옛 데몬이 codex 지정을 조용히 무시한다.</b> 버전을 안 올리기로 했으므로 모르는 칸은 버려지고 <b>claude가 대신 뜬다.</b></li>
+      <li>★<b>claude 의 권한 값이 코드 고정에서 값 유래로 바뀐다.</b>★ 지금은 「승인 끄기」를 맨 앞 두 인자로 <b>무조건</b> 넣는다. 그 값이 앞으로는 우리 어휘에서 나온다 — 그렇게 두기로 한 옛 결정 자체는 살아 있고, 바뀌는 건 <b>코드에 박혀 있던 것</b>뿐이다.</li>
+      <li>★<b>claude JSON 모드에서 턴 중 입력이 즉시 안 나간다.</b>★ 큐에 담겼다가 보낼 수 있을 때 흘러간다. <b>버리지는 않는다</b> — 상한을 넘거나 준비가 끝내 실패하면 그때 오류로 돌린다. 이래서 이 결정이 codex 전용이 아니다.</li>
+      <li><b>대기 자리가 둘이 된다.</b> 우편은 이미 바쁜 수신자 앞에서 편지를 파킹한다. 큐가 생기면 <b>편지가 두 번 기다릴 수 있다</b> — 지금은 둘을 따로 두기로 했고, 우편 쪽을 고칠 때 합칠지 판단한다.</li>
+      <li><b>권한 축의 값 이름은 아직 못 정한다.</b> claude 여섯 값이 실제로 무엇을 하는지 <b>claude 도움말이 한 줄도 안 적는다</b>(실측). 이름부터 짓고 코드를 나중에 대 보는 실패를 어휘 층에서 반복하지 않는다.</li>
     </ul>
+    <div class="warnbox">
+      <b>축이 둘인데 하나로 뭉치지 말 것</b> — 지난번 wire 버전 4 는 <b>종류를 더한</b> 변경이라 옛 쪽이 명부 응답을
+      통째로 못 읽는 <b>비관용</b> 축이었다. 권한을 capability 에 넣는 것은 <b>칸을 더하는</b> 쪽이라
+      ★<b>그 판정을 자동으로 물려받지 않는다</b>★ — 「탈 수 있다」로 열어 둔 것이지 정해진 게 아니고,
+      어느 축이 되는지는 값 설계 때 갈린다.
+    </div>
   </section>
 
-  <!-- 10 -->
-  <section class="slide" data-n="12">
+  <!-- 13 -->
+  <section class="slide" data-n="13">
     <div class="kicker">검증 상태</div>
     <h2>무엇으로 확인했나</h2>
     <ul class="points">
-      <li><b>화면 실측 PASS</b> — 트리 메뉴 → 폴더 → 활성화 → 슬롯에 codex TUI. <b>실 argv 를 OS 에서 직접 읽어</b> 명세와 대조했고, 신뢰 확인 창을 엔터로 지나 입력 프롬프트까지 진행했다.</li>
-      <li><b>워크스페이스 회귀 2116 통과 · 0 실패</b> — 두 갈래 작업을 <b>합친 상태에서 다시</b> 돌린 값이다.</li>
-      <li><b>시험대 11/11</b> — 백엔드마다 같은 질문표. 셋째 백엔드는 파일이 아니라 <b>열 하나</b>가 는다.</li>
-      <li><b>2 인 적대 리뷰</b> — 두 렌즈 모두 FIX, 반영 후 push 완료.</li>
+      <li><b>codex 실측 3 종</b> — 세 모드 비교 · 캔슬 비교 · 권한 값 목록. 기각 둘이 서술이 아니라 <b>실측에 걸려 있다.</b> 대상 = <code>codex-cli 0.153.4</code>, 2026-09-09.</li>
+      <li><b>소유권 추적 + 8 문항 검증</b> — 새 부품이 앉을 자리가 <b>공용 계약 변경을 강제하지 않음</b>을 확인했다. 막혀 있던 셋(쓰기 경로·실패 표현·취소)이 그 자리에서 전부 풀린다.</li>
+      <li><b>적대 리뷰 두 판 — 둘 다 BLOCK 이었다.</b> 그 지적이 3판과 이번 결정들로 흘러갔다. ★결정 넷이 선 자리는 리뷰가 아니다★ — 실측 · 소유권 추적 · 주석 원문 재독 · <b>사용자 결정</b>이다. 기록은 ADR-0187·0188·0189·0190, 정합성 검사 통과.</li>
+      <li><b>CI 초록</b> — 브랜치 <code>v0.3.0/feat/codex-backend</code>.</li>
     </ul>
     <div class="warnbox">
-      <b>안 재는 것을 안 잰다고 적어 뒀다</b> — 쓰기 권한 아래의 모델 동작 · 우리가 안 쓰는 인자 · <code>%VAR%</code> 한계.
-      「전부 실측」이라 적던 옛 문장이 거짓이었고, 리뷰가 잡아 고쳤다. <b>정본은 그 파일 헤더다.</b>
+      <b>안 된 것 —</b> ★<b>Phase 2a 설계 문서는 지금 다시 쓰는 중이고 리뷰를 아직 안 거쳤다</b>★ ·
+      도구를 실제로 실행하는 codex 턴 미측정 → <b>승인 요청 11 종이 실제로 오는지 모른다</b>(선언만 봤고 관측은 0 건이다) ·
+      턴 도중 stdin 을 닫으면 어떻게 되나 미측정 · claude 권한 6 값의 실제 동작 미확인 ·
+      ★살아 있는 대화에서 권한 모드를 바꿀 수 있는지 미확인★(못 바꾸면 「모드 변경 = 다시 띄우기」라 체감이 달라진다) ·
+      같은 플래그를 뒤에 덧붙일 때 <b>뒤 값이 이기는지 미검증</b> ·
+      이번엔 <b>소스가 0 줄</b> 바뀌어 화면 실측이 없다 · <code>master</code> 미머지.
     </div>
     <footer>
-      <div><b>다음:</b> 기록 셋(결정 기록 · 타임라인 · 이 브리핑) → CI 결론 확인 → master 머지</div>
-      <div><b>Phase 2:</b> codex 상주 JSON 서버 — 세션 복원 · 우편 · 구조화 챗이 <b>거기서 함께 열린다.</b> 프로세스 모델은 「대화마다 하나」로 확정(성숙 피어 선례)</div>
-      <div><b>Phase 3:</b> 프론트에 샌 claude 스키마 해석 회수 — claude 쪽 정리라 codex 와 독립</div>
+      <div><b>다음:</b> Phase 2a 설계 문서 재집필 → 적대 리뷰 → 그 뒤에 코드</div>
+      <div><b>정해진 것 넷:</b> 통로 = 상주 JSON 서버 · 자리 = codex 폴더 안의 통로 구현체 · 권한을 백엔드 중립 축으로 · JSON 모드 입력은 큐</div>
+      <div><b>비워 둔 것 셋:</b> 권한 축 값 설계 · 큐 상한 · 대기 표시 수단</div>
     </footer>
   </section>
 
