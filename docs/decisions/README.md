@@ -91,7 +91,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0041](0041-데몬-출력-구독-소유-layout-델타-단독-프론트-직접-구독-차단.md) | 데몬 출력 구독 소유 = layout 델타 단독 (프론트 직접 구독 차단) | 확정 |
 | [0042](0042-구독-델타-slot-단위-diff-agent-union-한계-보완.md) | 구독 델타 = slot 단위 diff (agent-union 한계 보완) | 확정 |
 | [0043](0043-mount-replay-actor-경유-deliverable-게이트-배정등록-fresh-분기.md) | mount-replay = actor 경유 + deliverable 게이트 + 배정·등록 fresh 분기 | 확정 (부분 폐기 by ADR-0046: deliverable gate·미러 cursor 메커니즘 조항: 폐기 → 뷰 buffering phase + gen 펜스로 대체 — mount-replay 원칙 자체는 전량 재replay로 승계) |
-| [0044](0044-json-모드-배선-stdiotransport-신설-바이트-통로-공용-지속-프로세스.md) | JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스 | 확정 (부분 폐기 by ADR-0045: 통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) |
+| [0044](0044-json-모드-배선-stdiotransport-신설-바이트-통로-공용-지속-프로세스.md) | JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스 | 확정 (부분 폐기 by ADR-0045: 통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환 / ADR-0189: 바이트 통로 공용 조항) |
 | [0045](0045-출력-정제를-백엔드로-이동-타입-outputevent를-서버에서-파싱해-wire로-흘림.md) | 출력 정제를 백엔드로 이동 — 타입 OutputEvent를 서버에서 파싱해 wire로 흘림 | 확정 |
 | [0046](0046-pc-미러-버퍼-제거-뷰-직결-replayview-direct-single-flight-gen-펜스.md) | PC 미러 버퍼 제거 — 뷰 직결 replay(view-direct) + single-flight gen 펜스 | 확정 (부분 폐기 by ADR-0164: 결정 2 의 재연결 계기 조항) |
 | [0047](0047-프론트-스타일링-tailwind-css-v4-shadcnlucide-채택-순수-css-기조-전환.md) | 프론트 스타일링 = Tailwind CSS v4 + shadcn/lucide 채택 (순수 CSS 기조 전환) | 확정 (부분 폐기 by ADR-0048: 채팅 UI 렌더 방식: CC룩 네이티브 직접 구현·OSS 참조한정(코드 복붙 아님) → Cline 잎 컴포넌트 verbatim 코드 포트(Apache-2.0 귀속)) |
@@ -229,3 +229,5 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0186](0186-claudemd-는-매-세션-필요한-것만-담는다-에피소딕-지식은-adr코드-앵커핸드오프가-진다.md) | CLAUDE.md 는 매 세션 필요한 것만 담는다 — 에피소딕 지식은 ADR·코드 앵커·핸드오프가 진다 | 확정 |
 | [0187](0187-codex-phase-2-통로를-app-server-로-확정한다-exec-는-글자를-흘리지-않는다.md) | codex Phase 2 통로를 app-server 로 확정한다 — exec 는 글자를 흘리지 않는다 | 확정 |
 | [0188](0188-권한과-승인을-백엔드-중립-축으로-추상화한다-값-설계는-후속.md) | 권한과 승인을 백엔드 중립 축으로 추상화한다 — 값 설계는 후속 | 확정 |
+| [0189](0189-codex-app-server-통로는-backend-폴더-안의-agenttransport-구현체로-둔다.md) | codex app-server 통로는 backend 폴더 안의 AgentTransport 구현체로 둔다 | 확정 |
+| [0190](0190-json-모드-입력은-큐에-담고-보낼-수-있을-때-흘린다-큐만-두고-조작은-나중.md) | json 모드 입력은 큐에 담고 보낼 수 있을 때 흘린다 — 큐만 두고 조작은 나중 | 확정 |
