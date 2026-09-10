@@ -1,7 +1,7 @@
 # ADR-0189: codex app-server 통로는 backend 폴더 안의 AgentTransport 구현체로 둔다
 
-- 상태: 확정 (2026-09-09, 근거: 사용자 판정 + 소유권 추적 검증 + 주석 원문 재독)
-- 관련: Amends ADR-0044 (바이트 통로 공용 조항) · ADR-0004(백엔드 지식 격리) · ADR-0045(출력 정제를 백엔드로) · ADR-0030(transport ⊕ backend caps 합성) · ADR-0187(app-server 통로 확정) · ADR-0190(입력 큐) · `docs/reference/structure/session-path-ownership.md` · `docs/process/S21-codex-backend/trd-phase2a.md` §5 · step-log S21
+- 상태: 확정 (2026-09-09, 근거: 사용자 판정 + 소유권 추적 검증 + 주석 원문 재독) · 부분 폐기 by ADR-0191 (통로의 거처는 정했으나 생성 경로를 안 정했다)
+- 관련: Amends ADR-0044 (바이트 통로 공용 조항) · ADR-0004(백엔드 지식 격리) · ADR-0045(출력 정제를 백엔드로) · ADR-0030(transport ⊕ backend caps 합성) · ADR-0187(app-server 통로 확정) · ADR-0190(입력 큐) · `docs/reference/structure/session-path-ownership.md` · `docs/process/S21-codex-backend/trd-phase2a.md` §5 · step-log S21 · Amended by ADR-0191 (통로의 거처는 정했으나 생성 경로를 안 정했다)
 
 ## 맥락
 
