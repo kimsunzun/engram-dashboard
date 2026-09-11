@@ -338,7 +338,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   subgraph W["웹뷰"]
-    KEY["xterm onData<br/>TerminalSlot.tsx:322-330"]
+    KEY["xterm onData<br/>TerminalSlot.tsx:360-368"]
     CHAT["RichSlot send<br/>RichSlot.tsx:226-250"]
     WS["protocolClient.writeStdin<br/>:846-850"]
   end
@@ -366,7 +366,7 @@ flowchart TD
 
 | # | 홉 | 그 지점의 데이터 모양 | 감싸나 | 등급 |
 |---|---|---|---|---|
-| 1 | 프론트 입력 | ★**평문 UTF-8 바이트뿐 — 프론트는 아무것도 감싸지 않고 개행도 안 붙인다**★. xterm은 Enter를 이미 `\r`로 준다(`TerminalSlot.tsx:322-330`); RichSlot은 `trim()`한 원문만 보내고 주석이 그 금지를 명시한다(`RichSlot.tsx:227-228`) | 아니오 | **[중립]** |
+| 1 | 프론트 입력 | ★**평문 UTF-8 바이트뿐 — 프론트는 아무것도 감싸지 않고 개행도 안 붙인다**★. xterm은 Enter를 이미 `\r`로 준다(`TerminalSlot.tsx:360-368`); RichSlot은 `trim()`한 원문만 보내고 주석이 그 금지를 명시한다(`RichSlot.tsx:227-228`) | 아니오 | **[중립]** |
 | 2 | `writeStdin` (`protocolClient.ts:846-850`) | `WriteStdin { agent_id, data: Array.from(bytes), request_id }` — wire 타입은 `Vec<u8>`/`number[]`(`protocol/messages.rs:43-49`) | 아니오 | **[중립]** |
 | 3 | 셸 `agent_write_stdin` (`src-tauri/src/commands/agent.rs:75-88`) | `Vec<u8>`를 봉투에 넣어 데몬으로 릴레이할 뿐 | 아니오 | **[중립]** |
 | 4 | 데몬 핸들러 (`connection_core.rs:814-828`) | lease 확인 후 `manager.write_stdin(agent_id, &data)`(`:821`) | 아니오 | **[중립]** |

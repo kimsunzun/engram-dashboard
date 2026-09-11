@@ -802,21 +802,23 @@ impl DaemonClient {
 
     // reply 없는 명령(Resize 등) enqueue(fire-and-forget). agent_resize invoke 가 쓴다.
     //
-    // ## ★알려진 갭 — 끊긴 동안의 Resize 는 유실되고, **연결 회복 자체로는** 복구되지 않는다(ADR-0195)★
+    // ## ★끊긴 동안의 Resize 는 여기서 유실되고, 되돌리는 것은 프론트의 재발행이다(ADR-0195)★
     // 형제 [`Self::unsubscribe`] 와 달리 이쪽은 창구가 닫혔다고 「의미 없는」 명령이 되지 않는다:
     // 에이전트는 데몬에서 멀쩡히 살아 있고 재연결이 그것을 다시 붙잡는다. 재동기가 없다는 사실 자체는
     // invoke 경계가 이미 적고 있다(`commands::agent::agent_resize` doc) — 여기서는 **그래서 무엇이
-    // 유실되나**만 적는다.
-    // ★재구동자는 넷뿐이고 모두 *화면 쪽 사건*이다★(`src/components/slot/TerminalSlot.tsx` 의 `resizePty`
-    // 호출부 넷): 컨테이너 크기 변화(ResizeObserver 디바운스) · **숨김→보임 전이**(IntersectionObserver 가
-    // WebGL 을 다시 붙일 때) · 구독 성립 직후 · 화신 리셋 콜백. ★연결 회복은 그 넷 중 어느 것도 아니다★ —
-    // 구독 effect deps 가 `[viewId, agentId]` 라 재연결로는 다시 돌지 않는다(ADR-0164).
-    // ★그래서 증상은 이렇게 **좁다**★: 백오프가 도는 동안 분할을 드래그하면 그 치수가 PTY 에 안 닿고,
-    // 재연결만으로는 안 고쳐진다. 단 「영영」은 아니다 — 그 탭을 접었다 펴거나 창 크기를 다시 건드리면
-    // 위 넷 중 하나가 발화해 그때의 치수가 나간다.
-    // ★여기서 담아 두는 것으로 고치지 않는다★ — 그것이 ADR-0195 가 거부한 바로 그 안이다. 고칠 자리는
-    // 프론트의 재구동(connected 전이에서 resize 재발행)이고, 사용자가 이 갭을 받아들이고 후속으로
-    // 미루기로 했다.
+    // 유실되고 누가 다시 내나**만 적는다.
+    // ★재구동자는 다섯이고, 그중 넷이 *화면 쪽 사건*이다★(`src/components/slot/TerminalSlot.tsx` 의
+    // `resizePty` 호출부): 컨테이너 크기 변화(ResizeObserver 디바운스) · **숨김→보임 전이**
+    // (IntersectionObserver 가 WebGL 을 다시 붙일 때) · 구독 성립 직후 · 화신 리셋 콜백. ★다섯째는
+    // **네트워크 사건**이다★ — 연결 상태가 connected 로 *전이*하면 그 슬롯이 지금 치수를 한 번 다시 낸다.
+    // ★그 다섯째를 구독 effect 라고 읽지 말 것★: 구독 deps 는 여전히 `[viewId, agentId]` 라 재연결로
+    // 다시 돌지 않는다 — 거기에 연결 상태를 섞는 것이 ADR-0164 가 BLOCK 한 안이다. 재발행은 구독을
+    // 건드리지 않는 별도 effect 이고, 그래서 화면을 지우지도 화신 표식을 잃지도 않는다.
+    // ★그래도 여기서 담아 두는 것으로 고치지 않는다★ — 그것이 ADR-0195 가 거부한 바로 그 안이고,
+    // 프론트 재발행이 선 지금도 그대로 거부다.
+    // ★남은 갭★: 그 재발행은 **보이고 박스가 선 슬롯**만 낸다(숨은 탭이나 붕괴한 박스에서 내면 생성
+    // 기본값 80×24 나 최소 치수가 그대로 PTY 로 간다 — 고치려는 그 값이다). 그런 슬롯은 다시 보이거나
+    // 크기가 잡히는 순간 위 넷 중 하나가 발화해 고친다.
     pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
         self.try_enqueue(|socket| ConnectionCommand::Fire { cmd, socket }, "fire");
     }
