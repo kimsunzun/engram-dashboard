@@ -20,6 +20,8 @@
 //! `generation`(plain u64 로 강등) · `cmd_tx`(Option<Sender>) · watch `state_tx` **를 하나의
 //! `Mutex<Lifecycle>` 아래로** 통합한다. 가드된 모든 전이는 이 모듈의 메서드 한 곳을 통과한다.
 //! 비교와 변경이 같은 critical section 안이라, 그 사이 다른 스레드가 세대를 못 바꾼다 → clobber 불가.
+//! 뒤에 들어온 소켓 표식(ADR-0195)도 같은 이유로 같은 락 아래 산다 — 그 목록은 `LifecycleInner` 가
+//! 정본이고 여기서 다시 세지 않는다.
 //!
 //! ## ★ADR-0006 불변식 — 락을 .await across 보유 금지★
 //! 이 락의 critical section 은 **순수 동기 코드만** 담는다. watch `send`·cmd_tx 교체·u64 비교/증가는
@@ -61,6 +63,22 @@ struct LifecycleInner {
     generation: u64,
     // ★단일 task 소유★: invoke 는 여기로 ConnectionCommand 만 보내고, 처리는 연결 task 단독(T6).
     cmd_tx: Option<mpsc::Sender<ConnectionCommand>>,
+    // ★ADR-0195 — 살아 있는 소켓의 표식. `0` = 살아 있는 소켓 없음(명령 창구 닫힘)★. 이 표식이 무엇을
+    // 막으려고 존재하는지는 [`ConnectionCommand`] 의 doc 이 정본이다.
+    //
+    // ★`cmd_tx` 와 같은 락 아래 있는 것이 이 칸의 요점★: 「어느 채널인가」와 「어느 소켓인가」를 한
+    // critical section 에서 함께 읽어야, 나가는 명령에 *그때* 살아 있던 소켓의 표식을 박을 수 있다.
+    //
+    // ★이름의 `epoch` 는 ADR-0163 의 **에이전트 화신 표식이 아니다**★ — 둘을 가르는 것은 `socket_`
+    // 접두 하나뿐이고, `connection::main_loop` 에서는 이 값과 화신 쪽 `known_epoch(subs, agent_id)` 가
+    // 몇 줄 사이에 나란히 선다. 축이 다르다: 이쪽은 **소켓 하나**를 가리키고 프로세스 밖으로 나가지
+    // 않는다(디스크에도 wire 에도). 그래서 여기서 `0` 을 「없음」으로 쓰는 것은 ADR-0163 이 wire 에서
+    // 금지한 `0` 특별취급과 무관하다 — 이 값은 wire 에 실리지 않는다.
+    socket_epoch: u64,
+    // 표식 채번기 — 창구를 닫아도 **되돌아가지 않는다**. 위 칸을 `0` 으로 접었다가 거기서 다시 세면 한
+    // 연결 task 의 소켓이 전부 같은 표식(1)을 받아, 재연결을 넘어온 명령이 새 소켓과 **일치해 버린다**
+    // (ADR-0195 가 막으려는 바로 그 실행). `0` 은 sentinel 이라 wraparound 시 건너뛴다.
+    socket_epoch_seq: u64,
     state_tx: watch::Sender<ConnectionState>,
     /// ★재연결 취소 신호(T4 — in-flight 취소 결함 수정)★. generation bump(승계 connect/ensure ·
     /// close)마다 새 generation 값을 send 해, 진행 중인 재연결 task 의 await 를 즉시 깨운다 —
@@ -93,6 +111,8 @@ impl Lifecycle {
                 inner: Mutex::new(LifecycleInner {
                     generation: 0,
                     cmd_tx: None,
+                    socket_epoch: 0,
+                    socket_epoch_seq: 0,
                     state_tx,
                     cancel_tx,
                     closed_by_user: false,
@@ -115,12 +135,17 @@ impl Lifecycle {
     // cmd_tx 를 store_cmd_if_current 로 덮어쓰)기 전까지 옛(stale) 명령채널이 살아 있어, 그 창에
     // 들어온 invoke 가 *죽어가는 옛 연결* 로 명령을 보낼 수 있다. Sender(옛 cmd_tx)를 여기서 drop
     // 하면 옛 연결 task 의 cmd_rx 가 EOF → main_loop 가 Closed 로 종료(재연결 안 함) → 옛 소켓 정리.
+    //
+    // ★명령 창구도 같은 락 안에서 닫는다(ADR-0195)★: 승계 시점엔 살아 있는 소켓이 없다. 옛 연결
+    // task 는 자기 세대로만 창구를 닫을 수 있어(`close_socket_if_current`) 승계당한 뒤엔 그 권한이
+    // 없으므로, 여기서 닫지 않으면 새 연결이 설 때까지 창구가 열린 채로 남는다.
     pub(crate) fn bump_and_capture(&self, set_state: Option<ConnectionState>) -> u64 {
         let mut g = self.inner.lock().expect("lifecycle poisoned");
         g.generation += 1;
         let my_gen = g.generation;
         g.closed_by_user = false;
         g.cmd_tx = None;
+        g.socket_epoch = 0;
         let _ = g.cancel_tx.send(g.generation);
         if let Some(state) = set_state {
             let _ = g.state_tx.send(state);
@@ -222,6 +247,8 @@ impl Lifecycle {
     fn close_locked(g: &mut LifecycleInner) -> u64 {
         g.generation += 1;
         g.cmd_tx = None;
+        // ADR-0195: 종료엔 살아 있는 소켓이 없다 — 창구를 같은 전이 안에서 닫는다.
+        g.socket_epoch = 0;
         g.closed_by_user = true;
         // ★재연결 취소 송신(T4)★: bump + closed_by_user 만으로는, 재연결 task 가 *await 중*이면 다음
         //   reconnect_guard 동기 체크에 닿기 전에 그 await(예: connect_async)가 완료돼 소켓이 열린다.
@@ -253,18 +280,64 @@ impl Lifecycle {
             .subscribe()
     }
 
-    // ★현재 활성 연결의 cmd_tx 핸들(T6a — send_command 진입점)★. 저장된 cmd_tx 를 clone 해 돌려준다
-    // (None = 연결 task 없음/끊김). `mpsc::Sender::clone` 은 동기·경량이라 락 안에서 OK — 호출자는
+    // ★새 소켓의 명령 창구를 연다(ADR-0195) — current 일 때만★. 반환 = 이 소켓의 표식(항상 non-zero).
+    // stale 이면 `None` 이고 아무것도 바뀌지 않는다(밀려난 task 가 current 의 창구를 갈아치우지 못한다).
+    //
+    // ★`Connected` 발행을 같은 critical section 에 묶는다★: 갈라 두면 **이 자리에서** 승계가 끼어
+    // 「화면은 connected 인데 창구는 닫힘」이 만들어진다.
+    //
+    // ★그 어긋남 자체를 없애지는 못한다 — 이 자리 하나만 닫는다(알려진 잔여)★. 나머지 둘은 그대로다:
+    //   (a) 끊김 edge 에서 `connection::connected_lifetime` 이 창구를 먼저 닫지만 watch 는 그 뒤
+    //       `Reconnecting` 이 나갈 때까지 `Connected` 를 읽는다(그 순서가 의도다 — 그 자리 주석).
+    //   (b) 첫 연결은 여기서 창구를 열고 `Connected` 를 내지만 `cmd_tx` 는 호출자가 `ready_rx.await`
+    //       뒤에 저장한다(`super::DaemonClient::start_connection`) — 그 사이 창구는 열려 있어도
+    //       `current_cmd_tx` 는 `None` 이다. (b) 는 이 변경 이전부터 있던 모양이다.
+    // ★그래서 `Connected` 를 「지금 명령이 나간다」로 읽으면 안 된다★ — `ensure()` 도 프론트의
+    // `ensureReady()` 도 그 값으로 단락하므로, 둘 다 저 두 창에서 성공을 보고한다. 명령이 나가는지의
+    // 유일한 답은 [`Self::current_cmd_tx`] 다.
+    pub(crate) fn open_socket_if_current(&self, my_gen: u64) -> Option<u64> {
+        let mut g = self.inner.lock().expect("lifecycle poisoned");
+        if g.generation != my_gen {
+            return None;
+        }
+        g.socket_epoch_seq = match g.socket_epoch_seq.wrapping_add(1) {
+            0 => 1,
+            next => next,
+        };
+        g.socket_epoch = g.socket_epoch_seq;
+        let _ = g.state_tx.send(ConnectionState::Connected);
+        Some(g.socket_epoch)
+    }
+
+    // ★명령 창구를 닫는다(ADR-0195) — current 일 때만★. 닫힌 동안 `current_cmd_tx` 가 `None` 을 내
+    // 호출자는 그 자리에서 「연결 안 됨」을 받는다(끊긴 동안 담아 두지 않는다).
+    //
+    // ★가드가 있는 이유★: 밀려난 연결 task 도 자기 소켓이 끝나면 이 자리를 지난다. 가드가 없으면 그
+    // 종료가 **이미 선 새 연결**의 창구를 닫아 버린다.
+    pub(crate) fn close_socket_if_current(&self, my_gen: u64) {
+        let mut g = self.inner.lock().expect("lifecycle poisoned");
+        if g.generation == my_gen {
+            g.socket_epoch = 0;
+        }
+    }
+
+    // ★현재 활성 연결의 cmd_tx 핸들 + 그 소켓의 표식(T6a — send_command 진입점)★. 저장된 cmd_tx 를
+    // clone 해 표식과 함께 돌려준다. `mpsc::Sender::clone` 은 동기·경량이라 락 안에서 OK — 호출자는
     // 반환된 Sender 로 **락 밖에서** `send().await` 한다(Sender 는 lifecycle 락과 독립).
     //
-    // ★stale 송신 차단★: bump_and_capture/close 가 cmd_tx 를 None 으로 비우므로(승계·종료), 이 clone 은
-    // 항상 current 연결의 채널이다.
-    pub(crate) fn current_cmd_tx(&self) -> Option<mpsc::Sender<ConnectionCommand>> {
-        self.inner
-            .lock()
-            .expect("lifecycle poisoned")
-            .cmd_tx
-            .clone()
+    // ★`None` = 지금 명령을 받을 소켓이 없다★ — 연결 task 없음 · 첫 연결 진행 중 · 끊겨 재연결 중 ·
+    // 재연결 소진 · 종료. ADR-0195 의 앞문이 이 `None` 이다: 끊긴 동안 들어온 명령을 담아 두지 않고
+    // 여기서 즉시 돌려보낸다. 창구를 여닫는 쪽은 [`Self::open_socket_if_current`] ·
+    // [`Self::close_socket_if_current`] 이고, 승계([`Self::bump_and_capture`])와 종료도 함께 닫는다.
+    //
+    // ★그래도 이 반환은 락 밖에서 낡는다 — 그래서 표식을 함께 준다★. 앞문은 *즉시성*을 맡고 불변식
+    // 자체는 받는 쪽의 표식 대조가 맡는다(사유 정본 = `connection::reject_foreign_command`).
+    pub(crate) fn current_cmd_tx(&self) -> Option<(mpsc::Sender<ConnectionCommand>, u64)> {
+        let g = self.inner.lock().expect("lifecycle poisoned");
+        if g.socket_epoch == 0 {
+            return None;
+        }
+        g.cmd_tx.clone().map(|tx| (tx, g.socket_epoch))
     }
 
     #[cfg(test)]

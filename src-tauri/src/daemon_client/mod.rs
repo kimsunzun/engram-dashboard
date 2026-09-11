@@ -105,6 +105,28 @@ impl DaemonDiscovery for RealDiscovery {
 // discover(spawn 가능) timeout 기본값(wsTransport discover_daemon 5s 와 정렬).
 const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// 지금 명령을 받을 소켓이 없을 때 호출자가 받는 문구(ADR-0195) — 「한 번도 연결 안 함」·「끊겨 재연결
+/// 중」·「재연결 소진」·「명시 종료」가 **전부** 이 하나로 떨어진다. 갈래를 문구로 가르지 않는 것은
+/// 호출자가 할 일이 넷 다 같기 때문이다.
+///
+/// ★「connect 먼저」라고 시키지 않는다★ — 재연결이 도는 중에 그 말을 따르면 `connect()` 가 세대를 올리고
+/// `cancel_tx` 를 쏴서 **진행 중인 복구를 승계로 끊는다**. 이 문구는 §5 제어 표면을 타고 LLM 호출자에게도
+/// 그대로 가므로, 틀린 다음 행동을 적어 두면 그쪽이 실제로 그것을 한다. 재시도 시점을 호출자가 정한다는
+/// 것이 ADR-0195 의 결정이고, 문구도 그렇게만 말한다.
+pub(crate) const NOT_CONNECTED: &str =
+    "데몬에 연결되어 있지 않음 — 지금은 명령을 받지 않는다(재시도 시점은 호출자가 정한다)";
+
+/// 창구는 열려 있었는데 그 채널의 수신단이 이미 사라진 경우 — [`NOT_CONNECTED`] 와 **다른 사실**이다
+/// (사유·도달 경로는 `DaemonClient::send_command` 의 「두 not-connected 문구가 갈리는 자리」).
+pub(crate) const CHANNEL_GONE: &str = "연결 task 가 명령을 받지 못함(끊김)";
+
+/// 명령은 채널에 들어갔는데 그 답을 **아무도 돌려주지 않은 채** reply oneshot 이 떨어진 경우. 도달 경로
+/// 둘: 연결 task 가 죽었거나, 재연결 없이 끝나는 갈래(소진 · 명시 종료 · Stop)에서 아직 큐에 있던
+/// 명령이 표식 대조를 지나지 못한 채 `cmd_rx` 와 함께 사라졌거나(그 자리 = `connection` 의 버퍼 drain
+/// 주석). ★끊김 계열 문구들과 갈라 두는 이유★: 이건 「나갔나 안 나갔나」를 **모르는** 상태라,
+/// [`connection::UNSENT_ON_DISCONNECT`] 의 「재전송 안전」을 여기에 붙이면 거짓이 된다.
+pub(crate) const REPLY_LOST: &str = "명령 응답 수신 실패(연결 task 종료)";
+
 // 데몬 연결의 단일 핸들. invoke 핸들러·트레이·상태 구독자가 공유한다(`Arc<DaemonClient>`).
 //
 // 연결 task 본체는 spawn 된 tokio task(`run_connection`)가 소유하고, 이 구조체는 그 task 와
@@ -694,19 +716,50 @@ impl DaemonClient {
     // 빌더가 `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency
     // (재시도 시 같은 키)와 정합한다 — send_command 가 임의로 채우면 호출자가 키를 모른다.
     //
-    // ★흐름★: (1) 현재 cmd_tx clone(없으면 not-connected Err) (2) oneshot 생성 (3) `SendCommand`
-    // enqueue (4) reply await. 연결 task 가 reply 를 resolve(Ok/Err)하거나, 끊김 시 drain 으로 Err 를
-    // 보낸다(no-hang). cmd_tx send 실패(채널 full/닫힘)·oneshot drop(연결 task 사망)도 Err 로 귀결.
+    // ★흐름★: (1) 현재 cmd_tx clone + 소켓 표식(없으면 not-connected Err) (2) oneshot 생성
+    // (3) `SendCommand` enqueue (4) reply await. 연결 task 가 reply 를 resolve(Ok/Err)하거나, 끊김 시
+    // drain 으로 Err 를 보낸다(no-hang). cmd_tx send 실패(채널 full/닫힘)·oneshot drop(연결 task
+    // 사망)도 Err 로 귀결.
     //
-    // ★ADR-0006(락 across await 금지)★: `current_cmd_tx()` 는 락을 잡았다 즉시 풀고 Sender clone 만
-    // 돌려준다 — 이후 `tx.send().await`·`rx.await` 는 락 미보유 상태다(Sender 는 lifecycle 락과 독립).
+    // ★ADR-0195 — 끊긴 동안에는 명령을 받지 않는다★: 아래 `current_cmd_tx()` 가 `None` 이면 담아 두지
+    // 않고 그 자리에서 [`NOT_CONNECTED`] 로 돌려준다. 「아직 첫 연결 중」도 같게 본다 — 그 구분은
+    // 프론트가 이미 자기 층에서 진다(`ProtocolClient.sendCommand` 가 매 명령 전에 `ensureReady()` 를
+    // 기다린다).
+    // ★두 not-connected 문구가 갈리는 자리★: 「살아 있는 소켓이 없다」는 **전부** [`NOT_CONNECTED`] 로
+    // 떨어진다(창구가 닫혀 있으므로 — 재연결 중·소진·종료 모두). 둘째 문구([`CHANNEL_GONE`])는 창구가
+    // 열린 것을 보고 clone 을 집어 간 **뒤에** 수신단이 사라진 경우다.
+    // ★둘째가 「좁은 경합」이라고만 읽지 말 것★: `main_loop` 가 패닉하면 창구를 닫는 자리를 아무도 지나지
+    // 않아 `cmd_tx` 도 `Connected` 도 그대로 남는다 — 그 뒤 **모든** 명령이 창구를 통과한 뒤 죽은 수신단에
+    // 부딪혀 둘째 문구를 영구히 받는다. 결말 자체는 옳다(즉시 실패 · hang 없음)므로 여기서 고치지 않는다.
+    //
+    // ★ADR-0006(락 across await 금지)★: `current_cmd_tx()` 는 락을 잡았다 즉시 풀고 Sender clone +
+    // 표식만 돌려준다 — 이후 `tx.send().await`·`rx.await` 는 락 미보유 상태다(Sender 는 lifecycle 락과
+    // 독립).
+    //
+    // ## ★알려진 잔여 — 이 clone 은 `reply_rx.await` 내내 살아 있고, 그게 `close()` 를 무디게 만든다★
+    // 연결 태스크의 종료 신호는 **강한 송신단이 전부 사라지는 것** 하나뿐이다(`connection::OutcomeSender`
+    // — `main_loop` 의 `select!` 에 취소 arm 이 없다). 그런데 아래 `cmd_tx` 는 답을 기다리는 동안에도
+    // 강한 송신단이다. 그래서 **소켓을 열어 둔 채 답하지 않는 데몬**을 만나면: 호출자는 `reply_rx` 에
+    // 매달리고 → `close()` 가 lifecycle 의 송신단을 놓아도 EOF 가 안 오고 → 옛 `main_loop` 와 소켓이
+    // 살아남는다.
+    // ★그 잠금을 푸는 마감시각은 **이미 있다 — 다만 한 호출자에만 있다**★: `commands::agent` 의
+    // `forward_daemon_command` 가 이 호출을 30s `tokio::time::timeout` 으로 감싼다(같은 hang 을 겨냥해
+    // 들어온 것이다). 시한이 지나면 이 future 가 drop 되고 그 안의 clone 도 함께 죽어 EOF 가 복구되므로
+    // `close()` 가 태스크를 거둔다. 그 경로가 프론트 명령 전부가 지나는 길이라, 운영에서 이 잠금은 30s 로
+    // 유계다. ★남은 것은 그 래핑이 없는 나머지 호출자들이다★ — `commands::agent` 의 맨 `.await` 다섯과
+    // `commands::layout` · `commands::view_bus` 각 하나. 즉 할 일은 마감시각을 **설계**하는 것이 아니라
+    // 이미 증명된 래핑을 그 일곱에 **넓히는** 것이다(또는 이 왕복 자체에 마감시각을 얹어 호출자마다
+    // 되풀이하지 않는 것 — ADR-0088 계열).
+    // ★이 모양은 ADR-0195 가 만든 것이 아니다★ — 이 변경은 반환을 `(Sender, 표식)` 쌍으로 바꿨을 뿐
+    // clone 의 수명은 그대로다(변경 전 `let Some(cmd_tx) = …` 도 같은 자리에서 같은 범위였다). 그래서
+    // 여기서 고치지 않는다.
     pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
         if protocol_state::command_request_id(&cmd).is_none() {
             return Err("send_command: request_id 없는 명령은 reply 를 기대할 수 없다".to_string());
         }
-        // 현재 활성 연결의 cmd_tx 를 얻는다(없으면 연결 안 됨/끊김).
-        let Some(cmd_tx) = self.lifecycle.current_cmd_tx() else {
-            return Err("데몬에 연결되어 있지 않음(connect 먼저)".to_string());
+        // 지금 명령을 받을 소켓이 있으면 그 채널과 표식을 함께 얻는다(없으면 연결 안 됨/끊김).
+        let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
+            return Err(NOT_CONNECTED.to_string());
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         // 연결 task 로 enqueue. send 실패 = 채널 닫힘(연결 task 종료) → not-connected 취급.
@@ -714,17 +767,18 @@ impl DaemonClient {
             .send(ConnectionCommand::SendCommand {
                 cmd,
                 reply: reply_tx,
+                socket,
             })
             .await
             .is_err()
         {
-            return Err("연결 task 가 명령을 받지 못함(끊김)".to_string());
+            return Err(CHANNEL_GONE.to_string());
         }
         // reply 대기. 연결 task 가 resolve(Ok/Err) 하거나 끊김 drain 으로 Err. oneshot 송신단이 reply
         //   없이 drop(연결 task 사망 등) 되면 RecvError → not-connected 취급.
         match reply_rx.await {
             Ok(result) => result,
-            Err(_) => Err("명령 응답 수신 실패(연결 task 종료)".to_string()),
+            Err(_) => Err(REPLY_LOST.to_string()),
         }
     }
 
@@ -733,15 +787,38 @@ impl DaemonClient {
     //
     // ★동기 + try_send★: layout command 는 `#[tauri::command] pub fn`(동기)이라 `async send` 를 못 한다.
     // cmd_tx 는 bounded(512) mpsc 라 `try_send` 로 넣는다 — 해제는 저빈도(레이아웃 변경 시에만)라
-    // full 은 사실상 안 난다. 비연결(`current_cmd_tx`=None)이면 조용히 no-op(데몬이 그 agent 를 이미 안
-    // 봄 → 정리 불필요, connect 시 layout 이 다시 정리 델타를 낸다).
+    // full 은 사실상 안 난다.
+    //
+    // ★창구가 닫혀 있으면 조용히 no-op 이고, **그래도 되는 이유는 이 명령에만 해당한다**★: 데몬의 구독은
+    // 연결마다 따로 서고 그 연결이 죽을 때 함께 정리된다(`daemon::connection_core` 의 per-conn `subs`).
+    // 그래서 소켓이 없는 동안의 해제는 보낼 필요가 **없다** — 이미 끝난 일이다. ★이 문장을 형제
+    // [`Self::send_fire_and_forget`] 로 넓히지 말 것★ — 그쪽은 사정이 다르고, 그 doc 이 그것을 적는다.
     pub fn unsubscribe(&self, agent_id: AgentId) {
-        self.try_enqueue(ConnectionCommand::Unsubscribe { agent_id }, "unsubscribe");
+        self.try_enqueue(
+            |socket| ConnectionCommand::Unsubscribe { agent_id, socket },
+            "unsubscribe",
+        );
     }
 
     // reply 없는 명령(Resize 등) enqueue(fire-and-forget). agent_resize invoke 가 쓴다.
+    //
+    // ## ★알려진 갭 — 끊긴 동안의 Resize 는 유실되고, **연결 회복 자체로는** 복구되지 않는다(ADR-0195)★
+    // 형제 [`Self::unsubscribe`] 와 달리 이쪽은 창구가 닫혔다고 「의미 없는」 명령이 되지 않는다:
+    // 에이전트는 데몬에서 멀쩡히 살아 있고 재연결이 그것을 다시 붙잡는다. 재동기가 없다는 사실 자체는
+    // invoke 경계가 이미 적고 있다(`commands::agent::agent_resize` doc) — 여기서는 **그래서 무엇이
+    // 유실되나**만 적는다.
+    // ★재구동자는 넷뿐이고 모두 *화면 쪽 사건*이다★(`src/components/slot/TerminalSlot.tsx` 의 `resizePty`
+    // 호출부 넷): 컨테이너 크기 변화(ResizeObserver 디바운스) · **숨김→보임 전이**(IntersectionObserver 가
+    // WebGL 을 다시 붙일 때) · 구독 성립 직후 · 화신 리셋 콜백. ★연결 회복은 그 넷 중 어느 것도 아니다★ —
+    // 구독 effect deps 가 `[viewId, agentId]` 라 재연결로는 다시 돌지 않는다(ADR-0164).
+    // ★그래서 증상은 이렇게 **좁다**★: 백오프가 도는 동안 분할을 드래그하면 그 치수가 PTY 에 안 닿고,
+    // 재연결만으로는 안 고쳐진다. 단 「영영」은 아니다 — 그 탭을 접었다 펴거나 창 크기를 다시 건드리면
+    // 위 넷 중 하나가 발화해 그때의 치수가 나간다.
+    // ★여기서 담아 두는 것으로 고치지 않는다★ — 그것이 ADR-0195 가 거부한 바로 그 안이다. 고칠 자리는
+    // 프론트의 재구동(connected 전이에서 resize 재발행)이고, 사용자가 이 갭을 받아들이고 후속으로
+    // 미루기로 했다.
     pub fn send_fire_and_forget(&self, cmd: AgentCommand) {
-        self.try_enqueue(ConnectionCommand::Fire { cmd }, "fire");
+        self.try_enqueue(|socket| ConnectionCommand::Fire { cmd, socket }, "fire");
     }
 
     // ★뷰 주도 replay 채번(ADR-0046 M1 — single-flight, 반환 gen)★. 뷰가 mount/remount 시 호출하면 연결
@@ -752,14 +829,15 @@ impl DaemonClient {
     // ★계약★: 비연결이면 Err(프론트 재요청 구동자는 connected 전이 — M2). 연결 task 에 `RequestReplay` 를
     //   보내고 oneshot 으로 gen 을 회수한다(actor 가 single-flight 상태를 단독 소유 → 직렬).
     pub async fn request_replay(&self, agent_id: AgentId) -> Result<u64, String> {
-        let Some(cmd_tx) = self.lifecycle.current_cmd_tx() else {
-            return Err("데몬에 연결되어 있지 않음(connect 먼저)".to_string());
+        let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
+            return Err(NOT_CONNECTED.to_string());
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<u64>();
         if cmd_tx
             .send(ConnectionCommand::RequestReplay {
                 agent_id,
                 reply: Some(reply_tx),
+                socket,
             })
             .await
             .is_err()
@@ -776,20 +854,27 @@ impl DaemonClient {
         //   `send_failure_path_clears_via_disconnect_and_next_request_sends` 는 **`on_disconnect` 가
         //   슬롯을 비우고 다음 요청이 다시 나간다**만 재고, 송신 실패에서 그 `on_disconnect` 까지 가는
         //   구간은 안 탄다.
+        // ★ADR-0195 도 같은 자리로 떨어진다★: 옛 소켓 몫으로 판정된 요청은 연결 task 가 이 oneshot 을
+        //   그냥 drop 한다 — 나를 통로는 `u64` 뿐이라 실어 보낼 오류값이 없다. 그래서 아래 문구가 그
+        //   경로의 **유일한** 관측이고, 「미전송 · 재요청 안전」이라 그 경우에도 정직하다.
         reply_rx
             .await
             .map_err(|_| "replay 요청 미전송(연결 끊김) — 프론트 재요청 안전".to_string())
     }
 
     // fire-and-forget enqueue 공통(동기 try_send). 비연결=no-op, full/닫힘=debug 로깅.
-    fn try_enqueue(&self, cmd: ConnectionCommand, kind: &str) {
-        let Some(cmd_tx) = self.lifecycle.current_cmd_tx() else {
-            // 비연결 — 조용히 no-op(ADR-0046: src-tauri 무상태). Unsubscribe/Resize 는 비연결이면 의미 없고,
-            //   replay 는 프론트가 connected 전이에서 재요청한다(재요청 구동자 = 프론트 단독).
-            tracing::debug!(%kind, "fire-and-forget: 비연결 — no-op");
+    //
+    // ★명령을 **만들어 주는 클로저**를 받는다(ADR-0195)★: 소켓 표식은 창구를 여는 그 한 번의 락
+    // 조회에서만 나오므로, 완성된 명령을 받으면 그 칸을 채울 값이 없다.
+    fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
+        let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
+            // 창구가 닫힘 — 조용히 no-op(ADR-0046: src-tauri 무상태). ★여기서 담아 두지 않는 것이
+            //   ADR-0195 이고, 그 대가는 명령마다 다르다★ — 무해한 쪽과 유실되는 쪽의 판정은 두 진입점
+            //   doc 에 있다([`DaemonClient::unsubscribe`] · [`DaemonClient::send_fire_and_forget`]).
+            tracing::debug!(%kind, "fire-and-forget: 창구 닫힘 — no-op");
             return;
         };
-        if let Err(e) = cmd_tx.try_send(cmd) {
+        if let Err(e) = cmd_tx.try_send(make(socket)) {
             tracing::debug!(%kind, "fire-and-forget enqueue 실패(full/닫힘): {e}");
         }
     }
