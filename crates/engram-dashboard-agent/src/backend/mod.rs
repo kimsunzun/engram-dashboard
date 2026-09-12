@@ -26,9 +26,10 @@ use uuid::Uuid;
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, SpawnMode};
 use crate::session_tracker::SessionIdSource;
-use crate::transport::OutputDecoder;
+use crate::transport::pty::PtyTransport;
+use crate::transport::{AgentTransport, OutputDecoder};
 use crate::turn::TurnSignal;
-use crate::types::{AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent};
+use crate::types::{AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError};
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
 /// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
@@ -125,6 +126,46 @@ pub trait AgentBackend: Send + Sync {
     // ADR-0044
     fn transport_shape(&self, _command: &AgentCommand) -> TransportShape {
         TransportShape::Pty
+    }
+
+    /// 이 backend 가 `command` 를 띄울 **물리 통로를 직접 만들어**, 세션 조립에 필요한 나머지 값과 함께
+    /// 한 번에 내준다.
+    ///
+    /// ★왜 backend 인가(ADR-0191)★: "이 프로그램을 어떤 통로 구현체로 띄우나" 는 프로그램별 지식이다.
+    ///   조립점이 [`TransportShape`] 를 다시 match 해 생성자를 고르면 **가르는 자리가 두 곳**이 되고
+    ///   (`backend_for` + 그 match), 그 자리가 백엔드 전용 통로 타입을 이름으로 알게 된다(ADR-0004).
+    /// ★조립점은 돌려받은 통로의 실제 타입을 모른다★ — `Box<dyn AgentTransport>` 로만 받는다.
+    /// ★아스펙트를 한 dispatch 에 모아 싣는다★: caps·인코더·턴 분류자·우편 자격은 각자 자기 메서드가
+    ///   그대로 소유하고, 여기서는 그것들을 **모으기만** 한다. 조립점이 같은 switch 를 아스펙트마다 다시
+    ///   타지 않게 하는 것이 이 묶음의 존재 이유다.
+    /// ★`output.structured` 를 통로 구현체가 하드코딩하는 것은 여전히 금지(ADR-0044/0030)★ — 구조화
+    ///   파이프를 고른 backend 가 그 자리에서 주입한다. 규칙은 그대로이고 주입하는 **자리**만 여기다.
+    /// `cols`/`rows` 는 터미널 통로에만 쓰인다 — 파이프에는 크기 개념이 없어 무시된다.
+    ///
+    /// ★기본값 = PTY + 각 아스펙트가 신고한 값★: 통로를 따로 만들지 않는 backend 는 터미널로 뜨고
+    ///   ([`AgentBackend::transport_shape`] 기본값과 같은 자리), 나머지 칸은 자기 메서드의 산출을 그대로
+    ///   싣는다.
+    /// ★단 이 기본값은 `transport_shape` 를 **읽지 않는다**★: 파이프를 요구한다고 신고해 놓고 이 메서드를
+    ///   구현하지 않으면 조용히 터미널로 뜬다. 선언 표 트립와이어(`tests::expected_codec_axis`)는
+    ///   `transport_shape` 의 신고값만 재므로 그 어긋남을 못 본다.
+    // ADR-0004
+    // ADR-0191
+    fn open_spawn(
+        &self,
+        command: &AgentCommand,
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SpawnParts, PtyError> {
+        let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
+        Ok(SpawnParts {
+            transport: Box::new(transport),
+            child_pid,
+            backend_caps: self.capabilities(command),
+            encoder: self.input_encoder(command),
+            turn_classifier: self.turn_classifier(),
+            reads_messages: self.reads_messages(),
+        })
     }
 
     /// 이 backend 의 **턴 신호 분류자**(ADR-0113 사실 계층의 백엔드 지식 몫).
@@ -258,6 +299,21 @@ pub trait AgentBackend: Send + Sync {
     }
 }
 
+/// spawn 한 번을 조립하는 데 필요한, backend 가 **한 dispatch 로** 내주는 묶음([`AgentBackend::open_spawn`]).
+///
+/// ★caps 소유권 분할은 그대로다(ADR-0030)★: `backend_caps` 는 backend 몫뿐이고, 통로가 신고하는
+///   input/output/control caps 와는 세션 층에서 `Capabilities::compose` 로 합성된다. 여기서 미리 합치지
+///   않는다 — 합치면 두 출처가 한 값으로 뭉개져 어느 쪽이 무엇을 신고했는지 추적이 끊긴다.
+// ADR-0191
+pub struct SpawnParts {
+    pub transport: Box<dyn AgentTransport>,
+    pub child_pid: Option<u32>,
+    pub backend_caps: BackendCaps,
+    pub encoder: InputEncoder,
+    pub turn_classifier: TurnClassifier,
+    pub reads_messages: bool,
+}
+
 /// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
 /// 세션 수명 동안 들고 이벤트마다 부른다.
 ///
@@ -333,6 +389,20 @@ pub fn transport_shape(c: &AgentCommand) -> TransportShape {
     backend_for(c).transport_shape(c)
 }
 
+/// 통로 실물도 그 위에 실리는 아스펙트 값도 전부 [`AgentBackend::open_spawn`] 이 소유하고 이 함수는
+/// dispatch 뿐이다 — 새 backend 는 자기 폴더에서 그 메서드를 구현하면 되고 이 함수는 손대지 않는다
+/// (교체성). ★이 호출이 자식 프로세스를 띄운다★ — 위아래 dispatch 들과 달리 부작용이 있고, 실패하면
+/// 그 spawn 이 성립하지 않는다.
+// ADR-0191
+pub fn open_spawn(
+    c: &AgentCommand,
+    spec: &CommandSpec,
+    cols: u16,
+    rows: u16,
+) -> Result<SpawnParts, PtyError> {
+    backend_for(c).open_spawn(c, spec, cols, rows)
+}
+
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
     backend_for(c).turn_classifier()
 }
@@ -363,11 +433,14 @@ pub fn session_id_source(
 /// claude JSON 라인으로 감싸는" 지식은 backend 소유다. session 은 이 enum(태그)만 들고, 실제
 /// 스키마는 [`AgentBackend::wrap_input_turn`] 구현체 안에만 산다(ADR-0004 격리 — 이 모듈도 session 도
 /// transport 도 형태를 모른다).
-/// backend 가 요구하는 물리 통로 모양 — `manager::select_transport` 의 입력.
+/// backend 가 요구하는 물리 통로 모양 — **신고값**이다. 통로 실물을 만드는 것은
+/// [`AgentBackend::open_spawn`] 이고, 그 안에서도 이 값을 다시 match 해 생성자를 고르지 않는다
+/// (ADR-0191 — 가르는 switch 는 `backend_for` 하나뿐). 오늘 이 값을 읽는 곳은 선언 표 트립와이어
+/// (`tests::expected_codec_axis`)뿐이다.
 ///
 /// ★출력 구조화 여부가 여기 함의돼 있다★: `StdioNdjson` 은 그 파이프가 나르는 바이트가 줄단위 JSON
-/// 이라는 뜻이고, 통로 자신은 그것을 모른다(바보 파이프 — ADR-0044). 그래서 조립점이 이 값을 보고
-/// `structured` output caps 를 주입한다.
+/// 이라는 뜻이고, 통로 자신은 그것을 모른다(바보 파이프 — ADR-0044). 그래서 그 `structured` output caps
+/// 는 하드코딩되지 않고 주입되는데, 주입하는 쪽이 파이프를 고른 backend 자신이다(ADR-0030 분담 유지).
 // ADR-0004
 // ADR-0044
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -814,6 +887,46 @@ mod tests {
             covered.iter().all(|c| *c),
             "샘플이 안 닿은 variant 가 있다(그 variant 는 코덱 축이 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
         );
+    }
+
+    // ── 선언한 통로 모양과 실제로 넘어오는 통로 ────────────────────────────────────────────
+    //
+    // ★왜 위 코덱 축 표와 따로 재나(ADR-0191 이후)★: 조립점이 `transport_shape` 를 match 해 생성자를
+    //   고르던 시절엔 그 표의 셋째 열이 **실제로 뜨는 통로**까지 전이적으로 단언했다. 통로 생성이
+    //   backend 의 `open_spawn` 으로 들어가면서 그 신고값을 읽는 생산 코드가 0 이 됐고, 그때부터
+    //   파이프를 선언해 놓고 기본 `open_spawn`(=PTY)을 타도 그 열은 초록이다. 런타임 증상은 깨진
+    //   화면뿐이라 지금 그 어긋남을 잡는 것은 이 테스트뿐이다.
+    // ★`structured` 로 가르지 않는 이유★: 그 칸은 통로가 아니라 backend 가 주입하는 값이라
+    //   (ADR-0030/0044) 평문 파이프도 false 를 신고한다 — 두 구현체를 실제로 가르는 것은 양쪽이
+    //   하드코딩하는 `terminal_bytes` 와 `resize` 다.
+    // ★슬롯 커버리지 단언을 두지 않았다★: 같은 샘플 목록을 도는 위 두 트립와이어가 이미 잰다.
+    // ★spec 은 그 백엔드의 실 CLI 가 아니다★: `open_spawn` 은 무엇을 띄울지를 spec 에서, 어떤 통로로
+    //   띄울지를 command 에서 따로 받으므로, 즉시 끝나는 프로브를 띄워 통로 선택만 본다(ADR-0012).
+    // ADR-0191
+    #[cfg(windows)]
+    #[test]
+    fn declared_transport_shape_matches_the_transport_handed_over() {
+        let probe = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo shape-probe".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        for c in &mail_eligibility_samples() {
+            let shape = transport_shape(c);
+            let expected = match shape {
+                TransportShape::Pty => (true, true),
+                TransportShape::StdioNdjson => (false, false),
+            };
+            let parts = open_spawn(c, &probe, 80, 24).expect("open_spawn");
+            let caps = parts.transport.capabilities();
+            let actual = (caps.output.terminal_bytes, caps.control.resize);
+            parts.transport.shutdown();
+            assert_eq!(
+                actual, expected,
+                "variant {c:?}: {shape:?} 를 신고했는데 open_spawn 이 넘긴 통로의 (terminal_bytes, resize) 가 다르다 — 신고와 통로 생성 중 한쪽만 고친 것이다"
+            );
+        }
     }
 
     // ── 제출 바이트(submit_sequence) — 백엔드별 "본문 write 만으론 턴이 안 시작되나" ──────────────

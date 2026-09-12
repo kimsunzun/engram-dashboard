@@ -29,15 +29,20 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::backend::{console_command, AgentBackend, InputEncoder, TransportShape, TurnClassifier};
+use crate::backend::{
+    console_command, AgentBackend, InputEncoder, SpawnParts, TransportShape, TurnClassifier,
+};
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
-use crate::transport::OutputDecoder;
+use crate::transport::pty::PtyTransport;
+use crate::transport::stdio::StdioTransport;
+use crate::transport::{AgentTransport, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
-    AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps,
-    ToolGrant, CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError,
+    SessionCaps, ToolGrant, CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF,
+    MAIL_MARKER_ON,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
@@ -335,12 +340,49 @@ impl AgentBackend for ClaudeBackend {
     }
 
     /// stream-json 은 파이프를 요구한다 — TUI 가 아니라 줄단위 JSON 을 stdout 으로 흘리기 때문.
+    ///
+    /// ★신고값일 뿐이고 실물은 아래 [`AgentBackend::open_spawn`] 이 만든다★ — 둘 다 [`is_stream_json`]
+    ///   을 보므로 한쪽만 고치면 신고와 실물이 어긋나고, 선언 표 트립와이어는 이 신고값만 잰다.
     fn transport_shape(&self, command: &AgentCommand) -> TransportShape {
         if is_stream_json(command) {
             TransportShape::StdioNdjson
         } else {
             TransportShape::Pty
         }
+    }
+
+    /// stream-json 모드는 구조화 파이프를, 터미널 모드는 PTY 를 만든다.
+    ///
+    /// ★판정은 [`is_stream_json`] 단독 — `transport_shape` 신고값을 되읽어 match 하지 않는다(ADR-0191)★:
+    ///   그렇게 하면 모양 값을 가르는 둘째 switch 가 생겨 이 결정이 걷어낸 그 모양으로 되돌아간다.
+    /// ★`structured: true` 를 주입하는 자리가 여기다(ADR-0044/0030)★: 파이프 자신은 나르는 바이트가
+    ///   줄단위 JSON 인지 모르므로(바보 파이프) [`StdioTransport`] 는 그 값을 하드코딩하지 않고 받아서
+    ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다.
+    // ADR-0044
+    // ADR-0191
+    fn open_spawn(
+        &self,
+        command: &AgentCommand,
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SpawnParts, PtyError> {
+        let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
+            if is_stream_json(command) {
+                let (t, pid) = StdioTransport::open(spec, true, self.output_decoder(command))?;
+                (Box::new(t), pid)
+            } else {
+                let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+                (Box::new(t), pid)
+            };
+        Ok(SpawnParts {
+            transport,
+            child_pid,
+            backend_caps: self.capabilities(command),
+            encoder: self.input_encoder(command),
+            turn_classifier: self.turn_classifier(),
+            reads_messages: self.reads_messages(),
+        })
     }
 
     fn input_encoder(&self, command: &AgentCommand) -> InputEncoder {

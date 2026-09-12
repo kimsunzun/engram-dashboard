@@ -50,9 +50,9 @@ flowchart TD
 flowchart TD
   M["AgentManager.spawn_agent"] -->|"AgentCommand 변형"| BF["backend_for — 명령 축 dispatch 표"]
   BF --> CB["그 백엔드의 build_spec"]
-  CB -->|"CommandSpec · program+args+cwd"| ST["select_transport — shape 는 backend.transport_shape 가 고른다"]
-  ST -->|"Pty · decoder 를 버린다"| PT["PtyTransport.open"]
-  ST -->|"StdioNdjson · decoder 를 받는다"| SD["StdioTransport.open"]
+  CB -->|"CommandSpec · program+args+cwd"| ST["그 백엔드의 open_spawn — 통로를 스스로 만들어 넘긴다"]
+  ST -->|"터미널 모드 · decoder 를 만들지 않는다"| PT["PtyTransport.open"]
+  ST -->|"stream-json · decoder 를 함께 넘긴다"| SD["StdioTransport.open"]
   PT -->|"원시 바이트"| OC["OutputCore · 링 + seq"]
   SD -->|"구조화 이벤트"| OC
   OC -->|"OutputEvent 팬아웃"| PC["ProtocolClient (프론트 TS)"]
@@ -61,7 +61,7 @@ flowchart TD
 
 ★**「백엔드 전용 코드는 `build_spec` 안에서 끝난다」고 적지 말 것 — 거짓이다**★. 같은 파일이 `needs_session`·`supports_control_channel`·`accepts_mcp_config`·`reads_messages`·`capabilities` 도 선언하고, 백엔드에 따라 `transport_shape`·`output_decoder` 까지 선언한다. 끝나는 것은 그 **함수**가 아니라 그 **폴더**다(ADR-0004).
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(파일 헤더 · backend_for · backend_for_encoder · 트립와이어 셋) · `crates/engram-dashboard-agent/src/manager.rs`(select_transport) · `crates/engram-dashboard-agent/src/transport/pty.rs`
+**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(파일 헤더 · backend_for · backend_for_encoder · `open_spawn` 기본값과 `SpawnParts` · 트립와이어 셋) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(`open_spawn` — 통로 실물이 갈리는 유일한 자리) · `crates/engram-dashboard-agent/src/transport/pty.rs`
 
 ## 렌더 분기 — override 가 먼저, 그다음 capability
 
@@ -71,14 +71,14 @@ flowchart TD
 flowchart LR
   OV["renderModeOverride 의 그 슬롯 칸"] -->|"값이 있으면 그것"| M["슬롯 렌더러 — terminal · rich · dom"]
   OV -.->|"키가 없을 때만 ?? 로 떨어진다"| DF["defaultRenderMode(agent)"]
-  TSH["backend.transport_shape — 구조화 모양을 고른다"] --> CO["Capabilities.compose"]
+  TSH["backend.open_spawn — 그 모드의 통로를 만들며 structured 를 주입한다"] --> CO["Capabilities.compose"]
   BC["BackendCaps — 그 백엔드의 선언"] --> CO
   CO -->|"output.structured"| DF
   DF -->|"true → rich · false → terminal"| M
-  TSH -.->|"StdioNdjson 에만 붙는다 — Pty 경로는 버린다"| DEC["output_decoder"]
+  TSH -.->|"구조화 파이프에만 함께 넘어간다 — 터미널 경로엔 아예 안 만든다"| DEC["output_decoder"]
 ```
 
-두 가지를 자주 틀린다. 첫째, **렌더 모드는 셋이다** — `terminal|rich|dom`. 이분법으로 적으면 dom 이 사라진다. 둘째, **rich 로 가는 축은 decoder 가 아니다.** 통로 모양(`TransportShape::StdioNdjson`)이 구조화를 고르고 **decoder 는 그 모양에만 붙는다** — `select_transport` 의 `Pty` 팔은 받은 decoder 를 그냥 버리고, 구조화가 아닌 모양에는 애초에 `None` 이 온다. 「decoder 를 선언하면 오른쪽으로 간다」는 인과가 뒤집힌 서술이다.
+두 가지를 자주 틀린다. 첫째, **렌더 모드는 셋이다** — `terminal|rich|dom`. 이분법으로 적으면 dom 이 사라진다. 둘째, **rich 로 가는 축은 decoder 가 아니다.** 출력 형식(claude 면 `--output-format stream-json`)이 구조화를 고르고 **decoder 는 그 갈래에만 붙는다** — 그 백엔드의 `open_spawn` 이 구조화 파이프를 만드는 바로 그 자리에서 decoder 를 함께 넘기고, 터미널 갈래는 애초에 만들지 않는다(ADR-0191 이후 **버려지는 자리 자체가 없다**). 「decoder 를 선언하면 오른쪽으로 간다」는 인과가 뒤집힌 서술이다.
 
 ★**ADR-0044 를 렌더 모드 우선순위의 근거로 인용하지 말 것 — 거짓이다**★. 그 ADR 은 JSON 모드 배선·`StdioTransport` 신설 결정이고 `override` 라는 낱말이 한 번도 안 나온다(실측: 0 건).
 
@@ -142,7 +142,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 | `supports_control_channel` | `true` | `false` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰+mcp-config 발급). `false` 면 provision 을 **아예 건드리지 않는다** |
 | `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
 | `output_decoder` | stream-json 에만 `Some` | 없음(trait 기본 `None`) | 없음(trait 기본 `None`) | 구조화 이벤트의 유무 → (A) 「렌더 분기」의 갈래 |
-| `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | `Pty`(trait 기본) | `Pty`(trait 기본) | `select_transport` 가 이 값으로 통로를 고르고, `Pty` 팔은 decoder 를 버린다 |
+| `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | `Pty`(trait 기본) | `Pty`(trait 기본) | ★**신고값일 뿐 통로를 고르지 않는다**★ — 실물은 `open_spawn` 이 만들고 그 안에서 이 값을 되읽지 않는다(ADR-0191). 오늘 이 값을 읽는 곳은 선언 표 트립와이어(`tests::expected_codec_axis`) 하나뿐이라, 신고와 실물이 어긋나도 아무 게이트가 못 본다 |
 | `capabilities().session.resume` | `true` | `false` | `false`(보수적 stub) | 무손실 복원 가능 여부 |
 
 ★**MCP 칸을 오독하지 말 것**★ — 「codex 가 MCP 를 못 쓴다」가 아니다. 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수 있나**다. codex 의 MCP 주입은 전역 TOML 오버라이드(`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.

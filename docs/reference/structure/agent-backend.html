@@ -315,9 +315,9 @@ flowchart TD
 flowchart TD
   M["AgentManager.spawn_agent"] -->|"AgentCommand 변형"| BF["backend_for — 명령 축 dispatch 표"]
   BF --> CB["그 백엔드의 build_spec"]
-  CB -->|"CommandSpec · program+args+cwd"| ST["select_transport — shape 는 backend.transport_shape 가 고른다"]
-  ST -->|"Pty · decoder 를 버린다"| PT["PtyTransport.open"]
-  ST -->|"StdioNdjson · decoder 를 받는다"| SD["StdioTransport.open"]
+  CB -->|"CommandSpec · program+args+cwd"| ST["그 백엔드의 open_spawn — 통로를 스스로 만들어 넘긴다"]
+  ST -->|"터미널 모드 · decoder 를 만들지 않는다"| PT["PtyTransport.open"]
+  ST -->|"stream-json · decoder 를 함께 넘긴다"| SD["StdioTransport.open"]
   PT -->|"원시 바이트"| OC["OutputCore · 링 + seq"]
   SD -->|"구조화 이벤트"| OC
   OC -->|"OutputEvent 팬아웃"| PC["ProtocolClient (프론트 TS)"]
@@ -342,7 +342,7 @@ flowchart TD
             <tr><td><code>reads_messages</code></td><td><code>false</code> 면 우편 수신자 명단에서 제외</td></tr>
             <tr><td><code>supports_control_channel</code></td><td><code>true</code> 면 spawn 전에 provision(토큰+mcp-config 발급)</td></tr>
             <tr><td><code>accepts_mcp_config</code></td><td>프라이밍 변형과 우편 표식이 이 값으로 갈린다</td></tr>
-            <tr><td><code>transport_shape</code></td><td><code>select_transport</code> 가 이 값으로 통로를 고른다</td></tr>
+            <tr><td><code>transport_shape</code></td><td><b>신고값일 뿐</b> — 통로 실물은 <code>open_spawn</code> 이 만들고 그 안에서 이 값을 되읽지 않는다</td></tr>
             <tr><td><code>output_decoder</code></td><td>구조화 이벤트의 유무</td></tr>
             <tr><td><code>capabilities().session.resume</code></td><td>무손실 복원 가능 여부</td></tr>
           </tbody>
@@ -377,14 +377,14 @@ flowchart LR
       <div class="figure-body">
 <pre class="mermaid">
 flowchart LR
-  TSH["backend.transport_shape — 구조화 모양을 고른다"] --> CO["Capabilities.compose"]
+  TSH["backend.open_spawn — 그 모드의 통로를 만들며 structured 를 주입한다"] --> CO["Capabilities.compose"]
   BC["BackendCaps — 그 백엔드의 선언"] --> CO
   CO -->|"output.structured"| DF["defaultRenderMode(agent)"]
   DF -->|"true → rich · false → terminal"| M["슬롯 렌더러 — terminal · rich · dom"]
-  TSH -.->|"StdioNdjson 에만 붙는다 — Pty 경로는 버린다"| DEC["output_decoder"]
+  TSH -.->|"구조화 파이프에만 함께 넘어간다 — 터미널 경로엔 아예 안 만든다"| DEC["output_decoder"]
 </pre>
       </div>
-      <figcaption>「decoder 를 선언하면 오른쪽으로 간다」는 <b>인과가 뒤집힌 서술</b>이다 — <code>select_transport</code> 의 <code>Pty</code> 팔은 받은 decoder 를 그냥 버린다.</figcaption>
+      <figcaption>「decoder 를 선언하면 오른쪽으로 간다」는 <b>인과가 뒤집힌 서술</b>이다 — 그 백엔드의 <code>open_spawn</code> 이 구조화 파이프를 만드는 자리에서 decoder 를 함께 넘기고, 터미널 갈래는 애초에 만들지 않는다(<b>버려지는 자리 자체가 없다</b>).</figcaption>
     </figure>
   </section>
 
