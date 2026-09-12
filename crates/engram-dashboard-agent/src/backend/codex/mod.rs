@@ -19,6 +19,9 @@
 //!
 //! tauri import 0.
 
+pub(crate) mod decoder;
+pub(crate) mod protocol;
+
 use std::path::PathBuf;
 
 use uuid::Uuid;
