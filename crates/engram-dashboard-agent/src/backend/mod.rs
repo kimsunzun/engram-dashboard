@@ -381,10 +381,6 @@ pub fn build_command_spec(
     backend_for(c).build_spec(c, mode, session_id, cwd, env, control)
 }
 
-pub fn backend_caps(c: &AgentCommand) -> BackendCaps {
-    backend_for(c).capabilities(c)
-}
-
 pub fn transport_shape(c: &AgentCommand) -> TransportShape {
     backend_for(c).transport_shape(c)
 }
