@@ -353,6 +353,8 @@ fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
     match e {
         InputEncoder::Raw => None,
         InputEncoder::ClaudeStreamJson => Some(&CLAUDE_BACKEND),
+        // 봉투를 통로가 만드는 태그라 backend 가 감쌀 것이 없다 — `encode` 는 통과, 에코도 없다.
+        InputEncoder::TransportFramed => None,
     }
 }
 
@@ -445,6 +447,15 @@ pub enum TransportShape {
     Pty,
     /// stdio 파이프 + 줄단위 JSON 출력 — resize 개념 없음.
     StdioNdjson,
+    /// stdio 파이프 + 줄단위 JSON 이 **양방향**으로 흐른다 — resize 개념 없음.
+    ///
+    /// ★[`TransportShape::StdioNdjson`] 과의 구분★: 그쪽은 우리가 쓴 바이트를 상대가 그대로 읽고
+    ///   우리는 상대의 줄을 읽기만 하는 단방향 파이프라, 봉투를 만드는 것은 backend 인코더다
+    ///   ([`InputEncoder`]). 이쪽은 상대가 **우리에게도 묻고 답을 기다리는** 프로토콜이라, 나가는 줄의
+    ///   id·메서드·순서를 통로가 직접 쥔다 — 그래서 [`AgentTransport::send_input`] 이 받는 바이트는
+    ///   와이어 프레임이 아니라 **메시지 본문**이고, 인코더는 그것을 건드리지 않는다
+    ///   ([`InputEncoder::TransportFramed`]).
+    StdioBidiJson,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,6 +464,13 @@ pub enum InputEncoder {
     Raw,
     /// claude stream-json: 텍스트 1턴을 user JSON 라인(`\n` 종단)으로 감싼다(스키마 = `backend/claude/`).
     ClaudeStreamJson,
+    /// 봉투를 **통로가 만든다** — 인코더는 바이트를 그대로 통과시킨다([`backend_for_encoder`] 가 `None`).
+    ///
+    /// ★`Raw` 를 재사용하지 않는 이유★: `Raw` 는 "PTY 로 사람 키보드를 흉내내는 채널" 이라
+    ///   [`InputEncoder::submit_sequence`] 가 CR 을 내고, 세션이 그 CR 을 **본문과 별개의
+    ///   `send_input` 호출**로 한 번 더 낸다([`crate::session::AgentSession::submit_input_observed`]).
+    ///   봉투를 스스로 만드는 통로에 그 호출이 닿으면 빈 본문짜리 턴이 하나 더 나간다.
+    TransportFramed,
 }
 
 impl InputEncoder {
@@ -504,6 +522,9 @@ impl InputEncoder {
     /// ★`Raw` = CR★: 터미널·shell 은 PTY 로 사람 키보드를 흉내내는 채널이라 Enter = CR(0x0D) 이다.
     /// ★`ClaudeStreamJson` = None★: `encode` 가 붙이는 종단 `\n` 이 그 프로토콜의 제출이다. 여기에 CR 을
     ///   더하면 라인 경계 뒤에 잉여 바이트가 붙어 페이로드가 오염된다.
+    /// ★`TransportFramed` = None★: 본문 바이트 하나가 그대로 한 턴이고, 그것을 봉투에 넣어 제출하는 것은
+    ///   통로다. 여기에 값을 두면 세션이 **본문과 별개의 `send_input` 호출**로 그 바이트를 한 번 더 내고,
+    ///   통로는 그것을 또 하나의 본문으로 읽어 빈 턴을 연다.
     /// ★키 입력 경로는 이 값을 보지 않는다★: 소비자는 "완성된 메시지 하나 = 턴 하나" 인
     ///   `AgentSession::submit_input_observed` 뿐이다. 사람이 Enter 를 직접 치는 터미널 스트리밍 입력
     ///   (`write_input`)에 제출을 끼워 넣으면 키 한 번마다 턴이 제출된다.
@@ -512,6 +533,7 @@ impl InputEncoder {
         match self {
             InputEncoder::Raw => Some(b"\r"),
             InputEncoder::ClaudeStreamJson => None,
+            InputEncoder::TransportFramed => None,
         }
     }
 }
@@ -772,7 +794,12 @@ mod tests {
         }
     }
 
-    /// variant 당 최소 1개. claude 는 모드가 둘이라 둘 다 싣는다(같은 슬롯 — 중복은 허용).
+    /// 아래 세 트립와이어가 전부 도는 표본 목록.
+    ///
+    /// ★이 목록에서 한 줄을 지우면 그 **모드가 세 트립와이어에서 통째로 빠진 채 전부 초록이 된다**★
+    ///   (실측 — codex app-server 줄을 지우고 돌려 확인했다). variant 슬롯 커버리지는 모드를 안 세므로
+    ///   그 침묵을 못 잡는다. 그래서 목록 자체를 재는 관문을 따로 뒀다:
+    ///   [`the_sample_list_covers_every_mode_of_every_backend`].
     fn mail_eligibility_samples() -> Vec<AgentCommand> {
         let per_variant: [AgentCommand; BACKEND_VARIANTS] = [
             AgentCommand::Claude {
@@ -793,7 +820,53 @@ mod tests {
             extra_args: vec![],
             output_format: AgentOutputFormat::StreamJson,
         });
+        all.push(AgentCommand::Codex {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::StreamJson,
+        });
         all
+    }
+
+    /// 표본 목록을 지키는 관문. ★아래 셋이 재는 것은 전부 이 목록이 닿은 것뿐이라, 목록에 구멍이 나면
+    /// 그 구멍은 **아무 데서도 안 보인다**★ — 세 항목이 다 같이 초록인 채로 그 모드를 한 번도 안 묻는다.
+    ///
+    /// ★슬롯이 variant 가 아니라 **(variant × 출력 모드)** 인 것이 요점이다★: variant 슬롯은 모드를 안
+    /// 세므로 둘째 모드가 빠져도 채워진 것으로 보인다. 새 variant 든 새 [`AgentOutputFormat`] 값이든
+    /// 늘면 아래 match 가 컴파일 에러를 낸다.
+    const BACKEND_MODES: usize = 5;
+
+    fn mode_slot(c: &AgentCommand) -> usize {
+        match c {
+            AgentCommand::Claude {
+                output_format: AgentOutputFormat::Terminal,
+                ..
+            } => 0,
+            AgentCommand::Claude {
+                output_format: AgentOutputFormat::StreamJson,
+                ..
+            } => 1,
+            AgentCommand::Shell { .. } => 2,
+            AgentCommand::Codex {
+                output_format: AgentOutputFormat::Terminal,
+                ..
+            } => 3,
+            AgentCommand::Codex {
+                output_format: AgentOutputFormat::StreamJson,
+                ..
+            } => 4,
+        }
+    }
+
+    #[test]
+    fn the_sample_list_covers_every_mode_of_every_backend() {
+        let mut covered = [false; BACKEND_MODES];
+        for c in &mail_eligibility_samples() {
+            covered[mode_slot(c)] = true;
+        }
+        assert!(
+            covered.iter().all(|c| *c),
+            "표본 목록이 안 닿은 모드가 있다 — 그 모드는 아래 세 트립와이어 어디에도 안 걸린 채 전부 초록이 된다: {covered:?}"
+        );
     }
 
     #[test]
@@ -849,11 +922,21 @@ mod tests {
                 TransportShape::StdioNdjson,
             ),
             AgentCommand::Shell { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
-            // ★codex 두 모드가 한 행에 묶인 것은 의도다★ — 오늘은 어느 모드로 띄워도 대화형 TUI 가 PTY
-            //   위에서 돈다. JSON 모드가 쓸 통로가 아직 없기 때문이다. 번역기도 없다: 터미널 바이트가
-            //   그대로 xterm 으로 간다. 그 통로가 붙으면 이 행을 모드별로 갈라야 하는데, ★그때 갈라지도록
-            //   강제하는 테스트도 게이트도 없다★ — 통로를 들이는 쪽이 이 행을 직접 손봐야 한다.
-            AgentCommand::Codex { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
+            AgentCommand::Codex {
+                output_format: AgentOutputFormat::Terminal,
+                ..
+            } => (InputEncoder::Raw, false, TransportShape::Pty),
+            // ★app-server 모드의 인코더가 `Raw` 가 아닌 것이 이 행의 요점이다★ — `Raw` 였다면 세션이
+            //   본문 뒤에 CR 을 **별도 호출**로 한 번 더 내고, 봉투를 스스로 만드는 통로는 그것을 또 하나의
+            //   본문으로 읽어 빈 턴을 연다.
+            AgentCommand::Codex {
+                output_format: AgentOutputFormat::StreamJson,
+                ..
+            } => (
+                InputEncoder::TransportFramed,
+                true,
+                TransportShape::StdioBidiJson,
+            ),
         }
     }
 
@@ -913,6 +996,9 @@ mod tests {
             let expected = match shape {
                 TransportShape::Pty => (true, true),
                 TransportShape::StdioNdjson => (false, false),
+                // 파이프라 터미널 바이트도 크기도 없다 — 단방향 파이프와 같은 짝이다. 둘을 가르는
+                //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
+                TransportShape::StdioBidiJson => (false, false),
             };
             let parts = open_spawn(c, &probe, 80, 24).expect("open_spawn");
             let caps = parts.transport.capabilities();

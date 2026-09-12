@@ -86,7 +86,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use engram_dashboard_agent::backend::{
-    AgentBackend, ClaudeBackend, CodexBackend, InputEncoder, SUBMIT_PACING,
+    AgentBackend, ClaudeBackend, CodexBackend, InputEncoder, TransportShape, SUBMIT_PACING,
 };
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -231,6 +231,13 @@ struct BackendRow {
     backend: &'static dyn AgentBackend,
     /// 선언을 물을 때 넘기는 명령 표본.
     sample: AgentCommand,
+    /// 같은 백엔드의 **둘째 통로** 표본. `None` = 통로가 하나뿐인 백엔드.
+    ///
+    /// ★행이 아니라 질문이 느는 자리다★ — 둘째 통로는 다른 프로그램이 아니라 같은 프로그램을 다른
+    ///   모양으로 띄우는 것이라, `Declared` 를 한 벌 더 적으면 같은 답을 두 곳에 베끼게 된다. 대신
+    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 **두 통로의 답이 갈리지
+    ///   않는가**를 묻는다 — 갈려야 하는 축(통로 모양·인코딩·번역기)은 그 아래 질문이 따로 잰다.
+    alt_sample: Option<AgentCommand>,
     declared: Declared,
     probe: Option<LiveProbe>,
 }
@@ -251,6 +258,10 @@ fn backend_table() -> Vec<BackendRow> {
                 extra_args: vec![],
                 output_format: AgentOutputFormat::Terminal,
             },
+            alt_sample: Some(AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::StreamJson,
+            }),
             declared: Declared {
                 needs_session: true,
                 supports_control_channel: true,
@@ -275,6 +286,10 @@ fn backend_table() -> Vec<BackendRow> {
                 extra_args: vec![],
                 output_format: AgentOutputFormat::Terminal,
             },
+            alt_sample: Some(AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::StreamJson,
+            }),
             declared: Declared {
                 // ★실측이 도장 찍은 값이다★ — 호출자가 세션 id 를 정할 수 없고(`session_id_flag: None`
                 //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
@@ -352,10 +367,21 @@ fn declaration_table_is_filled_for_every_backend() {
     );
 
     for row in &table {
-        let b = row.backend;
-        let d = &row.declared;
-        let name = row.name;
+        assert_declared(row.name, row.backend, &row.sample, &row.declared);
+    }
 
+    // ★`#[ignore]` 레인이 공회전하지 않는다는 것도 여기서 지킨다★: 실 프로브 행이 하나도 없으면
+    //   Q1~Q10 은 빈 순회로 전부 초록이 된다. 그 침묵을 이 항목이 잡는다.
+    assert!(
+        table.iter().any(|r| r.probe.is_some()),
+        "실 프로브 행이 하나도 없다 — Q1~Q10 이 빈 순회로 조용히 통과한다"
+    );
+}
+
+/// 한 표본에 대해 선언 열 전부를 대조한다.
+fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentCommand, d: &Declared) {
+    {
+        let row_sample = sample;
         assert_eq!(b.needs_session(), d.needs_session, "{name}: needs_session");
         assert_eq!(
             b.supports_control_channel(),
@@ -373,7 +399,7 @@ fn declaration_table_is_filled_for_every_backend() {
             "{name}: reads_messages"
         );
 
-        let caps = b.capabilities(&row.sample);
+        let caps = b.capabilities(row_sample);
         assert_eq!(
             caps.session.resume, d.session_resume,
             "{name}: session.resume"
@@ -396,13 +422,66 @@ fn declaration_table_is_filled_for_every_backend() {
             "{name}: model.max_tokens"
         );
     }
+}
 
-    // ★`#[ignore]` 레인이 공회전하지 않는다는 것도 여기서 지킨다★: 실 프로브 행이 하나도 없으면
-    //   Q1~Q10 은 빈 순회로 전부 초록이 된다. 그 침묵을 이 항목이 잡는다.
-    assert!(
-        table.iter().any(|r| r.probe.is_some()),
-        "실 프로브 행이 하나도 없다 — Q1~Q10 이 빈 순회로 조용히 통과한다"
-    );
+/// ★둘째 통로가 선언을 조용히 갈아치우지 않는가★ — 같은 프로그램을 다른 모양으로 띄우는 것이라 우편
+/// 자격·제어 채널·세션 능력은 통로가 바뀌어도 같아야 한다.
+///
+/// ★오늘 이 항목이 실제로 재는 것은 `capabilities(sample)` 한 칸뿐이다★ — 나머지 네 getter 는 인자를
+/// 안 받아 표본과 무관하므로, 그 칸들은 위 [`declaration_table_is_filled_for_every_backend`] 가 이미
+/// 잰 것을 되풀이할 뿐이고 여기서 따로 깨질 수 없다. 그 getter 중 하나가 명령을 받게 되는 날 이 항목이
+/// 그 축을 집어 든다.
+#[test]
+fn declarations_are_the_same_across_a_backend_s_two_channels() {
+    for row in &backend_table() {
+        let Some(alt) = &row.alt_sample else { continue };
+        assert_declared(row.name, row.backend, alt, &row.declared);
+    }
+}
+
+/// 둘째 통로를 **가진다고 적어 놓고 같은 통로를 적는 것**을 막는다 — 그러면 위 항목이 같은 표본을 두 번
+/// 물어 아무것도 재지 않는다.
+///
+/// ★코덱 축(인코더·번역기·통로 모양)의 값 자체는 `backend/mod.rs` 의 선언 표 트립와이어가 잰다★ —
+/// 여기서 그 값을 다시 적으면 같은 사실이 두 집에 살게 된다. 이 항목이 묻는 것은 **두 통로가 실제로
+/// 다른가** 하나다.
+#[test]
+fn a_second_channel_is_actually_a_different_channel() {
+    for row in &backend_table() {
+        let Some(alt) = &row.alt_sample else { continue };
+        let first = row.backend.transport_shape(&row.sample);
+        let second = row.backend.transport_shape(alt);
+        assert_ne!(
+            first, second,
+            "{}: 둘째 통로가 첫째와 같은 모양({first:?})을 신고한다 — 표본이 같거나 선언이 안 갈렸다",
+            row.name
+        );
+    }
+}
+
+/// 파이프로 뜨는 통로는 번역기를 **반드시** 달고 나와야 한다.
+///
+/// ★없으면 오류도 경고도 없이 바이트가 그대로 화면으로 간다★ — 런타임 증상은 깨진 화면뿐이다.
+#[test]
+fn every_pipe_channel_declares_an_output_decoder_and_a_non_raw_encoder() {
+    for row in &backend_table() {
+        for sample in std::iter::once(&row.sample).chain(row.alt_sample.iter()) {
+            if row.backend.transport_shape(sample) == TransportShape::Pty {
+                continue;
+            }
+            assert!(
+                row.backend.output_decoder(sample).is_some(),
+                "{}: 파이프를 신고했는데 번역기가 없다 — 바이트가 그대로 화면으로 간다",
+                row.name
+            );
+            assert_ne!(
+                row.backend.input_encoder(sample),
+                InputEncoder::Raw,
+                "{}: 파이프 통로가 `Raw` 인코더를 쓰면 세션이 본문 뒤에 CR 을 한 번 더 낸다",
+                row.name
+            );
+        }
+    }
 }
 
 // ── 공용 하네스 ──────────────────────────────────────────────────────────────
