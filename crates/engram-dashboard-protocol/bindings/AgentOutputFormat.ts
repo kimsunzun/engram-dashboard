@@ -3,4 +3,4 @@
 /**
  * Terminal=PTY 대화형, StreamJson=헤드리스 NDJSON.
  */
-export type ClaudeOutputFormat = "Terminal" | "StreamJson";
+export type AgentOutputFormat = "Terminal" | "StreamJson";

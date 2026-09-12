@@ -132,7 +132,7 @@ mod tests {
         GeminiBackend.build_spec(
             &AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: crate::profile::ClaudeOutputFormat::Terminal,
+                output_format: crate::profile::AgentOutputFormat::Terminal,
             },
             mode,
             sid,
@@ -176,7 +176,7 @@ mod tests {
         let s = GeminiBackend.build_spec(
             &AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: crate::profile::ClaudeOutputFormat::Terminal,
+                output_format: crate::profile::AgentOutputFormat::Terminal,
             },
             SpawnMode::Fresh,
             None,

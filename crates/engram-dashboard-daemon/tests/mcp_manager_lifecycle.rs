@@ -184,7 +184,7 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
         "claude-fail-closed".into(),
         AgentCommand::Claude {
             extra_args: vec![],
-            output_format: engram_dashboard_agent::profile::ClaudeOutputFormat::Terminal,
+            output_format: engram_dashboard_agent::profile::AgentOutputFormat::Terminal,
         },
         PathBuf::from("."),
         vec![],

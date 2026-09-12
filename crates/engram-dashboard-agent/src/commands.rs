@@ -17,7 +17,9 @@ use engram_dashboard_command::{
 
 use crate::manager::{AgentManager, RenameOutcome};
 use crate::preset::PresetId;
-use crate::profile::{AgentCommand, AgentProfile, ClaudeOutputFormat, SpawnMode};
+// 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
+use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
+use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::types::{
     AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED,
     RENAME_OUTCOME_UNCHANGED,
@@ -59,7 +61,9 @@ declare_commands! {
     /// 새 에이전트의 출력 형식(= 렌더 모드) — 생성 시점에 고정되고 이후 불변이다(ADR-0044/0078).
     ///
     /// `Terminal` = PTY 대화형(xterm 렌더) · `StreamJson` = 헤드리스 NDJSON 스트림.
-    /// 어휘는 `ClaudeOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — 갈리면 프론트 allowlist
+    /// 어휘는 코어 `profile::AgentOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — ★개명(ADR-0194)
+    /// 뒤로 이 선언 어휘와 코어 enum 이 **같은 이름을 쓴다**★. 가리킬 땐 경로를 붙여 적을 것(맨 이름은
+    /// 이 파일 안에서 이 선언을 가리킨다 — 그래서 위 import 가 코어 쪽에 별칭을 단다). 갈리면 프론트 allowlist
     /// (`coerceOutputFormat`)와 이 입구가 같은 낱말을 다르게 읽는다. 그 일치를 산문이 아니라 컴파일러가
     /// 지키는 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
     enum AgentOutputFormat {
@@ -264,7 +268,7 @@ impl AgentCommandHost for AgentManager {
 ///   (`agentlist.createAgent`)의 기본값이 이미 StreamJson 이다(ADR-0078). 두 입구가 같은 동사에 다른
 ///   기본을 주면 "만들었는데 화면이 다르다" 가 된다.
 /// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
-pub const NEW_AGENT_OUTPUT_FORMAT: ClaudeOutputFormat = ClaudeOutputFormat::StreamJson;
+pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat::StreamJson;
 
 // ── LLM 제어 표면의 백엔드 생성 정책(사용자 결정 2026-09-07 · TRD S21 §6-G) ──────────────────────
 //
@@ -351,7 +355,7 @@ fn backend_word(backend: &AgentBackend) -> String {
 /// ★이 `match` 는 **선언 enum** 을 훑는다 — 코어에 백엔드가 늘어도 여기서는 컴파일이 깨지지 않는다★.
 /// 그 방향(코어가 늘었는데 선언이 좁은 채로 남는 것)을 잡는 그물은 `AgentCommand` 를 훑는 역방향 `match`
 /// 이고, 그 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones` 하나다.
-fn backend_command(backend: AgentBackend, output_format: ClaudeOutputFormat) -> AgentCommand {
+fn backend_command(backend: AgentBackend, output_format: CoreAgentOutputFormat) -> AgentCommand {
     match backend {
         AgentBackend::Claude => AgentCommand::Claude {
             extra_args: vec![],
@@ -362,11 +366,11 @@ fn backend_command(backend: AgentBackend, output_format: ClaudeOutputFormat) -> 
 
 /// 선언 어휘 → 코어 어휘. **미지정은 [`NEW_AGENT_OUTPUT_FORMAT`]** 이고, 어휘 밖 값은 여기 오기 전에
 /// 역직렬화가 `INVALID_ARGUMENT` 로 반려한다(조용한 fallback 없음 — 프론트 `coerceOutputFormat` 과 같은 규율).
-fn output_format(given: Option<AgentOutputFormat>) -> ClaudeOutputFormat {
+fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
     match given {
         None => NEW_AGENT_OUTPUT_FORMAT,
-        Some(AgentOutputFormat::Terminal) => ClaudeOutputFormat::Terminal,
-        Some(AgentOutputFormat::StreamJson) => ClaudeOutputFormat::StreamJson,
+        Some(AgentOutputFormat::Terminal) => CoreAgentOutputFormat::Terminal,
+        Some(AgentOutputFormat::StreamJson) => CoreAgentOutputFormat::StreamJson,
     }
 }
 
@@ -1484,7 +1488,7 @@ mod tests {
             json!({ "cwd": "C:/x", "name": "typed", "output_format": "Terminal", "backend": "Claude" }),
         )
         .expect("명시");
-        assert_eq!(format_of("typed"), ClaudeOutputFormat::Terminal);
+        assert_eq!(format_of("typed"), CoreAgentOutputFormat::Terminal);
 
         let err = call(
             &table,
@@ -1589,10 +1593,10 @@ mod tests {
         }
 
         // ── 출력 형식: 선언 변형 ↔ 코어 변형이 일대일이고 wire 표기까지 같다 ──
-        fn declared_output_format(core: ClaudeOutputFormat) -> AgentOutputFormat {
+        fn declared_output_format(core: CoreAgentOutputFormat) -> AgentOutputFormat {
             match core {
-                ClaudeOutputFormat::Terminal => AgentOutputFormat::Terminal,
-                ClaudeOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
+                CoreAgentOutputFormat::Terminal => AgentOutputFormat::Terminal,
+                CoreAgentOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
             }
         }
         let formats = advertised("output_format");
@@ -1602,7 +1606,7 @@ mod tests {
             // 같은 낱말이 **양쪽에서** 읽혀야 한다 — 한쪽만 읽히면 그 자리가 곧 어긋난 지점이다.
             let declared: AgentOutputFormat =
                 serde_json::from_value(spelled.clone()).expect("선언 어휘가 광고를 읽는다");
-            let core: ClaudeOutputFormat =
+            let core: CoreAgentOutputFormat =
                 serde_json::from_value(spelled).expect("코어 어휘가 같은 낱말을 읽는다");
             assert_eq!(
                 declared_output_format(core),

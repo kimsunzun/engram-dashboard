@@ -2146,7 +2146,7 @@ mod tests {
     fn claude_terminal_command() -> crate::profile::AgentCommand {
         crate::profile::AgentCommand::Claude {
             extra_args: vec![],
-            output_format: crate::profile::ClaudeOutputFormat::Terminal,
+            output_format: crate::profile::AgentOutputFormat::Terminal,
         }
     }
 

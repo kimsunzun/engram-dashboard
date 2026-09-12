@@ -13,7 +13,7 @@ use engram_dashboard_agent::backend::accepts_mcp_config;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, ProfileStore,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -455,7 +455,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     //   테스트 사본이 된다.
     let accepts_mcp = accepts_mcp_config(&AgentCommand::Claude {
         extra_args: vec![],
-        output_format: ClaudeOutputFormat::StreamJson,
+        output_format: AgentOutputFormat::StreamJson,
     });
     assert!(accepts_mcp, "claude 는 MCP-capable 이어야(전제)");
     let ep = channel

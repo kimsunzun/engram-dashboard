@@ -11,7 +11,7 @@ import type {
   AgentInfo,
   AgentProfile,
   AgentStatus,
-  ClaudeOutputFormat,
+  AgentOutputFormat,
   Preset,
   RestoreReport,
 } from './types'
@@ -207,12 +207,12 @@ export interface AgentClient {
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
-    outputFormat?: ClaudeOutputFormat,
+    outputFormat?: AgentOutputFormat,
   ): Promise<AgentProfile>
   /**
    * codex 프로필 생성 — 형제 `createClaudeProfile` 과 같은 자리에 등록만 하고 스폰하지 않는다.
-   * ★출력 포맷 인자가 없는 것은 빠뜨린 게 아니다★: 그 축은 claude 의 것이고 codex 는 대화형 TUI 하나뿐이라
-   * 고를 것이 없다(화면은 늘 xterm 이다).
+   * ★출력 포맷 인자가 없는 것은 wire 계약이다★: codex 모드는 아직 프론트에서 wire 로
+   * 나르지 않으며 데몬 경계가 Terminal 로 채운다.
    */
   createCodexProfile(
     name: string,

@@ -11,7 +11,7 @@ use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, SpawnMode,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -230,7 +230,7 @@ fn spawn_json_agent(
         name.to_string(),
         AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         },
         std::path::PathBuf::from("."),
         vec![],
@@ -793,7 +793,7 @@ mod obs_seam {
             engram_dashboard_agent::backend::turn_classifier(
                 &engram_dashboard_agent::profile::AgentCommand::Claude {
                     extra_args: vec![],
-                    output_format: engram_dashboard_agent::profile::ClaudeOutputFormat::StreamJson,
+                    output_format: engram_dashboard_agent::profile::AgentOutputFormat::StreamJson,
                 },
             ),
         );

@@ -924,7 +924,7 @@ mod tests {
         status_sink: Arc<dyn StatusSink>,
         epoch: u32,
     ) -> (OutputCore, Arc<TurnObservations>, AgentId) {
-        use crate::profile::{AgentCommand, ClaudeOutputFormat};
+        use crate::profile::{AgentCommand, AgentOutputFormat};
         let id = uuid::Uuid::new_v4();
         let turns = Arc::new(TurnObservations::new());
         let core = OutputCore::new(
@@ -935,7 +935,7 @@ mod tests {
                 turns.clone(),
                 crate::backend::turn_classifier(&AgentCommand::Claude {
                     extra_args: vec![],
-                    output_format: ClaudeOutputFormat::StreamJson,
+                    output_format: AgentOutputFormat::StreamJson,
                 }),
             ),
         );
@@ -1029,12 +1029,12 @@ mod tests {
 
     #[test]
     fn a_dead_incarnations_late_echo_cannot_delete_the_live_ones_observation() {
-        use crate::profile::{AgentCommand, ClaudeOutputFormat};
+        use crate::profile::{AgentCommand, AgentOutputFormat};
         let id = uuid::Uuid::new_v4();
         let turns = Arc::new(TurnObservations::new());
         let classify = crate::backend::turn_classifier(&AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         });
         let wiring = |t: &Arc<TurnObservations>| TurnWiring::new(t.clone(), classify);
 

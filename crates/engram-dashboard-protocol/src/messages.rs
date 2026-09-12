@@ -5,7 +5,7 @@ use engram_dashboard_command::{CommandDecl, CommandEnvelope, CommandReply, Owner
 use ts_rs::TS;
 
 use crate::domain::{
-    AgentBackendKind, AgentInfo, AgentProfile, AgentStatus, Capabilities, ClaudeOutputFormat,
+    AgentBackendKind, AgentInfo, AgentOutputFormat, AgentProfile, AgentStatus, Capabilities,
     EnvelopeFormat, Preset, RestoreReport, SnapshotChunk,
 };
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
@@ -119,9 +119,10 @@ pub enum AgentCommand {
         auto_restore: bool,
         /// `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
         /// PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
-        /// ★claude 의 축이다★ — codex 에는 대응이 없어(TUI 하나뿐) 그 백엔드에선 읽히지 않는다.
+        /// ★이 wire 필드는 claude 의 축이다★ — codex 모드는 아직 wire 에 실리지 않아
+        /// 그 백엔드 갈래가 이 값을 읽지 않는다.
         #[serde(default)]
-        output_format: ClaudeOutputFormat,
+        output_format: AgentOutputFormat,
         /// 부재 = 오류(형제 `SpawnByCwd.backend` 와 같은 계약 — `AgentBackendKind` 참조).
         #[serde(default)]
         backend: Option<AgentBackendKind>,

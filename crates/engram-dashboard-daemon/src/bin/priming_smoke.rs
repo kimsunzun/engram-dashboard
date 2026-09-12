@@ -15,7 +15,7 @@ use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, SpawnMode,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -166,7 +166,7 @@ async fn run() -> i32 {
         format!("smoke-{}", &AgentId::new_v4().to_string()[..8]),
         AgentCommand::Claude {
             extra_args: vec!["--model".to_string(), model.clone()],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         },
         workspace.clone(),
         vec![],

@@ -497,7 +497,7 @@ pub fn resume_transcript_events(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::ClaudeOutputFormat;
+    use crate::profile::AgentOutputFormat;
 
     // ── ADR-0099 트립와이어: 새 AgentCommand variant 배선 시 capability 의식적 선언 강제 ──────
     //
@@ -528,13 +528,16 @@ mod tests {
         let variants: Vec<AgentCommand> = vec![
             AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: ClaudeOutputFormat::Terminal,
+                output_format: AgentOutputFormat::Terminal,
             },
             AgentCommand::Shell {
                 program: "cmd.exe".into(),
                 args: vec![],
             },
-            AgentCommand::Codex { extra_args: vec![] },
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
         ];
 
         for c in &variants {
@@ -563,7 +566,7 @@ mod tests {
         use crate::types::OutputEvent;
         let json = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         };
         let shell = AgentCommand::Shell {
             program: "cmd.exe".into(),
@@ -605,7 +608,7 @@ mod tests {
     fn resume_failure_dispatch_reads_claudes_marker_and_stays_silent_elsewhere() {
         let claude = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::Terminal,
+            output_format: AgentOutputFormat::Terminal,
         };
         let shell = AgentCommand::Shell {
             program: "cmd.exe".into(),
@@ -642,11 +645,11 @@ mod tests {
     fn input_encoder_dispatch_by_mode() {
         let term = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::Terminal,
+            output_format: AgentOutputFormat::Terminal,
         };
         let json = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         };
         let shell = AgentCommand::Shell {
             program: "cmd.exe".into(),
@@ -705,18 +708,21 @@ mod tests {
         let per_variant: [AgentCommand; BACKEND_VARIANTS] = [
             AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: ClaudeOutputFormat::Terminal,
+                output_format: AgentOutputFormat::Terminal,
             },
             AgentCommand::Shell {
                 program: "cmd.exe".into(),
                 args: vec![],
             },
-            AgentCommand::Codex { extra_args: vec![] },
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
         ];
         let mut all = per_variant.to_vec();
         all.push(AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         });
         all
     }
@@ -743,7 +749,7 @@ mod tests {
     // ★와일드카드를 추가하지 말 것★ — 이 축의 기본값(`Raw` · decoder 없음)은 둘 다 fail-open 이라
     // 아무 선언 없이도 컴파일되고 조용히 초록이 된다. 그런데 구조화 stdin 을 요구하는 프로그램에 `Raw`
     // 가 물리면 그 에이전트는 **입력을 통째로 못 읽고**, 런타임엔 아무 신호도 안 난다. `AgentCommand`
-    // variant 든 `ClaudeOutputFormat` 값이든 늘어나면 아래 match 가 컴파일 에러를 낸다.
+    // variant 든 `AgentOutputFormat` 값이든 늘어나면 아래 match 가 컴파일 에러를 낸다.
     //
     // 채우는 법 — CLI spike 실측값으로:
     //   ① input_encoder — 그 프로그램이 stdin 을 무엇으로 읽나(감쌀 게 없으면 `Raw`)
@@ -762,11 +768,11 @@ mod tests {
         // (input_encoder, output_decoder 유무, transport_shape)
         match c {
             AgentCommand::Claude {
-                output_format: ClaudeOutputFormat::Terminal,
+                output_format: AgentOutputFormat::Terminal,
                 ..
             } => (InputEncoder::Raw, false, TransportShape::Pty),
             AgentCommand::Claude {
-                output_format: ClaudeOutputFormat::StreamJson,
+                output_format: AgentOutputFormat::StreamJson,
                 ..
             } => (
                 InputEncoder::ClaudeStreamJson,
@@ -774,8 +780,10 @@ mod tests {
                 TransportShape::StdioNdjson,
             ),
             AgentCommand::Shell { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
-            // codex 는 대화형 TUI 라 PTY 가 유일한 통로다(파이프로 stdin 을 주면 그 자리에서 거부한다 —
-            //   실측). 번역기는 없다: 터미널 바이트가 그대로 xterm 으로 간다.
+            // ★codex 두 모드가 한 행에 묶인 것은 의도다★ — 오늘은 어느 모드로 띄워도 대화형 TUI 가 PTY
+            //   위에서 돈다. JSON 모드가 쓸 통로가 아직 없기 때문이다. 번역기도 없다: 터미널 바이트가
+            //   그대로 xterm 으로 간다. 그 통로가 붙으면 이 행을 모드별로 갈라야 하는데, ★그때 갈라지도록
+            //   강제하는 테스트도 게이트도 없다★ — 통로를 들이는 쪽이 이 행을 직접 손봐야 한다.
             AgentCommand::Codex { .. } => (InputEncoder::Raw, false, TransportShape::Pty),
         }
     }
@@ -887,11 +895,11 @@ mod tests {
     fn output_decoder_dispatch_by_mode() {
         let term = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::Terminal,
+            output_format: AgentOutputFormat::Terminal,
         };
         let json = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         };
         let shell = AgentCommand::Shell {
             program: "cmd.exe".into(),
@@ -916,7 +924,7 @@ mod tests {
         use crate::types::OutputEvent;
         let json = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         };
         let mut dec = output_decoder(&json).expect("json → decoder");
         let mut ev = dec.decode(b"{\"type\":\"result\",\"subtype\":\"success\"}\n");

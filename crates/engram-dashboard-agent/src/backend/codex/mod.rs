@@ -97,7 +97,7 @@ impl AgentBackend for CodexBackend {
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         match command {
-            AgentCommand::Codex { extra_args } => {
+            AgentCommand::Codex { extra_args, .. } => {
                 let mut args = Vec::with_capacity(6 + extra_args.len());
                 args.push(CD_FLAG.to_string());
                 args.push(cwd.to_string_lossy().into_owned());
@@ -161,10 +161,12 @@ impl AgentBackend for CodexBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::AgentOutputFormat;
 
     fn codex(extra_args: Vec<&str>) -> AgentCommand {
         AgentCommand::Codex {
             extra_args: extra_args.into_iter().map(String::from).collect(),
+            output_format: AgentOutputFormat::Terminal,
         }
     }
 

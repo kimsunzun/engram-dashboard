@@ -135,7 +135,7 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  // ★사람이 codex 를 고르는 문★ — 출력 포맷 인자가 **없다**(그 축은 claude 의 것이다). 형제와 마찬가지로
+  // ★사람이 codex 를 고르는 문★ — 프론트→wire 경로가 아직 codex 모드를 나르지 않아 출력 포맷 인자가 없다. 형제와 마찬가지로
   //   등록만 하고 스폰하지 않는다 — 뜨는 것은 활성화(더블클릭)에서다.
   // ★`run` 이 아니라 `runAsHuman` 이다★ — 이 문은 `humanOnly` 라 LLM 진입점으로는 반려된다(아래 별도 항목).
   it('createCodex(사람 경로) → createCodexProfile 호출(출력 포맷 인자 없음)', async () => {

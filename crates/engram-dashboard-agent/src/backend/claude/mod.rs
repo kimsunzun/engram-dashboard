@@ -31,7 +31,7 @@ use uuid::Uuid;
 
 use crate::backend::{console_command, AgentBackend, InputEncoder, TransportShape, TurnClassifier};
 use crate::failure::AgentFailureKind;
-use crate::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::OutputDecoder;
 use crate::turn::TurnSignal;
@@ -52,7 +52,7 @@ fn is_stream_json(command: &AgentCommand) -> bool {
     matches!(
         command,
         AgentCommand::Claude {
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
             ..
         }
     )
@@ -129,7 +129,7 @@ impl AgentBackend for ClaudeBackend {
                 args.push("bypassPermissions".to_string());
                 match output_format {
                     // ── 터미널(PTY 대화형) — 바이트/인자 동결(회귀 금지) ──
-                    ClaudeOutputFormat::Terminal => {
+                    AgentOutputFormat::Terminal => {
                         if let Some(sid) = session_id {
                             let flag = match mode {
                                 SpawnMode::Fresh => "--session-id",
@@ -142,7 +142,7 @@ impl AgentBackend for ClaudeBackend {
                     // ── JSON(헤드리스 stream-json) — ADR-0044 ──
                     // stream-json 입출력은 claude `-p` 전용(실측: --help "only works with --print").
                     // --replay-user-messages: 유저 턴을 출력 스트림에 되울림 → 프론트가 출력 단일 출처로 렌더.
-                    ClaudeOutputFormat::StreamJson => {
+                    AgentOutputFormat::StreamJson => {
                         args.push("-p".to_string());
                         args.push("--input-format".to_string());
                         args.push("stream-json".to_string());
@@ -1195,7 +1195,7 @@ mod tests {
     fn terminal(extra: Vec<&str>) -> AgentCommand {
         AgentCommand::Claude {
             extra_args: extra.into_iter().map(String::from).collect(),
-            output_format: ClaudeOutputFormat::Terminal,
+            output_format: AgentOutputFormat::Terminal,
         }
     }
 
@@ -2204,7 +2204,7 @@ mod tests {
         let s = spec_with_control(
             &AgentCommand::Claude {
                 extra_args: vec!["Bash".to_string()],
-                output_format: ClaudeOutputFormat::StreamJson,
+                output_format: AgentOutputFormat::StreamJson,
             },
             SpawnMode::Fresh,
             None,
@@ -2329,7 +2329,7 @@ mod tests {
     fn json(extra: Vec<&str>) -> AgentCommand {
         AgentCommand::Claude {
             extra_args: extra.into_iter().map(String::from).collect(),
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         }
     }
 

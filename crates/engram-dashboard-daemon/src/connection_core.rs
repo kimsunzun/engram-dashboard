@@ -34,8 +34,8 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_agent::preset::Preset as CorePreset;
 use engram_dashboard_agent::profile::{
-    AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
-    ClaudeOutputFormat as CoreClaudeOutputFormat, RestartPolicy as CoreRestartPolicy,
+    AgentCommand as CoreSpawnCommand, AgentOutputFormat as CoreAgentOutputFormat,
+    AgentProfile as CoreProfile, RestartPolicy as CoreRestartPolicy,
     RestoreOutcome as CoreRestoreOutcome,
 };
 use engram_dashboard_agent::types::{
@@ -44,14 +44,14 @@ use engram_dashboard_agent::types::{
 
 use engram_dashboard_protocol::{
     AgentBackendKind as WireBackendKind, AgentCommand, AgentEvent,
-    AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo, AgentProfile as WireProfile,
+    AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
+    AgentOutputFormat as WireAgentOutputFormat, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
-    EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
-    RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
-    SnapshotChunk as WireSnapshotChunk, StructuredEvent as WireStructuredEvent, SubscribeAction,
-    PROTOCOL_VERSION,
+    ControlCaps as WireControlCaps, EnvelopeFormat as WireEnvelopeFormat,
+    InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
+    Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
+    RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
+    StructuredEvent as WireStructuredEvent, SubscribeAction, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -419,19 +419,25 @@ const MISSING_BACKEND: &str = "backend 칸이 비었다 — 스폰 패킷(SpawnB
 
 /// wire 백엔드 선택 → 코어 실행 명령. `None` = 칸이 비었다(호출자가 [`MISSING_BACKEND`] 로 거절한다).
 ///
-/// `output_format` 은 claude 갈래만 쓴다 — codex 에는 그 축이 없다.
+/// wire `output_format` 은 claude 갈래만 나르고 codex 모드는 아직 이 모양에 없다.
 /// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
 fn spawn_command_for(
     backend: Option<WireBackendKind>,
     extra_args: Vec<String>,
-    output_format: CoreClaudeOutputFormat,
+    output_format: CoreAgentOutputFormat,
 ) -> Option<CoreSpawnCommand> {
     match backend? {
         WireBackendKind::Claude => Some(CoreSpawnCommand::Claude {
             extra_args,
             output_format,
         }),
-        WireBackendKind::Codex => Some(CoreSpawnCommand::Codex { extra_args }),
+        WireBackendKind::Codex => {
+            // wire 스폰 명령은 아직 codex 모드를 나르지 않으므로 이 경계에서 Terminal 기본값을 채운다.
+            Some(CoreSpawnCommand::Codex {
+                extra_args,
+                output_format: CoreAgentOutputFormat::Terminal,
+            })
+        }
     }
 }
 
@@ -443,15 +449,20 @@ fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
         } => WireSpawnCommand::Claude {
             extra_args: extra_args.clone(),
             output_format: match output_format {
-                CoreClaudeOutputFormat::Terminal => WireClaudeOutputFormat::Terminal,
-                CoreClaudeOutputFormat::StreamJson => WireClaudeOutputFormat::StreamJson,
+                CoreAgentOutputFormat::Terminal => WireAgentOutputFormat::Terminal,
+                CoreAgentOutputFormat::StreamJson => WireAgentOutputFormat::StreamJson,
             },
         },
         CoreSpawnCommand::Shell { program, args } => WireSpawnCommand::Shell {
             program: program.clone(),
             args: args.clone(),
         },
-        CoreSpawnCommand::Codex { extra_args } => WireSpawnCommand::Codex {
+        // ★codex `output_format` 은 여기서 떨어진다★ — wire 모양에 그 칸이 없어서다(형제
+        //   `spawn_command_for` 가 반대 방향에서 `Terminal` 을 채우는 것과 짝). 오늘 제품의 어느
+        //   생성 경로도 기본값 아닌 값을 만들지 않으므로 관측되는 손실은 없지만, 손으로 고친
+        //   `agents.json` 이 그 값을 들고 있으면 클라이언트는 그것을 볼 수 없다. 칸을 wire 로
+        //   넓히는 것은 통로 구현체가 설 때 같이 정한다.
+        CoreSpawnCommand::Codex { extra_args, .. } => WireSpawnCommand::Codex {
             extra_args: extra_args.clone(),
         },
     }
@@ -989,7 +1000,7 @@ impl ConnectionCore {
                 request_id,
             } => {
                 let Some(command) =
-                    spawn_command_for(backend, vec![], CoreClaudeOutputFormat::StreamJson)
+                    spawn_command_for(backend, vec![], CoreAgentOutputFormat::StreamJson)
                 else {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
@@ -1043,11 +1054,9 @@ impl ConnectionCore {
                 backend,
                 request_id,
             } => {
-                // ★`output_format` 은 claude 의 축이라 여기서만 읽힌다★ — codex 는 대응이 없어(TUI 하나)
-                //   그 갈래가 이 값을 안 본다.
                 let core_output_format = match output_format {
-                    WireClaudeOutputFormat::Terminal => CoreClaudeOutputFormat::Terminal,
-                    WireClaudeOutputFormat::StreamJson => CoreClaudeOutputFormat::StreamJson,
+                    WireAgentOutputFormat::Terminal => CoreAgentOutputFormat::Terminal,
+                    WireAgentOutputFormat::StreamJson => CoreAgentOutputFormat::StreamJson,
                 };
                 let Some(command) = spawn_command_for(backend, extra_args, core_output_format)
                 else {
@@ -3353,7 +3362,7 @@ mod tests {
                 extra_args: vec![],
                 env: vec![],
                 auto_restore: false,
-                output_format: WireClaudeOutputFormat::Terminal,
+                output_format: WireAgentOutputFormat::Terminal,
                 backend: Some(WireBackendKind::Claude),
                 request_id: req,
             },
@@ -3382,7 +3391,7 @@ mod tests {
                 extra_args: vec![],
                 env: vec![],
                 auto_restore: false,
-                output_format: WireClaudeOutputFormat::StreamJson,
+                output_format: WireAgentOutputFormat::StreamJson,
                 backend: Some(WireBackendKind::Claude),
                 request_id: rid(),
             },
@@ -3396,7 +3405,7 @@ mod tests {
             matches!(
                 &profiles[0].command,
                 CoreSpawnCommand::Claude {
-                    output_format: CoreClaudeOutputFormat::StreamJson,
+                    output_format: CoreAgentOutputFormat::StreamJson,
                     ..
                 }
             ),
@@ -3422,7 +3431,7 @@ mod tests {
                 extra_args: vec![],
                 env: vec![],
                 auto_restore: false,
-                output_format: WireClaudeOutputFormat::Terminal,
+                output_format: WireAgentOutputFormat::Terminal,
                 backend: None,
                 request_id: req,
             },
@@ -3493,8 +3502,8 @@ mod tests {
                 extra_args: vec!["--foo".into()],
                 env: vec![],
                 auto_restore: false,
-                // ★claude 의 축이라 codex 갈래는 이 값을 안 본다★ — 그 무시가 의도임을 여기서 고정한다.
-                output_format: WireClaudeOutputFormat::StreamJson,
+                // wire 는 codex 모드를 나르지 않으므로 이 값과 무관하게 Terminal 프로필이 만들어진다.
+                output_format: WireAgentOutputFormat::StreamJson,
                 backend: Some(WireBackendKind::Codex),
                 request_id: rid(),
             },
@@ -3505,8 +3514,12 @@ mod tests {
         let profiles = core.manager.agent_snapshots();
         assert_eq!(profiles.len(), 1);
         match &profiles[0].command {
-            CoreSpawnCommand::Codex { extra_args } => {
-                assert_eq!(extra_args, &vec!["--foo".to_string()])
+            CoreSpawnCommand::Codex {
+                extra_args,
+                output_format,
+            } => {
+                assert_eq!(extra_args, &vec!["--foo".to_string()]);
+                assert_eq!(*output_format, CoreAgentOutputFormat::Terminal);
             }
             other => panic!("Codex 기대: {other:?}"),
         }

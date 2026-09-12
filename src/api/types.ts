@@ -88,8 +88,8 @@ export interface AgentStatusChanged {
 
 // ── S9: 프로필 + 복원 ──────────────────────────────────────────────────────────
 
-/** claude 출력 포맷 — Terminal=PTY(xterm) / StreamJson=헤드리스 NDJSON(RichSlot). (ADR-0044) */
-export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
+/** 에이전트 출력 모드 — Terminal=PTY, StreamJson=JSON 기반 비터미널. 교환 모양은 backend 가 정한다. (ADR-0044) */
+export type AgentOutputFormat = 'Terminal' | 'StreamJson'
 
 /**
  * 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치.
@@ -100,7 +100,7 @@ export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
  * 그 방어는 이 값을 짓는 테스트 픽스처가 있을 때만 작동한다(프로덕션 코드는 안 만든다).
  */
 export type AgentCommand =
-  | { kind: 'Claude'; extra_args: string[]; output_format: ClaudeOutputFormat }
+  | { kind: 'Claude'; extra_args: string[]; output_format: AgentOutputFormat }
   | { kind: 'Shell'; program: string; args: string[] }
   | { kind: 'Codex'; extra_args: string[] }
 

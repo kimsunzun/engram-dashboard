@@ -26,11 +26,11 @@ fn now_millis() -> i64 {
 
 // ── 중립 실행 명령 ─────────────────────────────────────────────────────────────
 
-/// claude 출력 포맷 — 프로세스 기동 방식(= transport)과 프론트 렌더러를 함께 가른다(ADR-0044).
-/// `Terminal` = PTY 대화형(xterm 렌더). `StreamJson` = `-p` 헤드리스 NDJSON 스트림
-/// (StdioTransport + RichSlot 렌더).
+/// 에이전트 출력 모드 — backend별 transport·codec 선택에 들어가는 프로필 축이다(ADR-0044).
+/// `Terminal` = PTY 대화형. `StreamJson` = JSON 기반 비터미널 모드이며 구체적인 교환
+/// 모양은 backend 가 정한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum ClaudeOutputFormat {
+pub enum AgentOutputFormat {
     #[default]
     Terminal,
     StreamJson,
@@ -40,7 +40,8 @@ pub enum ClaudeOutputFormat {
 ///
 /// ★이름 충돌★ — `protocol::AgentCommand` 는 뜻이 다르다(데몬에 보내는 wire 명령).
 /// 이 타입의 wire 미러는 `protocol::AgentSpawnCommand`, 프론트 미러는 `src/api/types.ts`
-/// 의 동명 타입이다. crate 를 빼고 "AgentCommand" 라 부르면 뜻이 안 정해진다.
+/// 의 동명 타입이다. 단 codex `output_format` 은 아직 wire 미러에서 제외된다. crate 를 빼고
+/// "AgentCommand" 라 부르면 뜻이 안 정해진다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum AgentCommand {
@@ -49,22 +50,24 @@ pub enum AgentCommand {
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
-        output_format: ClaudeOutputFormat,
+        output_format: AgentOutputFormat,
     },
     Shell {
         program: String,
         args: Vec<String>,
     },
-    /// codex CLI(대화형 TUI). `extra_args` 는 대화형 인자(`--cd`·`-s`·`-a` — 조립은 `backend/codex/`)를
-    /// 제외한 사용자 추가 인자.
+    /// codex CLI. `extra_args` 는 backend 가 조립하는 인자(`--cd`·`-s`·`-a`)를 제외한
+    /// 사용자 추가 인자. `output_format` 이 없는 저장 JSON 은 `Terminal` 로 역직렬화한다.
     ///
-    /// ★칸이 이것 하나뿐인 것은 결정이다(사용자 결정 2026-09-07)★: 이 enum 은 `#[serde(tag = "kind")]`
-    /// 라 여기 적은 모양이 그대로 `agents.json` 에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록
-    /// 싸다**. 샌드박스·승인 모드 같은 값은 아직 `--help` 텍스트 등급이라(TRD §2) 지금 타입으로 굳히면
-    /// 그 등급인 채로 굳는다. 칸을 더할 땐 `#[serde(default)]` 를 달면 옛 프로필이 그대로 흡수된다
-    /// (형제 `output_format` 이 그 선례).
+    /// ★칸을 함부로 늘리지 않는다★: 이 enum 은 `#[serde(tag = "kind")]` 라 여기 적은 모양이 그대로
+    /// `agents.json` 에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록 싸다**. 샌드박스·승인 모드
+    /// 같은 값은 아직 `--help` 텍스트 등급이라(TRD §2) 지금 타입으로 굳히면 그 등급인 채로 굳는다.
+    /// 칸이 `extra_args` 하나뿐이던 것도 그 사유의 결정이었고(사용자 결정 2026-09-07), 모드 축을
+    /// 더하며 ADR-0194 가 그 자리만 갱신했다 — 사유는 그대로 산다.
     Codex {
         extra_args: Vec<String>,
+        #[serde(default)]
+        output_format: AgentOutputFormat,
     },
 }
 
@@ -711,7 +714,7 @@ mod tests {
             "t".into(),
             AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: ClaudeOutputFormat::Terminal,
+                output_format: AgentOutputFormat::Terminal,
             },
             PathBuf::from("."),
             vec![],
@@ -1624,7 +1627,21 @@ mod tests {
         assert!(
             matches!(
                 &cmd,
-                AgentCommand::Claude { output_format: ClaudeOutputFormat::Terminal, extra_args }
+                AgentCommand::Claude { output_format: AgentOutputFormat::Terminal, extra_args }
+                    if extra_args == &vec!["--foo".to_string()]
+            ),
+            "output_format 부재 → Terminal + extra_args 보존"
+        );
+    }
+
+    #[test]
+    fn codex_command_without_output_format_defaults_terminal() {
+        let stored = r#"{ "kind": "Codex", "extra_args": ["--foo"] }"#;
+        let cmd: AgentCommand = serde_json::from_str(stored).expect("stored codex cmd deserialize");
+        assert!(
+            matches!(
+                &cmd,
+                AgentCommand::Codex { output_format: AgentOutputFormat::Terminal, extra_args }
                     if extra_args == &vec!["--foo".to_string()]
             ),
             "output_format 부재 → Terminal + extra_args 보존"
@@ -1635,7 +1652,7 @@ mod tests {
     fn stream_json_command_roundtrips() {
         let cmd = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         };
         let json = serde_json::to_string(&cmd).unwrap();
         let back: AgentCommand = serde_json::from_str(&json).unwrap();

@@ -89,7 +89,7 @@ use engram_dashboard_agent::backend::{
     AgentBackend, ClaudeBackend, CodexBackend, InputEncoder, SUBMIT_PACING,
 };
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
-use engram_dashboard_agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use engram_dashboard_agent::transport::pty::PtyTransport;
 use engram_dashboard_agent::transport::AgentTransport;
 use engram_dashboard_agent::types::{
@@ -249,7 +249,7 @@ fn backend_table() -> Vec<BackendRow> {
             backend: &CLAUDE_BACKEND,
             sample: AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: ClaudeOutputFormat::Terminal,
+                output_format: AgentOutputFormat::Terminal,
             },
             declared: Declared {
                 needs_session: true,
@@ -271,7 +271,10 @@ fn backend_table() -> Vec<BackendRow> {
         BackendRow {
             name: "codex",
             backend: &CODEX_BACKEND,
-            sample: AgentCommand::Codex { extra_args: vec![] },
+            sample: AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
             declared: Declared {
                 // ★실측이 도장 찍은 값이다★ — 호출자가 세션 id 를 정할 수 없고(`session_id_flag: None`
                 //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
@@ -516,7 +519,7 @@ fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
     let add = |v: &mut Vec<String>| v.extend(extra.iter().map(|s| (*s).to_string()));
     match &mut c {
         AgentCommand::Claude { extra_args, .. } => add(extra_args),
-        AgentCommand::Codex { extra_args } => add(extra_args),
+        AgentCommand::Codex { extra_args, .. } => add(extra_args),
         AgentCommand::Shell { args, .. } => add(args),
     }
     c

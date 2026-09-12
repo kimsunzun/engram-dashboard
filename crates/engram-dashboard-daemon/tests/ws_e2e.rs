@@ -16,14 +16,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ClaudeOutputFormat, SpawnMode};
+use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, AgentProfile, SpawnMode};
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
 use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{
     decode_frame, AgentBackendKind as WireBackendKind, AgentCommand as WireCommand, AgentEvent,
-    ClaudeOutputFormat as WireOutputFormat, RequestId, SubscribeAction, PROTOCOL_VERSION,
+    AgentOutputFormat as WireOutputFormat, RequestId, SubscribeAction, PROTOCOL_VERSION,
 };
 
 use futures_util::{SinkExt, StreamExt};
@@ -1888,7 +1888,7 @@ async fn case35_ws_create_profile() {
                 .expect("json 프로필 등록됨")
                 .command,
             AgentCommand::Claude {
-                output_format: ClaudeOutputFormat::StreamJson,
+                output_format: AgentOutputFormat::StreamJson,
                 ..
             }
         ),

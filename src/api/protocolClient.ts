@@ -33,7 +33,7 @@ import type {
   AgentInfo,
   AgentProfile,
   AgentStatus,
-  ClaudeOutputFormat,
+  AgentOutputFormat,
   Preset,
   RestoreReport,
 } from './types'
@@ -881,7 +881,7 @@ export class ProtocolClient implements AgentClient {
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
-    outputFormat: ClaudeOutputFormat = 'Terminal',
+    outputFormat: AgentOutputFormat = 'Terminal',
   ): Promise<AgentProfile> {
     return this.sendCommand<AgentProfile>((request_id) => ({
       CreateProfile: {
@@ -910,7 +910,7 @@ export class ProtocolClient implements AgentClient {
         extra_args: extraArgs,
         env,
         auto_restore: autoRestore,
-        // wire 는 이 칸을 요구하지만 codex 갈래는 읽지 않는다(claude 의 축이다).
+        // wire 경로는 아직 codex 모드를 나르지 않으며 데몬 경계가 이 갈래를 Terminal 로 채운다.
         output_format: 'Terminal',
         backend: 'codex',
         request_id,

@@ -794,7 +794,7 @@ mod tests {
         // json 모드 command — backend 가 이걸 보고 caps 를 산출한다.
         let json_cmd = crate::profile::AgentCommand::Claude {
             extra_args: vec![],
-            output_format: crate::profile::ClaudeOutputFormat::StreamJson,
+            output_format: crate::profile::AgentOutputFormat::StreamJson,
         };
         let session = AgentSession::new(
             id,

@@ -134,7 +134,7 @@ pub struct RestoreReport {
 /// Terminal=PTY 대화형, StreamJson=헤드리스 NDJSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
-pub enum ClaudeOutputFormat {
+pub enum AgentOutputFormat {
     #[default]
     Terminal,
     StreamJson,
@@ -147,7 +147,7 @@ pub enum ClaudeOutputFormat {
 /// ★serde lowercase(load-bearing)★: `#[serde(rename_all="lowercase")]` 라 wire JSON 이 `"colon"`/`"xml"`
 /// (variant 이름 소문자)로 직렬화된다 — `set_envelope_format({format:"xml"})` invoke JSON 이 그대로
 /// 역직렬화되게 하는 계약(오퍼레이터/LLM 이 손으로 부르는 표면이라 소문자가 자연스럽다). 다른 wire
-/// enum(ClaudeOutputFormat 등)은 PascalCase 지만, 이 타입은 invoke 표면에 직접 노출되므로 lowercase 로 둔다.
+/// enum(AgentOutputFormat 등)은 PascalCase 지만, 이 타입은 invoke 표면에 직접 노출되므로 lowercase 로 둔다.
 /// ★기본 = Xml★: `#[default]` — 데몬 전역 상태 초기값(ADR-0103 기본 flip)과 정합. wire default 자체는
 /// SetEnvelopeFormat.format 이 `#[serde(default)]` 아님(항상 명시)이라 배선상 안 쓰이나, 운영 기본과 어긋나면
 /// `EnvelopeFormat::default()` 를 부르는 미래 코드가 오해하므로 데몬 기본과 동일하게 맞춘다.
@@ -162,17 +162,18 @@ pub enum EnvelopeFormat {
     Colon,
 }
 
-/// agent `profile::AgentCommand` 와 동일.
+/// agent `profile::AgentCommand` 의 wire 미러. codex `output_format` 은 아직 이 wire 모양에서 제외된다.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export)]
 pub enum AgentSpawnCommand {
     /// extra_args 는 세션 인자를 제외한 사용자 추가 인자.
-    /// output_format 은 `#[serde(default)]` 라 옛 프로필은 Terminal.
+    /// output_format 은 `#[serde(default)]` 라 옛 프로필은 Terminal. 이 wire 필드는
+    /// claude 전용이며 codex 모드는 아직 `AgentSpawnCommand` 로 나르지 않는다.
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
-        output_format: ClaudeOutputFormat,
+        output_format: AgentOutputFormat,
     },
     Shell {
         program: String,

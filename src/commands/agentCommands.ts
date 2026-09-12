@@ -5,7 +5,7 @@
 import { open } from '@tauri-apps/plugin-dialog'
 
 import { t } from '../i18n'
-import type { AgentProfile, ClaudeOutputFormat } from '../api/types'
+import type { AgentProfile, AgentOutputFormat } from '../api/types'
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
@@ -27,22 +27,22 @@ async function createReserved(make: (cwd: string) => Promise<AgentProfile>) {
   return profile
 }
 
-async function createReservedProfile(outputFormat: ClaudeOutputFormat) {
+async function createReservedProfile(outputFormat: AgentOutputFormat) {
   return createReserved(cwd => agentClient.createClaudeProfile(cwd, cwd, [], [], false, outputFormat))
 }
 
-// 렌더 모드를 안 묻는다 — codex 는 대화형 TUI 하나뿐이라 고를 축이 없다(화면은 늘 xterm).
+// codex 모드는 아직 프론트→wire 선택 축에 없으므로 여기서는 Terminal 프로필만 만든다.
 async function createReservedCodexProfile() {
   return createReserved(cwd => agentClient.createCodexProfile(cwd, cwd, [], [], false))
 }
 
-// ★ADR-0078★: ClaudeOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
+// ★ADR-0078★: AgentOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
 //   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이
 //   아니면 조용한 no-op·백엔드 전달 대신 명시 throw(잘못된 값 포함 — §5 LLM/cdp 디버깅).
-const VALID_OUTPUT_FORMATS: readonly ClaudeOutputFormat[] = ['Terminal', 'StreamJson']
-function coerceOutputFormat(raw: unknown): ClaudeOutputFormat {
+const VALID_OUTPUT_FORMATS: readonly AgentOutputFormat[] = ['Terminal', 'StreamJson']
+function coerceOutputFormat(raw: unknown): AgentOutputFormat {
   if (raw === undefined || raw === null) return 'StreamJson'
-  if (VALID_OUTPUT_FORMATS.includes(raw as ClaudeOutputFormat)) return raw as ClaudeOutputFormat
+  if (VALID_OUTPUT_FORMATS.includes(raw as AgentOutputFormat)) return raw as AgentOutputFormat
   throw new Error(`agentlist.createAgent: 잘못된 outputFormat: ${String(raw)} (유효: 'Terminal' | 'StreamJson')`)
 }
 
@@ -118,7 +118,7 @@ register({
   //   호출·테스트·LLM 참조가 인자 없이 부르면 종전 동작 유지). 사람 메뉴 경로는 아래 두 leaf command
   //   (createTerminal/createJson)가 모드를 명시 고정한다. command id 는 보존(하위호환).
   //   ★경계 검증(§5 LLM/cdp 프리미티브)★: outputFormat 은 외부 입력이라 무검증 캐스트 금지 — 런타임
-  //   allowlist(ClaudeOutputFormat 은 컴파일타임 union 이라 런타임 enum 없음)로 걸러, 미지정이면 기본,
+  //   allowlist(AgentOutputFormat 은 컴파일타임 union 이라 런타임 enum 없음)로 걸러, 미지정이면 기본,
   //   잘못된 값이면 조용히 백엔드로 흘리지 않고 명시 throw(agent.spawn/rename 과 동일 fail-loud — LLM/cdp
   //   디버깅 위해 잘못된 값 포함).
   run: async (args) => createReservedProfile(coerceOutputFormat(args?.outputFormat)),
