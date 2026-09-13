@@ -43,11 +43,21 @@
 //!   - **라이터에는 panic 봉쇄가 없다**(pump 에는 `catch_unwind` 가 있다). 라이터가 panic 하면 link 는
 //!     `Ready` 이고 닫힘 표식도 안 서므로, [`AgentTransport::send_input`] 이 아무도 보내지 않을 턴을
 //!     상한까지 받아들이다가 그 정지를 "큐가 찼다" 로 신고한다 — 위 첫 항목과 같은 사유 어긋남이다.
-//!   - **종료 알림이 `turn/start` 응답보다 먼저 오면 그 턴은 끝나지 않는다.** 그 알림은 귀속할 수 없어
-//!     버려지고, 뒤이어 온 응답이 id 를 채우면 대기표는 이미 걷힌 뒤라 시한 backstop 도 없다. 그 순서가
-//!     이 짝에서 관측된 적은 없지만, 같은 기제(알림이 자기 id 를 알려 줄 응답을 앞지른다)가 `thread/start`
-//!     짝에서 실측됐다. ★고치겠다고 「귀속 안 된 종료를 기억해 둔다」를 들이지 말 것★ — 그 기억이 곧
-//!     이 파일이 걷어낸 오귀속이다.
+//!   - **응답보다 먼저 온 종료를 붙들어 두는 칸은 [`EARLY_COMPLETION_SLOTS`] 개다.** 한 응답을 기다리는
+//!     동안 그보다 많은 종료가 흘러오면 가장 오래된 것부터 버려지고, 버려진 것이 우리 턴의 것이었다면 그
+//!     턴은 다시 끝낼 것이 없어진다. 열려 있는 턴이 하나뿐이라 정상 운용에서는 칸 하나로 충분하지만,
+//!     상대가 우리가 연 적 없는 턴의 종료를 흘리면 그만큼 잠식된다.
+//!   - **Job Object 편입은 spawn **뒤**라, 그 사이에 만들어진 손자는 Job 밖이다.** 편입된 뒤로는
+//!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
+//!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
+//!     같은 모양이고 이 저장소에 `CREATE_SUSPENDED` 는 한 줄도 없다. 고치는 것은 세 통로를 함께 건드리는
+//!     별건이다.
+//!   - **핸드셰이크가 실패해도 자식·리더·라이터는 그대로 남는다** — 링크만 `Down` 이 되고 아무도 죽이지
+//!     않는다. ★이것은 의도다★: 이 통로는 자기 수명을 스스로 끝내지 않고(ADR-0001 의 2 동사는 `kill`
+//!     핸들러의 것이다), 종료 전이는 pump 단독이다(ADR-0005). 그래서 그 세션은 매니저가 거둘 때까지
+//!     상주한다 — 화면에는 핸드셰이크 실패 오류가 이미 올라가 있다.
+//!   - **세션 id 기록 포트는 라이터 스레드 위에서 동기로 불린다** — 그 콜백이 블록하면 그 스레드가 갇혀
+//!     입력도 제어 줄도 나가지 않는다. 오늘은 조립점이 `None` 을 주므로 잠재적이다.
 //!   - **나간 요청의 실제 상한은 `budget + SWEEP_INTERVAL` 이고, 그 시계는 첫 쓰기 *뒤에* 시작한다.**
 //!     첫 `recv_timeout` 한 슬라이스가 지나야 시한을 처음 읽고, 그 앞의 요청 쓰기 자체는 유계가 아니다.
 //!   - **핸드셰이크 중에는 제어 줄이 슬라이스당 하나씩만 나간다.** 서버 요청이 그보다 빨리 쌓이면
@@ -147,6 +157,18 @@ const LOG_STRING_LIMIT: usize = 512;
 /// `initialize` 에 싣는 클라이언트 이름. 상대는 이 값을 자기 로그·`user_agent` 에 적는다.
 const CLIENT_NAME: &str = "engram-dashboard";
 
+/// 응답보다 먼저 온 종료 알림의 turn id 를 붙들어 두는 칸 수.
+///
+/// ★근거★: 한 번에 열려 있는 턴은 하나뿐이라 **정상 운용에서 필요한 칸은 하나**다. 나머지는 상대가
+/// 우리가 연 적 없는 턴의 종료를 흘릴 때를 위한 여유이고, 이 값이 그 여유의 상한이다. 넘으면 가장 오래된
+/// 것부터 버린다 — 늦게 온 것일수록 지금 기다리는 턴의 것일 가능성이 높다.
+const EARLY_COMPLETION_SLOTS: usize = 8;
+
+/// 붙들어 둘 turn id 의 최대 바이트. ★자르지 않고 **거른다**★ — 이 값은 사람이 읽는 관측 키가 아니라
+/// 나중에 **같은지 대조할 토큰**이라, 잘라 보관하면 서로 다른 긴 id 둘이 같은 것으로 읽힐 수 있다.
+/// 관측된 id 는 UUIDv7 문자열(36 바이트)이고 128 은 그 여유분이다.
+const MAX_TURN_ID_BYTES: usize = 128;
+
 // ★오류 코드로 분기하는 자리가 없는 것은 의도다 — 재시도 백오프 상수도 그래서 없다★.
 //   오류 응답은 코드가 무엇이든 그 요청의 대기자를 깨우므로 조용히 멎지 않는다. 그 위에 「특정 코드면
 //   같은 요청을 다시 보낸다」를 얹지 않은 이유는 셋이다: ① 과부하 코드가 실제로 이 봉투로 오는지
@@ -218,6 +240,14 @@ struct State {
     input: VecDeque<Vec<u8>>,
     /// 다음에 열 턴의 표식. 단조 증가만 하고 되감지 않는다.
     next_turn_seq: u64,
+    /// ★응답보다 먼저 온 종료 알림이 싣고 있던 turn id★ — 그 알림은 그 시점에 귀속할 수 없어 버려지지만,
+    /// 뒤이어 오는 `turn/start` 응답이 **우리 턴의 id 를 권위 있게** 알려 주므로 그때 대조해 끝낸다.
+    ///
+    /// ★붙드는 것은 「종료가 있었다」가 아니라 **그 id** 다★ — 그 구분이 이 칸이 오귀속이 아닌 이유다.
+    ///   끝내는 판정은 여전히 id 일치 하나뿐이고, 여기 있다는 사실만으로 끝나는 턴은 없다.
+    /// ★마스킹하지 않고 담는 것은 의도다★ — 대조용 토큰이라 변형하면 대조가 깨진다. 대신 길이로 거르고
+    ///   (`MAX_TURN_ID_BYTES`), 로그·화면으로 나갈 때 [`sanitize`] 를 지난다.
+    early_completions: VecDeque<String>,
     /// 이 통로는 더 보낼 것이 없다 — 라이터가 이것을 보고 루프를 끝낸다.
     ///
     /// ★세우는 자리가 둘이다★: [`AgentTransport::shutdown`](우리가 죽였다)과 [`ReaderExit`] 의 `Drop`
@@ -237,6 +267,7 @@ impl State {
             outbox: VecDeque::new(),
             input: VecDeque::new(),
             next_turn_seq: 0,
+            early_completions: VecDeque::new(),
             closed: false,
         }
     }
@@ -1048,11 +1079,14 @@ impl Reader {
     ///   id 가 비어 있다는 것은 그 턴의 `turn/start` 가 아직 답을 못 받았다는 뜻이고(답이 성공이든 오류든
     ///   해독 실패든 그 세 갈래가 전부 턴을 끝내거나 id 를 채운다), 그 요청에는 [`REQUEST_DEADLINE`] 이
     ///   걸려 있어 만료가 [`end_turn_if`] 로 그 턴을 끝낸다.
-    /// ★그 논증이 덮지 못하는 경우가 하나 있다 — 「유계다」로 일반화하지 말 것★: 종료 알림이 응답보다
-    ///   **먼저** 오면 그 알림은 여기서 버려지고, 뒤이어 온 응답이 id 를 채운 뒤로는 그 턴을 끝낼 것이
-    ///   아무 것도 남지 않는다(대기표는 그 응답이 이미 걷어 갔다). 모듈 헤더 「알려진 한계」가 그 칸을 진다.
-    ///   ★그것을 고치겠다고 「귀속 안 된 종료를 기억해 둔다」를 들이지 말 것★ — 그 기억이 곧 이 라운드가
-    ///   걷어낸 오귀속의 다른 이름이다.
+    /// ★종료가 응답보다 **먼저** 오는 경우는 그 논증이 안 덮는다 — 그래서 따로 닫는다★: 그 알림을 여기서
+    ///   버리기만 하면, 뒤이어 온 응답이 id 를 채우면서 대기표까지 걷어 가 그 턴은 끝낼 것이 아무 것도
+    ///   없이 남는다. 그래서 **그 알림이 싣고 있던 id 를** [`State::early_completions`] 에 붙들어 두고,
+    ///   응답이 우리 턴의 id 를 정하는 자리에서 대조한다([`Reader::resolve`]).
+    /// ★붙드는 것이 「종료가 있었다」가 아니라 **그 id** 인 것이 핵심이다★ — 전자는 무엇이든 끝낼 수 있는
+    ///   근거 없는 기억이라 오귀속 그 자체지만, 후자는 이 함수가 이미 하는 id 대조를 **미루는** 것뿐이다.
+    ///   끝내는 판정은 어느 경로에서도 id 일치 하나뿐이다. ★그 성질을 넓히지 말 것★ — id 대조 없이 턴을
+    ///   끝내는 갈래를 더하는 순간 이 파일이 걷어낸 오귀속이 그대로 돌아온다.
     fn note_turn(&self, method_name: &str, params: Option<&Value>) {
         if method_name != TURN_COMPLETED {
             return;
@@ -1085,6 +1119,30 @@ impl Reader {
                 s.turn = TurnState::Idle;
                 cv.notify_all();
             }
+            // ★지금 턴의 id 를 아직 모르는 동안 온 종료★: 이 시점에는 귀속할 수 없으므로 **끝내지
+            //   않는다**. 대신 그 id 만 붙들어 두고, 뒤이어 올 `turn/start` 응답이 우리 턴의 id 를
+            //   권위 있게 알려 줄 때 대조한다([`Reader::resolve`]). 그 대조가 없으면 이 턴은 끝낼 것이
+            //   아무 것도 없이 남는다 — 응답이 대기표를 걷어 가 시한 backstop 도 사라지기 때문이다.
+            (TurnState::Active { turn_id: None, .. }, Some(theirs)) => {
+                if theirs.len() > MAX_TURN_ID_BYTES {
+                    tracing::debug!(
+                        bytes = theirs.len(),
+                        "codex app-server: turn id 가 상한을 넘어 붙들지 않는다"
+                    );
+                    return;
+                }
+                if s.early_completions.iter().any(|k| k == theirs) {
+                    return;
+                }
+                if s.early_completions.len() >= EARLY_COMPLETION_SLOTS {
+                    s.early_completions.pop_front();
+                }
+                s.early_completions.push_back(theirs.to_string());
+                tracing::debug!(
+                    turn = %sanitize(theirs, LOG_STRING_LIMIT),
+                    "codex app-server: 응답보다 먼저 온 종료 — id 를 붙들고 대조를 기다린다"
+                );
+            }
             _ => {
                 tracing::debug!("codex app-server: 귀속할 수 없는 turn/completed — 무시한다")
             }
@@ -1115,6 +1173,23 @@ impl Reader {
                             TurnState::Active { seq: cur, turn_id } if *cur == seq => {
                                 if turn_id.is_none() {
                                     *turn_id = Some(r.turn.id);
+                                }
+                                // ★이 응답이 우리 턴의 id 를 권위 있게 정한 자리다★ — 그 id 로 온 종료가
+                                //   이미 지나갔다면 여기서 끝낸다. 이 대조가 없으면 그 턴은 영영 열린 채
+                                //   남고(대기표는 방금 걷혔다), 그 뒤의 `send_input` 이 그 정지를 "큐가
+                                //   찼다" 로 신고한다 — 사유가 어긋난 신고다.
+                                // ★끝내는 판정은 여전히 id 일치 하나뿐이다★ — 붙들어 둔 목록에 있다는
+                                //   사실만으로 끝나는 턴은 없다.
+                                let ours = turn_id.clone();
+                                if let Some(ours) = ours {
+                                    if let Some(pos) =
+                                        s.early_completions.iter().position(|k| *k == ours)
+                                    {
+                                        s.early_completions.remove(pos);
+                                        s.turn = TurnState::Idle;
+                                        let (_, cv) = &*self.state;
+                                        cv.notify_all();
+                                    }
                                 }
                             }
                             _ => tracing::debug!(
@@ -2093,6 +2168,75 @@ mod tests {
         );
     }
 
+    /// ★실제로 막히던 순서를 그대로 재는 항목★: 종료가 먼저 오고(귀속 불가 → 무시), **사이에 sweep 없이**
+    /// 응답이 와서 우리 턴의 id 를 정한다. 그 응답이 대기표를 걷어 가므로 여기서 안 끝내면 그 턴은 끝낼
+    /// 것이 영영 없다 — 시한도 없고 두 번째 종료도 오지 않는다.
+    ///
+    /// ★sweep 을 끼우면 이 순서를 안 재게 된다★ — 시한이 대신 끝내 버려 응답 쪽 대조가 한 번도 안 불린다.
+    #[test]
+    fn an_early_completion_is_reconciled_when_the_response_names_it() {
+        let mut h = harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+        with_state(&h.state, |s| s.input.push_back(b"queued".to_vec()));
+        let _ = h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
+
+        // ① 종료가 먼저 온다 — 이 시점에는 우리 턴의 id 를 모르므로 귀속할 수 없다.
+        h.reader.handle_line(
+            br#"{"method":"turn/completed","params":{"threadId":"T","turn":{"id":"U-EARLY"}}}"#,
+        );
+        assert_eq!(
+            turn_seq(&h.state),
+            Some(0),
+            "귀속 못 하는 종료가 그 자리에서 턴을 닫았다"
+        );
+
+        // ② 그 다음 응답이 온다 — 여기서 우리 턴의 id 가 `U-EARLY` 로 정해진다. sweep 은 끼우지 않는다.
+        h.reader
+            .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-EARLY"}}}"#);
+
+        assert_eq!(
+            turn_seq(&h.state),
+            None,
+            "응답이 id 를 정했는데 먼저 온 종료와 대조하지 않았다 — 이 턴은 끝낼 것이 영영 없다"
+        );
+        assert_eq!(
+            h.pending.len(),
+            0,
+            "응답이 대기표를 걷어 갔다(시한 backstop 없음)"
+        );
+        assert!(
+            with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
+            "큐가 안 풀렸다"
+        );
+    }
+
+    /// ★대조는 여전히 **id 일치** 하나뿐이다★ — 붙들어 둔 종료가 있다는 사실만으로 끝나는 턴은 없다.
+    #[test]
+    fn an_early_completion_for_another_turn_does_not_end_ours() {
+        let mut h = harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+        let _ = h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
+
+        h.reader.handle_line(
+            br#"{"method":"turn/completed","params":{"threadId":"T","turn":{"id":"U-SOMEONE-ELSE"}}}"#,
+        );
+        h.reader
+            .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-MINE"}}}"#);
+
+        assert_eq!(
+            turn_seq(&h.state),
+            Some(0),
+            "남의 종료가 붙들려 있다는 이유로 우리 턴이 닫혔다"
+        );
+        assert_eq!(turn_id_of(&h.state).as_deref(), Some("U-MINE"));
+    }
+
     /// ★귀속 못 한 종료를 버려도 그 턴의 **시한은 그대로 남아야 한다**★ — 무시하는 김에 대기표까지
     /// 걷으면 그 턴은 끝낼 것이 아무 것도 없어진다. 이 항목이 재는 것은 그 하나이고, 「귀속 못 한 턴에는
     /// 언제나 시한이 있다」는 **아니다**(그 일반화는 거짓이다 — 종료가 응답보다 먼저 오는 경우가 있고,
@@ -2629,6 +2773,11 @@ mod tests {
     }
 
     /// ★spawn 뒤 실패 경로에서 자식이 남으면 아무도 닿을 수 없다★ — `Child` 는 drop 으로 죽이지 않는다.
+    ///
+    /// ★이 항목이 덮는 것과 안 덮는 것★: 재는 것은 **가드 자체의 `Drop` 이 자식을 거둔다**는 것뿐이고,
+    /// **가드가 [`CodexAppServerTransport::open`] 안에서 충분히 이른 자리에 서 있는가**는 아니다. 그
+    /// 배치는 아래 [`the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`] 이 소스에서
+    /// 잰다 — 가드를 Job 생성·편입 `?` 아래로 내리면 그쪽이 빨개진다.
     #[cfg(windows)]
     #[test]
     fn the_child_guard_reaps_the_child_on_an_early_return() {
@@ -2841,6 +2990,33 @@ mod tests {
                 .any(|e| matches!(e, OutputEvent::Error(m) if m.contains("제어 큐"))),
             "거절을 못 보냈다는 사실이 화면에 안 올랐다: {seen:?}"
         );
+    }
+
+    /// ★가드는 spawn 뒤 **첫 실패 가능 단계보다 먼저** 서 있어야 한다★ — 그 아래로 내려가면 그 사이의
+    /// `?` 가 이미 도는 자식을 남긴 채 돌아가고, 그 자식은 아직 어느 Job 에도 안 들어가 아무도 닿을 수 없다.
+    ///
+    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`JobObjectHandle::new` 를 실패시키는
+    /// seam 이 없다). 위 `Drop` 항목은 가드가 도는 것만 재고 어디에 서 있는지는 못 본다.
+    #[test]
+    fn the_child_guard_is_armed_before_the_first_fallible_step_after_spawn() {
+        let src = include_str!("transport.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let open_body = production
+            .split("pub(crate) fn open(")
+            .nth(1)
+            .expect("open 본문");
+        let armed = open_body
+            .find("ChildGuard(Some(child))")
+            .expect("가드 무장 지점");
+        for step in ["JobObjectHandle::new()?", "job.assign(pid)?"] {
+            let at = open_body
+                .find(step)
+                .unwrap_or_else(|| panic!("`{step}` 가 open 안에 없다 — 이 항목의 전제가 낡았다"));
+            assert!(
+                armed < at,
+                "가드가 `{step}` 보다 뒤에 선다 — 그 사이의 실패가 자식을 남긴다"
+            );
+        }
     }
 
     /// stdin 락을 블로킹 write 가 쥐고 있어도 `shutdown` 이 완료된다 — 순서를 뒤집으면(stdin 을 kill
