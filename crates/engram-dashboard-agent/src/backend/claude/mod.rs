@@ -591,7 +591,9 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         OutputEvent::TextDelta { .. }
         | OutputEvent::ToolCall { .. }
         | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
-        OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended),
+        // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 뜻이 같으므로 같은 신호로 적는다★:
+        //   두 종료 어휘를 여기서 갈라 적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
+        OutputEvent::MessageDone { .. } | OutputEvent::TurnEnd { .. } => Some(TurnSignal::Ended),
         OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => None,
     }
 }
@@ -2719,6 +2721,7 @@ mod tests {
                 OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
                 OutputEvent::Usage { .. } => "usage".to_string(),
                 OutputEvent::MessageDone { .. } => "done".to_string(),
+                OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
                 OutputEvent::Error(_) => "error".to_string(),
                 OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
             })

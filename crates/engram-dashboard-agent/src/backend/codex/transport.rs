@@ -43,10 +43,12 @@
 //!   - **라이터에는 panic 봉쇄가 없다**(pump 에는 `catch_unwind` 가 있다). 라이터가 panic 하면 link 는
 //!     `Ready` 이고 닫힘 표식도 안 서므로, [`AgentTransport::send_input`] 이 아무도 보내지 않을 턴을
 //!     상한까지 받아들이다가 그 정지를 "큐가 찼다" 로 신고한다 — 위 첫 항목과 같은 사유 어긋남이다.
-//!   - **응답보다 먼저 온 종료를 붙들어 두는 칸은 [`EARLY_COMPLETION_SLOTS`] 개다.** 한 응답을 기다리는
+//!   - **응답보다 먼저 온 종료를 붙들어 두는 칸은 [`EARLY_COMPLETION_SLOTS`] 개다**(그 칸에는 turn id
+//!     와 **그 줄이 만든 턴 경계**가 함께 실린다 — [`EarlyCompletion`]). 한 응답을 기다리는
 //!     동안 그보다 많은 종료가 흘러오면 가장 오래된 것부터 버려지고, 버려진 것이 우리 턴의 것이었다면 그
 //!     턴은 다시 끝낼 것이 없어진다. 열려 있는 턴이 하나뿐이라 정상 운용에서는 칸 하나로 충분하지만,
-//!     상대가 우리가 연 적 없는 턴의 종료를 흘리면 그만큼 잠식된다.
+//!     상대가 우리가 연 적 없는 턴의 종료를 흘리면 그만큼 잠식된다. ★그 칸은 턴이 `Idle` 로 돌아가는
+//!     자리마다 통째로 비워진다★ — 사유 정본 = [`end_turn_if`] 의 그 줄.
 //!   - **Job Object 편입은 spawn **뒤**라, 그 사이에 만들어진 손자는 Job 밖이다.** 편입된 뒤로는
 //!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
 //!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
@@ -65,6 +67,14 @@
 //!     그 동안의 의무 누락은 실재한다.
 //!   - `turn/completed` 의 귀속은 **상대가 준 turn id 문자열**에 기댄다. 상대가 지금 쓰는 id 를 그대로
 //!     되보내면 엉뚱한 턴이 닫힌다 — 우리가 발급한 값이 아니므로 이 층에서 더 셀 수 있는 것이 없다.
+//!   - **귀속 못 한 `turn/completed` 는 턴 경계를 못 낸다**([`Reader::note_turn`]). 그래서 상대가 turn id
+//!     없는 종료만 보내는 조합에서는 그 턴이 이 통로에서도 사실 계층에서도 열린 채 남는다 — 응답이 이미
+//!     왔다면 시한 backstop 도 없다. ★그래도 두 축이 **같은** 판정을 받는 것이 이 모양의 요점이다★: 큐를
+//!     쥔 이 층이 다음 입력을 안 받는 동안 화면만 「끝났다」로 그리면 그 불일치가 더 나쁘다.
+//!     ★그 「같은 판정」은 **진행 쪽에도 걸려야** 성립한다★ — 종료만 게이트하고 진행을 열어 두면, 열린
+//!     턴이 없는 동안 온 `item/*` 한 줄이 사실 계층만 켜 놓고 그 종료는 위 문장대로 막혀 아무도 못 끈다
+//!     (통로는 `Idle` = 큐 열림인데 사실 계층은 바쁨). 그 가름을 [`Reader::claims_our_turn`] 이 진다 —
+//!     본문은 언제나 화면에 올리되 「턴 중」의 근거로 셀지만 같은 축으로 가른다.
 //!
 //! tauri import 0.
 
@@ -89,7 +99,7 @@ use crate::output_core::OutputCore;
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
-    TerminalReason, TransportCaps,
+    TerminalReason, TransportCaps, TurnOutcome,
 };
 
 #[cfg(windows)]
@@ -178,8 +188,15 @@ const MAX_TURN_ID_BYTES: usize = 128;
 //   재시도는 상대가 이미 받은 턴을 한 번 더 연다 ③ 그래서 값을 고르려면 실 서버에서 그 코드를 보는 것이
 //   먼저다. ★다시 열 때 필요한 것★ = 어느 요청에 어떤 코드가 언제 오는지의 관측.
 
-/// 턴이 끝났다는 알림 — ★이 통로의 상태 기계 입력이지 번역 대상이 아니다★. 큐 해제는 턴이 끝났다는
-/// 사실을 알아야 하므로 봉투를 분류하는 이 층이 자기 몫으로 읽는다.
+/// 턴이 끝났다는 알림 — ★이 통로의 상태 기계 입력이다★. 큐 해제는 턴이 끝났다는 사실을 알아야 하므로
+/// 봉투를 분류하는 이 층이 자기 몫으로 읽는다.
+///
+/// ★같은 줄을 번역기도 읽어 턴 경계(`TurnEnd`)로 옮긴다 — 두 독자는 하는 일이 다르다★: 그쪽은
+/// 「이 줄이 무슨 결말을 말하나」를 번역하고(codex 어휘 → 중립 어휘), 이쪽은 「그 결말이 **우리 턴의
+/// 것인가**」를 판정한다. ★번역기에는 그 판정에 쓸 재료가 없다★ — 우리 thread·turn id 는 이 층에만
+/// 있다. 그래서 번역은 무조건 하되 **그 산출을 화면으로 올릴지는 이 층이 정한다**([`Reader::note_turn`]
+/// 의 `boundary` 인자). 그 게이트를 걷으면 남의 턴 종료가 우리 턴을 닫아 이후 출력이 가짜 경계로
+/// 쪼개지고, 사실 계층은 한가함을 관측해 턴 도중에 우편을 꽂는다.
 ///
 /// ★`turn/started` 는 **일부러** 읽지 않는다 — 되살리지 말 것★: 그 알림에는 **우리가 발급한 식별자가
 /// 하나도 없어서** 어느 턴의 것인지 원리상 귀속시킬 수 없다. 「지금 턴이 답을 기다리는 중인가」 같은
@@ -187,9 +204,7 @@ const MAX_TURN_ID_BYTES: usize = 128;
 /// 않는다(그 id 로 온 종료 알림이 살아 있는 턴을 닫고, 큐가 풀려 턴이 겹치고, `interrupt` 가 죽은 턴을
 /// 겨눈다). 턴 id 를 정하는 것은 **우리 요청 id 로 짝지어지는 `turn/start` 응답 하나뿐**이다.
 ///
-/// ★[`protocol::method`] 에 없는 이유★: 그 모듈이 모은 것은 **번역기가 이름으로 아는** 알림이고, 이것은
-/// 번역되지 않는다(턴 경계를 화면 어휘로 내는 것은 이 단계 밖이다).
-const TURN_COMPLETED: &str = "turn/completed";
+const TURN_COMPLETED: &str = method::TURN_COMPLETED;
 
 // ── 세션 id 기록 포트 ─────────────────────────────────────────────────────────
 
@@ -240,14 +255,12 @@ struct State {
     input: VecDeque<Vec<u8>>,
     /// 다음에 열 턴의 표식. 단조 증가만 하고 되감지 않는다.
     next_turn_seq: u64,
-    /// ★응답보다 먼저 온 종료 알림이 싣고 있던 turn id★ — 그 알림은 그 시점에 귀속할 수 없어 버려지지만,
-    /// 뒤이어 오는 `turn/start` 응답이 **우리 턴의 id 를 권위 있게** 알려 주므로 그때 대조해 끝낸다.
+    /// ★응답보다 먼저 온 종료 알림★ — 그 시점에는 귀속할 수 없어 붙들어 두고, 뒤이어 오는
+    /// `turn/start` 응답이 **우리 턴의 id 를 권위 있게** 알려 줄 때 대조해 끝낸다.
     ///
     /// ★붙드는 것은 「종료가 있었다」가 아니라 **그 id** 다★ — 그 구분이 이 칸이 오귀속이 아닌 이유다.
     ///   끝내는 판정은 여전히 id 일치 하나뿐이고, 여기 있다는 사실만으로 끝나는 턴은 없다.
-    /// ★마스킹하지 않고 담는 것은 의도다★ — 대조용 토큰이라 변형하면 대조가 깨진다. 대신 길이로 거르고
-    ///   (`MAX_TURN_ID_BYTES`), 로그·화면으로 나갈 때 [`sanitize`] 를 지난다.
-    early_completions: VecDeque<String>,
+    early_completions: VecDeque<EarlyCompletion>,
     /// 이 통로는 더 보낼 것이 없다 — 라이터가 이것을 보고 루프를 끝낸다.
     ///
     /// ★세우는 자리가 둘이다★: [`AgentTransport::shutdown`](우리가 죽였다)과 [`ReaderExit`] 의 `Drop`
@@ -256,6 +269,19 @@ struct State {
     /// `Arc` 를 들고 있어 세션 하나치 메모리가 함께 남고, `shutdown()` 은 reaper 경로에서 불리지 않아
     /// 아무도 그것을 깨우지 않는다.
     closed: bool,
+}
+
+/// 응답보다 먼저 온 `turn/completed` 한 건 — id 와 **그 줄이 만든 턴 경계**를 함께 붙든다.
+///
+/// ★경계까지 붙드는 이유★: 이 시점에 그 경계를 화면으로 올리면 아직 귀속되지 않은 종료가 살아 있는
+///   턴을 닫는다([`Boundary`]). 그렇다고 버리면 대조가 성립한 뒤에 올릴 것이 없어져 **그 대화의 대기
+///   표시가 영영 돈다** — 결말을 알고 있었는데도 그렇다. 그래서 미루기만 한다.
+struct EarlyCompletion {
+    /// 대조용 토큰. ★마스킹하지 않고 담는 것은 의도다★ — 변형하면 대조가 깨진다. 대신 길이로 거르고
+    /// ([`MAX_TURN_ID_BYTES`]), 로그·화면으로 나갈 때 [`sanitize`] 를 지난다.
+    turn_id: String,
+    /// 그 줄에서 번역기가 낸 턴 경계. `None` = 번역기가 경계를 못 냈다(모양이 깨진 줄·번역기 없음).
+    boundary: Option<OutputEvent>,
 }
 
 impl State {
@@ -769,29 +795,56 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
     }
 }
 
-/// `seq` 가 **지금 진행 중인 바로 그 턴**일 때만 끝내고 큐를 푼다. `message` 가 있으면 화면에도 올린다.
+/// `seq` 가 **지금 진행 중인 바로 그 턴**일 때만 끝내고, 큐를 풀고, 그 턴의 **경계를 낸다**.
 ///
 /// ★표식을 안 보고 끝내면 늦게 온 신호가 다음 턴을 닫는다★ — 그러면 턴 둘이 동시에 열려 입력 큐가 막고자
 /// 하는 바로 그 상태가 된다. 돌려주는 값 = 실제로 끝냈나.
-fn end_turn_if(state: &SharedState, core: &OutputCore, seq: u64, message: Option<String>) -> bool {
+///
+/// ★경계를 내는 것이 선택이 아니라 이 함수의 일부인 것이 요점이다★(ADR-0127): 이 경로로 끝나는 턴에는
+///   `turn/completed` 가 **오지 않는다**(쓰기 실패·응답 해독 실패·오류 응답·시한 만료). 그런데 사실
+///   계층을 「턴 중 아님」으로 되돌리는 유일한 입력이 턴 경계 신호라, 경계 없이 상태만 되돌리면 그
+///   화신은 **한가한데도 턴 중으로 관측된 채** 남아 30 분 fail-open 밸브가 쓸어 갈 때까지 우편이 막힌다.
+///   ★그래서 [`OutputEvent::Error`] 한 줄로 대신하지 않는다★ — 그 어휘는 「종료 아님」이라 분류자가
+///   턴 신호로 세지 않는다(그것이 바로 위 결함의 기전이었다).
+/// ★사유를 경계 **안에** 싣고 따로 오류 줄을 앞세우지 않는다★ — 쪼개면 「턴이 끝났다」와 「어떻게
+///   끝났다」가 두 이벤트로 갈려 소비자에게 순서 계약이 하나 더 생긴다(같은 판정을 번역기의
+///   `turn/completed` 자리가 이미 했다).
+/// ★이 경로의 결말은 언제나 `Failed` 다★ — 네 호출자 전부 「우리가 이 턴을 포기한다」이고, 그중 어느
+///   것도 상대가 말해 준 결말이 아니다. 상대가 말해 준 결말은 번역기를 지나 [`Reader::note_turn`] 이
+///   귀속한다.
+fn end_turn_if(state: &SharedState, core: &OutputCore, seq: u64, detail: String) -> bool {
     let ended = {
         let (lock, cv) = &**state;
         let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-        match s.turn {
-            TurnState::Active { seq: cur, .. } if cur == seq => {
+        match &s.turn {
+            TurnState::Active { seq: cur, turn_id } if *cur == seq => {
+                let turn_id = turn_id.clone();
                 s.turn = TurnState::Idle;
+                // ★붙들어 둔 종료는 이 턴과 함께 버린다★: 그 칸은 **열려 있던 그 턴**의 id 를
+                //   기다리는 것뿐이라, 턴이 다른 길로 끝나면 영영 대조될 일이 없다. 남겨 두면 다음
+                //   턴이 그 id 를 재사용하는 순간 [`Reader::resolve`] 가 갓 열린 턴을 그 자리에서
+                //   닫고 낡은 경계를 올린다. 턴은 언제나 `Idle` 에서만 열리므로([`take_turn_locked`])
+                //   idle 자리마다 비우면 어느 칸도 다음 턴으로 넘어가지 않는다.
+                s.early_completions.clear();
                 cv.notify_all();
-                true
+                Some(turn_id)
             }
-            _ => false,
+            _ => None,
         }
     };
-    if ended {
-        if let Some(m) = message {
-            core.emit(OutputEvent::Error(m));
+    match ended {
+        // ★락을 놓은 뒤에 emit 한다★(ADR-0006) — 구독자는 이 호출 안에서 임의 코드를 돈다.
+        Some(turn_id) => {
+            core.emit(OutputEvent::TurnEnd {
+                turn_id,
+                outcome: TurnOutcome::Failed {
+                    detail: Some(detail),
+                },
+            });
+            true
         }
+        None => false,
     }
-    ended
 }
 
 fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
@@ -809,12 +862,7 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
             }
             Waiter::TurnStart { seq } => {
                 tracing::warn!("{reason}");
-                if !end_turn_if(
-                    state,
-                    core,
-                    seq,
-                    Some(format!("codex app-server: {reason}")),
-                ) {
+                if !end_turn_if(state, core, seq, format!("codex app-server: {reason}")) {
                     tracing::debug!("시한이 지난 turn/start 가 연 턴은 이미 끝났다 — 그대로 둔다");
                 }
             }
@@ -861,6 +909,23 @@ fn writer_loop(
             if dropped > 0 {
                 tracing::warn!("핸드셰이크 실패로 대기 중이던 입력 {dropped}건이 사라졌다");
             }
+            // ★이 경계는 통로 쪽 턴에 대응하지 않는다★: 턴을 여는 유일한 자리([`take_turn_locked`])가
+            //   [`Link::Ready`] 를 요구하는데 그 상태는 핸드셰이크가 성공해야 선다. 그래서 큐에 선
+            //   `dropped` 건도 통로 쪽에서 보면 **아직 턴이 아니라 큐에 선 본문**이고, 사실 계층도 이
+            //   화신을 한 번도 「턴 중」으로 관측한 적이 없다(첫 진행 신호는 상대가 되울리는 item 에서
+            //   오고, 합성 입력 에코는 선언하지 않는다 — ADR-0193).
+            // ★그래도 **버린 입력이 있든 없든** 실패 결말 하나를 낸다★ — 화면을 닫는 것이 이것뿐이기
+            //   때문이다. 프론트는 `Error` 를 턴 종료로 읽지 않고(재시도되는 스트림 오류가 그 어휘로 오기
+            //   때문 — [`OutputEvent::Error`] 의 doc), 그래서 오류 하나만 든 슬롯은 **대기 표시가 영영
+            //   돈다**. 링크는 이미 [`Link::Down`] 이라 그 뒤에 도착할 것도 없다.
+            // ★열린 턴이 없어 실을 id 가 없으니 `turn_id` 는 지어내지 않는다★.
+            // ★몇 건을 버렸든 경계는 하나다★ — `dropped` 는 버린 본문 수이지 턴 수가 아니다.
+            // ★두 갈래의 사유 문장이 갈리는 것은 의도다★ — 버린 쪽은 사람이 보낸 본문이 파괴됐다고
+            //   말하고, 안 버린 쪽은 연결이 서지 못했다고만 말한다. 뒤쪽에 입력 손실을 적으면 일어나지
+            //   않은 일을 보고하게 된다.
+            // ★사유가 오류 줄과 경계 안에 겹쳐 실리는 것은 의도다★ — 경계 하나만 읽는 소비자도 무슨 일이
+            //   있었는지 알아야 하기 때문이고([`end_turn_if`] 와 같은 사유), 그래서 둘 사이에 순서 계약이
+            //   새로 생기지는 않는다.
             for entry in pending.close() {
                 if let Waiter::Handshake(tx) = entry.waiter {
                     let _ = tx.send(Err(reason.clone()));
@@ -870,6 +935,23 @@ fn writer_loop(
                 "codex app-server 핸드셰이크 실패: {}",
                 sanitize(&reason, LOG_STRING_LIMIT)
             )));
+            let detail = if dropped > 0 {
+                format!(
+                    "codex app-server 핸드셰이크 실패로 보낸 입력 {dropped}건이 사라졌다: {}",
+                    sanitize(&reason, LOG_STRING_LIMIT)
+                )
+            } else {
+                format!(
+                    "codex app-server 핸드셰이크 실패로 연결이 서지 못했다: {}",
+                    sanitize(&reason, LOG_STRING_LIMIT)
+                )
+            };
+            core.emit(OutputEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Failed {
+                    detail: Some(detail),
+                },
+            });
         }
     }
 
@@ -899,12 +981,12 @@ fn writer_loop(
                 if let Err(e) = write_line(&stdin, &line) {
                     pending.forget(id);
                     // ★이 실패는 호출자에게 돌아갈 길이 없다★ — 그 호출은 이미 `Ok` 를 받고 떠났다.
-                    //   남는 것은 화면에 사실을 올리는 것뿐이다(정정 채널을 새로 만들지 않는다).
+                    //   남는 것은 이 턴을 실패로 닫는 것뿐이다(정정 채널을 새로 만들지 않는다).
                     end_turn_if(
                         &state,
                         &core,
                         seq,
-                        Some(format!("codex app-server 입력 전송 실패: {e}")),
+                        format!("codex app-server 입력 전송 실패: {e}"),
                     );
                 }
             }
@@ -1020,8 +1102,50 @@ impl Drop for ReaderExit {
         }
         s.link = Link::Down("스트림이 끝났다".to_string());
         s.turn = TurnState::Idle;
+        // 붙들어 둔 종료도 함께 버린다(사유 정본 = [`end_turn_if`]).
+        s.early_completions.clear();
         s.closed = true;
         cv.notify_all();
+    }
+}
+
+/// [`Reader::note_turn`] 이 **락을 놓은 뒤에** 남기는 한 줄.
+///
+/// ★상태 락을 쥔 채 찍지 않는다★: tracing 의 파일 sink 는 이벤트마다 동기 기록이라, 그 락 안에서
+///   찍으면 [`AgentTransport::send_input`] 과 라이터가 그 디스크 쓰기 뒤에 줄을 선다. 그리고
+///   [`Self::Unattributable`] 은 **일상** 경로다 — 포기한 턴의 진짜 `turn/completed` 가 뒤늦게 오면
+///   여기로 온다. 수다스러운 상대 하나가 락 보유 디스크 쓰기를 그만큼 만든다.
+// ADR-0006
+enum TurnNoteLog<'a> {
+    ForeignThread(&'a str),
+    OversizedTurnId(usize),
+    Held(&'a str),
+    Unattributable(Option<&'a str>),
+}
+
+impl TurnNoteLog<'_> {
+    fn write(self) {
+        match self {
+            TurnNoteLog::ForeignThread(thread) => tracing::warn!(
+                thread = %sanitize(thread, LOG_STRING_LIMIT),
+                "codex app-server: 남의 thread 의 turn/completed — 경계를 막는다"
+            ),
+            TurnNoteLog::OversizedTurnId(bytes) => tracing::warn!(
+                bytes,
+                "codex app-server: turn id 가 상한을 넘어 붙들지 않는다 — 경계를 막는다"
+            ),
+            TurnNoteLog::Held(turn) => tracing::debug!(
+                turn = %sanitize(turn, LOG_STRING_LIMIT),
+                "codex app-server: 응답보다 먼저 온 종료 — 대조를 기다린다"
+            ),
+            TurnNoteLog::Unattributable(turn) => tracing::warn!(
+                // 빈 문자열로 두면 「id 가 없었다」와 「id 가 빈 문자열이었다」가 로그에서 같아진다.
+                turn = %turn
+                    .map(|t| sanitize(t, LOG_STRING_LIMIT))
+                    .unwrap_or_else(|| "(칸 없음)".to_string()),
+                "codex app-server: 귀속할 수 없는 turn/completed — 경계를 막는다"
+            ),
+        }
     }
 }
 
@@ -1070,7 +1194,15 @@ impl Reader {
         }
     }
 
-    /// 턴이 끝났다는 알림 하나만 본다 — ★턴 상태는 **분류한 봉투**에서 오지 번역기 산출이 아니다★.
+    /// 턴이 끝났다는 알림 하나를 이 상태 기계에 먹이고, ★그 줄에서 번역기가 낸 **턴 경계를 화면으로
+    /// 올릴지**를 정한다★. 돌려주는 값 = 지금 올릴 경계(없으면 `None`).
+    ///
+    /// ★귀속을 아는 것은 이 층뿐이다★ — 번역기는 같은 줄을 보지만 우리 thread·turn id 를 모른다. 그래서
+    ///   번역은 무조건 하되, 그 산출이 **우리 턴의 경계인가**는 여기서 판정한다. 이 게이트가 없으면 남의
+    ///   턴 종료 한 줄이 살아 있는 우리 턴을 화면에서 닫고(이후 출력이 가짜 경계로 쪼개진다) 사실 계층도
+    ///   한가함으로 뒤집혀 턴 도중에 우편이 꽂힌다.
+    /// ★막은 줄은 조용히 사라지지 않는다★ — warn 으로 남는다. 「경계가 안 떴다」의 원인을 로그 없이는
+    ///   이 층과 번역기 중 어디서 찾아야 할지 알 수 없다.
     ///
     /// ★끝내는 조건은 둘 다 맞을 때뿐이다★: 우리 thread id 와 같고(알면), **우리가 아는 turn id 와 같다.**
     ///   thread 만 보고 끝내면 같은 스레드의 다른 턴(이미 끝난 앞 턴의 늦은 신호)이 지금 도는 턴을 닫고,
@@ -1081,15 +1213,23 @@ impl Reader {
     ///   걸려 있어 만료가 [`end_turn_if`] 로 그 턴을 끝낸다.
     /// ★종료가 응답보다 **먼저** 오는 경우는 그 논증이 안 덮는다 — 그래서 따로 닫는다★: 그 알림을 여기서
     ///   버리기만 하면, 뒤이어 온 응답이 id 를 채우면서 대기표까지 걷어 가 그 턴은 끝낼 것이 아무 것도
-    ///   없이 남는다. 그래서 **그 알림이 싣고 있던 id 를** [`State::early_completions`] 에 붙들어 두고,
-    ///   응답이 우리 턴의 id 를 정하는 자리에서 대조한다([`Reader::resolve`]).
+    ///   없이 남는다. 그래서 그 알림의 id **와 경계**를 [`State::early_completions`] 에 붙들어 두고,
+    ///   응답이 우리 턴의 id 를 정하는 자리에서 대조해 그때 올린다([`Reader::resolve`]).
     /// ★붙드는 것이 「종료가 있었다」가 아니라 **그 id** 인 것이 핵심이다★ — 전자는 무엇이든 끝낼 수 있는
     ///   근거 없는 기억이라 오귀속 그 자체지만, 후자는 이 함수가 이미 하는 id 대조를 **미루는** 것뿐이다.
     ///   끝내는 판정은 어느 경로에서도 id 일치 하나뿐이다. ★그 성질을 넓히지 말 것★ — id 대조 없이 턴을
     ///   끝내는 갈래를 더하는 순간 이 파일이 걷어낸 오귀속이 그대로 돌아온다.
-    fn note_turn(&self, method_name: &str, params: Option<&Value>) {
+    // ADR-0127
+    fn note_turn(
+        &self,
+        method_name: &str,
+        params: Option<&Value>,
+        boundary: Option<OutputEvent>,
+    ) -> Option<OutputEvent> {
         if method_name != TURN_COMPLETED {
-            return;
+            // ★번역기는 이 이름 밖에서 턴 경계를 내지 않는다★ — 그래도 받은 것을 그대로 돌려준다:
+            //   그 전제가 깨지는 날 경계가 조용히 사라지는 것보다 화면에 뜨는 편이 낫다.
+            return boundary;
         }
         let incoming_thread = params
             .and_then(|p| p.get("threadId"))
@@ -1099,53 +1239,106 @@ impl Reader {
             .and_then(|t| t.get("id"))
             .and_then(|v| v.as_str());
 
-        let (lock, cv) = &*self.state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-        // ★모르는 threadId 는 오류가 아니다★ — 알림이 그 스레드의 id 를 알려 줄 응답보다 먼저 도착하는
-        //   경우가 실측됐다. 우리 id 를 아직 모르면 그 축으로는 거르지 않는다.
-        if let (Some(mine), Some(theirs)) = (s.thread_id.as_deref(), incoming_thread) {
+        let (result, log) = {
+            let (lock, cv) = &*self.state;
+            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            // ★모르는 threadId 는 오류가 아니다★ — 알림이 그 스레드의 id 를 알려 줄 응답보다 먼저
+            //   도착하는 경우가 실측됐다. 우리 id 를 아직 모르면 그 축으로는 거르지 않는다.
+            let foreign_thread = match (s.thread_id.as_deref(), incoming_thread) {
+                (Some(mine), Some(theirs)) if mine != theirs => Some(theirs),
+                _ => None,
+            };
+            if let Some(theirs) = foreign_thread {
+                (None, Some(TurnNoteLog::ForeignThread(theirs)))
+            } else {
+                match (&s.turn, incoming_turn) {
+                    (
+                        TurnState::Active {
+                            turn_id: Some(mine),
+                            ..
+                        },
+                        Some(theirs),
+                    ) if mine == theirs => {
+                        s.turn = TurnState::Idle;
+                        s.early_completions.clear();
+                        cv.notify_all();
+                        (boundary, None)
+                    }
+                    // ★지금 턴의 id 를 아직 모르는 동안 온 종료★: 이 시점에는 귀속할 수 없으므로 **끝내지
+                    //   않고 경계도 안 올린다**. 대신 그 id 와 경계를 붙들어 두고, 뒤이어 올 `turn/start` 응답이
+                    //   우리 턴의 id 를 권위 있게 알려 줄 때 대조한다([`Reader::resolve`]). 그 대조가 없으면 이
+                    //   턴은 끝낼 것이 아무 것도 없이 남는다 — 응답이 대기표를 걷어 가 시한 backstop 도 사라진다.
+                    (TurnState::Active { turn_id: None, .. }, Some(theirs)) => {
+                        if theirs.len() > MAX_TURN_ID_BYTES {
+                            (None, Some(TurnNoteLog::OversizedTurnId(theirs.len())))
+                        } else if s.early_completions.iter().any(|k| k.turn_id == theirs) {
+                            (None, None)
+                        } else {
+                            if s.early_completions.len() >= EARLY_COMPLETION_SLOTS {
+                                s.early_completions.pop_front();
+                            }
+                            s.early_completions.push_back(EarlyCompletion {
+                                turn_id: theirs.to_string(),
+                                boundary,
+                            });
+                            (None, Some(TurnNoteLog::Held(theirs)))
+                        }
+                    }
+                    // 열린 턴이 없거나, 우리가 아는 id 와 다르거나, 알림에 turn id 가 아예 없다.
+                    _ => (None, Some(TurnNoteLog::Unattributable(incoming_turn))),
+                }
+            }
+        };
+        if let Some(entry) = log {
+            entry.write();
+        }
+        result
+    }
+
+    /// 이 알림이 **우리가 지금 열어 둔 턴의 것으로 셀 수 있나** — 화면에 올릴지가 아니라 ★사실 계층에
+    /// 진행 신호를 적을지★의 판정이다(ADR-0113).
+    ///
+    /// ★두 판정을 가른 이유★: 경계를 막으면 잃는 것이 「경계 하나」지만 본문을 막으면 **에이전트가 낸
+    ///   말이 화면에서 사라진다**. 그래서 본문은 언제나 올리고, 그 줄이 「이 화신은 턴 중」의 근거가
+    ///   되는지만 여기서 가른다. 이 가름이 없으면 우리가 연 적 없는 턴의 `item/*` 한 줄이 사실 계층을
+    ///   켜고, 그 턴의 종료는 [`Reader::note_turn`] 에 막혀 **아무도 그것을 못 끈다** — 30 분 fail-open
+    ///   밸브가 쓸어 갈 때까지 그 에이전트에는 우편이 안 간다(ADR-0127 이 닫은 그 기전과 같은 모양).
+    /// ★판정은 「모순되지 않는가」다 — 「일치하는가」가 아니다★: `item/*` 는 `turn/start` **응답보다
+    ///   먼저** 오는 것이 정상이라(그 창이 [`State::early_completions`] 가 존재하는 이유다) 그 시점에
+    ///   id 일치를 요구하면 우리 턴의 스트리밍 출력이 통째로 사실 계층 밖으로 나간다. 그래서 열린 턴이
+    ///   있고 그 턴의 id 와 **어긋나지만 않으면** 우리 것으로 센다.
+    /// ★열린 턴이 없으면 무조건 아니다★ — 그 순간 이 통로는 「턴 중 아님」이고, 두 축이 같은 판정을
+    ///   받는 것이 이 모양의 요점이다(모듈 헤더).
+    /// ★이 판정과 emit 사이에는 락이 없다(알려진 잔여)★ — 라이터가 그 틈에 턴을 열거나 닫으면 줄
+    ///   하나가 반대쪽으로 센다. 락을 emit 까지 끌면 ADR-0006 을 어기고, 그 한 줄의 오차는 다음 줄과
+    ///   턴 경계가 덮는다.
+    // ADR-0113
+    fn claims_our_turn(&self, params: Option<&Value>) -> bool {
+        let (lock, _) = &*self.state;
+        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        if let (Some(mine), Some(theirs)) = (
+            s.thread_id.as_deref(),
+            params
+                .and_then(|p| p.get("threadId"))
+                .and_then(|v| v.as_str()),
+        ) {
             if mine != theirs {
-                return;
+                return false;
             }
         }
-        match (&s.turn, incoming_turn) {
-            (
-                TurnState::Active {
-                    turn_id: Some(mine),
-                    ..
-                },
-                Some(theirs),
-            ) if mine == theirs => {
-                s.turn = TurnState::Idle;
-                cv.notify_all();
-            }
-            // ★지금 턴의 id 를 아직 모르는 동안 온 종료★: 이 시점에는 귀속할 수 없으므로 **끝내지
-            //   않는다**. 대신 그 id 만 붙들어 두고, 뒤이어 올 `turn/start` 응답이 우리 턴의 id 를
-            //   권위 있게 알려 줄 때 대조한다([`Reader::resolve`]). 그 대조가 없으면 이 턴은 끝낼 것이
-            //   아무 것도 없이 남는다 — 응답이 대기표를 걷어 가 시한 backstop 도 사라지기 때문이다.
-            (TurnState::Active { turn_id: None, .. }, Some(theirs)) => {
-                if theirs.len() > MAX_TURN_ID_BYTES {
-                    tracing::debug!(
-                        bytes = theirs.len(),
-                        "codex app-server: turn id 가 상한을 넘어 붙들지 않는다"
-                    );
-                    return;
-                }
-                if s.early_completions.iter().any(|k| k == theirs) {
-                    return;
-                }
-                if s.early_completions.len() >= EARLY_COMPLETION_SLOTS {
-                    s.early_completions.pop_front();
-                }
-                s.early_completions.push_back(theirs.to_string());
-                tracing::debug!(
-                    turn = %sanitize(theirs, LOG_STRING_LIMIT),
-                    "codex app-server: 응답보다 먼저 온 종료 — id 를 붙들고 대조를 기다린다"
-                );
-            }
-            _ => {
-                tracing::debug!("codex app-server: 귀속할 수 없는 turn/completed — 무시한다")
-            }
+        match &s.turn {
+            TurnState::Idle => false,
+            TurnState::Active { turn_id: None, .. } => true,
+            TurnState::Active {
+                turn_id: Some(mine),
+                ..
+            } => match params
+                .and_then(|p| p.get("turnId"))
+                .and_then(|v| v.as_str())
+            {
+                Some(theirs) => mine == theirs,
+                None => true,
+            },
         }
     }
 
@@ -1164,37 +1357,76 @@ impl Reader {
             }
             Waiter::TurnStart { seq } => match outcome {
                 Ok(v) => match serde_json::from_value::<TurnStartResponse>(v) {
+                    // ★응답이 정하는 id 에도 길이를 건다★ — 이 값은 그대로 `turn/interrupt` 의 params 와
+                    //   [`OutputEvent::TurnEnd`] 의 칸으로 나가므로, 상한이 없으면 상대가 응답 하나로 replay
+                    //   링의 단일 이벤트 상한을 넘는 경계를 만들고 그 링은 그 한 건으로 나머지를 전부 비운다.
+                    //   ★대조 토큰이라 자르지 않고 거른다★(같은 판단 = [`MAX_TURN_ID_BYTES`]) — 그러면 이
+                    //   턴은 귀속할 재료가 없으므로 아래 오류 갈래와 **같은 등급**으로 여기서 닫는다.
+                    Ok(r) if r.turn.id.len() > MAX_TURN_ID_BYTES => {
+                        tracing::warn!(
+                            bytes = r.turn.id.len(),
+                            "turn/start 응답의 turn id 가 상한을 넘었다"
+                        );
+                        end_turn_if(
+                            &self.state,
+                            &self.core,
+                            seq,
+                            format!(
+                                "codex app-server: turn/start 응답의 turn id 가 상한({MAX_TURN_ID_BYTES}B)을 넘었다"
+                            ),
+                        );
+                    }
                     Ok(r) => {
-                        let (lock, _) = &*self.state;
-                        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-                        // ★표식이 안 맞으면 이 답이 연 턴은 이미 끝났다★ — 그 id 를 지금 턴의 칸에 적으면
-                        //   그 뒤의 interrupt 가 엉뚱한 턴을 겨눈다.
-                        match &mut s.turn {
-                            TurnState::Active { seq: cur, turn_id } if *cur == seq => {
-                                if turn_id.is_none() {
-                                    *turn_id = Some(r.turn.id);
-                                }
-                                // ★이 응답이 우리 턴의 id 를 권위 있게 정한 자리다★ — 그 id 로 온 종료가
-                                //   이미 지나갔다면 여기서 끝낸다. 이 대조가 없으면 그 턴은 영영 열린 채
-                                //   남고(대기표는 방금 걷혔다), 그 뒤의 `send_input` 이 그 정지를 "큐가
-                                //   찼다" 로 신고한다 — 사유가 어긋난 신고다.
-                                // ★끝내는 판정은 여전히 id 일치 하나뿐이다★ — 붙들어 둔 목록에 있다는
-                                //   사실만으로 끝나는 턴은 없다.
-                                let ours = turn_id.clone();
-                                if let Some(ours) = ours {
-                                    if let Some(pos) =
-                                        s.early_completions.iter().position(|k| *k == ours)
-                                    {
-                                        s.early_completions.remove(pos);
-                                        s.turn = TurnState::Idle;
-                                        let (_, cv) = &*self.state;
-                                        cv.notify_all();
+                        let released = {
+                            let (lock, _) = &*self.state;
+                            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+                            // ★표식이 안 맞으면 이 답이 연 턴은 이미 끝났다★ — 그 id 를 지금 턴의 칸에
+                            //   적으면 그 뒤의 interrupt 가 엉뚱한 턴을 겨눈다.
+                            match &mut s.turn {
+                                TurnState::Active { seq: cur, turn_id } if *cur == seq => {
+                                    if turn_id.is_none() {
+                                        *turn_id = Some(r.turn.id);
+                                    }
+                                    // ★이 응답이 우리 턴의 id 를 권위 있게 정한 자리다★ — 그 id 로 온
+                                    //   종료가 이미 지나갔다면 여기서 끝내고, **그때 붙들어 둔 경계를
+                                    //   지금 올린다**. 이 대조가 없으면 그 턴은 영영 열린 채 남고
+                                    //   (대기표는 방금 걷혔다), 그 뒤의 `send_input` 이 그 정지를 "큐가
+                                    //   찼다" 로 신고한다 — 사유가 어긋난 신고다.
+                                    // ★끝내는 판정은 여전히 id 일치 하나뿐이다★ — 붙들어 둔 목록에
+                                    //   있다는 사실만으로 끝나는 턴은 없다.
+                                    let ours = turn_id.clone();
+                                    let hit = match ours.as_deref() {
+                                        Some(ours) => s
+                                            .early_completions
+                                            .iter()
+                                            .position(|k| k.turn_id == ours),
+                                        None => None,
+                                    };
+                                    match hit {
+                                        Some(pos) => {
+                                            let held = s.early_completions.remove(pos);
+                                            s.turn = TurnState::Idle;
+                                            // 같은 창에서 붙든 나머지도 이 턴과 함께 버린다
+                                            //   (사유 정본 = [`end_turn_if`]).
+                                            s.early_completions.clear();
+                                            let (_, cv) = &*self.state;
+                                            cv.notify_all();
+                                            held.and_then(|h| h.boundary)
+                                        }
+                                        None => None,
                                     }
                                 }
+                                _ => {
+                                    tracing::debug!(
+                                        "codex app-server: 이미 끝난 턴의 turn/start 응답 — 버린다"
+                                    );
+                                    None
+                                }
                             }
-                            _ => tracing::debug!(
-                                "codex app-server: 이미 끝난 턴의 turn/start 응답 — 버린다"
-                            ),
+                        };
+                        // ★락을 놓은 뒤에 올린다★(ADR-0006) — 구독자는 emit 안에서 임의 코드를 돈다.
+                        if let Some(ev) = released {
+                            self.core.emit(ev);
                         }
                     }
                     // ★오류 응답과 **같은 등급**이어야 한다★: 대기표는 위에서 이미 걷혔으므로, 여기서
@@ -1208,9 +1440,7 @@ impl Reader {
                             &self.state,
                             &self.core,
                             seq,
-                            Some(format!(
-                                "codex app-server: turn/start 응답을 읽지 못했다: {masked}"
-                            )),
+                            format!("codex app-server: turn/start 응답을 읽지 못했다: {masked}"),
                         );
                     }
                 },
@@ -1221,7 +1451,7 @@ impl Reader {
                         &self.state,
                         &self.core,
                         seq,
-                        Some(format!("codex app-server: {masked}")),
+                        format!("codex app-server: {masked}"),
                     );
                 }
             },
@@ -1254,16 +1484,42 @@ impl Reader {
         match protocol::classify(text) {
             Ok(Inbound::Request { id, method, .. }) => self.refuse(&id, &method),
             Ok(Inbound::Notification { method, params }) => {
-                self.note_turn(&method, params.as_ref());
                 // ★번역기에는 **원본 줄 바이트**를 그대로 넣는다★ — 두 번째 입구를 만들면 그쪽의 라인
                 //   재조립·상한·마스킹 규율이 배송 경로 밖으로 나간다(사유 정본 = `decoder.rs` 헤더).
                 //   번역기는 개행으로 줄을 가르므로 종단을 함께 준다.
-                if let Some(dec) = self.decoder.as_mut() {
-                    let mut events = dec.decode(line);
-                    events.extend(dec.decode(b"\n"));
-                    for ev in events {
-                        self.core.emit(ev);
+                let mut events = match self.decoder.as_mut() {
+                    Some(dec) => {
+                        let mut events = dec.decode(line);
+                        events.extend(dec.decode(b"\n"));
+                        events
                     }
+                    None => Vec::new(),
+                };
+                // ★턴 경계만 뽑아 **귀속 게이트**를 지난다 — 나머지는 그대로 흐른다★: 번역기는 우리
+                //   thread·turn id 를 몰라 「이 결말이 우리 턴의 것인가」를 답할 수 없고, 이 층은 그것만
+                //   안다(사유 정본 = [`TURN_COMPLETED`] doc).
+                let boundary = events
+                    .iter()
+                    .position(|e| matches!(e, OutputEvent::TurnEnd { .. }))
+                    .map(|i| events.remove(i));
+                // ★본문은 언제나 화면으로 올리되, 그 줄을 「이 화신은 턴 중」의 근거로 셀지는 가른다★
+                //   (사유 정본 = [`Reader::claims_our_turn`]). 이 두 문이 갈리지 않으면 미귀속 줄이
+                //   사실 계층만 켜 놓고 그 종료는 아래 게이트에 막혀 아무도 그것을 못 끈다.
+                // 경계 하나만 나오는 줄(대부분의 `turn/completed`)에서는 이 판정이 필요 없다 — 락을 아낀다.
+                let ours = !events.is_empty() && self.claims_our_turn(params.as_ref());
+                for ev in events {
+                    // ★종료 어휘는 그 문으로 보내지 않는다★ — 그 문은 도어벨(`StatusSink::turn_ended`)도
+                    //   건너뛰므로 종료를 기다리는 소비자가 안 깨어난다. 번역기 계약상 한 줄이 내는
+                    //   경계는 하나뿐이라 그것은 위에서 이미 뽑혔지만, 그 계약이 깨지는 날 조용히
+                    //   잃는 것보다 여기서 지키는 편이 싸다.
+                    if ours || matches!(ev, OutputEvent::TurnEnd { .. }) {
+                        self.core.emit(ev);
+                    } else {
+                        self.core.emit_without_turn_observation(ev);
+                    }
+                }
+                if let Some(ev) = self.note_turn(&method, params.as_ref(), boundary) {
+                    self.core.emit(ev);
                 }
             }
             Ok(Inbound::Response { id, result }) => self.resolve(&id, Ok(result)),
@@ -1461,7 +1717,8 @@ impl AgentTransport for CodexAppServerTransport {
     ///   연결이 이미 끝났다. 핸드셰이크 창에서 큐에 선 입력은 이미 `Ok` 를 받았으므로 ②를 그 지점 뒤로
     ///   넓히지 않는다.
     /// ★알려진 한계★: 받아 둔 뒤에 실패한 쓰기는 이 호출자에게 돌아갈 길이 없다. 그때 남는 것은 출력
-    ///   스트림에 오르는 오류 한 줄이고, 이미 준 `Ok` 는 정정되지 않는다.
+    ///   스트림에 오르는 **실패 결말의 턴 경계** 하나이고([`end_turn_if`], 그리고 핸드셰이크가 실패해
+    ///   큐가 통째로 버려지는 갈래는 [`writer_loop`] 가 직접 낸다), 이미 준 `Ok` 는 정정되지 않는다.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
         let (lock, cv) = &*self.state;
@@ -1616,6 +1873,7 @@ impl AgentTransport for CodexAppServerTransport {
 mod tests {
     use super::*;
     use crate::output_core::TurnWiring;
+    use crate::turn::TurnObservations;
     use crate::types::{
         AgentId, AgentStatus, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId, StatusSink,
     };
@@ -1823,6 +2081,284 @@ mod tests {
             seen,
             decoded,
         }
+    }
+
+    /// 실 번역기를 꽂은 시험대. ★귀속 게이트를 재려면 이쪽이어야 한다★ — [`RecordingDecoder`] 는
+    /// 이벤트를 하나도 내지 않아, 그것으로 재면 「경계를 막았다」가 **막아서가 아니라 애초에 없어서**
+    /// 통과한다.
+    fn harness_with_real_decoder() -> Harness {
+        let mut h = harness();
+        h.reader.decoder = Some(Box::new(super::super::decoder::CodexAppServerDecoder::new()));
+        h
+    }
+
+    /// 실 번역기 **와** 실 사실 계층을 함께 꽂은 시험대 — 「화면 경계」와 「이 화신이 턴 중인가」가 같은
+    /// 판정을 받는지를 한 자리에서 잰다. 화신 표식은 1 로 고정한다(이 시험대에 화신은 하나뿐이다).
+    fn harness_with_facts() -> (Harness, Arc<TurnObservations>, AgentId) {
+        let id = AgentId::new_v4();
+        let turns = Arc::new(TurnObservations::new());
+        let core = Arc::new(OutputCore::new(
+            id,
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::new(turns.clone(), super::super::classify_turn),
+        ));
+        turns.register(id, 1);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        core.subscribe(Arc::new(EventSink {
+            id: SinkId::new_v4(),
+            seen: seen.clone(),
+        }));
+        let state = shared();
+        let pending = Arc::new(Pending::default());
+        let decoded = Arc::new(Mutex::new(Vec::new()));
+        let reader = Reader {
+            core,
+            decoder: Some(Box::new(super::super::decoder::CodexAppServerDecoder::new())),
+            state: state.clone(),
+            pending: pending.clone(),
+        };
+        (
+            Harness {
+                reader,
+                state,
+                pending,
+                next_id: Arc::new(AtomicI64::new(0)),
+                seen,
+                decoded,
+            },
+            turns,
+            id,
+        )
+    }
+
+    fn boundaries(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<(Option<String>, TurnOutcome)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::TurnEnd { turn_id, outcome } => {
+                    Some((turn_id.clone(), outcome.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn failure_boundaries(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<String> {
+        boundaries(seen)
+            .into_iter()
+            .filter_map(|(_, outcome)| match outcome {
+                TurnOutcome::Failed { detail } => Some(detail.unwrap_or_default()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 한 줄짜리 `turn/completed` — 실 번역기가 읽을 수 있는 모양이다.
+    fn completed_line(thread_id: &str, turn_id: &str, status: &str) -> String {
+        serde_json::json!({
+            "method": "turn/completed",
+            "params": {"threadId": thread_id,
+                       "turn": {"id": turn_id, "items": [], "status": status}},
+        })
+        .to_string()
+    }
+
+    /// 턴 **중간**의 알림 한 줄 — 경계가 아니라 진행 신호가 되는 부류.
+    fn progress_line(thread_id: &str, turn_id: &str) -> String {
+        serde_json::json!({
+            "method": "item/agentMessage/delta",
+            "params": {"threadId": thread_id, "turnId": turn_id, "itemId": "i-1", "delta": "hi"},
+        })
+        .to_string()
+    }
+
+    /// 표 + codex 분류자 + 실 번역기를 꽂은 시험대 — ★사실 계층을 실제로 재는 항목 전용★.
+    ///
+    /// 기본 [`harness`] 는 `TurnWiring::detached()` 라 표가 침묵한다 — 그것으로 재면 「턴 중을 안
+    /// 켰다」가 **안 켜서가 아니라 표가 꺼져 있어서** 통과한다.
+    struct FactHarness {
+        reader: Reader,
+        state: SharedState,
+        table: Arc<TurnObservations>,
+        id: AgentId,
+        seen: Arc<Mutex<Vec<OutputEvent>>>,
+    }
+
+    fn fact_harness() -> FactHarness {
+        let id = AgentId::new_v4();
+        let table = Arc::new(TurnObservations::new());
+        table.register(id, 1);
+        let core = Arc::new(OutputCore::new(
+            id,
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::new(table.clone(), super::super::classify_turn),
+        ));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        core.subscribe(Arc::new(EventSink {
+            id: SinkId::new_v4(),
+            seen: seen.clone(),
+        }));
+        let state = shared();
+        let reader = Reader {
+            core,
+            decoder: Some(Box::new(super::super::decoder::CodexAppServerDecoder::new())),
+            state: state.clone(),
+            pending: Arc::new(Pending::default()),
+        };
+        FactHarness {
+            reader,
+            state,
+            table,
+            id,
+            seen,
+        }
+    }
+
+    /// ★열린 턴이 없는 동안 온 줄은 화면에는 오르되 「턴 중」을 켜지 않는다★ — 켜면 그 턴의 종료는
+    /// 귀속 게이트에 막혀 아무도 끄지 못하고, 30 분 fail-open 밸브가 쓸어 갈 때까지 그 에이전트에는
+    /// 우편이 안 간다(통로는 Idle = 큐 열림인데 사실 계층만 바쁨 — 두 축이 갈린다).
+    #[test]
+    fn a_line_that_arrives_with_no_open_turn_is_shown_but_never_marks_the_agent_busy() {
+        let mut h = fact_harness();
+        make_ready(&h.state, "T");
+
+        h.reader
+            .handle_line(progress_line("T", "U-OTHER").as_bytes());
+        assert!(!h.table.is_in_turn(h.id, 1), "미귀속 줄이 사실 계층을 켰다");
+        // ★버려서 통과한 것이 아니다★ — 그 줄은 화면에 그대로 올라간다. 가른 것은 사실 계층뿐이다.
+        assert!(
+            h.seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, OutputEvent::TextDelta { .. })),
+            "본문이 화면에서 사라졌다"
+        );
+
+        // 그 종료는 귀속 못 해 막힌다 — 그래도 표에는 끌 것이 남아 있지 않다.
+        h.reader
+            .handle_line(completed_line("T", "U-OTHER", "completed").as_bytes());
+        assert!(!h.table.is_in_turn(h.id, 1));
+        assert!(
+            boundaries(&h.seen).is_empty(),
+            "미귀속 경계가 화면에 올랐다"
+        );
+    }
+
+    /// 그 짝 — 우리 턴이 열려 있는 동안 온 같은 줄은 켜고, 그 턴의 종료가 끈다.
+    #[test]
+    fn a_line_inside_our_open_turn_marks_the_agent_busy_and_its_completion_clears_it() {
+        let mut h = fact_harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, Some("U-MINE"));
+
+        h.reader
+            .handle_line(progress_line("T", "U-MINE").as_bytes());
+        assert!(h.table.is_in_turn(h.id, 1));
+        h.reader
+            .handle_line(completed_line("T", "U-MINE", "completed").as_bytes());
+        assert!(!h.table.is_in_turn(h.id, 1));
+    }
+
+    /// ★응답보다 먼저 오는 item 알림은 정상이다★ — 그 창을 id 일치로 막으면 우리 턴의 스트리밍이
+    /// 통째로 사실 계층 밖으로 나간다. 그래서 판정은 「일치하나」가 아니라 「어긋나지 않나」다.
+    #[test]
+    fn a_line_that_arrives_before_the_turn_id_is_known_still_counts_as_ours() {
+        let mut h = fact_harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+
+        h.reader
+            .handle_line(progress_line("T", "U-MINE").as_bytes());
+        assert!(h.table.is_in_turn(h.id, 1));
+    }
+
+    /// ★붙들어 둔 종료는 그 턴과 함께 버려진다★ — 남기면 상대가 id 를 재사용하는 순간
+    /// [`Reader::resolve`] 가 **갓 열린 턴**을 그 자리에서 닫고 낡은 경계를 화면에 올린다.
+    #[test]
+    fn a_held_completion_does_not_survive_the_turn_that_was_open_when_it_arrived() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+
+        h.reader
+            .handle_line(completed_line("T", "U-1", "completed").as_bytes());
+        assert_eq!(
+            with_state(&h.state, |s| s.early_completions.len()),
+            1,
+            "응답보다 먼저 온 종료를 붙들지 않았다"
+        );
+
+        // 그 턴이 다른 길로 끝난다(시한 만료·쓰기 실패·오류 응답 — 전부 end_turn_if 로 온다).
+        let core = h.reader.core.clone();
+        assert!(end_turn_if(&h.state, &core, 0, "포기한다".into()));
+        assert_eq!(
+            with_state(&h.state, |s| s.early_completions.len()),
+            0,
+            "붙들어 둔 종료가 턴보다 오래 살았다"
+        );
+
+        // 다음 턴이 같은 id 를 받아도 열린 채로 산다.
+        activate(&h.state, 1, None);
+        assert!(h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 1 }, method::TURN_START));
+        h.reader
+            .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-1"}}}"#);
+        assert_eq!(
+            turn_seq(&h.state),
+            Some(1),
+            "갓 열린 턴이 낡은 칸으로 닫혔다"
+        );
+        assert_eq!(
+            boundaries(&h.seen).len(),
+            1,
+            "낡은 경계가 화면에 한 번 더 올랐다: {:?}",
+            boundaries(&h.seen)
+        );
+    }
+
+    /// ★응답이 정하는 turn id 에도 상한이 걸린다★ — 없으면 그 값이 그대로 경계의 칸으로 나가 replay
+    /// 링의 단일 이벤트 상한을 홀로 넘고, 그 링이 나머지를 전부 쫓아낸다. 대조 토큰이라 자르지 않고
+    /// 거르므로 그 턴은 귀속할 재료가 없다 — 그래서 오류 응답과 같은 등급으로 닫는다.
+    #[test]
+    fn an_oversized_turn_id_in_the_response_closes_the_turn_instead_of_becoming_a_boundary_field() {
+        let h = harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+        assert!(h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START));
+
+        let huge = "u".repeat(MAX_TURN_ID_BYTES + 1);
+        h.reader.resolve(
+            &RequestId::Num(5),
+            Ok(serde_json::json!({"turn": {"id": huge}})),
+        );
+
+        assert_eq!(turn_seq(&h.state), None, "턴이 열린 채 남았다");
+        let seen = boundaries(&h.seen);
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert!(matches!(seen[0].1, TurnOutcome::Failed { .. }), "{seen:?}");
+        assert!(seen[0].0.is_none(), "상한을 넘은 id 가 경계에 실렸다");
+    }
+
+    /// 남의 턴·남의 thread 는 우리 턴이 열려 있어도 세지 않는다 — 경계 게이트와 같은 축이다.
+    #[test]
+    fn a_line_from_another_turn_or_thread_does_not_count_even_while_ours_is_open() {
+        let mut h = fact_harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, Some("U-MINE"));
+
+        h.reader
+            .handle_line(progress_line("T", "U-OTHER").as_bytes());
+        assert!(!h.table.is_in_turn(h.id, 1), "남의 턴이 켰다");
+        h.reader
+            .handle_line(progress_line("OTHER", "U-MINE").as_bytes());
+        assert!(!h.table.is_in_turn(h.id, 1), "남의 thread 가 켰다");
     }
 
     fn outbox_lines(state: &SharedState) -> Vec<Value> {
@@ -2237,6 +2773,355 @@ mod tests {
         assert_eq!(turn_id_of(&h.state).as_deref(), Some("U-MINE"));
     }
 
+    // ── 턴 경계 귀속 게이트 ─────────────────────────────────────────────────
+    //
+    // 위 항목들이 재는 것은 **이 통로의 상태 기계**가 남의 종료에 안 속는다는 것이고, 아래 항목들이
+    // 재는 것은 **화면과 사실 계층**이 같은 판정을 받는다는 것이다. 둘이 갈리면 통로는 큐를 닫은 채인데
+    // 화면은 턴이 끝났다고 그리고, 사실 계층은 한가함을 관측해 턴 도중에 우편을 꽂는다.
+
+    /// ★리뷰가 이름한 그 입력 그대로다★: 우리 턴이 `U-MINE` 인데 같은 thread 의 `U-OTHER` 종료가 온다.
+    /// 통로는 그것을 무시하지만, 번역기는 귀속을 몰라 경계를 낸다 — 그 경계가 그대로 흐르면 분류자도
+    /// 프론트도 id 를 안 보므로 **살아 있는 `U-MINE` 이 끝난 것으로 찍힌다.**
+    #[test]
+    fn a_foreign_turn_completed_never_ends_the_live_turn() {
+        let (mut h, turns, id) = harness_with_facts();
+        make_ready(&h.state, "MINE");
+        activate(&h.state, 0, Some("U-MINE"));
+        // 되울린 유저 메시지 = 이 턴이 도는 중이라는 첫 관측.
+        h.reader.core.emit(OutputEvent::Structured {
+            kind: "user".into(),
+            json: "{}".into(),
+        });
+        assert!(turns.is_in_turn(id, 1), "전제: 턴 중으로 관측된다");
+
+        h.reader
+            .handle_line(completed_line("MINE", "U-OTHER", "completed").as_bytes());
+
+        assert!(
+            boundaries(&h.seen).is_empty(),
+            "귀속 안 되는 종료가 화면 경계를 냈다"
+        );
+        assert!(
+            turns.is_in_turn(id, 1),
+            "남의 턴 종료가 우리 턴을 한가함으로 뒤집었다 — 턴 도중에 우편이 꽂힌다"
+        );
+        assert_eq!(turn_seq(&h.state), Some(0), "상태 기계까지 흔들렸다");
+    }
+
+    /// 다른 thread 의 종료도 같다 — 막되, 로그로는 남는다(사유 = [`Reader::note_turn`] doc).
+    #[test]
+    fn a_turn_completed_from_another_thread_makes_no_boundary() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "MINE");
+        activate(&h.state, 0, Some("U-MINE"));
+        h.reader
+            .handle_line(completed_line("OTHER", "U-MINE", "completed").as_bytes());
+        assert!(boundaries(&h.seen).is_empty(), "{:?}", boundaries(&h.seen));
+    }
+
+    /// ★귀속되면 경계는 **그대로** 흐른다 — 결말까지★. 게이트가 「막는 것」만 하고 통과를 못 시키면
+    /// 대기 인디케이터가 영영 돈다.
+    #[test]
+    fn an_attributed_turn_completed_makes_exactly_one_boundary_with_its_outcome() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, Some("U-1"));
+        h.reader
+            .handle_line(completed_line("T", "U-1", "interrupted").as_bytes());
+        assert_eq!(
+            boundaries(&h.seen),
+            vec![(Some("U-1".to_string()), TurnOutcome::Interrupted)]
+        );
+        assert_eq!(turn_seq(&h.state), None, "상태 기계도 함께 닫혀야 한다");
+    }
+
+    /// ★응답보다 먼저 온 종료의 경계는 **버리지도 흘리지도 않고 미룬다**★ — 그 자리에서 흘리면 아직
+    /// 귀속되지 않은 종료가 살아 있는 턴을 닫고, 버리면 대조가 성립한 뒤에 올릴 것이 없어 대기 표시가
+    /// 영영 돈다. 결말을 알고 있었는데도 그렇다.
+    #[test]
+    fn an_early_completion_boundary_is_held_until_the_response_names_it() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+        let _ = h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
+
+        h.reader
+            .handle_line(completed_line("T", "U-EARLY", "interrupted").as_bytes());
+        assert!(
+            boundaries(&h.seen).is_empty(),
+            "귀속 전에 경계가 흘렀다 — 살아 있는 턴이 화면에서 닫힌다"
+        );
+
+        h.reader
+            .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-EARLY"}}}"#);
+        assert_eq!(
+            boundaries(&h.seen),
+            vec![(Some("U-EARLY".to_string()), TurnOutcome::Interrupted)],
+            "붙들어 둔 결말이 대조 뒤에도 안 올라왔다"
+        );
+    }
+
+    /// 대조는 여전히 **id 일치** 하나뿐이다 — 붙들려 있다는 사실만으로 올라오는 경계는 없다.
+    #[test]
+    fn an_early_completion_for_another_turn_never_releases_its_boundary() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+        let _ = h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
+
+        h.reader
+            .handle_line(completed_line("T", "U-SOMEONE-ELSE", "completed").as_bytes());
+        h.reader
+            .handle_line(br#"{"id":5,"result":{"turn":{"id":"U-MINE"}}}"#);
+        assert!(boundaries(&h.seen).is_empty(), "{:?}", boundaries(&h.seen));
+    }
+
+    // ── 결말 없이 죽는 턴(ADR-0127) ─────────────────────────────────────────
+
+    /// ★턴을 접는 유일한 함수는 **언제나** 경계를 낸다★ — 그것이 이 통로의 포기 경로 넷(쓰기 실패·응답
+    /// 해독 실패·오류 응답·시한 만료)이 사실 계층을 되돌리는 유일한 수단이다. 그리고 표식이 안 맞으면
+    /// 아무 것도 안 끝내고 **경계도 안 낸다** — 늦게 온 신호가 다음 턴의 경계를 지어내면 안 된다.
+    #[test]
+    fn ending_a_turn_always_makes_a_failure_boundary_and_a_stale_marker_makes_none() {
+        let (core, seen) = core_with_sink();
+        let state = shared();
+        activate(&state, 3, Some("U-3"));
+
+        assert!(
+            !end_turn_if(&state, &core, 2, "늦게 온 신호".into()),
+            "표식이 다른데 끝냈다"
+        );
+        assert!(boundaries(&seen).is_empty(), "안 끝냈는데 경계를 냈다");
+
+        assert!(end_turn_if(&state, &core, 3, "포기한다".into()));
+        assert_eq!(
+            boundaries(&seen),
+            vec![(
+                Some("U-3".to_string()),
+                TurnOutcome::Failed {
+                    detail: Some("포기한다".to_string())
+                }
+            )],
+            "사유는 경계 **안**에 실린다 — 따로 오류 줄을 앞세우지 않는다"
+        );
+    }
+
+    /// ★이것이 ADR-0127 이 막으려는 결말 그 자체다★: 턴 도중에 통로가 포기했는데 사실 계층이 되돌아가지
+    /// 않으면, 그 화신은 한가한데도 「턴 중」으로 관측된 채 남아 30 분 fail-open 밸브가 쓸어 갈 때까지
+    /// 우편이 막힌다. ★[`OutputEvent::Error`] 한 줄로는 이것이 안 된다★ — 분류자가 그 어휘를 턴 신호로
+    /// 세지 않는다(그것이 이 결함의 기전이었다).
+    #[test]
+    fn a_turn_abandoned_without_a_completion_clears_the_fact_layer() {
+        let (h, turns, id) = harness_with_facts();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, Some("U-1"));
+        h.reader.core.emit(OutputEvent::Structured {
+            kind: "user".into(),
+            json: "{}".into(),
+        });
+        assert!(turns.is_in_turn(id, 1), "전제: 턴 중으로 관측된다");
+
+        assert!(end_turn_if(
+            &h.state,
+            &h.reader.core,
+            0,
+            "codex app-server 입력 전송 실패".into()
+        ));
+        assert!(
+            !turns.is_in_turn(id, 1),
+            "턴을 접었는데 사실 계층은 여전히 턴 중이다"
+        );
+    }
+
+    /// `turn/start` 에 오류 응답이 오는 경로 — 포기 넷 중 하나. 사유가 경계 안에 실려 나간다.
+    #[test]
+    fn an_error_response_to_turn_start_ends_the_turn_with_its_reason_inside_the_boundary() {
+        let mut h = harness();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, None);
+        with_state(&h.state, |s| s.input.push_back(b"queued".to_vec()));
+        let _ = h
+            .pending
+            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START);
+
+        h.reader
+            .handle_line(br#"{"id":5,"error":{"code":-32000,"message":"turn refused"}}"#);
+
+        assert_eq!(
+            turn_seq(&h.state),
+            None,
+            "오류 응답이 턴을 열어 둔 채 남겼다"
+        );
+        let failures = failure_boundaries(&h.seen);
+        assert_eq!(failures.len(), 1, "{failures:?}");
+        assert!(failures[0].contains("turn refused"), "{failures:?}");
+        assert!(
+            with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
+            "큐가 안 풀렸다"
+        );
+    }
+
+    /// ★포기로 닫은 턴에 뒤늦게 진짜 종료가 와도 경계는 **하나**다★ — 둘이 나가면 화면이 같은 턴을 두 번
+    /// 닫고, 사실 계층에는 짝 없는 종료가 한 번 더 쌓인다.
+    #[test]
+    fn an_abandoned_turn_and_its_late_completion_make_exactly_one_boundary() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, Some("U-1"));
+        let _ = h.pending.register_at(
+            9,
+            Waiter::TurnStart { seq: 0 },
+            method::TURN_START,
+            Instant::now(),
+        );
+
+        sweep_deadlines(&h.state, &h.pending, &h.reader.core);
+        h.reader
+            .handle_line(completed_line("T", "U-1", "completed").as_bytes());
+
+        let seen = boundaries(&h.seen);
+        assert_eq!(seen.len(), 1, "같은 턴이 두 번 닫혔다: {seen:?}");
+        assert!(
+            matches!(seen[0].1, TurnOutcome::Failed { .. }),
+            "먼저 선 결말이 뒤집혔다: {seen:?}"
+        );
+    }
+
+    /// stdin 없이 라이터를 한 번 돌려 핸드셰이크를 실패시킨다. `queued` = 그 창에서 이미 `Ok` 를 받고
+    /// 큐에 서 있던 본문.
+    fn run_failed_handshake(queued: &[&str]) -> (SharedState, Arc<Mutex<Vec<OutputEvent>>>) {
+        let (core, seen) = core_with_sink();
+        let state = shared();
+        with_state(&state, |s| {
+            for body in queued {
+                s.input.push_back(body.as_bytes().to_vec());
+            }
+        });
+
+        writer_loop(
+            // stdin 이 없어 첫 쓰기에서 핸드셰이크가 실패한다.
+            Arc::new(Mutex::new(None)),
+            state.clone(),
+            Arc::new(Pending::default()),
+            Arc::new(AtomicI64::new(0)),
+            // 핸드셰이크 뒤 루프는 첫 검사에서 끝난다 — 이 항목들이 재는 것은 그 앞 구획이다.
+            Arc::new(AtomicBool::new(true)),
+            core,
+            ThreadStartParams {
+                cwd: None,
+                approval_policy: None,
+                sandbox: None,
+            },
+            None,
+        );
+
+        (state, seen)
+    }
+
+    /// 화면에 오른 오류·경계를 **온 순서대로** 뽑는다 — 이 갈래에서 재야 하는 것이 개수만이 아니라
+    /// 「사유가 경계보다 먼저 오르나」이기 때문이다.
+    fn error_and_boundary_order(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<&'static str> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::Error(_) => Some("error"),
+                OutputEvent::TurnEnd { .. } => Some("boundary"),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// ★버린 입력이 하나도 없어도 실패 결말 **하나**가 나간다★ — 턴을 여는 자리가 [`Link::Ready`] 를
+    /// 요구해 이 화신에 턴이 선 적은 없지만, 프론트는 `Error` 를 턴 종료로 읽지 않으므로 오류 하나만
+    /// 든 슬롯의 **대기 표시가 영영 돈다**(링크는 `Down` 이라 뒤에 도착할 것도 없다).
+    /// ★그 사유는 입력 손실을 주장하지 않는다★ — 버린 것이 없기 때문이다.
+    #[test]
+    fn a_failed_handshake_with_nothing_queued_still_ends_the_turn_exactly_once() {
+        let (state, seen) = run_failed_handshake(&[]);
+
+        assert_eq!(
+            error_and_boundary_order(&seen),
+            vec!["error", "boundary"],
+            "사유 한 줄 뒤 경계 하나가 아니다: {:?}",
+            error_and_boundary_order(&seen)
+        );
+        assert_eq!(
+            boundaries(&seen)[0].0,
+            None,
+            "열린 적 없는 턴의 id 를 지어냈다: {:?}",
+            boundaries(&seen)
+        );
+        let failures = failure_boundaries(&seen);
+        assert_eq!(failures.len(), 1, "실패 결말이 아니다: {failures:?}");
+        assert!(
+            !failures[0].contains("사라졌다"),
+            "버린 입력이 없는데 손실을 보고한다: {failures:?}"
+        );
+        assert!(with_state(&state, |s| matches!(s.link, Link::Down(_))));
+    }
+
+    /// ★큐에 선 본문을 파괴했으면 실패 결말 **하나**가 나간다★ — 보낸 쪽에는 턴이 있었기 때문이고,
+    /// `dropped` 는 버린 본문 수이지 턴 수가 아니다. ★이 경계가 없으면★ 프론트는 `Error` 를 턴 종료로
+    /// 읽지 않으므로(재시도되는 스트림 오류가 그 어휘로 온다) 오류 하나만 받은 슬롯의 **대기 표시가
+    /// 영영 돈다**.
+    #[test]
+    fn a_failed_handshake_that_destroyed_queued_input_ends_the_turn_exactly_once() {
+        let (state, seen) = run_failed_handshake(&["queued one", "queued two"]);
+
+        assert_eq!(
+            error_and_boundary_order(&seen),
+            vec!["error", "boundary"],
+            "사유 한 줄 뒤 경계 하나가 아니다: {:?}",
+            error_and_boundary_order(&seen)
+        );
+        assert_eq!(
+            boundaries(&seen)[0].0,
+            None,
+            "열린 적 없는 턴의 id 를 지어냈다: {:?}",
+            boundaries(&seen)
+        );
+        let failures = failure_boundaries(&seen);
+        assert_eq!(failures.len(), 1, "실패 결말이 아니다: {failures:?}");
+        assert!(failures[0].contains("2건"), "{failures:?}");
+        assert!(with_state(&state, |s| s.input.is_empty()));
+        assert!(with_state(&state, |s| matches!(s.link, Link::Down(_))));
+    }
+
+    /// ★턴을 idle 로 되돌리는 자리를 늘리면 여기가 빨개진다★ — 그 자리마다 「경계는 누가 내나」를 답해야
+    /// 하고, 안 답한 자리가 곧 사실 계층이 굳는 자리다(ADR-0127). 오늘 넷 = [`end_turn_if`](경계를
+    /// 스스로 낸다) · [`Reader::note_turn`](번역기 경계를 통과시킨다) · [`Reader::resolve`](붙들어 둔
+    /// 경계를 올린다) · [`ReaderExit::drop`](스트림이 끝났다 — 곧 `OutputCore::finish` 가 표를 거둔다).
+    #[test]
+    fn every_place_that_idles_a_turn_is_accounted_for() {
+        let src = include_str!("transport.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let sites = production
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with("s.turn = TurnState::Idle"))
+            .count();
+        assert_eq!(
+            sites, 4,
+            "턴을 idle 로 되돌리는 자리가 넷이 아니다 — 새 자리는 자기 턴 경계를 함께 내야 한다"
+        );
+        // ★그 자리마다 붙들어 둔 종료도 버려야 한다★ — 안 버리면 그 칸이 다음 턴까지 살아남아,
+        //   상대가 id 를 재사용하는 순간 갓 열린 턴이 낡은 경계로 닫힌다([`end_turn_if`] 의 그 줄).
+        let drops = production
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| l.starts_with("s.early_completions.clear()"))
+            .count();
+        assert_eq!(
+            drops, sites,
+            "idle 자리 수와 붙들어 둔 종료를 버리는 자리 수가 다르다"
+        );
+    }
+
     /// ★귀속 못 한 종료를 버려도 그 턴의 **시한은 그대로 남아야 한다**★ — 무시하는 김에 대기표까지
     /// 걷으면 그 턴은 끝낼 것이 아무 것도 없어진다. 이 항목이 재는 것은 그 하나이고, 「귀속 못 한 턴에는
     /// 언제나 시한이 있다」는 **아니다**(그 일반화는 거짓이다 — 종료가 응답보다 먼저 오는 경우가 있고,
@@ -2308,13 +3193,10 @@ mod tests {
             0,
             "대기표는 이미 걷혔다 — 시한 backstop 이 없다"
         );
-        assert!(
-            h.seen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, OutputEvent::Error(_))),
-            "조용히 접으면 화면에 신호가 하나도 없다"
+        assert_eq!(
+            failure_boundaries(&h.seen).len(),
+            1,
+            "조용히 접으면 화면에도, 사실 계층에도 신호가 하나도 없다"
         );
         assert!(
             with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some(),
@@ -2524,13 +3406,10 @@ mod tests {
             with_state(&h.state, |s| matches!(s.turn, TurnState::Idle)),
             "시한이 지났는데 턴이 영원히 진행 중이다"
         );
-        assert!(
-            h.seen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|e| matches!(e, OutputEvent::Error(_))),
-            "조용히 접으면 화면에 신호가 하나도 없다"
+        assert_eq!(
+            failure_boundaries(&h.seen).len(),
+            1,
+            "조용히 접으면 화면에도, 사실 계층에도 신호가 하나도 없다"
         );
         assert!(with_state(&h.state, |s| take_turn_locked(s, &h.next_id)).is_some());
     }

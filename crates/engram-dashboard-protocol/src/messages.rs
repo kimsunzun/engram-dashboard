@@ -620,11 +620,78 @@ pub enum StructuredEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// backend 가 보고한 오류(스트림 내부 오류 — 종료 아님).
+    /// 턴 경계 + **어떻게 끝났나**(agent `OutputEvent::TurnEnd` 의 미러).
+    ///
+    /// ★`MessageDone` 과 별 타입인 것이 계약이다★ — 그쪽은 "한 메시지가 닫혔다", 이쪽은 "한 턴이 이
+    ///   결말로 닫혔다". 한 턴에 완료 항목이 여럿인 백엔드에서 둘은 같은 사건이 아니다.
+    /// ★`PROTOCOL_VERSION` 은 이 추가로 올리지 않는다★ — [`crate::PROTOCOL_VERSION`] 이 적어 둔 bump
+    ///   기준은 모양이 아니라 **조용한 오작동**이다. 그 기준에 두 방향을 각각 대면 이렇게 된다:
+    ///   - **신데몬 + 구셸**: 이벤트 enum 은 모르는 변형이 와도 Rust 쪽이 조용히 통과시키므로 그 조합이
+    ///     깨지지 않는다. ★단 프론트 누산기 switch 에는 `default:` 가지가 없어 **화면에서는 조용하지
+    ///     않다**★(모르는 `type` 은 항목이 안 들어가고 턴 표시도 안 움직인다) — 그 가지를 세우는 것이 이
+    ///     어휘를 소비하는 쪽의 몫이다.
+    ///   - **구데몬 + 신셸**: ★이쪽이 로컬 개발의 일상 조합이다★ — 데몬은 셸 재빌드보다 오래 산다(그
+    ///     사실은 그 상수의 v4 항목에 적혀 있다). 구데몬은 이 이벤트를 **아예 안 보낸다**. 그래서 신셸의
+    ///     대기 표시가 영영 안 풀리고 알림도 안 뜬다 — 사람이 「고친 게 안 돈다」와 「네 데몬이 낡았다」를
+    ///     **구분할 수 없다**.
+    /// ★그래도 안 올리는 이유★ — 그 기준이 든 사례들은 전부 **두 쪽이 같은 데이터를 서로 다르게 해석하는**
+    ///   경우다. 이 변경은 **한 방향뿐이다**: 이벤트는 데몬→셸 으로만 흐르고 신셸이 데몬에 새로 보내는
+    ///   것은 없다. 그래서 구데몬에는 오독할 것이 아예 없고 **그 기능이 없을 뿐**이다. 「옛 빌드에 새
+    ///   수정이 없다」를 조용한 오작동으로 세면 **데몬 쪽 수정마다** bump 를 강제하게 된다.
+    /// ★그리고 미출시라 대가가 싸다★ — 밖의 사용자가 아직 없어 이 조합을 만나는 사람은 개발자뿐이고,
+    ///   나중에 이 판단을 뒤집는 값도 싸다. (사용자 결정 2026-09-14)
+    /// ★증상으로 되찾는 길★: **대기 표시가 영영 안 풀리면 버그를 뒤지기 전에 데몬이 낡았는지 먼저 본다.**
+    TurnEnd {
+        turn_id: Option<String>,
+        outcome: TurnOutcome,
+    },
+    /// backend 가 보고한 오류 — ★**턴 경계가 아니다**★.
+    ///
+    /// ★두 어휘가 각각 무엇을 뜻하나 — 소비자가 여기서 갈린다★:
+    ///   - `Error` = **턴 안에서 일어난 사고**. 그 뒤에도 같은 턴이 이어진다(재시도되는 스트림 오류가
+    ///     이 부류다). 이것을 턴 종료로 읽으면 한 턴이 사고 횟수만큼 쪼개지고, 뒤에 오는 진짜 경계는
+    ///     이미 끝난 턴에 붙는다.
+    ///   - [`StructuredEvent::TurnEnd`] = **턴이 끝났다**. 실패로 끝난 턴도 이쪽 어휘로 온다 — 사유는
+    ///     그 안의 결말 칸이 나른다.
+    /// ★그래서 「재시도되나」를 칸으로 따로 내보내지 않는다★ — 그 구별은 **이벤트 타입**이 이미 지고
+    ///   있고, 칸을 하나 더 만들면 같은 사실이 두 곳에 살다가 하나가 낡는다.
     Error { message: String },
     /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat).
     /// kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
     Structured { kind: String, json: String },
+}
+
+/// 턴이 **어떻게** 끝났나 — [`StructuredEvent::TurnEnd`] 가 나르는 중립 어휘(agent `TurnOutcome` 미러).
+///
+/// ★중립인 것은 **판별자**다 — `detail` 은 아니다★(ADR-0004): 상대 프로토콜의 상태 어휘
+///   (`completed`·`failed`·`inProgress` 같은 값)는 각 backend decoder 안에서 끝나고 밖으로는 이 네
+///   갈래만 나간다. 그래서 **소비자가 분기하는 축**에는 backend 이름이 없다.
+/// ★그 대신 `detail` 에는 상대가 만든 문장이 그대로 실린다 — 그것이 이 칸의 계약이다★: 실패 사유는
+///   상대가 준 것이 유일한 정보이고(codex 는 `serverOverloaded` 같은 자기 라벨과 「다음 턴에 그대로
+///   넣을 문장」을 거기 싣는다), 중립 어휘로 옮기려면 뜻을 지어내야 한다. 그래서 이 칸의 등급은
+///   [`StructuredEvent::Error`] 의 `message` 와 **같다** — 사람이 읽는 불투명 문자열이고, 길이와
+///   자격증명 마스킹만 backend decoder 가 책임진다.
+/// ★소비자 의무 = 그리기만 한다★: `detail` 을 파싱하거나 그 내용으로 분기하면 그 순간 프론트가
+///   backend 어휘를 알게 되고 격리가 실제로 샌다. 분기는 판별자로만 한다.
+/// ★`Unknown` 을 아는 셋 중 하나로 접지 말 것★ — 접으려면 모르는 값의 뜻을 추측해야 하고, 틀리면
+///   화면이 거짓 결말을 그린다. 모른다는 사실 자체가 실린다.
+/// ★self-describing serde★: internally-tagged(`#[serde(tag="kind")]`) — 바깥 봉투가 `"type"` 을 쓰므로
+///   여기는 `"kind"` 를 쓴다(같은 객체에 두 판별자가 겹치지 않게).
+// ADR-0045
+// ADR-0004
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "kind")]
+#[ts(export)]
+pub enum TurnOutcome {
+    /// 정상 종료.
+    Completed,
+    /// 실패. `detail` = **상대가 만든 사람이 읽는 사유**(없을 수 있다 — 사유 없이 실패만 아는 경우).
+    ///   ★중립 어휘가 아니다 — 분기하지 말고 그리기만 할 것★(타입 doc).
+    Failed { detail: Option<String> },
+    /// 사용자가 끊었다 — ★실패가 아니다★.
+    Interrupted,
+    /// 결말을 알 수 없다(모르는 값이거나 아예 없었다). 그래도 턴은 끝난 것으로 센다.
+    Unknown,
 }
 
 /// 출력 청크 — 종류 불가지(설계 §2).
@@ -796,6 +863,28 @@ mod tests {
                 turn_id: Some("t3".into()),
                 message_id: Some("m2".into()),
             },
+            StructuredEvent::TurnEnd {
+                turn_id: Some("t4".into()),
+                outcome: TurnOutcome::Completed,
+            },
+            StructuredEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Failed {
+                    detail: Some("model refused".into()),
+                },
+            },
+            StructuredEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Failed { detail: None },
+            },
+            StructuredEvent::TurnEnd {
+                turn_id: Some("t5".into()),
+                outcome: TurnOutcome::Interrupted,
+            },
+            StructuredEvent::TurnEnd {
+                turn_id: Some("t6".into()),
+                outcome: TurnOutcome::Unknown,
+            },
             StructuredEvent::Error {
                 message: "stream error".into(),
             },
@@ -836,6 +925,82 @@ mod tests {
             }
             _ => panic!("variant 불일치"),
         }
+    }
+
+    /// ★프론트가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 바깥 봉투 판별자는 `"type"`,
+    /// 결말 판별자는 `"kind"` 다. 둘을 같은 이름으로 두면 한 객체에서 겹쳐 결말이 사라진다.
+    ///
+    /// ★이 항목이 못 박는 중립성은 **판별자 집합** 하나다★ — 그 넷이 곧 프론트가 분기하는 축이고,
+    /// 거기에 backend 어휘가 들어오면 여기가 빨개진다. ★`detail` 은 그 축이 아니다 — 그 칸에는 상대가
+    /// 만든 문장이 그대로 실린다★(아래 마지막 단언이 그 사실을 명시로 고정한다). 「wire 에 backend
+    /// 어휘가 하나도 안 오른다」로 읽지 말 것 — 그것은 거짓이고, 한때 이 자리와 타입 doc 이 그렇게
+    /// 적혀 있었다.
+    #[test]
+    fn turn_end_wire_shape_is_pinned_and_the_outcome_discriminant_is_neutral() {
+        assert_eq!(
+            serde_json::to_string(&StructuredEvent::TurnEnd {
+                turn_id: Some("t1".into()),
+                outcome: TurnOutcome::Interrupted,
+            })
+            .unwrap(),
+            r#"{"type":"TurnEnd","turn_id":"t1","outcome":{"kind":"Interrupted"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&StructuredEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Failed {
+                    detail: Some("boom".into())
+                },
+            })
+            .unwrap(),
+            r#"{"type":"TurnEnd","turn_id":null,"outcome":{"kind":"Failed","detail":"boom"}}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&StructuredEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Unknown,
+            })
+            .unwrap(),
+            r#"{"type":"TurnEnd","turn_id":null,"outcome":{"kind":"Unknown"}}"#
+        );
+
+        // ★판별자 집합이 곧 중립성이다★ — 넷 말고 다른 값이 나가면 프론트의 분기 축에 backend 어휘가
+        //   실린 것이다. 값은 `serde_json` 이 내는 그대로를 읽는다(이름을 손으로 베끼지 않는다).
+        let discriminants: Vec<String> = [
+            TurnOutcome::Completed,
+            TurnOutcome::Failed { detail: None },
+            TurnOutcome::Interrupted,
+            TurnOutcome::Unknown,
+        ]
+        .iter()
+        .map(|o| {
+            serde_json::to_value(o).unwrap()["kind"]
+                .as_str()
+                .expect("kind")
+                .to_string()
+        })
+        .collect();
+        assert_eq!(
+            discriminants,
+            ["Completed", "Failed", "Interrupted", "Unknown"]
+        );
+
+        // ★그리고 `detail` 은 **그대로** 간다 — 이것이 계약이고 결함이 아니다★: 실패 사유는 상대가
+        //   준 것이 유일한 정보라 중립 어휘로 옮기려면 뜻을 지어내야 한다. 소비자는 이 칸을 그리기만
+        //   하고 파싱·분기하지 않는다(타입 doc). 그 등급은 `Error{message}` 와 같다.
+        let raw = "stream error (serverOverloaded) [willRetry]";
+        assert_eq!(
+            serde_json::to_string(&StructuredEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Failed {
+                    detail: Some(raw.into())
+                },
+            })
+            .unwrap(),
+            format!(
+                r#"{{"type":"TurnEnd","turn_id":null,"outcome":{{"kind":"Failed","detail":"{raw}"}}}}"#
+            )
+        );
     }
 
     // ── 프리셋 wire 계약(ADR-0061) — JSON envelope golden + round-trip ─────────────

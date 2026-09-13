@@ -1048,6 +1048,7 @@ fn decoded_variant_key(ev: &OutputEvent) -> String {
         OutputEvent::ToolCall { .. } => "ToolCall",
         OutputEvent::Usage { .. } => "Usage",
         OutputEvent::MessageDone { .. } => "MessageDone",
+        OutputEvent::TurnEnd { .. } => "TurnEnd",
         OutputEvent::Error(_) => "Error",
         OutputEvent::Structured { kind, .. } => return format!("Structured/{kind}"),
     }

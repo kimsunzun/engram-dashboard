@@ -61,11 +61,56 @@ pub enum OutputEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// backend가 보고한 오류(스트림 내부 오류 등 — TerminalReason과 별개, 종료 아님).
+    /// 턴 경계 + **어떻게 끝났나**. [`MessageDone`](Self::MessageDone) 과 다른 타입인 것은 의도다 —
+    /// 그쪽은 "한 메시지가 닫혔다" 이고 이쪽은 "한 턴이 이 결말로 닫혔다" 다.
+    ///
+    /// ★한 턴에 완료 항목이 여럿인 백엔드가 있다(실측)★ — 거기서는 **턴 끝 ≠ 메시지 끝**이라
+    ///   `MessageDone` 에 결말을 접으면 한 턴이 여러 경계로 쪼개진다. 그리고 결말을
+    ///   [`Error`](Self::Error) 로 접으면 **사용자가 정상 중단한 턴이 실패로 찍힌다.**
+    /// ★`MessageDone` 을 이것으로 이주시키지 않는다★ — claude 는 그대로 `MessageDone` 을 쓴다.
+    ///   두 어휘는 공존하고, 어느 쪽을 내는지는 각 백엔드 decoder 가 정한다.
+    /// ★결말은 **중립 enum** 이다 — 백엔드의 원시 상태 문자열을 그대로 싣지 않는다★(ADR-0004).
+    TurnEnd {
+        turn_id: Option<String>,
+        outcome: TurnOutcome,
+    },
+    /// backend 가 보고한 오류 — ★**턴 경계가 아니다**★(`TerminalReason` 과도 별개다).
+    ///
+    /// ★두 어휘가 각각 무엇을 뜻하나 — 소비자가 여기서 갈린다★:
+    ///   - `Error` = **턴 안에서 일어난 사고**. 그 뒤에도 같은 턴이 이어진다(재시도되는 스트림 오류가
+    ///     이 부류다). 종료로 읽으면 한 턴이 사고 횟수만큼 쪼개진다.
+    ///   - [`TurnEnd`](Self::TurnEnd) = **턴이 끝났다**. 실패로 끝난 턴도 이쪽 어휘로 온다.
+    /// ★그래서 「재시도되나」를 칸으로 따로 내보내지 않는다★ — 그 구별은 이벤트 타입이 이미 지고 있다.
     Error(String),
     /// 위 정형 variant로 안 잡히는 backend별 구조화 이벤트의 탈출구(forward-compat).
     /// kind=이벤트 종류 태그, json=원본 직렬화 payload. core는 내용을 해석하지 않는다.
     Structured { kind: String, json: String },
+}
+
+/// 턴이 **어떻게** 끝났나 — [`OutputEvent::TurnEnd`] 가 나르는 중립 어휘.
+///
+/// ★중립인 것은 **판별자**다 — `detail` 은 아니다★(ADR-0004): 상대 프로토콜의 상태 문자열은 각
+///   backend decoder 가 이 네 갈래로 옮기고, 그 바깥(코어·wire·프론트)이 **분기하는 축**은 그것뿐이다.
+/// ★`detail` 에는 상대가 만든 사람이 읽는 문장이 그대로 실린다★ — 실패 사유는 상대가 준 것이 유일한
+///   정보라 중립 어휘로 옮기려면 뜻을 지어내야 한다. 그 칸의 등급은 [`OutputEvent::Error`] 의 문자열과
+///   **같다**(불투명 · 그리기 전용). 길이와 자격증명 마스킹은 그것을 만든 backend decoder 가 진다.
+/// ★[`Unknown`](Self::Unknown) 을 아는 셋 중 하나로 접지 않는다★ — 접으려면 모르는 값의 뜻을 추측해야
+///   하고, 그 추측이 틀리면 화면이 **거짓 결말**을 그린다. 모른다는 사실 자체를 나른다.
+// ADR-0004
+// ADR-0045
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// 정상 종료.
+    Completed,
+    /// 실패. `detail` = **상대가 만든 사람이 읽는 사유**(없을 수 있다 — 사유 없이 실패만 아는 경우).
+    ///   ★중립 어휘가 아니다 — 분기하지 말고 그리기만 할 것★(타입 doc).
+    Failed { detail: Option<String> },
+    /// 사용자가 끊었다. ★실패가 아니다★ — 이 저장소에서 중단은 1급 정상 경로다
+    ///   (`TerminalReason::Interrupted` 가 따로 있는 것과 같은 이유).
+    Interrupted,
+    /// 결말을 알 수 없다 — 상대가 우리가 모르는 값을 줬거나, 아예 주지 않았다.
+    /// ★그래도 턴은 끝난 것으로 센다★: 결말을 몰라 이벤트를 버리면 그 대화의 대기 표시가 영영 돈다.
+    Unknown,
 }
 
 /// session→transport 입력 이벤트. 확장 가능 enum.

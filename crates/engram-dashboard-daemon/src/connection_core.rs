@@ -40,6 +40,7 @@ use engram_dashboard_agent::profile::{
 };
 use engram_dashboard_agent::types::{
     Capabilities as CoreCaps, OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
+    TurnOutcome as CoreTurnOutcome,
 };
 
 use engram_dashboard_protocol::{
@@ -51,7 +52,8 @@ use engram_dashboard_protocol::{
     InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
     Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
     RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
-    StructuredEvent as WireStructuredEvent, SubscribeAction, PROTOCOL_VERSION,
+    StructuredEvent as WireStructuredEvent, SubscribeAction, TurnOutcome as WireTurnOutcome,
+    PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -602,6 +604,10 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             turn_id: turn_id.clone(),
             message_id: message_id.clone(),
         }),
+        CoreOutputEvent::TurnEnd { turn_id, outcome } => Some(WireStructuredEvent::TurnEnd {
+            turn_id: turn_id.clone(),
+            outcome: turn_outcome_to_wire(outcome),
+        }),
         CoreOutputEvent::Error(message) => Some(WireStructuredEvent::Error {
             message: message.clone(),
         }),
@@ -609,6 +615,19 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             kind: kind.clone(),
             json: json.clone(),
         }),
+    }
+}
+
+/// 턴 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 어휘가 늘면 여기가 컴파일 에러로 서야 새 결말이
+/// 조용히 `Unknown` 으로 접히지 않는다.
+fn turn_outcome_to_wire(outcome: &CoreTurnOutcome) -> WireTurnOutcome {
+    match outcome {
+        CoreTurnOutcome::Completed => WireTurnOutcome::Completed,
+        CoreTurnOutcome::Failed { detail } => WireTurnOutcome::Failed {
+            detail: detail.clone(),
+        },
+        CoreTurnOutcome::Interrupted => WireTurnOutcome::Interrupted,
+        CoreTurnOutcome::Unknown => WireTurnOutcome::Unknown,
     }
 }
 
@@ -3964,6 +3983,48 @@ mod tests {
             None,
             "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
         );
+    }
+
+    /// ★결말 네 갈래가 하나도 접히지 않고 건너간다★ — 여기서 둘이 같은 값으로 떨어지면 화면이
+    /// 「중단」과 「완료」를, 또는 「미상」과 「완료」를 구별할 수단을 잃는다.
+    ///
+    /// ★이 항목은 「wire 에 backend 어휘가 안 오른다」를 재지 않는다★ — `detail` 은 상대가 만든 문장을
+    /// 그대로 나르고(그것이 그 칸의 계약이다), 아래 사례도 그 사실을 그대로 통과시킨다. 중립인 것은
+    /// **판별자**뿐이고 그 축을 못 박는 것은 protocol 쪽 golden 이다(ADR-0004).
+    #[tokio::test]
+    async fn turn_end_maps_every_outcome_without_collapsing_any() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+
+        let cases = [
+            (CoreTurnOutcome::Completed, WireTurnOutcome::Completed),
+            (CoreTurnOutcome::Interrupted, WireTurnOutcome::Interrupted),
+            (CoreTurnOutcome::Unknown, WireTurnOutcome::Unknown),
+            (
+                CoreTurnOutcome::Failed {
+                    detail: Some("model refused".into()),
+                },
+                WireTurnOutcome::Failed {
+                    detail: Some("model refused".into()),
+                },
+            ),
+            (
+                CoreTurnOutcome::Failed { detail: None },
+                WireTurnOutcome::Failed { detail: None },
+            ),
+        ];
+        for (core, wire) in cases {
+            assert_eq!(
+                output_event_to_wire(&CoreOutputEvent::TurnEnd {
+                    turn_id: Some("t9".into()),
+                    outcome: core.clone(),
+                }),
+                Some(W::TurnEnd {
+                    turn_id: Some("t9".into()),
+                    outcome: wire,
+                }),
+                "{core:?}"
+            );
+        }
     }
 
     // ══════════════════════════════════════════════════════════════════════════════════════════

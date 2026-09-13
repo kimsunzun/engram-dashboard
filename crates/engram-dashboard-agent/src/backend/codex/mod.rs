@@ -30,11 +30,16 @@ use uuid::Uuid;
 use self::decoder::CodexAppServerDecoder;
 use self::protocol::{AskForApproval, SandboxMode, ThreadStartParams};
 use self::transport::CodexAppServerTransport;
-use crate::backend::{console_command, AgentBackend, InputEncoder, SpawnParts, TransportShape};
+use crate::backend::{
+    console_command, AgentBackend, InputEncoder, SpawnParts, TransportShape, TurnClassifier,
+};
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, OutputDecoder};
-use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, PtyError, SessionCaps};
+use crate::turn::TurnSignal;
+use crate::types::{
+    BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError, SessionCaps,
+};
 
 /// codex 를 대화형 TUI 가 아니라 **상주 JSON 서버**로 띄우나 = 이 폴더 안의 네 축(통로 모양·통로 실물·
 /// 입력 인코딩·출력 decoder)이 함께 갈리는 지점.
@@ -114,16 +119,16 @@ impl AgentBackend for CodexBackend {
     }
 
     /// ★분류 사유가 shell 과 다르다★ — shell 이 false 인 것은 입력이 **명령으로 실행되기** 때문이고,
-    /// codex 가 false 인 것은 **바쁜 때를 못 가리기** 때문이다. 이 backend 는 턴 신호를 하나도 선언하지
-    /// 않는데(터미널 모드엔 구조화 이벤트가 없다) 바쁨 게이트가 fail-open 이라, 선언 없는 백엔드는 늘
-    /// 한가한 것으로 읽혀 **생각하는 도중에 편지가 꽂힌다**. 그래서 수신자 명단에서 아예 뺀다.
-    /// ★여는 조건도 다르다★: 턴을 관측할 수 있게 되면(상주 JSON 서버) 이 값이 열린다 — shell 쪽 사유는
-    /// 그때도 그대로 남으므로 둘을 같이 열지 말 것.
-    /// ★그 조건은 app-server 통로가 서면서 충족됐다★ — 이 통로는 `turn/completed` 를 직접 읽어 턴이
-    /// 끝나는 자리를 안다(`turn/started` 는 **일부러** 읽지 않는다 — 사유 정본은 그 통로의 `TURN_COMPLETED`
-    /// doc). 그런데도 여기가 아직 false 인 것은 **그 관측을 `TurnSignal` 로 내보내는 분류자를
-    /// 이 단계가 선언하지 않기 때문**이다(선언 없이 열면 바쁨 게이트가 fail-open 이라 열기 전과 같아진다).
-    /// 값을 여는 것은 그 분류자와 한 묶음이다.
+    /// codex 가 false 인 것은 **바쁜 때를 못 가리기** 때문이다. 바쁨 게이트는 fail-open 이라, 턴 신호가
+    /// 없는 백엔드는 늘 한가한 것으로 읽혀 **생각하는 도중에 편지가 꽂힌다**.
+    /// ★app-server 모드는 이제 그 신호를 낸다★ — 통로가 `turn/completed` 를 읽고(`turn/started` 는
+    /// **일부러** 읽지 않는다 — 사유 정본은 그 통로의 `TURN_COMPLETED` doc), 번역기가 같은 알림을 턴
+    /// 경계로 옮겨 아래 [`classify_turn`] 이 `Ended` 를 낸다. ★그런데도 이 칸이 false 인 것은 **터미널
+    /// 모드 때문**이다★: 이 메서드는 `command` 를 받지 않아 두 모드를 가를 수 없는데, 그 모드는 decoder
+    /// 가 없어 `TerminalBytes` 만 흐르고 그래서 신호가 하나도 없다. 여기서 true 를 돌려주면 그 모드까지
+    /// 함께 열린다.
+    /// ★여는 조건 = 이 축을 모드별로 가르는 것★(시그니처에 명령을 들이거나 자격을 세션 caps 로 옮기거나).
+    /// shell 쪽 사유는 그때도 그대로 남으므로 둘을 같이 열지 말 것.
     fn reads_messages(&self) -> bool {
         false
     }
@@ -297,6 +302,17 @@ impl AgentBackend for CodexBackend {
         }
     }
 
+    fn turn_classifier(&self) -> TurnClassifier {
+        classify_turn
+    }
+
+    // ★합성 입력 에코를 선언하지 않는다 — 되살리지 말 것★: 이 백엔드는 유저 메시지를 스스로
+    //   `item/*` 의 `userMessage` item 으로 되울리고(실측), 번역기가 그것을 「우리가 보낸 것」으로
+    //   표시해 흘린다. 여기에 합성 에코를 더하면 같은 질문이 화면에 두 벌 남는다 — 둘의 dedup 키가
+    //   다르기 때문이다(합성 쪽은 우리 uuid, 되울린 쪽은 codex item id). 그 겹침이 ADR-0193 의
+    //   「거부한 대안」이 실측을 근거로 기각한 바로 그것이다.
+    // ADR-0193
+
     /// ★선언하지 않으면 번역기가 조립되지 않고 바이트가 그대로 흘러 화면이 깨진다 — 오류도 경고도 없다★.
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
         if is_app_server(command) {
@@ -307,9 +323,45 @@ impl AgentBackend for CodexBackend {
     }
 }
 
+/// codex 출력 이벤트 → 턴 신호(ADR-0113).
+///
+/// ★이 백엔드의 종료 신호는 [`OutputEvent::TurnEnd`] 다★ — 번역기는 `MessageDone` 을 내지 않는다.
+///   그래도 그 갈래를 `Ended` 로 적어 둔다: 뜻이 같은 두 어휘를 여기서 갈라 적으면, 어느 날 이 백엔드가
+///   그것을 내게 됐을 때 종료가 조용히 사라진다.
+/// ★`Structured` 를 진행으로 세는 것이 이 백엔드에서 load-bearing 이다★: 이 갈래로 들어오는 것은
+///   되울린 유저 메시지(`userMessage` item 번역분) 하나뿐이고 — 모르는 알림은 버리므로(이 폴더
+///   `decoder` 헤더) 그 밖엔 없다 — 그것이 「이 턴이 시작됐다」의 첫 관측이다.
+/// ★그래도 「우리가 `turn/start` 를 쓴 순간부터 그 첫 알림이 도착하기까지」는 미관측이다★ — 그 창을
+///   합성 에코로 메우지 않는다(ADR-0193 이 그 대안을 기각했다). 큐 해제의 「지금 보낼 수 있나」는 통로
+///   구현체가 자기 상태로 답하고, 우편 게이트 쪽 미관측은 fail-open 으로 흡수된다(ADR-0104 의 선택).
+/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage`(`thread/tokenUsage/updated`)는 턴 중간에 오고,
+///   `Error`(`error` 알림)는 재시도 가능한 스트림 오류라 턴 경계가 아니다. 실패한 턴도 `turn/completed`
+///   가 내는 `TurnEnd` 로 닫힌다 — 실패 사유는 그 이벤트 **안에** 실린다.
+/// ★`turn/completed` 가 **아예 오지 않는** 포기 경로도 `TurnEnd` 로 닫힌다★(쓰기 실패·응답 해독 실패
+///   ·오류 응답·시한 만료 — 통로의 `end_turn_if`). 그 자리에 `Error` 를 쓰던 시절에는 이 표가 종료를
+///   못 세서 **한가한 에이전트가 턴 중으로 관측된 채 남아** 30 분 fail-open 밸브까지 우편이 막혔다
+///   (ADR-0127). 그래서 이 매핑에서 `Error` 를 종료로 승격시키는 것이 아니라, 그쪽이 경계 어휘를 쓴다.
+/// ★터미널 모드와 공유해도 되는 이유(모드별 분기 불필요)★: 그 모드는 decoder 가 없어 `TerminalBytes` 만
+///   흐르므로 이 매핑을 그대로 써도 신호가 하나도 나오지 않는다.
+/// ★`Ended` 앞에 `Progress` 가 없어도 안전하다(코드 근거)★: 표는 `Ended` 를 `in_turn = false` 로 적을
+///   뿐이라 짝 없는 종료는 등록 직후 상태와 같은 값을 쓰고(`crate::turn::TurnObservations::observe_at`),
+///   `in_turn_snapshot` 은 `in_turn` 인 것만 싣는다. 그래서 「시작 신호」를 지어내 채울 이유가 없다.
+// ADR-0113
+// ADR-0004
+pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
+    match event {
+        OutputEvent::TextDelta { .. }
+        | OutputEvent::ToolCall { .. }
+        | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
+        OutputEvent::TurnEnd { .. } | OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended),
+        OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::TurnOutcome;
 
     fn codex(extra_args: Vec<&str>) -> AgentCommand {
         AgentCommand::Codex {
@@ -466,7 +518,88 @@ mod tests {
         assert_eq!(enc.submit_sequence(), None);
         let body = b"hello codex";
         assert_eq!(enc.encode(body, Uuid::new_v4()), body.to_vec());
-        assert!(enc.input_echo_event(body, Uuid::new_v4()).is_none());
+    }
+
+    /// ★되살리지 마라 — 합성 입력 에코는 기각된 대안이다(ADR-0193 「거부한 대안」)★: codex 가
+    /// `userMessage` item 으로 되울리는 것과 겹쳐 같은 질문이 화면에 두 벌 남는다(dedup 키가 서로
+    /// 다르다). 유저 발화를 화면에 올리는 것은 그 되울림의 **번역**이 진다(이 폴더 `decoder`).
+    /// ★두 모드를 다 재는 것이 요점이다★ — 세션 층은 backend 가 아니라 [`InputEncoder`] 를 들고 dispatch
+    /// 표를 지나므로, 선언만 보고 그 표를 안 보면 되살아난 에코가 초록인 채 지나간다.
+    #[test]
+    fn neither_mode_makes_a_synthetic_input_echo() {
+        for command in [codex_app_server(vec![]), codex(vec![])] {
+            let enc = CodexBackend.input_encoder(&command);
+            assert!(
+                enc.input_echo_event("안녕 codex".as_bytes(), Uuid::new_v4())
+                    .is_none(),
+                "{enc:?}: 합성 에코가 되살아났다"
+            );
+        }
+    }
+
+    #[test]
+    fn the_turn_end_event_is_the_ended_signal() {
+        let classify = CodexBackend.turn_classifier();
+        assert_eq!(
+            classify(&OutputEvent::TurnEnd {
+                turn_id: Some("u-1".into()),
+                outcome: TurnOutcome::Completed
+            }),
+            Some(TurnSignal::Ended)
+        );
+        // 결말이 무엇이든 턴은 끝난 것이다 — 실패·중단·미상이 여기서 갈리면 그 결말의 대기 표시가 남는다.
+        for outcome in [
+            TurnOutcome::Failed {
+                detail: Some("boom".into()),
+            },
+            TurnOutcome::Interrupted,
+            TurnOutcome::Unknown,
+        ] {
+            assert_eq!(
+                classify(&OutputEvent::TurnEnd {
+                    turn_id: None,
+                    outcome: outcome.clone()
+                }),
+                Some(TurnSignal::Ended),
+                "{outcome:?}"
+            );
+        }
+        // 되울린 유저 메시지 — 이 턴이 시작됐다는 첫 관측이다.
+        assert_eq!(
+            classify(&OutputEvent::Structured {
+                kind: "user".into(),
+                json: "{}".into()
+            }),
+            Some(TurnSignal::Progress)
+        );
+        assert_eq!(
+            classify(&OutputEvent::TextDelta {
+                text: "hi".into(),
+                turn_id: None,
+                message_id: None
+            }),
+            Some(TurnSignal::Progress)
+        );
+        // `error` 알림은 재시도 가능한 스트림 오류라 턴 경계가 아니다.
+        assert_eq!(classify(&OutputEvent::Error("boom".into())), None);
+        assert_eq!(
+            classify(&OutputEvent::Usage {
+                input_tokens: 1,
+                output_tokens: 2,
+                turn_id: None
+            }),
+            None
+        );
+    }
+
+    /// 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐른다 — 그래서 같은 분류자를 모드별 분기 없이
+    /// 공유해도 그 모드에서는 신호가 하나도 나오지 않는다.
+    #[test]
+    fn terminal_bytes_carry_no_turn_signal() {
+        assert_eq!(
+            CodexBackend.turn_classifier()(&OutputEvent::TerminalBytes(b"[0m".to_vec())),
+            None
+        );
     }
 
     #[test]

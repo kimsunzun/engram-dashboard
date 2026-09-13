@@ -80,6 +80,7 @@ fn event_tag(e: &OutputEvent) -> String {
         OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
         OutputEvent::Usage { .. } => "usage".to_string(),
         OutputEvent::MessageDone { .. } => "done".to_string(),
+        OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
         OutputEvent::Error(_) => "error".to_string(),
         OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
     }

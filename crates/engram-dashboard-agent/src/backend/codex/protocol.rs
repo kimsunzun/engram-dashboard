@@ -228,6 +228,26 @@ pub(crate) mod method {
     pub(crate) const THREAD_TOKEN_USAGE_UPDATED: &str = "thread/tokenUsage/updated";
     pub(crate) const ERROR: &str = "error";
     pub(crate) const DEPRECATION_NOTICE: &str = "deprecationNotice";
+
+    /// ★이 이름 하나에 소비자가 둘이다★ — 번역기가 턴 경계로 옮기고(`decoder`), 통로가 큐 해제의
+    /// 상태 기계 입력으로 읽는다(`transport`). 둘은 같은 줄을 각자 본다.
+    pub(crate) const TURN_COMPLETED: &str = "turn/completed";
+}
+
+/// `TurnStatus` 의 네 값 전량(스키마 0.154.0 `definitions.TurnStatus` — 닫힌 `enum`).
+///
+/// ★문자열 상수로 두고 Rust `enum` 으로 받지 않는다★: 닫힌 타입으로 역직렬화하면 상류가 다섯째 값을
+/// 더한 날 `turn/completed` 줄 **전체**가 실패하고, 그러면 턴 경계가 통째로 사라져 화면의 대기
+/// 인디케이터가 영영 돈다. 그 결말이 이 상수들이 고치는 결함 그 자체다.
+pub(crate) mod turn_status {
+    pub(crate) const COMPLETED: &str = "completed";
+    pub(crate) const INTERRUPTED: &str = "interrupted";
+    pub(crate) const FAILED: &str = "failed";
+    pub(crate) const IN_PROGRESS: &str = "inProgress";
+
+    /// 등급을 가르는 용도 — 여기 **없는** 값은 상류 드리프트이고, 여기 있는데 결말로 안 옮겨지는 값
+    /// (오늘 [`IN_PROGRESS`] 하나)은 「뜻을 아직 모른다」다. 어느 쪽이든 번역은 그래도 한다.
+    pub(crate) const ALL: &[&str] = &[COMPLETED, INTERRUPTED, FAILED, IN_PROGRESS];
 }
 
 /// 우리가 모르는 인바운드 **요청**을 거절할 때 싣는 코드.
@@ -425,8 +445,11 @@ pub(crate) struct TurnStartResponse {
     pub(crate) turn: Turn,
 }
 
-/// 턴. ★`status`·`items` 를 안 싣는 것은 이 단계의 범위 때문이다★ — 턴 결말 분류는 뒤 단계가
-/// 지고, 지금 필요한 것은 `turn/interrupt` 에 실을 id 하나다.
+/// 턴 — ★`turn/start` **응답**을 읽는 타입이고 `turn/completed` 알림은 이것으로 읽지 않는다★.
+/// 그 알림의 `turn` 은 같은 스키마 타입이지만 번역기가 [`Value`] 로 직접 훑는다(사유 정본은
+/// [`crate::backend::codex::decoder`] 의 `turn/completed` 자리 — 한 칸이 어긋나도 턴 경계는 서야 한다).
+/// 여기서 필요한 것은 `turn/interrupt` 에 실을 id 하나뿐이라 나머지 칸(`status`·`items`·`error`
+/// ·`startedAt`·`completedAt`·`durationMs`·`itemsView`)을 옮겨 적지 않았다.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Turn {
     pub(crate) id: String,
@@ -516,6 +539,10 @@ pub(crate) struct ErrorNotification {
     pub(crate) will_retry: bool,
 }
 
+/// ★이 타입을 나르는 칸이 둘이다★ — `error` 알림의 `error`, 그리고 `Turn.error`. 스키마가 후자에
+/// 「Only populated when the Turn's status is failed」를 적는다(0.154.0). 그래서 실패한 턴의 사유는
+/// 이 타입 하나로 읽히고, 화면 문자열을 만드는 자리도 하나다.
+///
 /// ★`codexErrorInfo` 를 [`Value`] 로 받는 것은 의도다★ — 문자열 enum 13 종과 래퍼 객체 5 종이
 /// 섞인 union(= `oneOf` 멤버 6)이고, 우리가 쓰는 것은 사람이 읽을 라벨 하나뿐이다. 이 안에
 /// `serverOverloaded`·`rateLimitExceeded` 가 있다 — 스키마가 가진 유일한 백프레셔 어휘이고,

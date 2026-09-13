@@ -42,7 +42,7 @@ pub use domain::{
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
-    OutputChunk, StructuredEvent, SubscribeAction,
+    OutputChunk, StructuredEvent, SubscribeAction, TurnOutcome,
 };
 
 /// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
@@ -97,4 +97,8 @@ pub use messages::{
 /// 맞는 **살아있는 데몬을 재사용하지 않는다** — 위 「구데몬 + 신셸」 조합이 악수를 지나기 전에 끊긴다.
 /// 그 강제를 재는 자리는 v4 항목과 같다(discovery 의 `version_mismatch_live_daemon_errors_without_spawn`).
 /// (사용자 결정 2026-09-13)
+///
+/// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
+/// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
+/// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**
 pub const PROTOCOL_VERSION: u32 = 5;
