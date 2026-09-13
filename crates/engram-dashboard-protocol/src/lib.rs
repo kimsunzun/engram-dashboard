@@ -93,7 +93,7 @@ pub use messages::{
 ///   - **신데몬 + 구셸**: 구셸의 `AgentSpawnCommand` 는 모르는 필드를 관용하므로 명부는 살고, 모드만
 ///     안 보인다. 이쪽은 조용하지만 **해롭지 않다**(화면이 덜 보일 뿐 다른 것이 돌지 않는다) — 즉 이
 ///     bump 를 강제하는 것은 앞 항목 하나다.
-/// ★bump 가 만드는 차이★: discovery 의 `check_acceptable` 이 `daemon.json` 의 버전을 먼저 보고 짝이 안
+/// ★bump 가 만드는 차이★: discovery 의 `check_acceptable` 이 `daemon.json` 의 버전을 보고 짝이 안
 /// 맞는 **살아있는 데몬을 재사용하지 않는다** — 위 「구데몬 + 신셸」 조합이 악수를 지나기 전에 끊긴다.
 /// 그 강제를 재는 자리는 v4 항목과 같다(discovery 의 `version_mismatch_live_daemon_errors_without_spawn`).
 /// (사용자 결정 2026-09-13)
