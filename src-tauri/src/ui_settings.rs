@@ -404,7 +404,7 @@ fn json_kind(value: &serde_json::Value) -> &'static str {
 ///
 /// 마스킹은 코어 공용 헬퍼를 **명시 호출**한다 — 자동 적용이 아니라 호출자 몫이라는 것이 그 헬퍼의 계약이다
 /// (`docs/reference/logging-conventions.md` 「보안」 · ADR-0138). ★이 저장소의 유일한 호출처가 아니다★ —
-/// `agent/src/transport/stdio.rs` 가 외부 프로세스 stderr 에 같은 방식으로 건다.
+/// 다른 호출처도 각자 명시로 건다. 찾는 법 = `rg "mask_secrets\(" -g '*.rs' crates/ src-tauri/`.
 fn describe_value(raw: &str) -> String {
     if !looks_like_name(raw) {
         return format!(

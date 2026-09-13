@@ -13,7 +13,7 @@
 > ★**전제가 결정으로 바뀌었다**★ — 1·2 판은 「app-server 가 맞는 경로」를 §10-8 의 미결 전제로 이고 있었다(조사 표본 편향 판정 — §2 「뒤집힌 자리」 HIGH 5). **ADR-0187 이 세 모드를 실제로 돌려 그 항목을 닫았다** — `exec --json` 은 글자를 흘리지 않고(중단까지 두 줄) 공식 SDK 는 존재하지 않는다. 그래서 §3~§6 이 다시 열릴 조건은 이제 그 ADR 의 「다시 열 트리거」 둘뿐이다.
 >
 > **가리키는 두 문서(★베끼지 않는다★):**
-> - **실측 정본** = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` — codex-cli 0.153.4 · Windows 11 · 2026-09-09 의 실행 스냅샷. 이 문서의 `[실측]` 행은 전부 그 파일에서 왔고, ★버전이 바뀌면 그 파일이 낡는다★(그 파일 자신이 그렇게 도장 찍는다).
+> - **실측 정본** = `.claude/handoff/attachments/codex-measurements-2026-09-09.md` — codex-cli 0.153.4 · Windows 11 · 2026-09-09 의 실행 스냅샷. 이 문서의 `[실측]` 행은 **`ThreadItem` 변형 수·목록 하나만 빼고** 전부 그 파일에서 왔고, ★버전이 바뀌면 그 파일이 낡는다★(그 파일 자신이 그렇게 도장 찍는다). ★**그 하나의 정본은 다른 파일이다**★ — `.claude/handoff/attachments/codex-measurements-2026-09-13.md`(codex-cli **0.154.0** · 2026-09-13 의 로컬 스키마 생성). **두 파일은 측정 대상 버전이 달라 수치를 한 스냅샷으로 섞어 읽을 수 없다**(§2 머리).
 > - **소유권 지도** = `docs/reference/structure/session-path-ownership.md` — 세션 경로의 객체별 소유·수명 추적(2026-09-09 실측 스냅샷). ADR-0189 가 「막힌 자리」를 확정한 근거이고, ★쓸모 있는 부분은 **PART B**(설계가 실제로 답해야 하는 질문 열)와 **PART C**(「문이 없다」 목록)다★ — 통째로 읽지 말고 그 둘을 집어 읽는다.
 >
 > 앵커: **ADR-0187**(통로 확정) · **ADR-0188**(권한 중립 축) · **ADR-0189**(통로의 자리) · **ADR-0190**(입력 큐) · **ADR-0191**(통로 생성 seam) · **ADR-0192**(claude 기준 기본값) · **ADR-0193**(큐 해제 판정의 주인) · **ADR-0194**(실행 모드 = 백엔드 중립 축) · **ADR-0088**(배달 관측 — 완결성 = Ok-vs-Err) · **ADR-0185**(세션 복원 = 발급 주체 중립 — 이 단계의 sid 축 근거) · **ADR-0186**(무엇을 어디에 적나 — 이 문서가 「이 작업만 필요」 그릇이다) · **ADR-0004**(백엔드 지식 격리 — 이 작업 전체의 근거) · ADR-0002/0030(capability 산출·출처 분리) · ADR-0044(입력 인코딩·통로 무정제) · ADR-0045(tag1 StructuredEvent) · ADR-0001(kill 인과) · ADR-0005(finalize 1회) · ADR-0012(모듈 격리·단독 하네스) · ADR-0099(채널 capability 트립와이어) · ADR-0113(턴 신호 분류자) · ADR-0127(턴 관측 사실 층) · ADR-0145(챗 빈 상태 구성) · ADR-0110(메시징 커널 격리 — 2b) · ADR-0129(net 경계 — 손대지 않는 쪽) · ADR-0163/0164(화신 표식·구독 키) · `trd.md` §0·§2·§4-8·§4-9·§6-1 · `.claude/handoff/attachments/codex-app-server-survey.md`(조사 보고서 + 그 적대 리뷰).
@@ -90,7 +90,9 @@ Phase 3  프론트 해석 회수 · 생성 경로 정리
 
 대상: **codex-cli 0.153.4, 이 PC, 인증된 상태.** 상류 소스 판독은 `main` 이었다 — ★그 둘 사이의 드리프트는 `[미확인]`★.
 
-★**출처 정본이 둘이고 우선순위가 있다**★ — **`[실측]` 의 정본 = `.claude/handoff/attachments/codex-measurements-2026-09-09.md`**(실행 스냅샷, 측정 2026-09-09 17:18~17:29 KST). **`[스키마]`·`[문서]` 의 정본 = `.claude/handoff/attachments/codex-app-server-survey.md`**(판독 보고서 — F 번호는 그 보고서의 발견 번호). ★**둘이 어긋나면 실측이 이긴다**★(그 파일 자신이 그렇게 도장 찍는다). ★그리고 **버전이 바뀌면 실측 문서가 낡는다** — 이 문서는 수치를 베끼지 않고 그 파일을 가리킨다★.
+★**단 `ThreadItem` 변형 수 19 는 이 버전의 수치가 아니다**★ — **codex-cli 0.154.0** 의 로컬 스키마 생성이 돌려준 값이고, 이 문서의 나머지 수치(알림 81 종 등)와 **다른 버전**이다. 그 둘을 한 스냅샷으로 읽지 말 것 — 두 버전 사이의 드리프트는 `[미확인]` 이다.
+
+★**출처 정본이 둘이고 우선순위가 있다**★ — **`[실측]` 의 정본 = `.claude/handoff/attachments/codex-measurements-2026-09-09.md`**(실행 스냅샷, 측정 2026-09-09 17:18~17:29 KST) — ★**단 `ThreadItem` 변형 수·목록의 정본은 `.claude/handoff/attachments/codex-measurements-2026-09-13.md` 다**★(codex-cli **0.154.0** 의 로컬 스키마 생성 · 버전 차이는 이 절 머리가 적는다). **`[스키마]`·`[문서]` 의 정본 = `.claude/handoff/attachments/codex-app-server-survey.md`**(판독 보고서 — F 번호는 그 보고서의 발견 번호). ★**둘이 어긋나면 실측이 이긴다**★(그 파일 자신이 그렇게 도장 찍는다). ★그리고 **버전이 바뀌면 실측 문서가 낡는다** — 이 문서는 수치를 베끼지 않고 그 파일을 가리킨다★.
 
 ### `[실측]` — 실제로 돌려서 확인한 것
 
@@ -126,7 +128,7 @@ Phase 3  프론트 해석 회수 · 생성 경로 정리
 | S2b | `Thread.id` 가 **UUIDv7** 이라는 것 — ★★**이 줄은 이제 `[스키마]` 도 `[문서]` 도 아니라 `[실측]` 이다**★★. 1·2 판은 「스키마는 타입만 주고 UUIDv7 은 문서 문장이다」로 `[문서]` 를 붙였고 3판이 그 지시를 그대로 이고 있었는데, ★**실측 정본이 그것을 실측으로 뒷받침한다**★ — 받은 값의 **버전 니블 · RFC4122 variant · 48비트 ms 접두**를 디코드해 확인했다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md:21`·`:51` · 이 표의 L4). **§6-3·§9-1·§11 도 `[실측]` 로 읽는다** — 한 주장에 두 등급을 붙이지 않는다 | `backend_session_id: Option<Uuid>`(`crates/engram-dashboard-agent/src/profile.rs:165`) 의 타입이 이 한 줄에 매달렸는데, ★그 다리가 문서에서 실측으로 바뀌었다★ |
 | S3 | **id 는 생성 응답으로 온다** — `thread/start` → `ThreadStartResponse { thread, … }` 이고 `Thread.id` 가 그 값 | §6 끝의 순서 제약이 걸리는 자리 |
 | S4 | `Thread` 는 별도 `sessionId` 도 싣는다(같은 세션 트리에 속한 스레드들이 공유하는 id). 문서는 파생하지 말고 그 필드를 읽으라고 적는다 | ★resume 키로 쓰지 말 것 — 아래 「뒤집힌 자리」 HIGH 3★ |
-| S5 | 서버→클라 알림 **81종**(실험 opt-in 유무와 동일). ★**조사 보고서는 이 자리에 83 을 적었고 1·2·3 판이 그 숫자를 옮겼는데, 로컬 스키마 생성이 돌려준 선언 수는 `ServerNotification` 81 종이다**★(L14) — **실측이 이긴다**(§2 머리의 우선순위). 델타 넷 = `item/agentMessage/delta` · `item/reasoning/textDelta` · `item/reasoning/summaryTextDelta` · `item/commandExecution/outputDelta`. 완결 블록 = `item/started`/`item/completed` + **20 변형 `ThreadItem` union**. 턴 수명 = `turn/started`/`turn/completed`(`TurnStatus` 네 값 = completed · interrupted · failed · inProgress). `thread/status/changed` 가 `ThreadActiveFlag`(waitingOnApproval · waitingOnUserInput)를 싣는다. 토큰 = `thread/tokenUsage/updated` | §6 번역 표의 왼쪽 열 전부. ★**20 변형의 목록을 이 세션은 읽지 않았다**★ `[미확인]` |
+| S5 | 서버→클라 알림 **81종**(실험 opt-in 유무와 동일). ★**조사 보고서는 이 자리에 83 을 적었고 1·2·3 판이 그 숫자를 옮겼는데, 로컬 스키마 생성이 돌려준 선언 수는 `ServerNotification` 81 종이다**★(L14) — **실측이 이긴다**(§2 머리의 우선순위). 델타 넷 = `item/agentMessage/delta` · `item/reasoning/textDelta` · `item/reasoning/summaryTextDelta` · `item/commandExecution/outputDelta`. 완결 블록 = `item/started`/`item/completed` + **19 변형 `ThreadItem` union** — ★**조사 보고서는 그 자리에 「20-variant」 를 적었고 그 20 은 보고서 숫자이고 낡았다**★(F8). 로컬 스키마 생성이 돌려준 변형 수는 **19** 다(`.claude/handoff/attachments/codex-measurements-2026-09-13.md` · codex-cli 0.154.0) — 이 문서의 규율대로 **실측이 이긴다**(§2 머리의 우선순위 · 버전 단서도 그 자리). 턴 수명 = `turn/started`/`turn/completed`(`TurnStatus` 네 값 = completed · interrupted · failed · inProgress). `thread/status/changed` 가 `ThreadActiveFlag`(waitingOnApproval · waitingOnUserInput)를 싣는다. 토큰 = `thread/tokenUsage/updated` | §6 번역 표의 왼쪽 열 전부. ★**19 변형의 이름 목록은 `.claude/handoff/attachments/codex-measurements-2026-09-13.md` §2 에 있다**★ — 그 파일이 주는 것은 **이름과 개수까지**고, 변형별 payload 모양은 여전히 안 읽혔다(§9-1 첫 게이트가 그 나머지를 진다) |
 | S6 | 입력: `turn/start`(idle) · `turn/steer`(턴 중, `expectedTurnId` 선행조건) · `turn/interrupt` (threadId + turnId, Esc 등가, **턴 범위** — 스레드는 살고 턴이 interrupted 로 착지). `thread/queue/*` 는 실험 게이트. ★**「셋 다 stable」은 `[문서]` 다**★ — 상류 소스의 stable 표식·주석을 읽은 것이고(F10) 스키마가 내보내는 값이 아니다. ★단 `turn/start`·`turn/interrupt` 는 **실제로 돌았다**★(§2 L5 · L9) | 입력 인코딩이 `Raw` 가 아니게 된다(§5). ★**`control.interrupt` 신고는 새 통로 구현체가 진다**★ — `StdioTransport` 가 그 칸을 false 로 박아 신고하고(`crates/engram-dashboard-agent/src/transport/stdio.rs:363-384`) `interrupt()` 가 `Unsupported` 인 것은 그대로지만, **codex 세션은 그 파일을 안 지난다**(ADR-0189 · §5-5). ★그 정직한 값을 **누가 만들어 주입하나**는 ADR-0191 이 닫았다 — 백엔드 폴더 안의 통로 생성 코드다(§5-5)★ |
 | S7 | **shutdown 메서드가 없다.** 정리는 전송 계층 = stdin 닫기 | §4-8. L2 가 그 관측이다 |
 | S8 | ★**프로토콜 버전이 없다**★ — `InitializeParams`/`InitializeResponse` 양쪽에 버전 칸이 없다. 협상은 capability 플래그뿐(`experimentalApi` · `optOutNotificationMethods` · `requestAttestation` · 열린 `extensions` 맵). **깨지는 변경은 핸드셰이크에서 못 잡고 런타임에 드러난다** | §4-7 이 그 대신 무엇을 하나 |
@@ -162,7 +164,7 @@ Phase 3  프론트 해석 회수 · 생성 경로 정리
 - **추론 텍스트를 어떻게 켜나** — 기본 설정에서 `reasoning` 아이템이 빈 내용으로 왔다(L8). 어떤 설정이 `item/reasoning/textDelta` 를 내는지 안 봤다.
 - 두 연결이 한 스레드의 **턴을 몰 수 있나**(관측만이 아니라 구동) — 조사 보고서 자신이 미결로 남겼다.
 - `-32001` 이 실제로 언제 나오나 · 큐 깊이가 얼마인가.
-- `ThreadItem` 20 변형의 목록 — 읽지 않았다. §6 번역 표의 그 행이 비어 있는 이유다. ★**스키마를 로컬에서 생성할 수 있으므로**(L14) 이것은 codex 를 돌릴 필요 없는 판독이다★.
+- `ThreadItem` 19 변형의 **payload 모양** — 안 읽었다. **이름 목록은 있다**(`.claude/handoff/attachments/codex-measurements-2026-09-13.md` §2 · codex-cli 0.154.0). §6 번역 표의 그 행이 아직 안 채워지는 것은 그 payload 쪽 때문이다. ★**스키마를 로컬에서 생성할 수 있으므로**(L14) 이것은 codex 를 돌릴 필요 없는 판독이다★.
 - **`extra_args` 로 같은 플래그를 또 넣으면 뒤 값이 이기나** — 양쪽 백엔드 다 미검증(우리 소스도 그렇게 적어 뒀다 — `backend/claude/mod.rs:574`).
 - app-server 경로에 **첫 방문 폴더 신뢰 확인 모달이 있나** — PTY 경로엔 있고(`trd.md` §6-1 실측) 그것이 오늘 LLM 표면을 닫아 둔 유일한 사유다(`crates/engram-dashboard-agent/src/commands.rs:306-315`). ★단 §10-9 는 그 관측을 기다리지 않고 「지금 열지 않는다」로 닫혔다 — 사유가 **권한 축**이라 다른 축이다★.
 - 0.153.4 와 우리가 읽은 상류 `main` 사이의 드리프트.
@@ -312,7 +314,7 @@ EOF 를 `Killed` 로 접을지 `Exited{code}` 로 접을지는 오늘도 갈리�
 
 ### 로그인 · MCP · 서브에이전트 복구
 
-HIGH 7 이 셋을 함께 요구했는데 ★**이 문서는 그 셋을 설계하지 않는다**★ — 근거: MCP 주입 자체가 2a 범위 밖(§0)이고, 로그인 만료의 관측(#40766)은 `[문서]`이며 서브에이전트는 우리 스키마 판독 범위 밖(`ThreadItem` 20 변형 미판독 — §2 `[미확인]`)이다. **대신 셋 다 위 EOF 처분 하나로 흡수된다** — 어느 사유로 죽었든 우리가 하는 일은 같다(대기 RPC 오류로 깨우기 → 턴 미확정 로그 → 세션 종료·수거 → 재기동은 새 화신). ★**그리고 ADR-0192 뒤로는 그 흡수가 더 강해졌다**★ — 사유별로 갈릴 여지가 있던 자리(「어느 사유면 다시 붙나」)가 통째로 없어졌다. ★단 그것은 「사유를 구별할 필요가 없다」가 아니라 「지금은 구별할 근거가 없다」다★ — 구별이 필요해지면 `resume_failure_kind`(ADR-0172)가 그 자리다. §11 에 남긴다.
+HIGH 7 이 셋을 함께 요구했는데 ★**이 문서는 그 셋을 설계하지 않는다**★ — 근거: MCP 주입 자체가 2a 범위 밖(§0)이고, 로그인 만료의 관측(#40766)은 `[문서]`이며 서브에이전트는 우리 스키마 판독 범위 밖(`ThreadItem` 19 변형 미판독 — §2 `[미확인]`)이다. **대신 셋 다 위 EOF 처분 하나로 흡수된다** — 어느 사유로 죽었든 우리가 하는 일은 같다(대기 RPC 오류로 깨우기 → 턴 미확정 로그 → 세션 종료·수거 → 재기동은 새 화신). ★**그리고 ADR-0192 뒤로는 그 흡수가 더 강해졌다**★ — 사유별로 갈릴 여지가 있던 자리(「어느 사유면 다시 붙나」)가 통째로 없어졌다. ★단 그것은 「사유를 구별할 필요가 없다」가 아니라 「지금은 구별할 근거가 없다」다★ — 구별이 필요해지면 `resume_failure_kind`(ADR-0172)가 그 자리다. §11 에 남긴다.
 
 ---
 
@@ -738,7 +740,7 @@ ADR-0189·0191 「근거」의 점검 그대로이고, 이 문서가 그것을 �
 | `item/agentMessage/delta` | `[스키마]` | `TextDelta` | 손실 없음. ★단 `turn_id`/`message_id` 를 **채울 수 있다**★ — codex 는 turnId 를 갖고 있다. **claude 는 그 칸이 항상 None 이다**(`src/components/slot/structuredAccumulator.ts:130-132`) → 채우면 프론트가 처음으로 그 칸에 값을 보게 된다(§7 갭 1) |
 | `item/reasoning/textDelta` · `item/reasoning/summaryTextDelta` | `[스키마]` | ★**대응 variant 가 없다**★ | 우리 어휘에 「추론」 축이 없다. 갈림 셋: ① `TextDelta` 로 접어 본문에 섞는다(추론과 답을 화면이 구별 못 한다) ② 어휘를 늘린다(§10-6) ③ **버린다**(추론은 진단 가치가 있고 사용자도 보고 싶어 하므로 이것이 공짜가 아니다). ★**「`Structured` 로 흘린다」는 §6-2 가 닫았다**★ |
 | `item/commandExecution/outputDelta` | `[스키마]` | ★**없다**★ | 명령 **결과** 스트림. `ToolCall` 은 **호출**이지 결과가 아니다 — 우리 어휘에 도구 결과 축이 없다. 위와 같은 갈림(§10-6) |
-| `item/started` / `item/completed` (`ThreadItem` **20 변형 union**) | `[스키마]`(개수) + ★`[미확인]`(목록)★ | 일부 → `ToolCall`, 나머지 미정 | ★**조사 보고서는 그 20 변형을 열거하지 않는다 — 「20-variant union」이라고만 적는다**★(F8). 이 세션도 상류 스키마를 다시 열지 않았다. **그래서 이 행은 지금 채울 수 없고, 비운 채로 두지도 않는다** → ★`ThreadItem` 변형 열거를 §9-1 첫 게이트의 항목으로 올린다★. 열거 없이 번역기를 짜면 어느 변형이 조용히 버려지는지 아무도 모른다 |
+| `item/started` / `item/completed` (`ThreadItem` **19 변형 union**) | `[실측]`(개수) + ★`[미확인]`(목록)★ | 일부 → `ToolCall`, 나머지 미정 | ★**조사 보고서는 그 변형들을 열거하지 않는다 — 「20-variant union」이라고만 적는다**★(F8). ★**그 「20」 은 보고서 숫자이고 낡았다**★ — 로컬 스키마 생성이 돌려준 변형 수는 **19** 다(§2 머리의 버전 단서). 이 문서의 규율대로 **실측이 이긴다**(§2 머리의 우선순위). 이 세션도 상류 스키마를 다시 열지 않았다. **그래서 이 행은 지금 채울 수 없고, 비운 채로 두지도 않는다** → ★`ThreadItem` 변형 열거를 §9-1 첫 게이트의 항목으로 올린다★. 열거 없이 번역기를 짜면 어느 변형이 조용히 버려지는지 아무도 모른다 |
 | `turn/started` | `[스키마]` | **턴 시작 어휘가 없다** | claude 에선 「새 유저 턴」이 `Structured{kind:"user"}` 로 와서 프론트가 그것으로 `turnDone` 을 내린다(`structuredAccumulator.ts:110-123`). codex 는 그 모양으로 오지 않는다 → **대기 인디케이터가 안 뜬다**(§7 갭 1). ★그 관례를 계약으로 박는 것이 §10-2 (가)다★ |
 | `turn/completed` — `TurnStatus = completed` | `[스키마]` | `MessageDone` | 맞는 짝이다. ★**턴마다 정확히 1회**라는 계약을 여기서 지켜야 한다★ — `item/completed` 마다 내면 한 턴이 여러 경계로 쪼개진다(§7-1 의 3) |
 | `turn/completed` — `TurnStatus = failed` | `[스키마]` | 부분: `Error{message}` | `MessageDone` 으로만 접으면 **화면이 「정상 종료」로 읽는다.** `Error` 를 함께 내면 표시는 되지만 **턴 경계와 실패가 두 이벤트로 갈려** 순서 계약이 하나 더 생긴다 |
@@ -1089,7 +1091,7 @@ ProfileRegistry::observe_session_id(agent_id, thread.id)   profile.rs:629
 
 ★**그리고 이 게이트에 스키마 판독 항목 둘을 함께 싣는다 — 왕복이 아니라 읽기지만 같은 자리에서 막힌다**★:
 
-1. ★**`ThreadItem` 20 변형의 목록**★ — 조사 보고서가 개수만 적고 열거하지 않았다(F8). §6-1 번역 표의 그 행이 채워지지 않는 유일한 이유이고, **열거 없이 번역기를 짜면 어느 변형이 조용히 버려지는지 아무도 모른다.** 판정 = 20개 이름과 각 payload 모양을 적어 §6-1 에 행으로 넣는다.
+1. ★**`ThreadItem` 19 변형의 목록**★ — 조사 보고서가 개수만 적고 열거하지 않았다(F8). §6-1 번역 표의 그 행이 채워지지 않는 유일한 이유이고, **열거 없이 번역기를 짜면 어느 변형이 조용히 버려지는지 아무도 모른다.** 판정 = 19개 이름과 각 payload 모양을 적어 §6-1 에 행으로 넣는다.
 2. **알림 81종의 전체 명단** — ★관측된 것은 11 종이다★(§2 L7). 판정 = 명단을 얻어 §6-1 에 안 든 것이 무엇인지 확정한다.
 
 ★**이 둘은 codex 를 돌릴 필요가 없다 — 로컬 스키마 생성이 된다**★(`codex app-server generate-json-schema --experimental --out <dir>`, 종료코드 0, **네트워크·모델 호출 없음** — §2 L14). 그래서 `--ignored` 레인이 아니라 **착수 전 판독**으로 처리할 수 있고, 재기동 왕복보다 먼저 끝난다.
@@ -1280,7 +1282,7 @@ ProfileRegistry::observe_session_id(agent_id, thread.id)   profile.rs:629
 | **추론 텍스트를 켜는 설정** | `[미확인]` — 기본 설정에서 `reasoning` 아이템이 빈 내용으로 왔다(L8) | §10-6-b ① — **지금은 늘릴 어휘의 내용조차 없다** |
 | `-32001` 이 실제로 언제 나오나 · **큐 깊이** | `[미확인]` | 열린 채 — §4-5 는 「안 나올 것이다」로 생략하지 않는 것까지만 정한다 |
 | **비-JSON stdout 라인**이 이 버전·이 조합에서 나오나 | ★**답이 났다 — 나오지 않았다**★(stdout 비-JSON 0 · stderr 0 바이트, 두 실행 모두) | ★**그래도 §4-6 을 면제하지 않는다**★ — paseo 가 겪은 결말이 「데몬이 죽는다」라 §4-5 와 같은 판정이다(D6) |
-| `ThreadItem` **20 변형 목록** · 알림 **81 종 전체 명단** | `[미확인]` — 관측된 알림은 11 종이다(L7) | ★**codex 를 돌릴 필요 없는 판독이다**★ — 스키마를 로컬에서 생성할 수 있다(L14 · 네트워크·모델 호출 없음). §9-1 첫 게이트의 항목 |
+| `ThreadItem` **19 변형 목록** · 알림 **81 종 전체 명단** | `[미확인]` — 관측된 알림은 11 종이다(L7) | ★**codex 를 돌릴 필요 없는 판독이다**★ — 스키마를 로컬에서 생성할 수 있다(L14 · 네트워크·모델 호출 없음). §9-1 첫 게이트의 항목 |
 | ★**「응답 수령 → persist 호출」 사이 크래시의 복구**★ | `[미확인]` — 설계도 없다 | ★**2a 가 닫지 않는다**★. §6-3 의 게이트는 「persist 전에 턴이 나가는 것」을 막고 **그 창에서 죽는 것은 막지 못한다**. 저장된 sid 가 이미 있으면 결말이 **조용한 옛-스레드 재부착**이다 |
 | **쓰기 쪽 정지(stall)** 가 이 조합에서 실제로 일어나나 | `[미확인]` | 열린 채. §4-9 는 그것을 전제하지 않고 **탐지 수단을 남기는 것**만 정한다 |
 | ★★**그 정지가 길어져도 화면에는 아무 신호가 없다 — 그리고 죽이지 않기로 했다**★★ | ★**알려진 한계**★ — `[미확인]` 이 아니라 **고른 결과**다(§10-21 · 사용자 결정) | 프로세스는 살아 있고 EOF 는 안 오고 세션 상태도 안 바뀐다. 사용자가 보는 것은 「응답이 안 오는 에이전트」 하나이고, 그 원인이 **쓰기가 막힌 것**인지 **모델이 오래 생각하는 것**인지 가를 표면이 없다. ★**우편 쪽만 풀린다**★ — `BUSY_MAX_TURN` 30분 fail-open 상한과 그 sweep 이 그 수신자 앞 파킹을 깨운다(`crates/engram-dashboard-messaging/src/busy.rs:44-57` · `:136-146`). ★**강제 종료 감시는 만들지 않는다 — 그 동사의 소유자가 없다**★. 겪거나 재고 나면 그때 값과 함께 만든다 |
@@ -1310,7 +1312,7 @@ ProfileRegistry::observe_session_id(agent_id, thread.id)   profile.rs:629
 
 ★**이 목록이 짧아졌다**★ — 알림 이름 11 종 · `item/started`/`item/completed` · `agentMessage` 델타 · `ThreadStartResponse` 필드 · `turn/interrupt` 파라미터 · `TurnStatus` 중 `completed`·`interrupted`·`inProgress` 는 **실측으로 올라갔다**(§2 L4~L11).
 
-**아직 `[스키마]` 이고 실행 근거가 0 인 것:** 선언된 알림 **81종 중 관측되지 않은 70종** · `ClientRequest` **155종 중 우리가 안 부른 151종** · `ServerRequest` **11종 전부** · `TurnStatus` 의 `failed` · `ThreadActiveFlag` 두 값 · `turn/steer` 의 파라미터 · `ThreadItem` **20 변형 목록** · `ThreadStartParams` 27 속성에 id 계열이 0개라는 것. ★**§6-1 번역 표에서 이 등급이 남은 행은 「표가 틀리면 번역기가 아니라 표부터 다시 짠다」가 그대로 유효하다**★.
+**아직 `[스키마]` 이고 실행 근거가 0 인 것:** 선언된 알림 **81종 중 관측되지 않은 70종** · `ClientRequest` **155종 중 우리가 안 부른 151종** · `ServerRequest` **11종 전부** · `TurnStatus` 의 `failed` · `ThreadActiveFlag` 두 값 · `turn/steer` 의 파라미터 · `ThreadItem` **19 변형 목록** · `ThreadStartParams` 27 속성에 id 계열이 0개라는 것. ★**§6-1 번역 표에서 이 등급이 남은 행은 「표가 틀리면 번역기가 아니라 표부터 다시 짠다」가 그대로 유효하다**★.
 
 ★**그리고 「선언 ≠ 관측」을 이 자리에서 큰 소리로 남긴다**★ — 스키마는 **클라 요청 155종 · 서버 알림 81종 · 서버 요청 11종**을 선언하고, 실제로 온 것은 **알림 11종**이며 **서버 요청은 0 건**이다(`approvalPolicy:"never"` + read-only 조건). ★**스키마에 있다는 이유로 「온다」고 쓰지 말 것**★ — 이 문서의 등급 체계가 존재하는 이유가 정확히 그것이다.
 

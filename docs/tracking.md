@@ -356,9 +356,9 @@
 ## 해소됨 (아카이브)
 
 ### T-1. 로그 API 키 마스킹 — ✅ 구현 (2026-06-11)
-- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. LogSink에 적용. dr26 LGTM.
+- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. **sink 에 배선하지 않았다 — 호출자가 명시 호출한다**(정본 = `docs/reference/logging-conventions.md` 「보안」). dr26 LGTM.
 - **한계(문서화):** AWS Secret Key(40자 base64)는 패턴 식별 불가 — best-effort. generic api_key= 는 오탐 리스크로 미적용.
-- **규칙(명문화 필요):** 추후 production에 PTY 텍스트 로그 추가 시 반드시 mask_secrets 적용 → CLAUDE.md/LLD 명시 예정(D-6).
+- **규칙:** production 에 PTY 텍스트 로그를 추가하면 `mask_secrets` 를 명시 호출한다 — 명문화 정본 = `docs/reference/logging-conventions.md` 「보안」(D-6).
 
 ### (구) T-1 보류 메모
 - **상태:** 보류 (폐기 아님)
