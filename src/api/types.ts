@@ -102,7 +102,7 @@ export type AgentOutputFormat = 'Terminal' | 'StreamJson'
 export type AgentCommand =
   | { kind: 'Claude'; extra_args: string[]; output_format: AgentOutputFormat }
   | { kind: 'Shell'; program: string; args: string[] }
-  | { kind: 'Codex'; extra_args: string[] }
+  | { kind: 'Codex'; extra_args: string[]; output_format: AgentOutputFormat }
 
 /**
  * 스폰 패킷이 고르는 백엔드 — wire `AgentBackendKind` 미러. ★부재는 기본값이 아니라 오류다★: 이 낱말을

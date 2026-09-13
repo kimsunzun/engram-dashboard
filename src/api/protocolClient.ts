@@ -902,6 +902,7 @@ export class ProtocolClient implements AgentClient {
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
+    outputFormat: AgentOutputFormat = 'Terminal',
   ): Promise<AgentProfile> {
     return this.sendCommand<AgentProfile>((request_id) => ({
       CreateProfile: {
@@ -910,8 +911,7 @@ export class ProtocolClient implements AgentClient {
         extra_args: extraArgs,
         env,
         auto_restore: autoRestore,
-        // wire 경로는 아직 codex 모드를 나르지 않으며 데몬 경계가 이 갈래를 Terminal 로 채운다.
-        output_format: 'Terminal',
+        output_format: outputFormat,
         backend: 'codex',
         request_id,
       },

@@ -120,7 +120,8 @@ flowchart TD
 |---|---|---|---|
 | `claude` (터미널) | `claude` — Windows 는 `cmd.exe /c` 한 겹 | `--session-id <sid>`(Fresh) / `--resume <sid>`(Resume) · 제어 채널 있으면 `--mcp-config <path>` · grant 있으면 `--allowedTools <패턴>…` | 우리 인자보다 **먼저** 소진 — `--allowedTools` 가 variadic 이라 그 그룹을 맨 끝에 둔다 |
 | `claude` (stream-json) | 같음 | `-p --input-format stream-json --output-format stream-json --verbose` + 위 세션·MCP·grant 인자 | 같음 |
-| `codex` | `codex` — 같은 `cmd.exe /c` 한 겹 | `--cd <폴더> -s workspace-write -a on-request` | **맨 마지막** — 호출자가 우리 인자를 덮을 수 있게 |
+| `codex` (터미널) | `codex` — 같은 `cmd.exe /c` 한 겹 | `--cd <폴더> -s workspace-write -a on-request` | **맨 마지막** — 호출자가 우리 인자를 덮을 수 있게 |
+| `codex` (app-server) | 같음 | `app-server --stdio` **뿐** — 작업 폴더·샌드박스·승인 정책은 argv 가 아니라 `thread/start` 파라미터로 간다(`cwd`·`sandbox`·`approvalPolicy`) | 같음 — ★단 두 모드의 옵션 집합이 달라 대화형 CLI 를 보고 적은 인자는 여기서 거절될 수 있다★(모드별로 거르지 않는 것은 결정이다 — 코드 주석이 정본) |
 | `gemini` (미배선) | `gemini` — ★best-guess, CLI spike 전★ | stub(세션 플래그도 best-guess) | 미확정 |
 
 Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실제 실행파일이 아니라 `.cmd` shim 이라서다 — 직접 띄우면 error 193 으로 죽는다. 실 경로를 찾아 부르지 않는 이유는 그 경로가 버전에 묶여 있고 CLI 가 스스로 업데이트해 옮기기 때문이다.
@@ -141,8 +142,8 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 | `reads_messages` | `true`(trait 기본) | `false` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 |
 | `supports_control_channel` | `true` | `false` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰+mcp-config 발급). `false` 면 provision 을 **아예 건드리지 않는다** |
 | `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
-| `output_decoder` | stream-json 에만 `Some` | 없음(trait 기본 `None`) | 없음(trait 기본 `None`) | 구조화 이벤트의 유무 → (A) 「렌더 분기」의 갈래 |
-| `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | `Pty`(trait 기본) | `Pty`(trait 기본) | ★**신고값일 뿐 통로를 고르지 않는다**★ — 실물은 `open_spawn` 이 만들고 그 안에서 이 값을 되읽지 않는다(ADR-0191). 오늘 이 값을 읽는 곳은 선언 표 트립와이어(`tests::expected_codec_axis`) 하나뿐이라, 신고와 실물이 어긋나도 아무 게이트가 못 본다 |
+| `output_decoder` | stream-json 에만 `Some` | app-server 에만 `Some`(터미널은 `None`) | 없음(trait 기본 `None`) | 구조화 이벤트의 유무 → (A) 「렌더 분기」의 갈래 |
+| `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | app-server → `StdioBidiJson` · 터미널 → `Pty` | `Pty`(trait 기본) | ★**신고값일 뿐 통로를 고르지 않는다**★ — 실물은 `open_spawn` 이 만들고 그 안에서 이 값을 되읽지 않는다(ADR-0191). 오늘 이 값을 읽는 곳은 선언 표 트립와이어(`tests::expected_codec_axis`) 하나뿐이라, 신고와 실물이 어긋나도 아무 게이트가 못 본다 |
 | `capabilities().session.resume` | `true` | `false` | `false`(보수적 stub) | 무손실 복원 가능 여부 |
 
 ★**MCP 칸을 오독하지 말 것**★ — 「codex 가 MCP 를 못 쓴다」가 아니다. 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수 있나**다. codex 의 MCP 주입은 전역 TOML 오버라이드(`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.
@@ -160,7 +161,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 | 창구 | 어디 | `claude` | `codex` | `gemini` (미배선) |
 |---|---|---|---|---|
 | 사람 메뉴 — claude 계열 셋(`agentlist.createAgent`·`createTerminal`·`createJson`) | `src/commands/agentCommands.ts` | 만든다 — `createReservedProfile` → `createClaudeProfile` 로 claude 가 코드에 박혀 있다 | **못 고른다**(그 낱말을 받는 칸이 없다) | 항목 없음 |
-| 사람 메뉴 — codex 항목(`agentlist.createCodex`) | 같음 | — | 만든다 — **사람 클릭만** | 항목 없음 |
+| 사람 메뉴 — codex 항목 둘(`agentlist.createCodex`·`createCodexJson` — 대화형 TUI / 상주 JSON 서버) | 같음 | — | 만든다 — **사람 클릭만** | 항목 없음 |
 | LLM · 프론트 레지스트리(`registry.run`) | `src/commands/registry.ts` | 위 셋 그대로 통과 | `humanOnly` 반려 — **호출자 축** | — |
 | LLM · 셸 `agent.spawnInto` | `src-tauri/src/layout/apply.rs` | 통과 | 낱말을 **받아서** `gate_backend` → 정책이 닫는다(런타임 거절이 실제로 닿는 유일한 문) | wire enum 에 낱말이 없어 `parse_backend` 가 먼저 반려 |
 | LLM · 코어 `agent.new` | `crates/engram-dashboard-agent/src/commands.rs` | 통과 — `backend` 는 **필수 인자**(미지정 반려) | 선언 어휘에 `Codex` 가 없어 **역직렬화가 먼저 반려**. 정책 팔은 그 뒤에 있다 | 같음 |
@@ -172,7 +173,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 `agent.new` 의 정책 팔은 오늘 발화하지 않는다 — 선언 어휘가 정책 표보다 좁아서 닫힌 낱말이 그 팔에 닿기 전에 역직렬화가 반려한다. ★그래도 지우지 말 것★ — 그 팔이 막는 편집은 「어휘를 넓히면서 정책 표는 안 넓히는 것」이고, 그 조합이 오는 날 유일한 런타임 방어가 된다.
 
-**앵커** — (A) 「닫힌 문」의 앵커와 같다 + `src/commands/agentCommands.ts`(`agentlist.createCodex` 의 `humanOnly` 값 · `agent.spawn` 의 하드코딩 주석)
+**앵커** — (A) 「닫힌 문」의 앵커와 같다 + `src/commands/agentCommands.ts`(codex 문 둘이 나눠 갖는 `CODEX_HUMAN_ONLY` 값 · `agent.spawn` 의 하드코딩 주석)
 
 ## wire 변형
 
@@ -180,14 +181,15 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 | 축 | `claude` | `codex` | `gemini` (미배선) |
 |---|---|---|---|
-| 코어 `AgentCommand` 변형 — `#[serde(tag = "kind")]` 라 `agents.json` 에 그대로 앉는다 | `Claude { extra_args, output_format }` | `Codex { extra_args }` | 없음(변형 미신설) |
+| 코어 `AgentCommand` 변형 — `#[serde(tag = "kind")]` 라 `agents.json` 에 그대로 앉는다 | `Claude { extra_args, output_format }` | `Codex { extra_args, output_format }` | 없음(변형 미신설) |
+| wire `AgentSpawnCommand` 변형 — 위 변형의 미러(소켓으로 흐르는 명부가 이 모양이다) | `Claude { extra_args, output_format }` | `Codex { extra_args, output_format }` | 없음 |
 | wire `AgentBackendKind` 낱말 — `rename_all = "lowercase"` | `claude` | `codex` | 없음 |
 | 선언 어휘 `AgentBackend`(`agent.new` 입구) | `Claude` | 없음 | 없음 |
 | dispatch 배선(`backend_for`) | 있음 | 있음 | **없음** — 변형이 없어 이 backend 로 라우팅되지 않는다(구조 확보용 stub) |
 
-**`PROTOCOL_VERSION = 4`.** 스폰 명령은 `kind` 태그로 갈리는 열거형이라 변형 추가는 경성 파손이다 — 모르는 변형은 무시되지 않고 역직렬화 실패가 된다. 데몬이 셸 재빌드보다 오래 사는 것은 설계라서 「릴리스 상대가 없다」가 이 실패를 막아 주지 않는다.
+**`PROTOCOL_VERSION = 5`.** 이 작업이 두 번 올렸고 **사유가 서로 다르다**. 4 = 스폰 명령이 `kind` 태그로 갈리는 열거형이라 변형 추가가 경성 파손인 축 — 모르는 변형은 무시되지 않고 역직렬화 실패가 된다. 5 = codex 출력 모드가 wire 를 건너는 축인데, 이쪽은 **모양이 안 깨진다**(새 칸이 `#[serde(default)]` 라 양쪽 다 살아서 파싱된다). ★그래서 「모양이 깨질 때만 올린다」는 기준이 아니다★ — 올리는 기준은 **조용한 오작동**이고, 그 값을 버리는 옛 데몬은 「코덱스 JSON」 라벨 뒤에서 대화형 TUI 를 띄우면서 악수를 통과한다. 데몬이 셸 재빌드보다 오래 사는 것은 설계라서 「릴리스 상대가 없다」가 두 실패를 다 막아 주지 않는다. 버전별 사유의 정본 = 그 상수의 doc.
 
-★**버전 불일치는 discovery 가 먼저 거부한다 — 조용한 오작동이 아니다**★. `daemon.json` 의 `protocol_version` 이 이 클라이언트와 다르면 판정이 **살아있는 데몬을 spawn 으로 덮지 않고** `DiscoveryError::VersionMismatch { daemon, expected }` 로 실패한다. 판정이 보는 것은 같은지 다른지뿐이라 어느 쪽이 새것인지는 묻지 않는다. **버전 4 인상의 값어치가 여기다 — 「분명한 거부」.** 안 올렸으면 두 빌드가 악수를 지나 서로 다른 낱말을 같은 것으로 읽었을 자리다.
+★**버전 불일치는 discovery 가 먼저 거부한다 — 조용한 오작동이 아니다**★. `daemon.json` 의 `protocol_version` 이 이 클라이언트와 다르면 판정이 **살아있는 데몬을 spawn 으로 덮지 않고** `DiscoveryError::VersionMismatch { daemon, expected }` 로 실패한다. 판정이 보는 것은 같은지 다른지뿐이라 어느 쪽이 새것인지는 묻지 않는다. **두 인상의 값어치가 여기다 — 「분명한 거부」.** 안 올렸으면 두 빌드가 악수를 지나 서로 다른 낱말·다른 모드를 같은 것으로 읽었을 자리다.
 
 파싱 실패 이야기는 **그 뒤**의 축, 곧 디스크다. 프로필 파일은 한 번에 통째로 파싱되므로 모르는 `kind` 가 한 건이라도 있으면 그 한 건이 아니라 **파싱 전체가 실패**하고, 파일을 `.corrupt` 로 밀어낸 뒤 **빈 명부로 부팅**한다 — 새 백엔드로 띄운 에이전트 하나가 나머지 전부를 데리고 사라진다. 그래서 어휘를 넓히는 것은 「변형 하나 더」가 아니라 디스크 호환을 깨는 이주다. 이 하위호환은 개발 중이라 수용했고, 재도입 트리거는 「그 `kind` 가 실린 빌드가 릴리스로 나가는 순간」으로 추적표에 걸려 있다(`docs/tracking.md` T-33 — 그때의 선택지 셋도 거기 있다).
 
@@ -201,7 +203,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 **구조에 달린 한계.** `%VAR%` 가 든 폴더 경로는 여전히 다른 폴더로 새고, 알려진 해법이 일반적인 이스케이프가 아니라 미이식 상태다. 위 디스크 하위호환을 잡아 줄 **미지 `kind` 회귀 테스트가 없다.** 그리고 **실 모델 턴이 측정되지 않았다** — 계약 시험대의 상시 레인은 선언표 대조뿐이고, 실 CLI 를 띄우는 레인은 `#[ignore]` 라 부를 때만 돈다.
 
-**기록 부채.** 이 작업의 굵은 결정 넷에 **ADR 이 없다** — `PROTOCOL_VERSION` 4 인상 · wire enum 신설 · `backend_session_id` 하드 rename · 「사람만」 예외(`humanOnly`). 밀어 둔 **CI 의 결론도 확인되지 않았고**, **step-log 에도 등재되지 않았다.**
+**기록 부채.** 이 작업의 굵은 결정 다섯에 **ADR 이 없다** — `PROTOCOL_VERSION` 4 인상 · **5 인상**(사용자 결정 2026-09-13) · wire enum 신설 · `backend_session_id` 하드 rename · 「사람만」 예외(`humanOnly`). 밀어 둔 **CI 의 결론도 확인되지 않았고**, **step-log 에도 등재되지 않았다.**
 
 ## 어디서 왔나
 

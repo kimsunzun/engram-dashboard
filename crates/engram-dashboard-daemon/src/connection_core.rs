@@ -419,7 +419,10 @@ const MISSING_BACKEND: &str = "backend 칸이 비었다 — 스폰 패킷(SpawnB
 
 /// wire 백엔드 선택 → 코어 실행 명령. `None` = 칸이 비었다(호출자가 [`MISSING_BACKEND`] 로 거절한다).
 ///
-/// wire `output_format` 은 claude 갈래만 나르고 codex 모드는 아직 이 모양에 없다.
+/// ★두 갈래 다 **받은** `output_format` 을 그대로 싣는다 — 이 함수는 기본값을 채우지 않는다★: 여기서
+/// 채우면 요청한 모드와 실제로 뜨는 모드가 갈리고, 그 어긋남은 에이전트가 떠서 다르게 굴 때까지 안 보인다.
+/// ★단 「받은 값」이 늘 사람이 고른 값인 것은 아니다★ — `CreateProfile` 은 패킷의 칸을 그대로 넘기지만,
+/// 그 칸이 없는 `SpawnByCwd` 는 [`spawn_command_by_cwd`] 가 지어낸 값을 넘긴다.
 /// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
 fn spawn_command_for(
     backend: Option<WireBackendKind>,
@@ -431,13 +434,36 @@ fn spawn_command_for(
             extra_args,
             output_format,
         }),
-        WireBackendKind::Codex => {
-            // wire 스폰 명령은 아직 codex 모드를 나르지 않으므로 이 경계에서 Terminal 기본값을 채운다.
-            Some(CoreSpawnCommand::Codex {
-                extra_args,
-                output_format: CoreAgentOutputFormat::Terminal,
-            })
-        }
+        WireBackendKind::Codex => Some(CoreSpawnCommand::Codex {
+            extra_args,
+            output_format,
+        }),
+    }
+}
+
+/// `SpawnByCwd` 전용 조립 — 그 패킷에는 모드 칸이 없어서 **여기서 값을 지어낸다**.
+///
+/// ★아래 두 값은 고른 것이 아니라 **보존된 기본값**이다★. claude 의 `StreamJson` 은 이 입구가 claude
+/// 하나뿐이던 시절부터 이 자리에 있던 상수다. codex 의 `Terminal` 은 옛 [`spawn_command_for`] 가 codex
+/// 갈래에서 받은 값을 버리고 `Terminal` 을 박아 넣던 동작을 **그대로 유지**한다 — 그 버림을 걷으면서
+/// 이 입구가 조용히 app-server 로 갈아타는 것을 막는 값이고, 어느 모드가 이 경로에 맞는지는 아직
+/// 아무도 정하지 않았다. 모드 칸을 이 입구에 내거나 백엔드별 기본을 정하는 날 그 결정이 앉을 자리가
+/// 여기다(오늘 codex 는 `commands::LLM_BACKEND_POLICY` 가 이 문에서 닫혀 있어 그 값이 아직 발화하지
+/// 않는다 — 그 문이 열리는 날 함께 본다).
+/// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
+fn spawn_command_by_cwd(backend: Option<WireBackendKind>) -> Option<CoreSpawnCommand> {
+    let kind = backend?;
+    let output_format = match kind {
+        WireBackendKind::Claude => CoreAgentOutputFormat::StreamJson,
+        WireBackendKind::Codex => CoreAgentOutputFormat::Terminal,
+    };
+    spawn_command_for(Some(kind), vec![], output_format)
+}
+
+fn output_format_to_wire(f: CoreAgentOutputFormat) -> WireAgentOutputFormat {
+    match f {
+        CoreAgentOutputFormat::Terminal => WireAgentOutputFormat::Terminal,
+        CoreAgentOutputFormat::StreamJson => WireAgentOutputFormat::StreamJson,
     }
 }
 
@@ -448,22 +474,18 @@ fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
             output_format,
         } => WireSpawnCommand::Claude {
             extra_args: extra_args.clone(),
-            output_format: match output_format {
-                CoreAgentOutputFormat::Terminal => WireAgentOutputFormat::Terminal,
-                CoreAgentOutputFormat::StreamJson => WireAgentOutputFormat::StreamJson,
-            },
+            output_format: output_format_to_wire(*output_format),
         },
         CoreSpawnCommand::Shell { program, args } => WireSpawnCommand::Shell {
             program: program.clone(),
             args: args.clone(),
         },
-        // ★codex `output_format` 은 여기서 떨어진다★ — wire 모양에 그 칸이 없어서다(형제
-        //   `spawn_command_for` 가 반대 방향에서 `Terminal` 을 채우는 것과 짝). 오늘 제품의 어느
-        //   생성 경로도 기본값 아닌 값을 만들지 않으므로 관측되는 손실은 없지만, 손으로 고친
-        //   `agents.json` 이 그 값을 들고 있으면 클라이언트는 그것을 볼 수 없다. 칸을 wire 로
-        //   넓히는 것은 통로 구현체가 설 때 같이 정한다.
-        CoreSpawnCommand::Codex { extra_args, .. } => WireSpawnCommand::Codex {
+        CoreSpawnCommand::Codex {
+            extra_args,
+            output_format,
+        } => WireSpawnCommand::Codex {
             extra_args: extra_args.clone(),
+            output_format: output_format_to_wire(*output_format),
         },
     }
 }
@@ -999,9 +1021,12 @@ impl ConnectionCore {
                 backend,
                 request_id,
             } => {
-                let Some(command) =
-                    spawn_command_for(backend, vec![], CoreAgentOutputFormat::StreamJson)
-                else {
+                // ★이 한 줄이 [`spawn_command_by_cwd`] 를 부른다는 사실은 **아무 테스트도 안 잰다**★ —
+                //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent` 바로 아래) 단위
+                //   테스트가 못 들어오고, 여기를 옛 상수 호출로 되돌려도 전 스위트가 초록이다. 그러면
+                //   codex by-cwd 가 조용히 app-server 로 갈아탄다. 그 함수의 **내용**은
+                //   `by_cwd_fills_a_preserved_mode_per_backend` 가 지키므로, 무방비인 것은 이 호출 한 줄이다.
+                let Some(command) = spawn_command_by_cwd(backend) else {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
                 };
@@ -3489,6 +3514,8 @@ mod tests {
     }
 
     /// 고른 낱말이 **디스크에 앉는 실행 명령**까지 간다 — 이 사슬이 끊기면 codex 를 골라도 claude 가 뜬다.
+    /// ★고른 **모드**도 같은 사슬을 탄다★ — 이 경계가 기본값을 채우면 「코덱스 JSON」를 고른 노드
+    /// 뒤에서 대화형 TUI 가 뜨고, 그 어긋남은 에이전트가 떠서 다르게 굴 때까지 안 보인다.
     #[tokio::test]
     async fn create_profile_with_codex_stores_the_codex_command() {
         let (core, _rx) = test_core();
@@ -3502,7 +3529,6 @@ mod tests {
                 extra_args: vec!["--foo".into()],
                 env: vec![],
                 auto_restore: false,
-                // wire 는 codex 모드를 나르지 않으므로 이 값과 무관하게 Terminal 프로필이 만들어진다.
                 output_format: WireAgentOutputFormat::StreamJson,
                 backend: Some(WireBackendKind::Codex),
                 request_id: rid(),
@@ -3519,9 +3545,108 @@ mod tests {
                 output_format,
             } => {
                 assert_eq!(extra_args, &vec!["--foo".to_string()]);
+                assert_eq!(
+                    *output_format,
+                    CoreAgentOutputFormat::StreamJson,
+                    "고른 모드가 그대로 앉아야 한다 — 기본값을 채우면 여기서 Terminal 이 나온다"
+                );
+            }
+            other => panic!("Codex 기대: {other:?}"),
+        }
+    }
+
+    /// 위 항목이 못 재는 절반 — 고르지 않은 `StreamJson` 이 끼어들지 않는다(이 경계가 codex 를 통째로
+    /// app-server 로 올려 버리면 여기가 빨개진다). ★둘이 함께 서야 「고른 값을 그대로 나른다」가 된다★:
+    /// 어느 하나만 있으면 이 경계가 그 한 값을 **고정**해도 초록이다.
+    #[tokio::test]
+    async fn create_profile_with_codex_terminal_is_not_upgraded_to_app_server() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::CreateProfile {
+                name: "codex-term".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                extra_args: vec![],
+                env: vec![],
+                auto_restore: false,
+                output_format: WireAgentOutputFormat::Terminal,
+                backend: Some(WireBackendKind::Codex),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        let profiles = core.manager.agent_snapshots();
+        assert_eq!(profiles.len(), 1);
+        match &profiles[0].command {
+            CoreSpawnCommand::Codex { output_format, .. } => {
                 assert_eq!(*output_format, CoreAgentOutputFormat::Terminal);
             }
             other => panic!("Codex 기대: {other:?}"),
+        }
+    }
+
+    /// `SpawnByCwd` 는 모드 칸이 없는 입구라 데몬이 값을 지어낸다 — 그 지어낸 값을 못 박는다.
+    /// ★codex 의 `Terminal` 은 「이 경로엔 대화형이 맞다」는 의견이 아니라 옛 동작의 **보존**이다★
+    /// ([`spawn_command_by_cwd`] 의 doc 이 정본). 그 값을 바꾸는 편집은 이 항목을 빨갛게 만들어,
+    /// 우연이 아니라 결정으로 바뀌게 한다.
+    #[test]
+    fn by_cwd_fills_a_preserved_mode_per_backend() {
+        assert!(
+            spawn_command_by_cwd(None).is_none(),
+            "빈 backend 칸은 여기서도 거절로 이어진다"
+        );
+        match spawn_command_by_cwd(Some(WireBackendKind::Codex)) {
+            Some(CoreSpawnCommand::Codex { output_format, .. }) => assert_eq!(
+                output_format,
+                CoreAgentOutputFormat::Terminal,
+                "by-cwd 입구의 codex 는 보존된 Terminal 이다"
+            ),
+            other => panic!("Codex 기대: {other:?}"),
+        }
+        match spawn_command_by_cwd(Some(WireBackendKind::Claude)) {
+            Some(CoreSpawnCommand::Claude { output_format, .. }) => assert_eq!(
+                output_format,
+                CoreAgentOutputFormat::StreamJson,
+                "by-cwd 입구의 claude 는 옛 상수 그대로다"
+            ),
+            other => panic!("Claude 기대: {other:?}"),
+        }
+    }
+
+    /// 돌아오는 방향 — 명부가 나갈 때 모드가 실린다. ★오늘 이 값을 읽는 프론트 코드는 없다★
+    /// (`profile.command` 를 보는 자리가 하나도 없다 — 2026-09-13 실측). 그래도 떨어뜨리지 않는 것은,
+    /// 여기서 지우면 「코덱스 JSON」으로 만든 노드와 대화형 TUI 노드를 **구별할 방법 자체가** wire 에서
+    /// 사라지기 때문이다.
+    #[test]
+    fn codex_spawn_command_carries_the_mode_back_to_wire() {
+        for (core_mode, wire_mode) in [
+            (
+                CoreAgentOutputFormat::StreamJson,
+                WireAgentOutputFormat::StreamJson,
+            ),
+            (
+                CoreAgentOutputFormat::Terminal,
+                WireAgentOutputFormat::Terminal,
+            ),
+        ] {
+            let wire = spawn_command_to_wire(&CoreSpawnCommand::Codex {
+                extra_args: vec!["--foo".into()],
+                output_format: core_mode,
+            });
+            match wire {
+                WireSpawnCommand::Codex {
+                    extra_args,
+                    output_format,
+                } => {
+                    assert_eq!(extra_args, vec!["--foo".to_string()]);
+                    assert_eq!(output_format, wire_mode);
+                }
+                other => panic!("Codex 기대: {other:?}"),
+            }
         }
     }
 

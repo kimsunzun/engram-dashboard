@@ -1142,14 +1142,14 @@ fn advertised_new_backends() -> Vec<String> {
         .collect()
 }
 
-/// ★생성 문은 셋이다 — 이 시험이 **전부**를 재지는 않는다★(2026-09-08 리뷰: 옛 이름 `both_…` 은 둘로
-/// 세고 있었다). 나뉜 자리를 여기 적어 둔다:
+/// ★이 시험이 생성 문 **전부**를 재지는 않는다★(2026-09-08 리뷰: 옛 이름 `both_…` 은 문을 둘로 세고
+/// 있었다). 나뉜 자리를 여기 적어 둔다:
 ///   ① `agent.new` — 실행 판정은 그 crate 안에서 잰다(`FakeHost` 가 거기 산다):
 ///      `engram-dashboard-agent` 의 `commands::tests::new_creates_exactly_what_the_llm_backend_policy_opens`.
 ///      **여기서는 그 문이 광고하는 어휘만** 표와 맞춰 본다(아래 ②) — 두 crate 를 잇는 자리가 여기라서.
 ///   ② `agent.spawnInto`(이 패키지) — 아래 ③에서 **실제로 불러** 결말을 본다.
-///   ③ 프론트 `agentlist.createCodex` — 언어가 달라 여기서 못 잰다:
-///      `src/commands/agentCommands.test.ts` 가 진다.
+///   ③ 프론트의 codex 생성 문들(`agentCommands` 의 `CODEX_HUMAN_ONLY` 를 쓰는 것들) — 언어가 달라
+///      여기서 못 잰다: `src/commands/agentCommands.test.ts` 가 진다.
 #[tokio::test]
 async fn every_creation_door_reads_one_backend_policy() {
     // ① wire 백엔드 전량이 정책 표에 **선언돼** 있다. 빠진 낱말은 fail-closed 로 닫히지만 그건 「아직 안

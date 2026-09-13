@@ -2,6 +2,6 @@
 import type { AgentOutputFormat } from "./AgentOutputFormat";
 
 /**
- * agent `profile::AgentCommand` 의 wire 미러. codex `output_format` 은 아직 이 wire 모양에서 제외된다.
+ * agent `profile::AgentCommand` 의 wire 미러.
  */
-export type AgentSpawnCommand = { "kind": "Claude", extra_args: Array<string>, output_format: AgentOutputFormat, } | { "kind": "Shell", program: string, args: Array<string>, } | { "kind": "Codex", extra_args: Array<string>, };
+export type AgentSpawnCommand = { "kind": "Claude", extra_args: Array<string>, output_format: AgentOutputFormat, } | { "kind": "Shell", program: string, args: Array<string>, } | { "kind": "Codex", extra_args: Array<string>, output_format: AgentOutputFormat, };

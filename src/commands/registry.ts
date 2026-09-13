@@ -63,8 +63,9 @@ export interface Command {
    *
    * ★쓰기 전에 확인할 것 — 이 칸은 §5 의 예외이고, 예외에는 사유가 필요하다★: 「LLM 이 못 지나는 UI 가
    * 뒤에 있다」는 사유가 **아니다**(그건 고칠 결함이지 닫을 근거가 아니다). 정당한 사유는 「사람이 그
-   * 자리에 있어야 한다는 **정책 결정**이 있고, 그 결정의 정본이 딴 데 있다」다. 오늘 유일한 사용처
-   * (`agentlist.createCodex`)의 정본 = `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY`.
+   * 자리에 있어야 한다는 **정책 결정**이 있고, 그 결정의 정본이 딴 데 있다」다. 오늘의 사용처는 codex 를
+   * 만드는 문들이고(`agentCommands` 의 `CODEX_HUMAN_ONLY` 를 쓰는 것들), 그 결정의 정본 =
+   * `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY`.
    *
    * ★이 칸은 `help` 와 다른 축이다★ — `help` 없음 = 데몬 명부에 **광고 안 함**이고, 그것은 실행을 막지
    * 않는다(버스 다리의 `settle` 은 이름만 있으면 `run` 을 부른다). 광고를 빼는 것으로 닫았다고 읽지 말 것.

@@ -40,8 +40,7 @@ pub enum AgentOutputFormat {
 ///
 /// ★이름 충돌★ — `protocol::AgentCommand` 는 뜻이 다르다(데몬에 보내는 wire 명령).
 /// 이 타입의 wire 미러는 `protocol::AgentSpawnCommand`, 프론트 미러는 `src/api/types.ts`
-/// 의 동명 타입이다. 단 codex `output_format` 은 아직 wire 미러에서 제외된다. crate 를 빼고
-/// "AgentCommand" 라 부르면 뜻이 안 정해진다.
+/// 의 동명 타입이다. crate 를 빼고 "AgentCommand" 라 부르면 뜻이 안 정해진다.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum AgentCommand {

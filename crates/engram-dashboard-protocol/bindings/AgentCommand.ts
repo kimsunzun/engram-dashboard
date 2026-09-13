@@ -8,8 +8,10 @@ export type AgentCommand = { "Spawn": { profile_id: string, request_id: RequestI
 /**
  * `#[serde(default)]` 라 이 필드 없는 옛 프론트/wire 는 Terminal 로 흡수(기존 동작 불변,
  * PROTOCOL_VERSION 유지 — sibling OutputCaps.structured 와 같은 additive·tolerant 접근).
- * ★이 wire 필드는 claude 의 축이다★ — codex 모드는 아직 wire 에 실리지 않아
- * 그 백엔드 갈래가 이 값을 읽지 않는다.
+ * ★두 백엔드가 다 읽는다★ — claude 는 PTY/headless NDJSON 을, codex 는 대화형 TUI/상주 JSON
+ * 서버(`codex app-server`)를 가른다. codex 가 이 값을 읽게 된 것이
+ * [`crate::PROTOCOL_VERSION`] v5 의 사유다 — 그 값을 버리던 데몬은 「코덱스 JSON」 라벨 뒤에서
+ * 대화형 TUI 를 띄우면서 역직렬화는 성공시키므로, 그 어긋남을 잡는 것이 버전 게이트뿐이다.
  */
 output_format: AgentOutputFormat, 
 /**

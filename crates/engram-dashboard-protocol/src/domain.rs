@@ -162,14 +162,13 @@ pub enum EnvelopeFormat {
     Colon,
 }
 
-/// agent `profile::AgentCommand` 의 wire 미러. codex `output_format` 은 아직 이 wire 모양에서 제외된다.
+/// agent `profile::AgentCommand` 의 wire 미러.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[serde(tag = "kind")]
 #[ts(export)]
 pub enum AgentSpawnCommand {
     /// extra_args 는 세션 인자를 제외한 사용자 추가 인자.
-    /// output_format 은 `#[serde(default)]` 라 옛 프로필은 Terminal. 이 wire 필드는
-    /// claude 전용이며 codex 모드는 아직 `AgentSpawnCommand` 로 나르지 않는다.
+    /// output_format 은 `#[serde(default)]` 라 이 칸이 없는 옛 패킷은 Terminal 로 흡수된다.
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
@@ -180,9 +179,14 @@ pub enum AgentSpawnCommand {
         args: Vec<String>,
     },
     /// extra_args 는 대화형 인자(`--cd`·`-s`·`-a`)를 제외한 사용자 추가 인자 — 그 조립은 코어의
-    /// codex backend 가 하고 이 wire 는 그 목록만 나른다.
+    /// codex backend 가 하고 이 wire 는 그 목록을 그대로 나른다.
+    /// output_format 은 형제 `Claude` 와 같은 계약(`#[serde(default)]` → 없으면 Terminal)이지만
+    /// **가르는 것이 다르다**: codex 에서는 이 값이 대화형 TUI 와 상주 JSON 서버(`codex app-server`)를
+    /// 가른다(코어 `backend::codex::is_app_server`).
     Codex {
         extra_args: Vec<String>,
+        #[serde(default)]
+        output_format: AgentOutputFormat,
     },
 }
 
@@ -388,4 +392,44 @@ pub struct SnapshotChunk {
     #[serde(with = "serde_bytes")]
     #[ts(type = "number[]")]
     pub data: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 이 칸이 없는 옛 패킷 — 데몬이 명부를 보낼 때 `output_format` 을 안 싣던 빌드가 이 모양이다.
+    /// ★`#[serde(default)]` 는 **옛 데몬 → 새 셸** 한 방향만 진다★: 이것이 빠지면 그 데몬의
+    /// `ProfileList` 가 **한 행이 아니라 응답 전체** 역직렬화 실패로 무너진다(그 실패 단위는
+    /// [`crate::PROTOCOL_VERSION`] 의 v4 항목이 정본). 반대 방향(새 데몬 → 옛 셸)을 떠받치는 것은 이
+    /// attribute 가 아니라 serde 의 **미지 필드 관용**이라 여기서 재지 않는다.
+    #[test]
+    fn codex_spawn_command_without_output_format_defaults_to_terminal() {
+        let legacy = r#"{ "kind": "Codex", "extra_args": ["--foo"] }"#;
+        let cmd: AgentSpawnCommand = serde_json::from_str(legacy).expect("옛 패킷 역직렬화");
+        assert_eq!(
+            cmd,
+            AgentSpawnCommand::Codex {
+                extra_args: vec!["--foo".to_string()],
+                output_format: AgentOutputFormat::Terminal,
+            }
+        );
+    }
+
+    /// 실린 값은 그대로 돌아온다 — 위 항목 혼자면 이 타입이 `Terminal` 을 **고정**해도 초록이다.
+    #[test]
+    fn codex_spawn_command_roundtrips_both_modes() {
+        for mode in [AgentOutputFormat::Terminal, AgentOutputFormat::StreamJson] {
+            let cmd = AgentSpawnCommand::Codex {
+                extra_args: vec![],
+                output_format: mode,
+            };
+            let json = serde_json::to_string(&cmd).expect("직렬화");
+            assert_eq!(
+                serde_json::from_str::<AgentSpawnCommand>(&json).expect("역직렬화"),
+                cmd,
+                "{json}"
+            );
+        }
+    }
 }

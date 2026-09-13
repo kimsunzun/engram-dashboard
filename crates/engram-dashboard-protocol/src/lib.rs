@@ -79,4 +79,22 @@ pub use messages::{
 /// version-mismatch 거부(`discovery` 의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
 /// 거부/재기동**한다. 그 강제를 재는 자리 = discovery 의
 /// `version_mismatch_live_daemon_errors_without_spawn`.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// v5: codex 출력 모드가 wire 를 건넌다 — [`AgentSpawnCommand::Codex`] 에 `output_format` 칸 신설 +
+/// 데몬 경계가 `CreateProfile.output_format` 을 codex 갈래에서 **버리지 않고** 나른다.
+/// ★모양만 보면 안 올려도 되는 변경이고, 그 판정이 틀린다★ — 새 칸은 양쪽 다 `#[serde(default)]` 라
+/// 어느 쪽 peer 도 역직렬화에서 죽지 않는다. 그래서 「기존 변형에 `#[serde(default)]` 칸을 더하면 버전
+/// 유지」 규칙에 걸려 보인다. ★그러나 v4 를 올린 기준은 모양이 아니라 **조용한 오작동**이었다★ — 바로 위
+/// v4 의 「구데몬 + 신셸」 항목이 그 기준이고, 이 변경은 그것을 낱말만 바꿔 그대로 재현한다:
+///   - **구데몬 + 신셸**: 모드 칸을 codex 갈래에서 버리던 데몬은 그 칸을 받고도 `Terminal` 을 띄운다 —
+///     사람이 「코덱스 JSON」을 골랐는데 그 라벨이 붙은 노드 뒤에서 대화형 TUI 가 돈다. 역직렬화는
+///     성공하므로 **아무것도 시끄럽지 않다**. v4 가 막은 실패와 같은 종류이고, 여기서 안 올리면 v4 를
+///     올린 근거가 이 자리에서만 예외가 된다.
+///   - **신데몬 + 구셸**: 구셸의 `AgentSpawnCommand` 는 모르는 필드를 관용하므로 명부는 살고, 모드만
+///     안 보인다. 이쪽은 조용하지만 **해롭지 않다**(화면이 덜 보일 뿐 다른 것이 돌지 않는다) — 즉 이
+///     bump 를 강제하는 것은 앞 항목 하나다.
+/// ★bump 가 만드는 차이★: discovery 의 `check_acceptable` 이 `daemon.json` 의 버전을 먼저 보고 짝이 안
+/// 맞는 **살아있는 데몬을 재사용하지 않는다** — 위 「구데몬 + 신셸」 조합이 악수를 지나기 전에 끊긴다.
+/// 그 강제를 재는 자리는 v4 항목과 같다(discovery 의 `version_mismatch_live_daemon_errors_without_spawn`).
+/// (사용자 결정 2026-09-13)
+pub const PROTOCOL_VERSION: u32 = 5;

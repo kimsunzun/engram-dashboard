@@ -135,22 +135,47 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  // ★사람이 codex 를 고르는 문★ — 프론트→wire 경로가 아직 codex 모드를 나르지 않아 출력 포맷 인자가 없다. 형제와 마찬가지로
-  //   등록만 하고 스폰하지 않는다 — 뜨는 것은 활성화(더블클릭)에서다.
+  // ★사람이 codex 대화형 TUI 를 고르는 문★ — 형제와 마찬가지로 등록만 하고 스폰하지 않는다 — 뜨는 것은
+  //   활성화(더블클릭)에서다.
   // ★`run` 이 아니라 `runAsHuman` 이다★ — 이 문은 `humanOnly` 라 LLM 진입점으로는 반려된다(아래 별도 항목).
-  it('createCodex(사람 경로) → createCodexProfile 호출(출력 포맷 인자 없음)', async () => {
+  it('createCodex(사람 경로) → createCodexProfile 를 outputFormat=Terminal 로 호출', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
 
     await runAsHuman('agentlist.createCodex', {})
 
     expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
-      'C:/work/engram', 'C:/work/engram', [], [], false,
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'Terminal',
     )
     expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
     expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
     expect(useAgentStore.getState().profiles).toEqual([createdProfile])
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+  })
+
+  // ★모드 축이 실제로 갈리는 것을 재는 자리★ — 두 codex 문이 같은 `createCodexProfile` 을 부르므로,
+  //   모드를 안 싣거나 둘 다 같은 값을 실으면 위 항목과 이 항목 중 하나가 빨개진다.
+  it('createCodexJson(사람 경로) → createCodexProfile 를 outputFormat=StreamJson 로 호출', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    await runAsHuman('agentlist.createCodexJson', {})
+
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'StreamJson',
+    )
+    expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
+    expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
+    expect(useAgentStore.getState().profiles).toEqual([createdProfile])
+    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+  })
+
+  // 형제 `createCodex` 와 같은 게이트를 진다 — 한쪽만 닫히는 것이 이 항목이 막는 회귀다.
+  it('createCodexJson: LLM 진입점(registry.run)은 사유를 실어 반려하고 아무것도 만들지 않는다', () => {
+    expect(() => run('agentlist.createCodexJson', {})).toThrow(/LLM·버스/)
+    expect(() => run('agentlist.createCodexJson', {})).toThrow(/Phase 2/)
+    expect(clientMock.createCodexProfile).not.toHaveBeenCalled()
+    expect(dialogMock.open).not.toHaveBeenCalled()
   })
 
   // ★세 번째 생성 문 — LLM 은 못 지나고 사람은 지난다★(2026-09-08 리뷰 FIX 2).
@@ -175,7 +200,7 @@ describe('agent_list 생성 계열 라우팅', () => {
 
     await vi.waitFor(() => expect(clientMock.createCodexProfile).toHaveBeenCalled())
     expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
-      'C:/work/engram', 'C:/work/engram', [], [], false,
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'Terminal',
     )
   })
 
@@ -215,15 +240,16 @@ describe('agent_list 생성 계열 라우팅', () => {
 // ── agent_list pane 메뉴 = 1단 서브메뉴 컨테이너(ADR-0078 / ADR-0065) ──────────────
 // side-effect import 로 registerSlotMenu 가 이미 컨테이너를 기여했다.
 describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
-  it('"에이전트 생성" 컨테이너 + 자식 3개(선언 순서 Json→Terminal→Codex)', () => {
+  it('"에이전트 생성" 컨테이너 + 자식 4개(선언 순서 Json→Terminal→Codex→CodexJson)', () => {
     const items = buildSlotMenu('agent_list')
     const container = items.find(i => i.title === '에이전트 생성')
     expect(container).toBeDefined()
-    expect(container?.children?.length).toBe(3)
+    expect(container?.children?.length).toBe(4)
     expect(container?.children?.map(c => c.id)).toEqual([
       'agentlist.createJson',
       'agentlist.createTerminal',
       'agentlist.createCodex',
+      'agentlist.createCodexJson',
     ])
   })
 })

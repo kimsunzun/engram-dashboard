@@ -31,10 +31,25 @@ async function createReservedProfile(outputFormat: AgentOutputFormat) {
   return createReserved(cwd => agentClient.createClaudeProfile(cwd, cwd, [], [], false, outputFormat))
 }
 
-// codex 모드는 아직 프론트→wire 선택 축에 없으므로 여기서는 Terminal 프로필만 만든다.
-async function createReservedCodexProfile() {
-  return createReserved(cwd => agentClient.createCodexProfile(cwd, cwd, [], [], false))
+async function createReservedCodexProfile(outputFormat: AgentOutputFormat) {
+  return createReserved(cwd => agentClient.createCodexProfile(cwd, cwd, [], [], false, outputFormat))
 }
+
+// ★codex 를 만드는 문 둘이 같은 사유로 닫힌다 — 그래서 사유 문자열을 나눠 갖는다★: 갈라 적으면 한쪽만
+//   고쳐져 「같은 게이트」가 조용히 둘로 나뉜다.
+//
+// ★이 항목들은 **사람 메뉴이면서 동시에 LLM 이 부를 수 있는 command** 다(2026-09-08 리뷰)★ —
+//   `registry.register` 로 오르는 것은 전부 `window.__engramCmd` 와 버스 다리가 부를 수 있고, 이
+//   갈래는 wire `CreateProfile` 까지 닿는데 그 핸들러는 정책을 **아무것도** 보지 않는다
+//   (`crates/engram-dashboard-daemon/src/connection_core.rs`). LLM 을 막고 있던 것은 위
+//   `createReserved` 의 네이티브 폴더 다이얼로그뿐이었고 — 그건 게이트가 아니라 사고다.
+//   그래서 **호출자 축**으로 닫는다: 사람 클릭은 `dispatch.fireAndForget`(→ `runAsHuman`)이라 그대로
+//   지나고, LLM 경로(`registry.run`)만 이 사유로 반려된다.
+// ★사유의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
+//   codex 행이고, 형제 문 둘(`agent.new` · `agent.spawnInto`)이 그 표를 본다. 그 표가 codex 를 여는
+//   날(Phase 2, 신뢰 확인 모달 처리가 정해질 때) 이 상수도 함께 지운다.
+const CODEX_HUMAN_ONLY =
+  'codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(실측 2026-09-07). 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성」 서브메뉴에 있는 코덱스 항목들). 여는 시점 = Phase 2 — 사유의 정본은 engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 이고 claude 를 만드는 LLM 경로는 `agent.new` 다.'
 
 // ★ADR-0078★: AgentOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
 //   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이
@@ -136,23 +151,23 @@ register({
   id: 'agentlist.createCodex',
   title: t('agent.createCodex'),
   category: 'agent',
-  // ★사람이 codex 를 고르는 유일한 문★ — 형제 둘과 같은 자리에 서고, 여기서 만들어진 예약 노드를
-  //   활성화하면 codex 가 그 폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에
-  //   그대로 뜨고 사람이 지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다).
-  //
-  // ★그런데 이 항목은 **사람 메뉴이면서 동시에 LLM 이 부를 수 있는 command** 였다(2026-09-08 리뷰)★ —
-  //   `registry.register` 로 오르는 것은 전부 `window.__engramCmd` 와 버스 다리가 부를 수 있고, 이
-  //   갈래는 wire `CreateProfile` 까지 닿는데 그 핸들러는 정책을 **아무것도** 보지 않는다
-  //   (`crates/engram-dashboard-daemon/src/connection_core.rs`). LLM 을 막고 있던 것은 아래
-  //   `createReserved` 의 네이티브 폴더 다이얼로그뿐이었고 — 그건 게이트가 아니라 사고다.
-  //   그래서 **호출자 축**으로 닫는다: 사람 클릭은 `dispatch.fireAndForget`(→ `runAsHuman`)이라 그대로
-  //   지나고, LLM 경로(`registry.run`)만 아래 사유로 반려된다.
-  // ★사유의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
-  //   codex 행이고, 형제 문 둘(`agent.new` · `agent.spawnInto`)이 그 표를 본다. 그 표가 codex 를 여는
-  //   날(Phase 2, 신뢰 확인 모달 처리가 정해질 때) 이 줄도 함께 지운다.
-  humanOnly:
-    'codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(실측 2026-09-07). 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성 ▶ 코덱스 터미널」). 여는 시점 = Phase 2 — 사유의 정본은 engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 이고 claude 를 만드는 LLM 경로는 `agent.new` 다.',
-  run: async () => createReservedCodexProfile(),
+  // ★사람이 codex 대화형 TUI 를 고르는 문★ — 여기서 만들어진 예약 노드를 활성화하면 codex 가 그
+  //   폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에 그대로 뜨고 사람이
+  //   지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다).
+  humanOnly: CODEX_HUMAN_ONLY,
+  run: async () => createReservedCodexProfile('Terminal'),
+})
+
+register({
+  id: 'agentlist.createCodexJson',
+  title: t('agent.createCodexJson'),
+  category: 'agent',
+  // ★사람이 codex 상주 JSON 서버(`codex app-server`)를 고르는 문★ — 형제 `createCodex` 와 같은
+  //   백엔드이고 가르는 것은 출력 모드 하나다. 그 모드가 통로·입력 인코딩·출력 decoder 를 함께
+  //   가르는 자리는 `engram-dashboard-agent` 의 `backend::codex::is_app_server` 다.
+  // ★ADR-0078 과 같은 계약★: 모드는 생성 시점에 고정되고 이후 불변이다(활성화-시점 override 없음).
+  humanOnly: CODEX_HUMAN_ONLY,
+  run: async () => createReservedCodexProfile('StreamJson'),
 })
 
 register({
@@ -175,6 +190,7 @@ registerSlotMenu('agent_list', [
       { commandId: 'agentlist.createJson', group: 'content', order: 10 },
       { commandId: 'agentlist.createTerminal', group: 'content', order: 20 },
       { commandId: 'agentlist.createCodex', group: 'content', order: 30 },
+      { commandId: 'agentlist.createCodexJson', group: 'content', order: 40 },
     ],
   },
 ])

@@ -211,8 +211,8 @@ export interface AgentClient {
   ): Promise<AgentProfile>
   /**
    * codex 프로필 생성 — 형제 `createClaudeProfile` 과 같은 자리에 등록만 하고 스폰하지 않는다.
-   * ★출력 포맷 인자가 없는 것은 wire 계약이다★: codex 모드는 아직 프론트에서 wire 로
-   * 나르지 않으며 데몬 경계가 Terminal 로 채운다.
+   * outputFormat 은 codex 를 어느 모양으로 띄우나를 가른다: 'Terminal'=대화형 TUI,
+   * 'StreamJson'=상주 JSON 서버(codex app-server). 기본 'Terminal'(기존 호출자 동작 불변).
    */
   createCodexProfile(
     name: string,
@@ -220,6 +220,7 @@ export interface AgentClient {
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
+    outputFormat?: AgentOutputFormat,
   ): Promise<AgentProfile>
   deleteProfile(agentId: string): Promise<void>
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>
