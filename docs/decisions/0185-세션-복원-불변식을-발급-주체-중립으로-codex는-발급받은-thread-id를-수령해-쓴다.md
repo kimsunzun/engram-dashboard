@@ -38,4 +38,4 @@ Phase 2가 codex를 상주 JSON 서버(`codex app-server`)로 띄우면 세션 �
 - **코드 앵커가 아직 0이다** — `rg "ADR-0185" crates/ src/ src-tauri/` → 0줄. CLAUDE.md가 이름한 두 발견 표면 중 하나가 비어 있다는 뜻이고, 채우는 것은 위 주석 수정과 같은 라운드(Phase 2)다.
 - **개정 전 프레이밍이 남아 있는 문서 둘 — 둘의 처분이 다르다.**
   - `docs/process/S21-codex-backend/trd.md`(§0 resume 유보 사유 · M2 「claude 계약이 codex엔 성립하지 않는다」 · §413) — **Phase 0·1 시점 기록이라 고치지 않는다.** Phase 2 TRD가 이 ADR을 입력으로 받아 그 프레이밍을 대체한다.
-  - ★`docs/reference/structure/agent-backend.md:140,146`★ — 이쪽은 **시점 기록이 아니라 이 축의 주제별 상세 정본**이고(ADR-0179) 조감도가 독자를 여기로 내려보낸다. 그런데 `capabilities().session.resume`을 「무손실 복원 가능 여부」로 발급 주체에 묶어 설명한다. **다음 라운드에서 이 ADR 포인터를 달아야 한다** — 안 달면 더 새 문서가 개정 전 불변식으로 이 축을 설명한다.
+  - ★`docs/reference/structure/agent-backend.md:140,146`★ — 이쪽은 **시점 기록이 아니라 이 축의 주제별 상세 정본**이고(ADR-0197) 조감도가 독자를 여기로 내려보낸다. 그런데 `capabilities().session.resume`을 「무손실 복원 가능 여부」로 발급 주체에 묶어 설명한다. **다음 라운드에서 이 ADR 포인터를 달아야 한다** — 안 달면 더 새 문서가 개정 전 불변식으로 이 축을 설명한다.

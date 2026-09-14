@@ -1,7 +1,9 @@
-# ADR-0179: 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나
+# ADR-0197: 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나
 
 - 상태: 확정 (2026-09-08, 근거: 사용자 결정 — 재사용 부품이 필요하다)
 - 관련: ADR-0034(문서 아키텍처 — 이 결정은 그 frame 아래 새 문서 종류를 하나 더한다) · `docs/README.md` 「고아 금지」 · `docs/reference/structure/` · 첫 입주자 = `docs/reference/structure/agent-backend.md`
+
+> 채번 이력: 원래 `ADR-0179` 로 채번됐으나 병렬 브랜치가 같은 번호를 먼저(2026-09-04) 쓴 것이 머지 시점에 드러나 `0197` 로 옮겼다. 2026-09-14 이전 기록(핸드오프 history 등)에서 이 결정을 가리키는 `ADR-0179` 는 이 문서를 뜻한다.
 
 ## 맥락
 
