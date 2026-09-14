@@ -75,7 +75,13 @@ const NO_CONVERSATION_MARKER: &str = "no conversation found";
 pub struct ClaudeBackend;
 
 impl AgentBackend for ClaudeBackend {
-    fn needs_session(&self) -> bool {
+    /// 호출자가 `--session-id <uuid>` 로 정한다(실측) — 두 모양 다 같다.
+    fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
+        true
+    }
+
+    /// 저장된 sid 를 `--resume <uuid>` 로 이어받는다 — 두 모양 다 같다.
+    fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
         true
     }
 
@@ -2333,11 +2339,6 @@ mod tests {
         );
         assert_eq!(s.program, "cmd.exe");
         assert_eq!(s.args, vec!["/c".to_string(), "echo hi".to_string()]);
-    }
-
-    #[test]
-    fn needs_session_is_true() {
-        assert!(ClaudeBackend.needs_session());
     }
 
     #[test]

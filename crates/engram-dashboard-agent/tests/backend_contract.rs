@@ -99,10 +99,17 @@ use engram_dashboard_agent::types::{
 
 // ── 질문표 ───────────────────────────────────────────────────────────────────
 
-/// 실행 없이 대조하는 열 — 백엔드가 **스스로 신고하는** 값 전부. 새 백엔드 행은 이 열 열 칸을 다
-/// 적어야 컴파일된다(그것이 "표가 채워져 있는가" 의 실물).
+/// 실행 없이 대조하는 열 — 백엔드가 **스스로 신고하는** 값 전부. 새 백엔드 행은 이 칸들을 다 적어야
+/// 컴파일된다(그것이 "표가 채워져 있는가" 의 실물).
+///
+/// ★단 한 행을 채우는 데 필요한 칸이 이 구조체로 끝나지 않는다★ — [`BackendRow::can_resume_stored_session`]
+///   도 기본값이 없어 함께 적어야 컴파일된다. 통로별로 갈릴 축이라 그쪽에 사는 것이고, 「이 구조체를
+///   채웠으니 행이 다 찼다」로 읽으면 그 칸을 놓친다.
 struct Declared {
-    needs_session: bool,
+    /// ★모드 무관이라 한 칸으로 둔다★ — 오늘 모든 백엔드가 두 통로에서 같은 값을 신고하고, 아래
+    /// [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 그 불변을 실제로 잰다. 갈리는
+    /// 날엔 이 칸도 [`BackendRow::can_resume_stored_session`] 처럼 통로별로 쪼개야 한다.
+    assigns_session_id: bool,
     supports_control_channel: bool,
     accepts_mcp_config: bool,
     reads_messages: bool,
@@ -239,6 +246,14 @@ struct BackendRow {
     ///   않는가**를 묻는다 — 갈려야 하는 축(통로 모양·인코딩·번역기)은 그 아래 질문이 따로 잰다.
     alt_sample: Option<AgentCommand>,
     declared: Declared,
+    /// **통로별로** 적는 선언 축 = 「저장된 backend sid 로 이어받을 수 있나」. `.0` =
+    /// [`BackendRow::sample`] 의 답, `.1` = [`BackendRow::alt_sample`] 의 답(`None` = 둘째 통로 없음).
+    ///
+    /// ★오늘은 어느 행도 두 통로의 답이 갈리지 않는다 — 그런데도 통로별로 두는 이유★: 이 축은 **갈릴 것이
+    ///   예정된** 칸이다(codex 의 이어받기 배선이 들어오면 그 행의 둘째 칸 하나만 바뀐다). [`Declared`] 에
+    ///   두면 그때 [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 거짓이 되어 표를 다시
+    ///   짜야 하고, 한 칸으로 접으면 둘째 통로의 답이 이 표에서 **아예 안 보인다**.
+    can_resume_stored_session: (bool, Option<bool>),
     probe: Option<LiveProbe>,
 }
 
@@ -263,7 +278,7 @@ fn backend_table() -> Vec<BackendRow> {
                 output_format: AgentOutputFormat::StreamJson,
             }),
             declared: Declared {
-                needs_session: true,
+                assigns_session_id: true,
                 supports_control_channel: true,
                 accepts_mcp_config: true,
                 reads_messages: true,
@@ -274,6 +289,8 @@ fn backend_table() -> Vec<BackendRow> {
                 model_temperature: false,
                 model_max_tokens: false,
             },
+            // 두 통로 다 `--resume <sid>` 로 이어받는다(실측).
+            can_resume_stored_session: (true, Some(true)),
             // 실 claude 를 띄우지 않는다: 이 열은 이미 실측으로 채워져 있고, 실 claude 의존 테스트가
             // CI 에서 **fn 이름으로 `--skip`** 되는 미결이 바로 그 형태다(TRD §3-2). 시험대는 그 목록을
             // 늘리지 않는다.
@@ -294,7 +311,7 @@ fn backend_table() -> Vec<BackendRow> {
                 // ★실측이 도장 찍은 값이다★ — 호출자가 세션 id 를 정할 수 없고(`session_id_flag: None`
                 //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
                 //   정본은 `backend/codex/`.
-                needs_session: false,
+                assigns_session_id: false,
                 supports_control_channel: false,
                 accepts_mcp_config: false,
                 reads_messages: false,
@@ -305,6 +322,11 @@ fn backend_table() -> Vec<BackendRow> {
                 model_temperature: false,
                 model_max_tokens: false,
             },
+            // ★app-server 모드에는 이어받을 식별자가 있는데도 false 다★ — 이 칸은 그 프로그램이 **할 수
+            //   있는 것**이 아니라 **이 스폰이 실제로 하는 것**을 신고한다(바로 위 `model_select` 와 같은
+            //   규율). 이어받기 배선이 들어오는 커밋이 둘째 칸을 `Some(true)` 로 바꾼다 — 사유의 정본은
+            //   `backend/codex/` 의 그 메서드 주석.
+            can_resume_stored_session: (false, Some(false)),
             probe: Some(LiveProbe {
                 program: "codex",
                 // 운영은 `-s workspace-write -a on-request` 로 띄운다(그 argv 를 그대로 받아 온다).
@@ -382,7 +404,11 @@ fn declaration_table_is_filled_for_every_backend() {
 fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentCommand, d: &Declared) {
     {
         let row_sample = sample;
-        assert_eq!(b.needs_session(), d.needs_session, "{name}: needs_session");
+        assert_eq!(
+            b.assigns_session_id(row_sample),
+            d.assigns_session_id,
+            "{name}: assigns_session_id"
+        );
         assert_eq!(
             b.supports_control_channel(),
             d.supports_control_channel,
@@ -427,15 +453,49 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
 /// ★둘째 통로가 선언을 조용히 갈아치우지 않는가★ — 같은 프로그램을 다른 모양으로 띄우는 것이라 우편
 /// 자격·제어 채널·세션 능력은 통로가 바뀌어도 같아야 한다.
 ///
-/// ★오늘 이 항목이 실제로 재는 것은 `capabilities(sample)` 한 칸뿐이다★ — 나머지 네 getter 는 인자를
-/// 안 받아 표본과 무관하므로, 그 칸들은 위 [`declaration_table_is_filled_for_every_backend`] 가 이미
-/// 잰 것을 되풀이할 뿐이고 여기서 따로 깨질 수 없다. 그 getter 중 하나가 명령을 받게 되는 날 이 항목이
-/// 그 축을 집어 든다.
+/// ★이 항목이 실제로 재는 것은 **명령을 받는** getter 뿐이다★ — 인자를 안 받는 getter 는 표본과
+/// 무관하므로 위 [`declaration_table_is_filled_for_every_backend`] 가 잰 것을 되풀이할 뿐이고 여기서
+/// 따로 깨질 수 없다. 오늘 실제로 갈릴 수 있는 칸 = `capabilities(sample)` 와
+/// `assigns_session_id(sample)` 둘.
+///
+/// ★통로마다 갈리는 축은 여기 없다★ — 이 항목의 주장이 「두 통로의 답이 같다」이므로, 갈리는 축을
+///   [`Declared`] 에 넣으면 이 단언이 거짓이 된다. 그쪽은
+///   [`resume_eligibility_is_declared_per_channel`] 이 통로별로 잰다.
 #[test]
 fn declarations_are_the_same_across_a_backend_s_two_channels() {
     for row in &backend_table() {
         let Some(alt) = &row.alt_sample else { continue };
         assert_declared(row.name, row.backend, alt, &row.declared);
+    }
+}
+
+/// 통로마다 갈리는 축을 **통로별로** 대조한다. ★이 항목이 없으면 둘째 통로의 답은 표에 적혀 있어도 아무
+/// 데서도 안 불린다★ — 위 두 항목은 [`Declared`] 만 보고, 그 열은 두 통로가 같다는 전제로 서 있다.
+///
+/// ★짝이 안 맞는 것도 여기서 잡는다★: 둘째 통로를 적어 놓고 그 답을 비우면(또는 그 반대) 그 행은 조용히
+///   절반만 재진다.
+#[test]
+fn resume_eligibility_is_declared_per_channel() {
+    for row in &backend_table() {
+        assert_eq!(
+            row.backend.can_resume_stored_session(&row.sample),
+            row.can_resume_stored_session.0,
+            "{}: 첫째 통로의 이어받기 축 불일치",
+            row.name
+        );
+        match (&row.alt_sample, row.can_resume_stored_session.1) {
+            (Some(alt), Some(expected)) => assert_eq!(
+                row.backend.can_resume_stored_session(alt),
+                expected,
+                "{}: 둘째 통로의 이어받기 축 불일치 — 이 칸이 그 모드가 이 표에 보이는 유일한 자리다",
+                row.name
+            ),
+            (None, None) => {}
+            _ => panic!(
+                "{}: 둘째 통로와 그 답 중 한쪽만 적혔다 — 통로가 있는데 답이 비면 그 모드는 안 재진다",
+                row.name
+            ),
+        }
     }
 }
 

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
-use crate::profile::{AgentCommand, SpawnMode};
+use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, OutputDecoder};
@@ -54,8 +54,30 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
 
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {
-    /// true면 manager가 sid를 발급·watcher를 부착한다.
-    fn needs_session(&self) -> bool;
+    /// **우리가** 세션 id 를 뽑아 spawn 때 이 프로그램에 건네주나.
+    ///
+    /// true 면 manager 가 uuid 를 발급해 **프로필에 영속**하고(`ProfileRegistry` 의 발급 메서드는 둘 다
+    /// 디스크에 쓴다) 그 값을 [`AgentBackend::build_spec`] 의 `session_id` 로 넘긴다. sid drift 관측기도
+    /// 그 값을 기준값으로 삼으므로 이 축에 매달린다.
+    ///
+    /// ★false 를 「세션이 없다」로 읽지 말 것★: 그 프로그램이 자기 id 를 **스스로 발급**하는 쪽일 수
+    ///   있다. 그때 우리 uuid 를 심으면 그 프로그램이 한 번도 쓰지 않을 값이 프로필에 남고, 이어받기
+    ///   판정이 그 가짜 값을 보고 선다. 이어받기 가부는 별개 축
+    ///   ([`AgentBackend::can_resume_stored_session`])이 답한다.
+    // ADR-0185
+    fn assigns_session_id(&self, command: &AgentCommand) -> bool;
+
+    /// 프로필에 **저장된 backend sid 로 이 명령을 이어받을 수 있나**.
+    ///
+    /// 부팅 복원과 활성화 입구가 「Resume 으로 띄울까 Fresh 로 띄울까」를 이 값과 sid 존재 여부로 함께
+    /// 판정한다. 그 sid 를 **누가 발급했는지는 묻지 않는다**(ADR-0185) — 저장된 값이 이어받기에 쓰이나만
+    /// 묻는다.
+    ///
+    /// ★`command` 를 받는 이유★: 같은 프로그램이라도 **어떤 모양으로 띄우느냐에 따라 갈린다** — 한
+    ///   모양에는 이어받을 식별자가 있고 다른 모양에는 없을 수 있다. 인자 없는 술어로 두면 그 프로그램의
+    ///   두 모양 중 한쪽 값이 다른 쪽에 그대로 적용된다.
+    // ADR-0185
+    fn can_resume_stored_session(&self, command: &AgentCommand) -> bool;
 
     /// 이 백엔드가 데몬 제어 채널(MCP 입구)을 **소비**하는가(ADR-0086 F3).
     /// true 면 manager 가 spawn 전에 provision 을 부르고(토큰+mcp-config 발급), 그 endpoint 를
@@ -360,8 +382,22 @@ fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
 
 // ── 자유 함수 dispatch ─────────────────────────────────────────────────────────
 
-pub fn needs_session(c: &AgentCommand) -> bool {
-    backend_for(c).needs_session()
+pub fn assigns_session_id(c: &AgentCommand) -> bool {
+    backend_for(c).assigns_session_id(c)
+}
+
+pub fn can_resume_stored_session(c: &AgentCommand) -> bool {
+    backend_for(c).can_resume_stored_session(c)
+}
+
+/// 이 프로필을 **저장된 sid 로 이어받을 수 있나** = 이어받기 축 ∧ 저장된 sid 존재.
+///
+/// ★활성화 입구들이 이 규칙을 각자 적지 않게 하는 자리다★: 부팅 복원·명령 버스·WS 가 전부 여기를 부른다.
+/// 규칙을 베끼면 다음 입구가 두 항 중 하나만 옮겨 적고, 그 입구만 조용히 다르게 판정한다.
+/// ★명시 resume 요청은 이 함수가 모른다★ — 그것을 얹을지는 부르는 입구가 정한다.
+// ADR-0185
+pub fn can_resume_profile(p: &AgentProfile) -> bool {
+    can_resume_stored_session(&p.command) && p.backend_session_id.is_some()
 }
 
 pub fn supports_control_channel(c: &AgentCommand) -> bool {
@@ -794,9 +830,9 @@ mod tests {
         }
     }
 
-    /// 아래 세 트립와이어가 전부 도는 표본 목록.
+    /// 아래 트립와이어들이 전부 도는 표본 목록.
     ///
-    /// ★이 목록에서 한 줄을 지우면 그 **모드가 세 트립와이어에서 통째로 빠진 채 전부 초록이 된다**★
+    /// ★이 목록에서 한 줄을 지우면 그 **모드가 그 트립와이어들에서 통째로 빠진 채 전부 초록이 된다**★
     ///   (실측 — codex app-server 줄을 지우고 돌려 확인했다). variant 슬롯 커버리지는 모드를 안 세므로
     ///   그 침묵을 못 잡는다. 그래서 목록 자체를 재는 관문을 따로 뒀다:
     ///   [`the_sample_list_covers_every_mode_of_every_backend`].
@@ -827,8 +863,8 @@ mod tests {
         all
     }
 
-    /// 표본 목록을 지키는 관문. ★아래 셋이 재는 것은 전부 이 목록이 닿은 것뿐이라, 목록에 구멍이 나면
-    /// 그 구멍은 **아무 데서도 안 보인다**★ — 세 항목이 다 같이 초록인 채로 그 모드를 한 번도 안 묻는다.
+    /// 표본 목록을 지키는 관문. ★그 트립와이어들이 재는 것은 전부 이 목록이 닿은 것뿐이라, 목록에 구멍이
+    /// 나면 그 구멍은 **아무 데서도 안 보인다**★ — 전부 초록인 채로 그 모드를 한 번도 안 묻는다.
     ///
     /// ★슬롯이 variant 가 아니라 **(variant × 출력 모드)** 인 것이 요점이다★: variant 슬롯은 모드를 안
     /// 세므로 둘째 모드가 빠져도 채워진 것으로 보인다. 새 variant 든 새 [`AgentOutputFormat`] 값이든
@@ -865,7 +901,7 @@ mod tests {
         }
         assert!(
             covered.iter().all(|c| *c),
-            "표본 목록이 안 닿은 모드가 있다 — 그 모드는 아래 세 트립와이어 어디에도 안 걸린 채 전부 초록이 된다: {covered:?}"
+            "표본 목록이 안 닿은 모드가 있다 — 그 모드는 아래 트립와이어 어디에도 안 걸린 채 전부 초록이 된다: {covered:?}"
         );
     }
 
@@ -883,6 +919,113 @@ mod tests {
         assert!(
             covered.iter().all(|c| *c),
             "샘플이 안 닿은 variant 가 있다(그 variant 는 reads_messages 가 한 번도 안 불려 fail-open 이 그대로 통과한다): {covered:?}"
+        );
+    }
+
+    // ── 세션 두 축 트립와이어: 발급 축과 이어받기 축을 모드마다 의식적으로 선언한다 ────────────────────
+    //
+    // ★와일드카드를 추가하지 말 것★ — 두 축 다 trait 에 기본값이 없어 **새 backend** 는 값을 적을 수밖에
+    // 없지만, **새 출력 모드**는 컴파일러가 못 본다(한 impl 이 그 백엔드의 모든 모드를 받는다). 그 자리를
+    // 세우는 것이 아래 모드별 match 다.
+    //
+    // 두 축이 서로 다른 것을 묻는다 — 한 칸으로 접지 말 것:
+    //   ① assigns_session_id — **우리가** id 를 뽑아 spawn 때 건네주나. true 면 manager 가
+    //      발급해 프로필에 영속한다. 자기 id 를 스스로 발급하는 프로그램에 켜면 그 프로그램이 한 번도
+    //      쓰지 않을 uuid 가 심기고, 그 뒤 이어받기 판정이 그 가짜 값을 보고 선다.
+    //   ② can_resume_stored_session — 저장된 그 id 로 이어받을 수 있나. **발급 주체는 안 묻는다**.
+    // ★오늘은 모든 행이 두 칸의 값이 같다 — 그래도 한 칸으로 접지 말 것★: 접는 순간 한쪽을 고치면 다른
+    // 쪽이 딸려 가고, 그 둘이 서로 다른 소비자(발급 = spawn 시점 · 이어받기 = 활성화 입구 셋)를 굴린다.
+    // 값이 갈리는 첫 행은 codex app-server 가 될 것이다 — 그 행의 ②만 `true` 로 바뀐다(조건은 그 impl 주석).
+    // ADR-0185
+    fn expected_session_axes(c: &AgentCommand) -> (bool, bool) {
+        // (assigns_session_id, can_resume_stored_session)
+        match c {
+            AgentCommand::Claude {
+                output_format: AgentOutputFormat::Terminal,
+                ..
+            } => (true, true),
+            AgentCommand::Claude {
+                output_format: AgentOutputFormat::StreamJson,
+                ..
+            } => (true, true),
+            AgentCommand::Shell { .. } => (false, false),
+            AgentCommand::Codex {
+                output_format: AgentOutputFormat::Terminal,
+                ..
+            } => (false, false),
+            // ★이 칸의 이어받기 값은 그 백엔드가 **할 수 있는 것**이 아니라 **오늘 실제로 하는 것**이다★:
+            //   식별자는 있지만 이어받기 배선이 없어 false 다. 켜는 조건의 정본은 `backend/codex/` 의 그
+            //   메서드 주석이고, 그 배선이 들어오는 커밋이 이 칸도 함께 바꾼다.
+            AgentCommand::Codex {
+                output_format: AgentOutputFormat::StreamJson,
+                ..
+            } => (false, false),
+        }
+    }
+
+    /// 표본 목록의 구멍은 [`the_sample_list_covers_every_mode_of_every_backend`] 가 잰다 — 여기서 슬롯
+    /// 커버리지를 다시 세지 않는다(같은 목록·같은 슬롯이라 같은 답만 두 번 나온다).
+    #[test]
+    fn session_axes_are_consciously_declared_for_every_mode() {
+        for c in &mail_eligibility_samples() {
+            let (expected_assign, expected_resume) = expected_session_axes(c);
+            assert_eq!(
+                assigns_session_id(c),
+                expected_assign,
+                "{c:?}: 발급 축 불일치 — 위 expected_session_axes 의 ①을 따라 의식적으로 선언할 것"
+            );
+            assert_eq!(
+                can_resume_stored_session(c),
+                expected_resume,
+                "{c:?}: 이어받기 축 불일치 — 위 expected_session_axes 의 ②를 따라 의식적으로 선언할 것"
+            );
+        }
+    }
+
+    /// 활성화 입구 셋이 함께 부르는 판정의 회귀망 — ★저장된 sid 가 있다는 것만으로 이어받을 수 있는 게
+    /// 아니다★. 두 항을 다 재므로, 어느 입구가 이 함수 대신 `sid.is_some()` 만 보도록 되돌아가면 그 입구의
+    /// 테스트가 이것과 함께 깨진다.
+    #[test]
+    fn a_stored_sid_alone_does_not_make_a_profile_resumable() {
+        let sid = Some(Uuid::new_v4());
+        let profile = |c: AgentCommand, s: Option<Uuid>| {
+            let mut p =
+                AgentProfile::new("t".into(), c, std::path::PathBuf::from("."), vec![], false);
+            p.backend_session_id = s;
+            p
+        };
+
+        let not_resumable = profile(
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::StreamJson,
+            },
+            sid,
+        );
+        assert!(
+            !can_resume_profile(&not_resumable),
+            "이어받기 축이 false 인 명령은 sid 가 있어도 이어받지 않는다 — 켜면 새 대화가 「이어받음」으로 보고된다"
+        );
+
+        let resumable = profile(
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+            sid,
+        );
+        assert!(can_resume_profile(&resumable));
+
+        let no_sid = profile(
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+            None,
+        );
+        assert!(
+            !can_resume_profile(&no_sid),
+            "축이 true 여도 이어받을 값이 없으면 Fresh 다"
         );
     }
 
@@ -978,7 +1121,7 @@ mod tests {
     // ★`structured` 로 가르지 않는 이유★: 그 칸은 통로가 아니라 backend 가 주입하는 값이라
     //   (ADR-0030/0044) 평문 파이프도 false 를 신고한다 — 두 구현체를 실제로 가르는 것은 양쪽이
     //   하드코딩하는 `terminal_bytes` 와 `resize` 다.
-    // ★슬롯 커버리지 단언을 두지 않았다★: 같은 샘플 목록을 도는 위 두 트립와이어가 이미 잰다.
+    // ★슬롯 커버리지 단언을 두지 않았다★: 같은 샘플 목록을 도는 위 트립와이어들이 이미 잰다.
     // ★spec 은 그 백엔드의 실 CLI 가 아니다★: `open_spawn` 은 무엇을 띄울지를 spec 에서, 어떤 통로로
     //   띄울지를 command 에서 따로 받으므로, 즉시 끝나는 프로브를 띄워 통로 선택만 본다(ADR-0012).
     // ADR-0191

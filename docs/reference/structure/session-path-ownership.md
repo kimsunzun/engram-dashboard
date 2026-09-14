@@ -512,7 +512,9 @@ still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod
 2. `SpawnReservation::reserve` (:892-900) — second guard, RAII (:384-409).
 3. `register_for_spawn(profile)?` (:902) — name allocation + roster capacity.
 4. `dunce::canonicalize(&profile.cwd)` best-effort (:905).
-5. Session-id minting (:915-923): `needs = backend::needs_session(&profile.command)`; if `needs`,
+5. Session-id minting (:915-923): `assigns_sid = backend::assigns_session_id(&profile.command)`
+   — the **minting** axis only; whether a stored sid can be *resumed* is a separate predicate
+   (`can_resume_stored_session`, consulted by `restore_one` and the activation entries). If `assigns_sid`,
    `Resume => profiles.ensure_session_id(id)` (:918), `Fresh => profiles.new_session_id(id)` (:919);
    else `None`. Doc (:907-914) states this is the single authority: "spawn_agent 이 이 판정의 단일
    권위점이라 어떤 호출자(Spawn/SpawnProfile/restore/fallback)든 mode 만 맞게 넘기면 sid 충돌이 원천
@@ -637,27 +639,34 @@ api.rs:70) and nothing reads it.
 
 ## A10. The two activation entrances
 
-Both derive the mode from **`profile.backend_session_id.is_some()`** and nothing else.
+Both derive the mode from **`backend::can_resume_profile(&profile)`** — the resume axis of the
+backend AND a stored sid, one shared helper (backend/mod.rs). A stored sid alone is no longer
+enough. The socket entrance keeps one bypass on top of it (the wire `resume` flag, below).
 
 1. **Command bus / LLM entrance** — `crates/engram-dashboard-agent/src/commands.rs`.
    `agent.spawn` splits on its arguments (`target` xor `cwd`, commands.rs:485-501).
    - `wake_existing` (commands.rs:510-529): `resolve(host, token)` → `host.agent_snapshot(id)` →
      ```rust
-     let mode = if profile.backend_session_id.is_some() { SpawnMode::Resume } else { SpawnMode::Fresh };  // :522-526
-     let started = host.activate_profile(&profile, mode);                                                 // :526
+     let mode = if crate::backend::can_resume_profile(&profile) { SpawnMode::Resume } else { SpawnMode::Fresh };
+     let started = host.activate_profile(&profile, mode);
      ```
-     Doc (:520-521): "모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076) … 여기서 다른 규칙을 쓰면
-     같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다."
+     The doc above it states the rule is shared with the WS path (ADR-0076) and now points at the
+     shared helper — "여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을
+     잃는다". Regression net: `commands::tests::waking_does_not_resume_a_profile_whose_backend_cannot_resume`.
    - `create_and_start` (commands.rs:533-...): always `SpawnMode::Fresh` (:547), with the command
      built from `backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT)` (:544) — the verb
      has no backend or format field ("이 동사에는 형식·백엔드 칸이 없다", :537).
 2. **Socket entrance** — `crates/engram-dashboard-daemon/src/connection_core.rs`.
    - `AgentCommand::SpawnProfile { profile_id, resume, request_id }` (:1109-1113):
      ```rust
-     let mode = if resume || profile.backend_session_id.is_some() { SpawnMode::Resume } else { SpawnMode::Fresh };  // :1126-1130
-     let started = manager.activate_profile(&profile, mode);                                                        // :1131
+     let mode = if resume || backend::can_resume_profile(&profile) { SpawnMode::Resume } else { SpawnMode::Fresh };
+     let started = manager.activate_profile(&profile, mode);
      ```
-     So the wire `resume` flag is an **OR**, not the deciding input. Doc (:1114-1123): "저장된 세션이
+     So the wire `resume` flag is an **OR**, not the deciding input — and it is the one input that
+     **bypasses the backend's resume axis**: `resume: true` reaches Resume even for a backend that
+     declares it cannot resume. That asymmetry is deliberate-but-unsettled; it is pinned by
+     `connection_core::tests::ws_spawn_profile_still_honours_an_explicit_resume_request`, with the
+     guarded path pinned by `…_does_not_resume_a_profile_whose_backend_cannot_resume`. Doc (:1114-1123): "저장된 세션이
      있으면 wire `resume` 플래그(프론트는 false 로 보낸다)와 무관하게 항상 Resume 이다 … 단 '안전하다'
      고 읽지 말 것: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude 는 즉사한다."
    - `AgentCommand::Spawn { profile_id, request_id }` (:795-817): **always `SpawnMode::Fresh`**
@@ -731,9 +740,11 @@ one, set `last_active = now_millis()`, return `true`; otherwise `false` and **no
   whole directory (:98-123), guards against pid reuse (:204-206), and gives up after
   `MAX_RESOLVE_ATTEMPTS = 15` polls → `Degraded`, never polled again (:36, :184-192;
   session_tracker.rs:166-170). Poll interval 1 s (session_tracker.rs:33).
-- The port default is `None` (backend/mod.rs:251-258). Only claude implements it
-  (backend/claude/mod.rs:394-401). **Codex never reaches the watch at all** — its
-  `needs_session()` is `false` (backend/codex/mod.rs:59-61), which gates manager.rs:1022-1028.
+- The port default is `None` (`AgentBackend::session_id_source`, backend/mod.rs). Only claude
+  implements it (`ClaudeBackend::session_id_source`). **Codex never reaches the watch at all** — its
+  `assigns_session_id()` is `false`, which gates manager.rs:1022-1028. The watcher hangs off
+  the **minting** axis because `session_id_source` takes a required `expected_sid: Uuid` baseline —
+  without an assigned sid there is nothing to compare against.
 
 ### `mutate_if` (profile.rs:400-408)
 
@@ -873,11 +884,14 @@ Written but never read back into a spawn:
 - `epoch` — written as `0`, never read from disk.
 - `last_start_at`, `restart_policy`, `restart_count`, `failed_reason` — no writer at all.
 
-**Codex has zero persisted resume state today.** `needs_session()==false`
-(backend/codex/mod.rs:56-61) → `sid = None` at manager.rs:914-922 → `backend_session_id` stays
-`None` → `restore_one`'s resumable gate is false (manager.rs:1323-1329) → codex always spawns Fresh.
+**Codex has zero persisted resume state today**, and **two independent axes** now say so.
+`assigns_session_id()==false` → `sid = None` in `AgentManager::spawn_agent` → `backend_session_id`
+stays `None`. Separately `can_resume_stored_session()==false` (both modes, until `thread/resume` is
+wired) → `backend::can_resume_profile` is false → `restore_one` **and both activation entries**
+spawn Fresh. Either axis alone would be enough today; they are kept apart because they answer
+different questions (who mints vs. what a stored sid is good for — ADR-0185).
 `capabilities().session.resume = false` with the stated reason "호출자가 sid 를 못 정하므로 무손실
-복원이 성립하지 않는다" (backend/codex/mod.rs:141-148). `codex resume <id>` is listed as known but
+복원이 성립하지 않는다" (`CodexBackend::capabilities`). `codex resume <id>` is listed as known but
 unwired (:14, :87-88), and `build_spec` asserts no session flag is assembled (:90-96, test :245).
 The `gemini` backend is an unreachable stub — `pub mod gemini` exists (backend/mod.rs:14) but there
 is no `AgentCommand::Gemini` variant and no arm in `backend_for` (:283-289).
@@ -1858,9 +1872,9 @@ would want to do, and why it cannot today.
 46. **Store a non-UUID resume handle** (a conversation id string, a rollout file path) — the only
     slot is `backend_session_id: Option<Uuid>` (profile.rs:165). **No mechanism exists.**
 47. **Let a backend report a session id it minted itself** — the port is pull-only polling
-    (session_tracker.rs:47-51, backend/mod.rs:251-258) and there is no `AgentBackend` method to push
-    one. And the pull path is gated on `needs_session()` (manager.rs:1022-1028), which codex sets to
-    `false` (backend/codex/mod.rs:59-61) — so a codex agent can never record one.
+    (session_tracker.rs:47-51, `AgentBackend::session_id_source`) and there is no method to push
+    one. And the pull path is gated on `assigns_session_id()` (manager.rs:1022-1028), which
+    codex sets to `false` — so a codex agent can never record one.
 48. **Learn a session id from the child's own output stream** — the decoder cannot send anything
     (item 13), and `observe_session_id`'s only caller is the tracker's file-polling closure
     (daemon/src/lib.rs:288).
@@ -1921,10 +1935,12 @@ would want to do, and why it cannot today.
 67. **Enforce that production never assembles a core with turn observation disabled** —
     `TurnWiring::detached()` is `#[doc(hidden)]` and the doc concedes "그 구분을 강제하는 장치는
     **없다** … 이건 컴파일러가 아니라 규약이 지키는 경계다" (output_core.rs:103-105).
-68. **Choose the activation mode on any basis other than "is a session id stored"** — all three
-    entrances read exactly `profile.backend_session_id.is_some()` (commands.rs:521-525;
-    connection_core.rs:1126-1130) or hardcode `Fresh` (connection_core.rs:809). The wire `resume`
-    flag is only OR-ed in, never decisive.
+68. ~~**Choose the activation mode on any basis other than "is a session id stored"**~~ — **no longer
+    true.** All three entrances now call `backend::can_resume_profile`, which ANDs the stored sid
+    with the backend's resume axis, so a sid on a backend that cannot resume selects `Fresh`. What
+    remains unavailable: any basis *other than those two inputs* (no per-profile policy, no user
+    prompt, no wire field beyond the `resume` bypass), and `AgentCommand::Spawn` still hardcodes
+    `Fresh`.
 69. **Verify a resume actually resumed** — the only check is a **blocking 3-second poll** of the
     child's status and its stderr text (`EARLY_EXIT_WINDOW`, manager.rs:49; loop :1510-1532),
     classified by a per-backend string matcher over the diagnostic tail

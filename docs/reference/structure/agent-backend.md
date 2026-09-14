@@ -59,9 +59,9 @@ flowchart TD
   PC -->|"AgentInfo.capabilities"| RM["renderMode"]
 ```
 
-★**「백엔드 전용 코드는 `build_spec` 안에서 끝난다」고 적지 말 것 — 거짓이다**★. 같은 파일이 `needs_session`·`supports_control_channel`·`accepts_mcp_config`·`reads_messages`·`capabilities` 도 선언하고, 백엔드에 따라 `transport_shape`·`output_decoder` 까지 선언한다. 끝나는 것은 그 **함수**가 아니라 그 **폴더**다(ADR-0004).
+★**「백엔드 전용 코드는 `build_spec` 안에서 끝난다」고 적지 말 것 — 거짓이다**★. 같은 파일이 `assigns_session_id`·`can_resume_stored_session`·`supports_control_channel`·`accepts_mcp_config`·`reads_messages`·`capabilities` 도 선언하고, 백엔드에 따라 `transport_shape`·`output_decoder` 까지 선언한다. 끝나는 것은 그 **함수**가 아니라 그 **폴더**다(ADR-0004).
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(파일 헤더 · backend_for · backend_for_encoder · `open_spawn` 기본값과 `SpawnParts` · 트립와이어 셋) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(`open_spawn` — 통로 실물이 갈리는 유일한 자리) · `crates/engram-dashboard-agent/src/transport/pty.rs`
+**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(파일 헤더 · backend_for · backend_for_encoder · `open_spawn` 기본값과 `SpawnParts` · 트립와이어) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(`open_spawn` — 통로 실물이 갈리는 유일한 자리) · `crates/engram-dashboard-agent/src/transport/pty.rs`
 
 ## 렌더 분기 — override 가 먼저, 그다음 capability
 
@@ -134,11 +134,12 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ## capability 선언
 
-기능이 「빠진」 게 아니라 **백엔드가 스스로 없다고 신고**하고, 코어가 그 신고대로 배관을 잠근다. 그래서 이 표의 `false` 칸이 곧 다음 단계에 열 항목의 목록이 된다. 새 변형을 배선하면 트립와이어 셋이 컴파일 에러로 이 신고를 강제한다 — 세 축 모두 기본값이 fail-open 이라 선언을 빠뜨리면 조용히 초록이 되기 때문이다.
+기능이 「빠진」 게 아니라 **백엔드가 스스로 없다고 신고**하고, 코어가 그 신고대로 배관을 잠근다. 그래서 이 표의 `false` 칸이 곧 다음 단계에 열 항목의 목록이 된다. 새 변형을 배선하면 트립와이어들이 컴파일 에러로 이 신고를 강제한다 — 기본값이 fail-open 인 축은 선언을 빠뜨리면 조용히 초록이 되기 때문이다. ★두 세션 축은 그 부류가 아니다★: trait 에 기본값이 없어 **새 백엔드**는 값을 적을 수밖에 없고, 대신 **새 출력 모드**를 컴파일러가 못 보므로 그쪽을 모드별 트립와이어(`backend::tests::expected_session_axes`)가 맡는다.
 
 | 선언 | `claude` | `codex` | `gemini` (미배선) | 코어가 그 값으로 잠그는 것 |
 |---|---|---|---|---|
-| `needs_session` | `true` | `false` | `true`(best-guess stub) | `true` 면 manager 가 sid 를 발급하고 watcher 를 붙인다. `false` 면 sid 발급 없음 · 부팅 복원 대상 아님 · 항상 Fresh |
+| `assigns_session_id` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | **우리가** sid 를 뽑아 spec 에 넘기나. `true` 면 manager 가 발급해 **프로필에 영속**하고 watcher 의 기준값으로도 쓴다. `false` 를 「세션이 없다」로 읽지 말 것 — 그 프로그램이 자기 id 를 스스로 발급하는 쪽일 수 있다 |
+| `can_resume_stored_session` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | 저장된 backend sid 로 **이어받을 수 있나**. 발급 주체는 묻지 않는다. 부팅 복원과 활성화 입구 둘이 `backend::can_resume_profile`(이 축 ∧ sid 존재) 하나로 함께 판정한다 — `false` 면 sid 가 남아 있어도 Fresh. ★예외 하나★: WS `SpawnProfile{resume:true}` 는 그 판정을 **우회해** Resume 으로 간다(`resume \|\| can_resume_profile(…)`) |
 | `reads_messages` | `true`(trait 기본) | `false` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 |
 | `supports_control_channel` | `true` | `false` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰+mcp-config 발급). `false` 면 provision 을 **아예 건드리지 않는다** |
 | `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
@@ -148,18 +149,20 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ★**MCP 칸을 오독하지 말 것**★ — 「codex 가 MCP 를 못 쓴다」가 아니다. 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수 있나**다. codex 의 MCP 주입은 전역 TOML 오버라이드(`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.
 
-★**`needs_session` 과 `capabilities().session.resume` 두 행을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이고, codex 의 `false` 는 **영구 속성이 아니라 배선 상태**다(수령 배선 · `needs_session()` 세 역할 분리 · 활성화 입구 가드 = ADR-0185 결정 2 의 Phase 2 요구사항 셋). 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
+★**세션 축들을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했고, 위 두 행이 갈라져 있는 것이 그 폐기의 실물이다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이다. codex 의 `false` 는 **영구 속성이 아니라 배선 상태**다 — ADR-0185 결정 2 의 Phase 2 요구사항 셋 중 **두 역할 분리와 활성화 입구 가드는 착지했고**, 남은 것은 **수령 배선**(스레드 생성 응답 → 프로필)과 `thread/resume` 이다. 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
+
+★**`can_resume_stored_session` 의 codex 칸을 「할 수 있나」로 읽지 말 것**★ — app-server 모드에는 이어받을 식별자(thread id)가 **있는데도** `false` 다. 이 칸은 바로 아래 모델 선택 칸과 같은 규율으로 **이 스폰이 실제로 하는 것**을 신고한다: `build_spec` 은 mode·sid 를 무시하고 `open_spawn` 은 언제나 `thread/start` 를 낸다. 배선 전에 이 칸만 켜면 sid 가 생기는 순간 **새 스레드가 열리는데 결과는 「이어받음」으로 보고된다**.
 
 비슷한 오독이 모델 선택 칸에도 있다. codex 에는 `-m` 이 있는데도 `false` 인데, 이 칸은 **그 프로그램이 할 수 있는 것**이 아니라 **이 스폰이 실제로 쓰는 것**을 신고하기 때문이다.
 
 ★**여기 있던 예측은 실측으로 틀린 것이 됐다 — 되살리지 말 것**★. 그 문장은 「codex 의 상주 JSON-RPC(`codex app-server`)가 서면 이 표의 여러 칸이 한꺼번에 열린다 — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다」였다. **서버는 섰고, 함께 열린 칸은 정확히 하나다** — `output_decoder`(구조화 챗 = 턴 관측). 나머지 둘은 그 문으로 들어오지 않았다.
 
-- **세션 복원은 안 열렸다.** resume 배선이 아직 없다 — 수령 배선 · `needs_session()` 세 역할 쪼개기 · 활성화 입구 가드 셋이 그대로 Phase 2 몫이다(ADR-0185 결정 2). 위 두 행이 `false` 인 것은 그 배선 상태의 반영이다.
+- **세션 복원은 안 열렸다.** 셋 중 둘(세션 축 쪼개기 — ADR-0185 가 `needs_session()` 쪼개기로 적은 그것 · 활성화 입구 가드)은 착지했지만 **수령 배선과 `thread/resume` 이 없다**(ADR-0185 결정 2). 위 두 행이 `false` 인 것은 그 배선 상태의 반영이고, 배선이 들어오는 커밋이 값도 함께 바꾼다.
 - **우편도 안 열렸다.** `reads_messages()` 는 여전히 `false` 인데 ★**닫아 두는 사유가 갈아탔다**★. 옛 사유(「codex 는 턴 신호를 하나도 선언하지 않는다」)는 죽었다 — codex 는 이제 `turn_classifier` 를 선언하고 app-server 모드가 실제로 종료 신호를 낸다. 지금 닫는 것은 **그 선언이 명령을 못 받는다**는 것이다: 두 모드를 가를 수 없는데 터미널 모드는 decoder 가 없어 신호가 하나도 없으므로, 여기서 `true` 를 돌려주면 그 모드까지 함께 열린다. **여는 조건 = 이 축을 모드별로 가르는 것**(시그니처에 명령을 들이거나 자격을 세션 caps 로 옮기거나 — 사유 정본은 그 메서드의 doc).
 
 ★**그래서 「뿌리가 같으니 문도 하나」를 다시 세우지 말 것**★. 세 칸이 상주 스트림이라는 뿌리를 공유하는 것은 맞지만, 각자 **자기 배선**을 따로 요구한다. 이 예측이 그 둘을 한 번 뭉쳤고 틀렸다 — 같은 낙관을 다시 유도하지 않으려고 실패한 채로 적어 둔다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(`AgentBackend` trait 의 기본값 · 트립와이어 셋) · 각 `backend/<이름>/mod.rs`(그 백엔드의 선언과 사유 주석)
+**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(`AgentBackend` trait 의 기본값 · 트립와이어) · 각 `backend/<이름>/mod.rs`(그 백엔드의 선언과 사유 주석)
 
 ## LLM 창구 정책
 

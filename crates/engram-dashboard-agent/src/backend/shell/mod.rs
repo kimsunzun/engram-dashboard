@@ -17,7 +17,12 @@ use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, Session
 pub struct ShellBackend;
 
 impl AgentBackend for ShellBackend {
-    fn needs_session(&self) -> bool {
+    /// 셸에는 대화 세션 개념이 없다 — 두 축 모두 false.
+    fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
+        false
+    }
+
+    fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
         false
     }
 
@@ -102,11 +107,6 @@ mod tests {
         });
         assert_eq!(s.program, "cmd.exe");
         assert_eq!(s.args, vec!["/c".to_string(), "echo hi".to_string()]);
-    }
-
-    #[test]
-    fn needs_session_is_false() {
-        assert!(!ShellBackend.needs_session());
     }
 
     #[test]

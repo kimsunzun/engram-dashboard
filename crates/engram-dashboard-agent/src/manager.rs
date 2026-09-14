@@ -912,8 +912,11 @@ impl AgentManager {
         //     즉사, 이 세션의 재현 버그). new_session_id 가 항상 새 uuid 를 발급(옛 sid 는 이력 보존).
         //   spawn_agent 이 이 판정의 단일 권위점이라 어떤 호출자(Spawn/SpawnProfile/restore/fallback)든
         //   mode 만 맞게 넘기면 sid 충돌이 원천 봉인된다(FIX 2 backend-authoritative).
-        let needs = backend::needs_session(&profile.command);
-        let sid = if needs {
+        //   ★발급 축 단독으로 판정한다(ADR-0185)★: 「우리가 sid 를 뽑아 건네주나」와 「저장된 sid 로
+        //   이어받을 수 있나」는 다른 질문이다. 뒤엣것으로 여기를 가르면, 자기 id 를 스스로 발급하는
+        //   프로그램에 **그 프로그램이 한 번도 쓰지 않을 uuid** 가 발급돼 프로필에 영속된다.
+        let assigns_sid = backend::assigns_session_id(&profile.command);
+        let sid = if assigns_sid {
             match mode {
                 SpawnMode::Resume => self.profiles.ensure_session_id(profile.id),
                 SpawnMode::Fresh => self.profiles.new_session_id(profile.id),
@@ -1016,10 +1019,12 @@ impl AgentManager {
         }
 
         // sid drift 관측 부착(best-effort). 관측기를 만드는 것도 "만들 게 없다"고 답하는 것도 backend
-        //   몫이라(ADR-0004) 여기서는 그 프로그램이 무엇을 읽는지 모른다. `needs` 게이트는 그대로다 —
-        //   sid 를 발급하지 않은 세션은 관측할 기준값이 없다.
+        //   몫이라(ADR-0004) 여기서는 그 프로그램이 무엇을 읽는지 모른다.
+        // ★게이트가 **발급 축**인 이유(ADR-0185)★: 관측기는 우리가 건넨 sid 를 **기준값**(`expected_sid`)
+        //   으로 받아 그것과 달라진 것을 관측한다 — 발급하지 않은 세션에는 그 기준값이 아예 없다.
+        //   이어받기 축으로 갈면 기준값 없는 세션에 관측기가 붙는다.
         if let (Some(s), Some(pid)) = (sid, child_pid) {
-            if needs {
+            if assigns_sid {
                 if let Some(source) =
                     backend::session_id_source(&profile.command, profile.id, pid, s)
                 {
@@ -1320,8 +1325,9 @@ impl AgentManager {
     }
 
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
-        let resumable =
-            backend::needs_session(&profile.command) && profile.backend_session_id.is_some();
+        // ADR-0185: 이어받기 축 — 저장된 sid 를 **누가 발급했는지는 묻지 않는다**(그 축은 spawn 시점의
+        //   `assigns_session_id` 몫). 판정 규칙은 다른 활성화 입구들과 한 몸이라 dispatch 가 갖는다.
+        let resumable = backend::can_resume_profile(profile);
 
         if !resumable {
             // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.

@@ -1176,7 +1176,14 @@ impl ConnectionCore {
                 //     문구는 그 기록이 없던 시절의 것이다.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        let mode = if resume || profile.backend_session_id.is_some() {
+                        //   ★sid 갈래는 백엔드에 되묻는다(ADR-0185)★: 저장된 sid 가 그 명령으로
+                        //     **이어받을 수 있는 것인지**를 먼저 묻는다 — 그 판정은 부팅 복원·명령 버스
+                        //     입구와 같은 dispatch 가 소유한다.
+                        //   ★`resume` 명시 요청은 그 술어를 타지 않는다★: 위 「resume=true 는 존중」이
+                        //     그대로다(세션이 없어도 Resume 으로 남긴다).
+                        let mode = if resume
+                            || engram_dashboard_agent::backend::can_resume_profile(&profile)
+                        {
                             SpawnMode::Resume
                         } else {
                             SpawnMode::Fresh
@@ -2065,6 +2072,113 @@ mod tests {
             "활성화 결말이 프로필 목록으로 나가야 한다 — 없으면 WS 로 띄운 실패가 화면에 안 뜬다: {:?}",
             fanout.texts()
         );
+    }
+
+    /// ★저장된 sid 만으로 Resume 을 유도하지 않는다(ADR-0185)★ — 명령 버스 쪽 짝은
+    /// `engram_dashboard_agent::commands` 의 `waking_does_not_resume_a_profile_whose_backend_cannot_resume`
+    /// 다. 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
+    ///
+    /// ★모드를 어떻게 관측하나★: wire 에 「이어받았나」 칸이 없다 — 그것이 이 결함이 조용한 이유다. 그래서
+    ///   **결말**로 가른다. 즉시 끝나는 프로그램을 쓰면 Fresh 는 띄운 즉시 `Spawned` 를 내고, Resume 은
+    ///   `resume_no_fallback` 이 조기종료 창에서 그 종료를 보고 실패로 끊어 `Spawned` 가 없다.
+    // ADR-0185
+    #[tokio::test]
+    async fn ws_spawn_profile_does_not_resume_a_profile_whose_backend_cannot_resume() {
+        let (core, _rx) = test_core();
+        let mut profile = engram_dashboard_agent::profile::AgentProfile::new(
+            "ws-no-resume".into(),
+            engram_dashboard_agent::profile::AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec!["/c".into(), "exit".into()],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 `agents.json` 이 오늘 만든다.
+        profile.backend_session_id = Some(uuid::Uuid::new_v4());
+        let created = core.manager.create_agent(profile).expect("등록");
+        assert!(
+            core.manager
+                .agent_snapshot(created.id)
+                .and_then(|p| p.backend_session_id)
+                .is_some(),
+            "전제: sid 가 심겨 있어야 이 항목이 그 갈래를 잰다"
+        );
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::SpawnProfile {
+                profile_id: created.id,
+                resume: false,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        assert!(
+            mock.events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Spawned { .. })),
+            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다: {:?}",
+            mock.events()
+        );
+        let _ = core.manager.kill_agent(created.id);
+    }
+
+    /// ★`resume: true` 가 그 술어를 **일부러** 우회한다 — 이 비대칭을 코드에 못 박는다★: 위 항목의 짝이고,
+    /// 둘의 유일한 차이가 그 플래그다. 프로그램·sid·명령이 전부 같은데 결말이 갈리는 것이 그 우회의 실물.
+    ///
+    /// ★이 항목은 그 우회를 **정당화하지 않는다**★ — 지금 그렇다는 것만 잰다. 규칙을 「조화」시키려는 다음
+    ///   세션이 이 항목을 깨뜨리면, 그건 고장이 아니라 **결정을 바꾸고 있다**는 신호다(그 결정은 미결).
+    // ADR-0185
+    #[tokio::test]
+    async fn ws_spawn_profile_still_honours_an_explicit_resume_request() {
+        let (core, _rx) = test_core();
+        let mut profile = engram_dashboard_agent::profile::AgentProfile::new(
+            "ws-explicit-resume".into(),
+            engram_dashboard_agent::profile::AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec!["/c".into(), "exit".into()],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        profile.backend_session_id = Some(uuid::Uuid::new_v4());
+        let created = core.manager.create_agent(profile).expect("등록");
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::SpawnProfile {
+                profile_id: created.id,
+                resume: true,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        // Resume 으로 갔다는 증거 = 조기종료 창이 그 종료를 보고 활성화를 **실패로** 끊는다(Fresh 면 띄운
+        //   즉시 `Spawned` 가 나간다 — 바로 위 항목이 그쪽을 잰다).
+        // ★「Spawned 가 없다」만으로는 부족하다★ — 무관한 이유로 아무 것도 안 나가도 참이 된다. 그래서
+        //   그 실패가 **resume 갈래에서 왔다는 것**까지 본다.
+        let events = mock.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message, .. } if message.contains("resume")
+            )),
+            "명시 resume 요청이 이어받기 축에 막혔다 — 그 우회는 의도된 것이라 바꾸려면 결정이 먼저다: {events:?}"
+        );
+        let _ = core.manager.kill_agent(created.id);
     }
 
     fn test_core_with_control_registry() -> (ConnectionCore, Arc<ControlRegistry>) {

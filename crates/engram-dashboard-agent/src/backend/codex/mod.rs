@@ -94,14 +94,26 @@ pub struct CodexBackend;
 
 impl AgentBackend for CodexBackend {
     /// ★호출자가 세션 id 를 정할 수 없다(실측)★ — codex 에는 `--session-id` 류 플래그가 없고 id 는
-    /// codex 가 스스로 발급한다. true 로 두면 manager 가 우리 uuid 를 발급해 추적기를 붙이는데, 그 값은
-    /// codex 가 쓰지 않으므로 영영 나타나지 않을 파일을 폴링하게 된다.
-    /// ★그 사실이 「복원이 성립하지 않는다」로 이어지지 않는다★ — 복원은 프로필에 저장된 backend sid
-    /// 단독에 의존하고 발급 주체는 백엔드가 정한다. 이 플래그가 지금 false 인 것은 **한 플래그가 우리 쪽
-    /// 발급·watcher 부착·resume 가부 셋을 겸하기 때문**이고, 셋을 쪼개기 전에 켜면 codex 가 쓰지 않는
-    /// uuid 가 프로필에 심긴다.
+    /// codex 가 스스로 발급한다. true 로 두면 manager 가 우리 uuid 를 발급해 **프로필에 영속**하는데 그
+    /// 값은 codex 가 한 번도 쓰지 않는다 — 그러고 나면 이어받기 판정이 그 가짜 값을 보고 서서, 실제로는
+    /// 새 대화인 화신을 이어받았다고 믿는다.
+    /// ★app-server 모드라고 켜지 말 것 — 두 모양 다 false 다★: 그 모드의 식별자(thread id)도 발급 주체는
+    ///   codex 다. 그 id 로 **이어받을 수 있나**는 아래 별개 축이 답한다.
     // ADR-0185
-    fn needs_session(&self) -> bool {
+    fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
+        false
+    }
+
+    /// ★터미널 모드에는 이어받을 식별자 자체가 없고, app-server 모드에는 있다(thread id)★ — 그런데도 두
+    /// 모양 다 false 인 것은 **선언과 실물을 같게 두기 위해서**다.
+    /// ★`is_app_server(command)` 로 바꾸는 것은 `thread/resume` 을 배선하는 그 커밋이다 — 그 전에 켜지 말
+    ///   것★: 지금 [`AgentBackend::build_spec`] 은 mode·sid 를 무시하고 [`AgentBackend::open_spawn`] 은
+    ///   언제나 `thread/start` 를 낸다. 이 칸만 먼저 true 로 두면, 이 백엔드에 sid 가 생기는 순간(슬라이스
+    ///   2 가 그것을 배선하고, 손으로 고친 `agents.json` 은 오늘도 그 상태를 만든다) 복원·활성화가 Resume
+    ///   으로 가고 **새 스레드가 열리는데 결과는 「이어받음」으로 보고된다**. 지금은 그 입력이 Fresh 로
+    ///   떨어져 정직하게 보고된다.
+    // ADR-0185
+    fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
         false
     }
 
@@ -135,7 +147,8 @@ impl AgentBackend for CodexBackend {
 
     /// ★세션 인자를 조립하지 않는다★ — `--session-id` 는 존재하지 않고, 재개는 플래그가 아니라 하위
     /// 명령 + 위치 인자(`codex resume <id>`)라 이 자리의 문법이 아니다(실측). `session_id` 는
-    /// `needs_session()` 이 false 라 항상 `None` 이지만, 계약상 받는 값이므로 무시한다는 것을 적어 둔다.
+    /// `assigns_session_id()` 가 false 라 항상 `None` 이지만, 계약상 받는 값이므로 무시한다는
+    /// 것을 적어 둔다.
     // ADR-0004
     fn build_spec(
         &self,
@@ -213,7 +226,9 @@ impl AgentBackend for CodexBackend {
     /// `session.resume = false` 인 이유는 ★**발급 주체와 무관하다**★ — 복원은 프로필에 저장된 backend
     /// sid **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는 `thread/start`
     /// 응답으로 받아 쓰는 쪽이다. 그러니 이 칸이 false 인 것은 **그 값을 받아 프로필에 적는 배선이 아직
-    /// 없어서**이고, 켜는 것은 `needs_session()` 을 쪼개는 것과 한 묶음이라 이 단계의 범위가 아니다.
+    /// 없어서**다. ★판정 축([`AgentBackend::can_resume_stored_session`])도 **아직 꺼져 있다**★ — 그 축과
+    /// 이 칸은 **같은 배선 하나**를 기다리고, 그 배선 커밋이 둘을 함께 켠다. 둘 중 하나만 먼저 켜지 말 것:
+    /// 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로 보고된다.
     /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
     /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
     // ADR-0185
@@ -610,9 +625,20 @@ mod tests {
             .is_some());
     }
 
+    /// 이 백엔드가 바뀔 때 **함께** 봐야 하는 짝이라 한 항목에 둔다 — 위 두 impl 바로 옆이고, 켜는
+    /// 조건도 하나(그 배선 커밋)다.
     #[test]
-    fn needs_session_is_false() {
-        assert!(!CodexBackend.needs_session());
+    fn neither_session_axis_is_on_in_either_mode() {
+        for c in [codex(vec![]), codex_app_server(vec![])] {
+            assert!(
+                !CodexBackend.assigns_session_id(&c),
+                "{c:?}: 발급 주체는 codex 다 — 우리 uuid 를 심으면 그 값은 영영 안 쓰인다"
+            );
+            assert!(
+                !CodexBackend.can_resume_stored_session(&c),
+                "{c:?}: 이어받기 배선이 없는 동안은 선언도 false 여야 한다 — 켜는 조건은 그 impl 주석"
+            );
+        }
     }
 
     #[test]
