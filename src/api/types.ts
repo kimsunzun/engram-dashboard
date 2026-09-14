@@ -88,8 +88,8 @@ export interface AgentStatusChanged {
 
 // ── S9: 프로필 + 복원 ──────────────────────────────────────────────────────────
 
-/** claude 출력 포맷 — Terminal=PTY(xterm) / StreamJson=헤드리스 NDJSON(RichSlot). (ADR-0044) */
-export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
+/** 에이전트 출력 모드 — Terminal=PTY, StreamJson=JSON 기반 비터미널. 교환 모양은 backend 가 정한다. (ADR-0044) */
+export type AgentOutputFormat = 'Terminal' | 'StreamJson'
 
 /**
  * 에이전트 실행 명령 — 백엔드 #[serde(tag="kind")]와 일치.
@@ -100,8 +100,16 @@ export type ClaudeOutputFormat = 'Terminal' | 'StreamJson'
  * 그 방어는 이 값을 짓는 테스트 픽스처가 있을 때만 작동한다(프로덕션 코드는 안 만든다).
  */
 export type AgentCommand =
-  | { kind: 'Claude'; extra_args: string[]; output_format: ClaudeOutputFormat }
+  | { kind: 'Claude'; extra_args: string[]; output_format: AgentOutputFormat }
   | { kind: 'Shell'; program: string; args: string[] }
+  | { kind: 'Codex'; extra_args: string[]; output_format: AgentOutputFormat }
+
+/**
+ * 스폰 패킷이 고르는 백엔드 — wire `AgentBackendKind` 미러. ★부재는 기본값이 아니라 오류다★: 이 낱말을
+ * 안 실은 스폰 패킷은 데몬이 거절한다(고르지 않은 것과 claude 를 고른 것을 구별하려는 결정).
+ * ★화면 분기에 쓰지 말 것★ — 렌더러는 `capabilities.output.structured` 한 칸으로 갈린다.
+ */
+export type AgentBackendKind = 'claude' | 'codex'
 
 export type RestartPolicy = 'Never' | 'OnCrash' | 'Always'
 
@@ -135,7 +143,7 @@ export interface AgentProfile {
   command: AgentCommand
   cwd: string
   env: [string, string][]
-  claude_session_id: string | null
+  backend_session_id: string | null
   old_session_ids: string[]
   epoch: number
   auto_restore: boolean

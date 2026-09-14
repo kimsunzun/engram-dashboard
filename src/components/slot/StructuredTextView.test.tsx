@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 
 import { StructuredTextView } from './StructuredTextView'
 import type { StructuredItem } from './structuredAccumulator'
+import { t } from '../../i18n'
 
 afterEach(() => cleanup())
 
@@ -143,6 +144,61 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(screen.getByText('boom happened')).toBeTruthy()
   })
 
+  // ── 턴 결말 셋은 화면에서 서로 구별된다(그 구별이 결말 칸의 존재 이유) ──────────────────
+  it('outcome=failed → 실패 문구 + 사유(detail) 노출', () => {
+    const items: StructuredItem[] = [
+      { kind: 'outcome', outcome: 'failed', detail: 'model refused', itemId: 0 },
+    ]
+    render(<StructuredTextView items={items} />)
+    expect(screen.getByText(t('chat.turnFailed'))).toBeTruthy()
+    expect(screen.getByText('model refused')).toBeTruthy()
+  })
+
+  it('outcome=failed 사유가 없으면 사유 줄을 만들지 않는다(빈 줄 금지)', () => {
+    const items: StructuredItem[] = [
+      { kind: 'outcome', outcome: 'failed', detail: null, itemId: 0 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(screen.getByText(t('chat.turnFailed'))).toBeTruthy()
+    expect(container.querySelector('.whitespace-pre-wrap')).toBeNull()
+  })
+
+  it('outcome=interrupted 는 실패로 그려지지 않는다(붉은 톤·실패 문구 없음)', () => {
+    const items: StructuredItem[] = [
+      { kind: 'outcome', outcome: 'interrupted', detail: null, itemId: 0 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(screen.getByText(t('chat.turnInterrupted'))).toBeTruthy()
+    expect(screen.queryByText(t('chat.turnFailed'))).toBeNull()
+    expect(container.querySelector('.text-red-500')).toBeNull()
+    // rail 점도 실패 톤이 아니다(error 는 bg-red-500 점을 쓴다).
+    expect(container.querySelector('.rounded-full.bg-red-500')).toBeNull()
+  })
+
+  it('outcome=unknown 은 실패가 아니라 「모름」으로 그려진다', () => {
+    const items: StructuredItem[] = [
+      { kind: 'outcome', outcome: 'unknown', detail: null, itemId: 0 },
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(screen.getByText(t('chat.turnUnknown'))).toBeTruthy()
+    expect(container.querySelector('.text-red-500')).toBeNull()
+  })
+
+  it('결말 셋은 서로 다른 문구를 쓴다(한 모양으로 뭉개지지 않는다)', () => {
+    const labels = [t('chat.turnFailed'), t('chat.turnInterrupted'), t('chat.turnUnknown')]
+    expect(new Set(labels).size).toBe(3)
+  })
+
+  // ── 모르는 이벤트 표식 — 보이되 프로토콜 낱말은 안 보인다 ─────────────────────────────
+  it('unsupported item → 건수를 담은 고지 한 줄(원본 이름·JSON 없음)', () => {
+    const items: StructuredItem[] = [{ kind: 'unsupported', count: 3, itemId: 0 }]
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(screen.getByText(t('chat.unsupportedEvent', { count: '3' }))).toBeTruthy()
+    // 펼칠 것도 없다 — GenericItemRow(JSON 코드블록)로 새지 않는다.
+    expect(container.querySelectorAll('button').length).toBe(0)
+    expect(container.querySelector('pre')).toBeNull()
+  })
+
   it('separator item → 옅은 세로 스페이서(border-t divider 없음)', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'a', itemId: 0 },
@@ -175,6 +231,25 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'done', itemId: 0 }]
     render(<StructuredTextView items={items} />)
     expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  // ★오류 행 뒤에도 대기 인디케이터가 붙는다★: `Error` 는 턴 경계가 아니라 재시도 가능한 스트림 오류일
+  //   수 있어(그쪽 누산기 arm), 마지막 item 이 오류여도 턴은 열린 채일 수 있다. 오류를 「끝」으로 읽어
+  //   여기서 tail 을 잠그면 상류가 고친 깜빡임이 이 층에서 되살아난다.
+  it('마지막 item 이 error 여도 streaming 이면 대기 인디케이터가 붙는다', () => {
+    const items: StructuredItem[] = [
+      { kind: 'text', text: 'working', itemId: 0 },
+      { kind: 'error', message: 'overloaded (serverOverloaded) [willRetry]', itemId: 1 },
+    ]
+    render(<StructuredTextView items={items} streaming />)
+    expect(screen.getByText('Wait')).toBeTruthy()
+  })
+
+  // 모르는 이벤트 표식도 같다 — 그 행이 떴다는 것이 「턴이 끝났다」는 뜻은 아니다.
+  it('마지막 item 이 unsupported 여도 streaming 이면 대기 인디케이터가 붙는다', () => {
+    const items: StructuredItem[] = [{ kind: 'unsupported', count: 2, itemId: 0 }]
+    render(<StructuredTextView items={items} streaming />)
+    expect(screen.getByText('Wait')).toBeTruthy()
   })
 
   it('malformed json 이 와도 throw 하지 않고 폴백 렌더한다(안전 파서)', () => {

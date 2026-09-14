@@ -4,7 +4,9 @@
  * 새 에이전트의 출력 형식(= 렌더 모드) — 생성 시점에 고정되고 이후 불변이다(ADR-0044/0078).
  *
  * `Terminal` = PTY 대화형(xterm 렌더) · `StreamJson` = 헤드리스 NDJSON 스트림.
- * 어휘는 `ClaudeOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — 갈리면 프론트 allowlist
+ * 어휘는 코어 `profile::AgentOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — ★개명(ADR-0194)
+ * 뒤로 이 선언 어휘와 코어 enum 이 **같은 이름을 쓴다**★. 가리킬 땐 경로를 붙여 적을 것(맨 이름은
+ * 이 파일 안에서 이 선언을 가리킨다 — 그래서 위 import 가 코어 쪽에 별칭을 단다). 갈리면 프론트 allowlist
  * (`coerceOutputFormat`)와 이 입구가 같은 낱말을 다르게 읽는다. 그 일치를 산문이 아니라 컴파일러가
  * 지키는 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
  */

@@ -319,6 +319,46 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     // viewId 포함 — 구독 키(ADR-0046)라 바뀌면 재구독(실무상 key=viewId 라 slot 교체는 remount).
   }, [viewId, agentId])
 
+  // 재연결 뒤 치수 재전파 ──────────────────────────────────────────────────────────────
+  // ADR-0195: 소켓이 없는 동안 들어온 명령은 담아 두지 않고 그 자리에서 실패한다. resize 는
+  //   fire-and-forget 이라 그 실패가 조용히 삼켜지고 다시 낼 자리가 없어, 재연결 창(실측 500ms~10초)에
+  //   분할선을 끌면 그 치수가 에이전트에 영영 닿지 않는다. 담아 두는 대신 소켓이 서면 여기서 한 번 낸다.
+  // ★이 복구를 위 구독 트리거에 연결 상태를 섞어 만들지 말 것★ — 그 형태의 실패 모드는 위 트리거 주석이
+  //   정본이다. 이 effect 는 구독을 건드리지 않고 치수만 낸다.
+  // ★상태가 아니라 전이에 발화한다★: connected 는 한 세션 내내 참으로 머물 수 있다. 값만 보는 구현이
+  //   어긋나는 자리는 둘 — **마운트**와 **agentId 교체**다. 리렌더만으로는 다시 돌지 않고(deps 가 그 둘뿐),
+  //   같은 값 재통지는 setState 가 걸러 렌더조차 안 난다. 기준선이 마운트 시점 값이라 붙은 채 뜬 슬롯은
+  //   여기서 아무것도 내지 않는다.
+  // 데몬이 재기동해 그 에이전트가 없으면 거절이 콘솔 경고 한 줄로 남는다 — 상태도 재요청 사다리도 건드리지
+  //   않는 소음이다(재부착을 내는 것은 명부 관측 단독 — ADR-0164).
+  // 같은 agentId 를 보는 보이는 슬롯이 둘이면 둘 다 발화한다 — 어느 쪽이 PTY 에 남는지는 정해져 있지
+  //   않다(별개의 비동기 왕복이라 발화 순서가 도착 순서를 보장하지 않는다). RO 발화에 이미 있는 중재이고,
+  //   이 effect 는 계기를 하나 더할 뿐 새 부류를 만들지 않는다.
+  const wasConnectedRef = useRef(connected)
+  useEffect(() => {
+    const wasConnected = wasConnectedRef.current
+    wasConnectedRef.current = connected
+    if (!connected || wasConnected) return
+    const terminal = terminalRef.current
+    const container = containerRef.current
+    if (!agentId || !terminal || !container) return
+    // ★숨김 판정은 RO 와 같은 두 갈래여야 한다(그 주석이 정본)★ — display:none 은 offsetParent 로,
+    //   표시는 됐는데 박스만 붕괴한 경우는 0 크기로 잡는다. ★두 갈래가 내는 나쁜 값이 서로 다르다★:
+    //   display:none 은 글리프를 못 재 cell metrics 가 0 이고 fit() 이 terminal 을 건드리지 않고 빠져
+    //   **직전 치수**(한 번도 안 잰 슬롯이면 생성 기본값 80×24)가 나간다. 붕괴한 박스는 metrics 가
+    //   멀쩡해 **fit() 이 no-op 이 아니다** — 음수 폭이 Math.max 바닥으로 눌린 **2×1** 이 실제로 실린다.
+    // ★그래서 치수 자체를 검사하지 않는다★: 80×24 도 2×1 도 정상 치수와 구별되지 않고, fit() 뒤 cols/rows
+    //   는 0 도 NaN 도 될 수 없다(`@xterm/addon-fit` 계약). 값으로 가를 수 없으니 **언제 보내나**로
+    //   가른다 — 두 갈래 다 fit() 에 닿기 전에 빠진다.
+    // ☐ 안 걸리는 것: 보이고 박스도 멀쩡한데 글리프 metrics 가 아직 0 인 슬롯 — fit() 이 no-op 이라 직전
+    //   치수가 나간다. 재시도는 없고 다음 레이아웃·가시성 사건이 고친다.
+    if (container.offsetParent === null) return
+    const box = container.getBoundingClientRect()
+    if (box.width === 0 && box.height === 0) return
+    fitAddonRef.current?.fit()
+    void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
+  }, [connected, agentId])
+
   useEffect(() => {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return

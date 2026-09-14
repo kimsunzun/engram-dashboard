@@ -177,8 +177,11 @@ fn required_matches_what_deserialization_actually_demands() {
 ///
 /// 이 명령을 부르는 주체는 LLM 이고, 그가 보는 것은 이 스키마뿐이다: 폴더를 두 길로 정할 수 있다는 것
 /// (`cwd`·`preset`)과 나머지 두 칸이 **닫힌 어휘**라는 것이 거기 실려야 자기 인자를 스스로 고른다.
-/// ★`required` 가 비어 있는 것이 계약이다★ — 어느 칸도 혼자서는 필수가 아니고, 「정확히 하나」는 칸이
-/// 아니라 **조합**이라 스키마가 표현하지 못한다(그 판정은 핸들러가 지고, 반려 문구가 두 칸을 함께 짚는다).
+/// ★폴더를 정하는 두 칸은 어느 쪽도 혼자서는 필수가 아니다★ — 「정확히 하나」는 칸이 아니라 **조합**이라
+/// 스키마가 표현하지 못한다(그 판정은 핸들러가 지고, 반려 문구가 두 칸을 함께 짚는다).
+/// ★반면 `backend` 는 혼자서 필수다(2026-09-08)★ — 조용한 claude 기본값을 걷은 결과이고, 그 사실이
+/// `required` 에 실려야 호출자가 부르기 전에 안다. 옛 계약(`required` 가 비어 있음)은 그 기본값 위에
+/// 서 있었다.
 #[test]
 fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabularies() {
     let schema: serde_json::Value =
@@ -188,17 +191,27 @@ fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabula
     for field in ["cwd", "preset", "name", "output_format", "backend"] {
         assert!(properties.contains_key(field), "{field} 칸이 광고에 없다");
     }
+    let required: Vec<&str> = schema["required"]
+        .as_array()
+        .expect("required 배열")
+        .iter()
+        .map(|value| value.as_str().expect("문자열"))
+        .collect();
     assert_eq!(
-        schema["required"].as_array().map(Vec::len),
-        Some(0),
-        "혼자서 필수인 칸은 없다: {schema}"
+        required,
+        vec!["backend"],
+        "혼자서 필수인 칸은 `backend` 하나다: {schema}"
     );
 
     // 닫힌 어휘는 **값 목록**으로 실린다 — 이름만 실리면 호출자가 무엇을 넣을지 스스로 못 고른다.
+    // ★두 모양을 다 읽는다★ — 필수 칸은 `{"enum":[…]}`, 생략 가능한 칸은 `{"anyOf":[{"enum":[…]},…]}` 다.
     let vocabulary = |field: &str| -> Vec<String> {
-        properties[field]["anyOf"]
-            .as_array()
-            .expect("Option 칸은 anyOf")
+        let property = &properties[field];
+        let branches = match property.get("anyOf") {
+            Some(any_of) => any_of.as_array().expect("anyOf 는 배열").clone(),
+            None => vec![property.clone()],
+        };
+        branches
             .iter()
             .filter_map(|branch| branch.get("enum"))
             .flat_map(|values| values.as_array().expect("enum 배열").clone())

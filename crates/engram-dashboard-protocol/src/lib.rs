@@ -34,14 +34,15 @@ pub use codec::{
 };
 pub use discovery::DaemonInfo;
 pub use domain::{
-    AgentFailureKind, AgentInfo, AgentProfile, AgentSpawnCommand, AgentStatus, Capabilities,
-    ClaudeOutputFormat, ControlCaps, EnvelopeFormat, InputCaps, ModelCaps, OutputCaps, Preset,
-    RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps, SnapshotChunk,
+    AgentBackendKind, AgentFailureKind, AgentInfo, AgentOutputFormat, AgentProfile,
+    AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, EnvelopeFormat, InputCaps,
+    ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
+    SnapshotChunk,
 };
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
-    OutputChunk, StructuredEvent, SubscribeAction,
+    OutputChunk, StructuredEvent, SubscribeAction, TurnOutcome,
 };
 
 /// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
@@ -57,4 +58,47 @@ pub use messages::{
 /// 키) deserialize 에서 막힌다. 그러면 신클라가 Ack 를 기다리며 무한 대기할 수 있으므로(v2 bump 사유와
 /// 동일한 시나리오), auth 의 version check(ws.rs) + discovery 의 version-mismatch 거부가 구 데몬을
 /// **재사용하지 않고 거부/재기동**하게 강제한다.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: codex 배선 — [`AgentSpawnCommand::Codex`] **변형 추가** + `SpawnByCwd`·`CreateProfile` 에
+/// `backend`([`AgentBackendKind`]) 칸 신설.
+/// ★변형을 더한 것이라 v3 과 같은 **비관용** 축이다★ — `AgentSpawnCommand` 는 `#[serde(tag = "kind")]`
+/// 라 모르는 `kind` 는 관용되는 미지 **필드**가 아니라 역직렬화 **실패**다. 「기존 변형 안에
+/// `#[serde(default)]` 칸을 더하면 버전 유지」(v2·v3 사이에 여러 번 그렇게 지나갔다)는 이 변경에
+/// 해당하지 않는다. 두 방향이 각각 조용히 깨진다:
+///   - **신데몬 + 구셸**: codex 프로필이 하나라도 명부에 있으면 `ProfileList` 의
+///     `AgentProfile.command` 에서 디코드가 실패하고, 실패 단위가 **응답 전체**라 구셸은 그 한 행이
+///     아니라 **명부를 통째로** 잃는다.
+///   - **구데몬 + 신셸**: 새 `backend` 칸은 `#[serde(default)]` 라 구데몬이 그것을 **버리고** 옛
+///     하드코딩(claude·StreamJson)을 띄운다 — 사람이 「코덱스 터미널」을 골랐는데 codex 라벨이 붙은
+///     노드 뒤에서 claude 가 돈다. [`AgentBackendKind`] 가 기본값을 안 두기로 한 결정이 막으려던 바로
+///     그 실패인데, 그 결정을 모르는 데몬에는 그 결정이 닿지 않는다.
+/// ★출시 뒤가 아니라 로컬 개발에서 먼저 온다★ — 데몬은 설계상 셸 재빌드보다 오래 산다(셸을 다시 지어도
+/// 떠 있던 데몬에 그대로 붙는다). 그래서 위 두 조합은 개발 중에 일상적으로 만들어진다. 「출시 전이라
+/// 지켜 줄 상대가 없다」로 이 bump 를 건너뛰려던 판단이 틀렸던 지점이 여기다.
+/// bump 가 둘 다 시끄럽게 만든다: auth 의 version check(`net` 의 `ws.rs`) + discovery 의
+/// version-mismatch 거부(`discovery` 의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
+/// 거부/재기동**한다. 그 강제를 재는 자리 = discovery 의
+/// `version_mismatch_live_daemon_errors_without_spawn`.
+///
+/// v5: codex 출력 모드가 wire 를 건넌다 — [`AgentSpawnCommand::Codex`] 에 `output_format` 칸 신설 +
+/// 데몬 경계가 `CreateProfile.output_format` 을 codex 갈래에서 **버리지 않고** 나른다.
+/// ★모양만 보면 안 올려도 되는 변경이고, 그 판정이 틀린다★ — 새 칸은 양쪽 다 `#[serde(default)]` 라
+/// 어느 쪽 peer 도 역직렬화에서 죽지 않는다. 그래서 「기존 변형에 `#[serde(default)]` 칸을 더하면 버전
+/// 유지」 규칙에 걸려 보인다. ★그러나 v4 를 올린 기준은 모양이 아니라 **조용한 오작동**이었다★ — 바로 위
+/// v4 의 「구데몬 + 신셸」 항목이 그 기준이고, 이 변경은 그것을 낱말만 바꿔 그대로 재현한다:
+///   - **구데몬 + 신셸**: 모드 칸을 codex 갈래에서 버리던 데몬은 그 칸을 받고도 `Terminal` 을 띄운다 —
+///     사람이 「코덱스 JSON」을 골랐는데 그 라벨이 붙은 노드 뒤에서 대화형 TUI 가 돈다. 역직렬화는
+///     성공하므로 **아무것도 시끄럽지 않다**. v4 가 막은 실패와 같은 종류이고, 여기서 안 올리면 v4 를
+///     올린 근거가 이 자리에서만 예외가 된다.
+///   - **신데몬 + 구셸**: 구셸의 `AgentSpawnCommand` 는 모르는 필드를 관용하므로 명부는 살고, 모드만
+///     안 보인다. 이쪽은 조용하지만 **해롭지 않다**(화면이 덜 보일 뿐 다른 것이 돌지 않는다) — 즉 이
+///     bump 를 강제하는 것은 앞 항목 하나다.
+/// ★bump 가 만드는 차이★: discovery 의 `check_acceptable` 이 `daemon.json` 의 버전을 보고 짝이 안
+/// 맞는 **살아있는 데몬을 재사용하지 않는다** — 위 「구데몬 + 신셸」 조합이 악수를 지나기 전에 끊긴다.
+/// 그 강제를 재는 자리는 v4 항목과 같다(discovery 의 `version_mismatch_live_daemon_errors_without_spawn`).
+/// (사용자 결정 2026-09-13)
+///
+/// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
+/// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
+/// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**
+pub const PROTOCOL_VERSION: u32 = 5;

@@ -1,5 +1,9 @@
 //! ShellBackend — 임의 셸 프로그램 전용 CommandSpec 산출.
 //!
+//! ★이 폴더가 세우는 규칙 = shell 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
+//! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
+//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
+//!
 //! tauri import 0.
 
 use std::path::PathBuf;
@@ -51,8 +55,8 @@ impl AgentBackend for ShellBackend {
                 env,
                 cwd,
             },
-            AgentCommand::Claude { .. } => {
-                unreachable!("ShellBackend는 Claude variant를 처리하지 않음. dispatch 버그.")
+            AgentCommand::Claude { .. } | AgentCommand::Codex { .. } => {
+                unreachable!("ShellBackend는 Shell variant만 처리함. dispatch 버그.")
             }
         }
     }

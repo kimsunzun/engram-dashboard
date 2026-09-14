@@ -90,7 +90,7 @@ function profile(
   return {
     id, name: '', display_name: displayName, parent_id: parentId,
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
-    cwd, env: [], claude_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
+    cwd, env: [], backend_session_id: null, old_session_ids: [], epoch: 0, auto_restore: false,
     restart_policy: 'Never', restart_count: 0, failed_reason: null, last_failure: lastFailure,
     created_at: createdAt,
     last_active: 0, last_start_at: null,

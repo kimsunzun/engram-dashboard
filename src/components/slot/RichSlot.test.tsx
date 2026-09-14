@@ -219,6 +219,79 @@ describe('RichSlot(live) — 후속 전송 시 합성 user 에코가 "Wait" 을 
   })
 })
 
+// ★못 알아들은 프레임이 대기 표시를 끄지 않는다★ — 회귀는 **여러 턴**으로만 보인다: 갓 마운트한 슬롯은
+//   turnDone 이 false 라 무슨 프레임이 오든 "Wait" 이 서므로, 한 턴만 재는 테스트는 이 결함을 못 본다.
+//   결함 모양: 직전 턴이 닫힌 뒤(turnDone=true) 새로 전송하고, 그 턴의 첫 프레임이 이 셸이 모르는 종류로
+//   오면 — 구독 콜백이 awaiting 을 풀고 turnDone 은 직전 턴의 true 로 남아 응답이 도는 중에 "Wait" 이 꺼진다.
+describe('RichSlot(live) — 모르는 종류의 프레임이 "Wait" 을 끄지 않는다', () => {
+  it('완결 턴 뒤 전송 → 그 턴 첫 프레임이 모르는 종류여도 "Wait" 이 유지된다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    clientMock.writeStdin = vi.fn(async () => undefined)
+
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+
+    feedCompletedTurn() // turnDone=true + 콘텐츠 존재
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    const textarea = screen.getByPlaceholderText(/메시지 입력/)
+    fireEvent.change(textarea, { target: { value: 'follow-up' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await flush()
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    // 더 새 데몬이 보낸, 이 셸의 bindings 에 없는 종류.
+    act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'SomethingNewer', whatever: 1 }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    // 아는 프레임이 오면 그때 표시 주도권이 turnDone 으로 넘어가고, 경계가 정상적으로 끈다.
+    act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    act(() => captured.onChunk!(tag1(4, JSON.stringify({ type: 'MessageDone' }))))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(warn).toHaveBeenCalled() // 진단용 이름은 console 로만
+  })
+
+  it('복원된 이력의 끝이 모르는 종류여도 "Wait" 이 고착되지 않는다(전송 없음)', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+
+    feedCompletedTurn()
+    act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'SomethingNewer', whatever: 1 }))))
+
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(warn).toHaveBeenCalled()
+  })
+})
+
+// ★재시도 가능한 스트림 오류가 "Wait" 을 끄지 않는다★ — codex 는 과부하·rate limit 을 `Error` 한 줄로
+//   내고 그 뒤에도 같은 턴이 이어진다(그쪽 decoder 주석). claude 도 실패 턴을 `MessageDone` 으로 닫으므로
+//   `Error` 를 턴 종료로 세던 옛 규칙은 양쪽 다 어긋났다. fix 전 증상 = 오류 한 줄에 "Wait" 이 꺼졌다가
+//   다음 델타에 되살아나는 깜빡임.
+describe('RichSlot(live) — 턴 한복판의 Error 가 "Wait" 을 끄지 않는다', () => {
+  it('델타 → Error → 델타 구간 내내 "Wait" 이 유지되고, 경계만이 끈다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'thinking' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() =>
+      captured.onChunk!(
+        tag1(1, JSON.stringify({ type: 'Error', message: 'overloaded (serverOverloaded) [willRetry]' })),
+      ),
+    )
+    expect(screen.getByText('Wait')).toBeTruthy() // fix 전: 여기서 꺼졌다
+
+    act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'TextDelta', text: ' resumed' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'MessageDone' }))))
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+})
+
 // ★ADR-0145 빈 상태★: JSON 모드 첫 실행 화면(마스코트 + "Claude Code" + 가운데 입력창).
 //
 // 핵심 회귀 = **표시 게이트가 "0건"이 아니라 "복원 완료 신호('live') + 0건"이라는 것**. 챗 뷰는 마운트 시
@@ -497,7 +570,7 @@ describe('RichSlot(live) — ADR-0145 빈 상태 억제는 전송 사실을 따�
     await flush()
     expect(emptyState()).toBeNull()
 
-    // 빈 델타 = 누산기가 item 을 만들지 않고 흘려보내는 프레임(structuredAccumulator :69).
+    // 빈 델타 = 누산기가 item 을 만들지 않고 흘려보내는 프레임(structuredAccumulator 의 TextDelta arm).
     //   구독 콜백은 이 프레임에도 awaiting 을 푼다 → awaiting 게이트였다면 여기서 마스코트가 되살아난다.
     act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: '' }))))
     expect(emptyState()).toBeNull()

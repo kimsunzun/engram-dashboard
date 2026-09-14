@@ -19,7 +19,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::backend;
-use crate::backend::InputEncoder;
 use crate::failure::AgentFailureKind;
 use crate::output_core::{OutputCore, TurnWiring};
 use crate::preset::PresetRegistry;
@@ -29,13 +28,10 @@ use crate::profile::{
 use crate::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::session::AgentSession;
 use crate::session_tracker::SessionTracker;
-use crate::transport::pty::PtyTransport;
-use crate::transport::stdio::StdioTransport;
-use crate::transport::{AgentTransport, OutputDecoder};
 use crate::turn::TurnObservations;
 use crate::types::{
-    AgentId, AgentInfo, AgentStatus, BackendCaps, CommandSpec, ControlChannel, NoopControlChannel,
-    OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome,
+    AgentId, AgentInfo, AgentStatus, CommandSpec, ControlChannel, NoopControlChannel, OutputChunk,
+    OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome,
     TerminalReason, TerminationIntent,
 };
 
@@ -61,36 +57,6 @@ pub fn default_shell() -> &'static str {
 #[cfg(not(windows))]
 pub fn default_shell() -> &'static str {
     "bash"
-}
-
-/// 별도 함수로 뺀 이유 = 실 claude 없이 선택 로직을 단위 테스트하기 위함
-/// (ADR-0012 격리 — json→structured caps / 터미널→아님).
-///
-/// ★조립점 — "mode → 통로가 나르는 것"의 단일 위치(FIX 2, 사용자 요청: 한 곳에 모음)★:
-///   transport 종류 선택뿐 아니라 **출력이 구조화(NDJSON)인지도 여기서 결정해 주입**한다. 파이프
-///   자체는 내용을 모르므로(통로 무정제 불변) StdioTransport 는 structured 를 하드코딩하지 않고
-///   이 지점의 주입값을 받아 caps 로 신고한다. json 모드 = claude `--output-format stream-json` →
-///   NDJSON 캐리어 → structured=true. 터미널(PtyTransport)은 그 자체로 terminal-bytes(구조화 아님).
-///   출처 분리(output=transport 소유, ADR-0030)는 유지 — 값만 이 조립점에서 주입한다.
-// ADR-0044
-// ADR-0030
-fn select_transport(
-    json_mode: bool,
-    spec: &CommandSpec,
-    cols: u16,
-    rows: u16,
-    decoder: Option<Box<dyn OutputDecoder>>,
-) -> Result<(Box<dyn AgentTransport>, Option<u32>), PtyError> {
-    if json_mode {
-        // cols/rows 는 파이프에 개념이 없어 무시된다.
-        let (t, pid) = StdioTransport::open(spec, true, decoder)?;
-        Ok((Box::new(t), pid))
-    } else {
-        // decoder 는 여기서 버려진다 — `backend::output_decoder` 가 json 모드에만 Some 을 주므로
-        // non-json 은 애초에 None 이 온다.
-        let (t, pid) = PtyTransport::open(spec, cols, rows)?;
-        Ok((Box::new(t), pid))
-    }
 }
 
 /// spawn 요청 하나의 결말. ★"띄웠다" 와 "할 일이 없었다" 를 **호출자가 구분할 수 있어야 한다**★ —
@@ -643,8 +609,8 @@ impl AgentManager {
         self.profiles.list()
     }
 
-    pub fn agent_claude_session_id(&self, id: AgentId) -> Option<uuid::Uuid> {
-        self.profiles.get(id).and_then(|p| p.claude_session_id)
+    pub fn agent_backend_session_id(&self, id: AgentId) -> Option<uuid::Uuid> {
+        self.profiles.get(id).and_then(|p| p.backend_session_id)
     }
 
     /// 에이전트 신규 등록(트리 "만들기"). 등록 전에 명부 전역 이름 유일성을 강제한다(ADR-0120).
@@ -1023,20 +989,6 @@ impl AgentManager {
             control_endpoint,
         );
 
-        // spec 은 backend-neutral(program/args뿐)이라 caps 를 spec 에 싣지 않고 따로 전달한다 —
-        // session 이 transport caps 와 compose 한다.
-        let bcaps = backend::backend_caps(&profile.command);
-
-        // ADR-0044: 판정은 프로필 command 단일 출처 — spawn_session 은 backend 를 모르므로
-        // encoder/decoder/turn_classifier 를 여기서 뽑아 넘긴다.
-        let json_mode = profile.command.is_json_mode();
-        let encoder = backend::input_encoder(&profile.command);
-        let decoder = backend::output_decoder(&profile.command);
-        let turn_classifier = backend::turn_classifier(&profile.command);
-        // 우편 자격도 여기서 뽑아 세션에 싣는다 — 프로필이 지워져도 산 세션이 그 사실을 계속 안다
-        //   (`AgentManager::reads_messages` doc).
-        let reads_messages = backend::reads_messages(&profile.command);
-
         // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
         //   복원되고 shell 은 대화가 없어, 그 외 backend 는 빈 Vec 을 돌려준다.
         let seed_events = match mode {
@@ -1047,27 +999,32 @@ impl AgentManager {
             SpawnMode::Fresh => Vec::new(),
         };
 
-        let (session, child_pid) = self.spawn_session(
-            profile.id,
-            spec,
-            bcaps,
-            encoder,
-            reads_messages,
-            decoder,
-            json_mode,
-            epoch,
-            seed_events,
-            turn_classifier,
-        )?;
+        // ADR-0191: 통로 실물과 세션에 실릴 값(backend caps·encoder·턴 분류자·우편 자격)을 backend 가
+        //   **한 dispatch 로** 내준다 — 아스펙트마다 같은 switch 를 다시 타지 않는다. 이 자리는 돌려받은
+        //   통로의 실제 타입을 모른다.
+        //   우편 자격을 세션에 싣는 이유는 그대로다 — 프로필이 지워져도 산 세션이 그 사실을 계속 안다
+        //   (`AgentManager::reads_messages` doc).
+        // ★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그
+        //   프로그램이 이미 도는 상태에서 그 대화 파일을 읽게 된다.
+        let parts = backend::open_spawn(&profile.command, &spec, DEFAULT_COLS, DEFAULT_ROWS)?;
+
+        let (session, child_pid) =
+            self.spawn_session(profile.id, spec, parts, epoch, seed_events)?;
 
         if let Some(g) = provision_guard.as_mut() {
             g.disarm();
         }
 
-        // claude 세션 추적 부착(best-effort). shell은 세션 파일이 없으니 생략(needs_session=false).
+        // sid drift 관측 부착(best-effort). 관측기를 만드는 것도 "만들 게 없다"고 답하는 것도 backend
+        //   몫이라(ADR-0004) 여기서는 그 프로그램이 무엇을 읽는지 모른다. `needs` 게이트는 그대로다 —
+        //   sid 를 발급하지 않은 세션은 관측할 기준값이 없다.
         if let (Some(s), Some(pid)) = (sid, child_pid) {
             if needs {
-                self.tracker.watch(profile.id, pid, s);
+                if let Some(source) =
+                    backend::session_id_source(&profile.command, profile.id, pid, s)
+                {
+                    self.tracker.watch(profile.id, source);
+                }
             }
         }
 
@@ -1212,22 +1169,24 @@ impl AgentManager {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// ★통로를 여기서 만들지 않는다(ADR-0191)★ — 이미 만들어진 것을 `parts` 로 받고, 이 함수는 그
+    ///   실제 타입을 모른다. 호출자가 넘기기 전에 **자식 프로세스는 이미 떠 있다**.
     fn spawn_session(
         &self,
         id: AgentId,
         spec: CommandSpec,
-        backend_caps: BackendCaps,
-        encoder: InputEncoder,
-        reads_messages: bool,
-        decoder: Option<Box<dyn OutputDecoder>>,
-        json_mode: bool,
+        parts: backend::SpawnParts,
         epoch: u32,
         seed_events: Vec<OutputEvent>,
-        turn_classifier: backend::TurnClassifier,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
-        let (transport, child_pid) =
-            select_transport(json_mode, &spec, DEFAULT_COLS, DEFAULT_ROWS, decoder)?;
+        let backend::SpawnParts {
+            transport,
+            child_pid,
+            backend_caps,
+            encoder,
+            turn_classifier,
+            reads_messages,
+        } = parts;
 
         // ADR-0113: 공용 턴 관측 표 + 이 백엔드의 신호 분류자를 함께 꽂는다 — 안 꽂으면 이 세션만
         //   조용히 관측 밖으로 빠진다.
@@ -1362,7 +1321,7 @@ impl AgentManager {
 
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
         let resumable =
-            backend::needs_session(&profile.command) && profile.claude_session_id.is_some();
+            backend::needs_session(&profile.command) && profile.backend_session_id.is_some();
 
         if !resumable {
             // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.
@@ -1923,36 +1882,49 @@ mod tests {
         }
     }
 
-    // ── ADR-0044 ──
+    // ── ADR-0044/0191: backend 가 넘겨준 통로가 무엇을 나르나 ──────────────────────────────
+    //
+    // ★통로 **타입**이 아니라 통로가 신고하는 caps 로 잰다★: 만드는 코드가 `backend/<이름>/` 안으로
+    //   들어가 조립점에는 이름으로 부를 타입이 없다(ADR-0191). 재는 사실은 그대로다.
+    // ★`probe_spec` 은 실 CLI 가 아니다★: 즉시 끝나는 프로브를 그 backend 의 통로 선택으로 띄워, 어느
+    //   구현체가 골라졌는지만 본다(ADR-0012 격리 — 실 claude 바이너리 불요).
     #[cfg(windows)]
     #[test]
-    fn select_transport_json_mode_picks_stdio_structured() {
-        let (transport, _pid) =
-            select_transport(true, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS, None)
-                .expect("select");
-        let caps = transport.capabilities();
+    fn stream_json_backend_hands_over_structured_pipe() {
+        let parts = backend::open_spawn(
+            &claude_stream_json_command(),
+            &probe_spec(),
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+        )
+        .expect("open_spawn");
+        let caps = parts.transport.capabilities();
         assert!(
             caps.output.structured && !caps.output.terminal_bytes,
-            "json 모드 → StdioTransport(structured 출력, 터미널 바이트 아님)"
+            "stream-json → 구조화 파이프(structured 출력, 터미널 바이트 아님)"
         );
         assert!(!caps.control.resize, "파이프 resize 불가");
-        transport.shutdown();
+        parts.transport.shutdown();
     }
 
     // ── 회귀 ──
     #[cfg(windows)]
     #[test]
-    fn select_transport_terminal_mode_picks_pty() {
-        let (transport, _pid) =
-            select_transport(false, &probe_spec(), DEFAULT_COLS, DEFAULT_ROWS, None)
-                .expect("select");
-        let caps = transport.capabilities();
+    fn terminal_backend_hands_over_pty() {
+        let parts = backend::open_spawn(
+            &claude_terminal_command(),
+            &probe_spec(),
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+        )
+        .expect("open_spawn");
+        let caps = parts.transport.capabilities();
         assert!(
             caps.output.terminal_bytes && !caps.output.structured,
-            "터미널 모드 → PtyTransport(터미널 바이트, 구조화 아님)"
+            "터미널 모드 → PTY(터미널 바이트, 구조화 아님)"
         );
         assert!(caps.control.resize, "PTY resize 가능");
-        transport.shutdown();
+        parts.transport.shutdown();
     }
 
     // ── write_stdin_observed_if_epoch ──
@@ -1961,9 +1933,12 @@ mod tests {
     //   비교해 write 를 집행/거부하는가" 뿐이라, 실 자식·PTY·claude 바이너리가 전부 무관하다(ADR-0012 격리).
     //   in-crate 테스트라 private `sessions` 에 직접 접근한다 — `insert_test_session`(feature gate) 불요.
 
+    use crate::backend::InputEncoder;
     use crate::persistence::{FilePresetStore, FileProfileStore};
+    use crate::transport::AgentTransport;
     use crate::types::{
-        ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps, SessionCaps, TransportCaps,
+        BackendCaps, ControlCaps, InputCaps, InputEvent, ModelCaps, OutputCaps, SessionCaps,
+        TransportCaps,
     };
 
     struct RecordingTransport {
@@ -2023,7 +1998,6 @@ mod tests {
         ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
-                sessions_dir: None,
                 enabled: false,
                 poll_interval: Duration::from_secs(1),
             },
@@ -2126,7 +2100,15 @@ mod tests {
     fn claude_terminal_command() -> crate::profile::AgentCommand {
         crate::profile::AgentCommand::Claude {
             extra_args: vec![],
-            output_format: crate::profile::ClaudeOutputFormat::Terminal,
+            output_format: crate::profile::AgentOutputFormat::Terminal,
+        }
+    }
+
+    #[cfg(windows)]
+    fn claude_stream_json_command() -> crate::profile::AgentCommand {
+        crate::profile::AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: crate::profile::AgentOutputFormat::StreamJson,
         }
     }
 
@@ -2475,7 +2457,6 @@ mod tests {
         ))));
         let tracker = Arc::new(SessionTracker::new(
             crate::session_tracker::TrackerConfig {
-                sessions_dir: None,
                 enabled: false,
                 poll_interval: Duration::from_secs(1),
             },

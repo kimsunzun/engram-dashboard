@@ -7,10 +7,11 @@
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
 import type {
+  AgentBackendKind,
   AgentInfo,
   AgentProfile,
   AgentStatus,
-  ClaudeOutputFormat,
+  AgentOutputFormat,
   Preset,
   RestoreReport,
 } from './types'
@@ -175,7 +176,11 @@ export interface AgentClient {
   onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
 
   // ── 명령 ──────────────────────────────────────────────────────────────────
-  spawnAgent(cwd: string): Promise<AgentInfo>
+  /**
+   * ad-hoc 스폰 — 프로필을 미리 만들지 않고 cwd 와 백엔드만으로 띄운다(데몬이 프로필을 즉석 생성해
+   * 명부에 올린다). `backend` 는 **필수다** — 안 실으면 데몬이 거절한다(기본값 없음).
+   */
+  spawnAgent(cwd: string, backend: AgentBackendKind): Promise<AgentInfo>
   killAgent(agentId: string): Promise<void>
   interruptAgent(agentId: string): Promise<void>
   writeStdin(agentId: string, data: Uint8Array): Promise<void>
@@ -202,7 +207,20 @@ export interface AgentClient {
     extraArgs: string[],
     env: [string, string][],
     autoRestore: boolean,
-    outputFormat?: ClaudeOutputFormat,
+    outputFormat?: AgentOutputFormat,
+  ): Promise<AgentProfile>
+  /**
+   * codex 프로필 생성 — 형제 `createClaudeProfile` 과 같은 자리에 등록만 하고 스폰하지 않는다.
+   * outputFormat 은 codex 를 어느 모양으로 띄우나를 가른다: 'Terminal'=대화형 TUI,
+   * 'StreamJson'=상주 JSON 서버(codex app-server). 기본 'Terminal'(기존 호출자 동작 불변).
+   */
+  createCodexProfile(
+    name: string,
+    cwd: string,
+    extraArgs: string[],
+    env: [string, string][],
+    autoRestore: boolean,
+    outputFormat?: AgentOutputFormat,
   ): Promise<AgentProfile>
   deleteProfile(agentId: string): Promise<void>
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo>

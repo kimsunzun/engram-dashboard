@@ -31,6 +31,7 @@ Tauri v2 + React + xterm.js (프론트) / Rust + portable-pty (백엔드).
 | `research/` | step 착수 전 선행조사(조사·비교·미결질문). |
 | `refactoring/` | 리팩토링 재료 — 분리·병합 **경계 실측**, 구조 부채 계측, 계획·순서. **한 곳에서 훑어보려고 `research/`에서 갈라냈다**(사용자 지적 2026-08-23: 조사 더미에 묻혀 못 찾는다). 열람면·경계 규약 = 그 폴더 `README.md`. |
 | `reference/` | 코드 동기화 정설(진화형 캐논 — 제자리 수정). 실재 목록 = `ls docs/reference/`(주석·로깅·디버깅 컨벤션 등). *손으로 열거하지 않는다(rot).* |
+| `reference/structure/` | 주제별 **상세 구조** — 재사용 부품이고 **파일 하나 = 주제 하나**(브리핑·덱·TRD 가 여기를 가리키고 베끼지 않는다). ★조감도가 아니다★ — 전체 그림은 `reference/architecture-overview.md` 가 계속 갖는다. 실재 목록 = `ls docs/reference/structure/`. |
 | `handbook/` | 문서·프로세스 **시스템 설명서**. 첫 입주: `documentation-system.md`(개발 플로우↔문서 매핑·불변식·자동화 맵). "문서들이 어디에 왜 박히나"의 큰 그림. |
 
 ## 새 내용을 어디에 넣나

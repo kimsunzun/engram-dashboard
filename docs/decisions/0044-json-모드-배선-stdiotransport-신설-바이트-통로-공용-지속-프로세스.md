@@ -1,7 +1,7 @@
 # ADR-0044: JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스
 
-- 상태: 확정 (2026-07-02, 근거: claude CLI 실측 스파이크 + 백엔드 seam 매핑 + 사용자 승인) · resume 후속 완료 by ADR-0074
-- 관련: ADR-0002(출력 종류 비가정·capability 렌더러 분기) · ADR-0004(claude 지식 격리) · ADR-0030(transport ⊕ backend caps 합성) · `src/lab/richslot/`(렌더 스파이크) · step-log S? (JSON 렌더 착수) · Amended by ADR-0045 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환)
+- 상태: 확정 (2026-07-02, 근거: claude CLI 실측 스파이크 + 백엔드 seam 매핑 + 사용자 승인) · resume 후속 완료 by ADR-0074 · 부분 폐기 by ADR-0189 (바이트 통로 공용 조항)
+- 관련: ADR-0002(출력 종류 비가정·capability 렌더러 분기) · ADR-0004(claude 지식 격리) · ADR-0030(transport ⊕ backend caps 합성) · `src/lab/richslot/`(렌더 스파이크) · step-log S? (JSON 렌더 착수) · Amended by ADR-0045 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) · Amended by ADR-0189 (바이트 통로 공용 조항)
 
 ## 맥락
 대시보드가 claude 출력을 구조화(JSON)로 렌더하는 모드(RichSlot)를 붙여야 한다. 실측 결과 `--output-format stream-json`·`--input-format stream-json`은 **`-p`(print/헤드리스) 전용**이다(claude 2.1.170 `--help` 명시: "only works with --print"). 즉 현행 PTY 대화형 claude는 JSON을 낼 수 없고, "터미널 렌더러를 JSON 렌더러로 스왑"이 아니라 **프로세스 기동 방식 자체가 다른 별도 경로**가 필요하다. 문제: 이 경로를 기존 파이프라인(OutputCore→codec→데몬→프론트)과 어떻게 공존시키나.

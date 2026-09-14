@@ -267,7 +267,7 @@ const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 const CMD_UNSAFE_CHARS: &[char] = &['%', '&', '^', '|', '<', '>'];
 
 /// ★왜 UTF-8 도 보나(Codex #5)★: 인자는 최종적으로 `to_string_lossy()` 로 문자열화돼 CLI 에 실린다
-///   (claude.rs). 비-UTF8 경로는 그 lossy 변환에서 U+FFFD 로 **손상**돼 claude 가 존재하지 않는 경로를
+///   (`backend/claude/`). 비-UTF8 경로는 그 lossy 변환에서 U+FFFD 로 **손상**돼 claude 가 존재하지 않는 경로를
 ///   받는다. 그런 경로는 애초에 주입하지 않는다(손상된 경로 < 프라이밍 없음).
 fn path_is_cli_safe(p: &std::path::Path) -> bool {
     let Some(s) = p.to_str() else {

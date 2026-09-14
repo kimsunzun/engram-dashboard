@@ -55,7 +55,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0005](0005-finalize-1회.md) | finalize 정확히 1회 (pump 단독) | 확정 |
 | [0006](0006-락-순서.md) | 락 순서 규율 (sessions → 내부) | 확정 |
 | [0007](0007-epoch-재구독.md) | epoch 맵교체 재구독 | 확정 (부분 폐기 by ADR-0046: 프론트 epoch 권위 조항: SubscribeAck 단독 → src-tauri decide_epoch 1차 필터 + 필터된 frame/마커 epoch 채택 — 그때는 [agentId, epoch] 재구독 원칙을 그대로 뒀으나 그 deps 조항은 뒤이어 ADR-0163 이 폐기했다 / ADR-0163: 맵 교체마다 epoch +1 증분과 재구독 deps 두 조항) |
-| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음) |
+| [0008](0008-세션복원-sid-통제.md) | 세션 복원 — 우리가 sid 통제, 추적 파일 best-effort | 확정 (부분 폐기 by ADR-0082: resume 조기종료 → fresh-fallback 조항 폐지: 실패는 종점으로 직행(대개 `Exited{code≠0}` — `Failed` 가 아니다), 자동 fresh 재spawn 없음 / ADR-0185: sid 발급 주체) |
 | [0009](0009-tauri-2x-핀.md) | tauri 최신 2.x 핀 (Channel 무손실 실측) | 확정 |
 | [0010](0010-cargo-workspace-분리.md) | Cargo workspace 3-crate 분리 | 확정 |
 | [0011](0011-agentclient-제어표면.md) | agentClient 제어 표면 facade (데몬 대비) | 확정 |
@@ -91,7 +91,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0041](0041-데몬-출력-구독-소유-layout-델타-단독-프론트-직접-구독-차단.md) | 데몬 출력 구독 소유 = layout 델타 단독 (프론트 직접 구독 차단) | 확정 |
 | [0042](0042-구독-델타-slot-단위-diff-agent-union-한계-보완.md) | 구독 델타 = slot 단위 diff (agent-union 한계 보완) | 확정 |
 | [0043](0043-mount-replay-actor-경유-deliverable-게이트-배정등록-fresh-분기.md) | mount-replay = actor 경유 + deliverable 게이트 + 배정·등록 fresh 분기 | 확정 (부분 폐기 by ADR-0046: deliverable gate·미러 cursor 메커니즘 조항: 폐기 → 뷰 buffering phase + gen 펜스로 대체 — mount-replay 원칙 자체는 전량 재replay로 승계) |
-| [0044](0044-json-모드-배선-stdiotransport-신설-바이트-통로-공용-지속-프로세스.md) | JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스 | 확정 (부분 폐기 by ADR-0045: 통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) |
+| [0044](0044-json-모드-배선-stdiotransport-신설-바이트-통로-공용-지속-프로세스.md) | JSON 모드 배선 — StdioTransport 신설 + 바이트 통로 공용 + 지속 프로세스 | 확정 (부분 폐기 by ADR-0045: 통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환 / ADR-0189: 바이트 통로 공용 조항) |
 | [0045](0045-출력-정제를-백엔드로-이동-타입-outputevent를-서버에서-파싱해-wire로-흘림.md) | 출력 정제를 백엔드로 이동 — 타입 OutputEvent를 서버에서 파싱해 wire로 흘림 | 확정 |
 | [0046](0046-pc-미러-버퍼-제거-뷰-직결-replayview-direct-single-flight-gen-펜스.md) | PC 미러 버퍼 제거 — 뷰 직결 replay(view-direct) + single-flight gen 펜스 | 확정 (부분 폐기 by ADR-0164: 결정 2 의 재연결 계기 조항) |
 | [0047](0047-프론트-스타일링-tailwind-css-v4-shadcnlucide-채택-순수-css-기조-전환.md) | 프론트 스타일링 = Tailwind CSS v4 + shadcn/lucide 채택 (순수 CSS 기조 전환) | 확정 (부분 폐기 by ADR-0048: 채팅 UI 렌더 방식: CC룩 네이티브 직접 구현·OSS 참조한정(코드 복붙 아님) → Cline 잎 컴포넌트 verbatim 코드 포트(Apache-2.0 귀속)) |
@@ -123,13 +123,13 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 |
 | [0074](0074-json-stream-json-모드-resume-활성화-adr0044-후속-완료-통제-sid-adr0008-재사용.md) | json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용) | 확정 |
 | [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
-| [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효) |
+| [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효 / ADR-0185: 우리 쪽 sid 발급 전제) |
 | [0077](0077-수동-활성화도-resume-조기종료-시-fresh-fallback-공유-adr-0076-정련.md) | 수동 활성화도 resume 조기종료 시 fresh-fallback 공유 — ADR-0076 정련 | 폐기 (Superseded by ADR-0082) |
 | [0078](0078-렌더-모드는-에이전트-생성-시-결정고정-per-activation-활성화-오버라이드-폐기.md) | 렌더 모드는 에이전트 생성 시 결정·고정 (per-activation 활성화 오버라이드 폐기) | 확정 |
 | [0079](0079-jsonrichslot-모드-resume-시-대화-스크롤백-복원-데몬이-claude-jsonl-transcript를-읽어-history-프레임으로-전달.md) | JSON(RichSlot) 모드 resume 시 대화 스크롤백 복원 — 데몬이 Claude `.jsonl`을 읽어 OutputCore 버퍼에 seed(단일 소스 · pump 전) | 확정 |
 | [0080](0080-llm-제어-표면-아키텍처-bashengram-ctl데몬-ws백엔드-직행-데몬-opaque-relay앱-viewmanagerui.md) | LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI) | 폐기 (Superseded by ADR-0085) |
 | [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0155: 결정 1과 2 대체 / ADR-0154: 대상 주소지정 불요 전제) |
-| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (제목의 "Failed" 는 일상어 — `AgentStatus::Failed` 가 아니다. 실제 종점은 `Exited{code}`(대개 code≠0)이고 본문 결정도 "종점(terminal)"이라 적는다. 제목·파일명은 이력이라 안 고친다 — 본문 머리 주석 참조) |
+| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (부분 폐기 by ADR-0185: 살아남는 상위 결정 중 sid 발급 조항) |
 | [0083](0083-종료-시-프로필-자동-삭제-폐지-유저-kill정상-exit-포함-모든-종료는-시체-보존-삭제는-명시적-사용자-명령으로만.md) | 종료 시 프로필 자동 삭제 폐지 — 유저 kill·정상 exit 포함 모든 종료는 시체 보존, 삭제는 명시적 사용자 명령으로만 | 확정 |
 | [0084](0084-재활성화resume-epoch-bump-apply-disposition-epoch-guard-stale-reap-산-세션-강등프론트-재구독-누락-차단.md) | 재활성화(resume) epoch bump + apply_disposition epoch-guard — stale reap 산-세션 강등·프론트 재구독 누락 차단 | 확정 |
 | [0085](0085-cli-백엔드-제어-채널-in-band-출력-마커m3-engram-ctl-폐기.md) | CLI 백엔드 제어 채널 = in-band 출력 마커(M3) — engram-ctl 폐기 | 폐기 (Superseded by ADR-0086) |
@@ -144,7 +144,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0094](0094-s17-에이전트-간-발신-권한-런타임-최소권한-pre-authorization-grant-seam.md) | S17 에이전트 간 발신 권한 — 런타임 최소권한 pre-authorization (grant seam) | 확정 (부분 폐기 by ADR-0097: 발신만 pre-authorize·bypassPermissions 거부 → 스폰 기본을 auto mode(bypassPermissions)로 채택(2026-07-22 사용자 결정). grant seam은 미래 공용 제약 레이어용 정책 표면으로 유지 / ADR-0098: CLI 발신 grant 번역을 절대경로 Bash({exe} *)에서 bare-name Bash/PowerShell({exe}:*) + PATH 주입으로 정렬(claude 권한 매처 미매칭 0/38 해소·배포 이식성)) |
 | [0095](0095-봉투-포맷-스위칭-구조-기본-colon대체-xml-bracket-기각.md) | 봉투 포맷 스위칭 구조 — 기본 colon·대체 xml (bracket 기각) | 확정 (부분 폐기 by ADR-0096: 봉투 포맷 스위치 저장 위치·노출 방식 (결정 5)) |
 | [0096](0096-봉투-포맷-운영-스위치-데몬-전역-상태-invoke-커맨드-조종-표면-전용워커-mcp-미노출.md) | 봉투 포맷 운영 스위치 — 데몬 전역 상태 + invoke 커맨드 (조종 표면 전용·워커 MCP 미노출) | 확정 |
-| [0097](0097-스폰-에이전트-기본-auto-modebypasspermissions-채택-헤드리스-워커-권한-현실화.md) | 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화 | 확정 |
+| [0097](0097-스폰-에이전트-기본-auto-modebypasspermissions-채택-헤드리스-워커-권한-현실화.md) | 스폰 에이전트 기본 auto mode(bypassPermissions) 채택 — 헤드리스 워커 권한 현실화 | 확정 (부분 폐기 by ADR-0188: 권한 값을 백엔드 코드에 고정하던 부분) |
 | [0098](0098-cli-발신-grant를-bare-name-path-주입으로-정렬-절대경로-미매칭-해소.md) | CLI 발신 grant를 bare-name + PATH 주입으로 정렬 — 절대경로 미매칭 해소 | 확정 |
 | [0099](0099-채널-선택-백엔드-capability-스위치-프라이밍-정적-2파일mcp-capableboth-teaching-비-mcpcli-only.md) | 채널 선택 = 백엔드 capability 스위치 + 프라이밍 정적 2파일(MCP-capable=both-teaching / 비-MCP=CLI-only) | 확정 (부분 폐기 by ADR-0126: engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화 / ADR-0128: 결정 2 engram-send 물리 주입) |
 | [0100](0100-릴리즈-패키징-포터블-폴더-조립-스크립트-co-location-불변식.md) | 릴리즈 패키징 — 포터블 폴더 조립 스크립트 (co-location 불변식) | 확정 (부분 폐기 by ADR-0134: 런타임 데이터 위치를 실행 폴더 하위로 대체) |
@@ -230,3 +230,17 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0181](0181-요청-시한은-명령-무관-공용-하나로-두고-만료는-그-요청만-실패시킨다.md) | 요청 시한은 명령 무관 공용 하나로 두고 만료는 그 요청만 실패시킨다 | 확정 |
 | [0182](0182-transport-는-연결-사건을-구조화해-올리고-화면은-만들지-않는다.md) | transport 는 연결 사건을 구조화해 올리고 화면은 만들지 않는다 | 확정 |
 | [0183](0183-겹친-요청-번호는-승계시키지-않고-은퇴시켜-양쪽-다-실패시킨다.md) | 겹친 요청 번호는 승계시키지 않고 은퇴시켜 양쪽 다 실패시킨다 | 확정 |
+| [0184](0184-pty-transport-가-자식에게-터미널-정체성을-선언한다.md) | PTY transport 가 자식에게 터미널 정체성을 선언한다 | 확정 |
+| [0185](0185-세션-복원-불변식을-발급-주체-중립으로-codex는-발급받은-thread-id를-수령해-쓴다.md) | 세션 복원 불변식을 발급 주체 중립으로 — codex는 발급받은 thread id를 수령해 쓴다 | 확정 (부분 폐기 by ADR-0186: 원칙 문서 두 곳 조항) |
+| [0186](0186-claudemd-는-매-세션-필요한-것만-담는다-에피소딕-지식은-adr코드-앵커핸드오프가-진다.md) | CLAUDE.md 는 매 세션 필요한 것만 담는다 — 에피소딕 지식은 ADR·코드 앵커·핸드오프가 진다 | 확정 |
+| [0187](0187-codex-phase-2-통로를-app-server-로-확정한다-exec-는-글자를-흘리지-않는다.md) | codex Phase 2 통로를 app-server 로 확정한다 — exec 는 글자를 흘리지 않는다 | 확정 |
+| [0188](0188-권한과-승인을-백엔드-중립-축으로-추상화한다-값-설계는-후속.md) | 권한과 승인을 백엔드 중립 축으로 추상화한다 — 값 설계는 후속 | 확정 |
+| [0189](0189-codex-app-server-통로는-backend-폴더-안의-agenttransport-구현체로-둔다.md) | codex app-server 통로는 backend 폴더 안의 AgentTransport 구현체로 둔다 | 확정 (부분 폐기 by ADR-0191: 통로의 거처는 정했으나 생성 경로를 안 정했다) |
+| [0190](0190-json-모드-입력은-큐에-담고-보낼-수-있을-때-흘린다-큐만-두고-조작은-나중.md) | json 모드 입력은 큐에 담고 보낼 수 있을 때 흘린다 — 큐만 두고 조작은 나중 | 확정 (부분 폐기 by ADR-0193: 결정 4 의 「턴이 도는가는 코어가 이미 안다」 조항 (큐 해제 판정을 코어 단독으로 좁힌 부분)) |
+| [0191](0191-백엔드가-자기-통로를-만들어-넘긴다-가르는-switch-는-한-곳뿐이다.md) | 백엔드가 자기 통로를 만들어 넘긴다 — 가르는 switch 는 한 곳뿐이다 | 확정 |
+| [0192](0192-백엔드-동작의-기본값은-claude-와-동일하게-맞춘다-못-맞추면-보고한다.md) | 백엔드 동작의 기본값은 claude 와 동일하게 맞춘다 — 못 맞추면 보고한다 | 확정 |
+| [0193](0193-큐-해제의-지금-보낼-수-있나는-각-통로-구현체가-자기-상태로-판정한다.md) | 큐 해제의 「지금 보낼 수 있나」는 각 통로 구현체가 자기 상태로 판정한다 | 확정 |
+| [0194](0194-터미널이냐-json이냐는-백엔드-중립-축-하나로-둔다-종류만-구분자다.md) | 터미널이냐 JSON이냐는 백엔드 중립 축 하나로 둔다 — 종류만 구분자다 | 확정 |
+| [0195](0195-연결이-끊긴-동안-들어온-명령은-담아-두지-않고-즉시-실패시킨다.md) | 연결이 끊긴 동안 들어온 명령은 담아 두지 않고 즉시 실패시킨다 | 확정 |
+| [0196](0196-죽은-데몬-기록은-버전-방향과-무관하게-stale-생존-확인을-버전-대조보다-먼저.md) | 죽은 데몬 기록은 버전 방향과 무관하게 stale — 생존 확인을 버전 대조보다 먼저 | 확정 |
+| [0197](0197-주제별-상세-구조-문서를-referencestructure-에-모은다-파일-하나-주제-하나.md) | 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나 | 확정 |

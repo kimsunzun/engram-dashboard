@@ -1,7 +1,7 @@
 //! 에이전트 프로필 — 재시작·세션 복원의 단일 진실원(single source of truth).
 //!
 //! 이 모듈은 의도적으로 transport·claude 중립이다. claude 전용 인자 조립
-//! (`--session-id` / `--resume`)은 `backend/claude.rs`가 맡고, 여기엔 "무엇을 실행하고
+//! (`--session-id` / `--resume`)은 `backend/claude/`가 맡고, 여기엔 "무엇을 실행하고
 //! 어떤 세션을 이어받을지"라는 중립 데이터만 둔다.
 //!
 //! tauri import 0 — 격리 규칙 준수.
@@ -26,11 +26,11 @@ fn now_millis() -> i64 {
 
 // ── 중립 실행 명령 ─────────────────────────────────────────────────────────────
 
-/// claude 출력 포맷 — 프로세스 기동 방식(= transport)과 프론트 렌더러를 함께 가른다(ADR-0044).
-/// `Terminal` = PTY 대화형(xterm 렌더). `StreamJson` = `-p` 헤드리스 NDJSON 스트림
-/// (StdioTransport + RichSlot 렌더).
+/// 에이전트 출력 모드 — backend별 transport·codec 선택에 들어가는 프로필 축이다(ADR-0044).
+/// `Terminal` = PTY 대화형. `StreamJson` = JSON 기반 비터미널 모드이며 구체적인 교환
+/// 모양은 backend 가 정한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum ClaudeOutputFormat {
+pub enum AgentOutputFormat {
     #[default]
     Terminal,
     StreamJson,
@@ -49,31 +49,32 @@ pub enum AgentCommand {
     Claude {
         extra_args: Vec<String>,
         #[serde(default)]
-        output_format: ClaudeOutputFormat,
+        output_format: AgentOutputFormat,
     },
     Shell {
         program: String,
         args: Vec<String>,
     },
-}
-
-impl AgentCommand {
-    pub fn is_json_mode(&self) -> bool {
-        matches!(
-            self,
-            AgentCommand::Claude {
-                output_format: ClaudeOutputFormat::StreamJson,
-                ..
-            }
-        )
-    }
+    /// codex CLI. `extra_args` 는 backend 가 조립하는 인자(`--cd`·`-s`·`-a`)를 제외한
+    /// 사용자 추가 인자. `output_format` 이 없는 저장 JSON 은 `Terminal` 로 역직렬화한다.
+    ///
+    /// ★칸을 함부로 늘리지 않는다★: 이 enum 은 `#[serde(tag = "kind")]` 라 여기 적은 모양이 그대로
+    /// `agents.json` 에 앉는다 — 디스크에 박히는 계약이라 **덜 얼릴수록 싸다**. 샌드박스·승인 모드
+    /// 같은 값은 아직 `--help` 텍스트 등급이라(TRD §2) 지금 타입으로 굳히면 그 등급인 채로 굳는다.
+    /// 칸이 `extra_args` 하나뿐이던 것도 그 사유의 결정이었고(사용자 결정 2026-09-07), 모드 축을
+    /// 더하며 ADR-0194 가 그 자리만 갱신했다 — 사유는 그대로 산다.
+    Codex {
+        extra_args: Vec<String>,
+        #[serde(default)]
+        output_format: AgentOutputFormat,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnMode {
     /// 새 세션 시작(claude면 `--session-id <새 uuid>`).
     Fresh,
-    /// 기존 세션 이어받기(claude면 `--resume <claude_session_id>`).
+    /// 기존 세션 이어받기(claude면 `--resume <backend_session_id>`).
     Resume,
 }
 
@@ -155,9 +156,15 @@ pub struct AgentProfile {
     /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
     pub env: Vec<(String, String)>,
 
-    /// 현재 claude 세션 id. **가변** — 최초엔 우리가 생성하고, `/clear` 등으로 바뀌면
+    /// 현재 백엔드 세션 id. **가변** — 최초엔 우리가 생성하고, `/clear` 등으로 바뀌면
     /// session_tracker watcher가 갱신한다. None이면 아직 세션이 없다는 뜻.
-    pub claude_session_id: Option<Uuid>,
+    ///
+    /// ★이름이 중립인 것은 의도★ — **누가 id 를 뽑는지를 말하지 않는다.** claude 는 우리가 정한
+    /// id 를 `--session-id` 로 건네받고, codex 는 자기가 뽑은 id 를 우리에게 알린다. 어느 쪽이든
+    /// 「그 백엔드의 세션 이름공간에 있는 id」라는 뜻은 같다.
+    /// ※2026-09-07 까지 이 칸의 이름은 `claude_session_id` 였다(디스크·wire 포함).
+    ///   하위호환 shim 을 두지 않은 근거 = `docs/tracking.md` T-33 · S21 TRD §6-1.
+    pub backend_session_id: Option<Uuid>,
 
     /// fallback·clear로 폐기된 과거 세션 id 이력(감사·디버깅용).
     pub old_session_ids: Vec<Uuid>,
@@ -243,7 +250,7 @@ impl AgentProfile {
             command,
             cwd,
             env,
-            claude_session_id: None,
+            backend_session_id: None,
             old_session_ids: Vec::new(),
             epoch: 0,
             last_failure: None,
@@ -584,17 +591,17 @@ impl ProfileRegistry {
         }
     }
 
-    /// 세션 id 확보 — `claude_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
+    /// 세션 id 확보 — `backend_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
     ///
     /// ★Resume 전용(ADR-0076)★: 기존 대화를 이어받으려면 저장된 sid 를 그대로 써야 한다.
     ///   Fresh 모드는 절대 이걸 쓰면 안 된다 — Fresh 는 `new_session_id`(항상 새 uuid).
     pub fn ensure_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            if p.claude_session_id.is_none() {
-                p.claude_session_id = Some(Uuid::new_v4());
+            if p.backend_session_id.is_none() {
+                p.backend_session_id = Some(Uuid::new_v4());
             }
-            p.claude_session_id
+            p.backend_session_id
         })
     }
 
@@ -609,11 +616,11 @@ impl ProfileRegistry {
     pub fn new_session_id(&self, id: AgentId) -> Option<Uuid> {
         self.mutate(|m| {
             let p = m.get_mut(&id)?;
-            if let Some(old) = p.claude_session_id.take() {
+            if let Some(old) = p.backend_session_id.take() {
                 p.old_session_ids.push(old);
             }
             let fresh = Uuid::new_v4();
-            p.claude_session_id = Some(fresh);
+            p.backend_session_id = Some(fresh);
             Some(fresh)
         })
     }
@@ -623,11 +630,11 @@ impl ProfileRegistry {
     /// 같은 값으로의 호출은 no-op(불필요한 디스크 쓰기 회피).
     pub fn observe_session_id(&self, id: AgentId, new_sid: Uuid) -> bool {
         self.mutate_if(|m| match m.get_mut(&id) {
-            Some(p) if p.claude_session_id != Some(new_sid) => {
-                if let Some(old) = p.claude_session_id.take() {
+            Some(p) if p.backend_session_id != Some(new_sid) => {
+                if let Some(old) = p.backend_session_id.take() {
                     p.old_session_ids.push(old);
                 }
-                p.claude_session_id = Some(new_sid);
+                p.backend_session_id = Some(new_sid);
                 p.last_active = now_millis();
                 true
             }
@@ -706,7 +713,7 @@ mod tests {
             "t".into(),
             AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: ClaudeOutputFormat::Terminal,
+                output_format: AgentOutputFormat::Terminal,
             },
             PathBuf::from("."),
             vec![],
@@ -817,7 +824,7 @@ mod tests {
 
         assert!(reg.observe_session_id(id, sid2));
         let got = reg.get(id).unwrap();
-        assert_eq!(got.claude_session_id, Some(sid2));
+        assert_eq!(got.backend_session_id, Some(sid2));
         assert!(
             got.old_session_ids.contains(&sid1),
             "옛 sid가 이력에 남아야 함"
@@ -826,7 +833,7 @@ mod tests {
         assert!(!reg.observe_session_id(id, sid2));
 
         let persisted = store.load();
-        assert_eq!(persisted[0].claude_session_id, Some(sid2));
+        assert_eq!(persisted[0].backend_session_id, Some(sid2));
     }
 
     #[test]
@@ -845,7 +852,7 @@ mod tests {
         );
         let got = reg.get(id).unwrap();
         assert_eq!(
-            got.claude_session_id,
+            got.backend_session_id,
             Some(sid2),
             "현재 sid = 새로 발급한 값"
         );
@@ -853,7 +860,7 @@ mod tests {
             got.old_session_ids.contains(&sid1),
             "옛 sid 는 이력으로 밀려야 함"
         );
-        assert_eq!(store.load()[0].claude_session_id, Some(sid2));
+        assert_eq!(store.load()[0].backend_session_id, Some(sid2));
     }
 
     #[test]
@@ -864,7 +871,7 @@ mod tests {
         reg.upsert(p);
         let sid = reg.new_session_id(id).unwrap();
         let got = reg.get(id).unwrap();
-        assert_eq!(got.claude_session_id, Some(sid));
+        assert_eq!(got.backend_session_id, Some(sid));
         assert!(
             got.old_session_ids.is_empty(),
             "세션 없던 프로필은 밀 옛 sid 가 없음"
@@ -881,7 +888,7 @@ mod tests {
         let b = reg.new_session_id(id).unwrap();
         assert_ne!(a, b, "연속 Fresh 는 매번 다른 sid");
         let got = reg.get(id).unwrap();
-        assert_eq!(got.claude_session_id, Some(b));
+        assert_eq!(got.backend_session_id, Some(b));
         assert!(got.old_session_ids.contains(&a), "직전 sid 는 이력에");
     }
 
@@ -1410,7 +1417,7 @@ mod tests {
             "command": { "kind": "Claude", "extra_args": [] },
             "cwd": ".",
             "env": [],
-            "claude_session_id": null,
+            "backend_session_id": null,
             "old_session_ids": [],
             "epoch": 0,
             "auto_restore": true,
@@ -1532,7 +1539,7 @@ mod tests {
             "command": { "kind": "Claude", "extra_args": [] },
             "cwd": ".",
             "env": [],
-            "claude_session_id": null,
+            "backend_session_id": null,
             "old_session_ids": [],
             "epoch": 3,
             "auto_restore": true,
@@ -1609,7 +1616,7 @@ mod tests {
         );
     }
 
-    // ── ADR-0044: output_format serde 하위호환 + is_json_mode 판정 ──────────────
+    // ── ADR-0044: output_format serde 하위호환 ─────────────────────────────────
     #[test]
     fn claude_command_without_output_format_defaults_terminal() {
         // 옛 wire/agents.json 은 output_format 필드가 없다 → #[serde(default)] = Terminal.
@@ -1619,29 +1626,36 @@ mod tests {
         assert!(
             matches!(
                 &cmd,
-                AgentCommand::Claude { output_format: ClaudeOutputFormat::Terminal, extra_args }
+                AgentCommand::Claude { output_format: AgentOutputFormat::Terminal, extra_args }
                     if extra_args == &vec!["--foo".to_string()]
             ),
             "output_format 부재 → Terminal + extra_args 보존"
         );
-        assert!(!cmd.is_json_mode(), "Terminal 은 json 모드 아님");
     }
 
     #[test]
-    fn stream_json_command_roundtrips_and_is_json_mode() {
+    fn codex_command_without_output_format_defaults_terminal() {
+        let stored = r#"{ "kind": "Codex", "extra_args": ["--foo"] }"#;
+        let cmd: AgentCommand = serde_json::from_str(stored).expect("stored codex cmd deserialize");
+        assert!(
+            matches!(
+                &cmd,
+                AgentCommand::Codex { output_format: AgentOutputFormat::Terminal, extra_args }
+                    if extra_args == &vec!["--foo".to_string()]
+            ),
+            "output_format 부재 → Terminal + extra_args 보존"
+        );
+    }
+
+    #[test]
+    fn stream_json_command_roundtrips() {
         let cmd = AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         };
-        assert!(cmd.is_json_mode(), "StreamJson 은 json 모드");
         let json = serde_json::to_string(&cmd).unwrap();
         let back: AgentCommand = serde_json::from_str(&json).unwrap();
         assert_eq!(cmd, back);
-        assert!(!AgentCommand::Shell {
-            program: "cmd.exe".into(),
-            args: vec![]
-        }
-        .is_json_mode());
     }
 
     #[test]

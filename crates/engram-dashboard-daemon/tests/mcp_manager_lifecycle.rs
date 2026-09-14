@@ -148,7 +148,6 @@ fn make_manager_with_injected(
     let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },
@@ -185,7 +184,7 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
         "claude-fail-closed".into(),
         AgentCommand::Claude {
             extra_args: vec![],
-            output_format: engram_dashboard_agent::profile::ClaudeOutputFormat::Terminal,
+            output_format: engram_dashboard_agent::profile::AgentOutputFormat::Terminal,
         },
         PathBuf::from("."),
         vec![],

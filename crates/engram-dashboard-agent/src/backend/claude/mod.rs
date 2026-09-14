@@ -1,25 +1,67 @@
 //! ClaudeBackend — claude CLI 전용 CommandSpec 산출.
 //!
-//! ★claude 지식 격리(ADR-0004)★: claude 플래그·env 규약 · stream-json 스키마 · `.jsonl` transcript
-//! 파일 배치 지식은 **이 파일 안에만** 둔다. generic 층(manager·backend dispatch)·transport·core 는
-//! 추상 descriptor 와 바이트만 나른다.
+//! ★이 폴더가 세우는 규칙 = claude 지식은 여기 안에만 산다(ADR-0004)★: claude 플래그·env 규약 ·
+//! stream-json 입출력 스키마 · `.jsonl` transcript 파일 배치 · 이어받기 실패 문구 · 턴 신호 매핑이
+//! 전부 이 폴더다. 바깥(manager · `backend/mod.rs` dispatch · transport · core)은 추상 descriptor 와
+//! 바이트만 나른다.
+//! ★파일이 아니라 폴더인 이유가 그것이다★ — 맨 `claude.rs` 는 "여기까지가 claude 다" 를 이름으로 말하지
+//! 못해서, 지식이 dispatch 로 새어도 아무도 위반으로 읽지 않는다. 실제로 샜다: `backend/mod.rs` 가 입력
+//! 인코딩·합성 에코·출력 decoder·transcript seed 넷을 이 모듈의 함수로 직접 불렀고, 한 파일에 살던
+//! 동안은 그것이 보이지 않았다.
+//!
+//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나★: 바깥이 새 지식을 필요로 하면
+//!   그 trait 에 메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라.
+//! ★격리 게이트(백엔드 폴더 넷 공통 — 이름만 바꿔 돌린다)★:
+//!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
+//!   ★히트를 세지 않는다★ — 각 히트가 `backend/mod.rs` 의 **등록부**(`pub use claude::ClaudeBackend;`)
+//!   인지 판정한다. 등록부와 dispatch 표는 이름을 적을 수밖에 없는 자리이고, 그 밖의 히트는 위반이다.
+//!   ★못 보는 것 — 부풀리지 말 것★: ① **vendor 이름을 안 달고 새는 지식**(매직 타임아웃·맨 `pid` 필드
+//!   처럼 이름이 없는 규약)은 애초에 안 걸린다 — 이 게이트가 재는 건 이름뿐이다 ② 백엔드 알파벳을 손으로
+//!   적으므로 **새 백엔드는 누가 그 이름을 게이트에 더할 때까지 안 보인다** ③ 별칭 import
+//!   (`use crate::backend::claude as c;` → `c::foo()`)와 `#[path]` 재배치는 `claude::` 를 안 남겨
+//!   빠져나간다.
 //!
 //! tauri import 0.
+
+mod session_file;
 
 use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::backend::{console_command, AgentBackend, TurnClassifier};
+use crate::backend::{
+    console_command, AgentBackend, InputEncoder, SpawnParts, TransportShape, TurnClassifier,
+};
 use crate::failure::AgentFailureKind;
-use crate::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
+use crate::session_tracker::SessionIdSource;
+use crate::transport::pty::PtyTransport;
+use crate::transport::stdio::StdioTransport;
+use crate::transport::{AgentTransport, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
-    BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, SessionCaps, ToolGrant,
-    CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError,
+    SessionCaps, ToolGrant, CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF,
+    MAIL_MARKER_ON,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
+
+/// claude 가 `--output-format stream-json` 으로 뜨나 = 이 폴더 안의 네 축(통로·입력 인코딩·출력
+/// decoder·transcript seed)이 함께 갈리는 지점.
+///
+/// ★이 술어를 `profile` 로 되돌리지 말 것★(ADR-0004): 거기 있으면 claude 의 출력 형식 축이 공용 층의
+///   통로 선택을 직접 굴린다. 밖으로 나가는 것은 [`AgentBackend::transport_shape`] 같은 중립 축의
+///   값뿐이다.
+fn is_stream_json(command: &AgentCommand) -> bool {
+    matches!(
+        command,
+        AgentCommand::Claude {
+            output_format: AgentOutputFormat::StreamJson,
+            ..
+        }
+    )
+}
 
 /// claude 가 `--resume <sid>` 로 이어받을 대화를 못 찾았을 때 내는 문구의 **소문자 조각**.
 ///
@@ -92,7 +134,7 @@ impl AgentBackend for ClaudeBackend {
                 args.push("bypassPermissions".to_string());
                 match output_format {
                     // ── 터미널(PTY 대화형) — 바이트/인자 동결(회귀 금지) ──
-                    ClaudeOutputFormat::Terminal => {
+                    AgentOutputFormat::Terminal => {
                         if let Some(sid) = session_id {
                             let flag = match mode {
                                 SpawnMode::Fresh => "--session-id",
@@ -105,7 +147,7 @@ impl AgentBackend for ClaudeBackend {
                     // ── JSON(헤드리스 stream-json) — ADR-0044 ──
                     // stream-json 입출력은 claude `-p` 전용(실측: --help "only works with --print").
                     // --replay-user-messages: 유저 턴을 출력 스트림에 되울림 → 프론트가 출력 단일 출처로 렌더.
-                    ClaudeOutputFormat::StreamJson => {
+                    AgentOutputFormat::StreamJson => {
                         args.push("-p".to_string());
                         args.push("--input-format".to_string());
                         args.push("stream-json".to_string());
@@ -254,6 +296,9 @@ impl AgentBackend for ClaudeBackend {
                 env,
                 cwd,
             },
+            AgentCommand::Codex { .. } => {
+                unreachable!("ClaudeBackend 는 Codex variant 를 처리하지 않음. dispatch 버그.")
+            }
         }
     }
 
@@ -292,6 +337,110 @@ impl AgentBackend for ClaudeBackend {
             return Some(AgentFailureKind::NoConversationToResume);
         }
         None
+    }
+
+    /// stream-json 은 파이프를 요구한다 — TUI 가 아니라 줄단위 JSON 을 stdout 으로 흘리기 때문.
+    ///
+    /// ★신고값일 뿐이고 실물은 아래 [`AgentBackend::open_spawn`] 이 만든다★ — 둘 다 [`is_stream_json`]
+    ///   을 보므로 한쪽만 고치면 신고와 실물이 어긋나고, 선언 표 트립와이어는 이 신고값만 잰다.
+    fn transport_shape(&self, command: &AgentCommand) -> TransportShape {
+        if is_stream_json(command) {
+            TransportShape::StdioNdjson
+        } else {
+            TransportShape::Pty
+        }
+    }
+
+    /// stream-json 모드는 구조화 파이프를, 터미널 모드는 PTY 를 만든다.
+    ///
+    /// ★판정은 [`is_stream_json`] 단독 — `transport_shape` 신고값을 되읽어 match 하지 않는다(ADR-0191)★:
+    ///   그렇게 하면 모양 값을 가르는 둘째 switch 가 생겨 이 결정이 걷어낸 그 모양으로 되돌아간다.
+    /// ★`structured: true` 를 주입하는 자리가 여기다(ADR-0044/0030)★: 파이프 자신은 나르는 바이트가
+    ///   줄단위 JSON 인지 모르므로(바보 파이프) [`StdioTransport`] 는 그 값을 하드코딩하지 않고 받아서
+    ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다.
+    // ADR-0044
+    // ADR-0191
+    fn open_spawn(
+        &self,
+        command: &AgentCommand,
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+    ) -> Result<SpawnParts, PtyError> {
+        let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
+            if is_stream_json(command) {
+                let (t, pid) = StdioTransport::open(spec, true, self.output_decoder(command))?;
+                (Box::new(t), pid)
+            } else {
+                let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+                (Box::new(t), pid)
+            };
+        Ok(SpawnParts {
+            transport,
+            child_pid,
+            backend_caps: self.capabilities(command),
+            encoder: self.input_encoder(command),
+            turn_classifier: self.turn_classifier(),
+            reads_messages: self.reads_messages(),
+        })
+    }
+
+    fn input_encoder(&self, command: &AgentCommand) -> InputEncoder {
+        if is_stream_json(command) {
+            InputEncoder::ClaudeStreamJson
+        } else {
+            InputEncoder::Raw
+        }
+    }
+
+    fn wrap_input_turn(&self, text: &str, msg_uuid: Uuid) -> Vec<u8> {
+        wrap_user_turn(text, msg_uuid)
+    }
+
+    /// ★조건 없이 `Some`★: 이 메서드는 `input_encoder` 가 고른 태그를 통해서만 불린다
+    /// ([`crate::backend::backend_for_encoder`]) — 터미널 모드는 `Raw` 라 여기 닿지 않는다. 여기서
+    /// 모드를 다시 보면 같은 판정이 두 집에 살게 된다.
+    fn input_echo_event(&self, text: &str, msg_uuid: Uuid) -> Option<OutputEvent> {
+        Some(OutputEvent::Structured {
+            kind: "user".to_string(),
+            json: user_text_echo_json(text, msg_uuid),
+        })
+    }
+
+    fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+        if is_stream_json(command) {
+            Some(Box::new(ClaudeStreamDecoder::new()))
+        } else {
+            None
+        }
+    }
+
+    /// 터미널 claude 는 TUI 가 PTY repaint 로 복원하므로 seed 하지 않는다 — 하면 화면에 두 벌이 된다.
+    // ADR-0079
+    fn resume_transcript_events(
+        &self,
+        command: &AgentCommand,
+        cwd: &std::path::Path,
+        session_id: Uuid,
+    ) -> Vec<OutputEvent> {
+        if is_stream_json(command) {
+            read_transcript_events(cwd, session_id)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// 모드로 가르지 않는다 — 터미널이든 stream-json 이든 claude 는 같은 `sessions/<pid>.json` 을 쓰고,
+    /// sid 가 갈아타는 것도 양쪽 다다.
+    // ADR-0004
+    fn session_id_source(
+        &self,
+        agent_id: AgentId,
+        child_pid: u32,
+        expected_sid: Uuid,
+    ) -> Option<Box<dyn SessionIdSource>> {
+        session_file::ClaudeSessionIdSource::new(agent_id, child_pid, expected_sid)
+            .map(|s| Box::new(s) as Box<dyn SessionIdSource>)
     }
 }
 
@@ -442,7 +591,9 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         OutputEvent::TextDelta { .. }
         | OutputEvent::ToolCall { .. }
         | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
-        OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended),
+        // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 뜻이 같으므로 같은 신호로 적는다★:
+        //   두 종료 어휘를 여기서 갈라 적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
+        OutputEvent::MessageDone { .. } | OutputEvent::TurnEnd { .. } => Some(TurnSignal::Ended),
         OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => None,
     }
 }
@@ -917,20 +1068,25 @@ fn project_slug(cwd: &std::path::Path) -> String {
         .collect()
 }
 
-/// `~/.claude/projects/<slug>/<sid>.jsonl` 경로. `CLAUDE_CONFIG_DIR` 이 설정돼 있으면 우선한다
-/// (session_tracker 의 default_sessions_dir 과 동일 규약). home 을 못 찾으면 None.
-fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
-    let base = if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
-        if dir.is_empty() {
-            claude_home()?.join(".claude")
-        } else {
-            PathBuf::from(dir)
+/// claude 가 자기 상태를 두는 디렉토리 = `CLAUDE_CONFIG_DIR`(비어 있지 않을 때) 아니면 `~/.claude`.
+/// home 도 못 찾으면 None.
+///
+/// ★이 폴더의 claude 파일 경로는 전부 여기서 갈라져 나간다★ — transcript(`projects/`)도 세션 파일
+/// (`sessions/`)도. 같은 규약을 두 곳에 적으면 한쪽만 고쳐져 override 가 반쪽만 듣는다.
+pub(super) fn config_dir() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CLAUDE_CONFIG_DIR") {
+        if !dir.is_empty() {
+            return Some(PathBuf::from(dir));
         }
-    } else {
-        claude_home()?.join(".claude")
-    };
+    }
+    claude_home().map(|h| h.join(".claude"))
+}
+
+/// `<config dir>/projects/<slug>/<sid>.jsonl` 경로. home 을 못 찾으면 None.
+fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
     Some(
-        base.join("projects")
+        config_dir()?
+            .join("projects")
             .join(project_slug(cwd))
             .join(format!("{sid}.jsonl")),
     )
@@ -1065,7 +1221,7 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
 mod tests {
     use super::*;
 
-    // ── backend/claude.rs 단위 테스트 ─────────────────────────────────────────
+    // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], None)
@@ -1083,7 +1239,7 @@ mod tests {
     fn terminal(extra: Vec<&str>) -> AgentCommand {
         AgentCommand::Claude {
             extra_args: extra.into_iter().map(String::from).collect(),
-            output_format: ClaudeOutputFormat::Terminal,
+            output_format: AgentOutputFormat::Terminal,
         }
     }
 
@@ -2092,7 +2248,7 @@ mod tests {
         let s = spec_with_control(
             &AgentCommand::Claude {
                 extra_args: vec!["Bash".to_string()],
-                output_format: ClaudeOutputFormat::StreamJson,
+                output_format: AgentOutputFormat::StreamJson,
             },
             SpawnMode::Fresh,
             None,
@@ -2217,7 +2373,7 @@ mod tests {
     fn json(extra: Vec<&str>) -> AgentCommand {
         AgentCommand::Claude {
             extra_args: extra.into_iter().map(String::from).collect(),
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         }
     }
 
@@ -2565,6 +2721,7 @@ mod tests {
                 OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
                 OutputEvent::Usage { .. } => "usage".to_string(),
                 OutputEvent::MessageDone { .. } => "done".to_string(),
+                OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
                 OutputEvent::Error(_) => "error".to_string(),
                 OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
             })

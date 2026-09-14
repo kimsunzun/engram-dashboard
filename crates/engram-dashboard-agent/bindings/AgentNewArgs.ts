@@ -16,6 +16,11 @@ preset?: string | null, name?: string | null,
  */
 output_format?: AgentOutputFormat | null, 
 /**
- * 미지정 = Claude.
+ * 어느 백엔드를 돌릴 것인가 — ★**필수다. 미지정은 반려**★(2026-09-08).
+ *
+ * 예전엔 미지정이 `Claude` 였다. 백엔드가 둘이 된 뒤로 그 조용한 기본값은 **고르지 않은
+ * 것**과 **claude 를 고른 것**을 같은 값으로 접는다 — 스폰 패킷에서 같은 이유로 이미 걷어낸
+ * 모양이고(`protocol` 의 `AgentBackendKind` doc · 데몬의 `MISSING_BACKEND`), 이 문만 남겨
+ * 두면 그 결정이 입구마다 갈린다.
  */
-backend?: AgentBackend | null, };
+backend: AgentBackend, };

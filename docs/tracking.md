@@ -314,6 +314,30 @@
 - **남은 갭:** 그 보호는 **메시징 파킹 flush 소비자에만** 걸려 있다. **프론트로 나가는 broadcast는 그 밖에 그대로 있다**(`messaging_host.rs:864`의 위임분). 즉 프론트 명부는 여전히 순서가 갈릴 수 있다.
 - **착수 시:** 증상이 무엇으로 보이는지부터 정한다(늦게 도착한 옛 스냅샷이 새 명부를 덮어쓰는 형태). 위 messaging 쪽 수정이 그대로 선례이므로 재설계가 아니라 **같은 수법을 프론트 broadcast 경로에 적용할 수 있나**가 첫 갈래다.
 
+### T-33. `agents.json` 에 새 백엔드 종류가 실린 뒤의 하위호환
+- **상태:** 보류(사용자 결정 2026-09-07 — **지금은 수용한다**). 개발 중이라 명부를 잃어도 되고, 사용자가 "그냥 새로 만든단 셈 쳐도 된다"고 명시했다. 코드 변경 0.
+- **출처:** S21 codex 백엔드 TRD 사용자 결정 A.
+- **무엇이 문제인가:** 프로필 파일은 한 번에 통째로 파싱된다(`crates/engram-dashboard-agent/src/persistence/mod.rs:120`). 모르는 `kind` 가 **한 건이라도** 있으면 그 한 건이 아니라 **파싱 전체가 실패**하고, 파일을 `.corrupt` 로 밀어낸 뒤(`:86-94`) **빈 명부로 부팅**한다. 즉 codex 로 띄운 에이전트 하나가 나머지 전부를 데리고 사라진다.
+- **★언제 다시 다루나(재도입 시점)★:** **`kind: "Codex"` 가 실린 빌드가 릴리스로 나가는 시점.** 그때부터는 남의 PC 에 있는 명부라 "새로 만들면 된다"가 성립하지 않는다 — 구버전으로 되돌리는 것은 릴리스를 오가며 실제로 일어나는 일이다.
+- **그때의 선택지 셋:** ① 관용 파싱(프로필 한 건씩 읽고 모르는 건 건너뛴다 — 되돌려도 codex 만 사라진다) ② 파일의 `schema_version` 을 **실제로 읽어** 못 읽는 버전이면 파일을 건드리지 않는다(칸은 이미 파일에 있다 — 지금 그 값을 읽는 코드가 있는지는 미확인) ③ 계속 수용.
+- **회귀망 없음:** 미지 `kind` 를 만났을 때의 동작을 재는 테스트가 워크스페이스에 **0 건**이다(S21 TRD 조사). 어느 안을 고르든 그 테스트가 함께 와야 한다.
+- **딸린 사실:** 임시 스폰 경로도 프로필을 디스크에 올린다(`manager.rs:875-899`) — 그래서 이 위험은 "언젠가"가 아니라 **codex 를 처음 띄우는 순간** 파일에 새겨진다.
+
+### T-34. 중단(interrupt) 기능이 반쯤 배선된 채 멈춰 있다
+- **상태:** 보류(미착수). codex 작업 중 발견했으나 **codex 와 무관한 선재 미완**이라 그 범위에서 손대지 않았다.
+- **출처:** S21 codex Phase 2a 설계 중 실측(2026-09-09).
+- **증상:** wire 의 `capabilities.control.interrupt` 를 읽어 트리 노드에 `canInterrupt` 를 만드는데(`src/components/agent/mergeTreeNodes.ts:94`), **그 값을 읽는 화면 코드가 하나도 없다.** `rg "canInterrupt" src/ -g '!*.test.*'` 가 같은 파일 세 줄(타입 선언 `:55` · 대입 `:94` · 예약 노드 기본값 `:111`)만 낸다. 즉 사람이 중단을 누를 표면이 없다.
+- **반대편도 비어 있다:** `StdioTransport::interrupt()` 는 `Unsupported` 를 돌려주고(`crates/engram-dashboard-agent/src/transport/stdio.rs:316-321`), 같은 파일의 caps 가 `control.interrupt: false` 를 리터럴로 신고한다(`:363-384`). 즉 **신고도 거짓이고 실행 경로도 없다.**
+- **왜 지금 값이 올라갔나:** codex app-server 는 `turn/interrupt` 가 **실측 18ms 에 성공**하고 중단 뒤 같은 대화가 그대로 쓰인다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md`). 즉 **되는 기능인데 신고도 화면도 없는** 상태가 codex 에서 처음으로 실재하게 됐다.
+- **묶인 결정:** Phase 2a 설계 문서 §10 의 capability 신고 항목(그 값을 정직하게 낼 것인가 · 레버는 무엇인가)과 transport 계약 항목. 그 둘이 정해지면 이 항목의 절반이 따라온다 — **나머지 절반(사람이 누를 표면)은 그래도 남는다.**
+
+### T-35. 재연결 타이밍 테스트가 간헐적으로 깨진다 (ADR-0195 결함과 별건)
+- **상태:** 미착수. **ADR-0195 가 다루는 결함과 다른 테스트**다 — 같은 스위트에서 같이 나왔을 뿐이다.
+- **출처:** ADR-0195 결함 규명 중 부수 관측(2026-09-11). 단일 스위트 30 회 반복에서 **1 회 실패**.
+- **증상:** `src-tauri/src/daemon_client/tests.rs:2232` 의 「재연결이 Auth 송신 직후 창에 도달해야」 단언이 간헐 실패(`reconnect_close_after_auth_send_self_closes_socket`).
+- **왜 따로 세우나:** ADR-0195 의 수정(끊긴 동안 명령을 안 받음)은 이 테스트가 재는 축을 건드리지 않는다. 그 수정 뒤에도 남을 가능성이 높으니 **그때 남아 있으면 별건으로 본다.**
+- **안 한 것:** 원인 규명을 안 했다. 실패율도 30 회 표본 한 건이라 신뢰구간이 넓다.
+
 ## 결정 완료 (기록용)
 
 ### R-1. Exiting 상태 살림 (옵션 A)
@@ -332,9 +356,9 @@
 ## 해소됨 (아카이브)
 
 ### T-1. 로그 API 키 마스킹 — ✅ 구현 (2026-06-11)
-- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. LogSink에 적용. dr26 LGTM.
+- **구현:** logging/mod.rs `mask_secrets` (regex). 커버: Bearer, Anthropic sk-ant-, OpenAI sk-/sk-proj-, AWS AccessKeyID AKIA, GitHub ghp_/gho_/github_pat_, Google AIza. **sink 에 배선하지 않았다 — 호출자가 명시 호출한다**(정본 = `docs/reference/logging-conventions.md` 「보안」). dr26 LGTM.
 - **한계(문서화):** AWS Secret Key(40자 base64)는 패턴 식별 불가 — best-effort. generic api_key= 는 오탐 리스크로 미적용.
-- **규칙(명문화 필요):** 추후 production에 PTY 텍스트 로그 추가 시 반드시 mask_secrets 적용 → CLAUDE.md/LLD 명시 예정(D-6).
+- **규칙:** production 에 PTY 텍스트 로그를 추가하면 `mask_secrets` 를 명시 호출한다 — 명문화 정본 = `docs/reference/logging-conventions.md` 「보안」(D-6).
 
 ### (구) T-1 보류 메모
 - **상태:** 보류 (폐기 아님)

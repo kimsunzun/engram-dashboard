@@ -17,7 +17,9 @@ use engram_dashboard_command::{
 
 use crate::manager::{AgentManager, RenameOutcome};
 use crate::preset::PresetId;
-use crate::profile::{AgentCommand, AgentProfile, ClaudeOutputFormat, SpawnMode};
+// 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
+use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
+use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::types::{
     AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED,
     RENAME_OUTCOME_UNCHANGED,
@@ -26,7 +28,10 @@ use crate::types::{
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
-    catalog_version: 2;
+    // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
+    //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
+    //   않는다(`connection_core` 의 RegisterCommands 갈래).
+    catalog_version: 3;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -47,6 +52,8 @@ declare_commands! {
     /// **`agents.json` 에 그대로 적힌다**. 새 빌드가 새 kind 를 쓴 프로필을 저장하고 나면 옛 빌드는 그
     /// 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다** — 그 빌드에서
     /// 에이전트가 전부 사라진다(persistence `FileProfileStore::load`). 넓힐 때 그 이주를 함께 설계할 것.
+    /// ★**왜** 좁은지와 **언제** 넓어지는지는 [`LLM_BACKEND_POLICY`] 가 진다★ — 그 표를 나머지 생성
+    /// 문들도 본다(그 표 머리말이 셋을 나눠 적는다).
     enum AgentBackend {
         Claude,
     }
@@ -54,7 +61,9 @@ declare_commands! {
     /// 새 에이전트의 출력 형식(= 렌더 모드) — 생성 시점에 고정되고 이후 불변이다(ADR-0044/0078).
     ///
     /// `Terminal` = PTY 대화형(xterm 렌더) · `StreamJson` = 헤드리스 NDJSON 스트림.
-    /// 어휘는 `ClaudeOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — 갈리면 프론트 allowlist
+    /// 어휘는 코어 `profile::AgentOutputFormat` 과 **변형도 wire 표기도** 같아야 한다 — ★개명(ADR-0194)
+    /// 뒤로 이 선언 어휘와 코어 enum 이 **같은 이름을 쓴다**★. 가리킬 땐 경로를 붙여 적을 것(맨 이름은
+    /// 이 파일 안에서 이 선언을 가리킨다 — 그래서 위 import 가 코어 쪽에 별칭을 단다). 갈리면 프론트 allowlist
     /// (`coerceOutputFormat`)와 이 입구가 같은 낱말을 다르게 읽는다. 그 일치를 산문이 아니라 컴파일러가
     /// 지키는 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones`.
     enum AgentOutputFormat {
@@ -100,8 +109,13 @@ declare_commands! {
         name: Option<String>,
         /// 미지정 = StreamJson.
         output_format: Option<AgentOutputFormat>,
-        /// 미지정 = Claude.
-        backend: Option<AgentBackend>,
+        /// 어느 백엔드를 돌릴 것인가 — ★**필수다. 미지정은 반려**★(2026-09-08).
+        ///
+        /// 예전엔 미지정이 `Claude` 였다. 백엔드가 둘이 된 뒤로 그 조용한 기본값은 **고르지 않은
+        /// 것**과 **claude 를 고른 것**을 같은 값으로 접는다 — 스폰 패킷에서 같은 이유로 이미 걷어낸
+        /// 모양이고(`protocol` 의 `AgentBackendKind` doc · 데몬의 `MISSING_BACKEND`), 이 문만 남겨
+        /// 두면 그 결정이 입구마다 갈린다.
+        backend: AgentBackend,
     } -> ok AgentNewOk {
         agent_id: String,
         name: String,
@@ -254,14 +268,104 @@ impl AgentCommandHost for AgentManager {
 ///   (`agentlist.createAgent`)의 기본값이 이미 StreamJson 이다(ADR-0078). 두 입구가 같은 동사에 다른
 ///   기본을 주면 "만들었는데 화면이 다르다" 가 된다.
 /// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
-pub const NEW_AGENT_OUTPUT_FORMAT: ClaudeOutputFormat = ClaudeOutputFormat::StreamJson;
+pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat::StreamJson;
+
+// ── LLM 제어 표면의 백엔드 생성 정책(사용자 결정 2026-09-07 · TRD S21 §6-G) ──────────────────────
+//
+// ★정책의 집은 여기 하나다★ — 이 판정을 묻는 **LLM 제어 표면이 셋**이고 서로 다른 crate·언어에 산다.
+// ★둘이라고 적혀 있던 옛 문장은 틀렸다(2026-09-08 리뷰)★ — 셋째를 못 세는 바람에 그 문이 표를 한 번도
+// 안 보고 열려 있었다:
+//   ① `agent.new`(이 파일) — 선언 어휘 `AgentBackend` 가 어휘 자체로 좁혀 서고, 그 위에 이 표가 한 겹
+//      더 선다(어휘를 넓히면서 정책을 안 넓히는 편집을 런타임에서 멈춘다 — 그 팔은 오늘 안 닿는다).
+//   ② `agent.spawnInto`(셸 `src-tauri/src/layout/apply.rs`) — wire 낱말을 들고 와 이 표에 묻는다.
+//   ③ 프론트 command 레지스트리(`src/commands/registry.ts`) — `__engramCmd`·버스 다리가 부르는 표면.
+//      ★그 문은 사람 메뉴와 **같은 문**이라 백엔드 낱말이 아니라 **호출자 축**으로 닫는다★: 사람 클릭
+//      (`dispatch.fireAndForget`)은 지나가고 LLM 경로(`registry.run`)만 막힌다. 그래서 그쪽의 선언은
+//      낱말 표가 아니라 `humanOnly` 사유 문자열이고, **이 표가 그 사유의 정본**이다.
+// 문마다 각자 목록을 들면 「한 문으로는 만드는데 다른 문으로는 못 만드는 백엔드」가 생긴다. 어긋남을 재는
+// 자리 = ①은 `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(이 파일) · ②는
+// `src-tauri/tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` · ③은
+// `src/commands/agentCommands.test.ts`.
+//
+// ★왜 타입이 아니라 낱말로 묻나★ — ②가 들고 오는 타입은 wire enum `protocol::AgentBackendKind` 인데 이
+// crate 는 protocol 을 의존하지 않는다(그 금지의 정본 = 이 crate `Cargo.toml` 의 `[dependencies]` 주석).
+// 두 crate 가 공유할 수 있는 것은 낱말뿐이고, 철자가 갈리는 것은 위 시험이 잡는다.
+
+/// 정책 표의 한 줄.
+pub struct LlmBackendPolicy {
+    /// 백엔드 낱말. **대소문자를 무시하고** 비교한다 — 이 crate 의 선언 어휘는 `Claude`, wire 어휘는
+    /// `claude` 로 적히고(그 차이의 사유는 두 enum 의 doc 이 이미 진다) 같은 백엔드를 두 줄로 적을
+    /// 이유가 없다.
+    pub word: &'static str,
+    /// `None` = 이 표면이 만든다. `Some` = 안 만든다 — **사유와 여는 시점**을 함께 싣는다.
+    pub refusal: Option<&'static str>,
+}
+
+/// ★LLM 제어 표면이 어느 백엔드를 만들 수 있나 — 그 정책의 유일한 자리★.
+///
+/// Phase 2 에서 codex 를 열 때 손대는 곳이 여기다. ★그 한 줄만으로는 안 끝난다★ — `AgentBackend` 어휘에
+/// `Codex` 를 더하고 [`backend_command`] 의 짝을 채워야 `agent.new` 가 실제로 만든다(그 enum 의 doc 이
+/// 경고하는 `agents.json` 이주가 거기 매달린다). 이 표만 먼저 열고 그 둘을 안 하면 위 시험이 빨개진다 —
+/// 그게 이 표를 여는 사람에게 남는 유일한 안내다.
+///
+/// ★이 표가 가르는 것은 **백엔드 낱말 하나뿐이고 출력 모드 축은 어디에도 LLM 표현이 없다**★ — 그래서
+/// 낱말만 열면 LLM 은 codex 를 만들 수는 있어도 **JSON 모드로는 못 만든다**(사람은 트리 메뉴에서
+/// 고른다). 프론트 쪽 형제(`agentlist.createAgent`)도 claude 가 박혀 있어 그 축을 못 연다. 모드를
+/// 고르는 LLM 경로를 낼지는 별개 결정이고 여기서 같이 봐야 할 항목이라 적어 둔다 — 이 표만 열면
+/// 「만들 수는 있는데 원하는 모드로는 못 만든다」가 남는다.
+pub const LLM_BACKEND_POLICY: &[LlmBackendPolicy] = &[
+    LlmBackendPolicy {
+        word: "claude",
+        refusal: None,
+    },
+    LlmBackendPolicy {
+        word: "codex",
+        refusal: Some(CODEX_NEEDS_A_HUMAN_AT_THE_TRUST_MODAL),
+    },
+];
+
+/// codex 가 **이 표면에서만** 닫혀 있는 사유. ★사유와 여는 시점을 함께 적는다★ — 반년 뒤 이 거절을
+/// 만난 사람이 무엇을 기다리는지 문구 하나로 알아야 한다.
+///
+/// ★프론트에 같은 사유를 말하는 **별개 문구**가 있다★ — `src/commands/agentCommands.ts` 의
+/// `CODEX_HUMAN_ONLY`. 언어가 달라 이 상수를 거기서 읽을 수 없어 둘은 사본이 아니라 각자 쓴 문장이고,
+/// **아무 게이트도 둘의 뜻을 맞춰 주지 않는다**. 이 사유가 바뀌면 그쪽도 같이 본다.
+const CODEX_NEEDS_A_HUMAN_AT_THE_TRUST_MODAL: &str = "codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(키를 넣어도 안 먹는다 — 실측 2026-09-07). 지금 열면 「만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성」 서브메뉴에 있는 codex 항목들). 여는 시점 = Phase 2, codex 신뢰 확인 모달 처리가 정해질 때(사용자 결정 2026-09-07 · TRD S21 §6-G).";
+
+/// 표에 없는 낱말의 사유 — ★없음은 열림이 아니라 닫힘이다★. 새 백엔드가 정책 선언 없이 조용히 열리면
+/// 이 게이트는 아무것도 안 지킨 셈이 된다.
+const NO_POLICY_DECLARED: &str = "이 백엔드에는 LLM 제어 표면 정책이 아직 선언되지 않았다 — 선언 전에는 닫힘이다(engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 에 한 줄을 더할 것).";
+
+/// 이 낱말의 백엔드를 **LLM 제어 표면이 지금 만들 수 있나** — `None` = 만든다, `Some(사유)` = 안 만든다.
+///
+/// ★「모르는 낱말」과는 다른 축이다★ — 여기서 `Some` 이 나오는 값도 이 저장소가 아는 정당한 백엔드이고,
+/// 사람이 쓰는 문에서는 그대로 만들어진다. 막는 것은 **사람이 아닌 호출자**뿐이라, 두 거절을 한 문구로
+/// 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다. 호출자는 두 축을 각각 다른 문구로 낼 것.
+///
+/// 표에 없는 낱말도 `Some` 이다(fail-closed).
+pub fn llm_creation_refusal(backend_word: &str) -> Option<&'static str> {
+    LLM_BACKEND_POLICY
+        .iter()
+        .find(|policy| policy.word.eq_ignore_ascii_case(backend_word))
+        .map_or(Some(NO_POLICY_DECLARED), |policy| policy.refusal)
+}
+
+/// 선언 어휘의 낱말 — 정책 표에 물어보려면 낱말이 필요하다. `AgentBackend` 는 unit variant 뿐이라 serde
+/// 직렬화가 곧 그 낱말이고, 손으로 적으면 변형이 늘 때 조용히 어긋난다. 직렬화가 실패하면 빈 낱말이
+/// 되어 정책이 닫는다(fail-closed).
+fn backend_word(backend: &AgentBackend) -> String {
+    serde_json::to_value(backend)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_default()
+}
 
 /// 선언 어휘 → 실행 명령.
 ///
 /// ★이 `match` 는 **선언 enum** 을 훑는다 — 코어에 백엔드가 늘어도 여기서는 컴파일이 깨지지 않는다★.
 /// 그 방향(코어가 늘었는데 선언이 좁은 채로 남는 것)을 잡는 그물은 `AgentCommand` 를 훑는 역방향 `match`
 /// 이고, 그 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones` 하나다.
-fn backend_command(backend: AgentBackend, output_format: ClaudeOutputFormat) -> AgentCommand {
+fn backend_command(backend: AgentBackend, output_format: CoreAgentOutputFormat) -> AgentCommand {
     match backend {
         AgentBackend::Claude => AgentCommand::Claude {
             extra_args: vec![],
@@ -272,11 +376,11 @@ fn backend_command(backend: AgentBackend, output_format: ClaudeOutputFormat) -> 
 
 /// 선언 어휘 → 코어 어휘. **미지정은 [`NEW_AGENT_OUTPUT_FORMAT`]** 이고, 어휘 밖 값은 여기 오기 전에
 /// 역직렬화가 `INVALID_ARGUMENT` 로 반려한다(조용한 fallback 없음 — 프론트 `coerceOutputFormat` 과 같은 규율).
-fn output_format(given: Option<AgentOutputFormat>) -> ClaudeOutputFormat {
+fn output_format(given: Option<AgentOutputFormat>) -> CoreAgentOutputFormat {
     match given {
         None => NEW_AGENT_OUTPUT_FORMAT,
-        Some(AgentOutputFormat::Terminal) => ClaudeOutputFormat::Terminal,
-        Some(AgentOutputFormat::StreamJson) => ClaudeOutputFormat::StreamJson,
+        Some(AgentOutputFormat::Terminal) => CoreAgentOutputFormat::Terminal,
+        Some(AgentOutputFormat::StreamJson) => CoreAgentOutputFormat::StreamJson,
     }
 }
 
@@ -428,7 +532,7 @@ fn wake_existing(
     };
     // ★모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076)★: 저장된 세션이 있으면 이어받기, 없으면
     //   새로. 여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다.
-    let mode = if profile.claude_session_id.is_some() {
+    let mode = if profile.backend_session_id.is_some() {
         SpawnMode::Resume
     } else {
         SpawnMode::Fresh
@@ -527,14 +631,28 @@ fn verb_new(
             stored
         }
     };
+    // ★기본값이 없다★ — 미지정은 역직렬화가 반려한다(`AgentNewArgs::backend` 의 doc). 여기서
+    //   `unwrap_or(Claude)` 를 되살리지 말 것: 백엔드가 둘인 지금 그것은 「고르지 않았다」를 조용히
+    //   claude 로 접는 경로이고, 스폰 패킷에서 이미 같은 이유로 걷어냈다.
+    let backend = args.backend.clone();
+    let word = backend_word(&backend);
+    // ★생성 문 셋이 같은 표를 본다★ — 이 `if` 는 매 호출 돌지만 **거절 팔은 오늘 닿지 않는다**: 선언
+    //   어휘([`AgentBackend`])가 정책 표보다 좁아서, 표가 닫은 낱말은 그 전에 역직렬화가 반려한다.
+    //   ★그래도 지우지 말 것★ — 이 팔이 막는 편집은 「어휘를 넓히면서 [`LLM_BACKEND_POLICY`] 는 안
+    //   넓히는 것」이고, 그 편집이 오면 팔이 그날 살아난다. 그 사실을 시험이 잰다 =
+    //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(어휘를 넓히고 표를 안 열면
+    //   빨개진다). 형제 문의 자리 = 셸 `layout::apply::gate_backend`(런타임 거절이 오늘도 닿는다) ·
+    //   프론트 `commands/registry.ts` 의 `humanOnly`(LLM 표면만 닫는다).
+    if let Some(reason) = llm_creation_refusal(&word) {
+        return Err(CommandError::invalid_argument(format!(
+            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
+        )));
+    }
     let stored = register(
         host,
         &cwd,
         name.map(str::to_string),
-        backend_command(
-            args.backend.unwrap_or(AgentBackend::Claude),
-            output_format(args.output_format),
-        ),
+        backend_command(backend, output_format(args.output_format)),
     )?;
     notify.roster_changed();
     Ok(AgentNewOk {
@@ -924,7 +1042,7 @@ mod tests {
             let mut profile = profile;
             profile.display_name = Some(name.to_string());
             if resumable {
-                profile.claude_session_id = Some(uuid::Uuid::new_v4());
+                profile.backend_session_id = Some(uuid::Uuid::new_v4());
             }
             self.profiles.lock().unwrap().insert(id, profile);
             self.rows.lock().unwrap().push(AgentRosterRow {
@@ -1199,7 +1317,12 @@ mod tests {
         let host = FakeHost::new();
         let (table, notify) = wiring(&host);
 
-        let out = call(&table, "agent.new", json!({ "cwd": "C:/work/delta" })).expect("등록");
+        let out = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
+        )
+        .expect("등록");
         assert_eq!(out["state"], "sleeping");
         assert!(host.started.lock().unwrap().is_empty(), "띄우지 않는다");
         assert_eq!(*notify.calls.lock().unwrap(), 1, "명부 변경을 알린다");
@@ -1228,8 +1351,12 @@ mod tests {
             *host.create_fails.lock().unwrap() = Some(failure);
             let (table, notify) = wiring(&host);
 
-            let err = call(&table, "agent.new", json!({ "cwd": "C:/work/delta" }))
-                .expect_err("등록 실패");
+            let err = call(
+                &table,
+                "agent.new",
+                json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
+            )
+            .expect_err("등록 실패");
             assert_eq!(err.code(), expected);
             assert_eq!(
                 *notify.calls.lock().unwrap(),
@@ -1246,7 +1373,12 @@ mod tests {
         host.with_preset("bookmark-1", "C:/work/from-preset");
         let (table, notify) = wiring(&host);
 
-        let out = call(&table, "agent.new", json!({ "preset": "bookmark-1" })).expect("등록");
+        let out = call(
+            &table,
+            "agent.new",
+            json!({ "preset": "bookmark-1", "backend": "Claude" }),
+        )
+        .expect("등록");
 
         assert_eq!(out["state"], "sleeping");
         assert_eq!(
@@ -1266,8 +1398,8 @@ mod tests {
         let (table, notify) = wiring(&host);
 
         for args in [
-            json!({ "cwd": "C:/work/x", "preset": "bookmark-1" }),
-            json!({}),
+            json!({ "cwd": "C:/work/x", "preset": "bookmark-1", "backend": "Claude" }),
+            json!({ "backend": "Claude" }),
         ] {
             let err = call(&table, "agent.new", args.clone()).expect_err("고를 근거가 없다");
             assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
@@ -1292,8 +1424,12 @@ mod tests {
         host.with_preset("blank-bookmark", "   ");
         let (table, notify) = wiring(&host);
 
-        let err = call(&table, "agent.new", json!({ "preset": "blank-bookmark" }))
-            .expect_err("빈 폴더는 등록 대상이 아니다");
+        let err = call(
+            &table,
+            "agent.new",
+            json!({ "preset": "blank-bookmark", "backend": "Claude" }),
+        )
+        .expect_err("빈 폴더는 등록 대상이 아니다");
 
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
         assert!(
@@ -1313,8 +1449,12 @@ mod tests {
         let host = FakeHost::new();
         let (table, _notify) = wiring(&host);
 
-        let err = call(&table, "agent.new", json!({ "preset": "no-such-bookmark" }))
-            .expect_err("없는 북마크");
+        let err = call(
+            &table,
+            "agent.new",
+            json!({ "preset": "no-such-bookmark", "backend": "Claude" }),
+        )
+        .expect_err("없는 북마크");
         assert_eq!(err.code(), ErrorCode::NotFound);
         assert!(
             host.rows.lock().unwrap().is_empty(),
@@ -1347,7 +1487,7 @@ mod tests {
         call(
             &table,
             "agent.new",
-            json!({ "cwd": "C:/x", "name": "silent" }),
+            json!({ "cwd": "C:/x", "name": "silent", "backend": "Claude" }),
         )
         .expect("미지정");
         assert_eq!(format_of("silent"), NEW_AGENT_OUTPUT_FORMAT);
@@ -1355,15 +1495,15 @@ mod tests {
         call(
             &table,
             "agent.new",
-            json!({ "cwd": "C:/x", "name": "typed", "output_format": "Terminal" }),
+            json!({ "cwd": "C:/x", "name": "typed", "output_format": "Terminal", "backend": "Claude" }),
         )
         .expect("명시");
-        assert_eq!(format_of("typed"), ClaudeOutputFormat::Terminal);
+        assert_eq!(format_of("typed"), CoreAgentOutputFormat::Terminal);
 
         let err = call(
             &table,
             "agent.new",
-            json!({ "cwd": "C:/x", "output_format": "terminal" }),
+            json!({ "cwd": "C:/x", "output_format": "terminal", "backend": "Claude" }),
         )
         .expect_err("어휘 밖 값");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
@@ -1399,10 +1539,19 @@ mod tests {
 
         // 반려가 나는 갈래를 동사별로 훑는다 — 코드는 다르지만 전부 「손대기 전」이어야 한다.
         let rejections = [
-            ("agent.new", json!({ "cwd": "   " })),
-            ("agent.new", json!({ "preset": "no-such-bookmark" })),
-            ("agent.new", json!({ "preset": "blank-bookmark" })),
-            ("agent.new", json!({ "cwd": "C:/x", "preset": "b" })),
+            ("agent.new", json!({ "cwd": "   ", "backend": "Claude" })),
+            (
+                "agent.new",
+                json!({ "preset": "no-such-bookmark", "backend": "Claude" }),
+            ),
+            (
+                "agent.new",
+                json!({ "preset": "blank-bookmark", "backend": "Claude" }),
+            ),
+            (
+                "agent.new",
+                json!({ "cwd": "C:/x", "preset": "b", "backend": "Claude" }),
+            ),
             ("agent.rename", json!({ "target": "ghost", "name": "beta" })),
             ("agent.rename", json!({ "target": "alpha", "name": "  " })),
             ("agent.move", json!({ "target": "ghost", "parent": null })),
@@ -1436,9 +1585,16 @@ mod tests {
         fn advertised(field: &str) -> Vec<String> {
             let schema: serde_json::Value =
                 serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
-            schema["properties"][field]["anyOf"]
-                .as_array()
-                .expect("Option 칸은 anyOf")
+            // ★두 모양을 다 읽는다★ — 필수 칸은 `{"enum":[…]}` 로 바로 펴지고 생략 가능한 칸은
+            //   `{"anyOf":[{"enum":[…]},…]}` 로 한 겹 감싸인다. 한 모양만 읽으면 그 칸이 필수↔선택을
+            //   오갈 때 순회가 **빈 목록**이 되어 조용히 아무것도 안 잰다(호출부의 `is_empty` 단언이
+            //   마지막 방어지만, 여기서 안 접으면 그 단언이 매번 터진다).
+            let property = &schema["properties"][field];
+            let branches = match property.get("anyOf") {
+                Some(any_of) => any_of.as_array().expect("anyOf 는 배열").clone(),
+                None => vec![property.clone()],
+            };
+            branches
                 .iter()
                 .filter_map(|branch| branch.get("enum"))
                 .flat_map(|values| values.as_array().expect("enum 배열").clone())
@@ -1447,10 +1603,10 @@ mod tests {
         }
 
         // ── 출력 형식: 선언 변형 ↔ 코어 변형이 일대일이고 wire 표기까지 같다 ──
-        fn declared_output_format(core: ClaudeOutputFormat) -> AgentOutputFormat {
+        fn declared_output_format(core: CoreAgentOutputFormat) -> AgentOutputFormat {
             match core {
-                ClaudeOutputFormat::Terminal => AgentOutputFormat::Terminal,
-                ClaudeOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
+                CoreAgentOutputFormat::Terminal => AgentOutputFormat::Terminal,
+                CoreAgentOutputFormat::StreamJson => AgentOutputFormat::StreamJson,
             }
         }
         let formats = advertised("output_format");
@@ -1460,7 +1616,7 @@ mod tests {
             // 같은 낱말이 **양쪽에서** 읽혀야 한다 — 한쪽만 읽히면 그 자리가 곧 어긋난 지점이다.
             let declared: AgentOutputFormat =
                 serde_json::from_value(spelled.clone()).expect("선언 어휘가 광고를 읽는다");
-            let core: ClaudeOutputFormat =
+            let core: CoreAgentOutputFormat =
                 serde_json::from_value(spelled).expect("코어 어휘가 같은 낱말을 읽는다");
             assert_eq!(
                 declared_output_format(core),
@@ -1481,6 +1637,11 @@ mod tests {
                 // ★`Shell` 이 `None` 인 것은 빈칸이 아니라 결정이다★ — 이 입구로는 만들 수 없다
                 //   (프로필 생성 경로가 그것으로 도는지 확인된 바 없다 — `AgentBackend` 선언).
                 AgentCommand::Shell { .. } => None,
+                // ★`Codex` 도 결정이다(사용자 결정 2026-09-07)★ — codex 는 처음 보는 폴더에서 신뢰 확인
+                //   모달을 띄우고 **LLM 은 그 모달을 못 지난다**(키를 넣어도 안 먹는다 — 실측). 여기를
+                //   열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 그 모달 처리가
+                //   정해질 때 함께 연다.
+                AgentCommand::Codex { .. } => None,
             }
         }
         let backends = advertised("backend");
@@ -1535,6 +1696,115 @@ mod tests {
             );
         }
         assert_eq!(host.rows.lock().unwrap().len(), 1, "반려는 등록하지 않는다");
+    }
+
+    /// ★칸을 아예 안 주면 반려다 — 조용히 claude 가 되지 않는다★(2026-09-08).
+    ///
+    /// 예전엔 미지정이 `Claude` 였다. 백엔드가 둘이 된 뒤로 그 기본값은 「고르지 않았다」와 「claude 를
+    /// 골랐다」를 같은 값으로 접는데, 스폰 패킷에서는 같은 이유로 이미 걷어냈다(데몬의 `MISSING_BACKEND`).
+    /// 이 문만 남겨 두면 그 결정이 입구마다 갈린다.
+    #[test]
+    fn new_refuses_an_unspecified_backend_instead_of_defaulting() {
+        let host = FakeHost::new();
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.new", json!({ "cwd": "C:/x" }))
+            .expect_err("고르지 않은 것은 claude 를 고른 것이 아니다");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+        assert!(
+            err.message().contains("backend"),
+            "어느 칸이 비었는지 말해야: {}",
+            err.message()
+        );
+        assert!(
+            host.rows.lock().unwrap().is_empty(),
+            "반려는 등록하지 않는다"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    /// ★이 문이 [`LLM_BACKEND_POLICY`] 와 **같은 집합**을 연다 — 목록 대조가 아니라 **호출**로 잰다★.
+    ///
+    /// 목록만 맞춰 보면 게이트를 통째로 걷어내도 초록이다(형제 문에서 실제로 그랬다 — 2026-09-08 리뷰).
+    /// 그래서 표의 낱말마다 `agent.new` 를 **불러** 결말을 본다: 표가 연 낱말은 명부에 오르고, 표가 닫은
+    /// 낱말은 **어떤 철자로도** 안 오른다.
+    ///
+    /// ★이 문이 받는 철자는 선언 어휘가 정한다★ — 표의 낱말과 대소문자만 다르다([`LlmBackendPolicy`]
+    /// 의 `word` doc). 그래서 낱말 하나에 **이 문이 받아들일 수 있는 철자 전부**를 넣어 본다. 한 철자만
+    /// 넣으면 어휘가 넓어진 날 그 시도가 엉뚱한 철자에 걸려 조용히 통과한다.
+    ///
+    /// ★무엇을 잡나 — 정확히 적는다★: 이 시험이 빨개지는 편집은 「선언 어휘 [`AgentBackend`] 를 넓히면서
+    /// `verb_new` 의 [`llm_creation_refusal`] 팔은 지우는 것」이다. 그 조합이 오늘 이 파일에 남아 있는
+    /// 유일한 codex 누출 경로이고, 그 팔의 회귀망은 여기 하나뿐이다.
+    /// ★반대로 **팔만 지우는 것**은 오늘 이 시험이 못 잡는다★ — 어휘가 표보다 좁아서 닫힌 낱말이 팔에
+    /// 닿기 전에 역직렬화가 반려하기 때문이다. 그 사실을 「그러니 팔은 필요 없다」로 읽지 말 것: 어휘가
+    /// 넓어지는 날 그 팔이 유일한 런타임 방어가 된다.
+    #[test]
+    fn new_creates_exactly_what_the_llm_backend_policy_opens() {
+        /// 이 문이 이 낱말에 대해 받아들일 수 있는 철자 후보 — 표는 소문자, 선언 어휘는 PascalCase 다.
+        fn spellings(word: &str) -> Vec<String> {
+            let mut chars = word.chars();
+            let pascal = match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            };
+            if pascal == word {
+                vec![word.to_string()]
+            } else {
+                vec![word.to_string(), pascal]
+            }
+        }
+
+        assert!(
+            !LLM_BACKEND_POLICY.is_empty(),
+            "표가 비면 이 순회가 무장 해제된다"
+        );
+        for policy in LLM_BACKEND_POLICY {
+            let mut opened_by_some_spelling = false;
+            for spelling in spellings(policy.word) {
+                let host = FakeHost::new();
+                let (table, notify) = wiring(&host);
+                let outcome = call(
+                    &table,
+                    "agent.new",
+                    json!({ "cwd": "C:/x", "backend": spelling }),
+                );
+                match outcome {
+                    Ok(_) => {
+                        opened_by_some_spelling = true;
+                        assert_eq!(
+                            host.rows.lock().unwrap().len(),
+                            1,
+                            "{spelling}: 통과했는데 명부에 안 올랐다"
+                        );
+                    }
+                    Err(err) => {
+                        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{spelling}");
+                        assert!(
+                            host.rows.lock().unwrap().is_empty(),
+                            "{spelling}: ★등록 전에 거부★"
+                        );
+                        assert_eq!(*notify.calls.lock().unwrap(), 0, "{spelling}");
+                    }
+                }
+            }
+            assert_eq!(
+                opened_by_some_spelling,
+                policy.refusal.is_none(),
+                "'{}': 이 문이 여는 집합과 정책 표가 갈렸다 — 표는 {}, 이 문은 {}",
+                policy.word,
+                if policy.refusal.is_none() {
+                    "연다"
+                } else {
+                    "닫는다"
+                },
+                if opened_by_some_spelling {
+                    "만든다"
+                } else {
+                    "안 만든다"
+                }
+            );
+        }
     }
 
     #[test]
@@ -1730,10 +2000,14 @@ mod tests {
         let host = FakeHost::new();
         let (table, notify) = wiring(&host);
 
-        let required = call(&table, "agent.new", json!({ "cwd": "   " }))
-            .expect_err("만들 자리를 정하는 칸이 공백")
-            .message()
-            .to_string();
+        let required = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "   ", "backend": "Claude" }),
+        )
+        .expect_err("만들 자리를 정하는 칸이 공백")
+        .message()
+        .to_string();
         assert!(
             required.contains("cwd needs a folder path") && required.contains("preset"),
             "값을 채우거나 형제 칸을 쓰라고 말해야: {required}"
@@ -1751,10 +2025,14 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
 
         // 선택 칸은 반대다 — 빼는 것이 실제로 통하는 길이라 그 길을 함께 알려 준다.
-        let optional = call(&table, "agent.new", json!({ "cwd": "C:/x", "name": " " }))
-            .expect_err("선택 칸이 공백")
-            .message()
-            .to_string();
+        let optional = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "name": " ", "backend": "Claude" }),
+        )
+        .expect_err("선택 칸이 공백")
+        .message()
+        .to_string();
         assert!(
             optional.contains("name") && optional.contains("left out"),
             "선택 칸은 빼도 된다고 말해도 참이다: {optional}"
@@ -1766,7 +2044,12 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
 
         // 시킨 대로 뺀 재시도가 실제로 통한다.
-        call(&table, "agent.new", json!({ "cwd": "C:/x" })).expect("빼라는 안내대로 하면 통한다");
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "backend": "Claude" }),
+        )
+        .expect("빼라는 안내대로 하면 통한다");
     }
 
     /// ★`rename` 의 두 칸은 **둘 다 필수**다★ — 어느 쪽에든 「빼도 된다」고 말하면 그대로 뺀 재시도가 입구

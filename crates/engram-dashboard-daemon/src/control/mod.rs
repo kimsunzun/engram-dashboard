@@ -615,11 +615,11 @@ mod tests {
         profile_env: Vec<(String, String)>,
     ) -> engram_dashboard_agent::types::CommandSpec {
         use engram_dashboard_agent::backend::{AgentBackend, ClaudeBackend};
-        use engram_dashboard_agent::profile::{AgentCommand, ClaudeOutputFormat, SpawnMode};
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
         ClaudeBackend.build_spec(
             &AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: ClaudeOutputFormat::StreamJson,
+                output_format: AgentOutputFormat::StreamJson,
             },
             SpawnMode::Fresh,
             Some(id),

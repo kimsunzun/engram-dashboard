@@ -436,14 +436,17 @@ enum AcceptCheck {
     VersionMismatch { daemon: u32 },
 }
 
+// ADR-0196: 생존 확인이 버전 대조보다 **먼저**다 — 뒤집지 마라. 그리고 이 판정은 **버전 방향을 일부러
+// 보지 않는다**: 죽은 기록은 우리보다 낮든 높든 stale 이라, 방향 판정을 더해 「더 새 기록이면 물러난다」로
+// 고치지 말 것.
 fn check_acceptable(info: &DaemonInfo, liveness: &dyn PidLiveness) -> AcceptCheck {
+    if liveness.is_dead(info.pid, info.start_time) {
+        return AcceptCheck::DeadPid;
+    }
     if info.protocol_version != PROTOCOL_VERSION {
         return AcceptCheck::VersionMismatch {
             daemon: info.protocol_version,
         };
-    }
-    if liveness.is_dead(info.pid, info.start_time) {
-        return AcceptCheck::DeadPid;
     }
     AcceptCheck::Accept
 }
@@ -489,6 +492,12 @@ fn ensure_with(
         Ok(Some(info)) => match check_acceptable(&info, liveness) {
             AcceptCheck::Accept => return Ok(info),
             AcceptCheck::DeadPid => {
+                tracing::warn!(
+                    pid = info.pid,
+                    daemon_version = info.protocol_version,
+                    expected = PROTOCOL_VERSION,
+                    "{DAEMON_FILE} 의 pid 가 살아있지 않음 — 그 기록을 stale 로 판정"
+                );
                 dead_candidate = Some(info);
             }
             AcceptCheck::VersionMismatch { daemon } => {
@@ -514,6 +523,7 @@ fn ensure_with(
 
     // (b) spawn — 그 전에 관문 1회.
     pre_spawn()?;
+    tracing::info!(exe = %exe.display(), "데몬 spawn");
     spawner.spawn(exe)?;
 
     // (c) 폴링 — timeout 까지 새 daemon.json 을 기다린다.
@@ -556,14 +566,29 @@ fn ensure_with(
         }
         if clock.now() >= deadline {
             if let Some(old) = dead_candidate.take() {
-                if !liveness.is_dead(old.pid, old.start_time)
-                    && old.protocol_version == PROTOCOL_VERSION
-                {
+                let old_live = !liveness.is_dead(old.pid, old.start_time);
+                if old_live && old.protocol_version == PROTOCOL_VERSION {
                     tracing::warn!(
                         pid = old.pid,
                         "dead 로 판정했던 daemon.json 이 폴링 timeout 시점엔 live — 그 데몬으로 복구"
                     );
                     return Ok(old);
+                } else if old_live {
+                    // ★원인 없는 timeout 으로 흘려보내지 마라★: 우리가 dead 로 잘못 본 데몬이 실은
+                    //   살아있고 버전만 다른 것이므로, 손에 든 protocol_version 을 버리고 Timeout 을
+                    //   내면 사용자가 보는 유일한 줄이 원인을 못 가리킨다. 네트워크 공유의 포터블
+                    //   폴더에서는 **남의 컴퓨터** pid 를 로컬 OpenProcess 로 재는 탓에 live 데몬이
+                    //   항상 dead 로 읽혀 이 경로가 기본값이 된다.
+                    tracing::warn!(
+                        pid = old.pid,
+                        daemon_version = old.protocol_version,
+                        expected = PROTOCOL_VERSION,
+                        "dead 로 판정했던 daemon.json 이 timeout 시점엔 live — 단 프로토콜 버전이 다름"
+                    );
+                    return Err(DiscoveryError::VersionMismatch {
+                        daemon: old.protocol_version,
+                        expected: PROTOCOL_VERSION,
+                    });
                 }
             }
             // ★기본 레벨(warn)에 반드시 남는다★: 이 timeout 이 사용자가 배너로 보는 그 실패다.
@@ -1987,6 +2012,54 @@ mod tests {
     }
 
     #[test]
+    fn dead_pid_with_old_protocol_spawns_instead_of_erroring() {
+        let reader = FakeReader::new(vec![
+            Ok(Some(info(600, PROTOCOL_VERSION - 1))),
+            Ok(Some(info(601, PROTOCOL_VERSION))),
+        ]);
+        let spawner = CountingSpawner::ok();
+        let liveness = FakeLiveness { dead: vec![600] };
+        let clock = FakeClock::new();
+
+        let got = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut noop_pre_spawn(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(got.pid, 601);
+        assert_eq!(spawner.count.get(), 1);
+    }
+
+    #[test]
+    fn dead_pid_with_newer_protocol_also_spawns_instead_of_erroring() {
+        let reader = FakeReader::new(vec![
+            Ok(Some(info(610, PROTOCOL_VERSION + 1))),
+            Ok(Some(info(611, PROTOCOL_VERSION))),
+        ]);
+        let spawner = CountingSpawner::ok();
+        let liveness = FakeLiveness { dead: vec![610] };
+        let clock = FakeClock::new();
+
+        let got = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut noop_pre_spawn(),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(got.pid, 611);
+        assert_eq!(spawner.count.get(), 1);
+    }
+
+    #[test]
     fn corrupt_existing_file_cleans_and_spawns() {
         let reader = FakeReader::new(vec![
             Err(DiscoveryError::Parse("bad".into())),
@@ -2108,20 +2181,22 @@ mod tests {
         i
     }
 
+    // is_dead 첫 호출만 dead 로 답한다 — 같은 (pid,start) 를 (a) 에서는 dead, timeout 재검사에서는
+    // live 로 보는 오판 시나리오가 그래야 성립한다(실물 = 원격 데몬 pid 를 로컬 OpenProcess 로 재는
+    // 네트워크 공유).
+    struct FlipLiveness {
+        calls: Cell<usize>,
+    }
+    impl PidLiveness for FlipLiveness {
+        fn is_dead(&self, _pid: u32, _start: u64) -> bool {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            n == 0
+        }
+    }
+
     #[test]
     fn timeout_recovers_old_daemon_if_still_live() {
-        // 같은 (pid,start) 가 (a) 에서는 dead, timeout 재검사에서는 live 여야 시나리오가 성립한다 —
-        // is_dead 호출 시점에 따라 답이 바뀌는 가짜를 쓴다.
-        struct FlipLiveness {
-            calls: Cell<usize>,
-        }
-        impl PidLiveness for FlipLiveness {
-            fn is_dead(&self, _pid: u32, _start: u64) -> bool {
-                let n = self.calls.get();
-                self.calls.set(n + 1);
-                n == 0
-            }
-        }
         let reader = FakeReader::new(vec![
             Ok(Some(info_with_start(42, PROTOCOL_VERSION, 777))), // (a) 처음엔 dead 판정 → 삭제+보관
             Ok(None),                                             // (c) 새 파일 안 나옴
@@ -2143,6 +2218,38 @@ mod tests {
         )
         .expect("옛 데몬이 사실 live 면 복구");
         assert_eq!(got.pid, 42, "dead 로 봤던 옛 데몬 정보를 복구");
+    }
+
+    #[test]
+    fn timeout_reports_version_mismatch_if_old_daemon_is_live_but_mismatched() {
+        let reader = FakeReader::new(vec![
+            Ok(Some(info_with_start(44, PROTOCOL_VERSION - 1, 999))),
+            Ok(None),
+        ]);
+        let spawner = CountingSpawner::ok();
+        let liveness = FlipLiveness {
+            calls: Cell::new(0),
+        };
+        let clock = FakeClock::new();
+
+        let err = ensure_with(
+            &reader,
+            &spawner,
+            &liveness,
+            &clock,
+            Path::new("daemon.exe"),
+            &mut noop_pre_spawn(),
+            Duration::from_millis(150),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                DiscoveryError::VersionMismatch { daemon, expected }
+                    if daemon == PROTOCOL_VERSION - 1 && expected == PROTOCOL_VERSION
+            ),
+            "원인 없는 Timeout 대신 버전을 실어야: {err:?}"
+        );
     }
 
     #[test]

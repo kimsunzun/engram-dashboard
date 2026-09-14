@@ -20,7 +20,7 @@ use crate::backend::TurnClassifier;
 use crate::turn::{TurnObservations, TurnSignal};
 use crate::types::{
     AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputPayload, OutputSink,
-    ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
+    ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason, TurnOutcome,
 };
 
 type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
@@ -201,6 +201,30 @@ impl OutputCore {
     /// - replay lock과 subscribers lock을 동시에 보유하지 않는다(각각 짧게).
     ///   두 lock 동시 취득은 subscribe 함수 단독 예외이며 emit은 절대 금지.
     pub fn emit(&self, event: OutputEvent) {
+        self.emit_inner(event, true);
+    }
+
+    /// 같은 이벤트를 **똑같이** 내보내되, ★이 줄을 「이 화신이 턴 중이라는 증거」로 세지 않는다★
+    /// (ADR-0113 의 사실 계층에 아무것도 적지 않는다).
+    ///
+    /// ★존재 이유★: 「화면에 보여야 한다」와 「이 화신이 턴 중이다」는 같은 사실이 아니다. 상대가
+    ///   **우리가 연 적 없는 턴**의 줄을 흘리면 그 내용은 화면에 보여야 하지만(버리면 조용한 유실이다),
+    ///   그것을 진행 신호로 적으면 그 턴의 종료는 우리 것이 아니라 귀속 게이트에 막히고 — 아무도 그
+    ///   사실을 되돌리지 못한 채 30 분 fail-open 밸브까지 우편이 막힌다. 그 비대칭을 닫는 문이다.
+    /// ★그래서 종료 신호를 낼 이벤트는 이 문으로 보내지 않는다★ — 이 문은 도어벨
+    ///   (`StatusSink::turn_ended`)도 함께 건너뛰므로, 종료를 여기로 보내면 그것을 기다리는 소비자가
+    ///   깨어나지 않는다. 판정 한 줄: **이 문은 진행 신호를 적지 않는 자리이지 종료 신호를 지우는 자리가
+    ///   아니다.**
+    /// ★정리 호출자를 늘리지 않는다(ADR-0127)★ — 관측을 아예 안 적으므로 지울 것도 없다. 그래서
+    ///   `finish` + `emit` 의 finalize 재확인이라는 두 자리는 그대로다.
+    /// ★오늘의 유일한 호출자 = codex app-server 통로의 미귀속 줄★(`backend/codex/transport.rs`).
+    // ADR-0113
+    // ADR-0127
+    pub(crate) fn emit_without_turn_observation(&self, event: OutputEvent) {
+        self.emit_inner(event, false);
+    }
+
+    fn emit_inner(&self, event: OutputEvent, observe_turn: bool) {
         let cost_bytes = estimate_cost_bytes(&event);
 
         // 3~4. ★seq 발급 + replay push 를 replay 락 안에서 원자적으로★ — brief lock(락 순서 1단계,
@@ -231,7 +255,7 @@ impl OutputCore {
         // ★ADR-0113 턴 관측★: 표 갱신을 **fanout·통지보다 먼저** 한다. 통지를 받은 소비자가 곧바로
         //   표를 조회하므로(도어벨→flush 등) 순서가 뒤집히면 그 조회가 갱신 전 값을 본다.
         //   락 규율: 표 갱신은 자기 락 하나만 짧게 잡고(core 락 미보유), 통지는 그 락을 놓은 뒤 한다.
-        if let Some(signal) = (self.turn.classify)(&event) {
+        if let Some(signal) = observe_turn.then(|| (self.turn.classify)(&event)).flatten() {
             // ★신호에 **출력 순서(seq)** 를 실어 보낸다★: emit 호출자는 둘이라(pump · 입력 에코를 낸
             //   주입 스레드) 두 emit 이 병행하면 표 적용 순서가 발행 순서와 뒤집힐 수 있다. seq 는 replay
             //   락 안에서 발급돼 **출력의 정본 순서**이므로, 표가 그걸로 늦은 신호를 걸러낸다(turn.rs).
@@ -559,6 +583,7 @@ impl OutputCore {
                         OutputEvent::ToolCall { .. } => "ToolCall",
                         OutputEvent::Usage { .. } => "Usage",
                         OutputEvent::MessageDone { .. } => "MessageDone",
+                        OutputEvent::TurnEnd { .. } => "TurnEnd",
                         OutputEvent::Error(_) => "Error",
                         OutputEvent::Structured { .. } => "Structured",
                     };
@@ -739,6 +764,14 @@ fn estimate_cost_bytes(event: &OutputEvent) -> usize {
             turn_id,
             message_id,
         } => opt_len(turn_id) + opt_len(message_id),
+        // 결말의 실패 사유만 길이를 상대가 정한다 — 나머지 세 갈래는 무게가 없다.
+        OutputEvent::TurnEnd { turn_id, outcome } => {
+            opt_len(turn_id)
+                + match outcome {
+                    TurnOutcome::Failed { detail } => opt_len(detail),
+                    TurnOutcome::Completed | TurnOutcome::Interrupted | TurnOutcome::Unknown => 0,
+                }
+        }
         OutputEvent::Error(s) => s.len(),
         OutputEvent::Structured { kind, json } => kind.len() + json.len(),
     }
@@ -924,7 +957,7 @@ mod tests {
         status_sink: Arc<dyn StatusSink>,
         epoch: u32,
     ) -> (OutputCore, Arc<TurnObservations>, AgentId) {
-        use crate::profile::{AgentCommand, ClaudeOutputFormat};
+        use crate::profile::{AgentCommand, AgentOutputFormat};
         let id = uuid::Uuid::new_v4();
         let turns = Arc::new(TurnObservations::new());
         let core = OutputCore::new(
@@ -935,7 +968,7 @@ mod tests {
                 turns.clone(),
                 crate::backend::turn_classifier(&AgentCommand::Claude {
                     extra_args: vec![],
-                    output_format: ClaudeOutputFormat::StreamJson,
+                    output_format: AgentOutputFormat::StreamJson,
                 }),
             ),
         );
@@ -964,6 +997,33 @@ mod tests {
         assert!(turns.is_in_turn(id, 7), "진행 신호 → 턴 중");
         core.emit(message_done());
         assert!(!turns.is_in_turn(id, 7), "종료 신호 → 턴 아님");
+    }
+
+    /// ★진행 신호를 적지 않는 문★ — 같은 이벤트가 화면(fanout)·replay 로는 그대로 가되 사실
+    /// 계층에는 아무 것도 안 남는다. 이 성질이 깨지면 미귀속 줄이 턴 중 표시를 켜 놓고 그 종료는 귀속
+    /// 게이트에 막혀, 30 분 fail-open 밸브까지 우편이 막힌다(ADR-0127 이 닫은 그 기전).
+    #[test]
+    fn the_unobserved_door_fans_out_and_replays_but_writes_no_turn_fact() {
+        let (core, turns, id) = core_with_turns(MockStatusSink::new(), 3);
+        let sink = MockSink::new();
+        core.subscribe(sink.clone());
+
+        core.emit_without_turn_observation(delta());
+        assert_eq!(turns.get(id, 3), None, "미귀속 줄이 사실 계층을 켰다");
+        assert_eq!(sink.len(), 1, "화면으로는 나가야 한다");
+        assert_eq!(
+            core.replay
+                .lock()
+                .expect("replay poisoned")
+                .snapshot()
+                .len(),
+            1,
+            "replay 에도 남아야 한다"
+        );
+
+        // 같은 core 의 보통 문은 그대로 적는다 — 문이 갈린 것이지 표가 꺼진 것이 아니다.
+        core.emit(delta());
+        assert!(turns.is_in_turn(id, 3));
     }
 
     #[test]
@@ -1029,12 +1089,12 @@ mod tests {
 
     #[test]
     fn a_dead_incarnations_late_echo_cannot_delete_the_live_ones_observation() {
-        use crate::profile::{AgentCommand, ClaudeOutputFormat};
+        use crate::profile::{AgentCommand, AgentOutputFormat};
         let id = uuid::Uuid::new_v4();
         let turns = Arc::new(TurnObservations::new());
         let classify = crate::backend::turn_classifier(&AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         });
         let wiring = |t: &Arc<TurnObservations>| TurnWiring::new(t.clone(), classify);
 

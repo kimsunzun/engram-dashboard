@@ -20,7 +20,7 @@ pub mod stdio;
 /// ★왜 이 트레이트가 필요한가(ADR-0004 격리)★: transport(StdioTransport)는 **바보 파이프**라
 ///   자식 stdout 바이트가 무슨 스키마인지(claude stream-json / codex 프로토콜 / 평문) 몰라야 한다.
 ///   그런데 json 모드는 그 바이트를 구조화 OutputEvent 로 정제해야 한다 — 그 파싱 지식은 backend
-///   소유다(claude 라면 `ClaudeStreamDecoder`, backend/claude.rs 단독). 그래서 파싱 로직을 이
+///   소유다(claude 라면 `ClaudeStreamDecoder`, backend/claude/ 단독). 그래서 파싱 로직을 이
 ///   트레이트 뒤에 숨겨 **transport 는 "어떤 디코더인지 모른 채" 주입받아 적용만** 한다.
 ///
 /// ★수명·상태(pump 스레드 단독 소유)★: decoder 는 라인 재조립을 위해 부분 라인 버퍼 등 **가변

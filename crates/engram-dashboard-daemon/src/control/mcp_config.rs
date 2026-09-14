@@ -15,7 +15,7 @@
 //! } } }
 //! ```
 //!   ※ 이 스키마는 mcp-config 공통 형식이지 claude CLI **플래그** 지식이 아니다 — 플래그(`--mcp-config`)는
-//!   backend/claude.rs 단독(ADR-0004). 파일 내용 생성은 데몬 관심사(토큰·엔드포인트는 데몬 소유)라
+//!   backend/claude/ 단독(ADR-0004). 파일 내용 생성은 데몬 관심사(토큰·엔드포인트는 데몬 소유)라
 //!   여기 둔다. backend 는 이 파일 경로만 `--mcp-config` 로 가리킨다.
 //!
 //! ★보안(ADR-0086 §Secrets)★:

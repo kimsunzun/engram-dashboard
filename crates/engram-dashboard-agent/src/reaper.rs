@@ -103,7 +103,7 @@ impl ReaperDeps {
 ///                                => KeepDisableAutoRestore // 시체 보존 + auto_restore=false
 /// ```
 /// 사용자 정책(ADR-0082 계승 "삭제하지마, 시체로라도 남겨")대로 모든 런타임 종료는 세션만 맵에서
-/// 수거하고 프로필은 시체로 보존한다(claude_session_id 유지 → 재활성화 시 --resume 로 이어받음).
+/// 수거하고 프로필은 시체로 보존한다(backend_session_id 유지 → 재활성화 시 --resume 로 이어받음).
 // ADR-0083
 pub fn decide(msg: &ReapMsg) -> Disposition {
     if msg.shutting_down_at_finish {

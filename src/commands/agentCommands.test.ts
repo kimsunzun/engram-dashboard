@@ -5,6 +5,7 @@ const clientMock = vi.hoisted(() => ({
   spawnAgent: vi.fn(async () => ({ id: 'new-agent' })),
   renameProfile: vi.fn(async () => undefined),
   createClaudeProfile: vi.fn(async () => ({ id: 'new-profile' })),
+  createCodexProfile: vi.fn(async () => ({ id: 'new-codex-profile' })),
   // refreshProfiles(eventBus) 가 부르는 listProfiles — 생성 직후 store/tree 반영 검증용. 기본 []
   //   (테스트별로 mockResolvedValueOnce 로 생성 프로필을 실어 반환).
   listProfiles: vi.fn(async () => [] as unknown[]),
@@ -14,6 +15,7 @@ vi.mock('../api/clientFactory', () => ({
     spawnAgent: (...args: unknown[]) => clientMock.spawnAgent(...(args as [])),
     renameProfile: (...args: unknown[]) => clientMock.renameProfile(...(args as [])),
     createClaudeProfile: (...args: unknown[]) => clientMock.createClaudeProfile(...(args as [])),
+    createCodexProfile: (...args: unknown[]) => clientMock.createCodexProfile(...(args as [])),
     listProfiles: (...args: unknown[]) => clientMock.listProfiles(...(args as [])),
   },
   getAgentClient: vi.fn(),
@@ -26,7 +28,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 import './agentCommands' // side-effect register
-import { run } from './registry'
+import { run, runAsHuman } from './registry'
+import { fireAndForget } from './dispatch'
 import { buildSlotMenu } from './slotMenu'
 import { useAgentStore } from '../store/agentStore'
 
@@ -34,6 +37,7 @@ beforeEach(() => {
   clientMock.spawnAgent.mockClear()
   clientMock.renameProfile.mockClear()
   clientMock.createClaudeProfile.mockClear()
+  clientMock.createCodexProfile.mockClear()
   clientMock.listProfiles.mockClear()
   dialogMock.open.mockReset()
   useAgentStore.setState({ presets: [], profiles: [] })
@@ -46,12 +50,12 @@ describe('agent.spawn 라우팅', () => {
   it('preset(id) → store.presets 에서 cwd 해소 → spawnAgent(cwd)', () => {
     useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/work/engram', name: null }] })
     run('agent.spawn', { preset: 'pr1' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work/engram')
+    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/work/engram', 'claude')
   })
 
   it('raw cwd → spawnAgent(trim 된 cwd)', () => {
     run('agent.spawn', { cwd: '  C:/new/path  ' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/new/path')
+    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/new/path', 'claude')
   })
 
   it('parent 세팅 → throw(중첩 미지원)', () => {
@@ -74,7 +78,7 @@ describe('agent.spawn 라우팅', () => {
   it('preset 이 cwd 보다 우선(둘 다 주면 preset 해소값 사용)', () => {
     useAgentStore.setState({ presets: [{ id: 'pr1', cwd: 'C:/from/preset', name: null }] })
     run('agent.spawn', { preset: 'pr1', cwd: 'C:/ignored' })
-    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/from/preset')
+    expect(clientMock.spawnAgent).toHaveBeenCalledWith('C:/from/preset', 'claude')
   })
 })
 
@@ -131,6 +135,75 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
+  // ★사람이 codex 대화형 TUI 를 고르는 문★ — 형제와 마찬가지로 등록만 하고 스폰하지 않는다 — 뜨는 것은
+  //   활성화(더블클릭)에서다.
+  // ★`run` 이 아니라 `runAsHuman` 이다★ — 이 문은 `humanOnly` 라 LLM 진입점으로는 반려된다(아래 별도 항목).
+  it('createCodex(사람 경로) → createCodexProfile 를 outputFormat=Terminal 로 호출', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    await runAsHuman('agentlist.createCodex', {})
+
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'Terminal',
+    )
+    expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
+    expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
+    expect(useAgentStore.getState().profiles).toEqual([createdProfile])
+    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+  })
+
+  // ★모드 축이 실제로 갈리는 것을 재는 자리★ — 두 codex 문이 같은 `createCodexProfile` 을 부르므로,
+  //   모드를 안 싣거나 둘 다 같은 값을 실으면 위 항목과 이 항목 중 하나가 빨개진다.
+  it('createCodexJson(사람 경로) → createCodexProfile 를 outputFormat=StreamJson 로 호출', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    await runAsHuman('agentlist.createCodexJson', {})
+
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'StreamJson',
+    )
+    expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
+    expect(clientMock.listProfiles).toHaveBeenCalledTimes(1)
+    expect(useAgentStore.getState().profiles).toEqual([createdProfile])
+    expect(clientMock.spawnAgent).not.toHaveBeenCalled()
+  })
+
+  // 형제 `createCodex` 와 같은 게이트를 진다 — 한쪽만 닫히는 것이 이 항목이 막는 회귀다.
+  it('createCodexJson: LLM 진입점(registry.run)은 사유를 실어 반려하고 아무것도 만들지 않는다', () => {
+    expect(() => run('agentlist.createCodexJson', {})).toThrow(/LLM·버스/)
+    expect(() => run('agentlist.createCodexJson', {})).toThrow(/Phase 2/)
+    expect(clientMock.createCodexProfile).not.toHaveBeenCalled()
+    expect(dialogMock.open).not.toHaveBeenCalled()
+  })
+
+  // ★세 번째 생성 문 — LLM 은 못 지나고 사람은 지난다★(2026-09-08 리뷰 FIX 2).
+  //
+  // 이 항목은 **사람 메뉴이면서 동시에 LLM command** 다. wire `CreateProfile` 까지 닿는데 그 핸들러는
+  // 정책을 하나도 안 본다 — 그래서 닫는 축이 백엔드 낱말이 아니라 **호출자**다. 아래 둘이 그 축을
+  // 양쪽에서 잰다: 게이트를 지우면 첫째가, 사람 경로를 게이트 뒤로 옮기면 둘째가 빨개진다.
+  it('createCodex: LLM 진입점(registry.run)은 사유를 실어 반려하고 아무것도 만들지 않는다', () => {
+    expect(() => run('agentlist.createCodex', {})).toThrow(/LLM·버스/)
+    expect(() => run('agentlist.createCodex', {})).toThrow(/Phase 2/)
+    expect(clientMock.createCodexProfile).not.toHaveBeenCalled()
+    // ★다이얼로그가 뜨기도 전에 막힌다★ — 「모달이 LLM 을 막는다」에 기대지 않는다는 것이 이 줄의 뜻이다.
+    expect(dialogMock.open).not.toHaveBeenCalled()
+  })
+
+  it('createCodex: 사람 경로(트리 메뉴 → fireAndForget)는 그대로 codex 를 만든다', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    // `SlotContextMenu` 가 메뉴 항목에 쓰는 바로 그 호출이다(그 파일의 `fireAndForget(id, …)`).
+    fireAndForget('agentlist.createCodex')
+
+    await vi.waitFor(() => expect(clientMock.createCodexProfile).toHaveBeenCalled())
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'Terminal',
+    )
+  })
+
   it('createAgent(파라미터형): 인자 없으면 StreamJson 기본, args.outputFormat 주면 그 값 사용', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
@@ -167,14 +240,16 @@ describe('agent_list 생성 계열 라우팅', () => {
 // ── agent_list pane 메뉴 = 1단 서브메뉴 컨테이너(ADR-0078 / ADR-0065) ──────────────
 // side-effect import 로 registerSlotMenu 가 이미 컨테이너를 기여했다.
 describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
-  it('"에이전트 생성" 컨테이너 + 자식 2개(선언 순서 Json→Terminal)', () => {
+  it('"에이전트 생성" 컨테이너 + 자식 4개(선언 순서 Json→Terminal→Codex→CodexJson)', () => {
     const items = buildSlotMenu('agent_list')
     const container = items.find(i => i.title === '에이전트 생성')
     expect(container).toBeDefined()
-    expect(container?.children?.length).toBe(2)
+    expect(container?.children?.length).toBe(4)
     expect(container?.children?.map(c => c.id)).toEqual([
       'agentlist.createJson',
       'agentlist.createTerminal',
+      'agentlist.createCodex',
+      'agentlist.createCodexJson',
     ])
   })
 })

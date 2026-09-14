@@ -63,9 +63,9 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   const [items, setItems] = useState<StructuredItem[]>([])
   const [turnDone, setTurnDone] = useState(false)
   // ★로컬 awaiting 플래그(FIX 5b)★: 전송 직후~첫 응답 바이트 도착 사이의 공백을 메운다. turnDone 은
-  //   누산기가 result 라인으로만 내리므로, 직전 턴이 idle 인 상태에서 새로 보내면 첫 바이트 전까지
-  //   'idle' 로 보인다. 전송 즉시 이 플래그를 세워 'streaming' 으로 뒤집고, 응답 바이트가 오면 해제해
-  //   이후 표시를 turnDone 에 넘긴다.
+  //   누산기가 턴 종료 신호(MessageDone · TurnEnd)로만 세우므로, 직전 턴이 idle 인 상태에서 새로 보내면
+  //   첫 바이트 전까지 'idle' 로 보인다. 전송 즉시 이 플래그를 세워 'streaming' 으로 뒤집고, ★누산기가
+  //   **알아들은** 응답 바이트★가 오면 해제해 이후 표시를 turnDone 에 넘긴다(아래 구독 콜백).
   const [awaiting, setAwaiting] = useState(false)
   const [input, setInput] = useState('')
   // ADR-0145: 이력 복원이 끝났다는 신호('live')를 받았나. 빈 상태 표시의 게이트이며 재구독마다 내린다.
@@ -160,11 +160,15 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           //   tag0 를 건너뛰어도 정합하다.
           if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) return
           // tag1 payload = StructuredEvent JSON 1건.
-          acc.feed(chunk.bytes)
+          const understood = acc.feed(chunk.bytes)
           // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
           setItems([...acc.snapshot()])
           setTurnDone(acc.isTurnDone())
-          setAwaiting(false) // 이후 표시는 turnDone 이 주도
+          // ★알아들은 프레임에만 표시 주도권을 turnDone 에 넘긴다★: 못 알아들은 프레임(모르는 종류·
+          //   malformed JSON)은 turnDone 을 갱신하지 못하므로, 그때 awaiting 을 풀면 표시가 **직전 턴의**
+          //   낡은 turnDone 으로 판정된다 — 둘째 턴부터는 그 값이 true 라 응답이 도는 중에 대기 표시가
+          //   꺼진다(첫 턴만 보는 테스트로는 안 보이던 결함). 못 알아들었으면 아직 아무것도 못 들은 것이다.
+          if (understood) setAwaiting(false)
         },
         // ADR-0145: replay 국면 콜백 — 'live' 는 데몬이 복원 끝에 넣은 표식을 클라가 소비해 버퍼를 비운
         //   시점이다(protocolClient.flushToLive). 이력이 0건인 새 에이전트에도 같은 신호가 오므로

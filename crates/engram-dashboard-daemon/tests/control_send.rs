@@ -11,7 +11,7 @@ use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, SpawnMode,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -157,7 +157,6 @@ async fn wire(
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },
@@ -231,7 +230,7 @@ fn spawn_json_agent(
         name.to_string(),
         AgentCommand::Claude {
             extra_args: vec![],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         },
         std::path::PathBuf::from("."),
         vec![],
@@ -794,7 +793,7 @@ mod obs_seam {
             engram_dashboard_agent::backend::turn_classifier(
                 &engram_dashboard_agent::profile::AgentCommand::Claude {
                     extra_args: vec![],
-                    output_format: engram_dashboard_agent::profile::ClaudeOutputFormat::StreamJson,
+                    output_format: engram_dashboard_agent::profile::AgentOutputFormat::StreamJson,
                 },
             ),
         );
@@ -1392,7 +1391,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
 ///       소관이라, 그 응용계층 직렬화를 지우는 회귀는 여기서 **안 잡힌다**. ▶ agent 크레이트
 ///       `tests/stdio_physical_pipe.rs` :: `physical_pipe_concurrent_sends_no_interleave` 가 커버한다.
 ///   (2) **encoder 내부 정확성** — actual·expected 가 같은 encoder 를 쓰므로 encoder 자체 결함(예:
-///       wrap_user_turn 이 개행을 빠뜨림)은 양쪽을 똑같이 오염시켜 여기선 안 걸린다. ▶ claude.rs 의
+///       wrap_user_turn 이 개행을 빠뜨림)은 양쪽을 똑같이 오염시켜 여기선 안 걸린다. ▶ `backend/claude/` 의
 ///       golden unit test `wrap_user_turn_exact_line_and_newline_terminated` 가 커버한다.
 #[tokio::test]
 async fn stage1_concurrent_sends_exact_once_distinct_bodies_intact_at_seam() {

@@ -45,7 +45,7 @@ function profile(
     command: { kind: 'Claude', extra_args: [], output_format: 'Terminal' },
     cwd: 'C:/x',
     env: [],
-    claude_session_id: null,
+    backend_session_id: null,
     old_session_ids: [],
     epoch: 0,
     auto_restore: false,

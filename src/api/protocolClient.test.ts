@@ -133,10 +133,12 @@ describe('request_id pending 매칭', () => {
   it('spawnAgent → SpawnByCwd{request_id} 전송 + Spawned{request_id,agent} resolve', async () => {
     const t = new MockTransport()
     const c = new ProtocolClient(t)
-    const p = c.spawnAgent('C:/work')
+    const p = c.spawnAgent('C:/work', 'codex')
     await Promise.resolve()
-    const sent = t.lastSent<{ request_id: string; cwd: string }>('SpawnByCwd')!
+    const sent = t.lastSent<{ request_id: string; cwd: string; backend: string }>('SpawnByCwd')!
     expect(sent.cwd).toBe('C:/work')
+    // 고른 낱말이 봉투에 실려야 한다 — 안 실으면 데몬이 거절한다(기본값 없음).
+    expect(sent.backend).toBe('codex')
     t.control({ Spawned: { request_id: sent.request_id, agent: { id: 'a1' } } })
     expect(await p).toEqual({ id: 'a1' })
   })
@@ -249,6 +251,52 @@ describe('프리셋 CRUD(ADR-0061)', () => {
     expect(sent.name).toBe('내 에이전트')
     t.control({ Ack: { request_id: sent.request_id } })
     await expect(p).resolves.toBeUndefined()
+  })
+})
+
+// ── 프로필 생성 — wire 명령을 **조립하는 줄**을 잰다 ───────────────────────────────────
+//
+// ★`agentCommands.test.ts` 와 겹치지 않는다★ — 그쪽은 클라이언트를 mock 하므로 여기서 조립되는
+//   `CreateProfile` 봉투를 하나도 보지 못한다. 백엔드 낱말과 모드가 실제로 소켓 쪽으로 나가는지는
+//   이 자리에서만 잰다.
+describe('프로필 생성(CreateProfile 봉투)', () => {
+  it('createCodexProfile(outputFormat) → backend=codex + 고른 모드를 그대로 싣는다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const profile = { id: 'p1' } as AgentProfile
+    const p = c.createCodexProfile('n', 'C:/work', ['--foo'], [], false, 'StreamJson')
+    await Promise.resolve()
+    const sent = t.lastSent<{
+      request_id: string
+      backend: string
+      output_format: string
+      extra_args: string[]
+    }>('CreateProfile')!
+    expect(sent.backend).toBe('codex')
+    expect(sent.output_format).toBe('StreamJson')
+    expect(sent.extra_args).toEqual(['--foo'])
+    t.control({ Created: { request_id: sent.request_id, profile } })
+    await expect(p).resolves.toEqual(profile)
+  })
+
+  // 모드를 안 주는 옛 호출자 — 여기가 `Terminal` 을 잃으면 그 호출자가 조용히 app-server 로 갈아탄다.
+  it('createCodexProfile(모드 생략) → output_format=Terminal', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    void c.createCodexProfile('n', 'C:/work', [], [], false)
+    await Promise.resolve()
+    expect(t.lastSent<{ output_format: string }>('CreateProfile')!.output_format).toBe('Terminal')
+  })
+
+  // 형제 — 한쪽 낱말을 다른 쪽에 잘못 박는 편집을 이 둘이 함께 잡는다.
+  it('createClaudeProfile(outputFormat) → backend=claude + 고른 모드', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    void c.createClaudeProfile('n', 'C:/work', [], [], false, 'StreamJson')
+    await Promise.resolve()
+    const sent = t.lastSent<{ backend: string; output_format: string }>('CreateProfile')!
+    expect(sent.backend).toBe('claude')
+    expect(sent.output_format).toBe('StreamJson')
   })
 })
 

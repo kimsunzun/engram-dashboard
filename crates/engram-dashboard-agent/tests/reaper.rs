@@ -76,7 +76,6 @@ fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>)
     let presets = Arc::new(PresetRegistry::new(preset_store));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },
@@ -200,7 +199,7 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
     let id = profile.id;
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
-    seeded.claude_session_id = Some(sid);
+    seeded.backend_session_id = Some(sid);
     profiles.upsert(seeded.clone());
 
     let info = manager
@@ -231,9 +230,9 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
         "userkill: 유저 kill 인데 프로필이 삭제됨 — 시체로 보존돼야 함(ADR-0083)"
     );
     assert_eq!(
-        profiles.get(id).and_then(|p| p.claude_session_id),
+        profiles.get(id).and_then(|p| p.backend_session_id),
         Some(sid),
-        "userkill: claude_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
+        "userkill: backend_session_id 가 유실됨 — 재활성화 resume 불가(ADR-0083 회귀)"
     );
 }
 

@@ -1,7 +1,11 @@
-//! CodexBackend — Codex CLI 전용 CommandSpec 산출 stub.
+//! GeminiBackend — Gemini CLI 전용 CommandSpec 산출 stub.
 //!
-//! AgentCommand에 Codex variant가 없으므로 backend_for dispatch에서 이 backend로 라우팅되지
-//! 않는다. 이 파일은 구조 확보 목적의 stub이며, AgentCommand::Codex variant 추가와
+//! ★이 폴더가 세우는 규칙 = gemini 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
+//! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
+//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
+//!
+//! AgentCommand에 Gemini variant가 없으므로 backend_for dispatch에서 이 backend로 라우팅되지
+//! 않는다. 이 파일은 구조 확보 목적의 stub이며, AgentCommand::Gemini variant 추가와
 //! backend_for 매칭은 CLI spike 완료 후 별도 작업에서 확정한다.
 //!
 //! tauri import 0.
@@ -14,32 +18,32 @@ use crate::backend::AgentBackend;
 use crate::profile::{AgentCommand, SpawnMode};
 use crate::types::{BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, SessionCaps};
 
-/// Codex 실행 파일명. PATH로 해석된다.
+/// Gemini 실행 파일명. PATH로 해석된다.
 ///
-/// ※ best-guess: Codex CLI의 실제 바이너리명이 "codex"인지 확인 필요.
-/// CLI spike에서 `which codex` / `codex --help` 로 확정할 것.
-const CODEX_PROGRAM: &str = "codex";
+/// ※ best-guess: Google Gemini CLI의 실제 바이너리명이 "gemini"인지 확인 필요.
+/// CLI spike에서 `which gemini` / `gemini --help` 로 확정할 것.
+/// Google AI Studio CLI 또는 `gemini-cli` 패키지명일 가능성 있음.
+const GEMINI_PROGRAM: &str = "gemini";
 
-pub struct CodexBackend;
+pub struct GeminiBackend;
 
-impl AgentBackend for CodexBackend {
+impl AgentBackend for GeminiBackend {
     fn needs_session(&self) -> bool {
-        // best-guess: Codex도 세션 개념이 있다고 가정해 true.
-        // CLI spike에서 실측 후 확정. 세션 없는 CLI라면 false로 변경.
+        // best-guess: Gemini CLI도 대화 세션 개념이 있다고 가정해 true.
+        // CLI spike에서 실측 후 확정. 세션리스 CLI라면 false로 변경.
         true
     }
 
     fn supports_control_channel(&self) -> bool {
-        // 보수적 stub(ADR-0086 F3) — Codex 의 MCP 지원 여부는 CLI spike 전이라 미상이다. capabilities
-        //   stub 가 전부 false 인 것과 같은 정신으로 false(미측정 backend 는 제어 채널을 소비한다고
-        //   주장하지 않는다). spike 후 실측값으로 교체.
+        // 보수적 stub(ADR-0086 F3) — Gemini CLI 의 MCP 지원 여부는 CLI spike 전이라 미상이다.
+        //   capabilities stub 가 전부 false 인 것과 같은 정신으로 false(미측정 backend 는 제어 채널을
+        //   소비한다고 주장하지 않는다). spike 후 실측값으로 교체.
         false
     }
 
     fn accepts_mcp_config(&self) -> bool {
-        // 보수적 stub(ADR-0099) — 미측정 backend 는 MCP-capable 을 주장하지 않는다 → false(비-MCP 스폰:
-        //   mcp-config 미기록 + CLI-only 프라이밍 + [Cli] grant). Codex 의 실제 MCP config 지원은 CLI
-        //   spike 후 실측값으로 교체(ADR-0004 backend 지식).
+        // 보수적 stub(ADR-0099) — 미측정 backend 는 MCP-capable 을 주장하지 않는다 → false(비-MCP 스폰).
+        //   Gemini 의 실제 MCP config 지원은 CLI spike 후 실측값으로 교체(ADR-0004 backend 지식).
         // ADR-0099
         false
     }
@@ -52,14 +56,15 @@ impl AgentBackend for CodexBackend {
         cwd: PathBuf,
         env: Vec<(String, String)>,
         // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
-        // TODO(ADR-0094): translate ControlEndpoint.grants to codex permission flags
-        //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e}:*)+PowerShell({e}:*); codex 방언은 CLI spike 후 확정).
+        // TODO(ADR-0094): translate ControlEndpoint.grants to gemini permission flags
+        //   (claude 는 --allowedTools mcp__{s}__{t} / Bash({e}:*)+PowerShell({e}:*); gemini 방언은 CLI spike 후 확정).
         _control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         let mut args: Vec<String> = Vec::new();
 
         if let Some(sid) = session_id {
-            // codex CLI의 세션 재개 플래그가 --session / --resume / --continue 등인지 미확인.
+            // Gemini CLI의 세션 재개 플래그가 --session / --resume / --conversation 등인지 미확인.
+            // Claude와 동일한 패턴을 best-guess로 선택(대부분의 AI CLI가 유사한 UX를 따른다고 가정).
             let flag = match mode {
                 SpawnMode::Fresh => "--session",
                 SpawnMode::Resume => "--resume",
@@ -77,7 +82,7 @@ impl AgentBackend for CodexBackend {
                 args: shell_args,
             } => {
                 return CommandSpec {
-                    program: CODEX_PROGRAM.to_string(),
+                    program: GEMINI_PROGRAM.to_string(),
                     args: {
                         let _ = program;
                         shell_args.clone()
@@ -86,10 +91,15 @@ impl AgentBackend for CodexBackend {
                     cwd,
                 };
             }
+            // 이 backend 는 dispatch 에 배선되지 않았고, 배선된 형제(codex)의 인자를 흉내 내면
+            //   그 형제의 지식이 여기로 샌다(ADR-0004).
+            AgentCommand::Codex { .. } => {
+                unreachable!("GeminiBackend 는 Codex variant 를 처리하지 않음. dispatch 버그.")
+            }
         }
 
         CommandSpec {
-            program: CODEX_PROGRAM.to_string(),
+            program: GEMINI_PROGRAM.to_string(),
             args,
             env,
             cwd,
@@ -119,10 +129,10 @@ mod tests {
     use super::*;
 
     fn spec(mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
-        CodexBackend.build_spec(
+        GeminiBackend.build_spec(
             &AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: crate::profile::ClaudeOutputFormat::Terminal,
+                output_format: crate::profile::AgentOutputFormat::Terminal,
             },
             mode,
             sid,
@@ -133,22 +143,22 @@ mod tests {
     }
 
     #[test]
-    fn codex_program_name_is_correct() {
+    fn gemini_program_name_is_correct() {
         let s = spec(SpawnMode::Fresh, None);
-        assert_eq!(s.program, CODEX_PROGRAM);
-        assert_eq!(s.program, "codex");
+        assert_eq!(s.program, GEMINI_PROGRAM);
+        assert_eq!(s.program, "gemini");
     }
 
     #[test]
-    fn codex_fresh_uses_session_flag_best_guess() {
+    fn gemini_fresh_uses_session_flag_best_guess() {
         let sid = Uuid::new_v4();
         let s = spec(SpawnMode::Fresh, Some(sid));
-        assert_eq!(s.program, CODEX_PROGRAM);
+        assert_eq!(s.program, GEMINI_PROGRAM);
         assert_eq!(s.args, vec!["--session".to_string(), sid.to_string()]);
     }
 
     #[test]
-    fn codex_resume_uses_resume_flag_best_guess() {
+    fn gemini_resume_uses_resume_flag_best_guess() {
         let sid = Uuid::new_v4();
         let s = spec(SpawnMode::Resume, Some(sid));
         assert_eq!(s.args, vec!["--resume".to_string(), sid.to_string()]);
@@ -156,17 +166,17 @@ mod tests {
 
     #[test]
     fn needs_session_is_true() {
-        assert!(CodexBackend.needs_session());
+        assert!(GeminiBackend.needs_session());
     }
 
     #[test]
     fn cwd_and_env_are_forwarded() {
         let cwd = PathBuf::from("C:/workspace");
-        let env = vec![("BAR".to_string(), "baz".to_string())];
-        let s = CodexBackend.build_spec(
+        let env = vec![("GEMINI_KEY".to_string(), "dummy".to_string())];
+        let s = GeminiBackend.build_spec(
             &AgentCommand::Claude {
                 extra_args: vec![],
-                output_format: crate::profile::ClaudeOutputFormat::Terminal,
+                output_format: crate::profile::AgentOutputFormat::Terminal,
             },
             SpawnMode::Fresh,
             None,

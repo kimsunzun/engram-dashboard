@@ -54,6 +54,8 @@ export const ko = {
     create: '에이전트 생성', // ADR-0078 생성 서브메뉴 컨테이너 라벨과 값 재사용.
     createTerminal: '클로드코드 터미널', // 렌더 모드 Terminal(xterm PTY) 고정 생성(ADR-0078).
     createJson: '클로드코드 JSON', // 렌더 모드 StreamJson(headless NDJSON→RichSlot) 고정 생성(ADR-0078).
+    createCodex: '코덱스 터미널', // 출력 모드 Terminal(대화형 TUI) 고정 생성.
+    createCodexJson: '코덱스 JSON', // 출력 모드 StreamJson(`codex app-server` 상주 JSON 서버) 고정 생성.
     spawnInto: '스폰 + 배치',
     kill: '에이전트 종료',
     monitor: '에이전트 모니터링',
@@ -116,6 +118,22 @@ export const ko = {
     label: '프리셋',
     empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
     deleteBtn: '삭제',
+  },
+  /**
+   * 구조화(챗) 슬롯 렌더 문자열.
+   *
+   * ★프로토콜 낱말을 여기 적지 않는다★ — 이벤트 이름·백엔드 상태 문자열·JSON 은 화면에 올리지 않는다
+   *   (`docs/process/S21-codex-backend/trd-phase2a.md` §6-2). 값은 사용자가 읽을 사실만 적는다.
+   */
+  chat: {
+    // 턴 결말 셋 — ★서로 다른 사실이라 한 키로 합치지 않는다★. 중단은 실패가 아니고, 모름은
+    //   「우리가 결말을 못 읽었다」이지 「실패했다」가 아니다.
+    turnFailed: '응답이 실패로 끝났습니다',
+    turnInterrupted: '응답이 중단됐습니다',
+    turnUnknown: '응답이 끝났습니다 — 끝난 이유는 알 수 없습니다',
+    // 이 셸이 모르는 이벤트가 도착했을 때. 방향이 한쪽뿐이라 원인을 단정할 수 있다 — 모르는 어휘는
+    //   데몬에서 오므로 뒤처진 쪽은 언제나 셸이다.
+    unsupportedEvent: '표시할 수 없는 신호 {count}건 — 앱이 데몬보다 오래된 버전일 수 있습니다',
   },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {

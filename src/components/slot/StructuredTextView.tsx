@@ -10,6 +10,9 @@ import {
   Braces,
   ChevronDown,
   ChevronRight,
+  CircleAlert,
+  CircleHelp,
+  CircleStop,
   FileCode2,
   FileMinus2,
   FilePlus2,
@@ -24,7 +27,7 @@ import {
 
 import { cn } from '@/lib/utils'
 import { t } from '../../i18n'
-import type { StructuredItem } from './structuredAccumulator'
+import type { StructuredItem, TurnOutcomeMark } from './structuredAccumulator'
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
 import { WaitRow } from './chat/WaitRow'
@@ -276,6 +279,60 @@ function ToolItemRow({
   )
 }
 
+/**
+ * 턴 결말 표식 — 실패/중단/모름 셋이 ★화면에서 서로 구별돼야 한다★(그 구별이 결말 칸의 존재 이유다).
+ * 가르는 축 셋: 아이콘 · 문구 · 톤. ★색 하나에 기대지 않는다★ — e-ink 테마는 색을 무력화하므로
+ * 색만 다르면 셋이 한 모양이 된다.
+ * ★중단·모름은 붉게 칠하지 않는다★ — 중단은 사용자가 끊은 정상 경로이고, 모름은 「모른다」이지
+ * 「실패했다」가 아니다. 실패만 error 톤을 쓴다(Error 행과 같은 어휘).
+ */
+function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: string | null }) {
+  const isErr = outcome === 'failed'
+  const Icon =
+    outcome === 'failed' ? AlertTriangle : outcome === 'interrupted' ? CircleStop : CircleHelp
+  const title =
+    outcome === 'failed'
+      ? t('chat.turnFailed')
+      : outcome === 'interrupted'
+        ? t('chat.turnInterrupted')
+        : t('chat.turnUnknown')
+  return (
+    <div className="my-1">
+      <div className={cn('flex items-center gap-2.5', isErr ? 'text-red-500' : 'text-muted')}>
+        <Icon className="size-3.5 flex-none" />
+        <span className={cn(isErr && 'font-bold')}>{title}</span>
+      </div>
+      {detail !== null && detail !== '' && (
+        // 사유는 상대가 준 신뢰할 수 없는 텍스트 — 마크다운을 태우지 않고 리터럴로만 그린다(FIX 2 와 같은 규율).
+        <div
+          className={cn(
+            'mt-1 whitespace-pre-wrap break-words',
+            isErr ? 'text-red-500' : 'text-muted',
+          )}
+        >
+          {detail}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * 이 셸이 모르는 이벤트가 왔다는 표식(누산기 default arm).
+ *
+ * ★이벤트 이름·payload 를 그리지 않는다★ — 프로토콜 낱말을 사용자 화면에 올리지 않는다(trd-phase2a §6-2).
+ *   진단에 필요한 이름은 누산기가 console 로만 내보낸다.
+ * ★assistant 본문처럼 보이면 안 된다★ — muted 톤 한 줄로 두어 「우리 쪽 한계 고지」로 읽히게 한다.
+ */
+function UnsupportedRow({ count }: { count: number }) {
+  return (
+    <div className="my-1 flex items-center gap-2.5 text-muted">
+      <CircleAlert className="size-3.5 flex-none" />
+      <span>{t('chat.unsupportedEvent', { count: String(count) })}</span>
+    </div>
+  )
+}
+
 function GenericItemRow({ label, json }: { label: string; json: string }) {
   const [open, setOpen] = useState(false)
   return (
@@ -322,6 +379,8 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
     case 'text':
     case 'tool':
     case 'error':
+    case 'outcome':
+    case 'unsupported':
       return 'assistant'
     case 'usage':
       return 'skip'
@@ -418,6 +477,22 @@ function renderItem(
         <ChatRow key={k} rail tone="error" runPos={pos}>
           <RowHeader icon={AlertTriangle} title="Error" tone="error" />
           <div className="text-red-500 whitespace-pre-wrap break-words">{item.message}</div>
+        </ChatRow>
+      )
+
+    case 'outcome':
+      // ★정상 완료는 여기 오지 않는다★ — 누산기가 표식 없이 구분선만 남긴다(평범한 끝맺음이 경고처럼
+      //   보이지 않게). 그래서 이 행이 그리는 것은 실패·중단·모름 셋뿐이다.
+      return (
+        <ChatRow key={k} rail tone={item.outcome === 'failed' ? 'error' : 'default'} runPos={pos}>
+          <OutcomeRow outcome={item.outcome} detail={item.detail} />
+        </ChatRow>
+      )
+
+    case 'unsupported':
+      return (
+        <ChatRow key={k} rail runPos={pos}>
+          <UnsupportedRow count={item.count} />
         </ChatRow>
       )
 

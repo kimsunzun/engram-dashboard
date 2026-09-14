@@ -60,7 +60,11 @@ register({
     const picked = await open({ directory: true, multiple: false, title: t('dialog.pickAgentCwd') })
     const cwd = typeof picked === 'string' ? picked : null
     if (!cwd) return // 취소 — no-op
-    const agent = await agentClient.spawnAgent(cwd)
+    // ★claude 를 이름으로 적는다★ — 스폰 패킷의 백엔드 칸은 기본값이 없어(데몬이 부재를 거절한다)
+    //   호출자가 고른 것을 말해야 한다. 이 명령이 codex 를 못 고르는 것은 빈칸이 아니라 자리 문제다 —
+    //   사람이 백엔드를 고르는 문은 트리 쪽(`agentlist.create*`)이고 이 명령은 메뉴에서 빠져 있다
+    //   (ADR-0067 — 아래 주석).
+    const agent = await agentClient.spawnAgent(cwd, 'claude')
     // ADR-0035: 배정도 백엔드 권위 invoke(assign_agent) — 낙관 갱신 없이 emit 으로 반영.
     return useViewStore.getState().assignAgent(viewId, slotId, agent.id)
   },

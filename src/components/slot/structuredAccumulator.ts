@@ -16,6 +16,13 @@
 //   상류(ProtocolClient)가 seq dedup·순서 보장을 하므로 이 누산기는 중복/역전 방어를 따로 하지 않는다.
 
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
+import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bindings/TurnOutcome'
+
+/**
+ * 턴이 **정상 완료가 아닌** 결말로 닫혔을 때 화면에 남기는 표식 — 중립 어휘(백엔드 이름이 없다).
+ * ★'interrupted' 를 실패로 그리지 말 것★ — 사용자가 끊은 것은 이 저장소에서 1급 정상 경로다.
+ */
+export type TurnOutcomeMark = 'failed' | 'interrupted' | 'unknown'
 
 /** `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
 export type StructuredItem =
@@ -27,6 +34,10 @@ export type StructuredItem =
   // 탈출구 이벤트(codex/gemini·API 모델 누수 흡수).
   | { kind: 'structured'; label: string; json: string; itemId: number }
   | { kind: 'separator'; itemId: number }
+  // 턴 결말 표식 — `detail` = 실패 사유(상대가 줬을 때만). 정상 완료는 이 item 을 만들지 않는다(구분선만).
+  | { kind: 'outcome'; outcome: TurnOutcomeMark; detail: string | null; itemId: number }
+  // 이 셸이 모르는 이벤트가 왔다는 표식. `count` = 연속 누적분. ★원본 payload 는 싣지 않는다★(아래 default arm).
+  | { kind: 'unsupported'; count: number; itemId: number }
 
 export class StructuredEventAccumulator {
   private items: StructuredItem[] = []
@@ -47,22 +58,28 @@ export class StructuredEventAccumulator {
   /**
    * 라이브 경로는 항상 Uint8Array, 문자열은 테스트/편의용.
    * tag1 은 프레임 1개 = 이벤트 1개라 라인 재조립·버퍼링이 필요 없다.
+   *
+   * @returns 이 프레임을 **이해했는가**. `false` = 파싱에 실패했거나 이 셸이 모르는 종류라, 돌아온
+   *   상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다는 뜻이다.
+   *   ★호출자는 이 값을 보고 자기 대기 상태를 누산기에 넘길지 정한다★ — 프레임이 왔다는 사실만으로
+   *   넘기면, 못 알아들은 프레임이 「응답이 왔다」로 둔갑해 대기 표시가 꺼진다(RichSlot 의 `awaiting`).
    */
-  feed(payload: Uint8Array | string): void {
+  feed(payload: Uint8Array | string): boolean {
     const json = typeof payload === 'string' ? payload : new TextDecoder('utf-8').decode(payload)
-    if (!json) return
+    if (!json) return false
     let ev: StructuredEvent
     try {
       ev = JSON.parse(json) as StructuredEvent
     } catch (err) {
       // 통로는 바보 파이프(무정제) — malformed JSON 은 프로토콜 수준 데이터 유실 신호이므로 경고 후 스킵.
       console.warn('[structuredAccumulator] tag1 JSON 파싱 실패 — 이벤트 스킵:', err)
-      return
+      return false
     }
-    this.consume(ev)
+    return this.consume(ev)
   }
 
-  private consume(ev: StructuredEvent): void {
+  /** @returns 위 `feed` 와 같은 뜻 — 아는 종류였으면 true. */
+  private consume(ev: StructuredEvent): boolean {
     switch (ev.type) {
       case 'TextDelta': {
         // 빈 델타("")는 phantom item(빈 Markdown 블록·의미 없는 구분선 유발)을 만들지 않도록 스킵.
@@ -97,8 +114,16 @@ export class StructuredEventAccumulator {
         break
       case 'Error':
         // 텍스트로 누적하지 않고 별도 item 으로 표시한다.
+        // ★턴을 닫지 않는다 — 되살리지 말 것★: 이 어휘는 양쪽 백엔드에서 「턴 경계 아님」이다. codex 는
+        //   재시도 가능한 스트림 오류(과부하·rate limit)를 이걸로 내고 그 줄 뒤에도 같은 턴이 이어지며
+        //   (`backend/codex/decoder.rs` 의 `error` 알림), claude 는 실패한 턴조차 `MessageDone` 으로 닫는다
+        //   (`backend/claude/mod.rs` 의 result 라인이 Error 뒤에 MessageDone 을 반드시 붙인다). 두 백엔드의
+        //   턴 분류자도 이 어휘엔 신호를 주지 않는다 — 여기서만 닫으면 두 축이 어긋난다.
+        //   닫았을 때의 증상 = 재시도 중에 대기 표시가 꺼졌다가 다음 델타에 되살아나는 깜빡임.
+        // ★알려진 구멍(프론트가 못 메운다)★: wire `StructuredEvent::Error` 에는 재시도 가능 여부 칸이
+        //   없다. 그래서 「정말 턴을 끝낸 오류인데 경계가 안 오는」 경로에서는 대기 표시가 남는다.
+        //   문자열을 뒤져 가르지 말 것 — 그 구별을 문자열에 적지 않는 것이 decoder 쪽 결정이다.
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
-        this.turnDone = true
         break
       case 'Structured': {
         // ★user uuid dedup(text 블록 한정)★: user 항목은 합성 입력-시점 에코와 claude replay 가
@@ -127,15 +152,68 @@ export class StructuredEventAccumulator {
         break
       }
       case 'MessageDone':
-        // ADR-0045: decoder(backend claude.rs)가 claude 결과 한 줄·한 턴마다 MessageDone 을 정확히 1회
-        // 발행하며, turn_id 는 현재 항상 None 이다. 따라서 MessageDone 이 유일하게 신뢰할 수 있는 턴
-        // 경계 트리거다(turn_id 로 교체하면 현재 always-None 이라 경계가 사라짐 — 재론 방지).
-        if (this.items.length > 0 && this.items[this.items.length - 1].kind !== 'separator') {
-          this.items.push({ kind: 'separator', itemId: this.nextId++ })
-        }
-        this.turnDone = true
+        // ADR-0045: claude decoder 는 결과 한 줄·한 턴마다 MessageDone 을 정확히 1회 발행하고, 그
+        //   `turn_id` 는 지금도 항상 None 이다(`backend/claude/mod.rs` 의 발행 지점 둘 다 literal None).
+        //   ★그래서 여기서 turn_id 로 경계를 유도하지 말 것★ — always-None 이라 경계가 사라진다.
+        // ★단 「유일한 턴 경계 트리거」는 아니다★ — codex decoder 는 MessageDone 을 아예 내지 않고 아래
+        //   `TurnEnd` 로 턴을 닫는다(그쪽 turn_id 는 채워져 온다). 두 어휘가 공존하며 렌더 경로는 하나다.
+        this.closeTurn()
         break
+      case 'TurnEnd':
+        // ★결말 넷이 **전부** 턴을 닫는다★ — 결말 칸이 가르는 것은 화면 표시이지 「닫을지 말지」가 아니다.
+        //   하나라도 안 닫으면 그 대화의 대기 인디케이터가 영영 돈다.
+        {
+          const mark = outcomeMark(ev.outcome)
+          if (mark !== null) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
+        }
+        this.closeTurn()
+        break
+      default: {
+        // ★모르는 이벤트를 조용히 삼키지 않는다★: 아무것도 안 하면 화면은 한 픽셀도 안 바뀌는데 호출자는
+        //   프레임이 온 것으로 행동한다. 릴리스 WebView2 에는 devtools 가 없어 console 이 사용자에게 도달
+        //   하지 않으므로(ConnectionNotice 가 존재하는 사유와 같다) 화면에 남는 표식을 만든다.
+        // ★원본 payload·이벤트 이름을 싣지 않는다★ — 프로토콜 낱말을 사용자 화면에 올리지 않는다는 결정
+        //   (trd-phase2a §6-2). 진단용 이름은 console 로만 나간다.
+        // ★이 item 이 대기 표시를 떠받친다고 기대하지 말 것(옛 오해 — 되살리지 말 것)★: 소비자의 파생은
+        //   `!turnDone && items.length>0` 이라, 직전 턴이 이미 닫힌 뒤(= 둘째 턴부터)에는 item 을 더해도
+        //   turnDone 이 true 로 남아 대기 표시가 그대로 꺼진다. 대기 표시를 지키는 것은 **아래 false 반환**
+        //   이고(호출자가 자기 대기 상태를 안 푼다), 이 item 은 「무슨 일이 있었나」를 남기는 쪽만 맡는다.
+        // ★그래도 `turnDone` 을 내리지는 않는다★ — 모르는 이벤트가 턴을 끝냈는지 우리는 모르고, 여기서
+        //   false 로 내리면 **복원된 이력의 마지막 프레임이 모르는 종류일 때** 대기 표시가 영영 도는 쪽으로
+        //   바뀐다(더 새 데몬이 턴 끝에 새 어휘를 붙이면 복원되는 모든 세션이 그 모양이 된다). 라이브 갭은
+        //   다음 프레임이 스스로 고치지만 이력의 끝은 고칠 다음 프레임이 없다 — 그래서 축을 갈랐다.
+        // ★알려진 구멍★: 이력의 마지막 프레임이 모르는 종류이면서 그 앞이 미완결 턴이면 대기 표시가 남는다.
+        //   프론트 정보만으로는 못 가른다(턴 상태를 말해 주는 신호가 wire 에 따로 없다).
+        // ★`never` 대입은 컴파일 시점 방어다★ — **이 셸의 bindings** 에 변형이 늘면 여기서 타입 에러가
+        //   난다(그때 할 일은 이 arm 에 기대는 것이 아니라 제대로 된 arm 을 더하는 것). 런타임 방어는 그
+        //   아래 — 더 새 데몬이 보내는, 이 셸의 bindings 에 **아예 없는** 종류다. 둘이 겨냥하는 창이 다르다.
+        const exhaustive: never = ev
+        console.warn(
+          '[structuredAccumulator] 모르는 StructuredEvent type — 표식만 남기고 버린다:',
+          (exhaustive as { type?: unknown }).type,
+        )
+        const last = this.items[this.items.length - 1]
+        if (last && last.kind === 'unsupported') {
+          // copy-on-write — 이전에 반환된 snapshot() 참조가 이 객체를 가리킨다(TextDelta arm 과 같은 규율).
+          this.items[this.items.length - 1] = { ...last, count: last.count + 1 }
+        } else {
+          this.items.push({ kind: 'unsupported', count: 1, itemId: this.nextId++ })
+        }
+        return false
+      }
     }
+    return true
+  }
+
+  /**
+   * 턴 경계 닫기 — 구분선 1개 + `turnDone`. 연속 종료는 구분선을 겹쳐 쌓지 않고, 선행 item 이 없으면
+   * 구분선을 만들지 않는다(맨 앞 빈 경계 방지).
+   */
+  private closeTurn(): void {
+    if (this.items.length > 0 && this.items[this.items.length - 1].kind !== 'separator') {
+      this.items.push({ kind: 'separator', itemId: this.nextId++ })
+    }
+    this.turnDone = true
   }
 
   /** 내부 배열 참조를 그대로 돌려준다 — React 소비자는 [...snapshot()] 로 새 참조를 떠서 set. */
@@ -143,7 +221,10 @@ export class StructuredEventAccumulator {
     return this.items
   }
 
-  /** 마지막 신호가 MessageDone/Error(턴 종료)였는가 — streaming/idle 표시 힌트(옵션). */
+  /**
+   * 마지막 신호가 턴 종료(MessageDone · TurnEnd)였는가 — streaming/idle 표시 힌트(옵션).
+   * ★`Error` 는 이 목록에 없다★ — 양쪽 백엔드에서 턴 경계가 아니다(그 arm 주석).
+   */
   isTurnDone(): boolean {
     return this.turnDone
   }
@@ -154,6 +235,33 @@ export class StructuredEventAccumulator {
     this.turnDone = false
     this.nextId = 0
     this.seenUserUuids.clear()
+  }
+}
+
+/**
+ * 결말 → 화면 표식. ★정상 완료는 표식을 남기지 않는다(null)★ — 구분선만으로 끝맺어 평범한 완료가
+ * 경고처럼 보이지 않게 한다.
+ * ★`default` 가 받는 것이 둘이다★ — ① 더 새 데몬이 더한 다섯째 결말 ② 결말 칸 자체가 없거나 모양이
+ * 깨진 프레임. 둘 다 뜻을 모르므로 「모름」으로 적는다 — 아는 셋 중 하나로 접으면 화면이 거짓 결말을
+ * 그린다(wire `TurnOutcome` 주석과 같은 규율).
+ * ★타입이 `TurnOutcome` 인데도 nullish 를 받는 것은 의도★ — `feed` 의 try/catch 는 JSON.parse 만 감싸므로
+ * 여기서 던지면 예외가 구독 콜백(RichSlot)까지 그대로 올라간다. 모양 가정을 하지 않는다.
+ */
+function outcomeMark(
+  outcome: TurnOutcome | null | undefined,
+): { outcome: TurnOutcomeMark; detail: string | null } | null {
+  switch (outcome?.kind) {
+    case 'Completed':
+      return null
+    case 'Failed':
+      // `detail` 이 아예 없는 프레임도 표식은 남긴다 — 사유를 모를 뿐 실패는 실패다.
+      return { outcome: 'failed', detail: outcome.detail ?? null }
+    case 'Interrupted':
+      return { outcome: 'interrupted', detail: null }
+    case 'Unknown':
+      return { outcome: 'unknown', detail: null }
+    default:
+      return { outcome: 'unknown', detail: null }
   }
 }
 

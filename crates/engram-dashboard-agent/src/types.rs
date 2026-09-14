@@ -61,11 +61,56 @@ pub enum OutputEvent {
         turn_id: Option<String>,
         message_id: Option<String>,
     },
-    /// backend가 보고한 오류(스트림 내부 오류 등 — TerminalReason과 별개, 종료 아님).
+    /// 턴 경계 + **어떻게 끝났나**. [`MessageDone`](Self::MessageDone) 과 다른 타입인 것은 의도다 —
+    /// 그쪽은 "한 메시지가 닫혔다" 이고 이쪽은 "한 턴이 이 결말로 닫혔다" 다.
+    ///
+    /// ★한 턴에 완료 항목이 여럿인 백엔드가 있다(실측)★ — 거기서는 **턴 끝 ≠ 메시지 끝**이라
+    ///   `MessageDone` 에 결말을 접으면 한 턴이 여러 경계로 쪼개진다. 그리고 결말을
+    ///   [`Error`](Self::Error) 로 접으면 **사용자가 정상 중단한 턴이 실패로 찍힌다.**
+    /// ★`MessageDone` 을 이것으로 이주시키지 않는다★ — claude 는 그대로 `MessageDone` 을 쓴다.
+    ///   두 어휘는 공존하고, 어느 쪽을 내는지는 각 백엔드 decoder 가 정한다.
+    /// ★결말은 **중립 enum** 이다 — 백엔드의 원시 상태 문자열을 그대로 싣지 않는다★(ADR-0004).
+    TurnEnd {
+        turn_id: Option<String>,
+        outcome: TurnOutcome,
+    },
+    /// backend 가 보고한 오류 — ★**턴 경계가 아니다**★(`TerminalReason` 과도 별개다).
+    ///
+    /// ★두 어휘가 각각 무엇을 뜻하나 — 소비자가 여기서 갈린다★:
+    ///   - `Error` = **턴 안에서 일어난 사고**. 그 뒤에도 같은 턴이 이어진다(재시도되는 스트림 오류가
+    ///     이 부류다). 종료로 읽으면 한 턴이 사고 횟수만큼 쪼개진다.
+    ///   - [`TurnEnd`](Self::TurnEnd) = **턴이 끝났다**. 실패로 끝난 턴도 이쪽 어휘로 온다.
+    /// ★그래서 「재시도되나」를 칸으로 따로 내보내지 않는다★ — 그 구별은 이벤트 타입이 이미 지고 있다.
     Error(String),
     /// 위 정형 variant로 안 잡히는 backend별 구조화 이벤트의 탈출구(forward-compat).
     /// kind=이벤트 종류 태그, json=원본 직렬화 payload. core는 내용을 해석하지 않는다.
     Structured { kind: String, json: String },
+}
+
+/// 턴이 **어떻게** 끝났나 — [`OutputEvent::TurnEnd`] 가 나르는 중립 어휘.
+///
+/// ★중립인 것은 **판별자**다 — `detail` 은 아니다★(ADR-0004): 상대 프로토콜의 상태 문자열은 각
+///   backend decoder 가 이 네 갈래로 옮기고, 그 바깥(코어·wire·프론트)이 **분기하는 축**은 그것뿐이다.
+/// ★`detail` 에는 상대가 만든 사람이 읽는 문장이 그대로 실린다★ — 실패 사유는 상대가 준 것이 유일한
+///   정보라 중립 어휘로 옮기려면 뜻을 지어내야 한다. 그 칸의 등급은 [`OutputEvent::Error`] 의 문자열과
+///   **같다**(불투명 · 그리기 전용). 길이와 자격증명 마스킹은 그것을 만든 backend decoder 가 진다.
+/// ★[`Unknown`](Self::Unknown) 을 아는 셋 중 하나로 접지 않는다★ — 접으려면 모르는 값의 뜻을 추측해야
+///   하고, 그 추측이 틀리면 화면이 **거짓 결말**을 그린다. 모른다는 사실 자체를 나른다.
+// ADR-0004
+// ADR-0045
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnOutcome {
+    /// 정상 종료.
+    Completed,
+    /// 실패. `detail` = **상대가 만든 사람이 읽는 사유**(없을 수 있다 — 사유 없이 실패만 아는 경우).
+    ///   ★중립 어휘가 아니다 — 분기하지 말고 그리기만 할 것★(타입 doc).
+    Failed { detail: Option<String> },
+    /// 사용자가 끊었다. ★실패가 아니다★ — 이 저장소에서 중단은 1급 정상 경로다
+    ///   (`TerminalReason::Interrupted` 가 따로 있는 것과 같은 이유).
+    Interrupted,
+    /// 결말을 알 수 없다 — 상대가 우리가 모르는 값을 줬거나, 아예 주지 않았다.
+    /// ★그래도 턴은 끝난 것으로 센다★: 결말을 몰라 이벤트를 버리면 그 대화의 대기 표시가 영영 돈다.
+    Unknown,
 }
 
 /// session→transport 입력 이벤트. 확장 가능 enum.
@@ -294,12 +339,12 @@ pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
 /// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
 ///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
 ///   agent 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
-///   backend/claude.rs 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
+///   backend/claude/ 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
 ///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
 /// ★최소권한(ADR-0094)★: 이 목록엔 발신 입구 툴만 담긴다 — 이 *목록*을 넓히려면 명시적 결정(ADR-0094 개정).
 ///   주의: 2026-07-22 사용자 결정으로 스폰 자체는 `--permission-mode bypassPermissions`(auto) 하에 돈다 —
 ///   이 grant 는 지금 런타임 게이트가 아니라 **미래 공용 제약 레이어용 정책 표면 + 문서화**로 남는 것이다
-///   (backend/claude.rs 참조, step-log 백로그 "전 LLM 공용 제약 레이어").
+///   (backend/claude/ 참조, step-log 백로그 "전 LLM 공용 제약 레이어").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGrant {
     /// MCP 서버의 툴 1개. backend 가 `mcp__{server}__{tool}` 로 번역한다(claude).
@@ -310,7 +355,7 @@ pub enum ToolGrant {
 }
 
 /// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
-/// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude.rs 단독,
+/// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude/ 단독,
 /// ADR-0004). agent/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
@@ -319,7 +364,7 @@ pub struct ControlEndpoint {
     /// 이 (AgentId,epoch) 전용 bearer 토큰(HTTP Authorization 헤더에 실린다).
     /// ★보안★: 이 값은 로그에 찍지 않는다(mcp-config 파일에만 기록 — 파일은 revoke 시 삭제).
     pub token: String,
-    /// 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다). backend/claude.rs 가 이 파일에
+    /// 에이전트별 mcp-config 파일 경로(데몬이 만들고 revoke 시 지운다). backend/claude/ 가 이 파일에
     /// url+token 을 써서 `--mcp-config` 로 주입한다.
     /// ★Option = 부재를 타입으로 인코딩(ADR-0099)★: MCP-capable 백엔드(claude)면 `Some(path)`(mcp-config
     ///   물리 존재), 비-MCP 백엔드(codex/gemini stub)면 `None` — mcp-config 를 **아예 쓰지 않는다**(MCP
@@ -351,7 +396,7 @@ pub struct ControlEndpoint {
     pub mail_allowed: bool,
     /// ADR-0092(수신 계약 프라이밍): 스폰 시 시스템 프롬프트에 주입할 **프라이밍 MD 파일의 절대경로**
     /// (있으면). 데몬의 `PrimingProvider` seam 이 해석해 실어 보낸다 — 파일 부재/미구성이면 `None`.
-    /// backend/claude.rs 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
+    /// backend/claude/ 가 이 경로를 `--append-system-prompt-file <abs-path>` 로 주입한다(claude 가
     /// 파일을 **직접 읽음** — 데몬/agent 는 내용을 안 읽는다). MCP 와 직교하는 broker-주입 데이터지만,
     /// 데몬이 이미 모든 claude 스폰에 대해 채우는 이 descriptor 를 재사용해 별도 threading 경로를 만들지
     /// 않는다.
@@ -362,7 +407,7 @@ pub struct ControlEndpoint {
     pub grants: Vec<ToolGrant>,
     /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
     /// 데몬이 provision 때 `<data_dir>/mcp-config/<id>-<epoch>.settings.json` 에 쓰고 revoke 때 지운다.
-    /// backend/claude.rs 가 `--settings <abs-path>` 로 번역한다(그 플래그 지식은 거기 단독 — ADR-0004).
+    /// backend/claude/ 가 `--settings <abs-path>` 로 번역한다(그 플래그 지식은 거기 단독 — ADR-0004).
     ///
     /// ★왜 필요한가(실측 2026-07-24)★: 유저 전역 설정의 `allowedMcpServers: []`(= 전면 차단)가 **스폰
     ///   에이전트에도 그대로 적용**돼 engram MCP 서버가 툴 목록에 뜨지 않았다. 이 조각이 그 세션에만

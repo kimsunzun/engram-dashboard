@@ -44,7 +44,7 @@ use crate::connection_core::sanitize_for_log;
 ///
 /// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. claude backend 가 CLI 용
 ///   base URL(ENGRAM_CONTROL_URL)을 파생할 때 이 리터럴 suffix("/mcp")를 **문자열로 벗긴다** —
-///   `crates/engram-dashboard-agent/src/backend/claude.rs`(strip_suffix("/mcp")). 이 값을 바꾸면
+///   `crates/engram-dashboard-agent/src/backend/claude/`(strip_suffix("/mcp")). 이 값을 바꾸면
 ///   거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이 틀어지고 CLI 가
 ///   조용히 404 를 받는다.
 const MCP_PATH: &str = "/mcp";
@@ -312,7 +312,7 @@ const SESSION_ID_HEADER: &str = "mcp-session-id";
 /// ★`send_message` MCP 툴 이름 = **단일 출처(ADR-0094)**★. 아래 `#[tool]` 메서드명이 곧 rmcp 가
 ///   `tools/list` 에 노출하는 툴 이름이고, 이 const 가 그 이름의 **정본**이다 — ADR-0094 발신 권한
 ///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 tool 로 쓴다(DaemonControlChannel.provision).
-///   claude 문법(`mcp__..`) 지식은 backend/claude.rs 단독 — 이 const 는 이름만 제공한다(ADR-0004/0094).
+///   claude 문법(`mcp__..`) 지식은 backend/claude/ 단독 — 이 const 는 이름만 제공한다(ADR-0004/0094).
 pub const SEND_MESSAGE_TOOL: &str = "send_message";
 
 /// ★`messages` MCP 툴 이름(D · spec §6)★ — `SEND_MESSAGE_TOOL` 과 같은 규율.

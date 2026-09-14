@@ -34,22 +34,25 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_agent::preset::Preset as CorePreset;
 use engram_dashboard_agent::profile::{
-    AgentCommand as CoreSpawnCommand, AgentProfile as CoreProfile,
-    ClaudeOutputFormat as CoreClaudeOutputFormat, RestartPolicy as CoreRestartPolicy,
+    AgentCommand as CoreSpawnCommand, AgentOutputFormat as CoreAgentOutputFormat,
+    AgentProfile as CoreProfile, RestartPolicy as CoreRestartPolicy,
     RestoreOutcome as CoreRestoreOutcome,
 };
 use engram_dashboard_agent::types::{
     Capabilities as CoreCaps, OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
+    TurnOutcome as CoreTurnOutcome,
 };
 
 use engram_dashboard_protocol::{
-    AgentCommand, AgentEvent, AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
-    AgentProfile as WireProfile, AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ClaudeOutputFormat as WireClaudeOutputFormat, ControlCaps as WireControlCaps,
-    EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
-    OutputCaps as WireOutputCaps, Preset as WirePreset, RestartPolicy as WireRestartPolicy,
-    RestoreOutcome as WireRestoreOutcome, RestoreReport, SessionCaps as WireSessionCaps,
-    SnapshotChunk as WireSnapshotChunk, StructuredEvent as WireStructuredEvent, SubscribeAction,
+    AgentBackendKind as WireBackendKind, AgentCommand, AgentEvent,
+    AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
+    AgentOutputFormat as WireAgentOutputFormat, AgentProfile as WireProfile,
+    AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
+    ControlCaps as WireControlCaps, EnvelopeFormat as WireEnvelopeFormat,
+    InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
+    Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
+    RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
+    StructuredEvent as WireStructuredEvent, SubscribeAction, TurnOutcome as WireTurnOutcome,
     PROTOCOL_VERSION,
 };
 
@@ -411,6 +414,61 @@ pub(crate) fn core_agents_to_wire(agents: Vec<CoreAgentInfo>) -> Vec<WireAgentIn
     agents.iter().map(agent_info_to_wire).collect()
 }
 
+/// 스폰 패킷의 backend 칸이 비었을 때 돌려주는 문구. ★어느 칸을 채워야 하는지 말한다★ — 다음 스폰
+/// 입구를 만드는 사람이 이 답장 하나로 고칠 수 있어야 한다(그 사람이 이 문구를 만나는 것이 이 거절의
+/// 목적이다).
+const MISSING_BACKEND: &str = "backend 칸이 비었다 — 스폰 패킷(SpawnByCwd·CreateProfile)의 `backend` 에 \"claude\" 또는 \"codex\" 를 적어라. 기본값은 없다(고르지 않은 것과 claude 를 고른 것을 구별하려는 결정 — 조용히 다른 백엔드가 뜨지 않는다).";
+
+/// wire 백엔드 선택 → 코어 실행 명령. `None` = 칸이 비었다(호출자가 [`MISSING_BACKEND`] 로 거절한다).
+///
+/// ★두 갈래 다 **받은** `output_format` 을 그대로 싣는다 — 이 함수는 기본값을 채우지 않는다★: 여기서
+/// 채우면 요청한 모드와 실제로 뜨는 모드가 갈리고, 그 어긋남은 에이전트가 떠서 다르게 굴 때까지 안 보인다.
+/// ★단 「받은 값」이 늘 사람이 고른 값인 것은 아니다★ — `CreateProfile` 은 패킷의 칸을 그대로 넘기지만,
+/// 그 칸이 없는 `SpawnByCwd` 는 [`spawn_command_by_cwd`] 가 지어낸 값을 넘긴다.
+/// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
+fn spawn_command_for(
+    backend: Option<WireBackendKind>,
+    extra_args: Vec<String>,
+    output_format: CoreAgentOutputFormat,
+) -> Option<CoreSpawnCommand> {
+    match backend? {
+        WireBackendKind::Claude => Some(CoreSpawnCommand::Claude {
+            extra_args,
+            output_format,
+        }),
+        WireBackendKind::Codex => Some(CoreSpawnCommand::Codex {
+            extra_args,
+            output_format,
+        }),
+    }
+}
+
+/// `SpawnByCwd` 전용 조립 — 그 패킷에는 모드 칸이 없어서 **여기서 값을 지어낸다**.
+///
+/// ★아래 두 값은 고른 것이 아니라 **보존된 기본값**이다★. claude 의 `StreamJson` 은 이 입구가 claude
+/// 하나뿐이던 시절부터 이 자리에 있던 상수다. codex 의 `Terminal` 은 옛 [`spawn_command_for`] 가 codex
+/// 갈래에서 받은 값을 버리고 `Terminal` 을 박아 넣던 동작을 **그대로 유지**한다 — 그 버림을 걷으면서
+/// 이 입구가 조용히 app-server 로 갈아타는 것을 막는 값이고, 어느 모드가 이 경로에 맞는지는 아직
+/// 아무도 정하지 않았다. 모드 칸을 이 입구에 내거나 백엔드별 기본을 정하는 날 그 결정이 앉을 자리가
+/// 여기다(오늘 codex 는 `commands::LLM_BACKEND_POLICY` 가 이 문에서 닫혀 있어 그 값이 아직 발화하지
+/// 않는다 — 그 문이 열리는 날 함께 본다).
+/// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
+fn spawn_command_by_cwd(backend: Option<WireBackendKind>) -> Option<CoreSpawnCommand> {
+    let kind = backend?;
+    let output_format = match kind {
+        WireBackendKind::Claude => CoreAgentOutputFormat::StreamJson,
+        WireBackendKind::Codex => CoreAgentOutputFormat::Terminal,
+    };
+    spawn_command_for(Some(kind), vec![], output_format)
+}
+
+fn output_format_to_wire(f: CoreAgentOutputFormat) -> WireAgentOutputFormat {
+    match f {
+        CoreAgentOutputFormat::Terminal => WireAgentOutputFormat::Terminal,
+        CoreAgentOutputFormat::StreamJson => WireAgentOutputFormat::StreamJson,
+    }
+}
+
 fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
     match cmd {
         CoreSpawnCommand::Claude {
@@ -418,14 +476,18 @@ fn spawn_command_to_wire(cmd: &CoreSpawnCommand) -> WireSpawnCommand {
             output_format,
         } => WireSpawnCommand::Claude {
             extra_args: extra_args.clone(),
-            output_format: match output_format {
-                CoreClaudeOutputFormat::Terminal => WireClaudeOutputFormat::Terminal,
-                CoreClaudeOutputFormat::StreamJson => WireClaudeOutputFormat::StreamJson,
-            },
+            output_format: output_format_to_wire(*output_format),
         },
         CoreSpawnCommand::Shell { program, args } => WireSpawnCommand::Shell {
             program: program.clone(),
             args: args.clone(),
+        },
+        CoreSpawnCommand::Codex {
+            extra_args,
+            output_format,
+        } => WireSpawnCommand::Codex {
+            extra_args: extra_args.clone(),
+            output_format: output_format_to_wire(*output_format),
         },
     }
 }
@@ -458,7 +520,7 @@ fn profile_to_wire(p: &CoreProfile) -> WireProfile {
         command: spawn_command_to_wire(&p.command),
         cwd: p.cwd.to_string_lossy().into_owned(),
         env: p.env.clone(),
-        claude_session_id: p.claude_session_id.map(|u| u.to_string()),
+        backend_session_id: p.backend_session_id.map(|u| u.to_string()),
         old_session_ids: p.old_session_ids.iter().map(|u| u.to_string()).collect(),
         epoch: p.epoch,
         auto_restore: p.auto_restore,
@@ -542,6 +604,10 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             turn_id: turn_id.clone(),
             message_id: message_id.clone(),
         }),
+        CoreOutputEvent::TurnEnd { turn_id, outcome } => Some(WireStructuredEvent::TurnEnd {
+            turn_id: turn_id.clone(),
+            outcome: turn_outcome_to_wire(outcome),
+        }),
         CoreOutputEvent::Error(message) => Some(WireStructuredEvent::Error {
             message: message.clone(),
         }),
@@ -549,6 +615,19 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             kind: kind.clone(),
             json: json.clone(),
         }),
+    }
+}
+
+/// 턴 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 어휘가 늘면 여기가 컴파일 에러로 서야 새 결말이
+/// 조용히 `Unknown` 으로 접히지 않는다.
+fn turn_outcome_to_wire(outcome: &CoreTurnOutcome) -> WireTurnOutcome {
+    match outcome {
+        CoreTurnOutcome::Completed => WireTurnOutcome::Completed,
+        CoreTurnOutcome::Failed { detail } => WireTurnOutcome::Failed {
+            detail: detail.clone(),
+        },
+        CoreTurnOutcome::Interrupted => WireTurnOutcome::Interrupted,
+        CoreTurnOutcome::Unknown => WireTurnOutcome::Unknown,
     }
 }
 
@@ -952,21 +1031,27 @@ impl ConnectionCore {
             }
 
             // ── 프로필 CRUD + ad-hoc spawn(phase4 1단계) ───────────────────────────────
-            // ★기본 백엔드 = claude(StreamJson)★ — 이 wire 에는 backend 선택 칸이 없어서(`SpawnByCwd{cwd}`)
-            //   여기 박힌 값이 곧 「고르지 않았을 때 뜨는 것」이다. 셸이 아니라 claude 인 이유: 이 문을
-            //   실제로 쓰는 호출자가 `agent.spawnInto`(에이전트가 CLI 로 부르는 배치 스폰)이고, 그 자리에서
-            //   원하는 것은 대화형 셸이 아니라 **일하는 에이전트**다(사용자 결정 2026-08-20).
-            //   ★스위칭이 생긴 것은 아니다★ — 고정 대상이 바뀐 것뿐이라 이제 **셸을 못 고른다**.
-            //   고르려면 wire 에 칸을 내야 하고 그건 봉투 변경이라 별도 결정이다(ADR-0058 fail-loud 도
-            //   그때 함께 본다 — `src-tauri/src/layout/apply.rs` 가 「이 wire 에 칸이 없다」를 근거로
-            //   명시된 backend 를 전부 거절한다).
-            AgentCommand::SpawnByCwd { cwd, request_id } => {
+            // ★고르지 않으면 아무것도 안 뜬다(사용자 결정 2026-09-07)★ — 예전엔 이 자리에 claude 가
+            //   박혀 있었고 그것이 곧 「고르지 않았을 때 뜨는 것」이었다. 백엔드가 둘이 된 지금 그 조용한
+            //   기본값은 **요청한 것과 다른 에이전트가 뜨는** 경로라, 부재를 거절로 바꾼다. 거절 문구가
+            //   어느 칸을 채워야 하는지 말해야 다음 스폰 입구를 만드는 사람이 그 자리에서 안다.
+            AgentCommand::SpawnByCwd {
+                cwd,
+                backend,
+                request_id,
+            } => {
+                // ★이 한 줄이 [`spawn_command_by_cwd`] 를 부른다는 사실은 **아무 테스트도 안 잰다**★ —
+                //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent` 바로 아래) 단위
+                //   테스트가 못 들어오고, 여기를 옛 상수 호출로 되돌려도 전 스위트가 초록이다. 그러면
+                //   codex by-cwd 가 조용히 app-server 로 갈아탄다. 그 함수의 **내용**은
+                //   `by_cwd_fills_a_preserved_mode_per_backend` 가 지키므로, 무방비인 것은 이 호출 한 줄이다.
+                let Some(command) = spawn_command_by_cwd(backend) else {
+                    reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
+                    return DispatchFlow::Continue;
+                };
                 let profile = CoreProfile::new(
                     cwd.clone(),
-                    CoreSpawnCommand::Claude {
-                        extra_args: vec![],
-                        output_format: CoreClaudeOutputFormat::StreamJson,
-                    },
+                    command,
                     std::path::PathBuf::from(&cwd),
                     vec![],
                     false,
@@ -1010,18 +1095,21 @@ impl ConnectionCore {
                 env,
                 auto_restore,
                 output_format,
+                backend,
                 request_id,
             } => {
                 let core_output_format = match output_format {
-                    WireClaudeOutputFormat::Terminal => CoreClaudeOutputFormat::Terminal,
-                    WireClaudeOutputFormat::StreamJson => CoreClaudeOutputFormat::StreamJson,
+                    WireAgentOutputFormat::Terminal => CoreAgentOutputFormat::Terminal,
+                    WireAgentOutputFormat::StreamJson => CoreAgentOutputFormat::StreamJson,
+                };
+                let Some(command) = spawn_command_for(backend, extra_args, core_output_format)
+                else {
+                    reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
+                    return DispatchFlow::Continue;
                 };
                 let profile = CoreProfile::new(
                     name,
-                    CoreSpawnCommand::Claude {
-                        extra_args,
-                        output_format: core_output_format,
-                    },
+                    command,
                     std::path::PathBuf::from(cwd),
                     env,
                     auto_restore,
@@ -1088,7 +1176,7 @@ impl ConnectionCore {
                 //     문구는 그 기록이 없던 시절의 것이다.
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        let mode = if resume || profile.claude_session_id.is_some() {
+                        let mode = if resume || profile.backend_session_id.is_some() {
                             SpawnMode::Resume
                         } else {
                             SpawnMode::Fresh
@@ -3318,7 +3406,8 @@ mod tests {
                 extra_args: vec![],
                 env: vec![],
                 auto_restore: false,
-                output_format: WireClaudeOutputFormat::Terminal,
+                output_format: WireAgentOutputFormat::Terminal,
+                backend: Some(WireBackendKind::Claude),
                 request_id: req,
             },
             &session,
@@ -3346,7 +3435,8 @@ mod tests {
                 extra_args: vec![],
                 env: vec![],
                 auto_restore: false,
-                output_format: WireClaudeOutputFormat::StreamJson,
+                output_format: WireAgentOutputFormat::StreamJson,
+                backend: Some(WireBackendKind::Claude),
                 request_id: rid(),
             },
             &session,
@@ -3356,9 +3446,227 @@ mod tests {
         let profiles = core.manager.agent_snapshots();
         assert_eq!(profiles.len(), 1, "프로필 1개 등록");
         assert!(
-            profiles[0].command.is_json_mode(),
+            matches!(
+                &profiles[0].command,
+                CoreSpawnCommand::Claude {
+                    output_format: CoreAgentOutputFormat::StreamJson,
+                    ..
+                }
+            ),
             "StreamJson 으로 만든 프로필은 json 모드여야 함"
         );
+    }
+
+    // ── 백엔드 선택 칸(사용자 결정 2026-09-07) ────────────────────────────────────
+    //
+    // ★부재는 기본값이 아니라 오류다★ — 이 두 항목이 없으면 「고르지 않으면 claude」로 되돌아가는 변경이
+    // 조용히 통과한다(그 회귀는 화면에서 「요청한 것과 다른 에이전트가 떴다」로만 발현한다).
+    #[tokio::test]
+    async fn create_profile_without_a_backend_is_refused() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let req = rid();
+        core.dispatch(
+            AgentCommand::CreateProfile {
+                name: "no-backend".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                extra_args: vec![],
+                env: vec![],
+                auto_restore: false,
+                output_format: WireAgentOutputFormat::Terminal,
+                backend: None,
+                request_id: req,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        match mock.events().as_slice() {
+            [AgentEvent::Error {
+                request_id,
+                message,
+            }] => {
+                assert_eq!(*request_id, Some(req));
+                assert!(message.contains("backend"), "어느 칸인지 말해야: {message}");
+                assert!(
+                    message.contains("claude") && message.contains("codex"),
+                    "무엇을 적어야 하는지 말해야: {message}"
+                );
+            }
+            other => panic!("Error 기대: {other:?}"),
+        }
+        assert_eq!(
+            core.manager.agent_snapshots().len(),
+            0,
+            "거절은 등록하지 않는다"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_by_cwd_without_a_backend_is_refused() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let req = rid();
+        core.dispatch(
+            AgentCommand::SpawnByCwd {
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                backend: None,
+                request_id: req,
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        match mock.events().as_slice() {
+            [AgentEvent::Error { request_id, .. }] => assert_eq!(*request_id, Some(req)),
+            other => panic!("Error 기대: {other:?}"),
+        }
+        assert_eq!(
+            core.manager.list_agents().len(),
+            0,
+            "거절은 스폰하지 않는다"
+        );
+    }
+
+    /// 고른 낱말이 **디스크에 앉는 실행 명령**까지 간다 — 이 사슬이 끊기면 codex 를 골라도 claude 가 뜬다.
+    /// ★고른 **모드**도 같은 사슬을 탄다★ — 이 경계가 기본값을 채우면 「코덱스 JSON」를 고른 노드
+    /// 뒤에서 대화형 TUI 가 뜨고, 그 어긋남은 에이전트가 떠서 다르게 굴 때까지 안 보인다.
+    #[tokio::test]
+    async fn create_profile_with_codex_stores_the_codex_command() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::CreateProfile {
+                name: "codex-p".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                extra_args: vec!["--foo".into()],
+                env: vec![],
+                auto_restore: false,
+                output_format: WireAgentOutputFormat::StreamJson,
+                backend: Some(WireBackendKind::Codex),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        let profiles = core.manager.agent_snapshots();
+        assert_eq!(profiles.len(), 1);
+        match &profiles[0].command {
+            CoreSpawnCommand::Codex {
+                extra_args,
+                output_format,
+            } => {
+                assert_eq!(extra_args, &vec!["--foo".to_string()]);
+                assert_eq!(
+                    *output_format,
+                    CoreAgentOutputFormat::StreamJson,
+                    "고른 모드가 그대로 앉아야 한다 — 기본값을 채우면 여기서 Terminal 이 나온다"
+                );
+            }
+            other => panic!("Codex 기대: {other:?}"),
+        }
+    }
+
+    /// 위 항목이 못 재는 절반 — 고르지 않은 `StreamJson` 이 끼어들지 않는다(이 경계가 codex 를 통째로
+    /// app-server 로 올려 버리면 여기가 빨개진다). ★둘이 함께 서야 「고른 값을 그대로 나른다」가 된다★:
+    /// 어느 하나만 있으면 이 경계가 그 한 값을 **고정**해도 초록이다.
+    #[tokio::test]
+    async fn create_profile_with_codex_terminal_is_not_upgraded_to_app_server() {
+        let (core, _rx) = test_core();
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::CreateProfile {
+                name: "codex-term".into(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                extra_args: vec![],
+                env: vec![],
+                auto_restore: false,
+                output_format: WireAgentOutputFormat::Terminal,
+                backend: Some(WireBackendKind::Codex),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+        let profiles = core.manager.agent_snapshots();
+        assert_eq!(profiles.len(), 1);
+        match &profiles[0].command {
+            CoreSpawnCommand::Codex { output_format, .. } => {
+                assert_eq!(*output_format, CoreAgentOutputFormat::Terminal);
+            }
+            other => panic!("Codex 기대: {other:?}"),
+        }
+    }
+
+    /// `SpawnByCwd` 는 모드 칸이 없는 입구라 데몬이 값을 지어낸다 — 그 지어낸 값을 못 박는다.
+    /// ★codex 의 `Terminal` 은 「이 경로엔 대화형이 맞다」는 의견이 아니라 옛 동작의 **보존**이다★
+    /// ([`spawn_command_by_cwd`] 의 doc 이 정본). 그 값을 바꾸는 편집은 이 항목을 빨갛게 만들어,
+    /// 우연이 아니라 결정으로 바뀌게 한다.
+    #[test]
+    fn by_cwd_fills_a_preserved_mode_per_backend() {
+        assert!(
+            spawn_command_by_cwd(None).is_none(),
+            "빈 backend 칸은 여기서도 거절로 이어진다"
+        );
+        match spawn_command_by_cwd(Some(WireBackendKind::Codex)) {
+            Some(CoreSpawnCommand::Codex { output_format, .. }) => assert_eq!(
+                output_format,
+                CoreAgentOutputFormat::Terminal,
+                "by-cwd 입구의 codex 는 보존된 Terminal 이다"
+            ),
+            other => panic!("Codex 기대: {other:?}"),
+        }
+        match spawn_command_by_cwd(Some(WireBackendKind::Claude)) {
+            Some(CoreSpawnCommand::Claude { output_format, .. }) => assert_eq!(
+                output_format,
+                CoreAgentOutputFormat::StreamJson,
+                "by-cwd 입구의 claude 는 옛 상수 그대로다"
+            ),
+            other => panic!("Claude 기대: {other:?}"),
+        }
+    }
+
+    /// 돌아오는 방향 — 명부가 나갈 때 모드가 실린다. ★오늘 이 값을 읽는 프론트 코드는 없다★
+    /// (`profile.command` 를 보는 자리가 하나도 없다 — 2026-09-13 실측). 그래도 떨어뜨리지 않는 것은,
+    /// 여기서 지우면 「코덱스 JSON」으로 만든 노드와 대화형 TUI 노드를 **구별할 방법 자체가** wire 에서
+    /// 사라지기 때문이다.
+    #[test]
+    fn codex_spawn_command_carries_the_mode_back_to_wire() {
+        for (core_mode, wire_mode) in [
+            (
+                CoreAgentOutputFormat::StreamJson,
+                WireAgentOutputFormat::StreamJson,
+            ),
+            (
+                CoreAgentOutputFormat::Terminal,
+                WireAgentOutputFormat::Terminal,
+            ),
+        ] {
+            let wire = spawn_command_to_wire(&CoreSpawnCommand::Codex {
+                extra_args: vec!["--foo".into()],
+                output_format: core_mode,
+            });
+            match wire {
+                WireSpawnCommand::Codex {
+                    extra_args,
+                    output_format,
+                } => {
+                    assert_eq!(extra_args, vec!["--foo".to_string()]);
+                    assert_eq!(output_format, wire_mode);
+                }
+                other => panic!("Codex 기대: {other:?}"),
+            }
+        }
     }
 
     // ── StopDaemon(force=false, 활성 0) ──────────────────────────────────────────
@@ -3677,6 +3985,48 @@ mod tests {
         );
     }
 
+    /// ★결말 네 갈래가 하나도 접히지 않고 건너간다★ — 여기서 둘이 같은 값으로 떨어지면 화면이
+    /// 「중단」과 「완료」를, 또는 「미상」과 「완료」를 구별할 수단을 잃는다.
+    ///
+    /// ★이 항목은 「wire 에 backend 어휘가 안 오른다」를 재지 않는다★ — `detail` 은 상대가 만든 문장을
+    /// 그대로 나르고(그것이 그 칸의 계약이다), 아래 사례도 그 사실을 그대로 통과시킨다. 중립인 것은
+    /// **판별자**뿐이고 그 축을 못 박는 것은 protocol 쪽 golden 이다(ADR-0004).
+    #[tokio::test]
+    async fn turn_end_maps_every_outcome_without_collapsing_any() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+
+        let cases = [
+            (CoreTurnOutcome::Completed, WireTurnOutcome::Completed),
+            (CoreTurnOutcome::Interrupted, WireTurnOutcome::Interrupted),
+            (CoreTurnOutcome::Unknown, WireTurnOutcome::Unknown),
+            (
+                CoreTurnOutcome::Failed {
+                    detail: Some("model refused".into()),
+                },
+                WireTurnOutcome::Failed {
+                    detail: Some("model refused".into()),
+                },
+            ),
+            (
+                CoreTurnOutcome::Failed { detail: None },
+                WireTurnOutcome::Failed { detail: None },
+            ),
+        ];
+        for (core, wire) in cases {
+            assert_eq!(
+                output_event_to_wire(&CoreOutputEvent::TurnEnd {
+                    turn_id: Some("t9".into()),
+                    outcome: core.clone(),
+                }),
+                Some(W::TurnEnd {
+                    turn_id: Some("t9".into()),
+                    outcome: wire,
+                }),
+                "{core:?}"
+            );
+        }
+    }
+
     // ══════════════════════════════════════════════════════════════════════════════════════════
     // 리뷰 fix D1 — `DeleteProfile` 삭제 정리 훅의 **배선** 통합 테스트(ADR-0116 결정 3)
     // ══════════════════════════════════════════════════════════════════════════════════════════
@@ -3929,7 +4279,7 @@ mod tests {
         core.dispatch(
             bus_command_with(
                 "agent.new",
-                serde_json::json!({ "cwd": "C:/work/bus", "name": "from-bus" }),
+                serde_json::json!({ "cwd": "C:/work/bus", "name": "from-bus", "backend": "Claude" }),
                 made,
             ),
             &session,

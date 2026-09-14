@@ -2773,6 +2773,10 @@ struct CruxReconnectServer {
     accepts: Arc<AtomicUsize>,
     // 첫 연결이 명령 frame 을 실제로 수신(= wire 로 나감 = in-flight pending)했음을 테스트에 알린다.
     first_cmd_received: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    // ★재연결된 **둘째 이후** 연결이 받은 명령 수(ADR-0195 회귀망)★. 「끊긴 명령이 뒤늦게 실행됐나」를
+    //   새 서버 쪽 계수기만으로 재면, 재연결이 **옛 포트로 되돌아온 경우**(read_live 가 아직 안 바뀜 ·
+    //   `fresh == None` 이라 캐시 주소로 시도) 그 실행을 아무도 안 센다. 이 칸이 그 갈래를 덮는다.
+    second_conn_cmds: Arc<AtomicUsize>,
     // 가장 최근 연결을 서버측에서 끊는 신호(첫 소켓 drop = 클라 재연결 트리거).
     drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
 }
@@ -2780,6 +2784,9 @@ struct CruxReconnectServer {
 impl CruxReconnectServer {
     fn accept_count(&self) -> usize {
         self.accepts.load(Ordering::SeqCst)
+    }
+    fn second_conn_cmd_count(&self) -> usize {
+        self.second_conn_cmds.load(Ordering::SeqCst)
     }
     fn drop_current_connection(&self) {
         if let Some(tx) = self.drop_current.lock().unwrap().take() {
@@ -2798,9 +2805,12 @@ async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
     let drop_current: Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>> =
         Arc::new(std::sync::Mutex::new(None));
 
+    let second_conn_cmds = Arc::new(AtomicUsize::new(0));
+
     let accepts_srv = accepts.clone();
     let first_cmd_srv = first_cmd_received.clone();
     let drop_srv = drop_current.clone();
+    let second_cmds_srv = second_conn_cmds.clone();
     tokio::spawn(async move {
         let mut conn_idx = 0u32;
         loop {
@@ -2813,6 +2823,7 @@ async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
             let (dtx, drx) = tokio::sync::oneshot::channel::<()>();
             *drop_srv.lock().unwrap() = Some(dtx);
             let first_cmd_c = first_cmd_srv.clone();
+            let second_cmds_c = second_cmds_srv.clone();
             tokio::spawn(async move {
                 let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
                     return;
@@ -2829,16 +2840,31 @@ async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
                 if is_first {
                     // 첫 소켓: 명령 frame 1건 수신(= 클라가 wire 로 보냄 = in-flight pending) → 신호만 보내고
                     //   응답하지 않는다. drop 신호 오면 소켓 drop(클라 끊김 감지 → 재연결).
-                    loop {
-                        match ws.next().await {
-                            Some(Ok(Message::Text(_))) => {
-                                if let Some(tx) = first_cmd_c.lock().unwrap().take() {
-                                    let _ = tx.send(());
-                                }
-                                break;
+                    // ★수신 대기와 drop 신호를 **경쟁시킨다**★: 명령을 기다리는 동안에도 끊을 수 있어야
+                    //   한다 — 안 그러면 「명령을 한 번도 안 보낸 채 끊긴 연결」을 세울 수 없고, ADR-0195
+                    //   가 겨냥하는 창(끊긴 **뒤에** 처음 들어온 명령)이 이 하네스로 못 만들어진다.
+                    //   명령이 먼저 오는 기존 두 테스트에선 첫 팔이 이겨 동작이 그대로다.
+                    let mut drx = drx;
+                    let mut got_cmd = false;
+                    while !got_cmd {
+                        tokio::select! {
+                            _ = &mut drx => {
+                                drop(ws);
+                                return;
                             }
-                            Some(Ok(_)) => continue, // Ping/Pong/binary 무시
-                            _ => break,              // 끊김
+                            msg = ws.next() => match msg {
+                                Some(Ok(Message::Text(_))) => {
+                                    if let Some(tx) = first_cmd_c.lock().unwrap().take() {
+                                        let _ = tx.send(());
+                                    }
+                                    got_cmd = true;
+                                }
+                                Some(Ok(_)) => {} // Ping/Pong/binary 무시
+                                _ => {
+                                    drop(ws);
+                                    return;
+                                }
+                            },
                         }
                     }
                     let _ = drx.await;
@@ -2850,6 +2876,9 @@ async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
                             Some(Ok(Message::Text(t))) => {
                                 let cmd: AgentCommand =
                                     serde_json::from_str(&t).expect("명령 JSON 파싱");
+                                if counts_as_late_execution(&cmd) {
+                                    second_cmds_c.fetch_add(1, Ordering::SeqCst);
+                                }
                                 if let Some(rid) = super::protocol_state::command_request_id(&cmd) {
                                     let ack =
                                         serde_json::to_string(&AgentEvent::Ack { request_id: rid })
@@ -2870,6 +2899,7 @@ async fn spawn_crux_reconnect_server() -> CruxReconnectServer {
         port,
         accepts,
         first_cmd_received,
+        second_conn_cmds,
         drop_current,
     }
 }
@@ -2946,8 +2976,8 @@ async fn reconnect_with_in_flight_command_drains_old_then_new_socket_usable() {
 // ── FIX-6 (FIX-1 커버): 끊김 시 cmd_rx 버퍼 명령도 drain — 재연결 후 미실행(double-apply 0) ──────────────
 // select! 경합에서 진 채(또는 actor 가 다른 명령에 묶여) cmd_rx mpsc 버퍼에 들어왔지만 actor 가 아직 안
 // 꺼낸 SendCommand 는 pending 에 없다. 끊김 시 이걸 안 비우면 재연결된 새 소켓에서 *뒤늦게 실행*된다
-// (부작용 이중 적용). FIX-1 이 끊김 edge 에서 cmd_rx 버퍼를 try_recv 로 비워 Err 로 깨우고, 그 명령이
-//   B 가 actor 에 *안 꺼내진 채* 끊김을 맞으면(버퍼 경로) "미전송(재전송 안전)" Err 가 된다.
+// (부작용 이중 적용). FIX-1 이 끊김 edge 에서 cmd_rx 버퍼를 try_recv 로 비워 Err 로 깨운다 — B 가 actor 에
+//   *안 꺼내진 채* 끊김을 맞으면(버퍼 경로) "미전송(재전송 안전)" Err 가 된다.
 //
 // ★두 갈래로 검증(정직성 — loopback select! race)★: "B 가 cmd_rx 버퍼에 갇히는가 vs actor 가 즉시 꺼내
 //   pending 으로 보내는가"는 loopback 스케줄링에 달린 *진짜 race* 라 한 통합 테스트로 결정론화하기 어렵다
@@ -2955,10 +2985,29 @@ async fn reconnect_with_in_flight_command_drains_old_then_new_socket_usable() {
 //     (1) 아래 **통합 테스트**: in-flight 명령들이 끊김 시 *어느 갈래든* Err 로 깨고(no-hang) + 재연결된
 //         새 소켓에서 *뒤늦게 실행되지 않음*(double-apply 0)을 박는다 — FIX-1 의 사용자-관측 불변식.
 //     (2) 그 아래 **결정론적 단위 테스트**(`buffered_send_command_drain_yields_unsent_message`): cmd_rx
-//         버퍼 drain 로직(try_recv → SendCommand 면 "미전송" Err)을 소켓 없이 직접 박아 메시지 문구·계약을
-//         결정론적으로 증명한다(FIX-2 의 "미전송 vs 전송됨" 구분).
+//         버퍼 drain 의 *계약*(try_recv 로 Empty 까지 · SendCommand 만 깨움 · 채널 미닫힘)을 소켓 없이
+//         결정론적으로 박는다.
+//         ★그 테스트는 **문구를 증명하지 않는다**(알려진 잔여)★ — 같은 모양의 루프를 자기가 다시 돌리므로
+//         생산 코드의 그 줄(`connection.rs` 끊김 edge 의 버퍼 drain)을 **실행하지 않는다**. 그래서 그 줄이
+//         형제 문구(pending drain 의 "전송됨·결과 불명")로 바뀌어도 스위트는 초록이다(실측). ★그 바꿔치기가
+//         왜 위험한가★: 두 drain 은 열 줄 사이에 있고 갈리는 축은 **재전송 안전성** 하나다 — 버퍼에 갇혀
+//         나간 적 없는 명령에 "결과 불명·맹목 재시도 금지"가 붙으면 호출자가 안전한 재시도를 포기한다.
+//         그 줄을 고칠 땐 테스트가 아니라 이 사실을 근거로 삼을 것.
+//
+// ★ADR-0195 이후 이 테스트의 간헐성은 사라졌다 — 갈래가 여럿이어도 **결말이 하나**이기 때문이다★:
+//   B 가 옛 소켓 표식을 달고 채널에 들어간 이상, 그것을 받는 자리가 버퍼 drain 이든 pending drain 이든
+//   표식 대조든 송신 실패든 결과는 「Err 로 깨어나고 새 소켓에서는 실행되지 않는다」 하나다. 그것이 아래
+//   계수기 단언이 재는 값이고, 이전엔 그 값이 1% 미만으로 1 이 됐다.
+// ★B 가 창구를 **거치지 않는** 것은 의도다★: 거치게 하면 B 가 읽는 시점이 안 정해져, 끊김·재연결이 다
+//   끝난 뒤 깨어난 B 가 새 소켓의 표식을 받아 **정상 성공**한다 — 옳은 동작인데 이 테스트가 빨개진다.
+//   창구 자체(닫힌 동안 즉시 거절)는 형제
+//   `command_during_reconnect_fails_fast_and_never_reaches_next_socket` 가 결정론적으로 잰다.
+// ★그래도 어느 갈래였는지는 기록한다★: 문구를 분류해 실패 메시지에 싣는다. 갈래를 안 박는 것과 갈래를
+//   안 **보는** 것은 다르다 — 뒤엣것이면 CI 로그 하나로 판정할 수 없다(이 ADR 이 실제로 겪은 일).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn buffered_command_on_disconnect_is_drained_not_executed_post_reconnect() {
+    use super::connection::ConnectionCommand;
+
     // new_server 가 받은 명령 수를 세는 카운터(재연결 후 끊긴 명령이 *뒤늦게* 실행되면 늘어난다).
     let new_cmd_count = Arc::new(AtomicUsize::new(0));
     let new_port = spawn_counting_reply_server(new_cmd_count.clone()).await;
@@ -2985,15 +3034,39 @@ async fn buffered_command_on_disconnect_is_drained_not_executed_post_reconnect()
         .await
         .expect("old_server 가 첫 명령을 bound 내 수신")
         .expect("first_cmd 신호");
-    let c_b = client.clone();
-    let buffered_b = tokio::spawn(async move { c_b.send_command(spawn_cmd()).await });
+    // ★B 의 표식을 **여기서** 못 박는다 — 「task 가 시작됐다」 신호로는 부족하다★.
+    //   `send_command` 에 그냥 spawn 하면 B 가 창구를 읽는 시점이 안 정해진다. B 가 진입 신호만 보내고
+    //   선점당한 뒤 **끊김과 재연결이 모두 끝나고** 깨어나면, B 는 새 소켓의 창구에서 **새 표식**을 받아
+    //   거기서 정상 성공한다 — 옳은 동작인데 아래 「Err 여야」·「실행 0」 단언이 깨진다. 즉 옛 배리어는
+    //   무엇도 고정하지 못했다.
+    //   그래서 형제 `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` 와 같은 방식으로
+    //   **끊기기 전에** 쌍을 확보한다. 이 쌍은 옛 소켓의 것이므로 B 는 새 소켓에서 성공할 길이 없다.
+    // ★그래도 이 테스트가 형제와 다른 축을 잰다★: 형제는 enqueue 를 drain **뒤**로 못 박아 표식 대조
+    //   하나만 태우지만, 여기 B 는 끊김 edge 언저리 아무 데나 떨어진다 — 버퍼 drain · pending drain ·
+    //   표식 대조 · 송신 실패 중 무엇이 받든 **결말이 하나**임을 재는 것이 이 테스트의 몫이다.
+    let (b_tx, b_stamp) = client
+        .lifecycle
+        .current_cmd_tx()
+        .expect("아직 connected — 창구가 열려 있다");
+    let (b_reply_tx, b_reply_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    let buffered_b = tokio::spawn(async move {
+        b_tx.send(ConnectionCommand::SendCommand {
+            cmd: spawn_cmd(),
+            reply: b_reply_tx,
+            socket: b_stamp,
+        })
+        .await
+        .expect("채널은 재연결을 넘어 살아 있다");
+        b_reply_rx.await.expect("B 의 답이 drop 되지 않고 온다")
+    });
 
     // hot-swap + 끊김.
     disco_handle.set_live(Some(info_for(new_port, "buf-new")));
     old_server.drop_current_connection();
 
-    // ★불변식 1(no-hang)★: A·B 둘 다 끊김으로 Err 로 깨어난다(영구 hang 없음). 갈래(미전송/전송됨/송신
-    //   실패)는 race 라 종류를 안 박고 "Err 로 bound 내 깨어남"만 단언한다. 문구 구분은 (2) 단위 테스트가 박음.
+    // ★불변식 1(no-hang)★: A·B 둘 다 끊김으로 Err 로 깨어난다(영구 hang 없음). 어느 갈래로 깨어나는지는
+    //   race 라 종류를 안 박고 「Err 로 bound 내 깨어남」만 단언한다 — 다만 그 갈래가 **이름 있는 것들
+    //   중 하나**인지는 본다(모르는 문구 = 새 결말이 생겼다는 신호). 문구 구분은 (2) 단위 테스트가 박음.
     let a_result = tokio::time::timeout(Duration::from_secs(5), inflight_a)
         .await
         .expect("in-flight A 가 bound 내 반환(hang 없음)")
@@ -3004,6 +3077,11 @@ async fn buffered_command_on_disconnect_is_drained_not_executed_post_reconnect()
         .expect("B 가 drain 으로 bound 내 반환(hang 없음)")
         .expect("buffered B task panic 없이");
     assert!(b_result.is_err(), "B 도 끊김 Err: {b_result:?}");
+    let b_branch = classify_disconnect_err(&b_result);
+    assert!(
+        b_branch != DisconnectBranch::Unknown,
+        "B 의 Err 는 이름 있는 갈래 중 하나여야 — 모르는 문구면 분류기가 낡은 것이 아니라          **새 결말이 생긴** 것이다(둘을 헷갈리면 옳은 동작에서 빨개진다): {b_result:?}"
+    );
 
     // ★불변식 2(double-apply 0 — FIX-1 핵심)★: 재연결 완료 후, 끊긴 두 명령이 새 소켓에서 *뒤늦게 실행*되지
     //   않는다. FIX-1 이 없으면 cmd_rx 버퍼에 남은 명령이 재연결된 소켓에서 실행돼 new_cmd_count 가 늘어난다.
@@ -3013,11 +3091,15 @@ async fn buffered_command_on_disconnect_is_drained_not_executed_post_reconnect()
     .await;
     assert!(reconnected, "재연결 후 connected: {:?}", client.state());
     tokio::time::sleep(Duration::from_millis(200)).await; // 뒤늦은 실행이 있었다면 도달했을 시간.
+
+    // ★두 서버를 **함께** 센다★: 재연결이 새 포트로 갔다고 단정할 수 없다(read_live 반영 타이밍 ·
+    //   `fresh == None` 이면 캐시한 옛 주소로 시도). 새 서버만 세면 옛 포트로 되돌아온 실행이 통과한다.
+    let landed_new = new_cmd_count.load(Ordering::SeqCst);
+    let landed_old = old_server.second_conn_cmd_count();
     assert_eq!(
-        new_cmd_count.load(Ordering::SeqCst),
-        0,
-        "끊긴 명령이 재연결된 새 소켓에서 실행되면 안 됨(FIX-1 double-apply 0): new_cmd_count={}",
-        new_cmd_count.load(Ordering::SeqCst)
+        (landed_new, landed_old),
+        (0, 0),
+        "끊긴 명령이 재연결된 소켓에서 실행되면 안 됨(FIX-1 double-apply 0 · ADR-0195):          새 서버={landed_new} 옛 서버(둘째 연결)={landed_old} · B 갈래={b_branch:?}"
     );
 
     client.close();
@@ -3035,6 +3117,9 @@ async fn buffered_send_command_drain_yields_unsent_message() {
     use super::connection::ConnectionCommand;
 
     let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<ConnectionCommand>(8);
+    // ★표식은 이 테스트의 관심사가 아니다★: 끊김 edge 의 버퍼 drain 은 **대조하지 않고 전부 비운다**
+    //   (대조는 `main_loop` 쪽 일 — ADR-0195). 그래서 아무 non-zero 값이나 실어도 계약이 같다.
+    const SOCKET: u64 = 7;
 
     // 버퍼에 SendCommand 2건 + reply 없는 Unsubscribe 1건을 넣는다(actor 가 아직 안 꺼낸 상태 모사).
     // ★타입 명시★: CommandReply = oneshot::Sender<Result<AgentEvent, String>>. 수신단 타입을 pin 해 아래
@@ -3045,12 +3130,14 @@ async fn buffered_send_command_drain_yields_unsent_message() {
         .send(ConnectionCommand::SendCommand {
             cmd: spawn_cmd(),
             reply: r1_tx,
+            socket: SOCKET,
         })
         .await
         .unwrap();
     cmd_tx
         .send(ConnectionCommand::Unsubscribe {
             agent_id: uuid::Uuid::new_v4(),
+            socket: SOCKET,
         })
         .await
         .unwrap();
@@ -3058,18 +3145,22 @@ async fn buffered_send_command_drain_yields_unsent_message() {
         .send(ConnectionCommand::SendCommand {
             cmd: spawn_cmd(),
             reply: r2_tx,
+            socket: SOCKET,
         })
         .await
         .unwrap();
 
     // connected_lifetime 의 버퍼 drain 과 동형: try_recv 로 Empty 까지 비우며 SendCommand 만 Err.
+    // ★문구는 손으로 베끼지 않고 생산 상수를 쓴다★ — 같은 문자열이 두 집에 살면 그 둘이 조용히 갈린다
+    //   (`connection::PENDING_SUPERSEDED` 의 관례). ★다만 이것이 문구를 **고정**해 주지는 않는다★:
+    //   상수를 바꾸면 이 테스트도 함께 따라가 초록이다(실측). 이 스위트가 잠그는 것은 **갈래의 명단**이지
+    //   문구가 아니다 — 분류기의 `Unknown` 은 「문구가 바뀌었다」가 아니라 「이름 없는 결말이 생겼다」를
+    //   뜻한다. 사용자 대면 문구를 못 박고 싶으면 그건 별도의 단언이어야 하고, 지금은 없다.
     let mut drained_send = 0;
     while let Ok(buffered) = cmd_rx.try_recv() {
         if let ConnectionCommand::SendCommand { reply, .. } = buffered {
             drained_send += 1;
-            let _ = reply.send(Err(
-                "daemon 연결 끊김 — 명령 미전송(재전송 안전)".to_string()
-            ));
+            let _ = reply.send(Err(super::connection::UNSENT_ON_DISCONNECT.to_string()));
         }
     }
     assert_eq!(
@@ -3077,19 +3168,17 @@ async fn buffered_send_command_drain_yields_unsent_message() {
         "SendCommand 2건이 drain 대상(Unsubscribe 는 drop)"
     );
 
-    // 두 SendCommand 의 reply 가 "미전송" Err 로 깨워졌는지(= 호출자 hang 없음, FIX-2 문구).
+    // 두 SendCommand 의 reply 가 "미전송" 갈래로 깨워졌는지(= 호출자 hang 없음, FIX-2 문구 구분).
     for (n, rx) in [("r1", r1_rx), ("r2", r2_rx)] {
         let got = tokio::time::timeout(Duration::from_secs(2), rx)
             .await
             .unwrap_or_else(|_| panic!("{n} 이 bound 내 깨어남"))
             .expect("oneshot 수신");
-        match got {
-            Err(m) => assert!(
-                m.contains("미전송"),
-                "{n}: 버퍼 drain 은 '미전송(재전송 안전)' Err 여야: {m}"
-            ),
-            Ok(ev) => panic!("{n}: 버퍼 drain 명령이 Ok 면 안 됨: {ev:?}"),
-        }
+        assert_eq!(
+            classify_disconnect_err(&got),
+            DisconnectBranch::Unsent,
+            "{n}: 버퍼 drain 은 '미전송(재전송 안전)' 갈래여야: {got:?}"
+        );
     }
 
     // ★채널 미닫힘★: drain 후에도 cmd_tx 로 다시 send 가능(재연결 carry 계약).
@@ -3098,9 +3187,384 @@ async fn buffered_send_command_drain_yields_unsent_message() {
         .send(ConnectionCommand::SendCommand {
             cmd: spawn_cmd(),
             reply: r3_tx,
+            socket: SOCKET,
         })
         .await
         .expect("drain 후에도 cmd_rx 는 열려 있어야(닫지 않음 — 재연결 carry)");
+}
+
+// 끊김 언저리에서 `send_command` 가 낼 수 있는 **모든** 결말 — 문구가 아니라 이름으로 다루려고 분류한다.
+// 「어느 갈래인가」를 단언하지 않는 자리에서도 실패 메시지에는 실어야 한다(값 하나로 판정하다 운에 기댄
+// 적이 있다).
+//
+// ★명단이 모자라면 그 자체가 결함이다★: `Unknown` 에 「아직 안 적은 정상 결말」이 섞이면, 그것을 거르는
+// 단언은 **옳은 동작에서** 빨개지면서 엉뚱하게 분류기 탓을 한다. 그래서 생산 코드가 낼 수 있는 결말마다
+// 이름을 붙이고(개수는 여기 적지 않는다 — 아래 enum 이 명단이다), 판정은 문구 추측이 아니라 **생산
+// 코드의 상수와 직접 대조**한다(문구를 두 곳에 적으면 갈린다 — `connection::PENDING_SUPERSEDED` 가 세운
+// 관례).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisconnectBranch {
+    // 창구가 닫혀 있어 그 자리에서 거절(ADR-0195 — 담아 두지 않는다).
+    NotConnected,
+    // 채널까지는 들어갔으나 wire 에 못 나감 — 끊김 edge 의 버퍼 drain 또는 표식 대조.
+    Unsent,
+    // 이미 wire 로 나갔고 답을 못 받음(결과 불명) — pending drain.
+    Sent,
+    // 창구는 열려 있었는데 그 채널의 수신단이 이미 사라짐(연결 task 사망 등).
+    ChannelGone,
+    // 소켓으로 밀어 넣는 데 실패 — 끊김이 아니라 소켓 오류다.
+    SendFailed,
+    // 명령을 JSON 으로 굽는 데 실패 — 소켓이 멀쩡한 채로도 난다(오늘 실제 발생 경로는 없다).
+    SerializeFailed,
+    // 채널엔 들어갔는데 답을 못 받은 채 reply oneshot 이 떨어짐 — 재연결 없이 끝나는 갈래가 여기로 온다.
+    ReplyLost,
+    // 위 어디에도 안 맞음 = **새 결말이 생겼다**(또는 문구가 갈렸다). 분류기를 늘려야 한다는 신호다.
+    Unknown,
+}
+
+fn classify_disconnect_err(result: &Result<AgentEvent, String>) -> DisconnectBranch {
+    let Err(m) = result else {
+        return DisconnectBranch::Unknown;
+    };
+    if m == super::NOT_CONNECTED {
+        DisconnectBranch::NotConnected
+    } else if m == super::connection::UNSENT_ON_DISCONNECT {
+        DisconnectBranch::Unsent
+    } else if m == super::connection::SENT_OUTCOME_UNKNOWN {
+        DisconnectBranch::Sent
+    } else if m == super::CHANNEL_GONE {
+        DisconnectBranch::ChannelGone
+    } else if m == super::REPLY_LOST {
+        DisconnectBranch::ReplyLost
+    } else if m.starts_with(super::connection::SEND_FAILED_PREFIX) {
+        // 아래 둘만 접두 대조 — 뒤에 원인 문자열이 붙는다.
+        DisconnectBranch::SendFailed
+    } else if m.starts_with(super::connection::SERIALIZE_FAILED_PREFIX) {
+        DisconnectBranch::SerializeFailed
+    } else {
+        DisconnectBranch::Unknown
+    }
+}
+
+// ── ADR-0195: 끊긴 동안 들어온 명령은 담아 두지 않고 즉시 실패시킨다 ──────────────────────────
+// ★기존 `send_command_errs_when_not_connected` 가 못 덮는 자리다★ — 그쪽은 **한 번도 연결한 적 없는**
+//   경우(창구가 애초에 열린 적 없음)를 재고, 이 ADR 이 다루는 것은 **연결됐다 끊겨 재연결 중**인 경우다.
+//   그 둘은 코드 경로가 다르다: 앞은 `cmd_tx` 가 `None`, 뒤는 `cmd_tx` 가 **그대로 있는데** 창구가 닫힌
+//   상태다(송신단을 놓으면 재연결 루프가 죽는다 — 그래서 못 놓는다).
+// ★창을 결정론적으로 연다★: 재연결의 `read_live` 를 게이트로 막아 「끊겨 재연결 중」에 세워 둔다. 실시간
+//   `sleep` 으로 그 창을 노리면 백오프 길이에 기대는 flaky 가 된다.
+// ★게이트를 되돌리면 무엇이 깨지나★: 창구 판정을 지우면 단언 1·2 가 그 자리에서 깨지고, 표식 대조까지
+//   지우면 단언 3(어느 소켓에서도 실행 0)이 깨진다 — 두 기제를 각각 잡는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn command_during_reconnect_fails_fast_and_never_reaches_next_socket() {
+    let new_cmd_count = Arc::new(AtomicUsize::new(0));
+    let new_port = spawn_counting_reply_server(new_cmd_count.clone()).await;
+    let old_server = spawn_crux_reconnect_server().await;
+
+    let disco = Arc::new(MockDiscovery::new(
+        Some(info_for(old_server.port, "gate-old")),
+        Ok(info_for(old_server.port, "gate-old")),
+    ));
+    let disco_handle = disco.clone();
+    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+
+    client.connect().await.expect("connect → connected");
+    assert_eq!(client.state(), ConnectionState::Connected);
+    // 비공허성 — 연결된 동안엔 창구가 열려 있다(아래 단언이 처음부터 참인 게 아니다).
+    assert!(
+        client.lifecycle.current_cmd_tx().is_some(),
+        "connected 면 창구가 열려 있어야(안 그러면 아래 단언이 공허하다)"
+    );
+
+    // 재연결을 read_live 창에 세워 「끊겨 재연결 중」을 결정론적으로 붙잡는다.
+    let (entered_rx, release_tx) = disco_handle.gate_read_live();
+    old_server.drop_current_connection();
+    let in_window =
+        poll_until_realtime(Duration::from_secs(5), || entered_rx.try_recv().is_ok()).await;
+    assert!(
+        in_window,
+        "재연결이 read_live 창(소켓 열기 전)에 도달해야: {:?}",
+        client.state()
+    );
+
+    // ★단언 1 — 창구는 닫혔는데 송신단은 그대로다★. 이 짝이 이 설계의 핵심이다: 송신단을 놓으면
+    //   `cmd_rx` 가 EOF 를 봐 연결 태스크가 접히고 재연결 루프까지 죽는다(그래서 못 놓는다).
+    assert!(
+        client.lifecycle.current_cmd_tx().is_none(),
+        "끊긴 동안엔 창구가 닫혀 명령 채널을 내주지 않아야"
+    );
+    assert!(
+        client.lifecycle.cmd_tx_snapshot().is_some(),
+        "그래도 송신단 자체는 남아 있어야(놓으면 재연결 루프가 죽는다)"
+    );
+
+    // ★단언 2 — 그 창에서 넣은 명령은 담기지 않고 즉시 거절된다★.
+    let result = tokio::time::timeout(Duration::from_secs(2), client.send_command(spawn_cmd()))
+        .await
+        .expect("끊긴 동안의 명령은 즉시 반환(담아 두지 않는다)");
+    assert_eq!(
+        classify_disconnect_err(&result),
+        DisconnectBranch::NotConnected,
+        "끊긴 동안의 명령은 「연결 안 됨」으로 즉시 거절되어야: {result:?}"
+    );
+
+    // 게이트를 풀어 **다른 서버**로 재연결시킨다(주소가 갈아타도 결론이 같음을 강조).
+    disco_handle.set_live(Some(info_for(new_port, "gate-new")));
+    let _ = release_tx.send(());
+    let reconnected = poll_until_realtime(Duration::from_secs(10), || {
+        client.state() == ConnectionState::Connected
+    })
+    .await;
+    assert!(reconnected, "재연결 후 connected: {:?}", client.state());
+    tokio::time::sleep(Duration::from_millis(200)).await; // 뒤늦은 실행이 있었다면 도달했을 시간.
+
+    // ★단언 3 — 거절된 명령은 **어느 소켓에도** 닿지 않았다★. 두 서버를 함께 센다(재연결이 옛 포트로
+    //   되돌아오는 갈래가 있다 — `fresh == None` 이면 캐시한 주소로 시도한다).
+    let landed_new = new_cmd_count.load(Ordering::SeqCst);
+    let landed_old = old_server.second_conn_cmd_count();
+    assert_eq!(
+        (landed_new, landed_old),
+        (0, 0),
+        "끊긴 동안 거절된 명령이 다음 소켓에서 실행되면 안 됨(ADR-0195):          새 서버={landed_new} 옛 서버(둘째 연결)={landed_old}"
+    );
+
+    client.close();
+}
+
+// ── ADR-0195 결정론 단위: 옛 소켓 몫 명령은 실행되지 않고 **깨워진다** ─────────────────────────
+// ★왜 단위로 따로 박나 — 「실 소켓으로는 못 잰다」가 **아니다**★: 잴 수 있고, 형제
+//   `held_clone_enqueued_after_disconnect_is_rejected_and_never_runs` 가 실제로 잰다(하네스가 창구
+//   clone 을 직접 쥐고 있다가 끊긴 뒤에 넣는다). ★그 반대로 적혀 있던 옛 문장을 되살리지 말 것★ — 그걸
+//   믿으면 이 파일의 유일한 **호출 줄** 회귀망을 중복이라 여겨 지우게 된다.
+// ★그래서 이 테스트의 몫은 그 형제와 **다른 것**이다★: 형제는 `main_loop` 이 이 함수를 *부르는지*를 재고,
+//   이쪽은 그 함수의 *판정표*를 재 — variant 마다 결말이 갈리는데 실 소켓 하나로는 한 번에 한 갈래밖에
+//   못 태운다. 둘 중 하나만 남기면 나머지 축이 통째로 빈다.
+// ★재는 것 셋★: ① 지금 소켓 몫은 통과 ② 옛 소켓 몫은 **버려지되 대기자가 깨어난다**(hang 금지)
+//   ③ 답장(`CommandOutcome`)은 여기서 안 걸린다 — 대조는 자기 팔이 한다(비대칭이 의도다).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_socket_command_is_dropped_and_its_waiter_is_woken() {
+    use super::connection::{reject_foreign_command, ConnectionCommand};
+
+    const LIVE: u64 = 9;
+    const OLD: u64 = 8;
+
+    // ① 지금 소켓 몫은 그대로 통과(비공허성 — 아래 None 들이 "무조건 None" 이 아니다).
+    let (keep_tx, _keep_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    assert!(
+        reject_foreign_command(
+            ConnectionCommand::SendCommand {
+                cmd: spawn_cmd(),
+                reply: keep_tx,
+                socket: LIVE,
+            },
+            LIVE
+        )
+        .is_some(),
+        "지금 소켓 몫 명령은 통과해야"
+    );
+
+    // ② 옛 소켓 몫 SendCommand — 버려지고 호출자는 "미전송" Err 로 깨어난다.
+    let (drop_tx, drop_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    assert!(
+        reject_foreign_command(
+            ConnectionCommand::SendCommand {
+                cmd: spawn_cmd(),
+                reply: drop_tx,
+                socket: OLD,
+            },
+            LIVE
+        )
+        .is_none(),
+        "옛 소켓 몫 명령은 실행되면 안 됨"
+    );
+    let woken = tokio::time::timeout(Duration::from_secs(2), drop_rx)
+        .await
+        .expect("옛 소켓 몫 명령의 호출자가 bound 내 깨어남(hang 없음)")
+        .expect("oneshot 수신");
+    assert_eq!(
+        classify_disconnect_err(&woken),
+        DisconnectBranch::Unsent,
+        "표식 대조로 걸린 명령은 wire 에 나간 적이 없다 — 버퍼 drain 과 같은 문구여야: {woken:?}"
+    );
+
+    // ② 옛 소켓 몫 RequestReplay — 나를 통로가 `u64` 뿐이라 오류값을 실을 수 없다. drop 이 곧 신호다.
+    let (gen_tx, gen_rx) = tokio::sync::oneshot::channel::<u64>();
+    assert!(
+        reject_foreign_command(
+            ConnectionCommand::RequestReplay {
+                agent_id: uuid::Uuid::new_v4(),
+                reply: Some(gen_tx),
+                socket: OLD,
+            },
+            LIVE
+        )
+        .is_none(),
+        "옛 소켓 몫 replay 요청은 나가면 안 됨"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), gen_rx)
+            .await
+            .expect("replay 요청자가 bound 내 깨어남(hang 없음)")
+            .is_err(),
+        "gen 을 잘못 돌려주지 않고 RecvError 로 깨워야(호출자는 재요청 안전 Err 를 본다)"
+    );
+
+    // ② 깨울 대기자가 없는 둘도 통과시키지 않는다(옛 소켓으로 가야 할 것이 새 소켓으로 나가면 안 된다).
+    assert!(
+        reject_foreign_command(
+            ConnectionCommand::Unsubscribe {
+                agent_id: uuid::Uuid::new_v4(),
+                socket: OLD,
+            },
+            LIVE
+        )
+        .is_none(),
+        "옛 소켓 몫 Unsubscribe 는 버려져야"
+    );
+    assert!(
+        reject_foreign_command(
+            ConnectionCommand::Fire {
+                cmd: AgentCommand::Resize {
+                    agent_id: uuid::Uuid::new_v4(),
+                    cols: 80,
+                    rows: 24,
+                    viewport_id: None,
+                },
+                socket: OLD,
+            },
+            LIVE
+        )
+        .is_none(),
+        "옛 소켓 몫 Fire 는 버려져야"
+    );
+
+    // ③ 답장은 표식이 어긋나도 **여기서는** 안 걸린다 — 대조·로그는 자기 팔이 한다(정본은 그 자리).
+    let outcome = ConnectionCommand::CommandOutcome {
+        reply: engram_dashboard_command::CommandReply::err(
+            engram_dashboard_command::RequestId::new(),
+            engram_dashboard_command::CommandError::internal("테스트"),
+        ),
+        socket: OLD,
+    };
+    assert!(
+        reject_foreign_command(outcome, LIVE).is_some(),
+        "답장은 이 팔이 판정하지 않는다(자기 팔이 request_id 와 함께 판정)"
+    );
+}
+
+// 「끊긴 명령이 뒤늦게 실행됐나」 계수기가 **세야 할 것**의 판정 — ★제외 목록이 아니라 지목이다★.
+//
+// 계수기들은 전부 `== 0` 을 단언하므로, 판정을 「무엇을 빼나」로 쓰면 그 목록은 **가릴 줄만 알고 걸릴 줄은
+// 모른다** — 빼기로 한 것이 정작 옛 소켓 몫으로 넘어와 실행돼도 계수기가 침묵한다. 그래서 반대로 적는다:
+// 이 스위트가 넣는 명령은 `spawn_cmd()` 뿐이고, 센다는 것은 **그것이 새 소켓에서 실행됐다**는 뜻이다.
+// 다른 무엇이 그 소켓에 오가든(연결 태스크의 자기 이름 등록 등) 이 단언의 관심사가 아니다.
+fn counts_as_late_execution(cmd: &AgentCommand) -> bool {
+    matches!(cmd, AgentCommand::Spawn { .. })
+}
+
+// ── ADR-0195: 창구가 닫히기 **전에** 집어 간 clone 으로 닫힌 **뒤에** 넣으면 표식이 잡는다 ────────────
+// ★이 테스트가 지키는 것은 검사 본문이 아니라 `main_loop` 의 **호출 줄**이다★: 형제 단위 테스트
+//   (`foreign_socket_command_is_dropped_and_its_waiter_is_woken`)는 함수를 직접 부르므로, 그 줄을 지워도
+//   초록이었다(실측 — 5회 반복 250 통과). 여기서는 하네스가 창구 clone 을 **자기가 쥐고** 있다가 넣어,
+//   그 줄을 지나지 않으면 명령이 새 소켓에서 실행되게 만든다.
+// ★경합이 없다★: clone 은 창구가 닫히기 전에 받고, enqueue 는 재연결이 `read_live` 창에 도달한 뒤에
+//   한다 — 그 지점은 끊김 edge 의 두 drain 이 **이미 지난** 뒤다(`connected_lifetime` 의 순서).
+//   그래서 이 명령을 깨울 수 있는 것은 표식 대조 하나뿐이다.
+// ★채번 되돌림도 함께 잡는다(FIX-2)★: 표식 채번기가 닫힌 값(`0`)에서 다시 세면 새 소켓이 옛 표식과
+//   같은 수를 받아 이 명령이 **일치해 실행된다**. 아래 `assert_ne!` 가 그 되돌림을 잡는다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn held_clone_enqueued_after_disconnect_is_rejected_and_never_runs() {
+    use super::connection::ConnectionCommand;
+
+    let new_cmd_count = Arc::new(AtomicUsize::new(0));
+    let new_port = spawn_counting_reply_server(new_cmd_count.clone()).await;
+    let old_server = spawn_crux_reconnect_server().await;
+
+    let disco = Arc::new(MockDiscovery::new(
+        Some(info_for(old_server.port, "held-old")),
+        Ok(info_for(old_server.port, "held-old")),
+    ));
+    let disco_handle = disco.clone();
+    let client = Arc::new(DaemonClient::new(Handle::current(), disco));
+
+    client.connect().await.expect("connect → connected");
+    assert_eq!(client.state(), ConnectionState::Connected);
+
+    // 1) 창구가 열려 있는 동안 clone + 표식을 집어 둔다 — 호출자가 락을 놓은 그 순간의 실물이다.
+    let (held_tx, held_stamp) = client
+        .lifecycle
+        .current_cmd_tx()
+        .expect("connected 면 창구가 열려 있다");
+
+    // 2) 재연결을 read_live 창에 세운다(= 두 drain 이 지났음을 못 박는 지점).
+    let (entered_rx, release_tx) = disco_handle.gate_read_live();
+    old_server.drop_current_connection();
+    let past_drains =
+        poll_until_realtime(Duration::from_secs(5), || entered_rx.try_recv().is_ok()).await;
+    assert!(
+        past_drains,
+        "재연결이 read_live 창에 도달해야(그 앞에 두 drain 이 있다): {:?}",
+        client.state()
+    );
+    assert!(
+        client.lifecycle.current_cmd_tx().is_none(),
+        "이 시점엔 창구가 닫혀 있어야(새 호출자는 못 들어온다)"
+    );
+
+    // 3) 쥐고 있던 clone 으로 **drain 이 지난 뒤** enqueue — 창구를 지나지 않는 유일한 길이다.
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Result<AgentEvent, String>>();
+    held_tx
+        .send(ConnectionCommand::SendCommand {
+            cmd: spawn_cmd(),
+            reply: reply_tx,
+            socket: held_stamp,
+        })
+        .await
+        .expect("채널은 재연결을 넘어 살아 있다 — 그래서 창구만으로는 못 막는다");
+
+    // 4) 게이트를 풀어 **다른 서버**로 재연결시킨다.
+    disco_handle.set_live(Some(info_for(new_port, "held-new")));
+    let _ = release_tx.send(());
+    let reconnected = poll_until_realtime(Duration::from_secs(10), || {
+        client.state() == ConnectionState::Connected
+    })
+    .await;
+    assert!(reconnected, "재연결 후 connected: {:?}", client.state());
+
+    // 5) ★FIX-2 — 새 소켓은 새 표식을 받아야 한다★. 되돌아가면 위 명령이 새 소켓과 일치해 실행된다.
+    let (next_tx, next_stamp) = client
+        .lifecycle
+        .current_cmd_tx()
+        .expect("재연결 후 창구가 다시 열린다");
+    assert_ne!(
+        next_stamp, held_stamp,
+        "표식 채번은 창구를 닫아도 되돌아가면 안 된다(되돌아가면 옛 소켓 몫이 새 소켓과 일치한다)"
+    );
+
+    // 6) ★FIX-1 — 그 명령은 실행되지 않고 미전송 Err 로 깨어난다★.
+    let woken = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+        .await
+        .expect("표식에 걸린 명령의 호출자가 bound 내 깨어남(hang 없음)")
+        .expect("oneshot 수신");
+    assert_eq!(
+        classify_disconnect_err(&woken),
+        DisconnectBranch::Unsent,
+        "옛 소켓 몫 명령은 실행되지 않고 미전송 Err 로 깨어나야: {woken:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await; // 뒤늦은 실행이 있었다면 도달했을 시간.
+
+    let landed_new = new_cmd_count.load(Ordering::SeqCst);
+    let landed_old = old_server.second_conn_cmd_count();
+    assert_eq!(
+        (landed_new, landed_old),
+        (0, 0),
+        "옛 소켓 몫 명령이 다음 소켓에서 실행되면 안 됨(ADR-0195):          새 서버={landed_new} 옛 서버(둘째 연결)={landed_old}"
+    );
+
+    // 쥔 송신단을 놓아야 close 가 연결 태스크에 EOF 로 닿는다(강한 clone 이 남으면 안 닫힌다).
+    drop(held_tx);
+    drop(next_tx);
+    client.close();
 }
 
 // 받은 명령 frame 수를 카운트하며 Ack echo 하는 mock 서버(끊긴 명령의 재연결 후 미실행 검증용). 반환: port.
@@ -3129,9 +3593,11 @@ async fn spawn_counting_reply_server(count: Arc<AtomicUsize>) -> u16 {
                 loop {
                     match ws.next().await {
                         Some(Ok(Message::Text(t))) => {
-                            count_c.fetch_add(1, Ordering::SeqCst);
                             let cmd: AgentCommand =
                                 serde_json::from_str(&t).expect("명령 JSON 파싱");
+                            if counts_as_late_execution(&cmd) {
+                                count_c.fetch_add(1, Ordering::SeqCst);
+                            }
                             if let Some(rid) = super::protocol_state::command_request_id(&cmd) {
                                 let ack =
                                     serde_json::to_string(&AgentEvent::Ack { request_id: rid })

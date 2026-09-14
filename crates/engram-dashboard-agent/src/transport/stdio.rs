@@ -44,12 +44,12 @@ pub struct StdioTransport {
     stderr: Mutex<Option<ChildStderr>>,
     /// shutdown(kill) 진행 신호. set(Release)면 pump가 종료 시 Killed로 전이(pump가 Acquire).
     shutdown: Arc<AtomicBool>,
-    /// 이 파이프가 나르는 출력이 구조화 스트림(NDJSON)인지. ★조립점 주입(ADR-0044/0030)★:
-    /// "구조화냐"는 파이프가 아니라 claude `--output-format`(backend/mode 지식)이 정하므로,
-    /// select_transport 가 mode 로부터 주입한다(하드코딩 금지 — 평문 stdio 엔 false). capabilities()가 그대로 신고.
+    /// 이 파이프가 나르는 출력이 구조화 스트림(NDJSON)인지. ★주입값이다(ADR-0044/0030/0191)★:
+    /// "구조화냐"는 파이프가 아니라 그 프로그램의 출력 형식(backend 지식)이 정하므로, 이 통로를 만드는
+    /// backend 가 `open` 인자로 주입한다(하드코딩 금지 — 평문 stdio 엔 false). capabilities()가 그대로 신고.
     structured: bool,
-    /// 출력 정제 decoder(ADR-0004/0044). manager 가 json 모드 세션에 주입한다(없으면 바이트
-    /// 직통 = 평문·터미널 경로). start()에서 take 해 pump 스레드로 move(=None 이면 이미 시작됨).
+    /// 출력 정제 decoder(ADR-0004/0044). 이 통로를 만드는 backend 가 구조화 모드에 주입한다(없으면
+    /// 바이트 직통 = 평문·터미널 경로). start()에서 take 해 pump 스레드로 move(=None 이면 이미 시작됨).
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
     #[cfg(windows)]
     job_handle: JobObjectHandle,

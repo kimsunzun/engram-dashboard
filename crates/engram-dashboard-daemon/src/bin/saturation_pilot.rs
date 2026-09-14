@@ -21,7 +21,7 @@ use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentProfile, ClaudeOutputFormat, ProfileRegistry, SpawnMode,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -256,7 +256,7 @@ async fn run_one(
     };
 
     let session_id = manager
-        .agent_claude_session_id(agent.id)
+        .agent_backend_session_id(agent.id)
         .map(|s| s.to_string());
     let transcript_path = match &session_id {
         Some(sid) => locate_transcript_with_wait(sid, TRANSCRIPT_APPEAR_TIMEOUT),
@@ -779,7 +779,6 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     ))));
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig {
-            sessions_dir: None,
             enabled: false,
             poll_interval: Duration::from_secs(1),
         },
@@ -826,7 +825,7 @@ fn spawn_pilot_agent(
         AgentCommand::Claude {
             // ★모델 핀★: extra_args 로 --model 주입(백엔드 코드 무변경 — ADR-0090 d3).
             extra_args: vec!["--model".to_string(), model.to_string()],
-            output_format: ClaudeOutputFormat::StreamJson,
+            output_format: AgentOutputFormat::StreamJson,
         },
         workspace.to_path_buf(),
         vec![],
@@ -1049,6 +1048,7 @@ fn decoded_variant_key(ev: &OutputEvent) -> String {
         OutputEvent::ToolCall { .. } => "ToolCall",
         OutputEvent::Usage { .. } => "Usage",
         OutputEvent::MessageDone { .. } => "MessageDone",
+        OutputEvent::TurnEnd { .. } => "TurnEnd",
         OutputEvent::Error(_) => "Error",
         OutputEvent::Structured { kind, .. } => return format!("Structured/{kind}"),
     }
