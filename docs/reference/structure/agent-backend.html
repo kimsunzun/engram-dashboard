@@ -250,11 +250,10 @@
     <h1>새 백엔드는 파일이 아니라 표의 열 하나가 는다</h1>
     <p class="lede">claude 든 codex 든 gemini 든 <b>같은 파이프를 타고</b>, 백엔드마다 다른 것은 그 파이프 입구에 무엇을 밀어 넣느냐뿐이다.</p>
     <dl class="stamp">
-      <dt>기준</dt><dd>브랜치 v0.3.0/feat/codex-backend · 코드 실측 2026-09-08</dd>
-      <dt>배선된 것</dt><dd>claude(터미널) · claude(stream-json) · codex</dd>
-      <dt>아직 아닌 것</dt><dd>gemini — 폴더·stub 만 서 있고 dispatch 미배선</dd>
+      <dt>기준</dt><dd>브랜치 v0.3.0/feat/codex-backend · 코드 실측 2026-09-14</dd>
+      <dt>범위</dt><dd>codex app-server 가 <b>화면에서 대화가 되는 데까지</b> — 질문 표시 · 턴 결말 · 대기 표시 정지</dd>
     </dl>
-    <div class="note">이 페이지는 <b>2026-09-08 기준 개략</b>이다. 구조가 바뀔 때마다 갱신하지 않는다 — 디테일과 최신은 같은 폴더의 <code>agent-backend.md</code> 가 갖는다.</div>
+    <div class="note">「띄우기까지」가 아니고 <b>「다 됐다」도 아니다</b> — 무엇이 서 있고 무엇이 닫혀 있는지는 <b>05 의 표가 칸마다 들고 있다.</b> 디테일과 정본은 같은 폴더의 <code>agent-backend.md</code> 가 갖는다 — argv 표·디스크 호환 같은 절은 그쪽에만 산다.</div>
   </section>
 
   <!-- 02 -->
@@ -277,120 +276,323 @@ flowchart TD
   D -.->|"사람이 한 번 더 누를 때까지 아무 일도 없다"| E
 </pre>
       </div>
-      <figcaption>갈라 둔 이유는 <b>폴더를 고르는 일과 프로그램을 띄우는 일이 서로 다른 실패를 하기</b> 때문이다 — 붙여 두면 폴더를 잘못 골랐을 때 프로세스까지 함께 치워야 한다.</figcaption>
+      <figcaption>갈라 둔 이유는 <b>폴더를 고르는 일과 프로그램을 띄우는 일이 서로 다른 실패를 하기</b> 때문이다.</figcaption>
     </figure>
+    <div class="note">위 첫 칸이 <b>빈 곳(pane 배경)</b> 인 것이 계약이다 — 목록의 <b>행</b>을 우클릭하면 행 메뉴가 이겨서 상위 슬롯 메뉴가 아예 뜨지 않는다. 이 구분을 뭉개면 메뉴를 못 찾는다.</div>
+    <div class="anchor">src/commands/agentCommands.ts(registerSlotMenu · createReserved) · src/components/agent/AgentList.tsx(파일 헤더의 버블 규칙 · onContextMenu 의 stopPropagation) · crates/engram-dashboard-daemon/src/connection_core.rs(CreateProfile · SpawnProfile)</div>
   </section>
 
   <!-- 03 -->
   <section class="slide">
-    <div class="kicker"><span class="n">03</span><span>두 제스처 · 우클릭 자리</span></div>
-    <h2>행을 우클릭하면 행 메뉴가 이겨서 생성 메뉴가 아예 뜨지 않는다</h2>
-    <figure>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>우클릭 자리</th><th>뜨는 것</th></tr></thead>
-          <tbody>
-            <tr>
-              <td>에이전트 목록 패널의 <b>빈 곳(pane 배경)</b></td>
-              <td>상위 슬롯 메뉴 — 「에이전트 생성 ▶ 백엔드 항목」</td>
-            </tr>
-            <tr>
-              <td>목록의 <b>행</b></td>
-              <td>행 메뉴가 이긴다 — 상위 슬롯 메뉴는 뜨지 않는다</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <figcaption>이 구분을 뭉개면 메뉴를 못 찾는다.</figcaption>
-    </figure>
-  </section>
-
-  <!-- 04 -->
-  <section class="slide">
-    <div class="kicker"><span class="n">04</span><span>스폰 사슬</span></div>
-    <h2>백엔드 이름이 적히는 자리는 등록부와 두 갈림 표뿐이고, 그 아래로는 아무도 백엔드를 모른다</h2>
+    <div class="kicker"><span class="n">03</span><span>스폰 사슬</span></div>
+    <h2>백엔드 이름이 적히는 자리는 등록부와 갈림 표뿐이고, 그 아래로는 아무도 백엔드를 모른다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
 flowchart TD
   M["AgentManager.spawn_agent"] -->|"AgentCommand 변형"| BF["backend_for — 명령 축 dispatch 표"]
   BF --> CB["그 백엔드의 build_spec"]
-  CB -->|"CommandSpec · program+args+cwd"| ST["그 백엔드의 open_spawn — 통로를 스스로 만들어 넘긴다"]
-  ST -->|"터미널 모드 · decoder 를 만들지 않는다"| PT["PtyTransport.open"]
-  ST -->|"stream-json · decoder 를 함께 넘긴다"| SD["StdioTransport.open"]
-  PT -->|"원시 바이트"| OC["OutputCore · 링 + seq"]
+  CB -->|"CommandSpec · program + args + cwd"| ST["그 백엔드의 open_spawn — 통로를 스스로 만들어 넘긴다"]
+  ST -->|"터미널 모드 · decoder 를 만들지 않는다"| PT["PtyTransport"]
+  ST -->|"claude stream-json · decoder 동반"| SD["StdioTransport"]
+  ST -->|"codex app-server · decoder 동반"| AS["CodexAppServerTransport"]
+  PT -->|"원시 바이트"| OC["OutputCore — 링 + seq"]
   SD -->|"구조화 이벤트"| OC
+  AS -->|"구조화 이벤트"| OC
   OC -->|"OutputEvent 팬아웃"| PC["ProtocolClient (프론트 TS)"]
   PC -->|"AgentInfo.capabilities"| RM["renderMode"]
 </pre>
       </div>
-      <figcaption>통로는 바이트만 나르고, 코어는 그 바이트에 번호를 붙여 링에 쌓고, 데몬은 구독자에게 뿌리고, 프론트는 받아 그린다.</figcaption>
+      <figcaption>끝나는 것은 <b><code>build_spec</code> 이라는 함수</b>가 아니라 그 <b>폴더</b>다 — 아래가 같은 폴더가 선언하는 나머지다.</figcaption>
     </figure>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>그 폴더가 선언하는 것</th><th>코어가 그 값으로 잠그는 것</th></tr></thead>
+        <tbody>
+          <tr><td><code>needs_session</code></td><td><code>true</code> 면 sid 발급 + watcher · <code>false</code> 면 부팅 복원 대상 아님 · 항상 Fresh</td></tr>
+          <tr><td><code>reads_messages</code></td><td><code>false</code> 면 우편 수신자 명단에서 제외</td></tr>
+          <tr><td><code>supports_control_channel</code></td><td><code>true</code> 면 spawn 전에 provision(토큰 + mcp-config 발급)</td></tr>
+          <tr><td><code>accepts_mcp_config</code></td><td>프라이밍 변형과 우편 표식이 이 값으로 갈린다</td></tr>
+          <tr><td><code>turn_classifier</code></td><td>출력 이벤트 → <code>TurnSignal</code>. 선언이 없으면 그 백엔드는 <b>관측 대상이 아니다</b>(기본 = 침묵)</td></tr>
+          <tr><td><code>transport_shape</code></td><td><b>신고값일 뿐</b> — 통로 실물은 <code>open_spawn</code> 이 만들고 그 안에서 이 값을 되읽지 않는다</td></tr>
+          <tr><td><code>output_decoder</code></td><td>구조화 이벤트의 유무</td></tr>
+          <tr><td><code>capabilities().session.resume</code></td><td>무손실 복원 가능 여부</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="anchor">crates/engram-dashboard-agent/src/backend/mod.rs(AgentBackend trait 기본값 · backend_for · SpawnParts · 트립와이어 셋) · backend/codex/mod.rs(is_app_server · open_spawn · classify_turn)</div>
   </section>
 
-  <!-- 05 -->
+  <!-- 04 -->
   <section class="slide">
-    <div class="kicker"><span class="n">05</span><span>스폰 사슬 · 어디서 끝나나</span></div>
-    <h2>백엔드 전용 코드는 함수 하나가 아니라 폴더 하나에서 끝난다</h2>
-    <figure>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>그 폴더가 선언하는 것</th><th>코어가 그 값으로 잠그는 것</th></tr></thead>
-          <tbody>
-            <tr><td><code>build_spec</code></td><td>program + args + cwd — 실제 명령줄 한 벌</td></tr>
-            <tr><td><code>needs_session</code></td><td><code>true</code> 면 sid 발급 + watcher · <code>false</code> 면 부팅 복원 대상 아님 · 항상 Fresh</td></tr>
-            <tr><td><code>reads_messages</code></td><td><code>false</code> 면 우편 수신자 명단에서 제외</td></tr>
-            <tr><td><code>supports_control_channel</code></td><td><code>true</code> 면 spawn 전에 provision(토큰+mcp-config 발급)</td></tr>
-            <tr><td><code>accepts_mcp_config</code></td><td>프라이밍 변형과 우편 표식이 이 값으로 갈린다</td></tr>
-            <tr><td><code>transport_shape</code></td><td><b>신고값일 뿐</b> — 통로 실물은 <code>open_spawn</code> 이 만들고 그 안에서 이 값을 되읽지 않는다</td></tr>
-            <tr><td><code>output_decoder</code></td><td>구조화 이벤트의 유무</td></tr>
-            <tr><td><code>capabilities().session.resume</code></td><td>무손실 복원 가능 여부</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <figcaption>끝나는 것은 <b><code>build_spec</code> 이라는 함수</b>가 아니라 그 <b>폴더</b>다.</figcaption>
-    </figure>
-  </section>
-
-  <!-- 06 -->
-  <section class="slide">
-    <div class="kicker"><span class="n">06</span><span>렌더 분기 · 첫째 층</span></div>
-    <h2>강제값이 없을 때만 에이전트가 신고한 값으로 떨어진다</h2>
+    <div class="kicker"><span class="n">04</span><span>렌더 분기</span></div>
+    <h2>강제값이 없을 때만 capability 로 떨어지고, decoder 는 그 갈래에 붙을 뿐 고르지 않는다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
 flowchart LR
   OV["renderModeOverride 의 그 슬롯 칸"] -->|"값이 있으면 그것"| M["슬롯 렌더러 — terminal · rich · dom"]
-  OV -.->|"키가 없을 때만 ?? 로 떨어진다"| DF["defaultRenderMode(agent)"]
+  OV -.->|"키가 없을 때만 떨어진다"| DF["defaultRenderMode(agent)"]
+  TSH["backend.open_spawn — 그 모드의 통로를 만들며 structured 를 주입한다"] --> CO["Capabilities.compose"]
+  BC["BackendCaps — 그 백엔드의 선언"] --> CO
+  CO -->|"output.structured"| DF
   DF -->|"true → rich · false → terminal"| M
+  TSH -.->|"구조화 파이프에만 함께 넘어간다 — 터미널 경로엔 아예 안 만든다"| DEC["output_decoder"]
 </pre>
       </div>
-      <figcaption>렌더 모드는 <b>셋</b>이다 — <code>terminal|rich|dom</code>. 렌더러는 백엔드 이름을 한 번도 보지 않는다.</figcaption>
+      <figcaption>「decoder 를 선언하면 오른쪽으로 간다」는 <b>인과가 뒤집힌 서술</b>이다 — 구조화를 고르는 것은 <code>open_spawn</code> 이 만드는 통로 모양이고, decoder 는 그 갈래에 <b>딸려 갈</b> 뿐이다.</figcaption>
     </figure>
+    <div class="anchor">우선순위 정본 = ADR-0078 <b>+</b> src/store/viewStore.ts 의 renderModeOverride JSDoc — ★둘이 한 쌍이고 ADR 단독으로 인용하면 오인용이다★(그 ADR 이 결정한 것은 「렌더 모드는 생성 시 고정」이고 per-activation 오버라이드를 거부했다 · 이 축은 이 저장소에서 이미 한 번 오인용된 적이 있다) · src/components/layout/ViewLayoutRenderer.tsx(판정 지점) · src/components/slot/renderMode.ts(RENDER_MODES)</div>
+  </section>
+
+  <!-- 05 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">05</span><span>백엔드별 칸</span></div>
+    <h2>기능이 「빠진」 게 아니라 백엔드가 스스로 없다고 신고한다</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>백엔드</th><th>전송</th><th>렌더 기본값</th><th>턴 신호</th><th>승인 요청</th><th>세션 복원</th><th>우편 수신</th><th>LLM 창구</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>claude</code> (터미널)</td>
+            <td><code>Pty</code></td>
+            <td>terminal</td>
+            <td>없음 — 구조화 이벤트가 없다</td>
+            <td>통로에 인바운드 요청 축이 없다 — 제어는 MCP 채널이 따로 진다</td>
+            <td>무손실 <code>--resume</code></td>
+            <td>받는다</td>
+            <td><span class="tag open">열림</span></td>
+          </tr>
+          <tr>
+            <td><code>claude</code> (stream-json)</td>
+            <td><code>StdioNdjson</code></td>
+            <td>rich</td>
+            <td><code>MessageDone</code></td>
+            <td>같음</td>
+            <td>무손실 <code>--resume</code></td>
+            <td>받는다</td>
+            <td><span class="tag open">열림</span></td>
+          </tr>
+          <tr>
+            <td><code>codex</code> (터미널)</td>
+            <td><code>Pty</code></td>
+            <td>terminal</td>
+            <td>없음 — decoder 가 없다</td>
+            <td>argv 의 <code>-a on-request</code> — 묻는 상대가 화면의 사람이다</td>
+            <td>없음 — 항상 Fresh</td>
+            <td>명단에서 제외</td>
+            <td><span class="tag shut">사람만</span></td>
+          </tr>
+          <tr>
+            <td><code>codex</code> (app-server)</td>
+            <td><code>StdioBidiJson</code></td>
+            <td>rich</td>
+            <td><code>TurnEnd</code> — <b>결말까지 나른다</b></td>
+            <td><span class="tag shut">거절</span> <code>METHOD_NOT_FOUND</code></td>
+            <td>없음 — 배선 상태이지 영구 속성이 아니다</td>
+            <td><span class="tag later">여전히 제외</span> 사유가 갈렸다</td>
+            <td><span class="tag shut">사람만</span></td>
+          </tr>
+          <tr>
+            <td><code>gemini</code> <span class="tag later">미배선</span></td>
+            <td><code>Pty</code> (trait 기본)</td>
+            <td>terminal</td>
+            <td>없음 — 선언 안 함</td>
+            <td>없음</td>
+            <td>없음 (보수적 stub)</td>
+            <td>선언 안 함 — trait 기본</td>
+            <td><span class="tag shut">낱말 미등록</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note"><b>승인은 「UI 가 아직 없다」가 아니라 적극적 거절이다.</b> <code>thread/start</code> 에 <code>approvalPolicy: onRequest</code> 를 실어 <b>묻게 해 놓고</b>, 상대가 보내는 인바운드 요청은 모르는 것이든 승인 요청이든 전부 <code>METHOD_NOT_FOUND</code> 로 답한다 — <b>답하지 않으면 그 에이전트가 영구 정지</b>하고, <b>성공을 위장하면 그것이 자동 승인</b>이기 때문이다. 그래서 승인이 필요한 도구 호출은 <b>그 자리에서 거부된다.</b></div>
+    <div class="note"><b>옛 사유 둘을 인용하지 말 것 — 죽었다.</b> 「codex 는 턴 신호를 하나도 선언하지 않는다」와 「상주 JSON 서버가 서면 여러 칸이 한꺼번에 열린다」. 서버는 섰고 <b>함께 열린 것은 구조화 챗 하나뿐</b>이며, 우편이 지금 닫힌 사유는 <b>터미널 모드</b>다(선언이 명령을 못 받아 두 모드를 못 가른다 — 여는 조건도 그 가름이다). ★<code>agent-backend.md</code> 에는 그 죽은 문장이 아직 그대로 있다★.</div>
+    <div class="anchor">crates/engram-dashboard-agent/src/backend/codex/mod.rs(reads_messages · turn_classifier · transport_shape 의 사유 주석 · open_spawn 의 ThreadStartParams) · backend/codex/transport.rs(Reader::refuse) · ADR-0185(복원 축) · ADR-0188(승인 축 추상화 — 값 설계는 후속) · ADR-0191(통로를 고르는 자리)</div>
+  </section>
+
+  <!-- 06 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">06</span><span>턴 상태 기계</span></div>
+    <h2>상대가 끝났다고 말한 턴은 id 가 맞을 때만 닫고, 우리가 포기한 턴은 다른 열쇠로 닫는다</h2>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+stateDiagram-v2
+  state "Idle — 입력 큐 열림" as Idle
+  state "Active · turn id 미상" as A0
+  state "Active · turn id 확정" as A1
+  [*] --> Idle
+  Idle --> A0 : 입력 한 건 — turn/start 를 쓰고 같은 락 안에서 전이한다
+  A0 --> A1 : turn/start 응답이 turn id 를 권위 있게 알려 준다
+  A1 --> Idle : turn/completed 가 그 id 와 일치 — 상대가 준 결말로 닫는다
+  A0 --> Idle : 포기 경로 — end_turn_if 가 Failed 경계를 내고 닫는다
+  A1 --> Idle : 같은 포기 경로
+  A0 --> A0 : 응답보다 먼저 온 종료 — 그 id 와 경계를 붙들어 둔다
+</pre>
+      </div>
+      <figcaption><b>붙드는 것이 「종료가 있었다」가 아니라 그 id</b> 인 것이 핵심이다 — 전자는 무엇이든 끝낼 수 있는 근거 없는 기억이지만, 후자는 이미 하는 id 대조를 <b>미루는</b> 것뿐이다. ★상대가 준 종료를 귀속하는 이 경로에★ id 대조 없이 끝내는 갈래를 더하면 걷어낸 오귀속이 그대로 돌아온다.</figcaption>
+    </figure>
+    <ul class="points">
+      <li><b>포기 경로는 다른 열쇠를 쓴다</b> — 상대의 id 가 아니라 <b>그 턴이 열릴 때 받은 순번</b>으로 자기 턴을 찾는다. 그래서 <i>turn id 미상</i> 상태에서도 닫을 수 있다(쓰기 실패 · 응답 해독 실패 · 오류 응답 · 시한 만료 넷).</li>
+      <li><b>핸드셰이크 실패는 턴이 열리기도 전이다</b> — 상태 전이 없이 <code>turn_id</code> 가 빈 경계를 내고, 양쪽 갈래 다 낸다. 안 내면 오류 한 줄만 남은 화면에서 대기 표시가 영원히 돈다.</li>
+      <li>그 자리에 <code>Error</code> 한 줄만 내던 시절에는 <b>한가한 에이전트가 턴 중으로 관측된 채 남아</b> 30분 fail-open 밸브까지 우편이 막혔다 — 「턴을 끝내는 일」 자체에 경계 발화를 묶어 구조적으로 빠질 수 없게 한 이유가 이것이다.</li>
+    </ul>
+    <div class="anchor">crates/engram-dashboard-agent/src/backend/codex/transport.rs(TurnState · take_turn_locked · note_turn · end_turn_if · EARLY_COMPLETION_SLOTS) · ADR-0127</div>
   </section>
 
   <!-- 07 -->
   <section class="slide">
-    <div class="kicker"><span class="n">07</span><span>렌더 분기 · 둘째 층</span></div>
-    <h2>구조화를 고르는 것은 통로 모양이고, decoder 는 그 모양에만 붙는다</h2>
+    <div class="kicker"><span class="n">07</span><span>한 턴이 건너는 것</span></div>
+    <h2>질문이 화면에 뜨는 길은 우리가 만든 에코가 아니라 상대가 되울린 항목이다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
-flowchart LR
-  TSH["backend.open_spawn — 그 모드의 통로를 만들며 structured 를 주입한다"] --> CO["Capabilities.compose"]
-  BC["BackendCaps — 그 백엔드의 선언"] --> CO
-  CO -->|"output.structured"| DF["defaultRenderMode(agent)"]
-  DF -->|"true → rich · false → terminal"| M["슬롯 렌더러 — terminal · rich · dom"]
-  TSH -.->|"구조화 파이프에만 함께 넘어간다 — 터미널 경로엔 아예 안 만든다"| DEC["output_decoder"]
+sequenceDiagram
+  participant U as 사람
+  participant F as 프론트 누산기
+  participant D as 데몬
+  participant T as 통로 · app-server
+  participant C as codex
+  U->>F: 질문을 친다
+  F->>D: 입력 프레임 · 대기 표시 켬
+  D->>T: send_input
+  T->>C: turn/start
+  C-->>T: item/started · userMessage (되울림)
+  T-->>F: Structured · user — 우리가 보낸 것으로 표시
+  C-->>T: item/agentMessage/delta ...
+  T-->>F: TextDelta ...
+  C-->>T: turn/completed · status
+  T-->>F: TurnEnd · outcome
+  F->>F: 구분선 + 결말 표식 · 대기 표시 해제
 </pre>
       </div>
-      <figcaption>「decoder 를 선언하면 오른쪽으로 간다」는 <b>인과가 뒤집힌 서술</b>이다 — 그 백엔드의 <code>open_spawn</code> 이 구조화 파이프를 만드는 자리에서 decoder 를 함께 넘기고, 터미널 갈래는 애초에 만들지 않는다(<b>버려지는 자리 자체가 없다</b>).</figcaption>
+      <figcaption><b>합성 입력 에코는 쓰지 않는다</b> — 이 백엔드가 유저 메시지를 스스로 되울리므로, 합성 에코를 더하면 같은 질문이 두 벌 남는다. <b>둘의 dedup 키가 달라서</b>(합성 쪽은 우리 uuid, 되울린 쪽은 상대 item id) 어느 층에서도 안 걸린다 — ADR-0193 의 「거부한 대안」이 실측을 근거로 기각한 것이 정확히 이것이다.</figcaption>
     </figure>
+    <p>같은 항목이 <code>started</code>·<code>completed</code> 두 번 오므로 <b>decoder 안에서</b> item id 로 먼저 온 쪽만 낸다. 그 기억은 유계다 — 세션이 길어진다고 자라지 않는다.</p>
+    <div class="anchor">crates/engram-dashboard-agent/src/backend/codex/decoder.rs(user_message · user_message_event · MAX_EMITTED_USER_ITEMS) · backend/codex/mod.rs(합성 에코를 안 선언하는 사유 주석) · ADR-0193</div>
   </section>
 
   <!-- 08 -->
   <section class="slide">
-    <div class="kicker"><span class="n">08</span><span>닫힌 문</span></div>
+    <div class="kicker"><span class="n">08</span><span>결말 어휘</span></div>
+    <h2>실패로 잡는 것은 상대가 실패라고 말한 값 하나뿐이다 — 여집합으로 뒤집지 말 것</h2>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart LR
+  S["turn.status 문자열 — 닫힌 enum 으로 받지 않는다"] -->|"completed"| C["Completed"]
+  S -->|"interrupted"| I["Interrupted"]
+  S -->|"failed — 허용목록의 유일한 실패"| F["Failed · detail"]
+  S -->|"그 밖의 값 · 칸 자체가 없음"| N["Unknown"]
+  C --> E["TurnEnd — 알림 하나당 정확히 1회"]
+  I --> E
+  F --> E
+  N -.->|"결말을 몰라도 턴은 닫는다"| E
+</pre>
+      </div>
+      <figcaption>결말 칸이 가르는 것은 <b>화면 표시</b>이지 「닫을지 말지」가 아니다 — 하나라도 안 닫으면 그 대화의 대기 표시가 영영 돈다.</figcaption>
+    </figure>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>결말</th><th>화면</th><th>되살리기 쉬운 실수</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>Completed</code></td>
+            <td>표식 없음 — 구분선만</td>
+            <td>평범한 끝맺음에 경고를 붙이는 것</td>
+          </tr>
+          <tr>
+            <td><code>Failed { detail }</code></td>
+            <td>아이콘 + 문구 + error 톤. 사유는 <b>리터럴로만</b> 그린다</td>
+            <td><b>여집합(denylist)</b> — 사용자가 Esc 로 끊은 턴이 실패로 도장 찍힌다. claude 쪽 같은 자리가 한때 그랬다가 되돌렸고 그 기록이 코드에 남아 있다</td>
+          </tr>
+          <tr>
+            <td><code>Interrupted</code></td>
+            <td>구별되는 아이콘·문구 — <b>붉게 칠하지 않는다</b></td>
+            <td>실패로 접는 것. 이 저장소에서 중단은 1급 정상 경로다</td>
+          </tr>
+          <tr>
+            <td><code>Unknown</code></td>
+            <td>「끝난 이유는 알 수 없다」</td>
+            <td>아는 셋 중 하나로 접는 것 — 추측이 틀리면 화면이 <b>거짓 결말</b>을 그린다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note"><b>중립인 것은 판별자이지 <code>detail</code> 이 아니다.</b> 상대의 상태 문자열은 decoder 안에서 끝나고 밖으로는 이 넷만 나가지만, 실패 사유는 상대가 준 것이 유일한 정보라 그 문장이 그대로 실린다. 그 칸의 등급은 <code>Error</code> 의 문자열과 같다 — <b>그리기 전용</b>이고, 파싱해 분기하면 그 순간 프론트가 백엔드 어휘를 알게 된다.</div>
+    <div class="anchor">crates/engram-dashboard-agent/src/types.rs(OutputEvent::TurnEnd · TurnOutcome) · backend/codex/decoder.rs(turn_completed) · backend/claude/mod.rs(is_error 의 허용목록 주석) · crates/engram-dashboard-protocol/src/messages.rs(wire 미러) · crates/engram-dashboard-daemon/src/connection_core.rs(turn_outcome_to_wire)</div>
+  </section>
+
+  <!-- 09 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">09</span><span>발행 두 문</span></div>
+    <h2>「화면에 보여야 한다」와 「이 화신이 턴 중이다」는 같은 사실이 아니다</h2>
+    <figure>
+      <div class="figure-body">
+<pre class="mermaid">
+flowchart TD
+  L["상대가 흘린 줄 하나"] --> G["귀속 판정 — 우리 thread id · turn id 와 모순되지 않나"]
+  G -->|"우리 것"| E1["emit — 보통 문"]
+  G -->|"우리가 연 적 없는 턴"| E2["emit_without_turn_observation — 옆문"]
+  E1 --> SCR["화면 팬아웃 + replay 링"]
+  E2 --> SCR
+  E1 --> FACT["턴 사실 계층 → 우편 게이트"]
+  E2 -.->|"아무것도 적지 않는다"| FACT
+</pre>
+      </div>
+      <figcaption>옆문이 없으면 우리가 연 적 없는 턴의 줄이 사실 계층을 켜고, <b>그 턴의 종료는 귀속 게이트에 막혀 아무도 못 끈다</b> — 켜는 쪽과 끄는 쪽이 서로 다른 문을 쓰게 되는 비대칭이 이 옆문이 닫는 것이다.</figcaption>
+    </figure>
+    <ul class="points">
+      <li><b>옆문은 진행 신호를 안 적는 자리이지 종료 신호를 지우는 자리가 아니다</b> — 도어벨까지 건너뛰므로, 종료를 여기로 보내면 그것을 기다리는 소비자가 안 깨어난다.</li>
+      <li><b>ADR-0127 의 정리 호출자 둘은 그대로다</b>(<code>finish</code> + <code>emit</code> 의 finalize 재확인) — 옆문은 관측을 아예 안 적으므로 지울 것도 없고, 그래서 셋째 호출자가 생기지 않는다.</li>
+      <li>게이트가 본문까지 막지는 않는다 — <b>본문은 언제나 화면에 올린다.</b> 막으면 에이전트가 낸 말이 사라지고, 그것이 경계 하나를 잃는 것보다 나쁘다.</li>
+    </ul>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>상대가 길이를 정하는 칸</th><th>상한 없으면</th></tr></thead>
+        <tbody>
+          <tr><td>전사 본문 · 도구 인자 · 실패 사유</td><td><b>붙여넣기 한 번이 그 대화의 되감기를 지운다</b> — 이벤트 하나가 replay 링의 단일 이벤트 상한을 홀로 넘으면 링이 나머지를 전부 쫓아낸다</td></tr>
+          <tr><td>turn id · item id</td><td>대조 토큰이라 <b>자르지 않고 거른다</b> — 자른 둘이 같아지면 서로 다른 것이 한 벌로 접힌다</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="anchor">crates/engram-dashboard-agent/src/output_core.rs(emit · emit_without_turn_observation · estimate_cost_bytes) · backend/codex/transport.rs(claims_our_turn · note_turn) · backend/codex/decoder.rs(MAX_TRANSCRIPT_CHARS · MAX_TOOL_ARGS_BYTES · MAX_ID_BYTES)</div>
+  </section>
+
+  <!-- 10 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">10</span><span>화면</span></div>
+    <h2>세 규칙 전부 「없을 때의 증상」이 조용하다 — 그래서 세운 것들이다</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>규칙</th><th>어떻게</th><th>없을 때의 증상</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>결말 셋을 구별한다</td>
+            <td>아이콘 · 문구 · 톤 <b>세 축</b>으로 가른다 — <b>색 하나에 기대지 않는다</b>(e-ink 테마가 색을 무력화한다)</td>
+            <td>셋이 한 모양이 되고, 결말 칸의 존재 이유가 사라진다</td>
+          </tr>
+          <tr>
+            <td>모르는 이벤트에 가지를 둔다</td>
+            <td>표식 한 줄을 남기고 「이해 못 했다」를 호출자에게 돌려준다 — 호출자는 그때 자기 대기 상태를 풀지 않는다</td>
+            <td><b>화면은 한 픽셀도 안 바뀌는데 대기 표시만 조용히 꺼진다.</b> 릴리스 WebView2 에는 devtools 가 없어 console 은 사용자에게 닿지 않는다</td>
+          </tr>
+          <tr>
+            <td><code>Error</code> 는 턴을 닫지 않는다</td>
+            <td>세 층이 같은 판정을 진다 — 백엔드 분류자 · wire 변형의 계약 · 프론트 누산기</td>
+            <td>재시도 중 대기 표시가 깜빡이고, 한 턴이 사고 횟수만큼 쪼개진다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note"><b>표식에 프로토콜 낱말과 원본 payload 를 올리지 않는다.</b> 사용자가 읽는 것은 「표시할 수 없는 신호 N건 — 앱이 데몬보다 오래된 버전일 수 있습니다」이고, 진단용 이름은 console 로만 나간다.</div>
+    <div class="anchor">src/components/slot/structuredAccumulator.ts(feed 의 반환 계약 · outcomeMark · closeTurn · default arm) · src/components/slot/StructuredTextView.tsx(OutcomeRow · UnsupportedRow) · src/components/slot/RichSlot.tsx(awaiting) · src/i18n/ko.ts(chat)</div>
+  </section>
+
+  <!-- 11 -->
+  <section class="slide">
+    <div class="kicker"><span class="n">11</span><span>닫힌 문</span></div>
     <h2>사람 경로는 게이트를 지나지 않고, LLM 경로만 사유를 실은 오류로 반려된다</h2>
     <figure>
       <div class="figure-body">
@@ -399,108 +601,85 @@ flowchart TD
   P["LLM_BACKEND_POLICY — 표에 없으면 반려(fail-closed)"]
   H["사람 — 빈 곳 우클릭 메뉴"] -->|"runAsHuman — 게이트를 지나지 않는다"| OK["통과 → 프로필 생성"]
   L["LLM · 명령 버스"] -->|"프론트 레지스트리 registry.run"| D1["문 1 — humanOnly · 호출자 축으로 반려"]
-  L -->|"셸 agent.spawnInto"| D2["문 2 — 받은 낱말을 정책에 물어 반려"]
-  L -->|"코어 agent.new"| D3["문 3 — backend 는 필수 인자 · 선언 어휘에 없으면 역직렬화가 먼저 반려"]
+  L -->|"셸 agent.spawnInto"| D2["문 2 — 받은 낱말을 정책에 물어 반려 · 런타임 거절이 실제로 닿는 유일한 문"]
+  L -->|"코어 agent.new"| D3["문 3 — 선언 어휘에 없으면 역직렬화가 먼저 반려"]
+  L -->|"agent.spawn — cwd 즉시 스폰"| D4["문이 아니다 — 낱말을 받는 칸이 아예 없어 정책이 볼 것도 없다"]
   P --- D2
   P --- D3
   X["backend 칸을 비운 스폰 패킷"] -->|"기본값 없음"| ERR["데몬 거절 — MISSING_BACKEND"]
 </pre>
       </div>
-      <figcaption>정책은 <b>표 한 장</b>이고 입구 셋이 그 표를 함께 본다. 표에 이름이 없는 백엔드는 열린 게 아니라 <b>막힌 것</b>이다.</figcaption>
+      <figcaption>문 하나는 낱말로 닫을 수 없다 — 프론트 레지스트리는 <b>사람 클릭과 LLM 호출이 같은 등록물</b>이라, 낱말로 닫으면 사람 길까지 함께 닫힌다. 그래서 그 문만 <b>호출자 축</b>으로 갈랐다.</figcaption>
     </figure>
+    <p><b>「못 고른다」와 「골라도 정책이 닫는다」는 다른 축이다</b> — 뭉개면 어느 문을 열 때 무엇을 손대야 하는지가 사라진다. codex 가 LLM 표면에서만 닫힌 사유는 <b>첫 실행의 신뢰 확인 모달</b>이고(사람이 아닌 호출자는 못 지난다 — 키를 넣어도 안 먹는다, <b>실측 2026-09-07</b>), <b>여는 시점 = 그 모달 처리가 정해질 때</b>다. 사람이 만드는 문은 그대로 열려 있다.</p>
+    <div class="anchor">crates/engram-dashboard-agent/src/commands.rs(LLM_BACKEND_POLICY · llm_creation_refusal) · src-tauri/src/layout/apply.rs(parse_backend · gate_backend) · src/commands/registry.ts(humanOnly · run vs runAsHuman)</div>
   </section>
 
-  <!-- 09 -->
+  <!-- 12 -->
   <section class="slide">
-    <div class="kicker"><span class="n">09</span><span>닫힌 문 · codex</span></div>
-    <h2>codex 는 사람만 만들 수 있다 — LLM 이 만들면 첫 실행의 신뢰 확인 창을 지나지 못한다</h2>
-    <figure>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>창구</th><th><code>claude</code></th><th><code>codex</code></th></tr></thead>
-          <tbody>
-            <tr>
-              <td>사람 — 빈 곳 우클릭 메뉴</td>
-              <td>만든다 — <code>createClaudeProfile</code> 로 코드에 박혀 있다</td>
-              <td><span class="tag open">만든다</span> 사람 클릭만</td>
-            </tr>
-            <tr>
-              <td>LLM · 프론트 레지스트리 <code>registry.run</code></td>
-              <td>통과</td>
-              <td><span class="tag shut">반려</span> <code>humanOnly</code> — 호출자 축</td>
-            </tr>
-            <tr>
-              <td>LLM · 셸 <code>agent.spawnInto</code></td>
-              <td>통과</td>
-              <td><span class="tag shut">반려</span> <code>gate_backend</code> — 런타임 거절이 실제로 닿는 유일한 문</td>
-            </tr>
-            <tr>
-              <td>LLM · 코어 <code>agent.new</code></td>
-              <td>통과 — <code>backend</code> 는 필수 인자</td>
-              <td><span class="tag shut">반려</span> 선언 어휘에 <code>Codex</code> 가 없어 역직렬화가 먼저 반려</td>
-            </tr>
-            <tr>
-              <td>LLM · <code>agent.spawn</code>(cwd 즉시 스폰)</td>
-              <td><code>'claude'</code> 가 코드에 박혀 있다</td>
-              <td><span class="tag shut">못 고른다</span> 낱말을 받는 칸이 없다</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <figcaption>codex 는 처음 보는 폴더에서 <b>자기 신뢰 확인 모달</b>을 띄우는데 사람이 아닌 호출자는 그것을 못 지난다 — 키를 넣어도 안 먹는다(실측 2026-09-07). <b>여는 시점 = Phase 2</b>, 그 모달 처리가 정해질 때.</figcaption>
-    </figure>
+    <div class="kicker"><span class="n">12</span><span>버전 인상</span></div>
+    <h2>인상 기준은 모양이 깨지느냐가 아니라 조용한 오작동이 나느냐다</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>변경</th><th class="num">인상</th><th>판정</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>스폰 명령이 <code>kind</code> 태그로 갈리는 열거형이 된다</td>
+            <td class="num">→ 4</td>
+            <td>모르는 변형은 무시되지 않고 <b>역직렬화 실패</b>가 된다 — 경성 파손 축</td>
+          </tr>
+          <tr>
+            <td>codex 출력 모드가 wire 를 건넌다</td>
+            <td class="num">→ 5</td>
+            <td><b>모양은 안 깨진다</b>(새 칸이 기본값을 갖는다). 그래도 올린 것은 그 값을 버리는 옛 데몬이 「코덱스 JSON」 라벨 뒤에서 <b>대화형 TUI 를 띄우면서 악수를 통과하기</b> 때문이다</td>
+          </tr>
+          <tr>
+            <td><code>StructuredEvent::TurnEnd</code> 신설</td>
+            <td class="num"><span class="tag later">안 올림</span></td>
+            <td>이벤트는 <b>데몬 → 셸 한 방향</b>으로만 흐르고 셸이 새로 보내는 것이 없다 — 옛 데몬에는 오독할 것이 아예 없고 <b>그 기능이 없을 뿐</b>이다. 「옛 빌드에 새 수정이 없다」를 조용한 오작동으로 세면 <b>데몬 쪽 수정마다</b> 인상을 강제하게 된다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="note"><b>안 올린 대가는 0 이 아니다.</b> 옛 데몬 + 새 셸(로컬 개발의 일상 조합이다)에서는 그 이벤트가 아예 안 와서 대기 표시가 영영 안 풀리고, 사람이 「고친 게 안 돈다」와 「네 데몬이 낡았다」를 구분할 수 없다. <b>증상으로 되찾는 길 — 대기 표시가 영영 안 풀리면 버그를 뒤지기 전에 데몬이 낡았는지 먼저 본다.</b></div>
+    <p>살아있는 데몬의 버전 불일치 자체는 조용하지 않다 — discovery 가 그 데몬을 덮지 않고 <b>분명한 거부</b>로 실패시킨다. 인상한 둘이 사 준 것이 그 거부다.</p>
+    <div class="anchor">crates/engram-dashboard-protocol/src/lib.rs(PROTOCOL_VERSION 과 그 체인지로그 — 기준의 집) · crates/engram-dashboard-protocol/src/messages.rs(StructuredEvent::TurnEnd 의 doc — 두 방향 분석의 집) · crates/engram-dashboard-discovery/src/lib.rs(check_acceptable · VersionMismatch)</div>
   </section>
 
-  <!-- 10 -->
+  <!-- 13 -->
   <section class="slide">
-    <div class="kicker"><span class="n">10</span><span>백엔드 비교</span></div>
-    <h2>기능이 「빠진」 게 아니라 백엔드가 스스로 없다고 신고한다</h2>
-    <figure>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>백엔드</th><th>전송 모양</th><th>렌더 기본값</th><th>세션 복원</th><th>우편 수신</th><th>LLM 창구</th><th>상태</th></tr></thead>
-          <tbody>
-            <tr>
-              <td><code>claude</code> (터미널)</td>
-              <td><code>Pty</code></td>
-              <td>terminal</td>
-              <td>무손실 <code>--resume</code></td>
-              <td>받는다</td>
-              <td><span class="tag open">열림</span></td>
-              <td><span class="tag open">배선됨</span></td>
-            </tr>
-            <tr>
-              <td><code>claude</code> (stream-json)</td>
-              <td><code>StdioNdjson</code></td>
-              <td>rich</td>
-              <td>무손실 <code>--resume</code></td>
-              <td>받는다</td>
-              <td><span class="tag open">열림</span></td>
-              <td><span class="tag open">배선됨</span></td>
-            </tr>
-            <tr>
-              <td><code>codex</code></td>
-              <td><code>Pty</code></td>
-              <td>terminal</td>
-              <td>없음 — 항상 Fresh</td>
-              <td>명단에서 제외</td>
-              <td><span class="tag shut">사람만</span></td>
-              <td><span class="tag open">배선됨</span></td>
-            </tr>
-            <tr>
-              <td><code>gemini</code></td>
-              <td><code>Pty</code> (trait 기본)</td>
-              <td>terminal</td>
-              <td>없음 (보수적 stub)</td>
-              <td>선언 안 함 — trait 기본</td>
-              <td><span class="tag shut">낱말 미등록</span></td>
-              <td><span class="tag later">미배선</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <figcaption>gemini 열은 실측이 아니라 <b>stub 값</b>이다 — 명령 변형이 없어 dispatch 로 라우팅되지 않는다. 그리고 codex 의 상주 JSON-RPC(<code>codex app-server</code>)가 서면 <b>그 행의 여러 칸이 한꺼번에 열린다</b>.</figcaption>
-    </figure>
+    <div class="kicker"><span class="n">13</span><span>알려진 한계</span></div>
+    <h2>화면 축에 걸리는 넷 — 뿌리가 각각 다르다</h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>한계</th><th>증상</th><th>뿌리 — 서로 다르다</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>귀속 판정과 발행 사이에 <b>락이 없다</b></td>
+            <td>라이터가 그 틈에 턴을 열거나 닫으면 줄 하나가 반대쪽으로 샌다</td>
+            <td><b>그 빠진 락.</b> 락을 발행까지 끌면 ADR-0006(락 순서)을 어긴다 — 한 줄의 오차는 다음 줄과 턴 경계가 덮는다</td>
+          </tr>
+          <tr>
+            <td>정상 완료 뒤 늦게 온 출력</td>
+            <td>앞 턴의 줄이 <b>갓 열린 다음 턴</b>의 진행으로 세어진다</td>
+            <td><b>귀속 판정이 「일치」가 아니라 「모순되지 않음」인 것.</b> id 를 아직 모르는 창에서 일치를 요구하면 우리 턴의 스트리밍이 통째로 사실 계층 밖으로 나간다 — 느슨함이 의도이고 이것이 그 대가다</td>
+          </tr>
+          <tr>
+            <td>통로의 한 줄 상한을 넘긴 줄은 <b>decoder 가 보기 전에</b> 버려진다</td>
+            <td>그 줄이 종료 알림이었다면 <b>그 턴은 안 닫힌다</b></td>
+            <td><b>상한이 두 층에 따로 있는 것.</b> decoder 쪽은 넘긴 줄을 표식으로 남기지만 통로는 그 앞에서 버려, 번역기가 볼 기회 자체가 없다</td>
+          </tr>
+          <tr>
+            <td>wire <code>Error</code> 에 「재시도 가능한가」 칸이 없다</td>
+            <td>정말 턴을 끝낸 오류인데 경계가 안 오는 경로에서 <b>대기 표시가 남는다</b></td>
+            <td><b>그 구별을 이벤트 타입에만 지운 것.</b> 문자열을 뒤져 가르지 말 것 — 적지 않는 쪽이 decoder 의 결정이다</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p>한 바퀴는 GUI 로 실측됐다(2026-09-14). <b>없는 것은 그것을 매번 다시 재 줄 자동 레인</b>이다 — 상시 레인은 선언표 대조뿐이고, 실 CLI 를 띄우는 레인은 <code>#[ignore]</code> 라 부를 때만 돈다.</p>
+    <div class="rule">숨긴 결함이 아니라 묶어 둔 항목이다 — 그리고 <b>이 넷이 전부가 아니다.</b> 화면에 안 걸리는 한계(무한히 매달릴 수 있는 블로킹 쓰기 · 라이터의 panic 봉쇄 없음 · 비-Windows 손자 수거 · 붙들어 둔 종료의 칸 넘침)는 통로 파일 헤더가 자기 목록으로 들고 있다.</div>
+    <div class="anchor">crates/engram-dashboard-agent/src/backend/codex/transport.rs(파일 헤더 「알려진 한계」 · MAX_LINE_BYTES · claims_our_turn) · src/components/slot/structuredAccumulator.ts(Error arm 의 「알려진 구멍」)</div>
   </section>
 
 </div>
