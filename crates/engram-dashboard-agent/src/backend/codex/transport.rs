@@ -1285,8 +1285,15 @@ fn writer_loop(
             //   ★한때 이 자리에서 라이터가 직접 `child.kill()`·`TerminateJobObject` 를 불렀는데, 그것이
             //   ADR-0199 가 그은 선(라이터가 그 동사들을 부르는 순간 위반)을 넘는 것이라 걷어냈다.
             //   되살리지 말 것 — 되살리려면 그 ADR 을 먼저 고쳐야 한다.★
-            // ★**남는 구멍을 적어 둔다**★: 판정이 **걸려 있지 않은** spawn(예: Fresh 로 띄운 codex)에서
-            //   같은 일이 나면 아무도 그 `Down` 을 보지 않는다. 그 갈래는 여전히 무주공산이다.
+            // ★**한때 남아 있던 구멍 — 지금은 닫혔다**★: 예전에는 Fresh 로 띄운 codex 에 판정이 아예
+            //   안 걸려서(감독자가 배달함을 버렸다) `thread/start` 거절의 `Down` 을 **아무도 보지
+            //   않았다.** 지금은 활성화 입구 둘(`AgentManager::activate_profile` 의 Fresh 갈래 ·
+            //   `AgentManager::restore_one` 의 비-이어받기 갈래)이 같은 판정을 돌므로 두 모드 모두
+            //   주인이 있다(`AgentManager::spawn_fresh_settled`).
+            // ★주인이 없는 갈래가 하나 남지만 **오늘은 여기 닿지 않는다**★: `AgentManager::spawn_agent`
+            //   을 직접 부르는 즉석 생성(데몬의 by-cwd 갈래)은 배달함을 그대로 버린다. 그 입구가 codex 에
+            //   주는 출력 형식이 **터미널**이라 이 통로 자체가 안 뜨는 것이 그 갈래를 무해하게 만드는
+            //   전부다 — 그 기본값이 app-server 로 바뀌는 날 이 구멍이 그대로 열린다.
         }
     }
 

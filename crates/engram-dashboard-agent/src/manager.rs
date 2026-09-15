@@ -392,6 +392,23 @@ pub(crate) struct LinkVerdict {
     pub(crate) resolution: LinkResolution,
 }
 
+/// 연결의 결말을 기다리는 호출자가 쥐는 한 벌 — **배달함과 spawn 예약이 한 몸**이다.
+///
+/// ★두 칸을 묶은 것이 요점이다★: 연결을 선언하는 통로에서는 「세션이 명부에 올랐다」와 「그 세션에
+///   입력을 보낼 수 있다」 사이가 핸드셰이크 한 왕복만큼 벌어진다. 그 구간에 들어온 두 번째 활성화가
+///   명부만 보고 「떠 있다」로 답하면, 첫 요청이 실패로 판정해 그 화신을 거두는 순간 **두 호출자가
+///   서로 다른 사실을 들고 갈린다**(뒤엣것은 자기 밑에서 죽을 에이전트를 산 것으로 보고한다).
+///   예약을 결말까지 들고 있으면 그 구간의 답이 「이미 뜨는 중」으로 하나가 된다.
+/// ★그래서 이 값을 **버리면 예약이 즉시 풀린다**★ — [`AgentManager::spawn_agent`] 가 그렇게 한다.
+///   그쪽은 결말을 기다리지 않는 갈래라 예약을 들고 있을 근거도 없다.
+/// ★연결 축이 없는 통로에는 이 타입이 아예 오지 않는다★(`Option` 이 `None`) — 그 경로는 예약 수명도
+///   판정도 예전 그대로다.
+struct LinkWatch {
+    rx: Receiver<LinkVerdict>,
+    /// 결말이 날 때까지 놓지 않는다 — 읽지 않는 것이 정상이다(수명 하나가 이 칸의 전부다).
+    _reservation: SpawnReservation,
+}
+
 /// 통로에 건네줄 배달 포트를 만든다 — 화신 표식을 **여기서** 찍어 채널로 넘긴다.
 ///
 /// ★통로는 화신을 모른다★([`session_id_sink`] 와 같은 모양·같은 사유): 표식은 조립점 개념이고, 통로에
@@ -1030,7 +1047,9 @@ impl AgentManager {
     /// ★배달 채널을 버리는 얇은 위임★ — 연결 결말을 기다리는 호출자는 아래
     /// [`AgentManager::spawn_agent_watching_link`] 를 쓴다. 이 갈래에서 채널이 닫히면 통로의 배달은
     /// 조용히 실패하고(그 포트가 그렇게 설계됐다) 아무도 기다리지 않는다.
-    /// ★그래서 **Fresh spawn 의 연결 실패는 아직 주인이 없다**★(알려진 구멍 — 5b 로 미뤄져 있다).
+    /// ★그래서 **이 동사로 띄운 화신의 연결 실패는 주인이 없다**★ — 활성화 입구
+    /// ([`AgentManager::activate_profile`]·[`AgentManager::restore_one`])는 Fresh 도 Resume 도
+    /// [`LinkWatch`] 를 쥐는 갈래로 들어가므로 그 구멍에 닿지 않는다. 남는 소비자는 WS `Spawn` 하나다.
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
@@ -1044,13 +1063,33 @@ impl AgentManager {
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
-    ) -> Result<(SpawnOutcome, Option<Receiver<LinkVerdict>>), PtyError> {
+    ) -> Result<(SpawnOutcome, Option<LinkWatch>), PtyError> {
+        // ★★예약을 **명부 조회보다 먼저** 잡는다 — 순서를 되돌리지 마라★★: 연결을 선언하는 통로에서는
+        //   예약이 spawn 이 끝날 때까지가 아니라 **연결의 결말이 날 때까지** 살아 있다([`LinkWatch`]).
+        //   그 구간의 세션은 명부에 올라 있지만 아직 **입력을 받을 수 있는지 모르는** 화신이다. 조회를
+        //   먼저 두면 그 화신을 본 두 번째 요청이 `Moot(Some(..))` — 즉 「떠 있다」 — 로 답하는데, 그
+        //   답이 곧 결함이다: 첫 요청이 곧 실패로 판정해 그것을 거두면, 두 번째 요청의 호출자는 **자기
+        //   밑에서 죽을 에이전트를 산 것으로 들고 있게 된다.**
+        //   예약을 먼저 보면 그 구간의 답이 `Moot(None)`(「이미 뜨는 중」)이 되어 두 호출자가 갈리지 않는다.
+        //   ★연결 축이 없는 통로에서는 이 순서가 아무것도 바꾸지 않는다★ — 거기서는 예약이 이 함수와
+        //   함께 끝나므로, 「떠 있다」와 「뜨는 중」이 겹치는 구간이 애초에 명령 몇 개 폭이다.
+        let Some(reservation) = SpawnReservation::reserve(self.spawning.clone(), profile.id) else {
+            // 승자가 아직 명부에 올리기 전이거나, 올렸어도 그 연결이 아직 결말을 못 냈다 — 어느 쪽이든
+            // 우리가 「떠 있다」고 답할 근거가 없다.
+            tracing::info!(
+                agent = %profile.id,
+                "spawn_agent: 이미 뜨는 중 — 이 요청은 할 일이 없다(moot)"
+            );
+            return Ok((SpawnOutcome::Moot(None), None));
+        };
+
         // ★잔여 레이스(ADR-0082 미해결·후속)★: 이 이중-spawn 가드는 여기서 read lock 을 잡아 contains_key 를 본 뒤
         //   놓고, 실제 등록(sessions.insert)은 아래에서 별개 write lock 으로 한다 — 그 사이 창이 있다.
         //   같은 id 를 **서로 다른 연결**이 동시에 SpawnProfile 하면 둘 다 이 검사와 activate_profile 의
         //   pre-check 를 통과해 double-spawn 이 날 수 있다(데몬 명령 처리는 연결당 직렬일 뿐 연결 간엔
         //   아니다 — 각 연결이 제 read_task 에서 dispatch 를 await 한다). 이 window 는 ADR-0082 이전부터
         //   있던 **선재(pre-existing) 레이스**이며 이번 변경이 도입하지도 닫지도 않았다(후속 과제로 flag).
+        //   ★위 예약이 그 폭을 **줄이지만 닫지는 않는다**★ — 예약 취득과 이 조회 사이에도 같은 창이 있다.
         if let Ok(session) = self.get_session(profile.id) {
             tracing::info!(
                 agent = %profile.id,
@@ -1058,16 +1097,6 @@ impl AgentManager {
             );
             return Ok((SpawnOutcome::Moot(Some(self.agent_info(&session))), None));
         }
-
-        let Some(_reservation) = SpawnReservation::reserve(self.spawning.clone(), profile.id)
-        else {
-            // 승자가 아직 명부에 올리기 전이라 보여 줄 세션이 없다 — 그래도 이 요청은 할 일이 없다.
-            tracing::info!(
-                agent = %profile.id,
-                "spawn_agent: 이미 뜨는 중 — 이 요청은 할 일이 없다(moot)"
-            );
-            return Ok((SpawnOutcome::Moot(None), None));
-        };
 
         self.register_for_spawn(profile)?;
 
@@ -1294,7 +1323,17 @@ impl AgentManager {
 
         let info = self.agent_info(&session);
         self.status_sink.agent_list_updated(self.list_agents());
-        Ok((SpawnOutcome::Started(info), link_rx))
+        // ★배달함과 예약을 **한 벌로** 넘긴다★ — 결말을 기다리는 호출자가 그 사이 예약을 놓지 않게 하는
+        //   것이 [`LinkWatch`] 의 존재 이유다. 연결 축이 없으면 `None` 이고, 그때 예약은 예전 그대로
+        //   이 함수와 함께 끝난다(`reservation` 이 여기서 drop 된다).
+        let watch = match link_rx {
+            Some(rx) => Some(LinkWatch {
+                rx,
+                _reservation: reservation,
+            }),
+            None => None,
+        };
+        Ok((SpawnOutcome::Started(info), watch))
     }
 
     /// ★수동 활성화 진입점 — 이어받기(resume) 전용, fresh-fallback 폐지(ADR-0082)★.
@@ -1308,21 +1347,50 @@ impl AgentManager {
     ///    로 교체(유저 실측 회귀). 지금은 두 겹으로 막힌다: 여기 선제 조회가 먼저 걸러 산 에이전트를
     ///    놔두고, 그걸 지나쳐도 그 가드는 이제 Err 가 아니라 `SpawnOutcome::Moot` 을 낸다(오인할 오류
     ///    자체가 없다).
-    /// 2. **Fresh(진짜 신규 — 세션 없음)** — `spawn_agent(Fresh)` 위임. 이건 실패-fallback 이 아니라
+    /// 2. **Fresh(진짜 신규 — 세션 없음)** — `spawn_fresh_settled` 위임. 이건 실패-fallback 이 아니라
     ///    정상 신규 생성이다(ADR-0076 "Fresh=새 sid" 유효).
     /// 3. **Resume** — `resume_no_fallback` 로 이어받기만 시도하고, 그 Failed 결말을 Err 로 노출한다.
     ///
-    /// ★blocking★: Resume 모드는 최대 EARLY_EXIT_WINDOW(현 3s)만큼 결말을 폴링하므로 호출이 그만큼
-    ///   블록될 수 있다(restore_all 과 동일 성질). 데몬의 명령 처리 스레드에서 호출되므로 그 연결의
-    ///   응답만 지연되고 다른 세션에는 영향 없다. Fresh 모드·재활성화 가드는 폴링 없이 즉시 반환한다.
+    /// ★blocking★: 호출이 얼마나 블록되나는 **모드가 아니라 통로의 연결 축**이 정한다.
+    ///   - 연결을 선언하지 않는 통로(claude·shell·stdio·codex 터미널): Resume 은 최대
+    ///     EARLY_EXIT_WINDOW(현 3s)만큼 폴링하고, Fresh 는 폴링 없이 즉시 반환한다(옛 성질 그대로).
+    ///   - 연결을 선언하는 통로(codex app-server): **Fresh 도 Resume 도** 연결의 결말이 날 때까지
+    ///     기다린다 — 다만 그것은 창이 아니라 **신호**라(ADR-0201) 정상 왕복이면 즉시 돌아온다
+    ///     (실측 약 130ms). 상한은 [`LINK_RESOLUTION_BACKSTOP`] 이고 그것은 판정 창이 아니라 포기다.
+    ///   재활성화 가드와 아래 in-flight 가드는 어느 축에서도 폴링 없이 즉시 반환한다.
+    ///   데몬의 명령 처리 스레드에서 호출되므로 그 연결의 응답만 지연되고 다른 세션에는 영향 없다.
     ///   ★실패는 이 상한보다 빨리 돌아올 수 있다★ — 진단 스트림이 먼저 말하면 그 자리에서 끊는다.
     // ADR-0082
     // ADR-0076
+    // ADR-0201
     pub fn activate_profile(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<AgentInfo, PtyError> {
+        // ★★「떠 있다」고 답하기 **전에** 「아직 결말이 안 난 활성화」를 본다 — 순서를 되돌리지 마라★★:
+        //   연결을 선언하는 통로에서는 세션이 명부에 오른 뒤에도 그 화신이 입력을 받을 수 있는지가
+        //   아직 안 정해져 있고([`LinkWatch`]), 그 구간을 여는 요청이 예약을 들고 있다. 아래 조회를
+        //   먼저 두면 그 구간의 두 번째 활성화가 `Ok`(도는 중)를 받는데, 첫 요청이 곧 실패로 판정해
+        //   그 화신을 거두면 **두 호출자가 서로 다른 사실을 들고 갈린다** — 뒤엣것은 자기 밑에서 죽을
+        //   에이전트를 산 것으로 보고한다.
+        // ★`Err` 가 정직한 답인 이유★: 이 요청은 아무것도 하지 않았고 돌려줄 산 세션도 없다. 같은 문구를
+        //   아래 Fresh 갈래가 이미 쓰고 있다(승자가 아직 명부에 올리기 전인 경우) — 그 답을 **연결이
+        //   설 때까지로 늘린 것**이 여기다.
+        // ★이 가드는 창을 **줄이지만 닫지는 않는다**★ — 이 검사와 `spawn_agent_watching_link` 의 예약
+        //   취득 사이에 여전히 명령 몇 개 폭의 창이 있다(ADR-0082 「열린 항목」 ③ 의 선재 레이스).
+        //   닫은 것은 핸드셰이크 한 왕복만큼 벌어져 있던 **긴** 창이다.
+        if self.activation_in_flight(profile.id) {
+            tracing::info!(
+                agent = %profile.id,
+                "activate_profile: 다른 요청의 활성화가 아직 결말을 못 냈다 — 이 요청은 할 일이 없다"
+            );
+            return Err(PtyError::SpawnFailed(format!(
+                "another request is already activating agent {}; this one did nothing",
+                profile.id
+            )));
+        }
+
         if let Ok(session) = self.get_session(profile.id) {
             tracing::info!(
                 agent = %profile.id,
@@ -1334,8 +1402,9 @@ impl AgentManager {
         }
 
         if mode == SpawnMode::Fresh {
-            let outcome = self.spawn_agent(profile, SpawnMode::Fresh);
-            self.note_spawn_result(profile.id, &outcome);
+            // ★기록은 이 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다★(연결 결말을 본 자리만이
+            //   무엇이 일어났는지 안다. Resume 갈래가 `resume_no_fallback` 에 맡기는 것과 같은 규율).
+            let outcome = self.spawn_fresh_settled(profile);
             // moot 이면 남이 띄운(띄우는 중인) 세션을 돌려준다. 아직 명부에 없으면 조회로 한 번 더 본다.
             // ★그마저 없을 때의 문구는 "없는 에이전트" 가 아니다★: 프로필은 실재하고 지금 **다른 요청이
             //   띄우는 중**이라 우리가 돌려줄 세션이 없을 뿐이다. `NotFound` 를 그대로 흘리면 원인을
@@ -1416,8 +1485,29 @@ impl AgentManager {
         self.profiles.set_last_failure(id, incarnation, failure);
     }
 
-    /// spawn 한 번으로 결말이 나는 갈래(Fresh)의 기록 — 띄웠으면 그 화신의 epoch 으로 지우고, 실패면
+    /// 이 항목의 활성화가 **아직 결말을 못 낸 채 진행 중**인가.
+    ///
+    /// ★예약 집합을 그대로 읽는 것이 전부다 — 두 번째 상태를 만들지 않았다★: 그 집합의 수명이 이미
+    ///   정확히 「누군가 이 항목을 띄우는 중」이고, 연결을 선언하는 통로에서는 [`LinkWatch`] 가 그
+    ///   수명을 **연결의 결말까지** 늘려 둔다. 별도 「establishing」 표를 만들면 세울 지점과 지울 지점이
+    ///   새로 둘 생기고, 통로가 자기 상태를 칸에 담아 두고 감독자가 들여다보던 옛 모양으로 되돌아간다
+    ///   (그 모양이 이 라운드가 걷어낸 결함 넷의 뿌리다).
+    /// ★락을 잡는 구간은 `contains` 하나다★ — 이 Mutex 보유 중 sessions/profiles 를 잡지 않는다
+    ///   (ADR-0006 · `spawning` 필드 doc).
+    fn activation_in_flight(&self, id: AgentId) -> bool {
+        self.spawning
+            .lock()
+            .expect("spawning set poisoned")
+            .contains(&id)
+    }
+
+    /// **spawn 한 번으로 결말이 나는** 갈래의 기록 — 띄웠으면 그 화신의 epoch 으로 지우고, 실패면
     /// 기록하고, **할 일이 없었으면 아무것도 쓰지 않는다**.
+    ///
+    /// ★「Fresh 의 기록」이 아니다 — 호출자는 이제 [`AgentManager::spawn_fresh_settled`] 하나뿐이고 그
+    ///   안에서도 **연결 축이 없는 통로**에만 쓰인다★: 연결을 선언하는 통로는 spawn 이 `Started` 를
+    ///   돌려준 시점에 아직 결말이 안 났으므로(핸드셰이크가 시작도 안 했다) 여기서 지우면 그것이 곧
+    ///   ADR-0202 가 막으려는 증거 파괴다. 그쪽 갈래는 판정을 본 뒤 자기 자리에서 쓴다.
     ///
     /// ★moot 이 아무것도 안 쓰는 것은 예외가 아니라 정의다★: 이 호출은 아무것도 하지 않았으므로 기록할
     ///   실패도 없고 지울 근거도 없다. `activate_profile` 의 선제 "이미 실행 중" 갈래가 쓰지 않는 것과
@@ -1433,6 +1523,120 @@ impl AgentManager {
             Ok(SpawnOutcome::Moot(_)) => {}
             // 화신이 없으므로 비교할 세대가 없다(`set_last_failure` 계약의 `None` 갈래).
             Err(_) => self.note_activation_result(id, None, Some(AgentFailureKind::SpawnFailed)),
+        }
+    }
+
+    /// Fresh 활성화 — ★프로세스가 떴다는 것만으로 성공을 말하지 않는다★.
+    ///
+    /// ★왜 이 함수가 생겼나(회귀 방지 — 지우면 그 구멍이 그대로 돌아온다)★: `spawn_agent` 은 **자식
+    ///   프로세스가 뜬 순간** `Started` 를 돌려주고 배달함을 버린다. 연결을 선언하는 통로에서는 그
+    ///   시점에 핸드셰이크가 아직 시작도 안 했다 — 그래서 Fresh 로 띄운 codex 가 `thread/start` 를
+    ///   거절당해도 **아무도 그 결말을 보지 않았고**, 두 가지가 한꺼번에 일어났다:
+    ///   ① 상대가 stdout 을 붙든 채 남으면 리더가 EOF 를 못 봐 [`OutputCore::finish`] 가 영영 안 돌고
+    ///      그 메시지의 단독 소비자인 reaper 도 안 움직인다 — 화면엔 Running 인데 입력은 전부 거절되는
+    ///      **굳음**이 돌아온다(ADR-0200 이 이어받기 쪽에서 닫은 바로 그 모양).
+    ///   ② `note_spawn_result` 가 그 `Started` 를 성공으로 읽고 **「마지막 실패」를 지웠다** — 거절당한
+    ///      활성화가 성공으로 보고되면서 앞선 실패 증거까지 함께 파괴했다(ADR-0202 가 「아직 참이 아니다」로
+    ///      적어 둔 그 구멍).
+    ///   Fresh 는 새 codex 에이전트의 **일상 경로**이지 변두리가 아니다.
+    ///
+    /// ★그래서 「성공」의 뜻을 Resume 과 **같은 것**으로 둔다(ADR-0201)★: 성공 = 에이전트가 **입력을
+    ///   받을 준비가 됐다고 신호했다**. 프로세스가 살아 있다는 것은 그 질문의 답이 아니다. 새 대화든
+    ///   이어받기든 상대에게 묻는 것은 같으므로(`thread/start` vs `thread/resume` — 통로 안쪽의 갈림),
+    ///   판정 어휘를 갈라 둘 이유가 없다.
+    /// ★성공이 「마지막 실패」를 **지우지 않는다**(ADR-0202)★ — 준비됐다는 관측은 그 뒤의 일을 말해
+    ///   주지 않고, 지움은 되돌릴 수 없다. 자동 지움은 어느 갈래에서도 안 한다.
+    /// ★연결 축이 없는 통로는 **한 줄도 바뀌지 않는다**★ — 그쪽은 아래 let-else 로 빠져 옛
+    ///   `note_spawn_result` 경로(띄웠으면 지움)를 그대로 탄다. claude 의 Fresh 는 지금 깨져 있지 않고,
+    ///   ADR-0201 이 그 경로를 이번 범위 밖으로 못박았다.
+    /// ★실패 종류는 분류하지 않고 [`AgentFailureKind::Other`] 로 둔다★ — `resume_failure_kind` 는
+    ///   **이어받기** 어휘(「이어받을 대화가 없다」)를 내는데, 새 대화를 여는 이 갈래에서 그 문구는
+    ///   거짓이다(이어받으려 한 적이 없다). 없는 어휘를 지어내는 대신 「그 밖」으로 둔다 — 그쪽은
+    ///   재시도 가능이라 화면이 항목을 막지도 않는다(`failureKinds.ts`).
+    // ADR-0201
+    // ADR-0202
+    fn spawn_fresh_settled(&self, profile: &AgentProfile) -> Result<SpawnOutcome, PtyError> {
+        let (result, watch) = match self.spawn_agent_watching_link(profile, SpawnMode::Fresh) {
+            Ok((outcome, watch)) => (Ok(outcome), watch),
+            Err(e) => (Err(e), None),
+        };
+
+        // 기다릴 결말이 없는 셋이 여기서 빠진다 — 연결 축이 없는 통로 · 아무것도 안 만든 요청(moot) ·
+        // 프로세스조차 못 띄운 실패. 셋 다 옛 기록 규율 그대로다(`note_spawn_result`).
+        let (Some(watch), Ok(SpawnOutcome::Started(info))) = (watch.as_ref(), &result) else {
+            self.note_spawn_result(profile.id, &result);
+            return result;
+        };
+        // ★표식을 결말 **밖으로** 들고 나간다★ — 아래 정리·기록은 판정만큼 늦게 일어나고, 그 사이 이
+        //   화신이 수거되고 다음 화신이 떴을 수 있다. 값으로 들고 가야 둘 다 이 화신에만 닿는다
+        //   (ADR-0163/0164 — 비교는 일치/불일치뿐).
+        let incarnation = info.epoch;
+
+        match self.link_activation_verdict(
+            profile.id,
+            incarnation,
+            &watch.rx,
+            LINK_RESOLUTION_BACKSTOP,
+        ) {
+            // ★상대가 준비됐다고 신호했다 = 성립★. 기록은 건드리지 않는다(위 doc · ADR-0202).
+            EarlyVerdict::Ready => result,
+            // ★정리를 **먼저**, 기록을 나중에★ — `resume_no_fallback` 의 같은 갈래와 같은 순서이고 같은
+            //   사유다: 기록은 프로필 뮤텍스를 잡는데 그 뮤텍스가 붙들려 있으면 순서가 뒤집힌 쪽은
+            //   **자식을 영영 안 죽인다**. 백스톱은 바로 그 정체를 위해 있다.
+            EarlyVerdict::LinkFailed { reason } => {
+                self.tear_down_failed_activation(profile.id, incarnation);
+                self.note_activation_result(
+                    profile.id,
+                    Some(incarnation),
+                    Some(AgentFailureKind::Other),
+                );
+                tracing::warn!(
+                    agent = %profile.id,
+                    epoch = incarnation,
+                    %reason,
+                    "새 대화의 연결이 서지 못했다 → 활성화 실패 — LLM 에스컬레이션 대상"
+                );
+                Err(PtyError::SpawnFailed(format!(
+                    "새 대화 연결 실패: {reason}"
+                )))
+            }
+            // 판정이 끝나기 전에 프로세스가 죽었다 — 자식이 이미 종점이라 정리할 것이 없다(ADR-0082
+            // 「아무것도 죽지마」: 관측된 시체는 그대로 둔다).
+            // ★사용자가 끊은 것은 활성화 실패가 아니다★ — 기록하지 않는다(`resume_no_fallback` 의 같은 규율).
+            EarlyVerdict::Terminal { status, evidence } => {
+                if matches!(status, AgentStatus::Killed) {
+                    tracing::info!(
+                        agent = %profile.id,
+                        epoch = incarnation,
+                        "새 대화가 서는 중에 사용자가 종료했다 — 활성화 실패로 기록하지 않는다"
+                    );
+                } else {
+                    self.note_activation_result(
+                        profile.id,
+                        Some(incarnation),
+                        Some(AgentFailureKind::Other),
+                    );
+                    tracing::warn!(
+                        agent = %profile.id,
+                        epoch = incarnation,
+                        ?status,
+                        %evidence,
+                        "새 대화가 서기 전에 종료했다 → 활성화 실패 — LLM 에스컬레이션 대상"
+                    );
+                }
+                // ★꼬리를 **오류 문구에 싣지 않는다**★ — 최대 4 KiB 짜리 콘솔 꼬리가 명령 응답으로
+                //   그대로 나간다. 위 로그가 그것을 나르고, 문구는 `resume_no_fallback` 의 형제와 같은
+                //   모양(상태 하나)으로 둔다.
+                Err(PtyError::SpawnFailed(format!(
+                    "새 대화가 서기 전에 종료({status:?})"
+                )))
+            }
+            // ★도달 불가 — [`AgentManager::link_activation_verdict`] 는 이 둘을 내지 않는다★.
+            //   방어 갈래는 상태를 건드리지 않는다: 무슨 일이 있었는지 모르는 자리라, 실패를 단정해 쓰면
+            //   방금 뜬 에이전트에 도장을 찍을 수 있다.
+            other => Err(PtyError::SpawnFailed(format!(
+                "spawn_fresh_settled: 예상 밖 결말 {other:?}"
+            ))),
         }
     }
 
@@ -1593,8 +1797,11 @@ impl AgentManager {
 
         if !resumable {
             // ADR-0172: 부팅 복원도 같은 규율 — 띄웠으면 지우고 실패하면 그 자리에서 기록한다.
-            let outcome = self.spawn_agent(profile, SpawnMode::Fresh);
-            self.note_spawn_result(profile.id, &outcome);
+            // ★수동 활성화와 **같은 동사**를 쓴다(ADR-0201/0202)★: 이어받을 손잡이가 없는 codex 프로필은
+            //   부팅 복원에서도 이 갈래로 오고, 거기서 `thread/start` 가 거절되면 아무도 그 결말을 보지
+            //   않는 옛 구멍이 **프로필 수만큼** 한꺼번에 선다. 입구마다 판정을 갈라 두면 그중 하나가
+            //   반드시 뒤처진다.
+            let outcome = self.spawn_fresh_settled(profile);
             return match outcome {
                 // moot(이미 떠 있음)도 결과적으로 "그 항목은 떠 있다" 라 같은 보고로 접는다 — 복원 보고
                 //   어휘에 「할 일 없었음」 칸이 없다(그 칸을 만드는 것은 wire 변경이라 별건).
@@ -1657,7 +1864,7 @@ impl AgentManager {
             );
         }
 
-        let (outcome, link_rx) = match self.spawn_agent_watching_link(profile, SpawnMode::Resume) {
+        let (outcome, watch) = match self.spawn_agent_watching_link(profile, SpawnMode::Resume) {
             Err(e) => {
                 let reason = format!("resume spawn 실패: {e}");
                 // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
@@ -1698,11 +1905,11 @@ impl AgentManager {
         // ADR-0172
         // ★판정 경로가 **통로의 축으로** 갈린다★: 배달 채널이 있으면 결말이 오기를 기다리고, 없으면
         //   옛 창 판정을 그대로 탄다. 둘을 한 루프에 섞지 않는 이유 = `link_activation_verdict` 의 doc.
-        let verdict = match link_rx.as_ref() {
-            Some(rx) => self.link_activation_verdict(
+        let verdict = match watch.as_ref() {
+            Some(w) => self.link_activation_verdict(
                 profile.id,
                 spawned.epoch,
-                rx,
+                &w.rx,
                 LINK_RESOLUTION_BACKSTOP,
             ),
             None => self.early_activation_verdict(
@@ -3036,6 +3243,236 @@ mod tests {
             *kills.lock().expect("shutdowns poisoned"),
             1,
             "자기 화신의 정리가 돌지 않았다 — 실패한 세션이 아무도 못 거두는 채로 남는다"
+        );
+    }
+
+    /// ★★아직 결말이 안 난 활성화를 「도는 중」이라고 답하지 않는다★★ — 두 호출자가 갈리는 자리.
+    ///
+    /// 연결을 선언하는 통로에서는 세션이 명부에 오른 뒤에도 그 화신이 입력을 받을 수 있는지가 아직
+    /// 안 정해져 있다. 그 구간에 들어온 두 번째 활성화가 `Ok`(도는 중)를 받으면, 첫 요청이 곧 실패로
+    /// 판정해 그 화신을 거두는 순간 **두 호출자가 서로 다른 사실을 들고 갈린다**.
+    /// ★예약을 직접 들고 그 구간을 만든다★ — 스레드 경쟁을 기다리지 않는다(`LinkWatch` 가 실물에서
+    ///   하는 일이 정확히 이것이다: 결말이 날 때까지 예약을 놓지 않는다).
+    /// ★대조군이 요점이다★ — 예약이 없을 때는 같은 조합이 여전히 「도는 중」으로 답해야 한다. 그 단언이
+    ///   없으면 「항상 거절한다」도 통과하고, 그건 ADR-0082 의 재활성화 가드를 부수는 것이다.
+    #[test]
+    fn an_unresolved_activation_is_not_reported_to_a_second_caller_as_running() {
+        let manager = bare_manager();
+        let profile = create(
+            &manager,
+            "C:/still-establishing",
+            Some("still-establishing"),
+        );
+        let id = profile.id;
+        // 첫 요청이 명부에 올려 둔 화신.
+        let (_core, _kills) = put_session_with_link(&manager, id, 4);
+
+        let settled = manager.activate_profile(&profile, SpawnMode::Fresh);
+        assert_eq!(
+            settled.as_ref().ok().map(|i| i.id),
+            Some(id),
+            "전제: 결말이 난 화신은 그대로 「도는 중」으로 답한다(ADR-0082 재활성화 가드)"
+        );
+
+        // 첫 요청이 결말을 기다리는 그 구간 — `LinkWatch` 가 예약을 쥐고 있다.
+        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약");
+        let during = manager.activate_profile(&profile, SpawnMode::Fresh);
+        assert!(
+            during.is_err(),
+            "연결이 아직 안 선 화신을 「도는 중」으로 답했다 — 첫 요청이 그것을 실패로 판정해 거두면 이              호출자는 자기 밑에서 죽을 에이전트를 산 것으로 들고 있게 된다: got {:?}",
+            during.map(|i| i.id)
+        );
+    }
+
+    /// ★같은 구간에서 `spawn_agent` 도 「떠 있다」로 답하지 않는다★ — 예약을 명부 조회보다 **먼저**
+    /// 보는 그 순서가 여기서 잡힌다.
+    #[test]
+    fn a_spawn_request_during_an_unresolved_activation_does_not_hand_back_the_live_session() {
+        let manager = bare_manager();
+        let profile = create(
+            &manager,
+            "C:/moot-vs-establishing",
+            Some("moot-vs-establishing"),
+        );
+        let id = profile.id;
+        let (_core, _kills) = put_session_with_link(&manager, id, 6);
+
+        let settled = manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("중복 요청은 오류가 아니다");
+        assert_eq!(
+            settled.into_info().map(|i| i.id),
+            Some(id),
+            "전제: 결말이 난 화신은 moot 이어도 그 정보를 돌려준다"
+        );
+
+        let _held = SpawnReservation::reserve(manager.spawning.clone(), id).expect("예약");
+        let during = manager
+            .spawn_agent(&profile, SpawnMode::Fresh)
+            .expect("중복 요청은 오류가 아니다");
+        assert!(
+            during.into_info().is_none(),
+            "연결이 아직 안 선 화신을 「떠 있다」로 돌려줬다 — 명부 조회가 예약보다 앞서면 이 답이 나온다"
+        );
+    }
+
+    /// ★위 두 항목이 **못 재는 절반**을 여기서 잰다★ — 그 구간이 실제로 **연결의 결말까지** 이어지나.
+    ///
+    /// 위 둘은 예약을 시험대가 직접 들고 그 구간을 모사하므로, 운영 코드가 예약을 spawn 이 끝나는
+    /// 자리에서 놓아 버려도 **초록으로 남는다**. 그러면 가드는 그대로인데 지켜야 할 구간이 사라진다.
+    /// ★왜 소스에서 재나★: 그 구간을 실행으로 관측하려면 실 codex app-server 가 핸드셰이크를 붙들고
+    ///   있어 줘야 한다 — 시험대에 그 상대가 없다.
+    /// ★이 항목이 **못 잡는 것**도 적어 둔다★: 결말을 기다리는 쪽이 받은 값에서 배달함만 꺼내 들고
+    ///   나머지를 버리면(예: `watch.map(|w| w.rx)`) 예약은 조용히 풀리고 이 단언은 그대로 통과한다.
+    ///   그 모양을 막는 것은 컴파일러도 이 항목도 아니고, 두 호출자가 `watch` 를 통째로 들고 있다는
+    ///   사실뿐이다.
+    #[test]
+    fn the_link_watch_holds_the_spawn_reservation_until_the_verdict() {
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+
+        let declaration = production
+            .split("struct LinkWatch {")
+            .nth(1)
+            .expect("`LinkWatch` 선언")
+            .split('}')
+            .next()
+            .expect("선언 본문");
+        assert!(
+            declaration.contains("_reservation: SpawnReservation"),
+            "배달함이 예약을 더는 들고 있지 않다 — 그러면 세션이 명부에 오른 순간 예약이 풀리고, 연결이              서는 동안 들어온 두 번째 요청이 다시 「떠 있다」로 답한다: {declaration}"
+        );
+
+        let spawning = production
+            .split("fn spawn_agent_watching_link(")
+            .nth(1)
+            .expect("`spawn_agent_watching_link` 본문")
+            .split("pub fn activate_profile(")
+            .next()
+            .expect("다음 함수까지");
+        assert!(
+            spawning.contains("_reservation: reservation"),
+            "예약이 배달함에 실리지 않는다 — 이 함수가 돌아오는 순간 풀린다: {spawning}"
+        );
+    }
+
+    /// 운영 구획에서 `spawn_fresh_settled` 의 한 갈래 본문만 잘라 온다.
+    fn fresh_arm(start: &str, end: &str) -> String {
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body = production
+            .split("fn spawn_fresh_settled(")
+            .nth(1)
+            .expect("`spawn_fresh_settled` 본문")
+            .split("fn spawn_session(")
+            .next()
+            .expect("다음 함수까지");
+        let i = body
+            .find(start)
+            .unwrap_or_else(|| panic!("`{start}` 갈래가 없다 — 이 항목의 전제가 낡았다"));
+        let rest = &body[i..];
+        let j = rest
+            .find(end)
+            .unwrap_or_else(|| panic!("`{end}` 가 그 뒤에 없다 — 이 항목의 전제가 낡았다"));
+        rest[..j].to_string()
+    }
+
+    /// ★★Fresh 스폰도 연결의 결말을 보고 나서 성공을 말한다★★ — 그리고 **두 입구 다** 그렇게 한다.
+    ///
+    /// ★왜 소스에서 재나★: 이 갈래를 실행으로 몰려면 실 codex app-server 가 `thread/start` 를 거절해
+    ///   줘야 하는데 시험대에 그 상대가 없다(`link_activation_verdict` 단위 항목들이 그래서 채널을 직접
+    ///   쥔다). 회귀했을 때 나는 것은 빨간 단언이 아니라 **조용한 무주공산**이다 — 화면엔 Running 인데
+    ///   입력은 전부 거절되고 아무도 거두지 않는다.
+    /// ★입구를 둘 다 재는 것이 요점이다★ — 하나만 고치면 다른 하나가 뒤처지고, 부팅 복원 쪽이 뒤처지면
+    ///   그 구멍이 이어받을 손잡이 없는 codex 프로필 수만큼 한꺼번에 선다.
+    #[test]
+    fn both_fresh_entrances_settle_the_link_before_reporting_success() {
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+
+        let settling = production
+            .split("fn spawn_fresh_settled(")
+            .nth(1)
+            .expect("`spawn_fresh_settled` 본문")
+            .split("fn spawn_session(")
+            .next()
+            .expect("다음 함수까지");
+        assert!(
+            settling.contains("self.link_activation_verdict("),
+            "Fresh 갈래가 연결의 결말을 보지 않는다 — 거절당한 핸드셰이크에 주인이 없어진다: {settling}"
+        );
+        assert!(
+            settling.contains("self.note_spawn_result("),
+            "연결 축이 없는 통로(claude·shell)의 옛 기록 경로가 사라졌다 — 그 경로는 이 변경의 범위 밖이다"
+        );
+
+        let activate = production
+            .split("pub fn activate_profile(")
+            .nth(1)
+            .expect("`activate_profile` 본문")
+            .split("fn note_activation_result(")
+            .next()
+            .expect("다음 함수까지");
+        assert!(
+            activate.contains("self.spawn_fresh_settled(profile)"),
+            "수동 활성화의 Fresh 갈래가 판정을 안 도는 동사로 돌아갔다: {activate}"
+        );
+
+        let restore = production
+            .split("fn restore_one(")
+            .nth(1)
+            .expect("`restore_one` 본문")
+            .split("fn resume_no_fallback(")
+            .next()
+            .expect("다음 함수까지");
+        assert!(
+            restore.contains("self.spawn_fresh_settled(profile)"),
+            "부팅 복원의 비-이어받기 갈래가 판정을 안 도는 동사로 돌아갔다: {restore}"
+        );
+
+        assert_eq!(
+            production.matches("self.note_spawn_result(").count(),
+            1,
+            "「spawn 한 번으로 끝나는 기록」의 호출자가 늘었다 — 그 동사는 연결 축이 **없는** 통로 전용이고,              축이 있는 곳에서 부르면 그것이 곧 ADR-0202 가 막는 증거 파괴다"
+        );
+    }
+
+    /// ★Fresh 의 낙관적 성공도 「마지막 실패」를 지우지 않는다★(ADR-0202) — Resume 쪽 형제와 같은 규율.
+    ///
+    /// ADR-0202 가 「아직 참이 아니다」로 적어 둔 구멍이 정확히 이 자리였다: Fresh 는 프로세스가 뜬
+    /// 순간을 성공으로 읽고 앞선 실패 기록을 지웠다.
+    #[test]
+    fn a_fresh_success_does_not_clear_the_failure_record() {
+        let ready = fresh_arm("EarlyVerdict::Ready =>", "EarlyVerdict::LinkFailed");
+        assert!(
+            !ready.contains("note_activation_result"),
+            "Fresh 성공 갈래가 「마지막 실패」를 건드린다 — 이 판정은 「입력을 받을 준비가 됐다」까지만              관측하므로, 그것으로 옛 실패 증거를 지우면 되돌릴 수 없는 소실이다: {ready}"
+        );
+    }
+
+    /// ★Fresh 실패 갈래도 **정리를 먼저, 기록을 나중에**★ — Resume 쪽 형제와 같은 순서·같은 사유.
+    ///
+    /// 기록은 프로필 뮤텍스를 잡는데 그 뮤텍스가 붙들려 있으면, 순서가 뒤집힌 쪽은 **자식을 영영 안
+    /// 죽인다**. 그리고 정리는 화신 표식을 들고 불려야 한다 — 안 그러면 산 후임을 죽인다.
+    #[test]
+    fn a_failed_fresh_link_tears_down_before_it_records() {
+        let arm = fresh_arm(
+            "EarlyVerdict::LinkFailed { reason } => {",
+            "EarlyVerdict::Terminal {",
+        );
+        let teardown = arm
+            .find("tear_down_failed_activation")
+            .expect("Fresh 연결 실패 갈래가 정리를 부르지 않는다 — 실패한 세션을 아무도 못 거둔다");
+        let record = arm
+            .find("note_activation_result")
+            .expect("Fresh 연결 실패 갈래가 실패를 기록하지 않는다 — 증거가 어디에도 안 남는다");
+        assert!(
+            teardown < record,
+            "기록이 정리보다 앞선다 — 프로필 뮤텍스가 붙들려 있으면 자식이 영영 안 죽는다: {arm}"
+        );
+        assert!(
+            arm.contains("tear_down_failed_activation(profile.id, incarnation)"),
+            "정리가 화신 표식 없이 불린다 — 그 사이 다른 화신이 섰으면 산 후임을 죽인다: {arm}"
         );
     }
 
