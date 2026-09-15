@@ -36,6 +36,7 @@ use crate::backend::{
     console_command, AgentBackend, InputEncoder, SessionIdSink, SpawnParts, TransportShape,
     TurnClassifier,
 };
+use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, OutputDecoder};
@@ -118,6 +119,12 @@ fn thread_open(spec: &CommandSpec, resume_session_id: Option<Uuid>) -> ThreadOpe
 /// ★편입은 spawn **뒤**라 그 사이 창은 그 보장 밖이다★ — 그 창에서 태어난 자손은 Job 에 안 들어간다.
 /// 이 저장소의 통로 셋이 전부 같은 모양이고(`CREATE_SUSPENDED` 는 한 줄도 없다) 기존 teardown 테스트는
 /// 정착 상태만 재므로, 이 창은 **재 본 적이 없다**. 고치는 것은 세 통로를 함께 건드리는 별건이다.
+/// 「그 스레드의 기록이 없다」를 뜻하는 상대 문구(소문자 비교). ★실측된 응답에서 그대로 딴다★ —
+/// `-32600` + `no rollout found for thread id`(`docs/reference/backend-capabilities.md` §1).
+/// ★코드가 아니라 이 문구가 판정 기준인 이유★: 같은 코드가 설정 오류·중복 `initialize`·하위 스레드
+/// 이어받기에도 온다. 코드로 가르면 멀쩡한 손잡이가 무관한 실패에서 「이어받을 대화 없음」 도장을 받는다.
+const NO_ROLLOUT_MARKER: &str = "no rollout found";
+
 const CODEX_PROGRAM: &str = "codex";
 
 /// codex 가 작업 폴더를 받는 플래그. ★프로세스 cwd 와 별개다★ — `CommandSpec.cwd` 는 우리가 프로세스를
@@ -191,6 +198,37 @@ impl AgentBackend for CodexBackend {
     /// shell 쪽 사유는 그때도 그대로 남으므로 둘을 같이 열지 말 것.
     fn reads_messages(&self) -> bool {
         false
+    }
+
+    /// 이어받기가 왜 실패했나 — ★이 backend 의 증거는 **통로의 연결 사유**로 온다★.
+    ///
+    /// ★그 사유가 두 꼬리 어디에도 없다는 것이 이 구현의 존재 이유다★: 이어받기 거절은 stdout 의
+    ///   JSON-RPC 오류라, 콘솔 꼬리(`terminal_tail`)는 이 통로에 아예 없고 진단 꼬리
+    ///   (`diagnostic_tail`)는 stderr 만 담는다. 그래서 판정은
+    ///   [`crate::transport::LinkState::Down`] 의 `reason` 을 증거로 넘긴다 — 선언이 없으면 그 문자열이
+    ///   와도 분류가 `None` 으로 떨어져 「이어받기 직후 조기 종료」라는 **틀린 맥락 기본값**이 찍힌다
+    ///   (이 갈래에는 조기 종료가 없다. 프로세스는 멀쩡히 살아 있었다).
+    ///
+    /// ★**오류 코드로 가르지 않는다 — `-32600` 은 뜻이 하나가 아니다**★(실측 0.154.0): 모르는 스레드도,
+    ///   두 번째 `initialize` 도, 설정 오류도, **하위 스레드를 직접 이어받으려 한 경우**도 전부 그 코드로
+    ///   온다. 코드로 「모르는 스레드」를 유도하면 멀쩡한 손잡이가 무관한 실패에서 분류를 잘못 받는다.
+    ///   그래서 보는 것은 **메시지**뿐이다.
+    /// ★선언하는 문구는 **실측된 것 하나**다★ — `no rollout found for thread id`
+    ///   (`docs/reference/backend-capabilities.md` §1 「모르는 id 를 주면」). 나머지 사유들은 실제 응답
+    ///   문구를 우리가 갖고 있지 않으므로 **지어내지 않는다** — `None` 으로 떨어뜨려 호출자가 맥락
+    ///   기본값을 쓰게 두고, 사람이 읽을 사유는 어차피 `reason` 문자열 그대로 결말에 실려 나간다.
+    ///   ★특히 「하위 스레드는 부모를 먼저 이어받아라」 갈래는 문구를 모른다★ — 실물을 재기 전에
+    ///   추측한 문자열을 넣으면 안 맞는 매칭이 조용히 죽은 코드로 남는다.
+    /// ★살아 있는 세션에도 불린다(trait doc 의 조건)★ — 위 문구는 상대가 **요청을 거절할 때만** 내는
+    ///   것이고 대화 본문에 섞일 수 있는 말이 아니라, 그 조건을 만족한다.
+    // ADR-0004
+    // ADR-0082
+    // ADR-0172
+    fn resume_failure_kind(&self, evidence: &str) -> Option<AgentFailureKind> {
+        if evidence.to_lowercase().contains(NO_ROLLOUT_MARKER) {
+            return Some(AgentFailureKind::NoConversationToResume);
+        }
+        None
     }
 
     /// ★세션 인자를 조립하지 않는다★ — `--session-id` 는 존재하지 않고, 재개는 플래그가 아니라 하위
@@ -761,7 +799,12 @@ mod tests {
             FakeResume::EchoesTheThreadId => {
                 r#"'"result":{"thread":{"id":"resumed-' + $tid + '","cliVersion":"0.0.0-fake"}}'"#
             }
-            FakeResume::Rejects => r#"'"error":{"code":-32600,"message":"unknown thread"}'"#,
+            // ★문구를 실측된 것으로 쓴다★ — 이 가짜가 「모르는 스레드」를 흉내 내는 목적이 분류까지
+            //   태우는 것인데, 지어낸 문구를 쓰면 `resume_failure_kind` 가 못 알아봐서 그 배선이 시험대를
+            //   그냥 통과한다(`docs/reference/backend-capabilities.md` §1 「모르는 id 를 주면」).
+            FakeResume::Rejects => {
+                r#"'"error":{"code":-32600,"message":"no rollout found for thread id"}'"#
+            }
         };
         let script = FAKE_APP_SERVER_PS1
             .replace("THREAD_ID_PLACEHOLDER", start_thread_id)
@@ -1090,6 +1133,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
         let seen = events.lock().unwrap().clone();
         let got = recorded.lock().unwrap().clone();
+        let link_when_failed = match parts.transport.link_state() {
+            Some(crate::transport::LinkState::Down { reason }) => Some(reason),
+            _ => None,
+        };
 
         // 실패 경계가 오른 뒤, 통로가 우리 쪽 stdin 을 놓은 결과로 상대가 EOF 를 보고 끝나기를 기다린다.
         //   ★`shutdown()` 전이다★ — 위 doc 의 그 사유.
@@ -1104,14 +1151,34 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         while !terminal() && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        // ★통로가 실제로 「연결 못 섬 + 사유」를 신고하나 — 실물로 재는 자리는 여기뿐이다★:
+        //   매니저 쪽 항목들은 대역 통로로 판정 로직만 재므로, 실 통로가 그 축을 안 채우면 그 배선이
+        //   양쪽 다 초록인 채로 끊긴다. ★종점에 닿기 **전에** 잡는다★ — 그 뒤에는 이 값이 남아 있을
+        //   이유가 없다.
+        let link_when_failed = link_when_failed.expect(
+            "실패 경계가 올랐는데 통로의 연결 축이 `Down` 이 아니다 — 활성화 판정이 볼 신호가 없다",
+        );
+        // 그리고 그 사유가 분류까지 가야 「마지막 실패」에 맥락 기본값(조기 종료)이 아닌 진짜 원인이 남는다.
+        assert_eq!(
+            CodexBackend.resume_failure_kind(&link_when_failed),
+            Some(crate::failure::AgentFailureKind::NoConversationToResume),
+            "연결 사유가 분류되지 않았다 — 이 갈래에는 조기 종료가 없으므로 맥락 기본값이 찍히면 거짓이다: {link_when_failed}"
+        );
+
         let reached_terminal = terminal();
         let seen_statuses = statuses.lock().expect("status poisoned").clone();
-        // ★`!is_live()` 로는 부족하다★ — 리더 패닉(`Failed`)과 읽기 오류(`Exited{code:None}`)는 **자식이
-        //   살아 있어도** 그 술어를 만족한다. 재려는 인과는 「stdin 닫기 → 상대 exit → EOF」이므로
-        //   종류까지 못 박는다(선례·사유 = [`tests::a_recording_failure_ends_the_session`]).
-        let ended_by_peer_exit = seen_statuses
+        // ★`!is_live()` 로도 `Exited { .. }` 로도 **부족하다**★(리뷰 지적 — 옛 단언은 공허했다):
+        //   리더가 EOF 를 보면 자식의 생사와 무관하게 `Exited { code: None }` 이 서므로, 종류만 보는
+        //   단언은 위 `reached_terminal` 이 참일 때 **거짓이 될 수 없었다** — 즉 아무것도 안 재고 있었다.
+        // ★코드가 실려 있는 것이 자식이 실제로 수거됐다는 유일한 증거다★ — `Some(_)` 은 `try_wait` 가
+        //   성공했다는 뜻이고 그건 프로세스가 끝났을 때만 성공한다(그 값이 경합으로 유실되지 않게
+        //   `reader_loop` 이 유계로 다시 본다 — 그 자리 주석이 정본).
+        // ★어느 경로로 끝났는지는 여기서 가르지 않는다★ — 상대가 EOF 를 보고 스스로 끝났든, 유예를
+        //   넘겨 통로가 직접 끝냈든 둘 다 정당한 결말이고, 가르려면 시간을 재야 해서 깜빡인다.
+        //   이 항목이 막으려는 것은 **아무 결말도 없는 것**이다.
+        let ended_with_a_reaped_child = seen_statuses
             .iter()
-            .any(|s| matches!(s, AgentStatus::Exited { .. }));
+            .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
 
         parts.transport.shutdown();
 
@@ -1133,9 +1200,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
              지운다(ADR-0082 가 막으려던 결말). 관측된 상태: {seen_statuses:?}"
         );
         assert!(
-            ended_by_peer_exit,
-            "종료는 했는데 상대가 스스로 끝난 모양이 아니다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 \
-             살아 있어도 나므로 이 항목이 재려는 인과(stdin 닫기 → 상대 exit → EOF)를 재지 못한다(관측: {seen_statuses:?})"
+            ended_with_a_reaped_child,
+            "종점에 닿았는데 자식이 수거된 흔적이 없다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 \
+             있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen_statuses:?})"
         );
         assert!(
             removed,
@@ -1246,11 +1313,14 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         let reached_terminal = terminal();
         let seen = statuses.lock().expect("status poisoned").clone();
-        // ★`!is_live()` 로는 부족하다★ — 리더 패닉은 `Failed`, 읽기 오류는 `Exited{code:None}` 을 내는데
-        //   **자식이 살아 있어도** 둘 다 그 술어를 만족한다. 이 항목이 재려는 것은 「상대가 EOF 를 보고
-        //   스스로 끝났다」이므로 종류까지 못 박는다. 오늘 이 시험대에 그 둘을 만드는 경로가 없지만, 못
-        //   박아 두지 않으면 나중에 그리로 흘러가도 초록이다.
-        let ended_by_peer_exit = seen.iter().any(|s| matches!(s, AgentStatus::Exited { .. }));
+        // ★`!is_live()` 로도 `Exited { .. }` 로도 **부족하다**★ — 리더가 EOF 를 보면 자식의 생사와 무관하게
+        //   `Exited { code: None }` 이 서서, 종류만 보는 단언은 위 `reached_terminal` 이 참일 때 거짓이 될
+        //   수 없었다(옛 모양은 공허했다 — 리뷰 지적. 그 복사본이 옆 항목에도 있었고 함께 고쳤다).
+        // ★코드가 실려 있는 것이 자식이 실제로 수거됐다는 유일한 증거다★ — 사유의 정본은
+        //   `a_rejected_resume_does_not_fall_back_and_ends_the_session` 의 같은 자리.
+        let ended_with_a_reaped_child = seen
+            .iter()
+            .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
         parts.transport.shutdown();
 
         assert!(
@@ -1281,8 +1351,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
              도 reaper 도 움직이지 않는다(관측된 상태: {seen:?})"
         );
         assert!(
-            ended_by_peer_exit,
-            "종료는 했는데 상대가 스스로 끝난 모양이 아니다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 있어도 나므로 이 항목이 재려는 인과(stdin 닫기 → 상대 exit → EOF)를 재지 못한다(관측: {seen:?})"
+            ended_with_a_reaped_child,
+            "종점에 닿았는데 자식이 수거된 흔적이 없다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 \
+             있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen:?})"
         );
         assert!(
             removed,

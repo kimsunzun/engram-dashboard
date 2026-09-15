@@ -440,9 +440,13 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (profile, batch, count) = long_lived_profile("kill-reactivate");
     let id = profile.id;
 
-    // ★seeded 프로필을 spawn/activate/kill 전부에 넘겨야 한다★: spawn 은 넘겨받은 스냅샷을
-    //   upsert_preserving_hierarchy 로 그대로 심으므로, backend_session_id=None 인 원본을 넘기면
-    //   심어둔 sid 가 덮여 유실된다. auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
+    // ★seeded 프로필을 spawn/activate/kill 전부에 넘긴다★ — 명부와 인자를 한 값으로 맞춰 이 항목이
+    //   재는 것이 손잡이 보존이 아니라 **이어받기 배선**임을 분명히 한다.
+    //   ★옛 사유(「안 그러면 심어둔 sid 가 덮여 유실된다」)는 낡았다★ — `upsert_preserving_hierarchy` 가
+    //   이제 `backend_session_id` 와 그 이력을 live 에서 보존한다(사용자 결정). 그 보존 자체의 회귀망은
+    //   `profile.rs` 의 `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot`
+    //   이고 여기서 겸하지 않는다.
+    //   auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);

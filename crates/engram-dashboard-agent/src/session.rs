@@ -288,6 +288,16 @@ impl AgentSession {
         self.core.terminal_tail(max_bytes)
     }
 
+    /// 이 세션의 통로가 **연결을 세워야 쓸 수 있나**, 그리고 지금 어디까지 섰나
+    /// (계약은 `AgentTransport::link_state`). `None` = 세울 연결이 없는 통로(PTY·stdio).
+    ///
+    /// ★세 꼬리(`terminal_tail`·`diagnostic_tail`)와 **다른 축**이다★: 저 둘은 그 화신이 남긴 **텍스트**
+    ///   이고 이것은 통로의 **상태**다. codex app-server 의 이어받기 거절은 stdout 의 JSON-RPC 오류로
+    ///   와서 두 꼬리 어디에도 안 잡히므로, 그 실패가 판정에 닿는 길은 이 축뿐이다.
+    pub fn link_state(&self) -> Option<crate::transport::LinkState> {
+        self.transport.link_state()
+    }
+
     /// 이 화신이 낸 **진단(stderr) 텍스트** 꼬리(계약·상한은 `OutputCore::diagnostic_tail`).
     ///
     /// ★`terminal_tail` 의 대체재가 아니라 짝이다★: 두 스트림은 transport 에 따라 배타적으로 찬다

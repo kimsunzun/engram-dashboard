@@ -443,14 +443,17 @@ impl ProfileRegistry {
         });
     }
 
-    /// spawn 전용 upsert — 스냅샷을 삽입하되 **오케스트레이션 메타데이터(`parent_id`·`display_name`)는
-    /// 이미 맵에 있는 live 엔트리 값을 보존**한다(ADR-0070/0072). 없던 id(ad-hoc spawn)면 스냅샷 그대로.
+    /// spawn 전용 upsert — 스냅샷을 삽입하되 **런타임이 저자인 칸은 이미 맵에 있는 live 엔트리 값을
+    /// 보존**한다. 없던 id(ad-hoc spawn)면 스냅샷 그대로.
+    ///
+    /// ★보존 목록의 정본은 아래 본문이다 — 이 문단에서 개수를 세지 말 것★(세던 「그 두 필드」가 실제로
+    /// 두 번 뒤처졌다). 가름 규칙은 하나다: **그 칸을 누가 쓰나.** 호출자가 뜬 사본이 저자가 아닌 칸은
+    /// 전부 live 가 이기고, spawn 이 실제로 확정하는 칸(cwd·command·env 등)만 스냅샷을 반영한다.
     ///
     /// ★왜 spawn 스냅샷을 그대로 안 쓰나(lost-update 봉인)★: 넘어오는 프로필은 호출 시점에 뜬
     /// **스냅샷**이라, 그 사이 다른 연결이 reparent/rename 을 커밋했다면 옛 `parent_id`/`display_name` 이
     /// 최신 값을 덮어써 동시 편집이 유실된다(lost update). 그 둘은 프로세스 기동과 무관한 순수 트리 메타라
-    /// spawn 이 author 할 이유가 없으므로, live 엔트리가 있으면 그 두 필드만 보존하고 나머지
-    /// (cwd/command/env/session 등 spawn 이 실제로 확정하는 필드)는 스냅샷을 반영한다.
+    /// spawn 이 author 할 이유가 없으므로, live 엔트리가 있으면 그 값을 보존한다.
     ///
     /// ★화신 표식(epoch)도 live 보존(ADR-0084)★: 그 값은 프로세스 기동과 무관한 순수 런타임 메타로,
     ///   spawn 이 넘긴 **스냅샷**이 author 하면 안 된다. spawn 은 이 upsert **직후** `epoch_for_spawn` 으로
@@ -468,6 +471,22 @@ impl ProfileRegistry {
                 //   spawn 이 넘긴 옛 사본이 그것을 되돌리면 이미 지워진 실패가 화면에 되살아난다.
                 // ADR-0172
                 profile.last_failure = live.last_failure;
+                // ★backend 세션 손잡이와 그 이력도 live 가 이긴다(사용자 결정)★ — 위 넷과 **같은 사유**다:
+                //   이 칸을 쓰는 것은 런타임이지 spawn 스냅샷이 아니다. 발급하는 backend(claude)는 spawn 이
+                //   `ensure_session_id`/`new_session_id` 로 **이 upsert 뒤에** 확정하고, 받아 적는
+                //   backend(codex)는 통로가 핸드셰이크에서 받은 값을 기록 포트로 적는다. 어느 쪽이든
+                //   호출자가 뜬 사본은 그 값의 저자가 아니다.
+                // ★무엇을 막나★: 사본을 뜬 뒤 도착한 손잡이가 여기서 덮이고 **그대로 디스크에 영속된다**.
+                //   그러면 그 대화로 돌아갈 길이 사라진다 — 되돌릴 방법이 없는 유실이라, 덮어쓰기와
+                //   보존 중 틀렸을 때 싼 쪽을 고른다(보존). 남는 것은 낡은 값을 한 번 더 들고 가는 것이고,
+                //   그건 다음 관측이 고친다.
+                // ★이력도 함께 보존한다 — 둘은 한 덩어리다★: `observe_session_id`·`new_session_id` 가
+                //   옛 값을 `old_session_ids` 로 밀어 넣으며 짝으로 갱신하므로, 새 값만 지키고 이력을
+                //   스냅샷으로 되돌리면 그 사이 밀려난 손잡이가 목록에서 사라진다.
+                // ★Fresh spawn 이 이것 때문에 옛 대화를 재사용하지는 않는다★ — `new_session_id` 가 이
+                //   upsert **뒤에** 무조건 새 uuid 를 발급하고 옛 값을 이력으로 민다(ADR-0076).
+                profile.backend_session_id = live.backend_session_id;
+                profile.old_session_ids = live.old_session_ids.clone();
             }
             m.insert(profile.id, profile);
         });
@@ -1475,6 +1494,46 @@ mod tests {
             after.display_name,
             Some("live".into()),
             "stale spawn 스냅샷이 최신 display_name 을 되돌리면 안 됨(ADR-0070 latent)"
+        );
+    }
+
+    /// ★사본을 뜬 **뒤에** 도착한 backend 손잡이가 spawn 등록에 덮이지 않는다(사용자 결정)★.
+    ///
+    /// 이 칸을 쓰는 것은 런타임이다 — 받아 적는 backend(codex)는 통로가 핸드셰이크에서 받은 thread id 를
+    /// 기록 포트로 적고, 발급하는 backend(claude)는 spawn 이 이 upsert **뒤에** 확정한다. 어느 쪽이든
+    /// 호출자가 든 사본은 저자가 아니다.
+    /// ★덮이면 그냥 낡은 값이 아니라 **되돌릴 수 없는 유실**이다★ — 이 upsert 는 `mutate` 라 그대로
+    ///   디스크에 영속되고, 그 대화로 돌아갈 손잡이가 어디에도 안 남는다.
+    /// ★이력을 함께 재는 것이 요점이다★ — 새 값만 지키고 `old_session_ids` 를 스냅샷으로 되돌리면 그
+    ///   사이 밀려난 손잡이가 목록에서 사라져, 유실을 절반만 막은 것이 된다.
+    #[test]
+    fn spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+
+        let first = reg.ensure_session_id(id).expect("최초 손잡이");
+        let stale_snapshot = reg.get(id).unwrap();
+        assert_eq!(stale_snapshot.backend_session_id, Some(first));
+        assert!(stale_snapshot.old_session_ids.is_empty());
+
+        // 그 사이 상대가 새 손잡이를 줬고 기록 포트가 명부에 적었다.
+        let arrived = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, None, arrived));
+
+        reg.upsert_preserving_hierarchy(stale_snapshot);
+
+        let after = reg.get(id).unwrap();
+        assert_eq!(
+            after.backend_session_id,
+            Some(arrived),
+            "스냅샷 뒤에 도착한 손잡이가 spawn 등록에 덮였다 — 그 대화로 돌아갈 길이 없어진다"
+        );
+        assert_eq!(
+            after.old_session_ids,
+            vec![first],
+            "손잡이는 지켰는데 이력이 스냅샷으로 되돌아갔다 — 밀려난 손잡이가 목록에서 사라진다"
         );
     }
 

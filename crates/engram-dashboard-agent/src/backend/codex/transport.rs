@@ -133,7 +133,7 @@ use super::protocol::{
 };
 use crate::backend::SessionIdSink;
 use crate::output_core::OutputCore;
-use crate::transport::{AgentTransport, OutputDecoder};
+use crate::transport::{AgentTransport, LinkState, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps, TurnOutcome,
@@ -157,6 +157,23 @@ use crate::platform::JobObjectHandle;
 /// 사람이 화면 앞에서 "멈췄다" 고 판단하기 전에 오류가 뜬다.
 /// ★턴의 길이와 무관하다★ — `turn/start` 의 **응답**은 턴이 끝날 때가 아니라 턴이 열릴 때 온다.
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+
+/// 핸드셰이크 **전체**(두 왕복 + 기록 호출)의 상한. ★요청 하나가 아니라 구획 하나에 건다★.
+///
+/// ★왜 [`REQUEST_DEADLINE`] 을 그대로 쓰지 않나 — 그 값이 판정보다 열 배 늦기 때문이다★:
+///   매니저의 조기종료 창은 3 초인데 요청마다 30 초를 주면 핸드셰이크의 결말은 최대 60 초 뒤에 난다.
+///   그 사이 프로세스는 멀쩡히 살아 있으므로 판정은 창 끝에서 「살아 있음」을 보고 **이어받기 성공으로
+///   도장을 찍고 마지막 실패 기록까지 지운다** — 실제 결말이 실패로 확정되기 27 초 전에. 즉 시한이
+///   판정 창보다 늦으면 이 통로의 실패는 **판정에 참여하지 못한다**.
+/// ★그래서 이 값의 계약은 하나다: **매니저의 연결 판정 창보다 작을 것**★
+///   ([`crate::manager::LINK_DECISION_WINDOW`]). 그 관계는 같은 crate 안에 있어 시험대가 직접 잰다
+///   ([`tests::the_handshake_budget_fits_inside_the_managers_link_window`]).
+/// ★값의 근거★: 관측된 왕복은 `initialize` ≈130ms 이고 거절은 **즉시** 온다(실측 — 하위 스레드
+///   `thread/resume` 이 `-32600` 을 곧바로 돌려줬다). 10 초는 그 정상 왕복의 70 배가 넘어 느린 기동
+///   (npm shim → node)까지 덮는다. ★단 이것은 「10 초면 충분하다」의 실측이 아니라 **판정 창에 맞춘
+///   상한**이다★ — 이보다 느린 핸드셰이크는 어차피 활성화로 셀 수 없다.
+/// ★턴 요청은 이 값을 쓰지 않는다★ — 그쪽은 판정 창과 무관하고 [`REQUEST_DEADLINE`] 그대로다.
+const HANDSHAKE_BUDGET: Duration = Duration::from_secs(10);
 
 /// 라이터가 **주위를 둘러보는** 주기. 두 곳이 이 값을 쓴다 — 시한 만료 훑기, 그리고 핸드셰이크가 답을
 /// 기다리는 동안 제어 줄을 **한 줄씩** 내보내는 것([`request_blocking`]).
@@ -470,7 +487,7 @@ pub(crate) struct CodexAppServerTransport {
     /// 무엇을 나르는지 모르고, 아는 쪽은 이 모드를 고른 backend 다.
     structured: bool,
     #[cfg(windows)]
-    job_handle: JobObjectHandle,
+    job_handle: Arc<JobObjectHandle>,
 }
 
 /// spawn 뒤 실패 경로에서 자식을 확실히 거두는 가드.
@@ -543,7 +560,7 @@ impl CodexAppServerTransport {
             if let Some(pid) = child_pid {
                 job.assign(pid)?;
             }
-            job
+            Arc::new(job)
         };
 
         let transport = CodexAppServerTransport {
@@ -726,6 +743,14 @@ fn handshake(
     next_id: &AtomicI64,
     open: &ThreadOpen,
 ) -> Result<String, String> {
+    // ★시한은 요청마다가 아니라 **이 구획 전체**에 건다★ — 요청별로 주면 두 왕복의 합이 상한의 두 배가
+    //   되고, 그 합이 매니저의 연결 판정 창을 넘기는 순간 이 통로의 실패는 판정에 참여하지 못한다
+    //   ([`HANDSHAKE_BUDGET`] 의 doc 이 그 인과의 정본).
+    // ★남은 몫이 0 이면 `request_blocking` 이 곧바로 시한 만료로 돌아온다★ — 거기가 유일한 판정 자리라
+    //   여기서 미리 갈라 두 곳에서 같은 결론을 내지 않는다.
+    let deadline = Instant::now() + HANDSHAKE_BUDGET;
+    let remaining = || deadline.saturating_duration_since(Instant::now());
+
     let init: InitializeResponse = request_blocking(
         stdin,
         state,
@@ -738,7 +763,7 @@ fn handshake(
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
         },
-        REQUEST_DEADLINE,
+        remaining(),
     )?;
     // ★이 줄이 상류 드리프트를 사후에 가르는 유일한 기록이다★ — 이 프로토콜에는 버전 칸이 없고
     //   (스키마 전체에 `protocolVersion` 0 회), CLI 는 스스로 업데이트한다.
@@ -765,7 +790,7 @@ fn handshake(
                 next_id,
                 method::THREAD_START,
                 params,
-                REQUEST_DEADLINE,
+                remaining(),
             )?;
             started.thread
         }
@@ -777,7 +802,7 @@ fn handshake(
                 next_id,
                 method::THREAD_RESUME,
                 params,
-                REQUEST_DEADLINE,
+                remaining(),
             )?;
             resumed.thread
         }
@@ -1029,6 +1054,81 @@ impl HandshakeFailure {
     }
 }
 
+/// 이 화신을 끝내는 마지막 수단 — 자식 kill + (Windows 면) Job 종료를 **한 덩어리로** 캡처한 것.
+///
+/// ★값이 아니라 동작으로 넘기는 이유 둘★: ① 프로세스 손잡이는 플랫폼마다 달라(`cfg`) 인자 목록을
+///   가르면 비-Windows 빌드에서만 깨지는 자리가 생긴다 ② [`writer_loop`] 은 프로세스를 소유하지도
+///   알지도 않는 스레드라, 거기에 `Child` 를 들여보내면 그 층이 다루지 않던 자원을 쥐게 된다.
+/// ★시험대가 이 seam 으로 그 유계 수습을 실제로 잰다★ — 진짜 자식 없이 「불렸나/안 불렸나」만 본다.
+type TearDown = Arc<dyn Fn() + Send + Sync>;
+
+/// 우리가 stdin 을 놓은 뒤 **상대가 스스로 끝나기를** 기다리는 유예.
+///
+/// ★값의 근거★: 재 본 것은 「턴이 없는 상태에서 stdin 을 닫으면 41–51ms 안에 exit 한다」이고, 5 초는
+/// 그 100 배다. 느린 종료 훅까지 덮으면서, 사람이 「멈췄다」고 느끼기 전에 결말이 난다.
+/// ★이 값이 크면 클수록 wedge 가 길어지고, 작으면 정상 종료를 앞질러 죽인다★ — 앞질러 죽여도 결과는
+/// 같은 종점(`Exited`)이라 손해가 비대칭이다. 그래서 여유 쪽으로 넉넉히 둔다.
+const PEER_EXIT_GRACE: Duration = Duration::from_secs(5);
+
+/// 리더가 EOF 를 본 뒤 **종료 코드가 잡힐 때까지** 다시 보는 상한.
+///
+/// ★[`PEER_EXIT_GRACE`] 와 다른 것을 잰다 — 합치지 말 것★: 저쪽은 「상대가 끝나기를 기다린다」이고
+/// 이쪽은 「이미 끝난(= stdout 을 닫은) 상대를 OS 가 수거하기를 기다린다」다. 뒤엣것이 훨씬 짧다.
+/// ★값의 근거★: stdout close 와 프로세스 수거 사이는 밀리초 단위다. 2 초는 그 여유를 크게 잡은 것이고,
+/// 넘기면 그건 「끝나지 않은 상대」라 위 유예가 처분할 몫이다.
+const CHILD_REAP_GRACE: Duration = Duration::from_secs(2);
+
+/// 닫힘 표식이 설 때까지 **유계로** 기다리고, 안 서면 이 화신을 직접 끝낸다.
+///
+/// ★이것이 이 통로가 자기 자식을 죽이는 **유일한** 자리다★ — 그 예외의 조건을 좁게 적는다:
+///   ① 핸드셰이크가 실패해 이 화신을 쓰지 않기로 **이미 확정**했고, ② 우리 쪽 stdin 도 이미 놓았고,
+///   ③ 그런데도 상대가 유예 안에 끝나지 않았다. 셋이 다 참일 때만 온다.
+/// ★ADR-0082 의 「아무것도 죽지마」와 충돌하지 않는다★ — 그 결정이 지키는 것은 **관측된 종점(시체)**
+///   이고, 여기서 죽이는 것은 종점이 **한 번도 서지 않은** 화신이다. 그냥 두면 상태는 영영 `Running`
+///   이고, 화면에 남는 실패 오류와 사실상 어긋난 채로 데몬 수명 내내 자원을 문다. 즉 여기서 죽이는 것은
+///   증거를 지우는 것이 아니라 **없던 증거(종료 전이)를 만드는 것**이다. 실패 경계와 오류는 이 호출
+///   **전에** 이미 화면에 올라가 있다.
+/// ★ADR-0001 의 2 동사도 그대로다★ — 순서(kill → wait → Job 종료)를 그대로 재사용하고, 종료 전이는
+///   여전히 pump 단독이다(ADR-0005): 여기서는 파이프를 깨기만 하고 상태를 직접 쓰지 않는다.
+/// ★`shutdown()` 을 부르지 않는다★ — 그쪽은 `self` 전체를 잡고 `shutdown` 원자를 세우는데, 그 원자가
+///   서면 아래 루프가 「사용자가 껐다」와 구별되지 않는다. 여기서 필요한 것은 파이프를 깨는 두 동작뿐이다.
+fn wait_for_close_or_tear_down(
+    state: &SharedState,
+    shutdown: &AtomicBool,
+    tear_down: &TearDown,
+    grace: Duration,
+) {
+    // ★사용자가 껐으면 여기서 아무것도 하지 않는다★ — 그 경로는 [`AgentTransport::shutdown`] 이 이미
+    //   두 동사를 쥐고 있고, 여기서 겹쳐 죽이면 같은 인과에 주인이 둘이 된다.
+    if shutdown.load(Ordering::Acquire) {
+        return;
+    }
+    let closed = {
+        let (lock, cv) = &**state;
+        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let deadline = Instant::now() + grace;
+        while !s.closed {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            // ★`wait_timeout` 이라 깨어나는 이유가 둘이다(통지·시한)★ — 그래서 조건을 다시 본다.
+            let (guard, _) = cv.wait_timeout(s, left).unwrap_or_else(|p| p.into_inner());
+            s = guard;
+        }
+        s.closed
+    };
+    if closed {
+        return;
+    }
+
+    tracing::error!(
+        grace_ms = grace.as_millis() as u64,
+        "codex 상대가 stdin EOF 뒤에도 끝나지 않았다 — 이 화신을 직접 끝낸다(안 그러면 자식·Job·스레드가          데몬 수명 내내 붙들리고 종료 전이가 영영 서지 않는다)"
+    );
+    tear_down();
+}
+
 #[allow(clippy::too_many_arguments)]
 fn writer_loop(
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -1039,6 +1139,8 @@ fn writer_loop(
     core: Arc<OutputCore>,
     open_params: ThreadOpen,
     sid_sink: Option<SessionIdSink>,
+    // 핸드셰이크가 실패한 뒤 상대가 유예 안에 안 끝날 때만 쓴다(`wait_for_close_or_tear_down`).
+    tear_down: TearDown,
 ) {
     // ★두 실패를 **갈라서** 든다★ — 이 통로가 말하는 「핸드셰이크」는 왕복 둘만이 아니라 **기록 호출이
     //   돌아오는 데까지**이므로(위 [`record_session_id`] 의 게이트 조건) 둘 다 `Ready` 를 막고 아래 수습을
@@ -1194,6 +1296,15 @@ fn writer_loop(
                 while_recording = *while_recording,
                 "연결이 서지 못해 codex 쪽 stdin 을 닫는다 — 상대가 EOF 를 보고 끝나면 세션이 수거된다"
             );
+
+            // ★그 다음이 **상대의 행동**이라는 것이 이 자리의 약점이다 — 그래서 유계로 만든다★:
+            //   stdin 을 놓으면 상대가 EOF 를 보고 스스로 끝나고(실측 41–51ms, 턴이 없는 상태) 그 EOF 가
+            //   리더를 끝내 [`OutputCore::finish`] → reaper 로 이어진다. 그 첫 고리가 **우리 것이 아니다.**
+            //   상대가 stdout 을 열어 둔 채 남으면 리더는 영원히 읽기에 매달리고, 그러면 닫기 전과 똑같이
+            //   자식·Job·스레드 셋이 통째로 붙들린다 — 아무 신호 없이.
+            //   codex 는 스스로 업데이트하고 이 프로토콜에는 버전 칸이 없어 그 행동은 조용히 바뀔 수 있다.
+            //   ★거절 뒤에도 상대가 EOF 로 끝나는지는 **미검**이다★(재 본 것은 기록 실패 갈래뿐).
+            wait_for_close_or_tear_down(&state, &shutdown, &tear_down, PEER_EXIT_GRACE);
         }
     }
 
@@ -1837,11 +1948,32 @@ fn reader_loop(
         }
     }
 
+    // ★EOF 직후의 `try_wait` 한 번으로는 종료 코드를 못 받는다★ — stdout 이 닫히는 것과 프로세스가
+    //   수거되는 것은 같은 순간이 아니라, 그 한 번은 대개 `Ok(None)` 으로 떨어지고 코드가 조용히
+    //   **유실**된다. 그 유실은 두 번 아프다: 화면에 종료 코드가 안 뜨고, `Exited { code: None }` 이
+    //   「자식이 아직 살아 있다」와 구별되지 않아 **시험대가 그 둘을 가를 수단을 잃는다**.
+    // ★그래서 유계로 다시 본다★ — 락은 시도마다 놓는다(쥔 채 자면 `shutdown` 의 kill 이 그만큼 막힌다).
+    // ★kill 경로는 이 루프를 한 바퀴도 안 돈다★ — `shutdown()` 이 이미 `wait()` 했으므로 첫 시도가
+    //   바로 값을 준다.
+    // ★그래도 `None` 이 남을 수 있고 그것이 정직한 결말이다★ — 상대가 stdout 만 닫고 안 끝난 경우가
+    //   그것이고, 그 처분은 [`wait_for_close_or_tear_down`] 이 따로 진다.
     let code = {
-        let mut c = child.lock().unwrap_or_else(|p| p.into_inner());
-        match c.try_wait() {
-            Ok(Some(status)) => status.code(),
-            _ => None,
+        let deadline = Instant::now() + CHILD_REAP_GRACE;
+        loop {
+            let reaped = {
+                let mut c = child.lock().unwrap_or_else(|p| p.into_inner());
+                match c.try_wait() {
+                    Ok(Some(status)) => Some(status.code()),
+                    _ => None,
+                }
+            };
+            if let Some(code) = reaped {
+                break code;
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
     };
     if shutdown.load(Ordering::Acquire) {
@@ -1906,6 +2038,23 @@ impl AgentTransport for CodexAppServerTransport {
             let shutdown = self.shutdown.clone();
             let writer_core = core.clone();
             let sink = self.sid_sink.clone();
+            let tear_down: TearDown = {
+                let child = self.child.clone();
+                #[cfg(windows)]
+                let job = self.job_handle.clone();
+                Arc::new(move || {
+                    // ★`shutdown()` 과 같은 순서다(ADR-0001 2 동사) — kill → wait → Job 종료★.
+                    {
+                        let mut c = child.lock().unwrap_or_else(|p| p.into_inner());
+                        let _ = c.kill();
+                        let _ = c.wait();
+                    }
+                    #[cfg(windows)]
+                    {
+                        let _ = job.terminate(1);
+                    }
+                })
+            };
             let spawn_result = std::thread::Builder::new()
                 .name("engram-codex-writer".into())
                 .spawn(move || {
@@ -1918,6 +2067,7 @@ impl AgentTransport for CodexAppServerTransport {
                         writer_core,
                         params,
                         sink,
+                        tear_down,
                     )
                 });
             match spawn_result {
@@ -2093,6 +2243,24 @@ impl AgentTransport for CodexAppServerTransport {
                 let _ = tx.send(Err(format!("{}: 통로가 닫혔다", entry.method)));
             }
         }
+    }
+
+    /// ★이 통로는 세울 연결이 **있다** — 그래서 기본 `None` 을 쓰지 않는다★.
+    ///
+    /// 「프로세스가 살아 있다」와 「이 통로로 입력이 나간다」가 여기서 갈린다: 상대가 `thread/resume` 을
+    /// 거절하면 자식은 멀쩡히 살고 거절은 stdout 으로 오므로, 생사만 보는 판정에는 아무 신호도 안 남는다.
+    /// ★`Down` 에 사유를 실어 올리는 것이 분류의 유일한 입구다★ — 그 문자열은 stderr 진단 꼬리에도
+    /// 콘솔 꼬리에도 없다(둘 다 다른 스트림을 본다).
+    fn link_state(&self) -> Option<LinkState> {
+        let (lock, _) = &*self.state;
+        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        Some(match &s.link {
+            Link::Connecting => LinkState::Establishing,
+            Link::Ready => LinkState::Up,
+            Link::Down(reason) => LinkState::Down {
+                reason: reason.clone(),
+            },
+        })
     }
 
     fn capabilities(&self) -> TransportCaps {
@@ -3270,6 +3438,7 @@ mod tests {
                 sandbox: None,
             }),
             None,
+            Arc::new(|| {}),
         );
 
         (state, seen)
@@ -4274,6 +4443,106 @@ mod tests {
     /// ★시험 구획은 범위 밖이다★ — 그쪽은 일부러 락을 붙드는 항목을 갖는다
     /// ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). 그 사실은 위 그 갈래의
     /// 주석이 예외로 이름을 적어 둔다.
+    /// ★통로의 핸드셰이크 상한이 매니저의 연결 판정 창 **안에** 들어야 한다★.
+    ///
+    /// 두 값이 뒤집히면 판정이 「아직 안 섰다」를 보고 실패 도장을 찍는데, 그 순간 통로는 아직 답을
+    /// 기다리는 중이다 — 즉 **멀쩡한 이어받기가 우리 성급함 때문에 실패로 기록된다.** 반대로 상한이
+    /// 창보다 작으면, 창이 끝날 때 통로는 이미 `Down` 을 세워 두었으므로 판정이 **사유를 들고** 확정한다.
+    /// ★이 관계는 두 파일에 흩어진 두 상수 사이에만 있어 컴파일러가 못 본다★ — 한쪽만 조정하면 아무 것도
+    /// 안 깨지고 결함만 되살아나므로 여기서 잰다.
+    #[test]
+    fn the_handshake_budget_fits_inside_the_managers_link_window() {
+        assert!(
+            HANDSHAKE_BUDGET < crate::manager::LINK_DECISION_WINDOW,
+            "핸드셰이크 상한({HANDSHAKE_BUDGET:?})이 연결 판정 창({:?}) 이상이다 — 그러면 판정이 통로보다              먼저 포기해, 답을 기다리던 멀쩡한 이어받기가 실패로 기록된다",
+            crate::manager::LINK_DECISION_WINDOW
+        );
+    }
+
+    /// ★stdin 을 놓은 뒤의 수습이 **유계**다★ — 상대가 안 끝나면 이 화신을 직접 끝낸다.
+    ///
+    /// 이것이 없으면 「stdin 을 닫았다」가 회수를 보장하지 않는다: 상대가 stdout 을 연 채로 남으면 리더는
+    /// 영영 읽기에 매달리고, 자식·Job·스레드 셋이 닫기 전과 똑같이 붙들린다 — 아무 신호 없이.
+    /// ★실 자식 없이 잰다★ — 재려는 것은 「유예를 넘기면 마지막 수단이 도나」이고, 그 답에 실 프로세스는
+    ///   무관하다(그래서 처분을 클로저 seam 으로 받는다).
+    #[test]
+    fn the_bounded_wait_tears_the_incarnation_down_when_the_peer_will_not_leave() {
+        let state = shared();
+        let shutdown = AtomicBool::new(false);
+        let fired = Arc::new(AtomicI64::new(0));
+        let tear_down: TearDown = {
+            let fired = fired.clone();
+            Arc::new(move || {
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        // `closed` 가 서지 않는다 = 상대가 EOF 를 보고도 안 끝났다.
+        wait_for_close_or_tear_down(&state, &shutdown, &tear_down, Duration::from_millis(80));
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            1,
+            "유예를 넘겼는데 마지막 수단이 돌지 않았다 — 자식·Job·스레드가 데몬 수명 내내 붙들리고              종료 전이가 영영 서지 않는다"
+        );
+    }
+
+    /// ★상대가 제때 끝나면 아무것도 죽이지 않는다★ — 위 항목의 짝(그것만 있으면 「항상 죽인다」도 통과한다).
+    #[test]
+    fn the_bounded_wait_does_nothing_when_the_peer_leaves_in_time() {
+        let state = shared();
+        let shutdown = AtomicBool::new(false);
+        let fired = Arc::new(AtomicI64::new(0));
+        let tear_down: TearDown = {
+            let fired = fired.clone();
+            Arc::new(move || {
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        let waker = state.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            let (lock, cv) = &*waker;
+            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            s.closed = true;
+            cv.notify_all();
+        });
+
+        wait_for_close_or_tear_down(&state, &shutdown, &tear_down, Duration::from_secs(5));
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "상대가 스스로 끝났는데도 죽였다 — 정상 종료를 앞질러 죽이면 이 수습이 마지막 수단이 아니게 된다"
+        );
+    }
+
+    /// ★사용자가 껐으면 이 수습은 빠진다★ — 그 경로의 두 동사는 [`AgentTransport::shutdown`] 것이고,
+    /// 여기서 겹쳐 죽이면 같은 인과에 주인이 둘이 된다.
+    #[test]
+    fn the_bounded_wait_defers_to_an_explicit_shutdown() {
+        let state = shared();
+        let shutdown = AtomicBool::new(true);
+        let fired = Arc::new(AtomicI64::new(0));
+        let tear_down: TearDown = {
+            let fired = fired.clone();
+            Arc::new(move || {
+                fired.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+
+        let started = Instant::now();
+        wait_for_close_or_tear_down(&state, &shutdown, &tear_down, Duration::from_secs(5));
+        assert_eq!(
+            fired.load(Ordering::SeqCst),
+            0,
+            "사용자 종료 경로에서 통로가 따로 죽였다"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "사용자 종료 경로에서 유예만큼 잤다 — teardown 이 그만큼 느려진다"
+        );
+    }
+
     #[test]
     fn the_production_blocking_stdin_locks_are_counted() {
         /// `stdin` 뒤에 공백을 건너뛰고 `.lock()` 이 오는 자리 — 여러 줄로 쪼개 쓴 형태도 같이 잡는다.
@@ -4302,9 +4571,10 @@ mod tests {
         assert_eq!(
             blocking_acquisitions(&code),
             2,
-            "운영 구획의 블로킹 stdin 락 취득 수가 달라졌다 — `write_line` 과 `writer_loop` 의 기록 실패 \
-             갈래 둘이 전부여야 한다. 늘었다면 그 새 자리가 어느 스레드에서 불리는지 먼저 판정할 것: \
-             라이터가 `write_all` 에 매달린 동안 그 락을 블로킹으로 기다리는 자리가 생기면 데드락이다"
+            "운영 구획의 블로킹 stdin 락 취득 수가 달라졌다 — `write_line` 과 `writer_loop` 의 \
+             **핸드셰이크 실패 갈래**(기록 실패만이 아니라 왕복 실패·거절도 같은 자리를 지난다) 둘이 \
+             전부여야 한다. 늘었다면 그 새 자리가 어느 스레드에서 불리는지 먼저 판정할 것: 라이터가 \
+             `write_all` 에 매달린 동안 그 락을 블로킹으로 기다리는 자리가 생기면 데드락이다"
         );
     }
 

@@ -54,4 +54,38 @@ pub trait AgentTransport: Send + Sync {
     fn shutdown(&self);
 
     fn capabilities(&self) -> TransportCaps;
+
+    /// 이 통로가 **연결을 세워야** 쓸 수 있는가, 그리고 지금 어디까지 섰나.
+    ///
+    /// `None`(기본값) = 세울 연결이 없다. PTY·stdio 는 프로세스가 뜬 순간부터 쓸 수 있으므로 이 축이
+    /// 아예 없고, 그래서 이 메서드를 구현하지 않는다.
+    ///
+    /// ★왜 필요한가 — 「살아 있다」가 「쓸 수 있다」가 아닌 통로가 생겼기 때문이다★:
+    ///   활성화 판정([`crate::manager::AgentManager`] 의 조기종료 창)은 **프로세스 생사**만 본다. 그
+    ///   전제는 「뜨면 쓸 수 있다」인데, 핸드셰이크를 왕복해야 쓸 수 있는 통로(codex app-server)에서는
+    ///   거짓이다. 그 통로에서 이어받기가 거절당하면 **자식은 멀쩡히 살아 있고** 거절은 stdout 으로
+    ///   오므로, 판정은 창이 끝날 때까지 `Running` 만 보고 **성공으로 도장을 찍으며 마지막 실패 기록까지
+    ///   지운다**. 그 결말이 ADR-0082 가 막으려던 바로 그것이다.
+    /// ★그래서 이 값이 답하는 질문은 하나다: **아직 못 쓰는 상태로 창을 넘겼나**★. 넘겼으면 판정은
+    ///   「살아 있음」을 낼 수 없다.
+    /// ★`Down` 의 `reason` 은 상대가 준 사유를 담는다 — 그것이 분류의 유일한 입구다★: 이 통로의 실패
+    ///   사유는 stdout 의 JSON-RPC 오류로 오므로 stderr 진단 꼬리에도, 콘솔 꼬리에도 잡히지 않는다.
+    ///   그 문자열을 여기로 올리지 않으면 [`crate::backend::resume_failure_kind`] 에 닿을 길이 없다.
+    fn link_state(&self) -> Option<LinkState> {
+        None
+    }
+}
+
+/// 통로의 연결 수립 단계(`AgentTransport::link_state`).
+///
+/// ★상태는 셋뿐이고 그 셋이 배타적이어야 한다★ — 판정하는 쪽은 「아직」과 「못 섰다」를 다르게 처분한다
+/// (앞은 기다리고 뒤는 즉시 실패). 둘을 한 값으로 합치면 그 구별이 호출자 쪽 추측이 된다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkState {
+    /// 아직 세우는 중. ★이 상태로 창을 넘긴 것은 성공이 아니다★.
+    Establishing,
+    /// 섰다 — 이 통로로 입력이 나간다.
+    Up,
+    /// 못 섰다(또는 끊겼다). `reason` = 사람이 읽을 사유이자 backend 분류의 입력.
+    Down { reason: String },
 }
