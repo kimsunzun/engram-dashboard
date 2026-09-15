@@ -20,7 +20,12 @@
 //!   않는다. 상태 락을 쥔 채 stdin 락을 잡는 자리도 없다.
 //!
 //! ★teardown 은 오늘 인과 그대로다(ADR-0001 2 동사)★ — [`AgentTransport::shutdown`] 안에 기다림을
-//!   더하지 않고, ★stdin 은 kill 보다 먼저 닫지 않는다★(사유 정본 = `transport/stdio.rs` 의 같은 자리).
+//!   더하지 않고, ★**그 경로에서는** stdin 을 kill 보다 먼저 닫지 않는다★(사유 정본 = `transport/stdio.rs`
+//!   의 같은 자리). ★**이것은 파일 전체 규칙이 아니라 teardown 경로의 규칙이다 — 양방향으로 오해하지 말 것**★:
+//!   ① 세션 id 기록이 실패한 갈래에서는 [`writer_loop`] 이 **kill 없이** stdin 을 닫는다(그 자리 주석이 왜
+//!   거기서 안전한지의 정본). 그 존재를 이 문장으로 되돌리지 말 것. ② 반대로 그 새 자리를 근거로
+//!   `shutdown()` 의 순서를 뒤집지도 말 것 — 두 자리가 안전한 이유가 **다르고**, 그쪽 순서는
+//!   [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`] 가 지키는 실제 회귀다.
 //!   라이터 스레드는 아무도 join 하지 않고, ★닫힘 표식(`State::closed`)을 보고 스스로 끝난다 — 그 표식을
 //!   세우는 자리가 **둘**이다★: `shutdown()`(우리가 죽였다)과 [`ReaderExit`] 의 `Drop`(상대가 스스로
 //!   끝났거나 리더가 panic 했다 — `Drop` 이라 unwind 도 반드시 지난다). 앞의 경우 자식을 죽이면 파이프가
@@ -33,16 +38,25 @@
 //!   - **비-Windows 에는 손자를 거두는 수단이 없다.** Job Object 도 프로세스 그룹도 안 쓴다.
 //!   - [`AgentTransport::interrupt`] 는 닫힘 표식을 안 본다 — 닫히는 찰나에 버려질 줄 하나에 `Ok` 를
 //!     돌려주는 창이 있다.
-//!   - 핸드셰이크가 실패하면 큐에 선 입력이 사라지는데, **몇 건이 사라졌는지는 로그에만** 남는다
-//!     (화면에 오르는 것은 "핸드셰이크 실패" 뿐이다).
+//!   - 연결이 서지 못하면 큐에 선 입력이 사라진다. **몇 건이 사라졌는지는 로그와 화면 둘 다에 남는다** —
+//!     실패 결말의 `detail` 이 그 건수를 싣는다([`writer_loop`] 의 그 갈래). ★한때 여기 「로그에만 남는다
+//!     (화면에 오르는 것은 "핸드셰이크 실패" 뿐이다)」로 적혀 있던 것은 낡은 서술이다★ — 건수는 실려 있고,
+//!     머리말도 하나가 아니라 둘이다([`HandshakeFailure::headline`] — 프로토콜 왕복 실패와 세션 id 기록
+//!     실패를 갈라 적는다).
 //!   - pump 는 panic 하는 `thread::spawn` 으로 띄운다(나머지 둘은 실패를 로그로 흡수한다).
 //!   - **한 번의 블로킹 쓰기는 무한히 매달릴 수 있다** — 상대가 우리 stdin 을 안 읽으면 `write_all` 이
 //!     파이프 backpressure 로 멈추고, 거기서 빠져나오는 길은 `shutdown()` 의 kill 뿐이다. 시한도
 //!     조건변수도 그 한 번의 쓰기 안쪽에는 닿지 않는다. ★이것이 이 파일 전체에 걸리는 한계이지
 //!     핸드셰이크만의 것이 아니다★.
-//!   - **라이터에는 panic 봉쇄가 없다**(pump 에는 `catch_unwind` 가 있다). 라이터가 panic 하면 link 는
-//!     `Ready` 이고 닫힘 표식도 안 서므로, [`AgentTransport::send_input`] 이 아무도 보내지 않을 턴을
-//!     상한까지 받아들이다가 그 정지를 "큐가 찼다" 로 신고한다 — 위 첫 항목과 같은 사유 어긋남이다.
+//!   - **라이터의 panic 봉쇄는 한 자리뿐이다** — 세션 id 기록 호출을 감싼 [`record_session_id`] 의
+//!     `catch_unwind` 가 그것이고(pump 에도 따로 있다), **그 밖의 라이터 코드에는 없다.** 봉쇄 밖에서
+//!     라이터가 panic 하면 그 시점에 이미 선 상태가 남는다: 핸드셰이크 **전**이면 link 는 `Connecting`
+//!     이고 닫힘 표식도 안 서서 [`AgentTransport::send_input`] 이 계속 `Ok` 를 돌려주며 큐를 상한까지
+//!     채우고 그 정지를 "큐가 찼다" 로 신고한다(위 첫 항목과 같은 사유 어긋남). 핸드셰이크 **뒤**면 link
+//!     는 이미 `Ready` 라 같은 증상이 턴 경로에서 난다. ★어느 쪽이든 닫힘 표식은 안 서므로 pump 도
+//!     reaper 도 움직이지 않는다★.
+//!   - ★**위 봉쇄는 unwind 빌드에서만 선다**★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가
+//!     `panic = "abort"` 라, 릴리스에서는 `catch_unwind` 가 아무것도 잡지 않고 프로세스가 죽는다.
 //!   - **응답보다 먼저 온 종료를 붙들어 두는 칸은 [`EARLY_COMPLETION_SLOTS`] 개다**(그 칸에는 turn id
 //!     와 **그 줄이 만든 턴 경계**가 함께 실린다 — [`EarlyCompletion`]). 한 응답을 기다리는
 //!     동안 그보다 많은 종료가 흘러오면 가장 오래된 것부터 버려지고, 버려진 것이 우리 턴의 것이었다면 그
@@ -54,12 +68,32 @@
 //!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
 //!     같은 모양이고 이 저장소에 `CREATE_SUSPENDED` 는 한 줄도 없다. 고치는 것은 세 통로를 함께 건드리는
 //!     별건이다.
-//!   - **핸드셰이크가 실패해도 자식·리더·라이터는 그대로 남는다** — 링크만 `Down` 이 되고 아무도 죽이지
+//!   - **프로토콜 왕복이 실패하면 자식·리더·라이터는 그대로 남는다** — 링크만 `Down` 이 되고 아무도 죽이지
 //!     않는다. ★이것은 의도다★: 이 통로는 자기 수명을 스스로 끝내지 않고(ADR-0001 의 2 동사는 `kill`
 //!     핸들러의 것이다), 종료 전이는 pump 단독이다(ADR-0005). 그래서 그 세션은 매니저가 거둘 때까지
-//!     상주한다 — 화면에는 핸드셰이크 실패 오류가 이미 올라가 있다.
+//!     상주한다 — 화면에는 실패 오류가 이미 올라가 있다.
+//!     ★**단 이것을 「연결이 못 선 모든 경우」로 넓혀 읽지 말 것 — 갈래가 둘이다**★: 왕복은 성공했고
+//!     **세션 id 기록**에서 넘어진 갈래에서는 [`writer_loop`] 이 우리 쪽 stdin 을 놓는다. 그 갈래에서만
+//!     상대가 살아 있는 것이 확정이라, 놓지 않으면 라이터가 `Job::Sweep` 만 물고 영원히 돌며 셋을 통째로
+//!     붙든다(리더가 EOF 를 못 보므로 pump 도 reaper 도 움직이지 않는다). ★그래도 이 통로가 kill 을 부르는
+//!     것은 아니다★ — 쓰기 끝을 놓을 뿐이고, 종료 전이는 여전히 pump 단독이다(ADR-0005 그대로).
+//!     ★**그 갈래 전체가 릴리스에서는 죽은 코드다 — 「지금 이렇게 돈다」로 읽지 말 것**★: 기록 실패는
+//!     [`record_session_id`] 가 잡은 패닉에서만 나오고, 워크스페이스 루트의 `[profile.release]` 가
+//!     `panic = "abort"` 라 릴리스에서는 그 자리에서 프로세스가 죽는다. stdin 닫기도, 「이 화신을 쓰지
+//!     않는다」 `detail` 갈래도, [`HandshakeFailure::headline`] 의 「세션 id 기록 실패」 머리말도
+//!     **unwind 빌드에서만 관측된다**. ★**서수로 가리키지 말 것**★ — 갈래 순서는 바뀌고, 나머지 둘
+//!     (「보낸 입력 N 건이 사라졌다」·「연결이 서지 못했다」)은 왕복 실패로 **릴리스에서도 닿는다**.
+//!   - **기록 실패 뒤의 회수는 첫 고리가 *상대의* 행동이고 우리에게 backstop 이 없다** — stdin 을 놓은 뒤
+//!     실제로 세션을 끝내는 것은 「상대가 EOF 를 보고 스스로 exit 한다」이며(실측 41–51ms), 그것이 일어나야
+//!     리더 EOF → pump → reaper 가 이어진다. ★그 전제가 깨지면 위 wedge 가 **아무 신호 없이** 돌아온다★ —
+//!     시한도 없고 그때 kill 할 자리도 없다(이 통로는 kill 을 안 부른다). codex 는 스스로 업데이트하고 이
+//!     프로토콜에는 버전 칸이 없어(이 헤더의 다른 항목이 그 사실을 이미 말한다) 그 행동이 조용히 바뀔 수
+//!     있다. **이 항목을 줄이지 말 것** — 고치려면 유계 대기와 그 뒤의 처분을 누가 지는지부터 정해야 한다.
 //!   - **세션 id 기록 포트는 라이터 스레드 위에서 동기로 불린다** — 그 콜백이 블록하면 그 스레드가 갇혀
-//!     입력도 제어 줄도 나가지 않는다. 오늘은 조립점이 `None` 을 주므로 잠재적이다.
+//!     입력도 제어 줄도 나가지 않는다. ★**이것은 잠재적이 아니라 실재한다**★: 조립점(`manager.rs`)이 모든
+//!     spawn 에 포트를 넘기고, 그 구현은 프로필 레지스트리 락을 잡아 `agents.json` 을 통째로 다시 쓴다.
+//!     즉 이 통로는 핸드셰이크 끝에서 **남의 디스크 쓰기만큼** 멈출 수 있다. 그 동안 제어 줄이 슬라이스당
+//!     하나씩만 나가는 위 항목과 곱해져 [`OUTBOX_LIMIT`] 거절 떨굼을 **길게** 만든다.
 //!   - **나간 요청의 실제 상한은 `budget + SWEEP_INTERVAL` 이고, 그 시계는 첫 쓰기 *뒤에* 시작한다.**
 //!     첫 `recv_timeout` 한 슬라이스가 지나야 시한을 처음 읽고, 그 앞의 요청 쓰기 자체는 유계가 아니다.
 //!   - **핸드셰이크 중에는 제어 줄이 슬라이스당 하나씩만 나간다.** 서버 요청이 그보다 빨리 쌓이면
@@ -95,6 +129,7 @@ use super::protocol::{
     ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
     TurnStartResponse, UserInput, METHOD_NOT_FOUND,
 };
+use crate::backend::SessionIdSink;
 use crate::output_core::OutputCore;
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{
@@ -205,15 +240,6 @@ const MAX_TURN_ID_BYTES: usize = 128;
 /// 겨눈다). 턴 id 를 정하는 것은 **우리 요청 id 로 짝지어지는 `turn/start` 응답 하나뿐**이다.
 ///
 const TURN_COMPLETED: &str = method::TURN_COMPLETED;
-
-// ── 세션 id 기록 포트 ─────────────────────────────────────────────────────────
-
-/// codex 가 발급한 thread id 를 기록하는 **중립 한 동사** 포트.
-///
-/// ★`ProfileRegistry` 를 여기로 들이지 않는다(ADR-0004)★ — 그 타입은 `backend/` 에서 보이지 않고, 보이게
-/// 만들면 통로가 프로필 스키마를 알게 된다. 조립점이 자기 기록 수단을 이 한 동사로 감싸 넘긴다.
-/// ★이름에 백엔드가 들어가지 않는 것도 계약이다★ — "codex 용" 이라 부르는 순간 같은 격리가 샌다.
-pub(crate) type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 // ── 상태 기계 ─────────────────────────────────────────────────────────────────
 
@@ -871,6 +897,100 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
     }
 }
 
+/// 받은 thread id 를 조립점의 기록 동사에 넘긴다. `Err` = 이 화신의 연결을 세우면 안 된다.
+///
+/// ★게이트의 정직한 조건은 「디스크에 있다」가 아니라 「기록 호출이 돌아왔다」다★ — 그 포트는 실패를 자기
+/// 안에서 로그로 삼키고 호출자를 막지 않으므로, 그 위에 영속성을 주장하면 없는 보장을 인용하게 된다.
+/// 포트가 `None` 이면 기록되는 곳도 없다.
+/// ★[`Link::Ready`] 보다 먼저 불린다 — 뒤집지 말 것★: `turn/start` 가 허용되는 선이 `Ready` 라, 순서가
+/// 뒤집히면 기록되기 전에 그 세션으로 턴이 나가고 포트는 「보내기 전에 불린다」는 계약을 잃는다. 그 계약이
+/// 서 있는 덕에 기록됐는지 되묻는 둘째 동사가 없다.
+///
+/// ★닫힘 울타리는 창을 **좁힐 뿐 닫지 못한다 — 「늦은 쓰기를 막는다」로 읽지 말 것**★. 막는 것은 하나다:
+/// **이 스레드가 여기 닿기 전에 이미 관측된 종료**(자식이 답하고 곧장 죽어 리더가 EOF 를 본 경우 ·
+/// [`AgentTransport::shutdown`] 이 먼저 돈 경우).
+///
+/// ★**남는 창을 「몇 개 명령」으로 어림하지 말 것 — 그 크기의 지배항은 락 경합이다**★. 창은 위 상태 락을
+/// 놓는 순간부터 **프로필 맵이 실제로 바뀌는 순간**까지이고, 그 사이에 이 스레드는 프로필 레지스트리 락을
+/// 기다린다. 그 락은 다른 스레드가 **`agents.json` 전체 재기록이 끝날 때까지** 쥐고 있을 수 있다(ADR-0071
+/// 이 저장을 락 안에 둔다). 그래서 이 창 안에 `shutdown()` 도, `join_pump` 의 반환도, reaper 의 수거도
+/// 통째로 들어갈 수 있고, 그 뒤에 도착한 쓰기가 **이미 거둬진 세션의 프로필에 sid 를 적고 옛 sid 를
+/// 이력으로 민다.** 화신 표식 가드도 이 창을 안 덮는다 — 종료 경로 중 어느 것도 `epoch` 을 건드리지 않아
+/// 거둬진 세션과 산 세션의 표식이 **같다**.
+///
+/// 그 창을 닫으려면 「살아 있나」 판정이 기록과 **한 임계구역**에 들어가야 하는데, 그 임계구역은 프로필
+/// 레지스트리 쪽이고 이 통로의 상태 락은 거기까지 들고 갈 수 없다(락 보유 중 디스크 쓰기가 된다 — 모듈
+/// 헤더의 락 순서).
+///
+/// ★`catch_unwind` 가 실제로 사는 값을 부풀리지 말 것 — 「기록이 터져도 안전하다」가 아니다★.
+/// 이 포트 아래의 호출 그래프에는 **우리 코드가 만드는 패닉원이 없다**(해독은 `Result` 로 돌아오고,
+/// `now_millis` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장소는 IO 오류를
+/// 자기 안에서 삼킨다). 닿을 수 있는 것은 **poison 가드**(`expect`)들이고 — 레지스트리 맵 락과, 쓰기가
+/// 실제로 일어날 때 그 아래에서 잡히는 저장소 락, 서로 다른 모듈에 하나씩 — 어느 쪽이든 서려면 **먼저
+/// 다른 패닉이 그 락을 오염시켜 놓았어야** 한다. 그러니 이 봉쇄가 사는 것은 딱 하나다:
+/// ★이미 남의 패닉으로 레지스트리가 망가진 상태에서, codex 라이터가 **그 위에 겹쳐 죽지는 않는다**★.
+/// ★**게다가 릴리스에서는 이 갈래가 죽은 코드다**★ — 워크스페이스 루트 `Cargo.toml` 의
+/// `[profile.release]` 가 `panic = "abort"` 라 [`std::panic::catch_unwind`] 가 아무것도 잡지 않고
+/// 프로세스가 그대로 죽는다. 즉 `Err` 로 도는 결말은 unwind 빌드(개발·테스트)에서만 관측된다.
+/// 그래도 두는 이유 둘 — 그 빌드에서는 실제로 서고, 패닉 전략이 바뀌면 방어가 저절로 산다.
+///
+/// unwind 빌드에서 이것이 막는 것: 여기서 unwind 가 올라가면 [`Link::Ready`] 도 [`Link::Down`] 도 서지
+/// 않아 링크가 `Connecting` 에 멈추고, 그 상태에서 [`AgentTransport::send_input`] 은 닫힘 표식도 `Down`
+/// 도 못 보고 **`Ok` 를 돌려주며 큐가 상한까지 찬다** — 에이전트는 Running 으로 보이는데 벙어리가 되고
+/// kill 말고는 복구가 없다(ADR-0190 의 「조용히 통과시키지 않는다」가 「조용히 멈춘다」로 무너지는 자리).
+fn record_session_id(
+    state: &SharedState,
+    shutdown: &AtomicBool,
+    sid_sink: Option<&SessionIdSink>,
+    thread_id: &str,
+) -> Result<(), String> {
+    let Some(sink) = sid_sink else {
+        tracing::debug!(
+            "codex thread id 를 받았으나 기록할 곳이 없다 — 조립점이 기록 포트를 주지 않았다"
+        );
+        return Ok(());
+    };
+
+    // ★두 표식을 함께 본다★ — [`AgentTransport::shutdown`] 은 이 원자를 **먼저** 세우고 그 다음에 상태
+    //   락을 잡아 `closed` 를 세운다. 그 사이는 비어 있지 않다(그 순간 락은 `send_input`·[`next_job`]·
+    //   리더의 거절 경로가 쥐고 있을 수 있다). 하나만 보면 그 구간이 통째로 새는데, 둘을 OR 하면 공짜로 닫힌다.
+    let already_ended = shutdown.load(Ordering::Acquire) || {
+        let (lock, _) = &**state;
+        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        s.closed
+    };
+    if already_ended {
+        // ★정상 종료라 실패 결말을 내지 않는다★ — `Err` 로 돌리면 이미 끝난 세션에 오류 경계가 하나 더 선다.
+        tracing::debug!("codex thread id 를 기록하지 않는다 — 이 화신은 이미 끝났다");
+        return Ok(());
+    }
+
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sink(thread_id))).map_err(|_| {
+        tracing::error!("codex 세션 id 기록이 패닉했다 — 이 화신의 연결을 내린다");
+        "세션 id 기록이 패닉했다".to_string()
+    })
+}
+
+/// 연결이 서지 못한 사유 한 건. ★두 칸이 **다른 질문**에 답한다★ — `reason` 은 사람에게 뭐라고 말하나,
+/// `while_recording` 은 **상대가 지금 살아 있는가**다. 뒤쪽이 stdin 을 닫을지를 가르므로 합치지 말 것.
+struct HandshakeFailure {
+    reason: String,
+    /// 왕복 둘은 성공했고 기록 단계에서 넘어졌나. `true` = 상대가 살아서 우리 stdin 을 읽고 있다(확정).
+    while_recording: bool,
+}
+
+impl HandshakeFailure {
+    /// 화면·로그의 머리말. ★두 갈래를 같은 문장으로 신고하지 않는다★ — 기록 실패를 「핸드셰이크 실패」로
+    /// 적으면 프로토콜 왕복을 의심하게 만들어 분류 비용이 엉뚱한 곳으로 간다(왕복은 성공했다).
+    fn headline(&self) -> &'static str {
+        if self.while_recording {
+            "codex app-server 세션 id 기록 실패(프로토콜 왕복은 성공했다)"
+        } else {
+            "codex app-server 핸드셰이크 실패"
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn writer_loop(
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -882,22 +1002,41 @@ fn writer_loop(
     start_params: ThreadStartParams,
     sid_sink: Option<SessionIdSink>,
 ) {
-    match handshake(&stdin, &state, &pending, &next_id, &start_params) {
+    // ★두 실패를 **갈라서** 든다★ — 이 통로가 말하는 「핸드셰이크」는 왕복 둘만이 아니라 **기록 호출이
+    //   돌아오는 데까지**이므로(위 [`record_session_id`] 의 게이트 조건) 둘 다 `Ready` 를 막고 아래 수습을
+    //   함께 탄다. 그래도 **뭉치면 안 되는 사실이 하나** 있다: 기록에서 넘어진 갈래는 왕복이 이미 성공한
+    //   뒤라 **상대가 살아서 우리 stdin 을 읽고 있는 것이 확정**이다. 왕복 자체가 실패한 갈래에는 그
+    //   확정이 없다. 그 차이가 아래에서 stdin 을 닫을지와 사람에게 뭐라고 말할지를 가른다.
+    let outcome = match handshake(&stdin, &state, &pending, &next_id, &start_params) {
+        Err(reason) => Err(HandshakeFailure {
+            reason,
+            while_recording: false,
+        }),
         Ok(thread_id) => {
-            // ★게이트의 정직한 조건은 「디스크에 있다」가 아니라 「기록 호출이 돌아왔다」다★ — 그 포트는
-            //   실패를 자기 안에서 로그로 삼키고 호출자를 막지 않으므로, 그 위에 영속성을 주장하면 없는
-            //   보장을 인용하게 된다. 포트가 없으면(오늘 조립점이 그렇다) 기록되는 곳도 없다.
-            if let Some(sink) = &sid_sink {
-                sink(&thread_id);
+            match record_session_id(&state, &shutdown, sid_sink.as_ref(), &thread_id) {
+                Ok(()) => Ok(thread_id),
+                Err(reason) => Err(HandshakeFailure {
+                    reason,
+                    while_recording: true,
+                }),
             }
+        }
+    };
+
+    match outcome {
+        Ok(thread_id) => {
             let (lock, cv) = &*state;
             let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
             s.thread_id = Some(thread_id);
             s.link = Link::Ready;
             cv.notify_all();
         }
-        Err(reason) => {
-            tracing::warn!("codex app-server 핸드셰이크 실패: {reason}");
+        Err(failure) => {
+            let HandshakeFailure {
+                reason,
+                while_recording,
+            } = &failure;
+            tracing::warn!("{}: {reason}", failure.headline());
             let dropped = {
                 let (lock, _) = &*state;
                 let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -932,18 +1071,28 @@ fn writer_loop(
                 }
             }
             core.emit(OutputEvent::Error(format!(
-                "codex app-server 핸드셰이크 실패: {}",
-                sanitize(&reason, LOG_STRING_LIMIT)
+                "{}: {}",
+                failure.headline(),
+                sanitize(reason, LOG_STRING_LIMIT)
             )));
             let detail = if dropped > 0 {
                 format!(
-                    "codex app-server 핸드셰이크 실패로 보낸 입력 {dropped}건이 사라졌다: {}",
-                    sanitize(&reason, LOG_STRING_LIMIT)
+                    "{} — 보낸 입력 {dropped}건이 사라졌다: {}",
+                    failure.headline(),
+                    sanitize(reason, LOG_STRING_LIMIT)
+                )
+            } else if *while_recording {
+                // ★여기서는 「연결이 서지 못했다」가 거짓이다★ — 왕복은 섰고, 우리가 안 쓰기로 한 것이다.
+                format!(
+                    "{} — 이 화신을 쓰지 않는다: {}",
+                    failure.headline(),
+                    sanitize(reason, LOG_STRING_LIMIT)
                 )
             } else {
                 format!(
-                    "codex app-server 핸드셰이크 실패로 연결이 서지 못했다: {}",
-                    sanitize(&reason, LOG_STRING_LIMIT)
+                    "{} — 연결이 서지 못했다: {}",
+                    failure.headline(),
+                    sanitize(reason, LOG_STRING_LIMIT)
                 )
             };
             core.emit(OutputEvent::TurnEnd {
@@ -952,11 +1101,53 @@ fn writer_loop(
                     detail: Some(detail),
                 },
             });
+
+            // ★기록에서 넘어진 갈래에서만 우리 쪽 stdin 을 닫는다★ — 이 갈래는 상대가 **살아서 우리
+            //   stdin 을 읽고 있는 것이 확정**이고, 우리는 그 세션을 쓰지 않기로 이미 정했다. 닫지 않으면
+            //   아래 루프가 `Job::Sweep` 만 물고 영원히 돌면서 자식·리더·라이터를 붙들고, 리더는 EOF 를
+            //   못 봐 [`OutputCore::finish`] 가 영영 안 돌아 **종료 전이도 수거도 일어나지 않는다**
+            //   (화면은 Running 인데 입력은 전부 거절 — 사람이 kill 할 때까지).
+            // ★이 통로가 자기 수명을 스스로 끝내는 것이 아니다★ — kill 은 여전히 안 부른다(ADR-0001 의
+            //   2 동사는 kill 핸들러의 것). 여기서 하는 것은 **우리 쪽 쓰기 끝을 놓는 것**뿐이고, 그 다음은
+            //   이미 있는 인과가 굴린다: 상대 exit(실측 41–51ms) → 리더 EOF → [`ReaderExit`] 의 `Drop` 이
+            //   `closed`+`Link::Down` → pump 가 종료 전이(ADR-0005 단독) → reaper 수거.
+            // ★여기서 stdin 락을 잡는 것이 안전한 이유(`shutdown` 의 순서 위험과 다르다)★: 그 위험은
+            //   **남의 스레드**가 `write_all` 에 매달린 라이터의 락을 기다리는 모양이다. 여기서 잡는 것은
+            //   라이터 자신이고, 이 지점은 루프에 들어가기 전이라 `write_all` 안이 아니다.
+            // ★**그 안전의 범위를 정확히 적는다 — 「파일 전체」가 아니라 「운영 호출 그래프」다**★:
+            //   블로킹으로 이 락을 잡는 자리는 운영 구획에 **둘**뿐이고([`write_line`] 과 바로 아래 이 줄)
+            //   [`write_line`] 을 부르는 것은 라이터뿐이다(`shutdown` 은 `try_lock` 이라 세지 않는다).
+            //   ★단 **시험 구획은 그 그래프 밖에서 같은 락을 블로킹으로 잡는다**★ —
+            //   [`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`] 가 별도 스레드에서
+            //   [`write_line`] 으로 8MiB 를 밀어 넣고 kill 이 올 때까지 락을 쥔다. 그런 채움 스레드와 이
+            //   갈래를 **같은 시험대에서** 돌리면 여기서 영원히 막히고, 그러면 stdin 이 안 닫혀 이 라운드가
+            //   세운 인과가 통째로 사라진다. 오늘 그렇게 조합하는 항목은 없다.
+            //   운영 구획의 그 개수는 [`tests::the_production_blocking_stdin_locks_are_counted`] 가 지킨다 —
+            //   셋째가 생기면 위 판정을 다시 해야 하므로 조용히 늘지 않게 막는다.
+            if *while_recording {
+                let had_stdin = stdin
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                    .is_some();
+                tracing::warn!(
+                    had_stdin,
+                    "세션 id 를 기록하지 못해 codex 쪽 stdin 을 닫는다 — 상대가 스스로 끝나고 세션이 수거된다"
+                );
+            }
         }
     }
 
     // ★핸드셰이크가 실패해도 루프는 돈다★ — 상대는 살아 있을 수 있고, 그러면 서버 요청에 답할 자리가
     //   여전히 필요하다(답하지 않으면 그쪽이 영구 정지한다).
+    // ★그 사유가 **뒤집힌 것이 아니라 한 갈래에서 다르게 충족된 것**이다★ — 기록 실패 갈래는 바로 위에서
+    //   stdin 을 닫았으므로, 상대는 답을 기다리는 대신 EOF 를 보고 끝난다. 그 갈래에서도 루프는 그대로 돌고,
+    //   리더가 EOF 를 보아 `closed` 를 세우면 [`next_job`] 이 `None` 을 돌려 스스로 빠져나온다.
+    // ★**단 「상대가 정지하는 일이 없다」를 무조건으로 적지 말 것 — 그만큼은 재 본 적이 없다**★: 재 본 것은
+    //   「턴이 없는 상태에서 stdin 을 닫으면 41–51ms 안에 exit 한다」 하나다. 이 헤더가 따로 적는 조건
+    //   ——핸드셰이크 동안 상대의 요청이 쌓이고 거절이 [`OUTBOX_LIMIT`] 에서 떨어진다——아래에서는, 닫은 뒤
+    //   모든 [`write_line`] 이 실패하므로 **미답 요청이 남은 채로** 상대가 EOF 를 만난다. 그 상태에서도
+    //   상대가 그냥 끝나는지는 **미검**이다. 끝나지 않으면 위 「첫 고리가 상대의 행동」 항목 그대로다.
     loop {
         if shutdown.load(Ordering::Acquire) {
             break;
@@ -3341,6 +3532,78 @@ mod tests {
         );
     }
 
+    // ── 기록 호출의 두 예외 갈래 ──────────────────────────────────────────────
+
+    /// ★이미 끝난 화신에는 기록하지 않는다★ — 적히면 죽은 세션의 프로필이 남의 대화를 자기 것으로 들고,
+    /// 옛 sid 가 이력으로 밀린다. ★단 이것이 재는 것은 **이미 관측된** 종료뿐이다★ — 그 판정과 실제
+    /// 기록 사이에 끝나는 세션은 이 항목이 재는 범위 밖이고 오늘 통과한다(`record_session_id` doc).
+    /// ★표식 **둘 다** 재는 것이 요점이다★ — `shutdown()` 은 원자를 먼저 세우고 그 다음에 상태 락을 잡아
+    /// `closed` 를 세운다. 그 사이 구간은 비어 있지 않으므로 한쪽만 보는 울타리는 그만큼 샌다.
+    #[test]
+    fn a_session_that_already_ended_is_not_recorded() {
+        for (closed, shutting_down) in [(true, false), (false, true), (true, true)] {
+            let state = shared();
+            with_state(&state, |s| s.closed = closed);
+            let calls = Arc::new(AtomicI64::new(0));
+            let sink: SessionIdSink = {
+                let calls = calls.clone();
+                Arc::new(move |_| {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                })
+            };
+
+            assert!(
+                record_session_id(&state, &AtomicBool::new(shutting_down), Some(&sink), "T")
+                    .is_ok(),
+                "정상 종료를 실패 결말로 올렸다 (closed={closed}, shutdown={shutting_down})"
+            );
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                0,
+                "끝난 세션에 기록했다 (closed={closed}, shutdown={shutting_down})"
+            );
+        }
+    }
+
+    /// 짝 방향 — 둘 다 안 섰으면 기록한다. 없으면 위 항목이 「언제나 건너뜀」으로도 초록이다.
+    #[test]
+    fn a_live_session_is_recorded() {
+        let state = shared();
+        let calls = Arc::new(AtomicI64::new(0));
+        let sink: SessionIdSink = {
+            let calls = calls.clone();
+            Arc::new(move |_| {
+                calls.fetch_add(1, Ordering::Relaxed);
+            })
+        };
+
+        assert!(record_session_id(&state, &AtomicBool::new(false), Some(&sink), "T").is_ok());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// ★기록이 패닉해도 라이터를 데려가지 않는다★ — unwind 가 올라가면 `Ready` 도 `Down` 도 서지 않아
+    /// 링크가 `Connecting` 에 멈추고, 그 상태에서 [`AgentTransport::send_input`] 은 닫힘도 `Down` 도 못
+    /// 보고 `Ok` 를 돌려주며 큐만 찬다(ADR-0190 이 금한 「조용히 멈춤」). `Err` 로 바뀌어야 라이터가
+    /// 실패 갈래로 가 링크를 내린다.
+    #[test]
+    fn a_panicking_sink_becomes_a_failure_instead_of_unwinding() {
+        let state = shared();
+        let sink: SessionIdSink = Arc::new(|_| panic!("기록 포트가 터졌다"));
+
+        // ★훅 교체를 맨손으로 하지 않는다★ — 훅은 프로세스 전역이라, 같은 바이너리에서 동시에 도는 다른
+        //   항목이 자기 패닉 출력을 잃거나(진단 불가) 중첩 구간이 조용한 훅을 영구히 남긴다. 그 두 사고를
+        //   막는 헬퍼가 이미 있다.
+        let out = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
+            record_session_id(&state, &AtomicBool::new(false), Some(&sink), "T")
+        });
+
+        assert!(out.is_err(), "패닉이 실패로 바뀌지 않았다: {out:?}");
+        assert!(
+            with_state(&state, |s| matches!(s.link, Link::Connecting)),
+            "이 함수가 링크를 직접 옮겼다 — 옮기는 것은 호출자(라이터의 실패 갈래)다"
+        );
+    }
+
     /// 반대 방향의 짝 — `Ready` 인데 thread id 가 없으면 봉투를 만들 수 없다.
     #[test]
     fn nothing_is_sent_without_a_thread_id() {
@@ -3896,6 +4159,85 @@ mod tests {
                 "가드가 `{step}` 보다 뒤에 선다 — 그 사이의 실패가 자식을 남긴다"
             );
         }
+    }
+
+    /// ★기록 호출은 게이트가 열리기 **전에** 나와야 한다★ — 이것이 한 동사 포트의 존재 근거다
+    /// ([`crate::backend::SessionIdSink`]: 「적혔나」를 되묻는 둘째 동사가 없는 이유가 이 순서다).
+    /// 뒤집히면 기록되기 전에 그 세션으로 턴이 나가고, 포트는 **아무것도 보장하지 않는 통보**가 된다.
+    ///
+    /// ★왜 소스에서 재나★ — 포트는 `Fn(&str)` 이라 불린 시점의 링크 상태를 볼 수 없고, 보게 만들려면
+    /// 이 항목이 지키려는 바로 그 한 동사 계약을 깨야 한다. 게이트의 반대쪽 절반(「`Ready` 여야 턴이
+    /// 나간다」)은 [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]
+    /// 이 실제로 돌려서 잰다 — 둘이 합쳐 「기록 → 게이트 → 전송」 순서를 덮는다.
+    /// 선례·같은 사유 = [`tests::the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`].
+    #[test]
+    fn the_session_id_is_recorded_before_the_gate_opens() {
+        let src = include_str!("transport.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body = production
+            .split("fn writer_loop(")
+            .nth(1)
+            .expect("writer_loop 본문");
+
+        let recorded = body
+            .find("record_session_id(")
+            .expect("`record_session_id(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+        let gate_open = body
+            .find("Link::Ready")
+            .expect("`Link::Ready` 가 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+
+        assert!(
+            recorded < gate_open,
+            "기록 호출이 게이트(`Link::Ready`)보다 뒤에 선다 — 기록되기 전에 턴이 나갈 수 있고, 그러면 한 \
+             동사 포트가 보장하는 것이 없어진다(둘째 동사가 필요해진다)"
+        );
+    }
+
+    /// ★운영 구획에서 stdin 락을 **블로킹으로** 잡는 자리의 개수를 못 박는다★.
+    ///
+    /// 왜 개수인가 = [`writer_loop`] 의 기록 실패 갈래가 그 락을 잡는 것이 안전한 근거가 「운영 그래프에서
+    /// 이 락을 블로킹으로 잡는 자리가 저 둘뿐이고, 그중 [`write_line`] 은 라이터만 부른다」이기 때문이다.
+    /// 셋째가 조용히 생기면 그 근거가 말없이 낡는다 — 그때 나는 것은 컴파일 에러가 아니라 **데드락**이다.
+    ///
+    /// ★이 항목은 자리를 못 박지 않고 개수만 본다★ — 위치를 박으면 줄이 밀릴 때마다 낡는다. 늘었으면
+    /// 새 자리가 어느 스레드에서 불리는지 **직접 판정한 뒤** 이 숫자를 고친다(숫자만 올리지 말 것).
+    /// ★`try_lock` 은 안 센다★ — [`AgentTransport::shutdown`] 의 그 자리는 기다리지 않으므로 이 위험에
+    /// 애초에 안 든다. ★주석 줄도 안 센다★ — 이 파일은 본문에서 `stdin.lock()` 을 인용한다.
+    /// ★시험 구획은 범위 밖이다★ — 그쪽은 일부러 락을 붙드는 항목을 갖는다
+    /// ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). 그 사실은 위 그 갈래의
+    /// 주석이 예외로 이름을 적어 둔다.
+    #[test]
+    fn the_production_blocking_stdin_locks_are_counted() {
+        /// `stdin` 뒤에 공백을 건너뛰고 `.lock()` 이 오는 자리 — 여러 줄로 쪼개 쓴 형태도 같이 잡는다.
+        fn blocking_acquisitions(src: &str) -> usize {
+            let mut found = 0;
+            let mut from = 0;
+            while let Some(rel) = src[from..].find("stdin") {
+                let after = from + rel + "stdin".len();
+                let rest = src[after..].trim_start();
+                if rest.starts_with(".lock()") {
+                    found += 1;
+                }
+                from = after;
+            }
+            found
+        }
+
+        let src = include_str!("transport.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let code: String = production
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            blocking_acquisitions(&code),
+            2,
+            "운영 구획의 블로킹 stdin 락 취득 수가 달라졌다 — `write_line` 과 `writer_loop` 의 기록 실패 \
+             갈래 둘이 전부여야 한다. 늘었다면 그 새 자리가 어느 스레드에서 불리는지 먼저 판정할 것: \
+             라이터가 `write_all` 에 매달린 동안 그 락을 블로킹으로 기다리는 자리가 생기면 데드락이다"
+        );
     }
 
     /// stdin 락을 블로킹 write 가 쥐고 있어도 `shutdown` 이 완료된다 — 순서를 뒤집으면(stdin 을 kill

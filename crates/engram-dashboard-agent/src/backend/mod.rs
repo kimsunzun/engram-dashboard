@@ -20,6 +20,7 @@ pub use gemini::GeminiBackend;
 pub use shell::ShellBackend;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -51,6 +52,26 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
         (program.to_string(), args)
     }
 }
+
+// ── 세션 id 기록 포트 ─────────────────────────────────────────────────────────
+
+/// backend 가 상대에게서 **받아 온** 세션 id 를 조립점에 넘기는 **한 동사** 포트.
+///
+/// 호출은 그 id 를 실제로 받은 뒤 정확히 한 번이고, 받지 못하면 한 번도 불리지 않는다.
+/// 인자는 상대가 준 문자열 그대로다 — ★uuid 인지 판정하지 않는다★. 그 해석은 넘겨받는 쪽 몫이고,
+/// 그래서 uuid 로 못 읽히는 값이 와도 이 포트는 성립한다.
+///
+/// ★`ProfileRegistry` 를 `backend/` 로 들이지 않으려고 이 모양이다(ADR-0004)★ — 그 타입이 여기서 보이면
+/// 통로가 프로필 스키마를 알게 된다. 조립점이 자기 기록 수단을 이 한 동사로 감싸 넘긴다.
+/// ★이름에 백엔드가 들어가지 않는 것도 계약이다★ — "codex 용" 이라 부르는 순간 같은 격리가 샌다.
+/// ★한 동사인 것도 계약이다★ — "적혔나" 를 되묻는 둘째 동사를 달지 않는다. 되물을 것이 없도록 호출
+/// **순서**가 대신 서 있다([`AgentBackend::open_spawn`] 의 계약 참조).
+///
+/// 반환이 없으므로 **실패는 호출자에게 돌아가지 않는다** — 기록하는 쪽이 자기 안에서 로그로 삼킨다.
+/// 그래서 이 포트가 돌아왔다는 사실 위에 「영속됐다」를 얹으면 없는 보장을 인용하게 된다.
+// ADR-0004
+// ADR-0185
+pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {
@@ -164,6 +185,13 @@ pub trait AgentBackend: Send + Sync {
     ///   파이프를 고른 backend 가 그 자리에서 주입한다. 규칙은 그대로이고 주입하는 **자리**만 여기다.
     /// `cols`/`rows` 는 터미널 통로에만 쓰인다 — 파이프에는 크기 개념이 없어 무시된다.
     ///
+    /// `sid_sink` = 상대가 세션 id 를 **발급해 주는** backend 가 그 값을 조립점으로 돌려보낼 곳
+    /// ([`SessionIdSink`]). `None` = 조립점이 기록 수단을 주지 않았다 → 받아도 남길 곳이 없다.
+    /// ★그 id 를 스스로 받지 않는 backend 는 이 칸을 그냥 무시한다★ — claude 처럼 자기 파일을 감시해
+    ///   관측하는 쪽은 여기가 아니라 그 관측기 경로로 기록한다.
+    /// ★순서 계약★: 이 포트는 **그 세션으로 무엇을 보내기 전에** 불린다. 그래서 기록됐는지 되묻는
+    ///   둘째 동사가 필요 없다(포트가 한 동사인 이유 — [`SessionIdSink`]).
+    ///
     /// ★기본값 = PTY + 각 아스펙트가 신고한 값★: 통로를 따로 만들지 않는 backend 는 터미널로 뜨고
     ///   ([`AgentBackend::transport_shape`] 기본값과 같은 자리), 나머지 칸은 자기 메서드의 산출을 그대로
     ///   싣는다.
@@ -178,7 +206,11 @@ pub trait AgentBackend: Send + Sync {
         spec: &CommandSpec,
         cols: u16,
         rows: u16,
+        sid_sink: Option<SessionIdSink>,
     ) -> Result<SpawnParts, PtyError> {
+        // 이 기본값은 세션 id 를 받아 오지 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은
+        //   위 doc 이 부르는 것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
+        let _ = sid_sink;
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -433,8 +465,9 @@ pub fn open_spawn(
     spec: &CommandSpec,
     cols: u16,
     rows: u16,
+    sid_sink: Option<SessionIdSink>,
 ) -> Result<SpawnParts, PtyError> {
-    backend_for(c).open_spawn(c, spec, cols, rows)
+    backend_for(c).open_spawn(c, spec, cols, rows, sid_sink)
 }
 
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
@@ -1143,7 +1176,7 @@ mod tests {
                 //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts = open_spawn(c, &probe, 80, 24).expect("open_spawn");
+            let parts = open_spawn(c, &probe, 80, 24, None).expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();

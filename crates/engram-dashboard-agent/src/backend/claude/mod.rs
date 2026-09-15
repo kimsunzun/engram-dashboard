@@ -30,7 +30,8 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use crate::backend::{
-    console_command, AgentBackend, InputEncoder, SpawnParts, TransportShape, TurnClassifier,
+    console_command, AgentBackend, InputEncoder, SessionIdSink, SpawnParts, TransportShape,
+    TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -364,6 +365,9 @@ impl AgentBackend for ClaudeBackend {
     /// ★`structured: true` 를 주입하는 자리가 여기다(ADR-0044/0030)★: 파이프 자신은 나르는 바이트가
     ///   줄단위 JSON 인지 모르므로(바보 파이프) [`StdioTransport`] 는 그 값을 하드코딩하지 않고 받아서
     ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다.
+    /// ★`sid_sink` 를 쓰지 않는 것은 이 backend 가 세션 id 를 **받아 오지 않기 때문**이다★ — 우리가
+    ///   발급해 건네주고([`AgentBackend::assigns_session_id`]), 그 뒤의 drift 는 통로가 아니라 파일
+    ///   감시자([`AgentBackend::session_id_source`])가 관측한다. 그쪽이 이 backend 의 기록 경로다.
     // ADR-0044
     // ADR-0191
     fn open_spawn(
@@ -372,7 +376,10 @@ impl AgentBackend for ClaudeBackend {
         spec: &CommandSpec,
         cols: u16,
         rows: u16,
+        sid_sink: Option<SessionIdSink>,
     ) -> Result<SpawnParts, PtyError> {
+        // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
+        let _ = sid_sink;
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
                 let (t, pid) = StdioTransport::open(spec, true, self.output_decoder(command))?;

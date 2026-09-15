@@ -625,11 +625,32 @@ impl ProfileRegistry {
         })
     }
 
-    /// watcher가 세션 id 변경을 관측했을 때 호출 — 옛 sid를 이력으로 넘기고 새 값으로 교체,
+    /// 세션 id 를 관측한 자리에서 호출 — 옛 sid 를 이력으로 넘기고 새 값으로 교체,
     /// 변경 즉시 persist한다(1-b: clear→관측→persist 전 크래시 시 stale 복원 방지).
     /// 같은 값으로의 호출은 no-op(불필요한 디스크 쓰기 회피).
-    pub fn observe_session_id(&self, id: AgentId, new_sid: Uuid) -> bool {
+    ///
+    /// `incarnation`:
+    /// - `Some(epoch)` — 이 관측은 **그 화신**의 것이다. 프로필의 현재 epoch 과 같을 때만 쓴다.
+    /// - `None` — 대조할 화신 축이 호출자에게 없다. 무조건 쓴다.
+    ///
+    /// ★`None` 갈래는 잔여다(알고 수용 — 선례 [`ProfileRegistry::set_last_failure`])★: 오늘 그 갈래로
+    ///   들어오는 것은 파일 감시자([`crate::session_tracker::SessionTracker`]) 하나이고, 그 관측기는
+    ///   화신 표식을 나르지 않는다. 닫으려면 `SessionTracker::on_change`·`WatchEntry` 를 넓혀 그 생성
+    ///   지점을 전부 고쳐야 하는데 — 운영 호출부는 **하나뿐**이고(데몬 조립점) 나머지는 전부 시험대와
+    ///   실험용 bin 이다 — 그것으로 **오늘의 claude 동작은 한 가지도 달라지지 않는다**.
+    /// ★비교는 일치/불일치뿐★ — 표식으로 "더 새 것" 을 유도하지 않는다(ADR-0007/0163).
+    /// ★이 가드가 막는 것은 「더 새 화신이 이미 섰다」 하나다 — 「늦은 쓰기를 막는다」로 넓혀 읽지 말 것★:
+    ///   종료 경로 중 어느 것도 `epoch` 을 건드리지 않으므로(reaper 는 `auto_restore` 만 쓰고 통로의
+    ///   teardown 은 프로필을 안 만진다), **끝나기만 하고 다시 뜨지 않은** 세션의 표식은 산 세션의 것과
+    ///   같다. 그 창으로 들어온 관측은 그대로 통과해 죽은 세션의 프로필에 적힌다.
+    /// ★`bool` 이 뜻하는 것은 「메모리 맵이 바뀌었다」다 — 「디스크에 남았다」가 아니다★:
+    ///   [`ProfileStore::save`] 는 `()` 를 돌려주고 실패를 자기 안에서 삼킨다.
+    // ADR-0007
+    // ADR-0163
+    // ADR-0185
+    pub fn observe_session_id(&self, id: AgentId, incarnation: Option<u32>, new_sid: Uuid) -> bool {
         self.mutate_if(|m| match m.get_mut(&id) {
+            Some(p) if incarnation.is_some_and(|e| e != p.epoch) => false,
             Some(p) if p.backend_session_id != Some(new_sid) => {
                 if let Some(old) = p.backend_session_id.take() {
                     p.old_session_ids.push(old);
@@ -822,7 +843,7 @@ mod tests {
         let sid1 = reg.ensure_session_id(id).unwrap();
         let sid2 = Uuid::new_v4();
 
-        assert!(reg.observe_session_id(id, sid2));
+        assert!(reg.observe_session_id(id, None, sid2));
         let got = reg.get(id).unwrap();
         assert_eq!(got.backend_session_id, Some(sid2));
         assert!(
@@ -830,10 +851,68 @@ mod tests {
             "옛 sid가 이력에 남아야 함"
         );
 
-        assert!(!reg.observe_session_id(id, sid2));
+        assert!(!reg.observe_session_id(id, None, sid2));
 
         let persisted = store.load();
         assert_eq!(persisted[0].backend_session_id, Some(sid2));
+    }
+
+    // ── 화신 가드 (ADR-0007/0163 · ADR-0185) ──
+
+    /// ★죽은 화신의 뒤늦은 관측이 산 화신의 값을 덮지 못한다★ — 덮이면 그 프로필은 다른 대화를 자기
+    /// 것으로 믿고, 이어받기가 남의 스레드를 연다.
+    #[test]
+    fn observe_session_id_rejects_a_stale_incarnation() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let live = reg.epoch_for_spawn(id).unwrap();
+        let held = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, Some(live), held));
+
+        let stale = live.wrapping_add(1);
+        let intruder = Uuid::new_v4();
+        assert!(
+            !reg.observe_session_id(id, Some(stale), intruder),
+            "표식이 다른 관측이 통과했다"
+        );
+        assert_eq!(
+            reg.get(id).unwrap().backend_session_id,
+            Some(held),
+            "거절했는데 값이 바뀌었다"
+        );
+    }
+
+    /// 짝 방향 — 표식이 같으면 쓴다. 이것 없이는 위 항목이 「언제나 거절」로도 초록이다.
+    #[test]
+    fn observe_session_id_accepts_a_matching_incarnation() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let live = reg.epoch_for_spawn(id).unwrap();
+        let sid = Uuid::new_v4();
+
+        assert!(reg.observe_session_id(id, Some(live), sid));
+        assert_eq!(reg.get(id).unwrap().backend_session_id, Some(sid));
+    }
+
+    /// `None` = 대조할 축이 없다 → 표식과 무관하게 쓴다(claude 쪽 파일 감시자 갈래).
+    #[test]
+    fn observe_session_id_without_an_incarnation_writes_unconditionally() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        reg.upsert(p);
+        let live = reg.epoch_for_spawn(id).unwrap();
+        let sid = Uuid::new_v4();
+
+        // ★같은 자리에서 표식을 붙이면 거절된다는 것까지 함께 잰다★ — 이 짝이 없으면 이 항목은 가드가
+        //   통째로 사라져도 초록이다.
+        assert!(!reg.observe_session_id(id, Some(live.wrapping_add(1)), sid));
+        assert!(reg.observe_session_id(id, None, sid));
+        assert_eq!(reg.get(id).unwrap().backend_session_id, Some(sid));
     }
 
     #[test]

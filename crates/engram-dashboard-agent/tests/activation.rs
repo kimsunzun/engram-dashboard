@@ -772,7 +772,10 @@ fn we_do_not_mint_a_session_id_for_a_backend_that_mints_its_own() {
     assert_eq!(
         profiles.get(codex.id).and_then(|p| p.backend_session_id),
         None,
-        "자기 id 를 스스로 발급하는 백엔드에 우리 uuid 가 심겼다 — 발급 축이 이어받기 축으로 갈렸다(ADR-0185)"
+        "자기 id 를 스스로 발급하는 백엔드의 프로필에 sid 가 적혔다 — 원인이 둘이라 로그를 함께 볼 것: \
+         ① 우리가 uuid 를 심었다(발급 축이 이어받기 축으로 갈렸다 — ADR-0185) ② app-server 수령 경로가 \
+         받아 적었다. 이 시험대는 존재하지 않는 cwd 로 spawn 을 실패시켜 ②를 못 일어나게 하므로, ②라면 \
+         그 격리 전제가 먼저 깨진 것이다"
     );
     assert!(
         profiles

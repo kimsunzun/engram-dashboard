@@ -31,7 +31,8 @@ use self::decoder::CodexAppServerDecoder;
 use self::protocol::{AskForApproval, SandboxMode, ThreadStartParams};
 use self::transport::CodexAppServerTransport;
 use crate::backend::{
-    console_command, AgentBackend, InputEncoder, SpawnParts, TransportShape, TurnClassifier,
+    console_command, AgentBackend, InputEncoder, SessionIdSink, SpawnParts, TransportShape,
+    TurnClassifier,
 };
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
@@ -225,10 +226,15 @@ impl AgentBackend for CodexBackend {
 
     /// `session.resume = false` 인 이유는 ★**발급 주체와 무관하다**★ — 복원은 프로필에 저장된 backend
     /// sid **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는 `thread/start`
-    /// 응답으로 받아 쓰는 쪽이다. 그러니 이 칸이 false 인 것은 **그 값을 받아 프로필에 적는 배선이 아직
-    /// 없어서**다. ★판정 축([`AgentBackend::can_resume_stored_session`])도 **아직 꺼져 있다**★ — 그 축과
-    /// 이 칸은 **같은 배선 하나**를 기다리고, 그 배선 커밋이 둘을 함께 켠다. 둘 중 하나만 먼저 켜지 말 것:
-    /// 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로 보고된다.
+    /// 응답으로 받아 쓰는 쪽이다.
+    /// ★**「받아 적는 배선이 없어서」는 낡은 사유다 — 그 배선은 섰다**★: [`AgentBackend::open_spawn`] 이
+    /// 조립점의 기록 동사를 받아 app-server 통로에 넘기고, 그 통로가 `thread/start` 응답의 id 로 그것을
+    /// 부른다(실 app-server 실측 — 받은 id 가 프로필에 앉는다). 지금 이 칸이 false 인 사유는 **하나
+    /// 남았다 — `thread/resume` 을 내지 않는다**. 받은 id 는
+    /// 프로필에 적히기만 하고 이어받기에 쓰이지 않는다.
+    /// ★판정 축([`AgentBackend::can_resume_stored_session`])도 **아직 꺼져 있고, 그 축과 이 칸은 여전히
+    /// 같은 하나를 기다린다**★ — 이제 그 하나는 「수령 배선」이 아니라 `thread/resume` 이다. 둘 중 하나만
+    /// 먼저 켜지 말 것: 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로 보고된다.
     /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
     /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
     // ADR-0185
@@ -266,10 +272,12 @@ impl AgentBackend for CodexBackend {
     /// ★`structured: true` 와 `thread/start` 정책을 주입하는 자리가 여기다(ADR-0044/0030)★: 통로는 자기가
     ///   나르는 바이트가 무엇인지도, 어느 폴더를 어떤 샌드박스로 열어야 하는지도 모른다. 아는 쪽은 이
     ///   모드와 정책을 고른 이 backend 다.
-    /// ★`sid_sink` 가 `None` 인 것은 「기록하지 않기로 했다」가 아니라 **조립점이 아직 그 동사를 주지
-    ///   않는다**는 사실이다★ — [`AgentBackend::open_spawn`] 시그니처에 그 칸이 없다. 그래서 codex 가
-    ///   발급한 thread id 는 이 화신 안에서만 살고 프로필에 남지 않으며, 그 배선이 서기 전에는
-    ///   `capabilities().session.resume` 도 켤 수 없다(위 주석).
+    /// ★`sid_sink` 를 app-server 갈래에만 넘긴다★ — 터미널 갈래에는 받아 올 식별자 자체가 없다. 그
+    ///   포트로 나가는 값은 codex 가 `thread/start` 응답으로 발급한 thread id 이고, 통로가 그 세션으로
+    ///   무엇을 보내기 전에 나간다([`AgentBackend::open_spawn`] 의 순서 계약).
+    /// ★그 배선이 섰다고 `capabilities().session.resume` 이나
+    ///   [`AgentBackend::can_resume_stored_session`] 이 함께 켜지는 것이 아니다★ — 그 둘은 `thread/resume`
+    ///   을 실제로 내는 커밋이 함께 켠다. 여기까지는 값이 프로필에 **남기만** 한다.
     // ADR-0185
     // ADR-0191
     fn open_spawn(
@@ -278,6 +286,7 @@ impl AgentBackend for CodexBackend {
         spec: &CommandSpec,
         cols: u16,
         rows: u16,
+        sid_sink: Option<SessionIdSink>,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_app_server(command) {
@@ -291,7 +300,7 @@ impl AgentBackend for CodexBackend {
                     true,
                     self.output_decoder(command),
                     params,
-                    None,
+                    sid_sink,
                 )?;
                 (Box::new(t), pid)
             } else {
@@ -649,6 +658,306 @@ mod tests {
     #[test]
     fn capabilities_resume_is_false() {
         assert!(!CodexBackend.capabilities(&codex(vec![])).session.resume);
+    }
+
+    // ── ADR-0185: 받아 온 thread id 가 조립점의 기록 동사까지 실제로 간다 ──────────────────
+
+    /// 가짜 app-server 스크립트를 지운다 — 지웠으면 `true`. ★한 번 시도하고 마는 모양은 `%TEMP%` 에
+    /// 파일을 남겼다★: `shutdown()` 이 돌아온 뒤에도 자식이 그 파일 핸들을 잠깐 더 쥐고 있어 첫
+    /// `remove_file` 이 실패한다.
+    /// ★결과를 돌려주는 이유 = `eprintln!` 은 **통과한** 항목에서 libtest 가 삼킨다★ — 그 자리에 적으면
+    /// 지우지 못한 사실이 아무 데도 안 남고 찌꺼기만 쌓인다. 호출자가 단언으로 올린다.
+    #[cfg(windows)]
+    #[must_use = "지우지 못한 사실을 버리면 찌꺼기가 조용히 쌓인다 — 단언으로 올릴 것"]
+    fn remove_script(path: &std::path::Path) -> bool {
+        for _ in 0..40 {
+            if std::fs::remove_file(path).is_ok() || !path.exists() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        false
+    }
+
+    /// 핸드셰이크의 두 요청에만 답하는 최소 app-server. ★실 codex 가 아니다★ — 재는 것은 「상대가 준
+    /// thread id 가 [`AgentBackend::open_spawn`] 에 건넨 동사까지 오나」 하나이고, 그 답에 실 CLI 는
+    /// 무관하다(ADR-0012 격리).
+    /// ★인자로 넘기지 않고 파일로 굽는다★ — 스크립트에 JSON 이 들어 있어 `"` 가 필수인데, 그 문자는
+    /// Rust `Command` 의 인자 이스케이프와 powershell 의 명령줄 해석을 거치며 두 번 씹힌다.
+    /// ★stdout 은 raw 바이트로 쓴다★ — `Write-Output` 은 인코딩·BOM 이 호스트 설정에 딸려 가고, BOM 한
+    /// 바이트가 첫 줄을 JSON 이 아니게 만든다.
+    ///
+    /// ★**이 가짜는 답한 뒤에도 죽지 않고 stdin 을 계속 읽는다 — 그 성질이 한 항목의 전제다**★.
+    /// [`tests::a_recording_failure_ends_the_session`] 이 재는 것은 「기록이 실패하면 우리가 stdin 을 닫고
+    /// 그 결과로 세션이 끝난다」인데, 이 가짜가 스스로 끝나 버리면 EOF 가 **닫기와 무관하게** 와서 그
+    /// 항목이 배선을 하나도 안 재고 초록이 된다. 실제로 그렇지 않다는 것은 변이로 확인했다 — 닫기를
+    /// 없애면 그 항목에 상태 전이가 **하나도** 관측되지 않는다. ★그러니 아래 while 루프를 「응답 뒤
+    /// exit」 으로 바꾸면 그 항목이 조용히 무력해진다★.
+    #[cfg(windows)]
+    const FAKE_APP_SERVER_PS1: &str = r#"
+$ErrorActionPreference = 'Stop'
+$so = [Console]::OpenStandardOutput()
+function Send([string]$s) {
+  $b = [Text.Encoding]::ASCII.GetBytes($s + "`n")
+  $so.Write($b, 0, $b.Length)
+  $so.Flush()
+}
+while ($null -ne ($line = [Console]::In.ReadLine())) {
+  if ($line -match '"id":(-?\d+)') {
+    $rid = $Matches[1]
+    if ($line -match '"method":"initialize"') {
+      Send ('{"id":' + $rid + ',"result":{"codexHome":"h","platformFamily":"windows","platformOs":"windows","userAgent":"engram-fake/0"}}')
+    } elseif ($line -match '"method":"thread/start"') {
+      Send ('{"id":' + $rid + ',"result":{"thread":{"id":"THREAD_ID_PLACEHOLDER","cliVersion":"0.0.0-fake"}}}')
+    }
+  }
+}
+"#;
+
+    /// ★조립점이 `None` 을 넘기던 시절에는 이 항목이 서지 않았다★ — 배선이 다시 끊기면 여기서 잡힌다.
+    /// 재는 것은 **기록 동사가 불렸나**이고, 그 값이 프로필에 어떻게 앉나는 `manager.rs` 쪽 항목이 잰다.
+    #[cfg(windows)]
+    #[test]
+    fn an_app_server_spawn_hands_the_thread_id_to_the_sink() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
+        use std::sync::{Arc, Mutex};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let thread_id = Uuid::new_v4().to_string();
+        let script = FAKE_APP_SERVER_PS1.replace("THREAD_ID_PLACEHOLDER", &thread_id);
+        let script_path =
+            std::env::temp_dir().join(format!("engram-fake-app-server-{}.ps1", Uuid::new_v4()));
+        std::fs::write(&script_path, script).expect("가짜 app-server 기록");
+
+        let spec = CommandSpec {
+            program: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script_path.to_string_lossy().into_owned(),
+            ],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: SessionIdSink = {
+            let seen = seen.clone();
+            Arc::new(move |id: &str| seen.lock().unwrap().push(id.to_string()))
+        };
+
+        let parts =
+            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink))
+                .expect("open_spawn");
+
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+
+        // 핸드셰이크는 powershell 기동 + 두 왕복이라 즉시 끝나지 않는다. 시한은 통로 자신의 요청 시한
+        //   (30s)보다 짧게 둔다 — 넘기면 실패 사유가 「우리가 덜 기다렸다」로 흐려진다.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let got = seen.lock().unwrap().clone();
+
+        parts.transport.shutdown();
+
+        // ★두 실패를 갈라 적는다★ — 「한 번도 안 불렸다」는 배선이 끊긴 것일 수도, 가짜 app-server 가
+        //   시한 안에 안 뜬 것일 수도 있다(powershell 기동·실행 정책). 한 문장으로 적으면 환경 문제를
+        //   배선 회귀로 읽는다. ★그래서 이 갈래에서는 스크립트를 지우지 않는다★ — 손으로 돌려 봐야 갈린다.
+        assert!(
+            !got.is_empty(),
+            "시한(20초) 안에 기록 동사가 한 번도 불리지 않았다 — 배선이 끊겼거나, 가짜 app-server 가 그 안에 \
+             핸드셰이크를 끝내지 못했다(powershell 기동 실패·실행 정책). 가르려면 {} 를 손으로 돌려 볼 것",
+            script_path.display()
+        );
+        let removed = remove_script(&script_path);
+        assert_eq!(
+            got,
+            vec![thread_id],
+            "기록 동사가 app-server 가 준 thread id 와 다른 값을 받았다"
+        );
+        assert!(
+            removed,
+            "가짜 app-server 스크립트를 지우지 못했다: {}",
+            script_path.display()
+        );
+    }
+
+    /// ★기록이 패닉하면 세션이 **끝난다** — 조용히 멈추지도, 영원히 떠 있지도 않는다★.
+    ///
+    /// 이 항목이 재는 것은 셋이고 ★셋째가 핵심★이다:
+    ///   1. 기록 동사가 실제로 불렸다(= 핸드셰이크가 섰다. 아니면 아래 둘이 공회전한다).
+    ///   2. 입력이 거절된다 — 링크가 `Connecting` 에 멈춰 큐만 차던 모양이 아니다(ADR-0190).
+    ///   3. ★세션이 **종료 상태에 닿는다**★. 2 만 재던 옛 모양은 **막힌 세션과 구별이 안 됐다** —
+    ///      거절은 되는데 자식·리더·라이터가 그대로 남고 pump 가 영영 안 끝나 수거도 안 되는 상태가
+    ///      2 를 그대로 통과한다. 그 갈래를 가르는 것은 종료 전이 하나뿐이다.
+    #[cfg(windows)]
+    #[test]
+    fn a_recording_failure_ends_the_session() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, InputEvent, StatusSink};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        /// 종료 전이를 보는 눈 — `is_live()` 가 거짓인 상태가 곧 종료다(그 술어가 정본).
+        struct RecordingStatus(Arc<Mutex<Vec<AgentStatus>>>);
+        impl StatusSink for RecordingStatus {
+            fn status_changed(&self, _id: Uuid, s: AgentStatus, _e: u32) {
+                self.0.lock().expect("status poisoned").push(s);
+            }
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let script =
+            FAKE_APP_SERVER_PS1.replace("THREAD_ID_PLACEHOLDER", &Uuid::new_v4().to_string());
+        let script_path =
+            std::env::temp_dir().join(format!("engram-fake-app-server-{}.ps1", Uuid::new_v4()));
+        std::fs::write(&script_path, script).expect("가짜 app-server 기록");
+
+        let spec = CommandSpec {
+            program: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script_path.to_string_lossy().into_owned(),
+            ],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+
+        // 불렸다는 사실만 남기고 터진다 — 「패닉이 났다」와 「아예 안 불렸다」를 갈라야 하기 때문.
+        let reached = Arc::new(AtomicBool::new(false));
+        let sink: SessionIdSink = {
+            let reached = reached.clone();
+            Arc::new(move |_: &str| {
+                reached.store(true, Ordering::SeqCst);
+                panic!("기록 포트가 터졌다");
+            })
+        };
+
+        let parts =
+            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink))
+                .expect("open_spawn");
+
+        let statuses: Arc<Mutex<Vec<AgentStatus>>> = Arc::new(Mutex::new(Vec::new()));
+        let terminal = {
+            let statuses = statuses.clone();
+            move || {
+                statuses
+                    .lock()
+                    .expect("status poisoned")
+                    .iter()
+                    .any(|s| !s.is_live())
+            }
+        };
+
+        // ★훅 교체를 맨손으로 하지 않는다★ — 전역이라 같은 바이너리의 다른 항목이 자기 패닉 출력을 잃고,
+        //   중첩되면 조용한 훅이 영구히 남는다. 그 둘을 막는 헬퍼를 쓴다. 라이터 스레드가 이 구간 안에서
+        //   터지므로 구간이 그 시점을 덮어야 한다.
+        // ★조용한 훅 구간은 **패닉 순간까지만** 잡는다★ — 그 훅은 프로세스 전역이고 헬퍼가 static
+        //   뮤텍스로 직렬화하므로, 종료 대기까지 감싸면 같은 바이너리의 다른 패닉 항목이 그만큼 줄을 서고
+        //   그 창에 터진 **무관한** 항목이 자기 패닉 메시지와 위치를 잃는다. 종료 대기는 패닉과 무관하므로
+        //   구간 밖으로 뺀다(최악 대기가 절반으로 준다).
+        let (reached, refusal) = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
+            parts.transport.start(Arc::new(OutputCore::new(
+                Uuid::new_v4(),
+                1,
+                Arc::new(RecordingStatus(statuses.clone())),
+                TurnWiring::detached(),
+            )));
+
+            // ★먼저 기록 동사가 불릴 때까지 **아무것도 보내지 않고** 기다린다★ — 핸드셰이크 전의
+            //   `send_input` 은 정상적으로 큐에 서므로(ADR-0190), 여기서 보내면 상한(32)을 채워
+            //   **큐 가득참 오류**가 나고 이 항목이 엉뚱한 이유로 초록이 된다.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while !reached.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+
+            // 링크를 내리는 것은 그 다음 몇 마이크로초다. 시도는 상한보다 한참 적게 둔다 — 같은 이유.
+            let mut refusal = None;
+            for _ in 0..8 {
+                match parts.transport.send_input(InputEvent::Raw(b"hi".to_vec())) {
+                    Err(e) => {
+                        refusal = Some(e);
+                        break;
+                    }
+                    Ok(()) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                }
+            }
+
+            (reached.load(Ordering::SeqCst), refusal)
+        });
+
+        // stdin 을 놓은 뒤 상대가 스스로 끝나고(실측 41–51ms) 그 EOF 가 pump 를 끝내기까지 기다린다.
+        //   ★`shutdown()` 을 부르지 않고 기다리는 것이 요점이다★ — 우리가 죽여 놓고 「끝났다」를 재면 이
+        //   항목이 재려던 그 인과를 우리가 대신 굴린 것이 된다.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !terminal() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        let reached_terminal = terminal();
+        let seen = statuses.lock().expect("status poisoned").clone();
+        // ★`!is_live()` 로는 부족하다★ — 리더 패닉은 `Failed`, 읽기 오류는 `Exited{code:None}` 을 내는데
+        //   **자식이 살아 있어도** 둘 다 그 술어를 만족한다. 이 항목이 재려는 것은 「상대가 EOF 를 보고
+        //   스스로 끝났다」이므로 종류까지 못 박는다. 오늘 이 시험대에 그 둘을 만드는 경로가 없지만, 못
+        //   박아 두지 않으면 나중에 그리로 흘러가도 초록이다.
+        let ended_by_peer_exit = seen.iter().any(|s| matches!(s, AgentStatus::Exited { .. }));
+        parts.transport.shutdown();
+
+        assert!(
+            reached,
+            "기록 동사가 한 번도 불리지 않았다 — 이 항목은 실패 처리를 재지 못했다. 가짜 app-server 가 안 \
+             떴을 수 있다(스크립트는 남겨 둔다): {}",
+            script_path.display()
+        );
+        let removed = remove_script(&script_path);
+
+        let refusal = refusal.expect(
+            "기록이 실패했는데 입력이 계속 받아들여진다 — 링크가 `Connecting` 에 멈춰 세션이 조용히 벙어리가 됐다",
+        );
+        let PtyError::WriteFailed(reason) = &refusal else {
+            panic!("예상 밖 오류 종류: {refusal:?}");
+        };
+        // ★큐 가득참만 배제한다★ — 그것만이 「실패 경로가 안 돌았는데 거절됐다」를 뜻한다. 남은 두 사유
+        //   (기록 실패로 내려간 링크 · 그 뒤 stdin 을 닫아 끝난 통로)는 **둘 다 이 경로가 돈 증거**이고,
+        //   어느 쪽이 잡히나는 타이밍이라 하나로 못 박으면 그 자체가 깜빡이가 된다.
+        assert!(
+            !reason.contains("상한"),
+            "거절 사유가 큐 가득참이다 — 실패 경로가 돈 것을 잰 것이 아니다: {reason}"
+        );
+
+        assert!(
+            reached_terminal,
+            "기록이 실패했는데 세션이 종료 상태에 닿지 않았다 — 자식·리더·라이터가 그대로 붙들려 있고 pump \
+             도 reaper 도 움직이지 않는다(관측된 상태: {seen:?})"
+        );
+        assert!(
+            ended_by_peer_exit,
+            "종료는 했는데 상대가 스스로 끝난 모양이 아니다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 있어도 나므로 이 항목이 재려는 인과(stdin 닫기 → 상대 exit → EOF)를 재지 못한다(관측: {seen:?})"
+        );
+        assert!(
+            removed,
+            "가짜 app-server 스크립트를 지우지 못했다: {}",
+            script_path.display()
+        );
     }
 
     #[test]

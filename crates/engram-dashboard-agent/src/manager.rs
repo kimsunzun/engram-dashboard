@@ -316,6 +316,69 @@ fn pick_suffix(used: &std::collections::BTreeSet<u32>) -> Option<u32> {
     Some(candidate)
 }
 
+/// 「backend 가 받아 온 세션 id」를 이 프로필의 이 화신에 적는 한 동사를 만든다
+/// ([`backend::SessionIdSink`] 의 조립점 쪽 실물).
+///
+/// ★`String` → `Uuid` 해독이 여기 있는 이유★: 상대가 주는 것은 문자열이고(codex `Thread.id`) 프로필이
+///   드는 것은 `Uuid` 다. 그 폭을 좁히는 것은 프로필 스키마 지식이라 `backend/` 에 둘 수 없다(ADR-0004).
+/// ★**여기로 들어오는 값이 v4 라고 가정하지 말 것 — 실측은 UUIDv7 이다**★: 실 app-server 가 준 것은
+///   `01a0a08f-…`(버전 니블 `7`)였다. 그래서 `backend_session_id` 한 칸에 **백엔드마다 다른 UUID 버전**이
+///   앉는다 — claude 는 우리가 v4 를 뽑아 건네고, codex 는 받아 적는다. 이 저장소의 시험대는 전부
+///   `Uuid::new_v4()` 로 값을 만들어서 그 차이를 한 번도 겪지 않는다. ★버전 검증을 넣지 말 것★ —
+///   `Uuid::parse_str` 은 버전을 안 보고, 그것이 이 경로가 두 버전 다 받는 이유다.
+/// ★uuid 로 못 읽히면 로그로 남기고 **버린다**★ — panic 도 `unwrap` 도 아니다. 이 호출은 라이터 스레드
+///   위에서 돌고 그 스레드는 핸드셰이크·입력 전송을 함께 지므로, 여기서 죽으면 상대 형식이 한 번 바뀐
+///   것만으로 그 세션이 통째로 말을 잃는다. 기록만 못 한 것이 낫다(그러면 이어받기가 Fresh 로 떨어져
+///   정직하게 보고된다).
+/// ★값 자체를 로그에 싣지 않는다★ — 남기는 것은 해독 실패 사유뿐이다.
+/// ★화신 표식을 `Some` 으로 못 박는다(ADR-0007/0163)★ — 이 동사는 **한 spawn** 에 묶여 있고 그 spawn 의
+///   표식은 호출 시점에 이미 확정돼 있다. 그래서 **더 새 화신이 이미 선** 뒤에 도착한 기록은 거절된다.
+///   ★「늦은 기록을 막는다」로 넓혀 읽지 말 것★ — 세션이 그냥 **끝나기만** 한 경우는 표식이 그대로라
+///   이 가드가 안 선다(그 창의 정본 = 통로의 `record_session_id` doc).
+/// ★세 결말이 로그로 갈린다(`docs/reference/logging-conventions.md` 「계측 의무」)★ — 기록됨(info) ·
+///   버려짐(debug, S14 stale 가드와 같은 자리) · uuid 해독 실패(warn). **받지 못한 결말**은 여기 오지
+///   않고 통로의 핸드셰이크 실패 로그가 낸다.
+/// ★`true` 를 「영속됐다」로 읽지 말 것★ — 그 값이 뜻하는 것은 메모리 명부가 바뀌었다는 것뿐이고, 디스크
+///   쓰기 실패는 저장소가 자기 자리에서 `error!` 로 낸다([`ProfileStore::save`] 는 `()` 를 돌려준다).
+// ADR-0007
+// ADR-0185
+fn session_id_sink(
+    profiles: Arc<ProfileRegistry>,
+    id: AgentId,
+    incarnation: u32,
+) -> backend::SessionIdSink {
+    Arc::new(move |raw: &str| {
+        // ★기록 호출을 match 가드에 두지 말 것★ — 부작용이 있는 가드는 앞에 팔 하나만 끼어도 호출 횟수가
+        //   조용히 0 이나 2 가 된다. 판정과 분기를 갈라 둔다.
+        let sid = match uuid::Uuid::parse_str(raw) {
+            Ok(sid) => sid,
+            Err(e) => {
+                tracing::warn!(
+                    agent = %id,
+                    epoch = incarnation,
+                    "backend 가 준 세션 id 를 uuid 로 읽지 못해 버린다: {e}"
+                );
+                return;
+            }
+        };
+        if profiles.observe_session_id(id, Some(incarnation), sid) {
+            tracing::info!(
+                agent = %id,
+                epoch = incarnation,
+                "backend 가 준 세션 id 를 프로필 명부에 반영했다"
+            );
+        } else {
+            // ★사유를 가르지 못한다 — 돌아오는 것이 `bool` 하나다★: 화신 표식 불일치 · 프로필 부재 ·
+            //   이미 같은 값, 셋이 같은 `false` 로 온다. 지어내지 않고 그대로 적는다.
+            tracing::debug!(
+                agent = %id,
+                epoch = incarnation,
+                "backend 가 준 세션 id 가 명부에 반영되지 않았다 — 화신 표식 불일치·프로필 부재·같은 값 중 하나"
+            );
+        }
+    })
+}
+
 pub struct AgentManager {
     sessions: Arc<RwLock<HashMap<AgentId, Arc<AgentSession>>>>,
     status_sink: Arc<dyn StatusSink>,
@@ -1009,7 +1072,21 @@ impl AgentManager {
         //   (`AgentManager::reads_messages` doc).
         // ★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그
         //   프로그램이 이미 도는 상태에서 그 대화 파일을 읽게 된다.
-        let parts = backend::open_spawn(&profile.command, &spec, DEFAULT_COLS, DEFAULT_ROWS)?;
+        // ADR-0185: 세션 id 를 **받아 오는** backend(codex app-server)가 그 값을 프로필에 남길 통로를 여기서
+        //   건넨다.
+        // ★무조건 건네는 것이 의도다 — `receives_session_id()` 같은 선언 축을 새로 만들지 않았다★:
+        //   이 자리의 형제 둘(`supports_control_channel` · `accepts_mcp_config`)이 선언으로 갈리는 것은
+        //   **주면 효과가 나기 때문**이다(토큰·config 파일 발급). 이 칸은 반대다 — 안 읽는 backend 에게는
+        //   아무 효과도 없어서, 축을 세우면 같은 판정이 두 곳(선언 표 + impl)에 적히고 둘이 어긋날 수 있다.
+        //   판정 지점은 impl 하나로 둔다.
+        //   위에서 확정된 `epoch` 을 그대로 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음 화신을 덮지 않게 한다.
+        let parts = backend::open_spawn(
+            &profile.command,
+            &spec,
+            DEFAULT_COLS,
+            DEFAULT_ROWS,
+            Some(session_id_sink(self.profiles.clone(), profile.id, epoch)),
+        )?;
 
         let (session, child_pid) =
             self.spawn_session(profile.id, spec, parts, epoch, seed_events)?;
@@ -1888,6 +1965,92 @@ mod tests {
         }
     }
 
+    // ── ADR-0185: 「받아 온 세션 id」 기록 동사 ────────────────────────────────────────────
+    //
+    // 여기서 재는 것은 `session_id_sink` 가 만든 동사 하나다 — 그 동사가 실제로 spawn 에 실리는지는
+    //   `backend/codex/mod.rs` 의 app-server 종단 항목이 잰다.
+
+    /// ★저장소가 **메모리**인 것은 의도다★ — 이 세 항목이 단언하는 것은 레지스트리의 판정뿐이라
+    /// 영속이 무관하고, `bare_manager` 처럼 파일 저장을 쓰면 호출마다 temp 폴더가 하나씩 남는다
+    /// (한 번의 crate 회귀에 9개가 쌓였다 — 실측).
+    fn sink_fixture() -> (Arc<crate::profile::ProfileRegistry>, AgentId, u32) {
+        #[derive(Default)]
+        struct MemStore(Mutex<Vec<AgentProfile>>);
+        impl crate::profile::ProfileStore for MemStore {
+            fn save(&self, profiles: &[AgentProfile]) {
+                *self.0.lock().expect("mem store poisoned") = profiles.to_vec();
+            }
+            fn load(&self) -> Vec<AgentProfile> {
+                self.0.lock().expect("mem store poisoned").clone()
+            }
+        }
+        let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
+            MemStore::default(),
+        )));
+        let p = AgentProfile::new(
+            "raw".into(),
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: crate::profile::AgentOutputFormat::StreamJson,
+            },
+            std::path::PathBuf::from("."),
+            vec![],
+            true,
+        );
+        let id = p.id;
+        profiles.upsert(p);
+        let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
+        (profiles, id, epoch)
+    }
+
+    #[test]
+    fn the_session_id_sink_records_the_id_it_is_handed() {
+        let (profiles, id, epoch) = sink_fixture();
+        let sid = uuid::Uuid::new_v4();
+
+        session_id_sink(profiles.clone(), id, epoch)(&sid.to_string());
+
+        assert_eq!(profiles.get(id).unwrap().backend_session_id, Some(sid));
+    }
+
+    /// ★죽은 화신의 뒤늦은 기록이 산 화신의 값을 덮지 못한다★ — 이 동사는 자기 spawn 의 표식을 들고
+    /// 있고, 그 표식은 다음 spawn 이 새로 뽑으면서 낡는다.
+    #[test]
+    fn a_dead_incarnations_sink_cannot_overwrite_a_live_value() {
+        let (profiles, id, dead_epoch) = sink_fixture();
+        let dead_sink = session_id_sink(profiles.clone(), id, dead_epoch);
+
+        // 새 화신이 서고 자기 값을 적는다.
+        let live_epoch = profiles.epoch_for_spawn(id).expect("프로필은 그대로다");
+        let live_sid = uuid::Uuid::new_v4();
+        session_id_sink(profiles.clone(), id, live_epoch)(&live_sid.to_string());
+
+        // 죽은 화신의 통로가 이제야 자기 thread id 를 들고 돌아온다.
+        dead_sink(&uuid::Uuid::new_v4().to_string());
+
+        assert_eq!(
+            profiles.get(id).unwrap().backend_session_id,
+            Some(live_sid),
+            "죽은 화신의 기록이 산 화신의 값을 덮었다"
+        );
+    }
+
+    /// uuid 로 못 읽히는 값은 **버린다** — panic 하면 그 라이터 스레드가 죽어 세션이 통째로 말을 잃는다.
+    #[test]
+    fn a_non_uuid_session_id_is_dropped_without_panicking() {
+        let (profiles, id, epoch) = sink_fixture();
+        let sink = session_id_sink(profiles.clone(), id, epoch);
+
+        sink("not-a-uuid");
+        sink("");
+
+        assert_eq!(
+            profiles.get(id).unwrap().backend_session_id,
+            None,
+            "해독 실패한 값이 프로필에 적혔다"
+        );
+    }
+
     // ── ADR-0044/0191: backend 가 넘겨준 통로가 무엇을 나르나 ──────────────────────────────
     //
     // ★통로 **타입**이 아니라 통로가 신고하는 caps 로 잰다★: 만드는 코드가 `backend/<이름>/` 안으로
@@ -1902,6 +2065,7 @@ mod tests {
             &probe_spec(),
             DEFAULT_COLS,
             DEFAULT_ROWS,
+            None,
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
@@ -1922,6 +2086,7 @@ mod tests {
             &probe_spec(),
             DEFAULT_COLS,
             DEFAULT_ROWS,
+            None,
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
