@@ -38,7 +38,7 @@ use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
 use crate::transport::stdio::StdioTransport;
-use crate::transport::{AgentTransport, OutputDecoder};
+use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
     AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError,
@@ -378,6 +378,9 @@ impl AgentBackend for ClaudeBackend {
         rows: u16,
         sid_sink: Option<SessionIdSink>,
         resume_session_id: Option<Uuid>,
+        // ★이 backend 는 세울 연결이 없다 — `declares_link()` 가 false 라 조립점이 애초에 `None` 을
+        //   준다. 받아 두고 무시하는 것이 계약이다(`session_id` 칸과 같은 모양).
+        _link_sink: Option<LinkSink>,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
         let _ = (sid_sink, resume_session_id);

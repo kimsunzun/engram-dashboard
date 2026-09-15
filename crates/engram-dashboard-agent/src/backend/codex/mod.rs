@@ -39,7 +39,7 @@ use crate::backend::{
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
-use crate::transport::{AgentTransport, OutputDecoder};
+use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError, SessionCaps,
@@ -198,6 +198,15 @@ impl AgentBackend for CodexBackend {
     /// shell 쪽 사유는 그때도 그대로 남으므로 둘을 같이 열지 말 것.
     fn reads_messages(&self) -> bool {
         false
+    }
+
+    /// ★app-server 모드에만 세울 연결이 있다★ — 핸드셰이크 왕복을 마쳐야 `turn/start` 가 허용된다.
+    /// 터미널 모드는 PTY 라 프로세스가 뜬 순간부터 쓸 수 있어 이 축이 없다(claude·shell 과 같다).
+    /// ★이 선언과 실제 배달이 **어긋나면 안 된다**★ — true 인데 안 부르면 감독자가 백스톱까지 기다리고,
+    ///   false 인데 부르면 그 배달을 아무도 안 받는다. 그 짝은 시험대가 잰다.
+    // ADR-0004
+    fn declares_link(&self, command: &AgentCommand) -> bool {
+        is_app_server(command)
     }
 
     /// 이어받기가 왜 실패했나 — ★이 backend 의 증거는 **통로의 연결 사유**로 온다★.
@@ -371,6 +380,7 @@ impl AgentBackend for CodexBackend {
         rows: u16,
         sid_sink: Option<SessionIdSink>,
         resume_session_id: Option<Uuid>,
+        link_sink: Option<LinkSink>,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_app_server(command) {
@@ -380,9 +390,11 @@ impl AgentBackend for CodexBackend {
                     self.output_decoder(command),
                     thread_open(spec, resume_session_id),
                     sid_sink,
+                    link_sink,
                 )?;
                 (Box::new(t), pid)
             } else {
+                // ★터미널 모드에는 세울 연결이 없다★ — `declares_link()` 가 false 라 포트도 `None` 이다.
                 let (t, pid) = PtyTransport::open(spec, cols, rows)?;
                 (Box::new(t), pid)
             };
@@ -749,6 +761,24 @@ mod tests {
         );
     }
 
+    /// ★선언과 실물이 짝이어야 한다★ — `declares_link()` 가 조립점에서 배달 포트를 **깔지 말지**를
+    /// 가르므로, true 인데 통로가 안 부르면 감독자가 백스톱까지 기다리고 false 인데 부르면 그 배달을
+    /// 아무도 안 받는다.
+    ///
+    /// 여기서 재는 것은 선언 쪽이고, 실물 쪽(app-server 통로가 실제로 배달한다)은
+    /// `a_rejected_resume_does_not_fall_back_and_ends_the_session` 이 실 통로로 잰다.
+    #[test]
+    fn only_app_server_declares_a_link() {
+        assert!(
+            CodexBackend.declares_link(&codex_app_server(vec![])),
+            "app-server 는 핸드셰이크를 마쳐야 쓸 수 있다 — 축이 없다고 선언하면 그 결말이 판정에              참여하지 못하고, 거절이 다시 성공으로 보고된다"
+        );
+        assert!(
+            !CodexBackend.declares_link(&codex(vec![])),
+            "터미널 모드는 PTY 라 뜬 순간부터 쓸 수 있다 — 축이 있다고 선언하면 아무도 배달하지 않는              채널을 감독자가 백스톱까지 기다린다"
+        );
+    }
+
     #[test]
     fn reads_messages_is_false() {
         assert!(!CodexBackend.reads_messages());
@@ -894,9 +924,16 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Arc::new(move |id: &str| seen.lock().unwrap().push(id.to_string()))
         };
 
-        let parts =
-            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink), None)
-                .expect("open_spawn");
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &spec,
+            80,
+            24,
+            Some(sink),
+            None,
+            None,
+        )
+        .expect("open_spawn");
 
         parts.transport.start(Arc::new(OutputCore::new(
             Uuid::new_v4(),
@@ -978,6 +1015,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             24,
             Some(sink),
             Some(resume_target),
+            None,
         )
         .expect("open_spawn");
 
@@ -1091,6 +1129,14 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             let recorded = recorded.clone();
             Arc::new(move |id: &str| recorded.lock().unwrap().push(id.to_string()))
         };
+        // ★배달을 그대로 받아 적는다★ — 이 항목이 재는 것은 「통로가 결말을 **내보내나**」이고, 그것이
+        //   실 통로에서 확인되는 유일한 자리다(매니저 쪽 항목들은 대역으로 판정 로직만 잰다).
+        let delivered: Arc<Mutex<Vec<crate::transport::LinkResolution>>> =
+            Arc::new(Mutex::new(Vec::new()));
+        let link_sink: crate::transport::LinkSink = {
+            let delivered = delivered.clone();
+            Arc::new(move |r| delivered.lock().unwrap().push(r))
+        };
 
         let parts = crate::backend::open_spawn(
             &codex_app_server(vec![]),
@@ -1099,6 +1145,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             24,
             Some(sink),
             Some(resume_target),
+            Some(link_sink),
         )
         .expect("open_spawn");
 
@@ -1133,8 +1180,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
         let seen = events.lock().unwrap().clone();
         let got = recorded.lock().unwrap().clone();
-        let link_when_failed = match parts.transport.link_state() {
-            Some(crate::transport::LinkState::Down { reason }) => Some(reason),
+        let link_when_failed = match delivered.lock().unwrap().first() {
+            Some(crate::transport::LinkResolution::Failed { reason }) => Some(reason.clone()),
             _ => None,
         };
 
@@ -1156,7 +1203,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         //   양쪽 다 초록인 채로 끊긴다. ★종점에 닿기 **전에** 잡는다★ — 그 뒤에는 이 값이 남아 있을
         //   이유가 없다.
         let link_when_failed = link_when_failed.expect(
-            "실패 경계가 올랐는데 통로의 연결 축이 `Down` 이 아니다 — 활성화 판정이 볼 신호가 없다",
+            "실패 경계가 올랐는데 통로가 연결 결말을 **배달하지 않았다** — 활성화 판정이 받을 신호가 없다",
+        );
+        assert_eq!(
+            delivered.lock().unwrap().len(),
+            1,
+            "연결 결말이 한 번이 아니다 — 이 포트의 계약은 **정확히 한 번**이다"
         );
         // 그리고 그 사유가 분류까지 가야 「마지막 실패」에 맥락 기본값(조기 종료)이 아닌 진짜 원인이 남는다.
         assert_eq!(
@@ -1249,9 +1301,16 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             })
         };
 
-        let parts =
-            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink), None)
-                .expect("open_spawn");
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &spec,
+            80,
+            24,
+            Some(sink),
+            None,
+            None,
+        )
+        .expect("open_spawn");
 
         let statuses: Arc<Mutex<Vec<AgentStatus>>> = Arc::new(Mutex::new(Vec::new()));
         let terminal = {

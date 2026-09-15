@@ -143,7 +143,7 @@ use super::protocol::{
 };
 use crate::backend::SessionIdSink;
 use crate::output_core::OutputCore;
-use crate::transport::{AgentTransport, LinkState, OutputDecoder};
+use crate::transport::{AgentTransport, LinkResolution, LinkSink, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps, TurnOutcome,
@@ -492,6 +492,9 @@ pub(crate) struct CodexAppServerTransport {
     /// 우리 요청 id 계수기. ★서버 id 는 여기 안 들어온다★ — 두 공간은 따로다.
     next_id: Arc<AtomicI64>,
     sid_sink: Option<SessionIdSink>,
+    /// 연결의 결말을 **한 번** 배달하는 포트(`None` = 조립점이 안 줬다 = 이 축이 없다).
+    /// ★`start()` 에서 take 해 라이터로 move 한다 — 배달은 그 스레드에서만, 정확히 한 번 일어난다★.
+    link_sink: Mutex<Option<LinkSink>>,
     /// 라이터 스레드 핸들. ★아무도 join 하지 않는다 — `shutdown()` 안에서 기다리는 것은 계약 위반이다★.
     ///
     /// 이 핸들을 드는 이유는 하나다: **그 스레드가 실제로 끝나는지를 밖에서 볼 수 있어야 한다.** 안 끝나면
@@ -538,6 +541,7 @@ impl CodexAppServerTransport {
         decoder: Option<Box<dyn OutputDecoder>>,
         open_params: ThreadOpen,
         sid_sink: Option<SessionIdSink>,
+        link_sink: Option<LinkSink>,
     ) -> Result<(CodexAppServerTransport, Option<u32>), PtyError> {
         let mut cmd = Command::new(&spec.program);
         cmd.args(&spec.args);
@@ -589,6 +593,7 @@ impl CodexAppServerTransport {
             pending: Arc::new(Pending::default()),
             next_id: Arc::new(AtomicI64::new(0)),
             sid_sink,
+            link_sink: Mutex::new(link_sink),
             writer_handle: Mutex::new(None),
             structured,
             #[cfg(windows)]
@@ -1068,6 +1073,26 @@ impl HandshakeFailure {
     }
 }
 
+/// 연결의 결말을 **한 번** 배달한다 — 사용자가 껐으면 배달하지 않는다.
+///
+/// ★kill 로 풀린 핸드셰이크는 「상대가 답했다」가 아니다★: [`AgentTransport::shutdown`] 은 대기표를 닫아
+///   핸드셰이크를 `Err` 로 깨우는데, 그것을 그대로 배달하면 **사용자의 취소가 이어받기 실패로 기록되고**
+///   그 위에 정리까지 한 번 더 돈다(결함 ③). 그 갈래에서 감독자가 볼 사실은 종점 상태 하나뿐이고,
+///   거기엔 「사용자가 끈 것은 실패가 아니다」 규율이 이미 있다.
+/// ★`shutdown` 원자를 보는 것으로 충분하다★ — 그 표식은 kill 경로에서 **가장 먼저** 서고(그 함수의 첫 줄)
+///   되돌아가지 않는다. 즉 여기서 읽는 것은 래치이지 오가는 셀이 아니다.
+/// ★`take()` 로 포트를 소비한다★ — 「정확히 한 번」을 타입으로 강제하지는 못하지만, 두 번째 호출이
+///   조용히 두 번 배달하는 것은 막는다.
+fn deliver_link(shutdown: &AtomicBool, sink: &Option<LinkSink>, resolution: LinkResolution) {
+    if shutdown.load(Ordering::Acquire) {
+        tracing::debug!("연결 결말을 배달하지 않는다 — 사용자가 이 화신을 껐다");
+        return;
+    }
+    if let Some(sink) = sink {
+        sink(resolution);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn writer_loop(
     stdin: Arc<Mutex<Option<ChildStdin>>>,
@@ -1078,6 +1103,7 @@ fn writer_loop(
     core: Arc<OutputCore>,
     open_params: ThreadOpen,
     sid_sink: Option<SessionIdSink>,
+    link_sink: Option<LinkSink>,
 ) {
     // ★두 실패를 **갈라서** 든다★ — 이 통로가 말하는 「핸드셰이크」는 왕복 둘만이 아니라 **기록 호출이
     //   돌아오는 데까지**이므로(위 [`record_session_id`] 의 게이트 조건) 둘 다 `Ready` 를 막고 아래 수습을
@@ -1105,11 +1131,16 @@ fn writer_loop(
 
     match outcome {
         Ok(thread_id) => {
-            let (lock, cv) = &*state;
-            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-            s.thread_id = Some(thread_id);
-            s.link = Link::Ready;
-            cv.notify_all();
+            {
+                let (lock, cv) = &*state;
+                let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+                s.thread_id = Some(thread_id);
+                s.link = Link::Ready;
+                cv.notify_all();
+            }
+            // ★게이트를 연 **직후** 배달한다 — 락을 쥔 채로는 부르지 않는다★(ADR-0006: 상태 락 보유 중
+            //   외부 호출 금지. 이 포트는 조립점 코드를 부르고 그쪽은 채널을 만진다).
+            deliver_link(&shutdown, &link_sink, LinkResolution::Ready);
         }
         Err(failure) => {
             let HandshakeFailure {
@@ -1128,6 +1159,15 @@ fn writer_loop(
             if dropped > 0 {
                 tracing::warn!("핸드셰이크 실패로 대기 중이던 입력 {dropped}건이 사라졌다");
             }
+            // ★사유를 **들고** 배달한다★ — 이 문구는 stdout 의 JSON-RPC 오류라 콘솔 꼬리에도 stderr
+            //   진단 꼬리에도 없다. 여기서 안 실으면 분류가 닿을 길이 아예 없다.
+            deliver_link(
+                &shutdown,
+                &link_sink,
+                LinkResolution::Failed {
+                    reason: reason.clone(),
+                },
+            );
             // ★이 경계는 통로 쪽 턴에 대응하지 않는다★: 턴을 여는 유일한 자리([`take_turn_locked`])가
             //   [`Link::Ready`] 를 요구하는데 그 상태는 핸드셰이크가 성공해야 선다. 그래서 큐에 선
             //   `dropped` 건도 통로 쪽에서 보면 **아직 턴이 아니라 큐에 선 본문**이고, 사실 계층도 이
@@ -1990,6 +2030,11 @@ impl AgentTransport for CodexAppServerTransport {
             let shutdown = self.shutdown.clone();
             let writer_core = core.clone();
             let sink = self.sid_sink.clone();
+            let link = self
+                .link_sink
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .take();
             let spawn_result = std::thread::Builder::new()
                 .name("engram-codex-writer".into())
                 .spawn(move || {
@@ -2002,6 +2047,7 @@ impl AgentTransport for CodexAppServerTransport {
                         writer_core,
                         params,
                         sink,
+                        link,
                     )
                 });
             match spawn_result {
@@ -2177,24 +2223,6 @@ impl AgentTransport for CodexAppServerTransport {
                 let _ = tx.send(Err(format!("{}: 통로가 닫혔다", entry.method)));
             }
         }
-    }
-
-    /// ★이 통로는 세울 연결이 **있다** — 그래서 기본 `None` 을 쓰지 않는다★.
-    ///
-    /// 「프로세스가 살아 있다」와 「이 통로로 입력이 나간다」가 여기서 갈린다: 상대가 `thread/resume` 을
-    /// 거절하면 자식은 멀쩡히 살고 거절은 stdout 으로 오므로, 생사만 보는 판정에는 아무 신호도 안 남는다.
-    /// ★`Down` 에 사유를 실어 올리는 것이 분류의 유일한 입구다★ — 그 문자열은 stderr 진단 꼬리에도
-    /// 콘솔 꼬리에도 없다(둘 다 다른 스트림을 본다).
-    fn link_state(&self) -> Option<LinkState> {
-        let (lock, _) = &*self.state;
-        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
-        Some(match &s.link {
-            Link::Connecting => LinkState::Establishing,
-            Link::Ready => LinkState::Up,
-            Link::Down(reason) => LinkState::Down {
-                reason: reason.clone(),
-            },
-        })
     }
 
     fn capabilities(&self) -> TransportCaps {
@@ -3372,6 +3400,7 @@ mod tests {
                 sandbox: None,
             }),
             None,
+            None,
         );
 
         (state, seen)
@@ -3924,6 +3953,7 @@ mod tests {
             None,
             ThreadOpen::Start(ThreadStartParams::default()),
             None,
+            None,
         )
         .expect("open")
     }
@@ -3935,6 +3965,7 @@ mod tests {
             true,
             None,
             ThreadOpen::Start(ThreadStartParams::default()),
+            None,
             None,
         )
         .expect("open")
@@ -3961,6 +3992,7 @@ mod tests {
             false,
             None,
             ThreadOpen::Start(ThreadStartParams::default()),
+            None,
             None,
         )
         .expect("open");
@@ -4363,19 +4395,44 @@ mod tests {
         );
     }
 
-    /// ★운영 구획에서 stdin 락을 **블로킹으로** 잡는 자리의 개수를 못 박는다★.
+    /// ★사용자가 껐으면 연결 결말을 **배달하지 않는다**★ — 결함 ③ 의 뿌리.
     ///
-    /// 왜 개수인가 = [`writer_loop`] 의 기록 실패 갈래가 그 락을 잡는 것이 안전한 근거가 「운영 그래프에서
-    /// 이 락을 블로킹으로 잡는 자리가 저 둘뿐이고, 그중 [`write_line`] 은 라이터만 부른다」이기 때문이다.
-    /// 셋째가 조용히 생기면 그 근거가 말없이 낡는다 — 그때 나는 것은 컴파일 에러가 아니라 **데드락**이다.
-    ///
-    /// ★이 항목은 자리를 못 박지 않고 개수만 본다★ — 위치를 박으면 줄이 밀릴 때마다 낡는다. 늘었으면
-    /// 새 자리가 어느 스레드에서 불리는지 **직접 판정한 뒤** 이 숫자를 고친다(숫자만 올리지 말 것).
-    /// ★`try_lock` 은 안 센다★ — [`AgentTransport::shutdown`] 의 그 자리는 기다리지 않으므로 이 위험에
-    /// 애초에 안 든다. ★주석 줄도 안 센다★ — 이 파일은 본문에서 `stdin.lock()` 을 인용한다.
-    /// ★시험 구획은 범위 밖이다★ — 그쪽은 일부러 락을 붙드는 항목을 갖는다
-    /// ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). 그 사실은 위 그 갈래의
-    /// 주석이 예외로 이름을 적어 둔다.
+    /// kill 은 대기표를 닫아 핸드셰이크를 `Err` 로 깨운다. 그것을 그대로 배달하면 **사용자의 취소가
+    /// 이어받기 실패로 기록되고** 그 위에 정리가 한 번 더 돈다. 그 갈래에서 감독자가 볼 사실은 종점 상태
+    /// 하나여야 하고, 거기엔 「사용자가 끈 것은 실패가 아니다」 규율이 이미 있다.
+    #[test]
+    fn a_shutdown_suppresses_the_link_delivery() {
+        let seen: Arc<Mutex<Vec<LinkResolution>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: Option<LinkSink> = {
+            let seen = seen.clone();
+            Some(Arc::new(move |r| {
+                seen.lock().expect("seen poisoned").push(r)
+            }))
+        };
+
+        let quiet = AtomicBool::new(false);
+        deliver_link(&quiet, &sink, LinkResolution::Ready);
+        assert_eq!(
+            seen.lock().expect("seen poisoned").len(),
+            1,
+            "평소에는 배달돼야 한다 — 이 항목의 대조군이 죽으면 아래 단언이 공허해진다"
+        );
+
+        let killed = AtomicBool::new(true);
+        deliver_link(
+            &killed,
+            &sink,
+            LinkResolution::Failed {
+                reason: "대기표가 닫혔다".into(),
+            },
+        );
+        assert_eq!(
+            seen.lock().expect("seen poisoned").len(),
+            1,
+            "사용자 kill 이 만든 실패가 배달됐다 — 그러면 사용자의 취소가 이어받기 실패로 기록되고 그              위에 정리까지 한 번 더 돈다"
+        );
+    }
+
     /// ★통로의 핸드셰이크 상한이 매니저의 liveness 백스톱보다 **작아야** 한다★.
     ///
     /// 둘은 다른 일을 한다: 상한은 **사유를 만들고**(상대가 답을 안 하면 `Down` 에 그 사실을 적는다),

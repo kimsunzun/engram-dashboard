@@ -28,7 +28,7 @@ use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
-use crate::transport::{AgentTransport, OutputDecoder};
+use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError};
 
@@ -210,6 +210,13 @@ pub trait AgentBackend: Send + Sync {
     ///   `transport_shape` 의 신고값만 재므로 그 어긋남을 못 본다.
     // ADR-0004
     // ADR-0191
+    /// 이 backend 의 통로가 연결을 세워야 하나(공개 래퍼 [`declares_link`] 의 doc 이 정본).
+    /// ★기본값 = `false`★ — 선언하지 않은 backend 는 배달 포트를 받지 않고 옛 판정 경로를 그대로 탄다.
+    // ADR-0004
+    fn declares_link(&self, _command: &AgentCommand) -> bool {
+        false
+    }
+
     fn open_spawn(
         &self,
         command: &AgentCommand,
@@ -218,6 +225,8 @@ pub trait AgentBackend: Send + Sync {
         rows: u16,
         sid_sink: Option<SessionIdSink>,
         resume_session_id: Option<Uuid>,
+        // 연결의 결말을 배달할 곳 — `declares_link()` 가 true 인 backend 에만 온다.
+        _link_sink: Option<LinkSink>,
     ) -> Result<SpawnParts, PtyError> {
         // 이 기본값은 세션 id 를 받아 오지도 통로로 이어받지도 않는다 — 밑줄 이름 대신 여기서 명시적으로
         //   버린다(이름은 위 doc 이 부르는 것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
@@ -478,8 +487,20 @@ pub fn open_spawn(
     rows: u16,
     sid_sink: Option<SessionIdSink>,
     resume_session_id: Option<Uuid>,
+    link_sink: Option<LinkSink>,
 ) -> Result<SpawnParts, PtyError> {
-    backend_for(c).open_spawn(c, spec, cols, rows, sid_sink, resume_session_id)
+    backend_for(c).open_spawn(c, spec, cols, rows, sid_sink, resume_session_id, link_sink)
+}
+
+/// 이 backend 의 통로가 **연결을 세워야** 쓸 수 있나 = 결말을 배달할 축이 있나.
+///
+/// ★조립점이 이것으로 배달 포트를 **깔지 말지**를 가른다★ — 축이 없는 backend 에 포트를 주면 아무도
+///   부르지 않는 채널을 감독자가 기다리게 된다. `false` 인 backend 의 활성화 판정은 옛 경로 그대로다
+///   (claude·shell·stdio·codex 터미널 — 바이트 단위로 같다).
+/// ★왜 backend 인가(ADR-0004)★: 「이 프로그램이 뜬 직후부터 쓸 수 있나, 아니면 왕복을 해야 하나」는
+///   프로그램별 지식이다. manager 가 command 를 직접 matches! 하면 그 지식이 공용 층으로 샌다.
+pub fn declares_link(c: &AgentCommand) -> bool {
+    backend_for(c).declares_link(c)
 }
 
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
@@ -1202,7 +1223,7 @@ mod tests {
                 //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts = open_spawn(c, &probe, 80, 24, None, None).expect("open_spawn");
+            let parts = open_spawn(c, &probe, 80, 24, None, None, None).expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();
