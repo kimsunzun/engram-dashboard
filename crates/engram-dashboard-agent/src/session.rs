@@ -117,6 +117,21 @@ impl AgentSession {
         self.intent.store(intent as u8, Ordering::SeqCst);
     }
 
+    /// 지금까지 관측된 종료 의도 — ★단조 래치로 읽으라고 있는 값이다★.
+    ///
+    /// ★왜 읽는 동사가 필요했나★: 활성화 판정이 **사용자 취소를 종점 상태보다 먼저** 알아야 한다.
+    ///   `kill_agent` 는 이 값을 `enter_exiting` 보다도 앞에 세우고([`AgentManager::kill_agent`]),
+    ///   그 뒤에야 통로를 내린다. 그래서 kill 로 인한 어떤 관측(통로의 배달 중단 · 배달 채널 닫힘 ·
+    ///   `Exiting` 상태)보다 이 래치가 **반드시 먼저** 보인다 — 종점 전이(`Killed`)는 pump 가 깨어날
+    ///   때까지 안 서므로 그것만 보는 판정은 그 사이를 「연결 실패」로 오독한다.
+    /// ★`Ordering::SeqCst` 로 읽는다★ — 쓰는 쪽(`set_intent`)과 같은 순서라 짝이 맞는다.
+    /// ★화신마다 새 값이다★ — `Arc<AtomicU8>` 을 `spawn_session` 이 화신마다 새로 만든다. 그래서 앞
+    ///   화신의 kill 의도가 이 화신에 보이지 않는다.
+    // ADR-0019
+    pub fn termination_intent(&self) -> TerminationIntent {
+        TerminationIntent::from_u8(self.intent.load(Ordering::SeqCst))
+    }
+
     /// pump 기동을 위임(transport.start). ★ADR-0019 reaper 순서★: manager 는 이 세션을 sessions
     /// 맵에 **insert 한 뒤** start 한다. pump 가 즉시 EOF→finish→ReapMsg 를 보내도 그땐 이미 맵에
     /// 존재하므로 reaper 가 정상 reap 한다(insert 전 start 면 hook send 가 맵에 없는 id 를 가리켜

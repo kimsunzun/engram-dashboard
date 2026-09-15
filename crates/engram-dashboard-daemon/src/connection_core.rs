@@ -857,10 +857,24 @@ impl ConnectionCore {
                 // ADR-0172
                 let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        let started = manager
-                            .activate_profile(&profile, SpawnMode::Fresh)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string());
+                        // ★★blocking 풀로 넘긴다 — 이 자리에서 직접 부르지 마라★★: `activate_profile`
+                        //   은 연결을 선언하는 통로에서 **결말이 날 때까지** 블록하고(최대 백스톱 15s),
+                        //   실패로 판정하면 그 뒤 teardown 의 `session.kill(5s)` 까지 탄다 — 합쳐 약 20s
+                        //   동안 **yield 지점이 하나도 없다.** async 워커에서 그대로 부르면 그 워커가
+                        //   통째로 묶이고, 막힌 codex 활성화 N 건이 워커 N 개를 가져간다(다른 연결의
+                        //   명령까지 함께 멈춘다). 같은 파일의 `Shutdown` 이 `shutdown_all` 을 같은
+                        //   이유로 감싼다.
+                        //   ★명령 버스 쪽 형제는 이미 보호돼 있다★ — `agent.*` 표가 `blocking_handler`
+                        //   뒤에 있다(`agent::commands::make_table` 의 blocking 계약). 보호가 없던 것은
+                        //   이 WS 표면뿐이다.
+                        let mgr = manager.clone();
+                        let started = tokio::task::spawn_blocking(move || {
+                            mgr.activate_profile(&profile, SpawnMode::Fresh)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("activation task failed: {e}")));
                         broadcast_profile_list(fanout, manager);
                         started
                     }
@@ -1200,7 +1214,20 @@ impl ConnectionCore {
                         } else {
                             SpawnMode::Fresh
                         };
-                        let started = manager.activate_profile(&profile, mode);
+                        // ★blocking 풀로 넘긴다★ — 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
+                        //   ★Fresh 도 이제 여기 든다★: 연결을 선언하는 통로에서는 모드와 무관하게
+                        //   결말까지 기다린다(ADR-0201 — 예전엔 Fresh 가 즉시 반환이었다).
+                        let mgr = manager.clone();
+                        let profile_for_task = profile.clone();
+                        let started = tokio::task::spawn_blocking(move || {
+                            mgr.activate_profile(&profile_for_task, mode)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(engram_dashboard_agent::types::PtyError::SpawnFailed(
+                                format!("activation task failed: {e}"),
+                            ))
+                        });
                         // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0172/0162)★: 활성화는 그
                         //   항목의 「마지막 실패」를 **성공이면 지우고 실패면 기록**하는데, 그 축은
                         //   프로필 목록으로만 흐른다(`Spawned` 이벤트·산 명부에는 없다). 성공 쪽을
@@ -1839,6 +1866,42 @@ mod tests {
 
     fn rid() -> RequestId {
         RequestId(uuid::Uuid::new_v4())
+    }
+
+    /// ★★활성화를 async 워커에서 **직접 부르지 않는다**★★ — 그 워커가 최대 20 초 묶인다.
+    ///
+    /// `AgentManager::activate_profile` 은 연결을 선언하는 통로에서 결말이 날 때까지 블록하고(백스톱
+    /// 15s), 실패로 판정하면 teardown 의 `session.kill(5s)` 까지 탄다 — 그 사이 yield 지점이 **없다.**
+    /// 막힌 활성화 N 건이 워커 N 개를 가져가면 다른 연결의 명령까지 함께 멈춘다.
+    /// ★왜 소스에서 재나★: 워커 고갈은 멀티스레드 런타임에 그 수만큼 부하를 걸어야 관측되고, 그
+    ///   시험대는 본질적으로 타이밍 의존이라 이 저장소가 피하는 모양이다(시계 단언 금지). 회귀했을 때
+    ///   나는 것은 빨간 단언이 아니라 **부하 아래서만 보이는 정지**다.
+    /// ★명령 버스 쪽 형제는 `blocking_handler` 가 이미 덮는다★ — 보호가 없던 것은 이 WS 표면뿐이다.
+    #[test]
+    fn both_ws_activation_sites_hand_the_blocking_call_to_the_pool() {
+        let src = include_str!("connection_core.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+
+        let lines: Vec<&str> = production.lines().collect();
+        let call_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(".activate_profile(") && !l.trim_start().starts_with("//"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !call_sites.is_empty(),
+            "활성화 호출 자리가 사라졌다 — 이 항목의 전제가 낡았다"
+        );
+        // ★자리마다 **그 위 몇 줄 안에** blocking 풀 인계가 있어야 한다★ — 개수를 세지 않는다(세면
+        //   무관한 `spawn_blocking` 이 하나 늘 때마다 헛빨강이 난다).
+        for i in call_sites {
+            let window = lines[i.saturating_sub(4)..=i].join("\n");
+            assert!(
+                window.contains("spawn_blocking"),
+                "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다:\n{window}"
+            );
+        }
     }
 
     /// ★output 평면은 mock 으로 안 만든다★ — 실 프레임 출구(conn_tx)로 흘려 별도 채널로 받는다
