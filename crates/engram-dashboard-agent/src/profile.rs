@@ -461,37 +461,73 @@ impl ProfileRegistry {
     ///   (lost update) 산 세션이 죽은 세션의 표식을 쓴다 → 프론트 재구독 누락(빈 슬롯) + 턴 관측·제어
     ///   토큰이 두 세대를 구분 못 함. 그래서 parent_id/display_name 과 동일하게 live 값을 보존한다.
     // ADR-0070 ADR-0072 ADR-0084
-    pub fn upsert_preserving_hierarchy(&self, mut profile: AgentProfile) {
+    pub fn upsert_preserving_hierarchy(&self, profile: AgentProfile) {
         self.mutate(|m| {
-            if let Some(live) = m.get(&profile.id) {
-                profile.parent_id = live.parent_id;
-                profile.display_name = live.display_name.clone();
-                profile.epoch = live.epoch;
-                // 마지막 실패도 같은 이유로 live 값이 이긴다 — 그 사실을 쓰는 곳은 활성화 관측뿐이고,
-                //   spawn 이 넘긴 옛 사본이 그것을 되돌리면 이미 지워진 실패가 화면에 되살아난다.
-                // ADR-0172
-                profile.last_failure = live.last_failure;
-                // ★backend 세션 손잡이와 그 이력도 live 가 이긴다(사용자 결정)★ — 위 넷과 **같은 사유**다:
-                //   이 칸을 쓰는 것은 런타임이지 spawn 스냅샷이 아니다. 발급하는 backend(claude)는 spawn 이
-                //   `ensure_session_id`/`new_session_id` 로 **이 upsert 뒤에** 확정하고, 받아 적는
-                //   backend(codex)는 통로가 핸드셰이크에서 받은 값을 기록 포트로 적는다. 어느 쪽이든
-                //   호출자가 뜬 사본은 그 값의 저자가 아니다.
-                // ★무엇을 막나★: 사본을 뜬 뒤 도착한 손잡이가 여기서 덮이고 **그대로 디스크에 영속된다**.
-                //   그러면 그 대화로 돌아갈 길이 사라진다 — 되돌릴 방법이 없는 유실이라, 덮어쓰기와
-                //   보존 중 틀렸을 때 싼 쪽을 고른다(보존). 남는 것은 낡은 값을 한 번 더 들고 가는 것이고,
-                //   그건 다음 관측이 고친다.
-                // ★이력도 함께 보존한다 — 둘은 한 덩어리다★: `observe_session_id`·`new_session_id` 가
-                //   옛 값을 `old_session_ids` 로 밀어 넣으며 짝으로 갱신하므로, 새 값만 지키고 이력을
-                //   스냅샷으로 되돌리면 그 사이 밀려난 손잡이가 목록에서 사라진다.
-                // ★Fresh spawn 이 이것 때문에 옛 대화를 재사용하지는 않는다★ — `new_session_id` 가 이
-                //   upsert **뒤에** 무조건 새 uuid 를 발급하고 옛 값을 이력으로 민다(ADR-0076).
-                profile.backend_session_id = live.backend_session_id;
-                profile.old_session_ids = live.old_session_ids.clone();
-            }
-            m.insert(profile.id, profile);
+            merge_preserving_live(m, profile);
         });
     }
 
+    /// 같은 병합을 하되 **없는 id 는 만들지 않는다** — 있으면 갱신하고 `true`, 없으면 no-op 에 `false`.
+    ///
+    /// ★존재하는 이유 = 지워진 프로필의 **부활**을 막는 것★: spawn 등록은 「이미 있나」를 보고 갈리는데,
+    ///   그 조회와 쓰기가 따로면 사이에 낀 삭제가 무시된다 — 삭제가 성공으로 보고된 뒤 그 프로필이
+    ///   **되살아나고 자식 프로세스까지 따라 뜬다.** 판정과 쓰기를 한 임계구역에 넣는 것이 그 창을 닫는
+    ///   유일한 방법이고, 이 저장소의 다른 TOCTOU 봉인과 같은 모양이다(`reparent`·`epoch_for_spawn`).
+    /// ★`false` 를 삼키지 말 것★ — 호출자는 그것을 「그 사이 지워졌다」로 읽고 spawn 을 끊어야 한다.
+    ///   그냥 넘기면 프로필 없는 세션이 명부에 오른다.
+    /// ★**이것이 부활 경로를 전부 닫지는 않는다**★ — 등록이 **시작되기 전에** 삭제가 끝난 경우는 조회가
+    ///   애초에 `None` 이라 신규 등록(ad-hoc spawn) 갈래로 간다. 그 둘을 가르려면 호출자가 「이건 원래
+    ///   있던 항목이다」를 들고 와야 하는데, 그 신호는 지금 `spawn_agent` 의 시그니처에 없다.
+    pub fn update_preserving_hierarchy(&self, profile: AgentProfile) -> bool {
+        self.mutate_if(|m| {
+            if !m.contains_key(&profile.id) {
+                return false;
+            }
+            merge_preserving_live(m, profile);
+            true
+        })
+    }
+}
+
+/// `upsert_preserving_hierarchy` 계열의 병합 본체 — live 엔트리가 있으면 **런타임이 저자인 칸**을 지킨다.
+///
+/// ★보존 목록의 정본이 이 함수다★ — 가름 규칙은 「그 칸을 누가 쓰나」이고, 호출자가 뜬 사본이 저자가
+/// 아닌 칸은 전부 live 가 이긴다. 근거는 각 줄 옆에 있다.
+fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: AgentProfile) {
+    if let Some(live) = m.get(&profile.id) {
+        profile.parent_id = live.parent_id;
+        profile.display_name = live.display_name.clone();
+        profile.epoch = live.epoch;
+        // 마지막 실패도 같은 이유로 live 값이 이긴다 — 그 사실을 쓰는 곳은 활성화 관측뿐이고,
+        //   spawn 이 넘긴 옛 사본이 그것을 되돌리면 이미 지워진 실패가 화면에 되살아난다.
+        // ADR-0172
+        profile.last_failure = live.last_failure;
+        // ★backend 세션 손잡이와 그 이력도 live 가 이긴다(사용자 결정)★ — 위 넷과 **같은 사유**다:
+        //   이 칸을 쓰는 것은 런타임이지 spawn 스냅샷이 아니다. 발급하는 backend(claude)는 spawn 이
+        //   `ensure_session_id`/`new_session_id` 로 **이 upsert 뒤에** 확정하고, 받아 적는
+        //   backend(codex)는 통로가 핸드셰이크에서 받은 값을 기록 포트로 적는다. 어느 쪽이든
+        //   호출자가 뜬 사본은 그 값의 저자가 아니다.
+        // ★무엇을 막나★: 사본을 뜬 뒤 도착한 손잡이가 여기서 덮이고 **그대로 디스크에 영속된다**.
+        //   그러면 그 대화로 돌아갈 길이 사라진다 — 되돌릴 방법이 없는 유실이라, 덮어쓰기와
+        //   보존 중 틀렸을 때 싼 쪽을 고른다(보존). 남는 것은 낡은 값을 한 번 더 들고 가는 것이고,
+        //   그건 다음 관측이 고친다.
+        // ★이력도 함께 보존한다 — 둘은 한 덩어리다★: `observe_session_id`·`new_session_id` 가
+        //   옛 값을 `old_session_ids` 로 밀어 넣으며 짝으로 갱신하므로, 새 값만 지키고 이력을
+        //   스냅샷으로 되돌리면 그 사이 밀려난 손잡이가 목록에서 사라진다.
+        // ★Fresh spawn 이 이것 때문에 옛 대화를 재사용하지는 않는다★ — `new_session_id` 가 이
+        //   upsert **뒤에** 무조건 새 uuid 를 발급하고 옛 값을 이력으로 민다(ADR-0076).
+        // ★**claude 에서도 동작이 바뀐다 — 「받아 적는 backend 만의 일」로 읽지 말 것**★: 발급 축
+        //   backend 의 Resume 은 `ensure_session_id` 로 이 칸을 **명부에서** 읽는데, 예전에는 그 직전
+        //   등록이 스냅샷으로 덮어써서 낡은 값이 읽혔다. 이제는 `SessionTracker` 가 관측해 넣은 드리프트
+        //   sid 가 읽힌다(그 관측기는 화신 축 없이 무조건 쓰고 — `observe_session_id(id, None, ..)` —
+        //   발급 축 backend 에만 붙는다). 방향은 개선이지만 **무변화가 아니다**.
+        profile.backend_session_id = live.backend_session_id;
+        profile.old_session_ids = live.old_session_ids.clone();
+    }
+    m.insert(profile.id, profile);
+}
+
+impl ProfileRegistry {
     /// **부모 삭제 시 자식 루트 승격(orphan-to-root):**
     /// 삭제 대상을 부모로 가리키던 자식들의 `parent_id` 를 **같은 임계구역에서** `None` 으로 푼다 —
     /// 존재하지 않는 부모를 가리키는 고아 참조(dangling parent)를 남기지 않는다(트리 렌더·복원 불변식).
@@ -1494,6 +1530,36 @@ mod tests {
             after.display_name,
             Some("live".into()),
             "stale spawn 스냅샷이 최신 display_name 을 되돌리면 안 됨(ADR-0070 latent)"
+        );
+    }
+
+    /// ★지워진 프로필은 spawn 등록으로 **되살아나지 않는다**★.
+    ///
+    /// 이 병합은 삭제와 경합한다: 「있나」를 보고 「쓴다」가 따로면 그 사이에 낀 삭제가 무시돼, 삭제가
+    /// 성공으로 보고된 뒤 항목이 목록에 돌아오고 자식 프로세스까지 따라 뜬다. 판정을 락 안으로 넣은 것이
+    /// 그 창을 닫는 유일한 방법이고, `false` 는 호출자가 spawn 을 끊는 신호다.
+    /// ★있을 때는 평소대로 병합한다★ — 없을 때만 갈리는 것이 이 동사의 전부라, 그 절반도 함께 잰다.
+    #[test]
+    fn update_preserving_hierarchy_never_resurrects_a_removed_profile() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        let p = sample();
+        let id = p.id;
+        let snapshot = p.clone();
+        reg.upsert(p);
+
+        assert!(
+            reg.update_preserving_hierarchy(snapshot.clone()),
+            "있는 id 를 갱신하지 못했다 — 이 동사의 정상 갈래가 죽었다"
+        );
+
+        reg.remove(id);
+        assert!(
+            !reg.update_preserving_hierarchy(snapshot),
+            "지워진 프로필에 spawn 등록이 값을 다시 넣었다"
+        );
+        assert!(
+            reg.get(id).is_none(),
+            "지워진 프로필이 되살아났다 — 삭제가 성공으로 보고된 뒤 항목과 자식이 함께 돌아온다"
         );
     }
 

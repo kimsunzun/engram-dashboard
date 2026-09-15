@@ -446,6 +446,13 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     //   이제 `backend_session_id` 와 그 이력을 live 에서 보존한다(사용자 결정). 그 보존 자체의 회귀망은
     //   `profile.rs` 의 `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot`
     //   이고 여기서 겸하지 않는다.
+    //   ★**그 보존이 claude 에서도 동작을 바꾼다 — 「claude 는 그대로다」로 읽지 말 것**★: 재활성화가
+    //   쓰는 sid 는 `ensure_position` 이 아니라 `ensure_session_id` 가 **명부에서** 읽어 오는데, 등록이
+    //   더 이상 그 칸을 스냅샷으로 덮지 않으므로 이제 **`SessionTracker` 가 관측한 드리프트 sid** 가
+    //   읽힌다(그 관측기는 `observe_session_id(id, None, ..)` 로 무조건 쓰고, `assigns_sid` 게이트
+    //   뒤에서만 붙으므로 실제 대상이 claude 다). 즉 낡은 스냅샷으로 재활성화해도 드리프트한 쪽을
+    //   이어받는다 — 의도한 개선이지만 **무변화가 아니다**. 이 항목은 명부와 인자가 같아 그 차이를
+    //   재지 않는다(그래서 여기 적어 둔다).
     //   auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
