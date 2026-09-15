@@ -129,7 +129,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0079](0079-jsonrichslot-모드-resume-시-대화-스크롤백-복원-데몬이-claude-jsonl-transcript를-읽어-history-프레임으로-전달.md) | JSON(RichSlot) 모드 resume 시 대화 스크롤백 복원 — 데몬이 Claude `.jsonl`을 읽어 OutputCore 버퍼에 seed(단일 소스 · pump 전) | 확정 |
 | [0080](0080-llm-제어-표면-아키텍처-bashengram-ctl데몬-ws백엔드-직행-데몬-opaque-relay앱-viewmanagerui.md) | LLM 제어 표면 아키텍처 — Bash→engram-ctl→데몬 WS(백엔드 직행) + 데몬 opaque-relay→앱 ViewManager(UI) | 폐기 (Superseded by ADR-0085) |
 | [0081](0081-llm-ui-제어-relay-앱데몬-명령-수신-ws-peer-opaque-relay-봉투-tauri-invoke-shim-적용사람-경로-재사용.md) | LLM UI 제어 relay: 앱=데몬 명령 수신 WS peer + opaque relay 봉투 + Tauri invoke-shim 적용(사람 경로 재사용) | 확정 (부분 폐기 by ADR-0155: 결정 1과 2 대체 / ADR-0154: 대상 주소지정 불요 전제) |
-| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (부분 폐기 by ADR-0185: 살아남는 상위 결정 중 sid 발급 조항) |
+| [0082](0082-활성화이어받기resume-전용-fresh-fallback-폐지-실패는-failed시체원인-로그-llm-에이전트가-분석에스컬레이션.md) | 활성화=이어받기(resume) 전용 — fresh-fallback 폐지, 실패는 Failed(시체)+원인 로그, LLM 에이전트가 분석·에스컬레이션 | 확정 (부분 폐기 by ADR-0185: 살아남는 상위 결정 중 sid 발급 조항 / ADR-0201: 이어받기 실패를 알아내는 수단) |
 | [0083](0083-종료-시-프로필-자동-삭제-폐지-유저-kill정상-exit-포함-모든-종료는-시체-보존-삭제는-명시적-사용자-명령으로만.md) | 종료 시 프로필 자동 삭제 폐지 — 유저 kill·정상 exit 포함 모든 종료는 시체 보존, 삭제는 명시적 사용자 명령으로만 | 확정 |
 | [0084](0084-재활성화resume-epoch-bump-apply-disposition-epoch-guard-stale-reap-산-세션-강등프론트-재구독-누락-차단.md) | 재활성화(resume) epoch bump + apply_disposition epoch-guard — stale reap 산-세션 강등·프론트 재구독 누락 차단 | 확정 |
 | [0085](0085-cli-백엔드-제어-채널-in-band-출력-마커m3-engram-ctl-폐기.md) | CLI 백엔드 제어 채널 = in-band 출력 마커(M3) — engram-ctl 폐기 | 폐기 (Superseded by ADR-0086) |
@@ -238,4 +238,8 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0196](0196-죽은-데몬-기록은-버전-방향과-무관하게-stale-생존-확인을-버전-대조보다-먼저.md) | 죽은 데몬 기록은 버전 방향과 무관하게 stale — 생존 확인을 버전 대조보다 먼저 | 확정 |
 | [0197](0197-주제별-상세-구조-문서를-referencestructure-에-모은다-파일-하나-주제-하나.md) | 주제별 상세 구조 문서를 reference/structure/ 에 모은다 — 파일 하나 = 주제 하나 | 확정 |
 | [0198](0198-codex-입력도-화면에-즉시-띄운다-합성-에코를-clientusermessageid-로-합친다.md) | codex 입력도 화면에 즉시 띄운다 — 합성 에코를 clientUserMessageId 로 합친다 | 확정 |
-| [0199](0199-기록-실패-갈래에서-통로가-자기-stdin-쓰기-끝을-닫는다.md) | 기록 실패 갈래에서 통로가 자기 stdin 쓰기 끝을 닫는다 | 확정 |
+| [0199](0199-기록-실패-갈래에서-통로가-자기-stdin-쓰기-끝을-닫는다.md) | 기록 실패 갈래에서 통로가 자기 stdin 쓰기 끝을 닫는다 | 확정 (부분 폐기 by ADR-0200: stdin 을 닫는 갈래 범위) |
+| [0200](0200-왕복-실패-갈래도-통로가-자기-stdin-쓰기-끝을-닫는다.md) | 왕복 실패 갈래도 통로가 자기 stdin 쓰기 끝을 닫는다 | 확정 |
+| [0201](0201-이어받기-성공은-준비됐다는-신호로-판정한다-시간-창이-아니다.md) | 이어받기 성공은 준비됐다는 신호로 판정한다 — 시간 창이 아니다 | 확정 |
+| [0202](0202-활성화-증거를-지우지-않는다-저장된-손잡이도-실패-기록도.md) | 활성화 증거를 지우지 않는다 — 저장된 손잡이도 실패 기록도 | 확정 |
+| [0203](0203-codex-화면-복원은-app-server-에-페이지로-요청한다-rollout-파일을-읽지-않는다.md) | codex 화면 복원은 app-server 에 페이지로 요청한다 — rollout 파일을 읽지 않는다 | 확정 |

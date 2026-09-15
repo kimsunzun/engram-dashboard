@@ -1,7 +1,7 @@
 # ADR-0199: 기록 실패 갈래에서 통로가 자기 stdin 쓰기 끝을 닫는다
 
-- 상태: 확정 (2026-09-15, 근거: 리뷰 3라운드 · 코더 변이 검증 2건)
-- 관련: CLAUDE.md 「핵심 불변식」 kill 인과 · ADR-0001 · ADR-0005 · ADR-0185 결정 2 · `crates/engram-dashboard-agent/src/backend/codex/transport.rs` `record_session_id`·`writer_loop`
+- 상태: 확정 (2026-09-15, 근거: 리뷰 3라운드 · 코더 변이 검증 2건) · 부분 폐기 by ADR-0200 (stdin 을 닫는 갈래 범위)
+- 관련: CLAUDE.md 「핵심 불변식」 kill 인과 · ADR-0001 · ADR-0005 · ADR-0185 결정 2 · `crates/engram-dashboard-agent/src/backend/codex/transport.rs` `record_session_id`·`writer_loop` · Amended by ADR-0200 (stdin 을 닫는 갈래 범위)
 
 ## 맥락
 
