@@ -899,15 +899,21 @@ Written but never read back into a spawn:
 - `epoch` — written as `0`, never read from disk.
 - `last_start_at`, `restart_policy`, `restart_count`, `failed_reason` — no writer at all.
 
-**Codex has zero persisted resume state today**, and **two independent axes** now say so.
-`assigns_session_id()==false` → `sid = None` in `AgentManager::spawn_agent` → `backend_session_id`
-stays `None`. Separately `can_resume_stored_session()==false` (both modes, until `thread/resume` is
-wired) → `backend::can_resume_profile` is false → `restore_one` **and both activation entries**
-spawn Fresh. Either axis alone would be enough today; they are kept apart because they answer
-different questions (who mints vs. what a stored sid is good for — ADR-0185).
-`capabilities().session.resume = false` with the stated reason "호출자가 sid 를 못 정하므로 무손실
-복원이 성립하지 않는다" (`CodexBackend::capabilities`). `codex resume <id>` is listed as known but
-unwired (:14, :87-88), and `build_spec` asserts no session flag is assembled (:90-96, test :245).
+**Codex's two axes now disagree, and that is the point.** `assigns_session_id()==false` → `sid =
+None` in `AgentManager::spawn_agent` → the manager never mints a uuid for codex. But
+`can_resume_stored_session()` is now `is_app_server(command)`: **true** for app-server, **false** for
+terminal mode. So an app-server profile that has been handed a thread id is resumable —
+`backend::can_resume_profile` is true → `restore_one` **and both activation entries** spawn Resume →
+`AgentManager::spawn_agent` passes `profile.backend_session_id` to `open_spawn` as the resume target
+→ the codex backend issues `thread/resume { threadId }` instead of `thread/start`. The two axes are
+kept apart precisely because they answer different questions (who mints vs. what a stored sid is good
+for — ADR-0185), and codex is the backend where the answers differ.
+★Do not collapse the resume target with `build_spec`'s `session_id`★ — the latter is the value *we*
+mint (the `assigns_session_id` axis) and is `None` here; the former is the value the *peer* minted
+and we recorded. `capabilities().session.resume` follows the same per-channel predicate.
+`codex resume <id>` (the terminal-mode subcommand) is still listed as known but unwired (:14,
+:87-88), and `build_spec` asserts no session flag is assembled (:90-96, test :245) — codex's resume
+never travels on the command line.
 The `gemini` backend is an unreachable stub — `pub mod gemini` exists (backend/mod.rs:14) but there
 is no `AgentCommand::Gemini` variant and no arm in `backend_for` (:283-289).
 
@@ -1889,15 +1895,23 @@ would want to do, and why it cannot today.
     blocking codex resume★: codex's thread id **is** a UUID (measured — a real app-server handed us
     `01a0a08f-…`, a UUIDv7), so it parses and lands in that slot. This item is about a backend whose
     handle is not a UUID at all; no such backend is wired.
-47. ~~**Let a backend report a session id it minted itself**~~ — **this is now wired.**
+47. ~~**Let a backend report a session id it minted itself**~~ — **wired, and now read back.**
     `AgentBackend::open_spawn` takes a `SessionIdSink` (`Arc<dyn Fn(&str) + Send + Sync>`,
     backend/mod.rs) that the assembly point supplies; codex's app-server branch hands it to the
-    transport, whose writer calls it with the `thread/start` thread id before setting `Link::Ready`.
+    transport, whose writer calls it with the handshake's thread id before setting `Link::Ready`.
     The old pull-only poller (`AgentBackend::session_id_source`, still gated on
-    `assigns_session_id()`) remains the claude path and is unchanged. Measured against a real app-server: the id lands in
-    `backend_session_id` and survives a kill. What is still **not** wired: `thread/resume` — so
-    `can_resume_stored_session` and `capabilities().session.resume` both stay `false` for codex, and
-    the recorded id is stored but not yet resumed from.
+    `assigns_session_id()`) remains the claude path and is unchanged. Measured against a real
+    app-server: the id lands in `backend_session_id` and survives a kill.
+    **The read-back half is now wired too**: `open_spawn` also takes `resume_session_id:
+    Option<Uuid>` (the manager fills it from `profile.backend_session_id` on a `Resume` spawn only),
+    and codex turns it into `thread/resume { threadId }`. Both `can_resume_stored_session` and
+    `capabilities().session.resume` are `is_app_server(command)` — they flip **together**, per
+    channel. ★The receipt still fires on the resume path★ and records **what the peer answered**, not
+    what we sent; if those differ, the peer's value is the thread this incarnation actually talks to.
+    ★A rejected resume does not fall back to a fresh thread★ (ADR-0082) — and codex adds a reason of
+    its own: `-32600` is not exclusive to "unknown thread" — an unknown method, a second
+    `initialize` and a config error all return it (measured, 0.154.0) — so branching on that code
+    would overwrite a still-valid handle on an unrelated failure.
 48. **Learn a session id from the child's own *output* stream** — the decoder still cannot send
     anything (item 13). ★Do not read this as "nothing can push a session id" — item 47 changed.★
     The codex app-server path pushes one, but it arrives on the **request/response channel** the
@@ -1915,6 +1929,19 @@ would want to do, and why it cannot today.
       a write landing on a session that ended without being replaced compares equal and is accepted.
       Closing it needs a liveness fact readable inside the same critical section as the write — and
       the registry's critical section holds a disk write, so it cannot be the transport's state lock.
+      ★Scope this gap correctly now that the recorded id is resumed from★: the late write carries
+      **this same profile's own** most recent thread id, and any *re-spawn* mints a new `epoch`
+      (`epoch_for_spawn`, called before the sink can fire) so an older incarnation can never land
+      **after** a newer one. What is left is therefore not a wrong resume target but (a) an
+      `agents.json` rewrite after the session is gone and (b) a window in which a reader still sees
+      the previous id — the same "received but not yet persisted" gap the persist requirement already
+      records as unmet, not a second one.
+      ★A different lost-update does reach `backend_session_id`, and it is not this one★:
+      `register_for_spawn` → `upsert_preserving_hierarchy` inserts the caller's **snapshot**, which
+      preserves only `parent_id`/`display_name`/`epoch`/`last_failure`. A snapshot taken before a
+      late receipt landed therefore reverts that receipt, and the same spawn then resumes from the
+      snapshot's older id. This shape predates codex resume (it applies to the claude poller's writes
+      too) and is the one named in `upsert_preserving_hierarchy`'s own doc.
 50. **Record when a process last started** — `last_start_at` has **no writer at all**
     (profile.rs:229-230; only the `None` init at :261 and a wire mirror at
     connection_core.rs:498). A dead slot.

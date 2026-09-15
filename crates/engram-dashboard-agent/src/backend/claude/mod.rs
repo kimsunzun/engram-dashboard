@@ -377,9 +377,10 @@ impl AgentBackend for ClaudeBackend {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        resume_session_id: Option<Uuid>,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
-        let _ = sid_sink;
+        let _ = (sid_sink, resume_session_id);
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
                 let (t, pid) = StdioTransport::open(spec, true, self.output_decoder(command))?;

@@ -28,7 +28,9 @@ use std::path::PathBuf;
 use uuid::Uuid;
 
 use self::decoder::CodexAppServerDecoder;
-use self::protocol::{AskForApproval, SandboxMode, ThreadStartParams};
+use self::protocol::{
+    AskForApproval, SandboxMode, ThreadOpen, ThreadResumeParams, ThreadStartParams,
+};
 use self::transport::CodexAppServerTransport;
 use crate::backend::{
     console_command, AgentBackend, InputEncoder, SessionIdSink, SpawnParts, TransportShape,
@@ -55,6 +57,38 @@ fn is_app_server(command: &AgentCommand) -> bool {
             ..
         }
     )
+}
+
+/// 이 spawn 의 **핸드셰이크 둘째 요청**을 고른다 — `resume_session_id` 가 있으면 그 스레드를 이어받고,
+/// 없으면 새 스레드를 연다. 부재 = 이어받을 것이 없다(저장된 값이 없거나 Fresh 로 띄운다).
+///
+/// ★정책 셋(작업 폴더·승인·샌드박스)을 두 갈래에 **똑같이** 싣는다★: 이어받기에서 빼면 codex 가 그
+///   스레드를 만들 때 저장해 둔 값으로 돈다 — 프로필의 작업 폴더가 그 사이 바뀌었어도 이어받은 세션만
+///   조용히 옛 폴더를 워크스페이스로 믿는다. 그 어긋남은 화면에 아무 표시도 남기지 않는다.
+/// ★codex 가 스레드 생성 때와 **다른** cwd·정책을 받아들이는지는 미검이다★ — 거절한다면 증상은
+///   이어받기 실패이고, 새 스레드로 되돌아가지 않으므로(ADR-0082) 그 사유가 화면에 그대로 오른다.
+/// ★`excludeTurns` 를 켜는 것은 결정이다★ — 우리는 `thread.turns` 를 한 칸도 읽지 않는데(응답 타입에
+///   그 칸이 없다), 채워 받으면 긴 대화 하나가 통로의 줄 상한(`MAX_LINE_BYTES`)을 넘겨 **그 줄만
+///   버려지고** 핸드셰이크가 시한까지 오지 않을 답을 기다린다.
+// ADR-0185
+fn thread_open(spec: &CommandSpec, resume_session_id: Option<Uuid>) -> ThreadOpen {
+    let cwd = Some(spec.cwd.to_string_lossy().into_owned());
+    let approval_policy = Some(AskForApproval::OnRequest);
+    let sandbox = Some(SandboxMode::WorkspaceWrite);
+    match resume_session_id {
+        Some(thread_id) => ThreadOpen::Resume(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            cwd,
+            approval_policy,
+            sandbox,
+            exclude_turns: Some(true),
+        }),
+        None => ThreadOpen::Start(ThreadStartParams {
+            cwd,
+            approval_policy,
+            sandbox,
+        }),
+    }
 }
 
 /// PATH 로 해석되는 이름 그대로 띄운다(사용자 결정 2026-09-07 · TRD §6-H).
@@ -105,17 +139,16 @@ impl AgentBackend for CodexBackend {
         false
     }
 
-    /// ★터미널 모드에는 이어받을 식별자 자체가 없고, app-server 모드에는 있다(thread id)★ — 그런데도 두
-    /// 모양 다 false 인 것은 **선언과 실물을 같게 두기 위해서**다.
-    /// ★`is_app_server(command)` 로 바꾸는 것은 `thread/resume` 을 배선하는 그 커밋이다 — 그 전에 켜지 말
-    ///   것★: 지금 [`AgentBackend::build_spec`] 은 mode·sid 를 무시하고 [`AgentBackend::open_spawn`] 은
-    ///   언제나 `thread/start` 를 낸다. 이 칸만 먼저 true 로 두면, 이 백엔드에 sid 가 생기는 순간(슬라이스
-    ///   2 가 그것을 배선하고, 손으로 고친 `agents.json` 은 오늘도 그 상태를 만든다) 복원·활성화가 Resume
-    ///   으로 가고 **새 스레드가 열리는데 결과는 「이어받음」으로 보고된다**. 지금은 그 입력이 Fresh 로
-    ///   떨어져 정직하게 보고된다.
+    /// ★터미널 모드에는 이어받을 식별자 자체가 없고, app-server 모드에는 있다(thread id)★ — 그래서 이
+    /// 칸이 모드를 가른다. app-server 는 저장된 그 id 로 `thread/resume` 을 내고
+    /// ([`AgentBackend::open_spawn`] 이 고른다), 터미널 모드는 `codex resume <id>` 를 쓰지 않으므로
+    /// 이어받을 것이 없다.
+    /// ★아래 [`AgentBackend::capabilities`] 의 `session.resume` 과 **같은 술어로 함께 켠다 — 한쪽만
+    ///   건드리지 말 것**★: 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로
+    ///   보고되고, 단독으로 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다.
     // ADR-0185
-    fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
-        false
+    fn can_resume_stored_session(&self, command: &AgentCommand) -> bool {
+        is_app_server(command)
     }
 
     fn supports_control_channel(&self) -> bool {
@@ -224,24 +257,20 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// `session.resume = false` 인 이유는 ★**발급 주체와 무관하다**★ — 복원은 프로필에 저장된 backend
-    /// sid **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는 `thread/start`
-    /// 응답으로 받아 쓰는 쪽이다.
-    /// ★**「받아 적는 배선이 없어서」는 낡은 사유다 — 그 배선은 섰다**★: [`AgentBackend::open_spawn`] 이
-    /// 조립점의 기록 동사를 받아 app-server 통로에 넘기고, 그 통로가 `thread/start` 응답의 id 로 그것을
-    /// 부른다(실 app-server 실측 — 받은 id 가 프로필에 앉는다). 지금 이 칸이 false 인 사유는 **하나
-    /// 남았다 — `thread/resume` 을 내지 않는다**. 받은 id 는
-    /// 프로필에 적히기만 하고 이어받기에 쓰이지 않는다.
-    /// ★판정 축([`AgentBackend::can_resume_stored_session`])도 **아직 꺼져 있고, 그 축과 이 칸은 여전히
-    /// 같은 하나를 기다린다**★ — 이제 그 하나는 「수령 배선」이 아니라 `thread/resume` 이다. 둘 중 하나만
-    /// 먼저 켜지 말 것: 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로 보고된다.
+    /// `session.resume` 이 **모드마다 갈리는** 이유는 ★발급 주체와 무관하다★ — 복원은 프로필에 저장된
+    /// backend sid **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는
+    /// `thread/start` 응답으로 받아 쓰는 쪽이고, app-server 모드는 그 값으로 `thread/resume` 을 낸다
+    /// ([`AgentBackend::open_spawn`] 이 고르고 통로가 낸다). 터미널 모드에는 그 손잡이가 없다.
+    /// ★위 [`AgentBackend::can_resume_stored_session`] 과 **같은 술어다 — 한쪽만 건드리지 말 것**★:
+    ///   그 축은 활성화 입구가 「Resume 으로 띄울까」를 묻는 자리이고 이 칸은 그 결과를 소비자에게
+    ///   신고하는 자리라, 갈리면 새 스레드가 「이어받음」으로(또는 그 반대로) 보고된다.
     /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
     /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
     // ADR-0185
-    fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
+    fn capabilities(&self, command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {
-                resume: false,
+                resume: is_app_server(command),
                 snapshot: false,
                 cwd_env: true,
             },
@@ -275,9 +304,11 @@ impl AgentBackend for CodexBackend {
     /// ★`sid_sink` 를 app-server 갈래에만 넘긴다★ — 터미널 갈래에는 받아 올 식별자 자체가 없다. 그
     ///   포트로 나가는 값은 codex 가 `thread/start` 응답으로 발급한 thread id 이고, 통로가 그 세션으로
     ///   무엇을 보내기 전에 나간다([`AgentBackend::open_spawn`] 의 순서 계약).
-    /// ★그 배선이 섰다고 `capabilities().session.resume` 이나
-    ///   [`AgentBackend::can_resume_stored_session`] 이 함께 켜지는 것이 아니다★ — 그 둘은 `thread/resume`
-    ///   을 실제로 내는 커밋이 함께 켠다. 여기까지는 값이 프로필에 **남기만** 한다.
+    /// ★`thread/start` 냐 `thread/resume` 이냐를 고르는 자리도 여기다★ — 조립점이 넘긴
+    ///   `resume_session_id` 하나로 갈린다([`thread_open`]). ★통로에게 다시 묻지 않는다★: 통로가 자기
+    ///   상태를 보고 판정하면 가르는 자리가 둘이 된다.
+    /// ★`resume_session_id` 를 터미널 갈래에서는 쓰지 않는다★ — 그 모드에는 이어받을 손잡이가 없고,
+    ///   [`AgentBackend::can_resume_stored_session`] 이 그 모드에 false 라 조립점도 값을 안 채운다.
     // ADR-0185
     // ADR-0191
     fn open_spawn(
@@ -287,19 +318,15 @@ impl AgentBackend for CodexBackend {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        resume_session_id: Option<Uuid>,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_app_server(command) {
-                let params = ThreadStartParams {
-                    cwd: Some(spec.cwd.to_string_lossy().into_owned()),
-                    approval_policy: Some(AskForApproval::OnRequest),
-                    sandbox: Some(SandboxMode::WorkspaceWrite),
-                };
                 let (t, pid) = CodexAppServerTransport::open(
                     spec,
                     true,
                     self.output_decoder(command),
-                    params,
+                    thread_open(spec, resume_session_id),
                     sid_sink,
                 )?;
                 (Box::new(t), pid)
@@ -634,30 +661,45 @@ mod tests {
             .is_some());
     }
 
-    /// 이 백엔드가 바뀔 때 **함께** 봐야 하는 짝이라 한 항목에 둔다 — 위 두 impl 바로 옆이고, 켜는
-    /// 조건도 하나(그 배선 커밋)다.
+    /// 세 선언이 한 항목에 있는 이유 = **함께 봐야 하는 짝**이다. 발급 축은 두 모드 다 꺼져 있고
+    /// (발급 주체가 codex 라 우리가 심을 값이 없다), 이어받기 두 칸은 통로 하나로 함께 갈린다.
+    ///
+    /// ★네 칸을 다 적는 것이 요점이다★ — 이어받기 축과 caps 신고 칸 중 **한쪽만** 갈리면 이어받은 적
+    ///   없는 새 스레드가 「이어받음」으로 보고되거나 그 반대가 되는데, 모드별로 한 칸씩만 재면 그
+    ///   어긋남이 이 파일에서 안 보인다.
     #[test]
-    fn neither_session_axis_is_on_in_either_mode() {
+    fn the_resume_declarations_split_on_the_channel_and_the_issuing_axis_does_not() {
         for c in [codex(vec![]), codex_app_server(vec![])] {
             assert!(
                 !CodexBackend.assigns_session_id(&c),
                 "{c:?}: 발급 주체는 codex 다 — 우리 uuid 를 심으면 그 값은 영영 안 쓰인다"
             );
-            assert!(
-                !CodexBackend.can_resume_stored_session(&c),
-                "{c:?}: 이어받기 배선이 없는 동안은 선언도 false 여야 한다 — 켜는 조건은 그 impl 주석"
-            );
         }
+
+        let terminal = codex(vec![]);
+        assert!(
+            !CodexBackend.can_resume_stored_session(&terminal),
+            "터미널 모드에는 이어받을 손잡이가 없다"
+        );
+        assert!(
+            !CodexBackend.capabilities(&terminal).session.resume,
+            "터미널 모드가 이어받기를 신고하면 새 대화가 「이어받음」으로 보고된다"
+        );
+
+        let app_server = codex_app_server(vec![]);
+        assert!(
+            CodexBackend.can_resume_stored_session(&app_server),
+            "app-server 는 저장된 thread id 로 `thread/resume` 을 낸다"
+        );
+        assert!(
+            CodexBackend.capabilities(&app_server).session.resume,
+            "축만 켜고 신고를 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다"
+        );
     }
 
     #[test]
     fn reads_messages_is_false() {
         assert!(!CodexBackend.reads_messages());
-    }
-
-    #[test]
-    fn capabilities_resume_is_false() {
-        assert!(!CodexBackend.capabilities(&codex(vec![])).session.resume);
     }
 
     // ── ADR-0185: 받아 온 thread id 가 조립점의 기록 동사까지 실제로 간다 ──────────────────
@@ -679,6 +721,56 @@ mod tests {
         false
     }
 
+    /// 가짜가 `thread/resume` 에 무엇으로 답하나.
+    #[cfg(windows)]
+    enum FakeResume {
+        /// 받은 `threadId` 에 접두를 붙여 돌려준다 — 우리가 보낸 값과 **다른** 값이 되는 것이 요점이다.
+        EchoesTheThreadId,
+        /// `-32600` 으로 거절한다. ★이 코드가 「모르는 스레드」 전용이 아니라는 것이 ADR-0082 의 codex 쪽
+        /// 보강 사유다★ — 모르는 메서드도 중복 `initialize` 도 설정 오류도 같은 코드로 오므로(실측
+        /// 0.154.0 — 정본은 이 폴더 `protocol` 과 통로 시험대), 코드로 갈라 새 스레드로 폴백하면 아직
+        /// 멀쩡한 손잡이를 무관한 실패에서 덮어쓴다.
+        Rejects,
+    }
+
+    /// 가짜 app-server 를 임시 파일로 구워 그것을 띄울 [`CommandSpec`] 과 그 경로를 돌려준다.
+    /// `start_thread_id` = 이 가짜가 `thread/start` 에 답할 id.
+    ///
+    /// ★경로를 함께 돌려주는 것은 계약이다★ — 항목마다 [`remove_script`] 로 지워야 하고, 못 지운 사실을
+    /// 단언으로 올려야 한다.
+    #[cfg(windows)]
+    fn bake_fake_app_server(
+        start_thread_id: &str,
+        resume: FakeResume,
+    ) -> (CommandSpec, std::path::PathBuf) {
+        let resume_reply = match resume {
+            FakeResume::EchoesTheThreadId => {
+                r#"'"result":{"thread":{"id":"resumed-' + $tid + '","cliVersion":"0.0.0-fake"}}'"#
+            }
+            FakeResume::Rejects => r#"'"error":{"code":-32600,"message":"unknown thread"}'"#,
+        };
+        let script = FAKE_APP_SERVER_PS1
+            .replace("THREAD_ID_PLACEHOLDER", start_thread_id)
+            .replace("RESUME_REPLY_PLACEHOLDER", resume_reply);
+        let script_path =
+            std::env::temp_dir().join(format!("engram-fake-app-server-{}.ps1", Uuid::new_v4()));
+        std::fs::write(&script_path, script).expect("가짜 app-server 기록");
+
+        let spec = CommandSpec {
+            program: "powershell.exe".into(),
+            args: vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-File".into(),
+                script_path.to_string_lossy().into_owned(),
+            ],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+        (spec, script_path)
+    }
+
     /// 핸드셰이크의 두 요청에만 답하는 최소 app-server. ★실 codex 가 아니다★ — 재는 것은 「상대가 준
     /// thread id 가 [`AgentBackend::open_spawn`] 에 건넨 동사까지 오나」 하나이고, 그 답에 실 CLI 는
     /// 무관하다(ADR-0012 격리).
@@ -686,6 +778,9 @@ mod tests {
     /// Rust `Command` 의 인자 이스케이프와 powershell 의 명령줄 해석을 거치며 두 번 씹힌다.
     /// ★stdout 은 raw 바이트로 쓴다★ — `Write-Output` 은 인코딩·BOM 이 호스트 설정에 딸려 가고, BOM 한
     /// 바이트가 첫 줄을 JSON 이 아니게 만든다.
+    ///
+    /// ★`thread/resume` 갈래의 답은 [`FakeResume`] 이 채워 넣는다★ — 그 자리에 들어가는 것은 JSON 조각이
+    /// 아니라 **powershell 식**이라, 받은 `threadId` 를 이어 붙이는 답도 쓸 수 있다.
     ///
     /// ★**이 가짜는 답한 뒤에도 죽지 않고 stdin 을 계속 읽는다 — 그 성질이 한 항목의 전제다**★.
     /// [`tests::a_recording_failure_ends_the_session`] 이 재는 것은 「기록이 실패하면 우리가 stdin 을 닫고
@@ -709,6 +804,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       Send ('{"id":' + $rid + ',"result":{"codexHome":"h","platformFamily":"windows","platformOs":"windows","userAgent":"engram-fake/0"}}')
     } elseif ($line -match '"method":"thread/start"') {
       Send ('{"id":' + $rid + ',"result":{"thread":{"id":"THREAD_ID_PLACEHOLDER","cliVersion":"0.0.0-fake"}}}')
+    } elseif ($line -match '"method":"thread/resume"') {
+      $tid = 'MISSING'
+      if ($line -match '"threadId":"([^"]+)"') { $tid = $Matches[1] }
+      Send ('{"id":' + $rid + ',' + RESUME_REPLY_PLACEHOLDER + '}')
     }
   }
 }
@@ -730,23 +829,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
 
         let thread_id = Uuid::new_v4().to_string();
-        let script = FAKE_APP_SERVER_PS1.replace("THREAD_ID_PLACEHOLDER", &thread_id);
-        let script_path =
-            std::env::temp_dir().join(format!("engram-fake-app-server-{}.ps1", Uuid::new_v4()));
-        std::fs::write(&script_path, script).expect("가짜 app-server 기록");
-
-        let spec = CommandSpec {
-            program: "powershell.exe".into(),
-            args: vec![
-                "-NoProfile".into(),
-                "-ExecutionPolicy".into(),
-                "Bypass".into(),
-                "-File".into(),
-                script_path.to_string_lossy().into_owned(),
-            ],
-            env: vec![],
-            cwd: PathBuf::from("."),
-        };
+        let (spec, script_path) = bake_fake_app_server(&thread_id, FakeResume::EchoesTheThreadId);
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink: SessionIdSink = {
@@ -755,7 +838,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
 
         let parts =
-            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink))
+            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink), None)
                 .expect("open_spawn");
 
         parts.transport.start(Arc::new(OutputCore::new(
@@ -797,6 +880,196 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         );
     }
 
+    /// ★조립점이 이어받을 값을 주면 둘째 요청이 `thread/resume` 으로 갈린다 — 그리고 기록되는 것은
+    /// **상대가 답한 id** 다★.
+    ///
+    /// 단언 하나가 셋을 가른다(가짜의 답이 `resumed-<우리가 보낸 threadId>` 라서):
+    ///   1. 나간 것이 `thread/start` 가 아니다 — 그쪽이었으면 가짜가 `start_only` 를 돌려준다.
+    ///   2. `threadId` 칸이 우리가 넘긴 값을 그대로 실어 갔다(철자 camelCase 포함).
+    ///   3. 기록 동사가 받는 것은 **상대가 준 값**이다. 우리가 보낸 값을 되쓰는 구현이었다면 접두 없는
+    ///      원본이 올라와 여기서 갈린다 — 그 갈래가 중요한 이유는, 상대가 다른 id 를 주는 날 그 값이
+    ///      이 화신이 실제로 말하는 스레드이기 때문이다.
+    ///
+    /// ★`send_input` 을 한 번도 하지 않는다★ — 재는 것은 핸드셰이크 구획뿐이고, 여기서 보내면 상한까지
+    ///   큐가 차는 다른 갈래를 섞게 된다.
+    #[cfg(windows)]
+    #[test]
+    fn a_resume_target_makes_the_handshake_issue_thread_resume() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
+        use std::sync::{Arc, Mutex};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let resume_target = Uuid::new_v4();
+        let (spec, script_path) = bake_fake_app_server("start_only", FakeResume::EchoesTheThreadId);
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: SessionIdSink = {
+            let seen = seen.clone();
+            Arc::new(move |id: &str| seen.lock().unwrap().push(id.to_string()))
+        };
+
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &spec,
+            80,
+            24,
+            Some(sink),
+            Some(resume_target),
+        )
+        .expect("open_spawn");
+
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+
+        // 시한 근거는 위 항목과 같다 — 통로 자신의 요청 시한(30s)보다 짧게 둔다.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let got = seen.lock().unwrap().clone();
+
+        parts.transport.shutdown();
+
+        assert!(
+            !got.is_empty(),
+            "시한(20초) 안에 기록 동사가 한 번도 불리지 않았다 — 이어받기 요청이 안 나갔거나(가짜는              `thread/start` 에도 답하므로 그 경우에도 불려야 한다), 가짜 app-server 가 그 안에 뜨지              못했다. 가르려면 {} 를 손으로 돌려 볼 것",
+            script_path.display()
+        );
+        let removed = remove_script(&script_path);
+        assert_eq!(
+            got,
+            vec![format!("resumed-{resume_target}")],
+            "이어받기 응답의 id 가 기록되지 않았다 — `start_only` 면 `thread/start` 가 나간 것이고,              접두 없는 원본이면 상대 답 대신 우리가 보낸 값을 되쓴 것이다"
+        );
+        assert!(
+            removed,
+            "가짜 app-server 스크립트를 지우지 못했다: {}",
+            script_path.display()
+        );
+    }
+
+    /// ★거절당한 이어받기는 **새 스레드로 되돌아가지 않는다**(ADR-0082)★ — 그리고 프로필에 저장된
+    /// 손잡이를 건드리지 않는다.
+    ///
+    /// 결정적 증거는 **기록 동사가 한 번도 안 불린다**는 것이다: 이 가짜는 `thread/start` 에도 답하므로
+    /// (`start_only`), 통로가 거절을 보고 새 스레드를 열었다면 그 id 가 기록 동사로 올라온다. 그 부재가
+    /// 곧 둘째 spawn 부재이고, 기록이 없으니 저장된 sid 도 그대로다.
+    /// ★부재를 시한으로만 재지 않는다★ — 화면에 오르는 실패 경계를 **기다린 뒤에** 부재를 단언한다.
+    ///   그래야 「아직 안 끝났을 뿐」과 「폴백이 없다」가 갈린다.
+    /// ★세션이 종점으로 가는 것은 여기서 재지 않는다★ — 왕복 실패 갈래는 이 통로가 아무도 죽이지 않고
+    ///   링크만 내린다(그 통로 헤더의 「알려진 한계」). 종점까지 가는 것은 매니저·reaper 몫이고,
+    ///   그 규율의 회귀망은 `tests/activation.rs` 가 진다.
+    #[cfg(windows)]
+    #[test]
+    fn a_rejected_resume_does_not_fall_back_to_a_fresh_thread() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{
+            AgentInfo, AgentStatus, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
+            StatusSink, TurnOutcome,
+        };
+        use std::sync::{Arc, Mutex};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        struct EventSink {
+            id: SinkId,
+            seen: Arc<Mutex<Vec<OutputEvent>>>,
+        }
+        impl OutputSink for EventSink {
+            fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+                if let OutputPayload::Event(e) = frame.payload {
+                    self.seen.lock().unwrap().push(e.clone());
+                }
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                self.id
+            }
+        }
+
+        let resume_target = Uuid::new_v4();
+        let (spec, script_path) = bake_fake_app_server("start_only", FakeResume::Rejects);
+
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: SessionIdSink = {
+            let recorded = recorded.clone();
+            Arc::new(move |id: &str| recorded.lock().unwrap().push(id.to_string()))
+        };
+
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &spec,
+            80,
+            24,
+            Some(sink),
+            Some(resume_target),
+        )
+        .expect("open_spawn");
+
+        let events: Arc<Mutex<Vec<OutputEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let core = Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
+        core.subscribe(Arc::new(EventSink {
+            id: SinkId::new_v4(),
+            seen: events.clone(),
+        }));
+        parts.transport.start(core);
+
+        let failed = |es: &[OutputEvent]| {
+            es.iter().any(|e| {
+                matches!(
+                    e,
+                    OutputEvent::TurnEnd {
+                        outcome: TurnOutcome::Failed { .. },
+                        ..
+                    }
+                )
+            })
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !failed(&events.lock().unwrap()) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let seen = events.lock().unwrap().clone();
+        let got = recorded.lock().unwrap().clone();
+
+        parts.transport.shutdown();
+
+        assert!(
+            failed(&seen),
+            "시한(20초) 안에 실패 경계가 화면에 오르지 않았다 — 거절이 삼켜졌거나 가짜 app-server 가 뜨지              못했다(스크립트는 남겨 둔다): {}",
+            script_path.display()
+        );
+        let removed = remove_script(&script_path);
+        assert!(
+            got.is_empty(),
+            "거절당한 이어받기 뒤에 기록 동사가 불렸다 — 새 스레드로 폴백했다는 뜻이고(값이              `start_only` 면 확정), 그 값이 프로필의 아직 멀쩡한 손잡이를 덮어쓴다: {got:?}"
+        );
+        assert!(
+            removed,
+            "가짜 app-server 스크립트를 지우지 못했다: {}",
+            script_path.display()
+        );
+    }
+
     /// ★기록이 패닉하면 세션이 **끝난다** — 조용히 멈추지도, 영원히 떠 있지도 않는다★.
     ///
     /// 이 항목이 재는 것은 셋이고 ★셋째가 핵심★이다:
@@ -822,24 +1095,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
 
-        let script =
-            FAKE_APP_SERVER_PS1.replace("THREAD_ID_PLACEHOLDER", &Uuid::new_v4().to_string());
-        let script_path =
-            std::env::temp_dir().join(format!("engram-fake-app-server-{}.ps1", Uuid::new_v4()));
-        std::fs::write(&script_path, script).expect("가짜 app-server 기록");
-
-        let spec = CommandSpec {
-            program: "powershell.exe".into(),
-            args: vec![
-                "-NoProfile".into(),
-                "-ExecutionPolicy".into(),
-                "Bypass".into(),
-                "-File".into(),
-                script_path.to_string_lossy().into_owned(),
-            ],
-            env: vec![],
-            cwd: PathBuf::from("."),
-        };
+        let (spec, script_path) =
+            bake_fake_app_server(&Uuid::new_v4().to_string(), FakeResume::EchoesTheThreadId);
 
         // 불렸다는 사실만 남기고 터진다 — 「패닉이 났다」와 「아예 안 불렸다」를 갈라야 하기 때문.
         let reached = Arc::new(AtomicBool::new(false));
@@ -852,7 +1109,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
 
         let parts =
-            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink))
+            crate::backend::open_spawn(&codex_app_server(vec![]), &spec, 80, 24, Some(sink), None)
                 .expect("open_spawn");
 
         let statuses: Arc<Mutex<Vec<AgentStatus>>> = Arc::new(Mutex::new(Vec::new()));

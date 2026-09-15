@@ -139,25 +139,27 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 | 선언 | `claude` | `codex` | `gemini` (미배선) | 코어가 그 값으로 잠그는 것 |
 |---|---|---|---|---|
 | `assigns_session_id` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | **우리가** sid 를 뽑아 spec 에 넘기나. `true` 면 manager 가 발급해 **프로필에 영속**하고 watcher 의 기준값으로도 쓴다. `false` 를 「세션이 없다」로 읽지 말 것 — 그 프로그램이 자기 id 를 스스로 발급하는 쪽일 수 있다 |
-| `can_resume_stored_session` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | 저장된 backend sid 로 **이어받을 수 있나**. 발급 주체는 묻지 않는다. 부팅 복원과 활성화 입구 둘이 `backend::can_resume_profile`(이 축 ∧ sid 존재) 하나로 함께 판정한다 — `false` 면 sid 가 남아 있어도 Fresh. ★예외 하나★: WS `SpawnProfile{resume:true}` 는 그 판정을 **우회해** Resume 으로 간다(`resume \|\| can_resume_profile(…)`) |
+| `can_resume_stored_session` | `true`(두 모드) | **app-server `true` · 터미널 `false`** | `true`(best-guess stub) | 저장된 backend sid 로 **이어받을 수 있나**. 발급 주체는 묻지 않는다. 부팅 복원과 활성화 입구 둘이 `backend::can_resume_profile`(이 축 ∧ sid 존재) 하나로 함께 판정한다 — `false` 면 sid 가 남아 있어도 Fresh. ★예외 하나★: WS `SpawnProfile{resume:true}` 는 그 판정을 **우회해** Resume 으로 간다(`resume \|\| can_resume_profile(…)`) |
 | `reads_messages` | `true`(trait 기본) | `false` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 |
 | `supports_control_channel` | `true` | `false` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰+mcp-config 발급). `false` 면 provision 을 **아예 건드리지 않는다** |
 | `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
 | `output_decoder` | stream-json 에만 `Some` | app-server 에만 `Some`(터미널은 `None`) | 없음(trait 기본 `None`) | 구조화 이벤트의 유무 → (A) 「렌더 분기」의 갈래 |
 | `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | app-server → `StdioBidiJson` · 터미널 → `Pty` | `Pty`(trait 기본) | ★**신고값일 뿐 통로를 고르지 않는다**★ — 실물은 `open_spawn` 이 만들고 그 안에서 이 값을 되읽지 않는다(ADR-0191). 오늘 이 값을 읽는 곳은 선언 표 트립와이어(`tests::expected_codec_axis`) 하나뿐이라, 신고와 실물이 어긋나도 아무 게이트가 못 본다 |
-| `capabilities().session.resume` | `true` | `false` | `false`(보수적 stub) | 무손실 복원 가능 여부 |
+| `capabilities().session.resume` | `true` | **app-server `true` · 터미널 `false`** | `false`(보수적 stub) | 무손실 복원 가능 여부. ★위 `can_resume_stored_session` 과 **같은 술어로 함께 켠다**★ — 갈리면 이어받지 않는 스폰이 이어받는다고 신고되거나 그 반대가 된다 |
 
 ★**MCP 칸을 오독하지 말 것**★ — 「codex 가 MCP 를 못 쓴다」가 아니다. 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수 있나**다. codex 의 MCP 주입은 전역 TOML 오버라이드(`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.
 
-★**세션 축들을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했고, 위 두 행이 갈라져 있는 것이 그 폐기의 실물이다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이다. codex 의 `false` 는 **영구 속성이 아니라 배선 상태**다 — ADR-0185 결정 2 의 Phase 2 요구사항 셋 중 **두 역할 분리와 활성화 입구 가드는 착지했고, 수령 배선도 착지했다**(`open_spawn` 이 조립점의 기록 동사를 받아 app-server 통로에 넘기고, 그 통로가 `thread/start` 응답의 id 로 부른다). ★**실 app-server 로 실측됐다**★ — 받은 id 가 `agents.json` 의 `backend_session_id` 에 앉고 kill 을 넘겨 살아남는 것까지 확인했다(터미널 모드는 `null` 그대로 — 음성 대조군). ★**남은 것은 `thread/resume` 하나다 — 「수령 배선이 없다」로 적힌 자리를 만나면 낡은 것이다**★. 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
+★**세션 축들을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했고, 위 두 행이 갈라져 있는 것이 그 폐기의 실물이다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이다. codex 가 그 등식의 반례다 — 발급은 codex 가 하는데(`assigns_session_id: false`) 이어받기는 우리가 연다. ADR-0185 결정 2 의 Phase 2 요구사항 셋(역할 분리 · 활성화 입구 가드 · 수령 배선)에 **`thread/resume` 까지 착지했다**: `open_spawn` 이 조립점에게서 「이어받을 저장된 sid」를 받아, 있으면 통로가 `thread/start` 대신 `thread/resume` 을 낸다. ★**「남은 것은 `thread/resume` 하나다」·「수령 배선이 없다」로 적힌 자리를 만나면 낡은 것이다**★. 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
 
-★**`can_resume_stored_session` 의 codex 칸을 「할 수 있나」로 읽지 말 것**★ — app-server 모드에는 이어받을 식별자(thread id)가 **있는데도** `false` 다. 이 칸은 바로 아래 모델 선택 칸과 같은 규율으로 **이 스폰이 실제로 하는 것**을 신고한다: `build_spec` 은 mode·sid 를 무시하고 `open_spawn` 은 언제나 `thread/start` 를 낸다. 배선 전에 이 칸만 켜면 sid 가 생기는 순간 **새 스레드가 열리는데 결과는 「이어받음」으로 보고된다**.
+★**codex 의 두 세션 칸은 「모드 하나로 접히지 않는다」가 요점이다**★ — 터미널 모드에는 이어받을 식별자 자체가 없고(그 모드는 `codex resume <id>` 를 쓰지 않는다), app-server 모드에만 thread id 가 있다. 그래서 **이 백엔드가 두 통로의 선언이 실제로 갈리는 첫 행**이고, 선언 표(`tests/backend_contract.rs`)의 그 두 칸이 통로별 튜플로 적히는 이유가 그것이다. ★한쪽 통로만, 또는 두 칸 중 한 칸만 켜지 말 것★ — 새 스레드가 「이어받음」으로 보고되거나 그 반대가 된다.
+
+★**거절당한 이어받기는 새 스레드로 되돌아가지 않는다(ADR-0082)**★ — 세션은 그대로 끝나고 프로필의 손잡이는 보존된다. codex 쪽 보강 사유 하나: 이 프로토콜의 `-32600` 은 뜻이 하나가 아니다 — 모르는 메서드·중복 `initialize`·설정 오류가 전부 그 코드로 온다(실측 0.154.0 — 정본은 `backend/codex/protocol.rs` 와 그 통로 시험대). 그 코드로 「모르는 스레드」를 갈라 폴백하면 아직 멀쩡한 손잡이를 무관한 실패에서 덮어쓴다.
 
 비슷한 오독이 모델 선택 칸에도 있다. codex 에는 `-m` 이 있는데도 `false` 인데, 이 칸은 **그 프로그램이 할 수 있는 것**이 아니라 **이 스폰이 실제로 쓰는 것**을 신고하기 때문이다.
 
 ★**여기 있던 예측은 실측으로 틀린 것이 됐다 — 되살리지 말 것**★. 그 문장은 「codex 의 상주 JSON-RPC(`codex app-server`)가 서면 이 표의 여러 칸이 한꺼번에 열린다 — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다」였다. **서버는 섰고, 함께 열린 칸은 정확히 하나다** — `output_decoder`(구조화 챗 = 턴 관측). 나머지 둘은 그 문으로 들어오지 않았다.
 
-- **세션 복원은 아직 안 열렸다 — 단 남은 것은 하나뿐이다.** 셋 중 둘(세션 축 쪼개기 — ADR-0185 가 `needs_session()` 쪼개기로 적은 그것 · 활성화 입구 가드)에 **수령 배선까지 착지했고**, 남은 것은 `thread/resume` 이다(ADR-0185 결정 2 — 수령 쪽은 실 app-server 실측). ★**그러니 「수령 배선이 들어오는 커밋이 값도 함께 바꾼다」는 더는 맞지 않는다**★ — 그 커밋은 값을 **일부러 그대로 두었다**(받은 id 는 프로필에 적히기만 하고 이어받기에 쓰이지 않는다. 그 단계에서 켜면 새 스레드가 「이어받음」으로 보고된다). 위 두 행을 함께 켜는 것은 `thread/resume` 커밋이다.
+- **세션 복원은 이제 열렸다 — 단 그 예측이 말한 「한 문」으로 들어온 것은 아니다.** ADR-0185 결정 2 의 요구사항 넷이 **커밋 세 개에 걸쳐 따로** 착지했다(역할 분리 · 활성화 입구 가드 → 수령 배선 → `thread/resume`). 각 단계가 앞 단계의 값을 **일부러 그대로 두고** 지나갔다는 것이 이 항목이 남기는 사실이다: 배선 없이 칸만 먼저 켜면 새 스레드가 「이어받음」으로 보고된다.
 - **우편도 안 열렸다.** `reads_messages()` 는 여전히 `false` 인데 ★**닫아 두는 사유가 갈아탔다**★. 옛 사유(「codex 는 턴 신호를 하나도 선언하지 않는다」)는 죽었다 — codex 는 이제 `turn_classifier` 를 선언하고 app-server 모드가 실제로 종료 신호를 낸다. 지금 닫는 것은 **그 선언이 명령을 못 받는다**는 것이다: 두 모드를 가를 수 없는데 터미널 모드는 decoder 가 없어 신호가 하나도 없으므로, 여기서 `true` 를 돌려주면 그 모드까지 함께 열린다. **여는 조건 = 이 축을 모드별로 가르는 것**(시그니처에 명령을 들이거나 자격을 세션 caps 로 옮기거나 — 사유 정본은 그 메서드의 doc).
 
 ★**그래서 「뿌리가 같으니 문도 하나」를 다시 세우지 말 것**★. 세 칸이 상주 스트림이라는 뿌리를 공유하는 것은 맞지만, 각자 **자기 배선**을 따로 요구한다. 이 예측이 그 둘을 한 번 뭉쳤고 틀렸다 — 같은 낙관을 다시 유도하지 않으려고 실패한 채로 적어 둔다.

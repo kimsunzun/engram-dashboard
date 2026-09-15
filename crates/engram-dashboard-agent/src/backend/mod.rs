@@ -192,6 +192,16 @@ pub trait AgentBackend: Send + Sync {
     /// ★순서 계약★: 이 포트는 **그 세션으로 무엇을 보내기 전에** 불린다. 그래서 기록됐는지 되묻는
     ///   둘째 동사가 필요 없다(포트가 한 동사인 이유 — [`SessionIdSink`]).
     ///
+    /// `resume_session_id` = 이 spawn 이 **이어받을** 저장된 backend sid. `None` = 이어받지 않는다
+    ///   (Fresh 로 띄우거나, 저장된 값이 없거나, 이 backend 의 이어받기 축이 꺼져 있다).
+    /// ★[`AgentBackend::build_spec`] 의 `session_id` 와 **다른 값이다 — 같은 것으로 접지 말 것**★:
+    ///   그쪽은 우리가 발급해 건네주는 값([`AgentBackend::assigns_session_id`] 축)이고, 이 칸은 상대가
+    ///   발급해 우리가 받아 적어 둔 값이다([`SessionIdSink`] 가 적은 그것).
+    /// ★모드를 함께 받지 않는 것은 의도다★ — 조립점이 Fresh 면 이 칸을 비워서 넘긴다. 모드와 값을 둘
+    ///   다 받으면 「Fresh 인데 이어받을 값이 있다」는 조합이 표현 가능해지고, 그 조합의 해석이 backend
+    ///   마다 갈린다.
+    /// ★명령줄로 이어받는 backend(claude)는 이 칸을 쓰지 않는다★ — 그쪽은 `build_spec` 이
+    ///   `--resume <sid>` 를 조립한다. 이 칸이 필요한 것은 **통로가 이어받기를 요청하는** backend 다.
     /// ★기본값 = PTY + 각 아스펙트가 신고한 값★: 통로를 따로 만들지 않는 backend 는 터미널로 뜨고
     ///   ([`AgentBackend::transport_shape`] 기본값과 같은 자리), 나머지 칸은 자기 메서드의 산출을 그대로
     ///   싣는다.
@@ -207,10 +217,11 @@ pub trait AgentBackend: Send + Sync {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        resume_session_id: Option<Uuid>,
     ) -> Result<SpawnParts, PtyError> {
-        // 이 기본값은 세션 id 를 받아 오지 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은
-        //   위 doc 이 부르는 것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
-        let _ = sid_sink;
+        // 이 기본값은 세션 id 를 받아 오지도 통로로 이어받지도 않는다 — 밑줄 이름 대신 여기서 명시적으로
+        //   버린다(이름은 위 doc 이 부르는 것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
+        let _ = (sid_sink, resume_session_id);
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -466,8 +477,9 @@ pub fn open_spawn(
     cols: u16,
     rows: u16,
     sid_sink: Option<SessionIdSink>,
+    resume_session_id: Option<Uuid>,
 ) -> Result<SpawnParts, PtyError> {
-    backend_for(c).open_spawn(c, spec, cols, rows, sid_sink)
+    backend_for(c).open_spawn(c, spec, cols, rows, sid_sink, resume_session_id)
 }
 
 pub fn turn_classifier(c: &AgentCommand) -> TurnClassifier {
@@ -966,9 +978,9 @@ mod tests {
     //      발급해 프로필에 영속한다. 자기 id 를 스스로 발급하는 프로그램에 켜면 그 프로그램이 한 번도
     //      쓰지 않을 uuid 가 심기고, 그 뒤 이어받기 판정이 그 가짜 값을 보고 선다.
     //   ② can_resume_stored_session — 저장된 그 id 로 이어받을 수 있나. **발급 주체는 안 묻는다**.
-    // ★오늘은 모든 행이 두 칸의 값이 같다 — 그래도 한 칸으로 접지 말 것★: 접는 순간 한쪽을 고치면 다른
-    // 쪽이 딸려 가고, 그 둘이 서로 다른 소비자(발급 = spawn 시점 · 이어받기 = 활성화 입구 셋)를 굴린다.
-    // 값이 갈리는 첫 행은 codex app-server 가 될 것이다 — 그 행의 ②만 `true` 로 바뀐다(조건은 그 impl 주석).
+    // ★두 칸을 한 칸으로 접지 말 것★: 접는 순간 한쪽을 고치면 다른 쪽이 딸려 가고, 그 둘이 서로 다른
+    // 소비자(발급 = spawn 시점 · 이어받기 = 활성화 입구 셋)를 굴린다. 값이 실제로 갈리는 행이 이미 있다 —
+    // codex app-server 가 (false, true) 다.
     // ADR-0185
     fn expected_session_axes(c: &AgentCommand) -> (bool, bool) {
         // (assigns_session_id, can_resume_stored_session)
@@ -986,13 +998,13 @@ mod tests {
                 output_format: AgentOutputFormat::Terminal,
                 ..
             } => (false, false),
-            // ★이 칸의 이어받기 값은 그 백엔드가 **할 수 있는 것**이 아니라 **오늘 실제로 하는 것**이다★:
-            //   식별자는 있지만 이어받기 배선이 없어 false 다. 켜는 조건의 정본은 `backend/codex/` 의 그
-            //   메서드 주석이고, 그 배선이 들어오는 커밋이 이 칸도 함께 바꾼다.
+            // ★이 행이 두 칸의 값이 갈리는 첫 행이다★ — 발급은 여전히 codex 가 하고(①), 우리는 그
+            //   받아 적은 thread id 로 `thread/resume` 을 낸다(②). 사유의 정본은 `backend/codex/` 의 그
+            //   두 메서드 주석.
             AgentCommand::Codex {
                 output_format: AgentOutputFormat::StreamJson,
                 ..
-            } => (false, false),
+            } => (false, true),
         }
     }
 
@@ -1028,7 +1040,21 @@ mod tests {
             p
         };
 
+        // ★터미널 모드 codex 를 쓴다 — 같은 프로그램의 **다른 통로**는 이제 이 축이 true 다★. 그래서
+        //   이 표본은 「프로그램이 아니라 통로가 가른다」까지 함께 잰다.
         let not_resumable = profile(
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: AgentOutputFormat::Terminal,
+            },
+            sid,
+        );
+        assert!(
+            !can_resume_profile(&not_resumable),
+            "이어받기 축이 false 인 명령은 sid 가 있어도 이어받지 않는다 — 켜면 새 대화가 「이어받음」으로 보고된다"
+        );
+
+        let resumable_by_channel = profile(
             AgentCommand::Codex {
                 extra_args: vec![],
                 output_format: AgentOutputFormat::StreamJson,
@@ -1036,8 +1062,8 @@ mod tests {
             sid,
         );
         assert!(
-            !can_resume_profile(&not_resumable),
-            "이어받기 축이 false 인 명령은 sid 가 있어도 이어받지 않는다 — 켜면 새 대화가 「이어받음」으로 보고된다"
+            can_resume_profile(&resumable_by_channel),
+            "app-server 통로는 저장된 thread id 로 `thread/resume` 을 낸다 — 이 칸이 꺼지면 이어받는 스폰이 「새 대화」로 보고된다"
         );
 
         let resumable = profile(
@@ -1176,7 +1202,7 @@ mod tests {
                 //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts = open_spawn(c, &probe, 80, 24, None).expect("open_spawn");
+            let parts = open_spawn(c, &probe, 80, 24, None, None).expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();

@@ -1080,12 +1080,24 @@ impl AgentManager {
         //   아무 효과도 없어서, 축을 세우면 같은 판정이 두 곳(선언 표 + impl)에 적히고 둘이 어긋날 수 있다.
         //   판정 지점은 impl 하나로 둔다.
         //   위에서 확정된 `epoch` 을 그대로 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음 화신을 덮지 않게 한다.
+        // ★`sid` 를 그대로 넘기지 않는다 — 이 칸은 **저장된 backend sid** 다(ADR-0185 의 두 축)★:
+        //   `sid` 는 발급 축이 켜진 backend 에만 채워지므로, 받아 적는 쪽(codex)에서는 이어받을 값이
+        //   실제로 프로필에 있어도 언제나 `None` 이다. 이어받기 요청을 **통로가** 내는 backend 는 그
+        //   값으로 이어받는다.
+        // ★Fresh 면 비워서 넘긴다★ — 값을 실어 보내고 backend 가 모드를 다시 보게 하면 판정이 두 곳이
+        //   된다. 그 죽은 화신의 thread id 로 새 대화를 열라는 요청이 Fresh 인데, 여기서 안 비우면 그
+        //   요청이 backend 마다 다르게 해석된다.
+        let resume_session_id = match mode {
+            SpawnMode::Resume => profile.backend_session_id,
+            SpawnMode::Fresh => None,
+        };
         let parts = backend::open_spawn(
             &profile.command,
             &spec,
             DEFAULT_COLS,
             DEFAULT_ROWS,
             Some(session_id_sink(self.profiles.clone(), profile.id, epoch)),
+            resume_session_id,
         )?;
 
         let (session, child_pid) =
@@ -2066,6 +2078,7 @@ mod tests {
             DEFAULT_COLS,
             DEFAULT_ROWS,
             None,
+            None,
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
@@ -2086,6 +2099,7 @@ mod tests {
             &probe_spec(),
             DEFAULT_COLS,
             DEFAULT_ROWS,
+            None,
             None,
         )
         .expect("open_spawn");

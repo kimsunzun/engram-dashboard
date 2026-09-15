@@ -125,8 +125,8 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::protocol::{
-    self, method, ClientInfo, Inbound, InitializeParams, InitializeResponse, RequestId,
-    ThreadStartParams, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
+    self, method, ClientInfo, Inbound, InitializeParams, InitializeResponse, RequestId, Thread,
+    ThreadOpen, ThreadResumeResponse, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
     TurnStartResponse, UserInput, METHOD_NOT_FOUND,
 };
 use crate::backend::SessionIdSink;
@@ -219,7 +219,8 @@ const MAX_TURN_ID_BYTES: usize = 128;
 //   같은 요청을 다시 보낸다」를 얹지 않은 이유는 셋이다: ① 과부하 코드가 실제로 이 봉투로 오는지
 //   미검증이다(스키마에 `-32xxx` 대역이 0 회이고, 과부하·레이트리밋은 `error` **알림**의
 //   `codexErrorInfo` 로 온다) ② 우리가 내는 세 요청은 재시도가 위험하다 — `initialize` 는 한 번만
-//   보낼 수 있고(실측: 두 번째는 오류), `thread/start` 재시도는 스레드를 둘 만들며, `turn/start`
+//   보낼 수 있고(실측: 두 번째는 오류), `thread/start` 재시도는 스레드를 둘 만들고 `thread/resume`
+//   재시도도 같은 스레드를 두 번 여는 요청이며, `turn/start`
 //   재시도는 상대가 이미 받은 턴을 한 번 더 연다 ③ 그래서 값을 고르려면 실 서버에서 그 코드를 보는 것이
 //   먼저다. ★다시 열 때 필요한 것★ = 어느 요청에 어떤 코드가 언제 오는지의 관측.
 
@@ -248,7 +249,8 @@ const TURN_COMPLETED: &str = method::TURN_COMPLETED;
 enum Link {
     /// 핸드셰이크 전 또는 진행 중. 입력은 거절이 아니라 **큐에 선다**.
     Connecting,
-    /// `thread/start` 응답을 받고 기록 호출이 돌아왔다 — `turn/start` 가 여기서부터 허용된다.
+    /// 핸드셰이크 둘째 요청(`thread/start` 또는 `thread/resume`)의 응답을 받고 기록 호출이 돌아왔다 —
+    /// `turn/start` 가 여기서부터 허용된다.
     Ready,
     /// 끊겼거나 핸드셰이크가 실패했다. 사유는 새 입력을 거절할 때 그대로 인용한다.
     Down(String),
@@ -449,8 +451,8 @@ pub(crate) struct CodexAppServerTransport {
     stdout: Mutex<Option<ChildStdout>>,
     stderr: Mutex<Option<ChildStderr>>,
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
-    /// `start()` 에서 take 해 라이터로 move — 핸드셰이크가 그것으로 `thread/start` 를 낸다.
-    start_params: Mutex<Option<ThreadStartParams>>,
+    /// `start()` 에서 take 해 라이터로 move — 핸드셰이크의 둘째 요청이 이 값 그대로 나간다.
+    open_params: Mutex<Option<ThreadOpen>>,
     shutdown: Arc<AtomicBool>,
     state: SharedState,
     pending: Arc<Pending>,
@@ -493,14 +495,15 @@ impl Drop for ChildGuard {
 impl CodexAppServerTransport {
     /// **pump 는 아직 안 띄운다**(`start` 에서). `child_pid` 를 함께 돌려준다.
     ///
-    /// `start_params` = `thread/start` 에 실을 값. ★정책을 통로가 하드코딩하지 않는다★ — 어느 폴더를
-    ///   워크스페이스로 믿고 어떤 샌드박스·승인 정책으로 돌 것인가는 backend 지식이라 주입받는다.
+    /// `open_params` = 핸드셰이크의 둘째 요청으로 그대로 나갈 값([`ThreadOpen`]). ★정책도 이어받기
+    ///   여부도 통로가 하드코딩하지 않는다★ — 어느 폴더를 워크스페이스로 믿고 어떤 샌드박스·승인
+    ///   정책으로 돌 것인가도, 저장된 스레드를 이어받을 것인가도 backend 지식이라 주입받는다.
     /// `sid_sink` = codex 가 발급한 thread id 를 기록할 곳. `None` = 기록할 곳이 없다.
     pub(crate) fn open(
         spec: &CommandSpec,
         structured: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
-        start_params: ThreadStartParams,
+        open_params: ThreadOpen,
         sid_sink: Option<SessionIdSink>,
     ) -> Result<(CodexAppServerTransport, Option<u32>), PtyError> {
         let mut cmd = Command::new(&spec.program);
@@ -547,7 +550,7 @@ impl CodexAppServerTransport {
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
             decoder: Mutex::new(decoder),
-            start_params: Mutex::new(Some(start_params)),
+            open_params: Mutex::new(Some(open_params)),
             shutdown: Arc::new(AtomicBool::new(false)),
             state: Arc::new((Mutex::new(State::new()), Condvar::new())),
             pending: Arc::new(Pending::default()),
@@ -704,16 +707,22 @@ fn request_blocking<P: Serialize, R: DeserializeOwned>(
     }
 }
 
-/// 핸드셰이크. 순서가 계약이다 — `initialize` → (`initialized`) → `thread/start`.
+/// 핸드셰이크. 순서가 계약이다 — `initialize` → (`initialized`) → **`open` 이 고른 둘째 요청**
+/// (`thread/start` 또는 `thread/resume`).
 ///
 /// ★`initialize` 는 한 번만 보낼 수 있다(실측 0.154.0)★ — 두 번째는 오류로 돌아온다. 그래서 이 함수는
 /// 화신마다 정확히 한 번 돌고, 실패해도 다시 부르지 않는다(ADR-0192).
+/// ★둘째 요청이 거절되면 그대로 `Err` 다 — 새 스레드로 되돌아가지 않는다(ADR-0082)★. codex 쪽 사유가
+/// 하나 더 있다: 이 프로토콜의 `-32600` 은 뜻이 하나가 아니다 — 모르는 메서드도, 두 번째 `initialize`
+/// 도, 설정 오류도 전부 그 코드로 온다(실측 0.154.0 — 앞 둘의 정본은 이 폴더 `protocol`, 셋째는
+/// [`tests::a_peer_error_message_is_masked_before_it_leaves_this_module`] 이 든 실제 응답). 그래서 오류 코드로
+/// 「모르는 스레드」를 갈라 새 스레드로 폴백하면, 아직 멀쩡한 손잡이를 무관한 실패에서 덮어쓴다.
 fn handshake(
     stdin: &Mutex<Option<ChildStdin>>,
     state: &SharedState,
     pending: &Pending,
     next_id: &AtomicI64,
-    start_params: &ThreadStartParams,
+    open: &ThreadOpen,
 ) -> Result<String, String> {
     let init: InitializeResponse = request_blocking(
         stdin,
@@ -742,20 +751,41 @@ fn handshake(
     write_line(stdin, &protocol::notification_line(method::INITIALIZED))
         .map_err(|e| format!("initialized 쓰기 실패: {e}"))?;
 
-    let started: ThreadStartResponse = request_blocking(
-        stdin,
-        state,
-        pending,
-        next_id,
-        method::THREAD_START,
-        start_params,
-        REQUEST_DEADLINE,
-    )?;
+    // ★두 갈래가 같은 `thread` 를 돌려주고, 그래서 이 함수의 반환은 하나다★ — 이어받기에서도 **상대가
+    //   준 id 를 그대로** 올린다. 우리가 보낸 것과 같을 것이라 가정해 되쓰지 않는다: 다르면 그 다른
+    //   값이 이 화신이 실제로 말하는 스레드이고, 기록 동사가 그것을 받아야 다음 이어받기가 맞는 곳을 연다.
+    let thread: Thread = match open {
+        ThreadOpen::Start(params) => {
+            let started: ThreadStartResponse = request_blocking(
+                stdin,
+                state,
+                pending,
+                next_id,
+                method::THREAD_START,
+                params,
+                REQUEST_DEADLINE,
+            )?;
+            started.thread
+        }
+        ThreadOpen::Resume(params) => {
+            let resumed: ThreadResumeResponse = request_blocking(
+                stdin,
+                state,
+                pending,
+                next_id,
+                method::THREAD_RESUME,
+                params,
+                REQUEST_DEADLINE,
+            )?;
+            resumed.thread
+        }
+    };
     tracing::info!(
-        cli_version = ?started.thread.cli_version.as_deref().map(|v| sanitize(v, LOG_STRING_LIMIT)),
+        cli_version = ?thread.cli_version.as_deref().map(|v| sanitize(v, LOG_STRING_LIMIT)),
+        resumed = matches!(open, ThreadOpen::Resume(_)),
         "codex thread 개시"
     );
-    Ok(started.thread.id)
+    Ok(thread.id)
 }
 
 enum Job {
@@ -999,7 +1029,7 @@ fn writer_loop(
     next_id: Arc<AtomicI64>,
     shutdown: Arc<AtomicBool>,
     core: Arc<OutputCore>,
-    start_params: ThreadStartParams,
+    open_params: ThreadOpen,
     sid_sink: Option<SessionIdSink>,
 ) {
     // ★두 실패를 **갈라서** 든다★ — 이 통로가 말하는 「핸드셰이크」는 왕복 둘만이 아니라 **기록 호출이
@@ -1007,7 +1037,7 @@ fn writer_loop(
     //   함께 탄다. 그래도 **뭉치면 안 되는 사실이 하나** 있다: 기록에서 넘어진 갈래는 왕복이 이미 성공한
     //   뒤라 **상대가 살아서 우리 stdin 을 읽고 있는 것이 확정**이다. 왕복 자체가 실패한 갈래에는 그
     //   확정이 없다. 그 차이가 아래에서 stdin 을 닫을지와 사람에게 뭐라고 말할지를 가른다.
-    let outcome = match handshake(&stdin, &state, &pending, &next_id, &start_params) {
+    let outcome = match handshake(&stdin, &state, &pending, &next_id, &open_params) {
         Err(reason) => Err(HandshakeFailure {
             reason,
             while_recording: false,
@@ -1833,7 +1863,7 @@ impl AgentTransport for CodexAppServerTransport {
         //   변경이다), `shutdown()` 안에서 기다리는 것은 계약 위반이다. 이 스레드는 kill 이 파이프를
         //   깨면 블록된 write 가 풀리고 닫힘 표식을 보아 스스로 끝난다.
         if let Some(params) = self
-            .start_params
+            .open_params
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .take()
@@ -2062,6 +2092,7 @@ impl AgentTransport for CodexAppServerTransport {
 
 #[cfg(test)]
 mod tests {
+    use super::super::protocol::ThreadStartParams;
     use super::*;
     use crate::output_core::TurnWiring;
     use crate::turn::TurnObservations;
@@ -3202,11 +3233,11 @@ mod tests {
             // 핸드셰이크 뒤 루프는 첫 검사에서 끝난다 — 이 항목들이 재는 것은 그 앞 구획이다.
             Arc::new(AtomicBool::new(true)),
             core,
-            ThreadStartParams {
+            ThreadOpen::Start(ThreadStartParams {
                 cwd: None,
                 approval_policy: None,
                 sandbox: None,
-            },
+            }),
             None,
         );
 
@@ -3754,8 +3785,14 @@ mod tests {
             env: vec![],
             cwd: std::path::PathBuf::from("."),
         };
-        CodexAppServerTransport::open(&spec, true, None, ThreadStartParams::default(), None)
-            .expect("open")
+        CodexAppServerTransport::open(
+            &spec,
+            true,
+            None,
+            ThreadOpen::Start(ThreadStartParams::default()),
+            None,
+        )
+        .expect("open")
     }
 
     #[cfg(windows)]
@@ -3764,7 +3801,7 @@ mod tests {
             &probe_spec(args),
             true,
             None,
-            ThreadStartParams::default(),
+            ThreadOpen::Start(ThreadStartParams::default()),
             None,
         )
         .expect("open")
@@ -3790,7 +3827,7 @@ mod tests {
             &probe_spec(&["/c", "echo caps-probe"]),
             false,
             None,
-            ThreadStartParams::default(),
+            ThreadOpen::Start(ThreadStartParams::default()),
             None,
         )
         .expect("open");

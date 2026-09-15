@@ -394,6 +394,17 @@ pub(crate) struct ThreadResumeParams {
     pub(crate) exclude_turns: Option<bool>,
 }
 
+/// 핸드셰이크의 **둘째 요청** — 새 스레드를 여나, 저장된 스레드를 이어받나.
+///
+/// ★고르는 자리는 `backend/codex/mod.rs` 의 [`crate::backend::AgentBackend::open_spawn`] 하나다★ —
+/// 통로는 받은 것을 그대로 낸다. 통로가 자기 상태를 보고 다시 판정하면 가르는 자리가 둘이 된다
+/// (ADR-0191 이 통로 선택에서 걷어낸 것과 같은 모양).
+// ADR-0185
+pub(crate) enum ThreadOpen {
+    Start(ThreadStartParams),
+    Resume(ThreadResumeParams),
+}
+
 /// ★thread id 가 여기 산다 — 응답 최상위가 아니라 `thread.id` 다★.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ThreadStartResponse {
