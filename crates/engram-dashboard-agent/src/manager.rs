@@ -49,30 +49,25 @@ const DEFAULT_ROWS: u16 = 24;
 // ADR-0172
 const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 
-/// 연결을 **세워야 쓸 수 있는** 통로에서, 그 연결의 결말을 기다리는 상한
-/// ([`crate::transport::AgentTransport::link_state`]).
+/// 통로가 **연결의 결말을 아예 안 내는** 경우에만 쓰이는 liveness 백스톱.
 ///
-/// ★[`EARLY_EXIT_WINDOW`] 와 **다른 질문**에 답한다 — 합치지 말 것★: 저쪽은 「이 프로세스가 곧 죽나」이고
-///   이쪽은 「이 통로를 쓸 수 있게 됐나」다. 생사만 보는 창으로 뒤엣것을 재면, 거절당한 이어받기가
-///   **살아 있는 프로세스**로 창을 넘겨 성공으로 도장 찍힌다(그 도장이 마지막 실패 기록까지 지운다).
-/// ★그래서 이 창은 저것보다 **길다**★ — 연결의 결말은 왕복을 기다려야 나오고, 죽음은 안 기다려도 된다.
-/// ★값의 계약: 통로의 핸드셰이크 상한보다 **커야 한다**★. 작으면 멀쩡한 이어받기가 「아직 안 섰다」로
-///   실패 도장을 받는다 — 그 관계를 시험대가 직접 잰다
-///   ([`tests::the_link_window_outlasts_every_transports_handshake_budget`]).
+/// ★★이것은 판정 창이 아니다 — 판정은 연결 그 자체다★★(사용자 결정): 이어받기의 성공은 「N 초 안에 안
+///   죽었다」가 아니라 **「에이전트가 입력을 받을 준비가 됐다고 신호했다」**이고, codex 에서 그 신호는
+///   핸드셰이크 완료(`Link::Up`)다. 거절도 상대가 **즉시** 답한다(실측). 그래서 양방향 모두 기다릴 것이
+///   없고, [`AgentManager::early_activation_verdict`] 는 연결이 결말을 내는 **그 순간** 돌아온다.
+///   ★한때 여기 있던 「연결 판정 창」(15 초를 끝까지 기다리는 정책)은 그 결정이 걷어냈다 — 되살리지 말 것★.
 ///
-/// ★**이 창은 `EARLY_EXIT_WINDOW` 를 늘리지 않는다 — 연결이 미정인 동안만 판정을 붙든다**★.
-///   두 창이 **따로** 만료한다: 죽음 감시는 언제나 짧은 쪽이고, 이 창은 연결이 `Establishing` 일 때만
-///   쓰인다. 그래서 **성립한 이어받기의 비용은 옛날 그대로**이고(연결이 선 뒤에는 죽음 창만 남는다),
-///   느려지는 것은 **연결이 끝내 안 서는 경우** 하나뿐이다.
-///   ★한때 이 자리에 「서면 그 즉시 판정이 끝난다」로 적혀 있었는데, 그건 약속을 과장한 것이었다★ —
-///   연결이 서도 죽음 감시(`EARLY_EXIT_WINDOW`)는 그대로 돈다. 연결이 섰다고 자식이 곧바로 안 죽는다는
-///   보장은 없고, 그 감시를 codex 에서만 걷으면 다른 backend 와 다른 규율이 된다. **즉시 끝나는 것이
-///   아니라 「다른 backend 와 같아지는」 것이 맞다.**
-///   ★그 과장을 코드가 그대로 받아 적었던 것이 실제 결함이었다★ — 창을 `max()` 로 합쳐 두는 바람에
-///   **성공한 codex 이어받기가 전부 이 창만큼 블록했다.** 그 호출은 데몬의 async dispatch 안에서
-///   블로킹으로 돌고(`spawn_blocking` 없음) 부팅 복원은 직렬이라, 비용이 워커 점유 × 에이전트 수로 붙었다.
-///   합치지 말 것.
-pub(crate) const LINK_DECISION_WINDOW: Duration = Duration::from_secs(15);
+/// ★그럼에도 이 값이 남아 있는 이유는 **단 하나**다★: 통로가 결말을 **못 내는** 경로가 실재한다.
+///   [`crate::backend::codex`] 의 핸드셰이크 상한은 **응답 대기**에만 걸리고 **쓰기**에는 안 걸린다 —
+///   상대가 우리 stdin 을 읽지 않으면 `write_all` 이 파이프 backpressure 로 무한히 매달리고, 그러면
+///   라이터가 실패 갈래에 도달하지 못해 링크가 `Connecting` 에 영영 멈춘다. 그 상태에서 이 백스톱이
+///   없으면 `activate_profile` 이 **영원히** 블록한다(데몬의 async dispatch 워커 하나가 통째로 묶인다).
+/// ★그래서 이 값이 하는 일은 「판정」이 아니라 「포기」다★ — 여기 닿았다는 것은 상대가 답도 안 하고
+///   우리 쓰기도 안 받는다는 뜻이고, 그 결말은 실패이자 **아래 teardown 의 트리거**다(그 kill 이 매달린
+///   쓰기까지 함께 푼다).
+/// ★값은 통로의 핸드셰이크 상한보다 커야 한다★ — 작으면 통로가 스스로 실패를 확정하기 **전에** 이쪽이
+///   가로채, 사유 없는 포기가 사유 있는 거절을 덮는다. 그 대소는 시험대가 직접 잰다.
+pub(crate) const LINK_RESOLUTION_BACKSTOP: Duration = Duration::from_secs(15);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
 
@@ -155,7 +150,18 @@ enum EarlyVerdict {
     /// **아직 살아 있지만** 진단 스트림이 이미 알려진 실패를 말했다 — 죽음을 기다리지 않고 확정한다.
     Diagnosed(AgentFailureKind),
     /// 창을 넘겼고 아무 증거도 서지 않았다 = 활성화 성립.
+    ///
+    /// ★이것은 **약한** 성공 증거다★ — 「N 초 안에 안 죽었다」일 뿐 그 에이전트가 입력을 받을 수 있는지는
+    ///   모른다. 연결 축이 없는 통로(claude·shell·stdio)에는 이것뿐이라 그대로 쓴다.
     Alive,
+    /// 에이전트가 **입력을 받을 준비가 됐다고 신호했다** = 활성화 성립(사용자 결정).
+    ///
+    /// ★`Alive` 와 갈라 두는 이유가 두 가지다★:
+    ///   ① **증거의 종류가 다르다** — 이쪽은 상대가 낸 긍정 신호(codex 핸드셰이크 완료)이고, 저쪽은
+    ///      아무 일도 안 일어났다는 관측이다. 그래서 이쪽은 기다릴 것이 없다(신호가 오면 그 즉시 끝).
+    ///   ② **「마지막 실패」 처분이 다르다** — 이 낙관적 성공은 기록을 **지우지 않는다**(사용자 조건).
+    ///      지움 규칙의 정본은 `AgentManager::resume_no_fallback` 의 그 자리다.
+    Ready,
     /// 통로가 **연결을 못 세웠다** — 프로세스는 살아 있을 수 있다.
     ///
     /// ★`Terminal` 과 갈라 두는 이유★: 저쪽은 「죽었다」이고 이쪽은 「살아 있는데 못 쓴다」다. 처분은
@@ -1640,7 +1646,7 @@ impl AgentManager {
             profile.id,
             &profile.command,
             EARLY_EXIT_WINDOW,
-            LINK_DECISION_WINDOW,
+            LINK_RESOLUTION_BACKSTOP,
         ) {
             EarlyVerdict::Terminal { status, evidence } => {
                 let reason = format!("resume 조기 종료({status:?})");
@@ -1708,15 +1714,29 @@ impl AgentManager {
                     ?kind,
                     "ADR-0082: 통로가 연결을 못 세웠다 → 활성화 실패, fresh-fallback 없음 — LLM 에스컬레이션 대상"
                 );
+                // ★기록한 **뒤에** 끝낸다 — 순서가 계약이다★: 먼저 죽이면 `Killed` 상태가 서고, 그러면
+                //   위 `Terminal` 갈래의 「사용자가 끈 것은 실패가 아니다」 규율과 구별되지 않는다.
+                //   그 자리 주석이 그 인과의 정본이다.
+                self.tear_down_failed_activation(profile.id);
                 (RestoreOutcome::Failed { reason }, Some(spawned))
             }
-            EarlyVerdict::Alive => {
-                // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
-                //   근거다(`note_activation_result` 주석).
-                // ★**연결을 세우는 통로에서는 그 위에 조건이 하나 더 붙는다**★: 위 갈래가 `Establishing`
-                //   으로 창을 넘기는 경우를 먼저 걷어 가므로, 여기 오는 그런 통로는 연결이 실제로 **선**
-                //   것이다. 그 걷어내기를 지우면 이 줄이 다시 거짓말을 시작한다.
-                self.note_activation_result(profile.id, Some(spawned.epoch), None);
+            // ★상대가 **준비됐다고 신호했다** = 성립(사용자 결정)★ — 창을 지켜본 것이 아니라 긍정 증거를
+            //   받은 것이다. 그래서 이 갈래는 `Alive` 보다 **빨리**, 그리고 **강한 근거로** 도착한다.
+            //
+            // ★★그런데 「마지막 실패」는 **지우지 않는다**★★(사용자 조건): 이 성공은 낙관적이다 —
+            //   에이전트가 입력을 받을 수 있다는 것까지가 관측이고, 그 뒤에 일어나는 일(턴 오류·연결
+            //   끊김)은 **다른 경로가 지는 다른 사건**이다. 원래 결함의 절반이 「성공 보고가 실패 증거를
+            //   함께 지운 것」이었고, 판정이 빨라진 만큼 그 파괴는 더 이르게 일어난다.
+            // ★그래서 지움 규칙을 이렇게 둔다 — **자동으로는 아무것도 안 지운다**★:
+            //   이 기록이 답하는 질문은 「직전 활성화가 어떻게 끝났나」이고, 그것을 무효로 만드는 증거는
+            //   **다음 실패가 덮어쓰는 것**(`set_last_failure(Some(..))`)과 **프로필 자체가 사라지는 것**
+            //   뿐이다. 「지금 떠 있다」는 그 질문에 대한 답이 아니다.
+            //   ★대가를 정직하게 적는다★: 그래서 낡은 실패가 산 에이전트 옆에 남을 수 있다. 화면에서는
+            //   그 조합이 「도는 중이 이긴다」로 그려지므로(ADR-0173) 오해로 이어지지 않고, 반대 방향의
+            //   대가(증거 소실)는 되돌릴 수 없다 — 그래서 남기는 쪽을 고른다.
+            // ★claude 는 이 갈래로 오지 않는다★ — 그쪽 통로는 연결 축이 없어 아래 `Alive` 로 간다.
+            //   지움 규칙을 그쪽으로 넓히지 말 것(별건이고, 그 경로는 이 결정의 범위 밖이다).
+            EarlyVerdict::Ready => {
                 // ★여기서 두 결말이 갈린다★ — 활성화는 똑같이 성립했지만 **무엇이 성립했는지**가 다르다.
                 //   `Started` 는 이미 있던 어휘다(「이어받기 대상이 아니라 새 세션을 시작함」) — 새 칸을
                 //   만들지 않고 그 뜻 그대로 쓴다.
@@ -1727,7 +1747,46 @@ impl AgentManager {
                 };
                 (outcome, Some(spawned))
             }
+            EarlyVerdict::Alive => {
+                // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
+                //   근거다(`note_activation_result` 주석).
+                // ★이 갈래로 오는 것은 **연결 축이 없는 통로**뿐이다★(claude·shell·stdio) — 연결을
+                //   선언하는 통로는 위 `Ready`/`LinkFailed` 에서 이미 갈린다. 그래서 지움 규칙이 여기
+                //   남아 있는 것이 claude 경로를 그대로 두는 것과 같은 말이다.
+                self.note_activation_result(profile.id, Some(spawned.epoch), None);
+                let outcome = if opens_a_new_conversation {
+                    RestoreOutcome::Started
+                } else {
+                    RestoreOutcome::Resumed
+                };
+                (outcome, Some(spawned))
+            }
         }
+    }
+
+    /// 활성화가 **실패로 확정된** 세션을 끝낸다 — 프로세스가 아직 살아 있을 때만 의미가 있다.
+    ///
+    /// ★왜 매니저가 하나★: 이어받기가 거절되면 통로는 자기 쪽 stdin 만 놓고, 그 뒤 상대가 스스로 끝나기를
+    ///   기다린다. 상대가 stdout 을 붙든 채 남으면 리더가 EOF 를 못 봐 `OutputCore::finish` 가 영영 안 돌고,
+    ///   그 메시지의 단독 소비자인 reaper 도 움직이지 않는다 — 자식·Job·스레드가 데몬 수명 내내 묶인다.
+    ///   그 처분의 주인은 **kill 핸들러**이고(ADR-0001 의 2 동사), 통로가 아니다.
+    ///   ★한때 통로의 라이터가 직접 kill 하던 자리가 있었는데 그것이 ADR-0199 가 그은 선을 넘는 것이라
+    ///   걷어냈다 — 되살리지 말 것★. 여기가 그 대체이고, 새로 발명한 동사가 아니라 이미 있는 teardown 이다.
+    /// ★`kill_agent` 를 그대로 부르지 않는 이유 = **사용자 종료 표식**★: 그쪽은
+    ///   `TerminationIntent::UserKill` 을 세우는데 이건 사용자가 끈 것이 아니다. 그 표식은 `ReapMsg` 에
+    ///   frozen 으로 실려 나가므로, 거짓으로 세우면 종료 분류 기록이 통째로 거짓이 된다.
+    /// ★ADR-0082 「아무것도 죽지마」와 충돌하지 않는다★ — 그 결정이 지키는 것은 **관측된 종점(시체)** 이고,
+    ///   여기서 끝내는 것은 종점이 **한 번도 서지 않은** 화신이다. 죽이는 것이 증거를 지우는 게 아니라
+    ///   **없던 증거(종료 전이)를 만드는** 쪽이다. 실패 사유는 이 호출 **전에** 이미 기록된다.
+    /// ★그래서 `Terminal`·`Diagnosed` 갈래에서는 부르지 않는다★ — 그쪽은 자식이 이미 죽었거나(시체 보존),
+    ///   claude 가 종료 훅을 도는 중이라 ADR-0082 가 그대로 적용된다.
+    fn tear_down_failed_activation(&self, id: AgentId) {
+        let Ok(session) = self.get_session(id) else {
+            return;
+        };
+        self.control.revoke(id, session.epoch);
+        let _ = session.enter_exiting();
+        session.kill(Duration::from_secs(5));
     }
 
     /// spawn 후 window 안에 이어받기의 결말을 판정한다 — **죽음 또는 증거**(`EarlyVerdict`).
@@ -1761,7 +1820,7 @@ impl AgentManager {
         id: AgentId,
         command: &AgentCommand,
         window: Duration,
-        link_window: Duration,
+        link_backstop: Duration,
     ) -> EarlyVerdict {
         let session = match self.get_session(id) {
             Ok(s) => s,
@@ -1780,20 +1839,15 @@ impl AgentManager {
                 }
             }
         };
-        // ★창이 **통로에 따라 갈린다**★: 세울 연결이 있는 통로는 「아직 안 섰다」를 성공으로 셀 수 없어
-        //   그 결말까지 기다려야 하고([`LINK_DECISION_WINDOW`]), 없는 통로는 옛 창 그대로다.
-        // ★이 축은 **spawn 직후 한 번만** 본다★ — 통로 종류에 딸린 성질이라 화신이 사는 동안 바뀌지
-        //   않는다(`None` 이던 통로가 도중에 연결을 갖지 않는다).
-        // ★claude·shell 은 여기서 아무것도 달라지지 않는다★ — 그쪽 통로는 `link_state()` 가 `None` 이라
-        //   창도 판정도 옛 경로 그대로다. 이 절의 비용은 전부 「연결을 세우는 통로」에만 걸린다.
-        // ★두 창을 **인자로** 받는다 — 여기서 상수를 직접 읽지 않는다★: 그러면 시험대가 창을 낮출 수
-        //   없어 항목 하나가 운영값만큼 실제로 잔다(15 초). 재려는 것은 「넘겼을 때 무엇으로 떨어지나」
-        //   이지 그 길이가 아니다. 운영 호출자는 [`EARLY_EXIT_WINDOW`]·[`LINK_DECISION_WINDOW`] 를 넘긴다.
-        // ★★두 시한을 **따로** 든다 — `max()` 로 합치지 말 것★★: 합치면 연결이 **선** 세션까지 긴 쪽을
-        //   기다려 **성공한 이어받기가 전부 그만큼 블록한다**(그 비용의 정본 = [`LINK_DECISION_WINDOW`]
-        //   doc). 죽음 감시는 통로 종류와 무관하게 짧은 쪽이고, 긴 쪽은 **연결이 미정인 동안에만** 쓴다.
-        let death_deadline = Instant::now() + window;
-        let link_deadline = Instant::now() + link_window;
+        // ★통로가 **연결을 선언하나**로 갈린다 — 그 축은 통로 종류에 딸린 성질이라 한 번만 본다★
+        //   (`None` 이던 통로가 도중에 연결을 갖지 않는다).
+        // ★claude·shell·stdio 는 여기서 **아무것도 달라지지 않는다**★ — `link_state()` 가 `None` 이라
+        //   옛 창(`window`)을 그대로 쓰고 결말도 `Alive` 그대로다. 아래 새 규칙은 연결을 선언하는
+        //   통로에만 걸린다.
+        let has_link = session.link_state().is_some();
+        // ★연결 축이 있으면 이 시한은 **판정 창이 아니라 백스톱**이다★ — 사유의 정본 =
+        //   [`LINK_RESOLUTION_BACKSTOP`]. 정상 경로에서는 연결이 그 전에 결말을 내므로 닿지 않는다.
+        let deadline = Instant::now() + if has_link { link_backstop } else { window };
         loop {
             let status = session.status();
             if matches!(
@@ -1822,42 +1876,35 @@ impl AgentManager {
                 }
                 return EarlyVerdict::Terminal { status, evidence };
             }
-            // ★연결 결말을 **죽음 다음, 진단 앞**에서 본다★ — 죽음보다 뒤인 이유는 위 doc 의 그 규율이
-            //   그대로이고(창 안에 온 사용자 종료가 실패로 앞질러 잡히면 안 된다), 진단보다 앞인 이유는
-            //   이쪽이 **상대가 낸 답 한 건**이라 확정된 사실이기 때문이다. 진단 꼬리는 추론이다.
-            // ★★이 반복의 읽기 **하나**를 아래 결말 판정이 전부 쓴다 — 아래에서 다시 읽지 말 것★★:
-            //   옛 모양은 여기서 `Establishing` 을 보고, 시한 검사에서는 연결을 **안 보고** `Alive` 를
-            //   돌려줬다. 그 사이에 선점당하면 **연결이 안 선 세션이 성공으로 도장 찍힌다** — 이 라운드가
-            //   고치려던 바로 그 결함이 스케줄링만으로 되살아나는 경로였다.
-            let link = session.link_state();
-            if let Some(LinkState::Down { reason }) = link {
-                return EarlyVerdict::LinkFailed { reason };
+            // ★★연결이 결말을 내면 **그 자리에서** 판정이 끝난다 — 어느 쪽으로도 창을 기다리지 않는다★★
+            //   (사용자 결정): 이어받기의 성공은 「입력을 받을 준비가 됐다」이고 codex 에서 그 신호가
+            //   `Up` 이다. 거절은 상대가 즉시 답하므로 `Down` 도 곧바로 온다.
+            // ★죽음보다 **뒤**에서 보는 것은 그대로다★ — 창 안에 온 사용자 종료가 실패로 앞질러 잡히면
+            //   안 된다(위 doc 의 그 규율).
+            match session.link_state() {
+                Some(LinkState::Up) => return EarlyVerdict::Ready,
+                Some(LinkState::Down { reason }) => return EarlyVerdict::LinkFailed { reason },
+                Some(LinkState::Establishing) | None => {}
             }
             if let Some(kind) = backend::resume_failure_kind(command, &session.diagnostic_tail()) {
                 return EarlyVerdict::Diagnosed(kind);
             }
-            let now = Instant::now();
-            if matches!(link, Some(LinkState::Establishing)) {
-                // ★연결이 미정인 동안은 **죽음 시한이 지나도 `Alive` 를 내지 않는다**★ — 상대가 stdin 만
-                //   받고 답을 안 하면 프로세스는 영영 `Running` 이라, 여기를 열어 두면 그 조합만 옛 결함
-                //   그대로 남는다. 긴 쪽 시한까지 기다리고, 그것마저 넘기면 실패로 확정한다.
-                //   ★여기까지 왔다는 것은 통로 자신의 핸드셰이크 상한마저 지났다는 뜻이다★(그 대소를
-                //   시험대가 잰다) — 즉 「우리가 덜 기다렸다」가 아니라 「상대가 답하지 않았다」다.
-                if now >= link_deadline {
-                    return EarlyVerdict::LinkFailed {
+            if Instant::now() >= deadline {
+                // ★두 결말이 **같은 시한에서 갈린다**★: 연결 축이 없는 통로에게 이 시한은 「조기종료를
+                //   지켜본 창」이고 그 끝은 성립이다. 연결 축이 있는 통로에게는 백스톱이고, 여기 닿았다는
+                //   것은 통로가 **결말을 못 냈다**는 뜻이라 성립일 수 없다 —
+                //   ★`Establishing` 을 성공으로 떨어뜨리는 갈래를 다시 만들지 말 것★(그것이 이 라운드들이
+                //   고쳐 온 원래 결함이다).
+                return if has_link {
+                    EarlyVerdict::LinkFailed {
                         reason: format!(
-                            "연결이 {}초 안에 서지 못했다 — 상대가 핸드셰이크에 답하지 않았다",
-                            link_window.as_secs()
+                            "통로가 {}초 안에 연결의 결말을 내지 못했다 — 상대가 답도 하지 않고 우리                              쓰기도 받지 않는다(핸드셰이크 상한은 응답 대기에만 걸린다)",
+                            link_backstop.as_secs()
                         ),
-                    };
-                }
-            } else if now >= death_deadline {
-                // ★여기 닿는 `link` 는 이 반복에서 읽은 `Up` 이거나 `None`(연결 축 없음)이다★ —
-                //   즉 `Alive` 는 **연결을 확인한 같은 반복에서만** 나간다.
-                //   ★남는 창은 그 읽기와 이 줄 사이뿐이고, 그 창에서 일어날 수 있는 전이는 `Up → Down`
-                //   하나다★ — 그건 「안 선 연결을 살아 있다고 했다」가 아니라 「섰던 연결이 그 뒤 끊겼다」라
-                //   다른 사건이고, 처분도 다른 경로(pump → reaper)가 진다.
-                return EarlyVerdict::Alive;
+                    }
+                } else {
+                    EarlyVerdict::Alive
+                };
             }
             std::thread::sleep(Duration::from_millis(100));
         }
@@ -2436,6 +2483,8 @@ mod tests {
     ///   (ADR-0012 격리). 실물로 재려면 codex 바이너리 + 거절당할 스레드 id 가 필요해 CI 에서 못 돈다.
     struct LinkedTransport {
         link: Arc<Mutex<LinkState>>,
+        /// `shutdown()` 이 몇 번 불렸나 — 실패한 활성화의 teardown 이 실제로 통로까지 가는지 잰다.
+        shutdowns: Arc<Mutex<usize>>,
     }
     impl AgentTransport for LinkedTransport {
         fn start(&self, _core: Arc<OutputCore>) {}
@@ -2448,7 +2497,9 @@ mod tests {
         fn interrupt(&self) -> Result<(), PtyError> {
             Ok(())
         }
-        fn shutdown(&self) {}
+        fn shutdown(&self) {
+            *self.shutdowns.lock().expect("shutdowns poisoned") += 1;
+        }
         fn capabilities(&self) -> TransportCaps {
             TransportCaps {
                 input: InputCaps {
@@ -2596,7 +2647,7 @@ mod tests {
         manager: &AgentManager,
         id: AgentId,
         link: LinkState,
-    ) -> (Arc<Mutex<LinkState>>, Arc<OutputCore>) {
+    ) -> (Arc<Mutex<LinkState>>, Arc<OutputCore>, Arc<Mutex<usize>>) {
         let core = Arc::new(OutputCore::new(
             id,
             1,
@@ -2604,6 +2655,7 @@ mod tests {
             TurnWiring::detached(),
         ));
         let shared = Arc::new(Mutex::new(link));
+        let shutdowns = Arc::new(Mutex::new(0usize));
         let session = Arc::new(AgentSession::new(
             id,
             std::path::PathBuf::from("."),
@@ -2628,6 +2680,7 @@ mod tests {
             core.clone(),
             Box::new(LinkedTransport {
                 link: shared.clone(),
+                shutdowns: shutdowns.clone(),
             }),
         ));
         manager
@@ -2635,7 +2688,7 @@ mod tests {
             .write()
             .expect("sessions poisoned")
             .insert(id, session);
-        (shared, core)
+        (shared, core, shutdowns)
     }
 
     /// ★거절당한 이어받기는 **살아 있어도** 성립이 아니다★ — 이 갈래가 없으면 판정이 창 끝에서
@@ -2647,7 +2700,7 @@ mod tests {
     fn a_link_that_went_down_is_not_judged_alive() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
-        let (_link, _core) = put_session_with_link(
+        let (_link, _core, _kills) = put_session_with_link(
             &manager,
             id,
             LinkState::Down {
@@ -2688,13 +2741,13 @@ mod tests {
     /// ★답이 **안 오는** 경우도 성립이 아니다★ — 거절은 즉시 오지만, 상대가 stdin 만 받고 침묵하면
     /// 프로세스는 영영 `Running` 이라 이 갈래를 열어 두면 그 조합만 옛 결함 그대로 남는다.
     ///
-    /// ★창을 인자로 낮춰 재는 것이 seam 이다★ — 운영값([`LINK_DECISION_WINDOW`])만큼 실제로 자면
+    /// ★창을 인자로 낮춰 재는 것이 seam 이다★ — 운영값([`LINK_RESOLUTION_BACKSTOP`])만큼 실제로 자면
     ///   이 항목 하나가 15 초를 먹는다. 재려는 것은 「넘겼을 때 무엇으로 떨어지나」이지 그 길이가 아니다.
     #[test]
     fn a_link_still_establishing_at_the_deadline_is_not_judged_alive() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
-        let (_link, _core) = put_session_with_link(&manager, id, LinkState::Establishing);
+        let (_link, _core, _kills) = put_session_with_link(&manager, id, LinkState::Establishing);
 
         let verdict = manager.early_activation_verdict(
             id,
@@ -2709,75 +2762,43 @@ mod tests {
         );
     }
 
-    /// ★연결이 선 통로는 옛 판정 그대로다 — 그리고 **긴 창을 기다리지 않는다**★.
+    /// ★연결이 서 있으면 판정은 **그 자리에서** 끝난다 — 어떤 창도 기다리지 않는다★(사용자 결정).
     ///
-    /// ★두 창을 **다르게** 주는 것이 이 항목의 요점이다★: 같은 값을 주면 `max()` 가 no-op 이라 합쳐졌든
-    ///   아니든 똑같이 초록이 된다(옛 모양이 실제로 그래서, **성공한 이어받기가 전부 긴 창만큼 블록하는**
-    ///   결함을 못 봤다). 긴 쪽을 짧은 쪽보다 한참 크게 주고 **경과 시간**까지 재야 그 합침이 잡힌다.
-    /// ★시간을 재는 항목이지만 깜빡이지 않는다★ — 재는 것은 「긴 창을 통째로 기다렸나」이고, 두 값의
-    ///   차이가 40 배라 판정 여유가 그만큼 넓다.
+    /// 성공의 정의가 「N 초 안에 안 죽었다」에서 **「입력을 받을 준비가 됐다고 신호했다」**로 바뀐 것이
+    /// 이 항목이 지키는 계약이다. 그래서 두 시한을 **둘 다 크게** 주고 경과 시간을 잰다 — 어느 하나라도
+    /// 다시 판정에 끼어들면 여기서 잡힌다(옛 모양은 긴 쪽을 통째로 기다렸고, 그 앞 모양은 짧은 쪽을
+    /// 기다렸다).
     #[test]
-    fn a_link_that_came_up_does_not_wait_out_the_link_window() {
+    fn a_link_that_is_up_ends_the_verdict_immediately() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
-        let (_link, _core) = put_session_with_link(&manager, id, LinkState::Up);
+        let (_link, _core, _kills) = put_session_with_link(&manager, id, LinkState::Up);
 
-        let death_window = Duration::from_millis(150);
-        let link_window = Duration::from_secs(6);
         let started = Instant::now();
         let verdict = manager.early_activation_verdict(
             id,
             &codex_app_server_command(),
-            death_window,
-            link_window,
+            Duration::from_secs(6),
+            Duration::from_secs(6),
         );
         let elapsed = started.elapsed();
 
         assert!(
-            matches!(verdict, EarlyVerdict::Alive),
-            "연결이 섰는데 실패로 접혔다 — got {verdict:?}"
+            matches!(verdict, EarlyVerdict::Ready),
+            "연결이 선 것은 **성공 신호**다 — got {verdict:?}"
         );
         assert!(
-            elapsed < Duration::from_secs(2),
-            "연결이 이미 섰는데 판정이 **연결 창**({link_window:?})을 기다렸다({elapsed:?}) — 두 시한이              `max()` 로 합쳐졌다는 뜻이고, 그러면 성공한 codex 이어받기가 전부 그만큼 블록한다(데몬의              async dispatch 워커 점유 · 부팅 복원은 직렬이라 에이전트 수만큼 곱해진다)"
+            elapsed < Duration::from_secs(1),
+            "연결이 이미 섰는데 판정이 창을 기다렸다({elapsed:?}) — 성공의 근거는 신호이지 경과 시간이              아니다. 이 대기는 데몬의 async dispatch 워커를 그만큼 묶고, 부팅 복원은 직렬이라 에이전트              수만큼 곱해진다"
         );
     }
 
-    /// ★연결이 미정인 동안은 **죽음 시한이 지나도** `Alive` 가 아니다★ — 위 항목이 두 시한을 갈라 놓은
-    /// 뒤에도 그 갈라짐이 원래 막으려던 것을 그대로 막는지 본다(둘이 짝이다).
-    ///
-    /// 옛 결함의 재발 경로가 여기다: 죽음 창(짧은 쪽)이 먼저 지나는데 연결은 아직 `Establishing` 이면,
-    /// 그 조합에서 `Alive` 를 내는 순간 **연결이 안 선 세션이 성공으로 도장 찍히고 마지막 실패 기록까지
-    /// 지워진다**.
+    /// ★뒤늦게 선 연결도 성공이다★ — 위 항목의 짝(그것만 있으면 「연결 축이 있으면 무조건 실패」도 통과한다).
     #[test]
-    fn an_unresolved_link_outlives_the_death_window_without_being_judged_alive() {
+    fn a_link_that_comes_up_late_is_still_a_success() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
-        let (_link, _core) = put_session_with_link(&manager, id, LinkState::Establishing);
-
-        // ★두 창을 **다르게** 주는 것이 이 항목의 전부다★: 같게 주면 두 시한이 같이 만료해, 연결을
-        //   다시 보든 말든 `LinkFailed` 가 나온다(옛 모양도 그래서 초록이었다). 짧은 죽음 창이 **먼저**
-        //   지나야 「연결이 미정인데 시한이 됐다」 조합이 만들어진다.
-        let verdict = manager.early_activation_verdict(
-            id,
-            &codex_app_server_command(),
-            Duration::from_millis(50),
-            Duration::from_millis(600),
-        );
-
-        assert!(
-            matches!(verdict, EarlyVerdict::LinkFailed { .. }),
-            "죽음 창이 지났다는 이유만으로 「살아 있음」이 나왔다 — 연결은 아직 안 섰는데 성공으로 도장을              찍고 마지막 실패 기록까지 지우는, 이 라운드가 고치려던 그 결말이다: got {verdict:?}"
-        );
-    }
-
-    /// ★그렇다고 **뒤늦게 선** 연결까지 실패로 접지는 않는다★ — 위 항목의 짝(그것만 있으면 「연결 축이
-    /// 있으면 무조건 실패」도 통과한다).
-    #[test]
-    fn a_link_that_comes_up_after_the_death_window_is_still_judged_alive() {
-        let manager = bare_manager();
-        let id = AgentId::new_v4();
-        let (link, _core) = put_session_with_link(&manager, id, LinkState::Establishing);
+        let (link, _core, _kills) = put_session_with_link(&manager, id, LinkState::Establishing);
 
         let flipper = link.clone();
         std::thread::spawn(move || {
@@ -2793,8 +2814,140 @@ mod tests {
         );
 
         assert!(
-            matches!(verdict, EarlyVerdict::Alive),
+            matches!(verdict, EarlyVerdict::Ready),
             "연결이 뒤늦게 섰는데 판정이 그것을 못 봤다 — got {verdict:?}"
+        );
+    }
+
+    /// ★연결 축이 있는 통로에는 **조기종료 창이 판정에 끼지 않는다**★ — 짧은 창이 지났다는 이유만으로
+    /// 성공이 나오면 그것이 이 라운드들이 고쳐 온 원래 결함이다.
+    ///
+    /// 두 시한을 크게 다르게 주는 것이 요점이다: 짧은 쪽(조기종료 창)이 먼저 지나는데 연결은 아직
+    /// 미정인 구간을 만들어야, 그 구간에서 무엇이 나오는지가 드러난다. 같게 주면 둘이 함께 만료해
+    /// 어느 쪽이 판정했는지 구별되지 않는다.
+    #[test]
+    fn the_death_window_alone_never_decides_a_link_backed_activation() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let (_link, _core, _kills) = put_session_with_link(&manager, id, LinkState::Establishing);
+
+        let verdict = manager.early_activation_verdict(
+            id,
+            &codex_app_server_command(),
+            Duration::from_millis(50),
+            Duration::from_millis(600),
+        );
+
+        assert!(
+            matches!(verdict, EarlyVerdict::LinkFailed { .. }),
+            "조기종료 창이 지났다는 이유만으로 성공이 나왔다 — 연결은 아직 안 섰는데 성공으로 도장을              찍고, 그 자리가 원래 마지막 실패 기록까지 지우던 곳이다: got {verdict:?}"
+        );
+    }
+
+    /// ★낙관적 성공은 「마지막 실패」를 **지우지 않는다**★(사용자 조건) — 원래 결함의 절반이 그 파괴였다.
+    ///
+    /// ★왜 소스에서 재나★: 지움은 `note_activation_result(.., None)` 호출 **하나**이고, 그 부재를
+    ///   실행으로 재려면 실 codex 로 이어받기를 성공시켜 놓고 옛 실패 기록이 남아 있는지 봐야 한다 —
+    ///   시험대에 그 조합이 없다. 반면 「그 호출이 이 갈래에 있나」는 정확히 판정 가능하고, 회귀했을 때
+    ///   나는 것은 컴파일 에러도 빨간 단언도 아닌 **조용한 증거 소실**이라 그물이 필요하다.
+    /// ★`Alive` 갈래에는 그 호출이 **남아 있어야** 한다★ — 그쪽은 연결 축이 없는 통로(claude)의 길이고
+    ///   이 결정의 범위 밖이다. 둘을 함께 재야 「범위를 안 넘었다」까지 잡힌다.
+    /// 선례·같은 사유 = `backend::codex::transport::tests::the_session_id_is_recorded_before_the_gate_opens`.
+    #[test]
+    fn an_optimistic_success_does_not_clear_the_failure_record() {
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body = production
+            .split("fn resume_no_fallback(")
+            .nth(1)
+            .expect("`resume_no_fallback` 본문")
+            .split("fn tear_down_failed_activation(")
+            .next()
+            .expect("다음 함수까지");
+
+        let arm_start = body
+            .find("EarlyVerdict::Ready => {")
+            .expect("`Ready` 갈래가 없다 — 이 항목의 전제가 낡았다");
+        let ready_arm = &body[arm_start
+            ..body[arm_start..]
+                .find("EarlyVerdict::Alive => {")
+                .expect("`Alive` 갈래가 `Ready` 뒤에 없다 — 이 항목의 전제가 낡았다")
+                + arm_start];
+
+        assert!(
+            !ready_arm.contains("note_activation_result"),
+            "낙관적 성공 갈래가 「마지막 실패」를 건드린다 — 이 판정은 「입력을 받을 준비가 됐다」까지만              관측하므로, 그것으로 옛 실패 증거를 지우면 되돌릴 수 없는 소실이다: {ready_arm}"
+        );
+
+        let alive_arm = &body[body
+            .find("EarlyVerdict::Alive => {")
+            .expect("`Alive` 갈래가 없다")..];
+        assert!(
+            alive_arm.contains("note_activation_result(profile.id, Some(spawned.epoch), None)"),
+            "연결 축이 없는 통로(claude)의 지움까지 함께 걷혔다 — 이 결정의 범위는 연결을 선언하는              통로뿐이다"
+        );
+    }
+
+    /// ★실패로 확정된 활성화는 **매니저가** 끝낸다★ — 통로는 stdin 만 놓고 아무것도 죽이지 않는다.
+    ///
+    /// 이 배선이 없으면 상대가 stdout 을 붙든 채 남는 경우 리더가 EOF 를 못 봐 `finish` 가 영영 안 돌고,
+    /// 그 단독 소비자인 reaper 도 안 움직여 자식·스레드가 데몬 수명 내내 묶인다.
+    /// ★한때 그 처분을 통로의 라이터가 직접 했는데 ADR-0199 가 그은 선을 넘는 것이라 걷어냈다★ — 여기가
+    ///   그 대체이고, 이 항목이 그 대체가 실재함을 잰다.
+    #[test]
+    fn a_failed_activation_is_torn_down_by_the_manager() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        let (_link, _core, kills) = put_session_with_link(
+            &manager,
+            id,
+            LinkState::Down {
+                reason: "rejected".into(),
+            },
+        );
+
+        manager.tear_down_failed_activation(id);
+
+        assert_eq!(
+            *kills.lock().expect("shutdowns poisoned"),
+            1,
+            "실패로 확정된 활성화가 통로의 teardown 을 부르지 않았다 — 상대가 stdout 을 붙들면 그 세션은              아무도 거두지 못한다"
+        );
+
+        // ★그 동사가 **실제로 실패 갈래에 걸려 있나**까지 본다★ — 위 단언만으로는 동사가 살아 있다는 것만
+        //   재고, 아무도 안 부르면 그대로 초록이다(실측: 그 호출만 지웠을 때 위 단언은 통과했다).
+        //   ★실행으로 재려면 실 codex 로 거절을 받아야 해서 시험대에 그 조합이 없다★ — 그래서 소스를 본다
+        //   (선례·같은 사유 = `an_optimistic_success_does_not_clear_the_failure_record`).
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body = production
+            .split("fn resume_no_fallback(")
+            .nth(1)
+            .expect("`resume_no_fallback` 본문")
+            .split("fn tear_down_failed_activation(")
+            .next()
+            .expect("다음 함수까지");
+        let arm_start = body
+            .find("EarlyVerdict::LinkFailed { reason } => {")
+            .expect("`LinkFailed` 갈래가 없다 — 이 항목의 전제가 낡았다");
+        let arm = &body[arm_start
+            ..body[arm_start..]
+                .find("EarlyVerdict::Ready => {")
+                .expect("`Ready` 갈래가 `LinkFailed` 뒤에 없다 — 이 항목의 전제가 낡았다")
+                + arm_start];
+        assert!(
+            arm.contains("tear_down_failed_activation"),
+            "연결 실패 갈래가 teardown 을 부르지 않는다 — 통로는 stdin 만 놓으므로, 상대가 stdout 을              붙들면 리더가 EOF 를 못 봐 `finish` 도 reaper 도 영영 안 돈다: {arm}"
+        );
+        // ★기록이 **먼저**여야 한다★ — 먼저 죽이면 `Killed` 가 서서 「사용자가 끈 것은 실패가 아니다」
+        //   규율과 구별되지 않는다.
+        assert!(
+            arm.find("note_activation_result")
+                .expect("실패 기록이 없다")
+                < arm
+                    .find("tear_down_failed_activation")
+                    .expect("teardown 이 없다"),
+            "teardown 이 실패 기록보다 먼저 선다 — 그 순서면 사용자 종료와 구별되지 않는다: {arm}"
         );
     }
 
@@ -2810,7 +2963,7 @@ mod tests {
     fn a_terminal_verdict_still_carries_the_link_reason_as_evidence() {
         let manager = bare_manager();
         let id = AgentId::new_v4();
-        let (_link, core) = put_session_with_link(
+        let (_link, core, _kills) = put_session_with_link(
             &manager,
             id,
             LinkState::Down {
@@ -2921,7 +3074,7 @@ mod tests {
             id,
             &claude_terminal_command(),
             Duration::from_secs(30),
-            LINK_DECISION_WINDOW,
+            LINK_RESOLUTION_BACKSTOP,
         );
 
         assert!(
@@ -2935,6 +3088,7 @@ mod tests {
                 EarlyVerdict::Alive => "Alive(죽음만 기다리는 옛 판정 = 회귀)".into(),
                 EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
                 EarlyVerdict::LinkFailed { ref reason } => format!("LinkFailed({reason})"),
+                EarlyVerdict::Ready => "Ready".into(),
             }
         );
         assert!(
@@ -2962,7 +3116,7 @@ mod tests {
             id,
             &claude_terminal_command(),
             Duration::from_millis(250),
-            LINK_DECISION_WINDOW,
+            LINK_RESOLUTION_BACKSTOP,
         );
 
         assert!(
@@ -2973,6 +3127,7 @@ mod tests {
                 EarlyVerdict::Alive => "Alive".into(),
                 EarlyVerdict::Terminal { ref status, .. } => format!("Terminal({status:?})"),
                 EarlyVerdict::LinkFailed { ref reason } => format!("LinkFailed({reason})"),
+                EarlyVerdict::Ready => "Ready".into(),
             }
         );
     }
@@ -2994,7 +3149,7 @@ mod tests {
             id,
             &claude_terminal_command(),
             Duration::from_secs(5),
-            LINK_DECISION_WINDOW,
+            LINK_RESOLUTION_BACKSTOP,
         );
 
         let evidence = match verdict {
@@ -3005,6 +3160,7 @@ mod tests {
                     EarlyVerdict::Diagnosed(k) => format!("Diagnosed({k:?})"),
                     EarlyVerdict::Alive => "Alive".into(),
                     EarlyVerdict::LinkFailed { reason } => format!("LinkFailed({reason})"),
+                    EarlyVerdict::Ready => "Ready".into(),
                     EarlyVerdict::Terminal { .. } => unreachable!(),
                 }
             ),
@@ -4405,7 +4561,7 @@ mod tests {
             profile.id,
             &claude_terminal_command(),
             Duration::from_secs(10),
-            LINK_DECISION_WINDOW,
+            LINK_RESOLUTION_BACKSTOP,
         ) else {
             panic!("이 배치는 즉시 죽는다(전제)")
         };
