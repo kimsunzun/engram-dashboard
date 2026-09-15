@@ -964,6 +964,39 @@ impl AgentManager {
 
         self.register_for_spawn(profile)?;
 
+        // ★화신 표식 확정 — 화신마다 새 값(ADR-0007)★
+        //
+        // ★왜 이 자리인가(호출부가 아니라)★: 맵 교체가 실제로 일어나는 곳이 여기고, **모든 spawn 이
+        //   모드와 무관하게 이 한 줄을 지난다**. 옛날엔 발급이 `activate_profile` 의 Resume 갈래에만
+        //   있어서 Fresh 재spawn 경로들(WS `Spawn` 명령 · `activate_profile` 의 Fresh 갈래 · sid 없는
+        //   프로필의 부팅 복원)이 죽은 화신의 표식을 **그대로 재사용**했다. 그 재사용은 (AgentId, epoch)
+        //   를 키로 쓰는 모든 구조를 무너뜨린다 — 턴 관측 표(ADR-0113: 죽은 화신의 지각 emit 이 산 화신의
+        //   항목을 덮고 그 emit 의 finalize 재확인이 그걸 지운다) · 제어 채널 토큰(ADR-0086) ·
+        //   reap epoch-guard(ADR-0084). 호출부마다 흩뿌리면 새 호출부가 또 빠뜨린다.
+        // ★모드를 보지 않는다(Resume 도 같은 규칙)★: 새 프로세스를 띄웠으면 그건 새 화신이고, 모드는 그
+        //   사실을 바꾸지 않는다. 모드로 가르면 Resume 쪽 재spawn(`restore_all` 을 부팅 밖에서 부르는 등)이
+        //   같은 재사용 구멍으로 남는다 — 그건 규약일 뿐 강제되지 않는다.
+        // ★프로필이 사라졌으면 **spawn 을 중단한다**★: 삭제된 프로필로 세션을 띄울 이유가 없다. `?` 로 끊는다.
+        //
+        // ★**`register_for_spawn` 바로 뒤여야 한다 — 사이에 한 줄도 끼우지 말 것**★:
+        //   [`ProfileRegistry::upsert_preserving_hierarchy`] 는 live 표식을 **보존**하므로(ADR-0084 —
+        //   스냅샷이 표식을 author 하면 안 되기 때문), 이 줄이 돌기 전까지 명부에 서 있는 표식은 여전히
+        //   **앞 화신의 것**이다. 그 구간에 도착한 앞 화신의 지각 기록
+        //   ([`ProfileRegistry::observe_session_id`] 의 `Some(epoch)` 갈래)은 표식이 일치하므로 **거절되지
+        //   않고 통과한다** — 그 가드가 막는 것은 「더 새 화신이 이미 섰다」 하나뿐이고, 새 화신은 아직
+        //   안 섰다. 그래서 이 줄이 **그 구간을 닫는 동사**다. 옛 자리(cwd 정규화와 sid 발급 **뒤**)에서는
+        //   그 구간이 canonicalize 한 번 + `agents.json` 통째 쓰기 한 번만큼 벌어져 있었다.
+        //   ★그리고 이 줄 **뒤에** 읽는 것이 아래 `resume_session_id` 가 명부를 읽을 수 있는 근거다★ —
+        //   표식이 바뀐 시점부터 이 spawn 이 자기 기록 포트를 건네기 전까지는 **어떤 화신의 기록도 통과할
+        //   수 없어** 그 값이 얼어 있다. 그 읽기를 이 줄 위로 올리면 그 보장이 사라진다.
+        // ADR-0007
+        let epoch = self.profiles.epoch_for_spawn(profile.id).ok_or_else(|| {
+            PtyError::SpawnFailed(format!(
+                "profile {} vanished mid-spawn (concurrent delete) — spawn aborted",
+                profile.id
+            ))
+        })?;
+
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
 
@@ -987,27 +1020,6 @@ impl AgentManager {
         } else {
             None
         };
-
-        // ★화신 표식 확정 — 화신마다 새 값(ADR-0007)★
-        //
-        // ★왜 이 자리인가(호출부가 아니라)★: 맵 교체가 실제로 일어나는 곳이 여기고, **모든 spawn 이
-        //   모드와 무관하게 이 한 줄을 지난다**. 옛날엔 발급이 `activate_profile` 의 Resume 갈래에만
-        //   있어서 Fresh 재spawn 경로들(WS `Spawn` 명령 · `activate_profile` 의 Fresh 갈래 · sid 없는
-        //   프로필의 부팅 복원)이 죽은 화신의 표식을 **그대로 재사용**했다. 그 재사용은 (AgentId, epoch)
-        //   를 키로 쓰는 모든 구조를 무너뜨린다 — 턴 관측 표(ADR-0113: 죽은 화신의 지각 emit 이 산 화신의
-        //   항목을 덮고 그 emit 의 finalize 재확인이 그걸 지운다) · 제어 채널 토큰(ADR-0086) ·
-        //   reap epoch-guard(ADR-0084). 호출부마다 흩뿌리면 새 호출부가 또 빠뜨린다.
-        // ★모드를 보지 않는다(Resume 도 같은 규칙)★: 새 프로세스를 띄웠으면 그건 새 화신이고, 모드는 그
-        //   사실을 바꾸지 않는다. 모드로 가르면 Resume 쪽 재spawn(`restore_all` 을 부팅 밖에서 부르는 등)이
-        //   같은 재사용 구멍으로 남는다 — 그건 규약일 뿐 강제되지 않는다.
-        // ★프로필이 사라졌으면 **spawn 을 중단한다**★: 삭제된 프로필로 세션을 띄울 이유가 없다. `?` 로 끊는다.
-        // ADR-0007
-        let epoch = self.profiles.epoch_for_spawn(profile.id).ok_or_else(|| {
-            PtyError::SpawnFailed(format!(
-                "profile {} vanished mid-spawn (concurrent delete) — spawn aborted",
-                profile.id
-            ))
-        })?;
 
         // ADR-0086 ★spec 조립 직전에 부른다★ — build_command_spec 이 endpoint 를 받아 backend 방식
         //   (claude=`--mcp-config`)으로 명령줄에 주입해야 하므로. 화신 표식은 위에서 확정된 현재값이라
@@ -1087,8 +1099,40 @@ impl AgentManager {
         // ★Fresh 면 비워서 넘긴다★ — 값을 실어 보내고 backend 가 모드를 다시 보게 하면 판정이 두 곳이
         //   된다. 그 죽은 화신의 thread id 로 새 대화를 열라는 요청이 Fresh 인데, 여기서 안 비우면 그
         //   요청이 backend 마다 다르게 해석된다.
+        // ★**호출자가 준 스냅샷이 아니라 명부를 읽는다**★ — `profile` 은 호출자가 뜬 사본이고, 이 칸의
+        //   값은 **우리가 아니라 상대가 쓴다**(codex 가 핸드셰이크에서 준 thread id 를 기록 포트가 명부에
+        //   적는다). 그래서 스냅샷 시점 뒤에 도착한 손잡이는 사본에 없다 — 그걸 읽으면 낡은 스레드로
+        //   이어받는다. 발급 축 backend(claude)가 위에서 [`ProfileRegistry::ensure_session_id`] 로 명부를
+        //   거치는 것과 같은 규율이고, 이 칸만 사본을 읽던 것이 **codex 쪽에서만 벌어져 있던 폭**이다.
+        // ★읽는 자리가 위 `epoch_for_spawn` **뒤**인 것이 이 읽기의 근거다★ — 표식이 새로 선 뒤부터
+        //   아래 `session_id_sink` 를 건네기 전까지는 어떤 화신의 기록도 명부에 통과하지 못한다(앞 화신은
+        //   표식 불일치로 거절되고, 이 화신의 통로는 아직 존재하지 않는다). 즉 이 구간의 명부 값은 얼어
+        //   있고, 그래서 「읽은 값 = 이 화신이 이어받는 값」이 레이스 없이 성립한다. 이 읽기를 표식 확정
+        //   위로 옮기면 그 보장이 사라진다.
+        // ★`get` 이 `None` 이면 그 사이 프로필이 지워진 것이다★ — 위 `epoch_for_spawn` 이 이미 그 경우
+        //   spawn 을 끊으므로 여기까지 오면 실재하지만, 재조회는 별도 락이라 계약으로 기대지 않고
+        //   `and_then` 으로 흡수한다(없으면 이어받을 손잡이도 없다 = `None` 과 같은 결말).
+        //
+        // ★**이 읽기가 덮는 범위를 부풀리지 말 것 — 「명부를 읽으니 언제 도착한 손잡이든 잡는다」는
+        //   거짓이다**★ (알려진 잔여, 이번 라운드에서 **안 고쳤다**):
+        //   위 `register_for_spawn` → [`ProfileRegistry::upsert_preserving_hierarchy`] 는 live 엔트리에서
+        //   `parent_id`·`display_name`·`epoch`·`last_failure` **넷만** 보존하고 나머지는 스냅샷으로 덮는다.
+        //   `backend_session_id` 는 그 넷에 없다 — 즉 **호출자 스냅샷 시점 이후에 도착한 손잡이는 이 읽기에
+        //   닿기 전에 이미 스냅샷 값으로 덮여 있다.** (그 덮어쓰기는 이미 관측된 동작이다 —
+        //   `tests/activation.rs` 의 `user_kill_then_reactivate_finds_profile_and_resumes` 가 그것 때문에
+        //   seeded 사본을 모든 호출에 넘긴다고 주석으로 적어 둔다.)
+        //   그래서 이 읽기가 실제로 덮는 구간은 [`register_for_spawn`, 위 표식 확정] 하나이고, 바로 그
+        //   구간을 표식 확정을 끌어올려 최소화했다. 그럼에도 스냅샷 대신 명부를 읽는 것이 맞다 — 권위
+        //   출처가 명부이고, 발급 축 backend 가 이미 그렇게 읽는다(위 `ensure_session_id`).
+        //   ★닫으려면 `upsert_preserving_hierarchy` 의 보존 목록에 `backend_session_id`(와 그 이력)를
+        //   더해야 한다 — `epoch`·`last_failure` 가 거기 있는 것과 **같은 사유**로(런타임이 쓰는 칸을
+        //   spawn 스냅샷이 author 하면 안 된다). 그것은 모든 backend 의 공용 헬퍼를 바꾸는 별건이라
+        //   이 라운드 범위 밖이고, 사용자 결정으로 남긴다.★
         let resume_session_id = match mode {
-            SpawnMode::Resume => profile.backend_session_id,
+            SpawnMode::Resume => self
+                .profiles
+                .get(profile.id)
+                .and_then(|p| p.backend_session_id),
             SpawnMode::Fresh => None,
         };
         let parts = backend::open_spawn(
@@ -2060,6 +2104,33 @@ mod tests {
             profiles.get(id).unwrap().backend_session_id,
             None,
             "해독 실패한 값이 프로필에 적혔다"
+        );
+    }
+
+    /// ★버리는 것의 **대가**를 잰다 — 「안 적혔다」가 아니라 「갈렸다」다★.
+    ///
+    /// 위 항목은 빈 프로필에서 시작해서 「버렸다」와 「원래 없었다」가 구별되지 않는다. 실제로 아픈 모양은
+    /// 이쪽이다: 저장된 손잡이가 **이미 있는데** 상대가 uuid 아닌 thread id 를 주면, 통로는 그 문자열을
+    /// 들고 그 뒤 모든 턴을 그것으로 내보내는데 디스크는 옛 값 그대로 남는다. 두 축이 조용히 갈리고
+    /// 다음 이어받기는 이 화신이 실제로 말한 스레드가 아닌 곳을 연다 — 화면에는 아무 표시도 없다.
+    ///
+    /// ★그 조건을 만드는 짝은 `backend/codex/mod.rs` 의
+    ///   `tests::a_resume_target_makes_the_handshake_issue_thread_resume` 이다★ — 그 시험대의 가짜가
+    ///   `resumed-<uuid>` 를 돌려주는데 그 문자열은 uuid 가 아니다(그쪽이 그 사실을 단언한다).
+    /// ★이 항목은 「버려야 한다」를 뒤집자는 것이 아니다★ — 여기서 panic 하거나 옛 값을 지우면 더 나쁘다
+    ///   (그 사유는 [`session_id_sink`] 의 doc). 못 박는 것은 **이 결말에 값이 있다**는 사실이고,
+    ///   그래서 이 갈래가 조용해질 때 회귀가 아니라 **결정**이 되도록 남긴다.
+    #[test]
+    fn a_non_uuid_thread_id_leaves_the_stored_one_diverged() {
+        let (profiles, id, epoch) = sink_fixture();
+        let stored = profiles.ensure_session_id(id).expect("갓 넣은 프로필");
+
+        session_id_sink(profiles.clone(), id, epoch)("resumed-abc");
+
+        assert_eq!(
+            profiles.get(id).unwrap().backend_session_id,
+            Some(stored),
+            "해독 실패한 값이 저장된 손잡이를 건드렸다 — 버리기로 한 결정이 깨졌다"
         );
     }
 
@@ -3825,6 +3896,84 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&batch);
+    }
+
+    /// ★`spawn_agent` 안의 **세 동사 순서**를 못 박는다 — 이 순서가 이어받기 값의 레이스 없음을 낸다★.
+    ///
+    /// 못 박는 것 둘:
+    ///   1. `register_for_spawn` **바로 뒤**가 `epoch_for_spawn` 이다. 앞엣것은 live 표식을 **보존**하므로
+    ///      (ADR-0084) 그 사이 구간에는 여전히 **앞 화신의 표식**이 서 있고, 그 구간에 도착한 앞 화신의
+    ///      지각 기록은 표식이 일치해 **거절되지 않는다**. 사이에 cwd 정규화(syscall)나 sid 발급
+    ///      (`agents.json` 통째 쓰기)이 끼면 그 구간이 실제로 벌어진다 — 옛 배치가 그랬다.
+    ///   2. 이어받기 손잡이를 읽는 자리가 `epoch_for_spawn` **뒤**다. 표식이 바뀐 뒤부터 이 spawn 이
+    ///      기록 포트를 건네기 전까지는 어떤 화신의 기록도 통과하지 못해 명부 값이 얼어 있고, 그래서
+    ///      「읽은 값 = 이 화신이 이어받는 값」이 성립한다.
+    ///
+    /// ★그리고 그 읽기가 **명부**여야 한다★ — 호출자 스냅샷(`profile.backend_session_id`)을 읽으면 그
+    ///   사이 상대가 준 thread id 를 통째로 놓친다(그 칸은 우리가 아니라 상대가 쓴다).
+    ///
+    /// ★왜 소스에서 재나★: 이 순서를 실행으로 재려면 실 codex 바이너리와 지각 기록을 끼워 넣을 창이
+    ///   동시에 있어야 한다. 그 둘은 시험대에 없고, 어긋났을 때 나는 것은 컴파일 에러도 빨간 단언도 아닌
+    ///   **낮은 확률의 조용한 오기록**이다. 선례·같은 사유 =
+    ///   `backend::codex::transport::tests::the_session_id_is_recorded_before_the_gate_opens`.
+    #[test]
+    fn the_resume_handle_is_read_from_the_roster_after_the_incarnation_tag_is_stamped() {
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body = production
+            .split("pub fn spawn_agent(")
+            .nth(1)
+            .expect("`spawn_agent` 본문")
+            .split("pub fn activate_profile(")
+            .next()
+            .expect("다음 함수까지");
+
+        let at = |needle: &str| {
+            body.find(needle).unwrap_or_else(|| {
+                panic!("`{needle}` 이 `spawn_agent` 에 없다 — 이 항목의 전제가 낡았다")
+            })
+        };
+
+        let registered = at("self.register_for_spawn(profile)?;");
+        let stamped = at("let epoch = self.profiles.epoch_for_spawn(profile.id)");
+        let resume_read = at("let resume_session_id = match mode {");
+
+        assert!(
+            registered < stamped,
+            "표식 확정이 `register_for_spawn` 보다 앞선다 — 등록이 live 표식을 되살려 앞 화신 것으로 되돌린다"
+        );
+        assert!(
+            stamped < resume_read,
+            "이어받기 손잡이를 표식 확정 **전에** 읽는다 — 그 구간의 명부 값은 앞 화신의 지각 기록에 열려 \
+             있어 「읽은 값 = 이어받는 값」이 성립하지 않는다"
+        );
+
+        // 두 동사 사이에 **실행되는 줄**이 없어야 한다(주석·빈 줄만 허용).
+        let between = &body[registered + "self.register_for_spawn(profile)?;".len()..stamped];
+        let executable: Vec<&str> = between
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with("//"))
+            .collect();
+        assert!(
+            executable.is_empty(),
+            "`register_for_spawn` 과 표식 확정 사이에 실행되는 줄이 끼었다 — 그만큼 앞 화신의 표식이 \
+             명부에 서 있는 구간이 벌어진다(옛 배치가 canonicalize + `agents.json` 쓰기만큼 벌어져 \
+             있었다): {executable:?}"
+        );
+
+        let resume_binding = &body[resume_read..];
+        let resume_binding = &resume_binding[..resume_binding.find("};").expect("바인딩 끝")];
+        assert!(
+            !resume_binding.contains("profile.backend_session_id"),
+            "이어받기 손잡이를 호출자 스냅샷에서 읽는다 — 스냅샷 뒤에 상대가 준 thread id 를 놓치고 \
+             낡은 스레드로 이어받는다: {resume_binding}"
+        );
+        // ★rustfmt 가 이 체인을 줄로 쪼개므로 `self.profiles.get(...)` 을 한 덩어리로 찾지 않는다★.
+        assert!(
+            resume_binding.contains(".profiles") && resume_binding.contains(".get(profile.id)"),
+            "이어받기 손잡이를 명부에서 읽지 않는다: {resume_binding}"
+        );
     }
 
     /// ★실 프로세스로 보는 이유★: 표식 발급은 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이

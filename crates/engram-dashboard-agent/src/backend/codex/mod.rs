@@ -65,11 +65,25 @@ fn is_app_server(command: &AgentCommand) -> bool {
 /// ★정책 셋(작업 폴더·승인·샌드박스)을 두 갈래에 **똑같이** 싣는다★: 이어받기에서 빼면 codex 가 그
 ///   스레드를 만들 때 저장해 둔 값으로 돈다 — 프로필의 작업 폴더가 그 사이 바뀌었어도 이어받은 세션만
 ///   조용히 옛 폴더를 워크스페이스로 믿는다. 그 어긋남은 화면에 아무 표시도 남기지 않는다.
-/// ★codex 가 스레드 생성 때와 **다른** cwd·정책을 받아들이는지는 미검이다★ — 거절한다면 증상은
-///   이어받기 실패이고, 새 스레드로 되돌아가지 않으므로(ADR-0082) 그 사유가 화면에 그대로 오른다.
+/// ★**미검인 것의 범위를 정확히 적는다 — 「다른 cwd 를 받아 주나」는 이미 실측됐다**★
+///   (`docs/reference/backend-capabilities.md` §1 「cwd 가 다르면」): **이어진다.** 스레드 정체성은
+///   워크스페이스가 아니라 `CODEX_HOME` 단위라 cwd 가 달라도 거절되지 않는다. 그러니 「거절하면 이어받기
+///   실패로 화면에 오른다」는 있지도 않은 갈래를 대비한 문장이었다.
+///   ★진짜 미검은 **우리가 보낸 cwd 가 기록된 값을 덮나**다★ — 같은 실측이 「응답의 `cwd` 는 **스레드에
+///   기록된 원래 cwd**」라고 적는다. 즉 우리 값이 무시될 가능성이 있고, 그러면 바로 위 문단이 막으려던
+///   그 어긋남(이어받은 세션만 옛 폴더를 믿는다)이 **이 인자를 실어 보내도 그대로 남는다.** 재려면 서로
+///   다른 두 폴더로 같은 스레드를 이어받아 턴이 실제로 어느 쪽에서 도는지 봐야 한다 — 안 재 봤다.
+///   ★그래도 인자는 계속 싣는다★: 무시되면 손해가 없고, 반영되면 의도한 값이 선다.
 /// ★`excludeTurns` 를 켜는 것은 결정이다★ — 우리는 `thread.turns` 를 한 칸도 읽지 않는데(응답 타입에
 ///   그 칸이 없다), 채워 받으면 긴 대화 하나가 통로의 줄 상한(`MAX_LINE_BYTES`)을 넘겨 **그 줄만
 ///   버려지고** 핸드셰이크가 시한까지 오지 않을 답을 기다린다.
+///   ★**그 결말이 거절과 구별되지 않는다는 것이 이 항목의 요점이다**★ — 상대는 살아 있고 stdout 으로
+///   답을 보냈는데 우리가 그 줄을 버렸으므로, 우리 쪽에서 보이는 것은 「핸드셰이크가 시한으로 실패했고
+///   자식은 멀쩡하다」 하나다. 그것은 `thread/resume` 이 JSON-RPC 오류로 거절당한 경우와 **같은 모양**
+///   이고, 그 모양이 통로의 stdin 을 닫지 않으면 자식·리더·라이터가 통째로 붙들려 아무도 거두지 못하는
+///   wedge 가 된다(그래서 그 닫기가 갈래를 가리지 않는다 — `transport.rs` 의 그 자리).
+///   ★즉 상류가 `excludeTurns` 를 무시하기 시작하면 이 인자는 아무 것도 못 막고, 남는 방어는 그 닫기
+///   하나뿐이다★ — 이 인자를 「막아 뒀다」로 읽지 말 것. 상류가 실제로 존중하는지는 미검이다.
 // ADR-0185
 fn thread_open(spec: &CommandSpec, resume_session_id: Option<Uuid>) -> ThreadOpen {
     let cwd = Some(spec.cwd.to_string_lossy().into_owned());
@@ -951,6 +965,19 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             vec![format!("resumed-{resume_target}")],
             "이어받기 응답의 id 가 기록되지 않았다 — `start_only` 면 `thread/start` 가 나간 것이고,              접두 없는 원본이면 상대 답 대신 우리가 보낸 값을 되쓴 것이다"
         );
+        // ★이 가짜가 주는 값은 **uuid 가 아니다** — 그 사실을 여기서 못 박는다★.
+        //   조립점의 기록 동사(`manager::session_id_sink`)는 `Uuid::parse_str` 에 실패한 값을 **조용히
+        //   버리므로**, 이 갈래에서 실제로 일어나는 일은 「기록됨」이 아니라 **갈림**이다: 통로는 이
+        //   문자열을 `thread_id` 로 들고 그 뒤 모든 턴을 그것으로 내보내는데, 디스크의
+        //   `backend_session_id` 는 **옛 값 그대로** 남는다. 그래서 다음 이어받기는 이 화신이 실제로
+        //   말한 스레드가 아닌 곳을 연다.
+        //   ★그 갈림을 재는 짝은 `manager.rs` 쪽 `a_non_uuid_thread_id_leaves_the_stored_one_diverged`
+        //   이고, 여기서 재는 것은 「이 시험대가 그 조건을 실제로 만들어 낸다」 하나다★ — 이 단언이 없으면
+        //   위 `assert_eq!` 가 「기록까지 됐다」로 잘못 읽힌다.
+        assert!(
+            Uuid::parse_str(&got[0]).is_err(),
+            "가짜의 답이 uuid 로 읽힌다 — 이 항목의 전제(조립점이 이 값을 버린다)가 낡았다: {got:?}"
+        );
         assert!(
             removed,
             "가짜 app-server 스크립트를 지우지 못했다: {}",
@@ -966,12 +993,21 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     /// 곧 둘째 spawn 부재이고, 기록이 없으니 저장된 sid 도 그대로다.
     /// ★부재를 시한으로만 재지 않는다★ — 화면에 오르는 실패 경계를 **기다린 뒤에** 부재를 단언한다.
     ///   그래야 「아직 안 끝났을 뿐」과 「폴백이 없다」가 갈린다.
-    /// ★세션이 종점으로 가는 것은 여기서 재지 않는다★ — 왕복 실패 갈래는 이 통로가 아무도 죽이지 않고
-    ///   링크만 내린다(그 통로 헤더의 「알려진 한계」). 종점까지 가는 것은 매니저·reaper 몫이고,
-    ///   그 규율의 회귀망은 `tests/activation.rs` 가 진다.
+    ///
+    /// ★그리고 **세션이 종점에 닿는 것까지 여기서 잰다**★ — 이것이 이 항목의 두 번째 축이고, 없으면
+    ///   항목 전체가 **깨진 구현 위에서 초록**이다. 이 가짜는 거절을 답한 뒤에도 죽지 않고 stdin 을 계속
+    ///   읽으므로(그 상수의 doc), 통로가 우리 쪽 stdin 을 안 놓으면 자식·리더·라이터가 그대로 살아
+    ///   리더가 EOF 를 못 보고 [`crate::output_core::OutputCore::finish`] 가 영영 안 돈다. 그러면 reaper 로
+    ///   가는 메시지가 아예 만들어지지 않고(그 단독 소비자 — ADR-0019), 매니저의 활성화 판정은 3초 내내
+    ///   `Running` 만 보고 **「이어받기 성공」으로 도장을 찍으며 마지막 실패 기록까지 지운다**.
+    ///   ★한때 이 자리에 「종점은 매니저·reaper 몫이고 그 회귀망은 `tests/activation.rs` 가 진다」고
+    ///   적혀 있었다 — 그 그물은 **없다**(그 파일에 codex 항목은 프로필 배선 하나뿐이고 거절 갈래를 재지
+    ///   않는다). 그래서 이 통로가 stdin 을 놓는 것을 재는 자리는 여기뿐이다.★
+    /// ★`shutdown()` 전에 기다리는 것이 요점이다★ — 우리가 죽여 놓고 「끝났다」를 재면 이 항목이 재려던
+    ///   인과를 우리가 대신 굴린 것이 된다(선례 = [`tests::a_recording_failure_ends_the_session`]).
     #[cfg(windows)]
     #[test]
-    fn a_rejected_resume_does_not_fall_back_to_a_fresh_thread() {
+    fn a_rejected_resume_does_not_fall_back_and_ends_the_session() {
         use crate::output_core::{OutputCore, TurnWiring};
         use crate::types::{
             AgentInfo, AgentStatus, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
@@ -979,9 +1015,12 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
         use std::sync::{Arc, Mutex};
 
-        struct NoopStatus;
-        impl StatusSink for NoopStatus {
-            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+        /// 종료 전이를 보는 눈 — 선례·사유는 [`tests::a_recording_failure_ends_the_session`] 과 같다.
+        struct RecordingStatus(Arc<Mutex<Vec<AgentStatus>>>);
+        impl StatusSink for RecordingStatus {
+            fn status_changed(&self, _id: Uuid, s: AgentStatus, _e: u32) {
+                self.0.lock().expect("status poisoned").push(s);
+            }
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
 
@@ -1021,10 +1060,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         .expect("open_spawn");
 
         let events: Arc<Mutex<Vec<OutputEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let statuses: Arc<Mutex<Vec<AgentStatus>>> = Arc::new(Mutex::new(Vec::new()));
         let core = Arc::new(OutputCore::new(
             Uuid::new_v4(),
             1,
-            Arc::new(NoopStatus),
+            Arc::new(RecordingStatus(statuses.clone())),
             TurnWiring::detached(),
         ));
         core.subscribe(Arc::new(EventSink {
@@ -1051,6 +1091,28 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let seen = events.lock().unwrap().clone();
         let got = recorded.lock().unwrap().clone();
 
+        // 실패 경계가 오른 뒤, 통로가 우리 쪽 stdin 을 놓은 결과로 상대가 EOF 를 보고 끝나기를 기다린다.
+        //   ★`shutdown()` 전이다★ — 위 doc 의 그 사유.
+        let terminal = || {
+            statuses
+                .lock()
+                .expect("status poisoned")
+                .iter()
+                .any(|s| !s.is_live())
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !terminal() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let reached_terminal = terminal();
+        let seen_statuses = statuses.lock().expect("status poisoned").clone();
+        // ★`!is_live()` 로는 부족하다★ — 리더 패닉(`Failed`)과 읽기 오류(`Exited{code:None}`)는 **자식이
+        //   살아 있어도** 그 술어를 만족한다. 재려는 인과는 「stdin 닫기 → 상대 exit → EOF」이므로
+        //   종류까지 못 박는다(선례·사유 = [`tests::a_recording_failure_ends_the_session`]).
+        let ended_by_peer_exit = seen_statuses
+            .iter()
+            .any(|s| matches!(s, AgentStatus::Exited { .. }));
+
         parts.transport.shutdown();
 
         assert!(
@@ -1062,6 +1124,18 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         assert!(
             got.is_empty(),
             "거절당한 이어받기 뒤에 기록 동사가 불렸다 — 새 스레드로 폴백했다는 뜻이고(값이              `start_only` 면 확정), 그 값이 프로필의 아직 멀쩡한 손잡이를 덮어쓴다: {got:?}"
+        );
+        assert!(
+            reached_terminal,
+            "이어받기가 거절됐는데 세션이 종료 상태에 닿지 않았다 — 통로가 우리 쪽 stdin 을 놓지 않아 \
+             자식·리더·라이터가 그대로 붙들려 있고, pump 가 종결을 못 해 reaper 로 가는 메시지가 아예 \
+             만들어지지 않는다. 그 상태를 매니저는 「이어받기 성공」으로 읽고 마지막 실패 기록까지 \
+             지운다(ADR-0082 가 막으려던 결말). 관측된 상태: {seen_statuses:?}"
+        );
+        assert!(
+            ended_by_peer_exit,
+            "종료는 했는데 상대가 스스로 끝난 모양이 아니다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 \
+             살아 있어도 나므로 이 항목이 재려는 인과(stdin 닫기 → 상대 exit → EOF)를 재지 못한다(관측: {seen_statuses:?})"
         );
         assert!(
             removed,
