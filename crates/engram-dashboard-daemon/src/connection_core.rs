@@ -1877,6 +1877,9 @@ mod tests {
     ///   시험대는 본질적으로 타이밍 의존이라 이 저장소가 피하는 모양이다(시계 단언 금지). 회귀했을 때
     ///   나는 것은 빨간 단언이 아니라 **부하 아래서만 보이는 정지**다.
     /// ★명령 버스 쪽 형제는 `blocking_handler` 가 이미 덮는다★ — 보호가 없던 것은 이 WS 표면뿐이다.
+    /// ★★이 항목이 **못 보는 것 둘**을 적어 둔다★★: ① `include_str!` 가 **자기 파일**이라, 다른 데몬
+    ///   파일에 세 번째 활성화 자리가 생기면 사거리 밖이다 ② 창이 5 줄이라, 인계가 그보다 위에 있는
+    ///   모양은 위 ① 축(`mgr` 수신자)으로만 걸린다. 오늘 둘 다 해당 없음이고, 자리가 늘면 여기를 함께 볼 것.
     #[test]
     fn both_ws_activation_sites_hand_the_blocking_call_to_the_pool() {
         let src = include_str!("connection_core.rs");
@@ -1893,13 +1896,20 @@ mod tests {
             !call_sites.is_empty(),
             "활성화 호출 자리가 사라졌다 — 이 항목의 전제가 낡았다"
         );
-        // ★자리마다 **그 위 몇 줄 안에** blocking 풀 인계가 있어야 한다★ — 개수를 세지 않는다(세면
-        //   무관한 `spawn_blocking` 이 하나 늘 때마다 헛빨강이 난다).
+        // ★두 축으로 본다 — 한 축만 두면 각각 새는 구멍이 있다★:
+        //   ① 호출 수신자가 **풀로 옮긴 사본**(`mgr`)인가 — 거리와 무관하게 맨몸 호출을 잡는다.
+        //   ② 그 위 몇 줄 안에 인계가 실제로 있나 — 이름만 `mgr` 로 바꾼 위장을 잡는다.
+        //   개수는 세지 않는다(세면 무관한 `spawn_blocking` 이 하나 늘 때마다 헛빨강이 난다).
         for i in call_sites {
+            let line = lines[i];
+            assert!(
+                line.contains("mgr.activate_profile("),
+                "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다: {line}"
+            );
             let window = lines[i.saturating_sub(4)..=i].join("\n");
             assert!(
                 window.contains("spawn_blocking"),
-                "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다:\n{window}"
+                "수신자만 풀 사본 이름이고 인계가 없다 — 이름은 맞는데 여전히 async 워커에서 돈다:\n{window}"
             );
         }
     }

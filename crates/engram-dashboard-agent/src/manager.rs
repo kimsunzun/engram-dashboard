@@ -539,6 +539,19 @@ pub struct AgentManager {
 /// spawn 진행 중 AgentId 예약을 잡고, drop 시 자동 해제하는 RAII 가드(ADR-0086 FIX 6). spawn_agent
 /// 의 어느 조기 반환(provision 실패·PTY 실패·`?`)에서도 예약이 새지 않게 한다. `reserve` 가 이미 예약된
 /// id 면 None(두 번째 동시 spawn 거부).
+///
+/// ★★이 가드의 **수명**에 다른 두 안전이 얹혀 있다 — 줄이면 둘이 **함께** 열린다★★. 연결을 선언하는
+/// 통로에서는 [`LinkWatch`] 가 이 예약을 **연결의 결말이 날 때까지** 들고 있고, 그동안 같은 id 로는
+/// 새 화신이 설 수 없다. 그 사실에 기대고 있는 것이 둘이다:
+///   1. **배달함의 화신 표식 대조가 발화하지 않는다** — 그래서 [`AgentManager::link_activation_verdict`]
+///      의 `as_verdict` 불일치 갈래가 운영에서 죽은 코드다(그 doc 이 「채널 신선도가 진짜 이유」라고
+///      적은 것의 절반이 이 수명이다).
+///   2. **감독자가 세션을 id 로만 집어도 안전하다** — `link_activation_verdict` 는 `get_session(id)` 로
+///      잡은 세션의 상태·종료 의도를 화신 표식 대조 없이 읽는다. 기다리는 동안 후임이 설 수 없어서
+///      성립하는 성질이지, 그 함수가 스스로 지키는 성질이 아니다.
+/// ★그래서 이 수명을 좁히는 변경은 **둘 다 재검토해야 한다**★ — 한 쪽만 보고 줄이면, 한 번도 발화한 적
+/// 없는 가드에 기대는 모양이 된다(`as_verdict` 가 그렇게 잘못 적혀 있었다 — 같은 실수를 여기서 반복하지
+/// 말 것). 소비자 쪽 주석만으로는 이 의존이 안 보여서 **정의 자리인 여기**에 적는다.
 struct SpawnReservation {
     spawning: Arc<Mutex<HashSet<AgentId>>>,
     id: AgentId,
@@ -1952,7 +1965,10 @@ impl AgentManager {
             EarlyVerdict::Terminal { status, evidence } => {
                 let reason = format!("resume 조기 종료({status:?})");
                 // ★사용자가 끊은 것은 활성화 실패가 아니다 — 기록하지 않는다★: 창 안에서 kill 이 오면
-                //   (트리 종료·`agent.kill`·LLM 의 활성화→종료) 그건 우리가 관측할 실패가 아니라 명시적
+                //   (트리 종료·WS `Kill` 프레임·데몬 종료 경로) 그건 우리가 관측할 실패가 아니라 명시적
+                //   ★한때 여기 `agent.kill` 이라 적혀 있었는데 **그런 동사는 없다**★ — 명령 버스의
+                //   `agent.*` 에 kill 은 **의도적으로** 빠져 있다(`types::CLI_AGENT_VERBS` 주석 · ADR-0122
+                //   미해소). 그래서 오늘 kill 이 닿는 표면은 WS 프레임 하나뿐이다.
                 //   개입이다. 기록하면 트리에 「이어받은 직후 종료됐습니다」가 남아, 사용자가 방금 스스로
                 //   끈 항목이 고장 난 것처럼 보인다. 활성화 결과는 여전히 Failed 다(에이전트가 안 떠 있다).
                 //   지우지도 않는다 — 이 시도에 대해 성립을 주장할 근거도 없다.
@@ -2199,30 +2215,20 @@ impl AgentManager {
     /// ★「이미 죽었다」가 아니라 「사용자가 끊기로 했다」를 뜻한다★ — 그 순간 자식은 아직 살아 있을 수
     ///   있다(`session.kill()` 이 도는 중이다). 우리가 단언하는 것은 **이 활성화의 결말을 사용자가
     ///   정했다**는 것 하나이고, 호출자가 그 값으로 하는 일은 「실패로 기록하지 않는다」뿐이다.
-    /// `delivered` = 이 취소가 가로챈 배달의 사유(있으면). 증거 꼬리에 이어 붙인다 — 그 문구는 콘솔에도
-    /// 진단에도 없어서, 여기서 안 실으면 어디에도 안 남는다.
-    fn cancelled_verdict(session: &AgentSession, delivered: Option<String>) -> EarlyVerdict {
-        let mut evidence = Self::terminal_evidence(session);
-        if let Some(reason) = delivered {
-            if !evidence.is_empty() {
-                evidence.push('\n');
-            }
-            evidence.push_str(&reason);
-        }
+    /// ★★가로챈 배달의 사유를 **여기서 나르지 않는다 — 나를 곳이 없기 때문이다**★★:
+    ///   이 값을 받는 두 소비자(`spawn_fresh_settled` · `resume_no_fallback`)는 `Killed` 갈래에서
+    ///   **아무것도 기록하지 않고 `evidence` 도 읽지 않는다** — 사용자가 끈 것은 분류할 실패가 아니라서다.
+    ///   한때 이 함수가 그 사유를 `evidence` 에 이어 붙이고 「여기서 안 실으면 어디에도 안 남는다」고
+    ///   적었는데, **둘 다 거짓이었다**: 싣고 나서 아무도 안 읽었고, 그 문구는 이미 남아 있다 —
+    ///   통로가 실패 갈래에 들어서자마자 `tracing::warn!` 로 낸다(`backend/codex/transport.rs` 의
+    ///   `writer_loop`, `deliver_link` 보다 **앞**이고 종료 래치에 **억제되지 않는다**). 없는 보존을
+    ///   약속하던 자리라 걷었다 — 지난 라운드에 걷어낸 `take()` 주장과 같은 부류다.
+    /// ★그래서 꼬리를 로그로 쏟지도 않는다★ — `Killed` 갈래에서 `evidence` 를 찍으면 사용자가 끌 때마다
+    ///   최대 4 KiB 콘솔 꼬리(대화 본문이 들어 있을 수 있다)가 데몬 로그로 나간다. 얻을 것이 없다.
+    fn cancelled_verdict(session: &AgentSession) -> EarlyVerdict {
         EarlyVerdict::Terminal {
             status: AgentStatus::Killed,
-            evidence,
-        }
-    }
-
-    /// 배달 한 건에서 **실패 사유 문자열만** 꺼낸다 — 표식이 다르거나 성공이면 `None`.
-    fn delivered_reason(v: LinkVerdict, epoch: u32) -> Option<String> {
-        if v.epoch != epoch {
-            return None;
-        }
-        match v.resolution {
-            LinkResolution::Failed { reason } => Some(reason),
-            LinkResolution::Ready => None,
+            evidence: Self::terminal_evidence(session),
         }
     }
 
@@ -2333,9 +2339,10 @@ impl AgentManager {
                     //   직후 사용자가 끊으면, 이 자리에서 그 `Ready` 를 그대로 받아 **죽은 에이전트를
                     //   성공으로 보고**했다(`restore_one` 은 `Resumed`, `activate_profile` 은 `Ok`).
                     //   래치를 먼저 보면 그 조합이 「사용자가 끈 것」으로 떨어져 기록도 보고도 정직해진다.
-                    // ★버린 배달의 사유는 증거로 옮겨 싣는다★ — 그 문구는 두 꼬리 어디에도 없다.
+                    // ★버린 배달의 사유는 **여기서 나르지 않는다**★ — 받는 쪽이 `Killed` 갈래에서
+                    //   `evidence` 를 안 읽고, 그 문구는 이미 통로가 로그로 냈다(`cancelled_verdict` doc).
                     if user_cancelled(&session) {
-                        return Self::cancelled_verdict(&session, Self::delivered_reason(v, epoch));
+                        return Self::cancelled_verdict(&session);
                     }
                     if let Some(verdict) = as_verdict(v, epoch) {
                         return verdict;
@@ -2355,7 +2362,7 @@ impl AgentManager {
                     //   먼저** 서므로 기다릴 이유가 없고, kill 이 아닌 소멸에서는 유예를 줘도 결말이
                     //   실패로 같다(문구만 갈린다).
                     if user_cancelled(&session) {
-                        return Self::cancelled_verdict(&session, None);
+                        return Self::cancelled_verdict(&session);
                     }
                     // 통로가 배달 없이 사라졌다 — 남은 사실은 종점 상태뿐이다.
                     let status = session.status();
@@ -2379,7 +2386,7 @@ impl AgentManager {
 
             // ★사용자 kill 이 여기로도 온다★ — 위 두 갈래와 같은 규율이고, 종점 전이를 기다리지 않는다.
             if user_cancelled(&session) {
-                return Self::cancelled_verdict(&session, None);
+                return Self::cancelled_verdict(&session);
             }
 
             // ★종점은 래치라 읽어도 안전하다★ — `OutputCore` 가 한 번만 세우고 되돌리지 않는다.
@@ -3427,32 +3434,41 @@ mod tests {
         );
     }
 
-    /// ★취소가 가로챈 배달의 **사유는 증거로 살아남는다**★ — 그 문구는 두 꼬리 어디에도 없다.
+    /// ★★취소가 배달을 가로채도 그 **사유는 통로의 로그에 이미 남아 있다**★★ — 그것이 이 자리가
+    /// 사유를 나르지 않는 근거이고, 그래서 그 로그 줄을 여기서 지킨다.
+    ///
+    /// ★왜 이 항목이 생겼나★: 한때 감독자가 가로챈 사유를 `evidence` 로 옮겨 싣고 「여기서 안 실으면
+    ///   어디에도 안 남는다」고 적었는데 **둘 다 거짓이었다** — 받는 쪽 둘이 `Killed` 갈래에서
+    ///   `evidence` 를 읽지 않아 그대로 버려졌고(그 갈래는 기록 자체를 안 한다), 문구는 이미 통로가
+    ///   내고 있었다. 기계를 걷어냈으므로, **걷어낸 근거인 그 로그 줄**을 대신 못 박는다.
+    /// ★지켜야 하는 성질 둘★: ① 실패 갈래에 들어서면 사유를 **로그로 낸다** ② 그 줄이 `deliver_link`
+    ///   보다 **앞**이다 — 뒤로 가면 종료 래치가 배달을 억제하는 인터리빙에서 사유가 통째로 사라진다
+    ///   (억제되는 것은 배달이지 로그가 아니다).
+    /// ★왜 소스에서 재나★: 로그 방출을 실행으로 재려면 `tracing` 수집기를 붙여야 하는데 이 crate 에는
+    ///   그 하네스가 없고, 무엇보다 재야 하는 것이 **두 줄의 순서**다.
     #[test]
-    fn a_cancellation_keeps_the_reason_of_the_delivery_it_intercepted() {
-        let manager = bare_manager();
-        let id = AgentId::new_v4();
-        let (_core, _kills) = put_session_with_link(&manager, id, 33);
-        let session = manager.get_session(id).expect("전제: 세션이 명부에 있다");
+    fn the_transport_logs_the_rejection_reason_before_it_may_be_suppressed() {
+        let src = include_str!("backend/codex/transport.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let failure_arm = production
+            .split("fn writer_loop(")
+            .nth(1)
+            .expect("`writer_loop` 본문")
+            .split("Err(failure) => {")
+            .nth(1)
+            .expect("핸드셰이크 실패 갈래");
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        tx.send(LinkVerdict {
-            epoch: 33,
-            resolution: LinkResolution::Failed {
-                reason: "thread/resume: -32600 no rollout found for thread id".into(),
-            },
-        })
-        .expect("배달");
-        session.set_intent(TerminationIntent::UserKill);
-
-        let EarlyVerdict::Terminal { evidence, .. } =
-            manager.link_activation_verdict(id, 33, &rx, Duration::from_secs(6))
-        else {
-            panic!("전제: 취소는 종점 갈래로 떨어진다");
-        };
+        let logged = failure_arm
+            .find("tracing::warn!(\"{}: {reason}\", failure.headline());")
+            .expect(
+                "통로가 실패 사유를 로그로 내지 않는다 — 감독자가 그것을 안 나르기로 한 근거가 사라진다",
+            );
+        let delivered = failure_arm
+            .find("deliver_link(")
+            .expect("실패 갈래가 배달을 하지 않는다 — 이 항목의 전제가 낡았다");
         assert!(
-            evidence.contains("-32600"),
-            "가로챈 배달의 사유가 사라졌다 — 그 문구는 콘솔에도 진단에도 없어서 여기서 안 실으면              어디에도 안 남는다: {evidence:?}"
+            logged < delivered,
+            "사유 로그가 배달보다 뒤에 있다 — 종료 래치가 배달을 억제하는 인터리빙에서 그 문구가              어디에도 안 남는다(억제되는 것은 배달이지 로그가 아니다)"
         );
     }
 
