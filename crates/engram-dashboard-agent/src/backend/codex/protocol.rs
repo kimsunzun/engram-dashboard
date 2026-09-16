@@ -215,6 +215,12 @@ pub(crate) mod method {
     pub(crate) const TURN_START: &str = "turn/start";
     pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
 
+    /// 이어받은 스레드의 지난 item 을 **페이지로** 받는다(ADR-0203).
+    ///
+    /// ★쌍둥이 `thread/turns/list` 를 쓰지 않는다★ — 우리가 화면에 그리는 단위는 turn 이 아니라
+    /// item 이고, 그쪽은 같은 item 을 turn 봉투 안에 한 겹 더 싸서 준다. 벗길 봉투만 하나 는다.
+    pub(crate) const THREAD_ITEMS_LIST: &str = "thread/items/list";
+
     /// 우리 → 서버 알림. ★클라이언트가 보낼 수 있는 알림은 이것 하나뿐이고 params 칸이 아예
     /// 없다★(`ClientNotification.json`).
     /// ★보내는 것이 의무가 아니다★(실측 0.154.0 — 보낸 경우와 안 보낸 경우 둘 다에서
@@ -411,11 +417,76 @@ pub(crate) struct ThreadStartResponse {
     pub(crate) thread: Thread,
 }
 
-/// `thread/resume` 응답. 칸 구성은 `thread/start` 응답에 커서 둘이 더 붙은 것이고 그 둘은 우리가
-/// 안 읽는다 — 그래도 별도 타입으로 두어 두 경로가 따로 진화할 수 있게 한다.
+/// `thread/resume` 응답. 칸 구성은 `thread/start` 응답에 커서 둘이 더 붙은 것이다.
+///
+/// ★그 커서 중 하나를 이제 읽는다 — 그것이 화면 복원의 **진입점**이다★(ADR-0203). 쓰는 법은 스키마
+/// (0.154.0)가 그 칸의 설명에 직접 적어 둔다: "Pass this as `cursor` to `thread/items/list` with
+/// `sortDirection: \"desc\"`. The first page includes the item identified by the cursor."
+/// ★`default` 로 두는 것은 스키마가 그렇기 때문이다★ — `required` 목록에 없고 `default: null` 이다.
+/// 부재 = 되돌아갈 이력이 없다는 뜻이고, **실패가 아니다**(복원을 건너뛴다).
+/// ★`thread/start` 응답에는 이 칸이 아예 없다★ — 그래서 새 대화는 이 경로를 탈 재료가 없다.
+/// ★나머지 커서(`turnsBackwardsCursor`)는 여전히 안 읽는다★ — 위 [`method::THREAD_ITEMS_LIST`] 가
+/// 그 쌍둥이를 안 쓰는 사유를 진다.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadResumeResponse {
     pub(crate) thread: Thread,
+    #[serde(default)]
+    pub(crate) items_backwards_cursor: Option<String>,
+}
+
+/// 페이지를 어느 방향으로 걷나 — 스키마의 닫힌 `enum` 두 값 전량(0.154.0 `SortDirection`).
+///
+/// ★[`SortDirection::Asc`] 는 오늘 아무도 안 쓴다 — 그래도 적어 둔다★: 이것은 **나가는** 칸이라 값을
+/// 지어낼 수 없고, 둘을 함께 적어 두면 방향을 뒤집는 변경이 상수를 새로 만들지 않는다.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) enum SortDirection {
+    #[serde(rename = "asc")]
+    Asc,
+    #[serde(rename = "desc")]
+    Desc,
+}
+
+/// `thread/items/list` 요청. ★`threadId` 만 required 다★(스키마 0.154.0) — 나머지는 전부 생략 가능이라
+/// `Option` + `skip_serializing_if` 로 둔다([`ThreadStartParams`] 와 같은 사유: 부재를 기대하는 자리에
+/// 명시적 `null` 을 보내지 않는다).
+/// ★한 턴으로 좁히는 `turnId` 는 옮겨 적지 않았다★ — 우리는 스레드 전체를 끝에서부터 걷는다.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadItemsListParams {
+    pub(crate) thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sort_direction: Option<SortDirection>,
+}
+
+/// 페이지 한 장.
+///
+/// ★`nextCursor` 가 없거나 `null` 이면 그 방향으로 더 볼 것이 없다★ — 스키마가 그렇게 적고, 실측으로도
+/// 마지막 페이지에서 `null` 이 왔다(2026-09-16, 실 0.154.0 · 28 item 스레드가 25+3 으로 끝났다).
+/// ★방향을 뒤집을 때 쓰는 `backwardsCursor` 는 옮겨 적지 않았다★ — 우리는 한 방향으로만 걷는다.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadItemsListResponse {
+    pub(crate) data: Vec<ThreadItemEntry>,
+    #[serde(default)]
+    pub(crate) next_cursor: Option<String>,
+}
+
+/// 페이지에 실린 item 한 개 + 그것이 속한 turn.
+///
+/// ★`item` 이 [`ItemNotification`] 의 그 칸과 **같은 타입**이라는 것이 ADR-0203 의 근거다★ — 벤더
+/// 스키마에서 `item/completed` 알림·resume 응답·페이지 응답의 항목 정의 해시가 전부 같다(19 variants).
+/// 그래서 번역기를 새로 짜지 않고 봉투만 벗긴다. [`Value`] 로 받는 사유도 그쪽과 같다 — 모르는 변형
+/// 하나가 페이지 **전체**를 죽이면 안 된다.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadItemEntry {
+    pub(crate) turn_id: String,
+    pub(crate) item: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]

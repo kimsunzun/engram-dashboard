@@ -217,7 +217,12 @@ impl OutputCore {
     ///   아니다.**
     /// ★정리 호출자를 늘리지 않는다(ADR-0127)★ — 관측을 아예 안 적으므로 지울 것도 없다. 그래서
     ///   `finish` + `emit` 의 finalize 재확인이라는 두 자리는 그대로다.
-    /// ★오늘의 유일한 호출자 = codex app-server 통로의 미귀속 줄★(`backend/codex/transport.rs`).
+    /// ★호출자는 오늘 둘이고 **둘 다 같은 파일**이다★(`backend/codex/transport.rs`):
+    ///   ① 상대가 흘린 미귀속 줄 ② 이어받기 직후 페이지로 받아 온 지난 화면(ADR-0203).
+    ///   ★②가 `seed` 가 아니라 이 문으로 오는 것은 **시점이 다르기 때문**이다★ — `seed` 는 세션이
+    ///   명부에 오르기 전에만 옳고(fanout 이 없어도 구독자가 없다), ②는 핸드셰이크 뒤라 이미 붙은
+    ///   구독자가 있을 수 있다. 거기서 fanout 없는 문을 쓰면 그 구독자는 빈 링을 replay 한 뒤라 지난
+    ///   화면을 **영영 못 본다**.
     // ADR-0113
     // ADR-0127
     pub(crate) fn emit_without_turn_observation(&self, event: OutputEvent) {
@@ -743,7 +748,12 @@ pub struct StoredOutput {
 /// 이벤트가 "건수 1" 로만 세지면 max_bytes(2MB) 상한을 우회해 버퍼가 무한정 커진다. 이를 막으려
 /// **payload 문자열 필드들의 바이트 길이 합**을 구조적으로 근사해 예산에 반영한다. 이 값은 eviction
 /// 판단 전용이며 정확한 직렬화 크기가 아니다(태그·구분자·escape 오버헤드 무시).
-fn estimate_cost_bytes(event: &OutputEvent) -> usize {
+/// ★`pub(crate)` 인 것은 **링 바깥에서 「이만큼이면 링을 채운다」를 셀 수 있어야 하기 때문이다**★:
+/// 복원 이력을 상대에게 **요청해서** 받는 backend(codex app-server)는 몇 건을 받아 올지 스스로 정해야
+/// 하는데, 그 천장은 [`REPLAY_MAX_BYTES`]·[`REPLAY_MAX_EVENTS`] 이고 무게를 세는 축은 이 함수다. 다른
+/// 축으로 어림잡으면 그 backend 가 링이 버릴 것을 더 받아 오거나(순 비용) 실을 수 있는 것을 덜 받아
+/// 온다(화면 손실). (ADR-0203)
+pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
     match event {
         OutputEvent::TerminalBytes(v) => v.len(),
         OutputEvent::TextDelta {
@@ -796,15 +806,23 @@ pub struct Ring {
     max_events: usize,
 }
 
+/// 링의 바이트 천장. ★상수로 꺼내 둔 것은 [`estimate_cost_bytes`] 와 같은 사유다★ — 이력을 요청해서
+/// 받는 backend 가 「여기까지만 받으면 된다」를 이 값으로 판정한다(ADR-0203). 링 자신이 쓰는 자리는
+/// 아래 [`Ring::new`] 하나다.
+pub(crate) const REPLAY_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// 링의 건수 천장 — 사유는 [`REPLAY_MAX_BYTES`] 와 같다.
+pub(crate) const REPLAY_MAX_EVENTS: usize = 4096;
+
 impl Ring {
     pub fn new() -> Self {
         Self {
             items: VecDeque::new(),
             total_bytes: 0,
-            max_bytes: 2 * 1024 * 1024,
+            max_bytes: REPLAY_MAX_BYTES,
             // 4096: 데몬 WS 송신 큐 cap(예 4608) − control_slack(512) 이하로 잡아
             // replay만으로 신규 구독자 큐가 넘치지 않게 한다.
-            max_events: 4096,
+            max_events: REPLAY_MAX_EVENTS,
         }
     }
 

@@ -26,9 +26,12 @@
 //! ★턴 경계는 `turn/completed` **하나가** 낸다★ — 그 알림 한 줄이 [`OutputEvent::TurnEnd`] 정확히
 //!   1 회이고, 실려 온 상태 값이 무엇이든(없어도) 그렇다(TRD §6-1). `item/completed` 마다 내면 한 턴이
 //!   여러 경계로 쪼개진다. `turn/started` 는 번역하지 않는다.
-//!   ★이 번역기는 [`OutputEvent::MessageDone`] 을 내지 않는다★ — 그쪽은 "한 메시지가 닫혔다" 이고
-//!   여기서 필요한 것은 "한 턴이 **이 결말로** 닫혔다" 다. 한 턴에 완료 item 이 여럿이라 둘이 같은
-//!   사건이 아니다(실측).
+//!   ★**라이브** 번역은 [`OutputEvent::MessageDone`] 을 내지 않는다★ — 그쪽은 "한 메시지가 닫혔다"
+//!   이고 여기서 필요한 것은 "한 턴이 **이 결말로** 닫혔다" 다. 한 턴에 완료 item 이 여럿이라 둘이
+//!   같은 사건이 아니다(실측).
+//!   ★단 **이력 복원은 그 어휘를 쓴다 — 「이 번역기는 MessageDone 을 안 낸다」로 읽지 말 것**★:
+//!   페이지에는 결말이 실려 오지 않아 `TurnEnd` 에 채울 값이 없다([`history_turn_boundary`] 가 그
+//!   선택의 정본). 두 어휘가 출처별로 갈리는 것이고, 소비자의 렌더 경로는 하나다.
 //!   ★단 그 경계를 **화면으로 올릴지는 여기서 정하지 않는다**★ — 이 번역기에는 「이 종료가 우리 턴의
 //!   것인가」를 답할 재료(우리 thread·turn id)가 없다. 그 판정은 봉투를 분류하는 통로가 지고, 그래서
 //!   여기서 낸 `TurnEnd` 가 막히거나 미뤄질 수 있다(정본 = 이 폴더 `transport` 의 `note_turn`).
@@ -238,6 +241,30 @@ const KNOWN_ITEM_TYPES: &[&str] = &[
 /// 표시만 읽는다 — 백엔드 이름은 화면에 가지 않는다(ADR-0004).
 const USER_MESSAGE_ITEM_TYPE: &str = "userMessage";
 
+/// 어시스턴트 본문을 통째로 담은 `ThreadItem` 변형.
+///
+/// ★라이브에서는 이 변형을 **번역하지 않는다 — 그것이 옳다**★: 같은 본문이 `item/agentMessage/delta`
+///   로 이미 흘러 화면에 그려졌으므로, 여기서 또 내면 한 답이 두 벌 남는다.
+/// ★그런데 이력 복원에는 그 델타가 없다★ — 페이지 응답에 실려 오는 것은 완결된 item 뿐이라, 이 변형을
+///   안 옮기면 **복원된 화면에 어시스턴트의 말이 한 줄도 없다**(실측 표본: 120 item 중 5 건이 이것이다).
+///   그래서 [`ItemOrigin::History`] 에서만 옮긴다 — 라이브 두 갈래는 바이트 단위로 그대로다.
+const AGENT_MESSAGE_ITEM_TYPE: &str = "agentMessage";
+
+/// 이 item 이 **어느 문으로 들어왔나**. 같은 `ThreadItem` union 을 셋이 공유하되 발행 규칙이 갈린다.
+///
+/// ★축을 `bool` 에서 이 enum 으로 넓힌 것이 이력 복원이 더한 전부다★ — 어휘표([`KNOWN_ITEM_TYPES`]
+///   ·[`TOOL_ITEM_TYPES`])도 변형별 번역기([`tool_call`]·[`user_message_event`])도 한 벌 그대로고,
+///   갈리는 것은 「이 출처에서 이 변형을 내나」뿐이다(ADR-0203: 두 번째 어휘표를 만들지 않는다).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ItemOrigin {
+    /// `item/started` — 라이브. 도구 호출의 발행 지점.
+    Started,
+    /// `item/completed` — 라이브. 도구 호출을 **내지 않는다**(`Started` 가 이미 냈다).
+    Completed,
+    /// `thread/items/list` 페이지 — 이어받기 직후의 지난 기록(ADR-0203).
+    History,
+}
+
 /// 도구 호출로 옮기는 `ThreadItem` 변형. 나머지는 우리 중립 어휘에 자리가 없거나
 /// (추론·계획·리뷰 모드 전환) 다른 알림이 이미 나른다.
 const TOOL_ITEM_TYPES: &[&str] = &[
@@ -416,7 +443,7 @@ impl CodexAppServerDecoder {
     fn translate(&mut self, method_name: &str, params: Option<&Value>) -> Vec<OutputEvent> {
         match method_name {
             method::ITEM_AGENT_MESSAGE_DELTA => self.text_delta(params),
-            method::ITEM_STARTED => self.item(params, method_name, true),
+            method::ITEM_STARTED => self.item(params, method_name, ItemOrigin::Started),
             method::THREAD_TOKEN_USAGE_UPDATED => self.usage(params),
             method::ERROR => self.error(params),
             method::TURN_COMPLETED => self.turn_completed(params),
@@ -426,7 +453,7 @@ impl CodexAppServerDecoder {
             //   — 양쪽에서 내면 한 호출이 화면에 두 번 뜬다. 그래도 item `type` 은 들여다본다: 새 변형은
             //   여기로도 온다. 그리고 턴 경계를 여기서 내면 한 턴이 item 개수만큼의 경계로 쪼개진다
             //   (TRD §6-1) — 경계는 `turn/completed` 단독.
-            method::ITEM_COMPLETED => self.item(params, method_name, false),
+            method::ITEM_COMPLETED => self.item(params, method_name, ItemOrigin::Completed),
 
             // 상류 드리프트의 조기 신호라 이름만이 아니라 본문까지 남긴다(TRD §4-7 의 2).
             // ★키 하나로 눌러 담는 것은 의도다★ — 이 파일의 다른 모든 상대발(發) 경고가 키별
@@ -474,31 +501,59 @@ impl CodexAppServerDecoder {
         }]
     }
 
-    /// `item/started`·`item/completed` — 같은 `ThreadItem` union 을 나른다.
+    /// `item/started`·`item/completed` — 같은 `ThreadItem` union 을 나르는 **알림** 쪽 문.
     ///
-    /// ★도구 호출의 발행 지점은 `item/started` 하나다(`at_item_start`)★ — 양쪽에서 내면 한 호출이
-    /// 화면에 두 번 뜬다. ★그런데 codex 가 모든 item 에 `started` 를 내는지는 미검증★ — `completed` 만
-    /// 오는 item 종류가 있다면 그 호출은 사라진다(계수에는 남는다).
+    /// ★라이브에서 도구 호출의 발행 지점은 `item/started` 하나다★ — 양쪽에서 내면 한 호출이 화면에
+    /// 두 번 뜬다. ★그런데 codex 가 모든 item 에 `started` 를 내는지는 미검증★ — `completed` 만 오는
+    /// item 종류가 있다면 그 호출은 사라진다(계수에는 남는다).
     ///
     /// ★되울린 유저 메시지만 그 규칙을 따르지 않는다 — **먼저 온 쪽**이 올린다★: 그쪽은 한쪽에 걸면
     /// 잃는 것이 「유저 자신이 친 말」이라 대가가 다르고, 두 방향 모두 실패 사례가 있다 — `started` 가
     /// 이 종류에 오는지는 미측정이고, `completed` 는 중단된 item 에 아예 오지 않는 것이 실측이다
     /// (TRD §2 L10). 둘째 알림은 [`Self::emitted_user_items`] 에 걸려 조용히 빠진다.
+    ///
+    /// ★분기표 자체는 [`Self::item_core`] 가 진다★ — 이 문은 봉투를 벗기기만 한다. 이력 쪽 문
+    /// ([`Self::history_item`])이 같은 표를 쓰고, 그 공유가 ADR-0203 의 「두 번째 어휘표를 만들지
+    /// 않는다」의 실물이다.
     fn item(
         &mut self,
         params: Option<&Value>,
         method_name: &str,
-        at_item_start: bool,
+        origin: ItemOrigin,
     ) -> Vec<OutputEvent> {
         let Some(n) = self.parse::<protocol::ItemNotification>(params, method_name) else {
             return Vec::new();
         };
-        let Some(kind) = n
-            .item
-            .get("type")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-        else {
+        self.item_core(&n.turn_id, &n.item, method_name, origin)
+    }
+
+    /// 이어받기 직후 페이지로 받아 온 지난 item 한 개 → 중립 이벤트 0~n 개(ADR-0203).
+    ///
+    /// ★들어오는 문이 [`OutputDecoder`] 가 아닌 유일한 자리다 — 그 예외의 범위를 정확히 적는다★:
+    ///   페이지는 **알림이 아니라 응답**이라 라인 스트림을 타고 오지 않는다(봉투를 벗긴 `data[]` 를
+    ///   통로가 직접 들고 온다). 그래서 이 문은 라인 재조립·상한·resync 규율을 **우회하는 것이 아니라
+    ///   애초에 그 규율이 걸리는 축 밖**이다 — 그 규율은 여전히 라이브 스트림 전량을 덮는다.
+    /// ★여기로 들어온 item 은 [`ItemOrigin::History`] 규칙을 받는다★ — 도구 호출을 내고(`Started` 와
+    ///   같다) 어시스턴트 본문도 낸다(`AGENT_MESSAGE_ITEM_TYPE` doc).
+    // ADR-0203
+    pub(crate) fn history_item(&mut self, turn_id: &str, item: &Value) -> Vec<OutputEvent> {
+        self.item_core(
+            turn_id,
+            item,
+            method::THREAD_ITEMS_LIST,
+            ItemOrigin::History,
+        )
+    }
+
+    /// 봉투를 벗긴 item 한 개를 옮긴다 — 위 두 문이 공유하는 **단일 분기표**.
+    fn item_core(
+        &mut self,
+        turn_id: &str,
+        item: &Value,
+        method_name: &str,
+        origin: ItemOrigin,
+    ) -> Vec<OutputEvent> {
+        let Some(kind) = item.get("type").and_then(|v| v.as_str()).map(String::from) else {
             self.observe(
                 format!("item-type:{method_name}"),
                 Observed::Malformed,
@@ -520,12 +575,38 @@ impl CodexAppServerDecoder {
             // ★버리지 않는다 — 이것이 재부착 뒤 화면을 되살리는 재료다★: 우리 쪽에는 이 대화의
             //   유저 발화를 복원할 다른 재료가 없다(입력 시점 합성 에코를 선언하지 않으므로 — 이
             //   폴더 `mod.rs` 의 그 자리 · ADR-0193).
-            return self.user_message(&n.item, method_name, at_item_start);
+            return self.user_message(item, method_name, origin != ItemOrigin::Completed);
         }
-        if at_item_start && TOOL_ITEM_TYPES.contains(&kind.as_str()) {
+        // ★이력 전용 arm — 라이브 두 갈래는 여기 안 들어온다★(사유 정본 = [`AGENT_MESSAGE_ITEM_TYPE`]).
+        if origin == ItemOrigin::History && kind == AGENT_MESSAGE_ITEM_TYPE {
+            let Some(text) = item.get("text").and_then(|v| v.as_str()) else {
+                self.observe(
+                    format!("item-text:{method_name}#{kind}"),
+                    Observed::Malformed,
+                    "어시스턴트 메시지 item 에 required `text` 가 없다",
+                );
+                return Vec::new();
+            };
+            if text.is_empty() {
+                // 빈 말풍선을 만들지 않는다 — 소비자도 빈 델타를 같은 판정으로 버린다.
+                self.observe(format!("item:{method_name}#{kind}"), Observed::Routine, "");
+                return Vec::new();
+            }
+            // ★`TextDelta` 로 내는 것은 claude 쪽 복원과 **같은 선례**다★(ADR-0079: 과거 어시스턴트
+            //   본문을 델타 하나로 싣는다). 소비자는 연속한 텍스트를 이어 붙이므로, 한 턴에 본문 item
+            //   이 여럿이어도 라이브에서 델타가 이어지는 모양과 같아진다.
+            // ★본문은 [`clip`] 만 지난다 — 마스킹하지 않는다★(사유 = `user_message_event` 의 같은 자리:
+            //   이것은 진단 문자열이 아니라 그 대화의 기록이다).
+            return vec![OutputEvent::TextDelta {
+                text: clip(text, MAX_TRANSCRIPT_CHARS),
+                turn_id: bounded_id(turn_id),
+                message_id: item.get("id").and_then(|v| v.as_str()).and_then(bounded_id),
+            }];
+        }
+        if origin != ItemOrigin::Completed && TOOL_ITEM_TYPES.contains(&kind.as_str()) {
             // ★도구 변형인데 이벤트가 안 나오면 그건 "번역 안 함" 이 아니라 결함이다★ — 아래
             //   일상 계수(debug)로 흘려보내면 필수 칸이 빠진 item 이 조용한 소음이 된다.
-            return match tool_call(&n.item, &kind, &n.turn_id) {
+            return match tool_call(item, &kind, turn_id) {
                 Some(event) => vec![event],
                 None => {
                     self.observe(
@@ -1053,6 +1134,29 @@ fn bounded_args_json(item: &Value, kind: &str) -> String {
         }
     }
     Value::Object(reduced).to_string()
+}
+
+/// 이력 한 턴을 닫는 경계 이벤트(ADR-0203).
+///
+/// ★라이브가 쓰는 [`OutputEvent::TurnEnd`] 가 **아닌** 것이 결정이다★: 그 어휘는 결말([`TurnOutcome`])을
+///   요구하는데 페이지 응답에는 지난 턴이 **어떻게** 끝났는지가 실려 오지 않는다. 남는 선택은 둘이고
+///   둘 다 나쁘다 — `Unknown` 은 정직하지만 소비자가 경계마다 「모름」 표식을 그려, 우리가 묻지도 않은
+///   것 때문에 복원된 화면이 표식으로 뒤덮인다. `Completed` 로 접는 것은 **지어낸 결말**이라 그 타입의
+///   doc 이 정면으로 금한다.
+/// ★[`OutputEvent::MessageDone`] 은 결말을 주장하지 않으면서 턴을 닫는다★ — 소비자는 이것을 구분선
+///   하나로 그린다. claude 의 복원도 같은 어휘로 닫는다(ADR-0079 — 그쪽 transcript 에도 결말 줄이 없다).
+/// ★★닫는 것 자체가 load-bearing 이다 — 없애지 말 것★★: 복원분이 진행 신호(텍스트·도구·유저)로만
+///   끝나면 소비자의 파생이 `!turnDone && items>0` 이라 **아무것도 안 보냈는데 대기 표시가 영영 돈다**
+///   (claude 쪽에서 실측된 버그 2026-08-17 · ADR-0079 의 같은 자리).
+/// ★관측(ADR-0113)과 무관하다★ — 이 이벤트는 턴 관측을 적지 않는 문으로 나간다
+///   ([`crate::output_core::OutputCore::emit_without_turn_observation`]). 그래서 이것으로 busy/idle 이
+///   부트스트랩되지 않는다.
+// ADR-0203
+pub(crate) fn history_turn_boundary(turn_id: &str) -> OutputEvent {
+    OutputEvent::MessageDone {
+        turn_id: bounded_id(turn_id),
+        message_id: None,
+    }
 }
 
 /// 상대가 만든 문자열을 로그에 실을 수 있는 모양으로 — 자격증명 마스킹 후 길이 절단.
@@ -2553,6 +2657,142 @@ mod tests {
                     "{name}: 이벤트 하나가 {weight}B — 링 상한({RING_SINGLE_EVENT_LIMIT}B)을 넘어 replay 를 비운다"
                 );
             }
+        }
+    }
+
+    // ── 이력 복원 번역(ADR-0203) ───────────────────────────────────────────────
+
+    /// 같은 item 을 세 문으로 각각 넣고 **무엇이 나오나**만 본다.
+    fn through_each_door(item: Value) -> (Vec<OutputEvent>, Vec<OutputEvent>, Vec<OutputEvent>) {
+        let params = serde_json::json!({"threadId": "th", "turnId": "tu", "item": item});
+        (
+            decode_notification(method::ITEM_STARTED, params.clone()),
+            decode_notification(method::ITEM_COMPLETED, params),
+            CodexAppServerDecoder::new().history_item("tu", &item),
+        )
+    }
+
+    /// ★★어시스턴트 본문은 **이력에서만** 옮긴다★★ — 라이브에서는 같은 본문이
+    /// `item/agentMessage/delta` 로 이미 흘러 화면에 그려졌으므로 여기서 또 내면 한 답이 두 벌 남는다.
+    /// 그런데 페이지 응답에는 그 델타가 없어서, 안 옮기면 **복원된 화면에 어시스턴트의 말이 한 줄도
+    /// 없다**(실측 표본 120 item 중 5 건이 이 변형이다).
+    #[test]
+    fn an_agent_message_item_becomes_text_only_on_the_history_door() {
+        let (started, completed, history) = through_each_door(
+            serde_json::json!({"type": "agentMessage", "id": "m1", "text": "hello"}),
+        );
+        assert!(
+            started.is_empty(),
+            "라이브가 델타와 겹쳐 두 벌을 낸다: {started:?}"
+        );
+        assert!(completed.is_empty(), "{completed:?}");
+        match history.as_slice() {
+            [OutputEvent::TextDelta {
+                text,
+                turn_id,
+                message_id,
+            }] => {
+                assert_eq!(text, "hello");
+                assert_eq!(turn_id.as_deref(), Some("tu"));
+                assert_eq!(message_id.as_deref(), Some("m1"));
+            }
+            other => panic!("어시스턴트 본문 하나가 아니다: {other:?}"),
+        }
+    }
+
+    /// ★도구 호출은 이력에서도 나온다 — 발행 축이 `started` 하나가 아니라 「`completed` 가 아닐 것」이다★.
+    /// 실측 표본에서 이 변형이 120 건 중 44 건이라, 빠지면 복원된 화면이 사실상 비어 있다.
+    #[test]
+    fn a_tool_item_is_emitted_on_the_history_door_just_like_item_started() {
+        let (started, completed, history) = through_each_door(serde_json::json!({
+            "type": "commandExecution", "id": "c1", "command": "ls"
+        }));
+        assert_eq!(started.len(), 1, "{started:?}");
+        assert!(
+            completed.is_empty(),
+            "라이브 `completed` 는 여전히 안 낸다: {completed:?}"
+        );
+        assert_eq!(history.len(), 1, "{history:?}");
+        assert!(
+            matches!(history[0], OutputEvent::ToolCall { .. })
+                && matches!(started[0], OutputEvent::ToolCall { .. }),
+            "이력과 `started` 의 산출이 갈렸다: {history:?} / {started:?}"
+        );
+    }
+
+    /// 되울린 유저 발화는 세 문 전부에서 나온다 — 이력에서는 그것이 「누가 무엇을 물었나」의 유일한 재료다.
+    #[test]
+    fn a_user_message_item_comes_through_the_history_door_too() {
+        let (_, _, history) = through_each_door(serde_json::json!({
+            "type": "userMessage", "id": "u1",
+            "content": [{"type": "text", "text": "안녕"}]
+        }));
+        match history.as_slice() {
+            [OutputEvent::Structured { kind, json }] => {
+                assert_eq!(kind, "user");
+                assert!(json.contains("\"uuid\":\"u1\""), "{json}");
+                assert!(json.contains("안녕"), "{json}");
+            }
+            other => panic!("유저 말풍선 하나가 아니다: {other:?}"),
+        }
+    }
+
+    /// ★라이브가 버리는 변형은 이력에서도 버린다★ — 추론·하위 에이전트 활동 따위에 이력 전용 arm 을
+    /// 더하면 두 화면이 서로 다른 대화를 그린다.
+    #[test]
+    fn the_history_door_drops_exactly_what_the_live_doors_drop() {
+        for kind in ["reasoning", "subAgentActivity", "contextCompaction", "plan"] {
+            let (started, completed, history) =
+                through_each_door(serde_json::json!({"type": kind, "id": "x"}));
+            assert!(started.is_empty(), "{kind}: {started:?}");
+            assert!(completed.is_empty(), "{kind}: {completed:?}");
+            assert!(history.is_empty(), "{kind}: {history:?}");
+        }
+    }
+
+    /// ★이력 이벤트 하나가 replay 링을 통째로 비우지 못한다★ — 형제 항목
+    /// (`no_translated_notification_can_produce_an_event_that_evicts_the_replay_ring`)이 알림 쪽에
+    /// 거는 같은 벽이고, 이력 문은 그 항목의 사정권 **밖**이라 여기서 따로 잰다.
+    #[test]
+    fn no_history_item_can_produce_an_event_that_evicts_the_replay_ring() {
+        let huge = "가".repeat(MAX_LINE_BYTES / 4);
+        let long_id = "i".repeat(MAX_ID_BYTES + 1);
+        let cases = [
+            serde_json::json!({"type": "agentMessage", "id": long_id, "text": huge}),
+            serde_json::json!({"type": "userMessage", "id": long_id,
+                "content": [{"type": "text", "text": huge}]}),
+            serde_json::json!({"type": "commandExecution", "id": long_id, "command": huge}),
+        ];
+        for item in cases {
+            for event in CodexAppServerDecoder::new().history_item(&long_id, &item) {
+                let weight = event_weight(&event);
+                assert!(
+                    weight <= RING_SINGLE_EVENT_LIMIT,
+                    "이력 이벤트 하나가 {weight}B — 링 상한({RING_SINGLE_EVENT_LIMIT}B)을 넘어 replay 를 비운다"
+                );
+            }
+        }
+    }
+
+    /// ★★이력 턴 경계는 결말을 **주장하지 않는다**★★ — 페이지에는 지난 턴이 어떻게 끝났는지가 실려
+    /// 오지 않으므로 `TurnEnd` 에 채울 값이 없다. `Unknown` 은 경계마다 「모름」 표식을 그리고,
+    /// `Completed` 는 지어낸 결말이다(그 타입 doc 이 금한다).
+    #[test]
+    fn a_history_turn_boundary_closes_without_claiming_an_outcome() {
+        match history_turn_boundary("tu") {
+            OutputEvent::MessageDone {
+                turn_id,
+                message_id,
+            } => {
+                assert_eq!(turn_id.as_deref(), Some("tu"));
+                assert_eq!(message_id, None);
+            }
+            other => panic!("경계가 `MessageDone` 이 아니다 — 결말을 지어내고 있다: {other:?}"),
+        }
+        // 대조 토큰이라 상한을 넘으면 자르지 않고 거른다(같은 판정 = `bounded_id`).
+        match history_turn_boundary(&"t".repeat(MAX_ID_BYTES + 1)) {
+            OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
+            other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
         }
     }
 
