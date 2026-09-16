@@ -1,7 +1,7 @@
 # ADR-0203: codex 화면 복원은 app-server 에 페이지로 요청한다 — rollout 파일을 읽지 않는다
 
-- 상태: 확정 (2026-09-15, 근거: 사용자 결정 + 실 codex app-server 0.154.0 실측 + rollout 901개 전수 스캔)
-- 관련: ADR-0079(데몬이 claude `.jsonl` 을 읽어 버퍼에 seed) · ADR-0008(추적 파일로 기능 확장 금지) · ADR-0172(스크롤백 읽기와 기능 잠그기는 등급이 다르다) · ADR-0004(백엔드 지식 격리) · `backend/mod.rs::AgentBackend::resume_transcript_events`
+- 상태: 확정 (2026-09-15, 근거: 사용자 결정 + 실 codex app-server 0.154.0 실측 + rollout 901개 전수 스캔) · 부분 폐기 by ADR-0204 (복원 이벤트가 붙는 자리)
+- 관련: ADR-0079(데몬이 claude `.jsonl` 을 읽어 버퍼에 seed) · ADR-0008(추적 파일로 기능 확장 금지) · ADR-0172(스크롤백 읽기와 기능 잠그기는 등급이 다르다) · ADR-0004(백엔드 지식 격리) · `backend/mod.rs::AgentBackend::resume_transcript_events` · Amended by ADR-0204 (복원 이벤트가 붙는 자리)
 
 ## 맥락
 
