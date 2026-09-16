@@ -3448,15 +3448,25 @@ mod tests {
     ///   그 하네스가 없고, 무엇보다 재야 하는 것이 **두 줄의 순서**다.
     #[test]
     fn the_transport_logs_the_rejection_reason_before_it_may_be_suppressed() {
+        // ★★주석을 걷고 훑는다 — 안 걷으면 **주석 한 줄이 실물 호출 행세를 한다**★★: 그 갈래는
+        //   자기가 지키는 이름을 그대로 인용하는 주석으로 덮여 있고(이 저장소의 주석 규약이다), 그중
+        //   하나가 로그 줄보다 앞에서 `deliver_link(` 를 언급하는 순간 이 항목은 **아무것도 안 재면서
+        //   초록**이 된다. 같은 결함으로 통로 쪽 순서 가드 둘이 실제로 비어 있었다.
+        //   ★그쪽 헬퍼(`writer_loop_code`)를 쓰지 못한다★ — 다른 파일의 test 모듈 안이라 여기서
+        //   닿지 않는다. 그래서 같은 걷기를 여기 한 벌 둔다(옮기려면 둘 다 아는 자리가 먼저 필요하다).
         let src = include_str!("backend/codex/transport.rs");
         let production = src.split("mod tests {").next().expect("운영 구획");
-        let failure_arm = production
+        let failure_arm: String = production
             .split("fn writer_loop(")
             .nth(1)
             .expect("`writer_loop` 본문")
             .split("Err(failure) => {")
             .nth(1)
-            .expect("핸드셰이크 실패 갈래");
+            .expect("핸드셰이크 실패 갈래")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         let logged = failure_arm
             .find("tracing::warn!(\"{}: {reason}\", failure.headline());")
