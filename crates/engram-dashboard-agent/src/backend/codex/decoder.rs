@@ -1151,10 +1151,13 @@ fn bounded_args_json(item: &Value, kind: &str) -> String {
 /// ★관측(ADR-0113)과 무관하다★ — 이 이벤트는 턴 관측을 적지 않는 문으로 나간다
 ///   ([`crate::output_core::OutputCore::emit_without_turn_observation`]). 그래서 이것으로 busy/idle 이
 ///   부트스트랩되지 않는다.
+/// ★인자가 `Option` 인 것은 **상한을 넘긴 turn id 를 이미 거른 호출자**를 받기 위해서다★ — 그 거르기는
+///   [`MAX_ID_BYTES`] 규칙 그대로이고(자르지 않고 버린다), `None` 은 「이 턴의 id 를 실을 수 없다」다.
+///   경계 자체는 그래도 선다 — id 를 못 실었다고 턴을 안 닫으면 대기 표시가 도는 쪽으로 틀린다.
 // ADR-0203
-pub(crate) fn history_turn_boundary(turn_id: &str) -> OutputEvent {
+pub(crate) fn history_turn_boundary(turn_id: Option<&str>) -> OutputEvent {
     OutputEvent::MessageDone {
-        turn_id: bounded_id(turn_id),
+        turn_id: turn_id.and_then(bounded_id),
         message_id: None,
     }
 }
@@ -2779,7 +2782,7 @@ mod tests {
     /// `Completed` 는 지어낸 결말이다(그 타입 doc 이 금한다).
     #[test]
     fn a_history_turn_boundary_closes_without_claiming_an_outcome() {
-        match history_turn_boundary("tu") {
+        match history_turn_boundary(Some("tu")) {
             OutputEvent::MessageDone {
                 turn_id,
                 message_id,
@@ -2790,7 +2793,12 @@ mod tests {
             other => panic!("경계가 `MessageDone` 이 아니다 — 결말을 지어내고 있다: {other:?}"),
         }
         // 대조 토큰이라 상한을 넘으면 자르지 않고 거른다(같은 판정 = `bounded_id`).
-        match history_turn_boundary(&"t".repeat(MAX_ID_BYTES + 1)) {
+        match history_turn_boundary(Some(&"t".repeat(MAX_ID_BYTES + 1))) {
+            OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
+            other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
+        }
+        // id 를 못 실어도 경계는 선다 — 안 닫으면 대기 표시가 영영 돈다.
+        match history_turn_boundary(None) {
             OutputEvent::MessageDone { turn_id, .. } => assert_eq!(turn_id, None),
             other => panic!("경계가 `MessageDone` 이 아니다: {other:?}"),
         }

@@ -229,6 +229,75 @@ impl OutputCore {
         self.emit_inner(event, false);
     }
 
+    /// 같은 문으로 **여러 건을 한 덩이로** 내보낸다 — ★그 사이에 다른 emit 이 끼어들 수 없다★.
+    ///
+    /// ★존재 이유 = 「끼어들 수 없다」 하나다★: 낱개로 부르면 각 호출이 replay 락을 따로 잡으므로, 그
+    ///   틈마다 pump 의 라이브 emit 이 seq 를 가져갈 수 있다. 복원된 대화 **한가운데**에 새 줄이 박히는
+    ///   것이 그 결과다(ADR-0203 의 이력 복원이 이 문을 쓰는 이유). 한 락 구간 안에서 seq 를 연달아
+    ///   발급하면 그 덩이는 링에서 반드시 연속이다.
+    /// ★그래도 **덩이 앞뒤**는 막지 못한다★ — 이 덩이보다 먼저 도착한 라이브 줄은 여전히 앞에 선다.
+    ///   이 문이 파는 것은 「이력이 쪼개지지 않는다」이지 「이력이 맨 앞이다」가 아니다.
+    /// ★락 규율은 [`Self::emit`] 과 같다(ADR-0006)★ — 발급·push 는 replay 락 안에서, fanout 은 락을 놓고
+    ///   subscribers 스냅샷으로. 두 락을 동시에 쥐지 않는다.
+    /// ★관측·상태·finalize 를 건드리지 않는 것도 낱개 문과 같다★(ADR-0005/0113/0127).
+    // ADR-0203
+    pub(crate) fn emit_batch_without_turn_observation(&self, events: Vec<OutputEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        // 1. 발급 + push 를 **한 번의** replay 락 안에서 — 이 구간이 곧 「끼어들 수 없다」의 실물이다.
+        let numbered: Vec<(u64, OutputEvent)> = {
+            let mut replay = self.replay.lock().expect("replay poisoned");
+            events
+                .into_iter()
+                .map(|event| {
+                    let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+                    let cost_bytes = estimate_cost_bytes(&event);
+                    replay.push(StoredOutput {
+                        seq,
+                        event: event.clone(),
+                        cost_bytes,
+                    });
+                    (seq, event)
+                })
+                .collect()
+        };
+
+        // 2. fanout 은 락을 놓고 — 죽은 sink 는 낱개 문과 같은 방식으로 한 번에 걷어낸다.
+        let sinks = self
+            .subscribers
+            .lock()
+            .expect("subscribers poisoned")
+            .clone();
+        let mut dead = Vec::new();
+        for sink in sinks {
+            for (seq, event) in &numbered {
+                let payload = match event {
+                    OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
+                    other => OutputPayload::Event(other),
+                };
+                if sink
+                    .send(OutputFrame {
+                        agent_id: self.id,
+                        epoch: self.epoch,
+                        seq: *seq,
+                        payload,
+                    })
+                    .is_err()
+                {
+                    dead.push(sink.sink_id());
+                    break;
+                }
+            }
+        }
+        if !dead.is_empty() {
+            self.subscribers
+                .lock()
+                .expect("subscribers poisoned")
+                .retain(|s| !dead.contains(&s.sink_id()));
+        }
+    }
+
     fn emit_inner(&self, event: OutputEvent, observe_turn: bool) {
         let cost_bytes = estimate_cost_bytes(&event);
 
@@ -1190,6 +1259,95 @@ mod tests {
         // 라이브 emit 부터 관측이 시작된다(seed 가 관측을 막아 버리는 것도 아니다).
         core.emit(delta());
         assert!(turns.is_in_turn(id, 0));
+    }
+
+    /// 덩이 문의 기본 계약 — 링에도 들어가고, 붙어 있는 구독자에게도 **순서대로** 나가며, seq 가 이어진다.
+    #[test]
+    fn a_batch_lands_in_the_ring_and_fans_out_in_order() {
+        let core = new_core(MockStatusSink::new());
+        let sink = MockSink::new();
+        core.subscribe(sink.clone());
+
+        core.emit_batch_without_turn_observation(vec![
+            OutputEvent::TerminalBytes(b"one".to_vec()),
+            OutputEvent::TerminalBytes(b"two".to_vec()),
+            OutputEvent::TerminalBytes(b"three".to_vec()),
+        ]);
+
+        assert_eq!(sink.seqs(), vec![0, 1, 2]);
+        // 늦게 붙는 구독자도 링에서 같은 셋을 받는다.
+        let late = MockSink::new();
+        core.subscribe(late.clone());
+        assert_eq!(late.seqs(), vec![0, 1, 2]);
+    }
+
+    /// 빈 덩이는 seq 를 쓰지 않는다 — 안 그러면 복원할 것이 없는 세션마다 번호가 하나씩 밀린다.
+    #[test]
+    fn an_empty_batch_consumes_no_seq() {
+        let core = new_core(MockStatusSink::new());
+        core.emit_batch_without_turn_observation(Vec::new());
+        let sink = MockSink::new();
+        core.subscribe(sink.clone());
+        core.emit(OutputEvent::TerminalBytes(b"first".to_vec()));
+        assert_eq!(sink.seqs(), vec![0]);
+    }
+
+    /// 덩이 문도 낱개 문과 같이 **관측을 적지 않는다** — 지나간 기록이 새 화신을 「턴 중」으로 만들면
+    /// 그 턴의 종료가 영영 오지 않는다(ADR-0113/0127 · `seed` 가 지키던 그 규율).
+    #[test]
+    fn a_batch_never_bootstraps_turn_observation() {
+        let sink = MockStatusSink::new();
+        let (core, turns, id) = core_with_turns(sink.clone(), 0);
+        core.emit_batch_without_turn_observation(vec![delta(), message_done(), delta()]);
+        assert_eq!(turns.get(id, 0), None, "덩이 문이 관측을 적었다");
+        assert!(sink.turn_ends().is_empty(), "덩이 문이 통지를 냈다");
+    }
+
+    /// ★★덩이 **안으로** 다른 emit 이 끼어들 수 없다★★ — 이것이 이 문의 존재 이유다(ADR-0203).
+    /// 낱개로 부르는 구현이면 경쟁 스레드가 중간 seq 를 가져가 복원된 대화가 쪼개진다.
+    #[test]
+    fn nothing_can_interleave_inside_a_batch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let core = Arc::new(new_core(MockStatusSink::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let racer = {
+            let core = core.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    core.emit(OutputEvent::TerminalBytes(b"live".to_vec()));
+                }
+            })
+        };
+
+        let batch: Vec<OutputEvent> = (0..200)
+            .map(|i| OutputEvent::Structured {
+                kind: "history".to_string(),
+                json: format!("{i}"),
+            })
+            .collect();
+        core.emit_batch_without_turn_observation(batch);
+        stop.store(true, Ordering::Relaxed);
+        racer.join().unwrap();
+
+        // 링에서 덩이 항목들의 seq 를 뽑아 **연속**인지 본다.
+        let stored = core.replay.lock().unwrap().snapshot();
+        let seqs: Vec<u64> = stored
+            .iter()
+            .filter(
+                |c| matches!(&c.event, OutputEvent::Structured { kind, .. } if kind == "history"),
+            )
+            .map(|c| c.seq)
+            .collect();
+        assert_eq!(seqs.len(), 200, "덩이가 링에서 잘렸다");
+        for pair in seqs.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 1,
+                "덩이 한가운데에 다른 줄이 끼어들었다: {seqs:?}"
+            );
+        }
     }
 
     #[test]

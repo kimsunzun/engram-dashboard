@@ -42,6 +42,18 @@
 //!   - **이력 복원은 통째로 best-effort 다** — 거절·시한·줄 상한 어느 것이든 결말은 「거기까지만
 //!     복원한다」이고 연결은 그대로 선다([`hydrate_history`]). 그래서 **얼마나 복원됐는지는 로그에만
 //!     남고 화면에는 표시가 없다** — 사람은 짧아진 화면을 「원래 이만큼이었다」로 읽는다.
+//!   - ★**복원된 이력 「앞」에 라이브 줄이 설 수 있다 — 그리고 그것을 막는 것은 구조가 아니라 실측이다**★:
+//!     리더는 핸드셰이크 중에도 돌고 있어서, 상대가 그 창에서 알림을 흘리면 그 줄이 이력보다 먼저 링에
+//!     들어간다. ★이력이 **쪼개지는** 쪽은 닫혀 있다★ —
+//!     [`OutputCore::emit_batch_without_turn_observation`] 이 한 락 구간에 싣는다. 남은 것은 「앞에
+//!     선다」 하나다.
+//!     ★봉쇄가 무엇인지 정확히 적는다 — 그것이 이 항목의 요점이다★: ADR-0203 이 이어받기 뒤 `item/*`
+//!     알림을 **0 건**으로 실측했고(0.154.0), 턴을 여는 자리가 [`Link::Ready`] 를 요구해 우리 쪽 턴도
+//!     아직 없다. ★즉 **벤더 행동 관측**이지 구조적 보장이 아니다★ — codex 는 스스로 업데이트하고 이
+//!     프로토콜에는 버전 칸이 없어(이 헤더의 다른 항목이 그 사실을 이미 말한다) 그 0 건이 조용히 바뀔 수
+//!     있다. 바뀌면 증상은 「복원된 대화 위에 낯선 줄 하나」이고, 닫으려면 리더가 게이트 전까지 emit 을
+//!     **유계로 붙들어야** 한다 — 그 큐의 상한과 넘쳤을 때의 처분(조용한 유실)을 먼저 정해야 하므로
+//!     별건이다.
 //!   - 연결이 서지 못하면 큐에 선 입력이 사라진다. **몇 건이 사라졌는지는 로그와 화면 둘 다에 남는다** —
 //!     실패 결말의 `detail` 이 그 건수를 싣는다([`writer_loop`] 의 그 갈래). ★한때 여기 「로그에만 남는다
 //!     (화면에 오르는 것은 "핸드셰이크 실패" 뿐이다)」로 적혀 있던 것은 낡은 서술이다★ — 건수는 실려 있고,
@@ -946,10 +958,17 @@ fn collect_history(
 ) -> Vec<OutputEvent> {
     let mut cursor = entry_cursor;
     let mut decoder = CodexAppServerDecoder::new();
-    // 최신 → 과거 순으로 쌓는다. 칸 하나 = item 하나가 낸 이벤트들 + 그 item 이 속한 turn.
+    // 최신 → 과거 순으로 쌓는다. 칸 하나 = item 하나가 낸 이벤트들 + 그 item 이 속한 turn 의 **대조 키**.
     // ★아무것도 못 옮긴 item 은 칸을 차지하지 않는다★ — 그래야 턴 경계가 **내용이 있는 턴 사이**에만
     //   서고, 전부 버려진 이력이 경계만 남은 목록이 되지 않는다.
-    let mut newest_first: Vec<(String, Vec<OutputEvent>)> = Vec::new();
+    // ★키가 `Option<String>` 인 것은 **메모리 상한**이다★: `turnId` 에는 와이어 상한이 없어서, 상대가
+    //   긴 id 를 단 item 을 페이지마다 보내면 여기 쌓인 원본 문자열만으로 수백 MiB 가 된다(줄 상한은
+    //   페이지 **한 장**에만 걸리고 이 누적에는 안 걸린다). 그래서 담기 전에 [`MAX_TURN_ID_BYTES`] 로
+    //   **자르지 않고 거른다** — 자른 둘이 같아지면 서로 다른 턴이 한 턴으로 접히기 때문이고, 이 판정은
+    //   이벤트 안의 id 에 이미 걸려 있는 규칙과 같다(`decoder` 의 `MAX_ID_BYTES`).
+    //   ★대가 = 상한을 넘긴 id 를 단 턴들은 서로 구별되지 않아 경계가 하나로 접힌다★ — 화면상의 손실이고
+    //   내용은 전부 남는다.
+    let mut newest_first: Vec<(Option<String>, Vec<OutputEvent>)> = Vec::new();
     let mut cost = 0usize;
     let mut count = 0usize;
     let mut pages = 0usize;
@@ -973,6 +992,10 @@ fn collect_history(
             Err(reason) => {
                 // ★`warn` 이 아니라 `info` 다★ — 이것은 결함이 아니라 「여기까지만 복원했다」는 사실이고,
                 //   연결은 이 뒤로 정상으로 선다. 사유는 그래도 남긴다(상류 드리프트의 첫 신호가 여기다).
+                // ★★이 갈래가 「연결이 죽었다」를 **삼킨다는 것을 알고 둔다**★★ — 리더가 EOF 를 보면
+                //   대기표가 오류로 깨어나 여기로 오는데, 그 둘을 문자열로 가를 수는 없다. 그래서 그
+                //   판정은 여기가 아니라 게이트를 여는 자리가 진다([`open_gate`]) — 거기서 상태를 직접
+                //   보므로 문자열 추측이 필요 없다.
                 tracing::info!(
                     page = pages,
                     "codex 이력 복원을 여기서 멈춘다 — 화면만 짧아지고 연결은 그대로다: {}",
@@ -987,18 +1010,47 @@ fn collect_history(
             if translated.is_empty() {
                 continue;
             }
-            count += translated.len();
-            cost += translated.iter().map(estimate_cost_bytes).sum::<usize>();
-            newest_first.push((entry.turn_id, translated));
-            if cost >= REPLAY_MAX_BYTES || count >= REPLAY_MAX_EVENTS {
+            let key = (entry.turn_id.len() <= MAX_TURN_ID_BYTES).then_some(entry.turn_id);
+            // ★★천장 판정은 **넣기 전에**, 그리고 **합성할 경계까지 세어서** 한다★★:
+            //   ① 넣고 나서 재면 그 한 건만큼 늘 넘긴다. ② 경계를 안 세면 턴이 많은 이력에서 실제 이벤트
+            //   수가 여기서 센 것의 최대 두 배가 되어(항목마다 턴이 갈리는 극단) 링이 착지하자마자 절반을
+            //   버린다 — 천장을 링 상수에 묶어 둔 이유가 바로 그 어긋남을 없애려던 것이었다.
+            // ★경계는 **새 run 마다 하나**다★ — 시간순으로 되돌렸을 때 run 하나당 닫는 경계가 하나이므로,
+            //   역순으로 걸으며 run 이 바뀔 때마다 하나씩 세면 총수가 정확히 맞는다.
+            let new_run = newest_first.last().map(|(k, _)| k) != Some(&key);
+            let boundary = new_run.then(|| history_turn_boundary(key.as_deref()));
+            let add_events = translated.len() + usize::from(boundary.is_some());
+            let add_cost = translated.iter().map(estimate_cost_bytes).sum::<usize>()
+                + boundary.as_ref().map(estimate_cost_bytes).unwrap_or(0);
+            // ★첫 항목은 무조건 받는다★ — 한 건이 홀로 천장을 넘어도 빈 화면보다는 그 한 건이 낫고,
+            //   링도 같은 규칙으로 최신 1 건을 지킨다(`Ring::push` 의 `len() > 1` 가드).
+            if !newest_first.is_empty()
+                && (cost + add_cost > REPLAY_MAX_BYTES || count + add_events > REPLAY_MAX_EVENTS)
+            {
                 hit_ceiling = true;
                 break;
             }
+            count += add_events;
+            cost += add_cost;
+            newest_first.push((key, translated));
         }
         if hit_ceiling {
             break;
         }
         match next {
+            // ★★같은 커서를 다시 주면 멈춘다★★ — 그렇지 않으면 같은 페이지를 페이지 상한까지 다시 받아
+            //   **같은 대화가 여러 벌** 실리고, 그 중복이 진짜 이력을 링에서 밀어낸다. 상한은 루프를
+            //   묶지만 이 오염은 못 막는다.
+            //   ★막는 것은 **바로 되풀이되는 커서 하나**뿐이다★ — 둘 이상을 도는 순환은 여전히 페이지
+            //   상한과 예산이 묶을 뿐 탐지되지 않는다. 본 커서를 전부 기억하는 쪽은 상대가 길이를 정하는
+            //   문자열을 256 개까지 드는 것이라 위 `turnId` 와 같은 축의 비용을 새로 만든다.
+            Some(next) if next == cursor => {
+                tracing::warn!(
+                    page = pages,
+                    "codex 이력 복원: 상대가 같은 커서를 되돌려 줬다 — 중복을 싣지 않고 멈춘다"
+                );
+                break;
+            }
             Some(next) => cursor = next,
             None => break,
         }
@@ -1007,23 +1059,28 @@ fn collect_history(
     // ★여기서 한 번 뒤집어 시간순으로 되돌린다★ — 링은 넣은 순서가 곧 화면 순서다.
     newest_first.reverse();
     let items = newest_first.len();
-    let mut events: Vec<OutputEvent> = Vec::with_capacity(count + 1);
-    let mut open_turn: Option<String> = None;
-    for (turn_id, translated) in newest_first {
-        if open_turn.as_deref() != Some(turn_id.as_str()) {
+    let mut events: Vec<OutputEvent> = Vec::with_capacity(count);
+    let mut open_turn: Option<Option<String>> = None;
+    for (key, translated) in newest_first {
+        if open_turn.as_ref() != Some(&key) {
             if let Some(previous) = open_turn.take() {
-                events.push(history_turn_boundary(&previous));
+                events.push(history_turn_boundary(previous.as_deref()));
             }
-            open_turn = Some(turn_id);
+            open_turn = Some(key);
         }
         events.extend(translated);
     }
     // ★마지막 턴도 반드시 닫는다★ — 안 닫으면 복원된 슬롯의 대기 표시가 영영 돈다
     //   ([`history_turn_boundary`] 가 그 인과의 정본).
     if let Some(last) = open_turn {
-        events.push(history_turn_boundary(&last));
+        events.push(history_turn_boundary(last.as_deref()));
     }
 
+    debug_assert_eq!(
+        events.len(),
+        count,
+        "천장 회계가 실제 이벤트 수와 갈렸다 — 경계를 안 센 회귀"
+    );
     tracing::info!(
         pages,
         items,
@@ -1033,6 +1090,34 @@ fn collect_history(
         "codex 이력 복원"
     );
     events
+}
+
+/// 게이트를 연다 — ★**이 화신의 연결이 아직 우리 것일 때만**★.
+///
+/// ★★없으면 죽은 통로가 `Ready` 로 선다 — 그것이 이 함수의 존재 이유다★★: 핸드셰이크가 성공한 뒤
+///   이력을 받는 동안 상대가 stdout 을 닫으면 [`ReaderExit`] 의 `Drop` 이 `closed`/[`Link::Down`] 을
+///   세우고 대기표를 오류로 깨운다. 이력 쪽은 그 오류를 **부분 성공**으로 처리하도록 되어 있어(그것이
+///   옳다 — 페이지 하나가 안 온 것과 연결이 끊긴 것은 다른 사건이다), 그대로 두면 그 다음 줄이 방금
+///   내려간 상태를 `Ready` 로 덮어쓰고 **이미 죽은 것을 활성화 성공으로 배달한다.**
+/// ★그래서 가르는 축은 「무엇이 실패했나」가 아니라 **「지금 연결이 서 있나」**다★ — 상태를 직접 보므로
+///   오류 문자열을 해석할 필요가 없다. 페이지가 안 왔을 뿐이면 이 검사는 통과한다.
+/// ★`Err` 의 문구는 상태가 들고 있던 사유 그대로다★ — 그 사유는 stdout 의 JSON-RPC 오류나 스트림 종료라
+///   콘솔 꼬리에도 stderr 꼬리에도 없다(`LinkResolution::Failed` 의 doc 이 그 인과의 정본).
+// ADR-0203
+// ADR-0201
+fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
+    let (lock, cv) = &**state;
+    let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if let Link::Down(reason) = &s.link {
+        return Err(reason.clone());
+    }
+    if s.closed {
+        return Err("연결이 닫혔다".to_string());
+    }
+    s.thread_id = Some(thread_id);
+    s.link = Link::Ready;
+    cv.notify_all();
+    Ok(())
 }
 
 enum Job {
@@ -1368,20 +1453,33 @@ fn writer_loop(
             // ★그러면서 관측·상태·finalize 는 건드리지 않는다★ — `seed` 가 지키던 그 규율 그대로다
             //   (ADR-0005 · ADR-0113 · ADR-0127). 지나간 기록을 진행 신호로 먹이면 그 턴의 종료가
             //   영영 오지 않아 우편이 30 분 fail-open 까지 막힌다.
-            for event in hydrate_history(&stdin, &state, &pending, &next_id, &opened, link_deadline)
-            {
-                core.emit_without_turn_observation(event);
+            // ★**한 덩이로** 올린다★ — 낱개로 부르면 그 틈마다 리더의 라이브 줄이 seq 를 가져가
+            //   복원된 대화 한가운데에 새 줄이 박힌다([`OutputCore::emit_batch_without_turn_observation`]).
+            core.emit_batch_without_turn_observation(hydrate_history(
+                &stdin,
+                &state,
+                &pending,
+                &next_id,
+                &opened,
+                link_deadline,
+            ));
+            // ★★게이트는 **연결이 아직 서 있을 때만** 열린다★★ — 이력을 받는 동안 스트림이 끝났으면
+            //   여기서 `Ready` 를 세우는 것이 곧 「죽은 것을 활성화 성공으로 배달」이다([`open_gate`]).
+            match open_gate(&state, opened.thread_id) {
+                // ★게이트를 연 **직후** 배달한다 — 락을 쥔 채로는 부르지 않는다★(ADR-0006: 상태 락 보유
+                //   중 외부 호출 금지. 이 포트는 조립점 코드를 부르고 그쪽은 채널을 만진다).
+                Ok(()) => deliver_link(&shutdown, &link_sink, LinkResolution::Ready),
+                Err(reason) => {
+                    // ★여기서 화면에 오류·경계를 더하지 않는다★ — 스트림이 끝났다는 것은 pump 가 곧
+                    //   종점 전이를 낸다는 뜻이고(ADR-0005 단독 주체), 그 경로가 이미 화면을 닫는다.
+                    //   사용자 kill 이면 이 배달은 `deliver_link` 가 억제한다(그 함수의 래치).
+                    tracing::warn!(
+                        "codex app-server: 이력을 받는 동안 연결이 끝났다 — 게이트를 열지 않는다: {}",
+                        sanitize(&reason, LOG_STRING_LIMIT)
+                    );
+                    deliver_link(&shutdown, &link_sink, LinkResolution::Failed { reason });
+                }
             }
-            {
-                let (lock, cv) = &*state;
-                let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-                s.thread_id = Some(opened.thread_id);
-                s.link = Link::Ready;
-                cv.notify_all();
-            }
-            // ★게이트를 연 **직후** 배달한다 — 락을 쥔 채로는 부르지 않는다★(ADR-0006: 상태 락 보유 중
-            //   외부 호출 금지. 이 포트는 조립점 코드를 부르고 그쪽은 채널을 만진다).
-            deliver_link(&shutdown, &link_sink, LinkResolution::Ready);
         }
         Err(failure) => {
             let HandshakeFailure {
@@ -4622,25 +4720,45 @@ mod tests {
     /// 선례·같은 사유 = [`tests::the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`].
     #[test]
     fn the_session_id_is_recorded_before_the_gate_opens() {
-        let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
-        let body = production
-            .split("fn writer_loop(")
-            .nth(1)
-            .expect("writer_loop 본문");
+        let body = writer_loop_code();
 
         let recorded = body
             .find("record_session_id(")
             .expect("`record_session_id(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+        // ★앵커가 `Link::Ready` 에서 `open_gate(` 로 옮겼다★ — 게이트를 세우는 줄이 그 함수 안으로
+        //   들어가면서, 이 본문에 남은 `Link::Ready` 는 **주석뿐**이 됐다. 그대로 두면 이 항목이 주석
+        //   위치를 재며 조용히 통과한다(실제로 그렇게 통과했다).
         let gate_open = body
-            .find("Link::Ready")
-            .expect("`Link::Ready` 가 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+            .find("open_gate(")
+            .expect("`open_gate(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
 
         assert!(
             recorded < gate_open,
             "기록 호출이 게이트(`Link::Ready`)보다 뒤에 선다 — 기록되기 전에 턴이 나갈 수 있고, 그러면 한 \
              동사 포트가 보장하는 것이 없어진다(둘째 동사가 필요해진다)"
         );
+    }
+
+    /// `writer_loop` 본문에서 **주석을 걷어낸** 코드만 — 순서·문 선택을 소스에서 재는 항목들의 공용 렌즈.
+    ///
+    /// ★★주석을 걷는 것이 이 헬퍼의 존재 이유다★★: 이 파일의 주석은 자기가 지키는 이름을 그대로
+    ///   인용하므로(그것이 이 저장소의 주석 규약이다), 날것으로 훑으면 **주석 한 줄이 실물 호출 행세를
+    ///   한다.** 실제로 그렇게 통과한 적이 있다 — 게이트를 세우는 줄이 `open_gate` 안으로 들어간 뒤에도
+    ///   `Link::Ready` 를 찾던 두 항목이 본문에 남은 **주석**을 재며 초록이었다.
+    fn writer_loop_code() -> String {
+        let src = include_str!("transport.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        production
+            .split("fn writer_loop(")
+            .nth(1)
+            .expect("writer_loop 본문")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
     }
 
     // ── 이력 복원 페이징(ADR-0203) ─────────────────────────────────────────────
@@ -4815,13 +4933,120 @@ mod tests {
         });
 
         let weight: usize = events.iter().map(estimate_cost_bytes).sum();
+        // ★★넘기 **전에** 멈춘다 — 「넘고 나서 멈춘다」로 되돌리지 말 것★★: 넣고 나서 재면 언제나 한
+        //   건만큼 넘기고, 그 한 건은 링이 착지하자마자 버린다. 천장을 링 상수에 묶어 둔 이유가 그
+        //   어긋남을 없애려던 것이다.
         assert!(
-            weight >= REPLAY_MAX_BYTES,
-            "링을 채우기 전에 멈췄다: {weight}B"
+            weight <= REPLAY_MAX_BYTES,
+            "천장을 넘겨 받았다: {weight}B > {REPLAY_MAX_BYTES}B"
+        );
+        // 그러면서 **거의** 채운다 — 한 건(64KiB)만큼의 여유 안에 들어야 한다.
+        assert!(
+            weight + 64 * 1024 >= REPLAY_MAX_BYTES,
+            "링을 한참 못 채우고 멈췄다: {weight}B"
         );
         assert_eq!(
             calls, 2,
             "링이 찬 뒤로도 페이지를 더 물었다(왕복 낭비) — {calls}회"
+        );
+    }
+
+    /// ★★천장 회계가 **합성한 경계까지** 세야 한다★★ — 안 세면 항목마다 턴이 갈리는 이력에서 실제
+    /// 이벤트 수가 센 것의 두 배가 되고, 링(4096 건)이 착지하자마자 절반을 버린다. 그 절반은 **가장
+    /// 오래된 쪽**이라, 복원된 대화의 머리가 통째로 잘린다.
+    #[test]
+    fn the_ceiling_counts_the_boundaries_it_synthesizes() {
+        let mut n = 0usize;
+        let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
+            let data = (0..HISTORY_PAGE_LIMIT)
+                .map(|_| {
+                    n += 1;
+                    // 항목마다 턴이 다르다 = 항목마다 경계가 하나씩 더 붙는 최악.
+                    entry(&format!("t{n}"), agent_message(&format!("m{n}"), "x"))
+                })
+                .collect();
+            Ok(page(data, Some(&format!("c{n}"))))
+        });
+
+        assert!(
+            events.len() <= REPLAY_MAX_EVENTS,
+            "링 건수 천장을 넘겨 받았다: {} > {REPLAY_MAX_EVENTS}",
+            events.len()
+        );
+        // 경계를 안 세던 시절이면 여기서 항목 수가 천장까지 갔을 것이다 — 절반 언저리여야 맞다.
+        let texts = events
+            .iter()
+            .filter(|e| matches!(e, OutputEvent::TextDelta { .. }))
+            .count();
+        let closes = events
+            .iter()
+            .filter(|e| matches!(e, OutputEvent::MessageDone { .. }))
+            .count();
+        assert_eq!(texts, closes, "턴마다 경계 하나 — 회계의 전제가 깨졌다");
+        assert!(
+            events.len() > REPLAY_MAX_EVENTS - 2 * HISTORY_PAGE_LIMIT as usize,
+            "천장을 한참 못 채우고 멈췄다: {}",
+            events.len()
+        );
+    }
+
+    /// ★★`turnId` 에는 와이어 상한이 없다 — 담기 전에 거른다★★: 줄 상한은 페이지 **한 장**에만 걸리고
+    /// 여기 쌓이는 누적에는 안 걸려서, 긴 id 를 단 item 이 페이지마다 오면 원본 문자열만으로 수백 MiB 가
+    /// 된다(25 건 × 160KiB 는 한 장에서 4MiB 를 안 넘는데, 건수 천장까지 모으면 ~650MiB 다).
+    /// ★자르지 않고 **거른다**★ — 자른 둘이 같아지면 서로 다른 턴이 한 턴으로 접힌다(`MAX_ID_BYTES` 의
+    /// 같은 판정). 대가는 상한을 넘긴 id 들끼리 **구별되지 않아 경계가 하나로 접히는 것**이고, 이 항목이
+    /// 재는 것이 바로 그 접힘이다 — 거르지 않으면 서로 다른 키로 남아 경계가 둘이 된다.
+    #[test]
+    fn an_oversized_turn_id_is_filtered_before_it_is_retained() {
+        let huge_a = "a".repeat(MAX_TURN_ID_BYTES + 1);
+        let huge_b = "b".repeat(MAX_TURN_ID_BYTES + 1);
+        let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
+            Ok(page(
+                vec![
+                    entry(&huge_b, agent_message("m2", "later")),
+                    entry(&huge_a, agent_message("m1", "earlier")),
+                ],
+                None,
+            ))
+        });
+
+        let closes: Vec<Option<String>> = events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::MessageDone { turn_id, .. } => Some(turn_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            closes,
+            vec![None],
+            "상한 넘긴 turn id 가 대조 키로 그대로 남았다 — 원본 문자열이 누적된다: {events:?}"
+        );
+        assert_eq!(
+            texts(&events),
+            vec!["earlier", "later"],
+            "내용은 전부 남는다"
+        );
+    }
+
+    /// ★★같은 커서를 되돌려 주는 상대에게 같은 페이지를 다시 받지 않는다★★ — 받으면 같은 대화가 여러
+    /// 벌 실리고 그 중복이 진짜 이력을 링에서 밀어낸다. 페이지 상한은 루프를 묶지만 이 오염은 못 막는다.
+    #[test]
+    fn a_repeating_cursor_stops_instead_of_duplicating_history() {
+        let mut calls = 0usize;
+        let events = collect_history("th", "c".to_string(), far_deadline(), |_, _| {
+            calls += 1;
+            Ok(page(
+                vec![entry("t1", agent_message("m1", "once"))],
+                // 첫 답이 준 커서를 그 뒤로 계속 되돌려 준다.
+                Some("same"),
+            ))
+        });
+        assert_eq!(calls, 2, "되풀이되는 커서를 알아보지 못했다 — {calls}회");
+        assert_eq!(
+            texts(&events),
+            vec!["once", "once"],
+            "첫 커서와 둘째 커서는 서로 다르므로 두 장까지는 정상이다: {events:?}"
         );
     }
 
@@ -4837,11 +5062,72 @@ mod tests {
                     "t1",
                     serde_json::json!({"type": "reasoning", "id": "r"}),
                 )],
-                Some("more"),
+                // ★매번 **다른** 커서다★ — 같은 값을 주면 되풀이 가드가 먼저 끊어, 이 항목이 재려는
+                //   상한이 아니라 그 가드를 재게 된다.
+                Some(&format!("c{calls}")),
             ))
         });
         assert_eq!(calls, MAX_HISTORY_PAGES);
         assert!(events.is_empty());
+    }
+
+    /// ★★연결이 이력을 받는 도중에 끝났으면 게이트를 열지 않는다★★ — 이력 쪽은 그 오류를 「페이지가
+    /// 안 왔다」로 처리하므로(그것이 옳다), 게이트가 상태를 안 보면 **이미 죽은 통로가 `Ready` 로 서서
+    /// 활성화 성공으로 배달된다.** 그 뒤엔 매니저가 시체를 산 에이전트로 들고 간다.
+    #[test]
+    fn a_gate_does_not_open_over_a_link_that_died_while_hydrating() {
+        let state = shared();
+        with_state(&state, |s| {
+            s.link = Link::Down("스트림이 끝났다".to_string());
+            s.closed = true;
+        });
+        let verdict = open_gate(&state, "th".to_string());
+        assert_eq!(verdict, Err("스트림이 끝났다".to_string()));
+        with_state(&state, |s| {
+            assert!(matches!(s.link, Link::Down(_)), "내려간 연결을 덮어썼다");
+            assert!(s.thread_id.is_none(), "죽은 통로에 thread id 를 심었다");
+        });
+    }
+
+    /// 배달 채널이 아니라 **닫힘 표식만** 선 경우도 같다 — 사유 문구가 없을 뿐 결론은 같다.
+    #[test]
+    fn a_gate_does_not_open_over_a_closed_link() {
+        let state = shared();
+        with_state(&state, |s| s.closed = true);
+        assert!(open_gate(&state, "th".to_string()).is_err());
+        with_state(&state, |s| {
+            assert!(!matches!(s.link, Link::Ready));
+        });
+    }
+
+    /// 멀쩡한 연결에서는 그대로 열리고 손잡이가 실린다 — 위 둘의 반대편.
+    #[test]
+    fn a_healthy_link_opens_the_gate_and_carries_the_thread_id() {
+        let state = shared();
+        assert_eq!(open_gate(&state, "th-9".to_string()), Ok(()));
+        with_state(&state, |s| {
+            assert!(matches!(s.link, Link::Ready));
+            assert_eq!(s.thread_id.as_deref(), Some("th-9"));
+        });
+    }
+
+    /// ★한 왕복이 예산을 다 써 버리면 **그 다음은 묻지 않는다**★ — 이 루프가 공유 예산을 실제로 강제하는
+    /// 자리가 여기다. 한 요청 **안**의 초과분(응답 대기 슬라이스 하나, 500ms)은 이 루프가 못 막고,
+    /// 그것이 `HANDSHAKE_BUDGET` 위에 얹히는 유일한 초과다(10s + 0.5s — 백스톱 15s 아래).
+    #[test]
+    fn a_page_that_burns_the_budget_is_the_last_one() {
+        let mut calls = 0usize;
+        let deadline = Instant::now() + Duration::from_millis(80);
+        let events = collect_history("th", "c0".to_string(), deadline, |_, _| {
+            calls += 1;
+            std::thread::sleep(Duration::from_millis(160));
+            Ok(page(
+                vec![entry("t1", agent_message("m1", "only"))],
+                Some("c1"),
+            ))
+        });
+        assert_eq!(calls, 1, "예산이 끝났는데 또 물었다 — {calls}회");
+        assert_eq!(texts(&events), vec!["only"], "받아 둔 것은 그대로 싣는다");
     }
 
     /// ★예산이 이미 없으면 **한 번도 묻지 않는다**★ — 핸드셰이크가 예산을 다 쓰고 겨우 성공한 경우가
@@ -4891,19 +5177,15 @@ mod tests {
     /// 형제 = [`tests::the_session_id_is_recorded_before_the_gate_opens`].
     #[test]
     fn the_history_is_emitted_before_the_gate_opens() {
-        let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
-        let body = production
-            .split("fn writer_loop(")
-            .nth(1)
-            .expect("writer_loop 본문");
+        let body = writer_loop_code();
 
         let hydrated = body
             .find("hydrate_history(")
             .expect("`hydrate_history(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+        // 앵커를 `open_gate(` 로 두는 사유 = 형제 항목의 같은 자리.
         let gate_open = body
-            .find("Link::Ready")
-            .expect("`Link::Ready` 가 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
+            .find("open_gate(")
+            .expect("`open_gate(` 호출이 writer_loop 에 없다 — 이 항목의 전제가 낡았다");
         assert!(
             hydrated < gate_open,
             "이력 복원이 게이트보다 뒤에 선다 — 복원된 대화가 새 답 뒤에 붙는다"
@@ -4913,9 +5195,12 @@ mod tests {
         //   뒤라, `OutputCore::seed`(링에 넣기만 하고 fanout 없음)를 쓰면 그 사이 붙은 구독자가 빈 링을
         //   replay 한 뒤라서 지난 화면을 **영영 못 본다**. ADR-0079 가 `seed` 로 충분했던 것은 그쪽이
         //   명부 등록 **전**이었기 때문이고, 이 경로는 그 자리로 당길 수가 없다.
+        // ★요구하는 것은 **덩이 문**이다★ — 낱개 문으로 바꾸면 fanout 은 유지되지만 호출 사이마다
+        //   리더의 라이브 줄이 seq 를 가져가 복원된 대화 한가운데가 쪼개진다
+        //   ([`crate::output_core::OutputCore::emit_batch_without_turn_observation`]).
         assert!(
-            body.contains("emit_without_turn_observation"),
-            "이력이 fanout 없는 문으로 들어간다 — 이미 붙은 구독자가 지난 화면을 못 본다"
+            body.contains("emit_batch_without_turn_observation"),
+            "이력이 낱개 문으로 들어간다 — fanout 은 되지만 덩이 한가운데가 쪼개진다"
         );
         assert!(
             !body.contains("core.seed("),
@@ -4928,17 +5213,7 @@ mod tests {
     /// 그 계약의 실물은 「`writer_loop` 이 시계를 한 번만 잡아 둘에게 같은 값을 넘긴다」이다.
     #[test]
     fn the_handshake_and_the_history_share_one_budget() {
-        let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
-        let body = production
-            .split("fn writer_loop(")
-            .nth(1)
-            .expect("writer_loop 본문");
-        let code: String = body
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let code = writer_loop_code();
 
         // ★호출 모양이 아니라 **이름의 등장 횟수**로 잰다★ — 인자 목록의 줄바꿈은 `cargo fmt` 이
         //   정하므로, 호출 문자열을 통째로 대조하면 서식만 바뀌어도 이 항목이 깨진다(실제로 깨졌다).
