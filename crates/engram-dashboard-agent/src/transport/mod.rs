@@ -7,11 +7,13 @@
 //! tauri import 0.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::output_core::OutputCore;
 use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps};
 
 pub mod api;
+pub mod input_queue;
 pub mod pty;
 pub mod stdio;
 
@@ -42,7 +44,31 @@ pub trait AgentTransport: Send + Sync {
     /// 출력 pump/stream 기동 → core 연결. spawn 직후 1회 호출.
     fn start(&self, core: Arc<OutputCore>);
 
+    /// ★수령 의미는 **「받았다」이지 「갔다」가 아니다**★: `Ok` = 전량을 순서까지 확정해 받았다,
+    ///   `Err` = 받지 않았다(부분 수용을 `Ok` 로 축소 보고하지 않는다). 오늘 구현체 셋이 전부 유계 큐에
+    ///   담고 전담 라이터가 빼서 쓰므로, **이 호출은 OS 쓰기를 기다리지 않는다** — 그것이 이 seam 의
+    ///   요점이다(자식이 stdin 을 안 읽어도 부른 쪽이 함께 매달리지 않는다).
+    /// ★그 대가 = 받아 둔 뒤에 실패한 쓰기는 이 호출자에게 돌아갈 길이 없다★. 그 실패가 나타나는 곳은
+    ///   **다음 호출의 `Err`** 와 로그, 그리고 대개 곧 이어지는 종점 전이다. 계약·상한·처분의 정본은
+    ///   [`input_queue`] 모듈 헤더(콘솔 계열)와 codex 통로의 `send_input` doc 이다.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError>;
+
+    /// ★이 호출 시점까지 받아 둔 입력이 **실제로 나갈 때까지** 기다린다★ — `Ok` = 나갔다.
+    ///
+    /// ★왜 있나★: [`AgentTransport::send_input`] 의 `Ok` 는 「받았다」이지 「갔다」가 아니다. 그 둘의
+    ///   차이를 **배달 영수증에 실으면 안 되는** 호출자가 하나 있다 — 우편 배달이다(ADR-0088 이 가르려는
+    ///   "전송 실패" 와 "모델이 무시" 가 뒤집힌다). 그 호출자만 이 동사를 지나 `Ok` 의 뜻을 되돌린다.
+    /// ★★키 입력 경로는 이것을 부르지 않는다 — 부르면 안 된다★★: 거기서 기다리면 큐가 없애려던 바로 그
+    ///   head-of-line blocking 이 되돌아온다. 이 동사를 새 호출부에 붙이기 전에 그 호출부가 **이미
+    ///   블로킹을 감수하는 경로인지** 먼저 답할 것.
+    /// ★기본 구현이 `Unsupported` 인 것은 의도다 — `Ok` 로 위장하지 않는다★: 쓰기 완료를 확인할 수단이
+    ///   없는 통로가 `Ok` 를 돌려주면 그것이 곧 위 뒤집힘이다. 확인 수단이 없다고 **말하는** 쪽이 정직하고,
+    ///   호출자는 그 신호를 보고 「예전과 같은 수준의 앎」으로 다룰 수 있다(그 판단은 호출부가 적는다).
+    fn flush_input(&self, _timeout: Duration) -> Result<(), PtyError> {
+        Err(PtyError::Unsupported(
+            "flush_input (이 통로는 쓰기 완료를 확인할 수단이 없다)".into(),
+        ))
+    }
 
     /// cols/rows의 보존(atomic 저장)은 AgentSession 책임.
     fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError>;

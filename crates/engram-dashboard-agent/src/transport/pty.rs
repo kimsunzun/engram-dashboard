@@ -11,6 +11,7 @@ use std::time::Duration;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::output_core::OutputCore;
+use crate::transport::input_queue::{self, InputQueue};
 use crate::transport::AgentTransport;
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
@@ -26,7 +27,16 @@ pub struct PtyTransport {
     /// master 는 watcher(자연 종료 감지)와 shutdown(kill) 둘 다 drop(take)할 수 있어 Arc 공유한다.
     /// 둘 다 `take()` 라 멱등 — 먼저 take 한 쪽이 ConPTY 를 닫고, 나중 쪽은 None 을 본다.
     master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    /// ★라이터 스레드가 **소유**한다 — `start()` 에서 take 해 move 하고 그 뒤로 여기는 `None` 이다★.
+    ///
+    /// ★왜 공유(`Arc<Mutex<…>>`)가 아니라 소유인가★: `portable_pty` 의 writer 는 **한 번만 take 할 수
+    ///   있고**(트레이트 doc: "It is invalid to take the writer more than once" — unix 는 `bail!`, Windows
+    ///   ConPTY 는 `Option::take()`) `Send` 지만 `Sync` 가 아니다. 즉 이 핸들은 **한 스레드의 것**이라야
+    ///   하고, 그 스레드가 라이터다. stdio 쪽이 `Arc<Mutex<Option<ChildStdin>>>` 로 공유하는 것과 갈리는
+    ///   이유가 이것이다(그쪽은 `shutdown()` 의 `try_lock` 정리 규율이 핸들 공유를 요구한다).
+    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    /// 아직 못 나간 입력. `send_input` 은 여기 넣고 **즉시** 돌아온다(모듈 = `transport::input_queue`).
+    input: Arc<InputQueue>,
     child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     shutdown: Arc<AtomicBool>,
     /// start()에서 take해 pump로 move. None이면 이미 시작됨.
@@ -84,7 +94,8 @@ impl PtyTransport {
 
         let transport = PtyTransport {
             master: Arc::new(Mutex::new(Some(pair.master))),
-            writer: Mutex::new(writer),
+            writer: Mutex::new(Some(writer)),
+            input: Arc::new(InputQueue::new()),
             child: Arc::new(Mutex::new(child)),
             shutdown: Arc::new(AtomicBool::new(false)),
             reader: Mutex::new(Some(reader)),
@@ -128,6 +139,20 @@ fn build_pty_command(spec: &CommandSpec) -> CommandBuilder {
     cmd
 }
 
+/// pump 가 **어떤 길로 끝나든** 입력 큐를 닫아 라이터 스레드를 거둔다.
+///
+/// ★`Drop` 인 것이 요점이다★ — EOF 로 정상 종료하든 pump 본체가 panic 하든(그 갈래는 `catch_unwind` 가
+///   흡수한다) 이 자리는 반드시 지난다. codex 통로의 `ReaderExit` 와 같은 규율이고, 같은 이유로 필요하다:
+///   ★빠뜨리면 **자연 종료한 에이전트마다 라이터 스레드가 영영 남는다**★. `shutdown()` 은 reaper 경로에서
+///   불리지 않으므로 그 스레드를 깨울 다른 자리가 없고, 그 스레드는 큐와 PTY writer 핸들을 문 채 남는다.
+struct WriterStop(Arc<InputQueue>);
+
+impl Drop for WriterStop {
+    fn drop(&mut self) {
+        self.0.close("PTY 스트림이 끝났다 — 더 보낼 곳이 없다");
+    }
+}
+
 /// B-2. pump 클로저에서 분리해 둔 이유: 이 매핑이 load-bearing(panic→Failed 전이)이라 실제 PTY
 /// child 없이 단위테스트로 직접 검증할 수 있게 한다.
 fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
@@ -152,10 +177,42 @@ impl AgentTransport for PtyTransport {
             None => return,
         };
 
+        // ── 입력 라이터 스레드 ──
+        // ★아무도 join 하지 않는다★ — `core` 는 pump 핸들 하나만 들고(그 자리를 넓히는 것은 코어 변경이다),
+        //   `shutdown()` 안에서 기다리는 것은 ADR-0001 의 2 동사 계약 위반이다. 이 스레드는 큐가 닫히면
+        //   스스로 끝나고(`WriterStop` 의 `Drop` 과 `shutdown()` 이 그 둘), 매달린 `write_all` 이 있으면
+        //   kill+master drop 이 그것을 에러로 푼다. ★그래서 이 스레드가 kill 인과를 **지연시킬 수 없다**★.
+        // ★`start()` 에서 띄우는 이유(= `open()` 이 아니라)★: codex 라이터와 같은 자리에 둬 「통로를 만든
+        //   것」과 「통로를 돌리기 시작한 것」을 가른다. `start()` 전에 온 입력은 큐에 그대로 서 있다가
+        //   여기서 흘러 나간다 — 부르는 쪽이 준비 여부를 알 필요가 없다(ADR-0190 규율 1).
+        if let Some(mut writer) = self.writer.lock().expect("writer poisoned").take() {
+            let queue = self.input.clone();
+            // ★라이터가 남기는 경고에 귀속을 붙이려면 여기서 id 를 넘겨야 한다★ — 그 안에서는
+            //   `core` 를 들 수 없다(스레드로 move 되는 것은 큐와 writer 뿐이다). 아래 spawn 실패
+            //   갈래가 이미 `agent = %core.id()` 로 남기는 것과 같은 필드를 쓴다.
+            let writer_agent = core.id();
+            let spawn_result = std::thread::Builder::new()
+                .name("engram-pty-writer".into())
+                .spawn(move || {
+                    input_queue::drain(&queue, "PTY", writer_agent, |bytes| {
+                        writer.write_all(bytes)?;
+                        writer.flush()
+                    });
+                });
+            if let Err(e) = spawn_result {
+                // ★조용히 두지 않는다★: 라이터가 없으면 `send_input` 이 계속 `Ok` 를 돌려주면서 바이트는
+                //   영영 안 나간다 — 조용한 유실 그 자체다. 큐를 닫아 **그 순간부터 정직하게 거절**한다.
+                let reason = format!("PTY 입력 라이터 스레드 기동 실패: {e}");
+                tracing::warn!(agent = %core.id(), "{reason}");
+                self.input.close(&reason);
+            }
+        }
+
         let (done_tx, done_rx) = mpsc::channel();
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
+        let writer_stop = WriterStop(self.input.clone());
 
         // ── 자연 종료 감지 watcher(콘솔 전용 — 이 detection 은 PtyTransport 안에만 둔다) ──
         // 문제: Windows ConPTY 는 master 가 살아있는 한 자식이 스스로 exit 해도 reader 에 EOF 를
@@ -202,6 +259,9 @@ impl AgentTransport for PtyTransport {
         drop(watcher);
 
         let handle = std::thread::spawn(move || {
+            // ★pump 가 끝나면 라이터도 끝난다 — 이 guard 가 그 한 몸을 만든다(`WriterStop` doc).★
+            //   `catch_unwind` 바깥에 둬 정상·panic 두 갈래 모두에서 drop 이 지나게 한다.
+            let _writer_stop = writer_stop;
             // ── B-2: pump 본체를 catch_unwind로 감싼다 ──
             // pump 스레드가 panic하면(emit/read/try_wait 어디서든) 그 agent 출력이 영구 silent
             // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 catch_unwind로 잡아, panic이면
@@ -279,19 +339,17 @@ impl AgentTransport for PtyTransport {
         core.attach_pump(handle, done_rx);
     }
 
+    /// 큐에 넣고 **즉시** 돌아온다 — OS 쓰기는 전담 라이터 스레드의 일이다.
+    ///
+    /// ★계약·상한·「받아 둔 뒤의 실패」의 정본은 [`crate::transport::input_queue`] 모듈 헤더★. 여기
+    ///   되풀어 적지 않는다.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
-        match input {
-            InputEvent::Raw(bytes) => {
-                let mut writer = self.writer.lock().expect("writer poisoned");
-                writer
-                    .write_all(&bytes)
-                    .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-                writer
-                    .flush()
-                    .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-                Ok(())
-            }
-        }
+        let InputEvent::Raw(bytes) = input;
+        self.input.push(bytes)
+    }
+
+    fn flush_input(&self, timeout: Duration) -> Result<(), PtyError> {
+        self.input.wait_drained(timeout)
     }
 
     fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
@@ -308,6 +366,15 @@ impl AgentTransport for PtyTransport {
         Ok(())
     }
 
+    /// ★0x03 은 **같은 FIFO 에 선다** — 큐에 이미 든 입력을 추월하지 않는다★.
+    ///
+    /// ★그것이 결정이다(현상 유지)★: 큐가 생기기 전에도 인터럽트는 `send_input` 과 **같은 writer 락**을
+    ///   지나 도착 순서대로 나갔다. 큐를 들이면서 그 순서를 바꾸면 이 변경이 성능 변경이 아니라 **동작
+    ///   변경**이 된다 — 그 판단은 사용자 몫이라 여기서 하지 않는다.
+    /// ★codex 통로는 다르다 — 그쪽을 근거로 여기를 고치지 말 것★: 거기서는 인터럽트가 별도 `outbox` 로
+    ///   가고 라이터가 그것을 입력 턴보다 **먼저** 집는다. 그럴 근거가 그쪽에만 있다 — 거기서는 거절
+    ///   응답이 큐에 선 유저 턴 뒤에서 기다리면 상대가 그 요청의 답을 영영 못 받는다(제어 줄과 데이터가
+    ///   같은 JSON-RPC 통로를 공유한다). PTY 에는 그 사실이 없다.
     fn interrupt(&self) -> Result<(), PtyError> {
         self.send_input(InputEvent::Raw(vec![0x03]))
     }
@@ -316,6 +383,11 @@ impl AgentTransport for PtyTransport {
     fn shutdown(&self) {
         // 1. shutdown 신호 — pump가 종료 시 Killed로 전이하도록.
         self.shutdown.store(true, Ordering::Release);
+
+        // 1b. 입력 큐를 닫는다 — 라이터 스레드가 이것을 보고 끝난다. ★여기서 잡는 것은 큐의 락뿐이라
+        //     매달릴 수 없다★(블로킹 쓰기 중인 라이터는 그 락을 놓고 있다 — `InputQueue::close` doc).
+        //     ★대가 = 아직 못 나간 입력은 사라진다★: 이 자식은 다음 줄에서 죽으므로 마저 써도 실패한다.
+        self.input.close("에이전트를 종료했다");
 
         // 2~3. wait 는 reap(좀비 방지). 두 번째 호출은 이미 죽었으니 Err — 무시(멱등).
         {
@@ -569,5 +641,133 @@ mod tests {
             "B 는 영향 없이 정상 Exited"
         );
         assert_eq!(sink_b.statuses().len(), 1, "B status 변경 1건(정상)");
+    }
+}
+
+/// ★`shutdown()` 이 **매달린 ConPTY 쓰기를 푼다**는 것을 실측으로 못 박는 자리★.
+///
+/// ★왜 이 질문이 중요했나★: `portable-pty 0.8.1` 의 `take_writer()` 는 `Inner.writable` 을
+///   `Option::take` 하므로(win/conpty.rs) **master drop 이 그 쓰기 핸들을 닫지 않는다** — 핸들은 라이터
+///   스레드의 것이다. 아무도 그 스레드를 join 하지 않고 시한도 없으니, 만약 `shutdown()` 이 매달린 쓰기를
+///   풀지 못한다면 **죽은 에이전트마다 스레드 하나와 ConPTY 핸들 하나가 영구히 샌다.** 남은 후보는
+///   `ClosePseudoConsole` 이 conhost 쪽 읽기 끝을 닫아 주느냐 하나뿐이었고 그것은 OS 비공개 동작이라
+///   추론이 아니라 재 보는 수밖에 없었다.
+/// ★실측 결론(2026-09-18, 4/4 재현)★: **푼다.** 2MiB 를 문 채 매달린 쓰기가 `shutdown()` 이후
+///   14–17ms 만에 `ERROR_BROKEN_PIPE`(os error 109)로 풀리고 라이터가 스스로 끝난다. 그래서 누수 우려는
+///   닫혔고, 백스톱(시한·강제 핸들 닫기)을 만들지 않는다. ★이 항목이 그 결론의 회귀망이다★ — 깨지면
+///   위 누수가 되살아난 것이므로 백스톱 논의를 다시 열어야 한다.
+///
+/// ★왜 별도 모듈인가★: 운영 `start()` 는 쓰기 클로저를 자기가 만들므로 밖에서 계측을 끼울 수 없다.
+///   대신 `writer` 를 **먼저** 꺼내 계측 클로저로 감싸 우리가 라이터를 띄우고, 그 뒤 `start()` 를 부른다
+///   — `start()` 는 `writer` 가 이미 `None` 이라 라이터 spawn 만 건너뛰고 watcher·pump 는 그대로 세우므로
+///   `shutdown()` 이 재는 인과(kill → Job terminate → master drop)는 운영과 동일하다.
+#[cfg(all(test, windows))]
+mod conpty_wedge {
+    use super::*;
+    use crate::output_core::TurnWiring;
+    use crate::transport::input_queue::INPUT_QUEUE_MAX_BYTES;
+    use crate::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
+    use std::sync::atomic::AtomicBool;
+    use std::time::Instant;
+
+    struct NoopStatusSink;
+    impl StatusSink for NoopStatusSink {
+        fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+        fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+    }
+
+    #[test]
+    fn shutdown_unwedges_a_blocked_conpty_write() {
+        // ping 은 콘솔 입력을 읽지 않는다 — ConPTY 입력 버퍼가 차면 우리 쪽 write 가 매달린다.
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec![
+                "/c".into(),
+                "ping".into(),
+                "-n".into(),
+                "60".into(),
+                "127.0.0.1".into(),
+            ],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, _pid) = PtyTransport::open(&spec, 80, 24).expect("open");
+
+        // ★운영보다 **먼저** 꺼낸다★ — 이 한 줄이 계측을 가능하게 하고, 그 대가로 start() 의 라이터
+        //   spawn 이 건너뛰어진다(위 모듈 doc).
+        let mut writer = transport
+            .writer
+            .lock()
+            .expect("writer poisoned")
+            .take()
+            .expect("open 직후엔 writer 가 있다");
+
+        let in_write = Arc::new(AtomicBool::new(false));
+        let drain_done = Arc::new(AtomicBool::new(false));
+        let outcome: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let queue = transport.input.clone();
+        let w_flag = in_write.clone();
+        let w_done = drain_done.clone();
+        let w_out = outcome.clone();
+        std::thread::Builder::new()
+            .name("engram-pty-writer-instrumented".into())
+            .spawn(move || {
+                input_queue::drain(&queue, "PTY", AgentId::nil(), |bytes| {
+                    w_flag.store(true, Ordering::Release);
+                    let r = writer.write_all(bytes).and_then(|()| writer.flush());
+                    w_flag.store(false, Ordering::Release);
+                    w_out.lock().unwrap().push(match &r {
+                        Ok(()) => format!("write ok ({} bytes)", bytes.len()),
+                        Err(e) => format!("write err: {e}"),
+                    });
+                    r
+                });
+                w_done.store(true, Ordering::Release);
+            })
+            .expect("계측 라이터 spawn");
+
+        let core = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            Arc::new(NoopStatusSink) as Arc<dyn StatusSink>,
+            TurnWiring::detached(),
+        ));
+        transport.start(core.clone());
+
+        transport
+            .send_input(InputEvent::Raw(vec![b'x'; INPUT_QUEUE_MAX_BYTES]))
+            .expect("상한 이내");
+
+        // ① 실제로 매달렸나 — 이것이 참이어야 아래 판정이 공허하지 않다.
+        let enter_deadline = Instant::now() + Duration::from_secs(5);
+        while !in_write.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < enter_deadline,
+                "라이터가 5s 안에 write 에 진입조차 못했다 — 실험이 성립하지 않는다"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(
+            in_write.load(Ordering::Acquire) && !drain_done.load(Ordering::Acquire),
+            "★공허한 통과★ — {INPUT_QUEUE_MAX_BYTES} 바이트가 매달리지 않고 그냥 나갔다. 이 크기로는              wedge 가 만들어지지 않으므로 아래 판정이 아무것도 재지 못한다. 기록: {:?}",
+            outcome.lock().unwrap()
+        );
+
+        // ② shutdown 이 그것을 푸는가 — 실측 14–17ms.
+        let t0 = Instant::now();
+        transport.shutdown();
+        let deadline = t0 + Duration::from_secs(5);
+        while !drain_done.load(Ordering::Acquire) {
+            assert!(
+                Instant::now() < deadline,
+                "★shutdown 이 매달린 write 를 5s 안에 풀지 못했다★ — 죽은 에이전트마다 라이터 스레드와                  ConPTY 쓰기 핸들이 샌다(in_write={}). 백스톱 논의를 다시 열 것. 기록: {:?}",
+                in_write.load(Ordering::Acquire),
+                outcome.lock().unwrap()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        core.join_pump(Duration::from_secs(5));
     }
 }

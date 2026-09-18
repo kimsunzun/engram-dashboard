@@ -9,6 +9,11 @@
 //! - **연결당 단일 writer**: SplitSink 는 동시 write 불가. 그래서 모든 출력 프레임을 연결당 단일
 //!   `mpsc::Sender<Frame>`(conn_tx)에 넣고, write_task 한 곳만 SinkHalf 에 write 한다.
 //!   SubscribeAck→replay→live 의 FIFO 순서가 이 단일 큐로 보장된다.
+//! - **연결당 수신 큐(읽기 ≠ 처리)**: 읽기 루프는 프레임을 디코드해 `Inbound` 큐에 넣고 곧바로 다음
+//!   프레임을 읽는다. 핸들러 호출은 그 큐의 **단일** 소비자(`dispatch_task`)가 도착 순서대로 한다.
+//!   둘을 한 줄로 묶어 두면 명령 하나의 처리 시간이 곧 그 연결 전체의 정지 시간이 된다(소켓
+//!   head-of-line blocking). 순서가 뜻을 갖는 명령들은 소비자가 하나라는 성질로 그대로 지켜진다 —
+//!   오래 걸리는 명령을 그 줄에서 떼는 판단은 위층 몫이다(`frame_port::ConnectionHandler` 계약).
 //! - **try_send vs await 경계**: 위층 sink 가 pump 스레드에서 부르는 `FrameSink::try_send` 는 절대
 //!   block 금지. async 문맥의 `FrameSink::send` 는 await 허용(.send().await).
 //! - **out-of-band 종료 신호(close_signal)**: conn_tx 가 full 이면 큐 안 마커(`Frame::Close`)도
@@ -29,7 +34,7 @@ use crate::auth::AuthFrame;
 
 use crate::frame_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameError, FrameFanout,
-    FrameSink,
+    FrameSink, Saturated,
 };
 
 use futures_util::future::BoxFuture;
@@ -40,11 +45,81 @@ use tokio_tungstenite::tungstenite::handshake::server::{
     Callback, ErrorResponse, Request, Response,
 };
 use tokio_tungstenite::tungstenite::http::StatusCode;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Bytes, Message, Utf8Bytes};
 
 /// 연결당 송신 큐 용량. ReplayBuffer.max_events(4096) + control_slack(512) = 4608.
 /// replay 전체가 들어가도 control 여유가 남게 한다(output_core.rs 불변식과 정합).
 const CONN_TX_CAP: usize = 4608;
+
+/// 연결당 **수신** 도착순 줄의 **칸 수** — 읽기 루프가 핸들러의 일을 기다리지 않고 다음 프레임을
+/// 읽게 하는 여유. 메모리 축은 이 값이 아니라 [`CONN_RX_MAX_BYTES`] 가 진다(그 doc 이 회계의 정본).
+///
+/// ★이 큐는 backlog 저장소가 아니라 **버스트 흡수기**다★: 소비자(`dispatch_task`)가 한 번에 붙드는
+///   것은 도착 순서가 뜻을 갖는 프레임 **하나**뿐이고, 긴 일은 위층이 이 줄 밖으로 떼어 낸다
+///   (`frame_port::ConnectionHandler` 의 「도착 순서」 계약). 그래서 replay 전량을 담아야 하는
+///   [`CONN_TX_CAP`] 과 달리 큰 값이 필요하지 않다 — 두 값을 같은 축으로 견주지 말 것.
+/// ★★가득 차도 **읽기 루프는 서지 않는다** — 그 한 프레임의 처분을 위층에 묻고 계속 읽는다★★
+///   ([`ConnectionHandler::on_inbound_saturated`]). ★한때 여기 적혀 있던 「가득 차면 읽기 루프가
+///   기다린다」는 **틀린 설계였다**★: TCP 는 스트림이라 기다리는 동안 **그 뒤 프레임은 소켓에서
+///   꺼내지지도 않는다**. 그러면 위층이 「굶으면 안 된다」고 고른 프레임([`Saturated::Bypass`])이
+///   막힌 줄 뒤에서 굶고, 이 배치가 없애려던 바로 그 증상이 다른 경로로 되돌아온다.
+///   ㆍ**그래도 조용히 버리지는 않는다**: 처분을 위층에 되물어 [`Saturated::Refused`] 를 받는다는 것은
+///     **위층이 이미 답장을 냈다**는 뜻이다(포트 계약의 의무 2). 그 답장조차 못 냈을 때의 처분은
+///     [`Saturated::Unanswered`] 가 따로 갖는다 — 그 자리에서만 연결을 끝낸다.
+///   ㆍ**그 밖에는 끊지도 않는다**: 송신 큐([`ConnFrameSink::try_send`])가 포화에서 연결을 끊는 것은
+///     그쪽 호출자가 **답장을 만들 수 없는** 동기 경로이기 때문이다(비대칭의 정본 =
+///     `frame_port::FrameSink`). 여기서는 위층이 거절을 말로 할 수 있으므로 연결을 죽일 이유가 없다.
+/// ★그래서 이 값이 재는 것★ = 「소비자가 막힌 동안 **손실 없이** 받아 둘 프레임 **개수**」. 둘 중
+///   먼저 걸리는 쪽이 포화다 — 칸이 다 차거나, 바이트 예산이 다 차거나.
+/// ★소비자가 멀쩡하면 이 값은 보이지도 않는다★: 줄에 남는 것은 await 지점이 없는 짧은 프레임들뿐이라
+///   (긴 것은 위층이 떼어 낸다) 정상 운용에서 64 칸이 차는 일이 없다. 차 있다는 것은 **소비자가
+///   막혔다**는 신호이고, 그 상태에서 옳은 답은 기다리는 것이 아니라 건너뛸 것을 통과시키는 것이다.
+// ADR-0206
+const CONN_RX_CAP: usize = 64;
+
+/// 도착순 줄이 붙들 수 있는 **페이로드 바이트** 예산 — [`CONN_RX_CAP`] 과 **함께** 포화를 정한다.
+///
+/// ★왜 칸 수만으로는 모자란가★: 한 칸에 드는 것은 tungstenite 가 준 페이로드 핸들이라 **칸마다 크기가
+///   다르다**. 칸 수만 세면 이 줄의 실제 천장이 `CONN_RX_CAP × (한 프레임의 상한)` 이 되는데, 그
+///   상한은 이 crate 가 정한 적이 없는 **tungstenite 기본값 `max_message_size` = 64 MiB** 다
+///   (업그레이드에 `WebSocketConfig` 를 넘기지 않는다 — `handle_connection` 의 `accept_hdr_async`).
+///   즉 64 × 64 MiB = **4 GiB** 였다. ★한때 여기 적혀 있던 「프레임 하나의 상한은 이 상수의 관심사가
+///   아니다」는 그 곱을 아무도 세지 않게 만든 문장이다★ — 회계는 둘 중 하나가 반드시 져야 한다.
+/// ★판정은 **더하기 전 물높이**로 한다★: 이미 든 바이트가 이 값 이상이면 포화로 본다. 그래서 빈 줄에
+///   오는 프레임은 **크기와 무관하게 언제나 한 장 받는다** — 크다는 이유만으로 정당한 명령이 거절되는
+///   일이 없다. 대가로 천장이 「예산 + 프레임 하나」가 된다(= 16 MiB + max_message_size).
+/// ★남는 항 — 정직하게 적는다★: 위 곱의 둘째 항(프레임 하나의 상한)을 좁히려면 업그레이드에
+///   `WebSocketConfig` 를 넘겨야 하는데, 그것은 **받아 주는 프레임의 크기를 바꾸는 동작 변경**이라
+///   별건이다. 여기서는 개수 축만 닫는다.
+/// ★값의 근거★: 이 줄에 서는 것은 짧은 제어 프레임들이고 큰 것은 어쩌다 한 장이다 — 16 MiB 면 그
+///   「어쩌다 한 장」이 여러 번 겹쳐도 남고, 정상 버스트는 이 값을 볼 일이 없다.
+const CONN_RX_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// 도착순 줄을 건너뛴 프레임([`Saturated::Bypass`])이 서는 줄의 용량.
+///
+/// ★작은 이유★: 이 줄에 드는 것은 「막힌 줄을 풀려는 것」뿐이라 정상 운용에서 **한 칸도 안 쓴다**.
+///   8 칸이 차 있다는 것은 그것을 여덟 번 보냈는데 하나도 안 끝났다는 뜻 — 그 경로 자체가 막힌
+///   상태이고, 그때는 더 받아 봐야 같은 일을 여덟 번 더 줄 세울 뿐이다.
+/// ★여기서는 기다린다(위 줄과 다르다)★: 이 줄이 찼을 때 읽기를 멈추면 굶는 것은 **도착순 줄로 갈
+///   프레임**이고, 그것들은 어차피 거절되던 참이다. 즉 이 자리의 대기는 지켜야 할 것을 굶기지 않는다.
+/// ★바이트 예산이 여기엔 **걸리지 않는다**★: 위층이 「굶으면 안 된다」고 고른 프레임을 예산으로
+///   거절하면 이 줄의 존재 이유가 사라진다. 그래서 이 줄의 천장은 칸 수 그대로이고, 그 값은
+///   8 × max_message_size 다([`CONN_RX_MAX_BYTES`] 가 적은 둘째 항과 같은 항). 정상 운용에서 이 줄이
+///   비어 있다는 성질이 그 천장을 실효 0 으로 만든다 — 보장이 아니라 관측이므로 그대로 적어 둔다.
+const CONN_BYPASS_CAP: usize = 8;
+
+/// 연결 정리에서 우선 줄이 **받아 둔 것을 비울** 때까지 기다리는 유예([`finish_bypass_lane`]).
+///
+/// ★이 값이 정확성을 지지는 **않는다**★ — 정확성은 「기다린다」 자체가 지고, 이 값은 그 기다림이
+///   무한이 되지 않게 하는 상한일 뿐이다. 유예를 넘기면 옛 동작(abort)으로 떨어지므로, 이 상수가
+///   틀려도 **이전보다 나쁠 수는 없다**.
+/// ★크기의 근거★: 이 줄의 한 건은 위층에서 「막힌 것을 끝내는」 동작이고, 그런 동작은 대상이 죽기를
+///   동기로 기다리는 구간을 갖는다(오늘 그 구간의 상한은 위층의 5초 join 이다). 10초면 진행 중 한 건
+///   + 다음 한 건이 끝나고, 그보다 더 밀려 있다면 그 경로 자체가 막힌 상태라 더 기다려도 같은 일을
+///   줄 세울 뿐이다([`CONN_BYPASS_CAP`] 의 「8칸이 차 있다는 것은」과 같은 판단).
+/// ★이 유예 동안 무엇이 붙들리나★ = 그 **연결 하나의 정리**뿐이다. 소켓은 이미 끝났고, accept 루프도
+///   다른 연결도 이 대기에 걸리지 않는다.
+const BYPASS_DRAIN_GRACE: Duration = Duration::from_secs(10);
 
 const AUTH_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -390,13 +465,42 @@ pub async fn handle_connection(
     let keepalive_base = tokio::time::Instant::now();
     let last_recv = Arc::new(AtomicU64::new(0));
 
-    let mut read_handle = tokio::spawn(read_task(
+    // ★수신 큐 = 읽기 행과 처리 행의 경계★: 읽기는 소켓에서 꺼내 여기 넣기만 하고, 핸들러 호출은
+    //   [`dispatch_task`] 가 도착 순서대로 진다. 용량과 포화 처분의 근거는 [`CONN_RX_CAP`].
+    let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+    // ★칸 수와 **함께** 포화를 정하는 바이트 예산의 물높이★ — 근거 정본 = [`CONN_RX_MAX_BYTES`].
+    let rx_bytes: RxBytes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // ★막힌 줄 뒤에서 굶으면 안 되는 프레임을 위한 두 번째 줄★ — 왜 별도 용량·별도 소비자여야
+    //   하는지는 [`CONN_BYPASS_CAP`] 과 [`bypass_task`] 가 각각 갖는다.
+    let (bypass_tx, bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
+
+    let read_handle = tokio::spawn(read_task(
         stream_half,
-        frames,
+        inbound_tx,
+        bypass_tx,
+        rx_bytes.clone(),
+        frames.clone(),
         handler.clone(),
         conn_id,
         keepalive_base,
         last_recv.clone(),
+    ));
+
+    let bypass_handle = tokio::spawn(bypass_task(
+        bypass_rx,
+        frames.clone(),
+        handler.clone(),
+        conn_id,
+    ));
+
+    // ★프레임 출구의 강참조가 read_task 에서 이 task 로 옮겨 갔다★ — `the_losing_task_is_aborted_not_detached`
+    //   의 관측이 그 사실 위에 서 있다(그 테스트 주석).
+    let mut dispatch_handle = tokio::spawn(dispatch_task(
+        inbound_rx,
+        rx_bytes,
+        frames,
+        handler.clone(),
+        conn_id,
     ));
 
     let mut write_handle = tokio::spawn(write_task(
@@ -417,14 +521,35 @@ pub async fn handle_connection(
     //    스스로 끝나지만, 그건 "모든 Sender<Frame> 사본이 함께 죽는다" 는 조건부다 — 구독 기록 누락
     //    (아래 on_disconnect 경쟁)으로 사본이 살아남으면 자기종료가 성립하지 않는다. 전수 열거와 실측
     //    범위는 그 테스트 주석에 있다.
+    // ★★task 는 셋인데 select 대상이 **둘**인 것은 의도다 — read_task 는 여기 안 든다★★:
+    //    읽기 루프가 끝나는 것(클라 close·EOF·수신 오류)은 「입력이 끝났다」는 뜻이지 「이 연결을 그
+    //    자리에서 끊으라」가 아니다. 끝나면 수신 큐의 **유일한 송신단**이 드롭되므로 dispatch_task 가
+    //    남은 것을 처리한 **뒤** 스스로 끝나고, 그 종료를 아래 첫 갈래가 잡는다. read 를 여기 넣어 즉시
+    //    abort 하면 「명령 한 장 보내고 곧바로 소켓을 닫는」 클라의 마지막 명령이 처리 전에 잘린다 —
+    //    읽기와 처리가 한 줄이던 HEAD 에서는 그 명령이 **항상** 끝난 뒤에야 close frame 을 읽었으므로
+    //    그건 회귀다.
+    //    ★대가 = 핸들러가 영영 반환하지 않으면 이 연결은 정리되지 않는다★. HEAD 도 같았다(그때는 읽기
+    //    루프가 `on_text` 안에 파킹된 채 남았다) — 이 배치가 새로 만든 위험이 아니다.
+    //    ★우선 줄(bypass_task)도 select 대상이 아니다★ — 그것이 끝나는 것은 read 가 끝났다는 뜻일
+    //    뿐이고(자기 송신단이 read 에 있다), 연결을 끊을 사유가 아니다. 그쪽이 낸 종료 의사는
+    //    `Frame::Close` 로 write 줄을 타고 아래 둘째 갈래로 돌아온다(그 task 주석).
+    //    ★★우선 줄은 **abort 하지 않는다 — 비운다**★★: 그 줄에 든 프레임은 위층이 「굶으면 안 된다」고
+    //    골라 **받아 준** 것이다. 여기서 abort 하면 받아 놓고 안 하는 것이 되어, 이 줄을 둔 이유가
+    //    통째로 무너진다(도착순 줄에는 그런 구멍이 없다 — 송신단이 드롭되면 남은 것을 비우고 끝난다).
+    //    그래서 read 를 먼저 끊어 **그 줄의 유일한 송신단**을 놓고, [`finish_bypass_lane`] 이 그
+    //    비움을 기다린다.
     tokio::select! {
-        _ = &mut read_handle => {
-            tracing::debug!(conn = conn_id, "read_task 종료 → write_task abort + cleanup");
+        _ = &mut dispatch_handle => {
+            tracing::debug!(conn = conn_id, "dispatch_task 종료 → read abort · bypass 비움 · write abort + cleanup");
+            read_handle.abort();
+            finish_bypass_lane(bypass_handle, conn_id).await;
             write_handle.abort();
         }
         _ = &mut write_handle => {
-            tracing::debug!(conn = conn_id, "write_task 종료 → read_task abort + cleanup");
+            tracing::debug!(conn = conn_id, "write_task 종료 → read abort · bypass 비움 · dispatch abort + cleanup");
             read_handle.abort();
+            finish_bypass_lane(bypass_handle, conn_id).await;
+            dispatch_handle.abort();
         }
     }
 
@@ -520,12 +645,55 @@ async fn write_task(
     tracing::debug!(conn = conn_id, "write_task 루프 종료");
 }
 
-// ── read_task ────────────────────────────────────────────────────────────────
+// ── read_task + dispatch_task(수신 큐로 갈라진 두 행) ─────────────────────────────
+
+/// 읽기 루프가 디코드해 수신 큐로 넘기는 단위.
+///
+/// ★나가는 쪽 [`Frame`] 과 달리 Close 가 없다★: 나가는 Close 는 위층이 큐에 넣는 마커지만, 들어오는
+///   쪽의 close 판정은 프레임 **내용**이 아니라 핸들러의 답(`ConnFlow::Close`)이 낸다 — 그래서 이
+///   어휘에는 그 모양이 없다.
+/// ★페이로드를 **복사하지 않는다**★: tungstenite 가 준 payload 타입을 그대로 옮긴다(둘 다 refcount
+///   핸들이라 이동이 값싸다). `String`/`Vec<u8>` 으로 바꾸면 **클라가 고른 크기만큼** 프레임마다
+///   복사가 생긴다 — 옛 `on_binary` 가 페이로드를 빌려주던 것과 같은 축의 이유다.
+enum Inbound {
+    Text(Utf8Bytes),
+    Binary(Bytes),
+}
+
+impl Inbound {
+    /// 이 프레임이 줄에서 붙들고 있는 페이로드 바이트 — [`CONN_RX_MAX_BYTES`] 회계의 단위.
+    ///
+    /// ★핸들 자체의 크기가 아니라 **페이로드** 길이다★: 둘 다 refcount 핸들이라 `size_of` 는 몇십
+    ///   바이트로 똑같고, 실제로 메모리를 무는 것은 그 뒤의 버퍼다.
+    fn payload_len(&self) -> usize {
+        match self {
+            Inbound::Text(t) => t.len(),
+            Inbound::Binary(b) => b.len(),
+        }
+    }
+}
+
+/// 도착순 줄이 지금 붙들고 있는 페이로드 바이트 — 생산자(`read_task`)가 더하고 소비자
+/// (`dispatch_task`)가 뺀다. 한 연결에 하나.
+///
+/// ★빼는 자리가 **핸들러 호출 뒤**인 것은 의도다★: 꺼내자마자 빼면 「꺼냈지만 아직 처리 중인」 프레임이
+///   0 으로 세어져, 예산이 실제로는 두 배가 된다(같은 축의 실수 = `input_queue` 의 in-flight 회계).
+type RxBytes = Arc<std::sync::atomic::AtomicUsize>;
 
 /// ★stream 이 generic 인 이유★: 소켓 없이 합성 프레임열로 이 루프를 돌리는 격리 하네스를 두려고
 /// (ADR-0129). 운영 경로는 WS stream half 로만 단형화된다.
+///
+/// ★핸들러의 일을 **기다리지 않는다**★: 디코드한 프레임을 수신 큐에 넘기고 곧바로 다음 프레임을
+/// 읽는다. 옛 모양(여기서 `on_text` 를 완료까지 await)에서는 한 명령의 처리 시간이 곧 그 연결
+/// **전체**의 정지 시간이었다 — 에이전트 활성화 하나가 다른 에이전트로 가는 입력·kill 까지 소켓에서
+/// 꺼내지지도 않게 했다. 처리는 [`dispatch_task`] 가 도착 순서대로 진다.
+// ADR-0206
+#[allow(clippy::too_many_arguments)]
 async fn read_task<S>(
     mut incoming: S,
+    inbound_tx: mpsc::Sender<Inbound>,
+    bypass_tx: mpsc::Sender<Inbound>,
+    rx_bytes: RxBytes,
     frames: Arc<dyn FrameSink>,
     handler: Arc<dyn ConnectionHandler>,
     conn_id: ConnId,
@@ -542,40 +710,186 @@ async fn read_task<S>(
                 break;
             }
         };
-        // ★keepalive(A)★: tungstenite 는 Pong 을 Message::Pong 으로 올려주므로 능동 Ping 의
-        //   응답도 여기서 잡힌다.
+        // ★keepalive(A) 갱신이 **디스패치보다 앞**인 것은 그대로다★: 이 줄은 옛 모양에서도 핸들러
+        //   호출 앞이었으므로, 처리를 다른 task 로 옮겨도 keepalive 판정은 달라지지 않는다.
+        //   tungstenite 는 Pong 을 Message::Pong 으로 올려주므로 능동 Ping 의 응답도 여기서 잡힌다.
         last_recv.store(
             keepalive_base.elapsed().as_millis() as u64,
             Ordering::Release,
         );
-        match msg {
-            Message::Text(text) => {
-                if handler.on_text(conn_id, &text, &frames).await == ConnFlow::Close {
-                    break;
-                }
-            }
-            Message::Binary(payload) => {
-                // 페이로드는 **빌려준다** — 거부 경로가 유일한 소비자라 복사하지 않는다(클라가 고른
-                //   크기만큼 할당하게 두면 인증 후 최대 프레임 크기까지 낭비 할당이 된다).
-                if handler.on_binary(conn_id, &payload, &frames).await == ConnFlow::Close {
-                    break;
-                }
-            }
+        let queued = match msg {
+            Message::Text(text) => Inbound::Text(text),
+            Message::Binary(payload) => Inbound::Binary(payload),
             // Ping/Pong 은 tungstenite 가 자동 응답(write_task 가 아닌 내부). 여기선 무시.
-            Message::Ping(_) | Message::Pong(_) => {}
+            Message::Ping(_) | Message::Pong(_) => continue,
             Message::Close(_) => {
                 tracing::debug!(conn = conn_id, "Close frame 수신 — 종료");
                 break;
             }
-            Message::Frame(_) => {}
+            Message::Frame(_) => continue,
+        };
+        // ★칸보다 **바이트 예산이 먼저 걸릴 수 있다**★ — 판정은 더하기 전 물높이로 한다(빈 줄에는
+        //   크기와 무관하게 한 장은 들어간다). 근거 정본 = [`CONN_RX_MAX_BYTES`].
+        let over_budget = rx_bytes.load(Ordering::Acquire) >= CONN_RX_MAX_BYTES;
+        // ★`try_send` 다 — 여기서 기다리면 그 뒤 프레임을 **소켓에서 꺼내지도 못한다**★(근거 정본 =
+        //   [`CONN_RX_CAP`]). 자리가 있으면 이게 전부이고(정상 경로 비용 0), 없을 때만 아래로 간다.
+        let full = if over_budget {
+            queued
+        } else {
+            let len = queued.payload_len();
+            match inbound_tx.try_send(queued) {
+                Ok(()) => {
+                    rx_bytes.fetch_add(len, Ordering::AcqRel);
+                    continue;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!(conn = conn_id, "수신 큐 소비자 없음 — read_task 종료");
+                    break;
+                }
+                // 넣지 못한 프레임을 **되돌려 받는다** — 이게 있어야 조용한 유실 없이 처분을 고를 수 있다.
+                Err(mpsc::error::TrySendError::Full(item)) => item,
+            }
+        };
+
+        // ★줄이 찼다 — 이 한 프레임의 처분은 위층이 정한다★(어휘를 아는 쪽이 위층뿐이다).
+        //   binary 는 묻지 않는다: 이 프로토콜에서 클라→데몬 binary 는 그 자체가 위반이라 위층이 어차피
+        //   연결을 닫으며, 그 판정에 줄 순서가 걸려 있지 않다.
+        let disposition = match &full {
+            Inbound::Text(text) => handler.on_inbound_saturated(conn_id, text.as_str(), &frames),
+            Inbound::Binary(_) => Saturated::Bypass,
+        };
+        match disposition {
+            Saturated::Refused => {
+                // 위층이 답장을 냈다 — 버리고 계속 읽는다. 「계속 읽는다」가 이 갈래의 존재 이유다.
+                tracing::debug!(
+                    conn = conn_id,
+                    "수신 줄 포화 — 위층이 거절했다(계속 읽는다)"
+                );
+            }
+            // ★거절조차 못 냈다 — 「버리고 계속 읽는다」의 근거가 사라졌으므로 끝낸다★(근거 정본 =
+            //   [`Saturated::Unanswered`]). 읽기만 끝내면 도착순 줄은 이미 받아 둔 것을 마저 처리한 뒤
+            //   스스로 끝나고, 그 종료를 `handle_connection` 이 잡아 정리한다.
+            Saturated::Unanswered => {
+                tracing::warn!(
+                    conn = conn_id,
+                    "수신 줄 포화 — 거절 답장조차 큐에 못 넣었다(송신 큐도 포화) — 읽기를 끝낸다"
+                );
+                break;
+            }
+            // ★여기서는 기다려도 된다★ — 근거는 [`CONN_BYPASS_CAP`].
+            Saturated::Bypass => {
+                if bypass_tx.send(full).await.is_err() {
+                    tracing::debug!(conn = conn_id, "우선 줄 소비자 없음 — read_task 종료");
+                    break;
+                }
+            }
         }
     }
     tracing::debug!(conn = conn_id, "read_task 루프 종료");
 }
 
+/// 수신 큐의 **단일** 소비자 — 한 연결의 프레임을 도착 순서대로, 서로 겹치지 않게 핸들러에 올린다.
+///
+/// ★이 직렬성이 위층 순서 불변식의 **실물**이다★: 「같은 에이전트로 가는 입력끼리」·「입력 lease
+/// 획득과 그 뒤 입력」·「같은 연결의 구독/해지」·「명령 명부 등록과 그 차분」이 전부 도착 순서에
+/// 걸려 있고, 그것을 지키는 것은 이 task 가 하나이고 한 번에 하나만 await 한다는 성질뿐이다
+/// (계약의 정본 = `frame_port::ConnectionHandler`). **두 번째 소비자를 띄우거나 여기서 spawn 으로
+/// 흩으면 그 넷이 한꺼번에 깨진다** — 오래 걸리는 명령을 줄에서 떼는 판단은 위층 몫이다.
+async fn dispatch_task(
+    mut inbound_rx: mpsc::Receiver<Inbound>,
+    rx_bytes: RxBytes,
+    frames: Arc<dyn FrameSink>,
+    handler: Arc<dyn ConnectionHandler>,
+    conn_id: ConnId,
+) {
+    while let Some(item) = inbound_rx.recv().await {
+        let len = item.payload_len();
+        let flow = match item {
+            Inbound::Text(text) => handler.on_text(conn_id, text.as_str(), &frames).await,
+            // 페이로드는 **빌려준다** — 거부 경로가 유일한 소비자라 복사하지 않는다(클라가 고른
+            //   크기만큼 할당하게 두면 인증 후 최대 프레임 크기까지 낭비 할당이 된다).
+            Inbound::Binary(payload) => handler.on_binary(conn_id, payload.as_ref(), &frames).await,
+        };
+        // ★핸들러가 반환한 **뒤**에 뺀다★ — 처리 중인 한 장을 0 으로 세면 예산이 두 배가 된다
+        //   ([`RxBytes`]). 핸들러가 panic 하면 이 줄에 못 오지만, 그때는 이 task 자체가 죽어 연결이
+        //   통째로 정리되므로 새는 예산이 남을 곳이 없다.
+        rx_bytes.fetch_sub(len, Ordering::AcqRel);
+        if flow == ConnFlow::Close {
+            tracing::debug!(conn = conn_id, "핸들러가 Close — dispatch_task 종료");
+            break;
+        }
+    }
+    tracing::debug!(conn = conn_id, "dispatch_task 루프 종료");
+}
+
+/// 도착순 줄을 건너뛴 프레임([`Saturated::Bypass`])의 소비자.
+///
+/// ★★[`dispatch_task`] 와 **별도 task 여야 한다** — 같은 task 의 `select!` 로 합칠 수 없다★★: 이 줄이
+/// 존재하는 상황은 곧 **그쪽 소비자가 막혀 있는** 상황이다. 막힌 task 는 아무것도 폴링하지 못하므로,
+/// 한 task 안에 우선순위를 두는 형태로는 이 프레임이 영영 안 돈다.
+///
+/// ★그래서 두 줄은 **겹쳐서 돈다**★ — 포트 계약의 「겹치지 않는다」에 대한 유일한 예외이고, 그 예외를
+/// 고른 것은 위층 자신이다(`on_inbound_saturated`). 여기서 도는 것과 저기서 막혀 있는 것이 같은 대상을
+/// 건드릴 수 있다는 뜻이므로, 그래도 되는 프레임만 고르는 책임도 위층에 있다.
+///
+/// ★`Close` 를 큐 안 마커로 돌린다★: 이 task 는 `handle_connection` 의 select 대상이 **아니다**(그랬다면
+/// 읽기가 끝나 이 줄이 닫히는 순간 teardown 이 시작돼, 도착순 줄이 남은 것을 비울 기회를 잃는다).
+/// 그래서 종료 의사는 `Frame::Close` 로 write 줄에 실어 보낸다 — 앞서 넣은 프레임이 먼저 나간 뒤 닫힌다.
+async fn bypass_task(
+    mut bypass_rx: mpsc::Receiver<Inbound>,
+    frames: Arc<dyn FrameSink>,
+    handler: Arc<dyn ConnectionHandler>,
+    conn_id: ConnId,
+) {
+    while let Some(item) = bypass_rx.recv().await {
+        let flow = match item {
+            Inbound::Text(text) => handler.on_text(conn_id, text.as_str(), &frames).await,
+            Inbound::Binary(payload) => handler.on_binary(conn_id, payload.as_ref(), &frames).await,
+        };
+        if flow == ConnFlow::Close {
+            tracing::debug!(
+                conn = conn_id,
+                "우선 줄에서 Close — write 줄로 종료를 넘긴다"
+            );
+            let _ = frames.try_send(Frame::Close("bypass lane requested close".into()));
+            break;
+        }
+    }
+    tracing::debug!(conn = conn_id, "bypass_task 루프 종료");
+}
+
+/// 우선 줄을 **거둔다** — `abort()` 가 아니라, 남은 것을 비우고 스스로 끝나기를 기다린다.
+///
+/// ★왜 abort 가 결함이었나★: 우선 줄에 들어간 프레임은 위층이 「이건 굶으면 안 된다」고 판정해
+///   **받아 준** 것이다(`on_inbound_saturated` → [`Saturated::Bypass`]). 그런데 도착순 줄이 먼저
+///   끝나면(피어가 명령 한 장 보내고 곧바로 close 하는 흔한 모양) 그 자리에서 이 task 를 abort 했고,
+///   **받아 놓고 한 번도 폴링되지 않은 프레임이 그대로 사라졌다.** 이 줄을 둔 이유가 통째로 무너지는
+///   갈래다 — 도착순 줄에는 같은 구멍이 없다(송신단이 드롭되면 남은 것을 비운 뒤 끝난다).
+///
+/// ★부르는 쪽의 의무 = **먼저 `read_task` 를 끊을 것**★: 이 줄의 유일한 송신단이 거기 있어서, 그것이
+///   드롭되지 않으면 `recv()` 가 영영 `None` 을 못 받아 이 대기가 유예를 다 쓴다.
+/// ★유예를 넘기면 옛 처분으로 떨어진다★ — 그래서 이 함수는 **손해가 없다**: 잘 되면 받아 둔 것을
+///   마저 하고, 안 되면 예전과 똑같이 abort 한다. ★`timeout` 에 핸들을 **넘기지 않고 빌려주는 것은
+///   의도다**★: 넘기면 시한 초과 시 핸들이 drop 되어 task 가 abort 가 아니라 **detach** 되고, 그건
+///   `handle_connection` 이 명시적 abort 로 막고 있는 바로 그 누수다.
+async fn finish_bypass_lane(mut handle: tokio::task::JoinHandle<()>, conn_id: ConnId) {
+    match tokio::time::timeout(BYPASS_DRAIN_GRACE, &mut handle).await {
+        Ok(_) => {}
+        Err(_) => {
+            tracing::warn!(
+                conn = conn_id,
+                grace_ms = BYPASS_DRAIN_GRACE.as_millis() as u64,
+                "우선 줄이 유예 안에 안 비워졌다 — abort(받아 둔 것이 남아 있으면 유실된다)"
+            );
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     // ── 2. 토큰 상수시간 비교 정확성 ──────────────────────────────────────────
     #[test]
@@ -822,9 +1136,19 @@ mod tests {
     #[derive(Default)]
     struct FakeFrameSink {
         frames: Mutex<Vec<SeenFrame>>,
+        /// 켜면 모든 `try_send`/`send` 가 실패한다 — 「송신 큐도 포화」를 시한 없이 만드는 손잡이.
+        refuse: AtomicBool,
     }
 
     impl FakeFrameSink {
+        /// 한 프레임도 받아 주지 않는 출구(= 그 연결의 송신 큐가 포화이거나 닫힌 상태의 대역).
+        fn refusing() -> Self {
+            Self {
+                refuse: AtomicBool::new(true),
+                ..Self::default()
+            }
+        }
+
         fn frames(&self) -> Vec<String> {
             self.frames
                 .lock()
@@ -841,6 +1165,9 @@ mod tests {
 
     impl FrameSink for FakeFrameSink {
         fn try_send(&self, frame: Frame) -> Result<(), FrameError> {
+            if self.refuse.load(Ordering::Acquire) {
+                return Err(FrameError);
+            }
             let seen = match frame {
                 Frame::Text(s) => SeenFrame::Text(s),
                 Frame::Binary(b) => SeenFrame::Binary(b),
@@ -876,6 +1203,17 @@ mod tests {
         connect_gate: Option<Arc<Notify>>,
         /// `on_text` 1건 처리 완료 신호 — 테스트가 클라 close 타이밍과 무관하게 진행하기 위한 것.
         text_seen: Arc<Notify>,
+        /// 이 텍스트를 받으면 [`Self::slow_gate`] 가 열릴 때까지 `on_text` **안에서** 대기한다 —
+        /// 「핸들러가 한 명령에 붙들려 있는 동안 읽기 루프가 앞서 나가는가」를 재는 창을 만든다.
+        /// ★타이밍 가정을 쓰지 않으려는 장치다★: sleep 으로 흉내 내면 느린 러너에서 창이 닫혀 위양성이
+        ///   난다. 게이트는 테스트가 열기 전까지 **영원히** 닫혀 있다.
+        slow_on: Option<String>,
+        slow_gate: Arc<Notify>,
+        /// [`Self::slow_on`] 의 **우선 줄 판**: 이 텍스트를 받으면 [`Self::bypass_gate`] 가 열릴 때까지
+        /// `on_text` 안에서 대기한다. 도착순 줄과 **따로** 잠가야 「도착순은 끝났는데 우선 줄은 아직
+        /// 한 건에 붙들려 있다」는 상태를 만들 수 있다(그 상태가 곧 abort 결함의 무대다).
+        bypass_gate_on: Option<String>,
+        bypass_gate: Arc<Notify>,
         /// `on_connect` 이 받은 프레임 출구의 약참조. 강참조는 read_task 만 들고 있으므로, 연결이
         /// 끝난 뒤에도 upgrade 되면 그 task 가 abort 되지 않고 **detach** 됐다는 뜻이다.
         /// ★이 fake 는 프레임 출구의 **강참조를 절대 보관하면 안 된다**★ — 필드에 `Arc` 를 하나라도
@@ -896,9 +1234,29 @@ mod tests {
                 close_queue_on: None,
                 connect_gate: None,
                 text_seen: Arc::new(Notify::new()),
+                slow_on: None,
+                slow_gate: Arc::new(Notify::new()),
+                bypass_gate_on: None,
+                bypass_gate: Arc::new(Notify::new()),
                 frames_weak: Mutex::new(None),
                 registry: None,
                 registered_at_disconnect: Mutex::new(None),
+            }
+        }
+
+        /// 한 명령에 붙들리는 변종 — `slow_gate` 를 열 때까지 그 `on_text` 이 반환하지 않는다.
+        fn blocking_on(slow_on: &str) -> Self {
+            Self {
+                slow_on: Some(slow_on.to_string()),
+                ..Self::new(None)
+            }
+        }
+
+        /// 두 줄을 **각각** 잠그는 변종 — 도착순 줄은 `slow_on` 에, 우선 줄은 `bypass_gate_on` 에.
+        fn blocking_on_both(slow_on: &str, bypass_gate_on: &str) -> Self {
+            Self {
+                bypass_gate_on: Some(bypass_gate_on.to_string()),
+                ..Self::blocking_on(slow_on)
             }
         }
 
@@ -998,6 +1356,12 @@ mod tests {
                     .unwrap()
                     .push(HandlerCall::Text(conn_id, text.to_string()));
                 self.text_seen.notify_one();
+                if self.slow_on.as_deref() == Some(text) {
+                    self.slow_gate.notified().await;
+                }
+                if self.bypass_gate_on.as_deref() == Some(text) {
+                    self.bypass_gate.notified().await;
+                }
                 if close_via_writer {
                     let _ = frames.try_send(Frame::Close("테스트: writer 가 먼저 끝난다".into()));
                     return ConnFlow::Continue;
@@ -1023,6 +1387,26 @@ mod tests {
                     .push(HandlerCall::Binary(conn_id, payload.len()));
                 ConnFlow::Continue
             })
+        }
+
+        /// 이 fake 는 "bypass:" 로 시작하는 text 만 줄을 건너뛰게 한다. 나머지는 거절하고, 거절도
+        /// **기록해** 조용한 유실과 구별한다(포트 계약의 의무 2 에 해당하는 이 fake 의 답장).
+        ///
+        /// ★답장 결과를 보고 [`Saturated::Unanswered`] 로 갈리는 것까지 운영 핸들러와 같은 모양이다★ —
+        ///   결과를 버리고 늘 `Refused` 를 돌려주면 이 fake 는 그 갈래를 **표현조차 못 한다.**
+        fn on_inbound_saturated(
+            &self,
+            _conn_id: ConnId,
+            text: &str,
+            frames: &Arc<dyn FrameSink>,
+        ) -> Saturated {
+            if text.starts_with("bypass:") {
+                return Saturated::Bypass;
+            }
+            match frames.try_send(Frame::Text(format!("refused:{text}"))) {
+                Ok(()) => Saturated::Refused,
+                Err(_) => Saturated::Unanswered,
+            }
         }
 
         fn on_disconnect(&self, conn_id: ConnId) {
@@ -1053,6 +1437,53 @@ mod tests {
         Ok(Message::Text(s.to_string().into()))
     }
 
+    /// 읽기 행과 처리 행을 **실제 배치대로**(수신 큐로 이어) 함께 돌린다 — `handle_connection` 이
+    /// 하는 배선의 최소 재현이고, 둘 다 끝난 뒤 반환한다.
+    ///
+    /// ★소켓 없이 도는 격리 하네스라는 성질은 그대로다★(ADR-0129) — 바뀐 것은 이 seam 을 태우는 데
+    ///   task 가 하나가 아니라 둘이라는 점뿐이다.
+    async fn run_read_and_dispatch<S>(
+        incoming: S,
+        frames: Arc<dyn FrameSink>,
+        handler: Arc<dyn ConnectionHandler>,
+        conn_id: ConnId,
+    ) where
+        S: Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>>
+            + Unpin
+            + Send
+            + 'static,
+    {
+        let (tx, rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+        let rx_bytes = new_rx_bytes();
+        let (bypass_tx, bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
+        let read = tokio::spawn(read_task(
+            incoming,
+            tx,
+            bypass_tx,
+            rx_bytes.clone(),
+            frames.clone(),
+            handler.clone(),
+            conn_id,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let bypass = tokio::spawn(bypass_task(
+            bypass_rx,
+            frames.clone(),
+            handler.clone(),
+            conn_id,
+        ));
+        dispatch_task(rx, rx_bytes, frames, handler, conn_id).await;
+        // `handle_connection` 의 "dispatch 가 먼저 끝난" 갈래와 같은 처분.
+        read.abort();
+        let _ = read.await;
+        finish_bypass_lane(bypass, conn_id).await;
+    }
+
+    fn new_rx_bytes() -> RxBytes {
+        Arc::new(std::sync::atomic::AtomicUsize::new(0))
+    }
+
     #[tokio::test]
     async fn handler_sees_connect_then_frames_then_disconnect() {
         let fake_sink = Arc::new(FakeFrameSink::default());
@@ -1061,7 +1492,7 @@ mod tests {
         let handler: Arc<dyn ConnectionHandler> = fake.clone();
 
         handler.on_connect(7, &frames).await;
-        read_task(
+        run_read_and_dispatch(
             futures_util::stream::iter(vec![
                 text_frame("cmd"),
                 Ok(Message::Binary(vec![1, 2, 3].into())),
@@ -1071,8 +1502,6 @@ mod tests {
             frames.clone(),
             handler.clone(),
             7,
-            tokio::time::Instant::now(),
-            Arc::new(AtomicU64::new(0)),
         )
         .await;
         handler.on_disconnect(7);
@@ -1093,13 +1522,17 @@ mod tests {
         );
     }
 
+    /// ★close 판정이 읽기 루프 밖으로 나간 뒤에도 그 뜻은 같다★: 처리 행이 `ConnFlow::Close` 를 받으면
+    /// 그 자리에서 멈추고, 뒤에 이미 **큐에 들어와 있던** 프레임도 처리되지 않는다. 옛 모양에서
+    /// "소켓에서 더 읽지 않는다" 였던 것이 지금은 "더 처리하지 않는다" 이고, 연결 종료로 잇는 것은
+    /// `handle_connection` 의 select 갈래다.
     #[tokio::test]
-    async fn close_flow_from_on_text_breaks_the_read_loop() {
+    async fn close_flow_from_on_text_stops_the_dispatch_row() {
         let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
         let fake = Arc::new(FakeHandler::new(Some("stop")));
         let handler: Arc<dyn ConnectionHandler> = fake.clone();
 
-        read_task(
+        run_read_and_dispatch(
             futures_util::stream::iter(vec![
                 text_frame("go"),
                 text_frame("stop"),
@@ -1108,28 +1541,326 @@ mod tests {
             frames,
             handler,
             3,
-            tokio::time::Instant::now(),
-            Arc::new(AtomicU64::new(0)),
         )
         .await;
 
         assert_eq!(
             fake.calls(),
             vec!["text:3:go", "text:3:stop"],
-            "ConnFlow::Close 면 그 자리에서 수신 루프를 나간다"
+            "ConnFlow::Close 면 그 자리에서 처리를 멈춘다(뒤엣것은 큐에 있어도 안 돈다)"
+        );
+    }
+
+    /// ★★이 변경이 고친 결함의 회귀망★★ — 옛 읽기 루프는 핸들러 호출을 **완료까지 await** 한 뒤에야
+    /// 다음 프레임을 읽었다. 그래서 에이전트 활성화 한 건(전형 2s·백스톱 15s)이 도는 동안 같은
+    /// 클라이언트가 보낸 **다른 에이전트로 가는 입력·kill·또 다른 활성화**가 소켓에서 꺼내지지도
+    /// 않았다(소켓 head-of-line blocking).
+    ///
+    /// ★두 가지를 한 번에 잰다★: ① 핸들러가 한 명령에 붙들려 있는 동안 나머지 프레임이 **전부** 읽힌다
+    /// ② 그럼에도 처리는 여전히 **도착 순서대로 하나씩**이다(순서가 뜻을 갖는 명령들이 이 성질 하나에
+    /// 걸려 있다 — `frame_port::ConnectionHandler` 계약). ①만 재면 "순서를 버려서 빨라진" 회귀를 못
+    /// 잡고, ②만 재면 원래 결함이 그대로 있어도 초록이다.
+    ///
+    /// ★게이트로 재고 sleep 으로 재지 않는다★: 느린 러너에서 창이 닫혀 나는 위양성을 없앤다.
+    #[tokio::test]
+    async fn the_read_loop_runs_ahead_while_a_handler_call_is_still_running() {
+        let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
+        let fake = Arc::new(FakeHandler::blocking_on("slow"));
+        let handler: Arc<dyn ConnectionHandler> = fake.clone();
+
+        let yielded = Arc::new(AtomicU64::new(0));
+        let counter = yielded.clone();
+        let incoming = futures_util::stream::iter(vec![
+            text_frame("slow"),
+            text_frame("other-agent-input"),
+            text_frame("kill"),
+            Ok(Message::Binary(vec![9, 9].into())),
+            text_frame("tail"),
+        ])
+        .inspect(move |_| {
+            counter.fetch_add(1, Ordering::Release);
+        });
+
+        let (tx, rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+        let rx_bytes = new_rx_bytes();
+        let (bypass_tx, _bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
+        let read = tokio::spawn(read_task(
+            incoming,
+            tx,
+            bypass_tx,
+            rx_bytes.clone(),
+            frames.clone(),
+            handler.clone(),
+            5,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let dispatch = tokio::spawn(dispatch_task(rx, rx_bytes, frames, handler, 5));
+
+        // 첫 명령이 핸들러 **안에서** 붙들린 것을 확인하고 나서 관측한다.
+        tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
+            .await
+            .expect("첫 명령이 핸들러에 닿아야");
+
+        let mut all_read = false;
+        for _ in 0..500 {
+            if yielded.load(Ordering::Acquire) == 5 {
+                all_read = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            all_read,
+            "핸들러가 첫 명령에 붙들린 동안 나머지 프레임이 소켓에서 꺼내지지 않았다 — head-of-line blocking 회귀"
+        );
+        assert_eq!(
+            fake.calls(),
+            vec!["text:5:slow"],
+            "읽기가 앞서 나가도 처리는 한 번에 하나다 — 앞 호출이 반환하기 전에 다음이 시작되면 안 된다"
+        );
+
+        fake.slow_gate.notify_one();
+        tokio::time::timeout(Duration::from_secs(10), dispatch)
+            .await
+            .expect("게이트가 열리면 처리 행이 끝나야")
+            .unwrap();
+        let _ = read.await;
+
+        assert_eq!(
+            fake.calls(),
+            vec![
+                "text:5:slow",
+                "text:5:other-agent-input",
+                "text:5:kill",
+                "binary:5:2",
+                "text:5:tail",
+            ],
+            "큐를 거쳐도 처리 순서는 도착 순서 그대로다"
+        );
+    }
+
+    /// ★★적대 리뷰가 찾아낸 두 번째 구멍의 회귀망★★ — 수신 줄에 **취소를 위한 자리가 없으면**, 줄이
+    /// 가득 찬 순간 `Kill` 이 그 줄 뒤에서 굶어 이 변경이 없애려던 증상(「취소가 안 먹는다」)이 다른
+    /// 경로로 되돌아온다.
+    ///
+    /// ★핵심은 「우선 줄이 있다」가 아니라 「**읽기가 안 선다**」다★: 읽기 루프가 포화한 줄 위에서
+    /// 기다리면, 그 뒤에 오는 `Kill` 은 **소켓에서 꺼내지지도 않는다**(TCP 는 스트림이다). 그래서 이
+    /// 시험은 `Kill` 을 **가득 찬 뒤에 오는 프레임**으로 놓고, 그 앞에 일반 명령을 하나 더 끼워
+    /// 「그 한 장을 처분하고 계속 읽었는가」까지 함께 본다.
+    ///
+    /// ★소비자가 막힌 상태를 만든다★: 첫 프레임이 게이트에 붙들리므로 도착순 줄은 절대 비지 않는다 —
+    /// 실제 사고(막힌 PTY write 뒤로 키 입력이 쌓인다)와 같은 모양이다.
+    #[tokio::test]
+    async fn a_cancel_still_gets_through_a_saturated_inbound_queue() {
+        let sink = Arc::new(FakeFrameSink::default());
+        let frames: Arc<dyn FrameSink> = sink.clone();
+        let fake = Arc::new(FakeHandler::blocking_on("slow"));
+        let handler: Arc<dyn ConnectionHandler> = fake.clone();
+
+        // 줄을 꽉 채운다: 게이트에 붙들릴 1장 + 줄을 메울 CONN_RX_CAP 장.
+        let mut items = vec![text_frame("slow")];
+        for i in 0..CONN_RX_CAP {
+            items.push(text_frame(&format!("filler-{i}")));
+        }
+        // ★여기부터가 이 시험의 본론★ — 줄에 자리가 없는 상태에서 도착하는 두 장.
+        items.push(text_frame("overflow-ordered"));
+        items.push(text_frame("bypass:kill"));
+
+        let (tx, rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+        let rx_bytes = new_rx_bytes();
+        let (bypass_tx, bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
+        let read = tokio::spawn(read_task(
+            futures_util::stream::iter(items),
+            tx,
+            bypass_tx,
+            rx_bytes.clone(),
+            frames.clone(),
+            handler.clone(),
+            11,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let bypass = tokio::spawn(bypass_task(bypass_rx, frames.clone(), handler.clone(), 11));
+        let dispatch = tokio::spawn(dispatch_task(rx, rx_bytes, frames, handler, 11));
+
+        // 취소가 **도착순 소비자가 아직 첫 명령에 붙들려 있는 동안** 실제로 처리되는지 본다.
+        let mut cancelled = false;
+        for _ in 0..500 {
+            if fake.calls().iter().any(|c| c == "text:11:bypass:kill") {
+                cancelled = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            cancelled,
+            "줄이 가득 찬 동안 취소가 통과하지 못했다 — 취소 자리 없음 회귀: {:?}",
+            fake.calls()
+        );
+        // ★여기서 재는 것은 **집합이지 순서가 아니다**★: 두 줄이 서로 다른 task 라 "slow" 와 취소 중
+        //   어느 쪽이 먼저 기록되는지는 스케줄러 몫이고, 그것을 단언하면 위양성이 난다. 지켜야 할 것은
+        //   「줄에 든 것들은 아직 하나도 안 돌았다」 — 즉 건너뛴 것이 취소뿐이라는 사실이다.
+        let ran: Vec<String> = fake.calls();
+        assert!(
+            ran.iter()
+                .all(|c| c == "text:11:slow" || c == "text:11:bypass:kill"),
+            "취소 말고 다른 것이 줄을 건너뛰었다(또는 막힌 줄이 돌았다): {ran:?}"
+        );
+        // ★넘친 일반 명령은 **조용히 사라지지 않는다**★ — 이 fake 의 거절 답장이 그 증거다.
+        assert!(
+            sink.frames()
+                .iter()
+                .any(|f| f == "text:refused:overflow-ordered"),
+            "넘친 명령이 답장 없이 버려졌다: {:?}",
+            sink.frames()
+        );
+
+        fake.slow_gate.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(10), dispatch).await;
+        read.abort();
+        bypass.abort();
+    }
+
+    /// ★★칸은 남았는데 **바이트가 먼저 찬다**★★ — [`CONN_RX_MAX_BYTES`] 회귀망.
+    ///
+    /// ★잡는 회귀★: 포화를 칸 수로만 재던 모양. 그러면 이 줄의 실제 천장이
+    ///   `CONN_RX_CAP × max_message_size` (= 64 × 64 MiB) 가 되는데, 그 곱을 아무도 세지 않았다.
+    /// ★결정적이다★: sleep 도 스케줄러 가정도 없다 — 소비자를 게이트로 붙들어 두면 줄은 절대 비지
+    ///   않으므로, 예산 판정은 프레임을 넣는 그 순서만으로 결정된다.
+    /// ★큰 프레임 **두 장**인 이유★: 판정이 「더하기 전 물높이」라 빈 줄에 오는 한 장은 크기와 무관하게
+    ///   언제나 들어간다(그 성질도 함께 고정한다). 예산을 넘기는 것은 그 다음 장부터다.
+    #[tokio::test]
+    async fn the_inbound_row_is_bounded_by_bytes_not_only_by_slots() {
+        let sink = Arc::new(FakeFrameSink::default());
+        let frames: Arc<dyn FrameSink> = sink.clone();
+        let fake = Arc::new(FakeHandler::blocking_on("slow"));
+        let handler: Arc<dyn ConnectionHandler> = fake.clone();
+
+        // 예산의 절반보다 한 바이트 큰 장 둘 — 둘이면 예산을 넘고, 칸은 64 중 셋밖에 안 쓴다.
+        let big = "x".repeat(CONN_RX_MAX_BYTES / 2 + 1);
+        let items = vec![
+            text_frame("slow"),
+            text_frame(&big),
+            text_frame(&big),
+            text_frame("after-budget"),
+        ];
+
+        let (tx, rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+        let rx_bytes = new_rx_bytes();
+        let (bypass_tx, _bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
+        let read = tokio::spawn(read_task(
+            futures_util::stream::iter(items),
+            tx,
+            bypass_tx,
+            rx_bytes.clone(),
+            frames.clone(),
+            handler.clone(),
+            21,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        ));
+        let dispatch = tokio::spawn(dispatch_task(rx, rx_bytes, frames, handler, 21));
+
+        // 읽기 루프는 프레임을 다 훑고 끝난다(예산 초과에서도 서지 않는다 — 그게 이 배치의 전제).
+        tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .expect("읽기 루프가 예산 초과에서 서면 안 된다")
+            .unwrap();
+
+        assert!(
+            sink.frames()
+                .iter()
+                .any(|f| f == "text:refused:after-budget"),
+            "칸이 남았다고 통과시켰다 — 바이트 예산이 안 걸렸다: {:?}",
+            sink.frames()
+        );
+        // 소비자가 첫 장을 실제로 집었음을 **신호로** 확인하고 나서 아래를 단언한다(스케줄러 가정 금지).
+        tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
+            .await
+            .expect("소비자가 첫 장을 집어야");
+        assert_eq!(
+            fake.calls(),
+            vec!["text:21:slow"],
+            "소비자는 여전히 첫 장에 붙들려 있어야(줄이 비면 이 시험의 전제가 무너진다)"
+        );
+
+        fake.slow_gate.notify_one();
+        let _ = tokio::time::timeout(Duration::from_secs(10), dispatch).await;
+    }
+
+    /// ★★거절을 **답장하지 못하면** 그 연결은 끝난다★★ — [`Saturated::Unanswered`] 회귀망.
+    ///
+    /// ★잡는 회귀★: 위층이 `Error` 답장 enqueue 결과를 버리고 늘 `Refused` 를 돌려주던 모양. 그러면
+    ///   네트워크 행은 없는 답장을 믿고 원래 명령을 버리고, 보낸 쪽은 **명령도 거절도** 못 받은 채
+    ///   자기 마감시각까지 기다린다.
+    /// ★관측 = 「그 뒤 프레임을 소켓에서 꺼냈는가」★: 종료 여부를 join 으로 재면 두 갈래가 구별되지
+    ///   않는다(둘 다 곧 끝난다). 스트림에서 **몇 장을 뽑았는지**를 세면 갈린다 — 끝냈으면 뒤엣것은
+    ///   뽑히지 않는다.
+    /// ★소비자를 아예 안 띄운다★: 띄우면 「소비자가 첫 장을 꺼내 갔는가」가 스케줄러에 달려 포화 시점이
+    ///   한 장씩 흔들린다(실측으로 그 흔들림을 봤다). 수신단만 살려 두면 줄은 정확히 `CONN_RX_CAP` 장에서
+    ///   차므로 판정이 결정적이다 — 이 시험이 재는 것은 소비자 동작이 아니라 **읽기 행의 처분**이다.
+    #[tokio::test]
+    async fn a_refusal_that_could_not_be_sent_ends_the_read_row() {
+        // 한 프레임도 못 받는 출구 = 송신 큐도 포화인 상태.
+        let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::refusing());
+        let handler: Arc<dyn ConnectionHandler> = Arc::new(FakeHandler::new(None));
+
+        let mut items = Vec::new();
+        for i in 0..CONN_RX_CAP {
+            items.push(text_frame(&format!("filler-{i}")));
+        }
+        items.push(text_frame("unanswerable")); // 줄도 차고 답장도 못 내는 그 한 장
+        items.push(text_frame("tail-1"));
+        items.push(text_frame("tail-2"));
+        let total = items.len();
+        let trigger_index = CONN_RX_CAP + 1; // filler 들 + 그 한 장
+
+        let pulled = Arc::new(AtomicU64::new(0));
+        let counter = pulled.clone();
+        let incoming = futures_util::stream::iter(items).inspect(move |_| {
+            counter.fetch_add(1, Ordering::Release);
+        });
+
+        // ★수신단을 살려 둔다★ — 드롭하면 첫 `try_send` 가 Closed 로 끊겨 이 시험이 포화가 아니라
+        //   "소비자 없음" 을 재게 된다.
+        let (tx, _rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+        let (bypass_tx, _bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
+        read_task(
+            incoming,
+            tx,
+            bypass_tx,
+            new_rx_bytes(),
+            frames,
+            handler,
+            23,
+            tokio::time::Instant::now(),
+            Arc::new(AtomicU64::new(0)),
+        )
+        .await;
+
+        assert_eq!(
+            pulled.load(Ordering::Acquire) as usize,
+            trigger_index,
+            "답장 못 한 거절을 '거절했다'로 읽고 계속 읽었다 — 전체 {total} 장 중 {trigger_index} 장에서 멈췄어야",
         );
     }
 
     /// 초기값을 도달 불가능한 sentinel 로 두어 "갱신됐다" 를 타이밍 없이 판정한다.
     async fn clock_updated_by(msg: Message) -> bool {
-        let frames: Arc<dyn FrameSink> = Arc::new(FakeFrameSink::default());
-        let handler: Arc<dyn ConnectionHandler> = Arc::new(FakeHandler::new(None));
         let last_recv = Arc::new(AtomicU64::new(u64::MAX));
 
+        // ★수신단을 살려 둔다★: 드롭하면 `send` 가 실패해 루프가 첫 프레임에서 끊겨, 이 판정이
+        //   "갱신됐나" 가 아니라 "큐가 살아 있나" 를 재게 된다.
+        let (tx, _rx) = mpsc::channel::<Inbound>(CONN_RX_CAP);
+        let (bypass_tx, _bypass_rx) = mpsc::channel::<Inbound>(CONN_BYPASS_CAP);
         read_task(
             futures_util::stream::iter(vec![Ok(msg)]),
-            frames,
-            handler,
+            tx,
+            bypass_tx,
+            new_rx_bytes(),
+            Arc::new(FakeFrameSink::default()),
+            Arc::new(FakeHandler::new(None)),
             1,
             tokio::time::Instant::now(),
             last_recv.clone(),
@@ -1340,13 +2071,105 @@ mod tests {
         );
     }
 
+    /// ★★받아 준 우선 프레임을 teardown 이 **버리지 않는다**★★ — [`finish_bypass_lane`] 회귀망.
+    ///
+    /// ★잡는 결함★: 도착순 줄이 먼저 끝나는 갈래(피어가 명령을 보내고 곧바로 close 하는 흔한 모양)에서
+    ///   `handle_connection` 이 우선 줄 task 를 그냥 `abort()` 했다. 위층이 「이건 굶으면 안 된다」고
+    ///   판정해 **받아 준** 프레임이 한 번도 돌지 않고 사라진다 — 그 줄을 둔 이유가 통째로 무너진다.
+    ///
+    /// ★무대 만들기★: 두 줄을 **각각** 잠근다. 도착순 줄은 게이트에 붙들어 수신 큐를 채우고(그래야
+    ///   뒤엣것이 우선 줄로 간다), 우선 줄은 **첫 건에서** 따로 잠가 둘째 건이 큐에 남게 한다. 그 상태로
+    ///   도착순 줄을 풀고 소켓을 닫으면 teardown 이 시작되는데, 그때 우선 줄에는 **받아 놓고 아직 안 돈
+    ///   한 장**이 있다 — 결함이 있으면 그 장이 abort 와 함께 사라진다.
+    /// ★탐지의 정직한 범위★: 300ms 창은 **버그판이 그 안에 정리를 끝내는가**만 본다(정상 코드는 우선
+    ///   줄을 기다리느라 그 창에 절대 안 끝난다 — 위양성 불가). 창이 짧아 버그판이 아직 안 끝났으면
+    ///   위음성 쪽으로만 틀린다. 그 뒤 게이트를 열고 결과를 보는 단언은 두 갈래 모두에서 결정적이다.
+    #[tokio::test]
+    async fn an_accepted_bypass_frame_survives_the_ordered_row_finishing_first() {
+        let registry = ConnRegistry::new();
+        let fake = Arc::new(FakeHandler::blocking_on_both("slow", "bypass:first"));
+        let (mut client, mut server) =
+            serve_one(registry.clone(), fake.clone(), KeepaliveConfig::default()).await;
+
+        // ① 도착순 소비자를 붙든다 — 이 뒤로 그 줄은 절대 비지 않는다.
+        client
+            .send(Message::Text("slow".to_string().into()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), fake.text_seen.notified())
+            .await
+            .expect("첫 명령이 핸들러에 닿아야");
+
+        // ② 도착순 줄을 꽉 채운다(소비자가 하나를 꺼내 갔으므로 정확히 CONN_RX_CAP 장).
+        for i in 0..CONN_RX_CAP {
+            client
+                .send(Message::Text(format!("filler-{i}").into()))
+                .await
+                .unwrap();
+        }
+
+        // ③ 포화 상태에서 우선 줄로 두 장 — 첫 장은 그 줄의 게이트에 붙들리고, 둘째 장은 큐에 남는다.
+        client
+            .send(Message::Text("bypass:first".to_string().into()))
+            .await
+            .unwrap();
+        client
+            .send(Message::Text("bypass:second".to_string().into()))
+            .await
+            .unwrap();
+
+        let mut first_running = false;
+        for _ in 0..500 {
+            if fake.calls().iter().any(|c| c == "text:1:bypass:first") {
+                first_running = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            first_running,
+            "우선 줄이 첫 장을 집지 못했다 — 이 시험의 무대가 안 섰다: {:?}",
+            fake.calls()
+        );
+
+        // ④ 도착순 줄을 풀고 소켓을 닫는다 → read 종료 → dispatch 가 남은 것을 비우고 종료 → teardown.
+        fake.slow_gate.notify_one();
+        client.close(None).await.unwrap();
+
+        // ⑤ 정상 코드는 우선 줄을 기다리므로 이 창 안에 안 끝난다. 끝났다면 버려 버린 것이다.
+        let finished_before_the_gate =
+            tokio::time::timeout(Duration::from_millis(300), &mut server)
+                .await
+                .is_ok();
+
+        // ⑥ 이제 우선 줄을 풀어 준다 — 받아 둔 둘째 장이 여기서 돌아야 한다.
+        fake.bypass_gate.notify_one();
+        if !finished_before_the_gate {
+            tokio::time::timeout(Duration::from_secs(15), &mut server)
+                .await
+                .expect("우선 줄이 비면 정리가 끝나야")
+                .unwrap();
+        }
+
+        assert!(
+            fake.calls().iter().any(|c| c == "text:1:bypass:second"),
+            "받아 둔 우선 프레임이 teardown 의 abort 로 사라졌다(창 안 종료 = {finished_before_the_gate}): {:?}",
+            fake.calls()
+        );
+        drop(client);
+    }
+
     /// ★패자 task 의 명시적 abort★(`handle_connection` 의 select!) — JoinHandle 을 그냥 drop 하면
     /// detach 되어 WS half 를 쥔 task 가 살아남는다. 그 누수는 e2e 로는 안 보인다(전부 정상 종료라
     /// 남은 half 가 표에 안 드러난다).
     ///
-    /// ★관측 방법★: 프레임 출구 `Arc` 의 **강참조는 read_task 만** 들고 있다(`handle_connection` 은
-    /// 그것을 read_task 로 move 하고, `on_connect` 은 빌리기만 한다). 그래서 연결 종료 뒤에도 약참조가
-    /// upgrade 되면 = read_task 가 살아 있다 = abort 대신 detach 됐다는 뜻이다.
+    /// ★관측 방법★: 프레임 출구 `Arc` 의 **강참조는 dispatch_task 만** 들고 있다(`handle_connection` 은
+    /// 그것을 dispatch_task 로 move 하고, `on_connect` 은 빌리기만 한다). 그래서 연결 종료 뒤에도
+    /// 약참조가 upgrade 되면 = 그 task 가 살아 있다 = abort 대신 detach 됐다는 뜻이다.
+    /// ★그 관측이 **read_task 의 abort 도 함께** 무는 것은 배선 때문이다★: dispatch_task 가 스스로
+    /// 끝나려면 수신 큐의 유일한 송신단(read_task 가 쥔다)이 드롭돼야 하는데, 이 갈래의 read_task 는
+    /// `next()` 에 파킹돼 스스로 끝나지 않는다 — 즉 read 의 abort 가 빠져도 이 폴링이 끝까지
+    /// `released == false` 로 돈다. 옛 주석은 이 강참조가 read_task 에 있다고 적혀 있었다.
     /// ★이 관측은 **이 테스트의 fake 핸들러에서만** 성립한다★ — 그 fake 는 강참조를 하나도 보관하지
     /// 않는다(아래 `FakeHandler` 주석의 금지 조항). 운영 핸들러는 `on_connect` 에서 사본을 하나 떠
     /// **명령 명부**에 넣고 연결 수명 내내 들고 있으므로 이 테스트를 그쪽으로 옮기면 관측이 성립하지

@@ -2130,6 +2130,67 @@ async fn case44_ws_get_snapshot_unknown_error() {
     server.shutdown().await;
 }
 
+// ── 케이스 45: 활성화가 도는 동안 뒤 명령이 먼저 답한다(소켓 head-of-line blocking 회귀망) ────────
+//
+// ★옛 모양★: 읽기 루프가 `on_text` 을 완료까지 await 했으므로, 활성화 한 건(실 프로세스 생성 + 링크
+//   대기 — 전형 2s·백스톱 15s)이 끝날 때까지 같은 클라이언트의 **다른 명령이 소켓에서 꺼내지지도**
+//   않았다. 그래서 아래 두 답은 반드시 보낸 순서대로 왔다.
+// ★무엇이 이 순서를 뒤집나★: 활성화는 이제 그 연결의 도착순 줄 밖에서 돌고(`connection_core::
+//   dispatch_order`), `ListAgents` 는 그 줄에서 곧바로 처리된다. 두 일의 규모 차가 3 자릿수라
+//   (프로세스 생성 대 인메모리 맵 조회) 이 단언은 타이밍 여유에 기대지 않는다.
+// ★e2e 로 두는 이유★: 이 순서 뒤집힘은 소켓 → 읽기 행 → 수신 큐 → 처리 행 → dispatch 가 **전부
+//   제대로 이어져야** 나온다. 단위 시험 둘(`agent_conn` 의 짝)은 각 조각만 잰다.
+#[tokio::test]
+async fn case45_ws_activation_does_not_block_the_next_command() {
+    let server = start_test_server().await.unwrap();
+    let profile_id = register_shell_profile(&server);
+
+    let mut c = Client::connect_and_auth(server.port, &server.token).await;
+    drain_handshake(&mut c).await;
+
+    let spawn_req = RequestId::new();
+    let list_req = RequestId::new();
+    c.send(&WireCommand::Spawn {
+        profile_id,
+        request_id: spawn_req,
+    })
+    .await;
+    c.send(&WireCommand::ListAgents {
+        request_id: list_req,
+    })
+    .await;
+
+    let mut order: Vec<&str> = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while order.len() < 2 && std::time::Instant::now() < deadline {
+        match c.next().await {
+            Some(Incoming::Event(AgentEvent::AgentList { request_id, .. }))
+                if request_id == list_req =>
+            {
+                order.push("list")
+            }
+            Some(Incoming::Event(AgentEvent::Ack { request_id })) if request_id == spawn_req => {
+                order.push("spawn")
+            }
+            Some(Incoming::Event(AgentEvent::Error {
+                request_id: Some(rid),
+                message,
+            })) if rid == spawn_req => {
+                panic!("Spawn 이 실패했다 — 이 케이스가 재는 것이 아니다: {message}")
+            }
+            Some(_) => continue,
+            None => break,
+        }
+    }
+    assert_eq!(
+        order,
+        vec!["list", "spawn"],
+        "뒤에 보낸 ListAgents 가 활성화를 기다렸다 — 소켓 head-of-line blocking 회귀"
+    );
+
+    server.shutdown().await;
+}
+
 // ── 보조 함수 ──────────────────────────────────────────────────────────────────────
 
 /// AgentListUpdated 는 spawn 으로 추가 발생할 수 있어 Hello 만 보장 소진하고, 첫 list 1건도 소진.

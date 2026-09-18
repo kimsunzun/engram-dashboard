@@ -1103,10 +1103,14 @@ impl AgentManager {
 
         // ★잔여 레이스(ADR-0082 미해결·후속)★: 이 이중-spawn 가드는 여기서 read lock 을 잡아 contains_key 를 본 뒤
         //   놓고, 실제 등록(sessions.insert)은 아래에서 별개 write lock 으로 한다 — 그 사이 창이 있다.
-        //   같은 id 를 **서로 다른 연결**이 동시에 SpawnProfile 하면 둘 다 이 검사와 activate_profile 의
-        //   pre-check 를 통과해 double-spawn 이 날 수 있다(데몬 명령 처리는 연결당 직렬일 뿐 연결 간엔
-        //   아니다 — 각 연결이 제 read_task 에서 dispatch 를 await 한다). 이 window 는 ADR-0082 이전부터
-        //   있던 **선재(pre-existing) 레이스**이며 이번 변경이 도입하지도 닫지도 않았다(후속 과제로 flag).
+        //   같은 id 를 동시에 SpawnProfile 하면 둘 다 이 검사와 activate_profile 의 pre-check 를 통과해
+        //   double-spawn 이 날 수 있다. 이 window 는 ADR-0082 이전부터 있던 **선재(pre-existing)
+        //   레이스**이며 그 변경이 도입하지도 닫지도 않았다(후속 과제로 flag).
+        //   ★한때 여기 적혀 있던 「연결 간에만 겹친다(연결당은 직렬이니까)」는 이제 **거짓이다**★:
+        //   데몬이 활성화 명령을 그 연결의 도착순 줄에서 떼어 별도 태스크로 돌리므로(daemon crate 의
+        //   `connection_core::dispatch_order`) **같은 연결의 두 요청**도 여기서 겹칠 수 있다. 창의 폭은
+        //   그대로고 — 막는 것은 위 예약과 pre-check 이지 호출자 쪽 직렬성이 아니었다 — 바뀐 것은
+        //   그 창에 닿을 수 있는 호출자의 범위뿐이다.
         //   ★위 예약이 그 폭을 **줄이지만 닫지는 않는다**★ — 예약 취득과 이 조회 사이에도 같은 창이 있다.
         if let Ok(session) = self.get_session(profile.id) {
             tracing::info!(

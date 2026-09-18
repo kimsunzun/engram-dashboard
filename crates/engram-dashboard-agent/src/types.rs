@@ -705,9 +705,21 @@ pub struct SubscribeOutcome {
 ///   가르려면 write 경계에서 **완결성 신호**(전량 수용 vs 실패)와 이 유저 턴의 replay-dedup 키
 ///   (`msg_uuid`)를 관측 가능하게 올려야 한다. 이 값이 그 산출물이다(성공 경로에서만 반환).
 ///
-/// ★완결성 신호 = Ok-vs-Err 이지 바이트 비교가 아니다(중요)★: transport 의 `send_input` 은
-///   `write_all`(+`flush`)로 쓴다 — `write_all` 은 요청 바이트를 **전부** 쓰거나 `Err` 를 낸다
-///   (부분 write 를 `Ok` 로 숨기지 않는다, std 계약). 따라서 "전량 수용됐나"의 유일한 증거는
+/// ★★`Ok` 의 뜻이 **어느 동사로 얻었느냐에 달렸다** — 이 문단이 그 갈림이고, 옛 서술은 거짓이다★★:
+///   한때 여기 「transport 의 `send_input` 은 `write_all`(+`flush`)로 쓴다」로 적혀 있었는데, 통로 셋
+///   (PTY·stdio·codex)이 전부 **유계 입력 큐**에 담고 전담 라이터가 빼서 쓰는 지금 그것은 사실이 아니다.
+///   갈림은 이렇다:
+///   - `AgentSession::submit_input_observed`(= 우편 배달이 쓰는 동사, `AgentManager::submit_stdin_observed`)
+///     의 `Ok` = ★**실제로 OS 로 나갔다**★. 그 동사가 `AgentTransport::flush_input` 으로 착지를 확인한 뒤에만
+///     영수증을 낸다 — ADR-0088 이 가르려는 "전송 실패" vs "모델이 무시" 가 그 확인 위에 선다.
+///   - `AgentSession::write_input_observed`(키 입력 스트리밍 판)의 `Ok` = **전량을 순서까지 확정해 받았다**.
+///     그 경로는 기다리지 않는다(기다리면 연결당 dispatch 소비자가 물린 에이전트 하나에 통째로 선다).
+///   ★확인 수단이 없는 통로는 옛 수준 그대로다★ — codex app-server 와 시험대 seam 은 `flush_input` 이
+///     `Unsupported` 라 배달 동사도 「받았다」까지만 안다. **그 통로에 대해서는 이 레코드가 착지를 단언하지
+///     않는다**(pre-existing — 그 통로의 큐는 이 규율보다 먼저 있었다).
+///
+/// ★완결성 신호 = Ok-vs-Err 이지 바이트 비교가 아니다(중요)★: 위 갈림 어느 쪽이든 부분 수용을 `Ok` 로
+///   숨기지 않는다 — 전량을 받거나(또는 전량이 나가거나) `Err` 다. 따라서 그 판정의 유일한 증거는
 ///   `Ok(WriteOutcome)` **자체**(vs `Err`)다 — 아래 두 바이트 필드의 비교가 아니다. 진짜 written
 ///   바이트 수는 transport 밖으로 스레드되지 않으므로(write_all 계약상 불필요), `bytes_written` 은
 ///   독립 계측값이 아니라 `bytes_requested` 를 **구성상 그대로 복사**한 값이다(short-write 탐지 불가 —

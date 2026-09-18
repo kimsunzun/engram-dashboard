@@ -833,6 +833,15 @@ export class ProtocolClient implements AgentClient {
   }
 
   // ── 명령(인터페이스 → wire) ───────────────────────────────────────────────────────
+  /**
+   * ★★활성화(spawn 계열)는 **반드시 이 Promise 를 await 한 뒤에** 그 agent id 를 쓴다★★
+   * — `spawnProfile` 도 같다. 데몬은 활성화 명령을 그 연결의 도착순 줄에서 떼어 별도 태스크로 돌리므로
+   * (활성화만이 결말까지 기다리는 갈래라, 줄에 두면 그동안 이 연결의 다른 명령이 전부 함께 늦는다),
+   * 답을 안 기다리고 보낸 후속 명령이 **먼저 실행돼** 「agent not found」로 실패한다. 같은 id 의 활성화를
+   * 답 받기 전에 다시 보내는 것도 같은 이유로 금지다(데몬의 검사/등록 창에 두 요청이 함께 든다).
+   * 계약의 정본은 wire 어휘 쪽 — `crates/engram-dashboard-protocol/src/messages.rs` 의 `AgentCommand`
+   * 머리에 있는 「활성화 셋의 호출 계약」.
+   */
   spawnAgent(cwd: string, backend: AgentBackendKind): Promise<AgentInfo> {
     return this.sendCommand<AgentInfo>((request_id) => ({ SpawnByCwd: { cwd, backend, request_id } }))
   }
@@ -922,6 +931,7 @@ export class ProtocolClient implements AgentClient {
       DeleteProfile: { profile_id: agentId, request_id },
     }))
   }
+  /** ★답을 await 한 뒤에 그 agent id 를 쓸 것 — 계약은 `spawnAgent` 의 doc★ */
   spawnProfile(agentId: string, resume: boolean): Promise<AgentInfo> {
     return this.sendCommand<AgentInfo>((request_id) => ({
       SpawnProfile: { profile_id: agentId, resume, request_id },
