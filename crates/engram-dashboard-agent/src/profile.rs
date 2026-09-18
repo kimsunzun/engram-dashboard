@@ -372,6 +372,9 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
 /// 로 재진입하지 않는다 → 락 순서는 `profiles → write_lock` 단방향, 순환 없음. profiles lock 은 세션
 /// (sessions/core/status) 락 도메인과도 분리라 그 순서에 얽히지 않는다. 로컬 소형 파일이라
 /// lock 보유 중 IO 비용도 무시 가능.
+/// ★**「그래도 lock-hold 를 줄이자」는 재론은 ADR-0207 이 닫았다**★ — 그 비용을 *수용*한 자리는
+/// ADR-0071:27 이고(이 주석이 아니다 — 여기는 IO 비용만 말한다), 0207 은 ① 줄일 대상이 측정된 적이
+/// 없고 ② 이 save 가 수명 이벤트에서만 돈다는 근거로 현상 유지를 재확인했다. 되열리는 조건도 거기 있다.
 pub struct ProfileRegistry {
     profiles: Mutex<HashMap<AgentId, AgentProfile>>,
     store: Arc<dyn ProfileStore>,
@@ -393,7 +396,7 @@ impl ProfileRegistry {
         let result = f(&mut guard);
         normalize_hierarchy(&mut guard);
         let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
-        // ADR-0071
+        // ADR-0071 · ADR-0207
         self.store.save(&snapshot);
         result
     }
