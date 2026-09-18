@@ -23,7 +23,8 @@ use crate::failure::AgentFailureKind;
 use crate::output_core::{OutputCore, TurnWiring};
 use crate::preset::PresetRegistry;
 use crate::profile::{
-    AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
+    AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SessionIdAdoption,
+    SpawnMode,
 };
 use crate::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::session::AgentSession;
@@ -437,6 +438,35 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
     ))
 }
 
+/// Fresh 스폰이 **저장된 세션 id 를 비우고 시작해야 하나** — 발급 축이 꺼진 backend 전용 판정.
+///
+/// ★참인 조건 셋을 전부 요구한다★
+///   1. **Fresh 다.** Resume 에서 비우면 이어받을 손잡이가 사라진다(ADR-0083 이 지키는 그 값이다).
+///   2. **우리가 그 id 를 발급하지 않는다.** 발급하는 쪽은 `new_session_id` 가 같은 밀기를 이미 한다 —
+///      여기서 또 부르면 그 발급을 지운다.
+///   3. ★**이 화신에 그 칸을 채울 경로가 있다**★ — 상대가 우리에게 id 를 말할 수 있는 통로가 하나라도
+///      있어야 한다. 없는데 비우면, 손으로 심어 둔 값이 아무도 다시 안 채우는 채로 사라진다.
+///
+/// ★3 번의 경로가 오늘 둘이고, 그 열거는 **손으로 관리된다**★: 통로 연결([`backend::declares_link`] —
+///   그 통로가 핸드셰이크 응답에서 받아 [`session_id_sink`] 로 넘긴다)과 제어 평면
+///   ([`backend::supports_control_channel`] — 상대가 띄운 훅이 그 자격증명으로 보고한다). 셋째 경로가
+///   생기면 여기 더해야 하고, 안 더하면 그 backend 만 2 회차 화신부터 보고가 거절된다.
+/// ★오늘 이 판정이 실제로 갈리는 자리★: codex 는 두 모양 다 참, shell·gemini 는 거짓(경로가 없다),
+///   claude 는 2 번에서 거짓이다.
+///
+/// ★없으면 무슨 일이 나나(되살리지 말 것)★: 발급 축이 꺼진 backend 는 화신마다 새 대화를 여는데 칸이
+///   첫 화신 값으로 찬 채 남아, 2 회차부터 모든 보고가 「이미 다른 값이 있다」로 거절된다. 그 거절 로그는
+///   중첩 사고의 **유일한 사후 판별 수단**이라(데몬 `control::hook`), 정상 재시작마다 찍히면 신호가
+///   잡음이 된다. 그리고 그 칸은 아래 `resume_session_id` 가 읽는 바로 그 칸이라, 이어받기를 여는 날
+///   최초 대화로 되감긴다.
+// ADR-0185
+// ADR-0083
+pub(crate) fn fresh_spawn_release_session_id(command: &AgentCommand, mode: SpawnMode) -> bool {
+    matches!(mode, SpawnMode::Fresh)
+        && !backend::assigns_session_id(command)
+        && (backend::supports_control_channel(command) || backend::declares_link(command))
+}
+
 fn session_id_sink(
     profiles: Arc<ProfileRegistry>,
     id: AgentId,
@@ -782,6 +812,36 @@ impl AgentManager {
 
     pub fn agent_backend_session_id(&self, id: AgentId) -> Option<uuid::Uuid> {
         self.profiles.get(id).and_then(|p| p.backend_session_id)
+    }
+
+    /// 통로 **밖**(제어 평면)에서 온 세션 id 보고를 프로필에 적는다 — ★빈 칸에만★.
+    ///
+    /// 규칙·거절 사유·「덮지 않는다」의 근거는 전부 [`ProfileRegistry::adopt_session_id`] 가 진다.
+    /// 여기서는 화신 축을 `Option` 이 아닌 값으로 받아 그 규칙에 그대로 넘긴다 — 이 경로의 호출자는
+    /// 자격증명에서 화신을 받으므로 「대조할 축이 없다」 갈래가 없다.
+    // ADR-0185
+    pub fn adopt_reported_session_id(
+        &self,
+        id: AgentId,
+        epoch: u32,
+        sid: uuid::Uuid,
+    ) -> SessionIdAdoption {
+        self.profiles.adopt_session_id(id, epoch, sid)
+    }
+
+    /// 이 에이전트가 **자기 세션 id 를 우리에게서 받는 쪽인가**(= 우리가 발급하나).
+    ///
+    /// ★제어 평면의 세션 id 보고 입구가 자격을 가르는 축이다★ — `true` 인 에이전트의 손잡이는 **우리가
+    ///   정한 값**이라, 밖에서 온 보고가 그것을 건드릴 이유가 하나도 없다. 그런 보고를 받아 주면 그
+    ///   에이전트가 자기 이어받기를 스스로 깨는 경로가 열린다.
+    /// `None` = 그 프로필이 없다.
+    /// ★판정을 여기서 새로 짜지 않는다★ — backend dispatch 의 그 술어를 **읽기만** 한다(ADR-0185).
+    // ADR-0004
+    // ADR-0185
+    pub fn assigns_own_session_id(&self, id: AgentId) -> Option<bool> {
+        self.profiles
+            .get(id)
+            .map(|p| backend::assigns_session_id(&p.command))
     }
 
     /// 에이전트 신규 등록(트리 "만들기"). 등록 전에 명부 전역 이름 유일성을 강제한다(ADR-0120).
@@ -1185,6 +1245,13 @@ impl AgentManager {
             };
             Some(issued.ok_or_else(|| profile_vanished_mid_spawn(profile.id, "세션 id 발급"))?)
         } else {
+            // ★두 갈래가 Fresh 에서 **같은 일**을 한다 — 옛 손잡이를 이력으로 밀고 빈 칸에서 시작한다★.
+            //   위는 밀고 새 uuid 를 박고(우리가 뽑으므로), 아래는 밀기만 한다(상대가 뽑으므로).
+            //   판정·사유의 정본은 [`fresh_spawn_release_session_id`].
+            // ADR-0185
+            if fresh_spawn_release_session_id(&profile.command, mode) {
+                self.profiles.clear_session_id(profile.id);
+            }
             None
         };
 
@@ -1207,9 +1274,15 @@ impl AgentManager {
             //   한꺼번에 가르게 한다(정합 불변식 = 가르치는 채널 ⊆ 깐 채널 — ADR-0126 결정 4 로 단방향 개정).
             //   판정은 backend dispatch(ADR-0004) — manager 는 command 를 직접 matches! 하지 않는다.
             // ADR-0126
-            let accepts_mcp = backend::accepts_mcp_config(&profile.command);
+            // ★두 축을 **각각** 묻는다 — 한쪽에서 다른 쪽을 파생하지 않는다★: 그 접힘이 「제어는 쓰지만
+            //   우편 평면 밖」인 backend 에 보내기 인가를 조용히 열었던 자리다([`ControlChannelNeeds`] doc).
+            // ADR-0133
+            let needs = crate::types::ControlChannelNeeds {
+                accepts_mcp_config: backend::accepts_mcp_config(&profile.command),
+                uses_mail: backend::uses_mail(&profile.command),
+            };
             self.control
-                .provision(profile.id, epoch, accepts_mcp)
+                .provision(profile.id, epoch, needs)
                 .map_err(|e| {
                     PtyError::SpawnFailed(format!(
                         "control channel provision failed (fail-closed): {e}"
@@ -2817,6 +2890,143 @@ mod tests {
         profiles.upsert(p);
         let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
         (profiles, id, epoch)
+    }
+
+    // ── Fresh 스폰의 손잡이 반납(ADR-0185) ──────────────────────────────────────
+
+    use uuid::Uuid;
+
+    fn codex(output_format: crate::profile::AgentOutputFormat) -> AgentCommand {
+        AgentCommand::Codex {
+            extra_args: vec![],
+            output_format,
+        }
+    }
+
+    /// ★판정표 — 백엔드 선언을 **읽어서** 갈린다(리터럴 사본이 아니다)★.
+    ///
+    /// ★이 시험이 재지 않는 것★: 이 술어가 실제로 `spawn_agent` 에 실리는지. 그쪽은 실 프로세스를 띄워야
+    ///   하는 자리라 이 파일이 안 잰다(형제 `session_id_sink` 시험들과 같은 범위).
+    #[test]
+    fn fresh_spawn_releases_the_handle_only_where_something_can_refill_it() {
+        use crate::profile::AgentOutputFormat as Fmt;
+        let shell = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let claude = AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: Fmt::Terminal,
+        };
+
+        // 발급 축이 꺼져 있고 보고 경로가 있는 두 모양 — 비운다.
+        for c in [codex(Fmt::Terminal), codex(Fmt::StreamJson)] {
+            assert!(
+                fresh_spawn_release_session_id(&c, SpawnMode::Fresh),
+                "{c:?}: Fresh 는 빈 칸에서 시작해야 한다"
+            );
+            // ★Resume 은 **절대** 비우지 않는다★ — 그 칸이 이어받을 손잡이다(ADR-0083).
+            assert!(
+                !fresh_spawn_release_session_id(&c, SpawnMode::Resume),
+                "{c:?}: Resume 이 손잡이를 지웠다"
+            );
+        }
+
+        // 보고 경로가 하나도 없다 — 비우면 손으로 심어 둔 값이 아무도 안 채우는 채로 사라진다.
+        assert!(!fresh_spawn_release_session_id(&shell, SpawnMode::Fresh));
+        assert!(!fresh_spawn_release_session_id(&shell, SpawnMode::Resume));
+
+        // 우리가 발급하는 쪽 — `new_session_id` 가 같은 밀기를 이미 한다.
+        assert!(!fresh_spawn_release_session_id(&claude, SpawnMode::Fresh));
+        assert!(!fresh_spawn_release_session_id(&claude, SpawnMode::Resume));
+    }
+
+    /// ★이 시험이 재는 것이 적출 A 의 본체다★: 2 회차 화신의 새 id 가 **거절이 아니라 기록**으로 끝난다.
+    /// 비우기가 없으면 아래 마지막 단언이 `Conflict` 로 떨어지고, 그 거절 로그가 정상 재시작마다 찍혀
+    /// 중첩 사고 신호를 덮는다.
+    #[test]
+    fn a_second_incarnation_records_its_own_session_id() {
+        use crate::profile::SessionIdAdoption;
+        let (profiles, id, first_epoch) = sink_fixture();
+
+        // 1 회차 — 빈 칸에 상대가 준 값이 앉는다.
+        let first = Uuid::new_v4();
+        assert_eq!(
+            profiles.adopt_session_id(id, first_epoch, first),
+            SessionIdAdoption::Adopted
+        );
+
+        // 2 회차 스폰 — 화신이 갈리고, 스폰 경로가 손잡이를 반납한다.
+        let second_epoch = profiles.epoch_for_spawn(id).expect("프로필");
+        assert!(fresh_spawn_release_session_id(
+            &codex(crate::profile::AgentOutputFormat::StreamJson),
+            SpawnMode::Fresh
+        ));
+        assert!(
+            profiles.clear_session_id(id),
+            "반납이 실제로 값을 밀어야 한다"
+        );
+
+        let second = Uuid::new_v4();
+        assert_eq!(
+            profiles.adopt_session_id(id, second_epoch, second),
+            SessionIdAdoption::Adopted,
+            "2 회차 화신의 새 id 가 거절됐다"
+        );
+        let p = profiles.get(id).expect("프로필");
+        assert_eq!(p.backend_session_id, Some(second));
+        assert_eq!(
+            p.old_session_ids,
+            vec![first],
+            "옛 손잡이는 지워지는 게 아니라 이력으로 간다"
+        );
+    }
+
+    /// 같은 화신 안에서는 반납이 없으므로 **다른 값은 여전히 거절된다** — 비우기가 규칙을 우회하지 않는다.
+    #[test]
+    fn releasing_at_spawn_does_not_open_the_rule_inside_one_incarnation() {
+        use crate::profile::SessionIdAdoption;
+        let (profiles, id, epoch) = sink_fixture();
+        let mine = Uuid::new_v4();
+        assert_eq!(
+            profiles.adopt_session_id(id, epoch, mine),
+            SessionIdAdoption::Adopted
+        );
+        assert_eq!(
+            profiles.adopt_session_id(id, epoch, Uuid::new_v4()),
+            SessionIdAdoption::Conflict
+        );
+        assert_eq!(
+            profiles.get(id).and_then(|p| p.backend_session_id),
+            Some(mine)
+        );
+    }
+
+    /// app-server 는 통로 sink 가 곧바로 채우므로 반납의 영향을 받지 않는다 — 비우고 sink 가 쓰면 끝이다.
+    #[test]
+    fn releasing_the_handle_does_not_disturb_a_transport_that_refills_it() {
+        let (profiles, id, epoch) = sink_fixture();
+        profiles.adopt_session_id(id, epoch, Uuid::new_v4());
+        let next_epoch = profiles.epoch_for_spawn(id).expect("프로필");
+        profiles.clear_session_id(id);
+
+        // 통로가 핸드셰이크 응답으로 받은 값을 그 자리에 적는다(운영과 같은 동사).
+        let from_transport = Uuid::new_v4();
+        session_id_sink(profiles.clone(), id, next_epoch)(&from_transport.to_string());
+
+        assert_eq!(
+            profiles.get(id).and_then(|p| p.backend_session_id),
+            Some(from_transport)
+        );
+    }
+
+    /// 빈 칸을 또 비우는 것은 무동작이다(저장도 안 탄다).
+    #[test]
+    fn releasing_an_empty_handle_changes_nothing() {
+        let (profiles, id, _) = sink_fixture();
+        assert!(!profiles.clear_session_id(id));
+        assert_eq!(profiles.get(id).and_then(|p| p.backend_session_id), None);
+        assert!(profiles.get(id).expect("프로필").old_session_ids.is_empty());
     }
 
     #[test]

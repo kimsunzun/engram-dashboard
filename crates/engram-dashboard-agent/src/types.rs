@@ -268,6 +268,35 @@ pub const MAIL_MARKER_ENV: &str = "ENGRAM_MAIL";
 pub const MAIL_MARKER_ON: &str = "on";
 pub const MAIL_MARKER_OFF: &str = "off";
 
+/// 훅 보고가 POST 하는 **라우트 경로**.
+///
+/// ★다른 라우트와 달리 이 하나만 공유값이다 — 일관성 위반이 아니라 **실패 모드가 다르기 때문**이다★:
+///   나머지 경로는 CLI 가 적고 데몬 상수와 손으로 맞춘다(`bin/engram.rs` 의 `Command::route`). 그쪽이
+///   어긋나면 에이전트가 404 body 와 exit 1 을 보고 **즉시 안다**. 이 경로는 응답을 버리고 언제나 0 으로
+///   끝나므로(그 동사의 계약) 어긋나도 아무도 모른 채 세션 id 가 조용히 유실된다 — 그래서 손으로 맞추는
+///   규약을 이 하나에는 적용하지 않는다.
+/// ★생산자(CLI `bin/engram.rs`)와 소비자(데몬 `control::mcp_server`)가 다른 crate 라 여기 산다★ —
+///   `AGENT_STATE_LIVE` 와 같은 사유.
+// ADR-0086
+// ADR-0132
+pub const CONTROL_HOOK_ROUTE: &str = "/control/hook";
+
+/// 훅 보고가 실어 나르는 **세션 id 칸의 이름**.
+///
+/// ★이 한 낱말이 **두 계약에 동시에 서 있다**★: ① 에이전트 프로그램이 훅 프로세스 stdin 으로 주는
+///   JSON 의 필드 이름(외부 세계의 사실 — codex 0.155.0 실측 2026-09-18) ② 그 훅이 데몬 제어 라우트로
+///   POST 하는 요청 봉투의 필드 이름(우리 계약). 오늘 철자가 같아서 한 값으로 둔다.
+/// ★상류가 자기 필드를 개명하면 이 상수를 **쪼개라 — 따라 바꾸지 말 것**★: 우리 봉투까지 함께 바뀌면
+///   데몬 쪽 역직렬화가 조용히 실패해 보고가 통째로 사라진다(그 실패는 훅이 삼키므로 화면에 아무 신호도
+///   없다).
+/// ★왜 여기 사나★: 생산자(CLI `bin/engram.rs`)와 소비자(데몬 `control::hook`)가 다른 crate 라 각자
+///   리터럴을 적으면 한쪽만 바뀌어도 아무도 못 본다 — `AGENT_STATE_LIVE` 와 같은 사유다.
+/// ★백엔드 이름이 안 들어가는 것도 계약이다★ — `SessionIdSink` 와 같은 규율(그 포트 doc). "codex 용"
+///   이라 부르는 순간 그 지식이 공용 층에 이름으로 박힌다(ADR-0004).
+// ADR-0004
+// ADR-0185
+pub const CLI_HOOK_SESSION_ID_FIELD: &str = "session_id";
+
 /// 우편 계열의 동사 전량 — `engram mail <동사>`.
 ///
 /// 세 소비자가 같은 값을 봐야 한다: CLI 파서(무엇을 받나) · 프라이밍 판정자(본문이 **실행 가능한** 호출을
@@ -357,6 +386,11 @@ pub enum ToolGrant {
 /// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
 /// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude/ 단독,
 /// ADR-0004). agent/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
+///
+/// ★칸마다 소비자가 다르다 — 「backend 가 번역한다」를 「칸 전부를 한 backend 가 쓴다」로 읽지 말 것★:
+/// 아래 `token`·`send_exe`·`mail_allowed` 는 **백엔드 공용 주입**(`backend::inject_cli_entrance`)이
+/// 쓰고, `config_path`·`priming_file`·`settings_file`·`grants` 는 그것을 받아들이는 프로그램의 폴더가
+/// 자기 플래그로만 번역한다. 그 분담의 근거는 바로 아래 `config_path` doc 이 이미 적어 둔 문장이다.
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
     /// 데몬 MCP Streamable HTTP 엔드포인트 URL(예: `http://127.0.0.1:<port>/mcp`).
@@ -376,8 +410,8 @@ pub struct ControlEndpoint {
     ///   는 존재하지 않는다.
     pub config_path: Option<std::path::PathBuf>,
     /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram` CLI 바이너리 절대경로(있으면).
-    /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
-    /// 그 env(claude=`ENGRAM_CLI_EXE`)와 PATH 프리펜드를 주입하지 않는다.
+    /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 CLI 입구 주입이
+    /// 그 env(`CLI_EXE_ENV`)와 PATH 프리펜드를 건너뛴다(`backend::inject_cli_entrance` — 백엔드 공용).
     /// ★소비 조건 = control endpoint 가 있는 스폰 전부(ADR-0133 · ADR-0132 결정 5)★: 제어 동사는 전원에게
     /// 열리므로 두 갈래 모두 이 값을 쓴다. 형제 exe 탐색 지식은 데몬 소유(lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
@@ -431,6 +465,35 @@ impl std::fmt::Display for ProvisionError {
 
 impl std::error::Error for ProvisionError {}
 
+/// 이 스폰이 제어 채널에서 **무엇을 받나** — provision 이 갈리는 축 전부.
+///
+/// ★두 칸이지 하나가 아니다 — 합치지 말 것★: 예전에는 `accepts_mcp_config` 하나가 MCP 입구·프라이밍
+///   변형·grant·**우편 가부**를 전부 굴렸다. 그 접힘 때문에 「제어 채널은 쓰지만 우편 평면 밖」인
+///   backend 가 제어를 켜는 순간 **보내기 인가까지 함께 열렸다**(받기는 닫힌 채로). 그 비대칭은 어느
+///   선언에도 안 적혀 있었다 — 축이 둘인데 칸이 하나였기 때문이다.
+/// ★그래도 `mail_allowed` 의 **파생점은 여전히 하나다**(ADR-0133 결정 2)★: 데몬이 이 두 칸에서 한 값을
+///   만들고, 그 한 값이 자격증명에 박히는 강제와 endpoint 에 실리는 표식을 **함께** 낳는다. 바뀐 것은
+///   그 식의 재료 수뿐이다. 두 자리에서 따로 판정하면 교육과 강제가 갈린다.
+/// ★`engram` CLI 배선(env·PATH)은 어느 조합에서도 깔린다★ — 제어 동사가 전원 개방이기 때문이다
+///   (ADR-0132 결정 5). 이 타입이 가르는 것은 **우편과 MCP** 뿐이다.
+// ADR-0099
+// ADR-0126
+// ADR-0133
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlChannelNeeds {
+    /// 이 backend 가 **우리가 만든 mcp-config 파일을 먹을 수 있나**(ADR-0099).
+    ///
+    /// true → mcp-config + 세션 설정 조각 기록 + MCP endpoint bits. false → 그 셋 다 안 만든다.
+    /// ★"MCP 를 쓸 수 있나" 가 아니다★ — 다른 기제로 MCP 를 켜는 프로그램도 이 칸은 false 다
+    ///   (판정의 정본은 각 backend 폴더).
+    pub accepts_mcp_config: bool,
+    /// 이 스폰에 **우편 채널을 배정하나**(`AgentBackend::uses_mail`).
+    ///
+    /// false → 우편 교육(프라이밍)도 발신 grant 도 안 실리고, 데몬이 이 자격증명의 우편 요청을 거절한다.
+    /// ★그래도 제어 동사와 CLI 입구는 받는다★ — 위 타입 doc 의 마지막 항.
+    pub uses_mail: bool,
+}
+
 /// 제어 채널 provisioning seam(ADR-0086). AgentManager 기본값 = `NoopControlChannel`.
 pub trait ControlChannel: Send + Sync + 'static {
     /// (AgentId,epoch)용 토큰을 발급하고 (MCP-capable 이면) mcp-config 파일을 만들어 엔드포인트를 돌려준다.
@@ -440,23 +503,15 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///   - `Err(_)`       — 제어 채널을 쓰려다 **실패**(CSPRNG/파일 write 오류). ★치명★ — 스폰은
     ///     이 Err 를 만나면 fail-closed 로 중단한다(제어 채널 없이 몰래 도는 에이전트 금지, health 위장 방지).
     ///
-    /// `accepts_mcp_config`(ADR-0099): 이 backend 가 mcp-config 를 받아들이는가(= MCP-capable 인가). manager 가
-    ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **MCP 입구·
-    ///   프라이밍 변형·grant·우편 가부를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 우편 채널
-    ///   **=** 그 스폰이 실제로 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면 ADR-0099 가 실측한 발신
-    ///   freeze 가 재발한다).
-    ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
-    ///   결정 1) + `mail_allowed=false`(데몬이 이 자격증명의 우편 요청을 거절한다 — ADR-0133).
-    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `mail_allowed=true`.
-    ///   `engram` CLI 배선(env·PATH)은 **두 갈래 모두** 받는다 — 제어 동사가 전원 개방이기 때문이다
-    ///   (ADR-0132 결정 5).
+    /// `needs` = 이 스폰이 제어 채널에서 무엇을 받나([`ControlChannelNeeds`] — 두 칸의 뜻과 갈림의
+    ///   정본이 그 타입 doc 이다). manager 가 backend dispatch 로 채워 넘긴다.
     // ADR-0126
     // ADR-0133
     fn provision(
         &self,
         id: AgentId,
         epoch: u32,
-        accepts_mcp_config: bool,
+        needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError>;
 
     /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
@@ -477,7 +532,7 @@ impl ControlChannel for NoopControlChannel {
         &self,
         _id: AgentId,
         _epoch: u32,
-        _accepts_mcp_config: bool,
+        _needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         Ok(None)
     }

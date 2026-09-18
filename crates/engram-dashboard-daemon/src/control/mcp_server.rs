@@ -42,11 +42,12 @@ use crate::connection_core::sanitize_for_log;
 
 /// MCP 서버가 붙는 axum 경로. mcp-config url 도 이 경로를 가리킨다(`http://127.0.0.1:<port>/mcp`).
 ///
-/// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. claude backend 가 CLI 용
+/// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. CLI 입구 주입이 CLI 용
 ///   base URL(ENGRAM_CONTROL_URL)을 파생할 때 이 리터럴 suffix("/mcp")를 **문자열로 벗긴다** —
-///   `crates/engram-dashboard-agent/src/backend/claude/`(strip_suffix("/mcp")). 이 값을 바꾸면
-///   거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이 틀어지고 CLI 가
-///   조용히 404 를 받는다.
+///   `crates/engram-dashboard-agent/src/backend/mod.rs`(`inject_cli_entrance` 의 strip_suffix("/mcp")).
+///   이 값을 바꾸면 거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이
+///   틀어지고 CLI 가 조용히 404 를 받는다.
+///   ★그 자리는 이제 **백엔드 공용**이다★ — 어긋나면 claude 뿐 아니라 codex 스폰의 CLI 도 함께 죽는다.
 const MCP_PATH: &str = "/mcp";
 
 /// CLI 입구(ADR-0086 스텝 2) — `engram mail send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
@@ -78,6 +79,16 @@ const CONTROL_AGENT_PATH: &str = "/control/agent";
 /// ★`pub(super)` 인 이유★: 이웃 `catalog` 의 회복 안내가 이 경로를 문구에 싣고, 그 테스트가 이 상수를 태워
 ///   대조한다 — 문구가 없는 주소를 가리키는 것을 막는 유일한 수단이다.
 pub(super) const CONTROL_COMMANDS_PATH: &str = "/control/commands";
+
+/// 훅 보고 입구 — 에이전트가 띄운 **자식 프로세스**가 「나는 지금 이 세션이다」를 보고한다(`control::hook`).
+///
+/// ★형제들과 **부르는 주체가 다르다**★: 다른 제어 라우트는 에이전트 본인이 치는 동사인데 이쪽은 그
+///   프로그램이 대신 띄운 훅이고, 그 훅은 응답을 읽지 않는다(자기 실패로 사용자 세션을 죽이면 안 되기
+///   때문이다 — CLI 쪽 훅 동사 주석). 그래서 이 라우트의 실질 출력은 **데몬 로그**다.
+/// ★우편이 아니다★ — 아래 `is_mail` 이 그것을 컴파일 단계에서 적게 만든다.
+/// ★경로 문자열이 **공유 상수**다(형제들과 다른 규약이고 그것이 의도다)★ — 사유의 정본은
+///   [`engram_dashboard_agent::types::CONTROL_HOOK_ROUTE`] doc: 이 라우트만 어긋남이 조용하다.
+const CONTROL_HOOK_PATH: &str = engram_dashboard_agent::types::CONTROL_HOOK_ROUTE;
 
 /// CLI 범용 호출 입구 — 명령을 **전체 이름**으로 부른다(`{name, args}`).
 ///
@@ -111,15 +122,17 @@ enum ControlRoute {
     Agent,
     Commands,
     Call,
+    Hook,
 }
 
 impl ControlRoute {
-    const ALL: [ControlRoute; 5] = [
+    const ALL: [ControlRoute; 6] = [
         Self::Send,
         Self::Messages,
         Self::Agent,
         Self::Commands,
         Self::Call,
+        Self::Hook,
     ];
 
     const fn path(self) -> &'static str {
@@ -129,6 +142,7 @@ impl ControlRoute {
             Self::Agent => CONTROL_AGENT_PATH,
             Self::Commands => CONTROL_COMMANDS_PATH,
             Self::Call => CONTROL_CALL_PATH,
+            Self::Hook => CONTROL_HOOK_PATH,
         }
     }
 
@@ -151,7 +165,7 @@ impl ControlRoute {
             Self::Send | Self::Messages => true,
             // 제어 평면 — 발견과 호출은 우편이 아니다. 편지를 못 쓰는 자격증명도 무엇을 부를 수 있는지
             //   알아야 하고, 부를 수 있어야 한다(ADR-0132 결정 5 — 제어는 전원 개방).
-            Self::Agent | Self::Commands | Self::Call => false,
+            Self::Agent | Self::Commands | Self::Call | Self::Hook => false,
         }
     }
 
@@ -1053,6 +1067,105 @@ async fn control_agent_handler(
     Json(result.to_json()).into_response()
 }
 
+// ── 훅 보고 입구(/control/hook) ────────────────────────────────────────────────
+
+/// 훅 라우트의 State — 프로필을 볼 수단 하나뿐이다.
+///
+/// ★요청들 사이에 남는 상태가 **없다**★: 중첩 보고를 가르는 근거는 프로필에 이미 있는 값이고
+///   (`control::hook` 헤더), 그래서 이 라우트는 자기 자료구조를 갖지 않는다. 「이 화신에서 먼저 온
+///   보고인가」를 기억하는 맵을 여기 다시 만들지 말 것 — 그 축이 바로 **정상 재개를 덮는** 경로였다.
+#[derive(Clone)]
+struct ControlHookState {
+    manager: Arc<ManagerSlot>,
+}
+
+/// [`super::hook::SessionStartRecorder`] 의 운영 어댑터 — 매니저 슬롯을 그 포트로 옮긴다.
+///
+/// ★슬롯이 비어 있으면 **「그런 에이전트 없음」과 같은 답**을 낸다★: 자격 질문엔 `None`, 쓰기엔
+///   `Vanished`. 판정부가 그것을 로그로 남긴다. 여기서 503 을 내지 않는 것은 훅이 그 응답을 읽지 않기
+///   때문이다 — 코드를 갈라도 아무도 안 본다. 배선 이상 자체는 아래 `error!` 가 남긴다.
+struct ManagerSessionRecorder(Arc<ManagerSlot>);
+
+impl ManagerSessionRecorder {
+    fn manager(&self, what: &'static str) -> Option<&Arc<AgentManager>> {
+        let m = self.0.get();
+        if m.is_none() {
+            tracing::error!(
+                entrance = "cli",
+                step = what,
+                "세션 시작 보고를 처리하지 못했다 — 매니저 슬롯 미설정(배선 순서 이상)"
+            );
+        }
+        m
+    }
+}
+
+impl super::hook::SessionStartRecorder for ManagerSessionRecorder {
+    fn assigns_own_session_id(&self, id: engram_dashboard_agent::types::AgentId) -> Option<bool> {
+        self.manager("eligibility")?.assigns_own_session_id(id)
+    }
+
+    fn adopt(
+        &self,
+        id: engram_dashboard_agent::types::AgentId,
+        epoch: u32,
+        sid: uuid::Uuid,
+    ) -> engram_dashboard_agent::profile::SessionIdAdoption {
+        match self.manager("adopt") {
+            Some(manager) => manager.adopt_reported_session_id(id, epoch, sid),
+            None => engram_dashboard_agent::profile::SessionIdAdoption::Vanished,
+        }
+    }
+}
+
+/// 항상 200 + JSON(성공/반려 모두) — 형제(`/control/agent`)와 같은 계약이다.
+///
+/// ★`spawn_blocking` 경계도 형제와 같다★: 이 경로는 프로필 뮤텍스를 잡고 그 임계구역이 **디스크 저장**
+///   까지 포함한다(`ProfileRegistry::adopt_session_id` → `ProfileStore::save`). async 워커에서 그대로
+///   부르면 그 워커는 양보가 아니라 park 되고, 같은 스레드에 얹힌 **다른 요청까지** 막힌다. 같은 잠금을
+///   한쪽 라우트만 워커에서 잡을 이유도 없다.
+/// ★이 입구가 부르는 것은 `adopt_session_id` 이지 형제 `observe_session_id` 가 **아니다**★ — 두 동사의
+///   규칙이 정반대다(이쪽은 빈 칸에만 쓰고, 그쪽은 덮는다). 그 차이가 이 라우트의 존재 이유라, 이름을
+///   섞어 적으면 다음 독자가 정확히 반대 규칙을 이 입구 것으로 읽는다.
+async fn control_hook_handler(
+    axum::extract::State(state): axum::extract::State<ControlHookState>,
+    identity: Option<axum::Extension<BoundIdentity>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(axum::Extension(caller)) = identity else {
+        return unauthorized();
+    };
+    // ★`Json<…>` 추출기를 쓰지 않는 이유는 형제와 같다★ — 그쪽 주석이 정본이다. 다만 여기서는 사유가
+    //   호출자 자기교정이 아니라 **로그에 남는 진단**이다(훅은 응답을 안 읽는다).
+    let req: super::hook::HookSessionStartRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(
+                entrance = "cli",
+                agent = %caller.agent_id,
+                epoch = caller.epoch,
+                "세션 시작 보고의 봉투를 읽지 못했다: {e}"
+            );
+            return Json(serde_json::json!({
+                "status": "error",
+                "code": "INVALID_ARGUMENT",
+                "hint": e.to_string(),
+            }))
+            .into_response();
+        }
+    };
+    let Ok((_outcome, result)) = tokio::task::spawn_blocking(move || {
+        let recorder = ManagerSessionRecorder(state.manager);
+        super::hook::handle_session_start(&recorder, caller, &req)
+    })
+    .await
+    else {
+        tracing::error!(entrance = "cli", "세션 시작 보고 태스크 실패(패닉)");
+        return internal_error();
+    };
+    Json(result.into_json()).into_response()
+}
+
 // ── CLI 발견·범용 호출 입구(/control/commands · /control/call) ──────────────────────
 
 /// 두 카탈로그 라우트의 State — 발견이 합치는 **두 출처**를 그대로 든다(`control::catalog::merge`).
@@ -1316,6 +1429,9 @@ pub async fn start_mcp_server(
         bus,
     };
     let agent_state = ControlAgentState { commands };
+    let hook_state = ControlHookState {
+        manager: manager.clone(),
+    };
     // ★명단(`ControlRoute::ALL`)을 돌며 얹는다 — 빌더 체인으로 되돌리지 말 것★: 새 라우트가 명단에
     //   들어와야 서빙이 되고, 들어오면 `is_mail` 의 exhaustive match 가 우편 분류를 컴파일 단계에서
     //   강제한다(ADR-0133). 체인은 그 강제를 우회한다.
@@ -1341,6 +1457,10 @@ pub async fn start_mcp_server(
             ControlRoute::Call => app.route(
                 route.path(),
                 axum::routing::post(control_call_handler).with_state(catalog_state.clone()),
+            ),
+            ControlRoute::Hook => app.route(
+                route.path(),
+                axum::routing::post(control_hook_handler).with_state(hook_state.clone()),
             ),
         };
     }
@@ -1392,6 +1512,7 @@ mod tests {
             ControlRoute::Agent => false,
             ControlRoute::Commands => false,
             ControlRoute::Call => false,
+            ControlRoute::Hook => false,
         }
     }
 
@@ -1411,7 +1532,7 @@ mod tests {
             );
         }
         // 라우터는 이 명단을 돌며 조립된다 — 길이가 줄면 라우트가 조용히 사라진 것이다.
-        assert_eq!(ControlRoute::ALL.len(), 5);
+        assert_eq!(ControlRoute::ALL.len(), 6);
         assert_eq!(
             ControlRoute::ALL.iter().filter(|r| r.is_mail()).count(),
             2,
@@ -1451,7 +1572,12 @@ mod tests {
             );
         }
         // 명단에 있는 라우트는 자기 분류를 그대로 따른다(접기가 분류를 덮어쓰지 않는다).
-        for open in [CONTROL_AGENT_PATH, CONTROL_COMMANDS_PATH, CONTROL_CALL_PATH] {
+        for open in [
+            CONTROL_AGENT_PATH,
+            CONTROL_COMMANDS_PATH,
+            CONTROL_CALL_PATH,
+            CONTROL_HOOK_PATH,
+        ] {
             assert!(!mail_gated_path(open), "제어 평면은 전원 개방: {open}");
         }
         for route in ControlRoute::ALL {

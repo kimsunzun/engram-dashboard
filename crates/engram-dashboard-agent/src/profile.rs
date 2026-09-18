@@ -721,6 +721,87 @@ impl ProfileRegistry {
         })
     }
 
+    /// 저장된 세션 id 를 **비우고 그 값을 이력으로 보낸다**. 바뀐 것이 있으면 `true`.
+    ///
+    /// ★[`ProfileRegistry::new_session_id`] 의 **발급 없는 짝**이다★: 그 동사는 Fresh 스폰에서 옛 값을
+    ///   이력으로 밀고 새 uuid 를 박는데, 그 값을 **우리가 뽑지 않는** backend 에는 박을 것이 없다. 이
+    ///   동사는 미는 것까지만 하고 칸을 빈 채로 둔다 — 그 자리를 채우는 것은 상대다(통로가 받아 오거나
+    ///   제어 평면으로 보고된다).
+    /// ★왜 필요한가 — 이것이 없으면 [`ProfileRegistry::adopt_session_id`] 의 「빈 칸에만」이 **한 번만**
+    ///   성립한다★: 그 backend 들은 Fresh 로만 뜨고 화신마다 새 대화를 여는데, 칸이 첫 화신의 값으로
+    ///   찬 채 남으면 2 회차부터 모든 보고가 거절된다. 그 거절 로그는 중첩 사고를 가리키는 유일한 신호라,
+    ///   정상 재시작마다 찍히면 신호가 잡음이 된다.
+    /// ★Fresh 전용이다 — Resume 에서 부르면 이어받을 손잡이를 지운다★. 호출 조건의 정본은
+    ///   `manager` 의 `fresh_spawn_release_session_id`(crate 내부 항목이라 링크가 아니라 이름으로 적는다).
+    // ADR-0076
+    // ADR-0185
+    pub fn clear_session_id(&self, id: AgentId) -> bool {
+        self.mutate_if(|m| match m.get_mut(&id) {
+            Some(p) => match p.backend_session_id.take() {
+                Some(old) => {
+                    p.old_session_ids.push(old);
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        })
+    }
+
+    /// 관측된 세션 id 를 ★**빈 칸에만** 적는다 — 이미 값이 있으면 덮지 않는다★.
+    ///
+    /// ★[`ProfileRegistry::observe_session_id`] 와 **의도적으로 다른 규칙**이고, 둘을 합치지 말 것★:
+    ///   그쪽은 「우리 통로가 상대에게서 직접 받아 온 값」을 적는 자리라 **덮는 것이 옳다**(그 스폰의
+    ///   진짜 손잡이가 그것이다). 이쪽은 「상대가 대신 띄운 **다른 프로세스**가 보고한 값」을 적는
+    ///   자리라, 그 프로세스가 정말 이 에이전트인지 우리가 확인할 수단이 없다 — 환경변수는 자손 전부에게
+    ///   상속되므로 하위 세션의 보고와 본인의 보고가 **글자 그대로 같은 모양**으로 온다.
+    /// ★막는 것은 「이미 찬 칸」 **하나뿐이다 — 「먼저 온 것이 이긴다」를 없앤 것이 아니다**★:
+    ///   빈 칸 갈래는 **정확히 first-wins** 이고, 그것이 이 메서드의 알려진 한계다. 슬롯이 비어 있는
+    ///   동안에는 위 문단의 위협(하위 세션이 같은 토큰으로 보고한다)이 **전혀 막히지 않는다** — 자식이
+    ///   먼저 닿으면 자식 값이 앉고, 그 뒤 부모의 보고가 거절된다.
+    /// ★그래서 이 규칙이 실제로 사는 자리는 「칸이 이미 옳은 값으로 차 있는 창」이다★: 통로가 받아 온
+    ///   진짜 손잡이가 덮이는 것을 막고(그것이 덮이면 정상 재개가 없는 대화를 열어 죽는다), 그 뒤 오는
+    ///   모든 다른 값을 거절한다. 순서로 가르는 대신 **값으로** 가르므로 늦게 온 본인이 지는 일은 없다.
+    /// ★빈 칸 창은 화신마다 새로 열린다★ — Fresh 스폰이 이 칸을 비우기 때문이다
+    ///   ([`ProfileRegistry::clear_session_id`]). 즉 위 first-wins 창은 한 번이 아니라 **화신마다 한 번**
+    ///   있다. 그 창을 닫으려면 보고자의 계보를 가릴 축이 필요한데 오늘 그런 축이 없다(데몬
+    ///   `control::hook` 헤더가 그 부재의 정본).
+    /// ★그 대가 = 「정당한 갱신」도 함께 거절된다★. 한 화신 안에서 그 에이전트가 **새 대화**를 열면 그
+    ///   값은 여기로 못 들어온다 — 빈 칸으로 되돌리는 것은 이 메서드가 아니라 스폰·발급·교체 경로의
+    ///   일이다([`ProfileRegistry::clear_session_id`]·[`ProfileRegistry::new_session_id`]·
+    ///   [`ProfileRegistry::observe_session_id`]).
+    /// ★`old_session_ids` 를 건드리지 않는다★ — 밀려나는 값이 없기 때문이다(쓰는 갈래는 빈 칸뿐).
+    /// ★`incarnation` 은 `Option` 이 아니다★: 이 경로의 호출자는 자격증명에서 화신을 받으므로 못 주는
+    ///   경우가 없다. 「대조할 축이 없다」 갈래를 열어 두면 그것이 곧 무조건 쓰기가 된다.
+    // ADR-0007
+    // ADR-0163
+    // ADR-0185
+    pub fn adopt_session_id(
+        &self,
+        id: AgentId,
+        incarnation: u32,
+        new_sid: Uuid,
+    ) -> SessionIdAdoption {
+        let mut outcome = SessionIdAdoption::Vanished;
+        self.mutate_if(|m| {
+            outcome = match m.get_mut(&id) {
+                None => SessionIdAdoption::Vanished,
+                Some(p) if p.epoch != incarnation => SessionIdAdoption::StaleIncarnation,
+                Some(p) => match p.backend_session_id {
+                    Some(existing) if existing == new_sid => SessionIdAdoption::AlreadyKnown,
+                    Some(_) => SessionIdAdoption::Conflict,
+                    None => {
+                        p.backend_session_id = Some(new_sid);
+                        p.last_active = now_millis();
+                        SessionIdAdoption::Adopted
+                    }
+                },
+            };
+            outcome == SessionIdAdoption::Adopted
+        });
+        outcome
+    }
+
     /// ★spawn 이 쓸 **화신 표식**을 한 임계구역에서 확정한다(ADR-0007)★ — 화신마다 새로 뽑은 난수다.
     ///
     /// `None` = 그 사이 프로필이 사라졌다(동시 삭제) → **호출자는 spawn 을 중단해야 한다**.
@@ -756,6 +837,25 @@ impl ProfileRegistry {
             Some(next)
         })
     }
+}
+
+/// [`ProfileRegistry::adopt_session_id`] 의 네 답.
+///
+/// ★`AlreadyKnown` 과 `Conflict` 를 가르는 것이 이 타입의 존재 이유다★ — 둘 다 「아무 것도 안 썼다」
+///   지만, 앞은 정상이고 뒤는 **두 출처가 다른 값을 주장한다**는 사건이라 호출자가 다르게 다뤄야 한다.
+// ADR-0185
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionIdAdoption {
+    /// 빈 칸에 적었다.
+    Adopted,
+    /// 이미 같은 값이 있었다 — 쓰지 않았고, 쓸 것도 없었다.
+    AlreadyKnown,
+    /// ★이미 **다른** 값이 있었다 — 덮지 않았다★.
+    Conflict,
+    /// 화신 표식이 프로필의 것과 다르다 — 죽은 화신의 관측이다.
+    StaleIncarnation,
+    /// 그 사이 프로필이 사라졌다.
+    Vanished,
 }
 
 /// 앞 릴리스 리더용 자리채움 — 산 표식과 무관하게 항상 `0` 을 쓴다(근거 = `AgentProfile::epoch` 주석).

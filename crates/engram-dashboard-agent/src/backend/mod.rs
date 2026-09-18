@@ -30,7 +30,10 @@ use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
-use crate::types::{AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError};
+use crate::types::{
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError, CLI_EXE_ENV,
+    CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+};
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
 /// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
@@ -50,6 +53,143 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
     #[cfg(not(windows))]
     {
         (program.to_string(), args)
+    }
+}
+
+// ── CLI 입구 주입(백엔드 공용) ────────────────────────────────────────────────
+
+/// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
+/// PATH 프리펜드 + 우편 가부 표식.
+///
+/// ★여기 사는 이유 = 이 셋에 백엔드 지식이 하나도 없다(ADR-0004)★: 심는 것은 env 세 값과 PATH 뿐이고
+///   그 어느 것도 특정 프로그램의 플래그·파일 규약이 아니다. 반대로 `--mcp-config` 같은 **번역**은 그
+///   프로그램의 문법이라 그 백엔드 폴더에 남는다 — 그것까지 여기로 올리면 공용 자리가 한 백엔드의
+///   어휘를 갖게 된다.
+/// ★[`crate::types::ControlEndpoint::config_path`] 의 doc 이 이미 이 분담을 계약으로 적어 두었다★ —
+///   그 Option 은 **MCP 입구의 유무**만 뜻하고 CLI 배선의 유무가 아니다. 이 함수가 공용인 것이 그 문장의
+///   실물이다.
+///
+/// ★호출 조건 = control endpoint 가 있는 스폰 전부★: 제어 동사는 전원에게 열려 있고(ADR-0132 결정 5)
+///   실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다. 우편은 여기서 가리지 않는다 — 표식이 사용법을
+///   가리고(교육), 데몬이 자격증명으로 거절한다(강제).
+/// ★표식은 강제가 아니다★: 에이전트가 자기 env 를 지울 수 있으므로 표식을 뗀 프로세스는 우편 사용법을
+///   **본다**. 그때 막는 것은 데몬 거절뿐이라, 거절 없이 이 표식만으로 통제하려 들면 우편이 열린다.
+/// ★왜 env 인가★: 에이전트가 shell 로 그 명령을 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
+///   토큰으로 POST 한다. portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
+///   (Bash·그 손자)까지 상속**된다.
+/// ★그래서 이 세 값은 에이전트 본인뿐 아니라 **그 프로그램이 대신 띄우는 보조 프로세스**(훅 등)의
+///   자격증명이기도 하다★ — 그 프로그램이 자식 env 를 덧씌우지 않는 한. 어느 프로그램이 실제로 그런지는
+///   그 백엔드 폴더가 실측으로 적는다(여기서 이름으로 세지 않는다 — ADR-0004).
+/// ★보안★: 토큰이 env 로 노출된다 — 같은 OS 유저의 자식에만 상속되고 로그엔 안 찍지만 하드 격리는
+///   원래 불가다(ADR-0086 §불변식). ★상속이 자식 전부에 걸린다는 것은 **에이전트가 띄운 하위
+///   에이전트도 같은 토큰을 든다**는 뜻이다★ — 그 토큰으로 오는 보고를 신원 하나로 믿으면 자식의 값이
+///   부모 자리에 앉는다. 그 축을 막는 것은 이 함수가 아니라 받는 쪽이다(데몬 `control::hook`).
+// ADR-0086 / ADR-0133 / ADR-0004
+pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
+    // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
+    //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를 벗겨 base 만
+    //   남긴다 — CLI 가 `<base>/control/send` 를 조립한다(라우트 경로 지식은 CLI 소유). suffix 가 없으면
+    //   (형태 변주) url 을 그대로 base 로 쓴다(방어적).
+    //   ★keep-in-sync(M5)★: 아래 strip_suffix 의 리터럴 "/mcp" 는 데몬측 MCP_PATH 상수와 **손으로 맞춰진**
+    //   값이다 — 정본 = `crates/engram-dashboard-daemon/src/control/mcp_server.rs`(const MCP_PATH). 그쪽
+    //   경로를 바꾸면 여기 리터럴도 함께 고쳐야 한다(빌드가 강제 못 함 → 어긋나면 base 파생이 틀어져 CLI 가
+    //   조용히 404). 두 곳 상호 앵커.
+    let base = endpoint
+        .url
+        .strip_suffix("/mcp")
+        .unwrap_or(&endpoint.url)
+        .to_string();
+    env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
+    env.push(("ENGRAM_CONTROL_URL".to_string(), base));
+    // ★두 값 다 명시로 싣는다(부재를 off 로 쓰지 않는다)★: 부재는 "스폰 밖" 을 뜻해 CLI 가 전부 보여
+    //   준다(`MAIL_MARKER_ENV`). 켜짐을 생략하면 두 뜻이 겹쳐, 표식을 못 실은 배선 사고가 정상 스폰과
+    //   구별되지 않는다.
+    // ADR-0133
+    env.push((
+        MAIL_MARKER_ENV.to_string(),
+        if endpoint.mail_allowed {
+            MAIL_MARKER_ON
+        } else {
+            MAIL_MARKER_OFF
+        }
+        .to_string(),
+    ));
+    // ★ENGRAM_CLI_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare 실행파일 이름
+    //   (`CLI_EXE_NAME` — 아래 PATH 주입으로 해석)을 가르치지만, 이 절대경로 env 도 함께 싣는다 —
+    //   진단·수동 조작용이다(ADR-0094 의 이름 정렬 자체는 PATH 로 이룬다).
+    //   ★이 값을 가르치는 프라이밍은 없다 — 그러니 아래 loud skip 갈래(PATH 조합 실패·비-UTF8)의 복구
+    //     수단으로 세지 말 것★: 그 갈래에서 에이전트는 bare 이름만 배운 채 PATH 로 해석하지 못하므로
+    //     실질적으로 발신 불가이고, 신호는 그 warn 로그 하나뿐이다.
+    //   None 갈래는 발신 입구가 하나도 안 남는 조합이라 데몬이 provision 에서 이미 fail-closed 로 끊는다
+    //   — 여기 도달하지 않는 방어 경로다(도달해도 크레덴셜만 있고 부를 CLI 가 없는 무해한 상태).
+    if let Some(send_exe) = &endpoint.send_exe {
+        env.push((
+            CLI_EXE_ENV.to_string(),
+            send_exe.to_string_lossy().into_owned(),
+        ));
+        // ★PATH 주입(ADR-0094 bare 이름 해석)★: grant(`Bash(<CLI_EXE_NAME>:*)`)와 프라이밍이 모두 bare
+        //   실행파일 이름을 가르치므로 스폰된 에이전트의 shell(및 그 자식 Bash 도구)이 그 이름을 실제로
+        //   **찾을** 수 있어야 한다. send_exe 의 **부모 디렉토리**를 PATH **맨 앞**에 붙인다.
+        //
+        // ★base = env 벡터에 이미 있는 PATH(프로필 우선, FIX-1)★: 프로필 env 는 이 지점보다 **먼저**
+        //   벡터에 들어와 있다. 데몬 프로세스 PATH(std::env::var_os) 로 리빌드하면 프로필이 실은 커스텀
+        //   PATH 가 통째로 증발하므로, 벡터에 PATH 가 없을 때만 데몬 PATH 로 폴백한다.
+        //   ★키 대소문자(Windows)★: 프로필이 "Path"·"PATH" 어느 표기로 넣어도 같은 변수다.
+        //   ★last-match-wins + dedupe(load-bearing)★: transport(portable-pty)는 env 를 **순서대로**
+        //   cmd.env(k,v) 하므로 같은 변수의 중복 항목이 있으면 자식엔 **마지막** 값이 산다(예: Windows
+        //   에서 `[("PATH", 데몬), ("Path", 프로필)]`). 그래서 마지막 case-equivalent PATH 를 base 이자
+        //   승리 항목으로 삼아 그 키 표기 그대로 제자리 교체하고, **나머지 PATH 항목은 전부 제거**한다 —
+        //   중복을 남기면 앞쪽만 고친 뒤 뒤쪽 미수정 항목이 last-wins 로 이겨 주입이 **조용히 무력화**된다
+        //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제 디렉토리가
+        //   **맨 앞**(shadowing 방어), 프로필/데몬 PATH 는 **tail 로 생존**.
+        if let Some(parent) = send_exe.parent() {
+            let is_path_key = |k: &str| {
+                if cfg!(windows) {
+                    k.eq_ignore_ascii_case("PATH")
+                } else {
+                    k == "PATH"
+                }
+            };
+            let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
+            let base_os = winner_idx
+                .map(|i| std::ffi::OsString::from(env[i].1.clone()))
+                .or_else(|| std::env::var_os("PATH"));
+            let mut dirs = vec![parent.to_path_buf()];
+            if let Some(base) = &base_os {
+                dirs.extend(std::env::split_paths(base));
+            }
+            match std::env::join_paths(dirs)
+                .ok()
+                .and_then(|j| j.into_string().ok())
+            {
+                Some(joined) => match winner_idx {
+                    Some(i) => {
+                        env[i].1 = joined;
+                        let mut seen = 0usize;
+                        env.retain(|(k, _)| {
+                            if is_path_key(k) {
+                                let keep = seen == i;
+                                seen += 1;
+                                keep
+                            } else {
+                                seen += 1;
+                                true
+                            }
+                        });
+                    }
+                    None => env.push(("PATH".to_string(), joined)),
+                },
+                // ★loud skip(FIX-2/3)★: join 실패·비-UTF8 이면 주입을 **통째 건너뛴다** — lossy 변환한
+                //   PATH 를 절대 push 하지 않는다(비-Unicode PATH 항목을 조용히 손상시키면 skip 보다
+                //   나쁘다). skip 시 env 벡터는 **원래 그대로** 둬서 상속 PATH 가 안전 폴백이 된다.
+                None => {
+                    tracing::warn!(
+                        "CLI PATH 주입 건너뜀(PATH 조합 실패 또는 비-UTF8) — grant/프라이밍은 bare `{}` 를 약속하나 이 설치에선 자식이 이름을 해석하지 못할 수 있음; 상속 PATH 유지",
+                        CLI_EXE_NAME
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -291,6 +431,26 @@ pub trait AgentBackend: Send + Sync {
         true
     }
 
+    /// 이 backend 에 **우편 채널을 배정하나** = [`AgentBackend::reads_messages`] 의 보내기 짝.
+    ///
+    /// ★이 칸이 없던 동안 무엇이 벌어졌나(되살리지 말 것)★: 우편 가부를 데몬이
+    ///   `!accepts_mcp_config` **하나로** 파생했다. 그래서 「제어 채널은 쓰지만 우편은 안 쓰는」 backend 가
+    ///   제어 채널을 켜는 순간 **보내기 인가까지 함께 열렸다** — 받기는 위 칸이 false 인 채로. 보내기만
+    ///   열린 그 비대칭은 아무 선언에도 안 적혀 있었고, 데몬은 「CLI 우편을 가르쳤다」고 기록하는데
+    ///   실제 스폰은 그 교육을 한 글자도 안 받는 상태로 갈렸다.
+    /// ★그래서 이 축은 **backend 가 말한다**(ADR-0004)★: 어느 프로그램이 우편 평면에 드나는 프로그램별
+    ///   사실이다. 데몬은 이 값과 `accepts_mcp_config` 둘로 **한 값**(`mail_allowed`)을 파생하므로
+    ///   ADR-0133 결정 2 의 단일 파생점은 그대로다 — 갈린 것은 재료가 하나에서 둘로 는 것뿐이다.
+    /// ★기본값 = true(fail-open)★: 위 받기 칸과 같은 이유다. 모른다고 우편을 끊으면 편지가 조용히
+    ///   사라지므로, 우편 평면 밖에 있는 backend 만 스스로 false 를 선언한다.
+    /// ★`false` 는 "우편을 못 쓴다" 이지 "제어를 못 쓴다" 가 아니다★ — 제어 동사는 전원 개방이다
+    ///   (ADR-0132 결정 5). 그 둘을 가르는 것이 이 칸을 세운 이유다.
+    // ADR-0004
+    // ADR-0133
+    fn uses_mail(&self) -> bool {
+        true
+    }
+
     /// 이 backend 가 `command` 에 대해 쓰는 **입력 인코딩 태그**. 세션이 spawn 때 한 번 받아 보관한다.
     ///
     /// ★왜 backend 인가(ADR-0004)★: "이 프로그램이 stdin 을 무엇으로 읽나" 는 프로그램별 지식이다.
@@ -458,6 +618,10 @@ pub fn supports_control_channel(c: &AgentCommand) -> bool {
 
 pub fn accepts_mcp_config(c: &AgentCommand) -> bool {
     backend_for(c).accepts_mcp_config()
+}
+
+pub fn uses_mail(c: &AgentCommand) -> bool {
+    backend_for(c).uses_mail()
 }
 
 pub fn build_command_spec(
@@ -710,9 +874,11 @@ mod tests {
         match c {
             AgentCommand::Claude { .. } => (true, true),
             AgentCommand::Shell { .. } => (false, false),
-            // codex 는 MCP 를 쓸 수 있지만 그 주입이 전역 TOML 오버라이드라 **이 mcp-config 파일**을
-            //   먹일 수는 없다(실측) — 두 칸의 뜻 차이는 `backend/codex/` 가 적는다.
-            AgentCommand::Codex { .. } => (false, false),
+            // ★두 칸이 갈리는 유일한 행이고, 그것이 두 칸의 뜻 차이를 그대로 보여 준다★: 제어 채널은
+            //   **쓴다**(CLI 입구 = 크레덴셜 env). 다만 그 소비 수단이 mcp-config 파일이 아닐 뿐이다 —
+            //   codex 의 MCP 주입은 전역 TOML 오버라이드라 우리가 만든 파일을 먹일 수 없다(실측).
+            //   사유의 정본은 `backend/codex/` 의 그 두 메서드 주석.
+            AgentCommand::Codex { .. } => (true, false),
         }
     }
 

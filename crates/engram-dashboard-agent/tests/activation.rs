@@ -703,7 +703,7 @@ impl ControlChannel for FailingControl {
         &self,
         _id: AgentId,
         _epoch: u32,
-        _accepts_mcp_config: bool,
+        _needs: engram_dashboard_agent::types::ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         Err(ProvisionError(
             "시험대: 통로 생성 전에 spawn 을 끊는다".into(),

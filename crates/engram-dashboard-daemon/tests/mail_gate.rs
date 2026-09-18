@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use engram_dashboard_agent::backend::accepts_mcp_config;
+use engram_dashboard_agent::backend::{accepts_mcp_config, uses_mail};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
@@ -17,7 +17,8 @@ use engram_dashboard_agent::profile::{
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
-    AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
+    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlChannelNeeds, NoopControlChannel,
+    StatusSink,
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
 use engram_dashboard_daemon::control::commands::make_daemon_table;
@@ -451,15 +452,23 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         Arc::new(NoopPrimingProvider),
     );
 
-    // claude 백엔드의 실제 capability 를 그대로 넘긴다 — 여기 리터럴 true 를 적으면 그 판정이 다시
-    //   테스트 사본이 된다.
-    let accepts_mcp = accepts_mcp_config(&AgentCommand::Claude {
+    // claude 백엔드의 실제 capability 를 그대로 넘긴다 — 여기 리터럴을 적으면 그 판정이 다시
+    //   테스트 사본이 된다. 두 축 다 backend dispatch 에서 읽는다(ADR-0133 — 재료가 둘이다).
+    let command = AgentCommand::Claude {
         extra_args: vec![],
         output_format: AgentOutputFormat::StreamJson,
-    });
-    assert!(accepts_mcp, "claude 는 MCP-capable 이어야(전제)");
+    };
+    let needs = ControlChannelNeeds {
+        accepts_mcp_config: accepts_mcp_config(&command),
+        uses_mail: uses_mail(&command),
+    };
+    assert!(
+        needs.accepts_mcp_config,
+        "claude 는 MCP-capable 이어야(전제)"
+    );
+    assert!(needs.uses_mail, "claude 는 우편 평면 안이어야(전제)");
     let ep = channel
-        .provision(AgentId::new_v4(), 0, accepts_mcp)
+        .provision(AgentId::new_v4(), 0, needs)
         .expect("provision ok")
         .expect("endpoint");
 
@@ -478,6 +487,135 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     );
     // 표식도 같은 판정에서 나왔는지 함께 본다(교육과 강제가 한 값에서 갈린다 — ADR-0133 결정 2).
     assert!(!ep.mail_allowed, "endpoint 표식도 off 여야");
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// ★우편 평면 **밖**인 backend 는 제어 채널을 받아도 우편 인가를 못 받는다★ — `supports_control_channel`
+/// 을 켠 부수효과로 보내기만 열렸던 상태를 되돌린 자리다(사용자 결정 2026-09-18).
+///
+/// ★두 층을 함께 잰다★: ① 자격증명(HTTP 우편 라우트가 거절하나) ② endpoint 가 나르는 것들(표식·발신
+///   grant·프라이밍). 한 층만 재면 「거절은 하는데 가르치기는 한다」가 그대로 통과한다 — 그 어긋남이
+///   ADR-0099 가 실측한 발신 freeze 의 모양이다.
+#[tokio::test]
+async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
+    let registry = Arc::new(ControlRegistry::new());
+    let manager_slot = Arc::new(ManagerSlot::new());
+    let (relay_bus, _sweeper) =
+        engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
+    let handle = start_mcp_server(
+        registry.clone(),
+        manager_slot.clone(),
+        Arc::new(MessagingSlot::new()),
+        Arc::new(CommandTableSlot::new()),
+        relay_bus,
+    )
+    .await
+    .expect("start mcp server");
+    let base = handle
+        .url
+        .strip_suffix("/mcp")
+        .expect("mcp url suffix")
+        .to_string();
+
+    let data_dir =
+        std::env::temp_dir().join(format!("engram-mail-gate-nomail-{}", AgentId::new_v4()));
+    let channel = DaemonControlChannel::new(
+        registry.clone(),
+        handle.url.clone(),
+        data_dir.clone(),
+        Some(std::path::PathBuf::from("C:/app/engram.exe")),
+        Arc::new(NoopPrimingProvider),
+    );
+
+    // ★백엔드의 실제 선언을 읽는다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★.
+    let command = AgentCommand::Codex {
+        extra_args: vec![],
+        output_format: AgentOutputFormat::Terminal,
+    };
+    let needs = ControlChannelNeeds {
+        accepts_mcp_config: accepts_mcp_config(&command),
+        uses_mail: uses_mail(&command),
+    };
+    assert!(!needs.uses_mail, "전제: 이 백엔드는 우편 평면 밖이다");
+    assert!(!needs.accepts_mcp_config, "전제: mcp-config 를 못 먹는다");
+
+    let ep = channel
+        .provision(AgentId::new_v4(), 0, needs)
+        .expect("제어 채널은 발급돼야(제어 동사는 전원 개방)")
+        .expect("endpoint");
+
+    // ① 자격증명 — 우편 라우트 전량에서 거절.
+    for (route, body) in MAIL_ROUTES {
+        let payload: serde_json::Value = serde_json::from_str(body).expect("fixture body");
+        let resp = reqwest::Client::new()
+            .post(format!("{base}{route}"))
+            .header("Authorization", format!("Bearer {}", ep.token))
+            .json(&payload)
+            .send()
+            .await
+            .expect("http request");
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(
+            is_mail_rejection(status, &text),
+            "{route} 는 이 자격증명으로 거절돼야: {status} {text}"
+        );
+    }
+
+    // ② endpoint — 표식 off · 발신 grant 0 · 프라이밍 없음. 「인가를 안 주면 기록도 그렇게 말한다」.
+    assert!(!ep.mail_allowed, "표식이 on 이면 사용법이 우편을 가르친다");
+    assert!(
+        ep.grants.is_empty(),
+        "발신 입구가 없는데 grant 가 실렸다: {:?}",
+        ep.grants
+    );
+    assert!(
+        ep.priming_file.is_none(),
+        "못 쓰는 채널을 가르치는 프라이밍이 실렸다: {:?}",
+        ep.priming_file
+    );
+    // ③ 제어 CLI 입구는 그대로 받는다 — 이 칸이 닫는 것은 우편뿐이다(ADR-0132 결정 5).
+    assert!(ep.send_exe.is_some(), "제어 CLI 배선은 유지돼야");
+    assert!(!ep.token.is_empty(), "제어 토큰은 발급돼야");
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+/// ★`engram` 실행파일이 없어도 우편 평면 **밖** 스폰은 끊기지 않는다★ — fail-closed 가 지키는 짝
+/// (CLI-only 프라이밍 ↔ 부를 실행파일)이 그 스폰에는 애초에 없기 때문이다. 이 갈래를 함께 끊으면
+/// 그 설치에서 우편과 무관한 backend 의 스폰이 통째로 중단된다.
+#[test]
+fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
+    let registry = Arc::new(ControlRegistry::new());
+    let data_dir =
+        std::env::temp_dir().join(format!("engram-mail-gate-nocli-{}", AgentId::new_v4()));
+    let channel = DaemonControlChannel::new(
+        registry,
+        "http://127.0.0.1:1/mcp".to_string(),
+        data_dir.clone(),
+        None, // ← CLI 실행파일을 못 찾은 데몬
+        Arc::new(NoopPrimingProvider),
+    );
+
+    let no_mail = ControlChannelNeeds {
+        accepts_mcp_config: false,
+        uses_mail: false,
+    };
+    assert!(
+        channel.provision(AgentId::new_v4(), 0, no_mail).is_ok(),
+        "우편 평면 밖 스폰이 CLI 부재로 중단되면 안 된다"
+    );
+
+    // 짝이 성립하는 조합(우편을 쓰는데 CLI 가 없다)은 **여전히** 끊긴다 — 그 규율은 그대로다.
+    let cli_mail = ControlChannelNeeds {
+        accepts_mcp_config: false,
+        uses_mail: true,
+    };
+    assert!(
+        channel.provision(AgentId::new_v4(), 0, cli_mail).is_err(),
+        "CLI 우편을 쓰는데 실행파일이 없으면 fail-closed 여야"
+    );
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

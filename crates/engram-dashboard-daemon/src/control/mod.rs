@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod catalog;
 pub mod commands;
+pub mod hook;
 pub mod ingress;
 pub mod mcp_config;
 pub mod mcp_server;
@@ -15,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use engram_dashboard_agent::types::{
-    AgentId, ControlChannel, ControlEndpoint, ProvisionError, ToolGrant, CLI_EXE_NAME,
+    AgentId, ControlChannel, ControlChannelNeeds, ControlEndpoint, ProvisionError, ToolGrant,
+    CLI_EXE_NAME,
 };
 
 use mcp_config::MCP_SERVER_NAME;
@@ -57,10 +59,19 @@ impl DaemonControlChannel {
     ///   발신했다. CLI 라우팅 실측은 채널을 통째로 가르는 `ENGRAM_FORCE_CLI_ONLY_SEND`(provision)로만
     ///   성립한다.
     // ADR-0094
+    /// ★`uses_mail == false` 면 **한 줄도 내지 않는다**★: 이 목록에 담기는 것은 발신 입구 툴뿐이고
+    ///   (ADR-0094 최소권한), 우편 평면 밖 스폰에는 그 입구가 없다. 예전에는 `!accepts_mcp_config` 만
+    ///   보고 CLI grant 를 실어, 데몬은 「발신을 허가했다」고 기록하는데 그 자격증명의 우편 요청은
+    ///   거절되는 상태가 났다.
+    // ADR-0133
     fn build_grants(
         send_exe: Option<&std::path::Path>,
-        accepts_mcp_config: bool,
+        needs: ControlChannelNeeds,
     ) -> Vec<ToolGrant> {
+        if !needs.uses_mail {
+            return Vec::new();
+        }
+        let accepts_mcp_config = needs.accepts_mcp_config;
         let disallow_mcp_send = std::env::var("ENGRAM_DISALLOW_MCP_SEND")
             .map(|v| !v.is_empty())
             .unwrap_or(false);
@@ -141,7 +152,7 @@ impl ControlChannel for DaemonControlChannel {
         &self,
         id: AgentId,
         epoch: u32,
-        accepts_mcp_config: bool,
+        needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         let token = Self::gen_token()
             .ok_or_else(|| ProvisionError("CSPRNG token generation failed".to_string()))?;
@@ -149,7 +160,21 @@ impl ControlChannel for DaemonControlChannel {
         //   교육=MCP · 물리=CLI 로 갈려 정합 불변식을 정면 위반한다.
         // 운영 빌드에선 `force_cli_only()` 가 const false 라 아래 식이 `accepts_mcp_config` 그대로다.
         let force_cli_only = Self::force_cli_only();
-        let accepts_mcp_config = accepts_mcp_config && !force_cli_only;
+        let accepts_mcp_config = needs.accepts_mcp_config && !force_cli_only;
+        let needs = ControlChannelNeeds {
+            accepts_mcp_config,
+            ..needs
+        };
+        // ★우편 가부의 **단일 파생 지점**(ADR-0133 결정 2)★: 이 한 값이 ① 자격증명에 박히는 강제(데몬
+        //   거절) ② endpoint 에 실려 나가는 표식(교육) ③ 아래 진단 로그를 **전부** 낳는다. 재료가 둘로
+        //   는 뒤에도 파생은 한 자리다.
+        //   MCP 로 우편을 쓰는 스폰은 CLI 우편을 쓰지 않는다 — 채널은 capability 로만 갈리고 런타임
+        //   스위칭·폴백이 없다(ADR-0128 결정 1). 우편 평면 **밖** 스폰은 둘 다 아니다(`uses_mail`).
+        //   ★식을 두 번째로 쓰지 말 것 — 로그에도 쓰지 말 것★: 동치인 사본이라도 갈리는 날 그 로그는
+        //   「왜 편지를 못 보내나」를 쫓는 자리에서 **반대 사실**을 말한다. 읽는 곳이 셋이면 변수도 하나다.
+        //   그래서 이 줄이 `accepts_mcp_config` 확정 **직후**에 있다.
+        // ADR-0133
+        let mail_allowed = needs.uses_mail && !accepts_mcp_config;
         // ADR-0099
         let (config_path, settings_file, priming_variant) = if accepts_mcp_config {
             let path = mcp_config::write_config(&self.data_dir, id, epoch, &self.mcp_url, &token)
@@ -175,16 +200,33 @@ impl ControlChannel for DaemonControlChannel {
         } else {
             (None, None, PrimingVariant::CliOnly)
         };
+        // ★우편 평면 밖 스폰에는 프라이밍을 **아예 싣지 않는다**★: 프라이밍이 가르치는 것은 우편
+        //   사용법이고(두 변형 다), 그 스폰은 그 채널을 못 쓴다. 실으면 데몬은 「가르쳤다」고 기록하는데
+        //   에이전트는 배운 대로 쳤다가 거절만 받는다 — ADR-0099 가 실측한 발신 freeze 와 같은 모양이다.
+        //   ★교육과 인가를 같은 값에서 갈라야 한다는 정합 불변식의 세 번째 갈래가 이것이다★:
+        //   「못 쓰는 채널을 가르치지 않는다」에 「채널이 아예 없으면 아무 것도 가르치지 않는다」가 더해진다.
+        // ADR-0099
+        // ADR-0126
+        // ADR-0133
+        let priming_variant = needs.uses_mail.then_some(priming_variant);
         tracing::debug!(
             agent = %id,
             epoch,
             accepts_mcp_config,
+            uses_mail = needs.uses_mail,
             force_cli_only,
             ?priming_variant,
             has_mcp_config = config_path.is_some(),
             "제어 채널 provision fork(ADR-0099 채널 스위치)"
         );
-        if !accepts_mcp_config && self.send_exe.is_none() {
+        // ★`needs.uses_mail` 이 조건에 든 것이 load-bearing 이다★: 이 fail-closed 가 지키는 것은
+        //   「CLI-only 프라이밍이 그 명령을 가르치는데 부를 실행파일이 없다」는 **짝 위반** 하나다.
+        //   우편 평면 밖 스폰은 그 프라이밍을 아예 안 받으므로(바로 위) 짝이 성립할 여지가 없다 —
+        //   그런 스폰까지 여기서 끊으면 `engram` 이 없는 설치에서 **우편과 무관한 backend 의 스폰이
+        //   통째로 중단된다**(제어 동사를 못 쓰는 것은 아래 warn 이 다루는 fail-open 사안이다).
+        // ADR-0099
+        // ADR-0133
+        if needs.uses_mail && !accepts_mcp_config && self.send_exe.is_none() {
             let msg = format!(
                 "non-MCP backend with no `{CLI_EXE_NAME}` binary — zero physical send channels while CLI-only priming teaches that command (pairing invariant violation)"
             );
@@ -193,28 +235,26 @@ impl ControlChannel for DaemonControlChannel {
             //   않았고 token 도 아직 issue 전이다 — 되돌릴 자원이 없다.
             return Err(ProvisionError(msg));
         }
-        // ★CLI 입구 없이 제어 채널을 발급하는 경우를 **보이게** 만든다(ADR-0132 결정 5)★: 여기 닿는 것은
-        //   `accepts_mcp_config == true` 갈래뿐이다(비-MCP + send_exe 부재는 바로 위에서 fail-closed).
-        //   그 스폰은 우편은 MCP 로 멀쩡히 쓰지만 **제어 동사에는 닿을 수 없다** — `engram` 을 부를 수단이
-        //   없기 때문이다. fail-open 을 유지하는 것은 기존 판단이고(제어 부재로 스폰을 막지 않는다), 다만
-        //   그 상태가 **로그 한 줄도 없이** 지나가면 "전원 개방" 이라 적힌 결정과 실제가 조용히 갈린다.
+        // ★CLI 입구 없이 제어 채널을 발급하는 경우를 **보이게** 만든다(ADR-0132 결정 5)★: 여기 닿는
+        //   갈래는 둘이다 — MCP 가능 스폰과, **우편 평면 밖 스폰**(바로 위 fail-closed 가 그 둘을 통과
+        //   시킨다). 어느 쪽이든 **제어 동사에는 닿을 수 없다** — `engram` 을 부를 수단이 없기 때문이다.
+        //   fail-open 을 유지하는 것은 기존 판단이고(제어 부재로 스폰을 막지 않는다), 다만 그 상태가
+        //   **로그 한 줄도 없이** 지나가면 "전원 개방" 이라 적힌 결정과 실제가 조용히 갈린다.
         //   증상: 에이전트가 `engram: command not found` 를 만나고, 그 원인이 배포 폴더에 있다.
+        // ★우편에 대해서는 이 줄이 아무 말도 하지 않는다★ — 두 갈래의 답이 다르기 때문이다(앞은 MCP 로
+        //   정상 동작하고 뒤는 우편 자체가 없다). 한쪽 답을 적으면 다른 갈래에서 거짓이 된다.
         // ADR-0133
         if self.send_exe.is_none() {
             tracing::warn!(
                 agent = %id, epoch,
-                "제어 채널을 발급했으나 `{CLI_EXE_NAME}` 실행파일을 찾지 못했다 — 이 스폰은 제어 동사(engram …)를 쓸 수 없다(데몬 exe 형제로 배포됐는지 확인). 우편은 MCP 로 정상 동작한다."
+                mail_allowed,
+                "제어 채널을 발급했으나 `{CLI_EXE_NAME}` 실행파일을 찾지 못했다 — 이 스폰은 제어 동사(engram …)를 쓸 수 없다(데몬 exe 형제로 배포됐는지 확인)."
             );
         }
-        // ★우편 가부의 **단일 파생 지점**(ADR-0133 결정 2)★: MCP 로 우편을 쓰는 스폰은 CLI 우편을 쓰지
-        //   않는다 — 채널은 capability 로만 갈리고 런타임 스위칭·폴백이 없다(ADR-0128 결정 1). 이 한 값이
-        //   ① 자격증명에 박히는 강제(데몬 거절)와 ② endpoint 에 실려 나가는 표식(교육)을 **함께** 낳는다.
-        //   두 자리가 따로 판정하면 "가르치는 것 ≠ 거절하는 것" 이 되어 조용히 갈린다.
-        // ADR-0133
-        let mail_allowed = !accepts_mcp_config;
+        // 이 값이 강제(여기)와 교육(아래 endpoint 표식)을 함께 낳는다 — 파생점과 그 사유는 위 한 곳.
         self.registry.issue(id, epoch, token.clone(), mail_allowed);
-        let priming_file = self.priming.priming_file(priming_variant);
-        let grants = Self::build_grants(self.send_exe.as_deref(), accepts_mcp_config);
+        let priming_file = priming_variant.and_then(|v| self.priming.priming_file(v));
+        let grants = Self::build_grants(self.send_exe.as_deref(), needs);
         Ok(Some(ControlEndpoint {
             url: self.mcp_url.clone(),
             token,
@@ -238,6 +278,16 @@ impl ControlChannel for DaemonControlChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 옛 한 축(`accepts_mcp_config`) 시절의 시험들이 그대로 서게 하는 어댑터 — ★`uses_mail: true` 를
+    /// 박는 것이 그 동치다★: 그때는 우편 평면 밖 스폰이라는 갈래 자체가 없었다. 그 새 갈래를 재는 것은
+    /// 아래 「우편 평면 밖」 구획이고, 이 헬퍼를 쓰지 않는다.
+    fn needs(accepts_mcp_config: bool) -> ControlChannelNeeds {
+        ControlChannelNeeds {
+            accepts_mcp_config,
+            uses_mail: true,
+        }
+    }
     use engram_dashboard_agent::types::{
         CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
     };
@@ -267,7 +317,7 @@ mod tests {
             std::env::var(DISALLOW_MCP_ENV).is_err(),
             "테스트 진입 시 env 미설정이어야(leak 감지)"
         );
-        let grants = DaemonControlChannel::build_grants(None, true);
+        let grants = DaemonControlChannel::build_grants(None, needs(true));
         assert_eq!(
             grants,
             vec![ToolGrant::Mcp {
@@ -284,7 +334,7 @@ mod tests {
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         let exe = Path::new("C:/app/engram.exe");
         assert_eq!(
-            DaemonControlChannel::build_grants(Some(exe), true),
+            DaemonControlChannel::build_grants(Some(exe), needs(true)),
             vec![ToolGrant::Mcp {
                 server: MCP_SERVER_NAME.to_string(),
                 tool: SEND_MESSAGE_TOOL.to_string(),
@@ -292,7 +342,7 @@ mod tests {
             "MCP-capable + send_exe → [Mcp] 만(CLI grant 는 우편 채널 축으로만 나온다)"
         );
         assert_eq!(
-            DaemonControlChannel::build_grants(Some(exe), false),
+            DaemonControlChannel::build_grants(Some(exe), needs(false)),
             vec![ToolGrant::Cli {
                 exe: CLI_EXE_NAME.to_string(),
             }],
@@ -306,7 +356,7 @@ mod tests {
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         let exe = Path::new("C:/app/engram.exe");
         for accepts_mcp_config in [true, false] {
-            let grants = DaemonControlChannel::build_grants(Some(exe), accepts_mcp_config);
+            let grants = DaemonControlChannel::build_grants(Some(exe), needs(accepts_mcp_config));
             assert_eq!(
                 grants.len(),
                 1,
@@ -330,8 +380,8 @@ mod tests {
         );
         std::env::set_var(DISALLOW_MCP_ENV, "1");
         let exe = Path::new("C:/app/engram.exe");
-        let mcp_capable = DaemonControlChannel::build_grants(Some(exe), true);
-        let non_mcp = DaemonControlChannel::build_grants(Some(exe), false);
+        let mcp_capable = DaemonControlChannel::build_grants(Some(exe), needs(true));
+        let non_mcp = DaemonControlChannel::build_grants(Some(exe), needs(false));
         std::env::remove_var(DISALLOW_MCP_ENV);
         assert!(
             mcp_capable.is_empty(),
@@ -351,7 +401,7 @@ mod tests {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         std::env::set_var(DISALLOW_MCP_ENV, "1");
-        let grants = DaemonControlChannel::build_grants(None, true);
+        let grants = DaemonControlChannel::build_grants(None, needs(true));
         std::env::remove_var(DISALLOW_MCP_ENV);
         assert!(
             grants.is_empty(),
@@ -364,7 +414,8 @@ mod tests {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         std::env::set_var(DISALLOW_MCP_ENV, "");
-        let grants = DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram.exe")), true);
+        let grants =
+            DaemonControlChannel::build_grants(Some(Path::new("C:/app/engram.exe")), needs(true));
         std::env::remove_var(DISALLOW_MCP_ENV);
         assert_eq!(
             grants,
@@ -383,7 +434,7 @@ mod tests {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
         let exe = Path::new("C:/app/engram.exe");
-        let grants = DaemonControlChannel::build_grants(Some(exe), false);
+        let grants = DaemonControlChannel::build_grants(Some(exe), needs(false));
         assert_eq!(
             grants,
             vec![ToolGrant::Cli {
@@ -397,7 +448,7 @@ mod tests {
     fn build_grants_non_mcp_backend_no_send_exe_yields_empty() {
         let _g = lock_env();
         assert!(std::env::var(DISALLOW_MCP_ENV).is_err());
-        let grants = DaemonControlChannel::build_grants(None, false);
+        let grants = DaemonControlChannel::build_grants(None, needs(false));
         assert!(
             grants.is_empty(),
             "비-MCP + send_exe 부재 → 발신 grant 0: {grants:?}"
@@ -447,7 +498,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
         let ep = channel
-            .provision(id, 0, true)
+            .provision(id, 0, needs(true))
             .expect("provision ok")
             .expect("endpoint");
         let cfg = ep
@@ -487,7 +538,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
         let ep = channel
-            .provision(id, 0, false)
+            .provision(id, 0, needs(false))
             .expect("provision ok")
             .expect("endpoint");
         assert_eq!(
@@ -527,7 +578,7 @@ mod tests {
         let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
         let id = AgentId::new_v4();
         let err = channel
-            .provision(id, 0, false)
+            .provision(id, 0, needs(false))
             .expect_err("비-MCP + send_exe=None → fail-closed Err");
         assert!(
             err.0.contains("non-MCP") && err.0.contains(CLI_EXE_NAME),
@@ -561,7 +612,7 @@ mod tests {
         std::fs::write(&cfg_dir, b"occupied").expect("폴더 자리를 파일로 점유");
 
         let err = channel
-            .provision(id, 0, true)
+            .provision(id, 0, needs(true))
             .expect_err("MCP-capable + config write 실패 → fail-closed Err");
         assert!(
             err.0.contains("mcp-config write failed"),
@@ -584,7 +635,7 @@ mod tests {
         let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
         let id = AgentId::new_v4();
         let ep = channel
-            .provision(id, 0, true)
+            .provision(id, 0, needs(true))
             .expect("MCP-capable + send_exe=None 은 허용(accepted edge)")
             .expect("endpoint");
         assert!(
@@ -644,7 +695,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
         let id = AgentId::new_v4();
         let ep = channel
-            .provision(id, 0, true)
+            .provision(id, 0, needs(true))
             .expect("provision ok")
             .expect("endpoint");
         assert_eq!(
@@ -705,7 +756,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
         let id = AgentId::new_v4();
         let ep = channel
-            .provision(id, 0, false)
+            .provision(id, 0, needs(false))
             .expect("provision ok")
             .expect("endpoint");
         assert_eq!(
@@ -813,7 +864,7 @@ mod tests {
             WarnCollector {
                 lines: lines.clone(),
             },
-            || channel.provision(id, 0, true),
+            || channel.provision(id, 0, needs(true)),
         )
         .expect("fail-open 유지 — 제어 부재로 스폰을 막지 않는다")
         .expect("endpoint");
@@ -854,7 +905,7 @@ mod tests {
             );
             let id = AgentId::new_v4();
             let ep = channel
-                .provision(id, 0, accepts_mcp_config)
+                .provision(id, 0, needs(accepts_mcp_config))
                 .expect("provision ok")
                 .expect("endpoint");
             let bound = registry.validate(&ep.token).expect("발급된 자격증명");
@@ -893,7 +944,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "1");
         let id = AgentId::new_v4();
-        let result = channel.provision(id, 0, true);
+        let result = channel.provision(id, 0, needs(true));
         std::env::remove_var(FORCE_CLI_ENV);
         let ep = result.expect("provision ok").expect("endpoint");
         assert_eq!(
@@ -929,7 +980,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "");
         let id = AgentId::new_v4();
-        let result = channel.provision(id, 0, true);
+        let result = channel.provision(id, 0, needs(true));
         std::env::remove_var(FORCE_CLI_ENV);
         let ep = result.expect("provision ok").expect("endpoint");
         assert!(
@@ -958,7 +1009,7 @@ mod tests {
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "1");
         let id = AgentId::new_v4();
-        let result = channel.provision(id, 0, true);
+        let result = channel.provision(id, 0, needs(true));
         std::env::remove_var(FORCE_CLI_ENV);
         let ep = result.expect("provision ok").expect("endpoint");
         assert!(

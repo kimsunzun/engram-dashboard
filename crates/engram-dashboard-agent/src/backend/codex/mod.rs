@@ -5,6 +5,8 @@
 //! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다.
 //!
 //! ★여기 적힌 codex 사실은 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-08 재확인)★.
+//! ★그 뒤에 잰 것은 **자기 자리에 버전을 달고 있다**★ — 이 한 줄이 파일 전체를 한 버전으로 묶는다고
+//! 읽지 말 것. 상류가 스스로 업데이트하므로 잰 시점이 항목마다 갈린다.
 //! `tests/backend_contract.rs` 가 이 파일의 `build_spec` 이 낸 argv 를 **그대로 띄우므로**, 여기서 인자를
 //! 바꾸면 그 레인이 바뀐 argv 로 실 codex 를 겪는다 — ★단 그 레인은 `#[ignore]` 라 부를 때만 돈다(CI 아님)★.
 //!
@@ -33,8 +35,8 @@ use self::protocol::{
 };
 use self::transport::CodexAppServerTransport;
 use crate::backend::{
-    console_command, AgentBackend, InputEncoder, SessionIdSink, SpawnParts, TransportShape,
-    TurnClassifier,
+    console_command, inject_cli_entrance, AgentBackend, InputEncoder, SessionIdSink, SpawnParts,
+    TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -172,8 +174,31 @@ impl AgentBackend for CodexBackend {
         is_app_server(command)
     }
 
+    /// ★true 인데 [`AgentBackend::accepts_mcp_config`] 는 false 다 — 두 축은 별개다(ADR-0133)★: 이 칸이
+    /// 묻는 것은 **제어 채널을 소비하나**이고, 그 소비 수단은 MCP 만이 아니라 CLI 입구(크레덴셜 env)도
+    /// 있다. 아래 칸이 묻는 것은 그중 **mcp-config 파일을 먹일 수 있나** 하나뿐이다.
+    /// ★false 로 되돌리면 codex 스폰의 env 에서 `ENGRAM_TOKEN`·`ENGRAM_CONTROL_URL` 이 통째로 사라진다★
+    ///   — 조립점이 이 칸을 보고 provision 자체를 건너뛰므로([`crate::manager::AgentManager`] 의 그
+    ///   자리) endpoint 가 `None` 으로 오고, 아래 `build_spec` 의 주입이 한 줄도 돌지 않는다. 그러면
+    ///   codex 가 띄우는 훅 프로세스도 자격증명 없이 뜬다.
+    /// ★그 훅이 실제로 이 env 를 받는다(실측 2026-09-18, codex 0.155.0)★ — codex 는 `SessionStart` 훅
+    ///   프로세스에 자기 env 를 **하나도 덧씌우지 않는다**(순수 상속). 즉 여기서 심은 토큰이 그 훅에
+    ///   그대로 도착한다. 공용 주입이 「보조 프로세스의 자격증명이기도 하다」고 적은 조건을 이 백엔드가
+    ///   만족한다는 실측이 이것이고, 그 조건 자체는 [`inject_cli_entrance`] doc 이 진다.
+    /// ★이 칸이 **우편까지 열지는 않는다 — 그리고 그것이 공짜가 아니었다**★: 예전 데몬은 우편 가부를
+    ///   `!accepts_mcp_config` 하나로 파생해서, 이 칸을 켜는 것만으로 이 백엔드에 **보내기 인가가 함께
+    ///   열렸다**(받기는 [`AgentBackend::reads_messages`] 가 닫은 채로). 그 비대칭을 없애려고 보내기 축을
+    ///   별도 선언으로 뽑았다 — 아래 [`AgentBackend::uses_mail`] 이 그것이고, 데몬은 두 축에서 한 값을
+    ///   파생한다. ★그 칸을 지우거나 기본값으로 되돌리면 이 부수효과가 그대로 돌아온다★.
+    /// ★`engram` 실행파일이 없는 설치에서도 이 백엔드의 스폰은 **끊기지 않는다**★ — 그 fail-closed 는
+    ///   「CLI 우편을 가르쳤는데 부를 실행파일이 없다」는 짝 위반을 지키는 것이고, 우편 평면 밖 스폰에는
+    ///   그 짝이 없다(그 판정의 정본 = 데몬 `control::provision`). 제어 동사를 못 쓰게 되는 것은 남지만
+    ///   그쪽은 fail-open + warn 이다.
+    // ADR-0086
+    // ADR-0132
+    // ADR-0133
     fn supports_control_channel(&self) -> bool {
-        false
+        true
     }
 
     /// ★"codex 가 MCP 를 못 쓴다" 가 아니다★ — 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수
@@ -197,6 +222,18 @@ impl AgentBackend for CodexBackend {
     /// ★여는 조건 = 이 축을 모드별로 가르는 것★(시그니처에 명령을 들이거나 자격을 세션 caps 로 옮기거나).
     /// shell 쪽 사유는 그때도 그대로 남으므로 둘을 같이 열지 말 것.
     fn reads_messages(&self) -> bool {
+        false
+    }
+
+    /// ★받기와 **같이** 닫는다(사용자 결정 2026-09-18)★: 위 칸이 false 인 채로 이 칸만 열리면 「보내기만
+    /// 되는」 비대칭이 생기고, 그 비대칭은 `supports_control_channel` 을 켠 부수효과로 **아무도 선언하지
+    /// 않은 채** 한 번 생겼던 상태다. 그것을 되돌린 자리가 여기다.
+    /// ★제어 동사는 그대로 쓴다★ — 이 칸이 닫는 것은 우편 입구(`/control/send`·`/control/messages`)
+    ///   뿐이고, CLI 입구(토큰·주소)와 제어 라우트는 위 `supports_control_channel` 이 연다.
+    /// ★여는 조건★: 받기 축을 먼저 열 것(그쪽 doc 의 「여는 조건」). 보내기만 먼저 열면 답장을 못 받는
+    ///   발신자가 생기고, 그것은 우편 장부에 영원한 미결로 남는다.
+    // ADR-0133
+    fn uses_mail(&self) -> bool {
         false
     }
 
@@ -251,8 +288,8 @@ impl AgentBackend for CodexBackend {
         _mode: SpawnMode,
         _session_id: Option<Uuid>,
         cwd: PathBuf,
-        env: Vec<(String, String)>,
-        _control: Option<ControlEndpoint>,
+        mut env: Vec<(String, String)>,
+        control: Option<ControlEndpoint>,
     ) -> CommandSpec {
         match command {
             AgentCommand::Codex {
@@ -304,6 +341,21 @@ impl AgentBackend for CodexBackend {
                 //   ★고칠 때 무엇이 필요한가★: 위 셋을 뒤집을 실측(그 형태로 감싼 `cmd` 아래에서 claude·
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
                 // ADR-0004
+
+                // ADR-0086 스텝 2(CLI 입구) — ★모드를 가르지 않는다★: 심는 것은 env 세 값뿐이고 그
+                //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구·훅 프로세스)이다.
+                //   두 모드 다 자식을 띄우므로 갈릴 축이 없다.
+                // ★`--mcp-config` 짝은 여기 없다 — 그것은 claude 의 플래그다★: 이 백엔드의
+                //   [`AgentBackend::accepts_mcp_config`] 가 false 라 `endpoint.config_path` 는 애초에
+                //   `None` 으로 온다(그 Option 의 뜻 = MCP 입구의 유무. CLI 배선의 유무가 아니다 —
+                //   [`ControlEndpoint::config_path`] doc).
+                // ★`priming_file`·`settings_file`·`grants` 도 쓰지 않는다★ — 전부 claude 의 플래그로만
+                //   번역되는 칸이고, codex 에 그 짝이 있는지는 재 본 적이 없다. 없는 문법을 지어내
+                //   붙이면 기동이 실패하므로 재기 전에는 싣지 않는다.
+                // ADR-0086 / ADR-0133
+                if let Some(endpoint) = &control {
+                    inject_cli_entrance(&mut env, endpoint);
+                }
                 let (program, args) = console_command(CODEX_PROGRAM, args);
                 CommandSpec {
                     program,
@@ -476,7 +528,9 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::TurnOutcome;
+    use crate::types::{
+        TurnOutcome, CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+    };
 
     fn codex(extra_args: Vec<&str>) -> AgentCommand {
         AgentCommand::Codex {
@@ -597,6 +651,119 @@ mod tests {
                 .any(|a| a == "--session-id" || a == "--resume" || a == "--session"),
             "존재하지 않는 세션 플래그가 실렸다: {:?}",
             s.args
+        );
+    }
+
+    // ── CLI 입구 주입(ADR-0086 스텝 2 · ADR-0133) ────────────────────────────────
+
+    fn endpoint() -> ControlEndpoint {
+        ControlEndpoint {
+            url: "http://127.0.0.1:7777/mcp".to_string(),
+            token: "deadbeef".to_string(),
+            // ★None 이 이 백엔드의 정상값이다★ — `accepts_mcp_config()` 가 false 라 데몬이 mcp-config 를
+            //   아예 쓰지 않는다. 그래도 아래 세 env 는 실려야 한다는 것이 이 구획이 재는 것이다.
+            config_path: None,
+            send_exe: Some(std::path::PathBuf::from("C:/engram/bin/engram.exe")),
+            priming_file: Some(std::path::PathBuf::from("C:/engram/priming.md")),
+            grants: vec![],
+            settings_file: Some(std::path::PathBuf::from("C:/engram/session.json")),
+            // ★운영이 이 백엔드에 싣는 값이 `false` 다★ — 이 폴더가 그렇게 선언하고(`uses_mail`) 데몬이
+            //   그 선언에서 파생한다. 아래 형제 시험이 반대 값도 따라간다는 것을 따로 잰다.
+            mail_allowed: false,
+        }
+    }
+
+    fn spec_with_control(command: &AgentCommand, control: Option<ControlEndpoint>) -> CommandSpec {
+        CodexBackend.build_spec(
+            command,
+            SpawnMode::Fresh,
+            None,
+            PathBuf::from("C:/workspace"),
+            vec![],
+            control,
+        )
+    }
+
+    fn env_value<'a>(spec: &'a CommandSpec, key: &str) -> Option<&'a str> {
+        spec.env
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// ★터미널 모드·app-server 모드를 **각각** 잰다★ — 한 모드만 재면 다른 모드의 스폰이 자격증명 없이
+    /// 떠도 아무도 모른다. codex 가 띄우는 훅 프로세스는 이 env 를 상속으로만 받는다.
+    #[test]
+    fn both_modes_carry_the_control_plane_entrance() {
+        for (label, command) in [
+            ("terminal", codex(vec![])),
+            ("app-server", codex_app_server(vec![])),
+        ] {
+            let s = spec_with_control(&command, Some(endpoint()));
+            assert_eq!(
+                env_value(&s, "ENGRAM_TOKEN"),
+                Some("deadbeef"),
+                "{label}: ENGRAM_TOKEN"
+            );
+            assert_eq!(
+                env_value(&s, "ENGRAM_CONTROL_URL"),
+                Some("http://127.0.0.1:7777"),
+                "{label}: ENGRAM_CONTROL_URL = MCP url 에서 /mcp 를 벗긴 base"
+            );
+            assert_eq!(
+                env_value(&s, MAIL_MARKER_ENV),
+                Some(MAIL_MARKER_OFF),
+                "{label}: 우편 표식은 endpoint 가 실어 온 값 그대로(운영값 = off)"
+            );
+            assert_eq!(
+                env_value(&s, CLI_EXE_ENV),
+                Some("C:/engram/bin/engram.exe"),
+                "{label}: CLI 절대경로"
+            );
+        }
+    }
+
+    /// 표식은 **endpoint 가 실어 온 값**이지 이 백엔드가 파생하는 값이 아니다(ADR-0133 결정 2).
+    ///
+    /// ★그래서 운영값과 **반대**를 실어 잰다★: 여기서 파생을 하면 데몬 판정과 갈리는데, 운영값으로만
+    ///   재면 그 갈림이 안 보인다(두 값이 우연히 같아서 통과한다).
+    #[test]
+    fn the_mail_marker_follows_the_endpoint() {
+        let mut ep = endpoint();
+        ep.mail_allowed = true;
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        assert_eq!(env_value(&s, MAIL_MARKER_ENV), Some(MAIL_MARKER_ON));
+    }
+
+    /// ★`--mcp-config` 는 claude 의 플래그다 — 이쪽으로 새면 codex 가 모르는 인자로 기동에 실패한다★.
+    #[test]
+    fn no_claude_flag_rides_along_with_the_entrance() {
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let s = spec_with_control(&command, Some(endpoint()));
+            for forbidden in [
+                "--mcp-config",
+                "--append-system-prompt-file",
+                "--settings",
+                "--allowedTools",
+                "--disallowedTools",
+            ] {
+                assert!(
+                    !s.args.iter().any(|a| a == forbidden),
+                    "`{forbidden}` 가 codex argv 에 실렸다: {:?}",
+                    s.args
+                );
+            }
+        }
+    }
+
+    /// endpoint 가 없는 스폰(= 제어 채널을 못 받은 경우)은 env 가 **한 줄도 늘지 않는다**.
+    #[test]
+    fn without_an_endpoint_nothing_is_injected() {
+        let s = spec_with_control(&codex(vec![]), None);
+        assert!(
+            s.env.is_empty(),
+            "endpoint 부재인데 env 가 실렸다: {:?}",
+            s.env
         );
     }
 

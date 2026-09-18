@@ -12,7 +12,18 @@ use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_agent::types::{AgentId, AgentInfo, AgentStatus, ControlChannel, StatusSink};
+use engram_dashboard_agent::types::{
+    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlChannelNeeds, StatusSink,
+};
+
+/// MCP 가능 스폰이 넘기는 축 둘 — 이 파일들은 채널 물리(토큰·config 파일)만 재므로 운영이 그 값을
+/// 어디서 읽는지는 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
+fn mcp_needs() -> ControlChannelNeeds {
+    ControlChannelNeeds {
+        accepts_mcp_config: true,
+        uses_mail: true,
+    }
+}
 
 use engram_dashboard_daemon::control::mcp_config;
 use engram_dashboard_daemon::control::mcp_server::{
@@ -171,7 +182,7 @@ async fn claude_spawn_fails_closed_when_provision_errors() {
             &self,
             _id: CoreAgentId,
             _epoch: u32,
-            _accepts_mcp_config: bool,
+            _needs: engram_dashboard_agent::types::ControlChannelNeeds,
         ) -> Result<Option<ControlEndpoint>, ProvisionError> {
             Err(ProvisionError("injected provision failure".to_string()))
         }
@@ -216,7 +227,7 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
             &self,
             _id: CoreAgentId,
             _epoch: u32,
-            _accepts_mcp_config: bool,
+            _needs: engram_dashboard_agent::types::ControlChannelNeeds,
         ) -> Result<Option<ControlEndpoint>, ProvisionError> {
             Err(ProvisionError("must not be called for shell".to_string()))
         }
@@ -278,7 +289,7 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
     let id = AgentId::new_v4();
 
     let ep = channel
-        .provision(id, 0, true)
+        .provision(id, 0, mcp_needs())
         .expect("provision ok")
         .expect("endpoint");
     assert_eq!(registry.live_token_count(), 1, "provision 후 산 토큰 1개");

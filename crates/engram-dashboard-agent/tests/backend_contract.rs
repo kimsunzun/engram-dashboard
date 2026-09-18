@@ -113,6 +113,9 @@ struct Declared {
     supports_control_channel: bool,
     accepts_mcp_config: bool,
     reads_messages: bool,
+    /// 보내기 축 — 위 받기 축의 짝이다. ★둘이 갈린 행은 「보내기만 되는」 비대칭이므로 그 행의 사유가
+    /// 그 백엔드 폴더에 적혀 있어야 한다★.
+    uses_mail: bool,
     session_snapshot: bool,
     /// ★이 칸에는 실 근거가 붙는다 — 선언끼리 맞대는 것으로 끝나지 않는다★: 「cwd·env 를 준 대로
     /// 쓴다」는 주장이라 [`q12_working_root_comes_from_the_cd_flag_and_env_reaches_the_process`] 가
@@ -290,6 +293,7 @@ fn backend_table() -> Vec<BackendRow> {
                 supports_control_channel: true,
                 accepts_mcp_config: true,
                 reads_messages: true,
+                uses_mail: true,
                 session_snapshot: false,
                 session_cwd_env: true,
                 model_select: false,
@@ -320,9 +324,14 @@ fn backend_table() -> Vec<BackendRow> {
                 //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
                 //   정본은 `backend/codex/`.
                 assigns_session_id: false,
-                supports_control_channel: false,
+                // ★이 칸만 claude 와 같다 — 그 이유는 MCP 가 아니다★: 제어 채널의 소비 수단에는 CLI
+                //   입구(크레덴셜 env)도 있고 codex 는 그쪽만 쓴다. 바로 아래 칸이 false 인 채로 이 칸이
+                //   true 인 조합이 그 사실의 모양이다.
+                supports_control_channel: true,
                 accepts_mcp_config: false,
                 reads_messages: false,
+                // 받기와 **같이** 닫혀 있다 — 사유의 정본은 `backend/codex/` 의 그 칸.
+                uses_mail: false,
                 session_snapshot: false,
                 session_cwd_env: true,
                 model_select: false,
@@ -427,6 +436,7 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
             d.accepts_mcp_config,
             "{name}: accepts_mcp_config"
         );
+        assert_eq!(b.uses_mail(), d.uses_mail, "{name}: uses_mail");
         assert_eq!(
             b.reads_messages(),
             d.reads_messages,
