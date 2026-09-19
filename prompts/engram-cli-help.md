@@ -1,26 +1,21 @@
-# `engram help` 화면 본문 (ADR-0092 계열 외부화)
+# `engram help` screen bodies
 
-에이전트가 제어 평면 표면을 배우는 유일한 자리인 `engram help` 의 **본문**이다. 프라이밍
-(`agent-priming.md`)과 같은 이유로 바이너리 밖에 산다 — 문구를 고치는 데 재빌드가 필요하면 그 문구는
-사실상 코드다.
+Everything below the first marker is text an agent reads. Edit it and the next `engram help` call
+shows the change — no rebuild. Why it lives outside the binary: ADR-0212.
 
-★이 파일을 고치면 재빌드 없이 다음 `engram help` 호출부터 반영된다★ — CLI 가 실행 시점에 읽는다.
-바이너리에도 같은 내용의 사본이 `include_str!` 로 박혀 있는데 그것은 **이 파일을 못 읽을 때만** 쓰이는
-폴백이다(이 화면이 아무것도 못 내면 에이전트는 표면이 없다고 결론짓는다 — 빈 출력은 선택지가 아니다).
-폴백으로 내려가면 stderr 에 사유 한 줄이 나가고 stdout 과 종료코드는 그대로다.
+Editing rules — break one and the screens break:
 
-## 형식
-
-- 구획 표시 = `<!-- engram:help <구획-id> -->` 한 줄. **그 줄 다음 바이트부터 다음 표시 줄 앞까지가 본문**
-  이고 공백·빈 줄·줄바꿈까지 **그대로** 화면에 실린다. 첫 표시 앞의 이 글은 버려진다.
-- `{tool}` 은 실행파일 이름으로 치환된다(정본 = agent 의 `CLI_EXE_NAME`). 이름을 손으로 적지 말 것 —
-  적으면 실행파일 이름이 갈리는 날 배운 대로 쳐도 명령을 못 찾는다.
-- 구획 하나라도 빠지면 이 파일은 **통째로** 거부되고 폴백이 뜬다(반쪽 화면 금지). 모르는 구획은 무시한다
-  — 새 파일을 옛 바이너리로 읽는 경우가 정상 경로이기 때문이다.
-- 우편 하위 화면의 구획 id 는 주제 토큰에서 **파생**된다(`mail.index.<토큰>` · `mail.page.<토큰>`).
-  그래서 주제를 늘리면 여기 구획도 반드시 함께 늘어야 하고, 안 늘면 로드가 거부된다.
-- 우편 계열이 감춰진 스폰(ADR-0133)에서는 `root.group.mail` 과 `agent.xref` 두 구획만 빠진다. 그래서
-  그 둘이 따로 서 있다 — 다른 구획에 우편을 적으면 필터가 무의미해진다.
+- A marker is a whole line, `<!-- engram:help <section-id> -->`. Its section runs from the next byte
+  to the line before the following marker, whitespace and blank lines included, verbatim. This
+  header, above the first marker, is discarded.
+- Write `{tool}`, never the executable's name. It is substituted at render time; a hand-written name
+  goes stale the day the executable is renamed, and the agent types what it was taught and misses.
+- Miss one required section and the whole file is rejected in favour of the built-in copy — no half
+  screens. Unknown sections are ignored, because a new file read by an old binary is a normal case.
+- Mail subtopic ids are **derived from the verb token** (`mail.index.<token>`, `mail.page.<token>`).
+  Add a subtopic in the code and you must add both sections here, or the file stops loading.
+- Only `root.group.mail` and `agent.xref` are dropped for agents without mail (ADR-0133). They stand
+  alone for that reason — put mail anywhere else and the filter stops meaning anything.
 
 <!-- engram:help root.head -->
 {tool} — CLI for the Engram broker daemon. Usage: {tool} <group> <verb> [flags]
