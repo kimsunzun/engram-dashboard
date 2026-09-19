@@ -207,7 +207,7 @@ foreach ($d in $topDirs) {
 }
 if ($topDirs -notcontains 'prompts') { $errors += '누락(top dir): prompts/' }
 
-# prompts/: 정확히 두 .md, 하위 디렉토리 없음.
+# prompts/: 정확히 $ExpectedPrompts 의 .md 만(2026-09-19 현재 1개 — CLI 변형 삭제), 하위 디렉토리 없음.
 if (Test-Path $ReleasePrompts) {
     $pFiles = @(Get-ChildItem -Force -File      -Path $ReleasePrompts | ForEach-Object Name)
     $pDirs  = @(Get-ChildItem -Force -Directory -Path $ReleasePrompts | ForEach-Object Name)

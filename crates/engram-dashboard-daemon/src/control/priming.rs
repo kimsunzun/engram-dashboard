@@ -638,16 +638,18 @@ mod tests {
         ));
     }
 
+    /// ★입구 **이름**을 가르치는 자리는 더 이상 이 파일이 아니다★: 프라이밍은 포인터 한 줄
+    ///   (`engram help`)로 줄었고, `send_message` 라는 낱말을 에이전트가 읽는 곳은 그 툴의 **설명문**
+    ///   뿐이다(rmcp 가 tools/list 에 싣는다). 그래서 그 반쪽은
+    ///   `control/mcp_server.rs::the_send_message_entry_teaches_its_own_call` 로 옮겼다 — 표면을 소유한
+    ///   파일이 그 표면을 지킨다. 여기 남은 것은 **주어가 여전히 프라이밍 파일인** 반쪽,
+    ///   곧 ADR-0126 결정 1(우회 교육 폐지)의 CLI 표면 부재다.
     // ADR-0126
     // ADR-0128
     #[test]
-    fn production_priming_files_pin_taught_channels() {
+    fn production_priming_file_carries_no_mail_cli_surface() {
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        assert!(
-            a.contains("send_message"),
-            "A(McpPrimary)는 send_message 를 가르쳐야(A 의 유일한 교육 표면)"
-        );
         // A 의 CLI 표면 **전면** 부재 — ADR-0126 영향/불변식의 검사 목록 그대로(명령 표기 + 딸린 플래그).
         //   이름만 지우고 플래그 표기가 남으면 우회 교육이 반쪽으로 살아남는다.
         // ★맨 `contains` 로 되돌리지 말 것★: 대소문자·줄바꿈·마크다운 강조로 표기만 흐트러뜨려도
@@ -696,9 +698,9 @@ mod tests {
     ///   장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
     ///
     /// ★왜 "broken channel" 한 토큰만 pin 하나★: 문장 전체를 pin 하면 평범한 문구 손질에도 깨진다. "우회
-    ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 pin_taught_channels 가 A 의 CLI 표면 부재를 이미
-    ///   강제하므로 "대신 다른 입구를 써라" 식 회귀는 그쪽에서 잡힌다. 여기선 **고장을 고장이라 부르는
-    ///   문장이 존재하는지**만 본다.
+    ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 `production_priming_file_carries_no_mail_cli_surface`
+    ///   가 A 의 CLI 표면 부재를 이미 강제하므로 "대신 다른 입구를 써라" 식 회귀는 그쪽에서 잡힌다.
+    ///   여기선 **고장을 고장이라 부르는 문장이 존재하는지**만 본다.
     // ADR-0126
     #[test]
     fn production_priming_files_teach_channel_failure_escalation() {
@@ -710,31 +712,10 @@ mod tests {
         );
     }
 
-    /// ★C3 회신 계약 프라이밍 정합(ADR-0103 결정 2/3 · spec §3)★: 데몬은 `type="request"` 봉투를 내보내고
-    ///   기한 초과 시 발신자에게 `<notice>` 를 쏜다 — 그런데 **회신 자체는 LLM 준수(soft)** 라, 프라이밍이
-    ///   회신 규칙을 안 가르치면 엄격 매칭(`reply_to` 필수)이 구조적으로 회신을 못 받는다(계약 반쪽).
-    ///   그래서 "request 를 받으면 그 id 로 회신" 을 가르치는지 파일 수준에서 못박는다.
-    ///
-    /// ★자기 입구의 표기만 가르친다(ADR-0126 결정 1)★: 회신·기한은 **툴 인자**(snake_case `reply_to`·
-    ///   `reply_by`)로만 적는다. 봉투 인식(`type="request"`)과 `<notice>` 는 입구와 무관한 수신측 계약이라
-    ///   표기가 갈리지 않는다. CLI 플래그 표기가 들어오면 폐지한 우회 교육이 되살아난다(ADR-0126) — 그
-    ///   회귀는 위 pin_taught_channels 의 CLI 표면 부재 단언이 함께 잡는다.
-    // ADR-0126
-    #[test]
-    fn production_priming_files_teach_the_reply_contract() {
-        let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        assert!(
-            a.contains("type=\"request\""),
-            "A(McpPrimary): request 봉투를 알아보게 가르쳐야"
-        );
-        assert!(
-            a.contains("<notice>"),
-            "A(McpPrimary): notice 는 회신 대상이 아님을 가르쳐야(데몬 전용 태그)"
-        );
-        assert!(
-            a.contains("reply_to") && a.contains("reply_by"),
-            "A(McpPrimary)는 회신·기한을 툴 인자 표기(snake_case)로 가르쳐야(A 의 유일한 입구)"
-        );
-    }
+    // ★C3 회신 계약(ADR-0103 결정 2/3)의 pin 은 여기 없다 — 되살리지 말 것★: 프라이밍은 봉투 문법을
+    //   더 이상 싣지 않는다(포인터로 줄었다). 계약은 두 표면으로 갈려 각자의 파일이 지킨다 —
+    //   봉투 인식(`type="request"` · `<notice>` · 받은 id 로 회신)은 `bin/engram.rs` 의 `help mail recv`
+    //   화면 pin 이, 툴 인자 표기(snake_case `reply_to`·`reply_by`)는 `control/mcp_server.rs` 의 설명문
+    //   pin 이 본다. 프라이밍이 지는 것은 **행동 규칙**뿐이고(위 에스컬레이션 pin 이 그쪽 축이다), 그
+    //   문법을 여기로 도로 끌어오면 같은 계약이 세 곳에서 갈라진다.
 }

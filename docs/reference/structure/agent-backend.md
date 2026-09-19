@@ -142,7 +142,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 | `can_resume_stored_session` | `true`(두 모드) | **app-server `true` · 터미널 `false`** | `true`(best-guess stub) | 저장된 backend sid 로 **이어받을 수 있나**. 발급 주체는 묻지 않는다. 부팅 복원과 활성화 입구 둘이 `backend::can_resume_profile`(이 축 ∧ sid 존재) 하나로 함께 판정한다 — `false` 면 sid 가 남아 있어도 Fresh. ★예외 하나★: WS `SpawnProfile{resume:true}` 는 그 판정을 **우회해** Resume 으로 간다(`resume \|\| can_resume_profile(…)`) |
 | `reads_messages` | `true`(trait 기본) | `false` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 |
 | `supports_control_channel` | `true` | `false` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰+mcp-config 발급). `false` 면 provision 을 **아예 건드리지 않는다** |
-| `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
+| `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 **적재 여부**(싣느냐 마느냐 — 변형 축이 아니다. CLI 판은 `2ef6902` 에서 삭제됐다)와 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
 | `output_decoder` | stream-json 에만 `Some` | app-server 에만 `Some`(터미널은 `None`) | 없음(trait 기본 `None`) | 구조화 이벤트의 유무 → (A) 「렌더 분기」의 갈래 |
 | `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | app-server → `StdioBidiJson` · 터미널 → `Pty` | `Pty`(trait 기본) | ★**신고값일 뿐 통로를 고르지 않는다**★ — 실물은 `open_spawn` 이 만들고 그 안에서 이 값을 되읽지 않는다(ADR-0191). 오늘 이 값을 읽는 곳은 선언 표 트립와이어(`tests::expected_codec_axis`) 하나뿐이라, 신고와 실물이 어긋나도 아무 게이트가 못 본다 |
 | `capabilities().session.resume` | `true` | **app-server `true` · 터미널 `false`** | `false`(보수적 stub) | 무손실 복원 가능 여부. ★위 `can_resume_stored_session` 과 **같은 술어로 함께 켠다**★ — 갈리면 이어받지 않는 스폰이 이어받는다고 신고되거나 그 반대가 된다 |

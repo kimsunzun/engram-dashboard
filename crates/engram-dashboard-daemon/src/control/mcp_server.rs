@@ -426,25 +426,26 @@ impl EngramMcpHandler {
     ///   않는 툴을 가리켜 발신 입구가 조용히 막히고, 테스트만 이를 잡는다.
     // ADR-0086 / ADR-0094(단일 출처 결합)
     #[tool(
-        description = "Send a message to teammate agents. You are one agent on a team; use this \
-        tool to reply to or reach other live agents. `to` = one teammate or a LIST of them — each \
-        entry is an agent name (or agent id), or a group address: \"@here\" = everyone live right \
-        now EXCEPT you, \"@all\" = every agent in the team tree EXCEPT you, including ones that \
-        are not running (their copy waits and is delivered when they come back). You can mix them, \
-        e.g. [\"@here\", \"qa-bravo\"]. `body` = your message text. \
-        The sender envelope (who you are, message id) is added automatically by the broker — your \
-        identity comes from your bound session, not from arguments, so just write the body \
-        naturally. Set `request` = true when you need answers back (optionally with `reply_by` = \
-        \"5m\"/\"10m\"/\"1h\" — at least 1 minute, after which YOU get notified for each recipient \
-        that did not reply); with several recipients that opens one independent reply contract per \
-        recipient. When you answer a message that arrived with type=\"request\" and an id, pass \
-        `reply_to` = that id — a reply must have exactly one recipient. `request` and `reply_to` \
-        are mutually exclusive. The result has one row per recipient: status delivered (injected \
-        now), pending (queued until that agent finishes its turn) or failed (that recipient only — \
-        `code` says why, e.g. RECIPIENT_NOT_FOUND if it is not running; the others still got it). \
-        Delivery is at-least-once: if this call fails or times out without a result, the message \
-        may already have been delivered — check before resending, because a retry is a NEW \
-        message, not a replacement."
+        description = "Send a message to teammate agents — use it to reach or reply to them. This \
+        is the `engram` broker's tool, NOT your harness's own built-in `SendMessage`, which is \
+        denied on this team and fails as a permission denial if called. `to` = one teammate or a \
+        LIST of them — each entry is an agent name (or agent id), or a group address: \"@here\" = \
+        everyone live right now EXCEPT you, \"@all\" = every agent in the team tree EXCEPT you, \
+        including ones that are not running (their copy waits and is delivered when they come \
+        back). You can mix them, e.g. [\"@here\", \"qa-bravo\"]. `body` = your message text. \
+        The sender envelope (who you are, message id) is added by the broker from your bound \
+        session, not from arguments — just write the body. Set `request` = true when you need \
+        answers back (optionally with `reply_by` = \"5m\"/\"10m\"/\"1h\" — at least 1 minute); YOU \
+        get notified for each recipient that did not reply, one independent contract each. When \
+        you answer a message that arrived with type=\"request\" and an id, pass `reply_to` = that \
+        id — a reply must have exactly one recipient. `request` and `reply_to` are mutually \
+        exclusive. The result has one row per recipient: status delivered (injected now), pending \
+        (NOT a failure, and not confirmed either — it has several possible causes, so never read \
+        the recipient's state off this row; if arrival matters look it up with `messages` and that \
+        `id`) or failed (that recipient only — `code` says why, e.g. RECIPIENT_NOT_FOUND when no \
+        agent has that name; the others still got it). Delivery is at-least-once: if this call \
+        fails or times out with no result the message may already be delivered — check before \
+        resending; a retry is a NEW message, not a replacement."
     )]
     async fn send_message(
         &self,
@@ -1766,6 +1767,67 @@ mod tests {
         assert!(
             router.has_route(SEND_MESSAGE_TOOL),
             "라우터에 '{SEND_MESSAGE_TOOL}' 툴이 등록돼 있어야(const ↔ #[tool] 메서드명 일치 강제)"
+        );
+    }
+
+    /// ★옮겨 온 pin(`control/priming.rs::production_priming_files_pin_taught_channels` 의 앞 반쪽)★:
+    ///   예전엔 프라이밍 파일이 `send_message` 라는 낱말을 싣는지 봤다 — 그때는 그게 MCP 가능 스폰의
+    ///   **유일한 교육 표면**이었기 때문이다. 프라이밍이 포인터 한 줄로 줄면서 그 표면이 이 설명문으로
+    ///   옮겨 왔고(ADR-0126 결정 1 의 "입구는 하나만 가르친다" 는 그대로다), 그래서 pin 도 따라왔다.
+    ///
+    /// ★이름만으로는 부족하다★: `tools_list_exposes_send_message_tool` 이 보는 것은 라우팅 이름뿐이라
+    ///   설명문이 비어도 초록이다. 설명문이 사라지면 에이전트에게 남는 건 이름과 JSON 스키마뿐이고,
+    ///   **어디에서도 호출법을 배우지 못한 채** 돌게 된다 — 프라이밍이 그 자리를 더는 받쳐 주지 않으므로
+    ///   그 침묵을 잡는 곳이 여기 하나다.
+    ///
+    /// ★회신 계약의 **툴 인자 표기**(snake_case)도 여기서 본다(ADR-0103 결정 2/3)★: 봉투 인식
+    ///   (`<notice>` 포함)은 CLI 쪽 `help mail recv` 화면이 지고(`bin/engram.rs`), 이쪽은 자기 입구의
+    ///   인자 철자만 진다. 한 계약을 표면별로 갈라 두는 것이 ADR-0126 결정 1 의 모양이다.
+    ///
+    /// ★아래 두 단언은 옛 지시서에만 있다가 이 표면으로 되살린 것이다 — 지우지 말 것★:
+    ///   ① `pending` 에서 상대 상태를 추론하지 말고 `messages` 로 조회하라(ADR-0211 결정 2 가 이름으로
+    ///      지목한 둘 중 하나. 원인을 하나로 단정하는 설명은 그 금지를 정면으로 어긴다).
+    ///   ② 이름이 닮은 하네스 내장 `SendMessage` 와 자기를 가른다(ADR-0106 — deny 는 구조로 막지만,
+    ///      오발이 권한 거부로 끝나는 것을 모르면 지시서가 시킨 **채널 고장 보고**가 허위로 올라간다).
+    // ADR-0103
+    // ADR-0106
+    // ADR-0126
+    // ADR-0128
+    // ADR-0211
+    #[test]
+    fn the_send_message_entry_teaches_its_own_call() {
+        let tools = EngramMcpHandler::tool_router().list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == SEND_MESSAGE_TOOL)
+            .unwrap_or_else(|| panic!("tools/list 에 '{SEND_MESSAGE_TOOL}' 이 있어야"));
+        let desc = tool.description.as_deref().unwrap_or_else(|| {
+            panic!("'{SEND_MESSAGE_TOOL}' 에 설명문이 있어야(이게 교육 표면이다)")
+        });
+        for arg in ["`to`", "`body`"] {
+            assert!(
+                desc.contains(arg),
+                "설명문이 {arg} 를 가르쳐야(수신자·본문 없이는 호출이 성립하지 않는다): {desc}"
+            );
+        }
+        assert!(
+            desc.contains("type=\"request\""),
+            "설명문이 request 봉투를 알아보게 가르쳐야(회신은 LLM 준수 soft 라 안 가르치면 엄격 매칭이 \
+             구조적으로 회신을 못 받는다 — ADR-0103 결정 2/3): {desc}"
+        );
+        assert!(
+            desc.contains("reply_to") && desc.contains("reply_by"),
+            "설명문이 회신·기한을 툴 인자 표기(snake_case)로 가르쳐야: {desc}"
+        );
+        assert!(
+            desc.contains("pending") && desc.contains(MESSAGES_TOOL),
+            "`pending` 을 원인 하나로 설명하지 말고 '{MESSAGES_TOOL}' 로 조회하라고 가르쳐야(상대 상태 \
+             추론 금지 — ADR-0211 결정 2): {desc}"
+        );
+        assert!(
+            desc.contains("SendMessage"),
+            "이름이 닮은 하네스 내장 툴과 자기를 갈라 가르쳐야(오발이 권한 거부로 끝난다는 것을 모르면 \
+             허위 '채널 고장' 보고가 올라간다 — ADR-0106): {desc}"
         );
     }
 

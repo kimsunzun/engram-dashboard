@@ -471,7 +471,8 @@ mod tests {
         );
     }
 
-    // ── ADR-0099: provision 분기 — 채널 물리 배선 + 프라이밍 변형이 MCP-capability 로 함께 움직인다 ──────
+    // ── ADR-0099: provision 분기 — 채널 물리 배선 + 프라이밍 **적재 여부**가 MCP-capability 로 함께 ──────
+    //   움직인다(변형 축이 아니다 — 커밋 `2ef6902` 이후 비-MCP 갈래는 프라이밍을 아예 안 받는다, ADR-0209).
 
     use crate::control::priming::PrimingProvider;
     use std::sync::{Arc, Mutex};

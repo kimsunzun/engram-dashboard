@@ -583,7 +583,10 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
 }
 
 /// ★`engram` 실행파일이 없어도 우편 평면 **밖** 스폰은 끊기지 않는다★ — fail-closed 가 지키는 짝
-/// (CLI-only 프라이밍 ↔ 부를 실행파일)이 그 스폰에는 애초에 없기 때문이다. 이 갈래를 함께 끊으면
+/// (데몬이 낸 CLI 우편 인가 `mail_allowed`·[Cli] grant ↔ 부를 실행파일)이 그 스폰에는 애초에 없기
+/// 때문이다. ★그 짝의 한쪽은 프라이밍이 아니다★ — CLI 판 지시서는 삭제됐고 비-MCP 갈래는 아무것도
+/// 배우지 못한 채 뜨지만 인가는 그대로 나가므로, 짝도 판정도 그대로다(ADR-0209 · `control/mod.rs`).
+/// 이 갈래를 함께 끊으면
 /// 그 설치에서 우편과 무관한 backend 의 스폰이 통째로 중단된다.
 #[test]
 fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {

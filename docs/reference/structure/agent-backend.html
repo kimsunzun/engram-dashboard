@@ -313,7 +313,7 @@ flowchart TD
           <tr><td><code>can_resume_stored_session</code></td><td>저장된 sid 로 <b>이어받을 수 있나</b>(발급 주체는 안 묻는다) — 부팅 복원과 활성화 입구 둘이 <code>can_resume_profile</code>(이 축 ∧ sid 존재) 하나로 함께 판정한다. <code>false</code> 면 sid 가 남아 있어도 Fresh. <b>예외 하나</b> — WS <code>SpawnProfile{resume:true}</code> 는 그 판정을 우회해 Resume 으로 간다</td></tr>
           <tr><td><code>reads_messages</code></td><td><code>false</code> 면 우편 수신자 명단에서 제외</td></tr>
           <tr><td><code>supports_control_channel</code></td><td><code>true</code> 면 spawn 전에 provision(토큰 + mcp-config 발급)</td></tr>
-          <tr><td><code>accepts_mcp_config</code></td><td>프라이밍 변형과 우편 표식이 이 값으로 갈린다</td></tr>
+          <tr><td><code>accepts_mcp_config</code></td><td>프라이밍 적재 여부(싣느냐 마느냐 — 변형 축이 아니다)와 우편 표식이 이 값으로 갈린다</td></tr>
           <tr><td><code>turn_classifier</code></td><td>출력 이벤트 → <code>TurnSignal</code>. 선언이 없으면 그 백엔드는 <b>관측 대상이 아니다</b>(기본 = 침묵)</td></tr>
           <tr><td><code>transport_shape</code></td><td><b>신고값일 뿐</b> — 통로 실물은 <code>open_spawn</code> 이 만들고 그 안에서 이 값을 되읽지 않는다</td></tr>
           <tr><td><code>output_decoder</code></td><td>구조화 이벤트의 유무</td></tr>

@@ -255,18 +255,25 @@ pub trait AgentBackend: Send + Sync {
     /// 프로그램이 MCP config 를 소비하나"는 backend-kind 지식이라 여기서 선언한다 — manager 가 `matches!`
     /// 로 직접 분기하지 않는다.
     ///
-    /// 이 플래그 하나가 provision 의 MCP 입구·grant·프라이밍 변형·**우편 가부**를 전부 구동한다(정합
+    /// 이 플래그 하나가 provision 의 MCP 입구·grant·**프라이밍 적재 여부**·**우편 가부**를 전부 구동한다(정합
     /// 불변식 = 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
     /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
     /// `DaemonControlChannel::provision` 이 mcp-config 를 쓰고 MCP bits 를 endpoint 에 실으며 MCP-only 교육
     /// 프라이밍(`send_message` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 mcp-config 미기록 +
-    /// CLI-only 프라이밍 + 우편 가능 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    /// **프라이밍 미주입** + 우편 가능 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    ///
+    /// ★false 쪽이 고르는 것은 「다른 프라이밍」이 아니라 「프라이밍 없음」이다 — 변형 축을 되살리지 말 것★:
+    ///   CLI 전용 사본(`prompts/agent-priming-cli.md`)은 커밋 `2ef6902` 에서 삭제됐고 판정식은
+    ///   `wants_priming = uses_mail && accepts_mcp_config` 하나다(`control/mod.rs`). 그래서 비-MCP 스폰은
+    ///   지시서를 한 글자도 못 받고, 위 정합 불변식은 **아무것도 안 가르쳐서** 성립한다(없는 툴을 설명하는
+    ///   문서를 주는 것이 거짓말이고 침묵은 아니다 — ADR-0209 결정 3).
     ///
     /// ★`supports_control_channel` 과의 관계★: 후자는 "provision 을 **부르나**"(제어 채널 자체를 소비하나),
     ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 현재 claude 는 둘 다 true,
     ///   codex/gemini 는 둘 다 false 지만, 미래 "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 다.
     // ADR-0126
     // ADR-0133
+    // ADR-0209
     fn accepts_mcp_config(&self) -> bool;
 
     /// cwd·env는 manager가 정규화한 값을 전달한다.
@@ -885,8 +892,9 @@ mod tests {
     // 새 variant 배선 시 체크리스트:
     //   ① 새 백엔드의 두 capability는 stub 복붙 금지 — CLI spike로 실측한 값으로 채울 것.
     //   ② supports_control_channel=false로 연결하면 메시징 없는 단독 에이전트가 된다(의도인지 확인).
-    //   ③ 비-MCP(accepts_mcp_config=false)면 provision이 CLI판 프라이밍·[Cli] grant를 자동 선택한다
-    //      — `roundtrip-smoke --cli-only`로 실측.
+    //   ③ 비-MCP(accepts_mcp_config=false)면 provision이 [Cli] grant를 자동 선택하고 **프라이밍은 아예
+    //      안 싣는다**(CLI판 사본은 커밋 `2ef6902`에서 삭제됐고 `roundtrip-smoke --cli-only` 노브도 함께
+    //      사라졌다 — 되살리려 하지 말 것). 그 갈래는 오늘 실측 수단이 없다 — ADR-0209.
     //   ④ MCP-capable이면 기본 roundtrip으로 실측.
     //   참조: ADR-0099.
     fn expected_channel_matrix(c: &AgentCommand) -> (bool, bool) {

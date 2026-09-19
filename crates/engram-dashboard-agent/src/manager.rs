@@ -1271,7 +1271,8 @@ impl AgentManager {
         //   토큰/config 를 회수한다(FIX 3 leak 방지). supports_control_channel=false 인 backend 는 provision
         //   을 건너뛰므로 None(부재)과 동일하게 흐른다 — 그 backend 엔 fail-closed 계약이 적용되지 않는다.
         let control_endpoint = if backend::supports_control_channel(&profile.command) {
-            // ADR-0099: backend 의 MCP-capability 를 provision 에 넘겨 채널 물리 배선·프라이밍 변형·grant 를
+            // ADR-0099: backend 의 MCP-capability 를 provision 에 넘겨 채널 물리 배선·프라이밍 적재 여부
+            //   (변형이 아니다 — 비-MCP 갈래는 지시서를 아예 안 받는다, ADR-0209)·grant 를
             //   한꺼번에 가르게 한다(정합 불변식 = 가르치는 채널 ⊆ 깐 채널 — ADR-0126 결정 4 로 단방향 개정).
             //   판정은 backend dispatch(ADR-0004) — manager 는 command 를 직접 matches! 하지 않는다.
             // ADR-0126
