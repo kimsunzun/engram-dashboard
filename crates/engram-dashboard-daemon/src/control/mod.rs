@@ -22,7 +22,7 @@ use engram_dashboard_agent::types::{
 
 use mcp_config::MCP_SERVER_NAME;
 use mcp_server::SEND_MESSAGE_TOOL;
-use priming::{PrimingProvider, PrimingVariant};
+use priming::PrimingProvider;
 use registry::ControlRegistry;
 
 pub struct DaemonControlChannel {
@@ -56,8 +56,7 @@ impl DaemonControlChannel {
     ///   — MCP 가능 스폰의 자격증명으로 온 우편 요청은 데몬이 거절하므로(ADR-0133), MCP grant 를 빼도
     ///   CLI 우편으로 넘어가지 않고 **발신 입구가 0** 이 될 뿐이다. 게다가 스폰은 auto 권한 모드라 grant
     ///   자체가 NO-OP 이다(ADR-0097) — 실측(2026-08-03, 6/6)에서 이 노브를 켠 에이전트가 전부 정상
-    ///   발신했다. CLI 라우팅 실측은 채널을 통째로 가르는 `ENGRAM_FORCE_CLI_ONLY_SEND`(provision)로만
-    ///   성립한다.
+    ///   발신했다. 채널을 통째로 가르는 것은 `ENGRAM_FORCE_CLI_ONLY_SEND`(provision) 뿐이다.
     // ADR-0094
     /// ★`uses_mail == false` 면 **한 줄도 내지 않는다**★: 이 목록에 담기는 것은 발신 입구 툴뿐이고
     ///   (ADR-0094 최소권한), 우편 평면 밖 스폰에는 그 입구가 없다. 예전에는 `!accepts_mcp_config` 만
@@ -83,9 +82,13 @@ impl DaemonControlChannel {
                 tool: SEND_MESSAGE_TOOL.to_string(),
             });
         }
-        // exe 는 send_exe 에서 파생하지 않는다 — grant 문자열은 프라이밍이 가르치는 bare 명령 이름과
-        //   글자 그대로 같아야 해서 `CLI_EXE_NAME`(정본)을 쓰고, send_exe 는 CLI 입구 **존재 여부**만
-        //   판정에 쓴다(절대경로를 넣으면 bare 이름 호출과 매칭되지 않는다 — ADR-0098).
+        // exe 는 send_exe 에서 파생하지 않는다 — grant 문자열은 bare 명령 이름과 글자 그대로 같아야 해서
+        //   `CLI_EXE_NAME`(정본)을 쓰고, send_exe 는 CLI 입구 **존재 여부**만 판정에 쓴다(절대경로를 넣으면
+        //   bare 이름 호출과 매칭되지 않는다 — ADR-0098).
+        // ★이 갈래의 grant 를 가르치는 프라이밍은 없다★: CLI 미러 프라이밍이 사라져 비-MCP 스폰은 우편
+        //   교육을 아예 안 받는다(provision 의 `wants_priming`). 그래도 grant 를 내는 이유는 `mail_allowed`
+        //   가 그 스폰에 CLI 우편을 **인가**하기 때문이다 — 인가와 grant 가 갈리면 데몬이 받아 줄 요청을
+        //   권한 목록이 막는 상태가 난다. 「가르치는 이름 == grant 이름」 정렬은 여기선 성립하지 않는다.
         // ★알려진 미충족(의도적, 사용자 결정 대기)★: ADR-0133 이후 프라이밍 A 도 MCP 가능 스폰에
         //   bare `engram`(제어 발견 한 줄)을 가르치지만, 이 갈래는 CLI grant 를 방출하지 않는다 — 즉 위
         //   "가르치는 이름 == grant 이름" 정렬이 **그 갈래에서만 깨져 있다**. 지금 무해한 이유는 스폰이
@@ -111,8 +114,9 @@ impl DaemonControlChannel {
     ///   dep 그래프엔 유니피케이션되지 않는다 — **그 비유니피케이션과 그것이 깨지는 조건(`--all-targets`)
     ///   둘 다의 정본은 Cargo.toml `[dev-dependencies]` 의 self-dev-dependency 주석이다**(배포 릴리스를
     ///   `--all-targets` 로 만들면 이 노브가 그 바이너리에 박힌다).
-    /// ★유일한 소비자 = `roundtrip-smoke`★ — 그 bin 자체가 `required-features = ["test-harness"]` 라
-    ///   게이팅으로 실측이 끊기지 않는다.
+    /// ★지금 이 노브를 켜는 것은 아래 단위 테스트뿐이다★ — CLI 미러 프라이밍이 사라지며 이 노브를 쓰던
+    ///   실 claude 모드(`roundtrip-smoke --cli-only`)가 함께 없어졌다. 노브가 여는 비-MCP 갈래 자체는
+    ///   그대로 살아 있고(codex·gemini 가 그 모양이다) 이 노브가 claude 로 그 갈래를 밟는 유일한 수단이다.
     // ADR-0133
     #[cfg(feature = "test-harness")]
     fn force_cli_only() -> bool {
@@ -157,8 +161,9 @@ impl ControlChannel for DaemonControlChannel {
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         let token = Self::gen_token()
             .ok_or_else(|| ProvisionError("CSPRNG token generation failed".to_string()))?;
-        // ★ENGRAM_PRIMING_FILE override 와 손으로 조합 금지★: override 가 MCP 교육 파일을 물리면
-        //   교육=MCP · 물리=CLI 로 갈려 정합 불변식을 정면 위반한다.
+        // ★이 노브가 켜진 스폰은 프라이밍을 아예 못 받는다★: 아래 `wants_priming` 이 비-MCP 갈래를
+        //   먼저 끊으므로 `ENGRAM_PRIMING_FILE` override 로도 MCP 교육 파일이 실리지 않는다 — 「교육=MCP ·
+        //   물리=CLI」로 갈리는 옛 조합은 그 단락으로 성립 자체가 불가능해졌다.
         // 운영 빌드에선 `force_cli_only()` 가 const false 라 아래 식이 `accepts_mcp_config` 그대로다.
         let force_cli_only = Self::force_cli_only();
         let accepts_mcp_config = needs.accepts_mcp_config && !force_cli_only;
@@ -178,7 +183,7 @@ impl ControlChannel for DaemonControlChannel {
         // ADR-0209
         let mail_allowed = needs.uses_mail && !accepts_mcp_config;
         // ADR-0099
-        let (config_path, settings_file, priming_variant) = if accepts_mcp_config {
+        let (config_path, settings_file) = if accepts_mcp_config {
             let path = mcp_config::write_config(&self.data_dir, id, epoch, &self.mcp_url, &token)
                 .map_err(|e| {
                     tracing::warn!(agent = %id, epoch, "mcp-config 기록 실패 — fail-closed(스폰 중단): {e}");
@@ -198,41 +203,48 @@ impl ControlChannel for DaemonControlChannel {
                     None
                 }
             };
-            (Some(path), settings, PrimingVariant::McpPrimary)
+            (Some(path), settings)
         } else {
-            (None, None, PrimingVariant::CliOnly)
+            (None, None)
         };
-        // ★우편 평면 밖 스폰에는 프라이밍을 **아예 싣지 않는다**★: 프라이밍이 가르치는 것은 우편
-        //   사용법이고(두 변형 다), 그 스폰은 그 채널을 못 쓴다. 실으면 데몬은 「가르쳤다」고 기록하는데
-        //   에이전트는 배운 대로 쳤다가 거절만 받는다 — ADR-0099 가 실측한 발신 freeze 와 같은 모양이다.
-        //   ★교육과 인가를 같은 값에서 갈라야 한다는 정합 불변식의 세 번째 갈래가 이것이다★:
-        //   「못 쓰는 채널을 가르치지 않는다」에 「채널이 아예 없으면 아무 것도 가르치지 않는다」가 더해진다.
+        // ★프라이밍을 싣는 스폰은 **MCP 우편을 실제로 쓰는 스폰뿐**이다★: 남은 프라이밍 파일 하나가
+        //   가르치는 것은 `send_message` 툴 하나이고(ADR-0126 결정 1), 그 툴이 없는 스폰에 실으면 데몬은
+        //   「가르쳤다」고 기록하는데 에이전트는 없는 도구를 부른다 — ADR-0099 가 실측한 발신 freeze 와
+        //   같은 모양이다. 그래서 두 축이 **함께** 참일 때만 싣는다.
+        //   ★CLI 미러 쪽 변형은 사라졌다 — 그 자리를 A 로 메우지 말 것(사용자 결정 2026-09-19)★: 비-MCP
+        //   스폰은 프라이밍을 **아예 안 받는다**. 우편 CLI 는 미러이지 정식 경로가 아니고(ADR-0209 결정
+        //   3), 정식 경로는 그 backend 에 MCP 를 붙이는 것이다. 침묵은 거짓말이 아니지만 없는 툴을
+        //   가르치는 것은 거짓말이다.
+        // ADR-0092
         // ADR-0099
         // ADR-0126
         // ADR-0133
         // ADR-0209
-        let priming_variant = needs.uses_mail.then_some(priming_variant);
+        let wants_priming = needs.uses_mail && accepts_mcp_config;
         tracing::debug!(
             agent = %id,
             epoch,
             accepts_mcp_config,
             uses_mail = needs.uses_mail,
             force_cli_only,
-            ?priming_variant,
+            wants_priming,
             has_mcp_config = config_path.is_some(),
             "제어 채널 provision fork(ADR-0099 채널 스위치)"
         );
         // ★`needs.uses_mail` 이 조건에 든 것이 load-bearing 이다★: 이 fail-closed 가 지키는 것은
-        //   「CLI-only 프라이밍이 그 명령을 가르치는데 부를 실행파일이 없다」는 **짝 위반** 하나다.
-        //   우편 평면 밖 스폰은 그 프라이밍을 아예 안 받으므로(바로 위) 짝이 성립할 여지가 없다 —
-        //   그런 스폰까지 여기서 끊으면 `engram` 이 없는 설치에서 **우편과 무관한 backend 의 스폰이
-        //   통째로 중단된다**(제어 동사를 못 쓰는 것은 아래 warn 이 다루는 fail-open 사안이다).
+        //   「데몬이 이 자격증명에 CLI 우편을 **인가했는데**(`mail_allowed` · CLI grant) 부를 실행파일이
+        //   없다」는 **짝 위반** 하나다 — 인가한 채널이 물리적으로 0 이면 그 스폰의 편지는 전부 조용히
+        //   사라진다. 우편 평면 밖 스폰은 애초에 인가를 안 받으므로 짝이 성립할 여지가 없다 — 그런 스폰까지
+        //   여기서 끊으면 `engram` 이 없는 설치에서 **우편과 무관한 backend 의 스폰이 통째로 중단된다**
+        //   (제어 동사를 못 쓰는 것은 아래 warn 이 다루는 fail-open 사안이다).
+        // ★프라이밍 부재는 이 판정을 완화하지 않는다★: CLI 미러 변형이 사라져 이 갈래는 이제 아무것도
+        //   배우지 못한 채 뜨지만, 인가는 그대로 나간다(`mail_allowed`) — 그러니 지키는 짝도 그대로다.
         // ADR-0099
         // ADR-0133
         // ADR-0209
         if needs.uses_mail && !accepts_mcp_config && self.send_exe.is_none() {
             let msg = format!(
-                "non-MCP backend with no `{CLI_EXE_NAME}` binary — zero physical send channels while CLI-only priming teaches that command (pairing invariant violation)"
+                "non-MCP backend with no `{CLI_EXE_NAME}` binary — zero physical send channels while the daemon authorises CLI mail for this credential (pairing invariant violation)"
             );
             tracing::warn!(agent = %id, epoch, "제어 채널 provision fail-closed(ADR-0099): {msg}");
             // 회수 코드가 없는 이유: 이 분기는 !accepts_mcp_config 일 때만 참이라 위 write_config 를 타지
@@ -257,7 +269,7 @@ impl ControlChannel for DaemonControlChannel {
         }
         // 이 값이 강제(여기)와 교육(아래 endpoint 표식)을 함께 낳는다 — 파생점과 그 사유는 위 한 곳.
         self.registry.issue(id, epoch, token.clone(), mail_allowed);
-        let priming_file = priming_variant.and_then(|v| self.priming.priming_file(v));
+        let priming_file = wants_priming.then(|| self.priming.priming_file()).flatten();
         let grants = Self::build_grants(self.send_exe.as_deref(), needs);
         Ok(Some(ControlEndpoint {
             url: self.mcp_url.clone(),
@@ -461,24 +473,24 @@ mod tests {
 
     // ── ADR-0099: provision 분기 — 채널 물리 배선 + 프라이밍 변형이 MCP-capability 로 함께 움직인다 ──────
 
-    use crate::control::priming::{PrimingProvider, PrimingVariant};
+    use crate::control::priming::PrimingProvider;
     use std::sync::{Arc, Mutex};
 
+    /// ★seam 을 **불렀는지**를 기록한다★: 변형 축이 사라진 뒤로 provision 이 가르는 것은 "어느 파일" 이
+    ///   아니라 "물어보나 마나" 다(ADR-0209 · 사용자 결정 2026-09-19). 그래서 호출 사실이 관측 대상이고,
+    ///   `ep.priming_file` 단독으로는 "provider 가 None 을 줬다" 와 구분되지 않는다.
     struct RecordingPriming {
-        seen: Arc<Mutex<Option<PrimingVariant>>>,
+        seen: Arc<Mutex<bool>>,
     }
     impl PrimingProvider for RecordingPriming {
-        fn priming_file(&self, variant: PrimingVariant) -> Option<PathBuf> {
-            *self.seen.lock().unwrap() = Some(variant);
-            Some(PathBuf::from(match variant {
-                PrimingVariant::McpPrimary => "A-mcp-primary",
-                PrimingVariant::CliOnly => "B-cli-only",
-            }))
+        fn priming_file(&self) -> Option<PathBuf> {
+            *self.seen.lock().unwrap() = true;
+            Some(PathBuf::from("A-mcp-primary"))
         }
     }
 
     fn provision_test_channel_with_send(
-        seen: Arc<Mutex<Option<PrimingVariant>>>,
+        seen: Arc<Mutex<bool>>,
         send_exe: Option<PathBuf>,
     ) -> (DaemonControlChannel, PathBuf) {
         let data_dir =
@@ -497,7 +509,7 @@ mod tests {
     fn provision_mcp_capable_writes_config_and_picks_mcp_primary_priming() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
@@ -510,10 +522,9 @@ mod tests {
             .as_ref()
             .expect("MCP-capable → config_path Some");
         assert!(cfg.is_file(), "MCP-capable → mcp-config 파일 물리 존재");
-        assert_eq!(
+        assert!(
             *seen.lock().unwrap(),
-            Some(PrimingVariant::McpPrimary),
-            "MCP-capable → McpPrimary 프라이밍 변형"
+            "MCP-capable → 프라이밍 seam 에 물어봐야"
         );
         assert_eq!(ep.priming_file, Some(PathBuf::from("A-mcp-primary")));
         let settings = ep
@@ -534,10 +545,10 @@ mod tests {
     }
 
     #[test]
-    fn provision_non_mcp_skips_config_and_picks_cli_only_priming() {
+    fn provision_non_mcp_skips_config_and_injects_no_priming() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         let id = AgentId::new_v4();
@@ -557,12 +568,14 @@ mod tests {
             ep.settings_file, None,
             "비-MCP → settings_file 도 None(정합 불변식: 깐 채널 == 허용한 채널)"
         );
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(PrimingVariant::CliOnly),
-            "비-MCP → CliOnly 프라이밍 변형"
+        assert!(
+            !*seen.lock().unwrap(),
+            "비-MCP → 프라이밍 seam 을 아예 묻지 않아야(남은 파일은 MCP 툴만 가르친다)"
         );
-        assert_eq!(ep.priming_file, Some(PathBuf::from("B-cli-only")));
+        assert_eq!(
+            ep.priming_file, None,
+            "비-MCP → 프라이밍 미주입(없는 툴을 가르치느니 침묵 — ADR-0209 결정 3)"
+        );
         assert_eq!(
             ep.grants,
             vec![ToolGrant::Cli {
@@ -578,7 +591,7 @@ mod tests {
     fn provision_non_mcp_with_no_send_exe_fails_closed() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
         let id = AgentId::new_v4();
         let err = channel
@@ -602,7 +615,7 @@ mod tests {
     fn provision_mcp_capable_fails_closed_when_config_write_fails() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) = provision_test_channel_with_send(
             seen.clone(),
             Some(PathBuf::from("C:/app/engram.exe")),
@@ -624,8 +637,8 @@ mod tests {
             err.0
         );
         assert!(
-            seen.lock().unwrap().is_none(),
-            "fail-closed 면 프라이밍 변형 선택까지 가지 않는다(반쪽 provision 금지)"
+            !*seen.lock().unwrap(),
+            "fail-closed 면 프라이밍 seam 까지 가지 않는다(반쪽 provision 금지)"
         );
         let _ = std::fs::remove_file(&cfg_dir);
         let _ = std::fs::remove_dir_all(&data_dir);
@@ -635,7 +648,7 @@ mod tests {
     fn provision_mcp_capable_with_no_send_exe_is_allowed() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
         let id = AgentId::new_v4();
         let ep = channel
@@ -692,7 +705,7 @@ mod tests {
     fn provision_mcp_capable_wires_the_cli_and_marks_mail_off() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         // **절대**경로여야 한다 — 부모 디렉토리가 PATH prepend 대상이라, bare 이름이면 부모가 없어 PATH
         //   주입 단언이 성립하지 않는다.
         let send_exe = PathBuf::from("C:/app/engram.exe");
@@ -703,9 +716,8 @@ mod tests {
             .provision(id, 0, needs(true))
             .expect("provision ok")
             .expect("endpoint");
-        assert_eq!(
+        assert!(
             *seen.lock().unwrap(),
-            Some(PrimingVariant::McpPrimary),
             "MCP 가능 갈래(프라이밍 A)여야 이 가드가 의미를 가진다"
         );
         assert_eq!(ep.send_exe.as_deref(), Some(send_exe.as_path()));
@@ -755,7 +767,7 @@ mod tests {
     fn provision_non_mcp_wires_the_same_cli_and_marks_mail_on() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let send_exe = PathBuf::from("C:/app/engram.exe");
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(send_exe.clone()));
@@ -764,10 +776,9 @@ mod tests {
             .provision(id, 0, needs(false))
             .expect("provision ok")
             .expect("endpoint");
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(PrimingVariant::CliOnly),
-            "비-MCP 갈래(프라이밍 B)여야 이 가드가 의미를 가진다"
+        assert!(
+            !*seen.lock().unwrap(),
+            "비-MCP 갈래(프라이밍 미주입)여야 이 가드가 의미를 가진다"
         );
         assert!(
             ep.mail_allowed,
@@ -860,7 +871,7 @@ mod tests {
 
         let _g = lock_env();
         let lines: Arc<StdMutex<Vec<String>>> = Arc::default();
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         // send_exe=None + MCP-capable = 형제 exe 를 못 찾은 배포. 비-MCP 는 이 조합에서 fail-closed 라
         //   여기 닿지 않는다(위 `provision_non_mcp_with_no_send_exe_fails_closed`).
         let (channel, data_dir) = provision_test_channel_with_send(seen.clone(), None);
@@ -905,7 +916,7 @@ mod tests {
                 data_dir.clone(),
                 Some(PathBuf::from(CLI_EXE_NAME)),
                 Arc::new(RecordingPriming {
-                    seen: Arc::new(Mutex::new(None)),
+                    seen: Arc::new(Mutex::new(false)),
                 }),
             );
             let id = AgentId::new_v4();
@@ -943,7 +954,7 @@ mod tests {
             std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err(),
             "테스트 진입 시 두 env 모두 미설정이어야(leak 감지 — provision 이 둘 다 읽음)"
         );
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         // send_exe 를 켠다 — seam 이 스폰을 CLI-only 로 만들므로 CLI 입구가 없으면 fail-closed edge 에 걸린다.
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
@@ -960,10 +971,9 @@ mod tests {
             !data_dir.join("mcp-config").exists(),
             "seam 켜짐 → mcp-config 파일 물리 부재"
         );
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(PrimingVariant::CliOnly),
-            "seam 켜짐 → CliOnly 프라이밍(교육 절반)"
+        assert!(
+            !*seen.lock().unwrap(),
+            "seam 켜짐 → 비-MCP 와 같은 갈래이므로 프라이밍을 묻지 않는다"
         );
         assert_eq!(
             ep.grants,
@@ -980,7 +990,7 @@ mod tests {
     fn provision_force_cli_only_empty_value_is_inert() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "");
@@ -992,10 +1002,9 @@ mod tests {
             ep.config_path.is_some(),
             "빈 값 = seam 미발동 → MCP-capable 오늘 동작(config Some)"
         );
-        assert_eq!(
+        assert!(
             *seen.lock().unwrap(),
-            Some(PrimingVariant::McpPrimary),
-            "빈 값 → McpPrimary(오늘 동작)"
+            "빈 값 → 프라이밍 seam 호출(오늘 동작)"
         );
         let _ = std::fs::remove_dir_all(&data_dir);
     }
@@ -1009,7 +1018,7 @@ mod tests {
     fn the_forcing_knob_moves_the_mail_verdict_too_which_is_why_it_is_gated() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
-        let seen = Arc::new(Mutex::new(None));
+        let seen = Arc::new(Mutex::new(false));
         let (channel, data_dir) =
             provision_test_channel_with_send(seen.clone(), Some(PathBuf::from(CLI_EXE_NAME)));
         std::env::set_var(FORCE_CLI_ENV, "1");

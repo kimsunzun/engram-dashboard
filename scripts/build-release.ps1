@@ -43,7 +43,7 @@ $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
 
 # ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서. ──
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
-$ExpectedPrompts = @('agent-priming.md', 'agent-priming-cli.md')
+$ExpectedPrompts = @('agent-priming.md')
 
 function Fail([string]$msg) {
     Write-Host "[build-release] 실패: $msg" -ForegroundColor Red
