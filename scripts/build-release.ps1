@@ -13,8 +13,12 @@
 #       청소하지 않으므로, 옛 이름의 exe 가 남아 있는 상태에서 아래 manifest 만 그 옛 이름으로 고치면
 #       존재 검사도 tripwire 도 통과하고 **그 stale 바이너리가 그대로 패키징된다**(빌드가 그 파일을
 #       갱신하지 않았는데도). manifest 를 고칠 땐 산출 디렉토리를 함께 확인할 것.
-#     - 데몬은 프라이밍 prompts/agent-priming[-cli].md 를 find_install_root(=릴리즈에선 exe 폴더) 기준
+#     - 데몬은 프라이밍 prompts/agent-priming.md 를 find_install_root(=릴리즈에선 exe 폴더) 기준
 #       상대해석한다(ADR-0092). 릴리즈 폴더엔 .git·[workspace] 마커가 없으므로 install_root = exe 디렉토리.
+#     - engram.exe 는 `engram help` 화면 본문 prompts/engram-cli-help.md 를 **같은 앵커**로 읽는다
+#       (ADR-0092 계열 외부화). ★이 파일이 빠져도 help 는 죽지 않는다★ — 바이너리에 include_str! 사본이
+#       있어 내용은 그대로 나가고 stderr 에 사유 한 줄만 붙는다. 그래서 부재가 조용하고, 아래 tripwire 가
+#       그 침묵을 대신 잡는다(배송된 폴더의 본문이 낡은 사본으로 조용히 갈리는 것이 이 게이트의 표적).
 #   따라서 manifest(이 스크립트의 EXPECTED_*)가 곧 "무엇을 배송하는가"의 단일 출처다. manifest 를 바꾸면
 #   위 동거 불변식이 깨지지 않는지 반드시 재검토한다. tauri.conf.json 은 건드리지 않는다(정식 번들은 유예).
 #
@@ -43,7 +47,7 @@ $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
 
 # ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서. ──
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
-$ExpectedPrompts = @('agent-priming.md')
+$ExpectedPrompts = @('agent-priming.md', 'engram-cli-help.md')
 
 function Fail([string]$msg) {
     Write-Host "[build-release] 실패: $msg" -ForegroundColor Red
@@ -207,7 +211,8 @@ foreach ($d in $topDirs) {
 }
 if ($topDirs -notcontains 'prompts') { $errors += '누락(top dir): prompts/' }
 
-# prompts/: 정확히 $ExpectedPrompts 의 .md 만(2026-09-19 현재 1개 — CLI 변형 삭제), 하위 디렉토리 없음.
+# prompts/: 정확히 $ExpectedPrompts 의 .md 만, 하위 디렉토리 없음. ★개수를 여기 세지 않는다★ — 세던 숫자는
+#   manifest 가 늘 때마다 뒤처진다(실제로 뒤처졌다). 정본은 위 $ExpectedPrompts 배열 자체다.
 if (Test-Path $ReleasePrompts) {
     $pFiles = @(Get-ChildItem -Force -File      -Path $ReleasePrompts | ForEach-Object Name)
     $pDirs  = @(Get-ChildItem -Force -Directory -Path $ReleasePrompts | ForEach-Object Name)

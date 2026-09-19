@@ -279,173 +279,238 @@ impl MailSurface {
     }
 }
 
-/// 계열 목록의 머리·꼬리와 **계열당 한 줄**. 줄 단위로 쪼갠 이유는 필터가 필터로 남게 하기 위해서다 —
-/// 완성된 두 번째 목록 문자열을 따로 두면 한쪽만 고쳐진 채 갈린다(ADR-0133 결정 1).
-const HELP_ROOT_HEAD: &str = "\
-{tool} — CLI for the Engram broker daemon. Usage: {tool} <group> <verb> [flags]
+// ── help 화면 본문 = 외부 파일(ADR-0092 계열 외부화) ──────────────────────────────────────
+//
+// ★왜 바이너리 밖인가★: 이 화면은 에이전트가 표면을 배우는 유일한 자리라 문구가 계속 손질된다. 고치는 데
+//   재빌드가 필요하면 그 문구는 사실상 코드이고, 같은 내용을 프라이밍에서 외부 MD 로 뺀 결정(ADR-0092)과
+//   어긋난다.
+// ★프라이밍과 **같지 않은 반쪽이 있다**★: 그쪽 모듈은 경로만 다루고 내용은 claude 가 읽지만, 여기서는
+//   읽는 것도 이 프로세스다(화면을 우리가 찍는다). 그래서 재사용하는 것은 ADR-0092 의 **경로 해석
+//   모양**(install-root 앵커 · env override · 절대경로)이지 "내용을 안 읽는다" 쪽이 아니다.
+// ★늘어난 의존은 로컬 파일 읽기 하나뿐이다★ — 데몬도 크레덴셜도 부르지 않는다(ADR-0132 조각 ①: 표면을
+//   배우는 자리가 "이미 스폰돼 있어야" 하면 발견이 아니다).
+// ADR-0092
+// ADR-0132
+// ADR-0133
 
-Groups:
-";
-const HELP_ROOT_GROUP_MAIL: &str =
-    "  mail     message your teammates and check your own outstanding items\n";
-const HELP_ROOT_GROUP_AGENT: &str =
-    "  agent    list, create, start, rename and re-parent the agents on this team\n";
-/// ★이 화면은 정적이다 — 여기서 데몬을 부르지 않는다★: 표면을 배우는 자리가 "이미 연결돼 있어야" 하면
-/// 발견이 아니다. 그래서 런타임 표는 아래 한 줄로 **가리키기만** 한다(그 줄이 세 형태를 전부 적는 이유:
-/// 이 화면 말고는 그 형태를 배울 자리가 없다).
-const HELP_ROOT_TAIL: &str = "
-Run `{tool} help <group>` for that group's verbs (`{tool} <group> --help` works too).
-Run `{tool} commands` for every command the daemon can run right now, `{tool} commands <name>` for one command's arguments and return shape, and `{tool} <name> --flag value` to run it.
-";
+/// 화면 본문의 고정 상대경로 — 프라이밍과 같은 `prompts/` 폴더에 산다. ADR-0100 이 그 폴더를 exe 옆으로
+/// 통째 배송하고 manifest tripwire 가 부족·여분을 둘 다 잡으므로, 새 폴더를 만들면 그 두 장치를 한 벌 더
+/// 지어야 한다.
+const REL_HELP_FILE: &str = "prompts/engram-cli-help.md";
 
-/// `help mail` 개요의 머리 — 짧은 소개 + 색인의 머리말.
+/// 운영자·하네스가 본문을 갈아끼우는 자리 — 프라이밍의 `ENGRAM_PRIMING_FILE` 과 같은 계약이다.
 ///
-/// ★색인 줄은 여기 없다★: 손으로 적으면 하위 화면을 더하고 색인에서 빠뜨릴 수 있고, 그 화면은 **존재하되
-///   아무도 못 찾는** 상태가 된다(컴파일러도 테스트도 그 침묵은 못 잡는다). 그래서 색인은
-///   `MailTopic::SUBTOPICS` 를 돌며 조립한다.
-const HELP_MAIL_HEAD: &str = "\
-{tool} mail — messages between the agents on this team.
+/// ★실패해도 고정 파일로 폴백하지 않는다(프라이밍과 같은 규율)★: 명시 지정을 조용히 다른 파일로
+///   갈아치우면 무엇을 읽었는지 알 수 없다. 내장 사본으로 내려가고 사유는 stderr 에 적는다.
+const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
 
-Sending is three verbs; receiving takes none, because messages arrive on their own. One page each:
-";
+/// 구획 표시 줄의 앞뒤. ★**줄 전체**가 표시여야 한다★ — substring 으로 보면 형식을 설명하는 산문 한 줄이
+/// 구획을 끊는다(그 파일의 머리글이 실제로 그런 문장을 싣는다).
+const SECTION_OPEN: &str = "<!-- engram:help ";
+const SECTION_CLOSE: &str = "-->";
 
-/// 개요의 꼬리 = **계열 전체에 걸리는 규칙**(신원 · 종료코드).
+/// 바이너리에 박힌 사본 — 외부 파일을 못 쓸 때만 나간다.
 ///
-/// ★하위 화면으로 복사하지 않는다★: 종료코드가 바뀌는 날 네 사본 중 하나가 남는다. 하위 화면은 마지막
-///   줄로 여기를 가리키기만 한다.
-const HELP_MAIL_TAIL: &str = "
-Your identity is taken from the token the broker injected, never from an argument — there is no flag to send or query as somebody else.
+/// ★지우지 말 것(load-bearing)★: `engram help` 는 실패할 수 없는 자리다. 아무것도 못 내면 에이전트는
+///   「그런 표면이 없다」로 결론짓고, 요란하게 죽어도 결과는 같다 — 표면을 배우러 온 프로세스가 못 배운
+///   채 끝난다. 그래서 **낡았을지언정 옳은 화면**을 내고 사유는 stdout 이 아니라 stderr 로만 알린다.
+/// ★손으로 베낀 사본이 아니다★: `include_str!` 라 파일과 바이트가 같고, cargo 가 그 파일을 의존으로
+///   추적해 고치면 다시 굽는다 — 둘이 갈릴 경로가 없다.
+const HELP_EMBEDDED: &str = include_str!("../../../../prompts/engram-cli-help.md");
 
-Exit codes: 0 = accepted or read | 1 = rejected, or the daemon could not be reached — stdout carries the daemon's own reply when there was one, and {\"status\":\"error\",\"code\":...,\"hint\":...} when this CLI rejected the call itself | 2 = the daemon answered 2xx in a shape this CLI cannot read; report it, retrying will not help. Judge the outcome by the exit code, not by the shape of stdout.
-";
+/// 구획 id. ★표면 필터가 빼는 두 조각(`root.group.mail`·`agent.xref`)이 따로 서 있는 것이 요점이다★ —
+/// 완성된 두 번째 화면을 따로 두면 한쪽만 고쳐진 채 갈린다(ADR-0133 결정 1).
+const SECTION_ROOT_HEAD: &str = "root.head";
+const SECTION_ROOT_GROUP_MAIL: &str = "root.group.mail";
+const SECTION_ROOT_GROUP_AGENT: &str = "root.group.agent";
+const SECTION_ROOT_TAIL: &str = "root.tail";
+const SECTION_MAIL_HEAD: &str = "mail.head";
+const SECTION_MAIL_TAIL: &str = "mail.tail";
+const SECTION_AGENT_HEAD: &str = "agent.head";
+const SECTION_AGENT_XREF: &str = "agent.xref";
+const SECTION_AGENT_TAIL: &str = "agent.tail";
 
-/// 하위 화면 넷. 동사당 한 줄 + 플래그 목록으로 짧게 유지하는 규율은 그대로다(산문 금지) — 쪼갠 이유는
-/// 분량이지 형식이 아니다.
-const HELP_MAIL_SEND: &str = "\
-{tool} mail send — send a message to one or more teammates.
-
-  {tool} mail send --to <name[,name...]> (--body <text> | --body-stdin) [--request] [--reply-by <dur>] [--reply-to <m-id>]
-      Send a message. Prints one result row per recipient.
-      --to <name[,name...]>  teammate name or agent id; comma-separated for several;
-                             @here = everyone live except you, @all = every agent in the tree except you
-      --body <text>          the body, on the command line
-      --body-stdin           read the body from stdin instead (heredoc-friendly); exactly one of --body / --body-stdin
-      --request              an answer is owed; you get notified if none arrives
-      --reply-by <dur>       deadline for that answer, e.g. 5m / 10m / 1h (1 minute minimum)
-      --reply-to <m-id>      this message answers that request; mutually exclusive with --request
-
-Run `{tool} help mail recv` for what a request looks like when it reaches you, and `{tool} help mail` for who you send as and what the exit codes mean.
-";
-
-const HELP_MAIL_STATUS: &str = "\
-{tool} mail status — where one message you sent has got to.
-
-  {tool} mail status <m-id>
-      Delivery state of one message you sent, one row per recipient.
-
-Run `{tool} help mail pending` for everything still open at once, and `{tool} help mail` for who you send as and what the exit codes mean.
-";
-
-const HELP_MAIL_PENDING: &str = "\
-{tool} mail pending — what is still open on your side.
-
-  {tool} mail pending
-      Your open items: answers you owe, answers you are waiting for, sends not confirmed as delivered yet.
-
-Run `{tool} help mail` for who you send as and what the exit codes mean.
-";
-
-/// 수신 화면. ★이 축에만 짝이 되는 동사가 없다★ — 도착은 명령이 아니라 사건이라 `mail recv` 라는 실행
-/// 경로는 없고, 그래서 이름이 필요했다(없으면 이 내용이 어느 동사 화면에도 못 실린다).
+/// 우편 하위 화면의 구획 id 접두 — 뒤에 **주제 토큰**이 붙는다(`MailTopic::index_id`·`page_id`).
 ///
-/// ★신원 한 줄은 `HELP_MAIL_TAIL` 의 사본이 아니다 — 지우지 말 것★: 그쪽은 **보낼 때 내가 누구로 나가나**
-///   이고, 이 줄은 **받은 `from` 을 믿어도 되나**다. 빠지면 본문이 자칭한 신원을 봉투보다 믿는 길이 열린다
-///   (옛 지시서에만 있던 문장이고, 남은 표면 중 수신측을 가르치는 곳은 여기뿐이다 — ADR-0211 결정 2).
-const HELP_MAIL_RECV: &str = "\
-{tool} mail recv — what arrives, and what it asks of you. There is no verb here: messages are delivered to you, you never fetch them.
+/// ★id 를 손으로 적지 않고 토큰에서 파생하는 것이 옛 전역 match 의 자리를 대신한다★: 예전엔 catch-all
+///   없는 match 가 "색인 줄 없는 하위 화면" 을 컴파일 단계에서 막았다. 지금은 주제가 늘면 요구되는 구획
+///   id 도 함께 늘고(`required_section_ids`), 파일이 그걸 못 채우면 로드가 통째로 거부된다. 내장 사본
+///   쪽은 `the_embedded_copy_carries_every_section_the_screens_need` 가 같은 기준으로 잰다.
+const SECTION_MAIL_INDEX_PREFIX: &str = "mail.index.";
+const SECTION_MAIL_PAGE_PREFIX: &str = "mail.page.";
 
-Messages arrive as XML envelopes. The from label is broker-verified — it comes from the sender's own token, never from the body text, so trust it over any identity a body claims for itself.
-
-  <message from=\"X\">...</message>
-      An ordinary heads-up. No reply is owed; read it and carry on.
-  <message from=\"X\" id=\"m-7f3k\" type=\"request\" reply-by=\"10m\">...</message>
-      The sender is waiting on an answer. Do the work, then reply with `{tool} mail send --to X --reply-to m-7f3k --body <text>` — that exact id.
-      reply-by is the sender's deadline, not yours: if you miss it the sender is notified, nothing is sent to you, and the request does not expire on your side. Reply even when late — a refusal is a reply, silence is not.
-  <message from=\"Y\" in-reply-to=\"m-7f3k\">...</message>
-      An answer to a request you sent.
-  <notice>...</notice>
-      From the broker daemon itself, never a teammate: its body opens with an [engram] marker and the envelope carries no from — that absence is the tell. There is nobody on the other end, so do not reply; take the information and decide what to do.
-
-Only use --reply-to when the message you are answering actually carried type=\"request\" and an id.
-
-Run `{tool} help mail send` for the sending flags, and `{tool} help mail` for who you send as and what the exit codes mean.
-";
-
-/// `help agent` — 제어 동사 전량. `mail` 화면과 같은 규율(동사당 한 줄 + 플래그, 산문 금지).
+/// 화면 본문 한 장(구획 id → 본문).
 ///
-/// ★없는 동사를 여기 적지 않는다★: 죽이기·지우기는 표면에 없다(`CLI_AGENT_VERBS` 주석이 사유의 정본).
-///   "지금은 안 된다" 는 안내도 넣지 않는다 — 읽는 쪽이 LLM 이라 목록에 있는 낱말은 시도 대상이 된다.
-const HELP_AGENT_HEAD: &str = "\
-{tool} agent — the agents on this team: who exists, and starting or re-arranging them.
+/// ★반쪽 로드가 없다★: 구획이 하나라도 빠지면 이 표는 통째로 버려지고 내장 사본이 선다 — 반쪽 화면은
+///   낡은 화면보다 나쁘다(빠진 자리가 무엇이었는지 읽는 쪽이 알 길이 없다).
+struct HelpText {
+    sections: Vec<(String, String)>,
+    /// 폴백 경고가 사람에게 보여 줄 출처.
+    origin: String,
+}
 
-  {tool} agent list
-      Every agent, running or asleep. One JSON object: agents[] with id, name, state (live|sleeping), cwd, parent.
-";
+impl HelpText {
+    /// ★본문 = 표시 줄 다음 바이트부터 다음 표시 줄 앞까지, **그대로**★: 들여쓰기·빈 줄·끝 줄바꿈이 곧
+    ///   화면 서식이라 어느 것도 다듬지 않는다. 첫 표시 앞의 글은 버린다(파일 머리글 자리).
+    /// ★CRLF 만은 접는다★: `core.autocrlf` 때문에 체크아웃된 파일의 줄끝이 기계마다 갈리는데, 이 화면은
+    ///   바이트가 곧 계약이다(내장 사본과 파일이 같아야 하고, 이 자리에 있던 컴파일 상수는 LF 였다).
+    ///   여기서 접어 두면 어느 체크아웃에서도 같은 화면이 나간다.
+    fn parse(src: &str, origin: &str) -> Self {
+        let mut sections: Vec<(String, String)> = Vec::new();
+        let mut current: Option<(String, String)> = None;
+        for line in src.split_inclusive('\n') {
+            match section_marker(line) {
+                Some(id) => {
+                    sections.extend(current.take());
+                    current = Some((id.to_string(), String::new()));
+                }
+                None => {
+                    if let Some((_, body)) = current.as_mut() {
+                        body.push_str(&line.replace("\r\n", "\n"));
+                    }
+                }
+            }
+        }
+        sections.extend(current.take());
+        Self {
+            sections,
+            origin: origin.to_string(),
+        }
+    }
 
-/// 우편이 보이는 프로세스에서만 붙는 상호참조 한 줄(ADR-0133) — 감춘 계열을 다른 계열의 help 가 가르치면
-/// 필터가 무의미해진다.
-const HELP_AGENT_MAIL_XREF: &str =
-    "      Names are how you address teammates in `{tool} mail send --to <name>`.\n";
+    /// ★빠진 구획도 **무언가는** 낸다★: 로더가 완전한 표만 고르므로 실제로는 안 걸리지만, 그 보장이
+    ///   깨져도 화면이 조용히 비지 않게 자리와 id 를 남긴다 — 빈 출력은 표면 부재로 읽힌다.
+    fn section(&self, id: &str) -> String {
+        self.sections
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| format!("(help section `{id}` missing from {})\n", self.origin))
+    }
 
-const HELP_AGENT_TAIL: &str = "\
-  {tool} agent spawn <name>
-      Start an agent that already exists (it keeps its own past session when it has one).
-  {tool} agent spawn --cwd <path> [--name <name>]
-      Create a new agent in that folder and start it right away.
-  {tool} agent new --cwd <path> [--name <name>]
-      Create a new agent without starting it. It shows up as sleeping.
-      --cwd <path>           the folder the agent works in (required)
-      --name <name>          what to call it; without this the folder name is used
-  {tool} agent rename <name> <new-name>
-      Rename an agent. `outcome` says what happened: renamed (with the name it actually got — a
-      number is appended when that name is taken) or unchanged (it already held that name).
-  {tool} agent move <name> --parent <name|none>
-      Put an agent under another one, or `--parent none` to move it back to the top level.
-      --parent <name|none>   the new parent, or the word none to detach (required)
+    /// 화면 조립이 요구하는 구획 중 이 표가 못 채우는 것 전량.
+    fn missing(&self) -> Vec<String> {
+        required_section_ids()
+            .into_iter()
+            .filter(|id| !self.sections.iter().any(|(k, _)| k == id))
+            .collect()
+    }
+}
 
-Agents are named exactly: no case-folding, no prefixes. If two agents share a name the command is
-refused rather than guessing — pass the id from `{tool} agent list` instead. An agent literally
-called `none` can only be used as a parent by its id.
+/// 표시 줄이면 그 구획 id. 줄 전체가 표시여야 하고(양끝 공백 허용) id 에는 공백이 없다.
+fn section_marker(line: &str) -> Option<&str> {
+    let inner = line
+        .trim()
+        .strip_prefix(SECTION_OPEN)?
+        .strip_suffix(SECTION_CLOSE)?
+        .trim();
+    (!inner.is_empty() && !inner.contains(char::is_whitespace)).then_some(inner)
+}
 
-Exit codes: 0 = done | 1 = refused, or the daemon could not be reached — stdout carries the daemon's own reply when there was one, and {\"status\":\"error\",\"code\":...,\"hint\":...} when this CLI refused the call itself | 2 = the daemon answered 2xx in a shape this CLI cannot read; report it, retrying will not help. Judge the outcome by the exit code, not by the shape of stdout.
-";
+/// 화면 조립이 요구하는 구획 전량 — 우편 하위 화면분은 주제 목록에서 파생된다.
+fn required_section_ids() -> Vec<String> {
+    let mut ids: Vec<String> = [
+        SECTION_ROOT_HEAD,
+        SECTION_ROOT_GROUP_MAIL,
+        SECTION_ROOT_GROUP_AGENT,
+        SECTION_ROOT_TAIL,
+        SECTION_MAIL_HEAD,
+        SECTION_MAIL_TAIL,
+        SECTION_AGENT_HEAD,
+        SECTION_AGENT_XREF,
+        SECTION_AGENT_TAIL,
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+    for sub in MailTopic::SUBTOPICS {
+        ids.push(sub.index_id());
+        ids.push(sub.page_id());
+    }
+    ids
+}
+
+/// 고정 경로 — 프라이밍(`FilePrimingProvider::from_install_root`)과 **같은 앵커**를 쓴다.
+///
+/// ★cwd 도 repo 상대경로도 쓰지 않는다(ADR-0092 가 실측한 것)★: 이 CLI 는 에이전트의 작업 폴더에서
+///   불리므로 cwd 는 아무 관계가 없고, 릴리즈에는 repo 가 아예 없다. 릴리즈에서 이 앵커는 exe 폴더로
+///   떨어지고 거기 `prompts/` 가 함께 배송된다(ADR-0100).
+fn help_file_path() -> Option<std::path::PathBuf> {
+    let root = engram_dashboard_discovery::find_install_root()?;
+    root.is_absolute().then(|| root.join(REL_HELP_FILE))
+}
+
+/// ★stdout 을 건드리지 않는다★: 이 줄이 화면에 섞이면 읽는 쪽(LLM)이 그것을 표면의 일부로 읽고, 파이프로
+/// 받는 쪽은 화면이 오염된다. 종료코드도 0 그대로다 — 낡은 화면은 실패가 아니다.
+fn warn_help_fallback(reason: &str) {
+    eprintln!("[{CLI_EXE_NAME}] help 본문 외부 파일을 쓰지 못해 내장 사본으로 답한다 — {reason}");
+}
+
+fn load_help_text() -> HelpText {
+    let override_path = std::env::var_os(ENV_HELP_FILE)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from);
+    match override_path.or_else(help_file_path) {
+        Some(p) => {
+            let shown = p.display().to_string();
+            match std::fs::read_to_string(&p) {
+                Ok(src) => {
+                    let text = HelpText::parse(&src, &shown);
+                    let missing = text.missing();
+                    if missing.is_empty() {
+                        return text;
+                    }
+                    warn_help_fallback(&format!(
+                        "{shown}: 구획 누락({}) — 반쪽 화면 대신 사본으로 간다",
+                        missing.join(", ")
+                    ));
+                }
+                Err(e) => warn_help_fallback(&format!("{shown}: {e}")),
+            }
+        }
+        None => warn_help_fallback("설치 루트를 못 잡아 본문 경로를 짓지 못함"),
+    }
+    HelpText::parse(HELP_EMBEDDED, "내장 사본")
+}
+
+/// 프로세스당 한 번 해석한다 — 실제 호출은 화면 하나를 찍고 끝나지만 테스트는 여러 장을 그린다.
+fn help_text() -> &'static HelpText {
+    static CELL: std::sync::OnceLock<HelpText> = std::sync::OnceLock::new();
+    CELL.get_or_init(load_help_text)
+}
 
 /// 화면 하나 = 조각들의 이어붙임 + 실행파일 이름 치환. 조각 선택이 곧 표면 필터다(ADR-0133).
 fn render_help(topic: HelpTopic, mail: MailSurface) -> String {
+    render_help_from(help_text(), topic, mail)
+}
+
+/// 조립을 표에서 떼어 둔 자리 — 테스트가 깨진 표·빈 표를 먹여 그려 볼 수 있게 한다(본문을 밖으로
+/// 내보낸 뒤 "파일이 깨졌을 때" 를 재는 유일한 길이다).
+fn render_help_from(text: &HelpText, topic: HelpTopic, mail: MailSurface) -> String {
     let mut out = String::new();
     match topic {
         HelpTopic::Root => {
-            out.push_str(HELP_ROOT_HEAD);
+            out.push_str(&text.section(SECTION_ROOT_HEAD));
             if mail.shows_mail() {
-                out.push_str(HELP_ROOT_GROUP_MAIL);
+                out.push_str(&text.section(SECTION_ROOT_GROUP_MAIL));
             }
-            out.push_str(HELP_ROOT_GROUP_AGENT);
-            out.push_str(HELP_ROOT_TAIL);
+            out.push_str(&text.section(SECTION_ROOT_GROUP_AGENT));
+            out.push_str(&text.section(SECTION_ROOT_TAIL));
         }
         HelpTopic::Mail => {
-            out.push_str(HELP_MAIL_HEAD);
+            out.push_str(&text.section(SECTION_MAIL_HEAD));
             for sub in MailTopic::SUBTOPICS {
-                out.push_str(sub.index_line());
+                out.push_str(&text.section(&sub.index_id()));
             }
-            out.push_str(HELP_MAIL_TAIL);
+            out.push_str(&text.section(SECTION_MAIL_TAIL));
         }
-        HelpTopic::MailSub(sub) => out.push_str(sub.page()),
+        HelpTopic::MailSub(sub) => out.push_str(&text.section(&sub.page_id())),
         HelpTopic::Agent => {
-            out.push_str(HELP_AGENT_HEAD);
+            out.push_str(&text.section(SECTION_AGENT_HEAD));
             if mail.shows_mail() {
-                out.push_str(HELP_AGENT_MAIL_XREF);
+                out.push_str(&text.section(SECTION_AGENT_XREF));
             }
-            out.push_str(HELP_AGENT_TAIL);
+            out.push_str(&text.section(SECTION_AGENT_TAIL));
         }
     }
     out.replace(HELP_TOOL_SLOT, CLI_EXE_NAME)
@@ -790,34 +855,17 @@ declare_mail_topics! {
 }
 
 impl MailTopic {
-    /// 개요의 색인 한 줄(줄바꿈 포함).
+    /// 개요 색인 한 줄과 하위 화면 본문의 구획 id.
     ///
-    /// ★catch-all 을 두지 않는 것이 요점이다★: 변종이 늘면 이 match 가 컴파일을 멈춘다 — 색인 줄 없는
-    ///   하위 화면을 아예 만들 수 없다는 뜻이다. `page` 도 같은 이유로 전역 match 다.
-    fn index_line(self) -> &'static str {
-        match self {
-            MailTopic::Send => {
-                "  {tool} help mail send      composing and sending, and every flag it takes\n"
-            }
-            MailTopic::Status => {
-                "  {tool} help mail status    where one message you sent has got to\n"
-            }
-            MailTopic::Pending => {
-                "  {tool} help mail pending   what you still owe, and what you are waiting for\n"
-            }
-            MailTopic::Recv => {
-                "  {tool} help mail recv      what arrives on your side, and when a reply is owed\n"
-            }
-        }
+    /// ★id 를 손으로 적지 않고 토큰에서 파생하는 것이 예전 전역 match 의 자리를 대신한다★: 그 match 는
+    ///   catch-all 이 없어 색인 줄 없는 하위 화면을 컴파일 단계에서 막았다. 지금은 주제가 늘면 요구되는
+    ///   구획 id 도 함께 늘고(`required_section_ids`), 본문 파일이 그걸 못 채우면 로드가 통째로 거부된다.
+    fn index_id(self) -> String {
+        format!("{SECTION_MAIL_INDEX_PREFIX}{}", self.token())
     }
 
-    fn page(self) -> &'static str {
-        match self {
-            MailTopic::Send => HELP_MAIL_SEND,
-            MailTopic::Status => HELP_MAIL_STATUS,
-            MailTopic::Pending => HELP_MAIL_PENDING,
-            MailTopic::Recv => HELP_MAIL_RECV,
-        }
+    fn page_id(self) -> String {
+        format!("{SECTION_MAIL_PAGE_PREFIX}{}", self.token())
     }
 }
 
@@ -4911,6 +4959,193 @@ mod tests {
         }
     }
 
+    // ── ADR-0092 계열: 화면 본문이 바이너리 밖에 산다 ──────────────────────────────────
+
+    /// 이 파일의 테스트는 언제나 컴파일타임 소스 트리 안에서 도므로 MANIFEST_DIR 이 신뢰 가능하다.
+    fn help_repo_root() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo 루트")
+            .to_path_buf()
+    }
+
+    /// 화면 조립이 부르는 구획 전량을 그리는 주제 목록 — 아래 여러 테스트가 공유한다.
+    fn all_help_topics() -> Vec<HelpTopic> {
+        let mut v = vec![HelpTopic::Root, HelpTopic::Mail, HelpTopic::Agent];
+        v.extend(MailTopic::SUBTOPICS.iter().map(|s| HelpTopic::MailSub(*s)));
+        v
+    }
+
+    /// ★내장 사본이 완전하지 않으면 폴백이 폴백이 아니다★: 외부 파일을 못 쓰는 순간 화면이 반쪽으로
+    ///   나가고, 그건 `engram help` 가 실패할 수 없다는 성질(ADR-0132 조각 ①)의 실질적 파기다.
+    ///   구획 id 를 주제 토큰에서 파생하면서 옛 전역 match 의 컴파일 강제가 사라졌으므로, 그 자리를
+    ///   이 단언이 진다 — 하위 주제를 늘리고 본문 파일에 구획을 안 더하면 여기서 빨개진다.
+    // ADR-0092
+    #[test]
+    fn the_embedded_copy_carries_every_section_the_screens_need() {
+        let text = HelpText::parse(HELP_EMBEDDED, "내장 사본");
+        assert!(
+            text.missing().is_empty(),
+            "내장 사본에 빠진 구획: {:?}",
+            text.missing()
+        );
+    }
+
+    /// ★두 경로가 **같은 파일**을 가리키는지★: 런타임은 `REL_HELP_FILE` 로 읽고 폴백은 `include_str!`
+    ///   로 굽는다 — 파일을 옮기며 한쪽만 고치면 배포본은 새 파일을, 바이너리는 옛 사본을 들고 돈다.
+    ///   그 어긋남은 둘 다 자기 안에서는 멀쩡해 보이므로 다른 어느 게이트도 못 잡는다.
+    #[test]
+    fn the_runtime_path_and_the_embedded_copy_name_the_same_file() {
+        let on_disk = std::fs::read_to_string(help_repo_root().join(REL_HELP_FILE))
+            .expect("본문 파일이 REL_HELP_FILE 자리에 있어야");
+        assert_eq!(
+            on_disk.replace("\r\n", "\n"),
+            HELP_EMBEDDED.replace("\r\n", "\n"),
+            "`include_str!` 가 굽는 파일과 런타임이 읽는 파일이 갈렸다"
+        );
+    }
+
+    /// 고정 경로 해석은 프라이밍과 같은 앵커(exe walk-up)를 쓴다 — cwd 도 repo 상대경로도 아니다.
+    #[test]
+    fn the_fixed_help_path_resolves_absolute_to_a_real_file() {
+        let p = help_file_path().expect("current_exe 가 있으면 경로는 산출된다");
+        assert!(p.is_absolute(), "절대경로여야: {p:?}");
+        assert!(
+            p.ends_with("prompts/engram-cli-help.md") || p.ends_with("prompts\\engram-cli-help.md"),
+            "고정 상대경로로 끝나야: {p:?}"
+        );
+        assert!(p.is_file(), "소스 트리에서 실제 파일을 가리켜야: {p:?}");
+    }
+
+    /// ★반쪽 로드 금지★: 구획 하나가 빠진 파일은 통째로 버려진다. 반쪽 화면은 낡은 화면보다 나쁘다 —
+    ///   읽는 쪽에는 빠진 자리가 그냥 없는 표면으로 보인다.
+    #[test]
+    fn a_help_file_missing_one_section_is_rejected_whole() {
+        let full = HELP_EMBEDDED.replace("\r\n", "\n");
+        let marker = format!("{SECTION_OPEN}{SECTION_AGENT_TAIL} {SECTION_CLOSE}");
+        assert!(full.contains(&marker), "표시 줄 표기가 바뀌었다: {marker}");
+        let crippled = full.replace(&marker, "<!-- 그냥 주석 -->");
+        let text = HelpText::parse(&crippled, "crippled");
+        assert_eq!(
+            text.missing(),
+            vec![SECTION_AGENT_TAIL.to_string()],
+            "빠진 구획을 정확히 지목해야"
+        );
+    }
+
+    /// ★외부 파일이 통째로 없어도 모든 화면이 선다★: 폴백으로 내려가는 것이 곧 이 성질이다.
+    #[test]
+    fn every_screen_still_renders_from_the_embedded_copy_alone() {
+        let text = HelpText::parse(HELP_EMBEDDED, "내장 사본");
+        for topic in all_help_topics() {
+            for surface in [MailSurface::Shown, MailSurface::Hidden] {
+                let screen = render_help_from(&text, topic, surface);
+                assert!(!screen.trim().is_empty(), "빈 화면({topic:?}/{surface:?})");
+                assert!(
+                    !screen.contains(HELP_TOOL_SLOT),
+                    "치환 안 된 자리({topic:?}): {screen}"
+                );
+                assert!(
+                    screen.contains(CLI_EXE_NAME),
+                    "실행파일 이름이 없다: {screen}"
+                );
+            }
+        }
+    }
+
+    /// ★최후의 바닥 — 표가 통째로 비어도 화면은 비지 않는다★: 빈 출력은 읽는 쪽에게 「그런 표면이
+    ///   없다」로 읽히므로, 그 경우에도 무엇이 빠졌는지 이름을 남긴다. 로더가 완전한 표만 고르므로
+    ///   운영에서는 안 걸리지만, 그 보장이 깨지는 날 조용히 사라지지 않게 박아 둔다.
+    #[test]
+    fn a_screen_never_renders_empty_even_with_no_sections_at_all() {
+        let empty = HelpText::parse("", "아무것도 없음");
+        assert_eq!(empty.missing().len(), required_section_ids().len());
+        for topic in all_help_topics() {
+            let screen = render_help_from(&empty, topic, MailSurface::Shown);
+            assert!(!screen.trim().is_empty(), "빈 화면({topic:?})");
+            assert!(
+                screen.contains("missing from") && screen.contains("아무것도 없음"),
+                "무엇이 어디서 빠졌는지 남겨야({topic:?}): {screen}"
+            );
+        }
+    }
+
+    /// ★표시는 **줄 전체**여야 한다★: 그렇지 않으면 형식을 설명하는 산문 한 줄이 구획을 끊는다 —
+    ///   본문 파일의 머리글이 실제로 그런 문장을 싣고 있고, 그 글은 첫 표시 앞이라 버려져야 한다.
+    #[test]
+    fn a_section_marker_must_be_a_whole_line() {
+        let src = format!(
+            "머리글: 표시는 `{SECTION_OPEN}<id> {SECTION_CLOSE}` 꼴이다.\n\
+             {SECTION_OPEN}one {SECTION_CLOSE}\n\
+             body one\n\
+             여기서도 {SECTION_OPEN}two {SECTION_CLOSE} 를 설명만 한다\n"
+        );
+        let text = HelpText::parse(&src, "fixture");
+        assert_eq!(
+            text.sections.len(),
+            1,
+            "산문 속 표기가 구획을 끊었다: {:?}",
+            text.sections
+        );
+        assert_eq!(
+            text.section("one"),
+            format!("body one\n여기서도 {SECTION_OPEN}two {SECTION_CLOSE} 를 설명만 한다\n")
+        );
+    }
+
+    /// ★본문은 공백까지 그대로다(들여쓰기·빈 줄·끝 줄바꿈이 곧 화면 서식)★ — 단 CRLF 만은 접는다:
+    ///   `core.autocrlf` 때문에 체크아웃된 줄끝이 기계마다 갈리는데 이 화면은 바이트가 곧 계약이다.
+    #[test]
+    fn section_bodies_keep_their_whitespace_but_fold_crlf() {
+        let text = HelpText::parse("<!-- engram:help s -->\r\n\r\n  indented\r\ntail\r\n", "f");
+        assert_eq!(text.section("s"), "\n  indented\ntail\n");
+        let no_trailing_newline = HelpText::parse("<!-- engram:help s -->\nlast", "f");
+        assert_eq!(no_trailing_newline.section("s"), "last");
+    }
+
+    /// ★env override 는 고정 파일을 이기고, 실패해도 **고정 파일로 되돌아가지 않는다**★(프라이밍과 같은
+    ///   규율 — 명시 지정을 조용히 다른 파일로 갈아치우면 무엇을 읽었는지 알 수 없다). 두 경로의 본문이
+    ///   같아서 내용으로는 못 가르므로 출처(`origin`)로 가른다.
+    // ADR-0092
+    #[test]
+    fn the_env_override_wins_and_its_failure_falls_back_to_the_embedded_copy() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os(ENV_HELP_FILE);
+
+        let dir = std::env::temp_dir().join(format!("engram-help-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let custom = dir.join("custom-help.md");
+        std::fs::write(
+            &custom,
+            HELP_EMBEDDED.replace("Groups:", "Groups (custom):"),
+        )
+        .unwrap();
+
+        std::env::set_var(ENV_HELP_FILE, &custom);
+        let loaded = load_help_text();
+        assert!(loaded.missing().is_empty());
+        assert!(
+            render_help_from(&loaded, HelpTopic::Root, MailSurface::Shown)
+                .contains("Groups (custom):"),
+            "override 파일이 이겨야"
+        );
+
+        std::env::set_var(ENV_HELP_FILE, dir.join("does-not-exist.md"));
+        let fell_back = load_help_text();
+        assert_eq!(
+            fell_back.origin, "내장 사본",
+            "override 실패는 고정 파일이 아니라 내장 사본으로 간다"
+        );
+        assert!(fell_back.missing().is_empty());
+
+        match previous {
+            Some(v) => std::env::set_var(ENV_HELP_FILE, v),
+            None => std::env::remove_var(ENV_HELP_FILE),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     // ── ADR-0133: 우편 표식 — 목록만 가리고 실행은 가리지 않는다 ─────────────────────────
 
     /// 표식 값 → 표면. **부재·모르는 값이 전부 보이는 쪽**인 것이 계약이다(사람이 셸에서 여는 자리).
