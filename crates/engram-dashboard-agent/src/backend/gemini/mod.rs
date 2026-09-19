@@ -67,6 +67,8 @@ impl AgentBackend for GeminiBackend {
         command: &AgentCommand,
         mode: SpawnMode,
         session_id: Option<Uuid>,
+        // ADR-0185 stub — 이 백엔드는 dispatch 에 배선되지 않았고, 명령줄 이어받기 문법도 미측정이다.
+        _resume_session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
         // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
@@ -157,6 +159,7 @@ mod tests {
             },
             mode,
             sid,
+            None,
             PathBuf::from("."),
             vec![],
             None,
@@ -197,6 +200,7 @@ mod tests {
                 output_format: crate::profile::AgentOutputFormat::Terminal,
             },
             SpawnMode::Fresh,
+            None,
             None,
             cwd.clone(),
             env.clone(),

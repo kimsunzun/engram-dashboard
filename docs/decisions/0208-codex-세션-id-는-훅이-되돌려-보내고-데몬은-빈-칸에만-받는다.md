@@ -1,7 +1,7 @@
 # ADR-0208: codex 세션 id 는 훅이 되돌려 보내고 데몬은 빈 칸에만 받는다
 
-- 상태: 확정 (2026-09-19, 근거: commit `75bdfda` · codex-cli 0.155.0 실측 3회)
-- 관련: CLAUDE.md 「백엔드 확장」 · ADR-0185(발급 주체 중립) · ADR-0086(제어 평면 토큰) · ADR-0004(백엔드 지식 격리) · ADR-0083(프로필 시체 보존) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs:169-171` · `crates/engram-dashboard-daemon/src/control/hook.rs` · `crates/engram-dashboard-agent/src/profile.rs:780` · step-log S21
+- 상태: 확정 (2026-09-19, 근거: commit `75bdfda` · codex-cli 0.155.0 실측 3회) · 부분 폐기 by ADR-0210 (훅 등록 경계와 훅 진단 합류)
+- 관련: CLAUDE.md 「백엔드 확장」 · ADR-0185(발급 주체 중립) · ADR-0086(제어 평면 토큰) · ADR-0004(백엔드 지식 격리) · ADR-0083(프로필 시체 보존) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs:169-171` · `crates/engram-dashboard-daemon/src/control/hook.rs` · `crates/engram-dashboard-agent/src/profile.rs:780` · step-log S21 · Amended by ADR-0210 (훅 등록 경계와 훅 진단 합류)
 
 ## 맥락
 

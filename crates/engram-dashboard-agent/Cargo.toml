@@ -34,7 +34,11 @@ ts-rs = "10"   # 선언 매크로가 인자·반환 struct 에 TS derive 를 단
 [dev-dependencies]
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 
-# 소비자는 `platform::windows` 의 Job Object 래퍼 하나뿐이다(PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# 소비자는 둘이다 — `platform::windows` 의 Job Object 래퍼와 `backend/codex` 의 8.3 단축 경로 변환
+#   (PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# ★`Win32_Storage_FileSystem` = `GetShortPathNameW` 하나★ — codex 훅의 `command` 는 첫 공백까지를
+#   프로그램으로 잘라 셸 없이 띄우므로, 공백이 든 exe 경로는 8.3 이름으로만 실을 수 있다(실측
+#   2026-09-19 · ADR-0208 후속). 빼면 `backend/codex/mod.rs` 의 `short_program_path` 가 안 선다.
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
 #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
 #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.
@@ -44,4 +48,5 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
 ] }

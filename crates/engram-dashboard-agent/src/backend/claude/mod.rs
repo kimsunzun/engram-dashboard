@@ -117,6 +117,7 @@ impl AgentBackend for ClaudeBackend {
         command: &AgentCommand,
         mode: SpawnMode,
         session_id: Option<Uuid>,
+        _resume_session_id: Option<Uuid>,
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
@@ -1121,7 +1122,7 @@ mod tests {
     // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
-        ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], None)
+        ClaudeBackend.build_spec(command, mode, sid, None, PathBuf::from("."), vec![], None)
     }
 
     fn spec_with_control(
@@ -1130,7 +1131,15 @@ mod tests {
         sid: Option<Uuid>,
         control: Option<ControlEndpoint>,
     ) -> CommandSpec {
-        ClaudeBackend.build_spec(command, mode, sid, PathBuf::from("."), vec![], control)
+        ClaudeBackend.build_spec(
+            command,
+            mode,
+            sid,
+            None,
+            PathBuf::from("."),
+            vec![],
+            control,
+        )
     }
 
     fn terminal(extra: Vec<&str>) -> AgentCommand {
@@ -1459,6 +1468,7 @@ mod tests {
         ClaudeBackend.build_spec(
             command,
             SpawnMode::Fresh,
+            None,
             None,
             PathBuf::from("."),
             profile_env,
@@ -2253,6 +2263,7 @@ mod tests {
             &terminal(vec![]),
             SpawnMode::Fresh,
             None,
+            None,
             cwd.clone(),
             env.clone(),
             None,
@@ -2355,6 +2366,7 @@ mod tests {
             &json(vec![]),
             SpawnMode::Fresh,
             None,
+            None,
             PathBuf::from("."),
             env,
             None,
@@ -2378,6 +2390,7 @@ mod tests {
         let s = ClaudeBackend.build_spec(
             &json(vec![]),
             SpawnMode::Fresh,
+            None,
             None,
             PathBuf::from("."),
             env,
@@ -3352,6 +3365,7 @@ mod tests {
             &terminal(vec![]),
             SpawnMode::Resume,
             Some(sid),
+            None,
             PathBuf::from("."),
             vec![],
             None,

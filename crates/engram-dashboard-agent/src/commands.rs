@@ -1295,8 +1295,41 @@ mod tests {
     /// 없어 화면도 LLM 도 구별하지 못한다.
     /// ★WS 입구에도 같은 짝이 있다★ — 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
     // ADR-0185
+    /// ★표본이 셸인 것은 의도다 — codex 터미널 모드를 여기 되돌리지 말 것★: 그 모드는 ADR-0208 로
+    /// `codex resume <id>` 를 쓰게 되어 이제 이어받기 축이 **true** 다. 축이 꺼진 표본은 셸뿐이고,
+    /// 셸을 잘못된 표본이라 여겨 갈아 끼우면 이 항목이 재는 것이 사라진다.
     #[test]
     fn waking_does_not_resume_a_profile_whose_backend_cannot_resume() {
+        let host = FakeHost::new();
+        let id = host.with_status_command(
+            "shell-with-stale-sid",
+            None,
+            true,
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+        );
+        let (table, _notify) = wiring(&host);
+
+        call(
+            &table,
+            "agent.spawn",
+            json!({ "target": "shell-with-stale-sid" }),
+        )
+        .expect("깨우기");
+        assert_eq!(
+            host.started.lock().unwrap().as_slice(),
+            &[(id, false)],
+            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다"
+        );
+    }
+
+    /// ★위 항목의 짝 — codex 터미널 모드는 이제 **반대쪽**에 선다(ADR-0208)★: 손잡이가 명부에 있으면
+    /// 그 모드도 Resume 으로 떠야 한다. 이것이 없으면 위 항목만 남아, 축을 통째로 꺼도 초록이다.
+    // ADR-0208
+    #[test]
+    fn waking_a_codex_terminal_profile_with_a_stored_handle_resumes() {
         let host = FakeHost::new();
         let id = host.with_status_command(
             "codex-term",
@@ -1312,8 +1345,8 @@ mod tests {
         call(&table, "agent.spawn", json!({ "target": "codex-term" })).expect("깨우기");
         assert_eq!(
             host.started.lock().unwrap().as_slice(),
-            &[(id, false)],
-            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다"
+            &[(id, true)],
+            "훅이 받아 적은 손잡이가 있는데 Fresh 로 뜨면 그 id 는 영영 안 쓰인다"
         );
     }
 

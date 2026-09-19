@@ -406,7 +406,9 @@ fn run(args: &[String]) -> i32 {
         }
         // ★훅은 크레덴셜 검사 **앞**에서 자기 흐름을 탄다★: 아래 공통 경로는 크레덴셜이 없으면 반려
         //   JSON 을 stdout 에 찍고 1 로 끝나는데, 이 동사는 그 둘을 다 하면 안 된다(`EXIT_HOOK` doc).
-        ParsedCommand::Hook(rest) => return run_hook(&rest, read_hook_stdin, post_hook_report),
+        ParsedCommand::Hook(rest) => {
+            return run_hook(&rest, read_credentials, read_hook_stdin, post_hook_report)
+        }
         // 발견·호출은 stdin 도 본문도 없다 — 크레덴셜 뒤에서 자기 흐름을 탄다.
         ParsedCommand::Catalog(c) => Plan::Catalog(c),
         ParsedCommand::Invoke(i) => Plan::Invoke(i),
@@ -506,9 +508,11 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
 ///
 /// ★`rest` = 계열 뒤 argv 전량★. 동사 판정이 여기 있는 이유는 [`EXIT_HOOK`] doc 이 진다(파서에서
 ///   반려하면 그 반려가 계약을 깬다).
-/// ★stdin 과 전송을 **둘 다 인자로 받는 이유**★: 이 함수의 실패 갈래 전부(읽기 실패·tty·크레덴셜
-///   부재·연결 실패·비-2xx)를 프로세스도 소켓도 없이 재려면 두 입구가 seam 이어야 한다(ADR-0012).
-///   운영 호출부는 [`read_hook_stdin`]·[`post_hook_report`] 하나씩이다.
+/// ★크레덴셜·stdin·전송을 **셋 다 인자로 받는 이유**★: 이 함수의 실패 갈래 전부(크레덴셜 부재·읽기
+///   실패·tty·연결 실패·비-2xx)를 프로세스도 소켓도 env 도 없이 재려면 세 입구가 seam 이어야 한다
+///   (ADR-0012). 운영 호출부는 [`read_credentials`]·[`read_hook_stdin`]·[`post_hook_report`] 하나씩이다.
+/// ★`send` 가 크레덴셜을 **받아서** 쓰는 것도 그 축이다★ — 전송이 제 손으로 env 를 읽으면 아래 순서
+///   (크레덴셜 먼저)가 두 벌이 되고, 한쪽만 고친 편집이 조용히 갈린다.
 /// ★응답 body 를 찍지 않는다 — 형제들과 갈리는 유일한 자리다★: 다른 동사는 데몬 body 를 그대로 흘려
 ///   발신 에이전트가 자기교정하게 하지만, 이 동사의 호출자는 훅이라 읽는 눈이 없다.
 /// ★읽을 수 없는 페이로드도 **보낸다**(빈 값으로)★: 그래야 「훅이 떴는데 못 읽었다」가 데몬 로그에
@@ -516,14 +520,26 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
 ///   있기 때문이다. 값의 모양 판정은 원래도 데몬 단독이다(`control::hook`).
 fn run_hook(
     rest: &[String],
+    read_creds: impl FnOnce() -> Result<(String, String), (&'static str, &'static str)>,
     read_stdin: impl FnOnce() -> Result<String, String>,
-    send: impl FnOnce(&str) -> Result<u16, String>,
+    send: impl FnOnce((String, String), &str) -> Result<u16, String>,
 ) -> i32 {
     if rest.len() != 1 || rest[0] != CLI_HOOK_VERB_SESSION_START {
         return hook_note(&format!(
             "unknown hook invocation: {rest:?} (expected exactly `{CLI_HOOK_VERB_SESSION_START}`)"
         ));
     }
+    // ★크레덴셜을 stdin 보다 **먼저** 본다 — 뒤집으면 이 프로세스가 영영 안 끝난다★: 훅의 stdin 은
+    //   상대 프로그램이 채우는데 그쪽이 파이프를 열어 둔 채 닫지 않으면 `read_to_end` 는 EOF 를 기다리며
+    //   무한히 매달린다. [`HOOK_STDIN_CAP`] 은 **바이트를 자를 뿐 기다림을 안 자르고**, [`read_hook_stdin`]
+    //   의 가드는 tty 만 본다 — 파이프는 그 둘 어디에도 안 걸린다. Windows 에서는 그렇게 매달린 것을
+    //   거두는 쪽이 없어 **훅 발화마다 한 개씩 남는다.** 크레덴셜이 없으면 읽어 봐야 보낼 곳이 없으므로,
+    //   그것을 stdin 없이 알 수 있는 이 자리에서 끝낸다. ADR-0208/ADR-0210
+    let creds = match read_creds() {
+        Ok(pair) => pair,
+        // 스폰 밖에서 사람이 쳐 본 갈래 — 「닿지 못했다」와 같게 다뤄 침묵 + [`EXIT_HOOK`].
+        Err((code, hint)) => return hook_note(&format!("{code}: {hint}")),
+    };
     let payload = match read_stdin() {
         Ok(p) => p,
         // 페이로드를 못 읽었다 — 빈 값으로 보내 데몬이 기록하게 한다(위 doc).
@@ -532,7 +548,7 @@ fn run_hook(
             String::new()
         }
     };
-    match send(&hook_request_body(&payload)) {
+    match send(creds, &hook_request_body(&payload)) {
         Ok(status) if (200..300).contains(&status) => EXIT_HOOK,
         // ★2xx 가 아니면 데몬은 이 보고를 **처리하지 않았다**★. 특히 401(폐기된 토큰)은 인증
         //   미들웨어에서 끊겨 핸들러에 닿지 않으므로 **데몬 로그에도 안 남는다** — 그 갈래의 유일한
@@ -543,12 +559,9 @@ fn run_hook(
     }
 }
 
-/// [`run_hook`] 의 운영 전송 — 크레덴셜을 읽어 라우트로 민다.
-///
-/// ★크레덴셜 부재가 여기서 `Err` 인 것이 계약이다★: 스폰 밖에서 사람이 쳐 본 경우가 그 갈래이고,
-///   호출부는 그것을 「닿지 못했다」와 같게 다뤄 침묵 + [`EXIT_HOOK`] 으로 끝낸다.
-fn post_hook_report(body: &str) -> Result<u16, String> {
-    let (token, base) = read_credentials().map_err(|(code, hint)| format!("{code}: {hint}"))?;
+/// [`run_hook`] 의 운영 전송 — **받은** 크레덴셜로 라우트에 민다(env 를 제 손으로 읽지 않는다 —
+/// [`run_hook`] doc 의 마지막 항).
+fn post_hook_report((token, base): (String, String), body: &str) -> Result<u16, String> {
     post_json(&base, CONTROL_HOOK_ROUTE, &token, body)
         .map(|resp| resp.status)
         .map_err(|e| e.to_string())
@@ -3758,6 +3771,19 @@ mod tests {
     /// 「상대가 주는 것을 우리가 읽는다」의 유일한 자리다★ — 실 codex 는 여기 안 뜬다.
     const MEASURED_HOOK_PAYLOAD: &str = r#"{"session_id":"01a0b3bb-2fe3-7ef3-8c71-1edc4f7ae9a4","transcript_path":"C:/x/y.jsonl","cwd":"C:/x","hook_event_name":"SessionStart","model":"gpt-5.6-sol","permission_mode":"bypassPermissions","source":"startup"}"#;
 
+    /// 훅 시험용 크레덴셜 한 쌍 — **값은 어디로도 안 나간다**(전송이 seam 이라 소켓이 없다).
+    fn hook_creds() -> Result<(String, String), (&'static str, &'static str)> {
+        Ok(("token".to_string(), "http://127.0.0.1:1".to_string()))
+    }
+
+    /// 스폰 밖에서 쳤을 때 [`read_credentials`] 가 주는 그 쌍 그대로 — 문구가 갈리면 진단이 갈린다.
+    fn hook_creds_missing() -> Result<(String, String), (&'static str, &'static str)> {
+        Err((
+            "NO_TOKEN",
+            "ENGRAM_TOKEN is not set; this command must run inside an engram-spawned agent.",
+        ))
+    }
+
     fn hook_rest(args: &[&str]) -> Vec<String> {
         match parse_command(&argv(args)).expect("훅 계열은 파싱에서 반려되지 않는다")
         {
@@ -3791,7 +3817,7 @@ mod tests {
     #[test]
     fn every_hook_failure_path_exits_zero() {
         let good = || Ok(MEASURED_HOOK_PAYLOAD.to_string());
-        let unreachable_send = |_: &str| -> Result<u16, String> {
+        let unreachable_send = |_: (String, String), _: &str| -> Result<u16, String> {
             panic!("동사가 성립하지 않으면 전송까지 가면 안 된다")
         };
 
@@ -3803,7 +3829,7 @@ mod tests {
             vec!["hook", "session-start", "extra"],
         ] {
             assert_eq!(
-                run_hook(&hook_rest(&args), good, unreachable_send),
+                run_hook(&hook_rest(&args), hook_creds, good, unreachable_send),
                 EXIT_HOOK,
                 "{args:?} 가 0 이 아닌 코드로 끝났다"
             );
@@ -3815,8 +3841,9 @@ mod tests {
         assert_eq!(
             run_hook(
                 &rest,
+                hook_creds,
                 || Err("stdin is a terminal".to_string()),
-                |body| {
+                |_, body| {
                     seen = Some(body.to_string());
                     Ok(200)
                 }
@@ -3832,22 +3859,46 @@ mod tests {
         // 전송 계층이 답으로 주는 갈래 전부.
         for status in [401u16, 403, 404, 500, 503] {
             assert_eq!(
-                run_hook(&rest, good, |_| Ok(status)),
+                run_hook(&rest, hook_creds, good, |_, _| Ok(status)),
                 EXIT_HOOK,
                 "HTTP {status} 가 0 이 아닌 코드로 끝났다"
             );
         }
-        // 크레덴셜 부재·연결 실패는 같은 `Err` 갈래로 접힌다(운영 전송이 그렇게 접는다).
+        // 크레덴셜 부재 — 전송 앞에서 끊기고 코드는 같다.
         assert_eq!(
-            run_hook(&rest, good, |_| Err("NO_TOKEN: not set".to_string())),
+            run_hook(&rest, hook_creds_missing, good, unreachable_send),
             EXIT_HOOK
         );
+        // 연결 실패 — 전송이 `Err` 로 답하는 갈래.
         assert_eq!(
-            run_hook(&rest, good, |_| Err("connect refused".to_string())),
+            run_hook(&rest, hook_creds, good, |_, _| Err(
+                "connect refused".to_string()
+            )),
             EXIT_HOOK
         );
         // 성공 갈래.
-        assert_eq!(run_hook(&rest, good, |_| Ok(200)), EXIT_HOOK);
+        assert_eq!(run_hook(&rest, hook_creds, good, |_, _| Ok(200)), EXIT_HOOK);
+    }
+
+    /// ★크레덴셜이 없으면 stdin 을 **건드리지 않는다**★ — 상대가 파이프를 안 닫으면 `read_to_end` 가
+    /// EOF 를 기다리며 무한히 매달리고, Windows 에서는 그 프로세스가 훅 발화마다 한 개씩 남는다. 보낼
+    /// 곳이 없다는 것은 읽기 전에 알 수 있으므로 그 자리에서 끝난다(`run_hook` 본문 주석 · ADR-0208/ADR-0210).
+    #[test]
+    fn a_hook_without_credentials_never_touches_stdin() {
+        let rest = hook_rest(&["hook", "session-start"]);
+        assert_eq!(
+            run_hook(
+                &rest,
+                hook_creds_missing,
+                || -> Result<String, String> {
+                    panic!("크레덴셜이 없는데 stdin 을 읽었다 — 그 읽기가 매달리는 자리다")
+                },
+                |_: (String, String), _: &str| -> Result<u16, String> {
+                    panic!("크레덴셜이 없으면 전송까지 가면 안 된다")
+                }
+            ),
+            EXIT_HOOK
+        );
     }
 
     /// ★상한은 **자르고 계속 간다**★ — 반려하면 그 사건이 어디에도 안 남는다.

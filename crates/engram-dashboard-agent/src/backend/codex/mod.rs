@@ -13,8 +13,17 @@
 //! ★시험대가 **다시 재지 않는 것** — 「전부 실측」이라 적던 옛 문장이 거짓이었다(리뷰 적출 2026-09-08)★:
 //!   1. `workspace-write`·`on-request` 정책 **아래의 모델 동작** — 시험대는 그 argv 로 뜨는 것과 컴포저
 //!      기립까지만 잰다(재려면 쓰기 권한을 가진 에이전트를 자동 레인에서 실제로 돌려야 한다).
-//!   2. 우리가 안 쓰는 인자(`-m` · MCP `-c mcp_servers.…` 오버라이드 문법 · `codex resume <id>`) — 이
-//!      파일 주석에만 있고 재는 곳이 없다.
+//!   2. 우리가 안 쓰는 인자(`-m` · MCP `-c mcp_servers.…` 오버라이드 문법) — 이 파일 주석에만 있고
+//!      재는 곳이 없다.
+//!   2-1. ★`codex resume <id>` 는 이제 **우리가 쓴다** — 그런데도 시험대가 실물로 재지 않는다★:
+//!      [`production_spec`](../../../tests/backend_contract.rs) 이 `SpawnMode::Fresh` 로만 argv 를 뽑아
+//!      이어받기 갈래가 그 레인에 애초에 안 실린다. 자동으로 재려면 그 파일에 살아 있는 스레드 id 를
+//!      공급할 길이 먼저 필요하다.
+//!      ★단 **동작 자체는 손으로 실측됐다(2026-09-19 · 0.155.0)** — 「기립하는 것까지는 아무도 안 본다」로
+//!        적혀 있던 옛 문장은 더 이상 참이 아니다★: 그 argv 로 실제로 떴고, **세션 id 가 보존된다**. 새
+//!        세션이 id S 를 `source:"startup"` 으로 신고하고, 이어받으면 **같은 S** 가 `source:"resume"` 으로
+//!        다시 오며(반복 이어받기에도 안정) 기록은 S 의 원래 rollout 파일에 이어 붙는다. 그래서 이어받은
+//!        세션의 훅 보고는 충돌이 아니라 「이미 같은 값」으로 끝나고, 낡은 id 로 흘러가는 갈래가 없다.
 //!   3. 아래 `build_spec` 의 `%VAR%` 한계(그 자리 주석이 정본).
 //!
 //! capability 선언이 그 표와 어긋나면 시험대의 **비-`#[ignore]`** 항목이 빨개진다.
@@ -142,11 +151,174 @@ const SANDBOX_WORKSPACE_WRITE: &str = "workspace-write";
 const APPROVAL_FLAG: &str = "-a";
 const APPROVAL_ON_REQUEST: &str = "on-request";
 
+/// 저장된 세션을 이어받는 하위 명령. ★플래그가 아니다 — `--resume`·`--session-id` 는 존재하지 않는다★
+/// (실측). 받는 것은 **위치 인자**이고 그 자리는 `codex resume [OPTIONS] [SESSION_ID] [PROMPT]` 의 첫
+/// 위치다(실측 0.155.0 `codex resume --help`).
+///
+/// ★정책 셋(`--cd`·`-s`·`-a`)을 이 하위 명령 **뒤**에 이어도 파싱된다★ — 그 셋은 `resume` 자신의
+///   옵션으로도 선언돼 있다(같은 실측). 위치 인자와 옵션의 앞뒤 순서는 둘 다 통과하는 것을 봤다
+///   (`codex resume <id> --cd . -s <잘못된값>` 과 옵션을 앞에 둔 짝 모두 **샌드박스 값 오류**로 죽었다
+///   = 그 지점까지 파싱이 갔다는 뜻). 그래서 id 를 하위 명령 바로 뒤에 붙여 `codex resume <id>` 라는
+///   한 덩어리가 읽히게 둔다.
+/// ★둘째 위치 인자가 `[PROMPT]` 다★ — 그래서 아래 `extra_args` 에 **플래그가 아닌 맨 낱말**이 들어오면
+///   그것이 첫 프롬프트로 먹힌다. Fresh 갈래(`codex [OPTIONS] [PROMPT]`)도 같은 성질이라 이어받기가
+///   새로 들인 위험이 아니다 — 걸러 내지 않는 사유는 아래 패스스루 주석이 정본이다.
+const RESUME_SUBCOMMAND: &str = "resume";
+
+/// codex 설정을 명령줄에서 덮어쓰는 플래그. ★훅 등록에 파일을 하나도 쓰지 않게 하는 수단이 이것 하나다★
+/// — 사용자 홈(`$CODEX_HOME/config.toml`)에도, 래퍼 스크립트에도 우리는 한 글자도 쓰지 않는다.
+const CONFIG_OVERRIDE_FLAG: &str = "-c";
+
+/// `SessionStart` 훅 표의 키. ★이 오버라이드는 사용자 자신의 config.toml 훅을 **대체하지 않고 공존한다**★
+/// (실측 0.155.0) — 그래서 여기 우리 항목을 걸어도 사용자 훅이 사라지지 않는다.
+const SESSION_START_HOOK_KEY: &str = "hooks.SessionStart";
+
+/// 훅이 부를 우리 CLI 의 계열+동사. ★정본은 그 CLI 의 파서다★ —
+/// `crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `CLI_GROUP_HOOK` + `CLI_HOOK_VERB_SESSION_START`
+/// 이고, 그쪽 `run_hook` 은 계열 뒤 argv 가 **정확히 한 낱말 `session-start`** 일 것을 요구한다.
+/// ★어긋나도 아무 데도 안 남는다 — 그래서 손으로 맞춘다★: 그 CLI 는 반려 갈래에서도 exit 0 에 stdout
+/// 봉인이라(ADR-0208 결정 3), 이 문자열에 오타 한 글자가 나면 증상은 「세션 id 가 영영 안 온다」 하나다.
+const HOOK_REPORT_ARGV: &str = "hook session-start";
+
 /// 상주 JSON 서버로 띄우는 하위 명령과 그 전송 선택(실측 0.154.0 — `--stdio` 는 `--listen stdio://` 와
 /// 같고 그것이 기본값이다. 기본값에 기대지 않고 명시한다: 이 통로는 stdio 가 아니면 성립하지 않는데,
 /// 기본값은 상류가 바꿀 수 있고 바뀌어도 우리 argv 는 조용히 그대로다).
 const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
+
+/// 터미널 모드 spawn 에 실을 `SessionStart` 훅 등록 오버라이드 값(`-c` 의 짝). `None` = 걸지 않는다 —
+/// ★경고만 남기고 스폰은 그대로 간다★. 그 결과(이어받기가 안 선다)를 사람에게 말하는 자리는 여기가
+/// 아니라 조립점이다([`crate::manager::AgentManager`] 의 `opens_a_new_conversation`) — 여기서 또 말하면
+/// 같은 사실이 두 출처에서 갈려 적힌다.
+///
+/// ★파일을 하나도 만들지 않는다★ — 등록은 이 한 값 단독이고, 그래도 codex 의 TUI 신뢰 심사를 거쳐
+///   정상 발화한다(실측 0.155.0 — `docs/research/codex-session-id-recovery-survey-2026-09-19.md` §10-1).
+/// ★그 대가 = 설치 경로가 바뀌면 신뢰 심사 프롬프트가 한 번 다시 뜬다★: 신뢰 해시가 덮는 것은 훅
+///   **정의 문자열**인데(같은 §10-1 결론 3) 그 문자열에 우리 exe 절대경로가 박혀 있기 때문이다.
+///   ★그것을 「고치려고」 고정 경로 래퍼를 사용자 홈에 쓰지 말 것★ — 우리가 지우지 못하는 잔여물이
+///   사용자 파일계에 남고, 이 함수가 파일을 0개 만드는 성질이 정확히 그것과 맞바꾼 것이다.
+/// ★프로그램 경로에 공백이 있으면 codex 가 못 띄운다(실측 2026-09-19)★ — codex 는 `command` 의 **첫
+///   공백까지**를 프로그램으로 잘라 셸 없이 직접 spawn 하고 나머지만 따옴표 인지 분할로 인자에 넣는다.
+///   그래서 **인자는** 따옴표로 공백을 담을 수 있어도 **프로그램은 못 담고**(감싸도 실패했다), 증상은
+///   TUI 의 `Hook failed` / `hook exited with code 1` 이다. 유일한 탈출구가 8.3 단축 경로다.
+/// ★스키마에 `args` 배열이 없다★ — 인자는 이 한 문자열 안에 넣는 수밖에 없다(실측).
+/// ★`%VAR%` 가 든 경로는 여기서도 새 위험이 아니다★ — 아래 `build_spec` 의 같은 이름 한계 주석이
+///   정본이고(cmd 가 명령줄의 `%NAME%` 을 편다), 이 값도 그 cmd 를 지난다. 별도 가드를 두지 않는 것은
+///   그 결정을 따르는 것이다.
+/// ★이 값은 실 argv 경로를 **바이트 그대로** 건넌다(실측 2026-09-19 · 0.155.0)★ — `cmd.exe /c` 래핑과
+///   PATH 의 `codex` `.cmd` shim 을 **둘 다** 지난 뒤 `hooks/list` 가 `command` 칸을 바뀌지 않은 채
+///   돌려줬다. 즉 「작은따옴표·역슬래시·공백 없는 경로」 조합은 그 두 겹을 견딘다 — 「shim 을 지나며
+///   망가질지 모른다」를 전제로 한 방어를 새로 세우지 말 것(`%VAR%` 한계는 위 문단이 정본이고 그것과
+///   별개다).
+fn session_start_hook_override(send_exe: Option<&std::path::Path>) -> Option<String> {
+    let Some(exe) = send_exe else {
+        tracing::warn!(
+            "codex SessionStart 훅 미등록 — CLI 실행파일 경로가 없어 세션 id 를 되돌려 받을 창구를 못 건다"
+        );
+        return None;
+    };
+    let Some(raw) = exe.to_str() else {
+        tracing::warn!("codex SessionStart 훅 미등록 — CLI 경로가 UTF-8 이 아니다: {exe:?}");
+        return None;
+    };
+    // TOML 리터럴 문자열(작은따옴표)에는 이스케이프가 없다 — 그래서 Windows 역슬래시를 그대로 실을 수
+    //   있는 대신 작은따옴표 자체는 담을 수 없다. 지어낸 이스케이프로 밀어 넣지 않고 건너뛴다.
+    if raw.contains('\'') {
+        tracing::warn!("codex SessionStart 훅 미등록 — CLI 경로에 작은따옴표가 있다: {raw}");
+        return None;
+    }
+    // ★탈출구가 있는 공백문자는 **보통 공백 하나뿐**이다★ — 나머지는 8.3 변환으로도 안 없어진다. 탭은
+    //   codex 가 프로그램 토큰을 자르는 자리를 옮겨 **다른 프로그램**을 띄우게 하고, 줄바꿈은 한 줄짜리
+    //   TOML 리터럴 문자열 자체를 깨 값이 파싱에서 죽는다. 제어문자도 같은 부류다. 어느 쪽이든 증상은
+    //   「훅이 안 돈다」 하나라 조용하므로, 실을 수 없는 것은 싣지 않고 여기서 끊는다.
+    if let Some(bad) = raw
+        .chars()
+        .find(|c| c.is_control() || (c.is_whitespace() && *c != ' '))
+    {
+        tracing::warn!(
+            "codex SessionStart 훅 미등록 — CLI 경로에 실을 수 없는 문자가 있다({bad:?}): {raw}"
+        );
+        return None;
+    }
+    let program = if raw.contains(' ') {
+        match short_program_path(exe) {
+            Some(short) => short,
+            None => {
+                tracing::warn!(
+                    "codex SessionStart 훅 미등록 — CLI 경로에 공백이 있는데 8.3 단축 경로를 못 얻었다(걸면 `Hook failed` 로 매 세션 뜬다): {raw}"
+                );
+                return None;
+            }
+        }
+    } else {
+        raw.to_string()
+    };
+    Some(format!(
+        "{SESSION_START_HOOK_KEY}=[{{hooks=[{{type='command',command='{program} {HOOK_REPORT_ARGV}'}}]}}]"
+    ))
+}
+
+/// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
+/// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
+///
+/// ★잡는 모양은 하나뿐 = `-c` **다음 칸**이 이 키로 시작하는 형태다★(`-c hooks.SessionStart=…`).
+/// ★못 잡는 것 — 알고 두는 구멍이다★: `-c` 와 값을 한 낱말로 붙인 형태 · `-c` 말고 긴 이름의 같은
+///   플래그 · `hooks` 표 전체를 덮는 상위 키(`-c hooks=…`) · `hooks.SessionStart` 로 **시작만 하는** 다른
+///   키. 이 목록을 키워 「확실히」 만들려 들지 말 것 — codex 오버라이드 문법의 재구현이 되고 그 재구현은
+///   상류가 바뀔 때마다 조용히 낡는다. 놓쳐서 잃는 것은 **경고뿐이고 동작이 아니다** — 우리 것이 이기는
+///   성질은 아래 `build_spec` 의 순서가 따로 보장한다.
+fn passthrough_overrides_the_hook_key(extra_args: &[String]) -> bool {
+    extra_args
+        .windows(2)
+        .any(|pair| pair[0] == CONFIG_OVERRIDE_FLAG && pair[1].starts_with(SESSION_START_HOOK_KEY))
+}
+
+/// 8.3 단축 경로. `None` = 못 얻었다 — 실물이 없거나, 볼륨이 단축 이름을 안 만들거나, 받은 값에 아직
+/// 실을 수 없는 문자(공백문자·제어문자·작은따옴표)가 남아 있다.
+///
+/// ★두 번 부른다 — 두 호출의 반환이 서로 다른 것을 센다★: 버퍼 없이 부르면 **종단 NUL 을 포함한** 필요
+///   길이를, 버퍼를 주고 부르면 **NUL 을 뺀** 기록 길이를 돌려준다(0 = 실패). 한 값으로 접으면 마지막
+///   글자가 잘리거나 NUL 이 문자열에 섞인다.
+/// ★성공했는데 공백이 남을 수 있다★ — 8.3 생성이 꺼진 볼륨에서 이 API 는 실패가 아니라 **원본을 그대로**
+///   돌려준다. 그것을 실으면 우리가 막으려던 그 실패를 우리 손으로 만든다.
+#[cfg(windows)]
+fn short_program_path(exe: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+
+    let wide: Vec<u16> = exe
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let needed = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), None) };
+    if needed == 0 {
+        return None;
+    }
+    let mut buf = vec![0u16; needed as usize];
+    let written = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) };
+    if written == 0 || written as usize > buf.len() {
+        return None;
+    }
+    let short = std::ffi::OsString::from_wide(&buf[..written as usize])
+        .into_string()
+        .ok()?;
+    if short
+        .chars()
+        .any(|c| c.is_whitespace() || c.is_control() || c == '\'')
+    {
+        return None;
+    }
+    Some(short)
+}
+
+/// ★Windows 밖에는 8.3 이름이라는 것이 없다★ — 그래서 공백이 든 경로는 그 플랫폼에서 **언제나** 등록이
+/// 건너뛰어진다. 공백 제약 자체는 플랫폼을 안 가린다(codex 가 셸 없이 첫 토큰을 프로그램으로 쓴다).
+#[cfg(not(windows))]
+fn short_program_path(_exe: &std::path::Path) -> Option<String> {
+    None
+}
 
 pub struct CodexBackend;
 
@@ -162,17 +334,23 @@ impl AgentBackend for CodexBackend {
         false
     }
 
-    /// ★터미널 모드에는 이어받을 식별자 자체가 없고, app-server 모드에는 있다(thread id)★ — 그래서 이
-    /// 칸이 모드를 가른다. app-server 는 저장된 그 id 로 `thread/resume` 을 내고
-    /// ([`AgentBackend::open_spawn`] 이 고른다), 터미널 모드는 `codex resume <id>` 를 쓰지 않으므로
-    /// 이어받을 것이 없다.
+    /// ★두 모드 다 이어받는다 — 수단만 다르다★: app-server 는 저장된 thread id 로 `thread/resume` 을
+    /// 내고([`AgentBackend::open_spawn`] 이 고른다), 터미널 모드는 같은 id 를 하위 명령 + 위치 인자로
+    /// 실어 띄운다([`RESUME_SUBCOMMAND`] · [`AgentBackend::build_spec`] 의 터미널 갈래).
+    /// ★그래서 이 칸은 [`is_app_server`] 를 보지 않는다 — 되돌리지 말 것★: 이 술어가 묻는 것은
+    ///   **저장된 sid 로 이어받을 수 있나**이지 어느 통로로 이어받나가 아니다. 통로로 가르면 터미널
+    ///   모드로 뜬 codex 는 손잡이가 명부에 있어도 활성화 입구가 Fresh 로 띄워, 훅이 받아 적어 둔
+    ///   ([`crate::profile::ProfileRegistry::adopt_session_id`]) 그 id 가 영영 안 쓰인다.
+    /// ★손잡이가 **없을 때**는 이 칸이 답하지 않는다★ — 그 판정은 저장된 sid 존재와 함께 보는
+    ///   [`crate::backend::can_resume_profile`] 이 하고, 그래도 Resume 으로 들어온 spawn 은
+    ///   [`AgentBackend::build_spec`] 이 새 대화 argv 로 떨어뜨린다(그 자리 doc).
     /// ★아래 [`AgentBackend::capabilities`] 의 `session.resume` 과 **같은 술어로 함께 켠다 — 한쪽만
     ///   건드리지 말 것**★: 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로
     ///   보고되고, 단독으로 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다.
     // ADR-0185
-    // ADR-0208
-    fn can_resume_stored_session(&self, command: &AgentCommand) -> bool {
-        is_app_server(command)
+    // ADR-0208/ADR-0210
+    fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
+        true
     }
 
     /// ★true 인데 [`AgentBackend::accepts_mcp_config`] 는 false 다 — 두 축은 별개다(ADR-0133)★: 이 칸이
@@ -281,16 +459,32 @@ impl AgentBackend for CodexBackend {
         None
     }
 
-    /// ★세션 인자를 조립하지 않는다★ — `--session-id` 는 존재하지 않고, 재개는 플래그가 아니라 하위
-    /// 명령 + 위치 인자(`codex resume <id>`)라 이 자리의 문법이 아니다(실측). `session_id` 는
-    /// `assigns_session_id()` 가 false 라 항상 `None` 이지만, 계약상 받는 값이므로 무시한다는
-    /// 것을 적어 둔다.
+    /// ★`session_id` 는 **여전히** 조립하지 않는다 — 되살리지 말 것★: `--session-id` 는 존재하지 않고
+    /// ([`AgentBackend::assigns_session_id`] 가 false 라 이 칸은 언제나 `None` 이다), 그 값을 argv 에
+    /// 실으면 codex 가 한 번도 쓰지 않을 uuid 를 명령줄에 밀어 넣는 것이 된다.
+    /// ★이어받는 것은 그 칸이 아니라 `resume_session_id` 다 — 두 칸을 접지 말 것★: 이어받기는 플래그가
+    ///   아니라 **하위 명령 + 위치 인자**라([`RESUME_SUBCOMMAND`]) 조립 모양부터 다르다. 접으면
+    ///   `assigns_session_id() == false` 의 뜻이 거짓이 된다.
+    /// ★터미널 모드만 조립한다★ — app-server 모드의 이어받기는 argv 가 아니라 핸드셰이크 둘째 요청
+    ///   (`thread/resume`)이고, 그것을 고르는 자리는 [`AgentBackend::open_spawn`] 이다. 같은 값이 두
+    ///   모드에서 서로 다른 수단으로 나가는 것이지 두 번 나가는 것이 아니다.
+    /// ★Resume 인데 손잡이가 없으면 **새 대화 argv 로 떨어진다**★ — `codex resume` 를 id 없이 내면
+    ///   **TUI 피커**가 뜨고(실측 0.155.0 `--help`: "picker by default"), 그 화면은 PTY 에 붙은 에이전트를
+    ///   영원히 첫 화면에 묶어 둔다. 그래서 여기서는 하위 명령 자체를 빼 Fresh 와 **바이트 단위로 같은**
+    ///   argv 를 낸다.
+    ///   ★그 퇴행을 조용히 넘기지 않는다 — 그런데 신고하는 자리는 여기가 아니다★:
+    ///   [`crate::manager::AgentManager`] 의 `resume_no_fallback` 이 spawn 전에 같은 조건
+    ///   (`opens_a_new_conversation`)을 판정해 경고를 남기고 결말을 `Resumed` 가 아니라 `Started` 로
+    ///   낸다. 여기서 또 신고하면 같은 사실이 두 출처에서 갈려 적힌다 — 이 자리는 인자만 만든다.
     // ADR-0004
+    // ADR-0185
+    // ADR-0208/ADR-0210
     fn build_spec(
         &self,
         command: &AgentCommand,
-        _mode: SpawnMode,
+        mode: SpawnMode,
         _session_id: Option<Uuid>,
+        resume_session_id: Option<Uuid>,
         cwd: PathBuf,
         mut env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
@@ -300,9 +494,18 @@ impl AgentBackend for CodexBackend {
                 extra_args,
                 output_format,
             } => {
-                let mut args = Vec::with_capacity(6 + extra_args.len());
+                let mut args = Vec::with_capacity(8 + extra_args.len());
                 match output_format {
                     AgentOutputFormat::Terminal => {
+                        // ★하위 명령과 그 위치 인자가 **맨 앞**이어야 한다★ — 뒤로 밀리면 clap 이
+                        //   `resume` 를 하위 명령이 아니라 루트의 `[PROMPT]` 로 읽는다(app-server 갈래의
+                        //   같은 제약이 `app_server_extra_args_come_last` 로 못 박혀 있다).
+                        // ★둘은 짝이다 — 하나만 내보내지 말 것★: id 없는 `codex resume` 는 TUI 피커라
+                        //   에이전트가 첫 화면에서 멈춘다(위 doc 의 그 갈래).
+                        if let (SpawnMode::Resume, Some(thread_id)) = (mode, resume_session_id) {
+                            args.push(RESUME_SUBCOMMAND.to_string());
+                            args.push(thread_id.to_string());
+                        }
                         args.push(CD_FLAG.to_string());
                         args.push(cwd.to_string_lossy().into_owned());
                         args.push(SANDBOX_FLAG.to_string());
@@ -346,6 +549,37 @@ impl AgentBackend for CodexBackend {
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
                 // ADR-0004
 
+                // ★훅 등록은 패스스루 **뒤**다 — 앞에 두면 사용자 인자 한 줄에 우리 등록이 진다★.
+                //   실측(codex-cli 0.155.0 · 2026-09-19): 같은 설정 키를 `-c` 로 두 번 넘기면 **마지막
+                //   것이 이긴다** — 병합도 없고 중복 키 오류도 없다. 그래서 앞에 두면
+                //   `-c hooks.SessionStart=[]` 한 줄이 우리 등록을 통째로 지우고, 그 결말은 `hooks/list`
+                //   가 빈 배열 · 신뢰 심사 프롬프트 **없음** · 세션 id 영영 도착 안 함이다. 화면에도
+                //   로그에도 아무 신호가 남지 않는다.
+                //   ★그러니 「인자 조립을 정돈」한답시고 이 블록을 위 터미널 갈래로 되돌리지 말 것★.
+                // ★터미널 모드에만 건다(ADR-0208/ADR-0210)★ — app-server 모드의 세션 id 는 `thread/start` 응답으로
+                //   통로가 직접 받아 오고(그쪽 sink 가 언제나 먼저 같은 값을 채운다), 훅 보고는 늘 「이미
+                //   같은 값」으로 끝난다. 이 모드에만 받을 창구가 없었다.
+                // ★`build_spec` 이 이 값을 만드는 것이 ADR-0004 의 요점이다★ — 조립점은 훅도 `-c` 문법도
+                //   모른다. 여기 쓰는 재료는 공용 endpoint 의 `send_exe` 하나이고, 그것은
+                //   [`inject_cli_entrance`] 가 `ENGRAM_CLI_EXE`·PATH 에 쓰는 **같은 값**이다 — 실행파일을
+                //   찾는 둘째 방법을 만들지 말 것.
+                if matches!(output_format, AgentOutputFormat::Terminal) {
+                    if let Some(value) = session_start_hook_override(
+                        control.as_ref().and_then(|e| e.send_exe.as_deref()),
+                    ) {
+                        // ★거르지 않고 경고만 한다★ — 패스스루를 지우는 것은 사용자 인자를 우리가 검열하는
+                        //   것이고, 우리 등록을 접으면 세션 id 회수가 통째로 죽는다. 둘 다 안 하고 이긴
+                        //   사실만 남긴다.
+                        if passthrough_overrides_the_hook_key(extra_args) {
+                            tracing::warn!(
+                                "codex 패스스루가 `{SESSION_START_HOOK_KEY}` 을 직접 세웠다 — 세션 id 회수를 위해 우리 등록을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                            );
+                        }
+                        args.push(CONFIG_OVERRIDE_FLAG.to_string());
+                        args.push(value);
+                    }
+                }
+
                 // ADR-0086 스텝 2(CLI 입구) — ★모드를 가르지 않는다★: 심는 것은 env 세 값뿐이고 그
                 //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구·훅 프로세스)이다.
                 //   두 모드 다 자식을 띄우므로 갈릴 축이 없다.
@@ -374,21 +608,22 @@ impl AgentBackend for CodexBackend {
         }
     }
 
-    /// `session.resume` 이 **모드마다 갈리는** 이유는 ★발급 주체와 무관하다★ — 복원은 프로필에 저장된
-    /// backend sid **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는
-    /// `thread/start` 응답으로 받아 쓰는 쪽이고, app-server 모드는 그 값으로 `thread/resume` 을 낸다
-    /// ([`AgentBackend::open_spawn`] 이 고르고 통로가 낸다). 터미널 모드에는 그 손잡이가 없다.
-    /// ★위 [`AgentBackend::can_resume_stored_session`] 과 **같은 술어다 — 한쪽만 건드리지 말 것**★:
-    ///   그 축은 활성화 입구가 「Resume 으로 띄울까」를 묻는 자리이고 이 칸은 그 결과를 소비자에게
-    ///   신고하는 자리라, 갈리면 새 스레드가 「이어받음」으로(또는 그 반대로) 보고된다.
+    /// `session.resume` 이 켜진 근거는 ★발급 주체와 무관하다★ — 복원은 프로필에 저장된 backend sid
+    /// **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는 받아 쓰는 쪽이고
+    /// (app-server 는 `thread/start` 응답으로, 터미널 모드는 훅으로 — ADR-0208), 그 값으로 두 모드 다
+    /// 이어받는다.
+    /// ★그래서 이 칸도 모드를 안 가른다 — 위 [`AgentBackend::can_resume_stored_session`] 과 **같은
+    ///   술어다. 한쪽만 건드리지 말 것**★: 그 축은 활성화 입구가 「Resume 으로 띄울까」를 묻는 자리이고
+    ///   이 칸은 그 결과를 소비자에게 신고하는 자리라, 갈리면 새 스레드가 「이어받음」으로(또는 그
+    ///   반대로) 보고된다.
     /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
     /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
     // ADR-0185
-    // ADR-0208
-    fn capabilities(&self, command: &AgentCommand) -> BackendCaps {
+    // ADR-0208/ADR-0210
+    fn capabilities(&self, _command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {
-                resume: is_app_server(command),
+                resume: true,
                 snapshot: false,
                 cwd_env: true,
             },
@@ -419,14 +654,17 @@ impl AgentBackend for CodexBackend {
     /// ★`structured: true` 와 `thread/start` 정책을 주입하는 자리가 여기다(ADR-0044/0030)★: 통로는 자기가
     ///   나르는 바이트가 무엇인지도, 어느 폴더를 어떤 샌드박스로 열어야 하는지도 모른다. 아는 쪽은 이
     ///   모드와 정책을 고른 이 backend 다.
-    /// ★`sid_sink` 를 app-server 갈래에만 넘긴다★ — 터미널 갈래에는 받아 올 식별자 자체가 없다. 그
-    ///   포트로 나가는 값은 codex 가 `thread/start` 응답으로 발급한 thread id 이고, 통로가 그 세션으로
+    /// ★`sid_sink` 를 app-server 갈래에만 넘긴다★ — 이 **통로**로 받아 올 식별자가 터미널 갈래엔 없다.
+    ///   그 포트로 나가는 값은 codex 가 `thread/start` 응답으로 발급한 thread id 이고, 통로가 그 세션으로
     ///   무엇을 보내기 전에 나간다([`AgentBackend::open_spawn`] 의 순서 계약).
+    ///   ★「터미널 모드는 id 를 못 받는다」로 읽지 말 것 — 그쪽은 **다른 입구**로 받는다★: codex 가 띄우는
+    ///   `SessionStart` 훅이 제어 평면으로 되돌려 보내고(ADR-0208), 그 값은 이 통로를 거치지 않는다.
     /// ★`thread/start` 냐 `thread/resume` 이냐를 고르는 자리도 여기다★ — 조립점이 넘긴
     ///   `resume_session_id` 하나로 갈린다([`thread_open`]). ★통로에게 다시 묻지 않는다★: 통로가 자기
     ///   상태를 보고 판정하면 가르는 자리가 둘이 된다.
-    /// ★`resume_session_id` 를 터미널 갈래에서는 쓰지 않는다★ — 그 모드에는 이어받을 손잡이가 없고,
-    ///   [`AgentBackend::can_resume_stored_session`] 이 그 모드에 false 라 조립점도 값을 안 채운다.
+    /// ★`resume_session_id` 를 터미널 갈래에서는 쓰지 않는다 — 그런데 사유는 「손잡이가 없어서」가
+    ///   **아니다**★: 그 모드의 이어받기는 이미 argv 에 실려 나갔다([`AgentBackend::build_spec`] 의
+    ///   터미널 갈래). 같은 값을 여기서 또 쓰면 한 spawn 이 두 수단으로 이어받으려 든다.
     // ADR-0185
     // ADR-0191
     fn open_spawn(
@@ -556,6 +794,7 @@ mod tests {
             command,
             SpawnMode::Fresh,
             None,
+            None,
             PathBuf::from(cwd),
             vec![],
             None,
@@ -641,6 +880,7 @@ mod tests {
             &codex(vec![]),
             SpawnMode::Resume,
             Some(sid),
+            None,
             PathBuf::from("."),
             vec![],
             None,
@@ -656,6 +896,151 @@ mod tests {
                 .any(|a| a == "--session-id" || a == "--resume" || a == "--session"),
             "존재하지 않는 세션 플래그가 실렸다: {:?}",
             s.args
+        );
+    }
+
+    // ── ADR-0208: 터미널 모드 이어받기(`codex resume <id>`) ──────────────────────
+
+    /// 이어받기 칸을 채워 뽑은 spec — 발급 칸(`session_id`)은 그대로 비워 둔다.
+    ///
+    /// ★두 칸을 **따로** 넘기는 것이 이 헬퍼의 요점이다★ — 하나로 접으면
+    /// [`AgentBackend::assigns_session_id`] 가 false 인 백엔드의 argv 에 우리가 발급한 값이 실릴 수
+    /// 있고, 아래 항목들은 그 접힘을 못 본다.
+    fn spec_resuming(
+        command: &AgentCommand,
+        mode: SpawnMode,
+        resume_session_id: Option<Uuid>,
+        cwd: &str,
+    ) -> CommandSpec {
+        CodexBackend.build_spec(
+            command,
+            mode,
+            None,
+            resume_session_id,
+            PathBuf::from(cwd),
+            vec![],
+            None,
+        )
+    }
+
+    /// ★하위 명령과 위치 인자가 **맨 앞에 붙어** 나가야 한다★ — `resume` 가 뒤로 밀리면 clap 이 그것을
+    /// 루트의 `[PROMPT]` 로 읽어 이어받기가 조용히 새 대화가 되고, id 가 하위 명령과 떨어지면
+    /// `[SESSION_ID]` 자리를 놓친다.
+    /// 정책 셋은 **그대로** 뒤에 실린다 — `resume` 도 그 셋을 자기 옵션으로 받는다(실측 0.155.0).
+    #[test]
+    fn resuming_with_a_stored_handle_emits_the_subcommand_and_the_positional_id() {
+        let thread_id = Uuid::new_v4();
+        let s = spec_resuming(
+            &codex(vec![]),
+            SpawnMode::Resume,
+            Some(thread_id),
+            "C:/workspace",
+        );
+        assert_eq!(
+            codex_argv(&s),
+            vec![
+                "resume",
+                &thread_id.to_string(),
+                "--cd",
+                "C:/workspace",
+                "-s",
+                "workspace-write",
+                "-a",
+                "on-request",
+            ]
+        );
+    }
+
+    /// ★손잡이가 없으면 **Fresh 와 바이트 단위로 같은** argv 여야 한다★ — id 없는 `codex resume` 는 TUI
+    /// 피커라(실측 0.155.0 `--help`: "picker by default") 그 화면에 붙은 에이전트는 첫 화면에서 영영
+    /// 멈춘다. 그래서 하위 명령만 내보내는 반쪽 조립을 금지한다.
+    #[test]
+    fn resuming_without_a_stored_handle_falls_back_to_the_fresh_argv() {
+        let fresh = codex_argv(&spec(&codex(vec![]), "C:/workspace"));
+        let fell_back = codex_argv(&spec_resuming(
+            &codex(vec![]),
+            SpawnMode::Resume,
+            None,
+            "C:/workspace",
+        ));
+        assert_eq!(
+            fell_back, fresh,
+            "손잡이 없는 Resume 이 Fresh 와 다른 argv 를 냈다 — 반쪽 조립이면 TUI 피커에 걸린다"
+        );
+        assert!(
+            !fell_back.iter().any(|a| a == RESUME_SUBCOMMAND),
+            "id 없이 하위 명령만 실렸다 — 피커가 떠 에이전트가 첫 화면에서 멈춘다: {fell_back:?}"
+        );
+    }
+
+    /// ★그 퇴행의 **신고**는 이 파일이 하지 않는다 — 조립점이 한다★:
+    /// [`crate::manager::AgentManager`] 의 `resume_no_fallback` 이 `opens_a_new_conversation` 을 세 항의
+    /// 곱으로 판정해 경고를 남기고 결말을 `Resumed` 가 아니라 `Started` 로 낸다. 그중 **둘이 이 파일의
+    /// 선언**이라 여기서 못 박는다.
+    /// ★실행 단언으로는 이 회귀가 안 잡힌다★ — 어느 쪽이 뒤집혀도 argv 는 위 항목대로 새 대화로 멀쩡히
+    ///   떨어지고, 거짓이 되는 것은 **보고뿐**이다(새 대화가 「이어받음」으로 나간다).
+    // ADR-0208
+    #[test]
+    fn a_handleless_resume_still_trips_the_new_conversation_notice() {
+        let terminal = codex(vec![]);
+        assert!(
+            !CodexBackend.assigns_session_id(&terminal),
+            "발급 축이 켜지면 조립점이 `ensure_session_id` 로 손잡이를 만들어 줘, 「손잡이가 없다」는 \
+             갈래 자체가 사라진다"
+        );
+        assert!(
+            CodexBackend.can_resume_stored_session(&terminal),
+            "이어받기 축이 꺼지면 그 곱이 언제나 거짓이라, 손잡이 없이 연 새 대화가 조용히 \
+             「이어받음」으로 보고된다"
+        );
+    }
+
+    /// ★Fresh 는 손잡이가 있어도 이어받지 않는다★ — 조립점이 Fresh 에서 이 칸을 비워 넘기는 것이 규율이지만
+    /// (`AgentManager::spawn_agent`), 이 파일이 그 규율에 기대면 판정이 두 곳이 된다. 죽은 화신의 스레드로
+    /// 새 대화를 열라는 요청이 바로 그 조합이다.
+    #[test]
+    fn a_fresh_spawn_ignores_a_stored_handle() {
+        let s = spec_resuming(
+            &codex(vec![]),
+            SpawnMode::Fresh,
+            Some(Uuid::new_v4()),
+            "C:/workspace",
+        );
+        assert_eq!(
+            codex_argv(&s),
+            codex_argv(&spec(&codex(vec![]), "C:/workspace"))
+        );
+    }
+
+    /// ★app-server 모드는 이어받기를 argv 로 내지 않는다★ — 그 모드의 수단은 핸드셰이크 둘째 요청
+    /// (`thread/resume`)이고 [`AgentBackend::open_spawn`] 이 고른다. 여기 실리면 `app-server` 하위 명령이
+    /// 모르는 인자를 받아 기동이 실패한다.
+    #[test]
+    fn the_app_server_argv_is_unchanged_by_a_stored_handle() {
+        let s = spec_resuming(
+            &codex_app_server(vec![]),
+            SpawnMode::Resume,
+            Some(Uuid::new_v4()),
+            "C:/workspace",
+        );
+        assert_eq!(codex_argv(&s), vec!["app-server", "--stdio"]);
+    }
+
+    /// 패스스루는 이어받기 갈래에서도 하위 명령·정책 **뒤**다 — 앞으로 오면 하위 명령과 그 위치 인자를
+    /// 갈라놓는다. (훅 등록이 서는 스폰에서는 그것이 패스스루보다 더 뒤다 — 아래 훅 구획이 잰다.)
+    #[test]
+    fn resume_argv_still_ends_with_the_passthrough() {
+        let s = spec_resuming(
+            &codex(vec!["-m", "gpt-5"]),
+            SpawnMode::Resume,
+            Some(Uuid::new_v4()),
+            "C:/workspace",
+        );
+        let argv = codex_argv(&s);
+        assert_eq!(&argv[..1], &["resume".to_string()]);
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            &["-m".to_string(), "gpt-5".to_string()]
         );
     }
 
@@ -682,6 +1067,7 @@ mod tests {
         CodexBackend.build_spec(
             command,
             SpawnMode::Fresh,
+            None,
             None,
             PathBuf::from("C:/workspace"),
             vec![],
@@ -770,6 +1156,273 @@ mod tests {
             "endpoint 부재인데 env 가 실렸다: {:?}",
             s.env
         );
+    }
+
+    // ── ADR-0208/ADR-0210: `SessionStart` 훅 등록(`-c` 오버라이드 단독) ─────────
+
+    /// 실 codex 0.155.0 이 받아들인 값 그대로(실측 2026-09-19): `--strict-config app-server` 가 0 으로
+    /// 끝났고, `hooks/list` 가 이 정의를 `untrusted` 로 되돌려 주며 `command` 칸이 바이트 단위로 같았다.
+    ///
+    /// ★작은따옴표(TOML 리터럴 문자열)가 load-bearing 이다★ — 큰따옴표면 Windows 역슬래시가 이스케이프로
+    ///   먹히고, 그 값은 `cmd.exe /c codex …` 래핑을 지나며 한 번 더 망가진다. 리터럴 문자열은 둘 다 없다.
+    #[test]
+    fn the_terminal_spawn_registers_the_session_start_hook() {
+        let s = spec_with_control(&codex(vec![]), Some(endpoint()));
+        let argv = codex_argv(&s);
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            &[
+                CONFIG_OVERRIDE_FLAG.to_string(),
+                "hooks.SessionStart=[{hooks=[{type='command',command='C:/engram/bin/engram.exe hook session-start'}]}]"
+                    .to_string(),
+            ],
+            "훅 등록이 실측된 모양 그대로 실려야 한다: {argv:?}"
+        );
+    }
+
+    /// ★훅이 부르는 동사는 우리 CLI 파서와 **손으로** 맞춰져 있다★ — 정본 =
+    /// `crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `CLI_GROUP_HOOK` +
+    /// `CLI_HOOK_VERB_SESSION_START`. 그쪽 `run_hook` 은 계열 뒤 argv 가 정확히 한 낱말일 것을 요구하고,
+    /// 어긋나면 exit 0 · stdout 봉인으로 조용히 끝나 **어느 게이트도 못 잡는다**(ADR-0208 결정 3).
+    /// 이 crate 는 데몬을 의존하지 않으므로(의존 방향) 여기서 잴 수 있는 것은 문자열 자체뿐이다.
+    #[test]
+    fn the_hook_command_carries_the_cli_verb_the_daemon_parses() {
+        assert_eq!(HOOK_REPORT_ARGV, "hook session-start");
+        let s = spec_with_control(&codex(vec![]), Some(endpoint()));
+        assert!(
+            codex_argv(&s)
+                .iter()
+                .any(|a| a.ends_with(" hook session-start'}]}]")),
+            "훅 명령이 `<exe> hook session-start` 로 끝나야 한다: {:?}",
+            s.args
+        );
+    }
+
+    /// ★app-server 모드에는 걸지 않는다★ — 그 모드의 세션 id 는 `thread/start` 응답으로 통로가 직접
+    /// 받아 오므로 훅이 **군더더기**다. ★거절 로그를 피하려는 것이 아니다★ — 두 경로가 나르는 값은
+    /// 같아서 훅 보고는 충돌이 아니라 「이미 같은 값」으로 끝난다(위 `build_spec` 의 같은 자리 주석).
+    #[test]
+    fn the_app_server_spawn_registers_no_hook() {
+        let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
+        assert_eq!(codex_argv(&s), vec!["app-server", "--stdio"]);
+    }
+
+    /// ★훅 등록이 패스스루 **뒤**다★ — 이 순서가 뒤집히면 `-c hooks.SessionStart=…` 한 줄로 우리 등록이
+    /// 조용히 진다(같은 키를 두 번 넘기면 마지막이 이긴다 — 실측 0.155.0 · 2026-09-19).
+    #[test]
+    fn the_hook_override_follows_the_passthrough() {
+        let s = CodexBackend.build_spec(
+            &codex(vec!["-m", "gpt-5"]),
+            SpawnMode::Fresh,
+            None,
+            None,
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+        );
+        let argv = codex_argv(&s);
+        let flag = argv
+            .iter()
+            .position(|a| a == CONFIG_OVERRIDE_FLAG)
+            .expect("훅 등록이 실려야 한다");
+        assert_eq!(
+            flag,
+            argv.len() - 2,
+            "훅 등록이 맨 뒤가 아니다 — 뒤에 오는 쪽이 이긴다: {argv:?}"
+        );
+        assert_eq!(
+            &argv[argv.len() - 4..argv.len() - 2],
+            &["-m".to_string(), "gpt-5".to_string()],
+            "패스스루가 훅 등록 앞에 와야 한다: {argv:?}"
+        );
+    }
+
+    /// ★사용자가 같은 키를 직접 세워도 우리 것이 이긴다 — 그리고 그 승리를 **말없이** 하지 않는다★.
+    /// 지면 `hooks/list` 가 빈 배열이 되고 신뢰 심사 프롬프트조차 안 떠서, 「세션 id 가 영영 안 온다」
+    /// 말고는 아무 신호가 없다(실측 0.155.0). 거르지 않는 사유는 emission 자리 주석이 정본이다.
+    #[test]
+    fn a_conflicting_passthrough_loses_to_ours_and_trips_the_warning() {
+        assert!(
+            passthrough_overrides_the_hook_key(&[
+                CONFIG_OVERRIDE_FLAG.to_string(),
+                format!("{SESSION_START_HOOK_KEY}=[]"),
+            ]),
+            "`-c {SESSION_START_HOOK_KEY}=…` 를 못 알아봤다 — 경고 없이 사용자 설정을 덮는다"
+        );
+        let s = CodexBackend.build_spec(
+            &codex(vec![CONFIG_OVERRIDE_FLAG, "hooks.SessionStart=[]"]),
+            SpawnMode::Fresh,
+            None,
+            None,
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+        );
+        let argv = codex_argv(&s);
+        assert_eq!(
+            argv.iter().filter(|a| *a == CONFIG_OVERRIDE_FLAG).count(),
+            2,
+            "두 `-c` 가 다 실려야 한다 — 거르는 순간 사용자 인자를 우리가 검열하는 것이다: {argv:?}"
+        );
+        assert!(
+            argv[argv.len() - 1].starts_with(SESSION_START_HOOK_KEY)
+                && argv[argv.len() - 1].contains(HOOK_REPORT_ARGV),
+            "마지막 `-c` 값이 우리 것이 아니다 — 마지막이 이기므로 이 자리를 뺏기면 훅이 죽는다: {argv:?}"
+        );
+    }
+
+    /// 다른 키를 `-c` 로 넘기는 것은 충돌이 아니다 — 경고를 남발하면 아무도 안 읽는다.
+    #[test]
+    fn an_unrelated_config_passthrough_is_not_a_conflict() {
+        assert!(!passthrough_overrides_the_hook_key(&[
+            CONFIG_OVERRIDE_FLAG.to_string(),
+            "model=gpt-5".to_string(),
+        ]));
+        assert!(!passthrough_overrides_the_hook_key(&[
+            "--profile".to_string(),
+            format!("{SESSION_START_HOOK_KEY}=[]"),
+        ]));
+    }
+
+    /// 이어받기 갈래에서도 하위 명령은 맨 앞, 훅 등록은 맨 뒤 — 둘이 서로를 밀어내지 않는다.
+    #[test]
+    fn a_resuming_spawn_still_registers_the_hook() {
+        let s = CodexBackend.build_spec(
+            &codex(vec![]),
+            SpawnMode::Resume,
+            None,
+            Some(Uuid::new_v4()),
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+        );
+        let argv = codex_argv(&s);
+        assert_eq!(&argv[..1], &[RESUME_SUBCOMMAND.to_string()]);
+        assert_eq!(argv[argv.len() - 2], CONFIG_OVERRIDE_FLAG);
+    }
+
+    /// ★CLI 실행파일을 모르면 걸지 않는다 — 없는 프로그램을 가리키는 훅은 매 세션 `Hook failed` 다★.
+    #[test]
+    fn without_a_cli_executable_no_hook_is_registered() {
+        let mut ep = endpoint();
+        ep.send_exe = None;
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        assert!(
+            !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+            "send_exe 부재인데 훅이 실렸다: {:?}",
+            s.args
+        );
+    }
+
+    /// endpoint 자체가 없는 스폰도 마찬가지다 — 이쪽은 `send_exe` 이전에 끊긴다.
+    #[test]
+    fn without_an_endpoint_no_hook_is_registered() {
+        let s = spec_with_control(&codex(vec![]), None);
+        assert!(
+            !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+            "endpoint 부재인데 훅이 실렸다: {:?}",
+            s.args
+        );
+    }
+
+    /// ★공백이 든 경로는 **실패할 것을 아는 명령을 거느니 건너뛴다**★ — codex 는 `command` 의 첫 공백
+    /// 까지를 프로그램으로 잘라 셸 없이 띄우므로(실측), 그 경로는 따옴표로 감싸도 뜨지 않는다.
+    ///
+    /// ★이 경로가 **실재하지 않는 것**이 이 항목을 두 플랫폼에서 결정적으로 만든다★: Windows 에서
+    ///   `GetShortPathNameW` 는 실물이 없으면 0 을 돌려주고, 그 밖의 플랫폼에는 8.3 이름이 아예 없다.
+    ///   실재하는 공백 경로를 쓰면 이 항목은 볼륨의 8.3 설정에 따라 갈린다.
+    #[test]
+    fn a_spaced_executable_path_without_a_short_form_is_skipped() {
+        let mut ep = endpoint();
+        ep.send_exe = Some(std::path::PathBuf::from(
+            "C:/Program Files/engram no such dir/engram.exe",
+        ));
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let argv = codex_argv(&s);
+        assert!(
+            !argv.iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+            "단축 경로를 못 얻은 공백 경로가 그대로 실렸다: {argv:?}"
+        );
+        assert_eq!(
+            argv,
+            codex_argv(&spec(&codex(vec![]), "C:/workspace")),
+            "훅을 건너뛴 argv 는 훅 없는 argv 와 바이트 단위로 같아야 한다"
+        );
+    }
+
+    /// ★작은따옴표는 TOML 리터럴 문자열에 담을 수 없다 — 지어낸 이스케이프로 밀어 넣지 않는다★.
+    #[test]
+    fn an_executable_path_with_a_single_quote_is_skipped() {
+        let mut ep = endpoint();
+        ep.send_exe = Some(std::path::PathBuf::from("C:/o'brien/engram.exe"));
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        assert!(
+            !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+            "작은따옴표가 든 경로가 실렸다: {:?}",
+            s.args
+        );
+    }
+
+    /// ★탭·줄바꿈·제어문자는 8.3 으로도 못 구한다★ — 탭은 codex 가 프로그램 토큰을 자르는 자리를 옮기고,
+    /// 줄바꿈은 한 줄짜리 TOML 리터럴 문자열 자체를 깨뜨린다. 그래서 보통 공백과 달리 단축 경로를
+    /// 시도하지도 않고 끊는다.
+    #[test]
+    fn an_executable_path_with_a_tab_or_a_newline_is_skipped() {
+        for raw in ["C:/engram\tbin/engram.exe", "C:/engram\nbin/engram.exe"] {
+            let mut ep = endpoint();
+            ep.send_exe = Some(std::path::PathBuf::from(raw));
+            let s = spec_with_control(&codex(vec![]), Some(ep));
+            assert!(
+                !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+                "공백 아닌 공백문자가 든 경로가 실렸다({raw:?}): {:?}",
+                s.args
+            );
+        }
+    }
+
+    /// ★8.3 변환의 **성공** 갈래를 도는 유일한 항목이다★ — 형제 둘은 전부 건너뛰기 갈래라, 두 번 부르는
+    /// 길이 규약(NUL 포함 ↔ 제외)이 한 번도 실행되지 않는다. 운영 경로로도 안 돈다 — 우리 실 exe 경로에
+    /// 공백이 없기 때문이다.
+    /// ★「이 볼륨엔 8.3 이름이 없다」는 실패가 아니라 정당한 다른 결말이다★ — 그 설정은 볼륨마다 다르고
+    ///   테스트가 도는 볼륨을 우리가 고르지 않는다. 그래서 두 결말을 **둘 다** 받고, 대신 각 결말이
+    ///   자기 짝(훅 값의 유무)과 어긋나지 않는 것을 잰다.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_spaced_path_exercises_the_short_name_success_branch() {
+        let dir = std::env::temp_dir().join(format!("engram hook path {}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("임시 폴더 생성");
+        let exe = dir.join("engram.exe");
+        std::fs::write(&exe, b"").expect("임시 파일 생성");
+
+        let short = short_program_path(&exe);
+        let hook = session_start_hook_override(Some(exe.as_path()));
+        let short_exists = short.as_deref().map(|s| std::path::Path::new(s).exists());
+        std::fs::remove_dir_all(&dir).ok();
+
+        match short {
+            Some(short) => {
+                assert!(
+                    !short
+                        .chars()
+                        .any(|c| c.is_whitespace() || c.is_control() || c == '\''),
+                    "단축 경로에 아직 실을 수 없는 문자가 남았다: {short:?}"
+                );
+                assert_eq!(
+                    short_exists,
+                    Some(true),
+                    "단축 경로가 같은 실물을 안 가리킨다: {short:?}"
+                );
+                let hook = hook.expect("단축 경로를 얻었으면 훅 값도 서야 한다");
+                assert!(
+                    hook.contains(&short),
+                    "훅 값이 단축 경로를 안 실었다: {hook}"
+                );
+            }
+            None => assert!(
+                hook.is_none(),
+                "단축 경로가 없는데 훅이 섰다 — 공백이 든 경로가 그대로 실린다: {hook:?}"
+            ),
+        }
     }
 
     #[test]
@@ -907,39 +1560,31 @@ mod tests {
     }
 
     /// 세 선언이 한 항목에 있는 이유 = **함께 봐야 하는 짝**이다. 발급 축은 두 모드 다 꺼져 있고
-    /// (발급 주체가 codex 라 우리가 심을 값이 없다), 이어받기 두 칸은 통로 하나로 함께 갈린다.
+    /// (발급 주체가 codex 라 우리가 심을 값이 없다), 이어받기 두 칸은 두 모드 다 켜져 있다 —
+    /// 갈리는 것은 **수단**뿐이고(argv ↔ `thread/resume`) 이 네 칸은 그 수단을 묻지 않는다.
     ///
     /// ★네 칸을 다 적는 것이 요점이다★ — 이어받기 축과 caps 신고 칸 중 **한쪽만** 갈리면 이어받은 적
     ///   없는 새 스레드가 「이어받음」으로 보고되거나 그 반대가 되는데, 모드별로 한 칸씩만 재면 그
     ///   어긋남이 이 파일에서 안 보인다.
+    /// ★터미널 모드의 두 칸을 `false` 로 되돌리려면 argv 조립도 함께 걷어야 한다★ — 선언만 끄면
+    ///   활성화 입구가 Fresh 로 띄우는데 [`AgentBackend::build_spec`] 은 여전히 이어받을 채비를 하고
+    ///   있어, 그 배선이 영영 안 불리는 죽은 코드가 된다.
     #[test]
-    fn the_resume_declarations_split_on_the_channel_and_the_issuing_axis_does_not() {
+    fn both_modes_declare_resume_and_neither_claims_to_issue_the_id() {
         for c in [codex(vec![]), codex_app_server(vec![])] {
             assert!(
                 !CodexBackend.assigns_session_id(&c),
                 "{c:?}: 발급 주체는 codex 다 — 우리 uuid 를 심으면 그 값은 영영 안 쓰인다"
             );
+            assert!(
+                CodexBackend.can_resume_stored_session(&c),
+                "{c:?}: 이어받기 축을 끄면 손잡이가 명부에 있어도 활성화 입구가 Fresh 로 띄운다"
+            );
+            assert!(
+                CodexBackend.capabilities(&c).session.resume,
+                "{c:?}: 축만 켜고 신고를 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다"
+            );
         }
-
-        let terminal = codex(vec![]);
-        assert!(
-            !CodexBackend.can_resume_stored_session(&terminal),
-            "터미널 모드에는 이어받을 손잡이가 없다"
-        );
-        assert!(
-            !CodexBackend.capabilities(&terminal).session.resume,
-            "터미널 모드가 이어받기를 신고하면 새 대화가 「이어받음」으로 보고된다"
-        );
-
-        let app_server = codex_app_server(vec![]);
-        assert!(
-            CodexBackend.can_resume_stored_session(&app_server),
-            "app-server 는 저장된 thread id 로 `thread/resume` 을 낸다"
-        );
-        assert!(
-            CodexBackend.capabilities(&app_server).session.resume,
-            "축만 켜고 신고를 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다"
-        );
     }
 
     /// ★선언과 실물이 짝이어야 한다★ — `declares_link()` 가 조립점에서 배달 포트를 **깔지 말지**를
@@ -1609,6 +2254,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         let s = CodexBackend.build_spec(
             &codex(vec![]),
             SpawnMode::Fresh,
+            None,
             None,
             cwd.clone(),
             env.clone(),

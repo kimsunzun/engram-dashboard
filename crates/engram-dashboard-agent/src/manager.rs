@@ -1299,44 +1299,15 @@ impl AgentManager {
             armed: true,
         });
 
-        let spec = backend::build_command_spec(
-            &profile.command,
-            mode,
-            sid,
-            cwd.clone(),
-            profile.env.clone(),
-            control_endpoint,
-        );
-
-        // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
-        //   복원되고 shell 은 대화가 없어, 그 외 backend 는 빈 Vec 을 돌려준다.
-        let seed_events = match mode {
-            SpawnMode::Resume => match sid {
-                Some(s) => backend::resume_transcript_events(&profile.command, &cwd, s),
-                None => Vec::new(),
-            },
-            SpawnMode::Fresh => Vec::new(),
-        };
-
-        // ADR-0191: 통로 실물과 세션에 실릴 값(backend caps·encoder·턴 분류자·우편 자격)을 backend 가
-        //   **한 dispatch 로** 내준다 — 아스펙트마다 같은 switch 를 다시 타지 않는다. 이 자리는 돌려받은
-        //   통로의 실제 타입을 모른다.
-        //   우편 자격을 세션에 싣는 이유는 그대로다 — 프로필이 지워져도 산 세션이 그 사실을 계속 안다
-        //   (`AgentManager::reads_messages` doc).
-        // ★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그
-        //   프로그램이 이미 도는 상태에서 그 대화 파일을 읽게 된다.
-        // ADR-0185: 세션 id 를 **받아 오는** backend(codex app-server)가 그 값을 프로필에 남길 통로를 여기서
-        //   건넨다.
-        // ★무조건 건네는 것이 의도다 — `receives_session_id()` 같은 선언 축을 새로 만들지 않았다★:
-        //   이 자리의 형제 둘(`supports_control_channel` · `accepts_mcp_config`)이 선언으로 갈리는 것은
-        //   **주면 효과가 나기 때문**이다(토큰·config 파일 발급). 이 칸은 반대다 — 안 읽는 backend 에게는
-        //   아무 효과도 없어서, 축을 세우면 같은 판정이 두 곳(선언 표 + impl)에 적히고 둘이 어긋날 수 있다.
-        //   판정 지점은 impl 하나로 둔다.
-        //   위에서 확정된 `epoch` 을 그대로 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음 화신을 덮지 않게 한다.
         // ★`sid` 를 그대로 넘기지 않는다 — 이 칸은 **저장된 backend sid** 다(ADR-0185 의 두 축)★:
         //   `sid` 는 발급 축이 켜진 backend 에만 채워지므로, 받아 적는 쪽(codex)에서는 이어받을 값이
-        //   실제로 프로필에 있어도 언제나 `None` 이다. 이어받기 요청을 **통로가** 내는 backend 는 그
-        //   값으로 이어받는다.
+        //   실제로 프로필에 있어도 언제나 `None` 이다.
+        // ★한 값을 **두 자리**에 넘긴다 — 쓰는 backend 가 갈릴 뿐이다★: 아래 `build_command_spec` 은
+        //   명령줄로 이어받는 backend(codex 터미널의 `resume <id>`)가 읽고, 더 아래 `open_spawn` 은
+        //   통로가 이어받기를 요청하는 backend(codex app-server 의 `thread/resume`)가 읽는다. 두 자리에
+        //   다른 값을 계산해 넘기면 어느 쪽이 「이 spawn 이 이어받는 것」인지가 갈린다.
+        // ★조립을 여기서 하지 않는다(ADR-0004)★ — 이 자리는 손잡이만 읽어 넘기고, 그것을 하위 명령으로
+        //   쓸지 플래그로 쓸지 아예 안 쓸지는 backend 가 정한다.
         // ★Fresh 면 비워서 넘긴다★ — 값을 실어 보내고 backend 가 모드를 다시 보게 하면 판정이 두 곳이
         //   된다. 그 죽은 화신의 thread id 로 새 대화를 열라는 요청이 Fresh 인데, 여기서 안 비우면 그
         //   요청이 backend 마다 다르게 해석된다.
@@ -1372,6 +1343,42 @@ impl AgentManager {
             }
             SpawnMode::Fresh => None,
         };
+
+        let spec = backend::build_command_spec(
+            &profile.command,
+            mode,
+            sid,
+            resume_session_id,
+            cwd.clone(),
+            profile.env.clone(),
+            control_endpoint,
+        );
+
+        // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
+        //   복원되고 shell 은 대화가 없어, 그 외 backend 는 빈 Vec 을 돌려준다.
+        let seed_events = match mode {
+            SpawnMode::Resume => match sid {
+                Some(s) => backend::resume_transcript_events(&profile.command, &cwd, s),
+                None => Vec::new(),
+            },
+            SpawnMode::Fresh => Vec::new(),
+        };
+
+        // ADR-0191: 통로 실물과 세션에 실릴 값(backend caps·encoder·턴 분류자·우편 자격)을 backend 가
+        //   **한 dispatch 로** 내준다 — 아스펙트마다 같은 switch 를 다시 타지 않는다. 이 자리는 돌려받은
+        //   통로의 실제 타입을 모른다.
+        //   우편 자격을 세션에 싣는 이유는 그대로다 — 프로필이 지워져도 산 세션이 그 사실을 계속 안다
+        //   (`AgentManager::reads_messages` doc).
+        // ★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그
+        //   프로그램이 이미 도는 상태에서 그 대화 파일을 읽게 된다.
+        // ADR-0185: 세션 id 를 **받아 오는** backend(codex app-server)가 그 값을 프로필에 남길 통로를 여기서
+        //   건넨다.
+        // ★무조건 건네는 것이 의도다 — `receives_session_id()` 같은 선언 축을 새로 만들지 않았다★:
+        //   이 자리의 형제 둘(`supports_control_channel` · `accepts_mcp_config`)이 선언으로 갈리는 것은
+        //   **주면 효과가 나기 때문**이다(토큰·config 파일 발급). 이 칸은 반대다 — 안 읽는 backend 에게는
+        //   아무 효과도 없어서, 축을 세우면 같은 판정이 두 곳(선언 표 + impl)에 적히고 둘이 어긋날 수 있다.
+        //   판정 지점은 impl 하나로 둔다.
+        //   위에서 확정된 `epoch` 을 그대로 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음 화신을 덮지 않게 한다.
         // ★연결을 선언하는 backend 에만 배달 포트를 깐다★ — 없는 곳에 깔면 아무도 안 부르는 채널을
         //   감독자가 기다리게 되고, 그 backend 의 판정은 옛 경로 그대로여야 한다(claude·shell·stdio·
         //   codex 터미널은 여기서 `None` 이 되어 바이트 단위로 같은 길을 간다).
@@ -5717,6 +5724,28 @@ mod tests {
         let registered = only("self.register_for_spawn(profile)?;");
         let stamped = only(".epoch_for_spawn(profile.id)");
         let resume_read = only("let resume_session_id = match mode {");
+        let spec_built = only("let spec = backend::build_command_spec(");
+
+        // ★읽기가 spec 조립보다 **앞**이어야 한다(ADR-0208)★ — 명령줄로 이어받는 backend(codex 터미널의
+        //   `resume <id>`)는 그 값을 argv 조립 시점에 받는다. 뒤로 밀리면 그 자리에 넘길 값이 없어
+        //   이어받기가 **말없이 새 대화**가 되고, 통로로 이어받는 형제(app-server)만 멀쩡해 증상이
+        //   한 모드에서만 난다.
+        assert!(
+            resume_read < spec_built,
+            "손잡이 읽기가 spec 조립보다 뒤다(읽기 {resume_read} · 조립 {spec_built}) — 명령줄로 \
+             이어받는 backend 가 넘겨받을 값이 없어진다"
+        );
+        // 읽어 놓고 안 넘기면 위 순서만 맞고 값은 `None` 인 상태가 초록으로 지나간다.
+        let spec_call_end = code[spec_built..]
+            .iter()
+            .position(|l| l.starts_with(");"))
+            .expect("spec 조립 호출의 끝");
+        let spec_call = &code[spec_built..spec_built + spec_call_end];
+        assert!(
+            spec_call.iter().any(|l| l.contains("resume_session_id")),
+            "spec 조립이 이어받기 손잡이를 안 받는다 — 터미널 모드 codex 가 `resume <id>` 를 못 낸다: \
+             {spec_call:?}"
+        );
 
         assert!(
             registered < stamped && stamped < resume_read,

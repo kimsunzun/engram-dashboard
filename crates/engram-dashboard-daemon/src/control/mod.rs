@@ -678,6 +678,7 @@ mod tests {
             },
             SpawnMode::Fresh,
             Some(id),
+            None,
             PathBuf::from("."),
             profile_env,
             Some(ep),

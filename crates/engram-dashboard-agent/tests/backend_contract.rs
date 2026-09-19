@@ -251,10 +251,11 @@ struct BackendRow {
     /// **통로별로** 적는 선언 축 = 「저장된 backend sid 로 이어받을 수 있나」. `.0` =
     /// [`BackendRow::sample`] 의 답, `.1` = [`BackendRow::alt_sample`] 의 답(`None` = 둘째 통로 없음).
     ///
-    /// ★오늘은 어느 행도 두 통로의 답이 갈리지 않는다 — 그런데도 통로별로 두는 이유★: 이 축은 **갈릴 것이
-    ///   예정된** 칸이다(codex 의 이어받기 배선이 들어오면 그 행의 둘째 칸 하나만 바뀐다). [`Declared`] 에
-    ///   두면 그때 [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 거짓이 되어 표를 다시
-    ///   짜야 하고, 한 칸으로 접으면 둘째 통로의 답이 이 표에서 **아예 안 보인다**.
+    /// ★오늘은 어느 행도 두 통로의 답이 갈리지 않는다 — 그런데도 통로별로 두는 이유★: 이 축은 **갈린 적이
+    ///   있고 또 갈릴 수 있는** 칸이다. codex 행이 한동안 `(false, Some(true))` 였다(터미널 모드에 이어받기
+    ///   배선이 없던 시절). 한 칸으로 접으면 그런 상태가 이 표에서 **아예 안 보이고**, [`Declared`] 로
+    ///   옮기면 그때 [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 거짓이 되어 표를
+    ///   다시 짜야 한다. 지금 두 칸이 같다는 것이 그 대비를 걷을 근거는 아니다.
     can_resume_stored_session: (bool, Option<bool>),
     /// 같은 통로별 모양으로 적는 **caps 신고 칸** = `capabilities(cmd).session.resume`.
     ///
@@ -262,8 +263,10 @@ struct BackendRow {
     ///   띄울까」를 판정하는 축이고, 이 칸은 그 결과를 소비자(프론트·wire)에게 신고하는 값이다. 오늘은
     ///   모든 행에서 둘이 같지만, 갈리면 **이어받지 않는 스폰이 이어받는다고 신고**되거나 그 반대가
     ///   되므로 그 어긋남이 이 표에서 보여야 한다.
-    /// ★[`Declared`] 에 없는 이유★ — codex 의 두 통로가 실제로 갈려서, 거기 두면
-    ///   [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 거짓이 된다.
+    /// ★[`Declared`] 에 없는 이유★ — 바로 위 칸과 짝이라 같은 모양으로 둔다. 두 칸이 갈리면 [`Declared`]
+    ///   에 둔 쪽이 [`declarations_are_the_same_across_a_backend_s_two_channels`] 를 거짓으로 만드는데,
+    ///   codex 행에서 실제로 그런 적이 있다(위 칸의 doc). 지금 어느 행도 안 갈린다는 것이 이 배치를
+    ///   되돌릴 근거는 아니다 — 되돌리면 다음에 갈릴 때 표를 다시 짜야 한다.
     session_resume: (bool, Option<bool>),
     probe: Option<LiveProbe>,
 }
@@ -338,12 +341,13 @@ fn backend_table() -> Vec<BackendRow> {
                 model_temperature: false,
                 model_max_tokens: false,
             },
-            // ★이 백엔드는 두 통로의 답이 갈린다★ — app-server 는 받아 적은 thread id 로
-            //   `thread/resume` 을 내고, 터미널 모드에는 그 손잡이가 없다. 두 줄이 **같이** 갈리는 것이
-            //   요점이다: 한쪽만 켜지면 이어받은 적 없는 새 스레드가 「이어받음」으로 보고된다. 사유의
-            //   정본은 `backend/codex/` 의 그 두 메서드 주석.
-            can_resume_stored_session: (false, Some(true)),
-            session_resume: (false, Some(true)),
+            // ★두 통로가 같은 답을 낸다 — 이어받는 **수단**만 갈린다★: app-server 는 받아 적은
+            //   thread id 로 `thread/resume` 을 내고, 터미널 모드는 같은 id 를 `codex resume <id>` 로
+            //   실어 띄운다(ADR-0208 — 그 모드의 손잡이는 훅이 제어 평면으로 되돌려 준다).
+            //   두 줄이 **같이** 갈리는 것이 여전히 요점이다: 한쪽만 켜지면 이어받은 적 없는 새 스레드가
+            //   「이어받음」으로 보고된다. 사유의 정본은 `backend/codex/` 의 그 두 메서드 주석.
+            can_resume_stored_session: (true, Some(true)),
+            session_resume: (true, Some(true)),
             probe: Some(LiveProbe {
                 program: "codex",
                 // 운영은 `-s workspace-write -a on-request` 로 띄운다(그 argv 를 그대로 받아 온다).
@@ -715,6 +719,7 @@ fn production_spec(
     row.backend.build_spec(
         &with_extra(&row.sample, extra),
         SpawnMode::Fresh,
+        None,
         None,
         cwd.to_path_buf(),
         env.to_vec(),

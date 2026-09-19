@@ -274,11 +274,29 @@ pub trait AgentBackend: Send + Sync {
     /// `control`(ADR-0086): 데몬이 발급한 제어 채널 엔드포인트(추상 descriptor). 있으면 backend 가
     ///   자기 프로그램 방식으로 명령줄에 주입한다(claude=`--mcp-config <path>` — 그 지식은
     ///   `backend/claude/` 단독, ADR-0004). None 이거나 제어 채널을 안 쓰는 backend(shell)면 무시한다.
+    ///
+    /// `resume_session_id` = 이 spawn 이 **이어받을** 저장된 backend sid. `None` = 이어받지 않는다
+    ///   (Fresh 로 띄우거나, 저장된 값이 없거나, 이 backend 의 이어받기 축이 꺼져 있다).
+    /// ★바로 위 `session_id` 와 **다른 값이다 — 한 칸으로 접지 말 것**★: 그쪽은 우리가 발급해 건네주는
+    ///   값([`AgentBackend::assigns_session_id`] 축)이고, 이 칸은 상대가 발급해 우리가 받아 적어 둔
+    ///   값이다([`SessionIdSink`] 가 적은 그것). 접으면 `assigns_session_id() == false` 가 뜻하는
+    ///   「우리는 id 를 발급하지 않는다」가 거짓이 된다 — 발급 축이 꺼진 backend 의 argv 에 우리가 넘긴
+    ///   값이 실리게 되므로.
+    /// ★[`AgentBackend::open_spawn`] 의 같은 이름 칸과 **같은 값이다**★ — 갈라지는 것은 그 값으로
+    ///   **무엇을 하나**뿐이다: 명령줄로 이어받는 backend(codex 터미널)는 여기서 argv 를 조립하고,
+    ///   통로가 이어받기를 요청하는 backend(codex app-server)는 그쪽에서 첫 요청을 고른다.
+    /// ★모드를 함께 보는 것이 여기서는 정당하다 — `open_spawn` 과 다른 점★: 그쪽은 모드를 안 받아
+    ///   「Fresh 인데 이어받을 값이 있다」가 표현 불가능하지만, 이 자리는 `mode` 를 이미 받고 있고
+    ///   **Fresh 와 Resume 의 argv 가 애초에 갈린다**(claude 의 `--session-id` ↔ `--resume`). 조립점은
+    ///   그쪽과 같은 규율로 Fresh 면 이 칸을 비워서 넘긴다.
+    // ADR-0185
+    // ADR-0208
     fn build_spec(
         &self,
         command: &AgentCommand,
         mode: SpawnMode,
         session_id: Option<Uuid>,
+        resume_session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
@@ -629,11 +647,12 @@ pub fn build_command_spec(
     c: &AgentCommand,
     mode: SpawnMode,
     session_id: Option<Uuid>,
+    resume_session_id: Option<Uuid>,
     cwd: PathBuf,
     env: Vec<(String, String)>,
     control: Option<ControlEndpoint>,
 ) -> CommandSpec {
-    backend_for(c).build_spec(c, mode, session_id, cwd, env, control)
+    backend_for(c).build_spec(c, mode, session_id, resume_session_id, cwd, env, control)
 }
 
 pub fn transport_shape(c: &AgentCommand) -> TransportShape {
@@ -1168,7 +1187,9 @@ mod tests {
     //   ② can_resume_stored_session — 저장된 그 id 로 이어받을 수 있나. **발급 주체는 안 묻는다**.
     // ★두 칸을 한 칸으로 접지 말 것★: 접는 순간 한쪽을 고치면 다른 쪽이 딸려 가고, 그 둘이 서로 다른
     // 소비자(발급 = spawn 시점 · 이어받기 = 활성화 입구 셋)를 굴린다. 값이 실제로 갈리는 행이 이미 있다 —
-    // codex app-server 가 (false, true) 다.
+    // codex 두 모드가 다 (false, true) 다: 발급은 codex 가 하고(우리가 심을 값이 없다), 우리는 받아 적은 그
+    // 값으로 이어받는다. ★터미널 모드가 (false, false) 로 적혀 있는 자리를 만나면 낡은 것이다★ —
+    // 그 모드는 `codex resume <id>` 로 이어받고(ADR-0208), 손잡이는 훅이 적어 준다.
     // ADR-0185
     fn expected_session_axes(c: &AgentCommand) -> (bool, bool) {
         // (assigns_session_id, can_resume_stored_session)
@@ -1185,7 +1206,7 @@ mod tests {
             AgentCommand::Codex {
                 output_format: AgentOutputFormat::Terminal,
                 ..
-            } => (false, false),
+            } => (false, true),
             // ★이 행이 두 칸의 값이 갈리는 첫 행이다★ — 발급은 여전히 codex 가 하고(①), 우리는 그
             //   받아 적은 thread id 로 `thread/resume` 을 낸다(②). 사유의 정본은 `backend/codex/` 의 그
             //   두 메서드 주석.
@@ -1228,12 +1249,12 @@ mod tests {
             p
         };
 
-        // ★터미널 모드 codex 를 쓴다 — 같은 프로그램의 **다른 통로**는 이제 이 축이 true 다★. 그래서
-        //   이 표본은 「프로그램이 아니라 통로가 가른다」까지 함께 잰다.
+        // ★축이 꺼진 표본은 이제 셸뿐이다★ — codex 터미널 모드가 이 자리를 떠났다(ADR-0208 로 그 모드도
+        //   `codex resume <id>` 로 이어받게 됐다). 셸에는 재개 개념 자체가 없어 이 자리가 비지 않는다.
         let not_resumable = profile(
-            AgentCommand::Codex {
-                extra_args: vec![],
-                output_format: AgentOutputFormat::Terminal,
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
             },
             sid,
         );
@@ -1242,17 +1263,22 @@ mod tests {
             "이어받기 축이 false 인 명령은 sid 가 있어도 이어받지 않는다 — 켜면 새 대화가 「이어받음」으로 보고된다"
         );
 
-        let resumable_by_channel = profile(
-            AgentCommand::Codex {
-                extra_args: vec![],
-                output_format: AgentOutputFormat::StreamJson,
-            },
-            sid,
-        );
-        assert!(
-            can_resume_profile(&resumable_by_channel),
-            "app-server 통로는 저장된 thread id 로 `thread/resume` 을 낸다 — 이 칸이 꺼지면 이어받는 스폰이 「새 대화」로 보고된다"
-        );
+        // ★codex 는 **두 통로 다** 이어받는다 — 수단만 갈린다★: app-server 는 `thread/resume`,
+        //   터미널은 `codex resume <id>`. 둘을 다 재는 것이 요점이다 — 한쪽만 재면 다른 쪽이 조용히
+        //   꺼졌을 때 「이어받는 스폰이 새 대화로 보고된다」가 여기서 안 보인다.
+        for output_format in [AgentOutputFormat::StreamJson, AgentOutputFormat::Terminal] {
+            let resumable_codex = profile(
+                AgentCommand::Codex {
+                    extra_args: vec![],
+                    output_format: output_format.clone(),
+                },
+                sid,
+            );
+            assert!(
+                can_resume_profile(&resumable_codex),
+                "{output_format:?}: codex 는 받아 적은 id 로 이어받는다 — 이 칸이 꺼지면 이어받는 스폰이 「새 대화」로 보고된다"
+            );
+        }
 
         let resumable = profile(
             AgentCommand::Claude {
