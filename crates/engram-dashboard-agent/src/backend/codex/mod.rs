@@ -170,6 +170,7 @@ impl AgentBackend for CodexBackend {
     ///   건드리지 말 것**★: 어느 쪽이든 단독으로 켜면 이어받은 적 없는 새 스레드가 「이어받음」으로
     ///   보고되고, 단독으로 끄면 실제로 이어받는 스폰이 「새 대화」로 보고된다.
     // ADR-0185
+    // ADR-0208
     fn can_resume_stored_session(&self, command: &AgentCommand) -> bool {
         is_app_server(command)
     }
@@ -197,6 +198,8 @@ impl AgentBackend for CodexBackend {
     // ADR-0086
     // ADR-0132
     // ADR-0133
+    // ADR-0208
+    // ADR-0209
     fn supports_control_channel(&self) -> bool {
         true
     }
@@ -233,6 +236,7 @@ impl AgentBackend for CodexBackend {
     /// ★여는 조건★: 받기 축을 먼저 열 것(그쪽 doc 의 「여는 조건」). 보내기만 먼저 열면 답장을 못 받는
     ///   발신자가 생기고, 그것은 우편 장부에 영원한 미결로 남는다.
     // ADR-0133
+    // ADR-0209
     fn uses_mail(&self) -> bool {
         false
     }
@@ -380,6 +384,7 @@ impl AgentBackend for CodexBackend {
     /// `model.select` 는 codex 에 `-m` 이 있는데도 false 다 — 이 칸은 **그 프로그램이 할 수 있는 것**이
     /// 아니라 **이 스폰이 쓰는 것**을 신고한다. 그 칸을 노출하지 않으므로 신고하지 않는다.
     // ADR-0185
+    // ADR-0208
     fn capabilities(&self, command: &AgentCommand) -> BackendCaps {
         BackendCaps {
             session: SessionCaps {

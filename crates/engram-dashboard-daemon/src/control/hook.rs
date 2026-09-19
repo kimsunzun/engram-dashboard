@@ -40,6 +40,7 @@
 // ADR-0004
 // ADR-0086
 // ADR-0185
+// ADR-0208
 
 use engram_dashboard_agent::profile::SessionIdAdoption;
 use engram_dashboard_agent::types::AgentId;

@@ -193,6 +193,7 @@ const CLI_HOOK_VERB_SESSION_START: &str = "session-start";
 ///   없는 페이로드도 빈 값으로 실어 보내 그 흔적을 만든다) ② [`HOOK_DEBUG_ENV`] 를 켠 셸에서만 나오는
 ///   stderr 한 줄. 기본이 침묵인 이유는 훅 stderr 가 에이전트 화면에 보이는 구현이 있어, 거기 계열 이름이
 ///   찍히면 위 은닉이 무의미해지기 때문이다.
+// ADR-0208
 const EXIT_HOOK: i32 = 0;
 
 /// 훅 계열의 진단을 stderr 로 내보내는 스위치 — **비어 있지 않으면** 켜진다.

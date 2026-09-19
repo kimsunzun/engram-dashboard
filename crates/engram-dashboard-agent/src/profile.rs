@@ -776,6 +776,7 @@ impl ProfileRegistry {
     // ADR-0007
     // ADR-0163
     // ADR-0185
+    // ADR-0208
     pub fn adopt_session_id(
         &self,
         id: AgentId,

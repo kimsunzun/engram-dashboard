@@ -279,6 +279,7 @@ pub const MAIL_MARKER_OFF: &str = "off";
 ///   `AGENT_STATE_LIVE` 와 같은 사유.
 // ADR-0086
 // ADR-0132
+// ADR-0208
 pub const CONTROL_HOOK_ROUTE: &str = "/control/hook";
 
 /// 훅 보고가 실어 나르는 **세션 id 칸의 이름**.
@@ -295,6 +296,7 @@ pub const CONTROL_HOOK_ROUTE: &str = "/control/hook";
 ///   이라 부르는 순간 그 지식이 공용 층에 이름으로 박힌다(ADR-0004).
 // ADR-0004
 // ADR-0185
+// ADR-0208
 pub const CLI_HOOK_SESSION_ID_FIELD: &str = "session_id";
 
 /// 우편 계열의 동사 전량 — `engram mail <동사>`.
@@ -491,6 +493,7 @@ pub struct ControlChannelNeeds {
     ///
     /// false → 우편 교육(프라이밍)도 발신 grant 도 안 실리고, 데몬이 이 자격증명의 우편 요청을 거절한다.
     /// ★그래도 제어 동사와 CLI 입구는 받는다★ — 위 타입 doc 의 마지막 항.
+    // ADR-0209
     pub uses_mail: bool,
 }
 

@@ -84,7 +84,7 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
 ///   원래 불가다(ADR-0086 §불변식). ★상속이 자식 전부에 걸린다는 것은 **에이전트가 띄운 하위
 ///   에이전트도 같은 토큰을 든다**는 뜻이다★ — 그 토큰으로 오는 보고를 신원 하나로 믿으면 자식의 값이
 ///   부모 자리에 앉는다. 그 축을 막는 것은 이 함수가 아니라 받는 쪽이다(데몬 `control::hook`).
-// ADR-0086 / ADR-0133 / ADR-0004
+// ADR-0086 / ADR-0133 / ADR-0004 / ADR-0208
 pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &ControlEndpoint) {
     // ★ENGRAM_CONTROL_URL = base(스킴+호스트+포트)★: endpoint.url 은 MCP 라우트
     //   (`http://127.0.0.1:<port>/mcp`)라 CLI 가 붙을 base 로 쓰려면 라우트 suffix(`/mcp`)를 벗겨 base 만
@@ -447,6 +447,7 @@ pub trait AgentBackend: Send + Sync {
     ///   (ADR-0132 결정 5). 그 둘을 가르는 것이 이 칸을 세운 이유다.
     // ADR-0004
     // ADR-0133
+    // ADR-0209
     fn uses_mail(&self) -> bool {
         true
     }

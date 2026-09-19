@@ -461,6 +461,7 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
 ///   최초 대화로 되감긴다.
 // ADR-0185
 // ADR-0083
+// ADR-0208
 pub(crate) fn fresh_spawn_release_session_id(command: &AgentCommand, mode: SpawnMode) -> bool {
     matches!(mode, SpawnMode::Fresh)
         && !backend::assigns_session_id(command)

@@ -1127,6 +1127,7 @@ impl super::hook::SessionStartRecorder for ManagerSessionRecorder {
 /// ★이 입구가 부르는 것은 `adopt_session_id` 이지 형제 `observe_session_id` 가 **아니다**★ — 두 동사의
 ///   규칙이 정반대다(이쪽은 빈 칸에만 쓰고, 그쪽은 덮는다). 그 차이가 이 라우트의 존재 이유라, 이름을
 ///   섞어 적으면 다음 독자가 정확히 반대 규칙을 이 입구 것으로 읽는다.
+// ADR-0208
 async fn control_hook_handler(
     axum::extract::State(state): axum::extract::State<ControlHookState>,
     identity: Option<axum::Extension<BoundIdentity>>,

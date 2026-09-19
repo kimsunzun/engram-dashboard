@@ -64,6 +64,7 @@ impl DaemonControlChannel {
     ///   보고 CLI grant 를 실어, 데몬은 「발신을 허가했다」고 기록하는데 그 자격증명의 우편 요청은
     ///   거절되는 상태가 났다.
     // ADR-0133
+    // ADR-0209
     fn build_grants(
         send_exe: Option<&std::path::Path>,
         needs: ControlChannelNeeds,
@@ -174,6 +175,7 @@ impl ControlChannel for DaemonControlChannel {
         //   「왜 편지를 못 보내나」를 쫓는 자리에서 **반대 사실**을 말한다. 읽는 곳이 셋이면 변수도 하나다.
         //   그래서 이 줄이 `accepts_mcp_config` 확정 **직후**에 있다.
         // ADR-0133
+        // ADR-0209
         let mail_allowed = needs.uses_mail && !accepts_mcp_config;
         // ADR-0099
         let (config_path, settings_file, priming_variant) = if accepts_mcp_config {
@@ -208,6 +210,7 @@ impl ControlChannel for DaemonControlChannel {
         // ADR-0099
         // ADR-0126
         // ADR-0133
+        // ADR-0209
         let priming_variant = needs.uses_mail.then_some(priming_variant);
         tracing::debug!(
             agent = %id,
@@ -226,6 +229,7 @@ impl ControlChannel for DaemonControlChannel {
         //   통째로 중단된다**(제어 동사를 못 쓰는 것은 아래 warn 이 다루는 fail-open 사안이다).
         // ADR-0099
         // ADR-0133
+        // ADR-0209
         if needs.uses_mail && !accepts_mcp_config && self.send_exe.is_none() {
             let msg = format!(
                 "non-MCP backend with no `{CLI_EXE_NAME}` binary — zero physical send channels while CLI-only priming teaches that command (pairing invariant violation)"
