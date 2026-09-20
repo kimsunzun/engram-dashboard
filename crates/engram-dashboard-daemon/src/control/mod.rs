@@ -51,7 +51,7 @@ impl DaemonControlChannel {
     }
 
     /// ★`ENGRAM_DISALLOW_MCP_SEND` = test-only 노브(운영 스위치 아님)★: 설정 + non-empty 면 MCP
-    ///   send_message grant 를 **뺀다**.
+    ///   eg_send grant 를 **뺀다**.
     /// ★이 노브로는 CLI-only 라우팅을 만들 수 없다★: 우편 가부를 가르는 것은 grant 가 아니라 자격증명이다
     ///   — MCP 가능 스폰의 자격증명으로 온 우편 요청은 데몬이 거절하므로(ADR-0133), MCP grant 를 빼도
     ///   CLI 우편으로 넘어가지 않고 **발신 입구가 0** 이 될 뿐이다. 게다가 스폰은 auto 권한 모드라 grant
@@ -208,7 +208,7 @@ impl ControlChannel for DaemonControlChannel {
             (None, None)
         };
         // ★프라이밍을 싣는 스폰은 **MCP 우편을 실제로 쓰는 스폰뿐**이다★: 남은 프라이밍 파일 하나가
-        //   가르치는 것은 `send_message` 툴 하나이고(ADR-0126 결정 1), 그 툴이 없는 스폰에 실으면 데몬은
+        //   가르치는 것은 `eg_send` 툴 하나이고(ADR-0126 결정 1), 그 툴이 없는 스폰에 실으면 데몬은
         //   「가르쳤다」고 기록하는데 에이전트는 없는 도구를 부른다 — ADR-0099 가 실측한 발신 freeze 와
         //   같은 모양이다. 그래서 두 축이 **함께** 참일 때만 싣는다.
         //   ★CLI 미러 쪽 변형은 사라졌다 — 그 자리를 A 로 메우지 말 것(사용자 결정 2026-09-19)★: 비-MCP

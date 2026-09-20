@@ -259,7 +259,7 @@ pub trait AgentBackend: Send + Sync {
     /// 불변식 = 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
     /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
     /// `DaemonControlChannel::provision` 이 mcp-config 를 쓰고 MCP bits 를 endpoint 에 실으며 MCP-only 교육
-    /// 프라이밍(`send_message` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 mcp-config 미기록 +
+    /// 프라이밍(`eg_send` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 mcp-config 미기록 +
     /// **프라이밍 미주입** + 우편 가능 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
     ///
     /// ★false 쪽이 고르는 것은 「다른 프라이밍」이 아니라 「프라이밍 없음」이다 — 변형 축을 되살리지 말 것★:

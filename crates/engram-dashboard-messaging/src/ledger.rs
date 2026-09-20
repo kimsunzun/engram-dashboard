@@ -74,7 +74,7 @@ pub enum DeliveryStatus {
     ///   입구 반려(`RECIPIENT_NOT_FOUND`/`RECIPIENT_AMBIGUOUS`) ·
     ///   `MAILBOX_FULL` · `REQUEST_CAPACITY` · **삭제 정리**(`RECIPIENT_DELETED` — 4차).
     ///
-    /// ★왜 장부에 남기나(load-bearing)★: 발신자가 나중에 `messages{id}` 로 "누가 못 받았나" 를 다시 볼 수
+    /// ★왜 장부에 남기나(load-bearing)★: 발신자가 나중에 `eg_messages{id}` 로 "누가 못 받았나" 를 다시 볼 수
     ///   있어야 하고, 그래야 **장부 기대 행수 = 발신 응답 행수**가 맞아 `may_be_truncated` 오탐이 사라진다
     ///   (spec §5·§6). 파킹은 없지만 기록은 있다.
     /// ★기록 시점이 곧 종점 — **단 하나의 예외**(4차 · ADR-0116 결정 4)★: 입구 반려 계열은 이 상태로
@@ -155,7 +155,7 @@ pub struct MessageRecord {
     /// ★조회에 실을 실패 코드(4차 신설 — spec §6 `RECIPIENT_DELETED`)★.
     ///
     /// ★왜 wire 문자열을 그대로 담나(load-bearing)★: 이 코드가 처음 보이는 곳은 **발송 응답이 아니라
-    ///   `messages{id}` 조회**다(발송 시점엔 `pending` 이었다 — spec §6). 즉 값을 발송 응답과 다른 시점까지
+    ///   `eg_messages{id}` 조회**다(발송 시점엔 `pending` 이었다 — spec §6). 즉 값을 발송 응답과 다른 시점까지
     ///   **보관**해야 하므로 레코드에 실린다. 어휘 정본은 `service::FailCode::as_str` 이고 여기엔 그 반환값이
     ///   그대로 들어온다 — 장부가 service 의 enum 을 타입으로 알면 순수 저장 계층이 정책 어휘에 유착되므로
     ///   `&'static str` 한 겹으로만 받는다(값 복제 없음).
@@ -470,7 +470,7 @@ pub struct DueTimeout {
     pub reply_by_raw: String,
 }
 
-/// ★미회신 request 1건의 조회 뷰(S18 D — `messages` 무인자 "내 미결")★.
+/// ★미회신 request 1건의 조회 뷰(S18 D — `eg_messages` 무인자 "내 미결")★.
 ///
 /// ★왜 `RequestEntry` 를 직접 노출하지 않나★: 추적 항목은 장부의 **내부 상태**(closed/notified 플래그,
 ///   sender_id 등 배달 배선용 필드)를 담는다 — 그대로 내보내면 조회 표면이 내부 표현에 유착돼 v2 영속화 때
@@ -1362,7 +1362,7 @@ impl Ledger {
         self.requests.len()
     }
 
-    /// ★미회신(열려 있는) request 전부를 조회 뷰로(S18 D — `messages` 무인자)★. **오래된 순**(`created_at`
+    /// ★미회신(열려 있는) request 전부를 조회 뷰로(S18 D — `eg_messages` 무인자)★. **오래된 순**(`created_at`
     /// 오름차순, 동률이면 현재 목록 순서 — stable sort).
     ///
     /// ★왜 명시적으로 정렬하나(round-4 리뷰 H4)★: 예전엔 "추가 순서 = 발송 순서" 라는 이유로 raw Vec 순서를
@@ -1383,7 +1383,7 @@ impl Ledger {
     ///   제외하지 않는다. **여기 기준을 바꾸면 `is_live()` 도 함께 바꿔야 한다**(갈리면 같은 버그가 재발 —
     ///   `is_live` 주석의 4단계 시퀀스).
     /// ★필터는 상위가★: 이름별(발신/수신) 갈래는 호출자가 정한다 — 장부는 이름 규약을 모른다.
-    // ADR-0103 (spec §6 messages 무인자 = 내 미결)
+    // ADR-0103 (spec §6 eg_messages 무인자 = 내 미결)
     pub fn open_requests(&self) -> Vec<OpenRequestView> {
         let mut out: Vec<OpenRequestView> = self
             .requests

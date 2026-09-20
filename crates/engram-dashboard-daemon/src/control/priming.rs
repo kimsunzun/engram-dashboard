@@ -525,7 +525,7 @@ mod tests {
     #[test]
     fn mcp_only_prose_is_not_mistaken_for_cli_teaching() {
         for text in [
-            "call the MCP tool `send_message` with the recipient and body.",
+            "call the MCP tool `eg_send` with the recipient and body.",
             "on the `engram` server",
             "**engram** server tools are listed at startup",
             "its body opens with an [engram] marker",
@@ -639,7 +639,7 @@ mod tests {
     }
 
     /// ★입구 **이름**을 가르치는 자리는 더 이상 이 파일이 아니다★: 프라이밍은 포인터 한 줄
-    ///   (`engram help`)로 줄었고, `send_message` 라는 낱말을 에이전트가 읽는 곳은 그 툴의 **설명문**
+    ///   (`engram help`)로 줄었고, `eg_send` 라는 낱말을 에이전트가 읽는 곳은 그 툴의 **설명문**
     ///   뿐이다(rmcp 가 tools/list 에 싣는다). 그래서 그 반쪽은
     ///   `control/mcp_server.rs::the_send_message_entry_teaches_its_own_call` 로 옮겼다 — 표면을 소유한
     ///   파일이 그 표면을 지킨다. 여기 남은 것은 **주어가 여전히 프라이밍 파일인** 반쪽,
@@ -691,31 +691,21 @@ mod tests {
         );
     }
 
-    /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: "우회하지 마라" 와 "대신 principal 에게 보고하라"
-    ///   는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면 결정이 반쪽이 된다.
-    ///   ★셸 우회를 데몬이 거절하는 지금도 이 교육은 필요하다★: 그 갈래는 거절로 닫히지만(ADR-0133)
-    ///   **조용한 포기** 갈래는 그대로 남고, auto mode 에선 grant 가 NO-OP 이라(ADR-0097) 이 지시를 붙드는
-    ///   장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
-    ///
-    /// ★왜 "broken channel" 한 토큰만 pin 하나★: 문장 전체를 pin 하면 평범한 문구 손질에도 깨진다. "우회
-    ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 `production_priming_file_carries_no_mail_cli_surface`
-    ///   가 A 의 CLI 표면 부재를 이미 강제하므로 "대신 다른 입구를 써라" 식 회귀는 그쪽에서 잡힌다.
-    ///   여기선 **고장을 고장이라 부르는 문장이 존재하는지**만 본다.
-    // ADR-0126
-    #[test]
-    fn production_priming_files_teach_channel_failure_escalation() {
-        let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        assert!(
-            a.contains("broken channel"),
-            "A(McpPrimary): 발신 입구가 고장나면 우회하지 말고 principal 에게 보고하도록 가르쳐야(ADR-0126 결정 2·5)"
-        );
-    }
+    // ★에스컬레이션 pin 은 여기 있었고, 지금은 없다 — 그 부재를 적어 둔다★: 옵 ADR-0126 결정 2·5 가
+    //   요구하던 "broken channel" 에스컬레이션 문장을 이 자리의 테스트가 불있었다. 그 문장은 프라이밍 본문의
+    //   행동 규칙 네 줄과 **함께** 걷혔고(사용자 결정 2026-09-19) 되돌아오지 않는다.
+    //   그 뒤 한 번 재배선됐던 잔존본(`production_priming_file_points_at_discovery_entrypoint`)은
+    //   위 `production_priming_files_point_at_the_control_surface` 와 **같은 파일에서 같은 리터럴을**
+    //   보는 엄밀한 중복이어서(저쪽은 그 위에 불변식 둘을 더 진다) 2026-09-20 에 지웠다 — 커버리지는
+    //   줄지 않았다.
+    // ★그래서 에스컬레이션 축을 지금 묶어 두는 pin 은 **하나도 없다**★ — 그 문장이 조용히 되살아나도,
+    //   반대로 다시 필요해져도 어느 게이트도 알려 주지 않는다. 그 갭의 기록은 ADR-0213 「영향」이 진다.
 
     // ★C3 회신 계약(ADR-0103 결정 2/3)의 pin 은 여기 없다 — 되살리지 말 것★: 프라이밍은 봉투 문법을
     //   더 이상 싣지 않는다(포인터로 줄었다). 계약은 두 표면으로 갈려 각자의 파일이 지킨다 —
     //   봉투 인식(`type="request"` · `<notice>` · 받은 id 로 회신)은 `bin/engram.rs` 의 `help mail recv`
     //   화면 pin 이, 툴 인자 표기(snake_case `reply_to`·`reply_by`)는 `control/mcp_server.rs` 의 설명문
-    //   pin 이 본다. 프라이밍이 지는 것은 **행동 규칙**뿐이고(위 에스컬레이션 pin 이 그쪽 축이다), 그
+    //   pin 이 본다. ★프라이밍은 이제 행동 규칙도 지지 않는다★ — 그 네 줄과 에스컬레이션 pin 은
+    //   함께 걷혔다(위 주석). 프라이밍에 남은 load-bearing 성질은 발견 입구 한 줄뿐이고, 그
     //   문법을 여기로 도로 끌어오면 같은 계약이 세 곳에서 갈라진다.
 }

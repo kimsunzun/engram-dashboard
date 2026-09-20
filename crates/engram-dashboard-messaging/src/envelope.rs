@@ -151,7 +151,7 @@ fn apply_wrap_template(template: &str, sender: &str, id: &str, body: &str) -> St
 /// 파이프라인 로직은 이걸 분기하지 않는다(entrance-agnostic) — **로그 라벨 전용**이다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entrance {
-    /// MCP `send_message` 툴 경로.
+    /// MCP `eg_send` 툴 경로.
     Mcp,
     /// `/control/send` 평문 HTTP 라우트(CLI `engram mail send`).
     Cli,

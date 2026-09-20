@@ -256,11 +256,15 @@ impl AgentBackend for ClaudeBackend {
                 args.extend(extra_args.iter().cloned());
                 // ADR-0094 / ADR-0106: 내장 SendMessage 차단 — `--disallowedTools SendMessage`,
                 //   **control endpoint 있을 때만** 주입.
-                //   ★왜★: harness 내장 툴 `SendMessage`(PascalCase)와 우리 MCP 툴 `send_message`
-                //   (server: engram, snake_case)가 이름이 충돌한다 — 스폰된 claude 가 프라이밍을 오독해
-                //   내장 SendMessage 를 호출하면 engram 에이전트 이름을 몰라 "No agent named 'X' is
-                //   reachable" 로 실패한다(실측 2026-07-26 roundtrip 진단 — 스폰마다 재현). 프라이밍 문구
-                //   교정만으론 재발하므로 툴 자체를 막아 결정적으로 끊는다.
+                //   ★왜 들였나★: 계기는 harness 내장 툴 `SendMessage`(PascalCase)와 우리 MCP 툴의
+                //   **옛 이름** `send_message`(server: engram, snake_case) 사이의 이름 충돌이었다 — 스폰된
+                //   claude 가 프라이밍을 오독해 내장 SendMessage 를 호출하면 engram 에이전트 이름을 몰라
+                //   "No agent named 'X' is reachable" 로 실패했다(실측 2026-07-26 roundtrip 진단 — 스폰마다
+                //   재현). 프라이밍 문구 교정만으론 재발해 툴 자체를 막아 끊었다.
+                //   ★그 툴은 지금 `eg_send` 다 — 이름은 더는 닮지 않지만 deny 는 의도적으로 남긴다★:
+                //   실측된 고장은 **harness 가 자기 내장 툴을 오발한 것**이지 두 이름의 철자가 같아서
+                //   일어난다고 증명된 것이 아니다. 이름이 갈렸다는 이유로 걷어내면 오발이 사라졌는지를
+                //   스폰 현장에서만 알게 된다 — 재현 실측 없이는 걷지 않는다.
                 //   ★스코프 = control 있을 때만(ADR-0106, 리뷰 지적 2026-07-26)★: 충돌이 문제 되는 건
                 //   메시징 프라이밍을 받은 에이전트뿐이고 그건 control endpoint 가 있는 스폰뿐이다. 비메시징
                 //   스폰까지 막으면 (a) 이유 없이 내장 기능을 잃고 (b) claude 가 미등록 툴을 deny 목록에서
@@ -1222,7 +1226,7 @@ mod tests {
             grants: vec![
                 ToolGrant::Mcp {
                     server: "engram".to_string(),
-                    tool: "send_message".to_string(),
+                    tool: "eg_send".to_string(),
                 },
                 ToolGrant::Cli {
                     exe: CLI_EXE_NAME.to_string(),
@@ -1871,9 +1875,9 @@ mod tests {
     fn grants_to_allowed_tools_mcp_pattern() {
         let out = grants_to_allowed_tools(&[ToolGrant::Mcp {
             server: "engram".to_string(),
-            tool: "send_message".to_string(),
+            tool: "eg_send".to_string(),
         }]);
-        assert_eq!(out, vec!["mcp__engram__send_message".to_string()]);
+        assert_eq!(out, vec!["mcp__engram__eg_send".to_string()]);
     }
 
     #[test]
@@ -1895,7 +1899,7 @@ mod tests {
         let out = grants_to_allowed_tools(&[
             ToolGrant::Mcp {
                 server: "engram".to_string(),
-                tool: "send_message".to_string(),
+                tool: "eg_send".to_string(),
             },
             ToolGrant::Cli {
                 exe: CLI_EXE_NAME.to_string(),
@@ -1904,7 +1908,7 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                "mcp__engram__send_message".to_string(),
+                "mcp__engram__eg_send".to_string(),
                 format!("Bash({CLI_EXE_NAME}:*)"),
                 format!("PowerShell({CLI_EXE_NAME}:*)"),
             ]
@@ -1931,7 +1935,7 @@ mod tests {
             .expect("grants 있으면 --allowedTools 주입");
         assert_eq!(
             s.args.get(pos + 1).map(|s| s.as_str()),
-            Some("mcp__engram__send_message"),
+            Some("mcp__engram__eg_send"),
             "첫 패턴 = MCP 발신 입구(1차 확실 경로): {:?}",
             s.args
         );

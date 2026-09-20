@@ -368,7 +368,7 @@ pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
 /// 자기 입구 정의 옆에서 채우고, backend 가 자기 프로그램 문법으로 번역한다(claude = `--allowedTools`).
 ///
 /// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
-///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
+///   컨트롤 채널만 안다 — 툴 이름(`eg_send`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
 ///   agent 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
 ///   backend/claude/ 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
 ///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
@@ -438,7 +438,7 @@ pub struct ControlEndpoint {
     /// 않는다.
     pub priming_file: Option<std::path::PathBuf>,
     /// 사전 승인할 툴 목록(ADR-0094 — 계약은 `ToolGrant`). 데몬 컨트롤 채널이 발신 입구(MCP
-    /// `send_message` / `engram` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
+    /// `eg_send` / `engram` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
     /// (권한 플래그 없음 = 기존 게이트 유지).
     pub grants: Vec<ToolGrant>,
     /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).

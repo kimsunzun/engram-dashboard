@@ -1,4 +1,4 @@
-//! ADR-0086 스텝 2 통합 테스트 — 듀얼 입구 A→B 메시지 전송(send_message MCP 툴 + /control/send HTTP 라우트).
+//! ADR-0086 스텝 2 통합 테스트 — 듀얼 입구 A→B 메시지 전송(eg_send MCP 툴 + /control/send HTTP 라우트).
 //!
 //! ★relay 관측 방식(honest note)★: 산 json 에이전트를 실제 스폰하고 write_input 이 send_input 성공 직후
 //!   **동기**로 내는 입력 에코를 OutputSink 로 잡는다. 이 에코는 claude 왕복 이전에 발행되므로 claude
@@ -2769,7 +2769,7 @@ async fn stage1_lifecycle_mid_flight_epoch_race_lands_on_new_incarnation_determi
     handle.shutdown().await;
 }
 
-// ── MCP send_message 툴: happy path + 교정 에러(rmcp 클라이언트) ─────────────────────────────
+// ── MCP eg_send 툴: happy path + 교정 에러(rmcp 클라이언트) ─────────────────────────────
 #[tokio::test]
 async fn mcp_send_message_tool_happy_and_error() {
     use rmcp::model::CallToolRequestParams;
@@ -2797,20 +2797,20 @@ async fn mcp_send_message_tool_happy_and_error() {
 
     let tools = client.list_all_tools().await.expect("list tools");
     assert!(
-        tools.iter().any(|t| t.name == "send_message"),
-        "tools 에 send_message: {:?}",
+        tools.iter().any(|t| t.name == "eg_send"),
+        "tools 에 eg_send: {:?}",
         tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>()
     );
 
     let mut params = CallToolRequestParams::default();
-    params.name = "send_message".into();
+    params.name = "eg_send".into();
     params.arguments = Some(
         serde_json::json!({ "to": "recv", "body": "mcp-hello" })
             .as_object()
             .unwrap()
             .clone(),
     );
-    let result = client.call_tool(params).await.expect("call send_message");
+    let result = client.call_tool(params).await.expect("call eg_send");
     let text = result
         .content
         .iter()
@@ -2824,17 +2824,14 @@ async fn mcp_send_message_tool_happy_and_error() {
     assert_eq!(v["results"][0]["to"], "recv");
 
     let mut params = CallToolRequestParams::default();
-    params.name = "send_message".into();
+    params.name = "eg_send".into();
     params.arguments = Some(
         serde_json::json!({ "to": "ghost", "body": "x" })
             .as_object()
             .unwrap()
             .clone(),
     );
-    let result = client
-        .call_tool(params)
-        .await
-        .expect("call send_message err");
+    let result = client.call_tool(params).await.expect("call eg_send err");
     let text = result
         .content
         .iter()
@@ -3654,7 +3651,7 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     // tools/list 노출 이름 = 프라이밍이 가르치는 이름과 같은 값.
     let tools = client.list_all_tools().await.expect("list tools");
     let names: Vec<String> = tools.iter().map(|t| t.name.to_string()).collect();
-    for want in ["send_message", "messages"] {
+    for want in ["eg_send", "eg_messages"] {
         assert!(
             names.contains(&want.to_string()),
             "tools 에 {want}: {names:?}"
@@ -3666,8 +3663,8 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
         "group 툴은 제거돼야: {names:?}"
     );
 
-    // ① messages 무인자 — 같은 토큰이므로 "나" 도 같고 결과도 같다(빈 미결).
-    let via_mcp = call_mcp_tool(&client, "messages", serde_json::json!({})).await;
+    // ① eg_messages 무인자 — 같은 토큰이므로 "나" 도 같고 결과도 같다(빈 미결).
+    let via_mcp = call_mcp_tool(&client, "eg_messages", serde_json::json!({})).await;
     let (_s, body) = post_control(&base, "/control/messages", tok, serde_json::json!({})).await;
     let via_cli: serde_json::Value = serde_json::from_str(&body).expect("json");
     assert_eq!(
@@ -3679,7 +3676,7 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     // ② 조회 반려도 동일 shape·동일 code.
     let via_mcp = call_mcp_tool(
         &client,
-        "messages",
+        "eg_messages",
         serde_json::json!({ "id": "m-nope1234" }),
     )
     .await;
@@ -3702,7 +3699,7 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     let (x, y) = (obs_seam::fallback_name(x_id), obs_seam::fallback_name(y_id));
     let via_mcp = call_mcp_tool(
         &client,
-        "send_message",
+        "eg_send",
         serde_json::json!({ "to": [x.clone(), y.clone()], "body": "parity" }),
     )
     .await;
@@ -3722,7 +3719,7 @@ async fn d_mcp_and_cli_entrances_return_identical_json_for_messages_and_group() 
     //    문자열이 CLI 로 오면 두 수신자로 쪼개지므로, 여기서 두 입구의 결과는 **일부러 달라야** 한다.
     let split_free = call_mcp_tool(
         &client,
-        "send_message",
+        "eg_send",
         serde_json::json!({ "to": [format!("{x},{y}")], "body": "no-split" }),
     )
     .await;

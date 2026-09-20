@@ -2,7 +2,7 @@
 //!
 //! ## 무엇을 실측하나
 //! 실 primed claude 2개(A=alice · B=bob, stream-json/Fresh)를 스폰해, priming-smoke 가 증명한 A→B
-//! **수신** 위에서 두 조각만 새로 본다: ① B 가 **발신 절반**(MCP `send_message` 또는 `engram mail send` CLI)을
+//! **수신** 위에서 두 조각만 새로 본다: ① B 가 **발신 절반**(MCP `eg_send` 또는 `engram mail send` CLI)을
 //! **스스로** 호출하는가 ② A 가 그 답신을 자연스럽게 수용하는가. 관측 축 둘 — 기계적 = registry
 //! `DeliveryObservation`(from=B, to=A) + B 가 고른 입구, 정성적 = A 의 턴 텍스트. 최종 해석은 아래
 //! stdout 마커로 오케스트레이터가 내린다.
@@ -26,7 +26,7 @@
 //!   = 운영 A `prompts/agent-priming.md`. 옛 C1~C3 별칭은 ADR-0099 로 제거됐다 — 지금 넘기면 특수 매핑
 //!   없이 "그 이름의 파일 경로"로 해석돼 부재로 걸린다.
 //! - `--model <name>` — 기본 sonnet.
-//! - `--disallow-mcp` — MCP `send_message` grant 만 뺀다. ★이 노브로는 CLI 라우팅을 만들 수 없다
+//! - `--disallow-mcp` — MCP `eg_send` grant 만 뺀다. ★이 노브로는 CLI 라우팅을 만들 수 없다
 //!   (실측 2026-08-03 6/6 전원 MCP 정상 발신 = 조작 불성립)★ — 스폰이 MCP 가능 그대로라 그 자격증명의
 //!   CLI 우편 요청은 데몬이 거절한다(ADR-0133). ★CLI 입구를 실측하는 모드는 없다★ — 우편의 정식 경로는
 //!   MCP 이고 CLI 는 미러다(ADR-0209 결정 3).
@@ -120,7 +120,7 @@ const TASK_PROMPT_B: &str =
 /// ★씨앗 A→B(ADR-0092 — 자연 팀원 질문, 기계적 "툴 X 써라" 아님)★: A 가 B 에게 진행 상황을 묻는
 ///   평범한 협업 질문 → 답을 A 에게 돌려주는 게 자연스러운 반응이 되도록 만든다. 발신 방법(툴/CLI)은
 ///   본문이 아니라 **프라이밍 변형**이 가르친다(C0/기본 = 프로덕션 A `prompts/agent-priming.md` —
-///   ADR-0126 결정 1 이후 send_message 만 가르친다).
+///   ADR-0126 결정 1 이후 eg_send 만 가르친다).
 const SEED_A_TO_B: &str =
     "Can you share the status of the auth module? If you're stuck anywhere on the login path, tell me what you need too.";
 
@@ -1266,11 +1266,8 @@ mod tests {
 
     #[test]
     fn teaches_mail_cli_false_for_mcp_only() {
-        let text = "To reply, call the MCP tool `send_message` with the recipient and body.";
-        assert!(
-            !teaches_mail_cli(text),
-            "MCP send_message 만 → CLI 지시 아님"
-        );
+        let text = "To reply, call the MCP tool `eg_send` with the recipient and body.";
+        assert!(!teaches_mail_cli(text), "MCP eg_send 만 → CLI 지시 아님");
     }
 
     #[test]
