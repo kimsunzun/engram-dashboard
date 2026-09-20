@@ -120,8 +120,8 @@ flowchart TD
 |---|---|---|---|
 | `claude` (터미널) | `claude` — Windows 는 `cmd.exe /c` 한 겹 | `--session-id <sid>`(Fresh) / `--resume <sid>`(Resume) · 제어 채널 있으면 `--mcp-config <path>` · grant 있으면 `--allowedTools <패턴>…` | 우리 인자보다 **먼저** 소진 — `--allowedTools` 가 variadic 이라 그 그룹을 맨 끝에 둔다 |
 | `claude` (stream-json) | 같음 | `-p --input-format stream-json --output-format stream-json --verbose` + 위 세션·MCP·grant 인자 | 같음 |
-| `codex` (터미널) | `codex` — 같은 `cmd.exe /c` 한 겹 | Resume 이면 **맨 앞**에 `resume <thread id>` 하위 명령(★플래그가 아니다★ — 뒤로 밀리면 clap 이 루트의 `[PROMPT]` 로 읽는다) · `--cd <폴더> -s workspace-write -a on-request` · 제어 채널 있으면 패스스루 **뒤**에 `-c mcp_servers.engram={…}`(우편 입구)와 `-c hooks.SessionStart=…`(세션 id 회수) | 우리 인자 **뒤**, 단 그 두 `-c` 오버라이드보다는 **앞** — 같은 설정 키를 `-c` 로 두 번 넘기면 마지막이 이기므로(실측 0.155.0) 우편 입구와 훅 등록을 패스스루 한 줄에 지우지 못하게 뒤에 싣는다 |
-| `codex` (app-server) | 같음 | `app-server --stdio` + 제어 채널 있으면 `-c mcp_servers.engram={…}` — 작업 폴더·샌드박스·승인 정책은 argv 가 아니라 `thread/start` 파라미터로 간다(`cwd`·`sandbox`·`approvalPolicy`). ★훅 등록은 이 모드엔 안 건다★ — 세션 id 를 통로가 `thread/start` 응답으로 직접 받아 온다 | 같음 — ★단 두 모드의 옵션 집합이 달라 대화형 CLI 를 보고 적은 인자는 여기서 거절될 수 있다★(모드별로 거르지 않는 것은 결정이다 — 코드 주석이 정본) |
+| `codex` (터미널) | `codex` — 같은 `cmd.exe /c` 한 겹 | Resume 이면 **맨 앞**에 `resume <thread id>` 하위 명령(★플래그가 아니다★ — 뒤로 밀리면 clap 이 루트의 `[PROMPT]` 로 읽는다) · `--cd <폴더> -s workspace-write -a on-request` · 패스스루 **뒤**에 `-c tui.status_line=['thread-id']`(세션 id 회수 — 제어 채널과 무관하게 언제나 실린다) · 제어 채널 있으면 같은 자리에 `-c mcp_servers.engram={…}`(우편 입구) | 우리 인자 **뒤**, 단 그 `-c` 오버라이드들보다는 **앞** — 같은 설정 키를 `-c` 로 두 번 넘기면 마지막이 이기므로(실측 0.155.0) 우편 입구와 상태줄을 패스스루 한 줄에 지우지 못하게 뒤에 싣는다 |
+| `codex` (app-server) | 같음 | `app-server --stdio` + 제어 채널 있으면 `-c mcp_servers.engram={…}` — 작업 폴더·샌드박스·승인 정책은 argv 가 아니라 `thread/start` 파라미터로 간다(`cwd`·`sandbox`·`approvalPolicy`). ★상태줄 오버라이드는 이 모드엔 안 싣는다★ — 세션 id 를 통로가 `thread/start` 응답으로 직접 받아 온다 | 같음 — ★단 두 모드의 옵션 집합이 달라 대화형 CLI 를 보고 적은 인자는 여기서 거절될 수 있다★(모드별로 거르지 않는 것은 결정이다 — 코드 주석이 정본) |
 | `gemini` (미배선) | `gemini` — ★best-guess, CLI spike 전★ | stub(세션 플래그도 best-guess) | 미확정 |
 
 Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실제 실행파일이 아니라 `.cmd` shim 이라서다 — 직접 띄우면 error 193 으로 죽는다. 실 경로를 찾아 부르지 않는 이유는 그 경로가 버전에 묶여 있고 CLI 가 스스로 업데이트해 옮기기 때문이다.
@@ -130,7 +130,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ★**안 고친 한계 — `%VAR%` 확장**★ — `cmd.exe` 는 따옴표 안에서도 `%NAME%` 을 환경변수로 편다. 폴더 이름에 `%` 로 감싼 낱말이 실제로 들어 있으면 CLI 는 **다른 폴더**를 받는다. 고치려면 claude 와 공용인 조립 지점을 건드려야 하고 틀리면 모든 스폰이 죽는다 — 사유와 필요한 실측은 코드 주석이 정본이다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `mcp_server_override` · `session_start_hook_override` · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
+**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `mcp_server_override` · `STATUS_LINE_OVERRIDE` · `backend/codex/thread_id.rs`(상태줄 스니퍼 + `observer`) · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
 
 ## capability 선언
 
@@ -154,7 +154,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ★**세션 축들을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했고, 위 두 행이 갈라져 있는 것이 그 폐기의 실물이다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이다. codex 가 그 등식의 반례다 — 발급은 codex 가 하는데(`assigns_session_id: false`) 이어받기는 우리가 연다. ADR-0185 결정 2 의 Phase 2 요구사항 셋(역할 분리 · 활성화 입구 가드 · 수령 배선)에 **`thread/resume` 까지 착지했다**: `open_spawn` 이 조립점에게서 「이어받을 저장된 sid」를 받아, 있으면 통로가 `thread/start` 대신 `thread/resume` 을 낸다. ★**「남은 것은 `thread/resume` 하나다」·「수령 배선이 없다」로 적힌 자리를 만나면 낡은 것이다**★. 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
 
-★**codex 의 두 세션 칸은 이제 모드를 안 가른다 — 갈리는 것은 이어받는 「수단」이다**★. 여기 있던 판독은 「터미널 모드에는 이어받을 식별자 자체가 없다」였는데 **틀렸다**: 그 모드는 `codex resume <thread id>` **하위 명령**(플래그가 아니다)으로 이어받고, 그 손잡이는 codex 가 띄우는 `SessionStart` 훅이 제어 평면으로 되돌려 적어 준다(ADR-0208). app-server 모드는 같은 값으로 `thread/resume` 을 낸다. ★**터미널 모드가 `false` 로 적힌 자리를 만나면 낡은 것이다**★. 선언 표(`tests/backend_contract.rs`)의 그 두 칸은 여전히 통로별 튜플 모양이지만 **오늘은 양쪽이 같은 값**이다 — 모양을 안 되돌리는 것은 갈릴 날을 위한 자리이지 지금 갈려 있다는 뜻이 아니다.
+★**codex 의 두 세션 칸은 이제 모드를 안 가른다 — 갈리는 것은 이어받는 「수단」이다**★. 여기 있던 판독은 「터미널 모드에는 이어받을 식별자 자체가 없다」였는데 **틀렸다**: 그 모드는 `codex resume <thread id>` **하위 명령**(플래그가 아니다)으로 이어받고, 그 손잡이는 **우리가 켠 codex TUI 상태줄을 우리 PTY 가 읽어** 프로필에 적어 둔다(ADR-0216 — 한때 그 자리를 codex 가 띄우는 `SessionStart` 훅이 맡았고, 그 기계장치는 저장소에서 걷혔다). app-server 모드는 같은 값으로 `thread/resume` 을 낸다. ★**터미널 모드가 `false` 로 적힌 자리를 만나면 낡은 것이다**★. 선언 표(`tests/backend_contract.rs`)의 그 두 칸은 여전히 통로별 튜플 모양이지만 **오늘은 양쪽이 같은 값**이다 — 모양을 안 되돌리는 것은 갈릴 날을 위한 자리이지 지금 갈려 있다는 뜻이 아니다.
 
 이 행에서 **실제로 갈리는 것은 통로가 아니라 두 축이다** — 발급은 codex 가 하고(`assigns_session_id: false`) 이어받기는 우리가 연다(`can_resume_stored_session: true`). ★두 칸 중 한 칸만, 또는 두 모드 중 한 모드만 켜지 말 것★ — 새 스레드가 「이어받음」으로 보고되거나 그 반대가 된다.
 

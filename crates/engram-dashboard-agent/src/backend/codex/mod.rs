@@ -194,17 +194,6 @@ const RESUME_SUBCOMMAND: &str = "resume";
 /// — 사용자 홈(`$CODEX_HOME/config.toml`)에도, 래퍼 스크립트에도 우리는 한 글자도 쓰지 않는다.
 const CONFIG_OVERRIDE_FLAG: &str = "-c";
 
-/// `SessionStart` 훅 표의 키. ★이 오버라이드는 사용자 자신의 config.toml 훅을 **대체하지 않고 공존한다**★
-/// (실측 0.155.0) — 그래서 여기 우리 항목을 걸어도 사용자 훅이 사라지지 않는다.
-const SESSION_START_HOOK_KEY: &str = "hooks.SessionStart";
-
-/// 훅이 부를 우리 CLI 의 계열+동사. ★정본은 그 CLI 의 파서다★ —
-/// `crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `CLI_GROUP_HOOK` + `CLI_HOOK_VERB_SESSION_START`
-/// 이고, 그쪽 `run_hook` 은 계열 뒤 argv 가 **정확히 한 낱말 `session-start`** 일 것을 요구한다.
-/// ★어긋나도 아무 데도 안 남는다 — 그래서 손으로 맞춘다★: 그 CLI 는 반려 갈래에서도 exit 0 에 stdout
-/// 봉인이라(ADR-0208 결정 3), 이 문자열에 오타 한 글자가 나면 증상은 「세션 id 가 영영 안 온다」 하나다.
-const HOOK_REPORT_ARGV: &str = "hook session-start";
-
 /// TUI 상태줄 항목 표의 키.
 const STATUS_LINE_KEY: &str = "tui.status_line";
 
@@ -316,7 +305,7 @@ fn command_line_cost(args: &[String]) -> usize {
 /// 이 스폰에 실을 프라이밍 지시서의 **내용**. `None` = 실을 것이 없다(경로 부재·읽기 실패·빈 파일).
 ///
 /// ★읽기 실패는 fail-open 이다★ — 경고만 남기고 `None` 을 돌려준다. 프라이밍은 있으면 좋은 것이고
-///   스폰은 필수다(ADR-0210 결정 4 가 훅 등록에 세운 규율을 그대로 따른다).
+///   스폰은 필수다(ADR-0216 이 일반 규칙으로 물려받은 「어떤 갈래로도 스폰을 실패시키지 않는다」).
 /// ★내용을 **이 crate 가** 읽는 것이 claude 갈래와 갈리는 지점이다★ — 그쪽은 경로를 넘기고 claude 가
 ///   직접 읽는다(ADR-0092). codex 에는 경로를 받는 키가 없어서([`DEVELOPER_INSTRUCTIONS_KEY`]) 그
 ///   선택지가 없다. 이 읽기가 backend 폴더 안에 있는 것이 ADR-0004 의 요점이다 — 데몬의 프라이밍
@@ -324,8 +313,8 @@ fn command_line_cost(args: &[String]) -> usize {
 /// ★빈 파일도 `None` 이다★ — 빈 지시문을 싣는 것은 명령줄만 쓰고 아무것도 가르치지 않는다.
 // ADR-0004
 // ADR-0092
-// ADR-0210
 // ADR-0215
+// ADR-0216
 fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
     let path = control?.priming_file.as_deref()?;
     match std::fs::read_to_string(path) {
@@ -348,7 +337,7 @@ fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
 }
 
 /// 터미널 모드 spawn 에 실을 `-c developer_instructions='…'` 값. `None` = 싣지 않는다 — ★경고만 남기고
-/// 스폰은 그대로 간다★(ADR-0210 결정 4 와 같은 규율).
+/// 스폰은 그대로 간다★(ADR-0216 의 「어떤 갈래로도 스폰을 실패시키지 않는다」와 같은 규율).
 ///
 /// `args_so_far` = 이 값 앞에 이미 조립된 인자들. 명령줄 예산 판정에만 쓴다.
 ///
@@ -365,8 +354,8 @@ fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
 ///   토큰 분리와 인용 계층을 우리가 검증한 적이 없다. 증상이 전부 「조용히 어긋난 명령줄」이라 싣지
 ///   않는 쪽을 고른다.
 /// ★가드는 **바꾸기 전 원문**을 본다★ — 뒤에 하면 우리가 넣은 역슬래시가 우리 가드에 걸린다.
-// ADR-0210
 // ADR-0215
+// ADR-0216
 fn developer_instructions_override(text: &str, args_so_far: &[String]) -> Option<String> {
     if let Some(bad) = text.chars().find(|c| {
         matches!(c, '\'' | '"' | '%' | '\\') || (c.is_control() && *c != '\n' && *c != '\r')
@@ -471,90 +460,12 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
 const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 
-/// 터미널 모드 spawn 에 실을 `SessionStart` 훅 등록 오버라이드 값(`-c` 의 짝). `None` = 걸지 않는다 —
-/// ★경고만 남기고 스폰은 그대로 간다★. 그 결과(이어받기가 안 선다)를 사람에게 말하는 자리는 여기가
-/// 아니라 조립점이다([`crate::manager::AgentManager`] 의 `opens_a_new_conversation`) — 여기서 또 말하면
-/// 같은 사실이 두 출처에서 갈려 적힌다.
-///
-/// ★파일을 하나도 만들지 않는다★ — 등록은 이 한 값 단독이고, 그래도 codex 의 TUI 신뢰 심사를 거쳐
-///   정상 발화한다(실측 0.155.0 — `docs/research/codex-session-id-recovery-survey-2026-09-19.md` §10-1).
-/// ★그 대가 = 설치 경로가 바뀌면 신뢰 심사 프롬프트가 한 번 다시 뜬다★: 신뢰 해시가 덮는 것은 훅
-///   **정의 문자열**인데(같은 §10-1 결론 3) 그 문자열에 우리 exe 절대경로가 박혀 있기 때문이다.
-///   ★그것을 「고치려고」 고정 경로 래퍼를 사용자 홈에 쓰지 말 것★ — 우리가 지우지 못하는 잔여물이
-///   사용자 파일계에 남고, 이 함수가 파일을 0개 만드는 성질이 정확히 그것과 맞바꾼 것이다.
-/// ★프로그램 경로에 공백이 있으면 codex 가 못 띄운다(실측 2026-09-19)★ — codex 는 `command` 의 **첫
-///   공백까지**를 프로그램으로 잘라 셸 없이 직접 spawn 하고 나머지만 따옴표 인지 분할로 인자에 넣는다.
-///   그래서 **인자는** 따옴표로 공백을 담을 수 있어도 **프로그램은 못 담고**(감싸도 실패했다), 증상은
-///   TUI 의 `Hook failed` / `hook exited with code 1` 이다. 유일한 탈출구가 8.3 단축 경로다.
-/// ★스키마에 `args` 배열이 없다★ — 인자는 이 한 문자열 안에 넣는 수밖에 없다(실측).
-/// ★`%VAR%` 가 든 경로는 여기서도 새 위험이 아니다★ — 아래 `build_spec` 의 같은 이름 한계 주석이
-///   정본이고(cmd 가 명령줄의 `%NAME%` 을 편다), 이 값도 그 cmd 를 지난다. 별도 가드를 두지 않는 것은
-///   그 결정을 따르는 것이다.
-/// ★이 값은 실 argv 경로를 **바이트 그대로** 건넌다(실측 2026-09-19 · 0.155.0)★ — `cmd.exe /c` 래핑과
-///   PATH 의 `codex` `.cmd` shim 을 **둘 다** 지난 뒤 `hooks/list` 가 `command` 칸을 바뀌지 않은 채
-///   돌려줬다. 즉 「작은따옴표·역슬래시·공백 없는 경로」 조합은 그 두 겹을 견딘다 — 「shim 을 지나며
-///   망가질지 모른다」를 전제로 한 방어를 새로 세우지 말 것(`%VAR%` 한계는 위 문단이 정본이고 그것과
-///   별개다).
-// ★오늘 이 빌더를 부르는 운영 경로는 없다 — 그래서 `dead_code` 를 끈다★. 회수가 TUI 상태줄로
-//   옮겨 갔고(ADR-0216), 삭제에는 **순서 조건**이 걸려 있다: GUI 실측으로 새 채널을 확인한 뒤에
-//   훅 기계장치를 통째로 걷는다. 그때까지 이 빌더·[`SESSION_START_HOOK_KEY`]·[`HOOK_REPORT_ARGV`]·
-//   [`short_program_path`] 는 되돌아갈 길로 서 있다(이 한 줄이 그 넷을 함께 덮는다 — 각자에 붙이면
-//   걷어낼 때 네 자리를 찾아다녀야 한다). ★실측이 초록이면 이 넷과 이 속성을 **함께** 지울 것★.
-#[allow(dead_code)]
-fn session_start_hook_override(send_exe: Option<&std::path::Path>) -> Option<String> {
-    let Some(exe) = send_exe else {
-        tracing::warn!(
-            "codex SessionStart 훅 미등록 — CLI 실행파일 경로가 없어 세션 id 를 되돌려 받을 창구를 못 건다"
-        );
-        return None;
-    };
-    let Some(raw) = exe.to_str() else {
-        tracing::warn!("codex SessionStart 훅 미등록 — CLI 경로가 UTF-8 이 아니다: {exe:?}");
-        return None;
-    };
-    // TOML 리터럴 문자열(작은따옴표)에는 이스케이프가 없다 — 그래서 Windows 역슬래시를 그대로 실을 수
-    //   있는 대신 작은따옴표 자체는 담을 수 없다. 지어낸 이스케이프로 밀어 넣지 않고 건너뛴다.
-    if raw.contains('\'') {
-        tracing::warn!("codex SessionStart 훅 미등록 — CLI 경로에 작은따옴표가 있다: {raw}");
-        return None;
-    }
-    // ★탈출구가 있는 공백문자는 **보통 공백 하나뿐**이다★ — 나머지는 8.3 변환으로도 안 없어진다. 탭은
-    //   codex 가 프로그램 토큰을 자르는 자리를 옮겨 **다른 프로그램**을 띄우게 하고, 줄바꿈은 한 줄짜리
-    //   TOML 리터럴 문자열 자체를 깨 값이 파싱에서 죽는다. 제어문자도 같은 부류다. 어느 쪽이든 증상은
-    //   「훅이 안 돈다」 하나라 조용하므로, 실을 수 없는 것은 싣지 않고 여기서 끊는다.
-    if let Some(bad) = raw
-        .chars()
-        .find(|c| c.is_control() || (c.is_whitespace() && *c != ' '))
-    {
-        tracing::warn!(
-            "codex SessionStart 훅 미등록 — CLI 경로에 실을 수 없는 문자가 있다({bad:?}): {raw}"
-        );
-        return None;
-    }
-    let program = if raw.contains(' ') {
-        match short_program_path(exe) {
-            Some(short) => short,
-            None => {
-                tracing::warn!(
-                    "codex SessionStart 훅 미등록 — CLI 경로에 공백이 있는데 8.3 단축 경로를 못 얻었다(걸면 `Hook failed` 로 매 세션 뜬다): {raw}"
-                );
-                return None;
-            }
-        }
-    } else {
-        raw.to_string()
-    };
-    Some(format!(
-        "{SESSION_START_HOOK_KEY}=[{{hooks=[{{type='command',command='{program} {HOOK_REPORT_ARGV}'}}]}}]"
-    ))
-}
-
 /// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
 /// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
 ///
-/// ★잡는 모양은 하나뿐 = `-c` **다음 칸**이 `key` 로 시작하는 형태다★(`-c hooks.SessionStart=…`).
+/// ★잡는 모양은 하나뿐 = `-c` **다음 칸**이 `key` 로 시작하는 형태다★(`-c tui.status_line=…`).
 /// ★못 잡는 것 — 알고 두는 구멍이다★: `-c` 와 값을 한 낱말로 붙인 형태 · `-c` 말고 긴 이름의 같은
-///   플래그 · 표 전체를 덮는 상위 키(`-c hooks=…` · `-c mcp_servers=…`) · 그 키로 **시작만 하는** 다른
+///   플래그 · 표 전체를 덮는 상위 키(`-c tui=…` · `-c mcp_servers=…`) · 그 키로 **시작만 하는** 다른
 ///   키. 이 목록을 키워 「확실히」 만들려 들지 말 것 — codex 오버라이드 문법의 재구현이 되고 그 재구현은
 ///   상류가 바뀔 때마다 조용히 낡는다. 놓쳐서 잃는 것은 **경고뿐이고 동작이 아니다** — 우리 것이 이기는
 ///   성질은 아래 `build_spec` 의 순서가 따로 보장한다.
@@ -564,53 +475,6 @@ fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
         .windows(2)
         .any(|pair| pair[0] == CONFIG_OVERRIDE_FLAG && pair[1].starts_with(key))
-}
-
-/// 8.3 단축 경로. `None` = 못 얻었다 — 실물이 없거나, 볼륨이 단축 이름을 안 만들거나, 받은 값에 아직
-/// 실을 수 없는 문자(공백문자·제어문자·작은따옴표)가 남아 있다.
-///
-/// ★두 번 부른다 — 두 호출의 반환이 서로 다른 것을 센다★: 버퍼 없이 부르면 **종단 NUL 을 포함한** 필요
-///   길이를, 버퍼를 주고 부르면 **NUL 을 뺀** 기록 길이를 돌려준다(0 = 실패). 한 값으로 접으면 마지막
-///   글자가 잘리거나 NUL 이 문자열에 섞인다.
-/// ★성공했는데 공백이 남을 수 있다★ — 8.3 생성이 꺼진 볼륨에서 이 API 는 실패가 아니라 **원본을 그대로**
-///   돌려준다. 그것을 실으면 우리가 막으려던 그 실패를 우리 손으로 만든다.
-#[cfg(windows)]
-fn short_program_path(exe: &std::path::Path) -> Option<String> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    use windows::core::PCWSTR;
-    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
-
-    let wide: Vec<u16> = exe
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let needed = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), None) };
-    if needed == 0 {
-        return None;
-    }
-    let mut buf = vec![0u16; needed as usize];
-    let written = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) };
-    if written == 0 || written as usize > buf.len() {
-        return None;
-    }
-    let short = std::ffi::OsString::from_wide(&buf[..written as usize])
-        .into_string()
-        .ok()?;
-    if short
-        .chars()
-        .any(|c| c.is_whitespace() || c.is_control() || c == '\'')
-    {
-        return None;
-    }
-    Some(short)
-}
-
-/// ★Windows 밖에는 8.3 이름이라는 것이 없다★ — 그래서 공백이 든 경로는 그 플랫폼에서 **언제나** 등록이
-/// 건너뛰어진다. 공백 제약 자체는 플랫폼을 안 가린다(codex 가 셸 없이 첫 토큰을 프로그램으로 쓴다).
-#[cfg(not(windows))]
-fn short_program_path(_exe: &std::path::Path) -> Option<String> {
-    None
 }
 
 pub struct CodexBackend;
@@ -923,7 +787,7 @@ impl AgentBackend for CodexBackend {
                 //   데몬은 「MCP 로 우편을 쓴다」고 판정해(`mail_allowed=false`) CLI 미러까지 닫으므로
                 //   **발신 입구가 0** 이 된다. 그 결말은 오류가 아니라 침묵이다.
                 // ★우리 것이 뒤에 실리는 성질을 순서로 얻는다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이
-                //   이긴다(실측 · ADR-0210 결정 3).
+                //   이긴다(실측 · ADR-0216 이 물려받은 「override 는 passthrough 뒤 · 덮으면 경고」).
                 // ADR-0128
                 // ADR-0209
                 // ★「안 붙인다」의 두 갈래를 여기서 **가르지 않는다**★ — 정당한 부재
@@ -976,17 +840,12 @@ impl AgentBackend for CodexBackend {
                     args.push(STATUS_LINE_OVERRIDE.to_string());
                 }
 
-                // ★`SessionStart` 훅은 더 이상 등록하지 않는다(ADR-0216)★ — 회수 경로가 위 상태줄로
-                //   옮겨 갔다. 훅이 **고장 나서**가 아니다(돌았다 — 실측 0.155.0): 기각 사유는 codex 가
-                //   훅 **명령 문자열**을 해싱해 사람 승인을 요구하는데 그 문자열에 우리 exe 절대경로가
-                //   박혀 있다는 것 하나다. 배포가 태그 이름 폴더로 풀리므로 경로가 릴리스마다 바뀌고,
-                //   그래서 릴리스마다 승인 화면이 다시 뜨며 **그 화면이 떠 있는 동안 터미널 codex 가
-                //   아예 안 뜬다.**
-                // ★그런데 [`session_start_hook_override`] 와 그 짝들은 **아직 서 있다 — 지우지 말 것**★:
-                //   ADR-0216 이 그 삭제에 **순서 조건**을 걸었다. 새 채널을 GUI 실측으로 눈으로 확인한
-                //   **뒤에** 훅 기계장치(이 빌더 · `engram hook session-start` CLI 동사 · `/control/hook`
-                //   라우트 · 그 수신 모듈)를 통째로 걷는다. 그 실측이 빨가면 여기 한 블록을 되살리는 것이
-                //   되돌아갈 길이고, 그 길은 기계장치가 남아 있는 동안에만 있다.
+                // ★`SessionStart` 훅을 여기 되살리지 말 것(ADR-0216)★ — 회수 경로가 위 상태줄이고
+                //   훅 기계장치는 저장소에서 걷혔다. 훅이 **고장 나서**가 아니다(돌았다 — 실측
+                //   0.155.0): 기각 사유는 codex 가 훅 **명령 문자열**을 해싱해 사람 승인을 요구하는데
+                //   그 문자열에 우리 exe 절대경로가 박혀 있다는 것 하나다. 배포가 태그 이름 폴더로
+                //   풀리므로 경로가 릴리스마다 바뀌고, 그래서 릴리스마다 승인 화면이 다시 뜨며
+                //   **그 화면이 떠 있는 동안 터미널 codex 가 아예 안 뜬다.**
 
                 // ★프라이밍 주입 — 터미널 모드만 여기서 조립한다★: app-server 모드는 같은 내용을 명령줄이
                 //   아니라 핸드셰이크 JSON(`thread/start` 의 `developerInstructions`)으로 싣는다
@@ -1000,12 +859,12 @@ impl AgentBackend for CodexBackend {
                 // ★패스스루 **뒤**다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이 이긴다(위 두 블록의 같은
                 //   규율). 사유 정본은 위 상태줄 블록의 순서 주석이고 여기 되풀어 적지 않는다.
                 // ★어느 갈래로도 스폰을 실패시키지 않는다★ — 파일을 못 읽어도, 실을 수 없는 문자가 있어도,
-                //   예산을 넘어도 경고만 남기고 인자를 안 싣는다(ADR-0210 결정 4 의 규율). 프라이밍은
+                //   예산을 넘어도 경고만 남기고 인자를 안 싣는다(ADR-0216 이 물려받은 규율). 프라이밍은
                 //   있으면 좋은 것이고 스폰은 필수다.
                 // ADR-0004
                 // ADR-0092
-                // ADR-0210
                 // ADR-0215
+                // ADR-0216
                 if matches!(output_format, AgentOutputFormat::Terminal) {
                     if let Some(text) = priming_text(control.as_ref()) {
                         if let Some(value) = developer_instructions_override(&text, &args) {
@@ -1293,13 +1152,15 @@ mod tests {
         }
     }
 
-    /// ★오늘 이 값은 **언제나 `None`** 이다 — 훅 등록이 argv 에서 걷혔다(ADR-0216)★. 그래서 이 헬퍼로
-    /// 「걸렸다」를 재는 시험은 못 쓰고, 남은 쓸모는 **되살아나지 않았다**를 재는 것 하나다.
+    /// ★이 값은 **언제나 `None`** 이어야 한다 — 훅 등록도 그 빌더도 걷혔다(ADR-0216)★. 남은 쓸모는
+    /// **되살아나지 않았다**를 재는 것 하나다.
+    /// ★키를 리터럴로 적는 것이 의도다★ — 운영 코드에 이 문자열이 한 글자도 없는 것이 지금의 불변식이라,
+    ///   상수를 되살려 참조하면 그 사실이 흐려진다.
     /// ★`-c` 의 **존재**로는 아무것도 세지 말 것★ — 오늘 그 플래그를 싣는 것이 둘이다(MCP 부착 ·
     ///   상태줄). 플래그만 세던 옛 형태는 둘째가 들어올 때마다 거짓 양성이 됐다.
     fn hook_override_value(argv: &[String]) -> Option<String> {
         argv.windows(2)
-            .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with(SESSION_START_HOOK_KEY))
+            .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with("hooks.SessionStart"))
             .map(|p| p[1].clone())
     }
 
@@ -1801,12 +1662,8 @@ mod tests {
         );
     }
 
-    // ── ADR-0216: 훅 등록은 걷혔고 빌더만 서 있다 ────────────────────────────────
+    // ── ADR-0216: 훅 등록은 걷혔다 ───────────────────────────────────────────────
     //
-    // ★이 구획의 단언은 argv 가 아니라 **빌더 자체**를 부른다 — 되돌리지 말 것★: 등록을 걷은 뒤로
-    //   `hook_override_value(codex_argv(..))` 는 **무엇을 넣든 언제나 `None`** 이라, 「건너뛴다」를 재던
-    //   옛 형태가 전부 공허하게 초록이 된다. 빌더가 살아 있는 동안(삭제에 걸린 순서 조건 —
-    //   `session_start_hook_override` 위 주석) 그 판정들을 실제로 재는 길은 직접 부르는 것뿐이다.
     // ★순서·충돌 경고 축은 상태줄 오버라이드 쪽으로 **옮겨 갔다**★ — 위 ADR-0216 구획의
     //   `the_status_line_override_follows_the_passthrough` 와
     //   `a_conflicting_status_line_passthrough_loses_to_ours_and_trips_the_warning` 이 그 자리다.
@@ -1819,7 +1676,7 @@ mod tests {
         let argv = codex_argv(&spec_with_control(&codex(vec![]), Some(endpoint())));
         assert_eq!(hook_override_value(&argv), None, "{argv:?}");
         assert!(
-            !argv.iter().any(|a| a.contains(HOOK_REPORT_ARGV)),
+            !argv.iter().any(|a| a.contains("hook session-start")),
             "훅 명령 문자열이 다른 모양으로 실렸다: {argv:?}"
         );
     }
@@ -1838,45 +1695,6 @@ mod tests {
         );
     }
 
-    /// ★훅이 부르는 동사는 우리 CLI 파서와 **손으로** 맞춰져 있다★ — 정본 =
-    /// `crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `CLI_GROUP_HOOK` +
-    /// `CLI_HOOK_VERB_SESSION_START`. 그쪽 `run_hook` 은 계열 뒤 argv 가 정확히 한 낱말일 것을 요구하고,
-    /// 어긋나면 exit 0 · stdout 봉인으로 조용히 끝나 **어느 게이트도 못 잡는다**(ADR-0208 결정 3).
-    /// 이 crate 는 데몬을 의존하지 않으므로(의존 방향) 여기서 잴 수 있는 것은 문자열 자체뿐이다.
-    #[test]
-    fn the_hook_command_carries_the_cli_verb_the_daemon_parses() {
-        assert_eq!(HOOK_REPORT_ARGV, "hook session-start");
-        let value =
-            session_start_hook_override(Some(std::path::Path::new("C:/engram/bin/engram.exe")))
-                .expect("공백 없는 경로면 값이 서야 한다");
-        assert!(
-            value.ends_with(" hook session-start'}]}]"),
-            "훅 명령이 `<exe> hook session-start` 로 끝나야 한다: {value}"
-        );
-    }
-
-    /// 실 codex 0.155.0 이 받아들인 값 그대로(실측 2026-09-19): `--strict-config app-server` 가 0 으로
-    /// 끝났고, `hooks/list` 가 이 정의를 `untrusted` 로 되돌려 주며 `command` 칸이 바이트 단위로 같았다.
-    ///
-    /// ★작은따옴표(TOML 리터럴 문자열)가 load-bearing 이다★ — 큰따옴표면 Windows 역슬래시가 이스케이프로
-    ///   먹히고, 그 값은 `cmd.exe /c codex …` 래핑을 지나며 한 번 더 망가진다. 리터럴 문자열은 둘 다 없다.
-    #[test]
-    fn the_hook_override_value_is_still_the_measured_one() {
-        assert_eq!(
-            session_start_hook_override(Some(std::path::Path::new("C:/engram/bin/engram.exe"))),
-            Some(
-                "hooks.SessionStart=[{hooks=[{type='command',command='C:/engram/bin/engram.exe hook session-start'}]}]"
-                    .to_string()
-            ),
-        );
-    }
-
-    /// ★CLI 실행파일을 모르면 값 자체가 안 선다 — 없는 프로그램을 가리키는 훅은 매 세션 `Hook failed` 다★.
-    #[test]
-    fn without_a_cli_executable_no_hook_value_is_built() {
-        assert_eq!(session_start_hook_override(None), None);
-    }
-
     /// endpoint 자체가 없는 스폰의 argv — ★`-c` 의 **부재**로 재던 옛 형태는 쓸 수 없다★: 상태줄
     /// 오버라이드는 endpoint 를 안 보므로 이 스폰에도 실린다(그 축을 재는 자리 =
     /// `the_status_line_override_needs_no_control_endpoint`). 그래서 여기서는 `-c` 가 **그것 하나뿐**임을
@@ -1890,45 +1708,6 @@ mod tests {
             1,
             "endpoint 부재인데 상태줄 말고 다른 `-c` 가 실렸다: {argv:?}"
         );
-    }
-
-    /// ★공백이 든 경로는 **실패할 것을 아는 명령을 거느니 건너뛴다**★ — codex 는 `command` 의 첫 공백
-    /// 까지를 프로그램으로 잘라 셸 없이 띄우므로(실측), 그 경로는 따옴표로 감싸도 뜨지 않는다.
-    ///
-    /// ★이 경로가 **실재하지 않는 것**이 이 항목을 두 플랫폼에서 결정적으로 만든다★: Windows 에서
-    ///   `GetShortPathNameW` 는 실물이 없으면 0 을 돌려주고, 그 밖의 플랫폼에는 8.3 이름이 아예 없다.
-    ///   실재하는 공백 경로를 쓰면 이 항목은 볼륨의 8.3 설정에 따라 갈린다.
-    #[test]
-    fn a_spaced_executable_path_without_a_short_form_is_skipped() {
-        assert_eq!(
-            session_start_hook_override(Some(std::path::Path::new(
-                "C:/Program Files/engram no such dir/engram.exe"
-            ))),
-            None
-        );
-    }
-
-    /// ★작은따옴표는 TOML 리터럴 문자열에 담을 수 없다 — 지어낸 이스케이프로 밀어 넣지 않는다★.
-    #[test]
-    fn an_executable_path_with_a_single_quote_is_skipped() {
-        assert_eq!(
-            session_start_hook_override(Some(std::path::Path::new("C:/o'brien/engram.exe"))),
-            None
-        );
-    }
-
-    /// ★탭·줄바꿈·제어문자는 8.3 으로도 못 구한다★ — 탭은 codex 가 프로그램 토큰을 자르는 자리를 옮기고,
-    /// 줄바꿈은 한 줄짜리 TOML 리터럴 문자열 자체를 깨뜨린다. 그래서 보통 공백과 달리 단축 경로를
-    /// 시도하지도 않고 끊는다.
-    #[test]
-    fn an_executable_path_with_a_tab_or_a_newline_is_skipped() {
-        for raw in ["C:/engram\tbin/engram.exe", "C:/engram\nbin/engram.exe"] {
-            assert_eq!(
-                session_start_hook_override(Some(std::path::Path::new(raw))),
-                None,
-                "공백 아닌 공백문자가 든 경로가 실렸다({raw:?})"
-            );
-        }
     }
 
     /// 다른 키를 `-c` 로 넘기는 것은 충돌이 아니다 — 경고를 남발하면 아무도 안 읽는다.
@@ -1973,51 +1752,6 @@ mod tests {
             .position(|a| a == STATUS_LINE_OVERRIDE)
             .expect("상태줄 오버라이드가 사라졌다");
         assert!(passthrough < ours, "{argv:?}");
-    }
-
-    /// ★8.3 변환의 **성공** 갈래를 도는 유일한 항목이다★ — 형제 둘은 전부 건너뛰기 갈래라, 두 번 부르는
-    /// 길이 규약(NUL 포함 ↔ 제외)이 한 번도 실행되지 않는다. 운영 경로로도 안 돈다 — 우리 실 exe 경로에
-    /// 공백이 없기 때문이다.
-    /// ★「이 볼륨엔 8.3 이름이 없다」는 실패가 아니라 정당한 다른 결말이다★ — 그 설정은 볼륨마다 다르고
-    ///   테스트가 도는 볼륨을 우리가 고르지 않는다. 그래서 두 결말을 **둘 다** 받고, 대신 각 결말이
-    ///   자기 짝(훅 값의 유무)과 어긋나지 않는 것을 잰다.
-    #[cfg(windows)]
-    #[test]
-    fn a_real_spaced_path_exercises_the_short_name_success_branch() {
-        let dir = std::env::temp_dir().join(format!("engram hook path {}", Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).expect("임시 폴더 생성");
-        let exe = dir.join("engram.exe");
-        std::fs::write(&exe, b"").expect("임시 파일 생성");
-
-        let short = short_program_path(&exe);
-        let hook = session_start_hook_override(Some(exe.as_path()));
-        let short_exists = short.as_deref().map(|s| std::path::Path::new(s).exists());
-        std::fs::remove_dir_all(&dir).ok();
-
-        match short {
-            Some(short) => {
-                assert!(
-                    !short
-                        .chars()
-                        .any(|c| c.is_whitespace() || c.is_control() || c == '\''),
-                    "단축 경로에 아직 실을 수 없는 문자가 남았다: {short:?}"
-                );
-                assert_eq!(
-                    short_exists,
-                    Some(true),
-                    "단축 경로가 같은 실물을 안 가리킨다: {short:?}"
-                );
-                let hook = hook.expect("단축 경로를 얻었으면 훅 값도 서야 한다");
-                assert!(
-                    hook.contains(&short),
-                    "훅 값이 단축 경로를 안 실었다: {hook}"
-                );
-            }
-            None => assert!(
-                hook.is_none(),
-                "단축 경로가 없는데 훅이 섰다 — 공백이 든 경로가 그대로 실린다: {hook:?}"
-            ),
-        }
     }
 
     #[test]

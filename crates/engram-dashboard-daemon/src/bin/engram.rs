@@ -3,11 +3,6 @@
 //! 2종의 미러. `group` 툴/서브커맨드는 ADR-0111 결정 4 로 제거됐다)과 **`agent`**(에이전트 제어 —
 //! 짝이 되는 MCP 툴이 **없다**. 제어를 CLI 로만 내는 것이 ADR-0132 의 결정이다).
 //!
-//! ★에이전트가 **치지 않는** 계열이 하나 더 있고, 그것은 어디에도 안 보인다★: `hook` 은 에이전트
-//!   프로그램이 자기 자식으로 띄우는 훅 프로세스가 부르는 자리라 아래 사용법·발견 어디에도 나오지 않고,
-//!   그 이름을 친 호출은 모르는 계열과 같은 반려를 받는다. 사유와 계약의 정본은 `CLI_GROUP_HOOK` doc 이다
-//!   — ★"계열은 둘" 이라는 위 문장을 「이 파일이 받는 토큰이 둘뿐」으로 읽지 말 것★.
-//!
 //! ★인자 표면의 정본은 이 파일이다★ — S18 spec §6 의 CLI 블록은 그룹 구조 이전의 표기라 인자 계약으로
 //!   읽으면 안 된다(그 절이 자기 supersede 를 적고 있다). 그 spec 이 계속 정본인 것은 **응답 shape·상태
 //!   어휘** 쪽이고, 아래 exit code 판정자들이 §6 을 인용하는 것도 그 축이다. 표면 결정 = ADR-0132.
@@ -121,9 +116,9 @@ use std::time::Duration;
 
 use engram_dashboard_agent::types::{
     AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
-    CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL,
-    CLI_HOOK_SESSION_ID_FIELD, CLI_MAIL_FLAGS, CLI_MAIL_VERBS, CONTROL_HOOK_ROUTE, MAIL_MARKER_ENV,
-    MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
+    CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS,
+    CLI_MAIL_VERBS, MAIL_MARKER_ENV, MAIL_MARKER_OFF, RENAME_OUTCOME_RENAMED,
+    RENAME_OUTCOME_UNCHANGED,
 };
 
 /// 제어 소켓의 **침묵 한도**(로컬 데몬이라 짧게) — 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
@@ -164,63 +159,6 @@ const COMMAND_NAME_SEPARATOR: char = '.';
 /// 발견·범용 호출 라우트 — [`Command::route`] 와 같은 규율(경로 지식은 CLI 소유, 데몬측 상수와 손으로 맞춘다).
 const ROUTE_COMMANDS: &str = "/control/commands";
 const ROUTE_CALL: &str = "/control/call";
-
-/// 훅 보고 계열과 그 동사 하나 — `engram hook session-start`.
-///
-/// ★이 계열은 **에이전트가 치는 것이 아니다**★: 에이전트 프로그램이 세션을 열 때 자기 자식으로 띄우는
-///   훅 프로세스가 부른다. 인자는 없고 페이로드는 **stdin 단독**으로 온다(실측 2026-09-18, codex
-///   0.155.0 — 그 훅의 argv 는 비어 있다).
-/// ★그래서 `help` 에 올리지 않는다(의도적 부재)★: help 는 **에이전트가 표면을 배우는 자리**이고
-///   (ADR-0132 결정 4) 이 동사는 에이전트가 배워서 쓸 것이 아니다. 올리면 둘이 나빠진다 — ① 에이전트가
-///   자기 세션 id 를 **손으로 지어내 보고**할 수 있다는 것을 가르친다 ② 쳐 봐야 stdin 이 없어 아무 일도
-///   안 일어나는 동사가 목록을 늘린다.
-/// ★단 은닉은 **교육 차단이지 강제가 아니다**★ — 강제는 데몬이 한다(자격 없는 에이전트의 보고는 값을
-///   보기도 전에 거절된다 · `control::hook`). 여기 필터에 강제를 기대면 안 된다: 라우트 주소는 감출 수
-///   없고, 자격증명을 든 프로세스는 이 CLI 없이도 그 주소를 칠 수 있다.
-/// ★이 계열 이름을 `types.rs` 로 올리지 않은 것도 결정이다★ — 우편·제어 계열이 거기 사는 이유는 소비자가
-///   여러 crate 라서인데(프라이밍 판정자·데몬 입구), 이 낱말은 이 파일 말고 읽는 곳이 없다. 봉투의
-///   **칸 이름**과 **라우트**만 공유값이다(`CLI_HOOK_SESSION_ID_FIELD`·`CONTROL_HOOK_ROUTE`).
-// ADR-0132
-const CLI_GROUP_HOOK: &str = "hook";
-const CLI_HOOK_VERB_SESSION_START: &str = "session-start";
-
-/// 훅 계열의 exit code — ★언제나 0★.
-///
-/// ★이유 = 우리 실패가 사용자 세션을 죽이는 경로를 만들지 않는다★: 이 프로세스는 에이전트 프로그램의
-///   **자식**이고, 그 프로그램이 훅의 비정상 종료를 어떻게 다루는지 우리는 재 본 적이 없다(기동을 멈추는
-///   구현이 실재한다). 보고 하나 실패했다고 사용자의 대화가 안 뜨는 것은 그 보고가 주는 값보다 훨씬 비싸다.
-/// ★그래서 **첫 토큰이 이 계열이면 파싱 반려조차 이 코드로 끝난다**★: 호스트가 argv 를 덧붙이거나 배선에
-///   오타 한 글자가 나면 그것도 「훅이 실패한 것」이고, 그 갈래만 exit 1 로 빠지면 계약이 반쪽이 된다.
-/// ★stdout 은 어느 갈래에서도 한 글자도 안 쓴다★: 훅의 stdout 을 읽어 세션에 주입하는 구현이 있어
-///   (claude 계열 실측) 우리 봉투가 모델 입력으로 새면 그것이 더 나쁜 사고다. 반려 JSON 도 예외가 아니다.
-/// ★그럼 사람은 어떻게 보나 — 두 표면이다★: ① **데몬 로그**(닿기만 하면 판정·사유가 거기 남는다. 읽을 수
-///   없는 페이로드도 빈 값으로 실어 보내 그 흔적을 만든다) ② [`HOOK_DEBUG_ENV`] 를 켠 셸에서만 나오는
-///   stderr 한 줄. 기본이 침묵인 이유는 훅 stderr 가 에이전트 화면에 보이는 구현이 있어, 거기 계열 이름이
-///   찍히면 위 은닉이 무의미해지기 때문이다.
-// ADR-0208
-const EXIT_HOOK: i32 = 0;
-
-/// 훅 계열의 진단을 stderr 로 내보내는 스위치 — **비어 있지 않으면** 켜진다.
-///
-/// ★스폰이 이 값을 심지는 않는다. 그렇다고 에이전트에게 **꺼져 있는 것은 아니다**★ — 이 저장소의
-///   스폰은 부모 env 를 시드하므로(그 상속이 `backend::inject_cli_entrance` 가 토큰 배선의 근거로 쓰는
-///   바로 그 사실이다), **데몬을 띄운 셸에 이 변수가 있었으면 에이전트와 그 훅까지 그대로 상속된다.**
-///   즉 실제 조건은 「데몬의 env 에 있었나」이고, 배선을 보려는 사람은 그 셸에서 켠다.
-/// ★그래서 위 은닉(`CLI_GROUP_HOOK` doc)은 이 변수에 기대지 않는다★: 켜진 환경에서는 계열 이름이
-///   에이전트 화면에 보일 수 있다. 은닉은 교육 차단이고 강제는 데몬 자격 게이트라는 그 문단이 여기서도
-///   그대로다 — 이 변수를 **끊어서** 은닉을 지키려 들면, 배선 오류를 볼 수단이 0 이 된다(stdout·
-///   종료코드가 둘 다 봉인돼 있다).
-const HOOK_DEBUG_ENV: &str = "ENGRAM_HOOK_DEBUG";
-
-/// 훅 페이로드에서 읽어들일 **상한**. 넘으면 그 지점에서 자른다.
-///
-/// ★왜 상한이 있나★: 이 stdin 은 우리가 아니라 **상대 프로그램**이 채운다. 무제한으로 읽으면 상대의
-///   버그나 큰 전사본 하나가 이 프로세스의 메모리를 그대로 먹는다.
-/// ★자르고 **계속 간다**(반려하지 않는다)★: 우리가 찾는 칸은 앞쪽에 있는 짧은 문자열 하나라, 잘린
-///   앞부분만으로 JSON 이 깨지면 아래가 빈 값을 실어 보내 데몬이 그 사실을 기록한다. 여기서 끊으면
-///   그 기록조차 안 남는다.
-/// ★64 KiB = 우편 본문 상한과 같은 값★(데몬 ingress). 실측 페이로드는 300 바이트 미만이라 여유가 크다.
-const HOOK_STDIN_CAP: u64 = 64 * 1024;
 
 /// 데몬이 「지금 못 돌린다」고 표시한 이름들의 구획 머리(목록)와 그 한 줄(상세).
 ///
@@ -539,11 +477,6 @@ fn run(args: &[String]) -> i32 {
             println!("{}", render_help(topic, mail));
             return 0;
         }
-        // ★훅은 크레덴셜 검사 **앞**에서 자기 흐름을 탄다★: 아래 공통 경로는 크레덴셜이 없으면 반려
-        //   JSON 을 stdout 에 찍고 1 로 끝나는데, 이 동사는 그 둘을 다 하면 안 된다(`EXIT_HOOK` doc).
-        ParsedCommand::Hook(rest) => {
-            return run_hook(&rest, read_credentials, read_hook_stdin, post_hook_report)
-        }
         // 발견·호출은 stdin 도 본문도 없다 — 크레덴셜 뒤에서 자기 흐름을 탄다.
         ParsedCommand::Catalog(c) => Plan::Catalog(c),
         ParsedCommand::Invoke(i) => Plan::Invoke(i),
@@ -637,130 +570,6 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
             1
         }
     }
-}
-
-/// 훅 보고 한 번 — ★어떤 갈래로 끝나도 [`EXIT_HOOK`] 을 돌려주고 stdout 에 한 글자도 안 쓴다★.
-///
-/// ★`rest` = 계열 뒤 argv 전량★. 동사 판정이 여기 있는 이유는 [`EXIT_HOOK`] doc 이 진다(파서에서
-///   반려하면 그 반려가 계약을 깬다).
-/// ★크레덴셜·stdin·전송을 **셋 다 인자로 받는 이유**★: 이 함수의 실패 갈래 전부(크레덴셜 부재·읽기
-///   실패·tty·연결 실패·비-2xx)를 프로세스도 소켓도 env 도 없이 재려면 세 입구가 seam 이어야 한다
-///   (ADR-0012). 운영 호출부는 [`read_credentials`]·[`read_hook_stdin`]·[`post_hook_report`] 하나씩이다.
-/// ★`send` 가 크레덴셜을 **받아서** 쓰는 것도 그 축이다★ — 전송이 제 손으로 env 를 읽으면 아래 순서
-///   (크레덴셜 먼저)가 두 벌이 되고, 한쪽만 고친 편집이 조용히 갈린다.
-/// ★응답 body 를 찍지 않는다 — 형제들과 갈리는 유일한 자리다★: 다른 동사는 데몬 body 를 그대로 흘려
-///   발신 에이전트가 자기교정하게 하지만, 이 동사의 호출자는 훅이라 읽는 눈이 없다.
-/// ★읽을 수 없는 페이로드도 **보낸다**(빈 값으로)★: 그래야 「훅이 떴는데 못 읽었다」가 데몬 로그에
-///   남는다. 여기서 끊으면 그 사건은 어디에도 안 남는다 — 이 프로세스의 stdout·종료코드는 둘 다 봉인돼
-///   있기 때문이다. 값의 모양 판정은 원래도 데몬 단독이다(`control::hook`).
-fn run_hook(
-    rest: &[String],
-    read_creds: impl FnOnce() -> Result<(String, String), (&'static str, &'static str)>,
-    read_stdin: impl FnOnce() -> Result<String, String>,
-    send: impl FnOnce((String, String), &str) -> Result<u16, String>,
-) -> i32 {
-    if rest.len() != 1 || rest[0] != CLI_HOOK_VERB_SESSION_START {
-        return hook_note(&format!(
-            "unknown hook invocation: {rest:?} (expected exactly `{CLI_HOOK_VERB_SESSION_START}`)"
-        ));
-    }
-    // ★크레덴셜을 stdin 보다 **먼저** 본다 — 뒤집으면 이 프로세스가 영영 안 끝난다★: 훅의 stdin 은
-    //   상대 프로그램이 채우는데 그쪽이 파이프를 열어 둔 채 닫지 않으면 `read_to_end` 는 EOF 를 기다리며
-    //   무한히 매달린다. [`HOOK_STDIN_CAP`] 은 **바이트를 자를 뿐 기다림을 안 자르고**, [`read_hook_stdin`]
-    //   의 가드는 tty 만 본다 — 파이프는 그 둘 어디에도 안 걸린다. Windows 에서는 그렇게 매달린 것을
-    //   거두는 쪽이 없어 **훅 발화마다 한 개씩 남는다.** 크레덴셜이 없으면 읽어 봐야 보낼 곳이 없으므로,
-    //   그것을 stdin 없이 알 수 있는 이 자리에서 끝낸다. ADR-0208/ADR-0210
-    let creds = match read_creds() {
-        Ok(pair) => pair,
-        // 스폰 밖에서 사람이 쳐 본 갈래 — 「닿지 못했다」와 같게 다뤄 침묵 + [`EXIT_HOOK`].
-        Err((code, hint)) => return hook_note(&format!("{code}: {hint}")),
-    };
-    let payload = match read_stdin() {
-        Ok(p) => p,
-        // 페이로드를 못 읽었다 — 빈 값으로 보내 데몬이 기록하게 한다(위 doc).
-        Err(e) => {
-            hook_note(&e);
-            String::new()
-        }
-    };
-    match send(creds, &hook_request_body(&payload)) {
-        Ok(status) if (200..300).contains(&status) => EXIT_HOOK,
-        // ★2xx 가 아니면 데몬은 이 보고를 **처리하지 않았다**★. 특히 401(폐기된 토큰)은 인증
-        //   미들웨어에서 끊겨 핸들러에 닿지 않으므로 **데몬 로그에도 안 남는다** — 그 갈래의 유일한
-        //   진단이 이 줄이다.
-        Ok(status) => hook_note(&format!("daemon refused the report: HTTP {status}")),
-        // 크레덴셜 부재·연결 실패·응답 파싱 실패 — 데몬에 닿지 못했다.
-        Err(e) => hook_note(&e),
-    }
-}
-
-/// [`run_hook`] 의 운영 전송 — **받은** 크레덴셜로 라우트에 민다(env 를 제 손으로 읽지 않는다 —
-/// [`run_hook`] doc 의 마지막 항).
-fn post_hook_report((token, base): (String, String), body: &str) -> Result<u16, String> {
-    post_json(&base, CONTROL_HOOK_ROUTE, &token, body)
-        .map(|resp| resp.status)
-        .map_err(|e| e.to_string())
-}
-
-/// 훅 갈래의 진단 한 줄 — [`HOOK_DEBUG_ENV`] 가 켜졌을 때만 stderr 로 나가고, 언제나 [`EXIT_HOOK`].
-///
-/// ★`eprintln!` 을 쓰지 않는다★ — 그 매크로는 쓰기에 실패하면 **패닉한다**. 훅의 stderr 가 이미 닫힌
-///   파이프면(부모가 먼저 거둔 흔한 모양) 그 패닉이 비영 종료가 되어, 이 파일이 세운 exit 계약을
-///   진단 코드가 스스로 깬다.
-/// ★계열 이름이 이 줄에만 나온다★ — 그래서 기본이 침묵이어야 한다([`HOOK_DEBUG_ENV`] doc).
-fn hook_note(reason: &str) -> i32 {
-    if std::env::var(HOOK_DEBUG_ENV).is_ok_and(|v| !v.is_empty()) {
-        let _ = writeln!(
-            std::io::stderr(),
-            "{CLI_EXE_NAME} {CLI_GROUP_HOOK} {CLI_HOOK_VERB_SESSION_START}: {reason}"
-        );
-    }
-    EXIT_HOOK
-}
-
-/// 훅 페이로드용 stdin 읽기 — **tty 면 아예 안 읽는다**.
-///
-/// ★tty 갈래★: 사람이 파이프 없이 손으로 치면 `read_to_end` 는 EOF(Ctrl+Z/Ctrl+D)까지 멈춘다. 이 동사는
-///   사람이 칠 것이 아니므로, 그 상황은 기다릴 게 아니라 **바로 끝내고 사유를 남길** 자리다.
-fn read_hook_stdin() -> Result<String, String> {
-    use std::io::IsTerminal as _;
-    let stdin = std::io::stdin();
-    if stdin.is_terminal() {
-        return Err("stdin is a terminal; this verb reads its payload from a pipe".to_string());
-    }
-    read_capped(stdin)
-}
-
-/// [`HOOK_STDIN_CAP`] 에서 자르고 UTF-8 로 옮긴다.
-///
-/// ★자르고 **계속 간다**(반려하지 않는다)★: 우리가 찾는 칸은 짧은 문자열 하나라, 잘린 앞부분만으로
-///   JSON 이 깨지면 호출부가 빈 값을 실어 보내 데몬이 그 사실을 기록한다. 여기서 끊으면 그 기록조차
-///   안 남는다.
-fn read_capped(source: impl Read) -> Result<String, String> {
-    let mut buf = Vec::new();
-    source
-        .take(HOOK_STDIN_CAP)
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("failed to read stdin: {e}"))?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// 훅이 stdin 으로 준 JSON → 우리 봉투. ★실패하지 않는다 — 못 읽으면 **빈 값**을 싣는다★.
-///
-/// ★페이로드의 **나머지 칸은 통째로 버린다**★: 오늘 나르는 것은 세션 id 하나뿐이고, 나르지 않는 값을
-///   실어 보내면 그 순간 그것이 계약이 된다(상대가 칸을 바꾸면 우리 봉투가 따라 깨진다).
-/// ★칸 이름은 두 계약에 동시에 서 있다 — 그 사실의 정본은 [`CLI_HOOK_SESSION_ID_FIELD`] doc★.
-/// ★값의 **모양은 여기서 보지 않는다**★: uuid 인지 판정하는 자리는 데몬 하나다(`control::hook`). 두
-///   곳에서 판정하면 한쪽만 고친 편집이 조용히 갈린다 — `SessionIdSink` 가 같은 이유로 판정을 안 한다.
-fn hook_request_body(payload: &str) -> String {
-    let sid = serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .as_ref()
-        .and_then(|v| v.get(CLI_HOOK_SESSION_ID_FIELD))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    serde_json::json!({ CLI_HOOK_SESSION_ID_FIELD: sid }).to_string()
 }
 
 /// 전송 계층 실패 분류(M1) — exit code 는 항상 1 이지만 **에러 코드**는 원인별로 갈라 stdout JSON 에 싣는다.
@@ -892,9 +701,6 @@ enum ParsedCommand {
     Agent(ParsedAgent),
     Catalog(ParsedCatalog),
     Invoke(ParsedInvoke),
-    /// 훅 계열 — argv 잔여를 그대로 싣는다(동사 판정은 `run_hook` 이 한다. 여기서 반려하면 그 반려가
-    /// 훅의 exit 계약을 깬다).
-    Hook(Vec<String>),
 }
 
 /// 발견 요청 — 목록 전량이냐 이름 하나냐.
@@ -1074,12 +880,6 @@ fn parse_command(args: &[String], mail: MailSurface) -> Result<ParsedCommand, St
                 .map(ParsedCommand::Mail)
                 .map_err(|e| hide_mail_reason(mail, e))
         }
-        // ★첫 토큰이 이 계열이면 **무슨 인자가 오든 훅 갈래다**★: 동사가 틀렸어도 여기서 `Err` 를 내면
-        //   그 반려가 stdout + exit 1 로 나가 훅의 계약([`EXIT_HOOK`])을 깬다. 인자 판정은 훅 갈래
-        //   **안**에서 하고, 틀린 인자는 그 갈래의 진단 표면으로 보고한다.
-        // ★그래서 이 반환은 「동사가 맞다」를 뜻하지 않는다★ — 싣고 가는 것은 argv 잔여이고, 그것이
-        //   성립하는지는 `run_hook` 이 본다.
-        CLI_GROUP_HOOK => Ok(ParsedCommand::Hook(args[1..].to_vec())),
         CLI_GROUP_AGENT => {
             let rest = &args[1..];
             if rest.first().is_some_and(|a| is_help_token(a)) {
@@ -4003,230 +3803,6 @@ mod tests {
                 "파서가 어느 동사에서도 모르는 플래그가 공용 목록에 있다: {flag}"
             );
         }
-    }
-
-    // ── 훅 보고 계열(`hook`) ─────────────────────────────────────────
-
-    /// 실측된 페이로드 그대로(codex 0.155.0, 2026-09-18 — 7 필드). ★이 시험이 바이트로 재는 것이
-    /// 「상대가 주는 것을 우리가 읽는다」의 유일한 자리다★ — 실 codex 는 여기 안 뜬다.
-    const MEASURED_HOOK_PAYLOAD: &str = r#"{"session_id":"01a0b3bb-2fe3-7ef3-8c71-1edc4f7ae9a4","transcript_path":"C:/x/y.jsonl","cwd":"C:/x","hook_event_name":"SessionStart","model":"gpt-5.6-sol","permission_mode":"bypassPermissions","source":"startup"}"#;
-
-    /// 훅 시험용 크레덴셜 한 쌍 — **값은 어디로도 안 나간다**(전송이 seam 이라 소켓이 없다).
-    fn hook_creds() -> Result<(String, String), (&'static str, &'static str)> {
-        Ok(("token".to_string(), "http://127.0.0.1:1".to_string()))
-    }
-
-    /// 스폰 밖에서 쳤을 때 [`read_credentials`] 가 주는 그 쌍 그대로 — 문구가 갈리면 진단이 갈린다.
-    fn hook_creds_missing() -> Result<(String, String), (&'static str, &'static str)> {
-        Err((
-            "NO_TOKEN",
-            "ENGRAM_TOKEN is not set; this command must run inside an engram-spawned agent.",
-        ))
-    }
-
-    fn hook_rest(args: &[&str]) -> Vec<String> {
-        match parse_command(&argv(args)).expect("훅 계열은 파싱에서 반려되지 않는다")
-        {
-            ParsedCommand::Hook(rest) => rest,
-            other => panic!("훅 갈래가 아니다: {other:?}"),
-        }
-    }
-
-    /// ★첫 토큰이 계열이면 **무엇이 와도** 훅 갈래로 들어온다★ — 파서에서 반려하면 그 반려가 stdout +
-    /// exit 1 로 나가 훅의 계약을 깬다(그것이 이번 라운드에 적출된 결함이다).
-    #[test]
-    fn every_hook_invocation_parses_into_the_hook_branch() {
-        for args in [
-            vec!["hook", "session-start"],
-            vec!["hook"],
-            vec!["hook", "--help"],
-            vec!["hook", "sessionstart"],
-            vec!["hook", "session-start", "--extra", "x"],
-        ] {
-            assert!(
-                matches!(parse_command(&argv(&args)), Ok(ParsedCommand::Hook(_))),
-                "{args:?} 가 훅 갈래로 안 들어왔다"
-            );
-        }
-    }
-
-    /// ★계약: **모든** 오류 갈래가 exit 0 이고 stdout 에 아무 것도 안 쓴다★ — 파서 반려·동사 오타·
-    /// 인자 과다·stdin 실패(tty 포함)·크레덴셜 부재·연결 실패·비-2xx(401 포함)까지 전부.
-    ///
-    /// ★소켓도 프로세스도 없이 잰다★ — 전송이 seam 이라 401·500·연결 실패를 값으로 준다.
-    #[test]
-    fn every_hook_failure_path_exits_zero() {
-        let good = || Ok(MEASURED_HOOK_PAYLOAD.to_string());
-        let unreachable_send = |_: (String, String), _: &str| -> Result<u16, String> {
-            panic!("동사가 성립하지 않으면 전송까지 가면 안 된다")
-        };
-
-        // 파서를 지나 훅 갈래로 들어온 뒤 동사에서 걸리는 것들 — 전송을 아예 안 탄다.
-        for args in [
-            vec!["hook"],
-            vec!["hook", "--help"],
-            vec!["hook", "sessionstart"],
-            vec!["hook", "session-start", "extra"],
-        ] {
-            assert_eq!(
-                run_hook(&hook_rest(&args), hook_creds, good, unreachable_send),
-                EXIT_HOOK,
-                "{args:?} 가 0 이 아닌 코드로 끝났다"
-            );
-        }
-
-        let rest = hook_rest(&["hook", "session-start"]);
-        // stdin 읽기 실패·tty — 보고는 **그래도 나가고**(빈 값) 코드는 0 이다.
-        let mut seen: Option<String> = None;
-        assert_eq!(
-            run_hook(
-                &rest,
-                hook_creds,
-                || Err("stdin is a terminal".to_string()),
-                |_, body| {
-                    seen = Some(body.to_string());
-                    Ok(200)
-                }
-            ),
-            EXIT_HOOK
-        );
-        assert_eq!(
-            seen.as_deref(),
-            Some(r#"{"session_id":""}"#),
-            "못 읽은 페이로드도 빈 값으로 실려 데몬에 흔적을 남겨야 한다"
-        );
-
-        // 전송 계층이 답으로 주는 갈래 전부.
-        for status in [401u16, 403, 404, 500, 503] {
-            assert_eq!(
-                run_hook(&rest, hook_creds, good, |_, _| Ok(status)),
-                EXIT_HOOK,
-                "HTTP {status} 가 0 이 아닌 코드로 끝났다"
-            );
-        }
-        // 크레덴셜 부재 — 전송 앞에서 끊기고 코드는 같다.
-        assert_eq!(
-            run_hook(&rest, hook_creds_missing, good, unreachable_send),
-            EXIT_HOOK
-        );
-        // 연결 실패 — 전송이 `Err` 로 답하는 갈래.
-        assert_eq!(
-            run_hook(&rest, hook_creds, good, |_, _| Err(
-                "connect refused".to_string()
-            )),
-            EXIT_HOOK
-        );
-        // 성공 갈래.
-        assert_eq!(run_hook(&rest, hook_creds, good, |_, _| Ok(200)), EXIT_HOOK);
-    }
-
-    /// ★크레덴셜이 없으면 stdin 을 **건드리지 않는다**★ — 상대가 파이프를 안 닫으면 `read_to_end` 가
-    /// EOF 를 기다리며 무한히 매달리고, Windows 에서는 그 프로세스가 훅 발화마다 한 개씩 남는다. 보낼
-    /// 곳이 없다는 것은 읽기 전에 알 수 있으므로 그 자리에서 끝난다(`run_hook` 본문 주석 · ADR-0208/ADR-0210).
-    #[test]
-    fn a_hook_without_credentials_never_touches_stdin() {
-        let rest = hook_rest(&["hook", "session-start"]);
-        assert_eq!(
-            run_hook(
-                &rest,
-                hook_creds_missing,
-                || -> Result<String, String> {
-                    panic!("크레덴셜이 없는데 stdin 을 읽었다 — 그 읽기가 매달리는 자리다")
-                },
-                |_: (String, String), _: &str| -> Result<u16, String> {
-                    panic!("크레덴셜이 없으면 전송까지 가면 안 된다")
-                }
-            ),
-            EXIT_HOOK
-        );
-    }
-
-    /// ★상한은 **자르고 계속 간다**★ — 반려하면 그 사건이 어디에도 안 남는다.
-    #[test]
-    fn an_oversized_payload_is_truncated_not_refused() {
-        let huge = format!(
-            r#"{{"{CLI_HOOK_SESSION_ID_FIELD}":"01a0b3bb-2fe3-7ef3-8c71-1edc4f7ae9a4","pad":"{}"}}"#,
-            "x".repeat(HOOK_STDIN_CAP as usize * 2)
-        );
-        let read = read_capped(huge.as_bytes()).expect("자르기는 실패가 아니다");
-        assert_eq!(read.len() as u64, HOOK_STDIN_CAP, "상한에서 잘려야 한다");
-        // 잘린 조각은 JSON 이 아니므로 빈 값이 실려 나간다 — 그것이 데몬에 남는 흔적이다.
-        let v: serde_json::Value =
-            serde_json::from_str(&hook_request_body(&read)).expect("valid json");
-        assert_eq!(v, serde_json::json!({ CLI_HOOK_SESSION_ID_FIELD: "" }));
-    }
-
-    /// 상한 안이면 그대로 온다 — 실측 페이로드가 여유 안에 있다는 것도 함께 잰다.
-    #[test]
-    fn a_payload_within_the_cap_survives_intact() {
-        assert!((MEASURED_HOOK_PAYLOAD.len() as u64) < HOOK_STDIN_CAP);
-        assert_eq!(
-            read_capped(MEASURED_HOOK_PAYLOAD.as_bytes()).expect("읽기"),
-            MEASURED_HOOK_PAYLOAD
-        );
-    }
-
-    /// 실측 페이로드 한 덩이 → 우리 봉투. ★나머지 6 칸은 실리지 않는다★ — 나르지 않는 값을 실으면 그
-    /// 순간 그것이 계약이 된다.
-    #[test]
-    fn the_measured_payload_becomes_a_one_field_envelope() {
-        let v: serde_json::Value =
-            serde_json::from_str(&hook_request_body(MEASURED_HOOK_PAYLOAD)).expect("valid json");
-        assert_eq!(
-            v,
-            serde_json::json!({ CLI_HOOK_SESSION_ID_FIELD: "01a0b3bb-2fe3-7ef3-8c71-1edc4f7ae9a4" })
-        );
-    }
-
-    /// ★uuid 판정을 여기서 하지 않는다★ — 그 자리는 데몬 하나다. 여기서 한 번 더 보면 두 곳이 갈린다.
-    #[test]
-    fn the_cli_does_not_judge_the_shape_of_the_value() {
-        assert!(hook_request_body(r#"{"session_id":"not-a-uuid"}"#).contains("not-a-uuid"));
-    }
-
-    /// ★못 읽은 페이로드도 **빈 값으로 실려 나간다**★ — 그래야 「훅이 떴는데 못 읽었다」가 데몬 로그에
-    /// 남는다. 이 프로세스의 stdout·종료코드는 둘 다 봉인돼 있어 다른 흔적 표면이 없다.
-    #[test]
-    fn an_unreadable_payload_still_produces_a_report() {
-        for payload in [
-            "{}",
-            r#"{"session_id":null}"#,
-            r#"{"session_id":123}"#,
-            "not json at all",
-            "",
-        ] {
-            let v: serde_json::Value =
-                serde_json::from_str(&hook_request_body(payload)).expect("valid json");
-            assert_eq!(
-                v,
-                serde_json::json!({ CLI_HOOK_SESSION_ID_FIELD: "" }),
-                "payload={payload:?}"
-            );
-        }
-    }
-
-    /// ★감춰진 계열은 사용법 어디에도 없다★ — help 는 에이전트가 표면을 배우는 자리이고, 이 동사는
-    /// 배워서 쓸 것이 아니다.
-    #[test]
-    fn the_hook_group_is_absent_from_every_help_screen() {
-        for topic in [HelpTopic::Root, HelpTopic::Agent, HelpTopic::Mail]
-            .into_iter()
-            .chain(MailTopic::SUBTOPICS.iter().map(|s| HelpTopic::MailSub(*s)))
-        {
-            let screen = render_help(topic, MailSurface::Shown);
-            assert!(
-                !screen.contains(CLI_GROUP_HOOK),
-                "help 에 훅 계열이 보인다({topic:?}): {screen}"
-            );
-        }
-        // `help hook` 은 계열로 인정되지 않는다(발견 경로로는 못 닿는다).
-        assert!(parse_command(&argv(&["help", "hook"])).is_err());
-    }
-
-    /// 라우트는 데몬과 **한 값을 공유한다** — 손으로 맞추는 형제들과 갈리는 이유는 그 상수 doc 이 진다.
-    #[test]
-    fn the_hook_route_is_the_shared_constant() {
-        assert_eq!(CONTROL_HOOK_ROUTE, "/control/hook");
     }
 
     // ── ADR-0132 조각 ②: 제어 계열(`agent`) ──────────────────────────────────────────
