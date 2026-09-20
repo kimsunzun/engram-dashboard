@@ -401,9 +401,12 @@ impl AgentBackend for ClaudeBackend {
         // ★이 backend 는 세울 연결이 없다 — `declares_link()` 가 false 라 조립점이 애초에 `None` 을
         //   준다. 받아 두고 무시하는 것이 계약이다(`session_id` 칸과 같은 모양).
         _link_sink: Option<LinkSink>,
+        // ★제어 평면은 이 backend 에서 **전부 명령줄로** 번역된다([`AgentBackend::build_spec`]) — 통로
+        //   핸드셰이크에 실을 것이 없다. 여기서 또 읽으면 한 spawn 이 같은 값을 두 수단으로 보낸다.
+        control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
-        let _ = (sid_sink, resume_session_id);
+        let _ = (sid_sink, resume_session_id, control);
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
                 let (t, pid) = StdioTransport::open(spec, true, self.output_decoder(command))?;

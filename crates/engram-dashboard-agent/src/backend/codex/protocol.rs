@@ -383,8 +383,25 @@ pub(crate) struct ThreadStartParams {
     pub(crate) approval_policy: Option<AskForApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<SandboxMode>,
+    /// codex 기본 지시문 **뒤에 덧붙는** 지시문. 부재 = 아무것도 덧붙이지 않는다.
+    ///
+    /// ★대체가 아니라 덧붙이기다★ — 이 칸에 무엇을 실어도 codex 자신의 기본 지시문은 그대로 남는다
+    ///   (실측 0.155.0: 본문이 `input[0]` 의 `developer` 역할 메시지로 앞에 서고 기본 프롬프트는 무손상).
+    /// ★터미널 모드의 `-c developer_instructions=…` 와 **같은 것을 나르지만 같은 통로가 아니다**★:
+    ///   이쪽은 JSON 본문이라 명령줄 길이 상한도, `%VAR%` 치환도, 줄바꿈 절단도 없다. 그래서 값을
+    ///   **손대지 않고 그대로** 싣는다 — 그쪽의 줄바꿈 변환·문자 가드를 여기로 가져오지 말 것(가져오면
+    ///   아무 위험도 막지 못한 채 에이전트가 읽는 문서만 망가진다).
+    // ADR-0215
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) developer_instructions: Option<String>,
 }
 
+/// ★여기엔 `developerInstructions` 짝이 **없다 — 없는 채로 두는 것이 결정이다**★: 그 칸이 이 요청의
+/// 스키마에도 있는지를 재 보지 않았고, 모르는 칸을 JSON-RPC params 에 얹는 대가는 「거절당한 핸드셰이크」
+/// 라 이어받기 스폰이 통째로 죽는다. 그래서 **이어받은 app-server 스레드는 프라이밍을 못 받는다** —
+/// 터미널 모드는 argv 라 이어받기에도 그대로 실리므로, 갭은 이 한 갈래뿐이다. 실측으로 칸의 존재가
+/// 확인되면 그때 더한다.
+// ADR-0215
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadResumeParams {
@@ -945,11 +962,15 @@ mod tests {
             cwd: Some("C:/w".to_string()),
             approval_policy: Some(AskForApproval::Never),
             sandbox: Some(SandboxMode::WorkspaceWrite),
+            developer_instructions: Some("be brief".to_string()),
         })
         .unwrap();
         assert_eq!(field(&v, "cwd"), "C:/w");
         assert_eq!(field(&v, "approvalPolicy"), "never");
         assert_eq!(field(&v, "sandbox"), "workspace-write");
+        // ★camelCase 로 나가는 것이 계약이다★ — snake_case 로 새면 codex 가 모르는 칸으로 읽어 조용히
+        //   버리고, 증상은 「프라이밍이 안 먹는다」 하나다(오류가 없다).
+        assert_eq!(field(&v, "developerInstructions"), "be brief");
     }
 
     #[test]

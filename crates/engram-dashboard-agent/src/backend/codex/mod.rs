@@ -105,8 +105,19 @@ fn is_app_server(command: &AgentCommand) -> bool {
 ///   wedge 가 된다(그래서 그 닫기가 갈래를 가리지 않는다 — `transport.rs` 의 그 자리).
 ///   ★즉 상류가 `excludeTurns` 를 무시하기 시작하면 이 인자는 아무 것도 못 막고, 남는 방어는 그 닫기
 ///   하나뿐이다★ — 이 인자를 「막아 뒀다」로 읽지 말 것. 상류가 실제로 존중하는지는 미검이다.
+/// ★`developer_instructions` 는 **여는 갈래에만** 실린다★ — [`ThreadResumeParams`] 에는 그 칸이 없고,
+///   없는 채로 두는 것이 결정이다(그 타입의 doc 이 사유의 정본). 그래서 이어받은 app-server 스레드는
+///   프라이밍을 못 받는다 — 터미널 모드는 argv 라 이어받기에도 그대로 실리므로 갭은 이 한 갈래뿐이다.
+/// ★받은 값을 **손대지 않고** 싣는다★ — JSON 본문에는 명령줄 상한도 `%` 치환도 줄바꿈 절단도 없다.
+///   터미널 갈래의 변환([`developer_instructions_override`])을 여기로 가져오면 아무 위험도 막지 못한
+///   채 에이전트가 읽는 문서만 망가진다.
 // ADR-0185
-fn thread_open(spec: &CommandSpec, resume_session_id: Option<Uuid>) -> ThreadOpen {
+// ADR-0215
+fn thread_open(
+    spec: &CommandSpec,
+    resume_session_id: Option<Uuid>,
+    developer_instructions: Option<String>,
+) -> ThreadOpen {
     let cwd = Some(spec.cwd.to_string_lossy().into_owned());
     let approval_policy = Some(AskForApproval::OnRequest);
     let sandbox = Some(SandboxMode::WorkspaceWrite);
@@ -122,6 +133,7 @@ fn thread_open(spec: &CommandSpec, resume_session_id: Option<Uuid>) -> ThreadOpe
             cwd,
             approval_policy,
             sandbox,
+            developer_instructions,
         }),
     }
 }
@@ -223,6 +235,141 @@ const MCP_BEARER_ENV_KEY: &str = "bearer_token_env_var";
 ///   스폰마다 실어야 한다.
 const MCP_APPROVAL_MODE_KEY: &str = "default_tools_approval_mode";
 const MCP_APPROVAL_MODE_VALUE: &str = "approve";
+
+/// 프라이밍 지시서를 codex 기본 지시문 **뒤에 덧붙이는** 설정 키.
+///
+/// ★`model_instructions_file` 과 바꿔 쓰지 말 것 — 그쪽은 덧붙이기가 아니라 **대체**다(실측 0.155.0)★:
+///   경로를 받는 지시문 키는 그것 하나뿐인데, 프라이밍을 거기 걸면 codex 자신의 운용 지시가 통째로
+///   사라진다.
+/// ★이 키에는 경로를 받는 `*_file` 짝이 **없다**★ — `developer_instructions_file` ·
+///   `experimental_instructions_file` · `instructions_file` 은 전부 `unknown configuration field` 다
+///   (같은 실측). 그래서 이 backend 는 claude 와 달리 경로가 아니라 **내용**을 싣고, 지시서 파일을
+///   **여기서 읽는다**. 그 갈림이 ADR-0004 가 말하는 백엔드별 지식이다.
+/// ★권위는 같은 층이다★ — OpenAI 문서상 `instructions` 파라미터와 `developer` 역할 메시지는 같은 등급
+///   이라, 경로 대신 이 칸을 고른 대가가 「지시 강도」는 아니다.
+// ADR-0004
+// ADR-0215
+const DEVELOPER_INSTRUCTIONS_KEY: &str = "developer_instructions";
+
+/// 명령줄에 실을 때 줄바꿈을 대신하는 두 글자(역슬래시 + `n`).
+///
+/// ★실제 LF 가 한 글자라도 남으면 `cmd` 가 **그 자리에서 명령줄을 자르고 아무 오류도 내지 않는다**★
+///   (실측) — 뒤따르던 인자가 통째로 사라진 채 codex 가 뜬다. 그 결말은 「프라이밍이 없다」가 아니라
+///   「MCP 부착도 훅 등록도 없다」라, 조용한 절단이 이 값의 가장 비싼 실패 모드다.
+/// ★두 글자로 바꾸는 것이 실측된 선택이다★ — 모델이 이 형태를 그대로 줄바꿈으로 읽었다(같은 실측).
+///   TOML 리터럴 문자열에는 이스케이프가 없으므로 이 두 글자는 파서를 지나 **글자 그대로** 도착한다.
+// ADR-0215
+const NEWLINE_REPLACEMENT: &str = "\\n";
+
+/// `cmd.exe` 가 받아 주는 명령줄 총 길이(UTF-16 코드 단위).
+///
+/// ★이 예산은 우리 값만의 것이 아니다★ — 정책 플래그·패스스루·오버라이드 둘이 같은 줄을 나눠 쓴다.
+///   그래서 판정은 고정 상수 비교가 아니라 **이미 조립된 인자를 센 뒤의 잔액**으로 한다
+///   ([`command_line_cost`]).
+// ADR-0215
+const CMD_LINE_LIMIT_UTF16: usize = 8191;
+
+/// `console_command` 가 Windows 에서 덧대는 래핑(`cmd.exe /c codex`)의 길이 몫.
+const CMD_WRAPPER_COST: usize = "cmd.exe /c ".len() + CODEX_PROGRAM.len();
+
+/// 이미 조립된 인자가 쓴 명령줄 길이의 **보수적** 추정(UTF-16 코드 단위).
+///
+/// ★인용 규칙을 재현하지 않고 일부러 넉넉하게 센다★ — 인자마다 공백 하나와 감싸는 따옴표 둘을 무조건
+///   얹는다. 정확히 세려면 portable-pty 의 인용 규칙과 `cmd` 의 재파싱을 **둘 다** 재구현해야 하고, 그
+///   재구현은 상류가 바뀌면 조용히 낡는다. 넘게 세서 프라이밍을 건너뛰는 쪽이 모자라게 세서 명령줄이
+///   잘리는 쪽보다 싸다 — 잘림은 오류 없이 뒤쪽 인자를 지운다.
+/// ★래핑 몫을 플랫폼과 무관하게 더한다★ — 상한이 걸리는 곳은 Windows 뿐이지만, 판정을 플랫폼으로
+///   가르면 같은 지시서가 어느 기기에서는 실리고 어느 기기에서는 안 실린다. 한 값으로 떨어뜨린다.
+/// ★UTF-16 으로 세는 것이 의도다★ — Windows 명령줄은 UTF-16 이고 상한도 그 단위다. 바이트로 세면
+///   비-ASCII 지시서에서 과대평가하고, `chars()` 로 세면 BMP 밖 문자에서 과소평가한다.
+// ADR-0215
+fn command_line_cost(args: &[String]) -> usize {
+    CMD_WRAPPER_COST
+        + args
+            .iter()
+            .map(|a| a.encode_utf16().count() + 3)
+            .sum::<usize>()
+}
+
+/// 이 스폰에 실을 프라이밍 지시서의 **내용**. `None` = 실을 것이 없다(경로 부재·읽기 실패·빈 파일).
+///
+/// ★읽기 실패는 fail-open 이다★ — 경고만 남기고 `None` 을 돌려준다. 프라이밍은 있으면 좋은 것이고
+///   스폰은 필수다(ADR-0210 결정 4 가 훅 등록에 세운 규율을 그대로 따른다).
+/// ★내용을 **이 crate 가** 읽는 것이 claude 갈래와 갈리는 지점이다★ — 그쪽은 경로를 넘기고 claude 가
+///   직접 읽는다(ADR-0092). codex 에는 경로를 받는 키가 없어서([`DEVELOPER_INSTRUCTIONS_KEY`]) 그
+///   선택지가 없다. 이 읽기가 backend 폴더 안에 있는 것이 ADR-0004 의 요점이다 — 데몬의 프라이밍
+///   provider 는 여전히 **경로만** 다룬다.
+/// ★빈 파일도 `None` 이다★ — 빈 지시문을 싣는 것은 명령줄만 쓰고 아무것도 가르치지 않는다.
+// ADR-0004
+// ADR-0092
+// ADR-0210
+// ADR-0215
+fn priming_text(control: Option<&ControlEndpoint>) -> Option<String> {
+    let path = control?.priming_file.as_deref()?;
+    match std::fs::read_to_string(path) {
+        Ok(text) if text.trim().is_empty() => {
+            tracing::warn!(
+                "codex 프라이밍 미주입 — 지시서 파일이 비었다: {}",
+                path.display()
+            );
+            None
+        }
+        Ok(text) => Some(text),
+        Err(e) => {
+            tracing::warn!(
+                "codex 프라이밍 미주입 — 지시서 파일을 못 읽었다({}): {e}",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
+/// 터미널 모드 spawn 에 실을 `-c developer_instructions='…'` 값. `None` = 싣지 않는다 — ★경고만 남기고
+/// 스폰은 그대로 간다★(ADR-0210 결정 4 와 같은 규율).
+///
+/// `args_so_far` = 이 값 앞에 이미 조립된 인자들. 명령줄 예산 판정에만 쓴다.
+///
+/// ★TOML 리터럴 문자열(작은따옴표)로 감싼다★ — 이스케이프가 없어 값이 바이트 그대로 건너가고, 그 조합이
+///   `cmd.exe /c` + `.cmd` shim 두 겹을 견디는 것이 실측돼 있다(ADR-0210). 대신 작은따옴표 자체는 담을
+///   수 없다.
+/// ★실을 수 없는 문자를 만나면 지어낸 이스케이프로 밀어 넣지 않고 건너뛴다★ — 네 글자가 각각 다른 층을
+///   깬다: 작은따옴표는 TOML 리터럴을, 큰따옴표와 역슬래시는 그 바깥의 **명령줄 인용**(portable-pty 가
+///   `\"` 로 이스케이프하는데 `cmd` 는 그 규칙을 모르고 따옴표 수만 센다)을, `%` 는 cmd 의 환경변수
+///   치환을(**따옴표 안에서도 편다** — `build_spec` 의 같은 이름 한계 주석이 정본) 깬다.
+/// ★이 가드가 오늘 한 번도 안 걸린다고 걷어내지 말 것★ — 지금 지시서에는 그 넷이 0 개지만 이 문서는
+///   사람이 고치는 마크다운이고, 영어 축약형(`don't`) 한 번이면 작은따옴표가 들어온다.
+/// ★탭을 포함한 제어문자도 끊는다★ — 줄바꿈만 위 [`NEWLINE_REPLACEMENT`] 로 바꾸고, 나머지는 `cmd` 의
+///   토큰 분리와 인용 계층을 우리가 검증한 적이 없다. 증상이 전부 「조용히 어긋난 명령줄」이라 싣지
+///   않는 쪽을 고른다.
+/// ★가드는 **바꾸기 전 원문**을 본다★ — 뒤에 하면 우리가 넣은 역슬래시가 우리 가드에 걸린다.
+// ADR-0210
+// ADR-0215
+fn developer_instructions_override(text: &str, args_so_far: &[String]) -> Option<String> {
+    if let Some(bad) = text.chars().find(|c| {
+        matches!(c, '\'' | '"' | '%' | '\\') || (c.is_control() && *c != '\n' && *c != '\r')
+    }) {
+        tracing::warn!(
+            "codex 프라이밍 미주입 — 지시서에 명령줄로 실을 수 없는 문자가 있다({bad:?})"
+        );
+        return None;
+    }
+    let single_line = text
+        .replace("\r\n", NEWLINE_REPLACEMENT)
+        .replace('\n', NEWLINE_REPLACEMENT)
+        .replace('\r', NEWLINE_REPLACEMENT);
+    let value = format!("{DEVELOPER_INSTRUCTIONS_KEY}='{single_line}'");
+    // `-c` 와 값 자신이 함께 드는 몫 — 위 [`command_line_cost`] 와 같은 셈법으로 센다.
+    let cost = CONFIG_OVERRIDE_FLAG.encode_utf16().count() + 3 + value.encode_utf16().count() + 3;
+    let used = command_line_cost(args_so_far);
+    if used + cost > CMD_LINE_LIMIT_UTF16 {
+        tracing::warn!(
+            "codex 프라이밍 미주입 — 명령줄 예산을 넘는다(이미 {used}, 더 필요 {cost}, 상한 {CMD_LINE_LIMIT_UTF16})"
+        );
+        return None;
+    }
+    Some(value)
+}
 
 /// 이 스폰에 데몬 MCP 서버를 붙일지의 **단일 판정**. [`AgentBackend::build_spec`](실제 부착)과
 /// [`AgentBackend::precheck_control_endpoint`](fail-closed 게이트)가 **같은 이 값**을 읽는다.
@@ -803,6 +950,38 @@ impl AgentBackend for CodexBackend {
                     }
                 }
 
+                // ★프라이밍 주입 — 터미널 모드만 여기서 조립한다★: app-server 모드는 같은 내용을 명령줄이
+                //   아니라 핸드셰이크 JSON(`thread/start` 의 `developerInstructions`)으로 싣는다
+                //   ([`AgentBackend::open_spawn`]). 같은 값이 두 모드에서 서로 다른 수단으로 나가는
+                //   것이지 두 번 나가는 것이 아니다 — 이어받기(`resume`)가 argv 와 핸드셰이크로 갈리는
+                //   것과 같은 모양이다.
+                // ★왜 모드를 가르나 — 훅과 달리 「중복이라서」가 아니다★: 이 명령줄에는 8191 자 상한이
+                //   있고 지시서가 그 예산을 통째로 먹을 수 있다. JSON 본문에는 그 상한이 없어(8 MB 까지
+                //   받는 것을 실측) 값을 손대지 않고 그대로 보낼 수 있다. 두 모드에 다 명령줄로 실으면
+                //   app-server 쪽이 이유 없이 그 상한과 `%`·줄바꿈 위험을 진다.
+                // ★패스스루 **뒤**다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이 이긴다(위 두 블록의 같은
+                //   규율). 사유 정본은 위 훅 등록 블록의 순서 주석이고 여기 되풀어 적지 않는다.
+                // ★어느 갈래로도 스폰을 실패시키지 않는다★ — 파일을 못 읽어도, 실을 수 없는 문자가 있어도,
+                //   예산을 넘어도 경고만 남기고 인자를 안 싣는다(ADR-0210 결정 4 의 규율). 프라이밍은
+                //   있으면 좋은 것이고 스폰은 필수다.
+                // ADR-0004
+                // ADR-0092
+                // ADR-0210
+                // ADR-0215
+                if matches!(output_format, AgentOutputFormat::Terminal) {
+                    if let Some(text) = priming_text(control.as_ref()) {
+                        if let Some(value) = developer_instructions_override(&text, &args) {
+                            if passthrough_overrides_key(extra_args, DEVELOPER_INSTRUCTIONS_KEY) {
+                                tracing::warn!(
+                                    "codex 패스스루가 `{DEVELOPER_INSTRUCTIONS_KEY}` 을 직접 세웠다 — 수신 계약 프라이밍을 위해 우리 값을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                                );
+                            }
+                            args.push(CONFIG_OVERRIDE_FLAG.to_string());
+                            args.push(value);
+                        }
+                    }
+                }
+
                 // ADR-0086 스텝 2(CLI 입구) — ★모드를 가르지 않는다★: 심는 것은 env 세 값뿐이고 그
                 //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구·훅 프로세스)이다.
                 //   두 모드 다 자식을 띄우므로 갈릴 축이 없다.
@@ -821,18 +1000,16 @@ impl AgentBackend for CodexBackend {
                 // ★`grants` 도 안 쓴다★ — 그 목록은 권한 프롬프트의 **사전 승인**이지 툴 허용 목록이
                 //   아니고(ADR-0094), codex 설정의 `enabled_tools` 로 번역하면 뜻이 「미리 승인」에서
                 //   「이것만 존재」로 바뀐다. 다른 뜻의 값을 같은 값이라 부르지 않는다.
-                // ★`priming_file` 도 안 쓴다 — 짝이 **없어서**이고, 재 본 결과다(2026-09-19 · 0.155.0)★:
-                //   경로를 받는 지시문 키는 `model_instructions_file` 하나뿐인데 그것은 **기본 지시문을
-                //   대체**한다(오류 문구가 `failed to read model instructions file`). 프라이밍을 거기
-                //   걸면 codex 자신의 운용 지시가 통째로 사라진다. 나머지 후보는 키 자체가 없다
-                //   (`experimental_instructions_file`·`developer_instructions_file`·`instructions_file`
-                //   전부 `unknown configuration field`). 내용을 인라인으로 받는 칸
-                //   (`developer_instructions`)은 있으나 프라이밍은 8 KB 넘는 마크다운이라 TOML 한 줄
-                //   리터럴에 담기지 않고(줄바꿈·작은따옴표), 담으려면 이 crate 가 프라이밍 **내용을 읽는**
-                //   쪽이 된다 — ADR-0092 가 그 역할을 소비 프로그램에 준 것과 반대다.
-                //   ★그래서 이 백엔드에서 우편 사용법을 나르는 것은 MCP 툴 설명 자체다★(데몬
-                //   `control/mcp_server.rs` 의 `eg_send` description 이 수신자 표기·요청/답장
-                //   계약·배달 상태·at-least-once 까지 싣는다).
+                // ★`priming_file` 은 **쓴다 — 단 경로가 아니라 내용을 쓴다**★: 경로를 받는 지시문 키는
+                //   `model_instructions_file` 하나뿐인데 그것은 덧붙이기가 아니라 **대체**라 걸면 codex
+                //   자신의 운용 지시가 사라지고, `developer_instructions_file` 은 키 자체가 없다(실측
+                //   0.155.0). 그래서 이 backend 가 그 파일을 **읽어** 위 [`DEVELOPER_INSTRUCTIONS_KEY`]
+                //   (터미널) 또는 `thread/start` 의 `developerInstructions`(app-server)로 싣는다.
+                //   ★「내용을 읽는 것은 ADR-0092 에 어긋난다」로 되돌리지 말 것★ — 그 ADR 이 소비
+                //   프로그램에 준 역할은 **경로 해석**이고, 그 역할은 데몬의 provider 가 여전히 단독으로
+                //   진다(이 폴더는 실려 온 경로를 읽을 뿐 어느 파일인지 고르지 않는다). 읽는 자리가
+                //   backend 폴더인 것은 ADR-0004 그대로다 — 「어느 키에 어떤 모양으로 싣나」가 여기 말고는
+                //   갈 데가 없다.
                 // ADR-0086 / ADR-0092 / ADR-0133 / ADR-0209
                 if let Some(endpoint) = &control {
                     inject_cli_entrance(&mut env, endpoint);
@@ -908,8 +1085,12 @@ impl AgentBackend for CodexBackend {
     /// ★`resume_session_id` 를 터미널 갈래에서는 쓰지 않는다 — 그런데 사유는 「손잡이가 없어서」가
     ///   **아니다**★: 그 모드의 이어받기는 이미 argv 에 실려 나갔다([`AgentBackend::build_spec`] 의
     ///   터미널 갈래). 같은 값을 여기서 또 쓰면 한 spawn 이 두 수단으로 이어받으려 든다.
+    /// ★`control` 도 **같은 규율로 app-server 갈래에서만 읽는다**★ — 여기서 꺼내는 것은 프라이밍 내용
+    ///   하나이고([`priming_text`]), 터미널 갈래는 그것을 이미 `-c developer_instructions=…` 로 실어
+    ///   보냈다. 그래서 PTY 쪽 생성자에는 이 칸이 닿지 않는다.
     // ADR-0185
     // ADR-0191
+    // ADR-0215
     fn open_spawn(
         &self,
         command: &AgentCommand,
@@ -919,6 +1100,7 @@ impl AgentBackend for CodexBackend {
         sid_sink: Option<SessionIdSink>,
         resume_session_id: Option<Uuid>,
         link_sink: Option<LinkSink>,
+        control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_app_server(command) {
@@ -926,7 +1108,7 @@ impl AgentBackend for CodexBackend {
                     spec,
                     true,
                     self.output_decoder(command),
-                    thread_open(spec, resume_session_id),
+                    thread_open(spec, resume_session_id, priming_text(control)),
                     sid_sink,
                     link_sink,
                 )?;
@@ -1308,6 +1490,10 @@ mod tests {
             //   무너지는 날 이 backend 가 그 경로를 그대로 받아 쓰는 회귀를 아무도 못 잡는다.
             config_path: Some(std::path::PathBuf::from("C:/engram/mcp-config.json")),
             send_exe: Some(std::path::PathBuf::from("C:/engram/bin/engram.exe")),
+            // ★이 경로는 **없는 파일**이고 그것이 의도다★: 이 backend 는 이제 지시서의 **내용**을 읽어
+            //   싣는데(ADR-0215), 실물을 가리키면 이 fixture 를 쓰는 모든 시험의 argv 에 프라이밍
+            //   오버라이드가 한 칸 더 붙어 인접·순서를 재는 단언들이 흔들린다. 읽기 실패는 fail-open 이라
+            //   여기서는 「안 실린다」로 착지한다. 주입을 재는 항목은 [`bake_priming`] 으로 실물을 굽는다.
             priming_file: Some(std::path::PathBuf::from("C:/engram/priming.md")),
             // ★이 칸이 「데몬이 이 스폰에 MCP 발신 입구를 인가했다」의 실물이다 — 비워 두지 말 것★:
             //   빈 목록은 운영자가 MCP 우편을 **끈** 상태이고(그쪽 fixture 는 아래
@@ -2067,6 +2253,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(sink),
             None,
             None,
+            None,
         )
         .expect("open_spawn");
 
@@ -2150,6 +2337,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             24,
             Some(sink),
             Some(resume_target),
+            None,
             None,
         )
         .expect("open_spawn");
@@ -2281,6 +2469,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             Some(sink),
             Some(resume_target),
             Some(link_sink),
+            None,
         )
         .expect("open_spawn");
 
@@ -2442,6 +2631,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             80,
             24,
             Some(sink),
+            None,
             None,
             None,
         )
@@ -2795,6 +2985,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     /// (`writes_mcp_config_file()` = false → 데몬이 안 쓴다), 이 시험은 그 게이트가 무너진 상태를
     /// **일부러** 먹여 두 번째 벽을 잰다. codex 에는 그 둘을 가리킬 플래그가 없어서 「Some 이니 뭔가
     /// 쓰자」로 claude 의 플래그를 베껴 붙이면 기동이 죽는다.
+    /// ★셋째 칸(`priming_file`)이 여기 함께 있는 것은 이제 다른 뜻이다★ — 그 파일은 **읽어서 싣는다**
+    ///   (ADR-0215). 그래도 **경로**가 argv 에 닿으면 안 되는 것은 그대로라 이 대조에 남긴다(같은 사실을
+    ///   실물 파일로 재는 짝 = `the_priming_path_never_reaches_the_command_line`).
     #[test]
     fn the_daemon_written_files_are_still_not_translated_into_argv() {
         let ep = endpoint();
@@ -2814,6 +3007,279 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 "경로 `{path}` 가 argv 에 실렸다: {argv:?}"
             );
         }
+    }
+
+    // ── ADR-0215: 프라이밍 주입(터미널 = `-c developer_instructions=…` · app-server = 핸드셰이크 JSON) ──
+
+    /// 지시서 파일을 임시 폴더에 구워 그것을 가리키는 endpoint 를 돌려준다.
+    ///
+    /// ★경로를 함께 돌려주는 것이 계약이다★ — 항목마다 지워야 한다. 기본 fixture 의
+    /// `C:/engram/priming.md` 는 **없는 파일**이라 읽기 실패 갈래로 떨어진다(그래서 다른 시험의 argv 가
+    /// 이 주입으로 늘지 않는다). 주입을 재려면 실물이 있어야 한다.
+    fn bake_priming(text: &str) -> (ControlEndpoint, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!("engram-priming-{}.md", Uuid::new_v4()));
+        std::fs::write(&path, text).expect("프라이밍 파일 기록");
+        (
+            ControlEndpoint {
+                priming_file: Some(path.clone()),
+                ..endpoint()
+            },
+            path,
+        )
+    }
+
+    /// 데몬이 프라이밍을 안 실어 준 스폰(비-MCP 갈래의 endpoint 모양).
+    fn endpoint_without_priming() -> ControlEndpoint {
+        ControlEndpoint {
+            priming_file: None,
+            ..endpoint()
+        }
+    }
+
+    fn developer_instructions_value(argv: &[String]) -> Option<String> {
+        let prefix = format!("{DEVELOPER_INSTRUCTIONS_KEY}=");
+        config_override_values(argv)
+            .into_iter()
+            .find(|v| v.starts_with(&prefix))
+    }
+
+    /// 건너뛴 갈래가 **정말로 아무 것도 안 바꿨나** — 프라이밍 없는 스폰과 argv 가 바이트 단위로 같나.
+    ///
+    /// ★「주입이 없다」만 재면 부족하다★: 값을 못 만든 갈래가 인자를 반쯤 밀어 넣거나 순서를 흔들어도
+    ///   그 단언은 통과한다. 이 대조가 「스폰은 그대로 간다」의 실물이다.
+    fn assert_argv_matches_a_spawn_without_priming(argv: &[String]) {
+        let bare = spec_with_control(&codex(vec![]), Some(endpoint_without_priming()));
+        assert_eq!(
+            argv,
+            codex_argv(&bare),
+            "프라이밍을 건너뛴 argv 가 프라이밍 없는 스폰과 다르다"
+        );
+    }
+
+    /// ★값을 **글자 그대로** 못 박는다★ — codex 설정 파서가 읽는 wire 계약이고, 작은따옴표(TOML 리터럴
+    /// 문자열)와 줄바꿈 두 글자 치환이 둘 다 load-bearing 이다.
+    #[test]
+    fn the_terminal_spawn_carries_the_priming_document_as_developer_instructions() {
+        let (ep, path) = bake_priming("line one\nline two\n");
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let value = developer_instructions_value(&codex_argv(&s)).expect("프라이밍이 안 실렸다");
+        assert_eq!(value, "developer_instructions='line one\\nline two\\n'");
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★실제 줄바꿈이 한 글자라도 남으면 cmd 가 그 자리에서 명령줄을 자른다(오류 없음)★ — 세 형태
+    /// (`\r\n`·`\n`·`\r`)를 한 문서에 섞어, 어느 하나만 바꾸는 구현을 잡는다.
+    #[test]
+    fn every_line_break_shape_collapses_into_one_line() {
+        let (ep, path) = bake_priming("a\r\nb\rc\nd");
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let value = developer_instructions_value(&codex_argv(&s)).expect("프라이밍이 안 실렸다");
+        assert_eq!(value, "developer_instructions='a\\nb\\nc\\nd'");
+        assert!(
+            !value.contains('\n') && !value.contains('\r'),
+            "값에 실제 줄바꿈이 남았다: {value:?}"
+        );
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★작은따옴표 하나가 TOML 리터럴 문자열을 깬다 — 영어 축약형 한 번이면 들어온다★.
+    #[test]
+    fn a_quoted_priming_document_is_skipped_and_the_spawn_still_stands() {
+        let (ep, path) = bake_priming("do not route around it — tell your principal you can't");
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let argv = codex_argv(&s);
+        assert!(
+            developer_instructions_value(&argv).is_none(),
+            "작은따옴표가 든 지시서가 그대로 실렸다: {argv:?}"
+        );
+        assert_argv_matches_a_spawn_without_priming(&argv);
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★`%NAME%` 은 cmd 가 **따옴표 안에서도** 편다★ — 그대로 실으면 에이전트가 읽는 문서에 이 기기의
+    /// 환경변수 값이 박히거나(치환 성공) 문장이 통째로 사라진다(미정의 변수).
+    #[test]
+    fn a_priming_document_with_a_percent_sign_is_skipped_and_the_spawn_still_stands() {
+        let (ep, path) = bake_priming("progress is 50% done");
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let argv = codex_argv(&s);
+        assert!(
+            developer_instructions_value(&argv).is_none(),
+            "`%` 가 든 지시서가 그대로 실렸다: {argv:?}"
+        );
+        assert_argv_matches_a_spawn_without_priming(&argv);
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★예산을 넘는 지시서는 **스폰을 죽이지 않고** 건너뛴다★ — 상한을 넘긴 명령줄은 오류가 아니라
+    /// 절단으로 벌하므로, MCP 부착과 훅 등록까지 함께 사라지는 것이 이 갈래의 진짜 대가다.
+    #[test]
+    fn an_oversized_priming_document_is_skipped_and_the_spawn_still_stands() {
+        let (ep, path) = bake_priming(&"x".repeat(CMD_LINE_LIMIT_UTF16));
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let argv = codex_argv(&s);
+        assert!(
+            developer_instructions_value(&argv).is_none(),
+            "예산을 넘는 지시서가 실렸다(길이 {})",
+            argv.iter().map(|a| a.len()).sum::<usize>()
+        );
+        assert_argv_matches_a_spawn_without_priming(&argv);
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★예산은 **잔액**으로 판정한다 — 우리 값만 재는 것이 아니다★: 같은 지시서가 패스스루가 긴
+    /// 스폰에서는 건너뛰어진다. 고정 상수 비교로 되돌리면 이 항목이 무너진다.
+    #[test]
+    fn the_budget_counts_what_the_rest_of_the_command_line_already_spent() {
+        let text = "y".repeat(CMD_LINE_LIMIT_UTF16 / 2);
+        let (ep, path) = bake_priming(&text);
+        let roomy = spec_with_control(&codex(vec![]), Some(ep.clone()));
+        assert!(
+            developer_instructions_value(&codex_argv(&roomy)).is_some(),
+            "여유 있는 명령줄에서 건너뛰었다"
+        );
+        let filler = "z".repeat(CMD_LINE_LIMIT_UTF16 / 2);
+        let crowded = spec_with_control(&codex(vec![filler.as_str()]), Some(ep));
+        assert!(
+            developer_instructions_value(&codex_argv(&crowded)).is_none(),
+            "패스스루가 예산을 다 쓴 명령줄에 그대로 실었다"
+        );
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★패스스루 **뒤**여야 한다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이 이긴다. 앞에 두면 사용자
+    /// 인자 한 줄이 수신 계약 프라이밍을 아무 신호 없이 지운다(훅·MCP 부착과 같은 규율).
+    #[test]
+    fn the_priming_override_follows_the_passthrough() {
+        let (ep, path) = bake_priming("teach the reply contract");
+        let s = spec_with_control(
+            &codex(vec![
+                CONFIG_OVERRIDE_FLAG,
+                "developer_instructions='theirs'",
+            ]),
+            Some(ep),
+        );
+        let values = config_override_values(&codex_argv(&s));
+        let ours = values
+            .iter()
+            .position(|v| v.contains("teach the reply contract"))
+            .expect("우리 값이 없다");
+        let theirs = values
+            .iter()
+            .position(|v| v.contains("theirs"))
+            .expect("패스스루가 걸러졌다 — 사용자 인자를 검열하면 안 된다");
+        assert!(
+            ours > theirs,
+            "우리 값이 앞에 실렸다(지고 있다): {values:?}"
+        );
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★app-server 갈래는 명령줄을 한 글자도 안 쓴다 — 그리고 값을 **손대지 않는다**★: 줄바꿈도,
+    /// 터미널 갈래가 끊어 내는 `'`·`%` 도 JSON 본문에서는 아무 것도 못 깬다. 그쪽 변환을 이리 옮기면
+    /// 아무 위험도 막지 못한 채 에이전트가 읽는 문서만 망가진다.
+    #[test]
+    fn the_app_server_handshake_carries_the_document_unmodified() {
+        let text = "line one\nyou can't skip 50% of it\n";
+        let (ep, path) = bake_priming(text);
+        let s = spec_with_control(&codex_app_server(vec![]), Some(ep.clone()));
+        assert!(
+            developer_instructions_value(&codex_argv(&s)).is_none(),
+            "app-server 갈래가 명령줄로도 실었다: {:?}",
+            codex_argv(&s)
+        );
+        let params = match thread_open(&s, None, priming_text(Some(&ep))) {
+            ThreadOpen::Start(p) => p,
+            ThreadOpen::Resume(_) => panic!("이어받기가 아닌데 resume 이 골라졌다"),
+        };
+        let v = serde_json::to_value(&params).expect("직렬화");
+        assert_eq!(
+            v.get("developerInstructions").and_then(|v| v.as_str()),
+            Some(text),
+            "핸드셰이크 JSON 의 지시문이 원문과 다르다: {v}"
+        );
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★이어받은 app-server 스레드는 프라이밍을 못 받는다 — 회귀가 아니라 결정이다★
+    /// (`ThreadResumeParams` 의 doc 이 사유의 정본). 그 칸이 실측으로 확인돼 생기는 날 이 항목이
+    /// 빨개지면서 함께 고쳐진다.
+    #[test]
+    fn a_resuming_app_server_handshake_carries_no_instructions_field() {
+        let (ep, path) = bake_priming("teach the reply contract");
+        let s = spec_with_control(&codex_app_server(vec![]), Some(ep.clone()));
+        let params = match thread_open(&s, Some(Uuid::new_v4()), priming_text(Some(&ep))) {
+            ThreadOpen::Resume(p) => p,
+            ThreadOpen::Start(_) => panic!("이어받기인데 start 가 골라졌다"),
+        };
+        let v = serde_json::to_value(&params).expect("직렬화");
+        assert!(
+            v.get("developerInstructions").is_none(),
+            "재 본 적 없는 칸이 이어받기 요청에 실렸다: {v}"
+        );
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// 데몬이 프라이밍을 안 실어 준 스폰(`wants_priming` 이 false 인 갈래)은 argv 가 한 칸도 늘지 않는다.
+    #[test]
+    fn without_a_priming_file_nothing_is_injected() {
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let s = spec_with_control(&command, Some(endpoint_without_priming()));
+            assert!(
+                developer_instructions_value(&codex_argv(&s)).is_none(),
+                "{command:?}: 경로가 없는데 실렸다"
+            );
+        }
+        assert!(priming_text(Some(&endpoint_without_priming())).is_none());
+        assert!(priming_text(None).is_none());
+    }
+
+    /// ★읽기 실패는 fail-open 이다★ — 경고만 남기고 스폰은 그대로 간다. 오류로 올리면 지시서 파일 하나가
+    /// 사라진 설치에서 codex 스폰이 통째로 죽는다.
+    #[test]
+    fn an_unreadable_priming_file_is_skipped_in_both_modes() {
+        let missing =
+            std::env::temp_dir().join(format!("engram-priming-absent-{}.md", Uuid::new_v4()));
+        let ep = ControlEndpoint {
+            priming_file: Some(missing),
+            ..endpoint()
+        };
+        assert!(priming_text(Some(&ep)).is_none(), "없는 파일이 읽혔다");
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let s = spec_with_control(&command, Some(ep.clone()));
+            let argv = codex_argv(&s);
+            assert!(
+                developer_instructions_value(&argv).is_none(),
+                "{command:?}: 없는 파일인데 실렸다"
+            );
+        }
+        assert_argv_matches_a_spawn_without_priming(&codex_argv(&spec_with_control(
+            &codex(vec![]),
+            Some(ep),
+        )));
+    }
+
+    /// 빈 지시서는 명령줄만 쓰고 아무 것도 안 가르친다 — 실을 이유가 없다.
+    #[test]
+    fn an_empty_priming_file_is_not_injected() {
+        let (ep, path) = bake_priming("   \n\t\n");
+        assert!(priming_text(Some(&ep)).is_none(), "빈 파일이 실렸다");
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
+    }
+
+    /// ★경로는 여전히 argv 에 닿지 않는다★ — 실리는 것은 **내용**이다. 경로가 새면 codex 가 모르는
+    /// 낱말을 첫 프롬프트로 먹는다(`[PROMPT]` 위치 인자).
+    #[test]
+    fn the_priming_path_never_reaches_the_command_line() {
+        let (ep, path) = bake_priming("teach the reply contract");
+        let s = spec_with_control(&codex(vec![]), Some(ep));
+        let needle = path.to_string_lossy().into_owned();
+        assert!(
+            !s.args.iter().any(|a| a.contains(&needle)),
+            "지시서 경로가 argv 에 실렸다: {:?}",
+            s.args
+        );
+        std::fs::remove_file(&path).expect("임시 지시서 삭제");
     }
 
     #[test]

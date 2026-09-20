@@ -3784,6 +3784,7 @@ mod tests {
                 cwd: None,
                 approval_policy: None,
                 sandbox: None,
+                developer_instructions: None,
             }),
             None,
             None,

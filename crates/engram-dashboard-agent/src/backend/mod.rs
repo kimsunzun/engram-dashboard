@@ -439,8 +439,18 @@ pub trait AgentBackend: Send + Sync {
     /// ★단 이 기본값은 `transport_shape` 를 **읽지 않는다**★: 파이프를 요구한다고 신고해 놓고 이 메서드를
     ///   구현하지 않으면 조용히 터미널로 뜬다. 선언 표 트립와이어(`tests::expected_codec_axis`)는
     ///   `transport_shape` 의 신고값만 재므로 그 어긋남을 못 본다.
+    ///
+    /// `control` = [`AgentBackend::build_spec`] 이 받은 것과 **같은 endpoint**. 명령줄이 아니라 **통로
+    ///   핸드셰이크로** 제어 평면 데이터를 실어야 하는 backend 를 위해 온다(codex app-server 가
+    ///   `thread/start` 의 `developerInstructions` 에 프라이밍 내용을 싣는다).
+    /// ★그쪽에서 이미 썼다고 여기서 다시 쓰지 말 것★ — 한 spawn 이 같은 값을 두 수단으로 보내면 상대가
+    ///   그 둘을 어떻게 합치는지에 우리 동작이 매달린다. 조립하는 자리는 모드마다 하나여야 한다
+    ///   (`resume_session_id` 가 argv 와 핸드셰이크로 갈리는 것과 같은 규율).
+    /// ★대부분의 backend 는 이 칸을 무시한다★ — 명령줄로 번역해 끝나는 backend 는 `build_spec` 에서
+    ///   이미 다 했다.
     // ADR-0004
     // ADR-0191
+    // ADR-0215
     /// 이 backend 의 통로가 연결을 세워야 하나(공개 래퍼 [`declares_link`] 의 doc 이 정본).
     /// ★기본값 = `false`★ — 선언하지 않은 backend 는 배달 포트를 받지 않고 옛 판정 경로를 그대로 탄다.
     // ADR-0004
@@ -458,10 +468,12 @@ pub trait AgentBackend: Send + Sync {
         resume_session_id: Option<Uuid>,
         // 연결의 결말을 배달할 곳 — `declares_link()` 가 true 인 backend 에만 온다.
         _link_sink: Option<LinkSink>,
+        control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
-        // 이 기본값은 세션 id 를 받아 오지도 통로로 이어받지도 않는다 — 밑줄 이름 대신 여기서 명시적으로
-        //   버린다(이름은 위 doc 이 부르는 것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
-        let _ = (sid_sink, resume_session_id);
+        // 이 기본값은 세션 id 를 받아 오지도, 통로로 이어받지도, 제어 평면 데이터를 핸드셰이크에 싣지도
+        //   않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는 것과 같아야 한다:
+        //   rustdoc 이 시그니처를 그대로 렌더한다).
+        let _ = (sid_sink, resume_session_id, control);
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -760,8 +772,18 @@ pub fn open_spawn(
     sid_sink: Option<SessionIdSink>,
     resume_session_id: Option<Uuid>,
     link_sink: Option<LinkSink>,
+    control: Option<&ControlEndpoint>,
 ) -> Result<SpawnParts, PtyError> {
-    backend_for(c).open_spawn(c, spec, cols, rows, sid_sink, resume_session_id, link_sink)
+    backend_for(c).open_spawn(
+        c,
+        spec,
+        cols,
+        rows,
+        sid_sink,
+        resume_session_id,
+        link_sink,
+        control,
+    )
 }
 
 /// 이 backend 의 통로가 **연결을 세워야** 쓸 수 있나 = 결말을 배달할 축이 있나.
@@ -1523,7 +1545,7 @@ mod tests {
                 //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts = open_spawn(c, &probe, 80, 24, None, None, None).expect("open_spawn");
+            let parts = open_spawn(c, &probe, 80, 24, None, None, None, None).expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();

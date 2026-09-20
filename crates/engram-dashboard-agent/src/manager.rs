@@ -1371,7 +1371,7 @@ impl AgentManager {
             resume_session_id,
             cwd.clone(),
             profile.env.clone(),
-            control_endpoint,
+            control_endpoint.clone(),
         );
 
         // ADR-0079: json 모드 claude 만 실제로 transcript 를 읽는다 — 터미널은 TUI PTY repaint 로
@@ -1418,6 +1418,11 @@ impl AgentManager {
             Some(session_id_sink(self.profiles.clone(), profile.id, epoch)),
             resume_session_id,
             link_sink,
+            // ★위 `build_command_spec` 에 넘긴 것과 **같은 endpoint** 다★ — 명령줄로 번역할 것은 거기서
+            //   끝났고, 이 자리는 **통로 핸드셰이크로** 실어야 하는 backend 를 위해 같은 값을 한 번 더
+            //   건넨다(codex app-server 가 `thread/start` 에 프라이밍을 싣는다). 무엇을 어디에 싣는지는
+            //   backend 가 정한다 — 이 자리는 두 수단 중 어느 쪽인지 모른다(ADR-0004).
+            control_endpoint.as_ref(),
         )?;
 
         let (session, child_pid) =
@@ -3149,6 +3154,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
@@ -3169,6 +3175,7 @@ mod tests {
             &probe_spec(),
             DEFAULT_COLS,
             DEFAULT_ROWS,
+            None,
             None,
             None,
             None,
