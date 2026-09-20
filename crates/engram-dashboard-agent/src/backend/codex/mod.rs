@@ -31,7 +31,10 @@
 //!        적혀 있던 옛 문장은 더 이상 참이 아니다★: 그 argv 로 실제로 떴고, **세션 id 가 보존된다**. 새
 //!        세션이 id S 를 `source:"startup"` 으로 신고하고, 이어받으면 **같은 S** 가 `source:"resume"` 으로
 //!        다시 오며(반복 이어받기에도 안정) 기록은 S 의 원래 rollout 파일에 이어 붙는다. 그래서 이어받은
-//!        세션의 훅 보고는 충돌이 아니라 「이미 같은 값」으로 끝나고, 낡은 id 로 흘러가는 갈래가 없다.
+//!        세션의 회수는 덮어쓰기든 아니든 **같은 값에 착지하고**, 낡은 id 로 흘러가는 갈래가 없다.
+//!        ★단 이것은 `source` 칸을 내던 **훅 채널**의 관측이고, 그 채널은 걷혔다(ADR-0216)★. 오늘 회수는
+//!        TUI 상태줄을 읽고 그 자리엔 `source` 칸이 없다 — 그래서 **ADR-0216 은 재개 시 id 거동을 미측정
+//!        으로 적어 두고 그 위에서 덮어쓰기를 골랐다.** 둘이 어긋나 보이면 이 문단이 옛 채널의 기록이다.
 //!   3. 아래 `build_spec` 의 `%VAR%` 한계(그 자리 주석이 정본).
 //!
 //! capability 선언이 그 표와 어긋나면 시험대의 **비-`#[ignore]`** 항목이 빨개진다.
@@ -40,6 +43,7 @@
 
 pub(crate) mod decoder;
 pub(crate) mod protocol;
+mod thread_id;
 pub(crate) mod transport;
 
 use std::path::PathBuf;
@@ -186,7 +190,7 @@ const APPROVAL_ON_REQUEST: &str = "on-request";
 ///   새로 들인 위험이 아니다 — 걸러 내지 않는 사유는 아래 패스스루 주석이 정본이다.
 const RESUME_SUBCOMMAND: &str = "resume";
 
-/// codex 설정을 명령줄에서 덮어쓰는 플래그. ★훅 등록에 파일을 하나도 쓰지 않게 하는 수단이 이것 하나다★
+/// codex 설정을 명령줄에서 덮어쓰는 플래그. ★사용자 기기에 파일을 하나도 안 만들고 설정을 얻는 수단이 이것 하나다★
 /// — 사용자 홈(`$CODEX_HOME/config.toml`)에도, 래퍼 스크립트에도 우리는 한 글자도 쓰지 않는다.
 const CONFIG_OVERRIDE_FLAG: &str = "-c";
 
@@ -200,6 +204,24 @@ const SESSION_START_HOOK_KEY: &str = "hooks.SessionStart";
 /// ★어긋나도 아무 데도 안 남는다 — 그래서 손으로 맞춘다★: 그 CLI 는 반려 갈래에서도 exit 0 에 stdout
 /// 봉인이라(ADR-0208 결정 3), 이 문자열에 오타 한 글자가 나면 증상은 「세션 id 가 영영 안 온다」 하나다.
 const HOOK_REPORT_ARGV: &str = "hook session-start";
+
+/// TUI 상태줄 항목 표의 키.
+const STATUS_LINE_KEY: &str = "tui.status_line";
+
+/// 터미널 모드 스폰에 싣는 상태줄 오버라이드 값 — ★codex 가 **전체 36 자 thread id** 를 화면에 찍게
+/// 하는 것이 이 한 값의 전부다★(회수는 우리 PTY 가 한다 — [`thread_id`]).
+///
+/// ★항목 이름이 틀리면 오류가 아니라 조용한 무시다★ — `thread-name` 은 그럴듯하지만 **무효**이고,
+///   유효한 것은 `thread-id`(`session-id` 는 레거시 별칭) · `thread` · `thread-title` 이다. 확인 수단은
+///   `codex --strict-config -c '<이 값>' app-server --stdio`(모르는 루트 키면 `unknown configuration
+///   field` 로 exit 1 — 실측 0.155.1 · 이 값은 exit 0).
+/// ★작은따옴표(TOML 리터럴 문자열)가 load-bearing 이다 — 큰따옴표로 바꾸지 말 것★: 이 값은 argv 한
+///   칸에 들어가 Windows 에서 `cmd.exe /c` 래핑을 한 겹 더 지난다. 큰따옴표를 넣으면 그 겹이 인자
+///   경계를 다시 해석하며 값이 갈린다. 형제 오버라이드들이 같은 이유로 전부 작은따옴표다.
+/// ★실측(codex-cli 0.155.1, 직전 세션 — 정본 = ADR-0216 「근거」)★: 스폰 약 0.3 초 뒤 · 첫 턴 전 ·
+///   rollout 파일이 생기기도 전에 찍히고, 터미널 폭을 60 칸으로 좁혀도 36 자가 온전하다.
+// ADR-0216
+const STATUS_LINE_OVERRIDE: &str = "tui.status_line=['thread-id']";
 
 /// 데몬 MCP 서버를 이 스폰에 붙이는 설정 오버라이드의 키 접두. 뒤에 서버 논리명이 붙어
 /// `mcp_servers.engram` 한 키가 된다(정본 = [`MCP_SERVER_NAME`] — 이름을 여기 다시 타이핑하지 말 것).
@@ -473,6 +495,12 @@ const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 ///   돌려줬다. 즉 「작은따옴표·역슬래시·공백 없는 경로」 조합은 그 두 겹을 견딘다 — 「shim 을 지나며
 ///   망가질지 모른다」를 전제로 한 방어를 새로 세우지 말 것(`%VAR%` 한계는 위 문단이 정본이고 그것과
 ///   별개다).
+// ★오늘 이 빌더를 부르는 운영 경로는 없다 — 그래서 `dead_code` 를 끈다★. 회수가 TUI 상태줄로
+//   옮겨 갔고(ADR-0216), 삭제에는 **순서 조건**이 걸려 있다: GUI 실측으로 새 채널을 확인한 뒤에
+//   훅 기계장치를 통째로 걷는다. 그때까지 이 빌더·[`SESSION_START_HOOK_KEY`]·[`HOOK_REPORT_ARGV`]·
+//   [`short_program_path`] 는 되돌아갈 길로 서 있다(이 한 줄이 그 넷을 함께 덮는다 — 각자에 붙이면
+//   걷어낼 때 네 자리를 찾아다녀야 한다). ★실측이 초록이면 이 넷과 이 속성을 **함께** 지울 것★.
+#[allow(dead_code)]
 fn session_start_hook_override(send_exe: Option<&std::path::Path>) -> Option<String> {
     let Some(exe) = send_exe else {
         tracing::warn!(
@@ -530,7 +558,7 @@ fn session_start_hook_override(send_exe: Option<&std::path::Path>) -> Option<Str
 ///   키. 이 목록을 키워 「확실히」 만들려 들지 말 것 — codex 오버라이드 문법의 재구현이 되고 그 재구현은
 ///   상류가 바뀔 때마다 조용히 낡는다. 놓쳐서 잃는 것은 **경고뿐이고 동작이 아니다** — 우리 것이 이기는
 ///   성질은 아래 `build_spec` 의 순서가 따로 보장한다.
-/// ★키를 인자로 받는 것이 의도다★ — 오버라이드가 둘이 됐는데(훅 등록 · MCP 서버 부착) 판정을 키마다
+/// ★키를 인자로 받는 것이 의도다★ — 오버라이드가 여럿이라(MCP 서버 부착 · 상태줄 · 지시서) 판정을 키마다
 ///   복제하면 한쪽만 고쳐져 경고가 반쪽이 된다.
 fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
@@ -604,8 +632,9 @@ impl AgentBackend for CodexBackend {
     /// 실어 띄운다([`RESUME_SUBCOMMAND`] · [`AgentBackend::build_spec`] 의 터미널 갈래).
     /// ★그래서 이 칸은 [`is_app_server`] 를 보지 않는다 — 되돌리지 말 것★: 이 술어가 묻는 것은
     ///   **저장된 sid 로 이어받을 수 있나**이지 어느 통로로 이어받나가 아니다. 통로로 가르면 터미널
-    ///   모드로 뜬 codex 는 손잡이가 명부에 있어도 활성화 입구가 Fresh 로 띄워, 훅이 받아 적어 둔
-    ///   ([`crate::profile::ProfileRegistry::adopt_session_id`]) 그 id 가 영영 안 쓰인다.
+    ///   모드로 뜬 codex 는 손잡이가 명부에 있어도 활성화 입구가 Fresh 로 띄워, TUI 상태줄에서 읽어
+    ///   적어 둔([`crate::profile::ProfileRegistry::observe_session_id`]) 그 id 가 영영 안 쓰인다
+    ///   (ADR-0216).
     /// ★손잡이가 **없을 때**는 이 칸이 답하지 않는다★ — 그 판정은 저장된 sid 존재와 함께 보는
     ///   [`crate::backend::can_resume_profile`] 이 하고, 그래도 Resume 으로 들어온 spawn 은
     ///   [`AgentBackend::build_spec`] 이 새 대화 argv 로 떨어뜨린다(그 자리 doc).
@@ -623,12 +652,11 @@ impl AgentBackend for CodexBackend {
     /// 있다. 아래 칸이 묻는 것은 그중 **mcp-config 파일을 먹일 수 있나** 하나뿐이다.
     /// ★false 로 되돌리면 codex 스폰의 env 에서 `ENGRAM_TOKEN`·`ENGRAM_CONTROL_URL` 이 통째로 사라진다★
     ///   — 조립점이 이 칸을 보고 provision 자체를 건너뛰므로([`crate::manager::AgentManager`] 의 그
-    ///   자리) endpoint 가 `None` 으로 오고, 아래 `build_spec` 의 주입이 한 줄도 돌지 않는다. 그러면
-    ///   codex 가 띄우는 훅 프로세스도 자격증명 없이 뜬다.
-    /// ★그 훅이 실제로 이 env 를 받는다(실측 2026-09-18, codex 0.155.0)★ — codex 는 `SessionStart` 훅
-    ///   프로세스에 자기 env 를 **하나도 덧씌우지 않는다**(순수 상속). 즉 여기서 심은 토큰이 그 훅에
-    ///   그대로 도착한다. 공용 주입이 「보조 프로세스의 자격증명이기도 하다」고 적은 조건을 이 백엔드가
-    ///   만족한다는 실측이 이것이고, 그 조건 자체는 [`inject_cli_entrance`] doc 이 진다.
+    ///   자리) endpoint 가 `None` 으로 오고, 아래 `build_spec` 의 주입이 한 줄도 돌지 않는다.
+    /// ★한때 이 env 의 소비자에 **우리 훅 프로세스**가 있었다 — 오늘은 없다★(ADR-0216 이 등록을 걷었다).
+    ///   그때 잰 것은 남긴다: codex 는 훅 프로세스에 자기 env 를 **하나도 덧씌우지 않았다**(순수 상속 —
+    ///   실측 2026-09-18, 0.155.0). 살아 있는 소비자는 codex 가 띄우는 셸 도구와 MCP 우편이고, 공용
+    ///   주입이 「보조 프로세스의 자격증명이기도 하다」고 적은 조건은 [`inject_cli_entrance`] doc 이 진다.
     /// ★이 칸이 **우편을 열지는 않는다 — 그리고 그것이 공짜가 아니었다**★: 예전 데몬은 우편 가부를
     ///   `!accepts_mcp_config` 하나로 파생해서, 이 칸을 켜는 것만으로 이 백엔드에 **보내기 인가가 함께
     ///   열렸다**(받기는 [`AgentBackend::reads_messages`] 가 닫은 채로). 그 비대칭을 없애려고 보내기 축을
@@ -886,10 +914,10 @@ impl AgentBackend for CodexBackend {
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
                 // ADR-0004
 
-                // ★MCP 서버 부착도 같은 자리·같은 규율이다(패스스루 **뒤**)★ — 아래 훅 등록 블록의
-                //   순서 주석이 그 사유의 정본이고 여기 되풀어 적지 않는다. ★훅과 달리 **모드를 가르지
-                //   않는다**★: 우편 입구는 두 모드 다 필요하고, 훅이 터미널에만 걸린 것은 app-server 가
-                //   세션 id 를 다른 경로로 받아 오기 때문이지 모드가 우편을 가르기 때문이 아니다.
+                // ★MCP 서버 부착도 같은 자리·같은 규율이다(패스스루 **뒤**)★ — 아래 상태줄 블록의
+                //   순서 주석이 그 사유의 정본이고 여기 되풀어 적지 않는다. ★그런데 **모드를 가르지
+                //   않는다**★: 우편 입구는 두 모드 다 필요하다. 모드를 가르는 것은 상대가 같은 값을
+                //   **다른 수단으로 이미 주는** 축(세션 id · 프라이밍)이고, 우편은 그 축에 안 든다.
                 // ★이 한 값이 codex 우편의 **유일한 물리 배선**이다★ — claude 는 mcp-config 파일을 읽지만
                 //   codex 는 이 오버라이드만 먹는다(실측 0.155.0). 빠지면 `eg_send` 툴이 아예 없고,
                 //   데몬은 「MCP 로 우편을 쓴다」고 판정해(`mail_allowed=false`) CLI 미러까지 닫으므로
@@ -902,7 +930,7 @@ impl AgentBackend for CodexBackend {
                 //   ([`McpAttachment::NotWanted`])든 못 만든 것([`McpAttachment::Unrepresentable`])이든
                 //   이 자리가 하는 일은 같다(인자를 안 싣는다). 못 만든 쪽을 스폰 중단으로 끊는 자리는
                 //   [`AgentBackend::precheck_control_endpoint`] 이고, 이 함수는 인자만 만든다(바로 아래
-                //   훅 블록이 신고 자리를 조립점으로 미루는 것과 같은 규율).
+                //   상태줄·지시서 블록이 신고 자리를 조립점으로 미루는 것과 같은 규율).
                 match mcp_attachment(control.as_ref()) {
                     McpAttachment::Attach(value) => {
                         if passthrough_overrides_key(
@@ -919,36 +947,46 @@ impl AgentBackend for CodexBackend {
                     McpAttachment::NotWanted | McpAttachment::Unrepresentable(_) => {}
                 }
 
-                // ★훅 등록은 패스스루 **뒤**다 — 앞에 두면 사용자 인자 한 줄에 우리 등록이 진다★.
-                //   실측(codex-cli 0.155.0 · 2026-09-19): 같은 설정 키를 `-c` 로 두 번 넘기면 **마지막
-                //   것이 이긴다** — 병합도 없고 중복 키 오류도 없다. 그래서 앞에 두면
-                //   `-c hooks.SessionStart=[]` 한 줄이 우리 등록을 통째로 지우고, 그 결말은 `hooks/list`
-                //   가 빈 배열 · 신뢰 심사 프롬프트 **없음** · 세션 id 영영 도착 안 함이다. 화면에도
-                //   로그에도 아무 신호가 남지 않는다.
-                //   ★그러니 「인자 조립을 정돈」한답시고 이 블록을 위 터미널 갈래로 되돌리지 말 것★.
-                // ★터미널 모드에만 건다(ADR-0208/ADR-0210)★ — app-server 모드의 세션 id 는 `thread/start` 응답으로
-                //   통로가 직접 받아 오고(그쪽 sink 가 언제나 먼저 같은 값을 채운다), 훅 보고는 늘 「이미
-                //   같은 값」으로 끝난다. 이 모드에만 받을 창구가 없었다.
-                // ★`build_spec` 이 이 값을 만드는 것이 ADR-0004 의 요점이다★ — 조립점은 훅도 `-c` 문법도
-                //   모른다. 여기 쓰는 재료는 공용 endpoint 의 `send_exe` 하나이고, 그것은
-                //   [`inject_cli_entrance`] 가 `ENGRAM_CLI_EXE`·PATH 에 쓰는 **같은 값**이다 — 실행파일을
-                //   찾는 둘째 방법을 만들지 말 것.
+                // ★★오버라이드는 전부 패스스루 **뒤**다 — 이 자리가 그 규율의 정본이다★★(형제 블록
+                //   둘이 여기를 가리킨다). 실측(codex-cli 0.155.0 · 2026-09-19): 같은 설정 키를 `-c` 로
+                //   두 번 넘기면 **마지막 것이 이긴다** — 병합도 없고 중복 키 오류도 없다. 그래서 앞에
+                //   두면 사용자 인자 한 줄(`-c tui.status_line=[]`)이 우리 값을 통째로 지우고, 그 결말은
+                //   화면에도 로그에도 아무 신호가 없다.
+                //   ★그러니 「인자 조립을 정돈」한답시고 이 블록들을 위 터미널 갈래로 되돌리지 말 것★.
+                // ★터미널 모드에만 얹는다★ — app-server 모드의 thread id 는 `thread/start` 응답으로
+                //   구조화된 채 오므로 화면을 읽을 이유가 없고, 얹으면 한 spawn 이 같은 값을 두 경로로
+                //   적으려 든다.
+                // ★제어 채널 유무를 **안 본다** — 형제 오버라이드와 갈리는 지점이다★: MCP 부착은
+                //   endpoint 에서 재료(url)를 받아야 서지만, 이 값은 상수라 받을 재료가 없다. 그래서
+                //   제어 평면이 없는 스폰에서도 실린다.
+                // ★★사용자 값을 덮으면 **말한다 — 조용한 덮어쓰기는 금지다**★★(ADR-0216 결정 1).
+                //   ★그래도 거르지는 않는다★: 패스스루를 지우는 것은 사용자 인자를 우리가 검열하는
+                //   것이고, 우리 값을 접으면 세션 id 회수가 통째로 죽는다. 둘 다 안 하고 이긴 사실만
+                //   남긴다(이 자리도 형제 블록들의 정본이다).
+                // ★`-c` 는 리스트를 병합하지 못한다★ — 그래서 사용자가 자기 상태줄 항목을 세워 뒀다면
+                //   그 항목들은 이 스폰에서 사라진다(다음 스폰이 아니라 이 스폰에서만).
+                // ADR-0216
                 if matches!(output_format, AgentOutputFormat::Terminal) {
-                    if let Some(value) = session_start_hook_override(
-                        control.as_ref().and_then(|e| e.send_exe.as_deref()),
-                    ) {
-                        // ★거르지 않고 경고만 한다★ — 패스스루를 지우는 것은 사용자 인자를 우리가 검열하는
-                        //   것이고, 우리 등록을 접으면 세션 id 회수가 통째로 죽는다. 둘 다 안 하고 이긴
-                        //   사실만 남긴다.
-                        if passthrough_overrides_key(extra_args, SESSION_START_HOOK_KEY) {
-                            tracing::warn!(
-                                "codex 패스스루가 `{SESSION_START_HOOK_KEY}` 을 직접 세웠다 — 세션 id 회수를 위해 우리 등록을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
-                            );
-                        }
-                        args.push(CONFIG_OVERRIDE_FLAG.to_string());
-                        args.push(value);
+                    if passthrough_overrides_key(extra_args, STATUS_LINE_KEY) {
+                        tracing::warn!(
+                            "codex 패스스루가 `{STATUS_LINE_KEY}` 을 직접 세웠다 — 세션 id 회수를 위해 우리 값을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                        );
                     }
+                    args.push(CONFIG_OVERRIDE_FLAG.to_string());
+                    args.push(STATUS_LINE_OVERRIDE.to_string());
                 }
+
+                // ★`SessionStart` 훅은 더 이상 등록하지 않는다(ADR-0216)★ — 회수 경로가 위 상태줄로
+                //   옮겨 갔다. 훅이 **고장 나서**가 아니다(돌았다 — 실측 0.155.0): 기각 사유는 codex 가
+                //   훅 **명령 문자열**을 해싱해 사람 승인을 요구하는데 그 문자열에 우리 exe 절대경로가
+                //   박혀 있다는 것 하나다. 배포가 태그 이름 폴더로 풀리므로 경로가 릴리스마다 바뀌고,
+                //   그래서 릴리스마다 승인 화면이 다시 뜨며 **그 화면이 떠 있는 동안 터미널 codex 가
+                //   아예 안 뜬다.**
+                // ★그런데 [`session_start_hook_override`] 와 그 짝들은 **아직 서 있다 — 지우지 말 것**★:
+                //   ADR-0216 이 그 삭제에 **순서 조건**을 걸었다. 새 채널을 GUI 실측으로 눈으로 확인한
+                //   **뒤에** 훅 기계장치(이 빌더 · `engram hook session-start` CLI 동사 · `/control/hook`
+                //   라우트 · 그 수신 모듈)를 통째로 걷는다. 그 실측이 빨가면 여기 한 블록을 되살리는 것이
+                //   되돌아갈 길이고, 그 길은 기계장치가 남아 있는 동안에만 있다.
 
                 // ★프라이밍 주입 — 터미널 모드만 여기서 조립한다★: app-server 모드는 같은 내용을 명령줄이
                 //   아니라 핸드셰이크 JSON(`thread/start` 의 `developerInstructions`)으로 싣는다
@@ -960,7 +998,7 @@ impl AgentBackend for CodexBackend {
                 //   받는 것을 실측) 값을 손대지 않고 그대로 보낼 수 있다. 두 모드에 다 명령줄로 실으면
                 //   app-server 쪽이 이유 없이 그 상한과 `%`·줄바꿈 위험을 진다.
                 // ★패스스루 **뒤**다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이 이긴다(위 두 블록의 같은
-                //   규율). 사유 정본은 위 훅 등록 블록의 순서 주석이고 여기 되풀어 적지 않는다.
+                //   규율). 사유 정본은 위 상태줄 블록의 순서 주석이고 여기 되풀어 적지 않는다.
                 // ★어느 갈래로도 스폰을 실패시키지 않는다★ — 파일을 못 읽어도, 실을 수 없는 문자가 있어도,
                 //   예산을 넘어도 경고만 남기고 인자를 안 싣는다(ADR-0210 결정 4 의 규율). 프라이밍은
                 //   있으면 좋은 것이고 스폰은 필수다.
@@ -983,7 +1021,7 @@ impl AgentBackend for CodexBackend {
                 }
 
                 // ADR-0086 스텝 2(CLI 입구) — ★모드를 가르지 않는다★: 심는 것은 env 세 값뿐이고 그
-                //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구·훅 프로세스)이다.
+                //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구 · 사용자 자신의 훅)이다.
                 //   두 모드 다 자식을 띄우므로 갈릴 축이 없다.
                 // ★`config_path`·`settings_file` 은 **안 온다 — 그리고 그것이 선언된 결과다**★: 둘 다
                 //   claude 가 **경로로 읽는 파일**이고 codex 에는 그 플래그가 없어서(실측 0.155.0:
@@ -1030,7 +1068,7 @@ impl AgentBackend for CodexBackend {
 
     /// `session.resume` 이 켜진 근거는 ★발급 주체와 무관하다★ — 복원은 프로필에 저장된 backend sid
     /// **단독**에 의존하고 그 sid 를 누가 발급하는지는 백엔드가 정한다. codex 는 받아 쓰는 쪽이고
-    /// (app-server 는 `thread/start` 응답으로, 터미널 모드는 훅으로 — ADR-0208), 그 값으로 두 모드 다
+    /// (app-server 는 `thread/start` 응답으로, 터미널 모드는 TUI 상태줄을 읽어 — ADR-0216), 그 값으로 두 모드 다
     /// 이어받는다.
     /// ★그래서 이 칸도 모드를 안 가른다 — 위 [`AgentBackend::can_resume_stored_session`] 과 **같은
     ///   술어다. 한쪽만 건드리지 말 것**★: 그 축은 활성화 입구가 「Resume 으로 띄울까」를 묻는 자리이고
@@ -1074,11 +1112,15 @@ impl AgentBackend for CodexBackend {
     /// ★`structured: true` 와 `thread/start` 정책을 주입하는 자리가 여기다(ADR-0044/0030)★: 통로는 자기가
     ///   나르는 바이트가 무엇인지도, 어느 폴더를 어떤 샌드박스로 열어야 하는지도 모른다. 아는 쪽은 이
     ///   모드와 정책을 고른 이 backend 다.
-    /// ★`sid_sink` 를 app-server 갈래에만 넘긴다★ — 이 **통로**로 받아 올 식별자가 터미널 갈래엔 없다.
-    ///   그 포트로 나가는 값은 codex 가 `thread/start` 응답으로 발급한 thread id 이고, 통로가 그 세션으로
-    ///   무엇을 보내기 전에 나간다([`AgentBackend::open_spawn`] 의 순서 계약).
-    ///   ★「터미널 모드는 id 를 못 받는다」로 읽지 말 것 — 그쪽은 **다른 입구**로 받는다★: codex 가 띄우는
-    ///   `SessionStart` 훅이 제어 평면으로 되돌려 보내고(ADR-0208), 그 값은 이 통로를 거치지 않는다.
+    /// ★`sid_sink` 가 두 갈래로 **다 간다 — 나르는 수단만 다르다**★: app-server 는 `thread/start`
+    ///   응답으로 **받아** 통로가 그대로 넘기고, 터미널은 우리가 켠 TUI 상태줄을 **읽어**
+    ///   ([`thread_id::observer`]) 넘긴다. 어느 쪽이든 그 세션으로 무엇을 보내기 전에 나간다
+    ///   ([`AgentBackend::open_spawn`] 의 순서 계약).
+    ///   ★「터미널 갈래엔 이 통로로 받아 올 식별자가 없다」로 적혀 있던 옛 문장은 더 이상 참이 아니다★ —
+    ///   그 시절의 입구는 codex 가 띄우는 `SessionStart` 훅이었고(ADR-0208/ADR-0210), ADR-0216 이 그
+    ///   승인 게이트를 피해 회수를 이 통로로 옮겼다.
+    /// ★관찰자는 **터미널 갈래에만** 꽂는다★ — app-server 모드는 PTY 로 뜨지도 않고, 그쪽 id 는 이미
+    ///   구조화 응답으로 온다. 두 수단이 겹치면 한 spawn 이 같은 값을 두 경로로 적으려 든다.
     /// ★`thread/start` 냐 `thread/resume` 이냐를 고르는 자리도 여기다★ — 조립점이 넘긴
     ///   `resume_session_id` 하나로 갈린다([`thread_open`]). ★통로에게 다시 묻지 않는다★: 통로가 자기
     ///   상태를 보고 판정하면 가르는 자리가 둘이 된다.
@@ -1115,7 +1157,15 @@ impl AgentBackend for CodexBackend {
                 (Box::new(t), pid)
             } else {
                 // ★터미널 모드에는 세울 연결이 없다★ — `declares_link()` 가 false 라 포트도 `None` 이다.
-                let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+                // ★기록 수단이 없으면 관찰자도 안 꽂는다★ — 건져 봐야 적을 곳이 없고, 그 갈래의 pump 는
+                //   바이트 단위로 예전과 같은 길을 간다.
+                // ADR-0216
+                let (t, pid) = PtyTransport::open_with_observer(
+                    spec,
+                    cols,
+                    rows,
+                    sid_sink.map(thread_id::observer),
+                )?;
                 (Box::new(t), pid)
             };
         Ok(SpawnParts {
@@ -1243,14 +1293,18 @@ mod tests {
         }
     }
 
-    /// ★`-c` 의 **존재**로 훅을 세지 말 것 — 이제 우리 오버라이드가 둘이다★(MCP 부착 · 훅 등록).
-    ///   플래그만 세던 옛 형태는 MCP 부착이 들어오면서 전부 거짓 양성이 됐다.
+    /// ★오늘 이 값은 **언제나 `None`** 이다 — 훅 등록이 argv 에서 걷혔다(ADR-0216)★. 그래서 이 헬퍼로
+    /// 「걸렸다」를 재는 시험은 못 쓰고, 남은 쓸모는 **되살아나지 않았다**를 재는 것 하나다.
+    /// ★`-c` 의 **존재**로는 아무것도 세지 말 것★ — 오늘 그 플래그를 싣는 것이 둘이다(MCP 부착 ·
+    ///   상태줄). 플래그만 세던 옛 형태는 둘째가 들어올 때마다 거짓 양성이 됐다.
     fn hook_override_value(argv: &[String]) -> Option<String> {
         argv.windows(2)
             .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with(SESSION_START_HOOK_KEY))
             .map(|p| p[1].clone())
     }
 
+    /// ★상태줄 오버라이드가 여기 실리는 것은 **제어 평면과 무관하다**★ — 이 fixture 는 endpoint 가
+    /// `None` 인데도 그 두 칸이 선다(형제 오버라이드 둘은 재료가 없어 빠진다).
     #[test]
     fn interactive_args_are_the_measured_ones() {
         let s = spec(&codex(vec![]), "C:/workspace");
@@ -1262,7 +1316,9 @@ mod tests {
                 "-s",
                 "workspace-write",
                 "-a",
-                "on-request"
+                "on-request",
+                CONFIG_OVERRIDE_FLAG,
+                STATUS_LINE_OVERRIDE,
             ]
         );
     }
@@ -1295,13 +1351,21 @@ mod tests {
         assert_eq!(spec(&codex_app_server(vec![]), "C:/workspace").cwd, cwd);
     }
 
+    /// ★「맨 뒤」가 아니라 「우리 기본 인자 **뒤**」다 — 옛 이름(`extra_args_come_last`)은 우리
+    /// 오버라이드가 생기기 전의 사실이었다★. 오버라이드가 패스스루보다 뒤에 서야 하는 것은 별개
+    /// 축이고, 그쪽은 `…_follows_the_passthrough` 항목들이 잰다.
     #[test]
-    fn extra_args_come_last() {
+    fn extra_args_follow_our_base_args() {
         let s = spec(&codex(vec!["-m", "gpt-5"]), "C:/workspace");
         let argv = codex_argv(&s);
-        assert_eq!(
-            &argv[argv.len() - 2..],
-            &["-m".to_string(), "gpt-5".to_string()]
+        let at = argv
+            .iter()
+            .position(|a| a == "-m")
+            .expect("패스스루가 사라졌다");
+        assert_eq!(&argv[at..at + 2], &["-m".to_string(), "gpt-5".to_string()]);
+        assert!(
+            argv[..at].iter().any(|a| a == APPROVAL_ON_REQUEST),
+            "패스스루가 우리 기본 인자 앞으로 갔다: {argv:?}"
         );
     }
 
@@ -1380,6 +1444,8 @@ mod tests {
                 "workspace-write",
                 "-a",
                 "on-request",
+                CONFIG_OVERRIDE_FLAG,
+                STATUS_LINE_OVERRIDE,
             ]
         );
     }
@@ -1460,9 +1526,10 @@ mod tests {
     }
 
     /// 패스스루는 이어받기 갈래에서도 하위 명령·정책 **뒤**다 — 앞으로 오면 하위 명령과 그 위치 인자를
-    /// 갈라놓는다. (훅 등록이 서는 스폰에서는 그것이 패스스루보다 더 뒤다 — 아래 훅 구획이 잰다.)
+    /// 갈라놓는다. (우리 오버라이드는 그 패스스루보다 더 뒤다 — `…_follows_the_passthrough` 항목들이
+    /// 그 축을 잰다.)
     #[test]
-    fn resume_argv_still_ends_with_the_passthrough() {
+    fn resume_argv_still_puts_the_passthrough_after_our_base_args() {
         let s = spec_resuming(
             &codex(vec!["-m", "gpt-5"]),
             SpawnMode::Resume,
@@ -1471,9 +1538,14 @@ mod tests {
         );
         let argv = codex_argv(&s);
         assert_eq!(&argv[..1], &["resume".to_string()]);
-        assert_eq!(
-            &argv[argv.len() - 2..],
-            &["-m".to_string(), "gpt-5".to_string()]
+        let at = argv
+            .iter()
+            .position(|a| a == "-m")
+            .expect("패스스루가 사라졌다");
+        assert_eq!(&argv[at..at + 2], &["-m".to_string(), "gpt-5".to_string()]);
+        assert!(
+            argv[..at].iter().any(|a| a == APPROVAL_ON_REQUEST),
+            "패스스루가 우리 기본 인자 앞으로 갔다: {argv:?}"
         );
     }
 
@@ -1547,7 +1619,7 @@ mod tests {
     }
 
     /// ★터미널 모드·app-server 모드를 **각각** 잰다★ — 한 모드만 재면 다른 모드의 스폰이 자격증명 없이
-    /// 떠도 아무도 모른다. codex 가 띄우는 훅 프로세스는 이 env 를 상속으로만 받는다.
+    /// 떠도 아무도 모른다. codex 가 띄우는 자식들은 이 env 를 상속으로만 받는다.
     #[test]
     fn both_modes_carry_the_control_plane_entrance() {
         for (label, command) in [
@@ -1622,49 +1694,138 @@ mod tests {
         );
     }
 
-    // ── ADR-0208/ADR-0210: `SessionStart` 훅 등록(`-c` 오버라이드 단독) ─────────
+    // ── ADR-0216: thread id 상태줄 켜기(`-c` 오버라이드 단독) ───────────────────
 
-    /// 실 codex 0.155.0 이 받아들인 값 그대로(실측 2026-09-19): `--strict-config app-server` 가 0 으로
-    /// 끝났고, `hooks/list` 가 이 정의를 `untrusted` 로 되돌려 주며 `command` 칸이 바이트 단위로 같았다.
-    ///
-    /// ★작은따옴표(TOML 리터럴 문자열)가 load-bearing 이다★ — 큰따옴표면 Windows 역슬래시가 이스케이프로
-    ///   먹히고, 그 값은 `cmd.exe /c codex …` 래핑을 지나며 한 번 더 망가진다. 리터럴 문자열은 둘 다 없다.
+    fn status_line_override_value(argv: &[String]) -> Option<String> {
+        argv.windows(2)
+            .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with(STATUS_LINE_KEY))
+            .map(|p| p[1].clone())
+    }
+
+    /// ★값을 바이트 단위로 못 박는다★ — 항목 이름이 틀려도 codex 는 오류를 안 내고 **조용히 무시**하고,
+    /// 그러면 증상은 「세션 id 가 영영 안 온다」 하나뿐이다(ADR-0216 「근거」).
+    /// ★작은따옴표도 함께 못 박힌다★ — 큰따옴표는 `cmd.exe /c` 래핑을 지나며 인자 경계를 다시 해석시킨다.
     #[test]
-    fn the_terminal_spawn_registers_the_session_start_hook() {
-        let s = spec_with_control(&codex(vec![]), Some(endpoint()));
-        let argv = codex_argv(&s);
+    fn the_terminal_spawn_turns_on_the_thread_id_status_line() {
+        let argv = codex_argv(&spec(&codex(vec![]), "C:/workspace"));
         assert_eq!(
-            &argv[argv.len() - 2..],
-            &[
-                CONFIG_OVERRIDE_FLAG.to_string(),
-                "hooks.SessionStart=[{hooks=[{type='command',command='C:/engram/bin/engram.exe hook session-start'}]}]"
-                    .to_string(),
-            ],
-            "훅 등록이 실측된 모양 그대로 실려야 한다: {argv:?}"
+            status_line_override_value(&argv).as_deref(),
+            Some("tui.status_line=['thread-id']"),
+            "{argv:?}"
         );
     }
 
-    /// ★훅이 부르는 동사는 우리 CLI 파서와 **손으로** 맞춰져 있다★ — 정본 =
-    /// `crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `CLI_GROUP_HOOK` +
-    /// `CLI_HOOK_VERB_SESSION_START`. 그쪽 `run_hook` 은 계열 뒤 argv 가 정확히 한 낱말일 것을 요구하고,
-    /// 어긋나면 exit 0 · stdout 봉인으로 조용히 끝나 **어느 게이트도 못 잡는다**(ADR-0208 결정 3).
-    /// 이 crate 는 데몬을 의존하지 않으므로(의존 방향) 여기서 잴 수 있는 것은 문자열 자체뿐이다.
+    /// 충돌 판정이 보는 키와 우리가 싣는 값이 **같은 키**여야 한다 — 갈리면 경고가 영영 안 뜬다.
     #[test]
-    fn the_hook_command_carries_the_cli_verb_the_daemon_parses() {
-        assert_eq!(HOOK_REPORT_ARGV, "hook session-start");
-        let s = spec_with_control(&codex(vec![]), Some(endpoint()));
+    fn the_status_line_value_and_the_conflict_key_agree() {
+        assert!(STATUS_LINE_OVERRIDE.starts_with(&format!("{STATUS_LINE_KEY}=")));
+    }
+
+    /// ★app-server 모드에는 안 얹는다★ — 그 모드의 thread id 는 `thread/start` 응답으로 구조화된 채
+    /// 오므로 화면을 읽을 이유가 없고, 얹으면 한 spawn 이 같은 값을 두 경로로 적으려 든다.
+    #[test]
+    fn the_app_server_spawn_leaves_the_status_line_alone() {
+        let argv = codex_argv(&spec_with_control(
+            &codex_app_server(vec![]),
+            Some(endpoint()),
+        ));
+        assert_eq!(status_line_override_value(&argv), None, "{argv:?}");
+    }
+
+    /// ★형제 오버라이드 둘과 갈리는 축★ — MCP 부착·훅 등록은 endpoint 에서 재료를 받아야 서지만, 이
+    /// 값은 상수라 받을 재료가 없다. 제어 평면이 없는 스폰에서도 회수가 서야 한다.
+    #[test]
+    fn the_status_line_override_needs_no_control_endpoint() {
+        let argv = codex_argv(&spec_with_control(&codex(vec![]), None));
+        assert!(status_line_override_value(&argv).is_some(), "{argv:?}");
+    }
+
+    /// ★패스스루 **뒤**다★ — 앞에 두면 `-c tui.status_line=[]` 한 줄에 우리 값이 지고, 그 결말은
+    /// 화면에도 로그에도 신호가 없다(같은 키를 두 번 넘기면 마지막이 이긴다).
+    #[test]
+    fn the_status_line_override_follows_the_passthrough() {
+        let argv = codex_argv(&spec(&codex(vec!["-m", "gpt-5"]), "C:/workspace"));
+        let ours = argv
+            .iter()
+            .position(|a| a.starts_with(STATUS_LINE_KEY))
+            .expect("상태줄 오버라이드가 실려야 한다");
+        let passthrough = argv
+            .iter()
+            .position(|a| a == "gpt-5")
+            .expect("패스스루가 사라졌다");
         assert!(
-            codex_argv(&s)
-                .iter()
-                .any(|a| a.ends_with(" hook session-start'}]}]")),
-            "훅 명령이 `<exe> hook session-start` 로 끝나야 한다: {:?}",
-            s.args
+            passthrough < ours,
+            "패스스루가 상태줄 오버라이드 앞에 와야 한다: {argv:?}"
         );
     }
 
-    /// ★app-server 모드에는 걸지 않는다★ — 그 모드의 세션 id 는 `thread/start` 응답으로 통로가 직접
-    /// 받아 오므로 훅이 **군더더기**다. ★거절 로그를 피하려는 것이 아니다★ — 두 경로가 나르는 값은
-    /// 같아서 훅 보고는 충돌이 아니라 「이미 같은 값」으로 끝난다(위 `build_spec` 의 같은 자리 주석).
+    /// ★사용자가 같은 키를 직접 세워도 우리 것이 이긴다 — 그리고 그 승리를 **말없이** 하지 않는다★.
+    /// 거르지 않는 사유는 emission 자리 주석이 정본이다(사용자 인자를 우리가 검열하지 않는다).
+    #[test]
+    fn a_conflicting_status_line_passthrough_loses_to_ours_and_trips_the_warning() {
+        assert!(
+            passthrough_overrides_key(
+                &[
+                    CONFIG_OVERRIDE_FLAG.to_string(),
+                    format!("{STATUS_LINE_KEY}=[]"),
+                ],
+                STATUS_LINE_KEY,
+            ),
+            "`-c {STATUS_LINE_KEY}=…` 를 못 알아봤다 — 경고 없이 사용자 설정을 덮는다"
+        );
+        let argv = codex_argv(&spec(
+            &codex(vec![CONFIG_OVERRIDE_FLAG, "tui.status_line=[]"]),
+            "C:/workspace",
+        ));
+        assert_eq!(
+            argv.iter()
+                .filter(|a| a.starts_with(STATUS_LINE_KEY))
+                .count(),
+            2,
+            "사용자 것과 우리 것이 다 실려야 한다 — 거르는 순간 사용자 인자를 우리가 검열하는 것이다: {argv:?}"
+        );
+        // ★「맨 뒤」가 아니라 「**그 사용자 값보다** 뒤」를 잰다★ — 실제 불변식은 패스스루 뒤에 선다는
+        //   것뿐이고, argv 의 마지막 칸은 우리 형제 오버라이드(지시서)가 프라이밍 파일이 있을 때 가져간다.
+        //   맨 뒤를 못 박으면 회귀가 아닌 변경에 이 항목이 깨진다.
+        let theirs = argv
+            .iter()
+            .position(|a| a == "tui.status_line=[]")
+            .expect("사용자 값이 사라졌다");
+        let ours = argv
+            .iter()
+            .position(|a| a == STATUS_LINE_OVERRIDE)
+            .expect("우리 값이 사라졌다");
+        assert!(
+            theirs < ours,
+            "우리 값이 사용자 값보다 앞이다 — 마지막이 이기므로 이 순서를 뺏기면 회수가 죽는다: {argv:?}"
+        );
+    }
+
+    // ── ADR-0216: 훅 등록은 걷혔고 빌더만 서 있다 ────────────────────────────────
+    //
+    // ★이 구획의 단언은 argv 가 아니라 **빌더 자체**를 부른다 — 되돌리지 말 것★: 등록을 걷은 뒤로
+    //   `hook_override_value(codex_argv(..))` 는 **무엇을 넣든 언제나 `None`** 이라, 「건너뛴다」를 재던
+    //   옛 형태가 전부 공허하게 초록이 된다. 빌더가 살아 있는 동안(삭제에 걸린 순서 조건 —
+    //   `session_start_hook_override` 위 주석) 그 판정들을 실제로 재는 길은 직접 부르는 것뿐이다.
+    // ★순서·충돌 경고 축은 상태줄 오버라이드 쪽으로 **옮겨 갔다**★ — 위 ADR-0216 구획의
+    //   `the_status_line_override_follows_the_passthrough` 와
+    //   `a_conflicting_status_line_passthrough_loses_to_ours_and_trips_the_warning` 이 그 자리다.
+    //   여기 있던 훅판 둘은 잴 대상(argv 에 실린 훅 값)이 사라져 그쪽으로 승계됐다.
+
+    /// ★터미널 스폰에 훅이 더는 실리지 않는다★ — 이 한 줄이 ADR-0216 의 회수 경로 교체를 못 박는다.
+    /// 실리면 codex 의 신뢰 심사 화면이 되살아나 **승인 전까지 에이전트가 안 뜬다.**
+    #[test]
+    fn the_terminal_spawn_no_longer_registers_the_session_start_hook() {
+        let argv = codex_argv(&spec_with_control(&codex(vec![]), Some(endpoint())));
+        assert_eq!(hook_override_value(&argv), None, "{argv:?}");
+        assert!(
+            !argv.iter().any(|a| a.contains(HOOK_REPORT_ARGV)),
+            "훅 명령 문자열이 다른 모양으로 실렸다: {argv:?}"
+        );
+    }
+
+    /// app-server 모드도 같다. ★한때 이 둘이 갈렸다 — 그 시절 훅은 터미널 전용이었다★(app-server 는
+    /// `thread/start` 응답으로 id 를 직접 받아 왔다). 지금은 두 모드 다 안 건다.
     #[test]
     fn the_app_server_spawn_registers_no_hook() {
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
@@ -1677,135 +1838,57 @@ mod tests {
         );
     }
 
-    /// ★훅 등록이 패스스루 **뒤**다★ — 이 순서가 뒤집히면 `-c hooks.SessionStart=…` 한 줄로 우리 등록이
-    /// 조용히 진다(같은 키를 두 번 넘기면 마지막이 이긴다 — 실측 0.155.0 · 2026-09-19).
+    /// ★훅이 부르는 동사는 우리 CLI 파서와 **손으로** 맞춰져 있다★ — 정본 =
+    /// `crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `CLI_GROUP_HOOK` +
+    /// `CLI_HOOK_VERB_SESSION_START`. 그쪽 `run_hook` 은 계열 뒤 argv 가 정확히 한 낱말일 것을 요구하고,
+    /// 어긋나면 exit 0 · stdout 봉인으로 조용히 끝나 **어느 게이트도 못 잡는다**(ADR-0208 결정 3).
+    /// 이 crate 는 데몬을 의존하지 않으므로(의존 방향) 여기서 잴 수 있는 것은 문자열 자체뿐이다.
     #[test]
-    fn the_hook_override_follows_the_passthrough() {
-        let s = CodexBackend.build_spec(
-            &codex(vec!["-m", "gpt-5"]),
-            SpawnMode::Fresh,
-            None,
-            None,
-            PathBuf::from("C:/workspace"),
-            vec![],
-            Some(endpoint()),
-        );
-        let argv = codex_argv(&s);
-        // ★첫 `-c` 를 집으면 안 된다 — 그 자리는 MCP 부착이다★. 이 항목이 재는 것은 **훅의** 자리다.
-        let flag = argv
-            .iter()
-            .position(|a| a.starts_with(SESSION_START_HOOK_KEY))
-            .expect("훅 등록이 실려야 한다")
-            - 1;
-        assert_eq!(
-            flag,
-            argv.len() - 2,
-            "훅 등록이 맨 뒤가 아니다 — 뒤에 오는 쪽이 이긴다: {argv:?}"
-        );
-        let passthrough = argv
-            .iter()
-            .position(|a| a == "gpt-5")
-            .expect("패스스루가 사라졌다");
+    fn the_hook_command_carries_the_cli_verb_the_daemon_parses() {
+        assert_eq!(HOOK_REPORT_ARGV, "hook session-start");
+        let value =
+            session_start_hook_override(Some(std::path::Path::new("C:/engram/bin/engram.exe")))
+                .expect("공백 없는 경로면 값이 서야 한다");
         assert!(
-            passthrough < flag,
-            "패스스루가 훅 등록 앞에 와야 한다: {argv:?}"
+            value.ends_with(" hook session-start'}]}]"),
+            "훅 명령이 `<exe> hook session-start` 로 끝나야 한다: {value}"
         );
     }
 
-    /// ★사용자가 같은 키를 직접 세워도 우리 것이 이긴다 — 그리고 그 승리를 **말없이** 하지 않는다★.
-    /// 지면 `hooks/list` 가 빈 배열이 되고 신뢰 심사 프롬프트조차 안 떠서, 「세션 id 가 영영 안 온다」
-    /// 말고는 아무 신호가 없다(실측 0.155.0). 거르지 않는 사유는 emission 자리 주석이 정본이다.
+    /// 실 codex 0.155.0 이 받아들인 값 그대로(실측 2026-09-19): `--strict-config app-server` 가 0 으로
+    /// 끝났고, `hooks/list` 가 이 정의를 `untrusted` 로 되돌려 주며 `command` 칸이 바이트 단위로 같았다.
+    ///
+    /// ★작은따옴표(TOML 리터럴 문자열)가 load-bearing 이다★ — 큰따옴표면 Windows 역슬래시가 이스케이프로
+    ///   먹히고, 그 값은 `cmd.exe /c codex …` 래핑을 지나며 한 번 더 망가진다. 리터럴 문자열은 둘 다 없다.
     #[test]
-    fn a_conflicting_passthrough_loses_to_ours_and_trips_the_warning() {
-        assert!(
-            passthrough_overrides_key(
-                &[
-                    CONFIG_OVERRIDE_FLAG.to_string(),
-                    format!("{SESSION_START_HOOK_KEY}=[]"),
-                ],
-                SESSION_START_HOOK_KEY,
+    fn the_hook_override_value_is_still_the_measured_one() {
+        assert_eq!(
+            session_start_hook_override(Some(std::path::Path::new("C:/engram/bin/engram.exe"))),
+            Some(
+                "hooks.SessionStart=[{hooks=[{type='command',command='C:/engram/bin/engram.exe hook session-start'}]}]"
+                    .to_string()
             ),
-            "`-c {SESSION_START_HOOK_KEY}=…` 를 못 알아봤다 — 경고 없이 사용자 설정을 덮는다"
         );
-        let s = CodexBackend.build_spec(
-            &codex(vec![CONFIG_OVERRIDE_FLAG, "hooks.SessionStart=[]"]),
-            SpawnMode::Fresh,
-            None,
-            None,
-            PathBuf::from("C:/workspace"),
-            vec![],
-            Some(endpoint()),
-        );
-        let argv = codex_argv(&s);
+    }
+
+    /// ★CLI 실행파일을 모르면 값 자체가 안 선다 — 없는 프로그램을 가리키는 훅은 매 세션 `Hook failed` 다★.
+    #[test]
+    fn without_a_cli_executable_no_hook_value_is_built() {
+        assert_eq!(session_start_hook_override(None), None);
+    }
+
+    /// endpoint 자체가 없는 스폰의 argv — ★`-c` 의 **부재**로 재던 옛 형태는 쓸 수 없다★: 상태줄
+    /// 오버라이드는 endpoint 를 안 보므로 이 스폰에도 실린다(그 축을 재는 자리 =
+    /// `the_status_line_override_needs_no_control_endpoint`). 그래서 여기서는 `-c` 가 **그것 하나뿐**임을
+    /// 잰다 — MCP 부착도 훅도 안 실렸다는 뜻이다.
+    #[test]
+    fn without_an_endpoint_only_the_status_line_override_rides() {
+        let argv = codex_argv(&spec_with_control(&codex(vec![]), None));
+        assert_eq!(hook_override_value(&argv), None, "{argv:?}");
         assert_eq!(
-            argv.iter()
-                .filter(|a| a.starts_with(SESSION_START_HOOK_KEY))
-                .count(),
-            2,
-            "사용자 것과 우리 것이 다 실려야 한다 — 거르는 순간 사용자 인자를 우리가 검열하는 것이다: {argv:?}"
-        );
-        assert!(
-            argv[argv.len() - 1].starts_with(SESSION_START_HOOK_KEY)
-                && argv[argv.len() - 1].contains(HOOK_REPORT_ARGV),
-            "마지막 `-c` 값이 우리 것이 아니다 — 마지막이 이기므로 이 자리를 뺏기면 훅이 죽는다: {argv:?}"
-        );
-    }
-
-    /// 다른 키를 `-c` 로 넘기는 것은 충돌이 아니다 — 경고를 남발하면 아무도 안 읽는다.
-    #[test]
-    fn an_unrelated_config_passthrough_is_not_a_conflict() {
-        assert!(!passthrough_overrides_key(
-            &[CONFIG_OVERRIDE_FLAG.to_string(), "model=gpt-5".to_string(),],
-            SESSION_START_HOOK_KEY,
-        ));
-        assert!(!passthrough_overrides_key(
-            &[
-                "--profile".to_string(),
-                format!("{SESSION_START_HOOK_KEY}=[]"),
-            ],
-            SESSION_START_HOOK_KEY,
-        ));
-    }
-
-    /// 이어받기 갈래에서도 하위 명령은 맨 앞, 훅 등록은 맨 뒤 — 둘이 서로를 밀어내지 않는다.
-    #[test]
-    fn a_resuming_spawn_still_registers_the_hook() {
-        let s = CodexBackend.build_spec(
-            &codex(vec![]),
-            SpawnMode::Resume,
-            None,
-            Some(Uuid::new_v4()),
-            PathBuf::from("C:/workspace"),
-            vec![],
-            Some(endpoint()),
-        );
-        let argv = codex_argv(&s);
-        assert_eq!(&argv[..1], &[RESUME_SUBCOMMAND.to_string()]);
-        assert_eq!(argv[argv.len() - 2], CONFIG_OVERRIDE_FLAG);
-    }
-
-    /// ★CLI 실행파일을 모르면 걸지 않는다 — 없는 프로그램을 가리키는 훅은 매 세션 `Hook failed` 다★.
-    #[test]
-    fn without_a_cli_executable_no_hook_is_registered() {
-        let mut ep = endpoint();
-        ep.send_exe = None;
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        assert_eq!(
-            hook_override_value(&codex_argv(&s)),
-            None,
-            "send_exe 부재인데 훅이 실렸다: {:?}",
-            s.args
-        );
-    }
-
-    /// endpoint 자체가 없는 스폰도 마찬가지다 — 이쪽은 `send_exe` 이전에 끊긴다.
-    #[test]
-    fn without_an_endpoint_no_hook_is_registered() {
-        let s = spec_with_control(&codex(vec![]), None);
-        assert!(
-            !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
-            "endpoint 부재인데 `-c` 가 실렸다(훅도 MCP 부착도 없어야): {:?}",
-            s.args
+            argv.iter().filter(|a| *a == CONFIG_OVERRIDE_FLAG).count(),
+            1,
+            "endpoint 부재인데 상태줄 말고 다른 `-c` 가 실렸다: {argv:?}"
         );
     }
 
@@ -1817,39 +1900,20 @@ mod tests {
     ///   실재하는 공백 경로를 쓰면 이 항목은 볼륨의 8.3 설정에 따라 갈린다.
     #[test]
     fn a_spaced_executable_path_without_a_short_form_is_skipped() {
-        let mut ep = endpoint();
-        ep.send_exe = Some(std::path::PathBuf::from(
-            "C:/Program Files/engram no such dir/engram.exe",
-        ));
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        let argv = codex_argv(&s);
         assert_eq!(
-            hook_override_value(&argv),
-            None,
-            "단축 경로를 못 얻은 공백 경로가 그대로 실렸다: {argv:?}"
-        );
-        // ★견줄 상대가 「제어 채널 없는 스폰」이면 안 된다★ — 그쪽은 MCP 부착까지 함께 빠져, 이 단언이
-        //   「훅을 건너뛰었다」가 아니라 「제어 채널이 없다」를 재게 된다.
-        let mut no_exe = endpoint();
-        no_exe.send_exe = None;
-        assert_eq!(
-            argv,
-            codex_argv(&spec_with_control(&codex(vec![]), Some(no_exe))),
-            "훅을 건너뛴 argv 는 훅 없는 argv 와 바이트 단위로 같아야 한다"
+            session_start_hook_override(Some(std::path::Path::new(
+                "C:/Program Files/engram no such dir/engram.exe"
+            ))),
+            None
         );
     }
 
     /// ★작은따옴표는 TOML 리터럴 문자열에 담을 수 없다 — 지어낸 이스케이프로 밀어 넣지 않는다★.
     #[test]
     fn an_executable_path_with_a_single_quote_is_skipped() {
-        let mut ep = endpoint();
-        ep.send_exe = Some(std::path::PathBuf::from("C:/o'brien/engram.exe"));
-        let s = spec_with_control(&codex(vec![]), Some(ep));
         assert_eq!(
-            hook_override_value(&codex_argv(&s)),
-            None,
-            "작은따옴표가 든 경로가 실렸다: {:?}",
-            s.args
+            session_start_hook_override(Some(std::path::Path::new("C:/o'brien/engram.exe"))),
+            None
         );
     }
 
@@ -1859,16 +1923,56 @@ mod tests {
     #[test]
     fn an_executable_path_with_a_tab_or_a_newline_is_skipped() {
         for raw in ["C:/engram\tbin/engram.exe", "C:/engram\nbin/engram.exe"] {
-            let mut ep = endpoint();
-            ep.send_exe = Some(std::path::PathBuf::from(raw));
-            let s = spec_with_control(&codex(vec![]), Some(ep));
             assert_eq!(
-                hook_override_value(&codex_argv(&s)),
+                session_start_hook_override(Some(std::path::Path::new(raw))),
                 None,
-                "공백 아닌 공백문자가 든 경로가 실렸다({raw:?}): {:?}",
-                s.args
+                "공백 아닌 공백문자가 든 경로가 실렸다({raw:?})"
             );
         }
+    }
+
+    /// 다른 키를 `-c` 로 넘기는 것은 충돌이 아니다 — 경고를 남발하면 아무도 안 읽는다.
+    ///
+    /// ★키를 **살아 있는 쪽**(상태줄)으로 잰다★ — 걷어낸 훅 키로 재면 이 헬퍼가 실제로 굴리는 경고와
+    ///   같은 축을 안 밟게 된다.
+    #[test]
+    fn an_unrelated_config_passthrough_is_not_a_conflict() {
+        assert!(!passthrough_overrides_key(
+            &[CONFIG_OVERRIDE_FLAG.to_string(), "model=gpt-5".to_string()],
+            STATUS_LINE_KEY,
+        ));
+        assert!(!passthrough_overrides_key(
+            &["--profile".to_string(), format!("{STATUS_LINE_KEY}=[]")],
+            STATUS_LINE_KEY,
+        ));
+    }
+
+    /// 이어받기 갈래에서도 하위 명령은 맨 앞, 우리 오버라이드는 패스스루 뒤 — 둘이 서로를 밀어내지 않는다.
+    ///
+    /// ★「맨 뒤」를 못 박지 않는다★ — 그 칸은 형제 오버라이드(지시서)가 프라이밍 파일이 있을 때 가져가고,
+    ///   그건 회귀가 아니다. 실제 불변식은 **패스스루보다 뒤**뿐이다.
+    #[test]
+    fn a_resuming_spawn_still_carries_our_override_after_the_passthrough() {
+        let s = CodexBackend.build_spec(
+            &codex(vec!["-m", "gpt-5"]),
+            SpawnMode::Resume,
+            None,
+            Some(Uuid::new_v4()),
+            PathBuf::from("C:/workspace"),
+            vec![],
+            Some(endpoint()),
+        );
+        let argv = codex_argv(&s);
+        assert_eq!(&argv[..1], &[RESUME_SUBCOMMAND.to_string()]);
+        let passthrough = argv
+            .iter()
+            .position(|a| a == "gpt-5")
+            .expect("패스스루가 사라졌다");
+        let ours = argv
+            .iter()
+            .position(|a| a == STATUS_LINE_OVERRIDE)
+            .expect("상태줄 오버라이드가 사라졌다");
+        assert!(passthrough < ours, "{argv:?}");
     }
 
     /// ★8.3 변환의 **성공** 갈래를 도는 유일한 항목이다★ — 형제 둘은 전부 건너뛰기 갈래라, 두 번 부르는
@@ -2220,6 +2324,74 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
   }
 }
 "#;
+
+    /// ★터미널 갈래의 **운영 배선**을 도는 유일한 항목이다★ — [`AgentBackend::open_spawn`] 을 실제로
+    /// 불러 PTY 를 띄우고, 자식이 찍은 id 가 기록 동사까지 닿는 것을 잰다.
+    ///
+    /// ★형제 시험들은 이것을 못 잡는다★: 스캐너 시험은 [`thread_id`] 안에서 스캐너만 돌리고, 통로 시험은
+    ///   자기 클로저를 직접 꽂는다. 그래서 `open_spawn` 의 관찰자 인자를 `None` 으로 바꿔도 **그 전부가
+    ///   초록이었다** — 기능을 지워도 통과하는 부류가 이 기능의 유일한 load-bearing seam 위에 앉아 있었다.
+    ///   이 항목이 그 자리를 메운다.
+    /// ★`cmd.exe` 로 찍는 것이 요점이다★ — 실 codex 가 아니라도 이 경로가 재는 것은 **우리 배선**이고,
+    ///   실 codex 를 요구하면 CI 에서 못 돈다(그 레인은 `tests/backend_contract.rs` 의 `#[ignore]` 몫).
+    /// ★값에 공백을 두지 않는다★ — 공백이 있으면 `CommandBuilder` 가 인자를 따옴표로 감싸고, 그 따옴표가
+    ///   화면에 그대로 찍혀 단언이 무엇을 재는지 흐려진다.
+    #[cfg(windows)]
+    #[test]
+    fn a_terminal_spawn_hands_the_status_line_id_to_the_sink() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
+        use std::sync::{Arc, Mutex};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let thread_id = Uuid::new_v4().to_string();
+        let spec = CommandSpec {
+            program: "cmd.exe".to_string(),
+            args: vec![
+                "/c".to_string(),
+                "echo".to_string(),
+                format!("tid={thread_id}"),
+            ],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: SessionIdSink = {
+            let seen = seen.clone();
+            Arc::new(move |id: &str| seen.lock().unwrap().push(id.to_string()))
+        };
+
+        let parts =
+            crate::backend::open_spawn(&codex(vec![]), &spec, 80, 24, Some(sink), None, None, None)
+                .expect("open_spawn");
+
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+
+        // 기록은 pump 가 아니라 배달 스레드가 한다 — pump 가 끝나도 그쪽이 아직 안 깼을 수 있다.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let got = seen.lock().unwrap().clone();
+        parts.transport.shutdown();
+
+        assert_eq!(
+            got,
+            vec![thread_id],
+            "터미널 스폰의 관찰자 배선이 끊겼다 — `open_spawn` 의 관찰자 인자를 확인할 것"
+        );
+    }
 
     /// ★조립점이 `None` 을 넘기던 시절에는 이 항목이 서지 않았다★ — 배선이 다시 끊기면 여기서 잡힌다.
     /// 재는 것은 **기록 동사가 불렸나**이고, 그 값이 프로필에 어떻게 앉나는 `manager.rs` 쪽 항목이 잰다.
@@ -2830,7 +3002,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     /// ★켠 행을 **함께** 재는 것이 요점이다★ — 끈 쪽만 재면 부착을 통째로 지워도 초록이고, 그 순간
     ///   codex 우편의 유일한 물리 배선이 사라진다(증상은 오류가 아니라 침묵이다).
     /// ★제어 평면 자체는 끊기지 않는다는 것도 함께 잰다★ — 우편을 끄는 것과 제어 동사를 끊는 것은
-    ///   다른 일이고(ADR-0132 결정 5), 여기서 자격증명까지 사라지면 codex 가 띄우는 훅이 죽는다.
+    ///   다른 일이고(ADR-0132 결정 5), 여기서 자격증명까지 사라지면 codex 가 띄우는 자식들이 그것을 잃는다.
     #[test]
     fn turning_mcp_send_off_takes_the_override_off_codex_too() {
         for command in [codex(vec![]), codex_app_server(vec![])] {

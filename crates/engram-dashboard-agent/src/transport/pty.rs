@@ -12,7 +12,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::output_core::OutputCore;
 use crate::transport::input_queue::{self, InputQueue};
-use crate::transport::AgentTransport;
+use crate::transport::{AgentTransport, PreInputByteObserver};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps,
@@ -41,17 +41,47 @@ pub struct PtyTransport {
     shutdown: Arc<AtomicBool>,
     /// start()에서 take해 pump로 move. None이면 이미 시작됨.
     reader: Mutex<Option<Box<dyn Read + Send>>>,
+    /// 자식이 첫 입력을 받기 전 출력을 들여다보는 관찰자([`PreInputByteObserver`]) — `None` = 아무도
+    /// 안 꽂았다. `start()` 에서 take 해 pump 로 move 한다(reader 와 같은 규율).
+    observer: Mutex<Option<PreInputByteObserver>>,
+    /// ★이 통로가 입력을 **받아들인** 적이 있나 — 위 관찰 창을 닫는 빗장이다★.
+    ///
+    /// ★큐가 **받아들인** 순간 올린다 — OS 쓰기를 마친 순간이 아니다★: 창이 지켜야 하는 것은 「자식이
+    ///   아직 사용자·모델 내용을 찍은 적이 없다」이고, 그 사실은 큐에 들어선 순간부터 흔들린다(라이터가
+    ///   언제 쓸지는 우리가 모른다). 늦게 올리면 그 사이에 읽힌 바이트가 창 안으로 새어 들어온다.
+    /// ★거절당한 입력으로는 **안 올린다**★ — 큐가 닫혔거나 상한을 넘겨 되돌려 보낸 바이트는 PTY 에
+    ///   한 글자도 닿지 않으므로 창의 전제가 그대로다. 거기서 올리면 도착하지도 않은 입력 때문에 회수를
+    ///   버린다(상한 초과는 실제로 도달 가능한 갈래다 — `tests/transport_smoke.rs`).
+    /// ★읽기는 `Acquire`, 쓰기는 `Release`★ — `Relaxed` 로 두면 「입력을 받아들였다」와 「pump 가 그것을
+    ///   본다」 사이에 순서 보장이 없어, 라이터가 이미 쓴 뒤에도 pump 가 `false` 를 읽어 그 청크를 관찰자에
+    ///   넘길 수 있다. 창 주장이 PTY 왕복이라는 **우연한** 장벽에 기대지 않게 한다.
+    input_seen: Arc<AtomicBool>,
     #[cfg(windows)]
     job_handle: JobObjectHandle,
 }
 
 impl PtyTransport {
-    /// **pump는 아직 안 띄운다**(start 에서). child_pid 를 함께 반환한다
-    /// (claude 세션 추적 부착용 — 호출자가 사용).
+    /// 관찰자를 꽂지 않는 [`PtyTransport::open_with_observer`] — 출력 바이트를 들여다볼 일이 없는
+    /// backend 가 부르는 입구다.
     pub fn open(
         spec: &CommandSpec,
         cols: u16,
         rows: u16,
+    ) -> Result<(PtyTransport, Option<u32>), PtyError> {
+        Self::open_with_observer(spec, cols, rows, None)
+    }
+
+    /// **pump는 아직 안 띄운다**(start 에서). child_pid 를 함께 반환한다
+    /// (claude 세션 추적 부착용 — 호출자가 사용).
+    ///
+    /// `observer` = 첫 입력 전 출력 바이트를 넘겨받을 자리(계약 정본 = [`PreInputByteObserver`]).
+    /// `None` = 아무도 안 본다 — 그 갈래는 pump 가 바이트 단위로 예전과 같은 길을 간다.
+    // ADR-0216
+    pub fn open_with_observer(
+        spec: &CommandSpec,
+        cols: u16,
+        rows: u16,
+        observer: Option<PreInputByteObserver>,
     ) -> Result<(PtyTransport, Option<u32>), PtyError> {
         let pair = native_pty_system()
             .openpty(PtySize {
@@ -99,6 +129,8 @@ impl PtyTransport {
             child: Arc::new(Mutex::new(child)),
             shutdown: Arc::new(AtomicBool::new(false)),
             reader: Mutex::new(Some(reader)),
+            observer: Mutex::new(observer),
+            input_seen: Arc::new(AtomicBool::new(false)),
             #[cfg(windows)]
             job_handle,
         };
@@ -212,6 +244,8 @@ impl AgentTransport for PtyTransport {
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
+        let mut observer = self.observer.lock().expect("observer poisoned").take();
+        let input_seen = self.input_seen.clone();
         let writer_stop = WriterStop(self.input.clone());
 
         // ── 자연 종료 감지 watcher(콘솔 전용 — 이 detection 은 PtyTransport 안에만 둔다) ──
@@ -267,9 +301,18 @@ impl AgentTransport for PtyTransport {
             // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 catch_unwind로 잡아, panic이면
             // core.finish(Error)로 Failed 전이시켜 사용자/LLM에게 가시화한다.
             //
-            // ★UnwindSafe★: 클로저가 잡는 reader/buf/child/shutdown은 panic 후 더 쓰지 않고
-            //   버리므로(스레드가 곧 종료) 논리적 불변 깨짐이 없다 → AssertUnwindSafe로 명시.
+            // ★UnwindSafe★: 클로저가 잡는 reader/buf/child/shutdown/observer/input_seen은 panic 후 더
+            //   쓰지 않고 버리므로(스레드가 곧 종료) 논리적 불변 깨짐이 없다 → AssertUnwindSafe로 명시.
             //   Mutex(child) 자체는 UnwindSafe지만 캡처 묶음(특히 dyn Read reader)이 아니므로 감싼다.
+            // ★캡처 목록이 **이 에이전트 전용**이라는 것이 아래 poison 범위 논증의 전제다★ — 그래서
+            //   observer 에 **여러 에이전트가 공유하는 자원**(전역 명부 같은)을 태워 보내면 안 된다.
+            //   그 자원의 락이 `expect` 로 풀리는 것이면 이 스레드의 panic 이 곧 다른 에이전트의
+            //   재-panic 이 된다. 관찰자 쪽 계약이 그것을 금하는 자리 = `PreInputByteObserver` doc.
+            //   ★`input_seen` 은 그 논증을 흔들지 않는다★ — 이 transport 전용이고 `AtomicBool` 이라
+            //   애초에 poison 될 것이 없다(락이 아니다).
+            // ★이 목록은 캡처가 바뀔 때 **함께** 고친다(ADR-0216 결정 2 가 그것을 명시한다)★ —
+            //   낡은 목록은 위 poison 범위 논증을 검증할 수 없는 문장으로 만든다.
+            // ADR-0216
             // ★Mutex poison 범위(정확히)★: 아래 reason 산출의 child.lock()만 poison-tolerant
             //   (into_inner)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
             //   다른 agent로 전파되지 않는다.
@@ -296,6 +339,20 @@ impl AgentTransport for PtyTransport {
                     //   막 반환한 직후 kill이 걸린 경우를 위한 안전망.
                     if shutdown.load(Ordering::Relaxed) {
                         break;
+                    }
+
+                    // ★관찰은 `emit` **직전**이고 락을 하나도 안 잡는다★(ADR-0216 결정 2) — 이 자리가
+                    //   기존 불변식 다섯(finalize 1회 · seq 발행 · 팬아웃 락 · replay 전송 · 턴 관측
+                    //   호출부) 중 어느 것도 안 건드리는 유일한 지점이다.
+                    // ★창이 닫히면 관찰자를 **버린다**★ — 계속 들고 있으면 그 상태가 사용자 대화 위에서
+                    //   계속 도는데, 그 창은 「자식이 자기 장식만 찍은 구간」이라는 근거를 이미 잃었다.
+                    //   ★검사가 이번 청크를 넘기기 **전**인 것이 의도다★: 입력이 큐에 든 뒤 읽힌 바이트는
+                    //   이미 그 입력의 에코일 수 있다.
+                    if observer.is_some() && input_seen.load(Ordering::Acquire) {
+                        observer = None;
+                    }
+                    if let (Some(obs), Some(fresh)) = (observer.as_mut(), buf.get(..n)) {
+                        obs(fresh);
                     }
 
                     pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec()));
@@ -345,7 +402,14 @@ impl AgentTransport for PtyTransport {
     ///   되풀어 적지 않는다.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
-        self.input.push(bytes)
+        // ★받아들인 입력만 관찰 창을 닫는다 — 거절당한 것으로는 안 닫는다★(정본 = `input_seen` 필드 doc).
+        //   ★`interrupt()` 도 이 자리를 지난다 — 빼지 말 것★: 그쪽도 같은 큐로 실제 바이트(0x03)를
+        //   보내므로 「사용자가 아직 아무것도 안 쳤다」가 깨지는 것은 똑같다.
+        let accepted = self.input.push(bytes);
+        if accepted.is_ok() {
+            self.input_seen.store(true, Ordering::Release);
+        }
+        accepted
     }
 
     fn flush_input(&self, timeout: Duration) -> Result<(), PtyError> {
@@ -641,6 +705,114 @@ mod tests {
             "B 는 영향 없이 정상 Exited"
         );
         assert_eq!(sink_b.statuses().len(), 1, "B status 변경 1건(정상)");
+    }
+}
+
+/// 첫 입력 전 출력 관찰자([`PreInputByteObserver`])의 배선 — ★실 자식 프로세스를 띄운다★.
+///
+/// ★별도 모듈인 것은 `#[cfg(windows)]` 때문이다★ — `cmd.exe` 를 띄우므로 그 밖의 플랫폼에서는 성립하지
+///   않는다. 위 `mod tests` 는 프로세스를 하나도 안 띄우는 것이 그 모듈의 성질이라 섞지 않는다.
+// ADR-0216
+#[cfg(all(test, windows))]
+mod pre_input_observer {
+    use super::*;
+    use crate::output_core::TurnWiring;
+    use crate::transport::input_queue::INPUT_QUEUE_MAX_BYTES;
+    use crate::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
+    use std::sync::Mutex;
+
+    struct NoopStatusSink;
+    impl StatusSink for NoopStatusSink {
+        fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+        fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+    }
+
+    fn echo(text: &str) -> CommandSpec {
+        CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo".into(), text.into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        }
+    }
+
+    /// 관찰자가 **실제로 바이트를 받는다** — 자리만 있고 아무도 안 부르는 seam 이 아니다.
+    #[test]
+    fn the_observer_receives_the_bytes_the_child_printed() {
+        const MARKER: &str = "engram-observer-probe";
+        let seen: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let (transport, _pid) = PtyTransport::open_with_observer(
+            &echo(MARKER),
+            80,
+            24,
+            Some(Box::new(move |bytes: &[u8]| {
+                if let Ok(mut g) = sink.lock() {
+                    g.extend_from_slice(bytes);
+                }
+            })),
+        )
+        .expect("open");
+
+        let core = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            Arc::new(NoopStatusSink) as Arc<dyn StatusSink>,
+            TurnWiring::detached(),
+        ));
+        transport.start(core.clone());
+        core.join_pump(Duration::from_secs(10));
+        transport.shutdown();
+
+        let got = String::from_utf8_lossy(&seen.lock().expect("seen poisoned")).into_owned();
+        assert!(
+            got.contains(MARKER),
+            "관찰자가 자식 출력을 못 받았다: {got:?}"
+        );
+    }
+
+    /// ★입력이 들어오면 창이 닫힌다(ADR-0216 결정 5 ⓑ)★ — 이 빗장이 없으면 관찰 창이 대화 내내
+    /// 열린 채로 남아, 사용자가 화면에 흘린 uuid 모양이 회수 대상이 된다.
+    #[test]
+    fn the_first_input_closes_the_observation_window() {
+        let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
+        assert!(
+            !transport.input_seen.load(Ordering::Acquire),
+            "입력 전인데 창이 이미 닫혀 있다"
+        );
+        transport
+            .send_input(InputEvent::Raw(vec![b'x']))
+            .expect("큐 상한 이내");
+        assert!(
+            transport.input_seen.load(Ordering::Acquire),
+            "입력이 들어왔는데 창이 안 닫혔다"
+        );
+        transport.shutdown();
+    }
+
+    /// ★거절당한 입력은 창을 닫지 않는다★ — PTY 에 한 글자도 안 닿았으므로 창의 전제(「자식이 자기
+    /// 장식만 찍었다」)가 그대로다. 닫으면 도착하지도 않은 입력 때문에 회수를 버린다.
+    #[test]
+    fn a_rejected_input_leaves_the_observation_window_open() {
+        let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
+        // ★`start()` 전에 잰다★ — 라이터가 없어야 큐가 안 빠져 상한 판정이 결정적이다(형제 스위트
+        //   `tests/transport_smoke.rs` 의 같은 규율).
+        transport
+            .send_input(InputEvent::Raw(vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1]))
+            .expect_err("상한 초과는 거절돼야 한다");
+        assert!(
+            !transport.input_seen.load(Ordering::Acquire),
+            "거절당한 입력이 창을 닫았다"
+        );
+        transport.shutdown();
+        // 큐가 닫힌 뒤의 거절도 같다.
+        transport
+            .send_input(InputEvent::Raw(b"late".to_vec()))
+            .expect_err("닫힌 큐는 거절돼야 한다");
+        assert!(
+            !transport.input_seen.load(Ordering::Acquire),
+            "닫힌 큐의 거절이 창을 닫았다"
+        );
     }
 }
 
