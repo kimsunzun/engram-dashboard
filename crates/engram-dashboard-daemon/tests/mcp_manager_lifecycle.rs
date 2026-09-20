@@ -16,11 +16,15 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, ControlChannelNeeds, StatusSink,
 };
 
-/// MCP 가능 스폰이 넘기는 축 둘 — 이 파일들은 채널 물리(토큰·config 파일)만 재므로 운영이 그 값을
+/// MCP 가능 스폰이 넘기는 축 셋 — 이 파일들은 채널 물리(토큰·config 파일)만 재므로 운영이 그 값을
 /// 어디서 읽는지는 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
+///
+/// ★이 파일이 재는 config 파일은 **파일 축이 켜진 행**의 것이다★ — 그 칸을 false 로 바꾸면 여기
+///   단언들이 무너진다. 그 조합을 재는 자리는 데몬 `control/mod.rs` 의 그 시험이다(ADR-0209).
 fn mcp_needs() -> ControlChannelNeeds {
     ControlChannelNeeds {
         accepts_mcp_config: true,
+        writes_mcp_config_file: true,
         uses_mail: true,
     }
 }

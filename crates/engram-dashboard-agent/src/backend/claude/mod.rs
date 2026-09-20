@@ -115,6 +115,19 @@ impl AgentBackend for ClaudeBackend {
         true
     }
 
+    /// ★이 backend 가 그 파일을 **실제로 연다**★ — 아래 `build_spec` 이 `--mcp-config <path>` 로 경로를
+    /// 넘기고, claude 가 그것을 읽어 `Authorization` 헤더를 싣는다(2.1.170 실측 · 데몬
+    /// `control/mcp_config.rs` 헤더가 그 스키마의 정본). 그래서 여기만 true 다.
+    /// ★그 파일의 write 실패에 스폰을 계속시키지 말 것(fail-closed 유지)★: 파일이 없으면 아래 주입이
+    ///   한 줄도 안 돌아 MCP 입구가 물리적으로 사라지고, 그 스폰은 제어 채널 없이 도는 에이전트가 된다.
+    ///   판정의 정본은 데몬 `control::provision` 의 그 `?`.
+    // ADR-0086
+    // ADR-0099
+    // ADR-0209
+    fn writes_mcp_config_file(&self) -> bool {
+        true
+    }
+
     fn build_spec(
         &self,
         command: &AgentCommand,

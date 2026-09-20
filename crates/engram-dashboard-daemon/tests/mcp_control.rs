@@ -6,11 +6,15 @@ use std::sync::Arc;
 
 use engram_dashboard_agent::types::{AgentId, ControlChannelNeeds};
 
-/// MCP 가능 스폰이 넘기는 축 둘 — 이 파일은 채널 물리(토큰 발급)만 재므로 운영이 그 값을 어디서 읽는지는
+/// MCP 가능 스폰이 넘기는 축 셋 — 이 파일은 채널 물리(토큰 발급)만 재므로 운영이 그 값을 어디서 읽는지는
 /// 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
+///
+/// ★claude 모양이다★ — 파일 축까지 켠 행. 「MCP 는 쓰는데 우리 파일은 안 읽는」 행(codex)을 재는 자리는
+///   데몬 `control/mod.rs` 의 그 시험이다(ADR-0209).
 fn mcp_needs() -> ControlChannelNeeds {
     ControlChannelNeeds {
         accepts_mcp_config: true,
+        writes_mcp_config_file: true,
         uses_mail: true,
     }
 }

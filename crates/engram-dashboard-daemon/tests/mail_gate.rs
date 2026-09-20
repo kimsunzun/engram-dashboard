@@ -9,7 +9,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use engram_dashboard_agent::backend::{accepts_mcp_config, uses_mail};
+use engram_dashboard_agent::backend::{accepts_mcp_config, uses_mail, writes_mcp_config_file};
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
@@ -460,6 +460,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     };
     let needs = ControlChannelNeeds {
         accepts_mcp_config: accepts_mcp_config(&command),
+        writes_mcp_config_file: writes_mcp_config_file(&command),
         uses_mail: uses_mail(&command),
     };
     assert!(
@@ -528,17 +529,17 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         Arc::new(NoopPrimingProvider),
     );
 
-    // ★백엔드의 실제 선언을 읽는다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★.
-    let command = AgentCommand::Codex {
-        extra_args: vec![],
-        output_format: AgentOutputFormat::Terminal,
-    };
+    // ★축을 **합성으로** 세운다 — 오늘 `uses_mail=false` 를 선언하는 backend 가 하나도 없기 때문이다★
+    //   (codex 가 마지막이었고 ADR-0209 의 MCP 배선과 함께 true 로 갔다). 실 backend 를 읽던 옛 형태로
+    //   되돌리면 이 테스트는 **우편 평면 안** 스폰을 재면서 이름만 밖이라고 말하게 된다.
+    //   ★그래도 이 축을 지우지 말 것★: 데몬의 파생·게이트·프라이밍 세 갈래가 이 조합에서만 함께
+    //   드러나고, 다음 backend 가 그 조합으로 들어올 때 회귀망이 이미 서 있어야 한다.
+    // ADR-0209
     let needs = ControlChannelNeeds {
-        accepts_mcp_config: accepts_mcp_config(&command),
-        uses_mail: uses_mail(&command),
+        accepts_mcp_config: false,
+        writes_mcp_config_file: false,
+        uses_mail: false,
     };
-    assert!(!needs.uses_mail, "전제: 이 백엔드는 우편 평면 밖이다");
-    assert!(!needs.accepts_mcp_config, "전제: mcp-config 를 못 먹는다");
 
     let ep = channel
         .provision(AgentId::new_v4(), 0, needs)
@@ -582,6 +583,73 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
     let _ = std::fs::remove_dir_all(&data_dir);
 }
 
+/// ★codex 의 우편은 MCP 로 나가고 CLI 미러는 **닫힌다**★ — ADR-0209 가 「MCP 가 정식, CLI 는 미러」라고
+/// 못 박은 것이 실 선언에서 그대로 서는지 잰다.
+///
+/// ★실 backend 선언을 읽는 것이 요점이다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★: 이 조각이
+///   건드린 두 칸(`accepts_mcp_config`·`uses_mail`)이 **함께** 움직여야 아래 셋이 동시에 선다. 한쪽만
+///   되돌리면 셋 중 하나가 조용히 무너진다 — `uses_mail` 을 되돌리면 grant 0 · 프라이밍 없음(툴을 쥔 채
+///   아무도 안 가르친 상태), `accepts_mcp_config` 를 되돌리면 표식이 on 이 되어 CLI 미러가 열린다.
+/// ★프라이밍은 **파일 선택까지만** 잰다★ — 그 파일이 codex argv 에 실리는지는 여기 범위가 아니다
+///   (실리지 않는다. 사유의 정본은 `backend/codex/` 의 emission 자리 주석).
+// ADR-0209
+#[test]
+fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
+    use engram_dashboard_agent::types::ToolGrant;
+    use engram_dashboard_daemon::control::mcp_config::MCP_SERVER_NAME;
+    use engram_dashboard_daemon::control::mcp_server::SEND_MESSAGE_TOOL;
+    use engram_dashboard_daemon::control::priming::FixedPrimingProvider;
+
+    let data_dir =
+        std::env::temp_dir().join(format!("engram-mail-gate-codex-{}", AgentId::new_v4()));
+    let priming = std::path::PathBuf::from("C:/engram/prompts/agent-priming.md");
+    let channel = DaemonControlChannel::new(
+        Arc::new(ControlRegistry::new()),
+        "http://127.0.0.1:1/mcp".to_string(),
+        data_dir.clone(),
+        Some(std::path::PathBuf::from("C:/app/engram.exe")),
+        Arc::new(FixedPrimingProvider(priming.clone())),
+    );
+    let command = AgentCommand::Codex {
+        extra_args: vec![],
+        output_format: AgentOutputFormat::Terminal,
+    };
+    let needs = ControlChannelNeeds {
+        accepts_mcp_config: accepts_mcp_config(&command),
+        writes_mcp_config_file: writes_mcp_config_file(&command),
+        uses_mail: uses_mail(&command),
+    };
+    assert!(needs.uses_mail, "전제: codex 는 우편 평면 안이다");
+    assert!(
+        needs.accepts_mcp_config,
+        "전제: 데몬은 codex 를 MCP 우편 갈래로 읽는다"
+    );
+
+    let ep = channel
+        .provision(AgentId::new_v4(), 0, needs)
+        .expect("provision ok")
+        .expect("endpoint");
+
+    assert!(
+        !ep.mail_allowed,
+        "MCP 우편 갈래인데 CLI 미러 표식이 on 이다 — 두 채널이 동시에 열렸다"
+    );
+    assert_eq!(
+        ep.grants,
+        vec![ToolGrant::Mcp {
+            server: MCP_SERVER_NAME.to_string(),
+            tool: SEND_MESSAGE_TOOL.to_string(),
+        }],
+        "발신 입구 grant 가 MCP send_message 하나여야"
+    );
+    assert_eq!(
+        ep.priming_file.as_deref(),
+        Some(priming.as_path()),
+        "우편 평면 안이면 프라이밍 파일이 선택돼야(`uses_mail` 게이트가 살아 있다는 증거)"
+    );
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
 /// ★`engram` 실행파일이 없어도 우편 평면 **밖** 스폰은 끊기지 않는다★ — fail-closed 가 지키는 짝
 /// (데몬이 낸 CLI 우편 인가 `mail_allowed`·[Cli] grant ↔ 부를 실행파일)이 그 스폰에는 애초에 없기
 /// 때문이다. ★그 짝의 한쪽은 프라이밍이 아니다★ — CLI 판 지시서는 삭제됐고 비-MCP 갈래는 아무것도
@@ -603,6 +671,7 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
 
     let no_mail = ControlChannelNeeds {
         accepts_mcp_config: false,
+        writes_mcp_config_file: false,
         uses_mail: false,
     };
     assert!(
@@ -613,6 +682,7 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
     // 짝이 성립하는 조합(우편을 쓰는데 CLI 가 없다)은 **여전히** 끊긴다 — 그 규율은 그대로다.
     let cli_mail = ControlChannelNeeds {
         accepts_mcp_config: false,
+        writes_mcp_config_file: false,
         uses_mail: true,
     };
     assert!(

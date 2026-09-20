@@ -167,8 +167,12 @@ impl ControlChannel for DaemonControlChannel {
         // 운영 빌드에선 `force_cli_only()` 가 const false 라 아래 식이 `accepts_mcp_config` 그대로다.
         let force_cli_only = Self::force_cli_only();
         let accepts_mcp_config = needs.accepts_mcp_config && !force_cli_only;
+        // ★노브는 이 칸도 함께 끈다★ — 그것이 「false path 전체」의 뜻이다. 파일만 남기면 하네스가
+        //   비-MCP 갈래를 실측한다고 믿는 스폰이 디스크에는 MCP 자격증명을 남긴다.
+        let writes_mcp_config_file = needs.writes_mcp_config_file && !force_cli_only;
         let needs = ControlChannelNeeds {
             accepts_mcp_config,
+            writes_mcp_config_file,
             ..needs
         };
         // ★우편 가부의 **단일 파생 지점**(ADR-0133 결정 2)★: 이 한 값이 ① 자격증명에 박히는 강제(데몬
@@ -182,8 +186,15 @@ impl ControlChannel for DaemonControlChannel {
         // ADR-0133
         // ADR-0209
         let mail_allowed = needs.uses_mail && !accepts_mcp_config;
+        // ★게이트는 `accepts_mcp_config` 가 아니라 **파일을 읽는다고 선언한 칸**이다(ADR-0209)★: 그 둘을
+        //   한 칸으로 겸하던 동안, 다른 기제로 MCP 를 켜는 backend(codex 의 `-c mcp_servers.engram=…`)가
+        //   우편 축을 맞추려 위 칸을 켜는 것만으로 **아무도 안 여는 평문 Bearer 토큰 JSON** 을 스폰마다
+        //   기본 ACL 로 받았고, 아래 `?`(fail-closed)가 그 파일 때문에 그 스폰을 끊을 수 있었다.
+        //   ★위 `mail_allowed` 줄을 이 칸으로 옮기지 말 것★ — 그 파생은 여전히 `accepts_mcp_config` 의
+        //   것이다(ADR-0133 결정 2). 갈라진 것은 **우편 판정**이 아니라 **디스크에 비밀을 쓸지**다.
         // ADR-0099
-        let (config_path, settings_file) = if accepts_mcp_config {
+        // ADR-0209
+        let (config_path, settings_file) = if writes_mcp_config_file {
             let path = mcp_config::write_config(&self.data_dir, id, epoch, &self.mcp_url, &token)
                 .map_err(|e| {
                     tracing::warn!(agent = %id, epoch, "mcp-config 기록 실패 — fail-closed(스폰 중단): {e}");
@@ -225,6 +236,7 @@ impl ControlChannel for DaemonControlChannel {
             agent = %id,
             epoch,
             accepts_mcp_config,
+            writes_mcp_config_file,
             uses_mail = needs.uses_mail,
             force_cli_only,
             wants_priming,
@@ -298,9 +310,14 @@ mod tests {
     /// 옛 한 축(`accepts_mcp_config`) 시절의 시험들이 그대로 서게 하는 어댑터 — ★`uses_mail: true` 를
     /// 박는 것이 그 동치다★: 그때는 우편 평면 밖 스폰이라는 갈래 자체가 없었다. 그 새 갈래를 재는 것은
     /// 아래 「우편 평면 밖」 구획이고, 이 헬퍼를 쓰지 않는다.
+    ///
+    /// ★셋째 칸을 첫째와 **같이** 움직이는 것도 그 동치다★: 파일 write 축이 갈라지기 전에는 이 한 칸이
+    ///   둘을 함께 굴렸다(= claude 모양). 「MCP 는 쓰는데 파일은 안 읽는」 새 조합(codex)을 재는 것은
+    ///   아래 [`the_file_write_follows_the_declaring_backend_not_the_mail_axis`] 이고 이 헬퍼를 쓰지 않는다.
     fn needs(accepts_mcp_config: bool) -> ControlChannelNeeds {
         ControlChannelNeeds {
             accepts_mcp_config,
+            writes_mcp_config_file: accepts_mcp_config,
             uses_mail: true,
         }
     }
@@ -668,6 +685,175 @@ mod tests {
             }],
             "MCP-capable + send_exe=None → grants == [Mcp]"
         );
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
+    // ── ADR-0209: 파일 write 축은 **파일을 읽는다고 선언한 backend** 만 따른다 ────────────────────
+
+    /// ★실 backend 선언을 읽는 것이 요점이다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★: 두 행이
+    /// `accepts_mcp_config` 는 **같이 true** 인데 결과가 갈려야 한다. 그래서 이 테스트는 게이트가
+    /// 우편 축이 아니라 파일 축에 걸려 있다는 것을 단언한다 — 게이트를 `accepts_mcp_config` 로
+    /// 되돌리면 codex 행이 깨지고, 게이트를 통째로 걷으면 그 행이 다시 평문 토큰 파일을 받는다.
+    ///
+    /// ★claude 행이 **같이** 서 있어야 의미가 있다★: codex 쪽만 재면 write 를 통째로 없애도 초록이라,
+    ///   그 순간 claude 의 MCP 입구가 조용히 사라진다(`--mcp-config` 가 가리킬 파일이 없어진다).
+    // ADR-0209
+    #[test]
+    fn the_file_write_follows_the_declaring_backend_not_the_mail_axis() {
+        use engram_dashboard_agent::backend::{
+            accepts_mcp_config, uses_mail, writes_mcp_config_file,
+        };
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat};
+
+        let _g = lock_env();
+        assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
+
+        for (name, command, expect_file) in [
+            (
+                "codex",
+                AgentCommand::Codex {
+                    extra_args: vec![],
+                    output_format: AgentOutputFormat::Terminal,
+                },
+                false,
+            ),
+            (
+                "claude",
+                AgentCommand::Claude {
+                    extra_args: vec![],
+                    output_format: AgentOutputFormat::StreamJson,
+                },
+                true,
+            ),
+        ] {
+            let seen = Arc::new(Mutex::new(false));
+            let (channel, data_dir) =
+                provision_test_channel_with_send(seen, Some(PathBuf::from(CLI_EXE_NAME)));
+            let needs = ControlChannelNeeds {
+                accepts_mcp_config: accepts_mcp_config(&command),
+                writes_mcp_config_file: writes_mcp_config_file(&command),
+                uses_mail: uses_mail(&command),
+            };
+            assert!(
+                needs.accepts_mcp_config,
+                "{name}: 전제 — 두 행 다 MCP 우편 갈래다(그래서 이 시험이 우편 축과 파일 축을 가른다)"
+            );
+            let id = AgentId::new_v4();
+            let ep = channel
+                .provision(id, 0, needs)
+                .expect("provision ok")
+                .expect("endpoint");
+
+            let cfg_dir = data_dir.join("mcp-config");
+            if expect_file {
+                let cfg = ep.config_path.as_ref().unwrap_or_else(|| {
+                    panic!("{name}: 파일을 읽는다고 선언했는데 config_path 가 None")
+                });
+                assert!(cfg.is_file(), "{name}: 선언한 파일이 실제로 있어야");
+                assert!(
+                    std::fs::read_to_string(cfg)
+                        .expect("read config")
+                        .contains(&ep.token),
+                    "{name}: 그 파일이 나르는 것이 이 스폰의 토큰이어야"
+                );
+                assert!(
+                    ep.settings_file.as_ref().is_some_and(|p| p.is_file()),
+                    "{name}: 세션 설정 조각도 함께"
+                );
+            } else {
+                assert_eq!(
+                    ep.config_path, None,
+                    "{name}: 안 읽는 파일의 경로를 endpoint 에 실으면 안 된다"
+                );
+                assert_eq!(ep.settings_file, None, "{name}: 설정 조각도 마찬가지");
+                // ★폴더 부재로 재는 것이 요점이다★ — `config_path` 만 보면 write 는 그대로 두고 경로만
+                //   숨기는 회귀(비밀은 여전히 디스크에 있다)를 못 잡는다.
+                assert!(
+                    !cfg_dir.exists(),
+                    "{name}: mcp-config 폴더가 생겼다 — 아무도 안 읽는 평문 토큰 파일이 스폰마다 쓰이고 있다: {}",
+                    cfg_dir.display()
+                );
+            }
+            channel.revoke(id, 0);
+            let _ = std::fs::remove_dir_all(&data_dir);
+        }
+    }
+
+    /// ★MCP 우편을 끄는 노브가 **codex 까지 닿는지**를 데몬→backend 로 이어서 잰다(적출 2026-09-20)★:
+    /// 끄는 판정은 위 [`DaemonControlChannel::build_grants`] 한 자리인데, codex 의 MCP 부착은 한동안 그
+    /// 목록이 아니라 **제어 채널의 존재**만 보고 실렸다 — 그래서 노브를 켠 운영자는 claude 쪽만 닫히고
+    /// codex 쪽은 `eg_send` 가 자동 승인으로 열린 채 남는 반쪽 상태를 얻었다.
+    ///
+    /// ★backend 쪽 단위 시험만으로는 이 축이 안 선다★ — 그쪽은 손으로 만든 endpoint 를 먹으므로
+    ///   「데몬이 실제로 그 목록을 비우나」를 못 잰다. 두 시험이 각각 절반씩 지킨다.
+    /// ★켠 행이 **같이** 서 있어야 의미가 있다★: 끈 쪽만 재면 부착을 통째로 지워도 초록이고, 그 순간
+    ///   codex 우편의 유일한 물리 배선이 사라진다.
+    // ADR-0094
+    // ADR-0209
+    #[test]
+    fn disallowing_mcp_send_reaches_the_codex_argv_too() {
+        use engram_dashboard_agent::backend::{
+            accepts_mcp_config, uses_mail, writes_mcp_config_file, AgentBackend, CodexBackend,
+        };
+        use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
+
+        let _g = lock_env();
+        assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
+
+        let command = AgentCommand::Codex {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::Terminal,
+        };
+        let needs = ControlChannelNeeds {
+            accepts_mcp_config: accepts_mcp_config(&command),
+            writes_mcp_config_file: writes_mcp_config_file(&command),
+            uses_mail: uses_mail(&command),
+        };
+        // 실 backend 에 먹인다 — 계약은 「endpoint 에 실렸나」가 아니라 「argv 에 닿나」다.
+        let attaches_mcp = |ep: ControlEndpoint| -> bool {
+            CodexBackend
+                .build_spec(
+                    &command,
+                    SpawnMode::Fresh,
+                    None,
+                    None,
+                    PathBuf::from("."),
+                    vec![],
+                    Some(ep),
+                )
+                .args
+                .iter()
+                .any(|a| a.contains("mcp_servers."))
+        };
+
+        let (channel, data_dir) = provision_test_channel_with_send(
+            Arc::new(Mutex::new(false)),
+            Some(PathBuf::from(CLI_EXE_NAME)),
+        );
+
+        let on = channel
+            .provision(AgentId::new_v4(), 0, needs)
+            .expect("provision ok")
+            .expect("endpoint");
+        assert!(
+            attaches_mcp(on),
+            "운영 기본에서 codex 부착이 빠졌다 — 이 backend 의 발신 입구가 0 이 된다"
+        );
+
+        std::env::set_var(DISALLOW_MCP_ENV, "1");
+        let off = channel.provision(AgentId::new_v4(), 0, needs);
+        std::env::remove_var(DISALLOW_MCP_ENV);
+        let off = off.expect("provision ok").expect("endpoint");
+        assert!(
+            off.grants.is_empty(),
+            "노브를 켰는데 발신 grant 가 남아 있다(이 시험의 전제): {:?}",
+            off.grants
+        );
+        assert!(
+            !attaches_mcp(off),
+            "노브를 켰는데 codex argv 에 MCP 부착이 실렸다 — 데몬의 차단이 이 backend 만 비껴간다"
+        );
+
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 

@@ -20,3 +20,5 @@ Things you cannot do unless you know they are there. Run the command next to one
   → `engram ui.refresh`
 - **Everything else** — every command the daemon can run right now; the list changes with what is attached.
   → `engram commands` · one in detail = `engram commands <name>` · run it = `engram <name> --flag value`
+
+If an `engram` command or tool is refused or keeps failing, tell your principal — do not route around it.

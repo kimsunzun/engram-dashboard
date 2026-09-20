@@ -1279,8 +1279,12 @@ impl AgentManager {
             // ★두 축을 **각각** 묻는다 — 한쪽에서 다른 쪽을 파생하지 않는다★: 그 접힘이 「제어는 쓰지만
             //   우편 평면 밖」인 backend 에 보내기 인가를 조용히 열었던 자리다([`ControlChannelNeeds`] doc).
             // ADR-0133
+            // ★셋째 축도 **각각** 묻는다★ — 「MCP 로 우편을 쓰나」에서 「우리가 쓴 파일을 읽나」를
+            //   파생하면, 다른 기제로 MCP 를 켜는 backend 가 안 읽는 평문 토큰 파일을 스폰마다 받는다
+            //   (ADR-0209 · `backend::writes_mcp_config_file` doc).
             let needs = crate::types::ControlChannelNeeds {
                 accepts_mcp_config: backend::accepts_mcp_config(&profile.command),
+                writes_mcp_config_file: backend::writes_mcp_config_file(&profile.command),
                 uses_mail: backend::uses_mail(&profile.command),
             };
             self.control
@@ -1299,6 +1303,21 @@ impl AgentManager {
             epoch,
             armed: true,
         });
+
+        // ★둘째 fail-closed 문 — 데몬이 못 보는 실패를 여기서 끊는다★: 위 provision 의 `?` 가 잡는 것은
+        //   데몬 쪽 실패(CSPRNG·mcp-config write)뿐이라, **파일을 안 쓰는 backend** 의 「부착 값을 못
+        //   만들었다」는 그 문을 그냥 지난다(codex 의 `-c mcp_servers.…`). 그 상태로 뜨면 그 에이전트는
+        //   배달 명단에는 오르는데 발신 입구가 0 이라, 도착한 요청이 전부 아무도 답할 수 없는 계약이 된다.
+        // ★가드 무장 **뒤**에 둔다★ — 여기서 끊기면 이미 발급된 토큰·파일을 그 가드가 회수한다.
+        // ★판정은 backend dispatch(ADR-0004)★ — manager 는 `-c` 문법도 MCP 부착도 모른다.
+        // ADR-0209
+        backend::precheck_control_endpoint(&profile.command, control_endpoint.as_ref()).map_err(
+            |e| {
+                PtyError::SpawnFailed(format!(
+                    "backend cannot use the provisioned control channel (fail-closed): {e}"
+                ))
+            },
+        )?;
 
         // ★`sid` 를 그대로 넘기지 않는다 — 이 칸은 **저장된 backend sid** 다(ADR-0185 의 두 축)★:
         //   `sid` 는 발급 축이 켜진 backend 에만 채워지므로, 받아 적는 쪽(codex)에서는 이어받을 값이

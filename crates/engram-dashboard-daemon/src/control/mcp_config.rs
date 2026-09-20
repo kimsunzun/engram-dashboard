@@ -37,7 +37,12 @@ const MCP_CONFIG_SUBDIR: &str = "mcp-config";
 ///   이름으로 서버가 뜨고, mcp-config JSON 의 `mcpServers.<이 값>` 키도 이 값이다. ADR-0094 발신 권한
 ///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 이 상수를 server 로 쓴다(DaemonControlChannel.provision).
 ///   ADR-0086 §engram-ctl 이름 재사용 금지 — 데몬 자체 브랜드로 `engram`(폐기된 크레이트명 아님).
-pub const MCP_SERVER_NAME: &str = "engram";
+///
+/// ★정의는 여기가 아니라 agent crate 다 — 되돌려 여기 리터럴을 다시 적지 말 것★: 이 이름을 쓰는 둘째
+///   소비자가 backend 폴더에 생겼고(codex 의 `-c mcp_servers.<name>=…`), 그쪽은 데몬을 의존할 수 없다.
+///   이 re-export 는 기존 `mcp_config::MCP_SERVER_NAME` 호출부를 그대로 세워 두기 위한 것이다.
+// ADR-0209
+pub use engram_dashboard_agent::types::MCP_SERVER_NAME;
 
 /// epoch 를 파일명에 넣어 회전 시 옛 파일과 충돌하지 않게 한다.
 pub fn config_path(data_dir: &Path, id: AgentId, epoch: u32) -> PathBuf {

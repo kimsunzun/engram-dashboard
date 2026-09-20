@@ -13,8 +13,16 @@
 //! ★시험대가 **다시 재지 않는 것** — 「전부 실측」이라 적던 옛 문장이 거짓이었다(리뷰 적출 2026-09-08)★:
 //!   1. `workspace-write`·`on-request` 정책 **아래의 모델 동작** — 시험대는 그 argv 로 뜨는 것과 컴포저
 //!      기립까지만 잰다(재려면 쓰기 권한을 가진 에이전트를 자동 레인에서 실제로 돌려야 한다).
-//!   2. 우리가 안 쓰는 인자(`-m` · MCP `-c mcp_servers.…` 오버라이드 문법) — 이 파일 주석에만 있고
-//!      재는 곳이 없다.
+//!   2. 우리가 안 쓰는 인자(`-m`) — 이 파일 주석에만 있고 재는 곳이 없다.
+//!      ★MCP `-c mcp_servers.…` 오버라이드는 이제 **우리가 쓴다**★ — 그리고 시험대가 아니라 손으로
+//!      쟀다(2026-09-19 · 0.155.0 · 버리는 `CODEX_HOME`): `--strict-config` 가 그 키를 받아들였고
+//!      (가짜 키 둘은 `unknown configuration field` 로 죽었다), app-server 의 `mcpServerStatus/list` 가
+//!      `engram` 을 그 서버의 발신·조회 툴 둘과 함께 돌려줬으며, 스텁 서버가
+//!      `Authorization: Bearer <ENGRAM_TOKEN 값>` 을 받았다. `cmd.exe /c` 를 지난 갈래도 같았다.
+//!      ★그날 화면에 찍힌 툴 이름은 `send_message`·`messages` 였다 — 오늘 그 이름은 없다★:
+//!      `1b84045` 가 에이전트 내장 도구와의 충돌을 끊으려 `eg_send`·`eg_messages` 로 개명했다. 잰 것은
+//!      그대로 유효하고(개명은 이름뿐이다) 바뀐 것은 부를 이름뿐이다 — 지금 다시 재면 그 목록에
+//!      `eg_send`·`eg_messages` 가 온다.
 //!   2-1. ★`codex resume <id>` 는 이제 **우리가 쓴다** — 그런데도 시험대가 실물로 재지 않는다★:
 //!      [`production_spec`](../../../tests/backend_contract.rs) 이 `SpawnMode::Fresh` 로만 argv 를 뽑아
 //!      이어받기 갈래가 그 레인에 애초에 안 실린다. 자동으로 재려면 그 파일에 살아 있는 스레드 id 를
@@ -54,6 +62,7 @@ use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
     BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError, SessionCaps,
+    MCP_SERVER_NAME, TOKEN_ENV,
 };
 
 /// codex 를 대화형 TUI 가 아니라 **상주 JSON 서버**로 띄우나 = 이 폴더 안의 네 축(통로 모양·통로 실물·
@@ -180,6 +189,113 @@ const SESSION_START_HOOK_KEY: &str = "hooks.SessionStart";
 /// 봉인이라(ADR-0208 결정 3), 이 문자열에 오타 한 글자가 나면 증상은 「세션 id 가 영영 안 온다」 하나다.
 const HOOK_REPORT_ARGV: &str = "hook session-start";
 
+/// 데몬 MCP 서버를 이 스폰에 붙이는 설정 오버라이드의 키 접두. 뒤에 서버 논리명이 붙어
+/// `mcp_servers.engram` 한 키가 된다(정본 = [`MCP_SERVER_NAME`] — 이름을 여기 다시 타이핑하지 말 것).
+///
+/// ★claude 의 `--mcp-config <파일>` 과 **기제가 다르다**★ — codex 는 파일을 안 먹고 이 오버라이드만
+///   먹는다(실측 0.155.0). 그래서 같은 endpoint 가 두 backend 에서 서로 다른 문법으로 번역된다
+///   (ADR-0004 가 말하는 바로 그 지점).
+const MCP_SERVER_OVERRIDE_PREFIX: &str = "mcp_servers.";
+
+/// MCP 서버 설정에서 **bearer 토큰의 값이 아니라 그것이 든 env 변수 이름**을 받는 칸.
+///
+/// ★이 칸을 고른 것이 결정이다 — 값 인라인(`bearer_token='…'`)으로 되돌리지 말 것★: 그렇게 하면
+///   토큰이 **명령줄에 박혀** 같은 사용자의 아무 프로세스나 argv 를 읽는 것만으로 새 나간다(Windows 의
+///   프로세스 목록·WMI 가 argv 를 준다 — 이 저장소가 데몬 발견에 쓰는 그 표면이다). 이 칸을 쓰면 토큰은
+///   이미 스폰 env 에 있는 그 한 벌뿐이고([`inject_cli_entrance`] 가 [`TOKEN_ENV`] 로 심는다) argv 에도
+///   디스크에도 사본이 생기지 않는다.
+/// ★codex 가 그 env 를 실제로 읽어 헤더로 싣는 것을 봤다(실측 2026-09-19 · 0.155.0)★ — 스텁 MCP 서버가
+///   `initialize`·`tools/list` 전 요청에서 `Authorization: Bearer <그 값>` 을 받았다.
+const MCP_BEARER_ENV_KEY: &str = "bearer_token_env_var";
+
+/// 이 MCP 서버 항목 하나에 한해 도구 호출 승인 프롬프트를 없애는 칸.
+///
+/// 유효값은 `auto | prompt | writes | approve` 넷이다 — ★`auto` 는 프롬프트를 없애지 않는다.
+///   없애는 것은 `approve` 뿐이다★(실측 2026-09-20). 이 둘을 헷갈려 한 번 잘못된 결론을 냈던
+///   적이 있어 여기 이름을 둘 다 박는다. `approve`가 대화형 TUI · `codex exec`(이 칸 없이는
+///   "MCP tool call requires approval, but approval policy is never"로 그냥 실패한다) ·
+///   `codex app-server --stdio`(이 칸 없이는 게이트가 `mcpServer/elicitation/request`로 온다)
+///   세 경로 전부에서 승인을 없애는 것을 확인했다.
+/// ★이 서버 항목 하나에만 걸린다 — 승인을 전역으로 끈 것이 아니다★: `approvalPolicy: on-request`·
+///   `sandbox: workspace-write`는 손대지 않으므로 일반 셸/실행 승인은 그대로 묻는다.
+/// ★대화상자의 "Always allow"는 디스크에 남지 않는다★(빈 `CODEX_HOME`으로 전/후 스냅샷 대조
+///   실측 — 새 프로세스는 다시 묻는다). 그래서 이 값은 한 번 설정해 두는 것으로 못 대체하고
+///   스폰마다 실어야 한다.
+const MCP_APPROVAL_MODE_KEY: &str = "default_tools_approval_mode";
+const MCP_APPROVAL_MODE_VALUE: &str = "approve";
+
+/// 이 스폰에 데몬 MCP 서버를 붙일지의 **단일 판정**. [`AgentBackend::build_spec`](실제 부착)과
+/// [`AgentBackend::precheck_control_endpoint`](fail-closed 게이트)가 **같은 이 값**을 읽는다.
+///
+/// ★두 자리가 각자 판정하면 게이트가 공허해진다★ — 게이트가 「붙일 수 있다」고 통과시킨 스폰이
+///   조립에서는 부착 없이 떠도 아무 신호가 없다. 그래서 판정은 [`mcp_attachment`] 하나뿐이고 이
+///   enum 이 그 결과를 두 읽는 자리에 같은 모양으로 나른다.
+enum McpAttachment {
+    /// 붙인다 — `-c` 에 실을 값.
+    Attach(String),
+    /// 붙이지 않는다, 그리고 **그것이 정상 상태다**. 두 갈래가 여기 든다 — 제어 채널이 아예 없는
+    /// 스폰(우편 평면 밖)과, 데몬이 이 스폰에 MCP 발신 입구를 **인가하지 않은** 스폰(운영자가 MCP
+    /// 우편을 껐다 — [`ControlEndpoint::grants_mcp_send`]). 둘 다 스폰을 막지 않는다.
+    NotWanted,
+    /// 붙여야 하는데 **못 만든다**(사유). ★이 값만이 fail-closed 를 낳는다★ — 이 상태로 그냥 뜨면
+    /// 에이전트는 수신 명단(`reads_messages`)에 오른 채 발신 입구가 0 이라(MCP 는 안 붙었고 CLI
+    /// 미러는 `mail_allowed=false` 가 닫는다), 배달된 요청이 전부 아무도 답할 수 없는 계약이 된다.
+    Unrepresentable(String),
+}
+
+/// 위 판정을 내리는 유일한 자리.
+///
+/// ★환경변수를 여기서 다시 읽지 않는다(ADR-0004)★: MCP 우편을 끄는 노브(`ENGRAM_DISALLOW_MCP_SEND` ·
+///   하네스의 `ENGRAM_FORCE_CLI_ONLY_SEND`)의 주인은 **데몬**이고, 그 결정은 이미 씹혀서
+///   [`ControlEndpoint::grants_mcp_send`] 로 실려 온다. backend 가 같은 변수를 다시 읽으면 권위가
+///   둘이 되고, 갈리는 날 「claude 는 꺼졌는데 codex 만 켜져 있다」가 조용히 난다(그것이 이 갈래를
+///   만든 적출이다).
+///
+/// ★이 갈래엔 평문 토큰 파일이 없다 — 그러나 그것을 보증하는 것은 이 함수가 아니다★: 여기서 토큰이
+///
+/// ★이 갈래엔 평문 토큰 파일이 없다 — 그러나 그것을 보증하는 것은 이 함수가 아니다★: 여기서 토큰이
+///   argv 에 안 박힌다는 것은 위 [`MCP_BEARER_ENV_KEY`] 가 지키고, **디스크에도 안 쓰인다**는 것은
+///   [`AgentBackend::writes_mcp_config_file`] 가 false 인 것이 지킨다(데몬 `control::provision` 이 그
+///   칸 하나로 `mcp_config::write_config`/`write_settings` 를 가른다 — 그 파일의 내용·수명은
+///   `control/mcp_config.rs`). ★한때 이 자리엔 「이 갈래는 그 파일이 애초에 없다」가 적혀 있었고 그것이
+///   거짓이었다★ — 그때 데몬은 `accepts_mcp_config` 를 보고 codex 스폰마다 그 파일을 실제로 썼다.
+///   이 함수가 파일을 안 만든다는 것과 그 스폰에 파일이 안 생긴다는 것은 다른 말이다.
+/// ★TOML 리터럴 문자열(작은따옴표)을 쓴다★ — 이스케이프가 없어 값이 **바이트 그대로** 건너가고, 그
+///   조합이 `cmd.exe /c` + `.cmd` shim 두 겹을 견디는 것이 이미 실측돼 있다(ADR-0210). 대신 작은따옴표
+///   자체는 담을 수 없다.
+/// ★실을 수 없는 문자를 만나면 지어낸 이스케이프로 밀어 넣지 않고 끊는다★ — 작은따옴표·공백문자·
+///   제어문자는 값이나 TOML 줄 자체를 깨고, `%` 는 cmd 가 명령줄에서 **따옴표 안에서도** 환경변수로
+///   펴서(아래 `build_spec` 의 같은 이름 한계 주석이 정본) 다른 주소를 가리키게 만든다. 셋 다 증상이
+///   「우편이 조용히 안 된다」 하나라 여기서 소리를 낸다.
+///   ★그 검사가 오늘 한 번도 안 걸리는 것이 정상이다★ — 이 url 은 데몬이 authoring 하는
+///   `http://127.0.0.1:<port>/mcp` 이고 사용자 입력이 아니다. 검사는 그 형태가 바뀌는 날을 위한 것이다.
+// ADR-0004
+// ADR-0128
+// ADR-0209
+fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
+    let Some(endpoint) = control else {
+        return McpAttachment::NotWanted;
+    };
+    // ★이 한 줄이 「운영자가 MCP 우편을 껐다」를 이 backend 에 닿게 하는 전부다★ — 예전에는 제어
+    //   채널의 **존재**만 보고 무조건 붙여서, 노브를 켠 운영자가 claude 는 꺼지고 codex 는 켜진 채로
+    //   남는 상태를 얻었다(`eg_send` 가 그대로 자동 승인으로 호출 가능).
+    if !endpoint.grants_mcp_send() {
+        return McpAttachment::NotWanted;
+    }
+    let url = endpoint.url.as_str();
+    if let Some(bad) = url
+        .chars()
+        .find(|c| *c == '\'' || *c == '%' || c.is_control() || c.is_whitespace())
+    {
+        return McpAttachment::Unrepresentable(format!(
+            "codex MCP 서버를 붙일 수 없다 — 제어 채널 주소에 실을 수 없는 문자가 있다({bad:?}): {url}"
+        ));
+    }
+    McpAttachment::Attach(format!(
+        "{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}={{url='{url}',{MCP_BEARER_ENV_KEY}='{TOKEN_ENV}',{MCP_APPROVAL_MODE_KEY}='{MCP_APPROVAL_MODE_VALUE}'}}"
+    ))
+}
+
 /// 상주 JSON 서버로 띄우는 하위 명령과 그 전송 선택(실측 0.154.0 — `--stdio` 는 `--listen stdio://` 와
 /// 같고 그것이 기본값이다. 기본값에 기대지 않고 명시한다: 이 통로는 stdio 가 아니면 성립하지 않는데,
 /// 기본값은 상류가 바꿀 수 있고 바뀌어도 우리 argv 는 조용히 그대로다).
@@ -261,16 +377,18 @@ fn session_start_hook_override(send_exe: Option<&std::path::Path>) -> Option<Str
 /// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
 /// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
 ///
-/// ★잡는 모양은 하나뿐 = `-c` **다음 칸**이 이 키로 시작하는 형태다★(`-c hooks.SessionStart=…`).
+/// ★잡는 모양은 하나뿐 = `-c` **다음 칸**이 `key` 로 시작하는 형태다★(`-c hooks.SessionStart=…`).
 /// ★못 잡는 것 — 알고 두는 구멍이다★: `-c` 와 값을 한 낱말로 붙인 형태 · `-c` 말고 긴 이름의 같은
-///   플래그 · `hooks` 표 전체를 덮는 상위 키(`-c hooks=…`) · `hooks.SessionStart` 로 **시작만 하는** 다른
+///   플래그 · 표 전체를 덮는 상위 키(`-c hooks=…` · `-c mcp_servers=…`) · 그 키로 **시작만 하는** 다른
 ///   키. 이 목록을 키워 「확실히」 만들려 들지 말 것 — codex 오버라이드 문법의 재구현이 되고 그 재구현은
 ///   상류가 바뀔 때마다 조용히 낡는다. 놓쳐서 잃는 것은 **경고뿐이고 동작이 아니다** — 우리 것이 이기는
 ///   성질은 아래 `build_spec` 의 순서가 따로 보장한다.
-fn passthrough_overrides_the_hook_key(extra_args: &[String]) -> bool {
+/// ★키를 인자로 받는 것이 의도다★ — 오버라이드가 둘이 됐는데(훅 등록 · MCP 서버 부착) 판정을 키마다
+///   복제하면 한쪽만 고쳐져 경고가 반쪽이 된다.
+fn passthrough_overrides_key(extra_args: &[String], key: &str) -> bool {
     extra_args
         .windows(2)
-        .any(|pair| pair[0] == CONFIG_OVERRIDE_FLAG && pair[1].starts_with(SESSION_START_HOOK_KEY))
+        .any(|pair| pair[0] == CONFIG_OVERRIDE_FLAG && pair[1].starts_with(key))
 }
 
 /// 8.3 단축 경로. `None` = 못 얻었다 — 실물이 없거나, 볼륨이 단축 이름을 안 만들거나, 받은 값에 아직
@@ -364,11 +482,12 @@ impl AgentBackend for CodexBackend {
     ///   프로세스에 자기 env 를 **하나도 덧씌우지 않는다**(순수 상속). 즉 여기서 심은 토큰이 그 훅에
     ///   그대로 도착한다. 공용 주입이 「보조 프로세스의 자격증명이기도 하다」고 적은 조건을 이 백엔드가
     ///   만족한다는 실측이 이것이고, 그 조건 자체는 [`inject_cli_entrance`] doc 이 진다.
-    /// ★이 칸이 **우편까지 열지는 않는다 — 그리고 그것이 공짜가 아니었다**★: 예전 데몬은 우편 가부를
+    /// ★이 칸이 **우편을 열지는 않는다 — 그리고 그것이 공짜가 아니었다**★: 예전 데몬은 우편 가부를
     ///   `!accepts_mcp_config` 하나로 파생해서, 이 칸을 켜는 것만으로 이 백엔드에 **보내기 인가가 함께
     ///   열렸다**(받기는 [`AgentBackend::reads_messages`] 가 닫은 채로). 그 비대칭을 없애려고 보내기 축을
     ///   별도 선언으로 뽑았다 — 아래 [`AgentBackend::uses_mail`] 이 그것이고, 데몬은 두 축에서 한 값을
     ///   파생한다. ★그 칸을 지우거나 기본값으로 되돌리면 이 부수효과가 그대로 돌아온다★.
+    ///   (오늘 그 칸은 켜져 있다 — 그러나 **선언으로** 켜져 있고, 부수효과로가 아니다.)
     /// ★`engram` 실행파일이 없는 설치에서도 이 백엔드의 스폰은 **끊기지 않는다**★ — 그 fail-closed 는
     ///   「CLI 우편을 가르쳤는데 부를 실행파일이 없다」는 짝 위반을 지키는 것이고, 우편 평면 밖 스폰에는
     ///   그 짝이 없다(그 판정의 정본 = 데몬 `control::provision`). 제어 동사를 못 쓰게 되는 것은 남지만
@@ -382,41 +501,83 @@ impl AgentBackend for CodexBackend {
         true
     }
 
-    /// ★"codex 가 MCP 를 못 쓴다" 가 아니다★ — 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수
-    /// 있나**이고 그 답이 아니오다. codex 의 MCP 주입은 전역 TOML 오버라이드
-    /// (`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 **기제가 다르다**(실측).
-    /// 그 다른 기제를 배선하는 것은 이 단계의 범위가 아니다.
+    /// ★이 칸의 **이름과 오늘의 뜻이 어긋나 있다 — 알고 켰다**★: 이름과 [`crate::types::ControlChannelNeeds`]
+    /// doc 이 묻는 것은 「우리가 만든 mcp-config **파일**을 먹일 수 있나」이고 codex 의 답은 여전히
+    /// **아니오**다(그 파일을 가리킬 플래그가 없다 — 실측 0.155.0). 그런데 데몬은 이 한 칸으로 **우편
+    /// 채널 판정**까지 파생하므로(`mail_allowed = uses_mail && !accepts_mcp_config`), MCP 로 우편을 쓰는
+    /// 이 백엔드가 false 를 유지하면 **CLI 미러가 열린 채로** 남는다 — ADR-0209 가 「MCP 가 정식, CLI 는
+    /// 미러」라고 못 박은 것의 정반대다.
+    /// ★한때 이 칸을 켜면 **파일까지 딸려 왔고, 그 대가는 갚았다**★: 데몬이 이 한 칸을 보고 mcp-config
+    ///   JSON(평문 Bearer 토큰)과 세션 설정 조각을 실제로 썼고, codex 는 둘 다 안 읽으므로 스폰마다
+    ///   아무도 안 여는 비밀 파일이 하나 생겼다 — 게다가 그 write 는 fail-closed 라 **안 읽는 파일 때문에
+    ///   codex 스폰이 끊길 수 있었다**. 데몬의 파생 축을 둘로 쪼개 해소했다: 파일을 쓸지는 이제 아래
+    ///   [`AgentBackend::writes_mcp_config_file`] 가 단독으로 가르고, 이 칸은 우편 채널 판정만 굴린다.
+    ///   ★그 칸을 지우거나 여기 값으로 파생하면 그 대가가 그대로 돌아온다★.
+    /// ★실제 부착 수단은 [`mcp_server_override`] 다★ — `-c mcp_servers.engram={…}` 한 값. 그 값이 실제로
+    ///   서버를 세우는 것을 봤다(실측 2026-09-19 · 0.155.0: `mcpServerStatus/list` 가 `engram` 을 그
+    ///   서버의 툴 둘과 함께 돌려줬고, 스텁 서버는 `Authorization: Bearer …` 를 받았다).
+    ///   ★그날 찍힌 이름은 `send_message`·`messages` 이고, `1b84045` 가 `eg_send`·`eg_messages` 로
+    ///   개명했다★ — 이 파일 헤더의 같은 실측 항목이 그 사유의 정본이다.
     // ADR-0099
+    // ADR-0128
+    // ADR-0209
     fn accepts_mcp_config(&self) -> bool {
+        true
+    }
+
+    /// ★위 칸이 true 인데 이 칸은 false 다 — 그 갈림이 이 칸의 존재 이유다★: codex 에는 우리가 쓴 파일을
+    /// 가리킬 플래그가 **없다**(실측 0.155.0 — `--mcp-config` 도 `--settings` 도, 설정 파일을 가리키는
+    /// `--config <파일>` 도 없다). MCP 부착은 [`mcp_server_override`] 의 `-c mcp_servers.engram={…}`
+    /// 한 값 단독이고, 토큰은 그 값이 이름으로 가리키는 env 로 간다([`MCP_BEARER_ENV_KEY`]) — 디스크에
+    /// 사본을 만들 자리가 아예 없다.
+    /// ★false 를 유지하는 것이 보안 결정이다 — 위 칸에서 파생하지 말 것★: true 로 되돌리면 데몬이
+    ///   스폰마다 평문 Bearer 토큰 JSON 을 기본 ACL 로 데이터 디렉토리에 쓰고(아무도 안 연다), 그
+    ///   write 실패가 **fail-closed** 라 codex 스폰이 그 파일 때문에 끊긴다. 그것이 이 칸이 갈라지기 전의
+    ///   실제 상태였다.
+    // ADR-0086
+    // ADR-0099
+    // ADR-0209
+    fn writes_mcp_config_file(&self) -> bool {
         false
     }
 
-    /// ★분류 사유가 shell 과 다르다★ — shell 이 false 인 것은 입력이 **명령으로 실행되기** 때문이고,
-    /// codex 가 false 인 것은 **바쁜 때를 못 가리기** 때문이다. 바쁨 게이트는 fail-open 이라, 턴 신호가
-    /// 없는 백엔드는 늘 한가한 것으로 읽혀 **생각하는 도중에 편지가 꽂힌다**.
-    /// ★app-server 모드는 이제 그 신호를 낸다★ — 통로가 `turn/completed` 를 읽고(`turn/started` 는
-    /// **일부러** 읽지 않는다 — 사유 정본은 그 통로의 `TURN_COMPLETED` doc), 번역기가 같은 알림을 턴
-    /// 경계로 옮겨 아래 [`classify_turn`] 이 `Ended` 를 낸다. ★그런데도 이 칸이 false 인 것은 **터미널
-    /// 모드 때문**이다★: 이 메서드는 `command` 를 받지 않아 두 모드를 가를 수 없는데, 그 모드는 decoder
-    /// 가 없어 `TerminalBytes` 만 흐르고 그래서 신호가 하나도 없다. 여기서 true 를 돌려주면 그 모드까지
-    /// 함께 열린다.
-    /// ★여는 조건 = 이 축을 모드별로 가르는 것★(시그니처에 명령을 들이거나 자격을 세션 caps 로 옮기거나).
-    /// shell 쪽 사유는 그때도 그대로 남으므로 둘을 같이 열지 말 것.
+    /// ★한때 false 였다 — 그 사유와 그것을 버린 이유를 **함께** 남긴다(지우지 말 것)★: 옛 값의 근거는
+    /// 「이 메서드가 `command` 를 안 받아 두 모드를 가를 수 없다」였다. app-server 모드는 턴 신호를
+    /// 낸다 — 통로가 `turn/completed` 를 읽고(`turn/started` 는 **일부러** 읽지 않는다. 사유 정본은 그
+    /// 통로의 `TURN_COMPLETED` doc), 번역기가 그 알림을 턴 경계로 옮겨 아래 [`classify_turn`] 이
+    /// `Ended` 를 낸다. 그런데 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐르고 신호가 0 이라,
+    /// 여기서 true 를 돌려주면 **그 모드까지 함께 열린다** — 그래서 닫아 뒀었다.
+    /// ★그 사유는 막을 근거가 못 된다 — 터미널 claude 가 **정확히 같은 자리에 있고 이미 받는다**★:
+    ///   구조화 출력이 없는 claude 도 턴 신호가 0 인데 수신자 명단에 있다. 정책 정본은 **ADR-0116
+    ///   결정 7** 이고 그 문장이 「턴 신호 없음 → 게이트 없이 즉시 주입」이다(그 CLI 자신의 입력 큐가
+    ///   게이트라서 우리가 idle 을 관측할 이유가 없다). 같은 ADR 의 거부한 대안이 「관측할 수 없으니
+    ///   배달할 수 없다」를 **명시로** 죽였다 — 그 전제로 되돌리지 말 것.
+    /// ★그래서 대가를 **알고** 받는다★: 터미널 모드에는 바쁨 게이트가 없으므로 봉투가 턴 한가운데
+    ///   꽂힐 수 있고, TUI 가 모달 상태(승인 프롬프트·메뉴·플랜 확인)면 그 위젯이 봉투를 먹을 수 있다.
+    ///   ADR-0116 결정 7 이 그 대가를 이미 명시 수용했다(문제가 실제로 관측되면 그때 좁힌다).
+    /// ★shell 과 같이 열지 말 것★ — 그쪽 false 는 관측 축이 아니라 **입력이 명령으로 실행된다**는 축이라
+    ///   이 변경과 무관하게 그대로 남는다(기본 구현 doc 의 그 문단).
+    // ADR-0116
+    // ADR-0209
     fn reads_messages(&self) -> bool {
-        false
+        true
     }
 
-    /// ★받기와 **같이** 닫는다(사용자 결정 2026-09-18)★: 위 칸이 false 인 채로 이 칸만 열리면 「보내기만
-    /// 되는」 비대칭이 생기고, 그 비대칭은 `supports_control_channel` 을 켠 부수효과로 **아무도 선언하지
-    /// 않은 채** 한 번 생겼던 상태다. 그것을 되돌린 자리가 여기다.
-    /// ★제어 동사는 그대로 쓴다★ — 이 칸이 닫는 것은 우편 입구(`/control/send`·`/control/messages`)
-    ///   뿐이고, CLI 입구(토큰·주소)와 제어 라우트는 위 `supports_control_channel` 이 연다.
-    /// ★여는 조건★: 받기 축을 먼저 열 것(그쪽 doc 의 「여는 조건」). 보내기만 먼저 열면 답장을 못 받는
-    ///   발신자가 생기고, 그것은 우편 장부에 영원한 미결로 남는다.
+    /// ★이 칸이 **무엇을 사는지** 정확히 적는다★: 데몬의 `build_grants` 가 이 값이 false 면 **한 줄도
+    /// 내지 않고 단락**하고(발신 입구 grant 0), 프라이밍 변형 선택도 `needs.uses_mail.then_some(…)` 으로
+    /// 끊긴다. 즉 이 칸을 닫은 채 위 `accepts_mcp_config` 만 켜면 에이전트는 MCP 툴을 **손에 쥔 채
+    /// 아무도 그 존재를 말해 주지 않는** 상태가 된다.
+    /// ★제어 동사와는 별개다★ — 이 칸이 여는 것은 우편이고, CLI 입구(토큰·주소)와 제어 라우트는 위
+    ///   `supports_control_channel` 이 연다.
+    /// ★한때 이 자리에 「미해소 — 보내기만 열렸다」가 적혀 있었다. 해소됐다★: 그 문단이 요구한 근거
+    ///   둘 중 첫째(받기 축이 열렸다)가 섰다 — [`AgentBackend::reads_messages`] 가 true 라 이 백엔드는
+    ///   데몬 `messaging_host` 의 배달 명단에 오르고, 이 에이전트가 보낸 `request` 의 답장이 돌아올
+    ///   곳이 있다. 그래서 ADR-0209 결정 4 의 「받기 먼저」 순서를 이제 어기지 않는다.
+    ///   ★되돌릴 때의 규칙은 그대로다★ — 받기 축을 닫으면서 이 칸만 열어 두면 그 비대칭이 되살아난다.
     // ADR-0133
     // ADR-0209
     fn uses_mail(&self) -> bool {
-        false
+        true
     }
 
     /// ★app-server 모드에만 세울 연결이 있다★ — 핸드셰이크 왕복을 마쳐야 `turn/start` 가 허용된다.
@@ -457,6 +618,35 @@ impl AgentBackend for CodexBackend {
             return Some(AgentFailureKind::NoConversationToResume);
         }
         None
+    }
+
+    /// ★claude 와 같은 자리에 fail-closed 를 세운다★ — 그쪽은 데몬의 `?`(mcp-config write 실패)가
+    /// 끊어 주지만, 이 backend 는 파일을 안 쓰므로(`writes_mcp_config_file` = false) 데몬이 끊을 재료가
+    /// 없다. 조립에서 부착 값을 못 만드는 것은 **여기서만** 보인다.
+    ///
+    /// ★끊는 조건은 [`McpAttachment::Unrepresentable`] 하나다 — 넓히지 말 것★: 그때의 상태가
+    ///   「배달 명단에는 올라가는데(`reads_messages` = true) 발신 입구가 0」이다. MCP 는 안 붙었고,
+    ///   CLI 미러는 데몬이 `mail_allowed=false` 로 닫아 뒀다(이 backend 는 `accepts_mcp_config` 가
+    ///   true 라 그 파생이 언제나 그렇게 떨어진다) — 그러면 배달된 `request` 가 전부 **아무도 답할 수
+    ///   없는 계약**이 되고, 증상은 오류가 아니라 영원한 무응답이다.
+    /// ★열어 두는 갈래 둘(둘 다 정상 상태다)★: ① 제어 채널이 아예 없는 스폰 — 우편 없이 뜨는 codex 는
+    ///   정당하다 ② 데몬이 MCP 발신 입구를 인가하지 않은 스폰 — 운영자가 MCP 우편을 껐다는 뜻이고,
+    ///   그 스폰은 애초에 우편을 기대하지 않는다. 둘 다 끊으면 `engram` 없이 도는 설치와 노브를 켠
+    ///   하네스에서 codex 스폰이 통째로 죽는다.
+    // ADR-0004
+    // ADR-0209
+    fn precheck_control_endpoint(
+        &self,
+        _command: &AgentCommand,
+        control: Option<&ControlEndpoint>,
+    ) -> Result<(), String> {
+        match mcp_attachment(control) {
+            McpAttachment::Attach(_) | McpAttachment::NotWanted => Ok(()),
+            McpAttachment::Unrepresentable(reason) => {
+                tracing::warn!("codex spawn fail-closed — {reason}");
+                Err(reason)
+            }
+        }
     }
 
     /// ★`session_id` 는 **여전히** 조립하지 않는다 — 되살리지 말 것★: `--session-id` 는 존재하지 않고
@@ -549,6 +739,39 @@ impl AgentBackend for CodexBackend {
                 //   codex 가 둘 다 뜨는가)이다. 그 전에는 이 한계를 아는 채로 둔다.
                 // ADR-0004
 
+                // ★MCP 서버 부착도 같은 자리·같은 규율이다(패스스루 **뒤**)★ — 아래 훅 등록 블록의
+                //   순서 주석이 그 사유의 정본이고 여기 되풀어 적지 않는다. ★훅과 달리 **모드를 가르지
+                //   않는다**★: 우편 입구는 두 모드 다 필요하고, 훅이 터미널에만 걸린 것은 app-server 가
+                //   세션 id 를 다른 경로로 받아 오기 때문이지 모드가 우편을 가르기 때문이 아니다.
+                // ★이 한 값이 codex 우편의 **유일한 물리 배선**이다★ — claude 는 mcp-config 파일을 읽지만
+                //   codex 는 이 오버라이드만 먹는다(실측 0.155.0). 빠지면 `eg_send` 툴이 아예 없고,
+                //   데몬은 「MCP 로 우편을 쓴다」고 판정해(`mail_allowed=false`) CLI 미러까지 닫으므로
+                //   **발신 입구가 0** 이 된다. 그 결말은 오류가 아니라 침묵이다.
+                // ★우리 것이 뒤에 실리는 성질을 순서로 얻는다★ — 같은 키를 `-c` 로 두 번 넘기면 마지막이
+                //   이긴다(실측 · ADR-0210 결정 3).
+                // ADR-0128
+                // ADR-0209
+                // ★「안 붙인다」의 두 갈래를 여기서 **가르지 않는다**★ — 정당한 부재
+                //   ([`McpAttachment::NotWanted`])든 못 만든 것([`McpAttachment::Unrepresentable`])이든
+                //   이 자리가 하는 일은 같다(인자를 안 싣는다). 못 만든 쪽을 스폰 중단으로 끊는 자리는
+                //   [`AgentBackend::precheck_control_endpoint`] 이고, 이 함수는 인자만 만든다(바로 아래
+                //   훅 블록이 신고 자리를 조립점으로 미루는 것과 같은 규율).
+                match mcp_attachment(control.as_ref()) {
+                    McpAttachment::Attach(value) => {
+                        if passthrough_overrides_key(
+                            extra_args,
+                            &format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}"),
+                        ) {
+                            tracing::warn!(
+                                "codex 패스스루가 `{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}` 을 직접 세웠다 — 우편 입구를 위해 우리 부착을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
+                            );
+                        }
+                        args.push(CONFIG_OVERRIDE_FLAG.to_string());
+                        args.push(value);
+                    }
+                    McpAttachment::NotWanted | McpAttachment::Unrepresentable(_) => {}
+                }
+
                 // ★훅 등록은 패스스루 **뒤**다 — 앞에 두면 사용자 인자 한 줄에 우리 등록이 진다★.
                 //   실측(codex-cli 0.155.0 · 2026-09-19): 같은 설정 키를 `-c` 로 두 번 넘기면 **마지막
                 //   것이 이긴다** — 병합도 없고 중복 키 오류도 없다. 그래서 앞에 두면
@@ -570,7 +793,7 @@ impl AgentBackend for CodexBackend {
                         // ★거르지 않고 경고만 한다★ — 패스스루를 지우는 것은 사용자 인자를 우리가 검열하는
                         //   것이고, 우리 등록을 접으면 세션 id 회수가 통째로 죽는다. 둘 다 안 하고 이긴
                         //   사실만 남긴다.
-                        if passthrough_overrides_the_hook_key(extra_args) {
+                        if passthrough_overrides_key(extra_args, SESSION_START_HOOK_KEY) {
                             tracing::warn!(
                                 "codex 패스스루가 `{SESSION_START_HOOK_KEY}` 을 직접 세웠다 — 세션 id 회수를 위해 우리 등록을 뒤에 실어 그 값을 덮는다(마지막 `-c` 가 이긴다)"
                             );
@@ -583,14 +806,34 @@ impl AgentBackend for CodexBackend {
                 // ADR-0086 스텝 2(CLI 입구) — ★모드를 가르지 않는다★: 심는 것은 env 세 값뿐이고 그
                 //   값을 읽는 것은 codex 가 아니라 **codex 가 띄우는 자식들**(셸 도구·훅 프로세스)이다.
                 //   두 모드 다 자식을 띄우므로 갈릴 축이 없다.
-                // ★`--mcp-config` 짝은 여기 없다 — 그것은 claude 의 플래그다★: 이 백엔드의
-                //   [`AgentBackend::accepts_mcp_config`] 가 false 라 `endpoint.config_path` 는 애초에
-                //   `None` 으로 온다(그 Option 의 뜻 = MCP 입구의 유무. CLI 배선의 유무가 아니다 —
-                //   [`ControlEndpoint::config_path`] doc).
-                // ★`priming_file`·`settings_file`·`grants` 도 쓰지 않는다★ — 전부 claude 의 플래그로만
-                //   번역되는 칸이고, codex 에 그 짝이 있는지는 재 본 적이 없다. 없는 문법을 지어내
-                //   붙이면 기동이 실패하므로 재기 전에는 싣지 않는다.
-                // ADR-0086 / ADR-0133
+                // ★`config_path`·`settings_file` 은 **안 온다 — 그리고 그것이 선언된 결과다**★: 둘 다
+                //   claude 가 **경로로 읽는 파일**이고 codex 에는 그 플래그가 없어서(실측 0.155.0:
+                //   `--mcp-config` 도 `--settings` 도, 설정 파일을 가리키는 `--config <파일>` 도 없다)
+                //   이 폴더가 [`AgentBackend::writes_mcp_config_file`] 를 false 로 선언하고, 데몬이 그
+                //   칸 하나로 write 를 가른다. 이 백엔드의 MCP 부착은 위 `-c` 한 값 단독이다.
+                //   ★그 칸이 갈라지기 전에는 스폰마다 **아무도 안 읽는 평문 토큰 파일이 하나 생겼다**★ —
+                //   데몬의 파생 축이 「MCP 로 우편을 쓰나」와 「우리 mcp-config 파일을 먹나」를 한 칸으로
+                //   겸했기 때문이다. 그 겸직을 되살리면(= 그 칸을 지우거나 `accepts_mcp_config` 로
+                //   파생하면) 낭비도 fail-closed 스폰 중단 위험도 그대로 돌아온다.
+                //   ★그래도 아래 주입은 두 칸이 `Some` 으로 와도 무시한다 — 그 방어를 걷지 말 것★:
+                //   제어 채널은 이 backend 하나만 쓰는 게 아니고, 「Some 이니 뭔가 쓰자」로 claude 의
+                //   플래그를 베껴 붙이면 기동이 죽는다(그 단언 = `the_daemon_written_files_are_still_not_translated_into_argv`).
+                // ★`grants` 도 안 쓴다★ — 그 목록은 권한 프롬프트의 **사전 승인**이지 툴 허용 목록이
+                //   아니고(ADR-0094), codex 설정의 `enabled_tools` 로 번역하면 뜻이 「미리 승인」에서
+                //   「이것만 존재」로 바뀐다. 다른 뜻의 값을 같은 값이라 부르지 않는다.
+                // ★`priming_file` 도 안 쓴다 — 짝이 **없어서**이고, 재 본 결과다(2026-09-19 · 0.155.0)★:
+                //   경로를 받는 지시문 키는 `model_instructions_file` 하나뿐인데 그것은 **기본 지시문을
+                //   대체**한다(오류 문구가 `failed to read model instructions file`). 프라이밍을 거기
+                //   걸면 codex 자신의 운용 지시가 통째로 사라진다. 나머지 후보는 키 자체가 없다
+                //   (`experimental_instructions_file`·`developer_instructions_file`·`instructions_file`
+                //   전부 `unknown configuration field`). 내용을 인라인으로 받는 칸
+                //   (`developer_instructions`)은 있으나 프라이밍은 8 KB 넘는 마크다운이라 TOML 한 줄
+                //   리터럴에 담기지 않고(줄바꿈·작은따옴표), 담으려면 이 crate 가 프라이밍 **내용을 읽는**
+                //   쪽이 된다 — ADR-0092 가 그 역할을 소비 프로그램에 준 것과 반대다.
+                //   ★그래서 이 백엔드에서 우편 사용법을 나르는 것은 MCP 툴 설명 자체다★(데몬
+                //   `control/mcp_server.rs` 의 `eg_send` description 이 수신자 표기·요청/답장
+                //   계약·배달 상태·at-least-once 까지 싣는다).
+                // ADR-0086 / ADR-0092 / ADR-0133 / ADR-0209
                 if let Some(endpoint) = &control {
                     inject_cli_entrance(&mut env, endpoint);
                 }
@@ -772,7 +1015,7 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 mod tests {
     use super::*;
     use crate::types::{
-        TurnOutcome, CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+        ToolGrant, TurnOutcome, CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
     };
 
     fn codex(extra_args: Vec<&str>) -> AgentCommand {
@@ -816,6 +1059,14 @@ mod tests {
             assert_eq!(spec.program, CODEX_PROGRAM);
             spec.args.clone()
         }
+    }
+
+    /// ★`-c` 의 **존재**로 훅을 세지 말 것 — 이제 우리 오버라이드가 둘이다★(MCP 부착 · 훅 등록).
+    ///   플래그만 세던 옛 형태는 MCP 부착이 들어오면서 전부 거짓 양성이 됐다.
+    fn hook_override_value(argv: &[String]) -> Option<String> {
+        argv.windows(2)
+            .find(|p| p[0] == CONFIG_OVERRIDE_FLAG && p[1].starts_with(SESSION_START_HOOK_KEY))
+            .map(|p| p[1].clone())
     }
 
     #[test]
@@ -1050,16 +1301,43 @@ mod tests {
         ControlEndpoint {
             url: "http://127.0.0.1:7777/mcp".to_string(),
             token: "deadbeef".to_string(),
-            // ★None 이 이 백엔드의 정상값이다★ — `accepts_mcp_config()` 가 false 라 데몬이 mcp-config 를
-            //   아예 쓰지 않는다. 그래도 아래 세 env 는 실려야 한다는 것이 이 구획이 재는 것이다.
-            config_path: None,
+            // ★운영에서 이 칸은 `None` 으로 온다 — 여기 `Some` 은 **일부러** 넣은 최악값이다★:
+            //   `writes_mcp_config_file()` 가 false 라 데몬은 이 backend 에 파일을 안 쓰고 두 칸을 비워
+            //   보낸다. 그래도 fixture 가 `Some` 을 싣는 이유는 아래 시험이 재는 것이 「경로가 오면
+            //   argv 로 새는가」이기 때문이다 — `None` 을 넣으면 그 단언이 공허해지고, 데몬 쪽 게이트가
+            //   무너지는 날 이 backend 가 그 경로를 그대로 받아 쓰는 회귀를 아무도 못 잡는다.
+            config_path: Some(std::path::PathBuf::from("C:/engram/mcp-config.json")),
             send_exe: Some(std::path::PathBuf::from("C:/engram/bin/engram.exe")),
             priming_file: Some(std::path::PathBuf::from("C:/engram/priming.md")),
-            grants: vec![],
+            // ★이 칸이 「데몬이 이 스폰에 MCP 발신 입구를 인가했다」의 실물이다 — 비워 두지 말 것★:
+            //   빈 목록은 운영자가 MCP 우편을 **끈** 상태이고(그쪽 fixture 는 아래
+            //   [`endpoint_without_mcp_send`]), 그 값으로 기본 fixture 를 만들면 MCP 부착을 재는 시험이
+            //   전부 「안 붙는 게 맞다」쪽을 재게 되어 통째로 공허해진다.
+            //   ★툴 이름을 여기 박는 것은 재타이핑이 아니다★ — 판정은 **서버명만** 본다
+            //   (`ControlEndpoint::grants_mcp_send`). 툴 이름의 정본은 데몬 쪽이고 이 crate 는 그것을
+            //   데이터로만 나른다.
+            grants: vec![ToolGrant::Mcp {
+                server: MCP_SERVER_NAME.to_string(),
+                tool: "eg_send".to_string(),
+            }],
             settings_file: Some(std::path::PathBuf::from("C:/engram/session.json")),
             // ★운영이 이 백엔드에 싣는 값이 `false` 다★ — 이 폴더가 그렇게 선언하고(`uses_mail`) 데몬이
             //   그 선언에서 파생한다. 아래 형제 시험이 반대 값도 따라간다는 것을 따로 잰다.
             mail_allowed: false,
+        }
+    }
+
+    /// 운영자가 MCP 우편을 **끈** 스폰의 endpoint. 데몬은 그때도 제어 채널 자체는 발급하고(제어 동사는
+    /// 전원 개방이다 — ADR-0132 결정 5) 발신 입구 grant 만 뺀다 — 그 결과가 이 모양이다.
+    ///
+    /// ★`ENGRAM_DISALLOW_MCP_SEND` 와 `ENGRAM_FORCE_CLI_ONLY_SEND` 가 서로 다른 자리를 건드리는데도 이
+    ///   한 fixture 로 둘 다 대표되는 이유★: 전자는 `build_grants` 에서 MCP grant 를 빼고, 후자는
+    ///   `accepts_mcp_config` 를 뒤집어 grant 가 CLI 쪽으로 가게 한다 — **둘 다 「우리 서버의 MCP 발신
+    ///   grant 가 없다」로 착지한다.** backend 가 보는 것은 그 착지점 하나다.
+    fn endpoint_without_mcp_send() -> ControlEndpoint {
+        ControlEndpoint {
+            grants: vec![],
+            ..endpoint()
         }
     }
 
@@ -1204,7 +1482,13 @@ mod tests {
     #[test]
     fn the_app_server_spawn_registers_no_hook() {
         let s = spec_with_control(&codex_app_server(vec![]), Some(endpoint()));
-        assert_eq!(codex_argv(&s), vec!["app-server", "--stdio"]);
+        let argv = codex_argv(&s);
+        assert_eq!(hook_override_value(&argv), None, "{argv:?}");
+        assert_eq!(
+            &argv[..2],
+            &["app-server".to_string(), APP_SERVER_STDIO_FLAG.to_string()],
+            "하위 명령과 전송 선택은 여전히 맨 앞이어야: {argv:?}"
+        );
     }
 
     /// ★훅 등록이 패스스루 **뒤**다★ — 이 순서가 뒤집히면 `-c hooks.SessionStart=…` 한 줄로 우리 등록이
@@ -1221,18 +1505,23 @@ mod tests {
             Some(endpoint()),
         );
         let argv = codex_argv(&s);
+        // ★첫 `-c` 를 집으면 안 된다 — 그 자리는 MCP 부착이다★. 이 항목이 재는 것은 **훅의** 자리다.
         let flag = argv
             .iter()
-            .position(|a| a == CONFIG_OVERRIDE_FLAG)
-            .expect("훅 등록이 실려야 한다");
+            .position(|a| a.starts_with(SESSION_START_HOOK_KEY))
+            .expect("훅 등록이 실려야 한다")
+            - 1;
         assert_eq!(
             flag,
             argv.len() - 2,
             "훅 등록이 맨 뒤가 아니다 — 뒤에 오는 쪽이 이긴다: {argv:?}"
         );
-        assert_eq!(
-            &argv[argv.len() - 4..argv.len() - 2],
-            &["-m".to_string(), "gpt-5".to_string()],
+        let passthrough = argv
+            .iter()
+            .position(|a| a == "gpt-5")
+            .expect("패스스루가 사라졌다");
+        assert!(
+            passthrough < flag,
             "패스스루가 훅 등록 앞에 와야 한다: {argv:?}"
         );
     }
@@ -1243,10 +1532,13 @@ mod tests {
     #[test]
     fn a_conflicting_passthrough_loses_to_ours_and_trips_the_warning() {
         assert!(
-            passthrough_overrides_the_hook_key(&[
-                CONFIG_OVERRIDE_FLAG.to_string(),
-                format!("{SESSION_START_HOOK_KEY}=[]"),
-            ]),
+            passthrough_overrides_key(
+                &[
+                    CONFIG_OVERRIDE_FLAG.to_string(),
+                    format!("{SESSION_START_HOOK_KEY}=[]"),
+                ],
+                SESSION_START_HOOK_KEY,
+            ),
             "`-c {SESSION_START_HOOK_KEY}=…` 를 못 알아봤다 — 경고 없이 사용자 설정을 덮는다"
         );
         let s = CodexBackend.build_spec(
@@ -1260,9 +1552,11 @@ mod tests {
         );
         let argv = codex_argv(&s);
         assert_eq!(
-            argv.iter().filter(|a| *a == CONFIG_OVERRIDE_FLAG).count(),
+            argv.iter()
+                .filter(|a| a.starts_with(SESSION_START_HOOK_KEY))
+                .count(),
             2,
-            "두 `-c` 가 다 실려야 한다 — 거르는 순간 사용자 인자를 우리가 검열하는 것이다: {argv:?}"
+            "사용자 것과 우리 것이 다 실려야 한다 — 거르는 순간 사용자 인자를 우리가 검열하는 것이다: {argv:?}"
         );
         assert!(
             argv[argv.len() - 1].starts_with(SESSION_START_HOOK_KEY)
@@ -1274,14 +1568,17 @@ mod tests {
     /// 다른 키를 `-c` 로 넘기는 것은 충돌이 아니다 — 경고를 남발하면 아무도 안 읽는다.
     #[test]
     fn an_unrelated_config_passthrough_is_not_a_conflict() {
-        assert!(!passthrough_overrides_the_hook_key(&[
-            CONFIG_OVERRIDE_FLAG.to_string(),
-            "model=gpt-5".to_string(),
-        ]));
-        assert!(!passthrough_overrides_the_hook_key(&[
-            "--profile".to_string(),
-            format!("{SESSION_START_HOOK_KEY}=[]"),
-        ]));
+        assert!(!passthrough_overrides_key(
+            &[CONFIG_OVERRIDE_FLAG.to_string(), "model=gpt-5".to_string(),],
+            SESSION_START_HOOK_KEY,
+        ));
+        assert!(!passthrough_overrides_key(
+            &[
+                "--profile".to_string(),
+                format!("{SESSION_START_HOOK_KEY}=[]"),
+            ],
+            SESSION_START_HOOK_KEY,
+        ));
     }
 
     /// 이어받기 갈래에서도 하위 명령은 맨 앞, 훅 등록은 맨 뒤 — 둘이 서로를 밀어내지 않는다.
@@ -1307,8 +1604,9 @@ mod tests {
         let mut ep = endpoint();
         ep.send_exe = None;
         let s = spec_with_control(&codex(vec![]), Some(ep));
-        assert!(
-            !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+        assert_eq!(
+            hook_override_value(&codex_argv(&s)),
+            None,
             "send_exe 부재인데 훅이 실렸다: {:?}",
             s.args
         );
@@ -1320,7 +1618,7 @@ mod tests {
         let s = spec_with_control(&codex(vec![]), None);
         assert!(
             !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
-            "endpoint 부재인데 훅이 실렸다: {:?}",
+            "endpoint 부재인데 `-c` 가 실렸다(훅도 MCP 부착도 없어야): {:?}",
             s.args
         );
     }
@@ -1339,13 +1637,18 @@ mod tests {
         ));
         let s = spec_with_control(&codex(vec![]), Some(ep));
         let argv = codex_argv(&s);
-        assert!(
-            !argv.iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+        assert_eq!(
+            hook_override_value(&argv),
+            None,
             "단축 경로를 못 얻은 공백 경로가 그대로 실렸다: {argv:?}"
         );
+        // ★견줄 상대가 「제어 채널 없는 스폰」이면 안 된다★ — 그쪽은 MCP 부착까지 함께 빠져, 이 단언이
+        //   「훅을 건너뛰었다」가 아니라 「제어 채널이 없다」를 재게 된다.
+        let mut no_exe = endpoint();
+        no_exe.send_exe = None;
         assert_eq!(
             argv,
-            codex_argv(&spec(&codex(vec![]), "C:/workspace")),
+            codex_argv(&spec_with_control(&codex(vec![]), Some(no_exe))),
             "훅을 건너뛴 argv 는 훅 없는 argv 와 바이트 단위로 같아야 한다"
         );
     }
@@ -1356,8 +1659,9 @@ mod tests {
         let mut ep = endpoint();
         ep.send_exe = Some(std::path::PathBuf::from("C:/o'brien/engram.exe"));
         let s = spec_with_control(&codex(vec![]), Some(ep));
-        assert!(
-            !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+        assert_eq!(
+            hook_override_value(&codex_argv(&s)),
+            None,
             "작은따옴표가 든 경로가 실렸다: {:?}",
             s.args
         );
@@ -1372,8 +1676,9 @@ mod tests {
             let mut ep = endpoint();
             ep.send_exe = Some(std::path::PathBuf::from(raw));
             let s = spec_with_control(&codex(vec![]), Some(ep));
-            assert!(
-                !codex_argv(&s).iter().any(|a| a == CONFIG_OVERRIDE_FLAG),
+            assert_eq!(
+                hook_override_value(&codex_argv(&s)),
+                None,
                 "공백 아닌 공백문자가 든 경로가 실렸다({raw:?}): {:?}",
                 s.args
             );
@@ -1605,9 +1910,13 @@ mod tests {
         );
     }
 
+    /// ★이 값을 정하는 것은 턴 신호 유무가 아니라 ADR-0116 결정 7 이다★ — 터미널 모드에 신호가 없다는
+    /// 사실은 여기서 false 를 낼 사유가 못 된다(터미널 claude 가 같은 자리에서 이미 받는다). 되돌리려면
+    /// 그 결정부터 뒤집을 것.
+    // ADR-0116
     #[test]
-    fn reads_messages_is_false() {
-        assert!(!CodexBackend.reads_messages());
+    fn reads_messages_is_true() {
+        assert!(CodexBackend.reads_messages());
     }
 
     // ── ADR-0185: 받아 온 thread id 가 조립점의 기록 동사까지 실제로 간다 ──────────────────
@@ -2245,6 +2554,266 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             "가짜 app-server 스크립트를 지우지 못했다: {}",
             script_path.display()
         );
+    }
+
+    // ── ADR-0209: MCP 서버 부착(`-c mcp_servers.<name>=…`) — codex 우편의 유일한 물리 배선 ──────────
+
+    /// `-c` **바로 뒤** 칸들만 모은다 — 순서·인접을 재는 단언이 그 형태에 기댄다.
+    fn config_override_values(argv: &[String]) -> Vec<String> {
+        argv.windows(2)
+            .filter(|p| p[0] == CONFIG_OVERRIDE_FLAG)
+            .map(|p| p[1].clone())
+            .collect()
+    }
+
+    /// ★생성되는 값을 **글자 그대로** 못 박는다★ — 이 문자열은 codex 설정 파서가 읽는 wire 계약이고,
+    /// 조립 중 한 글자만 어긋나도 증상은 오류가 아니라 「우편이 조용히 안 된다」다. 실 codex 로 이
+    /// 모양을 확인했다(2026-09-19 · 0.155.0: `--strict-config` 통과 + `mcpServerStatus/list` 에 등록).
+    #[test]
+    fn the_mcp_override_value_is_pinned_byte_for_byte() {
+        let s = spec_with_control(&codex(vec![]), Some(endpoint()));
+        assert!(
+            config_override_values(&codex_argv(&s)).contains(
+                &"mcp_servers.engram={url='http://127.0.0.1:7777/mcp',bearer_token_env_var='ENGRAM_TOKEN',default_tools_approval_mode='approve'}"
+                    .to_string()
+            ),
+            "생성된 `-c` 값들: {:?}",
+            config_override_values(&codex_argv(&s))
+        );
+    }
+
+    /// ★토큰이 argv 에 한 글자도 없어야 한다★ — 이 백엔드가 값 인라인 대신 env 변수 **이름**을 싣는
+    /// 이유가 이것이다. 되돌리면 같은 사용자의 아무 프로세스나 argv 를 읽는 것만으로 토큰이 샌다.
+    #[test]
+    fn the_bearer_token_never_reaches_the_command_line() {
+        let ep = endpoint();
+        let token = ep.token.clone();
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let s = spec_with_control(&command, Some(ep.clone()));
+            assert!(
+                !s.args.iter().any(|a| a.contains(&token)),
+                "토큰이 argv 에 실렸다: {:?}",
+                s.args
+            );
+            assert_eq!(
+                env_value(&s, TOKEN_ENV),
+                Some(token.as_str()),
+                "토큰은 env 한 벌로만 가야 한다"
+            );
+        }
+    }
+
+    /// ★모드를 가르지 않는다★ — 우편 입구는 두 모드 다 필요하다. 훅 등록이 터미널에만 걸린 것과
+    /// 혼동해 이 축까지 모드로 가르면 app-server 로 뜬 codex 는 발신 입구가 0 이 된다.
+    #[test]
+    fn the_mcp_override_rides_both_output_modes() {
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let s = spec_with_control(&command, Some(endpoint()));
+            let values = config_override_values(&codex_argv(&s));
+            assert!(
+                values
+                    .iter()
+                    .any(|v| v
+                        .starts_with(&format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}="))),
+                "{command:?} 에 MCP 부착이 빠졌다: {values:?}"
+            );
+        }
+    }
+
+    /// 제어 채널이 없는 스폰에는 붙일 것이 없다 — 빈 url 로 값을 지어내면 codex 가 못 뜨는 서버를 들고 뜬다.
+    #[test]
+    fn no_control_endpoint_means_no_mcp_override() {
+        let s = spec(&codex(vec![]), "C:/workspace");
+        assert!(
+            !codex_argv(&s)
+                .iter()
+                .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
+            "endpoint 없는 스폰에 MCP 부착이 실렸다: {:?}",
+            codex_argv(&s)
+        );
+    }
+
+    /// ★운영자가 MCP 우편을 끄면 **codex 에서도** 꺼져야 한다(적출 2026-09-20)★: 옛 게이트는 제어
+    /// 채널의 **존재**만 봤다 — 그래서 `ENGRAM_DISALLOW_MCP_SEND=1` 을 건 운영자는 claude 쪽 발신 입구만
+    /// 잃고 codex 쪽은 그대로 열어 둔 상태를 얻었다. 게다가 그 부착은
+    /// `default_tools_approval_mode='approve'` 를 싣고 있어 **자동 승인**된 채로 남는다.
+    /// ★켠 행을 **함께** 재는 것이 요점이다★ — 끈 쪽만 재면 부착을 통째로 지워도 초록이고, 그 순간
+    ///   codex 우편의 유일한 물리 배선이 사라진다(증상은 오류가 아니라 침묵이다).
+    /// ★제어 평면 자체는 끊기지 않는다는 것도 함께 잰다★ — 우편을 끄는 것과 제어 동사를 끊는 것은
+    ///   다른 일이고(ADR-0132 결정 5), 여기서 자격증명까지 사라지면 codex 가 띄우는 훅이 죽는다.
+    #[test]
+    fn turning_mcp_send_off_takes_the_override_off_codex_too() {
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let off = spec_with_control(&command, Some(endpoint_without_mcp_send()));
+            assert!(
+                !codex_argv(&off)
+                    .iter()
+                    .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
+                "{command:?}: MCP 발신 grant 가 없는데 부착이 실렸다 — 데몬의 차단이 이 backend 만 \
+                 비껴간다: {:?}",
+                codex_argv(&off)
+            );
+            assert_eq!(
+                env_value(&off, TOKEN_ENV),
+                Some("deadbeef"),
+                "{command:?}: 우편을 껐다고 제어 평면 자격증명까지 사라지면 안 된다"
+            );
+            let on = spec_with_control(&command, Some(endpoint()));
+            assert!(
+                codex_argv(&on)
+                    .iter()
+                    .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
+                "{command:?}: 인가된 스폰에 부착이 빠졌다 — 발신 입구가 0 이 된다: {:?}",
+                codex_argv(&on)
+            );
+        }
+    }
+
+    /// ★「배달 명단엔 오르는데 발신 입구가 0」인 스폰을 뜨기 전에 끊는다★: 이 backend 는
+    /// `reads_messages` 가 true 라 배달 명단에 오르고, `accepts_mcp_config` 가 true 라 데몬이
+    /// `mail_allowed=false` 를 실어 CLI 미러를 닫아 둔다 — 그 상태에서 MCP 부착까지 빠지면 도착한
+    /// `request` 가 전부 **아무도 답할 수 없는 계약**이 된다. 그 결말은 오류가 아니라 영원한 무응답이라
+    /// 아무 데도 안 남는다.
+    /// ★claude 는 이 자리를 데몬의 `?`(mcp-config write 실패)가 지킨다 — 이 backend 는 파일을 안 써서
+    ///   데몬에 끊을 재료가 없다★. 그 비대칭을 메우는 것이 이 게이트다.
+    /// ★공개 dispatch 로 부른다★ — impl 에만 걸면 조립점이 부르는 경로가 안 잡힌다.
+    #[test]
+    fn an_unbuildable_attachment_fails_the_spawn_closed() {
+        let bad = "http://127.0.0.1:1/it's/mcp";
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            let ep = ControlEndpoint {
+                url: bad.to_string(),
+                ..endpoint()
+            };
+            let err = crate::backend::precheck_control_endpoint(&command, Some(&ep))
+                .expect_err("부착을 못 만드는데 스폰이 그대로 진행된다 — 발신 입구 0 으로 뜬다");
+            assert!(
+                err.contains(bad),
+                "{command:?}: 사유에 원인이 있어야: {err}"
+            );
+            // 게이트가 있어도 조립은 **여전히** 인자를 지어내지 않는다 — 두 벽이 각각 선다.
+            let s = spec_with_control(&command, Some(ep));
+            assert!(
+                !codex_argv(&s)
+                    .iter()
+                    .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
+                "{command:?}: 못 만드는 값을 억지로 실었다: {:?}",
+                codex_argv(&s)
+            );
+        }
+    }
+
+    /// ★정당한 부재 셋을 **함께** 못 박는다 — 없으면 위 게이트가 멀쩡한 스폰까지 죽이는 쪽으로 자란다★.
+    /// 특히 ②가 load-bearing 이다: 운영자가 MCP 우편을 끈 스폰은 붙일 의사가 애초에 없으므로, 주소가
+    /// 어떻든 끊을 이유가 없다.
+    #[test]
+    fn the_legitimate_absences_still_spawn() {
+        let bad = "http://127.0.0.1:1/it's/mcp";
+        for command in [codex(vec![]), codex_app_server(vec![])] {
+            // ① 제어 채널 자체가 없다 — 우편 없이 뜨는 codex 는 정상이다.
+            assert!(
+                crate::backend::precheck_control_endpoint(&command, None).is_ok(),
+                "{command:?}: 제어 채널 없는 스폰을 끊었다"
+            );
+            // ② 데몬이 MCP 발신 입구를 인가하지 않았다(운영자가 껐다) — 주소를 못 실어도 무관하다.
+            let off = ControlEndpoint {
+                url: bad.to_string(),
+                ..endpoint_without_mcp_send()
+            };
+            assert!(
+                crate::backend::precheck_control_endpoint(&command, Some(&off)).is_ok(),
+                "{command:?}: 붙일 의사가 없는 스폰을 부착 불가로 끊었다 — 노브를 켠 하네스에서 codex \
+                 스폰이 통째로 죽는다"
+            );
+            // ③ 평범한 운영 스폰.
+            assert!(
+                crate::backend::precheck_control_endpoint(&command, Some(&endpoint())).is_ok(),
+                "{command:?}: 운영 endpoint 를 끊었다"
+            );
+        }
+    }
+
+    /// ★TOML 리터럴 문자열에 담을 수 없는 주소는 **싣지 않고 끊는다**★ — 지어낸 이스케이프로 밀어 넣으면
+    /// 값이 파싱에서 죽거나 다른 주소를 가리키고, 둘 다 증상이 「우편이 안 된다」 하나다.
+    #[test]
+    fn an_unrepresentable_control_url_drops_the_attachment_instead_of_mangling_it() {
+        for bad in [
+            "http://127.0.0.1:1/it's/mcp",
+            "http://127.0.0.1:1/%USER%/mcp",
+        ] {
+            let mut ep = endpoint();
+            ep.url = bad.to_string();
+            let s = spec_with_control(&codex(vec![]), Some(ep));
+            assert!(
+                !codex_argv(&s)
+                    .iter()
+                    .any(|a| a.starts_with(MCP_SERVER_OVERRIDE_PREFIX)),
+                "{bad} 로 부착 값을 만들었다: {:?}",
+                codex_argv(&s)
+            );
+        }
+    }
+
+    /// ★패스스루가 같은 키를 세워도 우리 것이 **뒤에** 실린다★ — 마지막 `-c` 가 이기므로 이 순서가
+    /// 곧 우편 입구의 생사다. 그리고 사용자 인자를 지우지 않는다(거르는 것은 검열이다).
+    #[test]
+    fn a_conflicting_mcp_passthrough_loses_to_ours_and_is_not_filtered() {
+        let key = format!("{MCP_SERVER_OVERRIDE_PREFIX}{MCP_SERVER_NAME}");
+        assert!(
+            passthrough_overrides_key(
+                &[
+                    CONFIG_OVERRIDE_FLAG.to_string(),
+                    format!("{key}={{url='http://evil/mcp'}}")
+                ],
+                &key,
+            ),
+            "같은 키의 패스스루를 못 알아봤다 — 경고 없이 사용자 설정을 덮는다"
+        );
+        let s = spec_with_control(
+            &codex(vec![
+                CONFIG_OVERRIDE_FLAG,
+                "mcp_servers.engram={url='http://evil/mcp'}",
+            ]),
+            Some(endpoint()),
+        );
+        let values = config_override_values(&codex_argv(&s));
+        let ours = values
+            .iter()
+            .position(|v| v.contains(MCP_BEARER_ENV_KEY))
+            .expect("우리 부착 값이 없다");
+        let theirs = values
+            .iter()
+            .position(|v| v.contains("evil"))
+            .expect("패스스루가 걸러졌다 — 사용자 인자를 검열하면 안 된다");
+        assert!(
+            ours > theirs,
+            "우리 값이 앞에 실렸다(지고 있다): {values:?}"
+        );
+    }
+
+    /// ★파일 칸이 `Some` 으로 와도 argv 에 닿지 않는다★ — 운영에서는 이제 `None` 으로 오지만
+    /// (`writes_mcp_config_file()` = false → 데몬이 안 쓴다), 이 시험은 그 게이트가 무너진 상태를
+    /// **일부러** 먹여 두 번째 벽을 잰다. codex 에는 그 둘을 가리킬 플래그가 없어서 「Some 이니 뭔가
+    /// 쓰자」로 claude 의 플래그를 베껴 붙이면 기동이 죽는다.
+    #[test]
+    fn the_daemon_written_files_are_still_not_translated_into_argv() {
+        let ep = endpoint();
+        let s = spec_with_control(&codex(vec![]), Some(ep.clone()));
+        let argv = codex_argv(&s);
+        for forbidden in ["--mcp-config", "--settings", "--append-system-prompt-file"] {
+            assert!(
+                !argv.iter().any(|a| a == forbidden),
+                "claude 의 플래그 `{forbidden}` 가 codex argv 에 실렸다: {argv:?}"
+            );
+        }
+        for path in [ep.config_path, ep.settings_file, ep.priming_file] {
+            let path = path.expect("fixture 는 세 칸을 다 채운다");
+            let path = path.to_string_lossy().into_owned();
+            assert!(
+                !argv.iter().any(|a| a.contains(&path)),
+                "경로 `{path}` 가 argv 에 실렸다: {argv:?}"
+            );
+        }
     }
 
     #[test]

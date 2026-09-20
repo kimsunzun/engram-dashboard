@@ -112,6 +112,13 @@ struct Declared {
     assigns_session_id: bool,
     supports_control_channel: bool,
     accepts_mcp_config: bool,
+    /// 데몬이 이 백엔드에 **mcp-config 파일을 써 주나** — 위 칸과 갈린 축이다.
+    ///
+    /// ★위 칸에서 파생하지 말 것★: 위는 오늘 「MCP 로 우편을 쓰나」를 뜻하고, 이 칸은 「그 프로그램이
+    ///   우리가 쓴 파일을 경로로 읽나」다. 둘이 갈린 행(codex)이 이 칸을 세운 이유이고, true 인 행은
+    ///   스폰마다 평문 Bearer 토큰 JSON 을 디스크에 받는다(그 write 실패는 fail-closed — 스폰 중단).
+    // ADR-0209
+    writes_mcp_config_file: bool,
     reads_messages: bool,
     /// 보내기 축 — 위 받기 축의 짝이다. ★둘이 갈린 행은 「보내기만 되는」 비대칭이므로 그 행의 사유가
     /// 그 백엔드 폴더에 적혀 있어야 한다★.
@@ -295,6 +302,8 @@ fn backend_table() -> Vec<BackendRow> {
                 assigns_session_id: true,
                 supports_control_channel: true,
                 accepts_mcp_config: true,
+                // 이 행만 파일을 **경로로 읽는다**(`--mcp-config <path>`) — 그래서 유일하게 true 다.
+                writes_mcp_config_file: true,
                 reads_messages: true,
                 uses_mail: true,
                 session_snapshot: false,
@@ -323,18 +332,31 @@ fn backend_table() -> Vec<BackendRow> {
                 output_format: AgentOutputFormat::StreamJson,
             }),
             declared: Declared {
-                // ★실측이 도장 찍은 값이다★ — 호출자가 세션 id 를 정할 수 없고(`session_id_flag: None`
-                //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
-                //   정본은 `backend/codex/`.
+                // ★실측이 도장 찍은 값이다★ — 세션 id 의 발급 주체가 codex 라 호출자가 정할 수 없다
+                //   (`session_id_flag: None` 이 그 짝). 사유의 정본은 `backend/codex/`.
+                //   ★이 칸을 아래 `reads_messages` 와 엮어 읽지 말 것★ — 옛 주석이 여기에 「턴을
+                //   관측할 수 없어 수신자 명단에서 뺀다」를 붙여 뒀었는데, 그 축은 ADR-0116 결정 7 이
+                //   기각한 전제였고 이제 그 칸은 true 다.
                 assigns_session_id: false,
-                // ★이 칸만 claude 와 같다 — 그 이유는 MCP 가 아니다★: 제어 채널의 소비 수단에는 CLI
-                //   입구(크레덴셜 env)도 있고 codex 는 그쪽만 쓴다. 바로 아래 칸이 false 인 채로 이 칸이
-                //   true 인 조합이 그 사실의 모양이다.
                 supports_control_channel: true,
-                accepts_mcp_config: false,
-                reads_messages: false,
-                // 받기와 **같이** 닫혀 있다 — 사유의 정본은 `backend/codex/` 의 그 칸.
-                uses_mail: false,
+                // ★이름대로 읽으면 틀린 값이다 — codex 는 우리 mcp-config **파일**을 여전히 못 먹는다★.
+                //   켜 둔 것은 데몬이 이 칸으로 우편 채널까지 파생하기 때문이고, 실제 부착은
+                //   `-c mcp_servers.engram={…}` 한 값이 한다. 사유·대가의 정본은 `backend/codex/`.
+                accepts_mcp_config: true,
+                // ★위 칸이 true 인데 이 칸은 false — 그 갈림이 이 칸의 존재 이유다★: codex 에는 우리가
+                //   쓴 파일을 가리킬 플래그가 없다(실측 0.155.0). 겸직하던 동안 이 행은 아무도 안 여는
+                //   평문 토큰 파일을 스폰마다 받았고 그 write 실패가 스폰을 끊을 수 있었다. 사유의
+                //   정본은 `backend/codex/` 의 그 메서드 주석.
+                // ADR-0209
+                writes_mcp_config_file: false,
+                // ★false 로 되돌리지 말 것 — 「턴 신호가 없다」는 그 사유를 ADR-0116 결정 7 이
+                //   기각했다★: 터미널 claude 가 같은 자리(신호 0)에서 이미 받는다. 대가(턴 한가운데
+                //   꽂힘 · 모달 위젯이 먹음)는 그 결정이 명시 수용한 것이고, 정본은 `backend/codex/`
+                //   의 `reads_messages` doc.
+                reads_messages: true,
+                // ★이 행의 두 칸이 **함께 열려 있다**★ — 보내기·받기가 같이 서야 ADR-0209 결정 4 의
+                //   「받기 먼저」 순서를 지킨다. 한쪽만 되돌리면 그 결정이 없애려던 비대칭이 살아난다.
+                uses_mail: true,
                 session_snapshot: false,
                 session_cwd_env: true,
                 model_select: false,
@@ -439,6 +461,11 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
             b.accepts_mcp_config(),
             d.accepts_mcp_config,
             "{name}: accepts_mcp_config"
+        );
+        assert_eq!(
+            b.writes_mcp_config_file(),
+            d.writes_mcp_config_file,
+            "{name}: writes_mcp_config_file — true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰인다"
         );
         assert_eq!(b.uses_mail(), d.uses_mail, "{name}: uses_mail");
         assert_eq!(

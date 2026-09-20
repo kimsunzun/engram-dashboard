@@ -32,7 +32,7 @@ use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
     AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError, CLI_EXE_ENV,
-    CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
+    CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON, TOKEN_ENV,
 };
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
@@ -99,7 +99,7 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
         .strip_suffix("/mcp")
         .unwrap_or(&endpoint.url)
         .to_string();
-    env.push(("ENGRAM_TOKEN".to_string(), endpoint.token.clone()));
+    env.push((TOKEN_ENV.to_string(), endpoint.token.clone()));
     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
     // ★두 값 다 명시로 싣는다(부재를 off 로 쓰지 않는다)★: 부재는 "스폰 밖" 을 뜻해 CLI 가 전부 보여
     //   준다(`MAIL_MARKER_ENV`). 켜짐을 생략하면 두 뜻이 겹쳐, 표식을 못 실은 배선 사고가 정상 스폰과
@@ -250,17 +250,38 @@ pub trait AgentBackend: Send + Sync {
     ///   스폰이 중단된다(제어 채널 없이 몰래 도는 에이전트 금지). false 인 backend 는 그 계약과 무관하다.
     fn supports_control_channel(&self) -> bool;
 
-    /// 이 backend(프로그램)가 **MCP config 를 받아들일 수 있는가**(ADR-0099). claude=true(mcp-config 파일을
-    /// `--mcp-config` 로 붙임), 그 외(shell·codex·gemini stub)=false. ★backend 지식(ADR-0004)★: "어느
-    /// 프로그램이 MCP config 를 소비하나"는 backend-kind 지식이라 여기서 선언한다 — manager 가 `matches!`
-    /// 로 직접 분기하지 않는다.
+    /// 이 backend(프로그램)가 **MCP 로 데몬 제어 채널을 붙이는가**(ADR-0099 → ADR-0209). 오늘 claude =
+    /// true(mcp-config 파일을 `--mcp-config` 로 붙임) · codex = true(명령줄 오버라이드로 붙임) ·
+    /// shell·gemini stub = false. ★이름이 「config 를 받아들이나」인데 오늘 뜻은 「MCP 로 우편을 쓰나」에
+    /// 가깝다 — 그 어긋남은 알고 남긴 것이고(아래 조합 표), 「파일을 먹나」를 묻는 칸은 따로 있다★.
+    /// ★backend 지식(ADR-0004)★: "어느 프로그램이 MCP 를 어떻게 먹나"는 backend-kind 지식이라 여기서
+    /// 선언한다 — manager 가 `matches!` 로 직접 분기하지 않는다.
     ///
-    /// 이 플래그 하나가 provision 의 MCP 입구·grant·**프라이밍 적재 여부**·**우편 가부**를 전부 구동한다(정합
-    /// 불변식 = 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
+    /// 이 플래그가 provision 의 grant·**프라이밍 적재 여부**·**우편 가부**를 구동한다(정합 불변식 =
+    /// 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
     /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
-    /// `DaemonControlChannel::provision` 이 mcp-config 를 쓰고 MCP bits 를 endpoint 에 실으며 MCP-only 교육
-    /// 프라이밍(`eg_send` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 mcp-config 미기록 +
-    /// **프라이밍 미주입** + 우편 가능 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    /// `DaemonControlChannel::provision` 이 MCP bits 를 endpoint 에 실으며 MCP-only 교육 프라이밍
+    /// (`eg_send` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 **프라이밍 미주입** + 우편 가능
+    /// 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    ///
+    /// ★**mcp-config 파일 write 는 더 이상 이 칸이 가르지 않는다 — 이 문장을 되돌리지 말 것**★
+    ///   (ADR-0209 · `control/mod.rs` 의 `writes_mcp_config_file` 게이트): 「우리가 쓴 파일을 읽나」가
+    ///   아래 [`AgentBackend::writes_mcp_config_file`] 로 갈라져 나갔고, 그 write 와 fail-closed `?` 는
+    ///   그쪽 칸에만 걸린다. 여기 「true 면 mcp-config 를 쓴다」가 적혀 있던 동안 codex 는 우편 축을
+    ///   맞추려 이 칸을 켜는 것만으로 **아무도 안 여는 평문 Bearer 토큰 JSON** 을 스폰마다 받았다.
+    ///
+    /// ★그래서 **두 칸의 네 조합이 전부 정당하다** — 특히 `(true, false)` 가 그렇다★:
+    ///   - `(true, true)` = claude. MCP 로 우편을 쓰고, 그 입구가 우리가 쓴 파일이다(`--mcp-config`).
+    ///   - **`(true, false)` = codex. MCP 로 우편을 쓰지만 그 파일은 한 번도 열지 않는다** — 부착 수단이
+    ///     명령줄 오버라이드(`-c mcp_servers.<서버>=…`)이고 토큰은 그 값이 **이름으로 가리키는 env** 로
+    ///     간다. 디스크에 사본이 생길 자리가 아예 없고, 그것이 이 조합의 값어치다.
+    ///   - `(false, false)` = shell·gemini stub. 우편 평면 밖이거나 미측정이다.
+    ///   - `(false, true)` 는 오늘 쓰는 backend 가 없다(파일은 MCP 입구를 위한 것이라 짝이 없으면 낭비다).
+    /// ★첫 칸만 켜고 둘째 칸을 **안 본** backend 는 조용히 MCP 를 못 받는다★ — 둘째 칸의 기본값이
+    ///   `false` 라, 파일을 **읽어야** 하는 backend 가 그것을 선언하지 않으면 데몬은 파일을 안 쓰고
+    ///   endpoint 의 `config_path` 가 `None` 으로 오며, 그 backend 의 `--mcp-config` 주입이 한 줄도 돌지
+    ///   않는다. 증상은 오류가 아니라 「툴이 없다」는 침묵이다. 새 backend 를 들일 때 **두 칸을 함께
+    ///   답할 것** — 첫 칸은 「MCP 로 우편을 쓰나」, 둘째 칸은 「그 입구가 우리가 쓴 **파일**인가」다.
     ///
     /// ★false 쪽이 고르는 것은 「다른 프라이밍」이 아니라 「프라이밍 없음」이다 — 변형 축을 되살리지 말 것★:
     ///   CLI 전용 사본(`prompts/agent-priming-cli.md`)은 커밋 `2ef6902` 에서 삭제됐고 판정식은
@@ -269,12 +290,34 @@ pub trait AgentBackend: Send + Sync {
     ///   문서를 주는 것이 거짓말이고 침묵은 아니다 — ADR-0209 결정 3).
     ///
     /// ★`supports_control_channel` 과의 관계★: 후자는 "provision 을 **부르나**"(제어 채널 자체를 소비하나),
-    ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 현재 claude 는 둘 다 true,
-    ///   codex/gemini 는 둘 다 false 지만, 미래 "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 다.
+    ///   이것은 "provision 이 붙일 채널 중 **MCP 를 낄 수 있나**"다 — 직교 축이다. 오늘 claude 와 codex 가
+    ///   둘 다 true 이고(codex 의 MCP 부착 수단만 파일이 아닐 뿐이다 — 위 조합 표), shell·gemini stub 은
+    ///   둘 다 false 다. "제어 채널은 CLI 로만 쓰는 백엔드"는 전자 true·후자 false 가 된다.
+    ///   ★「codex 는 둘 다 false」로 적힌 자리를 만나면 낡은 것이다★ — 그 서술은 ADR-0209 이전 것이다.
     // ADR-0126
     // ADR-0133
     // ADR-0209
     fn accepts_mcp_config(&self) -> bool;
+
+    /// 이 backend 가 **데몬이 쓴 mcp-config 파일을 경로로 읽나**(claude=true — `--mcp-config <path>`).
+    ///
+    /// ★위 칸에서 갈라져 나온 축이다 — 도로 접지 말 것★: 위 칸은 오늘 사실상 「MCP 로 우편을 쓰나」를
+    ///   뜻하고(데몬이 `mail_allowed` 를 거기서 파생한다 — ADR-0133), 이 칸은 「우리가 디스크에 평문
+    ///   Bearer 토큰 JSON 을 쓸까」 하나만 묻는다. 겸직하던 동안 codex 는 우편 축을 맞추려 위 칸을 켜는
+    ///   것만으로 **아무도 안 읽는 평문 토큰 파일**을 스폰마다 받았고(기본 ACL · revoke 때 삭제), 그
+    ///   write 는 fail-closed 라 **안 읽는 파일 때문에 스폰이 끊길 수 있었다**.
+    /// ★기본값 = false(비밀을 안 쓰는 쪽)★: 아래 우편 두 축의 fail-open 과 방향이 반대인데, 재는 것이
+    ///   다르기 때문이다 — 틀린 false 의 대가는 **파일 부재**(그 backend 의 MCP 가 안 붙고 계약 표가 그
+    ///   행에서 깨진다 — 시끄럽다)이고, 틀린 true 의 대가는 **평문 토큰이 디스크에 남는 것 + 스폰 중단
+    ///   위험**이다(조용하다). 모르는 backend 에 비밀을 쓰지 않는다.
+    /// ★true 를 선언한 backend 의 fail-closed 는 그대로다★ — 그 backend 는 이 파일 없이는 MCP 입구가
+    ///   물리적으로 사라지므로, write 실패에 스폰을 계속시키면 제어 채널 없이 도는 에이전트가 된다.
+    // ADR-0086
+    // ADR-0099
+    // ADR-0209
+    fn writes_mcp_config_file(&self) -> bool {
+        false
+    }
 
     /// cwd·env는 manager가 정규화한 값을 전달한다.
     ///
@@ -308,6 +351,29 @@ pub trait AgentBackend: Send + Sync {
         env: Vec<(String, String)>,
         control: Option<ControlEndpoint>,
     ) -> CommandSpec;
+
+    /// 데몬이 발급한 제어 endpoint 로 이 spawn 을 **세울 수 있나**. `Err(사유)` = fail-closed(스폰 중단).
+    ///
+    /// ★왜 [`AgentBackend::build_spec`] 안에서 못 하나★: 그 메서드는 `CommandSpec` 을 돌려줄 뿐이라
+    ///   「인자를 못 만들었다」를 호출자에게 말할 칸이 없다 — 조용히 빠진 인자로 스폰이 그대로 뜬다.
+    ///   그래서 조립점이 조립 **전에** 이 술어를 묻고, `Err` 면 스폰을 끊는다(발급된 토큰은 조립점의
+    ///   provision 가드가 회수한다).
+    /// ★기본값 = `Ok(())`★ — 대부분의 backend 는 제어 endpoint 로 못 세울 상태가 없다. claude 처럼
+    ///   데몬 쪽 `?`(mcp-config write 실패)가 이미 끊어 주는 backend 도 여기 손댈 것이 없다. 이 축이
+    ///   필요한 것은 **데몬이 못 보는 실패**를 가진 backend 뿐이다 — codex 의 MCP 부착 값이 그것이다
+    ///   (그 backend 는 파일을 안 쓰므로 데몬에 끊을 재료가 없다).
+    /// ★「인가되지 않음」을 여기서 끊지 말 것★ — 데몬이 우편 입구를 안 준 스폰은 **정상**이고(운영자가
+    ///   껐거나 그 backend 가 우편 평면 밖이다), 끊으면 그 조합에서 스폰이 통째로 죽는다. 이 술어가
+    ///   재는 것은 「붙여야 하는데 못 붙인다」 하나다.
+    // ADR-0004
+    // ADR-0209
+    fn precheck_control_endpoint(
+        &self,
+        _command: &AgentCommand,
+        _control: Option<&ControlEndpoint>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 
     /// 이 backend(프로그램)가 결정하는 caps — session(resume)·model.
     /// transport(물리 채널)가 만드는 input/output/control 과 별개로, 최종 Capabilities 는
@@ -646,6 +712,10 @@ pub fn accepts_mcp_config(c: &AgentCommand) -> bool {
     backend_for(c).accepts_mcp_config()
 }
 
+pub fn writes_mcp_config_file(c: &AgentCommand) -> bool {
+    backend_for(c).writes_mcp_config_file()
+}
+
 pub fn uses_mail(c: &AgentCommand) -> bool {
     backend_for(c).uses_mail()
 }
@@ -660,6 +730,17 @@ pub fn build_command_spec(
     control: Option<ControlEndpoint>,
 ) -> CommandSpec {
     backend_for(c).build_spec(c, mode, session_id, resume_session_id, cwd, env, control)
+}
+
+/// 조립 **직전**의 fail-closed 게이트(정본 doc = [`AgentBackend::precheck_control_endpoint`]).
+///
+/// ★조립점이 이것을 부르는 자리는 provision 가드가 무장된 **뒤**여야 한다★ — 그래야 여기서 끊길 때
+///   이미 발급된 토큰·파일이 회수된다.
+pub fn precheck_control_endpoint(
+    c: &AgentCommand,
+    control: Option<&ControlEndpoint>,
+) -> Result<(), String> {
+    backend_for(c).precheck_control_endpoint(c, control)
 }
 
 pub fn transport_shape(c: &AgentCommand) -> TransportShape {
@@ -896,17 +977,26 @@ mod tests {
     //      안 싣는다**(CLI판 사본은 커밋 `2ef6902`에서 삭제됐고 `roundtrip-smoke --cli-only` 노브도 함께
     //      사라졌다 — 되살리려 하지 말 것). 그 갈래는 오늘 실측 수단이 없다 — ADR-0209.
     //   ④ MCP-capable이면 기본 roundtrip으로 실측.
+    //   ⑤ 셋째 칸(writes_mcp_config_file)은 **둘째 칸에서 파생하지 말 것** — 「MCP 로 우편을 쓰나」와
+    //      「우리가 쓴 mcp-config 파일을 읽나」는 별개다. 그 프로그램에 그 파일을 가리킬 플래그가 실제로
+    //      있을 때만 true(claude 의 `--mcp-config`). true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰이고
+    //      그 write 실패가 스폰을 끊는다(fail-closed) — 안 읽는 backend 에 켜면 순수 손실이다.
     //   참조: ADR-0099.
-    fn expected_channel_matrix(c: &AgentCommand) -> (bool, bool) {
-        // (supports_control_channel, accepts_mcp_config) — CLI spike 실측값
+    fn expected_channel_matrix(c: &AgentCommand) -> (bool, bool, bool) {
+        // (supports_control_channel, accepts_mcp_config, writes_mcp_config_file) — CLI spike 실측값
         match c {
-            AgentCommand::Claude { .. } => (true, true),
-            AgentCommand::Shell { .. } => (false, false),
-            // ★두 칸이 갈리는 유일한 행이고, 그것이 두 칸의 뜻 차이를 그대로 보여 준다★: 제어 채널은
-            //   **쓴다**(CLI 입구 = 크레덴셜 env). 다만 그 소비 수단이 mcp-config 파일이 아닐 뿐이다 —
-            //   codex 의 MCP 주입은 전역 TOML 오버라이드라 우리가 만든 파일을 먹일 수 없다(실측).
-            //   사유의 정본은 `backend/codex/` 의 그 두 메서드 주석.
-            AgentCommand::Codex { .. } => (true, false),
+            AgentCommand::Claude { .. } => (true, true, true),
+            AgentCommand::Shell { .. } => (false, false, false),
+            // ★이 행의 둘째 칸은 **이름대로 읽으면 틀린 값이다 — 알고 켰다**★: codex 는 우리가 만든
+            //   mcp-config 파일을 여전히 못 먹는다(그 파일을 가리킬 플래그가 없다 — 실측 0.155.0).
+            //   그런데 데몬이 이 한 칸으로 우편 채널 판정까지 파생해서(`mail_allowed`), false 로 두면
+            //   MCP 로 우편을 쓰는 이 백엔드에 **CLI 미러가 열린 채로** 남는다. 사유의 정본은
+            //   `backend/codex/` 의 그 메서드 주석이고 여기 되풀어 적지 않는다.
+            // ★그래서 셋째 칸이 false 다 — 둘째를 복사하지 말 것★: 안 읽는 파일을 쓰던 대가(스폰마다
+            //   평문 토큰 JSON · 그 write 실패로 스폰 중단)는 이 칸이 갈라지면서 사라졌다. 여기를 true 로
+            //   되돌리면 그 대가가 그대로 돌아온다.
+            // ADR-0209
+            AgentCommand::Codex { .. } => (true, true, false),
         }
     }
 
@@ -928,9 +1018,10 @@ mod tests {
         ];
 
         for c in &variants {
-            let (expected_control, expected_mcp) = expected_channel_matrix(c);
+            let (expected_control, expected_mcp, expected_writes) = expected_channel_matrix(c);
             let actual_control = supports_control_channel(c);
             let actual_mcp = accepts_mcp_config(c);
+            let actual_writes = writes_mcp_config_file(c);
             assert_eq!(
                 actual_control,
                 expected_control,
@@ -941,6 +1032,12 @@ mod tests {
                 actual_mcp,
                 expected_mcp,
                 "variant {:?}: accepts_mcp_config 불일치 — backend mod.rs 상단 expected_channel_matrix 체크리스트를 따라 capability를 의식적으로 선언할 것(ADR-0099)",
+                c
+            );
+            assert_eq!(
+                actual_writes,
+                expected_writes,
+                "variant {:?}: writes_mcp_config_file 불일치 — 이 칸이 true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰이고 그 write 실패가 스폰을 끊는다. 위 체크리스트 ⑤ 를 따라 의식적으로 선언할 것(ADR-0209)",
                 c
             );
         }
@@ -1083,10 +1180,12 @@ mod tests {
         match c {
             AgentCommand::Claude { .. } => true,
             AgentCommand::Shell { .. } => false,
-            // ★shell 과 같은 값이지만 사유가 다르다★ — 여기 false 는 「입력이 실행된다」가 아니라
-            //   「턴을 관측할 수 없어 바쁜 때를 못 가린다」다(정본 = `backend/codex/`). 사유가 갈리므로
-            //   나중에 여는 조건도 갈린다.
-            AgentCommand::Codex { .. } => false,
+            // ★한때 false 였고 그 사유는 「턴을 관측할 수 없어 바쁜 때를 못 가린다」였다 — 그 전제를
+            //   ADR-0116 결정 7 이 기각했다★(「관측할 수 없으니 배달할 수 없다」 = 그 ADR 의 거부한
+            //   대안). 터미널 claude 가 같은 자리에서 이미 받으므로 이 백엔드만 뺄 근거가 없고, 위
+            //   분류 기준으로 재면 codex 는 입력을 **읽고 해석하는** 쪽이라 true 다.
+            //   사유의 정본은 `backend/codex/` 의 그 메서드 doc.
+            AgentCommand::Codex { .. } => true,
         }
     }
 
