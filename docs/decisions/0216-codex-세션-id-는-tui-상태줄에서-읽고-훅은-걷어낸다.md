@@ -1,7 +1,7 @@
 # ADR-0216: codex 세션 id 는 TUI 상태줄에서 읽고 훅은 걷어낸다
 
-- 상태: 확정 (2026-09-20, 근거: codex-cli 0.155.1 실측 + 펌프 코드 실측 — 아래 「근거」)
-- 관련: Supersedes ADR-0210 · Amends ADR-0208 (훅 회수 경로와 adopt 빈 칸 정책 대체) · ADR-0004(백엔드 지식 격리) · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0006(락 순서) · ADR-0079(seq 는 replay 락 안에서 발행) · ADR-0127(턴 관측은 두 지점뿐) · ADR-0207(프로필 쓰기는 락 보유 중 디스크 저장) · ADR-0214(우편 부착이 같은 override 규칙에 기댄다) · ADR-0215(지시서 부착이 같은 fail-open 규칙에 기댄다) · `crates/engram-dashboard-agent/src/transport/pty.rs` · `crates/engram-dashboard-agent/src/backend/codex/mod.rs` · `docs/reference/structure/agent-backend.md` · step-log S21
+- 상태: 확정 (2026-09-20, 근거: codex-cli 0.155.1 실측 + 펌프 코드 실측 — 아래 「근거」) · 부분 폐기 by ADR-0217 (상태줄 회수 채널과 스캐너 대체)
+- 관련: Supersedes ADR-0210 · Amends ADR-0208 (훅 회수 경로와 adopt 빈 칸 정책 대체) · ADR-0004(백엔드 지식 격리) · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0006(락 순서) · ADR-0079(seq 는 replay 락 안에서 발행) · ADR-0127(턴 관측은 두 지점뿐) · ADR-0207(프로필 쓰기는 락 보유 중 디스크 저장) · ADR-0214(우편 부착이 같은 override 규칙에 기댄다) · ADR-0215(지시서 부착이 같은 fail-open 규칙에 기댄다) · `crates/engram-dashboard-agent/src/transport/pty.rs` · `crates/engram-dashboard-agent/src/backend/codex/mod.rs` · `docs/reference/structure/agent-backend.md` · step-log S21 · Amended by ADR-0217 (상태줄 회수 채널과 스캐너 대체)
 
 ## 맥락
 
