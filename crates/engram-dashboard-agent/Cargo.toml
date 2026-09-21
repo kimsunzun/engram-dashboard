@@ -18,7 +18,9 @@ test-harness = []
 #   필요한데 그것을 protocol 에서 받으면 코어가 wire 타입까지 보게 된다. 도구 crate 가 그 유입을 막는다.
 #   (ADR-0155)
 engram-dashboard-command = { path = "../engram-dashboard-command" }
-# `transport::stdio` 의 `mask_secrets` 하나 — 옛 `crate::logging` 이 잎 crate 로 이사했다(ADR-0175 결정 1).
+# `transport::stdio` 의 `mask_secrets` 와 `platform::{process_creation_time, pid_alive_with_start_time}`
+#   — 옛 `crate::logging`·PID 헬퍼가 잎 crate 로 이사했다(ADR-0175 결정 1). 뒤엣것은 codex 세션 id
+#   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2).
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -34,7 +36,11 @@ ts-rs = "10"   # 선언 매크로가 인자·반환 struct 에 TS derive 를 단
 [dev-dependencies]
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 
-# 소비자는 하나다 — `platform::windows` 의 Job Object 래퍼(PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# 소비자는 둘이다 — `platform::windows` 의 Job Object 래퍼와 `platform::file_holders` 의 홀더 조회
+# (PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# `Win32_System_RestartManager` = 그 홀더 조회 몫 — 「이 파일을 누가 열고 있나」를 묻는
+#   `RmStartSession`/`RmRegisterResources`/`RmGetList`/`RmEndSession` 넷이 그 feature 뒤에 있다.
+#   codex 세션 id 회수가 그 답 위에 선다(ADR-0218 결정 1·11).
 # ★`Win32_Storage_FileSystem` 을 다시 켜지 말 것★ — 그것을 쓰던 유일한 자리는 codex 훅 등록의 8.3 단축
 #   경로 변환이었고, 훅 기계장치가 ADR-0216 으로 걷히며 함께 사라졌다.
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
@@ -46,4 +52,5 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_Security",
+    "Win32_System_RestartManager",
 ] }

@@ -452,10 +452,11 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
 ///   를 말할 수 있나」)을 선언하는 칸이 없다.
 /// ★오늘 이 판정이 실제로 갈리는 자리★: codex 는 두 모양 다 참, shell·gemini 는 거짓(경로가 없다),
 ///   claude 는 2 번에서 거짓이다.
-/// ★**단 codex 가 참인 것은 오늘 「우연히」다 — control channel 을 끄는 변경이 오면 이 줄을 먼저 볼 것**★:
-///   그 칸이 켜져 있는 이유는 MCP 우편이고(ADR-0214), codex 가 실제로 이 칸을 채우는 경로는 제어 평면이
-///   아니라 **PTY 상태줄**이다(ADR-0216). 답은 맞고 이유가 틀린 상태라, 우편 쪽 사정으로 그 칸이 꺼지면
-///   이 판정이 **조용히** 거짓으로 뒤집힌다.
+/// ★**단 codex 의 터미널 모드가 참인 것은 오늘 「우연히」다 — control channel 을 끄는 변경이 오면 이
+///   줄을 먼저 볼 것**★: 그 칸이 켜져 있는 이유는 MCP 우편이고(ADR-0214), 그 모드가 실제로 이 칸을
+///   채우는 경로는 제어 평면이 아니라 **자식이 쥔 writer 락**이다(ADR-0218). 답은 맞고 이유가 틀린
+///   상태라, 우편 쪽 사정으로 그 칸이 꺼지면 이 판정이 **조용히** 거짓으로 뒤집힌다. app-server
+///   모드는 그렇지 않다 — 그쪽은 `declares_link` 가 따로 참이라 제어 채널과 무관하게 선다.
 ///
 /// ★없으면 무슨 일이 나나(되살리지 말 것)★: 발급 축이 꺼진 backend 는 화신마다 새 대화를 여는데, 칸이
 ///   첫 화신 값으로 찬 채 남으면 그 칸은 아래 `resume_session_id` 가 읽는 바로 그 칸이라 **이어받기가
@@ -464,10 +465,30 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
 // ADR-0083
 // ADR-0208
 // ADR-0216
+// ADR-0217
+// ADR-0218
 pub(crate) fn fresh_spawn_release_session_id(command: &AgentCommand, mode: SpawnMode) -> bool {
     matches!(mode, SpawnMode::Fresh)
         && !backend::assigns_session_id(command)
         && (backend::supports_control_channel(command) || backend::declares_link(command))
+}
+
+/// 이 spawn 이 backend 에게 넘길 **이어받을 손잡이** — ★Fresh 면 저장된 값이 있어도 `None`★.
+///
+/// ★이 한 줄이 「`resume_session_id` 가 있다 ⟺ 이어받기 화신이다」를 성립시키는 자리다★. 그 동치에
+///   기대는 소비자가 둘이고 둘은 서로 다른 인자를 본다: backend 의 argv 조립은 `(mode, 손잡이)` 둘을
+///   보고, 회수를 돌릴지의 판정은 손잡이 **하나만** 본다. 두 판정이 갈리려면 Fresh 인데 손잡이가 실려
+///   나가야 하는데, 그 조합을 만들 수 있는 자리가 여기뿐이라 여기서 막는다.
+/// ★backend 에 모드를 함께 넘기지 않는 것은 결정이다★ — 그쪽 계약(`AgentBackend::open_spawn` 의
+///   `resume_session_id` doc)이 「모드와 값을 둘 다 받으면 『Fresh 인데 이어받을 값이 있다』는 조합이
+///   표현 가능해진다」고 적어 둔 그것이고, 이 함수가 그 표현 불가능성을 만드는 실물이다.
+// ADR-0185
+// ADR-0218
+fn resume_handle_for(mode: SpawnMode, stored: Option<uuid::Uuid>) -> Option<uuid::Uuid> {
+    match mode {
+        SpawnMode::Resume => stored,
+        SpawnMode::Fresh => None,
+    }
 }
 
 fn session_id_sink(
@@ -1326,7 +1347,7 @@ impl AgentManager {
         //   경우가 여기로 온다. `and_then` 으로 삼키면 이어받기가 **말없이 새 대화**가 되고, 그 다음
         //   `spawn_session` 이 프로필 없는 세션을 명부에 올린다. 그 둘 다 「조용히 새 대화를 만들지
         //   않는다」 규율 정면 위반이라 `?` 로 끊는다(위 sid 발급과 같은 처분).
-        let resume_session_id = match mode {
+        let stored_handle = match mode {
             SpawnMode::Resume => {
                 self.profiles
                     .get(profile.id)
@@ -1335,6 +1356,7 @@ impl AgentManager {
             }
             SpawnMode::Fresh => None,
         };
+        let resume_session_id = resume_handle_for(mode, stored_handle);
 
         let spec = backend::build_command_spec(
             &profile.command,
@@ -2971,6 +2993,26 @@ mod tests {
         assert!(!profiles.clear_session_id(id));
         assert_eq!(profiles.get(id).and_then(|p| p.backend_session_id), None);
         assert!(profiles.get(id).expect("프로필").old_session_ids.is_empty());
+    }
+
+    /// ★Fresh 는 저장된 손잡이를 **backend 로 안 내보낸다**★ — 이 한 칸이 「`resume_session_id` 가
+    /// 있다 ⟺ 이어받기 화신이다」를 성립시키고, codex 터미널 모드의 세션 id 회수가 그 동치 위에 선다
+    /// (그쪽은 손잡이 하나만 보고 fresh 를 판정한다 — ADR-0218 결정 5). 여기서 새면 이어받은 화신이
+    /// 자기 id 를 다시 회수하려 들거나, 새 대화가 회수를 건너뛴다.
+    #[test]
+    fn fresh_never_carries_a_resume_handle() {
+        let stored = uuid::Uuid::new_v4();
+        assert_eq!(
+            resume_handle_for(SpawnMode::Resume, Some(stored)),
+            Some(stored)
+        );
+        assert_eq!(resume_handle_for(SpawnMode::Resume, None), None);
+        assert_eq!(
+            resume_handle_for(SpawnMode::Fresh, Some(stored)),
+            None,
+            "Fresh 인데 손잡이가 실려 나갔다 — 그 조합이 표현 가능해지는 순간 두 소비자의 판정이 갈린다"
+        );
+        assert_eq!(resume_handle_for(SpawnMode::Fresh, None), None);
     }
 
     #[test]
@@ -5661,7 +5703,10 @@ mod tests {
 
         let registered = only("self.register_for_spawn(profile)?;");
         let stamped = only(".epoch_for_spawn(profile.id)");
-        let resume_read = only("let resume_session_id = match mode {");
+        // ★앵커는 **명부에서 읽는 그 줄**이다★ — 그 뒤에 `resume_handle_for` 가 Fresh 를 비우는 한
+        //   줄이 더 있고(그 함수의 doc 이 사유의 정본), 아래 순서 단언이 재는 것은 「읽기」의 자리다.
+        let resume_read = only("let stored_handle = match mode {");
+        let handle_gated = only("let resume_session_id = resume_handle_for(");
         let spec_built = only("let spec = backend::build_command_spec(");
 
         // ★읽기가 spec 조립보다 **앞**이어야 한다(ADR-0208)★ — 명령줄로 이어받는 backend(codex 터미널의
@@ -5699,6 +5744,14 @@ mod tests {
              서 있는 구간이 벌어지고, 그 구간에 도착한 지각 기록이 갓 발급한 sid 를 덮는다(옛 배치가 \
              canonicalize + `agents.json` 쓰기만큼 벌어져 있었다): {:?}",
             code[registered + 1]
+        );
+
+        // ★Fresh 를 비우는 문이 읽기와 spec 조립 **사이**여야 한다★ — 그 문이 사라지면 Fresh 스폰이
+        //   저장된 손잡이를 그대로 실어 보내고, 그 값 하나만 보는 소비자(codex 터미널의 세션 id 회수 —
+        //   ADR-0218 결정 5)가 새 대화를 「이어받기 화신」으로 오판해 회수를 통째로 건너뛴다.
+        assert!(
+            resume_read < handle_gated && handle_gated < spec_built,
+            "Fresh 를 비우는 문의 자리가 어긋났다(읽기 {resume_read} · 문 {handle_gated} · 조립 \n             {spec_built})"
         );
 
         let binding_end = code[resume_read..]

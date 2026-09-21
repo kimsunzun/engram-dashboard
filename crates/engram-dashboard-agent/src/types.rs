@@ -388,6 +388,17 @@ pub enum ToolGrant {
 /// 자기 플래그로만 번역한다. 그 분담의 근거는 바로 아래 `config_path` doc 이 이미 적어 둔 문장이다.
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
+    /// 이 endpoint 를 발급받은 에이전트와 그 화신 — 아래 `token` 의 수명 단위(`(AgentId,epoch)`)를
+    /// 값으로 들고 있는 칸이다. 화신 표식의 비교는 일치/불일치뿐이다(ADR-0163).
+    ///
+    /// ★descriptor 에 싣는 것이 결정이다 — backend 조립 인자로 따로 받는 형태로 되돌리지 말 것★:
+    ///   그렇게 하면 제어 채널이 **없는** 스폰에도 이 쌍이 닿아, 「제어 채널과 함께만 실린다」를
+    ///   backend 마다 조건문으로 다시 써야 한다(ADR-0217 결정 5 가 지키는 그 조건). 여기 있으면
+    ///   `Option<ControlEndpoint>` 하나가 그 조건을 타입으로 답한다.
+    // ADR-0217
+    pub agent_id: AgentId,
+    /// 위 `agent_id` 와 한 쌍 — 그쪽 doc 이 정본.
+    pub epoch: u32,
     /// 데몬 MCP Streamable HTTP 엔드포인트 URL(예: `http://127.0.0.1:<port>/mcp`).
     pub url: String,
     /// 이 (AgentId,epoch) 전용 bearer 토큰(HTTP Authorization 헤더에 실린다).

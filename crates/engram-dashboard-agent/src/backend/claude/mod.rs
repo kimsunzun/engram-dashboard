@@ -1209,6 +1209,8 @@ mod tests {
     // ── ADR-0086: `--mcp-config` 주입(제어 채널 입구) ─────────────────────────────────
     fn ep() -> ControlEndpoint {
         ControlEndpoint {
+            agent_id: uuid::Uuid::nil(),
+            epoch: 1,
             url: "http://127.0.0.1:54321/mcp".to_string(),
             token: "deadbeef".to_string(),
             // ADR-0099: config_path 는 Option — MCP-capable(claude) 케이스라 Some.
