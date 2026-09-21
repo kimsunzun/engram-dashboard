@@ -459,9 +459,10 @@ pub fn set_slot_content(
 //
 // ## ★그 그물 뒤에 축이 하나 더 있다 — 아는 낱말이어도 이 표면이 지금 만드나★
 // 위 그물이 「그런 백엔드가 있나」를 묻는다면 아래 게이트는 「**사람이 아닌 호출자**가 그것을 만들어도
-// 되나」를 묻는다. 두 축이 갈리는 실물이 codex 다: 이 저장소가 아는 정당한 백엔드이고 사람이 트리에서
-// 고르는 문은 그대로 열려 있는데, 이 문(LLM 제어 표면)으로는 지금 안 만든다.
-// ★두 거절을 한 문구로 뭉치지 말 것★ — 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.
+// 되나」를 묻는다. ★**오늘 그 정책은 아무 낱말도 안 닫는다**★(2026-09-22 · ADR-0219 — codex 의 거절이
+// 걷혔고 wire 어휘는 claude·codex 둘뿐이다). 그래서 이 문에서 실제로 닿는 거절은 위 오탈자 그물 하나다.
+// ★그래도 두 축을 뭉치지 말 것★ — 정책 축은 다음 백엔드가 올 때 되살아나고(선언 없음 = 닫힘), 두 거절을
+// 한 문구로 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.
 /// 오탈자 그물 — ★어휘를 손으로 적지 않는다★. 판정도 「무엇이 통하는가」 문구도 wire enum 자신에게서
 /// 나오므로(serde 의 unknown-variant 오류가 기대 낱말을 나열한다) 여기와 데몬이 갈릴 수 없다.
 fn parse_backend(word: &str) -> Result<AgentBackendKind, String> {
@@ -471,7 +472,8 @@ fn parse_backend(word: &str) -> Result<AgentBackendKind, String> {
 
 /// 오탈자 그물 + LLM 표면 정책. ★판정은 여기 없다★ — 정본은
 /// [`engram_dashboard_agent::commands::llm_creation_refusal`] 한 곳이고 `agent.new` 도 같은 표를 본다
-/// (사용자 결정 2026-09-07 · TRD S21 §6-G). 두 문이 함께 열리는지를 재는 자리 =
+/// (ADR-0219 — 그 표가 codex 를 연 결정. 옛 좌표 「사용자 결정 2026-09-07 · TRD S21 §6-G」는 그 ADR 이
+/// 번복했으므로 근거로 인용하지 말 것). 두 문이 함께 열리는지를 재는 자리 =
 /// `tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` (그 시험의 doc 이 문 셋과
 /// 각 문을 재는 스위트를 나눠 적는다 — 이 파일이 지는 것은 그중 ②다).
 fn gate_backend(word: &str) -> Result<AgentBackendKind, String> {

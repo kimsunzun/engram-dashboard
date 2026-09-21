@@ -71,6 +71,7 @@ export function ClaudeMascot() {
   return (
     <svg
       data-rich-mascot="1" // 실측 스크립트가 이 속성으로 찾는다.
+      data-rich-brand="claude" // 어느 백엔드인가(안정 토큰 — richBranding.ts 가 정의처). 모양·색은 불변.
       aria-hidden
       width={MASCOT_COLS * MASCOT_CELL_PX}
       height={rows * MASCOT_CELL_PX}

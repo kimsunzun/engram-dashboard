@@ -28,10 +28,15 @@ use crate::types::{
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v4(2026-09-22): `agent.new` 의 `backend` 어휘가 **`Claude` 하나 → `Claude`·`Codex` 둘**이 됐다
+    //   (ADR-0219). 이름도 칸도 안 늘었지만 **그 칸이 받는 낱말 집합**이 바뀌었고 그것이 호출자가 보는
+    //   선언이다 — 생성물이 그 차이를 그대로 싣는다(`bindings/commands.schema.json` 의
+    //   `"backend":{"enum":[…]}`). 안 올리면 codex 를 만들어 주는 빌드와 거절하는 빌드가 같은 세대를
+    //   보고한다. ★세대는 **이름이 늘 때만** 올리는 번호가 아니다 — 선언이 바뀌면 올린다.★
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 3;
+    catalog_version: 4;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -42,20 +47,30 @@ declare_commands! {
         parent: Option<String>,
     }
 
-    /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 하나뿐이다★.
+    /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 와 `Codex` 둘이다★(2026-09-22 에 codex 가
+    /// 들어왔다).
     ///
-    /// 코어에는 다른 백엔드도 있지만(`agent::backend` 의 codex·gemini·shell) **프로필 생성 경로가
-    /// 그것들로 도는지 확인된 바 없다** — 그래서 칸만 지금 열고 값은 좁혀 둔다(나중에 계약 **모양**이
+    /// 코어에는 다른 백엔드도 있지만(`agent::backend` 의 gemini·shell) **프로필 생성 경로가 그것들로
+    /// 도는지 확인된 바 없다** — 그래서 칸은 열어 두되 값은 확인된 둘로 좁혀 둔다(나중에 계약 **모양**이
     /// 바뀌지 않게).
-    /// ★넓히는 것은 「변형 하나 더」가 아니라 **디스크 호환을 깨는 이주**다★: 여기 변형을 늘리려면
-    /// 실행 명령(`AgentCommand`)에 짝이 있어야 하는데 그 enum 은 `#[serde(tag = "kind")]` 로
-    /// **`agents.json` 에 그대로 적힌다**. 새 빌드가 새 kind 를 쓴 프로필을 저장하고 나면 옛 빌드는 그
-    /// 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다** — 그 빌드에서
-    /// 에이전트가 전부 사라진다(persistence `FileProfileStore::load`). 넓힐 때 그 이주를 함께 설계할 것.
-    /// ★**왜** 좁은지와 **언제** 넓어지는지는 [`LLM_BACKEND_POLICY`] 가 진다★ — 그 표를 나머지 생성
-    /// 문들도 본다(그 표 머리말이 셋을 나눠 적는다).
+    /// ★변형을 더하는 값어치는 **짝이 이미 있나**가 가른다★: 실행 명령(`AgentCommand`)은
+    /// `#[serde(tag = "kind")]` 로 **`agents.json` 에 그대로 적히고**, 모르는 kind 를 만난 옛 빌드는 그
+    /// 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다**(persistence
+    /// `FileProfileStore::load`). 그러니 `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은
+    /// 디스크 호환을 깨는 이주이고, 짝이 **이미 있는** 백엔드를 더하는 것은 이주가 아니다.
+    /// ★`Codex` 는 후자였다★ — `AgentCommand::Codex { extra_args, output_format }` 는 그 전부터 있었고
+    /// 사람 메뉴(`agentlist.createCodex`·`createCodexJson`)가 **그 모양 그대로** `agents.json` 에 이미
+    /// 쓰고 있었다. 이 문을 연 것은 새 kind 도 새 칸도 스키마 상향도 아니다 — ★한때 이 자리에 「codex 를
+    /// 여는 것은 디스크 호환을 깨는 이주다」라고 적혀 있었는데, 사람 문이 같은 모양을 이미 쓰고 있어
+    /// 그때도 사실이 아니었다.★
+    /// ★전자의 실물은 `Gemini` 다★ — `agent::backend::gemini` 는 stub 으로 서 있지만 `AgentCommand` 에
+    /// 짝이 없다. 그 낱말을 여기 더하는 편집은 **디스크에 새 kind 를 앉히므로** 위 이주를 함께 설계해야
+    /// 한다. 두 경우를 같은 무게로 읽지 말 것.
+    /// ★**왜** 열려 있고 **다음 낱말은 어떻게 여나**는 [`LLM_BACKEND_POLICY`] 가 진다★ — 그 표를 나머지
+    /// 생성 문들도 본다(그 표 머리말이 셋을 나눠 적는다).
     enum AgentBackend {
         Claude,
+        Codex,
     }
 
     /// 새 에이전트의 출력 형식(= 렌더 모드) — 생성 시점에 고정되고 이후 불변이다(ADR-0044/0078).
@@ -268,9 +283,17 @@ impl AgentCommandHost for AgentManager {
 ///   (`agentlist.createAgent`)의 기본값이 이미 StreamJson 이다(ADR-0078). 두 입구가 같은 동사에 다른
 ///   기본을 주면 "만들었는데 화면이 다르다" 가 된다.
 /// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
+/// ★**값 자체를 못 박는 자리는 하나뿐이다**★ — `tests::the_new_agent_default_output_format_is_pinned_to_a_literal`.
+/// 나머지 단언은 전부 이 상수와의 **상대 비교**라 값을 뒤집어도 함께 따라 움직인다(그래서 그 하나가 없으면
+/// 이 줄을 바꾸는 편집이 전 스위트 초록으로 통과한다).
 pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat::StreamJson;
 
-// ── LLM 제어 표면의 백엔드 생성 정책(사용자 결정 2026-09-07 · TRD S21 §6-G) ──────────────────────
+// ── LLM 제어 표면의 백엔드 생성 정책(ADR-0219 — 2026-09-22) ──────────────────────────────────────
+//
+// ★근거가 갈아탔다★ — 이 표를 세운 것은 「안 연다」(사용자 결정 2026-09-07 · TRD S21 §6-G)였고 그
+// 결정은 **폴더 신뢰 모달을 LLM 이 못 지난다**는 전제 위에 서 있었다. 그 전제가 2026-09-22 실측으로
+// 뒤집혀(app-server 통로엔 그 모달이 없다) 거절이 걷혔다 — 그 번복의 정본이 ADR-0219 다. 옛 좌표를
+// 근거로 이 표를 도로 닫지 말 것: 그 자리는 ADR-0219 「거부한 대안」이 (b) 로 이미 재고했다.
 //
 // ★정책의 집은 여기 하나다★ — 이 판정을 묻는 **LLM 제어 표면이 셋**이고 서로 다른 crate·언어에 산다.
 // ★둘이라고 적혀 있던 옛 문장은 틀렸다(2026-09-08 리뷰)★ — 셋째를 못 세는 바람에 그 문이 표를 한 번도
@@ -303,34 +326,38 @@ pub struct LlmBackendPolicy {
 
 /// ★LLM 제어 표면이 어느 백엔드를 만들 수 있나 — 그 정책의 유일한 자리★.
 ///
-/// Phase 2 에서 codex 를 열 때 손대는 곳이 여기다. ★그 한 줄만으로는 안 끝난다★ — `AgentBackend` 어휘에
-/// `Codex` 를 더하고 [`backend_command`] 의 짝을 채워야 `agent.new` 가 실제로 만든다(그 enum 의 doc 이
-/// 경고하는 `agents.json` 이주가 거기 매달린다). 이 표만 먼저 열고 그 둘을 안 하면 위 시험이 빨개진다 —
-/// 그게 이 표를 여는 사람에게 남는 유일한 안내다.
+/// ★오늘 이 표는 아무것도 거절하지 않는다★(2026-09-22 에 codex 의 거절을 걷었다 — 사유는 그 줄에).
+/// 그래도 표를 걷지 않는 이유 둘: 다음 백엔드가 올 때 「선언 없음 = 닫힘」([`NO_POLICY_DECLARED`])이
+/// 그대로 서 있어야 하고, 생성 문 셋이 각자 목록을 들지 않게 하는 자리가 여기라서다.
 ///
-/// ★이 표가 가르는 것은 **백엔드 낱말 하나뿐이고 출력 모드 축은 어디에도 LLM 표현이 없다**★ — 그래서
-/// 낱말만 열면 LLM 은 codex 를 만들 수는 있어도 **JSON 모드로는 못 만든다**(사람은 트리 메뉴에서
-/// 고른다). 프론트 쪽 형제(`agentlist.createAgent`)도 claude 가 박혀 있어 그 축을 못 연다. 모드를
-/// 고르는 LLM 경로를 낼지는 별개 결정이고 여기서 같이 봐야 할 항목이라 적어 둔다 — 이 표만 열면
-/// 「만들 수는 있는데 원하는 모드로는 못 만든다」가 남는다.
+/// ★한 줄을 여는 것만으로는 안 끝난다★ — `AgentBackend` 어휘에 그 변형을 더하고 [`backend_command`] 의
+/// 짝을 채워야 `agent.new` 가 실제로 만든다. 이 표만 열고 그 둘을 안 하면 위 시험이 빨개진다 — 그게 이
+/// 표를 여는 사람에게 남는 유일한 안내다.
+///
+/// ★이 표가 가르는 것은 **백엔드 낱말 하나뿐이다 — 다만 출력 모드 축에는 이미 LLM 표현이 있다**★:
+/// `agent.new` 의 `output_format` 칸(`Terminal`|`StreamJson`, 미지정 = [`NEW_AGENT_OUTPUT_FORMAT`])이
+/// 그것이고, [`verb_new`] 는 그 값을 **백엔드와 무관하게** 그대로 [`backend_command`] 로 넘긴다. 그래서
+/// 낱말을 열면 두 모드가 함께 열린다. ★한때 이 자리에 「출력 모드 축은 어디에도 LLM 표현이 없다」고
+/// 적혀 있었는데 그 칸은 그 문장보다 먼저 있었다 — 쓰일 때부터 거짓이었다.★ 그 문장을 근거로 모드 축에
+/// 두 번째 입구를 짓지 말 것(CLAUDE.md 「LLM-우선 제어」의 「두 번째 표면을 짓지 말 것」).
 pub const LLM_BACKEND_POLICY: &[LlmBackendPolicy] = &[
     LlmBackendPolicy {
         word: "claude",
         refusal: None,
     },
+    // ★codex 의 거절은 2026-09-22 에 걷혔고, 걷힌 이유는 그 거절이 세워진 전제가 실측으로 뒤집혔기
+    //   때문이다★. 옛 사유 = 「처음 보는 폴더에서 codex 가 자기 신뢰 확인 모달을 띄우고 사람이 아닌
+    //   호출자는 그것을 못 지난다」. 실측(codex 0.155.1, 2026-09-22) = `app-server` 경로는 한 번도 본
+    //   적 없는 폴더에 `thread/start` 를 **성공**으로 돌려준다(약 338ms · 오류 없음 · 인바운드 신뢰
+    //   요청 없음). 그리고 그 폴더를 자기 `config.toml` 에 `trust_level = "trusted"` 로 **스스로 적는다**.
+    //   즉 폴더 신뢰 모달은 **TUI 전용 장치**였다.
+    // ★그래서 신뢰를 확인하는 코드를 두지 않는다★ — 이 경로에 검사할 게이트가 애초에 없고, 있는 척
+    //   검사를 지으면 codex 의 설정 파일을 읽는 의존(TOML)만 늘고 지키는 것은 없다.
     LlmBackendPolicy {
         word: "codex",
-        refusal: Some(CODEX_NEEDS_A_HUMAN_AT_THE_TRUST_MODAL),
+        refusal: None,
     },
 ];
-
-/// codex 가 **이 표면에서만** 닫혀 있는 사유. ★사유와 여는 시점을 함께 적는다★ — 반년 뒤 이 거절을
-/// 만난 사람이 무엇을 기다리는지 문구 하나로 알아야 한다.
-///
-/// ★프론트에 같은 사유를 말하는 **별개 문구**가 있다★ — `src/commands/agentCommands.ts` 의
-/// `CODEX_HUMAN_ONLY`. 언어가 달라 이 상수를 거기서 읽을 수 없어 둘은 사본이 아니라 각자 쓴 문장이고,
-/// **아무 게이트도 둘의 뜻을 맞춰 주지 않는다**. 이 사유가 바뀌면 그쪽도 같이 본다.
-const CODEX_NEEDS_A_HUMAN_AT_THE_TRUST_MODAL: &str = "codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(키를 넣어도 안 먹는다 — 실측 2026-09-07). 지금 열면 「만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성」 서브메뉴에 있는 codex 항목들). 여는 시점 = Phase 2, codex 신뢰 확인 모달 처리가 정해질 때(사용자 결정 2026-09-07 · TRD S21 §6-G).";
 
 /// 표에 없는 낱말의 사유 — ★없음은 열림이 아니라 닫힘이다★. 새 백엔드가 정책 선언 없이 조용히 열리면
 /// 이 게이트는 아무것도 안 지킨 셈이 된다.
@@ -365,9 +392,18 @@ fn backend_word(backend: &AgentBackend) -> String {
 /// ★이 `match` 는 **선언 enum** 을 훑는다 — 코어에 백엔드가 늘어도 여기서는 컴파일이 깨지지 않는다★.
 /// 그 방향(코어가 늘었는데 선언이 좁은 채로 남는 것)을 잡는 그물은 `AgentCommand` 를 훑는 역방향 `match`
 /// 이고, 그 자리는 `tests::the_declared_vocabularies_are_pinned_to_the_core_ones` 하나다.
+/// ★`output_format` 은 백엔드와 **무관하게** 그대로 실린다★ — 그래서 낱말 하나를 열면 두 모드가 함께
+/// 열린다(codex 의 두 모드를 가르는 자리는 `backend::codex::is_app_server` 이고 그 판정도 이 칸을 본다).
 fn backend_command(backend: AgentBackend, output_format: CoreAgentOutputFormat) -> AgentCommand {
     match backend {
         AgentBackend::Claude => AgentCommand::Claude {
+            extra_args: vec![],
+            output_format,
+        },
+        // ★`extra_args` 가 비는 것은 결정이다★ — 이 입구는 인자 표면을 늘리지 않는다(모델·추론 강도
+        //   따위를 고르는 칸을 두지 않는다). codex 가 실제로 받는 인자는 `backend::codex::build_spec`
+        //   이 이 명령 하나에서 전부 조립한다.
+        AgentBackend::Codex => AgentCommand::Codex {
             extra_args: vec![],
             output_format,
         },
@@ -553,7 +589,14 @@ fn create_and_start(
     cwd: &str,
     name: Option<String>,
 ) -> Result<AgentSpawnOk, CommandError> {
-    // ★이 동사에는 형식·백엔드 칸이 없다★ — 만들기 기본값을 그대로 쓴다(둘을 고르는 입구는 `agent.new`).
+    // ★이 동사에는 형식·백엔드 칸이 없다 — 그래서 아래 두 값은 이제 **고른 것**이다★(2026-09-22 재확인).
+    //   어휘가 claude 하나뿐이던 시절엔 `Claude` 가 「유일한 값」이라 고를 것이 없었지만, `agent.new` 가
+    //   codex 를 열면서 이 자리는 **의도한 claude 고정**이 됐다.
+    // ★그래도 여기에 칸을 내지 않는다★ — 백엔드·모드를 고르는 입구는 `agent.new` 하나이고, 이 동사에
+    //   칸을 더하면 같은 선택이 두 문으로 갈린다(카탈로그 세대 상향·바인딩 재생성까지 딸려 온다).
+    //   codex 를 원하는 호출자는 `agent.new` 로 등록한 뒤 `agent.spawn {target}` 으로 깨운다.
+    // ★프론트의 동명 문(`src/commands/agentCommands.ts` 의 `agent.spawn`)도 같은 이유로 claude 에
+    //   박혀 있다 — 둘은 이름이 같으므로 함께 움직인다.★
     let stored = register(
         host,
         cwd,
@@ -639,13 +682,18 @@ fn verb_new(
     //   claude 로 접는 경로이고, 스폰 패킷에서 이미 같은 이유로 걷어냈다.
     let backend = args.backend.clone();
     let word = backend_word(&backend);
-    // ★생성 문 셋이 같은 표를 본다★ — 이 `if` 는 매 호출 돌지만 **거절 팔은 오늘 닿지 않는다**: 선언
-    //   어휘([`AgentBackend`])가 정책 표보다 좁아서, 표가 닫은 낱말은 그 전에 역직렬화가 반려한다.
+    // ★생성 문 셋이 같은 표를 본다★ — 이 `if` 는 매 호출 돌지만 **거절 팔은 오늘도 닿지 않는다**.
+    //   ★단 닿지 않는 **사유**가 2026-09-22 에 갈렸다★: 그 전에는 「선언 어휘([`AgentBackend`])가
+    //   정책 표보다 좁아서」였고, 지금은 **어휘와 표가 여는 집합이 정확히 같아서**(둘 다 claude·codex)
+    //   그리고 **표가 아무 낱말도 안 닫아서**다. 표 밖 낱말은 여전히 그 전에 역직렬화가 반려한다.
     //   ★그래도 지우지 말 것★ — 이 팔이 막는 편집은 「어휘를 넓히면서 [`LLM_BACKEND_POLICY`] 는 안
     //   넓히는 것」이고, 그 편집이 오면 팔이 그날 살아난다. 그 사실을 시험이 잰다 =
     //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(어휘를 넓히고 표를 안 열면
-    //   빨개진다). 형제 문의 자리 = 셸 `layout::apply::gate_backend`(런타임 거절이 오늘도 닿는다) ·
-    //   프론트 `commands/registry.ts` 의 `humanOnly`(LLM 표면만 닫는다).
+    //   빨개진다). 형제 문의 자리 = 셸 `layout::apply::gate_backend` · 프론트 `commands/registry.ts`.
+    //   ★**둘 다 오늘은 정책으로 아무것도 안 막는다**★(2026-09-22 · ADR-0219) — `gate_backend` 에
+    //   남는 거절은 정책이 아니라 `parse_backend` 의 오탈자 그물이고(wire 어휘가 claude·codex 둘뿐인데
+    //   표가 둘 다 열었다), 프론트의 `humanOnly` 사유 문자열은 그날 함께 지워졌다. ★한때 이 자리에
+    //   「셸은 런타임 거절이 오늘도 닿는다」고 적혀 있었는데 표가 열린 뒤로 거짓이다.★
     if let Some(reason) = llm_creation_refusal(&word) {
         return Err(CommandError::invalid_argument(format!(
             "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
@@ -1650,6 +1698,17 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
     }
 
+    /// ★[`NEW_AGENT_OUTPUT_FORMAT`] 의 **값 자체**를 글자로 못 박는다★ — 이 상수를 읽는 자리는 전부
+    /// 상대 비교(`assert_eq!(…, NEW_AGENT_OUTPUT_FORMAT)`)라, 상수를 `Terminal` 로 뒤집어도 그 단언들이
+    /// 함께 따라 움직여 **워크스페이스 전체가 초록으로 남는다**(2026-09-22 실측 — 그 값을 글자로 재는
+    /// 단언이 저장소에 하나도 없었다). 상대 비교는 「두 갈래가 같은 집을 본다」만 재고 「그 집에 무엇이
+    /// 들었나」는 안 잰다 — 후자가 사용자에게 보이는 값(생성 직후 화면이 챗이냐 터미널이냐)이라 여기서
+    /// 따로 잰다. 값을 바꾸는 것은 결정이므로, 이 줄을 고치는 편집은 그 결정을 지나야 한다(ADR-0078).
+    #[test]
+    fn the_new_agent_default_output_format_is_pinned_to_a_literal() {
+        assert_eq!(NEW_AGENT_OUTPUT_FORMAT, CoreAgentOutputFormat::StreamJson);
+    }
+
     /// ★선언 어휘와 코어 어휘를 **컴파일러가** 묶는 자리★ — 산문으로만 묶으면 코어에 변형이 하나 늘 때
     /// 선언 쪽이 조용히 좁은 채로 남고, 그 낱말은 입구에서 `INVALID_ARGUMENT` 로 반려된다(에러도 로그도
     /// 없는 기능 부재라 아무도 알아채지 못한다).
@@ -1718,11 +1777,12 @@ mod tests {
                 // ★`Shell` 이 `None` 인 것은 빈칸이 아니라 결정이다★ — 이 입구로는 만들 수 없다
                 //   (프로필 생성 경로가 그것으로 도는지 확인된 바 없다 — `AgentBackend` 선언).
                 AgentCommand::Shell { .. } => None,
-                // ★`Codex` 도 결정이다(사용자 결정 2026-09-07)★ — codex 는 처음 보는 폴더에서 신뢰 확인
-                //   모달을 띄우고 **LLM 은 그 모달을 못 지난다**(키를 넣어도 안 먹는다 — 실측). 여기를
-                //   열면 「LLM 이 만들 수는 있는데 쓸 수는 없는 에이전트」가 생긴다. 그 모달 처리가
-                //   정해질 때 함께 연다.
-                AgentCommand::Codex { .. } => None,
+                // ★`Codex` 는 2026-09-22 에 열렸다★ — 옛 `None` 의 사유(「처음 보는 폴더의 신뢰 확인
+                //   모달을 LLM 이 못 지난다」)가 실측으로 뒤집혔다(그 표 = [`LLM_BACKEND_POLICY`] 의
+                //   codex 줄이 근거를 진다). 지금 이 줄이 재는 것은 그 결정이 아니라 **어휘 왕복**이다:
+                //   선언 `Codex` 가 짓는 실행 명령이 다시 `Codex` 로 읽히고, 저장되는 `kind` 태그도
+                //   같은 철자인가.
+                AgentCommand::Codex { .. } => Some(AgentBackend::Codex),
             }
         }
         let backends = advertised("backend");
@@ -1748,35 +1808,83 @@ mod tests {
         }
     }
 
-    /// ★백엔드 칸은 **모양만** 열려 있다★ — 코어에 다른 백엔드가 있어도 생성 경로가 그것으로 도는지
-    /// 확인된 바 없으므로, 오늘 통과하는 값은 `Claude` 하나다(사유 = `AgentBackend` 선언).
+    /// ★오늘 통과하는 값은 `Claude`·`Codex` 둘이고, 그 둘 **각각이 두 모드로** 통한다★(2026-09-22).
+    ///
+    /// 코어에는 `Shell` 도 있지만 생성 경로가 그것으로 도는지 확인된 바 없어 어휘 밖이다(사유 =
+    /// `AgentBackend` 선언).
+    ///
+    /// ★모드 축을 여기서 함께 재는 이유★ — codex 를 여는 것은 낱말 하나가 아니라 **낱말 × 두 모드**이고,
+    /// 모드가 실제로 실렸는지는 **저장된 실행 명령**을 들여다봐야만 보인다(`AgentNewOk` 에는 그 칸이
+    /// 없다). 여기서 안 재면 [`backend_command`] 가 codex 를 한 모드에 박아 넣어도 전 스위트가 초록이다.
     #[test]
-    fn new_accepts_the_claude_backend_and_refuses_the_rest() {
+    fn new_accepts_both_declared_backends_and_refuses_the_rest() {
+        for word in ["Claude", "Codex"] {
+            for (spelled, expected) in [
+                ("Terminal", CoreAgentOutputFormat::Terminal),
+                ("StreamJson", CoreAgentOutputFormat::StreamJson),
+            ] {
+                let host = FakeHost::new();
+                let (table, _notify) = wiring(&host);
+
+                call(
+                    &table,
+                    "agent.new",
+                    json!({ "cwd": "C:/x", "backend": word, "output_format": spelled }),
+                )
+                .unwrap_or_else(|e| {
+                    panic!("{word}/{spelled}: 선언 어휘가 반려됐다 — {}", e.message())
+                });
+
+                let profiles = host.profiles.lock().unwrap();
+                let stored = profiles.values().next().expect("등록된 프로필 하나");
+                let (kind, format) = match &stored.command {
+                    AgentCommand::Claude {
+                        extra_args,
+                        output_format,
+                    } => ("Claude", (extra_args.clone(), *output_format)),
+                    AgentCommand::Codex {
+                        extra_args,
+                        output_format,
+                    } => ("Codex", (extra_args.clone(), *output_format)),
+                    other => panic!("{word}/{spelled}: 엉뚱한 실행 명령 — {other:?}"),
+                };
+                assert_eq!(kind, word, "{word}/{spelled}: 다른 백엔드가 저장됐다");
+                // ★이 입구는 인자 표면을 늘리지 않는다★ — 모델·추론 강도 같은 칸이 여기로 새면 빈다는
+                //   단언이 먼저 깨진다.
+                assert!(
+                    format.0.is_empty(),
+                    "{word}/{spelled}: 이 입구는 extra_args 를 싣지 않는다 — {:?}",
+                    format.0
+                );
+                assert_eq!(format.1, expected, "{word}/{spelled}: 모드가 실리지 않았다");
+            }
+        }
+
+        // ★어휘 밖은 등록 전에 반려된다 — 소문자 철자도 여기 든다★(선언 어휘는 PascalCase 다).
         let host = FakeHost::new();
-        let (table, _notify) = wiring(&host);
-
-        call(
-            &table,
-            "agent.new",
-            json!({ "cwd": "C:/x", "backend": "Claude" }),
-        )
-        .expect("오늘 통하는 하나");
-
-        for unverified in ["Codex", "Gemini", "Shell", "claude"] {
+        let (table, notify) = wiring(&host);
+        for outside in ["Gemini", "Shell", "claude", "codex"] {
             let err = call(
                 &table,
                 "agent.new",
-                json!({ "cwd": "C:/x", "backend": unverified }),
+                json!({ "cwd": "C:/x", "backend": outside }),
             )
-            .expect_err("확인되지 않은 백엔드");
-            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{unverified}");
-            assert!(
-                err.message().contains("Claude"),
-                "무엇이 통하는지 말해야: {}",
-                err.message()
-            );
+            .expect_err("어휘 밖 백엔드");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{outside}");
+            // 무엇이 통하는지 **전부** 말해야 한다 — 하나만 말하면 어휘가 넓어진 날 안내가 뒤처진다.
+            for accepted in ["Claude", "Codex"] {
+                assert!(
+                    err.message().contains(accepted),
+                    "{outside}: 통하는 낱말 '{accepted}' 를 안 말한다 — {}",
+                    err.message()
+                );
+            }
         }
-        assert_eq!(host.rows.lock().unwrap().len(), 1, "반려는 등록하지 않는다");
+        assert!(
+            host.rows.lock().unwrap().is_empty(),
+            "반려는 등록하지 않는다"
+        );
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
     }
 
     /// ★칸을 아예 안 주면 반려다 — 조용히 claude 가 되지 않는다★(2026-09-08).
@@ -1814,12 +1922,16 @@ mod tests {
     /// 의 `word` doc). 그래서 낱말 하나에 **이 문이 받아들일 수 있는 철자 전부**를 넣어 본다. 한 철자만
     /// 넣으면 어휘가 넓어진 날 그 시도가 엉뚱한 철자에 걸려 조용히 통과한다.
     ///
-    /// ★무엇을 잡나 — 정확히 적는다★: 이 시험이 빨개지는 편집은 「선언 어휘 [`AgentBackend`] 를 넓히면서
-    /// `verb_new` 의 [`llm_creation_refusal`] 팔은 지우는 것」이다. 그 조합이 오늘 이 파일에 남아 있는
-    /// 유일한 codex 누출 경로이고, 그 팔의 회귀망은 여기 하나뿐이다.
-    /// ★반대로 **팔만 지우는 것**은 오늘 이 시험이 못 잡는다★ — 어휘가 표보다 좁아서 닫힌 낱말이 팔에
-    /// 닿기 전에 역직렬화가 반려하기 때문이다. 그 사실을 「그러니 팔은 필요 없다」로 읽지 말 것: 어휘가
-    /// 넓어지는 날 그 팔이 유일한 런타임 방어가 된다.
+    /// ★무엇을 잡나 — 정확히 적는다(2026-09-22 갱신: 표가 아무것도 안 닫으면서 두 방향의 무게가 갈렸다)★
+    ///   - **표를 닫았는데 이 문이 그대로 만든다** → 빨개진다. 어휘([`AgentBackend`])를 넓힌 채
+    ///     `verb_new` 의 [`llm_creation_refusal`] 팔만 지우는 편집이 여기 걸린다. 그 팔의 회귀망은
+    ///     여기 하나뿐이다.
+    ///   - **표는 열었는데 이 문이 안 만든다** → 빨개진다. 표에 한 줄만 더하고 어휘·[`backend_command`]
+    ///     를 안 채우는 편집이 여기 걸린다(그 안내를 [`LLM_BACKEND_POLICY`] 의 doc 이 낸다).
+    ///
+    /// ★**팔만 지우는 것**은 오늘도 이 시험이 못 잡는다★ — 다만 사유가 갈렸다: 그 전에는 「어휘가 표보다
+    /// 좁아서」였고 지금은 「표가 아무것도 안 닫아서 팔에 닿는 입력이 아예 없어서」다. 그 사실을 「그러니
+    /// 팔은 필요 없다」로 읽지 말 것 — 표가 다시 한 줄을 닫는 날 그 팔이 유일한 런타임 방어가 된다.
     #[test]
     fn new_creates_exactly_what_the_llm_backend_policy_opens() {
         /// 이 문이 이 낱말에 대해 받아들일 수 있는 철자 후보 — 표는 소문자, 선언 어휘는 PascalCase 다.

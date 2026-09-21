@@ -1,0 +1,36 @@
+/* RichSlot 백엔드 색조 — 패널 안쪽 테마 변수를 슬롯 루트 한 곳에서만 갈아 끼운다(ADR-0047 토큰 위).
+   ★컴포넌트 옆 css 를 그 컴포넌트가 import 한다★ — chat.css·agentGlyph.css·scroll-area.css 와 같은 결.
+
+   ★theme.css·index.css 를 건드리지 않는 이유★: 거기서 `--bg` 를 고치면 세 테마·모든 슬롯·터미널까지
+   함께 물든다. 여기 클래스는 리치 슬롯 루트에만 붙으므로 그 서브트리 밖으로 새지 않는다.
+
+   ★왜 유틸리티가 아니라 변수를 가나★: `@theme inline` 이 Tailwind 유틸에 값을 굳히지 않고 `var(--bg)` 를
+   그대로 방출한다(index.css). 그래서 루트에서 `--bg` 를 다시 선언하면 `bg-background`·`bg-surface` 가
+   서브트리 전체에서 함께 따라온다 — 자리마다 클래스를 갈아붙일 필요가 없다. */
+
+/* ★스냅샷 — 색조 계산의 바탕★. 이게 왜 :root 에 있냐면, 커스텀 속성은 **자기 자신을 참조할 수 없기**
+   때문이다: 슬롯 루트에서 `--bg: color-mix(…, var(--bg))` 를 쓰면 CSS 순환이라 선언 전체가 무효가 되고
+   패널 배경이 통째로 날아간다. 바탕값은 색조를 거는 자리보다 **위쪽 요소**가 들고 있어야 한다.
+   ★이 두 줄은 아무 픽셀도 바꾸지 않는다★ — 읽는 곳이 아래 한 클래스뿐이라, 색조 없는 화면에는 존재가
+   드러나지 않는다(그래서 :root 선언이지만 「전역 테마 변경」이 아니다). */
+:root {
+  --rich-base-bg: var(--bg);
+  --rich-base-surface: var(--bg-secondary);
+}
+
+/* codex 패널 — 테마 색 위에 옅은 브랜드 워시. 퍼센트는 「배경이 갈렸다」가 곁눈으로 보이되 본문 대비를
+   흔들지 않는 선이다. 표면(--bg-secondary)을 배경보다 한 단계 더 태워 입력창·도구 상자가 패널 배경에
+   묻히지 않게 유지한다. ★색값은 CodexMascot 의 fill 과 같은 값이다★ — 표식과 색조가 한 색에서 나온다. */
+.rich-tint-codex {
+  --rich-brand: #10a37f;
+  --bg: color-mix(in srgb, var(--rich-brand) 7%, var(--rich-base-bg));
+  --bg-secondary: color-mix(in srgb, var(--rich-brand) 10%, var(--rich-base-surface));
+}
+
+/* ★e-ink 은 색을 무력화하는 테마다★(theme.css — `--accent: #000`, `--status-*` 중립화). 그 테마에서만
+   워시를 걷어 테마 색 그대로 둔다. 백엔드 구분은 색이 아니라 제목 글자와 표식 **모양**이 지므로
+   (ADR-0062 「모양이 1차 신호」) 여기서 색이 빠져도 잃는 신호가 없다. */
+:root[data-theme='e-ink'] .rich-tint-codex {
+  --bg: var(--rich-base-bg);
+  --bg-secondary: var(--rich-base-surface);
+}

@@ -221,8 +221,9 @@ fn the_create_verb_advertises_both_ways_to_pick_a_folder_and_its_closed_vocabula
     assert_eq!(vocabulary("output_format"), vec!["Terminal", "StreamJson"]);
     assert_eq!(
         vocabulary("backend"),
-        vec!["Claude"],
-        "오늘 통과하는 값은 하나뿐이고 그 사실이 광고에 그대로 있어야 한다"
+        vec!["Claude", "Codex"],
+        "통과하는 값과 광고가 같아야 한다 — 광고가 정책보다 좁으면 호출자는 되는 것을 안 된다고 읽고, \
+         넓으면 반려당할 값을 고른다"
     );
 }
 

@@ -75,7 +75,8 @@ scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 
 #   `-- --test-threads=4` 는 로컬 전용이며 빼지 마세요(근거 = 같은 절). CI는 그것을 쓰지 않으며 그 차이가 의도입니다.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir . -LogFile test.log
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "npm test" -WorkDir . -LogFile vitest.log
-#   ↑ vitest 는 `__EXIT` 가 안 붙습니다(자식이 래퍼보다 오래 삽니다) — 로그에 찍힌 vitest 자신의 pass/fail 요약으로 판정하세요.
+#   ↑ vitest 도 예외가 아닙니다 — 위 `__EXIT` 마커로 판정하고 vitest 자신의 pass/fail 요약으로 갈음하지 마세요.
+#     「자식이 래퍼보다 오래 산다」던 옛 사유는 오진이었습니다(폐기 2026-09-22). 실제 원인은 Windows 에서 `npm` 의 실체가 `npm.cmd` 라, 래퍼 `.bat` 이 `call` 없이 부르면 제어가 안 돌아와 마커 줄이 실행되지 않은 것입니다 — 지금은 run-detached.ps1 이 대상이 배치일 때 `call` 을 붙여 마커가 그대로 붙습니다(실측). 정본 = .claude/skill-bindings/qa.md 「분리 실행」
 ```
 
 ## 문서

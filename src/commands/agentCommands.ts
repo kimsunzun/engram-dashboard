@@ -35,21 +35,17 @@ async function createReservedCodexProfile(outputFormat: AgentOutputFormat) {
   return createReserved(cwd => agentClient.createCodexProfile(cwd, cwd, [], [], false, outputFormat))
 }
 
-// ★codex 를 만드는 문 둘이 같은 사유로 닫힌다 — 그래서 사유 문자열을 나눠 갖는다★: 갈라 적으면 한쪽만
-//   고쳐져 「같은 게이트」가 조용히 둘로 나뉜다.
-//
-// ★이 항목들은 **사람 메뉴이면서 동시에 LLM 이 부를 수 있는 command** 다(2026-09-08 리뷰)★ —
-//   `registry.register` 로 오르는 것은 전부 `window.__engramCmd` 와 버스 다리가 부를 수 있고, 이
-//   갈래는 wire `CreateProfile` 까지 닿는데 그 핸들러는 정책을 **아무것도** 보지 않는다
-//   (`crates/engram-dashboard-daemon/src/connection_core.rs`). LLM 을 막고 있던 것은 위
-//   `createReserved` 의 네이티브 폴더 다이얼로그뿐이었고 — 그건 게이트가 아니라 사고다.
-//   그래서 **호출자 축**으로 닫는다: 사람 클릭은 `dispatch.fireAndForget`(→ `runAsHuman`)이라 그대로
-//   지나고, LLM 경로(`registry.run`)만 이 사유로 반려된다.
-// ★사유의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
-//   codex 행이고, 형제 문 둘(`agent.new` · `agent.spawnInto`)이 그 표를 본다. 그 표가 codex 를 여는
-//   날(Phase 2, 신뢰 확인 모달 처리가 정해질 때) 이 상수도 함께 지운다.
-const CODEX_HUMAN_ONLY =
-  'codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다(실측 2026-09-07). 사람이 만드는 문은 그대로 열려 있다(트리의 「에이전트 생성」 서브메뉴에 있는 코덱스 항목들). 여는 시점 = Phase 2 — 사유의 정본은 engram-dashboard-agent 의 `commands::LLM_BACKEND_POLICY` 이고 claude 를 만드는 LLM 경로는 `agent.new` 다.'
+// ★codex 생성 문 둘의 `humanOnly` 게이트는 2026-09-22 에 걷혔다★ — 그 게이트가 세워진 전제(「처음 보는
+//   폴더에서 codex 가 신뢰 확인 모달을 띄우고 사람이 아닌 호출자는 못 지난다」)가 실측으로 뒤집혔기
+//   때문이다: codex 의 `app-server` 경로는 한 번도 본 적 없는 폴더에 성공으로 답하고 그 폴더를 스스로
+//   신뢰 목록에 적는다. 폴더 신뢰 모달은 TUI 전용 장치였다.
+// ★사유·근거의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
+//   codex 줄이고, 형제 문 둘(`agent.new` · `agent.spawnInto`)이 같은 표를 본다. 이 파일에 있던 사본
+//   문자열(`CODEX_HUMAN_ONLY`)은 그 표가 codex 를 열면서 함께 지웠다 — 두 문장을 맞춰 주는 게이트가
+//   없었으므로 남겨 두면 표와 어긋난 채 살아남는다.
+// ★되돌리려거든 여기가 아니라 그 표부터★ — 이 문들을 다시 닫는 편집은 `humanOnly` 를 되살리기 전에
+//   그 표의 codex 줄을 닫아야 한다(안 그러면 같은 백엔드를 `agent.new` 로는 만들고 이 문으로는 못
+//   만드는 어긋남이 생기고, 그것을 재는 자리가 `agentCommands.test.ts` 와 `layout_apply.rs` 다).
 
 // ★ADR-0078★: AgentOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
 //   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이
@@ -92,9 +88,12 @@ register({
     if (!cwd || !cwd.trim()) {
       throw new Error(`agent.spawn: cwd 가 비어 있음: ${String(cwd)}`)
     }
-    // ★이 문은 claude 만 낸다(사용자 결정 2026-09-07 — TRD §6-G)★: 부르는 주체가 LLM 인데 codex 는 처음
-    //   보는 폴더에서 신뢰 확인 모달을 띄우고 **LLM 은 그 모달을 못 지난다**. 여기를 넓히면 「만들 수는
-    //   있는데 쓸 수는 없는 에이전트」가 생긴다. 그 모달 처리가 정해질 때 함께 연다.
+    // ★이 문은 claude 만 낸다 — 2026-09-22 에 **사유가 갈렸다**★. 옛 사유(「codex 는 신뢰 확인 모달을
+    //   띄우고 LLM 은 그것을 못 지난다」)는 실측으로 죽었다(그 근거의 자리 = 이 파일 머리 주석). 지금
+    //   남는 사유는 **인자 표면을 늘리지 않는다**는 것 하나다: 이 command 에 backend 인자를 내면
+    //   같은 id 의 백엔드 문(`engram-dashboard-agent` 의 `agent.spawn`)과 어휘가 갈린다 — 그쪽도 같은
+    //   이유로 claude 에 박혀 있다(`commands.rs` 의 `create_and_start`).
+    // ★codex 를 만드는 LLM 경로는 `agent.new` 다★ — backend 와 output_format 을 거기서 함께 고른다.
     return agentClient.spawnAgent(cwd.trim(), 'claude')
   },
 })
@@ -153,8 +152,9 @@ register({
   category: 'agent',
   // ★사람이 codex 대화형 TUI 를 고르는 문★ — 여기서 만들어진 예약 노드를 활성화하면 codex 가 그
   //   폴더에서 뜬다. ★첫 방문 폴더에서는 codex 자신의 신뢰 확인 모달이 화면에 그대로 뜨고 사람이
-  //   지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다).
-  humanOnly: CODEX_HUMAN_ONLY,
+  //   지나간다(사용자 결정 2026-09-07 — 우리가 미리 신뢰를 심어 우회하지 않는다). 그 모달은 **TUI
+  //   경로에만** 있다 — 그래서 이 문이 LLM 에게 닫혀 있을 이유가 되지 못했고, 2026-09-22 에
+  //   `humanOnly` 를 걷었다(위 머리 주석이 근거의 자리를 가리킨다).
   run: async () => createReservedCodexProfile('Terminal'),
 })
 
@@ -166,7 +166,8 @@ register({
   //   백엔드이고 가르는 것은 출력 모드 하나다. 그 모드가 통로·입력 인코딩·출력 decoder 를 함께
   //   가르는 자리는 `engram-dashboard-agent` 의 `backend::codex::is_app_server` 다.
   // ★ADR-0078 과 같은 계약★: 모드는 생성 시점에 고정되고 이후 불변이다(활성화-시점 override 없음).
-  humanOnly: CODEX_HUMAN_ONLY,
+  // ★형제 `createCodex` 와 같은 날 `humanOnly` 를 걷었다(2026-09-22)★ — 두 문은 같은 게이트를 지므로
+  //   한쪽만 열면 그 자체가 회귀다(그것을 재는 자리 = `agentCommands.test.ts`).
   run: async () => createReservedCodexProfile('StreamJson'),
 })
 

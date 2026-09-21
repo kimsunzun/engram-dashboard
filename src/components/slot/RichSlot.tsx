@@ -13,9 +13,13 @@
 //   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. tag0(터미널 바이트)이 이 슬롯에
 //   오면 무시한다(구조화 슬롯이라 렌더 대상 아님 — tag 게이트).
 //
-// ★빈 상태(ADR-0145)★: 복원 완료 신호('live') + 0건 + 미전송일 때만 마스코트·"Claude Code"·가운데
+// ★빈 상태(ADR-0145)★: 복원 완료 신호('live') + 0건 + 미전송일 때만 표식·제품명·가운데
 //   입력창을 그린다. 판정에만 개입하고 구독·누산·전송 경로는 건드리지 않는다. 입력창은 두 배치가
 //   같은 엘리먼트다(전송·IME·포커스 가드를 한 벌로 유지 — 갈라 두지 말 것).
+//
+// ★백엔드 표기★: 제목·표식·색조 셋이 claude 와 codex 를 가른다(정의처 = richBranding.ts). 표기는
+//   프로필에서 파생되는 표시값이라 설정도 command 도 두지 않는다 — 관측은 `data-rich-brand` 토큰으로 한다.
+//   ★이것으로 렌더러를 고르지 않는다★: 어느 슬롯을 띄울지는 여전히 capabilities 가 정한다(api/types.ts).
 //
 // ★층 분리★: 파싱/누적은 순수 TS(structuredAccumulator.ts)가, 렌더는 전용 컴포넌트(StructuredTextView)가
 //   소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O 배선만 한다
@@ -29,8 +33,9 @@ import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import { StructuredTextView } from './StructuredTextView'
-import { ClaudeMascot } from './ClaudeMascot'
+import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
+import './richBranding.css' // 색조 클래스 정의처(컴포넌트 옆 css 를 그 컴포넌트가 import 하는 규약).
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
 import { basename } from '../../util/basename'
 import { t } from '../../i18n'
@@ -123,6 +128,12 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   // ★basename 만★: agent.name 은 프로필의 name(=우리가 createClaudeProfile 에 넘긴 full cwd)이라 풀 경로가
   //   뜬다 → 트리(displayNameOf)와 동일하게 display_name override 없으면 basename(cwd)만 쓴다("Filter Library").
   const headerName = profile?.display_name ?? basename(cwd)
+  // ★백엔드 표기(제목·표식·색조)★: 리치 모드는 claude 와 codex 를 똑같이 그려 누구와 말하는지 화면에
+  //   신호가 없었다. 판정 근거는 프로필의 실행 명령 종류 하나이고, 프로필이 없으면 claude 표기 그대로다
+  //   (회귀 없는 기본값 — 사유는 richBranding.ts). ★렌더러 선택은 여전히 capabilities 가 한다★.
+  //   ★`command` 도 옵셔널로 탄다★ — 타입상 필수지만 위 profiles 와 같은 이유로 그 칸을 안 채우는 mock 이
+  //   실재한다(빠지면 표기가 아니라 슬롯 전체가 죽는다). 못 읽으면 기본값으로 떨어지는 쪽이 맞다.
+  const branding = richBranding(profile?.command?.kind)
 
   // 출력 구독 — TerminalSlot 규율 미러: seq dedup(컴포넌트 방어 — 클라도 내부 dedup),
   // 정확한 unsubscribe(stale 가드 토큰은 클라 소유).
@@ -284,9 +295,19 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       //   세로 가운데 놓는다. 위아래 spacer 로 나누면 위쪽에 든 마스코트·문구 높이만큼 묶음이 위로 밀린다.
       // relative = 아래 부재 오버레이(absolute inset-0)의 앵커. 안쪽 absolute 요소(입력창 위 이름 라벨)는
       //   각자 relative 부모를 갖고 있어 이 추가에 영향받지 않는다.
-      className={`relative flex h-full w-full flex-col bg-background${showEmpty ? ' justify-center' : ''}`}
+      // 색조는 클래스 하나로 들어온다(정의처 = richBranding.css) — claude 는 '' 라 현행 모습 그대로다.
+      className={[
+        'relative flex h-full w-full flex-col bg-background',
+        branding.tintClass,
+        showEmpty ? 'justify-center' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
       data-rich-live="1" // cdp eval 에서 라이브 RichSlot 마운트 여부 확인용
       data-agent-id={agentId}
+      // ★표식에도 같은 토큰이 붙지만 여기를 지우지 말 것★ — 대화가 시작되면 제목·표식이 함께 접혀
+      //   (ADR-0145 빈 상태) 그때 백엔드를 말하는 DOM 이 이 속성뿐이다.
+      data-rich-brand={branding.brand}
     >
       {/* 대화 렌더(스크롤) — ScrollArea seam(ADR-0053: 앱 전역 Radix 오버레이 스크롤바). 순서 보존 item 스트림.
           ★scrollRef 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 아래 하단 고정 auto-scroll
@@ -298,18 +319,19 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         </ScrollArea>
       )}
 
-      {/* ADR-0145 빈 상태 윗단 — 마스코트 + "Claude Code". 세로 중앙 정렬은 루트가 잡고(justify-center)
-          여기는 자기 높이만 차지한다. 문구는 제품명이라 번역 대상이 아니다(ADR-0145).
+      {/* ADR-0145 빈 상태 윗단 — 표식 + 제품명. 세로 중앙 정렬은 루트가 잡고(justify-center)
+          여기는 자기 높이만 차지한다. 문구는 제품명이라 번역 대상이 아니다(ADR-0145) — codex 쪽도 같은
+          이유로 i18n 을 타지 않는다. 둘 중 무엇을 그릴지는 richBranding 한 판정이 정한다.
           ★공간이 줄 때 줄어드는 쪽은 마스코트뿐★: 마스코트 칸만 shrink+overflow-hidden 이라 슬롯이
           낮아지면 자연스럽게 잘려 사라지고, 문구·입력창은 flex-none 으로 온전히 남는다
           (임계 높이로 통째 숨기던 방식은 툭 사라져 부자연스럽다는 사용자 판단으로 폐기). */}
       {showEmpty && (
         <div data-rich-empty="1" className="flex min-h-0 flex-col items-center px-4 pb-8">
           <div className="min-h-0 shrink overflow-hidden">
-            <ClaudeMascot />
+            <branding.Mascot />
           </div>
           <div className="mt-3 flex-none text-[20px] font-semibold tracking-tight text-foreground">
-            Claude Code
+            {branding.title}
           </div>
         </div>
       )}
@@ -329,7 +351,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         {/* ★정체성 라벨(§ user request)★: claude-code 터미널처럼 입력창 바로 위(우측)에 작은 라벨을 오버랩
             (absolute -top — 줄을 차지하지 않음)해 어느 에이전트인지 이름만 표시(중복 이름 허용). pointer-events-none
             으로 입력·스크롤을 막지 않는다. 상태 글리프는 트리가 담당.
-            빈 상태에서는 접는다 — 입력창 바로 위가 "Claude Code" 문구 자리라 겹친다(ADR-0145 §2 구성). */}
+            빈 상태에서는 접는다 — 입력창 바로 위가 제품명 문구 자리라 겹친다(ADR-0145 §2 구성). */}
         {!showEmpty && (
           <div
             data-rich-label="1"

@@ -19,6 +19,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+// ★만들기 기본 모드의 집은 코어 한 곳이다★ — 이 파일이 자기 상수를 두지 않는 이유는 그 상수의 doc 이
+//   진다(`spawn_command_by_cwd` 가 그것을 참조한다).
+use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
 // 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
@@ -608,19 +611,26 @@ fn spawn_command_for(
 
 /// `SpawnByCwd` 전용 조립 — 그 패킷에는 모드 칸이 없어서 **여기서 값을 지어낸다**.
 ///
-/// ★아래 두 값은 고른 것이 아니라 **보존된 기본값**이다★. claude 의 `StreamJson` 은 이 입구가 claude
-/// 하나뿐이던 시절부터 이 자리에 있던 상수다. codex 의 `Terminal` 은 옛 [`spawn_command_for`] 가 codex
-/// 갈래에서 받은 값을 버리고 `Terminal` 을 박아 넣던 동작을 **그대로 유지**한다 — 그 버림을 걷으면서
-/// 이 입구가 조용히 app-server 로 갈아타는 것을 막는 값이고, 어느 모드가 이 경로에 맞는지는 아직
-/// 아무도 정하지 않았다. 모드 칸을 이 입구에 내거나 백엔드별 기본을 정하는 날 그 결정이 앉을 자리가
-/// 여기다(오늘 codex 는 `commands::LLM_BACKEND_POLICY` 가 이 문에서 닫혀 있어 그 값이 아직 발화하지
-/// 않는다 — 그 문이 열리는 날 함께 본다).
-/// ★와일드카드를 넣지 말 것★: wire 어휘가 늘면 이 match 가 컴파일 에러로 그 자리를 가리킨다.
+/// ★2026-09-22 — 이 doc 이 기다리라고 적어 둔 그 날이 왔다★. `commands::LLM_BACKEND_POLICY` 가 codex 의
+/// 거절을 걷으면서 `agent.spawnInto` 가 codex 를 이리로 흘려보내기 시작했고, 그래서 codex 갈래의
+/// `Terminal` 은 이제 **닿는 값**이다. 그 값을 두 갈래 공통 기본([`NEW_AGENT_OUTPUT_FORMAT`])으로
+/// 맞춘다.
+///
+/// ★사유 = 기본값의 집은 하나여야 한다★. 그 상수의 doc 이 「만들기 동사를 여는 입구가 늘어도 자기
+/// 상수를 두지 않고 이것을 참조한다」고 못 박고 있고, `agent.new` 도 이 값을 쓴다 — 갈라 두면 같은
+/// 백엔드가 어느 입구로 만들어졌느냐에 따라 다른 모드로 뜬다.
+/// ★옛 `Terminal` 은 고른 값이 아니라 **보존된 값**이었다★: 옛 [`spawn_command_for`] 가 codex 갈래에서
+/// 받은 모드를 버리고 `Terminal` 을 박아 넣던 동작을 그 버림을 걷으면서 그대로 옮겨 둔 것이고, 이 doc
+/// 자신이 「어느 모드가 이 경로에 맞는지는 아직 아무도 정하지 않았다」고 적고 있었다. 즉 뒤집을 결정이
+/// 아니라 **아직 없던 결정**이다.
+///
+/// ★그래도 `match` 를 접지 말 것★ — 두 갈래가 같은 값을 내지만, 와일드카드로 접으면 wire 어휘가 늘 때
+/// 새 백엔드가 **아무 결정 없이** 이 기본값을 물려받는다. 지금 모양이면 컴파일 에러가 그 자리를 가리킨다.
 fn spawn_command_by_cwd(backend: Option<WireBackendKind>) -> Option<CoreSpawnCommand> {
     let kind = backend?;
     let output_format = match kind {
-        WireBackendKind::Claude => CoreAgentOutputFormat::StreamJson,
-        WireBackendKind::Codex => CoreAgentOutputFormat::Terminal,
+        WireBackendKind::Claude => NEW_AGENT_OUTPUT_FORMAT,
+        WireBackendKind::Codex => NEW_AGENT_OUTPUT_FORMAT,
     };
     spawn_command_for(Some(kind), vec![], output_format)
 }
@@ -1221,7 +1231,8 @@ impl ConnectionCore {
                 //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent` 바로 아래) 단위
                 //   테스트가 못 들어오고, 여기를 옛 상수 호출로 되돌려도 전 스위트가 초록이다. 그러면
                 //   codex by-cwd 가 조용히 app-server 로 갈아탄다. 그 함수의 **내용**은
-                //   `by_cwd_fills_a_preserved_mode_per_backend` 가 지키므로, 무방비인 것은 이 호출 한 줄이다.
+                //   `by_cwd_fills_one_shared_default_mode_for_every_backend` 가 지키므로, 무방비인 것은
+                //   이 호출 한 줄이다.
                 let Some(command) = spawn_command_by_cwd(backend) else {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
@@ -4117,28 +4128,30 @@ mod tests {
     }
 
     /// `SpawnByCwd` 는 모드 칸이 없는 입구라 데몬이 값을 지어낸다 — 그 지어낸 값을 못 박는다.
-    /// ★codex 의 `Terminal` 은 「이 경로엔 대화형이 맞다」는 의견이 아니라 옛 동작의 **보존**이다★
-    /// ([`spawn_command_by_cwd`] 의 doc 이 정본). 그 값을 바꾸는 편집은 이 항목을 빨갛게 만들어,
-    /// 우연이 아니라 결정으로 바뀌게 한다.
+    /// ★2026-09-22 — 두 백엔드가 **같은 기본값**을 쓴다★: `NEW_AGENT_OUTPUT_FORMAT`. 옛 codex 의
+    /// `Terminal` 은 「이 경로엔 대화형이 맞다」는 의견이 아니라 옛 동작의 보존이었고, codex 가
+    /// LLM 생성 표면에서 열리면서 그 자리에 앉을 결정이 실제로 필요해졌다([`spawn_command_by_cwd`] 의
+    /// doc 이 정본).
+    /// ★구체 값을 여기 베끼지 않는다★ — 그 값의 집은 코어 상수 하나이고(그 doc 이 못 박는다), 여기서
+    /// 재는 것은 「두 갈래가 그 집을 함께 본다」는 것이다. 한 갈래만 딴 값으로 갈라놓는 편집이 이 항목을
+    /// 빨갛게 만든다.
     #[test]
-    fn by_cwd_fills_a_preserved_mode_per_backend() {
+    fn by_cwd_fills_one_shared_default_mode_for_every_backend() {
         assert!(
             spawn_command_by_cwd(None).is_none(),
             "빈 backend 칸은 여기서도 거절로 이어진다"
         );
         match spawn_command_by_cwd(Some(WireBackendKind::Codex)) {
             Some(CoreSpawnCommand::Codex { output_format, .. }) => assert_eq!(
-                output_format,
-                CoreAgentOutputFormat::Terminal,
-                "by-cwd 입구의 codex 는 보존된 Terminal 이다"
+                output_format, NEW_AGENT_OUTPUT_FORMAT,
+                "by-cwd 입구의 codex 가 공통 기본값에서 갈라졌다"
             ),
             other => panic!("Codex 기대: {other:?}"),
         }
         match spawn_command_by_cwd(Some(WireBackendKind::Claude)) {
             Some(CoreSpawnCommand::Claude { output_format, .. }) => assert_eq!(
-                output_format,
-                CoreAgentOutputFormat::StreamJson,
-                "by-cwd 입구의 claude 는 옛 상수 그대로다"
+                output_format, NEW_AGENT_OUTPUT_FORMAT,
+                "by-cwd 입구의 claude 가 공통 기본값에서 갈라졌다"
             ),
             other => panic!("Claude 기대: {other:?}"),
         }
