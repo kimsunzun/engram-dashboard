@@ -130,7 +130,9 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ★**안 고친 한계 — `%VAR%` 확장**★ — `cmd.exe` 는 따옴표 안에서도 `%NAME%` 을 환경변수로 편다. 폴더 이름에 `%` 로 감싼 낱말이 실제로 들어 있으면 CLI 는 **다른 폴더**를 받는다. 고치려면 claude 와 공용인 조립 지점을 건드려야 하고 틀리면 모든 스폰이 죽는다 — 사유와 필요한 실측은 코드 주석이 정본이다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `mcp_server_override` · `DEVELOPER_INSTRUCTIONS_KEY` · `backend/codex/thread_lock.rs`(락 홀더 판정 + 폴링) · `src/platform/file_holders.rs`(Restart Manager 질의) · `src/platform/process_tree.rs`(우리 프로세스 나무) · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
+**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `MCP_SERVER_OVERRIDE_PREFIX` · `mcp_attachment`(`-c mcp_servers.engram={…}` 한 값을 조립하는 유일한 자리 · 결과 타입 `McpAttachment`) · `DEVELOPER_INSTRUCTIONS_KEY` · `backend/codex/thread_lock.rs`(락 홀더 판정 + 폴링) · `src/platform/file_holders.rs`(Restart Manager 질의) · `src/platform/process_tree.rs`(우리 프로세스 나무) · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
+
+★**`mcp_server_override` 는 앵커로 쓰지 말 것 — 그런 심볼은 없다**★(실측 2026-09-21 · 저장소 전체 검색에서 정의 0 건). 여기 그 이름이 적혀 있었고 가리킬 대상이 없었다. 실물은 접두 상수와 조립 함수로 갈려 있어 **위 두 이름이 정본**이다. ★같은 이름이 `backend/codex/mod.rs` 의 rustdoc 링크 두 곳에 아직 살아 있다★ — 그쪽은 코드라 여기서 안 고쳤다(끊어진 intra-doc 링크).
 
 ## 세션 id 회수 (codex 터미널 모드)
 
@@ -140,6 +142,7 @@ codex 는 세션 id 를 스스로 발급하고 터미널 모드에는 그것을 
 
 - **판정은 PID 와 프로세스 시작시각이 둘 다 맞아야 한다.** PID 는 재사용되므로 PID 단독 일치는 남의 스레드를 우리 손잡이에 적는다 — 그 고장은 조용하고 다음 재개가 남의 대화를 연다.
 - ★**후손은 부모보다 먼저 태어날 수 없다 — 먼저 태어난 것은 버린다**★. 이게 없으면 남이 우리 나무에 들어온다: 사용자가 손으로 띄운 `codex.exe` 가 고아가 되어 기록된 ppid `P` 를 그대로 달고 남고, Windows 가 `P` 를 우리 래퍼에 재사용하면 프로세스 열거가 그 남을 우리 자식으로 돌려준다. 그 남은 자기 락의 홀더와 자기 신원이 당연히 맞으므로, **우리 codex 가 락을 만들기 전 구간에 유일한 후보**가 되어 모호 판정조차 안 뜨고 채택된다. (같은 눈금에 뜬 자식은 통과시킨다 — 막는 것은 먼저 태어난 것뿐이다.)
+  - ★**이 규칙은 「전수」가 아니다 — 받아들인 잔여 셋이 코드에 박혀 있다(다시 논쟁하지 말 것 · 2026-09-21 결정)**★. ① **열거와 시작시각 읽기 사이의 PID 재사용** — 열거가 준 번호의 주인이 우리가 읽기 전에 죽어 번호가 넘어가면, 우리가 읽는 시작시각은 **새 주인의 것**이다. 열거와 조회가 별개 syscall 이라 원자적으로 고칠 수단이 없고 창은 마이크로초 단위다. ② **같은 눈금(`==`)** — 바로 위에서 통과시킨 그것. ③ **명시 부모 지정** — Windows 는 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` 로 부모를 박아 프로세스를 만들 수 있어, 그렇게 태어난 남은 우리 뿌리보다 **뒤**에 태어나고도 우리 뿌리의 PID 를 ppid 로 달아 이 비교를 지난다. ★그래도 규칙의 값어치는 그대로다★ — 흔한 경로(그것을 낳은 프로세스가 쥐고 있던 번호가 죽은 뒤 우리 뿌리에 재사용되는 경우)는 전부 닫히고, ③ 이 **실제 오검출**이 되려면 그 남이 우리 `CODEX_HOME` 아래 `<uuid>.lock` 까지 쥐고 있어야 한다. 정본 = `platform/process_tree.rs` 의 `subtree` doc.
 - **세는 것은 락 파일이 아니라 「맞은 홀더」다.** 한 락을 우리 프로세스 둘이 함께 쥐고 있으면 그 락이 누구 것인지가 아직 안 좁혀진 상태다 — 파일만 세면 그 상태가 채택으로 통과한다. 대가는 핸들을 물려받은 자식이 있는 동안 채택이 미뤄지는 것이고, 폴링이 멈추지 않으므로 그 자식이 끝나면 다음 바퀴에 잡는다(핸들 상속이 실제로 일어나는지는 미측정).
   - ★**이 줄은 닫힌 결정이 아니라 보류다 — 코드도 그렇게 적혀 있다**★. 반론 = 「둘 다 **우리** 프로세스면 그 락은 우리 것이 맞으니 채택이 옳다」이고, 그러면 셈 단위가 다시 파일로 돌아간다. **뒤집으려면 핸들 상속이 실재하는지를 먼저 재고 ADR-0218 결정 3 을 그 측정 위에서 다시 열 것** — 여기서 조용히 갈아치우지 말 것.
 - **파일 이름은 정규형 uuid(하이픈 36자)만 받는다.** 하이픈 없는 32자·중괄호·`urn:uuid:` 까지 받아 주면 우리가 만들지 않은 파일 하나가 후보 수를 늘려 판정을 모호로 뒤집고 회수가 통째로 멈춘다. 대소문자는 안 가린다.

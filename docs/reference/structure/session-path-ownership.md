@@ -849,6 +849,19 @@ Registry lifetime = daemon process lifetime; entry lifetime = disk-file lifetime
   live value (connection_core.rs:490). No wire→core `AgentProfile` conversion exists in production,
   so nothing injects an epoch into the registry from outside. Contract test at
   persistence/mod.rs:196-224.
+- **The endpoint condition that keeps that boundary enforceable: on the wire `0` is a legitimately
+  minted value, so special-casing it there is itself the regression.** `random_incarnation_tag`
+  takes the top four bytes of a fresh v4 UUID and can yield `0`; `epoch_for_spawn` retries only
+  `while next == p.epoch`, so `0` is excluded exactly when the *current* value is already `0` — the
+  first mint on a fresh profile (whose default is `0`), and the one mint right after a mint that
+  happened to land on `0`. Every other mint can be `0` at 2^-32. The unit test says exactly that in its own assertion
+  message (`epoch_for_spawn_never_repeats_the_previous_incarnations_tag`): "새 프로필의 기본값이 0
+  이라 첫 발급만은 0 을 피한다(그 뒤 발급엔 이 보장이 없다)". The disk `0` is a placeholder only
+  because the reader skips the field; nothing grants `0` that meaning anywhere else. No production
+  site reads it back as a sentinel today — no `== 0` on this field exists in `crates/`, `src/` or
+  `src-tauri/` (the one `socket_epoch == 0` in daemon_client/lifecycle.rs is an unrelated axis).
+  Rule of record: CLAUDE.md 「핵심 불변식」 — the asymmetry is `agents.json` disk serde only, do not
+  widen it to the wire.
 - Honest limit stated in-source (:646-652): the only real guarantee is *adjacency within one
   process*; a cross-process collision remains 2^-32 and is never detected because the value is
   never read back.
