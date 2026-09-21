@@ -4,7 +4,20 @@
 
 use std::sync::Arc;
 
-use engram_dashboard_agent::types::AgentId;
+use engram_dashboard_agent::types::{AgentId, ControlChannelNeeds};
+
+/// MCP 가능 스폰이 넘기는 축 셋 — 이 파일은 채널 물리(토큰 발급)만 재므로 운영이 그 값을 어디서 읽는지는
+/// 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
+///
+/// ★claude 모양이다★ — 파일 축까지 켠 행. 「MCP 는 쓰는데 우리 파일은 안 읽는」 행(codex)을 재는 자리는
+///   데몬 `control/mod.rs` 의 그 시험이다(ADR-0209).
+fn mcp_needs() -> ControlChannelNeeds {
+    ControlChannelNeeds {
+        accepts_mcp_config: true,
+        writes_mcp_config_file: true,
+        uses_mail: true,
+    }
+}
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot,
 };
@@ -402,7 +415,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
 
     let id = AgentId::new_v4();
     let ep0 = channel
-        .provision(id, 0, true)
+        .provision(id, 0, mcp_needs())
         .expect("provision ok")
         .expect("epoch0 endpoint");
     let old_token = ep0.token.clone();
@@ -411,7 +424,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     assert!(registry.validate(&old_token).is_some(), "epoch0 토큰 유효");
 
     let ep1 = channel
-        .provision(id, 1, true)
+        .provision(id, 1, mcp_needs())
         .expect("provision ok")
         .expect("epoch1 endpoint");
     let new_path = mcp_config::config_path(&data_dir, id, 1);

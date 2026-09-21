@@ -27,9 +27,7 @@ use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
 };
-use engram_dashboard_daemon::control::priming::{
-    FilePrimingProvider, PrimingProvider, PrimingVariant,
-};
+use engram_dashboard_daemon::control::priming::{FilePrimingProvider, PrimingProvider};
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
 use engram_dashboard_daemon::messaging_host::messaging_for_manager;
@@ -67,7 +65,7 @@ fn skip_no_claude(reason: &str) -> i32 {
 async fn run() -> i32 {
     let repo_root = repo_root_from_manifest();
     let priming = FilePrimingProvider::new(repo_root.clone());
-    let priming_path = priming.priming_file(PrimingVariant::McpPrimary);
+    let priming_path = priming.priming_file();
     match &priming_path {
         Some(p) => eprintln!("[smoke] priming file = {}", p.display()),
         None => eprintln!(

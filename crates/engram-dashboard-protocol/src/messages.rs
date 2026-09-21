@@ -23,7 +23,24 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 // ★이름 충돌★ — agent `profile::AgentCommand` 는 뜻이 다르다(프로필이 띄울 프로그램).
 //   그쪽의 wire 미러는 이 enum 이 아니라 `AgentSpawnCommand` 다. crate 를 빼고
 //   "AgentCommand" 라 부르면 뜻이 안 정해진다.
+// ★★활성화 셋(`Spawn`·`SpawnByCwd`·`SpawnProfile`)의 **호출 계약** — 클라이언트가 지켜야 하는 것★★
+//   데몬은 이 셋을 그 연결의 도착순 줄에서 **떼어 별도 태스크로** 돌린다(활성화는 결말까지 기다리는
+//   유일한 갈래라, 줄에 두면 그동안 그 연결의 다른 명령이 전부 함께 늦는다 — 데몬 crate 의
+//   `connection_core::dispatch_order`). 그 대가가 이 계약이다:
+//   ① **활성화의 답(`Spawned`/`Error`)을 받기 전에 그 에이전트 id 앞으로 아무것도 보내지 말 것.**
+//      같은 소켓으로 `SpawnProfile(X)` 직후 `WriteStdin(X)` 을 보내면 뒤엣것이 먼저 돌아
+//      「agent not found」로 실패한다. 답에는 요청의 `request_id` 가 그대로 실려 오므로 상관은
+//      클라이언트가 세울 수 있다.
+//   ② **같은 id 의 활성화를 답 받기 전에 다시 보내지 말 것.** 두 요청이 데몬의 검사/등록 창에 함께
+//      들어간다. 그 창은 이 배치가 만든 것이 아니라 선재이고(데몬의 `SpawnReservation` 가드가 좁히지만
+//      닫지는 않는다), 이 배치가 바꾼 것은 **한 연결만으로도 그 창에 닿을 수 있게 됐다**는 점뿐이다.
+//   ★이 저장소의 프론트는 이미 이 계약대로 돈다★ — `src/api/protocolClient.ts` 가 `request_id` 상관표로
+//   활성화 Promise 를 잡고, 호출부가 그것을 `await` 한 뒤에 돌아온 `agent.id` 를 쓴다.
+//   ★순서로 되돌리지 않은 이유★: 「같은 id 앞으로 가는 명령을 그 id 의 활성화 뒤에 줄 세운다」는 갈래는
+//   그 대기가 곧 그 연결 전체의 정지가 되므로(활성화는 전형 2s·백스톱 15s), 이 배치가 없애려던 증상을
+//   조건부로 되살린다.
 pub enum AgentCommand {
+    /// 프로필 id 로 활성화. ★답을 기다리는 계약 = 이 enum 머리의 「활성화 셋의 호출 계약」★.
     Spawn {
         #[ts(type = "string")]
         profile_id: ProfileId,
@@ -100,6 +117,8 @@ pub enum AgentCommand {
     /// `backend` 는 `#[serde(default)]` 라 **옛 클라이언트의 패킷도 역직렬화는 된다**(PROTOCOL_VERSION
     /// 유지 — 봉투에 변형을 더한 게 아니라 기존 변형에 칸을 더했다). 그 대신 **핸들러가 부재를
     /// 거절한다** — 조용한 기본 백엔드를 두지 않기로 한 결정의 실물이다(`AgentBackendKind` 참조).
+    ///
+    /// ★답을 기다리는 계약 = 이 enum 머리의 「활성화 셋의 호출 계약」★.
     SpawnByCwd {
         cwd: String,
         #[serde(default)]
@@ -138,6 +157,8 @@ pub enum AgentCommand {
     },
 
     /// resume=true 면 기존 세션 이어받기(claude `--resume`).
+    ///
+    /// ★답을 기다리는 계약 = 이 enum 머리의 「활성화 셋의 호출 계약」★.
     SpawnProfile {
         #[ts(type = "string")]
         profile_id: ProfileId,

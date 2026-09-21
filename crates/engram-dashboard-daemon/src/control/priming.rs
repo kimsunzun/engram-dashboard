@@ -6,8 +6,8 @@
 //!   않는다(하드코딩 금지, ADR-0092: 내용은 외부 MD `prompts/agent-priming.md` 에만 산다).
 //!
 //! ★seam 인 이유(ADR-0092 "길은 뚫어둔다")★: 현재 구현체(`FilePrimingProvider`)는 **에이전트를 가리지
-//!   않고 변형별 공용 파일 하나씩**만 준다(임시판). 미래에 에이전트별 프롬프트 인젝션/스킬등록 시스템이
-//!   오면 이 trait 의 구현만 갈아끼워(에이전트별·capability 별 프라이밍) 배선을 안 바꾸고 흡수한다.
+//!   않고 공용 파일 하나**만 준다(임시판). 미래에 에이전트별 프롬프트 인젝션/스킬등록 시스템이 오면 이
+//!   trait 의 구현만 갈아끼워(에이전트별·capability 별 프라이밍) 배선을 안 바꾸고 흡수한다.
 //!   그래서 provision 이 `PrimingProvider` trait 에만 의존하게 둔다.
 //!
 //! ★graceful(스폰을 막지 않는다)★: 해석된 파일이 없으면 `None` 을 돌려주고 warn 로그만 남긴다 — 프라이밍
@@ -212,31 +212,20 @@ pub fn mentions_mail_cli_surface(content: &str) -> bool {
         .any(|f| contains_bounded(&normalized, &normalized_token(f)))
 }
 
-/// 프라이밍 변형(ADR-0099) — 백엔드 MCP-capability 가 고르는 정적 파일 축. **정합 불변식**: 이 변형이
-/// **가르치는** 우편 채널 **=** 그 스폰이 실제로 **쓸 수 있는** 우편 채널. 못 쓰는 채널을 가르치면 발신
-/// freeze 가 재발하고(MCP 노출 + CLI-only 지시 = ~6/7 미발신, ADR-0099), 반대로 쓸 수 있는데 안 가르치면
-/// 아무도 통제하지 못하는 우회 표면이 남는다. 그래서 백엔드 capability 하나가 이 변형과 우편 가부를 함께
-/// 움직인다(ADR-0133 — 그 짝의 정본은 `DaemonControlChannel::provision`).
-// ADR-0126
-// ADR-0133
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrimingVariant {
-    /// MCP-capable 백엔드(claude). **send_message 툴만** 가르친다(ADR-0126 결정 1 — 우편 CLI 우회
-    ///   교육 폐지). 그 스폰의 CLI 우편은 데몬이 자격증명으로 거절한다(ADR-0133) — 고장난 MCP 를 조용히
-    ///   우회하면 고장이 관측되지 않으므로, 대신 principal 에게 보고하도록 가르친다(ADR-0126 결정 2).
-    ///   → `prompts/agent-priming.md`.
-    McpPrimary,
-    /// 비-MCP 백엔드(codex/gemini 등 미래). `engram mail` CLI 만 가르친다(send_message 단어 자체 부재).
-    ///   → `prompts/agent-priming-cli.md`.
-    CliOnly,
-}
-
 /// Send+Sync+'static — DaemonControlChannel 이 Arc 로 들고 provision 마다 부른다.
 pub trait PrimingProvider: Send + Sync + 'static {
     /// 이번 스폰에 주입할 프라이밍 MD 파일의 **절대경로**. 없거나(파일 부재) 미구성이면 `None`.
     /// ★절대경로 계약★: 에이전트의 cwd 는 데몬/repo 와 다르므로(각 워크스페이스) 반드시 절대경로여야
     ///   claude 가 파일을 찾는다 — 상대경로면 에이전트 cwd 기준으로 해석돼 어긋난다.
-    fn priming_file(&self, variant: PrimingVariant) -> Option<PathBuf>;
+    ///
+    /// ★**누구에게 주입할지는 이 seam 이 정하지 않는다**★: 정합 불변식(프라이밍이 **가르치는** 우편
+    ///   채널 == 그 스폰이 실제로 **쓸 수 있는** 우편 채널 — 어기면 ADR-0099 가 실측한 발신 freeze)의
+    ///   판정 재료는 `uses_mail`·`accepts_mcp_config` 이고 그건 데몬만 안다. 그래서 **부를지 말지**를
+    ///   provision 이 먼저 고르고, 이 seam 은 「줄 파일이 있나」에만 답한다. 그 짝의 정본은
+    ///   `DaemonControlChannel::provision`.
+    // ADR-0126
+    // ADR-0133
+    fn priming_file(&self) -> Option<PathBuf>;
 }
 
 /// ★왜 base 를 exe 기준 루트로 받나(ADR-0092, 두 리뷰어 PRIMARY)★: 예전엔 base 를 데몬 프로세스 cwd
@@ -252,7 +241,6 @@ pub struct FilePrimingProvider {
 }
 
 const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
-const REL_CLI_ONLY: &str = "prompts/agent-priming-cli.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
 /// ★cmd.exe 부패 위험 문자(ADR-0092, Codex #1+#5)★: Windows 에서 claude 인자는 `console_command`
@@ -333,24 +321,20 @@ impl FilePrimingProvider {
 }
 
 impl PrimingProvider for FilePrimingProvider {
-    fn priming_file(&self, variant: PrimingVariant) -> Option<PathBuf> {
+    fn priming_file(&self) -> Option<PathBuf> {
         // ★override 실패는 fixed 로 폴백하지 않는다★: 명시 override 를 조용히 다른 파일로 갈아치우면
         //   혼란스럽다. 어느 관문에서 걸리든 None(프라이밍 없이 진행 — resolve_checked 가 warn).
-        // ★env override 는 두 변형을 아우르는 **단일 전역 승자**(ADR-0099 test-seam)★: 설정되면 variant
-        //   와 무관하게 이 경로가 이긴다 — 하네스/운영자가 어떤 백엔드에도 특정 프라이밍을 강제할 수 있는
-        //   test-seam 이다(roundtrip_smoke `--priming` 이 이 env 로 넘긴다). 운영은 미설정이라 아래 변형별
-        //   정적 파일이 산다.
+        // ★env override 가 고정 파일을 이긴다(ADR-0099 test-seam)★: 하네스/운영자가 특정 프라이밍을
+        //   강제할 수 있다(roundtrip_smoke `--priming` 이 이 env 로 넘긴다). 운영은 미설정이라 아래 고정
+        //   파일이 산다. ★단 provision 이 이 seam 을 **안 부르기로** 한 스폰은 이 override 로도 되살아나지
+        //   않는다★ — 그 판정은 우편 인가와 한 몸이라 env 하나로 뒤집히면 안 된다(trait doc 이 정본).
         if let Some(v) = std::env::var_os(ENV_OVERRIDE) {
             if !v.is_empty() {
                 return self.resolve_checked(PathBuf::from(v), "override");
             }
         }
 
-        let rel = match variant {
-            PrimingVariant::McpPrimary => REL_MCP_PRIMARY,
-            PrimingVariant::CliOnly => REL_CLI_ONLY,
-        };
-        self.resolve_checked(PathBuf::from(rel), "fixed")
+        self.resolve_checked(PathBuf::from(REL_MCP_PRIMARY), "fixed")
     }
 }
 
@@ -359,7 +343,7 @@ impl PrimingProvider for FilePrimingProvider {
 pub struct NoopPrimingProvider;
 
 impl PrimingProvider for NoopPrimingProvider {
-    fn priming_file(&self, _variant: PrimingVariant) -> Option<PathBuf> {
+    fn priming_file(&self) -> Option<PathBuf> {
         None
     }
 }
@@ -369,7 +353,7 @@ impl PrimingProvider for NoopPrimingProvider {
 pub struct FixedPrimingProvider(pub PathBuf);
 
 impl PrimingProvider for FixedPrimingProvider {
-    fn priming_file(&self, _variant: PrimingVariant) -> Option<PathBuf> {
+    fn priming_file(&self) -> Option<PathBuf> {
         Some(self.0.clone())
     }
 }
@@ -377,7 +361,7 @@ impl PrimingProvider for FixedPrimingProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
+    use engram_dashboard_agent::types::CLI_EXE_NAME;
     use std::io::Write as _;
     use std::sync::Mutex;
 
@@ -392,8 +376,6 @@ mod tests {
         std::fs::create_dir_all(&prompts).unwrap();
         let mut f = std::fs::File::create(prompts.join("agent-priming.md")).unwrap();
         writeln!(f, "# 테스트 프라이밍 (mcp-primary)").unwrap();
-        let mut f2 = std::fs::File::create(prompts.join("agent-priming-cli.md")).unwrap();
-        writeln!(f2, "# 테스트 프라이밍 (cli-only)").unwrap();
         dir
     }
 
@@ -403,40 +385,12 @@ mod tests {
         let dir = make_fixture_dir();
         let provider = FilePrimingProvider::new(dir.clone());
         std::env::remove_var(ENV_OVERRIDE);
-        let got = provider
-            .priming_file(PrimingVariant::McpPrimary)
-            .expect("고정 파일이 있으면 Some");
+        let got = provider.priming_file().expect("고정 파일이 있으면 Some");
         assert!(got.is_absolute(), "해석 결과는 절대경로여야: {got:?}");
         assert!(
             got.ends_with("prompts/agent-priming.md") || got.ends_with("prompts\\agent-priming.md")
         );
         assert!(got.is_file(), "실제 파일을 가리켜야");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    // ── ADR-0099: 변형 매핑 ──────────────────────────────────────────────────────────
-    #[test]
-    fn variant_maps_to_distinct_files() {
-        let _env = ENV_LOCK.lock().unwrap();
-        let dir = make_fixture_dir();
-        std::env::remove_var(ENV_OVERRIDE);
-        let provider = FilePrimingProvider::new(dir.clone());
-        let mcp = provider
-            .priming_file(PrimingVariant::McpPrimary)
-            .expect("McpPrimary 파일");
-        let cli = provider
-            .priming_file(PrimingVariant::CliOnly)
-            .expect("CliOnly 파일");
-        assert!(
-            mcp.ends_with("prompts/agent-priming.md") || mcp.ends_with("prompts\\agent-priming.md"),
-            "McpPrimary → agent-priming.md: {mcp:?}"
-        );
-        assert!(
-            cli.ends_with("prompts/agent-priming-cli.md")
-                || cli.ends_with("prompts\\agent-priming-cli.md"),
-            "CliOnly → agent-priming-cli.md: {cli:?}"
-        );
-        assert_ne!(mcp, cli, "두 변형은 서로 다른 파일을 가리켜야");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -448,10 +402,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::env::remove_var(ENV_OVERRIDE);
         let provider = FilePrimingProvider::new(dir.clone());
-        assert!(
-            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
-            "부재 파일 → None"
-        );
+        assert!(provider.priming_file().is_none(), "부재 파일 → None");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -466,20 +417,11 @@ mod tests {
         }
         std::env::set_var(ENV_OVERRIDE, &override_file);
         let provider = FilePrimingProvider::new(dir.clone());
-        let got = provider
-            .priming_file(PrimingVariant::McpPrimary)
-            .expect("override 파일 존재 → Some");
+        let got = provider.priming_file().expect("override 파일 존재 → Some");
         assert!(got.is_absolute());
         assert!(
             got.ends_with("custom-priming.md"),
             "override 경로가 이겨야: {got:?}"
-        );
-        let got_cli = provider
-            .priming_file(PrimingVariant::CliOnly)
-            .expect("override 파일 존재 → Some");
-        assert!(
-            got_cli.ends_with("custom-priming.md"),
-            "CliOnly 로 물어도 override 가 이겨야(단일 전역 승자): {got_cli:?}"
         );
         std::env::remove_var(ENV_OVERRIDE);
         let _ = std::fs::remove_dir_all(&dir);
@@ -493,7 +435,7 @@ mod tests {
         std::env::set_var(ENV_OVERRIDE, &ghost);
         let provider = FilePrimingProvider::new(dir.clone());
         assert!(
-            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
+            provider.priming_file().is_none(),
             "override 파일 부재 → None(fixed 폴백 안 함)"
         );
         std::env::remove_var(ENV_OVERRIDE);
@@ -507,7 +449,7 @@ mod tests {
         std::env::remove_var(ENV_OVERRIDE);
         let provider = FilePrimingProvider::new(PathBuf::from("relative-base"));
         assert!(
-            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
+            provider.priming_file().is_none(),
             "상대 base → 절대화 불가 → None(상대경로 유출 금지)"
         );
     }
@@ -526,7 +468,7 @@ mod tests {
         std::env::remove_var(ENV_OVERRIDE);
         let provider = FilePrimingProvider::new(meta_base.clone());
         assert!(
-            provider.priming_file(PrimingVariant::McpPrimary).is_none(),
+            provider.priming_file().is_none(),
             "cmd 메타문자(% &) 포함 경로 → None(부패 위험 미주입)"
         );
         let _ = std::fs::remove_dir_all(&root);
@@ -583,7 +525,7 @@ mod tests {
     #[test]
     fn mcp_only_prose_is_not_mistaken_for_cli_teaching() {
         for text in [
-            "call the MCP tool `send_message` with the recipient and body.",
+            "call the MCP tool `eg_send` with the recipient and body.",
             "on the `engram` server",
             "**engram** server tools are listed at startup",
             "its body opens with an [engram] marker",
@@ -696,17 +638,18 @@ mod tests {
         ));
     }
 
+    /// ★입구 **이름**을 가르치는 자리는 더 이상 이 파일이 아니다★: 프라이밍은 포인터 한 줄
+    ///   (`engram help`)로 줄었고, `eg_send` 라는 낱말을 에이전트가 읽는 곳은 그 툴의 **설명문**
+    ///   뿐이다(rmcp 가 tools/list 에 싣는다). 그래서 그 반쪽은
+    ///   `control/mcp_server.rs::the_send_message_entry_teaches_its_own_call` 로 옮겼다 — 표면을 소유한
+    ///   파일이 그 표면을 지킨다. 여기 남은 것은 **주어가 여전히 프라이밍 파일인** 반쪽,
+    ///   곧 ADR-0126 결정 1(우회 교육 폐지)의 CLI 표면 부재다.
     // ADR-0126
     // ADR-0128
     #[test]
-    fn production_priming_files_pin_taught_channels() {
+    fn production_priming_file_carries_no_mail_cli_surface() {
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
-        assert!(
-            a.contains("send_message"),
-            "A(McpPrimary)는 send_message 를 가르쳐야(A 의 유일한 교육 표면)"
-        );
         // A 의 CLI 표면 **전면** 부재 — ADR-0126 영향/불변식의 검사 목록 그대로(명령 표기 + 딸린 플래그).
         //   이름만 지우고 플래그 표기가 남으면 우회 교육이 반쪽으로 살아남는다.
         // ★맨 `contains` 로 되돌리지 말 것★: 대소문자·줄바꿈·마크다운 강조로 표기만 흐트러뜨려도
@@ -719,20 +662,11 @@ mod tests {
              하나)이 다시 들어오면 ADR-0126 결정 1(우회 교육 폐지)의 회귀 — 그 스폰의 CLI 우편은 데몬이 \
              거절하므로 가르쳐도 쓸 수 없다(ADR-0133)"
         );
-        let cli_command = format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL}");
-        assert!(
-            teaches_mail_cli(&b),
-            "B(CliOnly)는 우편 CLI 명령({cli_command})을 가르쳐야"
-        );
-        assert!(
-            !b.contains("send_message"),
-            "B(CliOnly)는 send_message 단어가 부재여야(안 깐 MCP 입구 완전 삭제 — freeze 방지, ADR-0099)"
-        );
     }
 
-    /// ★제어 발견은 두 변형 공통이다(ADR-0132 결정 4·5 · ADR-0133)★: 제어 동사는 전원에게 열려 있으므로
-    ///   양쪽 파일이 같은 한 줄(`engram help`)로 그 표면을 가리킨다. 우편 계열이 그 목록에 나오는지는
-    ///   **스폰이 심은 표식**이 정하지 이 파일들이 정하지 않는다.
+    /// ★제어 발견은 우편 채널과 무관하다(ADR-0132 결정 4·5 · ADR-0133)★: 제어 동사는 전원에게 열려 있으므로
+    ///   프라이밍이 같은 한 줄(`engram help`)로 그 표면을 가리킨다. 우편 계열이 그 목록에 나오는지는
+    ///   **스폰이 심은 표식**이 정하지 이 파일이 정하지 않는다.
     ///
     /// ★이 줄이 판정기를 건드리면 안 된다★: 그러면 A 의 CLI-표면 부재 pin(위 테스트)이 깨진다. 제어 계열을
     ///   판정기에 넣어 그 pin 을 완화하는 방향으로 고치지 말 것 — 제어는 전원이 쓰는 표면이라 채널을
@@ -742,92 +676,36 @@ mod tests {
     fn production_priming_files_point_at_the_control_surface() {
         let root = repo_root();
         let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
         let discovery = format!("{CLI_EXE_NAME} help");
-        for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
-            assert!(
-                text.contains(&discovery),
-                "{label}: 제어 발견 입구(`{discovery}`)를 가리켜야"
-            );
-            assert!(
-                !teaches_mail_cli(&discovery),
-                "발견 한 줄 자체는 우편 교육이 아니어야(그렇게 읽히면 A 의 pin 이 깨진다)"
-            );
-        }
+        assert!(
+            a.contains(&discovery),
+            "A(McpPrimary): 제어 발견 입구(`{discovery}`)를 가리켜야"
+        );
+        assert!(
+            !teaches_mail_cli(&discovery),
+            "발견 한 줄 자체는 우편 교육이 아니어야(그렇게 읽히면 A 의 pin 이 깨진다)"
+        );
         assert!(
             !mentions_mail_cli_surface(&discovery),
             "발견 한 줄은 우편 표면 흔적도 아니어야"
         );
     }
 
-    /// ★채널 고장 시 에스컬레이션(ADR-0126 결정 2·5)★: "우회하지 마라" 와 "대신 principal 에게 보고하라"
-    ///   는 한 몸이고(결정 2 는 분리 금지), 후자가 프라이밍에서 사라지면 결정이 반쪽이 된다.
-    ///   ★셸 우회를 데몬이 거절하는 지금도 이 교육은 필요하다★: 그 갈래는 거절로 닫히지만(ADR-0133)
-    ///   **조용한 포기** 갈래는 그대로 남고, auto mode 에선 grant 가 NO-OP 이라(ADR-0097) 이 지시를 붙드는
-    ///   장치는 프라이밍 문장 하나뿐 — 그래서 파일 수준에서 못박는다.
-    ///
-    /// ★왜 "broken channel" 한 토큰만 pin 하나★: 문장 전체를 pin 하면 평범한 문구 손질에도 깨진다. "우회
-    ///   하지 마라" 쪽 반쪽은 여기서 안 봐도 된다 — 위 pin_taught_channels 가 A 의 CLI 표면 부재와 B 의
-    ///   send_message 부재를 이미 강제하므로 "대신 다른 입구를 써라" 식 회귀는 그쪽에서 잡힌다. 여기선
-    ///   **고장을 고장이라 부르는 문장이 존재하는지**만 본다.
-    ///
-    /// ★두 파일 모두(결정 5)★: 유일한 입구가 고장났을 때 편지를 조용히 버리는 실패 모드는 변형과 무관하게
-    ///   같다 — 표면 차이는 툴 이름뿐이라 에스컬레이션 교육은 양쪽에 같이 산다.
-    // ADR-0126
-    #[test]
-    fn production_priming_files_teach_channel_failure_escalation() {
-        let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
-        for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
-            assert!(
-                text.contains("broken channel"),
-                "{label}: 발신 입구가 고장나면 우회하지 말고 principal 에게 보고하도록 가르쳐야(ADR-0126 결정 2·5)"
-            );
-        }
-    }
+    // ★에스컬레이션 pin 은 여기 있었고, 지금은 없다 — 그 부재를 적어 둔다★: 옵 ADR-0126 결정 2·5 가
+    //   요구하던 "broken channel" 에스컬레이션 문장을 이 자리의 테스트가 불있었다. 그 문장은 프라이밍 본문의
+    //   행동 규칙 네 줄과 **함께** 걷혔고(사용자 결정 2026-09-19) 되돌아오지 않는다.
+    //   그 뒤 한 번 재배선됐던 잔존본(`production_priming_file_points_at_discovery_entrypoint`)은
+    //   위 `production_priming_files_point_at_the_control_surface` 와 **같은 파일에서 같은 리터럴을**
+    //   보는 엄밀한 중복이어서(저쪽은 그 위에 불변식 둘을 더 진다) 2026-09-20 에 지웠다 — 커버리지는
+    //   줄지 않았다.
+    // ★그래서 에스컬레이션 축을 지금 묶어 두는 pin 은 **하나도 없다**★ — 그 문장이 조용히 되살아나도,
+    //   반대로 다시 필요해져도 어느 게이트도 알려 주지 않는다. 그 갭의 기록은 ADR-0213 「영향」이 진다.
 
-    /// ★C3 회신 계약 프라이밍 정합(ADR-0103 결정 2/3 · spec §3)★: 데몬은 `type="request"` 봉투를 내보내고
-    ///   기한 초과 시 발신자에게 `<notice>` 를 쏜다 — 그런데 **회신 자체는 LLM 준수(soft)** 라, 프라이밍이
-    ///   회신 규칙을 안 가르치면 엄격 매칭(`reply_to` 필수)이 구조적으로 회신을 못 받는다(계약 반쪽).
-    ///   그래서 두 변형 모두 "request 를 받으면 그 id 로 회신" 을 가르치는지 파일 수준에서 못박는다.
-    ///
-    /// ★변형별 표기(ADR-0126 결정 1 로 개정)★: **각 변형은 자기 입구의 표기만** 가르친다 — A(McpPrimary)는
-    ///   툴 인자(snake_case `reply_to`)만, B(CliOnly)는 CLI 플래그(`--reply-to`)만. 봉투 인식(`type="request"`)
-    ///   과 `<notice>` 는 입구와 무관한 수신측 계약이라 양쪽 공통이다. A 에 CLI 플래그가 남으면 폐지한 우회
-    ///   교육이 되살아나고(ADR-0126), B 에 툴 인자 표기가 있으면 없는 입구를 가리킨다(지시-도구 불일치,
-    ///   ADR-0099).
-    // ADR-0126
-    #[test]
-    fn production_priming_files_teach_the_reply_contract() {
-        let root = repo_root();
-        let a = std::fs::read_to_string(root.join(REL_MCP_PRIMARY)).expect("A 프라이밍 파일 존재");
-        let b = std::fs::read_to_string(root.join(REL_CLI_ONLY)).expect("B 프라이밍 파일 존재");
-        for (label, text) in [("A(McpPrimary)", &a), ("B(CliOnly)", &b)] {
-            assert!(
-                text.contains("type=\"request\""),
-                "{label}: request 봉투를 알아보게 가르쳐야"
-            );
-            assert!(
-                text.contains("<notice>"),
-                "{label}: notice 는 회신 대상이 아님을 가르쳐야(데몬 전용 태그)"
-            );
-        }
-        assert!(
-            a.contains("reply_to") && a.contains("reply_by"),
-            "A(McpPrimary)는 회신·기한을 툴 인자 표기(snake_case)로 가르쳐야(A 의 유일한 입구)"
-        );
-        assert!(
-            b.contains("--reply-to"),
-            "B(CliOnly)는 CLI 회신 플래그를 가르쳐야"
-        );
-        assert!(
-            b.contains("--request") && b.contains("--reply-by"),
-            "B(CliOnly)는 CLI request/기한 플래그를 가르쳐야"
-        );
-        assert!(
-            !b.contains("reply_to") && !b.contains("reply_by"),
-            "B(CliOnly)는 툴 인자 표기가 부재여야(없는 입구를 가리키지 않게)"
-        );
-    }
+    // ★C3 회신 계약(ADR-0103 결정 2/3)의 pin 은 여기 없다 — 되살리지 말 것★: 프라이밍은 봉투 문법을
+    //   더 이상 싣지 않는다(포인터로 줄었다). 계약은 두 표면으로 갈려 각자의 파일이 지킨다 —
+    //   봉투 인식(`type="request"` · `<notice>` · 받은 id 로 회신)은 `bin/engram.rs` 의 `help mail recv`
+    //   화면 pin 이, 툴 인자 표기(snake_case `reply_to`·`reply_by`)는 `control/mcp_server.rs` 의 설명문
+    //   pin 이 본다. ★프라이밍은 이제 행동 규칙도 지지 않는다★ — 그 네 줄과 에스컬레이션 pin 은
+    //   함께 걷혔다(위 주석). 프라이밍에 남은 load-bearing 성질은 발견 입구 한 줄뿐이고, 그
+    //   문법을 여기로 도로 끌어오면 같은 계약이 세 곳에서 갈라진다.
 }

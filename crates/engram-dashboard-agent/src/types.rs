@@ -213,6 +213,18 @@ pub struct CommandSpec {
 // ADR-0094
 pub const CLI_EXE_NAME: &str = "engram";
 
+/// 데몬 MCP 서버의 **논리명**(`mcpServers` 키 · `mcp__{server}__{tool}` 의 server 자리).
+///
+/// ★정의가 여기 있는 것은 소비자가 데몬 밖에도 있기 때문이다★: 데몬은 이 이름으로 mcp-config JSON 을
+///   authoring 하고 `ToolGrant::Mcp` 를 채우는데, backend 폴더도 같은 이름으로 **자기 프로그램의 MCP
+///   부착 문법**을 조립한다(codex 의 `-c mcp_servers.<name>=…`). backend crate 는 데몬을 의존할 수
+///   없으므로(의존 방향), 이름이 거기 남아 있으면 backend 쪽에 **둘째 사본**이 생긴다.
+/// ★갈리면 증상이 조용하다★: 서버 이름이 어긋나면 grant 가 존재하지 않는 서버를 가리키고, codex 쪽은
+///   툴이 엉뚱한 이름으로 떠 프라이밍·grant 어느 쪽과도 안 맞는다 — 어느 갈래도 오류를 내지 않는다.
+// ADR-0094
+// ADR-0209
+pub const MCP_SERVER_NAME: &str = "engram";
+
 /// CLI 우편 계열 이름 — `engram mail <동사>` 의 가운데 토큰(ADR-0132 그룹 구조).
 ///
 /// ★왜 agent 가 이걸 아는가★: 우편 채널의 **교육↔배선 등호**(ADR-0128/0099)를 지키는 판정자들이 프라이밍
@@ -251,6 +263,18 @@ pub const CLI_CONTROL_READ_TIMEOUT_SECS: u64 = 10;
 ///   붙는 형태)뿐이다. 판정 규칙의 정본은 daemon `control/priming.rs`.
 // ADR-0132
 pub const CLI_EXE_ENV: &str = "ENGRAM_CLI_EXE";
+
+/// 제어 채널 bearer 토큰을 스폰 env 로 실어 보낼 때 쓰는 변수 이름.
+///
+/// ★이름 자체가 계약이 된 자리가 있다 — 그래서 상수다★: codex 는 MCP 서버 설정에 토큰 **값** 대신
+///   **이 변수 이름**을 받아(`bearer_token_env_var`) 자기가 env 에서 읽는다. 즉 심는 쪽
+///   ([`crate::backend::inject_cli_entrance`])과 그 이름을 설정에 적는 쪽(backend/codex)이 한 값을
+///   봐야 한다.
+/// ★갈리면 조용하다★: 이름이 어긋나면 codex 는 Authorization 헤더 없이 붙고 데몬은 401 을 돌려주는데,
+///   그 401 은 에이전트 화면이 아니라 MCP 서버 기동 실패로만 나타난다.
+// ADR-0086
+// ADR-0209
+pub const TOKEN_ENV: &str = "ENGRAM_TOKEN";
 
 /// 스폰 시 실어 보내는 **CLI 우편 계열 가부 표식**의 변수 이름과 두 값(ADR-0133 결정 2).
 ///
@@ -337,7 +361,7 @@ pub const RENAME_OUTCOME_UNCHANGED: &str = "unchanged";
 /// 자기 입구 정의 옆에서 채우고, backend 가 자기 프로그램 문법으로 번역한다(claude = `--allowedTools`).
 ///
 /// ★왜 추상 enum 인가(단일 출처·격리)★: 발신 입구의 **정체**(어느 MCP 서버의 어느 툴, 어느 CLI exe)는
-///   컨트롤 채널만 안다 — 툴 이름(`send_message`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
+///   컨트롤 채널만 안다 — 툴 이름(`eg_send`)·서버명(`engram`)·CLI 경로는 그쪽 정의가 정본이다.
 ///   agent 는 그 정체를 데이터(server/tool/exe 문자열)로만 나르고 "권한"·"allowlist" 개념을 모른다.
 ///   backend/claude/ 는 이 데이터를 claude 문법(`mcp__{server}__{tool}` / `Bash({exe}:*)` +
 ///   `PowerShell({exe}:*)`)으로만 번역한다 — 이름을 재타이핑하지 않는다(ADR-0004 격리 + ADR-0094 단일 출처 불변식).
@@ -357,6 +381,11 @@ pub enum ToolGrant {
 /// 데몬이 발급하는 제어 채널 엔드포인트(추상 descriptor). backend 가 이걸 받아 자기 프로그램의
 /// 방식으로 명령줄/env 에 주입한다(claude = `--mcp-config <path>` — 그 지식은 backend/claude/ 단독,
 /// ADR-0004). agent/transport 는 url/token/path 문자열만 나르고 "MCP" 나 claude 플래그를 모른다.
+///
+/// ★칸마다 소비자가 다르다 — 「backend 가 번역한다」를 「칸 전부를 한 backend 가 쓴다」로 읽지 말 것★:
+/// 아래 `token`·`send_exe`·`mail_allowed` 는 **백엔드 공용 주입**(`backend::inject_cli_entrance`)이
+/// 쓰고, `config_path`·`priming_file`·`settings_file`·`grants` 는 그것을 받아들이는 프로그램의 폴더가
+/// 자기 플래그로만 번역한다. 그 분담의 근거는 바로 아래 `config_path` doc 이 이미 적어 둔 문장이다.
 #[derive(Debug, Clone)]
 pub struct ControlEndpoint {
     /// 데몬 MCP Streamable HTTP 엔드포인트 URL(예: `http://127.0.0.1:<port>/mcp`).
@@ -376,8 +405,8 @@ pub struct ControlEndpoint {
     ///   는 존재하지 않는다.
     pub config_path: Option<std::path::PathBuf>,
     /// ADR-0086 스텝 2(CLI 입구): 데몬이 위치를 찾아낸 `engram` CLI 바이너리 절대경로(있으면).
-    /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 backend 가
-    /// 그 env(claude=`ENGRAM_CLI_EXE`)와 PATH 프리펜드를 주입하지 않는다.
+    /// 데몬 exe 의 형제라 배포 시 동거하나, 부분 빌드 등으로 없을 수 있다 → `None` 이면 CLI 입구 주입이
+    /// 그 env(`CLI_EXE_ENV`)와 PATH 프리펜드를 건너뛴다(`backend::inject_cli_entrance` — 백엔드 공용).
     /// ★소비 조건 = control endpoint 가 있는 스폰 전부(ADR-0133 · ADR-0132 결정 5)★: 제어 동사는 전원에게
     /// 열리므로 두 갈래 모두 이 값을 쓴다. 형제 exe 탐색 지식은 데몬 소유(lib.rs).
     pub send_exe: Option<std::path::PathBuf>,
@@ -402,7 +431,7 @@ pub struct ControlEndpoint {
     /// 않는다.
     pub priming_file: Option<std::path::PathBuf>,
     /// 사전 승인할 툴 목록(ADR-0094 — 계약은 `ToolGrant`). 데몬 컨트롤 채널이 발신 입구(MCP
-    /// `send_message` / `engram` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
+    /// `eg_send` / `engram` CLI)를 채운다. 빈 Vec 이면 backend 가 아무 것도 주입하지 않는다
     /// (권한 플래그 없음 = 기존 게이트 유지).
     pub grants: Vec<ToolGrant>,
     /// S18 D(spec §6 allowedMcpServers 대책): 스폰 세션에만 얹을 **설정 조각 파일의 절대경로**(있으면).
@@ -414,6 +443,29 @@ pub struct ControlEndpoint {
     ///   engram 서버를 허용한다 — **전역 설정 파일은 절대 건드리지 않는다**(허용 범위 = 엔그램이 스폰한
     ///   에이전트뿐). config_path 와 같은 수명(epoch 단위 생성·폐기)이라 같은 descriptor 에 태운다.
     pub settings_file: Option<std::path::PathBuf>,
+}
+
+impl ControlEndpoint {
+    /// 데몬이 이 스폰에 **우리 MCP 서버의 발신 입구를 인가했나**.
+    ///
+    /// ★이것이 backend 가 볼 수 있는 「MCP 우편 가부」의 **유일한 실물**이다★: 그 판정을 내리는 자리는
+    ///   데몬의 `DaemonControlChannel::build_grants` 하나이고(운영자 노브 `ENGRAM_DISALLOW_MCP_SEND` 도,
+    ///   하네스 노브 `ENGRAM_FORCE_CLI_ONLY_SEND` 가 `accepts_mcp_config` 를 뒤집는 것도 전부 그 한
+    ///   자리를 지나 이 목록에 나타난다), 그 결과가 `grants` 로 실려 온다. ★backend 에서 그 환경변수를
+    ///   다시 읽지 말 것★ — 판정의 주인은 데몬이고, backend 가 재파생하면 권위가 둘이 된다(ADR-0004).
+    /// ★`mail_allowed` 로 대신 읽지 말 것★ — 그 칸은 **CLI 우편** 인가를 뜻하고(ADR-0133), MCP 우편을
+    ///   쓰는 스폰에서는 언제나 `false` 라 MCP 를 끈 상태와 켠 상태를 구별하지 못한다.
+    /// ★툴 이름은 보지 않는다 — 서버명만 본다★: 그 이름의 정본은 데몬 쪽(`SEND_MESSAGE_TOOL`)이고
+    ///   이 crate 는 그것을 데이터로만 나른다(위 [`ToolGrant`] doc 의 격리 규율). 서버명은 여기
+    ///   [`MCP_SERVER_NAME`] 이 정본이라 재타이핑이 아니다.
+    // ADR-0094
+    // ADR-0133
+    // ADR-0209
+    pub fn grants_mcp_send(&self) -> bool {
+        self.grants
+            .iter()
+            .any(|g| matches!(g, ToolGrant::Mcp { server, .. } if server == MCP_SERVER_NAME))
+    }
 }
 
 /// 제어 채널 provision 실패 사유(ADR-0086 fail-closed). 파일 write·CSPRNG 실패 등 "제어 채널을 붙일
@@ -431,6 +483,50 @@ impl std::fmt::Display for ProvisionError {
 
 impl std::error::Error for ProvisionError {}
 
+/// 이 스폰이 제어 채널에서 **무엇을 받나** — provision 이 갈리는 축 전부.
+///
+/// ★세 칸이지 하나가 아니다 — 합치지 말 것★: 예전에는 `accepts_mcp_config` 하나가 MCP 입구·프라이밍
+///   변형·grant·**우편 가부**를 전부 굴렸다. 그 접힘 때문에 「제어 채널은 쓰지만 우편 평면 밖」인
+///   backend 가 제어를 켜는 순간 **보내기 인가까지 함께 열렸다**(받기는 닫힌 채로). 그 비대칭은 어느
+///   선언에도 안 적혀 있었다 — 축이 둘인데 칸이 하나였기 때문이다.
+/// ★셋째 칸이 갈라져 나온 것도 같은 모양이다★: `accepts_mcp_config` 가 「MCP 로 우편을 쓰나」와
+///   「우리가 쓴 파일을 읽나」를 겸직하는 동안, 다른 기제로 MCP 를 켜는 backend(codex 의
+///   `-c mcp_servers.engram=…`)는 우편 축을 맞추려 그 칸을 켜는 것만으로 **아무도 안 읽는 평문 토큰
+///   파일**을 스폰마다 받았다(기본 ACL · 그 write 실패는 fail-closed 라 스폰까지 끊었다).
+/// ★그래도 `mail_allowed` 의 **파생점은 여전히 하나다**(ADR-0133 결정 2)★: 데몬이 이 두 칸에서 한 값을
+///   만들고, 그 한 값이 자격증명에 박히는 강제와 endpoint 에 실리는 표식을 **함께** 낳는다. 바뀐 것은
+///   그 식의 재료 수뿐이다. 두 자리에서 따로 판정하면 교육과 강제가 갈린다.
+/// ★`engram` CLI 배선(env·PATH)은 어느 조합에서도 깔린다★ — 제어 동사가 전원 개방이기 때문이다
+///   (ADR-0132 결정 5). 이 타입이 가르는 것은 **우편과 MCP** 뿐이다.
+// ADR-0099
+// ADR-0126
+// ADR-0133
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlChannelNeeds {
+    /// 이 backend 가 **우리가 만든 mcp-config 파일을 먹을 수 있나**(ADR-0099).
+    ///
+    /// true → mcp-config + 세션 설정 조각 기록 + MCP endpoint bits. false → 그 셋 다 안 만든다.
+    /// ★"MCP 를 쓸 수 있나" 가 아니다★ — 다른 기제로 MCP 를 켜는 프로그램도 이 칸은 false 다
+    ///   (판정의 정본은 각 backend 폴더).
+    pub accepts_mcp_config: bool,
+    /// 데몬이 이 스폰에 **mcp-config 파일을 써 줄까**(`AgentBackend::writes_mcp_config_file`).
+    ///
+    /// true → `<data_dir>/mcp-config/<id>-<epoch>.json`(평문 Bearer 토큰)과 세션 설정 조각을 기록하고,
+    /// 그 write 실패는 **fail-closed**(스폰 중단)다. false → 둘 다 안 만들고 `config_path`·
+    /// `settings_file` 이 `None` 으로 나간다.
+    /// ★위 칸과 **한 칸으로 접지 말 것**★: 위는 우편 채널 판정(`mail_allowed`)을 파생하는 축이고,
+    ///   이 칸은 **디스크에 평문 토큰을 쓸까** 하나만 묻는다. 「MCP 는 쓰지만 우리 파일은 안 읽는다」
+    ///   (codex)가 그 조합의 정상값이다 — 타입 doc 의 셋째 칸 항목이 사유의 정본.
+    // ADR-0209
+    pub writes_mcp_config_file: bool,
+    /// 이 스폰에 **우편 채널을 배정하나**(`AgentBackend::uses_mail`).
+    ///
+    /// false → 우편 교육(프라이밍)도 발신 grant 도 안 실리고, 데몬이 이 자격증명의 우편 요청을 거절한다.
+    /// ★그래도 제어 동사와 CLI 입구는 받는다★ — 위 타입 doc 의 마지막 항.
+    // ADR-0209
+    pub uses_mail: bool,
+}
+
 /// 제어 채널 provisioning seam(ADR-0086). AgentManager 기본값 = `NoopControlChannel`.
 pub trait ControlChannel: Send + Sync + 'static {
     /// (AgentId,epoch)용 토큰을 발급하고 (MCP-capable 이면) mcp-config 파일을 만들어 엔드포인트를 돌려준다.
@@ -440,23 +536,15 @@ pub trait ControlChannel: Send + Sync + 'static {
     ///   - `Err(_)`       — 제어 채널을 쓰려다 **실패**(CSPRNG/파일 write 오류). ★치명★ — 스폰은
     ///     이 Err 를 만나면 fail-closed 로 중단한다(제어 채널 없이 몰래 도는 에이전트 금지, health 위장 방지).
     ///
-    /// `accepts_mcp_config`(ADR-0099): 이 backend 가 mcp-config 를 받아들이는가(= MCP-capable 인가). manager 가
-    ///   `backend::accepts_mcp_config(command)` 로 판정해 넘긴다. 데몬 구현이 이 플래그로 **MCP 입구·
-    ///   프라이밍 변형·grant·우편 가부를 한꺼번에 가른다**(정합 불변식 = 프라이밍이 **가르치는** 우편 채널
-    ///   **=** 그 스폰이 실제로 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면 ADR-0099 가 실측한 발신
-    ///   freeze 가 재발한다).
-    ///   true → mcp-config 기록 + MCP endpoint bits + MCP-only 교육 프라이밍(`send_message` 만 — ADR-0126
-    ///   결정 1) + `mail_allowed=false`(데몬이 이 자격증명의 우편 요청을 거절한다 — ADR-0133).
-    ///   false → mcp-config **미기록** + CLI-only 프라이밍 + `mail_allowed=true`.
-    ///   `engram` CLI 배선(env·PATH)은 **두 갈래 모두** 받는다 — 제어 동사가 전원 개방이기 때문이다
-    ///   (ADR-0132 결정 5).
+    /// `needs` = 이 스폰이 제어 채널에서 무엇을 받나([`ControlChannelNeeds`] — 두 칸의 뜻과 갈림의
+    ///   정본이 그 타입 doc 이다). manager 가 backend dispatch 로 채워 넘긴다.
     // ADR-0126
     // ADR-0133
     fn provision(
         &self,
         id: AgentId,
         epoch: u32,
-        accepts_mcp_config: bool,
+        needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError>;
 
     /// (AgentId,epoch)의 토큰을 폐기하고 mcp-config 파일을 지운다. 어떤 terminal(kill·크래시·EOF·정상
@@ -477,7 +565,7 @@ impl ControlChannel for NoopControlChannel {
         &self,
         _id: AgentId,
         _epoch: u32,
-        _accepts_mcp_config: bool,
+        _needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         Ok(None)
     }
@@ -705,9 +793,21 @@ pub struct SubscribeOutcome {
 ///   가르려면 write 경계에서 **완결성 신호**(전량 수용 vs 실패)와 이 유저 턴의 replay-dedup 키
 ///   (`msg_uuid`)를 관측 가능하게 올려야 한다. 이 값이 그 산출물이다(성공 경로에서만 반환).
 ///
-/// ★완결성 신호 = Ok-vs-Err 이지 바이트 비교가 아니다(중요)★: transport 의 `send_input` 은
-///   `write_all`(+`flush`)로 쓴다 — `write_all` 은 요청 바이트를 **전부** 쓰거나 `Err` 를 낸다
-///   (부분 write 를 `Ok` 로 숨기지 않는다, std 계약). 따라서 "전량 수용됐나"의 유일한 증거는
+/// ★★`Ok` 의 뜻이 **어느 동사로 얻었느냐에 달렸다** — 이 문단이 그 갈림이고, 옛 서술은 거짓이다★★:
+///   한때 여기 「transport 의 `send_input` 은 `write_all`(+`flush`)로 쓴다」로 적혀 있었는데, 통로 셋
+///   (PTY·stdio·codex)이 전부 **유계 입력 큐**에 담고 전담 라이터가 빼서 쓰는 지금 그것은 사실이 아니다.
+///   갈림은 이렇다:
+///   - `AgentSession::submit_input_observed`(= 우편 배달이 쓰는 동사, `AgentManager::submit_stdin_observed`)
+///     의 `Ok` = ★**실제로 OS 로 나갔다**★. 그 동사가 `AgentTransport::flush_input` 으로 착지를 확인한 뒤에만
+///     영수증을 낸다 — ADR-0088 이 가르려는 "전송 실패" vs "모델이 무시" 가 그 확인 위에 선다.
+///   - `AgentSession::write_input_observed`(키 입력 스트리밍 판)의 `Ok` = **전량을 순서까지 확정해 받았다**.
+///     그 경로는 기다리지 않는다(기다리면 연결당 dispatch 소비자가 물린 에이전트 하나에 통째로 선다).
+///   ★확인 수단이 없는 통로는 옛 수준 그대로다★ — codex app-server 와 시험대 seam 은 `flush_input` 이
+///     `Unsupported` 라 배달 동사도 「받았다」까지만 안다. **그 통로에 대해서는 이 레코드가 착지를 단언하지
+///     않는다**(pre-existing — 그 통로의 큐는 이 규율보다 먼저 있었다).
+///
+/// ★완결성 신호 = Ok-vs-Err 이지 바이트 비교가 아니다(중요)★: 위 갈림 어느 쪽이든 부분 수용을 `Ok` 로
+///   숨기지 않는다 — 전량을 받거나(또는 전량이 나가거나) `Err` 다. 따라서 그 판정의 유일한 증거는
 ///   `Ok(WriteOutcome)` **자체**(vs `Err`)다 — 아래 두 바이트 필드의 비교가 아니다. 진짜 written
 ///   바이트 수는 transport 밖으로 스레드되지 않으므로(write_all 계약상 불필요), `bytes_written` 은
 ///   독립 계측값이 아니라 `bytes_requested` 를 **구성상 그대로 복사**한 값이다(short-write 탐지 불가 —

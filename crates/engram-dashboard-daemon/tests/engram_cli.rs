@@ -636,12 +636,15 @@ fn engram_help_lists_groups_and_group_help_documents_its_verbs() {
     assert_eq!(bare_code, 0, "인자 없는 호출도 성공 종료: {bare}");
     assert_eq!(bare, stdout, "인자 없음 = help 와 같은 출력");
 
+    // 계열 화면은 개요 + 색인이고, 플래그는 그 동사의 하위 화면이 나른다.
     let (mail, code) = run_cli(UNREACHABLE_URL, &["help", "mail"], None);
     assert_eq!(code, 0, "계열 help 는 성공 종료: {mail}");
+    for token in ["send", "status", "pending", "recv"] {
+        assert!(mail.contains(token), "{token} 이 계열 help 색인에: {mail}");
+    }
+    let (send, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
+    assert_eq!(code, 0, "하위 help 는 성공 종료: {send}");
     for token in [
-        "send",
-        "status",
-        "pending",
         "--to",
         "--body",
         "--body-stdin",
@@ -649,7 +652,7 @@ fn engram_help_lists_groups_and_group_help_documents_its_verbs() {
         "--reply-by",
         "--reply-to",
     ] {
-        assert!(mail.contains(token), "{token} 이 계열 help 에: {mail}");
+        assert!(send.contains(token), "{token} 이 send 화면에: {send}");
     }
 }
 
@@ -683,6 +686,10 @@ fn engram_help_answers_before_any_credential_check_and_prints_plain_text() {
         vec!["help", "mail"],
         vec!["mail", "--help"],
         vec!["mail", "-h"],
+        vec!["help", "mail", "send"],
+        vec!["mail", "send", "--help"],
+        vec!["help", "mail", "recv"],
+        vec!["mail", "recv", "-h"],
     ] {
         let (stdout, code) = run_cli_without_credentials(&args);
         assert_eq!(
@@ -729,6 +736,26 @@ fn conventional_help_spellings_render_the_same_screens() {
         assert_eq!(out, canonical_mail, "계열 help 화면이 같아야: {alias:?}");
     }
     assert_ne!(canonical_root, canonical_mail, "두 화면은 서로 달라야");
+
+    // 하위 화면도 같은 규칙이다. ★이름 목록을 여기 손으로 적는 이유★: 통합 테스트는 실 exe 를 돌리므로
+    //   bin 안의 `MailTopic` 을 못 본다 — 개요가 색인한 이름과 어긋나면 아래 첫 단언이 잡는다.
+    for sub in ["send", "status", "pending", "recv"] {
+        assert!(
+            canonical_mail.contains(&format!("{CLI_EXE_NAME} help mail {sub}")),
+            "개요가 하위 화면을 색인해야({sub}): {canonical_mail}"
+        );
+        let (canonical_sub, code) = run_cli_without_credentials(&["help", "mail", sub]);
+        assert_eq!(code, 0, "{sub}: {canonical_sub}");
+        assert_ne!(canonical_sub, canonical_mail, "개요와 달라야: {sub}");
+        for alias in [vec!["mail", sub, "--help"], vec!["mail", sub, "-h"]] {
+            let (out, code) = run_cli_without_credentials(&alias);
+            assert_eq!(code, 0, "{alias:?}: {out}");
+            assert_eq!(out, canonical_sub, "하위 화면이 같아야: {alias:?}");
+        }
+    }
+    // 모르는 하위 주제는 오류로 남는다 — 개요로 조용히 되돌아가면 오타가 성공으로 읽힌다.
+    let (out, code) = run_cli_without_credentials(&["help", "mail", "inbox"]);
+    assert_eq!(code, 1, "모르는 하위 주제는 실패: {out}");
 }
 
 #[test]
@@ -740,12 +767,12 @@ fn engram_unknown_group_and_bare_flags_are_argument_errors_without_touching_the_
         vec!["--to", "bob", "--body", "hi"],
         vec!["pending"],
         vec!["status", "m-1"],
-        // help 토큰이 값 자리에 온 경우 — `status --help` 는 예전에 `--help` 를 메시지 id 로 **조회**해
-        //   실제 왕복을 했다. 이 목록에 있다는 것 자체가 "네트워크를 안 탄다" 는 주장이다(포트 0).
-        vec!["mail", "status", "--help"],
-        vec!["mail", "status", "-h"],
-        vec!["mail", "pending", "--help"],
-        vec!["mail", "send", "--help"],
+        // help 토큰이 값 자리에 온 경우 — `status <id> --help` 는 예전에 `--help` 를 메시지 id 로
+        //   **조회**해 실제 왕복을 했다. 이 목록에 있다는 것 자체가 "네트워크를 안 탄다" 는 주장이다
+        //   (포트 0). 하위 주제 **바로 다음 칸**은 반대로 화면이다 — 위 철자 테스트가 그쪽을 잰다.
+        vec!["mail", "status", "m-7f3k9q2d", "--help"],
+        vec!["mail", "status", "m-7f3k9q2d", "-h"],
+        vec!["help", "mail", "inbox"],
         // help + 잔여 인자 — exit 0 으로 삼키면 편지가 성공 코드와 함께 사라진다.
         vec!["mail", "--help", "--to", "bob", "--body", "hi"],
         vec!["--help", "mail", "--to", "bob"],
@@ -1728,6 +1755,9 @@ fn asking_for_the_hidden_mail_usage_is_refused_like_a_typo() {
         vec!["mail", "wat"],
         vec!["mail", "send"],
         vec!["mail", "status"],
+        vec!["mail", "send", "--help"],
+        vec!["mail", "recv", "--help"],
+        vec!["help", "mail", "recv"],
     ] {
         let (out, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &args);
         assert_eq!(code, 1, "감춘 계열의 잘못된 호출은 반려({args:?}): {out}");
@@ -1745,7 +1775,10 @@ fn asking_for_the_hidden_mail_usage_is_refused_like_a_typo() {
     // 대조군 — 같은 인자가 표식 없이는 화면·구체적 사유를 낸다(= 접기가 표식 때문이라는 증명).
     let (shown, code) = run_cli_with_marker(None, &["help", "mail"]);
     assert_eq!(code, 0, "표식 없으면 화면: {shown}");
-    assert!(shown.contains("--to"), "{shown}");
+    assert!(shown.contains("help mail send"), "{shown}");
+    let (shown_send, code) = run_cli_with_marker(None, &["mail", "send", "--help"]);
+    assert_eq!(code, 0, "표식 없으면 하위 화면도: {shown_send}");
+    assert!(shown_send.contains("--to"), "{shown_send}");
     let (verbless, code) = run_cli_with_marker(None, &["mail"]);
     assert_eq!(code, 1);
     assert!(

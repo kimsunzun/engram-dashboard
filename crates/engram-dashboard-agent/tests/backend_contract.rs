@@ -99,14 +99,30 @@ use engram_dashboard_agent::types::{
 
 // ── 질문표 ───────────────────────────────────────────────────────────────────
 
-/// 실행 없이 대조하는 열 — 백엔드가 **스스로 신고하는** 값 전부. 새 백엔드 행은 이 열 열 칸을 다
-/// 적어야 컴파일된다(그것이 "표가 채워져 있는가" 의 실물).
+/// 실행 없이 대조하는 열 — 백엔드가 **스스로 신고하는** 값 전부. 새 백엔드 행은 이 칸들을 다 적어야
+/// 컴파일된다(그것이 "표가 채워져 있는가" 의 실물).
+///
+/// ★단 한 행을 채우는 데 필요한 칸이 이 구조체로 끝나지 않는다★ — [`BackendRow::can_resume_stored_session`]
+///   과 [`BackendRow::session_resume`] 도 기본값이 없어 함께 적어야 컴파일된다. 통로별로 갈리는 축이라
+///   그쪽에 사는 것이고, 「이 구조체를 채웠으니 행이 다 찼다」로 읽으면 그 칸들을 놓친다.
 struct Declared {
-    needs_session: bool,
+    /// ★모드 무관이라 한 칸으로 둔다★ — 오늘 모든 백엔드가 두 통로에서 같은 값을 신고하고, 아래
+    /// [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 그 불변을 실제로 잰다. 갈리는
+    /// 날엔 이 칸도 [`BackendRow::can_resume_stored_session`] 처럼 통로별로 쪼개야 한다.
+    assigns_session_id: bool,
     supports_control_channel: bool,
     accepts_mcp_config: bool,
+    /// 데몬이 이 백엔드에 **mcp-config 파일을 써 주나** — 위 칸과 갈린 축이다.
+    ///
+    /// ★위 칸에서 파생하지 말 것★: 위는 오늘 「MCP 로 우편을 쓰나」를 뜻하고, 이 칸은 「그 프로그램이
+    ///   우리가 쓴 파일을 경로로 읽나」다. 둘이 갈린 행(codex)이 이 칸을 세운 이유이고, true 인 행은
+    ///   스폰마다 평문 Bearer 토큰 JSON 을 디스크에 받는다(그 write 실패는 fail-closed — 스폰 중단).
+    // ADR-0209
+    writes_mcp_config_file: bool,
     reads_messages: bool,
-    session_resume: bool,
+    /// 보내기 축 — 위 받기 축의 짝이다. ★둘이 갈린 행은 「보내기만 되는」 비대칭이므로 그 행의 사유가
+    /// 그 백엔드 폴더에 적혀 있어야 한다★.
+    uses_mail: bool,
     session_snapshot: bool,
     /// ★이 칸에는 실 근거가 붙는다 — 선언끼리 맞대는 것으로 끝나지 않는다★: 「cwd·env 를 준 대로
     /// 쓴다」는 주장이라 [`q12_working_root_comes_from_the_cd_flag_and_env_reaches_the_process`] 가
@@ -239,6 +255,26 @@ struct BackendRow {
     ///   않는가**를 묻는다 — 갈려야 하는 축(통로 모양·인코딩·번역기)은 그 아래 질문이 따로 잰다.
     alt_sample: Option<AgentCommand>,
     declared: Declared,
+    /// **통로별로** 적는 선언 축 = 「저장된 backend sid 로 이어받을 수 있나」. `.0` =
+    /// [`BackendRow::sample`] 의 답, `.1` = [`BackendRow::alt_sample`] 의 답(`None` = 둘째 통로 없음).
+    ///
+    /// ★오늘은 어느 행도 두 통로의 답이 갈리지 않는다 — 그런데도 통로별로 두는 이유★: 이 축은 **갈린 적이
+    ///   있고 또 갈릴 수 있는** 칸이다. codex 행이 한동안 `(false, Some(true))` 였다(터미널 모드에 이어받기
+    ///   배선이 없던 시절). 한 칸으로 접으면 그런 상태가 이 표에서 **아예 안 보이고**, [`Declared`] 로
+    ///   옮기면 그때 [`declarations_are_the_same_across_a_backend_s_two_channels`] 가 거짓이 되어 표를
+    ///   다시 짜야 한다. 지금 두 칸이 같다는 것이 그 대비를 걷을 근거는 아니다.
+    can_resume_stored_session: (bool, Option<bool>),
+    /// 같은 통로별 모양으로 적는 **caps 신고 칸** = `capabilities(cmd).session.resume`.
+    ///
+    /// ★바로 위 칸과 한 칸으로 접지 말 것★ — 묻는 곳이 다르다: 위는 활성화 입구가 「Resume 으로
+    ///   띄울까」를 판정하는 축이고, 이 칸은 그 결과를 소비자(프론트·wire)에게 신고하는 값이다. 오늘은
+    ///   모든 행에서 둘이 같지만, 갈리면 **이어받지 않는 스폰이 이어받는다고 신고**되거나 그 반대가
+    ///   되므로 그 어긋남이 이 표에서 보여야 한다.
+    /// ★[`Declared`] 에 없는 이유★ — 바로 위 칸과 짝이라 같은 모양으로 둔다. 두 칸이 갈리면 [`Declared`]
+    ///   에 둔 쪽이 [`declarations_are_the_same_across_a_backend_s_two_channels`] 를 거짓으로 만드는데,
+    ///   codex 행에서 실제로 그런 적이 있다(위 칸의 doc). 지금 어느 행도 안 갈린다는 것이 이 배치를
+    ///   되돌릴 근거는 아니다 — 되돌리면 다음에 갈릴 때 표를 다시 짜야 한다.
+    session_resume: (bool, Option<bool>),
     probe: Option<LiveProbe>,
 }
 
@@ -263,17 +299,22 @@ fn backend_table() -> Vec<BackendRow> {
                 output_format: AgentOutputFormat::StreamJson,
             }),
             declared: Declared {
-                needs_session: true,
+                assigns_session_id: true,
                 supports_control_channel: true,
                 accepts_mcp_config: true,
+                // 이 행만 파일을 **경로로 읽는다**(`--mcp-config <path>`) — 그래서 유일하게 true 다.
+                writes_mcp_config_file: true,
                 reads_messages: true,
-                session_resume: true,
+                uses_mail: true,
                 session_snapshot: false,
                 session_cwd_env: true,
                 model_select: false,
                 model_temperature: false,
                 model_max_tokens: false,
             },
+            // 두 통로 다 `--resume <sid>` 로 이어받는다(실측).
+            can_resume_stored_session: (true, Some(true)),
+            session_resume: (true, Some(true)),
             // 실 claude 를 띄우지 않는다: 이 열은 이미 실측으로 채워져 있고, 실 claude 의존 테스트가
             // CI 에서 **fn 이름으로 `--skip`** 되는 미결이 바로 그 형태다(TRD §3-2). 시험대는 그 목록을
             // 늘리지 않는다.
@@ -291,20 +332,44 @@ fn backend_table() -> Vec<BackendRow> {
                 output_format: AgentOutputFormat::StreamJson,
             }),
             declared: Declared {
-                // ★실측이 도장 찍은 값이다★ — 호출자가 세션 id 를 정할 수 없고(`session_id_flag: None`
-                //   이 그 짝), 턴을 관측할 수 없어 바쁜 때를 못 가리므로 수신자 명단에서 뺀다. 사유의
-                //   정본은 `backend/codex/`.
-                needs_session: false,
-                supports_control_channel: false,
-                accepts_mcp_config: false,
-                reads_messages: false,
-                session_resume: false,
+                // ★실측이 도장 찍은 값이다★ — 세션 id 의 발급 주체가 codex 라 호출자가 정할 수 없다
+                //   (`session_id_flag: None` 이 그 짝). 사유의 정본은 `backend/codex/`.
+                //   ★이 칸을 아래 `reads_messages` 와 엮어 읽지 말 것★ — 옛 주석이 여기에 「턴을
+                //   관측할 수 없어 수신자 명단에서 뺀다」를 붙여 뒀었는데, 그 축은 ADR-0116 결정 7 이
+                //   기각한 전제였고 이제 그 칸은 true 다.
+                assigns_session_id: false,
+                supports_control_channel: true,
+                // ★이름대로 읽으면 틀린 값이다 — codex 는 우리 mcp-config **파일**을 여전히 못 먹는다★.
+                //   켜 둔 것은 데몬이 이 칸으로 우편 채널까지 파생하기 때문이고, 실제 부착은
+                //   `-c mcp_servers.engram={…}` 한 값이 한다. 사유·대가의 정본은 `backend/codex/`.
+                accepts_mcp_config: true,
+                // ★위 칸이 true 인데 이 칸은 false — 그 갈림이 이 칸의 존재 이유다★: codex 에는 우리가
+                //   쓴 파일을 가리킬 플래그가 없다(실측 0.155.0). 겸직하던 동안 이 행은 아무도 안 여는
+                //   평문 토큰 파일을 스폰마다 받았고 그 write 실패가 스폰을 끊을 수 있었다. 사유의
+                //   정본은 `backend/codex/` 의 그 메서드 주석.
+                // ADR-0209
+                writes_mcp_config_file: false,
+                // ★false 로 되돌리지 말 것 — 「턴 신호가 없다」는 그 사유를 ADR-0116 결정 7 이
+                //   기각했다★: 터미널 claude 가 같은 자리(신호 0)에서 이미 받는다. 대가(턴 한가운데
+                //   꽂힘 · 모달 위젯이 먹음)는 그 결정이 명시 수용한 것이고, 정본은 `backend/codex/`
+                //   의 `reads_messages` doc.
+                reads_messages: true,
+                // ★이 행의 두 칸이 **함께 열려 있다**★ — 보내기·받기가 같이 서야 ADR-0209 결정 4 의
+                //   「받기 먼저」 순서를 지킨다. 한쪽만 되돌리면 그 결정이 없애려던 비대칭이 살아난다.
+                uses_mail: true,
                 session_snapshot: false,
                 session_cwd_env: true,
                 model_select: false,
                 model_temperature: false,
                 model_max_tokens: false,
             },
+            // ★두 통로가 같은 답을 낸다 — 이어받는 **수단**만 갈린다★: app-server 는 받아 적은
+            //   thread id 로 `thread/resume` 을 내고, 터미널 모드는 같은 id 를 `codex resume <id>` 로
+            //   실어 띄운다(ADR-0208 — 그 모드의 손잡이는 훅이 제어 평면으로 되돌려 준다).
+            //   두 줄이 **같이** 갈리는 것이 여전히 요점이다: 한쪽만 켜지면 이어받은 적 없는 새 스레드가
+            //   「이어받음」으로 보고된다. 사유의 정본은 `backend/codex/` 의 그 두 메서드 주석.
+            can_resume_stored_session: (true, Some(true)),
+            session_resume: (true, Some(true)),
             probe: Some(LiveProbe {
                 program: "codex",
                 // 운영은 `-s workspace-write -a on-request` 로 띄운다(그 argv 를 그대로 받아 온다).
@@ -382,7 +447,11 @@ fn declaration_table_is_filled_for_every_backend() {
 fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentCommand, d: &Declared) {
     {
         let row_sample = sample;
-        assert_eq!(b.needs_session(), d.needs_session, "{name}: needs_session");
+        assert_eq!(
+            b.assigns_session_id(row_sample),
+            d.assigns_session_id,
+            "{name}: assigns_session_id"
+        );
         assert_eq!(
             b.supports_control_channel(),
             d.supports_control_channel,
@@ -394,16 +463,20 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
             "{name}: accepts_mcp_config"
         );
         assert_eq!(
+            b.writes_mcp_config_file(),
+            d.writes_mcp_config_file,
+            "{name}: writes_mcp_config_file — true 면 스폰마다 평문 토큰 JSON 이 디스크에 쓰인다"
+        );
+        assert_eq!(b.uses_mail(), d.uses_mail, "{name}: uses_mail");
+        assert_eq!(
             b.reads_messages(),
             d.reads_messages,
             "{name}: reads_messages"
         );
 
+        // ★`session.resume` 은 여기서 안 잰다★ — 통로마다 갈리는 칸이라
+        //   [`resume_eligibility_is_declared_per_channel`] 이 통로별로 잰다.
         let caps = b.capabilities(row_sample);
-        assert_eq!(
-            caps.session.resume, d.session_resume,
-            "{name}: session.resume"
-        );
         assert_eq!(
             caps.session.snapshot, d.session_snapshot,
             "{name}: session.snapshot"
@@ -427,15 +500,67 @@ fn assert_declared(name: &str, b: &'static dyn AgentBackend, sample: &AgentComma
 /// ★둘째 통로가 선언을 조용히 갈아치우지 않는가★ — 같은 프로그램을 다른 모양으로 띄우는 것이라 우편
 /// 자격·제어 채널·세션 능력은 통로가 바뀌어도 같아야 한다.
 ///
-/// ★오늘 이 항목이 실제로 재는 것은 `capabilities(sample)` 한 칸뿐이다★ — 나머지 네 getter 는 인자를
-/// 안 받아 표본과 무관하므로, 그 칸들은 위 [`declaration_table_is_filled_for_every_backend`] 가 이미
-/// 잰 것을 되풀이할 뿐이고 여기서 따로 깨질 수 없다. 그 getter 중 하나가 명령을 받게 되는 날 이 항목이
-/// 그 축을 집어 든다.
+/// ★이 항목이 실제로 재는 것은 **명령을 받는** getter 뿐이다★ — 인자를 안 받는 getter 는 표본과
+/// 무관하므로 위 [`declaration_table_is_filled_for_every_backend`] 가 잰 것을 되풀이할 뿐이고 여기서
+/// 따로 깨질 수 없다. 오늘 실제로 갈릴 수 있는 칸 = `capabilities(sample)` 와
+/// `assigns_session_id(sample)` 둘.
+///
+/// ★통로마다 갈리는 축은 여기 없다★ — 이 항목의 주장이 「두 통로의 답이 같다」이므로, 갈리는 축을
+///   [`Declared`] 에 넣으면 이 단언이 거짓이 된다. 그쪽은
+///   [`resume_eligibility_is_declared_per_channel`] 이 통로별로 잰다.
 #[test]
 fn declarations_are_the_same_across_a_backend_s_two_channels() {
     for row in &backend_table() {
         let Some(alt) = &row.alt_sample else { continue };
         assert_declared(row.name, row.backend, alt, &row.declared);
+    }
+}
+
+/// 통로마다 갈리는 축을 **통로별로** 대조한다. ★이 항목이 없으면 둘째 통로의 답은 표에 적혀 있어도 아무
+/// 데서도 안 불린다★ — 위 두 항목은 [`Declared`] 만 보고, 그 열은 두 통로가 같다는 전제로 서 있다.
+///
+/// ★짝이 안 맞는 것도 여기서 잡는다★: 둘째 통로를 적어 놓고 그 답을 비우면(또는 그 반대) 그 행은 조용히
+///   절반만 재진다.
+/// ★두 칸을 **함께** 잰다★ — 판정 축([`AgentBackend::can_resume_stored_session`])과 신고 칸
+///   (`capabilities().session.resume`). 한쪽만 재면 둘이 갈린 상태가 초록으로 지나가고, 그 상태의 증상은
+///   「이어받지 않는 스폰이 이어받는다고 신고된다」(또는 그 반대)다.
+#[test]
+fn resume_eligibility_is_declared_per_channel() {
+    for row in &backend_table() {
+        assert_eq!(
+            row.backend.can_resume_stored_session(&row.sample),
+            row.can_resume_stored_session.0,
+            "{}: 첫째 통로의 이어받기 축 불일치",
+            row.name
+        );
+        assert_eq!(
+            row.backend.capabilities(&row.sample).session.resume,
+            row.session_resume.0,
+            "{}: 첫째 통로의 이어받기 신고 칸 불일치",
+            row.name
+        );
+        let alt_expected = (row.can_resume_stored_session.1, row.session_resume.1);
+        match (&row.alt_sample, alt_expected) {
+            (Some(alt), (Some(axis), Some(caps))) => {
+                assert_eq!(
+                    row.backend.can_resume_stored_session(alt),
+                    axis,
+                    "{}: 둘째 통로의 이어받기 축 불일치 — 이 칸이 그 모드가 이 표에 보이는 유일한 자리다",
+                    row.name
+                );
+                assert_eq!(
+                    row.backend.capabilities(alt).session.resume,
+                    caps,
+                    "{}: 둘째 통로의 이어받기 신고 칸 불일치 — 축과 갈리면 보고가 거짓이 된다",
+                    row.name
+                );
+            }
+            (None, (None, None)) => {}
+            _ => panic!(
+                "{}: 둘째 통로와 그 답 중 한쪽만 적혔다 — 통로가 있는데 답이 비면 그 모드는 안 재진다",
+                row.name
+            ),
+        }
     }
 }
 
@@ -621,6 +746,7 @@ fn production_spec(
     row.backend.build_spec(
         &with_extra(&row.sample, extra),
         SpawnMode::Fresh,
+        None,
         None,
         cwd.to_path_buf(),
         env.to_vec(),

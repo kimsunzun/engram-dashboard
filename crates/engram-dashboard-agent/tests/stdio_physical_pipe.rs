@@ -4,6 +4,11 @@
 //!   원자 `push` 로 캡처하므로 **물리 파이프 계층을 우회**한다 — 이 파일이 그 "반환 follow-up",
 //!   즉 운영 StdioTransport 의 물리 stdin write 경로(`stdin.lock()` + `write_all` + `flush`)를 덮는다.
 //!
+//! ★그 경로를 도는 주체가 바뀌었다 — 이 파일의 항목들이 그 위에 선다★: `send_input` 은 이제 유계 큐에
+//!   담기만 하고, 물리 쓰기는 **전담 라이터 스레드**가 한다(`transport::input_queue`). 그래서 이 파일은
+//!   `transport.start()` 를 반드시 부르고(라이터가 거기서 뜬다), `send_input` 의 `Ok` 를 "배달됐다" 가
+//!   아니라 **"받았다"** 로 읽는다. 배달 여부는 언제나 자식의 echo 로 잰다.
+//!
 //! ★Windows 전용★: 자식이 powershell 이라 Windows 에서만 컴파일·실행한다(프로젝트 전제).
 // ADR-0088
 #![cfg(windows)]
@@ -15,6 +20,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
+use engram_dashboard_agent::transport::input_queue::INPUT_QUEUE_MAX_BYTES;
 use engram_dashboard_agent::transport::stdio::StdioTransport;
 use engram_dashboard_agent::transport::AgentTransport;
 use engram_dashboard_agent::types::OutputSink;
@@ -88,9 +94,11 @@ fn spec(program: &str, args: &[&str]) -> CommandSpec {
 // Test 1 — 물리 OS-pipe 동시 write 무인터리브 (stdin.lock() 회귀 그물)
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
-/// ★증명한다★: 물리 파이프 계층의 **응용계층(application-layer) 직렬화** — `send_input` 이
-///   `stdin.lock()` 을 write_all+flush 내내 쥐므로 한 논리 메시지가 여러 OS write 로
-///   갈려도 다른 writer 의 write 가 그 사이에 끼어들지 못한다. 이어붙인 스트림이 **정확히 N 개의
+/// ★증명한다★: 물리 파이프 계층의 **응용계층(application-layer) 직렬화** — 한 논리 메시지가 여러 OS
+///   write 로 갈려도 다른 writer 의 write 가 그 사이에 끼어들지 못한다. ★그 직렬화를 지는 주체가
+///   바뀌었다★: 예전엔 `send_input` 이 `stdin.lock()` 을 write_all+flush 내내 쥐는 것이었고, 지금은
+///   **한 덩이가 큐의 한 칸이고 그것을 빼서 쓰는 스레드가 하나뿐**인 것이다(`transport::input_queue`).
+///   재는 성질과 이 항목의 오라클은 그대로다. 이어붙인 스트림이 **정확히 N 개의
 ///   연속 런**(fill 바이트당 1개, 각 길이 정확히 L)이면: 인터리브 없음(있으면 런이 N 개 초과) +
 ///   유실 없음(총량·각 런 길이 정확) + 중복/치환 없음(각 바이트값이 정확히 1런).
 ///   ▷ 검증된 회귀 형태 = **"한 논리 메시지를 배타 락 없이 여러 OS write 로 쓰는 것"**. 경험적 확인:
@@ -257,25 +265,104 @@ fn summarize_runs(runs: &[(u8, usize)]) -> Vec<(char, usize)> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════════════════
-// Test 2 — 실 부분 write 후 Err (부분 배달이 Ok 로 위장되지 않음)
+// Test 2 — 상한 초과는 **거절**이다(조용히 버리지 않는다)
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+
+/// ★한때 이 자리에 있던 항목(`physical_pipe_partial_write_then_err_surfaces_as_err`)은 **더 이상
+///   성립하지 않는다 — 계약이 바뀌었기 때문이지 약해졌기 때문이 아니다**★.
+///   옛 항목은 「`send_input` 이 호출 스레드에서 `write_all` 을 돌린다」에 기대어 「prefix 가 물리적으로
+///   나간 **뒤에도** 그 호출이 `Err` 로 돌아온다」를 쟀다. 지금 `send_input` 은 OS 를 건드리지 않고 유계
+///   큐에 담기만 하므로(모듈 = `transport::input_queue`) **그 호출이 볼 수 있는 실패는 「받지 않았다」뿐**
+///   이다. 옛 항목이 쟀던 나머지 절반(「받아 둔 뒤의 실패를 어떻게 신고하나」)은 Test 3 으로 갔다.
+///
+/// ★이 항목이 증명한다★: 큐 상한을 넘는 페이로드는 **통째로 거절**되고(`Err`), ★그 거절이 조용한
+///   유실이 아니라는 직접 증거로 **자식이 한 바이트도 못 받는다**★. 상한 초과를 부분 수용하거나
+///   앞부분만 쓰고 `Ok` 로 돌려주는 회귀는 아래 두 단언 중 하나에 반드시 걸린다.
+/// (ADR-0190 의 처분 — "넘으면 그 호출이 `Err` 로 돌아간다 — 버리지 않는다" — 의 물리 계층 판.)
+#[test]
+fn physical_pipe_oversized_payload_is_refused_whole() {
+    // 자식은 stdin 을 계속 읽어 echo 한다 — 즉 **배달될 수 있었는데 안 됐다**를 재는 자리다
+    // (자식이 안 읽어서 못 간 것이 아니다).
+    let child_script = "\
+$stdin=[Console]::OpenStandardInput();\
+$stdout=[Console]::OpenStandardOutput();\
+$buf=New-Object byte[] 8192;\
+while(($n=$stdin.Read($buf,0,$buf.Length)) -gt 0){\
+$stdout.Write($buf,0,$n);$stdout.Flush()}";
+
+    let (transport, _pid) = StdioTransport::open(
+        &spec("powershell.exe", &["-NoProfile", "-Command", child_script]),
+        false,
+        None,
+    )
+    .expect("open");
+
+    let sink = CollectingSink::new();
+    let core = Arc::new(OutputCore::new(
+        Uuid::new_v4(),
+        0,
+        Arc::new(NoopStatusSink),
+        TurnWiring::detached(),
+    ));
+    transport.start(core.clone());
+    core.subscribe(Arc::new(sink.clone()));
+
+    let over = vec![b'z'; INPUT_QUEUE_MAX_BYTES + 1];
+    let result = transport.send_input(InputEvent::Raw(over));
+    if !matches!(result, Err(PtyError::WriteFailed(_))) {
+        transport.shutdown();
+        panic!("상한 초과는 WriteFailed 로 거절돼야 한다(Ok 위장 금지): {result:?}");
+    }
+
+    // ★조용한 유실이 아님의 직접 증거★: 거절된 뒤 1s 동안 자식이 아무것도 되울리지 않는다.
+    //   부분 수용 회귀라면 그 앞부분이 echo 로 돌아와 여기서 잡힌다.
+    std::thread::sleep(Duration::from_secs(1));
+    let leaked = sink.total_len();
+
+    // 대조군 — 상한 아래는 정상 배달된다(위 0 이 "통로가 애초에 죽었다"가 아님을 배제).
+    const PROBE: &[u8] = b"under-the-bound\n";
+    transport
+        .send_input(InputEvent::Raw(PROBE.to_vec()))
+        .expect("상한 아래 페이로드는 받아야 한다");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while sink.total_len() < PROBE.len() {
+        if Instant::now() >= deadline {
+            let got = sink.total_len();
+            transport.shutdown();
+            panic!(
+                "대조군이 30s 안에 echo 되지 않음({got}) — 통로가 애초에 죽어 있어 위 0 이 공허함"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    if leaked != 0 {
+        transport.shutdown();
+        panic!("거절된 페이로드의 {leaked} 바이트가 자식에게 갔다 — 부분 수용(조용한 유실) 회귀");
+    }
+
+    transport.shutdown();
+    core.join_pump(Duration::from_secs(10));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// Test 3 — 받아 둔 뒤 실패한 쓰기는 **다음 호출**이 사유를 들고 거절한다
 // ═══════════════════════════════════════════════════════════════════════════════════════════
 
 /// ★증명한다★:
-///   (a) `send_input` 이 `Err(PtyError::WriteFailed(_))` 를 반환한다. std `write_all` 계약상 prefix 가
-///       **물리적으로 쓰였음에도** 호출이 Err 로 표면화된다.
-///   (b) echo 로 수집된 바이트가 **정확히 payload 의 앞 K 바이트와 일치**한다. K 바이트가 실제로
-///       파이프를 통과해 자식이 소비·되돌렸다는 = **prefix 가 실패 전에 물리적으로 배달됐다는** 직접
-///       증거다(자식이 첫 read 전에 죽었거나 transport 가 아무것도 쓰기 전에 실패했다면 이 등식이
-///       깨진다 → 아래 "vacuous pass" 를 차단).
-///   종합: **prefix 가 물리적으로 배달됐음에도 호출은 여전히 Err 로 표면화 ⇒ 부분 배달이 절대 `Ok` 로
-///   보고되지 않는다.** 이는 데몬 오라클 4(`stage1_lifecycle_write_error_single_failure_no_partial_dup`)
-///   의 물리 계층 상보물이다: 그 seam 은 바이트가 **한 톨도 움직이기 전에** Err 를 내는 all-or-nothing
-///   모사인 반면, 여기선 실제 prefix 바이트가 **움직인 뒤에도** 계약이 Err 를 보고한다.
+///   (a) 받아 둔 바이트가 **자식이 죽어 못 나가면** 통로가 닫히고, ★**다음** `send_input` 이 사유를
+///       들고 `Err` 로 돌아온다★ — 실패가 조용히 삼켜지지 않는다. (받아 둔 그 호출에게 돌려줄 길이
+///       없다는 것이 이 설계의 알려진 대가이고, 이 항목이 그 대가의 **경계**를 못 박는다: 다음
+///       호출부터는 반드시 정직하다.) ★어느 스레드가 먼저 알아채느냐는 경합이라 안 잰다★ — 사유
+///       문자열에 기대지 않는 근거는 아래 (a) 단언 자리의 주석.
+///   (b) 실패 전에 나간 prefix 가 **정확히 payload 의 앞 K 바이트**다 — 자식이 첫 read 전에 죽었거나
+///       라이터가 아무것도 쓰기 전에 실패했다면 이 등식이 깨진다(vacuous pass 차단). 옛 Test 2 의
+///       비반복 페이로드 오라클을 그대로 물려받는다.
+/// ★옛 Test 2 와 갈리는 곳은 (a) 하나뿐이다★ — 거기선 **그 호출**이 Err 였고 여기선 **다음 호출**이다.
 #[test]
-fn physical_pipe_partial_write_then_err_surfaces_as_err() {
+fn physical_pipe_write_failure_after_acceptance_surfaces_on_the_next_call() {
     // K = 64KiB 를 읽고 각 청크를 echo 한 뒤 종료. 종료 후 파이프가 끊겨 남은 write_all 이 실패한다.
-    //   ★Polish★: 마지막 read 를 남은 (K - total) 로 cap 해 총 소비·echo 를 정확히 K 로 맞춘다
-    //   (overshoot 시 "정확히 K 바이트" 등식이 부정확해짐).
+    //   마지막 read 를 남은 (K - total) 로 cap 해 총 소비·echo 를 정확히 K 로 맞춘다.
     const K: usize = 64 * 1024;
     let child_script = format!(
         "\
@@ -298,7 +385,6 @@ exit 0"
         None,
     )
     .expect("open");
-    let transport = Arc::new(transport);
 
     let sink = CollectingSink::new();
     let core = Arc::new(OutputCore::new(
@@ -310,12 +396,12 @@ exit 0"
     transport.start(core.clone());
     core.subscribe(Arc::new(sink.clone()));
 
-    // 8MiB 패턴 — K + 파이프 버퍼를 압도. 자식이 K 소비 후 종료 → 파이프 끊김 → in-flight write_all 실패.
-    //   ★비반복 스트림★: 고정 시드 xorshift64(seed=0x9E37_79B9_7F4A_7C15 — SplitMix 계열 상수). 결정적
-    //   (런마다 동일)이고 어떤 오프셋의 K-창도 payload[..K] 와 겹치지 않아, prefix 가 잘못된 오프셋에서
-    //   쓰이는 어떤 회귀든 (b) 등식이 잡아낸다. 균일 fill 이면 "K 바이트 도착"만 알 뿐 그게 진짜 앞쪽
-    //   prefix 인지 구분할 수 없다.
-    const PAYLOAD_LEN: usize = 8 * 1024 * 1024;
+    // 1MiB — K + 파이프 버퍼를 압도하되 큐 상한(2MiB) 아래. ★옛 8MiB 에서 내린 것은 상한 때문이고,
+    //   이 항목이 재는 성질(자식이 K 만 먹고 죽어 남은 write 가 실패한다)은 그대로다★ — 1MiB 는 기본
+    //   파이프 버퍼의 10배 이상이라 자식 종료 시 반드시 미전송 잔여가 남는다.
+    //   ★비반복 스트림★: 고정 시드 xorshift64(seed=0x9E37_79B9_7F4A_7C15). 결정적이고 어떤 오프셋의
+    //   K-창도 payload[..K] 와 겹치지 않아, prefix 가 잘못된 오프셋에서 쓰이는 회귀를 (b) 가 잡는다.
+    const PAYLOAD_LEN: usize = 1024 * 1024;
     let payload: Vec<u8> = {
         let mut v = Vec::with_capacity(PAYLOAD_LEN);
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
@@ -330,8 +416,7 @@ exit 0"
     };
     let expected_prefix = payload[..K].to_vec();
 
-    // ★FIX 3★: 모든 실패/타임아웃/spawn-실패 경로는 panic 전 transport.shutdown() 으로 blocked sender·
-    //   자식·pump 를 정리한다(다른 테스트 동시 실행 중 누수 방지).
+    // 모든 실패 경로는 panic 전 transport.shutdown() 으로 자식·pump·라이터를 정리한다.
     macro_rules! fail {
         ($($arg:tt)*) => {{
             transport.shutdown();
@@ -339,53 +424,26 @@ exit 0"
         }};
     }
 
-    // ★self-check(기계 검증) — 무-앨리어싱★: 어떤 시프트 s(1..=len-K)에서도 payload[s..s+K] 가 payload[..K]
-    //   와 같지 않음을 send 전에 단언한다. 같은 창이 존재하면 그 오프셋에서 잘못 쓰인 회귀를 (b) 등식이
-    //   못 잡아(오라클이 그 오프셋에서 눈멂) → 패턴 부적합. early-exit: 대부분 시프트는 첫 바이트부터 달라
-    //   payload[s] != payload[0] 만 비교하고 통과. 첫 바이트가 우연히 같은 s 에서만 K 깊이 비교로 내려간다
-    //   → debug 빌드에서도 빠르다.
+    // ★self-check(기계 검증) — 무-앨리어싱★: 어떤 시프트 s 에서도 payload[s..s+K] != payload[..K].
+    //   같은 창이 존재하면 (b) 오라클이 그 오프셋에서 눈멀어 회귀를 못 잡는다. early-exit 덕에 빠르다.
     let p0 = payload[0];
-    let self_check_start = Instant::now();
     for s in 1..=(payload.len() - K) {
         if payload[s] == p0 && payload[s..s + K] == expected_prefix[..] {
-            fail!("무-앨리어싱 self-check 실패: shift s={s} 에서 payload[s..s+K] == payload[..K] — 이 패턴은 부적합(그 오프셋에서 잘못 쓰인 회귀를 (b) 오라클이 못 잡아 눈멂). 시드/생성기를 바꿔 재생성 필요.");
+            fail!("무-앨리어싱 self-check 실패: shift s={s} — 시드/생성기를 바꿔 재생성 필요");
         }
     }
-    let self_check_ms = self_check_start.elapsed().as_millis();
-    eprintln!(
-        "[self-check] non-aliasing scan of {} shifts: {self_check_ms}ms",
-        payload.len() - K
-    );
 
-    // ★watchdog★: send 를 별도 스레드에서 돌려 hang(파이프가 안 끊기고 무한 블록)을 데드라인으로
-    //   큰 실패로 전환한다.
-    // ★thread-creation 실패 대응(round-3 MEDIUM)★: raw spawn 은 OS 스레드 생성 실패 시 shutdown 없이
-    //   panic → Builder::spawn 으로 Err 를 받아 fail!(shutdown 후 panic) 로 라우팅. 여기선 아직 send 를
-    //   못 냈고 다른 대기 스레드도 없으므로 park 잔여 없음(shutdown 이 자식·pump 만 정리).
-    let (tx, rx) = std::sync::mpsc::channel();
-    let sender = transport.clone();
-    let send_thread = match std::thread::Builder::new().spawn(move || {
-        let r = sender.send_input(InputEvent::Raw(payload));
-        let _ = tx.send(r);
-    }) {
-        Ok(h) => h,
-        Err(e) => fail!("send 스레드 OS 생성 실패: {e}"),
-    };
-
-    let result = match rx.recv_timeout(Duration::from_secs(30)) {
-        Ok(r) => r,
-        Err(_) => {
-            fail!("send_input 이 30s 안에 반환하지 않음 — prefix 쓴 뒤 파이프가 안 끊겨 hang(회귀)")
-        }
-    };
-    if send_thread.join().is_err() {
-        fail!("send 스레드가 panic — send_input 내부 실패");
+    // ★이 호출은 즉시 `Ok` 다 — 그것이 이 라운드의 요점이다★(부른 쪽이 OS 쓰기를 기다리지 않는다).
+    let accept_start = Instant::now();
+    if let Err(e) = transport.send_input(InputEvent::Raw(payload)) {
+        fail!("상한 아래 페이로드는 받아야 한다: {e:?}");
+    }
+    let accept_elapsed = accept_start.elapsed();
+    if accept_elapsed >= Duration::from_secs(2) {
+        fail!("send_input 이 {accept_elapsed:?} 걸렸다 — 호출자가 OS 쓰기에 매달린 회귀");
     }
 
-    if !matches!(result, Err(PtyError::WriteFailed(_))) {
-        fail!("prefix 쓴 뒤 파이프 끊김이 WriteFailed 로 표면화돼야 함(Ok 위장 금지): {result:?}");
-    }
-
+    // (b) prefix 가 실제로 물리 배달됐다 — 공허한 통과 차단.
     let prefix_deadline = Instant::now() + Duration::from_secs(30);
     while sink.total_len() < K {
         if Instant::now() >= prefix_deadline {
@@ -405,6 +463,35 @@ exit 0"
     }
     if echoed != expected_prefix {
         fail!("echo prefix 가 payload[..K] 와 불일치 — 물리 배달된 게 앞쪽 prefix 가 아님(무결성 위반)");
+    }
+
+    // (a) 자식이 죽어 통로가 닫힌다 → **다음** 호출이 사유를 들고 거절.
+    //     ★폴링인 이유★: 닫는 시점은 다른 스레드의 일이라 이 스레드와 동기가 아니다. 닫힘이 관측될
+    //     때까지 기다리되, 안 닫히면(=실패를 삼키는 회귀) 데드라인이 큰 실패로 바꾼다.
+    // ★★어느 사유가 이길지는 **경합이고, 둘 다 참이다** — 그래서 사유 문자열로 단언하지 않는다★★:
+    //   자식이 죽으면 ⓐ 라이터의 블록된 write 가 에러로 풀리는 것과 ⓑ pump 가 stdout EOF 를 보고
+    //   `WriterStop` 으로 닫는 것이 **동시에** 시작되고, 실측에서는 ⓑ 가 먼저 이겼다(2026-09-17).
+    //   `InputQueue::close` 는 첫 사유를 지키므로 그때 문구는 "스트림이 끝났다" 다. 이 항목이 재려는
+    //   성질은 **「받아 둔 뒤의 실패가 조용히 삼켜지지 않는다」**이지 어느 스레드가 먼저 알아채느냐가
+    //   아니므로, 단언은 「거절된다」 + 「그 사유가 상한이 아니다」로 잡는다(상한이면 이 항목이 재려던
+    //   것과 다른 이유로 통과하는 셈이라 그것만 배제한다).
+    let close_deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match transport.send_input(InputEvent::Raw(b"after\n".to_vec())) {
+            Err(PtyError::WriteFailed(msg)) => {
+                if msg.contains("상한") {
+                    fail!("거절 사유가 상한이다 — 통로가 닫혀서 거절된 것이 아니다: {msg}");
+                }
+                break;
+            }
+            Ok(()) => {
+                if Instant::now() >= close_deadline {
+                    fail!("30s 안에 통로가 닫히지 않음 — 자식의 죽음이 조용히 삼켜졌다");
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(other) => fail!("WriteFailed 여야: {other:?}"),
+        }
     }
 
     transport.shutdown();

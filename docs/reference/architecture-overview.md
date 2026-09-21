@@ -69,7 +69,7 @@ flowchart TD
   DAEMON -->|"PTY / 파이프: stdin↓ · stdout↑"| A1["claude.exe (에이전트 A)"]
   DAEMON -->|"PTY / 파이프: stdin↓ · stdout↑"| A2["claude.exe (에이전트 B)"]
   A2 --- AN["... (에이전트 N개)"]
-  A1 -.->|"send_message (MCP/HTTP · Bearer 토큰)<br/>= 에이전트 A→B 메시지"| CTL
+  A1 -.->|"eg_send (MCP/HTTP · Bearer 토큰)<br/>= 에이전트 A→B 메시지"| CTL
   CLI["engram.exe (제어 평면 CLI — mail·agent 계열 + 전체 이름 표면)"] -.->|"HTTP · Bearer 토큰"| CTL
 
   BOOT["부팅 시: 앱이 daemon.json(발견 겸 잠금 파일) 읽어 데몬 발견 → 없으면 spawn (discovery crate)"]
@@ -144,7 +144,7 @@ flowchart TD
   WSS --> AM
   AM -->|"stdin (입력)"| CL
   CL -->|"stdout (출력)"| AM
-  CL -.->|"send_message (Bearer 토큰) · 에이전트→데몬 (S17)"| CTL
+  CL -.->|"eg_send (Bearer 토큰) · 에이전트→데몬 (S17)"| CTL
   CTL -.->|"정규화한 발송을 넘김 (S18)"| MSGK
   MSGK -.->|"봉투 조립 → target stdin 주입<br/>(잠들었으면 파킹 · 부재면 반려)"| AM
 ```
@@ -155,7 +155,7 @@ flowchart TD
 | 프론트 ↔ 클라이언트(Rust) | `invoke` / Tauri `Channel` | 명령 프론트→Rust · 출력 Rust→프론트 | JSON 명령 / 바이너리 프레임 |
 | 클라이언트 ↔ 데몬 | WebSocket | 명령 **양방향** · 출력 데몬→클 | 명령 JSON(클→데몬 = 사람·프론트 발 · 데몬→클 = 에이전트/LLM 발 · ADR-0154/0155) / 출력·마커 |
 | 데몬 ↔ 에이전트 (기존) | PTY(ConPTY) 또는 파이프 | stdin↓ · stdout↑ | raw 바이트 / (json)NDJSON |
-| **에이전트 → 데몬 (S17~S20)** | **MCP 또는 CLI — 스폰 시 capability로만 갈린다(런타임 폴백 없음, ADR-0128)** | 에이전트→데몬 (업링크) | 우편(`send_message`·`messages`) + 에이전트 제어(`/control/agent`) + **명령 중계**(`/control/commands`·`/control/call` — ADR-0160/0161) · Bearer 토큰 인증 |
+| **에이전트 → 데몬 (S17~S20)** | **MCP 또는 CLI — 스폰 시 capability로만 갈린다(런타임 폴백 없음, ADR-0128)** | 에이전트→데몬 (업링크) | 우편(`eg_send`·`eg_messages`) + 에이전트 제어(`/control/agent`) + **명령 중계**(`/control/commands`·`/control/call` — ADR-0160/0161) · Bearer 토큰 인증 |
 
 결정: 제어표면 단일화 = ADR-0011 · 제어 채널 = ADR-0086 · 메시징 브로커 = ADR-0103(0105/0107/0111 부분 폐기) · 명령 하행(앱 = 데몬의 명령 수신 peer) = ADR-0081 → **ADR-0155가 결정 1·2 대체**.
 
@@ -263,7 +263,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   IN1["사용자 타이핑 / 프론트 invoke"]
-  IN2["다른 에이전트의 send_message<br/>(제어 채널 입구 → MessagingService)"]
+  IN2["다른 에이전트의 eg_send<br/>(제어 채널 입구 → MessagingService)"]
   WI["AgentSession.write_input_observed(bytes) ·· 본문 write<br/>encoder.encode() : Raw(그대로) | ClaudeStreamJson(JSON 포장) + msg_uuid<br/>반환 WriteOutcome ← 배달 관측('전송 실패' vs '모델 무시' 구별, ADR-0088)"]
   SUBMIT["submit_input_observed ·· 우편 배달 전용<br/>본문 write → SUBMIT_PACING 만큼 대기 → 제출 write(두 번 쓴다)<br/>★대기가 제출의 일부다(빼면 제출되지 않는다 — 실측)★<br/>사람 키 입력은 이 동사를 안 탄다 — 타면 키 한 번마다 턴이 제출된다"]
   SI["AgentTransport.send_input() ──▶ claude stdin"]
@@ -318,11 +318,16 @@ flowchart TD
 
 ### 세션 복원 / 활성화 (resume 전용 — ADR-0082)
 
-**복원은 프로필에 저장된 backend sid 단독에 의존한다 — 발급 주체는 백엔드가 정한다**(추적 파일은 best-effort). claude는 spawn 시 `--session-id`로 우리가 발급해 넘기고 `--resume`으로 **무손실** 복원한다(ADR-0008). ★**무손실은 claude 축의 말이다 — 발급 주체 중립 불변식에 붙이지 말 것**★: codex는 스레드를 만들어 본 적조차 없고 `capabilities().session.resume`이 `false`다. ★발급 주체를 불변식에 되올리지 말 것★ — 새 매핑·새 필드도 만들지 않는다(우리 id = `AgentId`, 백엔드 id = `backend_session_id`, 매핑 = 프로필 레코드).
+**복원은 프로필에 저장된 backend sid 단독에 의존한다 — 발급 주체는 백엔드가 정한다**(추적 파일은 best-effort). claude는 spawn 시 `--session-id`로 우리가 발급해 넘기고 `--resume`으로 **무손실** 복원한다(ADR-0008). ★**무손실은 claude 축의 말이다 — 발급 주체 중립 불변식에 붙이지 말 것**★: codex 는 스레드를 스스로 발급하고, 그 id 로 `thread/resume` 을 낸다(app-server 모드 한정 — 그래서 `capabilities().session.resume` 도 모드마다 갈린다). 그 이어받기가 **무손실**인지는 재 본 적이 없다. ★발급 주체를 불변식에 되올리지 말 것★ — 새 매핑·새 필드도 만들지 않는다(우리 id = `AgentId`, 백엔드 id = `backend_session_id`, 매핑 = 프로필 레코드).
 
-- ★**발급받는 백엔드(codex)는 아직 배선이 없다 — 「지금 이렇게 돈다」로 읽지 말 것**★ (ADR-0185). codex는 클라이언트 지정을 아예 받지 않으므로(`ThreadStartParams`에 id 계열 속성 0개) 스레드 생성 **응답**에서 받아야 하는데, 그 응답을 `observe_session_id`로 넘기는 줄이 없다 — 그 함수의 유일한 생산 호출자는 claude `/clear` watcher다(`daemon/src/lib.rs:288`). ★**그 watcher를 codex의 수령 경로로 오해하지 말 것**★ — `backend::session_id_source`는 **우리가 발급한 기준 sid**(`expected_sid: Uuid`)를 요구하는 파일 폴러이고(`backend/mod.rs:348-353`), codex의 id는 JSON-RPC 응답으로 온다. 즉 수령을 켜는 것은 **새 배선 하나**이고 `needs_session()`을 쪼개는 일이 그것을 열어 주지 않는다.
-- ★**그 가드가 없으면 조용한 대화 유실이다**★ — 활성화 입구 둘(`commands.rs:521` · `connection_core.rs:1126`)은 저장된 sid **하나만** 보고 `SpawnMode::Resume`을 유도하고 `needs_session()`을 보지 않는다(반면 `manager.rs:1376`의 부팅 복원은 본다). codex 프로필에 sid가 실린 채 그 입구를 타면 `spawn_agent`이 sid를 안 넘기고(`manager.rs:954-962`) `build_spec`은 `_mode`를 무시해(`backend/codex/mod.rs:93`) **새 대화가 열린다.** ★**그리고 그것이 새 대화라는 표식이 wire에 하나도 없다**★ — `AgentSpawnOk`(`commands.rs:807-814`)도 `AgentEvent::Spawned`(`protocol/src/messages.rs:468-471`)도 resume 여부를 안 실어서, 화면·소켓 어느 쪽으로도 구분되지 않는다. ★**`resumed` 를 grep 해 찾으려 하지 말 것**★ — 그 이름은 `commands.rs:1090` 의 `#[cfg(test)]` 테스트 더블 지역변수 하나뿐이다. `commands.rs:519-520`의 주석은 **다른 위험**(두 입구가 서로 다른 규칙을 쓰는 경우)을 적은 것이라 이 갭을 덮지 않는다 — 두 입구는 같은 규칙을 쓰고 있고, 그 규칙이 `needs_session()`을 안 보는 것이 여기서 문제다.
-- **미검(2026-09-09):** app-server 로 **실제 스레드를 만들어 id 를 받아 본 적이 없다** — `initialize` 왕복만 실측했다. 그리고 「받은 sid 를 첫 턴 허용 전에 persist 한다」는 순서 요구는 **아직 아무것도 강제하지 않는다** — `turn/start` 라는 이름이 저장소 코드·문서에 하나도 없고 근거는 스키마 읽기뿐이다. 그래서 지금은 **Phase 2 가 지켜야 할 요구사항**이지 성립한 불변식이 아니다.
+- ★**발급받는 백엔드(codex)의 수령은 이제 배선돼 있다 — 「없다」로 적힌 옛 문장을 되살리지 말 것**★ (ADR-0185). codex는 클라이언트 지정을 아예 받지 않으므로(`ThreadStartParams`에 id 계열 속성 0개) 스레드 생성 **응답**에서 받는다. 조립점이 `open_spawn`에 기록 동사 하나(`SessionIdSink`)를 넣어 내려보내고, app-server 통로의 라이터가 `thread/start` 응답을 받은 자리에서 그것을 부른다 — ★`Link::Ready`보다 **먼저**★. 그 동사가 이 spawn의 화신 표식을 들고 `observe_session_id`로 간다. ★**그 id 는 이제 읽히기도 한다 — 「적힐 뿐 이어받기에 쓰이지 않는다」로 적힌 자리를 만나면 낡은 것이다**★: 조립점이 Resume 스폰에서 `profile.backend_session_id` 를 `open_spawn` 의 `resume_session_id` 로 함께 넘기고, codex 가 그 값이 있으면 `thread/start` 대신 `thread/resume { threadId }` 를 낸다. 그래서 `can_resume_stored_session` 도 `capabilities().session.resume` 도 `is_app_server(command)` 다 — **둘이 같은 술어로 함께 켜지고 모드마다 갈린다**. ★수령 동사는 이어받기 갈래에서도 그대로 불리고, 적는 값은 **상대가 답한 id** 다★ — 우리가 보낸 것을 되쓰지 않는다(다르면 그 다른 값이 이 화신이 실제로 말하는 스레드다). ★거절당한 이어받기는 새 스레드로 되돌아가지 않는다(ADR-0082)★ — codex 쪽 보강 사유는 `-32600` 이 「모르는 스레드」 전용이 아니라는 것이다(모르는 메서드·중복 `initialize`·설정 오류가 전부 그 코드 — 실측 0.154.0). ★**claude `/clear` watcher를 codex의 수령 경로로 오해하지 말 것**★ — `backend::session_id_source`는 **우리가 발급한 기준 sid**(`expected_sid: Uuid`)를 요구하는 파일 폴러이고(`AgentBackend::session_id_source`), codex의 id는 JSON-RPC 응답으로 온다. 그 watcher는 지금도 별도 경로이고, 화신 표식 자리엔 `None`을 넘긴다(그 축을 나르지 않는다).
+- ★**그 가드는 이제 있다 — 「없다」로 적힌 옛 문장을 되살리지 말 것**★. 활성화 입구 둘(명령 버스 `wake_existing` · WS `SpawnProfile`)과 부팅 복원이 **같은 판정 하나**를 부른다 = `backend::can_resume_profile(profile)`(= 이어받기 축 ∧ 저장된 sid 존재). 세 곳이 규칙을 각자 적던 것을 한 함수로 모은 것이라, 네 번째 입구가 두 항 중 하나만 옮겨 적을 자리가 없다. 회귀망은 입구마다 하나씩 있다(버스 = `commands` 의 `waking_does_not_resume_…` · WS = `connection_core` 의 `ws_spawn_profile_does_not_resume_…` · 판정 자체 = `backend` 의 `a_stored_sid_alone_does_not_make_a_profile_resumable`).
+  - ★**그래도 두 구멍이 남는다**★: ① WS 입구의 `resume=true` 명시 요청은 그 술어를 **타지 않는다**(`resume || can_resume_profile(…)`) — 그 갈래로 들어오면 이어받을 수 없는 백엔드도 Resume 으로 뜬다. ② **새 대화라는 표식이 wire에 하나도 없다** — `AgentSpawnOk`(`commands.rs` 의 그 타입 선언)도 `AgentEvent::Spawned`(`protocol/src/messages.rs`)도 resume 여부를 안 실어서, 화면·소켓 어느 쪽으로도 구분되지 않는다. ★**`resumed` 를 grep 해 찾으려 하지 말 것**★ — 그 이름은 `commands.rs` 의 `#[cfg(test)]` 테스트 더블 안(`FakeHost::activate_profile`)에만 있다. 두 입구가 서로 다른 규칙을 쓰는 위험은 위 공용 판정이 닫았지만, 그것과 이 표식 갭은 **다른 축**이라 여전히 남는다.
+- **「받은 sid 를 첫 턴 허용 전에 persist 한다」 — 두 반쪽의 상태가 갈렸다(한 문장으로 읽지 말 것):**
+  - **순서 반쪽 = 강제된다.** 기록 호출이 `Link::Ready` 보다 **먼저** 나고, 턴을 여는 유일한 자리가 그 `Ready` 를 요구한다(`backend/codex/transport.rs` 의 `record_session_id` · `take_turn_locked`). 회귀망도 둘이다 — 순서 자체(`the_session_id_is_recorded_before_the_gate_opens`)와 게이트의 반대쪽 절반(`nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`). ★한때 여기 적혀 있던 「`turn/start` 라는 이름이 저장소 코드·문서에 하나도 없다」는 낡은 서술이다★ — `backend/codex/protocol.rs` 에 있다.
+  - **persist 반쪽 = 여전히 미충족(정직 표기).** 게이트가 실제로 서는 조건은 「기록 **호출이 돌아왔다**」이고 「디스크에 남았다」가 아니다 — 그 포트는 `()` 를 돌려주고 저장 실패를 자기 안에서 삼킨다. 그래서 저장이 실패해도 턴은 열린다. ★이 반쪽을 순서 반쪽과 함께 「강제됨」으로 적지 말 것★.
+- ★**이어받기 갈래는 실 codex 로 재 본 적이 없다 — 아래 실측은 `thread/start` 쪽이다**★. 재고 있는 것은 가짜 app-server 를 띄우는 격리 항목 둘(`backend/codex/mod.rs`): 이어받기 요청이 실제로 나가고 상대가 답한 id 가 기록되나 · 거절당하면 새 스레드로 폴백하지 않나. **미검으로 남은 것 셋** — 실 codex 가 ① 스레드 생성 때와 **다른** `cwd`·정책을 받아들이나 ② `excludeTurns: true` 를 실제로 존중하나 ③ 이어받은 대화가 화면에 어떻게 복원되나(그 갈래가 무손실인가).
+- **실측(GUI):** 실 codex app-server 가 스레드 id 를 실제로 건넸고 그 값이 `backend_session_id` 에 앉아 `agents.json` 에 남고 kill 을 넘겨 살아남았다. 성공 로그 한 갈래만 떴고 `epoch` 이 프로필과 일치해 화신 가드가 **우연히 통과한 것이 아니라 인정한 것**임까지 확인됐다(해독 실패 0 · 미반영 0). 음성 대조군 = Codex **Terminal** 프로필은 `null` 그대로. ★**받은 id 는 UUIDv7 이다**★ — claude 쪽 v4 와 버전이 갈리므로 그 칸에 v4 를 가정하지 말 것(수령 경로 doc 이 정본). ★한때 여기 있던 「실 app-server 로 id 를 받아 본 적이 없다」는 낡은 서술이다★. **턴은 안 돌렸다 — 핸드셰이크까지다.**
 
 - **활성화(activate) = 이어받기(resume) 전용이다 (ADR-0082).** 종료된 에이전트를 다시 켜면 그 session_id로 resume한다.
 - **fresh fallback 폐지:** 옛 설계는 "resume 실패 시 새 대화(fresh)를 만든다"였으나 이제 **하지 않는다.** resume가 실패/조기종료하면 → **관측된 종료 상태 그대로 종점 직행** + 시체 보존 + 실패 원인 기록(자동 재spawn 없음). 복구는 사람/LLM 판단 — 자동으로 새 세션을 파지 않는다(무손실 원칙 우선).
@@ -338,7 +343,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   A["에이전트 A (child claude)"]
-  MCP["입구① MCP send_message 툴<br/>웜 연결 · Bearer 토큰 (mcp-config에 박힘)"]
+  MCP["입구① MCP eg_send 툴<br/>웜 연결 · Bearer 토큰 (mcp-config에 박힘)"]
   CLI["입구② engram CLI (mail·agent 두 계열)<br/>별도 exe · 콜마다 HTTP POST · ENGRAM_TOKEN"]
   CI["[데몬] 라우트 핸들러 — 신원(from) 확정 + ControlCommand 조립<br/>from = 토큰에서 파생 (페이로드 아님 → 사칭 차단)"]
   VAL["ControlIngress.handle_send() — 공통 핸들러<br/>의미 검증·정규화 단일점 (ADR-0109, 0111이 부분 폐기)"]
@@ -347,16 +352,17 @@ flowchart TD
   ACK["동기 응답 — 수신자별 results[]<br/>delivered / pending / failed"]
 
   A -->|"원문 그대로 (McpPrimary 스폰)"| MCP --> CI
-  A -->|"원문 그대로 (CliOnly 스폰)"| CLI --> CI
+  A -->|"원문 그대로 (비-MCP 스폰 — 지시서 없음)"| CLI --> CI
   CI --> VAL --> DELIV
   DELIV -->|"① 배달일 때만"| B
   DELIV -.->|"세 분기 공통 — 결과를 동기 반환"| ACK
 ```
 
 - **입구는 원문을 나르고, 계약은 데몬이 만든다.** MCP 툴과 CLI(`engram mail` — 별도 exe라 HTTP로 붙는다)는 요청을 **그대로** 넘기고, `ControlCommand` 조립과 **의미 검증·정규화**(수신자 · 회신 계약 인자 · 멤버명 분해·트림)는 데몬 공유 핸들러 한 곳에서만 한다. 그래서 두 입구의 응답 JSON이 바이트 동일하고, 그 아래는 어느 입구로 들어왔는지 모른다(entrance-agnostic — ADR-0109). 입구별 인자 표면의 정본은 `crates/engram-dashboard-daemon/src/bin/engram.rs` 헤더다. **CLI는 계열이 둘이다** — `mail`(우편)과 `agent`(제어). agent 계열엔 **짝이 되는 MCP 툴을 의도적으로 두지 않았다**(제어는 빈도가 낮아 상주 연결이 아깝다 — ADR-0132).
-- **노출 표면 = 메시징 2툴(`send_message` 발송 · `messages` 상태·미결 조회) + 진단 `engram_ping`.** 그룹 관리 툴은 사용자 정의 그룹과 함께 폐지됐다(ADR-0111 결정 4) — CLI에도 `group` 동사가 없고 회귀 가드 테스트가 부활을 막는다. 이름이 닮은 Claude Code 내장 `SendMessage` 툴은 메시징 스폰에서 deny로 막는다(오발 방지 — ADR-0106).
-- **스폰 때 입구를 깔아 준다:** 에이전트별 `mcp-config`와 `--settings` 조각(전역 차단 설정을 세션 한정으로 우회 — 인라인 JSON이 아니라 **파일 경로**)을 만들어 주고, **프라이밍**이 "너는 팀의 한 명이고 이 툴로 동료에게 말을 건다"를 시스템 프롬프트에 얹는다(ADR-0092 · 0099는 0126/0128이 부분 폐기 · 0109는 0111이 부분 폐기).
-- ★**한 에이전트에게 열리는 입구는 하나다**★ — 스폰 시 capability로만 갈리고 **런타임 폴백이 없다**(ADR-0126이 우회 교육을 폐지, ADR-0128이 물리 배선까지 등호로 묶었다). 그래서 CliOnly 스폰의 프라이밍엔 `send_message`라는 낱말 자체가 없고, 안 깐 입구는 거절 응답에서도 **대안 채널을 알리지 않는다**(ADR-0133). 위 다이어그램의 두 화살표는 한 에이전트가 아니라 **두 스폰 모드**다.
+- **노출 표면 = 메시징 2툴(`eg_send` 발송 · `eg_messages` 상태·미결 조회) + 진단 `engram_ping`.** 그룹 관리 툴은 사용자 정의 그룹과 함께 폐지됐다(ADR-0111 결정 4) — CLI에도 `group` 동사가 없고 회귀 가드 테스트가 부활을 막는다. 이름이 닮은 Claude Code 내장 `SendMessage` 툴은 메시징 스폰에서 deny로 막는다(오발 방지 — ADR-0106).
+- **스폰 때 입구를 깔아 준다:** 에이전트별 `mcp-config`와 `--settings` 조각(전역 차단 설정을 세션 한정으로 우회 — 인라인 JSON이 아니라 **파일 경로**)을 만들어 주고, **프라이밍**이 "너는 팀의 한 명이고, 네 턴의 글은 동료에게 안 간다 — 닿는 법은 `engram help` 가 알려 준다"를 시스템 프롬프트에 얹는다(ADR-0092 · 0099는 0126/0128이 부분 폐기 · 0109는 0111이 부분 폐기). ★**그 문서는 계약을 산문으로 베끼지 않는다**★ — 2026-09-19에 포인터 한 장으로 줄였다(그 전엔 `send_message` 툴 설명과 같은 계약을 두 벌로 끌고 있었다). 툴 인자·회신 계약의 정본은 `eg_send` 툴 설명과 `engram help mail` 쪽이다.
+- ★**한 에이전트에게 열리는 입구는 하나다**★ — 스폰 시 capability로만 갈리고 **런타임 폴백이 없다**(ADR-0126이 우회 교육을 폐지, ADR-0128이 물리 배선까지 등호로 묶었다). 안 깐 입구는 거절 응답에서도 **대안 채널을 알리지 않는다**(ADR-0133). 위 다이어그램의 두 화살표는 한 에이전트가 아니라 **두 스폰 모드**다.
+- ★**단 지시서(프라이밍)를 받는 모드는 그 둘 중 하나뿐이다**★ — 비-MCP 갈래의 프라이밍 변형(`prompts/agent-priming-cli.md`)은 삭제됐고 `PrimingVariant` 축도 함께 걷혔다(커밋 `2ef6902`, 사용자 결정 2026-09-19). 지금 판정식은 `wants_priming = uses_mail && accepts_mcp_config`(`crates/engram-dashboard-daemon/src/control/mod.rs`)라 **비-MCP 스폰은 지시서를 한 글자도 받지 않는다** — 인가(`mail_allowed`)와 CLI grant 는 그대로 나가는데 교육만 없다. 근거는 ★없는 도구를 설명하는 문서를 주는 것이 거짓말이고 침묵은 아니다★이고, **오늘 그 화살표를 타는 운영 백엔드는 0개다**(claude = MCP 가능 · codex = `uses_mail=false`, ADR-0209). ★옛 문장 「CliOnly 스폰의 프라이밍엔 `send_message`라는 낱말 자체가 없다」를 되살리지 말 것★ — 그 파일이 없어서 참이 된 것이지 문구를 그렇게 쓴 것이 아니다. 정합 불변식(가르치는 채널 == 쓸 수 있는 채널)은 **아무것도 안 가르쳐서** 성립한다.
 
 > 응답은 수신자별 행이고 어휘는 **`delivered`·`pending`·`failed`** 3종이다(ADR-0125). `delivered`는 **stdin에 썼고 전량 수용됐다**는 뜻이지 수신 LLM이 읽었다는 뜻이 아니다 — 읽음 증거는 어느 모드에도 없다(ADR-0121 결정 3). `pending`은 큐에 남았다는 뜻이고, `failed`는 큐 적재 전 판정이다.
 
@@ -470,7 +476,7 @@ flowchart TD
 ### v1 경계 — 정직하게
 
 - **영속화 없음.** 보관함·장부가 전부 인메모리다 — **데몬을 재시작하면 파킹된 메시지도 미결 계약도 통째로 사라진다**(`messaging` crate에 serde·persist 0줄). 영속화는 에이전트 시스템 메모리 설계 때로 유예됐다(ADR-0103).
-- **UI 표면 없음.** 대시보드에 메시지함·미결 목록 화면이 없다. 관측 수단은 에이전트가 부르는 조회 툴(`messages`)과 데몬 로그뿐이다.
+- **UI 표면 없음.** 대시보드에 메시지함·미결 목록 화면이 없다. 관측 수단은 에이전트가 부르는 조회 툴(`eg_messages`)과 데몬 로그뿐이다.
 - **개발 중 — 기준선은 S18이고 그 뒤 개편이 여러 겹 쌓였다.** 발송 개편(ADR-0111/0112), 입구 3분기 재편(ADR-0116/0117), 동기 드레인(ADR-0125), `@all`/`@here` 분리(ADR-0121), 배달 병렬화(ADR-0142)가 v1 위에 얹혔다. 이 절을 읽을 때 **S18 spec 단독을 정본으로 삼지 말 것** — 위 ADR들이 spec 조항을 개정한다. 남은 측정·비채택 항목은 spec과 step-log 백로그가 추적한다.
 
 결정: v1 본체 = ADR-0103/0104(각각 0107·0111 / 0112로 부분 폐기) · 발송 개편 = ADR-0111(0117/0121로 범위 축소)·0112 · 입구 3분기 = ADR-0116(정본 — 0120/0121이 부분 폐기)·0117 · 계약 수명 = ADR-0108 → 0114 → 0118 · 동기 드레인 = ADR-0125(0124 폐기) · 그룹 어휘 = ADR-0121 · 병렬화 = ADR-0142 · 구조 = ADR-0110(0127로 부분 폐기).
@@ -715,7 +721,7 @@ flowchart TD
 ```mermaid
 flowchart TD
   M1["[스폰 시] 데몬이 A에게 (AgentId,epoch)별 토큰 발급 + mcp-config·settings 조각 생성 + 프라이밍"]
-  M2["A(LLM)가 send_message(to:'B', body) 호출<br/>· 입구① MCP 툴(웜 연결) 또는 · 입구② engram mail send CLI — 둘 다 원문 전달"]
+  M2["A(LLM)가 eg_send(to:'B', body) 호출<br/>· 입구① MCP 툴(웜 연결) 또는 · 입구② engram mail send CLI — 둘 다 원문 전달"]
   M3["[데몬] 인증 미들웨어: Bearer 토큰 → registry.validate → 신원(from) 확정 (페이로드 from 무시)"]
   M4["ControlIngress.handle_send: 의미 검증·정규화(단일점) → MessagingService"]
   M5["전부 큐 적재 → ★같은 호출이 자기 턴에 그 수신자 큐를 앞에서부터 동기 드레인★<br/>(직발송 지름길 폐지 — ADR-0125 · 다중 수신자면 수신자별로 같은 3분기)"]
@@ -748,7 +754,7 @@ flowchart TD
 
 **설계 지향(CLAUDE.md 「LLM-우선 제어」):** UI 컴포넌트는 store 액션 호출만, 그 액션을 LLM도 동일하게 부르는 단일 control surface로 모은다.
 - **백엔드 제어 — "누가" 제어하나로 갈린다.** ① 스폰·kill·write 등은 **클라이언트 제어 표면(invoke)** 으로 LLM 제어 가능(앱을 부리는 주체 경로). ② 워커(child 에이전트)도 제어 채널로 **우편 말고 제어를 함께 쥔다** — ★"메시징 2툴만"이 아니다★. 실제 표면은 셋이다:
-  - **MCP 툴 3종** — `send_message`(발송) · `messages`(조회) + 진단 `engram_ping`. 여기까지가 MCP가 내는 전부다(`group` 툴은 ADR-0111이 폐지).
+  - **MCP 툴 3종** — `eg_send`(발송) · `eg_messages`(조회) + 진단 `engram_ping`. 여기까지가 MCP가 내는 전부다(`group` 툴은 ADR-0111이 폐지).
   - **`agent` 계열 5동사**(`/control/agent` — `list`·`spawn`·`new`·`rename`·`move`). ★**형제 스폰이 여기 든다**★ — 있는 에이전트 깨우기와 새로 만들어 띄우기 둘 다다. **짝이 되는 MCP 툴을 의도적으로 두지 않아** CLI(`engram agent …`)로만 나가고, 이 라우트는 **스폰 모드와 무관하게 전원 개방**이다(제어는 빈도가 낮아 상주 연결이 아깝다 — ADR-0132 결정 5·6). 입구가 capability로 갈리는 것은 **우편 축뿐**이고 그쪽 거절은 데몬이 자격증명으로 한다(ADR-0133).
   - **전체 이름 호출**(`/control/commands` 발견 + `/control/call` 호출 — ADR-0160/0161). 데몬 자기 표(`agent.*`)뿐 아니라 **붙어 있는 클라이언트가 등록한 창·탭·슬롯 명령까지** 같은 입구로 닿는다. 즉 에이전트는 형제와 함께 **화면 레이아웃도** 부린다.
 
@@ -826,7 +832,7 @@ flowchart TD
 
 **제어 채널(S17) · 메시징(S18):**
 - **제어 채널(control channel)** = 에이전트↔에이전트 메시지의 **입구**(에이전트→데몬 MCP/HTTP). 기존 출력/입력 경로와 별개의 인바운드.
-- **send_message** = 발송 명령(조회는 `messages`). MCP 툴은 이 둘뿐 — `group` 관리 툴은 폐지됐다(ADR-0111). 입구 = MCP 툴 또는 `engram mail send` CLI.
+- **eg_send** = 발송 명령(조회는 `eg_messages`). MCP 툴은 이 둘뿐 — `group` 관리 툴은 폐지됐다(ADR-0111). 입구 = MCP 툴 또는 `engram mail send` CLI.
 - **토큰((AgentId,epoch))** = 발신자 신원의 단일 출처. 페이로드 from은 무시(사칭 차단).
 - **보관함(Mailbox)** = 지금 못 넣는 메시지를 데몬이 들고 있는 수신자별 **유계 2레인** 큐(메시지/통지, 인메모리 — ADR-0107, 상한은 0114).
 - **파킹(parking)** = 그 큐에 넣어 두는 것(상태 = `pending`).

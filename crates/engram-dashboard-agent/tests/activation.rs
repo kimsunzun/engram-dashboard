@@ -16,9 +16,14 @@ use engram_dashboard_agent::failure::AgentFailureKind;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
-use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
+use engram_dashboard_agent::profile::{
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, SpawnMode,
+};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
-use engram_dashboard_agent::types::{AgentId, AgentInfo, AgentStatus, StatusSink};
+use engram_dashboard_agent::types::{
+    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlEndpoint, NoopControlChannel,
+    ProvisionError, StatusSink,
+};
 
 #[derive(Clone)]
 struct CountingSink {
@@ -56,6 +61,13 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
 }
 
 fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>) {
+    make_manager_with_control(tag, Arc::new(NoopControlChannel))
+}
+
+fn make_manager_with_control(
+    tag: &str,
+    control: Arc<dyn ControlChannel>,
+) -> (AgentManager, CountingSink, Arc<ProfileRegistry>) {
     let sink = CountingSink::new();
     let sink_dyn: Arc<dyn StatusSink> = Arc::new(sink.clone());
     let store = Arc::new(FileProfileStore::new(
@@ -74,7 +86,8 @@ fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>)
         },
         Arc::new(|_, _| {}),
     ));
-    let manager = AgentManager::new(sink_dyn, profiles.clone(), presets, tracker);
+    let manager =
+        AgentManager::new_with_control(sink_dyn, profiles.clone(), presets, tracker, control);
     (manager, sink, profiles)
 }
 
@@ -358,7 +371,7 @@ fn spawn_registers_the_incarnation_in_the_turn_table() {
 
 /// ★ADR-0084 회귀 가드★ — 시체를 같은 슬롯에서 재활성화하면 화신 표식이 달라진다.
 ///
-/// 셸은 needs_session=false 라 `--resume` 플래그 조립까지는 보지 않는다 — 그건
+/// 셸은 두 세션 축이 모두 false 라 `--resume` 플래그 조립까지는 보지 않는다 — 그건
 ///   `backend::claude::tests::build_command_spec_resume_emits_resume_flag_with_sid` 몫이고,
 ///   이 테스트가 겨냥하는 "재활성화 = 맵 교체 = 새 표식" 은 backend 무관하게 성립한다.
 ///   ★재는 것은 **다름**뿐이다 — 커진다가 아니다★: 표식은 화신마다 뽑는 난수라 대소에 뜻이 없다
@@ -427,9 +440,20 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let (profile, batch, count) = long_lived_profile("kill-reactivate");
     let id = profile.id;
 
-    // ★seeded 프로필을 spawn/activate/kill 전부에 넘겨야 한다★: spawn 은 넘겨받은 스냅샷을
-    //   upsert_preserving_hierarchy 로 그대로 심으므로, backend_session_id=None 인 원본을 넘기면
-    //   심어둔 sid 가 덮여 유실된다. auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
+    // ★seeded 프로필을 spawn/activate/kill 전부에 넘긴다★ — 명부와 인자를 한 값으로 맞춰 이 항목이
+    //   재는 것이 손잡이 보존이 아니라 **이어받기 배선**임을 분명히 한다.
+    //   ★옛 사유(「안 그러면 심어둔 sid 가 덮여 유실된다」)는 낡았다★ — `upsert_preserving_hierarchy` 가
+    //   이제 `backend_session_id` 와 그 이력을 live 에서 보존한다(사용자 결정). 그 보존 자체의 회귀망은
+    //   `profile.rs` 의 `spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot`
+    //   이고 여기서 겸하지 않는다.
+    //   ★**그 보존이 claude 에서도 동작을 바꾼다 — 「claude 는 그대로다」로 읽지 말 것**★: 재활성화가
+    //   쓰는 sid 는 `ensure_position` 이 아니라 `ensure_session_id` 가 **명부에서** 읽어 오는데, 등록이
+    //   더 이상 그 칸을 스냅샷으로 덮지 않으므로 이제 **`SessionTracker` 가 관측한 드리프트 sid** 가
+    //   읽힌다(그 관측기는 `observe_session_id(id, None, ..)` 로 무조건 쓰고, `assigns_sid` 게이트
+    //   뒤에서만 붙으므로 실제 대상이 claude 다). 즉 낡은 스냅샷으로 재활성화해도 드리프트한 쪽을
+    //   이어받는다 — 의도한 개선이지만 **무변화가 아니다**. 이 항목은 명부와 인자가 같아 그 차이를
+    //   재지 않는다(그래서 여기 적어 둔다).
+    //   auto_restore=true 는 kill 수거의 다운그레이드를 관측하기 위함.
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);
@@ -666,4 +690,109 @@ fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
     let _ = std::fs::remove_file(&count);
     let _ = std::fs::remove_file(&batch);
+}
+
+// ── 세션 id 발급 축(ADR-0185) ─────────────────────────────────────────────────
+
+/// provision 을 떨어뜨려 spawn 을 **통로 생성 전에** 끊는 시험대 장치. 그 중단점이 sid 발급보다 뒤라,
+/// 이 장치를 낀 spawn 은 프로세스를 하나도 안 띄우고도 발급 지점을 실제로 지나간다.
+struct FailingControl;
+
+impl ControlChannel for FailingControl {
+    fn provision(
+        &self,
+        _id: AgentId,
+        _epoch: u32,
+        _needs: engram_dashboard_agent::types::ControlChannelNeeds,
+    ) -> Result<Option<ControlEndpoint>, ProvisionError> {
+        Err(ProvisionError(
+            "시험대: 통로 생성 전에 spawn 을 끊는다".into(),
+        ))
+    }
+
+    fn revoke(&self, _id: AgentId, _epoch: u32) {}
+}
+
+/// ★이 항목이 **실제로** 잰다고 주장하는 것 — 두 가지뿐이다★:
+///   ① sid 발급 판정이 정말 spawn 흐름 **안**에 있고 그 결말이 **프로필에 영속**된다.
+///   ② 그 게이트가 오늘 실제로 두 갈래를 낸다 — 발급하는 백엔드는 `Some`, 안 하는 백엔드는 `None`.
+///
+/// ★`manager.rs` 의 그 한 줄을 다른 축으로 바꿔치기하는 것은 **못 잡는다**★: 오늘 모든 백엔드가 두 축에
+///   같은 답을 내서, 어느 쪽을 부르든 이 단언들이 전부 그대로다. 그 축 혼동을 잡는 것은 `backend` 의
+///   모드별 트립와이어와 선언 표이고, 이 항목은 **저장 경로**를 맡는다. 두 축의 값이 갈리는 날 이 항목이
+///   그 혼동도 함께 집어 든다.
+/// ★그래도 이 항목이 필요한 이유★: 이 커밋 전에는 **spawn 뒤 `backend_session_id` 를 보는 단언이 하나도
+///   없었다**. 발급이 조용히 켜지거나 꺼져도 스위트 전체가 초록이었다.
+///
+/// ★spawn 은 **프로세스를 하나도 안 띄운 채** 실패하도록 몰아 둔다 — 그래도 발급 지점은 지난다★:
+///   발급은 spawn 흐름에서 통로 생성보다 **앞**이라, 뒤에서 끊어도 이 단언은 그 지점을 그대로 잰다.
+/// ★두 행이 서로 다른 자리에서 멈춘다★:
+///   - 제어 채널을 **쓰는** 백엔드는 아래 [`FailingControl`] 이 provision 에서 fail-closed 로 끊는다.
+///   - 제어 채널을 **안 쓰는** 백엔드는 provision 을 아예 안 타므로, 존재하지 않는 cwd 가 통로 생성을
+///     떨어뜨린다.
+/// ★cwd 하나로 두 행을 다 막을 수 없다(실측 2026-09-14 — 되살리지 마라)★: 존재하지 않는 cwd 를 줘도
+///   ConPTY 통로는 그대로 떠서 실 `cmd.exe /c claude` 가 기동했다. 그래서 그 행에는 제어 채널 쪽 장치가
+///   따로 필요하다.
+/// ★대조군(발급하는 백엔드) 행이 없으면 안 된다★ — 없으면 이 항목은 spawn 이 발급 **이전**에 죽어도
+///   초록이 된다.
+#[test]
+fn we_do_not_mint_a_session_id_for_a_backend_that_mints_its_own() {
+    let (manager, _sink, profiles) =
+        make_manager_with_control("mint-axis", Arc::new(FailingControl));
+    let nowhere = std::env::temp_dir().join(format!("engram-no-such-dir-{}", Uuid::new_v4()));
+
+    let codex = AgentProfile::new(
+        "codex-app-server".into(),
+        AgentCommand::Codex {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::StreamJson,
+        },
+        nowhere.clone(),
+        vec![],
+        false,
+    );
+    let claude = AgentProfile::new(
+        "claude-terminal".into(),
+        AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::Terminal,
+        },
+        nowhere,
+        vec![],
+        false,
+    );
+
+    for p in [&codex, &claude] {
+        if let Ok(outcome) = manager.spawn_agent(p, SpawnMode::Fresh) {
+            if let Some(info) = outcome.into_started() {
+                let _ = manager.kill_agent(info.id);
+                panic!(
+                    "{:?}: 통로가 실제로 떴다 — 격리 전제(존재하지 않는 cwd 로 spawn 실패)가 깨졌다",
+                    p.command
+                );
+            }
+        }
+    }
+
+    // ★먼저 명부에 실제로 올랐는지 본다★ — 아래 `None` 은 「발급 안 됨」과 「프로필이 아예 없음」을
+    //   구별하지 못해서, 이 줄이 없으면 등록조차 안 된 경우에도 초록이 된다.
+    assert!(
+        profiles.get(codex.id).is_some(),
+        "프로필이 명부에 없다 — 아래 단언이 발급 여부가 아니라 부재를 재게 된다"
+    );
+    assert_eq!(
+        profiles.get(codex.id).and_then(|p| p.backend_session_id),
+        None,
+        "자기 id 를 스스로 발급하는 백엔드의 프로필에 sid 가 적혔다 — 원인이 둘이라 로그를 함께 볼 것: \
+         ① 우리가 uuid 를 심었다(발급 축이 이어받기 축으로 갈렸다 — ADR-0185) ② app-server 수령 경로가 \
+         받아 적었다. 이 시험대는 존재하지 않는 cwd 로 spawn 을 실패시켜 ②를 못 일어나게 하므로, ②라면 \
+         그 격리 전제가 먼저 깨진 것이다"
+    );
+    assert!(
+        profiles
+            .get(claude.id)
+            .and_then(|p| p.backend_session_id)
+            .is_some(),
+        "대조군 실패: 발급하는 백엔드조차 발급되지 않았다 — spawn 이 발급 지점 이전에 죽어 위 단언이 공회전한다"
+    );
 }

@@ -532,7 +532,10 @@ fn wake_existing(
     };
     // ★모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076)★: 저장된 세션이 있으면 이어받기, 없으면
     //   새로. 여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다.
-    let mode = if profile.backend_session_id.is_some() {
+    //   ★sid 존재만으로 가르지 않는다(ADR-0185)★: 저장된 sid 가 그 명령으로 **이어받을 수 있는 것인지**
+    //     를 백엔드에 먼저 묻는다 — 그 판정은 부팅 복원·WS 입구와 같은 dispatch 가 소유한다. 안 물으면
+    //     이어받을 수 없는 모양이 Resume 으로 떠, 새 대화가 열렸는데 「이어받음」으로 보고된다.
+    let mode = if crate::backend::can_resume_profile(&profile) {
         SpawnMode::Resume
     } else {
         SpawnMode::Fresh
@@ -1028,12 +1031,29 @@ mod tests {
             live: Option<AgentStatus>,
             resumable: bool,
         ) -> AgentId {
-            let profile = AgentProfile::new(
-                format!("C:/work/{name}"),
+            self.with_status_command(
+                name,
+                live,
+                resumable,
                 AgentCommand::Claude {
                     extra_args: vec![],
                     output_format: NEW_AGENT_OUTPUT_FORMAT,
                 },
+            )
+        }
+
+        /// 행의 **명령**까지 정하는 변형 — 활성화 모드 유도가 백엔드 축을 보는지 재려면 claude 말고 다른
+        /// 명령도 심을 수 있어야 한다(claude 만 심으면 그 판정이 늘 같은 답을 내 아무것도 안 갈린다).
+        fn with_status_command(
+            self: &Arc<Self>,
+            name: &str,
+            live: Option<AgentStatus>,
+            resumable: bool,
+            command: AgentCommand,
+        ) -> AgentId {
+            let profile = AgentProfile::new(
+                format!("C:/work/{name}"),
+                command,
                 PathBuf::from(format!("C:/work/{name}")),
                 vec![],
                 false,
@@ -1267,6 +1287,67 @@ mod tests {
         call(&table, "agent.spawn", json!({ "target": "alpha" }))
             .expect_err("전제: 활성화가 실패한다");
         assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// ★저장된 sid 만으로 Resume 을 유도하지 않는다(ADR-0185)★ — 이어받을 수 없는 명령에 sid 가 남아
+    /// 있는 상태는 오늘도 만들어진다(손으로 고친 `agents.json` · 백엔드를 갈아탄 프로필). 그때 Resume 으로
+    /// 띄우면 **새 대화가 열리는데 결과는 「이어받음」으로 보고된다** — wire 에 그것이 새 대화라는 표식이
+    /// 없어 화면도 LLM 도 구별하지 못한다.
+    /// ★WS 입구에도 같은 짝이 있다★ — 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
+    // ADR-0185
+    /// ★표본이 셸인 것은 의도다 — codex 터미널 모드를 여기 되돌리지 말 것★: 그 모드는 ADR-0208 로
+    /// `codex resume <id>` 를 쓰게 되어 이제 이어받기 축이 **true** 다. 축이 꺼진 표본은 셸뿐이고,
+    /// 셸을 잘못된 표본이라 여겨 갈아 끼우면 이 항목이 재는 것이 사라진다.
+    #[test]
+    fn waking_does_not_resume_a_profile_whose_backend_cannot_resume() {
+        let host = FakeHost::new();
+        let id = host.with_status_command(
+            "shell-with-stale-sid",
+            None,
+            true,
+            AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            },
+        );
+        let (table, _notify) = wiring(&host);
+
+        call(
+            &table,
+            "agent.spawn",
+            json!({ "target": "shell-with-stale-sid" }),
+        )
+        .expect("깨우기");
+        assert_eq!(
+            host.started.lock().unwrap().as_slice(),
+            &[(id, false)],
+            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다"
+        );
+    }
+
+    /// ★위 항목의 짝 — codex 터미널 모드는 이제 **반대쪽**에 선다(ADR-0208)★: 손잡이가 명부에 있으면
+    /// 그 모드도 Resume 으로 떠야 한다. 이것이 없으면 위 항목만 남아, 축을 통째로 꺼도 초록이다.
+    // ADR-0208
+    #[test]
+    fn waking_a_codex_terminal_profile_with_a_stored_handle_resumes() {
+        let host = FakeHost::new();
+        let id = host.with_status_command(
+            "codex-term",
+            None,
+            true,
+            AgentCommand::Codex {
+                extra_args: vec![],
+                output_format: CoreAgentOutputFormat::Terminal,
+            },
+        );
+        let (table, _notify) = wiring(&host);
+
+        call(&table, "agent.spawn", json!({ "target": "codex-term" })).expect("깨우기");
+        assert_eq!(
+            host.started.lock().unwrap().as_slice(),
+            &[(id, true)],
+            "훅이 받아 적은 손잡이가 있는데 Fresh 로 뜨면 그 id 는 영영 안 쓰인다"
+        );
     }
 
     #[test]

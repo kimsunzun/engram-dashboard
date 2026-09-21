@@ -28,9 +28,23 @@ const GEMINI_PROGRAM: &str = "gemini";
 pub struct GeminiBackend;
 
 impl AgentBackend for GeminiBackend {
-    fn needs_session(&self) -> bool {
+    /// ★아래 두 축은 실측된 적이 없고, 이 백엔드는 오늘 **도달 불가**다★ — `AgentCommand` 에 gemini
+    /// variant 가 없어 `backend_for` 가 이 구현으로 오는 길이 없다(그래서 `tests/backend_contract.rs` 의
+    /// 선언 표에도 행이 없다). 값은 CLI spike 전의 best-guess 이고, variant 를 들이는 작업이 실측으로
+    /// 교체한다.
+    /// ★**이 두 메서드에 한해** 단위 테스트를 두지 않는 것은 의도다★: 부르려면 남의 백엔드 명령을 먹여야
+    ///   하는데(`backend_for` 가 만들 수 없는 짝) **이 둘은 그 명령을 읽지도 않아서**(`_command`) 그렇게 쓴
+    ///   단언은 상수 하나를 되읽을 뿐이다. ★같은 파일의 `build_spec` 은 다르다★ — 그쪽은 명령을 실제로
+    ///   match 해 인자를 옮기므로 합성 표본으로도 재는 것이 있고, 그래서 테스트를 둔다(그 한계는 아래
+    ///   `tests::spec` 주석).
+    fn assigns_session_id(&self, _command: &AgentCommand) -> bool {
         // best-guess: Gemini CLI도 대화 세션 개념이 있다고 가정해 true.
-        // CLI spike에서 실측 후 확정. 세션리스 CLI라면 false로 변경.
+        // 세션리스 CLI라면 false로 변경.
+        true
+    }
+
+    fn can_resume_stored_session(&self, _command: &AgentCommand) -> bool {
+        // best-guess: 아래 `--resume <sid>` 조립과 같은 가정.
         true
     }
 
@@ -53,6 +67,8 @@ impl AgentBackend for GeminiBackend {
         command: &AgentCommand,
         mode: SpawnMode,
         session_id: Option<Uuid>,
+        // ADR-0185 stub — 이 백엔드는 dispatch 에 배선되지 않았고, 명령줄 이어받기 문법도 미측정이다.
+        _resume_session_id: Option<Uuid>,
         cwd: PathBuf,
         env: Vec<(String, String)>,
         // ADR-0086: stub — 제어 채널 주입은 CLI spike 후 variant 확정 시 구현(현재 무시).
@@ -128,6 +144,13 @@ impl AgentBackend for GeminiBackend {
 mod tests {
     use super::*;
 
+    /// ★표본이 합성이다 — `backend_for` 는 이 백엔드에 claude 명령을 줄 수 없다★(gemini variant 자체가
+    /// 없어 **어떤** 명령도 여기 닿지 않는다). 그래도 이 helper 를 쓰는 항목들이 재는 것이 있다:
+    /// `build_spec` 은 명령을 실제로 match 해 `extra_args` 를 옮기고 세션 플래그를 조립하므로, 아래
+    /// 단언들은 **그 조립**을 잰다.
+    /// ★재지 **않는** 것 = 그 조립이 실 gemini 와 맞나★ — 프로그램 이름도 `--session`/`--resume` 도 전부
+    ///   best-guess 이고 실 CLI 를 띄운 적이 없다(파일 헤더의 stub 선언 그대로). variant 를 들이는 작업이
+    ///   표본을 진짜 명령으로 바꾸고 값을 실측으로 교체한다.
     fn spec(mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         GeminiBackend.build_spec(
             &AgentCommand::Claude {
@@ -136,6 +159,7 @@ mod tests {
             },
             mode,
             sid,
+            None,
             PathBuf::from("."),
             vec![],
             None,
@@ -164,11 +188,8 @@ mod tests {
         assert_eq!(s.args, vec!["--resume".to_string(), sid.to_string()]);
     }
 
-    #[test]
-    fn needs_session_is_true() {
-        assert!(GeminiBackend.needs_session());
-    }
-
+    /// 표본이 합성인 사정과 그 한계는 위 [`spec`] 주석이 정본이다 — 이 항목만 `spec` 을 안 쓰는 것은
+    /// cwd·env 를 직접 넘겨야 해서다.
     #[test]
     fn cwd_and_env_are_forwarded() {
         let cwd = PathBuf::from("C:/workspace");
@@ -179,6 +200,7 @@ mod tests {
                 output_format: crate::profile::AgentOutputFormat::Terminal,
             },
             SpawnMode::Fresh,
+            None,
             None,
             cwd.clone(),
             env.clone(),

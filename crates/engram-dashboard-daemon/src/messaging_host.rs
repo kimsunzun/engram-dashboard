@@ -123,7 +123,12 @@ fn receipt(o: engram_dashboard_agent::types::WriteOutcome) -> InjectReceipt {
 impl DeliveryPort for ManagerDeliveryPort {
     /// ★`submit_stdin_observed` 여야 한다(`write_stdin_observed` 로 되돌리지 마라)★: 봉투 바이트만 쓰면
     ///   터미널(TUI) 수신자는 그걸 입력창에 담아 둔 채 턴을 시작하지 않는다 — 배달은 "바이트가 닿았다" 가
-    ///   아니라 "수신자가 턴으로 받았다" 까지다(`DeliveryPort::inject` 계약). 제출이 필요한 백엔드인지의
+    ///   아니라 "수신자가 턴으로 받았다" 까지다(`DeliveryPort::inject` 계약).
+    /// ★그 동사가 지키는 것이 하나 더 있다 — 영수증이 **수락이 아니라 착지**를 뜻한다는 것★: 통로가 유계
+    ///   입력 큐를 쓰게 된 뒤로 `send_input` 의 `Ok` 는 「받았다」로 내려앉았고, 그것을 그대로 영수증에
+    ///   실으면 아직 안 나간 봉투가 배달 성공으로 기록된다. `submit_stdin_observed` 만 착지를 확인한다
+    ///   (`AgentSession::submit_input_observed` → `AgentTransport::flush_input`) — `write_stdin_observed`
+    ///   로 되돌리면 그 확인까지 함께 사라진다. 제출이 필요한 백엔드인지의
     ///   판정은 agent seam 뒤 backend 소유라(ADR-0004) 이 어댑터는 동사만 고른다.
     fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
         self.manager

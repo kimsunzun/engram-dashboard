@@ -118,6 +118,162 @@ pub enum DispatchFlow {
     Close,
 }
 
+// ── 도착순 큐에 남을 것과 떼어 낼 것(head-of-line blocking) ──────────────────────────
+
+/// 한 명령을 **그 연결의 도착순 줄에서 떼어내** 별도 태스크로 돌려도 되는가.
+///
+/// ★왜 분류가 필요한가★: 네트워크 행은 연결마다 소비자 하나로 프레임을 도착 순서대로 올린다
+///   (`frame_port::ConnectionHandler` 계약). 그 직렬성이 아래 순서 불변식들을 **공짜로** 지켜 주는
+///   대신, 한 명령이 오래 걸리면 그 연결의 다음 명령도 함께 늦는다. 그래서 「순서가 뜻을 갖지 않는
+///   것」만 골라 줄 밖으로 내보낸다.
+/// ★기본값은 [`DispatchOrder::InOrder`] 다 — 의심스러우면 줄에 남긴다★: 떼어 내는 쪽이 틀리면
+///   조용한 순서 결함이 되고, 남기는 쪽이 틀리면 느릴 뿐이다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DispatchOrder {
+    /// 도착 순서대로, 앞 명령이 끝난 뒤에 돈다.
+    InOrder,
+    /// 줄에서 떼어 별도 태스크로 돈다 — 이 명령이 도는 동안 **뒤에 온 명령이 먼저 끝날 수 있다**.
+    Detached,
+}
+
+/// 수신 줄이 **포화일 때만** 쓰는 두 번째 분류 — 그 프레임이 줄을 건너뛰어도 되는가.
+///
+/// ★[`DispatchOrder`] 와 축이 다르다 — 합치지 말 것★: 저쪽은 「오래 걸리는가」이고 이쪽은 「막힌 줄을
+///   풀려는 것인가」다. 실제로 둘은 정반대로 갈린다 — 활성화는 오래 걸리지만 급하지 않고, `Kill` 은
+///   짧지만 급하다.
+/// ★포화가 아니면 이 판정은 **아예 불리지 않는다**★: 즉 평시에 `Kill` 이 앞선 명령을 추월하는 일은
+///   없다. 우선순위는 압력이 있을 때만 생긴다 — 그래야 「빠르게 하려고 순서를 버렸다」가 안 된다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InboundLane {
+    /// 도착순 줄에 선다. 줄이 차 있으면 거절된다.
+    Ordered,
+    /// 줄을 건너뛴다 — 줄에 이미 든 것들보다 먼저·겹쳐서 돈다.
+    Bypass,
+}
+
+/// 수신 줄 포화 거절 문구. ★조용한 유실이 아니라 **말로 하는 거절**이다★ — 받은 쪽이 재시도할지
+/// 포기할지 정할 수 있어야 한다(codex transport 의 `INPUT_QUEUE_LIMIT`/ADR-0190 과 같은 처분).
+pub(crate) const SATURATED_REFUSAL: &str =
+    "daemon inbound queue for this connection is saturated; this command was refused, not applied — \
+     retry it, or send Kill if an agent is wedged";
+
+/// [`InboundLane`] 판정.
+///
+/// ★★건너뛰는 것은 `Kill` 하나뿐이다 — 이 목록을 늘리기 전에 아래 둘을 먼저 통과시킬 것★★:
+///   ① **어떤 순서 묶음에도 들지 않는가.** `Kill` 은 다섯 묶음 어디에도 없다. 앞서 줄에 든
+///      `WriteStdin`(X) 을 추월해 그 바이트가 유실되지만, 그 에이전트를 죽이라는 것이 이 명령의 뜻이라
+///      그 유실이 곧 요청된 결과다.
+///   ② **막힌 것과 다른 경로로 도는가.** ★한때 여기 적혀 있던 「줄이 막히는 현실적 원인은
+///      `write_stdin` 의 블로킹 PTY write 다」는 **더는 참이 아니다**★ — 콘솔 통로가 에이전트별 입력
+///      큐를 갖게 되면서 `send_input` 은 큐에 넣고 즉시 돌아온다(`transport::input_queue`). **그래도 이
+///      줄은 유효하다**: 오늘 도착순 줄을 실제로 오래 붙드는 것은 ㉮ `Kill` 자신
+///      (`AgentManager::kill_agent` 이 통로 종료와 pump join **5초**를 `spawn_blocking` 없이 동기로
+///      기다린다) ㉯ 프로필 CRUD 의 동기 파일 IO 다. 그리고 `Kill` 은 그 둘 중 어느 것도 타지 않는다 —
+///      `child.kill()` + Job 종료로 내려간다(`PtyTransport::shutdown`). 즉 **다른 경로로 돌 뿐 아니라,
+///      줄을 붙들고 있는 것을 끝내는 유일한 명령**이다.
+/// ★`Interrupt` 를 여기 **넣지 않은 것은 의도다** — 둘 다 어긋난다★: ①로는 순서 묶음 ①에 정면으로
+///   들고(`WriteStdin`(X) ↔ `Interrupt`(X)), ②로는 **건너뛰어도 도착 시점이 그대로다**.
+///   ★②의 근거가 갈렸다 — 옛 문장(「`interrupt()` 가 `0x03` 을 **같은 PTY writer 로** 쓰므로 그 writer 에
+///   걸린다」)은 입력 큐가 들어오면서 죽었다★. 지금 참인 것: `interrupt()` 는 그 `0x03` 을 **그
+///   에이전트의 입력 큐에 밀어 넣고 즉시 돌아온다**(`PtyTransport::interrupt` → `send_input`). 그래서
+///   이 명령 자체는 아무것도 막지 않지만, 그 한 바이트는 **큐에 이미 선 것들 뒤에** 서고 라이터가 OS
+///   쓰기에 물려 있으면 그 물림이 풀릴 때까지 안 나간다. 줄을 건너뛰어 얻는 것은 dispatch 몇 밀리초뿐
+///   이고, **순서를 깨면서 얻는 것이 여전히 없다.**
+/// ★★그 대신 기록해 둘 사실 — `Interrupt` 는 이제 포화에서 **거절된다**★★: 읽기와 처리가 한 줄이던
+///   옛 모양에서는 읽기 루프가 기다렸으므로 모든 명령이 늦게나마 **반드시** 처리됐다. 지금 도착순
+///   줄로 가는 것은 줄이 찬 순간 거절로 답해진다([`SATURATED_REFUSAL`]). 즉 압력이 걸린 순간 사용자가
+///   쥔 손잡이는 `Kill` 하나뿐이고, 그 문구가 `Kill` 을 가리키는 것이 이 변경 뒤에 **더** 맞는 말이 됐다.
+/// ★`StopDaemon` 도 넣지 않는다★: 순서 묶음 ⑤(이 연결의 마지막이어야 한다)에 정면으로 든다.
+// ADR-0206
+pub(crate) fn inbound_lane(cmd: &AgentCommand) -> InboundLane {
+    match cmd {
+        AgentCommand::Kill { .. } => InboundLane::Bypass,
+        // ★여기만 `_ =>` 를 쓴다 — 형제([`dispatch_order`])가 그것을 금하는 것과 모순이 아니다★:
+        //   저쪽은 빠뜨리면 **틀린 쪽(느리거나 조용히 빠짐)**으로 기울지만, 여기서 빠뜨리면 기우는
+        //   곳이 「줄에 선다」 = 순서 보존 = 안전한 쪽이다. 새 variant 가 말없이 이 기본값을 받는 것이
+        //   바로 바라는 동작이라, 컴파일 에러로 묻을 이유가 없다.
+        _ => InboundLane::Ordered,
+    }
+}
+
+/// [`DispatchOrder`] 판정.
+///
+/// ★떼어 내는 것은 활성화 셋뿐이다★: 이 셋만이 dispatch 안에서 **결말이 날 때까지** 기다린다(전형
+///   2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은 `Spawn` 갈래 주석).
+///   나머지 전부는 await 지점이 없거나(맵 조회·PTY write·목록 인코딩) 이미 자기 태스크로 나간다
+///   (`Command` 의 배달). 그래서 줄에 남겨도 다음 명령을 재지 않는다.
+/// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★ — 중복 활성화를 막는 것은 dispatch 의
+///   도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
+///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
+///   띄우려는 두 요청은 옛날부터 그 가드로만 갈렸다(그 가드가 닫지 못하는 잔여 창 = ADR-0082).
+/// ★★대신 **이것들 사이·이것과 뒤 명령 사이의 순서는 보장되지 않는다**★★: 같은 연결에서
+///   `SpawnProfile(X)` 을 보내고 곧바로 `WriteStdin(X)` 을 보내면 아직 안 뜬 에이전트에 쓰게 되고,
+///   `SpawnProfile(X)` 을 연달아 두 번 보내면 **한 연결에서 온 두 요청이** manager 의 검사/등록 창에
+///   함께 든다(그 창 자체는 선재 — ADR-0082). 그 왕복의 완료 신호는 `Spawned`/`Error`(둘 다
+///   `request_id` 를 되돌려준다)이므로 **보낸 쪽이 그 답을 기다리는 것이 계약**이다.
+/// ★그 계약을 **클라이언트가 읽는 자리에 적었다**★ — 정본은 wire 어휘 쪽
+///   (`engram_dashboard_protocol::AgentCommand` 의 활성화 셋 doc)이고, 여기 되풀어 적지 않는다.
+///   ★「순서에 기대던 클라이언트가 있었다면 그것이 고쳐야 할 쪽이다」를 **점검 없이 쓰지 말 것**★ —
+///   이 저장소의 프론트는 실제로 `request_id` 상관표로 ack 를 기다린 뒤에야 그 id 를 쓴다(실측
+///   2026-09-18 · `src/api/protocolClient.ts` 의 `sendCommand` 대기표 · `slot.createAgentHere` 의
+///   `await spawnAgent(...)`). 즉 이 갈래를 고른 근거는 「계약이니까」가 아니라 **우리 클라이언트가
+///   이미 그 계약대로 돈다**는 관측이다.
+/// ★`_ =>` 로 묶지 않는 이유는 `dispatch` 의 match 와 같다★: variant 가 늘면 여기가 컴파일 에러로
+///   걸려 「이것은 줄에 남아야 하나」를 한 번 묻는다. catch-all 이면 새 variant 가 아무 판단 없이
+///   줄에 들어가거나(느림) 조용히 빠진다.
+// ADR-0206
+pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
+    match cmd {
+        // ── 줄 밖: 활성화가 결말까지 기다리는 셋 ──────────────────────────────────
+        AgentCommand::Spawn { .. }
+        | AgentCommand::SpawnProfile { .. }
+        // ★`SpawnByCwd` 도 여기 든다★: 이쪽은 `spawn_blocking` 조차 없이 `manager.spawn_agent` 를
+        //   그대로 부르지만(실 프로세스 생성), 그 blocking 자체는 이 변경의 범위가 아니다 — 여기서
+        //   재는 것은 「순서가 뜻을 갖는가」뿐이고, 매번 새 uuid 를 만드는 즉석 생성이라 겹칠 짝이
+        //   애초에 없다.
+        | AgentCommand::SpawnByCwd { .. } => DispatchOrder::Detached,
+
+        // ── 줄 안: 아래 다섯 묶음이 도착 순서에 걸려 있다 ────────────────────────────
+        // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 바이트가 PTY 로
+        //    곧장 가고 그 밑에 순서를 다시 세우는 것이 없다.
+        // ② 입력 lease 획득/반납과 그 뒤의 입력 — `check_input` 이 읽는 표를 이 둘이 쓴다.
+        // ③ 같은 연결의 `Subscribe`↔`Subscribe`/`Unsubscribe` — 등록이 코어 먼저·세션 나중이고
+        //    `ReplayComplete` 는 코어 잠금을 놓은 **뒤** 큐에 드니, 겹치면 Ack/replay/Complete 가
+        //    단일 writer 줄에서 뒤섞인다(R1 위반).
+        // ④ `RegisterCommands`↔`UpdateCommands` — 앞은 전량 교체, 뒤는 그 결과에 대한 차분이다.
+        // ⑤ `StopDaemon` 은 이 연결의 **마지막**이어야 한다(`Close` 를 돌려주는 유일한 갈래).
+        //    ★그래서 이것만은 느린데도 줄에 남는다★ — 떼어 내면 연결을 끝내라는 답이 이미 다음
+        //    명령이 지나간 뒤에 나온다.
+        AgentCommand::Kill { .. }
+        | AgentCommand::Interrupt { .. }
+        | AgentCommand::WriteStdin { .. }
+        | AgentCommand::Resize { .. }
+        | AgentCommand::Subscribe { .. }
+        | AgentCommand::Unsubscribe { .. }
+        | AgentCommand::AcquireInput { .. }
+        | AgentCommand::ReleaseInput { .. }
+        | AgentCommand::ListAgents { .. }
+        | AgentCommand::StopDaemon { .. }
+        | AgentCommand::ListProfiles { .. }
+        | AgentCommand::CreateProfile { .. }
+        | AgentCommand::DeleteProfile { .. }
+        | AgentCommand::SetProfileAutoRestore { .. }
+        | AgentCommand::RenameProfile { .. }
+        | AgentCommand::ReparentProfile { .. }
+        | AgentCommand::GetSnapshot { .. }
+        | AgentCommand::ListPresets { .. }
+        | AgentCommand::CreatePreset { .. }
+        | AgentCommand::DeletePreset { .. }
+        | AgentCommand::RenamePreset { .. }
+        | AgentCommand::SetEnvelopeFormat { .. }
+        | AgentCommand::RegisterCommands { .. }
+        | AgentCommand::UpdateCommands { .. }
+        | AgentCommand::ListCommands { .. }
+        | AgentCommand::Command { .. }
+        | AgentCommand::CommandOutcome { .. } => DispatchOrder::InOrder,
+    }
+}
+
 // ── per-conn 수명 상태(ConnectionSession) ─────────────────────────────────────────
 
 /// 한 연결의 수명 상태. dispatch(`on_text`)와 정리(`on_disconnect`)가 공유하므로 내부 필드는
@@ -136,6 +292,12 @@ pub struct ConnectionSession {
     /// 무조건 켜져 있다(`docs/reference/logging-conventions.md`). 프레임마다 `warn!` 이면 로그 크기가 상대에게
     /// 통제권을 넘긴다 — 형제 래치(`claimed_owner_warned`)와 같은 이유다.
     stray_outcome_warned: AtomicBool,
+    /// 수신 줄 포화 거절을 이 연결에서 이미 한 번 경고했나(`AgentConnection::on_inbound_saturated`).
+    ///
+    /// ★래치 근거는 형제 둘과 같다★ — 포화는 **프레임마다** 판정되므로, 래치가 없으면 이 한 사건이
+    /// 릴리즈 데몬의 파일 로그를 통째로 덮는다. 다만 취소 계열 통과는 래치 밖에서 매번 남긴다:
+    /// 그건 드물고, 「막힌 줄을 무엇이 풀었나」를 나중에 되짚는 유일한 흔적이다.
+    pub(crate) saturated_warned: AtomicBool,
 }
 
 impl ConnectionSession {
@@ -146,6 +308,7 @@ impl ConnectionSession {
             owned_viewports: Arc::new(Mutex::new(Vec::new())),
             claimed_owner_warned: AtomicBool::new(false),
             stray_outcome_warned: AtomicBool::new(false),
+            saturated_warned: AtomicBool::new(false),
         }
     }
 
@@ -857,10 +1020,24 @@ impl ConnectionCore {
                 // ADR-0172
                 let result = match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        let started = manager
-                            .activate_profile(&profile, SpawnMode::Fresh)
-                            .map(|_| ())
-                            .map_err(|e| e.to_string());
+                        // ★★blocking 풀로 넘긴다 — 이 자리에서 직접 부르지 마라★★: `activate_profile`
+                        //   은 연결을 선언하는 통로에서 **결말이 날 때까지** 블록하고(최대 백스톱 15s),
+                        //   실패로 판정하면 그 뒤 teardown 의 `session.kill(5s)` 까지 탄다 — 합쳐 약 20s
+                        //   동안 **yield 지점이 하나도 없다.** async 워커에서 그대로 부르면 그 워커가
+                        //   통째로 묶이고, 막힌 codex 활성화 N 건이 워커 N 개를 가져간다(다른 연결의
+                        //   명령까지 함께 멈춘다). 같은 파일의 `Shutdown` 이 `shutdown_all` 을 같은
+                        //   이유로 감싼다.
+                        //   ★명령 버스 쪽 형제는 이미 보호돼 있다★ — `agent.*` 표가 `blocking_handler`
+                        //   뒤에 있다(`agent::commands::make_table` 의 blocking 계약). 보호가 없던 것은
+                        //   이 WS 표면뿐이다.
+                        let mgr = manager.clone();
+                        let started = tokio::task::spawn_blocking(move || {
+                            mgr.activate_profile(&profile, SpawnMode::Fresh)
+                                .map(|_| ())
+                                .map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|e| Err(format!("activation task failed: {e}")));
                         broadcast_profile_list(fanout, manager);
                         started
                     }
@@ -1174,14 +1351,46 @@ impl ConnectionCore {
                 //   ★단 "안전하다" 고 읽지 말 것★: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude
                 //     는 즉사하고, 그 결말은 이제 그 항목의 「마지막 실패」로 **기록된다**(ADR-0172). 옛
                 //     문구는 그 기록이 없던 시절의 것이다.
+                //   ★**codex 에서는 그 결말이 다르다 — 「실패한다」로 읽지 말 것**★ (ADR-0185 의 두 축이
+                //     갈리는 자리): codex 는 sid 발급 축이 꺼져 있어 우리가 심을 값이 아예 없고, 저장된
+                //     thread id 도 없으면 통로가 이어받기 요청을 낼 근거가 없어 **`thread/start` 로
+                //     새 스레드를 연다**(app-server). 터미널 모드는 애초에 이어받을 손잡이가 없어 그냥
+                //     새로 뜬다. 어느 쪽이든 프로세스는 멀쩡히 서므로 활성화 판정은 성립으로 떨어진다.
+                //     즉 codex 에서 이 플래그가 뜻하는 것은 「이어받아라」가 아니라 ★「세션이 없어도
+                //     좋으니 띄워라」★ 다.
+                //   ★그 결말을 **「이어받음」으로 보고하지 않는다**(사용자 결정)★ — 손잡이가 없어 새 대화를
+                //     연 경우는 `RestoreOutcome::Started` 로 나간다. 판정·보고의 정본은
+                //     `AgentManager::resume_no_fallback` 의 `opens_a_new_conversation` 이고, 여기 되풀어
+                //     적지 않는다. ★동작은 그대로다 — 갈린 것은 보고뿐이다★: 아무것도 덮어쓰지 않는다
+                //     (덮어쓸 손잡이가 애초에 없다).
                 match manager.agent_snapshot(profile_id) {
                     Some(profile) => {
-                        let mode = if resume || profile.backend_session_id.is_some() {
+                        //   ★sid 갈래는 백엔드에 되묻는다(ADR-0185)★: 저장된 sid 가 그 명령으로
+                        //     **이어받을 수 있는 것인지**를 먼저 묻는다 — 그 판정은 부팅 복원·명령 버스
+                        //     입구와 같은 dispatch 가 소유한다.
+                        //   ★`resume` 명시 요청은 그 술어를 타지 않는다★: 위 「resume=true 는 존중」이
+                        //     그대로다(세션이 없어도 Resume 으로 남긴다).
+                        let mode = if resume
+                            || engram_dashboard_agent::backend::can_resume_profile(&profile)
+                        {
                             SpawnMode::Resume
                         } else {
                             SpawnMode::Fresh
                         };
-                        let started = manager.activate_profile(&profile, mode);
+                        // ★blocking 풀로 넘긴다★ — 사유의 정본은 위 `Spawn` 갈래의 같은 주석이다.
+                        //   ★Fresh 도 이제 여기 든다★: 연결을 선언하는 통로에서는 모드와 무관하게
+                        //   결말까지 기다린다(ADR-0201 — 예전엔 Fresh 가 즉시 반환이었다).
+                        let mgr = manager.clone();
+                        let profile_for_task = profile.clone();
+                        let started = tokio::task::spawn_blocking(move || {
+                            mgr.activate_profile(&profile_for_task, mode)
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            Err(engram_dashboard_agent::types::PtyError::SpawnFailed(
+                                format!("activation task failed: {e}"),
+                            ))
+                        });
                         // ★결말이 어느 쪽이든 프로필 목록을 다시 민다(ADR-0172/0162)★: 활성화는 그
                         //   항목의 「마지막 실패」를 **성공이면 지우고 실패면 기록**하는데, 그 축은
                         //   프로필 목록으로만 흐른다(`Spawned` 이벤트·산 명부에는 없다). 성공 쪽을
@@ -1420,11 +1629,19 @@ impl ConnectionCore {
             //   (`command_delivery::deliver`). 그래서 여기 `sink` 를 쓰지 않는다: 답장은 이 dispatch 가
             //   반환한 한참 뒤에 나므로 빌린 `OutboundSink` 로는 닿을 수 없고, 명부가 든 그 연결의 프레임
             //   출구로 나간다(둘 다 같은 단일 writer 큐에 합류하므로 순서는 보존된다).
-            // ★★여기서 왕복을 기다리면 안 된다★★: 한 연결의 프레임은 그 연결의 읽기 루프가 한 장씩
-            //   **끝까지 기다려** 처리하므로, 주인이 곧 이 연결일 때(셸이 자기 이름을 얹고 자기가 부르는
-            //   경로가 그렇다) 자기 답을 자기가 못 꺼낸다 — ADR-0081 결정 3 개정이 잡아낸 self-deadlock
-            //   그대로다. `spawn` 이 그 회귀를 막는 유일한 수단이고, 되돌리면 그 조합에서 마감시각까지
-            //   연결 하나가 통째로 선다(TRD §3-6 — 셸·데몬·웹뷰 공통 규칙).
+            // ★★여기서 왕복을 기다리면 안 된다 — 이유가 **자리를 옮겼을 뿐 살아 있다**★★: 한 연결의
+            //   프레임은 그 연결의 **도착순 소비자 하나**가 한 장씩 끝까지 기다려 처리하므로, 주인이 곧
+            //   이 연결일 때(셸이 자기 이름을 얹고 자기가 부르는 경로가 그렇다) 주인이 돌려줄
+            //   `CommandOutcome` 이 **이 명령 뒤의 수신 큐에 앉은 채** 영영 안 꺼내진다 — 자기 답을
+            //   자기가 못 꺼낸다. ADR-0081 결정 3 개정이 잡아낸 self-deadlock 그대로다.
+            //   ★옛 문구("읽기 루프가 한 장씩 처리한다")를 「읽기와 처리가 갈렸으니 이 spawn 은 이제
+            //   불필요하다」로 읽지 말 것★: 갈린 것은 **소켓에서 꺼내는 일**이고, 처리 줄이 하나라는
+            //   성질은 그대로다(그 직렬성이 순서 불변식의 실물 — [`dispatch_order`]). 막힌 지점이
+            //   소켓에서 큐로 옮겨졌을 뿐 막힌다는 사실은 같다.
+            //   ★이 갈래를 [`DispatchOrder::Detached`] 로 옮기는 것도 답이 아니다★ — 그러면 배달이
+            //   태스크 밖으로 나가는 대신 **분류가** 그 일을 하게 돼 같은 것을 두 곳에서 정하게 된다.
+            //   `spawn` 이 그 회귀를 막는 수단이고, 되돌리면 그 조합에서 마감시각까지 연결 하나가
+            //   통째로 선다(TRD §3-6 — 셸·데몬·웹뷰 공통 규칙).
             // ADR-0154
             AgentCommand::Command { envelope } => {
                 tracing::debug!(
@@ -1822,6 +2039,190 @@ mod tests {
         RequestId(uuid::Uuid::new_v4())
     }
 
+    /// ★[`inbound_lane`] 의 판정표★ — 줄이 찼을 때 **무엇이 줄을 건너뛰는가**.
+    ///
+    /// ★`Interrupt` 가 `Ordered` 인 것이 이 시험의 핵심 단언이다★: 사람의 직관은 「취소니까 당연히
+    /// 건너뛴다」 쪽인데, 그것이 순서 묶음 ①(`WriteStdin`(X) ↔ `Interrupt`(X))을 깬다. 사유의 정본은
+    /// [`inbound_lane`] 주석이고, 여기서는 그 결정이 조용히 뒤집히지 않게 못박기만 한다.
+    #[test]
+    fn only_kill_jumps_the_queue_when_it_is_saturated() {
+        let agent_id = uuid::Uuid::new_v4();
+        assert_eq!(
+            inbound_lane(&AgentCommand::Kill {
+                agent_id,
+                request_id: rid()
+            }),
+            InboundLane::Bypass,
+            "Kill 은 막힌 줄을 실제로 푸는 유일한 손잡이다"
+        );
+        let ordered = vec![
+            AgentCommand::Interrupt {
+                agent_id,
+                request_id: rid(),
+            },
+            AgentCommand::WriteStdin {
+                agent_id,
+                data: "x".into(),
+                request_id: rid(),
+            },
+            AgentCommand::StopDaemon {
+                force: true,
+                kill_agents: true,
+                request_id: rid(),
+            },
+            AgentCommand::ListAgents { request_id: rid() },
+            AgentCommand::Spawn {
+                profile_id: uuid::Uuid::new_v4(),
+                request_id: rid(),
+            },
+        ];
+        for cmd in &ordered {
+            assert_eq!(
+                inbound_lane(cmd),
+                InboundLane::Ordered,
+                "이것이 줄을 건너뛰면 순서 묶음이 깨진다: {cmd:?}"
+            );
+        }
+    }
+
+    /// ★[`dispatch_order`] 의 판정표★ — 이 분류가 틀리면 **테스트가 아니라 운영에서만** 보인다:
+    /// 잘못 떼어 내면 조용한 순서 결함(입력이 lease 보다 먼저 도착하는 식)이고, 잘못 남기면 그
+    /// 명령이 연결 전체를 다시 세운다. 그래서 양쪽을 다 못박는다.
+    ///
+    /// ★대표만 고른 자리와 전수인 자리를 가른다★: 「떼어 내는 쪽」은 **전수**여야 한다(그 목록이
+    /// 커지는 것이 위험한 방향이다). 「줄에 남는 쪽」은 다섯 순서 묶음의 대표로 충분하다 — 새
+    /// variant 가 빠뜨려지는 것은 이 테스트가 아니라 `dispatch_order` 의 exhaustive match 가 잡는다.
+    #[test]
+    fn only_the_three_activation_commands_leave_the_arrival_queue() {
+        use engram_dashboard_command::OwnerToken;
+
+        let detached = vec![
+            AgentCommand::Spawn {
+                profile_id: uuid::Uuid::new_v4(),
+                request_id: rid(),
+            },
+            AgentCommand::SpawnProfile {
+                profile_id: uuid::Uuid::new_v4(),
+                resume: false,
+                request_id: rid(),
+            },
+            AgentCommand::SpawnByCwd {
+                cwd: "C:/tmp".into(),
+                backend: None,
+                request_id: rid(),
+            },
+        ];
+        for cmd in &detached {
+            assert_eq!(
+                dispatch_order(cmd),
+                DispatchOrder::Detached,
+                "활성화는 줄 밖이어야 한다: {cmd:?}"
+            );
+        }
+
+        let agent_id = uuid::Uuid::new_v4();
+        let in_order = vec![
+            // ① 같은 에이전트로 가는 입력
+            AgentCommand::WriteStdin {
+                agent_id,
+                data: "x".into(),
+                request_id: rid(),
+            },
+            AgentCommand::Interrupt {
+                agent_id,
+                request_id: rid(),
+            },
+            // ② 입력 lease
+            AgentCommand::AcquireInput {
+                agent_id,
+                request_id: rid(),
+            },
+            AgentCommand::ReleaseInput {
+                agent_id,
+                request_id: rid(),
+            },
+            // ③ 구독
+            AgentCommand::Subscribe {
+                agent_id,
+                epoch: None,
+                after_seq: None,
+            },
+            AgentCommand::Unsubscribe { agent_id },
+            // ④ 명령 명부
+            AgentCommand::RegisterCommands {
+                owner: OwnerToken::new("shell"),
+                decls: vec![],
+                catalog_version: 1,
+                request_id: rid(),
+            },
+            AgentCommand::UpdateCommands {
+                owner: OwnerToken::new("shell"),
+                added: vec![],
+                removed: vec![],
+                request_id: rid(),
+            },
+            // ⑤ 연결을 끝내는 명령 — 느린데도 줄에 남는 유일한 것
+            AgentCommand::StopDaemon {
+                force: true,
+                kill_agents: true,
+                request_id: rid(),
+            },
+        ];
+        for cmd in &in_order {
+            assert_eq!(
+                dispatch_order(cmd),
+                DispatchOrder::InOrder,
+                "순서가 뜻을 갖는 명령은 줄에 남아야 한다: {cmd:?}"
+            );
+        }
+    }
+
+    /// ★★활성화를 async 워커에서 **직접 부르지 않는다**★★ — 그 워커가 최대 20 초 묶인다.
+    ///
+    /// `AgentManager::activate_profile` 은 연결을 선언하는 통로에서 결말이 날 때까지 블록하고(백스톱
+    /// 15s), 실패로 판정하면 teardown 의 `session.kill(5s)` 까지 탄다 — 그 사이 yield 지점이 **없다.**
+    /// 막힌 활성화 N 건이 워커 N 개를 가져가면 다른 연결의 명령까지 함께 멈춘다.
+    /// ★왜 소스에서 재나★: 워커 고갈은 멀티스레드 런타임에 그 수만큼 부하를 걸어야 관측되고, 그
+    ///   시험대는 본질적으로 타이밍 의존이라 이 저장소가 피하는 모양이다(시계 단언 금지). 회귀했을 때
+    ///   나는 것은 빨간 단언이 아니라 **부하 아래서만 보이는 정지**다.
+    /// ★명령 버스 쪽 형제는 `blocking_handler` 가 이미 덮는다★ — 보호가 없던 것은 이 WS 표면뿐이다.
+    /// ★★이 항목이 **못 보는 것 둘**을 적어 둔다★★: ① `include_str!` 가 **자기 파일**이라, 다른 데몬
+    ///   파일에 세 번째 활성화 자리가 생기면 사거리 밖이다 ② 창이 5 줄이라, 인계가 그보다 위에 있는
+    ///   모양은 위 ① 축(`mgr` 수신자)으로만 걸린다. 오늘 둘 다 해당 없음이고, 자리가 늘면 여기를 함께 볼 것.
+    #[test]
+    fn both_ws_activation_sites_hand_the_blocking_call_to_the_pool() {
+        let src = include_str!("connection_core.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+
+        let lines: Vec<&str> = production.lines().collect();
+        let call_sites: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains(".activate_profile(") && !l.trim_start().starts_with("//"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !call_sites.is_empty(),
+            "활성화 호출 자리가 사라졌다 — 이 항목의 전제가 낡았다"
+        );
+        // ★두 축으로 본다 — 한 축만 두면 각각 새는 구멍이 있다★:
+        //   ① 호출 수신자가 **풀로 옮긴 사본**(`mgr`)인가 — 거리와 무관하게 맨몸 호출을 잡는다.
+        //   ② 그 위 몇 줄 안에 인계가 실제로 있나 — 이름만 `mgr` 로 바꾼 위장을 잡는다.
+        //   개수는 세지 않는다(세면 무관한 `spawn_blocking` 이 하나 늘 때마다 헛빨강이 난다).
+        for i in call_sites {
+            let line = lines[i];
+            assert!(
+                line.contains("mgr.activate_profile("),
+                "활성화를 async 워커에서 직접 부른다 — 최대 20 초 동안 그 워커가 묶이고, 막힌 활성화                  N 건이 워커 N 개를 가져가 다른 연결의 명령까지 멈춘다: {line}"
+            );
+            let window = lines[i.saturating_sub(4)..=i].join("\n");
+            assert!(
+                window.contains("spawn_blocking"),
+                "수신자만 풀 사본 이름이고 인계가 없다 — 이름은 맞는데 여전히 async 워커에서 돈다:\n{window}"
+            );
+        }
+    }
+
     /// ★output 평면은 mock 으로 안 만든다★ — 실 프레임 출구(conn_tx)로 흘려 별도 채널로 받는다
     /// (그래야 control 과 같은 단일 writer 큐에 실려 FIFO 순서를 관측할 수 있다).
     struct MockOutboundSink {
@@ -2065,6 +2466,113 @@ mod tests {
             "활성화 결말이 프로필 목록으로 나가야 한다 — 없으면 WS 로 띄운 실패가 화면에 안 뜬다: {:?}",
             fanout.texts()
         );
+    }
+
+    /// ★저장된 sid 만으로 Resume 을 유도하지 않는다(ADR-0185)★ — 명령 버스 쪽 짝은
+    /// `engram_dashboard_agent::commands` 의 `waking_does_not_resume_a_profile_whose_backend_cannot_resume`
+    /// 다. 두 핸들이 같은 것을 흔들어야 한다(CLAUDE.md 「LLM-우선 제어」).
+    ///
+    /// ★모드를 어떻게 관측하나★: wire 에 「이어받았나」 칸이 없다 — 그것이 이 결함이 조용한 이유다. 그래서
+    ///   **결말**로 가른다. 즉시 끝나는 프로그램을 쓰면 Fresh 는 띄운 즉시 `Spawned` 를 내고, Resume 은
+    ///   `resume_no_fallback` 이 조기종료 창에서 그 종료를 보고 실패로 끊어 `Spawned` 가 없다.
+    // ADR-0185
+    #[tokio::test]
+    async fn ws_spawn_profile_does_not_resume_a_profile_whose_backend_cannot_resume() {
+        let (core, _rx) = test_core();
+        let mut profile = engram_dashboard_agent::profile::AgentProfile::new(
+            "ws-no-resume".into(),
+            engram_dashboard_agent::profile::AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec!["/c".into(), "exit".into()],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 `agents.json` 이 오늘 만든다.
+        profile.backend_session_id = Some(uuid::Uuid::new_v4());
+        let created = core.manager.create_agent(profile).expect("등록");
+        assert!(
+            core.manager
+                .agent_snapshot(created.id)
+                .and_then(|p| p.backend_session_id)
+                .is_some(),
+            "전제: sid 가 심겨 있어야 이 항목이 그 갈래를 잰다"
+        );
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::SpawnProfile {
+                profile_id: created.id,
+                resume: false,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        assert!(
+            mock.events()
+                .iter()
+                .any(|e| matches!(e, AgentEvent::Spawned { .. })),
+            "sid 가 있어도 이어받을 수 없는 명령이면 Fresh 로 떠야 한다: {:?}",
+            mock.events()
+        );
+        let _ = core.manager.kill_agent(created.id);
+    }
+
+    /// ★`resume: true` 가 그 술어를 **일부러** 우회한다 — 이 비대칭을 코드에 못 박는다★: 위 항목의 짝이고,
+    /// 둘의 유일한 차이가 그 플래그다. 프로그램·sid·명령이 전부 같은데 결말이 갈리는 것이 그 우회의 실물.
+    ///
+    /// ★이 항목은 그 우회를 **정당화하지 않는다**★ — 지금 그렇다는 것만 잰다. 규칙을 「조화」시키려는 다음
+    ///   세션이 이 항목을 깨뜨리면, 그건 고장이 아니라 **결정을 바꾸고 있다**는 신호다(그 결정은 미결).
+    // ADR-0185
+    #[tokio::test]
+    async fn ws_spawn_profile_still_honours_an_explicit_resume_request() {
+        let (core, _rx) = test_core();
+        let mut profile = engram_dashboard_agent::profile::AgentProfile::new(
+            "ws-explicit-resume".into(),
+            engram_dashboard_agent::profile::AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec!["/c".into(), "exit".into()],
+            },
+            std::env::temp_dir(),
+            vec![],
+            false,
+        );
+        profile.backend_session_id = Some(uuid::Uuid::new_v4());
+        let created = core.manager.create_agent(profile).expect("등록");
+
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        core.dispatch(
+            AgentCommand::SpawnProfile {
+                profile_id: created.id,
+                resume: true,
+                request_id: engram_dashboard_protocol::RequestId(uuid::Uuid::new_v4()),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        // Resume 으로 갔다는 증거 = 조기종료 창이 그 종료를 보고 활성화를 **실패로** 끊는다(Fresh 면 띄운
+        //   즉시 `Spawned` 가 나간다 — 바로 위 항목이 그쪽을 잰다).
+        // ★「Spawned 가 없다」만으로는 부족하다★ — 무관한 이유로 아무 것도 안 나가도 참이 된다. 그래서
+        //   그 실패가 **resume 갈래에서 왔다는 것**까지 본다.
+        let events = mock.events();
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                AgentEvent::Error { message, .. } if message.contains("resume")
+            )),
+            "명시 resume 요청이 이어받기 축에 막혔다 — 그 우회는 의도된 것이라 바꾸려면 결정이 먼저다: {events:?}"
+        );
+        let _ = core.manager.kill_agent(created.id);
     }
 
     fn test_core_with_control_registry() -> (ConnectionCore, Arc<ControlRegistry>) {

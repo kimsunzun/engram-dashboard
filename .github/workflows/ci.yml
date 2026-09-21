@@ -942,7 +942,7 @@ jobs:
             *..*) echo "FAIL — 태그에 '..' 이 있다(경로 상위 이동)"; exit 1 ;;
             *.)   echo "FAIL — 태그가 '.' 로 끝난다(Windows 가 파일명 끝 점을 잘라낸다)"; exit 1 ;;
           esac
-          # 경로 길이 상한 여유분. RUNNER_TEMP + 조립 폴더 + prompts/agent-priming-cli.md 가 MAX_PATH 를
+          # 경로 길이 상한 여유분. RUNNER_TEMP + 조립 폴더 + prompts/agent-priming.md 가 MAX_PATH 를
           # 넘지 않게 하는 안전 한도지 버전 형식 규칙이 아니다.
           if [ "${#TAG}" -gt 64 ]; then echo "FAIL — 태그가 64자를 넘는다(${#TAG})"; exit 1; fi
           echo "PASS — tag name is usable as a path/file name"

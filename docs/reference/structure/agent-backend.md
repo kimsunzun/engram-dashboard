@@ -59,9 +59,9 @@ flowchart TD
   PC -->|"AgentInfo.capabilities"| RM["renderMode"]
 ```
 
-★**「백엔드 전용 코드는 `build_spec` 안에서 끝난다」고 적지 말 것 — 거짓이다**★. 같은 파일이 `needs_session`·`supports_control_channel`·`accepts_mcp_config`·`reads_messages`·`capabilities` 도 선언하고, 백엔드에 따라 `transport_shape`·`output_decoder` 까지 선언한다. 끝나는 것은 그 **함수**가 아니라 그 **폴더**다(ADR-0004).
+★**「백엔드 전용 코드는 `build_spec` 안에서 끝난다」고 적지 말 것 — 거짓이다**★. 같은 파일이 `assigns_session_id`·`can_resume_stored_session`·`supports_control_channel`·`accepts_mcp_config`·`writes_mcp_config_file`·`reads_messages`·`uses_mail`·`capabilities` 도 선언하고, 백엔드에 따라 `transport_shape`·`output_decoder` 까지 선언한다. 끝나는 것은 그 **함수**가 아니라 그 **폴더**다(ADR-0004).
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(파일 헤더 · backend_for · backend_for_encoder · `open_spawn` 기본값과 `SpawnParts` · 트립와이어 셋) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(`open_spawn` — 통로 실물이 갈리는 유일한 자리) · `crates/engram-dashboard-agent/src/transport/pty.rs`
+**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(파일 헤더 · backend_for · backend_for_encoder · `open_spawn` 기본값과 `SpawnParts` · 트립와이어) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(`open_spawn` — 통로 실물이 갈리는 유일한 자리) · `crates/engram-dashboard-agent/src/transport/pty.rs`
 
 ## 렌더 분기 — override 가 먼저, 그다음 capability
 
@@ -120,46 +120,56 @@ flowchart TD
 |---|---|---|---|
 | `claude` (터미널) | `claude` — Windows 는 `cmd.exe /c` 한 겹 | `--session-id <sid>`(Fresh) / `--resume <sid>`(Resume) · 제어 채널 있으면 `--mcp-config <path>` · grant 있으면 `--allowedTools <패턴>…` | 우리 인자보다 **먼저** 소진 — `--allowedTools` 가 variadic 이라 그 그룹을 맨 끝에 둔다 |
 | `claude` (stream-json) | 같음 | `-p --input-format stream-json --output-format stream-json --verbose` + 위 세션·MCP·grant 인자 | 같음 |
-| `codex` (터미널) | `codex` — 같은 `cmd.exe /c` 한 겹 | `--cd <폴더> -s workspace-write -a on-request` | **맨 마지막** — 호출자가 우리 인자를 덮을 수 있게 |
-| `codex` (app-server) | 같음 | `app-server --stdio` **뿐** — 작업 폴더·샌드박스·승인 정책은 argv 가 아니라 `thread/start` 파라미터로 간다(`cwd`·`sandbox`·`approvalPolicy`) | 같음 — ★단 두 모드의 옵션 집합이 달라 대화형 CLI 를 보고 적은 인자는 여기서 거절될 수 있다★(모드별로 거르지 않는 것은 결정이다 — 코드 주석이 정본) |
+| `codex` (터미널) | `codex` — 같은 `cmd.exe /c` 한 겹 | Resume 이면 **맨 앞**에 `resume <thread id>` 하위 명령(★플래그가 아니다★ — 뒤로 밀리면 clap 이 루트의 `[PROMPT]` 로 읽는다) · `--cd <폴더> -s workspace-write -a on-request` · 패스스루 **뒤**에 `-c tui.status_line=['thread-id']`(세션 id 회수 — 제어 채널과 무관하게 언제나 실린다) · 제어 채널 있으면 같은 자리에 `-c mcp_servers.engram={…}`(우편 입구) | 우리 인자 **뒤**, 단 그 `-c` 오버라이드들보다는 **앞** — 같은 설정 키를 `-c` 로 두 번 넘기면 마지막이 이기므로(실측 0.155.0) 우편 입구와 상태줄을 패스스루 한 줄에 지우지 못하게 뒤에 싣는다 |
+| `codex` (app-server) | 같음 | `app-server --stdio` + 제어 채널 있으면 `-c mcp_servers.engram={…}` — 작업 폴더·샌드박스·승인 정책은 argv 가 아니라 `thread/start` 파라미터로 간다(`cwd`·`sandbox`·`approvalPolicy`). ★상태줄 오버라이드는 이 모드엔 안 싣는다★ — 세션 id 를 통로가 `thread/start` 응답으로 직접 받아 온다 | 같음 — ★단 두 모드의 옵션 집합이 달라 대화형 CLI 를 보고 적은 인자는 여기서 거절될 수 있다★(모드별로 거르지 않는 것은 결정이다 — 코드 주석이 정본) |
 | `gemini` (미배선) | `gemini` — ★best-guess, CLI spike 전★ | stub(세션 플래그도 best-guess) | 미확정 |
 
 Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실제 실행파일이 아니라 `.cmd` shim 이라서다 — 직접 띄우면 error 193 으로 죽는다. 실 경로를 찾아 부르지 않는 이유는 그 경로가 버전에 묶여 있고 CLI 가 스스로 업데이트해 옮기기 때문이다.
 
-★**codex 는 「우리가 발급한 sid 를 넘기지 않는다」**★ — 「argv 에 절대 안 실린다」가 아니다. `extra_args` 는 그대로 통과하므로 호출자가 넣으면 실린다. 전용 테스트가 단언하는 것은 **빈 extras 기준**으로 sid·`--session-id`·`--resume`·`--session` 이 조립되지 않는다는 것이다.
+★**codex 는 「우리가 발급한 sid 를 넘기지 않는다」**★ — 「argv 에 절대 안 실린다」가 아니다. `extra_args` 는 그대로 통과하므로 호출자가 넣으면 실린다. 전용 테스트가 단언하는 것은 **빈 extras 기준**으로 sid·`--session-id`·`--resume`·`--session` 이 조립되지 않는다는 것이다. ★위 `resume <thread id>` 를 이 문장의 반례로 읽지 말 것★ — 그 자리에 실리는 것은 **codex 가 발급해 우리가 받아 적어 둔** 값이지 우리가 뽑은 sid 가 아니다(두 값이 다른 칸인 이유 = 아래 두 세션 축).
 
 ★**안 고친 한계 — `%VAR%` 확장**★ — `cmd.exe` 는 따옴표 안에서도 `%NAME%` 을 환경변수로 편다. 폴더 이름에 `%` 로 감싼 낱말이 실제로 들어 있으면 CLI 는 **다른 폴더**를 받는다. 고치려면 claude 와 공용인 조립 지점을 건드려야 하고 틀리면 모든 스폰이 죽는다 — 사유와 필요한 실측은 코드 주석이 정본이다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
+**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `mcp_server_override` · `STATUS_LINE_OVERRIDE` · `backend/codex/thread_id.rs`(상태줄 스니퍼 + `observer`) · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
 
 ## capability 선언
 
-기능이 「빠진」 게 아니라 **백엔드가 스스로 없다고 신고**하고, 코어가 그 신고대로 배관을 잠근다. 그래서 이 표의 `false` 칸이 곧 다음 단계에 열 항목의 목록이 된다. 새 변형을 배선하면 트립와이어 셋이 컴파일 에러로 이 신고를 강제한다 — 세 축 모두 기본값이 fail-open 이라 선언을 빠뜨리면 조용히 초록이 되기 때문이다.
+기능이 「빠진」 게 아니라 **백엔드가 스스로 없다고 신고**하고, 코어가 그 신고대로 배관을 잠근다. 그래서 이 표의 `false` 칸이 대체로 다음 단계에 열 항목의 목록이 된다. ★단 모든 `false` 를 「아직 안 연 것」으로 읽지 말 것★ — `writes_mcp_config_file` 의 `false` 는 미배선이 아니라 **디스크에 비밀을 안 쓰겠다는 결정**이다(그 행의 마지막 칸이 정본). 새 변형을 배선하면 트립와이어들이 컴파일 에러로 이 신고를 강제한다 — 기본값이 fail-open 인 축은 선언을 빠뜨리면 조용히 초록이 되기 때문이다. ★두 세션 축은 그 부류가 아니다★: trait 에 기본값이 없어 **새 백엔드**는 값을 적을 수밖에 없고, 대신 **새 출력 모드**를 컴파일러가 못 보므로 그쪽을 모드별 트립와이어(`backend::tests::expected_session_axes`)가 맡는다.
 
 | 선언 | `claude` | `codex` | `gemini` (미배선) | 코어가 그 값으로 잠그는 것 |
 |---|---|---|---|---|
-| `needs_session` | `true` | `false` | `true`(best-guess stub) | `true` 면 manager 가 sid 를 발급하고 watcher 를 붙인다. `false` 면 sid 발급 없음 · 부팅 복원 대상 아님 · 항상 Fresh |
-| `reads_messages` | `true`(trait 기본) | `false` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 |
-| `supports_control_channel` | `true` | `false` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰+mcp-config 발급). `false` 면 provision 을 **아예 건드리지 않는다** |
-| `accepts_mcp_config` | `true`(`--mcp-config`) | `false` | `false` | 프라이밍 변형(MCP-only ↔ CLI-only)과 우편 표식이 이 값으로 갈린다. 강제는 데몬 거절 하나뿐 |
+| `assigns_session_id` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | **우리가** sid 를 뽑아 spec 에 넘기나. `true` 면 manager 가 발급해 **프로필에 영속**하고 watcher 의 기준값으로도 쓴다. `false` 를 「세션이 없다」로 읽지 말 것 — 그 프로그램이 자기 id 를 스스로 발급하는 쪽일 수 있다 |
+| `can_resume_stored_session` | `true`(두 모드) | `true`(두 모드 — 이어받는 **수단**만 갈린다) | `true`(best-guess stub) | 저장된 backend sid 로 **이어받을 수 있나**. 발급 주체는 묻지 않는다. 부팅 복원과 활성화 입구 둘이 `backend::can_resume_profile`(이 축 ∧ sid 존재) 하나로 함께 판정한다 — `false` 면 sid 가 남아 있어도 Fresh. ★예외 하나★: WS `SpawnProfile{resume:true}` 는 그 판정을 **우회해** Resume 으로 간다(`resume \|\| can_resume_profile(…)`) |
+| `reads_messages` | `true`(trait 기본) | `true` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 — 그 대가는 ADR-0116 결정 7 이 명시로 수용했다 |
+| `supports_control_channel` | `true` | `true` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰 + CLI 입구 발급). `false` 면 provision 을 **아예 건드리지 않는다**. ★mcp-config **파일**까지 이 칸이 부르는 것으로 읽지 말 것★ — 그 write 는 아래 `writes_mcp_config_file` 이 따로 가른다 |
+| `accepts_mcp_config` | `true`(`--mcp-config <path>`) | `true`(`-c mcp_servers.engram={…}`) | `false` | 프라이밍 **적재 여부**(싣느냐 마느냐 — 변형 축이 아니다. CLI 판은 `2ef6902` 에서 삭제됐다)와 **우편 채널 판정**이 이 값으로 갈린다(데몬이 `uses_mail` 과 함께 `mail_allowed` 한 값을 파생한다). ★이름대로 「우리 mcp-config **파일**을 먹나」로 읽으면 틀린다★ — 오늘 이 칸이 실질적으로 묻는 것은 「이 스폰이 MCP 로 우편을 쓰나」이고, 파일 축은 아래 행이 진다. 강제는 데몬 거절 하나뿐 |
+| `writes_mcp_config_file` | `true` | `false` | `false`(trait 기본) | 데몬이 이 스폰에 **평문 Bearer 토큰 JSON 을 디스크에 쓸까**. `true` 면 mcp-config 파일과 세션 설정 조각을 쓰고 그 파일의 write 실패는 **fail-closed**(스폰 중단) — 그 backend 는 파일이 없으면 MCP 입구가 물리적으로 사라져 제어 채널 없이 도는 에이전트가 되기 때문이다. `false` 면 둘 다 안 만들고 endpoint 의 두 칸이 `None` 으로 나간다. ★위 칸에서 파생하지 말 것★ — 겸직하던 동안 codex 는 우편 축을 맞추려 위 칸을 켜는 것만으로 **아무도 안 여는 평문 토큰 파일**을 스폰마다 받았고, 그 fail-closed 가 **안 읽는 파일 때문에 스폰을 끊을 수 있었다**. 기본값 `false` 는 fail-open 인 우편 두 축과 방향이 반대인데 재는 것이 달라서다 — 틀린 `false` 의 대가는 시끄러운 파일 부재이고 틀린 `true` 의 대가는 조용한 평문 토큰이다 |
 | `output_decoder` | stream-json 에만 `Some` | app-server 에만 `Some`(터미널은 `None`) | 없음(trait 기본 `None`) | 구조화 이벤트의 유무 → (A) 「렌더 분기」의 갈래 |
 | `transport_shape` | stream-json → `StdioNdjson` · 터미널 → `Pty` | app-server → `StdioBidiJson` · 터미널 → `Pty` | `Pty`(trait 기본) | ★**신고값일 뿐 통로를 고르지 않는다**★ — 실물은 `open_spawn` 이 만들고 그 안에서 이 값을 되읽지 않는다(ADR-0191). 오늘 이 값을 읽는 곳은 선언 표 트립와이어(`tests::expected_codec_axis`) 하나뿐이라, 신고와 실물이 어긋나도 아무 게이트가 못 본다 |
-| `capabilities().session.resume` | `true` | `false` | `false`(보수적 stub) | 무손실 복원 가능 여부 |
+| `capabilities().session.resume` | `true` | `true`(두 모드) | `false`(보수적 stub) | 무손실 복원 가능 여부. ★위 `can_resume_stored_session` 과 **같은 술어로 함께 켠다**★ — 갈리면 이어받지 않는 스폰이 이어받는다고 신고되거나 그 반대가 된다 |
 
-★**MCP 칸을 오독하지 말 것**★ — 「codex 가 MCP 를 못 쓴다」가 아니다. 이 칸이 묻는 것은 **우리가 만든 mcp-config 파일을 먹일 수 있나**다. codex 의 MCP 주입은 전역 TOML 오버라이드(`-c mcp_servers.<name>={…}`)라 claude 의 `--mcp-config <path>` 와 기제가 다르고(실측), 그 다른 기제를 배선하는 것이 이 단계의 범위가 아닐 뿐이다.
+★**MCP 두 칸을 한 칸으로 접지 말 것 — 그 겸직은 실제 결함이었다**★. `accepts_mcp_config` 는 이름과 달리 오늘 **「이 스폰이 MCP 로 우편을 쓰나」**를 뜻하고(데몬이 거기서 우편 가부를 파생한다), **「우리가 디스크에 평문 Bearer 토큰 JSON 을 쓸까」**를 묻는 것은 `writes_mcp_config_file` 하나뿐이다. codex 가 그 둘이 갈리는 실물이다 — MCP 는 붙지만(`-c mcp_servers.engram={…}` 한 값 단독 · 토큰은 argv 가 아니라 **그 토큰이 든 env 변수 이름**으로 간다) 우리가 쓴 **파일**을 가리킬 플래그는 없다(실측 0.155.0 — `--mcp-config` 도 `--settings` 도, 설정 파일을 가리키는 `--config <파일>` 도 없다). 겸직하던 동안 codex 는 우편 축을 맞추려 앞 칸을 켜는 것만으로 아무도 안 여는 평문 토큰 파일을 스폰마다 받았고, 그 write 가 fail-closed 라 **안 읽는 파일 때문에 스폰이 끊길 수 있었다**.
 
-★**`needs_session` 과 `capabilities().session.resume` 두 행을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이고, codex 의 `false` 는 **영구 속성이 아니라 배선 상태**다(수령 배선 · `needs_session()` 세 역할 분리 · 활성화 입구 가드 = ADR-0185 결정 2 의 Phase 2 요구사항 셋). 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
+★**그래서 「codex 는 MCP 가 아직 배선되지 않았다」·「codex 는 우편 평면 밖이다」로 적힌 자리를 만나면 낡은 것이다**★ — 배선은 섰고 기제가 claude 와 다를 뿐이며, 받기(`reads_messages`)와 보내기(`uses_mail`)가 **둘 다** 켜져 있다. 그 둘이 함께 서야 「받기 먼저」 순서를 지킨다 — 한쪽만 되돌리면 보내기만 열린 비대칭이 살아난다(ADR-0209 결정 4).
+
+★**세션 축들을 「발급 주체 = 복원 가능 여부」로 읽지 말 것**★ — 그 등식은 ADR-0185 가 폐기했고, 위 두 행이 갈라져 있는 것이 그 폐기의 실물이다. 지금 불변식은 **「복원은 프로필에 저장된 backend sid 단독에 의존하고, 발급 주체는 백엔드가 정한다」**이다. codex 가 그 등식의 반례다 — 발급은 codex 가 하는데(`assigns_session_id: false`) 이어받기는 우리가 연다. ADR-0185 결정 2 의 Phase 2 요구사항 셋(역할 분리 · 활성화 입구 가드 · 수령 배선)에 **`thread/resume` 까지 착지했다**: `open_spawn` 이 조립점에게서 「이어받을 저장된 sid」를 받아, 있으면 통로가 `thread/start` 대신 `thread/resume` 을 낸다. ★**「남은 것은 `thread/resume` 하나다」·「수령 배선이 없다」로 적힌 자리를 만나면 낡은 것이다**★. 축의 불변식·상태 매핑 정본 = `docs/reference/architecture-overview.md` 「세션 복원 / 활성화」.
+
+★**codex 의 두 세션 칸은 이제 모드를 안 가른다 — 갈리는 것은 이어받는 「수단」이다**★. 여기 있던 판독은 「터미널 모드에는 이어받을 식별자 자체가 없다」였는데 **틀렸다**: 그 모드는 `codex resume <thread id>` **하위 명령**(플래그가 아니다)으로 이어받고, 그 손잡이는 **우리가 켠 codex TUI 상태줄을 우리 PTY 가 읽어** 프로필에 적어 둔다(ADR-0216 — 한때 그 자리를 codex 가 띄우는 `SessionStart` 훅이 맡았고, 그 기계장치는 저장소에서 걷혔다). app-server 모드는 같은 값으로 `thread/resume` 을 낸다. ★**터미널 모드가 `false` 로 적힌 자리를 만나면 낡은 것이다**★. 선언 표(`tests/backend_contract.rs`)의 그 두 칸은 여전히 통로별 튜플 모양이지만 **오늘은 양쪽이 같은 값**이다 — 모양을 안 되돌리는 것은 갈릴 날을 위한 자리이지 지금 갈려 있다는 뜻이 아니다.
+
+이 행에서 **실제로 갈리는 것은 통로가 아니라 두 축이다** — 발급은 codex 가 하고(`assigns_session_id: false`) 이어받기는 우리가 연다(`can_resume_stored_session: true`). ★두 칸 중 한 칸만, 또는 두 모드 중 한 모드만 켜지 말 것★ — 새 스레드가 「이어받음」으로 보고되거나 그 반대가 된다.
+
+★**거절당한 이어받기는 새 스레드로 되돌아가지 않는다(ADR-0082)**★ — 세션은 그대로 끝나고 프로필의 손잡이는 보존된다. codex 쪽 보강 사유 하나: 이 프로토콜의 `-32600` 은 뜻이 하나가 아니다 — 모르는 메서드·중복 `initialize`·설정 오류가 전부 그 코드로 온다(실측 0.154.0 — 정본은 `backend/codex/protocol.rs` 와 그 통로 시험대). 그 코드로 「모르는 스레드」를 갈라 폴백하면 아직 멀쩡한 손잡이를 무관한 실패에서 덮어쓴다.
 
 비슷한 오독이 모델 선택 칸에도 있다. codex 에는 `-m` 이 있는데도 `false` 인데, 이 칸은 **그 프로그램이 할 수 있는 것**이 아니라 **이 스폰이 실제로 쓰는 것**을 신고하기 때문이다.
 
-★**여기 있던 예측은 실측으로 틀린 것이 됐다 — 되살리지 말 것**★. 그 문장은 「codex 의 상주 JSON-RPC(`codex app-server`)가 서면 이 표의 여러 칸이 한꺼번에 열린다 — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다」였다. **서버는 섰고, 함께 열린 칸은 정확히 하나다** — `output_decoder`(구조화 챗 = 턴 관측). 나머지 둘은 그 문으로 들어오지 않았다.
+★**여기 있던 예측은 실측으로 틀린 것이 됐다 — 되살리지 말 것**★. 그 문장은 「codex 의 상주 JSON-RPC(`codex app-server`)가 서면 이 표의 여러 칸이 한꺼번에 열린다 — 턴을 관측할 수 있게 되는 순간 세션 복원·턴 관측·구조화 챗이 같은 문으로 들어온다」였다. **세 축은 이제 전부 열렸다. 그런데 그 문으로 들어온 것은 하나뿐이다** — `output_decoder`(구조화 챗 = 턴 관측). 나머지 둘은 각자 **다른 배선**으로 열렸고, 거기가 이 예측이 틀린 지점이다.
 
-- **세션 복원은 안 열렸다.** resume 배선이 아직 없다 — 수령 배선 · `needs_session()` 세 역할 쪼개기 · 활성화 입구 가드 셋이 그대로 Phase 2 몫이다(ADR-0185 결정 2). 위 두 행이 `false` 인 것은 그 배선 상태의 반영이다.
-- **우편도 안 열렸다.** `reads_messages()` 는 여전히 `false` 인데 ★**닫아 두는 사유가 갈아탔다**★. 옛 사유(「codex 는 턴 신호를 하나도 선언하지 않는다」)는 죽었다 — codex 는 이제 `turn_classifier` 를 선언하고 app-server 모드가 실제로 종료 신호를 낸다. 지금 닫는 것은 **그 선언이 명령을 못 받는다**는 것이다: 두 모드를 가를 수 없는데 터미널 모드는 decoder 가 없어 신호가 하나도 없으므로, 여기서 `true` 를 돌려주면 그 모드까지 함께 열린다. **여는 조건 = 이 축을 모드별로 가르는 것**(시그니처에 명령을 들이거나 자격을 세션 caps 로 옮기거나 — 사유 정본은 그 메서드의 doc).
+- **세션 복원 — 열렸지만 「한 문」이 아니었다.** ADR-0185 결정 2 의 요구사항 넷이 **커밋 세 개에 걸쳐 따로** 착지했고(역할 분리 · 활성화 입구 가드 → 수령 배선 → `thread/resume`), 그 뒤 **터미널 모드가 상주 서버와 무관한 경로로 따로 열렸다** — 훅이 세션 id 를 되돌려 주고 `codex resume <id>` 가 그것을 쓴다(ADR-0208). 각 단계가 앞 단계의 값을 **일부러 그대로 두고** 지나갔다는 것이 이 항목이 남기는 사실이다: 배선 없이 칸만 먼저 켜면 새 스레드가 「이어받음」으로 보고된다.
+- **우편 — 열렸는데 상주 서버가 연 것이 아니다.** ★**「`reads_messages` 는 여전히 `false` 다」로 적힌 자리를 만나면 낡은 것이다**★ — 받기와 보내기(`uses_mail`)가 둘 다 `true` 다. 열린 사유는 턴 신호가 생겨서가 아니라 **「관측할 수 없으니 배달할 수 없다」는 전제가 기각됐기** 때문이다(ADR-0116 결정 7 — 턴 신호가 없으면 게이트 없이 즉시 주입한다. 그 CLI 자신의 입력 큐가 게이트라서 우리가 idle 을 관측할 이유가 없다). 그 기각의 근거는 **신호가 0 인 터미널 claude 가 정확히 같은 자리에서 이미 받고 있었다**는 것이고, 그래서 decoder 가 없는 codex 터미널 모드까지 함께 열렸다. 대가(봉투가 턴 한가운데 꽂힐 수 있고 TUI 모달 위젯이 그것을 먹을 수 있다)는 그 결정이 명시로 수용했다. ★옛 서술의 「여는 조건 = 이 축을 모드별로 가르는 것」은 죽었다★ — 가르지 않고 열었다.
 
-★**그래서 「뿌리가 같으니 문도 하나」를 다시 세우지 말 것**★. 세 칸이 상주 스트림이라는 뿌리를 공유하는 것은 맞지만, 각자 **자기 배선**을 따로 요구한다. 이 예측이 그 둘을 한 번 뭉쳤고 틀렸다 — 같은 낙관을 다시 유도하지 않으려고 실패한 채로 적어 둔다.
+★**그래서 「뿌리가 같으니 문도 하나」를 다시 세우지 말 것**★. 세 축이 상주 스트림이라는 뿌리를 공유한다고 읽은 것부터가 과했다 — 그 뿌리를 실제로 요구한 것은 구조화 챗 하나뿐이고, 나머지 둘은 각자 **자기 배선**을 따로 요구했다(훅 회수 · 배달 정책 결정). 이 예측이 셋을 한 번 뭉쳤고 틀렸다 — 같은 낙관을 다시 유도하지 않으려고 실패한 채로 적어 둔다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(`AgentBackend` trait 의 기본값 · 트립와이어 셋) · 각 `backend/<이름>/mod.rs`(그 백엔드의 선언과 사유 주석)
+**앵커** — `crates/engram-dashboard-agent/src/backend/mod.rs`(`AgentBackend` trait 의 기본값 · 트립와이어 `tests::expected_channel_matrix` · `tests::expected_session_axes`) · 각 `backend/<이름>/mod.rs`(그 백엔드의 선언과 사유 주석) · `crates/engram-dashboard-agent/src/types.rs`(`ControlChannelNeeds` — 세 칸이 데몬으로 건너가는 모양) · `crates/engram-dashboard-daemon/src/control/mod.rs`(`DaemonControlChannel::provision` — `mail_allowed`·`wants_priming`·mcp-config write 를 파생하는 유일한 자리) · `crates/engram-dashboard-agent/tests/backend_contract.rs`(선언 표 실물)
 
 ## LLM 창구 정책
 

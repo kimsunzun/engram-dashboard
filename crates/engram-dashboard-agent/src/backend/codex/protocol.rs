@@ -215,6 +215,12 @@ pub(crate) mod method {
     pub(crate) const TURN_START: &str = "turn/start";
     pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
 
+    /// 이어받은 스레드의 지난 item 을 **페이지로** 받는다(ADR-0203).
+    ///
+    /// ★쌍둥이 `thread/turns/list` 를 쓰지 않는다★ — 우리가 화면에 그리는 단위는 turn 이 아니라
+    /// item 이고, 그쪽은 같은 item 을 turn 봉투 안에 한 겹 더 싸서 준다. 벗길 봉투만 하나 는다.
+    pub(crate) const THREAD_ITEMS_LIST: &str = "thread/items/list";
+
     /// 우리 → 서버 알림. ★클라이언트가 보낼 수 있는 알림은 이것 하나뿐이고 params 칸이 아예
     /// 없다★(`ClientNotification.json`).
     /// ★보내는 것이 의무가 아니다★(실측 0.154.0 — 보낸 경우와 안 보낸 경우 둘 다에서
@@ -377,8 +383,25 @@ pub(crate) struct ThreadStartParams {
     pub(crate) approval_policy: Option<AskForApproval>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) sandbox: Option<SandboxMode>,
+    /// codex 기본 지시문 **뒤에 덧붙는** 지시문. 부재 = 아무것도 덧붙이지 않는다.
+    ///
+    /// ★대체가 아니라 덧붙이기다★ — 이 칸에 무엇을 실어도 codex 자신의 기본 지시문은 그대로 남는다
+    ///   (실측 0.155.0: 본문이 `input[0]` 의 `developer` 역할 메시지로 앞에 서고 기본 프롬프트는 무손상).
+    /// ★터미널 모드의 `-c developer_instructions=…` 와 **같은 것을 나르지만 같은 통로가 아니다**★:
+    ///   이쪽은 JSON 본문이라 명령줄 길이 상한도, `%VAR%` 치환도, 줄바꿈 절단도 없다. 그래서 값을
+    ///   **손대지 않고 그대로** 싣는다 — 그쪽의 줄바꿈 변환·문자 가드를 여기로 가져오지 말 것(가져오면
+    ///   아무 위험도 막지 못한 채 에이전트가 읽는 문서만 망가진다).
+    // ADR-0215
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) developer_instructions: Option<String>,
 }
 
+/// ★여기엔 `developerInstructions` 짝이 **없다 — 없는 채로 두는 것이 결정이다**★: 그 칸이 이 요청의
+/// 스키마에도 있는지를 재 보지 않았고, 모르는 칸을 JSON-RPC params 에 얹는 대가는 「거절당한 핸드셰이크」
+/// 라 이어받기 스폰이 통째로 죽는다. 그래서 **이어받은 app-server 스레드는 프라이밍을 못 받는다** —
+/// 터미널 모드는 argv 라 이어받기에도 그대로 실리므로, 갭은 이 한 갈래뿐이다. 실측으로 칸의 존재가
+/// 확인되면 그때 더한다.
+// ADR-0215
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadResumeParams {
@@ -394,17 +417,93 @@ pub(crate) struct ThreadResumeParams {
     pub(crate) exclude_turns: Option<bool>,
 }
 
+/// 핸드셰이크의 **둘째 요청** — 새 스레드를 여나, 저장된 스레드를 이어받나.
+///
+/// ★고르는 자리는 `backend/codex/mod.rs` 의 [`crate::backend::AgentBackend::open_spawn`] 하나다★ —
+/// 통로는 받은 것을 그대로 낸다. 통로가 자기 상태를 보고 다시 판정하면 가르는 자리가 둘이 된다
+/// (ADR-0191 이 통로 선택에서 걷어낸 것과 같은 모양).
+// ADR-0185
+pub(crate) enum ThreadOpen {
+    Start(ThreadStartParams),
+    Resume(ThreadResumeParams),
+}
+
 /// ★thread id 가 여기 산다 — 응답 최상위가 아니라 `thread.id` 다★.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct ThreadStartResponse {
     pub(crate) thread: Thread,
 }
 
-/// `thread/resume` 응답. 칸 구성은 `thread/start` 응답에 커서 둘이 더 붙은 것이고 그 둘은 우리가
-/// 안 읽는다 — 그래도 별도 타입으로 두어 두 경로가 따로 진화할 수 있게 한다.
+/// `thread/resume` 응답. 칸 구성은 `thread/start` 응답에 커서 둘이 더 붙은 것이다.
+///
+/// ★그 커서 중 하나를 이제 읽는다 — 그것이 화면 복원의 **진입점**이다★(ADR-0203). 쓰는 법은 스키마
+/// (0.154.0)가 그 칸의 설명에 직접 적어 둔다: "Pass this as `cursor` to `thread/items/list` with
+/// `sortDirection: \"desc\"`. The first page includes the item identified by the cursor."
+/// ★`default` 로 두는 것은 스키마가 그렇기 때문이다★ — `required` 목록에 없고 `default: null` 이다.
+/// 부재 = 되돌아갈 이력이 없다는 뜻이고, **실패가 아니다**(복원을 건너뛴다).
+/// ★`thread/start` 응답에는 이 칸이 아예 없다★ — 그래서 새 대화는 이 경로를 탈 재료가 없다.
+/// ★나머지 커서(`turnsBackwardsCursor`)는 여전히 안 읽는다★ — 위 [`method::THREAD_ITEMS_LIST`] 가
+/// 그 쌍둥이를 안 쓰는 사유를 진다.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ThreadResumeResponse {
     pub(crate) thread: Thread,
+    #[serde(default)]
+    pub(crate) items_backwards_cursor: Option<String>,
+}
+
+/// 페이지를 어느 방향으로 걷나 — 스키마의 닫힌 `enum` 두 값 전량(0.154.0 `SortDirection`).
+///
+/// ★[`SortDirection::Asc`] 는 오늘 아무도 안 쓴다 — 그래도 적어 둔다★: 이것은 **나가는** 칸이라 값을
+/// 지어낼 수 없고, 둘을 함께 적어 두면 방향을 뒤집는 변경이 상수를 새로 만들지 않는다.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) enum SortDirection {
+    #[serde(rename = "asc")]
+    Asc,
+    #[serde(rename = "desc")]
+    Desc,
+}
+
+/// `thread/items/list` 요청. ★`threadId` 만 required 다★(스키마 0.154.0) — 나머지는 전부 생략 가능이라
+/// `Option` + `skip_serializing_if` 로 둔다([`ThreadStartParams`] 와 같은 사유: 부재를 기대하는 자리에
+/// 명시적 `null` 을 보내지 않는다).
+/// ★한 턴으로 좁히는 `turnId` 는 옮겨 적지 않았다★ — 우리는 스레드 전체를 끝에서부터 걷는다.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadItemsListParams {
+    pub(crate) thread_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) limit: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) sort_direction: Option<SortDirection>,
+}
+
+/// 페이지 한 장.
+///
+/// ★`nextCursor` 가 없거나 `null` 이면 그 방향으로 더 볼 것이 없다★ — 스키마가 그렇게 적고, 실측으로도
+/// 마지막 페이지에서 `null` 이 왔다(2026-09-16, 실 0.154.0 · 28 item 스레드가 25+3 으로 끝났다).
+/// ★방향을 뒤집을 때 쓰는 `backwardsCursor` 는 옮겨 적지 않았다★ — 우리는 한 방향으로만 걷는다.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadItemsListResponse {
+    pub(crate) data: Vec<ThreadItemEntry>,
+    #[serde(default)]
+    pub(crate) next_cursor: Option<String>,
+}
+
+/// 페이지에 실린 item 한 개 + 그것이 속한 turn.
+///
+/// ★`item` 이 [`ItemNotification`] 의 그 칸과 **같은 타입**이라는 것이 ADR-0203 의 근거다★ — 벤더
+/// 스키마에서 `item/completed` 알림·resume 응답·페이지 응답의 항목 정의 해시가 전부 같다(19 variants).
+/// 그래서 번역기를 새로 짜지 않고 봉투만 벗긴다. [`Value`] 로 받는 사유도 그쪽과 같다 — 모르는 변형
+/// 하나가 페이지 **전체**를 죽이면 안 된다.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ThreadItemEntry {
+    pub(crate) turn_id: String,
+    pub(crate) item: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -863,11 +962,15 @@ mod tests {
             cwd: Some("C:/w".to_string()),
             approval_policy: Some(AskForApproval::Never),
             sandbox: Some(SandboxMode::WorkspaceWrite),
+            developer_instructions: Some("be brief".to_string()),
         })
         .unwrap();
         assert_eq!(field(&v, "cwd"), "C:/w");
         assert_eq!(field(&v, "approvalPolicy"), "never");
         assert_eq!(field(&v, "sandbox"), "workspace-write");
+        // ★camelCase 로 나가는 것이 계약이다★ — snake_case 로 새면 codex 가 모르는 칸으로 읽어 조용히
+        //   버리고, 증상은 「프라이밍이 안 먹는다」 하나다(오류가 없다).
+        assert_eq!(field(&v, "developerInstructions"), "be brief");
     }
 
     #[test]

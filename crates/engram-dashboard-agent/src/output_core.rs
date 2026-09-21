@@ -217,11 +217,94 @@ impl OutputCore {
     ///   아니다.**
     /// ★정리 호출자를 늘리지 않는다(ADR-0127)★ — 관측을 아예 안 적으므로 지울 것도 없다. 그래서
     ///   `finish` + `emit` 의 finalize 재확인이라는 두 자리는 그대로다.
-    /// ★오늘의 유일한 호출자 = codex app-server 통로의 미귀속 줄★(`backend/codex/transport.rs`).
+    /// ★호출자는 오늘 둘이고 **둘 다 같은 파일**이다★(`backend/codex/transport.rs`):
+    ///   ① 상대가 흘린 미귀속 줄 ② 이어받기 직후 페이지로 받아 온 지난 화면(ADR-0203).
+    ///   ★②가 `seed` 가 아니라 이 문으로 오는 것은 **시점이 다르기 때문**이다★ — `seed` 는 세션이
+    ///   명부에 오르기 전에만 옳고(fanout 이 없어도 구독자가 없다), ②는 핸드셰이크 뒤라 이미 붙은
+    ///   구독자가 있을 수 있다. 거기서 fanout 없는 문을 쓰면 그 구독자는 빈 링을 replay 한 뒤라 지난
+    ///   화면을 **영영 못 본다**.
     // ADR-0113
     // ADR-0127
     pub(crate) fn emit_without_turn_observation(&self, event: OutputEvent) {
         self.emit_inner(event, false);
+    }
+
+    /// 같은 문으로 **여러 건을 한 덩이로** 내보낸다 — ★그 사이에 다른 emit 이 끼어들 수 없다★.
+    ///
+    /// ★존재 이유 = 「끼어들 수 없다」 하나다★: 낱개로 부르면 각 호출이 replay 락을 따로 잡으므로, 그
+    ///   틈마다 pump 의 라이브 emit 이 seq 를 가져갈 수 있다. 복원된 대화 **한가운데**에 새 줄이 박히는
+    ///   것이 그 결과다(ADR-0203 의 이력 복원이 이 문을 쓰는 이유). 한 락 구간 안에서 seq 를 연달아
+    ///   발급하면 그 덩이는 링에서 반드시 연속이다.
+    /// ★★그 「끼어들 수 없다」는 **링 안에서만** 참이다 — 배달까지로 넓혀 읽지 말 것★★: 아래 구현이
+    ///   fanout 은 락을 놓고 하므로(그 규율의 근거 = [`Self::emit`]), **이미 붙어 있는** 구독자에게는
+    ///   [덩이 seq N] → [라이브 seq N+k] → [덩이 seq N+1] 순서로 갈 수 있다. 그리고 그 결말은 재정렬이
+    ///   아니라 **폐기**다 — 프론트 구독 콜백이 `seq <= lastSeq` 를 버리므로 끼어든 뒤의 덩이 프레임이
+    ///   화면에서 사라진다. ★**나중에 붙는** 구독자는 영향이 없다★(링에서 replay 하므로 순서가 온전하다).
+    /// ★그리고 **덩이 앞**도 막지 못한다★ — 이 덩이보다 먼저 도착한 라이브 줄은 여전히 앞에 선다.
+    /// ★그래서 이 문이 파는 것은 「**링 안에서** 이력이 쪼개지지 않는다」 하나다★ — 배달 순서와 「이력이
+    ///   맨 앞이다」는 이 문이 주는 것이 아니고, 그 둘을 함께 닫는 길은 생산자 쪽에서 라이브 emit 을
+    ///   게이트까지 붙드는 것뿐이다(그 큐의 상한·넘침 처분이 선결이라 별건이다 — 그 별건은 **안 만들기로
+    ///   닫혔다**: ADR-0205. 위 한계는 열린 채로 남는다).
+    /// ★락 규율은 [`Self::emit`] 과 같다(ADR-0006)★ — 발급·push 는 replay 락 안에서, fanout 은 락을 놓고
+    ///   subscribers 스냅샷으로. 두 락을 동시에 쥐지 않는다.
+    /// ★관측·상태·finalize 를 건드리지 않는 것도 낱개 문과 같다★(ADR-0005/0113/0127).
+    // ADR-0203
+    // ADR-0205
+    pub(crate) fn emit_batch_without_turn_observation(&self, events: Vec<OutputEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        // 1. 발급 + push 를 **한 번의** replay 락 안에서 — 이 구간이 곧 「끼어들 수 없다」의 실물이다.
+        let numbered: Vec<(u64, OutputEvent)> = {
+            let mut replay = self.replay.lock().expect("replay poisoned");
+            events
+                .into_iter()
+                .map(|event| {
+                    let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+                    let cost_bytes = estimate_cost_bytes(&event);
+                    replay.push(StoredOutput {
+                        seq,
+                        event: event.clone(),
+                        cost_bytes,
+                    });
+                    (seq, event)
+                })
+                .collect()
+        };
+
+        // 2. fanout 은 락을 놓고 — 죽은 sink 는 낱개 문과 같은 방식으로 한 번에 걷어낸다.
+        let sinks = self
+            .subscribers
+            .lock()
+            .expect("subscribers poisoned")
+            .clone();
+        let mut dead = Vec::new();
+        for sink in sinks {
+            for (seq, event) in &numbered {
+                let payload = match event {
+                    OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
+                    other => OutputPayload::Event(other),
+                };
+                if sink
+                    .send(OutputFrame {
+                        agent_id: self.id,
+                        epoch: self.epoch,
+                        seq: *seq,
+                        payload,
+                    })
+                    .is_err()
+                {
+                    dead.push(sink.sink_id());
+                    break;
+                }
+            }
+        }
+        if !dead.is_empty() {
+            self.subscribers
+                .lock()
+                .expect("subscribers poisoned")
+                .retain(|s| !dead.contains(&s.sink_id()));
+        }
     }
 
     fn emit_inner(&self, event: OutputEvent, observe_turn: bool) {
@@ -743,7 +826,12 @@ pub struct StoredOutput {
 /// 이벤트가 "건수 1" 로만 세지면 max_bytes(2MB) 상한을 우회해 버퍼가 무한정 커진다. 이를 막으려
 /// **payload 문자열 필드들의 바이트 길이 합**을 구조적으로 근사해 예산에 반영한다. 이 값은 eviction
 /// 판단 전용이며 정확한 직렬화 크기가 아니다(태그·구분자·escape 오버헤드 무시).
-fn estimate_cost_bytes(event: &OutputEvent) -> usize {
+/// ★`pub(crate)` 인 것은 **링 바깥에서 「이만큼이면 링을 채운다」를 셀 수 있어야 하기 때문이다**★:
+/// 복원 이력을 상대에게 **요청해서** 받는 backend(codex app-server)는 몇 건을 받아 올지 스스로 정해야
+/// 하는데, 그 천장은 [`REPLAY_MAX_BYTES`]·[`REPLAY_MAX_EVENTS`] 이고 무게를 세는 축은 이 함수다. 다른
+/// 축으로 어림잡으면 그 backend 가 링이 버릴 것을 더 받아 오거나(순 비용) 실을 수 있는 것을 덜 받아
+/// 온다(화면 손실). (ADR-0203)
+pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
     match event {
         OutputEvent::TerminalBytes(v) => v.len(),
         OutputEvent::TextDelta {
@@ -796,15 +884,23 @@ pub struct Ring {
     max_events: usize,
 }
 
+/// 링의 바이트 천장. ★상수로 꺼내 둔 것은 [`estimate_cost_bytes`] 와 같은 사유다★ — 이력을 요청해서
+/// 받는 backend 가 「여기까지만 받으면 된다」를 이 값으로 판정한다(ADR-0203). 링 자신이 쓰는 자리는
+/// 아래 [`Ring::new`] 하나다.
+pub(crate) const REPLAY_MAX_BYTES: usize = 2 * 1024 * 1024;
+
+/// 링의 건수 천장 — 사유는 [`REPLAY_MAX_BYTES`] 와 같다.
+pub(crate) const REPLAY_MAX_EVENTS: usize = 4096;
+
 impl Ring {
     pub fn new() -> Self {
         Self {
             items: VecDeque::new(),
             total_bytes: 0,
-            max_bytes: 2 * 1024 * 1024,
+            max_bytes: REPLAY_MAX_BYTES,
             // 4096: 데몬 WS 송신 큐 cap(예 4608) − control_slack(512) 이하로 잡아
             // replay만으로 신규 구독자 큐가 넘치지 않게 한다.
-            max_events: 4096,
+            max_events: REPLAY_MAX_EVENTS,
         }
     }
 
@@ -1172,6 +1268,95 @@ mod tests {
         // 라이브 emit 부터 관측이 시작된다(seed 가 관측을 막아 버리는 것도 아니다).
         core.emit(delta());
         assert!(turns.is_in_turn(id, 0));
+    }
+
+    /// 덩이 문의 기본 계약 — 링에도 들어가고, 붙어 있는 구독자에게도 **순서대로** 나가며, seq 가 이어진다.
+    #[test]
+    fn a_batch_lands_in_the_ring_and_fans_out_in_order() {
+        let core = new_core(MockStatusSink::new());
+        let sink = MockSink::new();
+        core.subscribe(sink.clone());
+
+        core.emit_batch_without_turn_observation(vec![
+            OutputEvent::TerminalBytes(b"one".to_vec()),
+            OutputEvent::TerminalBytes(b"two".to_vec()),
+            OutputEvent::TerminalBytes(b"three".to_vec()),
+        ]);
+
+        assert_eq!(sink.seqs(), vec![0, 1, 2]);
+        // 늦게 붙는 구독자도 링에서 같은 셋을 받는다.
+        let late = MockSink::new();
+        core.subscribe(late.clone());
+        assert_eq!(late.seqs(), vec![0, 1, 2]);
+    }
+
+    /// 빈 덩이는 seq 를 쓰지 않는다 — 안 그러면 복원할 것이 없는 세션마다 번호가 하나씩 밀린다.
+    #[test]
+    fn an_empty_batch_consumes_no_seq() {
+        let core = new_core(MockStatusSink::new());
+        core.emit_batch_without_turn_observation(Vec::new());
+        let sink = MockSink::new();
+        core.subscribe(sink.clone());
+        core.emit(OutputEvent::TerminalBytes(b"first".to_vec()));
+        assert_eq!(sink.seqs(), vec![0]);
+    }
+
+    /// 덩이 문도 낱개 문과 같이 **관측을 적지 않는다** — 지나간 기록이 새 화신을 「턴 중」으로 만들면
+    /// 그 턴의 종료가 영영 오지 않는다(ADR-0113/0127 · `seed` 가 지키던 그 규율).
+    #[test]
+    fn a_batch_never_bootstraps_turn_observation() {
+        let sink = MockStatusSink::new();
+        let (core, turns, id) = core_with_turns(sink.clone(), 0);
+        core.emit_batch_without_turn_observation(vec![delta(), message_done(), delta()]);
+        assert_eq!(turns.get(id, 0), None, "덩이 문이 관측을 적었다");
+        assert!(sink.turn_ends().is_empty(), "덩이 문이 통지를 냈다");
+    }
+
+    /// ★★덩이 **안으로** 다른 emit 이 끼어들 수 없다★★ — 이것이 이 문의 존재 이유다(ADR-0203).
+    /// 낱개로 부르는 구현이면 경쟁 스레드가 중간 seq 를 가져가 복원된 대화가 쪼개진다.
+    #[test]
+    fn nothing_can_interleave_inside_a_batch() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let core = Arc::new(new_core(MockStatusSink::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let racer = {
+            let core = core.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    core.emit(OutputEvent::TerminalBytes(b"live".to_vec()));
+                }
+            })
+        };
+
+        let batch: Vec<OutputEvent> = (0..200)
+            .map(|i| OutputEvent::Structured {
+                kind: "history".to_string(),
+                json: format!("{i}"),
+            })
+            .collect();
+        core.emit_batch_without_turn_observation(batch);
+        stop.store(true, Ordering::Relaxed);
+        racer.join().unwrap();
+
+        // 링에서 덩이 항목들의 seq 를 뽑아 **연속**인지 본다.
+        let stored = core.replay.lock().unwrap().snapshot();
+        let seqs: Vec<u64> = stored
+            .iter()
+            .filter(
+                |c| matches!(&c.event, OutputEvent::Structured { kind, .. } if kind == "history"),
+            )
+            .map(|c| c.seq)
+            .collect();
+        assert_eq!(seqs.len(), 200, "덩이가 링에서 잘렸다");
+        for pair in seqs.windows(2) {
+            assert_eq!(
+                pair[1],
+                pair[0] + 1,
+                "덩이 한가운데에 다른 줄이 끼어들었다: {seqs:?}"
+            );
+        }
     }
 
     #[test]

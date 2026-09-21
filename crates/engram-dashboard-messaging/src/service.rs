@@ -202,7 +202,7 @@ pub enum FailCode {
     /// ★파킹돼 기다리는 동안 수신자 프로필이 삭제돼 미배달 종결됨(ADR-0116 결정 3)★.
     ///
     /// ★발송 응답에는 **절대 나타나지 않는다**(spec §6)★: 발송 시점엔 `pending` 이었고 이 코드는 삭제 정리가
-    ///   사후에 찍는다 — 그래서 발신 LLM 은 이걸 `messages{id}` **조회**에서 처음 본다(조회 행이 code 와
+    ///   사후에 찍는다 — 그래서 발신 LLM 은 이걸 `eg_messages{id}` **조회**에서 처음 본다(조회 행이 code 와
     ///   힌트를 함께 싣는 이유 — `message_state`). `RecipientNotFound`("보낼 때부터 없었다")와 **시점이
     ///   다르다**: 발신자가 "이름을 잘못 썼구나" 와 "기다리다 상대가 지워졌구나" 를 구분해야 재발송 판단이
     ///   갈린다.
@@ -1167,7 +1167,7 @@ impl MessagingService {
     /// ★그래도 이름은 필요하다(파킹은 이름 키다)★: 큐·장부·계약의 축은 canonical 이름이므로 정리 대상은
     ///   이름으로 지목한다.
     /// ★하는 일 두 가지★: ① 그 이름 앞 **파킹분 전량**을 `failed` + `RECIPIENT_DELETED` 로 종결(장부 종점 +
-    ///   조회 힌트 — 대기열에서만 사라지고 이력은 남아 발신자가 `messages{id}` 로 사유를 본다. "산 메일
+    ///   조회 힌트 — 대기열에서만 사라지고 이력은 남아 발신자가 `eg_messages{id}` 로 사유를 본다. "산 메일
     ///   조용히 버리기 금지" 불변식 유지) ② 그 이름이 **요청자**인 오픈 계약을 `reply_failed` 로 종결(회신
     ///   도달 불가 확정). 이미 `replied` 인 계약은 되돌리지 않고, **회신자 쪽이 삭제된 계약은 유지**한다
     ///   (발신자는 기한 통지로 무응답을 알게 되는 기존 경로가 살아 있다).
@@ -2288,7 +2288,7 @@ impl MessagingService {
     ///   환산해 내보낸다 — 수신 LLM 에게도 "3분 전" 이 "17:42:03" 보다 바로 쓸모 있다.
     /// ★`now` 를 인자로 받는다★: 장부 순수성(주입 시계, ledger.rs 헤더)과 같은 규율 — 결정적 단위 테스트.
     /// ★이력이 통째로 밀려난 **열린 계약**은 계약 뷰로 답한다(리뷰 NOTE — 교차 동사 모순 해소)★: B3 이후
-    ///   미회신 계약은 이력보다 오래 산다. 그러면 `messages{}` 는 그 id 를 미결로 보여 주는데 `messages{id}`
+    ///   미회신 계약은 이력보다 오래 산다. 그러면 `eg_messages{}` 는 그 id 를 미결로 보여 주는데 `eg_messages{id}`
     ///   는 `MESSAGE_NOT_FOUND` 를 내는 자기모순이 생긴다 — 조회자가 "목록이 거짓말한다" 로 읽는다. 그래서
     ///   행이 없어도 계약이 살아 있으면 **행 0줄 + `awaiting_reply=true` + 잘림 표시**로 답한다.
     pub fn message_state(&self, msg_id: &str, now: Instant) -> Option<MessageStateView> {
@@ -2333,7 +2333,7 @@ impl MessagingService {
         })
     }
 
-    /// ★`messages` 무인자 — 호출자의 "미결"(spec §6)★. 세 갈래를 **한 목록**으로 합쳐 오래된 순으로 준다:
+    /// ★`eg_messages` 무인자 — 호출자의 "미결"(spec §6)★. 세 갈래를 **한 목록**으로 합쳐 오래된 순으로 준다:
     ///   ① 내가 보냈는데 아직 안 꽂힌 것(`from=me` + `pending`) ② 내가 건 request 의 회신 대기
     ///   (`from=me` + awaiting_reply) ③ 내가 받은 request 중 아직 답 안 한 것(`to=me` + awaiting_reply).
     ///
@@ -3166,11 +3166,11 @@ fn deleted_hint() -> String {
 /// 잠듦 파킹 hint(spec §5 분기 3 — ADR-0116 결정 1). 발신자가 "왜 pending 인가" 와 결말을 읽게 한다.
 ///
 /// ★만료는 조용하다(사용자 결정 2026-07-30 — 알고 수용)★: 아무도 복원하지 않으면 24h TTL 로 `expired` 되고
-///   **발신자에게 능동 통지는 없다**(발송 응답의 `pending` + 이후 `messages` 조회가 전부). 그래서 그 사실을
+///   **발신자에게 능동 통지는 없다**(발송 응답의 `pending` + 이후 `eg_messages` 조회가 전부). 그래서 그 사실을
 ///   힌트에 적어 둔다 — 발신 LLM 이 "언젠가 반드시 간다" 로 오독하지 않게.
 fn park_hint_dormant(display: &str) -> String {
     format!(
-        "'{display}' is not running right now but it is a saved agent — parked; it will be delivered as one batch when that agent is restored. Nobody is notified if it expires first (24h TTL), so check with `messages` if it matters."
+        "'{display}' is not running right now but it is a saved agent — parked; it will be delivered as one batch when that agent is restored. Nobody is notified if it expires first (24h TTL), so check with `eg_messages` if it matters."
     )
 }
 
@@ -3192,10 +3192,10 @@ fn park_hint_inject_failed(display: &str, err: &str) -> String {
 ///
 /// ★문구가 "안 갔다" 로 읽히면 안 된다★: 이 편지는 **이긴 쪽 배치에 실려 이미 배달됐을 수 있다**. 발신
 ///   LLM 이 `pending` 을 "상대가 못 받았다" 로 단정해 보고하는 것이 spec §7 프라이밍이 막는 오독이고,
-///   힌트가 그 오독을 부추기면 안 된다 — 실제 결말은 `messages{id}` 조회로 본다.
+///   힌트가 그 오독을 부추기면 안 된다 — 실제 결말은 `eg_messages{id}` 조회로 본다.
 fn park_hint_overlapping(display: &str) -> String {
     format!(
-        "Another send to '{display}' was draining that mailbox at the same time, so this call could not confirm delivery — it was NOT lost: it either went out with that batch or is still queued. Check `messages` if you need to know which."
+        "Another send to '{display}' was draining that mailbox at the same time, so this call could not confirm delivery — it was NOT lost: it either went out with that batch or is still queued. Check `eg_messages` if you need to know which."
     )
 }
 

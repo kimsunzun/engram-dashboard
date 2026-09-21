@@ -151,7 +151,7 @@ fn apply_wrap_template(template: &str, sender: &str, id: &str, body: &str) -> St
 /// 파이프라인 로직은 이걸 분기하지 않는다(entrance-agnostic) — **로그 라벨 전용**이다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Entrance {
-    /// MCP `send_message` 툴 경로.
+    /// MCP `eg_send` 툴 경로.
     Mcp,
     /// `/control/send` 평문 HTTP 라우트(CLI `engram mail send`).
     Cli,
@@ -265,7 +265,11 @@ pub struct DeliveryObservation {
 }
 
 impl DeliveryObservation {
-    /// ★완결성의 근거는 `error.is_none()`(= 세션 write_all 이 Ok)★. 뒤의 바이트 등식은 short-write 를
+    /// ★완결성의 근거는 `error.is_none()`★ — 그 `Ok` 는 배달 동사(`submit_stdin_observed`)가 **바이트가
+    ///   실제로 OS 로 나간 것을 확인한 뒤** 낸 것이다. ★한때 여기 「= 세션 write_all 이 Ok」로 적혀 있던
+    ///   것은 낡았다★: 통로가 유계 입력 큐를 쓰게 되면서 `write_all` 은 호출 스레드에서 일어나지 않고,
+    ///   그 착지 확인이 별도 동사로 옮겨 갔다(`AgentTransport::flush_input`). ★쓰기 완료를 확인할 수단이
+    ///   없다고 신고하는 통로(codex app-server)에서는 이 레코드가 착지가 아니라 **수락**까지만 단언한다★. 뒤의 바이트 등식은 short-write 를
     ///   잡는 게 아니라(비교하면 항상 같다 — `InjectReceipt` by-construction) 성공 레코드가 잘 채워졌는지의
     ///   by-construction 정합성 방어일 뿐이다(성공인데 bytes_written=None 같은 구성 버그를 거른다).
     pub fn is_delivered(&self) -> bool {

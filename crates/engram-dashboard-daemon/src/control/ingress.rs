@@ -1,6 +1,6 @@
 //! ControlIngress seam(ADR-0086 스텝 2) — 듀얼 입구(MCP + CLI)의 공통 파이프라인.
 //!
-//! ★역할★: 두 입구(MCP `send_message` 툴 · `/control/send` HTTP 라우트)가 각자 요청을 정규화한
+//! ★역할★: 두 입구(MCP `eg_send` 툴 · `/control/send` HTTP 라우트)가 각자 요청을 정규화한
 //!   `ControlCommand` 로 만들어 **이 모듈의 단일 핸들러**(`handle_send`)를 부른다. 그 아래(Validator·
 //!   Relay·ACK)는 어느 입구로 들어왔는지 모른다(entrance-agnostic) — 입구별 코드 중복·표류를 막는다.
 //!
@@ -35,7 +35,7 @@ pub struct ControlCommand {
     pub contract: SendContract,
 }
 
-/// ★회신 계약 발송 인자(C3 · spec §6 `send_message { …, request?, reply_by?, reply_to? }`)★.
+/// ★회신 계약 발송 인자(C3 · spec §6 `eg_send { …, request?, reply_by?, reply_to? }`)★.
 ///
 /// ★왜 별도 struct 인가★: 세 인자는 전부 **선택**이고 기본값(`Default`)이 곧 "통보"다. `ControlCommand` 에
 ///   평평하게 늘어놓으면 plain 발송을 만드는 모든 자리(테스트·스모크 bin 포함)가 세 필드를 매번 써야 한다.
@@ -423,7 +423,7 @@ pub fn handle_send(
     }
 }
 
-// ── 조회 입구(D · spec §6 `messages`) ─────────────────────────────────────────────────────
+// ── 조회 입구(D · spec §6 `eg_messages`) ─────────────────────────────────────────────────────
 //
 // ★spawn_blocking 을 쓰지 않는 이유★: 이 경로엔 자식 stdin blocking write 가 없다(inject 없음). 잡는 락은
 //   messaging state 하나이고 그 임계구역은 순수 자료구조 조작뿐이라(port 호출은 락 밖) 짧다 — async 워커를

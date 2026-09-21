@@ -512,7 +512,9 @@ still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod
 2. `SpawnReservation::reserve` (:892-900) — second guard, RAII (:384-409).
 3. `register_for_spawn(profile)?` (:902) — name allocation + roster capacity.
 4. `dunce::canonicalize(&profile.cwd)` best-effort (:905).
-5. Session-id minting (:915-923): `needs = backend::needs_session(&profile.command)`; if `needs`,
+5. Session-id minting (:915-923): `assigns_sid = backend::assigns_session_id(&profile.command)`
+   — the **minting** axis only; whether a stored sid can be *resumed* is a separate predicate
+   (`can_resume_stored_session`, consulted by `restore_one` and the activation entries). If `assigns_sid`,
    `Resume => profiles.ensure_session_id(id)` (:918), `Fresh => profiles.new_session_id(id)` (:919);
    else `None`. Doc (:907-914) states this is the single authority: "spawn_agent 이 이 판정의 단일
    권위점이라 어떤 호출자(Spawn/SpawnProfile/restore/fallback)든 mode 만 맞게 넘기면 sid 충돌이 원천
@@ -527,7 +529,8 @@ still names no transport type — `open_spawn` returns `SpawnParts` (backend/mod
 8. `spec = backend::build_command_spec(...)` (:983-990).
 9. `seed_events` (:992-1000) — `Resume` + `Some(sid)` → `backend::resume_transcript_events`, else
    empty.
-10. `backend::open_spawn(&profile.command, &spec, DEFAULT_COLS, DEFAULT_ROWS)?` (:1009) — the backend
+10. `backend::open_spawn(&profile.command, &spec, DEFAULT_COLS, DEFAULT_ROWS, Some(sink))?` — the
+    sink is `session_id_sink(self.profiles.clone(), profile.id, epoch)`; the backend
     builds its own transport and returns the rest of the session's assembly values in `SpawnParts`.
     **This is where the child process starts**, and the code pins it after step 9 (:1007-1008):
     "★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그 프로그램이
@@ -637,27 +640,34 @@ api.rs:70) and nothing reads it.
 
 ## A10. The two activation entrances
 
-Both derive the mode from **`profile.backend_session_id.is_some()`** and nothing else.
+Both derive the mode from **`backend::can_resume_profile(&profile)`** — the resume axis of the
+backend AND a stored sid, one shared helper (backend/mod.rs). A stored sid alone is no longer
+enough. The socket entrance keeps one bypass on top of it (the wire `resume` flag, below).
 
 1. **Command bus / LLM entrance** — `crates/engram-dashboard-agent/src/commands.rs`.
    `agent.spawn` splits on its arguments (`target` xor `cwd`, commands.rs:485-501).
    - `wake_existing` (commands.rs:510-529): `resolve(host, token)` → `host.agent_snapshot(id)` →
      ```rust
-     let mode = if profile.backend_session_id.is_some() { SpawnMode::Resume } else { SpawnMode::Fresh };  // :522-526
-     let started = host.activate_profile(&profile, mode);                                                 // :526
+     let mode = if crate::backend::can_resume_profile(&profile) { SpawnMode::Resume } else { SpawnMode::Fresh };
+     let started = host.activate_profile(&profile, mode);
      ```
-     Doc (:520-521): "모드 유도 규칙은 WS 경로와 같은 것을 쓴다(ADR-0076) … 여기서 다른 규칙을 쓰면
-     같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을 잃는다."
+     The doc above it states the rule is shared with the WS path (ADR-0076) and now points at the
+     shared helper — "여기서 다른 규칙을 쓰면 같은 에이전트가 어느 입구로 깨우느냐에 따라 대화 이력을
+     잃는다". Regression net: `commands::tests::waking_does_not_resume_a_profile_whose_backend_cannot_resume`.
    - `create_and_start` (commands.rs:533-...): always `SpawnMode::Fresh` (:547), with the command
      built from `backend_command(AgentBackend::Claude, NEW_AGENT_OUTPUT_FORMAT)` (:544) — the verb
      has no backend or format field ("이 동사에는 형식·백엔드 칸이 없다", :537).
 2. **Socket entrance** — `crates/engram-dashboard-daemon/src/connection_core.rs`.
    - `AgentCommand::SpawnProfile { profile_id, resume, request_id }` (:1109-1113):
      ```rust
-     let mode = if resume || profile.backend_session_id.is_some() { SpawnMode::Resume } else { SpawnMode::Fresh };  // :1126-1130
-     let started = manager.activate_profile(&profile, mode);                                                        // :1131
+     let mode = if resume || backend::can_resume_profile(&profile) { SpawnMode::Resume } else { SpawnMode::Fresh };
+     let started = manager.activate_profile(&profile, mode);
      ```
-     So the wire `resume` flag is an **OR**, not the deciding input. Doc (:1114-1123): "저장된 세션이
+     So the wire `resume` flag is an **OR**, not the deciding input — and it is the one input that
+     **bypasses the backend's resume axis**: `resume: true` reaches Resume even for a backend that
+     declares it cannot resume. That asymmetry is deliberate-but-unsettled; it is pinned by
+     `connection_core::tests::ws_spawn_profile_still_honours_an_explicit_resume_request`, with the
+     guarded path pinned by `…_does_not_resume_a_profile_whose_backend_cannot_resume`. Doc (:1114-1123): "저장된 세션이
      있으면 wire `resume` 플래그(프론트는 false 로 보낸다)와 무관하게 항상 Resume 이다 … 단 '안전하다'
      고 읽지 말 것: 방금 발급한 sid 에는 이어받을 대화 실물이 없어서 claude 는 즉사한다."
    - `AgentCommand::Spawn { profile_id, request_id }` (:795-817): **always `SpawnMode::Fresh`**
@@ -689,7 +699,8 @@ Per-**incarnation** (goes stale, and by attribute never reaches disk):
 
 Hybrid — durable on disk but mutated by runtime observation:
 `backend_session_id: Option<Uuid>` (:165), `auto_restore: bool` (:210, raised at manager.rs:1283,
-lowered at reaper.rs:136), `last_active: i64` (:226, sole writer `observe_session_id` at :636).
+lowered at reaper.rs:136), `last_active: i64` (sole writer `observe_session_id`, which now has two
+callers — see that section).
 
 Reserved with **no production writer at all**: `restart_policy` (:213-214), `restart_count`
 (:217-218), `failed_reason` (:222-223), and `last_start_at: Option<i64>` (:229-230) — the last one
@@ -709,18 +720,31 @@ Invariants quoted:
 - Save-inside-the-lock discipline (:365-372): the profiles lock → store lock order is one-way, so
   `persisted == observed` and no interleaved A/B snapshot can leave memory newest and disk stale.
 
-### `observe_session_id` (profile.rs:629-639)
+### `observe_session_id`
 
-`pub fn observe_session_id(&self, id: AgentId, new_sid: Uuid) -> bool`. Body: a `mutate_if` closure —
-if `p.backend_session_id != Some(new_sid)`, push the old value onto `old_session_ids`, store the new
-one, set `last_active = now_millis()`, return `true`; otherwise `false` and **no disk write**
-(:630-639).
+`pub fn observe_session_id(&self, id: AgentId, incarnation: Option<u32>, new_sid: Uuid) -> bool`.
+Body: a `mutate_if` closure — reject first if `incarnation.is_some_and(|e| e != p.epoch)`; else if
+`p.backend_session_id != Some(new_sid)`, push the old value onto `old_session_ids`, store the new
+one, set `last_active = now_millis()`, return `true`; otherwise `false` and **no disk write**.
 
-- **No epoch / incarnation guard.** Any differing sid overwrites unconditionally. Contrast
-  `set_last_failure`, which *does* take an `incarnation` parameter (:575-583). A late poll from a
-  dead incarnation can still write.
-- Sole production caller: the `SessionTracker` `on_change` closure, daemon/src/lib.rs:288 (closure
-  built at lib.rs:283-289). **The return value is discarded.**
+- **Epoch / incarnation guard, but only on the arm that supplies one.** `Some(epoch)` writes only
+  when it equals the profile's current `epoch`; `None` means "the caller has no axis to compare"
+  and writes unconditionally, the same deliberate residue as `set_last_failure`. Comparison is
+  equality only — never ordering (ADR-0007/0163).
+- Two production callers, and they differ on that axis:
+  - the `SessionTracker` `on_change` closure, daemon/src/lib.rs — passes `None`, because that
+    file-poller does not carry an incarnation. This is the claude path and it is unchanged.
+  - `manager::session_id_sink`, the closure handed to `backend::open_spawn` — passes
+    `Some(epoch_for_spawn's value)`. **What that buys is exactly one thing: a receipt arriving after
+    a *newer incarnation has already been minted* is rejected.** It does not fence a receipt that
+    lands after the session merely *ended* — nothing on the kill/EOF/reap path writes `epoch`, so a
+    dead-and-not-replaced session carries the same marker a live one would. The transport narrows
+    that window by skipping the sink when the closed marker is already set
+    (`record_session_id`), but narrowing is not closing: a session that ends between that read and
+    the write still gets its profile stamped. This is the codex app-server path.
+- **The return value is used at one call site and discarded at the other.** `manager::session_id_sink`
+  branches on it to pick which of the three outcomes to log (recorded / not recorded / unparseable);
+  the tracker closure in `daemon/src/lib.rs` discards it.
 - Thread: the single OS thread named `"session-tracker"` (session_tracker.rs:153-155), one thread
   for all agents (:91). It is called **after** the watch-list mutex is released (:160-177), so the
   chain is `watched` → release → `profiles` → store lock.
@@ -731,9 +755,11 @@ one, set `last_active = now_millis()`, return `true`; otherwise `false` and **no
   whole directory (:98-123), guards against pid reuse (:204-206), and gives up after
   `MAX_RESOLVE_ATTEMPTS = 15` polls → `Degraded`, never polled again (:36, :184-192;
   session_tracker.rs:166-170). Poll interval 1 s (session_tracker.rs:33).
-- The port default is `None` (backend/mod.rs:251-258). Only claude implements it
-  (backend/claude/mod.rs:394-401). **Codex never reaches the watch at all** — its
-  `needs_session()` is `false` (backend/codex/mod.rs:59-61), which gates manager.rs:1022-1028.
+- The port default is `None` (`AgentBackend::session_id_source`, backend/mod.rs). Only claude
+  implements it (`ClaudeBackend::session_id_source`). **Codex never reaches the watch at all** — its
+  `assigns_session_id()` is `false`, which gates manager.rs:1022-1028. The watcher hangs off
+  the **minting** axis because `session_id_source` takes a required `expected_sid: Uuid` baseline —
+  without an assigned sid there is nothing to compare against.
 
 ### `mutate_if` (profile.rs:400-408)
 
@@ -762,7 +788,7 @@ section (:401-408). Predicate `false` → skips normalize, snapshot and save, re
   dirty flag, no shutdown flush.** Every mutating verb rewrites the entire file: `upsert` (:438),
   `upsert_preserving_hierarchy` (:459), `remove` (:479), `reparent` (:514), `update_with` (:542),
   `ensure_session_id` (:596), `new_session_id` (:614), `epoch_for_spawn` (:667),
-  `observe_session_id` (:629).
+  `observe_session_id`.
 - Deliberate bypass: `set_last_failure` takes the mutex directly and never saves (:574-590),
   justified at :568-571 ("`#[serde(skip)]` 이라 저장해도 파일 내용이 한 바이트도 달라지지 않는다").
   Note the inconsistency: `epoch_for_spawn` triggers a full save on **every spawn** although the
@@ -852,7 +878,7 @@ string (types.rs:322-330). Verified: no other `fs::` read/write in the agent cra
 
 With a live read path:
 - `backend_session_id: Option<Uuid>` — the **only** value that resumes a conversation today.
-  Writers `ensure_session_id` (:596), `new_session_id` (:614), `observe_session_id` (:629). Readers:
+  Writers `ensure_session_id`, `new_session_id`, `observe_session_id`. Readers:
   the resumable gate (manager.rs:1323-1324), manager.rs:613, and the claude backend, which turns it
   into `--resume <sid>` (backend/claude/mod.rs:136, :164, :1229) or `--session-id <sid>` for Fresh
   (:135, :163, :1211).
@@ -869,16 +895,25 @@ With a live read path:
 Written but never read back into a spawn:
 - `old_session_ids` (:618, :633) — mirrored to wire (connection_core.rs:489) and to the frontend
   (`src/api/types.ts:147`), and **never fed into any spawn**.
-- `last_active` (:636) — wire mirror only (connection_core.rs:497); consulted by no restore decision.
+- `last_active` — wire mirror only (connection_core.rs:497); consulted by no restore decision.
 - `epoch` — written as `0`, never read from disk.
 - `last_start_at`, `restart_policy`, `restart_count`, `failed_reason` — no writer at all.
 
-**Codex has zero persisted resume state today.** `needs_session()==false`
-(backend/codex/mod.rs:56-61) → `sid = None` at manager.rs:914-922 → `backend_session_id` stays
-`None` → `restore_one`'s resumable gate is false (manager.rs:1323-1329) → codex always spawns Fresh.
-`capabilities().session.resume = false` with the stated reason "호출자가 sid 를 못 정하므로 무손실
-복원이 성립하지 않는다" (backend/codex/mod.rs:141-148). `codex resume <id>` is listed as known but
-unwired (:14, :87-88), and `build_spec` asserts no session flag is assembled (:90-96, test :245).
+**Codex's two axes now disagree, and that is the point.** `assigns_session_id()==false` → `sid =
+None` in `AgentManager::spawn_agent` → the manager never mints a uuid for codex. But
+`can_resume_stored_session()` is now `is_app_server(command)`: **true** for app-server, **false** for
+terminal mode. So an app-server profile that has been handed a thread id is resumable —
+`backend::can_resume_profile` is true → `restore_one` **and both activation entries** spawn Resume →
+`AgentManager::spawn_agent` passes `profile.backend_session_id` to `open_spawn` as the resume target
+→ the codex backend issues `thread/resume { threadId }` instead of `thread/start`. The two axes are
+kept apart precisely because they answer different questions (who mints vs. what a stored sid is good
+for — ADR-0185), and codex is the backend where the answers differ.
+★Do not collapse the resume target with `build_spec`'s `session_id`★ — the latter is the value *we*
+mint (the `assigns_session_id` axis) and is `None` here; the former is the value the *peer* minted
+and we recorded. `capabilities().session.resume` follows the same per-channel predicate.
+`codex resume <id>` (the terminal-mode subcommand) is still listed as known but unwired (:14,
+:87-88), and `build_spec` asserts no session flag is assembled (:90-96, test :245) — codex's resume
+never travels on the command line.
 The `gemini` backend is an unreachable stub — `pub mod gemini` exists (backend/mod.rs:14) but there
 is no `AgentCommand::Gemini` variant and no arm in `backend_for` (:283-289).
 
@@ -1856,17 +1891,57 @@ would want to do, and why it cannot today.
 ## Profile / persistence / resume
 
 46. **Store a non-UUID resume handle** (a conversation id string, a rollout file path) — the only
-    slot is `backend_session_id: Option<Uuid>` (profile.rs:165). **No mechanism exists.**
-47. **Let a backend report a session id it minted itself** — the port is pull-only polling
-    (session_tracker.rs:47-51, backend/mod.rs:251-258) and there is no `AgentBackend` method to push
-    one. And the pull path is gated on `needs_session()` (manager.rs:1022-1028), which codex sets to
-    `false` (backend/codex/mod.rs:59-61) — so a codex agent can never record one.
-48. **Learn a session id from the child's own output stream** — the decoder cannot send anything
-    (item 13), and `observe_session_id`'s only caller is the tracker's file-polling closure
-    (daemon/src/lib.rs:288).
-49. **Guard a session-id observation by incarnation** — `observe_session_id` takes no `incarnation`
-    argument (profile.rs:629), unlike `set_last_failure` (:575). A late poll from a dead incarnation
-    overwrites the live one's sid unconditionally.
+    slot is `backend_session_id: Option<Uuid>`. **No mechanism exists.** ★Do not read this as a gap
+    blocking codex resume★: codex's thread id **is** a UUID (measured — a real app-server handed us
+    `01a0a08f-…`, a UUIDv7), so it parses and lands in that slot. This item is about a backend whose
+    handle is not a UUID at all; no such backend is wired.
+47. ~~**Let a backend report a session id it minted itself**~~ — **wired, and now read back.**
+    `AgentBackend::open_spawn` takes a `SessionIdSink` (`Arc<dyn Fn(&str) + Send + Sync>`,
+    backend/mod.rs) that the assembly point supplies; codex's app-server branch hands it to the
+    transport, whose writer calls it with the handshake's thread id before setting `Link::Ready`.
+    The old pull-only poller (`AgentBackend::session_id_source`, still gated on
+    `assigns_session_id()`) remains the claude path and is unchanged. Measured against a real
+    app-server: the id lands in `backend_session_id` and survives a kill.
+    **The read-back half is now wired too**: `open_spawn` also takes `resume_session_id:
+    Option<Uuid>` (the manager fills it from `profile.backend_session_id` on a `Resume` spawn only),
+    and codex turns it into `thread/resume { threadId }`. Both `can_resume_stored_session` and
+    `capabilities().session.resume` are `is_app_server(command)` — they flip **together**, per
+    channel. ★The receipt still fires on the resume path★ and records **what the peer answered**, not
+    what we sent; if those differ, the peer's value is the thread this incarnation actually talks to.
+    ★A rejected resume does not fall back to a fresh thread★ (ADR-0082) — and codex adds a reason of
+    its own: `-32600` is not exclusive to "unknown thread" — an unknown method, a second
+    `initialize` and a config error all return it (measured, 0.154.0) — so branching on that code
+    would overwrite a still-valid handle on an unrelated failure.
+48. **Learn a session id from the child's own *output* stream** — the decoder still cannot send
+    anything (item 13). ★Do not read this as "nothing can push a session id" — item 47 changed.★
+    The codex app-server path pushes one, but it arrives on the **request/response channel** the
+    transport's writer owns (the `thread/start` reply), not through the decoder, and it reaches the
+    registry through the `SessionIdSink` the assembly point supplies. So `observe_session_id` now has
+    **two** production callers — that sink and the tracker's file-polling closure — and neither is
+    the output decoder.
+49. ~~**Guard a session-id observation by incarnation**~~ — **partly closed, on one axis only.**
+    `observe_session_id` now takes `incarnation: Option<u32>` and rejects a mismatch, like
+    `set_last_failure`. Two gaps remain, and they are different gaps:
+    - **The claude path passes `None`** (the file-poller carries no incarnation), so a late poll
+      there still overwrites unconditionally. Closing it means widening
+      `SessionTracker::on_change` / `WatchEntry`.
+    - **Even on the codex path, "dead" is not "superseded".** No termination path writes `epoch`, so
+      a write landing on a session that ended without being replaced compares equal and is accepted.
+      Closing it needs a liveness fact readable inside the same critical section as the write — and
+      the registry's critical section holds a disk write, so it cannot be the transport's state lock.
+      ★Scope this gap correctly now that the recorded id is resumed from★: the late write carries
+      **this same profile's own** most recent thread id, and any *re-spawn* mints a new `epoch`
+      (`epoch_for_spawn`, called before the sink can fire) so an older incarnation can never land
+      **after** a newer one. What is left is therefore not a wrong resume target but (a) an
+      `agents.json` rewrite after the session is gone and (b) a window in which a reader still sees
+      the previous id — the same "received but not yet persisted" gap the persist requirement already
+      records as unmet, not a second one.
+      ★A different lost-update does reach `backend_session_id`, and it is not this one★:
+      `register_for_spawn` → `upsert_preserving_hierarchy` inserts the caller's **snapshot**, which
+      preserves only `parent_id`/`display_name`/`epoch`/`last_failure`. A snapshot taken before a
+      late receipt landed therefore reverts that receipt, and the same spawn then resumes from the
+      snapshot's older id. This shape predates codex resume (it applies to the claude poller's writes
+      too) and is the one named in `upsert_preserving_hierarchy`'s own doc.
 50. **Record when a process last started** — `last_start_at` has **no writer at all**
     (profile.rs:229-230; only the `None` init at :261 and a wire mirror at
     connection_core.rs:498). A dead slot.
@@ -1921,10 +1996,12 @@ would want to do, and why it cannot today.
 67. **Enforce that production never assembles a core with turn observation disabled** —
     `TurnWiring::detached()` is `#[doc(hidden)]` and the doc concedes "그 구분을 강제하는 장치는
     **없다** … 이건 컴파일러가 아니라 규약이 지키는 경계다" (output_core.rs:103-105).
-68. **Choose the activation mode on any basis other than "is a session id stored"** — all three
-    entrances read exactly `profile.backend_session_id.is_some()` (commands.rs:521-525;
-    connection_core.rs:1126-1130) or hardcode `Fresh` (connection_core.rs:809). The wire `resume`
-    flag is only OR-ed in, never decisive.
+68. ~~**Choose the activation mode on any basis other than "is a session id stored"**~~ — **no longer
+    true.** All three entrances now call `backend::can_resume_profile`, which ANDs the stored sid
+    with the backend's resume axis, so a sid on a backend that cannot resume selects `Fresh`. What
+    remains unavailable: any basis *other than those two inputs* (no per-profile policy, no user
+    prompt, no wire field beyond the `resume` bypass), and `AgentCommand::Spawn` still hardcodes
+    `Fresh`.
 69. **Verify a resume actually resumed** — the only check is a **blocking 3-second poll** of the
     child's status and its stderr text (`EARLY_EXIT_WINDOW`, manager.rs:49; loop :1510-1532),
     classified by a per-backend string matcher over the diagnostic tail

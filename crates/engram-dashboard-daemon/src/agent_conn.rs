@@ -27,12 +27,14 @@ use tokio::sync::watch;
 use crate::command_delivery::{CommandDeliveries, LocalCommands};
 use crate::command_roster::CommandRoster;
 use crate::connection_core::{
-    agent_list_event, broadcast_lease_changed, event_json, hello_event, output_event_to_wire,
-    ConnectionCore, ConnectionSession, DispatchFlow, MultiViewState, Outbound,
-    OutboundSink as CoreOutboundSink, SinkError as CoreSinkError,
+    agent_list_event, broadcast_lease_changed, dispatch_order, event_json, hello_event,
+    inbound_lane, output_event_to_wire, ConnectionCore, ConnectionSession, DispatchFlow,
+    DispatchOrder, InboundLane, MultiViewState, Outbound, OutboundSink as CoreOutboundSink,
+    SinkError as CoreSinkError, SATURATED_REFUSAL,
 };
 use engram_dashboard_net::frame_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
+    Saturated,
 };
 
 // ── 출력 평면 sink ────────────────────────────────────────────────────────────────
@@ -214,6 +216,9 @@ impl ConnectionHandler for AgentConnection {
         })
     }
 
+    /// ★이 호출들은 도착 순서대로, 서로 겹치지 않게 온다★(포트 계약) — 그 직렬성이 곧 순서 불변식의
+    /// 실물이다. 그래서 여기서 오래 붙들면 **같은 연결의 다음 명령이 함께 늦는다**. 어떤 명령을 그
+    /// 줄에서 떼어 낼지, 왜 그것만인지는 [`dispatch_order`] 가 정본이다.
     fn on_text<'a>(
         &'a self,
         conn_id: ConnId,
@@ -223,6 +228,29 @@ impl ConnectionHandler for AgentConnection {
         let sink = FrameOutboundSink::new(frames.clone());
         Box::pin(async move {
             match serde_json::from_str::<AgentCommand>(text) {
+                Ok(cmd) if dispatch_order(&cmd) == DispatchOrder::Detached => {
+                    // ★줄 밖으로 내보낸다 — 이 연결의 다음 명령을 막지 않게★.
+                    // ★답장은 그대로 **이 연결의 같은 프레임 출구**로 나간다★: sink 가 든 것은 연결당
+                    //   단일 writer 큐의 사본이라 이 태스크가 늦게 끝나도 답이 다른 데로 새지 않는다.
+                    //   대신 그 사본이 살아 있는 동안은 writer 의 송신단-드롭 자기종료가 성립하지
+                    //   않는다 — `handle_connection` 이 write 를 abort 하는 이유의 목록에 이것이 든다.
+                    // ★연결이 이미 정리된 뒤에도 이 태스크는 돈다★(네트워크 행의 abort 가 안 닿는다 —
+                    //   포트 계약). 그래도 **이 연결의 상태를 되살리지 않는다**: 이 셋이 건드리는 것은
+                    //   전역 manager 와 전-연결 브로드캐스트뿐이고, 명부·구독·lease 같은 연결 귀속
+                    //   상태에는 손대지 않는다(명부 쪽은 그래도 `refuse_if_detached` 가 한 겹 더 막는다).
+                    let core = Arc::clone(&self.core);
+                    let session = Arc::clone(&self.session);
+                    tokio::spawn(async move {
+                        // ★이 셋은 `Close` 를 내지 않는다★(`Close` 의 출처는 `StopDaemon` 과 replay 큐
+                        //   포화 둘뿐이고 둘 다 줄 안이다). 그래도 삼키지 않고 큐 안 마커로 돌려 놓는다 —
+                        //   분류가 어긋나 여기로 `Close` 가 오면 연결이 조용히 안 닫히는 편보다 낫다.
+                        if core.dispatch(cmd, &session, &sink).await == DispatchFlow::Close {
+                            let _ =
+                                sink.enqueue(Outbound::Close("dispatch requested close".into()));
+                        }
+                    });
+                    ConnFlow::Continue
+                }
                 Ok(cmd) => match self.core.dispatch(cmd, &self.session, &sink).await {
                     DispatchFlow::Close => ConnFlow::Close,
                     DispatchFlow::Continue => ConnFlow::Continue,
@@ -268,6 +296,62 @@ impl ConnectionHandler for AgentConnection {
             let _ = frames.send(Frame::Close("protocol error".into())).await;
             ConnFlow::Close
         })
+    }
+
+    /// ★포화일 때만 불린다 — 분류만 하고 **처리하지 않는다**(읽기 루프 위에서 도는 sync 갈래)★.
+    ///
+    /// ★거절도 답장이다★: `Refused` 를 고르기 전에 그 명령의 `request_id` 를 실은 `Error` 를 넣는다.
+    ///   빠뜨리면 보낸 쪽은 마감시각까지 답도 오류도 못 받는다(포트 계약의 의무 2).
+    /// ★★그 넣기가 **실패할 수 있다**★★ — 그때 `Refused` 를 돌려주면 「답장했다」고 거짓말하는 것이고,
+    ///   네트워크 행은 그 말을 믿고 원래 명령을 버린다. 보낸 쪽은 **명령도 그 거절도** 못 받는다.
+    ///   그래서 결과를 보고 [`Saturated::Unanswered`] 로 갈린다 — 그 값의 뜻과 처분(연결 종료)의 정본은
+    ///   그 variant 다. ★이 갈래가 나오는 조건은 양쪽 큐 동시 포화★: 도착순 줄이 찼고(그래서 여기
+    ///   왔고) 송신 큐도 찼다. 그 연결로는 더 받을 수도 더 답할 수도 없다.
+    /// ★파싱 실패도 여기로 온다★ — 그때는 실을 `request_id` 가 없다. `on_text` 의 파싱 실패 갈래와
+    ///   **같은 모양**(`request_id: None` 의 `Error`)으로 답한다: 줄이 찼다는 것 말고는 달라진 게 없다.
+    fn on_inbound_saturated(
+        &self,
+        conn_id: ConnId,
+        text: &str,
+        frames: &Arc<dyn FrameSink>,
+    ) -> Saturated {
+        let cmd = serde_json::from_str::<AgentCommand>(text).ok();
+        if let Some(cmd) = &cmd {
+            if inbound_lane(cmd) == InboundLane::Bypass {
+                tracing::warn!(
+                    conn = conn_id,
+                    "수신 줄 포화 — 취소 계열 명령을 줄 밖으로 통과시킨다"
+                );
+                return Saturated::Bypass;
+            }
+        }
+        // 첫 건만 warn — 포화는 프레임마다 나므로 래치가 없으면 로그가 이 한 사건으로 덮인다
+        //   (`stray_outcome_warned` 와 같은 규율).
+        if !self.session.saturated_warned.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                conn = conn_id,
+                "수신 줄 포화 — 이 연결의 명령을 거절한다(이 연결에서 한 번만 남긴다)"
+            );
+        }
+        let sink = FrameOutboundSink::new(frames.clone());
+        let refusal = sink.enqueue(Outbound::event(AgentEvent::Error {
+            request_id: cmd
+                .as_ref()
+                .and_then(engram_dashboard_protocol::command_request_id),
+            message: SATURATED_REFUSAL.to_string(),
+        }));
+        match refusal {
+            Ok(()) => Saturated::Refused,
+            Err(_) => {
+                // ★래치를 쓰지 않는다★ — 형제 경고(위 `saturated_warned`)는 프레임마다 나는 흔한
+                //   사건이라 눌러야 하지만, 이쪽은 그 직후 연결이 끝나므로 한 연결에 많아야 한 줄이다.
+                tracing::warn!(
+                    conn = conn_id,
+                    "수신 줄 포화 거절을 송신 큐에도 못 넣었다 — 이 명령은 답장 없이 사라진다"
+                );
+                Saturated::Unanswered
+            }
+        }
     }
 
     fn on_disconnect(&self, conn_id: ConnId) {
@@ -701,6 +785,187 @@ mod tests {
     /// 탓에 재접속마다 쌓이고, 만료도 회수 경로도 없어 명부가 상한까지 영구히 찬다(ADR-0150 결정 3).
     /// 조회하는 쪽을 **다른 연결**로 두는 것은 한 공장이 만든 연결들이 같은 명부를 본다는 것까지 함께
     /// 보기 위해서다.
+    /// ★★이 변경의 daemon 쪽 회귀망★★ — 활성화 명령이 **도착순 줄 밖에서** 돌아, 뒤에 온 명령이 그
+    /// 결말을 기다리지 않는다는 관측이다. 옛 모양에서는 활성화 한 건(전형 2s·백스톱 15s)이 끝나야
+    /// 같은 연결의 다음 명령이 시작됐다.
+    ///
+    /// ★없는 프로필로 잰다★: 실 프로세스 없이 결정적으로 끝나면서도 **답이 나오는 경로는 같다**
+    /// (분류는 `manager` 조회 앞에서 끝나므로 성공·실패 갈래가 갈리지 않는다).
+    /// ★관측이 기대는 것 = `#[tokio::test]` 의 current-thread 런타임★ — 떼어 낸 태스크는 이 테스트가
+    /// 다시 await 할 때까지 폴링되지 않으므로, 그 사이에 인라인으로 돈 `ListAgents` 의 답이 먼저
+    /// 큐에 든다. 멀티스레드 런타임으로 바꾸면 이 순서는 보장이 아니라 확률이 된다.
+    #[tokio::test]
+    async fn a_later_command_is_answered_before_an_earlier_activation() {
+        use engram_dashboard_protocol::RequestId;
+
+        let factory = test_factory();
+        let conn = factory.handler_for(1);
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let frames = frame_sink(tx);
+        conn.on_connect(1, &frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut rx).await;
+        }
+
+        let spawn = command_json(&AgentCommand::Spawn {
+            profile_id: uuid::Uuid::new_v4(),
+            request_id: RequestId(uuid::Uuid::new_v4()),
+        });
+        let list = command_json(&AgentCommand::ListAgents {
+            request_id: RequestId(uuid::Uuid::new_v4()),
+        });
+
+        assert_eq!(
+            conn.on_text(1, &spawn, &frames).await,
+            ConnFlow::Continue,
+            "활성화는 연결을 닫지 않는다"
+        );
+        conn.on_text(1, &list, &frames).await;
+
+        match next_event(&mut rx).await {
+            AgentEvent::AgentList { .. } => {}
+            other => panic!(
+                "뒤에 온 ListAgents 가 활성화를 기다렸다 — head-of-line blocking 회귀: {other:?}"
+            ),
+        }
+        // 떼어 냈어도 답은 **이 연결의 같은 출구**로 온다.
+        match next_event(&mut rx).await {
+            AgentEvent::Error { message, .. } => assert!(
+                message.contains("profile not found"),
+                "떼어 낸 갈래의 답이 이 연결로 와야 한다: {message}"
+            ),
+            other => panic!("Error 여야 함: {other:?}"),
+        }
+    }
+
+    /// 줄 **안**에 남는 명령은 `on_text` 이 반환하기 전에 답을 큐에 넣는다 — 위 시험의 짝이고, 둘이
+    /// 함께 서야 「전부 떼어 냈다」와 「하나도 못 뗐다」가 각각 잡힌다.
+    #[tokio::test]
+    async fn an_in_order_command_is_answered_before_on_text_returns() {
+        use engram_dashboard_protocol::RequestId;
+
+        let factory = test_factory();
+        let conn = factory.handler_for(1);
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let frames = frame_sink(tx);
+        conn.on_connect(1, &frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut rx).await;
+        }
+
+        let kill = command_json(&AgentCommand::Kill {
+            agent_id: uuid::Uuid::new_v4(),
+            request_id: RequestId(uuid::Uuid::new_v4()),
+        });
+        conn.on_text(1, &kill, &frames).await;
+        assert!(
+            rx.try_recv().is_ok(),
+            "줄 안 명령의 답은 on_text 반환 시점에 이미 큐에 있어야 한다"
+        );
+    }
+
+    /// 포화 갈래의 데몬 쪽 짝 — 네트워크 행의 회귀망
+    /// (`ws::tests::a_cancel_still_gets_through_a_saturated_inbound_queue`)이 배선을 재고, 여기서는
+    /// **이 핸들러가 무엇을 통과시키고 무엇을 어떻게 거절하는가**를 잰다.
+    ///
+    /// ★거절이 말이 없으면 조용한 유실과 구별되지 않는다★ — 그래서 `request_id` 가 실려 오는지까지 본다.
+    #[tokio::test]
+    async fn a_saturated_queue_passes_kill_and_refuses_the_rest_out_loud() {
+        use engram_dashboard_protocol::RequestId;
+
+        let factory = test_factory();
+        let conn = factory.handler_for(1);
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let frames = frame_sink(tx);
+        conn.on_connect(1, &frames).await;
+        for _ in 0..2 {
+            let _ = next_event(&mut rx).await;
+        }
+
+        let kill = command_json(&AgentCommand::Kill {
+            agent_id: uuid::Uuid::new_v4(),
+            request_id: RequestId::new(),
+        });
+        assert_eq!(
+            conn.on_inbound_saturated(1, &kill, &frames),
+            Saturated::Bypass,
+            "취소는 막힌 줄을 건너뛴다"
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "Bypass 는 분류일 뿐이다 — 이 자리에서 처리하거나 답장하면 안 된다"
+        );
+
+        let write_req = RequestId::new();
+        let write = command_json(&AgentCommand::WriteStdin {
+            agent_id: uuid::Uuid::new_v4(),
+            data: "x".into(),
+            request_id: write_req,
+        });
+        assert_eq!(
+            conn.on_inbound_saturated(1, &write, &frames),
+            Saturated::Refused,
+            "순서가 뜻을 갖는 명령은 건너뛰지 않는다"
+        );
+        match next_event(&mut rx).await {
+            AgentEvent::Error {
+                request_id,
+                message,
+            } => {
+                assert_eq!(
+                    request_id,
+                    Some(write_req),
+                    "거절이 어느 요청의 것인지 실려야 보낸 쪽이 재시도를 정한다"
+                );
+                assert!(
+                    message.contains("refused, not applied"),
+                    "적용되지 않았다는 사실이 문구에 있어야 한다: {message}"
+                );
+            }
+            other => panic!("Error 여야 함: {other:?}"),
+        }
+
+        // 파싱조차 안 되는 프레임도 침묵하지 않는다(실을 request_id 만 없다).
+        assert_eq!(
+            conn.on_inbound_saturated(1, "{\"NotACommand\":1}", &frames),
+            Saturated::Refused
+        );
+        match next_event(&mut rx).await {
+            AgentEvent::Error { request_id, .. } => assert_eq!(request_id, None),
+            other => panic!("Error 여야 함: {other:?}"),
+        }
+    }
+
+    /// ★★거절을 **넣지 못했으면** 그렇게 보고한다★★ — `Refused` 로 뭉개면 네트워크 행이 없는 답장을
+    /// 믿고 원래 명령을 버리고, 보낸 쪽은 **명령도 거절도** 못 받는다(포트 계약의 의무 2).
+    ///
+    /// ★무대 = 양쪽 큐 동시 포화★: 수신 줄이 찼다는 것은 이 갈래가 불렸다는 사실이 이미 말하고, 송신
+    ///   큐는 용량 1 짜리를 미리 채워 포화로 만든다. 그 상태가 곧 이 값이 나오는 유일한 조건이다.
+    /// ★결정적이다★ — 시한도 스레드도 없다.
+    #[tokio::test]
+    async fn a_refusal_that_cannot_be_enqueued_is_reported_as_unanswered() {
+        use engram_dashboard_protocol::RequestId;
+
+        let factory = test_factory();
+        let conn = factory.handler_for(1);
+        // 용량 1 — 한 장을 미리 넣어 두면 그 뒤 `try_send` 는 전부 실패한다.
+        let (tx, _rx) = mpsc::channel::<Frame>(1);
+        tx.try_send(Frame::Text("선점".into()))
+            .expect("한 칸은 채운다");
+        let frames = frame_sink(tx);
+
+        let write = command_json(&AgentCommand::WriteStdin {
+            agent_id: uuid::Uuid::new_v4(),
+            data: "x".into(),
+            request_id: RequestId::new(),
+        });
+        assert_eq!(
+            conn.on_inbound_saturated(1, &write, &frames),
+            Saturated::Unanswered,
+            "거절 답장이 실패했는데 Refused 를 돌려주면 네트워크 행이 거짓을 믿는다"
+        );
+    }
+
     #[tokio::test]
     async fn a_disconnect_removes_that_connections_commands_from_the_roster() {
         use engram_dashboard_command::{CommandDecl, OwnerToken};

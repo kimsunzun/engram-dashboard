@@ -15,8 +15,8 @@ use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
-    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlEndpoint, OutputFrame, OutputPayload,
-    OutputSink, ProvisionError, SinkError, SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlChannelNeeds, ControlEndpoint,
+    OutputFrame, OutputPayload, OutputSink, ProvisionError, SinkError, SinkId, StatusSink,
 };
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
@@ -101,11 +101,14 @@ impl ControlChannel for CountingControl {
         &self,
         id: AgentId,
         epoch: u32,
-        accepts_mcp_config: bool,
+        needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         self.provisions
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.seen_flags.lock().unwrap().push(accepts_mcp_config);
+        self.seen_flags
+            .lock()
+            .unwrap()
+            .push(needs.accepts_mcp_config);
         self.live.lock().unwrap().insert((id, epoch));
         Ok(Some(ControlEndpoint {
             url: "http://127.0.0.1:1/mcp".into(),
@@ -118,8 +121,8 @@ impl ControlChannel for CountingControl {
             grants: vec![],
             // S18 D: 설정 조각도 이 테스트의 관심사가 아니다(spec 조립이 아니라 spawn 인과 격리).
             settings_file: None,
-            // ADR-0133: 표식 산출도 관심사 밖 — 데몬 산출 규칙(!accepts_mcp_config)만 흉내 낸다.
-            mail_allowed: !accepts_mcp_config,
+            // ADR-0133: 표식 산출도 관심사 밖 — 데몬 산출 규칙만 흉내 낸다(재료가 둘이다).
+            mail_allowed: needs.uses_mail && !needs.accepts_mcp_config,
         }))
     }
     fn revoke(&self, id: AgentId, epoch: u32) {
@@ -240,10 +243,13 @@ impl ControlChannel for FailingControl {
         &self,
         _id: AgentId,
         _epoch: u32,
-        accepts_mcp_config: bool,
+        needs: ControlChannelNeeds,
     ) -> Result<Option<ControlEndpoint>, ProvisionError> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.seen_flags.lock().unwrap().push(accepts_mcp_config);
+        self.seen_flags
+            .lock()
+            .unwrap()
+            .push(needs.accepts_mcp_config);
         Err(ProvisionError("injected".into()))
     }
     fn revoke(&self, _id: AgentId, _epoch: u32) {}

@@ -34,7 +34,9 @@ ts-rs = "10"   # 선언 매크로가 인자·반환 struct 에 TS derive 를 단
 [dev-dependencies]
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 
-# 소비자는 `platform::windows` 의 Job Object 래퍼 하나뿐이다(PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# 소비자는 하나다 — `platform::windows` 의 Job Object 래퍼(PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# ★`Win32_Storage_FileSystem` 을 다시 켜지 말 것★ — 그것을 쓰던 유일한 자리는 codex 훅 등록의 8.3 단축
+#   경로 변환이었고, 훅 기계장치가 ADR-0216 으로 걷히며 함께 사라졌다.
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
 #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
 #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.

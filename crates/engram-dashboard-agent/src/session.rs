@@ -55,6 +55,20 @@ pub struct AgentSession {
     transport: Box<dyn AgentTransport>,
 }
 
+/// 배달 write 가 **실제로 나갔는지** 확인하기를 포기하는 시한([`AgentTransport::flush_input`]).
+///
+/// ★이 값이 재는 축★: 「아직 안 나갔다」와 「영영 안 나간다」를 가르는 자리다. 너무 짧으면 잠깐 바쁜
+///   수신자(턴 렌더링 중이라 입력을 늦게 읽는 TUI)를 배달 실패로 신고해 **재배달이 중복을 만들고**,
+///   너무 길면 물린 에이전트 하나가 배달 루프를 그만큼 붙잡는다. ★둘 중 더 나쁜 쪽은 중복이다★ —
+///   실패는 재시도로 복구되지만 중복은 수신자에게 같은 편지를 두 번 읽힌다. 그래서 넉넉한 쪽으로 기울였다.
+/// ★값의 출처 = 이 저장소가 「이쯤이면 끝났어야 한다」에 이미 쓰는 숫자★: kill 인과의 `join_pump` 상한이
+///   5 초다(ADR-0001). 새 숫자를 발명하는 대신 같은 자리를 쓴다 — 이 경로도 판정이 같다("5 초가 지나도
+///   안 나갔으면 그건 물린 것이다").
+/// ★이 대기를 타는 경로는 우편 배달 하나뿐이다★ — 그 경로는 [`crate::backend::SUBMIT_PACING`] 때문에
+///   이미 호출자를 0.5 초 붙잡는 동사라, 여기서 기다리는 것이 **새로운 종류의 블로킹이 아니다.** 키 입력
+///   경로(`write_input`)는 이 대기를 타지 않는다.
+const INPUT_FLUSH_BUDGET: Duration = Duration::from_secs(5);
+
 /// 운영 sleeper — 이 층은 동기 경로라 그냥 블로킹으로 잔다(배달 루프가 그만큼 붙잡히는 것은 수용한 성질:
 /// 터미널 수신은 시연 용도이고, 비동기 분리는 구조 변경이라 별도 결정 사항이다).
 fn blocking_sleep(d: Duration) {
@@ -117,6 +131,21 @@ impl AgentSession {
         self.intent.store(intent as u8, Ordering::SeqCst);
     }
 
+    /// 지금까지 관측된 종료 의도 — ★단조 래치로 읽으라고 있는 값이다★.
+    ///
+    /// ★왜 읽는 동사가 필요했나★: 활성화 판정이 **사용자 취소를 종점 상태보다 먼저** 알아야 한다.
+    ///   `kill_agent` 는 이 값을 `enter_exiting` 보다도 앞에 세우고([`AgentManager::kill_agent`]),
+    ///   그 뒤에야 통로를 내린다. 그래서 kill 로 인한 어떤 관측(통로의 배달 중단 · 배달 채널 닫힘 ·
+    ///   `Exiting` 상태)보다 이 래치가 **반드시 먼저** 보인다 — 종점 전이(`Killed`)는 pump 가 깨어날
+    ///   때까지 안 서므로 그것만 보는 판정은 그 사이를 「연결 실패」로 오독한다.
+    /// ★`Ordering::SeqCst` 로 읽는다★ — 쓰는 쪽(`set_intent`)과 같은 순서라 짝이 맞는다.
+    /// ★화신마다 새 값이다★ — `Arc<AtomicU8>` 을 `spawn_session` 이 화신마다 새로 만든다. 그래서 앞
+    ///   화신의 kill 의도가 이 화신에 보이지 않는다.
+    // ADR-0019
+    pub fn termination_intent(&self) -> TerminationIntent {
+        TerminationIntent::from_u8(self.intent.load(Ordering::SeqCst))
+    }
+
     /// pump 기동을 위임(transport.start). ★ADR-0019 reaper 순서★: manager 는 이 세션을 sessions
     /// 맵에 **insert 한 뒤** start 한다. pump 가 즉시 EOF→finish→ReapMsg 를 보내도 그땐 이미 맵에
     /// 존재하므로 reaper 가 정상 reap 한다(insert 전 start 면 hook send 가 맵에 없는 id 를 가리켜
@@ -148,10 +177,20 @@ impl AgentSession {
     ///   차이는 **관측 산출물을 삼키지 않고 반환**하는 것뿐이다. 제어 채널 relay(ingress::handle_send)가
     ///   이 산출물로 배달 관측 레코드를 만든다("전송 실패" vs "모델 무시" 구별의 전제 — ADR-0088).
     ///
-    /// ★완결성 = Ok-vs-Err★: `send_input` 이 `Ok(())` 를 돌려주면(내부 `write_all`) 요청 바이트가 전량
-    ///   수용된 것이다(std write_all 계약 — 부분 write 를 `Ok` 로 숨기지 않음). 전량 미수용은 이 함수가
-    ///   `Err` 로 반환하지 `Ok` 로 축소 반환하지 않는다. `WriteOutcome` 의 바이트 필드는 완결성 판정
-    ///   레버가 아니다(이유는 `WriteOutcome` 주석) — 완결성은 이 함수의 `Ok`/`Err` 로 본다.
+    /// ★완결성 = Ok-vs-Err★: `send_input` 이 `Ok(())` 를 돌려주면 요청 바이트가 **전량 수용**된 것이다
+    ///   (부분 수용을 `Ok` 로 숨기지 않음). 전량 미수용은 이 함수가 `Err` 로 반환하지 `Ok` 로 축소
+    ///   반환하지 않는다. `WriteOutcome` 의 바이트 필드는 완결성 판정 레버가 아니다(이유는
+    ///   `WriteOutcome` 주석) — 완결성은 이 함수의 `Ok`/`Err` 로 본다.
+    ///
+    /// ★★그 「수용」의 뜻이 바뀌었다 — 옛 문장의 「내부 `write_all`」·「std write_all 계약」은 이제
+    ///   거짓이다★★: 통로 셋(PTY·stdio·codex)이 전부 **유계 입력 큐**에 담고 전담 라이터 스레드가 빼서
+    ///   쓴다. 그래서 `Ok` 는 「자식에게 갔다」가 아니라 **「전량을 순서까지 확정해 받았다」**이고,
+    ///   ★받아 둔 뒤에 실패한 쓰기는 이 반환값으로 돌아오지 않는다★ — 나타나는 곳은 **다음 호출의
+    ///   `Err`** 와 로그, 그리고 대개 곧 이어지는 종점 전이다.
+    /// ★ADR-0088 의 배달 관측에 미치는 영향(정확히)★: 그 레코드가 가르던 「전송 실패 vs 모델 무시」에서
+    ///   **「전송 실패」가 잡는 범위가 줄었다** — 이제 그 자리는 「받지도 않았다」(통로가 닫혔거나 상한
+    ///   초과)를 잡고, 「받았는데 못 썼다」는 **그 다음** 배달이 `Err` 로 신고한다. 계약의 정본은
+    ///   [`crate::transport::input_queue`] 모듈 헤더.
     // ADR-0088
     pub fn write_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
         // ★이 유저 턴의 메시지 uuid(replay dedup 키)★: 한 write_input 당 하나 생성해 (a) stdin user
@@ -192,6 +231,15 @@ impl AgentSession {
     /// ★두 write 사이에 `backend::SUBMIT_PACING` 만큼 잔다★: 나눠 쓰는 것만으로는 부족하고, 간격이
     ///   없으면 PTY 에서 한 덩이로 묶여 수신자가 한 번의 read 로 받는다(그 상수 doc — "0ms 로 된다" 는
     ///   옛 관측은 측정 오류였다). **그래서 이 동사는 호출 스레드를 그만큼 붙잡는다.**
+    /// ★★그 간격은 **본문이 실제로 나간 뒤**부터 잰다 — 큐에 넣은 시각부터가 아니다★★: `send_input` 이
+    ///   큐 넣기가 된 뒤로 넣은 시각부터 재면 실제 간격이 `대기 - 본문이 나가는 데 걸린 시간` 으로 줄고,
+    ///   그 시간이 대기보다 길면 **0 이 된다**(두 write 가 한 덩이로 묶여 제출이 안 된다). 그래서 본체가
+    ///   `confirm_written` 으로 본문의 OS 착지를 먼저 확인한 뒤에 잔다.
+    /// ★한때 여기 「그 조건은 자식이 stdin 을 안 읽는다는 뜻이라 제출이 어차피 안 먹힌다」로 적혀 있었다 —
+    ///   **그 변명은 틀렸다**★: 파이프·ConPTY 버퍼(4–64KiB)보다 큰 본문은 **멀쩡히 읽는 자식** 상대로도
+    ///   여러 번의 write 주기가 걸리고, 큰 봉투를 보내는 우편 배달이 정확히 그 경로다. 즉 물린 에이전트가
+    ///   아니라 **정상 배달**에서 간격이 무너진다. 그리고 간격은 그 임계를 넘기 전에도 이미 `본문 쓰기
+    ///   시간` 만큼 **항상** 줄어 있었다 — 크기와 무관하게 방향이 틀린 것이다.
     /// ★왜 이 층인가★: transport 를 소유해 `send_input` 을 두 번 낼 수 있는 가장 낮은 층이 여기다. 위층
     ///   (manager·데몬 어댑터·메시징 커널)은 transport 를 모르고, 아래층(encoder)은 바이트열 하나를
     ///   돌려주는 계약이라 write 경계를 만들 수 없다.
@@ -203,6 +251,21 @@ impl AgentSession {
     pub fn submit_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
         let outcome = self.write_input_observed(bytes)?;
         if let Some(submit) = self.encoder.submit_sequence() {
+            // ★★대기를 **본문이 실제로 나간 뒤**부터 잰다 — 이 한 줄이 아래 대기를 의미 있게 만든다★★:
+            //   `send_input` 은 이제 큐에 넣고 즉시 돌아오므로, 넣은 시각부터 재면 실제 간격은
+            //   `대기 - 본문이 나가는 데 걸린 시간` 으로 줄고 그 시간이 대기보다 길면 **0 이 된다.**
+            //   그러면 두 write 가 한 덩이로 묶여 수신자가 한 번의 read 로 받아 **턴이 제출되지 않는다**
+            //   (`backend::SUBMIT_PACING` 이 실측으로 기록한 그 결함). 벌려야 하는 것은 우리 호출 간격이
+            //   아니라 **수신자의 read 경계**라, 기준점은 OS 로 나간 시각이어야 한다.
+            self.confirm_written().map_err(|e| {
+                tracing::warn!(
+                    agent = %self.id,
+                    epoch = self.epoch,
+                    bytes = bytes.len(),
+                    "본문 write 확인 실패 — 제출을 시도하지 않는다: {e}"
+                );
+                e
+            })?;
             // ★이 대기가 제출의 일부다(빼면 제출되지 않는다 — 실측)★: 근거·값 출처·"0ms 로 된다" 는
             //   옛 관측이 왜 틀렸는지는 `backend::SUBMIT_PACING` doc.
             (self.sleeper)(self.submit_pacing);
@@ -221,7 +284,39 @@ impl AgentSession {
                 return Err(e);
             }
         }
+        // ★★영수증의 뜻을 「받았다」에서 「나갔다」로 되돌리는 자리★★ — 이 확인이 없으면 큐에 들어가기만
+        //   한 본문이 **배달 성공**으로 기록되고, ADR-0088 이 가르려는 두 경우("전송 실패" vs "모델이
+        //   무시")가 정확히 뒤집힌다. 제출 경로가 있든(터미널) 없든(json) 마지막은 여기로 모인다.
+        // ★제출 바이트까지 포함해 확인한다★: 제출이 안 나간 배달은 턴이 시작되지 않은 배달이고, 그것은
+        //   위 `★에러 계약★` 이 이미 `Err` 로 정한 상태다.
+        self.confirm_written().map_err(|e| {
+            tracing::warn!(
+                agent = %self.id,
+                epoch = self.epoch,
+                bytes = bytes.len(),
+                "배달 write 확인 실패 — 영수증을 내지 않는다: {e}"
+            );
+            e
+        })?;
         Ok(outcome)
+    }
+
+    /// 받아 둔 입력이 실제로 나갔는지 통로에 확인한다. ★확인 수단이 **없다고 말하는** 통로는 그대로
+    /// 통과시킨다★ — 그 통로들(codex app-server·시험대 seam)은 이 변경 **이전부터** 그 수준의 앎만
+    /// 갖고 있었고, 여기서 `Err` 로 바꾸면 이번 변경이 고치려는 것과 무관한 배달을 새로 실패시킨다.
+    ///
+    /// ★그래서 이 함수는 두 가지를 **다르게** 다룬다★: 「확인해 봤는데 안 나갔다」(`WriteFailed`)는
+    ///   실패이고, 「확인할 수단이 없다」(`Unsupported`)는 실패가 아니다. 뒤엣것을 실패로 접으면 정직해
+    ///   보이지만 실제로는 멀쩡한 배달을 죽인다.
+    /// ★알려진 잔여 — 시한 초과는 「안 나갔다」가 아니다★: [`INPUT_FLUSH_BUDGET`] 을 넘겨 `Err` 로
+    ///   돌아가도 큐에 든 바이트는 **취소되지 않아** 늦게 나갈 수 있다. 그러면 상위의 재파킹이 같은
+    ///   봉투를 한 번 더 배달한다(한 턴에 두 벌). 그 잔여를 없애려면 시한 초과 시 그 덩이를 큐에서
+    ///   빼는 취소 동사가 필요한데, 그것은 「부분 배달을 어디까지 되돌릴 수 있나」라는 별개 질문이다.
+    fn confirm_written(&self) -> Result<(), PtyError> {
+        match self.transport.flush_input(INPUT_FLUSH_BUDGET) {
+            Err(PtyError::Unsupported(_)) => Ok(()),
+            other => other,
+        }
     }
 
     /// transport.resize 성공 후에만 cols/rows atomic 을 갱신한다 — 실패 시 옛 값 유지.
@@ -580,6 +675,14 @@ mod tests {
     /// 묶여 제출되지 않는다(`backend::SUBMIT_PACING` doc). 그래서 "제출 write 전에 대기가 있었나" 와
     /// "그 값이 운영 기본값인가" 둘 다 회귀 축이다. 시간을 재지 않고 sleeper 호출을 기록해 단언하므로
     /// 플래키하지 않고, 테스트가 0.5초를 실제로 자지도 않는다.
+    ///
+    /// ★★이 항목이 **못 잡는 것을 분명히 적는다** — 그래서 짝이 되는 항목이 따로 있다★★: 여기 오라클은
+    ///   「대기가 불렸나」뿐이라 **대기를 엉뚱한 시점부터 재는 결함을 통과시킨다.** 큐가 들어온 뒤 실제로
+    ///   그 결함이 났다 — 대기를 큐에 넣은 시각부터 재면 본문이 나가는 동안 간격이 먹혀 0 이 된다. 그
+    ///   갈래를 잡는 것은 **물리 read 경계**를 보는 항목이고 그것은 실 파이프가 필요해 통합 시험대에 있다:
+    ///   `tests/submit_delivery_boundary.rs` 의
+    ///   `submit_byte_lands_in_its_own_read_even_when_the_body_takes_many_write_cycles`.
+    ///   ★둘 중 하나만 남기지 말 것★ — 이 항목은 상수와 호출을, 저 항목은 그 호출이 만드는 실제 간격을 진다.
     #[test]
     fn submit_input_waits_between_the_body_and_the_submit_write() {
         use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};

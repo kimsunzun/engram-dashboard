@@ -3,7 +3,7 @@
 //! ★소유★: rmcp `StreamableHttpService`(Tower service)를 axum `/mcp` 에 nest 하고 그 앞에 bearer auth
 //!   미들웨어를 얹는다. 같은 서버·포트·미들웨어에 CLI 평문 라우트를 나란히 태운다 — 그 **명단의 정본은
 //!   `ControlRoute`** 이고 여기서 다시 세지 않는다(세던 목록이 라우트 추가 때 뒤처진다).
-//!   툴 표면 = `engram_ping` · `send_message` · `messages`.
+//!   툴 표면 = `engram_ping` · `eg_send` · `eg_messages`.
 //!   ★제어 동사는 MCP 툴로 내지 않는다★(ADR-0132 결정 = CLI) — 툴 스키마는 모든 에이전트 컨텍스트에 상시
 //!   상주하는데 제어는 빈도가 낮다. 그래서 `/control/agent` 에는 짝이 되는 `#[tool]` 이 없다.
 //!
@@ -42,11 +42,12 @@ use crate::connection_core::sanitize_for_log;
 
 /// MCP 서버가 붙는 axum 경로. mcp-config url 도 이 경로를 가리킨다(`http://127.0.0.1:<port>/mcp`).
 ///
-/// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. claude backend 가 CLI 용
+/// ★keep-in-sync(M5)★: `ControlEndpoint.url` 은 이 경로가 붙은 MCP 라우트다. CLI 입구 주입이 CLI 용
 ///   base URL(ENGRAM_CONTROL_URL)을 파생할 때 이 리터럴 suffix("/mcp")를 **문자열로 벗긴다** —
-///   `crates/engram-dashboard-agent/src/backend/claude/`(strip_suffix("/mcp")). 이 값을 바꾸면
-///   거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이 틀어지고 CLI 가
-///   조용히 404 를 받는다.
+///   `crates/engram-dashboard-agent/src/backend/mod.rs`(`inject_cli_entrance` 의 strip_suffix("/mcp")).
+///   이 값을 바꾸면 거기 strip 리터럴도 함께 고쳐야 한다 — 빌드가 강제하지 않아 어긋나면 base 파생이
+///   틀어지고 CLI 가 조용히 404 를 받는다.
+///   ★그 자리는 이제 **백엔드 공용**이다★ — 어긋나면 claude 뿐 아니라 codex 스폰의 CLI 도 함께 죽는다.
 const MCP_PATH: &str = "/mcp";
 
 /// CLI 입구(ADR-0086 스텝 2) — `engram mail send` 가 POST 하는 평문 JSON 라우트. CLI 가 base URL
@@ -185,7 +186,7 @@ fn mail_gated_path(path: &str) -> bool {
 /// 이 자격증명으로 **이 HTTP/CLI 우편 입구**를 쓸 수 없을 때의 반려 코드(ADR-0133 결정 3).
 ///
 /// ★이름이 주장하는 범위를 좁혀 읽을 것 — "우편 금지" 가 아니다★: 이 코드가 나가는 스폰(= MCP 가능
-///   백엔드)은 `/mcp` 의 `send_message` 로 **정상적으로 우편을 쓴다**. 채널은 백엔드 capability 로만
+///   백엔드)은 `/mcp` 의 `eg_send` 로 **정상적으로 우편을 쓴다**. 채널은 백엔드 capability 로만
 ///   갈리고 런타임 스위칭이 없다는 것이 설계이고(ADR-0128 결정 1), 이 게이트는 그 설계에서 **닫혀 있어야
 ///   할 쪽 입구**를 닫는다. 이름만 보고 "MCP 로 우회 가능 = 게이트 구멍" 으로 읽지 말 것.
 const MAIL_NOT_ALLOWED_CODE: &str = "MAIL_NOT_ALLOWED";
@@ -309,16 +310,16 @@ impl CommandTableSlot {
 /// MCP 세션 식별 헤더명(rmcp/스펙 표준, 소문자).
 const SESSION_ID_HEADER: &str = "mcp-session-id";
 
-/// ★`send_message` MCP 툴 이름 = **단일 출처(ADR-0094)**★. 아래 `#[tool]` 메서드명이 곧 rmcp 가
+/// ★`eg_send` MCP 툴 이름 = **단일 출처(ADR-0094)**★. 아래 `#[tool]` 메서드명이 곧 rmcp 가
 ///   `tools/list` 에 노출하는 툴 이름이고, 이 const 가 그 이름의 **정본**이다 — ADR-0094 발신 권한
 ///   grant 가 `mcp__{server}__{tool}` 패턴을 만들 때 tool 로 쓴다(DaemonControlChannel.provision).
 ///   claude 문법(`mcp__..`) 지식은 backend/claude/ 단독 — 이 const 는 이름만 제공한다(ADR-0004/0094).
-pub const SEND_MESSAGE_TOOL: &str = "send_message";
+pub const SEND_MESSAGE_TOOL: &str = "eg_send";
 
-/// ★`messages` MCP 툴 이름(D · spec §6)★ — `SEND_MESSAGE_TOOL` 과 같은 규율.
+/// ★`eg_messages` MCP 툴 이름(D · spec §6)★ — `SEND_MESSAGE_TOOL` 과 같은 규율.
 ///   ★grant 대상 아님(의도적)★: ADR-0094 의 pre-authorization 은 **발신 입구**만 담는다는 결정이라
 ///   (control/mod.rs `build_grants`), 조회 툴은 grant 목록에 넣지 않는다.
-pub const MESSAGES_TOOL: &str = "messages";
+pub const MESSAGES_TOOL: &str = "eg_messages";
 
 pub struct McpServerHandle {
     /// mcp-config 에 박아 넣을 엔드포인트 URL(예: `http://127.0.0.1:54321/mcp`).
@@ -403,7 +404,7 @@ impl EngramMcpHandler {
         }
     }
 
-    /// ★★이 메서드명(`send_message`)은 반드시 `SEND_MESSAGE_TOOL` 상수와 같아야 한다(ADR-0094 단일
+    /// ★★이 메서드명(`eg_send`)은 반드시 `SEND_MESSAGE_TOOL` 상수와 같아야 한다(ADR-0094 단일
     ///   출처)★★. rmcp `#[tool]` 매크로가 **메서드명**을 `tools/list` 툴 이름으로 그대로 쓰므로(2.2.0
     ///   tool.rs: `name = attribute.name.unwrap_or_else(|| fn_ident.to_string())`, 매크로 attr 는 String
     ///   **리터럴**만 받아 const 주입 불가 — 검증함), 이름 정본인 그 const 를 컴파일타임에 여기 붙일 방법이
@@ -412,27 +413,28 @@ impl EngramMcpHandler {
     ///   않는 툴을 가리켜 발신 입구가 조용히 막히고, 테스트만 이를 잡는다.
     // ADR-0086 / ADR-0094(단일 출처 결합)
     #[tool(
-        description = "Send a message to teammate agents. You are one agent on a team; use this \
-        tool to reply to or reach other live agents. `to` = one teammate or a LIST of them — each \
-        entry is an agent name (or agent id), or a group address: \"@here\" = everyone live right \
-        now EXCEPT you, \"@all\" = every agent in the team tree EXCEPT you, including ones that \
-        are not running (their copy waits and is delivered when they come back). You can mix them, \
-        e.g. [\"@here\", \"qa-bravo\"]. `body` = your message text. \
-        The sender envelope (who you are, message id) is added automatically by the broker — your \
-        identity comes from your bound session, not from arguments, so just write the body \
-        naturally. Set `request` = true when you need answers back (optionally with `reply_by` = \
-        \"5m\"/\"10m\"/\"1h\" — at least 1 minute, after which YOU get notified for each recipient \
-        that did not reply); with several recipients that opens one independent reply contract per \
-        recipient. When you answer a message that arrived with type=\"request\" and an id, pass \
-        `reply_to` = that id — a reply must have exactly one recipient. `request` and `reply_to` \
-        are mutually exclusive. The result has one row per recipient: status delivered (injected \
-        now), pending (queued until that agent finishes its turn) or failed (that recipient only — \
-        `code` says why, e.g. RECIPIENT_NOT_FOUND if it is not running; the others still got it). \
-        Delivery is at-least-once: if this call fails or times out without a result, the message \
-        may already have been delivered — check before resending, because a retry is a NEW \
-        message, not a replacement."
+        description = "Send a message to teammate agents — use it to reach or reply to them. This \
+        is the `engram` broker's tool, NOT your harness's own built-in `SendMessage`, which is \
+        denied on this team and fails as a permission denial if called. `to` = one teammate or a \
+        LIST of them — each entry is an agent name (or agent id), or a group address: \"@here\" = \
+        everyone live right now EXCEPT you, \"@all\" = every agent in the team tree EXCEPT you, \
+        including ones that are not running (their copy waits and is delivered when they come \
+        back). You can mix them, e.g. [\"@here\", \"qa-bravo\"]. `body` = your message text. \
+        The sender envelope (who you are, message id) is added by the broker from your bound \
+        session, not from arguments — just write the body. Set `request` = true when you need \
+        answers back (optionally with `reply_by` = \"5m\"/\"10m\"/\"1h\" — at least 1 minute); YOU \
+        get notified for each recipient that did not reply, one independent contract each. When \
+        you answer a message that arrived with type=\"request\" and an id, pass `reply_to` = that \
+        id — a reply must have exactly one recipient. `request` and `reply_to` are mutually \
+        exclusive. The result has one row per recipient: status delivered (injected now), pending \
+        (NOT a failure, and not confirmed either — it has several possible causes, so never read \
+        the recipient's state off this row; if arrival matters look it up with `eg_messages` and that \
+        `id`) or failed (that recipient only — `code` says why, e.g. RECIPIENT_NOT_FOUND when no \
+        agent has that name; the others still got it). Delivery is at-least-once: if this call \
+        fails or times out with no result the message may already be delivered — check before \
+        resending; a retry is a NEW message, not a replacement."
     )]
-    async fn send_message(
+    async fn eg_send(
         &self,
         params: Parameters<SendArgs>,
         ctx: RequestContext<RoleServer>,
@@ -530,7 +532,7 @@ impl EngramMcpHandler {
         instead; for a group broadcast you get one row per recipient. This tool only reads — it \
         never sends, replies, or changes anything."
     )]
-    async fn messages(
+    async fn eg_messages(
         &self,
         params: Parameters<MessagesArgs>,
         ctx: RequestContext<RoleServer>,
@@ -591,13 +593,13 @@ impl ToField {
     }
 }
 
-/// `send_message` 인자 — 수신자 지목(`to`) + 본문(`body`) + 회신 계약(C3, 전부 선택). ★from 필드 없음★:
+/// `eg_send` 인자 — 수신자 지목(`to`) + 본문(`body`) + 회신 계약(C3, 전부 선택). ★from 필드 없음★:
 /// 발신자는 세션 신원에서만 파생한다(payload from 금지 — ADR-0086 불변식). schemars 로 input schema 자동 생성.
 ///
 /// ★타입 문자열 인자 없음(구조적 — ADR-0103 불변식)★: `type` 을 문자열로 받지 않고 `request: bool` 만 둔다 —
 ///   그래야 에이전트가 `type="notice"`(데몬 전용 태그)를 밀반입할 표면 자체가 없다.
 /// ★doc 주석 = 툴 스키마 설명★: schemars 가 이 주석을 property description 으로 싣는다(수신 LLM 이 읽는 계약).
-// ADR-0103 (C3 — spec §6 send_message { to, body, request?, reply_by?, reply_to? })
+// ADR-0103 (C3 — spec §6 eg_send { to, body, request?, reply_by?, reply_to? })
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct SendArgs {
     /// Who to send to: one teammate, or a list. Each entry is an agent name, an exact agent id, or a
@@ -625,7 +627,7 @@ pub struct SendArgs {
     pub reply_to: Option<String>,
 }
 
-/// `messages` 인자(D · spec §6 `messages { id? }`). 전부 선택 — 무인자가 "내 미결" 조회다.
+/// `eg_messages` 인자(D · spec §6 `eg_messages { id? }`). 전부 선택 — 무인자가 "내 미결" 조회다.
 /// ★신원 필드 없음★: "나" 는 세션 신원에서만 온다(payload 로 남의 미결을 볼 수 없다 — ADR-0086 불변식).
 #[derive(Debug, serde::Deserialize, serde::Serialize, schemars::JsonSchema)]
 pub struct MessagesArgs {
@@ -641,7 +643,7 @@ impl ServerHandler for EngramMcpHandler {
     fn get_info(&self) -> ServerInfo {
         // ServerInfo(=InitializeResult)는 #[non_exhaustive] 라 struct 리터럴 불가 → ctor 체인 사용.
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "Engram daemon control channel (ADR-0086). Available tools: engram_ping, send_message, messages.",
+            "Engram daemon control channel (ADR-0086). Available tools: engram_ping, eg_send, eg_messages.",
         )
     }
 }
@@ -697,7 +699,7 @@ where
     //   판정 재료는 발급 시점에 박힌 자격증명의 사실 하나뿐이라 매니저 조회도, 바디 파싱도 필요 없다.
     // ★이것이 유일한 강제 지점이다★: 에이전트 쪽 표식(`MAIL_MARKER_ENV`)은 사용법을 가릴 뿐이고 조작
     //   가능하다 — 이 검사를 빼고 표식만 남기면 표식을 떼는 순간 우편이 열린다.
-    // ★막는 것은 이 HTTP/CLI 우편 표면뿐이다★: MCP 가능 에이전트는 `/mcp` 의 `send_message` 로 계속 우편을
+    // ★막는 것은 이 HTTP/CLI 우편 표면뿐이다★: MCP 가능 에이전트는 `/mcp` 의 `eg_send` 로 계속 우편을
     //   쓴다(ADR-0128 결정 1 — 채널은 capability 로만 갈린다). 이 거절은 "우편 금지" 가 아니라 "이 입구는
     //   네 채널이 아니다" 다.
     // ★warn 인 이유(info 아님)★: 기본 로그 레벨이 warn 이라 info 로 두면 "왜 이 에이전트가 편지를 못
@@ -1591,7 +1593,7 @@ mod tests {
         );
         assert!(
             !s.contains("\"from\""),
-            "send_message 스키마에 from 필드가 없어야: {s}"
+            "eg_send 스키마에 from 필드가 없어야: {s}"
         );
     }
 
@@ -1639,6 +1641,70 @@ mod tests {
         assert!(
             router.has_route(SEND_MESSAGE_TOOL),
             "라우터에 '{SEND_MESSAGE_TOOL}' 툴이 등록돼 있어야(const ↔ #[tool] 메서드명 일치 강제)"
+        );
+    }
+
+    /// ★옮겨 온 pin(`control/priming.rs::production_priming_files_pin_taught_channels` 의 앞 반쪽)★:
+    ///   예전엔 프라이밍 파일이 `send_message` 라는 낱말을 싣는지 봤다 — 그때는 그게 MCP 가능 스폰의
+    ///   **유일한 교육 표면**이었기 때문이다. 프라이밍이 포인터 한 줄로 줄면서 그 표면이 이 설명문으로
+    ///   옮겨 왔고(ADR-0126 결정 1 의 "입구는 하나만 가르친다" 는 그대로다), 그래서 pin 도 따라왔다.
+    ///
+    /// ★이름만으로는 부족하다★: `tools_list_exposes_send_message_tool` 이 보는 것은 라우팅 이름뿐이라
+    ///   설명문이 비어도 초록이다. 설명문이 사라지면 에이전트에게 남는 건 이름과 JSON 스키마뿐이고,
+    ///   **어디에서도 호출법을 배우지 못한 채** 돌게 된다 — 프라이밍이 그 자리를 더는 받쳐 주지 않으므로
+    ///   그 침묵을 잡는 곳이 여기 하나다.
+    ///
+    /// ★회신 계약의 **툴 인자 표기**(snake_case)도 여기서 본다(ADR-0103 결정 2/3)★: 봉투 인식
+    ///   (`<notice>` 포함)은 CLI 쪽 `help mail recv` 화면이 지고(`bin/engram.rs`), 이쪽은 자기 입구의
+    ///   인자 철자만 진다. 한 계약을 표면별로 갈라 두는 것이 ADR-0126 결정 1 의 모양이다.
+    ///
+    /// ★아래 두 단언은 옛 지시서에만 있다가 이 표면으로 되살린 것이다 — 지우지 말 것★:
+    ///   ① `pending` 에서 상대 상태를 추론하지 말고 `eg_messages` 로 조회하라(ADR-0211 결정 2 가 이름으로
+    ///      지목한 둘 중 하나. 원인을 하나로 단정하는 설명은 그 금지를 정면으로 어긴다).
+    ///   ② 이름이 닮은 하네스 내장 `SendMessage` 와 자기를 가른다(ADR-0106 — deny 는 구조로 막지만,
+    ///      오발이 권한 거부로 끝나는 것을 모르면 에이전트가 **우편 채널이 고장났다고 자기 판단으로**
+    ///      주인에게 보고한다. ★옵 사유 「지시서가 시킨 채널 고장 보고」는 더는 참이 아니다★ — 그 보고를
+    ///      시키던 행동 규칙 네 줄은 프라이밍에서 걷혔고(`control/priming.rs` 주석), 지금 프라이밍은
+    ///      이 오발에 대해 아무 말도 하지 않는다. 그래서 이 설명문이 유일한 안내 표면이다).
+    // ADR-0103
+    // ADR-0106
+    // ADR-0126
+    // ADR-0128
+    // ADR-0211
+    #[test]
+    fn the_send_message_entry_teaches_its_own_call() {
+        let tools = EngramMcpHandler::tool_router().list_all();
+        let tool = tools
+            .iter()
+            .find(|t| t.name == SEND_MESSAGE_TOOL)
+            .unwrap_or_else(|| panic!("tools/list 에 '{SEND_MESSAGE_TOOL}' 이 있어야"));
+        let desc = tool.description.as_deref().unwrap_or_else(|| {
+            panic!("'{SEND_MESSAGE_TOOL}' 에 설명문이 있어야(이게 교육 표면이다)")
+        });
+        for arg in ["`to`", "`body`"] {
+            assert!(
+                desc.contains(arg),
+                "설명문이 {arg} 를 가르쳐야(수신자·본문 없이는 호출이 성립하지 않는다): {desc}"
+            );
+        }
+        assert!(
+            desc.contains("type=\"request\""),
+            "설명문이 request 봉투를 알아보게 가르쳐야(회신은 LLM 준수 soft 라 안 가르치면 엄격 매칭이 \
+             구조적으로 회신을 못 받는다 — ADR-0103 결정 2/3): {desc}"
+        );
+        assert!(
+            desc.contains("reply_to") && desc.contains("reply_by"),
+            "설명문이 회신·기한을 툴 인자 표기(snake_case)로 가르쳐야: {desc}"
+        );
+        assert!(
+            desc.contains("pending") && desc.contains(MESSAGES_TOOL),
+            "`pending` 을 원인 하나로 설명하지 말고 '{MESSAGES_TOOL}' 로 조회하라고 가르쳐야(상대 상태 \
+             추론 금지 — ADR-0211 결정 2): {desc}"
+        );
+        assert!(
+            desc.contains("SendMessage"),
+            "이름이 닮은 하네스 내장 툴과 자기를 갈라 가르쳐야(오발이 권한 거부로 끝난다는 것을 모르면 \
+             허위 '채널 고장' 보고가 올라간다 — ADR-0106): {desc}"
         );
     }
 

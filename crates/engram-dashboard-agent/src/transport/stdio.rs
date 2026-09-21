@@ -24,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use engram_dashboard_base::logging::mask_secrets;
 
 use crate::output_core::OutputCore;
+use crate::transport::input_queue::{self, InputQueue};
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
@@ -37,7 +38,13 @@ pub struct StdioTransport {
     /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child는 wait 후 exit status를 캐시하므로
     /// shutdown이 먼저 reap해도 pump의 try_wait가 같은 status를 회수한다(이중 wait 무해).
     child: Arc<Mutex<Child>>,
-    stdin: Mutex<Option<ChildStdin>>,
+    /// ★라이터 스레드와 `shutdown()` 이 **공유**한다 — PTY 쪽이 소유로 가는 것과 갈린다★. 이 핸들을
+    ///   라이터에게 넘겨 버리면 `shutdown()` 4 단계의 `try_lock` 정리가 닿을 데가 없어진다. 그래서
+    ///   공유하되, ★블로킹 `write_all` 로 이 락을 쥐는 것은 이제 라이터 스레드 하나뿐★이고 `shutdown()`
+    ///   은 여전히 `try_lock` 만 쓴다(그 함수의 순서 불변식이 그대로 유효한 이유).
+    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    /// 아직 못 나간 입력. `send_input` 은 여기 넣고 **즉시** 돌아온다(모듈 = `transport::input_queue`).
+    input: Arc<InputQueue>,
     /// start()에서 take해 pump 스레드로 move. None이면 이미 시작됨.
     stdout: Mutex<Option<ChildStdout>>,
     /// start()에서 take해 drain 스레드로 move.
@@ -110,7 +117,8 @@ impl StdioTransport {
 
         let transport = StdioTransport {
             child: Arc::new(Mutex::new(child)),
-            stdin: Mutex::new(stdin),
+            stdin: Arc::new(Mutex::new(stdin)),
+            input: Arc::new(InputQueue::new()),
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -121,6 +129,28 @@ impl StdioTransport {
         };
 
         Ok((transport, child_pid))
+    }
+}
+
+/// 라이터 스레드의 실제 쓰기 한 번. ★`shutdown()` 이 핸들을 이미 거뒀으면 `BrokenPipe` 로 떨어져
+/// [`input_queue::drain`] 이 큐를 닫는다★ — 그 조합이 「kill 뒤에 남은 입력이 조용히 쌓이는」 갈래를 막는다.
+fn write_stdin(stdin: &Mutex<Option<ChildStdin>>, bytes: &[u8]) -> std::io::Result<()> {
+    // ★블로킹 `write_all` 을 이 락 아래서 하는 유일한 자리다★ — `shutdown()` 이 `try_lock` 을 쓰는
+    //   근거(그 함수의 순서 불변식)가 여기를 가리킨다.
+    let mut guard = stdin.lock().unwrap_or_else(|p| p.into_inner());
+    let stdin = guard.as_mut().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin 이 이미 닫혔다")
+    })?;
+    stdin.write_all(bytes)?;
+    stdin.flush()
+}
+
+/// pump 가 **어떤 길로 끝나든** 입력 큐를 닫아 라이터 스레드를 거둔다(사유·근거 = `pty.rs` 의 같은 이름).
+struct WriterStop(Arc<InputQueue>);
+
+impl Drop for WriterStop {
+    fn drop(&mut self) {
+        self.0.close("stdio 스트림이 끝났다 — 더 보낼 곳이 없다");
     }
 }
 
@@ -195,6 +225,33 @@ impl AgentTransport for StdioTransport {
             }
         }
 
+        // ── 입력 라이터 스레드 ──
+        // ★아무도 join 하지 않는다 · kill 인과를 지연시킬 수 없다★ — 사유의 정본은 `pty.rs` 의 같은 자리.
+        //   여기 stdio 판에만 있는 사실 하나: 이 스레드가 `write_stdin` 안에서 stdin 락을 쥔 채 매달릴 수
+        //   있고, `shutdown()` 이 **kill 을 먼저** 하는 순서가 그것을 에러로 푼다(그 함수의 순서 불변식).
+        // ★`stdout` 을 못 take 한 재호출 갈래에서는 여기 도달하지 않는다★ — 위에서 이미 return 했다.
+        //   즉 라이터도 딱 한 번만 뜬다.
+        {
+            let queue = self.input.clone();
+            let stdin = self.stdin.clone();
+            let spawn_result = std::thread::Builder::new()
+                .name("engram-stdio-writer".into())
+                .spawn(move || {
+                    // ★귀속(`agent = …`)이 없으면 이 경고가 흔적이 못 된다★ — 사유의 정본은
+                    //   `input_queue::drain` doc. 아래 spawn 실패 갈래와 같은 필드다.
+                    input_queue::drain(&queue, "stdio", agent_id, |bytes| {
+                        write_stdin(&stdin, bytes)
+                    });
+                });
+            if let Err(e) = spawn_result {
+                // 라이터가 없으면 `send_input` 이 `Ok` 를 돌려주면서 바이트는 영영 안 나간다 — 조용한
+                //   유실이라, 큐를 닫아 그 순간부터 정직하게 거절한다.
+                let reason = format!("stdio 입력 라이터 스레드 기동 실패: {e}");
+                tracing::warn!(agent = %agent_id, "{reason}");
+                self.input.close(&reason);
+            }
+        }
+
         // ── pump 스레드(stdout→core) ──
         let (done_tx, done_rx) = mpsc::channel();
         let pump_core = core.clone();
@@ -206,7 +263,11 @@ impl AgentTransport for StdioTransport {
             Err(poisoned) => poisoned.into_inner().take(),
         };
 
+        let writer_stop = WriterStop(self.input.clone());
+
         let handle = std::thread::spawn(move || {
+            // ★pump 가 끝나면 라이터도 끝난다★ — `catch_unwind` 바깥이라 정상·panic 두 갈래 모두 지난다.
+            let _writer_stop = writer_stop;
             // ★UnwindSafe★: 잡은 stdout/buf/child/shutdown은 panic 후 버려지므로(스레드 종료)
             //   논리 불변 깨짐 없음 → AssertUnwindSafe.
             let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -289,22 +350,16 @@ impl AgentTransport for StdioTransport {
     /// json 모드에선 이 바이트가 이미 backend가 감싼 stream-json 유저 턴 라인
     /// (`{"type":"user",…}\n`)이다 — transport는 그 형태를 모른다(AgentSession이 InputEncoder로
     /// 감싸 Raw로 넘긴다, ADR-0044 격리).
+    /// 큐에 넣고 **즉시** 돌아온다 — OS 쓰기는 전담 라이터 스레드의 일이다.
+    ///
+    /// ★계약·상한·「받아 둔 뒤의 실패」의 정본은 [`crate::transport::input_queue`] 모듈 헤더★.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
-        match input {
-            InputEvent::Raw(bytes) => {
-                let mut guard = self.stdin.lock().expect("stdin poisoned");
-                let stdin = guard
-                    .as_mut()
-                    .ok_or_else(|| PtyError::WriteFailed("stdin closed".into()))?;
-                stdin
-                    .write_all(&bytes)
-                    .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-                stdin
-                    .flush()
-                    .map_err(|e| PtyError::WriteFailed(e.to_string()))?;
-                Ok(())
-            }
-        }
+        let InputEvent::Raw(bytes) = input;
+        self.input.push(bytes)
+    }
+
+    fn flush_input(&self, timeout: std::time::Duration) -> Result<(), PtyError> {
+        self.input.wait_drained(timeout)
     }
 
     fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
@@ -328,8 +383,9 @@ impl AgentTransport for StdioTransport {
     ///   인과의 핵심이다(cmd.exe만 죽이고 claude가 살아 있으면 write 핸들이 안 닫혀 EOF가 안 온다).
     ///
     /// ★순서 불변 — stdin close 는 kill 보다 절대 먼저 오면 안 된다(데드락, FIX 1)★:
-    ///   send_input 은 stdin Mutex 를 **blocking write_all 내내** 쥔다. 자식이 stdin 을 안 읽으면
-    ///   (파이프 backpressure) 그 write_all 이 영원히 블록해 락을 놓지 않는다. 이때 kill **전에**
+    ///   ★한때 여기 「send_input 은 …」으로 적혀 있었다 — 그 락을 쥐는 주체가 바뀌었을 뿐 위험은 그대로다★.
+    ///   지금 그 락을 쥐는 것은 **라이터 스레드**다(`write_stdin`, blocking `write_all` 내내). 자식이
+    ///   stdin 을 안 읽으면(파이프 backpressure) 그 write_all 이 영원히 블록해 락을 놓지 않는다. 이때 kill **전에**
     ///   `stdin.lock()` 으로 닫으려 하면 그 락을 영영 못 얻어 kill 에 도달조차 못 하고 → pump 가
     ///   깨지 못해 → core.join_pump 가 영구 hang 한다(ADR-0001 인과가 멈춤). 그래서 **kill + Job
     ///   terminate 를 먼저** 한다: 자식을 죽이면 파이프가 깨져 블록된 write_all 이 에러로 풀리고
@@ -338,6 +394,12 @@ impl AgentTransport for StdioTransport {
     fn shutdown(&self) {
         // 1. shutdown 신호 — pump가 종료 시 Killed로 전이.
         self.shutdown.store(true, Ordering::Release);
+
+        // 1b. 입력 큐를 닫는다 — 라이터 스레드가 이것을 보고 끝난다. ★여기서 잡는 것은 **큐의 락뿐**이라
+        //     매달릴 수 없다★: stdin 락에 매달린 라이터는 큐 락을 이미 놓았다(`InputQueue::close` doc).
+        //     그래서 이 한 줄은 아래 순서 불변식(kill 먼저)을 건드리지 않는다 — 다른 락이다.
+        //     ★대가 = 아직 못 나간 입력은 사라진다★.
+        self.input.close("에이전트를 종료했다");
 
         // 2. wait 는 reap(좀비 방지). 두 번째 호출은 이미 죽어 Err — 무시(멱등).
         {
@@ -447,15 +509,28 @@ mod tests {
         json.shutdown();
     }
 
-    // ── FIX 1 회귀: send_input 이 stdin 락을 쥔 채 블록해도 shutdown 이 데드락 없이 완료된다 ──
-    // 재현: 자식이 stdin 을 절대 읽지 않게 하고(ping sleep), 큰 페이로드를 write_all → 파이프
-    //   backpressure 로 write_all 이 락을 쥔 채 블록. 그 상태에서 shutdown 을 호출한다. 버그(=stdin
-    //   close 를 kill 보다 먼저)면 shutdown 이 그 락을 영영 못 얻어 hang → 이 테스트가 타임아웃으로
-    //   잡는다. 픽스(kill 먼저 → try_lock)면 shutdown 이 즉시 완료된다.
+    // ── FIX 1 회귀 + 라이터 스레드 회귀 ──
+    // 잰다(둘):
+    //   (A) ★부른 쪽이 매달리지 않는다★ — 라이터가 파이프 backpressure 로 블록한 **그 상태에서** 온
+    //       `send_input` 이 즉시 돌아온다. 이것이 이 라운드가 세운 성질이고, 이 성질이 없으면 데몬의
+    //       연결당 dispatch 소비자가 물린 에이전트 하나에 통째로 선다.
+    //   (B) FIX 1 그대로 — 그 블록 상태에서 `shutdown` 이 데드락 없이 완료된다. 버그(=stdin close 를
+    //       kill 보다 먼저)면 그 락을 영영 못 얻어 hang 하고 아래 데드라인이 잡는다.
+    // ★옛 모양과 달라진 곳★: 예전엔 테스트가 직접 띄운 스레드가 `send_input` 안에서 블록했다. 이제
+    //   블록하는 것은 **운영 라이터 스레드**라 `start()` 를 반드시 부른다 — 안 부르면 라이터가 없어
+    //   아무것도 안 막히고 (A)·(B) 둘 다 공허하게 통과한다.
     #[cfg(windows)]
     #[test]
-    fn shutdown_completes_even_if_send_input_blocks_on_full_pipe() {
+    fn writer_blocks_but_send_input_returns_and_shutdown_completes() {
+        use crate::output_core::TurnWiring;
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
         use std::time::{Duration, Instant};
+
+        struct NoopStatusSink;
+        impl StatusSink for NoopStatusSink {
+            fn status_changed(&self, _id: crate::types::AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
 
         // ping -n 30 = ~30s 동안 살아있으며 stdin 을 읽지 않는다(간편한 sleep). 소량 stdout 은
         // 파이프 버퍼 아래라 자식이 stdout 으로도 블록하지 않는다 → stdin 미소비 상태 유지.
@@ -473,17 +548,35 @@ mod tests {
         };
         let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
         let transport = Arc::new(transport);
+        let core = Arc::new(OutputCore::new(
+            uuid::Uuid::new_v4(),
+            0,
+            Arc::new(NoopStatusSink) as Arc<dyn StatusSink>,
+            TurnWiring::detached(),
+        ));
+        transport.start(core.clone());
 
-        // 8MB = 파이프 버퍼를 훨씬 초과하는 크기.
-        let writer = transport.clone();
-        let writer_thread = std::thread::spawn(move || {
-            let big = vec![b'x'; 8 * 1024 * 1024];
-            let _ = writer.send_input(InputEvent::Raw(big));
-        });
+        // 1MiB = 파이프 버퍼를 훨씬 초과 · 큐 상한(2MiB) 아래. 라이터가 이것을 물고 블록한다.
+        transport
+            .send_input(InputEvent::Raw(vec![b'x'; 1024 * 1024]))
+            .expect("상한 아래라 받아야 한다");
 
-        // writer 가 write_all 에 진입해 stdin 락을 확실히 잡도록 잠깐 양보(넉넉히).
+        // 라이터가 write_all 에 진입해 stdin 락을 확실히 잡도록 잠깐 양보(넉넉히).
         std::thread::sleep(Duration::from_millis(500));
 
+        // (A) 그 블록 상태에서 온 호출이 **즉시** 돌아온다. 옛 모양이면 여기서 stdin 락을 기다리며
+        //     자식이 죽을 때까지(~30s) 매달렸다.
+        let probe_start = Instant::now();
+        transport
+            .send_input(InputEvent::Raw(b"probe\n".to_vec()))
+            .expect("큐에 자리가 있으므로 받아야 한다");
+        let probe_elapsed = probe_start.elapsed();
+        assert!(
+            probe_elapsed < Duration::from_secs(2),
+            "라이터가 막힌 동안 send_input 이 {probe_elapsed:?} 매달렸다 — 호출자 분리 회귀"
+        );
+
+        // (B) FIX 1 — 같은 상태에서 shutdown 이 데드락 없이 완료된다.
         let killer = transport.clone();
         let start = Instant::now();
         let shutdown_thread = std::thread::spawn(move || killer.shutdown());
@@ -497,12 +590,16 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         shutdown_thread.join().expect("shutdown thread panicked");
+
+        // 닫힌 뒤의 입력은 조용히 쌓이지 않고 거절된다.
         assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "shutdown deadlock 회귀(FIX 1)"
+            matches!(
+                transport.send_input(InputEvent::Raw(b"late\n".to_vec())),
+                Err(PtyError::WriteFailed(_))
+            ),
+            "shutdown 뒤의 send_input 은 거절돼야 한다"
         );
 
-        // kill 로 파이프가 끊겨 blocked write_all 이 에러로 풀리고 writer 가 종료된다.
-        let _ = writer_thread.join();
+        core.join_pump(Duration::from_secs(5));
     }
 }

@@ -285,7 +285,8 @@ fn build_daemon_wiring_with_store(
     let tracker = Arc::new(SessionTracker::new(
         TrackerConfig::default(),
         Arc::new(move |agent_id, new_sid| {
-            profiles_cb.observe_session_id(agent_id, new_sid);
+            // 화신 표식 자리에 `None` — 이 관측기(`SessionTracker`)는 그 축을 나르지 않는다.
+            profiles_cb.observe_session_id(agent_id, None, new_sid);
         }),
     ));
     tracker.start();
