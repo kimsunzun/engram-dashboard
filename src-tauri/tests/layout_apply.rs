@@ -1057,14 +1057,17 @@ async fn spawn_into_rejects_an_unknown_backend_before_spawning() {
 
 /// 아는 낱말은 **포트까지 그대로 간다** — 이 줄이 초록이면 ADR-0058 의 전량 거부가 실제로 걷힌 것이다.
 ///
-/// ★한때 여기 있던 codex 두 줄은 지워진 게 아니라 옮겨 갔다★ — 그 낱말은 이제 이 문에서 정책으로
-/// 거절되므로(아래 `every_creation_door_reads_one_backend_policy`) 「통과」를 재는 이 목록에 설 수 없다.
-/// 공백 다듬기는 claude 로 그대로 잰다.
+/// ★codex 두 줄이 2026-09-22 에 이 목록으로 돌아왔다★ — 한동안 빠져 있던 것은 그 낱말이 이 문에서
+/// 정책으로 거절됐기 때문이고(아래 `every_creation_door_reads_one_backend_policy`), 그 거절이 걷히면서
+/// 다시 「통과」를 재는 자리에 선다. ★그 목록을 다시 비우려거든 정책 표부터 볼 것★ — 표가 연 낱말이
+/// 여기 없으면 이 파일은 그 낱말이 실제로 포트까지 가는지를 아무 데서도 안 재게 된다.
 #[tokio::test]
 async fn spawn_into_forwards_a_known_backend() {
     for (word, expected) in [
         ("claude", AgentBackendKind::Claude),
         (" claude ", AgentBackendKind::Claude),
+        ("codex", AgentBackendKind::Codex),
+        (" codex ", AgentBackendKind::Codex),
     ] {
         let w = World::new();
         let agent = Uuid::new_v4();
@@ -1095,9 +1098,9 @@ async fn spawn_into_forwards_a_known_backend() {
 
 // ── ★두 생성 문이 한 정책 표를 본다★ ─────────────────────────────────────────────────────────
 //
-// Phase 2 는 두 문을 **함께** 연다 — 한쪽만 열리면 「`agent.new` 로는 못 만드는데 `agent.spawnInto` 로는
-// 만든다」가 되고, 그게 이 게이트가 막으려던 상태 그대로다(실제로 그 모양이 한 번 있었다: wire 에
-// backend 칸이 생기면서 spawnInto 만 codex 를 통과시켰다).
+// 2026-09-22 에 codex 가 두 문에서 **함께** 열렸다 — 한쪽만 열리면 「`agent.new` 로는 못 만드는데
+// `agent.spawnInto` 로는 만든다」가 되고, 그게 이 게이트가 막으려던 상태 그대로다(실제로 그 모양이 한 번
+// 있었다: wire 에 backend 칸이 생기면서 spawnInto 만 codex 를 통과시켰다). 다시 닫을 때도 같다.
 // ★이 시험이 재는 것은 두 목록이 오늘 우연히 같은지가 아니라 **같은 출처에서 나오는지**다.★
 
 /// wire 백엔드 전량. ★손으로 채우지만 빈칸이 조용히 남지 않는다★ — 변형이 늘면 `wire_slot` 의 match 가
@@ -1148,8 +1151,9 @@ fn advertised_new_backends() -> Vec<String> {
 ///      `engram-dashboard-agent` 의 `commands::tests::new_creates_exactly_what_the_llm_backend_policy_opens`.
 ///      **여기서는 그 문이 광고하는 어휘만** 표와 맞춰 본다(아래 ②) — 두 crate 를 잇는 자리가 여기라서.
 ///   ② `agent.spawnInto`(이 패키지) — 아래 ③에서 **실제로 불러** 결말을 본다.
-///   ③ 프론트의 codex 생성 문들(`agentCommands` 의 `CODEX_HUMAN_ONLY` 를 쓰는 것들) — 언어가 달라
-///      여기서 못 잰다: `src/commands/agentCommands.test.ts` 가 진다.
+///   ③ 프론트의 codex 생성 문들(`agentCommands` 의 `agentlist.createCodex`·`createCodexJson`) — 언어가
+///      달라 여기서 못 잰다: `src/commands/agentCommands.test.ts` 가 진다. ★그 문들을 닫고 있던
+///      `humanOnly` 상수(`CODEX_HUMAN_ONLY`)는 2026-09-22 에 지워졌다 — 그 이름으로 찾지 말 것.★
 #[tokio::test]
 async fn every_creation_door_reads_one_backend_policy() {
     // ① wire 백엔드 전량이 정책 표에 **선언돼** 있다. 빠진 낱말은 fail-closed 로 닫히지만 그건 「아직 안

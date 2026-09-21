@@ -137,7 +137,8 @@ describe('agent_list 생성 계열 라우팅', () => {
 
   // ★사람이 codex 대화형 TUI 를 고르는 문★ — 형제와 마찬가지로 등록만 하고 스폰하지 않는다 — 뜨는 것은
   //   활성화(더블클릭)에서다.
-  // ★`run` 이 아니라 `runAsHuman` 이다★ — 이 문은 `humanOnly` 라 LLM 진입점으로는 반려된다(아래 별도 항목).
+  // ★`runAsHuman` 인 것은 이제 **게이트 때문이 아니라 사람 경로를 재려고**다★ — 2026-09-22 에
+  //   `humanOnly` 가 걷히면서 두 진입점이 같아졌고, LLM 쪽은 아래 별도 항목이 따로 잰다.
   it('createCodex(사람 경로) → createCodexProfile 를 outputFormat=Terminal 로 호출', async () => {
     dialogMock.open.mockResolvedValueOnce('C:/work/engram')
     clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
@@ -170,25 +171,37 @@ describe('agent_list 생성 계열 라우팅', () => {
     expect(clientMock.spawnAgent).not.toHaveBeenCalled()
   })
 
-  // 형제 `createCodex` 와 같은 게이트를 진다 — 한쪽만 닫히는 것이 이 항목이 막는 회귀다.
-  it('createCodexJson: LLM 진입점(registry.run)은 사유를 실어 반려하고 아무것도 만들지 않는다', () => {
-    expect(() => run('agentlist.createCodexJson', {})).toThrow(/LLM·버스/)
-    expect(() => run('agentlist.createCodexJson', {})).toThrow(/Phase 2/)
-    expect(clientMock.createCodexProfile).not.toHaveBeenCalled()
-    expect(dialogMock.open).not.toHaveBeenCalled()
+  // 형제 `createCodex` 와 **같은 게이트를 진다** — 한쪽만 열리거나 한쪽만 닫히는 것이 이 항목이 막는
+  //   회귀다(그 게이트는 지금 열려 있다).
+  it('createCodexJson: LLM 진입점(registry.run)도 사람 경로와 같은 프로필을 만든다', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    await run('agentlist.createCodexJson', {})
+
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'StreamJson',
+    )
+    expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
   })
 
-  // ★세 번째 생성 문 — LLM 은 못 지나고 사람은 지난다★(2026-09-08 리뷰 FIX 2).
+  // ★세 번째 생성 문 — 두 진입점이 같은 문을 연다★(2026-09-22: 옛 `humanOnly` 게이트를 걷었다).
   //
-  // 이 항목은 **사람 메뉴이면서 동시에 LLM command** 다. wire `CreateProfile` 까지 닿는데 그 핸들러는
-  // 정책을 하나도 안 본다 — 그래서 닫는 축이 백엔드 낱말이 아니라 **호출자**다. 아래 둘이 그 축을
-  // 양쪽에서 잰다: 게이트를 지우면 첫째가, 사람 경로를 게이트 뒤로 옮기면 둘째가 빨개진다.
-  it('createCodex: LLM 진입점(registry.run)은 사유를 실어 반려하고 아무것도 만들지 않는다', () => {
-    expect(() => run('agentlist.createCodex', {})).toThrow(/LLM·버스/)
-    expect(() => run('agentlist.createCodex', {})).toThrow(/Phase 2/)
-    expect(clientMock.createCodexProfile).not.toHaveBeenCalled()
-    // ★다이얼로그가 뜨기도 전에 막힌다★ — 「모달이 LLM 을 막는다」에 기대지 않는다는 것이 이 줄의 뜻이다.
-    expect(dialogMock.open).not.toHaveBeenCalled()
+  // 이 항목은 **사람 메뉴이면서 동시에 LLM command** 다. 그 겸직을 닫고 있던 것은 백엔드 낱말이 아니라
+  // **호출자 축**이었고, 그 축을 세운 전제(codex 의 신뢰 확인 모달을 LLM 이 못 지난다)가 실측으로
+  // 죽었다 — 근거의 정본 = `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의 codex 줄.
+  // ★그래서 이 둘이 재는 것이 뒤집혔다★: 게이트를 되살리면 이 두 항목이 빨개진다. 되살릴 일이 생기면
+  // 그 표부터 닫을 것 — 표는 열린 채 여기만 닫으면 `agent.new` 로는 만들고 이 문으로는 못 만든다.
+  it('createCodex: LLM 진입점(registry.run)도 사람 경로와 같은 프로필을 만든다', async () => {
+    dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+    clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+
+    await run('agentlist.createCodex', {})
+
+    expect(clientMock.createCodexProfile).toHaveBeenCalledWith(
+      'C:/work/engram', 'C:/work/engram', [], [], false, 'Terminal',
+    )
+    expect(clientMock.createClaudeProfile).not.toHaveBeenCalled()
   })
 
   it('createCodex: 사람 경로(트리 메뉴 → fireAndForget)는 그대로 codex 를 만든다', async () => {
