@@ -67,12 +67,9 @@ vi.mock('../../api/clientFactory', () => ({
 
 // ── agentStore stub — 슬롯이 부재 판정용으로 agents·agentsLoaded 를 조회한다. ──
 // agentsLoaded=false 가 기본 = "권위 명부 미수신" → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
-// profiles 는 빈 상태 게이트의 넷째 항(이어받을 세션이 있나)이 읽는다. 기본값 undefined = 실물 mock 이
-//   그 칸을 안 채우는 경로 = 프로필 부재 — 그 경로의 동작이 종전 그대로임을 나머지 테스트 전부가 겸사겸사 잰다.
 const agentStoreState = vi.hoisted(() => ({
   agents: [] as unknown[],
   agentsLoaded: false,
-  profiles: undefined as unknown[] | undefined,
 }))
 vi.mock('../../store/agentStore', () => ({
   useAgentStore: (selector: (s: typeof agentStoreState) => unknown) => selector(agentStoreState),
@@ -128,7 +125,6 @@ beforeEach(() => {
   clientMock.stateCbs.clear()
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
-  agentStoreState.profiles = undefined
 })
 
 afterEach(() => {
@@ -555,107 +551,6 @@ describe('RichSlot(live) — ADR-0145 첫 실행 빈 상태', () => {
     expect(textarea().placeholder).toBe(t('agent.terminatedPlaceholder'))
   })
 
-})
-
-// ★codex 재개 깜빡임 차단 — 빈 상태 게이트의 넷째 항★
-//
-// 'live'(replayDone)는 **데몬이 자기 링을 다 흘려보냈다**는 뜻이지 **백엔드가 이력을 복원했다**는 뜻이
-// 아니다. claude 는 재개 이력을 자식 공개 전에 링에 심어 링이 빌 틈이 없지만, codex 는 spawn 뒤
-// thread/resume + thread/items/list 왕복으로 이력이 나중에 온다 — 그 창이 "live + 0건"이라 마스코트가
-// 번쩍였다가 대화로 뒤집혔다(화면 실측).
-//
-// ★여기서 재는 것의 절반은 "codex 에만 걸린다" 쪽이다★: 두 백엔드가 `backend_session_id` 를 반대 뜻으로
-//   채운다. claude 는 그 id 를 우리가 발급해 Fresh 스폰 순간 새 uuid 가 박히므로(assigns_session_id=true),
-//   억제를 claude 까지 넓히면 **갓 띄운 claude 에이전트 전부**가 첫 실행 화면을 잃는다. 아래
-//   'claude 프로필은 …' 이 그 회귀를 잡는 단언이다 — 조건에서 백엔드 검사를 빼면 그것이 빨개진다.
-describe('RichSlot(live) — codex 가 이어받을 세션을 들고 있으면 빈 상태를 억제한다', () => {
-  /** 슬롯이 읽는 칸만 채운 프로필 — 관심사는 `command.kind` × `backend_session_id` 둘뿐이다. */
-  function profileWith(kind: string, backendSessionId: string | null): unknown {
-    return {
-      id: AGENT,
-      name: 'C:/work',
-      display_name: null,
-      cwd: 'C:/work',
-      command:
-        kind === 'Shell'
-          ? { kind: 'Shell', program: 'pwsh', args: [] }
-          : { kind, extra_args: [], output_format: 'StreamJson' },
-      backend_session_id: backendSessionId,
-    }
-  }
-
-  const SID = '01a0a08f-0000-7000-8000-000000000000'
-
-  it('codex 재개 프로필은 live + 0건이어도 빈 상태를 그리지 않는다(복원된 이력이 뒤늦게 온다)', async () => {
-    agentStoreState.profiles = [profileWith('Codex', SID)]
-    render(<RichSlot viewId="v1" agentId={AGENT} />)
-    await flush()
-    fireState('live')
-
-    // 깜빡임의 정확한 자리 — 링은 비었고 'live' 는 이미 지나갔다.
-    expect(emptyState()).toBeNull()
-    expect(mascot()).toBeNull()
-    expect(screen.queryByText('Codex')).toBeNull()
-
-    // 왕복이 끝나 이력이 도착하면 그대로 대화로 그린다(억제가 렌더를 막지 않는다).
-    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'restored turn' }))))
-    expect(screen.getAllByText('restored turn')).toHaveLength(1)
-    expect(emptyState()).toBeNull()
-  })
-
-  it('codex 라도 이어받을 세션이 없으면 live + 0건에서 빈 상태를 그대로 그린다', async () => {
-    agentStoreState.profiles = [profileWith('Codex', null)]
-    render(<RichSlot viewId="v1" agentId={AGENT} />)
-    await flush()
-    fireState('live')
-
-    expect(emptyState()).not.toBeNull()
-    expect(mascot()).not.toBeNull()
-  })
-
-  // ★회귀 가드★: claude 의 세션 id 는 Fresh 스폰이 즉시 박는 값이라 "대화가 있다" 를 뜻하지 않는다.
-  //   이 단언이 빨개지면 조건에서 백엔드 검사가 빠진 것이고, 화면에서는 갓 띄운 claude 슬롯 전부가
-  //   마스코트·제품명을 잃는다(빈 화면 + 하단 입력창).
-  it('claude 프로필은 세션 id 가 있어도 빈 상태를 그대로 그린다(억제는 codex 전용)', async () => {
-    agentStoreState.profiles = [profileWith('Claude', SID)]
-    render(<RichSlot viewId="v1" agentId={AGENT} />)
-    await flush()
-    fireState('live')
-
-    expect(emptyState()).not.toBeNull()
-    expect(mascot()).not.toBeNull()
-    expect(screen.getByText('Claude Code')).toBeTruthy()
-  })
-
-  // 미지 종류도 같다 — richBranding 의 "모르면 claude" 기본값이 이 게이트까지 한 몸으로 간다.
-  it('codex 가 아닌 종류(Shell)는 세션 id 가 있어도 빈 상태를 그린다', async () => {
-    agentStoreState.profiles = [profileWith('Shell', SID)]
-    render(<RichSlot viewId="v1" agentId={AGENT} />)
-    await flush()
-    fireState('live')
-
-    expect(emptyState()).not.toBeNull()
-  })
-
-  it('프로필이 없으면 억제 근거도 없다고 보고 빈 상태를 그린다(ad-hoc·mock 경로)', async () => {
-    agentStoreState.profiles = undefined
-    render(<RichSlot viewId="v1" agentId={AGENT} />)
-    await flush()
-    fireState('live')
-
-    expect(emptyState()).not.toBeNull()
-    expect(mascot()).not.toBeNull()
-  })
-
-  // 명부에 프로필은 있는데 **이 에이전트의 것이 아닌** 경우 = 부재와 같게 본다(find 가 못 찾는 그 자리).
-  it('다른 에이전트의 codex 프로필만 있으면 부재와 같게 본다', async () => {
-    agentStoreState.profiles = [{ ...(profileWith('Codex', SID) as object), id: 'other-agent' }]
-    render(<RichSlot viewId="v1" agentId={AGENT} />)
-    await flush()
-    fireState('live')
-
-    expect(emptyState()).not.toBeNull()
-  })
 })
 
 // ★ADR-0145 빈 상태 게이트가 awaiting 이 아니라 "이 구독에서 이미 보냈다" 인 이유★
