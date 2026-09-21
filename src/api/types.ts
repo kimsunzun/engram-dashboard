@@ -107,7 +107,12 @@ export type AgentCommand =
 /**
  * 스폰 패킷이 고르는 백엔드 — wire `AgentBackendKind` 미러. ★부재는 기본값이 아니라 오류다★: 이 낱말을
  * 안 실은 스폰 패킷은 데몬이 거절한다(고르지 않은 것과 claude 를 고른 것을 구별하려는 결정).
- * ★화면 분기에 쓰지 말 것★ — 렌더러는 `capabilities.output.structured` 한 칸으로 갈린다.
+ * ★렌더러 선택에 쓰지 말 것★ — 어느 슬롯을 띄우나(터미널·리치·DOM)는 `capabilities.output.structured`
+ * 한 칸이 가른다. 여기로 그 분기를 세우면 같은 능력을 두 곳이 각자 판정하게 된다.
+ * ★한 렌더러 **안**의 백엔드 표기(제목·표식·색조)는 이 금지에 들지 않는다★ — 그건 무엇을 그리느냐가
+ * 아니라 누구와 말하느냐를 적는 것이다. 단 그 판정도 이 타입이 아니라 프로필의 `command.kind` 가 한다
+ * (정의처 = `components/slot/richBranding.ts`) — 이 낱말은 스폰 패킷이 실어 보내는 값이지 화면이 읽는
+ * 값이 아니다.
  */
 export type AgentBackendKind = 'claude' | 'codex'
 
