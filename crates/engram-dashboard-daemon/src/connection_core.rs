@@ -1231,7 +1231,8 @@ impl ConnectionCore {
                 //   이 갈래의 성공 경로는 실 프로세스 spawn 이라(`manager.spawn_agent` 바로 아래) 단위
                 //   테스트가 못 들어오고, 여기를 옛 상수 호출로 되돌려도 전 스위트가 초록이다. 그러면
                 //   codex by-cwd 가 조용히 app-server 로 갈아탄다. 그 함수의 **내용**은
-                //   `by_cwd_fills_a_preserved_mode_per_backend` 가 지키므로, 무방비인 것은 이 호출 한 줄이다.
+                //   `by_cwd_fills_one_shared_default_mode_for_every_backend` 가 지키므로, 무방비인 것은
+                //   이 호출 한 줄이다.
                 let Some(command) = spawn_command_by_cwd(backend) else {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;

@@ -1,7 +1,7 @@
 # ADR-0215: codex 지시서는 developer_instructions 로 싣고 파일 읽기는 백엔드가 진다
 
-- 상태: 확정 (2026-09-20, 근거: `docs/research/codex-instruction-injection-2026-09-20.md` — 방법·수치 정본, 여기 베끼지 않는다)
-- 관련: ADR-0004(백엔드 확장) · ADR-0210(스폰을 실패시키지 않는다) · ADR-0209 · ADR-0211(같은 8,191 벽을 먼저 실측했고 지시서를 이 크기로 줄인 결정) · ADR-0092(프라이밍 seam 의 최초 결정 — 이 ADR 이 어기지 않는다) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:238` · Amends ADR-0099 (codex 는 경로 대신 내용을 싣는다)
+- 상태: 확정 (2026-09-20, 근거: `docs/research/codex-instruction-injection-2026-09-20.md` — 방법·수치 정본, 여기 베끼지 않는다) · 부분 폐기 by ADR-0219 (LLM 생성 표면의 codex 차단 조항)
+- 관련: ADR-0004(백엔드 확장) · ADR-0210(스폰을 실패시키지 않는다) · ADR-0209 · ADR-0211(같은 8,191 벽을 먼저 실측했고 지시서를 이 크기로 줄인 결정) · ADR-0092(프라이밍 seam 의 최초 결정 — 이 ADR 이 어기지 않는다) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:238` · Amends ADR-0099 (codex 는 경로 대신 내용을 싣는다) · Amended by ADR-0219 (LLM 생성 표면의 codex 차단 조항)
 
 ## 맥락
 
@@ -46,4 +46,4 @@ claude 는 지시서를 `--append-system-prompt-file <절대경로>` 로 받는�
 - ★**인자 조립 테스트는 「codex 가 규약대로 행동한다」를 증명하지 않는다**★ — 그 합격 판정은 **봉투 본문에 「`eg_send` 로 답해라」를 적지 않고 보냈을 때 codex 가 도구로 답장하는가** 하나뿐이다. 현재 지시서는 그 규약을 직접 문장으로 담지 않고 **「네 턴에 쓴 것은 주인에게만 가고 팀원에게 닿지 않는다」** 한 줄로 대신한다 — claude 는 그 문장으로 올바르게 행동하지만 **codex 도 그런지는 미검이다.**
 - ★**실 왕복은 같은 날 통과했다 — 이 결정의 진짜 합격 판정이다**★(GUI 실측). 봉투 본문에 「`eg_send` 로 답해라」를 **적지 않았는데도** codex 가 **`engram help` 를 먼저 실행하고**(지시서 첫 줄) `eg_send` 로 답장했다(14초 · `delivered`). 주입 자체도 살아 있는 `codex.exe` 명령줄에서 눈으로 확인됐고 건너뛰기 경고는 0건이었다. **바로 위 「인자 조립 테스트가 증명하지 않는다」는 그대로 참이고, 그것을 메운 것이 이 실측이다.**
 - **미검으로 남은 것:** codex 기본 프롬프트를 버전마다 떠 오는 방법(위 첫 대안이 되살아날 때 필요해진다) · **터미널 모드 codex 의 턴 완주**(자기 훅 심사 화면에서 멈춰 승인 클릭을 안 했다) · **작은따옴표 감시 테스트**(★사용자 결정으로 안 넣는다★ — 지시서에 그 문자를 안 쓰는 규율로 간다).
-- ★**곁가지로 드러난 갭 — LLM 은 codex 를 스폰할 수 없다**★. `agent.new` 의 `AgentBackend` 는 `Claude` 하나뿐이고(넓히는 것은 `agents.json` 디스크 호환 이주다) 프론트 codex 생성 명령은 `humanOnly` 다. 둘 다 의도된 것이고 사유·여는 시점의 정본은 `commands::LLM_BACKEND_POLICY` — 이 ADR 이 그것을 바꾸지 않는다. **사람이 만드는 문은 열려 있다.**
+- ★**이 조항은 폐기됐다 — 부분 폐기 by ADR-0219 (2026-09-22).**★ ~~곁가지로 드러난 갭 — LLM 은 codex 를 스폰할 수 없다. `agent.new` 의 `AgentBackend` 는 `Claude` 하나뿐이고(넓히는 것은 `agents.json` 디스크 호환 이주다) 프론트 codex 생성 명령은 `humanOnly` 다. 둘 다 의도된 것이고 사유·여는 시점의 정본은 `commands::LLM_BACKEND_POLICY` — 이 ADR 이 그것을 바꾸지 않는다.~~ ★**지금은 LLM 도 codex 를 스폰한다**★ — 정책 표가 codex 를 열었고(ADR-0219), 그 거절을 떠받치던 폴더 신뢰 모달 전제가 실측으로 뒤집혔다. ★**「넓히는 것은 디스크 호환 이주다」도 그때부터 거짓이었다**★ — `AgentCommand::Codex` 짝이 이미 있었고 사람 메뉴가 같은 모양을 `agents.json` 에 쓰고 있었다. **사람이 만드는 문은 그때도 지금도 열려 있다.**

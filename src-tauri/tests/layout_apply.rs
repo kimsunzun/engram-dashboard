@@ -1223,6 +1223,12 @@ async fn every_creation_door_reads_one_backend_policy() {
                 assert_eq!(id, agent.to_string(), "{word}");
                 assert_eq!(&*spawner.backends.lock().unwrap(), &[Some(kind)], "{word}");
             }
+            // ★**이 갈래는 오늘 한 번도 돌지 않는다 — 그래도 남긴다**★(2026-09-22 · ADR-0219). 정책
+            //   표가 wire 어휘 둘(claude·codex)을 다 열어서 `llm_creation_refusal` 이 `None` 만 낸다.
+            //   지우지 않는 이유 = 표는 「선언 없음 = 닫힘」(`NO_POLICY_DECLARED`)으로 서 있고, **다음
+            //   백엔드가 wire 어휘에 들어오는 순간** 정책 줄 없이 이 갈래로 떨어진다. 그때 이 갈래가
+            //   없으면 위 `None` 팔이 그 백엔드를 「정책이 연 것」으로 읽어 **닫힌 백엔드가 통과했다는
+            //   사실 자체를 아무도 안 잰다.** 죽은 코드가 아니라 **다음 낱말을 기다리는 가드**다.
             Some(reason) => {
                 let err = out.expect_err("정책이 닫은 백엔드가 통과했다");
                 assert!(

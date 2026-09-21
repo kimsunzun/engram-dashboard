@@ -28,10 +28,15 @@ use crate::types::{
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v4(2026-09-22): `agent.new` 의 `backend` 어휘가 **`Claude` 하나 → `Claude`·`Codex` 둘**이 됐다
+    //   (ADR-0219). 이름도 칸도 안 늘었지만 **그 칸이 받는 낱말 집합**이 바뀌었고 그것이 호출자가 보는
+    //   선언이다 — 생성물이 그 차이를 그대로 싣는다(`bindings/commands.schema.json` 의
+    //   `"backend":{"enum":[…]}`). 안 올리면 codex 를 만들어 주는 빌드와 거절하는 빌드가 같은 세대를
+    //   보고한다. ★세대는 **이름이 늘 때만** 올리는 번호가 아니다 — 선언이 바뀌면 올린다.★
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 3;
+    catalog_version: 4;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -278,9 +283,17 @@ impl AgentCommandHost for AgentManager {
 ///   (`agentlist.createAgent`)의 기본값이 이미 StreamJson 이다(ADR-0078). 두 입구가 같은 동사에 다른
 ///   기본을 주면 "만들었는데 화면이 다르다" 가 된다.
 /// ★값의 집은 여기 하나다★ — 만들기 동사를 여는 입구가 늘어도 자기 상수를 두지 않고 이것을 참조한다.
+/// ★**값 자체를 못 박는 자리는 하나뿐이다**★ — `tests::the_new_agent_default_output_format_is_pinned_to_a_literal`.
+/// 나머지 단언은 전부 이 상수와의 **상대 비교**라 값을 뒤집어도 함께 따라 움직인다(그래서 그 하나가 없으면
+/// 이 줄을 바꾸는 편집이 전 스위트 초록으로 통과한다).
 pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat::StreamJson;
 
-// ── LLM 제어 표면의 백엔드 생성 정책(사용자 결정 2026-09-07 · TRD S21 §6-G) ──────────────────────
+// ── LLM 제어 표면의 백엔드 생성 정책(ADR-0219 — 2026-09-22) ──────────────────────────────────────
+//
+// ★근거가 갈아탔다★ — 이 표를 세운 것은 「안 연다」(사용자 결정 2026-09-07 · TRD S21 §6-G)였고 그
+// 결정은 **폴더 신뢰 모달을 LLM 이 못 지난다**는 전제 위에 서 있었다. 그 전제가 2026-09-22 실측으로
+// 뒤집혀(app-server 통로엔 그 모달이 없다) 거절이 걷혔다 — 그 번복의 정본이 ADR-0219 다. 옛 좌표를
+// 근거로 이 표를 도로 닫지 말 것: 그 자리는 ADR-0219 「거부한 대안」이 (b) 로 이미 재고했다.
 //
 // ★정책의 집은 여기 하나다★ — 이 판정을 묻는 **LLM 제어 표면이 셋**이고 서로 다른 crate·언어에 산다.
 // ★둘이라고 적혀 있던 옛 문장은 틀렸다(2026-09-08 리뷰)★ — 셋째를 못 세는 바람에 그 문이 표를 한 번도
@@ -676,8 +689,11 @@ fn verb_new(
     //   ★그래도 지우지 말 것★ — 이 팔이 막는 편집은 「어휘를 넓히면서 [`LLM_BACKEND_POLICY`] 는 안
     //   넓히는 것」이고, 그 편집이 오면 팔이 그날 살아난다. 그 사실을 시험이 잰다 =
     //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(어휘를 넓히고 표를 안 열면
-    //   빨개진다). 형제 문의 자리 = 셸 `layout::apply::gate_backend`(런타임 거절이 오늘도 닿는다) ·
-    //   프론트 `commands/registry.ts` 의 `humanOnly`(LLM 표면만 닫는다).
+    //   빨개진다). 형제 문의 자리 = 셸 `layout::apply::gate_backend` · 프론트 `commands/registry.ts`.
+    //   ★**둘 다 오늘은 정책으로 아무것도 안 막는다**★(2026-09-22 · ADR-0219) — `gate_backend` 에
+    //   남는 거절은 정책이 아니라 `parse_backend` 의 오탈자 그물이고(wire 어휘가 claude·codex 둘뿐인데
+    //   표가 둘 다 열었다), 프론트의 `humanOnly` 사유 문자열은 그날 함께 지워졌다. ★한때 이 자리에
+    //   「셸은 런타임 거절이 오늘도 닿는다」고 적혀 있었는데 표가 열린 뒤로 거짓이다.★
     if let Some(reason) = llm_creation_refusal(&word) {
         return Err(CommandError::invalid_argument(format!(
             "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason}"
@@ -1680,6 +1696,17 @@ mod tests {
             assert_eq!(snapshot(), before, "{name}: 반려가 명부를 바꿨다 — {args}");
         }
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    /// ★[`NEW_AGENT_OUTPUT_FORMAT`] 의 **값 자체**를 글자로 못 박는다★ — 이 상수를 읽는 자리는 전부
+    /// 상대 비교(`assert_eq!(…, NEW_AGENT_OUTPUT_FORMAT)`)라, 상수를 `Terminal` 로 뒤집어도 그 단언들이
+    /// 함께 따라 움직여 **워크스페이스 전체가 초록으로 남는다**(2026-09-22 실측 — 그 값을 글자로 재는
+    /// 단언이 저장소에 하나도 없었다). 상대 비교는 「두 갈래가 같은 집을 본다」만 재고 「그 집에 무엇이
+    /// 들었나」는 안 잰다 — 후자가 사용자에게 보이는 값(생성 직후 화면이 챗이냐 터미널이냐)이라 여기서
+    /// 따로 잰다. 값을 바꾸는 것은 결정이므로, 이 줄을 고치는 편집은 그 결정을 지나야 한다(ADR-0078).
+    #[test]
+    fn the_new_agent_default_output_format_is_pinned_to_a_literal() {
+        assert_eq!(NEW_AGENT_OUTPUT_FORMAT, CoreAgentOutputFormat::StreamJson);
     }
 
     /// ★선언 어휘와 코어 어휘를 **컴파일러가** 묶는 자리★ — 산문으로만 묶으면 코어에 변형이 하나 늘 때
