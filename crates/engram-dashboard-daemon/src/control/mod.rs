@@ -283,6 +283,8 @@ impl ControlChannel for DaemonControlChannel {
         let priming_file = wants_priming.then(|| self.priming.priming_file()).flatten();
         let grants = Self::build_grants(self.send_exe.as_deref(), needs);
         Ok(Some(ControlEndpoint {
+            agent_id: id,
+            epoch,
             url: self.mcp_url.clone(),
             token,
             config_path,

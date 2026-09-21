@@ -12,7 +12,7 @@
   ★**`문서` 는 가장 약한 등급이다**★ — codex 공개 문서는 thread id 예시로 `"thr_123"` 을 쓰는데 **실서버가 그 값을 거부한다**(실측). 문서와 소스가 갈리면 소스를 믿는다.
 - 우리 쪽 구현 여부는 여기 적지 않는다 — 그건 코드와 TRD 소관이다. 이 표는 **상대가 주는 것**만 적는다.
 
-**마지막 갱신:** 2026-09-14 · **claude** 2.1.170 · **codex** 0.154.0
+**마지막 갱신:** 2026-09-21 · **claude** 2.1.170 · **codex** 0.154.0 (§1·§2 는 그 버전, §2.5 의 락·`originator` 줄은 0.155.x 에서 잰 것이라 그 자리에 버전을 달았다)
 
 ---
 
@@ -23,11 +23,11 @@
 | **누가 id 를 발급하나** | **우리** — 우리가 뽑아 `--session-id <uuid>` 로 강제한다 (소스) | **codex** — `thread/start` **응답**의 `thread.id` 로 받는다 (소스·실측) |
 | **id 형식** | 우리가 뽑은 UUID | **UUID** — 타입이 `uuid::Uuid` newtype 이고 역직렬화가 `Uuid::parse_str` 를 부른다. 생성은 `Uuid::now_v7()`. **비-UUID 는 서버가 거부**한다 (소스·실측). ★단 JSON 스키마엔 그냥 `string` 으로 나온다 — 생성기 탓이 아니라 **그 타입이 스키마를 무제한 String 으로 직접 구현**하기 때문이다★. 그리고 벤더 주석은 「**codex 가 발급한** id 는 UUIDv7」로 한정한다 — 장래 hosted·import 경로까지 보장하지 않는다 |
 | **이어붙이는 방법** | 스폰 **인자** `--resume <uuid>` (소스) | 스폰 **후** 핸드셰이크 다음 첫 요청을 `thread/start` 대신 `thread/resume { threadId }` 로 (소스) |
-| **모르는 id 를 주면** | 미확인 | **에러** `-32600` `no rollout found for thread id` — 조용히 새 대화를 열지 않는다 (실측). ★**`-32600` 을 「모르는 스레드」 신호로 쓰면 안 된다**★ — 설정 로딩 실패 등 다른 잘못된 요청도 같은 코드다. 메시지를 봐야 가른다 |
+| **모르는 id 를 주면** | **정직하게 실패한다** — `No conversation found …` + 종료코드 ≠ 0. 조용히 새 대화를 열지 않는다 (실측 = `docs/process/S9-session-restore/spike-results.md` · ADR-0082 · 회귀망이 그 문구와 종료코드를 재현한다). ★**터미널 모드 codex 와 정반대다**★ — 그쪽은 모르는 값을 세션 이름으로 재해석해 종료코드 `0` 으로 새 대화를 연다(§2.5 codex) | **에러** `-32600` `no rollout found for thread id` — 조용히 새 대화를 열지 않는다 (실측). ★**`-32600` 을 「모르는 스레드」 신호로 쓰면 안 된다**★ — 설정 로딩 실패 등 다른 잘못된 요청도 같은 코드다. 메시지를 봐야 가른다. ★**터미널 모드의 `codex resume <값>` 은 이와 정반대다 — §2.5 codex 를 볼 것**★ |
 | **cwd 가 다르면** | 미확인 | **이어진다.** 정체성은 워크스페이스가 아니라 `CODEX_HOME`(`~/.codex`) 단위다. 응답의 `cwd` 는 **스레드에 기록된 원래 cwd** (실측) |
 | **시간 만료** | 미확인 | **없다** — 3개월·13 마이너 버전 전 스레드가 그대로 resume 됐다 (실측). 흔히 인용되는 30분은 만료가 아니라 **메모리 언로드 유예**다 (문서) |
 | **세션 목록 조회** | 미확인 (`~/.claude/projects/**/*.jsonl` 파일 스캔이 통용되는 우회) | **있다 — `thread/list`.** 커서 페이지네이션 + `cwd`·`archived`·`searchTerm` 등 필터 (소스·실측) |
-| **id 를 잃었을 때 회수** | 미확인 | **부분적으로만.** `thread/list` → `thread/resume` 입양이 되고 codex 자신도 데몬 복구에 그 쌍을 쓴다 (소스). ★**단 크래시 창은 이걸로 못 메운다**★ — 아래 참조 |
+| **id 를 잃었을 때 회수** | 미확인 | **부분적으로만.** `thread/list` → `thread/resume` 입양이 되고 codex 자신도 데몬 복구에 그 쌍을 쓴다 (소스). ★**단 크래시 창은 이걸로 못 메운다**★ — 아래 참조. ★**도는 프로세스라면 OS 에 물어 알 수 있다**★ — writer 락의 홀더가 그 프로세스다(§2.5 codex) |
 | **디스크 위치** | `~/.claude/projects/<경로>/<uuid>.jsonl` (관측) | `$CODEX_HOME/sessions/<YYYY>/<MM>/<DD>/rollout-<타임스탬프>-<uuid>.jsonl`. 첫 줄 `session_meta` 가 권위 (실측) |
 | **파일명에서 id 복원** | ★**깨진 사례가 있다**★ — 최근 claude 는 transcript 파일명 UUID 가 hook 이 보고한 session_id 와 **다르다**(orca 주석에 박제) | 대체로 되지만 **`thread/revert` 는 스레드 id 를 유지한 채 다른 rollout id 로 새 파일을 만든다** — 권위는 파일명이 아니라 `session_meta.id` (소스) |
 
@@ -75,7 +75,14 @@
 
 | 사실 | 근거 |
 |---|---|
-| **터미널 모드는 세션 개념이 없다** — 그냥 PTY 다. 이어붙이기·되울림 둘 다 해당 없음 | 소스 |
+| **터미널 모드에도 스레드는 있다 — 없는 것은 그것을 말해 주는 채널이다.** 이어붙이기는 `codex resume <thread id>` 하위 명령으로 된다(실측 0.155.0 — 같은 id 가 보존되고 기록이 이어 붙는다). 되울림은 해당 없음 | 소스·실측 |
+| ★**도는 스레드의 id 를 OS 에 물어 알 수 있다**★ — codex 프로세스가 `$CODEX_HOME/thread-writer-locks/<thread id>.lock` 을 **열어 쥔 채로** 돈다. 홀더는 `codex.exe` 자신이고 래퍼가 아니며, 파일은 0바이트라 이름만이 정보다. 기동 후 0.735·0.879·0.907·1.891 초에 생긴 것을 쟀고(재현 안 된 21 초 사례 하나) **첫 턴 이전**이다 | 실측 2026-09-21 (0.155.x) |
+| **죽은 락과 산 락이 구분된다** — 소유 프로세스를 죽인 뒤 같은 파일을 물으면 홀더 0 이다. codex 자신도 기동 때 죽은 락을 쓸어낸다. 관리자 권한은 필요 없다 | 실측 2026-09-21 |
+| **`CODEX_HOME` 은 건 프로세스에만 적용된다** — 위 락 폴더도 그 홈 아래로 따라 옮겨 간다. 락 폴더 이름·배치는 **문서화돼 있지 않다** — 상류가 바꾸면 오류가 아니라 조용히 후보 0 이 된다 | 실측 |
+| ★**기록 쪽에는 PID 가 없다**★ — rollout JSONL · `state_5.threads` 40개 칼럼 · `sandbox.*.log` 어디에도 pid·ppid·tty·host·명령줄·환경변수가 없다(전수 훑기). 디스크 기록만 읽어서는 「이 스레드가 우리 자식의 것인가」를 만들 수 없다 | 실측 2026-09-21 |
+| **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`** — 상류가 문서화하지 않은 내부 변수. 건 값이 세션 기록의 `originator` 칸에 그대로 남는다(임의 문자열 3종 · allowlist 거절 없음). 없어지면 오류가 아니라 조용한 무시 | 실측 (0.155.1) |
+| **`developer_instructions` 로 넘긴 텍스트는 rollout 에 verbatim 으로 남는다** — 단 sqlite 쪽에는 안 간다 | 실측 2026-09-21 |
+| ★**`codex resume <값>` 은 틀려도 실패하지 않는다**★ — 스레드 id 로 못 읽는 문자열을 주면 그것을 **세션 이름**으로 재해석해 **새 세션을 조용히 만들고** 종료 코드 `0` 으로 끝나며 턴이 과금된다. app-server 의 `thread/resume`(모르는 id → `-32600` 에러)과 **정반대 성질**이라 두 모드를 같은 규칙으로 다루면 안 된다 | 실측 2026-09-21 |
 | `thread/start` 파라미터 = `threadId` 없이 `cwd` · `approvalPolicy` · `sandbox` · `clientUserMessageId` · `input` · `turnTrigger` · `toolOutput` · (턴 단위 cwd 덮어쓰기) | 소스 (0.154.0 스키마) |
 | `thread/resume` 는 `threadId` 만 필수. 선택 인자 다수 — `cwd` · `model` · `sandbox` · `approvalPolicy` · `excludeTurns` · `initialTurnsPage` · `personality` 등 | 소스 |
 | `excludeTurns: true` = `thread.turns` 를 안 채우고 메타데이터와 live-resume 상태만 준다. **이력 전량 하이드레이션은 deprecated** 이고 `thread/turns/list`·`thread/items/list` 와 함께 쓰라고 스키마가 안내한다 | 소스 |
@@ -111,6 +118,8 @@
 - **같은 스레드를 둘이 동시에 열면** 어떻게 되나 — 소유권 규칙 미확인.
 - **rollout 파일이 손상·누락됐을 때** 의 동작 미확인.
 - **재시작 후 `CODEX_HOME` 이 달라지면** 이어붙이기가 통째로 실패한다 — 우리가 그 값을 고정하고 있는지 확인 안 했다.
+- **한 codex 프로세스가 writer 락을 둘 이상 쥐는 경우가 있나** — 미측정. 이 값이 「없다」로 확정되기 전에는 락 홀더로 스레드를 고르는 쪽이 그 경우를 거절해야 한다.
+- **`codex exec` 가 writer 락을 만드나** — 미측정(우리 경로는 TUI 라 당장은 무관).
 - **hosted/cloud 백엔드가 비-UUID thread id 를 주나** — 로컬 app-server 는 비-UUID 를 거부하지만 벤더 주석이 「codex 가 발급한 id 는 UUIDv7」로 한정한다.
 - **rollout 파일 정리(GC)·보존 정책** — 「만료 없음」은 성공 1회에 근거한 하한이다.
 

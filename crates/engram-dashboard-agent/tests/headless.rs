@@ -111,6 +111,8 @@ impl ControlChannel for CountingControl {
             .push(needs.accepts_mcp_config);
         self.live.lock().unwrap().insert((id, epoch));
         Ok(Some(ControlEndpoint {
+            agent_id: id,
+            epoch,
             url: "http://127.0.0.1:1/mcp".into(),
             token: format!("tok-{id}-{epoch}"),
             // ADR-0099: config_path 는 Option — 이 테스트 double 은 MCP 채널 물리를 검증하지 않으므로 None.
