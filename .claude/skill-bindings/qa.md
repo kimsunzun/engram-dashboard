@@ -81,6 +81,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 - 즉시 `PID=`·`LOG=`·`BAT=`을 찍고 돌아온다 — **반환 = 시작했다는 뜻이지 끝났다는 뜻이 아니다.**
 - ★**완료 판정 = 로그 마지막 줄의 `__EXIT=<종료코드>` 마커**★ — 그 마커가 나타날 때까지 폴링한다. **프로세스가 사라진 것으로 판정하지 말 것**(래퍼 `cmd`가 자식보다 먼저 빠질 수 있다). PASS/FAIL은 그 종료코드로 가른다.
 - **예외 — vitest(`npm test`)는 `__EXIT`가 안정적으로 안 붙는다**(자식이 래퍼보다 오래 산다). 그 줄만 **로그에 찍힌 vitest 자신의 pass/fail 요약**으로 판정한다.
+- ★**반대 방향의 함정 — `npx tsc --noEmit`은 예외가 아니라 마커에 *더* 의존한다**★(실측 2026-09-21). **tsc는 통과하면 아무것도 안 찍는다** — 그래서 **「안 돈 것」과 「통과」가 둘 다 빈 로그**라 내용으로는 가를 수 없다. 게다가 `npx`는 `npx.cmd`라 래퍼 `.bat`이 **`call` 없이 부르면 제어가 넘어간 채 돌아오지 않아 `__EXIT` 줄이 아예 안 찍힌다**(배치 파일이 다른 배치를 부를 때의 cmd 규칙). **그 조합이 곧 false PASS다** — 빈 로그를 통과로 읽는 것. 그러므로 ① 명령을 **`call npx tsc --noEmit`**으로 넘기고 ② 판정은 **`__EXIT` 마커로만** 한다. ★**빈 로그 + 마커 없음 = 실행 실패이지 통과가 아니다.**★ 위 vitest 줄만 이름으로 적혀 있던 옛 형태는 **더 위험한 쪽을 빠뜨린 것**이었다.
 - 판정이 끝나면 로그를 읽되 **필요한 줄만 인용한다** — 출력이 파일로 떨어지는 덕에 빌드 로그 전체를 삼키지 않아도 된다.
 - **`rg`·`cargo tree` 격리 게이트처럼 출력이 몇 줄뿐인 단발 조회는 굳이 감쌀 필요가 없다** — 그대로 받아도 컨텍스트를 먹지 않고 판정도 그 몇 줄로 끝난다. 다만 감싸도 무해하니, 애매하면 감싼다.
 - **§full의 「앱을 셸에서 직접 띄우지 않는다」와 같은 규칙이다** — 앱·빌드·테스트, **우리가 띄우는 것은 전부 프로세스 트리 밖 + 출력은 파일로만.** 대상별 절차만 다르다(앱 = `launch-detached.ps1`, 빌드·테스트 = `run-detached.ps1`).
@@ -97,7 +98,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
   - ★**버전 경계 — 다시 만나면 여기부터 본다**★: dated release는 `20240203`까지 **버그판**이고(이 머신에 설치돼 있던 것 = `20240203-110809-5046fc22`, 수정보다 두 해 이상 오래됐다), 수정은 **2026-06-07**에 들어갔으며 그 뒤 dated release가 없어 **nightly에만 실린다.** **`wezterm-gui.exe`에서 `0xc00000fd`를 또 만나면 가장 먼저 확인할 것 = 지금 돌고 있는 wezterm 빌드가 무엇인가.**
   - **적용된 해법:** nightly `20260819-012343-33891b4a`를 `I:\Engram\tools\wezterm_new\`에 풀어 그것으로 쓰고 있다(config·런처 동봉 — 런처는 자기 폴더 기준 상대 경로). 옛 폴더 `I:\Engram\tools\wezterm\`는 손대지 않아 2024 빌드 그대로다.
 
-**프론트 게이트 확정 절차:** ① `npm test`(package.json `scripts.test` = `vitest run`). ② 타입체크는 `npm run typecheck`가 있으면 우선, **없으면 `npx tsc --noEmit`**(현재 package.json엔 typecheck 스크립트 없음 → `npx tsc --noEmit`). ③ 스크립트가 아예 없으면 실행하지 말고 package.json 실제 스크립트명을 사용자에게 보고한다. **프론트 린트 게이트는 정본(CLAUDE.md·package.json)에 없음 — 임의로 lint를 추가하지 않는다.**
+**프론트 게이트 확정 절차:** ① `npm test`(package.json `scripts.test` = `vitest run`). ② 타입체크는 `npm run typecheck`가 있으면 우선, **없으면 `npx tsc --noEmit`**(현재 package.json엔 typecheck 스크립트 없음 → `npx tsc --noEmit`). ③ 스크립트가 아예 없으면 실행하지 말고 package.json 실제 스크립트명을 사용자에게 보고한다. **프론트 린트 게이트는 정본(CLAUDE.md·package.json)에 없음 — 임의로 lint를 추가하지 않는다.** ★**`npx tsc --noEmit`의 완료 판정은 위 「분리 실행」의 tsc 항목을 따른다 — 빈 로그를 통과로 읽지 말 것.**★
 
 ### quick — 영향 crate만
 
