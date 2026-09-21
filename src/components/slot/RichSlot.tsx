@@ -13,8 +13,9 @@
 //   이벤트로 흘리므로 프론트는 라인 재조립을 안 하고 이벤트 1건씩 소비한다. tag0(터미널 바이트)이 이 슬롯에
 //   오면 무시한다(구조화 슬롯이라 렌더 대상 아님 — tag 게이트).
 //
-// ★빈 상태(ADR-0145)★: 복원 완료 신호('live') + 0건 + 미전송일 때만 표식·제품명·가운데
-//   입력창을 그린다. 판정에만 개입하고 구독·누산·전송 경로는 건드리지 않는다. 입력창은 두 배치가
+// ★빈 상태(ADR-0145)★: 복원 완료 신호('live') + 0건 + 미전송 + **codex 재개 대기 아님**일 때만 표식·
+//   제품명·가운데 입력창을 그린다(넷째 항이 codex 에만 걸리는 사유는 아래 showEmpty 주석 — 두 백엔드의
+//   세션 id 의미가 반대다). 판정에만 개입하고 구독·누산·전송 경로는 건드리지 않는다. 입력창은 두 배치가
 //   같은 엘리먼트다(전송·IME·포커스 가드를 한 벌로 유지 — 갈라 두지 말 것).
 //
 // ★백엔드 표기★: 제목·표식·색조 셋이 claude 와 codex 를 가른다(정의처 = richBranding.ts). 표기는
@@ -287,7 +288,26 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   // ADR-0145: 빈 상태 = 복원 완료 신호 + 0건 + 이 구독에서 아직 안 보냄. 0건만 보고 그리면 이력이 있는
   //   세션도 복원이 끝나기 전엔 0건이라 안내가 떴다가 대화로 바뀐다(깜빡임). hasSent 를 함께 보는 이유 =
   //   첫 전송 직후 items 가 채워지기 전 구간도 이미 "대화 시작"이라 빈 상태가 아니다.
-  const showEmpty = replayDone && !hasSent && items.length === 0
+  // ★codex 가 이어받을 세션을 들고 있으면 빈 상태를 억제한다★: `replayDone`('live')은 **데몬이 자기
+  //   링을 다 흘려보냈다**는 뜻이지 **백엔드가 이력을 복원했다**는 뜻이 아니다. claude 는 재개 이력을
+  //   자식 공개 **전에** 링에 심어 두므로 링이 빌 틈이 없지만, codex 는 그 심기를 안 한다 — 이력이
+  //   spawn **뒤** thread/resume + thread/items/list 왕복으로 온다. 그 창이 "live + 0건"이라 마스코트가
+  //   번쩍였다가 대화로 뒤집힌다(화면 실측).
+  // ★backend 검사를 빼고 "단순화" 하지 말 것 — 두 백엔드가 이 칸을 반대 뜻으로 채운다★:
+  //   claude 는 세션 id 를 **우리가 발급**해 Fresh 스폰 순간 새 uuid 가 박힌다 → "id 가 있다"가 대화의
+  //   존재를 전혀 뜻하지 않고, 억제를 거기까지 넓히면 **갓 띄운 claude 에이전트 전부**가 첫 실행 화면을
+  //   잃는다. codex 는 반대로 상대가 발급하고 Fresh 스폰이 그 칸을 **비우고** 시작하므로, 지금 id 가
+  //   있다는 것은 이어받을 대화가 있다는 뜻이다. 두 backend 를 가르는 그 축의 정본 =
+  //   `AgentBackend::assigns_session_id`(claude=true · codex=false).
+  // ★대가는 알고 받는다(사용자 결정)★: codex 재개가 실패했거나 복원된 이력이 정말 0건이면 그 슬롯엔
+  //   표식·제품명이 아예 안 뜬다(입력창은 그대로 동작한다). 지금은 수용한다 — 「백엔드 복원이 끝났다」는
+  //   신호가 생기면 그때 그 경우의 첫 실행 화면을 되살린다. ★"이력 없는 codex 슬롯에 마스코트가 안 뜬다"
+  //   를 결함으로 보고 이 항을 떼지 말 것 — 떼면 깜빡임이 그대로 돌아온다.★
+  // ★백엔드를 묻는 두 번째 방법을 만들지 않는다★ — 표기가 이미 보는 그 한 칸(command.kind)을 그대로
+  //   쓴다. 그래서 claude·Shell·미지 종류·프로필 부재(ad-hoc 세션 · 프로필을 안 채우는 mock)는 전부
+  //   종전 동작으로 떨어진다 — richBranding 의 "모르면 claude" 기본값 규약이 여기까지 한 몸으로 간다.
+  const codexHasStoredSession = branding.brand === 'codex' && profile?.backend_session_id != null
+  const showEmpty = replayDone && !hasSent && items.length === 0 && !codexHasStoredSession
 
   return (
     <div
