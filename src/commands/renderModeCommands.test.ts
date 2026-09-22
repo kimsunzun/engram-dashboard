@@ -54,6 +54,17 @@ describe('렌더 모드 command 라우팅', () => {
     expect(override()['s1']).toBe('terminal')
   })
 
+  // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: store 에 박히는 것은 호출자가 쓴
+  //   철자가 아니라 RENDER_MODES 의 원소다 — 아니면 ViewLayoutRenderer 의 switch 가 조용히 terminal 로 떨군다.
+  it('mode 대소문자 무관 수용 → 선언 철자로 정규화해 기록', () => {
+    run('slot.renderMode.set', { slotId: 's1', mode: 'RICH' })
+    expect(override()['s1']).toBe('rich')
+    run('slot.renderMode.set', { slotId: 's1', mode: 'Terminal' })
+    expect(override()['s1']).toBe('terminal')
+    run('slot.renderMode.set', { slotId: 's1', mode: 'DoM' })
+    expect(override()['s1']).toBe('dom')
+  })
+
   it('slot.renderMode.clear → 그 slot 항목만 제거(다른 slot 불변)', () => {
     run('slot.renderMode.set', { slotId: 's1', mode: 'dom' })
     run('slot.renderMode.set', { slotId: 's2', mode: 'rich' })

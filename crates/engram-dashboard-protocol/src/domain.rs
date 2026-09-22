@@ -199,12 +199,46 @@ pub enum AgentSpawnCommand {
 /// 기본값이 곧 「요청한 것과 다른 에이전트가 떴다」가 된다.
 /// ★철자가 lowercase 인 이유★: 이 값은 invoke 표면(`spawn_into` 의 `backend` 인자)에서 오는 문자열과
 /// 같은 낱말이어야 하고 그 자리는 이미 `"claude"` 로 적혀 있었다(형제 `EnvelopeFormat` 과 같은 사유).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+/// ★받는 철자는 대소문자를 가리지 않는다 · **내보내는 철자는 lowercase 하나뿐이다**★: 이 칸을 채우는
+/// 것은 사람·LLM 이 손으로 친 낱말이고(`agent.spawnInto` 의 `backend`, 프론트의 `SpawnByCwd`) 거기서
+/// `Claude` 는 오타가 아니라 같은 뜻이다. 반대로 내보내는 쪽을 넓히면 `agents.json` 과 ts-rs 유니온이
+/// 갈리므로 [`Serialize`](serde::Serialize) 는 derive 그대로 둔다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
 pub enum AgentBackendKind {
     Claude,
     Codex,
+}
+
+impl AgentBackendKind {
+    /// wire 낱말 전량 — ★철자가 적히는 곳은 여기 하나다★. 반려 문구의 기대값이 이 배열 그대로이고
+    /// (`parse_backend` 가 그 문구를 실어 나른다) 아래 `ALL` 도 여기서 낱말을 꺼낸다.
+    /// `#[serde(rename_all = "lowercase")]` 이 내보내는 철자와 같아야 하며, 그 일치를 재는 자리 =
+    /// `tests::backend_kind_serializes_exactly_the_declared_words`.
+    const WORDS: &'static [&'static str] = &["claude", "codex"];
+
+    /// (변형, wire 표기) 짝 — 역직렬화가 낱말에서 변형으로 되돌아오는 유일한 표.
+    const ALL: &'static [(AgentBackendKind, &'static str)] = &[
+        (AgentBackendKind::Claude, Self::WORDS[0]),
+        (AgentBackendKind::Codex, Self::WORDS[1]),
+    ];
+}
+
+/// ★`String` 으로 받는다(`&str` 로 좁히지 말 것)★ — 형제 [`AgentFailureKind`] 와 같은 사유: 이스케이프가
+/// 하나라도 있으면 serde_json 이 scratch 경로로 빠져 빌린 `&str` 이 실패하고 **메시지 전체**가 깨진다.
+/// ★모르는 낱말은 흡수하지 않고 반려한다★ — 그 형제와 갈리는 지점이다: 여기서 접으면 요청한 것과 다른
+/// 백엔드가 조용히 뜬다(이 타입 doc 의 「부재의 뜻 = 오류」와 같은 결정).
+impl<'de> serde::Deserialize<'de> for AgentBackendKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = <String as serde::Deserialize>::deserialize(d)?;
+        let folded = raw.to_ascii_lowercase();
+        AgentBackendKind::ALL
+            .iter()
+            .find(|(_, word)| *word == folded)
+            .map(|(kind, _)| *kind)
+            .ok_or_else(|| serde::de::Error::unknown_variant(&raw, AgentBackendKind::WORDS))
+    }
 }
 
 /// **예약(reserved) — 죽은 필드 아님.** 동작 미구현이나 ADR-0016 "추후 재검토" 유효(2026-06-18 결정).
@@ -431,5 +465,52 @@ mod tests {
                 "{json}"
             );
         }
+    }
+
+    /// 손으로 친 낱말은 대소문자를 가리지 않는다 — `agent.spawnInto` 의 `backend` 와 프론트의
+    /// `SpawnByCwd` 가 사람·LLM 이 친 문자열을 그대로 싣는다.
+    #[test]
+    fn backend_kind_accepts_any_casing() {
+        for (raw, want) in [
+            ("claude", AgentBackendKind::Claude),
+            ("Claude", AgentBackendKind::Claude),
+            ("CLAUDE", AgentBackendKind::Claude),
+            ("codex", AgentBackendKind::Codex),
+            ("Codex", AgentBackendKind::Codex),
+            ("CODEX", AgentBackendKind::Codex),
+        ] {
+            let got: AgentBackendKind =
+                serde_json::from_value(serde_json::Value::String(raw.to_string()))
+                    .unwrap_or_else(|e| panic!("'{raw}' 는 받아야 한다: {e}"));
+            assert_eq!(got, want, "{raw}");
+        }
+    }
+
+    /// 관용은 **철자**에만 든다 — 모르는 낱말은 그대로 반려하고, 문구가 기대 낱말을 나열한다.
+    #[test]
+    fn backend_kind_still_rejects_a_word_it_does_not_know() {
+        let err = serde_json::from_value::<AgentBackendKind>(serde_json::Value::String(
+            "codx".to_string(),
+        ))
+        .expect_err("모르는 낱말은 반려");
+        let text = err.to_string();
+        assert!(text.contains("codx"), "{text}");
+        assert!(text.contains("claude") && text.contains("codex"), "{text}");
+    }
+
+    /// 내보내는 철자는 안 바뀐다 — `agents.json` 과 ts-rs 유니온이 이 값을 읽는다.
+    #[test]
+    fn backend_kind_serializes_exactly_the_declared_words() {
+        for (kind, word) in AgentBackendKind::ALL {
+            assert_eq!(
+                serde_json::to_value(kind).expect("직렬화"),
+                serde_json::Value::String((*word).to_string())
+            );
+        }
+        assert_eq!(
+            AgentBackendKind::ALL.len(),
+            AgentBackendKind::WORDS.len(),
+            "낱말 표와 짝 표가 갈렸다"
+        );
     }
 }

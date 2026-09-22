@@ -9,6 +9,7 @@ import type { AgentProfile, AgentOutputFormat } from '../api/types'
 import { agentClient } from '../api/clientFactory'
 import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
+import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
 
@@ -50,10 +51,14 @@ async function createReservedCodexProfile(outputFormat: AgentOutputFormat) {
 // ★ADR-0078★: AgentOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
 //   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이
 //   아니면 조용한 no-op·백엔드 전달 대신 명시 throw(잘못된 값 포함 — §5 LLM/cdp 디버깅).
+// ★대소문자는 호출자 자유이고 나가는 값은 아니다★: 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되는
+//   어긋남을 없앤다(사용자 결정 2026-09-23 — Rust 쪽 `AgentBackendKind` 역직렬화·명령 버스 enum 접기와
+//   같은 결정). 여기서 접은 뒤 나가는 것은 언제나 아래 선언 철자라 wire 값은 종전과 바이트 동일하다.
 const VALID_OUTPUT_FORMATS: readonly AgentOutputFormat[] = ['Terminal', 'StreamJson']
 function coerceOutputFormat(raw: unknown): AgentOutputFormat {
   if (raw === undefined || raw === null) return 'StreamJson'
-  if (VALID_OUTPUT_FORMATS.includes(raw as AgentOutputFormat)) return raw as AgentOutputFormat
+  const matched = matchDeclaredSpelling(raw, VALID_OUTPUT_FORMATS)
+  if (matched) return matched
   throw new Error(`agentlist.createAgent: 잘못된 outputFormat: ${String(raw)} (유효: 'Terminal' | 'StreamJson')`)
 }
 

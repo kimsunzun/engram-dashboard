@@ -1174,9 +1174,7 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        ToolGrant, TurnOutcome, CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
-    };
+    use crate::types::{ToolGrant, TurnOutcome, CLI_EXE_ENV};
 
     fn codex(extra_args: Vec<&str>) -> AgentCommand {
         AgentCommand::Codex {
@@ -1566,28 +1564,11 @@ mod tests {
                 "{label}: ENGRAM_CONTROL_URL = MCP url 에서 /mcp 를 벗긴 base"
             );
             assert_eq!(
-                env_value(&s, MAIL_MARKER_ENV),
-                Some(MAIL_MARKER_OFF),
-                "{label}: 우편 표식은 endpoint 가 실어 온 값 그대로(운영값 = off)"
-            );
-            assert_eq!(
                 env_value(&s, CLI_EXE_ENV),
                 Some("C:/engram/bin/engram.exe"),
                 "{label}: CLI 절대경로"
             );
         }
-    }
-
-    /// 표식은 **endpoint 가 실어 온 값**이지 이 백엔드가 파생하는 값이 아니다(ADR-0133 결정 2).
-    ///
-    /// ★그래서 운영값과 **반대**를 실어 잰다★: 여기서 파생을 하면 데몬 판정과 갈리는데, 운영값으로만
-    ///   재면 그 갈림이 안 보인다(두 값이 우연히 같아서 통과한다).
-    #[test]
-    fn the_mail_marker_follows_the_endpoint() {
-        let mut ep = endpoint();
-        ep.mail_allowed = true;
-        let s = spec_with_control(&codex(vec![]), Some(ep));
-        assert_eq!(env_value(&s, MAIL_MARKER_ENV), Some(MAIL_MARKER_ON));
     }
 
     /// ★`--mcp-config` 는 claude 의 플래그다 — 이쪽으로 새면 codex 가 모르는 인자로 기동에 실패한다★.

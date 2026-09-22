@@ -723,6 +723,7 @@ fn register(
     name: Option<String>,
     command: AgentCommand,
 ) -> Result<AgentProfile, CommandError> {
+    let cwd = &normalize_cwd(cwd);
     let mut profile =
         AgentProfile::new(cwd.to_string(), command, PathBuf::from(cwd), vec![], false);
     profile.display_name = name;
@@ -746,6 +747,29 @@ fn register(
         ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
     })
+}
+
+/// 손으로 친 작업 폴더의 **철자만** 고른다 — 감싼 따옴표 한 겹을 벗기고 `\` 를 `/` 로 옮긴다.
+///
+/// ★실재 확인이 아니다★ — 없는 폴더를 고쳐 주지 않고, 상대경로도 그대로 둔다. 실재 판정은 여전히 뒤에
+/// 있다(spawn 의 `dunce::canonicalize`).
+/// ★왜 필요한가★: 이 칸을 채우는 것은 사람·LLM 이고 Windows 경로는 `C:\work\thing` 으로 친다. 셸에서
+/// 온 값은 공백 때문에 `"…"` 로 감싸인 채 그대로 실려 오기도 한다. 둘 다 여기서 안 흡수하면 「폴더 이름이
+/// 통째로 이상한」 에이전트가 명부에 앉고, 그것을 지우는 동사가 없다(ADR-0122).
+/// ★따옴표는 **안이 빈 경우 벗기지 않는다**★ — 벗기면 비어 있지 않던 값이 빈 값이 되어, 이 함수 앞에
+/// 서 있는 빈 값 검문(`reject_blanks`)을 지난 뒤에 폴더가 사라진다.
+/// ★한 겹만 벗긴다★ — 두 겹은 호출자가 실수로 두 번 감쌌다는 뜻이고, 그것까지 조용히 삼키면 어느 쪽이
+/// 진짜 경로인지 우리가 추측하게 된다.
+pub fn normalize_cwd(raw: &str) -> String {
+    let unquoted = match raw.chars().next() {
+        Some(quote @ ('"' | '\'')) => raw
+            .strip_prefix(quote)
+            .and_then(|rest| rest.strip_suffix(quote))
+            .filter(|inner| !inner.is_empty())
+            .unwrap_or(raw),
+        _ => raw,
+    };
+    unquoted.replace('\\', "/")
 }
 
 fn verb_rename(
@@ -1457,6 +1481,98 @@ mod tests {
         assert_eq!(*notify.calls.lock().unwrap(), 1, "명부 변경을 알린다");
     }
 
+    // ── 손으로 친 낱말의 철자 ───────────────────────────────────────────────────────────────
+
+    /// 백엔드 낱말은 대소문자를 가리지 않는다 — 표를 거쳐 부르는 이 helper 가 그 조정이 도는 자리
+    /// (`CommandTable::call`)를 실제로 태운다.
+    #[test]
+    fn new_accepts_the_backend_word_in_any_casing() {
+        for word in ["claude", "Claude", "CLAUDE", "codex", "Codex", "CODEX"] {
+            let host = FakeHost::new();
+            let (table, _notify) = wiring(&host);
+
+            let out = call(
+                &table,
+                "agent.new",
+                json!({ "cwd": "C:/work/delta", "backend": word }),
+            )
+            .unwrap_or_else(|e| panic!("backend '{word}' 는 받아야 한다: {e:?}"));
+            assert_eq!(out["state"], "sleeping", "{word}");
+        }
+    }
+
+    /// 관용은 **철자**에만 든다 — 모르는 낱말은 그대로 반려한다.
+    #[test]
+    fn new_still_refuses_a_backend_word_it_does_not_know() {
+        let host = FakeHost::new();
+        let (table, _notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/work/delta", "backend": "codx" }),
+        )
+        .expect_err("모르는 낱말은 반려");
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    }
+
+    /// 내보내는 철자는 안 바뀐다 — 생성물(`bindings/commands.schema.json` 의 `"enum"`)이 이 값을 싣는다.
+    #[test]
+    fn the_declared_backend_words_still_serialize_in_pascal_case() {
+        assert_eq!(
+            serde_json::to_value(AgentBackend::Claude).expect("직렬화"),
+            json!("Claude")
+        );
+        assert_eq!(
+            serde_json::to_value(AgentBackend::Codex).expect("직렬화"),
+            json!("Codex")
+        );
+    }
+
+    #[test]
+    fn normalize_cwd_strips_one_quote_pair_and_turns_backslashes_around() {
+        for (raw, want) in [
+            (r"C:\work\thing", "C:/work/thing"),
+            (r#""C:\work\thing""#, "C:/work/thing"),
+            ("'C:/work/thing'", "C:/work/thing"),
+            ("C:/work/thing", "C:/work/thing"),
+            (r"\\server\share\thing", "//server/share/thing"),
+        ] {
+            assert_eq!(normalize_cwd(raw), want, "{raw}");
+        }
+    }
+
+    /// ★안 벗기는 셋★ — 짝이 안 맞는 따옴표(경로의 일부일 수 있다) · 안이 빈 짝(벗기면 빈 폴더가 된다) ·
+    /// 두 겹(어느 쪽이 진짜인지 우리가 추측하게 된다).
+    #[test]
+    fn normalize_cwd_leaves_quotes_it_cannot_safely_strip() {
+        assert_eq!(normalize_cwd(r#""C:/work/thing"#), r#""C:/work/thing"#);
+        assert_eq!(normalize_cwd(r#"'C:/work/thing""#), r#"'C:/work/thing""#);
+        assert_eq!(normalize_cwd(r#""""#), r#""""#);
+        assert_eq!(normalize_cwd(r#""#), r#""#);
+        assert_eq!(normalize_cwd(r#"""C:/work/thing"""#), r#""C:/work/thing""#);
+    }
+
+    /// 등록 공통부를 지나는 두 문(`agent.new` · `agent.spawn --cwd`)이 같은 철자를 명부에 앉힌다.
+    #[test]
+    fn a_windows_path_in_quotes_is_registered_with_the_normalized_spelling() {
+        for verb in ["agent.new", "agent.spawn"] {
+            let host = FakeHost::new();
+            let (table, _notify) = wiring(&host);
+
+            call(
+                &table,
+                verb,
+                json!({ "cwd": r#""C:\work\delta""#, "backend": "Claude" }),
+            )
+            .unwrap_or_else(|e| panic!("{verb}: {e:?}"));
+
+            let rows = host.rows.lock().unwrap();
+            assert_eq!(rows.len(), 1, "{verb}");
+            assert_eq!(rows[0].cwd, "C:/work/delta", "{verb}");
+        }
+    }
+
     /// 등록 실패는 사유마다 다른 코드로 나간다 — 호출자가 할 일이 갈리기 때문이다.
     #[test]
     fn registration_failures_map_to_distinct_codes() {
@@ -1629,10 +1745,19 @@ mod tests {
         .expect("명시");
         assert_eq!(format_of("typed"), CoreAgentOutputFormat::Terminal);
 
+        // 대소문자만 다른 철자는 어휘 밖이 아니다 — 선언된 철자로 옮겨져 통한다.
+        call(
+            &table,
+            "agent.new",
+            json!({ "cwd": "C:/x", "name": "folded", "output_format": "terminal", "backend": "Claude" }),
+        )
+        .expect("철자만 다른 값");
+        assert_eq!(format_of("folded"), CoreAgentOutputFormat::Terminal);
+
         let err = call(
             &table,
             "agent.new",
-            json!({ "cwd": "C:/x", "output_format": "terminal", "backend": "Claude" }),
+            json!({ "cwd": "C:/x", "output_format": "Ndjson", "backend": "Claude" }),
         )
         .expect_err("어휘 밖 값");
         assert_eq!(err.code(), ErrorCode::InvalidArgument);
@@ -1860,10 +1985,11 @@ mod tests {
             }
         }
 
-        // ★어휘 밖은 등록 전에 반려된다 — 소문자 철자도 여기 든다★(선언 어휘는 PascalCase 다).
+        // ★어휘 밖은 등록 전에 반려된다 — 단 **철자는 어휘 밖의 축이 아니다**★: 대소문자만 다른 낱말은
+        //   같은 낱말로 읽힌다(`new_accepts_the_backend_word_in_any_casing`).
         let host = FakeHost::new();
         let (table, notify) = wiring(&host);
-        for outside in ["Gemini", "Shell", "claude", "codex"] {
+        for outside in ["Gemini", "Shell", "codx"] {
             let err = call(
                 &table,
                 "agent.new",

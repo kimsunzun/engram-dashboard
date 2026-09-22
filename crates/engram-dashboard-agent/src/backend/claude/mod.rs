@@ -95,13 +95,12 @@ impl AgentBackend for ClaudeBackend {
         // ★이 값이 가르는 것 — 배선이 아니라 교육과 강제다(ADR-0133)★:
         //   - **배선은 전원에게 간다.** `engram` 실행파일·크레덴셜·PATH 는 MCP 가능 스폰에도 깔린다 —
         //     제어 동사가 전원 개방이고(ADR-0132 결정 5) 실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다.
-        //   - **교육만 갈린다.** 프라이밍 적재 여부와 우편 표식(`MAIL_MARKER_ENV`)이 이 값으로 갈려,
-        //     MCP 가능 스폰의 `engram help` 에는 우편 계열이 나오지 않는다. ★갈리는 것은 「어느 변형이냐」가
+        //   - **교육만 갈린다.** 프라이밍 적재 여부가 이 값으로 갈린다. ★갈리는 것은 「어느 변형이냐」가
         //     아니라 「싣느냐 마느냐」다★ — CLI 전용 사본은 커밋 `2ef6902` 에서 삭제됐고, 지금 프라이밍을
         //     받는 것은 MCP 가능 스폰뿐이다(비-MCP 는 지시서 0줄 — ADR-0209 결정 3).
         //   - **강제는 데몬 거절 하나뿐이다.** MCP 가능 스폰의 자격증명으로 온 우편 요청은 데몬이 거절한다.
-        // ★표식 필터를 강제로 세지 말 것★: 표식은 에이전트 자신의 env 라 떼면 목록에 우편이 보인다 —
-        //   그때도 막는 것은 데몬 거절뿐이므로, 거절을 지우고 표식만 남기면 우편이 열린다.
+        //     ★`engram help` 의 우편 화면은 이 값과 무관하게 열린다★ — 스폰 env 로 화면을 고르던 표식은
+        //     제거됐다(사용자 결정 2026-09-23). 되살리면 에이전트가 지울 수 있는 값이 화면을 정하게 된다.
         // ★못 쓰는 채널을 가르치면 ADR-0099 가 실측한 발신 freeze 가 재현된다★ — 프라이밍 적재와 우편
         //   가부는 반드시 같은 값에서 갈려야 한다(오늘 비-MCP 쪽은 **아무것도 안 가르쳐서** 그 등호가 선다).
         // ★이 플래그가 구현하는 살아 있는 불변식은 여전히 채널 단일화다(ADR-0128 결정 1)★: 우편 채널은
@@ -1138,9 +1137,7 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        CLI_EXE_ENV, CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
-    };
+    use crate::types::{CLI_EXE_ENV, CLI_EXE_NAME};
 
     // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
@@ -1407,12 +1404,7 @@ mod tests {
     #[test]
     fn claude_no_control_endpoint_no_cli_env() {
         let s = spec(&terminal(vec![]), SpawnMode::Fresh, None);
-        for key in [
-            "ENGRAM_TOKEN",
-            "ENGRAM_CONTROL_URL",
-            CLI_EXE_ENV,
-            MAIL_MARKER_ENV,
-        ] {
+        for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
             assert!(
                 !s.env.iter().any(|(k, _)| k == key),
                 "control 없으면 CLI env 없음({key}): {:?}",
@@ -1680,12 +1672,6 @@ mod tests {
             components.contains(&PathBuf::from("C:\\custom")),
             "프로필 PATH 가 tail 로 생존: {components:?}"
         );
-        assert_eq!(
-            env_value(&s, MAIL_MARKER_ENV),
-            Some(MAIL_MARKER_OFF),
-            "MCP 가능 스폰은 우편 표식이 off — 사용법에서 우편 계열을 감춘다: {:?}",
-            s.env
-        );
         assert!(
             s.args.iter().any(|a| a == "--mcp-config"),
             "MCP 갈래는 mcp-config 도 함께 받아야(배선과 배타가 아니다): {:?}",
@@ -1694,7 +1680,7 @@ mod tests {
     }
 
     #[test]
-    fn claude_non_mcp_spawn_gets_the_same_wiring_with_mail_marked_on() {
+    fn claude_non_mcp_spawn_gets_the_same_wiring() {
         let profile_env = vec![("PATH".to_string(), "C:\\custom".to_string())];
         let s = spec_with_env(&terminal(vec![]), Some(ep_cli_only()), profile_env);
         for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
@@ -1716,35 +1702,11 @@ mod tests {
             components.contains(&PathBuf::from("C:\\custom")),
             "프로필 PATH 가 tail 로 생존: {components:?}"
         );
-        assert_eq!(
-            env_value(&s, MAIL_MARKER_ENV),
-            Some(MAIL_MARKER_ON),
-            "비-MCP 스폰은 우편 표식이 on: {:?}",
-            s.env
-        );
         assert!(
             !s.args.iter().any(|a| a == "--mcp-config"),
             "비-MCP 갈래엔 mcp-config 없음: {:?}",
             s.args
         );
-    }
-
-    /// ★표식은 endpoint 가 실어 준 사실을 그대로 옮긴다 — backend 가 다른 필드에서 유도하지 않는다★:
-    ///   `config_path` 로 정책을 재파생하면 데몬 판정과 backend 판정 두 곳이 생겨 갈릴 수 있다.
-    #[test]
-    fn claude_mail_marker_follows_the_endpoint_not_the_mcp_config_field() {
-        let mcp_with_mail = ControlEndpoint {
-            mail_allowed: true,
-            ..ep()
-        };
-        let s = spec_with_control(
-            &terminal(vec![]),
-            SpawnMode::Fresh,
-            None,
-            Some(mcp_with_mail),
-        );
-        assert_eq!(env_value(&s, MAIL_MARKER_ENV), Some(MAIL_MARKER_ON));
-        assert!(s.args.iter().any(|a| a == "--mcp-config"));
     }
 
     // ── ADR-0092: 프라이밍 주입(`--append-system-prompt-file`) ──────────────────────────

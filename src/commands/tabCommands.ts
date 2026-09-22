@@ -7,6 +7,7 @@
 import { invoke } from '@tauri-apps/api/core'
 
 import { t } from '../i18n'
+import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
 import { readWindowLabelFromHash, useViewStore } from '../store/viewStore'
 
@@ -140,8 +141,10 @@ function optionalUuidArg(v: unknown, name: string): string | null {
   return v
 }
 
-/** SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063). */
-const SLOT_CONTENT_TYPES = new Set(['empty', 'agent', 'agent_list', 'preset_palette'])
+// SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063).
+// ★순서가 곧 선언 철자다★ — 호출자가 어떤 대소문자로 쓰든 백엔드로 나가는 태그는 이 배열의 원소로
+//   접힌다(사용자 결정 2026-09-23 — 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되던 어긋남 제거).
+const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette'] as const
 
 /**
  * ★SlotContent variant 형태 검증(FIX LOW)★: 태그(type)만 화이트리스트로 걸면 `{type:'agent'}` 처럼
@@ -176,16 +179,18 @@ register({
   run: args => {
     const viewId = args?.viewId
     const slotId = args?.slotId
-    const content = args?.content
+    const raw = args?.content
     if (typeof viewId !== 'string') throw new Error('[layout.setSlotContent] viewId 필요')
     if (typeof slotId !== 'string') throw new Error('[layout.setSlotContent] slotId 필요')
-    const type = (content as { type?: unknown } | undefined)?.type
-    if (typeof type !== 'string' || !SLOT_CONTENT_TYPES.has(type)) {
+    const type = matchDeclaredSpelling((raw as { type?: unknown } | undefined)?.type, SLOT_CONTENT_TYPES)
+    if (!type) {
       throw new Error(
-        `[layout.setSlotContent] content.type 이 SlotContent variant 여야 함(받음: ${JSON.stringify(content)})`,
+        `[layout.setSlotContent] content.type 이 SlotContent variant 여야 함(받음: ${JSON.stringify(raw)})`,
       )
     }
-    validateSlotContent(content as { type: string } & Record<string, unknown>)
+    // 접은 태그를 도로 얹는다 — 여분 필드(agent_id 등)는 호출자가 준 그대로 통과시키고 태그만 갈아낀다.
+    const content = { ...(raw as Record<string, unknown>), type }
+    validateSlotContent(content)
     return useViewStore
       .getState()
       .setSlotContent(viewId, slotId, content as import('../api/layoutTypes').SlotContent)

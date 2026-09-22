@@ -112,8 +112,12 @@ impl WindowHost for Windows {
     }
 }
 
-/// 스폰 요청 한 건 — cwd 와 그 답을 넣을 자리.
-type SpawnRequest = (String, oneshot::Sender<Result<String, String>>);
+/// 스폰 요청 한 건 — cwd · 고른 백엔드 · 그 답을 넣을 자리.
+type SpawnRequest = (
+    String,
+    Option<engram_dashboard_protocol::AgentBackendKind>,
+    oneshot::Sender<Result<String, String>>,
+);
 
 /// ★답을 **다른 태스크가** 넣어 줘야 끝난다★ — 데몬 왕복의 성질을 그대로 흉내낸다. 이게 있어야
 /// 「적용이 호출자 태스크를 붙들고 있나」를 잴 수 있다(가짜가 즉답하면 그 질문 자체가 사라진다).
@@ -125,13 +129,13 @@ impl AgentSpawner for DaemonSpawner {
     fn spawn_by_cwd<'a>(
         &'a self,
         cwd: String,
-        _backend: Option<engram_dashboard_protocol::AgentBackendKind>,
+        backend: Option<engram_dashboard_protocol::AgentBackendKind>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>>
     {
         Box::pin(async move {
             let (answer, wait) = oneshot::channel();
             self.requests
-                .send((cwd, answer))
+                .send((cwd, backend, answer))
                 .map_err(|_| "테스트 스폰 채널이 닫혔다".to_string())?;
             wait.await
                 .map_err(|_| "테스트 스폰 응답이 없다".to_string())?
@@ -986,12 +990,13 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
         world.mail.sink(request_id),
     );
 
-    let (cwd, answer) = tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
-        .await
-        .expect(
-            "호출자 태스크가 스폰 요청을 서비스하지 못했다 — 적용이 인라인으로 돈다(self-deadlock)",
-        )
-        .expect("스폰 요청이 온다");
+    let (cwd, _backend, answer) = tokio::time::timeout(
+        Duration::from_secs(5),
+        world.spawn_requests.recv(),
+    )
+    .await
+    .expect("호출자 태스크가 스폰 요청을 서비스하지 못했다 — 적용이 인라인으로 돈다(self-deadlock)")
+    .expect("스폰 요청이 온다");
     assert_eq!(cwd, "C:/work/engram");
     answer
         .send(Ok("agent-1".to_string()))
@@ -1001,6 +1006,88 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
     world.mail.settle(1).await;
     let ok = world.mail.only().outcome.expect("배치 성공");
     assert_eq!(ok["agent_id"], "agent-1");
+}
+
+/// ★이 문은 `agent.new` 의 등록 공통부를 안 지난다★ — 그래서 같은 철자 규칙을 여기서 따로 잰다.
+/// 백엔드 낱말은 wire enum 의 역직렬화가(`AgentBackendKind`), cwd 는 `normalize_cwd` 가 흡수한다.
+#[tokio::test]
+async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
+    for (word, want) in [
+        ("codex", engram_dashboard_protocol::AgentBackendKind::Codex),
+        ("Codex", engram_dashboard_protocol::AgentBackendKind::Codex),
+        ("CODEX", engram_dashboard_protocol::AgentBackendKind::Codex),
+        (
+            "Claude",
+            engram_dashboard_protocol::AgentBackendKind::Claude,
+        ),
+        (
+            "CLAUDE",
+            engram_dashboard_protocol::AgentBackendKind::Claude,
+        ),
+    ] {
+        let (mut world, ports) = World::build();
+        let receiver = InboundReceiver::new(
+            make_table(ports),
+            Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+            CATALOG_VERSION,
+        );
+
+        let request_id = RequestId::new();
+        receiver.on_command(
+            envelope(
+                "agent.spawnInto",
+                json!({
+                    "window": MAIN_WINDOW_LABEL,
+                    "cwd": r#""C:\work\engram""#,
+                    "backend": word,
+                }),
+                request_id,
+            ),
+            world.mail.sink(request_id),
+        );
+
+        let (cwd, backend, answer) =
+            tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{word}: 스폰까지 못 갔다"))
+                .expect("스폰 요청이 온다");
+        assert_eq!(cwd, "C:/work/engram", "{word}: cwd 철자가 안 옮겨졌다");
+        assert_eq!(backend, Some(want), "{word}: 다른 백엔드로 읽혔다");
+        answer
+            .send(Ok("agent-1".to_string()))
+            .expect("스폰 답을 넣는다");
+
+        world.mail.settle(1).await;
+        world.mail.only().outcome.expect("배치 성공");
+    }
+}
+
+/// 관용은 **철자**에만 든다 — 오탈자는 스폰 전에 반려된다(그 그물의 근거 = `apply::parse_backend`).
+#[tokio::test]
+async fn spawn_into_still_refuses_a_backend_word_it_does_not_know() {
+    let (mut world, ports) = World::build();
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+
+    let request_id = RequestId::new();
+    receiver.on_command(
+        envelope(
+            "agent.spawnInto",
+            json!({ "window": MAIN_WINDOW_LABEL, "cwd": "C:/work/engram", "backend": "codx" }),
+            request_id,
+        ),
+        world.mail.sink(request_id),
+    );
+
+    world.mail.settle(1).await;
+    error_of(world.mail.only());
+    assert!(
+        world.spawn_requests.try_recv().is_err(),
+        "반려된 낱말로 스폰이 나갔다"
+    );
 }
 
 // ── (B) 터져서 죽지 않는다 ───────────────────────────────────────────────────

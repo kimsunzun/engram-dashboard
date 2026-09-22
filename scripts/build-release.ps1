@@ -15,7 +15,7 @@
 #       갱신하지 않았는데도). manifest 를 고칠 땐 산출 디렉토리를 함께 확인할 것.
 #     - 데몬은 프라이밍 prompts/agent-priming.md 를 find_install_root(=릴리즈에선 exe 폴더) 기준
 #       상대해석한다(ADR-0092). 릴리즈 폴더엔 .git·[workspace] 마커가 없으므로 install_root = exe 디렉토리.
-#     - engram.exe 는 `engram help` 화면 본문 prompts/engram-cli-help.md 를 **같은 앵커**로 읽는다
+#     - engram.exe 는 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 읽는다
 #       (ADR-0092 계열 외부화). ★이 파일이 빠져도 help 는 죽지 않는다★ — 바이너리에 include_str! 사본이
 #       있어 내용은 그대로 나가고 stderr 에 사유 한 줄만 붙는다. 그래서 부재가 조용하고, 아래 tripwire 가
 #       그 침묵을 대신 잡는다(배송된 폴더의 본문이 낡은 사본으로 조용히 갈리는 것이 이 게이트의 표적).
@@ -47,7 +47,7 @@ $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
 
 # ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서. ──
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
-$ExpectedPrompts = @('agent-priming.md', 'engram-cli-help.md')
+$ExpectedPrompts = @('agent-priming.md', 'engram-help.md')
 
 function Fail([string]$msg) {
     Write-Host "[build-release] 실패: $msg" -ForegroundColor Red

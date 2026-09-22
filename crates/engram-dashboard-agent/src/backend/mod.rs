@@ -32,7 +32,7 @@ use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
     AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError, CLI_EXE_ENV,
-    CLI_EXE_NAME, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON, TOKEN_ENV,
+    CLI_EXE_NAME, TOKEN_ENV,
 };
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
@@ -59,7 +59,7 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
 // ── CLI 입구 주입(백엔드 공용) ────────────────────────────────────────────────
 
 /// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
-/// PATH 프리펜드 + 우편 가부 표식.
+/// PATH 프리펜드.
 ///
 /// ★여기 사는 이유 = 이 셋에 백엔드 지식이 하나도 없다(ADR-0004)★: 심는 것은 env 세 값과 PATH 뿐이고
 ///   그 어느 것도 특정 프로그램의 플래그·파일 규약이 아니다. 반대로 `--mcp-config` 같은 **번역**은 그
@@ -70,10 +70,10 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
 ///   실물이다.
 ///
 /// ★호출 조건 = control endpoint 가 있는 스폰 전부★: 제어 동사는 전원에게 열려 있고(ADR-0132 결정 5)
-///   실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다. 우편은 여기서 가리지 않는다 — 표식이 사용법을
-///   가리고(교육), 데몬이 자격증명으로 거절한다(강제).
-/// ★표식은 강제가 아니다★: 에이전트가 자기 env 를 지울 수 있으므로 표식을 뗀 프로세스는 우편 사용법을
-///   **본다**. 그때 막는 것은 데몬 거절뿐이라, 거절 없이 이 표식만으로 통제하려 들면 우편이 열린다.
+///   실행파일이 하나뿐이라 계열 단위로 갈라 깔 수 없다. 우편도 여기서 가리지 않는다 — 강제는 데몬의
+///   자격증명 거절 한 곳뿐이다(ADR-0133 결정 3).
+/// ★우편 가부를 env 로 실어 보내지 말 것★: 그 값은 에이전트 자신의 프로세스에 붙어 지울 수 있으므로
+///   강제를 하나도 못 하면서, 외부가 CLI 화면을 고르는 입구만 만든다(사용자 결정 2026-09-23).
 /// ★왜 env 인가★: 에이전트가 shell 로 그 명령을 부를 때 이 값을 읽어 데몬 제어 라우트에 Bearer
 ///   토큰으로 POST 한다. portable-pty CommandBuilder 가 부모 env 를 시드하므로 **모든 자식 프로세스
 ///   (Bash·그 손자)까지 상속**된다.
@@ -103,19 +103,6 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
         .to_string();
     env.push((TOKEN_ENV.to_string(), endpoint.token.clone()));
     env.push(("ENGRAM_CONTROL_URL".to_string(), base));
-    // ★두 값 다 명시로 싣는다(부재를 off 로 쓰지 않는다)★: 부재는 "스폰 밖" 을 뜻해 CLI 가 전부 보여
-    //   준다(`MAIL_MARKER_ENV`). 켜짐을 생략하면 두 뜻이 겹쳐, 표식을 못 실은 배선 사고가 정상 스폰과
-    //   구별되지 않는다.
-    // ADR-0133
-    env.push((
-        MAIL_MARKER_ENV.to_string(),
-        if endpoint.mail_allowed {
-            MAIL_MARKER_ON
-        } else {
-            MAIL_MARKER_OFF
-        }
-        .to_string(),
-    ));
     // ★ENGRAM_CLI_EXE = CLI 바이너리 절대경로(F1)★: 프라이밍과 grant 는 bare 실행파일 이름
     //   (`CLI_EXE_NAME` — 아래 PATH 주입으로 해석)을 가르치지만, 이 절대경로 env 도 함께 싣는다 —
     //   진단·수동 조작용이다(ADR-0094 의 이름 정렬 자체는 PATH 로 이룬다).
@@ -263,8 +250,8 @@ pub trait AgentBackend: Send + Sync {
     /// 프라이밍이 가르치는 우편 채널 **=** 그 스폰이 쓸 수 있는 우편 채널. 못 쓰는 채널을 가르치면
     /// 발신 freeze 가 재발하고, 쓸 수 있는데 안 가르치면 통제 없는 우회 표면이 남는다). true 면
     /// `DaemonControlChannel::provision` 이 MCP bits 를 endpoint 에 실으며 MCP-only 교육 프라이밍
-    /// (`eg_send` 만 — ADR-0126 결정 1)과 우편 불가 표식을, false 면 **프라이밍 미주입** + 우편 가능
-    /// 표식을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
+    /// (`eg_send` 만 — ADR-0126 결정 1)과 CLI 우편 불가를, false 면 **프라이밍 미주입** + CLI 우편
+    /// 가능을 고른다(ADR-0133). 제어 CLI 배선은 이 축과 무관하게 전원에게 간다.
     ///
     /// ★**mcp-config 파일 write 는 더 이상 이 칸이 가르지 않는다 — 이 문장을 되돌리지 말 것**★
     ///   (ADR-0209 · `control/mod.rs` 의 `writes_mcp_config_file` 게이트): 「우리가 쓴 파일을 읽나」가

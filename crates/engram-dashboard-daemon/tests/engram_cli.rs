@@ -10,9 +10,7 @@ use std::net::TcpListener;
 use std::process::Command;
 use std::thread;
 
-use engram_dashboard_agent::types::{
-    CLI_EXE_NAME, CLI_GROUP_MAIL, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
-};
+use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_MAIL};
 
 fn spawn_stub(response: &'static str) -> (String, u16, thread::JoinHandle<()>) {
     let (host, port, handle) = spawn_capturing_stub(response);
@@ -126,8 +124,6 @@ fn run_cli_bytes(control_url: &str, args: &[&str], stdin: &[u8]) -> (String, i32
         .args(args)
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
-        // 표식 부재 = 전부 보이는 표면(ADR-0133). 상속된 값이 화면을 갈라 놓지 않게 지운다.
-        .env_remove(MAIL_MARKER_ENV)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -151,7 +147,6 @@ fn run_cli(control_url: &str, args: &[&str], stdin: Option<&str>) -> (String, i3
         .args(args)
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
-        .env_remove(MAIL_MARKER_ENV)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -179,7 +174,6 @@ fn run_send(control_url: &str, to: &str, body: &str) -> (String, i32) {
         .args(["mail", "send", "--to", to, "--body", body])
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
-        .env_remove(MAIL_MARKER_ENV)
         .output()
         .expect("spawn engram CLI");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
@@ -636,23 +630,28 @@ fn engram_help_lists_groups_and_group_help_documents_its_verbs() {
     assert_eq!(bare_code, 0, "인자 없는 호출도 성공 종료: {bare}");
     assert_eq!(bare, stdout, "인자 없음 = help 와 같은 출력");
 
-    // 계열 화면은 개요 + 색인이고, 플래그는 그 동사의 하위 화면이 나른다.
-    let (mail, code) = run_cli(UNREACHABLE_URL, &["help", "mail"], None);
-    assert_eq!(code, 0, "계열 help 는 성공 종료: {mail}");
-    for token in ["send", "status", "pending", "recv"] {
-        assert!(mail.contains(token), "{token} 이 계열 help 색인에: {mail}");
+    // 계열 낱말 넷이 각각 자기 화면을 낸다 — 최상위 목록이 가리킨 곳에 실제로 화면이 있어야 한다.
+    for group in ["mail", "agent", "window", "theme"] {
+        assert!(
+            stdout.contains(&format!("{CLI_EXE_NAME} help {group}")),
+            "최상위 목록이 {group} 을 가리켜야: {stdout}"
+        );
+        let (screen, code) = run_cli(UNREACHABLE_URL, &["help", group], None);
+        assert_eq!(code, 0, "계열 help 는 성공 종료({group}): {screen}");
+        assert!(
+            screen.starts_with(&format!("{CLI_EXE_NAME} {group} ")),
+            "화면 머리가 자기 계열이어야({group}): {screen}"
+        );
+        assert_ne!(screen, stdout, "{group} 화면이 최상위와 같다");
     }
-    let (send, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
-    assert_eq!(code, 0, "하위 help 는 성공 종료: {send}");
-    for token in [
-        "--to",
-        "--body",
-        "--body-stdin",
-        "--request",
-        "--reply-by",
-        "--reply-to",
-    ] {
-        assert!(send.contains(token), "{token} 이 send 화면에: {send}");
+    // 계열 밑으로 한 칸 더 들어가는 자리는 없다 — 인자 오류로 끊고 계열 목록을 되돌려 준다.
+    let (deeper, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
+    assert_eq!(code, 1, "계열 다음 칸은 인자 오류: {deeper}");
+    for group in ["mail", "agent", "window", "theme"] {
+        assert!(
+            deeper.contains(group),
+            "반려가 계열 목록을 되돌려 줘야: {deeper}"
+        );
     }
 }
 
@@ -662,7 +661,6 @@ fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
         .args(args)
         .env_remove("ENGRAM_TOKEN")
         .env_remove("ENGRAM_CONTROL_URL")
-        .env_remove(MAIL_MARKER_ENV)
         .output()
         .expect("spawn engram CLI");
     (
@@ -686,10 +684,10 @@ fn engram_help_answers_before_any_credential_check_and_prints_plain_text() {
         vec!["help", "mail"],
         vec!["mail", "--help"],
         vec!["mail", "-h"],
-        vec!["help", "mail", "send"],
-        vec!["mail", "send", "--help"],
-        vec!["help", "mail", "recv"],
-        vec!["mail", "recv", "-h"],
+        vec!["help", "agent"],
+        vec!["agent", "--help"],
+        vec!["help", "window"],
+        vec!["help", "theme"],
     ] {
         let (stdout, code) = run_cli_without_credentials(&args);
         assert_eq!(
@@ -729,33 +727,32 @@ fn conventional_help_spellings_render_the_same_screens() {
         assert_eq!(code, 0);
         assert_eq!(out, canonical_root, "계열 목록 화면이 같아야: {alias:?}");
     }
-    let (canonical_mail, _) = run_cli_without_credentials(&["help", "mail"]);
-    for alias in [vec!["mail", "--help"], vec!["mail", "-h"]] {
-        let (out, code) = run_cli_without_credentials(&alias);
-        assert_eq!(code, 0);
-        assert_eq!(out, canonical_mail, "계열 help 화면이 같아야: {alias:?}");
-    }
-    assert_ne!(canonical_root, canonical_mail, "두 화면은 서로 달라야");
-
-    // 하위 화면도 같은 규칙이다. ★이름 목록을 여기 손으로 적는 이유★: 통합 테스트는 실 exe 를 돌리므로
-    //   bin 안의 `MailTopic` 을 못 본다 — 개요가 색인한 이름과 어긋나면 아래 첫 단언이 잡는다.
-    for sub in ["send", "status", "pending", "recv"] {
-        assert!(
-            canonical_mail.contains(&format!("{CLI_EXE_NAME} help mail {sub}")),
-            "개요가 하위 화면을 색인해야({sub}): {canonical_mail}"
-        );
-        let (canonical_sub, code) = run_cli_without_credentials(&["help", "mail", sub]);
-        assert_eq!(code, 0, "{sub}: {canonical_sub}");
-        assert_ne!(canonical_sub, canonical_mail, "개요와 달라야: {sub}");
-        for alias in [vec!["mail", sub, "--help"], vec!["mail", sub, "-h"]] {
+    // ★`<계열> --help` 철자를 갖는 것은 파서가 계열로 받는 둘뿐이다★: `window`·`theme` 은 데몬 쪽
+    //   `<계열> <동사>` 입구가 없어 `engram help <낱말>` 로만 닿는다.
+    let mut screens = vec![canonical_root.clone()];
+    for group in ["mail", "agent"] {
+        let (canonical, code) = run_cli_without_credentials(&["help", group]);
+        assert_eq!(code, 0, "{group}: {canonical}");
+        for alias in [vec![group, "--help"], vec![group, "-h"]] {
             let (out, code) = run_cli_without_credentials(&alias);
-            assert_eq!(code, 0, "{alias:?}: {out}");
-            assert_eq!(out, canonical_sub, "하위 화면이 같아야: {alias:?}");
+            assert_eq!(code, 0);
+            assert_eq!(out, canonical, "계열 help 화면이 같아야: {alias:?}");
+        }
+        screens.push(canonical);
+    }
+    for group in ["window", "theme"] {
+        let (canonical, code) = run_cli_without_credentials(&["help", group]);
+        assert_eq!(code, 0, "{group}: {canonical}");
+        screens.push(canonical);
+    }
+    for (i, a) in screens.iter().enumerate() {
+        for b in &screens[i + 1..] {
+            assert_ne!(a, b, "다섯 화면은 서로 달라야");
         }
     }
-    // 모르는 하위 주제는 오류로 남는다 — 개요로 조용히 되돌아가면 오타가 성공으로 읽힌다.
-    let (out, code) = run_cli_without_credentials(&["help", "mail", "inbox"]);
-    assert_eq!(code, 1, "모르는 하위 주제는 실패: {out}");
+    // 모르는 계열은 오류로 남는다 — 최상위로 조용히 되돌아가면 오타가 성공으로 읽힌다.
+    let (out, code) = run_cli_without_credentials(&["help", "inbox"]);
+    assert_eq!(code, 1, "모르는 계열은 실패: {out}");
 }
 
 #[test]
@@ -1478,7 +1475,6 @@ fn run_cli_streams(control_url: &str, args: &[&str]) -> (String, String, i32) {
         .args(args)
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", control_url)
-        .env_remove(MAIL_MARKER_ENV)
         .output()
         .expect("spawn engram CLI");
     (
@@ -1646,23 +1642,21 @@ fn the_static_help_points_at_the_catalog_without_fetching_it() {
     assert_eq!(v["code"], "NO_TOKEN", "{out}");
 }
 
-/// ★새 표면의 **우리 문구**가 감춘 계열을 가르치면 안 된다★.
+/// 발견 목록은 **데몬이 보낸 행**만 낸다 — 계열 이름이 화면에 나오는 자리는 그 행뿐이어야 한다.
 ///
 /// ★픽스처에 우편 이름이 실려 있는 것이 이 테스트의 요점이다★: 예전 판은 픽스처에 그 낱말이 아예 없어서
-///   **어떤 구현에서도** 통과했다(단언이 늘 참). 이제 목록에 `mail.send` 가 오므로, 우편이라는 낱말이 화면에
-///   나오는 자리는 **데몬이 보낸 그 행 하나뿐**이어야 한다 — 우리 chrome(머리글·구획 제목·안내)이 그 낱말을
-///   더하면 줄 수가 늘어 빨개진다.
+///   **어떤 구현에서도** 통과했다(단언이 늘 참). 이제 목록에 `mail.send` 가 오므로, 우리 chrome
+///   (머리글·구획 제목·안내)이 그 낱말을 더하면 줄 수가 늘어 빨개진다.
 /// ★표가 실어 온 이름을 지우지는 않는다★: 무엇이 실리느냐는 데몬 정책이고(그 질문은 별도로 파킹돼 있다),
 ///   목록에서 빼면 발견이 "있다" 를 말하지 않게 된다 — 이 CLI 가 고칠 층이 아니다.
 #[test]
-fn the_catalog_surface_never_teaches_the_hidden_mail_group_in_its_own_words() {
+fn the_catalog_surface_renders_only_the_rows_the_daemon_sent() {
     let (host, port, stub) = spawn_scripted_stub(vec![sample_catalog()]);
     let url = format!("http://{host}:{port}");
     let out = Command::new(env!("CARGO_BIN_EXE_engram"))
         .args(["commands"])
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", &url)
-        .env(MAIL_MARKER_ENV, MAIL_MARKER_OFF)
         .output()
         .expect("spawn engram CLI");
     let _ = stub.join().expect("stub join");
@@ -1684,127 +1678,93 @@ fn the_catalog_surface_never_teaches_the_hidden_mail_group_in_its_own_words() {
         "그 한 줄이 표가 실어 온 행이어야: {}",
         leaking[0]
     );
-
-    let (hidden_root, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &["help"]);
-    assert_eq!(code, 0);
-    assert!(
-        hidden_root.contains("commands"),
-        "발견 안내 줄은 표식과 무관하게 남는다: {hidden_root}"
-    );
-    assert!(
-        !hidden_root.contains(CLI_GROUP_MAIL),
-        "정적 화면은 여전히 감춘다: {hidden_root}"
-    );
 }
 
-// ── ADR-0133: 우편 표식 — 목록만 가리고 실행은 가리지 않는다(프로세스 레벨) ─────────────────────
+// ── ADR-0133: 우편은 데몬이 거절한다 — CLI 는 화면도 실행도 막지 않는다 ─────────────────────
 
-/// 표식 값을 명시해 돌린다. 크레덴셜은 주지 않는다 — 여기 케이스는 전부 파싱·렌더 단계에서 끝난다.
-fn run_cli_with_marker(marker: Option<&str>, args: &[&str]) -> (String, i32) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_engram"));
-    cmd.args(args)
+/// 크레덴셜을 **주지 않고** 돌린다 — 여기 케이스는 파싱·렌더 단계에서 끝난다.
+fn run_cli_bare(args: &[&str]) -> (String, i32) {
+    let out = Command::new(env!("CARGO_BIN_EXE_engram"))
+        .args(args)
         .env_remove("ENGRAM_TOKEN")
-        .env_remove("ENGRAM_CONTROL_URL");
-    match marker {
-        Some(v) => cmd.env(MAIL_MARKER_ENV, v),
-        None => cmd.env_remove(MAIL_MARKER_ENV),
-    };
-    let out = cmd.output().expect("spawn engram CLI");
+        .env_remove("ENGRAM_CONTROL_URL")
+        .output()
+        .expect("spawn engram CLI");
     (
         String::from_utf8_lossy(&out.stdout).to_string(),
         out.status.code().unwrap_or(-1),
     )
 }
 
-/// ★부재·모르는 값은 전부 보인다★: 사람이 스폰 밖 셸에서 여는 자리라 반쪽 사용법이 나오면 안 된다.
+/// ★우편 화면은 환경이 무엇을 싣고 있든 열린다★ — 스폰 env 로 화면을 고르던 표식은 제거됐고(사용자
+///   결정 2026-09-23), 그것을 되살리면 **에이전트 자신이 지울 수 있는 값**이 다시 화면을 정하게 된다.
+///
+/// ★두 조건을 나란히 재는 것이 요점이다★: 크레덴셜이 없는 사람 셸과 스폰된 에이전트가 **같은** 화면을
+///   받아야 한다. 한쪽만 재면 환경에 매인 분기가 되살아나도 초록이다.
+// ADR-0133
 #[test]
-fn only_the_explicit_off_marker_hides_the_mail_group_from_help() {
-    for marker in [None, Some(MAIL_MARKER_ON), Some("nonsense"), Some("")] {
-        let (out, code) = run_cli_with_marker(marker, &["help"]);
-        assert_eq!(code, 0, "help 는 성공 종료({marker:?}): {out}");
-        assert!(
-            out.contains(CLI_GROUP_MAIL),
-            "표식 {marker:?} 에서는 우편 계열이 보여야: {out}"
-        );
-    }
-    let (hidden, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &["help"]);
-    assert_eq!(code, 0, "표식 off 여도 help 자체는 성공: {hidden}");
-    assert!(
-        !hidden.contains(CLI_GROUP_MAIL),
-        "표식 off: 계열 목록에 우편이 없어야: {hidden}"
-    );
-    // 제어 계열은 표식과 무관하다(전원 개방 — ADR-0132 결정 5).
-    assert!(hidden.contains("agent"), "제어 계열은 그대로: {hidden}");
-    let (agent_help, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &["help", "agent"]);
-    assert_eq!(code, 0);
-    assert!(
-        !agent_help.contains(CLI_GROUP_MAIL),
-        "표식 off: 제어 계열 help 도 우편을 가르치지 않아야: {agent_help}"
-    );
-}
-
-/// 감춘 계열의 사용법 요청·**인자 오류**는 오타와 같은 반려(exit 1 + 봉투)로 끝난다. 하나라도 자기 사유를
-/// 돌려주면 두 연속 명령이 서로 모순되고, 동사 없는 호출의 반려는 감춘 화면보다 더 많이 가르친다.
-#[test]
-fn asking_for_the_hidden_mail_usage_is_refused_like_a_typo() {
-    for args in [
-        vec!["help", "mail"],
-        vec!["mail", "--help"],
-        vec!["mail", "-h"],
-        vec!["mail"],
-        vec!["mail", "wat"],
-        vec!["mail", "send"],
-        vec!["mail", "status"],
-        vec!["mail", "send", "--help"],
-        vec!["mail", "recv", "--help"],
-        vec!["help", "mail", "recv"],
+fn the_mail_screen_opens_whatever_the_environment_carries() {
+    let spawned = |args: &[&str]| -> (String, i32) {
+        let out = Command::new(env!("CARGO_BIN_EXE_engram"))
+            .args(args)
+            .env("ENGRAM_TOKEN", "test-token")
+            .env("ENGRAM_CONTROL_URL", UNREACHABLE_URL)
+            .output()
+            .expect("spawn engram CLI");
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            out.status.code().unwrap_or(-1),
+        )
+    };
+    for (label, run) in [
+        (
+            "크레덴셜 없음",
+            &run_cli_bare as &dyn Fn(&[&str]) -> (String, i32),
+        ),
+        ("스폰 크레덴셜", &spawned),
     ] {
-        let (out, code) = run_cli_with_marker(Some(MAIL_MARKER_OFF), &args);
-        assert_eq!(code, 1, "감춘 계열의 잘못된 호출은 반려({args:?}): {out}");
-        let v: serde_json::Value = serde_json::from_str(out.trim())
-            .unwrap_or_else(|e| panic!("반려는 봉투 JSON 이어야({args:?}): {e} — {out}"));
-        assert_eq!(v["code"], "BAD_ARGS", "{out}");
-        let hint = v["hint"].as_str().unwrap_or_default();
-        for leak in ["send", "status", "pending", "--to", "--body"] {
+        for args in [
+            vec!["help", CLI_GROUP_MAIL],
+            vec![CLI_GROUP_MAIL, "--help"],
+            vec![CLI_GROUP_MAIL, "-h"],
+        ] {
+            let (screen, code) = run(&args);
+            assert_eq!(
+                code, 0,
+                "{label}: 우편 화면은 성공 종료({args:?}): {screen}"
+            );
             assert!(
-                !hint.contains(leak),
-                "반려 문구가 감춘 계열의 내용물을 돌려주면 안 된다({leak}, {args:?}): {hint}"
+                screen.starts_with(&format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} ")),
+                "{label}: 화면 머리가 우편 계열이어야({args:?}): {screen}"
             );
         }
+        let (root, code) = run(&["help"]);
+        assert_eq!(code, 0, "{label}: help 는 성공 종료: {root}");
+        assert!(
+            root.contains(&format!("{CLI_EXE_NAME} help {CLI_GROUP_MAIL}")),
+            "{label}: 최상위 목록이 우편 화면을 가리켜야: {root}"
+        );
     }
-    // 대조군 — 같은 인자가 표식 없이는 화면·구체적 사유를 낸다(= 접기가 표식 때문이라는 증명).
-    let (shown, code) = run_cli_with_marker(None, &["help", "mail"]);
-    assert_eq!(code, 0, "표식 없으면 화면: {shown}");
-    assert!(shown.contains("help mail send"), "{shown}");
-    let (shown_send, code) = run_cli_with_marker(None, &["mail", "send", "--help"]);
-    assert_eq!(code, 0, "표식 없으면 하위 화면도: {shown_send}");
-    assert!(shown_send.contains("--to"), "{shown_send}");
-    let (verbless, code) = run_cli_with_marker(None, &["mail"]);
-    assert_eq!(code, 1);
-    assert!(
-        verbless.contains("send"),
-        "표식 없으면 동사 목록을 그대로 안내한다: {verbless}"
-    );
 }
 
-/// ★강제는 데몬 하나뿐이다(ADR-0133 §영향)★: 표식이 off 여도 발송은 **실제로 네트워크를 탄다** —
-///   여기서 막으면 데몬 거절이 관측되지 않고, 표식을 뗀 프로세스에선 아무도 막지 않게 된다.
+/// ★강제는 데몬 하나뿐이다(ADR-0133 §영향)★: 거절당할 자격증명으로 친 발송도 **실제로 네트워크를
+///   탄다** — 여기서 미리 끊으면 그 거절이 관측되지 않는다.
+// ADR-0133
 #[test]
-fn a_hidden_mail_verb_still_posts_to_the_daemon() {
+fn a_mail_verb_the_daemon_refuses_still_posts_and_surfaces_the_refusal() {
     let rejection = r#"{"status":"error","code":"MAIL_NOT_ALLOWED","hint":"This credential is not allowed to use mail. Retrying will not change that."}"#;
     let (host, port, stub) = spawn_capturing_stub(ok_response(rejection));
     let out = Command::new(env!("CARGO_BIN_EXE_engram"))
         .args(["mail", "send", "--to", "bob", "--body", "hi"])
         .env("ENGRAM_TOKEN", "test-token")
         .env("ENGRAM_CONTROL_URL", format!("http://{host}:{port}"))
-        .env(MAIL_MARKER_ENV, MAIL_MARKER_OFF)
         .output()
         .expect("spawn engram CLI");
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let request = stub.join().expect("stub thread");
     assert!(
         request.contains("POST /control/send"),
-        "표식 off 여도 요청은 나가야 — 로컬 차단이 아니다: {request}"
+        "요청은 나가야 — 로컬 차단이 아니다: {request}"
     );
     assert_eq!(
         out.status.code().unwrap_or(-1),
@@ -1815,55 +1775,4 @@ fn a_hidden_mail_verb_still_posts_to_the_daemon() {
         stdout.contains("MAIL_NOT_ALLOWED"),
         "거절 사유가 그대로 흘러야: {stdout}"
     );
-}
-
-/// ★파싱 뒤에 나는 반려도 접힌다(프로세스 레벨)★: 파서 반려만 보는 스위트가 못 잡던 갈래다 — 빈 stdin
-/// 반려가 `--body` 를 되돌려 주면 치지도 않은 플래그로 감춘 계열이 새어 나간다.
-#[test]
-fn a_hidden_post_parse_rejection_does_not_hand_back_a_sibling_flag() {
-    use std::process::Stdio;
-    let run = |marker: Option<&str>| {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_engram"));
-        cmd.args(["mail", "send", "--to", "bob", "--body-stdin"])
-            .env_remove("ENGRAM_TOKEN")
-            .env_remove("ENGRAM_CONTROL_URL")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        match marker {
-            Some(v) => cmd.env(MAIL_MARKER_ENV, v),
-            None => cmd.env_remove(MAIL_MARKER_ENV),
-        };
-        let mut child = cmd.spawn().expect("spawn engram CLI");
-        // stdin 을 열자마자 닫는다 = 빈 입력(리뷰어 repro 의 `</dev/null`).
-        drop(child.stdin.take().expect("stdin piped"));
-        let out = child.wait_with_output().expect("wait engram CLI");
-        (
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            out.status.code().unwrap_or(-1),
-        )
-    };
-
-    let (hidden, code) = run(Some(MAIL_MARKER_OFF));
-    assert_eq!(code, 1, "빈 본문은 반려: {hidden}");
-    let v: serde_json::Value =
-        serde_json::from_str(hidden.trim()).unwrap_or_else(|e| panic!("봉투 JSON: {e} — {hidden}"));
-    assert_eq!(v["code"], "BAD_ARGS");
-    let hint = v["hint"].as_str().unwrap_or_default();
-    for leak in ["--body", "--to", "send", "status", "pending"] {
-        assert!(
-            !hint.contains(leak),
-            "감춘 계열의 내용물이 파싱-후 반려로 새면 안 된다({leak}): {hint}"
-        );
-    }
-
-    // 대조군 — 표식이 없거나 on 이면 구체적 복구 안내를 그대로 준다.
-    for marker in [None, Some(MAIL_MARKER_ON)] {
-        let (shown, code) = run(marker);
-        assert_eq!(code, 1, "{marker:?}: {shown}");
-        assert!(
-            shown.contains("--body"),
-            "{marker:?}: 보이는 표면에선 복구 안내가 그대로여야: {shown}"
-        );
-    }
 }
