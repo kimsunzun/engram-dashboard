@@ -10,5 +10,9 @@
  * 기본값이 곧 「요청한 것과 다른 에이전트가 떴다」가 된다.
  * ★철자가 lowercase 인 이유★: 이 값은 invoke 표면(`spawn_into` 의 `backend` 인자)에서 오는 문자열과
  * 같은 낱말이어야 하고 그 자리는 이미 `"claude"` 로 적혀 있었다(형제 `EnvelopeFormat` 과 같은 사유).
+ * ★받는 철자는 대소문자를 가리지 않는다 · **내보내는 철자는 lowercase 하나뿐이다**★: 이 칸을 채우는
+ * 것은 사람·LLM 이 손으로 친 낱말이고(`agent.spawnInto` 의 `backend`, 프론트의 `SpawnByCwd`) 거기서
+ * `Claude` 는 오타가 아니라 같은 뜻이다. 반대로 내보내는 쪽을 넓히면 `agents.json` 과 ts-rs 유니온이
+ * 갈리므로 [`Serialize`](serde::Serialize) 는 derive 그대로 둔다.
  */
 export type AgentBackendKind = "claude" | "codex";

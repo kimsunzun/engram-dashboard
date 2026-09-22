@@ -128,6 +128,7 @@ impl CommandTable {
     pub fn call(&self, name: &str, args: &mut serde_json::Value) -> Option<CommandFuture> {
         let entry = self.entries.get(name)?;
         crate::coerce::integral_numbers_to_integers(&entry.args_schema, args);
+        crate::coerce::enum_words_to_declared_spelling(&entry.args_schema, args);
         Some(entry.handler.call(args.take()))
     }
 

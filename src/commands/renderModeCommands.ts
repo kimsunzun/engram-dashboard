@@ -18,8 +18,9 @@
 //   (`commands/viewCommandBridge.ts` 의 `offeredCommands` 가 그 칸 하나로 승선을 가른다).
 
 import { t } from '../i18n'
-import { RENDER_MODES, isRenderMode, type RenderMode } from '../components/slot/renderMode'
+import { RENDER_MODES, type RenderMode } from '../components/slot/renderMode'
 import { useViewStore } from '../store/viewStore'
+import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
 
 /** 렌더 모드 command 의 실행 컨텍스트 인자(단일 가방, ADR-0055). */
@@ -56,12 +57,16 @@ function requireSlotId(args: RenderModeCtx | undefined, cmd: string): string {
  *
  * ★이건 「모르는 칸」 규칙(ADR-0157)이 아니다★ — 그 규칙이 가리는 것은 **이름을 모르는 칸**이고,
  * 여기서 걸리는 것은 아는 칸의 **값이 유효 집합 밖**인 경우다.
+ *
+ * ★대소문자는 접고 유효 집합은 그대로 둔다★ — 호출자가 어떻게 쓰든 store 로 가는 것은 `RENDER_MODES` 의
+ * 원소다(사용자 결정 2026-09-23 — command 인자 enum 낱말 전반의 규칙). 접기 뒤에도 모르는 낱말은 여전히
+ * 여기서 throw 하므로 아래 store 의 `isRenderMode` 가드에 무효 값이 닿는 일은 없다.
  */
 function requireMode(args: RenderModeCtx | undefined, cmd: string): RenderMode {
-  const mode = args?.mode
-  if (!isRenderMode(mode)) {
+  const mode = matchDeclaredSpelling(args?.mode, RENDER_MODES)
+  if (!mode) {
     throw new Error(
-      `[${cmd}] mode 는 ${RENDER_MODES.join('|')} 중 하나여야 한다 — 받은 값: ${JSON.stringify(mode)}`,
+      `[${cmd}] mode 는 ${RENDER_MODES.join('|')} 중 하나여야 한다 — 받은 값: ${JSON.stringify(args?.mode)}`,
     )
   }
   return mode

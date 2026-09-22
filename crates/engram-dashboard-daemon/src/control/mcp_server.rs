@@ -413,26 +413,10 @@ impl EngramMcpHandler {
     ///   않는 툴을 가리켜 발신 입구가 조용히 막히고, 테스트만 이를 잡는다.
     // ADR-0086 / ADR-0094(단일 출처 결합)
     #[tool(
-        description = "Send a message to teammate agents — use it to reach or reply to them. This \
-        is the `engram` broker's tool, NOT your harness's own built-in `SendMessage`, which is \
-        denied on this team and fails as a permission denial if called. `to` = one teammate or a \
-        LIST of them — each entry is an agent name (or agent id), or a group address: \"@here\" = \
-        everyone live right now EXCEPT you, \"@all\" = every agent in the team tree EXCEPT you, \
-        including ones that are not running (their copy waits and is delivered when they come \
-        back). You can mix them, e.g. [\"@here\", \"qa-bravo\"]. `body` = your message text. \
-        The sender envelope (who you are, message id) is added by the broker from your bound \
-        session, not from arguments — just write the body. Set `request` = true when you need \
-        answers back (optionally with `reply_by` = \"5m\"/\"10m\"/\"1h\" — at least 1 minute); YOU \
-        get notified for each recipient that did not reply, one independent contract each. When \
-        you answer a message that arrived with type=\"request\" and an id, pass `reply_to` = that \
-        id — a reply must have exactly one recipient. `request` and `reply_to` are mutually \
-        exclusive. The result has one row per recipient: status delivered (injected now), pending \
-        (NOT a failure, and not confirmed either — it has several possible causes, so never read \
-        the recipient's state off this row; if arrival matters look it up with `eg_messages` and that \
-        `id`) or failed (that recipient only — `code` says why, e.g. RECIPIENT_NOT_FOUND when no \
-        agent has that name; the others still got it). Delivery is at-least-once: if this call \
-        fails or times out with no result the message may already be delivered — check before \
-        resending; a retry is a NEW message, not a replacement."
+        description = "팀원 에이전트에게 메시지를 보내고, 받은 요청에 답한다. 이것은 `engram` 중개의 \
+        도구이고 하네스에 내장된 `SendMessage` 가 아니다 — 그쪽은 이 팀에서 막혀 있어 부르면 권한 \
+        거절로 끝난다.\n\
+        인자는 각 필드 설명이 가지고, 결과를 읽는 법과 그 밖의 규칙은 `engram help mail` 이 가진다."
     )]
     async fn eg_send(
         &self,
@@ -524,13 +508,7 @@ impl EngramMcpHandler {
     }
 
     #[tool(
-        description = "Look up message state on the Engram broker. With no arguments it returns \
-        YOUR open items — messages you sent that have not landed yet, requests you are waiting on \
-        an answer for, and requests other agents sent you that you have NOT answered yet (each row \
-        is tagged with `direction`, and `reply_owed_by_me` means you still owe that agent a reply). \
-        Pass `id` = a message id (e.g. m-7f3k9q2d) to see that one message's delivery state \
-        instead; for a group broadcast you get one row per recipient. This tool only reads — it \
-        never sends, replies, or changes anything."
+        description = "Engram 중개에 메시지 상태를 묻는다. 행을 읽는 법은 `engram help mail` 이 가진다."
     )]
     async fn eg_messages(
         &self,
@@ -697,8 +675,8 @@ where
     // ★우편 거절은 핸들러가 아니라 여기다(ADR-0133 결정 3)★: 이 미들웨어는 라우터 **전체**를 감싸므로
     //   우편 라우트가 늘어도 한 자리로 덮인다 — 핸들러마다 검사를 두면 새 핸들러가 검사를 빠뜨린다.
     //   판정 재료는 발급 시점에 박힌 자격증명의 사실 하나뿐이라 매니저 조회도, 바디 파싱도 필요 없다.
-    // ★이것이 유일한 강제 지점이다★: 에이전트 쪽 표식(`MAIL_MARKER_ENV`)은 사용법을 가릴 뿐이고 조작
-    //   가능하다 — 이 검사를 빼고 표식만 남기면 표식을 떼는 순간 우편이 열린다.
+    // ★이것이 유일한 강제 지점이다★: 에이전트 쪽에는 우편을 막는 것이 하나도 없다 — CLI 는 말이 되는
+    //   우편 호출을 그대로 보낸다. 이 검사를 빼면 우편이 열린다.
     // ★막는 것은 이 HTTP/CLI 우편 표면뿐이다★: MCP 가능 에이전트는 `/mcp` 의 `eg_send` 로 계속 우편을
     //   쓴다(ADR-0128 결정 1 — 채널은 capability 로만 갈린다). 이 거절은 "우편 금지" 가 아니라 "이 입구는
     //   네 채널이 아니다" 다.
@@ -1681,25 +1659,46 @@ mod tests {
         let desc = tool.description.as_deref().unwrap_or_else(|| {
             panic!("'{SEND_MESSAGE_TOOL}' 에 설명문이 있어야(이게 교육 표면이다)")
         });
-        for arg in ["`to`", "`body`"] {
+        // ★인자 계약의 집이 옮겨 갔다(2026-09-23)★: 설명문이 칸마다 한 줄씩 다시 설명하던 것을 걷고
+        //   **입력 스키마의 칸별 설명**에 맡겼다 — 같은 계약을 두 벌로 끌던 중복이었고, 스키마 쪽이 더
+        //   자세하며 모델이 인자를 채우는 바로 그 자리에 붙는다. 계약이 사라진 게 아니라 한 집으로 모인
+        //   것이라, 이 고정도 그 집을 본다. 스키마가 비면 에이전트는 칸 이름만 받고 뜻을 못 배운다.
+        // ★칸 이름이 아니라 **뜻이 실렸나**를 본다★: schemars 는 doc 주석을 전부 지워도 `properties` 에
+        //   칸 이름을 그대로 찍는다. 이름만 보면 「스키마가 비면 에이전트는 칸 이름만 받고 뜻을 못
+        //   배운다」는 위 실패 조건을 못 잡는다(적대 리뷰가 잡았다 — 2026-09-23).
+        fn carries_description(v: &serde_json::Value) -> bool {
+            match v {
+                serde_json::Value::Object(m) => {
+                    m.get("description")
+                        .and_then(|d| d.as_str())
+                        .is_some_and(|s| !s.trim().is_empty())
+                        || m.values().any(carries_description)
+                }
+                serde_json::Value::Array(a) => a.iter().any(carries_description),
+                _ => false,
+            }
+        }
+        let props = tool
+            .input_schema
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("입력 스키마에 properties 가 있어야");
+        for arg in ["to", "body", "reply_to", "reply_by"] {
+            let slot = props
+                .get(arg)
+                .unwrap_or_else(|| panic!("입력 스키마가 {arg} 칸을 실어야: {props:?}"));
             assert!(
-                desc.contains(arg),
-                "설명문이 {arg} 를 가르쳐야(수신자·본문 없이는 호출이 성립하지 않는다): {desc}"
+                carries_description(slot),
+                "{arg} 칸에 설명이 실려야(인자 계약의 집이 여기다 — 설명문에서 걷어낸 것을 스키마가 진다): {slot}"
             );
         }
+        // ★위 ① (`pending` 에서 상대 상태를 추론하지 말고 조회하라)은 `help mail` 화면으로 옮겼다★ —
+        //   ADR-0211 결정 2 는 그대로 유효하고 옮긴 것은 표면이지 계약이 아니다. 그 자리의 고정은
+        //   `bin/engram.rs` 의 `the_mail_screen_teaches_the_reply_contract` 가 진다. 여기서는 그 화면을
+        //   **가리키고 있는가**만 본다 — 포인터가 끊기면 인자 밖 계약 전체가 갈 곳을 잃는다.
         assert!(
-            desc.contains("type=\"request\""),
-            "설명문이 request 봉투를 알아보게 가르쳐야(회신은 LLM 준수 soft 라 안 가르치면 엄격 매칭이 \
-             구조적으로 회신을 못 받는다 — ADR-0103 결정 2/3): {desc}"
-        );
-        assert!(
-            desc.contains("reply_to") && desc.contains("reply_by"),
-            "설명문이 회신·기한을 툴 인자 표기(snake_case)로 가르쳐야: {desc}"
-        );
-        assert!(
-            desc.contains("pending") && desc.contains(MESSAGES_TOOL),
-            "`pending` 을 원인 하나로 설명하지 말고 '{MESSAGES_TOOL}' 로 조회하라고 가르쳐야(상대 상태 \
-             추론 금지 — ADR-0211 결정 2): {desc}"
+            desc.contains("engram help mail"),
+            "설명문이 나머지 규칙을 어디서 읽는지 가리켜야: {desc}"
         );
         assert!(
             desc.contains("SendMessage"),

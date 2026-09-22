@@ -109,7 +109,7 @@ impl DaemonControlChannel {
     /// ★운영 빌드는 이 노브를 아예 컴파일하지 않는다(`const fn false`)★: 이 값은 채널 물리 배선·프라이밍
     ///   변형뿐 아니라 **우편 인가 판정(`mail_allowed`)까지** 뒤집는다 — 즉 릴리즈 바이너리가 환경변수
     ///   하나로 인가 결과를 바꿀 수 있게 두면, 에이전트가 자기 env 를 고쳐 데몬의 판정을 옮기는 경로가 생긴다
-    ///   (표식과 달리 이쪽은 강제 그 자체다). `test-harness` 는 self-dev-dependency 로만 켜지므로 운영
+    ///   — 이쪽은 강제 그 자체다. `test-harness` 는 self-dev-dependency 로만 켜지므로 운영
     ///   dep 그래프엔 유니피케이션되지 않는다 — **그 비유니피케이션과 그것이 깨지는 조건(`--all-targets`)
     ///   둘 다의 정본은 Cargo.toml `[dev-dependencies]` 의 self-dev-dependency 주석이다**(배포 릴리스를
     ///   `--all-targets` 로 만들면 이 노브가 그 바이너리에 박힌다).
@@ -175,8 +175,8 @@ impl ControlChannel for DaemonControlChannel {
             ..needs
         };
         // ★우편 가부의 **단일 파생 지점**(ADR-0133 결정 2)★: 이 한 값이 ① 자격증명에 박히는 강제(데몬
-        //   거절) ② endpoint 에 실려 나가는 표식(교육) ③ 아래 진단 로그를 **전부** 낳는다. 재료가 둘로
-        //   는 뒤에도 파생은 한 자리다.
+        //   거절) ② endpoint 가 나르는 같은 사실 ③ 아래 진단 로그를 **전부** 낳는다. 재료가 둘로 는
+        //   뒤에도 파생은 한 자리다.
         //   MCP 로 우편을 쓰는 스폰은 CLI 우편을 쓰지 않는다 — 채널은 capability 로만 갈리고 런타임
         //   스위칭·폴백이 없다(ADR-0128 결정 1). 우편 평면 **밖** 스폰은 둘 다 아니다(`uses_mail`).
         //   ★식을 두 번째로 쓰지 말 것 — 로그에도 쓰지 말 것★: 동치인 사본이라도 갈리는 날 그 로그는
@@ -278,7 +278,7 @@ impl ControlChannel for DaemonControlChannel {
                 "제어 채널을 발급했으나 `{CLI_EXE_NAME}` 실행파일을 찾지 못했다 — 이 스폰은 제어 동사(engram …)를 쓸 수 없다(데몬 exe 형제로 배포됐는지 확인)."
             );
         }
-        // 이 값이 강제(여기)와 교육(아래 endpoint 표식)을 함께 낳는다 — 파생점과 그 사유는 위 한 곳.
+        // 강제는 여기 한 줄이다 — 아래 endpoint 의 같은 칸은 기록일 뿐 아무도 읽지 않는다(그 칸 doc).
         self.registry.issue(id, epoch, token.clone(), mail_allowed);
         let priming_file = wants_priming.then(|| self.priming.priming_file()).flatten();
         let grants = Self::build_grants(self.send_exe.as_deref(), needs);
@@ -322,9 +322,7 @@ mod tests {
             uses_mail: true,
         }
     }
-    use engram_dashboard_agent::types::{
-        CLI_EXE_ENV, MAIL_MARKER_ENV, MAIL_MARKER_OFF, MAIL_MARKER_ON,
-    };
+    use engram_dashboard_agent::types::CLI_EXE_ENV;
     use std::path::Path;
 
     /// ★노브별 락이 아니라 **단일** 락★: `provision` 이 두 env 를 모두 읽으므로, 노브별로 나누면 한쪽만
@@ -890,7 +888,7 @@ mod tests {
     ///   끊긴 것을 못 잡으므로 실 backend 에 먹여 스폰 env 까지 확인한다.
     /// ★미커버★: 부팅 시 형제 exe 탐색(`lib.rs::locate_send_exe`)은 이 테스트 범위 밖이다.
     #[test]
-    fn provision_mcp_capable_wires_the_cli_and_marks_mail_off() {
+    fn provision_mcp_capable_wires_the_cli_and_withholds_mail() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(false));
@@ -911,7 +909,7 @@ mod tests {
         assert_eq!(ep.send_exe.as_deref(), Some(send_exe.as_path()));
         assert!(
             !ep.mail_allowed,
-            "MCP 가능 스폰의 우편은 데몬이 거절한다 → 표식 off"
+            "MCP 가능 스폰의 CLI 우편은 데몬이 거절한다"
         );
         let spec = spawn_spec_from(id, ep, vec![("PATH".to_string(), "C:\\custom".to_string())]);
         for key in ["ENGRAM_TOKEN", "ENGRAM_CONTROL_URL", CLI_EXE_ENV] {
@@ -921,15 +919,6 @@ mod tests {
                 spec.env
             );
         }
-        assert_eq!(
-            spec.env
-                .iter()
-                .find(|(k, _)| k == MAIL_MARKER_ENV)
-                .map(|(_, v)| v.as_str()),
-            Some(MAIL_MARKER_OFF),
-            "스폰 env 의 표식이 off 여야: {:?}",
-            spec.env
-        );
         let path = spec
             .env
             .iter()
@@ -949,10 +938,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
-    /// ★위 테스트만 있으면 표식을 상수 off 로 박아도 초록이라 짝으로 둔다★ — 이 갈래가 열화하면 비-MCP
-    ///   백엔드의 우편이 사용법에서 사라진다(그 백엔드엔 MCP 입구가 아예 없다).
+    /// ★위 테스트만 있으면 판정을 상수 false 로 박아도 초록이라 짝으로 둔다★ — 이 갈래가 열화하면
+    ///   비-MCP 백엔드가 자기 유일한 우편 입구를 잃는다(그 백엔드엔 MCP 입구가 아예 없다).
     #[test]
-    fn provision_non_mcp_wires_the_same_cli_and_marks_mail_on() {
+    fn provision_non_mcp_wires_the_same_cli_and_allows_mail() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         let seen = Arc::new(Mutex::new(false));
@@ -968,10 +957,7 @@ mod tests {
             !*seen.lock().unwrap(),
             "비-MCP 갈래(프라이밍 미주입)여야 이 가드가 의미를 가진다"
         );
-        assert!(
-            ep.mail_allowed,
-            "비-MCP 스폰의 우편 입구는 CLI 다 → 표식 on"
-        );
+        assert!(ep.mail_allowed, "비-MCP 스폰의 우편 입구는 CLI 다");
         let spec = spawn_spec_from(id, ep, vec![]);
         assert_eq!(
             spec.env
@@ -986,15 +972,6 @@ mod tests {
             spec.env.iter().any(|(k, _)| k == "ENGRAM_TOKEN")
                 && spec.env.iter().any(|(k, _)| k == "ENGRAM_CONTROL_URL"),
             "CLI 입구가 붙을 크레덴셜도 함께 실려야: {:?}",
-            spec.env
-        );
-        assert_eq!(
-            spec.env
-                .iter()
-                .find(|(k, _)| k == MAIL_MARKER_ENV)
-                .map(|(_, v)| v.as_str()),
-            Some(MAIL_MARKER_ON),
-            "스폰 env 의 표식이 on 이어야: {:?}",
             spec.env
         );
         let path = spec
@@ -1088,10 +1065,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_dir);
     }
 
-    /// ★교육(표식)과 강제(자격증명)는 **같은 한 값**에서 나와야 한다(ADR-0133 결정 2)★: 둘이 따로
-    ///   판정되면 "사용법엔 없는데 되는" 또는 "가르쳤는데 거절당하는" 상태가 조용히 생긴다.
+    /// ★자격증명(강제)과 endpoint(기록)는 **같은 한 값**에서 나와야 한다(ADR-0133 결정 2)★: 둘이 따로
+    ///   판정되면 데몬이 기록한 사실과 실제 거절이 조용히 갈린다.
     #[test]
-    fn provision_records_the_same_mail_verdict_on_the_credential_and_the_marker() {
+    fn provision_records_the_same_mail_verdict_on_the_credential_and_the_endpoint() {
         let _g = lock_env();
         assert!(std::env::var(FORCE_CLI_ENV).is_err() && std::env::var(DISALLOW_MCP_ENV).is_err());
         for accepts_mcp_config in [true, false] {
@@ -1115,7 +1092,7 @@ mod tests {
             let bound = registry.validate(&ep.token).expect("발급된 자격증명");
             assert_eq!(
                 bound.mail_allowed, ep.mail_allowed,
-                "자격증명에 박힌 판정 == endpoint 가 나르는 표식(accepts_mcp_config={accepts_mcp_config})"
+                "자격증명에 박힌 판정 == endpoint 가 나르는 값(accepts_mcp_config={accepts_mcp_config})"
             );
             assert_eq!(
                 ep.mail_allowed, !accepts_mcp_config,

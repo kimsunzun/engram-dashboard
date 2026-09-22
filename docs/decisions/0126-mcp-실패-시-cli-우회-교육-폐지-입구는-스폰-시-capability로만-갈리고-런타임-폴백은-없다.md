@@ -1,7 +1,7 @@
 # ADR-0126: MCP 실패 시 CLI 우회 교육 폐지 — 입구는 스폰 시 capability로만 갈리고 런타임 폴백은 없다
 
-- 상태: 확정 (2026-08-02, 근거: 사용자 결정 + `/review doc full` 2라운드 적출 — 아래 근거) · 부분 폐기 by ADR-0128 (결정 3 배선 존치) · 부분 폐기 by ADR-0211 (프라이밍 B 의존 조항) · 부분 폐기 by ADR-0213 (프라이밍 에스컬레이션 pin 제거)
-- 관련: Amends ADR-0099 (engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화) · ADR-0086(듀얼 입구·단일 wrap) · ADR-0125(동기 드레인 — 중복 발송의 대가를 키운 계약) · `prompts/agent-priming.md` · `crates/engram-dashboard-daemon/src/control/priming.rs` · Amended by ADR-0128 (결정 3 배선 존치) · Amended by ADR-0211 (프라이밍 B 의존 조항) · Amended by ADR-0213 (프라이밍 에스컬레이션 pin 제거)
+- 상태: 확정 (2026-08-02, 근거: 사용자 결정 + `/review doc full` 2라운드 적출 — 아래 근거) · 부분 폐기 by ADR-0128 (결정 3 배선 존치) · 부분 폐기 by ADR-0211 (프라이밍 B 의존 조항) · 부분 폐기 by ADR-0213 (프라이밍 에스컬레이션 pin 제거) · 부분 폐기 by ADR-0220 (CLI 와 MCP 철자 분리)
+- 관련: Amends ADR-0099 (engram-send 폴백 교육 폐지와 채널 정합 불변식 단방향화) · ADR-0086(듀얼 입구·단일 wrap) · ADR-0125(동기 드레인 — 중복 발송의 대가를 키운 계약) · `prompts/agent-priming.md` · `crates/engram-dashboard-daemon/src/control/priming.rs` · Amended by ADR-0128 (결정 3 배선 존치) · Amended by ADR-0211 (프라이밍 B 의존 조항) · Amended by ADR-0213 (프라이밍 에스컬레이션 pin 제거) · Amended by ADR-0220 (CLI 와 MCP 철자 분리)
 
 ## 맥락
 

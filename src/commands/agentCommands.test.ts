@@ -233,6 +233,24 @@ describe('agent_list 생성 계열 라우팅', () => {
     )
   })
 
+  // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: 백엔드로 나가는 값은 호출자가 쓴
+  //   철자가 아니라 'Terminal'·'StreamJson' 이어야 한다 — 그래야 wire 가 종전과 바이트 동일하다.
+  it('createAgent(파라미터형): outputFormat 대소문자 무관 수용 → 선언 철자로 정규화해 전달', async () => {
+    for (const [given, expected] of [
+      ['terminal', 'Terminal'],
+      ['TERMINAL', 'Terminal'],
+      ['streamjson', 'StreamJson'],
+      ['StreamJSON', 'StreamJson'],
+    ] as const) {
+      dialogMock.open.mockResolvedValueOnce('C:/work/engram')
+      clientMock.listProfiles.mockResolvedValueOnce([createdProfile])
+      await run('agentlist.createAgent', { outputFormat: given })
+      expect(clientMock.createClaudeProfile).toHaveBeenLastCalledWith(
+        'C:/work/engram', 'C:/work/engram', [], [], false, expected,
+      )
+    }
+  })
+
   it('createAgent(파라미터형): 잘못된 outputFormat → 명시 throw + createClaudeProfile 미호출', async () => {
     // 다이얼로그(open)보다 검증이 먼저라 폴더 픽·createClaudeProfile 모두 타지 않는다.
     await expect(run('agentlist.createAgent', { outputFormat: 'invalid' })).rejects.toThrow(/invalid/)

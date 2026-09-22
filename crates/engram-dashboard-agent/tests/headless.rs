@@ -123,7 +123,7 @@ impl ControlChannel for CountingControl {
             grants: vec![],
             // S18 D: 설정 조각도 이 테스트의 관심사가 아니다(spec 조립이 아니라 spawn 인과 격리).
             settings_file: None,
-            // ADR-0133: 표식 산출도 관심사 밖 — 데몬 산출 규칙만 흉내 낸다(재료가 둘이다).
+            // ADR-0133: 우편 인가 산출도 관심사 밖 — 데몬 산출 규칙만 흉내 낸다(재료가 둘이다).
             mail_allowed: needs.uses_mail && !needs.accepts_mcp_config,
         }))
     }

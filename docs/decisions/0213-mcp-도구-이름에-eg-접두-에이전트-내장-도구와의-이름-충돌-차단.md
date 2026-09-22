@@ -1,7 +1,7 @@
 # ADR-0213: MCP 도구 이름에 eg_ 접두 — 에이전트 내장 도구와의 이름 충돌 차단
 
-- 상태: 확정 (2026-09-20, 근거: 사용자 결정 + codex 도구 목록 실측 + 코드 실측)
-- 관련: ADR-0094(발신 grant seam — 「단일 출처」 불변식이 이름의 정본을 컨트롤 채널 입구로 박았다) · ADR-0004(백엔드 지식 격리) · ADR-0097(bypassPermissions auto mode — grant가 오늘 NO-OP인 사유) · `crates/engram-dashboard-daemon/src/control/mcp_server.rs:330,335` · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:259`(내장 `SendMessage` deny 근거 주석) · `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md` §6 · `docs/research/command-discovery-survey-2026-09-20.md` · step-log S21 · Amends ADR-0126 (프라이밍 에스컬레이션 pin 제거)
+- 상태: 확정 (2026-09-20, 근거: 사용자 결정 + codex 도구 목록 실측 + 코드 실측) · 부분 폐기 by ADR-0220 (지시서의 engram help mail 금지)
+- 관련: ADR-0094(발신 grant seam — 「단일 출처」 불변식이 이름의 정본을 컨트롤 채널 입구로 박았다) · ADR-0004(백엔드 지식 격리) · ADR-0097(bypassPermissions auto mode — grant가 오늘 NO-OP인 사유) · `crates/engram-dashboard-daemon/src/control/mcp_server.rs:330,335` · `crates/engram-dashboard-agent/src/backend/claude/mod.rs:259`(내장 `SendMessage` deny 근거 주석) · `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md` §6 · `docs/research/command-discovery-survey-2026-09-20.md` · step-log S21 · Amends ADR-0126 (프라이밍 에스컬레이션 pin 제거) · Amended by ADR-0220 (지시서의 engram help mail 금지)
 
 ## 맥락
 

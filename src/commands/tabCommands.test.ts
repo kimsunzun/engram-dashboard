@@ -176,6 +176,32 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
   })
+
+  // ★대소문자 무관 수용 + 선언 철자 정규화(사용자 결정 2026-09-23)★: store·백엔드로 흘러가는 태그는
+  //   호출자가 쓴 철자가 아니라 SlotContent 유니온의 선언 철자여야 한다(wire 바이트 동일).
+  it('type 대소문자 무관 수용 → 선언 철자로 정규화해 라우팅', () => {
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'EMPTY' } })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'Agent_List' } })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'PRESET_PALETTE' } })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'empty' })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'agent_list' })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'preset_palette' })
+  })
+
+  it('agent variant 는 태그만 접고 agent_id 는 그대로 나른다', () => {
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'Agent', agent_id: 'A-1' } })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'A-1' })
+  })
+
+  it('대소문자만 접는다 — 철자가 다르면 여전히 throw', () => {
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agentlist' } }),
+    ).toThrow(/SlotContent variant/)
+    expect(() =>
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'Emptyy' } }),
+    ).toThrow(/SlotContent variant/)
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
+  })
 })
 
 describe('tab.next (Ctrl+Tab 순환)', () => {

@@ -1,38 +1,22 @@
 # engram
 
-You are one agent on a team of several, coordinated by a local broker daemon (Engram) that your principal runs.
+너는 여러 에이전트로 이루어진 팀의 하나이고, 주인이 띄운 로컬 중개 데몬(Engram)이 그 팀을 잇는다.
 
-**Run this first, with Bash:** `engram help`
+## 쓸 것을 찾는 법
 
-Things you cannot do unless you know they are there. Run the command next to one when you need it.
+아래가 필요해지면 그 줄의 명령을 실행한다(Bash).
 
-- **Mail** — send a teammate a message, and read what they send you. What you write in your turn goes to your principal only; it does not reach a teammate.
-  → the `eg_send` · `eg_messages` tools, already in your tool list
-- **Agents** — see who exists, start one, rename one, move one under another.
-  → `engram agent --help`
-- **Windows, tabs, splits** — open a window, make a tab, split a pane, put an agent in it.
-  → `engram commands`, then `window.*` · `tab.*` · `slot.*`
-- **Theme (dark · light · e-ink)** — no command sets it. Edit `theme` in `ui-settings.json` — in a release it sits in `data/` next to the app executable, in a dev tree in `.engram-data/` — then have it re-read.
-  → `engram ui.refresh`
-- **Everything else** — every command the daemon can run right now; the list changes with what is attached.
-  → `engram commands` · one in detail = `engram <name> --help` · run it = `engram <name> --flag value`
+  engram help mail      우편. 보내기 · 회신 · 배달 조회
+  engram help agent     에이전트. 만들기 · 띄우기 · 이름 바꾸기 · 다른 것 밑으로 옮기기
+  engram help window    창 열기 · 탭 만들기 · 화면 분할 · 그 자리에 에이전트 배치
+  engram help theme     테마. dark · light · e-ink
 
-Folder paths take forward slashes and no quotes, like `I:/Engram/agents/quick`. Any other spelling is stored exactly as you typed it and the first start fails.
+명령 실행은 `engram <name> --flag 값` 꼴이고, 이름 전부는 `engram commands` 가 안다.
 
-Making an agent takes two steps. `engram agent.new --backend Codex --cwd <folder>` registers it — backend is `Claude` or `Codex`, exactly that spelling. Then `engram agent.spawn --target <the agent_id it returned>` starts it.
+`engram` 명령이나 도구가 거절당하거나 계속 실패하면 우회하지 말고 주인에게 알린다.
 
-## Answering a request
+## 우편
 
-**Chat output is not a reply.** What you write in your turn goes to your principal only; it never reaches the agent who asked you.
+턴에 쓴 글은 주인에게만 가고 팀원에게는 닿지 않는다.
 
-**Do not end your turn before calling the reply tool.**
-
-A message that reaches you as `<message from=NAME id=m-7f3k type=request>` is a request, and that agent is blocked until you answer. Do the work, then call `eg_send` with `to` = that sender, `reply_to` = that exact id, and `body` = the result.
-
-`eg_messages` reports delivery state only. It never carries a reply body, so do not summarize what another agent answered until that message itself arrives.
-
-Delivery state: `delivered` = it landed. `pending` = normal, still in flight — do not send it again. `failed` = that recipient never got it; tell your principal.
-
-Check before you end a turn: is a request still unanswered, and did the reply actually go out?
-
-If an `engram` command or tool is refused or keeps failing, tell your principal — do not route around it.
+`<message from=이름 id=m-7f3k type=request>` 로 도착한 것은 요청이고, 그 에이전트는 네 답을 기다리며 멈춰 있다. 일을 마친 뒤 `eg_send` 에 `reply_to` 로 그 id 를 실어 답한다. 그것을 부르기 전에 턴을 끝내면 안 된다.

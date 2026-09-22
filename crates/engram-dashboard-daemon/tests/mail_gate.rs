@@ -1,8 +1,8 @@
 //! ADR-0133 결정 3 통합 테스트 — **자격증명으로 우편을 거절하는 게이트**.
 //!
-//! ★여기가 유일한 강제 지점이다★: 에이전트 쪽 표식(`ENGRAM_MAIL`)은 사용법을 가릴 뿐이고 조작 가능하다.
-//!   그래서 "표식을 뗀 프로세스" 를 흉내 낼 필요조차 없다 — 이 테스트는 HTTP 로 직접 때리므로 애초에
-//!   표식이 없는 호출자다. 그런데도 거절돼야 한다는 것이 이 파일의 요점이다.
+//! ★여기가 유일한 강제 지점이다★: 에이전트 쪽에는 우편을 막는 것이 하나도 없다 — CLI 는 말이 되는
+//!   우편 호출을 그대로 보낸다. 이 테스트는 HTTP 로 직접 때리므로 그 CLI 조차 거치지 않는 호출자이고,
+//!   그런데도 거절돼야 한다는 것이 이 파일의 요점이다.
 //!
 //! ★claude 불요·결정적★: 실 에이전트를 띄우지 않는다. 우편 라우트는 messaging 슬롯을 비워 둬 **핸들러가
 //!   503 을 내게** 한다 — 그 503 이 곧 "미들웨어를 통과했다" 는 증거다(거절은 200 + 반려 봉투라 구별된다).
@@ -486,8 +486,8 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
         is_mail_rejection(status, &text),
         "실 provision 이 발급한 claude 자격증명은 HTTP 우편에서 거절돼야: {status} {text}"
     );
-    // 표식도 같은 판정에서 나왔는지 함께 본다(교육과 강제가 한 값에서 갈린다 — ADR-0133 결정 2).
-    assert!(!ep.mail_allowed, "endpoint 표식도 off 여야");
+    // endpoint 의 기록도 같은 판정에서 나왔는지 함께 본다(파생점이 하나다 — ADR-0133 결정 2).
+    assert!(!ep.mail_allowed, "endpoint 기록도 불가여야");
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }
@@ -495,7 +495,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
 /// ★우편 평면 **밖**인 backend 는 제어 채널을 받아도 우편 인가를 못 받는다★ — `supports_control_channel`
 /// 을 켠 부수효과로 보내기만 열렸던 상태를 되돌린 자리다(사용자 결정 2026-09-18).
 ///
-/// ★두 층을 함께 잰다★: ① 자격증명(HTTP 우편 라우트가 거절하나) ② endpoint 가 나르는 것들(표식·발신
+/// ★두 층을 함께 잰다★: ① 자격증명(HTTP 우편 라우트가 거절하나) ② endpoint 가 나르는 것들(우편 인가·발신
 ///   grant·프라이밍). 한 층만 재면 「거절은 하는데 가르치기는 한다」가 그대로 통과한다 — 그 어긋남이
 ///   ADR-0099 가 실측한 발신 freeze 의 모양이다.
 #[tokio::test]
@@ -564,8 +564,8 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
         );
     }
 
-    // ② endpoint — 표식 off · 발신 grant 0 · 프라이밍 없음. 「인가를 안 주면 기록도 그렇게 말한다」.
-    assert!(!ep.mail_allowed, "표식이 on 이면 사용법이 우편을 가르친다");
+    // ② endpoint — 우편 불가 · 발신 grant 0 · 프라이밍 없음. 「인가를 안 주면 기록도 그렇게 말한다」.
+    assert!(!ep.mail_allowed, "인가를 안 줬는데 기록은 가능이라 말한다");
     assert!(
         ep.grants.is_empty(),
         "발신 입구가 없는데 grant 가 실렸다: {:?}",
@@ -589,7 +589,7 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
 /// ★실 backend 선언을 읽는 것이 요점이다 — 리터럴을 적으면 그 판정이 테스트 사본이 된다★: 이 조각이
 ///   건드린 두 칸(`accepts_mcp_config`·`uses_mail`)이 **함께** 움직여야 아래 셋이 동시에 선다. 한쪽만
 ///   되돌리면 셋 중 하나가 조용히 무너진다 — `uses_mail` 을 되돌리면 grant 0 · 프라이밍 없음(툴을 쥔 채
-///   아무도 안 가르친 상태), `accepts_mcp_config` 를 되돌리면 표식이 on 이 되어 CLI 미러가 열린다.
+///   아무도 안 가르친 상태), `accepts_mcp_config` 를 되돌리면 CLI 미러가 인가돼 열린다.
 /// ★프라이밍은 **파일 선택까지만** 잰다★ — 그 파일이 codex argv 에 실리는지는 여기 범위가 아니다
 ///   (실리지 않는다. 사유의 정본은 `backend/codex/` 의 emission 자리 주석).
 // ADR-0209
@@ -632,7 +632,7 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
 
     assert!(
         !ep.mail_allowed,
-        "MCP 우편 갈래인데 CLI 미러 표식이 on 이다 — 두 채널이 동시에 열렸다"
+        "MCP 우편 갈래인데 CLI 미러가 인가됐다 — 두 채널이 동시에 열렸다"
     );
     assert_eq!(
         ep.grants,

@@ -4,6 +4,9 @@
 //! 직접 구현한 핸들러(Step 3 의 `await` 하는 셸 명령들)는 같은 `{"type":"integer"}` 를 광고하면서 다르게
 //! 받는다. 그래서 조정 재료를 **선언된 스키마**로 두고 [`crate::CommandTable::call`] 한 곳에서 돈다.
 //!
+//! 조정은 둘이다 — 정수 칸에 온 `1.0`([`integral_numbers_to_integers`])과 열거 칸에 온 다른 대소문자
+//! ([`enum_words_to_declared_spelling`]). 두 규칙 다 **선언이 그 칸을 무엇이라 말했는가**만 재료로 쓴다.
+//!
 //! [`CommandHandler`]: crate::CommandHandler
 
 use serde_json::Value;
@@ -91,6 +94,78 @@ fn accepts(schema: &Value, wanted: &str) -> bool {
     found
 }
 
+/// 열거 칸에 온 낱말을 **선언된 철자로** 옮긴다 — 대소문자만 다른 경우다.
+///
+/// ★왜 관용하나★: 이 칸을 채우는 것은 사람·LLM 이 손으로 친 낱말이고, 선언이 `Claude`·`Codex` 처럼
+/// PascalCase 면 `claude` 로 치는 쪽이 자연스럽다(그 반대도 같다). 그 둘을 다른 값으로 읽으면 스키마를
+/// 보고 채운 호출자가 「아는 낱말」을 거절당한다.
+/// ★옮기는 자리는 **선언이 열거라고 말한 칸**뿐이다★ — 자유 문자열 칸은 손대지 않는다. 그 칸의 대소문자는
+/// 값의 일부다(경로·이름·id).
+/// ★안 옮기는 둘★: 선언된 철자와 **이미 정확히 같으면** 그대로 두고(옮길 것이 없다), 대소문자만 다른
+/// 후보가 **둘 이상**이면 그대로 둔다 — 어느 쪽으로 읽을지를 여기서 정해 버리지 않는다(정수·실수가 겹친
+/// 칸을 안 건드리는 것과 같은 판정).
+/// ★모르는 낱말은 여기서 반려하지 않는다★ — 그대로 두면 역직렬화가 기대 낱말을 나열해 거절한다. 이 층이
+/// 흉내 내면 같은 규칙이 두 곳에 산다.
+pub(crate) fn enum_words_to_declared_spelling(schema: &Value, value: &mut Value) {
+    match value {
+        Value::String(given) => {
+            if let Some(declared) = declared_spelling(schema, given) {
+                *given = declared;
+            }
+        }
+        Value::Object(fields) => {
+            for_each_alternative(schema, &mut |node| {
+                let Some(props) = node.get("properties").and_then(Value::as_object) else {
+                    return;
+                };
+                for (name, field) in fields.iter_mut() {
+                    if let Some(field_schema) = props.get(name) {
+                        enum_words_to_declared_spelling(field_schema, field);
+                    }
+                }
+            });
+        }
+        Value::Array(items) => {
+            for_each_alternative(schema, &mut |node| {
+                let Some(item_schema) = node.get("items") else {
+                    return;
+                };
+                for item in items.iter_mut() {
+                    enum_words_to_declared_spelling(item_schema, item);
+                }
+            });
+        }
+        _ => {}
+    }
+}
+
+/// 이 자리에 설 수 있는 열거 낱말 중 `given` 과 **대소문자만 다른** 하나 — 없거나 애매하면 `None`.
+fn declared_spelling(schema: &Value, given: &str) -> Option<String> {
+    let mut exact = false;
+    let mut folded: Option<String> = None;
+    let mut ambiguous = false;
+    for_each_alternative(schema, &mut |node| {
+        let Some(Value::Array(words)) = node.get("enum") else {
+            return;
+        };
+        for word in words.iter().filter_map(Value::as_str) {
+            if word == given {
+                exact = true;
+            } else if word.eq_ignore_ascii_case(given) {
+                match &folded {
+                    None => folded = Some(word.to_string()),
+                    Some(seen) if seen == word => {}
+                    Some(_) => ambiguous = true,
+                }
+            }
+        }
+    });
+    if exact || ambiguous {
+        return None;
+    }
+    folded
+}
+
 fn fold_to_integer(value: &mut Value) {
     let Value::Number(number) = value else {
         return;
@@ -172,6 +247,74 @@ mod tests {
     fn a_field_the_schema_does_not_declare_is_left_alone() {
         let out = coerced(json!({ "unknown": 7.0 }));
         assert_eq!(out["unknown"], json!(7.0));
+    }
+
+    // ── 열거 낱말의 철자 ────────────────────────────────────────────────────────────────────
+
+    /// 선언 매크로가 열거 칸에 찍는 모양 그대로다(`{"enum":[…]}` · 선택 칸은 `anyOf` 로 감싼다).
+    fn word_schema() -> Value {
+        serde_json::from_str(
+            r#"{"type":"object","properties":{
+                 "backend":{"enum":["Claude","Codex"]},
+                 "format":{"anyOf":[{"enum":["Terminal","StreamJson"]},{"type":"null"}]},
+                 "name":{"type":"string"},
+                 "rows":{"type":"array","items":{"enum":["Claude"]}}}}"#,
+        )
+        .expect("픽스처 스키마")
+    }
+
+    fn respelled(mut args: Value) -> Value {
+        enum_words_to_declared_spelling(&word_schema(), &mut args);
+        args
+    }
+
+    #[test]
+    fn an_enum_word_typed_in_another_casing_becomes_the_declared_spelling() {
+        let out = respelled(json!({ "backend": "codex", "format": "streamjson" }));
+
+        assert_eq!(out["backend"], json!("Codex"));
+        assert_eq!(
+            out["format"],
+            json!("StreamJson"),
+            "선택 칸(anyOf)도 옮긴다"
+        );
+
+        let out = respelled(json!({ "backend": "CLAUDE" }));
+        assert_eq!(out["backend"], json!("Claude"));
+    }
+
+    #[test]
+    fn nested_enum_words_are_reached() {
+        let out = respelled(json!({ "rows": ["claude"] }));
+        assert_eq!(out["rows"][0], json!("Claude"));
+    }
+
+    /// 열거가 아닌 칸의 대소문자는 값의 일부다 — 경로·이름·id 가 여기 든다.
+    #[test]
+    fn a_free_string_field_and_an_undeclared_field_keep_their_casing() {
+        let out = respelled(json!({ "name": "Worker", "unknown": "Claude" }));
+
+        assert_eq!(out["name"], json!("Worker"));
+        assert_eq!(out["unknown"], json!("Claude"));
+    }
+
+    /// 모르는 낱말은 그대로 둔다 — 반려 문구를 내는 것은 역직렬화 쪽이다.
+    #[test]
+    fn a_word_the_enum_does_not_declare_is_left_alone() {
+        let out = respelled(json!({ "backend": "codx" }));
+        assert_eq!(out["backend"], json!("codx"));
+    }
+
+    /// ★대소문자만 다른 후보가 둘이면 안 건드린다★ — 어느 쪽으로 읽을지를 이 층이 정해 버린다.
+    #[test]
+    fn a_word_that_two_declared_spellings_could_be_is_left_alone() {
+        let ambiguous: Value =
+            serde_json::from_str(r#"{"anyOf":[{"enum":["Claude"]},{"enum":["CLAUDE"]}]}"#)
+                .expect("스키마");
+        let mut value = json!("claude");
+        enum_words_to_declared_spelling(&ambiguous, &mut value);
+
+        assert_eq!(value, json!("claude"));
     }
 
     /// ★두 뜻이 겹치면 안 건드린다★ — 정수로 접으면 실수로 읽을 갈래의 값을 우리가 바꿔 버린다.
