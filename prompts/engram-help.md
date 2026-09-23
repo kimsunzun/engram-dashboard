@@ -50,7 +50,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
 
   {tool} agent.new --backend <claude|codex> --cwd <폴더> [--name <이름>]
-      만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 여기서만 고른다.
+      만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 만들 때 고르며 바꾸는 명령은 없다.
 
   {tool} agent.spawn --target <이름|id>
       띄운다 — 처음이면 새로 시작하고, 지난 세션이 있으면 이어받는다.
@@ -84,10 +84,11 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       창의 마지막 탭이면 그 창도 닫힌다
 
   {tool} slot.split --view_id <id> --slot_id <id> --dir <LeftRight|TopBottom>
-      슬롯을 둘로 나눈다. 새로 생긴 슬롯 id 를 돌려준다
+      슬롯을 반으로 나눈다. 새 슬롯은 LeftRight 면 오른쪽, TopBottom 이면 아래에 생기고 포커스를 받는다. 그 id 를 돌려준다
   {tool} slot.close --view_id <id> --slot_id <id>
       형제가 그 자리를 물려받는다
   {tool} slot.focus --view_id <id> --slot_id <id>
+      포커스를 그 슬롯으로 옮긴다. 포커스를 되읽는 명령은 없다
   {tool} slot.popout --view_id <id> --slot_id <id> [--to_window <label>]
       슬롯의 내용을 다른 창의 새 탭으로 옮긴다. to_window 를 빼면 새 창을 연다
   {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette> [--agent_id <id>]
@@ -98,11 +99,12 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} slot.assignAgent --view_id <id> --slot_id <id> --agent_id <id>
       이미 살아 있는 에이전트를 그 슬롯에 붙인다. 새로 띄우지는 않는다
 
-slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 얻는다.
+slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 얻는다. 새 탭의 하나뿐인 슬롯은 --view_id 에 tab.create 가 준 값을 주고 top-left 로 푼다. 포커스는 사람이 빈 칸·에이전트 칸을 클릭하거나 포커스 슬롯이 닫혀도 옮는다. 확실히 집을 땐 split 이 준 id 나 모서리 낱말을 쓴다.
 
   {tool} slot.resolveSpatial --token <낱말> [--window <label>] [--view_id <id>]
-      left · right · up · down · top-left · top-right · bottom-left · bottom-right 를 슬롯 id 로 푼다.
       view_id 를 빼면 그 창의 활성 탭이 대상이고, window 도 빼면 main 창이다
+      top-left · top-right · bottom-left · bottom-right   그 탭에서 그 모서리를 차지한 슬롯. 포커스와 무관하다
+      left · right · up · down                            포커스 슬롯 옆 슬롯. 여럿이면 가장 넓게 맞닿은 것(같으면 어느 쪽인지 보장하지 않는다), 없으면 null
 
 함정 셋. slot.assignAgent 의 agent_id 는 `{tool} agent.list` 가 준 id 여야 한다 — 표시 이름을 주면 거절되지 않은 채 슬롯이 빈 칸으로 남는다. 인자는 `--flag 값` 꼴만 받고 `--flag=값` 은 거절된다. 그리고 아래 둘만 인자 이름이 camelCase 다.
 
@@ -126,4 +128,4 @@ theme 은 전체 기본값이고 windows 는 창 label 마다의 덮어쓰기다
 
 이 명령은 파일을 쓰지 않는다 — 쓰는 것은 부르는 쪽이다. 파일이 없거나 깨져 있어도 오류가 아니라 dark 로 떨어진다.
 
-data_dir 은 배포본에서 실행파일 폴더의 data/, 개발 트리에서 .engram-data 이고, ENGRAM_DATA_DIR 로 덮을 수 있다.
+data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-data 이고, 루트가 없으면 그 폴더의 .engram-data 다.
