@@ -370,7 +370,6 @@ impl World {
             .collect()
     }
 
-    // main 첫 탭은 트리 슬롯 + 빈 작업 슬롯으로 뜬다(ADR-0063) — 그 빈 칸.
     fn empty_slot(&self, view: uuid::Uuid) -> uuid::Uuid {
         tree::first_empty_slot_id(&apply::get_view(&self.state, view).expect("view").layout)
             .expect("빈 슬롯")

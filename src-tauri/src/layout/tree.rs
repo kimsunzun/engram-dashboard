@@ -54,7 +54,7 @@ pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     }
 }
 
-// 대상 Slot 을 `Split{dir, ratio:0.5, a=원래 슬롯, b=새 빈 슬롯}` 으로 치환하고 **새 빈 슬롯의
+// 대상 Slot 을 `Split{id=새 id, dir, ratio:0.5, a=원래 슬롯, b=새 빈 슬롯}` 으로 치환하고 **새 빈 슬롯의
 // id 를 반환**(호출자가 focus 이동·검증에 사용). slot_id 가 없으면 트리 불변 + None 반환(no-op).
 pub fn split_in_tree(
     node: &mut LayoutNode,
@@ -72,6 +72,7 @@ pub fn split_in_tree(
                 };
                 let original = std::mem::replace(node, LayoutNode::new_empty_slot());
                 *node = LayoutNode::Split {
+                    id: Uuid::new_v4(), // ADR-0223 — 분할마다 새 id
                     dir,
                     ratio: 0.5,
                     a: Box::new(original),
@@ -94,6 +95,7 @@ pub fn split_in_tree(
 }
 
 // - 닫는 슬롯이 어떤 Split 의 **직접 자식**이면 → 그 Split 을 **형제(다른 자식)로 치환**(형제 승격).
+//   형제는 노드째 옮긴다 — 재생성하면 분할 id 가 바뀐다. // ADR-0223
 // - 닫는 슬롯이 **root 자체**(트리에 슬롯 하나뿐)면 → 새 빈 슬롯으로 리셋(View 는 빈 상태 유지).
 // - slot_id 가 없으면 트리 불변(no-op, false 반환).
 //
@@ -260,7 +262,9 @@ mod tests {
         let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).expect("split 성공");
         assert_ne!(new_id, id);
         match &node {
-            LayoutNode::Split { dir, ratio, a, b } => {
+            LayoutNode::Split {
+                dir, ratio, a, b, ..
+            } => {
                 assert_eq!(*dir, SplitDir::LeftRight);
                 assert_eq!(*ratio, 0.5, "split 기본 ratio 0.5");
                 assert!(matches!(a.as_ref(), LayoutNode::Slot { id: aid, .. } if *aid == id));
@@ -296,6 +300,37 @@ mod tests {
             LayoutNode::Slot { .. } => 0,
             LayoutNode::Split { a, b, .. } => 1 + count_splits(a) + count_splits(b),
         }
+    }
+
+    fn split_id(node: &LayoutNode) -> Uuid {
+        match node {
+            LayoutNode::Split { id, .. } => *id,
+            LayoutNode::Slot { .. } => panic!("Split 이어야 함: {node:?}"),
+        }
+    }
+
+    // Split(R){x, Split(S){y, z}} — 반환 = (트리, x, y, z, R, S).
+    fn nested_split() -> (LayoutNode, Uuid, Uuid, Uuid, Uuid, Uuid) {
+        let (mut node, x) = single_slot();
+        let y = split_in_tree(&mut node, x, SplitDir::LeftRight).unwrap();
+        let root = split_id(&node);
+        let z = split_in_tree(&mut node, y, SplitDir::TopBottom).unwrap();
+        let LayoutNode::Split { b, .. } = &node else {
+            unreachable!()
+        };
+        let inner = split_id(b);
+        (node, x, y, z, root, inner)
+    }
+
+    #[test]
+    fn every_split_gets_a_fresh_id() {
+        let (node, _x, _y, _z, root, inner) = nested_split();
+        assert_ne!(root, inner);
+        assert_eq!(
+            split_id(&node),
+            root,
+            "안쪽 분할이 바깥 split 의 id 를 안 바꾼다"
+        );
     }
 
     // ── close: sibling promote ─────────────────────────────────────────────
@@ -334,6 +369,30 @@ mod tests {
         assert!(contains_slot(&node, y_id));
         assert!(!contains_slot(&node, b_id));
         assert_eq!(count_splits(&node), 1);
+    }
+
+    #[test]
+    fn close_promotes_sibling_split_with_its_own_id() {
+        let (mut node, x, _y, _z, root, inner) = nested_split();
+        assert!(close_in_tree(&mut node, x));
+        assert_eq!(
+            split_id(&node),
+            inner,
+            "승격된 split 이 자기 id 를 들고 올라온다"
+        );
+        assert_ne!(split_id(&node), root);
+    }
+
+    #[test]
+    fn close_inside_a_child_keeps_the_parent_split_id() {
+        let (mut node, x, y, z, root, _inner) = nested_split();
+        assert!(close_in_tree(&mut node, y));
+        assert_eq!(split_id(&node), root, "자식만 바뀐 split 은 id 유지");
+        let LayoutNode::Split { a, b, .. } = &node else {
+            unreachable!()
+        };
+        assert_eq!(first_slot_id(a), x);
+        assert!(matches!(b.as_ref(), LayoutNode::Slot { id, .. } if *id == z));
     }
 
     // ── close: root slot → reset to empty ───────────────────────────────────

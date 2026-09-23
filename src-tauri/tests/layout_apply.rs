@@ -632,13 +632,22 @@ fn focus_slot_notifies_without_routing_resync() {
     let w = World::new();
     let view = w.main_active();
     let target = w.empty_slot(view);
+    // 분할이 새 칸으로 포커스를 가져가므로 `target` 은 이제 포커스 밖이다 — 그래야 이동을 잰다.
+    apply::split_slot(&w.state, &w.subs, &w.ev, view, target, SplitDir::LeftRight).unwrap();
+    assert_ne!(w.snapshot(view).focused_slot_id, Some(target));
+    let (layout_before, tabs_before, resyncs_before) =
+        (w.layout_events(), w.tab_events(), w.resyncs());
 
     apply::focus_slot(&w.state, &w.ev, view, target).unwrap();
 
     assert_eq!(w.snapshot(view).focused_slot_id, Some(target));
-    assert_eq!(w.layout_events(), 1);
-    assert_eq!(w.tab_events(), 1);
-    assert_eq!(w.resyncs(), 0, "포커스는 출력 라우팅을 안 바꾼다");
+    assert_eq!(w.layout_events(), layout_before + 1);
+    assert_eq!(w.tab_events(), tabs_before + 1);
+    assert_eq!(
+        w.resyncs(),
+        resyncs_before,
+        "포커스는 출력 라우팅을 안 바꾼다"
+    );
 }
 
 #[test]
@@ -1425,15 +1434,13 @@ fn list_windows_lists_main_and_runtime_windows() {
 fn resolve_spatial_finds_neighbor_of_focused_slot() {
     let w = World::new();
     let view = w.main_active();
-    let slots = w.slots(view);
-    let focused = w.snapshot(view).focused_slot_id.unwrap();
-    let other = *slots
-        .iter()
-        .find(|s| **s != focused)
-        .expect("main 은 2슬롯");
+    let left = w.empty_slot(view);
+    let right =
+        apply::split_slot(&w.state, &w.subs, &w.ev, view, left, SplitDir::LeftRight).unwrap();
+    assert_eq!(w.snapshot(view).focused_slot_id, Some(right));
 
-    let right = apply::resolve_spatial(&w.state, "right", None, Some(view)).unwrap();
-    assert_eq!(right, Some(other));
+    let got = apply::resolve_spatial(&w.state, "left", None, Some(view)).unwrap();
+    assert_eq!(got, Some(left));
 }
 
 #[test]

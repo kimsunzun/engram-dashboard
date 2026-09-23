@@ -41,6 +41,7 @@ export const ko = {
     domModeEnable: 'DOM 모드 켜기',
     domModeDisable: 'DOM 모드 끄기',
     domModeToggle: 'DOM 모드 전환',
+    renderFailed: '이 슬롯을 표시하지 못했습니다 — 우클릭 메뉴로 비우거나 닫을 수 있습니다',
   },
   window: {
     create: '새 창',

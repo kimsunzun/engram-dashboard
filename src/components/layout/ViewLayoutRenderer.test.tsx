@@ -181,8 +181,8 @@ function slotNode(id: string, agentId: string | null): LayoutNode {
   }
 }
 
-function splitNode(a: LayoutNode, b: LayoutNode, ratio = 0.5, dir: SplitDir = 'left_right'): LayoutNode {
-  return { type: 'split', dir, ratio, a, b }
+function splitNode(id: string, a: LayoutNode, b: LayoutNode, ratio = 0.5, dir: SplitDir = 'left_right'): LayoutNode {
+  return { type: 'split', id, dir, ratio, a, b }
 }
 
 /**
@@ -563,7 +563,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
 describe('ViewLayoutRenderer — split 분기', () => {
   it('split 노드 → a/b 두 자식 슬롯이 재귀 렌더된다', () => {
-    const node = splitNode(slotNode('s1', null), slotNode('s2', null))
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null))
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     expect(document.querySelector('[data-slot-id="s1"]')).toBeTruthy()
     expect(document.querySelector('[data-slot-id="s2"]')).toBeTruthy()
@@ -572,7 +572,7 @@ describe('ViewLayoutRenderer — split 분기', () => {
   it('split 자식에 agent_id 있으면(caps 도착) 해당 슬롯에만 TerminalSlot 이 마운트된다', () => {
     const agentId = 'zzzz-agent'
     seedAgents(agentInfo(agentId, false))
-    const node = splitNode(slotNode('s1', agentId), slotNode('s2', null))
+    const node = splitNode('sp', slotNode('s1', agentId), slotNode('s2', null))
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     const terminals = screen.getAllByTestId('terminal-slot')
     expect(terminals).toHaveLength(1)
@@ -582,17 +582,17 @@ describe('ViewLayoutRenderer — split 분기', () => {
 
   // ── ★ADR-0063: node.ratio → 첫 Pane 의 preferredSize % 초기 사이징★ ──────────────────────────────
   // 이 스위트가 막는 것: split 렌더러가 node.ratio 를 첫 pane(a=왼/위)의 preferredSize="<pct>%" 로 넘겨
-  // 부팅 레이아웃 narrow-left(0.2)가 실제로 20/80 으로 뜨는지(50/50 무시 + defaultSizes-px-붕괴 회귀 안전망).
+  // 0.5 가 아닌 ratio(예: 0.2)도 그 비율로 뜨는지(ratio 무시 + defaultSizes-px-붕괴 회귀 안전망).
   // 드래그→백엔드 되쓰기는 이 슬라이스 밖(초기 사이징만).
   it('split(ratio=0.2) → 첫 pane preferredSize="20%" 로 초기 사이징이 전달된다', () => {
-    const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.2)
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.2)
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     const firstPane = screen.getAllByTestId('allotment-pane')[0]
     expect(firstPane.getAttribute('data-preferred-size')).toBe('20%')
   })
 
   it('split(ratio=0.5) → 첫 pane preferredSize="50%" (기존 50/50 스플릿은 그대로 유지)', () => {
-    const node = splitNode(slotNode('s1', null), slotNode('s2', null)) // 기본 ratio=0.5
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null)) // 기본 ratio=0.5
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     const firstPane = screen.getAllByTestId('allotment-pane')[0]
     expect(firstPane.getAttribute('data-preferred-size')).toBe('50%')
@@ -603,7 +603,7 @@ describe('ViewLayoutRenderer — split 분기', () => {
   // 바뀌어 pane 이 unmount+remount → Allotment 가 전 pane 을 균등 재분배 → 형제(a=왼 20%)의 비율 소실.
   // 위치 기반 안정 key("pane-a"/"pane-b")면 pane 이 마운트 유지(같은 인스턴스 id) → 사이즈 보존.
   it('b pane 콘텐츠가 slot→중첩 split 으로 재구조화돼도 두 pane 인스턴스 id 가 유지된다(remount 없음)', () => {
-    const initial = splitNode(slotNode('left', null), slotNode('right', null), 0.2)
+    const initial = splitNode('outer', slotNode('left', null), slotNode('right', null), 0.2)
     const { rerender } = render(<ViewLayoutRenderer node={initial} focusedSlotId={null} />)
     const outerPanesBefore = topLevelPanes()
     expect(outerPanesBefore).toHaveLength(2)
@@ -611,8 +611,9 @@ describe('ViewLayoutRenderer — split 분기', () => {
     const preferredBefore = outerPanesBefore[0].getAttribute('data-preferred-size')
 
     const restructured = splitNode(
+      'outer',
       slotNode('left', null),
-      splitNode(slotNode('right', null), slotNode('right-2', null)),
+      splitNode('inner', slotNode('right', null), slotNode('right-2', null)),
       0.2,
     )
     rerender(<ViewLayoutRenderer node={restructured} focusedSlotId={null} />)
@@ -629,13 +630,13 @@ describe('ViewLayoutRenderer — split 분기', () => {
   // 이 두 케이스가 막는 것: 매핑이 뒤집히면 라벨·command·타입·백엔드가 전부 맞는데도 화면만 반대가 된다
   // (라벨↔command 단언만으로는 절대 안 잡히는 층).
   it('dir="top_bottom" → Allotment vertical=true(위/아래로 쌓임)', () => {
-    const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.5, 'top_bottom')
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'top_bottom')
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     expect(screen.getAllByTestId('allotment')[0].getAttribute('data-vertical')).toBe('true')
   })
 
   it('dir="left_right" → Allotment vertical=false(좌/우로 나란히)', () => {
-    const node = splitNode(slotNode('s1', null), slotNode('s2', null), 0.5, 'left_right')
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'left_right')
     render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
     expect(screen.getAllByTestId('allotment')[0].getAttribute('data-vertical')).toBe('false')
   })

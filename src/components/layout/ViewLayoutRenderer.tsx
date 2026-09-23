@@ -18,6 +18,7 @@ import AgentList from '../agent/AgentList'
 import { isContentSlot } from '../agent/selectOpenTarget'
 import { agentPresence } from '../agent/mergeTreeNodes'
 import SlotContextMenu from '../slot/SlotContextMenu'
+import { SlotErrorBoundary } from '../slot/SlotErrorBoundary'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode, type RenderMode } from '../slot/renderMode'
 import { t } from '../../i18n'
@@ -112,6 +113,7 @@ export default function ViewLayoutRenderer({
       lastMountRef.current != null && lastMountRef.current.agentId === slotAgentId
         ? lastMountRef.current
         : null
+    const renderAs = mode ?? kept?.mode
     const presence = slotAgentId != null ? agentPresence(slotAgentId, agents, profiles) : 'unknown'
     // ★ADR-0148 상태 판정 — 축은 "기억 유무"다★
     //   에이전트 있음                → 현행대로(caps 로 렌더러 결정)
@@ -183,57 +185,61 @@ export default function ViewLayoutRenderer({
           setContextMenu({ x: e.clientX, y: e.clientY })
         }}
       >
-        {node.content.type === 'agent' ? (
-          agent == null && !keepDeadView ? (
-            presence === 'reserved' || !agentsLoaded || !profilesLoaded ? (
-              // 프로필은 있는데 아직 뜬 적 없다(스폰 대기·부팅 대기) 또는 목록 자체를 아직 못 받았다 —
-              //   둘 다 "곧 온다" 라서 같은 문구다. ★목록 미수신을 「없습니다」로 새게 두면 안 된다★:
-              //   refreshProfiles 는 재시도 없는 단발 pull 이라 실패·지연이 실제로 가능하고, 그때 대화를
-              //   보존 중인 뷰가 조기 언마운트된다(profilesLoaded 가 그 방어선).
-              <span>{t('agent.connecting')}</span>
+        <SlotErrorBoundary
+          slotId={node.id}
+          resetKey={`${node.id}:${node.content.type}:${slotAgentId ?? ''}:${renderAs ?? ''}`}
+        >
+          {node.content.type === 'agent' ? (
+            agent == null && !keepDeadView ? (
+              presence === 'reserved' || !agentsLoaded || !profilesLoaded ? (
+                // 프로필은 있는데 아직 뜬 적 없다(스폰 대기·부팅 대기) 또는 목록 자체를 아직 못 받았다 —
+                //   둘 다 "곧 온다" 라서 같은 문구다. ★목록 미수신을 「없습니다」로 새게 두면 안 된다★:
+                //   refreshProfiles 는 재시도 없는 단발 pull 이라 실패·지연이 실제로 가능하고, 그때 대화를
+                //   보존 중인 뷰가 조기 언마운트된다(profilesLoaded 가 그 방어선).
+                <span>{t('agent.connecting')}</span>
+              ) : (
+                // 프로필도 없다(트리에서 삭제) — 배정 자체가 유효하지 않은 슬롯.
+                // ★보존 중이던 대화가 여기서 사라지는 건 의도다★: 프로필 삭제는 사용자의 명시적 정리 동작이고,
+                //   ADR-0149 가 그 경우의 표시를 문구로 정했다(뷰 유지 대상이 아니다).
+                <span>{t('agent.noneConnected')}</span>
+              )
             ) : (
-              // 프로필도 없다(트리에서 삭제) — 배정 자체가 유효하지 않은 슬롯.
-              // ★보존 중이던 대화가 여기서 사라지는 건 의도다★: 프로필 삭제는 사용자의 명시적 정리 동작이고,
-              //   ADR-0149 가 그 경우의 표시를 문구로 정했다(뷰 유지 대상이 아니다).
-              <span>{t('agent.noneConnected')}</span>
+              (() => {
+                // ★viewId = node.id(slot id, ADR-0046)★: 슬롯이 자기 slot id 로 구독한다 — 같은 agentId 두
+                //   슬롯도 독립 진도(버그 B 해소). key 도 slot id 로 두어(옛 agent_id 키는 같은 agent 두 슬롯이
+                //   같은 React key 가 돼 remount 가 꼬였다) 슬롯 정체성을 slot 단위로 고정한다.
+                // ★여기서 회차(epoch)를 내려보내지 않는다★: 슬롯의 재구독 트리거에서 화신을 뺐다. 이 자리가
+                //   값을 만들어 내려보내면 그게 곧 재마운트 트리거라, 종료로 명부에서 수거되는 순간 값이
+                //   떨어지며 **replay 가 오기도 전에** 보존하려던 대화가 지워진다(데몬 ring 은 이미 없다).
+                //   화신 회전은 구독 쪽이 권위 명부로 판정해 비우기 신호로 낸다(protocolClient.observeRoster).
+                switch (renderAs) {
+                  case 'dom':
+                    // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
+                    // 한다(터미널 xterm 은 canvas 라 관측 불가).
+                    return <DomSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
+                  case 'rich':
+                    return <RichSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
+                  case 'terminal':
+                  default:
+                    return <TerminalSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
+                }
+              })()
             )
+          ) : node.content.type === 'preset_palette' ? (
+            // 목록/추가/삭제는 PresetPalette 내부에서 agentClient(단일 제어 표면)로 흐른다.
+            <PresetPalette />
+          ) : node.content.type === 'agent_list' ? (
+            // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
+            <AgentList />
           ) : (
-            (() => {
-              // ★viewId = node.id(slot id, ADR-0046)★: 슬롯이 자기 slot id 로 구독한다 — 같은 agentId 두
-              //   슬롯도 독립 진도(버그 B 해소). key 도 slot id 로 두어(옛 agent_id 키는 같은 agent 두 슬롯이
-              //   같은 React key 가 돼 remount 가 꼬였다) 슬롯 정체성을 slot 단위로 고정한다.
-              // ★여기서 회차(epoch)를 내려보내지 않는다★: 슬롯의 재구독 트리거에서 화신을 뺐다. 이 자리가
-              //   값을 만들어 내려보내면 그게 곧 재마운트 트리거라, 종료로 명부에서 수거되는 순간 값이
-              //   떨어지며 **replay 가 오기도 전에** 보존하려던 대화가 지워진다(데몬 ring 은 이미 없다).
-              //   화신 회전은 구독 쪽이 권위 명부로 판정해 비우기 신호로 낸다(protocolClient.observeRoster).
-              const renderAs = mode ?? kept?.mode
-              switch (renderAs) {
-                case 'dom':
-                  // ★DOM 모드(§5 관측)★: 같은 출력 스트림을 평문 <pre> 로 그려 CDP eval/innerText 로 읽히게
-                  // 한다(터미널 xterm 은 canvas 라 관측 불가).
-                  return <DomSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
-                case 'rich':
-                  return <RichSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
-                case 'terminal':
-                default:
-                  return <TerminalSlot key={node.id} viewId={node.id} agentId={slotAgentId!} />
-              }
-            })()
-          )
-        ) : node.content.type === 'preset_palette' ? (
-          // 목록/추가/삭제는 PresetPalette 내부에서 agentClient(단일 제어 표면)로 흐른다.
-          <PresetPalette />
-        ) : node.content.type === 'agent_list' ? (
-          // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
-          <AgentList />
-        ) : (
-          // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
-          //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
-          //   pointer-events 를 끊어 아이콘 위 클릭도 슬롯에 그대로 닿는다 — 유틸리티 클래스가 아니라 인라인인
-          //   이유는 이 끊음이 스타일 취향이 아니라 동작 계약이라서다(클래스 규칙으로 덮이지 않고, Tailwind 를
-          //   적용하지 않는 테스트 환경에서도 계산된 값으로 검증된다).
-          <Plus className="size-11 text-muted" style={{ pointerEvents: 'none', opacity: 0.5 }} />
-        )}
+            // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
+            //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
+            //   pointer-events 를 끊어 아이콘 위 클릭도 슬롯에 그대로 닿는다 — 유틸리티 클래스가 아니라 인라인인
+            //   이유는 이 끊음이 스타일 취향이 아니라 동작 계약이라서다(클래스 규칙으로 덮이지 않고, Tailwind 를
+            //   적용하지 않는 테스트 환경에서도 계산된 값으로 검증된다).
+            <Plus className="size-11 text-muted" style={{ pointerEvents: 'none', opacity: 0.5 }} />
+          )}
+        </SlotErrorBoundary>
         {contextMenu && (
           // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
           //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId)를 넘겨 각 command.run 이 백엔드
@@ -273,16 +279,27 @@ export default function ViewLayoutRenderer({
   //   *퍼센트 문자열*로 줘 컨테이너 대비 비율로 배치한다(b 는 나머지 채움). 0.2 → "20%" = 20/80,
   //   0.5 → "50%" = 50/50. 컨테이너 실측 픽셀을 몰라도 되고 높이는 Allotment 가 컨테이너로 채운다.
   //   ★초기 사이징만★: 드래그 리사이즈→백엔드 ratio 되쓰기는 이 슬라이스 범위 밖(ADR-0063).
-  // ★Allotment.Pane key = 위치 고정(pane-a/pane-b), 콘텐츠 파생 금지★: 옛 key 는 nodeKey(node.a) 로
-  //   *서브트리 구조*에서 파생됐다 — 어느 pane 안의 슬롯이 split 으로 재구조화되면 그 pane 의 nodeKey 가
-  //   바뀌어 React 가 Pane 을 unmount+remount 했고, Allotment 는 pane 이탈+합류로 보아 전 pane 을 균등
-  //   재분배(형제의 비율 소실 — 예: 왼 20% → 50% 점프)했다. split 은 항상 a/b 두 자식을 이 순서로만
-  //   가지므로 위치 기반 안정 key("pane-a"/"pane-b")를 쓴다 → 콘텐츠 재구조화에도 Pane 이 마운트 유지 →
-  //   Allotment 가 사이즈를 보존한다. (형제 2개 사이에서만 유일하면 됨 — 중첩 Allotment 는 각자 짝을 가짐.)
-  //   preferredSize(=ratio 파생 초기 사이징 %)는 첫 pane(a)에만 — 마운트 시 1회 적용·이후 보존(ADR-0063).
+  // ★Allotment.Pane key = 위치 고정(pane-a/pane-b), 콘텐츠 파생 금지★: 서브트리 구조에서 key 를 파생하면
+  //   pane 안의 슬롯을 분할하는 순간 key 가 바뀌어 Pane 이 unmount+remount 되고, Allotment 는 이를 pane
+  //   이탈+합류로 보아 전 pane 을 균등 재분배한다(형제의 비율 소실 — 예: 왼 20% → 50% 점프). split 은 항상
+  //   a/b 두 자식을 이 순서로만 가지므로 위치 key 로 충분하다(중첩 Allotment 는 각자 짝을 가진다).
+  // ★Allotment key = 이 split 의 id·dir★ (ADR-0223): allotment 는 방향을 마운트 때 한 번만 짓고(이후 `vertical` 은
+  //   CSS 클래스만 바꾼다) preferredSize 도 새로 합류한 pane 에만 먹인다 — 다른 split 에 옛 인스턴스를 쓰면
+  //   방향이 얼어 pane 이 0 으로 접히거나(뷰가 빈 화면) 옛 split 의 드래그 픽셀 크기가 남는다.
+  //   - id = split 노드의 정체(백엔드가 분할마다 새로 뽑고 형제 승격 때 노드와 함께 옮긴다). 닫기·팝업 분리로
+  //     다른 split 이 이 자리에 올라오면 key 가 바뀌어 새로 짓고, 자식만 바뀐 같은 split 은 key 가 그대로라
+  //     인스턴스(= 드래그한 크기)와 영향 없는 형제 서브트리가 남는다. 운영의 split 은 전부 ratio 0.5 로 태어나
+  //     방향·비율로는 승격된 split 을 못 가른다.
+  //   - dir 도 key 에 둔다 — 같은 split 의 방향이 제자리에서 바뀌어도 새로 지어야 한다.
+  //   - ★ratio 는 key 에 넣지 않는다★: 드래그→백엔드 ratio 되쓰기가 생기면 드래그마다 모든 터미널이
+  //     재마운트된다. 그 대가로 제자리 ratio 변경은 화면에 안 먹으므로(preferredSize 는 새 pane 에만 적용)
+  //     그 경로를 만들 땐 명령형 resize 가 필요하다.
+  //   - ★첫 슬롯 id 로 key 를 파생하지 않는다★: 슬롯 하나를 닫으면 조상 split 의 key 가 바뀌어 영향 없는
+  //     형제 서브트리까지 재마운트된다(터미널 재구독, ADR-0148 이 보존하던 죽은 에이전트 뷰 소실).
+  //   preferredSize(=ratio 파생 초기 사이징 %)는 첫 pane(a)에만 — 인스턴스 마운트 때 1회 적용(ADR-0063).
   return (
     <div style={{ height: '100%' }}>
-      <Allotment vertical={node.dir === 'top_bottom'}>
+      <Allotment key={`${node.id}:${node.dir}`} vertical={node.dir === 'top_bottom'}>
         <Allotment.Pane key="pane-a" preferredSize={`${Math.round(node.ratio * 100)}%`}>
           <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
         </Allotment.Pane>
