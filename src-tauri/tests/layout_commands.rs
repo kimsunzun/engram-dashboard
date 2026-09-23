@@ -223,30 +223,27 @@ impl Queued {
     }
 }
 
-// ── 패닉 훅 잠깐 끄기(RAII) ─────────────────────────────────────────────────
+// ── 패닉 훅 잠깐 끄기 ───────────────────────────────────────────────────────
 
-/// 패닉 메시지를 잠깐 삼킨다 — ★반드시 RAII 로 되돌린다★.
+/// 패닉 메시지를 삼킨 채 `body` 를 끝까지 돌리고 원래 훅을 되돌린다 — 같은 모양의 동기 판
+/// `engram_dashboard_command::testing::with_quiet_panic_hook` 의 async 판이다.
 ///
-/// 훅은 **프로세스 전역**이고 이 바이너리의 테스트들은 한 프로세스에서 **병렬**로 돈다. 손으로
-/// `set_hook`/`set_hook(previous)` 를 쓰면 그 사이에서 무엇이든 패닉하면(=테스트 실패) 복원 줄에 닿지 못해
-/// **그 뒤 모든 패닉 메시지가 조용해진다** — 실패 원인이 순서에 따라 사라지는 최악의 진단 파괴다. Drop 은
-/// unwind 중에도 돌므로 그 경로가 없다.
-struct QuietPanics(Option<Box<dyn Fn(&std::panic::PanicHookInfo<'_>) + Sync + Send + 'static>>);
-
-impl QuietPanics {
-    fn install() -> Self {
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        QuietPanics(Some(previous))
-    }
-}
-
-impl Drop for QuietPanics {
-    fn drop(&mut self) {
-        if let Some(previous) = self.0.take() {
-            std::panic::set_hook(previous);
-        }
-    }
+/// ★구간을 의도된 패닉 하나로 좁게 잡고, 되돌리기는 unwind 를 잡은 **뒤에** 한다 — RAII(`Drop`)로 옮기지
+/// 말 것★. 두 사유의 정본은 그 헬퍼의 doc 과 본문 주석이다.
+async fn quiet_panics<T>(body: impl std::future::Future<Output = T>) -> T {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(body)).await;
+    std::panic::set_hook(previous);
+    outcome.unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("<문자열이 아닌 패닉 페이로드>");
+        eprintln!("조용한 패닉 훅 구간 안에서 본문이 패닉했다(원래 출력은 삼켜졌다): {message}");
+        std::panic::resume_unwind(payload)
+    })
 }
 
 // ── 답장 수거 ────────────────────────────────────────────────────────────────
@@ -1115,10 +1112,7 @@ async fn a_panicking_handler_answers_instead_of_taking_the_process_down() {
     );
     let mail = Mailbox::default();
 
-    let reply = {
-        let _quiet = QuietPanics::install();
-        call(&receiver, &queue, &mail, "window.list", json!({})).await
-    };
+    let reply = quiet_panics(call(&receiver, &queue, &mail, "window.list", json!({}))).await;
 
     assert_eq!(error_of(reply).code(), ErrorCode::Internal);
 }
