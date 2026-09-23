@@ -1186,10 +1186,20 @@ mod tests {
     fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while !cond() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "{what} — 기다리다 마감을 넘겼다. 값이 틀린 게 아니라 **일어나지 않았다**"
-            );
+            if std::time::Instant::now() >= deadline {
+                let message = format!(
+                    "{what} — 기다리다 마감을 넘겼다. 값이 틀린 게 아니라 **일어나지 않았다**"
+                );
+                // ★패닉하기 전에 캡처를 안 거치는 stderr 에 먼저 쓴다★ — 패닉 본문은 패닉 훅을 타고 나가서,
+                //   조용한 훅 구간 안이거나 바이너리가 abort 하면 사라진다. 이 줄은 둘 다에서 남는다(실측).
+                let thread = std::thread::current();
+                let name = thread.name().unwrap_or("<unnamed>");
+                let _ = std::io::Write::write_all(
+                    &mut std::io::stderr(),
+                    format!("thread '{name}': {message}\n").as_bytes(),
+                );
+                panic!("{message}");
+            }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -2104,14 +2114,15 @@ mod tests {
 
     // ── ADR-0185: 받아 온 thread id 가 조립점의 기록 동사까지 실제로 간다 ──────────────────
 
-    /// 가짜 app-server 스크립트를 지운다 — 지웠으면 `true`. ★한 번 시도하고 마는 모양은 `%TEMP%` 에
-    /// 파일을 남겼다★: `shutdown()` 이 돌아온 뒤에도 자식이 그 파일 핸들을 잠깐 더 쥐고 있어 첫
-    /// `remove_file` 이 실패한다.
+    /// 가짜 app-server 의 파일 하나를 지운다 — 지웠으면 `true`. ★한 번 시도하고 마는 모양은 `%TEMP%` 에
+    /// 스크립트를 남겼다★: `shutdown()` 이 돌아온 뒤에도 자식이 그 파일 핸들을 잠깐 더 쥐고 있어 첫
+    /// `remove_file` 이 실패한다. 표식 파일도 같은 문을 탄다 — 가짜는 쓰고 곧바로 닫지만, 새 파일을 잠깐
+    /// 여는 제3자(백신·색인기)가 한 번 시도를 깜빡이로 만들 수 있다(관측된 적은 없다).
     /// ★결과를 돌려주는 이유 = `eprintln!` 은 **통과한** 항목에서 libtest 가 삼킨다★ — 그 자리에 적으면
     /// 지우지 못한 사실이 아무 데도 안 남고 찌꺼기만 쌓인다. 호출자가 단언으로 올린다.
     #[cfg(windows)]
     #[must_use = "지우지 못한 사실을 버리면 찌꺼기가 조용히 쌓인다 — 단언으로 올릴 것"]
-    fn remove_script(path: &std::path::Path) -> bool {
+    fn remove_fake_file(path: &std::path::Path) -> bool {
         for _ in 0..40 {
             if std::fs::remove_file(path).is_ok() || !path.exists() {
                 return true;
@@ -2133,32 +2144,76 @@ mod tests {
         Rejects,
     }
 
-    /// 가짜 app-server 를 임시 파일로 구워 그것을 띄울 [`CommandSpec`] 과 그 경로를 돌려준다.
-    /// `start_thread_id` = 이 가짜가 `thread/start` 에 답할 id.
-    ///
-    /// ★경로를 함께 돌려주는 것은 계약이다★ — 항목마다 [`remove_script`] 로 지워야 하고, 못 지운 사실을
-    /// 단언으로 올려야 한다.
+    /// [`FakeResume::Rejects`] 가 싣는 거절 문구 — 항목이 배달된 사유에서 이것을 찾아 「거절이 실제로
+    /// 왕복했다」를 가른다.
+    /// ★문구를 실측된 것으로 쓴다★ — 이 가짜가 「모르는 스레드」를 흉내 내는 목적이 분류까지 태우는
+    /// 것인데, 지어낸 문구를 쓰면 `resume_failure_kind` 가 못 알아봐서 그 배선이 시험대를 그냥 통과한다
+    /// (`docs/reference/backend-capabilities.md` §1 「모르는 id 를 주면」).
     #[cfg(windows)]
-    fn bake_fake_app_server(
-        start_thread_id: &str,
-        resume: FakeResume,
-    ) -> (CommandSpec, std::path::PathBuf) {
+    const FAKE_RESUME_REJECTION: &str = "no rollout found for thread id";
+
+    /// 가짜가 읽기 루프에 들어서며 만들 빈 파일의 경로를 싣는 환경 변수 이름.
+    #[cfg(windows)]
+    const FAKE_READY_ENV: &str = "ENGRAM_FAKE_APP_SERVER_READY";
+
+    /// 구운 가짜 app-server 한 벌.
+    ///
+    /// ★두 경로를 함께 드는 것은 계약이다★ — 항목마다 [`FakeAppServer::remove`] 로 지워야 하고, 못 지운
+    /// 사실을 단언으로 올려야 한다.
+    #[cfg(windows)]
+    struct FakeAppServer {
+        spec: CommandSpec,
+        script: std::path::PathBuf,
+        /// 가짜가 읽기 루프에 들어서며 만드는 빈 파일 — [`wait_for_the_fake_to_listen`] 이 이것을 기다린다.
+        ready: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl FakeAppServer {
+        /// 스크립트와 표식을 지우고 **지우지 못한 경로**를 돌려준다 — 비었으면 둘 다 지웠다.
+        #[must_use = "지우지 못한 사실을 버리면 찌꺼기가 조용히 쌓인다 — 단언으로 올릴 것"]
+        fn remove(&self) -> Vec<&std::path::Path> {
+            [self.script.as_path(), self.ready.as_path()]
+                .into_iter()
+                .filter(|path| !remove_fake_file(path))
+                .collect()
+        }
+
+        /// 이 가짜를 손으로 돌려 보는 **PowerShell** 한 줄(cmd·bash 에서는 그대로 돌지 않는다).
+        /// ★표식 경로 변수를 함께 적는다★ — 없으면 스크립트가 표식을 쓰는 줄에서 곧바로 죽어
+        /// (`$ErrorActionPreference = 'Stop'`) 실패가 재현되지 않는다.
+        /// 값은 전부 작은따옴표로 감싸고 안의 `'` 는 겹쳐 쓴다 — 경로의 공백·`$` 가 해석되지 않게.
+        fn hand_run(&self) -> String {
+            let quote = |s: &str| format!("'{}'", s.replace('\'', "''"));
+            let args: Vec<String> = self.spec.args.iter().map(|a| quote(a)).collect();
+            format!(
+                "$env:{FAKE_READY_ENV}={}; {} {}",
+                quote(&self.ready.to_string_lossy()),
+                self.spec.program,
+                args.join(" ")
+            )
+        }
+    }
+
+    /// 가짜 app-server 를 임시 파일로 굽는다. `start_thread_id` = 이 가짜가 `thread/start` 에 답할 id.
+    #[cfg(windows)]
+    fn bake_fake_app_server(start_thread_id: &str, resume: FakeResume) -> FakeAppServer {
         let resume_reply = match resume {
             FakeResume::EchoesTheThreadId => {
                 r#"'"result":{"thread":{"id":"resumed-' + $tid + '","cliVersion":"0.0.0-fake"}}'"#
+                    .to_string()
             }
-            // ★문구를 실측된 것으로 쓴다★ — 이 가짜가 「모르는 스레드」를 흉내 내는 목적이 분류까지
-            //   태우는 것인데, 지어낸 문구를 쓰면 `resume_failure_kind` 가 못 알아봐서 그 배선이 시험대를
-            //   그냥 통과한다(`docs/reference/backend-capabilities.md` §1 「모르는 id 를 주면」).
             FakeResume::Rejects => {
-                r#"'"error":{"code":-32600,"message":"no rollout found for thread id"}'"#
+                format!(r#"'"error":{{"code":-32600,"message":"{FAKE_RESUME_REJECTION}"}}'"#)
             }
         };
         let script = FAKE_APP_SERVER_PS1
             .replace("THREAD_ID_PLACEHOLDER", start_thread_id)
-            .replace("RESUME_REPLY_PLACEHOLDER", resume_reply);
-        let script_path =
-            std::env::temp_dir().join(format!("engram-fake-app-server-{}.ps1", Uuid::new_v4()));
+            .replace("RESUME_REPLY_PLACEHOLDER", &resume_reply)
+            .replace("READY_ENV_PLACEHOLDER", FAKE_READY_ENV);
+        let stem = format!("engram-fake-app-server-{}", Uuid::new_v4());
+        let script_path = std::env::temp_dir().join(format!("{stem}.ps1"));
+        let ready = std::env::temp_dir().join(format!("{stem}.ready"));
         std::fs::write(&script_path, script).expect("가짜 app-server 기록");
 
         let spec = CommandSpec {
@@ -2170,10 +2225,90 @@ mod tests {
                 "-File".into(),
                 script_path.to_string_lossy().into_owned(),
             ],
-            env: vec![],
+            env: vec![(FAKE_READY_ENV.into(), ready.to_string_lossy().into_owned())],
             cwd: PathBuf::from("."),
         };
-        (spec, script_path)
+        FakeAppServer {
+            spec,
+            script: script_path,
+            ready,
+        }
+    }
+
+    /// 가짜가 읽기 루프에 들어설 때까지 기다린다 — ★`start()` 바로 앞에서 부른다★.
+    ///
+    /// 핸드셰이크 예산(`transport::HANDSHAKE_BUDGET`)의 시계는 `start()` 가 띄우는 라이터가 잡는데, 가짜는
+    /// 그보다 먼저 `open_spawn` 에서 떠 있다. 그 사이의 powershell 기동은 이 가짜를 쓰는 항목들이 재는 것이
+    /// 아니다. CI run 35447034272 attempt 1 에서 이 네 항목이 함께 `initialize` 시한 만료로 실패했다(같은
+    /// 런의 attempt 2 는 초록). ★그 시간이 powershell 기동에 들었다는 것은 가장 그럴듯한 독해이지 확정이
+    /// 아니다★ — 로그에 남은 것은 시한 만료 한 줄뿐이고, 받치는 것은 기동 앞에 12초를 끼운 지연 주입이 같은
+    /// 실패를 재현한다는 사실이다. 기동을 예산 밖으로 빼서 **운영 예산 그대로** 왕복만 잰다.
+    /// ★예산을 늘려 맞추지 않는다★ — 그 값은 운영 동작이다(그 상수의 doc). 시험대용 예산을 주입할
+    /// 손잡이는 `start()` 경로에 없고, 내려면 운영 코드에 seam 을 새로 내야 한다(ADR-0012 — 사용자 결정).
+    /// ★표식이 보증하는 것은 「스크립트가 돌기 시작했다」까지다★ — 요청마다의 응답 경로(정규식·쓰기)가 처음
+    /// 도는 비용은 여전히 예산 안이다. 느린 러너에서 그 값은 미측정이고, 크면 증상은 같은 시한 만료다.
+    #[cfg(windows)]
+    fn wait_for_the_fake_to_listen(fake: &FakeAppServer) {
+        wait_until(
+            || fake.ready.exists(),
+            &format!(
+                "가짜 app-server 가 읽기 루프에 들어서는 것 — powershell 이 못 떴거나(실행 정책) 스크립트가 \
+                 루프 전에 죽었다. 가르려면 손으로 돌려 볼 것: {}",
+                fake.hand_run()
+            ),
+        );
+    }
+
+    /// 통로가 배달하는 연결 결말을 받아 적는 포트와 그 기록.
+    #[cfg(windows)]
+    fn link_recorder() -> (
+        crate::transport::LinkSink,
+        std::sync::Arc<std::sync::Mutex<Vec<crate::transport::LinkResolution>>>,
+    ) {
+        let delivered = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink: crate::transport::LinkSink = {
+            let delivered = delivered.clone();
+            std::sync::Arc::new(move |r: crate::transport::LinkResolution| {
+                delivered.lock().unwrap().push(r)
+            })
+        };
+        (sink, delivered)
+    }
+
+    /// 기록 동사가 불릴 때까지 기다린다 — ★그 전에 연결 결말이 배달되면 더 기다리지 않고 그 결말로 무엇이
+    /// 틀어졌는지 말하며 죽는다★.
+    ///
+    /// 기록 동사는 핸드셰이크 왕복이 선 **뒤에만** 불리고, 결말은 그 자리를 지난 **뒤에만** 배달된다. 그래서
+    /// 기록 없이 온 결말은 둘 중 하나다 — `Failed` 면 왕복이 넘어진 것이고, `Ready` 면 **기록 포트가 통로까지
+    /// 오지 않은 것**이다(포트가 없으면 통로는 기록을 건너뛰고 연결을 세운다 — `record_session_id`). 뒤쪽이
+    /// [`tests::an_app_server_spawn_hands_the_thread_id_to_the_sink`] 가 잡으려는 배선 회귀다. 어느 쪽이든
+    /// 기록만 기다리면 마감까지 헛돌고 「일어나지 않았다」만 남는다 — 사유는 결말에만 실린다.
+    #[cfg(windows)]
+    fn wait_for_recording(
+        recorded: impl Fn() -> bool,
+        delivered: &std::sync::Mutex<Vec<crate::transport::LinkResolution>>,
+        fake: &FakeAppServer,
+    ) {
+        wait_until(
+            || recorded() || !delivered.lock().unwrap().is_empty(),
+            "기록 동사가 불리거나 연결 결말이 배달되는 것",
+        );
+        if recorded() {
+            return;
+        }
+        let resolution = delivered.lock().unwrap().first().cloned();
+        match resolution {
+            Some(crate::transport::LinkResolution::Ready) => panic!(
+                "기록 동사가 한 번도 안 불렸는데 연결이 섰다 — 배선이 끊겼다: 기록 포트가 통로까지 오지 않았다"
+            ),
+            Some(crate::transport::LinkResolution::Failed { reason }) => panic!(
+                "핸드셰이크가 기록 전에 넘어졌다 — 이 항목은 재려던 지점에 닿지 못했다. 배달된 사유: {reason}. \
+                 사유가 시한 만료(「답이 없다」)면 가짜가 핸드셰이크 예산 안에 답하지 못한 것이다. 스크립트는 \
+                 남겨 둔다 — 손으로 돌려 볼 것: {}",
+                fake.hand_run()
+            ),
+            None => unreachable!("위 대기는 기록이나 결말 중 하나가 설 때만 돌아온다"),
+        }
     }
 
     /// 핸드셰이크의 두 요청에만 답하는 최소 app-server. ★실 codex 가 아니다★ — 재는 것은 「상대가 준
@@ -2193,6 +2328,9 @@ mod tests {
     /// 항목이 배선을 하나도 안 재고 초록이 된다. 실제로 그렇지 않다는 것은 변이로 확인했다 — 닫기를
     /// 없애면 그 항목에 상태 전이가 **하나도** 관측되지 않는다. ★그러니 아래 while 루프를 「응답 뒤
     /// exit」 으로 바꾸면 그 항목이 조용히 무력해진다★.
+    ///
+    /// ★표식 파일은 읽기 루프 **바로 앞**에서 만든다★ — [`wait_for_the_fake_to_listen`] 이 그것을 「답할
+    /// 준비가 됐다」로 읽는다. 답하는 데 쓰는 정의(`$so`·`Send`)보다 앞으로 옮기면 그 뜻이 거짓이 된다.
     #[cfg(windows)]
     const FAKE_APP_SERVER_PS1: &str = r#"
 $ErrorActionPreference = 'Stop'
@@ -2202,6 +2340,7 @@ function Send([string]$s) {
   $so.Write($b, 0, $b.Length)
   $so.Flush()
 }
+[IO.File]::WriteAllText($env:READY_ENV_PLACEHOLDER, '')
 while ($null -ne ($line = [Console]::In.ReadLine())) {
   if ($line -match '"id":(-?\d+)') {
     $rid = $Matches[1]
@@ -2234,26 +2373,28 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
 
         let thread_id = Uuid::new_v4().to_string();
-        let (spec, script_path) = bake_fake_app_server(&thread_id, FakeResume::EchoesTheThreadId);
+        let fake = bake_fake_app_server(&thread_id, FakeResume::EchoesTheThreadId);
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink: SessionIdSink = {
             let seen = seen.clone();
             Arc::new(move |id: &str| seen.lock().unwrap().push(id.to_string()))
         };
+        let (link_sink, delivered) = link_recorder();
 
         let parts = crate::backend::open_spawn(
             &codex_app_server(vec![]),
-            &spec,
+            &fake.spec,
             80,
             24,
             Some(sink),
             None,
-            None,
+            Some(link_sink),
             None,
         )
         .expect("open_spawn");
 
+        wait_for_the_fake_to_listen(&fake);
         parts.transport.start(Arc::new(OutputCore::new(
             Uuid::new_v4(),
             1,
@@ -2261,35 +2402,23 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // 핸드셰이크는 powershell 기동 + 두 왕복이라 즉시 끝나지 않는다. 시한은 통로 자신의 요청 시한
-        //   (30s)보다 짧게 둔다 — 넘기면 실패 사유가 「우리가 덜 기다렸다」로 흐려진다.
-        wait_until(
-            || !seen.lock().unwrap().is_empty(),
-            "sink 가 thread id 를 한 건이라도 받는 것",
-        );
+        // ★실패는 네 갈래로 갈려 적힌다★ — 가짜가 안 떴다(위 대기) · 왕복이 넘어졌다(실패 결말의 사유) ·
+        //   기록 없이 연결이 섰다(배선 회귀) · 가짜는 떴는데 기록도 결말도 없다(마감). 어느 갈래든 지우는
+        //   줄 전에 죽으므로 스크립트가 남는다.
+        wait_for_recording(|| !seen.lock().unwrap().is_empty(), &delivered, &fake);
         let got = seen.lock().unwrap().clone();
 
         parts.transport.shutdown();
 
-        // ★두 실패를 갈라 적는다★ — 「한 번도 안 불렸다」는 배선이 끊긴 것일 수도, 가짜 app-server 가
-        //   시한 안에 안 뜬 것일 수도 있다(powershell 기동·실행 정책). 한 문장으로 적으면 환경 문제를
-        //   배선 회귀로 읽는다. ★그래서 이 갈래에서는 스크립트를 지우지 않는다★ — 손으로 돌려 봐야 갈린다.
-        assert!(
-            !got.is_empty(),
-            "시한(20초) 안에 기록 동사가 한 번도 불리지 않았다 — 배선이 끊겼거나, 가짜 app-server 가 그 안에 \
-             핸드셰이크를 끝내지 못했다(powershell 기동 실패·실행 정책). 가르려면 {} 를 손으로 돌려 볼 것",
-            script_path.display()
-        );
-        let removed = remove_script(&script_path);
+        let leftover = fake.remove();
         assert_eq!(
             got,
             vec![thread_id],
             "기록 동사가 app-server 가 준 thread id 와 다른 값을 받았다"
         );
         assert!(
-            removed,
-            "가짜 app-server 스크립트를 지우지 못했다: {}",
-            script_path.display()
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
         );
     }
 
@@ -2319,26 +2448,28 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
 
         let resume_target = Uuid::new_v4();
-        let (spec, script_path) = bake_fake_app_server("start_only", FakeResume::EchoesTheThreadId);
+        let fake = bake_fake_app_server("start_only", FakeResume::EchoesTheThreadId);
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink: SessionIdSink = {
             let seen = seen.clone();
             Arc::new(move |id: &str| seen.lock().unwrap().push(id.to_string()))
         };
+        let (link_sink, delivered) = link_recorder();
 
         let parts = crate::backend::open_spawn(
             &codex_app_server(vec![]),
-            &spec,
+            &fake.spec,
             80,
             24,
             Some(sink),
             Some(resume_target),
-            None,
+            Some(link_sink),
             None,
         )
         .expect("open_spawn");
 
+        wait_for_the_fake_to_listen(&fake);
         parts.transport.start(Arc::new(OutputCore::new(
             Uuid::new_v4(),
             1,
@@ -2346,21 +2477,14 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             TurnWiring::detached(),
         )));
 
-        // 시한 근거는 위 항목과 같다 — 통로 자신의 요청 시한(30s)보다 짧게 둔다.
-        wait_until(
-            || !seen.lock().unwrap().is_empty(),
-            "sink 가 thread id 를 한 건이라도 받는 것",
-        );
+        // 실패 갈래는 위 항목과 같다. 이어받기 요청이 안 나간 것은 여기서 잡히지 않는다 — 가짜는
+        //   `thread/start` 에도 답하므로 그때도 기록 동사가 불리고, 그 갈림은 아래 값 단언이 한다.
+        wait_for_recording(|| !seen.lock().unwrap().is_empty(), &delivered, &fake);
         let got = seen.lock().unwrap().clone();
 
         parts.transport.shutdown();
 
-        assert!(
-            !got.is_empty(),
-            "시한(20초) 안에 기록 동사가 한 번도 불리지 않았다 — 이어받기 요청이 안 나갔거나(가짜는              `thread/start` 에도 답하므로 그 경우에도 불려야 한다), 가짜 app-server 가 그 안에 뜨지              못했다. 가르려면 {} 를 손으로 돌려 볼 것",
-            script_path.display()
-        );
-        let removed = remove_script(&script_path);
+        let leftover = fake.remove();
         assert_eq!(
             got,
             vec![format!("resumed-{resume_target}")],
@@ -2380,9 +2504,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             "가짜의 답이 uuid 로 읽힌다 — 이 항목의 전제(조립점이 이 값을 버린다)가 낡았다: {got:?}"
         );
         assert!(
-            removed,
-            "가짜 app-server 스크립트를 지우지 못했다: {}",
-            script_path.display()
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
         );
     }
 
@@ -2442,7 +2565,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         }
 
         let resume_target = Uuid::new_v4();
-        let (spec, script_path) = bake_fake_app_server("start_only", FakeResume::Rejects);
+        let fake = bake_fake_app_server("start_only", FakeResume::Rejects);
 
         let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let sink: SessionIdSink = {
@@ -2451,16 +2574,11 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         };
         // ★배달을 그대로 받아 적는다★ — 이 항목이 재는 것은 「통로가 결말을 **내보내나**」이고, 그것이
         //   실 통로에서 확인되는 유일한 자리다(매니저 쪽 항목들은 대역으로 판정 로직만 잰다).
-        let delivered: Arc<Mutex<Vec<crate::transport::LinkResolution>>> =
-            Arc::new(Mutex::new(Vec::new()));
-        let link_sink: crate::transport::LinkSink = {
-            let delivered = delivered.clone();
-            Arc::new(move |r| delivered.lock().unwrap().push(r))
-        };
+        let (link_sink, delivered) = link_recorder();
 
         let parts = crate::backend::open_spawn(
             &codex_app_server(vec![]),
-            &spec,
+            &fake.spec,
             80,
             24,
             Some(sink),
@@ -2482,6 +2600,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             id: SinkId::new_v4(),
             seen: events.clone(),
         }));
+        wait_for_the_fake_to_listen(&fake);
         parts.transport.start(core);
 
         let failed = |es: &[OutputEvent]| {
@@ -2499,12 +2618,28 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             || failed(&events.lock().unwrap()),
             "실패 경계(TurnEnd Failed)가 오르는 것",
         );
-        let seen = events.lock().unwrap().clone();
         let got = recorded.lock().unwrap().clone();
+        // ★통로가 실제로 「연결 못 섬 + 사유」를 신고하나 — 실물로 재는 자리는 여기뿐이다★:
+        //   매니저 쪽 항목들은 대역 통로로 판정 로직만 재므로, 실 통로가 그 축을 안 채우면 그 배선이
+        //   양쪽 다 초록인 채로 끊긴다. ★종점에 닿기 **전에** 잡는다★ — 그 뒤에는 이 값이 남아 있을
+        //   이유가 없다.
         let link_when_failed = match delivered.lock().unwrap().first() {
-            Some(crate::transport::LinkResolution::Failed { reason }) => Some(reason.clone()),
-            _ => None,
+            Some(crate::transport::LinkResolution::Failed { reason }) => reason.clone(),
+            other => panic!(
+                "실패 경계가 올랐는데 통로가 실패 결말을 **배달하지 않았다** — 활성화 판정이 받을 신호가 \
+                 없다(배달된 것: {other:?})"
+            ),
         };
+        // ★아래 무엇보다 먼저 그 사유가 **가짜의 거절**인지부터 가른다★ — 아니면 이 항목 전체(폴백 없음 ·
+        //   종점 · 분류)가 거절 없이 돈 것이고, 분류 단언은 엉뚱한 사유를 「분류 못 함」으로 보고한다.
+        //   종점 대기보다도 앞인 것은 그 대기가 안 끝나는 갈래에서도 이 사유가 인용되게 하려는 것이다.
+        assert!(
+            link_when_failed.contains(FAKE_RESUME_REJECTION),
+            "배달된 사유가 가짜의 거절이 아니다 — 이 항목은 거절 갈래를 재지 못했다. 사유가 시한 \
+             만료(「답이 없다」)면 가짜가 핸드셰이크 예산 안에 답하지 못한 것이다(요청이 안 나갔거나 가짜가 \
+             늦었다). 스크립트는 남겨 둔다 — 손으로 돌려 볼 것: {}. 사유: {link_when_failed}",
+            fake.hand_run()
+        );
 
         // 실패 경계가 오른 뒤, 통로가 우리 쪽 stdin 을 놓은 결과로 상대가 EOF 를 보고 끝나기를 기다린다.
         //   ★`shutdown()` 전이다★ — 위 doc 의 그 사유.
@@ -2516,13 +2651,6 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 .any(|s| !s.is_live())
         };
         wait_until(|| terminal(), "세션이 종점 상태로 가는 것");
-        // ★통로가 실제로 「연결 못 섬 + 사유」를 신고하나 — 실물로 재는 자리는 여기뿐이다★:
-        //   매니저 쪽 항목들은 대역 통로로 판정 로직만 재므로, 실 통로가 그 축을 안 채우면 그 배선이
-        //   양쪽 다 초록인 채로 끊긴다. ★종점에 닿기 **전에** 잡는다★ — 그 뒤에는 이 값이 남아 있을
-        //   이유가 없다.
-        let link_when_failed = link_when_failed.expect(
-            "실패 경계가 올랐는데 통로가 연결 결말을 **배달하지 않았다** — 활성화 판정이 받을 신호가 없다",
-        );
         assert_eq!(
             delivered.lock().unwrap().len(),
             1,
@@ -2552,12 +2680,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         parts.transport.shutdown();
 
-        assert!(
-            failed(&seen),
-            "시한(20초) 안에 실패 경계가 화면에 오르지 않았다 — 거절이 삼켜졌거나 가짜 app-server 가 뜨지              못했다(스크립트는 남겨 둔다): {}",
-            script_path.display()
-        );
-        let removed = remove_script(&script_path);
+        let leftover = fake.remove();
         assert!(
             got.is_empty(),
             "거절당한 이어받기 뒤에 기록 동사가 불렸다 — 새 스레드로 폴백했다는 뜻이고(값이              `start_only` 면 확정), 그 값이 프로필의 아직 멀쩡한 손잡이를 덮어쓴다: {got:?}"
@@ -2575,9 +2698,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
              있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen_statuses:?})"
         );
         assert!(
-            removed,
-            "가짜 app-server 스크립트를 지우지 못했다: {}",
-            script_path.display()
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
         );
     }
 
@@ -2606,27 +2728,32 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
         }
 
-        let (spec, script_path) =
-            bake_fake_app_server(&Uuid::new_v4().to_string(), FakeResume::EchoesTheThreadId);
+        let fake = bake_fake_app_server(&Uuid::new_v4().to_string(), FakeResume::EchoesTheThreadId);
 
         // 불렸다는 사실만 남기고 터진다 — 「패닉이 났다」와 「아예 안 불렸다」를 갈라야 하기 때문.
+        // ★터지기 전에 풀어 줄 때까지 선다★ — 그래야 조용한 훅 구간을 패닉 순간에만 걸 수 있다(아래 구간
+        //   주석). 송신단이 사라지면(테스트가 먼저 죽으면) 대기가 풀려 그대로 터지므로 영구히 서지 않는다.
         let reached = Arc::new(AtomicBool::new(false));
+        let (release, released) = std::sync::mpsc::channel::<()>();
         let sink: SessionIdSink = {
             let reached = reached.clone();
+            let released = Mutex::new(released);
             Arc::new(move |_: &str| {
                 reached.store(true, Ordering::SeqCst);
+                let _ = released.lock().expect("gate poisoned").recv();
                 panic!("기록 포트가 터졌다");
             })
         };
+        let (link_sink, delivered) = link_recorder();
 
         let parts = crate::backend::open_spawn(
             &codex_app_server(vec![]),
-            &spec,
+            &fake.spec,
             80,
             24,
             Some(sink),
             None,
-            None,
+            Some(link_sink),
             None,
         )
         .expect("open_spawn");
@@ -2643,42 +2770,42 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             }
         };
 
+        wait_for_the_fake_to_listen(&fake);
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(RecordingStatus(statuses.clone())),
+            TurnWiring::detached(),
+        )));
+
+        // ★먼저 기록 동사가 불릴 때까지 **아무것도 보내지 않고** 기다린다★ — 핸드셰이크 전의
+        //   `send_input` 은 정상적으로 큐에 서므로(ADR-0190), 여기서 보내면 상한(32)을 채워
+        //   **큐 가득참 오류**가 나고 이 항목이 엉뚱한 이유로 초록이 된다.
+        wait_for_recording(|| reached.load(Ordering::SeqCst), &delivered, &fake);
+
         // ★훅 교체를 맨손으로 하지 않는다★ — 전역이라 같은 바이너리의 다른 항목이 자기 패닉 출력을 잃고,
-        //   중첩되면 조용한 훅이 영구히 남는다. 그 둘을 막는 헬퍼를 쓴다. 라이터 스레드가 이 구간 안에서
-        //   터지므로 구간이 그 시점을 덮어야 한다.
-        // ★조용한 훅 구간은 **패닉 순간까지만** 잡는다★ — 그 훅은 프로세스 전역이고 헬퍼가 static
-        //   뮤텍스로 직렬화하므로, 종료 대기까지 감싸면 같은 바이너리의 다른 패닉 항목이 그만큼 줄을 서고
-        //   그 창에 터진 **무관한** 항목이 자기 패닉 메시지와 위치를 잃는다. 종료 대기는 패닉과 무관하므로
-        //   구간 밖으로 뺀다(최악 대기가 절반으로 준다).
-        let (reached, refusal) = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
-            parts.transport.start(Arc::new(OutputCore::new(
-                Uuid::new_v4(),
-                1,
-                Arc::new(RecordingStatus(statuses.clone())),
-                TurnWiring::detached(),
-            )));
+        //   중첩되면 조용한 훅이 영구히 남는다. 그 둘을 막는 헬퍼를 쓴다.
+        // ★조용한 훅 구간은 **패닉 순간만** 덮는다★ — 그 훅은 프로세스 전역이라, 구간이 길수록 그 창에
+        //   터진 **무관한** 항목이 자기 패닉 메시지와 위치를 잃고, 헬퍼의 static 뮤텍스 앞에 다른 패닉
+        //   항목이 줄을 선다. 그래서 핸드셰이크 · 종료 대기는 구간 밖에 두고, 라이터를 풀어 터뜨리는 것과
+        //   그 결과(연결 결말 · 입력 거절)를 보는 것만 안에 둔다 — 결말은 라이터가 그 패닉을 잡은 **뒤에**
+        //   배달되므로, 그것을 기다리면 패닉이 반드시 구간 안에서 난다.
+        let refusal = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
+            release.send(()).expect("기록 포트가 아직 살아 있어야");
 
-            // ★먼저 기록 동사가 불릴 때까지 **아무것도 보내지 않고** 기다린다★ — 핸드셰이크 전의
-            //   `send_input` 은 정상적으로 큐에 서므로(ADR-0190), 여기서 보내면 상한(32)을 채워
-            //   **큐 가득참 오류**가 나고 이 항목이 엉뚱한 이유로 초록이 된다.
+            // ★결말이 배달된 뒤에 **한 번만** 보낸다★ — 통로는 `Link::Down` 을 세운 **다음에** 실패 결말을
+            //   배달하므로(`writer_loop` 의 실패 갈래), 그 뒤의 입력은 거절이 확정이다. 고정 횟수·간격으로
+            //   시도하면 라이터가 깨어나 패닉을 잡고 링크를 내리기까지가 그 창 안에 들어와야 해서, 느린
+            //   러너에서 「입력이 계속 받아들여진다」로 거짓 실패한다.
             wait_until(
-                || reached.load(Ordering::SeqCst),
-                "기록 실패 지점에 닿는 것",
+                || !delivered.lock().unwrap().is_empty(),
+                "기록 실패 뒤 연결 결말이 배달되는 것 — 안 오면 통로가 기록 실패를 결말로 내지 않은 것이다 \
+                 (링크가 `Connecting` 에 멈춘 모양일 수 있다)",
             );
-
-            // 링크를 내리는 것은 그 다음 몇 마이크로초다. 시도는 상한보다 한참 적게 둔다 — 같은 이유.
-            let mut refusal = None;
-            for _ in 0..8 {
-                match parts.transport.send_input(InputEvent::Raw(b"hi".to_vec())) {
-                    Err(e) => {
-                        refusal = Some(e);
-                        break;
-                    }
-                    Ok(()) => std::thread::sleep(std::time::Duration::from_millis(50)),
-                }
-            }
-
-            (reached.load(Ordering::SeqCst), refusal)
+            parts
+                .transport
+                .send_input(InputEvent::Raw(b"hi".to_vec()))
+                .err()
         });
 
         // stdin 을 놓은 뒤 상대가 스스로 끝나고(실측 41–51ms) 그 EOF 가 pump 를 끝내기까지 기다린다.
@@ -2698,23 +2825,17 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             .any(|s| matches!(s, AgentStatus::Exited { code: Some(_) }));
         parts.transport.shutdown();
 
-        assert!(
-            reached,
-            "기록 동사가 한 번도 불리지 않았다 — 이 항목은 실패 처리를 재지 못했다. 가짜 app-server 가 안 \
-             떴을 수 있다(스크립트는 남겨 둔다): {}",
-            script_path.display()
-        );
-        let removed = remove_script(&script_path);
+        let leftover = fake.remove();
 
         let refusal = refusal.expect(
-            "기록이 실패했는데 입력이 계속 받아들여진다 — 링크가 `Connecting` 에 멈춰 세션이 조용히 벙어리가 됐다",
+            "기록 실패의 결말까지 배달됐는데 입력이 받아들여진다 — 링크가 내려가지 않아 세션이 조용히 벙어리가 됐다",
         );
         let PtyError::WriteFailed(reason) = &refusal else {
             panic!("예상 밖 오류 종류: {refusal:?}");
         };
         // ★큐 가득참만 배제한다★ — 그것만이 「실패 경로가 안 돌았는데 거절됐다」를 뜻한다. 남은 두 사유
         //   (기록 실패로 내려간 링크 · 그 뒤 stdin 을 닫아 끝난 통로)는 **둘 다 이 경로가 돈 증거**이고,
-        //   어느 쪽이 잡히나는 타이밍이라 하나로 못 박으면 그 자체가 깜빡이가 된다.
+        //   결말을 본 뒤에도 어느 쪽이 잡히나는 리더의 EOF 와의 경주라 하나로 못 박으면 그 자체가 깜빡이가 된다.
         assert!(
             !reason.contains("상한"),
             "거절 사유가 큐 가득참이다 — 실패 경로가 돈 것을 잰 것이 아니다: {reason}"
@@ -2731,9 +2852,8 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
              있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen:?})"
         );
         assert!(
-            removed,
-            "가짜 app-server 스크립트를 지우지 못했다: {}",
-            script_path.display()
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
         );
     }
 
