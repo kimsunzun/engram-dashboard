@@ -1173,6 +1173,26 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
 
 #[cfg(test)]
 mod tests {
+    /// 조건이 설 때까지 폴링한다 — ★마감을 넘기면 **무엇을 기다렸는지 말하며** 죽는다★.
+    ///
+    /// ★왜 이 함수가 있나★: 예전엔 마감이 **조용한 fallthrough** 였다. 넘겨도 그냥 빠져나가 아래
+    ///   단언이 「값이 틀렸다」로 죽었고, 실제로 CI 에서 그 모양으로 터졌을 때 **패닉 본문이 비어
+    ///   「시간 초과」와 「값 오류」가 구분되지 않았다**(2026-09-23 · v0.3.1 태그 런에서 이 파일의
+    ///   테스트 둘이 그렇게 실패했고, 같은 트리가 직전 브랜치 런에서는 초록이었다). 여기서 갈라
+    ///   놓아야 다음 실패가 스스로 어느 쪽인지 말한다.
+    /// ★상한은 단언이 아니라 안전망이다 — 줄여서 「빨리 실패하게」 만들지 말 것★: 정상 경로는 1초
+    ///   안에 선다(로컬 실측 0.5초). 혼잡한 러너는 같은 스위트를 **6.7배 느리게** 돌았다(실측: 로컬
+    ///   4.87초 ↔ CI 32.71초). 상한이 재는 것은 「일어났나」이지 「얼마나 빨리 일어났나」가 아니다.
+    fn wait_until(mut cond: impl FnMut() -> bool, what: &str) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !cond() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{what} — 기다리다 마감을 넘겼다. 값이 틀린 게 아니라 **일어나지 않았다**"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
     use super::*;
     use crate::types::{ToolGrant, TurnOutcome, CLI_EXE_ENV};
 
@@ -2243,10 +2263,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
 
         // 핸드셰이크는 powershell 기동 + 두 왕복이라 즉시 끝나지 않는다. 시한은 통로 자신의 요청 시한
         //   (30s)보다 짧게 둔다 — 넘기면 실패 사유가 「우리가 덜 기다렸다」로 흐려진다.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_until(
+            || !seen.lock().unwrap().is_empty(),
+            "sink 가 thread id 를 한 건이라도 받는 것",
+        );
         let got = seen.lock().unwrap().clone();
 
         parts.transport.shutdown();
@@ -2327,10 +2347,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         )));
 
         // 시한 근거는 위 항목과 같다 — 통로 자신의 요청 시한(30s)보다 짧게 둔다.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while seen.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_until(
+            || !seen.lock().unwrap().is_empty(),
+            "sink 가 thread id 를 한 건이라도 받는 것",
+        );
         let got = seen.lock().unwrap().clone();
 
         parts.transport.shutdown();
@@ -2475,10 +2495,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 )
             })
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !failed(&events.lock().unwrap()) && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_until(
+            || failed(&events.lock().unwrap()),
+            "실패 경계(TurnEnd Failed)가 오르는 것",
+        );
         let seen = events.lock().unwrap().clone();
         let got = recorded.lock().unwrap().clone();
         let link_when_failed = match delivered.lock().unwrap().first() {
@@ -2495,10 +2515,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
                 .iter()
                 .any(|s| !s.is_live())
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !terminal() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_until(|| terminal(), "세션이 종점 상태로 가는 것");
         // ★통로가 실제로 「연결 못 섬 + 사유」를 신고하나 — 실물로 재는 자리는 여기뿐이다★:
         //   매니저 쪽 항목들은 대역 통로로 판정 로직만 재므로, 실 통로가 그 축을 안 채우면 그 배선이
         //   양쪽 다 초록인 채로 끊긴다. ★종점에 닿기 **전에** 잡는다★ — 그 뒤에는 이 값이 남아 있을
@@ -2644,10 +2661,10 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             // ★먼저 기록 동사가 불릴 때까지 **아무것도 보내지 않고** 기다린다★ — 핸드셰이크 전의
             //   `send_input` 은 정상적으로 큐에 서므로(ADR-0190), 여기서 보내면 상한(32)을 채워
             //   **큐 가득참 오류**가 나고 이 항목이 엉뚱한 이유로 초록이 된다.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-            while !reached.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
-                std::thread::sleep(std::time::Duration::from_millis(20));
-            }
+            wait_until(
+                || reached.load(Ordering::SeqCst),
+                "기록 실패 지점에 닿는 것",
+            );
 
             // 링크를 내리는 것은 그 다음 몇 마이크로초다. 시도는 상한보다 한참 적게 둔다 — 같은 이유.
             let mut refusal = None;
@@ -2667,10 +2684,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
         // stdin 을 놓은 뒤 상대가 스스로 끝나고(실측 41–51ms) 그 EOF 가 pump 를 끝내기까지 기다린다.
         //   ★`shutdown()` 을 부르지 않고 기다리는 것이 요점이다★ — 우리가 죽여 놓고 「끝났다」를 재면 이
         //   항목이 재려던 그 인과를 우리가 대신 굴린 것이 된다.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !terminal() && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        wait_until(|| terminal(), "세션이 종점 상태로 가는 것");
 
         let reached_terminal = terminal();
         let seen = statuses.lock().expect("status poisoned").clone();
