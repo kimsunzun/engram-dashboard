@@ -2,10 +2,13 @@ import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ★실 allotment 로 돈다★: 형제 스위트(ViewLayoutRenderer.test.tsx)는 allotment 를 평범한 div 로 갈아 끼워
-//   분할 방향·크기가 prop 으로만 보인다. 여기서 잡는 결함은 allotment 가 방향을 마운트 때 한 번만 짓고
-//   preferredSize 를 새로 합류한 pane 에만 먹인다는 외부 라이브러리 동작이라, 가짜로는 재현되지 않는다.
-// jsdom 엔 ResizeObserver 가 없고 레이아웃도 없다 — 관측하는 모든 요소에 같은 크기를 즉시 알리는 가짜를 쓴다.
+//   분할 방향·크기가 prop 으로만 보인다. 여기서 잡는 결함은 allotment 가 방향·defaultSizes 를 마운트 때 한 번만
+//   읽고, defaultSizes 가 없으면 칸을 첫 ResizeObserver 콜백 뒤의 재렌더에서야 붙인다는 외부 라이브러리 동작이라,
+//   가짜로는 재현되지 않는다.
+// jsdom 엔 ResizeObserver 가 없고 레이아웃도 없다 — 관측하는 모든 요소에 같은 크기를 알리는 가짜를 쓴다.
 // 그래서 크기 단언은 최상위 split-view 에서만 의미가 있다(중첩 split 도 W×H 전체를 받는다).
+// 기본은 observe() 안에서 즉시 알린다. 첫 프레임 스위트만 이를 끄고 deliverObservations() 로 몰아 배달한다 —
+//   실제 RO 는 observe 와 같은 자리가 아니라 다음 렌더링 기회(페인트 직전)에 배달한다.
 const W = 1000
 const H = 600
 interface ObserverRecord {
@@ -14,6 +17,8 @@ interface ObserverRecord {
   self: FakeResizeObserver
 }
 const observers: ObserverRecord[] = []
+let deliverOnObserve = true
+const pendingObservations: { observer: FakeResizeObserver; el: Element }[] = []
 class FakeResizeObserver {
   private rec: ObserverRecord
   constructor(cb: ResizeObserverCallback) {
@@ -22,11 +27,15 @@ class FakeResizeObserver {
   }
   observe(el: Element): void {
     this.rec.els.push(el)
-    this.fireOne(el)
+    if (deliverOnObserve) this.fireOne(el)
+    else pendingObservations.push({ observer: this, el })
   }
   unobserve(): void {}
   disconnect(): void {
     this.rec.els = []
+  }
+  isObserving(el: Element): boolean {
+    return this.rec.els.includes(el)
   }
   fireOne(el: Element): void {
     const entry = { target: el, contentRect: { width: W, height: H } } as unknown as ResizeObserverEntry
@@ -34,6 +43,13 @@ class FakeResizeObserver {
   }
 }
 ;(globalThis as unknown as { ResizeObserver: unknown }).ResizeObserver = FakeResizeObserver
+
+/** 미뤄 둔 첫 관측을 배달한다. 그 사이 disconnect 된 관측자(언마운트된 인스턴스)는 실제 RO 처럼 건너뛴다. */
+function deliverObservations(): void {
+  for (const { observer, el } of pendingObservations.splice(0)) {
+    if (observer.isObserving(el)) observer.fireOne(el)
+  }
+}
 
 // ── Tauri / transport 계층 stub(형제 스위트와 같은 벌) ──────────────────────────────
 vi.mock('@tauri-apps/api/core', () => ({
@@ -265,6 +281,54 @@ describe('ViewLayoutRenderer + 실 allotment — 같은 split 유지', () => {
 
     expect(Object.is(rootSplitView(container), before)).toBe(true)
     expect(Object.is(container.querySelector('[data-slot-id="z"]'), zSlot)).toBe(true)
+  })
+})
+
+// ── 첫 프레임 — 새로 지은 split 의 칸이 첫 RO 배달 안에서 배치된다 ──────────────────────────
+// 실제 RO 는 페인트 직전에 배달되고, 그 콜백이 건 React 갱신은 페인트 뒤에 그려진다. 콜백 안에서 칸이 배치되지
+//   않으면 크기 없는 한 프레임이 칠해진다(닫기 후 쭈그러짐 — docs/research/split-layout-library-survey-2026-09-24.md
+//   F1). 동기 act 안에서는 콜백이 건 갱신이 act 를 나설 때까지 그려지지 않으므로, 그 안의 단언이 곧 그 한 프레임이다.
+describe('ViewLayoutRenderer + 실 allotment — 첫 프레임', () => {
+  beforeEach(() => {
+    deliverOnObserve = false
+  })
+  afterEach(() => {
+    deliverOnObserve = true
+    pendingObservations.length = 0
+  })
+
+  it('split 을 마운트하면 첫 RO 배달 안에서(재렌더 전) 칸이 비율대로 배치된다', () => {
+    const { container } = render(
+      <ViewLayoutRenderer node={LR('R', slot('s1'), slot('s2'), 0.2)} focusedSlotId={null} />,
+    )
+
+    act(() => {
+      deliverObservations()
+      const views = rootViews(container)
+      expect(views.map(v => v.width)).toEqual(['200px', '800px'])
+      expect(views.map(v => v.left)).toEqual(['0px', '200px'])
+    })
+    // 콜백이 건 재렌더가 그려진 뒤에도 크기가 그대로다.
+    expect(rootViews(container).map(v => v.width)).toEqual(['200px', '800px'])
+  })
+
+  it('닫기로 형제 split 이 승격돼 새로 지어져도 첫 RO 배달 안에서(재렌더 전) 칸이 비율대로 배치된다', () => {
+    const { container, rerender } = render(
+      <ViewLayoutRenderer node={LR('R', slot('s1'), TB('T', slot('s2'), slot('s3'), 0.3), 0.2)} focusedSlotId={null} />,
+    )
+    act(() => deliverObservations())
+    const before = rootSplitView(container)
+
+    rerender(<ViewLayoutRenderer node={TB('T', slot('s2'), slot('s3'), 0.3)} focusedSlotId={null} />)
+    expect(Object.is(rootSplitView(container), before)).toBe(false)
+
+    act(() => {
+      deliverObservations()
+      const views = rootViews(container)
+      expect(views.map(v => v.height)).toEqual(['180px', '420px'])
+      expect(views.map(v => v.top)).toEqual(['0px', '180px'])
+    })
+    expect(rootViews(container).map(v => v.height)).toEqual(['180px', '420px'])
   })
 })
 
