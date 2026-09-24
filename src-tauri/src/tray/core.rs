@@ -7,6 +7,8 @@
 //! ★주의: show_main_ui/hide_main_ui actions·command 는 유지★ — ShowUi/HideUi 는 메뉴 *항목*만
 //! 뺀 것이고(트레이 좌클릭이 대체), LLM/cdp 제어(CLAUDE.md §5)가 같은 actions 함수를 계속 쓴다.
 
+use crate::layout::MAIN_WINDOW_LABEL;
+
 // ── 메뉴 의도 ──────────────────────────────────────────────────────────────────
 
 // 트레이 메뉴 클릭이 표현하는 **의도**. 사람 클릭·LLM 호출·단축키가 모두 이 의도로
@@ -65,6 +67,47 @@ pub fn icon_state_for(alive: bool) -> IconState {
     } else {
         IconState::Inactive
     }
+}
+
+// ── 보이기·숨기기 대상 창(순수) ──────────────────────────────────────────────────────
+
+// 트레이 보이기·숨기기가 다룰 창 = 팝아웃 전부(번호 오름차순) 뒤에 메인. 그 밖의 창은 뺀다 — 늘 숨어
+// 있어야 하는 정적 창 `agent-tree` 가 여기 걸리면 화면에 떠 버린다(ADR-0225 가 걷을 예정).
+// ★메인이 마지막인 것이 계약이다★: 호출자가 받은 순서대로 창을 펼치고 포커스를 주는데 그 셋이 모두 창을
+//   활성화한다(tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SetForegroundWindow`) — 메인 뒤에 다룬
+//   팝아웃이 있으면 포커스를 그쪽이 가져간다. 같은 이유로 번호가 가장 큰 팝아웃이 메인 바로 아래에 온다.
+// ★팝아웃을 받은 순서대로 두지 말 것★: 호출자가 넘기는 `webview_windows()` 는 부를 때마다 무작위 해셔의
+//   새 HashMap 이라(tauri 2.11.3 `src/lib.rs:588-601`) 순서를 따르면 보이기마다 팝아웃 겹침 순서가 뒤섞인다.
+// 팝아웃 판정은 인자로 받는다 — 테스트 밖 코드가 Tauri 에 묶인 `commands` 모듈에 기대지 않게 하려는 것이고,
+//   테스트는 정본 판정(`commands::popout::is_popup_label`)을 그대로 넘겨 계약을 못 박는다.
+// ADR-0229
+pub fn ui_windows<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+    is_popout: impl Fn(&str) -> bool,
+) -> Vec<&'a str> {
+    let mut main = None;
+    let mut windows = Vec::new();
+    for label in labels {
+        if label == MAIN_WINDOW_LABEL {
+            main = Some(label);
+        } else if is_popout(label) {
+            windows.push(label);
+        }
+    }
+    // 번호 있는 것 먼저(번호순), 번호 없는 것은 뒤에 라벨순. 같은 번호("7"·"007")도 라벨로 갈라 전순서를 만든다
+    //   — 숫자·문자 비교를 섞는 비교자는 전순서가 아니라 정렬이 패닉할 수 있다.
+    windows.sort_by_key(|&label| {
+        let n = popout_number(label);
+        (n.is_none(), n, label)
+    });
+    windows.extend(main);
+    windows
+}
+
+// 번호 = 마지막 `-` 뒤 꼬리. 발급 라벨(`slot-popup-<n>`)에선 접두 뒤 꼬리와 같다 — 접두 상수는 Tauri 에 묶인
+// `commands::popout` 에 있어 여기서 쓰지 않는다. 빈 꼬리·숫자 아님·u64 초과는 `None`.
+fn popout_number(label: &str) -> Option<u64> {
+    label.rsplit_once('-')?.1.parse().ok()
 }
 
 // ── 아이콘 픽셀 변환(순수) ──────────────────────────────────────────────────────────
@@ -168,6 +211,99 @@ mod tests {
         dedup.sort_unstable();
         dedup.dedup();
         assert_eq!(labels.len(), dedup.len(), "label 중복: {labels:?}");
+    }
+
+    // ── 보이기·숨기기 대상 창 ──
+    // 팝아웃 판정은 운영과 같은 정본을 넘긴다 — 테스트용 판정을 따로 두면 정본이 바뀌어도 여기가 초록이다.
+    use crate::commands::popout::is_popup_label;
+
+    #[test]
+    fn ui_windows_puts_popouts_first_and_main_last() {
+        let labels = ["main", "slot-popup-1", "slot-popup-2"];
+        assert_eq!(
+            ui_windows(labels, is_popup_label),
+            ["slot-popup-1", "slot-popup-2", "main"],
+        );
+    }
+
+    #[test]
+    fn ui_windows_keeps_main_last_wherever_it_arrives() {
+        let labels = ["slot-popup-1", "main", "slot-popup-2"];
+        assert_eq!(
+            ui_windows(labels, is_popup_label).last(),
+            Some(&"main"),
+            "메인이 마지막이 아니면 뒤에 펼친 팝아웃이 포커스를 가져간다",
+        );
+    }
+
+    #[test]
+    fn ui_windows_excludes_agent_tree_and_unknown_windows() {
+        let labels = ["agent-tree", "main", "slot-popup-7", "devtools", "Main"];
+        assert_eq!(ui_windows(labels, is_popup_label), ["slot-popup-7", "main"]);
+    }
+
+    #[test]
+    fn ui_windows_without_main_returns_popouts_only() {
+        let labels = ["agent-tree", "slot-popup-3"];
+        assert_eq!(ui_windows(labels, is_popup_label), ["slot-popup-3"]);
+    }
+
+    #[test]
+    fn ui_windows_orders_popouts_by_number_not_by_arrival() {
+        let labels = ["slot-popup-10", "main", "slot-popup-2", "slot-popup-1"];
+        assert_eq!(
+            ui_windows(labels, is_popup_label),
+            ["slot-popup-1", "slot-popup-2", "slot-popup-10", "main"],
+        );
+    }
+
+    #[test]
+    fn ui_windows_order_does_not_depend_on_arrival_order() {
+        let a = ["slot-popup-3", "slot-popup-1", "slot-popup-2", "main"];
+        let b = ["main", "slot-popup-2", "slot-popup-3", "slot-popup-1"];
+        assert_eq!(ui_windows(a, is_popup_label), ui_windows(b, is_popup_label));
+    }
+
+    #[test]
+    fn ui_windows_puts_unnumbered_popouts_after_numbered_in_lexical_order() {
+        // 빈 꼬리 · 숫자 아닌 꼬리 · u64 를 넘는 꼬리는 번호가 없는 것으로 본다.
+        let labels = [
+            "slot-popup-x",
+            "slot-popup-99999999999999999999999",
+            "slot-popup-",
+            "slot-popup-9",
+        ];
+        assert_eq!(
+            ui_windows(labels, is_popup_label),
+            [
+                "slot-popup-9",
+                "slot-popup-",
+                "slot-popup-99999999999999999999999",
+                "slot-popup-x",
+            ],
+        );
+    }
+
+    #[test]
+    fn ui_windows_breaks_equal_numbers_by_label() {
+        // "007" 과 "7" 은 같은 번호다 — 라벨로 갈라 순서가 도착 순서에 기대지 않게 한다.
+        let a = ["slot-popup-7", "slot-popup-007"];
+        let b = ["slot-popup-007", "slot-popup-7"];
+        assert_eq!(
+            ui_windows(a, is_popup_label),
+            ["slot-popup-007", "slot-popup-7"]
+        );
+        assert_eq!(
+            ui_windows(b, is_popup_label),
+            ["slot-popup-007", "slot-popup-7"]
+        );
+    }
+
+    #[test]
+    fn ui_windows_main_only_and_empty() {
+        assert_eq!(ui_windows(["main"], is_popup_label), ["main"]);
+        assert!(ui_windows([], is_popup_label).is_empty());
+        assert!(ui_windows(["agent-tree"], is_popup_label).is_empty());
     }
 
     #[test]

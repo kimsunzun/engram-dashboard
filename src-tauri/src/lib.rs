@@ -165,9 +165,7 @@ pub fn run() {
             // ★한계(주석 명시)★: main 창 conf 기본 visible=true 라 창이 잠깐 떴다 숨어 깜빡일 수 있다.
             // 일단 수용 — 깜빡임 제거(conf visible:false + 비-hidden 시 show)는 후속으로 이연.
             if hidden {
-                if let Some(w) = app.get_webview_window("main") {
-                    let _ = w.hide();
-                }
+                crate::tray::actions::hide_main_ui(app.handle());
             }
             Ok(())
         })
@@ -178,9 +176,10 @@ pub fn run() {
         .on_window_event(move |window, event| {
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if window.label() == "main" {
+                    // ADR-0229: 숨기기 경로는 하나다 — 여기서 창을 따로 숨기면 입구마다 숨기는 창이 갈린다.
+                    if window.label() == crate::layout::MAIN_WINDOW_LABEL {
                         api.prevent_close();
-                        let _ = window.hide();
+                        crate::tray::actions::hide_main_ui(window.app_handle());
                     }
                 }
                 // ★팝업 창 Destroyed 정리(수명/누수 임계)★: 팝업이 실제로 소멸하면(정상 close 또는 프로그램
