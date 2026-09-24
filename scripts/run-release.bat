@@ -5,8 +5,8 @@ REM
 REM ★The app is launched detached (scripts\launch-detached.ps1) - do NOT replace this with `start`
 REM   (do not remove)★: launched from a terminal, the app becomes a DESCENDANT of that terminal and
 REM   its output travels back up the pipe chain. That combination repeatedly crashed the terminal
-REM   (measured 2026-08-16), taking the app down with it. The scheduler path fixes BOTH halves - the
-REM   app is created by a service so it is outside our process tree, AND its output goes to a file
+REM   (measured 2026-08-16), taking the app down with it. The WMI path fixes BOTH halves - the
+REM   app's wrapper cmd is created by WmiPrvSE.exe, so the app is outside our process tree, AND its output goes to a file
 REM   only. `start` satisfies NEITHER.
 REM
 REM ★Closing this window does NOT stop the app★ - it is no longer our child. Close the app window.
