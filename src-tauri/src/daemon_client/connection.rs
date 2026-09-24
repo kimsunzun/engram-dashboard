@@ -1434,7 +1434,8 @@ pub fn apply_replay_event(
 ) -> ReplayFollowUp {
     match ev {
         // ★구독 ack★: SubState.epoch 갱신(binary 팔 decide_epoch 의 기준) + in-flight 를 acked 로 전이 +
-        //   truncated 기억(성공 마커에 전파) + 진행(deadline 리셋). ★ADR-0046: 버퍼/커서 reset 없음★ —
+        //   truncated·continues_conversation(ADR-0226) 기억(성공 마커에 전파) + 진행(deadline 리셋).
+        //   ★ADR-0046: 버퍼/커서 reset 없음★ —
         //   epoch 전환 재구독은 프론트의 권위 명부 관측(observeRoster)이 담당한다(ADR-0164 결정 8) —
         //   구독 deps `[viewId, agentId]`는 화신 표식을 의도적으로 제외한다.
         // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로 창 render_seq 를 리셋했으나, 미러
@@ -1444,13 +1445,14 @@ pub fn apply_replay_event(
             agent_id,
             current_epoch,
             truncated,
+            continues_conversation,
             ..
         } => {
             let _ = protocol_state::apply_subscribe_ack(
                 subs.entry(*agent_id).or_default(),
                 *current_epoch,
             );
-            flight.on_ack(*agent_id, *truncated, now);
+            flight.on_ack(*agent_id, *truncated, *continues_conversation, now);
             ReplayFollowUp::Handled(None)
         }
         // ★replay 경계 각인(ADR-0046 M1)★: acked in-flight 를 성공 마커로 해소한다(Ack 전 도착 Complete =
