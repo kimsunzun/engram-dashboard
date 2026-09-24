@@ -106,11 +106,10 @@ fn walk(node: &LayoutNode, r: RectF64, out: &mut LayoutGeometry) {
         } => {
             // 쓰기 경로가 한계·유한을 보장해도 트리에 직접 심은 값을 여기서도 거른다 — 0.0 등이 면적 0 잎을
             // 만들지 않게 자르고, NaN 은 클램프를 그대로 통과해 자손 좌표 전체로 번지므로 반분으로 읽는다.
-            let raw = f64::from(*ratio);
-            let t = if raw.is_nan() {
+            let t = if ratio.is_nan() {
                 0.5
             } else {
-                raw.clamp(RATIO_MIN, RATIO_MAX)
+                ratio.clamp(RATIO_MIN, RATIO_MAX)
             };
             // ADR-0140: LeftRight = x 축 분할(a 왼쪽) · TopBottom = y 축 분할(a 위).
             let (at, ra, rb) = match dir {
@@ -171,7 +170,6 @@ pub fn content_rect(frame: &PxRect, insets: &Insets) -> RectF64 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::spatial;
     use super::super::types::SlotContent;
     use super::*;
 
@@ -186,12 +184,11 @@ mod tests {
         }
     }
 
-    // `ratio as _` — 저장형이 f32 든 f64 든 그대로 컴파일된다.
     fn split(n: u128, dir: SplitDir, ratio: f64, a: LayoutNode, b: LayoutNode) -> LayoutNode {
         LayoutNode::Split {
             id: id(n),
             dir,
-            ratio: ratio as _,
+            ratio,
             a: Box::new(a),
             b: Box::new(b),
         }
@@ -464,41 +461,6 @@ mod tests {
                 srect(103, SplitDir::TopBottom, 0.0, 0.25, 0.75, 1.0, 0.625),
             ]
         );
-    }
-
-    // ── spatial.rs 교차 일치 ─────────────────────────────────────────────────
-
-    #[test]
-    fn agrees_with_spatial_leaf_rects() {
-        let trees = [
-            nested(),
-            split(
-                200,
-                SplitDir::TopBottom,
-                0.6,
-                split(201, SplitDir::LeftRight, 0.15, slot(1), slot(2)),
-                split(
-                    202,
-                    SplitDir::LeftRight,
-                    0.85,
-                    split(203, SplitDir::TopBottom, 0.4, slot(3), slot(4)),
-                    slot(5),
-                ),
-            ),
-        ];
-        for tree in &trees {
-            let g = compute(tree);
-            let legacy = spatial::leaf_rects(tree);
-            assert_eq!(g.slots.len(), legacy.len());
-            for (sid, r) in legacy {
-                let s = g.slots.iter().find(|s| s.slot_id == sid).expect("같은 잎");
-                let near = |got: f64, want: f32| (got - f64::from(want)).abs() < 1e-6;
-                assert!(near(s.x0, r.x), "{sid} x0");
-                assert!(near(s.y0, r.y), "{sid} y0");
-                assert!(near(s.x1, r.x + r.w), "{sid} x1");
-                assert!(near(s.y1, r.y + r.h), "{sid} y1");
-            }
-        }
     }
 
     // ── px 변환 ─────────────────────────────────────────────────────────────

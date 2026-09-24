@@ -75,7 +75,8 @@ pub enum LayoutNode {
         #[ts(type = "string")]
         id: Uuid,
         dir: SplitDir,
-        ratio: f32,
+        // ADR-0227
+        ratio: f64,
         a: Box<LayoutNode>,
         b: Box<LayoutNode>,
     },
