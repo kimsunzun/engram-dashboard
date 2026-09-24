@@ -1,7 +1,7 @@
 # ADR-0068: LLM 공간 타깃 = 논리 도면(ViewManager) 방향·이웃·순서 핸들 우선 (geometry 좌표 노출 보류)
 
-- 상태: 확정 (2026-07-11, 근거: `/research medium`(설계-결정 모드) OSS 서베이(tmux·zellij·kitty·i3/sway·wezterm·VS Code·JetBrains) + Codex 적대 리뷰 FIX 보정 + 사용자 결정("도면만으로 충분")) · 부분 폐기 by ADR-0227 (결정 3 좌표 노출 보류와 영향의 실측 픽셀 조항)
-- 관련: Amends ADR-0066 (결정 3: LLM 공간 타깃 = geometry {x,y,w,h} 좌표 노출 우선 → 논리 도면 기반 방향/이웃/순서 핸들 우선으로 개정 (좌표계·실측 픽셀 보류)) · CLAUDE.md §5(LLM-우선 제어) · ADR-0035(레이아웃 권위 = 클라이언트 Rust ViewManager) · ADR-0022/0055(command registry) · ADR-0011(agentClient assign) · `src-tauri/src/layout/manager.rs`(ViewManager) · step-log "LLM 공간 타깃 = 논리 도면 방향·이웃·순서 핸들" · Amended by ADR-0227 (결정 3 좌표 노출 보류와 영향의 실측 픽셀 조항)
+- 상태: 확정 (2026-07-11, 근거: `/research medium`(설계-결정 모드) OSS 서베이(tmux·zellij·kitty·i3/sway·wezterm·VS Code·JetBrains) + Codex 적대 리뷰 FIX 보정 + 사용자 결정("도면만으로 충분")) · 부분 폐기 by ADR-0227 (결정 3과 거부 대안 백엔드 투영 px와 영향의 실측 픽셀 및 최소 칸 조항)
+- 관련: Amends ADR-0066 (결정 3: LLM 공간 타깃 = geometry {x,y,w,h} 좌표 노출 우선 → 논리 도면 기반 방향/이웃/순서 핸들 우선으로 개정 (좌표계·실측 픽셀 보류)) · CLAUDE.md §5(LLM-우선 제어) · ADR-0035(레이아웃 권위 = 클라이언트 Rust ViewManager) · ADR-0022/0055(command registry) · ADR-0011(agentClient assign) · `src-tauri/src/layout/manager.rs`(ViewManager) · step-log "LLM 공간 타깃 = 논리 도면 방향·이웃·순서 핸들" · Amended by ADR-0227 (결정 3과 거부 대안 백엔드 투영 px와 영향의 실측 픽셀 및 최소 칸 조항)
 
 ## 맥락
 
