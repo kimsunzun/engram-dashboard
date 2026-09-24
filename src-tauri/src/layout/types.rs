@@ -7,6 +7,7 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
+use super::geometry::{SlotRect, SplitRect};
 use super::spatial::SlotSpatial;
 
 /// 이름이 결과 배치를 말한다 — `LeftRight` 는 항상 좌/우, `TopBottom` 은 항상 위/아래.
@@ -115,8 +116,22 @@ pub struct ViewSnapshot {
     pub focused_slot_id: Option<Uuid>,
     /// ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
     /// 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
-    /// ordinal 순으로 담긴다. 좌표 자체는 노출 안 함(ADR-0068 결정 3 — 좌표 보류).
+    /// ordinal 순으로 담긴다. 정규화 좌표는 이 필드가 아니라 `slot_rects` 가 싣는다(ADR-0227 — ADR-0068 결정 3 개정).
     pub slot_spatial: Vec<SlotSpatial>,
+    /// 각 말단 슬롯의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴 `x0,y0,x1,y1`(픽셀 아님). 맞닿는 경계 값은 비트
+    /// 단위로 같다. 트리 전위 순(노드 → a 서브트리 → b 서브트리)으로 담긴다 — `slot_spatial` 의 ordinal
+    /// 순과 다르므로 짝을 찾을 땐 `slot_id` 로 맞춘다.
+    // ADR-0227
+    pub slot_rects: Vec<SlotRect>,
+    /// 각 분할 노드의 상자(두 자식을 합친 영역, `slot_rects` 와 같은 경계 꼴) + 분할 경계 `at`
+    /// (`dir` 이 `left_right` 면 x 축 값, `top_bottom` 이면 y 축 값). 트리 전위 순으로 담긴다.
+    // ADR-0227
+    pub split_rects: Vec<SplitRect>,
+    /// 분할 비율(a 쪽 몫)의 셸 한계 — 셸은 비율을 `[ratio_min, ratio_max]` 로 잘라 읽고, `slot_rects`·
+    /// `split_rects` 는 그렇게 자른 비율로 계산한 값이다. 화면은 이 두 값을 쓰고 한계 상수를 따로 두지 않는다.
+    // ADR-0227
+    pub ratio_min: f64,
+    pub ratio_max: f64,
     /// 변경마다 +1(ViewManager.version).
     /// ts-rs u64 기본 매핑=bigint 이나 serde_json 은 number 로 직렬화(런타임=JS number) → 타입도 number 로 고정
     /// (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.

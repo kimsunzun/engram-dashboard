@@ -31,6 +31,7 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
+use super::geometry;
 use super::tree;
 use super::types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
 
@@ -142,11 +143,16 @@ impl ViewManager {
             .views
             .get(&view_id)
             .ok_or(LayoutError::ViewNotFound(view_id))?;
+        let geo = geometry::compute(&v.layout);
         Ok(ViewSnapshot {
             view_id: v.id,
             layout: v.layout.clone(),
             focused_slot_id: v.focused_slot_id,
             slot_spatial: super::spatial::compute_spatial(&v.layout),
+            slot_rects: geo.slots,
+            split_rects: geo.splits,
+            ratio_min: tree::RATIO_MIN,
+            ratio_max: tree::RATIO_MAX,
             version: self.version,
         })
     }
@@ -1156,6 +1162,23 @@ mod tests {
         assert_eq!(snap.view_id, view_id);
         assert_eq!(snap.version, mgr.version);
         assert!(matches!(snap.layout, LayoutNode::Split { .. }));
+    }
+
+    #[test]
+    fn snapshot_carries_geometry_and_ratio_bounds() {
+        let mut mgr = ViewManager::new();
+        let view_id = main_active(&mgr);
+        let slot = first_slot_of(&mgr, view_id);
+        let right = mgr.split_slot(view_id, slot, SplitDir::LeftRight).unwrap();
+        mgr.split_slot(view_id, right, SplitDir::TopBottom).unwrap();
+        let snap = mgr.snapshot(view_id).unwrap();
+        let geo = geometry::compute(&snap.layout);
+        assert_eq!(snap.slot_rects, geo.slots);
+        assert_eq!(snap.split_rects, geo.splits);
+        assert_eq!(snap.slot_rects.len(), 3);
+        assert_eq!(snap.split_rects.len(), 2);
+        assert_eq!(snap.ratio_min, tree::RATIO_MIN);
+        assert_eq!(snap.ratio_max, tree::RATIO_MAX);
     }
 
     #[test]

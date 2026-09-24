@@ -57,6 +57,10 @@ function slotSnap(viewId: string, version: number): ViewSnapshot {
     layout: { type: 'slot', id: `s-${viewId}`, content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: `s-${viewId}`,
     slot_spatial: [], // ADR-0068: 공간 파생(이 테스트는 안 씀 — 빈 배열로 타입 충족)
+    slot_rects: [], // ADR-0227: 셸 기하(이 테스트는 안 씀)
+    split_rects: [],
+    ratio_min: 0.1,
+    ratio_max: 0.9,
     version,
   }
 }

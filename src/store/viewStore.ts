@@ -15,7 +15,7 @@
 //   - 팝업 = ?window=<label> 의 windows[label].active
 //   - agent-tree = windows["main"].active 폴백(모델 밖 config 창 — §3-4/G7 특례)
 //
-// ★view_id 별 캐시 모델★(핵심 불변식): layout 을 view_id → {layout,focus,version} 캐시로 보유한다.
+// ★view_id 별 캐시 모델★(핵심 불변식): layout 을 view_id → {layout,focus,기하,version} 캐시로 보유한다.
 // 왜 캐시인가:
 //   - 백엔드 ViewManager.version 은 *전역 단조 카운터*(모든 view 공유, manager.rs bump_version).
 //     모든 snapshot 이 같은 전역 version 을 박는다 → "view_id 가 다르면 무조건 채택"식 가드는 틀렸다.
@@ -30,7 +30,15 @@ import { getCurrentWindow } from '@tauri-apps/api/window'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { create } from 'zustand'
 
-import type { LayoutNode, SlotContent, SplitDir, ViewMeta, ViewSnapshot } from '../api/layoutTypes'
+import type {
+  LayoutNode,
+  SlotContent,
+  SlotRect,
+  SplitDir,
+  SplitRect,
+  ViewMeta,
+  ViewSnapshot,
+} from '../api/layoutTypes'
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 import { retryAsync } from '../util/retryInvoke'
 
@@ -58,6 +66,12 @@ export interface WindowTabs {
 export interface CachedView {
   layout: LayoutNode
   focusedSlotId: string | null
+  /** 셸이 계산한 칸·분할 사각형(스냅샷 그대로 — 트리 전위 순). 계약은 `ViewSnapshot.slot_rects`·`split_rects`. */
+  slotRects: SlotRect[]
+  splitRects: SplitRect[]
+  /** 셸의 분할 비율 한계(`ViewSnapshot.ratio_min`/`ratio_max`) — 화면이 상수를 따로 두지 않게 스냅샷에서 받는다. */
+  ratioMin: number
+  ratioMax: number
   /** 이 항목을 마지막으로 채택한 전역 version(stale emit 가드 — 같은 view 안에서 단조 비교). */
   version: number
 }
@@ -245,6 +259,10 @@ export const useViewStore = create<ViewState>((set, get) => ({
         [snap.view_id]: {
           layout: snap.layout,
           focusedSlotId: snap.focused_slot_id,
+          slotRects: snap.slot_rects,
+          splitRects: snap.split_rects,
+          ratioMin: snap.ratio_min,
+          ratioMax: snap.ratio_max,
           version: snap.version,
         },
       },

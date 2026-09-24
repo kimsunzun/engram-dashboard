@@ -58,6 +58,10 @@ function snap(overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
     layout: { type: 'slot', id: 's1', content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: 's1',
     slot_spatial: [], // ADR-0068: 공간 파생(이 테스트는 안 씀 — 빈 배열로 타입 충족)
+    slot_rects: [{ slot_id: 's1', x0: 0, y0: 0, x1: 1, y1: 1 }], // ADR-0227
+    split_rects: [],
+    ratio_min: 0.1,
+    ratio_max: 0.9,
     version: 1,
     ...overrides,
   }
@@ -197,6 +201,42 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(cached.version).toBe(3)
     expect(cached.focusedSlotId).toBe('s2')
     expect(cached.layout).toEqual({ type: 'slot', id: 's1', content: { type: 'empty' } })
+  })
+
+  it('layout:updated → 셸 기하(slot_rects/split_rects)와 비율 한계를 캐시 항목에 그대로 담는다(ADR-0227)', async () => {
+    {
+      const { ready } = subscribeViewEvents()
+      await ready
+    }
+    const slotRects = [
+      { slot_id: 'a', x0: 0, y0: 0, x1: 0.3, y1: 1 },
+      { slot_id: 'b', x0: 0.3, y0: 0, x1: 1, y1: 1 },
+    ]
+    const splitRects = [
+      { split_id: 'p', dir: 'left_right' as const, x0: 0, y0: 0, x1: 1, y1: 1, at: 0.3 },
+    ]
+    emit('layout:updated', snap({
+      view_id: 'v1',
+      version: 2,
+      layout: {
+        type: 'split',
+        id: 'p',
+        dir: 'left_right',
+        ratio: 0.3,
+        a: { type: 'slot', id: 'a', content: { type: 'empty' } },
+        b: { type: 'slot', id: 'b', content: { type: 'empty' } },
+      },
+      focused_slot_id: 'a',
+      slot_rects: slotRects,
+      split_rects: splitRects,
+      ratio_min: 0.15,
+      ratio_max: 0.85,
+    }))
+    const cached = useViewStore.getState().layouts['v1']
+    expect(cached.slotRects).toEqual(slotRects)
+    expect(cached.splitRects).toEqual(splitRects)
+    expect(cached.ratioMin).toBe(0.15)
+    expect(cached.ratioMax).toBe(0.85)
   })
 
   it('window:tabs-updated → windows[label].{tabs,active,version} 갱신', async () => {

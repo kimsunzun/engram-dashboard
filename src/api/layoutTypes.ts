@@ -11,3 +11,6 @@ export type { ViewSnapshot } from '../../src-tauri/bindings/ViewSnapshot'
 // ADR-0068: 슬롯 공간 타깃 파생(방향 이웃 + 읽기 순서) — ViewSnapshot.slot_spatial 에 실린다.
 export type { SlotSpatial } from '../../src-tauri/bindings/SlotSpatial'
 export type { Neighbors } from '../../src-tauri/bindings/Neighbors'
+// ADR-0227: 셸 기하(정규화 경계 꼴 사각형) — ViewSnapshot.slot_rects / split_rects 에 실린다.
+export type { SlotRect } from '../../src-tauri/bindings/SlotRect'
+export type { SplitRect } from '../../src-tauri/bindings/SplitRect'

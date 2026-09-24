@@ -8,15 +8,18 @@
 //! 값은 분할 경계 `at` 하나뿐이다. a 의 끝 경계와 b 의 시작 경계가 같은 `at` 이라 깊이와 무관하게
 //! `==` 가 선다. 경계를 `x + w` 로 다시 만들지 말 것 — 부동소수 끝자리에서 갈려 화면에 머리카락 틈이 난다.
 
+use ts_rs::TS;
 use uuid::Uuid;
 
 use super::tree::{RATIO_MAX, RATIO_MIN};
 use super::types::{LayoutNode, SplitDir};
 
 /// 한 칸의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴(`x0 <= x1`, `y0 <= y1`).
-/// 이웃 칸과 맞닿는 경계 값은 비트 단위로 같다(모듈 헤더 불변식).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 이웃 칸과 맞닿는 경계 값은 비트 단위로 같다(`src-tauri/src/layout/geometry.rs` 모듈 헤더 불변식).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
 pub struct SlotRect {
+    #[ts(type = "string")]
     pub slot_id: Uuid,
     pub x0: f64,
     pub y0: f64,
@@ -24,10 +27,12 @@ pub struct SlotRect {
     pub y1: f64,
 }
 
-/// 한 분할 노드 — 이 분할 자신의 상자(두 자식을 합친 영역) + 경계 좌표 `at`.
-/// `at` 은 `LeftRight` 면 x 축 값(a = 왼쪽), `TopBottom` 이면 y 축 값(a = 위)이다.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// 한 분할 노드 — 이 분할 자신의 상자(두 자식을 합친 영역, 뷰 기준 정규화 [0,1] 경계 꼴) + 경계 좌표 `at`.
+/// `at` 은 `dir` 이 `left_right` 면 x 축 값(a = 왼쪽), `top_bottom` 이면 y 축 값(a = 위)이다.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
 pub struct SplitRect {
+    #[ts(type = "string")]
     pub split_id: Uuid,
     pub dir: SplitDir,
     pub x0: f64,
