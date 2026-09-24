@@ -30,7 +30,7 @@ interface RenderModeCtx {
 }
 
 /**
- * ★viewId 를 받지 않는다★: 오버라이드 키는 slot node.id 이고(`ViewLayoutRenderer` 의
+ * ★viewId 를 받지 않는다★: 오버라이드 키는 slot node.id 이고(`LayoutLeaf` 의
  * `renderModeOverride[slotId]`), slotId 는 창 간 전역 고유 UUID 라(ADR-0035 불변식) viewId 로 좁힐 것이
  * 없다. 형제 slot.* 이 요구하는 viewId 를 여기서도 요구하면 대상 액션이 쓰지도 않는 값을 호출자(LLM)가
  * 찾아 채워야 한다.

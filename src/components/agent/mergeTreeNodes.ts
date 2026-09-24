@@ -17,7 +17,7 @@ import type { AgentFailureKind, AgentInfo, AgentProfile } from '../../api/types'
  *                 — reaper 는 명부에서 지우지만 프로필은 시체로 남긴다. 트리의 "예약" 노드와 같은 집합.
  * - `unknown`   : 둘 다 없다(트리에서 삭제됨).
  *
- * ★이 규칙을 두 곳에 각각 적지 않는다★: 트리 합성(mergeTreeNodes)과 슬롯 렌더 게이트(ViewLayoutRenderer)가
+ * ★이 규칙을 두 곳에 각각 적지 않는다★: 트리 합성(mergeTreeNodes)과 슬롯 렌더 게이트(LayoutLeaf)가
  *   같은 판정을 쓰므로, 한쪽만 고쳐 어긋나는 일이 생기지 않게 여기 한 함수로 둔다. 호출자는 명부·프로필을
  *   그대로 넘긴다(수십 건 규모 — 인덱스를 미리 만들 이유가 없다).
  *

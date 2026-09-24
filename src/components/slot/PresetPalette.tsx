@@ -5,7 +5,7 @@
 //!
 //! ★pane 메뉴 없음(ADR-0064)★: 옛 pane 우클릭 "추가" 메뉴 + stopPropagation 은 제거됐다 — 추가는 이제
 //! 통합 슬롯 메뉴의 preset.add command(폴더 다이얼로그 → createPreset, presetCommands.ts)로 기여된다.
-//! pane 우클릭은 상위 ViewLayoutRenderer 의 통합 SlotContextMenu 로 버블한다(공통 슬롯 ops 도 함께 노출).
+//! pane 우클릭은 상위 LayoutLeaf 의 통합 SlotContextMenu 로 버블한다(공통 슬롯 ops 도 함께 노출).
 //!
 //! ★스타일 = 변수-only(테마 준수)★: 색·폰트는 전부 CSS 변수 참조 — 하드코딩 색 리터럴 0(e-ink 대비).
 

@@ -37,7 +37,7 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
-// ── agentStore stub — ViewLayoutRenderer 가 `useAgentStore(s => s.agents)` 로 caps 를 조회한다. ──
+// ── agentStore stub — ViewLayoutRenderer 가 그리는 LayoutLeaf 가 `useAgentStore(s => s.agents)` 로 caps 를 조회한다. ──
 // FIX 1(ADR-0041): 렌더러 분기가 store 의 AgentInfo 유무·caps 에 의존하므로 테스트가 agents 를 제어할 수
 // 있어야 한다. vi.hoisted 로 가변 holder 를 만들어 selector 에 흘린다(TerminalSlot/RichSlot 은 stub 이라
 // 자기 useAgentStore 호출은 무해). afterEach 에서 초기화.
@@ -460,6 +460,20 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
     })
 
+    // ★잎 key = slot id(ADR-0227)★: 같은 자리에 다른 slot id 가 오면 잎을 새로 짓는다. 기억이 s2 로 넘어가면
+    //   s2 가 한 번도 띄운 적 없는 뷰를 「보존」해 수거된 에이전트로 구독을 건다.
+    it('같은 자리의 슬롯이 다른 slot id 로 바뀌면 기억을 넘기지 않는다(잎 재마운트)', () => {
+      const { rerender } = mountAlive(true, 3)
+      expect(screen.getByTestId('rich-slot')).toBeTruthy()
+
+      // 종료 — 명부에서 사라지고 프로필은 남는다(reserved). 같은 s1 이면 뷰를 지키는 조합이다.
+      agentStoreState.agents = []
+      rerender(<ViewLayoutRenderer node={slotNode('s2', GONE)} focusedSlotId={null} />)
+
+      expect(screen.queryByTestId('rich-slot')).toBeNull()
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+    })
+
     it('프로필 없음 → 「연결된 에이전트가 없습니다」(보존 중이던 뷰도 여기서 내려간다 — 의도)', () => {
       const { rerender } = mountAlive(true, 3)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
@@ -809,6 +823,20 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   it('우클릭 전에는 메뉴가 없다(preventDefault 후 상태 기반 마운트)', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
     expect(screen.queryByText('가로 분할')).toBeNull()
+  })
+
+  // ★잎 key = slot id(ADR-0227)★: 메뉴 상태는 잎이 쥔다 — 같은 자리에 다른 slot id 가 오면 새 잎이라 메뉴가 따라가지 않는다.
+  it('같은 자리의 슬롯이 다른 slot id 로 바뀌면 열린 메뉴가 닫힌다(잎 재마운트)', () => {
+    const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
+    const before = document.querySelector('[data-slot-id="s1"]') as HTMLElement
+    fireEvent.contextMenu(before)
+    expect(screen.getByText('가로 분할')).toBeTruthy()
+
+    rerender(<ViewLayoutRenderer node={slotNode('s2', null)} focusedSlotId={null} />)
+
+    expect(screen.queryByText('가로 분할')).toBeNull()
+    expect(document.querySelector('[data-slot-id="s2"]')).not.toBeNull()
+    expect(before.isConnected).toBe(false)
   })
 
   // ── ★메뉴는 우클릭 전용(ADR-0144)★ ────────────────────────────────────────────────────────
