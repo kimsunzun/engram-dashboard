@@ -1,7 +1,7 @@
 # ADR-0065: 슬롯 메뉴 descriptor 확장 — hideOn 제외조건 + children 1단 서브메뉴 (빈-슬롯 트림 + 콘텐츠-채움 접기)
 
-- 상태: 확정 (2026-07-10, 근거: 사용자 결정(옵션 "트림 + 콘텐츠 서브메뉴") + `/research light` OSS 서베이(VS Code·JetBrains·iTerm2·Windows Terminal·GNOME HIG))
-- 관련: Amends ADR-0064 (descriptor 스키마 확장: hideOn 제외조건 + children 1단 서브메뉴 (when-DSL 연기를 hideOn으로 부분 실현)) · CLAUDE.md §5(LLM-우선 제어) · ADR-0060(SlotContent 유니온) · `src/commands/slotMenu.ts`(SlotMenuItem/buildSlotMenu) · `src/commands/{slotCommands,slotContentCommands}.ts`(기여) · `src/components/slot/SlotContextMenu.tsx`(렌더)
+- 상태: 확정 (2026-07-10, 근거: 사용자 결정(옵션 "트림 + 콘텐츠 서브메뉴") + `/research light` OSS 서베이(VS Code·JetBrains·iTerm2·Windows Terminal·GNOME HIG)) · 부분 폐기 by ADR-0228 (결정 1 의 slot.popout 빈 칸 트림)
+- 관련: Amends ADR-0064 (descriptor 스키마 확장: hideOn 제외조건 + children 1단 서브메뉴 (when-DSL 연기를 hideOn으로 부분 실현)) · CLAUDE.md §5(LLM-우선 제어) · ADR-0060(SlotContent 유니온) · `src/commands/slotMenu.ts`(SlotMenuItem/buildSlotMenu) · `src/commands/{slotCommands,slotContentCommands}.ts`(기여) · `src/components/slot/SlotContextMenu.tsx`(렌더) · Amended by ADR-0228 (결정 1 의 slot.popout 빈 칸 트림)
 
 ## 맥락
 

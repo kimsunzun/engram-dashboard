@@ -428,13 +428,14 @@ impl ViewManager {
     }
 
     // ★phase A★: 소스 슬롯 콘텐츠를 담은 임시 View 를 만든다(아직 **어느 창 tabs 에도 안 넣음** — orphan
-    // 방지, phase C 에서 삽입). 소스 슬롯은 안 건드림(phase C 에서 close). 빈 슬롯(Empty)이면 Err
-    // (pop-out 대상 없음 — 메뉴가 empty 를 hideOn 으로 숨기나 코어도 방어).
+    // 방지, phase C 에서 삽입). 소스 슬롯은 안 건드림(phase C 에서 close). 거절은 없는 view/slot 뿐이다.
     //
     // ★ADR-0064 — 콘텐츠 일반화★: 모든 슬롯 종류가 팝업 가능(불변식 5 — 다중 참조 허용은 Agent 뿐 아니라
     // 콘텐츠 일반에 적용). 반환한 SlotContent 로 호출자가 agent 구독 마이그레이션(still-ours close 가드)이
     // 필요한지(= Agent 인지)를 판별한다.
+    // ★빈 슬롯(Empty)도 옮긴다 — 거절을 되살리지 말 것(사용자 결정)★: 결과는 빈 칸 하나짜리 새 탭이다.
     // ADR-0064
+    // ADR-0228
     pub fn prepare_detached_view(
         &mut self,
         src_view: ViewId,
@@ -442,9 +443,6 @@ impl ViewManager {
         name: String,
     ) -> Result<(ViewId, SlotContent), LayoutError> {
         let content = self.slot_content(src_view, src_slot)?;
-        if content.is_empty() {
-            return Err(LayoutError::SlotNotFound(src_slot));
-        }
         let id = self.make_view(name);
         let slot = {
             let v = self.views.get(&id).expect("방금 만든 View");
@@ -1223,19 +1221,52 @@ mod tests {
         );
     }
 
+    // ADR-0228
     #[test]
-    fn prepare_detached_view_empty_slot_is_err() {
-        // Empty 거부 = 코어 방어(팝업 대상 없음) — 이걸 정한 ADR 은 없고 메뉴 숨김만 ADR-0065
-        // (slot.popout hideOn:['empty']). agent_list/preset_palette 허용은 ADR-0064 — 위 테스트.
+    fn prepare_detached_view_moves_an_empty_slot() {
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
         let slot = first_slot_of(&mgr, src);
-        // ★썩음(낡은/없는 slot id)을 막는 것은 바로 아래 `unwrap()` 이다★ — prepare_detached_view 는
-        //   "빈 슬롯"과 "없는 슬롯"에 같은 LayoutError::SlotNotFound 를 돌려주므로 마지막 is_err 만으론
-        //   둘을 못 가른다. 하지만 set_slot_content 는 없는 id 면 set_in_tree 가 false → SlotNotFound 라
-        //   여기서 패닉한다 — 즉 다음 줄이 통과했다는 것 자체가 slot id 실재의 증거다.
         mgr.set_slot_content(src, slot, SlotContent::Empty).unwrap();
-        assert!(mgr.prepare_detached_view(src, slot, "P".into()).is_err());
+        let (tmp, content) = mgr
+            .prepare_detached_view(src, slot, "Popup".into())
+            .unwrap();
+        assert_eq!(content, SlotContent::Empty, "반환 콘텐츠 = Empty");
+        let tslot = first_slot_of(&mgr, tmp);
+        assert_eq!(
+            tree::find_slot(&mgr.views.get(&tmp).unwrap().layout, tslot).unwrap(),
+            &SlotContent::Empty
+        );
+        assert!(
+            mgr.view_owner.get(&tmp).is_none(),
+            "phase A 는 view_owner 미배정"
+        );
+        // phase C 에서 close.
+        assert_eq!(
+            tree::find_slot(&mgr.views.get(&src).unwrap().layout, slot).unwrap(),
+            &SlotContent::Empty
+        );
+    }
+
+    #[test]
+    fn prepare_detached_view_missing_slot_or_view_is_err_without_a_view() {
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let views_before = mgr.views.len();
+        let ghost = Uuid::new_v4();
+        assert_eq!(
+            mgr.prepare_detached_view(src, ghost, "P".into()),
+            Err(LayoutError::SlotNotFound(ghost))
+        );
+        assert_eq!(
+            mgr.prepare_detached_view(ghost, ghost, "P".into()),
+            Err(LayoutError::ViewNotFound(ghost))
+        );
+        assert_eq!(
+            mgr.views.len(),
+            views_before,
+            "거절은 임시 View 를 남기지 않는다"
+        );
     }
 
     #[test]
