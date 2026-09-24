@@ -488,6 +488,57 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     expect(got.filter((m) => m.kind === 'replayBoundary').length).toBe(1)
     t.close()
   })
+
+  // ADR-0226: 직결 경로는 마커가 없으니 Ack 의 칸을 그 요청에 기억해 성공 경계에 싣는다. ★요청마다 새로
+  //   시작한다★ — 앞 요청의 참이 뒤 요청(칸 없는 옛 데몬 Ack)으로 새면 첫 화면 대신 로딩이 뜬다.
+  it('SubscribeAck 의 continues_conversation 이 그 요청의 성공 경계로 가고, 다음 요청에 새지 않는다', async () => {
+    const t = new WsTransport()
+    const ws = await connect(t)
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+
+    await t.requestReplay(AGENT)
+    const p2 = t.requestReplay(AGENT) // in-flight 중 병합 — 첫 경계 뒤 승격된다
+    ws.fireText({
+      SubscribeAck: {
+        agent_id: AGENT,
+        current_epoch: 4,
+        replay_from: 0,
+        truncated: false,
+        continues_conversation: true,
+      },
+    })
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({
+      gen: 1n,
+      failed: false,
+      continuesConversation: true,
+    })
+
+    await p2
+    got.length = 0
+    ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 0, truncated: false } })
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({
+      gen: 2n,
+      continuesConversation: false,
+    })
+    t.close()
+  })
+
+  it('거절(실패 경계)은 continuesConversation=false', async () => {
+    const t = new WsTransport()
+    const ws = await connect(t)
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.requestReplay(AGENT)
+    ws.fireText({ SubscribeFailed: { agent_id: AGENT, reason: 'no such agent' } })
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({
+      failed: true,
+      continuesConversation: false,
+    })
+    t.close()
+  })
 })
 
 // ── FIX-B: replay single-flight 상태가 소켓 종료를 넘어 stuck 되지 않음 ──────────────────────

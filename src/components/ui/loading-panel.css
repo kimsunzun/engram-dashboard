@@ -1,0 +1,23 @@
+/* LoadingPanel 회전 (ADR-0226) — reduced-motion 과 e-ink 테마에서는 멈춘다.
+   ★정지 규칙을 여기 한 곳에 둔다★: Tailwind `motion-safe:` 는 reduced-motion 만 덮고 e-ink 테마는 못 덮어
+   규칙이 두 곳으로 갈린다. */
+
+@keyframes engram-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.engram-loading-spinner {
+  animation: engram-loading-spin 1s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .engram-loading-spinner {
+    animation: none;
+  }
+}
+
+:root[data-theme='e-ink'] .engram-loading-spinner {
+  animation: none;
+}
