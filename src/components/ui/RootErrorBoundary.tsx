@@ -4,6 +4,8 @@
 //   안쪽 오류는 SlotErrorBoundary 가 먼저 가두므로 여기까지 오는 것은 그 밖의 오류뿐이다.
 // ★대체 표시는 라우터·스토어·테마 스토어에 기대지 않는다★ — 그중 무엇이 터진 원인일지 모른다. 색은 main.tsx 가
 //   첫 페인트 전에 :root 에 박는 CSS 변수만 쓴다.
+// ★두 버튼에 LLM 경로가 없다★ — 「LLM-우선 제어」 갭(사용자 결정 2026-09-24: 기록만). 릴리즈 빌드에선 LLM 이
+//   이 상태를 알아챌 수단도 없어, 기존 명령 목록에 `window.reload` 를 더하는 것만으로는 닫히지 않는다.
 
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
