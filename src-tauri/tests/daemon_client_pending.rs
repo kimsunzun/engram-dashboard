@@ -9,8 +9,7 @@
 //! (그 타깃을 세운 결정 = ADR-0174 · 현황 = CLAUDE.md 「빌드·검증 명령」).
 //! 실행: `cargo test -p engram-dashboard --test daemon_client_pending`(자식 프로세스를 하나도 안
 //! 띄우므로 `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」).
-//! ★워크스페이스 회귀에 안 실린다★ — 그 명령이 `--exclude engram-dashboard` 로 이 패키지를 통째로 뺀다.
-//! 그래서 CI가 이 타깃만 따로 부르는 전용 스텝을 갖는다(`.github/workflows/ci.yml`).
+//! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
 //!
 //! ## ★무엇을 지키나 — 겹친 번호로 연결이 죽지 않는다★
 //! 이 맵의 키(`request_id`)는 더 이상 우리가 만드는 값이 아니다. `AgentCommand::Command { envelope }` 의

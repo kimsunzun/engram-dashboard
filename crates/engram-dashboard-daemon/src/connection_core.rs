@@ -2868,16 +2868,22 @@ mod tests {
             agent_id: AgentId,
         ) -> (bool, u32, u32, Vec<u32>) {
             // 셸이 뭔가 찍을 때까지 기다린다 — 안 그러면 replay 가 비어 아래 프레임 표식 단언이 헛돈다.
+            let mut printed = false;
             for _ in 0..125 {
                 if core
                     .manager
                     .get_snapshot(agent_id)
                     .is_ok_and(|chunks| !chunks.is_empty())
                 {
+                    printed = true;
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(40)).await;
             }
+            assert!(
+                printed,
+                "셸 출력이 5초 안에 replay 링에 닿지 않았다 — 시험 전제 실패(셸 기동 지연 또는 출력 경로)이지 구독 replay 결함이 아니다"
+            );
             let (tx, mut conn_rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(4608);
             let mock = MockOutboundSink::new(tx);
             core.dispatch(

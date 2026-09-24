@@ -83,7 +83,7 @@ pub struct Marker {
     /// 이어받기의 성공 여부가 아니다). ★성공 마커에만 참일 수 있다★ — 실패 마커를 만드는 두 자리
     /// ([`ReplayFlightSet::check_deadlines`]·[`ReplayFlightSet::on_refused`])가 `false` 로 짓고,
     /// [`encode_marker_frame`] 도 실패 마커의 bit2 를 지운다. 실패엔 Ack 이 안 왔을 수 있어 값이 없는
-    /// 자리다. 뷰 쪽 계약(ADR-0226 A4 — 아직 착지 전): 이 비트는 성공 flush 에서만 읽는다.
+    /// 자리다. 뷰 쪽 계약(ADR-0226 A4): 이 비트는 성공 flush 에서만 읽는다.
     pub continues_conversation: bool,
 }
 

@@ -2,6 +2,8 @@
 
 > 상태: **개정 4판(2026-09-24) — 리뷰 4회차 지적 넷 반영**(사용자 종료 중의 제출을 보내지도 않는다 · 메모 A 문구 셋). 3판 = 리뷰 3회차(FIX) 지적 여섯 반영. 2판 = 리뷰 2회차(FIX, 리뷰어 셋) 반영 + 사용자 결정 Q1·Q2·로딩 배치. 코드는 아직 한 줄도 안 바뀌었다. 판독 기준 = master `93f0f9f`(운영 코드는 `e0af391` 과 같다). `file:line` 은 그 시점에 직접 확인한 것이다. 리뷰 지적의 코드 주장은 전부 다시 읽어 확인했고, **코드와 어긋난 1회차 지적 하나(RichSlot 비우기 창)는 반영하지 않았다** — 근거는 §3-5(2회차 리뷰어 셋이 각자 그 반박을 확인했다). 2회차의 Phase B 몫 지적은 §3-4 끝 「B 라운드 착수 전 반영할 리뷰 지적」에 모았다.
 >
+> **착지(2026-09-24): Phase A 의 A1–A4 가 코드로 들어왔다 — 커밋은 §6-1 단계표.** 위 「코드는 아직 한 줄도 안 바뀌었다」와 본문의 `file:line` 은 판독 시점(`93f0f9f`)의 기록이다. 구현이 원안과 갈린 자리는 그 절에 「구현 결과」로 적었다(§3-5 게이트 식·배치 · §4-1 종단 시험 · §7 Q4).
+>
 > **이 문서가 스스로 고른 것**(D3 로 구현에 위임된 자리 · 사용자 체감이 없는 내부 구현)은 본문에 「고름」으로 표시한다. 사용자 결정이 필요한 것은 §7 에만 둔다.
 >
 > **두 덩이로 나뉜다 — Phase A(D1+D2+D5) · Phase B(D4).** 어느 쪽이든 혼자 착지해도 빌드가 서고, 한쪽만 착지했을 때의 동작은 §6-3·§6-4 가 적는다. 절 제목의 [A]/[B] 가 그 소속이다. 나눌지·어느 쪽 먼저인지는 §7 Q5 — **결정됨: A 를 이번 라운드, B 를 다음 라운드**(사용자 2026-09-24).
@@ -240,6 +242,7 @@
 4. **표류 id 가 대화보다 먼저 알려질 때**(불확실). claude 가 표류한 id Y 를 Y 의 transcript 가 생기기 **전에** 알리면(추적기가 적는다) 다음 `--resume Y` 가 「대화 없음」으로 끝난다. 그러면 D4 가 S 의 대화까지 버린다. Q3 오탐 목록에 넣거나 실측으로 배제한다.
 5. **동시 claude 활성화의 보고**(낮음). 6단계 새 대화 갈래가 `Moot(Some(e3))`(다른 요청이 띄운 화신)이면 7단계가 `Resumed` 로 보고한다. 그 e3 는 곧 죽을 화신일 수 있다. §3-6 에 적거나 Q7 (a)(예약을 판정 창까지 늘린다)에 묶는다.
 6. **LLM-우선**. 「이 화신이 이어받았다」 사실은 지금 구독 응답의 표식(D2)에만 있다. Q3 (d)를 고르면 새 칸을 짓지 말고 이 화신 사실(`continues_conversation` — 폴백이면 새 화신에서 거짓)을 `agent.spawn` 결과에 재사용한다.
+7. **(A2 이월 — 리뷰 지적이 아니라 A2 가 남긴 몫, 2026-09-24) D1 종단 시험을 한 활성화로 합친다.** A2 는 「한 활성화에 스폰 둘」(§4-1 「D4·D1 런타임 통합」)을 D4 없이 세울 수 없어 활성화 둘로 나눠 쟀다(`tests/activation.rs` `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission` — 쓰레기 id Resume → `Err` · Fresh → `Ok`). B2 가 D4 를 들이면 이 시험을 쓰레기 id 이어받기 한 번 → 폴백 새 대화(스폰 최대 2회 · 결과 `Ok`)로 바꾼다.
 
 ### 3-5. D5 — 로딩 패널과 RichSlot 게이트 [A]
 
@@ -251,15 +254,27 @@
   - ★**i18n 키는 새로 만든다**★(리뷰 지적 반영): `common.loading`(`ko.ts` 의 `common` 묶음 `:143` 에 더한다). 기존 `window.loading`(`:48` — 「창 로딩 중… (label: {label})」)은 뜻과 인자가 달라 재사용하지 않는다.
 - **RichSlot(`src/components/slot/RichSlot.tsx`):**
   - 새 상태 `continuesConversation` — `'live'` 통지의 `info` 로 세우고, 비우기 콜백(onReset)과 구독 effect 초기화에서 `false` 로 내린다.
-  - `awaitingHistory = replayDone && continuesConversation && !hasSent && !items.some(isRenderedItem) && !agentUnavailable`
+  - (계획 — 구현 결과는 아래) `awaitingHistory = replayDone && continuesConversation && !hasSent && !items.some(isRenderedItem) && !agentUnavailable`
   - `showEmpty = replayDone && !continuesConversation && !hasSent && items.length === 0` — 기존 식에 한 항만 더한다.
-  - `isRenderedItem` = `StructuredTextView` 의 `rowKindOf(item) !== 'skip'` 을 export(ADR-0051 의 null 반환 규칙과 한 몸 — `StructuredTextView.tsx:377`). ★**`items.length > 0` 으로 끝내지 않는 이유**★ — 실측상 이어받기의 첫 라이브 프레임이 `Usage` 인데 그것은 행을 안 그린다(`StructuredTextView.tsx:385`). 그걸로 끝내면 이력이 오기 전 20–70ms 빈 목록이 비친다.
-  - ★**대기 꼬리도 같은 판정으로**★(리뷰 지적 반영): `streaming = awaiting || (!turnDone && items.length > 0)`(`RichSlot.tsx:283`)는 `Usage` 만 온 창에서 참이 되어 대화 영역 끝에 대기 꼬리(`WaitRow` — `StructuredTextView` 의 `showTail = streaming`, `:517`)를 붙인다 — 로딩 패널과 대기 꼬리가 함께 보인다. `items.length > 0` 을 `items.some(isRenderedItem)` 으로 바꾼다. 달라지는 것은 행을 그리는 항목이 **하나도 없는** 창뿐이고, 그 창이 이 결정이 새로 다루는 창이다.
+  - ★**구현 결과(A4 `fc67cbe`) — 식의 정본은 `RichSlot.tsx` 다**★. 위 두 식 중 `showEmpty` 는 그대로 착지했고, 로딩 쪽은 세 식으로 풀렸다:
+    - `hasHistoryRow = items.some((item) => isRenderedItem(item) && item.kind !== 'separator')` — 원안 `items.some(isRenderedItem)` 과 다른 이유: 사용량만 온 뒤 턴이 닫히면 누산기가 턴 구분선을 붙이는데, 그 행은 12px 스페이서라 이력이 아니다. 원안대로면 로딩이 걷히고 첫 화면도 없는 빈 판이 남는다(A4 리뷰 1회차). 유저 말풍선은 구분선과 같은 행 부류(`'boundary'`)라 부류째 빼지 않고 이력으로 센다.
+    - `historyPending = continuesConversation && !hasSent && !hasHistoryRow` — 국면(복원 중·부재)과 무관한 「아직 이력을 못 받았다」. 원안에 없던 이름이다 — 아래 대기 꼬리가 이것을 쓰므로 따로 세웠다.
+    - `awaitingHistory = replayDone && historyPending && !agentUnavailable` — 원안과 같은 뜻이다(이력 항만 위 `hasHistoryRow` 로 바뀌었다).
+  - `isRenderedItem` = `StructuredTextView` 의 `rowKindOf(item) !== 'skip'` 을 export(ADR-0051 의 null 반환 규칙과 한 몸 — `StructuredTextView.tsx:377`). ★**`items.length > 0` 으로 끝내지 않는 이유**★ — 실측상 이어받기의 첫 라이브 프레임이 `Usage` 인데 그것은 행을 안 그린다(`StructuredTextView.tsx:385`). 그걸로 끝내면 이력이 오기 전 20–70ms 빈 목록이 비친다. (구현 결과: 이 함수는 그대로 착지했다 — 구분선 제외는 이 함수가 아니라 위 `hasHistoryRow` 가 한다. ADR-0051 과 한 몸인 판정을 이 용도로 비틀지 않으려는 것이다.)
+  - (계획 — 구현 결과는 이 항목 아래 — 채택하지 않았다) ★**대기 꼬리도 같은 판정으로**★(리뷰 지적 반영): `streaming = awaiting || (!turnDone && items.length > 0)`(`RichSlot.tsx:283`)는 `Usage` 만 온 창에서 참이 되어 대화 영역 끝에 대기 꼬리(`WaitRow` — `StructuredTextView` 의 `showTail = streaming`, `:517`)를 붙인다 — 로딩 패널과 대기 꼬리가 함께 보인다. `items.length > 0` 을 `items.some(isRenderedItem)` 으로 바꾼다. 달라지는 것은 행을 그리는 항목이 **하나도 없는** 창뿐이고, 그 창이 이 결정이 새로 다루는 창이다.
+    - ★**구현 결과(A4) — 이 교체는 채택하지 않았다**★: `streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)`. 이력 대기 중에만 꼬리를 내리고 그 밖은 A4 이전 규칙 그대로다 — 표식이 거짓이면 오늘과 똑같다. 리뷰어 판정이 갈려(원안은 표식 없는 슬롯의 꼬리 규칙까지 바꾼다) 보수적으로 채택했고, 2회차에 셋이 합의했다. `awaitingHistory` 가 아니라 `historyPending` 으로 내리는 이유: 같은 화신 재부착의 `'buffering'` 이나 막 아래에서 패널만 잠깐 내려간 창에 꼬리가 끼면 패널 → 꼬리 → 패널로 깜빡인다(A4 리뷰 2회차).
   - **배치(★Q2 = (a) 선택으로 정해짐(사용자, 2026-09-24 — (가)/(나)를 Q2 와 함께 제시)★):** 대화 영역 가운데. 하단 입력창은 **그대로 활성**이다 — 이력이 끝내 안 오는 경우에도 사용자가 빠져나갈 길이 입력이다(§3-6). ★Q2 = (a) 가 이 배치에 기댄다★ — 슬롯 전체를 덮는 로딩이면 이력 0건 화신에서 빠져나갈 길이 없다. 입력창(textarea)의 부모 자식 자리를 밀지 않는다(ADR-0145 · `RichSlot.tsx` 막 주석 — ScrollArea 안에 넣거나 마지막 자식으로).
+    - ★**구현 결과(A4) + 사용자 결정(2026-09-24)**★: 위 배치를 유지하고 **대화 영역 위에 옅은 막**을 더했다. 안내 문구(「끄고 다시 켜기」 등)는 넣지 않는다 — 이력이 끝내 안 오는 비정상 경우가 실제로 재현되면 그때 정한다(사용자). 모양:
+      - 막 색 = `bg-foreground/8` — 덮는 영역이 늘 비어 있어(이력 행이 오면 대기가 끝난다) 배경색 계열이면 같은 색 위의 같은 색이라 안 보인다.
+      - `pointer-events-none` — 스크롤·선택·클릭이 통과한다. 입력창은 덮지 않고 활성 그대로다.
+      - 자리 = ScrollArea 안(`absolute inset-0`). 기준은 ScrollArea 루트의 relative 이고, **Viewport 와 그 안쪽 래퍼는 positioned 가 아니어야 한다** — 래퍼가 positioned 가 되면 막이 내용 높이로 줄어든다. 그 불변식의 집 = `src/components/ui/scroll-area.tsx` 헤더.
+      - 아이콘 `size-8` · 보이는 글자 없음 · 타이머 없음.
+  - **종료 막(`SlotUnavailableVeil`)은 포인터 통과 그대로다(사용자 결정 2026-09-24)** — 막 뒤의 스크롤·선택·클릭이 계속 되고, 막는 것은 죽은 에이전트로 가는 입력뿐이다(오늘 이미 슬롯별 가드가 그렇게 한다 — 코드 변경 없음). ADR-0148 은 막이 왜 포인터 통과인지 적지 않았다(ADR-0165 「영향」은 그 사실과 입력 가드가 따로라는 것만 적는다) — 이 동작을 사용자 결정으로 처음 박는다(ADR-0226 「구현 중 정정」).
+  - ★**ADR-0148 과의 관계**★: `awaitingHistory` 가 `!agentUnavailable` 을 접으므로, 이어받는 화신이 로딩 중에 죽으면 막 아래가 빈 대화 영역이다(마스코트·첫 화면·스피너 없음). ADR-0148 「영향」의 「빈 상태 판정에 생존 조건을 접지 않는다」와 겉모양이 부딪히지만, 로딩 스피너는 내용이 아니라 활동 표시라 ADR-0148 결정 2(내용 고정)가 걸리지 않는다. 근거 = ADR-0226 결정 8 「막이 이긴다」 + 아래 §4-1 프론트 시험 ⑤. `showEmpty` 에는 여전히 생존 조건을 안 접는다.
   - 관측 속성 `data-rich-awaiting-history="1"`.
   - 타이머 없음.
   - ★**비우기 콜백에서 `replayDone` 을 내리지 않는다 — 리뷰 지적을 반영하지 않은 자리**★: 지적은 「onReset 이 `replayDone` 을 참으로 둔 채 표식을 거짓으로 내리면 다음 `'live'` 까지 `showEmpty` 가 참 → 그 사이 페인트가 깜빡임을 되살린다」였다. 코드상 그 창이 없다. ① 비우기는 `flushToLive` 안에서만 불리고(`protocolClient.ts:377-381` — `restartPending` 일 때만) 같은 함수 끝에서 **동기로** `'live'` 가 따라온다(`:398`) — 한 틱의 상태 변경은 React 가 묶어 한 번에 그리므로 사이에 페인트가 없다. ② `restartPending` 을 세우는 자리는 `startBuffering` 하나이고(`:450`) 그 함수가 먼저 `'buffering'` 을 통지한다(`:459`) — 비우기 시점엔 `replayDone` 이 **이미 거짓**이다. 기존 주석(「replayDone 은 내리지 않는다 — 바로 뒤 같은 틱에 'live' 가 따라온다」, `RichSlot.tsx:198-199`)이 그 순서에 기대고 있으므로, 그 순서를 시험으로 박는다(§4-1).
-- **대기가 끝나는 넷(D5)이 식의 항에 하나씩 대응한다:** 첫 이력 = `isRenderedItem` · 입력 = `hasSent` · 화신 종료 = `agentUnavailable`(막이 이긴다) · D4 재시작 = 새 화신의 onReset + `'live'`(`false`) → 첫 화면.
+- **대기가 끝나는 넷(D5)이 식의 항에 하나씩 대응한다:** 첫 이력 = `isRenderedItem`(구현 결과: `hasHistoryRow` — separator 제외, 위) · 입력 = `hasSent` · 화신 종료 = `agentUnavailable`(막이 이긴다) · D4 재시작 = 새 화신의 onReset + `'live'`(`false`) → 첫 화면.
 
 ### 3-6. 실패 모드
 
@@ -326,10 +341,15 @@
 - 같은 가짜로 [B] 재확인: 가짜가 `--resume` 에서 문구를 찍고 몇 초 살게 한 뒤 판정 뒤 kill → 새 스폰 없음(스폰 1회)·기록 없음 · 폴백 중 `shutdown_all` → 새 스폰 없음 · 폴백 중 두 번째 활성화 → 「다른 요청이 활성화 중」 `Err`·스폰 최대 2회.
 - 같은 수법의 codex 판(`codex/mod.rs:2190-2240` 의 가짜 app-server 스크립트를 가짜 `codex.cmd` 가 띄운다): `thread/resume` 거절 → 새 스레드 · 첫 턴 뒤에만 thread id 영속.
 - ★**이 수법이 서는지는 미확인이다**★(env 의 PATH 가 `cmd /c` 의 해석에 먹는지). A2 착수 때 파일럿 1건으로 먼저 잰다. 안 서면 manager 에 스폰 주입 seam 이 필요하고 그것은 **사용자 결정**이다(ADR-0012) — §7 Q4.
+- ★**구현 결과(A2 `495dba3`)**★
+  - **PATH 수법이 섰다** — 스폰 주입 seam 은 필요 없다(§7 Q4 해소). 가짜가 실제로 떴는지를 인자 기록으로 먼저 보고 나서 영속을 단언한다(안 떴으면 「영속 안 됨」이 공회전한다).
+  - **「한 활성화에 스폰 둘」 형태는 D4 가 있어야 선다** — Phase A 에는 이어받기 실패 뒤 새 대화로 넘어가는 길이 없다. 그래서 A2 는 **활성화 둘**로 나눠 쟀다(`tests/activation.rs` `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`): ① 쓰레기 id 로 Resume → `Err`(ADR-0082 그대로 · 쓰레기는 명부에 남는다) ② 같은 프로필 Fresh → `Ok`·Running · 쓰레기가 이력으로 · 1 의 실패 기록이 지워진다 · 뽑은 값은 첫 CR 전에는 명부·디스크 어디에도 없고 그 뒤에야 둘 다에 앉는다. ★**한 활성화(스폰 최대 2회)로 합치는 것은 B2 에서 할 몫이다**★ — §3-4 끝 목록 7.
+  - 손잡이 없는 claude Resume 은 짝 시험 하나가 잰다(`a_handleless_claude_resume_opens_a_new_conversation_without_persisting` — `--resume` 없이 `--session-id` 로 뜨고 영속 없음).
+  - 위 codex 판(가짜 `codex.cmd`)은 A2 에 없다 — crate 안에 가짜 `codex.cmd` 를 만드는 시험이 없다(grep).
 
 **daemon · protocol [A]**
 - `handle_subscribe`: 이어받기 표식이 든 세션 → ack 에 `continues_conversation: true`, ack → replay → `ReplayComplete` 순서 불변 · Ack 의 표식 == `ReplayComplete` 의 표식 == replay 프레임의 화신.
-  - ★**그 세션을 만드는 법 — 새 운영 seam 이 필요 없다**★(리뷰 지적 반영): 셸 프로필에 손잡이를 심고(`backend_session_id = Some(..)`) `core.manager.spawn_agent(&profile, SpawnMode::Resume)` 를 부른다. spawn 은 Resume 이면 backend 와 무관하게 명부의 손잡이를 읽는다(`manager.rs:1350-1358`). 셸은 그 값을 버린다(`build_spec` 의 `_resume_session_id` — `backend/shell/mod.rs:52` · 기본 `open_spawn` 의 `let _ = (..)` — `backend/mod.rs:465`). 그래서 셸이 그대로 뜨고 표식은 참이다. 새 id 는 등록의 신규 갈래가 스냅샷째 넣으므로(`manager.rs:1104` → `profile.rs:530`) 심은 손잡이가 명부에 선다. 기존 시험 `subscribe_emits_ack_then_replay_then_complete_in_order`(`connection_core.rs:2597`)가 이미 셸을 `spawn_agent` 로 띄운다 — 같은 수법이다. 대조군 = 같은 프로필 Fresh → `false`. (확인 = 코드 읽기 — 아직 돌려 보지 않았다.) `SessionIdLatch`·빌더가 crate 전용이어도 이 길은 막히지 않는다.
+  - ★**그 세션을 만드는 법 — 새 운영 seam 이 필요 없다**★(리뷰 지적 반영): 셸 프로필에 손잡이를 심고(`backend_session_id = Some(..)`) `core.manager.spawn_agent(&profile, SpawnMode::Resume)` 를 부른다. spawn 은 Resume 이면 backend 와 무관하게 명부의 손잡이를 읽는다(`manager.rs:1350-1358`). 셸은 그 값을 버린다(`build_spec` 의 `_resume_session_id` — `backend/shell/mod.rs:52` · 기본 `open_spawn` 의 `let _ = (..)` — `backend/mod.rs:465`). 그래서 셸이 그대로 뜨고 표식은 참이다. 새 id 는 등록의 신규 갈래가 스냅샷째 넣으므로(`manager.rs:1104` → `profile.rs:530`) 심은 손잡이가 명부에 선다. 기존 시험 `subscribe_emits_ack_then_replay_then_complete_in_order`(`connection_core.rs:2597`)가 이미 셸을 `spawn_agent` 로 띄운다 — 같은 수법이다. 대조군 = 같은 프로필 Fresh → `false`. (구현 결과(A3): 이 수법으로 선 데몬 시험 `subscribe_ack_carries_whether_the_incarnation_continues_a_conversation` 이 워크스페이스 회귀에서 돈다.) `SessionIdLatch`·빌더가 crate 전용이어도 이 길은 막히지 않는다.
 - ★구독 도중 재스폰(리뷰 지적 반영)★: 두 조회 사이의 화신 교체는 dispatch 로 결정론 재현이 안 되는 TOCTOU 라(기존 주석 `connection_core.rs:1778-1781` 과 같은 판단) 구조로 잰다 — `handle_subscribe` 본문에 `agent_epoch(` 가 없고 Ack·`ReplayComplete` 의 표식이 reply 에서 온다. 짝으로 agent 쪽 단위(위 D2)가 「한 Arc 에서 나온다」를 잰다.
 - codec: 칸 없는 옛 `SubscribeAck` JSON 이 `false` 로 읽힌다(하위 호환 단언).
 
@@ -340,11 +360,11 @@
 **프론트(vitest) [A]**
 - `LoadingPanel`: `role=status` · 아이콘 · 기본 텍스트 없음 · aria 이름 = `common.loading` · `label` 을 주면 그린다 · `data-loading-panel`. (e-ink·reduced-motion 정지는 jsdom 이 css 미디어를 못 돌려 GUI 실측으로 잰다.)
 - `wsFrame`: bit2 해독 · `tauriTransport`: 정규화에 실림 · `wsTransport`: `SubscribeAck` 칸 → 경계 · `protocolClient`: 보관 마커(myGen 미확정) 경로에서도 실림 · `'live'` 에만 `info` · ★onReset 은 언제나 `'buffering'` 뒤, 같은 `flushToLive` 안에서 `'live'` 직전에만 불린다(순서 핀 — §3-5 의 반영하지 않은 지적이 기대는 성질)★.
-- `RichSlot`: ① 표식 참 + 0건 → 첫 화면 없음·로딩 있음 ② 행을 그리는 첫 항목 → 로딩 사라짐·첫 화면 없음 ③ `Usage` 만 온 동안 로딩 유지 ④ 입력 → 로딩 사라짐 ⑤ 에이전트 부재 → 막·로딩 없음 ⑥ onReset + `'live'`(거짓) → 첫 화면(D4 재시작) ⑦ 표식 거짓 → ADR-0145 시험 전부 그대로 ⑧ `info` 없는 `'live'` → 거짓으로 읽음 ⑨ ★`Usage` 만 온 동안 대기 꼬리(`WaitRow`) 없음★.
+- `RichSlot`: ① 표식 참 + 0건 → 첫 화면 없음·로딩 있음 ② 행을 그리는 첫 항목 → 로딩 사라짐·첫 화면 없음(구현 결과: 이력 행 = `hasHistoryRow` — separator 제외, §3-5) ③ `Usage` 만 온 동안 로딩 유지 ④ 입력 → 로딩 사라짐 ⑤ 에이전트 부재 → 막·로딩 없음 ⑥ onReset + `'live'`(거짓) → 첫 화면(D4 재시작) ⑦ 표식 거짓 → ADR-0145 시험 전부 그대로 ⑧ `info` 없는 `'live'` → 거짓으로 읽음 ⑨ ★`Usage` 만 온 동안 대기 꼬리(`WaitRow`) 없음★.
 
 ### 4-2. 바뀌는 기존 시험
 
-- `tests/activation.rs:739` `we_do_not_mint_a_session_id_for_a_backend_that_mints_its_own` — 대조군 「claude 프로필에 sid 가 있다」가 D1 로 뒤집힌다. 대조군을 「claude spec 이 `--session-id` 를 실었다」(위 argv 시험)로 옮기고, 이 시험의 claude 단언은 「영속 안 됨」으로 바꾼다.
+- `tests/activation.rs:739` `we_do_not_mint_a_session_id_for_a_backend_that_mints_its_own`(★A5 에서 `a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history` 로 개명★ — A2 가 미뤄 둔 이름 정리) — 대조군 「claude 프로필에 sid 가 있다」가 D1 로 뒤집힌다. 대조군을 「claude spec 이 `--session-id` 를 실었다」(위 argv 시험)로 옮기고, 이 시험의 claude 단언은 「영속 안 됨」으로 바꾼다.
 - `manager.rs:2967-2968` — `assert!(!fresh_spawn_release_session_id(&claude, SpawnMode::Fresh))` 가 뒤집힌다(claude Fresh 도 이제 비우고 시작한다 — Resume 단언 `:2968` 은 그대로). 그 위 주석 「우리가 발급하는 쪽 — `new_session_id` 가 같은 밀기를 이미 한다」도 함께.
 - `profile.rs` 의 `new_session_id`·`ensure_session_id` 시험(`:900-1060` 부근) — 동사 교체에 맞춰 다시 쓴다. `manager.rs:3082` 의 `ensure_session_id` 사용도. 기록 포트 시험(`releasing_the_handle_does_not_disturb_a_transport_that_refills_it` — `:2972` 등)은 포트가 비교-교체를 부르게 된 만큼 `expected` 를 준다.
 - ADR-0082 회귀 — `activate_resume_early_exit_ends_failed_no_fresh_fallback`(`tests/activation.rs:167`, 파일 주석은 「①」이지만 ADR-0082 본문의 회귀 ②다 — 번호가 서로 어긋나 있어 이름으로 부른다) — shell 대역이라 분류가 `None` → 그대로 초록이어야 한다. 문구 「새 대화 안 생김(spawn 정확히 1회)」 옆에 「단 `NoConversationToResume` 부류는 예외(ADR-B)」를 단다 — [B] 몫이다.
@@ -409,15 +429,17 @@
 
 | # | 조각 | 파일 | 끝났을 때 |
 |---|---|---|---|
-| A1 | 순수 조각 + 구독 reply: 래치 모듈 · `submits_turn` · `commit_session_id`·`mint_session_id`·release · `Incarnation`·`SubscribeReply` · `AgentSession` 빌더(기본 거짓·래치 없음)와 입력 두 동사의 note(래치 없으면 무동작 · 우편은 제출 CR 직전 · `UserKill` 이면 세지도 보내지도 않고 `Err` — 래치가 없어 동작 불변) · `subscribe_from` 이 reply 를 돌려준다 · daemon `handle_subscribe` 가 reply 로 표식을 채운다(wire 칸은 아직 없음) | `session_id_latch.rs`(새) · `backend/mod.rs` · `profile.rs` · `types.rs` · `session.rs` · `manager.rs`(위임만) · daemon `connection_core.rs`(한 함수) | **동작 불변** — 운영이 빌더를 안 부른다 |
-| A2 | **D1 배선**: `spawn_session` 필수 `SpawnIncarnation` · 래치 생성 + claude offer(생성 자리) · `open_spawn` 에 `offer_sink` · claude 민팅 무영속 + Fresh release · 손잡이 단일 읽기 + 띄우기 전 거절 · 머리의 손잡이 없는 우회(+ `Ready`·`Alive` 팔의 죽은 삼항 걷기 — §6-3) · `ensure/new_session_id` 걷기 · 배선 구조 시험 · 시험 갱신(§4-2) · dev bin. PATH 수법 파일럿 1건을 여기서 먼저 잰다(Q4) | `manager.rs` · `profile.rs` · `tests/activation.rs` · daemon `bin/saturation_pilot.rs` | 0턴 세션이 영속 안 됨. 표식은 세션에 서지만 wire 에 아직 없다 → 화면 불변 |
-| A3 | wire + 셸: ack 칸(`serde(default)`) · 바인딩 재생성 · 데몬이 reply 의 표식을 ack 에 싣는다 · flight/마커 bit2 | `messages.rs` · `bindings/` · `connection_core.rs` · `replay_flight.rs` · `connection.rs` | 표식이 웹뷰까지 온다. 프론트는 아직 무시 |
-| A4 | 프론트: 마커 해독 → `'live'` info · `LoadingPanel` · RichSlot 게이트 · `isRenderedItem` · 대기 꼬리 판정 · `common.loading` | `src/api/*` · `src/components/ui/` · `RichSlot.tsx` · `StructuredTextView.tsx` · `src/i18n/ko.ts` | **P1 해소**(codex 이어받기 = 로딩) |
-| A5 | **ADR-A 작성**(D1+D2+D5 — 개정·링크는 §5 와 끝의 메모 A, `/adr`) · A 몫 문서·CLAUDE.md·앵커 · GUI 실측 [A] 시행(§4-4 1–9) | `docs/decisions/` · docs | ADR-A 확정 · 개정 대상 ADR 에 도장 |
+| A1 · ✅ `56a4e98` | 순수 조각 + 구독 reply: 래치 모듈 · `submits_turn` · `commit_session_id`·`mint_session_id`·release · `Incarnation`·`SubscribeReply` · `AgentSession` 빌더(기본 거짓·래치 없음)와 입력 두 동사의 note(래치 없으면 무동작 · 우편은 제출 CR 직전 · `UserKill` 이면 세지도 보내지도 않고 `Err` — 래치가 없어 동작 불변) · `subscribe_from` 이 reply 를 돌려준다 · daemon `handle_subscribe` 가 reply 로 표식을 채운다(wire 칸은 아직 없음) | `session_id_latch.rs`(새) · `backend/mod.rs` · `profile.rs` · `types.rs` · `session.rs` · `manager.rs`(위임만) · daemon `connection_core.rs`(한 함수) | **동작 불변** — 운영이 빌더를 안 부른다 |
+| A2 · ✅ `495dba3` | **D1 배선**: `spawn_session` 필수 `SpawnIncarnation` · 래치 생성 + claude offer(생성 자리) · `open_spawn` 에 `offer_sink` · claude 민팅 무영속 + Fresh release · 손잡이 단일 읽기 + 띄우기 전 거절 · 머리의 손잡이 없는 우회(+ `Ready`·`Alive` 팔의 죽은 삼항 걷기 — §6-3) · `ensure/new_session_id` 걷기 · 배선 구조 시험 · 시험 갱신(§4-2) · dev bin. PATH 수법 파일럿 1건을 여기서 먼저 잰다(Q4) | `manager.rs` · `profile.rs` · `tests/activation.rs` · daemon `bin/saturation_pilot.rs` | 0턴 세션이 영속 안 됨. 표식은 세션에 서지만 wire 에 아직 없다 → 화면 불변 |
+| A3 · ✅ `b012e5a` | wire + 셸: ack 칸(`serde(default)`) · 바인딩 재생성 · 데몬이 reply 의 표식을 ack 에 싣는다 · flight/마커 bit2 | `messages.rs` · `bindings/` · `connection_core.rs` · `replay_flight.rs` · `connection.rs` | 표식이 웹뷰까지 온다. 프론트는 아직 무시 |
+| A4 · ✅ `fc67cbe` | 프론트: 마커 해독 → `'live'` info · `LoadingPanel` · RichSlot 게이트 · `isRenderedItem` · 대기 꼬리 판정 · `common.loading` | `src/api/*` · `src/components/ui/` · `RichSlot.tsx` · `StructuredTextView.tsx` · `src/i18n/ko.ts` | **P1 해소**(codex 이어받기 = 로딩) |
+| A5 · 문서·주석 정리 커밋(2026-09-24) | **ADR-A 작성**(D1+D2+D5 — 개정·링크는 §5 와 끝의 메모 A, `/adr`) · A 몫 문서·CLAUDE.md·앵커 · GUI 실측 [A] 시행(§4-4 1–9) | `docs/decisions/` · docs | ADR-A 확정 · 개정 대상 ADR 에 도장 |
+
+★**착지 기록(2026-09-24)**★ — A1–A4 는 위 커밋으로 들어왔다(게이트·수치 = step-log 의 이 라운드 항목). A5 는 이렇게 채워졌다: ADR-A 는 A5 보다 앞서 ADR-0226 으로 박혔고(`b593d30`), 구현이 원안과 갈린 자리는 그 ADR 끝 「구현 중 정정」 절과 이 문서 §3-5·§4-1 이 받는다 · GUI 실측 [A] 시행 1–9 는 A3+A4 의 `/qa full` 에서 돌았다(전부 PASS) · A5 = 문서·주석 정리 커밋이다 — 이 문서 개정 · ADR-0226 정정 절 · CLAUDE.md · 참조 문서(TRD §5 「문서 갱신」 중 [A] 몫) · 코드 주석.
 
 ### 6-2. Phase B — D4
 
-착수 전 사용자 결정: **Q6**(Diagnosed 처분 — B2 의 모양을 바꾼다) · **Q7**(코드가 붙을 수 있다) · **Q3**(LLM 신호를 고르면 wire 가 는다). Q8 은 B3 의 GUI 실측 뒤에 정해도 된다. 착수 전 TRD 개정: §3-4 끝 「B 라운드 착수 전 반영할 리뷰 지적」 여섯.
+착수 전 사용자 결정: **Q6**(Diagnosed 처분 — B2 의 모양을 바꾼다) · **Q7**(코드가 붙을 수 있다) · **Q3**(LLM 신호를 고르면 wire 가 는다). Q8 은 B3 의 GUI 실측 뒤에 정해도 된다. 착수 전 TRD 개정: §3-4 끝 「B 라운드 착수 전 반영할 리뷰 지적」 일곱(여섯 + A2 이월 하나).
 
 | # | 조각 | 파일 | 끝났을 때 |
 |---|---|---|---|
@@ -473,7 +495,7 @@ B 는 A 의 코드에 기대지 않는다 — 폴백의 새 대화는 오늘의 
   - **제어 LLM:** 오늘 `agent.spawn` 의 결과(`AgentSpawnOk` = id·이름·상태·created)는 이어받기와 새 대화를 **가르지 못하고**, D4 는 `last_failure` 를 쓰지 않는다. ADR-0082 가 fresh-fallback 을 버린 사유 중 (2) 원인 은폐 · (3) LLM 이 판단 못 함이 바로 이 축이다. (c) 지금처럼 없음 · (d) 결과에 「새 대화로 열었다」 칸을 더한다(명령 버스 판올림) · (e) 활성화 기록 칸에 정보성 기록을 남긴다 — ADR-0202 개정이 따르고, §3-4 의 「codex 쪽 낡은 기록」 잔여가 함께 풀린다.
   - **오탐 부류:** 대화가 실재하는데 backend 가 「없다」고 답하는 경우 — claude 는 작업 폴더 기준으로 대화를 찾으므로 프로필 cwd 가 바뀌면 없다고 답한다(가능성 높음 · 미실측) · codex 는 프로필 env 로 `CODEX_HOME` 이 바뀌면 같다. D4 는 그 대화를 **조용히 버리고** 새 대화를 연다(옛 id 는 이력에 남아 손으로는 되찾을 수 있다). (f) 수용 · (g) 「id 를 저장한 뒤 cwd·env 가 안 바뀌었을 때만 폴백」 — id 옆에 지문 칸이 필요하다(새 칸 — ADR-0172 가 기각한 모양에 가깝다).
   - **권고: 사람 (a) · LLM (d) · 오탐 (f).** 사유: 잃는 것이 없는 게 보통이라 사람에겐 로그로 충분하지만, LLM 이 메인 조작 주체라(CLAUDE.md 「LLM-우선 제어」) 「이어받았다」고 믿고 이전 맥락을 전제한 지시를 내리지 않으려면 결과에서 갈려야 한다 — (d) 는 칸 하나다. 오탐은 cwd·`CODEX_HOME` 을 바꾸는 흐름이 드물고 id 가 이력에 남는다.
-- **Q4. [A·B] (조건부) 시험 seam** — §4-1 의 PATH 수법이 서면 불필요하다(A2 착수 때 파일럿 1건으로 잰다). 안 서면: (a) 런타임 통합 시험 없이 단위 + 구조 시험 + GUI 실측으로 간다 — ★그러면 **D1 의 종단 영속**(실 spawn → 래치 → 명부 → 디스크)과 D4 의 kill·셧다운 재확인이 **GUI 로만** 검증된다★(구조 시험은 배선이 있다는 것까지 재고 실행 순서는 못 잰다) · (b) manager 에 스폰 주입 seam 을 운영 코드에 둔다(ADR-0012 사용자 결정 사항) ← **권고(조건부)** — D1 배선이 망가졌을 때의 결말이 「모든 이어받기가 조용히 사라진다」(§3-2-2)라 GUI 만으로 지키기엔 값이 크다.
+- **Q4. [A·B] (조건부) 시험 seam** — ★**해소(A2 2026-09-24): PATH 수법이 섰다 — seam 불필요**(§4-1 「구현 결과」)★. 아래는 해소 전의 질문이다. §4-1 의 PATH 수법이 서면 불필요하다(A2 착수 때 파일럿 1건으로 잰다). 안 서면: (a) 런타임 통합 시험 없이 단위 + 구조 시험 + GUI 실측으로 간다 — ★그러면 **D1 의 종단 영속**(실 spawn → 래치 → 명부 → 디스크)과 D4 의 kill·셧다운 재확인이 **GUI 로만** 검증된다★(구조 시험은 배선이 있다는 것까지 재고 실행 순서는 못 잰다) · (b) manager 에 스폰 주입 seam 을 운영 코드에 둔다(ADR-0012 사용자 결정 사항) ← **권고(조건부)** — D1 배선이 망가졌을 때의 결말이 「모든 이어받기가 조용히 사라진다」(§3-2-2)라 GUI 만으로 지키기엔 값이 크다.
 - **Q5. [A·B] 단계 나누기** — ★**결정(사용자 2026-09-24): (a)** — Phase A 를 이번 라운드에 착지하고 Phase B 는 다음 라운드★. 선택지는 (a) Phase A 를 한 라운드로 먼저 착지하고 Phase B 는 별도 라운드 ← **권고** · (b) 한 라운드에 둘 다 · (c) B 먼저 였다.
   - 권고 사유: 리뷰 지적 21건 중 11건(구현 7 · 결정 4)이 B 몫이고, 결정 대기(Q3·Q6·Q7·Q8)가 전부 B 에 몰려 있다. A 만으로는 회귀가 없다 — D4 가 흡수할 경우들은 오늘과 같은 결말로 남는다(§6-3). (c) 는 쓰레기 id 에 막힌 프로필을 먼저 풀지만 0턴 세션마다 헛시도와 폴백 화면이 붙는다(§6-4).
   - 묶임: 이 답이 Q3·Q6·Q7·Q8 의 시한을 정한다 — (a) 면 B 라운드 착수 전까지 미룰 수 있고, (b) 면 지금 필요하다.
@@ -532,6 +554,6 @@ B 는 A 의 코드에 기대지 않는다 — 폴백의 새 대화는 오늘의 
   - **파일로 판정한다**(rollout 파일 존재 — `step-log.md:2458` 의 미룬 계획) — 사전 판정(ADR-0172) · 백엔드 내부 저장소 결합(ADR-0077·0082 가 거부 · ADR-0004) · claude 짝은 ADR-0008 위반 · codex 오류문이 같은 파일을 보므로 반응형으로 충분. 단 codex 터미널 문구가 측정으로 안 나오면 그 칸에 한해 재론(사용자 결정).
   - 명부 폴링 대기 · 밖에서 명부 확인 · 예약을 놓고 기다리기 · `LINK_RESOLUTION_BACKSTOP` 재사용 · `RestoreOutcome::FreshFallback` 어휘.
   - Q6 에서 고르지 않은 쪽(곧바로 거둔다 / 자연 종료를 기다린다) — U2 요구대로 ADR 에 적는다.
-- **B 착수 전 반영:** §3-4 끝 「B 라운드 착수 전 반영할 리뷰 지적」 여섯의 처분을 ADR 본문(결정 또는 알려진 잔여)에 싣는다.
+- **B 착수 전 반영:** §3-4 끝 「B 라운드 착수 전 반영할 리뷰 지적」 여섯의 처분을 ADR 본문(결정 또는 알려진 잔여)에 싣는다(7 은 A2 가 남긴 시험 이월이라 ADR 처분 대상이 아니다).
 - **사용자 결정 기록:** D4(2026-09-23/24) · Q3·Q6·Q7·Q8 의 답(나오는 대로).
 - **근거 수치:** claude JSON 진단 +2.2 s / 종료 +6.4 s · claude 실패 문구 약 1 s(ADR-0201) · codex 거절 즉시 · 최악 블로킹 codex ≈ 45 s / claude ≈ 13 s · B0 측정값.

@@ -33,7 +33,8 @@ export function SlotUnavailableVeil({ phase }: SlotUnavailableVeilProps) {
       // 옛 관측 표면 유지 — "붙을 에이전트를 기다리는 중" 만 참(`error` 는 아니다).
       data-slot-detached={phase === 'detached' ? '1' : undefined}
       aria-hidden
-      // pointer-events-none — 아래 조작을 막지 않는다(입력 비활성은 각 슬롯의 disabled 가 담당).
+      // pointer-events-none — 조작을 통과시킨다(ADR-0226 사용자 결정 2026-09-24).
+      // 죽은 에이전트로 가는 입력은 막이 아니라 각 슬롯 가드가 막는다(ADR-0165).
       className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-background/70"
     >
       <PowerOff className="size-10 text-muted" />

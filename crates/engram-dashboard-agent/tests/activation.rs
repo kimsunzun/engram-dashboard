@@ -733,7 +733,7 @@ impl ControlChannel for FailingControl {
 ///      codex 행이 재는 것도 이것뿐이다(등록됐고 비어 있다).
 ///   ② 우리가 발급하는 백엔드(claude)의 옛 손잡이는 지워지지 않고 **이력으로** 간다.
 ///
-/// ★이름과 달리 「자기 id 를 발급하는 백엔드(codex)에 우리 uuid 를 건네지 않는다」(ADR-0185)는 여기서
+/// ★「자기 id 를 발급하는 백엔드(codex)에 우리 uuid 를 건네지 않는다」(ADR-0185)는 여기서
 ///   못 잰다★ — 스폰 때는 어느 백엔드도 영속하지 않으므로, 발급 판정이 이어받기 축으로 갈려도 codex 행은
 ///   그대로 초록이다. 그 가드는 `manager` 의 `only_a_backend_that_assigns_ids_gets_one_handed_over`(판정)와
 ///   `the_first_submission_latch_is_wired_through_the_spawn_path`(spawn 이 그 판정을 쓴다)다.
@@ -754,7 +754,7 @@ impl ControlChannel for FailingControl {
 ///   따로 필요하다.
 // ADR-0226
 #[test]
-fn we_do_not_mint_a_session_id_for_a_backend_that_mints_its_own() {
+fn a_fresh_spawn_persists_no_session_id_and_moves_the_old_handle_to_history() {
     let (manager, _sink, profiles, store) =
         make_manager_with_store("mint-axis", Arc::new(FailingControl));
     let nowhere = std::env::temp_dir().join(format!("engram-no-such-dir-{}", Uuid::new_v4()));
