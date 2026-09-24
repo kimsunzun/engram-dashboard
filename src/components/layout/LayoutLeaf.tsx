@@ -1,11 +1,11 @@
-// ADR-0227: 슬롯 하나를 그리는 잎 — 호출부가 slot id 를 key 로 준다. 평평한 렌더러에서 칸 목록의 원소가 될
-//   자리다. 지금은 재귀 allotment 렌더러(ViewLayoutRenderer)가 pane 안 잎 자리에서 부르므로, 분할·닫기·승격으로
-//   부모 pane 이 바뀌면 key 가 같아도 재마운트된다(아래 「알려진 한계 ①」).
+// ADR-0227: 슬롯 하나를 그리는 잎 — 평평한 렌더러(ViewLayoutRenderer)가 루트 하나 아래에 slot id 를 key 로
+//   나란히 그린다. 분할·닫기·승격에도 부모·key 가 바뀌지 않아 잎과 그 안의 슬롯별 기억·터미널이 살아남는다.
+//   팝아웃은 새 slot id·새 웹뷰라 새로 마운트된다.
 
-import { useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
 import { Plus } from 'lucide-react'
 
-import type { LayoutNode } from '../../api/layoutTypes'
+import type { LayoutNode, SlotRect } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
 import TerminalSlot from '../slot/TerminalSlot'
@@ -20,17 +20,107 @@ import { SlotErrorBoundary } from '../slot/SlotErrorBoundary'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode, type RenderMode } from '../slot/renderMode'
 import { t } from '../../i18n'
+import { reportUiMetrics } from './uiMetricsReport'
 
 type SlotNode = Extract<LayoutNode, { type: 'slot' }>
+type MenuAnchor = { x: number; y: number }
 
-export default function LayoutLeaf({
+// memo: 구분선 미리보기 중 사각형이 안 바뀐 잎은 틀도 다시 그리지 않는다 — 재사상(`remapRects`)이 그 사각형 객체를
+//   그대로 돌려준다. 사각형이 바뀐 잎도 다시 그리는 것은 틀뿐이다(아래 SlotBody). 스토어 구독은 memo 와 무관하게
+//   잎을 갱신한다.
+export default memo(LayoutLeaf)
+
+function LayoutLeaf({
   node,
+  rect,
   focusedSlotId,
   viewIdOverride,
 }: {
   node: SlotNode
+  /** 셸이 계산한 이 칸의 사각형(뷰 기준 정규화) — 미리보기 재사상이 입혀졌을 수 있다. */
+  rect: SlotRect
   focusedSlotId: string | null
   viewIdOverride?: string | null
+}) {
+  // ★우클릭 슬롯 메뉴 상태(§5)★: 잎은 슬롯 하나당 하나라 여기 useState 는 그 슬롯 전용 메뉴 좌표다.
+  //   열림 시 SlotContextMenu 를 이 잎 안에서 직접 마운트한다.
+  const [contextMenu, setContextMenu] = useState<MenuAnchor | null>(null)
+  // 참조가 고정돼야 SlotBody 의 memo 가 선다.
+  const closeMenu = useCallback(() => setContextMenu(null), [])
+  // ★이 메뉴가 조작할 View 좌표(ADR-0064)★: 옛 SlotContextMenu 내부 폴백을 여기(ctx 조립처)로 끌어올렸다.
+  const currentViewId = useCurrentViewId()
+  const targetViewId = viewIdOverride ?? currentViewId
+
+  // ★틀과 테두리를 가른다(ADR-0227)★: 바깥 틀 = 셸 사각형 그대로 + overflow:hidden, 테두리 없음. 위치·크기
+  //   규칙은 index.css 의 `.engram-slot-frame` 이 이 사용자 속성 넷으로 계산한다(반올림 포함). 테두리를 틀에
+  //   되돌리면 0~1px 칸에서 테두리가 할당 폭을 넘어 이웃과 겹친다 — 안쪽 요소는 틀에 잘린다.
+  //   ★transform·contain 을 걸지 말 것★ — SlotContextMenu 가 position:fixed 라 조상의 transform 이 좌표계를 깬다.
+  const frameStyle: CSSProperties & Record<`--${string}`, number> = {
+    '--x0': rect.x0,
+    '--y0': rect.y0,
+    '--x1': rect.x1,
+    '--y1': rect.y1,
+    position: 'absolute',
+    overflow: 'hidden',
+  }
+  return (
+    <div
+      className="engram-slot-frame"
+      style={frameStyle}
+      // 슬롯 식별용 data 속성 — cdp eval 에서 DOM 으로 split 결과(슬롯 수)를 셀 수 있게. 이벤트와 함께 틀에 둔다:
+      //   cdp 레시피와 테스트가 [data-slot-id] 에 이벤트를 직접 쏘고, 안쪽 클릭은 버블로 여기 닿는다.
+      data-slot-id={node.id}
+      // ADR-0066: click-to-focus — 슬롯 pane 클릭 시 이 슬롯을 포커스로 지정한다. viewStore.focusSlot →
+      //   invoke(focus_slot) → emit(layout:updated) 단일 제어 표면(사람 클릭 = LLM = slot.focus command, §5).
+      //   ★낙관 갱신 X★: 링(isFocused)은 백엔드 emit 스냅샷으로만 갱신된다(권위 = src-tauri, ADR-0035).
+      //   ★버블 허용(stopPropagation/preventDefault 안 함)★: 내부 상호작용(터미널 포커스·AgentList 버튼 등)을
+      //   가로채지 않는다 — pane 어디를 눌러도 내부 핸들러가 그대로 발화한다.
+      //   ★제어 슬롯 포커스 제외 — allowlist(콘텐츠 슬롯만 포커스), ADR-0066 정제★: 콘텐츠 슬롯
+      //   (empty/agent)일 때만 focusSlot 호출한다. 트리(agent_list)·팔레트(preset_palette) 등 제어 슬롯,
+      //   그리고 앞으로 추가될 제어 variant(ADR-0060 FileTree/ControlPanel 등)는 자동으로 비포커스된다
+      //   — 게이트 기준을 denylist(제어 나열)가 아니라 selectOpenTarget 와 공유하는 단일 분류기
+      //   isContentSlot(allowlist)로 잡아 "열기" 대상 선택과 기준 이원화를 막는다.
+      //   이 게이트가 없으면 트리 노드 좌클릭이 트리 슬롯 pane 까지 버블해 트리 슬롯이 포커스되고, 이어
+      //   우클릭 "열기"가 그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다(선존 UX 버그).
+      //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
+      // ADR-0144: 빈 슬롯 좌클릭은 메뉴를 열지 않는다(포커스만) — 매 클릭마다 메뉴가 뜨는 게 불편하다는
+      //   제보로 ADR-0141/0143 의 좌클릭 오프너를 되돌렸다. 메뉴는 우클릭 전용(아래 onContextMenu).
+      onClick={() => {
+        if (!isContentSlot(node.content)) return
+        if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
+      }}
+      // ADR-0064: 메뉴 항목은 command id 로만 실행한다 — 메뉴가 store 를 직접 부르지 않는다.
+      //   그래서 사람 우클릭과 LLM 이 같은 진입점을 지난다(§5).
+      onContextMenu={e => {
+        e.preventDefault()
+        setContextMenu({ x: e.clientX, y: e.clientY })
+      }}
+    >
+      <SlotBody
+        node={node}
+        isFocused={node.id === focusedSlotId}
+        targetViewId={targetViewId}
+        contextMenu={contextMenu}
+        onCloseMenu={closeMenu}
+      />
+    </div>
+  )
+}
+
+// ★사각형을 받지 않는다★: 구분선을 끄는 동안 프레임마다 바뀌는 것은 틀의 사용자 속성 넷뿐이다. 이 몸이 사각형을
+//   받으면 그때마다 슬롯 렌더러(터미널·마크다운 재파싱)까지 다시 그린다 — allotment 는 DOM 스타일만 바꿨다.
+const SlotBody = memo(function SlotBody({
+  node,
+  isFocused,
+  targetViewId,
+  contextMenu,
+  onCloseMenu,
+}: {
+  node: SlotNode
+  isFocused: boolean
+  targetViewId: string | null
+  contextMenu: MenuAnchor | null
+  onCloseMenu: () => void
 }) {
   const renderModeOverride = useViewStore(s => s.renderModeOverride)
   // ★M2 caps 분기(ADR-0044)★: agent 배정 슬롯의 렌더러는 그 agent 의 output caps 로 고른다. caps 는
@@ -51,19 +141,16 @@ export default function LayoutLeaf({
   //   상태로 띄우고 수거된 에이전트로 구독까지 건다(ADR-0149 가 "빈 화면을 흐리게 하면 오독된다"고 거부한 상태).
   //   ★담는 것은 렌더 모드 하나뿐이다(ADR-0149 결정 5)★ — 회차 번호(epoch)는 여기도 슬롯 prop 에도 없다.
   //   슬롯의 재구독 트리거에서 화신을 뺐기 때문이다(비우기는 구독의 onReset 단독 — 각 슬롯 주석).
-  //   ★알려진 한계 둘★ ① 대화를 보존 중인 슬롯을 **분할**하면 이 잎이 새 allotment pane 안으로 들어가며
-  //   재마운트돼 기억이 사라진다. 기억을 밖(모듈 맵 등)으로 올려도 대화 자체는 슬롯 컴포넌트 state 에 있어
-  //   분할 시 언마운트로 함께 사라지므로 — 빈 화면에 흐림만 남고 죽은 에이전트로 재구독까지 나간다 — 지금은
-  //   옛 동작(「연결 중」)으로 떨어지게 둔다. 해소는 잎의 부모·key 가 분할에도 안 바뀌는 평평한 렌더러가
-  //   한다(ADR-0227).
-  //   ② 부재 구간에는 mode 유도가 없어 setRenderMode/clearRenderMode 가 조용히 무효다(호출은 성공으로 보인다).
+  //   ★알려진 한계★: 부재 구간에는 mode 유도가 없어 setRenderMode/clearRenderMode 가 조용히 무효다(호출은
+  //   성공으로 보인다).
   const lastMountRef = useRef<{ agentId: string; mode: RenderMode } | null>(null)
-  // ★우클릭 슬롯 메뉴 상태(§5)★: 잎은 슬롯 하나당 하나라 여기 useState 는 그 슬롯 전용 메뉴 좌표다.
-  //   열림 시 SlotContextMenu 를 이 잎 안에서 직접 마운트한다.
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
-  // ★이 메뉴가 조작할 View 좌표(ADR-0064)★: 옛 SlotContextMenu 내부 폴백을 여기(ctx 조립처)로 끌어올렸다.
-  const currentViewId = useCurrentViewId()
-  const targetViewId = viewIdOverride ?? currentViewId
+
+  // 칸 틀 기본 지표(TRD §2d)는 이 잎의 테두리 요소에서 잰다 — 셸의 칸 content = 틀 − 이 테두리 폭.
+  //   웹뷰당 한 번만 나간다(성공 뒤로는 즉시 돌아온다).
+  const borderRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (borderRef.current !== null) void reportUiMetrics(borderRef.current)
+  }, [])
 
   // ADR-0060: 슬롯 점유자 = SlotContent 태그드 유니온.
   const slotAgentId = node.content.type === 'agent' ? node.content.agent_id : null
@@ -87,7 +174,6 @@ export default function LayoutLeaf({
     }
   }, [agent?.id, mode, slotAgentId]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const isFocused = node.id === focusedSlotId
   // ★caps 도착 후에만 구체 렌더러를 마운트한다(ADR-0041 replay 소유권)★: 데몬 replay 는 slot-assign
   //   델타((window,agent) 키)에서 단 1회만 발화하고, 컴포넌트 스왑(TerminalSlot→RichSlot)엔 재발화하지
   //   않는다. 그래서 caps 미도착 상태에서 TerminalSlot 을 먼저 띄웠다가 caps 도착 후 RichSlot 으로 갈아끼면,
@@ -122,15 +208,21 @@ export default function LayoutLeaf({
   const hasContent = capsReady || keepDeadView || isPresetPalette || isAgentList
   return (
     <div
+      ref={borderRef}
+      data-slot-border=""
       style={{
-        height: '100%',
+        position: 'absolute',
+        inset: 0,
         background: 'var(--bg)',
         // border 폭을 항상 1px 고정해 포커스 이동 시 layout shift 제거.
-        border: '1px solid var(--border)',
-        // ★포커스 링은 여기(래퍼)가 아니라 아래 absolute 오버레이로 그린다★: inset box-shadow 를 래퍼에
-        //   직접 주면 overflow:hidden 슬롯에서 100% 채운 자식 컨텐츠(터미널 canvas·RichSlot)가 덮어 안
-        //   보였다(빈 슬롯만 보이던 버그, 사용자 제보 2026-07-16). position:relative 로 오버레이 앵커만 잡는다.
-        position: 'relative',
+        // 단축 속성(`border`)으로 합치지 않는다 — 폭이 `var()` 와 한 선언에 섞이면 jsdom 이 계산된 폭을 못 줘서
+        //   위 지표 측정을 테스트로 잴 수 없다.
+        borderWidth: 1,
+        borderStyle: 'solid',
+        borderColor: 'var(--border)',
+        // ★포커스 링은 여기가 아니라 아래 absolute 오버레이로 그린다★: inset box-shadow 를 이 요소에 직접 주면
+        //   overflow:hidden 슬롯에서 100% 채운 자식 컨텐츠(터미널 canvas·RichSlot)가 덮어 안 보였다(빈 슬롯만
+        //   보이던 버그, 사용자 제보 2026-07-16). 이 요소가 absolute 라 오버레이의 앵커도 된다.
         boxSizing: 'border-box',
         // 콘텐츠(터미널/rich) 있을 때: 슬롯을 100% 채우도록 여백·정렬 제거(center 정렬 끼면 깨짐).
         // 빈 슬롯(empty): 플레이스홀더를 중앙정렬하는 flex 유지.
@@ -146,33 +238,6 @@ export default function LayoutLeaf({
               fontSize: '12px',
               gap: '4px',
             }),
-      }}
-      // 슬롯 식별용 data 속성 — cdp eval 에서 DOM 으로 split 결과(슬롯 수)를 셀 수 있게.
-      data-slot-id={node.id}
-      // ADR-0066: click-to-focus — 슬롯 pane 클릭 시 이 슬롯을 포커스로 지정한다. viewStore.focusSlot →
-      //   invoke(focus_slot) → emit(layout:updated) 단일 제어 표면(사람 클릭 = LLM = slot.focus command, §5).
-      //   ★낙관 갱신 X★: 링(isFocused)은 백엔드 emit 스냅샷으로만 갱신된다(권위 = src-tauri, ADR-0035).
-      //   ★버블 허용(stopPropagation/preventDefault 안 함)★: 내부 상호작용(터미널 포커스·AgentList 버튼 등)을
-      //   가로채지 않는다 — pane 어디를 눌러도 내부 핸들러가 그대로 발화한다.
-      //   ★제어 슬롯 포커스 제외 — allowlist(콘텐츠 슬롯만 포커스), ADR-0066 정제★: 콘텐츠 슬롯
-      //   (empty/agent)일 때만 focusSlot 호출한다. 트리(agent_list)·팔레트(preset_palette) 등 제어 슬롯,
-      //   그리고 앞으로 추가될 제어 variant(ADR-0060 FileTree/ControlPanel 등)는 자동으로 비포커스된다
-      //   — 게이트 기준을 denylist(제어 나열)가 아니라 selectOpenTarget 와 공유하는 단일 분류기
-      //   isContentSlot(allowlist)로 잡아 "열기" 대상 선택과 기준 이원화를 막는다.
-      //   이 게이트가 없으면 트리 노드 좌클릭이 트리 슬롯 pane 까지 버블해 트리 슬롯이 포커스되고, 이어
-      //   우클릭 "열기"가 그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다(선존 UX 버그).
-      //   targetViewId 미확정(부팅 직후 탭 상태 미도착)이면 no-op(잘못된 view 로 focus 유출 방지).
-      // ADR-0144: 빈 슬롯 좌클릭은 메뉴를 열지 않는다(포커스만) — 매 클릭마다 메뉴가 뜨는 게 불편하다는
-      //   제보로 ADR-0141/0143 의 좌클릭 오프너를 되돌렸다. 메뉴는 우클릭 전용(아래 onContextMenu).
-      onClick={() => {
-        if (!isContentSlot(node.content)) return
-        if (targetViewId) void useViewStore.getState().focusSlot(targetViewId, node.id)
-      }}
-      // ADR-0064: 메뉴 항목은 command id 로만 실행한다 — 메뉴가 store 를 직접 부르지 않는다.
-      //   그래서 사람 우클릭과 LLM 이 같은 진입점을 지난다(§5).
-      onContextMenu={e => {
-        e.preventDefault()
-        setContextMenu({ x: e.clientX, y: e.clientY })
       }}
     >
       <SlotErrorBoundary
@@ -239,7 +304,7 @@ export default function LayoutLeaf({
           y={contextMenu.y}
           items={buildSlotMenu(node.content.type)}
           ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId }}
-          onClose={() => setContextMenu(null)}
+          onClose={onCloseMenu}
         />
       )}
       {isFocused && (
@@ -260,4 +325,4 @@ export default function LayoutLeaf({
       )}
     </div>
   )
-}
+})

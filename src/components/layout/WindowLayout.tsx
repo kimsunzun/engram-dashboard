@@ -287,6 +287,10 @@ function TabCanvas({ viewId }: { viewId: string }) {
       node={cached.layout}
       focusedSlotId={cached.focusedSlotId}
       viewIdOverride={viewId}
+      slotRects={cached.slotRects}
+      splitRects={cached.splitRects}
+      ratioBounds={{ min: cached.ratioMin, max: cached.ratioMax }}
+      version={cached.version}
     />
   )
 }

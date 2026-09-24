@@ -2,16 +2,61 @@
 // 제거됐다. 이 렌더러는 wire LayoutNode(string UUID id + content: SlotContent, ADR-0060, src-tauri/bindings)만 그린다 —
 // 사람 클릭(SlotContextMenu — 우클릭 전용, ADR-0144)이든 LLM(window.__engramCmd)이든 같은 invoke→emit
 // 권위 루프로 갱신된다.
+// ADR-0227: 평평한 루트 — 트리를 재귀로 풀지 않고, 셸이 계산한 사각형으로 칸(잎)과 구분선을 루트 하나 아래에
+//   절대 배치한다. 화면은 트리 기하를 따로 계산하지 않는다(방향 매핑 ADR-0140 도 셸 `layout/geometry.rs` 에 있다).
 
-import { Allotment } from 'allotment'
+import { useEffect, useMemo, useRef } from 'react'
 
-import type { LayoutNode } from '../../api/layoutTypes'
+import type { LayoutNode, SlotRect, SplitRect } from '../../api/layoutTypes'
+import { useCurrentViewId } from '../../store/viewStore'
 import LayoutLeaf from './LayoutLeaf'
+import Splitter from './Splitter'
+import { useSplitDrag } from './useSplitDrag'
+
+type SlotNode = Extract<LayoutNode, { type: 'slot' }>
+
+const NO_SLOT_RECTS: SlotRect[] = []
+const NO_SPLIT_RECTS: SplitRect[] = []
+
+// 코드 단위 비교 — 로캘과 무관하게 결정적이다.
+const byId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+interface TreeIds {
+  slots: Map<string, SlotNode>
+  splits: Set<string>
+}
+
+function collectTree(node: LayoutNode, out: TreeIds): TreeIds {
+  if (node.type === 'slot') {
+    out.slots.set(node.id, node)
+  } else {
+    out.splits.add(node.id)
+    collectTree(node.a, out)
+    collectTree(node.b, out)
+  }
+  return out
+}
+
+/** `ids` 가 `expected` 와 정확히 같은 집합이다 — 빠짐·남음·중복이 없다. */
+function sameIds(ids: readonly string[], expected: ReadonlySet<string> | ReadonlyMap<string, unknown>): boolean {
+  return ids.length === expected.size && new Set(ids).size === ids.length && ids.every(id => expected.has(id))
+}
+
+// 사각형을 쓰지 못할 때 남기는 오류 — 어떻게 그리는지까지 적는다.
+const RECT_ERRORS = {
+  missing: '[ViewLayoutRenderer] 분할 트리인데 사각형이 없어 아무것도 그리지 않는다:',
+  mismatchBlank: '[ViewLayoutRenderer] 사각형의 칸·분할 id 가 트리와 어긋나 아무것도 그리지 않는다:',
+  mismatchFullBox: '[ViewLayoutRenderer] 사각형의 칸·분할 id 가 트리와 어긋나 루트 칸을 전체 상자로 그린다:',
+} as const
 
 export default function ViewLayoutRenderer({
   node,
   focusedSlotId,
   viewIdOverride,
+  slotRects,
+  splitRects,
+  ratioBounds,
+  version,
 }: {
   node: LayoutNode
   focusedSlotId: string | null
@@ -19,67 +64,94 @@ export default function ViewLayoutRenderer({
   //   넘겨(ADR-0057) 내부 SlotContextMenu 의 액션 좌표를 그 탭 view 로 고정한다. 없으면 메뉴가
   //   useCurrentViewId(이 웹뷰 창의 active 탭) 폴백.
   viewIdOverride?: string | null
+  /**
+   * 셸이 계산한 칸·분할 사각형 — ★캐시 배열을 참조 그대로 넘긴다(복사·정렬 금지)★. 구분선 미리보기가 배열 참조로
+   *   새 스냅샷을 알아보고, 안 바뀐 사각형을 같은 객체로 돌려줘 잎이 다시 그리지 않는다.
+   * 칸·분할 id 가 트리와 정확히 맞을 때만 쓴다. 없거나 어긋나면 루트가 칸 하나일 때만 전체 상자로 그리고, 분할
+   *   트리는 오류를 남기고 아무것도 그리지 않는다.
+   */
+  slotRects?: SlotRect[]
+  splitRects?: SplitRect[]
+  /** 셸의 분할 비율 한계(스냅샷 `ratio_min`/`ratio_max`). 없으면 구분선은 잠긴다 — 화면이 셸 상수를 베끼지 않는다. */
+  ratioBounds?: { min: number; max: number }
+  /** 캐시 version — 구분선 미리보기가 확정 스냅샷을 알아보는 기준. */
+  version?: number
 }) {
-  if (node.type === 'slot') {
-    // key = slot id(ADR-0227): 이 자리에 다른 슬롯이 오면 잎을 새로 지어 슬롯별 기억·메뉴 상태가 딸려 가지 않는다.
-    return (
-      <LayoutLeaf
-        key={node.id}
-        node={node}
-        focusedSlotId={focusedSlotId}
-        viewIdOverride={viewIdOverride}
-      />
-    )
+  // 잎의 메뉴·포커스와 같은 View 좌표다(LayoutLeaf 의 targetViewId 와 같은 식).
+  const currentViewId = useCurrentViewId()
+  const viewId = viewIdOverride ?? currentViewId
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  const tree = useMemo(() => collectTree(node, { slots: new Map(), splits: new Set() }), [node])
+  const slotNodes = tree.slots
+  const rootSlotId = node.type === 'slot' ? node.id : null
+  const fullBox = useMemo<SlotRect[]>(
+    () => (rootSlotId === null ? NO_SLOT_RECTS : [{ slot_id: rootSlotId, x0: 0, y0: 0, x1: 1, y1: 1 }]),
+    [rootSlotId],
+  )
+  // 어긋난 사각형으로 그리면 칸이 빠지고 구분선이 트리에 없는 분할을 끈다. 화면은 트리 기하를 따로 계산하지 않으므로
+  //   분할 트리는 그리지 않는다. 운영 경로엔 없다(스냅샷이 늘 트리와 같은 사각형을 싣는다).
+  const rectsMatch = useMemo(
+    () =>
+      slotRects !== undefined &&
+      sameIds(slotRects.map(r => r.slot_id), tree.slots) &&
+      sameIds((splitRects ?? NO_SPLIT_RECTS).map(s => s.split_id), tree.splits),
+    [slotRects, splitRects, tree],
+  )
+  const drawNothing = !rectsMatch && rootSlotId === null
+  // 사각형 없는 단일 칸은 허용된 입력이다(전체 상자) — 알리지 않는다.
+  let rectError: keyof typeof RECT_ERRORS | null = null
+  if (slotRects === undefined) {
+    if (drawNothing) rectError = 'missing'
+  } else if (!rectsMatch) {
+    rectError = drawNothing ? 'mismatchBlank' : 'mismatchFullBox'
   }
-  // ★ADR-0140 유일한 진실 경계★: dir='top_bottom' = 위/아래 → allotment 의 vertical(수직 스택). 여기가
-  //   뒤집히면 메뉴·타입·테스트가 전부 맞는데도 화면만 반대가 된다.
-  // ★ratio 초기 사이징(ADR-0063) = `defaultSizes`★: node.ratio = a(왼/위) 자식의 비율. allotment 는 defaultSizes 를
-  //   합으로 나눠 비율로 정규화하고 칸마다 round(비율 × 컨테이너 크기)로 배치하므로 [ratio, 1-ratio] 를 그대로 준다.
-  //   ★그 정규화는 `proportionalLayout` 기본값(true)에 기댄다★ — false 로 바꾸면 소수 값이 그대로 픽셀이 되어
-  //   pane-a 가 minSize(30px)로 붕괴한다(리뷰 프로브 실측).
-  //   ★빼지 말 것★: 이게 있어야 칸이 마운트 때 만들어져 첫 ResizeObserver 콜백 안에서 배치된다. 없으면 칸이 그
-  //   콜백 뒤의 React 재렌더에서야 붙어, 새로 지은 split(닫기로 승격된 형제 포함)이 칸 크기 없는 한 프레임을
-  //   그린다(쭈그러짐). 그 콜백이 새 split 의 첫 페인트보다 앞선다는 것은 조건부 정적 분석이고 WebView2 화면
-  //   실측 전이다 — 조건·근거 = docs/research/split-layout-library-survey-2026-09-24.md F1·F2.
-  //   ★「비율 defaultSizes 가 split-view 를 ~1px 로 붕괴시킨다」는 옛 실측(8dca0b9)은 원인 미상이다★ — 같은 커밋이
-  //   allotment CSS import 누락도 함께 고쳐 둘이 따로 가려진 적이 없고, 정적 분석으로는 그 경로가 안 나온다(F2).
-  //   다시 보이면 이 prop 이 첫 용의자다.
-  //   pane-a 의 preferredSize(같은 ratio 를 정수 % 로)는 마운트 크기를 정하지 않는다 — allotment 는 그것을 새로 합류한
-  //   pane 에만 먹이고 defaultSizes 로 지은 pane 은 합류로 치지 않는다. 남기는 이유 = sash 더블클릭 리셋이 pane-a 를
-  //   이 값으로 되돌린다(없으면 50/50 균등 분배로 리셋된다). 정수 % 라 ratio 가 정수 % 가 아니면 마운트 크기와 리셋
-  //   값이 조금 어긋난다(0.234 → 234/766 로 서고 230/770 으로 리셋) — 지금은 모든 split 이 0.5 로 태어나 안 보인다.
-  //   ★초기 사이징만★: 드래그 리사이즈→백엔드 ratio 되쓰기는 이 슬라이스 범위 밖(ADR-0063).
-  // ★Allotment.Pane key = 위치 고정(pane-a/pane-b), 콘텐츠 파생 금지★: 서브트리 구조에서 key 를 파생하면
-  //   pane 안의 슬롯을 분할하는 순간 key 가 바뀌어 Pane 이 unmount+remount 되고, Allotment 는 이를 pane
-  //   이탈+합류로 보아 전 pane 을 균등 재분배한다(형제의 비율 소실 — 예: 왼 20% → 50% 점프). split 은 항상
-  //   a/b 두 자식을 이 순서로만 가지므로 위치 key 로 충분하다(중첩 Allotment 는 각자 짝을 가진다).
-  // ★Allotment key = 이 split 의 id·dir★ (ADR-0223): allotment 는 방향과 defaultSizes 를 마운트 때 한 번만 읽는다
-  //   (이후 `vertical` 은 CSS 클래스만 바꾼다) — 다른 split 에 옛 인스턴스를 쓰면 방향이 얼어 pane 이 0 으로
-  //   접히거나(뷰가 빈 화면) 옛 split 의 드래그 픽셀 크기가 남는다.
-  //   - id = split 노드의 정체(백엔드가 분할마다 새로 뽑고 형제 승격 때 노드와 함께 옮긴다). 닫기·팝업 분리로
-  //     다른 split 이 이 자리에 올라오면 key 가 바뀌어 새로 짓고, 자식만 바뀐 같은 split 은 key 가 그대로라
-  //     인스턴스(= 드래그한 크기)와 영향 없는 형제 서브트리가 남는다. 운영의 split 은 전부 ratio 0.5 로 태어나
-  //     방향·비율로는 승격된 split 을 못 가른다.
-  //   - dir 도 key 에 둔다 — 같은 split 의 방향이 제자리에서 바뀌어도 새로 지어야 한다.
-  //   - ★ratio 는 key 에 넣지 않는다★: 드래그→백엔드 ratio 되쓰기가 생기면 드래그마다 모든 터미널이
-  //     재마운트된다. 그 대가로 제자리 ratio 변경은 화면에 안 먹으므로(defaultSizes 는 마운트 때만 읽힌다)
-  //     그 경로를 만들 땐 명령형 resize 가 필요하다.
-  //   - ★첫 슬롯 id 로 key 를 파생하지 않는다★: 슬롯 하나를 닫으면 조상 split 의 key 가 바뀌어 영향 없는
-  //     형제 서브트리까지 재마운트된다(터미널 재구독, ADR-0148 이 보존하던 죽은 에이전트 뷰 소실).
+  useEffect(() => {
+    if (rectError !== null) console.error(RECT_ERRORS[rectError], node.id)
+  }, [rectError, node.id])
+
+  const drag = useSplitDrag({
+    viewId: viewId ?? '',
+    slotRects: rectsMatch && slotRects !== undefined ? slotRects : fullBox,
+    splitRects: rectsMatch ? (splitRects ?? NO_SPLIT_RECTS) : NO_SPLIT_RECTS,
+    ratioMin: ratioBounds?.min ?? NaN,
+    ratioMax: ratioBounds?.max ?? NaN,
+    version: version ?? 0,
+    rootRef,
+  })
+  // 잎은 slot id 순, 구분선은 split id 순(TRD §2e · D6) — 트리 순서를 따르면 재구성마다 DOM 노드가 옮겨진다
+  //   (포커스·스크롤 소실, 끌던 구분선의 포인터 캡처 소실). 생존 잎은 부모·key·상대 순서가 그대로다.
+  const leafRects = useMemo(
+    () => [...drag.slotRects].sort((a, b) => byId(a.slot_id, b.slot_id)),
+    [drag.slotRects],
+  )
+  const dividerRects = useMemo(
+    () => [...drag.splitRects].sort((a, b) => byId(a.split_id, b.split_id)),
+    [drag.splitRects],
+  )
+
+  if (drawNothing) return null
+  // 뷰 좌표나 비율 한계를 모르면 구분선을 잠근다 — 확정할 곳도 범위도 없다(잎의 포커스도 뷰 미확정이면 no-op).
+  const locked = viewId === null || ratioBounds === undefined
   return (
-    <div style={{ height: '100%' }}>
-      <Allotment
-        key={`${node.id}:${node.dir}`}
-        vertical={node.dir === 'top_bottom'}
-        defaultSizes={[node.ratio, 1 - node.ratio]}
-      >
-        <Allotment.Pane key="pane-a" preferredSize={`${Math.round(node.ratio * 100)}%`}>
-          <ViewLayoutRenderer node={node.a} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
-        </Allotment.Pane>
-        <Allotment.Pane key="pane-b">
-          <ViewLayoutRenderer node={node.b} focusedSlotId={focusedSlotId} viewIdOverride={viewIdOverride} />
-        </Allotment.Pane>
-      </Allotment>
+    // ★transform·contain 을 걸지 말 것★ — 잎 안 SlotContextMenu 가 position:fixed 라 조상의 transform 이 좌표계를 깬다.
+    <div ref={rootRef} style={{ position: 'absolute', inset: 0, overflow: 'hidden' }}>
+      {leafRects.map(r => {
+        const leaf = slotNodes.get(r.slot_id)
+        return leaf === undefined ? null : (
+          <LayoutLeaf
+            key={r.slot_id}
+            node={leaf}
+            rect={r}
+            focusedSlotId={focusedSlotId}
+            viewIdOverride={viewIdOverride}
+          />
+        )
+      })}
+      {dividerRects.map(s => {
+        const props = drag.splitterProps(s)
+        return <Splitter key={s.split_id} {...props} range={locked ? null : props.range} />
+      })}
     </div>
   )
 }

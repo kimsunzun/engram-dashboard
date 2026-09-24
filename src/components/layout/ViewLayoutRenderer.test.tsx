@@ -63,44 +63,6 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
   open: (...args: unknown[]) => dialogMock.open(...(args as [])),
 }))
 
-// ── allotment stub — split 분기 렌더 시 jsdom 환경에서 ResizeObserver 에러 방지 ──
-// vi.mock factory 는 호이스팅되므로 React import 를 직접 쓸 수 없다 — importOriginal 패턴으로 우회.
-// preferredSize(=ratio 파생 %, sash 더블클릭 리셋 값)를 Pane 의 data 속성으로 노출해 테스트가 단언할 수 있게
-// 한다. 마운트 크기(defaultSizes)는 이 stub 이 재지 않는다 — ViewLayoutRenderer.allotment.test.tsx 가 실 allotment 로 잰다.
-// ★Bug2 key 안정성 관측★: React key 는 props 로 새 나오지 않아 DOM 에서 직접 못 읽는다. 대신 Pane 이
-//   마운트마다 유일 인스턴스 id 를 만들어(useRef + 모듈 카운터) data-pane-instance 로 노출한다 —
-//   key 가 바뀌어 remount 되면 새 id 가, key 가 안정하면 같은 id 가 유지된다. 콘텐츠 재구조화(slot→중첩
-//   split) 리렌더 후 같은 인스턴스 id 면 = Pane 이 마운트 유지 = key 안정 = Allotment 가 사이즈 보존.
-let paneInstanceCounter = 0
-vi.mock('allotment', async () => {
-  const React = (await import('react')).default
-  const Pane = ({ children, preferredSize }: { children: React.ReactNode; preferredSize?: number | string }) => {
-    const instance = React.useRef<number | null>(null)
-    if (instance.current === null) instance.current = ++paneInstanceCounter
-    return React.createElement(
-      'div',
-      {
-        'data-testid': 'allotment-pane',
-        'data-preferred-size': preferredSize != null ? String(preferredSize) : undefined,
-        'data-pane-instance': String(instance.current),
-      },
-      children,
-    )
-  }
-  // ★vertical 노출(ADR-0140)★: dir → allotment 방향 매핑이 "유일한 진실 경계"라 테스트가 단언할 수 있게
-  //   prop 을 data 속성으로 새 낸다(뒤집히면 메뉴·타입이 다 맞는데 화면만 반대가 되는 자리).
-  const Allotment = Object.assign(
-    ({ children, vertical }: { children: React.ReactNode; vertical?: boolean }) =>
-      React.createElement(
-        'div',
-        { 'data-testid': 'allotment', 'data-vertical': String(vertical === true) },
-        children,
-      ),
-    { Pane },
-  )
-  return { Allotment }
-})
-
 // ── 슬롯 stub 3종 — 실 구독/xterm 없이 마운트 여부·전달된 prop 만 확인 ─────────────────
 // ★넘기는 prop 전량을 그린다★: 상위가 무엇을 내려보내는지가 이 렌더러의 계약이라, prop 을 그리지 않으면
 //   드리프트가 DOM 에서 안 보인다. ★회차(epoch)를 여기 되살리면 그 값이 곧 재마운트 트리거가 되고,
@@ -161,6 +123,13 @@ import { ANCHOR_GAP } from '../slot/SlotContextMenu'
 import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
 import { useViewStore } from '../../store/viewStore'
+import { rectsFor } from './testing/rects'
+import { __resetUiMetricsReportForTest } from './uiMetricsReport'
+
+// 잎이 마운트되면 칸 틀 지표를 웹뷰당 한 번 보낸다(모듈 상태) — 테스트 순서가 그 보고 여부를 가르지 않게 매번 비운다.
+beforeEach(() => {
+  __resetUiMetricsReportForTest()
+})
 
 afterEach(() => {
   cleanup()
@@ -186,10 +155,37 @@ function splitNode(id: string, a: LayoutNode, b: LayoutNode, ratio = 0.5, dir: S
 
 /**
  * 빈 슬롯 플레이스홀더 = `+` 아이콘(ADR-0141 로 옛 `Slot <id8>` / `— empty —` 텍스트를 대체).
- * ADR-0143 로 버튼이 아니라 순수 그림이라 role·접근성 이름이 없다 — 슬롯 래퍼 직속 svg 가 유일한 표면이다.
+ * ADR-0143 로 버튼이 아니라 순수 그림이라 role·접근성 이름이 없다 — 칸 테두리 요소 직속 svg 가 유일한 표면이다.
+ * ADR-0227: 칸은 틀(`[data-slot-id]` — 위치·이벤트)과 그 안의 테두리 요소(`[data-slot-border]` — 테두리·정렬·콘텐츠)로
+ *   갈렸다. 틀 직속을 찾으면 늘 빈 배열이라 「아이콘 없음」 단언이 헛되이 통과한다.
  */
 function emptyIcons(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('[data-slot-id] > svg'))
+  return Array.from(document.querySelectorAll<HTMLElement>('[data-slot-border] > svg'))
+}
+
+/** 칸 틀(`[data-slot-id]`) — 사각형 위치·클릭·우클릭이 걸린 바깥 요소. */
+function frameOf(slotId: string): HTMLElement {
+  const el = document.querySelector<HTMLElement>(`[data-slot-id="${slotId}"]`)
+  if (el === null) throw new Error(`칸 틀 ${slotId} 가 없다`)
+  return el
+}
+
+/** 칸 테두리 요소 — 틀의 직속 자식이어야 한다(틀 밖에 있으면 틀의 overflow:hidden 에 잘리지 않는다). */
+function borderOf(slotId: string): HTMLElement {
+  const el = frameOf(slotId).querySelector<HTMLElement>(':scope > [data-slot-border]')
+  if (el === null) throw new Error(`칸 ${slotId} 의 테두리 요소가 틀 직속에 없다`)
+  return el
+}
+
+/** 틀에 실린 사각형 사용자 속성 넷(숫자). 빈 값을 0 으로 읽어 헛되이 맞지 않게, 없으면 던진다. */
+function frameRect(slotId: string): { x0: number; y0: number; x1: number; y1: number } {
+  const s = frameOf(slotId).style
+  const read = (name: string): number => {
+    const raw = s.getPropertyValue(name)
+    if (raw.trim() === '') throw new Error(`칸 틀 ${slotId} 에 ${name} 가 없다`)
+    return Number(raw)
+  }
+  return { x0: read('--x0'), y0: read('--y0'), x1: read('--x1'), y1: read('--y1') }
 }
 
 function contentSlotNode(id: string, content: SlotContent): LayoutNode {
@@ -249,27 +245,28 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
   it('focusedSlotId == node.id → 포커스 링 오버레이(inset box-shadow, accent 40%)가 컨텐츠 위에 뜬다', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s1" />)
-    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
-    expect(wrapper).toBeTruthy()
-    // ADR-0066(focus-ring): 링은 래퍼가 아니라 컨텐츠 *위* absolute 오버레이로 그린다(overflow:hidden
-    //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정).
-    const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
+    const border = borderOf('s1')
+    // ADR-0066(focus-ring): 링은 테두리가 아니라 컨텐츠 *위* absolute 오버레이로 그린다(overflow:hidden
+    //   슬롯에서 100% 채운 자식이 inset box-shadow 를 덮던 버그 수정). 앵커는 테두리 요소다(ADR-0227).
+    const overlay = [...border.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
     expect(overlay).toBeTruthy()
+    expect(overlay!.parentElement).toBe(border)
     // ★강도를 실제로 잰다★: 예전 단언은 `includes('accent')` 뿐이라 65%로 되돌려도 통과했다 — 값을 바꾸는
     //   회귀를 못 잡으면서 제목만 강도를 광고하는 테스트였다(리뷰 지적 2026-08-23). 값 = ADR-0168 결정 1.
     expect(overlay!.style.boxShadow).toContain('40%')
     expect(overlay!.style.pointerEvents).toBe('none')
     expect(overlay!.style.position).toBe('absolute')
-    expect(wrapper.style.border).toContain('border')
-    expect(wrapper.style.border).not.toContain('accent')
+    // 테두리 색은 포커스로 바뀌지 않는다 — 링은 오버레이 몫이다.
+    expect(border.style.borderColor).toBe('var(--border)')
+    expect(border.style.borderColor).not.toContain('accent')
   })
 
   it('focusedSlotId != node.id → 비포커스: 링 오버레이 없음', () => {
     render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId="s-other" />)
-    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
-    expect(wrapper.style.border).toContain('border')
-    expect(wrapper.style.border).not.toContain('accent')
-    const overlay = [...wrapper.querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
+    const border = borderOf('s1')
+    expect(border.style.borderColor).toBe('var(--border)')
+    expect(border.style.borderColor).not.toContain('accent')
+    const overlay = [...frameOf('s1').querySelectorAll('div')].find(d => d.style.boxShadow.includes('accent'))
     expect(overlay).toBeUndefined()
   })
 
@@ -278,8 +275,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'preset_palette' })} focusedSlotId={null} />)
     expect(screen.getByTestId('preset-palette')).toBeTruthy()
     // 프리셋 팔레트는 실 콘텐츠(hasContent=true) — 중앙정렬 flex 가 없어야 팔레트 레이아웃이 안 깨진다.
-    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
-    expect(wrapper.style.justifyContent).not.toBe('center')
+    //   정렬은 테두리 요소가 진다(ADR-0227) — 겨냥이 맞는지는 아래 빈 슬롯 양성 짝이 지킨다.
+    expect(borderOf('s1').style.justifyContent).not.toBe('center')
+    expect(borderOf('s1').style.overflow).toBe('hidden')
   })
 
   it('content.type=agent_list slot(Slice C) → AgentList 가 마운트된다(hasContent=true)', () => {
@@ -287,8 +285,20 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(screen.getByTestId('agent-list')).toBeTruthy()
     // empty 플레이스홀더가 아니라 실 렌더러 — 중앙정렬 flex 없어야 목록 레이아웃이 안 깨진다.
     expect(emptyIcons()).toHaveLength(0)
-    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
-    expect(wrapper.style.justifyContent).not.toBe('center')
+    expect(borderOf('s1').style.justifyContent).not.toBe('center')
+    expect(borderOf('s1').style.overflow).toBe('hidden')
+  })
+
+  // ★양성 짝★: 위·아래의 `!== 'center'` 단언은 겨냥한 요소가 틀리면 헛되이 초록이 된다. 같은 겨냥으로 빈 슬롯에서는
+  //   실제로 중앙정렬이 보인다는 것을 함께 잰다.
+  it('빈 슬롯의 테두리 요소는 플레이스홀더를 중앙정렬한다(겨냥 확인용 양성 짝)', () => {
+    render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
+    const border = borderOf('s1')
+    expect(border.style.display).toBe('flex')
+    expect(border.style.justifyContent).toBe('center')
+    expect(border.style.alignItems).toBe('center')
+    expect(emptyIcons()).toHaveLength(1)
+    expect(emptyIcons()[0].parentElement).toBe(border)
   })
 
   it('data-slot-id 속성이 node.id 로 설정된다(cdp 검증용 불변식)', () => {
@@ -300,9 +310,11 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   it('agent_id 있는 slot(caps 도착) 래퍼에는 중앙정렬 flex 가 없다(터미널 레이아웃 오염 방지)', () => {
     seedAgents(agentInfo('some-agent-id', false))
     render(<ViewLayoutRenderer node={slotNode('s1', 'some-agent-id')} focusedSlotId={null} />)
-    const wrapper = document.querySelector('[data-slot-id="s1"]') as HTMLElement
-    expect(wrapper.style.justifyContent).not.toBe('center')
-    expect(wrapper.style.alignItems).not.toBe('center')
+    expect(screen.getByTestId('terminal-slot')).toBeTruthy()
+    const border = borderOf('s1')
+    expect(border.style.justifyContent).not.toBe('center')
+    expect(border.style.alignItems).not.toBe('center')
+    expect(border.style.overflow).toBe('hidden')
   })
 
   // ── FIX 1(ADR-0041 replay 소유권): caps 도착 전엔 구체 렌더러를 마운트하지 않는다 ──────────────
@@ -574,94 +586,93 @@ describe('ViewLayoutRenderer — slot 분기', () => {
   })
 })
 
-describe('ViewLayoutRenderer — split 분기', () => {
-  it('split 노드 → a/b 두 자식 슬롯이 재귀 렌더된다', () => {
-    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null))
-    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    expect(document.querySelector('[data-slot-id="s1"]')).toBeTruthy()
-    expect(document.querySelector('[data-slot-id="s2"]')).toBeTruthy()
+// ── 분할 트리(ADR-0227 평평한 렌더러) ─────────────────────────────────────────────────────────
+// 분할 트리는 재귀로 풀지 않는다 — 셸 스냅샷의 사각형으로 칸 틀을 루트 하나 아래에 나란히 두고, 구분선을 그 뒤에 둔다.
+//   사각형은 테스트 전용 픽스처(`testing/rects.ts`)가 만든다. 여기서는 렌더러가 받은 사각형을 그대로 싣는지만 보고,
+//   값이 셸과 같은지는 보지 않는다(기하 = Rust `geometry.rs` 테스트 몫). 재마운트·순서는 `.flat.test.tsx` 가 잰다.
+describe('ViewLayoutRenderer — split 분기(셸 사각형)', () => {
+  function renderTree(node: LayoutNode) {
+    const { slotRects, splitRects } = rectsFor(node)
+    return render(
+      <ViewLayoutRenderer node={node} focusedSlotId={null} slotRects={slotRects} splitRects={splitRects} />,
+    )
+  }
+
+  it('left_right split → 두 칸 틀이 좌/우 사각형(--x*·--y*)으로 그려지고 구분선 하나가 붙는다', () => {
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'left_right')
+    renderTree(node)
+    expect(frameRect('s1')).toEqual({ x0: 0, y0: 0, x1: 0.5, y1: 1 })
+    expect(frameRect('s2')).toEqual({ x0: 0.5, y0: 0, x1: 1, y1: 1 })
+    const divider = document.querySelector<HTMLElement>('[data-split-id="sp"][data-dir="left_right"]')
+    expect(divider).not.toBeNull()
+    // 구분선은 칸 틀 안이 아니라 루트 직속 형제다(레이아웃 공간을 먹지 않는 오버레이).
+    expect(divider!.parentElement).toBe(frameOf('s1').parentElement)
+    expect(divider!.getAttribute('aria-orientation')).toBe('vertical')
   })
 
-  it('split 자식에 agent_id 있으면(caps 도착) 해당 슬롯에만 TerminalSlot 이 마운트된다', () => {
+  // dir → 화면 방향의 매핑(ADR-0140)은 셸이 사각형으로 푼다 — 렌더러는 받은 y 경계를 그대로 싣는다.
+  it('top_bottom split → 두 칸 틀이 위/아래 사각형으로 그려지고 구분선 data-dir 이 top_bottom 이다', () => {
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'top_bottom')
+    renderTree(node)
+    expect(frameRect('s1')).toEqual({ x0: 0, y0: 0, x1: 1, y1: 0.5 })
+    expect(frameRect('s2')).toEqual({ x0: 0, y0: 0.5, x1: 1, y1: 1 })
+    const divider = document.querySelector<HTMLElement>('[data-split-id="sp"]')
+    expect(divider?.getAttribute('data-dir')).toBe('top_bottom')
+    expect(divider?.getAttribute('aria-orientation')).toBe('horizontal')
+  })
+
+  it('받은 사각형 값을 그대로 싣는다(비율 0.2 픽스처 → 첫 칸 x1 = 0.2)', () => {
+    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.2)
+    const { slotRects } = rectsFor(node)
+    renderTree(node)
+    for (const r of slotRects) {
+      expect(frameRect(r.slot_id)).toEqual({ x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1 })
+    }
+    expect(frameRect('s1').x1).toBe(0.2)
+  })
+
+  it('중첩 split → 칸 셋·구분선 둘이 루트 하나 아래 평평하게 놓인다', () => {
+    const node = splitNode('outer', slotNode('s1', null), splitNode('inner', slotNode('s2', null), slotNode('s3', null), 0.5, 'top_bottom'))
+    renderTree(node)
+    const root = frameOf('s1').parentElement!
+    for (const id of ['s2', 's3']) expect(frameOf(id).parentElement).toBe(root)
+    expect(root.querySelectorAll(':scope > [data-split-id]')).toHaveLength(2)
+    expect(frameRect('s2')).toEqual({ x0: 0.5, y0: 0, x1: 1, y1: 0.5 })
+    expect(frameRect('s3')).toEqual({ x0: 0.5, y0: 0.5, x1: 1, y1: 1 })
+  })
+
+  it('split 자식에 agent_id 있으면(caps 도착) 해당 칸에만 TerminalSlot 이 마운트된다', () => {
     const agentId = 'zzzz-agent'
     seedAgents(agentInfo(agentId, false))
-    const node = splitNode('sp', slotNode('s1', agentId), slotNode('s2', null))
-    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
+    renderTree(splitNode('sp', slotNode('s1', agentId), slotNode('s2', null)))
     const terminals = screen.getAllByTestId('terminal-slot')
     expect(terminals).toHaveLength(1)
     expect(terminals[0].getAttribute('data-agent-id')).toBe(agentId)
+    expect(terminals[0].getAttribute('data-view-id')).toBe('s1')
+    expect(borderOf('s1').contains(terminals[0])).toBe(true)
     expect(emptyIcons()).toHaveLength(1)
+    expect(borderOf('s2').contains(emptyIcons()[0])).toBe(true)
   })
 
-  // ── ★ADR-0063: node.ratio → 첫 Pane 의 preferredSize %(sash 리셋 값)★ ──────────────────────────────
-  // 이 스위트가 막는 것: split 렌더러가 node.ratio 를 첫 pane(a=왼/위)의 preferredSize="<pct>%" 로 넘기는지.
-  // ★전달만 본다(스텁)★ — 그 값으로 sash 더블클릭 리셋이 ratio 로 돌아가는 동작 자체는 여기서 재지 않는다.
-  // 마운트 크기는 이 값이 아니라 defaultSizes 가 정한다(실제 allotment 스위트가 잰다).
-  // 드래그→백엔드 되쓰기는 이 슬라이스 밖.
-  it('split(ratio=0.2) → 첫 pane preferredSize="20%" 가 전달된다', () => {
-    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.2)
-    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    const firstPane = screen.getAllByTestId('allotment-pane')[0]
-    expect(firstPane.getAttribute('data-preferred-size')).toBe('20%')
+  // 운영 경로엔 없다(스냅샷이 늘 사각형을 싣는다) — 화면은 트리 기하를 따로 계산하지 않으므로 그리지 않고 알린다.
+  it('사각형 없이 루트가 분할이면 오류를 남기고 아무것도 그리지 않는다', () => {
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const { container } = render(
+        <ViewLayoutRenderer node={splitNode('sp', slotNode('s1', null), slotNode('s2', null))} focusedSlotId={null} />,
+      )
+      expect(container.innerHTML).toBe('')
+      expect(consoleError).toHaveBeenCalled()
+    } finally {
+      consoleError.mockRestore()
+    }
   })
 
-  it('split(ratio=0.5) → 첫 pane preferredSize="50%" (기존 50/50 스플릿은 그대로 유지)', () => {
-    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null)) // 기본 ratio=0.5
-    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    const firstPane = screen.getAllByTestId('allotment-pane')[0]
-    expect(firstPane.getAttribute('data-preferred-size')).toBe('50%')
+  it('사각형 없이 루트가 슬롯이면 전체 상자(0,0)-(1,1)로 그린다', () => {
+    render(<ViewLayoutRenderer node={slotNode('s1', null)} focusedSlotId={null} />)
+    expect(frameRect('s1')).toEqual({ x0: 0, y0: 0, x1: 1, y1: 1 })
+    expect(document.querySelectorAll('[data-split-id]')).toHaveLength(0)
   })
-
-  // ── ★Bug2: Allotment.Pane key 안정화 — 형제 콘텐츠 재구조화에도 pane 이 remount 되지 않는다★ ──────
-  // 이 스위트가 막는 것: 옛 nodeKey(node.b) 파생 key 는 b pane 안 슬롯이 split 으로 재구조화되면 key 가
-  // 바뀌어 pane 이 unmount+remount → Allotment 가 전 pane 을 균등 재분배 → 형제(a=왼 20%)의 비율 소실.
-  // 위치 기반 안정 key("pane-a"/"pane-b")면 pane 이 마운트 유지(같은 인스턴스 id) → 사이즈 보존.
-  it('b pane 콘텐츠가 slot→중첩 split 으로 재구조화돼도 두 pane 인스턴스 id 가 유지된다(remount 없음)', () => {
-    const initial = splitNode('outer', slotNode('left', null), slotNode('right', null), 0.2)
-    const { rerender } = render(<ViewLayoutRenderer node={initial} focusedSlotId={null} />)
-    const outerPanesBefore = topLevelPanes()
-    expect(outerPanesBefore).toHaveLength(2)
-    const [aBefore, bBefore] = outerPanesBefore.map(p => p.getAttribute('data-pane-instance'))
-    const preferredBefore = outerPanesBefore[0].getAttribute('data-preferred-size')
-
-    const restructured = splitNode(
-      'outer',
-      slotNode('left', null),
-      splitNode('inner', slotNode('right', null), slotNode('right-2', null)),
-      0.2,
-    )
-    rerender(<ViewLayoutRenderer node={restructured} focusedSlotId={null} />)
-
-    const outerPanesAfter = topLevelPanes()
-    const [aAfter, bAfter] = outerPanesAfter.map(p => p.getAttribute('data-pane-instance'))
-    expect(aAfter).toBe(aBefore)
-    expect(bAfter).toBe(bBefore)
-    expect(outerPanesAfter[0].getAttribute('data-preferred-size')).toBe(preferredBefore)
-    expect(preferredBefore).toBe('20%')
-  })
-
-  // ── ★dir → allotment 방향(ADR-0140 유일한 진실 경계)★ ─────────────────────────────────────────
-  // 이 두 케이스가 막는 것: 매핑이 뒤집히면 라벨·command·타입·백엔드가 전부 맞는데도 화면만 반대가 된다
-  // (라벨↔command 단언만으로는 절대 안 잡히는 층).
-  it('dir="top_bottom" → Allotment vertical=true(위/아래로 쌓임)', () => {
-    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'top_bottom')
-    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    expect(screen.getAllByTestId('allotment')[0].getAttribute('data-vertical')).toBe('true')
-  })
-
-  it('dir="left_right" → Allotment vertical=false(좌/우로 나란히)', () => {
-    const node = splitNode('sp', slotNode('s1', null), slotNode('s2', null), 0.5, 'left_right')
-    render(<ViewLayoutRenderer node={node} focusedSlotId={null} />)
-    expect(screen.getAllByTestId('allotment')[0].getAttribute('data-vertical')).toBe('false')
-  })
-
-  /** 최상위 Allotment 의 직속 Pane 두 개만(중첩 Allotment 의 pane 은 제외). */
-  function topLevelPanes(): HTMLElement[] {
-    const outer = screen.getAllByTestId('allotment')[0]
-    return Array.from(outer.children).filter(
-      c => (c as HTMLElement).getAttribute('data-testid') === 'allotment-pane',
-    ) as HTMLElement[]
-  }
 })
 
 // ── ★click-to-focus 게이트(제어 슬롯 포커스 제외 — ADR-0066 정제)★ ─────────────────────────────

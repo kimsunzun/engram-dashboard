@@ -17,3 +17,5 @@ export type { SplitRect } from '../../src-tauri/bindings/SplitRect'
 // ADR-0227: 분할 비율 쓰기(`set_split_ratio`)의 답.
 export type { SplitRatioApplied } from '../../src-tauri/bindings/SplitRatioApplied'
 export type { SplitRatioOutcome } from '../../src-tauri/bindings/SplitRatioOutcome'
+// ADR-0227: 칸 틀 기본 지표 보고(`report_ui_metrics`)의 인자.
+export type { UiMetrics } from '../../src-tauri/bindings/UiMetrics'

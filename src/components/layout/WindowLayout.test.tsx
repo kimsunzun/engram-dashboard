@@ -34,11 +34,14 @@ vi.mock('@tauri-apps/api/window', () => ({
 //   프록시하려고, mount 시 useEffect([])가 viewId 별 카운터를 1 올린다. 전환 후 카운트가 안 늘고 display
 //   만 토글되면 keep-alive("전환 무손실", ADR-0056) 구조가 성립한다.
 const mountCounts = vi.hoisted(() => new Map<string, number>())
+/** viewIdOverride → 그 렌더러가 마지막으로 받은 props. */
+const rendererProps = vi.hoisted(() => new Map<string, Record<string, unknown>>())
 vi.mock('./ViewLayoutRenderer', async () => {
   const React = (await import('react')).default
   return {
-    default: ({ viewIdOverride }: { viewIdOverride?: string | null }) => {
-      const id = viewIdOverride ?? ''
+    default: (props: { viewIdOverride?: string | null } & Record<string, unknown>) => {
+      const id = props.viewIdOverride ?? ''
+      rendererProps.set(id, props)
       React.useEffect(() => {
         mountCounts.set(id, (mountCounts.get(id) ?? 0) + 1)
       }, [id])
@@ -78,6 +81,7 @@ beforeEach(() => {
   closeMock.mockClear()
   invokeMock.mockReset()
   mountCounts.clear()
+  rendererProps.clear()
   listenShouldReject = false
   useViewStore.setState({ layouts: {}, windows: {}, renderModeOverride: {} })
   invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
@@ -117,6 +121,21 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
     const renderers = screen.getAllByTestId('view-renderer')
     const ids = renderers.map(r => r.getAttribute('data-view-id')).sort()
     expect(ids).toEqual(['v1', 'v2'])
+  })
+
+  // 사각형 배열은 캐시 참조 그대로여야 한다 — 구분선 미리보기가 배열 참조로 새 스냅샷을 알아본다(ADR-0227).
+  it('캐시 항목의 사각형(같은 참조)·비율 한계·version 을 렌더러에 넘긴다', async () => {
+    render(<WindowLayout label="main" />)
+    await waitFor(() => {
+      const cached = useViewStore.getState().layouts['v1']
+      const props = rendererProps.get('v1')
+      expect(cached).toBeTruthy()
+      expect(props).toBeTruthy()
+      expect(props!.slotRects).toBe(cached!.slotRects)
+      expect(props!.splitRects).toBe(cached!.splitRects)
+      expect(props!.ratioBounds).toEqual({ min: cached!.ratioMin, max: cached!.ratioMax })
+      expect(props!.version).toBe(cached!.version)
+    })
   })
 })
 

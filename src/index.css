@@ -39,6 +39,25 @@ html:root {
   --focus-border: var(--accent);
 }
 
+/* ADR-0227: 칸 틀 위치 = 셸 사각형(정규화 경계 --x0 --y0 --x1 --y1, 잎이 인라인으로 싣는다)을 루트 기준 %로.
+   반올림 형태는 셸의 px 경계식과 같은 모양이다 — 이웃 칸이 같은 경계식을 쓰므로 틈·겹침이 0 이다.
+   ★@supports 로 가르는 이유★: var() 가 섞인 선언은 파싱 때 걸러지지 않고 계산 시점에 unset 이 되므로, 같은
+   속성을 두 번 적는 폴백이 통하지 않는다. round() 미지원이면 반올림 없는 % 로 떨어진다. */
+.engram-slot-frame {
+  left: calc(var(--x0) * 100%);
+  top: calc(var(--y0) * 100%);
+  width: calc((var(--x1) - var(--x0)) * 100%);
+  height: calc((var(--y1) - var(--y0)) * 100%);
+}
+@supports (width: round(nearest, 1.5px, 1px)) {
+  .engram-slot-frame {
+    left: round(nearest, calc(var(--x0) * 100%), 1px);
+    top: round(nearest, calc(var(--y0) * 100%), 1px);
+    width: calc(round(nearest, calc(var(--x1) * 100%), 1px) - round(nearest, calc(var(--x0) * 100%), 1px));
+    height: calc(round(nearest, calc(var(--y1) * 100%), 1px) - round(nearest, calc(var(--y0) * 100%), 1px));
+  }
+}
+
 /* ADR-0053: xterm 스크롤바 시각 통일(공용 ScrollArea seam 의 유일 예외).
    xterm 은 자체 스크롤바를 소유해 React ScrollArea 컴포넌트로 감쌀 수 없다. 대신 여기서 같은 theme.css
    토큰(--scrollbar-*)으로 스타일해 나머지 오버레이 스크롤바와 룩을 맞춘다(단일 출처 — 색은 theme 마다

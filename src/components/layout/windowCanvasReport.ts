@@ -1,5 +1,6 @@
 // ADR-0227: 창 캔버스 크기 보고의 보내는 쪽. 관측·디바운스는 `WindowLayout.tsx` 의 훅이 하고, 여기서는
-//   무엇을 언제 `report_window_canvas` 로 보낼지만 정한다.
+//   무엇을 언제 `report_window_canvas` 로 보낼지 정하고, 셸이 마지막으로 받아들인 값을 내놓는다
+//   (`subscribeCanvasReport` — 구분선 드래그의 허용 범위가 셸과 같은 입력으로 읽는다).
 // ★invoke 는 웹뷰당(= 창당) 한 번에 하나만 날린다★: 겹친 두 요청을 셸이 도착 역순으로 처리하면 저장된
 //   캔버스가 다음 리사이즈까지 낡은 채 남는다. WebView2 가 겹친 요청을 JS 발행 순서대로 올리는지는 문서에
 //   없다(모름). 하나씩이면 응답 순서가 곧 셸 적용 순서라, 취소된 작업의 성공도 셸의 현재 값으로 믿을 수 있다.
@@ -47,14 +48,43 @@ const createCanvasReportState = (): CanvasReportState => ({
 
 let canvasReport = createCanvasReportState()
 
+// 구독 하나마다 항목을 따로 둔다 — 같은 함수를 두 번 걸어도 한쪽 해제가 다른 쪽을 지우지 않는다.
+const canvasListeners = new Set<{ cb: (size: CanvasPx | null) => void }>()
+
 /** 훅이 관측을 붙일 때 잡는 이 웹뷰의 보고 상태. */
 export function getCanvasReport(): CanvasReportState {
   return canvasReport
 }
 
+/**
+ * `getCanvasReport().lastSent` 가 바뀔 때마다 새 값으로 부른다 — 셸이 지금과 다른 크기를 성공 응답했을 때, 그리고
+ * 테스트 초기화가 값을 비웠을 때(null). 실패·같은 값의 재성공에는 부르지 않는다.
+ * 반환 = 구독 해제(여러 번 불러도 된다). 구독자가 던져도 보고는 그대로 이어진다(오류 로그만 남는다).
+ */
+export function subscribeCanvasReport(cb: (size: CanvasPx | null) => void): () => void {
+  const entry = { cb }
+  canvasListeners.add(entry)
+  return () => {
+    canvasListeners.delete(entry)
+  }
+}
+
+// 알림은 invoke 시도 안에서 나간다 — 구독자의 throw 가 새면 보고 실패로 셈돼 같은 값을 다시 보낸다.
+function notifyCanvas(size: CanvasPx | null): void {
+  for (const { cb } of [...canvasListeners]) {
+    try {
+      cb(size)
+    } catch (err) {
+      console.error('[windowCanvasReport] 캔버스 구독자 오류:', err)
+    }
+  }
+}
+
 /** 테스트 전용 — 모듈 상태 초기화(테스트 간 격리). 프로덕션 코드에서 호출 금지. */
 export function __resetCanvasReportForTest(): void {
+  const had = canvasReport.lastSent !== null
   canvasReport = createCanvasReportState()
+  if (had) notifyCanvas(null)
 }
 
 /** 반올림한 관측 하나를 알린다(디바운스 전). */
@@ -107,7 +137,12 @@ function startCanvasJob(st: CanvasReportState, size: CanvasPx): void {
     st.inAir = true
     try {
       await invoke<void>('report_window_canvas', { w: size.w, h: size.h })
-      st.lastSent = size
+      // 같은 값이면 객체를 갈지 않는다 — 구독자가 읽는 값의 참조가 알림 없이 바뀌지 않게.
+      if (st.lastSent === null || !sameCanvas(st.lastSent, size)) {
+        st.lastSent = size
+        // 테스트 초기화로 버려진 상태의 늦은 응답은 지금 상태의 구독자에게 알리지 않는다.
+        if (st === canvasReport) notifyCanvas(size)
+      }
     } finally {
       st.inAir = false
       pumpCanvasReport(st)
