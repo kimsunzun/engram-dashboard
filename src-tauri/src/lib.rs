@@ -239,6 +239,9 @@ pub fn run() {
             commands::list_tabs,
             commands::list_windows,
             commands::resolve_spatial,
+            // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
+            commands::report_window_canvas,
+            commands::report_ui_metrics,
             // 부팅 조회 — 미는 쪽(`ui.refresh`)은 명령 표에 있다(`commands/settings.rs` 「읽는 자리가 둘인 이유」).
             commands::get_ui_settings,
             // 웹뷰 몫 명령(ADR-0155) — 부팅 보고와 결말 회수 한 쌍(`commands/view_bus.rs`).

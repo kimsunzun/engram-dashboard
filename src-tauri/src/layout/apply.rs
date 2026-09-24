@@ -26,6 +26,9 @@
 //!
 //! read-only 4종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial`)은 변형이 없어 포트를 하나도
 //! 받지 않는다(ADR-0156 결정 2로 v1 명령 범위에 합류).
+//!
+//! 측정 보고 2종(`report_window_canvas`·`report_ui_metrics`)도 포트를 받지 않는다 — 셸 상태에 쓰지만
+//! version·알림·구독 어느 것도 건드리지 않는다(측정이지 제어가 아니다 — ADR-0227).
 
 use std::future::Future;
 use std::pin::Pin;
@@ -38,7 +41,7 @@ use super::manager::{
     resolve_spawn_slot, CloseTabOutcome, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
-use super::types::{SlotContent, SplitDir, ViewMeta, ViewSnapshot};
+use super::types::{SlotContent, SplitDir, UiMetrics, ViewMeta, ViewSnapshot};
 use super::LayoutState;
 
 /// 창별 탭바 알림 페이로드(ADR-0057). 프론트는 `label` 이 자기 창과 일치할 때만 반응하고(§7-1),
@@ -711,6 +714,33 @@ fn rollback_detached(state: &LayoutState, subs: &dyn SubscriptionSync, tmp_view:
     };
     mgr.drop_detached_view(tmp_view);
     subs.resync(&mgr);
+}
+
+// ── 측정 보고 2종 ────────────────────────────────────────────────────────────
+//
+// `window` 는 보고한 웹뷰의 창 label 이다 — 껍데기가 Tauri 가 넣어 준 창에서 꺼내 넘긴다(인자로 받지 않음).
+// 0 크기 무시·범위 거절과 직전 값 유지는 관리자(`ViewManager::set_window_canvas`·`set_ui_metrics`)가 진다.
+// ADR-0227
+
+pub fn report_window_canvas(
+    state: &LayoutState,
+    window: &str,
+    w: u32,
+    h: u32,
+) -> Result<(), String> {
+    let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+    mgr.set_window_canvas(window, w, h)
+        .map_err(|e| e.to_string())
+}
+
+pub fn report_ui_metrics(
+    state: &LayoutState,
+    window: &str,
+    metrics: UiMetrics,
+) -> Result<(), String> {
+    let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+    mgr.set_ui_metrics(window, metrics)
+        .map_err(|e| e.to_string())
 }
 
 // ── read-only 4종 ────────────────────────────────────────────────────────────

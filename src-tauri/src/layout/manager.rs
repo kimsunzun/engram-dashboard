@@ -31,9 +31,9 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use super::geometry;
+use super::geometry::{self, PxRect, RectF64};
 use super::tree;
-use super::types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
+use super::types::{LayoutNode, SlotContent, SplitDir, UiMetrics, View, ViewMeta, ViewSnapshot};
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -53,6 +53,27 @@ pub enum LayoutError {
     WindowNotFound(String),
     #[error("메인 창은 닫을 수 없음")]
     MainNotClosable,
+    #[error("ui 지표 거절: {0}")]
+    InvalidMetrics(String),
+}
+
+// 보고 지표 방어선(TRD §2d) — 정책 값이 아니다. 테두리 폭·최소 칸 크기의 실제 값은 화면이 정한다.
+const INSET_MAX_PX: f64 = 64.0;
+const MIN_PANE_PX_MAX: u32 = 1000;
+
+/// 창의 탭 내용 영역 크기(정수 CSS px). 그 창의 탭 전부가 이 영역에 겹쳐 그려진다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasPx {
+    pub w: u32,
+    pub h: u32,
+}
+
+/// 한 칸의 px 사각형 — `frame` = 칸 틀(캔버스 원점 기준 정수 CSS px) · `content` = 틀을 칸 틀 안쪽 여백만큼
+/// 줄인 영역(폭·높이 ≥ 0).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SlotPx {
+    pub frame: PxRect,
+    pub content: RectF64,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +81,23 @@ pub struct WindowTabs {
     // 탭 순서(좌→우).
     pub tabs: Vec<ViewId>,
     pub active: ViewId,
+    // 둘 다 그 창 웹뷰가 보고하기 전엔 None 이고 창 엔트리와 함께 사라진다. 탭마다가 아니라 창마다다.
+    // ADR-0227
+    pub canvas: Option<CanvasPx>,
+    // ADR-0227
+    pub metrics: Option<UiMetrics>,
+}
+
+impl WindowTabs {
+    // 새 창 엔트리는 전부 여기서 만든다 — 측정값은 그 창 웹뷰가 보고할 때까지 비어 있어야 한다.
+    fn first_tab(view: ViewId) -> Self {
+        WindowTabs {
+            tabs: vec![view],
+            active: view,
+            canvas: None,
+            metrics: None,
+        }
+    }
 }
 
 // 창별 탭 조회 결과(list_tabs 반환 / window:tabs-updated 페이로드 원천). ADR-0057.
@@ -98,13 +136,8 @@ impl ViewManager {
         };
         let v0 = mgr.make_view("View 1".to_string());
         mgr.view_owner.insert(v0, MAIN_WINDOW_LABEL.to_string());
-        mgr.windows.insert(
-            MAIN_WINDOW_LABEL.to_string(),
-            WindowTabs {
-                tabs: vec![v0],
-                active: v0,
-            },
-        );
+        mgr.windows
+            .insert(MAIN_WINDOW_LABEL.to_string(), WindowTabs::first_tab(v0));
         mgr
     }
 
@@ -240,13 +273,8 @@ impl ViewManager {
         }
         let id = self.make_view("View 1".to_string());
         self.view_owner.insert(id, label.to_string());
-        self.windows.insert(
-            label.to_string(),
-            WindowTabs {
-                tabs: vec![id],
-                active: id,
-            },
-        );
+        self.windows
+            .insert(label.to_string(), WindowTabs::first_tab(id));
         self.bump_version();
         Ok(id)
     }
@@ -503,16 +531,107 @@ impl ViewManager {
             return Err(LayoutError::ViewNotFound(view));
         }
         self.view_owner.insert(view, label.to_string());
-        self.windows.insert(
-            label.to_string(),
-            WindowTabs {
-                tabs: vec![view],
-                active: view,
-            },
-        );
+        self.windows
+            .insert(label.to_string(), WindowTabs::first_tab(view));
         self.bump_version();
         Ok(())
     }
+
+    // ── 측정 보고(웹뷰 → 셸) ────────────────────────────────────────────────
+    //
+    // ★version 을 올리지 않는다★ — 측정이지 레이아웃 변경이 아니다. 스냅샷에도 안 실리고 알림도 없다
+    // (적용 서비스가 포트를 안 받는다). 셸 계산이 읽을 때 그 자리에서 본다.
+    // ADR-0227
+
+    // `w`·`h` 중 하나라도 0 이면 무시하고 직전 값을 유지한다(`Ok`) — 0 크기 관측은 실재하고, 저장하면 그
+    // 창의 모든 칸이 0 px 가 된다.
+    pub fn set_window_canvas(&mut self, label: &str, w: u32, h: u32) -> Result<(), LayoutError> {
+        let wt = self
+            .windows
+            .get_mut(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+        wt.canvas = Some(CanvasPx { w, h });
+        Ok(())
+    }
+
+    // 범위 밖이면 `InvalidMetrics` 로 거절하고 직전 값을 유지한다(범위 = `UiMetrics` 문서).
+    pub fn set_ui_metrics(&mut self, label: &str, m: UiMetrics) -> Result<(), LayoutError> {
+        let wt = self
+            .windows
+            .get_mut(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        check_metrics(&m)?;
+        wt.metrics = Some(m);
+        Ok(())
+    }
+
+    // view 를 소유한 창의 캔버스·지표. 둘 중 하나라도 모르면 `Ok(None)`.
+    // 소유 창이 없는 View(`prepare_detached_view` 의 임시 View)도 `Ok(None)` 이다.
+    // ADR-0227
+    pub(crate) fn px_context(
+        &self,
+        view: ViewId,
+    ) -> Result<Option<(CanvasPx, UiMetrics)>, LayoutError> {
+        if !self.views.contains_key(&view) {
+            return Err(LayoutError::ViewNotFound(view));
+        }
+        Ok(self
+            .view_owner
+            .get(&view)
+            .and_then(|label| self.windows.get(label))
+            .and_then(|wt| wt.canvas.zip(wt.metrics)))
+    }
+
+    // 칸 `slot` 의 px 사각형. `frame` 은 `geometry::frame_px`, `content` 는 `geometry::content_rect` 규칙이다
+    // (구분선 두께는 빼지 않는다 — 구분선은 공간을 먹지 않는 오버레이다).
+    // 캔버스나 지표를 모르면 `Ok(None)` — 지표 없이 내면 content 가 틀린 값이 된다. 없는 view·slot 은 그보다
+    // 먼저 `Err` 다. 숨은 탭도 같은 창 캔버스로 계산한다.
+    // ADR-0227
+    pub fn slot_px(&self, view: ViewId, slot: Uuid) -> Result<Option<SlotPx>, LayoutError> {
+        let v = self
+            .views
+            .get(&view)
+            .ok_or(LayoutError::ViewNotFound(view))?;
+        if !tree::contains_slot(&v.layout, slot) {
+            return Err(LayoutError::SlotNotFound(slot));
+        }
+        let Some((canvas, metrics)) = self.px_context(view)? else {
+            return Ok(None);
+        };
+        let geo = geometry::compute(&v.layout);
+        let rect = geo
+            .slots
+            .iter()
+            .find(|r| r.slot_id == slot)
+            .ok_or(LayoutError::SlotNotFound(slot))?;
+        let frame = geometry::frame_px(canvas.w, canvas.h, rect);
+        Ok(Some(SlotPx {
+            frame,
+            content: geometry::content_rect(&frame, &metrics.frame_insets),
+        }))
+    }
+}
+
+// `RangeInclusive::contains` 는 NaN 에 거짓이다 — 그래서 NaN·±∞ 도 이 한 검사에서 함께 걸린다.
+fn check_metrics(m: &UiMetrics) -> Result<(), LayoutError> {
+    let i = &m.frame_insets;
+    for (name, v) in [("t", i.t), ("r", i.r), ("b", i.b), ("l", i.l)] {
+        if !(0.0..=INSET_MAX_PX).contains(&v) {
+            return Err(LayoutError::InvalidMetrics(format!(
+                "frame_insets.{name}={v} — 유한하고 0~{INSET_MAX_PX} 이어야 한다"
+            )));
+        }
+    }
+    if !(1..=MIN_PANE_PX_MAX).contains(&m.min_pane_px) {
+        return Err(LayoutError::InvalidMetrics(format!(
+            "min_pane_px={} — 1~{MIN_PANE_PX_MAX} 이어야 한다",
+            m.min_pane_px
+        )));
+    }
+    Ok(())
 }
 
 // `spawn_into`(D-7) 슬롯 해소 실패 사유(TRD §6 G9). command 레이어가 문자열로 옮긴다.
@@ -1516,5 +1635,345 @@ mod tests {
             resolve_spawn_slot(view, Some(bogus)),
             Err(SpawnSlotError::SlotNotFound(bogus))
         );
+    }
+
+    // ── 측정 보고 · slot_px (ADR-0227) ───────────────────────────────────────
+
+    fn metrics(t: f64, r: f64, b: f64, l: f64, min_pane_px: u32) -> UiMetrics {
+        UiMetrics {
+            frame_insets: geometry::Insets { t, r, b, l },
+            min_pane_px,
+        }
+    }
+
+    fn one_px_border() -> UiMetrics {
+        metrics(1.0, 1.0, 1.0, 1.0, 30)
+    }
+
+    fn window(mgr: &ViewManager, label: &str) -> WindowTabs {
+        mgr.windows.get(label).expect("창 존재").clone()
+    }
+
+    #[test]
+    fn canvas_is_stored_per_window() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("popup-1").unwrap();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        mgr.set_window_canvas("popup-1", 640, 480).unwrap();
+
+        assert_eq!(
+            window(&mgr, MAIN_WINDOW_LABEL).canvas,
+            Some(CanvasPx { w: 1200, h: 800 })
+        );
+        assert_eq!(
+            window(&mgr, "popup-1").canvas,
+            Some(CanvasPx { w: 640, h: 480 })
+        );
+    }
+
+    #[test]
+    fn hidden_tab_uses_the_window_canvas_for_slot_px() {
+        let mut mgr = ViewManager::new();
+        let hidden = main_active(&mgr);
+        let shown = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        assert_ne!(main_active(&mgr), hidden, "전제: 첫 탭이 숨었다");
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
+            .unwrap();
+
+        let hidden_px = mgr
+            .slot_px(hidden, first_slot_of(&mgr, hidden))
+            .unwrap()
+            .expect("숨은 탭도 창 캔버스로 계산");
+        let shown_px = mgr
+            .slot_px(shown, first_slot_of(&mgr, shown))
+            .unwrap()
+            .expect("활성 탭");
+        let full = PxRect {
+            x0: 0,
+            y0: 0,
+            x1: 1200,
+            y1: 800,
+        };
+        assert_eq!(hidden_px.frame, full);
+        assert_eq!(shown_px.frame, full);
+    }
+
+    #[test]
+    fn a_new_window_starts_without_canvas_or_metrics() {
+        let mut mgr = ViewManager::new();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
+            .unwrap();
+
+        let fresh = mgr.create_window("popup-1").unwrap();
+        let src = main_active(&mgr);
+        let (detached, _) = mgr
+            .prepare_detached_view(src, first_slot_of(&mgr, src), "Tab".into())
+            .unwrap();
+        mgr.attach_view_as_new_window("popup-2", detached).unwrap();
+
+        for (label, view) in [("popup-1", fresh), ("popup-2", detached)] {
+            let wt = window(&mgr, label);
+            assert_eq!(
+                wt.canvas, None,
+                "{label}: 캔버스는 그 웹뷰 보고 전까지 없다"
+            );
+            assert_eq!(wt.metrics, None, "{label}: 지표도 없다");
+            assert_eq!(
+                mgr.slot_px(view, first_slot_of(&mgr, view)),
+                Ok(None),
+                "{label}: 메인 값을 빌려 쓰지 않는다"
+            );
+        }
+    }
+
+    #[test]
+    fn canvas_and_metrics_vanish_with_the_window() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("popup-1").unwrap();
+        let tab = mgr.create_window("popup-2").unwrap();
+        for label in ["popup-1", "popup-2"] {
+            mgr.set_window_canvas(label, 640, 480).unwrap();
+            mgr.set_ui_metrics(label, one_px_border()).unwrap();
+        }
+
+        mgr.close_window("popup-1").unwrap();
+        assert_eq!(
+            mgr.close_tab("popup-2", tab).unwrap(),
+            CloseTabOutcome::WindowClosed
+        );
+
+        for label in ["popup-1", "popup-2"] {
+            assert!(!mgr.windows.contains_key(label));
+            assert_eq!(
+                mgr.set_window_canvas(label, 640, 480),
+                Err(LayoutError::WindowNotFound(label.to_string()))
+            );
+        }
+    }
+
+    #[test]
+    fn reports_do_not_bump_version() {
+        let mut mgr = ViewManager::new();
+        let before = mgr.version;
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 0, 800).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
+            .unwrap();
+        let _ = mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(-1.0, 1.0, 1.0, 1.0, 30));
+        let _ = mgr.set_window_canvas("no-such", 1, 1);
+        assert_eq!(mgr.version, before);
+    }
+
+    #[test]
+    fn a_zero_size_canvas_report_is_ignored_and_keeps_the_previous_value() {
+        let mut mgr = ViewManager::new();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        for (w, h) in [(0, 800), (1200, 0), (0, 0)] {
+            assert_eq!(mgr.set_window_canvas(MAIN_WINDOW_LABEL, w, h), Ok(()));
+            assert_eq!(
+                window(&mgr, MAIN_WINDOW_LABEL).canvas,
+                Some(CanvasPx { w: 1200, h: 800 }),
+                "{w}x{h} 보고가 직전 값을 덮었다"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_size_first_report_leaves_the_canvas_unknown() {
+        let mut mgr = ViewManager::new();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 0, 0).unwrap();
+        assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).canvas, None);
+    }
+
+    #[test]
+    fn out_of_range_metrics_are_rejected_and_keep_the_previous_value() {
+        let good = one_px_border();
+        let bad = [
+            ("t < 0", metrics(-0.5, 1.0, 1.0, 1.0, 30)),
+            ("r > 64", metrics(1.0, 64.5, 1.0, 1.0, 30)),
+            ("b NaN", metrics(1.0, 1.0, f64::NAN, 1.0, 30)),
+            ("l +inf", metrics(1.0, 1.0, 1.0, f64::INFINITY, 30)),
+            ("t -inf", metrics(f64::NEG_INFINITY, 1.0, 1.0, 1.0, 30)),
+            ("min_pane_px 0", metrics(1.0, 1.0, 1.0, 1.0, 0)),
+            ("min_pane_px 1001", metrics(1.0, 1.0, 1.0, 1.0, 1001)),
+        ];
+        for (why, m) in bad {
+            let mut mgr = ViewManager::new();
+            mgr.set_ui_metrics(MAIN_WINDOW_LABEL, good).unwrap();
+            assert!(
+                matches!(
+                    mgr.set_ui_metrics(MAIN_WINDOW_LABEL, m),
+                    Err(LayoutError::InvalidMetrics(_))
+                ),
+                "{why}: 거절돼야 한다"
+            );
+            assert_eq!(
+                window(&mgr, MAIN_WINDOW_LABEL).metrics,
+                Some(good),
+                "{why}: 직전 값을 유지해야 한다"
+            );
+        }
+    }
+
+    #[test]
+    fn exact_metric_bounds_are_accepted() {
+        let mut mgr = ViewManager::new();
+        for m in [
+            metrics(0.0, 0.0, 0.0, 0.0, 1),
+            metrics(64.0, 64.0, 64.0, 64.0, 1000),
+            metrics(0.8, 1.25, 0.0, 64.0, 30),
+        ] {
+            assert_eq!(mgr.set_ui_metrics(MAIN_WINDOW_LABEL, m), Ok(()));
+            assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).metrics, Some(m));
+        }
+    }
+
+    #[test]
+    fn reports_to_an_unknown_window_are_window_not_found() {
+        let mut mgr = ViewManager::new();
+        assert_eq!(
+            mgr.set_window_canvas("no-such", 100, 100),
+            Err(LayoutError::WindowNotFound("no-such".into()))
+        );
+        assert_eq!(
+            mgr.set_ui_metrics("no-such", one_px_border()),
+            Err(LayoutError::WindowNotFound("no-such".into()))
+        );
+        // agent-tree 창은 탭 모델 밖이라 보고할 자리가 없다.
+        assert_eq!(
+            mgr.set_window_canvas("agent-tree", 100, 100),
+            Err(LayoutError::WindowNotFound("agent-tree".into()))
+        );
+    }
+
+    #[test]
+    fn slot_px_rounds_frame_edges_from_the_canvas_and_subtracts_insets() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let left = first_slot_of(&mgr, v);
+        let right = mgr.split_slot(v, left, SplitDir::LeftRight).unwrap();
+        // 폭 1001 × 비율 0.5 = 500.5 → 동률은 0 에서 먼 쪽이라 501.
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1001, 600).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(1.0, 2.0, 3.0, 4.0, 30))
+            .unwrap();
+
+        let l = mgr.slot_px(v, left).unwrap().unwrap();
+        let r = mgr.slot_px(v, right).unwrap().unwrap();
+        assert_eq!(
+            l.frame,
+            PxRect {
+                x0: 0,
+                y0: 0,
+                x1: 501,
+                y1: 600
+            }
+        );
+        assert_eq!(
+            r.frame,
+            PxRect {
+                x0: 501,
+                y0: 0,
+                x1: 1001,
+                y1: 600
+            }
+        );
+        assert_eq!(
+            l.content,
+            RectF64 {
+                x0: 4.0,
+                y0: 1.0,
+                x1: 499.0,
+                y1: 597.0
+            }
+        );
+        assert_eq!(
+            r.content,
+            RectF64 {
+                x0: 505.0,
+                y0: 1.0,
+                x1: 999.0,
+                y1: 597.0
+            }
+        );
+    }
+
+    #[test]
+    fn slot_px_content_never_goes_below_zero() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let s = first_slot_of(&mgr, v);
+        // 틀(3×2)이 여백 합(좌우 4 · 위아래 4)보다 좁다.
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 3, 2).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(2.0, 2.0, 2.0, 2.0, 30))
+            .unwrap();
+
+        let px = mgr.slot_px(v, s).unwrap().unwrap();
+        assert!(px.content.x1 - px.content.x0 >= 0.0, "{:?}", px.content);
+        assert!(px.content.y1 - px.content.y0 >= 0.0, "{:?}", px.content);
+        assert_eq!(px.content.x1, px.content.x0);
+        assert_eq!(px.content.y1, px.content.y0);
+    }
+
+    #[test]
+    fn slot_px_is_none_until_both_canvas_and_metrics_are_known() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let s = first_slot_of(&mgr, v);
+        assert_eq!(mgr.slot_px(v, s), Ok(None), "둘 다 없음");
+
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        assert_eq!(mgr.slot_px(v, s), Ok(None), "지표 없음");
+        assert_eq!(mgr.px_context(v), Ok(None));
+
+        let mut only_metrics = ViewManager::new();
+        let v2 = main_active(&only_metrics);
+        let s2 = first_slot_of(&only_metrics, v2);
+        only_metrics
+            .set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
+            .unwrap();
+        assert_eq!(only_metrics.slot_px(v2, s2), Ok(None), "캔버스 없음");
+
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
+            .unwrap();
+        assert!(mgr.slot_px(v, s).unwrap().is_some(), "둘 다 있음");
+        assert_eq!(
+            mgr.px_context(v),
+            Ok(Some((CanvasPx { w: 1200, h: 800 }, one_px_border())))
+        );
+    }
+
+    #[test]
+    fn slot_px_unknown_view_or_slot_is_err_even_without_canvas() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let other = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let bogus = Uuid::new_v4();
+        assert_eq!(
+            mgr.slot_px(bogus, first_slot_of(&mgr, v)),
+            Err(LayoutError::ViewNotFound(bogus))
+        );
+        assert_eq!(mgr.slot_px(v, bogus), Err(LayoutError::SlotNotFound(bogus)));
+        // 다른 탭의 칸은 이 view 의 칸이 아니다.
+        let foreign = first_slot_of(&mgr, other);
+        assert_eq!(
+            mgr.slot_px(v, foreign),
+            Err(LayoutError::SlotNotFound(foreign))
+        );
+        assert_eq!(mgr.px_context(bogus), Err(LayoutError::ViewNotFound(bogus)));
+    }
+
+    #[test]
+    fn px_context_of_an_ownerless_detached_view_is_none() {
+        let mut mgr = ViewManager::new();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, one_px_border())
+            .unwrap();
+        let src = main_active(&mgr);
+        let (tmp, _) = mgr
+            .prepare_detached_view(src, first_slot_of(&mgr, src), "Tab".into())
+            .unwrap();
+        assert_eq!(mgr.px_context(tmp), Ok(None));
     }
 }

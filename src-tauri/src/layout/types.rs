@@ -7,7 +7,7 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::geometry::{SlotRect, SplitRect};
+use super::geometry::{Insets, SlotRect, SplitRect};
 use super::spatial::SlotSpatial;
 
 /// 이름이 결과 배치를 말한다 — `LeftRight` 는 항상 좌/우, `TopBottom` 은 항상 위/아래.
@@ -137,6 +137,23 @@ pub struct ViewSnapshot {
     /// (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.
     #[ts(type = "number")]
     pub version: u64,
+}
+
+/// 칸 틀 기본 지표 — 웹뷰가 셸에 알리는 `report_ui_metrics` 의 인자(`{ metrics: UiMetrics }`).
+///
+/// - `frame_insets`: 칸 틀 안쪽 테두리 폭 넷(CSS px). **실측값**이다 — 배율에 따라 소수가 올 수 있다.
+///   각 값은 유한하고 `0 ≤ v ≤ 64` 여야 한다.
+/// - `min_pane_px`: 칸 최소 크기(CSS px). 측정값이 아니라 화면의 **정책 상수**이고 그 값의 유일한 정본은
+///   화면이다 — 셸은 받아 쓰기만 하고 자기 상수를 두지 않는다. `1 ≤ v ≤ 1000` 이어야 한다.
+///
+/// 범위를 벗어나면 셸이 거절(`Err`)하고 그 창의 직전 값을 유지한다. 보고는 version 을 올리지도 알리지도
+/// 않는다.
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UiMetrics {
+    pub frame_insets: Insets,
+    pub min_pane_px: u32,
 }
 
 impl LayoutNode {

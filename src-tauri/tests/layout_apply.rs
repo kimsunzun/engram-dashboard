@@ -44,8 +44,10 @@ use engram_dashboard_lib::commands::popout::PopupCounter;
 use engram_dashboard_lib::layout::apply::{
     self, AgentSpawner, LabelSource, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
 };
+use engram_dashboard_lib::layout::geometry::{Insets, PxRect};
 use engram_dashboard_lib::layout::{
-    tree, LayoutState, SlotContent, SplitDir, ViewManager, ViewSnapshot, MAIN_WINDOW_LABEL,
+    tree, LayoutState, SlotContent, SplitDir, UiMetrics, ViewManager, ViewSnapshot,
+    MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::output_router::OutputRouter;
 
@@ -1490,6 +1492,94 @@ async fn spawn_into_propagates_spawn_failure_untouched() {
         "스폰 실패면 탭도 안 만든다"
     );
     assert_eq!(w.resyncs(), 0);
+}
+
+// ── 측정 보고 2종 (ADR-0227) ─────────────────────────────────────────────────
+//
+// 두 함수는 알림·재동기 포트를 아예 안 받으므로 「통지 0」은 시그니처가 먼저 지킨다. 여기서 재는 것은 그
+// 나머지 — version 불변과, 성공·실패 어느 쪽이든 형제 명령의 알림이 딸려 나가지 않는다는 것이다.
+
+fn one_px_border() -> UiMetrics {
+    UiMetrics {
+        frame_insets: Insets {
+            t: 1.0,
+            r: 1.0,
+            b: 1.0,
+            l: 1.0,
+        },
+        min_pane_px: 30,
+    }
+}
+
+#[test]
+fn canvas_and_metrics_reports_notify_nothing_and_keep_version() {
+    let w = World::new();
+    let before = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+    apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, one_px_border()).unwrap();
+
+    assert_eq!(w.layout_events(), 0, "레이아웃 통지 0");
+    assert_eq!(w.tab_events(), 0, "탭 통지 0");
+    assert_eq!(w.resyncs(), 0, "라우팅 불변 — 재동기 없음");
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        before,
+        "측정 보고는 version 을 올리지 않는다"
+    );
+
+    // 저장은 됐다 — 셸 계산이 그 값을 읽는다.
+    let view = w.main_active();
+    let slot = w.slots(view)[0];
+    let px = w
+        .state
+        .0
+        .lock()
+        .unwrap()
+        .slot_px(view, slot)
+        .unwrap()
+        .expect("캔버스·지표 둘 다 보고됨");
+    assert_eq!(
+        px.frame,
+        PxRect {
+            x0: 0,
+            y0: 0,
+            x1: 1200,
+            y1: 800
+        }
+    );
+}
+
+#[test]
+fn rejected_reports_notify_nothing_and_keep_version() {
+    let w = World::new();
+    let before = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    let err = apply::report_window_canvas(&w.state, "no-such", 1200, 800).unwrap_err();
+    assert!(err.contains("window 없음"), "err={err}");
+    let err = apply::report_ui_metrics(&w.state, "no-such", one_px_border()).unwrap_err();
+    assert!(err.contains("window 없음"), "err={err}");
+    let mut bad = one_px_border();
+    bad.frame_insets.l = f64::NAN;
+    let err = apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, bad).unwrap_err();
+    assert!(err.contains("ui 지표 거절"), "err={err}");
+    // 0 크기는 오류가 아니라 무시다.
+    apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 0, 800).unwrap();
+
+    assert_eq!(w.layout_events() + w.tab_events(), 0);
+    assert_eq!(w.resyncs(), 0);
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        before
+    );
 }
 
 // ── read-only 4종 ────────────────────────────────────────────────────────────

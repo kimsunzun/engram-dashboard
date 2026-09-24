@@ -14,11 +14,11 @@ pub use apply::{
     WindowTabsPayload,
 };
 pub use manager::{
-    resolve_spawn_slot, CloseTabOutcome, LayoutError, SpawnSlotError, ViewManager,
-    WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    resolve_spawn_slot, CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError,
+    ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 pub use spatial::{compute_spatial, resolve_spatial, Neighbors, SlotSpatial, SpatialToken};
-pub use types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
+pub use types::{LayoutNode, SlotContent, SplitDir, UiMetrics, View, ViewMeta, ViewSnapshot};
 
 use std::sync::{Arc, Mutex};
 

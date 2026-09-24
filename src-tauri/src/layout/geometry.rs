@@ -59,7 +59,9 @@ pub struct PxRect {
 }
 
 /// 칸 틀 안쪽 여백(CSS px, 소수 허용 — 배율에 따라 테두리 폭이 소수로 잴 수 있다).
-#[derive(Debug, Clone, Copy, PartialEq)]
+// `UiMetrics`(웹뷰 보고 wire)에 실려 가므로 serde·ts-rs 를 단다. `PxRect`·`RectF64` 는 셸 내부라 안 단다.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
 pub struct Insets {
     pub t: f64,
     pub r: f64,

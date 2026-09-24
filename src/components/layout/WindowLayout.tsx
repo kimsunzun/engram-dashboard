@@ -7,7 +7,7 @@
 // display:none — xterm 인스턴스·버퍼 유지, 전환 즉시·무손실). WebglAddon 좌석은 보이는 슬롯만
 // (숨은 탭은 화면에서 빠져 CSS 로 안 보이지만 인스턴스는 살아 출력 계속 누적 — 백엔드가 모든 탭 라우팅).
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { listen } from '@tauri-apps/api/event'
 import { invoke } from '@tauri-apps/api/core'
 
@@ -19,6 +19,13 @@ import {
   type WindowTabsPayload,
 } from '../../store/viewStore'
 import { retryAsync, RetryCancelledError } from '../../util/retryInvoke'
+import {
+  getCanvasReport,
+  observeCanvasSize,
+  releaseCanvasReport,
+  submitCanvasSize,
+  type CanvasPx,
+} from './windowCanvasReport'
 import ViewLayoutRenderer from './ViewLayoutRenderer'
 import TabBar from './TabBar'
 import AgentMonitoringPicker from '../slot/AgentMonitoringPicker'
@@ -41,6 +48,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
   const renameTab = useViewStore(s => s.renameTab)
 
   const closingRef = useRef(false)
+  const canvasRef = useWindowCanvasReport()
 
   // ADR-0102: 부팅 pull 최종 실패 표면화 — 재시도 소진 후에도 이 창 상태(win)가 안 채워지면 로딩
   //   플레이스홀더에 영구 고착되므로(main 은 이벤트 복구 경로 없음), 조용한 console.warn 대신 이 플래그로
@@ -179,7 +187,7 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
           void renameTab(viewId, name).catch(e => console.error('[renameTab]', e))
         }
       />
-      <div style={{ flex: 1, position: 'relative', minHeight: 0 }}>
+      <div ref={canvasRef} style={{ flex: 1, position: 'relative', minHeight: 0 }}>
         {win.tabs.map(tab => (
           <div
             key={tab.id}
@@ -204,6 +212,61 @@ export default function WindowLayout({ label }: WindowLayoutProps) {
       <AgentMonitoringPicker key={openId} />
     </div>
   )
+}
+
+/** 훅 인스턴스가 소유하는 관측 상태. */
+interface CanvasObserverState {
+  ro: ResizeObserver | null
+  timer: ReturnType<typeof setTimeout> | null
+  /** 디바운스 대기 중인 최신 측정(반올림 후). */
+  measured: CanvasPx | null
+}
+
+const CANVAS_REPORT_DEBOUNCE_MS = 100
+
+// ADR-0227: 탭 내용 영역(창 캔버스) 크기를 재어 바뀔 때만 셸에 보고한다. 탭들이 이 영역을 공유하므로 창당
+//   하나다. 부팅·팝아웃 생성·웹뷰 재로드는 모두 새 마운트라 첫 측정이 곧 보고다. 무엇을 언제 보낼지(한 번에
+//   하나·합치기·재시도)는 `windowCanvasReport.ts` 가 정한다.
+// callback ref 인 이유: 재는 div 는 win 이 온 뒤에야 렌더되므로(조기 반환) 마운트 때 effect 에선 아직 없다.
+//   참조를 고정하는 이유: 렌더마다 새 함수면 React 가 떼고 다시 붙여 디바운스·재시도가 매번 날아간다.
+function useWindowCanvasReport(): (el: HTMLDivElement | null) => void {
+  const obsRef = useRef<CanvasObserverState>({ ro: null, timer: null, measured: null })
+
+  return useCallback((el: HTMLDivElement | null) => {
+    const obs = obsRef.current
+    const st = getCanvasReport()
+    detachCanvasObserver(obs)
+    releaseCanvasReport(st)
+    if (!el) return
+    // jsdom(vitest 에 setupFiles 없음)처럼 RO 가 없는 환경에선 관측 없이 지나간다.
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(entries => {
+      const rect = entries[entries.length - 1]?.contentRect
+      if (!rect) return
+      const size: CanvasPx = { w: Math.round(rect.width), h: Math.round(rect.height) }
+      observeCanvasSize(st, size)
+      obs.measured = size
+      if (obs.timer !== null) clearTimeout(obs.timer)
+      obs.timer = setTimeout(() => {
+        obs.timer = null
+        const measured = obs.measured
+        obs.measured = null
+        if (measured) submitCanvasSize(st, measured)
+      }, CANVAS_REPORT_DEBOUNCE_MS)
+    })
+    ro.observe(el)
+    obs.ro = ro
+  }, [])
+}
+
+function detachCanvasObserver(obs: CanvasObserverState): void {
+  obs.ro?.disconnect()
+  obs.ro = null
+  if (obs.timer !== null) {
+    clearTimeout(obs.timer)
+    obs.timer = null
+  }
+  obs.measured = null
 }
 
 /**

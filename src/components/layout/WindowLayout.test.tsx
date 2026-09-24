@@ -1,5 +1,5 @@
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── listen mock: 이벤트명별 핸들러 보관 → 테스트가 직접 emit ──
@@ -48,6 +48,7 @@ vi.mock('./ViewLayoutRenderer', async () => {
 })
 
 import WindowLayout from './WindowLayout'
+import { __resetCanvasReportForTest } from './windowCanvasReport'
 import { useViewStore } from '../../store/viewStore'
 import type { ViewSnapshot } from '../../api/layoutTypes'
 
@@ -343,6 +344,486 @@ describe('WindowLayout — 0탭 자가닫힘(§5-2/G2)', () => {
     await waitFor(() => expect(closeMock).toHaveBeenCalledTimes(1))
     await Promise.resolve()
     expect(closeMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── ★ADR-0227: 창 캔버스 보고(TRD §2d)★ ─────────────────────────────────────────────────────────
+// jsdom 에 ResizeObserver 가 없고 vitest 에 setupFiles 가 없어 이 블록만 스텁을 건다. 콜백은 테스트가
+//   직접 발화한다(레이아웃이 없어 실제 크기 변화가 안 난다).
+class FakeResizeObserver {
+  static instances: FakeResizeObserver[] = []
+  observed: Element[] = []
+  disconnected = false
+  private readonly cb: ResizeObserverCallback
+  constructor(cb: ResizeObserverCallback) {
+    this.cb = cb
+    FakeResizeObserver.instances.push(this)
+  }
+  observe(el: Element) {
+    this.observed.push(el)
+  }
+  unobserve() {}
+  disconnect() {
+    this.disconnected = true
+    this.observed = []
+  }
+  fire(width: number, height: number) {
+    this.cb(
+      [{ contentRect: { width, height } } as unknown as ResizeObserverEntry],
+      this as unknown as ResizeObserver,
+    )
+  }
+}
+
+function liveObserver(): FakeResizeObserver {
+  const live = FakeResizeObserver.instances.filter(o => !o.disconnected && o.observed.length > 0)
+  expect(live).toHaveLength(1)
+  return live[0]
+}
+
+function canvasReports(): Array<{ w: number; h: number }> {
+  return invokeMock.mock.calls
+    .filter(c => c[0] === 'report_window_canvas')
+    .map(c => c[1] as { w: number; h: number })
+}
+
+/** 기본 목(list_tabs/get_view)은 두고 report_window_canvas 만 갈아 끼운다. */
+function mockCanvasReport(impl: (size: { w: number; h: number }) => Promise<unknown>): void {
+  const base = invokeMock.getMockImplementation()!
+  invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+    if (cmd === 'report_window_canvas') return impl(args as { w: number; h: number })
+    return base(cmd, args)
+  })
+}
+
+async function mountReady() {
+  const view = render(<WindowLayout label="main" />)
+  await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+  return { ro: liveObserver(), unmount: view.unmount }
+}
+
+function reportErrors(spy: { mock: { calls: unknown[][] } }): unknown[][] {
+  return spy.mock.calls.filter(c => String(c[0]).includes('report_window_canvas'))
+}
+
+/** report_window_canvas 호출을 테스트가 호출 순번으로 손수 끝낸다. 동시에 날아간 최대 개수도 잰다. */
+function gateCanvasReport() {
+  const pending: Array<{ resolve: () => void; reject: (e: Error) => void }> = []
+  let inAir = 0
+  let max = 0
+  mockCanvasReport(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        inAir += 1
+        max = Math.max(max, inAir)
+        pending.push({ resolve, reject })
+      }),
+  )
+  return {
+    settle(i: number, err?: Error) {
+      inAir -= 1
+      if (err) pending[i].reject(err)
+      else pending[i].resolve()
+    },
+    maxInAir: () => max,
+  }
+}
+
+describe('WindowLayout — 창 캔버스 보고(ADR-0227, TRD §2d)', () => {
+  beforeEach(() => {
+    FakeResizeObserver.instances = []
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver)
+    // 보고 상태는 모듈 범위라 테스트 사이에 남는다(매달린 invoke 의 inAir 등).
+    __resetCanvasReportForTest()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  it('win 이 늦게 와도 callback ref 로 탭 내용 영역에 관측이 붙고 첫 측정이 보고된다', async () => {
+    let resolveListTabs: (payload: unknown) => void = () => {}
+    const listTabsPending = new Promise<unknown>(res => {
+      resolveListTabs = res
+    })
+    invokeMock.mockImplementation(async (cmd: string, args?: unknown) => {
+      if (cmd === 'list_tabs') return listTabsPending
+      if (cmd === 'get_view') return slotSnap((args as { viewId: string }).viewId, 1)
+      return undefined
+    })
+
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(listeners.has('window:tabs-updated')).toBe(true))
+    expect(FakeResizeObserver.instances.filter(o => o.observed.length > 0)).toHaveLength(0)
+
+    resolveListTabs({
+      label: 'main',
+      tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+      active: 'v1',
+      version: 1,
+    })
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+
+    const ro = liveObserver()
+    const area = screen.getAllByTestId('tab-canvas')[0].parentElement
+    expect(area).not.toBeNull()
+    expect(ro.observed).toHaveLength(1)
+    expect(ro.observed[0]).toBe(area)
+
+    ro.fire(1024, 768)
+    await waitFor(() => expect(canvasReports()).toEqual([{ w: 1024, h: 768 }]))
+  })
+
+  it('디바운스 → 정수 반올림 → 바뀔 때만 보낸다 · 같은 크기 재전송 없음 · 0 크기는 안 보낸다', async () => {
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(700, 500)
+    await vi.advanceTimersByTimeAsync(50)
+    ro.fire(800.4, 600.6) // 디바운스 창 안의 새 값이 앞 값을 덮는다
+    await vi.advanceTimersByTimeAsync(99)
+    expect(canvasReports()).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(canvasReports()).toEqual([{ w: 800, h: 601 }])
+
+    ro.fire(799.6, 600.9) // 반올림하면 직전 성공값과 같다
+    await vi.advanceTimersByTimeAsync(200)
+    ro.fire(0, 0)
+    await vi.advanceTimersByTimeAsync(200)
+    ro.fire(0.4, 600) // 반올림하면 폭 0
+    await vi.advanceTimersByTimeAsync(200)
+    expect(canvasReports()).toEqual([{ w: 800, h: 601 }])
+
+    // 위 무전송이 경로가 죽어서가 아님을 확인한다.
+    ro.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 601 },
+      { w: 1000, h: 700 },
+    ])
+  })
+
+  it('실패하면 RO 변화 없이도 유계 재시도로 재전송하고, 성공한 값만 직전 값이 된다', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let calls = 0
+    mockCanvasReport(async () => {
+      calls += 1
+      if (calls <= 2) throw new Error(`refused ${calls}`)
+      return undefined
+    })
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(canvasReports()).toHaveLength(1)
+    await vi.advanceTimersByTimeAsync(150) // retryAsync 첫 backoff
+    expect(canvasReports()).toHaveLength(2)
+    await vi.advanceTimersByTimeAsync(300)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 800, h: 600 },
+      { w: 800, h: 600 },
+    ])
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(canvasReports()).toHaveLength(3)
+  })
+
+  it('재시도가 소진되면 console.error 로 남기고 직전 값을 갱신하지 않는다', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    let refuse = true
+    mockCanvasReport(async () => {
+      if (refuse) throw new Error('refused')
+      return undefined
+    })
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100 + 150 + 300 + 600 + 10)
+    expect(canvasReports()).toHaveLength(4)
+    expect(reportErrors(errSpy)).toHaveLength(1)
+
+    refuse = false
+    ro.fire(800, 600) // 실패한 값은 직전 값이 아니므로 같은 크기라도 다시 나간다
+    await vi.advanceTimersByTimeAsync(100)
+    expect(canvasReports()).toHaveLength(5)
+  })
+
+  it('재시도 대기 중 다른 크기가 관측되면 디바운스를 기다리지 않고 옛 재시도를 멈춘다', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockCanvasReport(async ({ w }) => {
+      if (w === 800) throw new Error('refused')
+      return undefined
+    })
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100) // t=100: 800 첫 시도 실패 → 옛 재시도는 t=250 에 깬다
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+    await vi.advanceTimersByTimeAsync(100) // t=200
+    ro.fire(1000, 700) // 디바운스는 t=300 까지 — 옛 재시도가 이 창 안(t=250)에서 깬다
+    await vi.advanceTimersByTimeAsync(99)
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 1000, h: 700 },
+    ])
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(canvasReports()).toHaveLength(2)
+    expect(reportErrors(errSpy)).toHaveLength(0) // 취소는 실패가 아니다
+
+    ro.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(canvasReports()).toHaveLength(2)
+  })
+
+  it('0 크기 관측은 보내는 중인 값의 재시도를 멈추지 않는다', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    let calls = 0
+    mockCanvasReport(async () => {
+      calls += 1
+      if (calls === 1) throw new Error('refused')
+      return undefined
+    })
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100) // 첫 시도 실패 → t=250 에 재시도
+    ro.fire(0, 0)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 800, h: 600 },
+    ])
+  })
+
+  it('날아가는 invoke 가 있으면 새 크기는 그 응답 뒤에 보낸다(창당 한 번에 하나)', async () => {
+    const gate = gateCanvasReport()
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100)
+    ro.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(1000) // 시간이 지나도 응답 전에는 안 나간다
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+
+    gate.settle(0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 1000, h: 700 },
+    ])
+    gate.settle(1)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(gate.maxInAir()).toBe(1)
+
+    ro.fire(1000, 700) // 직전 성공값 = 1000×700
+    await vi.advanceTimersByTimeAsync(200)
+    expect(canvasReports()).toHaveLength(2)
+  })
+
+  it('날아가는 동안 온 크기는 마지막 하나만 응답 뒤에 보내고, 그 응답 값과 같으면 건너뛴다', async () => {
+    const gate = gateCanvasReport()
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100)
+    for (const [w, h] of [
+      [900, 650],
+      [950, 680],
+      [1000, 700],
+    ]) {
+      ro.fire(w, h)
+      await vi.advanceTimersByTimeAsync(150) // 각자 디바운스를 마친다
+    }
+    expect(canvasReports()).toHaveLength(1)
+    gate.settle(0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 1000, h: 700 },
+    ])
+
+    // 1000×700 이 날아가는 동안 다른 값을 거쳐 같은 값으로 돌아오면 그 응답(성공)이 직전 값이 되어 건너뛴다.
+    ro.fire(1100, 750)
+    await vi.advanceTimersByTimeAsync(150)
+    ro.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(150)
+    gate.settle(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(canvasReports()).toHaveLength(2)
+    expect(gate.maxInAir()).toBe(1)
+  })
+
+  it('응답을 기다리며 대기하던 값은 더 새 관측이 오면 버려져 응답 뒤에도 나가지 않는다', async () => {
+    const gate = gateCanvasReport()
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100) // 800×600 이 응답을 기다린다
+    ro.fire(900, 650)
+    await vi.advanceTimersByTimeAsync(150) // 900×650 이 디바운스를 마치고 차례를 기다린다
+    ro.fire(1000, 700) // 디바운스가 끝나기 전에 응답이 온다
+    await vi.advanceTimersByTimeAsync(50)
+    gate.settle(0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+
+    await vi.advanceTimersByTimeAsync(50)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 1000, h: 700 },
+    ])
+  })
+
+  it('훅 인스턴스가 바뀌어도(재마운트) 옛 인스턴스의 invoke 응답 전에는 보내지 않는다', async () => {
+    const gate = gateCanvasReport()
+    const first = await mountReady()
+    vi.useFakeTimers()
+
+    first.ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100) // 800×600 이 응답을 기다린다
+    first.unmount()
+
+    render(<WindowLayout label="main" />)
+    await vi.advanceTimersByTimeAsync(0)
+    const second = liveObserver()
+    expect(second).not.toBe(first.ro)
+    second.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+
+    gate.settle(0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(canvasReports()).toEqual([
+      { w: 800, h: 600 },
+      { w: 1000, h: 700 },
+    ])
+    expect(gate.maxInAir()).toBe(1)
+  })
+
+  it('다른 값이 날아가는 중 직전 성공값으로 돌아오면 그 응답 결과로 판정한다', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const gate = gateCanvasReport()
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+    const a = { w: 800, h: 600 }
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100)
+    gate.settle(0) // 직전 성공값 = 800×600
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 성공: 셸이 1000×700 으로 바뀌었으니 800×600 을 다시 보낸다.
+    ro.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(100)
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(150)
+    expect(canvasReports()).toEqual([a, { w: 1000, h: 700 }])
+    gate.settle(1)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(canvasReports()).toEqual([a, { w: 1000, h: 700 }, a])
+    gate.settle(2)
+    await vi.advanceTimersByTimeAsync(0)
+
+    // 실패: 셸은 800×600 그대로라 다시 보내지 않고, 취소된 재시도도 나가지 않는다.
+    ro.fire(1100, 750)
+    await vi.advanceTimersByTimeAsync(100)
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(150)
+    gate.settle(3, new Error('refused'))
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(canvasReports()).toEqual([a, { w: 1000, h: 700 }, a, { w: 1100, h: 750 }])
+    expect(gate.maxInAir()).toBe(1)
+  })
+
+  it('탭 전환 재렌더가 관측·디바운스를 끊지 않는다(ref 참조 고정)', async () => {
+    const { ro } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(50)
+    act(() =>
+      emit('window:tabs-updated', {
+        label: 'main',
+        tabs: [{ id: 'v1', name: 'Tab 1' }, { id: 'v2', name: 'Tab 2' }],
+        active: 'v2',
+        version: 2,
+      }),
+    )
+    const v2 = screen.getAllByTestId('tab-canvas').find(c => c.getAttribute('data-view-id') === 'v2')!
+    expect(v2.style.display).toBe('block')
+
+    await vi.advanceTimersByTimeAsync(50)
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+    expect(liveObserver()).toBe(ro)
+  })
+
+  it('디바운스 중 언마운트하면 보내지 않고 관측을 뗀다', async () => {
+    const { ro, unmount } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(50)
+    unmount()
+    expect(ro.disconnected).toBe(true)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(canvasReports()).toEqual([])
+  })
+
+  it('재시도 중 언마운트하면 재시도가 멈추고 최종 실패 로그도 없다', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    mockCanvasReport(async () => {
+      throw new Error('refused')
+    })
+    const { ro, unmount } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100)
+    expect(canvasReports()).toHaveLength(1)
+    unmount()
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(canvasReports()).toHaveLength(1)
+    expect(reportErrors(errSpy)).toHaveLength(0)
+  })
+
+  it('응답을 기다리는 중 언마운트하면 응답이 와도 대기 중이던 크기를 보내지 않는다', async () => {
+    const gate = gateCanvasReport()
+    const { ro, unmount } = await mountReady()
+    vi.useFakeTimers()
+
+    ro.fire(800, 600)
+    await vi.advanceTimersByTimeAsync(100)
+    ro.fire(1000, 700)
+    await vi.advanceTimersByTimeAsync(150) // 1000×700 이 응답을 기다린다
+    unmount()
+    gate.settle(0)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(canvasReports()).toEqual([{ w: 800, h: 600 }])
+  })
+
+  it('ResizeObserver 가 없는 환경에서도 던지지 않고 보고 없이 렌더한다', async () => {
+    vi.stubGlobal('ResizeObserver', undefined)
+    render(<WindowLayout label="main" />)
+    await waitFor(() => expect(screen.getByTestId('tab-bar')).toBeTruthy())
+    expect(screen.getAllByTestId('tab-canvas')).toHaveLength(2)
+    await new Promise(res => setTimeout(res, 150))
+    expect(canvasReports()).toEqual([])
   })
 })
 
