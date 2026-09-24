@@ -1,7 +1,7 @@
 # ADR-0073: 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정
 
-- 상태: 확정 (2026-07-13, 근거: 실 UX cdp 실측 PASS + 2인 적대 리뷰)
-- 관련: CLAUDE.md §5(LLM 제어 표면·손발/두뇌) · **ADR-0066(click-to-focus) 정제** · ADR-0067(우클릭 포커스 불변식) · ADR-0060(SlotContent 유니온) · ADR-0035(레이아웃 백엔드 권위) · `src/components/layout/ViewLayoutRenderer.tsx`(onClick 게이트) · `src/components/agent/selectOpenTarget.ts` · `src/components/agent/AgentList.tsx`(openInFocusedSlot) · step-log
+- 상태: 확정 (2026-07-13, 근거: 실 UX cdp 실측 PASS + 2인 적대 리뷰) · 부분 폐기 by ADR-0224 (백엔드 포커스 강제 보류 조항)
+- 관련: CLAUDE.md §5(LLM 제어 표면·손발/두뇌) · **ADR-0066(click-to-focus) 정제** · ADR-0067(우클릭 포커스 불변식) · ADR-0060(SlotContent 유니온) · ADR-0035(레이아웃 백엔드 권위) · `src/components/layout/ViewLayoutRenderer.tsx`(onClick 게이트) · `src/components/agent/selectOpenTarget.ts` · `src/components/agent/AgentList.tsx`(openInFocusedSlot) · step-log · Amended by ADR-0224 (백엔드 포커스 강제 보류 조항)
 
 ## 맥락
 트리 행 우클릭 "열기"는 running 에이전트를 활성 뷰의 포커스 슬롯(`focusedSlotId`)에 배정한다(`assignAgent`). 그런데 슬롯 pane의 click-to-focus(ADR-0066)가 **버블 허용**이라, 트리 노드를 좌클릭하면 그 클릭이 트리 슬롯 pane까지 버블해 **트리 슬롯이 focused가 된다.** 이어 우클릭 "열기"(우클릭은 포커스를 안 건드림 — ADR-0067)가 **그 트리 슬롯을 대상으로 잡아 트리를 에이전트 터미널로 덮어썼다**(빈 슬롯이 따로 있어도). 라이브 DOM으로 재현·확인(사용자 보고).
