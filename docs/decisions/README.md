@@ -120,7 +120,7 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0070](0070-디스플레이-이름-백엔드-저장-override-presetname-agentprofiledisplay-name-serde-default무마이그레이션.md) | 디스플레이 이름 = 백엔드 저장 override (Preset.name / AgentProfile.display_name, serde default·무마이그레이션) | 확정 |
 | [0071](0071-persistence-registry-mutate-락-규율-storesave를-map-락-보유-중-실행-동시-rename-stale-snapshot-race-fix.md) | persistence registry mutate 락 규율 — store.save를 map 락 보유 중 실행 (동시 rename stale-snapshot race fix) | 확정 |
 | [0072](0072-에이전트-트리-계층-구조백엔드-parent-id-reparentprofile-react-arborist-부활-1단-중첩부모삭제루트승격상태-글리프.md) | 에이전트 트리 = 계층 구조(백엔드 parent_id + ReparentProfile) + react-arborist 부활 — 1단 중첩·부모삭제=루트승격·상태 글리프 | 확정 |
-| [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 |
+| [0073](0073-제어-슬롯트리팔레트-포커스-제외-click-to-focus를-콘텐츠-슬롯으로-한정.md) | 제어 슬롯(트리·팔레트) 포커스 제외 — click-to-focus를 콘텐츠 슬롯으로 한정 | 확정 (부분 폐기 by ADR-0224: 백엔드 포커스 강제 보류 조항) |
 | [0074](0074-json-stream-json-모드-resume-활성화-adr0044-후속-완료-통제-sid-adr0008-재사용.md) | json(stream-json) 모드 resume 활성화 — ADR-0044 후속 완료 (통제-sid/ADR-0008 재사용) | 확정 |
 | [0075](0075-상태-글리프-색-허용-활성-녹색-테마-변수-adr0062-색-아님-개정-eink-별도-모드.md) | 상태 글리프 색 허용(활성=녹색, 테마 변수) — ADR-0062 "색 아님" 개정 (e-ink 별도 모드) | 확정 (부분 폐기 by ADR-0168: 글리프 매핑 심볼 교체) |
 | [0076](0076-활성화기존-세션-resume-fresh는-새-sid-발급재사용-금지-adr-0008-정련.md) | 활성화=기존 세션 resume, Fresh는 새 sid 발급(재사용 금지) — ADR-0008 정련 | 확정 (부분 폐기 by ADR-0077: 수동 활성화(activate_profile)도 resume 조기종료 시 restore_one 과 동일한 fresh-fallback 을 공유한다 / ADR-0082: fallback_fresh 관련 불변식·"fresh-fallback 유효" 문구 폐지: 활성화=resume·Fresh=새 sid·sid 발급 단일점은 유효 / ADR-0185: 우리 쪽 sid 발급 전제) |
@@ -270,3 +270,4 @@ LLM 세션은 바뀌면 결정 맥락을 잊고 같은 대안을 다시 꺼낸�
 | [0221](0221-호출자-입력의-철자-관용은-코어가-흡수한다.md) | 호출자 입력의 철자 관용은 코어가 흡수한다 | 확정 |
 | [0222](0222-부팅-기본-레이아웃은-단일-빈-슬롯이다-에이전트-트리를-기본에서-뺀다.md) | 부팅 기본 레이아웃은 단일 빈 슬롯이다 (에이전트 트리를 기본에서 뺀다) | 확정 |
 | [0223](0223-레이아웃-분할-노드에-고정-id를-두고-화면은-그-id로-분할-인스턴스를-가른다.md) | 레이아웃 분할 노드에 고정 id를 두고 화면은 그 id로 분할 인스턴스를 가른다 | 확정 |
+| [0224](0224-닫은-뒤-포커스는-직전-콘텐츠-칸으로-돌아가고-제어-칸은-포커스를-받지-않는다.md) | 닫은 뒤 포커스는 직전 콘텐츠 칸으로 돌아가고 제어 칸은 포커스를 받지 않는다 | 확정 |
