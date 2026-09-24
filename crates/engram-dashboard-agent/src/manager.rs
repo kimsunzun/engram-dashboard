@@ -32,8 +32,8 @@ use crate::transport::{LinkResolution, LinkSink};
 use crate::turn::TurnObservations;
 use crate::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, ControlChannel, NoopControlChannel, OutputChunk,
-    OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome,
-    TerminalReason, TerminationIntent,
+    OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeReply, TerminalReason,
+    TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -2542,8 +2542,11 @@ impl AgentManager {
         Ok(session.subscribe(sink))
     }
 
-    /// `epoch_matches` 는 데몬이 요청 epoch 과 세션 현재 epoch 을 비교해 넘긴다 — 코어는 protocol
-    /// 무의존이라 epoch 비교를 외부에서 받는다.
+    /// `requested_epoch` = 구독자가 마지막으로 본 화신 표식. 세션이 자기 표식과 대조한다.
+    ///
+    /// ★세션 조회는 한 번이다 — 두 번째 조회를 더하지 말 것★: 응답의 화신 표식·이어받기 표식과 replay 가
+    ///   같은 세션에서 나와야 한다. 따로 조회하면 그 사이에 화신이 갈려 표식이 replay 한 것과 다른 화신을
+    ///   말한다.
     ///
     /// ## ★계약: `Err` ⟹ `on_ready` 는 한 번도 불리지 않는다(load-bearing — 깨면 출력이 죽는다)★
     /// 실패는 **세션 조회 하나뿐**이고 그건 구조적으로 `on_ready` 를 넘기기 *전*이다. 이 순서에 데몬의
@@ -2555,16 +2558,17 @@ impl AgentManager {
     /// 대해 함께 나가고 클라이언트가 이미 푼 슬롯 위로 늦은 Ack/Complete 가 도착해 **replay 가 돌지 않은
     /// 세대에 성공 마커**가 붙는다(gen 펜스 붕괴). 새 실패 갈래가 필요하면 `on_ready` 앞에 두거나, 거절
     /// 통보의 계약을 함께 고쳐야 한다. 회귀망 = `subscribe_from_err_never_invokes_on_ready`.
+    // ADR-0226
     pub fn subscribe_from(
         &self,
         agent_id: AgentId,
         sink: Arc<dyn OutputSink>,
         after_seq: Option<u64>,
-        epoch_matches: bool,
-        on_ready: impl FnOnce(&SubscribeOutcome),
-    ) -> Result<SubscribeOutcome, PtyError> {
+        requested_epoch: Option<u32>,
+        on_ready: impl FnOnce(&SubscribeReply),
+    ) -> Result<SubscribeReply, PtyError> {
         let session = self.get_session(agent_id)?;
-        Ok(session.subscribe_from(sink, after_seq, epoch_matches, on_ready))
+        Ok(session.subscribe_from(sink, after_seq, requested_epoch, on_ready))
     }
 
     pub fn unsubscribe(&self, agent_id: AgentId, sink_id: SinkId) -> Result<(), PtyError> {
@@ -4246,13 +4250,67 @@ mod tests {
         let manager = bare_manager();
         let missing = AgentId::new_v4(); // 맵에 없는 id — get_session 이 실패한다.
         let mut ready_calls = 0usize;
-        let res = manager.subscribe_from(missing, Arc::new(NoopSink), None, false, |_| {
+        let res = manager.subscribe_from(missing, Arc::new(NoopSink), None, None, |_| {
             ready_calls += 1;
         });
         assert!(res.is_err(), "없는 에이전트 구독은 Err");
         assert_eq!(
             ready_calls, 0,
             "Err 경로에서 on_ready(=SubscribeAck) 발행 0"
+        );
+    }
+
+    /// ★구독 응답의 화신 사실은 replay 한 그 세션에서 나온다★ — `on_ready`(= 데몬의 Ack)가 받은 것과
+    ///   돌려받은 것(= 데몬의 `ReplayComplete`)이 같은 화신을 말하고, 표식 대조도 그 세션이 한다.
+    // ADR-0226
+    #[test]
+    fn subscribe_from_reports_the_incarnation_it_replayed_from() {
+        struct NoopSink;
+        impl OutputSink for NoopSink {
+            fn send(
+                &self,
+                _frame: crate::types::OutputFrame<'_>,
+            ) -> Result<(), crate::types::SinkError> {
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                SinkId::nil()
+            }
+        }
+
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        put_session(&manager, id, 3);
+
+        let mut at_ready = None;
+        let reply = manager
+            .subscribe_from(id, Arc::new(NoopSink), Some(0), Some(3), |r| {
+                at_ready = Some(r.incarnation)
+            })
+            .expect("명부에 있다");
+        let expected = crate::types::Incarnation {
+            epoch: 3,
+            continues_conversation: false,
+        };
+        assert_eq!(reply.incarnation, expected, "기본 세션 = 이어받기 아님");
+        assert_eq!(
+            at_ready,
+            Some(expected),
+            "on_ready 와 반환이 같은 화신을 말해야 한다"
+        );
+        assert_eq!(
+            reply.outcome.kind,
+            crate::types::ReplayKind::Resumed,
+            "요청 표식이 세션 표식과 같으면 seq 이어받기"
+        );
+
+        let stale = manager
+            .subscribe_from(id, Arc::new(NoopSink), Some(0), Some(4), |_| {})
+            .expect("명부에 있다");
+        assert_eq!(
+            stale.outcome.kind,
+            crate::types::ReplayKind::FromOldest,
+            "표식이 다르면 처음부터"
         );
     }
 

@@ -31,7 +31,7 @@ use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputSink, ReplayKind, SinkId,
-    SubscribeOutcome,
+    SubscribeReply,
 };
 
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
@@ -1736,32 +1736,20 @@ impl ConnectionCore {
     ) -> DispatchFlow {
         let manager = &self.manager;
 
-        // agent 가 없으면 subscribe_from 을 부르지 않으므로 Ack 도 나가지 않는다.
-        //
-        // ★거절은 `Error` 가 아니라 `SubscribeFailed` 로 낸다(load-bearing)★: `Subscribe` 는 request_id 가
-        //   없는 명령이라 `Error{request_id: None}` 에는 **주인을 식별할 필드가 없다** — 클라이언트가 어느
-        //   에이전트의 구독이 깨졌는지 몰라 자기 single-flight 슬롯을 못 풀었고, 그 슬롯이 좀비로 남아 그
-        //   에이전트의 Subscribe 가 두 번 다시 나가지 못했다(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19).
-        //   ★아래 두 거절 지점은 Ack 발행보다 먼저 return 한다★ — 그래서 "거절엔 Ack/Complete 가 뒤따르지
-        //   않는다"는 계약이 성립하고, 클라이언트는 그에 기대어 슬롯을 즉시 해제한다(AgentEvent 문서 참조).
-        let current_epoch = match manager.agent_epoch(agent_id) {
-            Some(e) => e,
-            None => {
-                refuse_subscribe(sink, agent_id, format!("agent {agent_id} not found"));
-                return DispatchFlow::Continue;
-            }
-        };
-        let epoch_matches = requested_epoch == Some(current_epoch);
-
         let (out_sink, replay_dropped) = sink.make_output_sink();
 
+        // ★Ack 와 `ReplayComplete` 의 화신 표식은 `subscribe_from` 의 응답에서만 꺼낸다 — 표식을 따로
+        //   조회하지 말 것★: 따로 조회하면 그 조회와 replay 사이에 화신이 갈려, 표식이 replay 한 것과 다른
+        //   화신을 말한다. 응답은 replay 한 그 세션이 스스로 채운다.
         // enqueue 실패를 삼키는 이유: control 은 작아 보통 성공하고, 큐가 full 이면 어차피 같은 큐를
         //   쓰는 replay 도 막혀 truncated 로 잡힌다.
-        let on_ready = |outcome: &SubscribeOutcome| {
+        // ADR-0226
+        let on_ready = |reply: &SubscribeReply| {
+            let outcome = &reply.outcome;
             let _ = sink.enqueue(Outbound::event(AgentEvent::SubscribeAck {
                 agent_id,
                 action: kind_to_action(outcome.kind),
-                current_epoch,
+                current_epoch: reply.incarnation.epoch,
                 oldest_seq: outcome.oldest_seq,
                 latest_seq: outcome.latest_seq,
                 replay_from: outcome.replay_from,
@@ -1769,20 +1757,31 @@ impl ConnectionCore {
             }));
         };
 
-        let outcome =
-            match manager.subscribe_from(agent_id, out_sink, after_seq, epoch_matches, on_ready) {
-                Ok(o) => o,
-                Err(e) => {
-                    // 위와 같은 자리다 — `on_ready`(Ack)가 아직 안 불린 실패라 Ack/Complete 가 뒤따르지
-                    //   않는다. 그 순서는 `AgentManager::subscribe_from` 의 계약이고 코어 테스트가 박는다
-                    //   (`subscribe_from_err_never_invokes_on_ready`).
-                    // ★이 갈래는 dispatch 로 결정론 재현이 안 된다★: `agent_epoch` 와 `subscribe_from` 이
-                    //   같은 sessions 맵을 읽으므로, 여기 닿으려면 그 둘 사이에 세션이 사라져야 한다
-                    //   (TOCTOU 창). 그래서 회귀망은 이 갈래가 부르는 `refuse_subscribe` 본체를 직접 태운다.
-                    refuse_subscribe(sink, agent_id, format!("subscribe failed: {e}"));
-                    return DispatchFlow::Continue;
-                }
-            };
+        let reply = match manager.subscribe_from(
+            agent_id,
+            out_sink,
+            after_seq,
+            requested_epoch,
+            on_ready,
+        ) {
+            Ok(r) => r,
+            Err(e) => {
+                // 없는 에이전트가 여기로 온다 — `subscribe_from` 은 세션 조회가 실패하면 `on_ready` 를
+                //   부르지 않으므로 Ack 도 나가지 않는다. 그 순서는 `AgentManager::subscribe_from` 의
+                //   계약이고 코어 테스트가 박는다(`subscribe_from_err_never_invokes_on_ready`).
+                //
+                // ★거절은 `Error` 가 아니라 `SubscribeFailed` 로 낸다(load-bearing)★: `Subscribe` 는
+                //   request_id 가 없는 명령이라 `Error{request_id: None}` 에는 **주인을 식별할 필드가
+                //   없다** — 클라이언트가 어느 에이전트의 구독이 깨졌는지 몰라 자기 single-flight 슬롯을
+                //   못 풀었고, 그 슬롯이 좀비로 남아 그 에이전트의 Subscribe 가 두 번 다시 나가지
+                //   못했다(데몬 재기동 뒤 출력 영구 두절 — 실측 2026-08-19). ★이 거절 지점은 Ack 발행보다
+                //   먼저 return 한다★ — 그래서 "거절엔 Ack/Complete 가 뒤따르지 않는다"는 계약이 성립하고,
+                //   클라이언트는 그에 기대어 슬롯을 즉시 해제한다(AgentEvent 문서 참조).
+                refuse_subscribe(sink, agent_id, format!("subscribe failed: {e}"));
+                return DispatchFlow::Continue;
+            }
+        };
+        let outcome = reply.outcome;
 
         let old = subs
             .lock()
@@ -1820,7 +1819,7 @@ impl ConnectionCore {
         if sink
             .enqueue(Outbound::event(AgentEvent::ReplayComplete {
                 agent_id,
-                epoch: current_epoch,
+                epoch: reply.incarnation.epoch,
             }))
             .is_err()
         {
@@ -1993,8 +1992,10 @@ fn broadcast_preset_list(fanout: &dyn FrameFanout, manager: &Arc<AgentManager>) 
     }
 }
 
-/// `Subscribe` 거절 통보([`AgentEvent::SubscribeFailed`])를 낸다 — [`ConnectionCore::handle_subscribe`] 의
-/// 두 거절 지점이 공유한다.
+/// `Subscribe` 거절 통보([`AgentEvent::SubscribeFailed`])를 낸다 — 부르는 자리는 [`ConnectionCore::handle_subscribe`]
+/// 의 거절 지점 하나, `subscribe_from` 의 `Err` 갈래뿐이다(없는 에이전트도 거기로 온다).
+/// ★그 앞에 에이전트 존재를 따로 묻는 선조회 거절을 되살리지 말 것★ — 선조회는 화신 표식을 replay 와
+/// 다른 조회에서 읽게 만든다(ADR-0226).
 ///
 /// ★enqueue 실패를 삼키지 않는다★: 이 한 장이 클라이언트의 single-flight 슬롯을 푸는 유일한 신호다.
 /// 큐 포화로 못 나가면 클라이언트는 거절을 영영 모르고 그 슬롯이 좀비로 남아 **그 에이전트의 Subscribe 가
@@ -2780,11 +2781,9 @@ mod tests {
         }
     }
 
-    // ── Subscribe: subscribe_from Err 갈래(둘째 거절 지점) ─────────────────────────
-    // ★dispatch 로는 못 몬다★: `agent_epoch` 와 `subscribe_from` 이 같은 sessions 맵을 읽어, 그 갈래에
-    //   닿으려면 둘 사이에 세션이 사라지는 TOCTOU 창을 잡아야 한다. 그래서 그 갈래가 부르는 본체를
-    //   직접 태워 **거절 통보의 내용**(agent_id 동봉 · 사유 전달)을 박는다 — 위 케이스가 덮는 것은
-    //   `agent not found` 갈래뿐이라 사유 문자열 경로가 비어 있었다.
+    // ── Subscribe: 거절 통보 본체 ────────────────────────────────────────────────────
+    // 위 dispatch 케이스는 변형과 주인만 본다. 여기서는 본체를 직접 태워 **거절 통보의 내용**(agent_id 동봉 ·
+    //   사유 전달)을 박는다.
     #[test]
     fn refuse_subscribe_carries_agent_id_and_reason() {
         let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -2821,6 +2820,42 @@ mod tests {
             }
         }
         refuse_subscribe(&FullSink, uuid::Uuid::new_v4(), "full".into());
+    }
+
+    /// ★Ack 과 `ReplayComplete` 의 화신 표식은 `subscribe_from` 의 응답 하나에서만 나온다★ — 표식을 따로
+    ///   조회하면 그 조회와 replay 사이에 화신이 갈려, 표식이 replay 한 것과 다른 화신을 말한다.
+    /// ★왜 소스에서 재나★: 그 창은 두 조회 사이의 화신 교체라 dispatch 로 결정론 재현이 안 된다. 짝 =
+    ///   코어의 `subscribe_from_reports_the_incarnation_it_replayed_from`(응답이 replay 한 세션에서 나온다).
+    // ADR-0226
+    #[test]
+    fn handle_subscribe_takes_the_incarnation_only_from_the_subscribe_reply() {
+        // 체크아웃의 줄끝(CRLF)과 무관하게 아래 0열 `}` 경계를 찾으려고 LF 로 맞춘다.
+        let src = include_str!("connection_core.rs").replace("\r\n", "\n");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        assert_eq!(
+            production.matches("fn handle_subscribe(").count(),
+            1,
+            "`handle_subscribe` 가 운영 구획에 정확히 하나여야 이 항목이 본문을 특정한다"
+        );
+        let rest = production
+            .split("fn handle_subscribe(")
+            .nth(1)
+            .expect("`handle_subscribe` 본문");
+        // 이 메서드는 `impl ConnectionCore` 의 마지막이라 impl 을 닫는 첫 0열 `}` 까지가 본문이다.
+        let body = &rest[..rest.find("\n}\n").expect("impl 을 닫는 괄호")];
+        assert!(
+            !body.contains("fn "),
+            "잘라 낸 덩어리에 다른 함수가 들어 있다 — 경계가 넘쳤다"
+        );
+        assert!(
+            !body.contains("agent_epoch("),
+            "표식을 따로 조회한다 — replay 와 다른 화신을 말할 수 있다: {body}"
+        );
+        assert_eq!(
+            body.matches("reply.incarnation.epoch").count(),
+            2,
+            "Ack 와 `ReplayComplete` 두 자리가 모두 응답의 표식을 써야 한다: {body}"
+        );
     }
 
     // ── Spawn: 없는 profile ──────────────────────────────────────────────────────

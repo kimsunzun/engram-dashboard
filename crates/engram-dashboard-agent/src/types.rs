@@ -783,6 +783,31 @@ pub struct SubscribeOutcome {
     pub replayed: usize,
 }
 
+/// 구독 응답이 싣는 **화신 사실** — 값 타입이다. 세션 칸이 아니다.
+///
+/// ★세션에 이 타입의 칸을 두지 말 것★: 화신 표식의 집은 `AgentSession::epoch` 하나다. 이 값을 세션
+///   칸으로 들이면 표식이 둘이 되고, 둘이 갈리면 어느 쪽이 화신인지 모른다. 응답을 만들 때 그 자리에서
+///   조립한다.
+// ADR-0226
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Incarnation {
+    pub epoch: u32,
+    /// 이 화신은 저장된 대화를 이어받으려고 떴다(스폰 때 이어받을 손잡이를 실었다).
+    /// ★이어받기가 성공했다는 뜻이 아니다★.
+    pub continues_conversation: bool,
+}
+
+/// `subscribe_from` 의 결과 — replay 결과와 **그 replay 를 한 화신**의 사실.
+///
+/// ★두 칸은 한 번의 세션 조회에서 나온다★: 따로 조회하면 그 사이에 화신이 갈릴 수 있고, 그러면 표식이
+///   replay 한 것과 다른 화신을 말한다.
+// ADR-0226
+#[derive(Debug, Clone, Copy)]
+pub struct SubscribeReply {
+    pub outcome: SubscribeOutcome,
+    pub incarnation: Incarnation,
+}
+
 /// 입력 write 의 배달-경계 계측 산출물(ADR-0088 Stage 0).
 ///
 /// ★왜 존재하나★: `write_input`/`write_stdin` 이 `Ok(())` 만 돌려주면 "전송 실패로 안 꽂힘" 과
