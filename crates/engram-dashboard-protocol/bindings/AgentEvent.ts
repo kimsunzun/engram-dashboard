@@ -23,4 +23,17 @@ replay_from: number,
 /**
  * ring 밖으로 밀려 일부 손실(clear+tail).
  */
-truncated: boolean, } } | { "SubscribeFailed": { agent_id: string, reason: string, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "AgentList": { request_id: RequestId, agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "ProfileListUpdated": { profiles: Array<AgentProfile>, } } | { "ProfileList": { request_id: RequestId, profiles: Array<AgentProfile>, } } | { "PresetListUpdated": { presets: Array<Preset>, } } | { "PresetList": { request_id: RequestId, presets: Array<Preset>, } } | { "Snapshot": { request_id: RequestId, agent_id: string, chunks: Array<SnapshotChunk>, } } | { "Created": { request_id: RequestId, profile: AgentProfile, } } | { "Spawned": { request_id: RequestId, agent: AgentInfo, } } | { "CommandList": { request_id: RequestId, entries: Array<CommandListEntry>, } } | { "CommandRequest": { envelope: { name: string, request_id: string, owner: string, proto_ver: number, args: unknown }, } } | { "CommandReply": { reply: { request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }, } } | { "Error": { request_id: RequestId | null, message: string, } };
+truncated: boolean, 
+/**
+ * 이 replay 의 화신은 저장된 대화를 이어받으려고 떴다(스폰이 이어받을 손잡이를 실었다) —
+ * ★이어받기가 **성공했다**는 뜻이 아니다★. `current_epoch` 와 같은 구독 응답에서 나온다.
+ * 칸이 없는 옛 데몬의 ack 는 `false` 로 읽힌다(`serde(default)`).
+ * ★[`crate::PROTOCOL_VERSION`] 은 이 추가로 올리지 않는다★ — 그 기준(조용한 **해로운** 오작동)에
+ *   두 방향을 대면 둘 다 오늘의 동작으로 떨어진다:
+ *   - **신데몬 + 구셸**: 구셸은 모르는 칸을 버린다(`deny_unknown_fields` 없음) — 이어받는 슬롯이
+ *     오늘처럼 첫 화면을 그린다.
+ *   - **구데몬 + 신셸**: 칸이 없어 `false` — 역시 오늘처럼 첫 화면을 그린다.
+ *   다른 것이 도는 조합이 없고 기능이 없을 뿐이다. 셸↔웹뷰 마커 비트는 셸과 웹뷰가 한 빌드로
+ *   나가므로 버전 축이 없다. (ADR-0226)
+ */
+continues_conversation: boolean, } } | { "SubscribeFailed": { agent_id: string, reason: string, } } | { "Output": { agent_id: string, epoch: number, seq: number, chunk: OutputChunk, } } | { "ReplayComplete": { agent_id: string, epoch: number, } } | { "StatusChanged": { agent_id: string, status: AgentStatus, epoch: number, } } | { "AgentListUpdated": { agents: Array<AgentInfo>, } } | { "AgentList": { request_id: RequestId, agents: Array<AgentInfo>, } } | { "RestoreResult": { report: RestoreReport, } } | { "InputLeaseChanged": { agent_id: string, held: boolean, } } | { "ProfileListUpdated": { profiles: Array<AgentProfile>, } } | { "ProfileList": { request_id: RequestId, profiles: Array<AgentProfile>, } } | { "PresetListUpdated": { presets: Array<Preset>, } } | { "PresetList": { request_id: RequestId, presets: Array<Preset>, } } | { "Snapshot": { request_id: RequestId, agent_id: string, chunks: Array<SnapshotChunk>, } } | { "Created": { request_id: RequestId, profile: AgentProfile, } } | { "Spawned": { request_id: RequestId, agent: AgentInfo, } } | { "CommandList": { request_id: RequestId, entries: Array<CommandListEntry>, } } | { "CommandRequest": { envelope: { name: string, request_id: string, owner: string, proto_ver: number, args: unknown }, } } | { "CommandReply": { reply: { request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }, } } | { "Error": { request_id: RequestId | null, message: string, } };

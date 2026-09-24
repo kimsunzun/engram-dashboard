@@ -1,7 +1,7 @@
 # ADR-0218: codex 세션 id 는 락 파일을 쥔 프로세스가 우리 자식인지로 판정한다
 
-- 상태: 확정 (2026-09-21, 근거: 실측 — 아래 「근거」)
-- 관련: Amends ADR-0217 (회수 채널을 락 파일 홀더 PID 로 교체) · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0208 · ADR-0210 · ADR-0004(백엔드 지식 격리) · ADR-0175(`base` 입주 조건) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs` · `crates/engram-dashboard-agent/src/platform` · step-log S21
+- 상태: 확정 (2026-09-21, 근거: 실측 — 아래 「근거」) · 부분 폐기 by ADR-0226 (결정 6 값 정책)
+- 관련: Amends ADR-0217 (회수 채널을 락 파일 홀더 PID 로 교체) · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0208 · ADR-0210 · ADR-0004(백엔드 지식 격리) · ADR-0175(`base` 입주 조건) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs` · `crates/engram-dashboard-agent/src/platform` · step-log S21 · Amended by ADR-0226 (결정 6 값 정책)
 
 ## 맥락
 

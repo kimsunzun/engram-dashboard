@@ -156,8 +156,8 @@ pub struct AgentProfile {
     /// ※자격증명 금지. persist 시 `*_KEY`/`*_TOKEN` 패턴은 경고한다(persistence).
     pub env: Vec<(String, String)>,
 
-    /// 현재 백엔드 세션 id. **가변** — 최초엔 우리가 생성하고, `/clear` 등으로 바뀌면
-    /// session_tracker watcher가 갱신한다. None이면 아직 세션이 없다는 뜻.
+    /// 현재 백엔드 세션 id. **가변** — 화신의 첫 사용자 턴이 나가기 직전에 적히고(ADR-0226), `/clear`
+    /// 등으로 바뀌면 session_tracker watcher가 갱신한다. None이면 이어받을 대화가 없다는 뜻.
     ///
     /// ★이름이 중립인 것은 의도★ — **누가 id 를 뽑는지를 말하지 않는다.** claude 는 우리가 정한
     /// id 를 `--session-id` 로 건네받고, codex 는 자기가 뽑은 id 를 우리에게 알린다. 어느 쪽이든
@@ -506,21 +506,20 @@ fn merge_preserving_live(m: &mut HashMap<AgentId, AgentProfile>, mut profile: Ag
         // ADR-0172
         profile.last_failure = live.last_failure;
         // ★backend 세션 손잡이와 그 이력도 live 가 이긴다(사용자 결정)★ — 위 넷과 **같은 사유**다:
-        //   이 칸을 쓰는 것은 런타임이지 spawn 스냅샷이 아니다. 발급하는 backend(claude)는 spawn 이
-        //   `ensure_session_id`/`new_session_id` 로 **이 upsert 뒤에** 확정하고, 받아 적는
-        //   backend(codex)는 통로가 핸드셰이크에서 받은 값을 기록 포트로 적는다. 어느 쪽이든
+        //   이 칸을 쓰는 것은 런타임이지 spawn 스냅샷이 아니다. 어느 backend 든 그 화신의 첫 제출
+        //   래치가 **이 upsert 뒤에** 적고(ADR-0226), claude 파일 감시자도 따로 적는다. 어느 쪽이든
         //   호출자가 뜬 사본은 그 값의 저자가 아니다.
         // ★무엇을 막나★: 사본을 뜬 뒤 도착한 손잡이가 여기서 덮이고 **그대로 디스크에 영속된다**.
         //   그러면 그 대화로 돌아갈 길이 사라진다 — 되돌릴 방법이 없는 유실이라, 덮어쓰기와
         //   보존 중 틀렸을 때 싼 쪽을 고른다(보존). 남는 것은 낡은 값을 한 번 더 들고 가는 것이고,
         //   그건 다음 관측이 고친다.
-        // ★이력도 함께 보존한다 — 둘은 한 덩어리다★: `observe_session_id`·`new_session_id` 가
+        // ★이력도 함께 보존한다 — 둘은 한 덩어리다★: 기록 동사들이
         //   옛 값을 `old_session_ids` 로 밀어 넣으며 짝으로 갱신하므로, 새 값만 지키고 이력을
         //   스냅샷으로 되돌리면 그 사이 밀려난 손잡이가 목록에서 사라진다.
-        // ★Fresh spawn 이 이것 때문에 옛 대화를 재사용하지는 않는다★ — `new_session_id` 가 이
-        //   upsert **뒤에** 무조건 새 uuid 를 발급하고 옛 값을 이력으로 민다(ADR-0076).
+        // ★Fresh spawn 이 이것 때문에 옛 대화를 재사용하지는 않는다★ — spawn 이 이 upsert **뒤에** 옛
+        //   값을 이력으로 밀어 칸을 비우고, 발급하는 backend 에는 새 uuid 를 뽑아 건넨다(ADR-0076).
         // ★**claude 에서도 동작이 바뀐다 — 「받아 적는 backend 만의 일」로 읽지 말 것**★: 발급 축
-        //   backend 의 Resume 은 `ensure_session_id` 로 이 칸을 **명부에서** 읽는데, 예전에는 그 직전
+        //   backend 의 Resume 도 이 칸을 **명부에서** 읽는데, 예전에는 그 직전
         //   등록이 스냅샷으로 덮어써서 낡은 값이 읽혔다. 이제는 `SessionTracker` 가 관측해 넣은 드리프트
         //   sid 가 읽힌다(그 관측기는 화신 축 없이 무조건 쓰고 — `observe_session_id(id, None, ..)` —
         //   발급 축 backend 에만 붙는다). 방향은 개선이지만 **무변화가 아니다**.
@@ -649,40 +648,6 @@ impl ProfileRegistry {
         }
     }
 
-    /// 세션 id 확보 — `backend_session_id` 가 None 이면 새로 생성하고, 이미 있으면 그대로 반환한다.
-    ///
-    /// ★Resume 전용(ADR-0076)★: 기존 대화를 이어받으려면 저장된 sid 를 그대로 써야 한다.
-    ///   Fresh 모드는 절대 이걸 쓰면 안 된다 — Fresh 는 `new_session_id`(항상 새 uuid).
-    pub fn ensure_session_id(&self, id: AgentId) -> Option<Uuid> {
-        self.mutate(|m| {
-            let p = m.get_mut(&id)?;
-            if p.backend_session_id.is_none() {
-                p.backend_session_id = Some(Uuid::new_v4());
-            }
-            p.backend_session_id
-        })
-    }
-
-    /// **Fresh spawn 전용** 세션 id 발급 — 항상 새 uuid 를 만들어 set·persist 하고 반환한다.
-    /// 기존 sid 가 있으면 이력(`old_session_ids`)으로 밀어 넣는다(감사·디버깅용, observe_session_id 패턴).
-    ///
-    /// ★왜 ensure_session_id 와 분리했나★: `ensure_session_id` 는 "있으면 그대로" 라 Fresh 가 그걸 쓰면
-    ///   저장된 sid 를 재사용해 `--session-id <저장 sid>` 로 뜨고, 디스크에 이미 그 세션 파일이 있으면
-    ///   claude 가 "Session ID <sid> is already in use" 로 즉사한다(데몬 콜드부팅 후 예약 프로필 활성화 시
-    ///   재현). Fresh = "진짜 새 대화" 이므로 반드시 새 sid 여야 하고, 이 메서드가 그 계약을 강제한다.
-    // ADR-0076 ADR-0008
-    pub fn new_session_id(&self, id: AgentId) -> Option<Uuid> {
-        self.mutate(|m| {
-            let p = m.get_mut(&id)?;
-            if let Some(old) = p.backend_session_id.take() {
-                p.old_session_ids.push(old);
-            }
-            let fresh = Uuid::new_v4();
-            p.backend_session_id = Some(fresh);
-            Some(fresh)
-        })
-    }
-
     /// 세션 id 를 관측한 자리에서 호출 — 옛 sid 를 이력으로 넘기고 새 값으로 교체,
     /// 변경 즉시 persist한다(1-b: clear→관측→persist 전 크래시 시 stale 복원 방지).
     /// 같은 값으로의 호출은 no-op(불필요한 디스크 쓰기 회피).
@@ -707,44 +672,87 @@ impl ProfileRegistry {
     // ADR-0163
     // ADR-0185
     pub fn observe_session_id(&self, id: AgentId, incarnation: Option<u32>, new_sid: Uuid) -> bool {
-        self.mutate_if(|m| match m.get_mut(&id) {
-            Some(p) if incarnation.is_some_and(|e| e != p.epoch) => false,
-            Some(p) if p.backend_session_id != Some(new_sid) => {
-                if let Some(old) = p.backend_session_id.take() {
-                    p.old_session_ids.push(old);
-                }
-                p.backend_session_id = Some(new_sid);
-                p.last_active = now_millis();
-                true
-            }
-            _ => false,
+        self.mutate_if(|m| {
+            m.get_mut(&id)
+                .is_some_and(|p| replace_session_id(p, incarnation, new_sid, |_| true))
         })
     }
 
-    /// 저장된 세션 id 를 **비우고 그 값을 이력으로 보낸다**. 바뀐 것이 있으면 `true`.
+    /// 이 화신의 **첫 제출**이 세션 id 를 영속하는 비교-교체 동사.
     ///
-    /// ★[`ProfileRegistry::new_session_id`] 의 **발급 없는 짝**이다★: 그 동사는 Fresh 스폰에서 옛 값을
-    ///   이력으로 밀고 새 uuid 를 박는데, 그 값을 **우리가 뽑지 않는** backend 에는 박을 것이 없다. 이
-    ///   동사는 미는 것까지만 하고 칸을 빈 채로 둔다 — 그 자리를 채우는 것은 상대다(통로가 받아 오거나
-    ///   제어 평면으로 보고된다).
-    /// ★왜 필요한가★: 그 backend 들은 Fresh 로만 뜨고 화신마다 **새 대화**를 여는데, 칸이 첫 화신의
-    ///   값으로 찬 채 남으면 그 죽은 손잡이가 다음 스폰의 이어받기 판정에 그대로 읽힌다
-    ///   (`manager` 의 `resume_session_id` 가 읽는 칸이 이 칸이다).
-    /// ★Fresh 전용이다 — Resume 에서 부르면 이어받을 손잡이를 지운다★. 호출 조건의 정본은
-    ///   `manager` 의 `fresh_spawn_release_session_id`(crate 내부 항목이라 링크가 아니라 이름으로 적는다).
+    /// 프로필 뮤텍스 안에서 차례로 본다:
+    /// - 화신 표식이 `incarnation` 과 다르다 → `false`
+    /// - 칸이 이미 `Some(new)` → `false` — 쓸 것이 없다(디스크 쓰기 없음)
+    /// - 칸이 `expected` → 옛 값을 이력으로 밀고 `new` 를 써서 영속, `true`
+    /// - 그 밖 → `false` — 다른 기록자가 먼저 칸을 바꿨다
+    ///
+    /// `expected` = **이 화신이 시작할 때 본 칸의 값**(Fresh = 칸을 비운 뒤라 `None` · Resume = 저장값).
+    ///
+    /// ★덮어쓰기([`ProfileRegistry::observe_session_id`])로 바꾸지 말 것★: 첫 제출 **전에** 다른 기록자가
+    ///   칸을 바꿨으면 덮어쓰기는 그 값을 스폰 때 값으로 되감는다. 그 기록자가 실재한다 — claude 파일
+    ///   감시자가 대조 없이 쓴다.
+    /// ★「빈 칸에만 쓴다」(ADR-0216 이 기각한 규칙)가 아니다★: `expected` 가 빈 칸이 아니라 시작 때 본
+    ///   값이라, 이어받기 화신의 재개가 저장값과 다른 id 를 내면 그대로 교체된다.
+    /// ★`bool` 은 메모리 맵 기준이다★ — 디스크 쓰기 실패는 [`ProfileStore::save`] 가 삼킨다.
+    // ADR-0226
+    // ADR-0216
+    // ADR-0217
+    pub fn commit_session_id(
+        &self,
+        id: AgentId,
+        incarnation: u32,
+        expected: Option<Uuid>,
+        new: Uuid,
+    ) -> bool {
+        let mut changed_by_another_writer = false;
+        let written = self.mutate_if(|m| {
+            m.get_mut(&id).is_some_and(|p| {
+                replace_session_id(p, Some(incarnation), new, |current| {
+                    changed_by_another_writer = current != expected;
+                    !changed_by_another_writer
+                })
+            })
+        });
+        if changed_by_another_writer {
+            tracing::debug!(
+                agent = %id,
+                epoch = incarnation,
+                "세션 id 칸을 다른 기록자가 먼저 바꿨다 — 첫 제출의 영속을 거절한다"
+            );
+        }
+        written
+    }
+
+    /// 새 세션 id 를 뽑는다 — ★명부를 건드리지 않는다(영속하지 않는다)★.
+    ///
+    /// 발급 단일점을 registry 에 남기려고 여기 둔다. 매번 새 uuid 라 Fresh 의 「언제나 새 sid」
+    /// 봉인(ADR-0076 — 「Session ID already in use」)이 그대로다. 영속은 첫 제출 때
+    /// [`ProfileRegistry::commit_session_id`] 가 한다.
+    // ADR-0226
     // ADR-0076
+    pub fn mint_session_id() -> Uuid {
+        Uuid::new_v4()
+    }
+
+    /// Fresh 스폰이 칸을 비우고 시작하는 동사 — 옛 값을 이력으로 밀고 빈 칸을 영속한다.
+    ///
+    /// `None` = 프로필이 없다(그 사이 지워졌다) · `Some(true)` = 밀었다 · `Some(false)` = 칸이 이미 비었다.
+    /// ★`None` 을 「밀 것이 없었다」와 가르는 이유★ — spawn 은 프로필이 사라진 것을 보면 끊어야 한다.
+    /// ★Fresh 전용이다 — Resume 에서 부르면 이어받을 손잡이를 지운다★. 호출 조건의 정본은 `manager` 의
+    ///   `fresh_spawn_release_session_id`(crate 내부 항목이라 링크가 아니라 이름으로 적는다). 이력 밀기라
+    ///   ADR-0202 가 금한 파괴가 아니다.
+    // ADR-0226
     // ADR-0185
-    pub fn clear_session_id(&self, id: AgentId) -> bool {
-        self.mutate_if(|m| match m.get_mut(&id) {
-            Some(p) => match p.backend_session_id.take() {
-                Some(old) => {
-                    p.old_session_ids.push(old);
-                    true
-                }
-                None => false,
-            },
+    pub fn release_session_id(&self, id: AgentId) -> Option<bool> {
+        let mut present = false;
+        let changed = self.mutate_if(|m| match m.get_mut(&id) {
+            Some(p) => {
+                present = true;
+                retire_session_id(p)
+            }
             None => false,
-        })
+        });
+        present.then_some(changed)
     }
 
     /// ★spawn 이 쓸 **화신 표식**을 한 임계구역에서 확정한다(ADR-0007)★ — 화신마다 새로 뽑은 난수다.
@@ -784,6 +792,45 @@ impl ProfileRegistry {
     }
 }
 
+/// 화신 가드를 거는 세션 id 기록 동사 둘([`ProfileRegistry::observe_session_id`] ·
+/// [`ProfileRegistry::commit_session_id`])의 **공통 본체** — 그 둘의 화신 가드와 이력 밀기는 여기 한 벌뿐이다.
+/// 가드 없는 비우기([`ProfileRegistry::release_session_id`])도 이력 밀기는 같은 `retire_session_id` 를 쓴다.
+///
+/// ★새 기록 동사가 이 도우미를 거치지 않고 가드를 따로 적지 말 것★ — 두 벌이 되면 한쪽만 고쳐져 가드가
+///   갈린다. ADR-0217 결정 6(ADR-0218 결정 6 이 승계)이 금한 「우회로를 새로 만든다」가 그것이다.
+///
+/// `admits` 는 가드와 「이미 같은 값」 확인을 **통과한 뒤에만** 불린다(인자 = 지금 칸의 값).
+// ADR-0217
+// ADR-0226
+fn replace_session_id(
+    p: &mut AgentProfile,
+    incarnation: Option<u32>,
+    new_sid: Uuid,
+    admits: impl FnOnce(Option<Uuid>) -> bool,
+) -> bool {
+    if incarnation.is_some_and(|e| e != p.epoch)
+        || p.backend_session_id == Some(new_sid)
+        || !admits(p.backend_session_id)
+    {
+        return false;
+    }
+    retire_session_id(p);
+    p.backend_session_id = Some(new_sid);
+    p.last_active = now_millis();
+    true
+}
+
+/// 칸의 값을 이력(`old_session_ids`)으로 밀고 칸을 비운다. 민 것이 있었으면 `true`.
+fn retire_session_id(p: &mut AgentProfile) -> bool {
+    match p.backend_session_id.take() {
+        Some(old) => {
+            p.old_session_ids.push(old);
+            true
+        }
+        None => false,
+    }
+}
+
 /// 앞 릴리스 리더용 자리채움 — 산 표식과 무관하게 항상 `0` 을 쓴다(근거 = `AgentProfile::epoch` 주석).
 fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<S::Ok, S::Error> {
     s.serialize_u32(0)
@@ -803,9 +850,12 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         saved: Mutex<Vec<AgentProfile>>,
+        /// 「디스크 쓰기 없음」을 재는 항목이 본다.
+        saves: std::sync::atomic::AtomicUsize,
     }
     impl ProfileStore for MemStore {
         fn save(&self, profiles: &[AgentProfile]) {
+            self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.saved.lock().unwrap() = profiles.to_vec();
         }
         fn load(&self) -> Vec<AgentProfile> {
@@ -904,27 +954,14 @@ mod tests {
     }
 
     #[test]
-    fn ensure_session_id_generates_once() {
-        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        let p = sample();
-        let id = p.id;
-        reg.upsert(p);
-        let first = reg.ensure_session_id(id).unwrap();
-        let second = reg.ensure_session_id(id).unwrap();
-        assert_eq!(
-            first, second,
-            "두 번째 호출은 기존 sid를 그대로 반환해야 함"
-        );
-    }
-
-    #[test]
     fn observe_session_id_pushes_old_and_persists() {
         let store = Arc::new(MemStore::default());
         let reg = ProfileRegistry::new(store.clone());
-        let p = sample();
+        let mut p = sample();
+        let sid1 = Uuid::new_v4();
+        p.backend_session_id = Some(sid1);
         let id = p.id;
         reg.upsert(p);
-        let sid1 = reg.ensure_session_id(id).unwrap();
         let sid2 = Uuid::new_v4();
 
         assert!(reg.observe_session_id(id, None, sid2));
@@ -999,60 +1036,209 @@ mod tests {
         assert_eq!(reg.get(id).unwrap().backend_session_id, Some(sid));
     }
 
-    #[test]
-    fn new_session_id_mints_fresh_and_pushes_old() {
+    // ── 첫 제출 영속 — 비교-교체(ADR-0226) ──
+
+    /// 프로필 하나를 넣고 그 화신 표식을 확정한다 — 아래 항목들의 공통 출발점.
+    fn registry_with_live_incarnation() -> (ProfileRegistry, Arc<MemStore>, AgentId, u32) {
         let store = Arc::new(MemStore::default());
         let reg = ProfileRegistry::new(store.clone());
         let p = sample();
         let id = p.id;
         reg.upsert(p);
+        let live = reg.epoch_for_spawn(id).unwrap();
+        (reg, store, id, live)
+    }
 
-        let sid1 = reg.ensure_session_id(id).unwrap();
-        let sid2 = reg.new_session_id(id).unwrap();
-        assert_ne!(
-            sid1, sid2,
-            "Fresh 는 새 sid 여야 함(저장된 sid 재사용 금지)"
-        );
-        let got = reg.get(id).unwrap();
+    fn saves(store: &MemStore) -> usize {
+        store.saves.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Fresh 화신 — 칸을 비우고 시작했으므로 `expected = None` 이고, 첫 제출이 뽑아 둔 값을 적는다.
+    #[test]
+    fn commit_session_id_writes_when_the_slot_is_what_the_incarnation_saw() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let minted = ProfileRegistry::mint_session_id();
+
+        assert!(reg.commit_session_id(id, live, None, minted));
+        assert_eq!(reg.get(id).unwrap().backend_session_id, Some(minted));
         assert_eq!(
-            got.backend_session_id,
-            Some(sid2),
-            "현재 sid = 새로 발급한 값"
+            store.load()[0].backend_session_id,
+            Some(minted),
+            "비교-교체가 성공하면 그 자리에서 영속한다"
         );
         assert!(
-            got.old_session_ids.contains(&sid1),
-            "옛 sid 는 이력으로 밀려야 함"
-        );
-        assert_eq!(store.load()[0].backend_session_id, Some(sid2));
-    }
-
-    #[test]
-    fn new_session_id_on_fresh_profile_has_no_history() {
-        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        let p = sample();
-        let id = p.id;
-        reg.upsert(p);
-        let sid = reg.new_session_id(id).unwrap();
-        let got = reg.get(id).unwrap();
-        assert_eq!(got.backend_session_id, Some(sid));
-        assert!(
-            got.old_session_ids.is_empty(),
-            "세션 없던 프로필은 밀 옛 sid 가 없음"
+            reg.get(id).unwrap().old_session_ids.is_empty(),
+            "빈 칸에서 시작했으니 밀 옛 값이 없다"
         );
     }
 
+    /// ★ADR-0216 이 기각한 「빈 칸에만 쓴다」가 아님을 재는 짝★ — 이어받기 화신의 첫 offer 가 저장값과
+    ///   다른 id 면(재개가 새 id 를 돌려준 경우) 칸 == `expected` == 저장값이라 **교체된다**. 빈 칸에만
+    ///   쓰는 규칙이면 여기서 거절돼 손잡이가 낡는다.
     #[test]
-    fn new_session_id_always_differs_and_accumulates_history() {
-        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        let p = sample();
-        let id = p.id;
-        reg.upsert(p);
-        let a = reg.new_session_id(id).unwrap();
-        let b = reg.new_session_id(id).unwrap();
-        assert_ne!(a, b, "연속 Fresh 는 매번 다른 sid");
+    fn a_resumed_incarnations_first_offer_with_a_different_id_replaces_the_stored_one() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let stored = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, Some(live), stored));
+        let resumed_as = Uuid::new_v4();
+
+        assert!(reg.commit_session_id(id, live, Some(stored), resumed_as));
         let got = reg.get(id).unwrap();
-        assert_eq!(got.backend_session_id, Some(b));
-        assert!(got.old_session_ids.contains(&a), "직전 sid 는 이력에");
+        assert_eq!(got.backend_session_id, Some(resumed_as));
+        assert!(
+            got.old_session_ids.contains(&stored),
+            "옛 값은 이력으로 밀린다"
+        );
+        assert_eq!(store.load()[0].backend_session_id, Some(resumed_as));
+    }
+
+    /// 이어받기 화신의 offer 가 저장값 그대로면 쓸 것이 없다 — 디스크를 건드리지 않는다.
+    #[test]
+    fn commit_session_id_with_the_value_already_in_the_slot_does_not_write() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let stored = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, Some(live), stored));
+        let before = saves(&store);
+
+        assert!(!reg.commit_session_id(id, live, Some(stored), stored));
+        assert_eq!(
+            saves(&store),
+            before,
+            "같은 값이면 디스크 쓰기가 없어야 한다"
+        );
+        let got = reg.get(id).unwrap();
+        assert_eq!(got.backend_session_id, Some(stored));
+        assert!(
+            !got.old_session_ids.contains(&stored),
+            "같은 값을 이력으로 밀지 않는다"
+        );
+    }
+
+    /// ★추적기가 첫 제출 **전에** 쓴 값을 commit 이 되감지 않는다★ — 추적기(claude 파일 감시자)는
+    ///   대조 없이 쓴다. 덮어쓰기였다면 여기서 스폰 때 값으로 되감기고 추적기 값은 이력으로 밀린다.
+    #[test]
+    fn commit_session_id_does_not_rewind_a_value_the_tracker_wrote_before_the_first_submission() {
+        // 이어받기 화신: 시작 때 저장값 S 를 봤는데, 첫 제출 전에 추적기가 Y 를 적었다.
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let stored = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, Some(live), stored));
+        let drifted = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, None, drifted));
+        let before = saves(&store);
+
+        assert!(!reg.commit_session_id(id, live, Some(stored), stored));
+        assert_eq!(reg.get(id).unwrap().backend_session_id, Some(drifted));
+        assert_eq!(saves(&store), before, "거절이면 디스크 쓰기가 없다");
+
+        // Fresh 화신: 시작 때 빈 칸을 봤는데, 첫 제출 전에 추적기가 Y 를 적었다.
+        let (reg, _store, id, live) = registry_with_live_incarnation();
+        let drifted = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, None, drifted));
+
+        assert!(!reg.commit_session_id(id, live, None, ProfileRegistry::mint_session_id()));
+        assert_eq!(
+            reg.get(id).unwrap().backend_session_id,
+            Some(drifted),
+            "추적기 값이 그대로 선다"
+        );
+    }
+
+    /// 짝 방향 — 표식이 다르면 칸이 `expected` 여도 쓰지 않는다. 이것 없이는 위 항목들이 가드 없이도 초록이다.
+    #[test]
+    fn commit_session_id_rejects_a_stale_incarnation() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let before = saves(&store);
+
+        assert!(!reg.commit_session_id(id, live.wrapping_add(1), None, Uuid::new_v4()));
+        assert_eq!(reg.get(id).unwrap().backend_session_id, None);
+        assert_eq!(saves(&store), before);
+    }
+
+    #[test]
+    fn commit_session_id_on_a_missing_profile_is_refused() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        assert!(!reg.commit_session_id(AgentId::new_v4(), 0, None, Uuid::new_v4()));
+    }
+
+    /// ★두 기록 동사가 **한** 가드 도우미를 거친다★ — 새 동사가 가드를 따로 적으면 ADR-0217 결정 6 이
+    ///   금한 우회로가 된다. 실행으로는 「같은 결과」만 보이고 「같은 코드」는 안 보이므로 소스에서 잰다.
+    #[test]
+    fn the_two_session_id_writers_share_one_guard_helper() {
+        let src = include_str!("profile.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body_of = |sig: &str, next: &str| -> String {
+            assert_eq!(
+                production.matches(sig).count(),
+                1,
+                "`{sig}` 가 운영 구획에 정확히 하나여야 이 항목이 본문을 특정한다"
+            );
+            let rest = production.split(sig).nth(1).expect("본문");
+            let end = rest.find(next).unwrap_or_else(|| {
+                panic!("`{next}` 가 `{sig}` 뒤에 없다 — 이 항목의 전제가 낡았다")
+            });
+            rest[..end].to_string()
+        };
+        let observe = body_of("pub fn observe_session_id(", "/// 이 화신의 **첫 제출**");
+        let commit = body_of("pub fn commit_session_id(", "/// 새 세션 id 를 뽑는다");
+        for (name, body) in [
+            ("observe_session_id", &observe),
+            ("commit_session_id", &commit),
+        ] {
+            assert!(
+                body.contains("replace_session_id("),
+                "`{name}` 가 공통 도우미를 거치지 않는다: {body}"
+            );
+            assert!(
+                !body.contains("p.epoch"),
+                "`{name}` 가 화신 가드를 따로 적었다 — 도우미 밖의 둘째 가드다: {body}"
+            );
+        }
+    }
+
+    // ── Fresh 가 칸을 비우는 동사(ADR-0226) ──
+
+    #[test]
+    fn release_session_id_pushes_the_old_value_and_persists_an_empty_slot() {
+        let (reg, store, id, live) = registry_with_live_incarnation();
+        let old = Uuid::new_v4();
+        assert!(reg.observe_session_id(id, Some(live), old));
+
+        assert_eq!(reg.release_session_id(id), Some(true));
+        let got = reg.get(id).unwrap();
+        assert_eq!(got.backend_session_id, None);
+        assert!(got.old_session_ids.contains(&old), "옛 값은 이력으로");
+        assert_eq!(store.load()[0].backend_session_id, None, "빈 칸이 영속된다");
+    }
+
+    #[test]
+    fn release_session_id_on_an_empty_slot_reports_nothing_to_push() {
+        let (reg, store, id, _live) = registry_with_live_incarnation();
+        let before = saves(&store);
+        assert_eq!(reg.release_session_id(id), Some(false));
+        assert_eq!(saves(&store), before, "바뀐 것이 없으면 쓰지 않는다");
+    }
+
+    /// ★`None` 은 「밀 것이 없었다」가 아니라 「프로필이 없다」다★ — spawn 이 이 둘을 갈라 끊는다.
+    #[test]
+    fn release_session_id_tells_a_vanished_profile_apart() {
+        let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
+        assert_eq!(reg.release_session_id(AgentId::new_v4()), None);
+    }
+
+    /// 뽑기는 명부를 건드리지 않는다 — 영속은 첫 제출의 몫이다.
+    #[test]
+    fn mint_session_id_touches_nothing_and_never_repeats() {
+        let (reg, store, id, _live) = registry_with_live_incarnation();
+        let before = saves(&store);
+        let a = ProfileRegistry::mint_session_id();
+        let b = ProfileRegistry::mint_session_id();
+        assert_ne!(a, b, "매번 새 uuid(Fresh 의 「언제나 새 sid」 봉인)");
+        assert_eq!(saves(&store), before, "디스크 쓰기 없음");
+        assert_eq!(
+            reg.get(id).unwrap().backend_session_id,
+            None,
+            "명부 칸도 그대로"
+        );
     }
 
     #[test]
@@ -1594,8 +1780,7 @@ mod tests {
 
     /// ★사본을 뜬 **뒤에** 도착한 backend 손잡이가 spawn 등록에 덮이지 않는다(사용자 결정)★.
     ///
-    /// 이 칸을 쓰는 것은 런타임이다 — 받아 적는 backend(codex)는 통로가 핸드셰이크에서 받은 thread id 를
-    /// 기록 포트로 적고, 발급하는 backend(claude)는 spawn 이 이 upsert **뒤에** 확정한다. 어느 쪽이든
+    /// 이 칸을 쓰는 것은 런타임이다 — 어느 backend 든 그 화신의 첫 제출 래치가 이 upsert **뒤에** 적는다.
     /// 호출자가 든 사본은 저자가 아니다.
     /// ★덮이면 그냥 낡은 값이 아니라 **되돌릴 수 없는 유실**이다★ — 이 upsert 는 `mutate` 라 그대로
     ///   디스크에 영속되고, 그 대화로 돌아갈 손잡이가 어디에도 안 남는다.
@@ -1604,11 +1789,12 @@ mod tests {
     #[test]
     fn spawn_preserving_upsert_does_not_revert_a_handle_recorded_after_the_snapshot() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        let p = sample();
+        let mut p = sample();
+        let first = Uuid::new_v4();
+        p.backend_session_id = Some(first);
         let id = p.id;
         reg.upsert(p);
 
-        let first = reg.ensure_session_id(id).expect("최초 손잡이");
         let stale_snapshot = reg.get(id).unwrap();
         assert_eq!(stale_snapshot.backend_session_id, Some(first));
         assert!(stale_snapshot.old_session_ids.is_empty());

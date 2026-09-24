@@ -9,8 +9,7 @@
 //! CLAUDE.md 「빌드·검증 명령」). 실행:
 //! `cargo test -p engram-dashboard --test daemon_client_replay`(자식 프로세스를 하나도 안 띄우므로
 //! `-- --test-threads=4` 를 붙이지 않는다 — 판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」).
-//! ★워크스페이스 회귀에 안 실린다★ — 그 명령이 `--exclude engram-dashboard` 로 이 패키지를 통째로 뺀다.
-//! 그래서 CI가 이 타깃만 따로 부르는 전용 스텝을 갖는다(`.github/workflows/ci.yml`).
+//! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
 //!
 //! ## ★무엇을 지키나 — 거절당한 구독이 다시 나갈 수 있다★
 //! 데몬 재기동 직후엔 세션이 없어(부팅 자동 복원 OFF) 재연결 replay 의 `Subscribe` 가 거절된다. 거절엔
@@ -96,7 +95,7 @@ fn flight() -> ReplayFlightSet {
     ReplayFlightSet::new(Duration::from_secs(10))
 }
 
-// 마커 프레임에서 gen(BE u64)과 failed 플래그(bit1)를 도로 꺼낸다 — 레이아웃 정본은
+// 마커 프레임에서 gen(BE u64)과 플래그 셋(bit0~2)을 도로 꺼낸다 — 레이아웃 정본은
 // `engram_dashboard_lib::daemon_client::replay_flight::encode_marker_frame` 문단이고, 여기선 그 값을
 // 읽기만 한다.
 fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
@@ -106,6 +105,11 @@ fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
     let epoch = u32::from_be_bytes(frame[17..21].try_into().unwrap());
     let generation = u64::from_be_bytes(frame[21..29].try_into().unwrap());
     let flags = frame[29];
+    assert_eq!(
+        flags & !0b0000_0111,
+        0,
+        "정의 안 된 플래그 비트: {flags:#010b}"
+    );
     (
         agent,
         epoch,
@@ -113,6 +117,7 @@ fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
             generation,
             truncated: flags & 0b0000_0001 != 0,
             failed: flags & 0b0000_0010 != 0,
+            continues_conversation: flags & 0b0000_0100 != 0,
         },
     )
 }
@@ -192,7 +197,7 @@ fn refusal_leaves_an_acked_healthy_subscription_alone() {
     let now = Instant::now();
 
     fs.request_replay(agent, now);
-    fs.on_ack(agent, false, now);
+    fs.on_ack(agent, false, false, now);
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
     assert!(plan.marker_frame.is_none(), "acked 슬롯엔 실패 마커 없음");
@@ -323,6 +328,7 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
             latest_seq: 0,
             replay_from: 0,
             truncated: false,
+            continues_conversation: true,
         },
         &mut fs,
         &mut subs,
@@ -351,6 +357,10 @@ fn a_refusal_hands_back_the_coalesced_generations_subscribe() {
     let (_, epoch, marker) = decode_marker(&out.0[0].1);
     assert_eq!(marker.generation, first.generation, "해제되는 건 앞 세대");
     assert_eq!(epoch, 7, "마지막으로 알려진 epoch 를 싣는다(권위값 아님)");
+    assert!(
+        !marker.continues_conversation,
+        "앞선 Ack(표식 참)은 어느 슬롯에도 안 앉았고 거절되는 슬롯은 Ack 을 받은 적이 없다 — bit2 는 0"
+    );
 
     match follow {
         ReplayFollowUp::Handled(Some(AgentCommand::Subscribe {
@@ -385,6 +395,7 @@ fn a_replay_complete_delivers_a_success_marker_to_the_same_windows() {
             latest_seq: 0,
             replay_from: 0,
             truncated: true,
+            continues_conversation: false,
         },
         &mut fs,
         &mut subs,
@@ -412,9 +423,62 @@ fn a_replay_complete_delivers_a_success_marker_to_the_same_windows() {
     assert!(!marker.failed, "완료 = 성공 마커");
     assert!(marker.truncated, "Ack 의 truncated 가 마커까지 전파");
     assert!(
+        !marker.continues_conversation,
+        "Ack 이 이어받기 화신이 아니라고 했다"
+    );
+    assert!(
         matches!(follow, ReplayFollowUp::Handled(None)),
         "대기열 없음"
     );
+}
+
+// ★Ack 의 이어받기 표식이 창으로 가는 바이트의 bit2 까지 간다(ADR-0226)★ — 웹뷰가 이 비트로 첫 화면
+//   대신 로딩을 그린다. 바로 위 시험과 truncated·표식 값을 뒤집어 두어, 두 칸이 서로 바뀌어 배선돼도 둘 중
+//   하나가 붉어진다.
+#[test]
+fn a_replay_complete_carries_the_acks_continues_conversation_in_bit2() {
+    let mut fs = flight();
+    let mut subs = Subs::new();
+    let agent = AgentId::new_v4();
+    let router = router_showing(agent);
+    let now = Instant::now();
+
+    fs.request_replay(agent, now);
+    let _ = feed(
+        &AgentEvent::SubscribeAck {
+            agent_id: agent,
+            action: engram_dashboard_protocol::SubscribeAction::Reset,
+            current_epoch: 3,
+            oldest_seq: 0,
+            latest_seq: 0,
+            replay_from: 0,
+            truncated: false,
+            continues_conversation: true,
+        },
+        &mut fs,
+        &mut subs,
+        &router,
+        now,
+    );
+    let (out, _) = feed(
+        &AgentEvent::ReplayComplete {
+            agent_id: agent,
+            epoch: 3,
+        },
+        &mut fs,
+        &mut subs,
+        &router,
+        now,
+    );
+
+    assert_eq!(out.0.len(), 1, "완료 하나 = 마커 하나");
+    let (labels, frame) = &out.0[0];
+    assert_eq!(labels.as_slice(), &[MAIN_WINDOW_LABEL.to_string()]);
+    assert_eq!(frame.len(), MARKER_FRAME_LEN, "길이 30 불변");
+    assert_eq!(frame[29], 0b0000_0100, "성공 + 이어받기 = bit2 하나만");
+    let (_, _, marker) = decode_marker(frame);
+    assert!(marker.continues_conversation);
+    assert!(!marker.truncated && !marker.failed);
 }
 
 // replay 계열이 아닌 이벤트는 이 함수가 삼키면 안 된다 — 삼키면 인바운드 명령과 broadcast 가 통째로

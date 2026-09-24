@@ -89,7 +89,7 @@ class MockTransport implements Transport {
     agentId: string,
     epoch: number,
     gen: bigint,
-    opts: { failed?: boolean; truncated?: boolean } = {},
+    opts: { failed?: boolean; truncated?: boolean; continuesConversation?: boolean } = {},
   ): void {
     this.deliver({
       kind: 'replayBoundary',
@@ -98,6 +98,7 @@ class MockTransport implements Transport {
       gen,
       truncated: opts.truncated ?? false,
       failed: opts.failed ?? false,
+      continuesConversation: opts.continuesConversation ?? false,
     })
   }
   setState(s: ConnectionState): void {
@@ -1194,6 +1195,97 @@ describe('실패 마커 → 재요청 사다리 → 상한(3) 도달 시 error',
     } finally {
       warn.mockRestore()
     }
+  })
+})
+
+// ── ADR-0226: 'live' 통지에 이어받기 화신 표식을 싣는다 ─────────────────────────────────
+describe("이어받기 화신 표식 — 'live' 에만 info 로 실린다(ADR-0226)", () => {
+  type Seen = { state: string; info: unknown; argc: number }
+  function recorder(): { seen: Seen[]; cb: (...args: unknown[]) => void } {
+    const seen: Seen[] = []
+    return {
+      seen,
+      cb: (...args: unknown[]) => seen.push({ state: String(args[0]), info: args[1], argc: args.length }),
+    }
+  }
+
+  it('성공 마커의 표식이 그대로 info 로 간다(참/거짓 둘 다 명시)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const r1 = recorder()
+    const r2 = recorder()
+    await c.subscribeOutput(V1, AGENT, () => {}, r1.cb)
+    await c.subscribeOutput(V2, AGENT, () => {}, r2.cb)
+    t.marker(AGENT, 1, t.replayCalls[0].gen, { continuesConversation: true })
+    expect(r1.seen).toEqual([{ state: 'live', info: { continuesConversation: true }, argc: 2 }])
+
+    t.marker(AGENT, 1, t.replayCalls[1].gen)
+    expect(r2.seen).toEqual([{ state: 'live', info: { continuesConversation: false }, argc: 2 }])
+  })
+
+  // 마커가 myGen 보다 먼저 오면 보관했다가 확정 때 재평가한다 — 보관 사본이 칸을 떨어뜨리면 이 경로에서만
+  //   로딩이 안 뜬다(실측상 흔한 경로다: 마커와 invoke 응답은 서로 다른 채널이다).
+  it('보관 마커(myGen 미확정) 경로에서도 표식이 실린다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    let releaseGen!: (gen: bigint) => void
+    t.replayGenImpl = () => new Promise<bigint>((r) => (releaseGen = r))
+    const r = recorder()
+    await c.subscribeOutput(V1, AGENT, () => {}, r.cb)
+    const gen = t.replayCalls[0].gen
+    t.marker(AGENT, 1, gen, { continuesConversation: true })
+    expect(r.seen).toEqual([])
+    releaseGen(gen)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(r.seen).toEqual([{ state: 'live', info: { continuesConversation: true }, argc: 2 }])
+  })
+
+  it("'live' 가 아닌 국면(buffering·detached·error)에는 info 가 없다", async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const r = recorder()
+      await c.subscribeOutput(V1, AGENT, () => {}, r.cb)
+      t.marker(AGENT, 1, t.replayCalls[0].gen, { continuesConversation: true })
+      t.control({ AgentListUpdated: { agents: [{ id: AGENT, epoch: 2 }] } }) // 회전 → buffering
+      t.control({ AgentListUpdated: { agents: [] } }) // 부재 → detached
+      t.control({ AgentListUpdated: { agents: [{ id: AGENT, epoch: 2 }] } }) // 재부착 → buffering
+      for (let i = 0; i < 4; i++) {
+        await Promise.resolve()
+        t.marker(AGENT, 2, t.replayCalls[t.replayCalls.length - 1].gen, { failed: true })
+        await vi.advanceTimersByTimeAsync(4000)
+      }
+      const nonLive = r.seen.filter((s) => s.state !== 'live')
+      expect(nonLive.map((s) => s.state)).toEqual(['buffering', 'detached', 'buffering', 'error'])
+      for (const s of nonLive) expect(s.argc).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // ★순서 핀(TRD §3-5 의 반영하지 않은 리뷰 지적이 기대는 성질)★: RichSlot 은 비우기 콜백에서 복원 완료
+  //   표시를 내리지 않는다. 그게 안전한 근거가 이 순서다 — 비우기 전에 'buffering' 이 이미 그 표시를
+  //   내렸고, 비우기 바로 뒤 같은 호출 안에서 'live' 가 새 표식과 함께 다시 세운다. 비우기와 'live' 사이에
+  //   다른 국면 통지가 끼면 그 틈에 첫 화면이 비친다.
+  it("onReset 은 언제나 'buffering' 뒤, 같은 flush 안에서 'live' 직전에만 불린다", async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const order: string[] = []
+    await c.subscribeOutput(
+      V1,
+      AGENT,
+      (chunk) => order.push(`chunk:${chunk.seq}`),
+      (s, info) => order.push(info ? `${s}:${info.continuesConversation}` : s),
+      () => order.push('reset'),
+    )
+    t.output(AGENT, 1, 0)
+    t.marker(AGENT, 1, t.replayCalls[0].gen)
+    t.control({ AgentListUpdated: { agents: [{ id: AGENT, epoch: 2 }] } }) // 다른 화신
+    await Promise.resolve() // myGen 확정
+    t.marker(AGENT, 2, t.replayCalls[1].gen, { continuesConversation: true })
+    expect(order).toEqual(['chunk:0', 'live:false', 'buffering', 'reset', 'live:true'])
   })
 })
 

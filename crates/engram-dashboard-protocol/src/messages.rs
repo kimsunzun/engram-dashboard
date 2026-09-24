@@ -385,6 +385,18 @@ pub enum AgentEvent {
         replay_from: u64,
         /// ring 밖으로 밀려 일부 손실(clear+tail).
         truncated: bool,
+        /// 이 replay 의 화신은 저장된 대화를 이어받으려고 떴다(스폰이 이어받을 손잡이를 실었다) —
+        /// ★이어받기가 **성공했다**는 뜻이 아니다★. `current_epoch` 와 같은 구독 응답에서 나온다.
+        /// 칸이 없는 옛 데몬의 ack 는 `false` 로 읽힌다(`serde(default)`).
+        /// ★[`crate::PROTOCOL_VERSION`] 은 이 추가로 올리지 않는다★ — 그 기준(조용한 **해로운** 오작동)에
+        ///   두 방향을 대면 둘 다 오늘의 동작으로 떨어진다:
+        ///   - **신데몬 + 구셸**: 구셸은 모르는 칸을 버린다(`deny_unknown_fields` 없음) — 이어받는 슬롯이
+        ///     오늘처럼 첫 화면을 그린다.
+        ///   - **구데몬 + 신셸**: 칸이 없어 `false` — 역시 오늘처럼 첫 화면을 그린다.
+        ///   다른 것이 도는 조합이 없고 기능이 없을 뿐이다. 셸↔웹뷰 마커 비트는 셸과 웹뷰가 한 빌드로
+        ///   나가므로 버전 축이 없다. (ADR-0226)
+        #[serde(default)]
+        continues_conversation: bool,
     },
     /// [`AgentCommand::Subscribe`] 가 **거절**됐다 — [`AgentEvent::SubscribeAck`] 의 실패 짝.
     ///
@@ -1022,6 +1034,46 @@ mod tests {
                 r#"{{"type":"TurnEnd","turn_id":null,"outcome":{{"kind":"Failed","detail":"{raw}"}}}}"#
             )
         );
+    }
+
+    // ── 구독 응답의 이어받기 표식(ADR-0226) ──────────────────────────────────────────
+    #[test]
+    fn subscribe_ack_json_golden_carries_continues_conversation() {
+        let agent_id = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let json = serde_json::to_string(&AgentEvent::SubscribeAck {
+            agent_id,
+            action: SubscribeAction::Reset,
+            current_epoch: 7,
+            oldest_seq: 1,
+            latest_seq: 2,
+            replay_from: 0,
+            truncated: false,
+            continues_conversation: true,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"{"SubscribeAck":{"agent_id":"11111111-1111-1111-1111-111111111111","action":"Reset","current_epoch":7,"oldest_seq":1,"latest_seq":2,"replay_from":0,"truncated":false,"continues_conversation":true}}"#
+        );
+    }
+
+    /// 옛 데몬은 이 칸을 모른다 — 빠진 ack 가 거절되지 않고 `false` 로 읽혀야 신셸이 옛 데몬에 붙는다.
+    #[test]
+    fn a_subscribe_ack_from_an_older_daemon_reads_as_not_continuing() {
+        let old = r#"{"SubscribeAck":{"agent_id":"11111111-1111-1111-1111-111111111111","action":"Resume","current_epoch":7,"oldest_seq":1,"latest_seq":2,"replay_from":1,"truncated":true}}"#;
+        match serde_json::from_str::<AgentEvent>(old).expect("칸 없는 옛 ack 도 읽힌다") {
+            AgentEvent::SubscribeAck {
+                continues_conversation,
+                truncated,
+                current_epoch,
+                ..
+            } => {
+                assert!(!continues_conversation, "빠진 칸 = 이어받지 않음");
+                assert!(truncated, "나머지 칸은 그대로 읽힌다");
+                assert_eq!(current_epoch, 7);
+            }
+            other => panic!("SubscribeAck 이어야: {other:?}"),
+        }
     }
 
     // ── 프리셋 wire 계약(ADR-0061) — JSON envelope golden + round-trip ─────────────

@@ -206,9 +206,9 @@ pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 pub trait AgentBackend: Send + Sync {
     /// **우리가** 세션 id 를 뽑아 spawn 때 이 프로그램에 건네주나.
     ///
-    /// true 면 manager 가 uuid 를 발급해 **프로필에 영속**하고(`ProfileRegistry` 의 발급 메서드는 둘 다
-    /// 디스크에 쓴다) 그 값을 [`AgentBackend::build_spec`] 의 `session_id` 로 넘긴다. sid drift 관측기도
-    /// 그 값을 기준값으로 삼으므로 이 축에 매달린다.
+    /// true 면 manager 가 Fresh 마다 uuid 를 뽑아 [`AgentBackend::build_spec`] 의 `session_id` 로 넘기고,
+    /// 그 값은 **첫 제출 때** 프로필에 영속된다(ADR-0226 — 스폰 때는 안 쓴다). sid drift 관측기도 그 값을
+    /// 기준값으로 삼으므로 이 축에 매달린다.
     ///
     /// ★false 를 「세션이 없다」로 읽지 말 것★: 그 프로그램이 자기 id 를 **스스로 발급**하는 쪽일 수
     ///   있다. 그때 우리 uuid 를 심으면 그 프로그램이 한 번도 쓰지 않을 값이 프로필에 남고, 이어받기
@@ -921,6 +921,24 @@ impl InputEncoder {
             InputEncoder::TransportFramed => None,
         }
     }
+
+    /// 이 입력 한 조각이 **사용자 턴을 제출하나** — 세션 id 첫 제출 래치가 세는 기준이다.
+    ///
+    /// - `ClaudeStreamJson`·`TransportFramed` → 언제나 `true`: 호출 1회 = 완결된 유저 턴 1개다
+    ///   (`AgentSession::write_input` 의 FIX 6a 계약 · codex 통로는 쓰기마다 턴 하나).
+    /// - `Raw` → 제출 바이트(CR)가 들어 있으면 `true`.
+    ///
+    /// ★`Raw` 의 CR 판정은 프론트의 키 인코딩에 매인다★: 터미널 Enter = CR 은 xterm 이 **기본** 키
+    ///   인코딩으로 보내는 바이트다. kitty 키보드·win32-input-mode 처럼 Enter 를 다른 시퀀스로 보내는
+    ///   모드를 켜면 이 판정이 **조용히** 거짓이 되어 제출이 안 세어지고, 그 모드의 이어받기가 전부
+    ///   사라진다. 같은 가정에 선 [`InputEncoder::submit_sequence`] 와 짝이다 — 한쪽만 고치지 말 것.
+    // ADR-0226
+    pub fn submits_turn(&self, bytes: &[u8]) -> bool {
+        match self {
+            InputEncoder::Raw => bytes.contains(&b'\r'),
+            InputEncoder::ClaudeStreamJson | InputEncoder::TransportFramed => true,
+        }
+    }
 }
 
 /// 본문 write 와 제출 write([`InputEncoder::submit_sequence`]) **사이에 두는 대기**.
@@ -1569,6 +1587,75 @@ mod tests {
             !out.contains(&b'\r'),
             "Raw encode 는 제출 바이트를 붙이지 않는다(제출은 write 경계 — session 소관): {out:?}"
         );
+    }
+
+    // ── 턴 제출 판정(submits_turn) — 세션 id 첫 제출 래치의 기준(ADR-0226) ──────────────────
+    /// ★이름에 가정을 박는다★: 이 판정은 xterm 기본 키 인코딩(Enter = CR)에 선다. Enter 를 다른 시퀀스로
+    ///   보내는 키 인코딩 모드가 들어오면 이 항목이 아니라 **판정 자체**를 다시 봐야 한다.
+    #[test]
+    fn raw_submission_is_cr_under_default_xterm_encoding() {
+        assert!(
+            !InputEncoder::Raw.submits_turn(b"hel"),
+            "CR 없는 키 입력 조각은 턴이 아니다"
+        );
+        assert!(
+            !InputEncoder::Raw.submits_turn(b""),
+            "빈 조각은 턴이 아니다"
+        );
+        assert!(
+            !InputEncoder::Raw.submits_turn(b"\n"),
+            "LF 는 xterm 기본 키 인코딩의 Enter 가 아니다"
+        );
+        assert!(InputEncoder::Raw.submits_turn(b"\r"), "Enter 단독");
+        assert!(
+            InputEncoder::Raw.submits_turn(b"hello\r"),
+            "본문 뒤 Enter 가 같은 조각에 실렸다"
+        );
+        assert!(
+            InputEncoder::Raw.submits_turn(b"a\rb"),
+            "붙여넣기처럼 CR 이 가운데 든 조각도 제출로 센다"
+        );
+    }
+
+    #[test]
+    fn structured_encoders_always_submit_a_turn() {
+        for encoder in [
+            InputEncoder::ClaudeStreamJson,
+            InputEncoder::TransportFramed,
+        ] {
+            assert!(
+                encoder.submits_turn(b"hello"),
+                "{encoder:?}: 호출 1회 = 유저 턴 1개 — CR 이 없어도 턴이다"
+            );
+            assert!(
+                encoder.submits_turn(b""),
+                "{encoder:?}: 내용과 무관하게 호출 자체가 턴이다"
+            );
+        }
+    }
+
+    /// ★제출 바이트를 내는 인코더는 그 바이트를 턴으로 센다★ — 우편 배달은 제출 바이트 앞에서
+    ///   `submits_turn(제출 바이트)` 로 세므로, 한쪽(예: `Raw` 의 제출 바이트)만 바뀌면 우편이 **조용히**
+    ///   안 세어지고 그 에이전트의 이어받기가 사라진다.
+    // ADR-0226
+    #[test]
+    fn every_submit_sequence_counts_as_a_turn_submission() {
+        // 변형이 늘면 이 match 가 컴파일을 깬다 — 아래 목록에 더하라는 신호다.
+        let _exhaustive = |e: InputEncoder| match e {
+            InputEncoder::Raw | InputEncoder::ClaudeStreamJson | InputEncoder::TransportFramed => {}
+        };
+        for encoder in [
+            InputEncoder::Raw,
+            InputEncoder::ClaudeStreamJson,
+            InputEncoder::TransportFramed,
+        ] {
+            if let Some(submit) = encoder.submit_sequence() {
+                assert!(
+                    encoder.submits_turn(submit),
+                    "{encoder:?}: 제출 바이트 {submit:?} 가 턴 제출로 안 세어진다 — 우편이 영속을 못 부른다"
+                );
+            }
+        }
     }
 
     // ── ADR-0044/0045: 입력-시점 유저 에코 이벤트 dispatch(input_echo_event) — uuid dedup ──────

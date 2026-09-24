@@ -1,0 +1,13 @@
+/* LoadingPanel 회전 (ADR-0226) — ★reduced-motion 에서도 e-ink 테마에서도 늘 돈다 — 정지 규칙을 되살리지 말 것★
+   (사용자 결정 2026-09-24 · ADR-0226). 트리의 회전 기호와 같은 규칙이다(`agent/agentGlyph.css` 의 사용자
+   결정 2026-08-24): 멈춘 스피너는 「멈춘 것」과 구분되지 않고, 이 회전이 「아직 오는 중」을 나르는 유일한 신호다. */
+
+@keyframes engram-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.engram-loading-spinner {
+  animation: engram-loading-spin 1s linear infinite;
+}

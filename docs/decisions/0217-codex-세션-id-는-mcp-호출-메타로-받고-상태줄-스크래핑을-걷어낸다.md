@@ -1,7 +1,7 @@
 # ADR-0217: codex 세션 id 는 MCP 호출 메타로 받고 상태줄 스크래핑을 걷어낸다
 
-- 상태: 확정 (2026-09-21, 근거: 실측 3라운드 — 아래 「근거」) · 부분 폐기 by ADR-0218 (회수 채널을 락 파일 홀더 PID 로 교체)
-- 관련: CLAUDE.md 「백엔드 확장」 · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0208(훅 회수) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0210(사용자 기기에 파일을 만들지 않는다) · ADR-0214(MCP 우편) · ADR-0213(`eg_` 접두) · ADR-0207(프로필 쓰기) · ADR-0004(백엔드 지식 격리) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs:711` · `crates/engram-dashboard-daemon/src/control/mcp_server.rs:437` · `crates/engram-dashboard-daemon/src/control/registry.rs:24` · `crates/engram-dashboard-agent/src/profile.rs:709` · step-log S21 · Amends ADR-0216 (상태줄 회수 채널과 스캐너 대체) · Amended by ADR-0218 (회수 채널을 락 파일 홀더 PID 로 교체)
+- 상태: 확정 (2026-09-21, 근거: 실측 3라운드 — 아래 「근거」) · 부분 폐기 by ADR-0218 (회수 채널을 락 파일 홀더 PID 로 교체) · 부분 폐기 by ADR-0226 (결정 7 값 정책)
+- 관련: CLAUDE.md 「백엔드 확장」 · ADR-0185(codex 는 id 를 발급하지 않는다) · ADR-0208(훅 회수) · ADR-0203(벤더 저장 포맷을 읽지 않는다) · ADR-0210(사용자 기기에 파일을 만들지 않는다) · ADR-0214(MCP 우편) · ADR-0213(`eg_` 접두) · ADR-0207(프로필 쓰기) · ADR-0004(백엔드 지식 격리) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs:711` · `crates/engram-dashboard-daemon/src/control/mcp_server.rs:437` · `crates/engram-dashboard-daemon/src/control/registry.rs:24` · `crates/engram-dashboard-agent/src/profile.rs:709` · step-log S21 · Amends ADR-0216 (상태줄 회수 채널과 스캐너 대체) · Amended by ADR-0218 (회수 채널을 락 파일 홀더 PID 로 교체) · Amended by ADR-0226 (결정 7 값 정책)
 
 ## 맥락
 

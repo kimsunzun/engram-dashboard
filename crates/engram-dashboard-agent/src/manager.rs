@@ -27,13 +27,14 @@ use crate::profile::{
 };
 use crate::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::session::AgentSession;
+use crate::session_id_latch::SessionIdLatch;
 use crate::session_tracker::SessionTracker;
 use crate::transport::{LinkResolution, LinkSink};
 use crate::turn::TurnObservations;
 use crate::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, ControlChannel, NoopControlChannel, OutputChunk,
-    OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeOutcome,
-    TerminalReason, TerminationIntent,
+    OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeReply, TerminalReason,
+    TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -355,32 +356,6 @@ fn pick_suffix(used: &std::collections::BTreeSet<u32>) -> Option<u32> {
     Some(candidate)
 }
 
-/// 「backend 가 받아 온 세션 id」를 이 프로필의 이 화신에 적는 한 동사를 만든다
-/// ([`backend::SessionIdSink`] 의 조립점 쪽 실물).
-///
-/// ★`String` → `Uuid` 해독이 여기 있는 이유★: 상대가 주는 것은 문자열이고(codex `Thread.id`) 프로필이
-///   드는 것은 `Uuid` 다. 그 폭을 좁히는 것은 프로필 스키마 지식이라 `backend/` 에 둘 수 없다(ADR-0004).
-/// ★**여기로 들어오는 값이 v4 라고 가정하지 말 것 — 실측은 UUIDv7 이다**★: 실 app-server 가 준 것은
-///   `01a0a08f-…`(버전 니블 `7`)였다. 그래서 `backend_session_id` 한 칸에 **백엔드마다 다른 UUID 버전**이
-///   앉는다 — claude 는 우리가 v4 를 뽑아 건네고, codex 는 받아 적는다. 이 저장소의 시험대는 전부
-///   `Uuid::new_v4()` 로 값을 만들어서 그 차이를 한 번도 겪지 않는다. ★버전 검증을 넣지 말 것★ —
-///   `Uuid::parse_str` 은 버전을 안 보고, 그것이 이 경로가 두 버전 다 받는 이유다.
-/// ★uuid 로 못 읽히면 로그로 남기고 **버린다**★ — panic 도 `unwrap` 도 아니다. 이 호출은 라이터 스레드
-///   위에서 돌고 그 스레드는 핸드셰이크·입력 전송을 함께 지므로, 여기서 죽으면 상대 형식이 한 번 바뀐
-///   것만으로 그 세션이 통째로 말을 잃는다. 기록만 못 한 것이 낫다(그러면 이어받기가 Fresh 로 떨어져
-///   정직하게 보고된다).
-/// ★값 자체를 로그에 싣지 않는다★ — 남기는 것은 해독 실패 사유뿐이다.
-/// ★화신 표식을 `Some` 으로 못 박는다(ADR-0007/0163)★ — 이 동사는 **한 spawn** 에 묶여 있고 그 spawn 의
-///   표식은 호출 시점에 이미 확정돼 있다. 그래서 **더 새 화신이 이미 선** 뒤에 도착한 기록은 거절된다.
-///   ★「늦은 기록을 막는다」로 넓혀 읽지 말 것★ — 세션이 그냥 **끝나기만** 한 경우는 표식이 그대로라
-///   이 가드가 안 선다(그 창의 정본 = 통로의 `record_session_id` doc).
-/// ★세 결말이 로그로 갈린다(`docs/reference/logging-conventions.md` 「계측 의무」)★ — 기록됨(info) ·
-///   버려짐(debug, S14 stale 가드와 같은 자리) · uuid 해독 실패(warn). **받지 못한 결말**은 여기 오지
-///   않고 통로의 핸드셰이크 실패 로그가 낸다.
-/// ★`true` 를 「영속됐다」로 읽지 말 것★ — 그 값이 뜻하는 것은 메모리 명부가 바뀌었다는 것뿐이고, 디스크
-///   쓰기 실패는 저장소가 자기 자리에서 `error!` 로 낸다([`ProfileStore::save`] 는 `()` 를 돌려준다).
-// ADR-0007
-// ADR-0185
 /// 통로가 배달한 연결 결말 한 건 — ★어느 화신의 것인지를 **함께** 나른다★.
 ///
 /// ★표식이 값에 붙어 있는 것이 이 타입의 요점이다★: 결말과 화신이 따로 다니면, 수거된 화신의 결말이
@@ -426,9 +401,9 @@ fn link_verdict_sink(tx: Sender<LinkVerdict>, incarnation: u32) -> LinkSink {
 
 /// spawn 도중 프로필이 사라졌다 — **spawn 을 중단한다**. `at` = 어느 단계에서 알아챘나.
 ///
-/// ★단계 이름을 싣는 이유★: `spawn_agent` 에는 이 판정 자리가 **셋**이다(화신 표식 확정 · 세션 id 발급 ·
-///   이어받기 손잡이 읽기). 어느 자리가 걸렸는지가 그 삭제가 언제 끼어들었나를 말해 주는데, 문구가 같으면
-///   로그·오류에서 구별되지 않는다.
+/// ★단계 이름을 싣는 이유★: `spawn_agent` 에는 이 판정 자리가 **셋**이다(화신 표식 확정 · Fresh 의 세션
+///   id 비우기 · Resume 의 이어받기 손잡이 읽기). 어느 자리가 걸렸는지가 그 삭제가 언제 끼어들었나를 말해
+///   주는데, 문구가 같으면 로그·오류에서 구별되지 않는다.
 /// ★셋 다 같은 처분인 것이 규율이다★ — 하나라도 `None` 을 삼키면 삭제된 프로필로 세션이 뜨거나
 ///   이어받기가 조용히 새 대화가 된다.
 fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
@@ -437,40 +412,39 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
     ))
 }
 
-/// Fresh 스폰이 **저장된 세션 id 를 비우고 시작해야 하나** — 발급 축이 꺼진 backend 전용 판정.
+/// Fresh 스폰이 **저장된 세션 id 를 비우고 시작해야 하나**.
 ///
-/// ★참인 조건 셋을 전부 요구한다★
+/// ★참인 조건 둘을 전부 요구한다★
 ///   1. **Fresh 다.** Resume 에서 비우면 이어받을 손잡이가 사라진다(ADR-0083 이 지키는 그 값이다).
-///   2. **우리가 그 id 를 발급하지 않는다.** 발급하는 쪽은 `new_session_id` 가 같은 밀기를 이미 한다 —
-///      여기서 또 부르면 그 발급을 지운다.
-///   3. ★**이 화신에 그 칸을 채울 경로가 있다**★ — 상대가 우리에게 id 를 말할 수 있는 통로가 하나라도
+///   2. ★**이 화신에 그 칸을 채울 경로가 있다**★ — 첫 제출 때 그 칸에 새 값을 적을 근거가 하나라도
 ///      있어야 한다. 없는데 비우면, 손으로 심어 둔 값이 아무도 다시 안 채우는 채로 사라진다.
 ///
-/// ★3 번의 열거는 **손으로 관리된다**★: 통로 연결([`backend::declares_link`] — 그 통로가 핸드셰이크
-///   응답에서 받아 [`session_id_sink`] 로 넘긴다)과 제어 평면([`backend::supports_control_channel`]).
-///   셋째 경로가 생기면 여기 더해야 하고, 컴파일러는 그 누락을 못 잡는다 — 진짜 축(「상대가 우리에게 id
-///   를 말할 수 있나」)을 선언하는 칸이 없다.
-/// ★오늘 이 판정이 실제로 갈리는 자리★: codex 는 두 모양 다 참, shell·gemini 는 거짓(경로가 없다),
-///   claude 는 2 번에서 거짓이다.
+/// ★2 번의 열거는 **손으로 관리된다**★: 우리가 뽑아 첫 제출에 적는다([`backend::assigns_session_id`]) ·
+///   통로 연결([`backend::declares_link`] — 그 통로가 핸드셰이크 응답에서 받아 래치에 넘긴다) · 제어
+///   평면([`backend::supports_control_channel`]). 넷째 경로가 생기면 여기 더해야 하고, 컴파일러는 그
+///   누락을 못 잡는다 — 진짜 축(「이 화신의 id 를 우리가 알게 되나」)을 선언하는 칸이 없다.
+/// ★오늘 이 판정이 실제로 갈리는 자리★: claude·gemini(발급)·codex 는 참, shell 은 거짓(경로가 없다).
 /// ★**단 codex 의 터미널 모드가 참인 것은 오늘 「우연히」다 — control channel 을 끄는 변경이 오면 이
 ///   줄을 먼저 볼 것**★: 그 칸이 켜져 있는 이유는 MCP 우편이고(ADR-0214), 그 모드가 실제로 이 칸을
 ///   채우는 경로는 제어 평면이 아니라 **자식이 쥔 writer 락**이다(ADR-0218). 답은 맞고 이유가 틀린
 ///   상태라, 우편 쪽 사정으로 그 칸이 꺼지면 이 판정이 **조용히** 거짓으로 뒤집힌다. app-server
 ///   모드는 그렇지 않다 — 그쪽은 `declares_link` 가 따로 참이라 제어 채널과 무관하게 선다.
 ///
-/// ★없으면 무슨 일이 나나(되살리지 말 것)★: 발급 축이 꺼진 backend 는 화신마다 새 대화를 여는데, 칸이
-///   첫 화신 값으로 찬 채 남으면 그 칸은 아래 `resume_session_id` 가 읽는 바로 그 칸이라 **이어받기가
-///   최초 대화로 되감긴다.**
+/// ★없으면 무슨 일이 나나(되살리지 말 것)★: Fresh 는 화신마다 새 대화를 여는데, 칸이 앞 화신 값으로 찬
+///   채 남으면 그 칸은 아래 `resume_session_id` 가 읽는 바로 그 칸이라 **이어받기가 앞 대화로 되감긴다.**
+///   발급하는 backend 도 같다 — 새 값은 첫 제출 때에야 적히므로, 그 전에 끝난 화신 뒤에는 옛 값이 남는다.
 // ADR-0185
 // ADR-0083
 // ADR-0208
 // ADR-0216
 // ADR-0217
 // ADR-0218
+// ADR-0226
 pub(crate) fn fresh_spawn_release_session_id(command: &AgentCommand, mode: SpawnMode) -> bool {
     matches!(mode, SpawnMode::Fresh)
-        && !backend::assigns_session_id(command)
-        && (backend::supports_control_channel(command) || backend::declares_link(command))
+        && (backend::assigns_session_id(command)
+            || backend::supports_control_channel(command)
+            || backend::declares_link(command))
 }
 
 /// 이 spawn 이 backend 에게 넘길 **이어받을 손잡이** — ★Fresh 면 저장된 값이 있어도 `None`★.
@@ -491,11 +465,71 @@ fn resume_handle_for(mode: SpawnMode, stored: Option<uuid::Uuid>) -> Option<uuid
     }
 }
 
+/// 이 spawn 이 backend 에 건네고 첫 제출 래치에 넣을 **우리 쪽 세션 id** — 발급 축 backend 에만 `Some`
+/// (Fresh = 새로 뽑은 값 · Resume = spawn 이 읽은 저장값).
+///
+/// ★발급 축(`assigns_session_id`) 단독으로 가른다 — 이어받기 축으로 바꾸지 말 것(ADR-0185)★: 자기 id 를
+///   스스로 발급하는 backend(codex)에 값을 내면, 그 값이 `open_spawn` 보다 먼저 래치에 들어가고 backend 는
+///   argv 에서 버리며, 상대가 준 진짜 id 는 래치의 둘째 offer 로 버려진다. 첫 제출이 그 가짜 값을 영속해
+///   **그 뒤 모든 이어받기가 조용히 실패한다**(ADR-0226).
+// ADR-0185
+// ADR-0226
+fn session_id_to_hand_over(
+    command: &AgentCommand,
+    mode: SpawnMode,
+    stored_handle: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    if !backend::assigns_session_id(command) {
+        return None;
+    }
+    match mode {
+        SpawnMode::Resume => stored_handle,
+        SpawnMode::Fresh => Some(ProfileRegistry::mint_session_id()),
+    }
+}
+
+/// 이 화신의 세션 id 를 프로필 명부에 적는 **commit 포트**를 만든다 — 부르는 것은 그 화신의 첫 제출
+/// 래치([`SessionIdLatch`])이고, 래치는 이 포트를 화신당 많아야 한 번 부른다.
+///
+/// ★적기는 비교-교체다([`ProfileRegistry::commit_session_id`])★ — 칸이 `expected` 이거나 이미 그 값일
+///   때만 쓴다. `expected` = **이 화신이 시작할 때 본 칸의 값**(Fresh = 비운 뒤라 `None` · Resume = spawn 이
+///   읽은 저장값). commit 이 성공하면 포트가 `expected` 를 그 값으로 옮긴다 — 방어 절이다: 래치가 화신당
+///   한 번만 부르므로 운영에서는 옮긴 값이 다시 쓰이지 않는다.
+/// ★덮어쓰기(`observe_session_id`)로 되돌리지 말 것★ — 첫 제출 전에 claude 파일 감시자가 칸을 바꿨으면
+///   덮어쓰기는 그 값을 스폰 때 값으로 되감는다(그 동사 doc 이 정본).
+/// ★`String` → `Uuid` 해독이 여기 있는 이유★: 상대가 주는 것은 문자열이고(codex `Thread.id`) 프로필이
+///   드는 것은 `Uuid` 다. 그 폭을 좁히는 것은 프로필 스키마 지식이라 `backend/` 에 둘 수 없다(ADR-0004).
+/// ★**여기로 들어오는 값이 v4 라고 가정하지 말 것 — 실측은 UUIDv7 이다**★: 실 app-server 가 준 것은
+///   `01a0a08f-…`(버전 니블 `7`)였다. 그래서 `backend_session_id` 한 칸에 **백엔드마다 다른 UUID 버전**이
+///   앉는다 — claude 는 우리가 v4 를 뽑아 건네고, codex 는 받아 적는다. 이 저장소의 시험대는 전부
+///   `Uuid::new_v4()` 로 값을 만들어서 그 차이를 한 번도 겪지 않는다. ★버전 검증을 넣지 말 것★ —
+///   `Uuid::parse_str` 은 버전을 안 보고, 그것이 이 경로가 두 버전 다 받는 이유다.
+/// ★uuid 로 못 읽히면 로그로 남기고 **버린다**★ — panic 도 `unwrap` 도 아니다. 이 호출은 라이터 스레드
+///   위에서 돌 수 있고 그 스레드는 핸드셰이크·입력 전송을 함께 지므로, 여기서 죽으면 상대 형식이 한 번
+///   바뀐 것만으로 그 세션이 통째로 말을 잃는다. 기록만 못 한 것이 낫다(그러면 이어받기가 Fresh 로 떨어져
+///   정직하게 보고된다).
+/// ★값 자체를 로그에 싣지 않는다★ — 남기는 것은 해독 실패 사유뿐이다.
+/// ★화신 표식을 못 박는다(ADR-0007/0163)★ — 이 포트는 **한 spawn** 에 묶여 있고 그 spawn 의 표식은 호출
+///   시점에 이미 확정돼 있다. 그래서 **더 새 화신이 이미 선** 뒤에 도착한 기록은 거절된다.
+///   ★「늦은 기록을 막는다」로 넓혀 읽지 말 것★ — 세션이 그냥 **끝나기만** 한 경우는 표식이 그대로라
+///   이 가드가 안 선다(그 창의 정본 = 통로의 `record_session_id` doc).
+/// ★세 결말이 로그로 갈린다(`docs/reference/logging-conventions.md` 「계측 의무」)★ — 기록됨(info) ·
+///   거절(debug) · uuid 해독 실패(warn). **받지 못한 결말**은 여기 오지 않고 통로의 핸드셰이크 실패 로그가
+///   낸다. 받았는데 제출이 없어 보류된 결말은 래치가 낸다.
+/// ★`true` 를 「영속됐다」로 읽지 말 것★ — 그 값이 뜻하는 것은 메모리 명부가 바뀌었다는 것뿐이고, 디스크
+///   쓰기 실패는 저장소가 자기 자리에서 `error!` 로 낸다(`ProfileStore::save` 는 `()` 를 돌려준다).
+/// ★`expected` 칸을 쥔 채 명부를 부른다★ — 락 순서 `래치 → 이 칸 → profiles → store write_lock` 단방향이고,
+///   이 칸을 잡는 곳은 이 포트 하나뿐이다.
+// ADR-0007
+// ADR-0185
+// ADR-0226
 fn session_id_sink(
     profiles: Arc<ProfileRegistry>,
     id: AgentId,
     incarnation: u32,
+    expected: Option<uuid::Uuid>,
 ) -> backend::SessionIdSink {
+    let expected = Mutex::new(expected);
     Arc::new(move |raw: &str| {
         // ★기록 호출을 match 가드에 두지 말 것★ — 부작용이 있는 가드는 앞에 팔 하나만 끼어도 호출 횟수가
         //   조용히 0 이나 2 가 된다. 판정과 분기를 갈라 둔다.
@@ -510,22 +544,43 @@ fn session_id_sink(
                 return;
             }
         };
-        if profiles.observe_session_id(id, Some(incarnation), sid) {
+        let mut seen = expected
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let written = profiles.commit_session_id(id, incarnation, *seen, sid);
+        if written {
+            *seen = Some(sid);
+        }
+        drop(seen);
+        if written {
             tracing::info!(
                 agent = %id,
                 epoch = incarnation,
                 "backend 가 준 세션 id 를 프로필 명부에 반영했다"
             );
         } else {
-            // ★사유를 가르지 못한다 — 돌아오는 것이 `bool` 하나다★: 화신 표식 불일치 · 프로필 부재 ·
-            //   이미 같은 값, 셋이 같은 `false` 로 온다. 지어내지 않고 그대로 적는다.
+            // ★사유를 가르지 못한다 — 돌아오는 것이 `bool` 하나다★: 화신 표식 불일치 · 다른 기록자가 먼저
+            //   바꿈 · 프로필 부재 · 이미 같은 값, 넷이 같은 `false` 로 온다. 지어내지 않고 그대로 적는다.
             tracing::debug!(
                 agent = %id,
                 epoch = incarnation,
-                "backend 가 준 세션 id 가 명부에 반영되지 않았다 — 화신 표식 불일치·프로필 부재·같은 값 중 하나"
+                "backend 가 준 세션 id 가 명부에 반영되지 않았다 — 화신 표식 불일치·다른 기록자·프로필 부재·같은 값 중 하나"
             );
         }
     })
+}
+
+/// spawn 이 세션에 싣는 화신 사실 — [`AgentManager::spawn_session`] 의 **필수** 인자다.
+///
+/// ★`Option` 으로 바꾸거나 기본값을 두지 말 것★: 래치가 세션에 안 실리면 제출이 한 번도 안 세어져 어느
+///   화신도 세션 id 를 영속하지 못하고, **모든 이어받기가 조용히 사라진다**(다음 활성화가 전부 새 대화 —
+///   오류는 없다). 기본값이 운영에 닿는 길을 컴파일러로 막는 모양이다. 받은 래치를 세션에 싣는 것까지는
+///   컴파일러가 강제하지 못해 배선 구조 시험이 잰다.
+/// `continues_conversation` = 이 spawn 이 이어받을 손잡이를 실었다(이어받기의 성공 여부가 아니다).
+// ADR-0226
+struct SpawnIncarnation {
+    continues_conversation: bool,
+    latch: Arc<SessionIdLatch>,
 }
 
 pub struct AgentManager {
@@ -1197,14 +1252,13 @@ impl AgentManager {
         //   ([`ProfileRegistry::observe_session_id`] 의 `Some(epoch)` 갈래)은 표식이 일치하므로 **거절되지
         //   않고 통과한다** — 그 가드가 막는 것은 「더 새 화신이 이미 섰다」 하나뿐이고, 새 화신은 아직
         //   안 섰다. 그래서 이 줄이 **그 구간을 닫는 동사**다.
-        //   ★그 구간이 실제로 무엇을 망가뜨리나(「그냥 낡은 값」이 아니다)★: 아래 sid 발급이 이 줄
-        //   **뒤**에 있으므로, Fresh spawn 이 갓 뽑은 uuid 를 앞 화신의 지각 기록이 덮고 그 새 값을
-        //   이력으로 밀어낼 수 있다 — 프로세스는 `--session-id <새 값>` 으로 떴는데 프로필은 죽은 화신의
-        //   값을 들게 된다. 옛 자리(cwd 정규화와 sid 발급 **뒤**)에서는 그 구간이 canonicalize 한 번 +
-        //   `agents.json` 통째 쓰기 한 번만큼 벌어져 있었다.
+        //   ★그 구간이 실제로 무엇을 망가뜨리나(「그냥 낡은 값」이 아니다)★: 이 줄이 아래 Fresh 비우기
+        //   보다 뒤로 가면, 비운 칸에 앞 화신의 지각 기록이 표식 가드를 통과해 앉는다. 그러면 이 화신의
+        //   첫 제출 commit 은 칸이 시작 때 본 값(`None`)과 달라 거절되고, 이 화신의 id 는 영속되지 않아
+        //   다음 활성화가 죽은 화신의 대화를 연다(ADR-0226).
         //   ★**그 대가로 「프로필이 사라졌다」를 보는 자리가 늘었다 — 아래 둘도 `?` 로 끊는다**★:
-        //   이 줄이 맨 앞으로 오면서, 여기서 통과한 뒤 sid 발급·명부 읽기 **사이**에 프로필이 지워지는
-        //   창이 생겼다. 그 창을 안 막으면 발급과 읽기가 조용히 `None` 을 돌려주고 spawn 은 계속 가서,
+        //   이 줄이 맨 앞으로 오면서, 여기서 통과한 뒤 비우기·명부 읽기 **사이**에 프로필이 지워지는
+        //   창이 생겼다. 그 창을 안 막으면 비우기와 읽기가 조용히 `None` 을 돌려주고 spawn 은 계속 가서,
         //   이어받기가 말없이 새 대화가 되고 프로필 없는 세션이 명부에 오른다. 옛 배치에서는 이 줄이
         //   맨 뒤라 그 인터리빙이 여기서 걸렸다 — 지금은 세 자리가 각자 건다.
         // ADR-0007
@@ -1216,38 +1270,74 @@ impl AgentManager {
         // cwd 정규화 — claude 세션 디렉토리 표기 고정(UNC 회피). 실패 시 원본 사용(best-effort).
         let cwd = dunce::canonicalize(&profile.cwd).unwrap_or_else(|_| profile.cwd.clone());
 
-        // ★mode 별 sid 발급 규칙(ADR-0076 — "activate=resume, fresh=new sid" 봉인)★:
-        //   - Resume: 저장된 sid 를 그대로 써야 기존 대화를 이어받는다 → ensure_session_id(있으면 그대로,
-        //     드물게 없으면 최초 발급). backend 가 `--resume <sid>` 로 무손실 복원(ADR-0008).
-        //   - Fresh: **반드시 새 sid**. ensure_session_id 를 쓰면 저장된 sid 를 재사용해
-        //     `--session-id <저장 sid>` 로 떠 디스크 세션과 충돌한다("Session ID already in use" → claude
-        //     즉사, 이 세션의 재현 버그). new_session_id 가 항상 새 uuid 를 발급(옛 sid 는 이력 보존).
-        //   spawn_agent 이 이 판정의 단일 권위점이라 어떤 호출자(Spawn/SpawnProfile/restore/fallback)든
-        //   mode 만 맞게 넘기면 sid 충돌이 원천 봉인된다(FIX 2 backend-authoritative).
-        //   ★발급 축 단독으로 판정한다(ADR-0185)★: 「우리가 sid 를 뽑아 건네주나」와 「저장된 sid 로
-        //   이어받을 수 있나」는 다른 질문이다. 뒤엣것으로 여기를 가르면, 자기 id 를 스스로 발급하는
-        //   프로그램에 **그 프로그램이 한 번도 쓰지 않을 uuid** 가 발급돼 프로필에 영속된다.
-        // ★`None` 은 「발급 안 함」이 아니라 「프로필이 사라졌다」다 — 삼키지 말고 끊는다★: 이 두 동사는
-        //   프로필이 있으면 반드시 값을 돌려준다(`m.get_mut(&id)?` 하나만이 `None` 을 만든다). 위 표식
-        //   확정을 통과한 뒤 지워진 경우가 여기로 오는데, 그대로 `None` 으로 흘리면 발급 축이 켜진
-        //   backend 가 **sid 없이** 떠서 Resume 이 말없이 새 대화가 된다.
-        let assigns_sid = backend::assigns_session_id(&profile.command);
-        let sid = if assigns_sid {
-            let issued = match mode {
-                SpawnMode::Resume => self.profiles.ensure_session_id(profile.id),
-                SpawnMode::Fresh => self.profiles.new_session_id(profile.id),
-            };
-            Some(issued.ok_or_else(|| profile_vanished_mid_spawn(profile.id, "세션 id 발급"))?)
-        } else {
-            // ★두 갈래가 Fresh 에서 **같은 일**을 한다 — 옛 손잡이를 이력으로 밀고 빈 칸에서 시작한다★.
-            //   위는 밀고 새 uuid 를 박고(우리가 뽑으므로), 아래는 밀기만 한다(상대가 뽑으므로).
-            //   판정·사유의 정본은 [`fresh_spawn_release_session_id`].
-            // ADR-0185
-            if fresh_spawn_release_session_id(&profile.command, mode) {
-                self.profiles.clear_session_id(profile.id);
+        // ★세션 id 규칙(ADR-0226 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」)★: 여기서는 **아무것도
+        //   새로 영속하지 않는다**. 이 화신의 id 는 첫 제출 래치가 첫 사용자 턴이 나가기 직전에 적는다
+        //   (아래 `SessionIdLatch`). 스폰 때 발급해 영속하는 경로를 되살리지 말 것 — 입력 없이 끈 세션마다
+        //   대화 없는 id 가 남아 다음 활성화가 그 id 로 이어받기에 실패한다.
+        //   - Fresh: 옛 손잡이를 이력으로 밀고 빈 칸에서 시작한다(판정·사유의 정본 =
+        //     [`fresh_spawn_release_session_id`]). 발급하는 backend 는 **반드시 새 sid** 를 뽑는다 — 저장된
+        //     sid 를 재사용하면 `--session-id <저장 sid>` 로 떠 디스크 세션과 충돌한다("Session ID already in
+        //     use" → claude 즉사, ADR-0076).
+        //   - Resume: 저장된 sid 를 **읽기만** 한다 — 아래 손잡이 읽기가 이 spawn 의 유일한 읽기다.
+        //   누구에게 우리 sid 를 건네나(발급 축)의 정본 = [`session_id_to_hand_over`].
+        // ★`None` 은 「밀 것이 없다」가 아니라 「프로필이 사라졌다」다 — 삼키지 말고 끊는다★: 위 표식
+        //   확정을 통과한 뒤 지워진 경우가 여기로 온다.
+        // ADR-0226
+        if fresh_spawn_release_session_id(&profile.command, mode) {
+            self.profiles
+                .release_session_id(profile.id)
+                .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "세션 id 비우기"))?;
+        }
+
+        // ★**호출자가 준 스냅샷이 아니라 명부를 읽는다**★ — `profile` 은 호출자가 뜬 사본이고, 이 칸의
+        //   값은 **우리가 아니라 상대가 쓴다**(codex 가 핸드셰이크에서 준 thread id 를 기록 포트가 명부에
+        //   적는다). 그래서 스냅샷 시점 뒤에 도착한 손잡이는 사본에 없다 — 그걸 읽으면 낡은 스레드로
+        //   이어받는다.
+        //   ★이 읽기가 실제로 값을 갖는 것은 [`ProfileRegistry::upsert_preserving_hierarchy`] 가
+        //   `backend_session_id` 를 보존하게 된 뒤부터다(사용자 결정)★ — 그 전에는 위
+        //   `register_for_spawn` 이 스냅샷으로 이 칸을 덮어써서, 명부를 읽어도 읽히는 것이 스냅샷이었다.
+        // ★읽는 자리가 위 `epoch_for_spawn` **뒤**인 것이 이 읽기의 근거다★ — 표식이 새로 선 뒤부터
+        //   이 화신의 통로가 아래 래치 `offer_sink` 를 받기 전까지, **표식을 들고 오는** 기록은 전부
+        //   거절된다(앞 화신은 불일치, 이 화신의 통로는 아직 없다).
+        //   ★**그것이 「아무도 못 쓴다」는 뜻은 아니다 — 그렇게 적으면 거짓이다**★:
+        //   [`ProfileRegistry::observe_session_id`] 의 `incarnation: None` 갈래는 대조 없이 **무조건
+        //   쓴다**. 그 갈래로 들어오는 운영 호출자가 실재한다 — 데몬 조립점이 [`SessionTracker`] 에 건
+        //   콜백(`engram-dashboard-daemon/src/lib.rs`)이 그것이다.
+        //   그래서 「읽은 값이 얼어 있다」가 성립하는 근거는 표식 하나가 아니라 **그 관측기가 codex
+        //   프로필에는 붙지 않는다**는 사실이다: `tracker.watch` 는 아래에서 `assigns_sid` 게이트 뒤에만
+        //   불리고 codex 는 그 축이 꺼져 있다(ADR-0185). 그 게이트를 이어받기 축으로 바꾸는 날 이 문장이
+        //   먼저 깨지므로, 그때 여기를 함께 볼 것.
+        // ★`get` 이 `None` = 그 사이 프로필이 지워졌다 → **끊는다**★: `and_then` 으로 삼키면 이어받기가
+        //   **말없이 새 대화**가 되고, 그 다음 `spawn_session` 이 프로필 없는 세션을 명부에 올린다. 그 둘 다
+        //   「조용히 새 대화를 만들지 않는다」 규율 정면 위반이라 `?` 로 끊는다.
+        let stored_handle = match mode {
+            SpawnMode::Resume => {
+                self.profiles
+                    .get(profile.id)
+                    .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "이어받기 손잡이 읽기"))?
+                    .backend_session_id
             }
-            None
+            SpawnMode::Fresh => None,
         };
+        // ★이 읽기가 권위다 — 비어 있으면 프로세스를 띄우기 전에 거절한다★: 저장 손잡이로 이어받는
+        //   backend 는 손잡이가 없으면 argv 에서 이어받기 플래그를 **말없이 뺀다**. 그대로 띄우면 우리가
+        //   모르는 id 의 새 대화가 열리고, 판정은 그것을 「이어받음」으로 보고한다. 흔한 경우(명부에 애초에
+        //   없음)는 `resume_no_fallback` 머리가 새 대화로 돌린다 — 여기는 그 판정과 이 읽기 **사이**에
+        //   칸이 비는 경합의 뒷문이고, 같은 술어를 쓴다. 다음 활성화는 손잡이가 없어 새 대화로 간다.
+        // ADR-0226
+        if mode == SpawnMode::Resume
+            && stored_handle.is_none()
+            && backend::can_resume_stored_session(&profile.command)
+        {
+            return Err(PtyError::SpawnFailed(format!(
+                "이어받을 손잡이가 spawn 도중 사라졌다 (agent {}) — 프로세스를 띄우지 않는다",
+                profile.id
+            )));
+        }
+        let resume_session_id = resume_handle_for(mode, stored_handle);
+
+        let assigns_sid = backend::assigns_session_id(&profile.command);
+        let sid = session_id_to_hand_over(&profile.command, mode, stored_handle);
 
         // ADR-0086 ★spec 조립 직전에 부른다★ — build_command_spec 이 endpoint 를 받아 backend 방식
         //   (claude=`--mcp-config`)으로 명령줄에 주입해야 하므로. 화신 표식은 위에서 확정된 현재값이라
@@ -1323,41 +1413,7 @@ impl AgentManager {
         //   쓸지 플래그로 쓸지 아예 안 쓸지는 backend 가 정한다.
         // ★Fresh 면 비워서 넘긴다★ — 값을 실어 보내고 backend 가 모드를 다시 보게 하면 판정이 두 곳이
         //   된다. 그 죽은 화신의 thread id 로 새 대화를 열라는 요청이 Fresh 인데, 여기서 안 비우면 그
-        //   요청이 backend 마다 다르게 해석된다.
-        // ★**호출자가 준 스냅샷이 아니라 명부를 읽는다**★ — `profile` 은 호출자가 뜬 사본이고, 이 칸의
-        //   값은 **우리가 아니라 상대가 쓴다**(codex 가 핸드셰이크에서 준 thread id 를 기록 포트가 명부에
-        //   적는다). 그래서 스냅샷 시점 뒤에 도착한 손잡이는 사본에 없다 — 그걸 읽으면 낡은 스레드로
-        //   이어받는다. 발급 축 backend(claude)가 위에서 [`ProfileRegistry::ensure_session_id`] 로 명부를
-        //   거치는 것과 같은 규율이고, 이 칸만 사본을 읽던 것이 **codex 쪽에서만 벌어져 있던 폭**이다.
-        //   ★이 읽기가 실제로 값을 갖는 것은 [`ProfileRegistry::upsert_preserving_hierarchy`] 가
-        //   `backend_session_id` 를 보존하게 된 뒤부터다(사용자 결정)★ — 그 전에는 위
-        //   `register_for_spawn` 이 스냅샷으로 이 칸을 덮어써서, 명부를 읽어도 읽히는 것이 스냅샷이었다.
-        // ★읽는 자리가 위 `epoch_for_spawn` **뒤**인 것이 이 읽기의 근거다★ — 표식이 새로 선 뒤부터
-        //   아래 `session_id_sink` 를 건네기 전까지, **표식을 들고 오는** 기록은 전부 거절된다(앞 화신은
-        //   불일치, 이 화신의 통로는 아직 없다).
-        //   ★**그것이 「아무도 못 쓴다」는 뜻은 아니다 — 그렇게 적으면 거짓이다**★:
-        //   [`ProfileRegistry::observe_session_id`] 의 `incarnation: None` 갈래는 대조 없이 **무조건
-        //   쓴다**. 그 갈래로 들어오는 운영 호출자가 실재한다 — 데몬 조립점이 [`SessionTracker`] 에 건
-        //   콜백(`engram-dashboard-daemon/src/lib.rs`)이 그것이다.
-        //   그래서 「읽은 값이 얼어 있다」가 성립하는 근거는 표식 하나가 아니라 **그 관측기가 codex
-        //   프로필에는 붙지 않는다**는 사실이다: `tracker.watch` 는 아래에서 `assigns_sid` 게이트 뒤에만
-        //   불리고 codex 는 그 축이 꺼져 있다(ADR-0185). 그 게이트를 이어받기 축으로 바꾸는 날 이 문장이
-        //   먼저 깨지므로, 그때 여기를 함께 볼 것.
-        // ★`get` 이 `None` = 그 사이 프로필이 지워졌다 → **끊는다**★: 위 표식 확정을 통과한 뒤 지워진
-        //   경우가 여기로 온다. `and_then` 으로 삼키면 이어받기가 **말없이 새 대화**가 되고, 그 다음
-        //   `spawn_session` 이 프로필 없는 세션을 명부에 올린다. 그 둘 다 「조용히 새 대화를 만들지
-        //   않는다」 규율 정면 위반이라 `?` 로 끊는다(위 sid 발급과 같은 처분).
-        let stored_handle = match mode {
-            SpawnMode::Resume => {
-                self.profiles
-                    .get(profile.id)
-                    .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "이어받기 손잡이 읽기"))?
-                    .backend_session_id
-            }
-            SpawnMode::Fresh => None,
-        };
-        let resume_session_id = resume_handle_for(mode, stored_handle);
-
+        //   요청이 backend 마다 다르게 해석된다(그 문 = 위 `resume_handle_for`).
         let spec = backend::build_command_spec(
             &profile.command,
             mode,
@@ -1385,14 +1441,15 @@ impl AgentManager {
         //   (`AgentManager::reads_messages` doc).
         // ★이 호출이 자식 프로세스를 띄운다 — 위 transcript 읽기보다 반드시 뒤★: 앞뒤를 바꾸면 그
         //   프로그램이 이미 도는 상태에서 그 대화 파일을 읽게 된다.
-        // ADR-0185: 세션 id 를 **받아 오는** backend(codex app-server)가 그 값을 프로필에 남길 통로를 여기서
-        //   건넨다.
+        // ADR-0185: 세션 id 를 **받아 오는** backend(codex)가 그 값을 알릴 곳을 여기서 건넨다 — 받는 쪽은
+        //   이 화신의 첫 제출 래치다(ADR-0226). 래치는 첫 사용자 턴이 나가기 직전에야 명부에 적는다.
         // ★무조건 건네는 것이 의도다 — `receives_session_id()` 같은 선언 축을 새로 만들지 않았다★:
         //   이 자리의 형제 둘(`supports_control_channel` · `accepts_mcp_config`)이 선언으로 갈리는 것은
         //   **주면 효과가 나기 때문**이다(토큰·config 파일 발급). 이 칸은 반대다 — 안 읽는 backend 에게는
         //   아무 효과도 없어서, 축을 세우면 같은 판정이 두 곳(선언 표 + impl)에 적히고 둘이 어긋날 수 있다.
         //   판정 지점은 impl 하나로 둔다.
-        //   위에서 확정된 `epoch` 을 그대로 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음 화신을 덮지 않게 한다.
+        //   래치의 commit 포트가 위에서 확정된 `epoch` 을 묶어, 이 spawn 이 죽은 뒤 도착한 기록이 다음
+        //   화신을 덮지 않게 한다.
         // ★연결을 선언하는 backend 에만 배달 포트를 깐다★ — 없는 곳에 깔면 아무도 안 부르는 채널을
         //   감독자가 기다리게 되고, 그 backend 의 판정은 옛 경로 그대로여야 한다(claude·shell·stdio·
         //   codex 터미널은 여기서 `None` 이 되어 바이트 단위로 같은 길을 간다).
@@ -1404,12 +1461,27 @@ impl AgentManager {
         } else {
             (None, None)
         };
+        // ★발급하는 backend 는 **여기서, `open_spawn` 보다 먼저** 제 id 를 래치에 넣는다★: 세션은 아래
+        //   명부 등록 순간부터 입력을 받고, 뒤이은 명부 공표가 파킹된 우편을 곧바로 흘려보낸다. 그보다 늦게
+        //   넣으면 첫 제출이 id 를 모르는 채 나가 commit 이 턴보다 늦는다. 판정은 backend 이름이 아니라
+        //   `sid` 를 쥐었나(발급 축) 하나라 백엔드 중립이다 — Fresh 는 방금 뽑은 값, Resume 은 읽은 저장값이다.
+        // ★commit 이 비교할 값 = 이 화신이 시작할 때 본 칸의 값(`stored_handle` — Fresh 는 위에서 비운 뒤라
+        //   `None`)★: 그 사이 다른 기록자(claude 파일 감시자)가 칸을 바꿨으면 commit 은 되감지 않고 거절한다.
+        // ADR-0226
+        let latch = SessionIdLatch::new(
+            profile.id,
+            epoch,
+            session_id_sink(self.profiles.clone(), profile.id, epoch, stored_handle),
+        );
+        if let Some(s) = sid {
+            latch.offer(&s.to_string());
+        }
         let parts = backend::open_spawn(
             &profile.command,
             &spec,
             DEFAULT_COLS,
             DEFAULT_ROWS,
-            Some(session_id_sink(self.profiles.clone(), profile.id, epoch)),
+            Some(latch.offer_sink()),
             resume_session_id,
             link_sink,
             // ★위 `build_command_spec` 에 넘긴 것과 **같은 endpoint** 다★ — 명령줄로 번역할 것은 거기서
@@ -1419,8 +1491,13 @@ impl AgentManager {
             control_endpoint.as_ref(),
         )?;
 
+        // ADR-0226: 이 화신 사실은 세션만 든다(wire 에 싣는 것은 구독 응답이다).
+        let incarnation = SpawnIncarnation {
+            continues_conversation: resume_session_id.is_some(),
+            latch,
+        };
         let (session, child_pid) =
-            self.spawn_session(profile.id, spec, parts, epoch, seed_events)?;
+            self.spawn_session(profile.id, spec, parts, epoch, seed_events, incarnation)?;
 
         if let Some(g) = provision_guard.as_mut() {
             g.disarm();
@@ -1795,7 +1872,15 @@ impl AgentManager {
         parts: backend::SpawnParts,
         epoch: u32,
         seed_events: Vec<OutputEvent>,
+        incarnation: SpawnIncarnation,
     ) -> Result<(Arc<AgentSession>, Option<u32>), PtyError> {
+        // ★이름째 해체한다 — `{ latch: _, .. }` 로 버리지 말 것★: 필수 인자는 래치를 여기까지만 끌고
+        //   오고 세션에 싣는 것은 강제하지 못한다(그 배선은 구조 시험이 잰다 — `SpawnIncarnation` doc).
+        // ADR-0226
+        let SpawnIncarnation {
+            continues_conversation,
+            latch,
+        } = incarnation;
         let backend::SpawnParts {
             transport,
             child_pid,
@@ -1856,19 +1941,23 @@ impl AgentManager {
             }));
         }
 
-        let session = Arc::new(AgentSession::new(
-            id,
-            spec.cwd.clone(),
-            epoch,
-            DEFAULT_COLS,
-            DEFAULT_ROWS,
-            intent,
-            backend_caps,
-            encoder,
-            reads_messages,
-            core,
-            transport,
-        ));
+        let session = Arc::new(
+            AgentSession::new(
+                id,
+                spec.cwd.clone(),
+                epoch,
+                DEFAULT_COLS,
+                DEFAULT_ROWS,
+                intent,
+                backend_caps,
+                encoder,
+                reads_messages,
+                core,
+                transport,
+            )
+            .with_incarnation(continues_conversation)
+            .with_session_id_latch(latch),
+        );
 
         // ★ADR-0113 턴 관측 자리 선점 — sessions 맵 insert 보다 **먼저**★: 이 화신이 그 id 의 항목을
         //   차지한다(앞 화신의 항목이 있으면 갈아치운다). insert 전이라 아직 아무 스레드도 이 core 에
@@ -1962,7 +2051,8 @@ impl AgentManager {
     }
 
     /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
-    /// 전제: 호출 시점에 이 프로필은 resumable(claude + sid 존재)이라고 이미 판정됐다.
+    /// 전제: 호출 시점에 이 프로필은 resumable(claude + sid 존재)이라고 이미 판정됐다 — 명시 resume 요청은
+    /// 손잡이 없이도 오는데, 저장 손잡이로 이어받는 backend 의 그 요청은 머리에서 새 대화로 맡긴다(ADR-0226).
     ///
     /// resume 을 시도하고, spawn 실패거나 EARLY_EXIT_WINDOW 안에 **비정상 종료하거나 진단 스트림이
     /// 실패를 말하면**(빈/미대화/손상 세션이면 claude 가 "No conversation found ..." 를 stderr 로 낸다)
@@ -1986,28 +2076,41 @@ impl AgentManager {
     // ADR-0082
     // ADR-0172
     fn resume_no_fallback(&self, profile: &AgentProfile) -> (RestoreOutcome, Option<AgentInfo>) {
-        // ★이 시도가 **실제로 이어받는가**를 spawn 전에 확정한다(사용자 결정)★ — 「새 대화를 열어 놓고
-        //   이어받았다고 보고하지 않는다」.
-        //   조건 둘이 다 참일 때만 「이어받기인 척하는 새 대화」가 된다: ① 이어받기 요청을 **통로가**
-        //   내는 backend 다(= 손잡이를 우리가 발급하지 않는다 — 발급하는 쪽은 `ensure_session_id` 가
-        //   반드시 값을 만들어 주므로 이 창이 없다) ② 그런데 명부에 손잡이가 없다.
+        // ★이어받을 손잡이가 없는 이어받기 요청은 **새 대화로 연다** — 고름이 아니라 사용자 결정 D1 의
+        //   귀결이다(「저장된 id 가 있다 ⟺ 이어받을 대화가 있다 · id 없음 → Fresh」)★.
         //   ★그 조합에 실제로 들어오는 것은 WS `SpawnProfile` 의 `resume: true` 명시 요청이다★ — 그
-        //   플래그는 저장된 세션이 없어도 Resume 으로 남기므로(그 자리 주석), codex 에서는 통로가
-        //   `thread/start` 로 **새 스레드**를 연다. claude 는 ①에서 걸러져 옛 경로 그대로다.
-        //   ★동작을 바꾸지 않는다 — 바꾸는 것은 **보고**뿐이다★: 아무것도 덮어쓰지 않고(덮어쓸 손잡이가
-        //   애초에 없다) 새 대화는 그대로 뜬다. 다만 그 결말을 `Resumed` 가 아니라 `Started` 로 낸다.
-        let opens_a_new_conversation = !backend::assigns_session_id(&profile.command)
-            && backend::can_resume_stored_session(&profile.command)
+        //   플래그는 저장된 세션이 없어도 Resume 으로 남긴다(그 자리 주석).
+        //   ★Resume 으로 띄워 보고만 바꾸지 않고 Fresh 경로에 통째로 맡긴다★: 저장 손잡이로 이어받는
+        //   backend 는 손잡이가 없으면 이어받기 플래그를 말없이 빼고 뜨므로, Resume 으로 띄우면 모르는
+        //   id 의 새 대화를 「이어받음」으로 보고하게 된다. 결말은 `Resumed` 가 아니라 `Started` 다.
+        //   ★「새 대화를 만들지 않는다」(ADR-0082)와 부딪히지 않는다★ — 그 결정이 지키는 것은 **이어받을
+        //   대화가 있는** 요청이고, 여기는 이어받을 것이 애초에 없는 요청이다(정상 생성).
+        //   이 판정은 흔한 경우를 싸게 거르는 앞문이고, 이 판정과 spawn 안의 손잡이 읽기 사이에 칸이 비는
+        //   경합은 spawn 이 프로세스를 띄우기 전에 거절한다(같은 술어).
+        //   shell 처럼 저장 손잡이로 이어받지 않는 backend 는 여기 안 걸리고 옛 길 그대로다.
+        // ADR-0226
+        let opens_a_new_conversation = backend::can_resume_stored_session(&profile.command)
             && self
                 .profiles
                 .get(profile.id)
                 .and_then(|p| p.backend_session_id)
                 .is_none();
         if opens_a_new_conversation {
-            tracing::warn!(
+            // 정상 수명주기라 info 다 — 이어받을 대화가 없는 요청의 정해진 결말이다(D1).
+            tracing::info!(
                 agent = %profile.id,
                 "이어받기 요청인데 저장된 손잡이가 없다 — 새 대화를 연다(결말은 `Resumed` 가 아니라 `Started` 로 보고한다)"
             );
+            // 기록은 새 대화 경로 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다.
+            return match self.spawn_fresh_settled(profile) {
+                Ok(outcome) => (RestoreOutcome::Started, outcome.into_info()),
+                Err(e) => (
+                    RestoreOutcome::Failed {
+                        reason: format!("새 대화 spawn 실패: {e}"),
+                    },
+                    None,
+                ),
+            };
         }
 
         let (outcome, watch) = match self.spawn_agent_watching_link(profile, SpawnMode::Resume) {
@@ -2169,15 +2272,8 @@ impl AgentManager {
             // ★claude 는 이 갈래로 오지 않는다★ — 그쪽 통로는 연결 축이 없어 아래 `Alive` 로 간다.
             //   지움 규칙을 그쪽으로 넓히지 말 것(별건이고, 그 경로는 이 결정의 범위 밖이다).
             EarlyVerdict::Ready => {
-                // ★여기서 두 결말이 갈린다★ — 활성화는 똑같이 성립했지만 **무엇이 성립했는지**가 다르다.
-                //   `Started` 는 이미 있던 어휘다(「이어받기 대상이 아니라 새 세션을 시작함」) — 새 칸을
-                //   만들지 않고 그 뜻 그대로 쓴다.
-                let outcome = if opens_a_new_conversation {
-                    RestoreOutcome::Started
-                } else {
-                    RestoreOutcome::Resumed
-                };
-                (outcome, Some(spawned))
+                // 손잡이 없는 요청은 위 머리에서 새 대화로 빠졌으므로 여기 오는 것은 이어받기뿐이다.
+                (RestoreOutcome::Resumed, Some(spawned))
             }
             EarlyVerdict::Alive => {
                 // ★조기종료 창을 넘겼고 진단도 침묵했다 = 이어받을 대화가 실재했다★ — 여기가 「지움」의
@@ -2186,12 +2282,7 @@ impl AgentManager {
                 //   선언하는 통로는 위 `Ready`/`LinkFailed` 에서 이미 갈린다. 그래서 지움 규칙이 여기
                 //   남아 있는 것이 claude 경로를 그대로 두는 것과 같은 말이다.
                 self.note_activation_result(profile.id, Some(spawned.epoch), None);
-                let outcome = if opens_a_new_conversation {
-                    RestoreOutcome::Started
-                } else {
-                    RestoreOutcome::Resumed
-                };
-                (outcome, Some(spawned))
+                (RestoreOutcome::Resumed, Some(spawned))
             }
         }
     }
@@ -2542,8 +2633,11 @@ impl AgentManager {
         Ok(session.subscribe(sink))
     }
 
-    /// `epoch_matches` 는 데몬이 요청 epoch 과 세션 현재 epoch 을 비교해 넘긴다 — 코어는 protocol
-    /// 무의존이라 epoch 비교를 외부에서 받는다.
+    /// `requested_epoch` = 구독자가 마지막으로 본 화신 표식. 세션이 자기 표식과 대조한다.
+    ///
+    /// ★세션 조회는 한 번이다 — 두 번째 조회를 더하지 말 것★: 응답의 화신 표식·이어받기 표식과 replay 가
+    ///   같은 세션에서 나와야 한다. 따로 조회하면 그 사이에 화신이 갈려 표식이 replay 한 것과 다른 화신을
+    ///   말한다.
     ///
     /// ## ★계약: `Err` ⟹ `on_ready` 는 한 번도 불리지 않는다(load-bearing — 깨면 출력이 죽는다)★
     /// 실패는 **세션 조회 하나뿐**이고 그건 구조적으로 `on_ready` 를 넘기기 *전*이다. 이 순서에 데몬의
@@ -2555,16 +2649,17 @@ impl AgentManager {
     /// 대해 함께 나가고 클라이언트가 이미 푼 슬롯 위로 늦은 Ack/Complete 가 도착해 **replay 가 돌지 않은
     /// 세대에 성공 마커**가 붙는다(gen 펜스 붕괴). 새 실패 갈래가 필요하면 `on_ready` 앞에 두거나, 거절
     /// 통보의 계약을 함께 고쳐야 한다. 회귀망 = `subscribe_from_err_never_invokes_on_ready`.
+    // ADR-0226
     pub fn subscribe_from(
         &self,
         agent_id: AgentId,
         sink: Arc<dyn OutputSink>,
         after_seq: Option<u64>,
-        epoch_matches: bool,
-        on_ready: impl FnOnce(&SubscribeOutcome),
-    ) -> Result<SubscribeOutcome, PtyError> {
+        requested_epoch: Option<u32>,
+        on_ready: impl FnOnce(&SubscribeReply),
+    ) -> Result<SubscribeReply, PtyError> {
         let session = self.get_session(agent_id)?;
-        Ok(session.subscribe_from(sink, after_seq, epoch_matches, on_ready))
+        Ok(session.subscribe_from(sink, after_seq, requested_epoch, on_ready))
     }
 
     pub fn unsubscribe(&self, agent_id: AgentId, sink_id: SinkId) -> Result<(), PtyError> {
@@ -2743,6 +2838,8 @@ impl AgentManager {
     }
 
     /// list_agents 전체 순회·AgentInfo 조립(profiles lock)을 피해 epoch 만 보는 경량 형제.
+    /// ★운영 호출자는 없다★ — 구독 응답의 표식은 `subscribe_from` 의 reply 가 싣는다(ADR-0226). 남은
+    ///   소비자는 daemon 통합 시험(`tests/ws_e2e.rs`)이다.
     pub fn agent_epoch(&self, agent_id: AgentId) -> Option<u32> {
         self.sessions
             .read()
@@ -2963,22 +3060,22 @@ mod tests {
         assert!(!fresh_spawn_release_session_id(&shell, SpawnMode::Fresh));
         assert!(!fresh_spawn_release_session_id(&shell, SpawnMode::Resume));
 
-        // 우리가 발급하는 쪽 — `new_session_id` 가 같은 밀기를 이미 한다.
-        assert!(!fresh_spawn_release_session_id(&claude, SpawnMode::Fresh));
+        // 우리가 발급하는 쪽 — 새 값은 첫 제출 때에야 적히므로 Fresh 도 빈 칸에서 시작한다(ADR-0226).
+        assert!(fresh_spawn_release_session_id(&claude, SpawnMode::Fresh));
         assert!(!fresh_spawn_release_session_id(&claude, SpawnMode::Resume));
     }
 
-    /// app-server 는 통로 sink 가 곧바로 채우므로 반납의 영향을 받지 않는다 — 비우고 sink 가 쓰면 끝이다.
+    /// 비운 칸은 commit 포트가 곧바로 채운다 — Fresh 의 commit 이 비교할 값은 비운 뒤의 `None` 이다.
     #[test]
     fn releasing_the_handle_does_not_disturb_a_transport_that_refills_it() {
         let (profiles, id, epoch) = sink_fixture();
         profiles.observe_session_id(id, Some(epoch), Uuid::new_v4());
         let next_epoch = profiles.epoch_for_spawn(id).expect("프로필");
-        profiles.clear_session_id(id);
+        assert_eq!(profiles.release_session_id(id), Some(true));
 
         // 통로가 핸드셰이크 응답으로 받은 값을 그 자리에 적는다(운영과 같은 동사).
         let from_transport = Uuid::new_v4();
-        session_id_sink(profiles.clone(), id, next_epoch)(&from_transport.to_string());
+        session_id_sink(profiles.clone(), id, next_epoch, None)(&from_transport.to_string());
 
         assert_eq!(
             profiles.get(id).and_then(|p| p.backend_session_id),
@@ -2986,11 +3083,94 @@ mod tests {
         );
     }
 
+    /// ★commit 포트는 비교-교체다 — 첫 제출 전에 다른 기록자가 바꾼 칸을 되감지 않는다(ADR-0226)★.
+    ///
+    /// claude 파일 감시자가 대조 없이 쓴 값(Y)이 칸에 있을 때, 이 화신의 포트가 시작 때 본 값(S)으로
+    /// commit 하면 거절돼야 한다. 덮어쓰기로 바뀌면 Y 가 S 로 되감기고 Y 가 이력으로 밀린다.
+    #[test]
+    fn the_commit_port_does_not_rewind_a_value_another_writer_set() {
+        let (profiles, id, epoch) = sink_fixture();
+        let started_with = Uuid::new_v4();
+        assert!(profiles.observe_session_id(id, Some(epoch), started_with));
+        let tracker_wrote = Uuid::new_v4();
+        assert!(profiles.observe_session_id(id, None, tracker_wrote));
+        let history = profiles.get(id).expect("프로필").old_session_ids;
+
+        session_id_sink(profiles.clone(), id, epoch, Some(started_with))(&started_with.to_string());
+
+        let p = profiles.get(id).expect("프로필");
+        assert_eq!(
+            p.backend_session_id,
+            Some(tracker_wrote),
+            "포트가 다른 기록자의 값을 시작 때 값으로 되감았다 — 덮어쓰기 동사로 바뀌었다"
+        );
+        assert_eq!(p.old_session_ids, history, "거절인데 이력이 움직였다");
+    }
+
+    /// ★우리 sid 는 발급 축 backend 에만 나간다(ADR-0185 · ADR-0226)★ — 선언 표를 **읽어서** 잰다.
+    ///
+    /// 자기 id 를 스스로 발급하는 backend(codex)에 값이 나가면, 그 값이 `open_spawn` 보다 먼저 래치에
+    /// 들어가고 backend 는 argv 에서 버리며 상대가 준 진짜 id 는 래치의 둘째 offer 로 버려진다 — 첫 제출이
+    /// 가짜 값을 영속해 그 뒤 모든 이어받기가 조용히 실패한다. 저장값이 **있어도** 안 나가야 한다(이어받기
+    /// 축으로 판정이 갈리면 여기서 걸린다).
+    #[test]
+    fn only_a_backend_that_assigns_ids_gets_one_handed_over() {
+        use crate::profile::AgentOutputFormat as Fmt;
+        let stored = Some(Uuid::new_v4());
+        let shell = AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        for c in [codex(Fmt::Terminal), codex(Fmt::StreamJson), shell] {
+            for mode in [SpawnMode::Fresh, SpawnMode::Resume] {
+                assert_eq!(
+                    session_id_to_hand_over(&c, mode, stored),
+                    None,
+                    "{c:?} {mode:?}: 우리가 발급하지 않는 backend 에 sid 가 나갔다"
+                );
+            }
+        }
+
+        for format in [Fmt::Terminal, Fmt::StreamJson] {
+            let claude = AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: format,
+            };
+            assert_eq!(
+                session_id_to_hand_over(&claude, SpawnMode::Resume, stored),
+                stored,
+                "{claude:?}: Resume 은 읽은 저장값을 건넨다"
+            );
+            let minted = session_id_to_hand_over(&claude, SpawnMode::Fresh, stored);
+            assert!(
+                minted.is_some() && minted != stored,
+                "{claude:?}: Fresh 는 새로 뽑은 값이어야 한다(저장값 재사용 금지 — ADR-0076): {minted:?}"
+            );
+        }
+    }
+
+    /// ★포트가 `expected` 를 옮기는 방어 절★ — 성공한 commit 뒤 같은 포트의 둘째 호출은 첫 값을 「이 화신이
+    /// 본 값」으로 보고 교체한다. 래치가 화신당 한 번만 부르므로 운영에서는 닿지 않는 갈래다.
+    #[test]
+    fn a_commit_port_moves_its_expected_value_after_a_successful_commit() {
+        let (profiles, id, epoch) = sink_fixture();
+        let port = session_id_sink(profiles.clone(), id, epoch, None);
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+
+        port(&first.to_string());
+        port(&second.to_string());
+
+        let p = profiles.get(id).expect("프로필");
+        assert_eq!(p.backend_session_id, Some(second));
+        assert_eq!(p.old_session_ids, vec![first]);
+    }
+
     /// 빈 칸을 또 비우는 것은 무동작이다(저장도 안 탄다).
     #[test]
     fn releasing_an_empty_handle_changes_nothing() {
         let (profiles, id, _) = sink_fixture();
-        assert!(!profiles.clear_session_id(id));
+        assert_eq!(profiles.release_session_id(id), Some(false));
         assert_eq!(profiles.get(id).and_then(|p| p.backend_session_id), None);
         assert!(profiles.get(id).expect("프로필").old_session_ids.is_empty());
     }
@@ -3020,7 +3200,7 @@ mod tests {
         let (profiles, id, epoch) = sink_fixture();
         let sid = uuid::Uuid::new_v4();
 
-        session_id_sink(profiles.clone(), id, epoch)(&sid.to_string());
+        session_id_sink(profiles.clone(), id, epoch, None)(&sid.to_string());
 
         assert_eq!(profiles.get(id).unwrap().backend_session_id, Some(sid));
     }
@@ -3030,12 +3210,12 @@ mod tests {
     #[test]
     fn a_dead_incarnations_sink_cannot_overwrite_a_live_value() {
         let (profiles, id, dead_epoch) = sink_fixture();
-        let dead_sink = session_id_sink(profiles.clone(), id, dead_epoch);
+        let dead_sink = session_id_sink(profiles.clone(), id, dead_epoch, None);
 
         // 새 화신이 서고 자기 값을 적는다.
         let live_epoch = profiles.epoch_for_spawn(id).expect("프로필은 그대로다");
         let live_sid = uuid::Uuid::new_v4();
-        session_id_sink(profiles.clone(), id, live_epoch)(&live_sid.to_string());
+        session_id_sink(profiles.clone(), id, live_epoch, None)(&live_sid.to_string());
 
         // 죽은 화신의 통로가 이제야 자기 thread id 를 들고 돌아온다.
         dead_sink(&uuid::Uuid::new_v4().to_string());
@@ -3051,7 +3231,7 @@ mod tests {
     #[test]
     fn a_non_uuid_session_id_is_dropped_without_panicking() {
         let (profiles, id, epoch) = sink_fixture();
-        let sink = session_id_sink(profiles.clone(), id, epoch);
+        let sink = session_id_sink(profiles.clone(), id, epoch, None);
 
         sink("not-a-uuid");
         sink("");
@@ -3079,9 +3259,10 @@ mod tests {
     #[test]
     fn a_non_uuid_thread_id_leaves_the_stored_one_diverged() {
         let (profiles, id, epoch) = sink_fixture();
-        let stored = profiles.ensure_session_id(id).expect("갓 넣은 프로필");
+        let stored = Uuid::new_v4();
+        assert!(profiles.observe_session_id(id, Some(epoch), stored));
 
-        session_id_sink(profiles.clone(), id, epoch)("resumed-abc");
+        session_id_sink(profiles.clone(), id, epoch, Some(stored))("resumed-abc");
 
         assert_eq!(
             profiles.get(id).unwrap().backend_session_id,
@@ -4246,13 +4427,67 @@ mod tests {
         let manager = bare_manager();
         let missing = AgentId::new_v4(); // 맵에 없는 id — get_session 이 실패한다.
         let mut ready_calls = 0usize;
-        let res = manager.subscribe_from(missing, Arc::new(NoopSink), None, false, |_| {
+        let res = manager.subscribe_from(missing, Arc::new(NoopSink), None, None, |_| {
             ready_calls += 1;
         });
         assert!(res.is_err(), "없는 에이전트 구독은 Err");
         assert_eq!(
             ready_calls, 0,
             "Err 경로에서 on_ready(=SubscribeAck) 발행 0"
+        );
+    }
+
+    /// ★구독 응답의 화신 사실은 replay 한 그 세션에서 나온다★ — `on_ready`(= 데몬의 Ack)가 받은 것과
+    ///   돌려받은 것(= 데몬의 `ReplayComplete`)이 같은 화신을 말하고, 표식 대조도 그 세션이 한다.
+    // ADR-0226
+    #[test]
+    fn subscribe_from_reports_the_incarnation_it_replayed_from() {
+        struct NoopSink;
+        impl OutputSink for NoopSink {
+            fn send(
+                &self,
+                _frame: crate::types::OutputFrame<'_>,
+            ) -> Result<(), crate::types::SinkError> {
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                SinkId::nil()
+            }
+        }
+
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        put_session(&manager, id, 3);
+
+        let mut at_ready = None;
+        let reply = manager
+            .subscribe_from(id, Arc::new(NoopSink), Some(0), Some(3), |r| {
+                at_ready = Some(r.incarnation)
+            })
+            .expect("명부에 있다");
+        let expected = crate::types::Incarnation {
+            epoch: 3,
+            continues_conversation: false,
+        };
+        assert_eq!(reply.incarnation, expected, "기본 세션 = 이어받기 아님");
+        assert_eq!(
+            at_ready,
+            Some(expected),
+            "on_ready 와 반환이 같은 화신을 말해야 한다"
+        );
+        assert_eq!(
+            reply.outcome.kind,
+            crate::types::ReplayKind::Resumed,
+            "요청 표식이 세션 표식과 같으면 seq 이어받기"
+        );
+
+        let stale = manager
+            .subscribe_from(id, Arc::new(NoopSink), Some(0), Some(4), |_| {})
+            .expect("명부에 있다");
+        assert_eq!(
+            stale.outcome.kind,
+            crate::types::ReplayKind::FromOldest,
+            "표식이 다르면 처음부터"
         );
     }
 
@@ -5640,8 +5875,8 @@ mod tests {
     /// 못 박는 것 둘:
     ///   1. `register_for_spawn` **바로 뒤**가 `epoch_for_spawn` 이다. 앞엣것은 live 표식을 **보존**하므로
     ///      (ADR-0084) 그 사이 구간에는 여전히 **앞 화신의 표식**이 서 있고, 그 구간에 도착한 앞 화신의
-    ///      지각 기록은 표식이 일치해 **거절되지 않는다**. 사이에 cwd 정규화(syscall)나 sid 발급
-    ///      (`agents.json` 통째 쓰기)이 끼면 그 구간이 실제로 벌어진다 — 옛 배치가 그랬다.
+    ///      지각 기록은 표식이 일치해 **거절되지 않는다**. 사이에 cwd 정규화(syscall)나 Fresh 비우기
+    ///      (`agents.json` 통째 쓰기)가 끼면 그 구간이 실제로 벌어진다.
     ///   2. 이어받기 손잡이를 읽는 자리가 `epoch_for_spawn` **뒤**다. 표식이 바뀐 뒤부터 이 spawn 이
     ///      기록 포트를 건네기 전까지는 어떤 화신의 기록도 통과하지 못해 명부 값이 얼어 있고, 그래서
     ///      「읽은 값 = 이 화신이 이어받는 값」이 성립한다.
@@ -5741,8 +5976,8 @@ mod tests {
         assert!(
             code[registered + 1].starts_with("let epoch"),
             "`register_for_spawn` 다음 실행 줄이 표식 바인딩이 아니다 — 그만큼 앞 화신의 표식이 명부에 \
-             서 있는 구간이 벌어지고, 그 구간에 도착한 지각 기록이 갓 발급한 sid 를 덮는다(옛 배치가 \
-             canonicalize + `agents.json` 쓰기만큼 벌어져 있었다): {:?}",
+             서 있는 구간이 벌어지고, 그 구간에 도착한 지각 기록이 비운 칸에 앉아 이 화신의 첫 제출 \
+             commit 을 거절되게 만든다: {:?}",
             code[registered + 1]
         );
 
@@ -5774,6 +6009,126 @@ mod tests {
             binding.iter().any(|l| l.contains("profile_vanished_mid_spawn")),
             "프로필 부재를 끊지 않는다 — `and_then` 으로 삼키면 이어받기가 조용히 새 대화가 된다: {binding:?}"
         );
+    }
+
+    /// 운영 구획에서 `start` 와 `end` 사이 함수 본문을 잘라 **주석 줄을 빼고 공백을 전부 지운** 문자열로 준다
+    /// — rustfmt 가 줄을 어떻게 쪼개든 같은 호출이 같은 문자열로 잡힌다. 끝 쉼표(`,}`·`,)`)는 접는다.
+    fn squashed_production_body(start: &str, end: &str) -> String {
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let body = production
+            .split(start)
+            .nth(1)
+            .unwrap_or_else(|| panic!("`{start}` 가 운영 구획에 없다 — 이 항목의 전제가 낡았다"))
+            .split(end)
+            .next()
+            .expect("다음 함수까지");
+        body.lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<String>()
+            .replace(",}", "}")
+            .replace(",)", ")")
+    }
+
+    /// ★첫 제출 래치가 spawn 경로에 실제로 실린다(ADR-0226)★ — 배선을 소스에서 못 박는다.
+    ///
+    /// 못 박는 것:
+    ///   ① `open_spawn` 의 기록 포트 자리가 래치의 `offer_sink` 이고, 명부에 곧바로 쓰는 옛 포트가 없다.
+    ///   ② 발급한 값의 `offer` 가 `open_spawn` 보다 **앞**이고, 그 값은 발급 축 판정
+    ///      (`session_id_to_hand_over`)을 거친 것이다 — 세션은 명부 등록 순간부터 입력을 받으므로 늦으면 첫
+    ///      제출이 id 를 모르는 채 나가 commit 이 턴보다 늦는다.
+    ///   ③ 같은 래치가 `spawn_session` 으로 가고, 그 함수는 머리에서 `SpawnIncarnation` 을 **이름째**
+    ///      해체해 `.with_incarnation(` 과 `.with_session_id_latch(` 를 **둘 다** 부른다. 운영 구획에 스폰 때
+    ///      발급해 영속하던 옛 동사가 없다.
+    /// ★③ 의 `.with_session_id_latch(` 단언을 빼지 말 것★ — 필수 인자는 래치를 함수까지만 끌고 오고 세션에
+    ///   싣는 것은 강제하지 못한다(`{ latch: _, .. }` 로 버려도 컴파일되고, 이름째 해체한 뒤 안 써도
+    ///   경고일 뿐이다). 그 빌더가 빠지면 제출이 한 번도 안 세어져 **모든 이어받기가 조용히 사라진다.**
+    ///   실 프로세스 짝 = `tests/activation.rs` 의
+    ///   `d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission`.
+    #[test]
+    fn the_first_submission_latch_is_wired_through_the_spawn_path() {
+        let spawning =
+            squashed_production_body("fn spawn_agent_watching_link(", "pub fn activate_profile(");
+        assert!(
+            spawning.contains("Some(latch.offer_sink())"),
+            "`open_spawn` 의 기록 포트가 래치의 수령 포트가 아니다 — 받아 온 id 가 래치를 비켜 간다"
+        );
+        assert!(
+            !spawning.contains("Some(session_id_sink("),
+            "명부에 곧바로 쓰는 포트가 통로에 다시 건네진다 — 0턴 화신의 id 가 영속된다"
+        );
+        assert!(
+            spawning.contains(
+                "letlatch=SessionIdLatch::new(profile.id,epoch,session_id_sink(self.profiles.clone(),profile.id,epoch,stored_handle))"
+            ),
+            "래치의 commit 포트가 이 화신의 표식·시작 때 본 값으로 묶이지 않았다"
+        );
+        // 래치에 넣는 값은 발급 축 판정을 거친 것이어야 한다 — 그 판정 자체는
+        //   `only_a_backend_that_assigns_ids_gets_one_handed_over` 가 잰다.
+        assert!(
+            spawning
+                .contains("letsid=session_id_to_hand_over(&profile.command,mode,stored_handle);"),
+            "래치에 넣을 sid 가 발급 축 판정(`session_id_to_hand_over`)을 거치지 않는다"
+        );
+        let offer = spawning.find("ifletSome(s)=sid{latch.offer(").expect(
+            "발급한 값을 래치에 넣는 줄이 없다 — 발급하는 backend 의 id 가 영영 commit 되지 않는다",
+        );
+        let open = spawning
+            .find("backend::open_spawn(")
+            .expect("`open_spawn` 호출");
+        assert!(
+            offer < open,
+            "발급한 값의 offer 가 `open_spawn` 보다 뒤다 — 첫 제출이 id 를 모르는 채 나갈 수 있다"
+        );
+        assert!(
+            spawning.contains(
+                "SpawnIncarnation{continues_conversation:resume_session_id.is_some(),latch}"
+            ),
+            "spawn 이 만든 그 래치가 `SpawnIncarnation` 에 실리지 않는다"
+        );
+        assert!(
+            spawning.contains(
+                "self.spawn_session(profile.id,spec,parts,epoch,seed_events,incarnation)"
+            ),
+            "`SpawnIncarnation` 이 `spawn_session` 으로 가지 않는다"
+        );
+
+        let session = squashed_production_body("fn spawn_session(", "pub fn restore_all(");
+        let head = session
+            .find("letSpawnIncarnation{continues_conversation,latch}=incarnation;")
+            .expect("`spawn_session` 이 `SpawnIncarnation` 을 이름째 해체하지 않는다");
+        let parts = session
+            .find("letbackend::SpawnParts{")
+            .expect("`SpawnParts` 해체");
+        assert!(
+            head < parts,
+            "`SpawnIncarnation` 해체가 함수 머리에 있지 않다"
+        );
+        assert!(
+            session.contains(".with_incarnation(continues_conversation)"),
+            "세션에 화신 사실이 실리지 않는다"
+        );
+        assert!(
+            session.contains(".with_session_id_latch(latch)"),
+            "세션에 래치가 실리지 않는다 — 제출이 한 번도 안 세어져 모든 이어받기가 조용히 사라진다"
+        );
+
+        let src = include_str!("manager.rs");
+        let production = src.split("mod tests {").next().expect("운영 구획");
+        let code: String = production
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.starts_with("//"))
+            .collect();
+        for verb in [".ensure_session_id(", ".new_session_id("] {
+            assert!(
+                !code.contains(verb),
+                "스폰 때 발급해 영속하는 옛 동사 `{verb}` 가 운영 구획에 돌아왔다"
+            );
+        }
     }
 
     /// ★실 프로세스로 보는 이유★: 표식 발급은 `spawn_agent` 안에 있고, 그 자리를 타는지는 실 spawn 만이

@@ -16,6 +16,9 @@
 // ★빈 상태(ADR-0145)★: 복원 완료 신호('live') + 0건 + 미전송일 때만 표식·제품명·가운데
 //   입력창을 그린다. 판정에만 개입하고 구독·누산·전송 경로는 건드리지 않는다. 입력창은 두 배치가
 //   같은 엘리먼트다(전송·IME·포커스 가드를 한 벌로 유지 — 갈라 두지 말 것).
+//   ★이어받기 화신은 빈 상태 대신 로딩을 그린다(ADR-0226)★: 'live' 가 "저장된 대화를 이어받으려고 뜬
+//   화신" 이라고 알리면, 행을 그리는 이력이 오거나 · 사용자가 보내거나 · 에이전트가 부재가 될 때까지 대화
+//   영역에 로딩 패널을 얹는다. 입력창은 하단 배치로 활성이다 — 이력이 끝내 안 오면 입력이 빠져나갈 길이다.
 //
 // ★백엔드 표기★: 제목·표식·색조 셋이 claude 와 codex 를 가른다(정의처 = richBranding.ts). 표기는
 //   프로필에서 파생되는 표시값이라 설정도 command 도 두지 않는다 — 관측은 `data-rich-brand` 토큰으로 한다.
@@ -32,11 +35,12 @@ import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
-import { StructuredTextView } from './StructuredTextView'
+import { isRenderedItem, StructuredTextView } from './StructuredTextView'
 import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 import './richBranding.css' // 색조 클래스 정의처(컴포넌트 옆 css 를 그 컴포넌트가 import 하는 규약).
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
+import { LoadingPanel } from '../ui/LoadingPanel'
 import { basename } from '../../util/basename'
 import { t } from '../../i18n'
 
@@ -75,6 +79,9 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   const [input, setInput] = useState('')
   // ADR-0145: 이력 복원이 끝났다는 신호('live')를 받았나. 빈 상태 표시의 게이트이며 재구독마다 내린다.
   const [replayDone, setReplayDone] = useState(false)
+  // ADR-0226: 마지막 'live' 가 "이 화신은 저장된 대화를 이어받으려고 떴다" 고 알렸나(성공 여부가 아니다).
+  //   'live' 에서만 세우고, 비우기 콜백과 구독 effect 초기화에서 내린다.
+  const [continuesConversation, setContinuesConversation] = useState(false)
   // 구독이 마지막으로 알린 국면 — 아래 부재 막(ADR-0148)의 세 번째 근거.
   const [phase, setPhase] = useState<ViewPhase | null>(null)
   // ★ADR-0145: "이 인스턴스에서 이미 보냈다"★ — 전송이 실제로 나갔다는 사실. 전송 자체가 실패하면
@@ -150,6 +157,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     //   사이 살아남는다). 그래도 남겨 둔다 — key 가 사라지면 이게 유일한 방어선이다.
     //   ★같은 에이전트의 재spawn 은 여기로 오지 않는다★ — 그건 아래 비우기 콜백(onReset)이 받는다.
     setReplayDone(false)
+    setContinuesConversation(false)
     setHasSent(false)
     setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
 
@@ -185,10 +193,11 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         //   시점이다(protocolClient.flushToLive). 이력이 0건인 새 에이전트에도 같은 신호가 오므로
         //   "복원 끝 + 0건"이 정확히 갈린다. 'buffering'(복원 중) · 'error'(replay 재요청 소진)에서는
         //   내려 둔다 — 둘 다 빈 상태를 그리면 안 되는 구간이다(복원 중 깜빡임 / 실패는 현행 빈 화면 유지).
-        (state) => {
+        (state, info) => {
           if (cancelled) return
           setReplayDone(state === 'live')
           setPhase(state)
+          if (state === 'live') setContinuesConversation(info?.continuesConversation ?? false)
         },
         // 비우기 의무·onReset 필수 전달의 근거는 TerminalSlot 동형(여기선 누산기까지 되돌린다).
         // ★전송 흔적도 함께 내린다★: 이 콜백은 **다른 화신**의 이력이 지금부터 온다는 뜻이라, 앞서 나간
@@ -204,6 +213,8 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           setTurnDone(false)
           setAwaiting(false)
           setHasSent(false)
+          // ADR-0226: 새 화신이 이어받기 화신인지는 바로 뒤 같은 틱의 'live' 가 다시 알린다.
+          setContinuesConversation(false)
           sendOkRef.current = false
           // ★날아가던 전송을 순번으로 무효화한다★: 앞 화신에 보낸 전송은 여기서 흔적을 내려도 promise
           //   자체는 살아 있어 나중에 결말이 온다. 순번을 올려 두지 않으면 그 뒤늦은 성공이 새 화신의
@@ -278,16 +289,36 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       })
   }
 
-  // ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
-  //   배지가 뜨는 오작동이 있었다. items.length>0 조건으로 좁혀 idle 을 idle 로 표시하되, (a) 실제 스트리밍 중
-  //   신호와 (b) '전송 직후 첫 토큰 대기(awaiting)' 는 그대로 살린다.
-  //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
-  const streaming = awaiting || (!turnDone && items.length > 0)
+  // 이력 행이 하나라도 도착했나 — 이어받기 로딩(ADR-0226)을 끝내는 첫 항.
+  //   ★items.length 로 대신하지 말 것★: 이어받기의 첫 라이브 프레임이 행을 안 그리는 usage 라, 그걸
+  //   "이력 도착" 으로 읽으면 이력이 오기 전 빈 목록이 비친다.
+  //   ★턴 구분선(separator)도 세지 않는다★: 선행 item 이 usage 뿐이어도 턴 경계가 구분선을 붙이는데(누산기
+  //   closeTurn), 그것은 빈 12px 스페이서라 이력이 아니다. 세면 로딩이 걷히고 첫 화면도 없는 빈 판이 남는다.
+  //   ★'boundary' 전체를 빼지 말 것★ — 유저 말풍선도 'boundary' 다(StructuredTextView rowKindOf).
+  const hasHistoryRow = items.some((item) => isRenderedItem(item) && item.kind !== 'separator')
 
   // ADR-0145: 빈 상태 = 복원 완료 신호 + 0건 + 이 구독에서 아직 안 보냄. 0건만 보고 그리면 이력이 있는
   //   세션도 복원이 끝나기 전엔 0건이라 안내가 떴다가 대화로 바뀐다(깜빡임). hasSent 를 함께 보는 이유 =
   //   첫 전송 직후 items 가 채워지기 전 구간도 이미 "대화 시작"이라 빈 상태가 아니다.
-  const showEmpty = replayDone && !hasSent && items.length === 0
+  //   ADR-0226: 이어받기 화신은 복원 끝 + 0건이어도 이력이 뒤따라올 수 있어 빈 상태 대신 아래 로딩을 그린다.
+  const showEmpty = replayDone && !continuesConversation && !hasSent && items.length === 0
+
+  // ADR-0226: 이어받기 화신이 아직 이력을 못 받았다 — 국면(복원 중·부재)과 무관한 부분. 끝나는 길은
+  //   첫 이력(hasHistoryRow) · 입력(hasSent) · 재시작(새 화신의 비우기 + 'live' 거짓) 셋이다.
+  const historyPending = continuesConversation && !hasSent && !hasHistoryRow
+  // 그 대기를 로딩 패널로 **그리는** 조건 — 복원이 끝났고 막이 없을 때만(부재면 막이 이긴다).
+  //   ★타이머로 끝내지 않는다★(ADR-0038) — 이력이 끝내 안 오면 입력이 빠져나갈 길이다.
+  const awaitingHistory = replayDone && historyPending && !agentUnavailable
+
+  // ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
+  //   배지가 뜨는 오작동이 있었다. items.length>0 조건으로 좁혀 idle 을 idle 로 표시하되, (a) 실제 스트리밍 중
+  //   신호와 (b) '전송 직후 첫 토큰 대기(awaiting)' 는 그대로 살린다.
+  //   ADR-0226: 이력 대기 중에는 대기 꼬리를 내린다 — usage 만 온 창에서 로딩 패널과 함께 뜬다. 그 밖의
+  //   창은 위 규칙 그대로다. ★awaitingHistory 가 아니라 historyPending 으로 내린다★: 같은 화신 재부착의
+  //   'buffering' 이나 부재 막 동안 패널만 잠깐 내려간 창에 꼬리(경과 초 포함)가 끼면 패널 → 꼬리 → 패널로
+  //   깜빡인다. awaiting 항은 건드리지 않는다: 전송이 곧 대기를 끝내므로 둘은 겹치지 않는다.
+  //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
+  const streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)
 
   return (
     <div
@@ -308,6 +339,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       // ★표식에도 같은 토큰이 붙지만 여기를 지우지 말 것★ — 대화가 시작되면 제목·표식이 함께 접혀
       //   (ADR-0145 빈 상태) 그때 백엔드를 말하는 DOM 이 이 속성뿐이다.
       data-rich-brand={branding.brand}
+      data-rich-awaiting-history={awaitingHistory ? '1' : undefined}
     >
       {/* 대화 렌더(스크롤) — ScrollArea seam(ADR-0053: 앱 전역 Radix 오버레이 스크롤바). 순서 보존 item 스트림.
           ★scrollRef 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 아래 하단 고정 auto-scroll
@@ -316,6 +348,18 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       {!showEmpty && (
         <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
           <StructuredTextView items={items} streaming={streaming} />
+          {/* ADR-0226 이력 대기 — 대화 영역 가운데 아이콘 + 옅은 막(사용자 결정 2026-09-24).
+              ★여기 두는 이유★: absolute 의 기준이 ScrollArea 루트(seam 의 relative)라 대화 영역만 정확히
+              덮고 스크롤되지 않으며, 그 아래 형제인 입력창에는 닿지 않는다. 이는 Radix Viewport 와 그 안쪽
+              래퍼에 position 이 없다는 데 기댄다(@radix-ui/react-scroll-area dist 소스 확인) — 안쪽 래퍼가
+              positioned 가 되면 기준이 그리로 옮겨 막이 내용 높이(대기 중엔 하단 여백 한 줄)로 줄어든다.
+              슬롯 루트 자식으로 두면 입력창까지 덮는다.
+              pointer-events-none — 스크롤·선택·클릭이 그대로 통과한다.
+              막 색이 background 가 아니라 foreground 옅은 틴트인 이유 = 이 막이 덮는 영역은 늘 비어 있다(이력
+              행이 오면 대기가 끝난다). background 계열이면 같은 색 위에 같은 색이라 보이지 않는다. */}
+          {awaitingHistory && (
+            <LoadingPanel className="pointer-events-none absolute inset-0 bg-foreground/8" />
+          )}
         </ScrollArea>
       )}
 

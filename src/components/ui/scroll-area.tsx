@@ -19,6 +19,10 @@
 //!   - ★스크롤 대상 = ScrollArea.Viewport(Root 아님)★: 실제 overflow/scrollTop 은 viewport DOM 노드다.
 //!     RichSlot/DomSlot 의 하단 고정 auto-scroll(scrollTop = scrollHeight)이 이 노드를 겨눠야 하므로 ref 를
 //!     Viewport 로 forward 한다. Root 로 겨누면 스크롤이 동작하지 않는다(회귀 주의).
+//!   - ★children 의 absolute 오버레이는 Root 에 붙는다★: Root 만 positioned(relative)이고 Viewport 와 그 안쪽
+//!     콘텐츠 래퍼는 positioned 가 아니어야 한다. 그래야 children 이 얹은 `absolute inset-0` 막이 스크롤되지
+//!     않고 이 영역만 정확히 덮는다 — RichSlot 의 이력 대기 로딩 막이 여기에 기댄다(ADR-0226). Viewport 에
+//!     position 을 주면 그 막이 콘텐츠와 함께 스크롤되고, 래퍼에 주면 콘텐츠 높이로 줄어든다.
 
 import { forwardRef, type ReactNode } from 'react'
 import * as RadixScrollArea from '@radix-ui/react-scroll-area'

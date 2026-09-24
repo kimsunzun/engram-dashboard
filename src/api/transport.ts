@@ -21,6 +21,8 @@ export type InboundMessage =
   // ★replay 경계 마커(ADR-0046)★: src-tauri 가 각 replay 종결마다 같은 출력 Channel 로 흘리는 tag=255
   //   프레임의 정규화. 공개 agentClient 표면엔 노출하지 않는다 — 마커는 프론트 내부 상태기계 전용
   //   (Designer 리뷰 요구). failed=true 면 이 replay 가 완결 없이 종결됨(deadline/단절).
+  //   continuesConversation = 이 화신이 저장된 대화를 이어받으려고 떴다(ADR-0226 — 성공 여부 아님).
+  //   실패 경계는 언제나 false.
   | {
       kind: 'replayBoundary'
       agentId: string
@@ -28,6 +30,7 @@ export type InboundMessage =
       gen: bigint
       truncated: boolean
       failed: boolean
+      continuesConversation: boolean
     }
 
 /** carrier 추상 — ProtocolClient 가 의존하는 유일한 전송 표면(daemon 접속 전용, ADR-0029). */

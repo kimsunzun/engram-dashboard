@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from 'vitest'
 
-import { decodeOutputFrame } from './wsFrame'
+import { decodeOutputFrame, decodeReplayMarker } from './wsFrame'
 
 // ── binary frame 빌더(codec.rs 와 동일 포맷: [tag:1][agentId:16][epoch:4 BE][seq:8 BE][payload]) ──
 const FRAME_HEADER_LEN = 29
@@ -101,5 +101,50 @@ describe('decodeOutputFrame', () => {
     const f = decodeOutputFrame(buf)
     expect(f).not.toBeNull()
     expect(f!.payload.length).toBe(0)
+  })
+})
+
+// ── replay 경계 마커(src-tauri replay_flight 가 합성하는 30바이트 — ADR-0046 · ADR-0226 bit2) ──
+const MARKER_LEN = 30
+function buildMarker(opts: { epoch: number; gen: bigint; flags: number; length?: number }): ArrayBuffer {
+  const buf = new ArrayBuffer(MARKER_LEN)
+  const view = new DataView(buf)
+  view.setUint8(0, 255)
+  const idBytes = uuidToBytes(AGENT)
+  for (let i = 0; i < 16; i++) view.setUint8(1 + i, idBytes[i])
+  view.setUint32(17, opts.epoch, false)
+  view.setBigUint64(21, opts.gen, false)
+  view.setUint8(29, opts.flags)
+  return opts.length === undefined ? buf : buf.slice(0, opts.length)
+}
+
+describe('decodeReplayMarker', () => {
+  it('bit2(0x04) = 이어받기 화신 — 다른 두 비트와 독립으로 읽힌다', () => {
+    const m = decodeReplayMarker(buildMarker({ epoch: 7, gen: 42n, flags: 0x04 }))
+    expect(m).toEqual({
+      agentId: AGENT,
+      epoch: 7,
+      gen: 42n,
+      truncated: false,
+      failed: false,
+      continuesConversation: true,
+    })
+    expect(decodeReplayMarker(buildMarker({ epoch: 7, gen: 42n, flags: 0x05 }))).toMatchObject({
+      truncated: true,
+      failed: false,
+      continuesConversation: true,
+    })
+  })
+
+  // 표식을 안 싣는 옛 셸·데몬 경로 = bit2 없음. 그때는 표식 도입 전 동작(첫 화면)이 나와야 한다.
+  it.each([0x00, 0x01, 0x02, 0x03])('bit2 가 없으면(flags=%i) 이어받기 아님', (flags) => {
+    expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags }))?.continuesConversation).toBe(
+      false,
+    )
+  })
+
+  it('bit2 가 실려도 길이는 30 — 29바이트는 마커가 아니다', () => {
+    expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags: 0x04 }))).not.toBeNull()
+    expect(decodeReplayMarker(buildMarker({ epoch: 1, gen: 1n, flags: 0x04, length: 29 }))).toBeNull()
   })
 })
