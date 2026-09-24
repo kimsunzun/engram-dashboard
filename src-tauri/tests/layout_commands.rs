@@ -372,7 +372,7 @@ impl World {
             .expect("빈 슬롯")
     }
 
-    /// pop-out 의 전제 — 빈 슬롯은 옮길 수 없으므로 한 칸을 채운다. 반환 = (탭, 그 슬롯).
+    /// agent 가 든 한 칸 — 반환 = (탭, 그 슬롯).
     ///
     /// agent 콘텐츠를 쓰는 이유는 운영 형태를 그대로 태우려는 것뿐이다 — ★구독 마이그레이션은 여기서 안
     /// 잰다★(이 파일의 `Subs` 는 no-op 이고, 실 `OutputRouter` 로 재는 자리는 `layout_apply.rs` 다).
@@ -761,12 +761,46 @@ async fn popout_into_a_named_window_adds_a_tab_there() {
     );
 }
 
-/// 옮길 것이 없는 슬롯은 `CONFLICT` + 서비스의 사유 문구로 반려된다(창도 안 연다).
+/// 빈 슬롯도 버스로 떼어낸다 — 새 창이 열리고 원본 슬롯은 닫힌다. // ADR-0228
 #[tokio::test]
-async fn popout_of_an_empty_slot_is_refused_without_opening_a_window() {
+async fn popout_of_an_empty_slot_opens_a_window() {
     let (world, queue, receiver) = queued();
     let view = world.main_tabs().active;
     let slot = world.empty_slot(view);
+
+    let ok = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "slot.popout",
+        json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+    )
+    .await
+    .outcome
+    .expect("분리 성공");
+
+    let window = ok["window"].as_str().expect("창 label").to_string();
+    assert_eq!(
+        world.windows.opened.lock().unwrap().as_slice(),
+        &[window.clone()]
+    );
+    let tabs = apply::list_tabs(&world.state, &window).expect("새 창 탭");
+    assert_eq!(
+        ok["new_view_id"].as_str(),
+        Some(tabs.active.to_string().as_str())
+    );
+    assert!(
+        !world.slots(view).contains(&slot),
+        "MOVE 다 — 원본 슬롯은 남지 않는다"
+    );
+}
+
+/// 없는 슬롯은 `CONFLICT` + 서비스의 사유 문구로 반려된다(창도 안 연다).
+#[tokio::test]
+async fn popout_of_a_missing_slot_is_refused_without_opening_a_window() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let ghost = uuid::Uuid::new_v4();
 
     let err = error_of(
         call(
@@ -774,18 +808,17 @@ async fn popout_of_an_empty_slot_is_refused_without_opening_a_window() {
             &queue,
             &world.mail,
             "slot.popout",
-            json!({ "view_id": view.to_string(), "slot_id": slot.to_string() }),
+            json!({ "view_id": view.to_string(), "slot_id": ghost.to_string() }),
         )
         .await,
     );
 
     assert_eq!(err.code(), ErrorCode::Conflict);
-    assert!(err.message().contains("빈 슬롯"), "{}", err.message());
+    assert!(err.message().contains("slot 없음"), "{}", err.message());
     assert!(
         world.windows.opened.lock().unwrap().is_empty(),
         "거절됐으면 창도 안 연다"
     );
-    assert!(world.slots(view).contains(&slot), "부분변경 금지");
 }
 
 /// `ui.refresh` 는 레이아웃을 안 건드리는 유일한 이름이다 — 그래서 「선언만 있고 자기 포트에 안 닿는다」가

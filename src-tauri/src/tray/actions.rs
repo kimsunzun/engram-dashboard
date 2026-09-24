@@ -16,6 +16,7 @@ use tauri_plugin_autostart::ManagerExt;
 
 use super::core::{self, IconState};
 use super::TrayIcons;
+use crate::commands::popout::is_popup_label;
 
 // 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
 pub const TRAY_ID: &str = "engram-main-tray";
@@ -47,23 +48,38 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 // downcast(CheckMenuItem)가 번거로워, build_tray 가 만든 핸들을 그대로 state 로 보관해 직접 set_checked 한다.
 pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 
-// main 창을 보이고 포커스(숨김/최소화 상태에서 복귀).
+// 메인과 팝아웃 창을 전부 화면 맨 앞으로 되살린다 — 숨은 창은 보이고 최소화된 창은 펼치고, 이미 떠 있던
+// 창도 다른 앱 위로 올린다. 포커스는 마지막에 메인이 받아 메인이 맨 위, 팝아웃이 그 바로 아래에 온다.
+// 이름에 `main` 이 남은 것은 같은 이름의 command 가 LLM 제어 표면이라서다 — 이름을 바꾸면 표면이 바뀐다.
 //
-// ★순서가 load-bearing(Windows focus-stealing)★: show()→unminimize()→set_focus() 순서가 아니면
-// hidden/minimized 에서 작업표시줄 깜빡임만 나고 실제로 안 떠오를 수 있다(TRD §4). 프로세스 내부
-// 호출이라 IPC 없음. 창이 없으면(아직 미생성 등) 조용히 no-op.
+// ★창마다 show()→unminimize()→set_focus() 순서가 load-bearing(Windows focus-stealing)★: 이 순서가
+// 아니면 hidden/minimized 에서 작업표시줄 깜빡임만 나고 실제로 안 떠오를 수 있다(TRD §4).
+// ★창 사이 순서(메인이 마지막)도 load-bearing★: 셋 다 창을 활성화하므로(tao 0.35 Windows = `SW_SHOW` ·
+//   `SW_RESTORE` · `SetForegroundWindow`) 메인 뒤에 무엇이든 하면 그 창이 포커스를 가져간다. 순서는
+//   [`core::ui_windows`] 가 정한다.
+// 창 하나가 실패해도(목록을 뜬 뒤 닫힌 팝아웃 등) 나머지와 메인은 계속 처리한다 — `?` 로 끊지 말 것.
+// ADR-0229
 pub fn show_main_ui(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
+    let windows = app.webview_windows();
+    for label in core::ui_windows(windows.keys().map(String::as_str), is_popup_label) {
+        let Some(w) = windows.get(label) else {
+            continue;
+        };
         let _ = w.show();
         let _ = w.unminimize();
         let _ = w.set_focus();
     }
 }
 
-// main 창을 숨긴다(파괴 아님 — WebView 상주, 트레이 "UI 보이기"로 복귀). X=hide 와 같은 종착.
+// 메인과 팝아웃 창을 전부 숨긴다(파괴 아님 — WebView 상주, [`show_main_ui`] 로 복귀). 메인 X 도 여기로
+// 온다. 대상은 [`show_main_ui`] 와 같다 — 숨긴 창을 보이기가 못 되살리면 되찾을 길이 없다.
+// ADR-0229
 pub fn hide_main_ui(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("main") {
-        let _ = w.hide();
+    let windows = app.webview_windows();
+    for label in core::ui_windows(windows.keys().map(String::as_str), is_popup_label) {
+        if let Some(w) = windows.get(label) {
+            let _ = w.hide();
+        }
     }
 }
 

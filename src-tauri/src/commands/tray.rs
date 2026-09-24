@@ -5,13 +5,14 @@
 
 use crate::tray::actions;
 
-// main 창 보이기(show+unminimize+focus). 트레이 "UI 보이기"와 동일 동작.
+/// 메인과 팝아웃 창 전부를 화면 맨 앞으로 되살리고 마지막에 메인에 포커스 — 트레이 좌클릭과 같은
+/// 동작(ADR-0229).
 #[tauri::command]
 pub fn show_main_ui(app: tauri::AppHandle) {
     actions::show_main_ui(&app);
 }
 
-// 트레이 "UI 숨기기"·X=hide 와 동일 종착.
+/// 메인과 팝아웃 창 전부를 숨긴다 — 메인 X 와 같은 동작(ADR-0229).
 #[tauri::command]
 pub fn hide_main_ui(app: tauri::AppHandle) {
     actions::hide_main_ui(&app);

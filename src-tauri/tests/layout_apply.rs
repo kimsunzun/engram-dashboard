@@ -133,11 +133,15 @@ impl SubscriptionSync for Subs {
     }
 }
 
+/// `open` 이 락 밖에서 한 번 부르는 끼어들기 — 창 빌드(phase B) 사이 다른 명령이 모델을 바꾼 상태를 세운다.
+type DuringOpen = Box<dyn FnOnce(&LayoutState) + Send>;
+
 struct Host {
     probe: Probe,
     fail_open: bool,
     opened: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
+    during_open: Mutex<Option<DuringOpen>>,
 }
 
 impl Host {
@@ -147,6 +151,7 @@ impl Host {
             fail_open,
             opened: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
+            during_open: Mutex::new(None),
         }
     }
 }
@@ -154,6 +159,9 @@ impl Host {
 impl WindowHost for Host {
     fn open(&self, label: &str) -> Result<(), String> {
         self.probe.assert_outside("WindowHost::open");
+        if let Some(hook) = self.during_open.lock().unwrap().take() {
+            hook(&self.probe.0);
+        }
         self.opened.lock().unwrap().push(label.to_string());
         if self.fail_open {
             return Err("창 생성 실패(테스트)".to_string());
@@ -757,7 +765,6 @@ fn set_slot_content_unknown_view_is_err() {
 // ── move_slot_to_window ──────────────────────────────────────────────────────
 
 impl World {
-    // agent 하나가 든 슬롯 + 그것을 담은 View — pop-out 의 전제(빈 슬롯은 거부되므로).
     fn view_with_filled_slot(&self) -> (Uuid, Uuid, SlotContent) {
         let view = self.main_active();
         let slot = self.empty_slot(view);
@@ -880,20 +887,116 @@ fn move_slot_to_window_into_an_existing_window_adds_a_tab() {
     assert_eq!(tabs.active, moved.tab);
 }
 
+// ADR-0228
 #[test]
-fn move_slot_to_window_refuses_an_empty_slot() {
+fn move_slot_to_window_moves_an_empty_slot_and_promotes_its_sibling() {
+    let w = World::new();
+    let view = w.main_active();
+    let slot = w.empty_slot(view);
+    let sibling =
+        apply::split_slot(&w.state, &w.subs, &w.ev, view, slot, SplitDir::LeftRight).expect("분할");
+
+    let moved = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap();
+
+    assert_eq!(&*w.host.opened.lock().unwrap(), &[moved.window.clone()]);
+    assert_eq!(
+        w.slots(view),
+        vec![sibling],
+        "원본 슬롯은 닫히고 형제가 자리를 물려받는다"
+    );
+    let landed = apply::list_tabs(&w.state, &moved.window).unwrap();
+    assert_eq!(landed.active, moved.tab);
+    let landed_slots = w.slots(moved.tab);
+    assert_eq!(landed_slots.len(), 1);
+    assert_eq!(
+        tree::find_slot(&w.snapshot(moved.tab).layout, landed_slots[0]),
+        Some(&SlotContent::Empty),
+        "새 탭은 빈 칸 하나다"
+    );
+    assert!(w.unsubscribed().is_empty(), "{:?}", w.unsubscribed());
+}
+
+// 탭에 칸이 하나뿐이면 닫힌 자리에 새 빈 칸이 선다(`close_slot` 과 같은 규칙) — 원본 탭이 비지 않는다.
+#[test]
+fn move_slot_to_window_of_a_lone_empty_slot_leaves_a_fresh_empty_slot() {
     let w = World::new();
     let view = w.main_active();
     let slot = w.empty_slot(view);
 
-    let err = apply::move_slot_to_window(
+    apply::move_slot_to_window(
         &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(err.contains("빈 슬롯"), "err={err}");
+    let left = w.slots(view);
+    assert_eq!(left.len(), 1);
+    assert_ne!(left[0], slot, "옮긴 칸이 아니라 새로 선 칸이다");
+    assert_eq!(
+        tree::find_slot(&w.snapshot(view).layout, left[0]),
+        Some(&SlotContent::Empty)
+    );
+}
+
+// ★거절 사유가 진짜 원인을 말한다★ — 없는 칸·없는 탭을 「빈 슬롯」으로 부르면 호출자가 엉뚱한 것을 고친다.
+#[test]
+fn move_slot_to_window_refuses_a_missing_slot_or_view_with_the_real_cause() {
+    let w = World::new();
+    let view = w.main_active();
+    let ghost = Uuid::new_v4();
+    let views_before = w.view_count();
+
+    let err = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, ghost, None,
+    )
+    .unwrap_err();
+    assert!(err.contains("slot 없음"), "err={err}");
+    assert!(!err.contains("빈 슬롯"), "err={err}");
+
+    let err = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, ghost, ghost, None,
+    )
+    .unwrap_err();
+    assert!(err.contains("view 없음"), "err={err}");
+
     assert!(w.host.opened.lock().unwrap().is_empty(), "창도 안 연다");
-    assert!(w.slots(view).contains(&slot), "부분변경 금지");
+    assert_eq!(w.view_count(), views_before, "임시 View 를 남기지 않는다");
+}
+
+/// ★옮기던 빈 칸이 창 빌드 사이 채워지면 원본을 닫지 않는다★ — 대조 기준이 `Empty` 여도 「옮긴 그대로일
+/// 때만 닫는다」가 선다. 닫으면 그 사이 누군가 채운 콘텐츠가 어느 화면에도 안 남는다.
+#[test]
+fn move_slot_to_window_keeps_an_empty_source_that_was_filled_during_the_window_build() {
+    let w = World::new();
+    let view = w.main_active();
+    let slot = w.empty_slot(view);
+    *w.host.during_open.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
+        state
+            .0
+            .lock()
+            .unwrap()
+            .set_slot_content(view, slot, SlotContent::AgentList)
+            .unwrap();
+    }));
+
+    let moved = apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, view, slot, None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        tree::find_slot(&w.snapshot(view).layout, slot),
+        Some(&SlotContent::AgentList),
+        "그 사이 채운 콘텐츠를 지우지 않는다"
+    );
+    let landed_slot = w.slots(moved.tab)[0];
+    assert_eq!(
+        tree::find_slot(&w.snapshot(moved.tab).layout, landed_slot),
+        Some(&SlotContent::Empty),
+        "대상 탭은 옮긴 그대로(빈 칸) 남는다"
+    );
 }
 
 /// ★임시 View 가 실제로 회수되는지를 잰다★ — 창 수를 세면 실패 경로엔 창 엔트리가 안 생겨 롤백을
