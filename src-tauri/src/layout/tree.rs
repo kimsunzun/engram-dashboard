@@ -8,15 +8,31 @@
 
 use uuid::Uuid;
 
-use super::types::{LayoutNode, SlotContent};
+use super::types::{LayoutNode, SlotContent, SplitDir};
 
 /// 분할 비율(= a 쪽, 즉 왼쪽/위 칸이 차지하는 몫)의 셸 전역 한계.
 // ADR-0227
+// ADR-0140
 pub const RATIO_MIN: f64 = 0.1;
 pub const RATIO_MAX: f64 = 0.9;
 
-pub fn clamp_ratio(r: f32) -> f32 {
-    r.clamp(0.0, 1.0)
+/// 새 분할의 비율 — `split_in_tree` 가 쓰고, 분할의 표현 가능성 가드가 같은 값으로 새 경계를 미리 잰다.
+pub const SPLIT_RATIO: f64 = 0.5;
+
+// NaN 은 그대로 NaN 이다 — 거르는 것은 호출자 몫(쓰기 경로는 관리자가 유한값만 받고, 기하는 NaN 을 반분으로 읽는다).
+pub fn clamp_ratio(r: f64) -> f64 {
+    r.clamp(RATIO_MIN, RATIO_MAX)
+}
+
+/// 분할 하나의 요약 — `list_splits` 의 행. `a_slots`·`b_slots` = 그 분할의 a(왼쪽/위)·b(오른쪽/아래)
+/// 서브트리에 든 칸 id, 각각 트리 전위 순.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplitInfo {
+    pub id: Uuid,
+    pub dir: SplitDir,
+    pub ratio: f64,
+    pub a_slots: Vec<Uuid>,
+    pub b_slots: Vec<Uuid>,
 }
 
 pub fn find_slot(node: &LayoutNode, slot_id: Uuid) -> Option<&SlotContent> {
@@ -79,7 +95,7 @@ pub fn split_in_tree(
                 *node = LayoutNode::Split {
                     id: Uuid::new_v4(), // ADR-0223 — 분할마다 새 id
                     dir,
-                    ratio: 0.5,
+                    ratio: SPLIT_RATIO,
                     a: Box::new(original),
                     b: Box::new(new_slot),
                 };
@@ -97,6 +113,82 @@ pub fn split_in_tree(
             }
         }
     }
+}
+
+/// id 가 `split_id` 인 분할의 비율을 `ratio` 로 **그대로** 쓴다 — 클램프·검증은 호출자(관리자) 몫이다.
+/// 없으면 트리 불변 + `false`.
+// ADR-0227
+pub fn set_ratio_in_tree(node: &mut LayoutNode, split_id: Uuid, ratio: f64) -> bool {
+    match node {
+        LayoutNode::Slot { .. } => false,
+        LayoutNode::Split {
+            id, ratio: r, a, b, ..
+        } => {
+            if *id == split_id {
+                *r = ratio;
+                true
+            } else {
+                set_ratio_in_tree(a, split_id, ratio) || set_ratio_in_tree(b, split_id, ratio)
+            }
+        }
+    }
+}
+
+pub fn split_ratio(node: &LayoutNode, split_id: Uuid) -> Option<f64> {
+    match node {
+        LayoutNode::Slot { .. } => None,
+        LayoutNode::Split {
+            id, ratio, a, b, ..
+        } => {
+            if *id == split_id {
+                Some(*ratio)
+            } else {
+                split_ratio(a, split_id).or_else(|| split_ratio(b, split_id))
+            }
+        }
+    }
+}
+
+pub fn slot_ids(node: &LayoutNode) -> Vec<Uuid> {
+    fn walk(node: &LayoutNode, out: &mut Vec<Uuid>) {
+        match node {
+            LayoutNode::Slot { id, .. } => out.push(*id),
+            LayoutNode::Split { a, b, .. } => {
+                walk(a, out);
+                walk(b, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
+}
+
+/// 트리의 분할 전량, 전위 순(노드 → a 서브트리 → b 서브트리). 비율은 트리에 저장된 값 그대로다.
+pub fn list_splits(node: &LayoutNode) -> Vec<SplitInfo> {
+    fn walk(node: &LayoutNode, out: &mut Vec<SplitInfo>) {
+        if let LayoutNode::Split {
+            id,
+            dir,
+            ratio,
+            a,
+            b,
+        } = node
+        {
+            out.push(SplitInfo {
+                id: *id,
+                dir: *dir,
+                ratio: *ratio,
+                a_slots: slot_ids(a),
+                b_slots: slot_ids(b),
+            });
+            walk(a, out);
+            walk(b, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(node, &mut out);
+    out
 }
 
 // - 닫는 슬롯이 어떤 Split 의 **직접 자식**이면 → 그 Split 을 **형제(다른 자식)로 치환**(형제 승격).
@@ -533,12 +625,85 @@ mod tests {
     // ── ratio clamp ────────────────────────────────────────────────────────
 
     #[test]
-    fn ratio_clamps_out_of_range() {
-        assert_eq!(clamp_ratio(-0.5), 0.0);
-        assert_eq!(clamp_ratio(1.5), 1.0);
+    fn ratio_clamps_to_the_shell_bounds() {
+        assert_eq!(clamp_ratio(-0.5), RATIO_MIN);
+        assert_eq!(clamp_ratio(0.0), RATIO_MIN);
+        assert_eq!(clamp_ratio(0.05), RATIO_MIN);
+        assert_eq!(clamp_ratio(1.5), RATIO_MAX);
+        assert_eq!(clamp_ratio(1.0), RATIO_MAX);
+        assert_eq!(clamp_ratio(f64::INFINITY), RATIO_MAX);
+        assert_eq!(clamp_ratio(f64::NEG_INFINITY), RATIO_MIN);
+        assert_eq!(clamp_ratio(0.1), 0.1);
+        assert_eq!(clamp_ratio(0.9), 0.9);
         assert_eq!(clamp_ratio(0.3), 0.3);
-        assert_eq!(clamp_ratio(0.0), 0.0);
-        assert_eq!(clamp_ratio(1.0), 1.0);
+    }
+
+    // ── set_ratio_in_tree · list_splits (ADR-0227) ───────────────────────────
+
+    fn ratio_of(node: &LayoutNode, split: Uuid) -> f64 {
+        split_ratio(node, split).expect("분할 있어야")
+    }
+
+    #[test]
+    fn set_ratio_in_tree_writes_only_the_split_with_that_id() {
+        let (mut node, _x, _y, _z, root, inner) = nested_split();
+        assert!(set_ratio_in_tree(&mut node, inner, 0.3));
+        assert_eq!(
+            ratio_of(&node, inner),
+            0.3,
+            "받은 값이 그대로(f64) 들어간다"
+        );
+        assert_eq!(ratio_of(&node, root), SPLIT_RATIO, "다른 분할은 그대로");
+
+        assert!(set_ratio_in_tree(&mut node, root, 0.7));
+        assert_eq!(ratio_of(&node, root), 0.7);
+        assert_eq!(ratio_of(&node, inner), 0.3);
+    }
+
+    #[test]
+    fn set_ratio_in_tree_missing_split_is_noop() {
+        let (mut node, x, _y, _z, _root, _inner) = nested_split();
+        let before = node.clone();
+        assert!(!set_ratio_in_tree(&mut node, Uuid::new_v4(), 0.3));
+        // 칸 id 는 분할 id 가 아니다.
+        assert!(!set_ratio_in_tree(&mut node, x, 0.3));
+        assert_eq!(node, before, "없는 분할 쓰기는 트리 불변");
+
+        let (mut lone, id) = single_slot();
+        let before = lone.clone();
+        assert!(!set_ratio_in_tree(&mut lone, id, 0.3));
+        assert_eq!(lone, before);
+    }
+
+    #[test]
+    fn list_splits_is_preorder_with_the_slots_under_each_side() {
+        // Split(R, LeftRight){x, Split(S, TopBottom){y, z}}
+        let (mut node, x, y, z, root, inner) = nested_split();
+        assert!(set_ratio_in_tree(&mut node, inner, 0.25));
+        let rows = list_splits(&node);
+        assert_eq!(
+            rows,
+            vec![
+                SplitInfo {
+                    id: root,
+                    dir: SplitDir::LeftRight,
+                    ratio: SPLIT_RATIO,
+                    a_slots: vec![x],
+                    b_slots: vec![y, z],
+                },
+                SplitInfo {
+                    id: inner,
+                    dir: SplitDir::TopBottom,
+                    ratio: 0.25,
+                    a_slots: vec![y],
+                    b_slots: vec![z],
+                },
+            ]
+        );
+        assert!(
+            list_splits(&single_slot().0).is_empty(),
+            "칸 하나면 분할 없음"
+        );
     }
 
     // ── first_slot_id (focus fallback 의 핵심) ────────────────────────────────

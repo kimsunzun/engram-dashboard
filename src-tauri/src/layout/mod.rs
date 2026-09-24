@@ -15,10 +15,13 @@ pub use apply::{
 };
 pub use manager::{
     resolve_spawn_slot, CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError,
-    ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    SplitRatioResult, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 pub use spatial::{compute_spatial, resolve_spatial, Neighbors, SlotSpatial, SpatialToken};
-pub use types::{LayoutNode, SlotContent, SplitDir, UiMetrics, View, ViewMeta, ViewSnapshot};
+pub use types::{
+    LayoutNode, SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, View,
+    ViewMeta, ViewSnapshot,
+};
 
 use std::sync::{Arc, Mutex};
 

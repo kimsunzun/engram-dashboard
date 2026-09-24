@@ -21,8 +21,8 @@ use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync, UiMetrics,
-    ViewManager, ViewSnapshot, WindowHost, WindowTabsPayload,
+    AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
+    SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 
@@ -339,6 +339,20 @@ pub fn split_slot(
         slot_id,
         dir,
     )
+}
+
+// JS: `invoke('set_split_ratio', { viewId, splitId, ratio })` — ratio = a 쪽(왼쪽/위) 칸의 몫. 결말·반환
+// version 의 뜻은 `SplitRatioApplied` 문서(바인딩에 실린다).
+// ADR-0227
+#[tauri::command]
+pub fn set_split_ratio(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    view_id: Uuid,
+    split_id: Uuid,
+    ratio: f64,
+) -> Result<SplitRatioApplied, String> {
+    apply::set_split_ratio(&state, &TauriEvents { app: &app }, view_id, split_id, ratio)
 }
 
 #[tauri::command]

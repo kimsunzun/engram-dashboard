@@ -31,9 +31,11 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use super::geometry::{self, PxRect, RectF64};
+use super::geometry::{self, PxRect, RectF64, SlotRect};
 use super::tree;
-use super::types::{LayoutNode, SlotContent, SplitDir, UiMetrics, View, ViewMeta, ViewSnapshot};
+use super::types::{
+    LayoutNode, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics, View, ViewMeta, ViewSnapshot,
+};
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -55,6 +57,23 @@ pub enum LayoutError {
     MainNotClosable,
     #[error("ui 지표 거절: {0}")]
     InvalidMetrics(String),
+    // ADR-0227
+    #[error("split 없음: {0}")]
+    SplitNotFound(Uuid),
+    // 값을 문자열로 싣는 이유: `f64` 를 담으면 이 enum 의 `Eq` 가 깨진다.
+    #[error("비율 거절: {0} — 유한한 수여야 한다")]
+    InvalidRatio(String),
+    #[error("칸이 너무 작아 더 나눌 수 없음 — 새 경계가 그 칸 안에 표현되지 않는다(부동소수 한계). 이 칸을 품은 분할의 비율을 넓히거나 다른 칸을 나누시오")]
+    SplitTooDeep,
+}
+
+/// `ViewManager::set_split_ratio` 의 결과 — `ratio` 는 셸이 지금 가진 값이다(`Applied` 면 방금 쓴 값,
+/// 아니면 손대지 않은 원래 값).
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitRatioResult {
+    pub ratio: f64,
+    pub outcome: SplitRatioOutcome,
 }
 
 // 보고 지표 방어선(TRD §2d) — 정책 값이 아니다. 테두리 폭·최소 칸 크기의 실제 값은 화면이 정한다.
@@ -367,6 +386,26 @@ impl ViewManager {
         dir: SplitDir,
     ) -> Result<Uuid, LayoutError> {
         let v = self.view_mut(view_id)?;
+        // 표현 가능성 가드: 늘 같은 쪽 자식을 나누면 새 경계가 부모 끝과 비트 단위로 같아져 한쪽 칸의 폭이
+        // 0 이 된다. 새 경계를 실제 기하와 같은 식·같은 비율로 미리 재서 칸 안에 엄격히 들 때만 나눈다.
+        // 이미 면적 0 인 칸(쓰기 경로로는 안 생기고 심긴 트리에만 있다)은 축과 무관하게 거절한다 — 다른 축으로
+        // 나누면 경계는 칸 안에 들어도 두 새 칸이 다 면적 0 이다.
+        // `min_pane_px` 보다 작은 칸을 만드는 분할은 막지 않는다(R11 — 사용자 결정).
+        // ADR-0227
+        let geo = geometry::compute(&v.layout);
+        if let Some(r) = geo.slots.iter().find(|s| s.slot_id == slot_id) {
+            if !has_area(r) {
+                return Err(LayoutError::SplitTooDeep);
+            }
+            let (lo, hi) = match dir {
+                SplitDir::LeftRight => (r.x0, r.x1),
+                SplitDir::TopBottom => (r.y0, r.y1),
+            };
+            let at = geometry::boundary(lo, hi, tree::SPLIT_RATIO);
+            if !(lo < at && at < hi) {
+                return Err(LayoutError::SplitTooDeep);
+            }
+        }
         match tree::split_in_tree(&mut v.layout, slot_id, dir) {
             Some(new_id) => {
                 v.focused_slot_id = Some(new_id);
@@ -375,6 +414,99 @@ impl ViewManager {
             }
             None => Err(LayoutError::SlotNotFound(slot_id)),
         }
+    }
+
+    // 분할 `split_id` 의 비율(a 쪽 = 왼쪽/위 칸의 몫 — ADR-0140)을 쓴다. 판정 순서가 계약이다:
+    // ① 비유한 → `InvalidRatio` — 이 관리자가 모든 호출자의 단일 관문이다(Rust 에서 직접 부르는 쪽이나
+    //    JSON 이 아닌 전송은 버스·IPC 역직렬화의 거름을 안 거친다).
+    // ② 없는 view → `ViewNotFound`, 그 view 에 없는 분할 → `SplitNotFound`(무변경).
+    // ③ `[RATIO_MIN, RATIO_MAX]` 클램프.
+    // ④ 소유 창의 캔버스·지표를 둘 다 알면 분할의 두 쪽(서브트리 통째)이 각각 `min_pane_px` 이상이 되게 한 번 더
+    //    클램프한다(거절하지 않는다). 그 범위가 비면 지금 값 그대로 `TooSmall`. 화면 드래그는 같은 식·같은
+    //    입력(보고한 정수 캔버스 × 스냅샷 상자)으로 범위를 구해야 한다 — 다르면 확정값이 여기서 다시 잘려
+    //    뗄 때 튄다(TRD §2c/§2f).
+    // ⑤ 그 값을 쓰면 **새로** 면적 0 이 되는 칸이 있으면 `TooSmall` — 조상 비율이 깊은 자손을 무너뜨리는
+    //    경로를 막는다. 쓰기 전부터 면적 0 이던 칸(쓰기 경로로는 안 생긴다)은 비교에서 뺀다 — 안 빼면 그런
+    //    칸 하나가 이 뷰의 모든 비율 쓰기를 잠근다.
+    // ⑥ 지금 값과 같으면 `Unchanged`(version 불변). ⑦ 아니면 쓰고 version +1 → `Applied`.
+    // ADR-0227
+    pub fn set_split_ratio(
+        &mut self,
+        view_id: ViewId,
+        split_id: Uuid,
+        ratio: f64,
+    ) -> Result<SplitRatioResult, LayoutError> {
+        if !ratio.is_finite() {
+            return Err(LayoutError::InvalidRatio(ratio.to_string()));
+        }
+        let px = self.px_context(view_id)?;
+        let v = self
+            .views
+            .get(&view_id)
+            .ok_or(LayoutError::ViewNotFound(view_id))?;
+        let current =
+            tree::split_ratio(&v.layout, split_id).ok_or(LayoutError::SplitNotFound(split_id))?;
+        let before = geometry::compute(&v.layout);
+        let rect = before
+            .splits
+            .iter()
+            .find(|s| s.split_id == split_id)
+            .ok_or(LayoutError::SplitNotFound(split_id))?;
+        let untouched = SplitRatioResult {
+            ratio: current,
+            outcome: SplitRatioOutcome::TooSmall,
+        };
+
+        let mut wanted = tree::clamp_ratio(ratio);
+        if let Some((canvas, metrics)) = px {
+            let (canvas_len, extent) = match rect.dir {
+                SplitDir::LeftRight => (canvas.w, rect.x1 - rect.x0),
+                SplitDir::TopBottom => (canvas.h, rect.y1 - rect.y0),
+            };
+            let len = f64::from(canvas_len) * extent;
+            let edge = f64::from(metrics.min_pane_px) / len;
+            let lo = tree::RATIO_MIN.max(edge);
+            let hi = tree::RATIO_MAX.min(1.0 - edge);
+            // `f64::clamp` 는 뒤집힌 범위에서 패닉한다. 폭 0 상자(`len == 0`)는 `edge = ∞` 라 여기서 빈 범위로
+            // 빠진다.
+            if lo > hi {
+                return Ok(untouched);
+            }
+            wanted = wanted.clamp(lo, hi);
+        }
+
+        let mut candidate = v.layout.clone();
+        tree::set_ratio_in_tree(&mut candidate, split_id, wanted);
+        let after = geometry::compute(&candidate);
+        // 비율만 바뀌어 잎 집합·전위 순이 같으므로 자리끼리 맞댄다.
+        let collapses = before
+            .slots
+            .iter()
+            .zip(&after.slots)
+            .any(|(b, a)| has_area(b) && !has_area(a));
+        if collapses {
+            return Ok(untouched);
+        }
+        if wanted == current {
+            return Ok(SplitRatioResult {
+                ratio: wanted,
+                outcome: SplitRatioOutcome::Unchanged,
+            });
+        }
+        self.view_mut(view_id)?.layout = candidate;
+        self.bump_version();
+        Ok(SplitRatioResult {
+            ratio: wanted,
+            outcome: SplitRatioOutcome::Applied,
+        })
+    }
+
+    pub fn list_splits(&self, view_id: ViewId) -> Result<Vec<tree::SplitInfo>, LayoutError> {
+        let v = self
+            .views
+            .get(&view_id)
+            .ok_or(LayoutError::ViewNotFound(view_id))?;
+        Ok(tree::list_splits(&v.layout))
     }
 
     // view 안 slot_id 슬롯을 포커스로 지정(click-to-focus — ADR-0066 결정 1). ★그 슬롯이 이 View 트리에
@@ -613,6 +745,10 @@ impl ViewManager {
             content: geometry::content_rect(&frame, &metrics.frame_insets),
         }))
     }
+}
+
+fn has_area(r: &SlotRect) -> bool {
+    r.x0 < r.x1 && r.y0 < r.y1
 }
 
 // `RangeInclusive::contains` 는 NaN 에 거짓이다 — 그래서 NaN·±∞ 도 이 한 검사에서 함께 걸린다.
@@ -1975,5 +2111,495 @@ mod tests {
             .prepare_detached_view(src, first_slot_of(&mgr, src), "Tab".into())
             .unwrap();
         assert_eq!(mgr.px_context(tmp), Ok(None));
+    }
+
+    // ── 비율 쓰기 · 분할 표현 가능성 (ADR-0227) ──────────────────────────────
+
+    // 전위 순 — 루트가 맨 앞, 같은 쪽으로 판 사슬이면 가장 깊은 것이 맨 뒤다.
+    fn split_ids(mgr: &ViewManager, view: ViewId) -> Vec<Uuid> {
+        tree::list_splits(&mgr.views[&view].layout)
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    fn ratio_in(mgr: &ViewManager, view: ViewId, split: Uuid) -> f64 {
+        tree::split_ratio(&mgr.views[&view].layout, split).expect("분할 있어야")
+    }
+
+    fn slot_rect(mgr: &ViewManager, view: ViewId, slot: Uuid) -> SlotRect {
+        *geometry::compute(&mgr.views[&view].layout)
+            .slots
+            .iter()
+            .find(|r| r.slot_id == slot)
+            .expect("칸 있어야")
+    }
+
+    fn assert_every_leaf_has_area(mgr: &ViewManager, view: ViewId) {
+        for r in geometry::compute(&mgr.views[&view].layout).slots {
+            assert!(has_area(&r), "면적 0 칸: {r:?}");
+        }
+    }
+
+    // main 활성 탭의 첫 칸을 `dir` 로 한 번 나눈 세계 — 반환 = (관리자, 탭, 그 분할).
+    fn one_split(dir: SplitDir) -> (ViewManager, ViewId, Uuid) {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let s = first_slot_of(&mgr, v);
+        mgr.split_slot(v, s, dir).unwrap();
+        let split = split_ids(&mgr, v)[0];
+        (mgr, v, split)
+    }
+
+    fn applied(ratio: f64) -> SplitRatioResult {
+        SplitRatioResult {
+            ratio,
+            outcome: SplitRatioOutcome::Applied,
+        }
+    }
+
+    // 값을 안 바꾼 결말 — 트리·version 이 그대로인지도 함께 본다.
+    fn assert_untouched(
+        mgr: &mut ViewManager,
+        view: ViewId,
+        split: Uuid,
+        ratio: f64,
+        expect: SplitRatioResult,
+    ) {
+        let before = mgr.views[&view].clone();
+        let ver = mgr.version;
+        assert_eq!(mgr.set_split_ratio(view, split, ratio), Ok(expect));
+        assert_eq!(mgr.views[&view], before, "무변경이어야 한다");
+        assert_eq!(mgr.version, ver, "version 을 안 올린다");
+    }
+
+    #[test]
+    fn set_split_ratio_writes_the_split_with_that_id_and_bumps_version() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let x = first_slot_of(&mgr, v);
+        let y = mgr.split_slot(v, x, SplitDir::LeftRight).unwrap();
+        mgr.split_slot(v, y, SplitDir::TopBottom).unwrap();
+        let ids = split_ids(&mgr, v);
+        assert_eq!(ids.len(), 2, "분할 둘");
+        let (outer, inner) = (ids[0], ids[1]);
+        let ver = mgr.version;
+
+        assert_eq!(mgr.set_split_ratio(v, inner, 0.7), Ok(applied(0.7)));
+        assert_eq!(ratio_in(&mgr, v, inner), 0.7);
+        assert_eq!(
+            ratio_in(&mgr, v, outer),
+            tree::SPLIT_RATIO,
+            "다른 분할은 그대로"
+        );
+        assert_eq!(mgr.version, ver + 1);
+        assert_eq!(mgr.snapshot(v).unwrap().version, ver + 1);
+    }
+
+    #[test]
+    fn set_split_ratio_of_a_missing_split_or_view_changes_nothing() {
+        let (mut mgr, v, _split) = one_split(SplitDir::LeftRight);
+        let other = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let other_slot = first_slot_of(&mgr, other);
+        mgr.split_slot(other, other_slot, SplitDir::TopBottom)
+            .unwrap();
+        let foreign = split_ids(&mgr, other)[0];
+        let bogus = Uuid::new_v4();
+        let slot = first_slot_of(&mgr, v);
+        let before = mgr.views[&v].clone();
+        let ver = mgr.version;
+
+        for missing in [bogus, slot, foreign] {
+            assert_eq!(
+                mgr.set_split_ratio(v, missing, 0.3),
+                Err(LayoutError::SplitNotFound(missing)),
+                "칸 id·다른 탭의 분할도 이 탭의 분할이 아니다"
+            );
+        }
+        assert_eq!(
+            mgr.set_split_ratio(bogus, foreign, 0.3),
+            Err(LayoutError::ViewNotFound(bogus))
+        );
+        assert_eq!(mgr.views[&v], before);
+        assert_eq!(ratio_in(&mgr, other, foreign), tree::SPLIT_RATIO);
+        assert_eq!(mgr.version, ver);
+    }
+
+    #[test]
+    fn set_split_ratio_refuses_non_finite_values_at_the_manager() {
+        let (mut mgr, v, split) = one_split(SplitDir::LeftRight);
+        let before = mgr.views[&v].clone();
+        let ver = mgr.version;
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                matches!(
+                    mgr.set_split_ratio(v, split, bad),
+                    Err(LayoutError::InvalidRatio(_))
+                ),
+                "{bad}: 거절돼야 한다"
+            );
+            // 없는 view 보다 먼저 걸린다 — 판정 순서가 계약이다.
+            assert!(matches!(
+                mgr.set_split_ratio(Uuid::new_v4(), split, bad),
+                Err(LayoutError::InvalidRatio(_))
+            ));
+        }
+        assert_eq!(mgr.views[&v], before);
+        assert_eq!(mgr.version, ver);
+    }
+
+    #[test]
+    fn set_split_ratio_clamps_to_the_ratio_bounds() {
+        let (mut mgr, v, split) = one_split(SplitDir::LeftRight);
+        assert_eq!(
+            mgr.set_split_ratio(v, split, 0.0),
+            Ok(applied(tree::RATIO_MIN))
+        );
+        assert_eq!(ratio_in(&mgr, v, split), tree::RATIO_MIN);
+        assert_eq!(
+            mgr.set_split_ratio(v, split, 1.0),
+            Ok(applied(tree::RATIO_MAX))
+        );
+        assert_eq!(
+            mgr.set_split_ratio(v, split, -5.0),
+            Ok(applied(tree::RATIO_MIN))
+        );
+        // 잘린 값이 지금 값과 같으면 무변경이다.
+        assert_untouched(
+            &mut mgr,
+            v,
+            split,
+            0.05,
+            SplitRatioResult {
+                ratio: tree::RATIO_MIN,
+                outcome: SplitRatioOutcome::Unchanged,
+            },
+        );
+    }
+
+    #[test]
+    fn ratio_0_3_round_trips_exactly() {
+        let (mut mgr, v, split) = one_split(SplitDir::TopBottom);
+        let got = mgr.set_split_ratio(v, split, 0.3).unwrap();
+        assert_eq!(got.ratio.to_bits(), 0.3f64.to_bits());
+        assert_eq!(ratio_in(&mgr, v, split).to_bits(), 0.3f64.to_bits());
+        let wire = serde_json::to_value(mgr.snapshot(v).unwrap().layout).unwrap();
+        assert_eq!(wire["ratio"], serde_json::json!(0.3), "{wire}");
+        assert_eq!(serde_json::to_string(&got.ratio).unwrap(), "0.3");
+    }
+
+    #[test]
+    fn the_same_value_is_unchanged_without_a_version_bump() {
+        let (mut mgr, v, split) = one_split(SplitDir::LeftRight);
+        assert_untouched(
+            &mut mgr,
+            v,
+            split,
+            tree::SPLIT_RATIO,
+            SplitRatioResult {
+                ratio: tree::SPLIT_RATIO,
+                outcome: SplitRatioOutcome::Unchanged,
+            },
+        );
+        mgr.set_split_ratio(v, split, 0.3).unwrap();
+        assert_untouched(
+            &mut mgr,
+            v,
+            split,
+            0.3,
+            SplitRatioResult {
+                ratio: 0.3,
+                outcome: SplitRatioOutcome::Unchanged,
+            },
+        );
+    }
+
+    #[test]
+    fn px_minimum_keeps_both_sides_at_least_min_pane_px_on_the_split_axis() {
+        // 가로 분할 둘: 바깥(상자 폭 1000px) · 오른쪽 칸 안쪽(상자 폭 500px). m = 100.
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let x = first_slot_of(&mgr, v);
+        let y = mgr.split_slot(v, x, SplitDir::LeftRight).unwrap();
+        mgr.split_slot(v, y, SplitDir::LeftRight).unwrap();
+        let ids = split_ids(&mgr, v);
+        assert_eq!(ids.len(), 2, "분할 둘");
+        let (outer, inner) = (ids[0], ids[1]);
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 1000, 400).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(1.0, 1.0, 1.0, 1.0, 100))
+            .unwrap();
+
+        // 안쪽: L = 1000 × 0.5 = 500 → 허용 [0.2, 0.8]. 캔버스 전체 폭으로 재면 0.1 이 통과해 버린다.
+        assert_eq!(mgr.set_split_ratio(v, inner, 0.1), Ok(applied(0.2)));
+        assert_eq!(ratio_in(&mgr, v, inner), 0.2);
+        assert_eq!(mgr.set_split_ratio(v, inner, 0.95), Ok(applied(0.8)));
+        assert_eq!(
+            mgr.set_split_ratio(v, inner, 0.4),
+            Ok(applied(0.4)),
+            "범위 안은 그대로"
+        );
+        // 바깥: L = 1000 → m/L = 0.1 이라 비율 한계가 이긴다.
+        assert_eq!(
+            mgr.set_split_ratio(v, outer, 0.05),
+            Ok(applied(tree::RATIO_MIN))
+        );
+
+        // 위아래 분할은 캔버스 높이로 잰다: L = 400 → 허용 [0.25, 0.75].
+        let (mut tb, tv, split) = one_split(SplitDir::TopBottom);
+        tb.set_window_canvas(MAIN_WINDOW_LABEL, 1000, 400).unwrap();
+        tb.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(1.0, 1.0, 1.0, 1.0, 100))
+            .unwrap();
+        assert_eq!(tb.set_split_ratio(tv, split, 0.1), Ok(applied(0.25)));
+        assert_eq!(tb.set_split_ratio(tv, split, 0.9), Ok(applied(0.75)));
+    }
+
+    #[test]
+    fn an_empty_px_range_is_too_small_and_keeps_the_current_ratio() {
+        let (mut mgr, v, split) = one_split(SplitDir::LeftRight);
+        mgr.set_split_ratio(v, split, 0.3).unwrap();
+        // L = 300 < 2m = 400.
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 300, 300).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(1.0, 1.0, 1.0, 1.0, 200))
+            .unwrap();
+        let too_small = SplitRatioResult {
+            ratio: 0.3,
+            outcome: SplitRatioOutcome::TooSmall,
+        };
+        for asked in [0.6, 0.3, 0.1] {
+            assert_untouched(&mut mgr, v, split, asked, too_small);
+        }
+    }
+
+    #[test]
+    fn without_canvas_or_metrics_only_the_ratio_bounds_apply() {
+        // 둘 중 하나만 있어도 px 최소는 안 건다 — 둘 다 있으면 [0.2, 0.8] 로 잘릴 세계다.
+        let (mut only_canvas, v1, s1) = one_split(SplitDir::LeftRight);
+        only_canvas
+            .set_window_canvas(MAIN_WINDOW_LABEL, 500, 500)
+            .unwrap();
+        assert_eq!(only_canvas.set_split_ratio(v1, s1, 0.1), Ok(applied(0.1)));
+
+        let (mut only_metrics, v2, s2) = one_split(SplitDir::LeftRight);
+        only_metrics
+            .set_ui_metrics(MAIN_WINDOW_LABEL, metrics(1.0, 1.0, 1.0, 1.0, 100))
+            .unwrap();
+        assert_eq!(only_metrics.set_split_ratio(v2, s2, 0.1), Ok(applied(0.1)));
+        assert_eq!(
+            only_metrics.set_split_ratio(v2, s2, 0.01),
+            Ok(SplitRatioResult {
+                ratio: tree::RATIO_MIN,
+                outcome: SplitRatioOutcome::Unchanged,
+            })
+        );
+    }
+
+    #[test]
+    fn a_split_that_makes_panes_smaller_than_min_pane_px_is_allowed() {
+        // R11: 캔버스·지표를 알아도 px 로 분할을 거절하지 않는다.
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let x = first_slot_of(&mgr, v);
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 40, 40).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(0.0, 0.0, 0.0, 0.0, 30))
+            .unwrap();
+        let before = mgr.views[&v].layout.clone();
+
+        let y = mgr
+            .split_slot(v, x, SplitDir::LeftRight)
+            .expect("30px 미만 칸을 만드는 분할도 성공");
+        assert_ne!(mgr.views[&v].layout, before, "트리가 바뀐다");
+        for slot in [x, y] {
+            let f = mgr.slot_px(v, slot).unwrap().unwrap().frame;
+            assert!(f.x1 - f.x0 < 30, "{slot}: {f:?}");
+        }
+        mgr.split_slot(v, y, SplitDir::TopBottom)
+            .expect("더 작게도 나뉜다");
+    }
+
+    #[test]
+    fn repeated_same_side_splits_stop_with_split_too_deep_before_a_zero_width_slot() {
+        for dir in [SplitDir::LeftRight, SplitDir::TopBottom] {
+            let mut mgr = ViewManager::new();
+            let v = main_active(&mgr);
+            // 새 칸(b = 오른쪽/아래)을 계속 나눈다 — 경계가 1.0 쪽으로 몰린다.
+            let mut target = first_slot_of(&mgr, v);
+            let mut splits = 0;
+            let err = loop {
+                let before = mgr.views[&v].clone();
+                let ver = mgr.version;
+                match mgr.split_slot(v, target, dir) {
+                    Ok(new) => {
+                        target = new;
+                        splits += 1;
+                        assert!(splits < 200, "{dir:?}: 가드가 안 선다");
+                    }
+                    Err(e) => {
+                        assert_eq!(mgr.views[&v], before, "{dir:?}: 거절은 트리 불변");
+                        assert_eq!(mgr.version, ver);
+                        break e;
+                    }
+                }
+            };
+            assert_eq!(err, LayoutError::SplitTooDeep);
+            // f64 한계에서 멈췄다(일찍 거절한 게 아니다) — 반분 사슬은 약 54 단에서 닿는다.
+            assert!(splits > 40, "{dir:?}: {splits} 단에서 멈춤");
+            // 바로 그 직전이다: 칸은 아직 폭이 있지만 다음 경계가 칸 끝과 같아진다.
+            let r = slot_rect(&mgr, v, target);
+            let (lo, hi) = match dir {
+                SplitDir::LeftRight => (r.x0, r.x1),
+                SplitDir::TopBottom => (r.y0, r.y1),
+            };
+            assert!(lo < hi, "{dir:?}: {r:?}");
+            let at = geometry::boundary(lo, hi, tree::SPLIT_RATIO);
+            assert!(at == lo || at == hi, "{dir:?}: at={at} lo={lo} hi={hi}");
+            assert_every_leaf_has_area(&mgr, v);
+            mgr.snapshot(v).expect("이 깊이의 스냅샷도 패닉 없이 선다");
+        }
+    }
+
+    // 사슬의 모든 분할을 0.9 로 둔다 — 나누는 새 칸(b)은 10% 몫이라 경계가 훨씬 빨리 1.0 에 몰린다.
+    fn ninety_chain(mgr: &mut ViewManager, v: ViewId) -> (usize, LayoutError) {
+        let mut target = first_slot_of(mgr, v);
+        let mut levels = 0;
+        loop {
+            let before = mgr.views[&v].clone();
+            match mgr.split_slot(v, target, SplitDir::LeftRight) {
+                Ok(new) => {
+                    let deepest = *split_ids(mgr, v).last().unwrap();
+                    assert_eq!(
+                        mgr.set_split_ratio(v, deepest, 0.9),
+                        Ok(applied(0.9)),
+                        "{levels} 단"
+                    );
+                    target = new;
+                    levels += 1;
+                    assert!(levels < 200, "가드가 안 선다");
+                }
+                Err(e) => {
+                    assert_eq!(mgr.views[&v], before, "거절은 트리 불변");
+                    return (levels, e);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_ninety_percent_chain_also_stops_with_split_too_deep() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let (levels, err) = ninety_chain(&mut mgr, v);
+        assert_eq!(err, LayoutError::SplitTooDeep);
+        // 10% 씩 줄면 약 17 단에서 닿는다 — 반분 사슬보다 훨씬 얕다.
+        assert!((10..30).contains(&levels), "{levels} 단");
+        assert_every_leaf_has_area(&mgr, v);
+    }
+
+    #[test]
+    fn an_ancestor_ratio_that_would_collapse_a_deep_leaf_is_too_small() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let mut target = first_slot_of(&mgr, v);
+        while let Ok(new) = mgr.split_slot(v, target, SplitDir::LeftRight) {
+            target = new;
+        }
+        let root = split_ids(&mgr, v)[0];
+        // 루트를 0.9 로 두면 사슬 전체가 폭 0.1 에서 시작해 맨 끝 칸들이 폭 0 이 된다.
+        assert_untouched(
+            &mut mgr,
+            v,
+            root,
+            0.9,
+            SplitRatioResult {
+                ratio: tree::SPLIT_RATIO,
+                outcome: SplitRatioOutcome::TooSmall,
+            },
+        );
+        assert_every_leaf_has_area(&mgr, v);
+        // 대조: 사슬이 더 넓어지는 쪽(0.1)은 아무 칸도 안 무너뜨려 적용된다 — 거름이 일괄 거절이 아니다.
+        assert_eq!(mgr.set_split_ratio(v, root, 0.1), Ok(applied(0.1)));
+        assert_every_leaf_has_area(&mgr, v);
+    }
+
+    // 쓰기 경로로는 못 만드는 트리: 좌우 반분 사슬(늘 b 쪽이 다음 단) — 54 단째부터 칸 폭이 0 이다.
+    fn planted_half_chain(depth: usize) -> LayoutNode {
+        let mut node = LayoutNode::new_empty_slot();
+        for _ in 0..depth {
+            node = LayoutNode::Split {
+                id: Uuid::new_v4(),
+                dir: SplitDir::LeftRight,
+                ratio: 0.5,
+                a: Box::new(LayoutNode::new_empty_slot()),
+                b: Box::new(node),
+            };
+        }
+        node
+    }
+
+    #[test]
+    fn a_planted_zero_width_slot_is_too_deep_to_split_on_the_other_axis_too() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        mgr.views.get_mut(&v).unwrap().layout = planted_half_chain(60);
+        let zero = geometry::compute(&mgr.views[&v].layout)
+            .slots
+            .into_iter()
+            .find(|r| !has_area(r))
+            .expect("전제: 면적 0 칸이 심겼다");
+        assert!(
+            zero.x0 == zero.x1 && zero.y0 < zero.y1,
+            "전제: 폭만 0 이다: {zero:?}"
+        );
+        // 위아래로 나누면 새 경계는 높이 안에 엄격히 들지만 두 새 칸이 다 폭 0 이다.
+        let before = mgr.views[&v].clone();
+        let ver = mgr.version;
+        assert_eq!(
+            mgr.split_slot(v, zero.slot_id, SplitDir::TopBottom),
+            Err(LayoutError::SplitTooDeep)
+        );
+        assert_eq!(mgr.views[&v], before, "거절은 트리 불변");
+        assert_eq!(mgr.version, ver);
+    }
+
+    #[test]
+    fn a_leaf_that_already_had_zero_area_does_not_lock_the_view() {
+        // 위 = 가로 분할 Q{x, y} · 아래 = 심은 반분 사슬 60 단.
+        let q = Uuid::new_v4();
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        mgr.views.get_mut(&v).unwrap().layout = LayoutNode::Split {
+            id: Uuid::new_v4(),
+            dir: SplitDir::TopBottom,
+            ratio: 0.5,
+            a: Box::new(LayoutNode::Split {
+                id: q,
+                dir: SplitDir::LeftRight,
+                ratio: 0.5,
+                a: Box::new(LayoutNode::new_empty_slot()),
+                b: Box::new(LayoutNode::new_empty_slot()),
+            }),
+            b: Box::new(planted_half_chain(60)),
+        };
+        let zero = geometry::compute(&mgr.views[&v].layout)
+            .slots
+            .iter()
+            .filter(|r| !has_area(r))
+            .count();
+        assert!(zero > 0, "전제: 면적 0 칸이 심겼다");
+
+        assert_eq!(mgr.set_split_ratio(v, q, 0.3), Ok(applied(0.3)));
+        assert_eq!(ratio_in(&mgr, v, q), 0.3);
+    }
+
+    #[test]
+    fn list_splits_of_a_missing_view_is_view_not_found() {
+        let (mgr, v, split) = one_split(SplitDir::LeftRight);
+        let rows = mgr.list_splits(v).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, split);
+        let bogus = Uuid::new_v4();
+        assert_eq!(
+            mgr.list_splits(bogus),
+            Err(LayoutError::ViewNotFound(bogus))
+        );
     }
 }

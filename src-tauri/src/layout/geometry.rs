@@ -11,7 +11,7 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
-use super::tree::{RATIO_MAX, RATIO_MIN};
+use super::tree::clamp_ratio;
 use super::types::{LayoutNode, SplitDir};
 
 /// 한 칸의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴(`x0 <= x1`, `y0 <= y1`).
@@ -111,21 +111,14 @@ fn walk(node: &LayoutNode, r: RectF64, out: &mut LayoutGeometry) {
             a,
             b,
         } => {
-            // 쓰기 경로가 한계·유한을 보장해도 트리에 직접 심은 값을 여기서도 거른다 — 0.0 등이 면적 0 잎을
-            // 만들지 않게 자르고, NaN 은 클램프를 그대로 통과해 자손 좌표 전체로 번지므로 반분으로 읽는다.
-            let t = if ratio.is_nan() {
-                0.5
-            } else {
-                ratio.clamp(RATIO_MIN, RATIO_MAX)
-            };
             // ADR-0140: LeftRight = x 축 분할(a 왼쪽) · TopBottom = y 축 분할(a 위).
             let (at, ra, rb) = match dir {
                 SplitDir::LeftRight => {
-                    let at = r.x0 + (r.x1 - r.x0) * t;
+                    let at = boundary(r.x0, r.x1, *ratio);
                     (at, RectF64 { x1: at, ..r }, RectF64 { x0: at, ..r })
                 }
                 SplitDir::TopBottom => {
-                    let at = r.y0 + (r.y1 - r.y0) * t;
+                    let at = boundary(r.y0, r.y1, *ratio);
                     (at, RectF64 { y1: at, ..r }, RectF64 { y0: at, ..r })
                 }
             };
@@ -142,6 +135,20 @@ fn walk(node: &LayoutNode, r: RectF64, out: &mut LayoutGeometry) {
             walk(b, rb, out);
         }
     }
+}
+
+/// 축 구간 `[lo, hi]` 를 비율 `ratio`(a 쪽 몫)로 나누는 경계 좌표 — `compute` 가 모든 분할에 쓰는 바로 그 식.
+/// 분할 가드가 새 경계를 미리 잴 때도 이것을 불러 실제 계산과 한 비트도 갈리지 않게 한다.
+// ADR-0227
+pub fn boundary(lo: f64, hi: f64, ratio: f64) -> f64 {
+    // 쓰기 경로가 한계·유한을 보장해도 트리에 직접 심은 값을 여기서도 거른다 — 0.0 등이 면적 0 잎을
+    // 만들지 않게 자르고, NaN 은 클램프를 그대로 통과해 자손 좌표 전체로 번지므로 반분으로 읽는다.
+    let t = if ratio.is_nan() {
+        0.5
+    } else {
+        clamp_ratio(ratio)
+    };
+    lo + (hi - lo) * t
 }
 
 /// 정규화 경계 `e` 를 캔버스 축 길이 `canvas` 위의 정수 px 경계로 = `round(canvas · e)`.
@@ -177,6 +184,7 @@ pub fn content_rect(frame: &PxRect, insets: &Insets) -> RectF64 {
 
 #[cfg(test)]
 mod tests {
+    use super::super::tree::{RATIO_MAX, RATIO_MIN};
     use super::super::types::SlotContent;
     use super::*;
 

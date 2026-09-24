@@ -20,12 +20,12 @@
 //! invalid view_id/slot_id/window → no-op + Err(String)(패닉·부분변경 금지).
 //!
 //! ## 함수가 받는 포트 = 그 명령이 건드리는 것
-//! 인자에 없는 포트는 **그 경로가 그것을 건드리지 않는다는 뜻**이다 — `focus_slot`·`rename_tab` 에
-//! `SubscriptionSync` 가 없는 것은 누락이 아니라 라우팅 불변(ADR-0066)의 표현이고, `close_window` 에
-//! `LayoutEvents` 가 없는 것은 그 경로가 프론트에 아무것도 안 쏜다는 사실이다.
+//! 인자에 없는 포트는 **그 경로가 그것을 건드리지 않는다는 뜻**이다 — `focus_slot`·`rename_tab`·
+//! `set_split_ratio` 에 `SubscriptionSync` 가 없는 것은 누락이 아니라 라우팅 불변(ADR-0066)의 표현이고,
+//! `close_window` 에 `LayoutEvents` 가 없는 것은 그 경로가 프론트에 아무것도 안 쏜다는 사실이다.
 //!
-//! read-only 4종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial`)은 변형이 없어 포트를 하나도
-//! 받지 않는다(ADR-0156 결정 2로 v1 명령 범위에 합류).
+//! read-only 5종(`get_view`·`list_tabs`·`list_windows`·`resolve_spatial`·`list_splits`)은 변형이 없어
+//! 포트를 하나도 받지 않는다(앞 넷은 ADR-0156 결정 2로 v1 명령 범위에 합류 · `list_splits` 는 ADR-0227).
 //!
 //! 측정 보고 2종(`report_window_canvas`·`report_ui_metrics`)도 포트를 받지 않는다 — 셸 상태에 쓰지만
 //! version·알림·구독 어느 것도 건드리지 않는다(측정이지 제어가 아니다 — ADR-0227).
@@ -41,7 +41,10 @@ use super::manager::{
     resolve_spawn_slot, CloseTabOutcome, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
-use super::types::{SlotContent, SplitDir, UiMetrics, ViewMeta, ViewSnapshot};
+use super::tree::SplitInfo;
+use super::types::{
+    SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, ViewMeta, ViewSnapshot,
+};
 use super::LayoutState;
 
 /// 창별 탭바 알림 페이로드(ADR-0057). 프론트는 `label` 이 자기 창과 일치할 때만 반응하고(§7-1),
@@ -170,7 +173,7 @@ fn notify(
     }
 }
 
-// ── 쓰기 13종 ────────────────────────────────────────────────────────────────
+// ── 쓰기 14종 ────────────────────────────────────────────────────────────────
 
 pub fn create_tab(
     state: &LayoutState,
@@ -365,6 +368,40 @@ pub fn focus_slot(
     }; // ← 락 드롭
     notify(events, layout, tabs);
     Ok(())
+}
+
+// 사람의 구분선 드래그(Tauri `set_split_ratio`)와 LLM 의 `split.setRatio` 가 같이 떨어지는 자리.
+// ★레이아웃 알림은 `Applied` 일 때만, 탭 알림은 없다★ — 무변경 결말(`Unchanged`·`TooSmall`)을 알리면 화면이
+// 바뀌지 않은 스냅샷을 또 받는다. 출력 라우팅이 안 바뀌어 재동기도 없다(`focus_slot` 과 같은 이유).
+// ★반환 version 은 같은 임계 구역에서 뜬 스냅샷의 것이다★ — 락을 놓은 뒤 전역 카운터를 다시 읽으면 그
+// 사이 끼어든 다른 쓰기의 값을 돌려줘, 화면이 통지되지 않을 version 을 기다린다.
+// ADR-0227
+pub fn set_split_ratio(
+    state: &LayoutState,
+    events: &dyn LayoutEvents,
+    view_id: Uuid,
+    split_id: Uuid,
+    ratio: f64,
+) -> Result<SplitRatioApplied, String> {
+    let (applied, layout) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        let result = mgr
+            .set_split_ratio(view_id, split_id, ratio)
+            .map_err(|e| e.to_string())?;
+        let layout = match result.outcome {
+            SplitRatioOutcome::Applied => mgr.snapshot(view_id).ok(),
+            SplitRatioOutcome::Unchanged | SplitRatioOutcome::TooSmall => None,
+        };
+        let version = layout.as_ref().map_or(mgr.version, |snap| snap.version);
+        let applied = SplitRatioApplied {
+            ratio: result.ratio,
+            outcome: result.outcome,
+            version,
+        };
+        (applied, layout)
+    }; // ← 락 드롭
+    notify(events, layout, None);
+    Ok(applied)
 }
 
 // ★탭 알림만★: 이름은 `ViewMeta.name`(= 탭 페이로드)에만 있고 `ViewSnapshot` 엔 없다 → 레이아웃
@@ -743,7 +780,14 @@ pub fn report_ui_metrics(
         .map_err(|e| e.to_string())
 }
 
-// ── read-only 4종 ────────────────────────────────────────────────────────────
+// ── read-only 5종 ────────────────────────────────────────────────────────────
+
+// LLM 이 split id 를 찾는 길 — 스냅샷(`get_view`)은 재귀 타입이라 명령 버스에 못 싣는다.
+// ADR-0227
+pub fn list_splits(state: &LayoutState, view_id: Uuid) -> Result<Vec<SplitInfo>, String> {
+    let mgr = state.0.lock().map_err(|e| e.to_string())?;
+    mgr.list_splits(view_id).map_err(|e| e.to_string())
+}
 
 // 팝업 pull↔listen race 용. ★조회만★ — 변형 없음, 알림 없음(version 안 올림).
 pub fn get_view(state: &LayoutState, view_id: Uuid) -> Result<ViewSnapshot, String> {

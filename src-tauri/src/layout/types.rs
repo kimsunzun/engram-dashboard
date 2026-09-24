@@ -139,6 +139,42 @@ pub struct ViewSnapshot {
     pub version: u64,
 }
 
+/// 비율 쓰기(`set_split_ratio`)의 결말.
+///
+/// - `Applied`: 값을 바꿨다 — version 이 올랐고 그 뷰의 레이아웃 스냅샷이 통지된다.
+/// - `Unchanged`: 클램프한 값이 지금 값과 같다 — 무변경·무통지.
+/// - `TooSmall`: 손대지 않았다 — 무변경·무통지. 사유는 둘이다 — 분할 상자가 두 쪽 모두 `min_pane_px`
+///   이상을 줄 만큼 크지 않다(px 범위가 비었다), 또는 그 값을 쓰면 어떤 칸의 폭·높이가 0 이 된다.
+///
+/// 명령 버스 `split.setRatio` 의 `outcome` 과 철자가 같다.
+// ★여기에 `#[serde(rename_all)]` 을 달지 말 것★ — 버스 선언 매크로는 rename 을 못 달아 variant 이름이 그대로
+// wire 값이 된다. 여기만 바꾸면 같은 결말을 두 표면이 다른 철자로 말한다(버스 쪽 쌍둥이 = `commands::RatioOutcome` ·
+// `ThemeSource`↔`ThemeOrigin` 과 같은 규칙 · 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의
+// `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum SplitRatioOutcome {
+    Applied,
+    Unchanged,
+    TooSmall,
+}
+
+/// `set_split_ratio` invoke 의 답. `ratio` = 셸이 실제로 가진 비율(a 쪽 = 왼쪽/위 칸의 몫 — ADR-0140) —
+/// `Applied` 면 방금 쓴 값, 아니면 손대지 않은 지금 값이다.
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct SplitRatioApplied {
+    pub ratio: f64,
+    pub outcome: SplitRatioOutcome,
+    /// `Applied` 일 때만 뜻이 있다 — 이 쓰기로 통지된 레이아웃 스냅샷의 `version` 과 같다(같은 락 안에서 뜬
+    /// 값). `Unchanged`·`TooSmall` 이면 통지가 없고 이 값은 전역 카운터의 그 순간 값일 뿐이라 기다릴
+    /// 대상이 아니다. number 로 고정하는 이유는 `ViewSnapshot.version` 과 같다.
+    #[ts(type = "number")]
+    pub version: u64,
+}
+
 /// 칸 틀 기본 지표 — 웹뷰가 셸에 알리는 `report_ui_metrics` 의 인자(`{ metrics: UiMetrics }`).
 ///
 /// - `frame_insets`: 칸 틀 안쪽 테두리 폭 넷(CSS px). **실측값**이다 — 배율에 따라 소수가 올 수 있다.

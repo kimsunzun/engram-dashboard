@@ -229,6 +229,7 @@ pub fn run() {
             commands::close_tab,
             commands::close_window,
             commands::split_slot,
+            commands::set_split_ratio,
             commands::close_slot,
             commands::focus_slot,
             commands::rename_tab,
