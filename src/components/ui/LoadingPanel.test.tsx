@@ -1,5 +1,5 @@
-// LoadingPanel 계약(ADR-0226). reduced-motion·e-ink 에서의 회전 정지는 jsdom 이 css 미디어·keyframes 를
-//   돌리지 않아 여기서 못 잰다 — GUI 실측 몫이다.
+// LoadingPanel 계약(ADR-0226). 회전(reduced-motion·e-ink 에서도 늘 돈다 — 사용자 결정 2026-09-24)은
+//   jsdom 이 css 미디어·keyframes 를 돌리지 않아 여기서 못 잰다 — GUI 실측 몫이다.
 
 import { cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'

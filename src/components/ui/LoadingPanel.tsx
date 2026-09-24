@@ -9,7 +9,7 @@ import { LoaderCircle } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { t } from '../../i18n'
-import './loading-panel.css' // 회전 keyframes 와 그 정지 규칙(reduced-motion·e-ink)의 정의처.
+import './loading-panel.css' // 회전 keyframes 의 정의처(reduced-motion·e-ink 에서도 늘 돈다).
 
 interface LoadingPanelProps {
   label?: ReactNode

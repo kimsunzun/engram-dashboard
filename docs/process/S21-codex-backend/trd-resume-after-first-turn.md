@@ -2,7 +2,7 @@
 
 > 상태: **개정 4판(2026-09-24) — 리뷰 4회차 지적 넷 반영**(사용자 종료 중의 제출을 보내지도 않는다 · 메모 A 문구 셋). 3판 = 리뷰 3회차(FIX) 지적 여섯 반영. 2판 = 리뷰 2회차(FIX, 리뷰어 셋) 반영 + 사용자 결정 Q1·Q2·로딩 배치. 코드는 아직 한 줄도 안 바뀌었다. 판독 기준 = master `93f0f9f`(운영 코드는 `e0af391` 과 같다). `file:line` 은 그 시점에 직접 확인한 것이다. 리뷰 지적의 코드 주장은 전부 다시 읽어 확인했고, **코드와 어긋난 1회차 지적 하나(RichSlot 비우기 창)는 반영하지 않았다** — 근거는 §3-5(2회차 리뷰어 셋이 각자 그 반박을 확인했다). 2회차의 Phase B 몫 지적은 §3-4 끝 「B 라운드 착수 전 반영할 리뷰 지적」에 모았다.
 >
-> **착지(2026-09-24): Phase A 의 A1–A4 가 코드로 들어왔다 — 커밋은 §6-1 단계표.** 위 「코드는 아직 한 줄도 안 바뀌었다」와 본문의 `file:line` 은 판독 시점(`93f0f9f`)의 기록이다. 구현이 원안과 갈린 자리는 그 절에 「구현 결과」로 적었다(§3-5 게이트 식·배치 · §4-1 종단 시험 · §7 Q4).
+> **착지(2026-09-24): Phase A 의 A1–A4 가 코드로 들어왔다 — 커밋은 §6-1 단계표.** 위 「코드는 아직 한 줄도 안 바뀌었다」와 본문의 `file:line` 은 판독 시점(`93f0f9f`)의 기록이다. 구현이 원안과 갈린 자리는 그 절에 「구현 결과」로 적었다(§3-5 게이트 식·배치·로딩 스피너(e-ink·reduced-motion 에서도 늘 돈다 — 사용자 결정 2026-09-24) · §4-1 종단 시험 · §7 Q4).
 >
 > **이 문서가 스스로 고른 것**(D3 로 구현에 위임된 자리 · 사용자 체감이 없는 내부 구현)은 본문에 「고름」으로 표시한다. 사용자 결정이 필요한 것은 §7 에만 둔다.
 >
@@ -40,7 +40,7 @@
 - **D2.** 챗 슬롯은 「이 화신이 대화를 이어받았나」(예/아니오 — id 자체가 아니다)를 **구독 응답**에서 받는다. id 가 생길 때의 broadcast 가 아니다. 사유: 구독 응답은 replay·`ReplayComplete` 와 **같은 순서 스트림**을 타고, 값은 스폰 때 화신마다 고정된다. `SubscribeAck.action` 의 `Resume`(seq 이어받기)과 이름이 겹치지 않게 한다.
 - **D3.** 백엔드·모드별 영속 방아쇠는 구현에 위임(코드상 최선을 골라 문서화). 「저장했는데 백엔드가 대화를 안 만들었다」는 D4 가 흡수하므로 괜찮다.
 - **D4.** 이어받기가 **「이어받을 대화가 없다」 부류**(`NoConversationToResume`)로 실패하면 **자동으로 새 대화를 연다.** 다른 실패는 ADR-0082 그대로(멈추고 보고). 루프 금지. ADR-0082 를 이 부류에 한해 개정하는 ADR 이 필요하다.
-- **D5.** 이어받은 화신이 이력을 기다리는 동안 챗 슬롯은 **새 공용 「로딩 패널」**(로딩 아이콘 + 선택적 텍스트 칸)을 그린다. 이번 용도는 **아이콘만, 텍스트 없음**. e-ink·reduced-motion 에서는 정지 아이콘. 시간 기반 지연 없음(ADR-0038 · `0145:26`). 대기가 끝나는 때 = 첫 이력 항목 도착 · 사용자 입력 · 화신 종료(지금의 막) · D4 재시작(새 화신 → 표식 거짓 → 첫 화면).
+- **D5.** 이어받은 화신이 이력을 기다리는 동안 챗 슬롯은 **새 공용 「로딩 패널」**(로딩 아이콘 + 선택적 텍스트 칸)을 그린다. 이번 용도는 **아이콘만, 텍스트 없음**. ~~e-ink·reduced-motion 에서는 정지 아이콘~~ → 바뀜: 늘 돈다(사용자 결정 2026-09-24 — §3-5). 시간 기반 지연 없음(ADR-0038 · `0145:26`). 대기가 끝나는 때 = 첫 이력 항목 도착 · 사용자 입력 · 화신 종료(지금의 막) · D4 재시작(새 화신 → 표식 거짓 → 첫 화면).
 
 ---
 
@@ -249,7 +249,8 @@
 - **`src/components/ui/LoadingPanel.tsx` + `loading-panel.css`**(옆 css 규약 — `scroll-area.css` 선례).
   - props: `label?: ReactNode`(**보이는** 선택 텍스트 칸 — 이번엔 안 넘긴다) · `className?`. aria 이름과는 별개다 — `label` 을 넘기면 그것을 그리고, 안 넘기면 보이는 텍스트가 없다.
   - 아이콘 = lucide `LoaderCircle`(`lucide-react` 는 이미 의존성). 색 = 테마 토큰(`text-muted`).
-  - 회전은 css keyframes. `@media (prefers-reduced-motion: reduce)` 와 `:root[data-theme='e-ink']` 에서 **정지**(고름: Tailwind `motion-safe:` 는 reduced-motion 만 덮고 e-ink 는 못 덮어 규칙이 두 곳으로 갈린다).
+  - (계획 — 바뀜, 아래) 회전은 css keyframes. `@media (prefers-reduced-motion: reduce)` 와 `:root[data-theme='e-ink']` 에서 **정지**(고름: Tailwind `motion-safe:` 는 reduced-motion 만 덮고 e-ink 는 못 덮어 규칙이 두 곳으로 갈린다).
+    - ★**→ 사용자 결정 2026-09-24: 기존 회전 기호(`agentGlyph.css`, 2026-08-24)와 같이 늘 돈다**★ — reduced-motion·e-ink 의 정지 규칙을 걷었다(멈춘 스피너는 「멈춤」과 구분되지 않는다). §2 D5·§4-1·§4-4 시행 9 의 「정지」 서술도 이것으로 읽는다.
   - `role="status"` · `aria-busy="true"` · 화면 밖 이름 `aria-label={t('common.loading')}` — **보이는 텍스트는 없다.** `data-loading-panel="1"`(GUI 실측 관측점).
   - ★**i18n 키는 새로 만든다**★(리뷰 지적 반영): `common.loading`(`ko.ts` 의 `common` 묶음 `:143` 에 더한다). 기존 `window.loading`(`:48` — 「창 로딩 중… (label: {label})」)은 뜻과 인자가 달라 재사용하지 않는다.
 - **RichSlot(`src/components/slot/RichSlot.tsx`):**
@@ -358,7 +359,7 @@
 - `tests/daemon_client_replay.rs`: `apply_replay_event` 가 `deliver` 로 넘기는 바이트에 bit2.
 
 **프론트(vitest) [A]**
-- `LoadingPanel`: `role=status` · 아이콘 · 기본 텍스트 없음 · aria 이름 = `common.loading` · `label` 을 주면 그린다 · `data-loading-panel`. (e-ink·reduced-motion 정지는 jsdom 이 css 미디어를 못 돌려 GUI 실측으로 잰다.)
+- `LoadingPanel`: `role=status` · 아이콘 · 기본 텍스트 없음 · aria 이름 = `common.loading` · `label` 을 주면 그린다 · `data-loading-panel`. ~~(e-ink·reduced-motion 정지는 jsdom 이 css 미디어를 못 돌려 GUI 실측으로 잰다.)~~ → 바뀜: 늘 돈다(사용자 결정 2026-09-24 — §3-5). 회전은 jsdom 이 못 재므로 GUI 실측으로 잰다.
 - `wsFrame`: bit2 해독 · `tauriTransport`: 정규화에 실림 · `wsTransport`: `SubscribeAck` 칸 → 경계 · `protocolClient`: 보관 마커(myGen 미확정) 경로에서도 실림 · `'live'` 에만 `info` · ★onReset 은 언제나 `'buffering'` 뒤, 같은 `flushToLive` 안에서 `'live'` 직전에만 불린다(순서 핀 — §3-5 의 반영하지 않은 지적이 기대는 성질)★.
 - `RichSlot`: ① 표식 참 + 0건 → 첫 화면 없음·로딩 있음 ② 행을 그리는 첫 항목 → 로딩 사라짐·첫 화면 없음(구현 결과: 이력 행 = `hasHistoryRow` — separator 제외, §3-5) ③ `Usage` 만 온 동안 로딩 유지 ④ 입력 → 로딩 사라짐 ⑤ 에이전트 부재 → 막·로딩 없음 ⑥ onReset + `'live'`(거짓) → 첫 화면(D4 재시작) ⑦ 표식 거짓 → ADR-0145 시험 전부 그대로 ⑧ `info` 없는 `'live'` → 거짓으로 읽음 ⑨ ★`Usage` 만 온 동안 대기 꼬리(`WaitRow`) 없음★.
 
@@ -393,7 +394,7 @@
   6. [A] D1 claude 터미널: 띄우고 Enter 없이 kill → `null` → 재활성화 argv 가 `--session-id`.
   7. [A] codex 터미널: ★시간이 아니라 사건을 기다린다(ADR-0038)★ — 데몬 로그에 그 에이전트·화신의 래치 offer 로그(「세션 id 를 받았다 — 첫 제출 전이라 영속을 보류한다」, §3-2-2)가 찍힌 것을 본 뒤 입력 없이 kill → `null` → 다음 활성화가 Fresh. 그 줄 없이 `null` 을 보면 회수가 안 된 것과 구별이 안 돼 공허하게 통과한다. 조건 둘: **신뢰된 폴더**에서 띄운다(처음 보는 폴더는 신뢰 모달이 회수를 막았다 — `step-log.md:2455`) · 데몬 로그를 info 이상으로 켠다(기본 warn — 켜는 법은 `/qa` 바인딩 §full).
   8. [A] 데몬 재기동 뒤 codex 이어받기(지난 B1 시행) — 첫 화면 없음.
-  9. [A] e-ink 테마 · reduced-motion — 아이콘 정지(스크린숏).
+  9. [A] e-ink 테마 · reduced-motion — ~~아이콘 정지(스크린숏)~~ → 바뀜: 아이콘이 **돈다**(스크린숏 두 장이 다르다 — 사용자 결정 2026-09-24 · §3-5).
   10. [B] D4: codex JSON 을 띄우고 입력 없이 kill → 재활성화 — 실패 문구 없음 · 새 화신 · 첫 화면 · `backend_session_id` 가 첫 메시지 전 `null`, 후 값.
   11. [B] 옛 쓰레기 프로필: 데몬을 내린 상태에서 `agents.json` 에 무작위 uuid 를 심는다 → 재활성화 → D4. **모드마다 따로 잰다** — claude JSON · codex app-server · claude 터미널 · codex 터미널(뒤 둘은 B0 결과에 따라 D4 또는 오늘의 실패).
   12. [B] 폴백 중 보이는 순서(Q8 의 근거) — 챗 슬롯(로딩 → 막 → 첫 화면)과 트리(도는 중 → 시체 → 도는 중)의 각 구간 길이를 찍는다.
