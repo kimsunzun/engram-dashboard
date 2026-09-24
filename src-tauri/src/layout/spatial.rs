@@ -59,7 +59,9 @@ fn edge_eq(a: f32, b: f32) -> bool {
 fn assign_rects(node: &LayoutNode, rect: NormRect, out: &mut Vec<(Uuid, NormRect)>) {
     match node {
         LayoutNode::Slot { id, .. } => out.push((*id, rect)),
-        LayoutNode::Split { dir, ratio, a, b } => {
+        LayoutNode::Split {
+            dir, ratio, a, b, ..
+        } => {
             // ★LOAD-BEARING 불변식(ADR-0068 §0 저위험 방어)★:
             // 이 모듈의 공간 계산은 **모든 leaf 가 비퇴화 면적(ratio ∈ (0,1))** 을 가진다고 가정한다 —
             // ratio 0/1 이면 한쪽 leaf 가 zero-width/height 가 되고, 그러면 edge 인접 판정(edge_eq)·

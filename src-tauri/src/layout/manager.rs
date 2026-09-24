@@ -86,42 +86,24 @@ impl Default for ViewManager {
 }
 
 impl ViewManager {
-    // ★부팅 기본 = 슬롯화된 트리(ADR-0063)★: 옛 고정 좌측 사이드패널(AppLayout Sidebar)이 하던 "트리 좌측
-    // 상시 노출"을 슬롯으로 재현한다. 좌측을 작게(ratio 0.2) 두어 사이드패널 UX(좁은 트리 + 넓은 작업
-    // 영역)를 무손실 대체한다. ★main 첫 뷰만★ — create_tab 로 만드는 새 탭은 종전대로 단일 빈 슬롯이다
-    // (트리를 모든 탭에 강제하지 않음).
+    // ★부팅 기본 = 다른 새 뷰와 같은 단일 빈 슬롯★ — 트리를 부팅에 깔지 않는다. 트리는 빈 슬롯 메뉴
+    // (`set_slot_content`)로 사용자가 놓는다. // ADR-0222
     pub fn new() -> Self {
-        let mut views = HashMap::new();
-        let v0 = View {
-            id: Uuid::new_v4(),
-            name: "View 1".to_string(),
-            layout: Self::default_main_layout(),
-            focused_slot_id: None,
-        };
-        let v0_id = v0.id;
-        views.insert(v0_id, v0);
-
-        let mut view_owner = HashMap::new();
-        view_owner.insert(v0_id, MAIN_WINDOW_LABEL.to_string());
-
-        let mut windows = HashMap::new();
-        windows.insert(
-            MAIN_WINDOW_LABEL.to_string(),
-            WindowTabs {
-                tabs: vec![v0_id],
-                active: v0_id,
-            },
-        );
-
         let mut mgr = Self {
-            views,
-            view_owner,
-            windows,
+            views: HashMap::new(),
+            view_owner: HashMap::new(),
+            windows: HashMap::new(),
             version: 0,
         };
-        if let Some(v) = mgr.views.get_mut(&v0_id) {
-            Self::fixup_focus(v);
-        }
+        let v0 = mgr.make_view("View 1".to_string());
+        mgr.view_owner.insert(v0, MAIN_WINDOW_LABEL.to_string());
+        mgr.windows.insert(
+            MAIN_WINDOW_LABEL.to_string(),
+            WindowTabs {
+                tabs: vec![v0],
+                active: v0,
+            },
+        );
         mgr
     }
 
@@ -204,20 +186,6 @@ impl ViewManager {
 
     fn bump_version(&mut self) {
         self.version += 1;
-    }
-
-    // ★직접 Split 구성★: split_in_tree 는 ratio 0.5 고정 + 새 슬롯이 항상 Empty 라 여기 요구(좌=AgentList,
-    //   ratio 0.2)를 못 맞춘다 → LayoutNode::Split 을 직접 짓는다(types.rs Split 노드 형태 그대로).
-    fn default_main_layout() -> LayoutNode {
-        LayoutNode::Split {
-            dir: SplitDir::LeftRight,
-            ratio: 0.2, // 좌측(AgentList)을 작게 — 사이드패널 폭 재현.
-            a: Box::new(LayoutNode::Slot {
-                id: Uuid::new_v4(),
-                content: SlotContent::AgentList,
-            }),
-            b: Box::new(LayoutNode::new_empty_slot()),
-        }
     }
 
     // ── 내부 헬퍼 ───────────────────────────────────────────────────────────
@@ -657,51 +625,38 @@ mod tests {
     }
 
     #[test]
-    fn new_main_default_layout_is_agent_list_split_empty() {
+    fn new_main_default_layout_is_single_empty_slot_focused() {
         let mgr = ViewManager::new();
-        let v0 = main_active(&mgr);
-        let layout = &mgr.views.get(&v0).unwrap().layout;
-        match layout {
-            LayoutNode::Split { dir, ratio, a, b } => {
-                assert_eq!(*dir, SplitDir::LeftRight, "좌/우 배치");
-                assert_eq!(*ratio, 0.2, "좌측(트리)을 작게");
-                assert!(
-                    matches!(
-                        a.as_ref(),
-                        LayoutNode::Slot {
-                            content: SlotContent::AgentList,
-                            ..
-                        }
-                    ),
-                    "좌측 = AgentList 슬롯"
-                );
-                assert!(
-                    matches!(
-                        b.as_ref(),
-                        LayoutNode::Slot {
-                            content: SlotContent::Empty,
-                            ..
-                        }
-                    ),
-                    "우측 = Empty 슬롯"
-                );
-            }
-            _ => panic!("부팅 기본은 Split 이어야 함"),
-        }
+        let v = mgr.views.get(&main_active(&mgr)).unwrap();
+        let LayoutNode::Slot {
+            id,
+            content: SlotContent::Empty,
+        } = &v.layout
+        else {
+            panic!(
+                "부팅 기본은 단일 빈 슬롯이어야 함(트리 없음): {:?}",
+                v.layout
+            );
+        };
+        assert_eq!(v.focused_slot_id, Some(*id), "그 빈 슬롯에 포커스");
     }
 
     #[test]
-    fn create_tab_stays_single_empty_slot() {
-        // ★ADR-0063★: 부팅 기본만 분할 — 트리를 모든 탭에 강제 안 함.
+    fn boot_view_has_the_same_shape_as_any_new_tab() {
         let mut mgr = ViewManager::new();
+        let boot = main_active(&mgr);
         let t = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        assert!(matches!(
-            mgr.views.get(&t).unwrap().layout,
-            LayoutNode::Slot {
-                content: SlotContent::Empty,
-                ..
-            }
-        ));
+        for view in [boot, t] {
+            let v = mgr.views.get(&view).unwrap();
+            assert!(matches!(
+                v.layout,
+                LayoutNode::Slot {
+                    content: SlotContent::Empty,
+                    ..
+                }
+            ));
+            assert_eq!(v.focused_slot_id, Some(first_slot_of(&mgr, view)));
+        }
     }
 
     #[test]
@@ -989,19 +944,17 @@ mod tests {
     fn set_focused_slot_updates_focus_and_bumps_version() {
         let mut mgr = ViewManager::new();
         let view_id = main_active(&mgr);
-        let (left, right) = {
-            let v = mgr.views.get(&view_id).unwrap();
-            match &v.layout {
-                LayoutNode::Split { a, b, .. } => (tree::first_slot_id(a), tree::first_slot_id(b)),
-                _ => panic!("부팅 기본은 Split"),
-            }
-        };
-        assert_eq!(mgr.views.get(&view_id).unwrap().focused_slot_id, Some(left));
-        let ver = mgr.version;
-        mgr.set_focused_slot(view_id, right).unwrap();
+        let left = first_slot_of(&mgr, view_id);
+        let right = mgr.split_slot(view_id, left, SplitDir::LeftRight).unwrap();
         assert_eq!(
             mgr.views.get(&view_id).unwrap().focused_slot_id,
-            Some(right),
+            Some(right)
+        );
+        let ver = mgr.version;
+        mgr.set_focused_slot(view_id, left).unwrap();
+        assert_eq!(
+            mgr.views.get(&view_id).unwrap().focused_slot_id,
+            Some(left),
             "포커스가 클릭한 슬롯으로 이동"
         );
         assert_eq!(mgr.version, ver + 1, "성공 시 version +1");
@@ -1276,7 +1229,6 @@ mod tests {
         // (slot.popout hideOn:['empty']). agent_list/preset_palette 허용은 ADR-0064 — 위 테스트.
         let mut mgr = ViewManager::new();
         let src = main_active(&mgr);
-        // ★first_slot_of 는 점유를 안 본다★ — 부팅 레이아웃 branch a(=AgentList)를 집으므로 Empty 를 명시 설정.
         let slot = first_slot_of(&mgr, src);
         // ★썩음(낡은/없는 slot id)을 막는 것은 바로 아래 `unwrap()` 이다★ — prepare_detached_view 는
         //   "빈 슬롯"과 "없는 슬롯"에 같은 LayoutError::SlotNotFound 를 돌려주므로 마지막 is_err 만으론

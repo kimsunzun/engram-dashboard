@@ -6,8 +6,9 @@ import type { LayoutNode, SlotContent } from '../../api/layoutTypes'
 function slot(id: string, content: SlotContent): LayoutNode {
   return { type: 'slot', id, content }
 }
+let splitSeq = 0
 function split(a: LayoutNode, b: LayoutNode, ratio = 0.5): LayoutNode {
-  return { type: 'split', dir: 'left_right', ratio, a, b }
+  return { type: 'split', id: `split-${++splitSeq}`, dir: 'left_right', ratio, a, b }
 }
 
 describe('selectOpenTarget (pure)', () => {
