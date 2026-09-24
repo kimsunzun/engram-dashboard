@@ -17,6 +17,7 @@ import { installViewCommandBridge } from './commands/viewCommandBridge'
 // ADR-0053: seam(ScrollArea) 밖 네이티브 스크롤러(= xterm viewport)에 seam 과 같은 스크롤바 가시성 규칙을
 //   입힌다. 스타일 배선이라 슬롯 컴포넌트가 아니라 앱 루트에서 한 번 설치한다(창마다 이 App 이 뜬다).
 import { installNativeScrollActivity } from './components/ui/nativeScrollActivity'
+import { RootErrorBoundary } from './components/ui/RootErrorBoundary'
 
 function App() {
   // 테마는 디스크(`ui-settings.json`)가 정한다 — 붙는 시점은 부팅 조회가 돌아온 뒤라, 그 전까지는 main.tsx 가
@@ -57,17 +58,21 @@ function App() {
     })()
   }, [])
 
+  // 경계를 App 안쪽·라우터 바깥에 둔다 — App 을 감싸면 「다시 그리기」가 App 을 재마운트해 위 부팅 effect
+  //   (데몬 ensure·목록·프로필 조회)까지 다시 돈다. 다시 그릴 것은 라우팅된 화면뿐이다.
   return (
-    <HashRouter>
-      <div style={{ height: '100vh' }}>
-        <Routes>
-          <Route path="/" element={<AppLayout />} />
-          <Route path="/tree" element={<TreePage />} />
-          {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(ADR-0057). */}
-          <Route path="/popup" element={<PopoutPage />} />
-        </Routes>
-      </div>
-    </HashRouter>
+    <RootErrorBoundary>
+      <HashRouter>
+        <div style={{ height: '100vh' }}>
+          <Routes>
+            <Route path="/" element={<AppLayout />} />
+            <Route path="/tree" element={<TreePage />} />
+            {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(ADR-0057). */}
+            <Route path="/popup" element={<PopoutPage />} />
+          </Routes>
+        </div>
+      </HashRouter>
+    </RootErrorBoundary>
   )
 }
 

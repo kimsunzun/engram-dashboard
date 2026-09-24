@@ -49,6 +49,9 @@ export const ko = {
     loading: '창 로딩 중… (label: {label})',
     // ADR-0102: 부팅 pull(list_tabs) 유계 재시도 소진 후 최종 실패 표면화(조용히 로딩에 고착 금지).
     loadFailed: '창을 불러오지 못했습니다 (label: {label}). 백엔드 연결을 확인하세요.',
+    renderFailed: '화면을 그리는 중 오류가 났습니다',
+    redraw: '다시 그리기',
+    reload: '새로고침',
   },
   agent: {
     spawn: '에이전트 생성(spawn)',
