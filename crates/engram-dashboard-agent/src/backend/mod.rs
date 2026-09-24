@@ -206,9 +206,9 @@ pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 pub trait AgentBackend: Send + Sync {
     /// **우리가** 세션 id 를 뽑아 spawn 때 이 프로그램에 건네주나.
     ///
-    /// true 면 manager 가 uuid 를 발급해 **프로필에 영속**하고(`ProfileRegistry` 의 발급 메서드는 둘 다
-    /// 디스크에 쓴다) 그 값을 [`AgentBackend::build_spec`] 의 `session_id` 로 넘긴다. sid drift 관측기도
-    /// 그 값을 기준값으로 삼으므로 이 축에 매달린다.
+    /// true 면 manager 가 Fresh 마다 uuid 를 뽑아 [`AgentBackend::build_spec`] 의 `session_id` 로 넘기고,
+    /// 그 값은 **첫 제출 때** 프로필에 영속된다(ADR-0226 — 스폰 때는 안 쓴다). sid drift 관측기도 그 값을
+    /// 기준값으로 삼으므로 이 축에 매달린다.
     ///
     /// ★false 를 「세션이 없다」로 읽지 말 것★: 그 프로그램이 자기 id 를 **스스로 발급**하는 쪽일 수
     ///   있다. 그때 우리 uuid 를 심으면 그 프로그램이 한 번도 쓰지 않을 값이 프로필에 남고, 이어받기

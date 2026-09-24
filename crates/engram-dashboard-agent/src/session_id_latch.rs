@@ -59,13 +59,6 @@ enum OfferOutcome {
 }
 
 impl SessionIdLatch {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "운영 조립점(spawn)이 래치를 만드는 배선은 다음 조각이 들인다"
-        )
-    )]
     pub(crate) fn new(agent: AgentId, epoch: u32, commit: SessionIdSink) -> Arc<Self> {
         Arc::new(Self {
             agent,
@@ -77,13 +70,6 @@ impl SessionIdLatch {
     }
 
     /// backend·통로에 건네는 기록 포트 — 부르면 [`SessionIdLatch::offer`] 다.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "운영 조립점(spawn)이 래치를 만드는 배선은 다음 조각이 들인다"
-        )
-    )]
     pub(crate) fn offer_sink(self: &Arc<Self>) -> SessionIdSink {
         let latch = Arc::clone(self);
         Arc::new(move |raw: &str| latch.offer(raw))

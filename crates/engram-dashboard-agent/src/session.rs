@@ -119,13 +119,6 @@ impl AgentSession {
 
     /// 화신 사실을 싣는다 — 기본값(부르지 않음) = 이어받기 아님.
     // ADR-0226
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "운영 조립점(spawn_session)의 배선은 다음 조각이 들인다"
-        )
-    )]
     pub(crate) fn with_incarnation(mut self, continues_conversation: bool) -> Self {
         self.continues_conversation = continues_conversation;
         self
@@ -136,13 +129,6 @@ impl AgentSession {
     /// ★운영 조립점에서 빠뜨리면 모든 이어받기가 조용히 사라진다★ — 제출이 한 번도 안 세어져 어느
     ///   화신도 id 를 영속하지 못하고, 다음 활성화가 전부 새 대화가 된다(오류는 없다).
     // ADR-0226
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "운영 조립점(spawn_session)의 배선은 다음 조각이 들인다"
-        )
-    )]
     pub(crate) fn with_session_id_latch(mut self, latch: Arc<SessionIdLatch>) -> Self {
         self.session_id_latch = Some(latch);
         self
