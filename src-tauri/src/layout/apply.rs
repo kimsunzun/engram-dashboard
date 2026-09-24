@@ -571,15 +571,16 @@ pub struct SlotMove {
 // 원본 슬롯을 원본 View 에서 제거한다. agent 프로세스는 안 건드린다 — 표시 표면만 이동한다.
 // `to_window` 미지정 → 새 창(label 은 발급기가 준다) · 지정 → 그 기존 창의 새 탭.
 //
-// ★ADR-0064 — 모든 슬롯 콘텐츠★: agent 슬롯뿐 아니라 agent_list/preset_palette 도 옮긴다. 비-에이전트
-// 콘텐츠는 백엔드 출력 구독이 없어 재동기가 자연히 no-op 이다(라우팅은 Agent 슬롯만 훑는다). `Empty` 만
-// 거부한다(메뉴가 empty 를 숨기지만 코어도 방어).
+// ★ADR-0064 — 모든 슬롯 콘텐츠★: agent 슬롯뿐 아니라 agent_list/preset_palette 와 빈 슬롯(ADR-0228)도
+// 옮긴다. 비-에이전트 콘텐츠는 백엔드 출력 구독이 없어 재동기가 자연히 no-op 이다(라우팅은 Agent 슬롯만
+// 훑는다). 거절은 없는 view/slot 뿐이고 그 사유(`LayoutError`)를 그대로 돌려준다.
 //
 // ## ★2-phase 롤백 + 기존창 타깃 orphan 방지(G4)★
 // 락이 풀린 사이 대상 창이 소멸/동시 close 될 수 있어 **탭 삽입을 phase C 로 이연**하고, 거기서 대상 창을
 // 다시 확인한 뒤에만 삽입한다(부재면 롤백). 소스 detach 는 still-ours 가드로 2차 락에서 close.
 // ADR-0057
 // ADR-0064
+// ADR-0228
 pub fn move_slot_to_window(
     state: &LayoutState,
     subs: &dyn SubscriptionSync,
@@ -618,7 +619,7 @@ pub fn move_slot_to_window(
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
         let detached = mgr
             .prepare_detached_view(view_id, slot_id, tab_name)
-            .map_err(|_| "빈 슬롯은 다른 창으로 옮길 수 없음(콘텐츠 없음)".to_string())?;
+            .map_err(|e| e.to_string())?;
         subs.resync(&mgr);
         detached
     }; // ← 락 드롭
@@ -660,6 +661,7 @@ pub fn move_slot_to_window(
         //   still_ours=false → close 스킵. 즉 "재배정된 엉뚱한 콘텐츠를 지우지 않는 것"이 최우선이고, 그 대가로
         //   원래 콘텐츠가 타깃 탭 + 소스 슬롯 양쪽에 남는다. 이 중복은 같은 콘텐츠 두 View 를 허용하는 모델
         //   불변식으로 무해하므로(진도 독립 — ADR-0046) 엄격 롤백 대신 이대로 둔다.
+        //   옮긴 것이 빈 칸이어도 같은 대조다 — 그 사이 채워졌으면 불일치라 채운 콘텐츠를 지우지 않는다(ADR-0228).
         // ★load-bearing★: 소스 View 자체가 gap 중 소멸(탭/창 닫힘)했으면 `slot_content` 가 `Err` 를 준다 →
         //   아래 대조가 실패 → close 스킵. 이 `Err→스킵` 이 이미-사라진 소스를 다시 close 하려다 나는
         //   오작동/패닉을 막는다(수정 금지).

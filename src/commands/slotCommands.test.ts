@@ -121,13 +121,14 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(clientMock.killAgent).not.toHaveBeenCalled()
   })
 
-  it('empty 콘텐츠 메뉴 최상위 = 에이전트 모니터링 → 새 콘텐츠(컨테이너) → 가로/세로 분할 → 닫기 (ADR-0067/0065 트림)', () => {
+  it('empty 콘텐츠 메뉴 최상위 = 에이전트 모니터링 → 새 콘텐츠(컨테이너) → 가로/세로 분할 → 팝업 분리 → 닫기 (ADR-0067/0065 트림 · ADR-0228)', () => {
     const items = buildSlotMenu('empty')
     expect(items.map(i => i.id)).toEqual([
       'slot.assignRunningAgent',
       'container:새 콘텐츠',
       'slot.split.topBottom',
       'slot.split.leftRight',
+      'slot.popout',
       'slot.close',
     ])
     // ADR-0067: "생성" 은 뺀다 — 스폰은 트리 소관.
@@ -137,7 +138,6 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     ])
     expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
     expect(items.map(i => i.id)).not.toContain('slot.empty')
-    expect(items.map(i => i.id)).not.toContain('slot.popout')
   })
 
   it('§5 불변: 접힌 slot.fill.* 도 registry 로 여전히 직접 실행 가능', () => {

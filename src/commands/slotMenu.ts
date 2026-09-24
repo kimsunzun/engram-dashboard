@@ -29,7 +29,7 @@ export interface SlotMenuItem {
   order: number
   /**
    * ADR-0065 제외 조건 — 나열된 콘텐츠 타입 슬롯에서 이 항목을 숨긴다(subtraction 전용, allowlist 아님).
-   * 예: slot.empty·slot.popout 에 `['empty']` → '*' 보편 등록은 유지하되 빈 슬롯에서만 뺀다(공통 ops 단일소스 유지).
+   * 예: slot.empty 에 `['empty']` → '*' 보편 등록은 유지하되 빈 슬롯에서만 뺀다(공통 ops 단일소스 유지).
    */
   hideOn?: SlotContent['type'][]
   /** ADR-0065 1단 서브메뉴 자식들. 있으면 이 항목은 컨테이너(commandId 없이 title 필수). 자식은 flat 실행 항목만(중첩 금지). */
@@ -153,7 +153,7 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
  * ★정렬은 등록 순서 무관 — (groupRank, order) 로만★(ADR-0064): import 순서·HMR 순서에 렌더가 흔들리지
  *   않게 한다. 안정 정렬을 위해 group 은 GROUP_ORDER 랭크, 그 안은 order, 동률이면 key(commandId/title) 로 타이브레이크.
  * ★hideOn 필터(ADR-0065)★: hideOn 에 contentType 이 포함된 항목은 먼저 뺀다(subtraction — '*' 보편성은 유지,
- *   특정 타입만 제외). 공통 ops 단일소스('*') 불변식을 유지하면서 빈 슬롯에서 slot.empty/slot.popout 을 트림한다.
+ *   특정 타입만 제외). 공통 ops 단일소스('*') 불변식을 유지하면서 빈 슬롯에서 slot.empty 를 트림한다.
  * ★1단 서브메뉴(ADR-0065)★: children 있는 컨테이너는 title passthrough + 각 자식 commandId 를 resolve 한다.
  *   ★자식은 선언 순서 보존★(최상위와 달리 재정렬 없음) — 기여가 이미 의도한 상대 순서로 나열한다(ADR-0065
  *   "keeping their relative order"). 자식이 또 children 을 가지면 2단 중첩이라 dev 에러 + skip(nested=true).

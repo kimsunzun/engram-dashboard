@@ -63,7 +63,7 @@ fn build_icons() -> tauri::Result<TrayIcons> {
 //
 // 메뉴(순서): 데몬 켜기 / 데몬 끄기 / 부팅 시 자동 시작 / ──separator── / 완전 종료.
 // 메뉴 id 와 라벨은 core::MenuAction 에서(순수). 클릭 → action_for_menu_id → dispatch.
-// UI 보이기/숨기기는 메뉴에서 빠지고 **트레이 좌클릭(단발)** 으로 대체(on_tray_icon_event).
+// UI 보이기·숨기기는 메뉴 항목이 없다 — 보이기는 **트레이 좌클릭(단발)**(on_tray_icon_event), 숨기기는 메인 X.
 pub fn build_tray(app: &App) -> tauri::Result<()> {
     let icons = build_icons()?;
     // 초기 아이콘 = 회색(데몬 상태는 setup 직후 refresh 가 확정).
@@ -100,14 +100,13 @@ pub fn build_tray(app: &App) -> tauri::Result<()> {
         .icon(initial)
         .tooltip("Engram")
         .menu(&menu)
-        // 좌클릭에 메뉴 안 뜨게(사용자 요청). 메뉴=우클릭, 좌클릭 더블=UI 열기(아래 on_tray_icon_event).
+        // 좌클릭에 메뉴 안 뜨게(사용자 요청). 메뉴=우클릭, 좌클릭(단발)=UI 열기(아래 on_tray_icon_event).
         // 기본값이 true 라 명시 false. (Tauri 2.11: menu_on_left_click 은 deprecated → show_ 사용.)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| dispatch_menu(app, event.id.as_ref()))
-        // 트레이 좌클릭(단발) = UI 열기(사용자 요청 — 더블클릭에서 변경). 메뉴는 우클릭
-        // (show_menu_on_left_click=false 로 좌클릭 메뉴 비활성). Left + Up(뗄 때)만 처리 —
+        // 트레이 좌클릭(단발) = 모든 UI 창 되살리기(사용자 요청, ADR-0229). Left + Up(뗄 때)만 처리 —
         // Click 은 Down·Up 둘 다 발화하므로 Up 으로 한정해 1회만(중복 표시 방지). 우클릭/Enter/Move/
-        // Leave 무시. show_main_ui 는 메뉴·command·단축키와 같은 actions 함수 공유(CLAUDE.md §5).
+        // Leave 무시. show_main_ui 는 command·단일 인스턴스 재실행과 같은 actions 함수 공유(CLAUDE.md §5).
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
