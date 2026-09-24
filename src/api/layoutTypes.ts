@@ -14,3 +14,6 @@ export type { Neighbors } from '../../src-tauri/bindings/Neighbors'
 // ADR-0227: 셸 기하(정규화 경계 꼴 사각형) — ViewSnapshot.slot_rects / split_rects 에 실린다.
 export type { SlotRect } from '../../src-tauri/bindings/SlotRect'
 export type { SplitRect } from '../../src-tauri/bindings/SplitRect'
+// ADR-0227: 분할 비율 쓰기(`set_split_ratio`)의 답.
+export type { SplitRatioApplied } from '../../src-tauri/bindings/SplitRatioApplied'
+export type { SplitRatioOutcome } from '../../src-tauri/bindings/SplitRatioOutcome'

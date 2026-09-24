@@ -35,6 +35,7 @@ import type {
   SlotContent,
   SlotRect,
   SplitDir,
+  SplitRatioApplied,
   SplitRect,
   ViewMeta,
   ViewSnapshot,
@@ -113,6 +114,14 @@ interface ViewState {
   /** slot 분할 → 새 slot_id 반환. */
   split: (viewId: string, slotId: string, dir: SplitDir) => Promise<string>
   /**
+   * 분할 비율 쓰기(ADR-0227 — 구분선 확정·더블클릭 50:50). `ratio` = a 쪽(왼쪽/위) 칸의 몫(ADR-0140).
+   * 셸이 클램프한 적용값과 결말을 돌려준다(`version` 은 `Applied` 일 때만 뜻이 있다). 실패하면 셸의 오류 문자열로 reject.
+   * 낙관 갱신 X — 화면은 layout:updated 와 구분선 미리보기 화해(`splitPreview.ts`)로만 바뀐다.
+   * ★프론트 명령 레지스트리(`window.__engramCmd`)에 올리지 않는다★ — LLM 경로는 버스 `split.setRatio` 하나다.
+   *   두 표면에 같은 id 를 두면 받는 것·주는 것이 갈라진다(`slot.popout` 선례).
+   */
+  setSplitRatio: (viewId: string, splitId: string, ratio: number) => Promise<SplitRatioApplied>
+  /**
    * slot 을 포커스로 지정(click-to-focus — ADR-0066 결정 1). 백엔드 focus_slot 을 invoke 하고 실제 링
    * 갱신은 layout:updated emit 으로만(낙관 갱신 X — focused_slot_id 권위 = src-tauri, ADR-0035/0066).
    * 사람 클릭·팔레트·키바인딩·LLM(window.__engramCmd → slot.focus)이 같은 이 핸들을 흔든다(§5).
@@ -181,6 +190,8 @@ export const useViewStore = create<ViewState>((set, get) => ({
   closeWindow: window => invoke<void>('close_window', { window }),
 
   split: (viewId, slotId, dir) => invoke<string>('split_slot', { viewId, slotId, dir }),
+  setSplitRatio: (viewId, splitId, ratio) =>
+    invoke<SplitRatioApplied>('set_split_ratio', { viewId, splitId, ratio }),
   // ADR-0057/0035: 낙관 갱신 X — invoke 만 부르고 이름은 window:tabs-updated emit 으로만 반영(백엔드 권위).
   //   §5 단일 표면(사람 더블클릭 + LLM tab.rename 이 여기로 수렴). trim/공백거부는 호출부(TabBar·tab.rename).
   renameTab: (viewId, name) => invoke<void>('rename_tab', { viewId, name }),
@@ -221,7 +232,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
   // ★렌더 모드 오버라이드 = 프론트 전용 예외★: invoke 안 부르고 프론트 상태만 set(override 라 백엔드
   // 권위 레이아웃과 무관 — 백엔드 wire LayoutNode 는 렌더 모드 개념을 모른다).
   setRenderMode: (nodeId, mode) => {
-    // ★타입 밖 진입 가드(FIX-4)★: 무효 mode 가 오버라이드로 새면 ViewLayoutRenderer switch 가 그걸
+    // ★타입 밖 진입 가드(FIX-4)★: 무효 mode 가 오버라이드로 새면 LayoutLeaf switch 가 그걸
     // 조용히 terminal 로 떨어뜨려(default) 의도와 다른 렌더가 된다 — 쓰기 전에 걸러 경고만 남긴다.
     // 레지스트리 진입점(`slot.renderMode.set`)은 여기 닿기 전에 throw 하므로 이건 그 뒤의 그물이다.
     if (!isRenderMode(mode)) {
@@ -238,7 +249,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
     }),
 
   // ★별칭은 set/clearRenderMode 위 래퍼로만 둔다★ — 자기 상태를 만들면 renderModeOverride 가 렌더 모드의
-  // 유일 출처가 아니게 된다(ViewLayoutRenderer 가 읽는 곳이 둘로 갈린다).
+  // 유일 출처가 아니게 된다(LayoutLeaf 가 읽는 곳이 둘로 갈린다).
   enableDomMode: nodeId => get().setRenderMode(nodeId, 'dom'),
   disableDomMode: nodeId => get().clearRenderMode(nodeId),
   toggleDomMode: nodeId =>

@@ -139,6 +139,24 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     expect(id).toBe('new-slot-id')
   })
 
+  it('setSplitRatio → set_split_ratio invoke(viewId/splitId/ratio) + 셸 답 그대로 반환', async () => {
+    const applied = { ratio: 0.3, outcome: 'Applied', version: 42 }
+    invokeMock.mockResolvedValueOnce(applied)
+    const res = await useViewStore.getState().setSplitRatio('v1', 'sp1', 0.3)
+    expect(invokeMock).toHaveBeenCalledTimes(1)
+    expect(invokeMock).toHaveBeenCalledWith('set_split_ratio', {
+      viewId: 'v1',
+      splitId: 'sp1',
+      ratio: 0.3,
+    })
+    expect(res).toEqual(applied)
+  })
+
+  it('setSplitRatio 실패 → 셸 오류 문자열로 reject', async () => {
+    invokeMock.mockRejectedValueOnce('split not found')
+    await expect(useViewStore.getState().setSplitRatio('v1', 'gone', 0.5)).rejects.toBe('split not found')
+  })
+
   it('closeSlot/assignAgent → 대응 invoke 인자', async () => {
     const s = useViewStore.getState()
     await s.closeSlot('v1', 's2')
