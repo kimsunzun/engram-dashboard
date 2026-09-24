@@ -1,6 +1,6 @@
 # 분할 레이아웃 렌더러 — allotment 유지 vs 교체 피어 서베이
 
-- 상태: 확정 조사 · **결정 = 지금은 A(비율 `defaultSizes`)로 쭈그러짐만 막고 머지 · 칸 재마운트를 없애는 구조 교체(C·D)는 별도 주제로 설계부터 — 사용자 결정 2026-09-24. C 와 D 중 무엇으로 갈지는 미정** · 날짜: 2026-09-24 · 강도: medium · 설계-결정 모드
+- 상태: 확정 조사 · **결정 = 지금은 A(비율 `defaultSizes`)로 쭈그러짐만 막고 머지 · 칸 재마운트를 없애는 구조 교체는 별도 주제로 설계부터 · 그 구조 교체 = D(평평한 잎 + 퍼센트 배치를 직접 구현) — 사용자 결정 2026-09-24** · 날짜: 2026-09-24 · 강도: medium · 설계-결정 모드
 - 방법: 주계열(Claude) 수집자 3 갈래(react-resizable-panels 심층 / allotment 결함 이력 / 피어 앱·후보 라이브러리) + 메인 grounding(react-resizable-panels 4.13.3 배포본 소스 · allotment 1.20.5 설치본 · React 19 `react-dom-client.development.js` · react-mosaic `MosaicRoot.tsx`·`BoundingBox.ts`·`package.json` 원문 · 로컬 클론 orca·paseo·vibe-kanban 코드 · GitHub API·npm 으로 이슈 상태·저장소 수치) + cross-family(codex, effort high, 웹 검색) 적대 리뷰 1 회 — 판정 REFUTE-PARTIAL, 지적 11 건 전부 반영(과장 2 · 도출 누락 1 · 근거 없는 인과 1 · 출처 맥락 누락 1 · 누락 4 · 날짜 오류 1 · 통합 공백 1)
 - 확신도 범례: 확실 = 독립 출처 2개 이상 또는 코드 직접 확인 / 가능성 높음 = 단일 출처로 지지 / 불확실 = 미지지·추론
 
@@ -14,8 +14,9 @@
 
 - 레이아웃 트리(분할 `id`·`dir`·`ratio`·두 자식)는 셸 백엔드가 소유하고 프론트는 스냅샷을 그리기만 한다(CLAUDE.md 「LLM-우선 제어」 · ADR-0035).
 - 렌더러는 트리를 **재귀 컴포넌트**로 그린다 — 분할마다 `Allotment` 하나, 그 안에 자식 렌더러 둘(`src/components/layout/ViewLayoutRenderer.tsx:300-310`). allotment 를 쓰는 파일은 이것 하나고, CSS 는 `src/main.tsx:8` 이 import 한다.
-- 분할 인스턴스 key = `${id}:${dir}`(ADR-0223). 초기 비율은 첫 칸의 `preferredSize` 퍼센트 문자열로 준다 — `defaultSizes` 는 쓰지 않는다(같은 파일 주석: 비율을 주면 ~1px 로 붕괴했다는 옛 실측).
+- 분할 인스턴스 key = `${id}:${dir}`(ADR-0223). 조사 시점엔 초기 비율을 첫 칸의 `preferredSize` 퍼센트 문자열로 줬고 `defaultSizes` 는 쓰지 않았다(같은 파일 주석: 비율을 주면 ~1px 로 붕괴했다는 옛 실측). 이 조사의 선택지 A 로 `defaultSizes` 를 넣었다(같은 날 — step-log).
 - 드래그한 크기는 백엔드로 되쓰지 않는다(ADR-0063 범위 밖).
+- **탭은 이미 재마운트가 없다** — 탭 하나 = 뷰 하나(자기 분할 트리·포커스를 가진다)이고, 창의 모든 탭 화면을 절대배치로 겹쳐 두고 활성 탭만 `display` 로 보인다(`src/components/layout/WindowLayout.tsx:182-197` · ADR-0056 — 코드 확인). 숨은 탭은 WebGL 좌석만 반납하고 터미널 인스턴스는 살아 있다. 그러니 평평한 구조는 **뷰 하나 안에만** 적용하면 된다. 칸을 다른 창으로 떼는 팝아웃은 새 칸 id·새 웹뷰라 어느 구조로도 재마운트를 피할 수 없다(`src-tauri/src/layout/apply.rs:561-600` — 조사 서브에이전트 보고).
 - **칸을 닫으면 살아남은 형제 서브트리가 통째로 재마운트된다** — 형제가 분할이면 새 `Allotment`·슬롯·xterm·재구독·replay 까지, 형제가 슬롯이어도 트리 깊이가 바뀌어 그 슬롯이 재마운트된다(원인 조사 서브에이전트 보고 · 후자는 ADR-0223 이전부터). ADR-0223 「영향」의 「승격된 서브트리 안 죽은 에이전트 보존 화면 소실」이 이 재마운트의 귀결이다.
 
 ## 발견
