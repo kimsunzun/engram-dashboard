@@ -93,6 +93,10 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 **에이전트 백엔드 전용 코드는 없앨 수 없고 한 곳에 모을 수 있을 뿐이다 — 그 한 곳이 `backend`다.** claude의 `--session-id`/`--resume` 같은 지식이 거기서 새면 위반이고, manager는 dispatch만 부르고 transport는 백엔드를 모른다. 그래서 새 백엔드는 그 한 곳만 늘리면 흡수된다. (ADR-0004 · capability 산출 = ADR-0002/0030)
 
+### 플랫폼 중립
+
+**배포는 지금 Windows뿐이어도 macOS 이식이 전체 리팩토링이 되지 않게 짠다.** OS마다 달라지는 일은 그 일을 맡은 함수·모듈 하나 안에서만 `#[cfg]`로 가르고, 나머지 코드는 그 함수만 부른다 — 예: CLI 실행을 감싸는 `console_command`(Windows = `cmd.exe /c`, 그 밖 = 그대로 실행). 부르는 쪽에 `cfg!(windows)`를 흩뿌리지 않는다. ★회귀망도 한 OS에 묶지 않는다★ — 시험 파일을 통째로 `#![cfg(windows)]`로 막으면 다른 OS에서는 실패가 아니라 침묵이 된다. **현황은 아직 못 미친다** — 시험·실행 스크립트·CI 러너가 Windows 전용이다(찾는 법 = `rg -l 'cfg!?\(windows\)' crates src-tauri`). (ADR-0230)
+
 ### 5. LLM-우선 제어
 
 **모든 기능이 LLM으로 제어 가능해야 한다.** LLM이 메인 조작 주체, 사람 클릭은 보조 — 둘이 같은 핸들을 흔든다. 프론트는 렌더링만 소유하고 제어는 소유하지 않는다.
