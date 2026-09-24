@@ -10,6 +10,11 @@ use uuid::Uuid;
 
 use super::types::{LayoutNode, SlotContent};
 
+/// 분할 비율(= a 쪽, 즉 왼쪽/위 칸이 차지하는 몫)의 셸 전역 한계.
+// ADR-0227
+pub const RATIO_MIN: f64 = 0.1;
+pub const RATIO_MAX: f64 = 0.9;
+
 pub fn clamp_ratio(r: f32) -> f32 {
     r.clamp(0.0, 1.0)
 }
