@@ -797,7 +797,7 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.getByText('세로 분할')).toBeTruthy()
     expect(screen.getByText('닫기')).toBeTruthy()
     expect(screen.queryByText('비우기')).toBeNull()
-    expect(screen.queryByText('팝업으로 분리')).toBeNull()
+    expect(screen.getByText('팝업으로 분리')).toBeTruthy() // ADR-0228
     expect(screen.queryByText('에이전트 트리 열기')).toBeNull()
     openNewContentFlyout()
     expect(screen.getByText('에이전트 트리 열기')).toBeTruthy()
@@ -990,12 +990,17 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     expect(screen.queryByText('에이전트 종료')).toBeNull()
   })
 
-  // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 콘텐츠 종류와 무관하게 뜨고 (viewId, slotId)로 move.
-  //    단 ADR-0065 로 빈 슬롯에선 트림(hideOn:['empty']) — 비-empty(agent) 슬롯으로 라우팅을 검증한다. ──
+  // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 빈 슬롯 포함 콘텐츠 종류와 무관하게 뜨고(ADR-0228) (viewId, slotId)로 move. ──
   it('"팝업으로 분리"(공통, 비-empty) → moveSlotToWindow(viewId, slotId) 호출', () => {
     openMenu('slot-P', 'agent-p')
     fireEvent.click(screen.getByText('팝업으로 분리'))
     expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-P')
+  })
+
+  it('빈 슬롯의 "팝업으로 분리" → moveSlotToWindow(viewId, slotId) 호출 (ADR-0228)', () => {
+    openMenu('slot-PE', null)
+    fireEvent.click(screen.getByText('팝업으로 분리'))
+    expect(moveSlotToWindowSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-PE')
   })
 
   // ── ★viewIdOverride 스레딩★ — 팝업 창 경로는 activeViewId(=main) 대신 넘겨받은 view 로 액션한다 ──
