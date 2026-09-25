@@ -97,22 +97,23 @@
 | 사실 | 확신도 | 근거 |
 |---|---|---|
 | 대기 입력은 **샘플링 요청 하나와 그 도구들이 다 끝난 뒤, 다음 요청을 짓기 전**에 한꺼번에 이력으로 들어간다(루프 머리). 새 입력은 진행 중 샘플링을 선점하지 않는다. 실측: 도구 도중 steer 둘 → 도구 완료 뒤·다음 샘플링 전에 **친 순서대로** `clientId` 단 `userMessage` 에코 둘 | 확실(M6) · 자리 = 가능성 높음(소스 + 벤더 시험) | `core/src/session/turn.rs:329-350` · `tests/suite/pending_input.rs:1123` · Phase 0 §7 |
-| 샘플링이 도구 없이 끝나도 대기 입력이 있으면 **같은 턴을 잇는다**(`needs_follow_up = model_needs_follow_up \|\| has_pending_input`). 실측: 샘플링 끝 두 지점(`agentMessage` 완료 · `thread/tokenUsage/updated`)에서 보낸 steer 가 둘 다 **같은 턴의 후속 샘플링**으로 소비됐다 | 확실(M6 T3·T4) | `turn.rs:452-475` |
+| 샘플링이 도구 없이 끝나도 대기 입력이 있으면 **같은 턴을 잇는다**(`needs_follow_up = model_needs_follow_up \|\| has_pending_input`). 실측: 샘플링 끝 두 지점(`agentMessage` 완료 · `thread/tokenUsage/updated`)에서 보낸 steer 가 둘 다 **같은 턴의 후속 샘플링**으로 소비됐다. → **도구 없는 답의 끝도 경계다** — 그러나 답 끝 신호에서 대기분 확인까지의 창은 **안 쟀다**(T3·T4 는 한 번씩 맞혔을 뿐이다 — M16) | 확실(M6 T3·T4) · 답 끝 창 = 미측정 | `turn.rs:452-475` |
 | 마지막 확인 뒤에 들어온 대기 입력은 **턴 종료 때 이력에 기록만** 된다(응답 없이). ★**실측에서 그 갈래를 못 맞혔다**★ — 창이 `tokenUsage/updated` 보다도 뒤다. 그 갈래에서 에코가 오는지, `turn/completed` 앞인지 뒤인지, `thread/items/list` 에 `clientId` 가 실리는지 **모른다**(M10) | 갈래 존재 = 가능성 높음(소스 — 본문 일부 미독) · 거동 = 미관측 | `core/src/tasks/mod.rs:588-645` `on_task_finished` · Phase 0 §7 |
 | `turn/steer{threadId, clientUserMessageId?, input, expectedTurnId(필수)}` → `{turnId}`. **성공 응답은 1–5 ms 안에 와 에코보다 훨씬 먼저 온다 — 수락은 전달이 아니다.** 활성 턴 없음 → −32600 「no active turn to steer」(실측 — `turn/completed` 를 받은 그 핸들러에서 옛 턴 id 로 보낸 steer) · 리뷰·압축 턴은 거절 · id 불일치 거절. **메서드는 0.135.0 에도 있고, `clientUserMessageId` 는 0.140.0 에 있다**(ADR-0198 의 하한과 같다) | 응답·−32600 = 확실(M6) · 나머지 = 가능성 높음(태그 대조) | `app-server-protocol/src/protocol/v2/turn.rs:277-299` · `turn_processor.rs:1006-1122` |
 | 끼워 넣은 입력은 **소비되는 순간** `clientId` 를 단 `userMessage` 항목으로 되울린다. `turn/start` 에 `clientUserMessageId` 를 실으면 그 첫 입력 에코에도 `clientId` 가 달린다(오늘 우리 코드는 안 싣는다 — `protocol.rs:537`) | 확실(M6) | Phase 0 §7 |
-| **넘긴 대기 입력을 하나만 빼는 API 는 없다** — 끊기(`turn/interrupt`)가 전부 버리는 것(`clear_pending`)뿐. 실측: 끊기 시 steer 한 글은 **에코도 없고 `thread/items/list` 에도 없다**(조용히 버려진다) | API 부재 = 가능성 높음(소스 — `InputQueue` 공개 동사 전수) · 끊기 거동 = 확실(M6) | `core/src/session/input_queue.rs` · `tasks/mod.rs:533` |
+| **넘긴 대기 입력을 하나만 빼는 API 는 없다** — 끊기(`turn/interrupt`)가 전부 버리는 것(`clear_pending`)뿐. 실측: 끊기 시 steer 한 글은 **에코도 없고 `thread/items/list` 에도 없다**(조용히 버려진다). → codex 의 ✕ 는 우리가 붙든 동안뿐이다(§5-5) | API 부재 = 가능성 높음(소스 — `InputQueue` 공개 동사 전수) · 끊기 거동 = 확실(M6) | `core/src/session/input_queue.rs` · `tasks/mod.rs:533` |
 | **`thread/items/list` 가 steer 로 든 항목과 `turn/start` 첫 입력의 `clientId` 를 싣는다** → 「그 글이 이력에 들었나」를 **물어볼 수 있다**(§5-5 턴 끝 탐침). 「기록만」 된 항목도 싣는지는 미측정. ★**페이지 목록이다 — 한 장의 「없음」은 부재의 증명이 아니다**★: `limit`·`sortDirection`·`cursor` 로 걷고 `nextCursor` 가 없거나 `null` 이면 그 방향 끝이다(스키마 + 실측 2026-09-16 — `protocol.rs:485-494`). 한 턴으로 좁히는 `turnId` 칸도 스키마에 있다(우리 코드는 안 옮겨 적었다 — `protocol.rs:467-470`) | 소비된 항목 = 확실(M6) · 「기록만」 = 미측정(M10) · 페이지 끝 규칙 = 확실(실측) | `protocol.rs:222` · Phase 0 §7 |
 | ★**끊긴 턴의 도구는 계속 돈다**★ — `turn/completed(interrupted)` 뒤에도 셸 명령이 끝까지 돌았고, 그 `item/completed`(**옛 턴 id** · status `completed`)가 끊기 17 s 뒤, **다음 두 턴이 끝난 뒤** 도착했다 → 턴 단위로 도구를 세는 코드는 **턴 id 로 가려야** 한다(「턴 경계에서 0」만으로는 늦게 온 완료가 음수를 만든다) | 모양 = 확실(1 회 관측) · 일반성 = 가능성 높음 | Phase 0 §7 |
-| ★**도구 완료 알림 뒤 대기분 확인까지 창이 있다 — 6–64 ms**★(확인은 `thread/tokenUsage/updated` 뒤 2–9 ms). 그 안에 들어온 steer 는 **같은 경계에 들었다(10/10)**. 1판 판독(「도구 완료 알림을 보내는 그 프로세스 안에서 곧바로 확인 — 거의 늘 놓친다」)과 **반대**다. 하네스의 반응은 0.1–0.4 ms 였고, **우리 데몬의 반응 지연**(펌프 → 통로 → 쓰기)이 최소 창 6 ms 보다 짧은지는 **안 쟀다**. 도구가 병렬이거나 모델이 느릴 때의 창 모양도 모른다 | 하네스 적중 = 가능성 높음(M7) · 데몬에 적용 = 불확실 | Phase 0 §8 |
-| 실험 API `thread/queue/{add,list,update,delete,reorder,start}` 는 **「내구성 있는 사용자 메시지 큐 + 한가할 때 배출」**이다 — 스레드가 idle 이 될 때 새 턴으로 시작한다. **도구 경계 전달이 아니다** — 즉시 넘기기 결정 아래서는 쓸 자리가 없다 | 가능성 높음(소스) | `ext/queue/src/lib.rs:1` · `service.rs:367-405` · `common.rs:624-656` |
+| ★**도구 완료 알림 뒤 대기분 확인까지 창이 있다 — 6–64 ms**★(확인은 `thread/tokenUsage/updated` 뒤 2–9 ms). 그 안에 들어온 steer 는 **같은 경계에 들었다(10/10)**. 1판 판독(「도구 완료 알림을 보내는 그 프로세스 안에서 곧바로 확인 — 거의 늘 놓친다」)과 **반대**다. 하네스의 반응은 0.1–0.4 ms 였고, **우리 데몬의 반응 지연**(통로 리더 → 라이터 → steer 쓰기)이 최소 창 6 ms 보다 짧은지는 **안 쟀다**(M15). 도구가 병렬이거나 모델이 느릴 때의 창 모양도 모른다. → codex 붙듦 정책의 도구 구간 근거(§5-5) | 하네스 적중 = 가능성 높음(M7) · 데몬에 적용 = 불확실(M15) | Phase 0 §8 |
+| **`thread/tokenUsage/updated` 는 샘플링과 그 도구가 다 끝난 뒤, 대기분 확인 직전에 온다** — 도구 완료 알림 뒤 +6–55 ms, 확인은 그 뒤 2–9 ms(M7 10 회). 도구 없는 샘플링에서도 온다(M6 T4). 그래서 「샘플링 끝」의 마지막 신호로 쓸 수 있지만, 그 뒤 창이 가장 좁아 거기에 넘기기를 기대지 않는다(§5-5 경계 신호 ③) | 순서 = 가능성 높음(M7 · T4) · 창 = 하네스 실측 | Phase 0 §7·§8 |
+| 실험 API `thread/queue/{add,list,update,delete,reorder,start}` 는 **「내구성 있는 사용자 메시지 큐 + 한가할 때 배출」**이다 — 스레드가 idle 이 될 때 새 턴으로 시작한다. **도구 경계 전달이 아니다** — 가장 이른 경계에 넘기는 결정에 맞지 않는다 | 가능성 높음(소스) | `ext/queue/src/lib.rs:1` · `service.rs:367-405` · `common.rs:624-656` |
 | 진행 중 `turn/start` 는 steer 로 처리된다(같은 턴 id) — 응답만으로는 steer 인지 새 턴인지 **id 대조로만** 갈린다 | 가능성 높음(0.154.0 소스) | `turn_processor.rs:636-668` |
 | **버전 출처:** `thread/start` 응답 `result.thread.cliVersion`(실측 `"0.156.1"`)이 가장 깨끗하다 — 우리 `Thread.cli_version` 이 이미 읽는 칸이고(`protocol.rs:518`) 핸드셰이크가 로그로 남긴다(`transport.rs:886`). `thread/resume` 도 같은 `Thread` 를 준다(스키마 — 그 응답은 안 쟀다). 예비 = `initialize` 응답 `userAgent` 의 `^[^/]+/(\d+\.\d+\.\d+)` — 앞머리가 **우리 `clientInfo.name`** 이고 끝 괄호에 **우리 버전(0.1.0)** 이 들어 있어 「마지막 semver」로 찾으면 우리 버전을 읽는다 | 확실(M8 — 실측 문자열 + 소스) | Phase 0 §9 |
 | codex 에도 `PostToolUse` 훅(`additionalContext`)이 있다. 그러나 훅은 **신뢰 승인**(명령 문자열 해시 — 우리 exe 절대경로 포함)을 요구해 **릴리스마다 승인이 다시 뜬다** — ADR-0216 이 그 이유로 codex 훅 기계장치를 통째로 걷었다 | 확실(ADR-0216) · 훅 필드는 가능성 높음 | `hooks/src/events/post_tool_use.rs:40-51` |
 
 ### 3-3. 측정 — Phase 0 결과와 남은 측정
 
-**Phase 0(M1–M8)은 끝났다(2026-09-25).** 결과·재현 인자·원시 로그 위치의 정본은 [**Phase 0 실측 보고서**](../../research/mid-turn-phase0-measurements-2026-09-25.md)(`docs/research/mid-turn-phase0-measurements-2026-09-25.md`)이고, 여기는 이 문서가 받은 결론만 적는다. ★원시 로그는 세션 스크래치에 있어 휘발할 수 있다★ — 벤더 줄 fixture 채취를 구현 첫 조각보다 앞에 둔다(§9 P0).
+**Phase 0(M1–M8)은 끝났다(2026-09-25).** 결과·재현 인자·원시 로그 위치의 정본은 [**Phase 0 실측 보고서**](../../research/mid-turn-phase0-measurements-2026-09-25.md)(`docs/research/mid-turn-phase0-measurements-2026-09-25.md`)이고, 여기는 이 문서가 받은 결론만 적는다. 원시 로그와 하네스는 세션 스크래치에서 `.claude/handoff/attachments/20260925-midturn-phase0/`(추적됨)으로 옮겨 두었다 — 벤더 줄 fixture 채취는 그래도 구현 첫 조각보다 앞에 둔다(§9 P0). M16 은 같은 하네스(`m7codex.js`)를 고쳐 잰다.
 
 | # | 무엇 | 결과 | 판정 | 이 문서에서 바뀐 자리 |
 |---|---|---|---|---|
@@ -122,20 +123,21 @@
 | **M4** | `system/init` 시점·`capabilities` | 기동 때 없음 · 턴 시작마다 `started` +0.6–0.9 s · `msg_lifecycle_v1` 있음 | 녹(틈 하나) | §5-4 탐지(`DeliveryAck` 세 값 · 첫 수명주기 줄 겸용) |
 | **M5** | 접힌 입력의 transcript 모양 | `attachment{type:"queued_command", prompt, source_uuid, commandMode}` · 취소분은 본문 없음 · 놓친 입력은 평범한 `user` | 녹 | §5-4 이어받기 복원 · §9 P3 |
 | **M6** | codex `turn/steer`(0.156.1) | 도구 중 steer 둘 → 에코 둘(친 순서) · 끊기 = 에코·이력 없음 · 막 끝난 턴 −32600 · `thread/items/list` 에 `clientId` · 「기록만」 갈래 미관측 · **끊긴 턴의 도구가 옛 턴 id 로 늦게 완료** | 녹 + 새 사실 | §3-2 · §5-5(턴 끝 탐침 · 턴 id 가림) |
-| **M7** | 도구 **완료**를 보고 넘길 때(S1) 같은 경계 적중률 | claude **0/10** · codex **10/10**(창 6–64 ms) | claude = 판독 확인 · **codex = 판독과 반대** | §3-2 · §4-2 S1 칸 · §10-2 |
+| **M7** | 도구 **완료**를 보고 넘길 때(S1) 같은 경계 적중률 | claude **0/10** · codex **10/10**(창 6–64 ms) | claude = 판독 확인 · **codex = 판독과 반대** | §3-2 · §4-2 · §5-5(codex 붙듦 정책의 도구 구간 근거) |
 | **M8** | codex 버전 출처(하한 0.140.0) | `thread.cliVersion` · 예비 `userAgent` 첫 semver | 녹 | §5-5 하한 판정 |
 
-**남은 측정(Phase 0b — 코드 없음, 같은 하네스 방식).** 구현을 막는 것은 M9·M10 뿐이고(§5-5 의 한 갈래), 나머지는 PRD 열린 질문의 재료다.
+**남은 측정.** 구현을 막는 것은 넷이다 — **M9·M10**(§5-5 턴 끝 정산의 한 갈래 — Phase 0b · 코드 없음 · 같은 하네스 방식 · codex 뼈대(§9 P2) 전에) · **M15·M16**(codex 붙듦 정책 — 뼈대 착지 뒤, 붙듦 정책(§9 P8) 전에 — §9 P7). 나머지(M11–M14)는 벤더 동작 확인이고, 결과가 사용자 체감을 바꾸면 사용자에게 다시 올린다.
 
 | # | 무엇 | 왜 · 빨가면 |
 |---|---|---|
 | **M9** | codex: **빈 `input`** 으로 `turn/start` 가 받히나 · 받히면 모델이 이력의 마지막 사용자 글에 답하나 | §5-5 「답 없는 항목」에 답할 턴을 여는 수단. 안 되면 PRD R4 대로 사용자에게 다시 올린다(§10-4 N3) — 재전송은 쓰지 않는다 |
 | **M10** | codex: 턴 끝 「기록만」 갈래를 맞힌다(마지막 대기 확인 뒤·`turn/completed` 전에 steer) → ★**설계가 물을 바로 그 순간에 묻는다**★ — `turn/completed` 를 받은 핸들러 안에서 곧바로 `thread/items/list` · N 회 반복(창을 겨누기 어렵다 — 맞힌 횟수를 함께 적는다). 적을 것: ① 그 순간의 목록에 `clientId` 가 **실리나**(늦게 실리면 「없음」 오판) ② 에코가 오나 · 어디에 서나(`turn/completed` 앞 / 뒤 / 탐침 응답 뒤) ③ 에코가 탐침 「없음」 뒤에 오는 경우의 간격 ④ 「기록만」 항목이 **어느 turn id** 로, 목록의 **어느 자리**(끝에서 몇 번째)에 실리나 ⑤ 잘린 목록 — 그 턴의 항목이 한 장보다 많은 경우(`limit` 을 작게 — 예: 2)에 §5-5 탐침이 **여러 장을 걸어** 그 턴을 다 지나치고서야 판정하는지, 정산 시한에 걸리면 「없음」이 아니라 모름(`Dropped{Unknown}`)으로 떨어지는지 | §5-5 턴 끝 탐침의 전제. 「기록만」 항목이 그 순간 목록에 `clientId` 와 함께 실리지 않으면 탐침이 「안 들었다」로 오판해 **이중 전달**이 난다 → 그 경우 탐침 갈래를 걷고 `Dropped{Unknown}`(버림)으로 떨어뜨린다. ② 가 「뒤」로 나오면 §5-5 턴 끝 뒤 받음 규칙(그 턴의 후속 턴은 한 번)이 그것을 받고, ③ 의 간격이 우리 `turn/start` 보다 짧다는 근거가 된다. ④ 가 「그 턴 id 가 아니다」로 나와도 탐침은 turn id 로 거르지 않으므로(§5-5) 깨지지 않는다 — 걷기를 멈추는 조건만 다시 본다 |
-| **M11** | claude: 경계를 놓친 항목 **둘 이상**이 턴 끝에 어떻게 배출되나(한 턴에 함께 / 항목마다 한 턴) | PRD Q9 의 claude 쪽은 벤더가 정한다 — 고른 답과 다르면 사용자에게 보고(ADR-0192) |
-| **M12** | claude: **오류로 끝난 턴**(`result` `is_error`)의 대기분 — 다음 턴으로 가나(`still_queued`) · `cancelled` 로 닫히나 · 이미 접혔던 항목의 종결 · 그 `cancelled` 가 `result` 앞인가 뒤인가 · 그때 취소 대기 중이던 항목에 우리 취소 응답이 `false` 로 오나 | PRD Q8 착지가 벤더 동작에 묶이는지 가른다 · §5-2 원인 귀속(응답 값으로 가름)이 실패 갈래에서 실제로 맞는지 확인한다 |
+| **M11** | claude: 경계를 놓친 항목 **둘 이상**이 턴 끝에 어떻게 배출되나(한 턴에 함께 / 항목마다 한 턴) | PRD §3-1 · AC27 의 claude 쪽은 벤더가 정한다 — codex(한 턴에 함께, 각자 따로)와 다르면 사용자에게 보고(ADR-0192) |
+| **M12** | claude: **오류로 끝난 턴**(`result` `is_error`)의 대기분 — 다음 턴으로 가나(`still_queued`) · `cancelled` 로 닫히나 · 이미 접혔던 항목의 종결 · 그 `cancelled` 가 `result` 앞인가 뒤인가 · 그때 취소 대기 중이던 항목에 우리 취소 응답이 `false` 로 오나 | PRD §3-10 claude = 벤더를 따른다(사용자: 「억지로 구현하지 마」) — 목록이 항목별 수명주기로 벤더의 실제 처리와 맞게 남는지(AC25) 확인하고, §5-2 원인 귀속(응답 값으로 가름)이 실패 갈래에서 맞는지 본다. 어긋나도 우리 쪽에서 강제로 맞추지 않는다 — 목록이 벤더와 어긋난 채 남으면 보고 |
 | **M13** | claude: 턴 도중 슬래시 명령(「/compact」 등)의 수명주기 — `queued`/`started` 가 오나 · 턴 끝까지 보류되나 · `started` 뒤 `result` 가 오나 | PRD R7 — 받음이 안 오면 그 항목은 에이전트가 끝날 때까지 목록에 남는다(§5-9) · `started` 만 오고 `result` 가 없으면 `Delivered` = 진행이 턴 표를 「턴 중」에 남긴다(오늘 합성 에코와 같은 부류 — §5-4) |
-| **M14** | claude: 이어받은 대화(`--resume`)를 불러오는 중 보낸 글의 벤더 처리 | PRD Q6 ② 의 재료(추천 없음 사유가 이 미측정이다) |
-| **M15** | 우리 데몬의 반응 지연(codex 도구 `item/completed` 수신 → steer 쓰기) | §10-2 재확인에만 쓴다 — 결정 재료가 아니다 |
+| **M14** | claude: 이어받은 대화(`--resume`)를 불러오는 중 보낸 글의 벤더 처리 | PRD §3-11 claude(목록에 두고 곧바로 넘긴다 — 벤더가 불러오기 뒤 처리)의 전제 · 어긋나면 보고(PRD R5) |
+| **M15** | 우리 데몬의 반응 지연 — 통로 리더가 현재 턴의 도구 `item/completed`(도는 도구 집합이 비는 것)를 받은 순간 → 그 신호가 푼 steer 쓰기가 끝난 순간. ★**실제 통로 경로에서 잰다**★ — codex 뼈대(§9 P2)가 구간 추적과 라이터 깨우기를 이미 돌리므로 거기에 추적 시각을 단다. 같은 모양의 홉인 「`turn/start` 응답(턴 id) → 쥔 항목 steer 쓰기」도 함께 잰다. N 회 — 긴 델타 흐름 도중 · 병렬 도구(마지막 완료부터 확인까지의 창도 함께 적는다) 포함. 판정(고름) = 최댓값이 창의 최솟값(M7 — 6 ms)보다 작으면 녹 | codex 붙듦 정책(§5-5)의 도구 구간 전제. ★**빨가면 붙듦 정책(§9 P8)을 짜기 전에 멈추고 사용자에게 묻는다**(붙듦 대 다른 길 — PRD R8)★ — 도구 구간을 못 맞추면 붙듦이 전달을 한 경계 늦춘다 |
+| **M16** | codex: **도구 없는 답의 끝 경계** — 답 끝 신호(도는 도구가 없을 때의 `agentMessage` `item/completed`)에서 벤더의 대기분 확인까지 창이 있나 · 그 신호를 받는 순간 넘긴 steer 가 **같은 턴의 후속 샘플링**에 드나(M7 방식 · N 회 · 적중 수와 창 길이 — 도구 없는 턴과, 도구 뒤 마지막 답 둘 다) · 창을 M15 의 반응 지연과 견준다 | §5-5 구간 표의 「답 구간」 칸. 녹 = 답 구간도 붙든다(✕) · 적 = 답 구간은 곧바로 넘긴다(✕ 없음). ★적이어도 멈추지 않는다★ — PRD §3-1 이 「붙들면 늦어지는 구간은 곧바로 · ✕ 없음」으로 이미 정한 갈래라 사용자 질문이 아니고, ✕ 가 없는 구간이 는다는 것을 보고한다(ADR-0192) |
 
 ---
 
@@ -152,39 +154,42 @@
 | 턴·도구 상태를 아나 | ○ 통로가 턴 상태를 쥐고(codex `TurnState`), 출력이 코어를 지난다 | ✕ net 은 에이전트를 모르게 지어졌다(ADR-0129 격리 게이트) | ✕ 링을 받아 보기만 한다 |
 | LLM-우선 제어 | ○ 명령 버스·CLI 가 같은 명부를 읽는다 | ✕ | ✕ 두 번째 제어 경로 |
 
-★**자리가 데몬 crate 가 아니라 agent crate 인 이유**★ — codex 에서 「지금 곧바로 넘기나 · 쥐나」(한가 판정 · FIFO)는 통로의 턴 상태와 **한 락 아래서** 판정돼야 하고(ADR-0193), 링(`OutputCore`)도 agent crate 에 있다. 데몬은 명령을 라우팅만 한다.
+★**자리가 데몬 crate 가 아니라 agent crate 인 이유**★ — codex 에서 「지금 곧바로 넘기나 · 쥐나」(한가 판정 · FIFO · 넘기는 구간)는 통로의 턴 상태와 **한 락 아래서** 판정돼야 하고(ADR-0193 · §5-5), 링(`OutputCore`)도 agent crate 에 있다. 데몬은 명령을 라우팅만 한다.
 
-### 4-2. 넘기는 시점 — 결정(S2)과 견준 전략
+### 4-2. 넘기는 시점 — 결정과 견준 전략
 
-**결정 = S2(즉시 넘김) — 두 백엔드 공통**(사용자 2026-09-25: 「그냥 클로드든 코덱스든 우리가 받고 바로 전달하자. 일단은 이렇게 공용화하고 나중에 세분화」). 아래 표는 그 결정의 재료와 나중 세분화(PRD §7)의 후보를 남기려고 둔다. 1판의 권고였던 **S3**(claude S2 + codex S5 혼합)는 이 결정으로 폐기됐다.
+**결정 = 백엔드마다 「에이전트가 받을 수 있는 가장 이른 때」**(사용자 원칙 — PRD §3-1). 붙들어도 전달이 늦어지지 않는 동안만 붙들고, 그 동안 ✕ 를 준다. 경계를 맞출 수 있는 창이 벤더마다 달라(M7) 답이 갈린다.
+
+- **claude = S2(즉시 넘김).** 붙들었다 도구 완료를 보고 넘기면 그 경계를 놓친다(M7 0/10) — 받자마자 stdin 에 써 두어야 지금 도는 도구의 끝에서 읽힌다. ✕ 는 벤더 취소 요청이다(§5-4).
+- **codex = 「가장 이른 경계까지 붙듦」 — S1 을 도구 밖 구간까지 넓힌 것.** 도구가 도는 동안 붙들었다가 도구가 끝나는 순간 넘긴다(M7 10/10 — 창 6–64 ms). 도구 없이 답을 쓰는 구간은 같은 창이 있는지 재서(M16) 있으면 답 끝까지 붙들고, 없으면 곧바로 넘긴다. 경계 직후처럼 붙들면 놓칠 수 있는 구간은 곧바로 넘긴다. 붙든 동안의 ✕ 는 우리 쪽에서 지우는 것이라 벤더 호출이 없다. 넘기는 때는 통로 안의 교체 가능한 정책이 정하고, 첫 착지는 곧바로 넘기는 정책이다 — 측정(M15·M16) 뒤 붙드는 정책으로 바꾼다(§5-5 · §9).
 
 표기: **경계** = 벤더가 대기분을 접는 지점(claude = 도구 묶음 끝 · codex = 샘플링+도구 끝). **취소 창** = ✕ 가 실제로 먹는 구간.
 
-| | S1 보관 → 도구 **완료** 관측 시 넘김 | **S2 즉시 넘김 ← 결정** | S4 경계 훅이 당겨감 | S5 보관 → 도구 **시작** 관측 시 넘김 |
+| | S1 보관 → 도구 **완료** 관측 시 넘김 | S2 즉시 넘김 | S4 경계 훅이 당겨감 | S5 보관 → 도구 **시작** 관측 시 넘김 |
 |---|---|---|---|---|
 | **전달 시점 claude** | ✕ **0/10 놓침**(실측 M7 — 판독과 일치) — 다음 도구 묶음 끝, 없으면 `result` 뒤 새 턴 | ○ 정확(벤더가 접는다) | ○ 정확(`PostToolBatch` 가 접기 직전) | △ 대개 정확 — 도구가 우리 왕복보다 빨리 끝나면(Read·Grep 부류) 한 경계 늦는다 |
-| **전달 시점 codex** | ★○ **10/10 맞음**(실측 M7 — 도구 완료 알림 뒤 6–64 ms 창) — 1판 판독(「거의 늘 놓친다」)과 반대 · **우리 데몬의 반응 지연은 미측정**(M15)★ | ○ 정확 | — (§3-2: 훅 신뢰 = ADR-0216 기각 경로) | ○ 대개 정확 — codex 도구는 셸 기동이라 대개 100 ms 이상 |
+| **전달 시점 codex** | ○ **10/10 맞음**(실측 M7 — 도구 완료 알림 뒤 6–64 ms 창) · **우리 데몬의 반응 지연은 미측정**(M15) | ○ 정확 | — (§3-2: 훅 신뢰 = ADR-0216 기각 경로) | ○ 대개 정확 — codex 도구는 셸 기동이라 대개 100 ms 이상 |
 | **취소 창 claude** | ○ 도구 완료까지(우리 손) | ○ **접기 직전까지**(`cancel_async_message` — 실측 도구 결과 뒤 ~540 ms 까지) | ○ 당겨갈 때까지 | ○ 도구 시작까지 우리 손 + 그 뒤 벤더 취소 |
-| **취소 창 codex** | ○ 도구 완료까지 | ✕ **없다**(넘기면 끝) → **codex 항목엔 ✕ 를 붙이지 않는다**(PRD §3-6) | — | △ 도구가 안 도는 동안만 |
+| **취소 창 codex** | ○ 도구 완료까지(우리 손 — 벤더 호출 없음) | ✕ **없다**(넘기면 끝 — 넘긴 항목 하나를 빼는 API 가 없다, §3-2) | — | △ 도구가 안 도는 동안만 |
 | **「전달됨」 신호** | claude `started`(@internal) · codex `clientId` 에코 | 같음 | 우리가 당겨준 순간(벤더 무관) | S1 과 같음 |
-| **벤더 변경 내성** | claude 는 @internal 수명주기에 기댄다 | claude 는 @internal 수명주기(전달 신호) + 제어 프로토콜 `cancel_async_message`(취소 — @internal 표식 없음)에 기댄다 | 훅 계약(공개)에 기대지만 **모델이 사용자 말로 안 받는다**(맥락 첨부) · 사용자·관리 설정이 끌 수 있다 | S1 과 같음 |
-| **비용** | 중 — 통로가 도구 완료를 보고 풀기(codex 는 턴 id 가림 — §3-2) | **작음** — claude = 쓰기 경로 분기 · 디코더 번역 · 취소 줄 / codex = Active 동안 steer · 턴 끝 처분(§5-5) | 큼 — 제어 라우트 · 설정 조각에 훅 · 턴 끝 폴백 · 도구 묶음마다 기동 또는 로컬 왕복 | 중(codex) — 통로가 도구 시작을 보고 `turn/steer` |
-| **판정** | **사용자 기각**(「한 걸음 늦다」) — ★codex 에 대해선 실측이 그 근거를 뒤집었다 → §10-2 재확인★ | **채택 — 두 백엔드**(사용자 결정 2026-09-25) | **사용자 기각**(「훅마다 매번 뭔가 실행하면 안 된다」) + 사용자 턴이 아니라는 뜻의 차이 | **폐기**(1판 codex 권고) — 나중 세분화 후보 |
+| **벤더 변경 내성** | claude 는 @internal 수명주기에 기댄다 · codex 는 「도구 완료 알림 → 대기분 확인」 사이의 창에 기댄다(창이 좁아지면 한 경계 늦는다 — 잃지는 않는다) | claude 는 @internal 수명주기(전달 신호) + 제어 프로토콜 `cancel_async_message`(취소 — @internal 표식 없음)에 기댄다 | 훅 계약(공개)에 기대지만 **모델이 사용자 말로 안 받는다**(맥락 첨부) · 사용자·관리 설정이 끌 수 있다 | S1 과 같음 |
+| **비용** | 중 — 통로가 현재 턴 id 로 가린 도구 완료를 보고 풀기(§3-2) · 구간 추적 | **작음** — claude = 쓰기 경로 분기 · 디코더 번역 · 취소 줄 / codex = Active 동안 steer · 턴 끝 처분(§5-5) | 큼 — 제어 라우트 · 설정 조각에 훅 · 턴 끝 폴백 · 도구 묶음마다 기동 또는 로컬 왕복 | 중(codex) — 통로가 도구 시작을 보고 `turn/steer` |
+| **판정** | **codex 채택**(도구 구간 — 「가장 이른 경계까지 붙듦」의 뼈대) · claude 는 **사용자 기각**(「한 걸음 늦다」 — 실측 0/10 과 일치) | **claude 채택** · codex 는 붙들면 늦어질 수 있는 구간에서만(§5-5 구간 표) | **사용자 기각**(「훅마다 매번 뭔가 실행하면 안 된다」) + 사용자 턴이 아니라는 뜻의 차이 | **기각** — 도구 *끝*까지 붙드는 S1 이 전달 시점은 같고 ✕ 가 더 오래 남는다(PRD §6) |
 
-- **S1 판독 근거의 뒤처리:** claude 쪽 판독(「접기가 도구 결과 직후 돈다」)은 결론이 섰다 — 접기 안에 비동기 대기가 있지만 스냅숏이 그보다 앞이다(§3-1 행 1 · M7 0/10). codex 쪽 판독(「`has_pending_input` 이 도구 완료 알림을 보내는 그 프로세스 안에서 곧바로 돈다」)은 **틀렸다** — 사이에 6–64 ms 가 있다(§3-2 · M7 10/10).
-- **나중 세분화 후보(PRD §7 「넘기는 시점의 백엔드별 세분화」):** codex S5(도구가 안 도는 동안 ✕ 를 살린다) · ★codex S1(M7 이 「한 걸음 늦지 않다」를 보였으므로 **도구 내내 ✕ 를 살릴 수 있다** — 우리 데몬 반응이 창 안이라는 M15 가 전제)★ · Codex TUI 의 Enter = steer / Tab = 턴 끝 대기 분리. 어느 것도 이번 구현에 들이지 않는다.
+- **S1 판독 근거의 뒤처리:** claude 쪽 판독(「접기가 도구 결과 직후 돈다」)은 결론이 섰다 — 접기 안에 비동기 대기가 있지만 스냅숏이 그보다 앞이다(§3-1 행 1 · M7 0/10). codex 쪽 판독(「`has_pending_input` 이 도구 완료 알림을 보내는 그 프로세스 안에서 곧바로 돈다」)은 **틀렸다** — 사이에 6–64 ms 가 있다(§3-2 · M7 10/10). 그 창이 codex 결정의 근거다.
 
 ### 4-3. 결정의 구현 조건
 
 - **claude = S2.** 오늘처럼 받는 즉시 stdin 에 쓴다. 바뀌는 것은 **표시와 취소**뿐이다 — 턴 중이면 합성 에코 대신 목록 사건을 내고, 결말을 수명주기로 판정한다(§5-4).
   - **탐지:** 백엔드 중립 세 값 `DeliveryAck`(Unknown / Available / Unavailable — §5-0)을 claude backend 가 채운다. `system/init` 의 `capabilities` 에 `msg_lifecycle_v1` 이 있거나 **첫 `command_lifecycle` 줄이 오면** `Available`, init 이 그 능력 없이 오면 `Unavailable`. `Unknown` 동안의 처리 = §5-4(M4 — 첫 턴 초반의 틈).
-  - **`Unavailable`(옛 CLI · 벤더가 걷음)이면 폴백** — 무엇으로 떨어질지는 PRD R6 대로 **사용자가 고른다**(선택지 = §10-4 N1). 1판은 「오늘 동작」을 스스로 골랐는데(「고름」), PRD R6 가 그것을 사용자 결정으로 올렸다.
-  - ★수명주기는 나오는데 취소만 안 되는 경우★는 Phase 0 에서 안 생겼다(M3 녹). 생기면 claude 도 codex 와 같은 「✕ 없음」이 되고, 그것은 PRD §3-6 을 바꾸는 체감 변화라 사용자에게 올린다(PRD R1).
-- **codex = S2** (0.140.0 이상 — `turn/steer` + `clientUserMessageId`). 진행 중 턴이 있으면 즉시 `turn/steer`, 없으면 `turn/start`(§5-5). **하한 판정** = `thread.cliVersion`(M8) → 없으면 `userAgent` 의 첫 semver → 둘 다 실패면 미달로 본다(고름: 모르는 버전에 `clientUserMessageId` 를 실어 보내면 에코 대조가 조용히 깨진다 — 안전한 쪽으로 떨어진다).
-  - **미달이면 폴백**(`DeliveryAck = Unavailable`) — 선택지 = §10-4 N1(PRD R6). ★어느 폴백에서도 codex 항목에 ✕ 는 없다★ — 1판의 「미만이면 보관 모드 · 목록과 ✕ 는 있다」는 PRD §3-6 과 어긋나 걷었다.
-- **두 백엔드의 체감이 갈린다**(PRD R3) — claude 는 접기 직전까지 ✕ 가 살고 codex 는 ✕ 가 없다. ADR-0192 「못 맞추면 보고」의 대상이고 새 ADR 에 그렇게 적는다(§8).
+  - **`Unavailable`(옛 CLI · 벤더가 걷음)이면 오늘 동작 그대로**(PRD R6 · 사용자 결정 N1 (a) 「알아서 업데이트」) — 목록·✕ 없이 보낸 자리 말풍선이다. 옛 버전을 위한 기계장치는 두지 않고, 그 사실을 로그 한 줄로 남긴다(고름). 판명 전에 이미 목록에 오른 항목은 그 자리 말풍선이 된다(§5-2 `AckUnavailable`).
+  - ★수명주기는 나오는데 취소만 안 되는 경우★는 Phase 0 에서 안 생겼다(M3 녹). 생기면 claude 에 ✕ 가 없어지고, 그것은 PRD §3-6 을 바꾸는 체감 변화라 사용자에게 올린다(PRD R1).
+- **codex = 「가장 이른 경계까지 붙듦」**(0.140.0 이상 — `turn/steer` + `clientUserMessageId`). 넘기는 때는 codex backend 안의 교체 가능한 정책(`HandOverPolicy` — §5-5)이 구간마다 답한다: 도구 구간은 붙들었다 도구 끝에 넘기고 · 넘길 수 없는 상태(연결 중 · 턴 끝 정산 · 오류 턴 뒤 대기 · 앞 항목 뒤)는 쥐고 · 그 밖 구간은 곧바로 넘긴다(진행 중 턴이 있으면 `turn/steer`, 없으면 `turn/start`). **하한 판정** = `thread.cliVersion`(M8) → 없으면 `userAgent` 의 첫 semver → 둘 다 실패면 미달로 본다(고름: 모르는 버전에 `clientUserMessageId` 를 실어 보내면 에코 대조가 조용히 깨진다 — 안전한 쪽으로 떨어진다).
+  - **미달이면 오늘 동작 그대로**(사용자 결정 N1 (a)) — 턴 끝까지 붙들고 벤더 에코로만 뜬다(`delivery_ack = Unavailable`). 하한 판정 전에는 목록에 올리지 않으므로 판명 전 항목이 없다(§5-5).
+  - **착지는 두 걸음이다**(§9): 먼저 `Immediate` 정책(모든 구간 곧바로 · ✕ 없음 — 오늘보다 나빠 보이지 않는다), 측정(M15 · M16) 뒤 `AtEarliestBoundary` 와 ✕. ★도구 구간 측정(M15)이 창을 못 맞추면 붙듦 정책을 짜기 전에 멈추고 사용자에게 다시 묻는다(PRD R8)★.
+- **두 백엔드의 체감이 갈리는 자리(PRD R3)** — claude 는 접기 직전까지 ✕ 가 살고, codex 는 우리가 붙든 동안만 ✕ 가 있다. codex 가 곧바로 넘기는 구간(경계 직후 · M16 이 빨가면 답 구간)에 친 글엔 처음부터 ✕ 가 없다. ADR-0192 「못 맞추면 보고」의 대상이고 새 ADR 에 그렇게 적는다(§8).
 - **S4 는 뺀다(한 줄 사유)** — 프로세스 없는 형태(`http`·`mcp_tool`)가 있어도 도구 묶음마다 불리고(사용자 기각), 넣는 글이 사용자 턴이 아니라 훅 맥락이라 PRD §3-4 의 「평범한 사용자 말풍선」과 모델이 받는 뜻이 갈린다.
-- **codex `thread/queue/*` 는 쓰지 않는다** — 실험 API 이고 배출이 **스레드가 한가해질 때**라 즉시 전달에 맞지 않는다. 턴 끝 처분(§5-5)은 우리 통로가 이미 하므로 벤더의 내구 저장소를 하나 더 들일 값이 없다.
+- **codex `thread/queue/*` 는 쓰지 않는다** — 실험 API 이고 배출이 **스레드가 한가해질 때**라 도구 경계 전달이 안 된다. 붙듦과 턴 끝 처분(§5-5)은 우리 통로가 이미 쥐므로 벤더의 내구 저장소를 하나 더 들일 값이 없다.
 
 ---
 
@@ -195,7 +200,8 @@
 - **출처는 쓰기 API 가 받는다.** 세션 쓰기 동사가 `InputOrigin::{User, Mail}` 를 받는다. WS `WriteStdin`(`connection_core.rs:1080-1094` → `manager.write_stdin` `manager.rs:2671`) = `User` · 우편 배달(`manager.write_stdin_observed`·`submit_stdin_observed` — `manager.rs:2675-2694`)과 그 밖의 사람 아닌 호출자(`saturation_pilot`) = `Mail`(오늘 경로). 오늘은 세 입구가 모두 `session.write_input_observed`(`session.rs:220`)로 합류해 세션이 출처를 모른다 — 그래서 출처를 쓰기 API 의 인자로 들인다. ★**`Mail` 은 어느 백엔드에서도 목록에 오르지 않는다**★ — claude 는 분류 단계에서, codex 는 통로 `TurnInput.origin` 에서 같은 값으로 가른다(PRD §2 · AC22).
 - **중간 입력 정책은 backend 가 신고한다(ADR-0004 모양).** `SpawnedSession` 에 백엔드 중립 칸 둘:
   - `mid_turn: MidTurnPolicy` = `SessionClassified`(claude JSON — 세션이 분류하고 벤더가 해제) · `TransportOwned`(codex JSON — 통로가 분류·해제) · `None`(터미널 · shell · gemini — 오늘 경로 그대로).
-  - `delivery_ack: Arc<DeliveryAck>` = 화신 공유 세 값(`Unknown`·`Available`·`Unavailable`) — **항목별 받음 알림을 줄 수 있나**를 backend 가 채운다(claude = §5-4 탐지 · codex = 하한 판정 §5-5).
+    - ★`TransportOwned` 는 넘기는 때와 취소를 통로에 맡긴다★ — 언제 넘기나(codex 의 교체 가능한 넘기기 정책 `HandOverPolicy` — §5-5)는 통로 안에서 정해지고 세션은 모른다. 세션의 취소 명령은 통로 동사 `withdraw` 로 넘기기만 한다 — 그 항목을 아직 쥐었는지 이미 넘겼는지는 통로만 안다(§5-5 「✕」). 그래서 이 자물쇠(아래)를 타지 않고, 순서는 통로 상태 락이 진다.
+  - `delivery_ack: Arc<DeliveryAck>` = 화신 공유 세 값(`Unknown`·`Available`·`Unavailable`) — **항목별 받음 알림을 줄 수 있나**를 backend 가 채운다(claude = §5-4 탐지 · codex = 하한 판정 §5-5). `Unavailable` 이면 오늘 동작 그대로다(사용자 결정 N1 (a) — §4-3).
   - `SessionClassified` 는 backend 가 만든 조각 하나를 더 준다 — **취소 줄 만들기**(`cancel_line(id) -> Vec<u8>`). 턴 신호 조각은 따로 없다 — claude `Delivered` 가 턴 표에 진행으로 적혀 같은 순간 같은 값을 준다(§5-4). 세션은 이 값들로만 가르고 **인코더 태그·백엔드 이름으로 분기하지 않는다** — 그렇게 가르면 backend 지식이 세션으로 샌다(ADR-0004 · §10-5).
   - ★받음 가능 여부를 항목마다 들고 다니지 않는 이유★ — `Available` 은 한 번 서면 되돌리지 않으므로 `Unavailable` 판정은 **그때까지 목록에 오른 항목 전부**(= 모두 `Unknown` 아래서 분류된 것)에 똑같이 걸린다. 화신 값 하나로 항목별 판정이 결정된다. ★「그때까지」는 **링 순서**다★ — `Unknown` 아래서 분류됐지만 판정보다 **늦게** 링에 선 항목은 코어가 판정 규칙대로 바꿔 적는다(§5-3).
 - **한 줄 순서 — 세션 입력 자물쇠.** 세션마다 `input_order: Mutex<()>` 하나. `SessionClassified` 의 **사용자 입력**(분류 → `Queued` emit → `send_input`)과 **취소**(명부 확인 → `CancelRequested` emit → 취소 줄 `send_input`)가 이 자물쇠를 쥔 채 한 덩어리로 돈다.
@@ -207,41 +213,50 @@
   - ★**`input_order` 를 잡는 것은 세션의 사용자 입력·취소 경로뿐이다 — 출력 펌프(디코더)는 잡지 않는다**★. 근거: 이 자물쇠는 ADR-0226 래치 commit(프로필 락 + 디스크 쓰기)을 품는다 — 펌프가 기다리면 **출력이 디스크 I/O 뒤에 선다**. 펌프 쪽 사건(받음 불가 판정 등)과 분류의 순서는 **코어의 replay 락**이 맞추므로(§5-3 · §5-4) 링 순서 = 판정 순서를 얻으려고 펌프를 입력 경로에 묶을 까닭이 없다. (「stdin 쓰기와 순환 대기」는 근거가 아니다 — 쓰기는 큐에 넣을 뿐이다.)
   - ★**ADR-0006 예외 하나**★: 세션이 `input_order` 를 쥔 채 emit 하므로, 구독자 팬아웃(`OutputSink::send`)이 **그 자물쇠를 쥔 채** 돈다 — ADR-0006 「lock 미보유 send」의 예외다. 교착이 없는 근거 = 운영 sink 가 `try_send` 라 막히지 않는다(가득 차면 `SinkError` — `agent_conn.rs:116`). 그 성질을 우연에 두지 않고 **`OutputSink::send` 의 trait 계약**으로 올린다(「막히지 않는다 — 못 보내면 기다리지 말고 `SinkError`」 · `types.rs:872` doc — §8). 첫 제출의 ADR-0226 래치 commit(프로필 디스크 쓰기)도 이 자물쇠 안에서 돈다 — 화신당 한 번이고 그 화신의 입력·취소만 잠깐 기다리게 하므로 무해하다.
   - 우편(`Mail`)은 이 자물쇠를 안 탄다(목록·취소가 없다). codex(`TransportOwned`)의 순서는 통로 상태 락이 진다(§5-5).
+- ★**우편의 한가 = 사용자 입력과 같다 — 도는 턴이 없고 사용자 목록이 비었다**(PRD §3-9 · 사용자 결정 N6)★. 사용자 입력이 먼저다 — 목록에 사용자 항목이 있으면 우편은 그 항목들이 들어간 턴이 끝날 때까지 기다리고, 오늘보다 늦어질 수 있다(사용자가 받아들였다). 터미널(PTY) 모드의 우편은 오늘 그대로다(`mid_turn == None` 이면 목록이 늘 비어 아래 사실이 늘 거짓이다). 두 층에서 같은 정의를 쓴다:
+  - **메시징 커널(두 백엔드 공통 — 통로에 닿기 전):** 커널의 바쁨 판정은 턴 관측 포트(`TurnFacts` — 데몬 어댑터 `ManagerTurnFacts`, `messaging_host.rs:240-270`)로만 읽는다. 포트가 돌려주는 사실(`TurnFact` — `busy.rs:76-81`)에 **`inputs_pending: bool`**(그 화신의 사용자 목록이 비지 않았다)을 더하고, 판정 `busy = in_turn ∨ inputs_pending` 은 커널의 `BusyPolicy` 가 한다(고름 — 어댑터는 「얇음이 계약」이라 판정을 안 넣는다 · 정책은 lib 에 · ADR-0110).
+  - **그 사실의 출처 = 대기 목록 표(고름)** — 턴 관측 표(`TurnObservations`)와 같은 모양의 잎 표를 manager 가 쥐고 코어에 주입한다. 코어가 명부를 환원한 **그 replay 락 안에서**, 명부가 비었다↔찼다로 바뀔 때만 적는다. 턴 관측 표에 칸을 더하지 않는 이유 = 그 표의 `in_turn` 을 쓰는 자리는 분류기와 정리 두 지점뿐이어야 한다(ADR-0127 「세 번째 호출자」) — 별개의 사실은 별개의 표에 둔다. 어댑터는 두 표를 sessions 락 없이 읽는다(오늘 규율 그대로).
+  - **초인종:** 명부가 **비는** 순간 코어가 턴 끝과 같은 길로 flush 도어벨을 울린다 — 오늘 턴 끝은 코어의 `StatusSink::turn_ended` push → 데몬 어댑터(`messaging_host.rs:876-888` — coalescing + 논블록 send 뿐) → flush 레인이다. 턴이 끝나지 않고 목록만 비는 경우(오류 턴 뒤 쥔 항목을 ✕ 로 다 거둔 codex · 받음이 턴 끝 뒤에 온 항목)에 파킹된 우편이 다음 턴 끝까지 묶이지 않게. `StatusSink` 에 동사를 하나 더할지 같은 동사를 넓힐지는 구현 때 정한다(고름 후보 = 동사 추가 — 「턴이 끝났다」는 이름을 흐리지 않는다 · flush 쪽은 어차피 바쁨을 다시 묻는다). 「표 갱신 → 통지」 순서는 턴 관측과 같아 잃는 깨움이 없다.
+  - **`inputs_pending` 에는 fail-open 상한을 걸지 않는다** — 받음이 끝내 안 오는 항목이 남는 동안 우편도 들지 못하는 것은 PRD R7 이 받아들인 결과다(항목은 에이전트가 끝날 때 버려지고 그때 목록이 빈다). 커널의 30 분 상한(`BUSY_MAX_TURN` — `busy.rs:44-57`, 마지막 턴 신호 기준)은 오늘처럼 턴 관측에만 걸린다. ★그 상한의 근거인 ADR-0104 「늦게 가는 것 < 안 가는 것」과 부딪치는 자리다★ — 새 ADR 에 예외로 적는다(§8).
+  - **codex 통로:** 커널이 한가할 때 보낸 우편이 통로에 쥐여 있는 동안에도 같은 규칙이 선다 — Idle 에서 사용자 항목이 있으면 사용자 턴을 먼저 연다(§5-5 「우편」).
 
 ### 5-1. 상태 기계 (보낸 입력 하나)
 
 id = 보낼 때 세션이 뽑는 uuid — 오늘 `write_input_observed` 가 뽑는 `msg_uuid` 그대로(claude `uuid` · codex `clientUserMessageId`).
 
 ```
-            ┌─ 한가(도는 턴 없음 ∧ 목록 빔) ────────────────────▶ Direct (목록 없음 · 즉시 말풍선) ▣
+            ┌─ 한가(도는 턴 없음 ∧ 목록 빔 · 이어받기 중 아님) ──▶ Direct (목록 없음 · 즉시 말풍선) ▣ ──(백엔드 거절)──▶ 말풍선을 지운다
 보냄(User)─분류┤
-            └─ 턴 중 / 목록 있음 / 연결 중 ─▶ Queued ──(벤더의 받음)───────────▶ Delivered ▣ (대화 끝 말풍선)
+            └─ 턴 중 / 목록 있음 / 연결 중 ─▶ Queued ──(벤더의 받음)──────────────────────▶ Delivered ▣ (대화 끝 말풍선)
                                                │
-                                               ├──✕(claude)──▶ Cancelling ──▶ Cancelled ▣ / Delivered ▣(늦음) / Discarded ▣
-                                               │                   └──(취소 요청 오류)──▶ Queued
+                                               ├──✕(codex · 통로가 쥔 항목)──────────────────────────────▶ Cancelled ▣
+                                               ├──✕(claude · codex 넘기는 찰나)──▶ Cancelling ──▶ Cancelled ▣ / Delivered ▣(늦음) / Discarded ▣
+                                               │                                     └──(취소 요청 오류 — claude)──▶ Queued
                                                └──(끊기 · 에이전트 종료 · 거절 · 모름)──▶ Discarded ▣ (버림)
-보냄(Mail) ─────────────────────────────────────────────────────▶ 오늘 경로(목록 없음)
+보냄(Mail) ──────────────────────────────────────────────────────▶ 오늘 경로(목록 없음 · 사용자 목록이 빌 때까지 기다림 — §5-0)
 
 원인이 Unknown 인 묘비 ──(그 뒤 벤더의 받음)──▶ Delivered  (종결을 뒤집는 유일한 전이 — 정의 한 벌 = §5-2 「되살림」)
 ```
 
-| 상태 | 목록 | ✕ | 뜻 |
+| 상태 | 목록(창) | ✕ | 뜻 |
 |---|---|---|---|
-| `Queued` | 보임 | claude = 있음 · codex = **없음**(연결 중 항목 = PRD Q2 대기) | claude = 벤더 큐에 있음(stdin 에는 이미 썼다) · codex = 벤더에 넘겼거나(steer) 우리가 쥐고 있음(연결 중 · FIFO · 턴 id 대기 · 거절 뒤 다음 턴 대기) — 둘의 차이는 통로 안 상태이고 목록 상태가 아니다 |
-| `Cancelling` | 보임(모양 = PRD Q7 ① 대기) | 없음 | claude 전용 — 취소 요청을 보냈고 결말 대기(수명주기와 우리 취소 응답을 모아 결말을 정한다 — §5-2) |
-| `Delivered` · `Cancelled` · `Discarded` | 빠짐 | — | 종결. ★어느 것도 입력창으로 돌아오지 않는다★(PRD §3-7). `Discarded` 는 원인을 쥔다 — 알림(PRD Q1)의 재료 |
+| `Direct` | 없음 — 곧바로 대화 끝 말풍선 | — | 한가할 때 보낸 글(PRD §3-5). 백엔드가 거절하면(`Dropped{Rejected}`) 그 말풍선을 알림 없이 지운다(§5-2) |
+| `Queued` | 보임 | claude = 있음 · codex = 통로가 쥐고 있는 동안(`cancellable` — 넘길 때 거둔다 · `Immediate` 정책이면 늘 없음) | claude = 벤더 큐에 있음(stdin 에는 이미 썼다) · codex = 우리가 쥐고 있음(도구 구간 · 연결 중 · FIFO · 정산 · 오류 턴 뒤 대기 — §5-5 구간 표) 또는 벤더에 넘김(steer · `turn/start`). 쥠/넘김의 차이는 통로 안 상태이고, 목록에는 `cancellable` 칸으로만 드러난다 |
+| `Cancelling` | ★**안 그린다 — 모든 창**★(LLM 목록만 `cancelling` — §5-6) | 없음 | 취소 요청을 받았고 결말 대기 — claude = 벤더 취소 응답·수명주기를 모은다 · codex = 넘기는 찰나와 겹친 ✕(통로가 결말을 가른다 — §5-5). ✕ 는 누른 창만의 감춤이 아니라 데몬 명부의 상태를 바꾸는 요청이라, 모든 창이 같은 환원 결과로 그리기를 멈춘다(사용자 결정 — PRD §3-6) |
+| `Delivered` · `Cancelled` · `Discarded` | 빠짐 | — | 종결. ★어느 것도 입력창으로 돌아오지 않는다★(PRD §3-7). ★알림은 없다★(PRD §3-7) — `Discarded` 가 쥔 원인은 로그·시험의 재료다 |
 
-- **1판의 `Releasing`(codex 「전달 중」 — ✕ 가 사라지는 단계)은 걷었다(고름)** — codex 항목에 ✕ 가 없으니 쥠/넘김의 차이가 화면에 드러날 자리가 없다. PRD Q2 가 (a)(연결 중에만 ✕)로 오면 그 차이는 항목의 `cancellable` 칸이 진다(§5-2).
+- **codex 의 쥠/넘김은 새 목록 상태가 아니다(고름)** — 넘기는 순간 통로가 `Queued{cancellable:false}` 를 재방출해 ✕ 만 거둔다(§5-2 · §5-5). 넘긴 항목이 벤더 거절·탐침 「없음」으로 돌아와 다시 쥐이면 `true` 로 되돌린다.
 
 **전이의 주인**(누가 그 사건을 링에 넣나):
 
 | 전이 | claude(`SessionClassified`) | codex(`TransportOwned`) |
 |---|---|---|
-| Direct/Queued 분류 | **세션** — 입력 자물쇠 안(§5-0) · 코어 턴 관측 + 명부가 비었나 + 받음 가능 여부(§5-4) | **통로** — 상태 락 아래(ADR-0193) |
-| → Delivered | 디코더 `started` · (N1 (a) 면) 환원기의 `AckUnavailable` 처리 · (N1 (a) 면) 판정 뒤 늦게 선 `Queued` 를 코어가 바꿔 적기(§5-4) — ★둘 다 쓰기가 성공한 항목에만 닿는다(§5-4)★ | 디코더 `clientId` 에코 · 통로 턴 끝 탐침(이력에 있음) · 탐침이 모름으로 끝난 항목의 늦은 에코(되살림 — §5-5) |
-| Queued → Cancelling | 세션(취소 명령 — 입력 자물쇠 안) | (없음 — PRD Q2 (a) 면 통로가 동기로 곧바로 Cancelled) |
-| → Cancelled | 디코더 `cancelled` **+ 우리 취소 응답 `cancelled:true`**(둘이 모여야 — 원인 귀속, §5-2) | (PRD Q2 (a) 면 통로 `withdraw`) |
-| → Discarded | 디코더 `cancelled`(Queued 에서 · 또는 Cancelling 에서 우리 취소 응답이 `false`·오류 — 실패 턴이 닫은 것)·`discarded`·`refused` · 세션(쓰기 실패) · 코어 종료 합성 · 코어 봉인(§5-3) | 통로(끊기 · 연결 끝 · `turn/start`·steer 쓰기 실패와 `turn/start` 거절 = `Rejected` · `turn/start` 수락 모름 = `Unknown` · 탐침 실패 · 정산 시한 · 탐침 불가 — §5-5) · 코어 종료 합성 · 코어 봉인 |
+| Direct/Queued 분류 | **세션** — 입력 자물쇠 안(§5-0) · 코어 턴 관측 + 명부가 비었나 + 받음 가능 여부(§5-4) | **통로** — 상태 락 아래(ADR-0193) · `cancellable` = 넘기기 정책의 판정(§5-5) |
+| Queued 칸 갱신(재방출) | — | **통로** — 쥐다 넘길 때 `false` · 되돌아와 다시 쥘 때 `true`(§5-5) |
+| → Delivered | 디코더 `started` · 환원기의 `AckUnavailable` 처리 · 판정 뒤 늦게 선 `Queued` 를 코어가 바꿔 적기(§5-4 — N1 (a) 사용자 결정) — ★둘 다 쓰기가 성공한 항목에만 닿는다(§5-4)★ | 디코더 `clientId` 에코 · 통로 턴 끝 탐침(이력에 있음) · 탐침이 모름으로 끝난 항목의 늦은 에코(되살림 — §5-5) |
+| Queued → Cancelling | 세션(취소 명령 — 입력 자물쇠 안) | 통로 `withdraw` — 넘기는 찰나와 겹친 ✕ 만(`CancelRequested` + `CancelAnswered{removed:false}` — §5-5) |
+| → Cancelled | 디코더 `cancelled` **+ 우리 취소 응답 `cancelled:true`**(둘이 모여야 — 원인 귀속, §5-2) | 통로 `withdraw` — 쥔 항목(`Dropped{Withdrawn}` · 벤더 호출 없음) · 넘긴 뒤 ✕ 한 항목을 벤더가 안 받았다고 판명(steer 오류 · 탐침 「없음」 → `Dropped{Withdrawn}`) |
+| → Discarded | 디코더 `cancelled`(Queued 에서 · 또는 Cancelling 에서 우리 취소 응답이 `false`·오류 — 실패 턴이 닫은 것)·`discarded`·`refused` · 세션(쓰기 실패) · 코어 종료 합성 · 코어 봉인(§5-3) | 통로(끊기 · 연결 끝 · `turn/start`·steer 쓰기 실패와 `turn/start` 거절 = `Rejected` · `turn/start` 수락 모름 = `Unknown` · 탐침 실패 · 정산 시한 · 탐침 불가 — §5-5) · 코어 종료 합성 · 코어 봉인. ★오류로 끝난 턴의 쥔 항목은 버리지 않는다 — 기다린다(PRD §3-10 · §5-5 `failed`)★ |
 | Cancelling → Queued | 디코더(`control_response` 오류) | — |
 
 ### 5-2. 링 이벤트 어휘 (백엔드 중립)
@@ -251,19 +266,20 @@ agent `OutputEvent` 에 변형 하나, wire `StructuredEvent` 에 거울 하나(
 ```rust
 // agent types.rs — ADR-NNNN
 pub enum QueuedInputEvent {
-    Queued { id: String, text: String, reason: QueueReason, cancellable: bool }, // 목록에 오른다 · 같은 id 로 다시 오면 칸만 갱신
-    CancelRequested { id: String },                                               // 취소 요청 접수(claude) — 결말 대기
-    CancelAnswered { id: String, removed: bool },                                 // 취소 요청의 성공 응답(claude) — `response.response.cancelled` 값. 결말이 아니라 `cancelled` 의 원인 귀속 재료
-    CancelFailed { id: String },                                                  // 취소 요청 자체가 실패(오류 응답) — Queued 로 되돌림
-    Delivered { id: String },                                                     // 벤더가 턴에 넣었다 → 목록에서 빠지고 대화 끝 말풍선
-    Dropped { id: String, cause: DropCause },                                     // 전달 안 됨 — 해석은 아래 환원 규칙
-    AckUnavailable,                                                               // 이 화신은 항목별 받음을 못 준다(§5-4 — N1 폴백의 방아쇠)
+    Queued { id: String, text: String, cancellable: bool }, // 목록에 오른다 · 같은 id 로 다시 오면 칸(`cancellable`)만 갱신
+    CancelRequested { id: String },               // 취소 요청 접수 — 결말 대기(claude 전부 · codex 는 넘기는 찰나와 겹친 ✕)
+    CancelAnswered { id: String, removed: bool }, // 취소 요청의 성공 응답 — claude = `response.response.cancelled` 값 · codex 늦은 ✕ = 늘 false. 결말이 아니라 `cancelled` 의 원인 귀속 재료
+    CancelFailed { id: String },                  // 취소 요청 자체가 실패(오류 응답 · 취소 줄 쓰기 실패 — claude) — Queued 로 되돌림
+    Delivered { id: String },                     // 벤더가 턴에 넣었다 → 목록에서 빠지고 대화 끝 말풍선
+    Dropped { id: String, cause: DropCause },     // 전달 안 됨 — 해석은 아래 환원 규칙 · `Rejected` 는 그 id 로 그린 말풍선도 지운다(아래)
+    AckUnavailable,                               // 이 화신은 항목별 받음을 못 준다(§5-4 — 남은 항목을 그 자리 말풍선으로)
 }
-pub enum QueueReason { MidTurn, Connecting }
 pub enum DropCause { Withdrawn, Interrupted, AgentEnded, Rejected, Unknown }
 ```
 
-- **`cancellable` — 누가 ✕ 를 받을 수 있나는 생산자가 정한다**(claude = 받음 가능 여부가 `Unavailable` 이 아니면 `true` · codex = `false`, PRD Q2 (a) 면 연결 중 항목만 `true` 였다가 넘길 때 `false` 로 재방출). 1판 어휘를 만나면: `Released` 는 없다(§5-1) · `Returned` → `Discarded`(뜻이 「입력창으로」에서 「버림」으로 바뀌었다).
+- **`cancellable` — 누가 ✕ 를 받을 수 있나는 생산자가 정한다.** claude = 늘 `true`(받음 가능 여부가 `Unavailable` 이면 애초에 목록에 안 오른다 — N1 (a)) · codex = 통로가 그 항목을 쥐고 있는 동안 `true`, 넘길 때 `false` 로 재방출 · 넘긴 항목이 되돌아와 다시 쥐이면 `true` 로 재방출(§5-5 — `Immediate` 정책은 늘 `false`). 1판 어휘를 만나면: `Released` 는 없다(§5-1) · `Returned` → `Discarded`(뜻이 「입력창으로」에서 「버림」으로 바뀌었다). 대기 사유 칸(`QueueReason{MidTurn, Connecting}`)도 없다 — 그것을 읽던 목록 머리줄이 없어졌다(PRD §3-2 · §10-5).
+- ★**취소 대기(`Cancelling`)는 어느 창에도 그리지 않는다**(사용자 결정 — PRD §3-6)★. ✕ 는 누른 창만의 감춤이 아니다 — 취소 명령이 데몬 명부의 상태를 바꾸고(claude `CancelRequested` · codex 쥔 항목은 곧바로 `Dropped{Withdrawn}`), 모든 창이 같은 환원 결과로 그 항목을 그리기에서 뺀다. 그래서 창이 따로 쥐는 감춤 상태가 없고, 앱을 재시작해도 결과가 같다(링 재생 · 재부착 대조 — §5-7). LLM 목록(§5-6)만 결말까지 `cancelling` 을 본다. 결말 (나)면 모든 창에 대화 끝 말풍선이 선다 · (가)·(다)면 다시 나타나지 않는다.
+- **codex 의 늦은 ✕ 는 어휘를 늘리지 않는다(고름)** — 통로가 `CancelRequested` 에 `CancelAnswered{removed:false}` 를 곧바로 잇는다(§5-5). 그러면 아래 표가 claude 의 「못 뺐다」 갈래로 결말을 가른다: 에코 = `Delivered`(나) · 벤더가 안 받았다고 판명돼 통로가 거둠 = `Dropped{Withdrawn}` → `Cancelled`(가) · 모름 = `Dropped{Unknown}` → `Discarded{Unknown}`(다 — 되살림 가능).
 
 **환원 규칙(명부·누산기 공용 — 한 벌을 두 언어로 · 상태 기반)**
 
@@ -275,9 +291,9 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 | 모름 | `Delivered` · `Dropped` | **묘비**만 남긴다(늦게 오는 `Queued` 가 영구 항목을 만들지 않게). 원인이 `Unknown`(`Dropped{Unknown}`)이면 되살림 가능(정의 = 아래 묘비 명세) |
 | 모름 | 그 밖 | 버린다 |
 | 묘비 | `Queued` | 버린다 |
-| 묘비(되살림 가능) | `Delivered` | **`Delivered`**(「모름」으로 버린 항목에 벤더 에코가 뒤늦게 왔다 · 되살림 표시를 지운다). 누산기는 그 id 의 PRD Q1 알림 행을 걷고, 말풍선은 뒤따르는 벤더 에코가 그린다(§5-5 · §5-7) |
+| 묘비(되살림 가능) | `Delivered` | **`Delivered`**(「모름」으로 버린 항목에 벤더 에코가 뒤늦게 왔다 · 되살림 표시를 지운다). 말풍선은 뒤따르는 벤더 에코가 그린다(§5-5 · §5-7 · 알림은 없다 — PRD §3-7) |
 | 묘비 | 그 밖 | 버린다 — 같은 id 의 둘째 `Delivered`(codex 디코더는 `item/started`·`item/completed` 양쪽에서 낸다)도 여기서 끝난다 |
-| `Queued` | `Queued` 재방출 | 칸(`reason`·`cancellable`)만 갱신 |
+| `Queued` | `Queued` 재방출 | 칸(`cancellable`)만 갱신 — codex 가 넘길 때 `false` · 되돌아와 다시 쥘 때 `true`(§5-5) |
 | `Queued` | `CancelRequested` | `Cancelling{없음, 아니오}` |
 | `Queued` | `Delivered` | `Delivered` |
 | `Queued` | `Dropped{Withdrawn}` | `Cancelled` |
@@ -289,27 +305,34 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 | `Cancelling{뺐다, 아니오}` | `Dropped{Unknown}`(벤더의 `cancelled`) | `Cancelled`(결말 (가)) |
 | `Cancelling{못 뺐다, 아니오}` | `Dropped{Unknown}` | `Discarded{Unknown}`(결말 (다) — 실패·끊긴 턴이 닫았다) |
 | `Cancelling{없음, 아니오}` | `Dropped{Unknown}` | `Cancelling{없음, 예}` — 목록엔 취소 대기 그대로 두고 응답을 기다린다(우리 취소가 뺐으면 응답이 **같은 ms 에 뒤따른다** — M3 ⓐ) |
+| `Cancelling` | `Queued` 재방출 | 칸만 갱신 — 취소 대기 그대로(codex 에서 늦은 ✕ 와 넘기기 재방출이 엇갈린 순서) |
 | `Cancelling` | `Delivered` | `Delivered`(너무 늦은 취소 — PRD §3-6 결말 (나)) |
-| `Cancelling` | `Dropped{그 밖}` | `Discarded{cause}`(결말 (다) — 에이전트 종료·거절·봉인) |
-| `Queued` 항목 전부 | `AckUnavailable` | **§10-4 N1 대기** — (a) 전부 `Delivered`(그 링 자리에 말풍선) · (b) `cancellable` 을 `false` 로(목록에 남는다). 어느 설정이든 **「받음 불가 판명」 표식**을 세운다(코어가 늦은 `Queued` 를 바꿔 적는 재료 — §5-3 · 아래 두 행의 재료). ★(a) 의 `Delivered` 는 쓰기가 성공한 항목에만 닿는다(§5-4)★ |
-| `Cancelling{응답, _}` | `AckUnavailable` | 이 화신에선 벤더 `cancelled` 가 오지 않으므로 **우리 취소 응답이 곧 결말**이다: `뺐다` → `Cancelled` · `못 뺐다` → N1 대로((a) `Delivered` · (b) `Queued{cancellable:false}`) · `없음` → 그대로(응답이 정한다 — 다음 행). `벤더 닫음 = 예` 는 이때 없다(수명주기 줄을 봤다면 `Available` 이다) |
-| `Cancelling`(판명 표식 뒤) | `CancelAnswered{removed}` · `CancelFailed` | `true` → `Cancelled` · `false`·`CancelFailed` → N1 대로(위 행과 같다) |
+| `Cancelling` | `Dropped{Withdrawn}` | `Cancelled`(결말 (가) — codex: 넘긴 뒤 ✕ 한 항목을 벤더가 안 받았다고 판명돼 통로가 거뒀다, §5-5 · `응답` 칸과 무관) |
+| `Cancelling` | `Dropped{Interrupted · AgentEnded · Rejected}` | `Discarded{cause}`(결말 (다) — 끊기·에이전트 종료·거절·봉인) |
+| `Queued` 항목 전부 | `AckUnavailable` | 전부 `Delivered` — 그 링 자리에 말풍선(사용자 결정 N1 (a) — 벤더는 이미 받았다 · 자리만 판명 순간이다). **「받음 불가 판명」 표식**을 세운다(코어가 늦은 `Queued` 를 바꿔 적는 재료 — §5-3 · 아래 두 행의 재료). ★`Delivered` 는 쓰기가 성공한 항목에만 닿는다(§5-4)★ |
+| `Cancelling{응답, _}` | `AckUnavailable` | 이 화신에선 벤더 `cancelled` 가 오지 않으므로 **우리 취소 응답이 곧 결말**이다: `뺐다` → `Cancelled` · `못 뺐다` → `Delivered`(N1 (a)) · `없음` → 그대로(응답이 정한다 — 다음 행). `벤더 닫음 = 예` 는 이때 없다(수명주기 줄을 봤다면 `Available` 이다) |
+| `Cancelling`(판명 표식 뒤) | `CancelAnswered{removed}` · `CancelFailed` | `true` → `Cancelled` · `false`·`CancelFailed` → `Delivered`(N1 (a) — 위 행과 같다) |
 | (항목이 종결에 닿으면) | — | 항목을 지우고 **묘비로 접는다**(본문을 화신 수명 내내 쥐지 않는다) |
 
 - **규칙은 이력이 아니라 지금 상태로 선다** — 「앞에 `CancelRequested` 가 있었나」를 되짚지 않으므로 골든 시퀀스가 이력 탐색 없이 결정적으로 선다. `Cancelling` 의 두 칸도 상태다.
-- ★**`cancelled` 의 원인 귀속**★: `Cancelling` 에서 온 벤더 `cancelled` 를 무조건 「취소됨」으로 닫을 수 없다 — `cancelled` 는 실패한 턴이 대기분을 닫을 때도 온다(§3-1) — 그 닫힘이 우리 취소 줄이 읽히기 **전에** 나면 우리 취소는 `cancelled:false` 로 답한다. 그래서 결말은 여전히 **수명주기**(`cancelled` / `started`)가 정하고, 우리 취소 응답은 그 `cancelled` 가 **우리 것이냐**만 가른다 — 뺐다면 「취소됨」(가), 아니면 「버려짐」(다). 응답 값을 결말로 쓰지 않는 규칙(§3-1 · §10-5)은 그대로다: `false` 는 여전히 「전달됨」이 아니다(뒤에 `started` 가 오면 (나)). 원인 표기는 `Unknown` — **PRD Q8 ① (a) 가 오면** `TurnFailed` 로 좁힐 수 있는지가 M12(실패 `result` 와 그 `cancelled` 의 순서)에 달렸다. 응답이 끝내 안 오면(에이전트 종료) 종료 합성 `Dropped{AgentEnded}` 가 `Discarded` 로 닫는다.
+- ★**`cancelled` 의 원인 귀속**★: `Cancelling` 에서 온 벤더 `cancelled` 를 무조건 「취소됨」으로 닫을 수 없다 — `cancelled` 는 실패한 턴이 대기분을 닫을 때도 온다(§3-1) — 그 닫힘이 우리 취소 줄이 읽히기 **전에** 나면 우리 취소는 `cancelled:false` 로 답한다. 그래서 결말은 여전히 **수명주기**(`cancelled` / `started`)가 정하고, 우리 취소 응답은 그 `cancelled` 가 **우리 것이냐**만 가른다 — 뺐다면 「취소됨」(가), 아니면 「버려짐」(다). 응답 값을 결말로 쓰지 않는 규칙(§3-1 · §10-5)은 그대로다: `false` 는 여전히 「전달됨」이 아니다(뒤에 `started` 가 오면 (나)). 원인 표기는 `Unknown` 이다 — 오류로 끝난 턴의 claude 처리는 벤더를 따르므로(PRD §3-10 · 사용자 결정 Q8) 실패 턴 전용 원인을 따로 두지 않는다(M12 는 그 갈래가 이 귀속대로 닫히는지만 본다). 응답이 끝내 안 오면(에이전트 종료) 종료 합성 `Dropped{AgentEnded}` 가 `Discarded` 로 닫는다.
 - **묘비 명세(두 언어가 같게, 고름):**
-  - **접기:** 종결에 닿은 항목은 지우고 묘비로 접는다 — 본문·원인은 그 순간의 사건 처리(누산기의 말풍선·알림 행)가 이미 썼으므로 남기지 않는다. 묘비 = id + 「되살림 가능」 표시 하나.
+  - **접기:** 종결에 닿은 항목은 지우고 묘비로 접는다 — 본문·원인은 그 순간의 사건 처리(누산기의 말풍선)가 이미 썼으므로 남기지 않는다. 묘비 = id + 「되살림 가능」 표시 하나.
   - ★**되살림 정의 — 한 벌**★: **되살림 가능 ⇔ 그 id 의 종결 원인이 `Unknown` 이다** — 항목이 `Discarded{Unknown}` 으로 닫혔든(어느 사건이 닫았든: 벤더 `cancelled` · 취소 응답 `false`·오류 · 탐침 모름 · 정산 시한 · `turn/start` 수락 모름) 모르는 id 에 `Dropped{Unknown}` 이 왔든. Rust·TS 가 같은 한 줄(`resurrectable = cause == Unknown`)을 쓴다. 원인으로 정한 사유: 되살림의 근거(「벤더가 준 사실이 모름을 이긴다」)는 어느 사건이 모름을 만들었는지와 무관하다. 되살림 불가 묘비(원인 `Withdrawn`·`Interrupted`·`AgentEnded`·`Rejected`, 결말 `Delivered`)에 온 `Delivered` 는 버린다.
   - **중복 없음:** 묘비는 집합이다 — 이미 있는 id 를 다시 묘비로 만들면 **무동작**이고 FIFO 자리도 안 옮긴다. 같은 id 에 사건이 여럿 오는 정상 흐름: codex 디코더의 `Delivered` 두 번(`item/started`·`item/completed`) · 한가할 때 보낸 글·우편의 `started`·에코(모르는 id 라 묘비만 남는다 — 우편도 두 백엔드 모두 uuid·`clientId` 를 싣는다).
   - **상한과 축출:** 화신당 **1024**, 넘치면 **가장 먼저 든 묘비**부터 버린다(FIFO). 상수는 환원기 옆(agent crate)에 두고 골든 파일 머리에 같은 값을 적는다 — TS 는 그 값을 자기 상수와 대조하는 시험을 갖는다.
-  - **골든 경계 시퀀스:** 묘비 1024 개 + 1 → 가장 오래된 묘비가 빠진다 · 빠진 id 의 `Queued` 는 목록에 **오르고** 둘째로 오래된 id 의 `Queued` 는 버려진다 · 같은 id 의 `Delivered` 두 번이 묘비 하나 · 되살림 가능 묘비에 `Delivered` · ★`Queued`→`CancelRequested`→`Dropped{Unknown}`→`CancelAnswered{false}`→`Delivered` = `Delivered`(취소 응답이 닫은 `Unknown` 도 되살린다) · `Queued`→`Dropped{Rejected}`→`Delivered` = 묘비 그대로★.
+  - **골든 경계 시퀀스:** 묘비 1024 개 + 1 → 가장 오래된 묘비가 빠진다 · 빠진 id 의 `Queued` 는 목록에 **오르고** 둘째로 오래된 id 의 `Queued` 는 버려진다 · 같은 id 의 `Delivered` 두 번이 묘비 하나 · 되살림 가능 묘비에 `Delivered` · ★`Queued`→`CancelRequested`→`Dropped{Unknown}`→`CancelAnswered{false}`→`Delivered` = `Delivered`(취소 응답이 닫은 `Unknown` 도 되살린다) · `Queued`→`Dropped{Rejected}`→`Delivered` = 묘비 그대로★ · codex: `Queued{true}`→`Queued{false}`→`Delivered` = `Delivered` · `Queued`→`CancelRequested`→`Queued{false}`→`CancelAnswered{false}`→`Dropped{Withdrawn}` = `Cancelled` · `Queued`→`CancelRequested`→`CancelAnswered{false}`→`Dropped{Unknown}`→`Delivered` = `Delivered`(되살림).
   - ★**명부(화신 전체)와 누산기(링 창)의 묘비 집합이 달라도 결과가 안 갈린다**★ — 근거는 「같은 규칙이 같은 결과」가 아니라(집합이 다르면 그것만으로는 안 선다) 도달 순서다: 묘비가 실제로 무언가를 막는 순서(같은 id 의 `Delivered`/`Dropped` 가 `Queued` 보다 **먼저** 링에 서는 것)는 생산자 쪽 순서로 **도달할 수 없다** — claude 는 `Queued` 를 `send_input` 앞에 입력 자물쇠 안에서 내고(§5-0), codex 는 announce 전 넘기기가 없고 처분은 죽음 표시로 `Queued` 뒤에 잇고(§5-5), 종료 뒤엔 봉인이, 받음 불가 판정 뒤엔 코어의 바꿔 적기가 `Queued` 를 대신한다(§5-3 · §5-4). ★예외 하나★: claude 가 받음 가능 여부 `Unknown` 동안은 쓰기 **뒤에** `Queued` 를 내므로(§5-4) 벤더 `started` 가 먼저 서는 순서가 드물게 도달 가능하다 — 두 쪽 결과는 같다(묘비 → 늦은 `Queued` 버림 → 목록에 안 오르고 되울림이 말풍선을 그린다 · 그 id 가 대기 중이 아니므로 억제되지 않는다). 같은 창에서 되울림만 `Queued` 를 앞지르고 `started` 는 뒤에 서는 순서(되울림 → `Queued` → `Delivered`)는 묘비가 막지 못한다 — 환원 결과는 두 쪽이 같고(목록에 올랐다 `Delivered` 로 빠진다), 말풍선이 두 벌 되는 것을 누산기의 그리기가 막는다(§5-7 「이미 그린 uuid」). 두 쪽이 **같은 순서**를 받는다는 전제 자체는 §5-7 「라이브 배달 순서」가 선다. 그래서 묘비는 생산자 결함에 대한 둘째 방어이고, 정상 링에서 두 쪽의 묘비 집합 차이는 결과에 닿지 않는다. 되살림 규칙도 같다 — 되살림 가능 묘비가 링 창 밖으로 밀려난 누산기는 그 `Delivered` 를 모르는 id 로 받아 묘비만 남기고, 말풍선은 어느 쪽이든 벤더 에코가 그린다.
 - ★**턴 신호는 claude `Delivered` 하나뿐이다**★(ADR-0113/0127): claude 분류기는 `QueuedInput::Delivered` 를 **진행(Progress)** 으로 센다 — 그 사건은 벤더 `command_lifecycle` `started` 줄의 1:1 번역이라 「벤더가 이 입력을 지금 턴에서 돌리기 시작했다」는 **벤더 출력의 사실**이다(근거·얻는 것 = §5-4). 나머지 사건 전부와 codex 의 모든 사건은 `None` — `Dropped`·codex `Delivered` 가 턴 끝 **뒤에** 와서 「턴 중」을 다시 켜면, 그 화신은 30분 fail-open 밸브까지 우편이 막힌다(codex 의 `Delivered` 는 턴 끝 뒤에도 온다 — 탐침 「있음」 · 늦은 에코 · 되살림, §5-5). 코어가 **바꿔 적은** 사건(봉인의 `Dropped` · 받음 불가 판정 뒤 `Queued` 에 잇는 `Delivered`)은 분류기를 지나지 않는다(§5-3 · §5-4). 분류기 시험에 박는다.
 - 링 무게(`estimate_cost_bytes`)는 `text` 를 센다.
 - **말풍선 본문은 우리 로컬 사본**이다(ADR-0198 — 벤더가 정규화할 수 있다). `Delivered` 는 본문을 안 싣는다 — 누산기가 `Queued` 의 본문으로 그린다(재부착으로 `Queued` 를 잃은 경우는 §5-7 대조가 메운다).
-- **한가할 때 보낸(Direct) 글의 거절도 같은 `Dropped{Rejected}` 로 낸다(고름 — 어휘를 늘리지 않는다).** 명부는 모르는 id 라 묘비만 남기고, 누산기가 이미 그린 말풍선에 그것을 어떻게 반영할지가 PRD Q1 ④ 대기다(§5-7).
-- **PRD 질문의 답에 따라 더할 수 있는 것은 가산뿐이다** — Q8 ① (a) → `DropCause::TurnFailed` · Q8 ② (c) → 말풍선 표식 사건 하나. 어느 쪽도 이 모양을 깨지 않는다(wire 바인딩 재생성뿐 — §10-3).
+- ★**한가할 때 보낸(Direct) 글의 거절 = `Dropped{Rejected}` — 그 말풍선을 알림 없이 지운다**(PRD §3-5 · 사용자 결정 Q1 ④)★.
+  - **어휘를 늘리지 않는다(고름)** — claude 의 거절은 수명주기 `refused` 이고 무상태 디코더가 번역하므로, 디코더는 그 id 가 한가할 때 보낸 글인지 목록 항목인지 모른다. 사건은 하나로 두고 뜻은 받는 쪽이 가린다. codex 의 거절 = Direct `turn/start` 의 쓰기 실패·오류 응답(§5-5 다섯 출구).
+  - **명부**는 모르는 id(또는 그 글의 `started` 가 이미 남긴 묘비)라 묘비만 남긴다 — 목록은 안 바뀐다.
+  - **누산기**는 환원 상태와 **무관하게**, 그 id 로 그린 사용자 말풍선이 있으면 지운다(그리기 규칙 — §5-7). 링 재생이 결정적이라 모든 창·앱 재시작이 같게 지운다. 목록을 거친 항목은 받음 **전에만** 거절되므로(말풍선이 아직 없다) 같은 규칙이 그대로 맞는다.
+  - **거절만 지운다** — 한가할 때 보낸 글이 끊기·에이전트 종료·실패 턴에 걸리면 말풍선은 남는다(PRD 가 정한 것은 거절뿐이다 · 오늘도 남는다 · 「이미 말풍선이 된 답 없는 글은 그대로」(PRD §3-10)와 같은 쪽).
+  - **오늘 그 말풍선이 남나(PRD R9 — 판독):** claude 의 쓰기 실패는 오늘도 말풍선을 안 그린다(합성 에코는 쓰기 성공 뒤 — `session.rs:230`·`:241`) · 벤더 `refused` 는 오늘 디코더가 수명주기를 버려 말풍선이 남는다(§1-1 — 한가할 때 보낸 글에 `refused` 가 실제로 오는 갈래는 미확인) · codex 는 오늘 합성 에코가 없어(ADR-0198 미구현) 거절된 글의 말풍선이 애초에 안 선다. 그래서 새로 지울 일은 claude `refused` 와, 이 기능이 들이는 codex 합성 에코에서 생긴다.
+- **오류로 끝난 턴(PRD §3-10 · 사용자 결정 Q8)은 어휘를 늘리지 않는다** — codex 는 쥔 항목을 사건 없이 목록에 남기고(✕ 그대로 — §5-5 `failed`), claude 는 벤더 수명주기의 번역 그대로다(벤더가 버리면 `Dropped` · 대화에 넣으면 `Delivered`). 그 턴에서 이미 말풍선이 된 글에는 표식을 달지 않는다.
 - **골든 시퀀스 파일의 집 = agent crate, 환원기 옆**(환원기를 가진 쪽이 소유한다). TS 시험은 그 파일을 경로로 읽는다(protocol crate 는 이 파일과 무관하다 — 어느 쪽도 의존을 늘리지 않는다).
 
 ### 5-3. 권위 명부 — `QueuedInputs` (고름)
@@ -352,70 +375,100 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 
 ### 5-5. codex 경로 (`TransportOwned` + ADR-0198 구현)
 
-- **통로 동사를 더한다(기본 구현 있음):** `AgentTransport::send_turn(&self, turn: TurnInput{ id, body, origin }) -> Result<(), PtyError>` — 기본 구현은 `send_input(InputEvent::Raw(body))` 로 위임한다. 그래서 **`pty.rs`·`stdio.rs` 는 한 줄도 안 바뀐다**(`InputEvent` 에 변형을 더하면 두 파일의 반박 불가 패턴이 깨지므로 그 길을 안 쓴다 — 고름). 세션은 `mid_turn == TransportOwned` 일 때만 이 동사를 부르고 `origin` 을 그대로 싣는다(§5-0). 취소용 `withdraw(&self, id) -> Withdraw`(기본 = `NotHeld`)는 **PRD Q2 (a) 일 때만** 더한다 — (b) 면 codex 에 취소 경로가 아예 없다.
-- **통로가 쥐는 사용자 항목(`pending`)** — 단계: `Held`(아직 안 넘김) · `InFlight{gen, turn_id, awaiting_reply: bool}`(steer 나 `turn/start` 를 썼고 에코 대기 — `awaiting_reply` = 그 요청의 응답을 아직 기다리나. 성공 응답도 시한 만료도 `false` 로 옮긴다 — 둘 다 턴 끝 탐침 대상이라 가를 곳이 없다) · `Probing{gen}`(턴 끝 탐침 중). 턴 단위 칸 둘: **턴 끝 정산**(`settling: Option<{gen, 시한, 기다리는 응답, 탐침 대상}>`) · **후속 턴 빚**(`follow_up_owed: Option<gen>` — 그 턴이 답 못 준 받음이 있다). 목록의 비종결 codex 사용자 항목과 1:1 이다 — 통로는 명부를 읽지 않고 **자기 상태로** 판정한다(ADR-0193).
+- **통로 동사 둘(기본 구현 있음 — `pty.rs`·`stdio.rs` 는 한 줄도 안 바뀐다):**
+  - `AgentTransport::send_turn(&self, turn: TurnInput{ id, body, origin }) -> Result<(), PtyError>` — 기본 구현은 `send_input(InputEvent::Raw(body))` 로 위임한다(`InputEvent` 에 변형을 더하면 두 파일의 반박 불가 패턴이 깨지므로 그 길을 안 쓴다 — 고름). 세션은 `mid_turn == TransportOwned` 일 때만 이 동사를 부르고 `origin` 을 그대로 싣는다(§5-0).
+  - `AgentTransport::withdraw(&self, id) -> Withdraw` — `Withdraw::{Withdrawn, TooLate, NotHeld}` · 기본 구현 = `NotHeld`. 세션의 취소가 `TransportOwned` 일 때 이 동사로 간다(§5-0). 처분 = 아래 「✕」.
+- ★**넘기는 때 = 교체 가능한 정책 `HandOverPolicy`(고름 — 이름 · 자리)**★. 「지금 넘기나 · 쥐나」는 codex backend 안(`backend/codex/`)의 정책 하나가 답하고, 통로의 분류와 라이터는 그 답만 따른다. 세션·manager 는 정책을 모른다 — 세션이 보는 것은 `TransportOwned` 와 사건의 `cancellable` 뿐이다(ADR-0004 — backend 지식은 한 곳에).
+  - **두 구현:** `Immediate` — 넘길 수 있으면 곧바로 넘긴다 · ✕ 없음(첫 착지 — §9 P2). `AtEarliestBoundary` — 측정이 「붙들어도 늦지 않는다」를 세운 구간에서만 붙들고, 경계 신호에 곧바로 넘긴다 · 붙든 동안 ✕(측정 뒤 착지 — §9 P8). 뒤엣것이 사용자 원칙 「받을 수 있는 가장 이른 때」(PRD §3-1)의 codex 판이다.
+  - **고르는 자리** = codex backend 의 상수 하나(고름 — 사용자 설정 표면을 늘리지 않는다). 시험은 통로를 짓는 seam 으로 바꿔 끼운다.
+  - **구간 표 — 정책의 전부:**
+
+    | 구간(통로가 자기 상태로 판정) | `Immediate` | `AtEarliestBoundary` | 근거 |
+    |---|---|---|---|
+    | **넘길 수 없음** — 연결 중 · 턴 끝 정산 중 · 오류 턴 뒤 대기(아래 `failed`) · 더 오래된 쥔 항목 뒤(FIFO) | 쥔다 · ✕ 없음 | 쥔다 · ✕ | 벤더가 지금 받을 수 없다 — 붙듦이 전달을 늦추지 않는다(PRD §3-6 · §3-10 · §3-11) |
+    | **경계 열림** — 턴 id 를 기다리는 중 · 턴을 막 열었을 때 · 경계 신호 직후 — 그 턴의 다음 `item/started` 까지 | 곧바로(턴 id 가 오는 대로) | 곧바로 · ✕ 없음 | 지금 넘기면 다가오는 대기분 확인에 들 수 있다 — 붙들면 놓칠 수 있다 |
+    | **도구 구간** — 현재 턴에 `item/started` 뒤 `item/completed` 가 안 온 도구 항목이 있다 | 곧바로 | 쥔다 · ✕ → 도구가 다 끝나는 `item/completed` 에 곧바로 | M7 10/10(창 6–64 ms — §3-2) · 우리 반응 지연 = M15 |
+    | **답 구간** — 현재 턴이 출력 중이고 도는 도구가 없다 | 곧바로 | **M16 녹** = 쥔다 · ✕ → 답 끝 신호에 곧바로 · **M16 적** = 곧바로 · ✕ 없음 | M16(미측정). 적이어도 사용자 질문이 아니다 — PRD §3-1 이 「붙들면 늦어지는 구간은 곧바로」로 정했다 |
+
+  - ★**일찍 넘기는 것은 무해하고 늦게 넘기는 것만 해롭다**★ — 경계보다 먼저 넘긴 글은 벤더 대기함에서 그 경계를 기다린다(잃는 것은 ✕ 뿐이다). 그래서 구간 판정이 모호하면 늘 「곧바로」 쪽으로 떨어뜨린다 — 아래에서 도구 항목을 넓게 세는 것과, 경계 열림을 그 턴의 다음 출력까지 끌고 가는 것이 그 규칙이다.
+  - ★**구간 추적 — 통로 리더가 상태 락 아래서, 현재 턴 id 의 줄만 본다**★(끊긴 턴 도구의 늦은 완료는 옛 턴 id 로 온다 — M6). **도구 항목** = `userMessage`·`agentMessage`·`reasoning` 이 **아닌** 모든 `item`(모르는 변형 포함 — 고름: 넓게 세면 일찍 넘길 뿐이고, 좁게 세면 가장 좁은 창인 ③ 에 기대게 된다). 분류 함수는 디코더의 항목 어휘(`decoder.rs:215-235`) 옆에 한 벌 둔다 — 통로가 목록을 따로 베끼지 않는다. 경계 신호 셋:
+    - ① **도구 끝** — 도는 도구 집합이 비는 `item/completed`. 병렬 도구면 마지막 것이 끝날 때다 — 벤더는 그 샘플링의 도구가 다 끝난 뒤 대기분을 확인한다(§3-2 행 1). 병렬일 때의 창은 미측정이라 M15 에 넣는다.
+    - ② **답 끝** — 도는 도구가 없을 때 온 `agentMessage` `item/completed`(그 순간 보낸 steer 가 같은 턴의 후속 샘플링에 들었다 — M6 T3, 한 번).
+    - ③ **샘플링 끝(뒷받침)** — `thread/tokenUsage/updated`. 도구가 다 끝난 뒤, 대기분 확인 **직전**에 온다(확인은 그 뒤 2–9 ms — §3-2). 그 창은 너무 좁아 기대지 않고 앞 둘을 놓친 경우의 마지막 기회로만 쓴다. 이 신호에서 도구 집합을 비운다 — 끝을 알리지 않는 항목이 남아 다음 구간을 도구 구간으로 오판하지 않게.
+    - 신호가 오면 구간은 경계 열림이 되고 라이터를 깨운다. 경계 열림은 그 턴의 다음 `item/started` 에서 닫힌다 — 벤더가 다음 출력을 시작했다면 확인은 지났다.
+  - **`Immediate` 도 구간을 추적한다** — 답에 쓰지 않을 뿐이다. 그 추적과 라이터 깨우기가 M15 를 실제 경로에서 재는 자리다(§3-3 · §9 P2).
+- **통로가 쥐는 사용자 항목(`pending`)** — 단계: `Held`(아직 안 넘김) · `InFlight{gen, turn_id, awaiting_reply: bool}`(steer 나 `turn/start` 를 썼고 에코 대기 — `awaiting_reply` = 그 요청의 응답을 아직 기다리나. 성공 응답도 시한 만료도 `false` 로 옮긴다 — 둘 다 턴 끝 탐침 대상이라 가를 곳이 없다) · `Probing{gen}`(턴 끝 탐침 중). 항목 칸 하나: `cancel_asked`(넘긴 뒤 온 ✕ — 아래 「✕」). 턴 단위 칸 둘: **턴 끝 정산**(`settling: Option<{gen, 시한, 기다리는 응답, 탐침 대상}>`) · **후속 턴 빚**(`follow_up_owed: Option<gen>` — 그 턴이 답 못 준 받음이 있다). 통로 칸 둘: **구간**(위) · **오류 턴 뒤 대기**(`parked` — 아래 `failed`). 목록의 비종결 codex 사용자 항목과 1:1 이다 — 통로는 명부를 읽지 않고 **자기 상태로** 판정한다(ADR-0193).
   - ★**세대 가림**★: `gen` = 통로가 새 활성 턴 id 를 볼 때마다 올리는 수. steer 응답 · 탐침 결과 · 에코를 처리할 때마다 **(id, gen) 과 그 항목의 지금 단계**를 대조하고, 맞지 않으면 **무동작**이다 — 늦은 응답·늦은 탐침 결과가 이미 다른 단계로 옮겨 간 항목을 두 번 움직이지 못한다.
-- **분류와 방출(통로 안, 두 단계):** 락 아래서 `Ready ∧ Idle ∧ pending 빔` 이면 Direct(턴 끝 정산이 열려 있으면 pending 은 비지 않는다 — 탐침·응답 대기 항목이 그 안에 있다), 아니면 Queued(`Connecting` 이면 `reason=Connecting`)로 정하고 항목을 `Held`·`announced=false` 로 넣는다 → 락을 놓고 emit(Direct = ADR-0198 합성 에코 `Structured{kind:"user", {type:text,text,uuid:id}}` · Queued = `Queued{…, cancellable:false}` — PRD Q2 (a) 면 연결 중 항목만 `true`) → 다시 잡아 `announced=true` + notify. 라이터는 **머리가 announce 전이면 기다린다**(건너뛰지 않는다 — FIFO). 사유: emit 은 락 밖이어야 하고(ADR-0006), 넘기기가 방출을 앞지르면 누산기가 `Delivered` 를 모르는 id 로 버린다.
+- **분류와 방출(통로 안, 두 단계):** 락 아래서 `Ready ∧ Idle ∧ pending 빔` 이면 Direct(턴 끝 정산이 열려 있거나 오류 턴 뒤 대기 중이면 pending 은 비지 않는다), 아니면 Queued 로 정하고 항목을 `Held`·`announced=false` 로 넣는다 → 락을 놓고 emit(Direct = ADR-0198 합성 에코 `Structured{kind:"user", {type:text,text,uuid:id}}` · Queued = `Queued{id, text, cancellable}`) → 다시 잡아 `announced=true` + notify. 라이터는 **머리가 announce 전이면 기다린다**(건너뛰지 않는다 — FIFO). 사유: emit 은 락 밖이어야 하고(ADR-0006), 넘기기가 방출을 앞지르면 누산기가 `Delivered` 를 모르는 id 로 버린다.
+  - ★**`cancellable` = 통로가 그 항목을 쥐기로 정했나**★ — 정책과 구간 표로 답하는 판정 함수 하나를 분류와 라이터가 같이 쓴다(고름). 값이 바뀌면 통로가 `Queued` 를 재방출한다(칸만 갱신 — §5-2): 쥐던 항목을 넘길 때 `false` · 넘긴 항목이 벤더 거절이나 탐침 「없음」으로 `Held` 에 돌아와 다시 쥘 때 `true`. `Immediate` 에서는 늘 `false` 다. 넘길 때의 재방출은 steer 쓰기 **뒤**에 한다(고름 — 경계 창 안에 쓰기를 먼저 넣는다. 그 사이 에코가 먼저 와 `Delivered` 가 재방출보다 앞서도 묘비가 늦은 `Queued` 를 버린다 — §5-2).
   - ★**통로가 합성한 사용자 말풍선은 전부 `emit_without_turn_observation` 으로 낸다**★ — Direct 합성 에코와 탐침 「있음」 말풍선. 보통 `emit` 으로 내면 분류기가 그것을 진행으로 적어 「턴 중」을 다시 켠다: 탐침 말풍선은 `turn/completed` **뒤**에 오므로 그 화신이 30분 fail-open 까지 우편이 막히고(ADR-0127 의 그 위험), Direct 에코는 `turn/start` 가 거절되면 열린 적 없는 턴을 「진행 중」으로 남긴다(ADR-0198·0193 회귀). codex 의 한가 판정은 통로 상태가 지므로(ADR-0193) 턴 표에 적을 이유가 없다. 벤더가 보낸 에코(`userMessage`)는 벤더 출력이라 오늘처럼 보통 `emit` 이다.
-  - ★**하한 판정 전에는 announce 하지 않는다**★ — 판정은 핸드셰이크 안(`thread/start`·`thread/resume` 응답의 `cliVersion` — M8)에서 온다. 그 전에 온 항목(전부 `Connecting` 이다 — Direct 는 `Ready` 뒤에만 선다)은 `announced=false` 로 쥐고, **판정이 난 쪽이 announce 한다**: 하한 충족 → `Queued{Connecting}` · 미달 → §10-4 N1 대기 — (a) 목록에 올리지 않고 오늘 경로(합성 에코도 없음) · (b) `Queued{Connecting, cancellable:false}` 로 올리고 턴 끝에만 넘긴다. 그래서 「이미 목록에 오른 연결 중 항목이 미달 판정을 만나는」 경우가 생기지 않는다. 목록이 늦게 뜨는 창은 핸드셰이크 왕복(실측 약 130 ms — ADR-0190)뿐이다.
-- **넘기기 규칙(라이터 `next_job`) — 받자마자, 단 친 순서로만:** 더 오래된 `Held` 가 있으면 뒤 항목도 쥔다(PRD §3-5 — 앞지르기 금지).
-  - `Ready ∧ Active{turn_id: Some(t)}` ∧ t 에 「steer 거절」 표시 없음 → 머리의 `Held` 부터 차례로 `turn/steer{threadId, expectedTurnId:t, clientUserMessageId:id, input}` → `InFlight{gen, t, awaiting_reply:true}`. **하나씩**(PRD §3-8 — 한 요청에 여럿을 싣지 않는다).
+  - ★**하한 판정 전에는 announce 하지 않는다**★ — 판정은 핸드셰이크 안(`thread/start`·`thread/resume` 응답의 `cliVersion` — M8)에서 온다. 그 전에 온 항목(전부 연결 중이다 — Direct 는 `Ready` 뒤에만 선다)은 `announced=false` 로 쥐고, **판정이 난 쪽이 announce 한다**: 하한 충족 → `Queued` · 미달 → **오늘 경로**(사용자 결정 N1 (a) — 목록에 올리지 않고 합성 에코도 없이 턴 끝까지 붙든다, `delivery_ack = Unavailable`). 그래서 「이미 목록에 오른 연결 중 항목이 미달 판정을 만나는」 경우가 생기지 않는다. 목록이 늦게 뜨는 창은 핸드셰이크 왕복(실측 약 130 ms — ADR-0190)뿐이다.
+- **넘기기 규칙(라이터 `next_job`) — 정책의 답대로, 친 순서로만:** 더 오래된 `Held` 가 있으면 뒤 항목도 쥔다(PRD §3-5 — 앞지르기 금지).
+  - `Ready ∧ Active{turn_id: Some(t)}` ∧ t 에 「steer 거절」 표시 없음 → 정책이 「곧바로」를 답하는 동안 머리의 `Held` 부터 차례로 `turn/steer{threadId, expectedTurnId:t, clientUserMessageId:id, input}` → `InFlight{gen, t, awaiting_reply:true}`. 「쥔다」를 답하면 경계 신호까지 기다린다(리더가 깨운다). **하나씩**(PRD §3-8 — 한 요청에 여럿을 싣지 않는다).
   - `Ready ∧ Active{turn_id: None}` → 기다린다. ★턴 id 는 **`turn/start` 응답 하나**로만 온다★(우리 요청 id 로 짝지어진다 — `transport.rs:2129`). `turn/started` 는 우리가 발급한 식별자가 없어 어느 턴 것인지 귀속할 수 없으므로 통로가 일부러 읽지 않는다(`transport.rs:322` 「되살리지 말 것」) — 이 설계도 그것을 id 출처로 쓰지 않는다(§10-5).
-  - `Ready ∧ Idle ∧ 머리가 Held` → `turn/start{…, clientUserMessageId: 머리 id}`(ADR-0198) → 머리는 `InFlight`. 나머지 `Held` 는 **PRD Q9 대기**: (a) 그 새 턴의 id 가 오면 위 Active 규칙대로 곧바로 steer — 한 턴에 따로따로 든다 · (b) 머리 하나만 들이고 나머지는 그 턴이 끝난 뒤 다음 `turn/start` 로 — ★(b) 는 그동안 새로 친 글도 FIFO 로 뒤에 세우므로 PRD AC4(「턴 끝까지 기다리지 않고」)를 깬다 — §10-3 Q9 묶임★. ★어느 답이든 한 `turn/start` 의 `input` 에 여러 항목을 싣지 않는다(고름)★ — 한 `userMessage` 로 뭉쳐 `clientId` 하나가 되므로 PRD §3-8 을 깬다.
-  - `Connecting` → 쥔다. 게이트가 열리면(ADR-0204 — 이력 덩이 **뒤**) Idle 규칙대로.
-  - ★**`Idle` 이어도 턴 끝 정산이 열려 있으면 어떤 턴도 열지 않는다 — 우편 턴·빈 턴 포함**★. 정산이 닫힌 뒤 Idle 규칙이 다시 돈다(아래 「턴 끝 정산」).
+  - `Ready ∧ Idle` ∧ 정산 없음 ∧ 오류 턴 뒤 대기 아님 → ★**턴을 여는 순서 = 사용자 먼저**(PRD §3-9 · 사용자 결정 N6)★:
+    - 사용자 `Held` 가 있으면 머리로 `turn/start{…, clientUserMessageId: 머리 id}`(ADR-0198) → 머리는 `InFlight`. 나머지 `Held` 는 새 턴 id 가 오는 순간이 경계 열림이라 곧바로 steer 된다 — ★**남은 항목은 한 다음 턴에 함께, 각자 따로 든다**(PRD §3-1 · AC27 — 사용자 결정 Q9)★.
+    - 사용자 `Held` 가 없을 때만 우편 턴(아래 「우편」). 둘 다 없고 후속 턴 빚이 있으면 빈 입력 `turn/start` 한 번(아래 「답 없는 항목」).
+    - ★어느 경우든 한 `turn/start` 의 `input` 에 여러 항목을 싣지 않는다(고름)★ — 한 `userMessage` 로 뭉쳐 `clientId` 하나가 되므로 PRD §3-8 을 깬다.
+  - `Connecting` → 쥔다. 게이트가 열리면(ADR-0204 — 이력 덩이 **뒤**) Idle 규칙대로. ★**이력 복원이 실패·중단돼도 연결이 살아 있으면 게이트는 열린다 — 오늘 코드가 이미 그렇다**★(이력 복원은 통째로 best-effort 이고 게이트는 연결이 서 있는지만 본다 — `transport.rs:42-44` · `:1491-1496`). 그래서 PRD §3-11 「대화는 이어받았는데 화면 이력 복원만 실패·중단되면 그대로 넘긴다」(사용자 결정 Q6)는 새 코드 없이 선다.
+  - ★**정산 중 · 오류 턴 뒤 대기 중에는 어떤 턴도 열지 않는다 — 사용자 턴 · 우편 턴 · 빈 턴 모두**★. 정산이 닫히면 Idle 규칙이 다시 돈다(아래 「턴 끝 정산」) · 대기는 아래 `failed` 가 푼다.
   - ★「한 번에 턴 시작 하나」(ADR-0193)는 그대로다★ — steer 는 턴을 열지 않고, 여는 요청은 여전히 `take_turn_locked` 하나뿐이다. 바뀌는 것은 「Active 동안 **아무것도** 안 보낸다」 한 줄이다.
-  - **통로는 도구를 세지 않는다** — 1판의 도구 계수(S5 의 해제 조건)는 걷었다. 도구 상태가 필요한 곳은 머리줄(PRD Q4 (b))과 「답 없는 항목」 판정뿐이고, 둘 다 **현재 턴 id 로 가린다**(끊긴 턴 도구의 늦은 `item/completed` — M6).
-- **우편:** `origin=Mail`(§5-0) 은 announce·steer 없이 오늘처럼 턴 끝까지 붙들고 Idle 에서 `turn/start`(`clientUserMessageId` 실음 — 말풍선은 소비 에코로 뜬다). 목록 밖이라 사용자 항목의 앞지르기 금지에 들지 않는다(Active 동안 쥔 우편이 사용자 항목의 steer 를 막지 않는다).
-  - ★**Idle 에서 턴을 여는 순서 = 쥔 것 전체(사용자 `Held` · 우편)의 도착 순(고름)**★. 도착 = 통로가 그 글을 받은 순간이다(steer 가 거절되거나 탐침 「없음」으로 `Held` 에 돌아온 항목은 처음 받은 자리). 사유: ① 오늘 큐가 우편·사람 입력을 한 줄 도착 순으로 흘린다 — Idle 에서 **머리의 턴을 여는 순서**는 오늘과 같다 ② 「`Held` 먼저」면 우편보다 **늦게 친** 사용자 글이 그 자리에서도 우편을 앞질러 우편 턴이 오늘보다 늦게 열린다 — 편차가 하나 더 는다 ③ 사용자 항목끼리의 친 순서(PRD §3-1)는 어느 쪽이든 선다.
-  - ★**그래도 우편이 답을 받는 순서는 오늘과 같지 않다(편차 ③ — PRD AC22 · §10-4 N6)**★: 통로에 쥐인 우편 **뒤에** 온 사용자 글이 그 우편보다 먼저 답을 받을 수 있다. Active 동안에는 그 글이 곧바로 steer 되고 우편은 턴 끝까지 쥐인다. Idle 에서 `[U1, M, U2]` 를 쥐었으면 머리 U1 의 턴이 열리고, PRD Q9 (a) 면 그 턴의 id 가 오는 대로 U2 가 steer 되어 그 턴이 답하며 M 은 그 턴이 끝나길 기다린다. 오늘은 셋 다 턴 끝까지 붙들렸다가 도착 순으로 나간다. (Q9 (b) 면 U2 는 M 뒤에 선다 — 대신 AC4 가 깨진다, §10-3 Q9.)
-- **`turn/start` 에 `clientUserMessageId` = id**(ADR-0198 · 0.156.1 실측 — 첫 입력 에코에 `clientId` 가 달린다). Direct · 턴 끝 다음 턴 · 연결 뒤 첫 전송이 이 길이다.
+- **우편:** `origin=Mail`(§5-0)은 announce·steer 없이 오늘처럼 턴 끝까지 붙들고, Idle 에서 ★**사용자 `Held` 가 없고 정산도 오류 턴 뒤 대기도 아닐 때만**★ `turn/start`(`clientUserMessageId` 실음 — 말풍선은 소비 에코로 뜬다). 우편끼리는 도착 순이다. 목록 밖이라 사용자 항목의 앞지르기 금지에 들지 않는다(Active 동안 쥔 우편이 사용자 항목의 steer 를 막지 않는다).
+  - ★**사용자 입력이 먼저다(PRD §3-9 · 사용자 결정 N6)**★ — 사용자 항목이 쥐여 있으면 우편은 그 항목들이 들어간 턴이 끝날 때까지 기다린다. 우편은 오늘보다 늦어질 수 있고(오류 턴 뒤 사용자 항목이 기다리는 동안 포함), 사용자가 그 지연을 받아들였다. 통로에 닿기 전의 우편은 메시징 커널이 같은 한가 정의로 붙든다(§5-0 「우편의 한가」).
+- **`turn/start` 에 `clientUserMessageId` = id**(ADR-0198 · 0.156.1 실측 — 첫 입력 에코에 `clientId` 가 달린다). Direct · 턴 끝 다음 턴 · 연결 뒤 첫 전송 · 오류 턴 뒤 대기가 풀린 턴이 이 길이다.
 - **steer 짝짓기:** 대기표에 `Waiter::Steer{ id, gen }` 를 새로 둔다.
   - **성공 응답**(`{turnId}`)과 ★**시한 만료**(`REQUEST_DEADLINE` 30 s — `transport.rs:194` · 수락 여부 모름)★는 똑같이 `awaiting_reply=false` 로만 옮긴다 — 성공은 에코보다 1–5 ms 먼저 오는 **수락**이지 받음이 아니고(M6 — PRD §3-4), 만료는 모름이다. 어느 쪽이든 에코가 오면 평소대로 받음이고, 안 오면 턴 끝 정산의 **탐침 대상**이다(그 턴이 이미 끝나 정산이 이 응답을 기다리던 중이면 곧바로). 만료 갈래가 없으면 항목이 응답 대기에 영원히 남아 codex 큐 전체가 멈춘다(§10-5). 만료된 steer 가 뒤늦게 벤더에서 처리돼도 이중 전달은 없다 — 그 요청은 `expectedTurnId` 로 **그 턴**에 묶여 턴이 끝난 뒤에는 거절된다(−32600 · id 불일치 — §3-2).
-  - **오류 응답**이면 그 항목을 `Held` 로 되돌리고(친 순서 자리) 그 턴에 「steer 거절」 표시를 단다 → 그 턴 동안은 더 steer 하지 않고 뒤이은 Idle 에서 `turn/start` 로 간다. −32600 「no active turn to steer」(턴이 막 끝남 — M6 실측) · 리뷰/압축 턴 · id 불일치가 모두 같은 처분이다(고름: id 불일치 때 새 턴 id 로 곧바로 다시 보낼 수도 있지만, 그 턴의 상태를 모르는 채 재시도 고리를 만들지 않는다). **오류로 돌아온 항목은 탐침하지 않는다** — 벤더가 거절했으니 이력에 없다.
-  - 목록에는 사건이 없다 — 항목은 여전히 Queued 다.
-- **소비 에코 = `Delivered`:** 디코더 `user_message`(`decoder.rs:642`)가 item 의 `clientId` 가 있으면 **그 값을 uuid 로** 쓰고(없으면 오늘처럼 item `id`), 말풍선 이벤트 **바로 앞에** `Delivered{clientId}` 를 낸다. 같은 펌프 스레드라 순서가 선다. 합성 에코와 되울림이 같은 uuid 라 누산기 dedup 이 한 벌만 남긴다(같은 id 의 둘째 `Delivered` — `item/started`·`item/completed` — 는 환원기의 묘비가 받는다, §5-2). 통로 리더도 그 `clientId` 를 `pending` 에서 뺀다(세대 가림 — 어느 단계에서 왔든 `Delivered` 가 이긴다, 아래 턴 끝 뒤 규칙).
+  - **오류 응답**이면 그 항목을 `Held` 로 되돌리고(친 순서 자리) 그 턴에 「steer 거절」 표시를 단다 → 그 턴 동안은 더 steer 하지 않고 뒤이은 Idle 에서 `turn/start` 로 간다. −32600 「no active turn to steer」(턴이 막 끝남 — M6 실측) · 리뷰/압축 턴 · id 불일치가 모두 같은 처분이다(고름: id 불일치 때 새 턴 id 로 곧바로 다시 보낼 수도 있지만, 그 턴의 상태를 모르는 채 재시도 고리를 만들지 않는다). **오류로 돌아온 항목은 탐침하지 않는다** — 벤더가 거절했으니 이력에 없다. 다시 쥐었으므로 `AtEarliestBoundary` 면 `Queued{cancellable:true}` 를 재방출한다 — ★단 `cancel_asked` 면 다시 쥐지 않고 거둔다(아래 「✕」)★.
+- ★**✕ — 통로가 쥔 항목을 지운다(`withdraw` · `AtEarliestBoundary` 에서만 닿는다)**★. 락 아래서 그 id 의 단계를 본다 — 넘기기와 ✕ 는 같은 상태 락에서 순서가 선다(라이터가 `Held` 를 `InFlight` 로 옮긴 뒤에 온 ✕ 는 늦은 쪽이다):
+  - `Held` → 항목을 뺀다 → 락 밖에서 `Dropped{Withdrawn}` → 결말 (가) · 명령 결과 `cancelled`(동기 — §5-6). **벤더 호출이 없다** — 벤더는 그 글을 본 적이 없다.
+  - `InFlight`·`Probing`(넘기는 찰나와 겹쳤다) → `cancel_asked` 를 세우고 `TooLate` → 락 밖에서 `CancelRequested` 에 곧바로 `CancelAnswered{removed:false}` 를 잇는다 → 명령 결과 `requested`. 목록에서는 결말까지 취소 대기다(창에는 그리지 않는다 — LLM 목록만 `cancelling`, §5-2). 결말은 넘긴 항목의 평소 길이 정한다: 에코 = (나) 대화 끝 말풍선 · 벤더가 안 받았다고 판명(steer 오류 응답 · 탐침 「없음」) = ★다시 보내지 않고 거둔다★ `Dropped{Withdrawn}` → (가) · 모름·끊기·종료·거절 = (다). 환원 규칙이 그 셋을 이미 가른다(§5-2) — codex 를 위해 새 사건을 더하지 않는다(고름).
+  - 모르는 id · 종결 id → `NotHeld`(명령은 명부 확인에서 `NOT_FOUND`·`CONFLICT` 로 먼저 거른다 — §5-6). `Immediate` 에서는 목록의 codex 항목이 늘 `cancellable:false` 라 이 동사에 닿지 않는다.
+  - 오류 턴 뒤 대기 중인 항목이 ✕ 로 다 빠지면 대기도 풀린다(쥔 것이 없다) — 목록이 비어 우편이 그때 흐른다(§5-0 초인종).
+- **소비 에코 = `Delivered`:** 디코더 `user_message`(`decoder.rs:642`)가 item 의 `clientId` 가 있으면 **그 값을 uuid 로** 쓰고(없으면 오늘처럼 item `id`), 말풍선 이벤트 **바로 앞에** `Delivered{clientId}` 를 낸다. 같은 펌프 스레드라 순서가 선다. 합성 에코와 되울림이 같은 uuid 라 누산기 dedup 이 한 벌만 남긴다(같은 id 의 둘째 `Delivered` — `item/started`·`item/completed` — 는 환원기의 묘비가 받는다, §5-2). 통로 리더도 그 `clientId` 를 `pending` 에서 뺀다(세대 가림 — 어느 단계에서 왔든 `Delivered` 가 이긴다, 아래 턴 끝 뒤 규칙). 에코 `item/started` 는 도구 항목이 아니지만 경계 열림을 닫는다(벤더가 확인을 지났다 — 위 구간 추적).
 - **턴 끝 처분(`turn/completed` — 상태별):**
   - ★**처분이 도는 자리 = 그 `turn/completed` 가 우리 턴으로 귀속된 순간 — 둘이다**★. ① 턴 id 를 이미 알면 그 줄을 받은 때(`transport.rs:1996-2007`). ② ★**응답보다 먼저 온 종료(이른 종료)도 턴 끝이다**★: 턴 id 를 모르는 동안 온 `turn/completed` 는 통로가 끝내지 않고 붙들었다가(`early_completions` — `transport.rs:2012-2027`), 뒤이은 `turn/start` 응답이 id 를 정할 때 id 가 맞으면 그 자리에서 턴을 끝낸다(`resolve` — `transport.rs:2138-2156`). 아래 처분(끊기 버림 · 정산 · 실패)은 **그 풀기에서도** 똑같이 돈다 — 안 돌면 그 턴의 `InFlight` 가 결말 없이 남아 pending 이 비지 않는다(아래 다섯 출구와 같은 사고). 그러려면 붙든 기록이 그 줄의 상태(`completed`·`interrupted`·`failed`)를 함께 쥐어야 한다 — 오늘은 번역된 경계(`boundary`)만 쥔다(`transport.rs:392-398` — 거기서 읽을지 칸을 더할지는 구현 때). 이른 종료로 끝난 턴에 넘긴 사용자 항목은 그 `turn/start` 의 글 하나뿐이다(id 전이라 steer 가 안 나갔다 — 위 `Active{turn_id: None}` 규칙).
-  - **`interrupted`** → `InFlight`·`Held` 전부 `Dropped{Interrupted}` → 버림. 벤더는 넘긴 것을 에코도 이력도 없이 버리고(M6), PRD §3-7 은 끊기로 못 보낸 대기분도 버린다. 오늘 끊기는 wire 로만 닿는다(§1-2 · PRD Q5).
+  - **`interrupted`** → `InFlight`·`Held` 전부 `Dropped{Interrupted}` → 버림. 벤더는 넘긴 것을 에코도 이력도 없이 버리고(M6), PRD §3-7 은 끊기로 못 보낸 대기분도 버린다. 오늘 끊기는 wire 로만 닿는다(§1-2 · 턴 끊기 조작은 다음 기능 — PRD §2).
   - **`completed`** → **턴 끝 정산**(아래).
-  - **`failed`** → **PRD Q8 대기** — 착지는 §10-3(① 목록에 남은 것 · ② 이미 말풍선이 된 것). Q8 이 「다음 턴으로」면 정산을 그대로 쓴다.
+  - ★**`failed` → 같은 정산을 돌리되, 턴을 저절로 열지 않는다(PRD §3-10 · 사용자 결정 Q8)**★. 에코 없는 `InFlight` 는 정산이 가른다(있음 = 받음 · 없음 = `Held` · 모름 = 버림). 정상 완료와 다른 점 둘:
+    - ① **후속 턴 빚을 세우지 않는다** — 그 턴에서 말풍선이 됐는데 답을 못 받은 글(한가할 때 보낸 글 포함)은 그대로 둔다(PRD §3-1 예외). 턴 끝 뒤 늦게 온 받음도 같다(아래).
+    - ② **정산이 닫힌 뒤 `Held` 가 남으면 오류 턴 뒤 대기(`parked`)를 세운다** — 그 동안 Idle 규칙은 어떤 턴도 열지 않는다. 목록의 항목은 그대로 서 있고 `AtEarliestBoundary` 면 ✕ 가 있다(쥔 항목이다 — `Queued{cancellable:true}` 재방출). ★**푸는 것 = 그 턴이 실패로 끝난 뒤 통로에 닿은 사용자 글 하나**★(정산 중에 닿았으면 대기가 아예 서지 않는다): 그 글은 목록이 비지 않았으므로 Queued 로 맨 뒤에 서고(PRD §3-5), 대기가 풀려 Idle 규칙이 머리(가장 오래 기다린 항목)로 턴을 연다 — **남은 항목이 먼저, 새 글이 끝에, 한 턴에 각자 따로**(PRD AC24). 시간이 지나 한도가 풀려도 저절로 풀지 않는다(사용자는 세션을 건드리지 않길 원한다) · 우편은 풀지 않는다 · 쥔 항목이 ✕ 로 다 빠지면 풀린다(위 「✕」).
+    - ★오늘과 다른 점★: 오늘 `failed` 뒤에는 쥐인 입력이 Idle 에서 곧바로 다음 `turn/start` 로 나간다. 이 기능은 사용자 입력에 한해 그것을 멈춘다 — 우편은 사용자 목록이 빌 때까지 어차피 기다린다(위 「우편」).
 - ★**`turn/completed` 없이 우리 쪽에서 끝나는 턴 — 다섯 출구**★. `turn/start` 가 `end_turn_if`(`transport.rs:1228`)로 끝나면 `turn/completed` 가 오지 않아 위 처분이 안 돈다 — 따로 닫지 않으면 그 `InFlight` 항목이 결말 없이 목록에 남아 **pending 이 영영 비지 않는다**(새 글이 전부 대기로 분류된다). 그 턴에 넘긴 사용자 항목은 그 `turn/start` 의 글 하나뿐이다(턴 id 를 받기 전이라 steer 가 나가지 않았다 — 위 `Active{turn_id: None}` 규칙). 그래서 정산을 열지 않고 그 한 건을 곧바로 닫는다.
   - **쓰기 실패**(`:1701`) · **오류 응답**(`:2191`) → `Dropped{Rejected}` — 벤더에 닿지 않았거나 벤더가 거절했다. `turn/steer` 쓰기 실패도 같다.
   - **응답 시한**(`:1278`) · **응답 해독 실패**(`:2180`) · **turn id 상한 초과**(`:2111`) → 수락 여부 모름 → **곧바로 `Dropped{Unknown}`**(되살림 가능 — §5-2). ★탐침하지 않는다(고름 — 「턴 끝처럼 탐침 정산」은 §10-5)★: ① `turn/start` 의 글은 받혔다면 **그 턴의 시작에** `clientId` 단 에코가 온다(M6) — 늦은 에코는 되살림이 받으므로 결말이 탐침 없이도 같다 ② 해독 실패·긴 id 는 서버가 이미 수락한 경우라 에코가 곧 오고, 시한은 서버가 멎은 경우라 탐침도 멎는다 ③ 탐침의 멈춤 조건(「T 를 다 지났다」)은 T 의 turn id 가 있어야 서는데, 이 셋은 그 id 를 못 받은 출구다 — 걸어 봐야 정산 시한까지 가서 모름이다. `Held` 로 되돌리지도 않는다 — steer 와 달리 `turn/start` 는 턴에 묶여 있지 않아, 서버가 늦게 처리하면 다시 보낸 글과 **이중 전달**이 된다.
   - ★되살아나도 후속 턴 빚은 세우지 않는다★ — `turn/start` 의 글은 그 요청이 연 턴이 답한다. 그 턴은 서버에서 아직 돌 수 있고(우리는 끝난 것으로 쳤다), 거기에 빈 `turn/start` 를 내면 빈 steer 가 된다(§3-2).
-  - Direct 글은 쓰기 실패·오류 응답이면 `Dropped{Rejected}`(§5-2 — PRD Q1 ④), 수락 모름이면 사건이 없다(말풍선은 오늘처럼 서 있고 에코는 dedup 된다). 우편은 목록 밖이라 사건이 없다.
-  - ★**불변식: 넘긴 채 결말 없는 항목(`InFlight`·`Probing`)은 정산이 닫힌 Idle 에 하나도 없다**★ — 턴이 끝나는 길 전부(`turn/completed` 셋 — 이른 종료를 푸는 자리 포함(위 턴 끝 처분 ②) · 이 다섯 출구 · 스트림 닫힘 = `finish` 합성)가 그 턴의 `InFlight` 를 `Delivered`·`Held`·`Dropped` 로 옮기거나 정산에 넘기고, 정산은 시한 안에 닫힌다. 이 다섯 출구는 PRD Q8 의 「오류로 끝난 턴」이 아니다 — 턴이 섰는지부터 모른다(Q8 은 벤더가 `turn/completed(failed)` 로 말해 준 경우다).
-- ★**턴 끝 정산 — 턴 하나에 한 번**★. 턴 T 의 `turn/completed(completed)`(이른 종료를 푸는 자리 포함)에서 정산 하나를 열고, 그 턴의 항목을 **전부 판정한 뒤** 후속 턴을 **한 번** 정한다 — 항목마다 탐침하고 후속 턴을 세우면 한 턴에 답 없는 항목이 여럿일 때 후속 턴이 여럿 열려 같은 이력에 답이 겹친다(§10-5). ★T 에 에코 없는 `InFlight` 가 없으면 정산은 열리자마자 닫힌다 — 그 턴 뒤 우편 턴이 열리는 시점은 오늘과 같다(AC22)★.
-  - ★**정산 시한 하나 — 턴 끝에서 잰다**★: 응답 모으기(1)와 탐침 걷기(2)가 **전부** `turn/completed` 수신(이른 종료면 풀기) 때 선 시한 하나 안이다 — 값은 `REQUEST_DEADLINE`(30 s)을 그대로 쓴다(고름 — 새 상수를 만들지 않는다). 만료 = 아직 못 가른 항목 전부(응답 대기 · 탐침 중) `Dropped{Unknown}`(되살림 가능) → 3·4 로 간다 — 턴을 여는 일이 다시 돈다. 시한 뒤 늦게 오는 응답·탐침 결과는 세대 가림이 무동작으로 버린다(늦은 에코는 되살림). 이 시한이 전체를 묶으므로 쪽수 상한은 두지 않는다(응답·탐침마다 따로 시한을 두면 이어져 약 60 s 이고 여러 쪽 탐침은 끝이 없다 — §10-5).
+  - Direct 글은 쓰기 실패·오류 응답이면 `Dropped{Rejected}` — 이미 그려진 합성 에코 말풍선을 누산기가 알림 없이 지운다(PRD §3-5 · 사용자 결정 Q1 ④ — §5-2). 수락 모름이면 사건이 없다(말풍선은 서 있고 늦은 에코는 dedup 된다). 우편은 목록 밖이라 사건이 없다.
+  - ★**불변식: 넘긴 채 결말 없는 항목(`InFlight`·`Probing`)은 정산이 닫힌 Idle 에 하나도 없다**★ — 턴이 끝나는 길 전부(`turn/completed` 셋 — 이른 종료를 푸는 자리 포함(위 턴 끝 처분 ②) · 이 다섯 출구 · 스트림 닫힘 = `finish` 합성)가 그 턴의 `InFlight` 를 `Delivered`·`Held`·`Dropped` 로 옮기거나 정산에 넘기고, 정산은 시한 안에 닫힌다. 이 다섯 출구는 PRD §3-10 의 「오류로 끝난 턴」이 아니다 — 턴이 섰는지부터 모른다(§3-10 은 벤더가 `turn/completed(failed)` 로 말해 준 경우다).
+- ★**턴 끝 정산 — 턴 하나에 한 번**★. 턴 T 의 `turn/completed(completed · failed)`(이른 종료를 푸는 자리 포함)에서 정산 하나를 열고, 그 턴의 항목을 **전부 판정한 뒤** 후속 턴을 **한 번** 정한다 — 항목마다 탐침하고 후속 턴을 세우면 한 턴에 답 없는 항목이 여럿일 때 후속 턴이 여럿 열려 같은 이력에 답이 겹친다(§10-5). ★T 에 에코 없는 `InFlight` 가 없으면 정산은 열리자마자 닫힌다★.
+  - ★**정산 시한 하나 — 턴 끝에서 잰다**★: 응답 모으기(1)와 탐침 걷기(2)가 **전부** `turn/completed` 수신(이른 종료면 풀기) 때 선 시한 하나 안이다 — 값은 `REQUEST_DEADLINE`(30 s)을 그대로 쓴다(고름 — 새 상수를 만들지 않는다). 만료 = 아직 못 가른 항목 전부(응답 대기 · 탐침 중) `Dropped{Unknown}`(되살림 가능) → 3·4 로 간다. 시한 뒤 늦게 오는 응답·탐침 결과는 세대 가림이 무동작으로 버린다(늦은 에코는 되살림). 이 시한이 전체를 묶으므로 쪽수 상한은 두지 않는다(응답·탐침마다 따로 시한을 두면 이어져 약 60 s 이고 여러 쪽 탐침은 끝이 없다 — §10-5).
   1. **응답을 모은다.** T 의 `InFlight` 중 `awaiting_reply` 인 것이 있으면 그 응답(또는 그 요청의 시한 만료)을 기다린다 — 오류 = `Held`(탐침 없음) · 성공·만료 = 탐침 대상. 사유: 응답 전에 탐침하면 「없음」 → `Held` → `turn/start` 를 낸 뒤 −32600 이 와서 **또** `Held` → 두 번째 `turn/start` 가 나간다.
   2. **탐침은 한 번 — 대상 전부를 한 걸음으로(고름).** T 의 에코 없고 응답이 끝난(`awaiting_reply=false`) 항목 전부를 `Probing{gen}` 으로 옮기고 `thread/items/list{threadId, sortDirection:"desc", limit, cursor}` 를 **끝에서부터** 걷으며 각 쪽의 항목마다 대상의 `clientId` 를 대조한다(M6 — 이 목록은 steer 로 든 항목의 `clientId` 를 싣는다). 대기표 = `Waiter::Probe{ gen }`(한 번에 한 쪽).
      - ★**「없음」은 T 를 다 지나서만 말한다**★: 한 장의 「없음」은 부재의 증명이 아니다(§3-2 — 페이지 목록). 걷기를 멈추는 정당한 조건은 둘 — ① T 의 항목을 본 뒤 **T 가 아닌 turn id 의 항목**을 처음 만났다(끝에서부터 걸으므로 T 를 다 지났다 — 정산 동안 새 턴이 열리지 않아 T 가 스레드의 마지막 턴이다) ② `nextCursor` 가 없거나 `null`(그 방향 끝 — `protocol.rs:485`). 그 전에 **정산 시한**에 닿으면 결과가 **잘린** 것이다 → 아직 못 찾은 대상은 「없음」이 아니라 **모름** = `Dropped{Unknown}`(재전송 없음). 한 쪽의 크기(`limit`)는 구현 때 정한다(고름 — 이력 복원의 `HISTORY_PAGE_LIMIT`(`transport.rs:251`)과 같은 부류 · 쪽수 상한은 두지 않는다 — 위 정산 시한).
      - ★**turn id 로 거르지 않는다(고름)**★ — 스키마엔 `turnId` 칸이 있지만(§3-2) 「기록만」 항목이 **어느 turn id** 로 실리는지 모른다(M10 ④). 거르면 그 항목이 빠져 「없음」 오판 → 이중 전달이다. 그래서 전부 대조하고 turn id 는 멈추는 조건에만 쓴다.
      - **있음**(턴 끝 「기록만」 갈래 — 이력에 들었다) → `Delivered{id}` + 말풍선(통로 합성 — `emit_without_turn_observation`) → 그 항목은 **답 못 받은 받음**이다(아래 3).
-     - **없음**(T 를 다 지났다) → 벤더 이력에 없다 → `Held` 로 되돌린다(친 순서 자리) — Idle 에서 `turn/start` 는 **처음 보내는 것이지 재전송이 아니다**(PRD §3-7 이 막는 이중 전달이 안 생긴다 — 전제 = M10).
+     - **없음**(T 를 다 지났다) → 벤더 이력에 없다 → `Held` 로 되돌린다(친 순서 자리) — Idle 에서 `turn/start` 는 **처음 보내는 것이지 재전송이 아니다**(PRD §3-7 이 막는 이중 전달이 안 생긴다 — 전제 = M10). 다시 쥐었으므로 `AtEarliestBoundary` 면 `Queued{cancellable:true}` 재방출 · ★`cancel_asked` 면 다시 쥐지 않고 `Dropped{Withdrawn}`(벤더가 안 받았다 — ✕ 가 이긴다)★.
      - **탐침 실패**(오류 응답 · 쪽 요청의 시한 만료) · **정산 시한** · **탐침 불가**(링크가 `Ready` 가 아니다) → 남은 대상 전부 `Dropped{Unknown}` → 버림(이중 전달보다 낫다). 그 id 들은 T 뒤 턴이 열릴 때까지 통로가 기억한다(늦은 에코의 되살림 판정 — 아래).
-  3. **후속 턴을 한 번 정한다.** T 에 **답 못 받은 받음**이 하나라도 있으면(판정 = 아래 「답 없는 항목」) 후속 턴 빚 `follow_up_owed = T` 를 세운다 — 항목마다가 아니라 **턴마다 하나**다.
-  4. **정산을 닫는다** → Idle 규칙이 다시 돈다: 쥔 것(사용자 `Held` · 우편)이 있으면 **도착 순**으로 머리의 턴(위 「우편」 항) · 없고 빚이 있으면 빈 입력 `turn/start` 한 번(M9). 어느 것이든 **T 가 끝난 뒤 열린 턴**이라 빚을 푼다(아래).
-  - ★**정산 동안 턴을 열지 않는 이유 셋**★: ① 후속 턴 결정이 한 번이려면 판정이 다 모여야 한다 ② 먼저 친 항목의 응답이 늦게 `Held` 로 돌아오는 동안 뒤 항목의 `turn/start` 가 먼저 나가면 **친 순서가 뒤집힌다**(PRD §3-1 「친 순서대로」) ③ 탐침의 「T 를 다 지났다」가 「T 가 마지막 턴」에 기댄다. 정산 길이는 대상이 없으면 0, 대개 탐침 한 왕복이고, 최악은 정산 시한이다. 우편도 그동안 기다린다 — 오늘과의 편차는 §7-3 AC22 · §10-4 N6. 정산 중 들어온 사용자 입력은 목록이 비지 않았으므로(탐침 대상이 목록에 있다) PRD §3-5 대로 Queued 이고 FIFO 뒤에 선다.
+  3. **후속 턴을 한 번 정한다 — `completed` 턴만.** T 에 **답 못 받은 받음**이 하나라도 있으면(판정 = 아래 「답 없는 항목」) 후속 턴 빚 `follow_up_owed = T` 를 세운다 — 항목마다가 아니라 **턴마다 하나**다. `failed` 턴은 세우지 않는다(위).
+  4. **정산을 닫는다** → `completed` 면 Idle 규칙이 다시 돈다: 사용자 `Held` 가 있으면 그 턴 · 없으면 우편 턴 · 둘 다 없고 빚이 있으면 빈 입력 `turn/start` 한 번(M9). 어느 것이든 **T 가 끝난 뒤 열린 턴**이라 빚을 푼다(아래). `failed` 면 `Held` 가 남을 때 오류 턴 뒤 대기를 세운다(위).
+  - ★**정산 동안 턴을 열지 않는 이유 셋**★: ① 후속 턴 결정이 한 번이려면 판정이 다 모여야 한다 ② 먼저 친 항목의 응답이 늦게 `Held` 로 돌아오는 동안 뒤 항목의 `turn/start` 가 먼저 나가면 **친 순서가 뒤집힌다**(PRD §3-1 「친 순서대로」) ③ 탐침의 「T 를 다 지났다」가 「T 가 마지막 턴」에 기댄다. 정산 길이는 대상이 없으면 0, 대개 탐침 한 왕복이고, 최악은 정산 시한이다. 우편도 그동안 기다린다(사용자가 받아들인 지연 — PRD §3-9). 정산 중 들어온 사용자 입력은 목록이 비지 않았으므로(탐침 대상이 목록에 있다) PRD §3-5 대로 Queued 이고 FIFO 뒤에 선다(넘길 수 없는 구간이라 `AtEarliestBoundary` 면 ✕ 가 있다).
   - ★**전제 미확인(M10)**★ — 「기록만」 된 항목이 **우리가 묻는 그 시점에** 그 목록에 `clientId` 와 함께 실린다는 것. 안 실리면 「없음」 갈래가 이중 전달을 낳으므로 탐침을 걷고 `Dropped{Unknown}` 로 떨어뜨린다.
 - ★**턴 끝 뒤에 받음이 오면(멱등 규칙 — 턴 단위)**★: T 가 끝난 뒤 어떤 항목의 에코(`clientId`)가 오면 —
   - 그 항목이 `InFlight`·`Probing` 이거나, 탐침 「없음」으로 `Held` 에 돌아가 **아직 안 나갔으면** → `Delivered` 로 닫고 `Held` 에서 뺀다(그 `turn/start` 는 안 나간다).
   - 그 항목이 **모름**(`Dropped{Unknown}` — 탐침 · 정산 시한)으로 닫혔으면 → **되살린다**(고름 — 아래 「모름 뒤의 늦은 에코」).
-  - 어느 쪽이든 그 받음은 답을 못 받았다 — **T 뒤에 열린 턴이 아직 없으면** `follow_up_owed = T` 를 세운다(이미 서 있으면 무동작) · **이미 열렸으면** 아무것도 안 한다(그 턴이 이력의 그 글을 함께 봤다 — 아래 빚 풀기). 예외 = `turn/start` 로 나간 항목(위 다섯 출구 — 그 글이 연 턴이 답한다).
+  - 어느 쪽이든 그 받음은 답을 못 받았다 — **T 가 `completed` 였고 T 뒤에 열린 턴이 아직 없으면** `follow_up_owed = T` 를 세운다(이미 서 있으면 무동작) · **이미 열렸으면** 아무것도 안 한다(그 턴이 이력의 그 글을 함께 봤다 — 아래 빚 풀기) · **T 가 `failed` 였으면** 세우지 않는다(PRD §3-10). 예외 = `turn/start` 로 나간 항목(위 다섯 출구 — 그 글이 연 턴이 답한다).
   - **그 항목의 `turn/start` 가 이미 나간 뒤라면** 벤더가 같은 글을 두 번 가졌다 — 되돌릴 수 없으므로 경고 로그 + 계수만 남긴다(이 창이 실제로 닫혀 있다는 증명이 M10 이다).
-  - 규칙 둘은 이제 구조가 지킨다: **항목 하나당 턴 끝 뒤 넘기기는 많아야 한 번**(단계 대조 — 세대 가림) · **턴 끝 하나당 후속 턴은 많아야 하나**(빚이 턴마다 칸 하나).
-- ★**모름 뒤의 늦은 에코 — 받음으로 되살린다(고름)**★. 탐침이 시한에 걸려 `Dropped{Unknown}`(버림)으로 닫힌 항목에 벤더 에코가 뒤늦게 오면, 종결이라 버리는 환원기와 벤더 말풍선을 그리는 누산기가 갈려 **「버려짐」과 말풍선이 함께 선다**. 고른 결말 = **되살림**: 환원기가 원인이 `Unknown` 인 묘비에 온 `Delivered` 를 `Delivered` 로 받고(§5-2 — 종결을 뒤집는 유일한 전이 · 정의 한 벌), 누산기는 그 id 의 알림 행(PRD Q1 이 그린다면)을 걷으며, 말풍선은 벤더 에코가 그린다. 사유: `Unknown` 은 「모른다」였고 에코는 벤더가 준 **사실**이다 — 사실이 모름을 이기는 쪽이 대화 화면(모델이 실제로 받은 글)과 목록 결말을 일치시킨다. 거부한 대안: 말풍선을 억눌러 「버려짐」을 지킨다(모델이 받은 글이 화면에서 사라져 답이 맥락 없이 선다) · 말풍선과 「버려짐」 알림을 함께 두고 문서화한다(한 글에 결말이 둘). 통로는 되살린 항목도 답 못 받은 받음으로 친다(위).
-- **답 없는 항목(PRD §3-1 · AC6 — codex):** 판정 = 그 항목의 `Delivered` 뒤로 **그 턴의** 샘플링 시작(`agentMessage`·`reasoning` `item/started` — 턴 id 로 가린다, M6)이 하나도 없이 `turn/completed(completed)` 가 왔다 · 또는 받음 자체가 턴 끝 **뒤**다(탐침 「있음」 · 턴 끝 뒤 에코 · 되살림). 처분 = 그 턴의 **후속 턴 빚**(위 정산 3 · 턴 끝 뒤 받음).
+  - 규칙 둘은 구조가 지킨다: **항목 하나당 턴 끝 뒤 넘기기는 많아야 한 번**(단계 대조 — 세대 가림) · **턴 끝 하나당 후속 턴은 많아야 하나**(빚이 턴마다 칸 하나).
+- ★**모름 뒤의 늦은 에코 — 받음으로 되살린다(고름)**★. 탐침이 시한에 걸려 `Dropped{Unknown}`(버림)으로 닫힌 항목에 벤더 에코가 뒤늦게 오면, 종결이라 버리는 환원기와 벤더 말풍선을 그리는 누산기가 갈려 **목록 결말은 「버려짐」인데 대화엔 말풍선이 선다**. 고른 결말 = **되살림**: 환원기가 원인이 `Unknown` 인 묘비에 온 `Delivered` 를 `Delivered` 로 받고(§5-2 — 종결을 뒤집는 유일한 전이 · 정의 한 벌), 말풍선은 벤더 에코가 그린다. 사유: `Unknown` 은 「모른다」였고 에코는 벤더가 준 **사실**이다 — 사실이 모름을 이기는 쪽이 대화 화면(모델이 실제로 받은 글)과 목록 결말을 일치시킨다. 거부한 대안: 말풍선을 억눌러 「버려짐」을 지킨다(모델이 받은 글이 화면에서 사라져 답이 맥락 없이 선다). 통로는 되살린 항목도 답 못 받은 받음으로 친다(위).
+- **답 없는 항목(PRD §3-1 · AC6 — codex):** 판정 = 그 항목의 `Delivered` 뒤로 **그 턴의** 샘플링 시작(`agentMessage`·`reasoning` `item/started` — 턴 id 로 가린다, M6)이 하나도 없이 `turn/completed(completed)` 가 왔다 · 또는 받음 자체가 턴 끝 **뒤**다(탐침 「있음」 · 턴 끝 뒤 에코 · 되살림). 처분 = 그 턴의 **후속 턴 빚**(위 정산 3 · 턴 끝 뒤 받음). `failed` 턴은 이 판정 밖이다(PRD §3-1 예외 — 그대로 둔다).
   - ★**빚 풀기 = T 가 끝난 뒤 열린 턴이면 무엇이든**★ — `Held` 항목의 `turn/start` · 우편 턴 · 새로 보낸 Direct 글의 턴 · 빈 입력 `turn/start`. 받음이 T 가 끝난 뒤에 늦게 알려져도, 그 글은 **T 가 끝날 때 이미 이력에 있었으므로** T 뒤에 열린 턴이 그것을 함께 본다(「`Delivered` 뒤에 열린 턴」만 치면 쓸데없는 후속 턴이 하나 더 열린다 — §10-5). 판정은 세대로 한다 — 빚 `T` 는 `gen > T` 인 턴이 열리면 풀린다.
   - 빚이 선 채 **Idle 이고, 정산이 없고, 쥔 것(사용자 `Held`·우편)이 없을 때만** 빈 입력 `turn/start` 한 번(M9 — 받히는지·모델이 답하는지 미측정). ★**Active 동안에는 빈 `turn/start` 를 절대 내지 않는다**★ — 진행 중 `turn/start` 는 steer 로 처리되므로(§3-2) 빈 steer 가 된다.
-  - 같은 글을 다시 넘기지 않고 말풍선도 새로 안 그린다(이미 Delivered 다). ★M9 가 빨가면 PRD R4 대로 사용자에게 올린다(§10-4 N3)★ — 재전송으로 메우지 않는다. claude 에는 이 갈래가 없다(접기가 다음 모델 요청 **앞**이라 접힌 글은 그 턴이 답한다 — 오류 턴만 예외, PRD Q8 ②).
+  - 같은 글을 다시 넘기지 않고 말풍선도 새로 안 그린다(이미 Delivered 다). ★M9 가 빨가면 PRD R4 대로 사용자에게 올린다(§10-4 N3)★ — 재전송으로 메우지 않는다. claude 에는 이 갈래가 없다(접기가 다음 모델 요청 **앞**이라 접힌 글은 그 턴이 답한다 — 오류 턴만 예외, PRD §3-10).
 - ★**시한과 닫힘 — 새 대기표 둘의 갈래**★: `Waiter::Steer`·`Waiter::Probe` 를 `sweep_deadlines`(`transport.rs:1263-1283`)와 스트림 닫힘(`transport.rs:1839-1848`)의 `match` 양쪽에 **갈래로** 둔다.
   - 시한: `Steer` → `awaiting_reply=false`(성공 응답과 같다 — 위 steer 짝짓기) · `Probe` → 탐침 실패(남은 대상 `Dropped{Unknown}` → 정산을 닫는다) · `TurnStart` → 위 다섯 출구의 「응답 시한」. 모두 경고 로그. ★정산 시한은 대기표가 아니라 정산 칸의 시각이다 — 같은 `sweep_deadlines` 가 함께 본다★.
-  - 닫힘: 항목을 손대지 않는다 — 스트림 끝은 그 화신의 끝이고(다음 화신은 이 통로를 이어받지 않는다 — `transport.rs:1821-1823` 주석 · 종점에서 `finish` 가 돈다), 남은 비종결 항목은 `finish` 합성이 `Dropped{AgentEnded}` 로 닫는다(끝 처분의 주인을 하나로 둔다 — §5-3). 열린 정산은 버린다(닫힌 뒤 턴을 열 일이 없다). debug 로그.
+  - 닫힘: 항목을 손대지 않는다 — 스트림 끝은 그 화신의 끝이고(다음 화신은 이 통로를 이어받지 않는다 — `transport.rs:1821-1823` 주석 · 종점에서 `finish` 가 돈다), 남은 비종결 항목은 `finish` 합성이 `Dropped{AgentEnded}` 로 닫는다(끝 처분의 주인을 하나로 둔다 — §5-3). 열린 정산·오류 턴 뒤 대기는 버린다(닫힌 뒤 턴을 열 일이 없다). debug 로그.
 - **처분이 announce 전 항목을 만나면:** 끊기·연결 끝·`turn/start` 거절 처분은 `announced=false` 항목을 직접 `Dropped` 로 내지 **않는다** — 그 항목에 「죽음 표시(원인)」만 달고, announce 하는 쪽이 `Queued` 를 낸 **바로 뒤에** `Dropped{원인}` 을 잇는다. 그래서 링에 `Dropped` 가 그 `Queued` 보다 먼저 서는 일이 없다(환원기의 묘비가 둘째 방어다 — §5-2).
-- **연결 중(하이드레이션):** `Connecting` 동안의 입력은 `Queued{Connecting}` 로 목록에 선다(하한 판정 뒤 — 위) → 게이트가 열리면(ADR-0204 — 이력 덩이 **뒤**) `turn/start` → 소비 에코 → 말풍선이 복원된 이력 **아래**에 선다. ★ADR-0198 「영향」 절이 미결로 남긴 「에코가 복원 이력보다 앞이냐 뒤냐」가 이것으로 닫힌다★. 이력 복원만 실패하고 대화는 이어졌을 때 = **PRD Q6 ① 대기**(§10-3). 이어받기 자체가 실패하면 화신이 종점으로 끝나(ADR-0082) `finish` 합성이 버린다.
-- **하한 판정(M8):** `thread.cliVersion` → 없으면 `userAgent` 첫 semver → 둘 다 실패면 미달. 미달이면 §10-4 N1 폴백(PRD R6) — `delivery_ack = Unavailable`. 1판이 스스로 골랐던 「`turn/start` 를 쓰는 순간을 `Delivered` 로」는 PRD §3-4(「써 넣은 것은 받음이 아니다」)와 어긋나 선택지로 내렸다.
+- **연결 중(하이드레이션):** 연결 중 입력은 `Queued` 로 목록에 선다(하한 판정 뒤 — 위 · 넘길 수 없는 구간이라 `AtEarliestBoundary` 면 ✕ — PRD §3-11) → 게이트가 열리면(ADR-0204 — 이력 덩이 **뒤**) `turn/start` → 소비 에코 → 말풍선이 복원된 이력 **아래**에 선다. ★ADR-0198 「영향」 절이 미결로 남긴 「에코가 복원 이력보다 앞이냐 뒤냐」가 이것으로 닫힌다★. 이력 복원만 실패하고 대화는 이어졌을 때도 게이트가 열린다(위 넘기기 규칙 `Connecting`). 이어받기 자체가 실패하면 화신이 종점으로 끝나(ADR-0082) `finish` 합성이 버린다.
+- **하한 판정(M8):** `thread.cliVersion` → 없으면 `userAgent` 첫 semver → 둘 다 실패면 미달. 미달이면 오늘 동작 그대로다(사용자 결정 N1 (a) — PRD R6 · `delivery_ack = Unavailable`). 1판이 스스로 골랐던 「`turn/start` 를 쓰는 순간을 `Delivered` 로」는 PRD §3-4(「써 넣은 것은 받음이 아니다」)와 어긋나 걷었다(§10-5).
 
 ### 5-6. 제어 표면 (LLM-우선)
 
@@ -493,36 +546,44 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 | 경우 | 결말 |
 |---|---|
 | 턴이 끝나는 순간 보낸 입력(claude) | Queued 로 분류 → CLI 가 `result` 직후 새 턴으로 `started`(M7 — 1.5 ms) → 목록이 한순간 비쳤다 말풍선. 표시만의 흔들림(PRD §4) |
-| drain 턴의 첫 출력 전에 보낸 입력(claude) | drain `started` → `Delivered` 가 진행으로 적혀 코어 턴 관측이 이미 턴 중이라 Queued. 우편 바쁨 판정도 같은 표를 봐 그 틈이 `result`→drain `started`(≈1.5 ms — M7)로 좁아진다(우편 시점 변화 = N6 ②) |
-| 턴이 끝나는 순간 넘긴 steer(codex) | −32600 → `Held` 로 되돌림(탐침 없음) → Idle 에서 `turn/start` 한 번. 목록은 그대로다(✕ 가 없어 깜빡일 것도 없다) |
+| drain 턴의 첫 출력 전에 보낸 입력(claude) | drain `started` → `Delivered` 가 진행으로 적혀 코어 턴 관측이 이미 턴 중이라 Queued. 우편 바쁨 판정도 같은 표를 봐 그 틈이 `result`→drain `started`(≈1.5 ms — M7)로 좁아진다(우편이 사용자의 drain 턴 뒤로 늦어진다 — 사용자가 받아들인 지연, PRD §3-9) |
+| 턴이 끝나는 순간 넘긴 steer(codex) | −32600 → `Held` 로 되돌림(탐침 없음) → Idle 에서 `turn/start` 한 번. `AtEarliestBoundary` 면 다시 쥔 항목에 ✕ 가 돌아온다(`Queued{cancellable:true}` 재방출) · 그 사이 ✕ 가 눌렸으면(`cancel_asked`) 다시 보내지 않고 거둔다(§5-5) |
 | `turn/completed` 뒤에 steer 응답이 옴(codex) | 정산이 응답을 기다렸다가 오류 = `Held` · 성공 = 탐침 대상 — 넘기기는 한 번(세대 가림) |
 | steer 응답이 시한(30 s) 안에 안 옴(codex) | 성공 응답과 같게 `awaiting_reply=false`(수락 모름) → 턴 끝 정산의 탐침 대상 — 큐가 멈추지 않는다 |
 | 턴 끝 정산이 오래 걸림(codex — 응답·탐침 쪽이 이어짐) | 턴 끝에서 잰 정산 시한 하나(30 s) — 못 가른 항목 = `Dropped{Unknown}`(되살림 가능) → 턴 열기가 다시 돈다 |
 | `turn/start` 가 `turn/completed` 없이 우리 쪽에서 끝남(codex — 다섯 출구) | 쓰기 실패·오류 응답 = `Dropped{Rejected}` · 응답 시한·해독 실패·긴 turn id = 곧바로 `Dropped{Unknown}`(탐침 없음 · 늦은 에코 = 되살림 · 후속 턴 빚 없음) — 결말 없는 항목이 Idle 에 남지 않는다 |
 | `turn/completed` 가 `turn/start` 응답보다 먼저 옴(codex — 이른 종료) | 통로가 붙들었다가 응답이 턴 id 를 정할 때 푼다 — 턴 끝 처분(끊기 버림 · 정산 · 실패)은 **그 풀기에서** 돈다 · 턴 id 는 응답에서만 잡는다(`turn/started` 안 읽음 — §5-5) |
-| Idle 에 우편과 사용자 `Held` 가 함께 쥐임(codex) | 도착 순으로 머리의 턴을 연다 — 오늘 큐와 같다. 단 쥔 우편 뒤에 온 사용자 글이 우편보다 먼저 답을 받을 수 있다(Active = 곧바로 steer · Idle `[U1, M, U2]` = PRD Q9 (a) 면 U2 가 U1 의 턴에 steer) — 편차 = N6 ③ |
+| Idle 에 우편과 사용자 `Held` 가 함께 쥐임(codex) | 사용자 먼저 — 남은 사용자 항목이 한 턴에 각자 따로 들고, 우편은 그 턴이 끝나 사용자 항목이 없을 때 턴을 연다(PRD §3-9 · 사용자 결정 N6 — 우편이 늦어질 수 있다) |
 | 턴 끝 「기록만」(codex) | 턴 끝 정산의 탐침 한 번 — 이력에 있음 = 받음 · 없음(T 를 다 지났다) = 처음 보내기 · 실패·잘림 = 버림 · 턴 끝 뒤 에코 = 받음(버린 것은 되살림). 답할 턴은 **그 턴에 한 번**(M9). 전제 = M10 |
 | 한 턴에 답 못 받은 받음이 여럿(codex) | 후속 턴 빚은 턴마다 하나 → 후속 턴 한 번 |
 | 정산 전에 우편 턴이 열릴 뻔함(codex) | 정산 동안 어떤 턴도 안 연다 · 정산 뒤 열린 우편 턴은 빚을 푼다(T 뒤에 열린 턴) |
-| 탐침이 시한에 걸려 버린 뒤 늦은 에코(codex) | 되살림 — `Discarded{Unknown}` → `Delivered` · 알림 행을 걷고 말풍선은 벤더 에코 · T 뒤 턴이 아직 없으면 후속 턴 빚 |
+| 탐침이 시한에 걸려 버린 뒤 늦은 에코(codex) | 되살림 — `Discarded{Unknown}` → `Delivered` · 말풍선은 벤더 에코 · T 가 `completed` 였고 T 뒤 턴이 아직 없으면 후속 턴 빚(`failed` 면 없음) |
 | 긴 턴에서 탐침 목록이 한 장을 넘음(codex) | 끝에서부터 T 를 다 지날 때까지 걷는다 · 정산 시한에 걸리면 잘림 = 모름 = 버림(재전송 없음) |
 | ✕ 와 접기가 동시(claude) | 벤더가 판정 — 접기 필터(`Oi`) 전이면 취소, 뒤면 `started` 가 이겨 말풍선(결말 (나)). 우리 쪽 경합 없음 |
+| ✕ 와 넘기기가 동시(codex) | 같은 상태 락에서 순서가 선다 — 아직 쥐었으면 곧바로 취소됨(`Dropped{Withdrawn}` · 벤더 호출 없음) · 이미 넘겼으면 취소 대기(창엔 안 그린다) → 에코 = 모든 창에 대화 끝 말풍선 · 벤더가 안 받았다고 판명(steer 오류 · 탐침 「없음」) = 다시 보내지 않고 거둔다 · 모름·끊기·종료 = 버림(§5-5) |
 | 다른 창·LLM 의 취소가 글보다 먼저 CLI 에 닿으려 함(claude) | **입력 자물쇠가 막는다**(§5-0) — `Queued` 가 쓰기 앞에 보여 다른 창이 먼저 누를 수 있지만, 취소 줄은 글 쓰기가 끝난 뒤에만 나간다 |
 | 처분이 announce 전 항목을 만남(codex) | 죽음 표시 → announce 쪽이 `Queued` 뒤에 `Dropped` 를 잇는다 · 환원기 묘비가 둘째 방어 |
 | `finish` 합성 뒤에 온 `Queued` | 봉인이 `Dropped{AgentEnded}` 로 바꿔 적는다 → 목록에 안 오른다 |
 | 통로 합성 말풍선(탐침 「있음」 · Direct 에코) | `emit_without_turn_observation` — 턴 표를 다시 켜지 않는다 |
-| claude 첫 턴 초반(받음 가능 여부 모름) | `Available` 로 가정해 Queued(쓰기 뒤에 `Queued`) — 수명주기가 오면 정상 결말 · `Unavailable` 로 판명되면 `AckUnavailable` → N1 폴백(§5-4) |
+| claude 첫 턴 초반(받음 가능 여부 모름) | `Available` 로 가정해 Queued(쓰기 뒤에 `Queued`) — 수명주기가 오면 정상 결말 · `Unavailable` 로 판명되면 `AckUnavailable` → 남은 항목이 그 자리 말풍선, 이후 오늘 경로(N1 (a) — §5-4) |
 | 같은 창에서 되울림이 `Queued` 를 앞지름(claude — `Unknown` 창) | 되울림이 말풍선을 그리고, 뒤이은 `Delivered`(벤더 `started` · N1 (a))는 이미 그린 uuid 라 말풍선을 더하지 않는다 · 늦은 `Queued` 는 목록에 그리지 않는다 — 말풍선 하나. 그 글은 목록을 거치지 않는다(오늘 동작과 같은 부류 · 명부에는 결말까지 남는다 — §5-4 · §5-7) |
-| 받음 불가 판정이 분류와 겹침(claude — 판정이 링에 먼저 섬) | 코어가 판정 뒤의 `Queued` 를 같은 락 안에서 N1 대로 바꿔 적는다 — 목록에 영구히 남지 않는다(§5-3) |
+| 받음 불가 판정이 분류와 겹침(claude — 판정이 링에 먼저 섬) | 코어가 판정 뒤의 `Queued` 를 같은 락 안에서 `Queued`+`Delivered` 로 바꿔 적는다(N1 (a)) — 목록에 영구히 남지 않는다(§5-3) |
 | 받음 불가 판정과 쓰기 실패가 겹침(claude — `Unknown` 창) | `Unknown` 갈래는 쓰기 성공 뒤에만 `Queued` 를 내므로 N1 (a) 의 합성 `Delivered` 가 쓰지 못한 글에 닿지 않는다 — 실패한 글은 목록에 안 오르고 `Err`(§5-4) |
-| 취소 대기 중 받음 불가 판명(claude) | 우리 취소 응답이 결말 — 뺐다 = 취소됨 · 못 뺐다·오류 = N1 대로 · 응답 전이면 응답을 기다린다(§5-2) |
+| 취소 대기 중 받음 불가 판명(claude) | 우리 취소 응답이 결말 — 뺐다 = 취소됨 · 못 뺐다·오류 = 그 자리 말풍선(N1 (a)) · 응답 전이면 응답을 기다린다(§5-2) |
 | 취소 줄 쓰기 실패(claude) | `CancelFailed` → `Queued` 로 돌아오고 오류를 돌려준다 — `Cancelling` 에 남지 않는다(§5-4) |
-| 실패한 턴이 취소 대기 항목을 `cancelled` 로 닫음(claude) | 우리 취소 응답이 `false`·오류 → 「취소됨」이 아니라 「버려짐」(`Discarded{Unknown}` — PRD Q8 ① 착지 · 확인 = M12) |
-| 수명주기 미광고(옛 claude) · codex 하한 미달 | §10-4 N1 폴백(PRD R6 — 사용자 선택). codex 는 판정 전 announce 를 미뤄 목록에 오른 항목이 판정을 만나지 않는다 |
-| 받음이 끝내 안 옴(예: 턴 도중 슬래시 명령 — PRD R7 · M13) | 에이전트가 끝날 때까지 목록에 남는다 → `finish` 합성 → 버림. 그동안 목록이 비지 않아 새 글도 전부 목록을 거친다(PRD R7 — AC1 상실). 머리줄 = `awaitingNextTurn`(PRD Q4) |
-| 끊긴 턴 도구의 늦은 `item/completed`(codex — 옛 턴 id, M6) | 통로가 도구를 세지 않으므로 넘기기에는 무해 · 「답 없는 항목」 판정과 (Q4 (b) 의) 도구 끝 신호는 현재 턴 id 로 가린다 |
+| 실패한 턴이 취소 대기 항목을 `cancelled` 로 닫음(claude) | 우리 취소 응답이 `false`·오류 → 「취소됨」이 아니라 「버려짐」(`Discarded{Unknown}` — 확인 = M12). 벤더 처리를 그대로 따른다(PRD §3-10) |
+| 수명주기 미광고(옛 claude) · codex 하한 미달 | 오늘 동작 그대로(사용자 결정 N1 (a) — PRD R6). claude 는 판명 전에 목록에 오른 항목이 그 자리 말풍선이 된다(`AckUnavailable` — §5-2) · codex 는 판정 전 announce 를 미뤄 그런 항목이 없다 |
+| 받음이 끝내 안 옴(예: 턴 도중 슬래시 명령 — PRD R7 · M13) | 에이전트가 끝날 때까지 목록에 남는다 → `finish` 합성 → 버림. 그동안 목록이 비지 않아 새 글도 전부 목록을 거친다(PRD R7 — AC1 상실). 우편도 그동안 못 든다(`inputs_pending` 에 fail-open 없음 — §5-0 · PRD R7) |
+| 끊긴 턴 도구의 늦은 `item/completed`(codex — 옛 턴 id, M6) | 구간 추적과 「답 없는 항목」 판정이 모두 현재 턴 id 로 가린다 — 늦은 완료가 도구 구간을 끝내거나 경계 신호를 내지 않는다(§5-5) |
+| 도구 끝 신호를 우리가 늦게 넘김(codex — 반응이 창보다 김) | 벤더의 확인이 지난 뒤라 다음 경계에 든다(한 경계 늦음 · 잃지 않는다) — 그 턴이 거기서 끝나면 「기록만」 갈래 → 턴 끝 정산. 체계적으로 늦으면 M15 가 빨갛다 → 붙듦 정책을 들이기 전에 멈추고 묻는다(§9 P7) |
+| 답 끝 신호를 우리가 늦게 넘김(codex — M16 녹으로 답 구간을 붙들 때) | 같은 턴의 후속 샘플링을 놓친다 → 턴이 끝나면 「기록만」 갈래 → 턴 끝 정산(탐침 · 후속 턴). 체계적으로 늦으면 M16 이 빨갛고 답 구간은 곧바로 넘긴다 |
+| 도구 항목이 끝을 알리지 않음(codex) | 샘플링 끝 신호(`tokenUsage/updated`)가 도구 집합을 비우고 쥔 것을 넘긴다 — 다음 구간을 도구 구간으로 오판하지 않는다(§5-5 경계 신호 ③) |
+| 쥔 채로 턴이 끝남(codex — 경계 신호를 하나도 못 받음) | `Held` 는 넘긴 적이 없으니 정산 대상이 아니다 — 남은 항목으로 다음 턴에 함께 든다(한 턴 늦음 · 잃지 않는다). 정상 경로에선 샘플링 끝 신호가 턴 끝보다 먼저 와 생기지 않는다 — 나면 구간 추적 결함이다(§7 시험이 잡는다) |
 | 끊기(codex — 오늘 wire 로만) | 쥔 것·넘긴 것 전부 `Dropped{Interrupted}` → 버림(M6 — 벤더도 버린다) |
-| 오류로 끝난 턴 | PRD Q8 대기 — §10-3 |
+| 오류로 끝난 턴(codex — `turn/completed(failed)`) | 정산은 같게 돌리되 후속 턴 빚 없음 · 남은 `Held` = 오류 턴 뒤 대기 — 저절로 안 보낸다(한도가 풀려도) · `AtEarliestBoundary` 면 ✕ · 다음 사용자 글과 한 턴에, 남은 항목이 먼저 · 우편도 기다린다 · 이미 말풍선이 된 답 없는 글은 그대로(PRD §3-10 · §5-5) |
+| 오류로 끝난 턴(claude — `result` `is_error`) | 벤더 수명주기를 그대로 번역한다 — 벤더가 버리면 목록에서 빠지고, 대화에 넣으면 말풍선이 된다. 우리 쪽에서 강제로 맞추지 않는다(PRD §3-10 · 확인 = M12) |
+| 오류 턴 뒤 쥔 항목을 전부 ✕(codex) | 대기가 풀리고 목록이 빈다 → 명부가 비는 순간의 초인종으로 파킹된 우편이 흐른다(§5-0) |
+| 한가할 때 보낸 글이 거절됨 | `Dropped{Rejected}` → 그린 말풍선을 알림 없이 지운다(PRD §3-5) — codex = Direct `turn/start` 쓰기 실패·오류 응답 · claude = 수명주기 `refused`(§5-2) |
 | 에이전트 종료 | 코어가 남은 id 를 `Dropped{AgentEnded}` → 버림(입력창 복귀 없음 — PRD §3-7) |
 | 데몬 재기동 | 명부는 휘발(화신과 함께) — 대기분은 사라진다. 벤더 쪽(claude CLI 큐)도 프로세스와 함께 사라진다. 오늘 입력 큐와 같은 등급(PRD §7) |
 | 창의 연결 끊김 | 끊기가 아니다 — 명부는 그대로고, 다시 붙은 창이 §5-7 대조로 맞춘다(PRD §3-7 · AC16) |
@@ -638,25 +699,31 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 
 ## 9. 구현 순서 — 어디서 멈춰도 빌드가 선다 · 어느 단계도 오늘보다 나빠 보이지 않는다
 
-새 타입·동사를 **아무도 안 부르는 채로 먼저 깔고** 뒤에서 배선한다. ★**착수 전제 = 이 문서의 `/review trd` · 사용자 확인 · PRD §9 답**★(CLAUDE.md 「개발 스텝」 — 사용자 선택 전 구현 진입 금지). PRD 질문의 답에 묶인 조각은 각 P 의 **맨 끝**에 두어, 답 전에 뼈대가 착지할 수 있게 한다(목록은 표 아래).
+새 타입·동사를 **아무도 안 부르는 채로 먼저 깔고** 뒤에서 배선한다. ★**착수 전제 = 이 문서의 `/review trd` · 사용자 확인**★(CLAUDE.md 「개발 스텝」 — 사용자 선택 전 구현 진입 금지). PRD §9 의 질문은 모두 답을 받았다 — 그 답이 착지하는 조각은 표 아래에 모았다.
 
-★**착지 순서 = P0 → P1 → P4 → P5 → P2 → P3 → P6**★. 사유: 생산자(P2·P3)가 화면(P5)보다 먼저 서면, 턴 중 입력이 합성 에코 없이 `Queued` 만 내고 그것을 그릴 목록이 아직 없어 **받힐 때까지 화면에 아무것도 안 보인다** — 오늘(보낸 자리에 바로 말풍선)보다 나빠진다. 화면을 먼저 세우면 생산자가 없는 동안엔 아무것도 그리지 않아 오늘과 같고, 생산자가 서는 순간 목록이 함께 뜬다. 표의 P 번호는 이름이고 순서가 아니다(다른 절이 번호로 가리킨다).
+★**착지 순서 = P0 → P1 → P4 → P5 → P3 → P2 → P7 → P8 → P6**★ — 공통 층과 claude 경로가 먼저, codex 는 **곧바로 넘기는 뼈대 → 측정 → 붙듦 정책과 ✕** 순이다. 표의 P 번호는 이름이고 순서가 아니다(다른 절이 번호로 가리킨다). 사유:
+- **화면(P5)이 생산자(P3·P2)보다 먼저다** — 생산자가 먼저 서면 턴 중 입력이 합성 에코 없이 `Queued` 만 내고 그것을 그릴 목록이 없어 **받힐 때까지 화면에 아무것도 안 보인다** — 오늘(보낸 자리에 바로 말풍선)보다 나빠진다. 화면을 먼저 세우면 생산자가 없는 동안엔 아무것도 그리지 않아 오늘과 같고, 생산자가 서는 순간 목록이 함께 뜬다.
+- **codex 는 `Immediate` 정책의 뼈대(P2)가 먼저다** — 턴 중 입력이 목록에 서고 곧바로 steer 로 넘어가 오늘(턴 끝까지 붙듦 · ✕ 없음)보다 나빠 보이지 않고, 붙듦 정책의 전제(M15)를 **실제 통로 경로**에서 잴 자리를 만든다(구간 추적은 뼈대에 이미 들어 있다 — 답에 쓰지 않을 뿐). 붙듦 정책과 ✕(P8)는 측정(P7) 뒤에만 착지한다.
 
-★**단계 불변식: 화면에 보이는 변화는 그것을 만드는 생산자와 같은 단계에 착지한다.**★ 생산자보다 먼저 서는 조각(P1·P4·P5)은 **생산자가 없으면 아무것도 바꾸지 않는** 것만 담는다 — 새 사건을 그리는 자리·빈 목록·새 명령이 그렇다. 생산자가 없어도 보이는 변화는 그 생산자 단계로 옮긴다. 예: 로딩 게이트 한 줄(`historyPending` 에서 `!hasSent` 빼기)은 생산자 없이 먼저 서면 이력 없는 이어받은 codex 에이전트에 글을 보낸 뒤 로딩 판이 곧바로 걷히지 않고 벤더 에코까지 남는다(그 사이 목록도 없다) — 그래서 **P2 에 둔다**(§5-7 게이트 수정 — 그 게이트가 필요한 것은 codex 연결 중 항목뿐이다 · §10-5). 리뷰 체크 항목: 각 P 의 「끝났을 때」 칸이 「오늘과 같게 보인다」거나 그 P 의 생산자가 만든 변화만 적는가.
+★**멈춤 조건(P7)**★ — **M15 가 도구 구간의 창을 못 맞추면**(§3-3 — 최댓값 ≥ 6 ms) **P8 을 짜기 전에 멈추고 사용자에게 묻는다**(붙듦 대 다른 길 — PRD R8). 그때까지 착지한 조각은 그대로 선다 — codex 는 곧바로 넘기고 ✕ 가 없는 상태다(PRD §3-6 의 codex ✕ 만 빠진다). ★**M16 이 빨가면 멈추지 않는다**★ — 구간 표의 「답 구간」 칸을 「곧바로」로 두고 P8 을 진행한다(PRD §3-1 이 이미 정한 갈래 — ✕ 가 없는 구간이 는다는 것만 보고한다, ADR-0192).
+
+★**단계 불변식: 화면에 보이는 변화는 그것을 만드는 생산자와 같은 단계에 착지한다.**★ 생산자보다 먼저 서는 조각(P1·P4·P5)은 **생산자가 없으면 아무것도 바꾸지 않는** 것만 담는다 — 새 사건을 그리는 자리·빈 목록·새 명령·늘 거짓인 우편 사실이 그렇다. 생산자가 없어도 보이는 변화는 그 생산자 단계로 옮긴다. 예: 로딩 게이트 한 줄(`historyPending` 에서 `!hasSent` 빼기)은 생산자 없이 먼저 서면 이력 없는 이어받은 codex 에이전트에 글을 보낸 뒤 로딩 판이 곧바로 걷히지 않고 벤더 에코까지 남는다(그 사이 목록도 없다) — 그래서 **P2 에 둔다**(§5-7 게이트 수정 — 그 게이트가 필요한 것은 codex 연결 중 항목뿐이다 · §10-5). 리뷰 체크 항목: 각 P 의 「끝났을 때」 칸이 「오늘과 같게 보인다」거나 그 P 의 생산자가 만든 변화만 적는가.
 
 | # | 조각 | 파일 | 끝났을 때 |
 |---|---|---|---|
-| **P0** | Phase 0(M1–M8) — **끝남**([보고서](../../research/mid-turn-phase0-measurements-2026-09-25.md)) · ★fixture 채취 — 원시 로그(세션 스크래치 · 휘발 가능)에서 벤더 줄을 시험 fixture 로 옮긴다★ · Phase 0b(M9·M10 먼저, 나머지는 PRD 답 재료) | fixture 파일(코드 없음) | §5-5 탐침·후속 턴 갈래 가부 |
-| **P1** | 어휘: `OutputEvent`·`StructuredEvent` 변형(`cancellable` · 종결 `Discarded` · `AckUnavailable` · `CancelAnswered`) · wire 매핑 · 분류기(claude = `Delivered` 만 진행 · codex = 전부 `None`) · 링 무게 · 환원기 모듈(상태 기반 · `Cancelling` 두 칸 · 판명 표식 · 묘비 명세 · 되살림 한 벌) + 골든 파일(agent crate · 머리에 묘비 상한) · 코어 관찰 배선(생산자 없음) · `finish` 합성과 봉인 한 덩이 · 두 스레드 배달 시험 · 판정 뒤 `Queued` 바꿔 적기 · `OutputSink::send` 논블록 계약 doc · 누산기 arm(그리기만 — 「이미 그린 uuid」 규칙 포함, §5-7: `Delivered` 가 없으면 아무것도 안 바꾼다) · 바인딩 · ★입력 경로 뼈대(§5-0) — `InputOrigin` 을 세 입구에 싣기 · `SpawnedSession` 의 `mid_turn`·`delivery_ack` 칸(모든 backend 가 `None` 을 신고 — 아무것도 안 바뀐다) · `input_order`★ | `types.rs` · `queued_input.rs`(새) · `output_core.rs` · `session.rs` · `manager.rs` · `backend/mod.rs` · claude/codex 분류기 · protocol `messages.rs` · 데몬 `connection_core.rs`(매핑) · `structuredAccumulator.ts` | **동작 불변** — 아무도 사건을 안 내고 정책은 전부 `None`(claude `Delivered` 도 아직 아무도 안 낸다) |
-| **P4** | 명령: manager 동사(`list/cancel_queued_input`) · 버스 선언 둘(`input_id` 필수 · 취소에 「입력 영향」 표지) · WS 두 명령 · 임대 검사(WS = 연결 · 버스·`/control/call`·`/control/agent` = 공통 입구 `call_daemon_command` 한 자리 — `LocalCommands::run` 에 `caller: Option<ConnId>` · 공통 입구에 `caller` · `target` 한 번 풀어 본문에 넘기기 · 낡은 입구 라벨 주석 정정) · 카탈로그 5 · **`PROTOCOL_VERSION` 6** | `manager.rs` · `commands.rs` · protocol(`lib.rs` 상수 doc 포함) · 데몬 `connection_core.rs`·`command_delivery.rs`·`control/commands.rs`·`control/agent.rs`·`control/catalog.rs` | LLM·CLI 가 목록(빈)·취소를 부를 수 있다 |
-| **P5** | 프론트: `QueuedInputList`(머리줄 키 넷 · ✕ 는 `cancellable` 에만) · RichSlot 배치·`showEmpty` 게이트·재부착 대조 · `agentClient` 두 동사 · 명령 등록 · `ko.ts` · ★`protocolClient` seq 연속(live 붙듦 · 버퍼→live flush — 시작점 = 마커의 `replay_from` · 넘침 → `startBuffering`) + 셸 replay 완료 마커에 `replay_from` 칸(SubscribeAck 값 · wire 무변) + 데몬 sink 자리채움 — 한 단계에 함께(§5-7 — 자리채움 없이 붙듦만 서면 폐기 갈래의 구멍이 상한까지 뒤 프레임을 막는다)★ — ★입력창 복귀는 없다 · `historyPending` 게이트는 **여기서 안 바꾼다**(P2 — 위 단계 불변식)★ | `src/components/slot/*` · `src/api/*` · `src/commands/agentCommands.ts` · `src/i18n/ko.ts` · 데몬 `agent_conn.rs`(폐기 갈래 두 곳) · 셸 `src-tauri/src/daemon_client/*`(replay 완료 마커) | 화면이 준비됐다 — 생산자가 없어 **오늘과 같게 보인다**(`showEmpty` 에 더한 조건은 목록이 늘 비어 있어 결과를 안 바꾼다 · seq 연속은 구멍이 없으면 곧바로 흘리고, 오늘 드물게 버려지던 역전 프레임을 되살릴 뿐이다 · 자리채움은 오늘 조용히 버려지던 버그 경로에서만 오류 행 하나로 보인다) |
-| **P2** | codex: `send_turn` 기본 구현(트레잇) · 정책 `TransportOwned` 신고 · 통로 두 단계 방출 · `pending`(`Held`/`InFlight{gen, awaiting_reply}`/`Probing`) · 세대 가림 · `clientUserMessageId` · `Waiter::Steer`·`Waiter::Probe`(시한·닫힘 갈래 포함) · 즉시 steer · 턴 끝 처분(끊기) · **턴 끝 정산**(응답 모으기 · 끝까지 걷는 탐침 한 번 · 턴 끝에서 잰 시한 하나 = 모름 · 후속 턴 빚 턴마다 하나 · 정산 동안 턴 안 열기) · 다섯 출구(`end_turn_if` 자리마다 처분) · 이른 종료를 푸는 자리(`resolve`)의 턴 끝 처분 · 턴 id 는 응답에서만 · Idle 도착 순(우편 포함) · 턴 끝 뒤 받음 · 되살림 · 빚 풀기(T 뒤 열린 턴) · 죽음 표시 · 합성 말풍선 관측 없이 · 하한 판정 뒤 announce · 디코더 `clientId` · ★프론트 한 줄: `RichSlot.tsx` `historyPending` 에서 `!hasSent` 빼기 + 그 시험★ | `transport/mod.rs` · `session.rs` · `backend/codex/{transport,protocol,decoder,mod}.rs` · `src/components/slot/RichSlot.tsx`(게이트 한 줄) | codex 턴 중 입력이 목록에 서고 곧바로 steer 로 넘어간다 · 이력 없는 이어받은 codex 에서 연결 중 친 글이 목록에 서고 로딩 판은 전달된 말풍선이 걷는다 |
-| **P3** | claude: 정책 `SessionClassified` 신고 · `DeliveryAck` 탐지 + `AckUnavailable` · 수명주기·`control_response` 번역(`CancelAnswered`·`CancelFailed`) · 세션 분류·취소(입력 자물쇠 안 · `Unavailable` 은 N1 대로 · ★`Unknown` 은 쓰기 뒤 `Queued` · 취소 줄 쓰기 실패 → `CancelFailed`★) · `cancel_line` · transcript seed(`queued_command` → 말풍선) | `backend/claude/mod.rs` · `backend/mod.rs` · `session.rs` | claude 턴 중 입력이 목록에 서고 ✕ 가 선다 · drain 턴 초반 입력도 목록에 선다 |
+| **P0** | Phase 0(M1–M8) — **끝남**([보고서](../../research/mid-turn-phase0-measurements-2026-09-25.md)) · ★fixture 채취 — 원시 로그에서 벤더 줄을 시험 fixture 로 옮긴다(로그 사본 = `.claude/handoff/attachments/20260925-midturn-phase0/`)★ · Phase 0b(**M9·M10** — P2 전에 · M11–M14 는 벤더 확인) | fixture 파일(코드 없음) | §5-5 탐침·후속 턴 갈래 가부 |
+| **P1** | 어휘: `OutputEvent`·`StructuredEvent` 변형(`cancellable` · 종결 `Discarded` · `AckUnavailable` · `CancelAnswered` — 대기 사유 칸 없음) · wire 매핑 · 분류기(claude = `Delivered` 만 진행 · codex = 전부 `None`) · 링 무게 · 환원기 모듈(상태 기반 · `Cancelling` 두 칸 · 취소 대기의 재방출·`Withdrawn` 행 · 판명 표식(N1 (a) = 전부 `Delivered`) · 묘비 명세 · 되살림 한 벌) + 골든 파일(agent crate · 머리에 묘비 상한 · codex 시퀀스 포함) · 코어 관찰 배선(생산자 없음) · `finish` 합성과 봉인 한 덩이 · 두 스레드 배달 시험 · 판정 뒤 `Queued` 바꿔 적기 · `OutputSink::send` 논블록 계약 doc · 누산기 arm(그리기만 — 「이미 그린 uuid」 · 취소 대기는 안 그림 · `Dropped{Rejected}` 의 id 로 그린 말풍선 지우기, §5-2 · §5-7: 사건이 없으면 아무것도 안 바꾼다) · 바인딩 · ★입력 경로 뼈대(§5-0) — `InputOrigin` 을 세 입구에 싣기 · `SpawnedSession` 의 `mid_turn`·`delivery_ack` 칸(모든 backend 가 `None` 을 신고 — 아무것도 안 바뀐다) · `input_order` · 트레잇 동사 `send_turn`·`withdraw` 기본 구현(아무도 안 부른다 — `withdraw` 는 `NotHeld`)★ · ★우편의 한가(§5-0) — 커널 `TurnFact.inputs_pending` 과 `BusyPolicy` 판정 · 대기 목록 표(코어가 명부가 비고 찰 때 적는다) · 비는 순간의 초인종★ | `types.rs` · `queued_input.rs`(새) · `output_core.rs` · `session.rs` · `transport/mod.rs` · `manager.rs` · `backend/mod.rs` · claude/codex 분류기 · protocol `messages.rs` · 데몬 `connection_core.rs`(매핑) · `structuredAccumulator.ts` · messaging `busy.rs` · 데몬 `messaging_host.rs` | **동작 불변** — 아무도 사건을 안 내고 정책은 전부 `None`(claude `Delivered` 도 아직 아무도 안 낸다) · 명부가 늘 비어 우편 사실은 늘 거짓이다 |
+| **P4** | 명령: manager 동사(`list/cancel_queued_input` — 취소는 정책대로 세션 입력 자물쇠 또는 통로 `withdraw` 로) · 버스 선언 둘(`input_id` 필수 · 취소에 「입력 영향」 표지) · WS 두 명령 · 임대 검사(WS = 연결 · 버스·`/control/call`·`/control/agent` = 공통 입구 `call_daemon_command` 한 자리 — `LocalCommands::run` 에 `caller: Option<ConnId>` · 공통 입구에 `caller` · `target` 한 번 풀어 본문에 넘기기 · 낡은 입구 라벨 주석 정정) · 카탈로그 5 · **`PROTOCOL_VERSION` 6**(사용자 승인 N4) | `manager.rs` · `commands.rs` · protocol(`lib.rs` 상수 doc 포함) · 데몬 `connection_core.rs`·`command_delivery.rs`·`control/commands.rs`·`control/agent.rs`·`control/catalog.rs` | LLM·CLI 가 목록(빈)·취소를 부를 수 있다 |
+| **P5** | 프론트: `QueuedInputList`(머리줄 없음 · ✕ 는 `cancellable` 에만 · 취소 대기 항목은 어느 창에도 안 그린다 · 접힘 기본값 = 누르면 펼침 · 가장 오래된 3개 · 툴팁 전문) · RichSlot 배치·`showEmpty` 게이트·재부착 대조 · `agentClient` 두 동사 · 명령 등록 · `ko.ts` · ★`protocolClient` seq 연속(live 붙듦 · 버퍼→live flush — 시작점 = 마커의 `replay_from` · 넘침 → `startBuffering`) + 셸 replay 완료 마커에 `replay_from` 칸(SubscribeAck 값 · wire 무변) + 데몬 sink 자리채움 — 한 단계에 함께(§5-7 · 사용자 결정 N5 (a) — 자리채움 없이 붙듦만 서면 폐기 갈래의 구멍이 상한까지 뒤 프레임을 막는다)★ — ★입력창 복귀는 없다 · `historyPending` 게이트는 **여기서 안 바꾼다**(P2 — 위 단계 불변식)★ | `src/components/slot/*` · `src/api/*` · `src/commands/agentCommands.ts` · `src/i18n/ko.ts` · 데몬 `agent_conn.rs`(폐기 갈래 두 곳) · 셸 `src-tauri/src/daemon_client/*`(replay 완료 마커) | 화면이 준비됐다 — 생산자가 없어 **오늘과 같게 보인다**(`showEmpty` 에 더한 조건은 목록이 늘 비어 있어 결과를 안 바꾼다 · seq 연속은 구멍이 없으면 곧바로 흘리고, 오늘 드물게 버려지던 역전 프레임을 되살릴 뿐이다 · 자리채움은 오늘 조용히 버려지던 버그 경로에서만 오류 행 하나로 보인다) |
+| **P3** | claude: 정책 `SessionClassified` 신고 · `DeliveryAck` 탐지 + `AckUnavailable`(N1 (a) — `Unavailable` 은 오늘 경로) · 수명주기·`control_response` 번역(`CancelAnswered`·`CancelFailed` · `refused` → `Dropped{Rejected}`) · 세션 분류·취소(입력 자물쇠 안 · ★`Unknown` 은 쓰기 뒤 `Queued` · 취소 줄 쓰기 실패 → `CancelFailed`★) · `cancel_line` · transcript seed(`queued_command` → 말풍선) | `backend/claude/mod.rs` · `backend/mod.rs` · `session.rs` | claude 턴 중 입력이 목록에 서고 ✕ 가 선다 · drain 턴 초반 입력도 목록에 선다 · 우편이 사용자 목록이 빌 때까지 기다린다 · 거절된 한가 말풍선이 지워진다 |
+| **P2** | codex 뼈대 — **`Immediate` 정책**: 정책 `TransportOwned` 신고(세션이 `send_turn` 을 부르기 시작한다) · `HandOverPolicy`(두 변형의 자리 · 상수 = `Immediate`) · 구간 추적(현재 턴 id · 도구 항목 넓게 · 경계 신호 셋 · 라이터 깨우기 — 답에는 안 씀) + **M15 추적 시각** · 통로 두 단계 방출(`cancellable:false`) · `pending`(`Held`/`InFlight{gen, awaiting_reply}`/`Probing` · `cancel_asked` 칸) · 세대 가림 · `clientUserMessageId` · `Waiter::Steer`·`Waiter::Probe`(시한·닫힘 갈래 포함) · 곧바로 steer · 턴 끝 처분(끊기 · `failed` = 정산 뒤 오류 턴 뒤 대기, 빚 없음) · **턴 끝 정산**(응답 모으기 · 끝까지 걷는 탐침 한 번 · 턴 끝에서 잰 시한 하나 = 모름 · 후속 턴 빚 턴마다 하나 · 정산 동안 턴 안 열기) · 다섯 출구(`end_turn_if` 자리마다 처분) · 이른 종료를 푸는 자리(`resolve`)의 턴 끝 처분 · 턴 id 는 응답에서만 · Idle 규칙(사용자 먼저 · 남은 항목 한 턴에 따로 · 우편은 사용자 항목이 없을 때) · 턴 끝 뒤 받음 · 되살림 · 빚 풀기(T 뒤 열린 턴) · 죽음 표시 · 합성 말풍선 관측 없이 · 하한 판정 뒤 announce(미달 = 오늘 경로) · Direct 거절 = `Dropped{Rejected}` · 디코더 `clientId` · ★프론트 한 줄: `RichSlot.tsx` `historyPending` 에서 `!hasSent` 빼기 + 그 시험★ | `session.rs` · `backend/codex/{transport,protocol,decoder,mod}.rs` · `src/components/slot/RichSlot.tsx`(게이트 한 줄) | codex 턴 중 입력이 목록에 서고 곧바로 steer 로 넘어간다(✕ 없음 — 오늘도 없다) · 한가할 때 보낸 글이 곧바로 말풍선 · 이력 없는 이어받은 codex 에서 연결 중 친 글이 목록에 서고 로딩 판은 전달된 말풍선이 걷는다 · 오류로 끝난 턴 뒤 남은 항목이 다음 사용자 글과 함께 간다 |
+| **P7** | 측정 — **M16**(하네스 — Phase 0 M7 방식 · 코드 없음) · **M15**(P2 착지본의 추적 시각 — 격리 인스턴스의 실 codex) · 판정과 멈춤 조건(위) | 측정 보고서(`docs/research/`) | P8 의 가부 · 답 구간 칸의 값 |
+| **P8** | codex 붙듦 정책 — **`AtEarliestBoundary`**: 구간 표 판정(답 구간 칸 = M16) · `cancellable` 재방출(쥠 ↔ 넘김 · 되돌아와 다시 쥠) · `withdraw`(쥔 항목 = `Dropped{Withdrawn}` · 넘기는 찰나 = `CancelRequested`+`CancelAnswered{false}` 와 `cancel_asked` · 벤더가 안 받았다고 판명되면 거둔다) · 상수를 `AtEarliestBoundary` 로 · 명령 결과 `cancelled`(동기) | `backend/codex/{transport,mod}.rs` | codex 의 도구 구간(M16 녹이면 답 구간)·연결 중·정산 중·오류 턴 뒤 대기 중인 항목에 ✕ 가 선다 · 붙들어도 같은 경계에 든다(M7 · M15) |
 | **P6** | 새 ADR + 개정 도장 · CLAUDE.md · 참조 문서 · GUI 실측 §7-2 | docs | 확정 |
 
-- **PRD 답에 묶인 조각(각 P 의 끝):** Q1 → P5 누산기 알림 행 · Q2 → P2 `withdraw` 동사(+ P4 outcome `cancelled`) · Q3 → P5 props 기본값 · Q4 → P2·P3 도구 끝 사건 + P5 문구 · Q5 → 범위 밖(답이 (a)면 별도 작업) · Q6 → P2 게이트 동작 · Q7 → P5 모양 · Q8 → P2·P3 `failed` 처분 + 가산 어휘 · Q9 → P2 설정값 · N1 → P1 환원기(`AckUnavailable`)·코어 바꿔 적기 · P2 announce · P3 디코더·세션 분류 · ★N5 → (a) P5 `protocolClient` seq 연속 + 데몬 sink 자리채움 · (b) P1 `output_core.rs` fanout 을 락 안으로(그러면 P5 의 seq 연속·자리채움은 빠진다) · N6 → P6 문서(허용이면 PRD AC22 에 편차 셋을 적는다 · 불허면 §10-4 N6 (b) 가 P2·P3 을 다시 연다)★.
-- **나눌 자리(파일 겹침 기준):** P1 이 `session.rs` 의 입력 경로 뼈대(출처 · 정책 분기 · 자물쇠)를 먼저 들이므로 P2 와 P3 이 세션에서 겹치는 곳은 **각 정책 갈래의 본문**뿐이다 — 그래도 같은 파일이라 한 코더가 P2 → P3 순차로 가는 것을 기본으로 한다. P4 는 P1 뒤 독립(파일 안 겹침 — `manager.rs`·`commands.rs`·데몬; `manager.rs` 는 P1 의 출처 칸과 겹치므로 P1 뒤). P5 는 P1 의 계약만 기대므로 목 데이터로 병렬 개발, 착지는 P4 뒤·P2 앞. ★P2 는 `RichSlot.tsx` 한 줄로 P5 와 겹친다★ — 착지 순서가 이미 P5 → P2 라 순차이고, 그 한 줄은 P5 의 배치 변경이 끝난 파일 위에 얹는다.
-- **메인이 먼저 못 박을 접점:** `QueuedInputEvent`/`QueueReason`/`DropCause` 모양(`cancellable` · `AckUnavailable` · `CancelAnswered` 포함)과 wire JSON(`{"type":"QueuedInput","op":{…}}` 식) · `InputOrigin`·`MidTurnPolicy`·`DeliveryAck` 모양 · 트레잇 동사 서명 · 버스·WS 명령 이름·인자·outcome 어휘 · 「입력 영향」 표지 모양 · `LocalCommands::run`·공통 입구의 `caller` 인자와 임대 포트 서명 · codex 정산 시한 상수(`REQUEST_DEADLINE` 재사용) · sink 자리채움 문구(고정 문자열 — 챗 뷰에 보인다) · 버스 임대 거절 오류 코드 · 골든 파일 위치와 형식(머리의 묘비 상한 포함) · 요청 id 규칙 `cancel:<uuid>` · 머리줄 키 넷.
+- **사용자 결정이 착지하는 조각:** Q1(알림 없음 · 거절된 한가 말풍선 지우기) → P1 누산기 · P3·P2 `Dropped{Rejected}` 생산 · Q2(codex 연결 중 ✕ — 붙듦이 푼다) → P8 · Q3(펼침 · 가장 오래된 3개 · 툴팁) → P5 · Q4·N2(머리줄 없음) → P5 — 도구 끝 사건을 wire 에 더하지 않는다 · Q5(턴 끊기 조작) → 범위 밖(다음 기능) · Q6 → P2(codex — 오늘 게이트 그대로) · P3(claude 불러오기 중 — §5-4) · Q7(취소 대기는 어느 창에도 안 그림 · LLM 만 `cancelling` · Tab·툴팁) → P5 · Q8 → P2(codex 오류 턴 뒤 대기) · P3(claude — 번역 그대로) · Q9(남은 항목 한 턴에 따로) → P2 · N1 (a) → P1 환원기 · P2 announce · P3 · N4 → P4 · N5 (a) → P5 · N6(사용자 입력이 먼저) → P1(커널 사실·초인종) · P2(Idle 사용자 먼저).
+- **나눌 자리(파일 겹침 기준):** P1 이 `session.rs` 의 입력 경로 뼈대(출처 · 정책 분기 · 자물쇠)를 먼저 들이므로 P3·P2 가 세션에서 겹치는 곳은 **각 정책 갈래의 본문**뿐이다 — 그래도 같은 파일이라 한 코더가 P3 → P2 순차로 가는 것을 기본으로 한다. P8 은 P2 와 같은 codex 통로 파일이라 P7 뒤 같은 줄기로 잇는다(격리 워크트리는 충돌만 막는다). P4 는 P1 뒤 독립(파일 안 겹침 — `manager.rs`·`commands.rs`·데몬; `manager.rs` 는 P1 의 출처 칸과 겹치므로 P1 뒤). P5 는 P1 의 계약만 기대므로 목 데이터로 병렬 개발, 착지는 P4 뒤·P3 앞. ★P2 는 `RichSlot.tsx` 한 줄로 P5 와 겹친다★ — 착지 순서가 이미 P5 → P2 라 순차이고, 그 한 줄은 P5 의 배치 변경이 끝난 파일 위에 얹는다. P7 의 하네스 측정(M16)은 코드와 안 겹쳐 P3·P2 와 나란히 돌 수 있다.
+- **메인이 먼저 못 박을 접점:** `QueuedInputEvent`/`DropCause` 모양(`cancellable` · `AckUnavailable` · `CancelAnswered` 포함 · 대기 사유 칸 없음)과 wire JSON(`{"type":"QueuedInput","op":{…}}` 식) · `InputOrigin`·`MidTurnPolicy`·`DeliveryAck` 모양 · 트레잇 동사 서명(`send_turn` · `withdraw` → `Withdraw::{Withdrawn, TooLate, NotHeld}`) · `HandOverPolicy` 와 구간·경계 신호의 이름 · 버스·WS 명령 이름·인자·outcome 어휘(`requested`·`cancelled`) · 「입력 영향」 표지 모양 · `LocalCommands::run`·공통 입구의 `caller` 인자와 임대 포트 서명 · 커널 `TurnFact.inputs_pending` 과 대기 목록 표 서명 · codex 정산 시한 상수(`REQUEST_DEADLINE` 재사용) · sink 자리채움 문구(고정 문자열 — 챗 뷰에 보인다) · 버스 임대 거절 오류 코드 · 골든 파일 위치와 형식(머리의 묘비 상한 포함) · 요청 id 규칙 `cancel:<uuid>` · M15 추적 시각의 이름·자리.
 
 ---
 
@@ -771,3 +838,17 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 | `turn/started` 로 턴 id 를 잡기(5판 한 자리) | 그 알림엔 우리가 발급한 식별자가 없어 귀속할 수 없다 — 앞 턴의 늦은 알림이 새 턴 칸에 id 를 적으면 회복되지 않는다(`transport.rs:322` 「되살리지 말 것」) → `turn/start` 응답 하나 | §5-5 |
 | 늦게 온 `Queued` 를 누산기 목록 **상태**에서 빼기(「이미 그린 uuid」를 환원 규칙으로) | 환원기는 말풍선을 모른다 — 누산기 상태만 바꾸면 명부·골든 시퀀스와 갈린다 → 그리기에서만 거른다 | §5-7 |
 | `Unknown` 갈래도 `Queued` 를 쓰기 앞으로 되돌려 되울림 선착을 막기 | 쓰지 못한 글이 N1 (a) 에서 말풍선이 되는 경합이 돌아온다 → 선착은 받아들이고 말풍선 한 번만 그린다 | §5-4 · §5-7 |
+| codex 도 받자마자 넘긴다(두 백엔드 공통 즉시 넘기기 — 한때 이 문서의 목표 설계 · codex 항목엔 ✕ 없음) | 사용자 원칙 「받을 수 있는 가장 이른 때 전달」 — 붙들어도 늦지 않는 동안은 붙들고 ✕ 를 준다. codex 는 도구 끝까지 붙들어도 같은 경계에 들었다(M7 10/10). 사용자: 이것은 나중 일이 아니라 이 기능의 일부다. 곧바로 넘기는 정책(`Immediate`)은 착지 첫 걸음과, 측정이 빨간 구간의 값으로만 남는다 | 사용자 · M7 · §4-2 · §5-5 |
+| codex 를 턴 안 모든 구간에서 경계까지 붙든다(경계 직후 · 턴 시작 포함) | 경계 신호 직후나 턴을 막 연 순간에 온 글은 붙들면 다가오는 대기분 확인을 놓칠 수 있다 → 측정이 「늦지 않다」를 세운 구간(도구 구간 · M16 녹이면 답 구간)에서만 붙든다 · 모호하면 곧바로(일찍 넘기는 것은 무해하다) | §5-5 |
+| codex 도구 구간을 디코더의 도구 호출 어휘(6 종)로만 센다 | 그 목록 밖의 항목이 도는 동안엔 가장 좁은 창(`tokenUsage/updated` 뒤 2–9 ms)에 기대게 된다 → 출력·되울림이 아닌 항목은 전부 도구로 넓게 센다(일찍 넘길 뿐이다) | §5-5 · §3-2 |
+| codex 의 늦은 ✕(넘기는 찰나와 겹침)에 전용 사건이나 명령 결과를 더한다 | 어휘가 는다 · 환원 규칙의 「못 뺐다」 갈래가 이미 (가)·(나)·(다)를 가른다 → `CancelRequested` + `CancelAnswered{removed:false}` 를 잇고, 벤더가 안 받았다고 판명되면 `Dropped{Withdrawn}` | §5-2 · §5-5 |
+| 넘긴 뒤 ✕ 한 codex 항목이 벤더에 거절·부재로 돌아오면 다시 쥐어 보낸다 | 사용자가 거두라고 한 글이다 — 벤더가 안 받았으니 그때 거둔다(결말 (가)) | §5-5 |
+| 목록 위 머리줄(「준비되면 전달」 · 「도구 호출이 끝나면 전달」 · 도구가 안 도는 턴의 둘째 문구 · 머리줄 키 넷 · 그것을 위한 도구 끝 사건) | 「한 줄 낭비」 — 회색 항목만 둔다(Claude Code 식). 그것을 읽던 대기 사유 칸(`QueueReason`)도 함께 걷었다 | 사용자(Q4 · N2) · PRD §6 |
+| 한가할 때 보낸 글이 거절돼도 말풍선을 남긴다(그대로 두기 · 「전달 안 됨」 표식) | 「거절하면 우리쪽 채팅도 지워져야」 → `Dropped{Rejected}` 의 id 로 그린 말풍선을 알림 없이 지운다 | 사용자(Q1 ④) · PRD §6 |
+| 버림·실패 알림(대화 안 한 줄 · 목록 자리 · 토스트 · 버린 글 전문) | 지금은 없다 — 못 보낸 항목은 목록에서 빠질 뿐이다. 필요하면 나중에 더한다(미룸 — PRD §7) | 사용자(Q1) |
+| ✕ 를 누른 창에서만 곧바로 감추기(창별 낙관 감춤) · 다른 창에 「취소 중」 표시(흐리게 + ✕ 비활성) · ✕ 를 누른 창에서도 결말까지 남겨 두기 | ✕ 를 누르면 **모든 창**에서 곧바로 사라진다 — 취소 요청이 데몬 명부의 상태를 바꾸고 모든 창이 취소 대기를 그리지 않는다. LLM 목록만 결말까지 `cancelling` 을 본다. 창별 감춤 상태가 없으니 앱 재시작 뒤의 감춤 문제도 없다 | 사용자(Q7 · Q7 후속) · §5-1 · §5-2 |
+| Idle 에서 쥔 것 전체(사용자 · 우편)를 도착 순으로 턴을 연다 | 사용자 입력이 우편보다 먼저다 — 우편의 한가는 「도는 턴 없음 ∧ 사용자 목록 빔」이고, 우편은 사용자 입력 뒤로 늦어질 수 있다(사용자가 받아들였다) | 사용자(N6) · PRD §3-9 |
+| 오류로 끝난 턴 뒤 codex 대기분을 저절로 보낸다(정상 턴 끝처럼 정산 뒤 다음 턴 · 한도가 풀린 뒤 포함) | 사용자는 세션을 건드리지 않길 원한다 → 쥔 채 기다리다(✕ 가능) 다음 사용자 글과 한 턴에, 남은 것이 먼저 | 사용자(Q8) · PRD §6 |
+| claude 오류 턴을 우리 쪽에서 맞춘다(`DropCause::TurnFailed` · 남은 항목에 우리가 취소 요청 · 다음 턴으로 밀어 넣기 · 답 못 받은 말풍선에 표식) | 「억지로 구현하지 마」 — 벤더 수명주기를 그대로 번역하고, 목록은 항목별 알림으로 벤더와 맞게 남는다 | 사용자(Q8) · PRD §6 |
+| 턴 끝에 남은 여럿을 머리 하나만 새 턴에 들이고 나머지는 턴마다 하나씩 | 그 동안 새로 친 글도 FIFO 로 뒤에 서서 도는 턴에 곧바로 못 든다(PRD AC4) → 한 다음 턴에 함께, 각자 따로 | 사용자(Q9) · §5-5 |
+| 벤더 전제가 없는 옛 버전에 목록은 두되 ✕ 없이(claude 되울림을 받음으로 · codex 턴 끝에만 `turn/start`) | 「알아서 업데이트」 — 옛 버전은 오늘 동작 그대로 · 실측 없는 기계장치를 늘리지 않는다 | 사용자(N1) · PRD R6 |
