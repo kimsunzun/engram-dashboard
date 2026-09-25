@@ -13,10 +13,13 @@ const FRAME_HEADER_LEN = 1 + 16 + 4 + 8
 //   종결마다 같은 출력 Channel 로 합성해 흘리고, transport(decodeReplayMarker)만 해석한다. 데몬 binary
 //   frame(tag0/1)과 seq 공간이 다르므로 decodeOutputFrame 은 이 tag 를 여전히 skip(전방 호환).
 export const FRAME_TAG_REPLAY_MARKER = 255
-// 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1(bit0=truncated,bit1=failed)].
+// 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1] — 길이 30.
+//   flags: bit0=truncated · bit1=failed · bit2=continues_conversation(src-tauri replay_flight 와 일치).
 const MARKER_LEN = 1 + 16 + 4 + 8 + 1
 const MARKER_FLAG_TRUNCATED = 0x01
 const MARKER_FLAG_FAILED = 0x02
+// ADR-0226: 이 화신은 저장된 대화를 이어받으려고 떴다 — 이어받기의 성공 여부가 아니다. 실패 마커는 늘 0.
+const MARKER_FLAG_CONTINUES = 0x04
 
 /**
  * binary output frame 디코드. 헤더 미만 길이·미지원 tag(≥2) 시 null(무시).
@@ -54,7 +57,14 @@ export function decodeOutputFrame(
  */
 export function decodeReplayMarker(
   buf: ArrayBuffer,
-): { agentId: string; epoch: number; gen: bigint; truncated: boolean; failed: boolean } | null {
+): {
+  agentId: string
+  epoch: number
+  gen: bigint
+  truncated: boolean
+  failed: boolean
+  continuesConversation: boolean
+} | null {
   if (buf.byteLength < MARKER_LEN) return null
   const view = new DataView(buf)
   if (view.getUint8(0) !== FRAME_TAG_REPLAY_MARKER) return null
@@ -68,6 +78,7 @@ export function decodeReplayMarker(
     gen,
     truncated: (flags & MARKER_FLAG_TRUNCATED) !== 0,
     failed: (flags & MARKER_FLAG_FAILED) !== 0,
+    continuesConversation: (flags & MARKER_FLAG_CONTINUES) !== 0,
   }
 }
 

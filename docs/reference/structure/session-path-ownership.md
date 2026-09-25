@@ -1376,10 +1376,15 @@ Not reachable / gated:
 - **The replay→live boundary marker is a synthetic `tag=255` frame** on the same output channel,
   produced by `src-tauri` and never by the daemon codec (`src/api/wsFrame.ts:12-19`; decoder :55-72,
   payload `[tag255][agentId:16][epoch:4][gen:8 BE][flags:1]`, bit0 truncated / bit1 failed :16-19,
-  :64-71). Normalized to a `replayBoundary` control event by the Tauri carrier
+  :64-71; **added 2026-09-24 (ADR-0226 — after this snapshot, so no line here):** bit2 (`0x04`)
+  continues_conversation, success markers only — the shell builds failure markers with it false and
+  its encoder clears it when `failed`; frame length stays 30; decoded as `MARKER_FLAG_CONTINUES` in
+  `src/api/wsFrame.ts`, encoded in `src-tauri/src/daemon_client/replay_flight.rs`). Normalized to a
+  `replayBoundary` control event by the Tauri carrier
   (`src/api/tauriTransport.ts:326-337`, checked **before** `decodeOutputFrame` :325). The WS carrier
   has no marker frame and synthesizes the boundary from `SubscribeAck`→`ReplayComplete`
-  (`src/api/wsTransport.ts:286-290`).
+  (`src/api/wsTransport.ts:286-290`; since 2026-09-24 it also copies the Ack's
+  `continues_conversation` into that boundary — false when the field is absent).
 - Boundary evaluation happens at marker arrival, not at registration
   (`src/api/protocolClient.ts:328-369`): buffering-only (:333); held-marker path when own `gen` is
   unknown (:339-347); **gen fence** `if (m.gen < st.myGen) return` (:352); `failed` marker → keep

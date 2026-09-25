@@ -332,6 +332,7 @@ export class TauriTransport implements Transport {
           gen: marker.gen,
           truncated: marker.truncated,
           failed: marker.failed,
+          continuesConversation: marker.continuesConversation,
         })
         return
       }

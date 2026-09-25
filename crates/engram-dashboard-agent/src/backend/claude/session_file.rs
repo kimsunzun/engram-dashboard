@@ -296,6 +296,7 @@ mod tests {
 
         let mut source = source_in(&dir, 1000, sid1);
 
+        // ADR-0226: 첫 poll 이 기준값(민팅 id)을 `Changed` 로 내면 추적기가 0턴 id 를 곧바로 영속해 D1 이 샌다 — 약화 금지.
         assert_eq!(source.poll(), SessionIdPoll::Unchanged);
         assert_eq!(source.resolved_pid, Some(1000));
 

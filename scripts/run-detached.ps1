@@ -9,8 +9,9 @@
 #   순환 가드가 없었다) 분리 실행으로 막히지 않았다 — 분리 실행으로 돌린 테스트 중에도 죽었다(실측).
 #   원인·증거·버전 경계·적용된 해법의 정본 = `/qa` 바인딩(`.claude/skill-bindings/qa.md`) 「분리 실행」.
 #
-# ★`launch-detached.ps1` 과 다른 점★: 그쪽은 **exe 경로**만 받아 앱을 띄운다(작업 스케줄러 경로).
-#   이 스크립트는 **명령줄**을 받아 빌드·테스트를 돌린다. 용도가 갈려 있으니 합치지 말 것.
+# ★`launch-detached.ps1` 과 다른 점★: 그쪽은 **exe 경로**만 받아 앱을 띄우고 `PID=` 가 **앱**의 pid 다.
+#   이 스크립트는 **명령줄**을 받아 빌드·테스트를 돌리고 `PID=` 는 **래퍼 cmd** 의 pid 다(둘 다 WMI 경로).
+#   용도가 갈려 있으니 합치지 말 것.
 #
 # 사용: run-detached.ps1 -Command "cargo test -p foo" -WorkDir <repo루트> -LogFile <경로>
 # 반환: `PID=<n>` · `LOG=<경로>` · `BAT=<래퍼경로>`.
@@ -112,8 +113,13 @@ if ($target) {
   if ($targetExt -eq '.cmd' -or $targetExt -eq '.bat') { $callPrefix = 'call ' }
 }
 
+# ★콘솔 제목엔 태그와 고정 문구만 넣는다 — 명령줄·경로를 끼워 넣지 말 것★: title 줄도 cmd 가 파싱하므로
+#   `& | < > ^ %` 가 들어가면 배치가 깨진다. 제목을 다는 이유 = 최소화 콘솔의 작업 표시줄 단추가 무엇인지 알리고,
+#   그 창을 닫으면 붙어 있는 콘솔 프로세스가 CTRL_CLOSE 로 함께 끝나 실행이 중단된다는 것을 경고한다(콘솔 탐침 실측 2026-09-25).
+#   콘솔 자식이 제목을 덮어쓸 수 있다(`npx --version` 이 `npm` 으로 바꾼다 — 실측).
 $batBody = @"
 @echo off
+title engram run-detached $tag - closing this window aborts the run
 cd /d "$WorkDir"
 $callPrefix$Command
 echo __EXIT=%ERRORLEVEL%
@@ -123,7 +129,29 @@ Set-Content -LiteralPath $bat -Value $batBody -Encoding ASCII
 if (Test-Path -LiteralPath $LogFile) { Remove-Item -LiteralPath $LogFile -Force }
 
 $launch = 'cmd.exe /c ""' + $bat + '" > "' + $LogFile + '" 2>&1"'
-$res = ([WMIClass]"\\.\root\cimv2:Win32_Process").Create($launch)
+# ★래퍼 콘솔은 「활성화 없이 최소화」(`ShowWindow = 7` = SW_SHOWMINNOACTIVE)로 띄운다★ — 표시 지정 없이 만들면
+#   새 콘솔이 보통 창으로 떠 포커스를 뺏는다(기본 터미널이 Windows Terminal 로 위임되는 머신에선 그 새 창이
+#   앞으로 나온다). 7 이면 conhost 가 위임하지 않고 자기 창을 최소화로만 띄워 전경 창이 안 바뀐다(실측 2026-09-25).
+#   콘솔 자식(cargo·rustc·테스트 바이너리·node)은 이 콘솔을 함께 쓰므로 창을 따로 안 연다.
+#   ★0(SW_HIDE)으로 바꾸지 말 것★ — 작업 표시줄 단추를 남기는 것이 요구다(사용자 결정 2026-09-25).
+#   ★전경 창이 하나도 없는 상태(전경 = null)에선 7 이어도 이 콘솔이 전경을 가져간다★ — conhost 는 7 일 때
+#   `SetActiveWindow` 를 건너뛰지만(`microsoft/terminal` `src/interactivity/win32/window.cpp` `ActivateAndShow`),
+#   그 상태의 첫 표시는 창 관리자가 활성화하는 것으로 보인다(기제는 추정 — 전경을 가져가는 관측은 실측).
+#   보통의 전경 창이 있으면(래퍼 5개를 연달아 띄워도) 안 가져간다
+#   (전경 탐침 실측 2026-09-25 — 래퍼 콘솔 대상).
+#   검토했다 버린 대안(최소화를 유지 — 사용자 결정 2026-09-25): SW_HIDE 는 작업 표시줄 단추가 없어 탈락했고,
+#   숨김으로 띄운 뒤 다른 프로세스에서 `ShowWindow(7)` 을 거는 길은 컴파일된 도우미가 필요해 고르지 않았다.
+#   ★`CreateFlags` 에 CREATE_NO_WINDOW(0x08000000)를 넣지 말 것★ — WMI 가 ReturnValue 21 로 거부한다
+#   (실측 정본 = `crates/engram-dashboard-discovery/src/lib.rs` `wmi_spawn` 주석 · `real_wmi_spawn_flag_matrix`).
+$startup = ([WMIClass]"\\.\root\cimv2:Win32_ProcessStartup").CreateInstance()
+$startup.ShowWindow = 7
+# ★CREATE_BREAKAWAY_FROM_JOB(0x01000000)을 빼지 말 것★ — Microsoft 문서(`Win32_Process.Create` Remarks):
+#   "Processes created with the Win32_Process.Create method are limited by the job object unless the
+#   CREATE_BREAKAWAY_FROM_JOB flag is specified"(공급자 호스트 쿼터 = `__ProviderHostQuotaConfiguration`).
+#   이 머신에선 플래그 유무와 무관하게 새 프로세스가 어느 Job 에도 속하지 않았고 RV=0 이었다(실측 2026-09-25) —
+#   그 Job 이 걸리는 환경에 대한 방어다. 그 Job 이 이탈을 막으면 Create 가 실패해 `LAUNCH_FAILED` 로 드러난다(문서 근거, 미검증).
+$startup.CreateFlags = 0x01000000
+$res = ([WMIClass]"\\.\root\cimv2:Win32_Process").Create($launch, $null, $startup)
 
 if ($res.ReturnValue -ne 0) {
   Write-Output ("LAUNCH_FAILED (Win32_Process.Create returned " + $res.ReturnValue + ")")

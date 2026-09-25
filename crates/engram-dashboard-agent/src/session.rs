@@ -16,10 +16,11 @@ use std::time::Duration;
 
 use crate::backend::InputEncoder;
 use crate::output_core::OutputCore;
+use crate::session_id_latch::SessionIdLatch;
 use crate::transport::AgentTransport;
 use crate::types::{
-    AgentId, AgentStatus, BackendCaps, Capabilities, InputEvent, OutputChunk, OutputSink, PtyError,
-    SinkId, SubscribeOutcome, TerminationIntent, WriteOutcome,
+    AgentId, AgentStatus, BackendCaps, Capabilities, Incarnation, InputEvent, OutputChunk,
+    OutputSink, PtyError, SinkId, SubscribeReply, TerminationIntent, WriteOutcome,
 };
 
 pub struct AgentSession {
@@ -51,6 +52,11 @@ pub struct AgentSession {
     /// 위 대기를 실제로 재우는 함수. 운영은 블로킹 sleep 이고, 테스트는 **재우지 않고 호출만 기록**하는
     /// 것을 꽂아 "대기가 발행됐다" 를 시간 측정 없이(= 비플래키) 단언한다.
     sleeper: fn(Duration),
+    /// 이 화신은 저장된 대화를 이어받으려고 떴다 — 화신 불변. 구독 응답이 `epoch` 과 함께 싣는다.
+    /// ★화신 표식은 이 칸이 아니라 `epoch` 하나다★ — 여기에 표식을 함께 두면 표식이 둘이 된다.
+    continues_conversation: bool,
+    /// 이 화신의 세션 id 첫 제출 래치. `None` = 입력 두 동사의 제출 세기가 무동작이다.
+    session_id_latch: Option<Arc<SessionIdLatch>>,
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
 }
@@ -104,9 +110,28 @@ impl AgentSession {
             reads_messages,
             submit_pacing: crate::backend::SUBMIT_PACING,
             sleeper: blocking_sleep,
+            continues_conversation: false,
+            session_id_latch: None,
             core,
             transport,
         }
+    }
+
+    /// 화신 사실을 싣는다 — 기본값(부르지 않음) = 이어받기 아님.
+    // ADR-0226
+    pub(crate) fn with_incarnation(mut self, continues_conversation: bool) -> Self {
+        self.continues_conversation = continues_conversation;
+        self
+    }
+
+    /// 세션 id 첫 제출 래치를 싣는다 — 기본값(부르지 않음) = 래치 없음.
+    ///
+    /// ★운영 조립점에서 빠뜨리면 모든 이어받기가 조용히 사라진다★ — 제출이 한 번도 안 세어져 어느
+    ///   화신도 id 를 영속하지 못하고, 다음 활성화가 전부 새 대화가 된다(오류는 없다).
+    // ADR-0226
+    pub(crate) fn with_session_id_latch(mut self, latch: Arc<SessionIdLatch>) -> Self {
+        self.session_id_latch = Some(latch);
+        self
     }
 
     /// ★테스트 전용 seam★ — 제출 대기를 낮추거나(하네스가 0.5초씩 자지 않게) 대기 발행 자체를 관측한다.
@@ -193,6 +218,8 @@ impl AgentSession {
     ///   [`crate::transport::input_queue`] 모듈 헤더.
     // ADR-0088
     pub fn write_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
+        // ADR-0226: 턴을 여는 쓰기는 보내기 **전에** 센다 — 첫 턴이 상대에게 가기 전에 세션 id 가 영속된다.
+        self.count_turn_submission(bytes)?;
         // ★이 유저 턴의 메시지 uuid(replay dedup 키)★: 한 write_input 당 하나 생성해 (a) stdin user
         //   라인(encode)과 (b) 입력-시점 합성 에코(input_echo_event) **양쪽에 같은 값**으로 넘긴다.
         //   json 모드에서 claude 가 replay 로 이 uuid 를 그대로 되울린다(실측). session 은 불투명 Uuid
@@ -269,6 +296,10 @@ impl AgentSession {
             // ★이 대기가 제출의 일부다(빼면 제출되지 않는다 — 실측)★: 근거·값 출처·"0ms 로 된다" 는
             //   옛 관측이 왜 틀렸는지는 `backend::SUBMIT_PACING` doc.
             (self.sleeper)(self.submit_pacing);
+            // ADR-0226: ★제출 CR 바로 앞에서 센다 — 맨 앞으로 올리지 말 것★. 턴을 여는 것은 이 CR 이고,
+            //   이것은 `write_input_observed` 를 거치지 않고 나간다. 맨 앞에서 세면 본문 쓰기·착지 확인·
+            //   대기가 영속과 턴 사이에 끼어, 그 창의 kill 이나 실패가 **턴 없는 영속**을 남긴다.
+            self.count_turn_submission(submit)?;
             //
             // ★두 실패를 로그에서 가른다(본문도 못 감 vs 본문은 갔고 제출만 실패)★: 후자는 수신자
             //   입력창에 미제출 봉투가 남은 상태라, 상위의 무손실 재파킹이 다음 flush 에서 같은 봉투를
@@ -299,6 +330,37 @@ impl AgentSession {
             e
         })?;
         Ok(outcome)
+    }
+
+    /// 이 쓰기가 턴을 연다면([`InputEncoder::submits_turn`]) 세션 id 래치에 제출을 센다 — 호출자는 그 쓰기를
+    /// **보내기 전에** 부르고, `Err` 면 보내지 않는다. 래치가 없으면 무동작이다.
+    ///
+    /// ★사용자 종료 중이면 세지도 보내지도 않는다(`Err`)★: 세고 보내면 대화 없는 id 가 영속되고, 세지만
+    ///   않고 보내면 입력 큐가 닫히기 전에 받아들여진 턴이 죽어 가는 자식에게 넘어가 **영속되지 않은 id 의
+    ///   대화**가 생길 수 있다. 결말은 큐가 닫힌 뒤의 `send_input` 과 같은 `WriteFailed` 다 — 그 오류를
+    ///   종료 의도가 선 순간으로 앞당길 뿐이다.
+    /// ★확인은 원자 읽기 하나다★ — 락을 잡지 않는다. 래치가 이미 영속을 마친 뒤에도 확인한다.
+    // ADR-0226
+    fn count_turn_submission(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        let Some(latch) = &self.session_id_latch else {
+            return Ok(());
+        };
+        if !self.encoder.submits_turn(bytes) {
+            return Ok(());
+        }
+        if self.termination_intent() == TerminationIntent::UserKill {
+            tracing::info!(
+                agent = %self.id,
+                epoch = self.epoch,
+                bytes = bytes.len(),
+                "사용자 종료 중에 온 턴 제출이라 보내지 않는다 — 세션 id 영속도 하지 않는다"
+            );
+            return Err(PtyError::WriteFailed(
+                "사용자가 이 에이전트를 종료하는 중이라 턴을 보내지 않았다".into(),
+            ));
+        }
+        latch.note_submission();
+        Ok(())
     }
 
     /// 받아 둔 입력이 실제로 나갔는지 통로에 확인한다. ★확인 수단이 **없다고 말하는** 통로는 그대로
@@ -358,15 +420,34 @@ impl AgentSession {
     }
 
     /// `on_ready`: replay 전송 직전(subscribers lock 보유 중) 1회 호출 — core 위임(불변식 2/TOCTOU).
+    ///
+    /// `requested_epoch` 을 **이 세션의** 표식과 대조해 seq 이어받기 여부를 정한다. `on_ready` 가 받는 응답과
+    /// 돌려주는 응답은 같은 값이다 — 표식·이어받기 표식·replay 가 모두 이 화신 하나에서 나온다.
+    // ADR-0226
     pub fn subscribe_from(
         &self,
         sink: Arc<dyn OutputSink>,
         after_seq: Option<u64>,
-        epoch_matches: bool,
-        on_ready: impl FnOnce(&SubscribeOutcome),
-    ) -> SubscribeOutcome {
-        self.core
-            .subscribe_from(sink, after_seq, epoch_matches, on_ready)
+        requested_epoch: Option<u32>,
+        on_ready: impl FnOnce(&SubscribeReply),
+    ) -> SubscribeReply {
+        let incarnation = Incarnation {
+            epoch: self.epoch,
+            continues_conversation: self.continues_conversation,
+        };
+        let epoch_matches = requested_epoch == Some(self.epoch);
+        let outcome = self
+            .core
+            .subscribe_from(sink, after_seq, epoch_matches, |outcome| {
+                on_ready(&SubscribeReply {
+                    outcome: *outcome,
+                    incarnation,
+                })
+            });
+        SubscribeReply {
+            outcome,
+            incarnation,
+        }
     }
 
     pub fn unsubscribe(&self, sink_id: SinkId) {
@@ -440,26 +521,30 @@ mod tests {
         }
         fn shutdown(&self) {}
         fn capabilities(&self) -> TransportCaps {
-            TransportCaps {
-                input: InputCaps {
-                    raw: true,
-                    message: false,
-                    attachment: false,
-                },
-                output: OutputCaps {
-                    terminal_bytes: true,
-                    structured: false,
-                    markdown: false,
-                    tool_events: false,
-                    usage: false,
-                },
-                control: ControlCaps {
-                    resize: false,
-                    interrupt: false,
-                    cancel: false,
-                    graceful_shutdown: false,
-                },
-            }
+            harness_caps()
+        }
+    }
+
+    fn harness_caps() -> TransportCaps {
+        TransportCaps {
+            input: InputCaps {
+                raw: true,
+                message: false,
+                attachment: false,
+            },
+            output: OutputCaps {
+                terminal_bytes: true,
+                structured: false,
+                markdown: false,
+                tool_events: false,
+                usage: false,
+            },
+            control: ControlCaps {
+                resize: false,
+                interrupt: false,
+                cancel: false,
+                graceful_shutdown: false,
+            },
         }
     }
 
@@ -927,5 +1012,348 @@ mod tests {
             "json 모드 세션 → resume=true(--resume 지원, spike-verified)"
         );
         session.kill(Duration::from_secs(5));
+    }
+
+    // ── 세션 id 첫 제출 래치 — 입력 두 동사가 세는 자리(ADR-0226) ──
+    //
+    // ★재는 축은 순서다★: 통로의 쓰기와 래치 commit 포트 호출을 **한 사건 기록**에 세워, 「턴을 여는 쓰기보다
+    //   commit 이 먼저」를 바이트가 아니라 사건 순서로 본다.
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Ev {
+        Commit(String),
+        Send(Vec<u8>),
+    }
+
+    /// `fail_from`: 이 순번(0-based)부터의 쓰기를 거절한다. `flush_fails`: 착지 확인이 실패한다.
+    struct EventTransport {
+        events: Arc<Mutex<Vec<Ev>>>,
+        fail_from: Option<usize>,
+        flush_fails: bool,
+    }
+    impl AgentTransport for EventTransport {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            let mut events = self.events.lock().unwrap();
+            let sent = events.iter().filter(|e| matches!(e, Ev::Send(_))).count();
+            if self.fail_from.is_some_and(|n| sent >= n) {
+                return Err(PtyError::WriteFailed("harness: write refused".into()));
+            }
+            events.push(Ev::Send(bytes));
+            Ok(())
+        }
+        fn flush_input(&self, _timeout: Duration) -> Result<(), PtyError> {
+            if self.flush_fails {
+                Err(PtyError::WriteFailed("harness: never landed".into()))
+            } else {
+                Ok(())
+            }
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            harness_caps()
+        }
+    }
+
+    fn recording_port(events: &Arc<Mutex<Vec<Ev>>>) -> crate::backend::SessionIdSink {
+        let events = events.clone();
+        Arc::new(move |raw: &str| events.lock().unwrap().push(Ev::Commit(raw.to_owned())))
+    }
+
+    /// 래치를 실은 세션. 래치에는 id 가 **이미** 들어가 있다(claude 처럼 래치를 만드는 자리에서 offer) —
+    /// 그래서 첫 제출이 그 자리에서 commit 하고, 사건 기록에서 제출과 commit 의 순서가 보인다.
+    fn latched_session_with(
+        encoder: InputEncoder,
+        fail_from: Option<usize>,
+        flush_fails: bool,
+        events: &Arc<Mutex<Vec<Ev>>>,
+        port: crate::backend::SessionIdSink,
+    ) -> AgentSession {
+        let id = uuid::Uuid::new_v4();
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatusSink),
+            crate::output_core::TurnWiring::detached(),
+        ));
+        let shell_cmd = crate::profile::AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let latch = SessionIdLatch::new(id, 0, port);
+        latch.offer("sid-1");
+        AgentSession::new(
+            id,
+            PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            ShellBackend.capabilities(&shell_cmd),
+            encoder,
+            true,
+            core,
+            Box::new(EventTransport {
+                events: events.clone(),
+                fail_from,
+                flush_fails,
+            }),
+        )
+        .with_submit_pacing(Duration::ZERO, |_| {})
+        .with_session_id_latch(latch)
+    }
+
+    fn latched(encoder: InputEncoder) -> (AgentSession, Arc<Mutex<Vec<Ev>>>) {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let session = latched_session_with(encoder, None, false, &events, recording_port(&events));
+        (session, events)
+    }
+
+    fn commits(events: &Arc<Mutex<Vec<Ev>>>) -> usize {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e, Ev::Commit(_)))
+            .count()
+    }
+
+    #[test]
+    fn a_key_fragment_without_cr_is_not_counted() {
+        let (session, events) = latched(InputEncoder::Raw);
+        session.write_input(b"hel").expect("write");
+        assert_eq!(*events.lock().unwrap(), vec![Ev::Send(b"hel".to_vec())]);
+    }
+
+    #[test]
+    fn a_key_fragment_with_cr_is_counted_before_it_is_sent() {
+        let (session, events) = latched(InputEncoder::Raw);
+        session.write_input(b"hi\r").expect("write");
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![Ev::Commit("sid-1".into()), Ev::Send(b"hi\r".to_vec())],
+            "영속이 턴보다 먼저여야 한다"
+        );
+
+        session.write_input(b"again\r").expect("write");
+        assert_eq!(commits(&events), 1, "둘째 제출은 다시 commit 하지 않는다");
+    }
+
+    #[test]
+    fn a_json_turn_is_counted_before_it_is_sent() {
+        let (session, events) = latched(InputEncoder::ClaudeStreamJson);
+        session.write_input(b"hello").expect("write");
+        let got = events.lock().unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(
+            got[0],
+            Ev::Commit("sid-1".into()),
+            "영속이 턴보다 먼저: {got:?}"
+        );
+        assert!(matches!(got[1], Ev::Send(_)), "{got:?}");
+    }
+
+    /// ★`Raw` 우편은 본문 뒤·대기 뒤·제출 CR 바로 앞에서 센다★ — 맨 앞에서 세면 본문 쓰기·착지 확인·대기가
+    ///   영속과 턴 사이에 끼어, 그 창의 실패나 kill 이 턴 없는 영속을 남긴다.
+    #[test]
+    fn raw_mail_is_counted_after_the_body_and_the_pacing_right_before_the_submit_cr() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+        // 이 테스트 전용 기록판 — 대기가 commit 보다 먼저 발행됐는지를 commit 순간에 읽는다.
+        static SLEPT: AtomicBool = AtomicBool::new(false);
+        fn mark_slept(_d: Duration) {
+            SLEPT.store(true, AtomicOrdering::SeqCst);
+        }
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let port_events = events.clone();
+        let port: crate::backend::SessionIdSink = Arc::new(move |raw: &str| {
+            let slept = SLEPT.load(AtomicOrdering::SeqCst);
+            port_events
+                .lock()
+                .unwrap()
+                .push(Ev::Commit(format!("{raw} slept={slept}")));
+        });
+        let session = latched_session_with(InputEncoder::Raw, None, false, &events, port)
+            .with_submit_pacing(Duration::ZERO, mark_slept);
+
+        session.submit_input_observed(b"envelope").expect("submit");
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                Ev::Send(b"envelope".to_vec()),
+                Ev::Commit("sid-1 slept=true".into()),
+                Ev::Send(b"\r".to_vec()),
+            ]
+        );
+    }
+
+    /// JSON 인코더는 제출 CR 이 없다 — 본문이 곧 턴이라 본문 **앞**에서 센다.
+    #[test]
+    fn json_mail_is_counted_before_the_body() {
+        let (session, events) = latched(InputEncoder::ClaudeStreamJson);
+        session.submit_input_observed(b"hello").expect("submit");
+        let got = events.lock().unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!(got[0], Ev::Commit("sid-1".into()), "{got:?}");
+        assert!(matches!(got[1], Ev::Send(_)), "{got:?}");
+    }
+
+    #[test]
+    fn raw_mail_whose_body_write_fails_is_not_counted() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let session = latched_session_with(
+            InputEncoder::Raw,
+            Some(0),
+            false,
+            &events,
+            recording_port(&events),
+        );
+        assert!(session.submit_input_observed(b"envelope").is_err());
+        assert_eq!(commits(&events), 0, "본문도 못 간 배달이 영속을 남겼다");
+    }
+
+    #[test]
+    fn raw_mail_whose_body_never_lands_is_not_counted() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let session = latched_session_with(
+            InputEncoder::Raw,
+            None,
+            true,
+            &events,
+            recording_port(&events),
+        );
+        assert!(session.submit_input_observed(b"envelope").is_err());
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![Ev::Send(b"envelope".to_vec())],
+            "착지 확인이 실패하면 제출 CR 도 영속도 없다"
+        );
+    }
+
+    /// 래치 없는 기본 세션은 세기도 사용자 종료 확인도 무동작이다 — 운영이 래치를 싣기 전까지 동작 불변.
+    #[test]
+    fn a_session_without_a_latch_is_untouched_even_during_a_user_kill() {
+        let (session, captured) = session_with(InputEncoder::Raw);
+        session.set_intent(TerminationIntent::UserKill);
+
+        session
+            .write_input(b"hi\r")
+            .expect("래치가 없으면 오늘처럼 보낸다");
+        session
+            .submit_input_observed(b"envelope")
+            .expect("래치가 없으면 오늘처럼 배달한다");
+
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![b"hi\r".to_vec(), b"envelope".to_vec(), b"\r".to_vec()]
+        );
+    }
+
+    fn assert_user_kill_refusal(result: Result<WriteOutcome, PtyError>) {
+        match result {
+            Err(PtyError::WriteFailed(msg)) => assert!(
+                msg.contains("종료") && !msg.contains("덧쓴다"),
+                "사용자 종료를 명시하는 제 문구여야 한다(제출 write 실패 문구 재사용 금지): {msg}"
+            ),
+            other => panic!("사용자 종료 중의 턴 제출은 WriteFailed 여야 한다: {other:?}"),
+        }
+    }
+
+    /// ★사용자 종료 중이면 세지도 보내지도 않는다★ — 세고 보내면 대화 없는 id 가 영속되고, 세지 않고
+    ///   보내면 영속되지 않은 id 의 대화가 생길 수 있다.
+    #[test]
+    fn a_user_kill_refuses_turn_submissions_without_counting_them() {
+        // 터미널 키 입력: CR 이 든 조각은 통째로 안 나가고, CR 없는 조각은 그대로 나간다.
+        let (session, events) = latched(InputEncoder::Raw);
+        session.set_intent(TerminationIntent::UserKill);
+        assert_user_kill_refusal(session.write_input_observed(b"hi\r"));
+        session
+            .write_input(b"typing")
+            .expect("턴을 열지 않는 키 입력은 세는 자리가 아니다");
+        assert_eq!(*events.lock().unwrap(), vec![Ev::Send(b"typing".to_vec())]);
+
+        // JSON 턴: 본문째 안 나간다.
+        let (session, events) = latched(InputEncoder::ClaudeStreamJson);
+        session.set_intent(TerminationIntent::UserKill);
+        assert_user_kill_refusal(session.write_input_observed(b"hello"));
+        assert_user_kill_refusal(session.submit_input_observed(b"hello"));
+        assert!(
+            events.lock().unwrap().is_empty(),
+            "{:?}",
+            events.lock().unwrap()
+        );
+
+        // `Raw` 우편: 본문은 나갔을 수 있지만 턴을 여는 CR 은 안 나간다.
+        let (session, events) = latched(InputEncoder::Raw);
+        session.set_intent(TerminationIntent::UserKill);
+        assert_user_kill_refusal(session.submit_input_observed(b"envelope"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![Ev::Send(b"envelope".to_vec())]
+        );
+    }
+
+    /// 영속을 마친 뒤(빠른 길)에도 확인한다 — 둘째 턴도 사용자 종료 중이면 안 나간다.
+    #[test]
+    fn a_user_kill_is_checked_even_after_the_latch_settled() {
+        let (session, events) = latched(InputEncoder::Raw);
+        session.write_input(b"a\r").expect("첫 턴");
+        session.set_intent(TerminationIntent::UserKill);
+        assert_user_kill_refusal(session.write_input_observed(b"b\r"));
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![Ev::Commit("sid-1".into()), Ev::Send(b"a\r".to_vec())]
+        );
+    }
+
+    // ── 구독 응답의 화신 사실(ADR-0226) ──
+
+    #[test]
+    fn subscribe_from_matches_the_requested_epoch_against_its_own_incarnation() {
+        let (session, _captured) = session_with(InputEncoder::Raw);
+        let sink = || -> Arc<dyn OutputSink> {
+            Arc::new(EmitCapturingSink {
+                id: uuid::Uuid::new_v4(),
+                seen: Arc::new(Mutex::new(Vec::new())),
+            })
+        };
+        use crate::types::ReplayKind;
+
+        let same = session.subscribe_from(sink(), Some(0), Some(0), |_| {});
+        assert_eq!(same.outcome.kind, ReplayKind::Resumed);
+        let other = session.subscribe_from(sink(), Some(0), Some(1), |_| {});
+        assert_eq!(other.outcome.kind, ReplayKind::FromOldest);
+        let unknown = session.subscribe_from(sink(), Some(0), None, |_| {});
+        assert_eq!(unknown.outcome.kind, ReplayKind::FromOldest);
+    }
+
+    #[test]
+    fn subscribe_from_hands_the_same_incarnation_to_on_ready_and_the_caller() {
+        let sink = || -> Arc<dyn OutputSink> {
+            Arc::new(EmitCapturingSink {
+                id: uuid::Uuid::new_v4(),
+                seen: Arc::new(Mutex::new(Vec::new())),
+            })
+        };
+        for continues in [false, true] {
+            let (session, _captured) = session_with(InputEncoder::Raw);
+            let session = session.with_incarnation(continues);
+            let mut at_ready = None;
+            let reply =
+                session.subscribe_from(sink(), None, None, |r| at_ready = Some(r.incarnation));
+            let expected = Incarnation {
+                epoch: session.epoch,
+                continues_conversation: continues,
+            };
+            assert_eq!(reply.incarnation, expected);
+            assert_eq!(at_ready, Some(expected));
+        }
     }
 }

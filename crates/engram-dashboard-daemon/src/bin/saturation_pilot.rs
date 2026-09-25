@@ -54,11 +54,6 @@ const MAX_TURNS_PER_RUN: u32 = 120;
 const MAX_WALLCLOCK_PER_RUN: Duration = Duration::from_secs(45 * 60);
 const TURN_WAIT_CAP: Duration = Duration::from_secs(240);
 const SPAWN_APPEAR_TIMEOUT: Duration = Duration::from_secs(10);
-/// claude 는 **첫 턴을 처리한 뒤에야** 트랜스크립트를 쓰기 시작한다(스모크 실측) — 스폰 직후엔 대개
-/// 부재라 여기선 짧게만 보고, 실제 확보는 턴 루프의 lazy 재검색(RunState::refresh_real_context)이 맡는다.
-const TRANSCRIPT_APPEAR_TIMEOUT: Duration = Duration::from_secs(3);
-/// 모델 id 폴링 상한 — assistant 라인 flush race 흡수. 파일은 이미 있으니 짧게.
-const MODEL_RESOLVE_POLL: Duration = Duration::from_secs(4);
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -255,21 +250,10 @@ async fn run_one(
         }
     };
 
-    let session_id = manager
-        .agent_backend_session_id(agent.id)
-        .map(|s| s.to_string());
-    let transcript_path = match &session_id {
-        Some(sid) => locate_transcript_with_wait(sid, TRANSCRIPT_APPEAR_TIMEOUT),
-        None => None,
-    };
-    if let Some(tp) = &transcript_path {
-        eprintln!("[pilot] transcript tap: {}", tp.display());
-    } else {
-        eprintln!(
-            "[pilot] transcript tap 부재(sid={:?}) — 문자 추정으로 폴백(best-effort)",
-            session_id
-        );
-    }
+    // ★세션 id 와 transcript 탭은 첫 전송 뒤에 찾는다(ADR-0226)★: 세션 id 는 첫 제출 전에는 영속되지
+    //   않아 스폰 직후 명부를 읽으면 언제나 비어 있다. 찾는 자리 = `RunState::learn_session_id`, 탭은 그
+    //   뒤 `refresh_real_context` 가 찾는다. 그 전까지는 문자 추정이다.
+    eprintln!("[pilot] transcript tap 은 첫 전송 뒤에 찾는다 — 그 전까지 문자 추정(best-effort)");
 
     let obs = Arc::new(TurnObserver::new());
     let sink_id = match manager.subscribe(agent.id, obs.clone()) {
@@ -281,42 +265,26 @@ async fn run_one(
     };
 
     // ── 런 상태 ──
-    let mut state = RunState::new(transcript_path.clone(), session_id.clone());
+    let mut state = RunState::new(None, None);
 
     // ★finding 10 — 헤더-first 계약★: HeaderRecord 는 **파일의 첫 줄**이다. 이 write 를 첫 task 턴 뒤로
-    //   미루면 turn 이 헤더보다 앞선다.
-    {
-        let resolved_model = state
-            .transcript_path
-            .as_deref()
-            .and_then(|p| poll_resolved_model(p, MODEL_RESOLVE_POLL));
-        let (note, available, path_str) = match (&state.transcript_path, &resolved_model) {
-            (Some(p), Some(_)) => (None, true, Some(p.display().to_string())),
-            (Some(p), None) => (
-                Some("트랜스크립트는 찾았으나 아직 모델 라인 미기록(스폰 시점) — 런 끝 재파싱으로 대조 가능".to_string()),
-                true,
-                Some(p.display().to_string()),
-            ),
-            (None, _) => (
-                Some("트랜스크립트 부재(스폰 시점 — 첫 턴 후 나타날 수 있음) — 실 usage·모델 id 는 런 끝 재파싱으로 확정, 진행은 문자 추정 폴백".to_string()),
-                false,
-                None,
-            ),
-        };
-        writer.write(&Record::Header(HeaderRecord {
-            claude_version,
-            daemon_git_commit: git_commit,
-            model_pin: cfg.model.clone(),
-            resolved_model,
-            resolved_model_note: note,
-            transcript_available: available,
-            transcript_path: path_str,
-            timestamp_utc: utc_stamp_rfc3339(),
-            run_index: run_idx,
-            run_id: run_id.clone(),
-            config: config_json,
-        }));
-    }
+    //   미루면 turn 이 헤더보다 앞선다. 그래서 헤더 시점에는 transcript 탭이 언제나 없다(위 주석).
+    writer.write(&Record::Header(HeaderRecord {
+        claude_version,
+        daemon_git_commit: git_commit,
+        model_pin: cfg.model.clone(),
+        resolved_model: None,
+        resolved_model_note: Some(
+            "트랜스크립트 부재(스폰 시점 — 첫 전송 뒤에 찾는다) — 실 usage·모델 id 는 런 끝 재파싱으로 확정, 진행은 문자 추정 폴백"
+                .to_string(),
+        ),
+        transcript_available: false,
+        transcript_path: None,
+        timestamp_utc: utc_stamp_rfc3339(),
+        run_index: run_idx,
+        run_id: run_id.clone(),
+        config: config_json,
+    }));
 
     // ★finding 8 — 패닉 경로에서도 cleanup 보장★: 감싸지 않으면 mid-run 패닉이 아래 cleanup 호출을
     //   건너뛰어 claude 가 살아남고 temp dir 이 남는다. 정리 리소스(manager/mcp_handle/paths)는 이 스코프에
@@ -845,34 +813,6 @@ fn spawn_pilot_agent(
     None
 }
 
-// ADR-0090 ADR-0008
-fn locate_transcript_with_wait(session_id: &str, timeout: Duration) -> Option<PathBuf> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(path) = transcript::locate_transcript(session_id) {
-            return Some(path);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
-// ADR-0090
-fn poll_resolved_model(path: &std::path::Path, timeout: Duration) -> Option<String> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(model) = transcript::parse_transcript(path).and_then(|s| s.resolved_model) {
-            return Some(model);
-        }
-        if Instant::now() >= deadline {
-            return None;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
 // ═══════════════════════════════════════════════════════════════════════════════════
 // 출력 관측 sink
 // ═══════════════════════════════════════════════════════════════════════════════════
@@ -1112,6 +1052,15 @@ impl RunState {
         (self.cumulative_chars_sent / CHARS_PER_TOKEN_EST).max(self.max_context_tokens)
     }
 
+    /// 전송이 성공한 **뒤에** 부른다 — 세션 id 는 첫 제출이 영속하므로(ADR-0226) 그 전에는 명부에 없다.
+    fn learn_session_id(&mut self, manager: &AgentManager, agent_id: AgentId) {
+        if self.session_id.is_none() {
+            self.session_id = manager
+                .agent_backend_session_id(agent_id)
+                .map(|s| s.to_string());
+        }
+    }
+
     fn refresh_real_context(&mut self) -> Option<u64> {
         if self.transcript_path.is_none() {
             if let Some(sid) = &self.session_id {
@@ -1173,6 +1122,7 @@ fn drive_turn(
     if manager.write_stdin(agent_id, prompt.as_bytes()).is_err() {
         return TurnResult::Terminal;
     }
+    state.learn_session_id(manager, agent_id);
 
     let ended = obs.wait_turn_end(baseline, TURN_WAIT_CAP);
     let wallclock_ms = t0.elapsed().as_millis() as u64;
@@ -1552,6 +1502,7 @@ fn send_and_collect(
             wallclock_ms: elapsed_ms,
         };
     }
+    state.learn_session_id(manager, agent_id);
 
     let ended = obs.wait_turn_end(baseline, TURN_WAIT_CAP);
     let waited_ms = t0.elapsed().as_millis() as u64;

@@ -23,6 +23,7 @@ import type {
   ConnectionState,
   OutputChunk,
   OutputSubscription,
+  ReplayLiveInfo,
   ViewOutputState,
   ViewPhase,
   ViewResetFn,
@@ -72,13 +73,14 @@ interface HeldMarker {
   gen: bigint
   truncated: boolean
   failed: boolean
+  continuesConversation: boolean
 }
 
 // ── 내부 구독 상태(뷰 단위, ADR-0046 F1) ──────────────────────────────────────────────
 interface SubState {
   agentId: string
   onChunk: (chunk: OutputChunk) => void
-  onState?: (state: ViewPhase) => void
+  onState?: (state: ViewPhase, info?: ReplayLiveInfo) => void
   onReset?: ViewResetFn
   phase: ViewPhase
   buffer: BufferedFrame[]
@@ -315,6 +317,7 @@ export class ProtocolClient implements AgentClient {
     gen: bigint
     truncated: boolean
     failed: boolean
+    continuesConversation: boolean
   }): void {
     for (const st of this.viewsForAgent(m.agentId)) {
       this.evalMarker(st, m)
@@ -325,10 +328,7 @@ export class ProtocolClient implements AgentClient {
    * 한 뷰에 대한 마커 판정(§2 상태전이표 — 마커 행 전부). ★평가는 마커 도착 시점★ — token/gen/epoch 를
    * 이 순간의 SubState 로 본다(리뷰 finding: 등록 시점 아님).
    */
-  private evalMarker(
-    st: SubState,
-    m: { epoch: number; gen: bigint; truncated: boolean; failed: boolean },
-  ): void {
+  private evalMarker(st: SubState, m: HeldMarker): void {
     // live·error 뷰: 마커(어떤 gen이든) 무시 — fan-out 으로 도달하는 남의 replay 경계. live 는 dedup 만으로 충분(§2).
     if (st.phase !== 'buffering') return
     // ★myGen 미확정(NEW-3)★: 마커를 버리지 않고 최고 gen 1개 보관 → myGen 확정 시 재평가(resolveHeldMarker).
@@ -341,7 +341,13 @@ export class ProtocolClient implements AgentClient {
       const replace =
         held === undefined || m.gen > held.gen || (m.gen === held.gen && held.failed && !m.failed)
       if (replace) {
-        st.heldMarker = { epoch: m.epoch, gen: m.gen, truncated: m.truncated, failed: m.failed }
+        st.heldMarker = {
+          epoch: m.epoch,
+          gen: m.gen,
+          truncated: m.truncated,
+          failed: m.failed,
+          continuesConversation: m.continuesConversation,
+        }
       }
       return
     }
@@ -365,10 +371,15 @@ export class ProtocolClient implements AgentClient {
     // 성공 마커는 epoch 를 채택하므로(flushToLive) 여기서 걸러야 한다 — 구세대/구 epoch replay 의 경계를
     //   자기 것으로 오인하면 불완전한 버퍼가 flush 된다.
     if (st.epoch !== undefined && m.epoch !== st.epoch) return
-    this.flushToLive(st, m.epoch, m.truncated)
+    this.flushToLive(st, m.epoch, m.truncated, m.continuesConversation)
   }
 
-  private flushToLive(st: SubState, epoch: number, truncated: boolean): void {
+  private flushToLive(
+    st: SubState,
+    epoch: number,
+    truncated: boolean,
+    continuesConversation: boolean,
+  ): void {
     // ★epoch 채택★: 성공 마커의 epoch 로 확정(src-tauri decide_epoch 1차 필터를 통과한 값 — ADR-0046 은
     //   ADR-0007 "epoch 권위=SubscribeAck 단독"을 amends: src-tauri 필터 + 프론트는 필터된 frame/마커 채택).
     st.epoch = epoch
@@ -395,7 +406,9 @@ export class ProtocolClient implements AgentClient {
     st.phase = 'live'
     st.attempts = 0
     this.clearTimers(st)
-    st.onState?.('live')
+    // ADR-0226: 이 화신이 이어받기 화신인가를 성공 마커가 싣고 온 그대로 넘긴다 — 뷰 상태에 담아 두지
+    //   않는다(마커 한 장이 곧 그 replay 의 권위다).
+    st.onState?.('live', { continuesConversation })
   }
 
   /**
@@ -496,7 +509,7 @@ export class ProtocolClient implements AgentClient {
       return
     }
     if (st.epoch !== undefined && held.epoch !== st.epoch) return
-    this.flushToLive(st, held.epoch, held.truncated)
+    this.flushToLive(st, held.epoch, held.truncated, held.continuesConversation)
   }
 
   private armWatchdog(st: SubState): void {
@@ -745,7 +758,7 @@ export class ProtocolClient implements AgentClient {
     viewId: string,
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
-    onState?: (state: ViewPhase) => void,
+    onState?: (state: ViewPhase, info?: ReplayLiveInfo) => void,
     onReset?: ViewResetFn,
   ): Promise<OutputSubscription> {
     const token = ++this.subSeq

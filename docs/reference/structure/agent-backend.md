@@ -164,7 +164,7 @@ codex 는 세션 id 를 스스로 발급하고 터미널 모드에는 그것을 
 
 | 선언 | `claude` | `codex` | `gemini` (미배선) | 코어가 그 값으로 잠그는 것 |
 |---|---|---|---|---|
-| `assigns_session_id` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | **우리가** sid 를 뽑아 spec 에 넘기나. `true` 면 manager 가 발급해 **프로필에 영속**하고 watcher 의 기준값으로도 쓴다. `false` 를 「세션이 없다」로 읽지 말 것 — 그 프로그램이 자기 id 를 스스로 발급하는 쪽일 수 있다 |
+| `assigns_session_id` | `true`(두 모드) | `false`(두 모드) | `true`(best-guess stub) | **우리가** sid 를 뽑아 spec 에 넘기나. `true` 면 manager 가 발급해 **첫 제출 때 영속**하고(그 전엔 메모리에만 — 첫 제출 래치, ADR-0226) watcher 의 기준값으로도 쓴다. `false` 를 「세션이 없다」로 읽지 말 것 — 그 프로그램이 자기 id 를 스스로 발급하는 쪽일 수 있다 |
 | `can_resume_stored_session` | `true`(두 모드) | `true`(두 모드 — 이어받는 **수단**만 갈린다) | `true`(best-guess stub) | 저장된 backend sid 로 **이어받을 수 있나**. 발급 주체는 묻지 않는다. 부팅 복원과 활성화 입구 둘이 `backend::can_resume_profile`(이 축 ∧ sid 존재) 하나로 함께 판정한다 — `false` 면 sid 가 남아 있어도 Fresh. ★예외 하나★: WS `SpawnProfile{resume:true}` 는 그 판정을 **우회해** Resume 으로 간다(`resume \|\| can_resume_profile(…)`) |
 | `reads_messages` | `true`(trait 기본) | `true` | `true`(trait 기본 — 선언 안 함) | `false` 면 우편 **수신자 명단에서 제외**. 바쁨 게이트가 fail-open 이라 턴 신호 없는 백엔드는 늘 한가한 것으로 읽혀 생각 도중에 편지가 꽂힌다 — 그 대가는 ADR-0116 결정 7 이 명시로 수용했다 |
 | `supports_control_channel` | `true` | `true` | `false` | `true` 면 manager 가 spawn 전에 provision 을 부른다(토큰 + CLI 입구 발급). `false` 면 provision 을 **아예 건드리지 않는다**. ★mcp-config **파일**까지 이 칸이 부르는 것으로 읽지 말 것★ — 그 write 는 아래 `writes_mcp_config_file` 이 따로 가른다 |

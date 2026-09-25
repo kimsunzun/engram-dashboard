@@ -4759,6 +4759,10 @@ mod tests {
     /// 나간다」)은 [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]
     /// 이 실제로 돌려서 잰다 — 둘이 합쳐 「기록 → 게이트 → 전송」 순서를 덮는다.
     /// 선례·같은 사유 = [`tests::the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`].
+    /// ★이 항목이 핀하는 것은 「게이트 전에 포트에 **건넸다**」까지다(ADR-0226)★ — 포트 뒤는 첫 제출
+    ///   래치라, 영속은 제출에 매인다. 「첫 턴 전에 영속」은 래치 단위 시험(진행 중 commit 뒤에 줄 서기) ·
+    ///   세션의 제출 세기 순서 시험 · 조립점의 배선 구조 시험(`manager` 의
+    ///   `the_first_submission_latch_is_wired_through_the_spawn_path`)이 함께 진다.
     #[test]
     fn the_session_id_is_recorded_before_the_gate_opens() {
         let body = writer_loop_code();

@@ -27,7 +27,12 @@ type WireEvent = Record<string, unknown>
 
 // 한 에이전트의 직결 single-flight 상태(필드 의미는 아래 `wsReplay` 선언 위 주석이 정본).
 interface WsReplayEntry {
-  inflight?: { gen: bigint; truncated: boolean; epoch: number | undefined }
+  inflight?: {
+    gen: bigint
+    truncated: boolean
+    epoch: number | undefined
+    continuesConversation: boolean
+  }
   pending?: {
     gen: bigint
     waiters: Array<{ resolve: (gen: bigint) => void; reject: (e: Error) => void }>
@@ -82,7 +87,8 @@ export class WsTransport implements Transport {
   //   `settleReplay` 로 모인다.
   //
   //   상태(agentId →):
-  //    - inflight: 현재 미종결(sent, 경계 대기) 요청 {gen, truncated(Ack), epoch(Ack)}. 없으면 undefined.
+  //    - inflight: 현재 미종결(sent, 경계 대기) 요청 {gen, truncated(Ack), epoch(Ack),
+  //      continuesConversation(Ack)}. 없으면 undefined.
   //    - pending: inflight 중 병합된 다음 요청 {gen, waiters[]}. 경계 종결 시 승격돼 Subscribe 송신.
   //      waiter 는 resolve/reject 쌍 — 소켓이 ReplayComplete 전에 닫히면(handleClose) reject 로 깨운다(FIX-B).
   private wsReplay = new Map<string, WsReplayEntry>()
@@ -407,7 +413,7 @@ export class WsTransport implements Transport {
       if (!entry.pending) this.wsReplay.delete(agentId)
       return Promise.reject(e instanceof Error ? e : new Error(String(e)))
     }
-    entry.inflight = { gen, truncated: false, epoch: undefined }
+    entry.inflight = { gen, truncated: false, epoch: undefined, continuesConversation: false }
     return Promise.resolve(gen)
   }
 
@@ -416,11 +422,18 @@ export class WsTransport implements Transport {
   // 병합된 다음 요청(pending)이 있으면 승격해 Subscribe 를 정확히 1회 송신한다(boundary 1개 ↔ Subscribe 1개).
   private observeReplayWire(msg: WireEvent): void {
     if ('SubscribeAck' in msg) {
-      const a = msg.SubscribeAck as { agent_id: string; current_epoch: number; truncated: boolean }
+      // ADR-0226: continues_conversation 은 옛 데몬이 안 싣는다 — 없으면 false(오늘의 동작).
+      const a = msg.SubscribeAck as {
+        agent_id: string
+        current_epoch: number
+        truncated: boolean
+        continues_conversation?: boolean
+      }
       const entry = this.wsReplay.get(a.agent_id)
       if (entry?.inflight) {
         entry.inflight.epoch = a.current_epoch
         entry.inflight.truncated = a.truncated
+        entry.inflight.continuesConversation = a.continues_conversation === true
       }
       return
     }
@@ -442,6 +455,7 @@ export class WsTransport implements Transport {
         gen: entry.inflight.gen,
         truncated: entry.inflight.truncated,
         failed: true,
+        continuesConversation: false,
       })
       return
     }
@@ -457,6 +471,7 @@ export class WsTransport implements Transport {
         gen: done.gen,
         truncated: done.truncated,
         failed: false,
+        continuesConversation: done.continuesConversation,
       })
     }
   }
@@ -467,7 +482,13 @@ export class WsTransport implements Transport {
   private settleReplay(
     agentId: string,
     entry: WsReplayEntry,
-    boundary: { epoch: number; gen: bigint; truncated: boolean; failed: boolean },
+    boundary: {
+      epoch: number
+      gen: bigint
+      truncated: boolean
+      failed: boolean
+      continuesConversation: boolean
+    },
   ): void {
     entry.inflight = undefined
     this.messageCb?.({ kind: 'replayBoundary', agentId, ...boundary })
@@ -476,7 +497,12 @@ export class WsTransport implements Transport {
       entry.pending = undefined
       try {
         this.sendSubscribeFromOldest(agentId)
-        entry.inflight = { gen: pending.gen, truncated: false, epoch: undefined }
+        entry.inflight = {
+          gen: pending.gen,
+          truncated: false,
+          epoch: undefined,
+          continuesConversation: false,
+        }
       } catch {
         // 송신 실패(끊김) — in-flight 못 세운다. 대기자는 gen 은 받되(계약상 gen 반환) 마커는 재연결
         //   전이가 구동하는 재요청이 낸다. entry 는 다음 요청 때 재사용.

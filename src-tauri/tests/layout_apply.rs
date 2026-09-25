@@ -8,9 +8,7 @@
 //! 실행: `cargo test -p engram-dashboard --test layout_apply` — ★`-- --test-threads=4` 를 붙이지 않는다★
 //! (이 스위트는 자식 프로세스를 하나도 안 띄운다. 그 플래그의 근거·판정 규칙 정본 = CLAUDE.md 「빌드·검증 명령」)
 //!
-//! ★이 파일은 워크스페이스 회귀에 안 실린다★ — 그 명령이 `--exclude engram-dashboard` 로 이 패키지를
-//! 통째로 뺀다. 그래서 CI가 **이 타깃만 따로 부르는 전용 스텝**을 갖는다(`.github/workflows/ci.yml`) —
-//! 그 스텝을 지우면 셸 조각 커버리지가 도로 0이 된다.
+//! CI 는 이 타깃만 따로 부르는 전용 스텝도 갖는다(`.github/workflows/ci.yml`).
 //!
 //! 창 label 발급은 **실 `PopupCounter`**(프로브 껍데기만 덧씌운다), 구독 재동기는 **실 `OutputRouter`** 를
 //! 쓴다 — 가짜로 흉내내면 label 단조성·라우팅 계약을 검증하는 게 아니라 가짜를 검증한다. 나머지 세

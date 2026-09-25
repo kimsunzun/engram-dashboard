@@ -56,6 +56,18 @@ export interface OutputSubscription {
 export type ViewPhase = 'detached' | 'buffering' | 'live' | 'error'
 
 /**
+ * `'live'` 통지에만 딸려 오는 부가 사실(ADR-0226). 다른 국면엔 오지 않고, `'live'` 에서도 없으면
+ * `continuesConversation: false` 로 읽는다.
+ */
+export interface ReplayLiveInfo {
+  /**
+   * 이 화신은 저장된 대화를 이어받으려고 떴다 — 이어받기가 **성공했다는 뜻이 아니다**. 참이어도 이력이
+   * 0건일 수 있다(이어받기가 실패했거나 이력이 늦게 온다). 옛 데몬·셸은 이 사실을 안 실어 늘 false 다.
+   */
+  continuesConversation: boolean
+}
+
+/**
  * 뷰 비우기 신호 — **다른 화신의 이력이 지금부터 배달된다**.
  *
  * 받는 쪽 의무: 그려 둔 것을 지우고 **자기 seq 가드도 함께** 되돌린다. 하나만 하면 겹쳐 그리거나(가드만
@@ -138,15 +150,15 @@ export interface AgentClient {
   // ── 출력 구독 ──────────────────────────────────────────────────────────────
   /**
    * 뷰(slot) 단위 출력 구독(ADR-0046). viewId = 슬롯 id — 같은 agentId 를 N 뷰가 봐도 각자 독립 진도
-   * (버그 B 구조 해소). onChunk 로 디코드된 바이트 전달. onState(옵션)는 국면 통지([`ViewPhase`]),
-   * onReset(옵션)은 비우기 신호([`ViewResetFn`]) — 값별 소비자 의무는 각 타입에 있다. 반환 핸들의
-   * unsubscribe 로 해제.
+   * (버그 B 구조 해소). onChunk 로 디코드된 바이트 전달. onState(옵션)는 국면 통지([`ViewPhase`]) —
+   * `'live'` 에만 둘째 인자 [`ReplayLiveInfo`] 가 온다. onReset(옵션)은 비우기 신호([`ViewResetFn`]) —
+   * 값별 소비자 의무는 각 타입에 있다. 반환 핸들의 unsubscribe 로 해제.
    */
   subscribeOutput(
     viewId: string,
     agentId: string,
     onChunk: (chunk: OutputChunk) => void,
-    onState?: (state: ViewPhase) => void,
+    onState?: (state: ViewPhase, info?: ReplayLiveInfo) => void,
     onReset?: ViewResetFn,
   ): Promise<OutputSubscription>
 

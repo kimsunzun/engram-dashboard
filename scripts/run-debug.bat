@@ -5,8 +5,8 @@ REM
 REM ★The app is launched detached (scripts\launch-detached.ps1) - do NOT go back to `npm run tauri dev`
 REM   (do not remove)★: launched from a terminal, `tauri dev` makes the app a DESCENDANT of that
 REM   terminal and the app's output travels back up the pipe chain. That combination repeatedly
-REM   crashed the terminal (measured 2026-08-16), taking the app down with it. The scheduler path
-REM   fixes BOTH halves - the app is created by a service so it is outside our process tree, AND its
+REM   crashed the terminal (measured 2026-08-16), taking the app down with it. The WMI path
+REM   fixes BOTH halves - WmiPrvSE.exe creates the app's wrapper cmd, so the app is outside our process tree, AND its
 REM   output goes to a file only. `start` / background jobs satisfy NEITHER, so they are not a
 REM   substitute.
 REM

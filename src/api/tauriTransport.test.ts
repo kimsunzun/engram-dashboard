@@ -149,6 +149,7 @@ function buildMarker(opts: {
   gen: bigint
   truncated?: boolean
   failed?: boolean
+  continuesConversation?: boolean
 }): ArrayBuffer {
   const buf = new ArrayBuffer(MARKER_LEN)
   const view = new DataView(buf)
@@ -160,6 +161,7 @@ function buildMarker(opts: {
   let flags = 0
   if (opts.truncated) flags |= 0x01
   if (opts.failed) flags |= 0x02
+  if (opts.continuesConversation) flags |= 0x04
   view.setUint8(29, flags)
   return buf
 }
@@ -519,9 +521,26 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
       gen: 42n,
       truncated: true,
       failed: false,
+      continuesConversation: false,
     })
     // 마커는 output 으로 올라오지 않는다(공개 표면 미노출 — Designer 요구).
     expect(got.find((m) => m.kind === 'output')).toBeUndefined()
+  })
+
+  // ADR-0226: 이어받기 화신 표식(bit2)이 정규화에서 떨어지면 슬롯은 늘 첫 화면으로 떨어진다(조용한 실패).
+  it('이어받기 화신 표식(bit2)이 경계에 실린다', async () => {
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.start()
+    h.state.capturedChannel!.onmessage!(
+      buildMarker({ agentId: AGENT, epoch: 7, gen: 43n, continuesConversation: true }),
+    )
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({
+      gen: 43n,
+      failed: false,
+      continuesConversation: true,
+    })
   })
 
   it('failed 플래그 전파', async () => {

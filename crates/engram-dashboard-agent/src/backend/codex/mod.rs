@@ -1427,20 +1427,16 @@ mod tests {
     }
 
     /// ★그 퇴행의 **신고**는 이 파일이 하지 않는다 — 조립점이 한다★:
-    /// [`crate::manager::AgentManager`] 의 `resume_no_fallback` 이 `opens_a_new_conversation` 을 세 항의
-    /// 곱으로 판정해 경고를 남기고 결말을 `Resumed` 가 아니라 `Started` 로 낸다. 그중 **둘이 이 파일의
-    /// 선언**이라 여기서 못 박는다.
-    /// ★실행 단언으로는 이 회귀가 안 잡힌다★ — 어느 쪽이 뒤집혀도 argv 는 위 항목대로 새 대화로 멀쩡히
-    ///   떨어지고, 거짓이 되는 것은 **보고뿐**이다(새 대화가 「이어받음」으로 나간다).
+    /// [`crate::manager::AgentManager`] 의 `resume_no_fallback` 이 `opens_a_new_conversation` 을 두 항(이어받기
+    /// 축 ∧ 명부에 손잡이 없음)의 곱으로 판정해 새 대화 경로로 맡기고 결말을 `Resumed` 가 아니라 `Started`
+    /// 로 낸다(ADR-0226). 그중 **이어받기 축이 이 파일의 선언**이라 여기서 못 박는다.
+    /// ★실행 단언으로는 이 회귀가 안 잡힌다★ — 그 축이 뒤집히면 손잡이 없는 요청이 이어받기 경로로 떠도
+    ///   argv 는 위 항목대로 새 대화로 멀쩡히 떨어지고, 거짓이 되는 것은 **보고뿐**이다(새 대화가
+    ///   「이어받음」으로 나간다).
     // ADR-0208
     #[test]
     fn a_handleless_resume_still_trips_the_new_conversation_notice() {
         let terminal = codex(vec![]);
-        assert!(
-            !CodexBackend.assigns_session_id(&terminal),
-            "발급 축이 켜지면 조립점이 `ensure_session_id` 로 손잡이를 만들어 줘, 「손잡이가 없다」는 \
-             갈래 자체가 사라진다"
-        );
         assert!(
             CodexBackend.can_resume_stored_session(&terminal),
             "이어받기 축이 꺼지면 그 곱이 언제나 거짓이라, 손잡이 없이 연 새 대화가 조용히 \
@@ -2711,6 +2707,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
     ///   3. ★세션이 **종료 상태에 닿는다**★. 2 만 재던 옛 모양은 **막힌 세션과 구별이 안 됐다** —
     ///      거절은 되는데 자식·리더·라이터가 그대로 남고 pump 가 영영 안 끝나 수거도 안 되는 상태가
     ///      2 를 그대로 통과한다. 그 갈래를 가르는 것은 종료 전이 하나뿐이다.
+    /// ★「기록」은 포트에 **건넸다**까지다(ADR-0226)★ — 운영의 포트 뒤는 첫 제출 래치라 영속은 제출에
+    ///   매인다. 「첫 턴 전에 영속」을 지는 시험은 따로 있다(`transport` 의
+    ///   `the_session_id_is_recorded_before_the_gate_opens` doc).
     #[cfg(windows)]
     #[test]
     fn a_recording_failure_ends_the_session() {

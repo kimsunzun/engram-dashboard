@@ -133,7 +133,15 @@ class FakeTransport implements Transport {
   }
   marker(epoch: number, gen: bigint, failed = false): void {
     act(() =>
-      this.msgCb?.({ kind: 'replayBoundary', agentId: AGENT, epoch, gen, truncated: false, failed }),
+      this.msgCb?.({
+        kind: 'replayBoundary',
+        agentId: AGENT,
+        epoch,
+        gen,
+        truncated: false,
+        failed,
+        continuesConversation: false,
+      }),
     )
   }
   get lastGen(): bigint {

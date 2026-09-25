@@ -394,6 +394,15 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
   }
 }
 
+/**
+ * 이 항목이 화면에 행을 그리나 — `rowKindOf` 의 skip 판정 그대로다(ADR-0051 null 반환 규칙과 한 몸).
+ * 턴 구분선(`separator`)도 참이다 — 빈 스페이서지만 DOM 행이다. ADR-0226 의 "이력이 도착했나" 판정은
+ * 이 위에서 구분선을 따로 뺀다(RichSlot).
+ */
+export function isRenderedItem(item: StructuredItem): boolean {
+  return rowKindOf(item) !== 'skip'
+}
+
 /** runPos(ADR-0051): rail 행의 run 내 위치 — 연결선 clean-ends. */
 function renderItem(
   item: StructuredItem,

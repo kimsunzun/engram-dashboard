@@ -21,6 +21,8 @@ pub mod preset;
 pub mod profile;
 pub mod reaper;
 pub mod session;
+// ADR-0226
+pub(crate) mod session_id_latch;
 pub mod session_tracker;
 pub mod transport;
 pub mod turn;

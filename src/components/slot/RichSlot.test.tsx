@@ -18,13 +18,13 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
-import type { OutputChunk, ViewPhase } from '../../api/agentClient'
+import type { OutputChunk, ReplayLiveInfo, ViewPhase } from '../../api/agentClient'
 import { t } from '../../i18n'
 
 // ── subscribeOutput 콜백 캡처 + writeStdin holder(테스트마다 갈아끼움). ──
 const captured = vi.hoisted(() => ({
   onChunk: null as ((c: OutputChunk) => void) | null,
-  onState: null as ((s: ViewPhase) => void) | null,
+  onState: null as ((s: ViewPhase, info?: ReplayLiveInfo) => void) | null,
   onReset: null as (() => void) | null,
 }))
 const clientMock = vi.hoisted(() => ({
@@ -42,7 +42,7 @@ vi.mock('../../api/clientFactory', () => ({
         _viewId: string,
         _agentId: string,
         onChunk: (c: OutputChunk) => void,
-        onState?: (s: ViewPhase) => void,
+        onState?: (s: ViewPhase, info?: ReplayLiveInfo) => void,
         onReset?: () => void,
       ) => {
         captured.onChunk = onChunk
@@ -901,5 +901,278 @@ describe('RichSlot(live) — 정체성이 바뀌면 인스턴스를 새로 마�
 
     expect(document.querySelector('[data-rich-live="1"]')).toBe(rootBefore)
     expect(screen.getByText('assistant reply')).toBeTruthy()
+  })
+})
+
+// ★ADR-0226 이어받기 화신의 이력 대기(D5)★
+//
+// 'live' 가 "이 화신은 저장된 대화를 이어받으려고 떴다" 고 알리면 첫 실행 화면 대신 대화 영역에 로딩을
+// 얹는다. 끝나는 길이 넷이다 — 첫 이력 행 · 입력 · 부재(막이 이긴다) · 재시작(비우기 + 거짓 'live').
+// 표식이 없거나 거짓이면 표식 도입 전과 한 글자도 다르지 않아야 한다(표식을 안 싣는 옛 데몬·셸 경로가 이 경우다).
+describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () => {
+  const OTHER = 'eeee-ffff-0000-1111'
+
+  function loadingPanel(): HTMLElement | null {
+    return document.querySelector('[data-loading-panel="1"]')
+  }
+  function awaitingAttr(): string | null {
+    return document.querySelector('[data-rich-live="1"]')!.getAttribute('data-rich-awaiting-history')
+  }
+  function fireLive(continuesConversation: boolean): void {
+    act(() => captured.onState!('live', { continuesConversation }))
+  }
+  const USAGE = JSON.stringify({ type: 'Usage', input_tokens: 10, output_tokens: 2 })
+
+  it('표식 참 + 0건 → 첫 화면 대신 로딩과 옅은 막, 입력창은 하단 배치로 활성', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+
+    expect(emptyState()).toBeNull()
+    expect(mascot()).toBeNull()
+    expect(screen.queryByText('Claude Code')).toBeNull()
+    const panel = loadingPanel()
+    expect(panel).not.toBeNull()
+    expect(panel!.textContent).toBe('') // 안내 문구 없음 — 아이콘뿐
+    expect(awaitingAttr()).toBe('1')
+    // 막은 조작을 가리지 않는다 — 스크롤·선택·클릭이 통과한다.
+    expect(panel!.className).toContain('pointer-events-none')
+    expect(panel!.className).toContain('bg-foreground/')
+    // 막이 덮는 범위 = 대화 영역(스크롤 영역)뿐. 입력창은 그 밖이다.
+    const conversationArea = panel!.closest('[data-radix-scroll-area-viewport]')
+    expect(conversationArea).not.toBeNull()
+    expect(conversationArea!.contains(textarea())).toBe(false)
+    // 이력이 끝내 안 오면 입력이 빠져나갈 길이다 — 활성 + 하단 배치.
+    expect(textarea().disabled).toBe(false)
+    expect(textarea().className).toContain('flex-1')
+    expect(textarea().placeholder).toBe(t('agent.inputPlaceholder'))
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  // 실측상 이어받기의 첫 라이브 프레임이 usage 다. 그걸로 대기를 끝내면 이력이 오기 전 빈 목록이 비치고,
+  //   대기 꼬리 판정까지 그걸로 하면 로딩과 대기 꼬리가 함께 뜬다.
+  it('행을 안 그리는 usage 만 온 동안 로딩이 유지되고 대기 꼬리는 없다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, USAGE))) // replay 는 'live' 보다 먼저 배달된다
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    act(() => captured.onChunk!(tag1(1, USAGE))) // 라이브 usage
+    expect(loadingPanel()).not.toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(emptyState()).toBeNull()
+  })
+
+  // 패널이 잠깐 내려가는 창(같은 화신 재부착의 'buffering')에도 꼬리를 세우지 않는다 — 세우면 패널 →
+  //   대기 꼬리(경과 초) → 패널로 깜빡인다. 대기 꼬리를 내리는 근거는 국면이 아니라 "아직 이력이 없다" 다.
+  it("대기 중 'buffering' 으로 패널이 내려가도 대기 꼬리가 끼지 않는다(턴 열린 usage 만)", async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, USAGE))) // 턴은 열린 채(turnDone=false)
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    fireState('buffering')
+    expect(loadingPanel()).toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  it.each<[string, () => void]>([
+    ['연결 끊김', () => setConnection('down')],
+    ["'detached'", () => fireState('detached')],
+    ["'error'", () => fireState('error')],
+  ])('부재 막(%s) 아래에도 대기 꼬리가 끼지 않는다(턴 열린 usage 만)', async (_name, goUnavailable) => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, USAGE)))
+    fireLive(true)
+    goUnavailable()
+    expect(deadOverlay()).not.toBeNull()
+    expect(loadingPanel()).toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  // 턴 경계는 선행 item 이 usage 뿐이어도 구분선을 붙인다. 구분선은 빈 스페이서라 이력이 아니다 — 그걸로
+  //   대기를 끝내면 로딩도 첫 화면도 없는 빈 판이 남는다(0건 이어받기 = 입력 전까지 로딩).
+  it.each([
+    ['MessageDone', JSON.stringify({ type: 'MessageDone' })],
+    ['TurnEnd', JSON.stringify({ type: 'TurnEnd', outcome: { kind: 'Completed' } })],
+  ])('usage 뒤 턴 경계(%s)의 구분선은 로딩을 끝내지 않는다', async (_name, boundary) => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    act(() => captured.onChunk!(tag1(0, USAGE)))
+    act(() => captured.onChunk!(tag1(1, boundary)))
+    expect(document.querySelector('[data-rich-live="1"] .h-3')).not.toBeNull() // 구분선이 실제로 섰다
+    expect(loadingPanel()).not.toBeNull()
+    expect(emptyState()).toBeNull()
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  // 반대 방향: 'boundary' 행을 통째로 빼면 유저 말풍선만 복원된 이력도 대기로 남는다.
+  it('구분선 뒤 유저 말풍선이 오면 로딩이 걷힌다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    act(() => captured.onChunk!(tag1(0, USAGE)))
+    act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'MessageDone' }))))
+    const user = JSON.stringify({
+      type: 'Structured',
+      kind: 'user',
+      json: JSON.stringify({ type: 'text', text: 'earlier question', uuid: 'U0' }),
+    })
+    act(() => captured.onChunk!(tag1(2, user)))
+    expect(loadingPanel()).toBeNull()
+    expect(screen.getByText('earlier question')).toBeTruthy()
+  })
+
+  it('행을 그리는 첫 이력이 오면 로딩이 걷히고 첫 화면도 뜨지 않는다 — 입력창은 같은 엘리먼트', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    const before = textarea()
+    act(() => captured.onChunk!(tag1(0, USAGE)))
+    act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'TextDelta', text: 'restored history' }))))
+
+    expect(loadingPanel()).toBeNull()
+    expect(awaitingAttr()).toBeNull()
+    expect(emptyState()).toBeNull()
+    expect(screen.getByText('restored history')).toBeTruthy()
+    expect(textarea()).toBe(before)
+  })
+
+  it('입력하면 로딩이 걷히고 대기 표시로 넘어간다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    fireEvent.change(textarea(), { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+  })
+
+  it('연결이 끊기면 부재 막이 이기고 로딩은 없다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+
+    setConnection('down')
+    expect(deadOverlay()).not.toBeNull()
+    expect(loadingPanel()).toBeNull()
+    expect(awaitingAttr()).toBeNull()
+  })
+
+  it('종료된 에이전트의 이어받기 화신 — 막만 뜨고 로딩도 첫 화면도 없다', async () => {
+    agentStoreState.agents = [{ id: AGENT, cwd: 'C:/x', status: { type: 'Exited' } }]
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+
+    expect(deadOverlay()).not.toBeNull()
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).toBeNull()
+  })
+
+  // D4 재시작 — 이어받기가 실패해 새 대화로 다시 띄운 화신은 거짓 표식으로 온다.
+  it("비우기 + 'live'(거짓) → 첫 화면, 비우기 + 'live'(참) → 다시 로딩", async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+
+    act(() => {
+      captured.onReset!()
+      captured.onState!('live', { continuesConversation: false })
+    })
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).not.toBeNull()
+
+    act(() => {
+      captured.onReset!()
+      captured.onState!('live', { continuesConversation: true })
+    })
+    expect(emptyState()).toBeNull()
+    expect(loadingPanel()).not.toBeNull()
+  })
+
+  // 재부착(같은 화신)의 'buffering' 은 복원 완료를 내린다 — 그동안은 로딩도 첫 화면도 아니다(오늘의 규칙).
+  it("대기 중 'buffering' 이 오면 로딩을 내리고, 다음 'live' 의 표식을 다시 따른다", async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    fireState('buffering')
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).toBeNull()
+
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+  })
+
+  // info 없는 'live' 는 거짓으로 읽는다 — 앞 'live' 의 참을 물려받으면 안 된다.
+  it("info 없는 'live' 는 거짓 — 앞서 받은 참이 남지 않는다", async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    fireState('buffering')
+    fireState('live')
+
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).not.toBeNull()
+  })
+
+  it('다른 에이전트로 배정이 바뀌면 앞 에이전트의 표식이 따라오지 않는다', async () => {
+    const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    expect(loadingPanel()).not.toBeNull()
+
+    rerender(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    expect(loadingPanel()).toBeNull()
+    fireState('live')
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).not.toBeNull()
+  })
+
+  // 표식이 없거나 거짓이면 화면이 표식 도입 전과 같다 — 바이트 단위로 잰다(표식을 안 싣는 옛 데몬·셸 경로).
+  it("'live'(거짓)과 info 없는 'live' 는 같은 DOM 을 그린다", async () => {
+    const a = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireState('live')
+    const withoutInfo = a.container.innerHTML
+    cleanup()
+
+    const b = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(false)
+    expect(b.container.innerHTML).toBe(withoutInfo)
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).not.toBeNull()
+  })
+
+  // 대기 꼬리 규칙은 이력 대기 밖에서 표식 도입 전 그대로다 — 행을 안 그리는 usage 만 온 창도 턴이 안
+  //   닫혔으면 꼬리가 뜬다. 꼬리를 내리는 것은 로딩 패널이 떠 있는 동안뿐이다(바로 위 usage 케이스).
+  it.each([
+    ['info 없음', undefined],
+    ['거짓', { continuesConversation: false }],
+  ])("표식 %s + usage 만 온 창 → 로딩 없이 대기 꼬리가 뜬다(표식 도입 전 규칙)", async (_name, info) => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, USAGE)))
+    act(() => captured.onState!('live', info))
+    expect(loadingPanel()).toBeNull()
+    expect(emptyState()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
   })
 })

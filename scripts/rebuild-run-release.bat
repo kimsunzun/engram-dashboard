@@ -113,8 +113,8 @@ if errorlevel 1 ( echo [release] DAEMON BUILD FAILED - not launching. & pause & 
 REM ★Launched detached (scripts\launch-detached.ps1) - do NOT go back to `start` (do not remove)★:
 REM   launched from a terminal, the app becomes a DESCENDANT of that terminal and its output travels
 REM   back up the pipe chain. That combination repeatedly crashed the terminal (measured 2026-08-16),
-REM   taking the app down with it. The scheduler path fixes BOTH halves - the app is created by a
-REM   service so it is outside our process tree, AND its output goes to a file only. `start` satisfies
+REM   taking the app down with it. The WMI path fixes BOTH halves - the app's wrapper cmd is created by
+REM   WmiPrvSE.exe, so the app is outside our process tree, AND its output goes to a file only. `start` satisfies
 REM   NEITHER.
 REM ★`-Command`, not `-File` (do not remove)★: with -File, PowerShell takes every following argument
 REM   as a literal string, so a comma-separated -EnvVars list collapses into ONE value. The debug port
