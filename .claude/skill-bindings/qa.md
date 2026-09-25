@@ -251,7 +251,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
   - **슬롯을 기존 창으로 옮기기.** 프론트 `slot.popout` 은 목적지 인자가 없어 **항상 새 창**이다(`src/commands/slotCommands.ts` 의 `slot.popout` — 그 주석이 셸 쪽 동명 명령과의 과도기 분열을 자인한다). 기존 창을 지목해야 하면 아래 invoke 로 간다.
   - **챗 스타일**(여백·글자 크기)**은 릴리스 빌드에서 읽지도 바꾸지도 못한다** — 명령이 아니라 설정 데이터로 분류됐고 그 저장 경로가 아직 없다(ADR-0169). dev 빌드엔 아래 store 핸들의 `chatStyle` 칸이 남는다. 그 값을 재야 하면 **릴리스로는 못 잰다**가 답이다.
   - ★**셸 invoke 는 직통이다**★ — `withGlobalTauri` 가 켜져 있어(`src-tauri/tauri.conf.json`) command 표를 안 거치고도 `window.__TAURI__.core.invoke('list_tabs', …)`·`invoke('move_slot_to_window', {viewId, slotId, toWindow})` 를 부를 수 있다. 위 첫 갈래의 탈출구가 이것이다.
-- store 스냅샷 `window.__engram.agent.getState()` — 노출 지점 `src/main.tsx:34`(★바로 위 `:33`이 `import.meta.env.DEV` 가드라 **릴리스 빌드엔 없다**★. 위 `__ENGRAM_AGENT__`와 갈리는 지점이니 릴리스로 실측할 때 헷갈리지 말 것). 칸은 셋 = `theme`·`agent`·`chatStyle`.
+- store 스냅샷 `window.__engram.agent.getState()` — 노출 지점 `src/main.tsx:30`(★바로 위 `:29`이 `import.meta.env.DEV` 가드라 **릴리스 빌드엔 없다**★. 위 `__ENGRAM_AGENT__`와 갈리는 지점이니 릴리스로 실측할 때 헷갈리지 말 것). 칸은 셋 = `theme`·`agent`·`chatStyle`.
 
 **C. 터미널 화면 텍스트는 DOM에 없다 → 슬롯을 DOM 모드로 바꾸거나, 안 되면 fiber를 타고 `Terminal` 인스턴스의 버퍼를 읽는다**
 - ★**먼저 시도할 것 = DOM 모드**★ (코드 파생) — `node scripts/cdp.mjs eval "window.__engramCmd.run('slot.domMode.enable', { slotId: '<uuid>' })"`. 그러면 그 슬롯이 `DomSlot`으로 갈리고 **같은 출력 스트림을 ANSI만 벗겨 `<pre>` 텍스트로** 그리므로 `innerText`로 읽힌다 — 그 컴포넌트가 **CDP 관측을 목적으로 존재한다고 자기 헤더에 적어 뒀다**(`src/components/slot/DomSlot.tsx`). 되돌리기 = `slot.domMode.disable`(또는 `slot.renderMode.clear`), 토글 = `slot.domMode.toggle`.
@@ -259,7 +259,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
   - 한계 = ANSI strip이 best-effort라 픽셀 재현이 아니다(그 파일이 "평문 가독"만 노린다고 자인한다). **읽히는 것은 평문뿐이다.**
   - ★**커서 위치·글자 색은 아래 fiber 경로로도 못 잰다 — 이 조리법에 답이 없다**★. 그 경로가 돌려주는 것은 `translateToString` 결과, 즉 **줄 단위 평문**이다. 색은 셀 속성(`line.getCell(x)`)이고 커서는 `buffer.cursorX`/`cursorY`인데 **지금 스니펫은 둘 다 만지지 않는다**. ★이름 자체는 실재한다★ — `@xterm/xterm` 타이핑에 있다(`typings/xterm.d.ts` 의 `IBuffer.cursorX`·`cursorY` · `IBufferLine.getCell`). **미검증인 것은 호출 선례**다(이 저장소에 0건). 늘려서 재 보지 않았다면 지어내 적지 말고 **못 쟀다고 보고할 것.**
 - 왜 fiber가 필요한가(코드 파생): 보이는 슬롯엔 WebGL 렌더러가 붙어(ADR-0056 — `src/components/slot/TerminalSlot.tsx:170`~`222`) 글리프가 canvas로 그려지고, `screenReaderMode`도 안 켜져 있다(생성 옵션 = `fontFamily`·`fontSize`·`theme` 셋뿐, `TerminalSlot.tsx:78`~`82`). 그래서 `.xterm` 하위 `innerText`가 빈 문자열이다(이전 세션 실측 2026-08-21).
-- 잡는 경로(코드 파생): 인스턴스를 들고 있는 것은 `terminalRef` 하나이고 window에 노출되지 않는다(`TerminalSlot.tsx:20`·`:90`). ★**시작점은 `.xterm`이 아니라 그 부모다**★ — fiber 키(`__reactFiber$*`)가 붙는 것은 React가 렌더한 컨테이너 div(`TerminalSlot.tsx:341`)이고 `.xterm`은 `term.open()`이 그 안에 만든 것이라(`:85`) 키가 없다. 슬롯이 여럿이면 `[data-slot-id]`로 먼저 좁힌다(`src/components/layout/LayoutLeaf.tsx:152`).
+- 잡는 경로(코드 파생): 인스턴스를 들고 있는 것은 `terminalRef` 하나이고 window에 노출되지 않는다(`TerminalSlot.tsx:20`·`:90`). ★**시작점은 `.xterm`이 아니라 그 부모다**★ — fiber 키(`__reactFiber$*`)가 붙는 것은 React가 렌더한 컨테이너 div(`TerminalSlot.tsx:381`)이고 `.xterm`은 `term.open()`이 그 안에 만든 것이라(`:85`) 키가 없다. 슬롯이 여럿이면 `[data-slot-id]`로 먼저 좁힌다(`src/components/layout/LayoutLeaf.tsx:72`).
 - ★**훅 인덱스로 세지 말 것**★ — `terminalRef`는 현재 두 번째 `useRef`지만(`TerminalSlot.tsx:19`~`32`) 훅 순서는 편집 한 번에 밀린다. **모양으로 찾는다**(`.current.buffer`를 가진 훅). ★미검증 스케치 — fiber 내부 구조에 기대므로 이 저장소엔 선례가 없다(`rg reactFiber|memoizedState` → 0건)★:
   ```js
   const host = document.querySelector('.xterm').parentElement
@@ -275,11 +275,11 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 
 **D. 스크롤바 관측은 두 갈래로 갈린다 — 채널을 먼저 고른다**
 - ★**진짜 네이티브 thumb는 어떤 조회로도 안 보인다**★ — DOM 요소가 아니라 selector·`getComputedStyle`이 그 픽셀을 말해 주지 않는다. **이 경우에만** 캡처가 유일 채널이고, 위 A대로 그건 창 전체다. (**미검증** — 이 저장소에 관측 선례 0. 네이티브 스크롤바가 DOM 밖에 그려진다는 일반 사실에 기댄 추론이다.)
-- ★**터미널에서 화면에 보이는 슬라이더는 네이티브가 아니다 — DOM이라 조회된다**★(이전 세션 실측 2026-08-21). xterm 6.0(`package.json:27`)은 VS Code의 ScrollableElement를 쓰고 실물은 `.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider`다(`src/index.css:33`~`35`·`91`~`95`). 폭·위치·가시성은 `eval` + `getBoundingClientRect()`/`getComputedStyle()`로 숫자로 받는다 — **이걸 스크린샷으로 재지 말 것.** 폭·`left`는 xterm JS가 인라인 style로 박아 우리 규칙이 `!important`로 덮는다(`index.css:83`~`92`).
-  - 이 갈래 차이가 곧 `index.css`의 `::-webkit-scrollbar` 블록(`index.css:59`~`79`)이 지금 **죽은 코드**인 근거다 — thumb 색을 빨강으로 강제하고 전체 캡처에서 일치 픽셀을 세어 0을 얻었다(이전 세션 실측 2026-08-21 — 그 관측을 적어 둔 주석이 `index.css:37`~`41`이고, 블록 자체는 그보다 아래다). ★"스크린샷만이 관측 수단"으로 뭉뚱그리면 이 갈래를 놓치고 전창 캡처를 반복하게 된다.★
-- **넘침 강제(이전 세션 실측 2026-08-21):** `.xterm-viewport`에 **높이 있는 빈 자식을 넣는다.** `.xterm-screen`의 높이 조작은 안 듣는다 — v6의 `.xterm-viewport`는 스크롤을 더 이상 받지 않고(스크롤백이 쌓여도 `scrollHeight === clientHeight`) 불투명한 `.xterm-scrollable-element`가 그 위를 덮기 때문이다(`src/index.css:33`~`37`).
-  - ★그렇게 드러나는 것은 **덮인 네이티브 스크롤바**이고 사용자가 보는 그것이 아니다★ — 위 첫 갈래로 간다. (코드 파생 — `src/index.css:33`~`41`)
-  - ★**넘침만 만들면 한 픽셀도 안 칠해진다**★ — thumb 색이 평소 transparent이고 `[data-scroll-active]`가 붙은 동안만 칠해진다(`index.css:66`~`79`). 정적 캡처를 뜨려면 표식을 손으로 붙인다(`el.setAttribute('data-scroll-active','1')`). (코드 파생) 실제 스크롤로 붙이면 마지막 스크롤 **500 ms** 뒤 자동으로 떨어진다(`SCROLL_HIDE_DELAY_MS` = `src/components/ui/scroll-area.tsx:36`, 붙이는 쪽 = `src/components/ui/nativeScrollActivity.ts`).
+- ★**터미널에서 화면에 보이는 슬라이더는 네이티브가 아니다 — DOM이라 조회된다**★(이전 세션 실측 2026-08-21). xterm 6.0(`package.json:27`)은 VS Code의 ScrollableElement를 쓰고 실물은 `.xterm .xterm-scrollable-element > .scrollbar.vertical > .slider`다(`src/index.css:57`~`59`·`115`~`119`). 폭·위치·가시성은 `eval` + `getBoundingClientRect()`/`getComputedStyle()`로 숫자로 받는다 — **이걸 스크린샷으로 재지 말 것.** 폭·`left`는 xterm JS가 인라인 style로 박아 우리 규칙이 `!important`로 덮는다(`index.css:107`~`117`).
+  - 이 갈래 차이가 곧 `index.css`의 `::-webkit-scrollbar` 블록(`index.css:83`~`103`)이 지금 **죽은 코드**인 근거다 — thumb 색을 빨강으로 강제하고 전체 캡처에서 일치 픽셀을 세어 0을 얻었다(이전 세션 실측 2026-08-21 — 그 관측을 적어 둔 주석이 `index.css:61`~`65`이고, 블록 자체는 그보다 아래다). ★"스크린샷만이 관측 수단"으로 뭉뚱그리면 이 갈래를 놓치고 전창 캡처를 반복하게 된다.★
+- **넘침 강제(이전 세션 실측 2026-08-21):** `.xterm-viewport`에 **높이 있는 빈 자식을 넣는다.** `.xterm-screen`의 높이 조작은 안 듣는다 — v6의 `.xterm-viewport`는 스크롤을 더 이상 받지 않고(스크롤백이 쌓여도 `scrollHeight === clientHeight`) 불투명한 `.xterm-scrollable-element`가 그 위를 덮기 때문이다(`src/index.css:57`~`61`).
+  - ★그렇게 드러나는 것은 **덮인 네이티브 스크롤바**이고 사용자가 보는 그것이 아니다★ — 위 첫 갈래로 간다. (코드 파생 — `src/index.css:57`~`65`)
+  - ★**넘침만 만들면 한 픽셀도 안 칠해진다**★ — thumb 색이 평소 transparent이고 `[data-scroll-active]`가 붙은 동안만 칠해진다(`index.css:90`~`103`). 정적 캡처를 뜨려면 표식을 손으로 붙인다(`el.setAttribute('data-scroll-active','1')`). (코드 파생) 실제 스크롤로 붙이면 마지막 스크롤 **500 ms** 뒤 자동으로 떨어진다(`SCROLL_HIDE_DELAY_MS` = `src/components/ui/scroll-area.tsx:36`, 붙이는 쪽 = `src/components/ui/nativeScrollActivity.ts`).
   - 거꾸로 **보이는 `.slider`는 DOM 주입으로 못 띄운다** — 기하가 xterm 내부 버퍼 상태에서 나오므로 실제 스크롤백을 쌓아야 한다(에이전트 출력 또는 위 C로 잡은 인스턴스에 쓰기). (미검증 — 추론)
 
 ## 실패 보고 시 게이트 명칭 (골격 §3에 주입)

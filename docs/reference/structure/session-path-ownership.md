@@ -1238,38 +1238,38 @@ That flag is `OutputCaps.structured` (`src/api/types.ts:30`; wire mirror
 `true` at backend/claude/mod.rs:372.
 
 Resolution: `renderModeOverride[slotId] ?? defaultRenderMode(agent)`
-(`src/components/layout/ViewLayoutRenderer.tsx:78-79`); mount switch :209-220 with a `default:` arm
-that falls through to `TerminalSlot` (:217-219). An invalid override therefore renders as a terminal
+(`src/components/layout/LayoutLeaf.tsx:158`); mount switch :270-280 with a `default:` arm
+that falls through to `TerminalSlot` (:277-279). An invalid override therefore renders as a terminal
 (flagged at `src/components/slot/renderMode.ts:12-13`).
 
 Storage: `renderModeOverride: Record<string /*slot node.id*/, RenderMode>` in the front-end Zustand
-view store (`src/store/viewStore.ts:78`, initial `{}` :161). This field explicitly **does not** go
-through the backend authority loop (:72-77, restated `src/commands/renderModeCommands.ts:4-5`), has
+view store (`src/store/viewStore.ts:93`, initial `{}` :184). This field explicitly **does not** go
+through the backend authority loop (:87-92, restated `src/commands/renderModeCommands.ts:4-5`), has
 **no disk persistence, and is per-webview-window** (`src/commands/renderModeCommands.ts:9-10`).
-Writers: `setRenderMode` (:209-218, invalid mode → `console.warn` + ignore :213-215),
-`clearRenderMode` (:219-224), dom aliases (:228-233); auto-cleared on slot re-content (:178, :185,
-:192, :199).
+Writers: `setRenderMode` (:234-243, invalid mode → `console.warn` + ignore :238-241),
+`clearRenderMode` (:244-249), dom aliases (:253-258); auto-cleared on slot re-content (:203, :210,
+:217, :224).
 
 **An LLM/command path exists and is release-reachable**, but with two holes:
-five commands registered — `slot.renderMode.set` (`src/commands/renderModeCommands.ts:71`),
-`slot.renderMode.clear` (:84), `slot.domMode.enable` (:95), `slot.domMode.disable` (:104),
-`slot.domMode.toggle` (:113); args `{slotId, mode}` with no `viewId` (:31-35); invalid `mode` throws
-rather than no-op (:60-67). Reachable via `window.__engramCmd.run(...)`, installed
+five commands registered — `slot.renderMode.set` (`src/commands/renderModeCommands.ts:76`),
+`slot.renderMode.clear` (:89), `slot.domMode.enable` (:100), `slot.domMode.disable` (:109),
+`slot.domMode.toggle` (:118); args `{slotId, mode}` with no `viewId` (:32-36); invalid `mode` throws
+rather than no-op (:65-73). Reachable via `window.__engramCmd.run(...)`, installed
 **unconditionally** — not behind `import.meta.env.DEV` (`src/store/eventBus.ts:86-89`, intentional
 per :83-85).
 - **No human UI path and no keybinding** — they have no `registerSlotMenu` contribution (contributions
-  exist only in `agentCommands.ts:169`, `presetCommands.ts:84`, `slotContentCommands.ts:94/110/134`,
-  `slotCommands.ts:137`), self-documented at `src/commands/renderModeCommands.ts:39`; no hits in
+  exist only in `agentCommands.ts:190`, `presetCommands.ts:84`, `slotContentCommands.ts:94/110/134`,
+  `slotCommands.ts:138`), self-documented at `src/commands/renderModeCommands.ts:40`; no hits in
   `src/commands/keybindings.ts`.
 - **They are deliberately excluded from the cross-window command bus** because they declare no `help`
   (the `offeredCommands` gate in `src/commands/viewCommandBridge.ts`), per
   `src/commands/renderModeCommands.ts:8-18`. So a backend-side caller cannot reach them — only
   in-window `__engramCmd`/CDP can.
 - The slot memoizes the last mounted mode for the dead-agent case and carries **only the mode**
-  (`src/components/layout/ViewLayoutRenderer.tsx:61`, effect :88-96, consumption
-  `renderAs = mode ?? kept?.mode` :209). Known in-source limitation: during agent absence there is
+  (`src/components/layout/LayoutLeaf.tsx:146`, effect :167-175, consumption
+  `renderAs = mode ?? kept?.mode` :192). Known in-source limitation: during agent absence there is
   no mode derivation, so `setRenderMode`/`clearRenderMode` are **silent no-ops that report success**
-  (:60).
+  (:144-145).
 
 ### The structured accumulator — an unrecognized `type` is silently swallowed
 
@@ -1343,11 +1343,11 @@ Release-reachable, no env gate, no dev flag, no hidden route:
   :242, :262, :296 → `rowTitle` :364 → `title={rowTitle}` :419). The row body shows only a fixed
   badge (:526-530).
 - **`WindowLayout` load failure** with the raw window label
-  (`src/components/layout/WindowLayout.tsx:158`, template `src/i18n/ko.ts:50`).
+  (`src/components/layout/WindowLayout.tsx:166`, template `src/i18n/ko.ts:50`).
 
 Not reachable / gated:
 - `window.__engram` store handles (theme/agent/chatStyle) — behind `if (import.meta.env.DEV)`
-  (`src/main.tsx:33-39`, stated :26-28).
+  (`src/main.tsx:29-35`, stated :22-24).
 - `window.__engramCmd` — **not** gated; installed in `initEventBus` for all builds
   (`src/store/eventBus.ts:86-89`), intentional per :83-85.
 - `src/lab/terminal/TerminalView.tsx` + `fixtures.ts` — **dead code**. Nothing imports them
@@ -1819,12 +1819,12 @@ would want to do, and why it cannot today.
     `output.structured` (:24), which reaches only two of the three modes and cannot name `'dom'`.
 23. **Register a fourth renderer** — `RENDER_MODES` is a frozen 3-tuple (:5) and the mount site is a
     hardcoded switch whose `default:` silently means terminal
-    (`src/components/layout/ViewLayoutRenderer.tsx:210-220`). A backend needing another presentation
+    (`src/components/layout/LayoutLeaf.tsx:270-280`). A backend needing another presentation
     gets a terminal.
 24. **Flip a slot's renderer from the backend or the command bus** — the five override commands are
     deliberately excluded from the cross-window bus because they declare no `help`
     (`src/commands/renderModeCommands.ts:8-18`), so only in-window `__engramCmd`/CDP can reach them;
-    they also have no menu item and no keybinding (:39).
+    they also have no menu item and no keybinding (:40).
 
 ## Frontend consumption
 
@@ -1857,9 +1857,9 @@ would want to do, and why it cannot today.
     life of a subscription; no cap, no trim, no eviction anywhere in
     `src/components/slot/structuredAccumulator.ts` (contrast `DomSlot`'s 200 KB cap, :36).
 32. **Persist or share a render-mode choice** — `renderModeOverride` is in-memory and per-webview
-    (`src/store/viewStore.ts:78`, `renderModeCommands.ts:9-10`); restart or a second window reverts
+    (`src/store/viewStore.ts:93`, `renderModeCommands.ts:9-10`); restart or a second window reverts
     to the capability-derived default. And during agent absence there is no derivation, so set/clear
-    are **silent no-ops that report success** (`ViewLayoutRenderer.tsx:60`).
+    are **silent no-ops that report success** (`LayoutLeaf.tsx:144-145`).
 33. **Restore a structured event from the snapshot path** — `OutputCore::snapshot` keeps only
     `TerminalBytes` and `warn`-drops every structured variant (output_core.rs:558-579), so the two
     restore paths (`subscribe_from` replay vs `get_snapshot`) are asymmetric by the code's own

@@ -1,6 +1,8 @@
 # TRD — 평평한 분할 렌더러(allotment 대체) + 분할 비율 되쓰기 + 셸의 창 캔버스 기하
 
 - 상태: **확정 — /review trd full 3 라운드(r1·r2 두 리뷰어 FIX 반영, r3 doc-aware 단독 확인 PASS) · 사용자 결정 D1~D6·R11 반영** · 날짜: 2026-09-24 · ADR = ADR-0227
+- 구현: **§6 1~8단계 커밋** — `e401966` 부터 `5e99268` 까지(2026-09-24~25). 단계별 게이트는 각 커밋 본문, 라운드 기록은 `docs/process/step-log.md`. 9단계(문서)에서 이 문서를 구현에 맞췄다 — 구현이 설계와 달라졌거나 설계가 안 정한 것을 정한 자리는 **「구현:」** 으로 표시한다.
+- ★**줄 포인터는 설계 시점 코드(`473da52`) 기준이다 — 「구현:」(「구현 —」·「구현(…)」 포함) 자리 안에 있거나 「지금(9단계)」 를 단 포인터만 9단계 시점 트리 기준이다**★. 그 자리 밖의 맨 「지금」·「구현 메모」 는 설계 시점의 말이라 그 포인터도 `473da52` 다. 그 뒤 구현과 master 흡수가 파일을 바꿔 줄이 어긋나므로 `git show 473da52:<경로>` 로 연다.
 - 근거 조사: `docs/research/split-layout-library-survey-2026-09-24.md`(렌더러 구조 — 선택지 D) · `docs/research/split-resize-policy-survey-2026-09-24.md`(D1~D6 정책)
 - 용어: **셸** = 클라이언트 셸 백엔드(`src-tauri/src/layout/` 의 `ViewManager`)다. 데몬이 아니다. **칸** = 슬롯(잎), **구분선** = 분할 경계의 드래그 손잡이.
 - 범위: **뷰 하나 안**. 탭은 이미 keep-alive 라(`src/components/layout/WindowLayout.tsx:182-197`, ADR-0056) 손대지 않는다.
@@ -49,13 +51,13 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 - **자식은 부모 경계를 복사하고 새 값은 분할 경계 하나뿐이다** — `at = x0 + (x1 - x0) * ratio`. a 의 `x1` 과 b 의 `x0` 이 같은 변수라 이웃 경계가 비트 단위로 같다. 깊이와 무관하다.
 - ADR-0140 매핑은 여기 한 곳이다: `left_right` → x 축 분할(a 왼쪽), `top_bottom` → y 축 분할(a 위).
 - `SplitRect = { split_id, dir, x0,y0,x1,y1, at }`(이 분할 자신의 상자 + 경계 좌표).
-- 비율은 여기서도 `[RATIO_MIN, RATIO_MAX]`(§2c)로 클램프한다. 쓰기 경로가 이미 보장하지만, 테스트가 트리에 직접 넣는 `0.0` 같은 값이 면적 0 인 잎을 못 만들게 하기 위해서다.
+- 비율은 여기서도 `[RATIO_MIN, RATIO_MAX]`(§2c)로 클램프한다. 쓰기 경로가 이미 보장하지만, 테스트가 트리에 직접 넣는 `0.0` 같은 값이 면적 0 인 잎을 못 만들게 하기 위해서다. *구현:* NaN 은 클램프를 그대로 지나 자손 좌표 전체로 번지므로 반분(0.5)으로 읽는다(`geometry.rs` 의 `boundary`).
 - `spatial.rs` 는 자기 사각형 계산을 버리고 이 함수의 경계를 입력으로 받는다(§2h). 셸 안에서도 기하 출처가 하나가 된다.
 - **픽셀 변환도 여기 있다:** `px_edge(canvas: u32, e: f64) = (canvas as f64 * e).round()`. 폭은 **반올림한 두 경계의 차**다(`round(W·x1) − round(W·x0)`) — 폭을 따로 반올림하지 않는다. 그래서 이웃 칸의 px 경계가 언제나 같은 정수다. 음수가 없으므로 Rust `round`(0 에서 먼 쪽)와 CSS `round(nearest)`(+∞ 쪽)의 동률 처리가 같다.
 
 ### 2b. 스냅샷 확장
 
-- `ViewSnapshot` 에 `slot_rects: Vec<SlotRect>` · `split_rects: Vec<SplitRect>` · `ratio_min: f64` · `ratio_max: f64` 를 더한다(`types.rs:106-122`, `manager.rs:140-152` 의 `snapshot()` 이 채운다). ts-rs 로 `SlotRect.ts`·`SplitRect.ts` 가 새로 생기고 `ViewSnapshot.ts` 가 바뀐다.
+- `ViewSnapshot` 에 `slot_rects: Vec<SlotRect>` · `split_rects: Vec<SplitRect>` · `ratio_min: f64` · `ratio_max: f64` 를 더한다(`manager.rs:140-152` 의 `snapshot()` 이 채운다 · 구조체는 지금(9단계) `types.rs:112-141`). ts-rs 로 `SlotRect.ts`·`SplitRect.ts` 가 새로 생기고 `ViewSnapshot.ts` 가 바뀐다.
   - 비율 한계 둘을 스냅샷에 싣는 이유: 화면 드래그가 셸 상수 0.1/0.9 를 따로 베껴 두지 않게 하기 위해서다. 교차 언어 골든 테스트보다 단순하다.
 - 프론트 캐시 `CachedView`(`src/store/viewStore.ts:58-63`, 채우는 곳 `:242-250`)가 둘을 함께 담는다. 지금은 `slot_spatial` 조차 캐시에 안 담는다.
 - 이것은 ADR-0068 결정 3(「좌표 노출 보류」)의 개정이다 — 정규화 좌표가 셸→화면 스냅샷에 실린다. **LLM 명령 표면으로 좌표·px 를 내보내는 것은 이번 범위가 아니다**(§7 R10).
@@ -85,9 +87,10 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   - 셸은 px 상수를 박지 않는다 — `m` 은 화면이 보낸 값이다.
   - 화면 드래그도 **같은 식·같은 입력**(자기가 보고한 정수 캔버스 × 스냅샷 상자)으로 범위를 구한다. 그래서 확정값이 셸에서 다시 잘리지 않고, 뗄 때 튀지 않는다(§2f).
 - **적용 서비스:** `apply::set_split_ratio` — `focus_slot`(`src-tauri/src/layout/apply.rs:348-366`)과 같은 모양. 출력 라우팅이 안 바뀌므로 `SubscriptionSync` 는 안 받는다. 레이아웃 스냅샷만 통지하고 탭은 통지하지 않는다(`notify` `:157-168`에 `tabs=None`).
-- **사람 경로:** `#[tauri::command] set_split_ratio(view_id, split_id, ratio) -> SplitRatioApplied { ratio: f64, outcome, version }`(`src-tauri/src/commands/layout.rs` 의 `split_slot` `:321-342` 모양, 등록 `src-tauri/src/lib.rs:211` `generate_handler!`). 반환 타입은 ts-rs 로 내보내고, `version: u64` 에는 `#[ts(type = "number")]` 를 박는다(`types.rs:118-121` 선례).
+- **사람 경로:** `#[tauri::command] set_split_ratio(view_id, split_id, ratio) -> SplitRatioApplied { ratio: f64, outcome, version }`(`src-tauri/src/commands/layout.rs` 의 `split_slot` `:321-342` 모양, 등록 `src-tauri/src/lib.rs:211` `generate_handler!`). 반환 타입은 ts-rs 로 내보내고(*구현:* `SplitRatioApplied.ts` + 결말 enum `SplitRatioOutcome.ts`), `version: u64` 에는 `#[ts(type = "number")]` 를 박는다(지금(9단계) `types.rs:136-140` 선례).
 - **LLM 경로(명령 버스):** `src-tauri/src/layout/commands.rs` 선언 블록(`:71`)에 추가.
-  - `"split.setRatio" => args { view_id: String, split_id: String, ratio: f64 } -> ok { ratio: f64, outcome: SplitRatioOutcome }`(`Applied`·`Unchanged`·`TooSmall` — 필드 없는 enum 이라 매크로가 싣는다).
+  - `"split.setRatio" => args { view_id: String, split_id: String, ratio: f64 } -> ok { ratio: f64, outcome: RatioOutcome }`(`Applied`·`Unchanged`·`TooSmall` — 필드 없는 enum 이라 매크로가 싣는다).
+    - *구현:* 선언 매크로 쪽 enum 이름은 `RatioOutcome` 이다. 셸 안쪽 쌍둥이 `SplitRatioOutcome`(Tauri 답)과 타입 이름만 다르고 variant 철자는 같다(§4 「구현 중 메인이 정한 것」).
     - 유한값이 아니면 `INVALID_ARGUMENT`. 범위 밖이면 클램프한 적용값을 돌려준다(오류 아님).
     - 매크로가 `f64` 를 `{"type":"number"}` 로 싣는다(`crates/engram-dashboard-command/src/macros.rs:149`).
     - **요약문에 「ratio = a 쪽(왼쪽/위) 칸의 몫」을 적는다**(ADR-0140).
@@ -98,6 +101,7 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 - **동시 쓰기:** 셸 도착 순서의 마지막 쓰기가 이긴다. 셸은 락 하나로 직렬화하므로 추가 장치는 없다. 화면 쪽 화해는 §2f.
 - **분할 경로에도 같은 표현 가능성 규칙을 건다.** 비율 0.1~0.9 만으로는 면적이 양수라는 보장이 없다 — 늘 같은 쪽 자식을 나누면 f64 경계가 부모 끝과 같아진다(0.5 로 약 54 단, 0.9 쪽으로 약 17 단). 지금 `split_in_tree`(`tree.rs:57`)엔 깊이 가드가 없다.
   - `ViewManager::split_slot` 은 새 경계 `at` 가 대상 칸 상자 안에 **엄격히** 들지 않으면(`at <= x0 || at >= x1`, 위아래 분할이면 y) 트리를 바꾸지 않는다. 새 `LayoutError::SplitTooDeep` 를 돌려주고, 버스에선 `CONFLICT`·Tauri 에선 `Err` 문자열이 된다. 패닉하지 않는다.
+    - *구현:* 이미 면적 0 인 칸(쓰기 경로로는 안 생긴다 — 심은 트리)도 축과 무관하게 `SplitTooDeep` 이다. 다른 축으로 나누면 새 경계는 칸 안에 들어도 두 새 칸이 다 면적 0 이다.
   - **`min_pane_px` 미만의 칸을 만드는 분할은 허용한다**(R11 — 사용자 결정 2026-09-24). 막는 것은 위 표현 가능성 규칙(`SplitTooDeep`)뿐이다. 캔버스를 알아도 px 로 분할을 거절하지 않는다(§7 R11).
 
 ### 2d. 창 캔버스 크기와 기본 지표 — 칸별 보고 없이, 상수 없이
@@ -109,6 +113,11 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   - `ResizeObserver` 가 없는 환경(jsdom — vitest 에 setupFiles 없음)에서는 관측을 건너뛴다.
   - 100ms 디바운스 → 정수 반올림 → **`w == 0 || h == 0` 이면 보내지 않는다**(0×0 RO 콜백은 실재한다 — `TerminalSlot.tsx:99-101`) → 직전 **성공한** 값과 다를 때만 `report_window_canvas(w, h)`.
   - 실패하면 직전 값을 갱신하지 않는다. RO 는 크기가 바뀔 때만 울리므로 다음 관측을 기다리지 않고 **같은 유계 재시도**(`src/util/retryInvoke.ts`)로 다시 보낸다. 그 사이 새 크기가 오면 옛 재시도는 취소한다.
+  - *구현:* 무엇을 언제 보낼지는 `src/components/layout/windowCanvasReport.ts` 가 정한다(관측·디바운스만 `WindowLayout.tsx` 의 훅). 상태는 **웹뷰 싱글톤**(모듈 범위)이다 — 같은 웹뷰에서도 훅 인스턴스는 바뀌므로(오류 경계 다시 그리기·HMR 재마운트), 인스턴스 상태면 새 인스턴스가 날아가는 요청을 모른 채 하나를 더 날린다.
+    - **invoke 는 웹뷰당 한 번에 하나.** 겹친 두 요청을 셸이 도착 역순으로 처리하면 낡은 캔버스가 다음 리사이즈까지 남는다(WebView2 가 발행 순서대로 올리는지는 문서에 없다 — 모른다). 날아가는 것이 있으면 그 응답 뒤에 보낸다. 대가: 응답이 끝내 안 오면 그 창의 보고가 거기서 멈춘다.
+    - **보낼 값은 최신 하나만** 둔다 — 새 값이 대기 값을 덮는다. 디바운스 전의 새 관측이 보내는 중·대기 중인 값과 다르면 그 재시도·대기 값을 곧바로 거둔다.
+    - 성공 응답은 취소된 작업의 것이라도 셸의 현재 값으로 기록한다 — 한 번에 하나라 응답 순서가 곧 셸 적용 순서다.
+    - 셸이 받아들인 값이 바뀌면 구독자에게 알린다(`subscribeCanvasReport`) — 구분선 허용 범위가 이것을 읽는다(§2f).
   - 숨은 탭은 창 캔버스를 공유하므로 창당 하나로 충분하다.
   - 부팅·팝아웃 생성·웹뷰 재로드는 모두 `WindowLayout` 새 마운트이므로 첫 측정이 곧 보고다.
 - **기본 지표 보고(웹뷰당 한 번):** `report_ui_metrics(UiMetrics { frame_insets: Insets { t, r, b, l: f64 }, min_pane_px: u32 })`.
@@ -116,11 +125,12 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   - `min_pane_px` = 화면의 **정책 상수** `MIN_PANE_PX`(30) — 실측값이 아니라서 별도 필드다. 이 값의 **유일한 정본은 화면**이고 셸은 받아 쓴다(§2c).
   - 첫 잎이 마운트될 때 보낸다. **「보냈음」 표식은 성공 응답 뒤에만** 세우고, 실패하면 유계 재시도한다(`src/util/retryInvoke.ts`). 표식은 모듈 수준이라 웹뷰 재로드와 함께 초기화된다.
   - **진행 중 걸쇠**: 부팅 때 잎 N 개가 한꺼번에 마운트되므로, 모듈 수준 in-flight 프라미스 하나를 두고 두 번째 이후 잎은 그것을 공유한다. 보고는 한 번만 나간다. 실패로 끝나면 걸쇠를 풀어 다음 잎 마운트가 다시 시도할 수 있게 한다.
+  - *구현:* `src/components/layout/uiMetricsReport.ts`. 잎의 몸(`SlotBody` — §4)이 마운트될 때 자기 `[data-slot-border]` 를 잰다. 테두리 폭 하나라도 유한한 수로 못 읽으면 보내지 않고 오류 로그만 남긴다(셸이 거절할 값이라 보내 봐야 재시도만 소진한다).
   - 지금 칸마다 붙는 고정 장식은 틀 테두리 1px 뿐이다(`ViewLayoutRenderer.tsx:139`). 머리줄은 없다. 콘텐츠별 안쪽 여백(`DomSlot.tsx:203` 의 `4px 8px` 등)은 지표에 넣지 않는다 — 칸 종류의 사정이다.
 - **셸 쪽 방어:**
   - `report_window_canvas` 는 `w == 0 || h == 0` 이면 무시하고 직전 값을 유지한다.
   - `report_ui_metrics` 는 범위를 검사해 벗어나면 거절하고(`Err`) 직전 값을 유지한다 — inset 은 유한·`0 ≤ v ≤ 64`, `min_pane_px` 는 `1 ≤ v ≤ 1000`.
-- **셸 계산:** `ViewManager::slot_px(view, slot) -> Result<Option<SlotPx { frame: PxRect, content: RectF64 }>, LayoutError>`. 캔버스를 모르면 `None`.
+- **셸 계산:** `ViewManager::slot_px(view, slot) -> Result<Option<SlotPx { frame: PxRect, content: RectF64 }>, LayoutError>`. 캔버스를 모르면 `None`. *구현:* 지표를 몰라도 `None` 이다 — 캔버스·지표를 **둘 다** 알 때만 `Some`(§4 「구현 중 메인이 정한 것」). 없는 view·slot 은 그보다 먼저 `Err`.
   - `frame` = 소유 창의 `canvas` × 그 칸의 `SlotRect` 를 §2a 규칙으로 반올림한 정수 사각형.
   - `content` = `frame` 을 `frame_insets` 만큼 줄인 것. **폭·높이는 `max(0, …)` 로 0 아래로 내려가지 않는다** — 창 최소 크기가 없고(D4) 조상 드래그로 칸이 틀 테두리보다 작아질 수 있다(D2).
   - **구분선 두께를 빼지 않는다** — 구분선은 레이아웃 공간을 먹지 않는 오버레이다(§2f).
@@ -148,15 +158,18 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 - **정밀도:** 셸 px 와 화면 px 는 경계마다 **0 이 정상이고 최악 1 CSS px** 다. 1px 어긋남은 셋 중 하나에서만 난다. ① 창 캔버스의 CSS 크기가 정수가 아닐 때(배율 ≠ 1 — 셸은 반올림한 정수를 갖는다) ② 경계가 .5 동률 근처일 때(Chromium 레이아웃 단위 1/64px 양자화) ③ `round()` 미지원일 때.
 - **transform·`contain` 금지** — `SlotContextMenu` 가 `position:fixed`(`src/components/slot/SlotContextMenu.tsx:121,127`)라 조상에 transform 이 걸리면 좌표계가 깨진다.
 - 첫 페인트: 위치는 렌더 결과 스타일 자체다. 측정도 ResizeObserver 도 필요 없고, 창 리사이즈도 CSS 가 그 프레임에 처리한다(D4 = 순수 비례).
-- props: `ViewLayoutRenderer` 이름·경로는 물론 **트리 prop 이름 `node` 도 유지한다**. 호출부 51곳(`ViewLayoutRenderer.test.tsx`의 `node=`)과 `slotDaemonRestart.test.tsx:223` 가 수정 없이 돈다.
+- props: `ViewLayoutRenderer` 이름·경로는 물론 **트리 prop 이름 `node` 도 유지한다**. 호출부 51곳(`ViewLayoutRenderer.test.tsx`의 `node=`)과 `slotDaemonRestart.test.tsx` 가 수정 없이 돈다. *구현:* prop 이름은 그대로 돌았다 — 분할 분기 테스트는 §5 대로 다시 써서 호출부 수가 바뀌었고, 뒤 파일의 그 호출은 지금(9단계) `:220` 이다(allotment mock 삭제로 밀렸다).
   - 더하는 선택 props: `slotRects`·`splitRects`·`ratioBounds`·`version`. `TabCanvas`(`WindowLayout.tsx:213-229`)가 캐시에서 넘긴다.
   - **사각형이 없고 루트가 슬롯이면 전체 상자**로 그린다. 사각형 없이 루트가 분할이면 오류 로그를 남기고 아무것도 그리지 않는다(운영 경로엔 없다 — 스냅샷이 늘 싣는다).
+    - *구현:* 사각형은 칸·분할 id 집합이 트리와 **정확히** 같을 때만 쓴다(빠짐·남음·중복 없음). 어긋나면 없을 때와 같이 가른다 — 루트가 슬롯이면 전체 상자, 분할이면 아무것도 안 그린다. 둘 다 오류 로그를 남긴다(사각형이 아예 없는 단일 칸만 허용된 입력이라 조용하다). 어긋난 사각형으로 그리면 칸이 빠지고 구분선이 트리에 없는 분할을 끈다.
+    - *구현:* 뷰 좌표나 비율 한계(`ratioBounds`)를 모르면 구분선을 잠근다 — 확정할 곳도 범위도 없다.
 
 ### 2f. 구분선 — 미리보기·확정·화해
 
 - **모양:** 분할 경계 `at` 에 중심을 둔 오버레이. 레이아웃 공간 0, 히트 8px, 보이는 선 1px `var(--border)`, 호버·드래그 중 `var(--accent)`(현 `index.css:37-40` 매핑과 같은 색), `zIndex:20`(포커스 링 10 위, 메뉴 1000 아래). cdp 용으로 `data-split-id`·`data-dir` 를 단다.
 - **드래그:**
   - `pointerdown` 에서 축 길이 `L` = **이 창이 셸에 보고한 정수 캔버스 px** × 스냅샷의 분할 상자 폭을 구한다. 셸 강제(§2c)와 같은 입력이다. 루트 `getBoundingClientRect()` 는 포인터 원점을 잡는 데만 쓴다. 캔버스 보고 전이면 `getBoundingClientRect()` 로 대신한다.
+    - *구현:* 범위는 `pointerdown` 이 아니라 **렌더 때** 구분선마다 구한다(`useSplitDrag.ts`). 캔버스 = 이 창이 셸에 보고해 **성공한** 값이고 보고 모듈을 구독하므로(§2d) 보고가 바뀌면 다시 계산한다. 보고 전에는 루트 `getBoundingClientRect()` 를 정수로 반올림해 쓴다(알려진 한계: 렌더러가 다시 그려지지 않는 사이의 루트 크기 변화는 못 보고, 보고가 오면 그쪽을 쓴다). 상자 폭은 재사상 전 스냅샷 값이다 — 셸과 비트 단위로 같은 입력이어야 한다. `Splitter` 는 포인터가 움직일 때마다 그때의 범위를 읽고, 드래그 중 그 분할이 잠기거나 방향·split id 가 바뀌면 취소한다. 루트 rect 는 누를 때 한 번 포인터 원점·크기를 잡는 데 쓴다.
   - 허용 범위는 `[max(ratio_min, 30/L), min(ratio_max, 1 − 30/L)]` — 셸 클램프와 같은 한계(스냅샷의 `ratio_min/max` — 화면이 0.1/0.9 를 베끼지 않는다)에, 분할의 두 쪽(서브트리 통째)이 각각 30px 이상이라는 조건(D2)을 겹친 것이다. 범위가 비면(`L < 60`) 그 구분선은 움직이지 않는다.
   - `pointermove` 는 rAF 로 합친다(orca `pane-divider-drag.ts:251-253`). `setPointerCapture` 와 창 수준 리스너를 함께 건다(Chromium 캡처 순간 소실 — orca `:97`). 드래그 중엔 `body` 커서를 고정하고 `user-select:none` 을 건다. 움직임 없이 뗀 클릭은 명령을 보내지 않는다.
 - **미리보기 계산 = 셸 사각형의 선형 재사상**(프론트에 두 번째 트리 기하 구현을 두지 않는다). 끌리는 분할의 상자 `[X0,X1]`, 옛 경계 `B`, 새 경계 `B'` 에서:
@@ -172,6 +185,9 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   4. 명령이 실패하면 미리보기를 버린다(셸 값으로 돌아간다) + `console.error`.
   5. 새 드래그가 앞선 확정보다 먼저 시작되면 새 `token` 이 덮는다. 늦게 온 옛 응답은 token 이 달라 무시된다.
   6. 응답은 왔는데 500ms 안에 `awaitVersion` 스냅샷이 오지 않으면(이벤트 유실) `get_view` 를 한 번 당긴다(`WindowLayout.tsx:116` 과 같은 당김).
+  - *구현 — 규칙 밖 판정 둘(`useSplitDrag.ts`, 규칙 1~6 의 정본은 순수 리듀서 `splitPreview.ts` 의 `reducePreview`):*
+    - **떼는 순간 미리보기가 이미 이 드래그의 것이 아니면 명령을 보내지 않는다** — 다른 구분선의 새 드래그가 가져갔거나(두 포인터 — 규칙 5), 스냅샷이 그 split id 를 지워 취소됐을 때(규칙 1). 화면에 보이던 값은 이미 그 드래그의 것(또는 셸 값)이라, 보내면 보이지 않던 값이 확정된다. 판정은 렌더를 기다리지 않고 보낸 사건을 곧바로 접은 상태로 한다.
+    - 미리보기·확정 응답·당김은 그것을 시작한 뷰에 묶인다. 같은 렌더러에서 뷰가 바뀌면 미리보기와 진행 중 제스처를 버리고, 옛 뷰에서 시작한 확정의 응답·당김은 새 뷰에 닿지 않는다.
   - 결과적으로 LLM 쓰기가 사용자 확정보다 셸에 늦게 도착하면 LLM 값이 보이고, 먼저 도착하면 사용자 값이 이긴다 — 도착 순서의 마지막 쓰기.
 - 호출 배선은 `viewStore` 의 기존 invoke 묶음(`src/store/viewStore.ts:169` `split` 옆)에 `setSplitRatio` 를 더한다.
 - 프론트 명령 레지스트리(`window.__engramCmd`)엔 등록하지 않는다 — LLM 경로는 버스 `split.setRatio` 하나다. 같은 id 가 두 표면에서 달라지는 선례(`commands.rs` 의 `slot.popout` 주석)를 새로 만들지 않는다.
@@ -197,9 +213,9 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 - **바꾸는 것:**
   - `spatial.rs` 는 `geometry.rs` 의 경계 꼴 f64 사각형을 입력으로 받는다(`leaf_rects` `:115` 대체).
   - **인접은 정확 비교**(`me.x1 == other.x0`), **겹침은 `> 0.0`** 으로 바꾼다. 근거: 절단(guillotine) 레이아웃에서 두 칸이 맞닿는 경계는 언제나 어느 한 분할의 `at` 하나이고, `geometry.rs` 가 그 한 값을 양쪽 자손에 복사한다(§2a). 그래서 **참 인접은 크기와 무관하게 비트 단위로 같아 절대 놓치지 않는다.**
-  - 거짓 후보는 이론상 남는다. 모서리만 닿는 칸은 수학적으로 직교축 겹침이 0 이지만, 그 두 끝점이 서로 다른 분할에서 따로 계산되면 1 ulp 차이로 겹침이 양수가 될 수 있다.
-    - 이 후보는 **직교축 겹침이 가장 큰 후보를 고르는 규칙**(`spatial.rs:184-189`)에서 밀린다. 내 변이 놓인 분할 경계의 반대편은 그 분할 상자 높이 전체가 잎들로 덮이므로, 내 변과 실제로 맞닿은 참 이웃이 반드시 있고 그 겹침은 1 ulp 보다 훨씬 크다(잎 크기 ≥ 0.1^깊이).
-    - 그래서 선택 결과는 틀리지 않는다. 테스트로 박는다(§5).
+  - 거짓 후보는 이론상 남는다. 모서리만 닿는 칸은 수학적으로 직교축 겹침이 0 이지만, 그 두 끝점이 서로 다른 분할 경로에서 따로 계산되면 반올림 오차만큼 겹침이 양수가 될 수 있다. ★*구현:* 그 오차는 1 ulp 로 묶이지 않는다★ — 경로가 깊을수록 몇 ulp 로 커질 수 있다(지금(9단계) 코드 주석 `spatial.rs:86-89`).
+    - 이 후보는 **직교축 겹침이 가장 큰 후보를 고르는 규칙**(지금(9단계) `spatial.rs:108-113`)에서 밀린다. 내 변의 반대편은 잎들이 빈틈없이 덮으므로 내 변과 실제로 맞닿은 참 이웃이 있고, 보통 그 겹침은 오차보다 훨씬 크다.
+    - ★*구현:* 보장은 아니다★ — 내 칸 자체가 몇 ulp 두께로 무너지기 직전이면 그 여유가 사라져 동률·역전이 날 수 있다(같은 주석). 테스트가 박은 것은 1 ulp 어긋남 한 경우다(`spatial.rs:625` 의 `one_ulp_corner_candidate_loses_to_true_neighbor` — 전제인 1 ulp 차이를 `to_bits` 로 먼저 실측한다).
   - 모서리만 닿는 경우(겹침 0)는 인접이 아니다 — 지금과 같다.
   - 쓰기 경로는 면적 0 인 잎을 만들지 않는다 — 비율 쓰기와 분할이 f64 표현 가능성 규칙으로 거른다(§2c).
   - **그래도 면적 0 인 잎이 들어오면 결정적으로 다룬다**(방어 — 테스트가 트리에 직접 심은 값 등): 그 잎은 이웃을 갖지 않고 누구의 이웃도 되지 않는다(인접 판정 전에 건너뛴다). 순서는 아래 규칙대로 매겨 명단에서 빠지지 않는다. 패닉 없음.
@@ -223,6 +239,7 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 ## 4. 내가 정한 내부 선택 (보고)
 
 - **파일:** 셸 `layout/geometry.rs`(신규) · `tree.rs`·`manager.rs`·`apply.rs`·`types.rs`·`commands.rs`·`commands/layout.rs`·`lib.rs`(수정). 화면 `src/components/layout/LayoutLeaf.tsx`·`Splitter.tsx`·`splitPreview.ts`(순수 미리보기 상태·재사상·범위)·`ViewLayoutRenderer.tsx`(평평한 루트) · 캔버스 측정은 `WindowLayout.tsx` 안 훅 · 위치 규칙 CSS 는 `src/index.css`.
+  - *구현:* 화면 파일이 셋 더 섰다 — `useSplitDrag.ts`(미리보기 리듀서에 token 발급·확정 호출·당김 타이머·허용 범위를 붙이는 훅) · `windowCanvasReport.ts`(캔버스 보고 상태 — §2d) · `uiMetricsReport.ts`(지표 보고 — §2d).
 - **이름:** 버스 `split.setRatio`·`split.list`(목적어 먼저 — `slot.split` 과 같은 어순) · Tauri `set_split_ratio`·`report_window_canvas`·`report_ui_metrics`(snake_case — `split_slot`·`report_view_commands` 선례).
 - **셸 px 최소 = 클램프(거절 아님)** — 적용값을 돌려준다. 범위가 비면 `TooSmall` 로 무변경을 알린다(§2c). 드래그 경로와 같은 모양이라 LLM 도 사람도 같은 결과를 본다.
 - **결과 신호 = `outcome` 셋(`Applied`·`Unchanged`·`TooSmall`)** — 무변경을 「적용됨」과 구별하고, 화면은 무변경이면 미리보기를 즉시 버린다. 뷰별 version 을 따로 두는 대안은 관리자 구조를 바꿔야 해 택하지 않았다.
@@ -235,6 +252,7 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   - inset 은 `f64`. `min_pane_px` 는 실측 inset 과 가른 정책 필드다.
   - 「보냈음」은 성공 뒤에만 세운다.
 - **캔버스 측정 = callback ref + RO 부재 가드.** 실패 시 RO 를 기다리지 않고 유계 재시도한다. 지표 보고는 in-flight 걸쇠로 1 회.
+  - *구현:* 캔버스 보고 상태는 `windowCanvasReport.ts` 의 **웹뷰 싱글톤**이다 — 보낼 값은 최신 하나 · invoke 는 한 번에 하나 · 성공한 값만 기록 · 바뀌면 구독자에게 알림(§2d).
 - **틀 = 이벤트·`data-slot-id`, 안쪽 `data-slot-border` = 테두리·중앙정렬·내용.** 스타일 단언은 안쪽으로 겨냥을 옮기고 양성 짝을 더한다.
 - **f64 표현 가능성 규칙** — 분할은 `SplitTooDeep` 로 거절하고, 비율 쓰기는 **새로** 면적 0 잎을 만들면 `TooSmall` 이다. px 기반 분할 거절은 하지 않는다(R11 — 사용자 결정).
 - **반환 version = 락 안에서 뜬 스냅샷의 version.**
@@ -244,6 +262,11 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 - **좌표:** `f64` 경계 꼴. 셸 `round` = CSS `round(nearest)`(양수에서 같다).
 - **`split.list`** 는 LLM 이 split id 를 찾을 유일한 길이라 넣었다(범위 추가).
 - 잎 `React.memo` — 미리보기 중 상자가 안 바뀐 잎은 재렌더하지 않는다. 잎 안 구체 렌더러의 `key={node.id}`(`:219-224`)는 그대로 둔다.
+  - *구현:* 잎을 둘로 갈랐다(`src/components/layout/LayoutLeaf.tsx`). 바깥 **위치 틀**(`LayoutLeaf`, memo — `--x0..--y1`·`data-slot-id`·클릭 포커스·우클릭 메뉴 상태)과 **몸**(`SlotBody`, memo — `:112` · ★사각형을 받지 않는다★ · `[data-slot-border]`·내용·포커스 링·메뉴·오류 경계·ADR-0148 기억)이다. 재사상이 상자 밖 사각형을 같은 객체로 돌려주므로 그 잎은 틀도 다시 그리지 않고, 사각형이 바뀐 잎도 드래그 프레임마다 다시 그리는 것은 틀뿐이다(몸이 사각형을 받으면 터미널·마크다운까지 매 프레임 다시 그린다). 구체 렌더러의 `key={node.id}` 는 그대로다.
+- **구현 중 메인이 정한 것(사용자 결정 아님 — 보고, 2026-09-25):**
+  - **`slot_px` 는 캔버스와 지표를 둘 다 알 때만 `Some`** — 캔버스만으로 내면 `content`(틀 − 인셋)가 틀린 값이 된다. 없는 view·slot 은 그보다 먼저 `Err`(§2d).
+  - **비율 쓰기 결말의 철자는 두 표면이 같다** — 버스 `split.setRatio` 의 `RatioOutcome`(선언 매크로 enum)과 Tauri `set_split_ratio` 의 `SplitRatioOutcome` 이 variant 이름 `Applied`·`Unchanged`·`TooSmall` 을 그대로 싣는다. 타입 이름만 다르고(`ThemeOrigin`↔`ThemeSource` 와 같은 관계) 변환은 버스 핸들러가 한다. 철자는 지금(9단계) `src-tauri/tests/layout_commands.rs:1061` 의 `both_surfaces_spell_the_split_ratio_outcome_the_same_way` 가 맞댄다.
+  - **버스에서 없는 view·split 은 `CONFLICT`** + 적용 서비스의 사유 문구다 — 이 표의 모든 적용 실패가 쓰는 한 코드다(`src-tauri/src/layout/commands.rs` 헤더 「적용 실패는 코드 하나로 나간다」). id 형식 불량은 `INVALID_ARGUMENT` 이고, `split_id` 형식 불량의 반려 문구는 `split.list` 를 가리킨다.
 
 ## 5. 테스트 계획
 
@@ -253,7 +276,8 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   - 단일 슬롯 = (0,0,1,1). ADR-0140 두 방향.
   - 이웃 경계 `==` 동일(3단 중첩 포함). 분할 상자·`at`.
   - `spatial.rs` 사각형과 1e-6 교차 일치.
-  - `px_edge` 반올림 · 이웃 px 경계 동일 · `content = frame − insets` · 캔버스 없음 → `None`.
+    - *구현:* ★1단계(`e401966`)에만 있었다★ — 1b(`3f8c4ef`)가 `spatial.rs` 자신의 사각형 계산을 걷어 대조 기준이 사라졌고, 테스트도 함께 걷었다. 지금은 `spatial.rs` 가 이 모듈의 경계를 입력으로 받으므로 두 셸 기하가 갈릴 자리가 없다. 셸 식과 화면 식의 일치를 재는 것은 이 테스트가 아니다 — 허용 범위는 `splitPreview.test.ts` 가 셸 px 클램프 식을 옮긴 오라클과 비트 단위로 맞대고, CSS 반올림 경계와 셸 `px_edge` 의 일치는 jsdom 에 레이아웃이 없어 GUI 실측(이음매 0 — §7 R1)만 봤다.
+  - `px_edge` 반올림 · 이웃 px 경계 동일 · `content = frame − insets` · 캔버스 없음 → `None`(*구현:* 이 마지막 것은 관리자 `slot_px` 테스트 몫이고, 캔버스·지표 중 하나라도 없으면 `None` 이다).
   - **0px·1px 틀**: 캔버스를 줄여 칸 틀이 0px·1px 가 되는 트리에서 `content` 폭·높이가 0(음수 아님)이고 이웃 틀 px 경계가 겹치지 않는다.
   - 비율 한계 밖의 트리 값(`0.0`)이 클램프된다.
 - `spatial.rs`(lib_unit): 기존 테스트 전부 유지. 추가:
@@ -302,7 +326,10 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
   - 디바운스 → 정수 → 바뀔 때만 `report_window_canvas` · 같은 크기 재전송 없음 · 0×0 은 안 보냄.
   - 실패하면 **RO 변화 없이도** 유계 재시도로 재전송한다. 재시도 중 새 크기가 오면 옛 재시도를 취소한다.
   - 지표는 성공할 때까지 재시도, 성공 뒤 웹뷰당 1 회. 잎 N 개가 동시에 마운트돼도 in-flight 걸쇠로 보고 1 회. 실패로 끝나면 걸쇠가 풀려 다음 마운트가 재시도한다.
+    - *구현:* 이 줄의 단언은 `src/components/layout/uiMetricsReport.test.ts` 에 있다. 잎 마운트 쪽 한 건(잎이 늘어도 다시 안 보냄)은 `ViewLayoutRenderer.flat.test.tsx`.
   - RO 가 없는 환경에서 던지지 않는다.
+- *구현:* `src/components/layout/windowCanvasReport.test.ts` — 캔버스 보고 싱글톤(§2d)의 구독 알림(성공한 값만 · 해제 · 테스트 초기화 · 초기화 전 늦은 성공 무시). 관측·디바운스·재시도는 위 `WindowLayout.test.tsx` 그대로다.
+- *구현:* `src/components/layout/useSplitDrag.test.tsx` — 확정·화해 · 구분선별 제스처 token · 확정 뒤 당김(규칙 6) · 뷰 전환 · 허용 범위(보고한 캔버스 × 스냅샷 상자) · 그릴 사각형의 참조 유지.
 - **유지:** `ViewLayoutRenderer.test.tsx` 의 슬롯 분기(`:231-560`)·클릭 포커스(`:660-728`)·메뉴(`:730-`) — prop 이름 `node` 그대로, 루트 슬롯 전체 상자 규칙(§2e)으로 돈다. 이벤트는 틀(`[data-slot-id]`)에 쏘는 그대로 닿는다(`:679,699,706,826` 클릭 · `:781,834` 우클릭).
 - **겨냥 옮김(지우지 않는다)** — 틀에서 보던 스타일 단언을 안쪽 `[data-slot-border]` 로 옮긴다. 안 옮기면 셀렉터가 빈 배열을 돌려 던지거나 `!== 'center'` 가 헛되이 통과한다.
   - `emptyIcons()`(`:191-193`, 7 곳에서 씀) 셀렉터 `'[data-slot-id] > svg'` → `'[data-slot-border] > svg'`.
@@ -337,17 +364,24 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 | 6 | TS | `splitPreview.ts` + `Splitter.tsx` + `viewStore.setSplitRatio` + 테스트(미연결) | `npm test`·`tsc` |
 | 7 | TS | `ViewLayoutRenderer` 몸통을 평평한 루트로 교체(prop `node` 유지) · 칸 틀/테두리 분리 · `TabCanvas` 선택 props · 위치 CSS(`index.css` — 원문을 읽는 `src/index.css.test.ts` 게이트가 함께 돈다) · 지표 보고(첫 잎) · 분할 테스트 재작성(`:563-658`) · 틀 스타일 단언 겨냥 옮김(`emptyIcons`·`:263-305`) + 양성 짝 · 테스트 전용 사각형 도우미 · `.flat.test.tsx` 신설 · `.allotment.test.tsx` 삭제(오류 격리 5 건 이사) | `npm test`·`tsc` · **`/qa full`** |
 | 8 | TS | allotment 걷기: `main.tsx:5-8` · `index.css:33-40` · `package.json:28`+lock · `slotDaemonRestart.test.tsx:72-74` · `TerminalSlot.tsx:301` 주석 | `npm test`·`tsc` · `/qa full` |
-| 9 | 문서 | ADR-0223·0068·0140·0168 헤더 도장은 이미 박혔다(ADR-0227 선점 `fad7a7f` + 범위 확대). **ADR-0223 「영향」 본문은 고치지 않는다** — ADR 은 덮어쓰지 않고 누적한다(`docs/decisions/README.md:13`). 넓힌 도장(「결정 2 Allotment key와 영향의 승격 재마운트 조항」)이 그 조항을 덮는다 · 렌더러 「알려진 한계 ①」 주석과 `ViewLayoutRenderer.tsx:291` 의 잘못된 ADR-0063 인용은 렌더러 교체(7)와 함께 사라진다 · `CLAUDE.md` 기술 스택 · `qa.md:262` 줄 포인터 · `types.rs:113-116` 주석 · **`types.rs:72-74` `Split.id` 문서 주석**(「프론트는 렌더러 인스턴스를 이 값으로 가른다(`ViewLayoutRenderer`)」 → 구분선·미리보기 key) + `:70` 의 「0.0~1.0 클램프」 → 0.1~0.9. id 주석은 `LayoutNode.ts` 로 내보내지므로 **바인딩을 다시 구워 같은 커밋에 싣는다**(lib_unit + CI 바인딩 sync 게이트) | `/review doc` · lib_unit · 바인딩 sync · 도장이 이미 이 브랜치에 있으므로 머지 전 조건은 충족돼 있다 — 되돌리지 말 것 |
+| 9 | 문서 | ADR-0223·0068·0140·0168 헤더 도장은 이미 박혔다(ADR-0227 선점 `fad7a7f` + 범위 확대). **ADR-0223 「영향」 본문은 고치지 않는다** — ADR 은 덮어쓰지 않고 누적한다(`docs/decisions/README.md:13`). 넓힌 도장(「결정 2 Allotment key와 영향의 승격 재마운트 조항」)이 그 조항을 덮는다 · 렌더러 「알려진 한계 ①」 주석과 `ViewLayoutRenderer.tsx:291` 의 잘못된 ADR-0063 인용은 렌더러 교체(7)와 함께 사라진다 · `CLAUDE.md` 기술 스택 · `qa.md:262` 줄 포인터 · `types.rs:118-120` 주석 · **`types.rs:73-75` `Split.id` 문서 주석**(「프론트는 렌더러 인스턴스를 이 값으로 가른다(`ViewLayoutRenderer`)」 → 구분선·미리보기 key) + `:71` 의 「0.0~1.0 클램프」 → 0.1~0.9(이 셋의 줄은 지금(9단계)). id 주석은 `LayoutNode.ts` 로 내보내지므로 **바인딩을 다시 구워 같은 커밋에 싣는다**(lib_unit + CI 바인딩 sync 게이트) | `/review doc` · lib_unit · 바인딩 sync · 도장이 이미 이 브랜치에 있으므로 머지 전 조건은 충족돼 있다 — 되돌리지 말 것 |
 
 - 1~4 는 화면 동작을 바꾸지 않는다(새 필드·명령은 아직 안 쓰인다). 1b 는 셸 이웃·순서 답이 얇은 잎에서만 달라진다(옳아진다). 7 이 사용자 체감이 바뀌는 유일한 커밋이다.
 - 7 이 가장 크다 — 렌더러 교체와 테스트 두 파일 재작성이 한 커밋이어야 초록이다. 2 는 Rust·바인딩·TS 테스트 리터럴이 한 커밋에 묶인다.
+- *구현:* 순서는 표 그대로다(5·6 은 리뷰·QA 를 함께 돌았다). 단계별 커밋은 `docs/process/step-log.md` 의 이 구현 라운드 항목이 기록한다.
 
 ## 7. 위험·미결
 
 - **R1 소수 px 와 xterm** — 반올림(§2e)으로 칸 경계는 정수 CSS px 가 된다. 남는 것:
   - 배율 ≠ 1 에서 정수 CSS px 도 장치 px 로는 소수라 글자가 흐려질 수 있다 — **흐려지는지 모른다**(정책 조사 F6).
   - 설치된 WebView2 런타임의 `round()` 지원은 **미확인**이다(Edge 125+ 지원 — caniuse 경유). 미지원이면 반올림 없는 % 로 떨어진다.
-- **R2 드래그 중 PTY 리사이즈** — 미리보기가 칸 크기를 매 프레임 바꾸고, `TerminalSlot.tsx:93-119` 가 RO 마다 `fit()` 하고 PTY 전송은 50ms 디바운스다. 지금과 같은 부류다. orca 의 「드래그 중 PTY 리사이즈 보류」(`pane-pty-resize-hold.ts`)는 넣지 않았다.
+  - *구현 — 7단계 GUI 실측의 답(125% 배율 PC, 2026-09-25 · 출처 = `d014c0c` 본문, 인셋 값·관찰은 그 라운드 인계 메모 `.claude/handoff/history/20260925-085850-평평한-렌더러-1-7단계-완료-다음은-8단계.md:26-28`):*
+    - 이 WebView2 는 `round()` 를 지원한다 — 반올림 경로가 실제로 돈다.
+    - 칸 테두리 인셋 실측 = **0.8px**(125%) — `frame_insets` 를 `f64` 로 받은 까닭이 실제로 나왔다.
+    - 칸 사이 이음매 **0** — 홀수 폭 · DSF 1.0/1.25/1.5 · 헬퍼로 돌린 네이티브 창 리사이즈(손으로 창 테두리를 끄는 것은 사용자 GUI 확인 몫).
+    - 관찰(결함 아님): 루트 CSS 크기가 소수일 때 바깥 테두리가 0.2~0.4 CSS px 넘치거나 모자란다(§2e 정밀도 ①) · 구분선의 선은 반올림 없이 `at × 100%` 에 놓여 최대 약 0.4px 어긋난다(같은 색이라 안 보인다).
+    - ★남은 것 — 글자가 흐려지는지·열 수가 안정한지는 **미측정**★이다. 실 에이전트 터미널 칸이 필요해 사용자 GUI 확인 몫으로 넘겼다.
+- **R2 드래그 중 PTY 리사이즈** — 미리보기가 칸 크기를 매 프레임 바꾸고, `TerminalSlot.tsx:93-119` 가 RO 마다 `fit()` 하고 PTY 전송은 50ms 디바운스다. 지금과 같은 부류다. orca 의 「드래그 중 PTY 리사이즈 보류」(`pane-pty-resize-hold.ts`)는 넣지 않았다. *구현:* 드래그 중 PTY 리사이즈 체감은 **미측정**(실 에이전트 필요 — 사용자 GUI 확인 몫).
 - **R3 아주 얇은 잎** — 두 겹으로 막는다. ① `split.setRatio` 가 캔버스·지표를 알면 끌린 분할의 두 쪽에 px 최소를 강제한다(§2c). ② 그래도 조상 드래그로 생기는 얇은 잎은 `spatial.rs` 가 정확 인접·`total_cmp` 순서로 크기와 무관하게 옳게 다룬다(§2h). 남는 것: 캔버스·지표 보고 **전**(부팅 직후·팝아웃 직후)에 들어온 LLM 비율은 0.1~0.9 로만 잘린다 — 화면 최소 30px 은 깨질 수 있지만 이웃·순서는 ②로 옳다.
 - **R4 이벤트 유실 시 미리보기 고착** — 화해 규칙 6(당김)이 막는다. 당김도 실패하면 다음 스냅샷까지 미리보기가 남는다. 무변경 응답(`Unchanged`·`TooSmall`)은 스냅샷을 기다리지 않으므로 이 경로에 들지 않는다.
 - **R4b 틀보다 작은 칸** — 창 최소 크기가 없고(D4) 조상 드래그로 깊은 칸이 줄어(D2) 칸이 테두리 두께보다 작아질 수 있다. 틀/테두리 분리(§2e)와 셸 `content` 의 `max(0, …)`(§2d)로 겹침·음수 크기는 없다. 그 크기의 칸은 내용이 잘려 보일 뿐이다.
@@ -362,11 +396,14 @@ allotment 에 기대는 그 밖의 것: `src/main.tsx:5-8`(CSS import) · `src/i
 - **R4c 캔버스는 버전 없는 최신값** — 디바운스 100ms 만큼 늦을 수 있다. 지금 소비자(px 최소 클램프)는 그 오차를 견딘다(ADR-0068 과의 차이는 §8).
 - **R5 팝아웃** — 새 slot id·새 웹뷰라 재마운트는 못 피한다. 새 창 캔버스는 첫 보고 전까지 `None`.
 - **R6 숨은 탭** — 캔버스는 숨지 않는 창 내용 영역에서 잰다(§2d). 숨은 탭의 슬롯 숨김 감지(`TerminalSlot.tsx:94-108`)와 WebGL 좌석(가시성 관측 `:224`)은 그대로다.
+  - *구현(선재 관찰 — 이 변경이 만든 것 아님):* 구독 직후의 초기 `fit()`+`resizePty`(지금(9단계) `TerminalSlot.tsx:304-305`)엔 숨김 가드(`offsetParent`)가 없다 — 같은 전송을 하는 RO 콜백(`:99-101`)·비우기 콜백(`:285`)·재연결(`:355`) 세 경로는 건다. WebGL 부착 경로(`:211-213`)도 같은 전송을 하지만 이 가드 대신 IntersectionObserver 가시성(`:224-227`)으로 거른다. 재현하지 않았고 손대지 않았다.
 - **R7 DOM 순서 ≠ 화면 순서**(D6 감수).
 - **R8 성능** — 스냅샷에 사각형 O(N)이 늘고, 확정마다 스냅샷 1 개가 온다(모든 잎 재렌더, 재마운트 0). 미리보기는 끌리는 서브트리 잎만 바꾼다. 실측 없음.
+  - *구현(후속 후보):* 몸(`SlotBody`)의 memo 는 `node` 를 참조로 비교하는데 캐시는 스냅샷의 트리를 그대로 담으므로, 스냅샷마다 모든 칸의 몸이 다시 그린다(드래그 프레임에서는 안 그린다 — §4). `node.id` + `content` 값 비교로 줄일 수 있다. 코드 판독이고 실측 없음.
 - **R9 표면 철자 둘** — 버스 `split.setRatio` ↔ Tauri `set_split_ratio`. 기존 `slot.split` ↔ `split_slot` 과 같은 관례라 새 분열은 아니다.
 - **R10 px 의 LLM 노출** — 셸이 px 를 알지만 버스로 내보내는 명령은 두지 않았다(외부 소비자 없음). 필요해지면 `split.list`·`slot.resolveSpatial` 답에 싣는 것이 후속이다.
 - **모르는 것** — jsdom PointerEvent 지원 · 배율 125% 에서 `getComputedStyle` 테두리 폭 값 · Chromium 이 떼었다 붙인 xterm 의 WebGL 을 잃는지(D6 로 피해 가지만 검증 안 함).
+  - *구현:* 테두리 폭은 답했다(0.8px@125% — R1). jsdom 포인터 캡처는 여전히 모른다 — 테스트는 계획대로 선택적으로 부르고 좌표로 민다. WebGL 좌석은 미측정(실 에이전트 필요).
 
 ## 8. ADR 제안
 

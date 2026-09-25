@@ -533,9 +533,11 @@ flowchart TD
   WLnode --> TB["TabBar · 탭 전환·생성·rename"]
   WLnode --> AMP["AgentMonitoringPicker · 창당 1개"]
   WLnode --> TC["TabCanvas · 탭별 keep-alive (ADR-0056)"]
-  TC --> VLR["ViewLayoutRenderer · 레이아웃 트리 재귀"]
-  VLR -->|"node=split"| VLR
-  VLR -->|"node=slot"| CAP{"renderModeOverride 있으면 그것 · 없으면 capabilities.output.structured 로"}
+  TC --> VLR["ViewLayoutRenderer · 평평한 루트 — 재귀 없음 (ADR-0227)"]
+  VLR -->|"셸 사각형마다 · slot id 순"| LL["LayoutLeaf · 칸 틀 (슬롯당 1개)"]
+  VLR -->|"분할마다 · split id 순"| SPL["Splitter · 구분선 (분할당 1개)"]
+  LL --> SB["SlotBody · caps 게이트 · renderAs · 콘텐츠 분기"]
+  SB -->|"content=agent"| CAP{"renderModeOverride 있으면 그것 · 없으면 capabilities.output.structured 로"}
   CAP -->|"terminal"| TS["TerminalSlot · xterm (tag=0)"]
   CAP -->|"rich"| RS["RichSlot · NDJSON·마크다운 (tag=1)"]
   CAP -->|"dom"| DS["DomSlot · pre, ANSI 제거 (CDP 관측)"]
@@ -544,10 +546,10 @@ flowchart TD
   RS -.-> VEIL2
   DS -.-> VEIL2
   AL0 --> CN["ConnectionNotice · 데몬 연결 상태 띠"]
-  VLR -->|"content=agent_list"| ALa["AgentList · react-arborist (드래그 재부모화)"]
-  VLR -->|"content=preset_palette"| PP["PresetPalette"]
-  VLR -->|"content=empty"| EMPTY["Plus 아이콘 · 순수 그림 (pointer-events 끊음 — ADR-0143, 좌클릭 조항은 0144가 개정)"]
-  VLR --> SCM["SlotContextMenu · 우클릭 단일 커맨드"]
+  SB -->|"content=agent_list"| ALa["AgentList · react-arborist (드래그 재부모화)"]
+  SB -->|"content=preset_palette"| PP["PresetPalette"]
+  SB -->|"content=empty"| EMPTY["Plus 아이콘 · 순수 그림 (pointer-events 끊음 — ADR-0143, 좌클릭 조항은 0144가 개정)"]
+  SB --> SCM["SlotContextMenu · 우클릭 단일 커맨드"]
 ```
 
 - **렌더러 선택:** 1차 축은 `renderModeOverride`고(있으면 caps를 아예 안 본다), 없을 때만 `agent.capabilities.output.structured`로 `RichSlot`/`TerminalSlot`을 가른다. `renderModeOverride`로 terminal·rich·dom 셋 중 무엇이든 강제 가능(프론트 전용 — wire는 이 개념을 모른다). (ADR-0044, 통로 무정제 조항은 0045가 폐기)
@@ -627,7 +629,7 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TD
-  VLR["ViewLayoutRenderer (레이아웃 트리 → 슬롯)"]
+  SB["SlotBody · LayoutLeaf 안, 슬롯당 1개 (ADR-0227)"]
   CAPS{"caps(AgentInfo) 도착?"}
   PH["미도착 → 「연결 중」 플레이스홀더<br/>구체 렌더러를 먼저 띄우면 스왑 전 바이트가 유실된다 (ADR-0041)"]
   KEPT{"에이전트가 명부에서 사라짐?"}
@@ -639,7 +641,7 @@ flowchart TD
   VEIL["SlotUnavailableVeil · 세 슬롯 공용 막 (흐림·심볼·입력차단, ADR-0165)"]
   NOTE["구독 effect deps = [viewId, agentId] — 화신 표식(epoch) 제외, ADR-0164 · reset() 선행 · seq dedup · tag 게이트"]
 
-  VLR --> CAPS
+  SB --> CAPS
   CAPS -->|"미도착"| PH
   CAPS -->|"도착"| MODE
   CAPS -->|"수거됨"| KEPT

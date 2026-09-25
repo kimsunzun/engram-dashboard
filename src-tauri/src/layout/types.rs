@@ -68,10 +68,11 @@ pub enum LayoutNode {
         id: Uuid,
         content: SlotContent,
     },
-    /// ratio = a 가 차지하는 비율(0.0~1.0 클램프, 기본 0.5).
+    /// ratio = a 가 차지하는 비율(`tree::RATIO_MIN`~`RATIO_MAX` = 0.1~0.9 로 클램프, 기본 0.5).
     Split {
         /// 이 split 노드의 정체 — 분할마다 새로 뽑고, 노드가 자리를 옮겨도(형제 승격) 따라간다. 프론트는
-        /// 렌더러 인스턴스를 이 값으로 가른다(`ViewLayoutRenderer`).
+        /// 이 값(스냅샷 `split_rects` 의 `split_id` 로도 실린다)을 구분선(`Splitter`)의 key 와 드래그 미리보기가
+        /// 끄는 분할의 표식으로 쓴다(`ViewLayoutRenderer`·`splitPreview`).
         // ADR-0223
         #[ts(type = "string")]
         id: Uuid,

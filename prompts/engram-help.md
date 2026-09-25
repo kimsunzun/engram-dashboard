@@ -97,7 +97,10 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} split.list --view_id <id>
       그 탭의 구분선 전량. 행마다 split_id · dir · ratio · a_slots(왼쪽/위 쪽 슬롯) · b_slots(오른쪽/아래 쪽 슬롯). 슬롯 x 와 y 사이 구분선은 x 가 한쪽, y 가 다른 쪽 목록에 든 행이다
   {tool} split.setRatio --view_id <id> --split_id <id> --ratio <0..1>
-      그 구분선을 옮긴다. ratio 는 창 전체가 아니라 그 분할이 나누는 영역 안에서 a 쪽(왼쪽/위)이 갖는 몫이다. 범위 밖 값은 잘라서 적용하고 적용한 값을 돌려준다. outcome 은 Applied(바꿨다) · Unchanged(자른 값이 지금 값과 같다) · TooSmall(너무 작아 손대지 않았다)
+      그 구분선을 옮긴다. ratio 는 창 전체가 아니라 그 분할이 나누는 영역 안에서 a 쪽(왼쪽/위)이 갖는 몫이다. 범위 밖 값은 잘라서 적용하고 적용한 값을 돌려준다(Applied 가 아니면 지금 값). 함께 오는 outcome 은 셋이다
+      Applied     바꿨다
+      Unchanged   자른 값이 지금 값과 같다
+      TooSmall    너무 작아 손대지 않았다
 
   {tool} agent.spawnInto --window <label> --cwd <폴더> [--view_id <id>] [--slot_id <id>] [--backend <claude|codex>]
       에이전트를 새로 띄우고 그 자리에 배치한다. view_id 를 빼면 새 탭에 놓고, 그때는 slot_id 를 주지 않는다
