@@ -1,0 +1,758 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>턴 도중 입력 설계 검토</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<style>
+:root{
+  --bg:#F3F5F7; --surface:#FFFFFF; --surface-2:#F8F9FB;
+  --ink:#17202A; --ink-2:#2E3945; --muted:#5B6674; --faint:#88929F;
+  --rule:#DDE2E8; --rule-strong:#B8C1CC;
+  --accent:#1C5DA3; --accent-soft:#E5EDF7;
+  --decide-bg:#FFF5DF; --decide-border:#C4891A; --decide-ink:#4E3500; --decide-strong:#8A5A00; --decide-card:#FFFCF4;
+  --claude:#8B4870; --claude-soft:#F6EAF1;
+  --codex:#11706A; --codex-soft:#E1F2EF;
+  --queued-bg:#ECEFF2; --queued-ink:#66707E;
+  --bubble-bg:#DCE7F5; --bubble-ink:#14202E;
+  --stop:#B3261E; --stop-soft:#FBEAE8;
+  --go:#2D6A38; --go-soft:#E5F1E6;
+  --pending:#865E00; --pending-soft:#FAF0D8;
+  --focus:#1C5DA3;
+  --font-sans:"IBM Plex Sans KR","Apple SD Gothic Neo","Malgun Gothic","Noto Sans KR",system-ui,sans-serif;
+  --font-mono:"IBM Plex Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#0F1216; --surface:#171B21; --surface-2:#1C2128;
+    --ink:#E5E9EE; --ink-2:#C9D0D8; --muted:#9AA4B1; --faint:#6E7884;
+    --rule:#29303A; --rule-strong:#3E4753;
+    --accent:#7EB1EE; --accent-soft:#1A2738;
+    --decide-bg:#241C0F; --decide-border:#CF9A3A; --decide-ink:#F1DEB8; --decide-strong:#EDB85A; --decide-card:#1B1710;
+    --claude:#DB9CC2; --claude-soft:#2B1D26;
+    --codex:#63C7B9; --codex-soft:#132E2B;
+    --queued-bg:#20262D; --queued-ink:#9AA3AE;
+    --bubble-bg:#1D2B3D; --bubble-ink:#E5E9EE;
+    --stop:#F2897E; --stop-soft:#3A1D1A;
+    --go:#7FCB8C; --go-soft:#172E1C;
+    --pending:#E6B85C; --pending-soft:#33290F;
+    --focus:#7EB1EE;
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#0F1216; --surface:#171B21; --surface-2:#1C2128;
+  --ink:#E5E9EE; --ink-2:#C9D0D8; --muted:#9AA4B1; --faint:#6E7884;
+  --rule:#29303A; --rule-strong:#3E4753;
+  --accent:#7EB1EE; --accent-soft:#1A2738;
+  --decide-bg:#241C0F; --decide-border:#CF9A3A; --decide-ink:#F1DEB8; --decide-strong:#EDB85A; --decide-card:#1B1710;
+  --claude:#DB9CC2; --claude-soft:#2B1D26;
+  --codex:#63C7B9; --codex-soft:#132E2B;
+  --queued-bg:#20262D; --queued-ink:#9AA3AE;
+  --bubble-bg:#1D2B3D; --bubble-ink:#E5E9EE;
+  --stop:#F2897E; --stop-soft:#3A1D1A;
+  --go:#7FCB8C; --go-soft:#172E1C;
+  --pending:#E6B85C; --pending-soft:#33290F;
+  --focus:#7EB1EE;
+  color-scheme:dark;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+body{
+  background:var(--bg); color:var(--ink);
+  font-family:var(--font-sans); font-size:15.5px; line-height:1.72;
+  word-break:keep-all; overflow-wrap:break-word;
+  -webkit-font-smoothing:antialiased;
+}
+.page{max-width:880px; margin:0 auto; padding-inline:20px; padding-block:40px 72px}
+p,li{max-width:68ch}
+a{color:var(--accent); text-underline-offset:3px}
+code,.mono{font-family:var(--font-mono); font-size:.88em}
+code{background:var(--surface-2); border:1px solid var(--rule); border-radius:4px; padding:0 .3em; color:var(--ink-2)}
+strong{font-weight:600; color:var(--ink)}
+:focus-visible{outline:2px solid var(--focus); outline-offset:2px; border-radius:3px}
+@media (prefers-reduced-motion: no-preference){ html{scroll-behavior:smooth} }
+
+/* header */
+.eyebrow{font-size:12.5px; letter-spacing:.08em; color:var(--muted); font-weight:500; margin:0 0 8px}
+h1{font-size:clamp(26px,4.4vw,34px); line-height:1.25; font-weight:700; letter-spacing:-.015em; margin:0 0 12px; text-wrap:balance}
+.lede{color:var(--ink-2); margin:0 0 22px; font-size:16.5px}
+.status{display:grid; grid-template-columns:max-content 1fr; gap:6px 18px; margin:0; padding:14px 16px; background:var(--surface); border:1px solid var(--rule); border-radius:8px; font-size:14px}
+.status dt{color:var(--muted); font-weight:500}
+.status dd{margin:0}
+.chip{display:inline-block; font-size:12.5px; font-weight:600; padding:1px 8px; border-radius:999px; border:1px solid currentColor; line-height:1.6; vertical-align:1px; white-space:nowrap}
+.chip.pending{color:var(--pending); background:var(--pending-soft)}
+.chip.ok{color:var(--go); background:var(--go-soft)}
+.chip.stop{color:var(--stop); background:var(--stop-soft)}
+.chip.neutral{color:var(--muted); background:var(--surface-2)}
+@media (max-width:520px){ .status{grid-template-columns:1fr; gap:0 0} .status dd{margin-bottom:8px} }
+
+nav.toc{margin:22px 0 0; font-size:13.5px; color:var(--muted)}
+nav.toc ul{list-style:none; padding:0; margin:0; display:flex; flex-wrap:wrap; gap:4px 14px}
+nav.toc a{color:var(--ink-2); text-decoration:none; border-bottom:1px solid var(--rule-strong)}
+nav.toc a:hover{color:var(--accent); border-color:var(--accent)}
+
+/* sections */
+section{margin-top:52px}
+section > h2{font-size:21px; font-weight:700; letter-spacing:-.01em; margin:0 0 6px; padding-top:18px; border-top:1px solid var(--rule); text-wrap:balance}
+.sub{color:var(--muted); font-size:14px; margin:0 0 18px}
+h3{font-size:16.5px; font-weight:700; margin:26px 0 8px; text-wrap:balance}
+ul.plain{padding-left:1.1em; margin:8px 0}
+ul.plain li{margin:4px 0}
+ul.plain li::marker{color:var(--faint)}
+
+/* summary */
+.sum{display:grid; gap:0; margin:4px 0 18px; background:var(--surface); border:1px solid var(--rule); border-radius:8px}
+.sum-row{display:grid; grid-template-columns:8.5em 1fr; gap:14px; padding:11px 16px; border-top:1px solid var(--rule)}
+.sum-row:first-child{border-top:0}
+.sum-row b{font-weight:600; color:var(--muted); font-size:14px; padding-top:1px}
+@media (max-width:560px){ .sum-row{grid-template-columns:1fr; gap:2px} }
+.why{color:var(--ink-2)}
+
+/* decision block */
+.decide{margin-top:40px; background:var(--decide-bg); border:1.5px solid var(--decide-border); border-radius:12px; padding:22px 22px 24px; color:var(--decide-ink)}
+.decide h2{border:0; padding:0; margin:0 0 4px; color:var(--decide-ink); font-size:22px}
+.decide .sub{color:var(--decide-ink); opacity:.85}
+.decide strong{color:var(--decide-ink)}
+.decide-index{list-style:none; padding:0; margin:12px 0 4px; display:grid; gap:8px}
+.decide-index li{display:grid; grid-template-columns:auto 1fr; gap:10px; align-items:baseline; max-width:none}
+.tag{font-family:var(--font-mono); font-size:12px; font-weight:500; padding:1px 7px; border-radius:4px; background:var(--decide-strong); color:var(--decide-bg); white-space:nowrap}
+.tag.minor{background:transparent; color:var(--decide-strong); border:1px solid var(--decide-strong)}
+.q{margin-top:22px; padding-top:18px; border-top:1px dashed var(--decide-border)}
+.q h3{margin:0 0 8px; color:var(--decide-ink); font-size:18px}
+.q p{margin:8px 0}
+.flow{list-style:none; counter-reset:f; padding:0; margin:12px 0; display:grid; gap:6px}
+.flow li{counter-increment:f; display:grid; grid-template-columns:1.7em 1fr; gap:8px; max-width:none; align-items:baseline}
+.flow li::before{content:counter(f); font-family:var(--font-mono); font-size:12px; font-weight:500; text-align:center; border:1px solid var(--decide-border); border-radius:50%; width:1.7em; height:1.7em; line-height:1.6em; color:var(--decide-strong)}
+.flow li.ask{font-weight:600}
+.opts{display:grid; grid-template-columns:1fr 1fr; gap:12px; margin:14px 0}
+@media (max-width:640px){ .opts{grid-template-columns:1fr} }
+.opt{background:var(--decide-card); border:1px solid var(--rule-strong); border-radius:8px; padding:14px 16px; color:var(--ink)}
+.opt.rec{border:2px solid var(--decide-strong)}
+.opt h4{margin:0 0 6px; font-size:15.5px; display:flex; flex-wrap:wrap; gap:6px 8px; align-items:center}
+.opt ul{padding-left:1.05em; margin:6px 0 0}
+.opt li{margin:4px 0}
+.opt .state{font-size:12px; font-weight:600; padding:0 7px; border-radius:999px; border:1px solid var(--rule-strong); color:var(--muted)}
+.opt.rec .state{border-color:var(--decide-strong); color:var(--decide-strong)}
+.opt strong{color:var(--ink)}
+.common{background:var(--decide-card); border-left:3px solid var(--decide-border); padding:10px 14px; border-radius:0 6px 6px 0; margin:12px 0; color:var(--ink)}
+.common strong{color:var(--ink)}
+.cand{list-style:none; padding:0; margin:10px 0; display:grid; gap:8px}
+.cand li{background:var(--decide-card); border:1px solid var(--rule-strong); border-radius:6px; padding:9px 12px; color:var(--ink); max-width:none}
+.cand .say{font-weight:600}
+.decide details{margin-top:10px}
+
+/* figure */
+.figure{margin:18px 0 10px; background:var(--surface); border:1px solid var(--rule); border-radius:10px; padding:16px 16px 12px}
+.fig-cap{font-size:13.5px; color:var(--muted); margin:10px 2px 0}
+.dg-wrap{overflow-x:auto}
+.dg{display:block; width:100%; min-width:620px; max-width:760px; height:auto; margin:0 auto}
+.dg text{font-family:var(--font-sans); font-size:13px; fill:var(--ink)}
+.dg .t-b{font-weight:600}
+.dg .t-m{fill:var(--muted); font-size:12.5px}
+.dg .box{fill:var(--surface-2); stroke:var(--rule-strong); stroke-width:1}
+.dg .box-q{fill:var(--queued-bg); stroke:var(--queued-ink); stroke-width:1; stroke-dasharray:4 3}
+.dg .box-b{fill:var(--bubble-bg); stroke:var(--accent); stroke-width:1}
+.dg .ln{stroke:var(--muted); stroke-width:1.4; fill:none}
+.dg .ln-d{stroke-dasharray:5 4}
+.dg .head{fill:var(--muted)}
+.dg .lbl-bg{fill:var(--surface)}
+
+/* mock */
+.mock{margin:18px 0; border:1px solid var(--rule); border-radius:10px; background:var(--surface); overflow:hidden; max-width:560px}
+.mock-cap{display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:12px; color:var(--muted); padding:7px 12px; border-bottom:1px solid var(--rule); background:var(--surface-2)}
+.mock-cap button{font:inherit; color:var(--accent); background:none; border:0; padding:2px 4px; cursor:pointer; text-decoration:underline; text-underline-offset:2px}
+.mock-chat{padding:14px 14px 10px; font-size:14px; color:var(--ink-2)}
+.mock-tool{display:inline-block; margin-top:6px; font-family:var(--font-mono); font-size:12px; color:var(--muted); border:1px solid var(--rule); border-radius:4px; padding:1px 7px}
+.mock-queue{list-style:none; margin:0; padding:0 12px 6px; display:grid; gap:2px}
+.q-item{display:grid; grid-template-columns:1fr auto; align-items:center; gap:6px; color:var(--queued-ink); font-size:13.5px; max-width:none; min-width:0}
+.q-text{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0}
+.q-x{font:inherit; font-size:12px; line-height:1; color:var(--queued-ink); background:transparent; border:1px solid transparent; border-radius:4px; padding:4px 6px; cursor:pointer}
+.q-x:hover{border-color:var(--rule-strong); color:var(--ink)}
+.q-more{max-width:none}
+.q-more button{font:inherit; font-size:12.5px; color:var(--queued-ink); background:none; border:0; padding:2px 0; cursor:pointer; text-decoration:underline; text-underline-offset:2px}
+.mock-input{margin:4px 12px 12px; border:1px solid var(--rule-strong); border-radius:8px; padding:9px 12px; color:var(--faint); font-size:14px; background:var(--surface)}
+
+/* compare */
+.cmp{margin:16px 0; border:1px solid var(--rule); border-radius:10px; background:var(--surface); overflow:hidden}
+.cmp-head,.cmp-row{display:grid; grid-template-columns:1fr 1fr}
+.cmp-head div{padding:10px 16px; font-weight:700; font-size:15px; display:flex; align-items:center; gap:8px}
+.cmp-head .c-claude{background:var(--claude-soft); color:var(--claude)}
+.cmp-head .c-codex{background:var(--codex-soft); color:var(--codex)}
+.cmp-row h3{grid-column:1 / -1; margin:0; padding:10px 16px 0; font-size:14px; color:var(--muted); font-weight:600; letter-spacing:.02em; border-top:1px solid var(--rule)}
+.cmp-cell{padding:6px 16px 14px}
+.cmp-cell + .cmp-cell{border-left:1px solid var(--rule)}
+.cmp-cell p{margin:6px 0}
+.be{display:none; font-size:12px; font-weight:700; padding:0 7px; border-radius:4px}
+.be.claude{color:var(--claude); background:var(--claude-soft)}
+.be.codex{color:var(--codex); background:var(--codex-soft)}
+.fact{font-size:13.5px; color:var(--muted)}
+.fact .mono{color:var(--ink-2)}
+@media (max-width:640px){
+  .cmp-head{display:none}
+  .cmp-row{grid-template-columns:1fr}
+  .cmp-cell + .cmp-cell{border-left:0; border-top:1px dashed var(--rule)}
+  .cmp-cell{padding-top:10px}
+  .be{display:inline-block}
+}
+details.names{margin:10px 0 0; font-size:13.5px; color:var(--muted)}
+details.names summary{cursor:pointer; color:var(--ink-2)}
+details.names ul{margin:6px 0 0; padding-left:1.1em}
+
+/* rules / edge grid */
+.rows{margin:12px 0; border-top:1px solid var(--rule)}
+.rows > div{display:grid; grid-template-columns:13em 1fr; gap:16px; padding:11px 0; border-bottom:1px solid var(--rule)}
+.rows dt{font-weight:600; font-size:14.5px}
+.rows dd{margin:0}
+.rows dd p{margin:0 0 4px}
+@media (max-width:620px){ .rows > div{grid-template-columns:1fr; gap:3px} }
+.inline-be{font-size:12px; font-weight:700; padding:0 6px; border-radius:4px; margin-right:4px}
+.inline-be.claude{color:var(--claude); background:var(--claude-soft)}
+.inline-be.codex{color:var(--codex); background:var(--codex-soft)}
+.inline-be.both{color:var(--muted); background:var(--surface-2); border:1px solid var(--rule)}
+
+/* decided */
+.decided{margin:14px 0; border-top:1px solid var(--rule)}
+.decided > div{display:grid; grid-template-columns:minmax(12em,1fr) 1.35fr; gap:18px; padding:10px 0; border-bottom:1px solid var(--rule)}
+.decided dt{font-weight:600; font-size:14.5px}
+.decided dt .ref{display:block; font-family:var(--font-mono); font-size:11.5px; font-weight:400; color:var(--faint); margin-top:2px}
+.decided dd{margin:0; font-size:14.5px; color:var(--ink-2)}
+.quote::before{content:"「"; color:var(--faint)}
+.quote::after{content:"」"; color:var(--faint)}
+.noquote{color:var(--faint); font-size:13.5px}
+@media (max-width:620px){ .decided > div{grid-template-columns:1fr; gap:2px} }
+
+/* table */
+.tbl-wrap{overflow-x:auto; margin:14px 0; border:1px solid var(--rule); border-radius:10px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; min-width:680px; font-size:14px}
+th,td{text-align:left; vertical-align:top; padding:10px 12px; border-bottom:1px solid var(--rule)}
+tr:last-child td{border-bottom:0}
+th{font-size:12.5px; color:var(--muted); font-weight:600; letter-spacing:.03em; background:var(--surface-2)}
+td.id{font-family:var(--font-mono); font-weight:500; white-space:nowrap}
+td .chip{margin-top:2px}
+.measured{font-size:14px; color:var(--ink-2); margin:8px 0}
+
+/* steps */
+.order-line{font-family:var(--font-mono); font-size:13px; color:var(--ink-2); background:var(--surface); border:1px solid var(--rule); border-radius:8px; padding:9px 12px; overflow-x:auto; white-space:nowrap}
+ol.steps{list-style:none; padding:0; margin:14px 0; counter-reset:s; display:grid; gap:0; border-top:1px solid var(--rule)}
+ol.steps > li{counter-increment:s; display:grid; grid-template-columns:2.2em 3.2em 1fr; gap:10px; padding:12px 0; border-bottom:1px solid var(--rule); max-width:none}
+ol.steps > li::before{content:counter(s); font-family:var(--font-mono); font-size:12px; color:var(--faint); padding-top:3px; text-align:right}
+.pname{font-family:var(--font-mono); font-weight:500; font-size:13px; color:var(--accent); background:var(--accent-soft); border-radius:4px; text-align:center; align-self:start; padding:2px 0}
+.step-body b{font-weight:600}
+.step-body p{margin:2px 0}
+.step-body .see{font-size:13.5px; color:var(--muted)}
+.stopmark{display:inline-block; font-size:12px; font-weight:600; color:var(--stop); border:1px solid var(--stop); background:var(--stop-soft); border-radius:999px; padding:0 7px; margin-left:4px; white-space:nowrap}
+@media (max-width:480px){ ol.steps > li{grid-template-columns:1.6em 2.8em 1fr; gap:8px} }
+
+/* risks */
+.risks{list-style:none; padding:0; margin:12px 0; display:grid; gap:10px}
+.risks li{max-width:none; display:grid; grid-template-columns:5.5em 1fr; gap:12px; align-items:start}
+.risks li p{margin:0; max-width:68ch}
+@media (max-width:480px){ .risks li{grid-template-columns:1fr; gap:2px} }
+
+ol.next{padding-left:1.4em; margin:12px 0}
+ol.next li{margin:6px 0}
+ol.next li::marker{font-family:var(--font-mono); color:var(--faint)}
+
+footer{margin-top:56px; padding-top:14px; border-top:1px solid var(--rule); font-size:13px; color:var(--muted)}
+footer p{margin:4px 0}
+</style>
+</head>
+<body>
+
+<div class="page">
+
+<header>
+  <p class="eyebrow">S21 · JSON 채팅 모드 · 구현 전 최종 검토</p>
+  <h1>턴 도중 입력 설계 검토</h1>
+  <p class="lede">에이전트가 턴을 도는 동안 보낸 글을 어디에 보이고, 언제 넘기고, 어떻게 목록에서 빼는지. 구현 들어가기 전 마지막으로 보실 요약이다.</p>
+  <dl class="status">
+    <dt>문서</dt><dd>TRD 7판 · PRD 5판 <span class="chip neutral">PRD 머리: 5판 리뷰 전</span></dd>
+    <dt>적대 리뷰 (TRD 7판)</dt><dd>5차까지 돌았다 — 1–4차 FIX 반영 · 5차 codex <span class="chip ok">PASS</span> · Claude 리뷰어는 가벼운 지적만(반영함). 답을 주시면 반영한 뒤 한 번 더 확인한다</dd>
+    <dt>코드</dt><dd>아직 한 줄도 안 바뀌었다</dd>
+    <dt>열린 질문</dt><dd><strong>N11 · N12 · N13</strong> + ✕ 툴팁 문구(작은 것) — <a href="#decide">바로 아래</a></dd>
+    <dt>측정</dt><dd>Phase 0(M1–M8) 끝남 · 구현을 막는 남은 측정 다섯(M9·M10·M13·M15·M16) <span class="chip pending">미측정</span></dd>
+  </dl>
+  <nav class="toc" aria-label="차례">
+    <ul>
+      <li><a href="#summary">요약</a></li>
+      <li><a href="#decide">결정해 주실 것</a></li>
+      <li><a href="#screen">화면</a></li>
+      <li><a href="#compare">claude 와 codex</a></li>
+      <li><a href="#edge">특수한 경우</a></li>
+      <li><a href="#decided">확정된 결정</a></li>
+      <li><a href="#measure">측정과 멈춤 조건</a></li>
+      <li><a href="#order">구현 순서</a></li>
+      <li><a href="#risk">남은 위험</a></li>
+      <li><a href="#next">다음 순서</a></li>
+    </ul>
+  </nav>
+</header>
+
+<section id="summary">
+  <h2>한 화면 요약</h2>
+  <div class="sum">
+    <div class="sum-row"><b>보이는 자리</b><span>턴이 도는 동안 보낸 글은 대화에 곧바로 박히지 않고 <strong>입력창 위 회색 목록</strong>(대기 목록)에 선다.</span></div>
+    <div class="sum-row"><b>넘기는 때</b><span>에이전트가 <strong>받을 수 있는 가장 이른 때</strong> — 보통 지금 도는 도구 호출이 끝나는 지점.</span></div>
+    <div class="sum-row"><b>말풍선이 되는 때</b><span>에이전트가 그 글을 받았다고 알려 오면 목록에서 빠져, <strong>그 순간의 대화 끝</strong>에 평범한 말풍선이 된다.</span></div>
+    <div class="sum-row"><b>✕</b><span>목록의 모든 항목에 늘 있고, 누르면 그 항목을 목록에서 뺀다 — 모든 창에서 함께.</span></div>
+    <div class="sum-row"><b>범위</b><span>JSON(구조화 채팅) 모드만. 터미널(PTY) 모드는 입력 바이트 하나 안 바뀐다.</span></div>
+  </div>
+  <p class="why"><strong>왜.</strong> 오늘 claude 는 보낸 자리에 말풍선을 박아서, 앞 답의 나머지가 그 아래로 이어진다 — 에이전트가 실제로 읽은 순서와 어긋나 보인다. codex 는 턴 도중 보낸 글이 턴이 끝날 때까지 모델에도 화면에도 가지 않는다. 둘 다 보낸 글을 거둘 방법이 없다.</p>
+</section>
+
+<section id="decide" class="decide" aria-labelledby="decide-h">
+  <h2 id="decide-h">결정해 주실 것</h2>
+  <p class="sub">넷이다. 큰 것은 N11 · N12 · N13 — 셋 다 드문 실패 상황의 처리다. 툴팁은 문구만 고르면 된다.</p>
+  <ul class="decide-index">
+    <li><span class="tag">N11</span><span><strong>codex 에서 답 못 받은 글의 후속 턴이 실패하면</strong> — 포기할지, 다음 사용자 글까지 기다릴지. 권고 = 기다린다.</span></li>
+    <li><span class="tag">N12</span><span><strong>codex 가 받았는지 모르는 글에 ✕ 를 누르면</strong> — 우편을 곧바로 풀지, 결말이 날 때까지 붙들지. 화면은 어느 쪽이든 같다. 권고 = 곧바로 푼다.</span></li>
+    <li><span class="tag">N13</span><span><strong>codex 가 받았는지 모르는 글 뒤에 친 글</strong> — 그 뒤에서 멈춰 기다릴지, 앞질러 보낼지. 권고 = 앞질러 보낸다.</span></li>
+    <li><span class="tag minor">툴팁</span><span><strong>✕ 툴팁 「취소 — 글은 버려짐」</strong>이 이제 늘 맞지는 않다 — 문구를 바꿀지.</span></li>
+  </ul>
+
+  <div class="q">
+    <h3>N11 · 후속 턴 자체가 실패하면</h3>
+    <p><strong>상황.</strong> codex 는 드물게 턴이 끝나는 찰나에 들어온 글을 대화 기록에만 넣고, 답하지 않은 채 턴을 끝낸다. 말풍선은 섰는데 답이 없는 글이 남는다. 설계는 이때 그 글에 답하게 할 턴을 하나 더 연다.</p>
+    <ol class="flow">
+      <li>턴이 끝나는 찰나에 글이 들어간다.</li>
+      <li>codex 가 기록만 하고 답 없이 턴을 끝낸다 — 말풍선은 있고 답은 없다.</li>
+      <li>후속 턴을 연다 — 그 사이 사용자가 새 글을 보냈으면 그 글의 턴이 그 몫을 하고, 아니면 빈 턴 하나를 연다.</li>
+      <li class="ask">그 후속 턴이 실패로 끝나면? (요청이 안 나감 · 거절됨 · 응답이 시한 안에 안 오거나 읽을 수 없음 · 턴이 오류로 끝남)</li>
+    </ol>
+    <div class="common">
+      <p><strong>두 안이 같은 것.</strong> 어느 쪽이든 다시 보내지 않는다 — 거절이 이어지는 동안 빈 턴을 계속 내는 고리를 막는다. 그리고 어느 쪽이든 그 글은 <strong>사용자가 다음 글을 보낼 때에야</strong> 답을 받는다(다음 턴이 기록에 있는 그 글을 함께 본다).</p>
+      <p><strong>갈리는 것은 하나 — 그 사이 우편이 먼저 들어가느냐.</strong></p>
+    </div>
+    <div class="opts">
+      <div class="opt">
+        <h4>(a) 포기한다 <span class="state">지금 TRD 본문 · 잠정</span></h4>
+        <ul>
+          <li>경고 로그만 남기고 후속 턴 몫을 지운다.</li>
+          <li>기다리던 우편이 곧바로 들어간다 — 모델이 답 못 받은 사용자 글보다 <strong>우편에 먼저</strong> 답할 수 있다.</li>
+          <li>리뷰어 둘이 이것이 「사용자 글이 우편보다 먼저」와 AC5·AC6(보낸 글은 답하는 턴을 받는다)을 깬다고 짚었다.</li>
+        </ul>
+      </div>
+      <div class="opt rec">
+        <h4>(b) 오류로 끝난 턴처럼 기다린다 <span class="state">권고</span></h4>
+        <ul>
+          <li>후속 턴 몫을 남겨 두고, <strong>다음 사용자 글의 턴</strong>이 그 몫을 한다(한 턴).</li>
+          <li>우편은 그때까지 기다린다 — 상한 없음.</li>
+          <li><strong>대가:</strong> 목록은 비어 있는데 우편만 안 들어가는 상태가 사용자가 무언가 칠 때까지 이어지고, 화면 어디에도 그 까닭이 안 보인다.</li>
+        </ul>
+      </div>
+    </div>
+    <p><strong>권고가 (b) 인 이유.</strong> 이미 내리신 두 결정과 같은 모양이다 — 「오류로 끝난 턴은 저절로 다시 보내지 않고 다음 입력과 함께」(Q8), 「사용자 글이 우편보다 먼저」(N6). (a) 는 두 번째를 이 경우에만 뒤집는다.</p>
+    <p><strong>언제 필요한가.</strong> codex 뼈대(P2)를 짜기 전. TRD 는 답이 오기 전에 이 갈래를 짜지 않는다고 적어 두었다.</p>
+    <details class="names">
+      <summary>어느 답이든 이미 고친 것</summary>
+      <p>후속 턴 몫이 남은 채 도는 턴이 오류로 끝나면, 그 뒤 빈 턴을 저절로 내지 않는다(오류로 끝난 턴은 저절로 잇지 않는다 — PRD §3-10). (a) 면 경고 로그와 함께 지우고, (b) 면 붙든다. 근거 = TRD §10-4 N11.</p>
+    </details>
+  </div>
+
+  <div class="q">
+    <h3>N12 · 받았는지 모르는 글에 ✕ 를 누르면</h3>
+    <p><strong>상황.</strong> codex 가 넘긴 글을 받았는지 끝내 모르게 되면(드문 실패) 그 글은 목록에 회색으로 남는다 — 이미 정하신 대로다. 그 글에 사용자가 ✕ 를 누른 경우다.</p>
+    <div class="common">
+      <p><strong>화면은 두 안이 같다.</strong> ✕ 를 누르면 곧바로 모든 창에서 사라지고, 나중에 codex 가 사실 받았던 것이 드러나면 대화 끝 말풍선으로 나타나 답을 받는다 — 평소 「늦게 누른 경우」와 똑같이 보인다.</p>
+      <p><strong>갈리는 것은 화면 밖 둘 — 우편과 LLM 이 읽는 목록.</strong></p>
+    </div>
+    <div class="opts">
+      <div class="opt rec">
+        <h4>(a) 곧바로 끝낸다 <span class="state">권고 · 지금 TRD 잠정</span></h4>
+        <ul>
+          <li>✕ 순간 목록에서 완전히 빠진다 — 기다리던 우편이 흐르고, LLM 목록에서도 사라진다.</li>
+          <li>나중에 받힌 것이 드러나면 말풍선이 되고 답도 받는다.</li>
+          <li><strong>대가:</strong> PRD 의 「✕ 하나는 결말 하나」를 이 경우만 어긴다 — 속으로는 「사라짐」으로 끝났다가 「말풍선」으로 바뀐다.</li>
+        </ul>
+      </div>
+      <div class="opt">
+        <h4>(b) 결말이 날 때까지 붙든다</h4>
+        <ul>
+          <li>LLM 목록에는 「취소 중」으로 남고, <strong>우편은 계속 기다린다</strong>.</li>
+          <li>받았다는 알림이 끝내 안 오면 에이전트가 끝날 때까지 그렇다.</li>
+          <li><strong>대가:</strong> 화면에는 아무것도 없는데 우편이 멈춘다 — 까닭이 안 보이는 막힘이 하나 는다.</li>
+        </ul>
+      </div>
+    </div>
+    <p><strong>권고가 (a) 인 이유.</strong> 「목록에서 빠지려면 이유가 있어야」 한다고 하셨는데, 여기서는 사용자가 ✕ 를 누른 것이 그 이유다. (b) 는 보이지 않는 막힘을 하나 더 만든다 — 우편만이 아니라, 화면에 없는 그 항목 때문에 한가할 때 보낸 새 글까지 전부 목록을 거치게 된다.</p>
+  </div>
+
+  <div class="q">
+    <h3>N13 · 받았는지 모르는 글 뒤에 친 글</h3>
+    <p><strong>상황.</strong> codex 가 받았는지 모르는 글 A 가 목록에 회색으로 남아 있다(드문 실패). 사용자가 그 뒤에 글 B, C 를 친다.</p>
+    <p class="fact">이것은 제가 PRD 의 「뒤에 친 글은 앞 글을 앞지르지 않는다」에 맞춰 (a) 로 적어 둔 것인데, 체감이 큰 동작이라 여쭙는다고 리뷰어가 짚었다.</p>
+    <div class="opts">
+      <div class="opt">
+        <h4>(a) A 뒤에서 멈춘다 <span class="state">지금 TRD 잠정</span></h4>
+        <ul>
+          <li>B, C 는 A 가 빠질 때까지 회색으로 기다린다 — A 를 ✕ 로 치우면 풀린다(정산 중·오류 턴 뒤 대기 중이 아니면).</li>
+          <li>순서는 늘 지켜진다.</li>
+          <li><strong>대가:</strong> A 하나 때문에 그 뒤 대화가 전부 멈춘다. 회색 줄들이 똑같이 생겨서 A 가 원인이라는 게 화면에 안 드러난다.</li>
+        </ul>
+      </div>
+      <div class="opt rec">
+        <h4>(b) A 만 건너뛰고 보낸다 <span class="state">권고</span></h4>
+        <ul>
+          <li>B, C 는 평소처럼 넘어가 답을 받는다. A 는 ✕ 가 있는 회색으로 그대로 남는다(우편은 A 때문에 계속 기다린다 — 상한 없음 결정대로).</li>
+          <li>codex 가 사실 A 를 받았던 게 나중에 드러나면, A 의 말풍선이 B, C 뒤에 선다 — <strong>그때만</strong> 순서가 뒤집힌다.</li>
+          <li><strong>대가:</strong> 「앞지르지 않는다」 규칙에 이 경우만 예외가 생긴다.</li>
+        </ul>
+      </div>
+    </div>
+    <p><strong>권고가 (b) 인 이유.</strong> 「글이 막히는 것 자체가 이상한 것」이라고 하셨다 — 고장 난 글 하나가 이어지는 대화 전체를 얼리는 쪽이 더 이상하다. A 는 이유(받음 · ✕ · 에이전트 끝) 없이는 여전히 목록에서 안 빠지고, 순서가 뒤집히는 것은 드문 실패 안에서도 늦은 신호가 올 때뿐이다.</p>
+  </div>
+
+  <div class="q">
+    <h3>✕ 툴팁 문구 <span class="tag minor">작은 것</span></h3>
+    <p><strong>지금 문구</strong> 「취소 — 글은 버려짐」(PRD §3-6 · AC10). ✕ 를 「늘 있고, 누르면 목록에서 뺀다」로 바꾼 뒤로 이 말이 틀리는 경우가 생겼다 — codex 에 이미 넘긴 글은 ✕ 로 목록에서 빠져도 모델에 닿고, 받히면 대화 끝 말풍선으로 나타난다. 첫 단계(P2)에서는 턴 도중 친 codex 글이 대부분 곧바로 넘어가므로 흔한 경우다. claude 도 ✕ 와 가져감이 엇갈리면 같다.</p>
+    <ul class="cand">
+      <li><span class="say">「목록에서 빼기」</span> — 말씀하신 ✕ 의 뜻 그대로(「그냥 x누르면 목록에서 기계적으로 빼는거」). 어느 경우에도 참이다.</li>
+      <li><span class="say">「목록에서 빼기 — 이미 넘어간 글은 대화에 나타날 수 있음」</span> — 늦은 말풍선까지 미리 알린다. 길다.</li>
+      <li><span class="say">그대로 둔다</span> — 넘긴 codex 글에서는 말과 동작이 어긋난다.</li>
+    </ul>
+    <p class="fact">바꾸면 PRD §3-6 · AC10 과 TRD 의 같은 문구 자리(§10-1 3 등)를 함께 고친다.</p>
+  </div>
+</section>
+
+<section id="screen">
+  <h2>화면에서 보이는 것</h2>
+  <p class="sub">항목 하나의 일생과 ✕ 의 결말 셋.</p>
+  <figure class="figure">
+    <div class="dg-wrap">
+      <svg class="dg" viewBox="-4 0 728 322" role="img" aria-labelledby="dg-t dg-d">
+        <title id="dg-t">대기 목록 항목 하나의 일생</title>
+        <desc id="dg-d">턴 도중 보낸 글은 입력창 위 회색 항목이 되고, 에이전트가 받았다고 알려 오면 목록에서 빠져 대화 끝 말풍선이 된다. 한가할 때 보낸 글은 목록을 거치지 않는다. ✕ 를 누르면 모든 창에서 곧바로 빠지고, 결말은 아직 안 받았으면 사라짐, 이미 가져갔으면 말풍선, 에이전트가 끝났거나 거절했으면 사라짐 중 하나다.</desc>
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" class="head"/>
+          </marker>
+        </defs>
+
+        <!-- idle bypass arc -->
+        <path d="M78,60 C78,12 642,12 642,58" class="ln ln-d" marker-end="url(#ah)"/>
+        <rect x="186" y="12" width="348" height="26" rx="4" class="lbl-bg"/>
+        <text x="360" y="30" text-anchor="middle" class="t-m">한가할 때 보낸 글 — 목록을 거치지 않고 곧바로 말풍선</text>
+
+        <!-- main row -->
+        <rect x="0" y="60" width="156" height="68" rx="8" class="box"/>
+        <text x="78" y="89" text-anchor="middle" class="t-b">턴 도는 중</text>
+        <text x="78" y="110" text-anchor="middle" class="t-m">글을 보낸다</text>
+
+        <rect x="188" y="60" width="156" height="68" rx="8" class="box-q"/>
+        <text x="266" y="89" text-anchor="middle" class="t-b">입력창 위 회색 항목</text>
+        <text x="266" y="110" text-anchor="middle" class="t-m">✕ 가 늘 있다</text>
+
+        <rect x="376" y="60" width="156" height="68" rx="8" class="box"/>
+        <text x="454" y="89" text-anchor="middle" class="t-b">에이전트가 받음</text>
+        <text x="454" y="110" text-anchor="middle" class="t-m">받았다는 알림이 온다</text>
+
+        <rect x="564" y="60" width="156" height="68" rx="8" class="box-b"/>
+        <text x="642" y="89" text-anchor="middle" class="t-b">목록에서 빠진다</text>
+        <text x="642" y="110" text-anchor="middle" class="t-m">대화 끝 말풍선</text>
+
+        <path d="M158,94 L185,94" class="ln" marker-end="url(#ah)"/>
+        <path d="M346,94 L373,94" class="ln" marker-end="url(#ah)"/>
+        <path d="M534,94 L561,94" class="ln" marker-end="url(#ah)"/>
+        <text x="454" y="150" text-anchor="middle" class="t-m">보통 도는 도구가 끝나는 때</text>
+
+        <!-- cancel branch -->
+        <path d="M266,128 L266,196" class="ln"/>
+        <text x="278" y="176" class="t-b">✕ 누름 — 모든 창에서 곧바로 빠지고, 결말은 셋 중 하나</text>
+        <path d="M112,196 L608,196" class="ln"/>
+        <path d="M112,196 L112,219" class="ln" marker-end="url(#ah)"/>
+        <path d="M360,196 L360,219" class="ln" marker-end="url(#ah)"/>
+        <path d="M608,196 L608,219" class="ln" marker-end="url(#ah)"/>
+
+        <rect x="0" y="222" width="224" height="92" rx="8" class="box"/>
+        <text x="112" y="248" text-anchor="middle" class="t-b">(가) 아직 안 받았다</text>
+        <text x="112" y="272" text-anchor="middle">모든 창에서 사라진다</text>
+        <text x="112" y="294" text-anchor="middle" class="t-m">글은 버림 · 모델은 모른다</text>
+
+        <rect x="248" y="222" width="224" height="92" rx="8" class="box-b"/>
+        <text x="360" y="248" text-anchor="middle" class="t-b">(나) 에이전트가 이미 가져갔다</text>
+        <text x="360" y="272" text-anchor="middle">대화 끝 말풍선으로 나타난다</text>
+        <text x="360" y="294" text-anchor="middle" class="t-m">에이전트가 답한다 · 알림 없음</text>
+
+        <rect x="496" y="222" width="224" height="92" rx="8" class="box"/>
+        <text x="608" y="248" text-anchor="middle" class="t-b">(다) 에이전트가 끝났거나 거절</text>
+        <text x="608" y="272" text-anchor="middle">사라진다</text>
+        <text x="608" y="294" text-anchor="middle" class="t-m">글은 버림</text>
+      </svg>
+    </div>
+    <figcaption class="fig-cap">「취소 중」은 어느 창에도 그리지 않는다. 결말이 날 때까지 그 상태를 보는 것은 LLM 이 읽는 목록뿐이다. 한가 = 도는 턴이 없고 목록도 비어 있음.</figcaption>
+  </figure>
+
+  <div class="mock" role="group" aria-label="대기 목록 화면 모형">
+    <div class="mock-cap"><span>화면 모형 · 예시 글 · ✕ 와 「외 N개」를 눌러 볼 수 있다</span><button type="button" id="mockReset">처음으로</button></div>
+    <div class="mock-chat">빌드를 돌리는 중입니다. 경고가 몇 개 나오고 있어요.<br><span class="mock-tool">도구 실행 중 · cargo build</span></div>
+    <ul class="mock-queue" id="mockQueue">
+      <li class="q-item"><span class="q-text" title="빌드 끝나면 경고도 같이 정리해 줘">빌드 끝나면 경고도 같이 정리해 줘</span><button class="q-x" type="button" title="취소 — 글은 버려짐" aria-label="목록에서 빼기">✕</button></li>
+      <li class="q-item"><span class="q-text" title="테스트는 --test-threads=4 로 돌려 줘. 병렬을 올리면 터미널이 같이 죽는다">테스트는 --test-threads=4 로 돌려 줘. 병렬을 올리면 터미널이 같이 죽는다</span><button class="q-x" type="button" title="취소 — 글은 버려짐" aria-label="목록에서 빼기">✕</button></li>
+      <li class="q-item"><span class="q-text" title="커밋은 아직 하지 마">커밋은 아직 하지 마</span><button class="q-x" type="button" title="취소 — 글은 버려짐" aria-label="목록에서 빼기">✕</button></li>
+      <li class="q-more"><button type="button">외 2개</button></li>
+    </ul>
+    <div class="mock-input">메시지 입력…</div>
+  </div>
+
+  <h3>표시 규칙</h3>
+  <ul class="plain">
+    <li><strong>목록 위에 머리줄(안내 문구 줄)이 없다</strong> — 회색 항목만. 대화 안에는 아무것도 그리지 않는다.</li>
+    <li>항목마다 회색 한 줄, 넘치면 「…」. <strong>마우스를 올리면 전문</strong>(툴팁).</li>
+    <li>오래된 것이 위. 3개를 넘으면 접혀 <strong>가장 오래된 3개</strong>와 「외 N개」가 보이고, 누르면 펼쳐진다. 개수·모양은 나중에 조정.</li>
+    <li>✕ 는 <strong>Tab 으로 닿는다</strong>. Esc 키 바인딩은 아직 없다.</li>
+    <li>✕ 를 누르면 그 항목이 <strong>모든 창에서 한꺼번에</strong> 빠진다 — 누른 창만이 아니다.</li>
+    <li>항목이 빠지는 까닭은 정해져 있다 — 받았다는 알림(말풍선이 된다) · ✕ · 에이전트 종료·끊기·거절(버린다). 하나씩 빠지고, 도구가 끝났다고 한꺼번에 비지 않는다.</li>
+    <li><strong>알림이 없다.</strong> 못 보낸 항목은 그냥 빠진다. 입력창으로 돌아오지도 않는다.</li>
+    <li>한가할 때 보낸 글이 말풍선으로 그려진 뒤 <strong>에이전트가 거절하면 그 말풍선을 조용히 지운다</strong>(목록을 거쳐 된 말풍선도). 거절이 아니라 에이전트가 끝나거나 턴이 끊겨 처리되지 못했으면 말풍선은 남는다.</li>
+    <li><strong>LLM 도 같은 목록을 읽고</strong>, 화면의 ✕ 와 같은 명령으로 어느 항목이든 취소한다.</li>
+    <li>세 테마(dark · light · e-ink)에서 읽히고, 입력창 위 에이전트 이름표를 가리지 않는다.</li>
+  </ul>
+</section>
+
+<section id="compare">
+  <h2>claude 와 codex 는 무엇이 다른가</h2>
+  <p class="sub">화면의 규칙은 같다. 다른 것은 넘기는 때와 ✕ 의 속, 이어받는 중의 처리다.</p>
+  <div class="cmp">
+    <div class="cmp-head" aria-hidden="true"><div class="c-claude">claude</div><div class="c-codex">codex</div></div>
+
+    <div class="cmp-row">
+      <h3>넘기는 때</h3>
+      <div class="cmp-cell">
+        <span class="be claude">claude</span>
+        <p><strong>받자마자 곧바로 넘긴다</strong> — 오늘처럼. claude 가 그 글을 자기 쪽에 쥐고 있다가 지금 도는 도구가 끝나는 지점에서 가져간다.</p>
+        <p class="fact">도구가 끝난 걸 보고서야 넘기면 그 경계를 놓친다 — 실측 <span class="mono">0/10</span>.</p>
+      </div>
+      <div class="cmp-cell">
+        <span class="be codex">codex</span>
+        <p><strong>우리가 붙들고 있다가 가장 이른 경계에 곧바로 넘긴다</strong> — 보통 도는 도구가 다 끝나는 순간. 도는 턴이 있으면 거기 끼워 넣고, 없으면 새 턴을 연다.</p>
+        <p class="fact">도구가 끝난 걸 보고 넘겨도 같은 경계에 들었다 — 실측 <span class="mono">10/10</span>, 틈 <span class="mono">6–64 ms</span>.</p>
+        <p class="fact">붙들 근거가 없는 구간(경계 직후 등 — 모호하면)은 곧바로 넘긴다. 도구 없이 답만 쓰는 구간은 측정(M16) 뒤 정한다. 착지는 두 걸음 — 먼저 늘 곧바로 넘기는 단계(P2), 측정(P7) 뒤 붙들기(P8).</p>
+      </div>
+    </div>
+
+    <div class="cmp-row">
+      <h3>✕ 를 누르면 — 속에서</h3>
+      <div class="cmp-cell">
+        <span class="be claude">claude</span>
+        <p>목록에 있는 claude 항목은 늘 claude 가 아직 안 가져간 글이다. ✕ 는 <strong>claude 에게 그 글을 빼 달라는 요청</strong>을 함께 보낸다.</p>
+        <p class="fact">결말은 claude 의 뒤이은 알림으로 정한다 — 「빼지 못했다」는 답이 「전달됐다」는 뜻은 아니다. 「뺐다」는 답이면 곧바로 취소 확정.</p>
+      </div>
+      <div class="cmp-cell">
+        <span class="be codex">codex</span>
+        <p><strong>우리 목록에서 뺀다</strong> — codex 에 따로 요청하지 않는다. 아직 붙들고 있던 글이면 codex 에 가지 않는다.</p>
+        <p class="fact">이미 넘긴 글이면 목록에서만 빠진다. 넘긴 글 하나를 거둬 오는 수단이 codex 에 없다(소스 판독) — codex 가 받으면 대화 끝 말풍선으로 나타난다(결말 나).</p>
+      </div>
+    </div>
+
+    <div class="cmp-row">
+      <h3>이어받는 중 보낸 글</h3>
+      <div class="cmp-cell">
+        <span class="be claude">claude</span>
+        <p><strong>예외 — 오늘 그대로.</strong> 이어받은 대화를 불러오는 중인지 가려낼 신호가 없어 한가할 때 보낸 글로 친다: 곧바로 말풍선, 곧바로 넘김. 그 짧은 틈엔 목록도 ✕ 도 없다.</p>
+        <p class="fact">claude 가 불러오기를 마친 뒤 그 글에 답하는지는 미측정(M14).</p>
+      </div>
+      <div class="cmp-cell">
+        <span class="be codex">codex</span>
+        <p><strong>목록에 서고 우리가 붙든다</strong>(✕ 있음). 준비되면 넘기고, 받히면 말풍선은 복원된 이력 아래에 선다.</p>
+        <p class="fact">대화는 이어받았는데 화면 이력 복원만 실패해도 그대로 넘긴다. 이어받기 자체가 실패하면 에이전트가 끝나므로 대기분은 버려진다.</p>
+      </div>
+    </div>
+  </div>
+  <details class="names">
+    <summary>구현 이름 (TRD 를 볼 때만 필요)</summary>
+    <ul>
+      <li>codex 넘기기 정책 = <code>HandOverPolicy</code> — 첫 단계 <code>Immediate</code>, 측정 뒤 <code>AtEarliestBoundary</code></li>
+      <li>codex ✕ 의 속 = <code>withdraw</code> · 받았는지 모르는 항목의 상태 = <code>Unconfirmed</code></li>
+      <li>claude 에 보내는 취소 요청 = <code>cancel_async_message</code> · codex 끼워 넣기 = <code>turn/steer</code>, 새 턴 = <code>turn/start</code></li>
+    </ul>
+  </details>
+</section>
+
+<section id="edge">
+  <h2>특수한 경우</h2>
+  <dl class="rows">
+    <div><dt>오류로 끝난 턴<br><span class="fact">요청 한도 · 과부하 · 맥락 초과</span></dt><dd>
+      <p><span class="inline-be codex">codex</span>목록에 남은 글은 저절로 안 간다. ✕ 로 뺄 수 있고, 사용자가 다음 글을 보내면 그 글과 한 턴에, 남은 글이 먼저 든다. 한도가 풀려도 저절로 안 간다.</p>
+      <p><span class="inline-be claude">claude</span>claude 가 하는 대로 따른다 — 버리면 목록에서 빠지고, 대화에 넣으면 말풍선. 억지로 맞추지 않는다.</p>
+      <p><span class="inline-be both">둘 다</span>그 턴에서 이미 말풍선이 됐는데 답을 못 받은 글은 그대로 둔다(후속 턴 없음).</p>
+    </dd></div>
+    <div><dt>턴 끝에 남은 글</dt><dd>
+      <p>다음 턴으로, 친 순서대로 — 다시 보낼 필요 없다. 여럿이면 한 다음 턴에 함께, 각자 따로 말풍선.</p>
+      <p class="fact">claude 는 claude 가 묶음을 정한다 — 미측정(M11), 다르면 보고.</p>
+    </dd></div>
+    <div><dt>남은 글이 기다리는 틈에 또 보냄</dt><dd><p>턴이 안 돌아도 한가가 아니다 — 새 글은 목록 맨 뒤에 서고, 말풍선은 친 순서대로 선다.</p></dd></div>
+    <div><dt>창 여러 개 · 다시 붙기</dt><dd>
+      <p>모든 창과 LLM 이 한 목록을 본다. 창을 닫았다 열어도, 앱을 재시작해도(데몬·에이전트가 살아 있으면) 그대로다.</p>
+      <p>연결이 끊겼다 다시 붙으면 실제 상태대로 — 그 사이 받힌 글은 말풍선, 버려진 글은 없는 채로. 데몬을 다시 띄우면 에이전트와 함께 목록도 사라진다.</p>
+    </dd></div>
+    <div><dt>codex 가 받았는지 모르게 됨<br><span class="fact">드문 실패</span></dt><dd>
+      <p>넘기기 요청에 30초 안에 답이 없거나, 답을 읽을 수 없거나, 턴 끝 확인이 실패한 경우. <strong>목록에 남는다.</strong> 빠지는 길은 셋 — 늦게 온 받았다는 알림(말풍선) · ✕ · 에이전트 종료. 다시 보내지 않는다.</p>
+      <p><strong>그 뒤에 보낸 글을 어떻게 할지는 결정 대기(<a href="#decide">N13</a>)</strong> — 지금 잠정은 뒤에서 기다리기(✕ 로 치우면 풀림), 권고는 그 항목만 건너뛰고 보내기.</p>
+      <p class="fact">그 동안 새 글은 전부 목록을 거치고(곧바로 말풍선이 안 된다) 우편은 기다린다. codex 가 그 글을 기록만 하고 알림을 안 주는 경우(미측정 — M10)에는 모델이 이미 가졌는데도 회색으로 남을 수 있다.</p>
+    </dd></div>
+    <div><dt>우편 (에이전트 간)</dt><dd>
+      <p>목록에 오르지 않는다. <strong>사용자 글이 먼저</strong> — 도는 턴이 없고 사용자 목록이 비었을 때에야 든다. 기다림에 상한이 없다. 터미널 모드의 우편은 오늘 그대로.</p>
+    </dd></div>
+    <div><dt>턴 도중 슬래시 명령<br><span class="fact">/compact 등</span></dt><dd>
+      <p>다른 글처럼 넘긴다. claude 가 그걸 어떻게 다루는지는 <strong>미측정(M13)</strong>. 받았다는 알림이 끝내 안 오면 그 항목이 에이전트가 끝날 때까지 남아 우편을 막는다 — 그래서 claude 경로를 짜기 전에 재고, 빨가면 멈추고 여쭙는다(<a href="#measure">멈춤 조건</a>).</p>
+    </dd></div>
+    <div><dt>끊기 · 에이전트 종료 · 거절</dt><dd>
+      <p>남은 항목은 알림 없이 빠지고 버려진다. 입력창으로 돌아오지 않고 다시 보내지 않는다.</p>
+      <p class="fact">턴 끊기 조작은 이 기능에 없다 — 바로 다음 기능이다. 이 기능 안에서 턴을 실제로 멈추는 것은 오류로 끝나는 턴뿐이다.</p>
+    </dd></div>
+    <div><dt>턴이 끝나는 찰나에 보냄</dt><dd><p><span class="inline-be claude">claude</span>목록에 한순간 비쳤다 곧바로 말풍선이 될 수 있다 — 표시만의 흔들림이다.</p></dd></div>
+  </dl>
+</section>
+
+<section id="decided">
+  <h2>확정된 결정</h2>
+  <p class="sub">2026-09-25 에 답하신 것. 다시 열지 않는다. 오른쪽은 말씀 그대로다.</p>
+  <dl class="decided">
+    <div><dt>✕ 는 늘 있고, 누르면 목록에서 뺀다<span class="ref">PRD §3-6</span></dt><dd><span class="quote">x를 건드릴 이유가 있어? 그냥 x누르면 목록에서 기계적으로 빼는거잖아. 구지 비활성 필요 있냐고</span> · 넘긴 글이 늦게 말풍선으로 나타나는 것엔 <span class="quote">상관없어</span></dd></div>
+    <div><dt>✕ 는 모든 창에서 곧바로 감춘다<span class="ref">PRD §3-6 · Q7</span></dt><dd><span class="quote">x 누르면 바로 빠지는 거잖아. 다른 창도 바로 빠져야 되는 거 아니?</span></dd></div>
+    <div><dt>목록 위 머리줄 없음<span class="ref">PRD §3-2 · Q4</span></dt><dd><span class="quote">한 줄 낭비</span></dd></div>
+    <div><dt>알림 없음 · 거둔 글은 버린다(입력창 복귀 없음)<span class="ref">PRD §3-7 · Q1</span></dt><dd><span class="quote">일단 그냥 다 버리고 나중에 생각하자</span></dd></div>
+    <div><dt>거절된 한가 말풍선은 지운다<span class="ref">PRD §3-5</span></dt><dd><span class="quote">거절하면 우리쪽 채팅도 지워져야</span></dd></div>
+    <div><dt>한가 말풍선이 거절이 아니라 종료·끊기로 처리 못 되면 남긴다<span class="ref">PRD §3-5 · N9</span></dt><dd><span class="quote">그냥 별도로 뭐 해야되는게 있음? resume 하면 어차피 갱신될텐데</span></dd></div>
+    <div><dt>codex 가 받았는지 모르는 항목은 목록에 남는다<span class="ref">PRD §3-4 · N10</span></dt><dd><span class="quote">갑자기 목록이 사라져서 이상할것같은데 응답이 없으면 유저가 뭘 할 수있다고 스택에서 빼? 목록에서 뺀다는건 이유가 있어야되는거아냐</span></dd></div>
+    <div><dt>우편 기다림에 상한 없음<span class="ref">PRD §3-9 · N8</span></dt><dd><span class="quote">일단 사용자 글이 막히면 우편도 막혀야 되는거 아냐? 상한이 필요한거? 애초에 글이 막히는것 자체가 이상한건데?</span></dd></div>
+    <div><dt>사용자 글이 우편보다 먼저<span class="ref">PRD §3-9 · N6</span></dt><dd><span class="noquote">인용 없음 — 우편이 사용자 입력 뒤로 늦어지는 것을 받아들이셨다(PRD §3-9).</span></dd></div>
+    <div><dt>claude 이어받는 중 보낸 글 = 오늘 동작<span class="ref">PRD §3-11 · N7</span></dt><dd><span class="quote">그냥 내가 채팅 치다가 오면 병합 잘 되는거잖아. 이번에 순서 삐뚤어져도 맞추는거 추가하잖아.</span></dd></div>
+    <div><dt>codex 는 가장 이른 경계까지 붙든다<span class="ref">PRD §3-1 · TRD §10-1 1</span></dt><dd><span class="quote">당연히 도구호출 끝나면 바로 푸쉬</span> · <span class="noquote">나중 릴리스가 아니라 이 기능의 일부라고 바로잡으심(인용 아님 — 풀어 쓴 말)</span></dd></div>
+    <div><dt>오류로 끝난 턴 — codex 는 저절로 안 보내고, claude 는 벤더대로<span class="ref">PRD §3-10 · Q8</span></dt><dd>claude: <span class="quote">억지로 구현하지 마</span> · codex: <span class="noquote">세션을 건드리지 않길 원하심(인용 아님 — PRD 의 풀어 쓴 말)</span></dd></div>
+    <div><dt>입력창 위 목록(대화 맨 아래 대기 행 기각)<span class="ref">PRD §6</span></dt><dd><span class="quote">터미널이 가장 자연스럽다</span></dd></div>
+    <div><dt>터미널(PTY) 모드는 범위 밖<span class="ref">PRD §2</span></dt><dd><span class="quote">터미널 모드는 그런거 필요없잖아</span></dd></div>
+    <div><dt>훅으로 대기분을 당겨오는 길 기각<span class="ref">PRD §6</span></dt><dd><span class="quote">훅마다 매번 뭔가 실행하면 안 된다</span></dd></div>
+  </dl>
+  <p class="fact">그 밖: 옛 벤더 버전은 오늘 동작(<span class="quote">알아서 업데이트</span>) · 접힌 목록의 개수·모양(<span class="quote">나중에 조정</span>) · 턴 끊기 조작은 바로 다음 기능 · wire 프로토콜 버전 5 → 6 승인(N4).</p>
+</section>
+
+<section id="measure">
+  <h2>측정과 멈춤 조건</h2>
+  <p class="sub">구현을 막는 측정은 다섯이다. <strong>다섯 모두 아직 안 쟀다.</strong></p>
+  <p class="measured">이미 잰 것 — Phase 0(M1–M8, 2026-09-25 · claude 2.1.280 · codex 0.156.1): claude 의 항목별 알림과 취소가 우리 모드에서 돈다 · codex 끼워 넣기와 항목 되울림이 선다 · 도구가 끝난 걸 보고 넘길 때 같은 경계 적중 claude 0/10, codex 10/10.</p>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>측정</th><th>무엇을 보나</th><th>언제</th><th>빨가면</th><th>상태</th></tr></thead>
+      <tbody>
+        <tr><td class="id">M9</td><td>codex 에 <strong>빈 턴</strong>을 열 수 있나 — 내용 없는 턴 시작이 받히고, 모델이 기록의 마지막 사용자 글에 답하나. 답 못 받은 글에 답하게 할 수단이다.</td><td>codex 뼈대(P2) 전 · Phase 0b</td><td><strong>멈추고 여쭙는다</strong>(질문 N3). 다시 보내는 길은 선택지에 없다.</td><td><span class="chip pending">미측정</span></td></tr>
+        <tr><td class="id">M10</td><td>codex 가 턴 끝 찰나에 <strong>기록만 한 글</strong>을, 턴이 끝난 그 순간 기록을 물어 가려낼 수 있나 — 그 글이 곧바로 기록에 실리나. 못 가르면 같은 글이 두 번 가거나, 턴 끝 항목이 전부 「모름」으로 목록에 남아 우편을 막는다.</td><td>P2 전 · Phase 0b</td><td><strong>멈추고 여쭙는다.</strong> 가려내기를 조용히 걷지 않는다.</td><td><span class="chip pending">미측정</span></td></tr>
+        <tr><td class="id">M13</td><td>claude 에 턴 도중 <strong>슬래시 명령</strong>(/compact 등)을 보냈을 때 받았다는 알림이 오나.</td><td>claude 경로(P3) 전 · Phase 0b</td><td>알림이 끝내 안 오면 <strong>멈추고 여쭙는다</strong> — 정상 조작이 우편을 상한 없이 막게 된다.</td><td><span class="chip pending">미측정</span></td></tr>
+        <tr><td class="id">M15</td><td><strong>우리 데몬의 반응 시간</strong> — codex 에서 도구가 끝났다는 신호를 받고 붙든 글을 넘기기까지. 측정된 가장 짧은 틈(6 ms)보다 짧아야 같은 경계에 든다. 출력을 쏟는 빌드와 병렬 도구를 반드시 넣는다.</td><td>P2 착지 뒤, 붙들기(P8) 전 · P7</td><td>6 ms 이상이면 <strong>멈추고 여쭙는다</strong>(붙들기 대 다른 길). 잃는 것은 도구·답 구간의 붙들기뿐 — 그때까지 선 것은 그대로다.</td><td><span class="chip pending">미측정</span></td></tr>
+        <tr><td class="id">M16</td><td>codex 에서 <strong>도구 없이 답을 쓰다 끝나는 지점</strong>에도 넘길 틈이 있나 — 그 순간 넘긴 글이 같은 턴에 드나.</td><td>P7 · P8 전</td><td><strong>그 구간만 곧바로 넘긴다</strong> — 멈추지 않는다. PRD 가 이미 정한 갈래라 질문이 아니다.</td><td><span class="chip pending">미측정</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="fact">그 밖의 벤더 확인(M11 claude 턴 끝에 남은 여럿 · M12 claude 오류 턴의 대기분 · M14 claude 이어받는 중 보낸 글)은 멈춤 조건이 아니다. 결과가 화면 동작을 바꾸면 다시 올린다.</p>
+</section>
+
+<section id="order">
+  <h2>구현 순서</h2>
+  <p class="sub"><strong>어느 단계에서 멈춰도 빌드가 서고, 어느 단계도 오늘보다 나빠 보이지 않는다.</strong> 화면에 보이는 변화는 그것을 만드는 쪽과 같은 단계에 들어온다. P 번호는 이름이고, 순서는 아래와 같다.</p>
+  <div class="order-line">P0 → P1 → P4 → P5 → P3 → P2 → P7 → P8 → P6</div>
+  <ol class="steps">
+    <li><span class="pname">P0</span><div class="step-body"><p><b>측정 준비와 Phase 0b</b> — 실측 로그를 시험 자료로 옮기고 M9·M10·M13 을 잰다. 코드 없음.<span class="stopmark">멈춤 지점</span></p><p class="see">보이는 변화: 없음. M9·M10 이 빨가면 P2 전, M13 이 빨가면 P3 전에 멈춘다.</p></div></li>
+    <li><span class="pname">P1</span><div class="step-body"><p><b>공통 뼈대</b> — 목록 상태를 나르는 사건과 그 해석 규칙, 입력 경로(사람 입력 / 우편 구분), 우편 대기 판정 자리.</p><p class="see">보이는 변화: 없음 — 아직 아무도 사건을 내지 않는다.</p></div></li>
+    <li><span class="pname">P4</span><div class="step-body"><p><b>명령</b> — 목록 조회·취소 명령, wire 프로토콜 버전 5 → 6.</p><p class="see">보이는 변화: LLM·CLI 가 목록(아직 빔)을 읽고 취소를 부를 수 있다.</p></div></li>
+    <li><span class="pname">P5</span><div class="step-body"><p><b>화면</b> — 대기 목록(머리줄 없음 · 모든 항목에 ✕ · 접힘 · 툴팁), 창 쪽 순서 맞추기.</p><p class="see">보이는 변화: 없음 — 목록을 채울 쪽이 아직 없어 오늘과 같게 보인다.</p></div></li>
+    <li><span class="pname">P3</span><div class="step-body"><p><b>claude 경로</b> — 항목별 알림 번역, 취소 요청, 이어받기 복원.</p><p class="see">보이는 변화: claude 턴 도중 친 글이 목록에 서고 ✕ 가 선다 · 우편이 사용자 목록이 빌 때까지 기다린다 · 거절된 한가 말풍선이 지워진다.</p></div></li>
+    <li><span class="pname">P2</span><div class="step-body"><p><b>codex 뼈대 — 늘 곧바로 넘긴다</b>(넘길 수 없는 동안만 붙든다). ✕ 와 턴 끝 정리, 후속 턴 포함 — <strong>N11 답이 필요하다.</strong></p><p class="see">보이는 변화: codex 턴 도중 친 글이 목록에 서고 곧바로 넘어간다(✕ 는 목록에서 빼고, 늦게 받히면 말풍선) · 한가할 때 보낸 글이 곧바로 말풍선 · 오류 턴 뒤 남은 글이 다음 글과 함께 간다 · 연결 중·오류 턴 뒤처럼 붙든 동안의 ✕ 는 글도 거둔다.</p></div></li>
+    <li><span class="pname">P7</span><div class="step-body"><p><b>측정</b> — M16(하네스) · M15(P2 가 들어간 실제 경로에서). 코드 없음, 측정 보고서.<span class="stopmark">멈춤 지점</span></p><p class="see">보이는 변화: 없음. M15 가 빨가면 P8 전에 멈춘다.</p></div></li>
+    <li><span class="pname">P8</span><div class="step-body"><p><b>codex 붙들기</b> — 도구 구간(M16 이 녹이면 답 구간도)에 친 글을 붙들었다가 경계에 넘긴다.</p><p class="see">보이는 변화: 그 구간에 친 codex 글의 ✕ 가 글을 거둔다 · 전달 시점은 그대로다.</p></div></li>
+    <li><span class="pname">P6</span><div class="step-body"><p><b>마무리</b> — 새 ADR, 문서 정리, 실제 화면 실측(<code>/qa full</code>).</p><p class="see">완료 판정은 화면 실측으로 한다 — 테스트 통과만으로는 완료가 아니다.</p></div></li>
+  </ol>
+</section>
+
+<section id="risk">
+  <h2>아직 확인 안 된 것 · 남은 위험</h2>
+  <ul class="risks">
+    <li><span class="chip pending">미측정</span><p><strong>codex 의 답 없는 글.</strong> 턴 끝에 기록만 되는 갈래를 Phase 0 이 한 번도 맞히지 못했다. 이를 두 번 넘기지 않고 답하게 할 수 있는지는 M9·M10 에 달렸다.</p></li>
+    <li><span class="chip pending">미측정</span><p><strong>codex 붙들기의 전제.</strong> 도구 끝 경계는 10/10 으로 섰지만, 우리 데몬이 제때 넘기는지(M15)와 도구 없는 답 끝의 틈(M16)은 안 쟀다.</p></li>
+    <li><span class="chip pending">미측정</span><p><strong>턴 도중 슬래시 명령.</strong> 알림이 끝내 안 오면 그 항목이 에이전트가 끝날 때까지 회색으로 남고, 그 뒤 보낸 글도 전부 목록을 거치며, 우편도 못 든다(M13).</p></li>
+    <li><span class="chip neutral">확인된 한계</span><p><strong>codex 에 넘긴 글은 거둘 수 없다.</strong> 붙들지 않는 구간의 ✕ 는 목록에서만 뺀다 — 그 구간에서 claude(빼 달라고 요청까지 한다)와 체감이 갈린다. 소스 판독 기준, 가능성 높음.</p></li>
+    <li><span class="chip neutral">확인된 한계</span><p><strong>claude 는 벤더 내부용 표면에 기댄다</strong> — 항목별 알림과 취소 요청 둘 다. Phase 0 에서 우리 모드로 도는 것은 확인했다(M1·M3).</p></li>
+    <li><span class="chip pending">미확인</span><p><strong>claude 이어받기.</strong> 복원 이력에 턴 도중 친 글의 말풍선이 빠질 수 있고, 불러오는 중 넘긴 글을 claude 가 불러오기 뒤 처리하는지도 모른다(M14).</p></li>
+    <li><span class="chip pending">미확인</span><p><strong>거절된 말풍선의 오늘 모습.</strong> 한가할 때 보낸 글이 거절될 때 오늘 그 말풍선이 남는지(R9), claude 가 받았다고 알린 뒤 거절하는 순서가 실제로 있는지(R10), 처리 못 된 한가 말풍선이 이어받은 뒤 빠지는지(R11).</p></li>
+    <li><span class="chip pending">미확인</span><p><strong>claude 의 묶음과 오류 턴.</strong> 턴 끝에 남은 여럿을 한 턴에 넣는지(M11), 오류로 끝난 턴의 대기분을 어떻게 닫는지(M12). 다르면 보고한다.</p></li>
+    <li><span class="chip neutral">받아들인 대가</span><p><strong>codex 가 받았는지 모르는 항목</strong>이 남아 있는 동안 우편은 못 든다 — ✕ 로 치우기 전까지, 또는 에이전트가 끝날 때까지(뒤에 보낸 글이 함께 멈추는지는 N13). 드문 실패일 때의 일이다.</p></li>
+  </ul>
+</section>
+
+<section id="next">
+  <h2>다음 순서</h2>
+  <ol class="next">
+    <li>이 페이지의 N11 · N12 · N13 과 툴팁 문구에 답 → PRD·TRD 에 반영 → 반영분 적대 리뷰 한 번 더</li>
+    <li>TRD 확인</li>
+    <li>새 ADR 작성 — 결정과 거부한 대안, 기존 ADR 개정 도장(0044 · 0045 · 0193 · 0198 · 0226)</li>
+    <li>master 를 이 브랜치(<code>v0.3.2/feat/json-midturn-queue</code>)에 병합</li>
+    <li>구현 — <code>/implement</code> critical 등급, 위 순서(P0 → … → P6)대로</li>
+  </ol>
+</section>
+
+<footer>
+  <p>정본은 저장소의 두 문서다 — <code>docs/process/S21-codex-backend/prd-mid-turn-input-queue.md</code>(PRD 5판 · 「무엇」) · <code>docs/process/S21-codex-backend/trd-mid-turn-input-queue.md</code>(TRD 7판 · 「어떻게」). 둘이 어긋나면 PRD 가 이긴다.</p>
+  <p>이 페이지는 검토용 요약이다 — 브랜치 <code>v0.3.2/feat/json-midturn-queue</code> <code>9d8b680</code> 기준(로컬 커밋 · 아직 push 전).</p>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var data = [
+    "빌드 끝나면 경고도 같이 정리해 줘",
+    "테스트는 --test-threads=4 로 돌려 줘. 병렬을 올리면 터미널이 같이 죽는다",
+    "커밋은 아직 하지 마",
+    "로그 파일 경로도 알려 줘",
+    "끝나면 바꾼 파일 목록을 정리해 줘"
+  ];
+  var list = document.getElementById("mockQueue");
+  var reset = document.getElementById("mockReset");
+  if (!list || !reset) return;
+  var items = [], expanded = false;
+  var TIP = "취소 — 글은 버려짐";
+
+  function render(focusIndex){
+    list.textContent = "";
+    var shown = (expanded || items.length <= 3) ? items : items.slice(0, 3);
+    shown.forEach(function(text){
+      var li = document.createElement("li");
+      li.className = "q-item";
+      var span = document.createElement("span");
+      span.className = "q-text"; span.textContent = text; span.title = text;
+      var btn = document.createElement("button");
+      btn.type = "button"; btn.className = "q-x"; btn.textContent = "✕";
+      btn.title = TIP; btn.setAttribute("aria-label", "목록에서 빼기: " + text);
+      btn.addEventListener("click", function(){
+        var i = items.indexOf(text);
+        if (i >= 0) items.splice(i, 1);
+        render(i);
+      });
+      li.appendChild(span); li.appendChild(btn);
+      list.appendChild(li);
+    });
+    if (!expanded && items.length > 3){
+      var more = document.createElement("li");
+      more.className = "q-more";
+      var mb = document.createElement("button");
+      mb.type = "button"; mb.textContent = "외 " + (items.length - 3) + "개";
+      mb.addEventListener("click", function(){ expanded = true; render(3); });
+      more.appendChild(mb); list.appendChild(more);
+    }
+    if (typeof focusIndex === "number"){
+      var xs = list.querySelectorAll(".q-x");
+      var target = xs[Math.min(focusIndex, xs.length - 1)];
+      (target || reset).focus();
+    }
+  }
+  function init(){ items = data.slice(); expanded = false; render(); }
+  reset.addEventListener("click", init);
+  init();
+})();
+</script>
+</body>
+</html>
