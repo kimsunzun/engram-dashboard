@@ -108,7 +108,7 @@ function LayoutLeaf({
 }
 
 // ★사각형을 받지 않는다★: 구분선을 끄는 동안 프레임마다 바뀌는 것은 틀의 사용자 속성 넷뿐이다. 이 몸이 사각형을
-//   받으면 그때마다 슬롯 렌더러(터미널·마크다운 재파싱)까지 다시 그린다 — allotment 는 DOM 스타일만 바꿨다.
+//   받으면 그때마다 슬롯 렌더러(터미널·마크다운 재파싱)까지 다시 그린다.
 const SlotBody = memo(function SlotBody({
   node,
   isFocused,

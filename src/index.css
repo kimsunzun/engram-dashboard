@@ -17,7 +17,7 @@
 }
 
 /* html/body/#root 배경을 var(--bg)로 고정.
-   WebView2 기본 흰 배경이 Allotment 신규 pane 마운트 1-2프레임 동안 투시되는 현상 제거.
+   WebView2 기본 흰 배경이 앱 요소가 아직 덮지 않은 자리(콘텐츠가 칠해지기 전 등)로 비치지 않게 한다.
    폴백 #0a0a0a = 다크 --bg 값. data-theme 는 main.tsx 가 createRoot 전에 dark 로 박으므로, 이 폴백이 쓰이는
    구간은 그 모듈이 돌기 전(HTML 파싱~스크립트 평가)뿐이다.
    ★그 선박기를 걷어내지 말 것★ — 색 토큰은 styles/theme.css 의 :root[data-theme='…'] 안에만 있고 폴백이
@@ -28,15 +28,6 @@
    var(--bg)가 이미 있으면 폴백은 무시되고 현재 테마 배경이 사용된다(세 테마 모두 --bg 정의). */
 html, body, #root {
   background: var(--bg, #0a0a0a);
-}
-
-/* allotment/dist/style.css 는 sash 색을 자기 :root 에 하드코딩한다(--separator-border rgba(128,128,128,.35),
-   --focus-border #007fd4 = VS Code blue) — 앱 테마와 무관해 data-theme 스왑을 따라오지 않는다.
-   ★html:root 인 이유★: main.tsx 가 index.css 를 먼저, allotment CSS 를 나중에 import 해 번들에서 allotment
-   규칙이 뒤에 온다 — 같은 :root 로는 later-wins 로 진다. type+pseudo(0,1,1) 로 올려 순서와 무관하게 이긴다. */
-html:root {
-  --separator-border: var(--border);
-  --focus-border: var(--accent);
 }
 
 /* ADR-0227: 칸 틀 위치 = 셸 사각형(정규화 경계 --x0 --y0 --x1 --y1, 잎이 인라인으로 싣는다)을 루트 기준 %로.

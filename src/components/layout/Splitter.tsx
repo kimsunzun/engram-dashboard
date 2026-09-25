@@ -155,7 +155,7 @@ function createDrag(latest: { current: SplitterProps }, setDragging: (v: boolean
       abort()
       return
     }
-    // pointerdown 을 막지 않으므로(아래 onPointerDown) 누른 채 끄는 동안의 기본 동작은 여기서 막는다(allotment 와 같다).
+    // pointerdown 을 막지 않으므로(아래 onPointerDown) 누른 채 끄는 동안의 기본 동작은 여기서 막는다.
     e.preventDefault()
     p.last = axisOf(p.dir, e)
     if (!p.moved) {
