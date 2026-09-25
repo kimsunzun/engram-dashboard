@@ -1,9 +1,9 @@
 //! 레이아웃 invoke 껍데기 + 그 포트의 Tauri 어댑터 — §5 LLM 제어 표면(ADR-0035/0057).
 //!
-//! ★이 파일에 로직이 없다★: 16개 `#[tauri::command]` 는 전송 중립 적용 서비스(`crate::layout::apply`)를
+//! ★이 파일에 로직이 없다★: `#[tauri::command]` 전부가 전송 중립 적용 서비스(`crate::layout::apply`)를
 //! 부르는 얇은 껍데기이고, 락 규율·순서·검증은 전부 거기 있다(ADR-0081 결정 3 — 사람 클릭과 중계된 LLM
 //! 호출이 같은 함수에 떨어진다). 여기 남는 것은 Tauri 세계로의 번역 4종(알림 emit · 구독 재동기 ·
-//! OS 창 · 데몬 스폰)뿐이다.
+//! OS 창 · 데몬 스폰)과 측정 보고의 창 label(Tauri 가 넣어 주는 `Window` 에서 꺼낸다)뿐이다.
 //!
 //! ## ★이벤트: 창별 `window:tabs-updated`(ADR-0057)★
 //! `view:closed` 는 엔드투엔드 은퇴(더는 emit 안 함 — §5-2/G2). `layout:updated`(뷰 스냅샷)는 유지.
@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, State, Window};
 use uuid::Uuid;
 
 use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, RequestId};
@@ -21,8 +21,8 @@ use crate::commands::popout::{PopupCounter, TauriWindowHost};
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync, ViewManager,
-    ViewSnapshot, WindowHost, WindowTabsPayload,
+    AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
+    SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 
@@ -341,6 +341,20 @@ pub fn split_slot(
     )
 }
 
+// JS: `invoke('set_split_ratio', { viewId, splitId, ratio })` — ratio = a 쪽(왼쪽/위) 칸의 몫. 결말·반환
+// version 의 뜻은 `SplitRatioApplied` 문서(바인딩에 실린다).
+// ADR-0227
+#[tauri::command]
+pub fn set_split_ratio(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    view_id: Uuid,
+    split_id: Uuid,
+    ratio: f64,
+) -> Result<SplitRatioApplied, String> {
+    apply::set_split_ratio(&state, &TauriEvents { app: &app }, view_id, split_id, ratio)
+}
+
 #[tauri::command]
 pub fn close_slot(
     app: AppHandle,
@@ -460,6 +474,39 @@ pub async fn spawn_into(
         cwd,
     )
     .await
+}
+
+// ── 측정 보고(웹뷰 → 셸) ─────────────────────────────────────────────────────
+//
+// 둘 다 버스 명령이 아니다 — 버스에 두면 LLM 이 캔버스·지표를 위조할 수 있다. version 을 올리지도 알리지도
+// 않는다.
+// ADR-0227
+
+/// 창 웹뷰가 자기 탭 내용 영역 크기(정수 CSS px)를 알린다 — `invoke('report_window_canvas', { w, h })`.
+///
+/// ★창 label 을 인자로 받지 않는다★ — 잘못 적힌 label 하나가 남의 창 캔버스를 덮는다. Tauri 가 넣어 주는
+/// [`Window`] 가 그 값의 유일한 권위다(`report_view_commands` 와 같은 규칙).
+/// `w` 나 `h` 가 0 이면 무시하고 직전 값을 유지한다(`Ok`). 탭 모델에 없는 창이면 `Err`.
+#[tauri::command]
+pub fn report_window_canvas(
+    window: Window,
+    state: State<'_, LayoutState>,
+    w: u32,
+    h: u32,
+) -> Result<(), String> {
+    apply::report_window_canvas(&state, window.label(), w, h)
+}
+
+/// 창 웹뷰가 칸 틀 기본 지표를 알린다 — `invoke('report_ui_metrics', { metrics })`. 계약(단위·범위)은
+/// [`UiMetrics`] 문서가 정본이다. 범위를 벗어나면 `Err` 이고 직전 값을 유지한다. 창 label 은
+/// `report_window_canvas` 와 같이 Tauri 가 넣어 주는 [`Window`] 에서 꺼낸다.
+#[tauri::command]
+pub fn report_ui_metrics(
+    window: Window,
+    state: State<'_, LayoutState>,
+    metrics: UiMetrics,
+) -> Result<(), String> {
+    apply::report_ui_metrics(&state, window.label(), metrics)
 }
 
 // ── read-only 조회 ───────────────────────────────────────────────────────────

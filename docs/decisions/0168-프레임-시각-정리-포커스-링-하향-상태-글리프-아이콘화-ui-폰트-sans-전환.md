@@ -1,7 +1,7 @@
 # ADR-0168: 프레임 시각 정리 — 포커스 링 하향, 상태 글리프 아이콘화, UI 폰트 sans 전환
 
-- 상태: 확정 (2026-08-23, 근거: 사용자 결정 5건(실화면 대조) + 폰트 설치 여부 canvas 폭 실측 + 테마 토큰 값 실측 + `/review code full` 2인 적대)
-- 관련: Amends ADR-0066 (포커스 링 강도 40퍼센트로 하향) · Amends ADR-0062 (상태 표시를 문자에서 아이콘으로 교체) · Amends ADR-0075 (글리프 매핑 심볼 교체) · ADR-0047(Tailwind) · ADR-0143(빈 슬롯 안내) · ADR-0072(트리 계층) · CLAUDE.md 「LLM-우선 제어」
+- 상태: 확정 (2026-08-23, 근거: 사용자 결정 5건(실화면 대조) + 폰트 설치 여부 canvas 폭 실측 + 테마 토큰 값 실측 + `/review code full` 2인 적대) · 부분 폐기 by ADR-0227 (결정 7 allotment sash 토큰)
+- 관련: Amends ADR-0066 (포커스 링 강도 40퍼센트로 하향) · Amends ADR-0062 (상태 표시를 문자에서 아이콘으로 교체) · Amends ADR-0075 (글리프 매핑 심볼 교체) · ADR-0047(Tailwind) · ADR-0143(빈 슬롯 안내) · ADR-0072(트리 계층) · CLAUDE.md 「LLM-우선 제어」 · Amended by ADR-0227 (결정 7 allotment sash 토큰)
 
 ## 맥락
 

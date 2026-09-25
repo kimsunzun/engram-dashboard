@@ -42,8 +42,10 @@ use engram_dashboard_lib::commands::popout::PopupCounter;
 use engram_dashboard_lib::layout::apply::{
     self, AgentSpawner, LabelSource, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
 };
+use engram_dashboard_lib::layout::geometry::{Insets, PxRect};
 use engram_dashboard_lib::layout::{
-    tree, LayoutState, SlotContent, SplitDir, ViewManager, ViewSnapshot, MAIN_WINDOW_LABEL,
+    tree, LayoutNode, LayoutState, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics,
+    ViewManager, ViewSnapshot, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::output_router::OutputRouter;
 
@@ -1488,6 +1490,255 @@ async fn spawn_into_propagates_spawn_failure_untouched() {
         "스폰 실패면 탭도 안 만든다"
     );
     assert_eq!(w.resyncs(), 0);
+}
+
+// ── set_split_ratio (ADR-0227 — 레이아웃 알림은 Applied 일 때만) ──────────────
+
+impl World {
+    // main 활성 탭의 첫 칸을 좌우로 나눈 세계 — 반환 = (탭, 그 분할).
+    fn split_view(&self) -> (Uuid, Uuid) {
+        let view = self.main_active();
+        let slot = self.empty_slot(view);
+        apply::split_slot(
+            &self.state,
+            &self.subs,
+            &self.ev,
+            view,
+            slot,
+            SplitDir::LeftRight,
+        )
+        .unwrap();
+        (view, self.snapshot(view).split_rects[0].split_id)
+    }
+
+    fn last_layout(&self) -> ViewSnapshot {
+        self.ev
+            .layout
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .expect("레이아웃 알림")
+    }
+}
+
+#[test]
+fn set_split_ratio_applied_notifies_the_layout_once_with_the_new_ratio_and_rects() {
+    let w = World::new();
+    let (view, split) = w.split_view();
+    let (layout_before, tabs_before, resyncs_before) =
+        (w.layout_events(), w.tab_events(), w.resyncs());
+
+    let got = apply::set_split_ratio(&w.state, &w.ev, view, split, 0.3).unwrap();
+
+    assert_eq!(got.outcome, SplitRatioOutcome::Applied);
+    assert_eq!(got.ratio, 0.3);
+    assert_eq!(
+        w.layout_events(),
+        layout_before + 1,
+        "레이아웃 통지 정확히 1"
+    );
+    assert_eq!(w.tab_events(), tabs_before, "탭 통지 0");
+    assert_eq!(w.resyncs(), resyncs_before, "라우팅 불변 — 재동기 없음");
+
+    let snap = w.last_layout();
+    assert_eq!(snap.view_id, view);
+    assert_eq!(
+        got.version, snap.version,
+        "반환 version == 통지된 스냅샷 version"
+    );
+    let LayoutNode::Split { ratio, .. } = &snap.layout else {
+        panic!("분할 트리여야 한다: {:?}", snap.layout)
+    };
+    assert_eq!(*ratio, 0.3);
+    let rect = snap
+        .split_rects
+        .iter()
+        .find(|r| r.split_id == split)
+        .expect("분할 사각형");
+    assert_eq!(rect.at, 0.3, "사각형도 새 비율로 계산된다");
+    let left = snap
+        .slot_rects
+        .iter()
+        .find(|r| r.x0 == 0.0)
+        .expect("왼쪽 칸");
+    assert_eq!(left.x1, 0.3, "a = 왼쪽 칸이 30%");
+}
+
+#[test]
+fn set_split_ratio_unchanged_or_too_small_notifies_nothing() {
+    let w = World::new();
+    let (view, split) = w.split_view();
+    let events_before = (w.layout_events(), w.tab_events());
+    let version = w.snapshot(view).version;
+
+    let same = apply::set_split_ratio(&w.state, &w.ev, view, split, 0.5).unwrap();
+    assert_eq!(same.outcome, SplitRatioOutcome::Unchanged);
+    assert_eq!(same.ratio, 0.5);
+
+    // 분할 폭 L = 300px < 2 × 200px — px 범위가 비었다.
+    apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 300, 300).unwrap();
+    let mut big_min = one_px_border();
+    big_min.min_pane_px = 200;
+    apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, big_min).unwrap();
+    let small = apply::set_split_ratio(&w.state, &w.ev, view, split, 0.3).unwrap();
+    assert_eq!(small.outcome, SplitRatioOutcome::TooSmall);
+    assert_eq!(small.ratio, 0.5, "지금 값 그대로");
+
+    assert_eq!(
+        (w.layout_events(), w.tab_events()),
+        events_before,
+        "무변경 결말은 아무것도 안 알린다"
+    );
+    assert_eq!(w.snapshot(view).version, version, "version 불변");
+}
+
+#[test]
+fn set_split_ratio_unknown_split_is_err_without_notify() {
+    let w = World::new();
+    let (view, split) = w.split_view();
+    let events_before = (w.layout_events(), w.tab_events());
+
+    let err = apply::set_split_ratio(&w.state, &w.ev, view, Uuid::new_v4(), 0.3).unwrap_err();
+    assert!(err.contains("split 없음"), "err={err}");
+    let err = apply::set_split_ratio(&w.state, &w.ev, view, split, f64::NAN).unwrap_err();
+    assert!(err.contains("비율 거절"), "err={err}");
+
+    assert_eq!((w.layout_events(), w.tab_events()), events_before);
+}
+
+/// 알림을 받는 그 자리에서 다른 쓰기를 끼워 넣는 포트 — 락을 놓은 뒤 전역 카운터를 다시 읽는 구현이면
+/// 돌려주는 version 이 이 끼어든 쓰기의 값으로 어긋난다.
+struct Meddler {
+    inner: Recorder,
+    state: LayoutState,
+}
+
+impl LayoutEvents for Meddler {
+    fn layout_updated(&self, snapshot: &ViewSnapshot) {
+        self.inner.layout_updated(snapshot);
+        let mut mgr = self.state.0.lock().unwrap();
+        mgr.rename_tab(snapshot.view_id, "끼어든 쓰기".to_string())
+            .unwrap();
+    }
+
+    fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
+        self.inner.window_tabs_updated(tabs);
+    }
+}
+
+#[test]
+fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
+    let w = World::new();
+    let (view, split) = w.split_view();
+    let meddler = Meddler {
+        inner: Recorder::new(&w.state),
+        state: w.state.clone(),
+    };
+
+    let got = apply::set_split_ratio(&w.state, &meddler, view, split, 0.3).unwrap();
+
+    let notified = meddler
+        .inner
+        .layout
+        .lock()
+        .unwrap()
+        .last()
+        .cloned()
+        .expect("알림 1");
+    assert_eq!(got.version, notified.version);
+    assert!(
+        w.snapshot(view).version > got.version,
+        "전제: 끼어든 쓰기가 전역 카운터를 올렸다"
+    );
+}
+
+// ── 측정 보고 2종 (ADR-0227) ─────────────────────────────────────────────────
+//
+// 두 함수는 알림·재동기 포트를 아예 안 받으므로 「통지 0」은 시그니처가 먼저 지킨다. 여기서 재는 것은 그
+// 나머지 — version 불변과, 성공·실패 어느 쪽이든 형제 명령의 알림이 딸려 나가지 않는다는 것이다.
+
+fn one_px_border() -> UiMetrics {
+    UiMetrics {
+        frame_insets: Insets {
+            t: 1.0,
+            r: 1.0,
+            b: 1.0,
+            l: 1.0,
+        },
+        min_pane_px: 30,
+    }
+}
+
+#[test]
+fn canvas_and_metrics_reports_notify_nothing_and_keep_version() {
+    let w = World::new();
+    let before = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 1200, 800).unwrap();
+    apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, one_px_border()).unwrap();
+
+    assert_eq!(w.layout_events(), 0, "레이아웃 통지 0");
+    assert_eq!(w.tab_events(), 0, "탭 통지 0");
+    assert_eq!(w.resyncs(), 0, "라우팅 불변 — 재동기 없음");
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        before,
+        "측정 보고는 version 을 올리지 않는다"
+    );
+
+    // 저장은 됐다 — 셸 계산이 그 값을 읽는다.
+    let view = w.main_active();
+    let slot = w.slots(view)[0];
+    let px = w
+        .state
+        .0
+        .lock()
+        .unwrap()
+        .slot_px(view, slot)
+        .unwrap()
+        .expect("캔버스·지표 둘 다 보고됨");
+    assert_eq!(
+        px.frame,
+        PxRect {
+            x0: 0,
+            y0: 0,
+            x1: 1200,
+            y1: 800
+        }
+    );
+}
+
+#[test]
+fn rejected_reports_notify_nothing_and_keep_version() {
+    let w = World::new();
+    let before = apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+        .unwrap()
+        .version;
+
+    let err = apply::report_window_canvas(&w.state, "no-such", 1200, 800).unwrap_err();
+    assert!(err.contains("window 없음"), "err={err}");
+    let err = apply::report_ui_metrics(&w.state, "no-such", one_px_border()).unwrap_err();
+    assert!(err.contains("window 없음"), "err={err}");
+    let mut bad = one_px_border();
+    bad.frame_insets.l = f64::NAN;
+    let err = apply::report_ui_metrics(&w.state, MAIN_WINDOW_LABEL, bad).unwrap_err();
+    assert!(err.contains("ui 지표 거절"), "err={err}");
+    // 0 크기는 오류가 아니라 무시다.
+    apply::report_window_canvas(&w.state, MAIN_WINDOW_LABEL, 0, 800).unwrap();
+
+    assert_eq!(w.layout_events() + w.tab_events(), 0);
+    assert_eq!(w.resyncs(), 0);
+    assert_eq!(
+        apply::list_tabs(&w.state, MAIN_WINDOW_LABEL)
+            .unwrap()
+            .version,
+        before
+    );
 }
 
 // ── read-only 4종 ────────────────────────────────────────────────────────────

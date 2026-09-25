@@ -190,7 +190,7 @@ export default function AgentList() {
   //   agent-tree 창(config)엔 자기 슬롯 캔버스가 없어 currentViewId() 가 main 폴백을 준다(AgentTree 주석 참조).
   //   ★대상 슬롯 = selectOpenTarget(순수 함수)★: 기본은 포커스 슬롯이지만, 포커스가 제어 슬롯(트리/팔레트)이거나
   //   focus=null 인 엣지 상태에선 트리/팔레트를 덮어쓰지 않고 첫 빈 슬롯으로 폴백한다(제어 슬롯 포커스 제외 —
-  //   ViewLayoutRenderer click-to-focus 게이트의 안전망). 빈 슬롯도 없으면 배정 안 함(실패 토스트 — 클로버 금지).
+  //   LayoutLeaf click-to-focus 게이트의 안전망). 빈 슬롯도 없으면 배정 안 함(실패 토스트 — 클로버 금지).
   const openInFocusedSlot = (agentId: string) => {
     if (!beginInFlight(agentId)) return
     const vs = useViewStore.getState()

@@ -3,6 +3,7 @@
 pub mod apply;
 // ADR-0155 결정 1: `window`/`tab`/`slot` 선언은 그 본문(적용 서비스) 옆에 산다.
 pub mod commands;
+pub mod geometry;
 pub mod manager;
 pub mod spatial;
 pub mod tree;
@@ -13,11 +14,14 @@ pub use apply::{
     WindowTabsPayload,
 };
 pub use manager::{
-    resolve_spawn_slot, CloseTabOutcome, LayoutError, SpawnSlotError, ViewManager,
-    WindowTabsSnapshot, MAIN_WINDOW_LABEL,
+    resolve_spawn_slot, CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError,
+    SplitRatioResult, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 pub use spatial::{compute_spatial, resolve_spatial, Neighbors, SlotSpatial, SpatialToken};
-pub use types::{LayoutNode, SlotContent, SplitDir, View, ViewMeta, ViewSnapshot};
+pub use types::{
+    LayoutNode, SlotContent, SplitDir, SplitRatioApplied, SplitRatioOutcome, UiMetrics, View,
+    ViewMeta, ViewSnapshot,
+};
 
 use std::sync::{Arc, Mutex};
 

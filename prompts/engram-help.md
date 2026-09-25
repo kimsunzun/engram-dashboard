@@ -94,12 +94,20 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette> [--agent_id <id>]
       슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를 함께 준다
 
+  {tool} split.list --view_id <id>
+      그 탭의 구분선 전량. 행마다 split_id · dir · ratio · a_slots(왼쪽/위 쪽 슬롯) · b_slots(오른쪽/아래 쪽 슬롯). 슬롯 x 와 y 사이 구분선은 x 가 한쪽, y 가 다른 쪽 목록에 든 행이다
+  {tool} split.setRatio --view_id <id> --split_id <id> --ratio <0..1>
+      그 구분선을 옮긴다. ratio 는 창 전체가 아니라 그 분할이 나누는 영역 안에서 a 쪽(왼쪽/위)이 갖는 몫이다. 범위 밖 값은 잘라서 적용하고 적용한 값을 돌려준다(Applied 가 아니면 지금 값). 함께 오는 outcome 은 셋이다
+      Applied     바꿨다
+      Unchanged   자른 값이 지금 값과 같다
+      TooSmall    너무 작아 손대지 않았다
+
   {tool} agent.spawnInto --window <label> --cwd <폴더> [--view_id <id>] [--slot_id <id>] [--backend <claude|codex>]
       에이전트를 새로 띄우고 그 자리에 배치한다. view_id 를 빼면 새 탭에 놓고, 그때는 slot_id 를 주지 않는다
   {tool} slot.assignAgent --view_id <id> --slot_id <id> --agent_id <id>
       이미 살아 있는 에이전트를 그 슬롯에 붙인다. 새로 띄우지는 않는다
 
-slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 얻는다. 새 탭의 하나뿐인 슬롯은 --view_id 에 tab.create 가 준 값을 주고 top-left 로 푼다. 포커스는 사람이 빈 칸·에이전트 칸을 클릭하거나 포커스 슬롯이 닫혀도 옮는다. 확실히 집을 땐 split 이 준 id 나 모서리 낱말을 쓴다.
+slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 얻는다. split_id 는 split.list 가 주고, 그 행의 a_slots·b_slots 도 slot_id 다. 새 탭의 하나뿐인 슬롯은 --view_id 에 tab.create 가 준 값을 주고 top-left 로 푼다. 포커스는 사람이 빈 칸·에이전트 칸을 클릭하거나 포커스 슬롯이 닫혀도 옮는다. 확실히 집을 땐 slot.split 이 준 id 나 모서리 낱말을 쓴다.
 
   {tool} slot.resolveSpatial --token <낱말> [--window <label>] [--view_id <id>]
       view_id 를 빼면 그 창의 활성 탭이 대상이고, window 도 빼면 main 창이다

@@ -298,9 +298,9 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
         // *변화* 시에만 발화하므로, 슬롯이 처음부터 최종 크기면 한 번도 안 울려 PTY 가 spawn 시
         // 기본값(80×24)에 고착된다 → claude welcome 박스가 80칸 기준으로 그려져 좁은 슬롯에서 깨짐.
         // 그 빈 "초기 1회"를 여기서 채운다(gotty 패턴; client-first(ttyd)는 데몬이 View 를 모르는
-        // ADR-0035 구조라 불가). 보내기 직전 fit() 으로 allotment 지연 레이아웃까지 반영한 최신
-        // cols/rows 를 보장한다. resizePty 는 fire-and-forget(Resize 는 request_id 없음) — 직전
-        // kill 등으로 실패해도 흡수. carrier 는 Phase B(TauriTransport)에서도 이 call-site 그대로.
+        // ADR-0035 구조라 불가). 보내기 직전 fit() 은 지금 박스를 동기로 잰다 — 구독 왕복 동안 칸 크기가
+        // 바뀌었는데 RO 가 아직 안 울렸어도(RO 는 다음 렌더링 단계에야 발화한다) 최신 cols/rows 가 나간다.
+        // resizePty 는 fire-and-forget(Resize 는 request_id 없음) — 직전 kill 등으로 실패해도 흡수.
         fitAddonRef.current?.fit()
         void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
       })

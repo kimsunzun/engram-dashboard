@@ -54,12 +54,14 @@ use engram_dashboard_lib::daemon_client::inbound::{
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
-    make_table, LayoutPorts, SlotPopoutArgs, UiRefreshArgs, WindowListArgs, CATALOG_VERSION,
-    COMMAND_SPECS,
+    make_table, LayoutPorts, SlotPopoutArgs, SplitListArgs, SplitSetRatioArgs, UiRefreshArgs,
+    WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
 };
+use engram_dashboard_lib::layout::geometry::Insets;
 use engram_dashboard_lib::layout::{
-    tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SubscriptionSync, ViewManager,
-    ViewSnapshot, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
+    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost,
+    WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::ui_settings::{
     deliver_per_window, load_settings, parse_settings, read_capped, sweep_dead_windows,
@@ -456,6 +458,8 @@ fn the_table_holds_exactly_the_declared_commands() {
             "slot.popout",
             "slot.resolveSpatial",
             "slot.split",
+            "split.list",
+            "split.setRatio",
             "tab.close",
             "tab.create",
             "tab.list",
@@ -478,10 +482,10 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     // ★이름 수가 안 늘어도 올라간다★ — 세대 4 는 `ui.refresh` 의 **답 모양**이, 세대 5 는
     //   `agent.spawnInto` 의 `backend` 가 받는 **어휘**가, 세대 6 은 그 칸의 **정책**(아는 낱말 하나를 이
     //   표면이 안 만든다)이, 세대 7 은 그 정책이 **뒤집힌 것**(그 낱말을 이 표면이 실제로 만든다 —
-    //   2026-09-22 · ADR-0219)이 바뀐 세대다(넷 다 선언이라 올린다). 아래 선언 수가 그대로인 것이 그
-    //   구분의 실물이다.
-    assert_eq!(CATALOG_VERSION, 7);
-    assert_eq!(COMMAND_SPECS.len(), 17);
+    //   2026-09-22 · ADR-0219)이 바뀐 세대다(넷 다 선언이라 올린다). 세대 8 은 이름이 는 세대다
+    //   (`split.setRatio`·`split.list` — ADR-0227).
+    assert_eq!(CATALOG_VERSION, 8);
+    assert_eq!(COMMAND_SPECS.len(), 19);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
         2,
@@ -492,6 +496,8 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
         3,
         "세대 3에 들어온 명령이 그 앞부터 있었다고 광고하면 안 된다"
     );
+    assert_eq!(SplitSetRatioArgs::SPEC.since, 8);
+    assert_eq!(SplitListArgs::SPEC.since, 8);
 }
 
 #[test]
@@ -960,6 +966,415 @@ async fn ui_refresh_leaves_the_layout_untouched() {
     );
     assert_eq!(after.active, before.active);
     assert_eq!(world.slots(after.active), slots_before);
+}
+
+// ── (B) 분할 비율 — split.setRatio · split.list (ADR-0227) ────────────────────
+
+impl World {
+    /// 명령을 한 번 더 부른다 — 같은 우편함을 비우고 쓴다([`Mailbox::only`] 가 「정확히 하나」를 요구한다).
+    async fn ask(
+        &self,
+        receiver: &InboundReceiver,
+        queue: &Queued,
+        name: &str,
+        args: serde_json::Value,
+    ) -> CommandReply {
+        self.mail.clear();
+        call(receiver, queue, &self.mail, name, args).await
+    }
+
+    fn split_ids(&self, view: uuid::Uuid) -> Vec<uuid::Uuid> {
+        apply::list_splits(&self.state, view)
+            .expect("view")
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// 주 탭을 `x | (y / z)` 로 나눈 세계 — 반환 = (탭, x, y, z). 분할은 전위 순으로 바깥(좌우) · 안쪽(위아래).
+    fn three_slots(&self) -> (uuid::Uuid, uuid::Uuid, uuid::Uuid, uuid::Uuid) {
+        let view = self.main_tabs().active;
+        let x = self.empty_slot(view);
+        let y = apply::split_slot(&self.state, &Subs, &Events, view, x, SplitDir::LeftRight)
+            .expect("좌우 분할");
+        let z = apply::split_slot(&self.state, &Subs, &Events, view, y, SplitDir::TopBottom)
+            .expect("위아래 분할");
+        (view, x, y, z)
+    }
+}
+
+fn metrics_with_min(min_pane_px: u32) -> UiMetrics {
+    UiMetrics {
+        frame_insets: Insets {
+            t: 1.0,
+            r: 1.0,
+            b: 1.0,
+            l: 1.0,
+        },
+        min_pane_px,
+    }
+}
+
+const A_SIDE: &str = "a 쪽(왼쪽/위) 칸의 몫";
+
+#[test]
+fn both_ratio_commands_define_the_ratio_as_the_a_side_share() {
+    for name in ["split.setRatio", "split.list"] {
+        let spec = spec_of(name).expect("선언돼 있다");
+        assert!(
+            spec.summary.contains(A_SIDE),
+            "{name}: 요약에 ratio 의 뜻({A_SIDE})이 없다: {}",
+            spec.summary
+        );
+    }
+    let list = spec_of("split.list").expect("선언돼 있다");
+    assert!(list.summary.contains("a = 왼쪽/위"), "{}", list.summary);
+    // 요약은 손으로 쓴 글이라 상수가 바뀌면 조용히 LLM 에게 거짓을 말한다 — 상수에서 만든 문자열로 잰다.
+    let bounds = format!("{}~{}", tree::RATIO_MIN, tree::RATIO_MAX);
+    let set = spec_of("split.setRatio").expect("선언돼 있다");
+    assert!(
+        set.summary.contains(&bounds),
+        "split.setRatio 요약이 클램프 범위 {bounds} 를 말해야 한다: {}",
+        set.summary
+    );
+}
+
+#[test]
+fn set_ratio_advertises_its_three_outcomes_by_name() {
+    let spec = spec_of("split.setRatio").expect("선언돼 있다");
+    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("스키마는 JSON");
+    assert_eq!(
+        shape["properties"]["outcome"]["enum"],
+        json!(["Applied", "Unchanged", "TooSmall"]),
+        "{shape}"
+    );
+    assert_eq!(shape["properties"]["ratio"]["type"], "number");
+}
+
+/// ★같은 결말을 두 표면이 같은 철자로 말한다★(`both_surfaces_spell_the_outcome_the_same_way` 와 같은 규칙).
+///
+/// `split.setRatio` 의 답은 선언 매크로의 `RatioOutcome`, Tauri `set_split_ratio` 의 답은 셸 내부
+/// `SplitRatioApplied.outcome`(ts-rs 로 화면에 간다)으로 직렬화된다. 둘 다 variant 이름을 serde 가 그대로
+/// 내지만, 셸 쪽에 serde rename 을 달면(이 crate 의 다른 레이아웃 enum 은 snake_case 다) 두 표면이 갈린다.
+/// 핸들러의 exhaustive `match` 는 **빠진 갈래**만 잡지 철자는 못 잡는다.
+#[test]
+fn both_surfaces_spell_the_split_ratio_outcome_the_same_way() {
+    let spec = spec_of("split.setRatio").expect("선언돼 있다");
+    let shape: serde_json::Value = serde_json::from_str(spec.ok_schema).expect("스키마는 JSON");
+    let advertised = shape["properties"]["outcome"]["enum"]
+        .as_array()
+        .expect("enum 목록")
+        .clone();
+
+    let cases = [
+        (SplitRatioOutcome::Applied, "Applied"),
+        (SplitRatioOutcome::Unchanged, "Unchanged"),
+        (SplitRatioOutcome::TooSmall, "TooSmall"),
+    ];
+    assert_eq!(advertised.len(), cases.len(), "{advertised:?}");
+    for (outcome, expected) in cases {
+        let payload = SplitRatioApplied {
+            ratio: 0.5,
+            outcome,
+            version: 1,
+        };
+        let json = serde_json::to_value(payload).expect("직렬화");
+        assert_eq!(
+            json["outcome"], expected,
+            "Tauri 답 쪽 철자가 갈렸다: {json}"
+        );
+        assert!(
+            advertised.contains(&json["outcome"]),
+            "명령 답이 광고하는 값에 {expected} 가 없다: {advertised:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_values() {
+    let (world, queue, receiver) = queued();
+    let (view, x, _y, _z) = world.three_slots();
+    let outer = world.split_ids(view)[0];
+
+    let ok = world
+        .ask(
+            &receiver,
+            &queue,
+            "split.setRatio",
+            json!({ "view_id": view.to_string(), "split_id": outer.to_string(), "ratio": 0.3 }),
+        )
+        .await
+        .outcome
+        .expect("적용");
+    assert_eq!(ok, json!({ "ratio": 0.3, "outcome": "Applied" }));
+    let layout = apply::get_view(&world.state, view).expect("view");
+    let left = layout
+        .slot_rects
+        .iter()
+        .find(|r| r.slot_id == x)
+        .expect("x");
+    assert_eq!(left.x1, 0.3, "0.3 이 그대로 a(왼쪽) 칸의 몫이 된다");
+
+    for (asked, clamped) in [(1.5, 0.9), (-1.0, 0.1)] {
+        let ok = world
+            .ask(
+                &receiver,
+                &queue,
+                "split.setRatio",
+                json!({ "view_id": view.to_string(), "split_id": outer.to_string(), "ratio": asked }),
+            )
+            .await
+            .outcome
+            .expect("범위 밖은 오류가 아니다");
+        assert_eq!(
+            ok,
+            json!({ "ratio": clamped, "outcome": "Applied" }),
+            "{asked}"
+        );
+    }
+
+    let ok = world
+        .ask(
+            &receiver,
+            &queue,
+            "split.setRatio",
+            json!({ "view_id": view.to_string(), "split_id": outer.to_string(), "ratio": 0.05 }),
+        )
+        .await
+        .outcome
+        .expect("이미 0.1");
+    assert_eq!(ok, json!({ "ratio": 0.1, "outcome": "Unchanged" }));
+}
+
+#[tokio::test]
+async fn set_ratio_refuses_malformed_ids_and_non_numbers_before_applying() {
+    let (world, queue, receiver) = queued();
+    let (view, _x, _y, _z) = world.three_slots();
+    let split = world.split_ids(view)[0];
+    let version = world.main_tabs().version;
+
+    let cases = [
+        (
+            json!({ "view_id": "nope", "split_id": split.to_string(), "ratio": 0.3 }),
+            Some("view_id"),
+        ),
+        (
+            json!({ "view_id": view.to_string(), "split_id": "nope", "ratio": 0.3 }),
+            Some("split_id"),
+        ),
+        // JSON 은 NaN·±∞ 를 못 싣는다 — `json!` 이 비유한 수를 null 로 적는다.
+        (
+            json!({ "view_id": view.to_string(), "split_id": split.to_string(), "ratio": f64::NAN }),
+            None,
+        ),
+        (
+            json!({ "view_id": view.to_string(), "split_id": split.to_string(), "ratio": f64::INFINITY }),
+            None,
+        ),
+        (
+            json!({ "view_id": view.to_string(), "split_id": split.to_string(), "ratio": "NaN" }),
+            None,
+        ),
+        (
+            json!({ "view_id": view.to_string(), "split_id": split.to_string(), "ratio": "Infinity" }),
+            None,
+        ),
+    ];
+    for (args, field) in cases {
+        let err = error_of(
+            world
+                .ask(&receiver, &queue, "split.setRatio", args.clone())
+                .await,
+        );
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+        if let Some(field) = field {
+            assert!(err.message().contains(field), "{args}: {}", err.message());
+        }
+    }
+
+    // 반려 문구가 id 를 얻는 곳으로 안내한다 — 분할 id 를 주는 명령은 split.list 하나뿐이다.
+    let err = error_of(
+        world
+            .ask(
+                &receiver,
+                &queue,
+                "split.setRatio",
+                json!({ "view_id": view.to_string(), "split_id": "nope", "ratio": 0.3 }),
+            )
+            .await,
+    );
+    assert!(err.message().contains("split.list"), "{}", err.message());
+    assert!(!err.message().contains("tab.list"), "{}", err.message());
+    assert_eq!(world.main_tabs().version, version, "반려는 무변경");
+}
+
+#[tokio::test]
+async fn set_ratio_on_a_missing_split_keeps_the_services_reason() {
+    let (world, queue, receiver) = queued();
+    let (view, x, _y, _z) = world.three_slots();
+    for missing in [uuid::Uuid::new_v4(), x] {
+        let err = error_of(
+            world
+                .ask(
+                    &receiver,
+                    &queue,
+                    "split.setRatio",
+                    json!({ "view_id": view.to_string(), "split_id": missing.to_string(), "ratio": 0.3 }),
+                )
+                .await,
+        );
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(err.message().contains("split 없음"), "{}", err.message());
+    }
+}
+
+/// 사람의 드래그와 같은 px 최소가 LLM 값에도 걸린다 — 두 표면이 같은 적용 서비스에 떨어진다.
+#[tokio::test]
+async fn set_ratio_is_clamped_by_the_px_minimum_once_the_window_reported_its_size() {
+    let (world, queue, receiver) = queued();
+    let (view, _x, _y, _z) = world.three_slots();
+    let inner = world.split_ids(view)[1];
+    // 안쪽(위아래) 분할의 상자 = 오른쪽 절반 × 캔버스 높이 400px → m = 100 이면 허용 [0.25, 0.75].
+    apply::report_window_canvas(&world.state, MAIN_WINDOW_LABEL, 1000, 400).unwrap();
+    apply::report_ui_metrics(&world.state, MAIN_WINDOW_LABEL, metrics_with_min(100)).unwrap();
+
+    let ok = world
+        .ask(
+            &receiver,
+            &queue,
+            "split.setRatio",
+            json!({ "view_id": view.to_string(), "split_id": inner.to_string(), "ratio": 0.1 }),
+        )
+        .await
+        .outcome
+        .expect("클램프해 적용");
+    assert_eq!(ok, json!({ "ratio": 0.25, "outcome": "Applied" }));
+
+    // 창이 두 쪽 최소를 못 줄 만큼 작으면 손대지 않고 TooSmall 을 싣는다(지금 값 그대로).
+    apply::report_window_canvas(&world.state, MAIN_WINDOW_LABEL, 1000, 150).unwrap();
+    let ok = world
+        .ask(
+            &receiver,
+            &queue,
+            "split.setRatio",
+            json!({ "view_id": view.to_string(), "split_id": inner.to_string(), "ratio": 0.5 }),
+        )
+        .await
+        .outcome
+        .expect("TooSmall 은 오류가 아니다");
+    assert_eq!(ok, json!({ "ratio": 0.25, "outcome": "TooSmall" }));
+}
+
+#[tokio::test]
+async fn split_list_names_the_slots_on_each_side_in_preorder() {
+    let (world, queue, receiver) = queued();
+    let (view, x, y, z) = world.three_slots();
+    let ids = world.split_ids(view);
+    apply::set_split_ratio(&world.state, &Events, view, ids[1], 0.3).unwrap();
+
+    let ok = world
+        .ask(
+            &receiver,
+            &queue,
+            "split.list",
+            json!({ "view_id": view.to_string() }),
+        )
+        .await
+        .outcome
+        .expect("목록");
+    assert_eq!(
+        ok,
+        json!({ "splits": [
+            {
+                "split_id": ids[0].to_string(),
+                "dir": "LeftRight",
+                "ratio": 0.5,
+                "a_slots": [x.to_string()],
+                "b_slots": [y.to_string(), z.to_string()],
+            },
+            {
+                "split_id": ids[1].to_string(),
+                "dir": "TopBottom",
+                "ratio": 0.3,
+                "a_slots": [y.to_string()],
+                "b_slots": [z.to_string()],
+            },
+        ]})
+    );
+
+    // 칸 하나뿐인 탭은 빈 목록 · 형식이 깨진 id 는 반려 · 없는 탭은 적용 서비스의 사유.
+    let fresh = apply::create_tab(&world.state, &Subs, &Events, MAIN_WINDOW_LABEL, None).unwrap();
+    let ok = world
+        .ask(
+            &receiver,
+            &queue,
+            "split.list",
+            json!({ "view_id": fresh.to_string() }),
+        )
+        .await
+        .outcome
+        .expect("목록");
+    assert_eq!(ok, json!({ "splits": [] }));
+    let err = error_of(
+        world
+            .ask(
+                &receiver,
+                &queue,
+                "split.list",
+                json!({ "view_id": "nope" }),
+            )
+            .await,
+    );
+    assert_eq!(err.code(), ErrorCode::InvalidArgument);
+    let err = error_of(
+        world
+            .ask(
+                &receiver,
+                &queue,
+                "split.list",
+                json!({ "view_id": uuid::Uuid::new_v4().to_string() }),
+            )
+            .await,
+    );
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    assert!(err.message().contains("view 없음"), "{}", err.message());
+}
+
+/// 표현할 수 없을 만큼 깊은 분할은 `CONFLICT` + 사유로 나간다(패닉·무응답 없이).
+#[tokio::test]
+async fn a_split_too_deep_to_represent_is_a_conflict() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let mut target = world.empty_slot(view);
+    while let Ok(new) = apply::split_slot(
+        &world.state,
+        &Subs,
+        &Events,
+        view,
+        target,
+        SplitDir::LeftRight,
+    ) {
+        target = new;
+    }
+    let slots_before = world.slots(view);
+
+    let err = error_of(
+        world
+            .ask(
+                &receiver,
+                &queue,
+                "slot.split",
+                json!({ "view_id": view.to_string(), "slot_id": target.to_string(), "dir": "LeftRight" }),
+            )
+            .await,
+    );
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    assert!(
+        err.message().contains("더 나눌 수 없음"),
+        "{}",
+        err.message()
+    );
+    assert_eq!(world.slots(view), slots_before, "트리 불변");
 }
 
 // ── (B) 연결 태스크를 안 막는다 ──────────────────────────────────────────────
