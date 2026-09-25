@@ -78,6 +78,12 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     const term = new Terminal({
       fontFamily,
       fontSize: 13,
+      // 사용자 결정 2026-09-25: 기본값만 막대·깜빡임으로 바꾼다. 사용자 설정으로 여는 것은 미뤘다 — 설정이
+      //   되려면 LLM 제어 경로가 함께 있어야 한다(CLAUDE.md 「LLM-우선 제어」).
+      // 포커스 없는 슬롯도 막대로 — xterm 기본값('outline')은 칸 전체를 빈 상자로 그려 그 선택과 어긋난다.
+      cursorStyle: 'bar',
+      cursorInactiveStyle: 'bar',
+      cursorBlink: true,
       theme: { background: '#0a0a0a', foreground: '#e0e0e0', cursor: '#4a9eff' },
     })
     const fitAddon = new FitAddon()
@@ -233,6 +239,29 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     return () => io.disconnect()
   }, [])
 
+  // 잴 수 있을 때만 지금 치수를 PTY 에 낸다. 잴 수 없으면 아무것도 보내지 않고 PTY 는 마지막 치수를 유지한다
+  //   — 조사한 xterm 기반 피어 공통 규칙이다(docs/research/hidden-tab-terminal-subscription-survey-2026-09-25.md).
+  // ★잴 수 없는 상태는 두 갈래다★ — display:none(offsetParent 로 잡는다)과, 표시는 됐는데 박스의 폭·높이 중
+  //   **한 축이라도** 0 으로 붕괴한 경우. FitAddon 은 xterm 이 글꼴로 잰 칸 크기(박스와 무관)로 부모의 계산된
+  //   폭·높이를 나누므로, 붕괴한 축은 바닥값(열 2 · 행 1)으로 눌리고 display:none 하위의 계산 값은 실제 배치를
+  //   잰 값이 아니다. 어느 쪽이든 fit() 이 내는 격자는 믿을 수 없다 — 구체 값은 미측정이다(GUI QA 몫).
+  // ★그래서 치수 자체를 검사하지 않는다★: 그 격자는 정상 치수와 값으로 구별되지 않고, fit() 뒤 cols/rows 는
+  //   0 도 NaN 도 될 수 없다(`@xterm/addon-fit` 계약) — 이상값 표지가 없다. 값으로 가를 수 없으니
+  //   **언제 보내나**로 가른다 — 두 갈래 다 fit() 에 닿기 전에 빠진다.
+  // ★RO 콜백·onReset 은 아직 이 판정보다 느슨하다★(RO = 두 축이 다 0 일 때만 · onReset = offsetParent 만)
+  //   — 한 축만 붕괴한 박스를 못 거르는 알려진 결손이고 네 송신 지점을 접을 때 맞춘다
+  //   (docs/todo/terminal-sizing.md). 이 판정을 그쪽에 맞춰 느슨하게 되돌리지 말 것.
+  // ☐ 안 걸리는 것: 보이고 박스도 멀쩡한데 칸 크기가 아직 0 인 슬롯 — fit() 이 no-op 이라 직전 치수가
+  //   나간다. 재시도는 없고 다음 레이아웃·가시성 사건이 고친다.
+  const sendSizeIfMeasurable = (aid: string, terminal: Terminal) => {
+    const container = containerRef.current
+    if (!container || container.offsetParent === null) return
+    const box = container.getBoundingClientRect()
+    if (box.width === 0 || box.height === 0) return
+    fitAddonRef.current?.fit()
+    void agentClient.resizePty(aid, terminal.cols, terminal.rows).catch(() => {})
+  }
+
   useEffect(() => {
     const terminal = terminalRef.current
     if (!agentId || !terminal) return
@@ -294,15 +323,21 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
           return
         }
         sub = handle
-        // Task1(ADR-0036 carry-forward): 구독 직후 초기 크기 1회 전파. ResizeObserver 는 크기
-        // *변화* 시에만 발화하므로, 슬롯이 처음부터 최종 크기면 한 번도 안 울려 PTY 가 spawn 시
-        // 기본값(80×24)에 고착된다 → claude welcome 박스가 80칸 기준으로 그려져 좁은 슬롯에서 깨짐.
+        // Task1(ADR-0036 carry-forward): 구독 직후 초기 크기 1회 전파. ResizeObserver 는 관측을 시작할 때
+        // (렌더된 비-0 박스면) 한 번 울린 뒤로는 크기 *변화* 시에만 울리므로, 이미 크기가 잡힌 슬롯에
+        // 에이전트가 붙거나 바뀌면 한 번도 안 울려 PTY 가 spawn 시 기본값(80×24)에 고착된다 → claude
+        // welcome 박스가 80칸 기준으로 그려져 좁은 슬롯에서 깨짐.
         // 그 빈 "초기 1회"를 여기서 채운다(gotty 패턴; client-first(ttyd)는 데몬이 View 를 모르는
         // ADR-0035 구조라 불가). 보내기 직전 fit() 은 지금 박스를 동기로 잰다 — 구독 왕복 동안 칸 크기가
         // 바뀌었는데 RO 가 아직 안 울렸어도(RO 는 다음 렌더링 단계에야 발화한다) 최신 cols/rows 가 나간다.
         // resizePty 는 fire-and-forget(Resize 는 request_id 없음) — 직전 kill 등으로 실패해도 흡수.
-        fitAddonRef.current?.fit()
-        void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
+        // ★잴 수 없으면 건너뛴다(ADR-0056 keep-alive)★: 숨은 탭에서 구독이 풀리면 여기서 나갈 격자는 잴 수
+        //   없는 상태의 fit() 이 낸 믿을 수 없는 값이라, 같은 에이전트를 보는 보이는 슬롯이 맞춰 둔 PTY 치수를
+        //   덮는다. 숨은 탭이 보이게 되면 치수는 두 경로가 낸다 — 가시성 effect(attachWebgl 의 fit()+
+        //   resizePty)와 RO(붕괴했던 박스가 실제 크기로 커지며 발화). WebGL 부착이 실패하면 앞의 것은
+        //   빠지지만 RO 는 남는다 — 여기서 건너뛰는 두 조건(display:none · 한 축이라도 0 인 박스)을 벗어나는
+        //   일 자체가 박스 크기 변화다.
+        sendSizeIfMeasurable(agentId, terminal)
       })
       // 구독 실패(예: 직전 kill로 NotFound)는 unhandled rejection 방지용으로 흡수.
       .catch(() => {})
@@ -340,23 +375,8 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     wasConnectedRef.current = connected
     if (!connected || wasConnected) return
     const terminal = terminalRef.current
-    const container = containerRef.current
-    if (!agentId || !terminal || !container) return
-    // ★숨김 판정은 RO 와 같은 두 갈래여야 한다(그 주석이 정본)★ — display:none 은 offsetParent 로,
-    //   표시는 됐는데 박스만 붕괴한 경우는 0 크기로 잡는다. ★두 갈래가 내는 나쁜 값이 서로 다르다★:
-    //   display:none 은 글리프를 못 재 cell metrics 가 0 이고 fit() 이 terminal 을 건드리지 않고 빠져
-    //   **직전 치수**(한 번도 안 잰 슬롯이면 생성 기본값 80×24)가 나간다. 붕괴한 박스는 metrics 가
-    //   멀쩡해 **fit() 이 no-op 이 아니다** — 음수 폭이 Math.max 바닥으로 눌린 **2×1** 이 실제로 실린다.
-    // ★그래서 치수 자체를 검사하지 않는다★: 80×24 도 2×1 도 정상 치수와 구별되지 않고, fit() 뒤 cols/rows
-    //   는 0 도 NaN 도 될 수 없다(`@xterm/addon-fit` 계약). 값으로 가를 수 없으니 **언제 보내나**로
-    //   가른다 — 두 갈래 다 fit() 에 닿기 전에 빠진다.
-    // ☐ 안 걸리는 것: 보이고 박스도 멀쩡한데 글리프 metrics 가 아직 0 인 슬롯 — fit() 이 no-op 이라 직전
-    //   치수가 나간다. 재시도는 없고 다음 레이아웃·가시성 사건이 고친다.
-    if (container.offsetParent === null) return
-    const box = container.getBoundingClientRect()
-    if (box.width === 0 && box.height === 0) return
-    fitAddonRef.current?.fit()
-    void agentClient.resizePty(agentId, terminal.cols, terminal.rows).catch(() => {})
+    if (!agentId || !terminal) return
+    sendSizeIfMeasurable(agentId, terminal)
   }, [connected, agentId])
 
   useEffect(() => {

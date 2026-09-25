@@ -107,9 +107,13 @@ const termState = vi.hoisted(() => ({
   write: vi.fn(),
   // 입력 핸들러 캡처 — 부재 시 입력 차단(ADR-0148)을 관측하려면 실제로 데이터를 먹여봐야 한다.
   onDataCb: null as ((data: string) => void) | null,
+  options: null as unknown,
 }))
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
+    constructor(options?: unknown) {
+      termState.options = options
+    }
     loadAddon = termState.loadAddon
     open = vi.fn()
     reset = termState.reset
@@ -220,6 +224,7 @@ beforeEach(() => {
   conn.state = 'connected'
   conn.cbs.clear()
   termState.onDataCb = null
+  termState.options = null
   termState.loadAddon.mockReset()
   termState.refresh.mockClear()
   termState.dispose.mockClear()
@@ -466,5 +471,23 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
     ;(agentClient.writeStdin as ReturnType<typeof vi.fn>).mockClear()
     act(() => termState.onDataCb!('x'))
     expect(agentClient.writeStdin).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('TerminalSlot — 커서 기본값', () => {
+  // 사용자 결정 2026-09-25 — 커서를 깜빡이는 막대로 바꾸고 굵기와 색은 그대로 둔다.
+  // 비활성 커서도 막대인 것은 그 선택에 맞춘 것이다 — xterm 기본값 'outline' 은 포커스 없는 슬롯에 칸 전체
+  //   빈 상자를 그린다.
+  it('막대·깜빡임 커서로 만들고 비활성도 막대, 굵기는 xterm 기본값, 색은 테마 값을 쓴다', async () => {
+    render(<TerminalSlot viewId="v1" agentId={AGENT} />)
+    await flushSubscribe()
+
+    expect(termState.options).toMatchObject({
+      cursorStyle: 'bar',
+      cursorInactiveStyle: 'bar',
+      cursorBlink: true,
+      theme: expect.objectContaining({ cursor: '#4a9eff' }),
+    })
+    expect(termState.options).not.toHaveProperty('cursorWidth')
   })
 })
