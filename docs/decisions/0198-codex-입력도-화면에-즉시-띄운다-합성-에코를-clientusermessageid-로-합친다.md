@@ -1,7 +1,7 @@
 # ADR-0198: codex 입력도 화면에 즉시 띄운다 — 합성 에코를 clientUserMessageId 로 합친다
 
-- 상태: 확정 (2026-09-14, 근거: 사용자 결정 + 벤더 스키마·통합 테스트 직독)
-- 관련: ADR-0193(큐 해제 판정 — **번복이 아니다**, 아래 「거부한 대안」 마지막 항) · ADR-0192(백엔드 기본값은 claude 와 동일) · `docs/reference/backend-capabilities.md` §2 · `crates/engram-dashboard-agent/src/backend/codex/protocol.rs` · step-log S21
+- 상태: 확정 (2026-09-14, 근거: 사용자 결정 + 벤더 스키마·통합 테스트 직독) · 부분 폐기 by ADR-0231 (합성 에코는 한가할 때만 · 영향의 하이드레이션 순서 미결을 닫음(대기 → 이력 뒤 전달) · 보낸 자리 정식 말풍선 원안 거부)
+- 관련: ADR-0193(큐 해제 판정 — **번복이 아니다**, 아래 「거부한 대안」 마지막 항) · ADR-0192(백엔드 기본값은 claude 와 동일) · `docs/reference/backend-capabilities.md` §2 · `crates/engram-dashboard-agent/src/backend/codex/protocol.rs` · step-log S21 · Amended by ADR-0231 (합성 에코는 한가할 때만 · 영향의 하이드레이션 순서 미결을 닫음(대기 → 이력 뒤 전달) · 보낸 자리 정식 말풍선 원안 거부)
 
 ## 맥락
 

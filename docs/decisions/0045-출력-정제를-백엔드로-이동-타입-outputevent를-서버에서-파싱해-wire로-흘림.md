@@ -1,7 +1,7 @@
 # ADR-0045: 출력 정제를 백엔드로 이동 — 타입 OutputEvent를 서버에서 파싱해 wire로 흘림
 
-- 상태: 확정 (2026-07-03, 근거: §5 손발/두뇌 분리 + ADR-0002 출력종류 비가정 + 가상 터미널 요구 + 출력 파이프라인 seam 코드 실측(재-review 3회) + 사용자 결정)
-- 관련: Amends ADR-0044 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) · ADR-0002(출력 종류 비가정·터미널 강제 금지 — 이 설계가 그 실현) · ADR-0003(OutputSink/OutputFrame 계약·코어 격리 — payload 확장 대상) · ADR-0004(claude 지식 격리) · ADR-0006(락 순서) · ADR-0030 · ADR-0040(서버 authoritative bounded 버퍼) · ADR-0043(mount-replay)
+- 상태: 확정 (2026-07-03, 근거: §5 손발/두뇌 분리 + ADR-0002 출력종류 비가정 + 가상 터미널 요구 + 출력 파이프라인 seam 코드 실측(재-review 3회) + 사용자 결정) · 부분 폐기 by ADR-0231 (렌더 모델에 대기 목록 추가와 uuid dedup 범위 좁힘)
+- 관련: Amends ADR-0044 (통로 무정제·프론트 파싱 → 백엔드 서버 정제(타입 OutputEvent)로 전환) · ADR-0002(출력 종류 비가정·터미널 강제 금지 — 이 설계가 그 실현) · ADR-0003(OutputSink/OutputFrame 계약·코어 격리 — payload 확장 대상) · ADR-0004(claude 지식 격리) · ADR-0006(락 순서) · ADR-0030 · ADR-0040(서버 authoritative bounded 버퍼) · ADR-0043(mount-replay) · Amended by ADR-0231 (렌더 모델에 대기 목록 추가와 uuid dedup 범위 좁힘)
 
 ## 용어 (자립용)
 - **`OutputEvent`** — pump/core 경계의 확장 enum. `TerminalBytes(Vec<u8>)` + 신규 구조화 variant(`TextDelta`/`ToolCall`/`Usage`/`MessageDone`/`Error`, optional `turn_id`/`message_id`, + `Structured{kind,json}` 탈출구).

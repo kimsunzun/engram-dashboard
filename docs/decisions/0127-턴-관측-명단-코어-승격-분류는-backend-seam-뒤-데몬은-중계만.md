@@ -1,7 +1,7 @@
 # ADR-0127: 턴 관측 명단 코어 승격, 분류는 backend seam 뒤, 데몬은 중계만
 
-- 상태: 확정 (2026-08-03, 근거: 사용자 결정 — 분류 거처를 backend seam 뒤로 확정, 신호 어휘는 공용 단일 유지)
-- 관련: Amends ADR-0110 (결정 3의 TapHost 포트와 결정 4 분류 거처) · Amends ADR-0113 (결정 3 배선 거처) · ADR-0119 결정 4(사실 계층 거처 = 코어 — 이 ADR이 집행) · ADR-0004(백엔드 지식은 `backend/` 디스패치 뒤) · ADR-0104 결정 3(idle 게이트 = 이 명단의 1호 소비자) · ADR-0005(finalize 1회) · ADR-0006(락 순서) · ADR-0007(epoch) · 코드 앵커 `crates/engram-dashboard-core/src/agent/turn.rs` · `agent/backend/mod.rs` · `agent/output_core.rs`
+- 상태: 확정 (2026-08-03, 근거: 사용자 결정 — 분류 거처를 backend seam 뒤로 확정, 신호 어휘는 공용 단일 유지) · 부분 폐기 by ADR-0231 (턴 오류 신호와 last_end_failed 칸 추가)
+- 관련: Amends ADR-0110 (결정 3의 TapHost 포트와 결정 4 분류 거처) · Amends ADR-0113 (결정 3 배선 거처) · ADR-0119 결정 4(사실 계층 거처 = 코어 — 이 ADR이 집행) · ADR-0004(백엔드 지식은 `backend/` 디스패치 뒤) · ADR-0104 결정 3(idle 게이트 = 이 명단의 1호 소비자) · ADR-0005(finalize 1회) · ADR-0006(락 순서) · ADR-0007(epoch) · 코드 앵커 `crates/engram-dashboard-core/src/agent/turn.rs` · `agent/backend/mod.rs` · `agent/output_core.rs` · Amended by ADR-0231 (턴 오류 신호와 last_end_failed 칸 추가)
 
 ## 맥락
 
