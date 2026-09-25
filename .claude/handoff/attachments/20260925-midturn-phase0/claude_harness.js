@@ -1,5 +1,5 @@
 // Phase 0 spike harness — claude CLI stream-json, mirrors engram ClaudeBackend::build_spec (JSON mode).
-// usage: node claude_harness.js <scenario> <outDir> <cwd> [model]
+// usage: node claude_harness.js <scenario> <outDir> <cwd> [model] [slashCmd (M13 only, default /compact)]
 'use strict';
 const { spawn, execFileSync } = require('child_process');
 const fs = require('fs'), path = require('path'), crypto = require('crypto');
@@ -12,7 +12,9 @@ const model = process.argv[5] || 'haiku';
 fs.mkdirSync(outDir, { recursive: true });
 fs.mkdirSync(cwd, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const logPath = path.join(outDir, `claude-${scenario}-${stamp}.jsonl`);
+const slashCmd = process.argv[6] || '/compact';
+const tag = scenario === 'M13' ? '-' + slashCmd.replace(/[^a-z0-9]/gi, '') : '';
+const logPath = path.join(outDir, `claude-${scenario}${tag}-${stamp}.jsonl`);
 const logFd = fs.openSync(logPath, 'w');
 const T0 = performance.now();
 const now = () => Math.round((performance.now() - T0) * 10) / 10;
@@ -200,6 +202,37 @@ S.M7 = async () => {
     await waitFor(isTerminalLc(B), 180000, from);
     await settle(4000, 60000);
   }
+};
+
+// M13: slash command as a user message — mid-turn (while a Bash tool runs) x2 and idle control x1
+S.M13 = async () => {
+  const any = (u) => (o) => o.type === 'command_lifecycle' && o.command_uuid === u;
+  const midTrial = async (name) => {
+    const A = uuid(), C = uuid();
+    rec({ dir: 'meta', trial: name, slashCmd, ids: { A, C } });
+    const from = events.length;
+    writeRaw(userLine(`Use the Bash tool to run exactly this command: sleep 12
+After it finishes, reply with exactly: DONE-${name}`, A), 'A ' + name);
+    const tu = await waitFor(isToolUse, 120000, from);
+    if (!tu) return;
+    await sleep(2000);
+    writeRaw(userLine(slashCmd, C), 'C slash mid-tool ' + name);
+    await waitFor(any(C), 5000, from);
+    await waitFor(isResult, 180000, from);
+    await waitFor(isTerminalLc(C), 120000, from);
+    await settle(10000, 120000);
+  };
+  const idleTrial = async (name) => {
+    const C = uuid();
+    rec({ dir: 'meta', trial: name, slashCmd, ids: { C } });
+    const from = events.length;
+    writeRaw(userLine(slashCmd, C), 'C slash idle ' + name);
+    await waitFor(isTerminalLc(C), 120000, from);
+    await settle(10000, 120000);
+  };
+  await midTrial('m1');
+  await idleTrial('i1');
+  await midTrial('m2');
 };
 
 // ---------------- driver ----------------

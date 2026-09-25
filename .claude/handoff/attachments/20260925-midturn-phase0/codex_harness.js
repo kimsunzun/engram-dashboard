@@ -199,6 +199,163 @@ S.M7 = async () => {
   }
 };
 
+// ---------------------------------------------------------------------------------------------
+// Phase 0b (2026-09-26) — M9 (empty-input turn/start) · M10 (turn-end "record only" branch).
+// Vendor source (0.156.1): the last pending-input check is `turn.rs` run_turn (after sampling) —
+// the record-only window runs from that check to `active_turn.task.take()` in
+// `tasks/mod.rs` on_task_finished (stop hooks · flush_rollout in between). A steer that lands there
+// is taken by `take_pending_input_for_turn_state` and recorded by `run_hooks_and_record_inputs`
+// before TurnComplete is emitted. The window has no notification of its own, so we anchor on the
+// final `thread/tokenUsage/updated` and busy-spin a jittered delay (setTimeout is too coarse on Windows).
+function spin(ms) { const end = performance.now() + ms; while (performance.now() < end) { /* busy wait on purpose */ } }
+const pick = (e) => ({ turnId: e.turnId, type: e.item?.type, id: e.item?.id, clientId: e.item?.clientId ?? null });
+async function emptyTurnStart(note) {
+  const from = events.length;
+  const r = await request('turn/start', { threadId, input: [] }, note);
+  rec({ dir: 'meta', note: note + ' response', resp: r.o });
+  const turnId = r.o.result?.turn?.id ?? null;
+  let text = null, done = null;
+  if (turnId) {
+    done = await waitFor((o) => isTurnCompleted(o) && o.params?.turn?.id === turnId, 180000, from);
+    await settle(2000, 20000);
+    const msgs = events.slice(from).filter((ev) => ev.o.method === 'item/completed' && itemType(ev.o) === 'agentMessage' && ev.o.params?.turnId === turnId).map((ev) => ev.o.params.item.text);
+    const userItems = events.slice(from).filter((ev) => ev.o.method === 'item/started' && itemType(ev.o) === 'userMessage').map((ev) => ({ t: ev.t, turnId: ev.o.params?.turnId, clientId: ev.o.params.item.clientId ?? null, text: (ev.o.params.item.content?.[0]?.text ?? '').slice(0, 60) }));
+    text = msgs;
+    rec({ dir: 'meta', note: note + ' result', turnId, status: done?.o?.params?.turn?.status ?? null, turnError: done?.o?.params?.turn?.error ?? null, agentMessages: msgs, userItemsDuringEmptyTurn: userItems });
+  }
+  return { resp: r.o, turnId, agentMessages: text, status: done?.o?.params?.turn?.status ?? null };
+}
+// Walk thread/items/list desc pages. The first request is sent synchronously (callable inside a handler).
+function walkItems(limit, note, prevTurnId, maxPages = 20) {
+  const t0 = now();
+  const pages = [];
+  const go = async () => {
+    let cursor = null;
+    for (let p = 0; p < maxPages; p++) {
+      const params = { threadId, limit, sortDirection: 'desc' };
+      if (cursor) params.cursor = cursor;
+      const sentT = now();
+      const r = await request('thread/items/list', params, `${note} page ${p}`);
+      const res = r.o.result;
+      const entries = (res?.data ?? []).map(pick);
+      pages.push({ p, sentT, respT: r.t, error: r.o.error ?? null, entries, nextCursor: res?.nextCursor ?? null });
+      if (!res) return 'error';
+      if (prevTurnId && entries.some((e) => e.turnId === prevTurnId)) return 'passed-turn';
+      if (!res.nextCursor) return 'end';
+      cursor = res.nextCursor;
+    }
+    return 'maxPages';
+  };
+  return go().then((stoppedBy) => ({ t0, tEnd: now(), stoppedBy, pages }));
+}
+
+S.M9 = async () => {
+  // Variant B (control): empty turn/start after a normally completed turn (last user message already answered).
+  await handshake();
+  const from = events.length;
+  const U = uuid();
+  const t1 = await startTurn('Without using any tools, reply with exactly: READY-7', U, 'M9 normal turn/start');
+  await waitFor((o) => isTurnCompleted(o) && o.params?.turn?.id === t1, 120000, from);
+  await settle(2000, 20000);
+  await itemsList('M9 after normal turn');
+  const r1 = await emptyTurnStart('M9 empty turn/start (after answered turn)');
+  rec({ dir: 'meta', m9summary: { variant: 'B-after-answered-turn', accepted: !!r1.turnId, error: r1.resp.error ?? null, agentMessages: r1.agentMessages, status: r1.status } });
+  await itemsList('M9 final');
+};
+
+S.M10 = async () => {
+  await handshake();
+  const maxAttempts = Number(process.env.M10_MAX || 40), wantHits = Number(process.env.M10_HITS || 3);
+  let d = Number(process.env.M10_D0 || 1.0); // spin delay after final tokenUsage/updated (ms)
+  let hits = 0, prevTurnId = null, m9Done = 0;
+  const tally = { HIT: 0, early: 0, late: 0, other: 0 };
+  for (let k = 1; k <= maxAttempts && hits < wantHits; k++) {
+    const from = events.length;
+    const U = uuid(), W = uuid();
+    const token = `PINEAPPLE${k}`;
+    const dUsed = Math.max(0, Math.round(d * 100) / 100);
+    rec({ dir: 'meta', trial: k, ids: { U, W }, d: dUsed });
+    const tk = await startTurn(`Without using any tools, reply with exactly: ACK-${k}`, U, 'M10 turn/start ' + k);
+    let sp = null, steerWriteT = null, tokT = null, tokChunk = null;
+    // steer after a jittered spin, inside the handler that delivers the first tokenUsage/updated of this turn
+    const onTok = onceSync((o) => o.method === 'thread/tokenUsage/updated' && o.params?.turnId === tk, (ev) => {
+      tokT = ev.t; tokChunk = ev.chunk;
+      spin(dUsed);
+      steerWriteT = now();
+      sp = steer(tk, `Reply with exactly the word ${token}.`, W, `M10 steer ${k} d=${dUsed} (tok at ${ev.t})`);
+    }, 120000, from);
+    // probe the moment turn/completed arrives: one full page (limit 40) + a limit-2 walk (design probe)
+    let probeFull = null, walk = null, tcT = null, tcChunk = null, probeSentT = null;
+    const tcEv = await onceSync((o) => isTurnCompleted(o) && o.params?.turn?.id === tk, (ev) => {
+      tcT = ev.t; tcChunk = ev.chunk;
+      probeSentT = now();
+      probeFull = request('thread/items/list', { threadId, limit: 40, sortDirection: 'desc' }, `M10 probe full ${k} (in turn/completed handler)`);
+      walk = walkItems(2, `M10 probe walk ${k}`, prevTurnId);
+    }, 180000, from);
+    await onTok;
+    const steerR = sp ? await sp : null;
+    const full = probeFull ? await probeFull : null;
+    const w = walk ? await walk : null;
+    await settle(2500, 30000);
+    // collect
+    const evs = events.slice(from);
+    const echoS = evs.find((ev) => ev.o.method === 'item/started' && itemType(ev.o) === 'userMessage' && ev.o.params.item.clientId === W);
+    const echoC = evs.find((ev) => ev.o.method === 'item/completed' && itemType(ev.o) === 'userMessage' && ev.o.params.item.clientId === W);
+    const msgs = evs.filter((ev) => ev.o.method === 'item/completed' && itemType(ev.o) === 'agentMessage' && ev.o.params?.turnId === tk).map((ev) => ev.o.params.item.text);
+    const toks = evs.filter((ev) => ev.o.method === 'thread/tokenUsage/updated' && ev.o.params?.turnId === tk).map((ev) => ev.t);
+    const fullEntries = (full?.o?.result?.data ?? []).map(pick);
+    const fIdx = fullEntries.findIndex((e) => e.clientId === W);
+    let walkFound = null;
+    if (w) for (const pg of w.pages) { const i = pg.entries.findIndex((e) => e.clientId === W); if (i >= 0) { walkFound = { page: pg.p, idxInPage: i, respT: pg.respT }; break; } }
+    const steerErr = steerR?.o?.error ?? null;
+    let verdict;
+    if (!sp) verdict = 'other';
+    else if (steerErr) verdict = 'late';
+    else if (msgs.length >= 2 || toks.length >= 2) verdict = 'early';
+    else if (msgs.length === 1) verdict = 'HIT';
+    else verdict = 'other';
+    tally[verdict]++;
+    const summary = {
+      trial: k, d: dUsed, verdict, turnId: tk,
+      tokT, tokChunk, steerWriteT, steerWriteMinusTok: tokT != null ? Math.round((steerWriteT - tokT) * 10) / 10 : null,
+      steerResp: steerR?.o?.result ?? steerErr, steerRespT: steerR?.t ?? null,
+      tcT, tcChunk, tcMinusTok: tcT != null && tokT != null ? Math.round((tcT - tokT) * 10) / 10 : null,
+      tcStatus: tcEv?.o?.params?.turn?.status ?? null,
+      echoStartedT: echoS?.t ?? null, echoCompletedT: echoC?.t ?? null, echoTurnId: echoS?.o?.params?.turnId ?? null,
+      echoVsTc: echoS && tcT != null ? Math.round((echoS.t - tcT) * 10) / 10 : null,
+      agentMessages: msgs, tokenUsageCount: toks.length,
+      probeSentT, probeFullRespT: full?.t ?? null, probeFullFound: fIdx >= 0, probeFullIdxFromNewest: fIdx, probeFullItem: fIdx >= 0 ? fullEntries[fIdx] : null,
+      probeFullTop: fullEntries.slice(0, 5),
+      walk: w ? { stoppedBy: w.stoppedBy, pages: w.pages.length, ms: Math.round((w.tEnd - w.t0) * 10) / 10, found: walkFound, pageTurns: w.pages.map((pg) => pg.entries.map((e) => `${(e.turnId || '').slice(-6)}:${e.type}${e.clientId === W ? '*W' : ''}`)) } : null,
+    };
+    rec({ dir: 'meta', m10summary: summary });
+    console.log(`M10 trial ${k} d=${dUsed} ${verdict} tc-tok=${summary.tcMinusTok} echoVsTc=${summary.echoVsTc} fullFound=${summary.probeFullFound} walk=${w ? w.stoppedBy + '/' + w.pages.length + (walkFound ? ' found p' + walkFound.page : ' notfound') : '-'}`);
+    // staircase on d
+    if (verdict === 'early') d = d + 0.5 + Math.random() * 0.5;
+    else if (verdict === 'late') d = Math.max(0, d - 0.3 - Math.random() * 0.4);
+    else if (verdict === 'HIT') d = Math.max(0, d + (Math.random() - 0.5) * 0.4);
+    prevTurnId = tk;
+    if (verdict === 'HIT') {
+      hits++;
+      // settled list after the hit (is the record-only item there once things are quiet?)
+      await itemsList(`M10 after hit ${k} (settled)`);
+      // M9 variant A: the recorded steer is an unanswered user message in history → empty turn/start
+      if (m9Done < 3) {
+        m9Done++;
+        const r9 = await emptyTurnStart(`M9A empty turn/start after M10 hit ${k}`);
+        const answered = (r9.agentMessages || []).some((m) => String(m).includes(token));
+        rec({ dir: 'meta', m9summary: { variant: 'A-after-record-only-hit', trial: k, token, accepted: !!r9.turnId, error: r9.resp.error ?? null, agentMessages: r9.agentMessages, status: r9.status, answeredToken: answered } });
+        console.log(`M9A after hit ${k}: accepted=${!!r9.turnId} answered=${answered} msgs=${JSON.stringify(r9.agentMessages)}`);
+        if (r9.turnId) prevTurnId = r9.turnId;
+      }
+    } else if (verdict === 'late' || verdict === 'other') {
+      // a late steer was refused: nothing unanswered. nothing to do.
+    }
+  }
+  rec({ dir: 'meta', m10tally: tally, hits });
+  console.log('M10 tally ' + JSON.stringify(tally));
+};
+
 function killTree() {
   try { execFileSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { stdio: 'ignore' }); rec({ dir: 'meta', killed: child.pid }); } catch (e) { rec({ dir: 'meta', killErr: String(e.message).slice(0, 200) }); }
 }
