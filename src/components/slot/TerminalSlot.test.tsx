@@ -475,10 +475,10 @@ describe('TerminalSlot — 에이전트 부재 판정(ADR-0148)', () => {
 })
 
 describe('TerminalSlot — 커서 기본값', () => {
-  // 사용자 결정 2026-09-25 — 커서를 깜빡이는 막대로 바꾸고 굵기와 색은 그대로 둔다.
+  // 사용자 결정 2026-09-25 — 커서를 깜빡이는 흰 막대로 바꾸고 굵기는 그대로 둔다.
   // 비활성 커서도 막대인 것은 그 선택에 맞춘 것이다 — xterm 기본값 'outline' 은 포커스 없는 슬롯에 칸 전체
   //   빈 상자를 그린다.
-  it('막대·깜빡임 커서로 만들고 비활성도 막대, 굵기는 xterm 기본값, 색은 테마 값을 쓴다', async () => {
+  it('흰 막대·깜빡임 커서로 만들고 비활성도 막대, 굵기는 xterm 기본값을 쓴다', async () => {
     render(<TerminalSlot viewId="v1" agentId={AGENT} />)
     await flushSubscribe()
 
@@ -486,7 +486,7 @@ describe('TerminalSlot — 커서 기본값', () => {
       cursorStyle: 'bar',
       cursorInactiveStyle: 'bar',
       cursorBlink: true,
-      theme: expect.objectContaining({ cursor: '#4a9eff' }),
+      theme: expect.objectContaining({ cursor: '#ffffff' }),
     })
     expect(termState.options).not.toHaveProperty('cursorWidth')
   })

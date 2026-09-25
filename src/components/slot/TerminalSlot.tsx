@@ -78,13 +78,13 @@ export default function TerminalSlot({ viewId, agentId }: TerminalSlotProps) {
     const term = new Terminal({
       fontFamily,
       fontSize: 13,
-      // 사용자 결정 2026-09-25: 기본값만 막대·깜빡임으로 바꾼다. 사용자 설정으로 여는 것은 미뤘다 — 설정이
+      // 사용자 결정 2026-09-25: 기본값만 흰 막대·깜빡임으로 바꾼다. 사용자 설정으로 여는 것은 미뤘다 — 설정이
       //   되려면 LLM 제어 경로가 함께 있어야 한다(CLAUDE.md 「LLM-우선 제어」).
       // 포커스 없는 슬롯도 막대로 — xterm 기본값('outline')은 칸 전체를 빈 상자로 그려 그 선택과 어긋난다.
       cursorStyle: 'bar',
       cursorInactiveStyle: 'bar',
       cursorBlink: true,
-      theme: { background: '#0a0a0a', foreground: '#e0e0e0', cursor: '#4a9eff' },
+      theme: { background: '#0a0a0a', foreground: '#e0e0e0', cursor: '#ffffff' },
     })
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
