@@ -49,11 +49,13 @@ use crate::ui_settings::UiSettingsRefresh;
 //   `layout.setSlotContent`·`agent.spawnInto` 는 `src/commands/*Commands.ts` 에 실재하는 id 다(실측
 //   2026-08-17). 여기서 다른 철자를 지으면 같은 동작에 이름이 둘이 되고, 화면 몫 등록(TRD §6 Step 4 —
 //   그 id 를 바꾸지 않는다고 적은 자리)이 그 둘을 다 지고 간다.
-// ★프론트에 짝이 없어 새로 짓는 이름은 넷★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다) ·
+// ★프론트에 짝이 없어 새로 짓는 이름은 여섯★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다) ·
 //   `slot.split`(프론트는 방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만,
 //   버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) · `ui.refresh`(프론트에 대응 명령이
 //   없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만 만지던 화면 명령 둘은 ADR-0167 이
-//   내렸다).
+//   내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고
+//   레지스트리에 이름을 싣지 않는다 — ADR-0227).
+// ★세대 8 = 분할 비율 명령 둘(`split.setRatio`·`split.list`)이 든 세대★(ADR-0227).
 // ★세대 7 = 그 `backend` 칸이 `"codex"` 를 **실제로 만드는** 세대★(2026-09-22 · ADR-0219) — 인자의
 //   **타입도 낱말 집합도 그대로**고(wire 어휘는 claude·codex 둘 그대로, 모르는 낱말은 여전히 모르는
 //   낱말) 바뀐 것은 정책이 그 낱말을 열었다는 것과 **그것을 광고하는 summary** 다. 세대 5 가 같은 축의
@@ -69,7 +71,7 @@ use crate::ui_settings::UiSettingsRefresh;
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 7;
+    catalog_version: 8;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -106,6 +108,31 @@ declare_commands! {
         Agent,
         AgentList,
         PresetPalette,
+    }
+
+    /// 비율 쓰기의 결말 — `Applied` = 바꿨다 · `Unchanged` = 자른 값이 지금 값과 같다(무변경) ·
+    /// `TooSmall` = 손대지 않았다(분할이 두 쪽 모두 최소 칸 크기를 줄 만큼 크지 않거나, 그 값이면 어떤 칸의
+    /// 폭·높이가 0 이 된다).
+    ///
+    /// 셸 안쪽 쌍둥이는 `super::types::SplitRatioOutcome` 이다(Tauri `set_split_ratio` 의 답) — 타입 이름은
+    /// 다르고 variant 철자는 같다(`ThemeOrigin`↔`ThemeSource` 와 같은 관계 · 맞대는 테스트가 지킨다). 변환은
+    /// 핸들러가 한다.
+    // ADR-0227
+    enum RatioOutcome {
+        Applied,
+        Unchanged,
+        TooSmall,
+    }
+
+    /// 분할 하나 — a = 왼쪽/위, b = 오른쪽/아래(ADR-0140). `ratio` = a 쪽 칸의 몫.
+    /// `a_slots`·`b_slots` = 그 쪽 서브트리에 든 슬롯 id(트리 전위 순).
+    // ADR-0227
+    struct SplitRow {
+        split_id: String,
+        dir: SplitDirection,
+        ratio: f64,
+        a_slots: Vec<String>,
+        b_slots: Vec<String>,
     }
 
     /// 창에 빈 탭을 하나 더 만들고 활성화한다.
@@ -193,6 +220,44 @@ declare_commands! {
         view_id: String,
         slot_id: String,
     } -> ok SlotCloseOk {} errors [CONFLICT];
+
+    // ADR-0227
+    // ADR-0140
+    /// 분할(구분선) 하나의 비율을 정한다. ratio = a 쪽(왼쪽/위) 칸의 몫 — 창 전체가 아니라 그 분할이 나누는
+    /// 영역 안의 몫이고, a 쪽에 칸이 여럿이면 그 묶음 전체의 몫이다. 0.3 이면 그 영역의 30% 를 왼쪽(위아래
+    /// 분할이면 위)이 갖는다. split_id 는 split.list 가 준다.
+    /// 범위 밖 값은 오류가 아니다: 셸이 0.1~0.9 로 자르고, 그 창의 크기를 알면 두 쪽이 각각 화면 최소 칸
+    /// 크기 이상이 되게 한 번 더 자른 뒤 그 값을 적용하고 답의 ratio 로 돌려준다.
+    /// outcome — Applied = 바꿨다 · Unchanged = 그렇게 자른 값이 지금 값과 같아 바꾼 것이 없다 ·
+    /// TooSmall = 분할이 너무 작아서(또는 그 값이면 어떤 칸이 사라져서) 손대지 않았다. Applied 가 아니면
+    /// ratio 는 손대지 않은 지금 값이다.
+    #[effect(Write)]
+    #[since(8)]
+    "split.setRatio" => args SplitSetRatioArgs {
+        view_id: String,
+        split_id: String,
+        ratio: f64,
+    } -> ok SplitSetRatioOk {
+        ratio: f64,
+        outcome: RatioOutcome,
+    } errors [CONFLICT];
+
+    // ADR-0227
+    // ADR-0140
+    /// 그 탭의 분할(구분선) 전량 — 트리 전위 순. 행 = split_id · dir(LeftRight = 좌/우, TopBottom = 위/아래) ·
+    /// ratio(= a 쪽(왼쪽/위) 칸의 몫 — 창 전체가 아니라 그 분할이 나누는 영역 안의 몫이고, a 쪽에 칸이
+    /// 여럿이면 그 묶음 전체의 몫) · a_slots(a = 왼쪽/위 쪽에 든 슬롯 id) · b_slots(b = 오른쪽/아래 쪽).
+    /// 슬롯 x 와 y 를 가르는 분할은 x 가 한쪽 목록, y 가 다른 쪽 목록에 든 행이다(하나뿐이다).
+    /// 중첩은 목록의 포함으로 읽는다 — 한 행의 a_slots·b_slots 가 전부 다른 행의 한쪽 목록에 들면 그 행은
+    /// 그쪽 영역을 다시 나누는 분할이다.
+    /// 비율을 바꾸려면 그 split_id 로 split.setRatio 를 부른다.
+    #[effect(Read)]
+    #[since(8)]
+    "split.list" => args SplitListArgs {
+        view_id: String,
+    } -> ok SplitListOk {
+        splits: Vec<SplitRow>,
+    } errors [CONFLICT];
 
     // ★알려진 과도기 분열 — 같은 id 가 두 표면에서 **받는 것도 주는 것도** 다르다★: 프론트 레지스트리에도
     //   `slot.popout` 이 있다(`src/commands/slotCommands.ts`). 받는 것 — 그쪽은 목적지 인자가 없어 **항상 새
@@ -378,6 +443,18 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         &mut table,
         "slot.close",
         blocking_handler(move |args: SlotCloseArgs| verb_slot_close(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "split.setRatio",
+        blocking_handler(move |args: SplitSetRatioArgs| verb_split_set_ratio(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "split.list",
+        blocking_handler(move |args: SplitListArgs| verb_split_list(&p, args)),
     );
     let p = Arc::clone(&ports);
     plug(
@@ -574,6 +651,56 @@ fn verb_slot_close(ports: &LayoutPorts, args: SlotCloseArgs) -> Result<SlotClose
     )
     .map_err(not_applied)?;
     Ok(SlotCloseOk {})
+}
+
+// ADR-0227
+fn verb_split_set_ratio(
+    ports: &LayoutPorts,
+    args: SplitSetRatioArgs,
+) -> Result<SplitSetRatioOk, CommandError> {
+    let view = uuid_arg("view_id", &args.view_id)?;
+    let split = uuid_arg_from("split_id", &args.split_id, "split.list")?;
+    // JSON 은 NaN·±∞ 를 못 실어 보통은 역직렬화가 먼저 반려한다 — 이 검사는 그 전제가 깨질 때의 그물이다.
+    //   여기서 거르지 않으면 관리자의 같은 거절이 `CONFLICT` 로 나가 「상태 탓」처럼 읽힌다.
+    if !args.ratio.is_finite() {
+        return Err(CommandError::invalid_argument(format!(
+            "ratio must be a finite number, got {}",
+            args.ratio
+        )));
+    }
+    let applied =
+        apply::set_split_ratio(&ports.state, ports.events.as_ref(), view, split, args.ratio)
+            .map_err(not_applied)?;
+    Ok(SplitSetRatioOk {
+        ratio: applied.ratio,
+        outcome: match applied.outcome {
+            super::types::SplitRatioOutcome::Applied => RatioOutcome::Applied,
+            super::types::SplitRatioOutcome::Unchanged => RatioOutcome::Unchanged,
+            super::types::SplitRatioOutcome::TooSmall => RatioOutcome::TooSmall,
+        },
+    })
+}
+
+// ADR-0227
+fn verb_split_list(ports: &LayoutPorts, args: SplitListArgs) -> Result<SplitListOk, CommandError> {
+    let view = uuid_arg("view_id", &args.view_id)?;
+    let splits = apply::list_splits(&ports.state, view).map_err(not_applied)?;
+    let ids = |slots: Vec<Uuid>| -> Vec<String> { slots.iter().map(Uuid::to_string).collect() };
+    Ok(SplitListOk {
+        splits: splits
+            .into_iter()
+            .map(|s| SplitRow {
+                split_id: s.id.to_string(),
+                dir: match s.dir {
+                    SplitDir::LeftRight => SplitDirection::LeftRight,
+                    SplitDir::TopBottom => SplitDirection::TopBottom,
+                },
+                ratio: s.ratio,
+                a_slots: ids(s.a_slots),
+                b_slots: ids(s.b_slots),
+            })
+            .collect(),
+    })
 }
 
 fn verb_slot_popout(
@@ -775,9 +902,14 @@ fn optional_text<'a>(field: &str, given: Option<&'a str>) -> Result<Option<&'a s
 /// ★형식 불량은 적용 전에 반려한다★ — 파싱에 실패한 id 로 적용을 부르면 「없는 id」와 「형식이 깨진 id」가
 /// 같은 답을 받아, 호출자는 멀쩡한 탭을 지웠나 의심하며 목록부터 다시 뒤진다.
 fn uuid_arg(field: &str, given: &str) -> Result<Uuid, CommandError> {
+    uuid_arg_from(field, given, "tab.list / slot.resolveSpatial")
+}
+
+/// `source` = 그 id 를 돌려주는 명령 — 반려 문구가 호출자를 거기로 안내한다.
+fn uuid_arg_from(field: &str, given: &str, source: &str) -> Result<Uuid, CommandError> {
     Uuid::parse_str(given.trim()).map_err(|_| {
         CommandError::invalid_argument(format!(
-            "{field} must be a UUID (the id shown by tab.list / slot.resolveSpatial), got {given:?}"
+            "{field} must be a UUID (the id shown by {source}), got {given:?}"
         ))
     })
 }

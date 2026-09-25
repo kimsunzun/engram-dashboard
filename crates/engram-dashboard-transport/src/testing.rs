@@ -854,6 +854,24 @@ mod tests {
         }
     }
 
+    // ── H6: 엔드포인트를 떨어뜨린 것은 닫기가 아니라 읽기 오류다 ──
+    //
+    // ★`MemRx::recv` 의 채널 소진 팔을 지키는 것은 이 테스트뿐이다★ — H5 는 `fail` 로 `Fail` 팔만 타고,
+    //   채널 소진 팔을 `Ok(Closed(None))` 으로 되돌려도 나머지 스위트는 전부 초록이었다(실측 2026-09-25).
+    #[tokio::test]
+    async fn dropping_the_endpoint_is_a_read_error_not_a_close() {
+        let net = MemoryNetwork::new();
+        let (_tx, mut rx) = net.dial(&Address::new("mem://x")).await.unwrap();
+        let endpoint = net.accept().unwrap();
+        // `accept` 가 명부에서 꺼내 주므로 이 `Arc` 가 송신단의 유일한 소유자다.
+        assert_eq!(Arc::strong_count(&endpoint), 1);
+        drop(endpoint);
+        match rx.recv().await {
+            Err(_) => {}
+            Ok(other) => panic!("말 없이 사라진 통로가 닫기로 올라왔다: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn a_peer_can_close_with_a_code_and_the_reader_sees_it() {
         let net = MemoryNetwork::new();

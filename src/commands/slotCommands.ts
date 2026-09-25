@@ -56,7 +56,7 @@ register({
   title: t('slot.focus'),
   category: 'slot',
   // ADR-0066: click-to-focus — viewStore.focusSlot → invoke(focus_slot) → emit(layout:updated) 로 링을
-  //   갱신한다(낙관 갱신 X, §5 단일 제어 표면). ViewLayoutRenderer 의 pane onClick 도 같은 핸들을 부른다.
+  //   갱신한다(낙관 갱신 X, §5 단일 제어 표면). LayoutLeaf 의 슬롯 onClick 도 같은 핸들을 부른다.
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.focus')
     return useViewStore.getState().focusSlot(viewId, slotId)

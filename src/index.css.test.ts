@@ -152,3 +152,68 @@ describe('index.css — xterm .slider 두께는 seam thumb 과 같은 산식', (
     expect(offenders.map(r => r.selector)).toEqual([])
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 칸 틀 위치 = 셸 사각형을 CSS 로 반올림 (ADR-0227, TRD §2e)
+//
+// ★무엇을 지키나★: 잎은 인라인으로 `--x0 --y0 --x1 --y1` 만 싣고, 위치·크기로 바꾸는 규칙은 여기 하나뿐이다.
+//   규칙이 빠지면 칸이 전부 원점에 크기 없이 놓이고, 반올림 형태가 셸의 px 경계식과 어긋나면 셸이 계산한 칸 px 와
+//   화면이 갈라진다. jsdom 은 캐스케이드·`@supports`·`round()` 를 계산하지 않으므로 소스 문자열로 잰다(위 게이트와 같은
+//   사유). 틀에 이 클래스가 붙는지는 ViewLayoutRenderer.flat.test.tsx 가 잰다.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('index.css — 칸 틀 위치 규칙', () => {
+  const code = cssSource.replace(/\/\*[\s\S]*?\*\//g, '')
+  const SUPPORTS = '@supports (width: round(nearest, 1.5px, 1px))'
+
+  /** `from` 에서 시작하는 블록 `{ ... }` 의 안쪽과 끝 위치. */
+  function blockAt(css: string, from: number): { inner: string; end: number } {
+    const open = css.indexOf('{', from)
+    let depth = 0
+    for (let j = open; j < css.length; j += 1) {
+      if (css[j] === '{') depth += 1
+      else if (css[j] === '}') {
+        depth -= 1
+        if (depth === 0) return { inner: css.slice(open + 1, j), end: j + 1 }
+      }
+    }
+    throw new Error('블록이 닫히지 않았다')
+  }
+
+  /** `.engram-slot-frame { ... }` 규칙들의 선언 목록(공백 정규화). */
+  function frameRules(css: string): string[][] {
+    return [...css.matchAll(/\.engram-slot-frame\s*\{([^{}]*)\}/g)].map(m =>
+      m[1]
+        .split(';')
+        .map(d => d.replace(/\s+/g, ' ').trim())
+        .filter(d => d !== ''),
+    )
+  }
+
+  const at = code.indexOf(SUPPORTS)
+  const supports = at < 0 ? null : blockAt(code, at)
+  const outside = supports === null ? code : code.slice(0, at) + code.slice(supports.end)
+
+  it('기본 규칙은 네 경계를 반올림 없는 % 로 놓는다', () => {
+    expect(frameRules(outside)).toEqual([
+      [
+        'left: calc(var(--x0) * 100%)',
+        'top: calc(var(--y0) * 100%)',
+        'width: calc((var(--x1) - var(--x0)) * 100%)',
+        'height: calc((var(--y1) - var(--y0)) * 100%)',
+      ],
+    ])
+  })
+
+  // var() 가 섞인 선언은 계산 시점에 unset 이 되므로 같은 속성을 두 번 적는 폴백이 통하지 않는다 — @supports 로 가른다.
+  it('round() 지원 시 규칙은 @supports 안에서 셸의 px 경계식과 같은 모양으로 반올림한다', () => {
+    expect(supports).not.toBeNull()
+    expect(frameRules(supports!.inner)).toEqual([
+      [
+        'left: round(nearest, calc(var(--x0) * 100%), 1px)',
+        'top: round(nearest, calc(var(--y0) * 100%), 1px)',
+        'width: calc(round(nearest, calc(var(--x1) * 100%), 1px) - round(nearest, calc(var(--x0) * 100%), 1px))',
+        'height: calc(round(nearest, calc(var(--y1) * 100%), 1px) - round(nearest, calc(var(--y0) * 100%), 1px))',
+      ],
+    ])
+  })
+})

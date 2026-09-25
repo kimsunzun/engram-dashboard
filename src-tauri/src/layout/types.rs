@@ -7,6 +7,7 @@
 use ts_rs::TS;
 use uuid::Uuid;
 
+use super::geometry::{Insets, SlotRect, SplitRect};
 use super::spatial::SlotSpatial;
 
 /// 이름이 결과 배치를 말한다 — `LeftRight` 는 항상 좌/우, `TopBottom` 은 항상 위/아래.
@@ -67,15 +68,17 @@ pub enum LayoutNode {
         id: Uuid,
         content: SlotContent,
     },
-    /// ratio = a 가 차지하는 비율(0.0~1.0 클램프, 기본 0.5).
+    /// ratio = a 가 차지하는 비율(`tree::RATIO_MIN`~`RATIO_MAX` = 0.1~0.9 로 클램프, 기본 0.5).
     Split {
         /// 이 split 노드의 정체 — 분할마다 새로 뽑고, 노드가 자리를 옮겨도(형제 승격) 따라간다. 프론트는
-        /// 렌더러 인스턴스를 이 값으로 가른다(`ViewLayoutRenderer`).
+        /// 이 값(스냅샷 `split_rects` 의 `split_id` 로도 실린다)을 구분선(`Splitter`)의 key 와 드래그 미리보기가
+        /// 끄는 분할의 표식으로 쓴다(`ViewLayoutRenderer`·`splitPreview`).
         // ADR-0223
         #[ts(type = "string")]
         id: Uuid,
         dir: SplitDir,
-        ratio: f32,
+        // ADR-0227
+        ratio: f64,
         a: Box<LayoutNode>,
         b: Box<LayoutNode>,
     },
@@ -114,13 +117,80 @@ pub struct ViewSnapshot {
     pub focused_slot_id: Option<Uuid>,
     /// ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
     /// 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
-    /// ordinal 순으로 담긴다. 좌표 자체는 노출 안 함(ADR-0068 결정 3 — 좌표 보류).
+    /// ordinal 순으로 담긴다. 정규화 좌표는 이 필드가 아니라 `slot_rects` 가 싣는다(ADR-0227 — ADR-0068 결정 3 개정).
     pub slot_spatial: Vec<SlotSpatial>,
+    /// 각 말단 슬롯의 사각형 — 뷰 기준 정규화 [0,1] 경계 꼴 `x0,y0,x1,y1`(픽셀 아님). 맞닿는 경계 값은 비트
+    /// 단위로 같다. 트리 전위 순(노드 → a 서브트리 → b 서브트리)으로 담긴다 — `slot_spatial` 의 ordinal
+    /// 순과 다르므로 짝을 찾을 땐 `slot_id` 로 맞춘다.
+    // ADR-0227
+    pub slot_rects: Vec<SlotRect>,
+    /// 각 분할 노드의 상자(두 자식을 합친 영역, `slot_rects` 와 같은 경계 꼴) + 분할 경계 `at`
+    /// (`dir` 이 `left_right` 면 x 축 값, `top_bottom` 이면 y 축 값). 트리 전위 순으로 담긴다.
+    // ADR-0227
+    pub split_rects: Vec<SplitRect>,
+    /// 분할 비율(a 쪽 몫)의 셸 한계 — 셸은 비율을 `[ratio_min, ratio_max]` 로 잘라 읽고, `slot_rects`·
+    /// `split_rects` 는 그렇게 자른 비율로 계산한 값이다. 화면은 이 두 값을 쓰고 한계 상수를 따로 두지 않는다.
+    // ADR-0227
+    pub ratio_min: f64,
+    pub ratio_max: f64,
     /// 변경마다 +1(ViewManager.version).
     /// ts-rs u64 기본 매핑=bigint 이나 serde_json 은 number 로 직렬화(런타임=JS number) → 타입도 number 로 고정
     /// (불일치 시 프론트 race 가드 `snap.version > pulled` 에서 bigint↔number 혼용 에러, FIX-1). 카운터라 2^53 비현실적.
     #[ts(type = "number")]
     pub version: u64,
+}
+
+/// 비율 쓰기(`set_split_ratio`)의 결말.
+///
+/// - `Applied`: 값을 바꿨다 — version 이 올랐고 그 뷰의 레이아웃 스냅샷이 통지된다.
+/// - `Unchanged`: 클램프한 값이 지금 값과 같다 — 무변경·무통지.
+/// - `TooSmall`: 손대지 않았다 — 무변경·무통지. 사유는 둘이다 — 분할 상자가 두 쪽 모두 `min_pane_px`
+///   이상을 줄 만큼 크지 않다(px 범위가 비었다), 또는 그 값을 쓰면 어떤 칸의 폭·높이가 0 이 된다.
+///
+/// 명령 버스 `split.setRatio` 의 `outcome` 과 철자가 같다.
+// ★여기에 `#[serde(rename_all)]` 을 달지 말 것★ — 버스 선언 매크로는 rename 을 못 달아 variant 이름이 그대로
+// wire 값이 된다. 여기만 바꾸면 같은 결말을 두 표면이 다른 철자로 말한다(버스 쪽 쌍둥이 = `commands::RatioOutcome` ·
+// `ThemeSource`↔`ThemeOrigin` 과 같은 규칙 · 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의
+// `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum SplitRatioOutcome {
+    Applied,
+    Unchanged,
+    TooSmall,
+}
+
+/// `set_split_ratio` invoke 의 답. `ratio` = 셸이 실제로 가진 비율(a 쪽 = 왼쪽/위 칸의 몫 — ADR-0140) —
+/// `Applied` 면 방금 쓴 값, 아니면 손대지 않은 지금 값이다.
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct SplitRatioApplied {
+    pub ratio: f64,
+    pub outcome: SplitRatioOutcome,
+    /// `Applied` 일 때만 뜻이 있다 — 이 쓰기로 통지된 레이아웃 스냅샷의 `version` 과 같다(같은 락 안에서 뜬
+    /// 값). `Unchanged`·`TooSmall` 이면 통지가 없고 이 값은 전역 카운터의 그 순간 값일 뿐이라 기다릴
+    /// 대상이 아니다. number 로 고정하는 이유는 `ViewSnapshot.version` 과 같다.
+    #[ts(type = "number")]
+    pub version: u64,
+}
+
+/// 칸 틀 기본 지표 — 웹뷰가 셸에 알리는 `report_ui_metrics` 의 인자(`{ metrics: UiMetrics }`).
+///
+/// - `frame_insets`: 칸 틀 안쪽 테두리 폭 넷(CSS px). **실측값**이다 — 배율에 따라 소수가 올 수 있다.
+///   각 값은 유한하고 `0 ≤ v ≤ 64` 여야 한다.
+/// - `min_pane_px`: 칸 최소 크기(CSS px). 측정값이 아니라 화면의 **정책 상수**이고 그 값의 유일한 정본은
+///   화면이다 — 셸은 받아 쓰기만 하고 자기 상수를 두지 않는다. `1 ≤ v ≤ 1000` 이어야 한다.
+///
+/// 범위를 벗어나면 셸이 거절(`Err`)하고 그 창의 직전 값을 유지한다. 보고는 version 을 올리지도 알리지도
+/// 않는다.
+// ADR-0227
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UiMetrics {
+    pub frame_insets: Insets,
+    pub min_pane_px: u32,
 }
 
 impl LayoutNode {

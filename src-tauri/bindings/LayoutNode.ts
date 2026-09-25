@@ -5,6 +5,7 @@ import type { SplitDir } from "./SplitDir";
 export type LayoutNode = { "type": "slot", id: string, content: SlotContent, } | { "type": "split", 
 /**
  * 이 split 노드의 정체 — 분할마다 새로 뽑고, 노드가 자리를 옮겨도(형제 승격) 따라간다. 프론트는
- * 렌더러 인스턴스를 이 값으로 가른다(`ViewLayoutRenderer`).
+ * 이 값(스냅샷 `split_rects` 의 `split_id` 로도 실린다)을 구분선(`Splitter`)의 key 와 드래그 미리보기가
+ * 끄는 분할의 표식으로 쓴다(`ViewLayoutRenderer`·`splitPreview`).
  */
 id: string, dir: SplitDir, ratio: number, a: LayoutNode, b: LayoutNode, };

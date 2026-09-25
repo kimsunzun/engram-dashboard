@@ -82,7 +82,7 @@ flowchart LR
 
 ★**ADR-0044 를 렌더 모드 우선순위의 근거로 인용하지 말 것 — 거짓이다**★. 그 ADR 은 JSON 모드 배선·`StdioTransport` 신설 결정이고 `override` 라는 낱말이 한 번도 안 나온다(실측: 0 건).
 
-**앵커** — 우선순위 정본 = **ADR-0078** + `src/store/viewStore.ts` 의 `renderModeOverride` 필드 JSDoc · 실물 판정 지점 = `src/components/layout/ViewLayoutRenderer.tsx`(`renderModeOverride[slotId] ?? defaultRenderMode(agent)`) · 모드 어휘 = `src/components/slot/renderMode.ts`(`RENDER_MODES`) · `src/api/types.ts`
+**앵커** — 우선순위 정본 = **ADR-0078** + `src/store/viewStore.ts` 의 `renderModeOverride` 필드 JSDoc · 실물 판정 지점 = `src/components/layout/LayoutLeaf.tsx` 의 `SlotBody`(`renderModeOverride[node.id] ?? defaultRenderMode(agent)`) · 모드 어휘 = `src/components/slot/renderMode.ts`(`RENDER_MODES`) · `src/api/types.ts`
 
 ## 닫힌 문 — 사람은 통과, LLM 은 정책이 닫는다
 

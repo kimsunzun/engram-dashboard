@@ -50,8 +50,10 @@ impl CloseCode {
 /// ★이 코드가 상대에게 실제로 닿는 자리는 좁다(외부 사실)★ — RFC 6455 §7.4.1 이 `1006` 을 **와이어로
 /// 보낼 수 없는 예약값**으로 못박고 §7.1.5 가 그것을 수신 측이 로컬 합성하는 값으로 정의한다. 즉
 /// [`CloseCode::QUEUE_FULL`]·[`CloseCode::WRITE_DEADLINE`] 처럼 **혼잡한 소켓**에서 끊을 때는 닫기
-/// 프레임을 밀어 넣을 자리가 없어 상대는 코드를 못 본다. 실제로 전달되는 자리는
-/// [`CloseCode::HANDSHAKE_REJECTED`] 다(그때는 아무것도 안 밀려 있다).
+/// 프레임을 밀어 넣을 자리가 없어 상대는 코드를 못 본다. [`CloseCode::HANDSHAKE_REJECTED`] 도 보장은
+/// 아니다 — 붙는 쪽 핸드셰이크가 거절할 때는 남은 핸드셰이크 시한 안에서만 밀어 넣고, 거절 직전의
+/// 마지막 프레임이 못 나갔으면 닫기를 아예 안 보낸다(상세 = crate 헤더 「닫기 코드가 상대에게 닿는
+/// 자리는 좁다」).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Close {
     pub code: CloseCode,
