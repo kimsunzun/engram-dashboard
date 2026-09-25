@@ -13,7 +13,9 @@ const effort = process.argv[6] || 'low';
 fs.mkdirSync(outDir, { recursive: true });
 fs.mkdirSync(cwd, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-const logPath = path.join(outDir, `codex-${scenario}-${stamp}.jsonl`);
+// M16 carries its case in the log name (codex-M16-A-<stamp>.jsonl)
+const logTag = scenario === 'M16' ? `M16-${(process.env.M16_CASE || 'A').toUpperCase()}` : scenario;
+const logPath = path.join(outDir, `codex-${logTag}-${stamp}.jsonl`);
 const logFd = fs.openSync(logPath, 'w');
 const T0 = performance.now();
 const now = () => Math.round((performance.now() - T0) * 10) / 10;
@@ -56,6 +58,7 @@ child.stdout.on('data', (d) => {
     if (o && o.method === 'item/agentMessage/delta') rec({ dir: 'out', chunk: chunkNo, line: { method: o.method, params: { itemId: o.params?.itemId, delta: o.params?.delta } } });
     else rec({ dir: 'out', chunk: chunkNo, line: o ?? line });
     if (!o) continue;
+    trackTools(o); // M16: per-turn running-tool set, updated before any waiter sees this line
     if (o.id !== undefined && o.method !== undefined) {
       // server -> client request: refuse like engram Reader::refuse (-32601)
       send({ id: o.id, error: { code: -32601, message: `engram-dashboard 는 \`${o.method}\` 를 처리하지 않는다` } }, 'refuse server request');
@@ -101,8 +104,11 @@ const isTurnCompleted = isN('turn/completed');
 const txt = (text) => [{ type: 'text', text }];
 
 let threadId = null;
-async function handshake() {
-  const init = await request('initialize', { clientInfo: { name: 'engram-dashboard', version: '0.1.0' } }, 'initialize');
+async function handshake(opts = {}) {
+  // opts.experimental: opt into experimentalApi (only M16 case C needs it — `turn/start.collaborationMode`)
+  const initParams = { clientInfo: { name: 'engram-dashboard', version: '0.1.0' } };
+  if (opts.experimental) initParams.capabilities = { experimentalApi: true };
+  const init = await request('initialize', initParams, 'initialize');
   rec({ dir: 'meta', initializeResult: init.o.result ?? init.o.error });
   console.log('USER_AGENT=' + (init.o.result?.userAgent ?? JSON.stringify(init.o.error)));
   send({ method: 'initialized' }, 'initialized');
@@ -354,6 +360,137 @@ S.M10 = async () => {
   }
   rec({ dir: 'meta', m10tally: tally, hits });
   console.log('M10 tally ' + JSON.stringify(tally));
+};
+
+// ---------------------------------------------------------------------------------------------
+// M16 (2026-09-26) — answer-end boundary. Does a steer written at the answer-end signal
+// (`agentMessage` / `plan` `item/completed` while no tool of the turn is running) still get into the
+// SAME turn's follow-up sampling?
+// Vendor source (0.156.1, core/src/session/turn.rs): the answer item's `item/completed` is emitted on the
+// stream's `OutputItemDone` (try_run_sampling_request); the stream then runs on to `ResponseEvent::Completed`;
+// after in-flight tools drain, `send_token_count_event` (→ `thread/tokenUsage/updated`) is sent and the
+// function returns; run_turn then checks `has_pending_input` (:555-567). That check closes the window —
+// a steer landing after it is record-only (M10) or −32600. Plan items (`plan`) complete on the same
+// `OutputItemDone` (maybe_complete_plan_item_from_message) but only exist in Plan collaboration mode,
+// which needs `turn/start.collaborationMode` (experimental → initialize capabilities.experimentalApi).
+// env: M16_CASE=A (tool-less long answer) | B (final answer after one tool) | C (plan-mode turn)
+//      M16_N     steers inside the signal handler, alternating +0 / +1 ms busy-spin (default 10)
+//      M16_TOK   steers inside the handler of the tokenUsage/updated that follows the signal (default 3)
+//      M16_SWEEP setTimeout-delayed steers spread over the gap observed so far (default 6)
+//      M16_K0    first attempt number (token KIWI<k>)
+const NON_TOOL_ITEMS = new Set(['userMessage', 'hookPrompt', 'agentMessage', 'plan', 'reasoning', 'functionCallOutput', 'subAgentActivity', 'enteredReviewMode', 'exitedReviewMode', 'contextCompaction']);
+const turnTools = new Map(); // turnId -> { running:Set<itemId>, done:number }
+function trackTools(o) {
+  if (o.method !== 'item/started' && o.method !== 'item/completed') return;
+  const it = o.params?.item, tid = o.params?.turnId;
+  if (!it || !tid || NON_TOOL_ITEMS.has(it.type)) return;
+  let s = turnTools.get(tid);
+  if (!s) { s = { running: new Set(), done: 0 }; turnTools.set(tid, s); }
+  if (o.method === 'item/started') s.running.add(it.id); else { s.running.delete(it.id); s.done++; }
+}
+const toolState = (tid) => turnTools.get(tid) || { running: new Set(), done: 0 };
+const median = (a) => { const b = [...a].sort((x, y) => x - y); return b.length ? b[Math.floor(b.length / 2)] : null; };
+const r1 = (x) => (x == null ? null : Math.round(x * 10) / 10);
+
+S.M16 = async () => {
+  const cs = (process.env.M16_CASE || 'A').toUpperCase();
+  const N1 = Number(process.env.M16_N ?? 10), N3 = Number(process.env.M16_TOK ?? 3), N2 = Number(process.env.M16_SWEEP ?? 6);
+  const K0 = Number(process.env.M16_K0 || 1);
+  await handshake({ experimental: cs === 'C' });
+  const prompt = (k) => cs === 'A'
+    ? `Without using any tools, write a detailed paragraph of about 150 words about the history of lighthouses. Finish with the line END-${k}.`
+    : cs === 'B'
+      ? `Run exactly this shell command: Start-Sleep -Seconds 1\nAfter it finishes, do not use any more tools: write a paragraph of about 80 words about lighthouses and finish with the line END-${k}.`
+      : `Propose a short plan (3 to 5 steps) for adding a README.md file to a small project. Do not ask any questions, do not use any tools and do not inspect any files - write the final plan now inside <proposed_plan></proposed_plan> tags. Plan id P-${k}.`;
+  const sigType = cs === 'C' ? 'plan' : 'agentMessage';
+  const sched = [];
+  for (let i = 0; i < N1; i++) sched.push({ mode: 'sig', jit: i % 2 });
+  for (let i = 0; i < N3; i++) sched.push({ mode: 'tok' });
+  for (let i = 0; i < N2; i++) sched.push({ mode: 'sweep', i });
+  const gaps = [];
+  const tally = {};
+  let k = K0 - 1;
+  for (const sc of sched) {
+    k++;
+    const from = events.length;
+    const U = uuid(), W = uuid(), token = `KIWI${k}`;
+    const steerText = `Also add one short final line that contains the word ${token}.`;
+    rec({ dir: 'meta', trial: k, m16case: cs, mode: sc, ids: { U, W }, token });
+    const params = { threadId, clientUserMessageId: U, input: txt(prompt(k)) };
+    if (cs === 'C') params.collaborationMode = { mode: 'plan', settings: { model, reasoning_effort: effort, developer_instructions: null } };
+    const r = await request('turn/start', params, `M16 ${cs} turn/start ${k}`);
+    const tk = r.o.result?.turn?.id;
+    if (!tk) { rec({ dir: 'meta', m16summary: { trial: k, case: cs, mode: sc.mode, verdict: 'start-error', error: r.o.error ?? null } }); tally['start-error'] = (tally['start-error'] || 0) + 1; break; }
+    let sp = null, steerWriteT = null, sigEv = null, tokEv = null, dPlanned = null, runningAtSig = null, doneAtSig = null;
+    let resolveSent; const sent = new Promise((res) => (resolveSent = res));
+    const fire = (note) => { steerWriteT = now(); sp = steer(tk, steerText, W, note); resolveSent(); };
+    const sigPred = (o) => o.method === 'item/completed' && o.params?.turnId === tk && itemType(o) === sigType
+      && toolState(tk).running.size === 0 && (cs !== 'B' || toolState(tk).done >= 1);
+    const sigRes = await onceSync(sigPred, (ev) => {
+      sigEv = ev; runningAtSig = toolState(tk).running.size; doneAtSig = toolState(tk).done;
+      if (sc.mode === 'sig') { if (sc.jit) spin(sc.jit); fire(`M16 ${cs} steer ${k} at signal +${sc.jit}ms (sig at ${ev.t})`); }
+      else if (sc.mode === 'tok') {
+        // registered synchronously so it sees the very next line
+        waiters.push({ from: ev.idx + 1, pred: (o) => o.method === 'thread/tokenUsage/updated' && o.params?.turnId === tk,
+          resolve: (tev) => { tokEv = tev; fire(`M16 ${cs} steer ${k} at following tokenUsage (tok at ${tev.t})`); } });
+      } else {
+        const g = gaps.length ? median(gaps) : 60;
+        dPlanned = Math.max(0, Math.round(g * (0.3 + 1.2 * sc.i / Math.max(1, N2 - 1))));
+        setTimeout(() => fire(`M16 ${cs} steer ${k} at signal + timeout ${dPlanned}ms`), dPlanned);
+      }
+    }, 240000, from);
+    const tcEv = await waitFor((o) => isTurnCompleted(o) && o.params?.turn?.id === tk, 300000, from);
+    await Promise.race([sent, sleep(3000)]);
+    const steerR = sp ? await sp : null;
+    await settle(2500, 30000);
+    const evs = events.slice(from);
+    const answerTypes = ['agentMessage', 'plan'];
+    const msgsAll = evs.filter((ev) => ev.o.method === 'item/completed' && answerTypes.includes(itemType(ev.o)) && ev.o.params?.turnId === tk)
+      .map((ev) => ({ t: ev.t, type: itemType(ev.o), phase: ev.o.params.item.phase ?? null, text: String(ev.o.params.item.text || '').slice(0, 90) }));
+    const toks = evs.filter((ev) => ev.o.method === 'thread/tokenUsage/updated' && ev.o.params?.turnId === tk);
+    let summary;
+    if (!sigRes) {
+      summary = { trial: k, case: cs, mode: sc.mode, verdict: 'nosignal', turnId: tk, msgsAll, tokCount: toks.length, tcStatus: tcEv?.o?.params?.turn?.status ?? null,
+        itemTypes: [...new Set(evs.filter((ev) => ev.o.method === 'item/completed').map((ev) => itemType(ev.o)))] };
+    } else {
+      const sigIdx = sigEv.idx, sigT = sigEv.t;
+      const tokAfter = tokEv || evs.find((ev) => ev.idx > sigIdx && ev.o.method === 'thread/tokenUsage/updated' && ev.o.params?.turnId === tk) || null;
+      const echoS = evs.find((ev) => ev.o.method === 'item/started' && itemType(ev.o) === 'userMessage' && ev.o.params?.item?.clientId === W) || null;
+      const postEcho = echoS ? evs.filter((ev) => ev.idx > echoS.idx && ev.o.method === 'item/completed' && answerTypes.includes(itemType(ev.o)) && ev.o.params?.turnId === tk) : [];
+      const postEchoTok = echoS ? evs.filter((ev) => ev.idx > echoS.idx && ev.o.method === 'thread/tokenUsage/updated' && ev.o.params?.turnId === tk).length : 0;
+      const answered = postEcho.some((ev) => String(ev.o.params.item.text || '').toUpperCase().includes(token));
+      const deltaMethod = cs === 'C' ? 'item/plan/delta' : 'item/agentMessage/delta';
+      const sigItemId = sigEv.o.params.item.id;
+      const deltas = evs.filter((ev) => ev.idx < sigIdx && ev.o.method === deltaMethod && ev.o.params?.itemId === sigItemId);
+      const steerErr = steerR?.o?.error ?? null;
+      let verdict;
+      if (!sp) verdict = 'nosteer';
+      else if (steerErr) verdict = 'late';
+      else if (!echoS) verdict = 'no-echo';
+      else if (answered) verdict = 'HIT';
+      else if (postEcho.length || postEchoTok) verdict = 'followup-ignored';
+      else verdict = 'record-only';
+      const gap = tokAfter ? tokAfter.t - sigT : null;
+      if (gap != null) gaps.push(gap);
+      summary = {
+        trial: k, case: cs, mode: sc.mode, jit: sc.jit ?? null, dPlanned, verdict, turnId: tk,
+        sigT, sigChunk: sigEv.chunk, sigPhase: sigEv.o.params.item.phase ?? null, runningAtSig, doneAtSig,
+        sigItemDeltas: deltas.length, sigItemDeltaChunks: new Set(deltas.map((ev) => ev.chunk)).size, firstDeltaToSig: deltas.length ? r1(sigT - deltas[0].t) : null,
+        tokT: tokAfter?.t ?? null, tokChunk: tokAfter?.chunk ?? null, gapSigToTok: r1(gap), tokSameChunkAsSig: tokAfter ? tokAfter.chunk === sigEv.chunk : null,
+        steerWriteT, steerMinusSig: r1(steerWriteT != null ? steerWriteT - sigT : null), steerMinusTok: r1(steerWriteT != null && tokAfter ? steerWriteT - tokAfter.t : null),
+        steerResp: steerR?.o?.result ?? steerErr, steerRespMinusWrite: r1(steerR && steerWriteT != null ? steerR.t - steerWriteT : null),
+        echoMinusSig: r1(echoS ? echoS.t - sigT : null), echoTurnMatch: echoS ? echoS.o.params?.turnId === tk : null,
+        postEchoMsgs: postEcho.map((ev) => String(ev.o.params.item.text || '').slice(0, 80)), postEchoTok, answered,
+        tcMinusSig: r1(tcEv ? tcEv.t - sigT : null), tcStatus: tcEv?.o?.params?.turn?.status ?? null,
+        tokCount: toks.length, msgsAll,
+      };
+    }
+    tally[summary.verdict] = (tally[summary.verdict] || 0) + 1;
+    rec({ dir: 'meta', m16summary: summary });
+    console.log(`M16 ${cs} #${k} ${sc.mode}${sc.jit != null ? '+' + sc.jit : ''}${dPlanned != null ? ' d=' + dPlanned : ''} ${summary.verdict} gap=${summary.gapSigToTok} steer-sig=${summary.steerMinusSig} steer-tok=${summary.steerMinusTok} echo-sig=${summary.echoMinusSig} deltas=${summary.sigItemDeltas} msgs=${(summary.msgsAll || []).length}`);
+  }
+  rec({ dir: 'meta', m16tally: tally, gaps: gaps.map(r1) });
+  console.log('M16 tally ' + JSON.stringify(tally));
 };
 
 function killTree() {

@@ -147,3 +147,5 @@ tool_result → A result/success → A completed
 | M13 | `/compact`·`/cost` 턴 도중 3/3씩 받힘 · 도구 경계에서 안 접히고 턴 끝까지 붙들림 · 거절·취소·버림 0 · `/compact` 는 남의 uuid `isReplay` 한 줄 더(한가할 때 앞 compact 줄 재되울림) | 녹 | §3-3 · §9 P0(P3 멈춤 없음) |
 | M9 | `input: []` 4/4 받힘 · 에코·항목 없음 · 답 못 받은 것 있으면 그것에만 답(3/3) · **없으면 직전 답 되풀이** | 녹 + 설계 함의 | §3-3 · §5-5(빚은 진짜 미응답일 때만) · §9 P0 |
 | M10 | 3/4 맞힘(창 (0, 1.4) ms 추정) · 탐침에 `clientId` 째 index 0 · **에코가 `turn/completed` 4.5–4.8 ms 전** · 끝난 턴 id · `limit:2` 2 페이지 · **`-32600` 이 `turn/completed` 보다 먼저 올 수 있음** | 녹 + 새 사실 | §3-3 · §5-5(에코 근거 섬 · `-32600` 순서 가정 제거) · §9 P0(P2 멈춤 없음) |
+
+> **정정(2026-09-26, M16):** 벤더의 마지막 대기분 확인은 같은 턴 안에서 `run_turn` 을 다시 도는 작업 고리 `core/src/tasks/regular.rs:120` 이다 — 위 §3 의 `core/src/session/turn.rs:555-567` 가리킴은 부정확하다. 근거·실측 = [M16 보고서](mid-turn-m16-measurements-2026-09-26.md).
