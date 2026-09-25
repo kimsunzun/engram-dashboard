@@ -176,7 +176,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 ## 프론트 구조 (`src/`)
 
 - **제어 표면(불변):** 컴포넌트·스토어는 `agentClient`(단일 `ProtocolClient`)에만 의존한다(개별 IPC 헬퍼 직접 호출 금지 — ADR-0011이 거부한 `ptyApi` 형태. 그런 모듈은 지금 없다). carrier = transport seam, 운영은 `TauriTransport` 고정(ADR-0036). 교체점은 transport이고, `WsTransport`는 테스트·직결 흔적이다(ADR-0020/0029).
-- **폴더:** api · commands(제어 표면 — registry/dispatch/contributions + 버스 다리) · components(layout/agent/slot/diff/ui) · i18n · lab · lib · pages · store · styles · theme · util.
+- **폴더:** api · commands(제어 표면 — registry/dispatch/contributions + 버스 다리) · components(layout/agent/slot/ui) · i18n · lab · lib · pages · store · styles · theme · util.
 - **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — 단 **raw `listen` 수명은 각 등록 주체가 따로 진다**. ★**등록 주체를 세지 말 것 — 늘어난다**★(옛 문장이 "둘로 갈린다"였는데 실제로는 넷이 됐고, 그 어긋남을 두 번 연속 리뷰가 잡았다). 대신 **가름 규칙**을 쓴다: `eventBus`는 `agentClient`의 **추상 구독**만 받고, **백엔드가 권위인 표면**은 Tauri `listen`을 직접 걸되 **거는 쪽이 자기 disposer를 소유한다**. 오늘 그 예외에 드는 것 = 에이전트 이벤트(전송 계층) · 레이아웃·탭 · 창 레이아웃 · UI 설정 · 버스 다리. **찾는 법 = `rg "from '@tauri-apps/api/event'" src/`** — 손으로 적은 명단은 또 낡는다.
 - **통합 micro-rules:** 구독 effect deps `[viewId, agentId]`(화신 표식 제외 — ADR-0046 구독 키 + ADR-0164) · 구독 전 `terminal.reset()` · seq dedup · replay 경계 = gen 펜스 성공 마커 · `delete channel.onmessage`(null 아님) · 입력 가드 · resize debounce 50ms.
 
@@ -186,7 +186,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 ## 기술 스택 (프론트)
 
-React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · react-arborist · @monaco-editor/react · react-router(hash) · react-markdown + remark/rehype + katex(챗 마크다운·수식) · **Tailwind CSS v4 + shadcn/ui + lucide-react** · CSS 변수 테마 · Tauri v2 셸. 상세는 package.json.
+React 19 + TS + Vite · Zustand · @xterm/xterm(+fit) · react-arborist · react-router(hash) · react-markdown + remark/rehype + katex(챗 마크다운·수식) · **Tailwind CSS v4 + shadcn/ui + lucide-react** · CSS 변수 테마 · Tauri v2 셸. 상세는 package.json.
 
 - 스타일링은 Tailwind 채택(기존 "순수 CSS" 기조 전환 — ADR-0047). 테마는 CSS 변수를 유지하고 Tailwind 토큰이 `var()`를 참조한다.
 - 테마 변수·폰트 정의는 `src/styles/theme.css`·`font.css`. `data-theme`은 `:root`에 dark/light/e-ink.
