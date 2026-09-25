@@ -143,9 +143,10 @@
 - **조치:** TerminalSlot.tsx 구현 시 lastSeqRef dedup이 실제로 들어갔는지 확인.
 
 ### T-5. monaco TS worker optimizeDeps — Phase 2
-- **상태:** Phase 2 monaco 통합 시 검토.
+- **상태:** monaco 재도입 시 검토 — 의존은 2026-09-25 에 걷었다.
 - **출처:** Channel spike 중 vite 경고 'ts.worker.js optimizeDeps 미존재'. spike엔 무해.
-- **조치:** monaco diff editor 통합 시 `optimizeDeps.exclude`에 monaco worker 추가 검토.
+- **조치:** monaco 재도입 시 `optimizeDeps.exclude`에 monaco worker 추가 검토.
+- **현황(2026-09-25):** 쓰이지 않던 monaco 의존(`@monaco-editor/react` · `monaco-editor`)을 걷었다(사용자 결정 — 「일단 떼고 모나코 필요할 때 추가하면 될 듯」). 이 항목은 monaco 를 다시 들일 때(용도 무관) 적용된다.
 
 ### T-6. cwd 워크스페이스 검증 (CwdDenied) — 보안 보류
 - **상태:** 보류(폐기 아님). 실제 멀티 에이전트 운영 단계에서 정책 결정.
