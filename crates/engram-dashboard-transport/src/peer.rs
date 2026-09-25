@@ -256,6 +256,8 @@ impl<W: Wire> Peer<W> {
     ///
     /// ★받아들여졌다는 뜻이 아니다★ — 운영 단계가 아니거나 큐가 찼으면 요청은 버려지고
     /// [`TransportEvent::Dropped`] 로만 보인다. 반환값은 "지금 세대가 이것이다" 일 뿐이다.
+    /// ★쓰는 도중 끊긴 이 요청은 그것으로도 안 보인다★ — 세지도, 다음 연결에서 다시 내지도 않는다(다시
+    /// 내는 것은 이 crate 가 구멍을 보고 스스로 낸 재요청뿐이다).
     pub fn resume_stream(&self, key: W::StreamKey, after: Option<u64>) -> Generation {
         if self.peer_state().is_live() {
             let _ = self.push(PeerCmd::Resume { key, after });
@@ -855,10 +857,10 @@ impl<W: Wire> Supervisor<W> {
 
     async fn on_cmd(&mut self, cmd: PeerCmd<W>) -> Option<Input> {
         match cmd {
-            PeerCmd::Raw(frame) => self.write(frame).await.err(),
+            PeerCmd::Raw(frame) => self.write_or_count(frame).await,
             PeerCmd::Notify { out } => {
                 let frame = self.wire.encode(&out);
-                self.write(frame).await.err()
+                self.write_or_count(frame).await
             }
             PeerCmd::Resume { key, after } => {
                 let out = self.wire.resume_request(&key, after);
@@ -1051,7 +1053,9 @@ impl<W: Wire> Supervisor<W> {
     // ── 쓰기 ────────────────────────────────────────────────────────────────
 
     /// ★쓰는 동안에도 제어를 듣는다★ — 안 들으면 `close()` 가 `write_deadline` 만큼 늦게 들린다.
-    /// 제어가 이기면 절반 나간 프레임 뒤이므로 통로를 그대로 버린다(machine 이 `DropLink` 를 낸다).
+    /// 제어가 이기면 쓰던 future 를 떨어뜨리고 통로를 버린다(machine 이 `DropLink` 를 낸다).
+    /// ★그 프레임이 어디까지 갔는지는 모른다★ — 한 번도 폴링되지 않았을 수도, 어댑터 버퍼에 들어가
+    /// `drop_link` 의 닫기 앞에 실려 나갈 수도 있다. 알림·팬아웃이면 [`Self::write_or_count`] 가 센다.
     async fn write(&mut self, frame: Frame) -> Result<(), Input> {
         let clock = self.clock.clone();
         let deadline = self.policy.write_deadline;
@@ -1070,6 +1074,17 @@ impl<W: Wire> Supervisor<W> {
                 Err(_) => Err(Input::LinkLost(DisconnectCause::WriteDeadline)),
             },
         }
+    }
+
+    /// 답장 없는 프레임을 쓴다. ★`Ok` 로 안 끝나면 사유를 가리지 않고 센다★ — 핸들은 큐에 넣을 때 이미
+    /// `Ok` 를 받아 갔으므로 여기서 안 세면 조용한 유실이다(`fail_pending` 의 그 규칙). 쓰다 만 프레임은
+    /// 실제로는 나갔을 수 있어 부풀 수 있다([`Direction::Outbound`] rustdoc).
+    async fn write_or_count(&mut self, frame: Frame) -> Option<Input> {
+        let result = self.write(frame).await;
+        if result.is_err() {
+            self.dropped_out += 1;
+        }
+        result.err()
     }
 
     async fn ping(&mut self) -> Result<(), Input> {
@@ -1418,6 +1433,7 @@ mod tests {
         settle, settle_until, ClientMsg, HelloHandshake, ImmediateHandshake, ListeningHandshake,
         ManualClock, MemoryEndpoint, MemoryNetwork, RejectingHandshake, TestIn, TestOut, TestWire,
     };
+    use futures_util::future::poll_immediate;
     use std::time::Duration;
 
     struct Harness {
@@ -1483,6 +1499,20 @@ mod tests {
                 TransportEvent::Disconnected { cause, .. } => Some(*cause),
                 _ => None,
             })
+        }
+
+        /// 감독 태스크가 끝났나. ★보이면 마지막 유실 신고까지 올라와 있다★ — `teardown` 이 큐를 닫은 뒤
+        /// `await` 없이 곧장 신고하므로, current_thread 런타임에서는 그 사이에 이 줄이 끼어들 수 없다.
+        fn supervisor_done(&self) -> bool {
+            self.peer.inner.data_tx.is_closed()
+        }
+
+        /// 감독이 나가는 큐를 다 꺼내 갔나. ★「통로로 아무것도 안 나갔다」만으로는 「쓰는 중」이 안
+        /// 선다★ — 큐에 남아 있어도 참이고, 큐에 남은 것은 `fail_pending` 이 따로 세거나 깨운다. 그러면
+        /// 쓰는 도중의 계수를 재는 단언이 쓰기와 무관하게 맞는다.
+        fn queue_drained(&self) -> bool {
+            let tx = &self.peer.inner.data_tx;
+            tx.capacity() == tx.max_capacity()
         }
     }
 
@@ -2587,8 +2617,9 @@ mod tests {
             } => Some((*direction, *count)),
             _ => None,
         });
+        // 4 = 쓰다 잘린 첫 것 1 + 큐에 남은 것 3.
         assert!(
-            matches!(dropped, Some((Direction::Outbound, n)) if n >= 3),
+            matches!(dropped, Some((Direction::Outbound, 4))),
             "핸들이 이미 Ok 를 받아 갔으므로 여기서 안 세면 조용한 유실이다: {dropped:?}"
         );
     }
@@ -2689,9 +2720,202 @@ mod tests {
             } => Some((*direction, *count)),
             _ => None,
         });
+        // 4 = 쓰다 잘린 첫 것 1 + 큐에 남은 것 3.
         assert!(
-            matches!(dropped, Some((Direction::Outbound, n)) if n >= 3),
+            matches!(dropped, Some((Direction::Outbound, 4))),
             "★다시 붙을 때까지 기다리면 사용자가 「다시 연결」을 누를 때까지 아무 데도 안 나온다★: {dropped:?}"
+        );
+    }
+
+    // ── 쓰는 도중 끊긴 답장 없는 프레임도 센다 ──
+    //
+    // ★핸들은 큐에 넣을 때 이미 `Ok` 를 받아 갔다★ — 쓰기가 `Ok` 로 안 끝난 알림·팬아웃 프레임을 안 세면
+    //   그대로 조용한 유실이다(`fail_pending` 의 그 규칙). 끊는 사유(제어 둘 · 통로 오류 · 쓰기 시한)마다
+    //   재고, 세면 안 되는 둘(요청 · keepalive)도 함께 잰다.
+
+    /// 나가는 쪽 유실 신고의 합 — 신고가 여러 번에 나뉘어 올라와도 합한다.
+    fn outbound_dropped(events: &[TransportEvent<TestWire>]) -> u64 {
+        events
+            .iter()
+            .map(|e| match e {
+                TransportEvent::Dropped {
+                    direction: Direction::Outbound,
+                    count,
+                    ..
+                } => *count,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    type Push = fn(&Peer<TestWire>) -> Result<(), SendError>;
+
+    /// 답장 없는 프레임의 두 입구 — 알림과 팬아웃.
+    fn reply_less_pushes() -> [(&'static str, Push); 2] {
+        [
+            ("알림", |p| p.notify(TestOut::Notice("in flight".into()))),
+            ("팬아웃", |p| {
+                p.send_frame(Frame::Text("in flight".into()))
+            }),
+        ]
+    }
+
+    /// 쓰기를 막고 하나를 밀어 넣어 감독을 그 쓰기 위에 세운다. 올라와 있던 사건은 비운다.
+    async fn park_in_flight(h: &mut Harness, endpoint: &MemoryEndpoint, push: Push) {
+        endpoint.stall_writes(true);
+        push(&h.peer).unwrap();
+        settle().await;
+        assert!(h.queue_drained(), "감독이 그것을 큐에서 꺼냈어야 한다");
+        assert!(
+            endpoint.drain().is_empty(),
+            "감독이 그 쓰기 위에 서 있어야 한다"
+        );
+        h.drain();
+    }
+
+    #[tokio::test]
+    async fn a_reply_less_frame_cut_mid_write_by_close_is_counted() {
+        for (what, push) in reply_less_pushes() {
+            let (mut h, endpoint) = live().await;
+            park_in_flight(&mut h, &endpoint, push).await;
+            h.peer.close();
+            settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+            // 걸린 goodbye 를 푼다 — 안 풀면 `teardown` 의 신고까지 못 간다.
+            endpoint.stall_writes(false);
+            settle_until("감독이 끝났다", || h.supervisor_done()).await;
+            assert_eq!(outbound_dropped(&h.events()), 1, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_less_frame_cut_mid_write_by_reconnect_now_is_counted() {
+        for (what, push) in reply_less_pushes() {
+            let (mut h, endpoint) = live().await;
+            park_in_flight(&mut h, &endpoint, push).await;
+            h.peer.reconnect_now();
+            // ★제어가 이긴 뒤에 푼다★ — 먼저 풀면 걸린 쓰기가 제어와 함께 준비돼 그대로 나갈 수 있다.
+            settle_until("제어가 이겼다", || {
+                h.peer.peer_state() == PeerState::Dialing
+            })
+            .await;
+            endpoint.stall_writes(false);
+            settle_until("다시 붙었다", || {
+                h.net.dials() == 2 && h.peer.peer_state() == PeerState::Live
+            })
+            .await;
+            settle().await;
+            assert_eq!(outbound_dropped(&h.events()), 1, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_less_frame_whose_write_fails_on_a_dead_link_is_counted() {
+        for (what, push) in reply_less_pushes() {
+            let (mut h, endpoint) = live().await;
+            park_in_flight(&mut h, &endpoint, push).await;
+            // ★엔드포인트를 떨어뜨리면 걸린 쓰기가 통로 오류로 끝난다★ — 멈춤 신호가 함께 사라져 깨어나고
+            //   받을 쪽이 없어 실패한다(`testing::MemTx`). `fail` 로는 이 갈래가 안 선다: 그것은 읽는 쪽에만
+            //   닿고, 쓰는 동안 감독은 읽는 쪽을 안 본다.
+            drop(endpoint);
+            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            settle().await;
+            let events = h.events();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    TransportEvent::Disconnected {
+                        cause: DisconnectCause::LinkError,
+                        ..
+                    }
+                )),
+                "{what}: 통로 오류 갈래를 재야 한다"
+            );
+            assert_eq!(outbound_dropped(&events), 1, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reply_less_frame_cut_by_the_write_deadline_is_counted() {
+        for (what, push) in reply_less_pushes() {
+            let (mut h, endpoint) = live().await;
+            park_in_flight(&mut h, &endpoint, push).await;
+            h.clock.advance(Policy::default().write_deadline);
+            settle_until("백오프", || h.peer.peer_state() == PeerState::Backoff).await;
+            // 걸린 goodbye 를 푼다 — 유실 신고는 그 다음 단계(백오프 대기)에서 나온다.
+            endpoint.stall_writes(false);
+            settle().await;
+            let events = h.events();
+            assert!(
+                events.iter().any(|e| matches!(
+                    e,
+                    TransportEvent::Disconnected {
+                        cause: DisconnectCause::WriteDeadline,
+                        ..
+                    }
+                )),
+                "{what}: 쓰기 시한 갈래를 재야 한다"
+            );
+            assert_eq!(outbound_dropped(&events), 1, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_cut_mid_write_is_woken_not_counted() {
+        let (mut h, endpoint) = live().await;
+        endpoint.stall_writes(true);
+        // ★별 태스크로 띄우지 않고 이 자리에서 한 번 폴링한다★ — 띄우면 그 태스크가 아직 안 돈 순간
+        //   아래 「큐에서 꺼냈다」가 빈 큐로 참이 된다. 첫 폴링이 큐에 넣는 데까지를 동기로 한다.
+        let peer = h.peer.clone();
+        let mut waiting = Box::pin(peer.request(TestOut::Request {
+            tag: 1,
+            body: "x".into(),
+        }));
+        assert!(poll_immediate(&mut waiting).await.is_none());
+        assert!(!h.queue_drained(), "요청이 큐에 들어가 있어야 한다");
+        settle().await;
+        assert!(h.queue_drained(), "감독이 그것을 큐에서 꺼냈어야 한다");
+        // ★아직 안 깨어났어야 「쓰는 중」이 선다★ — 쓰기 전에 거절된 요청도 아래에서 같은 오류로
+        //   깨어나므로, 이것 없이는 마지막 단언이 쓰기와 무관하게 맞는다.
+        assert!(
+            poll_immediate(&mut waiting).await.is_none(),
+            "쓰기 전에 끝났다"
+        );
+        assert!(
+            endpoint.drain().is_empty(),
+            "감독이 그 쓰기 위에 서 있어야 한다"
+        );
+        h.drain();
+        h.peer.close();
+        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        endpoint.stall_writes(false);
+        settle_until("감독이 끝났다", || h.supervisor_done()).await;
+        let woken = poll_immediate(&mut waiting)
+            .await
+            .expect("감독이 끝났는데 요청이 안 깨어났다");
+        assert!(matches!(woken, Err(RequestError::Disconnected { .. })));
+        assert_eq!(
+            outbound_dropped(&h.events()),
+            0,
+            "요청은 오류로 깨어나므로 유실로 또 세지 않는다"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_keepalive_cut_mid_write_is_not_counted() {
+        let (mut h, endpoint) = live().await;
+        endpoint.stall_writes(true);
+        h.clock.advance(Policy::default().ping_interval);
+        settle().await;
+        assert!(endpoint.drain().is_empty(), "ping 이 걸려 있어야 한다");
+        h.drain();
+        h.peer.close();
+        settle_until("종료", || h.peer.peer_state() == PeerState::Closed).await;
+        endpoint.stall_writes(false);
+        settle_until("감독이 끝났다", || h.supervisor_done()).await;
+        assert_eq!(
+            outbound_dropped(&h.events()),
+            0,
+            "keepalive 는 소비자가 넣은 프레임이 아니다"
         );
     }
 
@@ -2742,8 +2966,9 @@ mod tests {
                 .any(|m| matches!(m, ClientMsg::Close(c) if c.code == CloseCode::GOING_AWAY))
         })
         .await;
-        // 걸린 채 취소된 쓰기는 통로에 아무것도 남기지 않는다 — 절반 나간 프레임 뒤에 더 쓰지 않는다는
-        //   [`LinkTx::send`] 계약의 관측 가능한 면이다.
+        // ★이 단언은 하네스의 성질이지 [`LinkTx::send`] 계약이 아니다★ — `testing::MemTx` 는 막힌 쓰기를
+        //   넘기기 전에 세우므로 잘리면 아무것도 안 남는다. WS 어댑터에서는 잘린 프레임이 goodbye 앞에
+        //   실려 나갈 수 있다(`ws.rs` 「통로 성질」).
         assert!(
             !seen.iter().any(|m| matches!(m, ClientMsg::Frame(_))),
             "취소된 쓰기가 뒤늦게 나갔다: {seen:?}"

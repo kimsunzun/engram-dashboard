@@ -109,11 +109,18 @@ pub trait Dialer: Send + Sync + 'static {
 /// 보고, 그건 소켓 누수다. 두 끝은 [`Dialer::dial`] 이 한 쌍으로 주고 한 쌍으로 버려야 한다. 구현체가
 /// 하나의 하위 스트림을 공유하는 것이 보통이라(WS 어댑터는 `BiLock` 이다) **부르는 쪽이 이 의무를 진다.**
 pub trait LinkTx: Send + 'static {
-    /// ★반환 future 가 취소되면 부르는 쪽이 통로를 통째로 버린다★ — 절반 나간 프레임 뒤에 더 쓰지 않는다.
+    /// ★반환 future 가 취소된 뒤 부르는 쪽이 이 끝에 하는 일은 많아야 [`LinkTx::close`] 한 번이다★ —
+    /// 그 뒤 양 끝을 버리고 `send`·`ping` 은 다시 부르지 않는다. 운영 단계에서는 `Supervisor::drop_link`
+    /// 가 닫기를 보낸다. 핸드셰이크 도중에는 닫기 없이 버린다 — 시한이 자르면(거절 직전 프레임 포함)
+    /// `handshake_once` 가, 제어가 이기면 `shake_hands` 가 핸드셰이크 future 째 떨어뜨린다. 그래서
+    /// 구현체는 **취소된 `send` 뒤의 `close`** 를 견뎌야 하고, 잘린 프레임의 나머지가 그 닫기 앞에 실려
+    /// 나갈 수 있다(WS 어댑터가 그렇다 — `src/ws.rs` 「통로 성질」).
     fn send(&mut self, frame: Frame) -> BoxFuture<'_, Result<(), LinkError>>;
 
     /// 살아있나 물어본다. ★"언제" 는 이 crate 가 정하고 "어떻게" 만 구현체가 안다★ — 그래서 WS 처럼
     /// 전송 계층이 자체 Ping 을 가진 경우 프레임을 새로 짜지 않아도 된다.
+    ///
+    /// ★취소는 [`LinkTx::send`] 와 같은 계약이다★ — 잘린 뒤 이 끝이 받는 것은 많아야 `close` 한 번이다.
     fn ping(&mut self) -> BoxFuture<'_, Result<(), LinkError>>;
 
     /// 코드와 문구를 실어 닫는다. 실패해도 알릴 데가 없으므로 반환값이 없다.
