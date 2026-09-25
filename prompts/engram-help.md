@@ -61,6 +61,12 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.move --target <이름|id> --parent <이름|none>
       다른 에이전트 밑으로 넣는다. none 이면 최상위로 되돌린다.
 
+  {tool} agent.listQueuedInputs --target <이름|id>
+      턴 도중 받아 아직 전달하지 않은 입력 목록. 각 항목의 id, text, state(queued|unconfirmed|cancelling).
+
+  {tool} agent.cancelQueuedInput --target <이름|id> --input_id <id>
+      그 목록의 항목 하나를 취소한다. outcome 은 cancelled(곧바로 거뒀다) 또는 requested(결말은 목록에서 본다).
+
 이름이 겹치는 일이 드물게 생긴다. 그때 이름으로 지목하면 거절되므로 agent.list 가 준 id 를 넘긴다.
 ## window
 {tool} window — 창 · 탭 · 분할, 그리고 그 자리에 에이전트를 놓는 것.

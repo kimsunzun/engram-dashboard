@@ -760,6 +760,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
         engram_dashboard_daemon::control::commands::make_daemon_table(
             manager.clone(),
             broadcast_slot.clone(),
+            Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
         ),
     ));
     let messaging = Arc::new(

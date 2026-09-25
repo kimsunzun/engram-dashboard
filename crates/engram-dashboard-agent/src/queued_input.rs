@@ -398,6 +398,87 @@ impl QueuedInputs {
     }
 }
 
+impl CancelAnswer {
+    /// 목록 조회 응답의 `cancel.answer` 낱말 — 버스와 WS 가 같은 낱말을 싣는다.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unanswered => "none",
+            Self::NotRemoved => "not_removed",
+        }
+    }
+}
+
+/// 목록 조회가 싣는 행 상태 — 명부 상태([`RowPhase`]) 위에 통로의 수락 모름 표지를 덧댄 것.
+///
+/// ★`Unconfirmed` 는 환원 상태가 아니다★ — 조회 순간의 통로 상태(`AgentTransport::unconfirmed_inputs`)라
+/// 행 스냅숏(`as_of_seq`)과 한 원자가 아니다. 재부착 대조는 그것을 `Queued` 로 읽는다.
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListedState {
+    Queued,
+    Unconfirmed,
+    Cancelling {
+        answer: CancelAnswer,
+        vendor_closed: bool,
+    },
+}
+
+impl ListedState {
+    /// 목록 조회 응답의 `state` 낱말.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Unconfirmed => "unconfirmed",
+            Self::Cancelling { .. } => "cancelling",
+        }
+    }
+}
+
+/// 목록 조회의 한 줄.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedRow {
+    pub id: String,
+    pub text: String,
+    pub state: ListedState,
+}
+
+/// 목록 조회 한 번의 답 — 버스 `agent.listQueuedInputs` 와 WS 목록 조회가 같은 이 값을 싣는다.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueuedListing {
+    pub rows: Vec<ListedRow>,
+    /// 행이 환원한 마지막 목록 사건의 seq. `None` = 이 화신의 목록 사건이 아직 없다. `epoch` 안에서만 견준다.
+    pub as_of_seq: Option<u64>,
+    pub epoch: u32,
+    /// 턴 관측 표의 `last_end_failed` 그대로 — 표에 항목이 없으면 거짓.
+    pub stopped_after_error: bool,
+}
+
+/// 명부 행에 수락 모름 표지를 덧댄다 — `Queued` 행만 바뀐다(취소 대기가 이긴다). 명부에 없는 id 는 버린다
+/// (행을 지어내지 않는다).
+pub(crate) fn overlay_unconfirmed(rows: Vec<QueuedRow>, unconfirmed: &[String]) -> Vec<ListedRow> {
+    rows.into_iter()
+        .map(|row| {
+            let state = match row.phase {
+                RowPhase::Queued if unconfirmed.contains(&row.id) => ListedState::Unconfirmed,
+                RowPhase::Queued => ListedState::Queued,
+                RowPhase::Cancelling {
+                    answer,
+                    vendor_closed,
+                } => ListedState::Cancelling {
+                    answer,
+                    vendor_closed,
+                },
+            };
+            ListedRow {
+                id: row.id,
+                text: row.text,
+                state,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,5 +774,61 @@ mod tests {
             "사본이 이미 닫힌 항목을 두 번 닫지 않는다"
         );
         assert!(registry.is_empty() && registry.ack_unavailable_seen());
+    }
+
+    #[test]
+    fn the_unconfirmed_mark_lands_only_on_queued_rows_and_invents_none() {
+        let row = |id: &str, phase| QueuedRow {
+            id: id.into(),
+            text: format!("text of {id}"),
+            phase,
+        };
+        let cancelling = RowPhase::Cancelling {
+            answer: CancelAnswer::NotRemoved,
+            vendor_closed: true,
+        };
+        let listed = overlay_unconfirmed(
+            vec![
+                row("plain", RowPhase::Queued),
+                row("held", RowPhase::Queued),
+                row("withdrawing", cancelling),
+            ],
+            &["held".into(), "withdrawing".into(), "not-listed".into()],
+        );
+        let states: Vec<(&str, ListedState)> =
+            listed.iter().map(|r| (r.id.as_str(), r.state)).collect();
+        assert_eq!(
+            states,
+            vec![
+                ("plain", ListedState::Queued),
+                ("held", ListedState::Unconfirmed),
+                (
+                    "withdrawing",
+                    ListedState::Cancelling {
+                        answer: CancelAnswer::NotRemoved,
+                        vendor_closed: true
+                    }
+                ),
+            ],
+            "취소 대기가 표지를 이기고, 명부에 없는 id 는 행이 되지 않는다"
+        );
+        assert_eq!(listed[1].text, "text of held");
+    }
+
+    /// 낱말은 골든 행(`row_json`)과 같은 철자다 — 목록 조회 응답이 이 낱말을 싣는다.
+    #[test]
+    fn the_listing_words_are_pinned() {
+        assert_eq!(ListedState::Queued.as_str(), "queued");
+        assert_eq!(ListedState::Unconfirmed.as_str(), "unconfirmed");
+        assert_eq!(
+            ListedState::Cancelling {
+                answer: CancelAnswer::Unanswered,
+                vendor_closed: false
+            }
+            .as_str(),
+            "cancelling"
+        );
+        assert_eq!(CancelAnswer::Unanswered.as_str(), "none");
+        assert_eq!(CancelAnswer::NotRemoved.as_str(), "not_removed");
     }
 }

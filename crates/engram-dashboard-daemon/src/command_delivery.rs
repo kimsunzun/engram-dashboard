@@ -1180,12 +1180,17 @@ pub trait LocalCommands: Send + Sync {
     /// ★입구 검문(ADR-0157)이 이 **안에** 있어야 한다★: 검문 없이 표를 부르는 구현을 꽂으면 이 경로가
     /// 검문 없이 도는 두 번째 입구가 된다 — 오타 칸 하나가 조용히 다른 동작으로 실행되는 그 실패다.
     /// ★`Ok` payload 는 **로그에 실린다**★(마감 뒤 완료 — [`log_late_local`]). 그래서 이 포트로 나가는
-    /// 성공 payload 에 자격증명·토큰 같은 비밀을 담지 말 것. 오늘 실물(`agent.*`)은 id·이름·상태뿐이다.
+    /// 성공 payload 에 자격증명·토큰 같은 비밀을 담지 말 것. ★오늘 실물(`agent.*`)이 id·이름·상태뿐인 것은
+    /// 아니다★ — `agent.listQueuedInputs` 의 payload 는 사용자가 친 글을 싣는다. 그것이 로그에 안 앉는 이유는
+    /// 그 기록이 **붙든 Write 의 성공**에만 payload 를 싣기 때문이다(읽기는 사건만 남긴다 — [`log_late_local`]).
+    /// `caller` = 호출한 연결(입력 임대 판정의 재료 — ADR-0231). `None` = 연결 없는 입구(`/control/call`)이고
+    /// 임대 보유자로 치지 않는다.
     fn run(
         &self,
         name: &str,
         args: &mut serde_json::Value,
         entrance: &'static str,
+        caller: Option<ConnId>,
     ) -> Option<Result<serde_json::Value, CommandError>>;
 
     /// 이 데몬이 스스로 답하는 이름 전량 — 발견(`ListCommands`)이 명부와 **합쳐서** 내린다.
@@ -1205,6 +1210,7 @@ impl LocalCommands for NoLocalCommands {
         _name: &str,
         _args: &mut serde_json::Value,
         _entrance: &'static str,
+        _caller: Option<ConnId>,
     ) -> Option<Result<serde_json::Value, CommandError>> {
         None
     }
@@ -1384,7 +1390,7 @@ fn spawn_local(
                 Some(Err(no_retry(ErrorCode::Conflict, CALLER_ALREADY_GONE))),
             );
         }
-        let outcome = locals.run(&envelope.name, &mut envelope.args, entrance);
+        let outcome = locals.run(&envelope.name, &mut envelope.args, entrance, Some(origin));
         (envelope, outcome)
     })
 }
@@ -2530,6 +2536,8 @@ pub(crate) mod tests {
         saw: Mutex<Option<serde_json::Value>>,
         /// 본문이 받은 **입구 라벨** — 배달이 자기 입구를 그대로 넘기는지 재는 수단이다.
         saw_entrance: Mutex<Option<&'static str>>,
+        /// 본문이 받은 호출자 — 배달이 봉투를 낸 연결을 임대 판정 재료로 넘기는지 본다.
+        saw_caller: Mutex<Option<Option<ConnId>>>,
         /// 본문이 **몇 번** 돌았나 — 「같은 Write 동사가 두 번 적용되지 않는다」의 관측 수단이다.
         runs: std::sync::atomic::AtomicUsize,
         /// 본문이 들어왔음을 알리는 신호 — 시험이 「본문이 도는 동안」을 결정적으로 겨눌 수 있게 한다.
@@ -2550,6 +2558,7 @@ pub(crate) mod tests {
                 ran_on: Mutex::new(None),
                 saw: Mutex::new(None),
                 saw_entrance: Mutex::new(None),
+                saw_caller: Mutex::new(None),
                 runs: std::sync::atomic::AtomicUsize::new(0),
                 entered: Mutex::new(None),
                 gate: Mutex::new(None),
@@ -2571,6 +2580,10 @@ pub(crate) mod tests {
 
         fn entrance(&self) -> Option<&'static str> {
             *self.saw_entrance.lock().expect("fake local poisoned")
+        }
+
+        fn caller(&self) -> Option<Option<ConnId>> {
+            *self.saw_caller.lock().expect("fake local poisoned")
         }
     }
 
@@ -2621,8 +2634,10 @@ pub(crate) mod tests {
             _name: &str,
             args: &mut serde_json::Value,
             entrance: &'static str,
+            caller: Option<ConnId>,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             *self.saw_entrance.lock().expect("fake local poisoned") = Some(entrance);
+            *self.saw_caller.lock().expect("fake local poisoned") = Some(caller);
             self.runs.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             *self.ran_on.lock().expect("fake local poisoned") = Some(std::thread::current().id());
             *self.saw.lock().expect("fake local poisoned") = Some(args.clone());
@@ -3410,6 +3425,7 @@ pub(crate) mod tests {
             _name: &str,
             _args: &mut serde_json::Value,
             _entrance: &'static str,
+            _caller: Option<ConnId>,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             panic!("the table blew up while coercing arguments")
         }
@@ -4967,6 +4983,8 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(local.entrance(), Some(ENTRANCE_SOCKET));
+        // ADR-0231: 봉투를 낸 연결이 임대 판정의 호출자로 도착한다 — `None` 이면 보유자의 버스 취소가 거절된다.
+        assert_eq!(local.caller(), Some(Some(9)), "배달은 호출한 연결을 넘긴다");
         assert_eq!(local.runs(), 1, "전제: 소켓 문이 1단계를 태웠다");
 
         let (bus, _sweeper) = CommandBus::new(

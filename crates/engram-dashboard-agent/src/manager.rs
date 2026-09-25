@@ -26,7 +26,7 @@ use crate::preset::PresetRegistry;
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
-use crate::queued_input::QueuedInputs;
+use crate::queued_input::{QueuedInputs, QueuedListing};
 use crate::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::session::AgentSession;
 use crate::session_id_latch::SessionIdLatch;
@@ -34,9 +34,9 @@ use crate::session_tracker::SessionTracker;
 use crate::transport::{LinkResolution, LinkSink};
 use crate::turn::TurnObservations;
 use crate::types::{
-    AgentId, AgentInfo, AgentStatus, CommandSpec, ControlChannel, InputOrigin, NoopControlChannel,
-    OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeReply,
-    TerminalReason, TerminationIntent,
+    AgentId, AgentInfo, AgentStatus, CancelError, CancelOutcome, CommandSpec, ControlChannel,
+    InputOrigin, NoopControlChannel, OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg,
+    SinkId, StatusSink, SubscribeReply, TerminalReason, TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -2776,6 +2776,39 @@ impl AgentManager {
         session.write_input_observed(data)
     }
 
+    /// 산 화신의 대기 목록 — 버스 `agent.listQueuedInputs` 와 WS 목록 조회가 같은 이 값을 싣는다.
+    /// `Err(NotFound)` = 산 세션이 없다(잠든 에이전트는 목록을 쥐지 않는다).
+    /// ★락을 겹쳐 쥐지 않는다★: 명부(스냅숏) → 놓고 → 통로(수락 모름) → 턴 관측 표, 차례로 하나씩이다.
+    // ADR-0006
+    // ADR-0231
+    pub fn list_queued_inputs(&self, agent_id: AgentId) -> Result<QueuedListing, PtyError> {
+        let session = self.get_session(agent_id)?;
+        let (rows, as_of_seq) = session.list_queued_inputs();
+        let stopped_after_error = self
+            .turns
+            .get(agent_id, session.epoch)
+            .is_some_and(|observed| observed.last_end_failed);
+        Ok(QueuedListing {
+            rows,
+            as_of_seq,
+            epoch: session.epoch,
+            stopped_after_error,
+        })
+    }
+
+    /// 산 화신의 대기 입력 하나를 취소한다(결말 번역은 `AgentSession::cancel_queued_input`).
+    /// 산 세션이 없으면 `NotFound` — 잠든 에이전트에는 취소할 항목이 없다.
+    // ADR-0231
+    pub fn cancel_queued_input(
+        &self,
+        agent_id: AgentId,
+        input_id: &str,
+    ) -> Result<CancelOutcome, CancelError> {
+        self.get_session(agent_id)
+            .map_err(|_| CancelError::NotFound)?
+            .cancel_queued_input(input_id)
+    }
+
     /// ★하네스 전용 세션 주입 seam(ADR-0088 / ADR-0012)★ — 미리 조립한 `AgentSession`(테스트 transport
     ///   포함)을 sessions 맵에 직접 등록한다. spawn 파이프(실 PTY·claude 바이너리)를 거치지 않고
     ///   배달-경계 관측 테스트(reachable=structured 캐리어인데 write 성공/실패)를 **바이너리 의존 없이**
@@ -4586,6 +4619,71 @@ mod tests {
             .write_stdin_observed_if_epoch(id, 1, b"broadcast")
             .expect("현재 incarnation 지목은 통과");
         assert_eq!(new_written.lock().unwrap().len(), 1);
+    }
+
+    // ── 대기 목록 조회·취소 (ADR-0231) ──
+
+    #[test]
+    fn the_queued_listing_carries_the_incarnation_and_the_halt_from_the_turn_table() {
+        use crate::turn::{TurnEndKind, TurnSignal};
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        put_session(&manager, id, 3);
+        let halted = |manager: &AgentManager| {
+            manager
+                .list_queued_inputs(id)
+                .expect("산 세션")
+                .stopped_after_error
+        };
+
+        assert_eq!(
+            manager.list_queued_inputs(id).expect("산 세션"),
+            QueuedListing {
+                rows: vec![],
+                as_of_seq: None,
+                epoch: 3,
+                stopped_after_error: false,
+            },
+            "턴 관측 표에 항목이 없으면 멈춤은 거짓"
+        );
+
+        let turns = manager.turns();
+        turns.register(id, 3);
+        assert!(!halted(&manager), "등록 직후 = 거짓");
+        turns.observe(id, 3, 1, TurnSignal::Ended(TurnEndKind::Failed));
+        assert!(halted(&manager), "오류 끝 뒤 = 멈춤(표의 칸 그대로)");
+        turns.observe(id, 3, 2, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(!halted(&manager), "깨끗한 끝이 푼다");
+
+        turns.register(id, 4);
+        turns.observe(id, 4, 1, TurnSignal::Ended(TurnEndKind::Failed));
+        assert!(
+            !halted(&manager),
+            "표의 항목이 다른 화신 것이면 항목 없음과 같다"
+        );
+    }
+
+    #[test]
+    fn listing_or_cancelling_without_a_live_session_is_not_found() {
+        let manager = bare_manager();
+        let id = AgentId::new_v4();
+        assert!(matches!(
+            manager.list_queued_inputs(id),
+            Err(PtyError::NotFound(missing)) if missing == id
+        ));
+        assert!(matches!(
+            manager.cancel_queued_input(id, "q1"),
+            Err(CancelError::NotFound)
+        ));
+
+        put_session(&manager, id, 0);
+        assert!(
+            matches!(
+                manager.cancel_queued_input(id, "q1"),
+                Err(CancelError::NotFound)
+            ),
+            "목록을 쓰지 않는 세션(정책 None)도 NotFound 다 — 오늘 모든 백엔드의 답"
+        );
     }
 
     #[test]

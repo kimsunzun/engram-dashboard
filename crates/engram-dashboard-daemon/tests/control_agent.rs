@@ -20,7 +20,7 @@ use engram_dashboard_command::{CommandEnvelope, CommandReply};
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandDeliveries};
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
-use engram_dashboard_daemon::control::commands::make_daemon_table;
+use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -370,6 +370,7 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
         command_slot.set(Arc::new(make_daemon_table(
             manager.clone(),
             broadcast_slot.clone(),
+            Arc::new(NoInputLeases),
         )));
     }
 
@@ -1233,7 +1234,9 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
     assert_eq!(
         names,
         vec![
+            "agent.cancelQueuedInput",
             "agent.list",
+            "agent.listQueuedInputs",
             "agent.move",
             "agent.new",
             "agent.rename",

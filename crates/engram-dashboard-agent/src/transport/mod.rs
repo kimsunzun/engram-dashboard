@@ -79,6 +79,16 @@ pub trait AgentTransport: Send + Sync {
         Withdraw::NotHeld
     }
 
+    /// 수락 모름으로 쥔 대기 입력의 id — 넘겼는데 벤더가 받았는지 모르는 항목(목록 조회가 `unconfirmed` 로
+    /// 덧댄다). 그 전이는 목록 사건이 없어 명부에는 `Queued` 그대로다.
+    /// ★조회 순간의 통로 상태다★ — 명부 스냅숏과 한 원자가 아니고, 호출자는 명부 락을 놓은 **뒤** 부른다
+    ///   (두 락을 겹쳐 쥐지 않는다 — ADR-0006).
+    /// ★기본 구현 = 빈 목록★ — 턴을 넘긴 뒤 수락을 따로 기다리지 않는 통로(claude · PTY)는 늘 비어 있다.
+    // ADR-0231
+    fn unconfirmed_inputs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// ★이 호출 시점까지 받아 둔 입력이 **실제로 나갈 때까지** 기다린다★ — `Ok` = 나갔다.
     ///
     /// ★왜 있나★: [`AgentTransport::send_input`] 의 `Ok` 는 「받았다」이지 「갔다」가 아니다. 그 둘의
@@ -218,5 +228,11 @@ mod tests {
             t.0.lock().unwrap().is_empty(),
             "거두기는 아무것도 쓰지 않는다"
         );
+    }
+
+    #[test]
+    fn the_default_transport_holds_no_unconfirmed_input() {
+        let t = RawOnly(Mutex::new(Vec::new()));
+        assert!(t.unconfirmed_inputs().is_empty());
     }
 }

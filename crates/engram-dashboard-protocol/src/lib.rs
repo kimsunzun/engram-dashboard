@@ -42,8 +42,8 @@ pub use domain::{
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
-    DeliveredCopy, DropCause, OutputChunk, QueuedInputEvent, StructuredEvent, SubscribeAction,
-    TurnOutcome,
+    DeliveredCopy, DropCause, OutputChunk, QueuedInputCancel, QueuedInputEvent, QueuedInputRow,
+    StructuredEvent, SubscribeAction, TurnOutcome,
 };
 
 /// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,
@@ -99,7 +99,19 @@ pub use messages::{
 /// 그 강제를 재는 자리는 v4 항목과 같다(discovery 의 `version_mismatch_live_daemon_errors_without_spawn`).
 /// (사용자 결정 2026-09-13)
 ///
+/// v6: 대기 입력 목록 — `AgentCommand::ListQueuedInputs`·`AgentCommand::CancelQueuedInput` 추가 + 전용
+/// reply `AgentEvent::QueuedInputs`(행 · `as_of_seq` · 화신 표식 · `stopped_after_error`)·
+/// `AgentEvent::QueuedInputCancelReply`(ADR-0231). 명령 변형을 더한 것이라 v3 과 같은 **비관용 additive**
+/// 다 — 구데몬은 모르는 externally-tagged 키를 디코드하지 못해 명령 파싱 실패 갈래로 가고, 거기서
+/// **`Error{request_id: None}`** 로 답한다. 상관 키가 없으니 신셸의 대기 요청은 짝을 못 찾고 셸의 답장
+/// 상한까지 매달린다(v3 이 「신클라가 Ack 를 기다리며 무한 대기」로 적은 그 조용한 오작동). 그래서 auth 의
+/// version check + discovery 의 version-mismatch 거부가 구 데몬을 **재사용하지 않고 거부/재기동**하게
+/// 강제한다(재는 자리 = v4 항목과 같은 `version_mismatch_live_daemon_errors_without_spawn`).
+/// ★같은 판에 실려 나가지만 bump 사유가 아닌 것★: [`StructuredEvent::QueuedInput`](데몬→셸 한 방향 — 그
+/// 변형 doc)과 목록 응답의 `stopped_after_error` 칸. bump 를 강제하는 것은 명령 축 하나다. (사용자 승인 —
+/// ADR-0231)
+///
 /// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
 /// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
 /// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;

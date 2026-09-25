@@ -17,17 +17,19 @@ use engram_dashboard_command::{
 
 use crate::manager::{AgentManager, RenameOutcome};
 use crate::preset::PresetId;
+use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
 use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::types::{
-    AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED,
-    RENAME_OUTCOME_UNCHANGED,
+    AgentId, AgentStatus, CancelError, CancelOutcome, PtyError, AGENT_STATE_LIVE,
+    AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
 };
 
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v5(2026-09-26): 이름 둘이 늘었다 — `agent.listQueuedInputs`·`agent.cancelQueuedInput`(ADR-0231).
     // v4(2026-09-22): `agent.new` 의 `backend` 어휘가 **`Claude` 하나 → `Claude`·`Codex` 둘**이 됐다
     //   (ADR-0219). 이름도 칸도 안 늘었지만 **그 칸이 받는 낱말 집합**이 바뀌었고 그것이 호출자가 보는
     //   선언이다 — 생성물이 그 차이를 그대로 싣는다(`bindings/commands.schema.json` 의
@@ -36,7 +38,7 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 4;
+    catalog_version: 5;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -84,6 +86,26 @@ declare_commands! {
     enum AgentOutputFormat {
         Terminal,
         StreamJson,
+    }
+
+    /// 취소 대기 항목의 두 칸 — 명부의 환원 상태 그대로다(스냅숏 위에 뒤 사건을 다시 환원하려면 둘 다 필요하다).
+    struct QueuedInputCancel {
+        /// 우리 취소 요청의 응답 — `none`(아직 없다) | `not_removed`(안 뺐다고 답했거나 요청이 실패했다).
+        answer: String,
+        /// 그 id 의 벤더 닫힘을 이미 봤다.
+        vendor_closed: bool,
+    }
+
+    /// 대기 목록의 한 줄.
+    struct QueuedInputRow {
+        /// 입력 id — `agent.cancelQueuedInput` 의 `input_id` 로 그대로 쓴다.
+        id: String,
+        text: String,
+        /// `queued` | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 — 우편이 그 결말을 기다린다) |
+        /// `cancelling`(취소 대기 — 결말이 날 때까지 목록에 남는다).
+        state: String,
+        /// `cancelling` 행만 싣는다 — 그 밖은 `null`.
+        cancel: Option<QueuedInputCancel>,
     }
 
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
@@ -163,7 +185,48 @@ declare_commands! {
         name: String,
         parent: Option<String>,
     } errors [NOT_FOUND, CONFLICT];
+
+    /// 산 에이전트가 턴 도중 받아 아직 전달하지 않은 입력 목록(비종결만). `state` = `queued`(우리 목록에서
+    /// 기다린다 — 에이전트에 아직 안 넘겼거나, 넘겼고 대기로 확인됐다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
+    /// 목록에 남고 우편이 그 결말을 기다리며, 취소하면 곧바로 빠진다) | `cancelling`(취소를 요청했다 — 에이전트가
+    /// 결말을 낼 때까지 남는다). `cancel.answer` = `none`(아직 답이 없다) | `not_removed`(에이전트가 못 뺐다고
+    /// 답했거나 요청이 실패했다) · `cancel.vendor_closed` = 에이전트가 그 항목을 이미 닫았다.
+    /// `stopped_after_error` = 직전 턴이 실제 오류로 끝나, 사용자의 다음 턴이 성공할 때까지 아무것도(우편 포함)
+    /// 자동으로 보내지 않는다. 잠든 에이전트는 목록을 쥐지 않는다(NOT_FOUND).
+    #[effect(Read)]
+    #[since(5)]
+    "agent.listQueuedInputs" => args AgentListQueuedInputsArgs {
+        target: String,
+    } -> ok AgentListQueuedInputsOk {
+        inputs: Vec<QueuedInputRow>,
+        /// 행이 환원한 마지막 목록 사건의 seq(`null` = 아직 없다). `epoch` 안에서만 견준다 — 재부착 대조용.
+        as_of_seq: Option<u64>,
+        /// 화신 표식 — 일치/불일치로만 견준다.
+        epoch: u32,
+        stopped_after_error: bool,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// 대기 목록의 항목 하나를 취소한다(화면 ✕ 와 같은 명령) — `outcome` = `cancelled`(곧바로 거뒀다) |
+    /// `requested`(취소를 요청했다 — 결말은 목록이 보여 준다). 목록에 없는 id 는 NOT_FOUND. CONFLICT = 이름이
+    /// 모호하다(같은 이름이 둘 이상 — id 로 지목한다) 또는 연결된 뷰어가 이 에이전트의 입력을 쥐고 있다(놓은 뒤 다시).
+    #[effect(Write)]
+    #[since(5)]
+    "agent.cancelQueuedInput" => args AgentCancelQueuedInputArgs {
+        target: String,
+        /// ★필수다★ — 「없으면 가장 최근」 같은 기본값을 두지 않는다(TRD §5-6).
+        input_id: String,
+    } -> ok AgentCancelQueuedInputOk {
+        outcome: String,
+    } errors [NOT_FOUND, CONFLICT];
 }
+
+/// 산 에이전트의 **입력을 움직이는** 명령 — 공통 입구가 입력 임대(`check_input`)를 먼저 본다.
+///
+/// ★선언 매크로에 칸을 더하지 않고 여기 둔다★ — `CommandSpec` 에 표식을 얹으면 명령 crate 가 입력 임대라는
+///   도메인을 알게 된다. 이 목록의 이름은 전부 이 블록의 `Write` 선언이어야 한다(시험이 잰다).
+/// 조회(`agent.listQueuedInputs`)는 임대를 안 본다 — 읽기다.
+// ADR-0231
+pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput"];
 
 /// 명부 한 행 — 이 표가 매니저에게서 보는 것만.
 ///
@@ -210,6 +273,16 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★지목은 **id 정확 일치**뿐이다★ — 이름으로는 못 찾는다(프리셋 이름은 유일하지 않다). 없는 id 와
     /// id 형식이 아닌 문자열은 둘 다 `None` 이다: 호출자가 할 일이 같아서다(목록에서 id 를 다시 고른다).
     fn preset_cwd(&self, id: &str) -> Option<String>;
+    /// 산 화신의 대기 목록. `None` = 산 세션이 없다.
+    // ADR-0231
+    fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing>;
+    /// 산 화신의 대기 입력 하나를 취소한다. 산 세션이 없으면 `CancelError::NotFound`.
+    // ADR-0231
+    fn cancel_queued_input(
+        &self,
+        id: AgentId,
+        input_id: &str,
+    ) -> Result<CancelOutcome, CancelError>;
 }
 
 /// 명부가 바뀌었음을 붙어 있는 클라이언트에게 알리는 출구(포트).
@@ -274,6 +347,18 @@ impl AgentCommandHost for AgentManager {
             .into_iter()
             .find(|preset| preset.id == id)
             .map(|preset| preset.cwd.to_string_lossy().into_owned())
+    }
+
+    fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+        AgentManager::list_queued_inputs(self, id).ok()
+    }
+
+    fn cancel_queued_input(
+        &self,
+        id: AgentId,
+        input_id: &str,
+    ) -> Result<CancelOutcome, CancelError> {
+        AgentManager::cancel_queued_input(self, id, input_id)
     }
 }
 
@@ -446,6 +531,8 @@ pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged
     let new = (Arc::clone(&host), Arc::clone(&notify));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
     let move_ = (Arc::clone(&host), Arc::clone(&notify));
+    let list_queued = Arc::clone(&host);
+    let cancel_queued = Arc::clone(&host);
 
     // ★조립 때 터뜨린다★: insert 가 반려하는 셋(선언 집합에 없는 이름 · 중복 삽입 · 선언 스키마 텍스트가
     //   JSON 이 아님) 전부 **빌드가 정하는 값**이라 런타임에 달라지지 않는다. 어느 것인지는 패닉에 함께
@@ -488,6 +575,22 @@ pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged
             }),
         )
         .expect("agent.move 를 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.listQueuedInputs",
+            blocking_handler(move |args: AgentListQueuedInputsArgs| {
+                verb_list_queued_inputs(list_queued.as_ref(), args)
+            }),
+        )
+        .expect("agent.listQueuedInputs 를 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.cancelQueuedInput",
+            blocking_handler(move |args: AgentCancelQueuedInputArgs| {
+                verb_cancel_queued_input(cancel_queued.as_ref(), args)
+            }),
+        )
+        .expect("agent.cancelQueuedInput 을 표에 꽂지 못했다");
 
     table
 }
@@ -886,6 +989,81 @@ fn verb_move(
     })
 }
 
+// ★두 동사는 명부를 바꾸지 않는다 — 명부 통지를 내지 않는다★(대기 목록은 에이전트 출력 스트림으로 흐른다).
+// ADR-0231
+fn verb_list_queued_inputs(
+    host: &dyn AgentCommandHost,
+    args: AgentListQueuedInputsArgs,
+) -> Result<AgentListQueuedInputsOk, CommandError> {
+    let token = args.target.as_str();
+    reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
+    let id = resolve(host, token)?.id;
+    let listing = host
+        .list_queued_inputs(id)
+        .ok_or_else(|| not_running(token))?;
+    Ok(AgentListQueuedInputsOk {
+        inputs: listing
+            .rows
+            .into_iter()
+            .map(|row| QueuedInputRow {
+                id: row.id,
+                text: row.text,
+                state: row.state.as_str().to_string(),
+                cancel: match row.state {
+                    ListedState::Cancelling {
+                        answer,
+                        vendor_closed,
+                    } => Some(QueuedInputCancel {
+                        answer: answer.as_str().to_string(),
+                        vendor_closed,
+                    }),
+                    ListedState::Queued | ListedState::Unconfirmed => None,
+                },
+            })
+            .collect(),
+        as_of_seq: listing.as_of_seq,
+        epoch: listing.epoch,
+        stopped_after_error: listing.stopped_after_error,
+    })
+}
+
+// ADR-0231
+fn verb_cancel_queued_input(
+    host: &dyn AgentCommandHost,
+    args: AgentCancelQueuedInputArgs,
+) -> Result<AgentCancelQueuedInputOk, CommandError> {
+    let (token, input_id) = (args.target.as_str(), args.input_id.as_str());
+    reject_blanks(&[
+        ("target", Some(token), Blank::NeedsValue),
+        ("input_id", Some(input_id), Blank::NeedsValue),
+    ])?;
+    // ★문구엔 지목 토큰이 아니라 명부 이름을 싣는다★ — 공통 입구가 `target` 을 푼 id 로 바꿔 적으므로
+    //   (데몬 `admit_input`) 여기 오는 토큰은 대개 UUID 다.
+    let agent = resolve(host, token)?;
+    let name = agent.name.as_str();
+    match host.cancel_queued_input(agent.id, input_id) {
+        Ok(outcome) => Ok(AgentCancelQueuedInputOk {
+            outcome: outcome.as_str().to_string(),
+        }),
+        // ★「이미 결말이 났다」와 「잠들었다」를 가르지 않는다★ — 호출자가 할 일이 같다(목록을 다시 본다).
+        Err(CancelError::NotFound) => Err(CommandError::not_found(format!(
+            "'{name}' has no waiting input '{input_id}' — it was already delivered, cancelled or dropped, or the agent is not running; list its queued inputs to see what is still waiting"
+        ))),
+        // ★다시 부르라고 안내하지 않는다★: 항목은 취소 대기 그대로라 재호출은 아무것도 쓰지 않고 `requested`
+        //   를 돌려준다(멱등). 결말은 에이전트 자신의 수명주기가 정한다.
+        Err(CancelError::Write(e)) => Err(CommandError::internal(format!(
+            "the cancel request for '{input_id}' could not be written to '{name}': {e} — the item stays in the cancelling state and calling again will not resend it; its fate now follows the agent's own lifecycle, so watch it in the queued-input list"
+        ))),
+    }
+}
+
+/// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
+fn not_running(token: &str) -> CommandError {
+    CommandError::not_found(format!(
+        "'{token}' is not running, so it holds no queued inputs — an asleep agent has nothing waiting"
+    ))
+}
+
 fn current_name(host: &dyn AgentCommandHost, id: AgentId) -> Option<String> {
     host.roster()
         .into_iter()
@@ -929,12 +1107,15 @@ fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, Co
 
 /// [`resolve`] 의 순수한 알맹이 — **제어 입구가 실제로 쓰는 해석 규칙 그 자체**다.
 ///
-/// ★`pub` 인 이유(이것만이 근거다)★: 데몬 crate 의 교차 대조 테스트가 우편 입구와 **같은 규칙**인지를
-/// 재려면 실입구가 쓰는 해석기를 태워야 한다. 명부를 인자로 받는 형태라 그 테스트가 `AgentCommandHost`
-/// 전체를 흉내 내지 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다.
+/// ★`pub` 인 이유 둘★: ① 데몬 crate 의 교차 대조 테스트가 우편 입구와 **같은 규칙**인지를 재려면 실입구가
+/// 쓰는 해석기를 태워야 한다. 명부를 인자로 받는 형태라 그 테스트가 `AgentCommandHost` 전체를 흉내 내지
+/// 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다. ② 데몬의 입력 임대 검문
+/// (`control::commands::admit_input` — 운영 경로)이 [`INPUT_AFFECTING`] 명령의 `target` 을 동사 본문과 **같은
+/// 규칙으로** 한 번 풀어 그 id 로 임대를 본다. 해석기가 둘이면 검사한 에이전트와 실행하는 에이전트가 갈린다.
 /// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다).
 // ADR-0132
 // ADR-0155
+// ADR-0231
 pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgent, CommandError> {
     let found = |row: &AgentRosterRow| ResolvedAgent {
         id: row.id,
@@ -1053,6 +1234,12 @@ mod tests {
         rename_on_reparent: Mutex<Option<String>>,
         /// 등록된 경로 북마크(id → cwd) — 프리셋 지목이 **실제로 폴더를 물어 온다**를 재는 재료.
         presets: Mutex<HashMap<String, String>>,
+        /// 대기 목록 조회의 답. `None` = 산 세션이 없다.
+        queued_listing: Mutex<Option<QueuedListing>>,
+        /// 대기 입력 취소의 답(한 번 쓰고 비운다). 비었으면 `NotFound`.
+        cancel_answer: Mutex<Option<Result<CancelOutcome, CancelError>>>,
+        /// 두 동사가 매니저에 넘긴 지목 — 푼 id 가 그대로 가는지 잰다.
+        queued_calls: Mutex<Vec<(AgentId, Option<String>)>>,
     }
 
     /// 명부 통지 계수기 — 「이름을 바꿨는데 트리가 옛 명부를 보여준다」의 감시자.
@@ -1237,6 +1424,27 @@ mod tests {
         fn preset_cwd(&self, id: &str) -> Option<String> {
             self.presets.lock().unwrap().get(id).cloned()
         }
+
+        fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+            self.queued_calls.lock().unwrap().push((id, None));
+            self.queued_listing.lock().unwrap().clone()
+        }
+
+        fn cancel_queued_input(
+            &self,
+            id: AgentId,
+            input_id: &str,
+        ) -> Result<CancelOutcome, CancelError> {
+            self.queued_calls
+                .lock()
+                .unwrap()
+                .push((id, Some(input_id.to_string())));
+            self.cancel_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Err(CancelError::NotFound))
+        }
     }
 
     fn call(
@@ -1256,7 +1464,9 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "agent.cancelQueuedInput",
                 "agent.list",
+                "agent.listQueuedInputs",
                 "agent.move",
                 "agent.new",
                 "agent.rename",
@@ -2729,5 +2939,268 @@ mod tests {
             ok["properties"]["agents"]["items"]["properties"]["state"]["type"], "string",
             "블록 안 선언 struct 가 인라인으로 펼쳐진다"
         );
+    }
+
+    // ── 대기 목록 조회·취소 (ADR-0231 · TRD §5-6) ──
+
+    fn listed(id: &str, state: ListedState) -> crate::queued_input::ListedRow {
+        crate::queued_input::ListedRow {
+            id: id.into(),
+            text: format!("text of {id}"),
+            state,
+        }
+    }
+
+    #[test]
+    fn the_queued_listing_carries_every_row_state_the_seq_the_incarnation_and_the_halt() {
+        let host = FakeHost::new();
+        let id = host.with_agent("alpha", true, false);
+        *host.queued_listing.lock().unwrap() = Some(QueuedListing {
+            rows: vec![
+                listed("q1", ListedState::Queued),
+                listed("q2", ListedState::Unconfirmed),
+                listed(
+                    "q3",
+                    ListedState::Cancelling {
+                        answer: crate::queued_input::CancelAnswer::NotRemoved,
+                        vendor_closed: true,
+                    },
+                ),
+                listed(
+                    "q4",
+                    ListedState::Cancelling {
+                        answer: crate::queued_input::CancelAnswer::Unanswered,
+                        vendor_closed: false,
+                    },
+                ),
+            ],
+            as_of_seq: Some(7),
+            epoch: 4_000_000_000,
+            stopped_after_error: true,
+        });
+        let (table, notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.listQueuedInputs",
+            json!({ "target": "alpha" }),
+        )
+        .expect("조회 성공");
+        assert_eq!(
+            out,
+            json!({
+                "inputs": [
+                    { "id": "q1", "text": "text of q1", "state": "queued", "cancel": null },
+                    { "id": "q2", "text": "text of q2", "state": "unconfirmed", "cancel": null },
+                    { "id": "q3", "text": "text of q3", "state": "cancelling",
+                      "cancel": { "answer": "not_removed", "vendor_closed": true } },
+                    { "id": "q4", "text": "text of q4", "state": "cancelling",
+                      "cancel": { "answer": "none", "vendor_closed": false } },
+                ],
+                "as_of_seq": 7,
+                "epoch": 4_000_000_000u32,
+                "stopped_after_error": true,
+            })
+        );
+        assert_eq!(*host.queued_calls.lock().unwrap(), vec![(id, None)]);
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "명부를 바꾸지 않는다");
+    }
+
+    #[test]
+    fn an_empty_queue_lists_no_rows_and_a_null_seq() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        *host.queued_listing.lock().unwrap() = Some(QueuedListing {
+            rows: vec![],
+            as_of_seq: None,
+            epoch: 0,
+            stopped_after_error: false,
+        });
+        let (table, _notify) = wiring(&host);
+        let out = call(
+            &table,
+            "agent.listQueuedInputs",
+            json!({ "target": "alpha" }),
+        )
+        .expect("조회 성공");
+        assert_eq!(
+            out,
+            json!({ "inputs": [], "as_of_seq": null, "epoch": 0, "stopped_after_error": false })
+        );
+    }
+
+    #[test]
+    fn listing_the_queue_of_an_asleep_unknown_or_ambiguous_agent_is_refused() {
+        let host = FakeHost::new();
+        host.with_agent("asleep", false, false);
+        host.with_agent("twin", true, false);
+        host.with_agent("twin", true, false);
+        let (table, _notify) = wiring(&host);
+
+        let asleep = call(
+            &table,
+            "agent.listQueuedInputs",
+            json!({ "target": "asleep" }),
+        )
+        .expect_err("산 세션이 없다");
+        assert_eq!(asleep.code(), ErrorCode::NotFound);
+        assert!(
+            asleep.message().contains("not running"),
+            "명부에 있는 에이전트를 없다고 하지 않는다: {}",
+            asleep.message()
+        );
+        for (target, code) in [
+            ("nobody", ErrorCode::NotFound),
+            ("twin", ErrorCode::Conflict),
+        ] {
+            let err = call(
+                &table,
+                "agent.listQueuedInputs",
+                json!({ "target": target }),
+            )
+            .expect_err("지목 실패");
+            assert_eq!(err.code(), code, "{target}");
+        }
+        let blank =
+            call(&table, "agent.listQueuedInputs", json!({ "target": " " })).expect_err("빈 값");
+        assert_eq!(blank.code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            host.queued_calls.lock().unwrap().len(),
+            1,
+            "지목이 서지 않으면 매니저에 닿지 않는다(잠든 에이전트 한 번만 물었다)"
+        );
+    }
+
+    /// TRD §7-1 데몬 행의 「취소 결과」 — 세션의 답이 동사 응답으로 한 줄씩 번역된다.
+    #[test]
+    fn cancel_translates_every_session_answer() {
+        let answers: Vec<(Result<CancelOutcome, CancelError>, Result<&str, ErrorCode>)> = vec![
+            (Ok(CancelOutcome::Cancelled), Ok("cancelled")),
+            (Ok(CancelOutcome::Requested), Ok("requested")),
+            (Err(CancelError::NotFound), Err(ErrorCode::NotFound)),
+            (
+                Err(CancelError::Write(PtyError::WriteFailed(
+                    "pipe closed".into(),
+                ))),
+                Err(ErrorCode::Internal),
+            ),
+        ];
+        for (answer, expected) in answers {
+            let host = FakeHost::new();
+            let id = host.with_agent("alpha", true, false);
+            let label = format!("{answer:?}");
+            *host.cancel_answer.lock().unwrap() = Some(answer);
+            let (table, notify) = wiring(&host);
+
+            let got = call(
+                &table,
+                "agent.cancelQueuedInput",
+                json!({ "target": "alpha", "input_id": "q1" }),
+            );
+            match expected {
+                Ok(word) => assert_eq!(got.expect(&label), json!({ "outcome": word }), "{label}"),
+                Err(code) => {
+                    let err = got.expect_err(&label);
+                    assert_eq!(err.code(), code, "{label}");
+                    if code == ErrorCode::Internal {
+                        assert!(
+                            err.message().contains("stays in the cancelling state"),
+                            "쓰기 실패는 항목이 취소 대기로 남는다고 말한다: {}",
+                            err.message()
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                *host.queued_calls.lock().unwrap(),
+                vec![(id, Some("q1".to_string()))],
+                "{label}: 푼 id 와 input_id 가 그대로 넘어간다"
+            );
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                0,
+                "{label}: 명부를 바꾸지 않는다"
+            );
+        }
+    }
+
+    /// ★실패 문구는 명부 이름으로 부른다★ — 데몬 공통 입구가 `target` 을 푼 id 로 바꿔 적으므로 토큰을 그대로
+    /// 실으면 호출자는 자기가 치지 않은 UUID 를 읽는다.
+    #[test]
+    fn cancel_failures_name_the_agent_by_its_roster_name_even_when_targeted_by_id() {
+        for answer in [
+            CancelError::NotFound,
+            CancelError::Write(PtyError::WriteFailed("pipe closed".into())),
+        ] {
+            let host = FakeHost::new();
+            let id = host.with_agent("alpha", true, false);
+            let label = format!("{answer:?}");
+            *host.cancel_answer.lock().unwrap() = Some(Err(answer));
+            let (table, _notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.cancelQueuedInput",
+                json!({ "target": id.to_string(), "input_id": "q1" }),
+            )
+            .expect_err(&label);
+            assert!(
+                err.message().contains("'alpha'"),
+                "{label}: {}",
+                err.message()
+            );
+            assert!(
+                !err.message().contains(&id.to_string()),
+                "{label}: id 를 이름 자리에 싣지 않는다: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_requires_an_input_id_and_refuses_a_blank_one_before_touching_the_agent() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        let (table, _notify) = wiring(&host);
+
+        for args in [
+            json!({ "target": "alpha" }),
+            json!({ "target": "alpha", "input_id": "" }),
+            json!({ "target": "alpha", "input_id": "   " }),
+            json!({ "target": " ", "input_id": "q1" }),
+        ] {
+            let err = call(&table, "agent.cancelQueuedInput", args.clone()).expect_err("반려");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+        }
+        let unknown = call(
+            &table,
+            "agent.cancelQueuedInput",
+            json!({ "target": "nobody", "input_id": "q1" }),
+        )
+        .expect_err("지목 실패");
+        assert_eq!(unknown.code(), ErrorCode::NotFound);
+        assert!(
+            host.queued_calls.lock().unwrap().is_empty(),
+            "인자·지목이 서지 않으면 매니저에 닿지 않는다"
+        );
+    }
+
+    #[test]
+    fn the_queue_list_schema_inlines_the_row_and_the_cancel_pair() {
+        let ok: serde_json::Value =
+            serde_json::from_str(AgentListQueuedInputsArgs::SPEC.ok_schema).expect("ok 스키마");
+        let row = &ok["properties"]["inputs"]["items"]["properties"];
+        assert_eq!(row["state"]["type"], "string");
+        assert_eq!(
+            row["cancel"]["anyOf"][0]["properties"]["vendor_closed"]["type"],
+            "boolean"
+        );
+        let required: Vec<&str> = ok["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .map(|v| v.as_str().expect("문자열"))
+            .collect();
+        assert_eq!(required, vec!["inputs", "epoch", "stopped_after_error"]);
     }
 }

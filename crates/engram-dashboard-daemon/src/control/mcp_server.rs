@@ -290,19 +290,19 @@ impl RosterBroadcastSlot {
 /// (`commands::make_daemon_table`).
 #[derive(Default)]
 pub struct CommandTableSlot {
-    inner: std::sync::OnceLock<Arc<engram_dashboard_command::CommandTable>>,
+    inner: std::sync::OnceLock<Arc<super::commands::DaemonTable>>,
 }
 
 impl CommandTableSlot {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn set(&self, table: Arc<engram_dashboard_command::CommandTable>) {
+    pub fn set(&self, table: Arc<super::commands::DaemonTable>) {
         let _ = self.inner.set(table);
     }
     /// `/control/agent` 어댑터가 요청마다 읽는다 — 비어 있으면 그 라우트는 503 이다(요청 형식·인증
     /// 문제가 아니라 배선 순서 이상이라 4xx 가 아니다).
-    pub(crate) fn get(&self) -> Option<&Arc<engram_dashboard_command::CommandTable>> {
+    pub(crate) fn get(&self) -> Option<&Arc<super::commands::DaemonTable>> {
         self.inner.get()
     }
 }

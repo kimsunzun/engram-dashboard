@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::backend::InputEncoder;
 use crate::output_core::OutputCore;
-use crate::queued_input::{QueuedInputs, RowPhase};
+use crate::queued_input::{overlay_unconfirmed, ListedRow, QueuedInputs, RowPhase};
 use crate::session_id_latch::SessionIdLatch;
 use crate::transport::AgentTransport;
 use crate::types::{
@@ -531,6 +531,17 @@ impl AgentSession {
         }
     }
 
+    /// 목록 조회의 세션 쪽 — 명부 행과 `as_of_seq` 를 한 락 아래 읽고, 그 락을 놓은 **뒤** 통로에 수락 모름을
+    /// 물어 `Queued` 행에 덧댄다. 표지는 조회 순간의 통로 상태라 행 스냅숏과 한 원자가 아니다(다음 조회가 고친다).
+    /// 입력 자물쇠를 잡지 않는다 — 읽기다.
+    // ADR-0006
+    // ADR-0231
+    pub fn list_queued_inputs(&self) -> (Vec<ListedRow>, Option<u64>) {
+        let (rows, as_of_seq) = self.core.queued_inputs().snapshot();
+        let unconfirmed = self.transport.unconfirmed_inputs();
+        (overlay_unconfirmed(rows, &unconfirmed), as_of_seq)
+    }
+
     /// transport.resize 성공 후에만 cols/rows atomic 을 갱신한다 — 실패 시 옛 값 유지.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), PtyError> {
         self.transport.resize(cols, rows)?;
@@ -641,6 +652,7 @@ impl AgentSession {
 mod tests {
     use super::*;
     use crate::backend::{AgentBackend, ClaudeBackend, ShellBackend};
+    use crate::queued_input::{CancelAnswer, ListedState};
     use crate::transport::stdio::StdioTransport;
     use crate::types::{ControlCaps, InputCaps, OutputCaps, TransportCaps};
     use std::sync::Mutex;
@@ -1706,6 +1718,7 @@ mod tests {
         withdraws: Mutex<Vec<String>>,
         withdraw_answer: Mutex<Option<Withdraw>>,
         fail_raw: std::sync::atomic::AtomicBool,
+        unconfirmed: Mutex<Vec<String>>,
     }
     struct ProbeTransport(Arc<Probe>);
     impl AgentTransport for ProbeTransport {
@@ -1729,6 +1742,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .unwrap_or(Withdraw::NotHeld)
+        }
+        fn unconfirmed_inputs(&self) -> Vec<String> {
+            self.0.unconfirmed.lock().unwrap().clone()
         }
         fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
             Ok(())
@@ -1908,6 +1924,59 @@ mod tests {
             );
             assert!(probe.raw.lock().unwrap().is_empty(), "{answer:?}");
         }
+    }
+
+    #[test]
+    fn the_listing_marks_what_the_transport_holds_unconfirmed_on_queued_rows_only() {
+        let (session, probe) = probed(InputEncoder::TransportFramed, MidTurnPolicy::TransportOwned);
+        for id in ["q1", "q2", "q3"] {
+            session.core.emit(queued(id));
+        }
+        session.core.emit(OutputEvent::QueuedInput(
+            QueuedInputEvent::CancelRequested { id: "q3".into() },
+        ));
+        *probe.unconfirmed.lock().unwrap() = vec!["q2".into(), "q3".into(), "gone".into()];
+
+        let (rows, as_of_seq) = session.list_queued_inputs();
+        let states: Vec<(&str, ListedState)> =
+            rows.iter().map(|r| (r.id.as_str(), r.state)).collect();
+        assert_eq!(
+            states,
+            vec![
+                ("q1", ListedState::Queued),
+                ("q2", ListedState::Unconfirmed),
+                (
+                    "q3",
+                    ListedState::Cancelling {
+                        answer: CancelAnswer::Unanswered,
+                        vendor_closed: false
+                    }
+                ),
+            ],
+            "취소 대기가 표지를 이기고, 명부에 없는 id 는 행이 되지 않는다"
+        );
+        assert_eq!(rows[0].text, "text of q1");
+        assert!(as_of_seq.is_some());
+        assert_eq!(
+            as_of_seq,
+            session.queued_inputs().snapshot().1,
+            "as_of_seq 는 명부 스냅숏의 것 그대로다"
+        );
+    }
+
+    #[test]
+    fn a_transport_that_holds_nothing_unconfirmed_lists_every_row_as_registered() {
+        let (session, _captured) = session_with(InputEncoder::Raw);
+        assert_eq!(
+            session.list_queued_inputs(),
+            (vec![], None),
+            "목록 사건이 없는 화신 — 빈 목록 · as_of_seq 없음"
+        );
+        session.core.emit(queued("q1"));
+        let (rows, as_of_seq) = session.list_queued_inputs();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, ListedState::Queued);
+        assert!(as_of_seq.is_some());
     }
 
     #[test]

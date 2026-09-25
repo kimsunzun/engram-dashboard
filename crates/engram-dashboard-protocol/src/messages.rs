@@ -336,6 +336,26 @@ pub enum AgentCommand {
         )]
         reply: CommandReply,
     },
+
+    // ── 대기 입력 목록(ADR-0231) ─────────────────────────────────────────────────────
+    // 버스 `agent.listQueuedInputs`·`agent.cancelQueuedInput` 의 WS 짝 — 데몬이 같은 manager 값을 싣는다.
+    /// 산 화신의 대기 입력 목록 조회. 응답은 전용 reply [`AgentEvent::QueuedInputs`]. ★입력 임대를 보지 않는다★
+    /// (읽기다). 산 세션이 없으면 `Error`(`NOT_FOUND: …`).
+    ListQueuedInputs {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        request_id: RequestId,
+    },
+    /// 대기 입력 하나를 취소한다(화면 ✕ 와 같은 명령). 응답은 전용 reply [`AgentEvent::QueuedInputCancelReply`].
+    /// ★입력 임대는 `WriteStdin` 과 같은 검사를 거친다★ — 비보유자는 같은 문구의 `Error` 로 거절된다.
+    /// 목록에 없는 id(모르는 · 이미 결말이 난 · 잠든 에이전트)는 `Error`(`NOT_FOUND: …`).
+    /// `input_id` 는 필수다 — 「없으면 가장 최근」 같은 기본값을 두지 않는다.
+    CancelQueuedInput {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        input_id: String,
+        request_id: RequestId,
+    },
 }
 
 /// 데몬 명부의 **클라이언트 투영** 한 줄([`AgentEvent::CommandList`] 의 원소).
@@ -355,6 +375,35 @@ pub struct CommandListEntry {
     pub name: String,
     pub help: String,
     pub available: bool,
+}
+
+/// 대기 입력 목록의 한 줄([`AgentEvent::QueuedInputs`] 의 원소) — 버스 `agent.listQueuedInputs` 행과 같은 모양·낱말.
+///
+/// `state` = `queued` | `unconfirmed` | `cancelling`. ★`unconfirmed` 는 명부의 환원 상태가 아니다★ — 조회 순간
+///   통로가 수락 모름으로 쥔 항목을 덧댄 표지라 `as_of_seq` 와 한 원자가 아니고, 재부착 대조는 `queued` 로 읽는다.
+/// ★낱말 칸을 enum 으로 올리지 않는다★ — 낱말이 늘 때 구셸이 응답 전체를 못 읽는 대신 그 행만 모르는 낱말로
+///   받는다(버스 행도 문자열이다).
+/// `cancel` = `cancelling` 행에만 실린다(그 밖은 `null`).
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct QueuedInputRow {
+    /// [`AgentCommand::CancelQueuedInput`] 의 `input_id` 로 그대로 쓴다.
+    pub id: String,
+    pub text: String,
+    pub state: String,
+    pub cancel: Option<QueuedInputCancel>,
+}
+
+/// 취소 대기 행의 두 칸 — 명부의 환원 상태 그대로다(스냅숏 위에 뒤 사건을 다시 환원하려면 둘 다 필요하다).
+/// `answer` = `none`(우리 취소 요청의 응답이 아직 없다) | `not_removed`(안 뺐다고 답했거나 요청이 실패했다).
+/// `vendor_closed` = 그 id 의 벤더 닫힘을 이미 봤다.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct QueuedInputCancel {
+    pub answer: String,
+    pub vendor_closed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
@@ -526,7 +575,7 @@ pub enum AgentEvent {
     /// 이 variant 가 클라이언트를 「데몬 명령 **수신** peer」로 만든다 — ADR-0081 이 「신규 능력」으로 적은
     /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0155 이 이 통합 봉투로 대체했다.
     ///
-    /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지 18개는 알림이거나 내가 보낸 명령의 답장이다. 그래서
+    /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지는 전부 알림이거나 내가 보낸 명령의 답장이다. 그래서
     /// 받는 쪽은 이것만 [`AgentEvent`] 소비 흐름에서 갈라내 인바운드 수신기로 넘기고, 답은
     /// [`AgentCommand::CommandOutcome`] 으로 되돌린다. [`event_reply_request_id`] 가 여기 `None` 을 주는 것이
     /// 계약이다 — `Some` 이면 받는 쪽 pending 매칭이 이 요청을 「내가 기다린 답장」으로 읽고 삼킨다(그 봉투는
@@ -582,6 +631,36 @@ pub enum AgentEvent {
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
         )]
         reply: CommandReply,
+    },
+
+    /// [`AgentCommand::ListQueuedInputs`] 응답(전용 reply) — 버스 `agent.listQueuedInputs` 의 답과 같은 값이다.
+    ///
+    /// `inputs` = 비종결 항목만(목록 순서 그대로). `as_of_seq` = 행이 환원한 마지막 목록 사건의 seq(`null` = 이
+    /// 화신의 목록 사건이 아직 없다) — ★`epoch` 안에서만 견준다★(재부착 대조가 스냅숏과 라이브 사건을 이 seq 로
+    /// 맞춘다). `stopped_after_error` = 오류로 끝난 턴 뒤라 사용자의 다음 턴이 성공할 때까지 우편이 멈춰 있다.
+    /// ★broadcast 로 바꾸지 말 것★ — [`AgentEvent::CommandList`] 와 같은 이유로 구형 셸 안전이 「전용 reply」에 선다.
+    // ADR-0231
+    QueuedInputs {
+        request_id: RequestId,
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        inputs: Vec<QueuedInputRow>,
+        #[ts(type = "number | null")]
+        as_of_seq: Option<u64>,
+        epoch: u32,
+        stopped_after_error: bool,
+    },
+    /// [`AgentCommand::CancelQueuedInput`] 응답(전용 reply). ★「취소됐다」가 아니라 취소 요청에 대한 답이다★ —
+    /// `outcome` = `cancelled`(곧바로 거뒀다) | `requested`(취소를 요청했다 · 이미 취소 대기였다 — 결말은 뒤따르는
+    /// 목록 사건이 정한다). 그래서 이름이 `…Cancelled` 가 아니다. 실패(임대 거절 · `NOT_FOUND` · 취소 줄 쓰기
+    /// 실패)는 이 variant 가 아니라 `Error` 로 온다.
+    // ADR-0231
+    QueuedInputCancelReply {
+        request_id: RequestId,
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        input_id: String,
+        outcome: String,
     },
 
     /// request_id 있으면 특정 command 실패.
@@ -868,7 +947,10 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
         | AgentCommand::RegisterCommands { request_id, .. }
         | AgentCommand::UpdateCommands { request_id, .. }
-        | AgentCommand::ListCommands { request_id } => Some(*request_id),
+        | AgentCommand::ListCommands { request_id }
+        // 대기 입력 목록(ADR-0231) — 둘 다 전용 reply(QueuedInputs/QueuedInputCancelReply)를 기다린다.
+        | AgentCommand::ListQueuedInputs { request_id, .. }
+        | AgentCommand::CancelQueuedInput { request_id, .. } => Some(*request_id),
         // ★명령 요청은 상관 대상이다 — 키만 봉투 안에 있다★(ADR-0155). 형제들처럼 제 칸이 없다고 여기서
         //   None 을 고르면 셸이 답장을 받고도 깨울 슬롯을 못 만들어 마감시각까지 매달린다. 아래
         //   event_reply_request_id 의 `CommandReply` 갈래와 **한 쌍으로만** 성립한다.
@@ -909,6 +991,9 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         //   움직여야 하는 한 쌍이다 — 이 쌍의 고정은 이 crate 의 테스트가 박는다
         //   (`cargo test -p engram-dashboard-protocol`, CI 가 항상 실행).
         | AgentEvent::CommandList { request_id, .. }
+        // 대기 입력 목록(ADR-0231) — 위 command_request_id 의 두 갈래와 한 쌍이다.
+        | AgentEvent::QueuedInputs { request_id, .. }
+        | AgentEvent::QueuedInputCancelReply { request_id, .. }
         | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
         // ★명령 답장도 상관 대상이다 — 위 `AgentCommand::Command` 갈래의 짝★(ADR-0155). 요청이 Some 을
         //   주는데 여기서 None 을 고르면 그 슬롯을 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다.
@@ -1665,6 +1750,173 @@ mod tests {
             Some(r),
             "CommandList 는 ListCommands 의 전용 reply — 같은 request_id 로 매칭돼야 슬롯이 깨어난다"
         );
+    }
+
+    // ── 대기 입력 목록 wire(ADR-0231) — 프론트·셸이 이 글자를 그대로 읽는다 ─────────────
+    const NIL: &str = "00000000-0000-0000-0000-000000000000";
+
+    #[test]
+    fn queued_input_commands_json_golden_and_roundtrip() {
+        let list = AgentCommand::ListQueuedInputs {
+            agent_id: Uuid::nil(),
+            request_id: RequestId(Uuid::nil()),
+        };
+        let cancel = AgentCommand::CancelQueuedInput {
+            agent_id: Uuid::nil(),
+            input_id: "q1".into(),
+            request_id: RequestId(Uuid::nil()),
+        };
+        for (cmd, golden) in [
+            (
+                list,
+                format!(r#"{{"ListQueuedInputs":{{"agent_id":"{NIL}","request_id":"{NIL}"}}}}"#),
+            ),
+            (
+                cancel,
+                format!(
+                    r#"{{"CancelQueuedInput":{{"agent_id":"{NIL}","input_id":"q1","request_id":"{NIL}"}}}}"#
+                ),
+            ),
+        ] {
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert_eq!(
+                json, golden,
+                "대기 입력 명령의 wire 형태가 golden 과 불일치"
+            );
+            let back: AgentCommand = serde_json::from_str(&json).unwrap();
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        }
+    }
+
+    /// 행 모양·낱말은 버스 `agent.listQueuedInputs` 행과 같다 — 취소 대기 행만 두 칸(`answer`·`vendor_closed`)을
+    /// 싣고, 그 밖은 `cancel: null`. `as_of_seq` 는 JSON number(프론트 바인딩도 `number | null`).
+    #[test]
+    fn queued_inputs_reply_json_golden_and_roundtrip() {
+        let reply = AgentEvent::QueuedInputs {
+            request_id: RequestId(Uuid::nil()),
+            agent_id: Uuid::nil(),
+            inputs: vec![
+                QueuedInputRow {
+                    id: "q1".into(),
+                    text: "first".into(),
+                    state: "queued".into(),
+                    cancel: None,
+                },
+                QueuedInputRow {
+                    id: "q2".into(),
+                    text: "second".into(),
+                    state: "cancelling".into(),
+                    cancel: Some(QueuedInputCancel {
+                        answer: "not_removed".into(),
+                        vendor_closed: true,
+                    }),
+                },
+            ],
+            as_of_seq: Some(7),
+            epoch: 3,
+            stopped_after_error: true,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"QueuedInputs":{{"request_id":"{NIL}","agent_id":"{NIL}","inputs":[{{"id":"q1","text":"first","state":"queued","cancel":null}},{{"id":"q2","text":"second","state":"cancelling","cancel":{{"answer":"not_removed","vendor_closed":true}}}}],"as_of_seq":7,"epoch":3,"stopped_after_error":true}}}}"#
+            ),
+            "QueuedInputs wire 형태가 golden 과 불일치"
+        );
+        let back: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+
+        let empty = AgentEvent::QueuedInputs {
+            request_id: RequestId(Uuid::nil()),
+            agent_id: Uuid::nil(),
+            inputs: vec![],
+            as_of_seq: None,
+            epoch: 0,
+            stopped_after_error: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            format!(
+                r#"{{"QueuedInputs":{{"request_id":"{NIL}","agent_id":"{NIL}","inputs":[],"as_of_seq":null,"epoch":0,"stopped_after_error":false}}}}"#
+            ),
+            "목록 사건이 아직 없는 화신 = as_of_seq null"
+        );
+    }
+
+    #[test]
+    fn queued_input_cancel_reply_json_golden_and_roundtrip() {
+        let reply = AgentEvent::QueuedInputCancelReply {
+            request_id: RequestId(Uuid::nil()),
+            agent_id: Uuid::nil(),
+            input_id: "q1".into(),
+            outcome: "requested".into(),
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"QueuedInputCancelReply":{{"request_id":"{NIL}","agent_id":"{NIL}","input_id":"q1","outcome":"requested"}}}}"#
+            ),
+            "QueuedInputCancelReply wire 형태가 golden 과 불일치"
+        );
+        let back: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    /// ★명령↔답장 두 쌍 박제★ — 한쪽만 `Some` 이면 셸이 그 왕복을 연결이 끊기거나 답장 상한이 찰 때까지 붙든다.
+    #[test]
+    fn queued_input_commands_and_replies_pair_by_request_id() {
+        let r = RequestId::new();
+        let agent_id = Uuid::new_v4();
+        let pairs = [
+            (
+                AgentCommand::ListQueuedInputs {
+                    agent_id,
+                    request_id: r,
+                },
+                AgentEvent::QueuedInputs {
+                    request_id: r,
+                    agent_id,
+                    inputs: vec![],
+                    as_of_seq: None,
+                    epoch: 0,
+                    stopped_after_error: false,
+                },
+            ),
+            (
+                AgentCommand::CancelQueuedInput {
+                    agent_id,
+                    input_id: "q1".into(),
+                    request_id: r,
+                },
+                AgentEvent::QueuedInputCancelReply {
+                    request_id: r,
+                    agent_id,
+                    input_id: "q1".into(),
+                    outcome: "cancelled".into(),
+                },
+            ),
+        ];
+        for (cmd, reply) in pairs {
+            assert_eq!(command_request_id(&cmd), Some(r), "{cmd:?}");
+            assert_eq!(event_reply_request_id(&reply), Some(r), "{reply:?}");
+        }
+    }
+
+    /// `input_id` 에 기본값이 없다 — 빠진 취소는 「가장 최근」 같은 것으로 흡수되지 않고 반려된다.
+    #[test]
+    fn queued_input_commands_reject_missing_fields() {
+        for json in [
+            format!(r#"{{"CancelQueuedInput":{{"agent_id":"{NIL}","request_id":"{NIL}"}}}}"#),
+            format!(r#"{{"CancelQueuedInput":{{"agent_id":"{NIL}","input_id":"q1"}}}}"#),
+            format!(r#"{{"ListQueuedInputs":{{"agent_id":"{NIL}"}}}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<AgentCommand>(&json).is_err(),
+                "빠진 칸이 기본값으로 흡수되면 안 된다: {json}"
+            );
+        }
     }
 
     /// `request_id` 가 빠진 패킷은 **거절돼야 한다** — 이 crate 의 `RequestId::default()` 는 새 v4 를

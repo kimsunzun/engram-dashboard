@@ -301,6 +301,16 @@ pub enum CancelOutcome {
     Cancelled,
 }
 
+impl CancelOutcome {
+    /// 취소 응답의 `outcome` 낱말 — 버스와 WS 가 같은 낱말을 싣는다.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Cancelled => "cancelled",
+        }
+    }
+}
+
 /// 대기 입력 취소의 실패.
 // ADR-0231
 #[derive(Debug, thiserror::Error)]

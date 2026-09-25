@@ -32,7 +32,9 @@
 // ADR-0157
 
 use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
-use engram_dashboard_command::{CommandError, CommandTable, ErrorCode};
+use engram_dashboard_command::{CommandError, ErrorCode};
+
+use crate::connection_core::INPUT_LOCKED_REFUSAL;
 
 use super::ingress::ControlQueryResult;
 
@@ -153,14 +155,15 @@ impl<'de> serde::Deserialize<'de> for CommandArgs {
 ///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 어댑터
 ///   (`mcp_server::control_agent_handler`)가 `spawn_blocking` 으로 감싼다.
 /// ★명부 통지는 여기서 안 한다★ — 표가 조립될 때 꽂힌 통지 포트가 동사별로 부른다(위 [`RosterBroadcast`]).
-pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResult {
+pub fn handle_agent(table: &super::commands::DaemonTable, req: AgentRequest) -> ControlQueryResult {
     // CLI 표면과 카탈로그 이름은 점↔공백 하나 차이다(TRD §2-1) — 그래서 동사별 표를 손으로 두지 않는다.
     let name = format!("{CLI_GROUP_AGENT}.{}", req.verb);
     let mut args = req.args.into_value();
 
     // ★검문·실행은 이웃 `commands` 의 공통 입구가 한다★ — 이 라우트가 표를 직접 부르면 버스 배달과
     //   **다른 검문**을 갖게 되고, 두 입구 중 하나만 ADR-0157 을 지키는 상태가 된다.
-    match super::commands::call_daemon_command(table, &name, &mut args, "cli") {
+    // 연결 없는 입구라 호출자는 `None` = 입력 임대 비보유자다(ADR-0231).
+    match super::commands::call_daemon_command(table, &name, &mut args, "cli", None) {
         None => unknown_verb(&req.verb),
         Some(Ok(payload)) => ControlQueryResult::Ok(payload),
         Some(Err(e)) => refused(e),
@@ -174,10 +177,19 @@ pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResu
 /// ★자기교정 경로는 **어댑터가** 붙인다★: 표와 도구 crate 는 자기가 어느 표면에서 불렸는지 모른다(그래서
 ///   문구에 CLI 어휘를 넣지 않는다). 이 한 줄이 없으면 호출자(LLM)는 반려를 받고도 어디서 규격을 확인할지
 ///   모른 채 같은 인자로 재시도한다.
+/// ★예외 하나 — 입력 임대 거절★(`CONFLICT` 이지만 대상 문제가 아니다): 명부를 봐도 고칠 것이 없고, 다음
+///   걸음(놓인 뒤 다시)은 거절 문구 자신이 싣는다(`commands::admit_input` 의 연결 없는 입구 꼬리). 명부 안내를
+///   붙이면 호출자는 없는 동명이인을 찾는다.
+// ADR-0231
 fn refused(e: CommandError) -> ControlQueryResult {
+    let hint = if e.message().starts_with(INPUT_LOCKED_REFUSAL) {
+        format!("{}.", e.message())
+    } else {
+        format!("{} — {}.", e.message(), recovery_for(e.code()))
+    };
     ControlQueryResult::Error {
         code: e.code().as_str(),
-        hint: format!("{} — {}.", e.message(), recovery_for(e.code())),
+        hint,
     }
 }
 
@@ -397,6 +409,28 @@ mod tests {
                 "칠 수 있는 명령이 없다: {hint}"
             );
         }
+    }
+
+    /// ★입력 임대 거절은 명부 안내를 안 단다★ — `CONFLICT` 지만 대상을 잘못 고른 것이 아니라서, 명부를
+    ///   보라고 하면 호출자는 없는 동명이인을 찾는다. 다음 걸음은 거절 문구 자신이 싣는다.
+    #[test]
+    fn a_lease_refusal_does_not_point_at_the_roster() {
+        let message = format!("{INPUT_LOCKED_REFUSAL} — tail");
+        let (code, hint) = error_of(refused(CommandError::of(
+            ErrorCode::Conflict,
+            message.clone(),
+        )));
+        assert_eq!(code, "CONFLICT");
+        assert_eq!(hint, format!("{message}."));
+        // 같은 코드의 대상 실패(동명)는 여전히 명부를 가리킨다.
+        let (_, ambiguous) = error_of(refused(CommandError::of(
+            ErrorCode::Conflict,
+            "more than one agent",
+        )));
+        assert!(
+            ambiguous.contains(&format!("{CLI_GROUP_AGENT} {AGENT_LIST_VERB}")),
+            "{ambiguous}"
+        );
     }
 
     /// 코드마다 **다음에 할 일**이 다르다 — 고칠 인자가 없는 실패에 "인자 규격을 보라" 를 달면 호출자는

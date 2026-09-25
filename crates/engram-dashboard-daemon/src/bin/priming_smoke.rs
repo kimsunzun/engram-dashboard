@@ -150,6 +150,7 @@ async fn run() -> i32 {
         engram_dashboard_daemon::control::commands::make_daemon_table(
             manager.clone(),
             broadcast_slot.clone(),
+            Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
         ),
     ));
     let messaging = Arc::new(messaging_for_manager(manager.clone(), registry.clone()));
