@@ -7,6 +7,10 @@
 //!        `BusyGate` 답을 만들고, 상한을 넘긴 턴을 도어벨로 깨운다.
 //!     ③ `BusyGate`/`IdleNotifier` — 서비스가 묻는 문과 flush 도어벨 출구.
 //!
+//! ★바쁨 = 사용자 대기 목록이 있다 ∨ 오류 뒤 멈춤 ∨ (턴 중 ∧ 상한 안쪽)(ADR-0231)★: 앞의 두 사실에는 상한이
+//!   없다 — 사용자 입력이 먼저이고(N6·N8), 진짜 오류 뒤에 우편을 밀어 넣지 않는다(N11). ADR-0104
+//!   「늦게 가는 것 < 안 가는 것」의 의도된 예외다.
+//!
 //! ★positive-knowledge-only(load-bearing — spec §5 capability 폴백)★: 관측이 **없는** (id, epoch) 는 전부
 //!   **idle 취급**이다(= 즉시 주입). "모른다" 를 busy 로 해석하면 관측 불가 백엔드·관측이 아직 시작되지
 //!   않은 창에서 배달이 **영구 대기**한다. busy 는 **관측된 사실이 있을 때만** 참이다.
@@ -34,6 +38,7 @@
 // ADR-0104
 // ADR-0110
 // ADR-0113
+// ADR-0231
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -54,6 +59,7 @@ use crate::PeerId;
 /// ★왜 30분인가★: 사람 대화 수준 메시지율에서 30분 무-출력 턴은 정상 범위를 크게 벗어난다(도구 호출·
 ///   delta·usage 중 하나라도 오면 사실 계층이 시각을 갱신하므로, 30분은 "출력이 완전히 멈춘 채 턴 종료
 ///   신호도 없는" 구간을 뜻한다). 더 짧으면 정상 장기 턴을 자르고, 더 길면 회복이 늦다.
+/// ★턴 관측(`in_turn`)에만 건다★ — `inputs_pending`·`last_end_failed` 는 이 상한이 풀지 않는다(모듈 헤더).
 pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 
 /// ★idle 게이트 조회 seam(ADR-0012)★ — MessagingService 가 "이 수신자가 지금 턴 중인가" 를 묻는 유일한 문.
@@ -77,17 +83,24 @@ impl BusyGate for AlwaysIdleGate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TurnFact {
     pub in_turn: bool,
+    /// 마지막 턴 신호 시각 — `in_turn` 일 때만 읽힌다(상한 판정).
     pub last_signal: Instant,
+    /// 그 화신의 사용자 대기 목록이 비지 않았다.
+    // ADR-0231
+    pub inputs_pending: bool,
+    /// 그 화신의 마지막 턴 끝이 오류였고 그 뒤 깨끗한 성공 끝이 아직 없다(오류 뒤 멈춤).
+    // ADR-0231
+    pub last_end_failed: bool,
 }
 
 /// ★턴 사실 조회 포트(ADR-0110 결정 3 · ADR-0113 결정 1)★ — 호스트의 공용 관측 계층을 커널이 **타입으로도
 ///   모른 채** 읽는 문. 운영 구현은 호스트 어댑터가 소유한다.
 ///
 /// ★읽기 전용이 계약이다★: 이 포트에 "지워라/표시해라" 를 추가하지 말 것(근거 = 모듈 헤더).
-/// ★두 값을 한 번에 돌려주는 이유★: `in_turn` 과 `last_signal` 을 따로 물으면 두 조회 사이에 신호가 끼어
-///   "턴 중인데 시각은 옛것" 같은 합성 불가능한 조합으로 판정하게 된다.
+/// ★값들을 한 번에 돌려주는 이유★: 따로 물으면 두 조회 사이에 신호가 끼어 "턴 중인데 시각은 옛것"·
+///   "턴은 끝났는데 오류는 아직 안 적혔다" 같은 합성 불가능한 조합으로 판정하게 된다.
 pub trait TurnFacts: Send + Sync {
-    /// 이 (id, epoch)의 관측값. `None` = 미관측.
+    /// 이 (id, epoch)의 관측값. `None` = 미관측(어느 사실도 없다).
     fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact>;
 
     /// 지금 턴 중으로 관측된 전원 `(id, epoch, 마지막 신호 시각)` — 상한 sweep 의 입구.
@@ -178,6 +191,10 @@ impl BusyPolicy {
         let Some(fact) = self.facts.turn_fact(id, epoch) else {
             return false;
         };
+        // ADR-0231: 상한 장부를 보지 않는다 — 이 두 사실은 30 분이 지나도 바쁨이다(모듈 헤더).
+        if fact.inputs_pending || fact.last_end_failed {
+            return true;
+        }
         if !fact.in_turn {
             return false;
         }
@@ -205,25 +222,44 @@ impl ScriptedTurnFacts {
         Arc::new(Self::default())
     }
 
+    /// 이 화신을 "턴 중, 마지막 신호 = `at`" 으로 심는다 — 이미 심은 대기 목록·멈춤 칸은 그대로 둔다.
     pub fn set_in_turn(&self, id: PeerId, epoch: u32, at: Instant) {
-        self.facts.lock().unwrap().insert(
-            (id, epoch),
-            TurnFact {
-                in_turn: true,
-                last_signal: at,
-            },
-        );
+        self.update(id, epoch, at, |f| {
+            f.in_turn = true;
+            f.last_signal = at;
+        });
     }
 
-    /// 이 화신을 "턴 끝남, 마지막 신호 = `at`" 으로 심는다(관측은 있으나 턴 중은 아님).
+    /// 이 화신을 "턴 끝남, 마지막 신호 = `at`" 으로 심는다(관측은 있으나 턴 중은 아님). 대기 목록·멈춤
+    /// 칸은 그대로 둔다.
     pub fn set_idle(&self, id: PeerId, epoch: u32, at: Instant) {
-        self.facts.lock().unwrap().insert(
-            (id, epoch),
-            TurnFact {
-                in_turn: false,
-                last_signal: at,
-            },
-        );
+        self.update(id, epoch, at, |f| {
+            f.in_turn = false;
+            f.last_signal = at;
+        });
+    }
+
+    /// 대기 목록 칸만 바꾼다. 사실이 아직 없으면 "턴 아님, 마지막 신호 = `at`" 위에 심는다.
+    // ADR-0231
+    pub fn set_inputs_pending(&self, id: PeerId, epoch: u32, pending: bool, at: Instant) {
+        self.update(id, epoch, at, |f| f.inputs_pending = pending);
+    }
+
+    /// 오류 뒤 멈춤 칸만 바꾼다. 사실이 아직 없으면 "턴 아님, 마지막 신호 = `at`" 위에 심는다.
+    // ADR-0231
+    pub fn set_last_end_failed(&self, id: PeerId, epoch: u32, failed: bool, at: Instant) {
+        self.update(id, epoch, at, |f| f.last_end_failed = failed);
+    }
+
+    fn update(&self, id: PeerId, epoch: u32, at: Instant, change: impl FnOnce(&mut TurnFact)) {
+        let mut g = self.facts.lock().unwrap();
+        let fact = g.entry((id, epoch)).or_insert(TurnFact {
+            in_turn: false,
+            last_signal: at,
+            inputs_pending: false,
+            last_end_failed: false,
+        });
+        change(fact);
     }
 
     pub fn forget(&self, id: PeerId, epoch: u32) {
@@ -328,7 +364,9 @@ mod tests {
             f.turn_fact(id, 0),
             Some(TurnFact {
                 in_turn: true,
-                last_signal: t0
+                last_signal: t0,
+                inputs_pending: false,
+                last_end_failed: false,
             }),
             "사실은 그대로 — 우편의 판정이 공용 표를 바꾸지 않는다"
         );
@@ -406,6 +444,69 @@ mod tests {
         f.set_in_turn(id, 0, t0);
         assert_eq!(p.sweep_stale_busy(late), 1);
         assert_eq!(n.seen(), vec![id, id]);
+    }
+
+    // ── 대기 목록 · 오류 뒤 멈춤(ADR-0231) ──
+
+    #[test]
+    fn each_fact_alone_is_busy_and_all_false_is_idle() {
+        let (p, f, _n) = policy();
+        let t0 = Instant::now();
+        let pending = PeerId::new_v4();
+        f.set_inputs_pending(pending, 0, true, t0);
+        let halted = PeerId::new_v4();
+        f.set_last_end_failed(halted, 0, true, t0);
+        let turning = PeerId::new_v4();
+        f.set_in_turn(turning, 0, t0);
+        let quiet = PeerId::new_v4();
+        f.set_idle(quiet, 0, t0);
+        assert!(
+            p.is_busy(pending, 0),
+            "사용자 목록이 있으면 우편이 기다린다"
+        );
+        assert!(p.is_busy(halted, 0), "오류 뒤 멈춤 동안 우편이 기다린다");
+        assert!(p.is_busy(turning, 0));
+        assert!(!p.is_busy(quiet, 0));
+    }
+
+    #[test]
+    fn the_ceiling_releases_neither_the_list_nor_the_halt() {
+        let (p, f, n) = policy();
+        let t0 = Instant::now();
+        let late = t0 + BUSY_MAX_TURN + Duration::from_secs(1);
+        let pending = PeerId::new_v4();
+        f.set_inputs_pending(pending, 0, true, t0);
+        let halted = PeerId::new_v4();
+        f.set_last_end_failed(halted, 0, true, t0);
+        let both = PeerId::new_v4();
+        f.set_in_turn(both, 0, t0);
+        f.set_inputs_pending(both, 0, true, t0);
+
+        assert_eq!(
+            p.sweep_stale_busy(late),
+            1,
+            "상한은 턴 관측만 훑는다 — 목록·멈춤만 선 화신은 잔해 후보가 아니다"
+        );
+        assert_eq!(n.seen(), vec![both]);
+        assert!(p.is_busy(pending, 0), "30 분이 지나도 목록은 바쁨(N8)");
+        assert!(p.is_busy(halted, 0), "30 분이 지나도 멈춤은 바쁨(N11)");
+        assert!(
+            p.is_busy(both, 0),
+            "늙은 턴이 잔해로 판정돼도 목록이 남았으면 바쁨"
+        );
+    }
+
+    #[test]
+    fn clearing_the_facts_releases_the_gate() {
+        let (p, f, _n) = policy();
+        let t0 = Instant::now();
+        let id = PeerId::new_v4();
+        f.set_inputs_pending(id, 0, true, t0);
+        f.set_last_end_failed(id, 0, true, t0);
+        f.set_inputs_pending(id, 0, false, t0);
+        assert!(p.is_busy(id, 0), "멈춤이 남았다");
+        f.set_last_end_failed(id, 0, false, t0);
+        assert!(!p.is_busy(id, 0));
     }
 
     #[test]

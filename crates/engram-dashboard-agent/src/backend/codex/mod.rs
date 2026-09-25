@@ -52,6 +52,7 @@ pub(crate) mod thread_lock;
 pub(crate) mod transport;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -68,10 +69,10 @@ use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
-use crate::turn::TurnSignal;
+use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
-    AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError,
-    SessionCaps, MCP_SERVER_NAME, TOKEN_ENV,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, MidTurnPolicy, ModelCaps,
+    OutputEvent, PtyError, SessionCaps, TurnOutcome, MCP_SERVER_NAME, TOKEN_ENV,
 };
 
 /// codex 를 대화형 TUI 가 아니라 **상주 JSON 서버**로 띄우나 = 이 폴더 안의 네 축(통로 모양·통로 실물·
@@ -1103,6 +1104,10 @@ impl AgentBackend for CodexBackend {
             encoder: self.input_encoder(command),
             turn_classifier: self.turn_classifier(),
             reads_messages: self.reads_messages(),
+            // ADR-0231: 아직 목록을 쓰지 않는다 — 통로가 분류·해제를 지게 되면 app-server 갈래만
+            //   `TransportOwned` 로 뒤집고, 이 Arc 를 통로에도 건넨다(하한 판정).
+            mid_turn: MidTurnPolicy::None,
+            delivery_ack: Arc::new(DeliveryAck::new()),
         })
     }
 
@@ -1159,15 +1164,30 @@ impl AgentBackend for CodexBackend {
 /// ★`Ended` 앞에 `Progress` 가 없어도 안전하다(코드 근거)★: 표는 `Ended` 를 `in_turn = false` 로 적을
 ///   뿐이라 짝 없는 종료는 등록 직후 상태와 같은 값을 쓰고(`crate::turn::TurnObservations::observe_at`),
 ///   `in_turn_snapshot` 은 `in_turn` 인 것만 싣는다. 그래서 「시작 신호」를 지어내 채울 이유가 없다.
+/// ★명부 사건은 `Delivered` 까지 전부 `None` 이다(claude 와 다르다)★: 이 백엔드의 `Delivered` 는 턴 끝
+///   **뒤에도** 온다(수락 모름의 늦은 에코 · 되살림). 그것이 「턴 중」을 다시 켜면 그 화신은 30 분
+///   fail-open 밸브까지 우편이 막힌다. 턴 시작의 관측은 되울린 유저 메시지(`Structured`)가 이미 진다.
 // ADR-0113
 // ADR-0004
+// ADR-0231
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     match event {
         OutputEvent::TextDelta { .. }
         | OutputEvent::ToolCall { .. }
         | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
-        OutputEvent::TurnEnd { .. } | OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended),
-        OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => None,
+        OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
+            TurnOutcome::Completed => TurnEndKind::Clean,
+            // TODO(ADR-0231): 실패 끝은 아직 「그 밖」이다 — 통로의 오류 뒤 멈춤과 함께 `Failed` 로 바꾼다.
+            TurnOutcome::Failed { .. } | TurnOutcome::Interrupted | TurnOutcome::Unknown => {
+                TurnEndKind::Other
+            }
+        })),
+        // 결말을 싣지 않는 끝이라 오류 뒤 멈춤을 세우지도 풀지도 않는다.
+        OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Other)),
+        OutputEvent::Usage { .. }
+        | OutputEvent::Error(_)
+        | OutputEvent::TerminalBytes(_)
+        | OutputEvent::QueuedInput(_) => None,
     }
 }
 
@@ -1988,9 +2008,10 @@ mod tests {
                 turn_id: Some("u-1".into()),
                 outcome: TurnOutcome::Completed
             }),
-            Some(TurnSignal::Ended)
+            Some(TurnSignal::Ended(TurnEndKind::Clean))
         );
         // 결말이 무엇이든 턴은 끝난 것이다 — 실패·중단·미상이 여기서 갈리면 그 결말의 대기 표시가 남는다.
+        // 실패 끝이 아직 「그 밖」인 것은 오류 뒤 멈춤을 통로와 함께 켜기 전까지의 의도다(ADR-0231).
         for outcome in [
             TurnOutcome::Failed {
                 detail: Some("boom".into()),
@@ -2003,7 +2024,7 @@ mod tests {
                     turn_id: None,
                     outcome: outcome.clone()
                 }),
-                Some(TurnSignal::Ended),
+                Some(TurnSignal::Ended(TurnEndKind::Other)),
                 "{outcome:?}"
             );
         }
@@ -2033,6 +2054,45 @@ mod tests {
             }),
             None
         );
+    }
+
+    /// 이 백엔드의 `Delivered` 는 턴 끝 뒤에도 온다(늦은 에코 · 되살림) — 명부 사건은 하나도 턴 신호가
+    /// 아니다.
+    // ADR-0231
+    #[test]
+    fn no_queued_input_event_is_a_turn_signal() {
+        use crate::types::{DeliveredCopy, DropCause, QueuedInputEvent};
+        let classify = CodexBackend.turn_classifier();
+        let id = || "c1".to_owned();
+        for ev in [
+            QueuedInputEvent::Queued {
+                id: id(),
+                text: "hi".into(),
+            },
+            QueuedInputEvent::CancelRequested { id: id() },
+            QueuedInputEvent::CancelAnswered {
+                id: id(),
+                removed: false,
+            },
+            QueuedInputEvent::CancelFailed { id: id() },
+            QueuedInputEvent::Delivered { id: id() },
+            QueuedInputEvent::Dropped {
+                id: id(),
+                cause: DropCause::Withdrawn,
+            },
+            QueuedInputEvent::AckUnavailable {
+                delivered: vec![DeliveredCopy {
+                    id: id(),
+                    text: "hi".into(),
+                }],
+            },
+        ] {
+            assert_eq!(
+                classify(&OutputEvent::QueuedInput(ev.clone())),
+                None,
+                "{ev:?}"
+            );
+        }
     }
 
     /// 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐른다 — 그래서 같은 분류자를 모드별 분기 없이

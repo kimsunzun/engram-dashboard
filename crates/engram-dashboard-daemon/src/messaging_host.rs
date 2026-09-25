@@ -11,7 +11,8 @@
 //!     - `ManagerDeliveryPort` — `DeliveryPort`(주입·로스터·이름) → `AgentManager`.
 //!     - `is_live` — 로스터 술어(코어 `AgentStatus::is_live` 호출 어댑터). 항목이 **둘 이상**(위 포트와
 //!       아래 `RosterDiff`)에 걸려 있어 따로 적는다.
-//!     - `ManagerTurnFacts` — `TurnFacts`(턴 관측 사실 조회) → 코어의 턴 관측 표(ADR-0113 결정 1).
+//!     - `ManagerTurnFacts` — `TurnFacts`(턴 관측 사실 조회) → 코어의 대기 목록 표 + 턴 관측 표
+//!       (ADR-0113 결정 1 · ADR-0231).
 //!     - `ControlRegistry` 의 `ControlPlanePort` 구현 — 봉투 포맷 조회 + 배달 관측 적재.
 //!     - 조립 헬퍼(`messaging_for_manager`/`messaging_for_manager_gated`/`busy_gate_for_manager`) —
 //!       `MessagingService`/`BusyPolicy` 생성 seam → manager + control registry 배선.
@@ -54,9 +55,10 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_agent::inputs_pending::InputsPendingTable;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
-use engram_dashboard_agent::turn::TurnObservations;
+use engram_dashboard_agent::turn::{TurnObservation, TurnObservations};
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, StatusSink,
 };
@@ -130,6 +132,8 @@ impl DeliveryPort for ManagerDeliveryPort {
     ///   (`AgentSession::submit_input_observed` → `AgentTransport::flush_input`) — `write_stdin_observed`
     ///   로 되돌리면 그 확인까지 함께 사라진다. 제출이 필요한 백엔드인지의
     ///   판정은 agent seam 뒤 backend 소유라(ADR-0004) 이 어댑터는 동사만 고른다.
+    /// ★출처는 이 동사가 정한다 — `Mail`★: 우편은 턴 도중에도 사용자 대기 목록에 오르지 않는다(ADR-0231).
+    ///   출처를 받는 `write_stdin` 으로 옮기면 그 판정을 호출부가 다시 골라야 한다.
     fn inject(&self, to_id: PeerId, bytes: &[u8]) -> Result<InjectReceipt, String> {
         self.manager
             .submit_stdin_observed(to_id, bytes)
@@ -244,13 +248,44 @@ impl ControlPlanePort for ControlRegistry {
 ///   같은 표를 보는 다른 소비자와 판정이 갈린다.
 /// ★표를 직접 든다(manager 를 안 든다)★: 조회 경로에 sessions 락을 끼우지 않는다 — 이 조회는 배달 판정
 ///   경로에 있고, 표는 매니저와 무관한 leaf 락이다(ADR-0006).
+/// ★두 표를 읽는 순서 = 대기 목록 표 먼저, 턴 관측 표 나중(load-bearing)★: 코어가 쓰는 순서(진행 → 「비었다」)의
+///   거울이라, 「비었다」를 본 읽기는 그 앞의 진행도 본다. 뒤집으면 목록을 비우는 턴 진행 한 번 안에서 두
+///   사실이 함께 한가로 읽히는 틈이 생기고, 그때 든 우편이 사용자의 턴에 접혀 든다.
+// ADR-0231
 pub struct ManagerTurnFacts {
-    turns: Arc<TurnObservations>,
+    pending: Arc<dyn PendingRead>,
+    turns: Arc<dyn TurnRead>,
+}
+
+/// 어댑터가 두 표를 읽는 창 — 시험이 읽힌 순서를 기록하는 가짜를 끼우는 자리다.
+trait PendingRead: Send + Sync {
+    fn inputs_pending(&self, id: AgentId, epoch: u32) -> Option<bool>;
+}
+
+trait TurnRead: Send + Sync {
+    fn observation(&self, id: AgentId, epoch: u32) -> Option<TurnObservation>;
+    fn in_turn_snapshot(&self) -> Vec<(AgentId, u32, Instant)>;
+}
+
+impl PendingRead for InputsPendingTable {
+    fn inputs_pending(&self, id: AgentId, epoch: u32) -> Option<bool> {
+        self.get(id, epoch)
+    }
+}
+
+impl TurnRead for TurnObservations {
+    fn observation(&self, id: AgentId, epoch: u32) -> Option<TurnObservation> {
+        self.get(id, epoch)
+    }
+    fn in_turn_snapshot(&self) -> Vec<(AgentId, u32, Instant)> {
+        TurnObservations::in_turn_snapshot(self)
+    }
 }
 
 impl ManagerTurnFacts {
     pub fn new(manager: &Arc<AgentManager>) -> Self {
         Self {
+            pending: manager.inputs_pending(),
             turns: manager.turns(),
         }
     }
@@ -258,10 +293,24 @@ impl ManagerTurnFacts {
 
 impl TurnFacts for ManagerTurnFacts {
     fn turn_fact(&self, id: PeerId, epoch: u32) -> Option<TurnFact> {
-        self.turns.get(id, epoch).map(|o| TurnFact {
-            in_turn: o.in_turn,
-            last_signal: o.last_signal,
-        })
+        let inputs_pending = self.pending.inputs_pending(id, epoch);
+        match (self.turns.observation(id, epoch), inputs_pending) {
+            (Some(o), pending) => Some(TurnFact {
+                in_turn: o.in_turn,
+                last_signal: o.last_signal,
+                inputs_pending: pending.unwrap_or(false),
+                last_end_failed: o.last_end_failed,
+            }),
+            // 턴 관측 없이 목록만 찼다 — 바쁨이라는 사실은 버리지 않는다. `last_signal` 은 `in_turn` 일
+            //   때만 읽히므로 조회 시각을 싣는다.
+            (None, Some(true)) => Some(TurnFact {
+                in_turn: false,
+                last_signal: Instant::now(),
+                inputs_pending: true,
+                last_end_failed: false,
+            }),
+            (None, _) => None,
+        }
     }
 
     fn in_turn_snapshot(&self) -> Vec<(PeerId, u32, Instant)> {
@@ -886,6 +935,14 @@ impl StatusSink for MessagingFlushSink {
         //   그 안쪽에 생길 예정이다(ADR-0113 §영향 — §5 정합).
         self.inner.turn_ended(id, epoch);
     }
+
+    /// ★목록이 빈 push → 같은 flush 도어벨★ — flush 레인이 바쁨을 다시 묻으므로 오류 뒤 멈춤 중에 울려도
+    ///   우편은 안 든다. 감싼 sink 로 흘리는 이유는 `turn_ended` 와 같다(decorator 계약).
+    // ADR-0231
+    fn inputs_drained(&self, id: AgentId, epoch: u32) {
+        self.idle.enqueue(id);
+        self.inner.inputs_drained(id, epoch);
+    }
 }
 
 #[cfg(test)]
@@ -895,15 +952,15 @@ mod tests {
 
     // ── 턴 사실 어댑터 ──────────────────────────────────────────────────────────────────────
 
-    fn facts(turns: Arc<TurnObservations>) -> ManagerTurnFacts {
-        ManagerTurnFacts { turns }
+    fn facts(pending: Arc<InputsPendingTable>, turns: Arc<TurnObservations>) -> ManagerTurnFacts {
+        ManagerTurnFacts { pending, turns }
     }
 
     #[test]
     fn turn_facts_forwards_the_core_observation_verbatim() {
-        use engram_dashboard_agent::turn::TurnSignal;
+        use engram_dashboard_agent::turn::{TurnEndKind, TurnSignal};
         let turns = Arc::new(TurnObservations::new());
-        let f = facts(turns.clone());
+        let f = facts(Arc::new(InputsPendingTable::new()), turns.clone());
         let id = AgentId::new_v4();
         assert_eq!(f.turn_fact(id, 0), None, "미관측은 미관측으로 넘긴다");
 
@@ -913,22 +970,103 @@ mod tests {
             f.turn_fact(id, 0),
             Some(TurnFact {
                 in_turn: true,
-                last_signal: t0
+                last_signal: t0,
+                inputs_pending: false,
+                last_end_failed: false,
             })
         );
         assert_eq!(f.in_turn_snapshot(), vec![(id, 0, t0)]);
 
-        turns.observe_at(id, 0, 2, TurnSignal::Ended, t0);
+        turns.observe_at(id, 0, 2, TurnSignal::Ended(TurnEndKind::Clean), t0);
         assert_eq!(
             f.turn_fact(id, 0),
             Some(TurnFact {
                 in_turn: false,
-                last_signal: t0
+                last_signal: t0,
+                inputs_pending: false,
+                last_end_failed: false,
             })
         );
         assert!(
             f.in_turn_snapshot().is_empty(),
             "sweep 입구에는 턴 중인 것만 오른다"
+        );
+    }
+
+    #[test]
+    fn turn_facts_carry_the_list_and_the_halt_from_the_two_tables() {
+        use engram_dashboard_agent::turn::{TurnEndKind, TurnSignal};
+        let pending = Arc::new(InputsPendingTable::new());
+        let turns = Arc::new(TurnObservations::new());
+        let f = facts(pending.clone(), turns.clone());
+        let id = AgentId::new_v4();
+        let t0 = Instant::now();
+        pending.register(id, 4);
+        turns.register_at(id, 4, t0);
+        pending.set(id, 4, 1, true);
+        turns.observe_at(id, 4, 2, TurnSignal::Ended(TurnEndKind::Failed), t0);
+        assert_eq!(
+            f.turn_fact(id, 4),
+            Some(TurnFact {
+                in_turn: false,
+                last_signal: t0,
+                inputs_pending: true,
+                last_end_failed: true,
+            })
+        );
+        assert!(
+            f.in_turn_snapshot().is_empty(),
+            "목록·멈춤은 상한 sweep 입구에 오르지 않는다"
+        );
+
+        let other = AgentId::new_v4();
+        pending.register(other, 0);
+        pending.set(other, 0, 1, true);
+        let fact = f
+            .turn_fact(other, 0)
+            .expect("턴 관측 없이 찬 목록도 바쁨의 사실이다");
+        assert!(fact.inputs_pending && !fact.in_turn && !fact.last_end_failed);
+        pending.set(other, 0, 2, false);
+        assert_eq!(
+            f.turn_fact(other, 0),
+            None,
+            "두 표 모두 사실이 없으면 미관측"
+        );
+    }
+
+    /// 읽힌 순서를 한 줄에 적는 가짜 표 둘.
+    struct Recorded {
+        log: Arc<Mutex<Vec<&'static str>>>,
+    }
+    impl PendingRead for Recorded {
+        fn inputs_pending(&self, _id: AgentId, _epoch: u32) -> Option<bool> {
+            self.log.lock().unwrap().push("pending");
+            Some(false)
+        }
+    }
+    impl TurnRead for Recorded {
+        fn observation(&self, _id: AgentId, _epoch: u32) -> Option<TurnObservation> {
+            self.log.lock().unwrap().push("turn");
+            None
+        }
+        fn in_turn_snapshot(&self) -> Vec<(AgentId, u32, Instant)> {
+            Vec::new()
+        }
+    }
+
+    // ADR-0231
+    #[test]
+    fn turn_facts_read_the_list_table_before_the_turn_table() {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let f = ManagerTurnFacts {
+            pending: Arc::new(Recorded { log: log.clone() }),
+            turns: Arc::new(Recorded { log: log.clone() }),
+        };
+        let _ = f.turn_fact(AgentId::new_v4(), 0);
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["pending", "turn"],
+            "쓰는 순서(진행 → 비었다)의 거울 — 뒤집으면 두 사실이 함께 한가로 읽히는 틈이 생긴다"
         );
     }
 
@@ -1355,6 +1493,39 @@ mod tests {
         let id = AgentId::new_v4();
         sink.turn_ended(id, 3);
         assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Idle { id }]);
+    }
+
+    /// 감싼 sink 로 흘렸는지 보는 inner.
+    struct DrainedInner {
+        seen: Arc<Mutex<Vec<(AgentId, u32)>>>,
+    }
+    impl StatusSink for DrainedInner {
+        fn status_changed(&self, _: AgentId, _: CoreStatus, _: u32) {}
+        fn agent_list_updated(&self, _: Vec<CoreAgentInfo>) {}
+        fn inputs_drained(&self, id: AgentId, epoch: u32) {
+            self.seen.lock().unwrap().push((id, epoch));
+        }
+    }
+
+    // ADR-0231
+    #[test]
+    fn a_drained_list_push_rings_the_same_coalesced_doorbell_and_is_forwarded() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<FlushMsg>();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = MessagingFlushSink::new_test(
+            Box::new(DrainedInner { seen: seen.clone() }),
+            tx,
+            Arc::new(IdleCoalescer::new()),
+        );
+        let id = AgentId::new_v4();
+        sink.inputs_drained(id, 3);
+        sink.turn_ended(id, 3);
+        assert_eq!(
+            drain_msgs(&mut rx),
+            vec![FlushMsg::Idle { id }],
+            "턴 끝과 같은 도어벨 — 미처리분이 있으면 서로 접힌다"
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![(id, 3)], "decorator 계약");
     }
 
     #[test]

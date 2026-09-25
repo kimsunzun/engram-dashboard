@@ -11,16 +11,19 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::backend::InputEncoder;
 use crate::output_core::OutputCore;
+use crate::queued_input::{QueuedInputs, RowPhase};
 use crate::session_id_latch::SessionIdLatch;
 use crate::transport::AgentTransport;
 use crate::types::{
-    AgentId, AgentStatus, BackendCaps, Capabilities, Incarnation, InputEvent, OutputChunk,
-    OutputSink, PtyError, SinkId, SubscribeReply, TerminationIntent, WriteOutcome,
+    AgentId, AgentStatus, BackendCaps, CancelError, CancelOutcome, Capabilities, DeliveryAck,
+    Incarnation, InputEvent, InputOrigin, MidTurnPolicy, OutputChunk, OutputEvent, OutputSink,
+    PtyError, QueuedInputEvent, SinkId, SubscribeReply, TerminationIntent, TurnInput, Withdraw,
+    WriteOutcome,
 };
 
 pub struct AgentSession {
@@ -57,6 +60,18 @@ pub struct AgentSession {
     continues_conversation: bool,
     /// 이 화신의 세션 id 첫 제출 래치. `None` = 입력 두 동사의 제출 세기가 무동작이다.
     session_id_latch: Option<Arc<SessionIdLatch>>,
+    /// 턴 도중 입력 정책 — backend 신고값. 기본값(`with_mid_turn` 을 안 부름) = `None`(오늘 경로).
+    // ADR-0231
+    mid_turn: MidTurnPolicy,
+    /// backend 가 채우는 받음 알림 가능 여부 — `SpawnParts` 가 실어 온 바로 그 Arc.
+    // TODO(ADR-0231): 세션 분류(P3b)가 읽는다 — 그때 이 allow 를 걷는다.
+    #[allow(dead_code)]
+    delivery_ack: Arc<DeliveryAck>,
+    /// 세션 입력 자물쇠 — ★`SessionClassified` 의 사용자 입력과 취소만 잡는다★. 출력 펌프는 잡지 않는다: 이
+    ///   자물쇠는 첫 제출 래치 commit(디스크 쓰기)을 품으므로, 펌프가 기다리면 출력이 디스크 I/O 뒤에 선다.
+    ///   락 순서 = `input_order` → replay → 명부 → 대기 목록 표(emit 은 이것을 잡지 않으므로 역순이 없다).
+    // ADR-0231
+    input_order: Mutex<()>,
     core: Arc<OutputCore>,
     transport: Box<dyn AgentTransport>,
 }
@@ -112,6 +127,9 @@ impl AgentSession {
             sleeper: blocking_sleep,
             continues_conversation: false,
             session_id_latch: None,
+            mid_turn: MidTurnPolicy::None,
+            delivery_ack: Arc::new(DeliveryAck::new()),
+            input_order: Mutex::new(()),
             core,
             transport,
         }
@@ -134,6 +152,20 @@ impl AgentSession {
         self
     }
 
+    /// 턴 도중 입력 정책과 받음 알림 가능 여부를 싣는다 — 기본값(부르지 않음) = `None` · `Unknown`.
+    ///
+    /// ★운영 조립점에서 빠뜨리면 목록이 조용히 사라진다★ — 모든 입력이 오늘 경로로 가고, 오류는 없다.
+    // ADR-0231
+    pub(crate) fn with_mid_turn(
+        mut self,
+        mid_turn: MidTurnPolicy,
+        delivery_ack: Arc<DeliveryAck>,
+    ) -> Self {
+        self.mid_turn = mid_turn;
+        self.delivery_ack = delivery_ack;
+        self
+    }
+
     /// ★테스트 전용 seam★ — 제출 대기를 낮추거나(하네스가 0.5초씩 자지 않게) 대기 발행 자체를 관측한다.
     /// **운영 기본값은 언제나 `backend::SUBMIT_PACING`**(위 필드 doc) — 이 함수는 그 기본값을 바꾸지 않고,
     /// 테스트가 자기 인스턴스에 대해서만 명시로 내린다.
@@ -147,6 +179,15 @@ impl AgentSession {
     /// 이 세션이 편지를 읽는 주체인가 — 판정 근거는 필드 doc.
     pub fn reads_messages(&self) -> bool {
         self.reads_messages
+    }
+
+    /// 이 화신의 대기 입력 명부 — 코어가 emit 에서 먹이는 **바로 그** Arc 다.
+    /// ★세션에 따로 쥐지 않고 코어에서 꺼낸다★: 두 곳에 따로 꽂으면 세션이 읽는 명부와 코어가 먹이는 명부가
+    ///   갈릴 수 있는데, 그 어긋남은 컴파일도 오류도 없이 빈 목록으로만 보인다.
+    /// ★가드를 쥔 채 emit 하지 말 것★ — 락 순서가 replay → 명부다(`OutputCore::queued_inputs`).
+    // ADR-0231
+    pub fn queued_inputs(&self) -> &Arc<QueuedInputs> {
+        self.core.queued_inputs()
     }
 
     /// 유저 종료 의도 태깅(ADR-0019) — kill_agent 가 transport.shutdown **전에** 호출한다.
@@ -193,8 +234,29 @@ impl AgentSession {
     ///   글자마다 한 글자짜리 잘못된 턴이 만들어져 대화가 깨진다. 따라서 json 모드 호출자(RichSlot·M2)는
     ///   **완성된 메시지 전체를 한 번에** 보내야 한다(부분 입력 누적은 프론트 입력창 몫). 터미널 경로는
     ///   Raw 라 기존대로 스트리밍 바이트 호출이 정상(이 계약은 json 모드 한정).
+    /// 출처 = `Mail`([`AgentSession::write_input_observed`] 와 같다) — 사람의 입력은
+    /// [`AgentSession::write_input_from`] 으로 출처를 싣는다.
     pub fn write_input(&self, bytes: &[u8]) -> Result<(), PtyError> {
         self.write_input_observed(bytes).map(|_| ())
+    }
+
+    /// 출처를 실은 쓰기 — 동작·반환·바이트 계약은 [`AgentSession::write_input_observed`] 와 같고, 차이는
+    /// `origin` 이 정책 갈래에 닿는다는 것뿐이다.
+    ///
+    /// ★정책 `None` 이면 `origin` 은 아무것도 바꾸지 않는다★ — 두 출처 모두 오늘 경로다(바이트 동일 · 목록
+    ///   사건 없음). `TransportOwned` 는 본문과 출처를 통로 턴 동사로 넘긴다 — 분류는 통로가 한다.
+    // ADR-0231
+    pub fn write_input_from(
+        &self,
+        bytes: &[u8],
+        origin: InputOrigin,
+    ) -> Result<WriteOutcome, PtyError> {
+        match self.mid_turn {
+            MidTurnPolicy::None => self.write_now(bytes, None),
+            // TODO(ADR-0231): P3b — 입력 자물쇠 안 분류(대기 목록 표 → 턴 관측 순). 그 전까지 오늘 경로다.
+            MidTurnPolicy::SessionClassified { .. } => self.write_now(bytes, None),
+            MidTurnPolicy::TransportOwned => self.write_now(bytes, Some(origin)),
+        }
     }
 
     /// `write_input` 의 배달-경계 계측판(ADR-0088 Stage 0) — 성공 시 `WriteOutcome`(논리 메시지 바이트 +
@@ -216,8 +278,20 @@ impl AgentSession {
     ///   **「전송 실패」가 잡는 범위가 줄었다** — 이제 그 자리는 「받지도 않았다」(통로가 닫혔거나 상한
     ///   초과)를 잡고, 「받았는데 못 썼다」는 **그 다음** 배달이 `Err` 로 신고한다. 계약의 정본은
     ///   [`crate::transport::input_queue`] 모듈 헤더.
+    /// 출처 = `Mail`(우편 배달 · 사람 아닌 호출자) — 턴 도중에도 대기 목록에 오르지 않는다.
     // ADR-0088
+    // ADR-0231
     pub fn write_input_observed(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
+        self.write_input_from(bytes, InputOrigin::Mail)
+    }
+
+    /// 지금 보내는 쓰기 — 오늘 경로의 본체. `turn_origin` = `Some` 이면 통로 턴 동사로 출처와 함께 넘긴다
+    /// (`TransportOwned`), `None` 이면 `send_input(Raw)` 다. 두 갈래가 넘기는 바이트는 같다.
+    fn write_now(
+        &self,
+        bytes: &[u8],
+        turn_origin: Option<InputOrigin>,
+    ) -> Result<WriteOutcome, PtyError> {
         // ADR-0226: 턴을 여는 쓰기는 보내기 **전에** 센다 — 첫 턴이 상대에게 가기 전에 세션 id 가 영속된다.
         self.count_turn_submission(bytes)?;
         // ★이 유저 턴의 메시지 uuid(replay dedup 키)★: 한 write_input 당 하나 생성해 (a) stdin user
@@ -227,7 +301,15 @@ impl AgentSession {
         //   backend/claude/ 단독). Raw(터미널) encoder 는 이 uuid 를 무시한다.
         let msg_uuid = uuid::Uuid::new_v4();
         let encoded = self.encoder.encode(bytes, msg_uuid);
-        self.transport.send_input(InputEvent::Raw(encoded))?;
+        match turn_origin {
+            None => self.transport.send_input(InputEvent::Raw(encoded))?,
+            // ADR-0231: 통로가 목록 사건에 쓰는 id = 이 쓰기의 `msg_uuid` — 영수증과 목록이 같은 값을 가리킨다.
+            Some(origin) => self.transport.send_turn(TurnInput {
+                id: msg_uuid.to_string(),
+                body: encoded,
+                origin,
+            })?,
+        }
 
         // ★ADR-0044/0045 · 왜: 입력-시점 유저 에코★: 터미널(Raw)은 PTY 가 입력을 즉시 로컬 에코하지만,
         //   json(stream-json) 모드는 claude 가 `--replay-user-messages` 로 되울릴 때까지(왕복 지연)
@@ -378,6 +460,74 @@ impl AgentSession {
         match self.transport.flush_input(INPUT_FLUSH_BUDGET) {
             Err(PtyError::Unsupported(_)) => Ok(()),
             other => other,
+        }
+    }
+
+    /// 목록의 대기 입력 하나를 취소한다(명령 `agent.cancelQueuedInput` 의 세션 쪽).
+    ///
+    /// ★명부 확인이 먼저다★: 목록에 없는 id(모름 · 이미 결말) = `NotFound` · 이미 취소 대기 = 사건 없이
+    ///   `Requested`(멱등). 목록을 쓰지 않는 세션(`None`)은 늘 `NotFound` 다 — 통로에 닿지 않는다.
+    /// 정책별 갈래:
+    ///   - `SessionClassified` — 입력 자물쇠 안에서 확인 → `CancelRequested` → 취소 줄 `send_input` →
+    ///     `Requested`. 사용자 입력도 같은 자물쇠 안에서 쓰므로 그 id 의 취소 줄은 **글 쓰기가 돌아온 뒤에만**
+    ///     나간다(취소가 글을 앞지르면 턴 도중엔 예약이 안 걸려 글이 전달되는데 화면은 취소를 믿는다).
+    ///     ★취소 줄 쓰기 실패 = `CancelFailed` 를 내고 `Err(Write)`★ — 항목은 취소 대기 그대로다(목록으로
+    ///     되돌리면 모든 창에서 빠진 항목이 다시 그려진다).
+    ///   - `TransportOwned` — 자물쇠 없이 확인 → `withdraw`: `Withdrawn` = `Cancelled` · `TooLate` = `Requested`
+    ///     · `NotHeld` = `NotFound`(확인과 거두기 사이에 결말이 났다 — 그 결말 사건이 곧 명부에 선다). 목록
+    ///     사건은 통로가 낸다.
+    /// ★명부 가드를 쥔 채 emit 하지 않는다★ — 락 순서가 replay → 명부다(확인은 복사해 곧바로 놓는다).
+    // ADR-0231
+    pub fn cancel_queued_input(&self, id: &str) -> Result<CancelOutcome, CancelError> {
+        match self.mid_turn {
+            MidTurnPolicy::None => Err(CancelError::NotFound),
+            MidTurnPolicy::SessionClassified { cancel_line } => {
+                let _order = self
+                    .input_order
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                if let Some(answer) = self.answer_from_the_registry(id) {
+                    return answer;
+                }
+                self.core.emit(OutputEvent::QueuedInput(
+                    QueuedInputEvent::CancelRequested { id: id.to_owned() },
+                ));
+                if let Err(e) = self.transport.send_input(InputEvent::Raw(cancel_line(id))) {
+                    self.core
+                        .emit(OutputEvent::QueuedInput(QueuedInputEvent::CancelFailed {
+                            id: id.to_owned(),
+                        }));
+                    return Err(CancelError::Write(e));
+                }
+                Ok(CancelOutcome::Requested)
+            }
+            MidTurnPolicy::TransportOwned => {
+                if let Some(answer) = self.answer_from_the_registry(id) {
+                    return answer;
+                }
+                match self.transport.withdraw(id) {
+                    Withdraw::Withdrawn => Ok(CancelOutcome::Cancelled),
+                    Withdraw::TooLate => Ok(CancelOutcome::Requested),
+                    Withdraw::NotHeld => Err(CancelError::NotFound),
+                }
+            }
+        }
+    }
+
+    /// 명부만으로 답이 나는 취소 — `None` = 목록에 `Queued` 로 서 있다(정책 갈래로 간다).
+    fn answer_from_the_registry(&self, id: &str) -> Option<Result<CancelOutcome, CancelError>> {
+        let phase = self
+            .core
+            .queued_inputs()
+            .lock()
+            .rows()
+            .iter()
+            .find(|row| row.id == id)
+            .map(|row| row.phase);
+        match phase {
+            None => Some(Err(CancelError::NotFound)),
+            Some(RowPhase::Cancelling { .. }) => Some(Ok(CancelOutcome::Requested)),
+            Some(RowPhase::Queued) => None,
         }
     }
 
@@ -1355,5 +1505,435 @@ mod tests {
             assert_eq!(reply.incarnation, expected);
             assert_eq!(at_ready, Some(expected));
         }
+    }
+
+    // ── ADR-0231: 입력 경로 뼈대 — 출처 · 정책 · 취소 ──
+
+    /// 이벤트를 통째로 모으는 sink — 목록 사건의 모양까지 본다.
+    struct EventSink {
+        id: SinkId,
+        seen: Arc<Mutex<Vec<OutputEvent>>>,
+    }
+    impl OutputSink for EventSink {
+        fn send(
+            &self,
+            frame: crate::types::OutputFrame<'_>,
+        ) -> Result<(), crate::types::SinkError> {
+            if let crate::types::OutputPayload::Event(e) = frame.payload {
+                self.seen.lock().unwrap().push(e.clone());
+            }
+            Ok(())
+        }
+        fn sink_id(&self) -> SinkId {
+            self.id
+        }
+    }
+
+    /// 구독한 **뒤**의 이벤트만 모은다 — 구독이 동기로 되감은 링은 버린다.
+    fn watch(session: &AgentSession) -> Arc<Mutex<Vec<OutputEvent>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        session.subscribe(Arc::new(EventSink {
+            id: uuid::Uuid::new_v4(),
+            seen: seen.clone(),
+        }));
+        seen.lock().unwrap().clear();
+        seen
+    }
+
+    fn list_events(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<QueuedInputEvent> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::QueuedInput(op) => Some(op.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 매니저와 같은 배선(공용 턴 관측 표 + 대기 목록 표)으로 선 정책 `None` 세션 — **코어가 턴 중이라고 답하는**
+    /// 상태로 돌려준다.
+    fn in_turn_policy_none_session(
+        encoder: InputEncoder,
+    ) -> (
+        AgentSession,
+        Arc<Mutex<Vec<Vec<u8>>>>,
+        Arc<crate::turn::TurnObservations>,
+        Arc<crate::inputs_pending::InputsPendingTable>,
+    ) {
+        let id = uuid::Uuid::new_v4();
+        let turns = Arc::new(crate::turn::TurnObservations::new());
+        let pending = Arc::new(crate::inputs_pending::InputsPendingTable::new());
+        turns.register(id, 0);
+        pending.register(id, 0);
+        turns.observe(id, 0, 1, crate::turn::TurnSignal::Progress);
+        assert!(turns.is_in_turn(id, 0), "전제: 코어가 턴 중이라고 답한다");
+        let core = Arc::new(
+            OutputCore::new(
+                id,
+                0,
+                Arc::new(NoopStatusSink),
+                crate::output_core::TurnWiring::new(turns.clone(), crate::backend::no_turn_signals),
+            )
+            .with_queued(crate::output_core::QueuedWiring {
+                registry: Arc::new(QueuedInputs::new()),
+                pending: pending.clone(),
+            }),
+        );
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let shell_cmd = crate::profile::AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let session = AgentSession::new(
+            id,
+            PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            ShellBackend.capabilities(&shell_cmd),
+            encoder,
+            true,
+            core,
+            Box::new(CapturingTransport {
+                captured: captured.clone(),
+                fail_from: None,
+            }),
+        )
+        .with_submit_pacing(Duration::ZERO, |_| {});
+        (session, captured, turns, pending)
+    }
+
+    // TRD §7-1 새 회귀.
+    #[test]
+    fn a_policy_none_session_never_emits_queued_input_even_while_the_core_says_in_turn() {
+        for encoder in [InputEncoder::Raw, InputEncoder::ClaudeStreamJson] {
+            let (session, captured, _turns, _pending) = in_turn_policy_none_session(encoder);
+            let seen = watch(&session);
+            let mut expected = Vec::new();
+            for origin in [InputOrigin::User, InputOrigin::Mail] {
+                let body = b"echo hi\r\n";
+                let outcome = session.write_input_from(body, origin).unwrap();
+                expected.push(encoder.encode(body, outcome.msg_uuid));
+            }
+            let mail = b"<message from=\"bob\">hi</message>";
+            let outcome = session.submit_input_observed(mail).unwrap();
+            expected.push(encoder.encode(mail, outcome.msg_uuid));
+            if let Some(submit) = encoder.submit_sequence() {
+                expected.push(submit.to_vec());
+            }
+
+            assert_eq!(
+                *captured.lock().unwrap(),
+                expected,
+                "{encoder:?}: 정책 None 은 두 출처 모두 오늘 바이트 그대로다"
+            );
+            assert!(
+                list_events(&seen).is_empty(),
+                "{encoder:?}: 턴 중이어도 정책 None 세션은 목록 사건을 한 건도 내지 않는다"
+            );
+            let echoes = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|e| matches!(e, OutputEvent::Structured { .. }))
+                .count();
+            assert_eq!(
+                echoes,
+                if encoder == InputEncoder::Raw { 0 } else { 3 },
+                "{encoder:?}: 합성 에코도 오늘과 같다(json 은 쓰기마다 하나 · 터미널은 없음)"
+            );
+            assert!(session.queued_inputs().lock().is_empty());
+        }
+    }
+
+    // TRD §7-1 새 회귀.
+    #[test]
+    fn a_policy_none_agent_never_reports_inputs_pending() {
+        let (session, _captured, turns, pending) = in_turn_policy_none_session(InputEncoder::Raw);
+        let id = session.id;
+        for origin in [InputOrigin::User, InputOrigin::Mail] {
+            session.write_input_from(b"typed\r", origin).unwrap();
+        }
+        session.submit_input_observed(b"mail").unwrap();
+        assert!(matches!(
+            session.cancel_queued_input("anything"),
+            Err(CancelError::NotFound)
+        ));
+
+        assert_eq!(
+            pending.get(id, 0),
+            Some(false),
+            "터미널 화신의 대기 목록 사실은 늘 비었다 — 바쁨은 턴 관측만으로 선다"
+        );
+        assert!(
+            turns.is_in_turn(id, 0),
+            "입력 경로는 턴 관측을 건드리지 않는다"
+        );
+    }
+
+    #[test]
+    fn cancel_under_policy_none_is_not_found_and_touches_nothing() {
+        let (session, captured) = session_with(InputEncoder::Raw);
+        // 방어: 정책 None 에 목록 행이 설 길은 없지만, 서 있어도 통로에 닿지 않는다.
+        session.core.emit(queued("q1"));
+        let seen = watch(&session);
+        assert!(matches!(
+            session.cancel_queued_input("q1"),
+            Err(CancelError::NotFound)
+        ));
+        assert!(captured.lock().unwrap().is_empty());
+        assert!(list_events(&seen).is_empty());
+    }
+
+    fn queued(id: &str) -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::Queued {
+            id: id.into(),
+            text: format!("text of {id}"),
+        })
+    }
+
+    fn test_cancel_line(id: &str) -> Vec<u8> {
+        format!("cancel:{id}\n").into_bytes()
+    }
+
+    /// 정책 갈래를 관측하는 통로 — raw 쓰기 · 턴 넘기기 · 거두기 호출을 기록하고, 거두기 답을 대본대로 낸다.
+    #[derive(Default)]
+    struct Probe {
+        raw: Mutex<Vec<Vec<u8>>>,
+        turns: Mutex<Vec<TurnInput>>,
+        withdraws: Mutex<Vec<String>>,
+        withdraw_answer: Mutex<Option<Withdraw>>,
+        fail_raw: std::sync::atomic::AtomicBool,
+    }
+    struct ProbeTransport(Arc<Probe>);
+    impl AgentTransport for ProbeTransport {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            if self.0.fail_raw.load(Ordering::SeqCst) {
+                return Err(PtyError::WriteFailed("probe: write refused".into()));
+            }
+            self.0.raw.lock().unwrap().push(bytes);
+            Ok(())
+        }
+        fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError> {
+            self.0.turns.lock().unwrap().push(turn);
+            Ok(())
+        }
+        fn withdraw(&self, id: &str) -> Withdraw {
+            self.0.withdraws.lock().unwrap().push(id.to_owned());
+            self.0
+                .withdraw_answer
+                .lock()
+                .unwrap()
+                .unwrap_or(Withdraw::NotHeld)
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            harness_caps()
+        }
+    }
+
+    fn probed(encoder: InputEncoder, mid_turn: MidTurnPolicy) -> (AgentSession, Arc<Probe>) {
+        let id = uuid::Uuid::new_v4();
+        let core = Arc::new(OutputCore::new(
+            id,
+            0,
+            Arc::new(NoopStatusSink),
+            crate::output_core::TurnWiring::detached(),
+        ));
+        let probe = Arc::new(Probe::default());
+        let shell_cmd = crate::profile::AgentCommand::Shell {
+            program: "cmd.exe".into(),
+            args: vec![],
+        };
+        let session = AgentSession::new(
+            id,
+            PathBuf::from("."),
+            0,
+            80,
+            24,
+            Arc::new(AtomicU8::new(0)),
+            ShellBackend.capabilities(&shell_cmd),
+            encoder,
+            true,
+            core,
+            Box::new(ProbeTransport(probe.clone())),
+        )
+        .with_submit_pacing(Duration::ZERO, |_| {})
+        .with_mid_turn(mid_turn, Arc::new(DeliveryAck::new()));
+        (session, probe)
+    }
+
+    fn classified() -> MidTurnPolicy {
+        MidTurnPolicy::SessionClassified {
+            cancel_line: test_cancel_line,
+        }
+    }
+
+    fn phase_of(session: &AgentSession, id: &str) -> Option<RowPhase> {
+        session
+            .queued_inputs()
+            .lock()
+            .rows()
+            .iter()
+            .find(|r| r.id == id)
+            .map(|r| r.phase)
+    }
+
+    #[test]
+    fn a_session_classified_cancel_announces_the_request_then_writes_the_cancel_line() {
+        let (session, probe) = probed(InputEncoder::ClaudeStreamJson, classified());
+        session.core.emit(queued("q1"));
+        let seen = watch(&session);
+
+        assert_eq!(
+            session.cancel_queued_input("q1").unwrap(),
+            CancelOutcome::Requested
+        );
+        assert_eq!(
+            list_events(&seen),
+            vec![QueuedInputEvent::CancelRequested { id: "q1".into() }]
+        );
+        assert_eq!(
+            *probe.raw.lock().unwrap(),
+            vec![test_cancel_line("q1")],
+            "취소 줄은 backend 조각 그대로 한 번 — 인코더를 지나지 않는다"
+        );
+        assert!(matches!(
+            phase_of(&session, "q1"),
+            Some(RowPhase::Cancelling { .. })
+        ));
+    }
+
+    #[test]
+    fn a_second_cancel_of_a_cancelling_item_is_requested_without_events_or_vendor_calls() {
+        for mid_turn in [classified(), MidTurnPolicy::TransportOwned] {
+            let (session, probe) = probed(InputEncoder::ClaudeStreamJson, mid_turn);
+            session.core.emit(queued("q1"));
+            session.core.emit(OutputEvent::QueuedInput(
+                QueuedInputEvent::CancelRequested { id: "q1".into() },
+            ));
+            let seen = watch(&session);
+
+            assert_eq!(
+                session.cancel_queued_input("q1").unwrap(),
+                CancelOutcome::Requested,
+                "{mid_turn:?}: 이미 취소 대기면 멱등"
+            );
+            assert!(list_events(&seen).is_empty(), "{mid_turn:?}");
+            assert!(probe.raw.lock().unwrap().is_empty(), "{mid_turn:?}");
+            assert!(probe.withdraws.lock().unwrap().is_empty(), "{mid_turn:?}");
+        }
+    }
+
+    #[test]
+    fn a_failed_cancel_line_write_reports_cancel_failed_and_keeps_the_item_cancelling() {
+        let (session, probe) = probed(InputEncoder::ClaudeStreamJson, classified());
+        session.core.emit(queued("q1"));
+        probe.fail_raw.store(true, Ordering::SeqCst);
+        let seen = watch(&session);
+
+        assert!(matches!(
+            session.cancel_queued_input("q1"),
+            Err(CancelError::Write(PtyError::WriteFailed(_)))
+        ));
+        assert_eq!(
+            list_events(&seen),
+            vec![
+                QueuedInputEvent::CancelRequested { id: "q1".into() },
+                QueuedInputEvent::CancelFailed { id: "q1".into() },
+            ]
+        );
+        assert!(
+            matches!(phase_of(&session, "q1"), Some(RowPhase::Cancelling { .. })),
+            "취소 요청이 실패해도 목록으로 되돌리지 않는다"
+        );
+    }
+
+    #[test]
+    fn cancel_of_an_unknown_or_settled_id_is_not_found_under_every_listing_policy() {
+        for mid_turn in [classified(), MidTurnPolicy::TransportOwned] {
+            let (session, probe) = probed(InputEncoder::ClaudeStreamJson, mid_turn);
+            session.core.emit(queued("done"));
+            session
+                .core
+                .emit(OutputEvent::QueuedInput(QueuedInputEvent::Delivered {
+                    id: "done".into(),
+                }));
+            let seen = watch(&session);
+
+            for id in ["never-listed", "done"] {
+                assert!(
+                    matches!(session.cancel_queued_input(id), Err(CancelError::NotFound)),
+                    "{mid_turn:?}: {id}"
+                );
+            }
+            assert!(list_events(&seen).is_empty(), "{mid_turn:?}");
+            assert!(probe.raw.lock().unwrap().is_empty(), "{mid_turn:?}");
+            assert!(probe.withdraws.lock().unwrap().is_empty(), "{mid_turn:?}");
+        }
+    }
+
+    #[test]
+    fn a_transport_owned_cancel_maps_the_three_withdraw_answers() {
+        for (answer, expected) in [
+            (Withdraw::Withdrawn, Ok(CancelOutcome::Cancelled)),
+            (Withdraw::TooLate, Ok(CancelOutcome::Requested)),
+            (Withdraw::NotHeld, Err(())),
+        ] {
+            let (session, probe) =
+                probed(InputEncoder::TransportFramed, MidTurnPolicy::TransportOwned);
+            session.core.emit(queued("q1"));
+            *probe.withdraw_answer.lock().unwrap() = Some(answer);
+            let seen = watch(&session);
+
+            let got = session.cancel_queued_input("q1");
+            match expected {
+                Ok(outcome) => assert_eq!(got.unwrap(), outcome, "{answer:?}"),
+                Err(()) => assert!(matches!(got, Err(CancelError::NotFound)), "{answer:?}"),
+            }
+            assert_eq!(*probe.withdraws.lock().unwrap(), vec!["q1".to_string()]);
+            assert!(
+                list_events(&seen).is_empty(),
+                "{answer:?}: 목록 사건은 통로가 낸다 — 세션은 내지 않는다"
+            );
+            assert!(probe.raw.lock().unwrap().is_empty(), "{answer:?}");
+        }
+    }
+
+    #[test]
+    fn a_transport_owned_write_hands_the_turn_over_with_its_origin_and_receipt_id() {
+        let (session, probe) = probed(InputEncoder::TransportFramed, MidTurnPolicy::TransportOwned);
+        let seen = watch(&session);
+
+        let typed = session.write_input_from(b"hi", InputOrigin::User).unwrap();
+        let mail = session.write_input_observed(b"letter").unwrap();
+
+        let turns = probe.turns.lock().unwrap();
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].id, typed.msg_uuid.to_string());
+        assert_eq!(turns[0].body, b"hi".to_vec());
+        assert_eq!(turns[0].origin, InputOrigin::User);
+        assert_eq!(turns[1].id, mail.msg_uuid.to_string());
+        assert_eq!(turns[1].body, b"letter".to_vec());
+        assert_eq!(
+            turns[1].origin,
+            InputOrigin::Mail,
+            "`*_observed` 동사는 우편이다"
+        );
+        assert!(
+            probe.raw.lock().unwrap().is_empty(),
+            "턴은 통로 턴 동사로만 간다"
+        );
+        assert!(list_events(&seen).is_empty(), "분류는 통로가 한다");
     }
 }

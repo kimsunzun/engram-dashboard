@@ -26,6 +26,7 @@
 mod session_file;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use uuid::Uuid;
 
@@ -39,10 +40,10 @@ use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
 use crate::transport::stdio::StdioTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
-use crate::turn::TurnSignal;
+use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
-    AgentId, BackendCaps, CommandSpec, ControlEndpoint, ModelCaps, OutputEvent, PtyError,
-    SessionCaps, ToolGrant,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, MidTurnPolicy, ModelCaps,
+    OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolGrant, TurnOutcome,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
@@ -421,6 +422,10 @@ impl AgentBackend for ClaudeBackend {
             encoder: self.input_encoder(command),
             turn_classifier: self.turn_classifier(),
             reads_messages: self.reads_messages(),
+            // ADR-0231: 아직 목록을 쓰지 않는다 — 세션 분류가 서면 JSON 갈래만 `SessionClassified` 로 뒤집고,
+            //   이 Arc 를 디코더에도 건넨다(받음 가능 여부 탐지).
+            mid_turn: MidTurnPolicy::None,
+            delivery_ack: Arc::new(DeliveryAck::new()),
         })
     }
 
@@ -501,17 +506,36 @@ impl AgentBackend for ClaudeBackend {
 ///   "부모가 아직 턴 중인데 idle 로 오판 → 조기 주입"(유실 없이 타이밍만 어긋남)이다.
 /// ★터미널 모드와 공유해도 되는 이유(모드별 분기 불필요)★: 터미널 모드는 decoder 가 없어
 ///   `TerminalBytes` 만 흐르므로 이 매핑을 그대로 써도 신호가 하나도 나오지 않는다.
+/// ★명부 사건 중 진행은 `Delivered` 하나뿐이다★: 그것은 벤더 `command_lifecycle` `started` 줄의 1:1
+///   번역이라 「벤더가 이 입력을 지금 턴에서 돌리기 시작했다」는 벤더 출력의 사실이다. 나머지는 `None` —
+///   `Dropped` 처럼 턴 끝 **뒤에** 오는 사건이 「턴 중」을 다시 켜면 그 화신은 30 분 fail-open 밸브까지
+///   우편이 막힌다. 코어가 바꿔 적은 명부 사건(봉인 · 받음 불가 판정 뒤)은 이 분류기를 지나지 않는다.
 // ADR-0113
 // ADR-0004
+// ADR-0231
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     match event {
         OutputEvent::TextDelta { .. }
         | OutputEvent::ToolCall { .. }
-        | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
-        // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 뜻이 같으므로 같은 신호로 적는다★:
-        //   두 종료 어휘를 여기서 갈라 적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
-        OutputEvent::MessageDone { .. } | OutputEvent::TurnEnd { .. } => Some(TurnSignal::Ended),
-        OutputEvent::Usage { .. } | OutputEvent::Error(_) | OutputEvent::TerminalBytes(_) => None,
+        | OutputEvent::Structured { .. }
+        | OutputEvent::QueuedInput(QueuedInputEvent::Delivered { .. }) => {
+            Some(TurnSignal::Progress)
+        }
+        // `result` 줄의 번역 — 실패한 `result` 도 여기로 닫힌다(그 실패는 바로 앞의 `Error` 가 싣는다).
+        OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Clean)),
+        // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 종료로 적는다★: 두 종료 어휘를 여기서 갈라
+        //   적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
+        OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
+            TurnOutcome::Completed => TurnEndKind::Clean,
+            // TODO(ADR-0231): 오류 끝은 아직 싣지 않는다 — 「턴 오류」 신호를 켜는 변경이 함께 바꾼다.
+            TurnOutcome::Failed { .. } | TurnOutcome::Interrupted | TurnOutcome::Unknown => {
+                TurnEndKind::Other
+            }
+        })),
+        OutputEvent::Usage { .. }
+        | OutputEvent::Error(_)
+        | OutputEvent::TerminalBytes(_)
+        | OutputEvent::QueuedInput(_) => None,
     }
 }
 
@@ -1137,9 +1161,96 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{CLI_EXE_ENV, CLI_EXE_NAME};
+    use crate::types::{DeliveredCopy, DropCause, CLI_EXE_ENV, CLI_EXE_NAME};
 
     // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
+
+    /// `result` 끝 = 깨끗한 끝 · 오류 줄은 아직 신호가 아니다 — 오류 뒤 멈춤이 켜지기 전 오늘 동작 그대로.
+    // ADR-0231
+    #[test]
+    fn the_result_end_is_clean_and_no_end_is_an_error_end_yet() {
+        let classify = ClaudeBackend.turn_classifier();
+        assert_eq!(
+            classify(&OutputEvent::MessageDone {
+                turn_id: None,
+                message_id: None
+            }),
+            Some(TurnSignal::Ended(TurnEndKind::Clean))
+        );
+        assert_eq!(classify(&OutputEvent::Error("boom".into())), None);
+        let end = |outcome| {
+            classify(&OutputEvent::TurnEnd {
+                turn_id: None,
+                outcome,
+            })
+        };
+        assert_eq!(
+            end(TurnOutcome::Completed),
+            Some(TurnSignal::Ended(TurnEndKind::Clean))
+        );
+        for outcome in [
+            TurnOutcome::Failed { detail: None },
+            TurnOutcome::Interrupted,
+            TurnOutcome::Unknown,
+        ] {
+            assert_eq!(
+                end(outcome.clone()),
+                Some(TurnSignal::Ended(TurnEndKind::Other)),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// 명부 사건 중 진행 신호는 벤더 `started` 의 번역인 `Delivered` 하나다 — 나머지가 진행으로 세지면 턴 끝
+    /// 뒤에 온 사건이 「턴 중」을 다시 켜 우편이 30 분 밸브까지 막힌다.
+    // ADR-0231
+    #[test]
+    fn only_a_delivered_queued_input_is_turn_progress() {
+        let classify = ClaudeBackend.turn_classifier();
+        assert_eq!(
+            classify(&OutputEvent::QueuedInput(QueuedInputEvent::Delivered {
+                id: "u1".into()
+            })),
+            Some(TurnSignal::Progress)
+        );
+        let id = || "u1".to_owned();
+        for ev in [
+            QueuedInputEvent::Queued {
+                id: id(),
+                text: "hi".into(),
+            },
+            QueuedInputEvent::CancelRequested { id: id() },
+            QueuedInputEvent::CancelAnswered {
+                id: id(),
+                removed: true,
+            },
+            QueuedInputEvent::CancelAnswered {
+                id: id(),
+                removed: false,
+            },
+            QueuedInputEvent::CancelFailed { id: id() },
+            QueuedInputEvent::Dropped {
+                id: id(),
+                cause: DropCause::Rejected,
+            },
+            QueuedInputEvent::Dropped {
+                id: id(),
+                cause: DropCause::Unknown,
+            },
+            QueuedInputEvent::AckUnavailable {
+                delivered: vec![DeliveredCopy {
+                    id: id(),
+                    text: "hi".into(),
+                }],
+            },
+        ] {
+            assert_eq!(
+                classify(&OutputEvent::QueuedInput(ev.clone())),
+                None,
+                "{ev:?}"
+            );
+        }
+    }
 
     fn spec(command: &AgentCommand, mode: SpawnMode, sid: Option<Uuid>) -> CommandSpec {
         ClaudeBackend.build_spec(command, mode, sid, None, PathBuf::from("."), vec![], None)
@@ -2616,6 +2727,7 @@ mod tests {
                 OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
                 OutputEvent::Error(_) => "error".to_string(),
                 OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
+                OutputEvent::QueuedInput(_) => "queued-input".to_string(),
             })
             .collect()
     }

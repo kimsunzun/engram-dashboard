@@ -85,6 +85,68 @@ pub enum OutputEvent {
     /// 위 정형 variant로 안 잡히는 backend별 구조화 이벤트의 탈출구(forward-compat).
     /// kind=이벤트 종류 태그, json=원본 직렬화 payload. core는 내용을 해석하지 않는다.
     Structured { kind: String, json: String },
+    /// 대기 입력 명부 사건 — 백엔드 중립. 해석(환원 규칙)의 정본은 [`crate::queued_input`].
+    ///
+    /// ★[`Structured`](Self::Structured) 탈출구에 싣지 않는다★ — claude 턴 분류기가 `Structured` 를
+    ///   통째로 진행 신호로 세므로, 거기 실리면 턴 끝 뒤에 온 명부 사건이 「턴 중」을 다시 켠다.
+    // ADR-0231
+    QueuedInput(QueuedInputEvent),
+}
+
+/// [`OutputEvent::QueuedInput`] 이 나르는 사건 — 명부(`crate::queued_input`)와 프론트 누산기가 같은 환원
+/// 규칙으로 읽는다. `id` = 그 입력의 식별자(claude = 입력 uuid · codex = `clientId`).
+///
+/// ★생산자 의무 — 환원 규칙이 기대는 것★:
+///   - `Queued` 는 id 하나에 **한 번**만 낸다(재방출 없음 — 둘째는 환원기가 버린다).
+///   - `CancelRequested` 도 id 하나에 한 번이다(멱등 판정은 생산자 쪽 · 환원기는 둘째 방어).
+///   - `AckUnavailable.delivered` 는 **디코더가 비워 낸다** — 그 사건이 받음으로 닫는 항목의 본문 사본은
+///     코어가 링에 적는 순간 채운다(링 상한이 `Queued` 를 밀어내도 말풍선을 다시 그릴 수 있게).
+/// ★`Delivered` 는 본문을 싣지 않는다★ — 말풍선 본문은 우리 로컬 사본(`Queued` 의 `text`)이다(벤더가
+///   정규화할 수 있다 — ADR-0198).
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedInputEvent {
+    /// 목록에 오른다.
+    Queued { id: String, text: String },
+    /// 취소 요청을 접수했다 — 결말은 뒤따르는 사건이 정한다.
+    CancelRequested { id: String },
+    /// 취소 요청의 성공 응답. `removed` = 벤더가 그 글을 자기 큐에서 뺐나.
+    ///   ★`true` 만 결말이다(곧바로 취소됨)★ — `false` 는 뒤이은 벤더 닫힘이 우리 취소였는지 가르는 재료다.
+    CancelAnswered { id: String, removed: bool },
+    /// 취소 요청 자체가 실패했다(오류 응답 · 취소 줄 쓰기 실패). ★목록으로 되돌리지 않는다★ — 취소 대기
+    ///   그대로 「못 뺐다」이고 결말은 벤더 수명주기가 정한다.
+    CancelFailed { id: String },
+    /// 벤더가 턴에 넣었다 → 목록에서 빠지고 대화 끝 말풍선.
+    Delivered { id: String },
+    /// 전달되지 않았다. `Rejected` 는 그 id 로 그린 말풍선도 지운다(누산기의 그리기 규칙).
+    Dropped { id: String, cause: DropCause },
+    /// 이 화신은 항목별 받음을 못 준다 — 열린 항목 전부를 그 링 자리의 말풍선으로 닫는다.
+    AckUnavailable { delivered: Vec<DeliveredCopy> },
+}
+
+/// [`QueuedInputEvent::Dropped`] 의 원인. ★`Unknown` 만 되살림 가능한 묘비를 남긴다★ — 뒤늦은 벤더
+/// 받음이 「모름」을 이긴다(`crate::queued_input` 의 묘비 규칙).
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DropCause {
+    /// 사용자가 거뒀다(벤더에 닿기 전).
+    Withdrawn,
+    /// 턴 끊기가 닫았다.
+    Interrupted,
+    /// 에이전트가 끝났다(코어 종료 합성 · 봉인).
+    AgentEnded,
+    /// 벤더·통로가 거절했다(쓰기 실패 포함).
+    Rejected,
+    /// 벤더가 받았는지 모른다.
+    Unknown,
+}
+
+/// [`QueuedInputEvent::AckUnavailable`] 이 싣는 말풍선 사본 — 우리 로컬 본문 그대로.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeliveredCopy {
+    pub id: String,
+    pub text: String,
 }
 
 /// 턴이 **어떻게** 끝났나 — [`OutputEvent::TurnEnd`] 가 나르는 중립 어휘.
@@ -117,6 +179,138 @@ pub enum TurnOutcome {
 #[derive(Debug, Clone)]
 pub enum InputEvent {
     Raw(Vec<u8>), // PTY 키 입력 바이트
+}
+
+/// 입력이 **누구에게서** 왔나 — 세션 쓰기 동사가 받는다.
+///
+/// ★`Mail` 은 어느 백엔드에서도 대기 목록에 오르지 않는다★ — 사람 아닌 호출자(우편 배달 · 파일럿)는 늘 오늘
+///   경로다. 호출자 표: WS `WriteStdin` = `User` · `*_observed` 동사 전부 = `Mail`.
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputOrigin {
+    User,
+    Mail,
+}
+
+/// 턴 도중 친 입력을 **누가 분류하고 누가 해제하나** — backend 가 spawn 때 신고한다(ADR-0004 모양).
+///
+/// ★세션은 이 값으로만 가른다 — 인코더 태그·백엔드 이름으로 분기하지 않는다★. 그렇게 가르면 backend 지식이
+///   세션으로 샌다.
+// ADR-0231
+#[derive(Debug, Clone, Copy)]
+pub enum MidTurnPolicy {
+    /// 오늘 경로 그대로(터미널 · shell) — 목록이 없고 취소할 것도 없다.
+    None,
+    /// 세션이 입력 자물쇠 안에서 분류하고 벤더가 해제한다(claude JSON). `cancel_line` = 그 id 의 취소를 요청하는
+    /// stdin 줄 한 벌(개행 포함 — 세션은 그대로 `send_input` 한다).
+    SessionClassified { cancel_line: fn(&str) -> Vec<u8> },
+    /// 통로가 분류·해제·취소를 다 진다(codex JSON) — 세션은 [`TurnInput`] 을 넘기고 취소는
+    /// `AgentTransport::withdraw` 로 넘기기만 한다. 입력 자물쇠를 타지 않는다(순서는 통로 상태 락이 진다).
+    TransportOwned,
+}
+
+/// 이 화신이 **항목별 받음 알림을 줄 수 있나** — 화신 공유 세 값. backend 가 채우고 세션·통로가 읽는다.
+///
+/// ★전이는 `Unknown` 에서만 난다 — 한 번 정해지면 되돌리지 않는다★. `Available` 이 되돌려지면 그 전에
+///   목록에 오른 항목의 판정이 갈린다(받음 불가 판명은 「그때까지 오른 항목 전부」에 한 번 걸린다).
+/// ★받음 불가 판명의 링 순서는 이 원자값이 아니라 링의 `AckUnavailable` 이 정한다★ — 코어는 이 값을 읽지
+///   않는다(`OutputCore` 의 목록 사건 문).
+// ADR-0231
+#[derive(Debug, Default)]
+pub struct DeliveryAck(std::sync::atomic::AtomicU8);
+
+/// [`DeliveryAck`] 의 값.
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum DeliveryAckState {
+    /// 아직 모른다 — 화신의 첫 판정 전.
+    Unknown = 0,
+    Available = 1,
+    /// 옛 버전 — 오늘 동작 그대로 간다.
+    Unavailable = 2,
+}
+
+impl DeliveryAck {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn state(&self) -> DeliveryAckState {
+        match self.0.load(std::sync::atomic::Ordering::Acquire) {
+            1 => DeliveryAckState::Available,
+            2 => DeliveryAckState::Unavailable,
+            _ => DeliveryAckState::Unknown,
+        }
+    }
+
+    /// `Unknown → Available`. `true` = 이 호출이 전이시켰다. 이미 정해졌으면(어느 쪽이든) 무동작이다.
+    pub fn set_available(&self) -> bool {
+        self.leave_unknown(DeliveryAckState::Available)
+    }
+
+    /// `Unknown → Unavailable`. ★`true` 는 정확히 한 호출만 받는다★ — 그 승자가 `AckUnavailable` 을 한 번
+    /// 낸다. `Available` 뒤에는 늘 `false` 다(되돌리지 않는다).
+    pub fn try_set_unavailable(&self) -> bool {
+        self.leave_unknown(DeliveryAckState::Unavailable)
+    }
+
+    fn leave_unknown(&self, to: DeliveryAckState) -> bool {
+        self.0
+            .compare_exchange(
+                DeliveryAckState::Unknown as u8,
+                to as u8,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+/// `TransportOwned` 세션이 통로에 넘기는 턴 하나(`AgentTransport::send_turn`).
+///
+/// `id` = 이 입력의 식별자 — 이 쓰기의 `WriteOutcome::msg_uuid` 문자열(목록 사건의 id 와 같은 값) · `body` =
+/// 인코더를 지난 바이트.
+// ADR-0231
+#[derive(Debug, Clone)]
+pub struct TurnInput {
+    pub id: String,
+    pub body: Vec<u8>,
+    pub origin: InputOrigin,
+}
+
+/// `AgentTransport::withdraw` 의 답.
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Withdraw {
+    /// 통로가 쥔 항목을 지웠다 — 벤더는 그 글을 본 적이 없다.
+    Withdrawn,
+    /// 이미 넘겼다 — 목록에서만 뺀다(결말은 벤더 수명주기).
+    TooLate,
+    /// 통로가 모르는 id(이미 결말이 났거나 목록 밖).
+    NotHeld,
+}
+
+/// 대기 입력 취소가 **접수된** 모양(`AgentSession::cancel_queued_input`).
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelOutcome {
+    /// 취소를 요청했다(또는 이미 취소 대기였다) — 결말은 뒤따르는 목록 사건이 정한다.
+    Requested,
+    /// 곧바로 취소됐다(통로가 쥔 항목을 거뒀다).
+    Cancelled,
+}
+
+/// 대기 입력 취소의 실패.
+// ADR-0231
+#[derive(Debug, thiserror::Error)]
+pub enum CancelError {
+    /// 목록에 없다 — 모르는 id · 이미 결말이 난 id · 목록을 쓰지 않는 세션.
+    #[error("queued input not found")]
+    NotFound,
+    /// 취소 줄을 쓰지 못했다. ★항목은 취소 대기 그대로다★ — 목록으로 되돌리지 않는다.
+    #[error("cancel write failed: {0}")]
+    Write(PtyError),
 }
 
 /// transport가 산출하는 종료 사유(flat). core가 AgentStatus로 매핑(finalize 1회).
@@ -870,6 +1064,10 @@ pub struct SinkError;
 /// ※S12: wire 인코딩은 구현체가 소유한다(ChannelOutputSink=base64 PtyEvent / 데몬 프레임 sink=binary
 /// frame) → 코어 transport-agnostic.
 pub trait OutputSink: Send + Sync + 'static {
+    /// ★계약 = 막히지 않는다 — 못 보내면 기다리지 말고 `SinkError`★. 이 호출은 세션의 입력 자물쇠 안에서
+    /// 불릴 수 있다(ADR-0006 「lock 미보유 send」의 예외) — 여기서 기다리는 구현은 그 화신의 입력·취소를
+    /// 함께 멈춘다.
+    // ADR-0231
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError>;
     fn sink_id(&self) -> SinkId;
 }
@@ -897,6 +1095,16 @@ pub trait StatusSink: Send + Sync + 'static {
     ///   빠지는데, 잉여 통지는 대개 무해한 반면 누락은 소비자를 영구 대기시킨다.
     // ADR-0113
     fn turn_ended(&self, _id: AgentId, _epoch: u32) {}
+    /// 이 화신의 사용자 대기 목록이 방금 비었다 — 턴이 끝나지 않고 목록만 빈 경우에도 파킹된 우편이
+    /// 다음 턴 끝까지 묶이지 않게 하는 초인종. 기본 no-op.
+    ///
+    /// ★계약은 [`Self::turn_ended`] 와 같다(논블록·비재진입)★. ★대기 목록 표에 「비었다」를 적은 **뒤에**
+    ///   울린다★ — 받은 쪽이 곧바로 바쁨을 다시 묻는다. 비는 순간마다 나가며(종료 합성으로 빈 경우는 빼고 —
+    ///   `OutputCore::finish`) 잉여는 소비자가 흡수한다.
+    /// ★`turn_ended` 를 넓히지 않고 동사를 따로 둔 이유★: 「턴이 끝났다」는 이름이 턴 없이 비는 경우까지
+    ///   뜻하게 되면 그 이름에 기대는 소비자가 오판한다.
+    // ADR-0231
+    fn inputs_drained(&self, _id: AgentId, _epoch: u32) {}
 }
 
 #[cfg(test)]
@@ -953,5 +1161,47 @@ mod tests {
         assert!(caps.output.terminal_bytes);
         assert!(caps.session.cwd_env);
         assert!(!caps.model.select);
+    }
+
+    // ── DeliveryAck — Unknown 에서 한 번만 떠나고 되돌아가지 않는다 ──
+    #[test]
+    fn delivery_ack_leaves_unknown_once_and_never_goes_back() {
+        let ack = DeliveryAck::new();
+        assert_eq!(ack.state(), DeliveryAckState::Unknown);
+        assert!(ack.set_available(), "첫 판정은 전이한다");
+        assert!(!ack.set_available(), "같은 값으로 다시 전이하지 않는다");
+        assert!(
+            !ack.try_set_unavailable(),
+            "Available 뒤에는 받음 불가로 뒤집히지 않는다"
+        );
+        assert_eq!(ack.state(), DeliveryAckState::Available);
+
+        let old_cli = DeliveryAck::new();
+        assert!(
+            old_cli.try_set_unavailable(),
+            "승자는 true — AckUnavailable 을 한 번 낸다"
+        );
+        assert!(!old_cli.try_set_unavailable(), "둘째 승자는 없다");
+        assert!(
+            !old_cli.set_available(),
+            "Unavailable 뒤에는 Available 로 가지 않는다"
+        );
+        assert_eq!(old_cli.state(), DeliveryAckState::Unavailable);
+    }
+
+    #[test]
+    fn exactly_one_racer_wins_the_unavailable_verdict() {
+        let ack = std::sync::Arc::new(DeliveryAck::new());
+        let winners: usize = (0..8)
+            .map(|_| {
+                let ack = ack.clone();
+                std::thread::spawn(move || ack.try_set_unavailable())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| usize::from(h.join().unwrap()))
+            .sum();
+        assert_eq!(winners, 1, "받음 불가 판명은 한 화신에 한 번만 난다");
+        assert_eq!(ack.state(), DeliveryAckState::Unavailable);
     }
 }

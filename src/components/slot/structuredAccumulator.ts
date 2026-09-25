@@ -15,8 +15,10 @@
 //   상태를 오직 feed 순서로만 세우고(순서 보존) reset 이 전부 비우므로, reset→같은 순서 refeed = 동일 결과다.
 //   상류(ProtocolClient)가 seq dedup·순서 보장을 하므로 이 누산기는 중복/역전 방어를 따로 하지 않는다.
 
+import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
 import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bindings/TurnOutcome'
+import { QueuedInputRegistry, type QueuedEntry } from './queuedInputReducer'
 
 /**
  * 턴이 **정상 완료가 아닌** 결말로 닫혔을 때 화면에 남기는 표식 — 중립 어휘(백엔드 이름이 없다).
@@ -53,7 +55,11 @@ export class StructuredEventAccumulator {
   //   않고 보존한다(extractUserUuid 가 non-text 에 null 반환 — multi-block tool_result 소실 방지 HIGH FIX).
   //   uuid 없는 user item(과거/비-replay)도 dedup 하지 않고 전부 보존한다(vanish 방지).
   //   reset() 이 비우므로 replay idempotence 유지(refeed 시 같은 uuid 를 같은 순서로 다시 보고 재수렴).
+  // ADR-0231: 대기 입력의 말풍선도 이 집합으로 「한 id 에 한 번」을 지킨다 — `Delivered` 배치·판명 사본이
+  //   여기 넣고, 여기 든 uuid 는 목록(`snapshotQueued`)에도 안 그린다.
   private seenUserUuids = new Set<string>()
+  // ADR-0231: 대기 입력 명부의 환원 상태(agent 명부와 같은 규칙 · 같은 골든). 그리기 거름은 이 밖에서 한다.
+  private readonly queued = new QueuedInputRegistry()
 
   /**
    * 라이브 경로는 항상 Uint8Array, 문자열은 테스트/편의용.
@@ -136,6 +142,11 @@ export class StructuredEventAccumulator {
         if (ev.kind === 'user') {
           const uuid = extractUserUuid(ev.json)
           if (uuid !== null) {
+            // ADR-0231: ★대기 중인 uuid 의 에코는 그리지도 「본 것」에 넣지도 않는다★ — 그 말풍선은 그 id 의
+            //   `Delivered` 가 받음 자리에 그린다. 실측이 두 순서를 다 보였다: 에코가 `Delivered` 바로 앞에 오면
+            //   여기서, 뒤에 오면 아래 uuid dedup 이 받는다. 그래서 「첫 항목이 이긴다」는 대기 중이 아닌
+            //   uuid 에만 선다.
+            if (this.queued.row(uuid) !== undefined) break
             if (this.seenUserUuids.has(uuid)) break
             this.seenUserUuids.add(uuid)
           }
@@ -168,6 +179,8 @@ export class StructuredEventAccumulator {
         }
         this.closeTurn()
         break
+      case 'QueuedInput':
+        return this.consumeQueued(ev.op)
       default: {
         // ★모르는 이벤트를 조용히 삼키지 않는다★: 아무것도 안 하면 화면은 한 픽셀도 안 바뀌는데 호출자는
         //   프레임이 온 것으로 행동한다. 릴리스 WebView2 에는 devtools 가 없어 console 이 사용자에게 도달
@@ -216,6 +229,89 @@ export class StructuredEventAccumulator {
     this.turnDone = true
   }
 
+  /**
+   * 대기 입력 명부 사건 — 환원 뒤 그리기 규칙 셋만 대화 줄을 바꾼다(`Delivered` 배치 · 판명 사본 배치 ·
+   * `Rejected` 말풍선 지우기). ★`turnDone` 을 건드리지 않는다★ — 목록 사건은 출력이 아니다(말풍선을 그린
+   * 때만 사용자 arm 처럼 내린다). 종결은 목록에서 빠질 뿐 알림 행을 그리지 않는다.
+   */
+  // ADR-0231
+  private consumeQueued(op: QueuedInputEvent | null | undefined): boolean {
+    // `feed` 의 try/catch 는 JSON.parse 만 감싼다 — 모양이 깨진 프레임에서 던지지 않는다(outcomeMark 와 같은 규율).
+    if (op === null || typeof op !== 'object') return false
+    // 배치 본문은 앞선 `Queued` 의 사본이다 — 환원이 그 항목을 지우기 전에 잡는다.
+    const pending = op.kind === 'Delivered' ? this.queued.row(op.id) : undefined
+    if (op.kind === 'AckUnavailable' && !isCopyList(op.delivered)) return false
+    if (this.queued.reduce(op) === null) {
+      console.warn(
+        '[structuredAccumulator] 모르는 QueuedInput kind — 버린다:',
+        (op as { kind?: unknown }).kind,
+      )
+      return false
+    }
+    switch (op.kind) {
+      case 'Delivered':
+        // 대기 중이 아니던 id(되살림 · 모르는 id · 둘째 `Delivered`)는 그리지 않는다 — 되살림의 말풍선은
+        //   그 id 가 이제 대기 중이 아니라 억제되지 않는 벤더 에코가 그린다.
+        if (pending !== undefined) this.placeUserBubble(pending.id, pending.text)
+        break
+      case 'AckUnavailable':
+        // 사본마다(목록 순) 그 자리에 — 이 창이 그 `Queued` 를 링에서 잃었어도 사본 본문으로 그린다.
+        for (const copy of op.delivered) this.placeUserBubble(copy.id, copy.text)
+        break
+      case 'Dropped':
+        // 환원 상태와 무관한 그리기 규칙 — 거절만 지운다(끊기·종료·실패 턴의 말풍선은 남는다).
+        if (op.cause === 'Rejected') this.removeUserBubbles(op.id)
+        break
+      default:
+        break
+    }
+    return true
+  }
+
+  /** 받음 자리에 사용자 말풍선 — 에코·합성 에코와 같은 모양이라 렌더러가 가르지 않는다. 한 uuid 에 한 번. */
+  private placeUserBubble(id: string, text: string): void {
+    if (this.seenUserUuids.has(id)) return
+    this.seenUserUuids.add(id)
+    this.items.push({
+      kind: 'structured',
+      label: 'user',
+      json: JSON.stringify({ type: 'text', text, uuid: id }),
+      itemId: this.nextId++,
+    })
+    this.turnDone = false
+  }
+
+  /**
+   * 그 uuid 로 그린 사용자 말풍선(text 블록)을 걷는다. ★uuid 는 「본 것」에 남긴다★ — 거절은 되살림 불가라
+   * 뒤늦은 같은 uuid 를 다시 그리지 않는다. 같은 줄의 비-text 블록(tool_result)은 dedup 대상이 아니듯 여기서도
+   * 남는다.
+   */
+  private removeUserBubbles(id: string): void {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i]
+      if (item.kind === 'structured' && item.label === 'user' && extractUserUuid(item.json) === id) {
+        this.items.splice(i, 1)
+      }
+    }
+  }
+
+  /**
+   * `QueuedInputList` 가 그릴 항목 — 대기(`queued`)이고 아직 말풍선으로 그리지 않은 uuid 만, 든 순서(가장
+   * 오래된 것이 앞). 취소 대기는 모든 창에서 안 그린다. 매번 새 배열이다.
+   * ★거름은 그리기에만 선다★ — 명부와 같은 환원 상태는 `queuedRows()`.
+   */
+  // ADR-0231
+  snapshotQueued(): QueuedEntry[] {
+    return this.queued
+      .rows()
+      .filter((entry) => entry.phase.state === 'queued' && !this.seenUserUuids.has(entry.id))
+  }
+
+  /** 환원 상태 그대로(취소 대기 · 이미 그린 uuid 포함) — agent 명부·골든과 같은 값이다. */
+  queuedRows(): readonly QueuedEntry[] {
+    return this.queued.rows()
+  }
+
   /** 내부 배열 참조를 그대로 돌려준다 — React 소비자는 [...snapshot()] 로 새 참조를 떠서 set. */
   snapshot(): StructuredItem[] {
     return this.items
@@ -235,6 +331,7 @@ export class StructuredEventAccumulator {
     this.turnDone = false
     this.nextId = 0
     this.seenUserUuids.clear()
+    this.queued.clear()
   }
 }
 
@@ -263,6 +360,13 @@ function outcomeMark(
     default:
       return { outcome: 'unknown', detail: null }
   }
+}
+
+function isCopyList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every((copy) => copy !== null && typeof copy === 'object' && typeof copy.id === 'string')
+  )
 }
 
 /**

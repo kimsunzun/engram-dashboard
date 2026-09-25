@@ -692,6 +692,75 @@ pub enum StructuredEvent {
     /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat).
     /// kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
     Structured { kind: String, json: String },
+    /// 대기 입력 명부 사건(agent `OutputEvent::QueuedInput` 의 미러). 모양 = `{"type":"QueuedInput","op":{"kind":…}}`.
+    ///
+    /// ★프론트 누산기는 이 사건열을 agent 명부와 **같은 환원 규칙**으로 읽는다★ — 두 판의 공유 골든은
+    ///   `crates/engram-dashboard-agent/src/queued_input_golden.json` 이고, 그 사건 객체가 곧 `op` 의 모양이다.
+    /// ★`PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다★ — [`StructuredEvent::TurnEnd`] 와 같은 판단이다
+    ///   (데몬→셸 한 방향 · 구데몬은 이 사건을 안 보낼 뿐 오독할 것이 없다).
+    // ADR-0231
+    QueuedInput { op: QueuedInputEvent },
+}
+
+/// 대기 입력 명부 사건 — agent `QueuedInputEvent` 의 미러. 판별자 = `"kind"`(바깥 봉투의 `"type"` 과 겹치지
+/// 않게 — [`TurnOutcome`] 과 같은 이유).
+///
+/// ★`Delivered` 는 본문을 싣지 않는다★ — 말풍선 본문은 앞선 `Queued` 의 `text`(우리 로컬 사본)다.
+/// ★`AckUnavailable.delivered` 는 링에 적힐 때 늘 채워져 있다(agent 코어가 채운다)★ — 그 사건이 받음으로
+///   닫는 항목마다 (id, 본문) 한 벌. 링 창이 `Queued` 를 잃은 창도 이 사본으로 그 자리 말풍선을 그린다.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "kind")]
+#[ts(export)]
+pub enum QueuedInputEvent {
+    Queued {
+        id: String,
+        text: String,
+    },
+    CancelRequested {
+        id: String,
+    },
+    /// `removed: true` 만 결말(취소됨)이다 — `false` 는 뒤이은 벤더 닫힘의 원인을 가르는 재료다.
+    CancelAnswered {
+        id: String,
+        removed: bool,
+    },
+    CancelFailed {
+        id: String,
+    },
+    Delivered {
+        id: String,
+    },
+    /// `Rejected` 는 그 id 로 그린 말풍선도 지운다.
+    Dropped {
+        id: String,
+        cause: DropCause,
+    },
+    AckUnavailable {
+        delivered: Vec<DeliveredCopy>,
+    },
+}
+
+/// [`QueuedInputEvent::Dropped`] 의 원인 — wire 에서는 문자열 하나(`"Withdrawn"` 등).
+/// ★`Unknown` 만 되살림 가능한 묘비를 남긴다★(뒤늦은 `Delivered` 가 이긴다).
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum DropCause {
+    Withdrawn,
+    Interrupted,
+    AgentEnded,
+    Rejected,
+    Unknown,
+}
+
+/// [`QueuedInputEvent::AckUnavailable`] 이 싣는 말풍선 사본.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct DeliveredCopy {
+    pub id: String,
+    pub text: String,
 }
 
 /// 턴이 **어떻게** 끝났나 — [`StructuredEvent::TurnEnd`] 가 나르는 중립 어휘(agent `TurnOutcome` 미러).
@@ -925,6 +994,20 @@ mod tests {
                 kind: "custom".into(),
                 json: r#"{"k":1}"#.into(),
             },
+            StructuredEvent::QueuedInput {
+                op: QueuedInputEvent::Dropped {
+                    id: "u1".into(),
+                    cause: DropCause::Unknown,
+                },
+            },
+            StructuredEvent::QueuedInput {
+                op: QueuedInputEvent::AckUnavailable {
+                    delivered: vec![DeliveredCopy {
+                        id: "u2".into(),
+                        text: "hi".into(),
+                    }],
+                },
+            },
         ];
         for ev in cases {
             let json = serde_json::to_string(&ev).expect("직렬화 성공");
@@ -1034,6 +1117,91 @@ mod tests {
                 r#"{{"type":"TurnEnd","turn_id":null,"outcome":{{"kind":"Failed","detail":"{raw}"}}}}"#
             )
         );
+    }
+
+    // ── 대기 입력 명부 사건(ADR-0231) ────────────────────────────────────────────────
+
+    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 바깥 판별자 `"type"`, 사건 판별자
+    /// `"kind"`, 원인은 문자열 하나, 사본은 `{id,text}` 배열.
+    #[test]
+    fn queued_input_wire_shape_is_pinned() {
+        let json = |op| serde_json::to_string(&StructuredEvent::QueuedInput { op }).unwrap();
+        assert_eq!(
+            json(QueuedInputEvent::Queued {
+                id: "u1".into(),
+                text: "hi".into()
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"Queued","id":"u1","text":"hi"}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::CancelAnswered {
+                id: "u1".into(),
+                removed: false
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"CancelAnswered","id":"u1","removed":false}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::Dropped {
+                id: "u1".into(),
+                cause: DropCause::AgentEnded
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"Dropped","id":"u1","cause":"AgentEnded"}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::AckUnavailable {
+                delivered: vec![DeliveredCopy {
+                    id: "u2".into(),
+                    text: "yo".into()
+                }]
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"AckUnavailable","delivered":[{"id":"u2","text":"yo"}]}}"#
+        );
+        let causes: Vec<String> = [
+            DropCause::Withdrawn,
+            DropCause::Interrupted,
+            DropCause::AgentEnded,
+            DropCause::Rejected,
+            DropCause::Unknown,
+        ]
+        .iter()
+        .map(|c| {
+            serde_json::to_value(c)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+        assert_eq!(
+            causes,
+            [
+                "Withdrawn",
+                "Interrupted",
+                "AgentEnded",
+                "Rejected",
+                "Unknown"
+            ]
+        );
+    }
+
+    /// 공유 골든의 사건 객체가 곧 wire `op` 다 — 누산기는 그 객체를 `{type:"QueuedInput", op}` 로 먹는다. 골든을
+    /// 고쳐 wire 가 못 읽는 모양이 들어오면 여기서 빨개진다(파일은 agent crate 에 있다 — 명부 옆이 집이다).
+    #[test]
+    fn the_shared_queued_input_golden_speaks_the_wire_shape() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "../../engram-dashboard-agent/src/queued_input_golden.json"
+        ))
+        .expect("골든 JSON");
+        let mut fed = 0;
+        for case in golden["cases"].as_array().expect("cases") {
+            for ev in case["events"].as_array().expect("events") {
+                let op: QueuedInputEvent = serde_json::from_value(ev.clone())
+                    .unwrap_or_else(|e| panic!("wire 가 못 읽는 골든 사건 {ev}: {e}"));
+                assert_eq!(&serde_json::to_value(&op).unwrap(), ev, "왕복 무손실");
+                fed += 1;
+            }
+        }
+        assert!(fed > 0);
     }
 
     // ── 구독 응답의 이어받기 표식(ADR-0226) ──────────────────────────────────────────

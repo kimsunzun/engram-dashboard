@@ -17,10 +17,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::backend::TurnClassifier;
+use crate::inputs_pending::InputsPendingTable;
+use crate::queued_input::QueuedInputs;
 use crate::turn::{TurnObservations, TurnSignal};
 use crate::types::{
-    AgentId, AgentStatus, OutputChunk, OutputEvent, OutputFrame, OutputPayload, OutputSink,
-    ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason, TurnOutcome,
+    AgentId, AgentStatus, DropCause, OutputChunk, OutputEvent, OutputFrame, OutputPayload,
+    OutputSink, QueuedInputEvent, ReplayKind, SinkId, StatusSink, SubscribeOutcome, TerminalReason,
+    TurnOutcome,
 };
 
 type OnTerminalHook = Box<dyn Fn(TerminalReason) + Send + Sync>;
@@ -75,6 +78,39 @@ pub struct OutputCore {
     // ── ADR-0113 턴 관측 ──────────────────────────────────────
     /// 생성 후 불변이라 hot path 에 원자 load 도 락도 없다.
     turn: TurnWiring,
+
+    // ── ADR-0231 대기 입력 명부 ───────────────────────────────
+    /// 이 화신의 명부 — 세션이 이 Arc 로 읽는다. 명부를 바꾸는 길은 이 코어가 replay 락 안에서 먹이는
+    /// 환원 하나뿐이다(그래서 명부 = 링 접두의 환원값).
+    queued_inputs: Arc<QueuedInputs>,
+    /// 우편 바쁨이 읽는 대기 목록 표. `None` = 명부가 우편에 안 보이는 조립(하네스) — 표도 초인종도 없다.
+    inputs_pending: Option<Arc<InputsPendingTable>>,
+    /// 「봉인됨」 — `finish` 의 종료 합성이 세운다. 그 뒤의 `Queued` 는 링에 `Dropped{AgentEnded}` 로 선다.
+    /// ★replay 락 안에서만 읽고 쓴다★ — 순서(합성이 훑은 뒤인가)는 그 락이 나르고 원자값은 내부 가변성일 뿐이라
+    /// `Relaxed` 다. 락 밖에서 읽는 자리를 만들면 합성과 봉인 사이로 `Queued` 가 빠져나간다.
+    sealed: AtomicBool,
+}
+
+/// 대기 입력 명부 배선(ADR-0231) — 명부와 대기 목록 표는 항상 같이 꽂힌다. 명부만 있고 표가 없으면 사용자
+/// 목록이 찬 동안에도 우편이 한가로 읽혀 사용자 글보다 먼저 stdin 에 닿는다.
+///
+/// ★`registry` 는 그 화신 전용 새 명부다★ — 화신마다 새로 만든다(묘비·「받음 불가 판명」이 화신 사실이다).
+/// ★`pending` 은 그 화신을 `register` 한 표여야 한다★ — 표는 등록 없는 쓰기를 버리므로, 빠뜨리면 목록이
+/// 우편에 영영 안 보인다(오류는 없다).
+// ADR-0231
+pub struct QueuedWiring {
+    pub registry: Arc<QueuedInputs>,
+    pub pending: Arc<InputsPendingTable>,
+}
+
+/// 목록 사건 하나가 replay 락 안에서 남긴 것 — 락을 놓은 뒤의 단계(턴 관측 · 「비었다」 · fanout)가 쓴다.
+struct ListStep {
+    /// 링에 선 줄(발급 순) — 바꿔 적기로 한 사건이 두 줄이 될 수 있다.
+    numbered: Vec<(u64, OutputEvent)>,
+    /// 분류기에 넘길 원 사건의 자리. `None` = 원 사건이 봉인으로 바꿔 적혔다.
+    classify_at: Option<usize>,
+    /// 이 사건이 명부를 비웠다 — 그 seq 로 「비었다」를 적고 초인종을 울린다(락 밖, 턴 관측 뒤).
+    drained_at: Option<u64>,
 }
 
 /// 턴 관측 배선 한 벌(ADR-0113) — 표(어디에 쌓나)와 분류자(무엇이 신호인가)는 항상 같이 꽂힌다.
@@ -142,7 +178,27 @@ impl OutputCore {
             drain_done_rx: Mutex::new(None),
             on_terminal: Mutex::new(None),
             turn,
+            queued_inputs: Arc::new(QueuedInputs::new()),
+            inputs_pending: None,
+            sealed: AtomicBool::new(false),
         }
+    }
+
+    /// 대기 입력 명부를 꽂는다 — 부르지 않으면(기본) 아무도 안 읽는 자기 명부에 표가 없다. 봉인·바꿔 적기·사본
+    /// 채우기는 어느 쪽이든 같게 돈다(링의 모양은 배선과 무관하다).
+    /// ★생성 직후, 첫 사건 전에 부른다★ — 뒤에 갈아 끼우면 명부가 링 접두의 환원값이 아니게 된다.
+    /// ★운영 spawn 은 반드시 부른다★ — 빠뜨려도 컴파일되고, 그 화신의 사용자 목록은 우편에 안 보인다.
+    // ADR-0231
+    pub fn with_queued(mut self, wiring: QueuedWiring) -> Self {
+        self.queued_inputs = wiring.registry;
+        self.inputs_pending = Some(wiring.pending);
+        self
+    }
+
+    /// 이 화신의 명부. ★가드를 쥔 채 이 코어에 emit 하지 말 것★ — 락 순서가 replay → 명부라 거꾸로 잡는다.
+    // ADR-0231
+    pub fn queued_inputs(&self) -> &Arc<QueuedInputs> {
+        &self.queued_inputs
     }
 
     pub fn id(&self) -> AgentId {
@@ -182,6 +238,7 @@ impl OutputCore {
     pub fn seed(&self, events: Vec<OutputEvent>) {
         let mut replay = self.replay.lock().expect("replay poisoned");
         for event in events {
+            debug_assert_not_list_event(&event);
             let seq = self.seq.fetch_add(1, Ordering::Relaxed);
             let cost_bytes = estimate_cost_bytes(&event);
             replay.push(StoredOutput {
@@ -260,6 +317,7 @@ impl OutputCore {
             events
                 .into_iter()
                 .map(|event| {
+                    debug_assert_not_list_event(&event);
                     let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                     let cost_bytes = estimate_cost_bytes(&event);
                     replay.push(StoredOutput {
@@ -272,7 +330,16 @@ impl OutputCore {
                 .collect()
         };
 
-        // 2. fanout 은 락을 놓고 — 죽은 sink 는 낱개 문과 같은 방식으로 한 번에 걷어낸다.
+        // 2. fanout 은 락을 놓고.
+        self.fan_out(&numbered);
+    }
+
+    /// 여러 줄을 subscribers 스냅샷으로 락 없이 내보낸다 — 죽은 sink 는 낱개 문과 같은 방식으로 한 번에
+    /// 걷어낸다. 호출자는 replay 락을 놓은 뒤에 부른다(ADR-0006).
+    fn fan_out(&self, numbered: &[(u64, OutputEvent)]) {
+        if numbered.is_empty() {
+            return;
+        }
         let sinks = self
             .subscribers
             .lock()
@@ -280,7 +347,7 @@ impl OutputCore {
             .clone();
         let mut dead = Vec::new();
         for sink in sinks {
-            for (seq, event) in &numbered {
+            for (seq, event) in numbered {
                 let payload = match event {
                     OutputEvent::TerminalBytes(v) => OutputPayload::Bytes(v),
                     other => OutputPayload::Event(other),
@@ -308,6 +375,10 @@ impl OutputCore {
     }
 
     fn emit_inner(&self, event: OutputEvent, observe_turn: bool) {
+        let event = match event {
+            OutputEvent::QueuedInput(op) => return self.emit_list_event(op, observe_turn),
+            other => other,
+        };
         let cost_bytes = estimate_cost_bytes(&event);
 
         // 3~4. ★seq 발급 + replay push 를 replay 락 안에서 원자적으로★ — brief lock(락 순서 1단계,
@@ -335,35 +406,8 @@ impl OutputCore {
             });
         }
 
-        // ★ADR-0113 턴 관측★: 표 갱신을 **fanout·통지보다 먼저** 한다. 통지를 받은 소비자가 곧바로
-        //   표를 조회하므로(도어벨→flush 등) 순서가 뒤집히면 그 조회가 갱신 전 값을 본다.
-        //   락 규율: 표 갱신은 자기 락 하나만 짧게 잡고(core 락 미보유), 통지는 그 락을 놓은 뒤 한다.
-        if let Some(signal) = observe_turn.then(|| (self.turn.classify)(&event)).flatten() {
-            // ★신호에 **출력 순서(seq)** 를 실어 보낸다★: emit 호출자는 둘이라(pump · 입력 에코를 낸
-            //   주입 스레드) 두 emit 이 병행하면 표 적용 순서가 발행 순서와 뒤집힐 수 있다. seq 는 replay
-            //   락 안에서 발급돼 **출력의 정본 순서**이므로, 표가 그걸로 늦은 신호를 걸러낸다(turn.rs).
-            self.turn.table.observe(self.id, self.epoch, seq, signal);
-            // ★종료 후 지각 emit 이 유령 항목을 되살리지 못하게(load-bearing)★: 주입 스레드가 transport
-            //   write 에 막혀 있는 동안 pump 가 EOF→`finish` 를 지나 표를 비울 수 있고, 그 뒤 깨어난 에코가
-            //   **같은 epoch** 으로 항목을 다시 만든다(더 작은 epoch 만 버리는 표 쪽 규칙으론 못 막는다).
-            //   그 항목은 종료 신호가 영영 오지 않아 아무도 못 지운다.
-            //   ★무엇이 순서를 만드나 = **표의 뮤텍스**(이 인자를 지우지 말 것)★: 그 락이 우리 insert 와
-            //   `finish` 의 forget 을 **전순서**로 놓는다. forget 이 먼저인 순서에서는 forget 의 unlock
-            //   (release)이 우리 lock(acquire)과 synchronizes-with 하므로, forget 앞의 `finalized` swap 이
-            //   우리 load 보다 happens-before → load 는 false 를 읽을 수 없다. 반대 순서면 우리 insert 가
-            //   먼저이므로 뒤따르는 forget 이 그걸 지운다. 어느 쪽이든 유령이 남지 않는다.
-            //   ★그래서 이 load 의 `Acquire` 가 근거가 아니다★ — `Relaxed` 여도 결론은 같고, 순서를 나르는
-            //   것은 뮤텍스다. 표 갱신을 락 밖(lock-free)으로 "최적화" 하면 이 증명이 조용히 무너진다.
-            if self.finalized.load(Ordering::Acquire) {
-                self.turn.table.forget(self.id, self.epoch);
-            }
-            // ★통지는 epoch·finalize·seq 게이트를 걸지 않는다(위 표 갱신과 의도적으로 비대칭)★: 표는
-            //   **상태**라 죽은/옛 화신이 쓰면 산 화신의 사실이 오염되지만, 도어벨은 **일회성 자극**이라
-            //   잉여는 빈 큐 no-op 으로 흡수되고(소비자가 실행 시점에 재검증) 누락은 대기를 만든다
-            //   ("누락 < 잉여" — StatusSink::turn_ended 계약).
-            if signal == TurnSignal::Ended {
-                self.status_sink.turn_ended(self.id, self.epoch);
-            }
+        if observe_turn {
+            self.record_turn_signal(seq, &event);
         }
 
         let payload = match &event {
@@ -400,13 +444,188 @@ impl OutputCore {
         }
     }
 
+    /// 목록 사건(`QueuedInput`)의 문 — 낱개 문과 같은 단계에 명부 환원과 대기 목록 표 쓰기가 끼어 있다.
+    ///
+    /// ★replay 락 안(한 구간)★: 봉인 → 판정 뒤 바꿔 적기 → `AckUnavailable` 사본 채우기 → 발급·push·환원 →
+    ///   「찼다」. 명부를 이 구간에서 먹이므로 명부 = 링 접두의 환원값이고, 봉인·바꿔 적기의 판정도 링 순서를
+    ///   따른다(원자값 `DeliveryAck` 를 읽지 않는다 — 읽으면 링 재생과 명부가 서로 다른 순서를 본다).
+    /// ★락 밖★: 턴 관측(바꿔 적지 않은 원 사건만) → 「비었다」 + 초인종 → fanout.
+    ///   「비었다」를 턴 관측 **뒤**에 적는 이유: 목록을 비우는 claude `Delivered` 는 그 턴의 진행이라, 락
+    ///   안에서 적으면 진행이 표에 오르기 전 두 사실이 함께 「한가」인 순간이 생기고 그때 바쁨을 물은 우편이
+    ///   사용자의 턴에 접혀 든다. 「찼다」는 반대로 락 안이다 — 늦추면 `Queued` 가 링에 선 뒤에도 우편이 한가로
+    ///   읽혀 사용자 글보다 먼저 stdin 에 닿을 수 있다. 락 밖으로 미룬 「비었다」가 그 사이 다른 스레드가 적은
+    ///   더 늦은 「찼다」를 덮지 않는 것은 표의 seq 규칙이 진다.
+    // ADR-0231
+    fn emit_list_event(&self, op: QueuedInputEvent, observe_turn: bool) {
+        let step = {
+            let mut replay = self.replay.lock().expect("replay poisoned");
+            self.record_list_event(&mut replay, op)
+        };
+        if observe_turn {
+            if let Some(at) = step.classify_at {
+                let (seq, event) = &step.numbered[at];
+                self.record_turn_signal(*seq, event);
+            }
+        }
+        if let Some(seq) = step.drained_at {
+            self.write_drained(seq);
+        }
+        self.fan_out(&step.numbered);
+    }
+
+    /// replay 락 구간의 목록 단계. 호출자가 replay 락을 쥐고 부른다.
+    // ADR-0231: 락 순서 = (세션 `input_order` →) replay → 명부 → 대기 목록 표. 명부 가드는 이 replay 구간
+    //   안에서만 잡고, 표는 잎이며, `StatusSink` 는 어느 락도 쥐지 않은 채 부른다(`write_drained`). 명부를 먼저
+    //   쥐고 replay 를 기다리는 자리를 만들면 이 둘이 서로를 기다린다 — 명부만 읽는 쪽(목록 조회·취소 검증)은
+    //   명부 락 하나만 잡고 emit 하지 않는다.
+    fn record_list_event(&self, replay: &mut Ring, op: QueuedInputEvent) -> ListStep {
+        let mut registry = self.queued_inputs.lock();
+        let was_empty = registry.is_empty();
+        // 봉인이 바꿔 적기보다 먼저다 — 종료 뒤의 `Queued` 는 받음이 아니라 버림이다.
+        let (events, classify_at) = match op {
+            QueuedInputEvent::Queued { id, .. } if self.sealed.load(Ordering::Relaxed) => {
+                // 사용자 글이 전달 없이 버려지는 자리라 흔적을 남긴다 — 본문은 싣지 않는다(id 만).
+                tracing::debug!(
+                    agent = %self.id,
+                    epoch = self.epoch,
+                    id = %id,
+                    "봉인 뒤의 Queued 를 Dropped(AgentEnded) 로 바꿔 적음"
+                );
+                (
+                    vec![QueuedInputEvent::Dropped {
+                        id,
+                        cause: DropCause::AgentEnded,
+                    }],
+                    None,
+                )
+            }
+            // 판명 뒤의 `Queued` 는 그 자리에서 받음으로 닫는다 — `Delivered` 가 아니라 사본을 실은
+            //   `AckUnavailable` 을 잇는 이유: 링 상한이 두 줄 사이를 잘라도 닫는 줄이 본문을 쥔다.
+            queued @ QueuedInputEvent::Queued { .. } if registry.ack_unavailable_seen() => (
+                vec![
+                    queued,
+                    QueuedInputEvent::AckUnavailable {
+                        delivered: Vec::new(),
+                    },
+                ],
+                Some(0),
+            ),
+            other => (vec![other], Some(0)),
+        };
+        let mut numbered = Vec::with_capacity(events.len());
+        for mut op in events {
+            // ★사본은 늘 코어가 채운다★(디코더는 빈 채로 낸다) — 환원 **전**의 열린 항목이 그 환원이 받음으로
+            //   닫는 항목이다.
+            if let QueuedInputEvent::AckUnavailable { delivered } = &mut op {
+                *delivered = registry.open_copies();
+            }
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            registry.reduce(seq, &op);
+            let event = OutputEvent::QueuedInput(op);
+            let cost_bytes = estimate_cost_bytes(&event);
+            replay.push(StoredOutput {
+                seq,
+                event: event.clone(),
+                cost_bytes,
+            });
+            numbered.push((seq, event));
+        }
+        let now_empty = registry.is_empty();
+        drop(registry);
+
+        let last_seq = numbered.last().map(|(seq, _)| *seq).expect("한 줄 이상");
+        let mut drained_at = None;
+        match (was_empty, now_empty) {
+            (true, false) => {
+                if let Some(pending) = &self.inputs_pending {
+                    pending.set(self.id, self.epoch, last_seq, true);
+                }
+            }
+            (false, true) => drained_at = Some(last_seq),
+            // 판정 뒤 바꿔 적기는 빔 → 빔이다 — 목록이 찬 순간을 아무도 못 보므로 적을 것도 울릴 것도 없다.
+            _ => {}
+        }
+        ListStep {
+            numbered,
+            classify_at,
+            drained_at,
+        }
+    }
+
+    /// 「비었다」를 적고 초인종을 울린다 — 어느 락도 쥐지 않은 채. 표가 없는 조립은 둘 다 하지 않는다.
+    /// 표가 먼저다: 초인종을 받은 쪽이 곧바로 바쁨을 다시 묻는다.
+    // ADR-0231
+    fn write_drained(&self, seq: u64) {
+        if let Some(pending) = &self.inputs_pending {
+            pending.set(self.id, self.epoch, seq, false);
+            self.status_sink.inputs_drained(self.id, self.epoch);
+        }
+    }
+
+    /// 분류자가 낸 턴 신호를 표에 적고, 종료면 도어벨을 울린다. 호출자는 replay 락을 놓은 뒤에 부른다.
+    fn record_turn_signal(&self, seq: u64, event: &OutputEvent) {
+        // ★ADR-0113 턴 관측★: 표 갱신을 **fanout·통지보다 먼저** 한다. 통지를 받은 소비자가 곧바로
+        //   표를 조회하므로(도어벨→flush 등) 순서가 뒤집히면 그 조회가 갱신 전 값을 본다.
+        //   락 규율: 표 갱신은 자기 락 하나만 짧게 잡고(core 락 미보유), 통지는 그 락을 놓은 뒤 한다.
+        if let Some(signal) = (self.turn.classify)(event) {
+            // ★신호에 **출력 순서(seq)** 를 실어 보낸다★: emit 호출자는 둘이라(pump · 입력 에코를 낸
+            //   주입 스레드) 두 emit 이 병행하면 표 적용 순서가 발행 순서와 뒤집힐 수 있다. seq 는 replay
+            //   락 안에서 발급돼 **출력의 정본 순서**이므로, 표가 그걸로 늦은 신호를 걸러낸다(turn.rs).
+            self.turn.table.observe(self.id, self.epoch, seq, signal);
+            // ★종료 후 지각 emit 이 유령 항목을 되살리지 못하게(load-bearing)★: 주입 스레드가 transport
+            //   write 에 막혀 있는 동안 pump 가 EOF→`finish` 를 지나 표를 비울 수 있고, 그 뒤 깨어난 에코가
+            //   **같은 epoch** 으로 항목을 다시 만든다(더 작은 epoch 만 버리는 표 쪽 규칙으론 못 막는다).
+            //   그 항목은 종료 신호가 영영 오지 않아 아무도 못 지운다.
+            //   ★무엇이 순서를 만드나 = **표의 뮤텍스**(이 인자를 지우지 말 것)★: 그 락이 우리 insert 와
+            //   `finish` 의 forget 을 **전순서**로 놓는다. forget 이 먼저인 순서에서는 forget 의 unlock
+            //   (release)이 우리 lock(acquire)과 synchronizes-with 하므로, forget 앞의 `finalized` swap 이
+            //   우리 load 보다 happens-before → load 는 false 를 읽을 수 없다. 반대 순서면 우리 insert 가
+            //   먼저이므로 뒤따르는 forget 이 그걸 지운다. 어느 쪽이든 유령이 남지 않는다.
+            //   ★그래서 이 load 의 `Acquire` 가 근거가 아니다★ — `Relaxed` 여도 결론은 같고, 순서를 나르는
+            //   것은 뮤텍스다. 표 갱신을 락 밖(lock-free)으로 "최적화" 하면 이 증명이 조용히 무너진다.
+            if self.finalized.load(Ordering::Acquire) {
+                self.turn.table.forget(self.id, self.epoch);
+            }
+            // ★통지는 epoch·finalize·seq 게이트를 걸지 않는다(위 표 갱신과 의도적으로 비대칭)★: 표는
+            //   **상태**라 죽은/옛 화신이 쓰면 산 화신의 사실이 오염되지만, 도어벨은 **일회성 자극**이라
+            //   잉여는 빈 큐 no-op 으로 흡수되고(소비자가 실행 시점에 재검증) 누락은 대기를 만든다
+            //   ("누락 < 잉여" — StatusSink::turn_ended 계약).
+            if matches!(signal, TurnSignal::Ended(_)) {
+                self.status_sink.turn_ended(self.id, self.epoch);
+            }
+        }
+    }
+
     /// 종료 전이 — pump가 루프 탈출 후 1회 호출. finalize 정확히 1회 게이트로 중복 호출을 흡수한다.
     ///
     /// terminal 알림 주체는 pump(=여기) 단독. reason→AgentStatus 매핑은 impl-spec 표 그대로.
+    /// ★남은 목록 항목의 `Dropped{AgentEnded}` 가 종점 전이보다 먼저 나간다(ADR-0231)★ — 구독자는 목록이
+    ///   닫힌 뒤에 종점을 본다.
     pub fn finish(&self, reason: TerminalReason) {
         if self.finalized.swap(true, Ordering::AcqRel) {
             return;
         }
+
+        // ★ADR-0231 종료 합성 + 봉인 = 한 replay 락 구간★: 낱개 emit 은 호출마다 락을 따로 잡으므로, 훑기와
+        //   봉인 사이에 선 `Queued` 가 둘 다를 빠져나가 영구 항목(= 상한 없는 우편 막힘)이 된다. 이 덩이는 턴
+        //   관측을 지나지 않는다(관측 정리 지점을 늘리지 않는다 — ADR-0127).
+        let synthesized = {
+            let mut replay = self.replay.lock().expect("replay poisoned");
+            self.synthesize_ended_and_seal(&mut replay)
+        };
+        if !synthesized.is_empty() {
+            tracing::info!(
+                agent = %self.id,
+                epoch = self.epoch,
+                count = synthesized.len(),
+                "종료 합성: 남은 대기 입력을 Dropped(AgentEnded) 로 닫음"
+            );
+        }
+        // ★종료 합성은 목록을 비워도 「비었다」를 적지도 초인종을 울리지도 않는다★: 대기 목록 표의 이 화신
+        //   항목은 아래에서 턴 항목과 함께 거두므로 적어 봐야 곧 지워지고, 초인종은 종점 전이를 앞둔 화신에게
+        //   우편을 흘려보내라는 자극이 된다. 파킹된 우편은 다음 화신의 등장 flush 가 나른다.
+        // ADR-0231
+        self.fan_out(&synthesized);
 
         // AgentStatus 변형 추가 금지(impl-spec 표).
         // ★reason 은 reaper hook 에도 넘겨야 하므로 매핑 전에 clone 해 둔다(소비 전 보존).
@@ -432,6 +651,12 @@ impl OutputCore {
         //   (emit 의 finalize 재확인 주석이 그 인과의 다른 반쪽). epoch 일치 검사는 forget 이 한다.
         // ADR-0113
         self.turn.table.forget(self.id, self.epoch);
+        // 대기 목록 표도 같은 자리에서 거둔다. ★emit 쪽 finalize 재확인은 이 표에 필요 없다★ — 표의 `set` 은
+        //   항목을 만들지 않으므로(`register` 만 만든다) 지각한 쓰기가 거둔 항목을 되살릴 수 없다.
+        // ADR-0231
+        if let Some(pending) = &self.inputs_pending {
+            pending.forget(self.id, self.epoch);
+        }
 
         // status lock 해제 후 외부 호출(§10: status lock 보유 중 외부호출 금지).
         self.status_sink
@@ -447,6 +672,34 @@ impl OutputCore {
         {
             hook(reason);
         }
+    }
+
+    /// 열린 항목마다 `Dropped{AgentEnded}` 를 발급·push·환원하고 봉인을 세운다. 호출자가 replay 락을 쥐고
+    /// 부른다(`finish` 한 곳). 반환 = 링에 선 줄.
+    // ADR-0231
+    fn synthesize_ended_and_seal(&self, replay: &mut Ring) -> Vec<(u64, OutputEvent)> {
+        let mut registry = self.queued_inputs.lock();
+        let open: Vec<String> = registry.rows().iter().map(|row| row.id.clone()).collect();
+        let mut numbered = Vec::with_capacity(open.len());
+        for id in open {
+            let op = QueuedInputEvent::Dropped {
+                id,
+                cause: DropCause::AgentEnded,
+            };
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            registry.reduce(seq, &op);
+            let event = OutputEvent::QueuedInput(op);
+            let cost_bytes = estimate_cost_bytes(&event);
+            replay.push(StoredOutput {
+                seq,
+                event: event.clone(),
+                cost_bytes,
+            });
+            numbered.push((seq, event));
+        }
+        debug_assert!(registry.is_empty(), "종료 합성 뒤 열린 항목이 남았다");
+        self.sealed.store(true, Ordering::Relaxed);
+        numbered
     }
 
     /// 과도기 Exiting 전이 — manager kill 0.5단계용. Exiting 알림 주체가 이 경로.
@@ -669,6 +922,7 @@ impl OutputCore {
                         OutputEvent::TurnEnd { .. } => "TurnEnd",
                         OutputEvent::Error(_) => "Error",
                         OutputEvent::Structured { .. } => "Structured",
+                        OutputEvent::QueuedInput(_) => "QueuedInput",
                     };
                     tracing::warn!(
                         seq = s.seq,
@@ -819,6 +1073,16 @@ pub struct StoredOutput {
     pub cost_bytes: usize,
 }
 
+/// 목록 사건은 명부를 먹이는 낱개 문(`emit` 계열)으로만 링에 든다 — `seed`·덩이 문으로 들면 명부가 링 접두의
+/// 환원값이 아니게 된다(그 줄은 명부를 모른 채 링에만 선다).
+// ADR-0231
+fn debug_assert_not_list_event(event: &OutputEvent) {
+    debug_assert!(
+        !matches!(event, OutputEvent::QueuedInput(_)),
+        "목록 사건이 명부를 거치지 않는 문으로 들었다: {event:?}"
+    );
+}
+
 /// OutputEvent 의 **eviction 예산용** 크기 근사.
 ///
 /// ★왜 근사인가(TRD 핵심)★: core 는 직렬화를 못 한다(ADR-0003 — wire 변환은 daemon adapter 몫).
@@ -862,6 +1126,20 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
         }
         OutputEvent::Error(s) => s.len(),
         OutputEvent::Structured { kind, json } => kind.len() + json.len(),
+        // 본문을 싣는 둘 — `Queued` 의 글과 받음 불가 판명의 말풍선 사본.
+        // ADR-0231
+        OutputEvent::QueuedInput(ev) => match ev {
+            QueuedInputEvent::Queued { id, text } => id.len() + text.len(),
+            QueuedInputEvent::AckUnavailable { delivered } => delivered
+                .iter()
+                .map(|copy| copy.id.len() + copy.text.len())
+                .sum(),
+            QueuedInputEvent::CancelRequested { id }
+            | QueuedInputEvent::CancelAnswered { id, .. }
+            | QueuedInputEvent::CancelFailed { id }
+            | QueuedInputEvent::Delivered { id }
+            | QueuedInputEvent::Dropped { id, .. } => id.len(),
+        },
     }
 }
 
@@ -1093,6 +1371,153 @@ mod tests {
         assert!(turns.is_in_turn(id, 7), "진행 신호 → 턴 중");
         core.emit(message_done());
         assert!(!turns.is_in_turn(id, 7), "종료 신호 → 턴 아님");
+    }
+
+    /// 초인종 순간의 표를 읽는 sink — 「표 갱신 → 통지」 순서의 관찰창.
+    struct HaltAtDoorbell {
+        turns: Arc<TurnObservations>,
+        seen: Mutex<Vec<bool>>,
+    }
+    impl StatusSink for HaltAtDoorbell {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+        fn turn_ended(&self, id: AgentId, epoch: u32) {
+            let halted = self.turns.get(id, epoch).expect("관측됨").last_end_failed;
+            self.seen.lock().unwrap().push(halted);
+        }
+    }
+
+    /// 오류 끝을 싣는 분류자 — 운영 분류기가 아직 오류 끝을 안 내므로 시험이 직접 짓는다.
+    fn classify_outcome(event: &OutputEvent) -> Option<TurnSignal> {
+        use crate::turn::TurnEndKind;
+        use crate::types::TurnOutcome;
+        match event {
+            OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
+                TurnOutcome::Completed => TurnEndKind::Clean,
+                TurnOutcome::Failed { .. } => TurnEndKind::Failed,
+                _ => TurnEndKind::Other,
+            })),
+            _ => None,
+        }
+    }
+
+    // ADR-0231
+    #[test]
+    fn the_turn_end_doorbell_rings_after_the_halt_is_written() {
+        use crate::types::TurnOutcome;
+        let id = uuid::Uuid::new_v4();
+        let turns = Arc::new(TurnObservations::new());
+        turns.register(id, 2);
+        let sink = Arc::new(HaltAtDoorbell {
+            turns: turns.clone(),
+            seen: Mutex::new(Vec::new()),
+        });
+        let core = OutputCore::new(
+            id,
+            2,
+            sink.clone(),
+            TurnWiring::new(turns.clone(), classify_outcome),
+        );
+        core.emit(OutputEvent::TurnEnd {
+            turn_id: None,
+            outcome: TurnOutcome::Failed { detail: None },
+        });
+        core.emit(OutputEvent::TurnEnd {
+            turn_id: None,
+            outcome: TurnOutcome::Completed,
+        });
+        assert_eq!(
+            *sink.seen.lock().unwrap(),
+            vec![true, false],
+            "초인종을 받은 쪽이 곧바로 바쁨을 묻는다 — 그때 표가 이미 멈춤·풀림을 보여야 한다"
+        );
+    }
+
+    type Park = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+    /// 오류 줄을 분류하는 순간 그 스레드를 세워 두는 자리 — seq 는 발급됐고 표에는 아직 안 적힌 틈이다(시험 전용).
+    static PARK_ERROR: Mutex<Option<Park>> = Mutex::new(None);
+
+    /// 오류 줄 = `Failed`(붙잡힘) · 입력 에코 = 진행 · 턴 끝 = 깨끗한 끝.
+    fn classify_parking_error(event: &OutputEvent) -> Option<TurnSignal> {
+        use crate::turn::TurnEndKind;
+        match event {
+            OutputEvent::Error(_) => {
+                let parked = PARK_ERROR.lock().unwrap().take();
+                if let Some((entered, release)) = parked {
+                    entered.send(()).expect("entered");
+                    release
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("release");
+                }
+                Some(TurnSignal::Failed)
+            }
+            OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
+            OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Clean)),
+            _ => None,
+        }
+    }
+
+    /// ★멈춤 칸의 커서 회귀(실 emit 경로)★: pump 의 오류 줄(seq N)이 표에 적히기 전에 주입 스레드의 진행
+    /// (N+1)이 먼저 적힌다 — 진행 커서로 거르면 그 오류가 버려져 턴 끝(N+2)이 깨끗하게 접힌다.
+    // ADR-0231
+    #[test]
+    fn an_error_written_behind_a_newer_progress_still_halts_at_the_turn_end() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        *PARK_ERROR.lock().unwrap() = Some((entered_tx, release_rx));
+        let id = uuid::Uuid::new_v4();
+        let turns = Arc::new(TurnObservations::new());
+        turns.register(id, 4);
+        let core = Arc::new(OutputCore::new(
+            id,
+            4,
+            MockStatusSink::new(),
+            TurnWiring::new(turns.clone(), classify_parking_error),
+        ));
+
+        // 출력 pump — 오류 줄(분류에서 붙잡힘) 뒤에 턴 끝 줄.
+        let pump = {
+            let core = core.clone();
+            std::thread::spawn(move || {
+                core.emit(OutputEvent::Error("boom".into()));
+                core.emit(message_done());
+            })
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("오류 줄의 seq 가 발급된 채 붙잡혔다");
+        // 주입 스레드의 입력 에코.
+        core.emit(OutputEvent::Structured {
+            kind: "user".into(),
+            json: "{}".into(),
+        });
+        release_tx.send(()).expect("release");
+        pump.join().expect("pump");
+
+        let order: Vec<&str> = core
+            .replay
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .map(|s| match s.event {
+                OutputEvent::Error(_) => "Error",
+                OutputEvent::Structured { .. } => "Structured",
+                OutputEvent::MessageDone { .. } => "MessageDone",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            order,
+            ["Error", "Structured", "MessageDone"],
+            "링 순서 전제"
+        );
+        let o = turns.get(id, 4).expect("관측됨");
+        assert!(
+            o.last_end_failed,
+            "링 순서상 오류로 끝난 턴이 깨끗하게 접혔다 — 뒤 seq 의 진행에 밀려 오류가 버려졌다"
+        );
+        assert!(!o.in_turn, "턴 끝이 가장 새 신호다");
     }
 
     /// ★진행 신호를 적지 않는 문★ — 같은 이벤트가 화면(fanout)·replay 로는 그대로 가되 사실
@@ -1717,6 +2142,42 @@ mod tests {
         assert_eq!(cost2, 5 + 2);
     }
 
+    /// 명부 사건은 본문(글 · 말풍선 사본)을 링 무게로 센다 — 긴 글이 「건수 1」로 링 상한을 우회하지 않게.
+    #[test]
+    fn ring_cost_bytes_counts_queued_text_and_ack_copies() {
+        use crate::types::{DeliveredCopy, DropCause};
+        let queued = |ev| estimate_cost_bytes(&OutputEvent::QueuedInput(ev));
+        assert_eq!(
+            queued(QueuedInputEvent::Queued {
+                id: "u1".into(),      // 2
+                text: "hello".into(), // 5
+            }),
+            2 + 5
+        );
+        assert_eq!(
+            queued(QueuedInputEvent::AckUnavailable {
+                delivered: vec![
+                    DeliveredCopy {
+                        id: "a".into(),     // 1
+                        text: "xyz".into(), // 3
+                    },
+                    DeliveredCopy {
+                        id: "bb".into(),     // 2
+                        text: "wxyz".into(), // 4
+                    },
+                ],
+            }),
+            1 + 3 + 2 + 4
+        );
+        assert_eq!(
+            queued(QueuedInputEvent::Dropped {
+                id: "u12".into(),
+                cause: DropCause::Rejected,
+            }),
+            3
+        );
+    }
+
     #[test]
     fn finish_finalizes_exactly_once() {
         let status_sink = MockStatusSink::new();
@@ -1943,6 +2404,979 @@ mod tests {
         assert!(
             seqs.windows(2).all(|w| w[0] < w[1]),
             "replay ring 은 seq 로 엄격 오름차순이어야 한다(동시 emit 원자성): {seqs:?}"
+        );
+    }
+}
+
+// ── ADR-0231 대기 입력 명부 — 코어 관찰(명부 환원 · 종료 합성·봉인 · 바꿔 적기 · 대기 목록 표 순서) ──────────
+#[cfg(test)]
+mod queued_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::sync::mpsc;
+
+    use crate::queued_input::{CancelAnswer, QueuedRow, Registry, RowPhase};
+    use crate::turn::TurnEndKind;
+    use crate::types::{AgentInfo, DeliveredCopy, SinkError};
+
+    const EPOCH: u32 = 5;
+    /// 시험 스레드가 서로를 기다리는 상한 — 넘으면 매달리지 않고 실패한다.
+    const WAIT: Duration = Duration::from_secs(5);
+
+    fn queued(id: &str, text: &str) -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::Queued {
+            id: id.into(),
+            text: text.into(),
+        })
+    }
+    fn delivered(id: &str) -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::Delivered { id: id.into() })
+    }
+    fn dropped(id: &str, cause: DropCause) -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::Dropped {
+            id: id.into(),
+            cause,
+        })
+    }
+    fn cancel_requested(id: &str) -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::CancelRequested { id: id.into() })
+    }
+    fn cancel_answered(id: &str, removed: bool) -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::CancelAnswered {
+            id: id.into(),
+            removed,
+        })
+    }
+    fn ack_unavailable() -> OutputEvent {
+        OutputEvent::QueuedInput(QueuedInputEvent::AckUnavailable {
+            delivered: Vec::new(),
+        })
+    }
+    fn copy(id: &str, text: &str) -> DeliveredCopy {
+        DeliveredCopy {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+    fn ended(id: &str) -> QueuedInputEvent {
+        QueuedInputEvent::Dropped {
+            id: id.into(),
+            cause: DropCause::AgentEnded,
+        }
+    }
+    fn delta() -> OutputEvent {
+        OutputEvent::TextDelta {
+            text: "x".into(),
+            turn_id: None,
+            message_id: None,
+        }
+    }
+
+    struct Quiet;
+    impl StatusSink for Quiet {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+    }
+
+    /// 초인종 두 개가 울리는 순간의 두 표를 적는다 — 「표 갱신 → 통지」 · 「턴 관측 → 비었다」 순서의 관찰창.
+    struct DoorbellProbe {
+        id: AgentId,
+        pending: Arc<InputsPendingTable>,
+        turns: Arc<TurnObservations>,
+        /// 턴 끝 초인종 순간의 대기 목록 표.
+        at_turn_end: Mutex<Vec<Option<bool>>>,
+        /// 비었다 초인종 순간의 (대기 목록 표, 턴 중).
+        at_drain: Mutex<Vec<(Option<bool>, bool)>>,
+    }
+    impl DoorbellProbe {
+        fn drains(&self) -> Vec<(Option<bool>, bool)> {
+            self.at_drain.lock().unwrap().clone()
+        }
+    }
+    impl StatusSink for DoorbellProbe {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+        fn turn_ended(&self, id: AgentId, epoch: u32) {
+            assert_eq!((id, epoch), (self.id, EPOCH));
+            let pending = self.pending.get(id, epoch);
+            self.at_turn_end.lock().unwrap().push(pending);
+        }
+        fn inputs_drained(&self, id: AgentId, epoch: u32) {
+            assert_eq!((id, epoch), (self.id, EPOCH));
+            let pending = self.pending.get(id, epoch);
+            let in_turn = self.turns.is_in_turn(id, epoch);
+            self.at_drain.lock().unwrap().push((pending, in_turn));
+        }
+    }
+
+    /// 받은 프레임의 seq 와 목록 사건을 적는 sink.
+    struct Recorder {
+        id: SinkId,
+        got: Mutex<Vec<(u64, Option<QueuedInputEvent>)>>,
+    }
+    impl Recorder {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                id: uuid::Uuid::new_v4(),
+                got: Mutex::new(Vec::new()),
+            })
+        }
+        fn seqs(&self) -> Vec<u64> {
+            self.got.lock().unwrap().iter().map(|(s, _)| *s).collect()
+        }
+    }
+    impl OutputSink for Recorder {
+        fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+            let op = match frame.payload {
+                OutputPayload::Event(OutputEvent::QueuedInput(op)) => Some(op.clone()),
+                _ => None,
+            };
+            self.got.lock().unwrap().push((frame.seq, op));
+            Ok(())
+        }
+        fn sink_id(&self) -> SinkId {
+            self.id
+        }
+    }
+
+    fn claude_classifier() -> TurnClassifier {
+        use crate::profile::{AgentCommand, AgentOutputFormat};
+        crate::backend::turn_classifier(&AgentCommand::Claude {
+            extra_args: vec![],
+            output_format: AgentOutputFormat::StreamJson,
+        })
+    }
+
+    /// 목록을 비우는 받음이 턴 끝이기도 한 분류자 — 턴 끝 초인종이 「비었다」보다 앞에 오는지 가르려고 짓는다.
+    fn delivered_ends_the_turn(event: &OutputEvent) -> Option<TurnSignal> {
+        matches!(
+            event,
+            OutputEvent::QueuedInput(QueuedInputEvent::Delivered { .. })
+        )
+        .then_some(TurnSignal::Ended(TurnEndKind::Clean))
+    }
+
+    /// 한 화신의 두 표 — 코어는 운영 spawn 과 같은 모양으로 짓는다(두 표 등록 + 새 명부).
+    struct Fixture {
+        id: AgentId,
+        turns: Arc<TurnObservations>,
+        pending: Arc<InputsPendingTable>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            Self {
+                id: uuid::Uuid::new_v4(),
+                turns: Arc::new(TurnObservations::new()),
+                pending: Arc::new(InputsPendingTable::new()),
+            }
+        }
+        fn core(
+            &self,
+            status_sink: Arc<dyn StatusSink>,
+            classify: TurnClassifier,
+        ) -> Arc<OutputCore> {
+            self.turns.register(self.id, EPOCH);
+            self.pending.register(self.id, EPOCH);
+            Arc::new(
+                OutputCore::new(
+                    self.id,
+                    EPOCH,
+                    status_sink,
+                    TurnWiring::new(self.turns.clone(), classify),
+                )
+                .with_queued(QueuedWiring {
+                    registry: Arc::new(QueuedInputs::new()),
+                    pending: self.pending.clone(),
+                }),
+            )
+        }
+        fn probe(&self) -> Arc<DoorbellProbe> {
+            Arc::new(DoorbellProbe {
+                id: self.id,
+                pending: self.pending.clone(),
+                turns: self.turns.clone(),
+                at_turn_end: Mutex::new(Vec::new()),
+                at_drain: Mutex::new(Vec::new()),
+            })
+        }
+        fn pending(&self) -> Option<bool> {
+            self.pending.get(self.id, EPOCH)
+        }
+    }
+
+    fn ring(core: &OutputCore) -> Vec<StoredOutput> {
+        core.replay.lock().unwrap().snapshot()
+    }
+
+    /// 링의 목록 사건만(seq 순).
+    fn ring_ops(core: &OutputCore) -> Vec<(u64, QueuedInputEvent)> {
+        ring(core)
+            .into_iter()
+            .filter_map(|s| match s.event {
+                OutputEvent::QueuedInput(op) => Some((s.seq, op)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn rows(core: &OutputCore) -> Vec<QueuedRow> {
+        core.queued_inputs().snapshot().0
+    }
+
+    // ── 명부 = 링 접두의 환원값 ────────────────────────────────────────────────────────────────
+
+    /// 두 스레드가 목록 사건을 섞어 내는 동안 셋째가 명부 스냅숏을 뜬다 — 뜬 (행, S) 는 링 접두 `seq <= S` 를
+    /// 새 환원기에 먹인 결과와 같아야 한다. 명부를 replay 락 밖에서 먹이면 두 스레드의 환원 순서가 링 순서와
+    /// 갈려 이 대조가 깨진다.
+    #[test]
+    fn the_registry_snapshot_is_the_reduction_of_the_ring_prefix_it_names() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let reader = {
+            let (core, stop) = (core.clone(), stop.clone());
+            std::thread::spawn(move || {
+                let mut samples = Vec::new();
+                while !stop.load(Ordering::Acquire) {
+                    samples.push(core.queued_inputs().snapshot());
+                    std::thread::yield_now();
+                }
+                samples
+            })
+        };
+        let emitters: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|tag| {
+                let core = core.clone();
+                std::thread::spawn(move || {
+                    for i in 0..150 {
+                        let id = format!("{tag}{i}");
+                        core.emit(queued(&id, "t"));
+                        core.emit(delta());
+                        match i % 4 {
+                            0 => core.emit(delivered(&id)),
+                            1 => core.emit(cancel_requested(&id)),
+                            2 => core.emit(dropped(&format!("{tag}{}", i - 1), DropCause::Unknown)),
+                            _ => {}
+                        }
+                    }
+                })
+            })
+            .collect();
+        for e in emitters {
+            e.join().expect("emitter");
+        }
+        stop.store(true, Ordering::Release);
+        let mut samples = reader.join().expect("reader");
+        samples.push(core.queued_inputs().snapshot());
+
+        let ops = ring_ops(&core);
+        assert!(
+            ring(&core).len() < REPLAY_MAX_EVENTS,
+            "축출 없이 전량 남아야 대조가 완전하다"
+        );
+        samples.sort_by_key(|(_, s)| *s);
+        let mut fresh = Registry::new();
+        let mut next = ops.iter().peekable();
+        for (rows, s) in samples {
+            let Some(s) = s else {
+                assert!(rows.is_empty(), "목록 사건 없이 행이 있다");
+                continue;
+            };
+            while let Some((seq, op)) = next.next_if(|(seq, _)| *seq <= s) {
+                fresh.reduce(*seq, op);
+            }
+            assert_eq!(fresh.as_of_seq(), Some(s), "S 가 목록 사건의 seq 가 아니다");
+            assert_eq!(
+                fresh.rows(),
+                &rows[..],
+                "S={s} 의 행이 링 접두의 환원값과 다르다"
+            );
+        }
+        assert!(
+            next.next().is_none(),
+            "마지막 스냅숏이 링 끝까지 환원하지 않았다"
+        );
+    }
+
+    #[test]
+    fn without_list_events_the_snapshot_has_no_seq() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        assert_eq!(core.queued_inputs().snapshot(), (vec![], None));
+        core.emit(delta());
+        assert_eq!(core.queued_inputs().snapshot(), (vec![], None));
+        core.emit(queued("a", "A"));
+        assert_eq!(core.queued_inputs().snapshot().1, Some(1));
+    }
+
+    // ── 종료 합성 + 봉인 ─────────────────────────────────────────────────────────────────────
+
+    /// 합성 `Dropped{AgentEnded}` 가 링·구독자 양쪽에서 종점 전이보다 앞 · 대기 목록 표도 거둔다.
+    #[test]
+    fn finish_drops_every_open_row_before_the_terminal_transition() {
+        struct Log {
+            id: SinkId,
+            lines: Mutex<Vec<String>>,
+        }
+        impl OutputSink for Log {
+            fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+                if let OutputPayload::Event(OutputEvent::QueuedInput(op)) = frame.payload {
+                    self.lines.lock().unwrap().push(format!("{op:?}"));
+                }
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                self.id
+            }
+        }
+        impl StatusSink for Log {
+            fn status_changed(&self, _id: AgentId, status: AgentStatus, _epoch: u32) {
+                self.lines
+                    .lock()
+                    .unwrap()
+                    .push(format!("status {status:?}"));
+            }
+            fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+        }
+        let log = Arc::new(Log {
+            id: uuid::Uuid::new_v4(),
+            lines: Mutex::new(Vec::new()),
+        });
+        let fx = Fixture::new();
+        let core = fx.core(log.clone(), claude_classifier());
+        core.emit(queued("a", "A"));
+        core.emit(queued("b", "B"));
+        core.emit(cancel_requested("b"));
+        core.subscribe(log.clone());
+        log.lines.lock().unwrap().clear();
+        assert_eq!(fx.pending(), Some(true));
+
+        core.finish(TerminalReason::Exited { code: Some(0) });
+
+        assert_eq!(
+            *log.lines.lock().unwrap(),
+            vec![
+                format!("{:?}", ended("a")),
+                format!("{:?}", ended("b")),
+                format!("status {:?}", AgentStatus::Exited { code: Some(0) }),
+            ],
+            "남은 항목이 종점 전이보다 먼저 닫혀야 한다(목록 순)"
+        );
+        let tail: Vec<_> = ring_ops(&core)
+            .into_iter()
+            .skip(3)
+            .map(|(_, op)| op)
+            .collect();
+        assert_eq!(tail, vec![ended("a"), ended("b")]);
+        let registry = core.queued_inputs().lock();
+        assert!(registry.is_empty());
+        assert_eq!(
+            registry.tombstone("a"),
+            Some(false),
+            "에이전트 종료는 되살림 불가"
+        );
+        drop(registry);
+        assert_eq!(
+            fx.pending(),
+            None,
+            "대기 목록 표가 이 화신의 항목을 거두지 않았다"
+        );
+    }
+
+    /// 봉인: 종료 합성 뒤의 `Queued` 는 링에 `Dropped{AgentEnded}` 로 선다(→ 묘비) — 영구 항목을 못 만든다.
+    #[test]
+    fn a_queued_after_finish_lands_in_the_ring_as_agent_ended() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        core.finish(TerminalReason::Killed);
+        let sink = Recorder::new();
+        core.subscribe(sink.clone());
+
+        core.emit(queued("late", "L"));
+
+        assert_eq!(ring_ops(&core), vec![(0, ended("late"))]);
+        assert_eq!(*sink.got.lock().unwrap(), vec![(0, Some(ended("late")))]);
+        assert!(rows(&core).is_empty());
+        assert_eq!(core.queued_inputs().lock().tombstone("late"), Some(false));
+    }
+
+    /// 다른 스레드가 `Queued` 를 쉼 없이 내는 동안 `finish` — 합성 덩이와 봉인 사이에 `Queued` 가 없고, 합성은
+    /// 그때 열린 항목 전부를 한 덩이로 닫고, 명부에 비종결 항목이 남지 않는다.
+    #[test]
+    fn finish_synthesis_and_seal_are_one_lock_section() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let emitter = {
+            let core = core.clone();
+            std::thread::spawn(move || {
+                // 상한 = 링 축출 없이 전량 남는 크기(`Queued` + 합성 `Dropped` < `REPLAY_MAX_EVENTS`). 스케줄
+                //   탓에 상한까지 종료를 못 보면 이 판은 겹침을 못 잰다 — 봉인 단독은 위 시험이 잰다.
+                let mut after_final = 0;
+                for i in 0..1800 {
+                    core.emit(queued(&format!("q{i}"), "t"));
+                    if i == 100 {
+                        ready_tx.send(()).expect("ready");
+                    }
+                    if core.finalized.load(Ordering::Acquire) {
+                        after_final += 1;
+                        if after_final == 100 {
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+        ready_rx.recv_timeout(WAIT).expect("emitter ready");
+        core.finish(TerminalReason::Exited { code: Some(0) });
+        emitter.join().expect("emitter");
+
+        let ops: Vec<QueuedInputEvent> = ring_ops(&core).into_iter().map(|(_, op)| op).collect();
+        let first_drop = ops
+            .iter()
+            .position(|op| matches!(op, QueuedInputEvent::Dropped { .. }))
+            .expect("합성 Dropped 가 없다");
+        let listed: Vec<&String> = ops[..first_drop]
+            .iter()
+            .map(|op| match op {
+                QueuedInputEvent::Queued { id, .. } => id,
+                other => panic!("합성 앞에 Queued 아닌 사건: {other:?}"),
+            })
+            .collect();
+        let dropped_after: Vec<&String> = ops[first_drop..]
+            .iter()
+            .map(|op| match op {
+                QueuedInputEvent::Dropped {
+                    id,
+                    cause: DropCause::AgentEnded,
+                } => id,
+                other => panic!("합성 뒤에 AgentEnded 아닌 사건 — 봉인을 빠져나갔다: {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            &dropped_after[..listed.len()],
+            &listed[..],
+            "합성 덩이가 그때 열린 항목 전부를 목록 순으로 잇달아 닫지 않았다"
+        );
+        assert!(rows(&core).is_empty(), "명부에 비종결 항목이 남았다");
+    }
+
+    // ── 판정 뒤 바꿔 적기 · 사본 ─────────────────────────────────────────────────────────────
+
+    /// 판명 앞에 선 `Queued` 는 그대로 적히고 판명이 옮긴다 · 판명 뒤의 `Queued` 는 `Queued` + 그 항목 하나의
+    /// 사본을 실은 `AckUnavailable`(두 seq) — 명부 결과는 받음이고 목록은 찬 적이 없다.
+    #[test]
+    fn a_queued_after_the_ack_verdict_is_closed_by_its_own_copy_in_the_same_lock() {
+        let fx = Fixture::new();
+        let probe = fx.probe();
+        let core = fx.core(probe.clone(), claude_classifier());
+        core.emit(queued("a", "A"));
+        core.emit(ack_unavailable());
+        assert_eq!(fx.pending(), Some(false));
+
+        core.emit(queued("b", "B"));
+
+        let queued_op = |id: &str, text: &str| QueuedInputEvent::Queued {
+            id: id.into(),
+            text: text.into(),
+        };
+        let ack_op = |copies| QueuedInputEvent::AckUnavailable { delivered: copies };
+        assert_eq!(
+            ring_ops(&core),
+            vec![
+                (0, queued_op("a", "A")),
+                (1, ack_op(vec![copy("a", "A")])),
+                (2, queued_op("b", "B")),
+                (3, ack_op(vec![copy("b", "B")])),
+            ]
+        );
+        let registry = core.queued_inputs().lock();
+        assert!(registry.is_empty());
+        assert_eq!(registry.tombstone("b"), Some(false), "받음으로 닫혔다");
+        assert_eq!(registry.as_of_seq(), Some(3));
+        drop(registry);
+        assert_eq!(fx.pending(), Some(false));
+        assert_eq!(
+            probe.drains().len(),
+            1,
+            "빔 → 빔인 바꿔 적기는 초인종을 울리지 않는다"
+        );
+    }
+
+    #[test]
+    fn the_seal_comes_before_the_ack_rewrite() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        core.emit(ack_unavailable());
+        core.finish(TerminalReason::Killed);
+
+        core.emit(queued("c", "C"));
+
+        let ops = ring_ops(&core);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(
+            ops[1],
+            (1, ended("c")),
+            "봉인 뒤의 Queued 는 받음이 아니라 버림이다"
+        );
+    }
+
+    /// 디코더가 빈 채로 낸 판명에 코어가 그 환원이 받음으로 닫는 항목(`Queued` · 취소 대기 못 뺐다·응답
+    /// 없음)의 사본을 목록 순으로 채운다 — 취소로 닫힌 것은 없다 · 디코더가 채워 보낸 것은 덮는다 · 링 무게가
+    /// 사본 본문을 센다.
+    #[test]
+    fn the_core_fills_the_ack_copies_from_the_rows_it_closes_as_delivered() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        core.emit(queued("a", "AAAA"));
+        core.emit(queued("b", "BBBB"));
+        core.emit(cancel_requested("b"));
+        core.emit(queued("c", "CCCC"));
+        core.emit(cancel_requested("c"));
+        core.emit(cancel_answered("c", false));
+        core.emit(queued("d", "DDDD"));
+        core.emit(cancel_requested("d"));
+        core.emit(cancel_answered("d", true));
+        assert_eq!(
+            rows(&core)
+                .iter()
+                .map(|r| (r.id.as_str(), r.phase))
+                .collect::<Vec<_>>(),
+            vec![
+                ("a", RowPhase::Queued),
+                (
+                    "b",
+                    RowPhase::Cancelling {
+                        answer: CancelAnswer::Unanswered,
+                        vendor_closed: false
+                    }
+                ),
+                (
+                    "c",
+                    RowPhase::Cancelling {
+                        answer: CancelAnswer::NotRemoved,
+                        vendor_closed: false
+                    }
+                ),
+            ]
+        );
+
+        core.emit(OutputEvent::QueuedInput(QueuedInputEvent::AckUnavailable {
+            delivered: vec![copy("zz", "디코더가 채운 것")],
+        }));
+
+        let stored = ring(&core).pop().expect("판명");
+        let filled = QueuedInputEvent::AckUnavailable {
+            delivered: vec![copy("a", "AAAA"), copy("b", "BBBB"), copy("c", "CCCC")],
+        };
+        assert!(
+            matches!(&stored.event, OutputEvent::QueuedInput(op) if *op == filled),
+            "사본이 닫힌 항목의 목록 순 본문이 아니다: {:?}",
+            stored.event
+        );
+        assert_eq!(
+            stored.cost_bytes,
+            estimate_cost_bytes(&OutputEvent::QueuedInput(filled))
+        );
+        assert!(stored.cost_bytes > estimate_cost_bytes(&ack_unavailable()));
+        let registry = core.queued_inputs().lock();
+        assert!(registry.is_empty());
+        assert_eq!(
+            registry.tombstone("zz"),
+            None,
+            "덮인 디코더 사본은 환원되지 않는다"
+        );
+        assert!(registry.ack_unavailable_seen());
+    }
+
+    // ── 턴 관측 가드 ─────────────────────────────────────────────────────────────────────────
+
+    thread_local! {
+        static CLASSIFIED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn record_classified(event: &OutputEvent) -> Option<TurnSignal> {
+        let label = match event {
+            OutputEvent::QueuedInput(QueuedInputEvent::Queued { id, .. }) => format!("Queued {id}"),
+            OutputEvent::QueuedInput(QueuedInputEvent::AckUnavailable { .. }) => {
+                "AckUnavailable".into()
+            }
+            other => format!("{other:?}"),
+        };
+        CLASSIFIED.with(|c| c.borrow_mut().push(label));
+        None
+    }
+
+    /// 코어가 바꿔 적거나 지은 사건(봉인의 `Dropped` · 판정 뒤 잇는 `AckUnavailable` · 종료 합성)은 분류기를
+    /// 지나지 않는다 — 벤더 출력의 사실이 아니다. 원 사건(디코더의 판명 포함)은 지난다.
+    #[test]
+    fn events_the_core_writes_itself_never_reach_the_turn_classifier() {
+        let classified = || CLASSIFIED.with(|c| std::mem::take(&mut *c.borrow_mut()));
+        classified();
+
+        // 종료 합성(열린 항목 x) · 봉인(y).
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), record_classified);
+        core.emit(queued("x", "X"));
+        core.finish(TerminalReason::Killed);
+        core.emit(queued("y", "Y"));
+        assert_eq!(
+            ring_ops(&core).len(),
+            3,
+            "합성 Dropped x · 봉인 Dropped y 가 링에 섰다"
+        );
+        assert_eq!(
+            classified(),
+            vec!["Queued x"],
+            "종료 합성·봉인이 분류기를 지났다"
+        );
+
+        // 판정 뒤 바꿔 적기 — 원 사건(디코더의 판명 포함)만 지난다.
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), record_classified);
+        core.emit(queued("a", "A"));
+        core.emit(ack_unavailable());
+        core.emit(queued("b", "B"));
+        assert_eq!(ring_ops(&core).len(), 4);
+        assert_eq!(
+            classified(),
+            vec!["Queued a", "AckUnavailable", "Queued b"],
+            "판정 뒤 잇는 AckUnavailable 이 분류기를 지났다"
+        );
+    }
+
+    /// 운영 claude 분류기로 — 받음(`Delivered`) 말고는 목록 사건이 턴 관측을 켜지 않는다(바꿔 적은 사건 포함).
+    #[test]
+    fn list_events_other_than_delivered_never_turn_on_the_turn_observation() {
+        let fx = Fixture::new();
+        let probe = fx.probe();
+        let core = fx.core(probe.clone(), claude_classifier());
+        core.emit(queued("a", "A"));
+        core.emit(cancel_requested("a"));
+        core.emit(cancel_answered("a", false));
+        core.emit(queued("b", "B"));
+        core.emit(dropped("b", DropCause::Rejected));
+        core.emit(ack_unavailable());
+        core.emit(queued("c", "C"));
+        assert!(!fx.turns.is_in_turn(fx.id, EPOCH), "목록 사건이 턴을 켰다");
+        assert!(
+            probe.at_turn_end.lock().unwrap().is_empty(),
+            "목록 사건이 턴을 끝냈다"
+        );
+    }
+
+    // ── 대기 목록 표의 적는 순서 ─────────────────────────────────────────────────────────────
+
+    /// 「찼다」는 환원한 replay 락 안 — 그 emit 의 fanout 을 받은 쪽이 이미 참을 읽는다.
+    #[test]
+    fn filled_is_written_inside_the_lock_that_reduced_it() {
+        struct ReadsPendingOnQueued {
+            id: SinkId,
+            agent: AgentId,
+            pending: Arc<InputsPendingTable>,
+            seen: Mutex<Vec<Option<bool>>>,
+        }
+        impl OutputSink for ReadsPendingOnQueued {
+            fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+                if let OutputPayload::Event(OutputEvent::QueuedInput(QueuedInputEvent::Queued {
+                    ..
+                })) = frame.payload
+                {
+                    let v = self.pending.get(self.agent, EPOCH);
+                    self.seen.lock().unwrap().push(v);
+                }
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                self.id
+            }
+        }
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        let sink = Arc::new(ReadsPendingOnQueued {
+            id: uuid::Uuid::new_v4(),
+            agent: fx.id,
+            pending: fx.pending.clone(),
+            seen: Mutex::new(Vec::new()),
+        });
+        core.subscribe(sink.clone());
+        assert_eq!(fx.pending(), Some(false));
+        core.emit(queued("a", "A"));
+        assert_eq!(*sink.seen.lock().unwrap(), vec![Some(true)]);
+    }
+
+    /// 「비었다」는 그 emit 의 턴 관측 **뒤** — 목록을 비우는 받음이 턴 끝이기도 하면 턴 끝 초인종 순간엔 표가
+    /// 아직 참이고, 비었다 초인종 순간엔 거짓이다.
+    #[test]
+    fn drained_is_written_after_the_turn_observation_of_the_same_emit() {
+        let fx = Fixture::new();
+        let probe = fx.probe();
+        let core = fx.core(probe.clone(), delivered_ends_the_turn);
+        core.emit(queued("a", "A"));
+        core.emit(delivered("a"));
+        assert_eq!(*probe.at_turn_end.lock().unwrap(), vec![Some(true)]);
+        assert_eq!(probe.drains(), vec![(Some(false), false)]);
+    }
+
+    /// 목록을 비우는 claude `Delivered`(drain 턴의 진행) — 표가 거짓이 되는 순간 턴 관측은 이미 진행이다.
+    /// 어댑터와 같은 순서(표 먼저, 턴 관측 나중)로 쉼 없이 읽는 관찰자가 「둘 다 한가」를 한 번도 못 본다.
+    #[test]
+    fn a_draining_claude_delivery_is_never_observed_idle_on_both_facts() {
+        let fx = Fixture::new();
+        let probe = fx.probe();
+        let core = fx.core(probe.clone(), claude_classifier());
+        let stop = Arc::new(AtomicBool::new(false));
+        let (filled_tx, filled_rx) = mpsc::channel();
+        let observer = {
+            let (pending, turns, id, stop) =
+                (fx.pending.clone(), fx.turns.clone(), fx.id, stop.clone());
+            std::thread::spawn(move || {
+                let mut filled_seen = false;
+                let mut idle_after_filled = 0usize;
+                while !stop.load(Ordering::Acquire) {
+                    let p = pending.get(id, EPOCH);
+                    let in_turn = turns.is_in_turn(id, EPOCH);
+                    if p == Some(true) && !filled_seen {
+                        filled_seen = true;
+                        filled_tx.send(()).expect("filled");
+                    }
+                    if filled_seen && p == Some(false) && !in_turn {
+                        idle_after_filled += 1;
+                    }
+                }
+                idle_after_filled
+            })
+        };
+        core.emit(queued("a", "A"));
+        filled_rx.recv_timeout(WAIT).expect("관찰자가 찼다를 봤다");
+        core.emit(delivered("a"));
+        stop.store(true, Ordering::Release);
+        assert_eq!(observer.join().expect("observer"), 0);
+        assert_eq!(probe.drains(), vec![(Some(false), true)]);
+    }
+
+    /// 턴 관측을 지나지 않는 문도 목록을 비우면 락을 놓은 뒤 곧바로 적고 울린다 · 종료 합성 덩이는 목록을
+    /// 비워도 울리지 않고 표에서 거두기만 한다.
+    #[test]
+    fn unobserved_emits_drain_and_ring_but_the_finish_batch_only_forgets() {
+        let fx = Fixture::new();
+        let probe = fx.probe();
+        let core = fx.core(probe.clone(), claude_classifier());
+        core.emit_without_turn_observation(queued("a", "A"));
+        assert_eq!(fx.pending(), Some(true));
+        core.emit_without_turn_observation(delivered("a"));
+        assert_eq!(probe.drains(), vec![(Some(false), false)]);
+
+        core.emit(queued("b", "B"));
+        assert_eq!(fx.pending(), Some(true));
+        core.finish(TerminalReason::Killed);
+        assert!(rows(&core).is_empty(), "종료 합성이 목록을 비웠다(전제)");
+        // ADR-0231: 종료 합성은 초인종을 울리지 않는다 — 대기 목록 표 항목은 곧바로 거두고, 초인종은 종점 전이를
+        //   앞둔 화신에게 우편을 흘려보내라는 자극이 된다(파킹된 우편은 다음 화신의 등장 flush 가 나른다).
+        assert_eq!(
+            probe.drains().len(),
+            1,
+            "종료 합성이 죽어가는 화신 앞으로 초인종을 울렸다"
+        );
+        assert_eq!(fx.pending(), None, "표에서 거둔다");
+    }
+
+    /// 표는 더 작은 seq 의 쓰기를 버린다 — 락 밖으로 미룬 「비었다」(seq N)가 다른 스레드가 그 사이 락 안에서
+    /// 적은 「찼다」(seq N+1)를 덮지 않는다.
+    #[test]
+    fn a_deferred_drain_never_overwrites_a_later_fill() {
+        /// 첫 턴 끝 초인종에서 붙잡는다 — 「비었다」를 쓰기 직전의 스레드를 세워 두는 자리다(시험 전용).
+        struct HoldFirstTurnEnd {
+            hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+        }
+        impl StatusSink for HoldFirstTurnEnd {
+            fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+            fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+            fn turn_ended(&self, _id: AgentId, _epoch: u32) {
+                let taken = self.hold.lock().unwrap().take();
+                if let Some((entered, release)) = taken {
+                    entered.send(()).expect("entered");
+                    release.recv_timeout(WAIT).expect("release");
+                }
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let fx = Fixture::new();
+        let core = fx.core(
+            Arc::new(HoldFirstTurnEnd {
+                hold: Mutex::new(Some((entered_tx, release_rx))),
+            }),
+            delivered_ends_the_turn,
+        );
+        core.emit(queued("a", "A"));
+        let drainer = {
+            let core = core.clone();
+            std::thread::spawn(move || core.emit(delivered("a")))
+        };
+        entered_rx.recv_timeout(WAIT).expect("비우는 스레드가 섰다");
+        assert!(rows(&core).is_empty(), "명부는 이미 비었다(락 안)");
+        core.emit(queued("b", "B"));
+        release_tx.send(()).expect("release");
+        drainer.join().expect("drainer");
+
+        assert_eq!(
+            fx.pending(),
+            Some(true),
+            "늦게 쓴 더 작은 seq 의 「비었다」가 「찼다」를 덮었다"
+        );
+        assert_eq!(rows(&core).len(), 1);
+    }
+
+    /// 초인종은 비는 순간 한 번 — 턴 끝 없이 목록만 빈 경우 포함, 찬 채인 동안은 울리지 않는다.
+    #[test]
+    fn the_drain_doorbell_rings_once_per_drain() {
+        let fx = Fixture::new();
+        let probe = fx.probe();
+        let core = fx.core(probe.clone(), claude_classifier());
+        core.emit(queued("a", "A"));
+        core.emit(queued("b", "B"));
+        core.emit(delivered("a"));
+        assert!(probe.drains().is_empty());
+        core.emit(delivered("b"));
+        assert_eq!(probe.drains().len(), 1);
+        core.emit(queued("c", "C"));
+        core.emit(dropped("c", DropCause::Withdrawn));
+        assert_eq!(probe.drains().len(), 2);
+        core.emit(delivered("c"));
+        assert_eq!(
+            probe.drains().len(),
+            2,
+            "빈 목록의 묘비 사건은 울리지 않는다"
+        );
+        assert!(
+            probe.at_turn_end.lock().unwrap().is_empty(),
+            "턴 끝은 없었다"
+        );
+    }
+
+    /// 명부를 꽂지 않은 코어도 링의 모양(봉인 · 바꿔 적기 · 사본)은 같다 — 표 쓰기와 초인종만 없다.
+    #[test]
+    fn a_core_without_queued_wiring_shapes_the_ring_the_same_but_rings_nothing() {
+        struct CountsDrains(AtomicU64);
+        impl StatusSink for CountsDrains {
+            fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+            fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+            fn inputs_drained(&self, _id: AgentId, _epoch: u32) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let drains = Arc::new(CountsDrains(AtomicU64::new(0)));
+        let core = OutputCore::new(
+            uuid::Uuid::new_v4(),
+            EPOCH,
+            drains.clone(),
+            TurnWiring::detached(),
+        );
+        core.emit(queued("a", "A"));
+        core.emit(ack_unavailable());
+        core.emit(queued("b", "B"));
+        core.emit(queued("open", "O"));
+        core.finish(TerminalReason::Killed);
+        core.emit(queued("c", "C"));
+        let kinds: Vec<String> = ring_ops(&core)
+            .into_iter()
+            .map(|(_, op)| match op {
+                QueuedInputEvent::Queued { id, .. } => format!("Queued {id}"),
+                QueuedInputEvent::AckUnavailable { delivered } => format!(
+                    "Ack {:?}",
+                    delivered.iter().map(|c| c.id.as_str()).collect::<Vec<_>>()
+                ),
+                QueuedInputEvent::Dropped { id, cause } => format!("Dropped {id} {cause:?}"),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "Queued a",
+                "Ack [\"a\"]",
+                "Queued b",
+                "Ack [\"b\"]",
+                "Queued open",
+                "Ack [\"open\"]",
+                "Dropped c AgentEnded",
+            ]
+        );
+        assert_eq!(drains.0.load(Ordering::SeqCst), 0);
+    }
+
+    // ── 라이브 배달(§5-7 전제) ───────────────────────────────────────────────────────────────
+
+    /// 두 스레드가 emit 하고 시험 sink 가 한쪽 send 를 붙잡아 역전을 만든다(시험 전용 — 운영 sink 는 막히지
+    /// 않는다) → 그 sink 는 N+1 을 N 보다 먼저 받지만 **둘 다** 받는다 · 그 사이 붙은 새 sink 도 발급된 seq 를
+    /// 빠짐없이 받는다(replay 또는 라이브). 근거 = 링 push 가 fanout 보다 앞이고 구독이 subscribers 락을 쥔 채
+    /// replay 를 뜬다 — 어느 쪽이 뒤집히면 새 sink 가 N 을 잃는다.
+    #[test]
+    fn a_held_send_reorders_delivery_but_every_sink_gets_every_seq() {
+        struct HoldsSeq {
+            id: SinkId,
+            hold_seq: u64,
+            entered: Mutex<Option<mpsc::Sender<()>>>,
+            release: Mutex<Option<mpsc::Receiver<()>>>,
+            got: Mutex<Vec<u64>>,
+        }
+        impl OutputSink for HoldsSeq {
+            fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+                if frame.seq == self.hold_seq {
+                    if let Some(tx) = self.entered.lock().unwrap().take() {
+                        tx.send(()).expect("entered");
+                    }
+                    let rx = self.release.lock().unwrap().take();
+                    if let Some(rx) = rx {
+                        rx.recv_timeout(WAIT).expect("release");
+                    }
+                }
+                self.got.lock().unwrap().push(frame.seq);
+                Ok(())
+            }
+            fn sink_id(&self) -> SinkId {
+                self.id
+            }
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let held = Arc::new(HoldsSeq {
+            id: uuid::Uuid::new_v4(),
+            hold_seq: 0,
+            entered: Mutex::new(Some(entered_tx)),
+            release: Mutex::new(Some(release_rx)),
+            got: Mutex::new(Vec::new()),
+        });
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        core.subscribe(held.clone());
+
+        let first = {
+            let core = core.clone();
+            std::thread::spawn(move || core.emit(queued("n", "N")))
+        };
+        entered_rx
+            .recv_timeout(WAIT)
+            .expect("seq 0 의 send 가 붙잡혔다");
+        core.emit(queued("n1", "N+1"));
+        let late = Recorder::new();
+        core.subscribe(late.clone());
+        core.emit(delivered("n"));
+        release_tx.send(()).expect("release");
+        first.join().expect("first emitter");
+
+        assert_eq!(
+            held.got.lock().unwrap().clone(),
+            vec![1, 2, 0],
+            "붙잡힌 N 이 N+1 뒤에 도착한다 — 역전은 있다"
+        );
+        assert_eq!(
+            late.seqs(),
+            vec![0, 1, 2],
+            "새 sink 는 replay + 라이브로 전부 받는다"
         );
     }
 }

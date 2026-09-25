@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::output_core::OutputCore;
-use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps};
+use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps, TurnInput, Withdraw};
 
 pub mod api;
 pub mod input_queue;
@@ -60,6 +60,24 @@ pub trait AgentTransport: Send + Sync {
     ///   **다음 호출의 `Err`** 와 로그, 그리고 대개 곧 이어지는 종점 전이다. 계약·상한·처분의 정본은
     ///   [`input_queue`] 모듈 헤더(콘솔 계열)와 codex 통로의 `send_input` doc 이다.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError>;
+
+    /// 턴 하나를 출처와 함께 넘긴다 — 세션은 `MidTurnPolicy::TransportOwned` 일 때만 부른다. 수령 의미는
+    /// [`AgentTransport::send_input`] 과 같다.
+    /// ★기본 구현 = 본문을 `send_input(Raw)` 로 그대로★ — 턴을 스스로 분류하지 않는 통로(PTY·stdio)는 이것을
+    ///   구현하지 않는다. `InputEvent` 에 변형을 더하는 길은 쓰지 않는다: 그 통로들의 반박 불가 패턴
+    ///   (`let InputEvent::Raw(b) = input`)이 깨진다.
+    // ADR-0231
+    fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError> {
+        self.send_input(InputEvent::Raw(turn.body))
+    }
+
+    /// 대기 입력 하나를 거둔다 — 세션의 취소가 `MidTurnPolicy::TransportOwned` 일 때 이리로 넘어온다.
+    /// 목록 사건(거둠 · 취소 요청)은 **통로가** 낸다 — 그 항목을 쥐었는지 넘겼는지는 통로만 안다.
+    /// ★기본 구현 = `NotHeld`★ — 아무것도 쥐지 않는 통로다.
+    // ADR-0231
+    fn withdraw(&self, _id: &str) -> Withdraw {
+        Withdraw::NotHeld
+    }
 
     /// ★이 호출 시점까지 받아 둔 입력이 **실제로 나갈 때까지** 기다린다★ — `Ok` = 나갔다.
     ///
@@ -126,4 +144,79 @@ pub enum LinkResolution {
     /// 연결이 서지 못했다. `reason` = 사람이 읽을 사유이자 backend 분류의 입력 — 이 통로의 실패
     /// 문구는 stdout 의 JSON-RPC 오류라 콘솔 꼬리에도 stderr 진단 꼬리에도 없다.
     Failed { reason: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ControlCaps, InputCaps, InputOrigin, OutputCaps};
+    use std::sync::Mutex;
+
+    /// 기본 구현만 쓰는 통로 — `send_input` 만 기록한다.
+    struct RawOnly(Mutex<Vec<Vec<u8>>>);
+    impl AgentTransport for RawOnly {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            self.0.lock().unwrap().push(bytes);
+            Ok(())
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: true,
+                    structured: false,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_send_turn_hands_the_body_to_send_input_byte_for_byte() {
+        let t = RawOnly(Mutex::new(Vec::new()));
+        for origin in [InputOrigin::User, InputOrigin::Mail] {
+            t.send_turn(TurnInput {
+                id: "id-1".into(),
+                body: b"echo hi\r\n\x03".to_vec(),
+                origin,
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            *t.0.lock().unwrap(),
+            vec![b"echo hi\r\n\x03".to_vec(), b"echo hi\r\n\x03".to_vec()],
+            "기본 구현은 출처와 무관하게 본문만 그대로 넘긴다 — id·출처는 바이트에 안 섞인다"
+        );
+    }
+
+    #[test]
+    fn the_default_withdraw_holds_nothing() {
+        let t = RawOnly(Mutex::new(Vec::new()));
+        assert_eq!(t.withdraw("id-1"), Withdraw::NotHeld);
+        assert!(
+            t.0.lock().unwrap().is_empty(),
+            "거두기는 아무것도 쓰지 않는다"
+        );
+    }
 }

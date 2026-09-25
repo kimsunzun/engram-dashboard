@@ -42,7 +42,8 @@ pub use domain::{
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
-    OutputChunk, StructuredEvent, SubscribeAction, TurnOutcome,
+    DeliveredCopy, DropCause, OutputChunk, QueuedInputEvent, StructuredEvent, SubscribeAction,
+    TurnOutcome,
 };
 
 /// 깨지는 변경(필드 의미 변경·제거)에서만 +1(설계 결정 #6: 버전 처리 deferred,

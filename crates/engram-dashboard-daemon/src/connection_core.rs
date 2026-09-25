@@ -30,8 +30,8 @@ use engram_dashboard_agent::manager::default_shell;
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
 use engram_dashboard_agent::types::{
-    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputSink, ReplayKind, SinkId,
-    SubscribeReply,
+    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, InputOrigin, OutputSink,
+    ReplayKind, SinkId, SubscribeReply,
 };
 
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
@@ -42,8 +42,9 @@ use engram_dashboard_agent::profile::{
     RestoreOutcome as CoreRestoreOutcome,
 };
 use engram_dashboard_agent::types::{
-    Capabilities as CoreCaps, OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
-    TurnOutcome as CoreTurnOutcome,
+    Capabilities as CoreCaps, DeliveredCopy as CoreDeliveredCopy, DropCause as CoreDropCause,
+    OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
+    QueuedInputEvent as CoreQueuedInputEvent, TurnOutcome as CoreTurnOutcome,
 };
 
 use engram_dashboard_protocol::{
@@ -51,10 +52,11 @@ use engram_dashboard_protocol::{
     AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
     AgentOutputFormat as WireAgentOutputFormat, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ControlCaps as WireControlCaps, EnvelopeFormat as WireEnvelopeFormat,
-    InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
-    Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
-    RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
+    ControlCaps as WireControlCaps, DeliveredCopy as WireDeliveredCopy, DropCause as WireDropCause,
+    EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
+    OutputCaps as WireOutputCaps, Preset as WirePreset, QueuedInputEvent as WireQueuedInputEvent,
+    RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
+    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
     StructuredEvent as WireStructuredEvent, SubscribeAction, TurnOutcome as WireTurnOutcome,
     PROTOCOL_VERSION,
 };
@@ -788,6 +790,61 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             kind: kind.clone(),
             json: json.clone(),
         }),
+        CoreOutputEvent::QueuedInput(op) => Some(WireStructuredEvent::QueuedInput {
+            op: queued_input_to_wire(op),
+        }),
+    }
+}
+
+/// 명부 사건 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 사건·원인이 늘면 여기가 컴파일 에러로 서야 새 어휘가
+/// 조용히 다른 사건으로 접히지 않는다(프론트 누산기가 명부와 같은 환원을 하려면 사건열이 그대로 건너가야 한다).
+// ADR-0231
+fn queued_input_to_wire(op: &CoreQueuedInputEvent) -> WireQueuedInputEvent {
+    match op {
+        CoreQueuedInputEvent::Queued { id, text } => WireQueuedInputEvent::Queued {
+            id: id.clone(),
+            text: text.clone(),
+        },
+        CoreQueuedInputEvent::CancelRequested { id } => {
+            WireQueuedInputEvent::CancelRequested { id: id.clone() }
+        }
+        CoreQueuedInputEvent::CancelAnswered { id, removed } => {
+            WireQueuedInputEvent::CancelAnswered {
+                id: id.clone(),
+                removed: *removed,
+            }
+        }
+        CoreQueuedInputEvent::CancelFailed { id } => {
+            WireQueuedInputEvent::CancelFailed { id: id.clone() }
+        }
+        CoreQueuedInputEvent::Delivered { id } => {
+            WireQueuedInputEvent::Delivered { id: id.clone() }
+        }
+        CoreQueuedInputEvent::Dropped { id, cause } => WireQueuedInputEvent::Dropped {
+            id: id.clone(),
+            cause: drop_cause_to_wire(*cause),
+        },
+        CoreQueuedInputEvent::AckUnavailable { delivered } => {
+            WireQueuedInputEvent::AckUnavailable {
+                delivered: delivered
+                    .iter()
+                    .map(|CoreDeliveredCopy { id, text }| WireDeliveredCopy {
+                        id: id.clone(),
+                        text: text.clone(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+fn drop_cause_to_wire(cause: CoreDropCause) -> WireDropCause {
+    match cause {
+        CoreDropCause::Withdrawn => WireDropCause::Withdrawn,
+        CoreDropCause::Interrupted => WireDropCause::Interrupted,
+        CoreDropCause::AgentEnded => WireDropCause::AgentEnded,
+        CoreDropCause::Rejected => WireDropCause::Rejected,
+        CoreDropCause::Unknown => WireDropCause::Unknown,
     }
 }
 
@@ -1082,9 +1139,10 @@ impl ConnectionCore {
                 data,
                 request_id,
             } => {
+                // ADR-0231: 뷰어가 친 입력 = 사람의 입력(`User`) — 턴 도중이면 대기 목록에 오를 수 있는 유일한 입구다.
                 let result = match multiview.check_input(agent_id, conn_id) {
                     LeasePass::Allow => manager
-                        .write_stdin(agent_id, &data)
+                        .write_stdin(agent_id, &data, InputOrigin::User)
                         .map_err(|e| e.to_string()),
                     LeasePass::Denied => {
                         Err("input locked by another viewer; acquire first".to_string())
@@ -4650,9 +4708,99 @@ mod tests {
         );
 
         assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::QueuedInput(
+                CoreQueuedInputEvent::Queued {
+                    id: "u1".into(),
+                    text: "hi".into(),
+                }
+            )),
+            Some(W::QueuedInput {
+                op: WireQueuedInputEvent::Queued {
+                    id: "u1".into(),
+                    text: "hi".into(),
+                }
+            })
+        );
+
+        assert_eq!(
             output_event_to_wire(&CoreOutputEvent::TerminalBytes(vec![1, 2, 3])),
             None,
             "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
+        );
+    }
+
+    /// ★명부 사건·원인이 하나도 접히지 않고 건너간다★ — 누산기가 명부와 같은 환원을 하려면 사건열이 그대로
+    /// 가야 한다(원인 하나가 다른 원인으로 떨어지면 되살림·말풍선 지우기가 갈린다).
+    // ADR-0231
+    #[tokio::test]
+    async fn queued_input_maps_every_event_and_cause_without_collapsing_any() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+        let wire = |op| match output_event_to_wire(&CoreOutputEvent::QueuedInput(op)) {
+            Some(W::QueuedInput { op }) => op,
+            other => panic!("QueuedInput 기대, got {other:?}"),
+        };
+        let id = || "u1".to_owned();
+        assert_eq!(
+            wire(CoreQueuedInputEvent::CancelRequested { id: id() }),
+            WireQueuedInputEvent::CancelRequested { id: id() }
+        );
+        for removed in [true, false] {
+            assert_eq!(
+                wire(CoreQueuedInputEvent::CancelAnswered { id: id(), removed }),
+                WireQueuedInputEvent::CancelAnswered { id: id(), removed }
+            );
+        }
+        assert_eq!(
+            wire(CoreQueuedInputEvent::CancelFailed { id: id() }),
+            WireQueuedInputEvent::CancelFailed { id: id() }
+        );
+        assert_eq!(
+            wire(CoreQueuedInputEvent::Delivered { id: id() }),
+            WireQueuedInputEvent::Delivered { id: id() }
+        );
+        for (core, want) in [
+            (CoreDropCause::Withdrawn, WireDropCause::Withdrawn),
+            (CoreDropCause::Interrupted, WireDropCause::Interrupted),
+            (CoreDropCause::AgentEnded, WireDropCause::AgentEnded),
+            (CoreDropCause::Rejected, WireDropCause::Rejected),
+            (CoreDropCause::Unknown, WireDropCause::Unknown),
+        ] {
+            assert_eq!(
+                wire(CoreQueuedInputEvent::Dropped {
+                    id: id(),
+                    cause: core,
+                }),
+                WireQueuedInputEvent::Dropped {
+                    id: id(),
+                    cause: want,
+                }
+            );
+        }
+        assert_eq!(
+            wire(CoreQueuedInputEvent::AckUnavailable {
+                delivered: vec![
+                    CoreDeliveredCopy {
+                        id: "a".into(),
+                        text: "하나".into(),
+                    },
+                    CoreDeliveredCopy {
+                        id: "b".into(),
+                        text: "둘".into(),
+                    },
+                ],
+            }),
+            WireQueuedInputEvent::AckUnavailable {
+                delivered: vec![
+                    WireDeliveredCopy {
+                        id: "a".into(),
+                        text: "하나".into(),
+                    },
+                    WireDeliveredCopy {
+                        id: "b".into(),
+                        text: "둘".into(),
+                    },
+                ],
+            }
         );
     }
 

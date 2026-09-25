@@ -20,11 +20,13 @@ use std::time::{Duration, Instant};
 
 use crate::backend;
 use crate::failure::AgentFailureKind;
-use crate::output_core::{OutputCore, TurnWiring};
+use crate::inputs_pending::InputsPendingTable;
+use crate::output_core::{OutputCore, QueuedWiring, TurnWiring};
 use crate::preset::PresetRegistry;
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
 };
+use crate::queued_input::QueuedInputs;
 use crate::reaper::{self, ReaperCmd, ReaperDeps};
 use crate::session::AgentSession;
 use crate::session_id_latch::SessionIdLatch;
@@ -32,9 +34,9 @@ use crate::session_tracker::SessionTracker;
 use crate::transport::{LinkResolution, LinkSink};
 use crate::turn::TurnObservations;
 use crate::types::{
-    AgentId, AgentInfo, AgentStatus, CommandSpec, ControlChannel, NoopControlChannel, OutputChunk,
-    OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeReply, TerminalReason,
-    TerminationIntent,
+    AgentId, AgentInfo, AgentStatus, CommandSpec, ControlChannel, InputOrigin, NoopControlChannel,
+    OutputChunk, OutputEvent, OutputSink, PtyError, ReapMsg, SinkId, StatusSink, SubscribeReply,
+    TerminalReason, TerminationIntent,
 };
 
 const DEFAULT_COLS: u16 = 80;
@@ -643,6 +645,11 @@ pub struct AgentManager {
     // ADR-0113
     // ADR-0127
     turns: Arc<TurnObservations>,
+
+    /// 대기 목록 표(「이 화신의 사용자 대기 목록이 비지 않았다」) — 턴 관측 표와 같은 모양의 leaf.
+    /// 읽기 = 우편 바쁨 어댑터. ★sessions 락과 무관★(위 `turns` 와 같은 규율).
+    // ADR-0231
+    inputs_pending: Arc<InputsPendingTable>,
 }
 
 /// spawn 진행 중 AgentId 예약을 잡고, drop 시 자동 해제하는 RAII 가드(ADR-0086 FIX 6). spawn_agent
@@ -750,6 +757,7 @@ impl AgentManager {
     ) -> Self {
         let sessions = Arc::new(RwLock::new(HashMap::new()));
         let turns = Arc::new(TurnObservations::new());
+        let inputs_pending = Arc::new(InputsPendingTable::new());
 
         let deps = ReaperDeps {
             sessions: sessions.clone(),
@@ -772,11 +780,16 @@ impl AgentManager {
             spawning: Arc::new(Mutex::new(HashSet::new())),
             name_allocation: Arc::new(Mutex::new(())),
             turns,
+            inputs_pending,
         }
     }
 
     pub fn turns(&self) -> Arc<TurnObservations> {
         self.turns.clone()
+    }
+
+    pub fn inputs_pending(&self) -> Arc<InputsPendingTable> {
+        self.inputs_pending.clone()
     }
 
     pub fn presets(&self) -> &Arc<PresetRegistry> {
@@ -1888,16 +1901,26 @@ impl AgentManager {
             encoder,
             turn_classifier,
             reads_messages,
+            mid_turn,
+            delivery_ack,
         } = parts;
 
         // ADR-0113: 공용 턴 관측 표 + 이 백엔드의 신호 분류자를 함께 꽂는다 — 안 꽂으면 이 세션만
         //   조용히 관측 밖으로 빠진다.
-        let core = Arc::new(OutputCore::new(
-            id,
-            epoch,
-            self.status_sink.clone(),
-            TurnWiring::new(self.turns.clone(), turn_classifier),
-        ));
+        // ADR-0231: 이 화신의 새 명부 + 공용 대기 목록 표도 같은 자리 — 빠뜨리면 사용자 목록이 우편에 안 보인다.
+        //   세션은 명부를 코어에서 꺼내 쓰므로 여기 한 곳만 꽂는다.
+        let core = Arc::new(
+            OutputCore::new(
+                id,
+                epoch,
+                self.status_sink.clone(),
+                TurnWiring::new(self.turns.clone(), turn_classifier),
+            )
+            .with_queued(QueuedWiring {
+                registry: Arc::new(QueuedInputs::new()),
+                pending: self.inputs_pending.clone(),
+            }),
+        );
 
         // 2.1. ★ADR-0079 seed-before-publish(load-bearing 순서 — cross-family review 2026-07-13)★:
         //      resume 복원 과거 이벤트를 **세션이 관측 가능해지기 전에**(= sessions 맵 insert 전) core
@@ -1956,7 +1979,9 @@ impl AgentManager {
                 transport,
             )
             .with_incarnation(continues_conversation)
-            .with_session_id_latch(latch),
+            .with_session_id_latch(latch)
+            // ADR-0231: 빠뜨려도 컴파일되고 오류도 없다 — 이 화신의 모든 입력이 오늘 경로로 간다.
+            .with_mid_turn(mid_turn, delivery_ack),
         );
 
         // ★ADR-0113 턴 관측 자리 선점 — sessions 맵 insert 보다 **먼저**★: 이 화신이 그 id 의 항목을
@@ -1968,6 +1993,10 @@ impl AgentManager {
         //   `turn::TurnObservations::register`).
         // ADR-0113
         self.turns.register(id, epoch);
+        // 대기 목록 표도 같은 이유로 같은 자리 — 이 표는 등록 없는 쓰기를 버리므로 늦으면 그 화신의 목록이
+        //   우편에 영영 안 보인다.
+        // ADR-0231
+        self.inputs_pending.register(id, epoch);
 
         // ★ADR-0019 — sessions 등록은 pump 기동(start)보다 **먼저**★: finish hook 이 ReapMsg 를 보내는데,
         //    pump 가 즉시 EOF→finish 하면 그 시점에 세션이 맵에 있어야 reaper 가 reap 한다. insert 전에
@@ -2668,8 +2697,18 @@ impl AgentManager {
         Ok(())
     }
 
-    pub fn write_stdin(&self, agent_id: AgentId, data: &[u8]) -> Result<(), PtyError> {
-        self.get_session(agent_id)?.write_input(data)
+    /// 출처를 실은 키 입력·턴 쓰기 — 사람의 입력(WS `WriteStdin`)은 `User`, 사람 아닌 호출자는 `Mail`.
+    /// ★`*_observed` 동사들은 출처를 받지 않는다 — 전부 `Mail` 이다★(우편 배달 경로).
+    // ADR-0231
+    pub fn write_stdin(
+        &self,
+        agent_id: AgentId,
+        data: &[u8],
+        origin: InputOrigin,
+    ) -> Result<(), PtyError> {
+        self.get_session(agent_id)?
+            .write_input_from(data, origin)
+            .map(|_| ())
     }
 
     pub fn write_stdin_observed(
@@ -2767,6 +2806,8 @@ impl AgentManager {
     /// ★왜 필요한가★: 주입 세션이 `OutputCore::new` 만으로 조립되면 그 세션의 emit 은 매니저의 표에
     ///   닿지 않아, 게이트·도어벨 배선을 보려는 통합 테스트가 "관측이 없어서 통과" 하는 위약이 된다.
     ///   반대로 관측이 필요 없는 테스트는 이걸 쓰지 않으면 된다(운영 세션과 달리 선택이다).
+    /// ★대기 목록 표는 여기서 등록한다(턴 관측 표는 안 한다)★ — 턴 관측 표는 등록 없는 쓰기를 받아 주지만
+    ///   대기 목록 표는 버린다. 등록을 빼면 이 코어의 목록이 매니저의 우편 바쁨에 영영 안 보인다.
     #[cfg(feature = "test-harness")]
     #[doc(hidden)]
     pub fn wired_test_core(
@@ -2775,12 +2816,19 @@ impl AgentManager {
         epoch: u32,
         classify: crate::backend::TurnClassifier,
     ) -> Arc<OutputCore> {
-        Arc::new(OutputCore::new(
-            id,
-            epoch,
-            self.status_sink.clone(),
-            TurnWiring::new(self.turns.clone(), classify),
-        ))
+        self.inputs_pending.register(id, epoch);
+        Arc::new(
+            OutputCore::new(
+                id,
+                epoch,
+                self.status_sink.clone(),
+                TurnWiring::new(self.turns.clone(), classify),
+            )
+            .with_queued(QueuedWiring {
+                registry: Arc::new(QueuedInputs::new()),
+                pending: self.inputs_pending.clone(),
+            }),
+        )
     }
 
     pub fn resize(&self, agent_id: AgentId, cols: u16, rows: u16) -> Result<(), PtyError> {
@@ -6031,6 +6079,36 @@ mod tests {
             .collect::<String>()
             .replace(",}", "}")
             .replace(",)", ")")
+    }
+
+    /// ★대기 입력 명부가 spawn 경로에 실린다(ADR-0231)★ — 배선을 소스에서 못 박는다.
+    ///
+    /// 못 박는 것: 코어가 이 화신의 새 명부 + 매니저의 대기 목록 표로 꽂히고, 그 표에 이 화신이 sessions 맵
+    ///   insert 보다 **먼저** 등록된다. 둘 다 빠뜨려도 컴파일되고 오류도 없다 — 그 화신의 사용자 목록이 우편에
+    ///   안 보여, 목록이 찬 동안에도 우편이 사용자 글보다 먼저 stdin 에 닿는 것이 유일한 증상이다.
+    #[test]
+    fn the_queued_registry_and_pending_table_are_wired_through_the_spawn_path() {
+        let session = squashed_production_body("fn spawn_session(", "pub fn restore_all(");
+        assert!(
+            session.contains(
+                ".with_queued(QueuedWiring{registry:Arc::new(QueuedInputs::new()),pending:self.inputs_pending.clone()})"
+            ),
+            "spawn 코어에 이 화신의 새 명부 + 매니저의 대기 목록 표가 꽂히지 않는다"
+        );
+        assert!(
+            session.contains(".with_mid_turn(mid_turn,delivery_ack)"),
+            "backend 가 신고한 턴 도중 입력 정책·받음 알림 값이 세션에 실리지 않는다 — 모든 입력이 오늘 경로로 간다"
+        );
+        let register = session
+            .find("self.inputs_pending.register(id,epoch);")
+            .expect("대기 목록 표에 이 화신을 등록하지 않는다 — 표가 그 화신의 쓰기를 전부 버린다");
+        let insert = session
+            .find("self.sessions.write()")
+            .expect("sessions 맵 insert");
+        assert!(
+            register < insert,
+            "등록이 sessions insert 뒤다 — 그 사이 첫 목록 사건의 「찼다」가 버려진다"
+        );
     }
 
     /// ★첫 제출 래치가 spawn 경로에 실제로 실린다(ADR-0226)★ — 배선을 소스에서 못 박는다.

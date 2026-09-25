@@ -31,8 +31,8 @@ use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
-    AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError, CLI_EXE_ENV,
-    CLI_EXE_NAME, TOKEN_ENV,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, MidTurnPolicy, OutputEvent,
+    PtyError, CLI_EXE_ENV, CLI_EXE_NAME, TOKEN_ENV,
 };
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
@@ -471,6 +471,8 @@ pub trait AgentBackend: Send + Sync {
             encoder: self.input_encoder(command),
             turn_classifier: self.turn_classifier(),
             reads_messages: self.reads_messages(),
+            mid_turn: MidTurnPolicy::None,
+            delivery_ack: Arc::new(DeliveryAck::new()),
         })
     }
 
@@ -639,6 +641,14 @@ pub struct SpawnParts {
     pub encoder: InputEncoder,
     pub turn_classifier: TurnClassifier,
     pub reads_messages: bool,
+    /// 턴 도중 입력을 누가 분류·해제하나 — 세션이 이 값으로만 가른다.
+    // ADR-0231
+    pub mid_turn: MidTurnPolicy,
+    /// 이 화신의 받음 알림 가능 여부 — ★backend 가 자기 디코더·통로에 건넨 **바로 그** Arc 를 싣는다★. 따로
+    ///   만들면 세션이 읽는 값과 디코더가 채우는 값이 갈리고, 그 어긋남은 오류 없이 영원한 `Unknown` 으로만
+    ///   보인다.
+    // ADR-0231
+    pub delivery_ack: Arc<DeliveryAck>,
 }
 
 /// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
@@ -1096,7 +1106,10 @@ mod tests {
         };
         let claude_classify = turn_classifier(&json);
         assert_eq!(claude_classify(&delta), Some(TurnSignal::Progress));
-        assert_eq!(claude_classify(&done), Some(TurnSignal::Ended));
+        assert_eq!(
+            claude_classify(&done),
+            Some(TurnSignal::Ended(crate::turn::TurnEndKind::Clean))
+        );
         // ★`Structured` 해석이 백엔드별인 이유의 회귀★: claude 는 입력 시점 유저 에코를 여기 싣기에
         //   진행으로 세지만, 매핑을 선언하지 않은 backend 는 같은 이벤트에 침묵해야 한다 — 안 그러면
         //   턴과 무관한 구조화 메타 라인이 종료 신호 없는 영구 "턴 중" 을 만든다.

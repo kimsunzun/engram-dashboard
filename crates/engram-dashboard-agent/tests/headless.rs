@@ -16,7 +16,8 @@ use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistr
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, ControlChannelNeeds, ControlEndpoint,
-    OutputFrame, OutputPayload, OutputSink, ProvisionError, SinkError, SinkId, StatusSink,
+    InputOrigin, OutputFrame, OutputPayload, OutputSink, ProvisionError, SinkError, SinkId,
+    StatusSink,
 };
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
@@ -397,7 +398,7 @@ fn manager_spawn_write_resize_kill() {
     assert!(got_output, "2s 내 PTY 초기 출력을 수신하지 못함");
 
     manager
-        .write_stdin(info.id, b"echo headless-test\r\n")
+        .write_stdin(info.id, b"echo headless-test\r\n", InputOrigin::User)
         .expect("write_stdin failed");
     let echoed = wait_until(Duration::from_secs(3), || {
         out_sink.output_contains("headless-test")

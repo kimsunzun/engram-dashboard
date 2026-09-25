@@ -25,8 +25,8 @@ use engram_dashboard_agent::profile::{
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
-    AgentId, AgentInfo, AgentStatus, ControlChannel, OutputEvent, OutputFrame, OutputPayload,
-    OutputSink, SinkError, SinkId, StatusSink,
+    AgentId, AgentInfo, AgentStatus, ControlChannel, InputOrigin, OutputEvent, OutputFrame,
+    OutputPayload, OutputSink, SinkError, SinkId, StatusSink,
 };
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -991,6 +991,7 @@ fn decoded_variant_key(ev: &OutputEvent) -> String {
         OutputEvent::TurnEnd { .. } => "TurnEnd",
         OutputEvent::Error(_) => "Error",
         OutputEvent::Structured { kind, .. } => return format!("Structured/{kind}"),
+        OutputEvent::QueuedInput(_) => "QueuedInput",
     }
     .to_string()
 }
@@ -1118,8 +1119,11 @@ fn drive_turn(
     let baseline = obs.done_snapshot();
     let t0 = Instant::now();
 
-    // 유저 턴 전송 = write_stdin(세션이 wrap_user_turn 으로 감쌈).
-    if manager.write_stdin(agent_id, prompt.as_bytes()).is_err() {
+    // 유저 턴 전송 = write_stdin(세션이 wrap_user_turn 으로 감쌈). ADR-0231: 파일럿은 사람이 아니다 — `Mail`.
+    if manager
+        .write_stdin(agent_id, prompt.as_bytes(), InputOrigin::Mail)
+        .is_err()
+    {
         return TurnResult::Terminal;
     }
     state.learn_session_id(manager, agent_id);
@@ -1485,7 +1489,10 @@ fn send_and_collect(
     let baseline = obs.done_snapshot();
     let t0 = Instant::now();
 
-    if manager.write_stdin(agent_id, prompt.as_bytes()).is_err() {
+    if manager
+        .write_stdin(agent_id, prompt.as_bytes(), InputOrigin::Mail)
+        .is_err()
+    {
         let elapsed_ms = t0.elapsed().as_millis() as u64;
         let this_idx = state.turn_idx;
         writer.write(&Record::Stall(StallRecord {

@@ -6655,6 +6655,69 @@ mod tests {
         assert_eq!(svc.ledger_statuses("m1"), vec![DeliveryStatus::Delivered]);
     }
 
+    /// 목록만 빈 초인종 · 멈춤이 풀린 턴 끝 — 어느 쪽이든 flush 레인이 바쁨을 다시 묻고 파킹을 흘린다.
+    /// 그 전까지는 30 분 상한도 풀지 않는다.
+    // ADR-0231
+    #[test]
+    fn parked_mail_waits_out_the_list_and_the_halt_then_the_doorbell_delivers() {
+        use super::super::busy::{BusyPolicy, ScriptedTurnFacts, BUSY_MAX_TURN};
+        let port = Arc::new(FakeDeliveryPort::new());
+        let notifier = Arc::new(RecordingIdle {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let facts = ScriptedTurnFacts::new();
+        let gate = Arc::new(BusyPolicy::new(facts.clone(), notifier.clone()));
+        let svc = Arc::new(MessagingService::new_gated(
+            port.clone(),
+            Arc::new(FakeControlPlane),
+            gate.clone(),
+        ));
+        let (id, agent) = live("recv");
+        port.set_roster(vec![agent]);
+
+        let t0 = Instant::now();
+        facts.set_idle(id, 0, t0);
+        facts.set_inputs_pending(id, 0, true, t0);
+        facts.set_last_end_failed(id, 0, true, t0);
+        svc.park_absent_for_test(
+            "m1",
+            ident(),
+            "s",
+            "recv",
+            "hi",
+            Entrance::Mcp,
+            &SendMeta::default(),
+        )
+        .expect("park");
+        assert_eq!(svc.parked_len("recv"), 1, "목록·멈춤이라 파킹");
+
+        assert_eq!(
+            gate.sweep_stale_busy(t0 + BUSY_MAX_TURN + Duration::from_secs(1)),
+            0,
+            "상한은 목록·멈춤을 깨우지 않는다"
+        );
+        svc.flush_for_agent(id);
+        assert!(
+            port.injected_bodies().is_empty(),
+            "목록이 남은 동안 안 든다"
+        );
+
+        facts.set_inputs_pending(id, 0, false, t0);
+        svc.flush_for_agent(id);
+        assert!(
+            port.injected_bodies().is_empty(),
+            "목록이 비어도 오류 뒤 멈춤이면 안 든다"
+        );
+
+        facts.set_last_end_failed(id, 0, false, t0);
+        svc.flush_for_agent(id);
+        assert_eq!(
+            port.injected_bodies(),
+            vec![r#"<message from="s">hi</message>"#.to_string()],
+            "풀린 뒤의 초인종이 파킹을 흘린다"
+        );
+    }
+
     #[test]
     fn flush_for_agent_resolves_name_and_is_noop_without_parked() {
         let (svc, port, _gate) = svc_gated();

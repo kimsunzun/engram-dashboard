@@ -2538,41 +2538,10 @@ mod tests {
     /// 홀로 넘는 항목 하나를 넣으려고 나머지를 전부 쫓아낸다.
     const RING_SINGLE_EVENT_LIMIT: usize = 2 * 1024 * 1024;
 
-    /// `output_core::estimate_cost_bytes` 와 **같은 축**으로 잰다 — 그쪽은 private 이라 같은 모양을 여기
-    /// 둔다. 갈리면 이 항목이 재는 것과 링이 세는 것이 달라지므로, 그쪽을 고칠 때 여기도 함께 본다.
+    /// 링이 세는 그 축(`output_core::estimate_cost_bytes`)을 그대로 쓴다 — 여기 따로 베끼면 둘이 갈려 이
+    /// 항목이 재는 것과 링이 세는 것이 달라진다.
     fn event_weight(e: &OutputEvent) -> usize {
-        let opt = |o: &Option<String>| o.as_ref().map(|s| s.len()).unwrap_or(0);
-        match e {
-            OutputEvent::TerminalBytes(b) => b.len(),
-            OutputEvent::TextDelta {
-                text,
-                turn_id,
-                message_id,
-            } => text.len() + opt(turn_id) + opt(message_id),
-            OutputEvent::ToolCall {
-                name,
-                args_json,
-                id,
-                turn_id,
-                message_id,
-            } => name.len() + args_json.len() + opt(id) + opt(turn_id) + opt(message_id),
-            OutputEvent::Usage { turn_id, .. } => opt(turn_id),
-            OutputEvent::MessageDone {
-                turn_id,
-                message_id,
-            } => opt(turn_id) + opt(message_id),
-            OutputEvent::TurnEnd { turn_id, outcome } => {
-                opt(turn_id)
-                    + match outcome {
-                        TurnOutcome::Failed { detail } => opt(detail),
-                        TurnOutcome::Completed
-                        | TurnOutcome::Interrupted
-                        | TurnOutcome::Unknown => 0,
-                    }
-            }
-            OutputEvent::Error(s) => s.len(),
-            OutputEvent::Structured { kind, json } => kind.len() + json.len(),
-        }
+        crate::output_core::estimate_cost_bytes(e)
     }
 
     /// ★상한 없는 배출 경로를 **산출물에서** 잡는다★ — 위 소스 항목은 두 문 중 아무 것도 안 쓰는 경로를
