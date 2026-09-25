@@ -198,7 +198,8 @@ describe('TerminalSlot — 구독 직후 초기 치수의 숨김 가드', () => 
     expect(agentClient.resizePty).toHaveBeenCalledWith(AGENT, 137, 25)
   })
 
-  // display:none 하위에서 fit() 이 내는 값은 미측정이라 치수가 아니라 fit() 미호출로 판정한다.
+  // display:none 하위에서 실물 fit() 이 내는 값(실측 11×6 — TerminalSlot 헬퍼 주석)은 목이 흉내 내지 않으므로
+  //   치수가 아니라 fit() 미호출로 판정한다.
   it('숨은 슬롯(display:none)에서 구독이 풀리면 fit() 도 치수도 보내지 않는다', async () => {
     const { agentClient } = await import('../../api/clientFactory')
     layout.visible = false

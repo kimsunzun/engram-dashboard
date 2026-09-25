@@ -180,7 +180,7 @@ beforeEach(() => {
   //   빠지는 조건은 셋뿐이다 — terminal 없음 · `element.parentElement` 없음 · **cell metrics 가 0**.
   //   ★컨테이너 박스 크기는 그 셋에 없다★: metrics 는 xterm 이 글꼴로 재므로 박스와 무관하게 살아
   //   있고, 붕괴한 박스는 음수 폭을 낳아 `Math.max(2,·)`/`Math.max(1,·)` 바닥인 2×1 로 **실제 resize 가
-  //   걸린다**. display:none 갈래의 no-op 은 목의 자리채움이다 — 실제로 fit() 이 내는 값은 미측정이다.
+  //   걸린다**. display:none 갈래의 no-op 은 목의 자리채움이다 — 실물은 no-op 이 아니다(실측 11×6 — TerminalSlot 헬퍼 주석).
   //   목이 이 계약을 어기면 테스트가 라이브러리가 못 내는 값을 지어내고, 그 위에 세운 가드는 한 번도
   //   발화할 수 없는 코드가 된다 — 이 파일의 앞 판이 정확히 그랬다.
   fitAddonFit.mockReset()

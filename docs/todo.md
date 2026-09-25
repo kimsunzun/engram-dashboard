@@ -40,7 +40,7 @@
 | 터미널 치수 전파 | 트리거 대기 | 중간 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
 | 재생·구독 | 트리거 대기 | 중간 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
 | 이름·기록 | 트리거 대기 | 큼 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
-| 터미널 커서·한글 조합·초기 치수 가드 | 소유됨 | 작음~불명 | [`todo/terminal-cursor-ime-resize.md`](todo/terminal-cursor-ime-resize.md) |
+| 터미널 한글 조합 표시 | 소유됨 | 불명 | [`todo/terminal-cursor-ime-resize.md`](todo/terminal-cursor-ime-resize.md) |
 | 프론트엔드 모듈 분리 | 소유됨 | 불명 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
 | 확인만 된 것 (판단 보류) | 확인만 됨 | — | [`todo/observed-only.md`](todo/observed-only.md) |
 
@@ -53,7 +53,7 @@
 - **표시 정책 = 큼** — 1단계(터미널만)는 작지만 2단계가 앱 전역 seam 교체이고 ADR 번복이 따라온다.
 - **이름·기록 = 큼** — `epoch` 개명 하나가 코드 식별자 885곳이다(실측). 미루기로 한 사유도 그것이다.
 - **프론트엔드 모듈 분리 = 불명** — 범위가 안 정해졌다. 크기 압력은 없다(비테스트 11,285줄, 최대 파일 992줄 — 실측 2026-08-26)
-- **터미널 커서·한글 조합·초기 치수 가드 = 작음~불명** — 치수 가드는 한 줄 가드이고 커서는 사용자 스타일 선택 뒤 설정 한 줄이지만, 한글 조합 깨짐은 원인을 아직 안 봤다.
+- **터미널 한글 조합 표시 = 불명** — 같은 브랜치의 치수 가드·커서 기본값은 `fa1690d` 로 닫혔다. 남은 한글 조합은 커서 변경 뒤 흉내 입력에서 파란 선이 안 보였지만 변경 전을 같은 방법으로 재 본 적이 없어, 사용자 실 입력기 확인 뒤에야 크기가 선다. 커서 설정화는 표시 정책 쪽(트리거 대기)으로 옮겼다.
 - **CI 실행 범위 = 중간** — 조사가 몸통이다. 고치는 것 자체는 워크플로 몇 줄인데, ★태그 push 에 경로 필터가 걸리는지가 릴리스 안전성을 가른다★(미확인). 게이트 변경이라 사용자 결정이 선행한다.
 
 ---
