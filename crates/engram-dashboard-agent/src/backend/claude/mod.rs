@@ -42,8 +42,8 @@ use crate::transport::stdio::StdioTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
-    AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, MidTurnPolicy, ModelCaps,
-    OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolGrant, TurnOutcome,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, DropCause, MidTurnPolicy,
+    ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolGrant, TurnOutcome,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
@@ -62,6 +62,17 @@ fn is_stream_json(command: &AgentCommand) -> bool {
             ..
         }
     )
+}
+
+/// 턴 도중 입력 정책 — JSON 모드만 세션이 분류하고 벤더가 해제한다([`cancel_line`] 이 취소 수단).
+/// 터미널 모드는 오늘 경로다: 항목별 받음 알림을 줄 디코더도, 취소 줄을 받을 제어 채널도 없다.
+// ADR-0231
+fn mid_turn_policy(command: &AgentCommand) -> MidTurnPolicy {
+    if is_stream_json(command) {
+        MidTurnPolicy::SessionClassified { cancel_line }
+    } else {
+        MidTurnPolicy::None
+    }
 }
 
 /// claude 가 `--resume <sid>` 로 이어받을 대화를 못 찾았을 때 내는 문구의 **소문자 조각**.
@@ -407,9 +418,11 @@ impl AgentBackend for ClaudeBackend {
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
         let _ = (sid_sink, resume_session_id, control);
+        let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
-                let (t, pid) = StdioTransport::open(spec, true, self.output_decoder(command))?;
+                let decoder = stream_decoder(Arc::clone(&delivery_ack));
+                let (t, pid) = StdioTransport::open(spec, true, Some(decoder))?;
                 (Box::new(t), pid)
             } else {
                 let (t, pid) = PtyTransport::open(spec, cols, rows)?;
@@ -422,10 +435,9 @@ impl AgentBackend for ClaudeBackend {
             encoder: self.input_encoder(command),
             turn_classifier: self.turn_classifier(),
             reads_messages: self.reads_messages(),
-            // ADR-0231: 아직 목록을 쓰지 않는다 — 세션 분류가 서면 JSON 갈래만 `SessionClassified` 로 뒤집고,
-            //   이 Arc 를 디코더에도 건넨다(받음 가능 여부 탐지).
-            mid_turn: MidTurnPolicy::None,
-            delivery_ack: Arc::new(DeliveryAck::new()),
+            mid_turn: mid_turn_policy(command),
+            // 위 디코더가 채우는 바로 그 Arc — 터미널 갈래는 채울 디코더가 없어 `Unknown` 에 머문다.
+            delivery_ack,
         })
     }
 
@@ -451,9 +463,11 @@ impl AgentBackend for ClaudeBackend {
         })
     }
 
+    /// ★운영 spawn 은 이 메서드를 거치지 않는다★ — [`AgentBackend::open_spawn`] 이 화신 공유 받음 값을 쥔
+    /// decoder 를 직접 만든다. 여기서 나가는 decoder 는 판정 결과를 아무도 읽지 않는 자기 값을 쥔다.
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
         if is_stream_json(command) {
-            Some(Box::new(ClaudeStreamDecoder::new()))
+            Some(stream_decoder(Arc::new(DeliveryAck::new())))
         } else {
             None
         }
@@ -497,9 +511,14 @@ impl AgentBackend for ClaudeBackend {
 /// ★`kind` 를 보지 않는 이유(현 범위의 정직한 표기)★: claude decoder 가 내는 `Structured` 는 전부 턴
 ///   안에서 발생하는 라인이라 지금은 kind 구분이 불필요하다. claude 가 턴 밖 구조화 라인을 내기
 ///   시작하면 여기서 kind 를 걸러야 한다.
-/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고, `Error` 는 스트림 내부 오류지
-///   턴 경계가 아니다(실패 턴도 `MessageDone` 으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계
-///   정보가 없는 콘솔 바이트다.
+/// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고, `Error` 는 턴 경계가 아니다(실패
+///   턴도 `MessageDone` 으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계 정보가 없는 콘솔 바이트다.
+/// ★`Error` 중 「턴 오류」(`Failed`)는 실패한 `result` 의 것 하나다 — 머리말([`RESULT_FAILURE_DETAIL`])로
+///   가른다★: 그 `Error` 는 바로 뒤 `MessageDone` 과 같은 줄에서 나므로 표가 그 끝을 오류 끝으로 접는다(오류
+///   뒤 멈춤). ★줄 버퍼 넘침 같은 그 밖의 `Error` 를 `Failed` 로 세지 말 것★ — 턴 밖에서 나면 표가 그것을 쥐고
+///   있다가 **다음 깨끗한 턴**을 오류 끝으로 접고, 그 화신의 우편은 사용자가 다음 턴을 성공시킬 때까지 멈춘다
+///   (멈춤엔 상한이 없다). 칸이 아니라 머리말로 가르는 이유: `Error` 는 문자열 하나라 표식 칸을 더하면 모든
+///   소비자의 match 가 바뀐다 — 그 문자열을 만드는 쪽과 읽는 쪽은 둘 다 이 폴더 안에 산다.
 /// ★상관 키가 없다(알려진 범위)★: claude 의 `MessageDone` 은 `turn_id`/`message_id` 가 모두 None 이라
 ///   "어느 턴의 종료인가" 를 맞출 키가 없다. 그래서 턴 카운팅·펜싱을 하지 않고 **마지막 관측이
 ///   결정한다**. 중첩 Task 서브에이전트의 종료 라인이 부모 턴 종료로 새는지는 미검증이고, 새면 증상은
@@ -521,16 +540,17 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         | OutputEvent::QueuedInput(QueuedInputEvent::Delivered { .. }) => {
             Some(TurnSignal::Progress)
         }
+        OutputEvent::Error(detail) if detail.starts_with(RESULT_FAILURE_DETAIL) => {
+            Some(TurnSignal::Failed)
+        }
         // `result` 줄의 번역 — 실패한 `result` 도 여기로 닫힌다(그 실패는 바로 앞의 `Error` 가 싣는다).
         OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Clean)),
         // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 종료로 적는다★: 두 종료 어휘를 여기서 갈라
         //   적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
         OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
             TurnOutcome::Completed => TurnEndKind::Clean,
-            // TODO(ADR-0231): 오류 끝은 아직 싣지 않는다 — 「턴 오류」 신호를 켜는 변경이 함께 바꾼다.
-            TurnOutcome::Failed { .. } | TurnOutcome::Interrupted | TurnOutcome::Unknown => {
-                TurnEndKind::Other
-            }
+            TurnOutcome::Failed { .. } => TurnEndKind::Failed,
+            TurnOutcome::Interrupted | TurnOutcome::Unknown => TurnEndKind::Other,
         })),
         OutputEvent::Usage { .. }
         | OutputEvent::Error(_)
@@ -658,6 +678,48 @@ pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
     serde_json::to_string(&block).unwrap_or_default()
 }
 
+/// 취소 요청 `request_id` 의 머리말 — 뒤에 그 입력의 uuid 가 붙는다.
+///
+/// ★요청 id 에 uuid 를 싣는 것이 decoder 를 stateless 로 두는 수단이다★: 응답 봉투엔 요청 id 만 되돌아오므로,
+///   decoder 는 보낸 요청의 표 없이 거기서 uuid 를 떼어 명부 사건을 낸다([`cancel_response_event`]).
+// ADR-0231
+const CANCEL_REQUEST_PREFIX: &str = "cancel:";
+
+/// 대기 입력 `id` 하나의 취소를 요청하는 stdin 줄(개행 포함) — [`MidTurnPolicy::SessionClassified`] 의
+/// `cancel_line`.
+///
+/// ★벤더 계약(실측 M3 — claude 2.1.280)★: `control_request` `cancel_async_message` 는 `initialize` 없이 우리
+///   `-p` stream-json 모드에서 받힌다. 응답은 `control_response` 로 오고 값은 `response.response.cancelled` 에
+///   중첩된다. 키 순서는 [`wrap_user_turn`] 과 같은 이유로 typed struct 선언 순서다.
+// ADR-0231
+fn cancel_line(id: &str) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct ControlRequest<'a> {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        request_id: String,
+        request: CancelAsyncMessage<'a>,
+    }
+    #[derive(serde::Serialize)]
+    struct CancelAsyncMessage<'a> {
+        subtype: &'static str,
+        message_uuid: &'a str,
+    }
+
+    let request = ControlRequest {
+        kind: "control_request",
+        request_id: format!("{CANCEL_REQUEST_PREFIX}{id}"),
+        request: CancelAsyncMessage {
+            subtype: "cancel_async_message",
+            message_uuid: id,
+        },
+    };
+    // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
+    let mut line = serde_json::to_string(&request).unwrap_or_default();
+    line.push('\n');
+    line.into_bytes()
+}
+
 // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
 //
 // 스키마 근거 = 실측 fixture `backend/fixtures/claude_{text,tool}.jsonl`.
@@ -669,11 +731,37 @@ pub(crate) fn user_text_echo_json(text: &str, uuid: Uuid) -> String {
 ///   = 비정상으로 간주.
 const MAX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+/// 실패한 `result` 가 내는 [`OutputEvent::Error`] 의 머리말 — ★턴 분류기가 이 머리말로 「턴 오류」를 가른다★
+/// ([`classify_turn`]). 줄 버퍼 넘침 등 다른 `Error` 문구가 이것으로 시작하면 그 오류가 턴을 실패로 접는다.
+// ADR-0231
+const RESULT_FAILURE_DETAIL: &str = "claude stream-json result reported failure";
+
+/// `system/init` 의 `capabilities` 에서 「항목별 수명주기(`command_lifecycle`)를 낸다」를 뜻하는 낱말(실측 M4 —
+/// claude 2.1.280).
+// ADR-0231
+const MSG_LIFECYCLE_CAPABILITY: &str = "msg_lifecycle_v1";
+
+/// 한 줄이 어느 흐름에서 왔나 — 라이브 stdout 과 이어받기 transcript 는 봉투가 같지만 실리는 줄 종류가 다르다.
+#[derive(Clone, Copy)]
+enum LineSource<'a> {
+    /// 라이브 stdout — 받음 가능 여부를 이 값에 채우고, 수명주기·취소 응답을 명부 사건으로 옮긴다.
+    Live(&'a DeliveryAck),
+    /// 이어받기 transcript seed — ★명부 사건을 내지 않는다★: seed 는 명부 문을 지나지 않는다(코어가
+    ///   `seed` 로 들어온 `QueuedInput` 을 거부한다). 대신 접혀 들어간 입력의 첨부 줄을 말풍선으로 옮긴다.
+    Transcript,
+}
+
+/// 운영 spawn 의 decoder — 화신 공유 받음 값을 채운다.
+fn stream_decoder(ack: Arc<DeliveryAck>) -> Box<dyn OutputDecoder> {
+    Box::new(ClaudeStreamDecoder::with_delivery_ack(ack))
+}
+
 /// claude stream-json 라이브 decoder.
 ///
-/// ★유일한 상태 = 부분 라인 바이트 버퍼★: 메시지 병합(같은 message.id 블록 concat)은 decoder
-///   책임이 아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해 뱉는다.
-///   그래서 상태는 "마지막 개행 뒤 미완성 라인 바이트"뿐이다.
+/// ★decoder 자신의 상태 = 줄 재조립뿐이다★: 메시지 병합(같은 message.id 블록 concat)은 decoder 책임이
+///   아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해 뱉는다. 목록 항목도 모른다 —
+///   명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
+/// ★받음 값(`ack`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 세션이 같은 값을 읽는다.
 #[derive(Debug, Default)]
 pub struct ClaudeStreamDecoder {
     /// 마지막 `\n` 뒤 미완성 라인 바이트(라인-레벨 분할 재조립용).
@@ -695,11 +783,27 @@ pub struct ClaudeStreamDecoder {
     ///   손실하고, **그 라인이 끝나는 `\n` 이후부터** 온전히 복구하려면 "다음 개행까지 버리는"
     ///   상태가 있어야 한다.
     discarding: bool,
+
+    /// 이 화신의 받음 알림 가능 여부 — `system/init` 의 능력 목록과 첫 `command_lifecycle` 줄로 `Unknown` 을
+    /// 떠나게 한다. 운영에서는 backend 가 `SpawnParts::delivery_ack` 에 싣는 **바로 그** Arc 다.
+    // ADR-0231
+    ack: Arc<DeliveryAck>,
 }
 
 impl ClaudeStreamDecoder {
+    /// 자기만 쥐는 받음 값을 채우는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// `ack` 를 채우는 decoder — 세션이 같은 Arc 를 읽는다. ★`Unknown → Unavailable` 전이를 이긴 decoder 가
+    /// `AckUnavailable{delivered: []}` 를 한 번 낸다★(같은 Arc 를 쥔 decoder 가 여럿이어도 한 번).
+    // ADR-0231
+    pub fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
+        Self {
+            ack,
+            ..Self::default()
+        }
     }
 
     /// 바이트 청크를 밀어 넣고, 이번 청크로 **완성된 라인**들만 파싱해 이벤트를 돌려준다.
@@ -726,7 +830,11 @@ impl ClaudeStreamDecoder {
         // 마지막 개행 뒤 잔여는 tail 로 buffer 에 남겨 다음 청크와 합친다(FIX-D: 주석을 실제 코드와 일치).
         while let Some(nl) = self.buffer.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=nl).collect();
-            Self::consume_line(&line[..line.len() - 1], &mut events);
+            Self::consume_line(
+                &line[..line.len() - 1],
+                &mut events,
+                LineSource::Live(&self.ack),
+            );
         }
 
         // ★단순 clear 가 아니라 resync 진입(FIX-A)★: buffer 만 비우면 이 오염 라인의 나머지 꼬리가
@@ -751,7 +859,7 @@ impl ClaudeStreamDecoder {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            Self::consume_line(&line, &mut events);
+            Self::consume_line(&line, &mut events, LineSource::Live(&self.ack));
         }
         events
     }
@@ -764,8 +872,11 @@ impl ClaudeStreamDecoder {
     /// - `result` 라인 → MessageDone(+ result.usage 있으면 Usage 추가 emit;
     ///   is_error/subtype 이 error 계열이면 MessageDone **앞에** Error 도 emit — FIX-C).
     ///   ※ result 의 오류 표면화는 **백엔드 신규 정책**이다(프론트 파서엔 없던 판정).
-    /// - `system`/`rate_limit_event`/그 외 unknown type → skip(0개).
-    fn consume_line(line: &[u8], events: &mut Vec<OutputEvent>) {
+    /// - 라이브만: `command_lifecycle` → 명부 사건 · `cancel:<uuid>` 요청의 `control_response` → 취소 응답
+    ///   사건 · `system/init` → 받음 가능 여부 판정(ADR-0231).
+    /// - transcript 만: `attachment{queued_command}` → 사용자 말풍선.
+    /// - 그 밖의 `system`/`rate_limit_event`/`queue-operation`/unknown type → skip(0개).
+    fn consume_line(line: &[u8], events: &mut Vec<OutputEvent>, source: LineSource<'_>) {
         // ★여기서 처음 UTF-8 디코딩★(위 buffer 불변식). lossy 가 아니라 엄격 검증 후 실패 시 skip —
         //   비-UTF8 라인은 claude 정상 출력이 아니다(터미널 경로가 아니다).
         let text = match std::str::from_utf8(line) {
@@ -781,8 +892,8 @@ impl ClaudeStreamDecoder {
             Err(_) => return, // 비-JSON(stderr 경고 등) → skip
         };
 
-        match value.get("type").and_then(|t| t.as_str()) {
-            Some(role @ ("assistant" | "user")) => {
+        match (value.get("type").and_then(|t| t.as_str()), source) {
+            (Some(role @ ("assistant" | "user")), _) => {
                 let msg = match value.get("message") {
                     Some(m) => m,
                     None => return,
@@ -799,7 +910,7 @@ impl ClaudeStreamDecoder {
                     Self::consume_block(role, block, message_id.as_deref(), line_uuid, events);
                 }
             }
-            Some("result") => {
+            (Some("result"), _) => {
                 // ★Usage 를 MessageDone 보다 먼저 emit★: 소비자가 "턴 종료" 신호를 보기 전에 그 턴의
                 //   최종 토큰 집계를 받게 순서를 고정한다(뒤에 오면 종료 후 지연 도착처럼 보인다).
                 //   result.usage.{input_tokens,output_tokens} — 실측 fixture 확인(text.jsonl 라인5:
@@ -841,7 +952,7 @@ impl ClaudeStreamDecoder {
                 //   error 접두사만 오류로 잡고 나머지(success·interrupted·미지 non-error)는 오류 아님.
                 let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
                 if is_error || subtype_is_error {
-                    let mut detail = String::from("claude stream-json result reported failure");
+                    let mut detail = String::from(RESULT_FAILURE_DETAIL);
                     if let Some(s) = subtype {
                         detail.push_str(&format!(" (subtype={s})"));
                     }
@@ -855,7 +966,72 @@ impl ClaudeStreamDecoder {
                     message_id: None,
                 });
             }
-            // system/init·rate_limit_event·thinking_tokens 등 메타 라인, unknown type → skip.
+            (Some("command_lifecycle"), LineSource::Live(ack)) => {
+                // 알아보는 줄이 왔다는 것이 「이 CLI 는 항목별 수명주기를 낸다」다 — init 은 턴 시작 0.6–0.9 s 뒤에야
+                //   오지만 수명주기는 쓴 뒤 1 ms 안에 온다(M1·M4).
+                // ★type 만 맞고 못 알아보는 줄로는 열지 않는다(TRD §5-4 「처음 보면 Available」보다 좁다)★ — 내부
+                //   표면이라 벤더가 키·상태어를 바꾸면, 열어 둔 명부 행이 영영 안 닫힌다. 그대로 두면 능력 없는
+                //   init 이 `Unavailable` 로 보내 오늘 경로로 떨어진다.
+                // ADR-0231
+                if is_recognisable_lifecycle(&value) {
+                    ack.set_available();
+                }
+                if let Some(op) = lifecycle_event(&value) {
+                    events.push(OutputEvent::QueuedInput(op));
+                }
+            }
+            (Some("control_response"), LineSource::Live(_)) => {
+                if let Some(op) = cancel_response_event(&value) {
+                    events.push(OutputEvent::QueuedInput(op));
+                }
+            }
+            (Some("system"), LineSource::Live(ack))
+                if value.get("subtype").and_then(|s| s.as_str()) == Some("init") =>
+            {
+                if let Some(op) = judge_delivery_ack(ack, &value) {
+                    events.push(OutputEvent::QueuedInput(op));
+                }
+            }
+            (Some("attachment"), LineSource::Transcript) => {
+                Self::consume_queued_command(&value, events);
+            }
+            // 그 밖의 system(hook·thinking_tokens·task 알림 등)·rate_limit_event·queue-operation 등 메타 라인,
+            //   흐름이 맞지 않는 줄, unknown type → skip.
+            _ => {}
+        }
+    }
+
+    /// 이어받기 transcript 의 `attachment{queued_command}` → 사용자 말풍선(uuid = `source_uuid`).
+    ///
+    /// ★턴 도중 접혀 들어간 입력은 `user` 줄이 아니라 이 한 줄로 남는다(실측 M5 — claude 2.1.280)★ — 이것을
+    ///   건너뛰면 이어받은 대화에서 그 글이 사라진다. 뒤에 붙는 `queue-operation` 줄은 본문이 없어 버린다. 취소된
+    ///   입력은 본문을 안 남기므로 되살아나지 않는다(버린 글이다).
+    /// ★`commandMode: "prompt"` 만 옮긴다★ — 그 밖의 모드가 무엇을 싣는지는 판독하지 않았다(CLI 가 스스로 넣은
+    ///   명령일 수 있다). 사람이 친 글이라는 근거가 있는 것만 말풍선으로 세우고 나머지는 오늘처럼 버린다.
+    /// ★말풍선 모양은 `user` 줄의 text 블록과 같다★ — `consume_block` 의 user 갈래를 그대로 탄다.
+    // ADR-0231
+    fn consume_queued_command(value: &serde_json::Value, events: &mut Vec<OutputEvent>) {
+        let Some(attachment) = value.get("attachment") else {
+            return;
+        };
+        let field = |key: &str| attachment.get(key).and_then(|v| v.as_str());
+        if field("type") != Some("queued_command") || field("commandMode") != Some("prompt") {
+            return;
+        }
+        let uuid = field("source_uuid");
+        match attachment.get("prompt") {
+            Some(serde_json::Value::Array(blocks)) => {
+                for block in blocks
+                    .iter()
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                {
+                    Self::consume_block("user", block, None, uuid, events);
+                }
+            }
+            Some(serde_json::Value::String(text)) => {
+                let block = serde_json::json!({ "type": "text", "text": text });
+                Self::consume_block("user", &block, None, uuid, events);
+            }
             _ => {}
         }
     }
@@ -976,6 +1152,111 @@ impl ClaudeStreamDecoder {
     }
 }
 
+// ── ADR-0231: 대기 입력 — 벤더 줄 → 명부 사건 (stateless 번역) ──────────────────────
+
+/// `command_lifecycle` 한 줄 → 명부 사건.
+///
+/// ★키는 `command_uuid`(우리가 쓴 uuid)다 — 줄 자신의 `uuid` 는 CLI 가 새로 뽑는다(실측 M1)★.
+/// ★한가할 때 바로 보낸 입력의 수명주기도 번역한다★ — 명부·누산기가 모르는 id 라 묘비만 남는다(환원 규칙).
+/// 번역표: `started` → 받음 · `cancelled` → 모름(끊기·실패 턴·우리 취소 — 원인은 취소 응답이 가른다) ·
+///   `discarded` → 에이전트 종료 · `refused` → 거절. `queued`(큐 진입)·`completed`(결말 뒤)·모르는 상태 → 없음.
+// ADR-0231
+fn lifecycle_event(value: &serde_json::Value) -> Option<QueuedInputEvent> {
+    let id = value
+        .get("command_uuid")
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    let cause = match value.get("state").and_then(|v| v.as_str())? {
+        "started" => return Some(QueuedInputEvent::Delivered { id }),
+        "cancelled" => DropCause::Unknown,
+        "discarded" => DropCause::AgentEnded,
+        "refused" => DropCause::Rejected,
+        _ => return None,
+    };
+    Some(QueuedInputEvent::Dropped { id, cause })
+}
+
+/// decoder 가 아는 수명주기 상태어 여섯 — [`lifecycle_event`] 번역표와 같은 집합이다.
+const LIFECYCLE_STATES: [&str; 6] = [
+    "queued",
+    "started",
+    "completed",
+    "cancelled",
+    "discarded",
+    "refused",
+];
+
+/// 비지 않은 문자열 `command_uuid` 와 아는 상태어를 함께 가진 `command_lifecycle` 줄인가 — 받음을 `Available` 로
+/// 여는 조건이다.
+// ADR-0231
+fn is_recognisable_lifecycle(value: &serde_json::Value) -> bool {
+    let has_id = value
+        .get("command_uuid")
+        .and_then(|v| v.as_str())
+        .is_some_and(|id| !id.is_empty());
+    let known_state = value
+        .get("state")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| LIFECYCLE_STATES.contains(&s));
+    has_id && known_state
+}
+
+/// [`cancel_line`] 이 보낸 요청의 `control_response` → 취소 응답 사건. 다른 요청의 응답이면 `None`.
+///
+/// ★값은 `response.response.cancelled` 에 중첩돼 있다(실측 M3)★. 성공인데 그 값이 없으면 「못 뺐다」(`false`)로
+///   읽는다 — `false` 는 결말이 아니라 뒤이은 벤더 닫힘의 원인을 가르는 재료라, 모를 때 기울 쪽이 그것이다.
+/// `subtype:"error"` 봉투는 미캡처다(판독 — TRD §3-1) — 요청 id 만 같은 자리에서 읽는다.
+// ADR-0231
+fn cancel_response_event(value: &serde_json::Value) -> Option<QueuedInputEvent> {
+    let response = value.get("response")?;
+    let id = response
+        .get("request_id")
+        .and_then(|v| v.as_str())?
+        .strip_prefix(CANCEL_REQUEST_PREFIX)
+        .filter(|id| !id.is_empty())?
+        .to_owned();
+    match response.get("subtype").and_then(|v| v.as_str())? {
+        "success" => Some(QueuedInputEvent::CancelAnswered {
+            id,
+            removed: response
+                .get("response")
+                .and_then(|r| r.get("cancelled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }),
+        "error" => Some(QueuedInputEvent::CancelFailed { id }),
+        _ => None,
+    }
+}
+
+/// `system/init` 한 줄로 받음 가능 여부를 정한다 — 능력 목록에 [`MSG_LIFECYCLE_CAPABILITY`] 가 있으면 `Available`,
+/// 없으면(목록 자체가 없는 옛 CLI 포함) `Unavailable`.
+///
+/// ★`Unavailable` 전이를 이긴 호출만 `AckUnavailable{delivered: []}` 를 돌려준다★ — 이 화신에 한 번뿐이다. 남은
+///   항목을 말풍선으로 옮기는 것은 그 사건을 환원하는 명부·누산기이고(decoder 는 항목을 모른다), 본문 사본은
+///   코어가 채운다. 한 번 `Available` 이면 뒤의 init 이 무엇이든 되돌리지 않는다.
+// ADR-0231
+fn judge_delivery_ack(ack: &DeliveryAck, value: &serde_json::Value) -> Option<QueuedInputEvent> {
+    let lifecycle = value
+        .get("capabilities")
+        .and_then(|c| c.as_array())
+        .is_some_and(|caps| {
+            caps.iter()
+                .any(|c| c.as_str() == Some(MSG_LIFECYCLE_CAPABILITY))
+        });
+    if lifecycle {
+        ack.set_available();
+        None
+    } else if ack.try_set_unavailable() {
+        Some(QueuedInputEvent::AckUnavailable {
+            delivered: Vec::new(),
+        })
+    } else {
+        None
+    }
+}
+
 // ── ADR-0079: resume 시 `.jsonl` transcript → OutputEvent seed ──────
 //
 // ★매핑 재사용(디코더 한 벌)★: transcript 의 `assistant`/`user` 라인은 라이브 stream-json 과 **동일한**
@@ -984,6 +1265,8 @@ impl ClaudeStreamDecoder {
 //   봉투에 추가 top-level 키(`parentUuid`/`uuid`/`timestamp`/`sessionId`/`isSidechain` …)와 라이브에
 //   없는 라인 타입(`summary`/`file-history-snapshot`/`queue-operation`/`attachment`/`ai-title`)을 더 싣지만,
 //   `consume_line` 의 catch-all(`_ => {}`)이 모르는 타입을 이미 무해히 스킵하므로 그 라인들은 자연 배제된다.
+//   ★예외 하나 = `attachment{queued_command}`★ — 턴 도중 접힌 입력의 본문이 거기만 남아 말풍선으로 옮긴다
+//   (`LineSource::Transcript` 갈래). 라이브 전용 줄(수명주기·취소 응답·init)은 그 갈래에서 번역하지 않는다.
 //   유일한 추가 필터는 `isSidechain:true`(sub-agent 턴) — 이건 `type` 이 여전히 user/assistant 라
 //   consume_line 이 안 걸러내므로 여기서 라인 레벨로 스킵한다.
 
@@ -1061,7 +1344,7 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
         if is_sidechain_line(trimmed) {
             continue;
         }
-        ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events);
+        ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events, LineSource::Transcript);
     }
     // ★복원 히스토리는 반드시 "닫힌 턴"으로 끝낸다(load-bearing)★: 실제 `.jsonl` transcript 에는 라이브
     //   stream-json 의 `result` 라인이 **들어 있지 않다**(실측 2026-08-17 — 최근 transcript 12개 전부 0건.
@@ -1165,10 +1448,10 @@ mod tests {
 
     // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
-    /// `result` 끝 = 깨끗한 끝 · 오류 줄은 아직 신호가 아니다 — 오류 뒤 멈춤이 켜지기 전 오늘 동작 그대로.
+    /// `result` 끝 = 깨끗한 끝 · 오류 줄 중 턴 오류는 실패한 `result` 의 것뿐 · `TurnEnd` 의 실패 = 오류 끝.
     // ADR-0231
     #[test]
-    fn the_result_end_is_clean_and_no_end_is_an_error_end_yet() {
+    fn the_result_end_is_clean_and_only_a_failed_result_error_is_a_turn_error() {
         let classify = ClaudeBackend.turn_classifier();
         assert_eq!(
             classify(&OutputEvent::MessageDone {
@@ -1178,6 +1461,12 @@ mod tests {
             Some(TurnSignal::Ended(TurnEndKind::Clean))
         );
         assert_eq!(classify(&OutputEvent::Error("boom".into())), None);
+        assert_eq!(
+            classify(&OutputEvent::Error(format!(
+                "{RESULT_FAILURE_DETAIL} (subtype=error_max_turns)"
+            ))),
+            Some(TurnSignal::Failed)
+        );
         let end = |outcome| {
             classify(&OutputEvent::TurnEnd {
                 turn_id: None,
@@ -1188,11 +1477,11 @@ mod tests {
             end(TurnOutcome::Completed),
             Some(TurnSignal::Ended(TurnEndKind::Clean))
         );
-        for outcome in [
-            TurnOutcome::Failed { detail: None },
-            TurnOutcome::Interrupted,
-            TurnOutcome::Unknown,
-        ] {
+        assert_eq!(
+            end(TurnOutcome::Failed { detail: None }),
+            Some(TurnSignal::Ended(TurnEndKind::Failed))
+        );
+        for outcome in [TurnOutcome::Interrupted, TurnOutcome::Unknown] {
             assert_eq!(
                 end(outcome.clone()),
                 Some(TurnSignal::Ended(TurnEndKind::Other)),
@@ -2656,6 +2945,7 @@ mod tests {
         assert_eq!(
             tags(&events),
             vec![
+                "queued:ack-unavailable",
                 "structured:thinking",
                 "tool:Read",
                 "structured:user",
@@ -2727,7 +3017,18 @@ mod tests {
                 OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
                 OutputEvent::Error(_) => "error".to_string(),
                 OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
-                OutputEvent::QueuedInput(_) => "queued-input".to_string(),
+                OutputEvent::QueuedInput(op) => format!(
+                    "queued:{}",
+                    match op {
+                        QueuedInputEvent::Queued { .. } => "queued",
+                        QueuedInputEvent::CancelRequested { .. } => "cancel-requested",
+                        QueuedInputEvent::CancelAnswered { .. } => "cancel-answered",
+                        QueuedInputEvent::CancelFailed { .. } => "cancel-failed",
+                        QueuedInputEvent::Delivered { .. } => "delivered",
+                        QueuedInputEvent::Dropped { .. } => "dropped",
+                        QueuedInputEvent::AckUnavailable { .. } => "ack-unavailable",
+                    }
+                ),
             })
             .collect()
     }
@@ -2741,11 +3042,15 @@ mod tests {
 
     #[test]
     fn text_fixture_maps_to_text_then_usage_done() {
-        // text.jsonl: Warning(비-JSON)·system·rate_limit → skip / assistant[text "hello"] / result(usage).
+        // text.jsonl: Warning(비-JSON)·rate_limit → skip / assistant[text "hello"] / result(usage).
+        //   ★2.1.170 의 system/init 엔 능력 목록이 없다 → 받음 불가 판정 한 번(ADR-0231)★.
         let events = decode_all(TEXT_JSONL.as_bytes());
-        assert_eq!(tags(&events), vec!["text", "usage", "done"]);
+        assert_eq!(
+            tags(&events),
+            vec!["queued:ack-unavailable", "text", "usage", "done"]
+        );
 
-        match &events[0] {
+        match &events[1] {
             OutputEvent::TextDelta {
                 text, message_id, ..
             } => {
@@ -2754,7 +3059,7 @@ mod tests {
             }
             other => panic!("expected TextDelta, got {other:?}"),
         }
-        match &events[1] {
+        match &events[2] {
             OutputEvent::Usage {
                 input_tokens,
                 output_tokens,
@@ -2776,11 +3081,13 @@ mod tests {
         //  16 assistant[thinking]           → structured:thinking
         //  17 assistant[text]               → text
         //  18 result(usage)                 → usage, done
-        // (system/status·init·rate_limit·thinking_tokens 메타 라인은 전부 skip)
+        //  2  system/init(능력 목록 없음 — 2.1.170) → queued:ack-unavailable (ADR-0231)
+        // (system/status·rate_limit·thinking_tokens 메타 라인은 전부 skip)
         let events = decode_all(TOOL_JSONL.as_bytes());
         assert_eq!(
             tags(&events),
             vec![
+                "queued:ack-unavailable",
                 "structured:thinking",
                 "tool:Read",
                 "structured:user",
@@ -2865,7 +3172,8 @@ mod tests {
     fn non_json_and_meta_lines_are_skipped_without_panic() {
         let input = concat!(
             "Warning: no stdin data received in 3s, proceeding without it.\n",
-            "{\"type\":\"system\",\"subtype\":\"init\"}\n",
+            // 능력 목록 없는 init 은 받음 불가 판정 사건을 낸다(ADR-0231 — 별도 항목이 잰다).
+            "{\"type\":\"system\",\"subtype\":\"init\",\"capabilities\":[\"msg_lifecycle_v1\"]}\n",
             "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{}}\n",
             "\n",
             "not json at all {{{\n",
@@ -3485,5 +3793,564 @@ mod tests {
             !spec.args.iter().any(|x| x == "--session-id"),
             "Resume 모드에서 --session-id(fresh)가 누출되면 안 됨"
         );
+    }
+
+    // ── ADR-0231: 대기 입력 — 수명주기·취소 응답·받음 판정·턴 오류·첨부 복원 ─────────────────
+    //
+    // 정본 = Phase 0 실측 fixture(claude 2.1.280). `result_error_handbuilt` 만 손으로 지었다(README).
+
+    const LIFECYCLE_M1: &str = include_str!("fixtures/lifecycle_m1.jsonl");
+    const CANCEL_M3: &str = include_str!("fixtures/cancel_m3.jsonl");
+    const DRAIN_M7: &str = include_str!("fixtures/drain_m7.jsonl");
+    const SLASH_M13: &str = include_str!("fixtures/slash_m13.jsonl");
+    const RESULT_ERROR: &str = include_str!("fixtures/result_error_handbuilt.jsonl");
+    const TRANSCRIPT_QUEUED_M5: &str = include_str!("fixtures/transcript_queued_m5.jsonl");
+
+    fn queued_ops(events: &[OutputEvent]) -> Vec<QueuedInputEvent> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::QueuedInput(op) => Some(op.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn delivered(id: &str) -> QueuedInputEvent {
+        QueuedInputEvent::Delivered { id: id.into() }
+    }
+
+    fn dropped(id: &str, cause: DropCause) -> QueuedInputEvent {
+        QueuedInputEvent::Dropped {
+            id: id.into(),
+            cause,
+        }
+    }
+
+    fn answered(id: &str, removed: bool) -> QueuedInputEvent {
+        QueuedInputEvent::CancelAnswered {
+            id: id.into(),
+            removed,
+        }
+    }
+
+    /// 픽스처의 n 번째 줄(1 기반) — 개행을 붙여 decoder 한 번에 한 줄씩 먹일 때 쓴다.
+    fn fixture_line(fixture: &str, n: usize) -> String {
+        format!("{}\n", fixture.lines().nth(n - 1).expect("fixture line"))
+    }
+
+    /// 턴 관측을 운영처럼 배선한 코어 — 이 backend 의 분류기 + 등록된 공용 표.
+    fn observed_core(
+        table: &Arc<crate::turn::TurnObservations>,
+    ) -> (crate::output_core::OutputCore, AgentId, u32) {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let (id, epoch) = (Uuid::new_v4(), 7);
+        table.register(id, epoch);
+        let core = OutputCore::new(
+            id,
+            epoch,
+            Arc::new(NoopStatus),
+            TurnWiring::new(Arc::clone(table), classify_turn),
+        );
+        (core, id, epoch)
+    }
+
+    fn feed(core: &crate::output_core::OutputCore, d: &mut ClaudeStreamDecoder, bytes: &str) {
+        for ev in d.decode(bytes.as_bytes()) {
+            core.emit(ev);
+        }
+    }
+
+    /// 수명주기 키는 `command_uuid` 다 — 같은 줄의 `uuid`(CLI 가 새로 뽑는 값)가 아니다. 한가할 때 쓴 A 도 수명주기를
+    /// 낸다(M1).
+    // ADR-0231
+    #[test]
+    fn lifecycle_lines_translate_keyed_by_command_uuid() {
+        let first: serde_json::Value =
+            serde_json::from_str(LIFECYCLE_M1.lines().next().unwrap()).expect("fixture json");
+        assert_ne!(first["uuid"], first["command_uuid"], "픽스처 전제");
+
+        assert_eq!(
+            queued_ops(&decode_all(LIFECYCLE_M1.as_bytes())),
+            vec![
+                delivered("f53b8bb3-9dfd-4aa3-a57e-ad6659376e84"),
+                delivered("44fcee51-376b-4de7-9532-e9608f9de0a0"),
+            ]
+        );
+    }
+
+    /// 여섯 상태 번역 — `queued`·`completed` 는 사건이 없다. id 없는 줄·모르는 상태도 없다.
+    // ADR-0231
+    #[test]
+    fn all_six_lifecycle_states_translate() {
+        let line = |state: &str| {
+            format!(
+                r#"{{"type":"command_lifecycle","command_uuid":"u1","state":"{state}","uuid":"x","session_id":"s"}}"#
+            ) + "\n"
+        };
+        let cases = [
+            ("queued", vec![]),
+            ("started", vec![delivered("u1")]),
+            ("completed", vec![]),
+            ("cancelled", vec![dropped("u1", DropCause::Unknown)]),
+            ("discarded", vec![dropped("u1", DropCause::AgentEnded)]),
+            ("refused", vec![dropped("u1", DropCause::Rejected)]),
+            ("someday_new_state", vec![]),
+        ];
+        for (state, want) in cases {
+            assert_eq!(
+                queued_ops(&decode_all(line(state).as_bytes())),
+                want,
+                "{state}"
+            );
+        }
+        // id 없는 줄은 사건도 없고 받음도 열지 않는다(`Unknown` 그대로).
+        let no_id = "{\"type\":\"command_lifecycle\",\"state\":\"started\"}\n";
+        let empty_id =
+            "{\"type\":\"command_lifecycle\",\"command_uuid\":\"\",\"state\":\"started\"}\n";
+        for bad in [no_id, empty_id] {
+            let ack = Arc::new(DeliveryAck::new());
+            let mut d = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+            assert!(queued_ops(&d.decode(bad.as_bytes())).is_empty(), "{bad}");
+            assert_eq!(
+                ack.state(),
+                crate::types::DeliveryAckState::Unknown,
+                "{bad}"
+            );
+        }
+    }
+
+    /// 벤더 표류 — 키가 바뀌었거나(`command_uuid` 없음) 모르는 상태어인 수명주기 줄은 받음을 열지 않는다(`Unknown`).
+    /// 그래서 뒤이은 능력 없는 init 이 `Unavailable` + `AckUnavailable{[]}` 한 번으로 오늘 경로를 고른다.
+    // ADR-0231
+    #[test]
+    fn an_unrecognisable_lifecycle_line_does_not_make_the_ack_available() {
+        use crate::types::DeliveryAckState;
+
+        let renamed_key =
+            "{\"type\":\"command_lifecycle\",\"cmd_uuid\":\"u1\",\"state\":\"started\"}\n";
+        let unknown_state =
+            "{\"type\":\"command_lifecycle\",\"command_uuid\":\"u1\",\"state\":\"someday_new_state\"}\n";
+        for drift in [renamed_key, unknown_state] {
+            let ack = Arc::new(DeliveryAck::new());
+            let mut d = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+            assert!(
+                queued_ops(&d.decode(drift.as_bytes())).is_empty(),
+                "{drift}"
+            );
+            assert_eq!(ack.state(), DeliveryAckState::Unknown, "{drift}");
+
+            let bare_init = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
+            assert_eq!(
+                queued_ops(&d.decode(bare_init.as_bytes())),
+                vec![QueuedInputEvent::AckUnavailable {
+                    delivered: Vec::new()
+                }],
+                "{drift}"
+            );
+            assert_eq!(ack.state(), DeliveryAckState::Unavailable, "{drift}");
+        }
+    }
+
+    /// 모든 실측 픽스처에서 `started` 줄 하나 = `Delivered` 하나(같은 `command_uuid`, 같은 순서) — 도구 경계 접기(M1)
+    /// · 취소(M3) · drain 턴(M7) · 턴 도중 슬래시 명령(M13) 어느 갈래든 번역이 같다.
+    // ADR-0231
+    #[test]
+    fn every_started_line_in_every_fixture_is_one_delivered() {
+        for (name, fixture) in [
+            ("m1", LIFECYCLE_M1),
+            ("m3", CANCEL_M3),
+            ("m7", DRAIN_M7),
+            ("m13", SLASH_M13),
+            ("handbuilt", RESULT_ERROR),
+        ] {
+            let started: Vec<QueuedInputEvent> = fixture
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v["type"] == "command_lifecycle" && v["state"] == "started")
+                .map(|v| delivered(v["command_uuid"].as_str().unwrap()))
+                .collect();
+            let got: Vec<QueuedInputEvent> = queued_ops(&decode_all(fixture.as_bytes()))
+                .into_iter()
+                .filter(|op| matches!(op, QueuedInputEvent::Delivered { .. }))
+                .collect();
+            assert!(!started.is_empty(), "{name}: 픽스처 전제");
+            assert_eq!(got, started, "{name}");
+        }
+    }
+
+    /// M3 — (a) 우리 취소가 뺐다: `cancelled` 수명주기가 응답 `true` 보다 먼저 · (c2) 취소가 글보다 먼저 닿았다:
+    /// 응답 `false` 뒤 그 글이 접혀 전달됐다(`started`). 응답의 uuid 는 요청 id 에서 뗀다.
+    // ADR-0231
+    #[test]
+    fn cancel_m3_translates_answers_and_lifecycle_in_line_order() {
+        assert_eq!(
+            queued_ops(&decode_all(CANCEL_M3.as_bytes())),
+            vec![
+                delivered("a7c61eaa-2e6f-4190-b4ca-33e948fd9d2f"),
+                dropped("6d3edeb9-e7a6-48a6-826b-5e3e7d9a91dc", DropCause::Unknown),
+                answered("6d3edeb9-e7a6-48a6-826b-5e3e7d9a91dc", true),
+                delivered("154094b1-7dfd-4f71-887a-5daaa6542d5b"),
+                answered("635fe486-548a-4132-bbed-c0d59ac10a85", false),
+                delivered("635fe486-548a-4132-bbed-c0d59ac10a85"),
+            ]
+        );
+    }
+
+    /// 오류 응답 → `CancelFailed` · 값 없는 성공 → 「못 뺐다」 · 우리 취소가 아닌 응답과 빈 uuid → 없음.
+    // ADR-0231
+    #[test]
+    fn a_cancel_error_response_is_cancel_failed_and_foreign_responses_are_ignored() {
+        let error = r#"{"type":"control_response","response":{"subtype":"error","request_id":"cancel:u1","error":"boom"}}"#;
+        assert_eq!(
+            queued_ops(&decode_all(format!("{error}\n").as_bytes())),
+            vec![QueuedInputEvent::CancelFailed { id: "u1".into() }]
+        );
+        let no_value = r#"{"type":"control_response","response":{"subtype":"success","request_id":"cancel:u1","response":{}}}"#;
+        assert_eq!(
+            queued_ops(&decode_all(format!("{no_value}\n").as_bytes())),
+            vec![answered("u1", false)]
+        );
+        for foreign in [
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"interrupt-1","response":{"cancelled":true}}}"#,
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"cancel:","response":{"cancelled":true}}}"#,
+            r#"{"type":"control_response","response":{"subtype":"success","response":{"cancelled":true}}}"#,
+        ] {
+            let ev = decode_all(format!("{foreign}\n").as_bytes());
+            assert!(ev.is_empty(), "{foreign} → {ev:?}");
+        }
+    }
+
+    /// 취소 줄 바이트 골든(TRD §5-4 — 실측 M3 가 받아들인 모양) + 그 요청 id 의 응답이 같은 uuid 로 되돌아온다.
+    // ADR-0231
+    #[test]
+    fn cancel_line_bytes_golden_and_its_answer_round_trips() {
+        let id = "6d3edeb9-e7a6-48a6-826b-5e3e7d9a91dc";
+        let line = cancel_line(id);
+        assert_eq!(
+            String::from_utf8(line.clone()).unwrap(),
+            concat!(
+                r#"{"type":"control_request","request_id":"cancel:6d3edeb9-e7a6-48a6-826b-5e3e7d9a91dc","#,
+                r#""request":{"subtype":"cancel_async_message","message_uuid":"6d3edeb9-e7a6-48a6-826b-5e3e7d9a91dc"}}"#,
+                "\n"
+            )
+        );
+
+        let sent: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": sent["request_id"], "response": {"cancelled": true}},
+        });
+        assert_eq!(
+            queued_ops(&decode_all(format!("{answer}\n").as_bytes())),
+            vec![answered(id, true)]
+        );
+    }
+
+    /// JSON 모드만 세션 분류를 신고하고 그 취소 조각이 위 골든의 바로 그 줄이다 — 터미널 모드는 오늘 경로다.
+    // ADR-0231
+    #[test]
+    fn only_the_json_mode_reports_session_classified_with_the_cancel_line() {
+        let id = "6d3edeb9-e7a6-48a6-826b-5e3e7d9a91dc";
+        match mid_turn_policy(&json(vec![])) {
+            MidTurnPolicy::SessionClassified { cancel_line: line } => {
+                assert_eq!(line(id), cancel_line(id))
+            }
+            other => panic!("JSON 모드는 세션 분류여야 한다: {other:?}"),
+        }
+        assert!(matches!(
+            mid_turn_policy(&terminal(vec![])),
+            MidTurnPolicy::None
+        ));
+    }
+
+    /// 첫 수명주기 줄이 받음을 `Available` 로 연다 — init 은 턴 시작 뒤에야 오므로 그보다 앞선다(M1·M4). 뒤의
+    /// init 은 아무것도 바꾸지 않는다.
+    // ADR-0231
+    #[test]
+    fn the_first_lifecycle_line_makes_delivery_ack_available_before_init() {
+        use crate::types::DeliveryAckState;
+
+        let ack = Arc::new(DeliveryAck::new());
+        let mut d = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+        assert!(d
+            .decode(fixture_line(LIFECYCLE_M1, 1).as_bytes())
+            .is_empty());
+        assert_eq!(ack.state(), DeliveryAckState::Available);
+
+        let rest: String = LIFECYCLE_M1
+            .lines()
+            .skip(1)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let ops = queued_ops(&d.decode(rest.as_bytes()));
+        assert!(
+            !ops.iter()
+                .any(|op| matches!(op, QueuedInputEvent::AckUnavailable { .. })),
+            "{ops:?}"
+        );
+        assert_eq!(ack.state(), DeliveryAckState::Available);
+    }
+
+    /// 능력 목록에 `msg_lifecycle_v1` 이 있는 init → `Available`, 사건 없음.
+    // ADR-0231
+    #[test]
+    fn an_init_with_the_lifecycle_capability_is_available() {
+        use crate::types::DeliveryAckState;
+
+        let ack = Arc::new(DeliveryAck::new());
+        let mut d = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+        let init = fixture_line(LIFECYCLE_M1, 3);
+        assert!(init.contains("\"subtype\":\"init\""), "픽스처 전제");
+        assert!(d.decode(init.as_bytes()).is_empty());
+        assert_eq!(ack.state(), DeliveryAckState::Available);
+    }
+
+    /// 능력 없는 init(2.1.170) → `Unavailable` + `AckUnavailable{[]}` 가 **이 화신에 한 번** — 같은 decoder 가 다시
+    /// 봐도, 같은 Arc 를 쥔 다른 decoder 가 봐도 둘째는 없다.
+    // ADR-0231
+    #[test]
+    fn an_init_without_the_capability_is_unavailable_with_exactly_one_ack_unavailable() {
+        use crate::types::DeliveryAckState;
+
+        let init = TEXT_JSONL
+            .lines()
+            .find(|l| l.contains("\"subtype\":\"init\""))
+            .map(|l| format!("{l}\n"))
+            .expect("2.1.170 init");
+        let ack = Arc::new(DeliveryAck::new());
+        let mut d = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+        let mut other = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+        let mut ops = queued_ops(&d.decode(init.as_bytes()));
+        ops.extend(queued_ops(&d.decode(init.as_bytes())));
+        ops.extend(queued_ops(&other.decode(init.as_bytes())));
+        assert_eq!(
+            ops,
+            vec![QueuedInputEvent::AckUnavailable {
+                delivered: Vec::new()
+            }]
+        );
+        assert_eq!(ack.state(), DeliveryAckState::Unavailable);
+    }
+
+    /// 한 번 `Available` 이면 능력 없는 init 이 와도 되돌리지 않고 사건도 없다.
+    // ADR-0231
+    #[test]
+    fn a_capability_less_init_after_available_changes_nothing() {
+        use crate::types::DeliveryAckState;
+
+        let ack = Arc::new(DeliveryAck::new());
+        let mut d = ClaudeStreamDecoder::with_delivery_ack(Arc::clone(&ack));
+        d.decode(fixture_line(LIFECYCLE_M1, 1).as_bytes());
+        let bare_init = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s\"}\n";
+        assert!(d.decode(bare_init.as_bytes()).is_empty());
+        assert_eq!(ack.state(), DeliveryAckState::Available);
+    }
+
+    /// 턴 오류 신호는 실패한 `result` 가 `MessageDone` 바로 앞에 낸 `Error` 뿐 — 실제 decoder 출력으로 잰다(머리말이
+    /// 갈라지면 여기서 깨진다). `success`·`interrupted` 끝은 신호 0 건, 줄 버퍼 넘침 `Error` 도 0 건.
+    // ADR-0231
+    #[test]
+    fn only_the_failed_result_error_is_a_turn_error_signal() {
+        let classify = ClaudeBackend.turn_classifier();
+        let failed_signals = |events: &[OutputEvent]| {
+            events
+                .iter()
+                .filter(|e| classify(e) == Some(TurnSignal::Failed))
+                .count()
+        };
+
+        // 손으로 지은 두 실패 턴: `success`+`is_error:true` · `error_during_execution`.
+        let events = decode_all(RESULT_ERROR.as_bytes());
+        assert_eq!(failed_signals(&events), 2);
+        for (i, e) in events.iter().enumerate() {
+            if classify(e) == Some(TurnSignal::Failed) {
+                assert!(
+                    matches!(events.get(i + 1), Some(OutputEvent::MessageDone { .. })),
+                    "턴 오류 뒤엔 그 턴의 끝이 곧바로 와야 한다: {events:?}"
+                );
+            }
+        }
+
+        assert_eq!(failed_signals(&decode_all(TEXT_JSONL.as_bytes())), 0);
+        let interrupted = "{\"type\":\"result\",\"subtype\":\"interrupted\"}\n";
+        assert_eq!(failed_signals(&decode_all(interrupted.as_bytes())), 0);
+
+        let mut d = ClaudeStreamDecoder::new();
+        let overflow = d.decode(&vec![b'x'; MAX_BUFFER_BYTES + 1]);
+        assert!(
+            matches!(overflow.as_slice(), [OutputEvent::Error(_)]),
+            "{overflow:?}"
+        );
+        assert_eq!(classify(&overflow[0]), None);
+    }
+
+    /// 실패한 `result` → 코어 턴 표 `last_end_failed` 참(오류 뒤 멈춤) → 다음 깨끗한 턴이 푼다.
+    // ADR-0231
+    #[test]
+    fn a_failed_result_halts_until_the_next_clean_turn() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+
+        let first_turn: String = RESULT_ERROR
+            .lines()
+            .take(4)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        feed(&core, &mut d, &first_turn);
+        let after_error = table.get(id, epoch).expect("관측");
+        assert!(after_error.last_end_failed);
+        assert!(!after_error.in_turn);
+
+        feed(&core, &mut d, LIFECYCLE_M1);
+        let after_clean = table.get(id, epoch).expect("관측");
+        assert!(!after_clean.last_end_failed);
+        assert!(!after_clean.in_turn);
+    }
+
+    /// ★턴 밖 줄 버퍼 넘침 `Error` 는 다음 깨끗한 턴을 오류 끝으로 접지 않는다★ — 턴 오류로 세면 표가 그것을 쥐었다가
+    /// 다음 깨끗한 `result` 를 실패로 접어, 사용자가 다시 성공시킬 때까지 우편이 멈춘다.
+    // ADR-0231
+    #[test]
+    fn a_line_overflow_error_outside_a_turn_does_not_fail_the_next_clean_turn() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+
+        for ev in d.decode(&vec![b'x'; MAX_BUFFER_BYTES + 1]) {
+            core.emit(ev);
+        }
+        // 넘친 줄의 꼬리를 끝내는 개행 — 그 뒤부터 정상 줄이다.
+        feed(&core, &mut d, "\n");
+        assert!(!table.get(id, epoch).expect("관측").last_end_failed);
+
+        feed(&core, &mut d, LIFECYCLE_M1);
+        assert!(!table.get(id, epoch).expect("관측").last_end_failed);
+    }
+
+    /// drain 턴(M7): 앞 턴 `result` 로 한가가 된 코어가 대기분의 `started`(=`Delivered`)에서 곧바로 턴 중이 된다 —
+    /// 그 턴의 `system/init`(0.6–0.9 s 뒤)을 기다리지 않는다.
+    // ADR-0231
+    #[test]
+    fn a_drain_turn_started_puts_the_core_in_turn_before_its_init() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let in_turn = || table.get(id, epoch).expect("관측").in_turn;
+
+        for n in 1..=11 {
+            feed(&core, &mut d, &fixture_line(DRAIN_M7, n));
+        }
+        assert!(!in_turn(), "앞 턴 `result` 뒤 = 한가");
+        feed(&core, &mut d, &fixture_line(DRAIN_M7, 12));
+        assert!(!in_turn(), "앞 턴 `completed` 는 신호가 아니다");
+
+        let started = fixture_line(DRAIN_M7, 13);
+        assert!(started.contains("\"state\":\"started\""), "픽스처 전제");
+        feed(&core, &mut d, &started);
+        assert!(in_turn(), "drain 턴의 `started` = 턴 중");
+        assert!(
+            fixture_line(DRAIN_M7, 14).contains("\"subtype\":\"init\""),
+            "픽스처 전제 — 그 턴의 init 은 `started` 뒤다"
+        );
+    }
+
+    /// 이어받기: 접힌 입력의 `attachment{queued_command}` → 그 자리의 사용자 말풍선(uuid = `source_uuid`, 본문 =
+    /// `prompt` 의 text) · `queue-operation` 줄은 버린다 · seed 에 명부 사건은 없다(M5).
+    // ADR-0231
+    #[test]
+    fn a_queued_command_attachment_restores_as_a_user_bubble_in_place() {
+        let events = parse_transcript_events(TRANSCRIPT_QUEUED_M5);
+        assert_eq!(
+            tags(&events),
+            vec![
+                "structured:user",
+                "structured:thinking",
+                "tool:Bash",
+                "structured:user",
+                "structured:user",
+                "structured:thinking",
+                "text",
+                "done",
+            ]
+        );
+        let OutputEvent::Structured { json, .. } = &events[4] else {
+            panic!("expected the restored bubble: {:?}", events[4]);
+        };
+        let bubble: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(bubble["type"], "text");
+        assert_eq!(
+            bubble["text"],
+            "When you reply, also include the word PINEAPPLE."
+        );
+        assert_eq!(bubble["uuid"], "44fcee51-376b-4de7-9532-e9608f9de0a0");
+        assert!(queued_ops(&events).is_empty());
+    }
+
+    /// `queue-operation` 만 있는 transcript → 0 건 · `prompt` 가 아닌 모드·다른 첨부 → 0 건 · 문자열 `prompt` 도 받는다.
+    // ADR-0231
+    #[test]
+    fn queue_operations_and_non_prompt_attachments_are_skipped() {
+        let queue_ops: String = TRANSCRIPT_QUEUED_M5
+            .lines()
+            .filter(|l| l.contains("\"type\":\"queue-operation\""))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(!queue_ops.is_empty(), "픽스처 전제");
+        assert!(parse_transcript_events(&queue_ops).is_empty());
+
+        for skipped in [
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"x"}],"source_uuid":"u1","commandMode":"task-notification"}}"#,
+            r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":[{"type":"text","text":"x"}],"source_uuid":"u1"}}"#,
+            r#"{"type":"attachment","attachment":{"type":"prompt_snapshot","prompt":"x"}}"#,
+        ] {
+            assert!(parse_transcript_events(skipped).is_empty(), "{skipped}");
+        }
+
+        let string_prompt = r#"{"type":"attachment","attachment":{"type":"queued_command","prompt":"hi","source_uuid":"u1","commandMode":"prompt"}}"#;
+        let events = parse_transcript_events(string_prompt);
+        let OutputEvent::Structured { kind, json } = &events[0] else {
+            panic!("{events:?}");
+        };
+        assert_eq!(kind, "user");
+        let bubble: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            (bubble["text"].as_str(), bubble["uuid"].as_str()),
+            (Some("hi"), Some("u1"))
+        );
+    }
+
+    /// 두 흐름은 섞이지 않는다 — 라이브는 첨부 줄을 옮기지 않고(라이브엔 되울림이 따로 온다 — 옮기면 말풍선이 둘),
+    /// transcript 는 수명주기·취소 응답·init 을 번역하지 않는다(seed 는 명부 문을 지나지 않는다).
+    // ADR-0231
+    #[test]
+    fn live_and_transcript_line_kinds_do_not_cross() {
+        let attachment = TRANSCRIPT_QUEUED_M5
+            .lines()
+            .find(|l| l.contains("\"type\":\"attachment\""))
+            .map(|l| format!("{l}\n"))
+            .expect("픽스처 전제");
+        assert!(decode_all(attachment.as_bytes()).is_empty());
+
+        let live_only: String = CANCEL_M3
+            .lines()
+            .filter(|l| {
+                l.contains("\"type\":\"command_lifecycle\"")
+                    || l.contains("\"type\":\"control_response\"")
+                    || l.contains("\"subtype\":\"init\"")
+            })
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert!(!live_only.is_empty(), "픽스처 전제");
+        assert!(parse_transcript_events(&live_only).is_empty());
     }
 }

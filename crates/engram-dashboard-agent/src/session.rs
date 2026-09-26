@@ -15,15 +15,15 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use crate::backend::InputEncoder;
-use crate::output_core::OutputCore;
+use crate::output_core::{CancelRequest, OutputCore};
 use crate::queued_input::{overlay_unconfirmed, ListedRow, QueuedInputs, RowPhase};
 use crate::session_id_latch::SessionIdLatch;
 use crate::transport::AgentTransport;
 use crate::types::{
     AgentId, AgentStatus, BackendCaps, CancelError, CancelOutcome, Capabilities, DeliveryAck,
-    Incarnation, InputEvent, InputOrigin, MidTurnPolicy, OutputChunk, OutputEvent, OutputSink,
-    PtyError, QueuedInputEvent, SinkId, SubscribeReply, TerminationIntent, TurnInput, Withdraw,
-    WriteOutcome,
+    DeliveryAckState, DropCause, Incarnation, InputEvent, InputOrigin, MidTurnPolicy, OutputChunk,
+    OutputEvent, OutputSink, PtyError, QueuedInputEvent, SinkId, SubscribeReply, TerminationIntent,
+    TurnInput, Withdraw, WriteOutcome,
 };
 
 pub struct AgentSession {
@@ -64,8 +64,6 @@ pub struct AgentSession {
     // ADR-0231
     mid_turn: MidTurnPolicy,
     /// backend 가 채우는 받음 알림 가능 여부 — `SpawnParts` 가 실어 온 바로 그 Arc.
-    // TODO(ADR-0231): 세션 분류(P3b)가 읽는다 — 그때 이 allow 를 걷는다.
-    #[allow(dead_code)]
     delivery_ack: Arc<DeliveryAck>,
     /// 세션 입력 자물쇠 — ★`SessionClassified` 의 사용자 입력과 취소만 잡는다★. 출력 펌프는 잡지 않는다: 이
     ///   자물쇠는 첫 제출 래치 commit(디스크 쓰기)을 품으므로, 펌프가 기다리면 출력이 디스크 I/O 뒤에 선다.
@@ -245,18 +243,79 @@ impl AgentSession {
     ///
     /// ★정책 `None` 이면 `origin` 은 아무것도 바꾸지 않는다★ — 두 출처 모두 오늘 경로다(바이트 동일 · 목록
     ///   사건 없음). `TransportOwned` 는 본문과 출처를 통로 턴 동사로 넘긴다 — 분류는 통로가 한다.
+    ///   `SessionClassified` 는 `User` 만 분류하고(아래 [`Self::write_user_classified`]) `Mail` 은 오늘 경로다.
     // ADR-0231
     pub fn write_input_from(
         &self,
         bytes: &[u8],
         origin: InputOrigin,
     ) -> Result<WriteOutcome, PtyError> {
-        match self.mid_turn {
-            MidTurnPolicy::None => self.write_now(bytes, None),
-            // TODO(ADR-0231): P3b — 입력 자물쇠 안 분류(대기 목록 표 → 턴 관측 순). 그 전까지 오늘 경로다.
-            MidTurnPolicy::SessionClassified { .. } => self.write_now(bytes, None),
-            MidTurnPolicy::TransportOwned => self.write_now(bytes, Some(origin)),
+        match (self.mid_turn, origin) {
+            (MidTurnPolicy::None, _) => self.write_now(bytes, None),
+            (MidTurnPolicy::SessionClassified { .. }, InputOrigin::User) => {
+                self.write_user_classified(bytes)
+            }
+            (MidTurnPolicy::SessionClassified { .. }, InputOrigin::Mail) => {
+                self.write_now(bytes, None)
+            }
+            (MidTurnPolicy::TransportOwned, _) => self.write_now(bytes, Some(origin)),
         }
+    }
+
+    /// `SessionClassified` 의 사용자 입력 — 입력 자물쇠를 쥔 채 분류 → 목록 사건 → 쓰기가 한 덩어리로 돈다.
+    ///
+    /// ★한가하거나 받음 불가 판명(`Unavailable`)이면 오늘 경로다(쓰기 + 합성 에코)★. 한가 = 대기 목록 표 빔 ∧
+    ///   턴 관측이 턴 아님([`OutputCore::classified_input_busy`]) — 오류 뒤 멈춤은 읽지 않는다(멈춤 중 친 글도
+    ///   한가면 오늘 경로이고, 그 턴이 멈춤을 푼다).
+    /// 그 밖은 목록 갈래이고 합성 에코를 내지 않는다(말풍선은 벤더의 받음 자리에 선다):
+    ///   - `Available` — `Queued` 를 쓰기 **앞**에 낸다: 수명주기는 쓴 뒤 1 ms 안에 와서, 뒤에 내면 받음이 모르는
+    ///     id 로 버려진다. 쓰기 실패 = `Dropped{Rejected}` 를 내고 `Err`.
+    ///   - `Unknown` — 쓰기가 성공한 **뒤에만** `Queued` 를 낸다. 앞에 내면 쓰기가 도는 사이 펌프가 받음 불가를
+    ///     판명할 때 그 항목이 받음으로 닫히고, 이어 쓰기가 실패해도 `Dropped{Rejected}` 는 종결 묘비에 삼켜져
+    ///     보내지 못한 글이 말풍선으로 남는다. 쓰기 실패 = 아무것도 안 내고 `Err`.
+    /// ★자물쇠가 지키는 것★: 두 입력의 분류와 방출 순서가 어긋나지 않고, 같은 id 의 취소 줄은 이 쓰기가 돌아온
+    ///   뒤에만 나간다([`Self::cancel_queued_input`]). 이 자물쇠 아래의 emit 은 구독자 fanout 을 쥔 채 돈다 —
+    ///   `OutputSink::send` 가 막히지 않는다는 계약이 그것을 받친다(ADR-0006 의 예외).
+    // ADR-0231
+    fn write_user_classified(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
+        let _order = self
+            .input_order
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let ack = self.delivery_ack.state();
+        if ack == DeliveryAckState::Unavailable || !self.core.classified_input_busy() {
+            return self.write_now(bytes, None);
+        }
+        // ADR-0226: 오늘 경로와 같은 자리 — 보내기 전에 센다.
+        self.count_turn_submission(bytes)?;
+        let msg_uuid = uuid::Uuid::new_v4();
+        let id = msg_uuid.to_string();
+        let encoded = self.encoder.encode(bytes, msg_uuid);
+        let queued = OutputEvent::QueuedInput(QueuedInputEvent::Queued {
+            id: id.clone(),
+            text: String::from_utf8_lossy(bytes).into_owned(),
+        });
+        if ack == DeliveryAckState::Unknown {
+            self.transport.send_input(InputEvent::Raw(encoded))?;
+            self.core.emit(queued);
+        } else {
+            self.core.emit(queued);
+            if let Err(e) = self.transport.send_input(InputEvent::Raw(encoded)) {
+                self.core
+                    .emit(OutputEvent::QueuedInput(QueuedInputEvent::Dropped {
+                        id,
+                        cause: DropCause::Rejected,
+                    }));
+                return Err(e);
+            }
+        }
+        let n = bytes.len();
+        Ok(WriteOutcome {
+            bytes_requested: n,
+            bytes_written: n,
+            msg_uuid,
+            epoch: self.epoch,
+        })
     }
 
     /// `write_input` 의 배달-경계 계측판(ADR-0088 Stage 0) — 성공 시 `WriteOutcome`(논리 메시지 바이트 +
@@ -471,12 +530,16 @@ impl AgentSession {
     ///   - `SessionClassified` — 입력 자물쇠 안에서 확인 → `CancelRequested` → 취소 줄 `send_input` →
     ///     `Requested`. 사용자 입력도 같은 자물쇠 안에서 쓰므로 그 id 의 취소 줄은 **글 쓰기가 돌아온 뒤에만**
     ///     나간다(취소가 글을 앞지르면 턴 도중엔 예약이 안 걸려 글이 전달되는데 화면은 취소를 믿는다).
+    ///     ★확인과 `CancelRequested` 는 한 replay 구간이다★(`OutputCore::emit_cancel_request`) — 펌프의 결말이
+    ///     확인 뒤에 끼면 그 항목은 `NotFound` 로 답하고 취소 줄도 쓰지 않는다. 기록 뒤에 온 결말(늦은 받음 등)은
+    ///     `Requested` 그대로이고 명부가 결말을 정한다.
     ///     ★취소 줄 쓰기 실패 = `CancelFailed` 를 내고 `Err(Write)`★ — 항목은 취소 대기 그대로다(목록으로
     ///     되돌리면 모든 창에서 빠진 항목이 다시 그려진다).
     ///   - `TransportOwned` — 자물쇠 없이 확인 → `withdraw`: `Withdrawn` = `Cancelled` · `TooLate` = `Requested`
     ///     · `NotHeld` = `NotFound`(확인과 거두기 사이에 결말이 났다 — 그 결말 사건이 곧 명부에 선다). 목록
     ///     사건은 통로가 낸다.
-    /// ★명부 가드를 쥔 채 emit 하지 않는다★ — 락 순서가 replay → 명부다(확인은 복사해 곧바로 놓는다).
+    /// ★명부 가드를 쥔 채 emit 하지 않는다★ — 락 순서가 replay → 명부다(`TransportOwned` 의 확인은 복사해 곧바로
+    ///   놓고, `SessionClassified` 의 확인은 코어가 replay 락 아래에서 한다).
     // ADR-0231
     pub fn cancel_queued_input(&self, id: &str) -> Result<CancelOutcome, CancelError> {
         match self.mid_turn {
@@ -486,12 +549,11 @@ impl AgentSession {
                     .input_order
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                if let Some(answer) = self.answer_from_the_registry(id) {
-                    return answer;
+                match self.core.emit_cancel_request(id) {
+                    CancelRequest::NotListed => return Err(CancelError::NotFound),
+                    CancelRequest::AlreadyCancelling => return Ok(CancelOutcome::Requested),
+                    CancelRequest::Recorded => {}
                 }
-                self.core.emit(OutputEvent::QueuedInput(
-                    QueuedInputEvent::CancelRequested { id: id.to_owned() },
-                ));
                 if let Err(e) = self.transport.send_input(InputEvent::Raw(cancel_line(id))) {
                     self.core
                         .emit(OutputEvent::QueuedInput(QueuedInputEvent::CancelFailed {
@@ -2004,5 +2066,882 @@ mod tests {
             "턴은 통로 턴 동사로만 간다"
         );
         assert!(list_events(&seen).is_empty(), "분류는 통로가 한다");
+    }
+
+    // ── ADR-0231: 세션 분류(SessionClassified) — 사용자 입력 · 취소 (TRD §7-1 claude 세션 행) ──
+
+    use crate::inputs_pending::InputsPendingTable;
+    use crate::turn::{TurnEndKind, TurnObservations, TurnSignal};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc;
+
+    /// 쓰기를 관측하는 통로 — 쓰기마다 (바이트, **그 순간** 명부에 선 id) 를 적고, 대본대로 실패하거나 붙잡힌다.
+    struct Gate {
+        core: Arc<OutputCore>,
+        writes: Mutex<Vec<(Vec<u8>, Vec<String>)>>,
+        fail: AtomicBool,
+        /// `Some` 이면 다음 쓰기가 들어오자마자 앞의 것을 울리고 뒤의 것을 받을 때까지 멈춘다(한 번만).
+        hold: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>>,
+        /// 쓰기 시도·래치 commit·`Queued` 방출을 한 줄에 세우는 사건 기록(래치 순서 단언용).
+        trace: Arc<Mutex<Vec<String>>>,
+    }
+    struct GateTransport(Arc<Gate>);
+    impl AgentTransport for GateTransport {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            let listed: Vec<String> = self
+                .0
+                .core
+                .queued_inputs()
+                .lock()
+                .rows()
+                .iter()
+                .map(|r| r.id.clone())
+                .collect();
+            self.0.trace.lock().unwrap().push("write".into());
+            let hold = self.0.hold.lock().unwrap().take();
+            if let Some((entered, release)) = hold {
+                entered.send(()).unwrap();
+                release.recv().unwrap();
+            }
+            if self.0.fail.load(Ordering::SeqCst) {
+                return Err(PtyError::WriteFailed("gate: write refused".into()));
+            }
+            self.0.writes.lock().unwrap().push((bytes, listed));
+            Ok(())
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            harness_caps()
+        }
+    }
+
+    /// 출력 seq 와 함께 모으는 sink — 링 순서(seq)로 사건 순서를 단언한다(fanout 도착 순서는 링 순서가 아니다).
+    struct SeqSink {
+        id: SinkId,
+        seen: Arc<Mutex<Vec<(u64, OutputEvent)>>>,
+    }
+    impl OutputSink for SeqSink {
+        fn send(
+            &self,
+            frame: crate::types::OutputFrame<'_>,
+        ) -> Result<(), crate::types::SinkError> {
+            if let crate::types::OutputPayload::Event(e) = frame.payload {
+                self.seen.lock().unwrap().push((frame.seq, e.clone()));
+            }
+            Ok(())
+        }
+        fn sink_id(&self) -> SinkId {
+            self.id
+        }
+    }
+
+    /// `Queued` 방출을 사건 기록에 적는 sink — fanout 은 emit 안에서 동기로 돈다.
+    struct TraceSink {
+        id: SinkId,
+        trace: Arc<Mutex<Vec<String>>>,
+    }
+    impl OutputSink for TraceSink {
+        fn send(
+            &self,
+            frame: crate::types::OutputFrame<'_>,
+        ) -> Result<(), crate::types::SinkError> {
+            if let crate::types::OutputPayload::Event(OutputEvent::QueuedInput(
+                QueuedInputEvent::Queued { .. },
+            )) = frame.payload
+            {
+                self.trace.lock().unwrap().push("queued".into());
+            }
+            Ok(())
+        }
+        fn sink_id(&self) -> SinkId {
+            self.id
+        }
+    }
+
+    /// 매니저와 같은 배선(공용 턴 관측 표 + 대기 목록 표 + 분류기)으로 선 claude JSON 세션 하나.
+    struct Classified {
+        session: Arc<AgentSession>,
+        gate: Arc<Gate>,
+        turns: Arc<TurnObservations>,
+        pending: Arc<InputsPendingTable>,
+        ack: Arc<DeliveryAck>,
+        trace: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Classified {
+        fn new(classify: crate::backend::TurnClassifier) -> Self {
+            Self::build(classify, false)
+        }
+
+        /// 세션 id 래치를 실은 claude 세션 — 래치엔 id 가 이미 들어 있어(`latched_session_with` 와 같다) 첫 제출이
+        /// 그 자리에서 commit 하고, 그 commit 이 쓰기·`Queued` 와 같은 사건 기록(`trace`)에 선다.
+        fn with_session_id_latch() -> Self {
+            let fx = Self::build(crate::backend::claude::classify_turn, true);
+            fx.session.subscribe(Arc::new(TraceSink {
+                id: uuid::Uuid::new_v4(),
+                trace: fx.trace.clone(),
+            }));
+            fx.trace.lock().unwrap().clear();
+            fx
+        }
+
+        fn build(classify: crate::backend::TurnClassifier, latched: bool) -> Self {
+            let id = uuid::Uuid::new_v4();
+            let turns = Arc::new(TurnObservations::new());
+            let pending = Arc::new(InputsPendingTable::new());
+            turns.register(id, 0);
+            pending.register(id, 0);
+            let core = Arc::new(
+                OutputCore::new(
+                    id,
+                    0,
+                    Arc::new(NoopStatusSink),
+                    crate::output_core::TurnWiring::new(turns.clone(), classify),
+                )
+                .with_queued(crate::output_core::QueuedWiring {
+                    registry: Arc::new(QueuedInputs::new()),
+                    pending: pending.clone(),
+                }),
+            );
+            let trace = Arc::new(Mutex::new(Vec::new()));
+            let gate = Arc::new(Gate {
+                core: core.clone(),
+                writes: Mutex::new(Vec::new()),
+                fail: AtomicBool::new(false),
+                hold: Mutex::new(None),
+                trace: trace.clone(),
+            });
+            let ack = Arc::new(DeliveryAck::new());
+            let shell_cmd = crate::profile::AgentCommand::Shell {
+                program: "cmd.exe".into(),
+                args: vec![],
+            };
+            let session = AgentSession::new(
+                id,
+                PathBuf::from("."),
+                0,
+                80,
+                24,
+                Arc::new(AtomicU8::new(0)),
+                ShellBackend.capabilities(&shell_cmd),
+                InputEncoder::ClaudeStreamJson,
+                true,
+                core,
+                Box::new(GateTransport(gate.clone())),
+            )
+            .with_submit_pacing(Duration::ZERO, |_| {})
+            .with_mid_turn(classified(), ack.clone());
+            let session = if latched {
+                let port_trace = trace.clone();
+                let latch = SessionIdLatch::new(
+                    id,
+                    0,
+                    Arc::new(move |raw: &str| {
+                        port_trace.lock().unwrap().push(format!("commit:{raw}"))
+                    }),
+                );
+                latch.offer("sid-1");
+                session.with_session_id_latch(latch)
+            } else {
+                session
+            };
+            Self {
+                session: Arc::new(session),
+                gate,
+                turns,
+                pending,
+                ack,
+                trace,
+            }
+        }
+
+        fn trace(&self) -> Vec<String> {
+            self.trace.lock().unwrap().clone()
+        }
+
+        fn claude() -> Self {
+            Self::new(crate::backend::claude::classify_turn)
+        }
+
+        fn id(&self) -> AgentId {
+            self.session.id
+        }
+
+        /// 벤더 출력 한 줄로 코어를 턴 중으로 만든다(분류기가 진행으로 센다).
+        fn start_turn(&self) {
+            self.session.core.emit(OutputEvent::TextDelta {
+                text: "thinking".into(),
+                turn_id: None,
+                message_id: None,
+            });
+            assert!(self.turns.is_in_turn(self.id(), 0), "전제: 턴 중");
+        }
+
+        /// 구독한 **뒤**의 사건만 (seq, 사건) 으로 모은다.
+        fn watch(&self) -> Arc<Mutex<Vec<(u64, OutputEvent)>>> {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            self.session.subscribe(Arc::new(SeqSink {
+                id: uuid::Uuid::new_v4(),
+                seen: seen.clone(),
+            }));
+            seen.lock().unwrap().clear();
+            seen
+        }
+
+        fn written(&self) -> Vec<Vec<u8>> {
+            self.gate
+                .writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(bytes, _)| bytes.clone())
+                .collect()
+        }
+
+        fn listed(&self) -> Vec<String> {
+            self.session
+                .queued_inputs()
+                .lock()
+                .rows()
+                .iter()
+                .map(|r| r.id.clone())
+                .collect()
+        }
+
+        fn hold_next_write(&self) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            *self.gate.hold.lock().unwrap() = Some((entered_tx, release_rx));
+            (entered_rx, release_tx)
+        }
+    }
+
+    fn seq_list_events(seen: &Arc<Mutex<Vec<(u64, OutputEvent)>>>) -> Vec<QueuedInputEvent> {
+        let mut got = seen.lock().unwrap().clone();
+        got.sort_by_key(|(seq, _)| *seq);
+        got.into_iter()
+            .filter_map(|(_, e)| match e {
+                OutputEvent::QueuedInput(op) => Some(op),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn echoes(seen: &Arc<Mutex<Vec<(u64, OutputEvent)>>>) -> usize {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, e)| matches!(e, OutputEvent::Structured { .. }))
+            .count()
+    }
+
+    fn queued_op(id: &str, text: &str) -> QueuedInputEvent {
+        QueuedInputEvent::Queued {
+            id: id.into(),
+            text: text.into(),
+        }
+    }
+
+    // TRD §7-1: 한가 ∧ 명부 빔 → 에코, 사건 없음.
+    #[test]
+    fn an_idle_user_input_is_written_and_echoed_without_a_list_event() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        let seen = fx.watch();
+
+        let outcome = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(
+            fx.written(),
+            vec![InputEncoder::ClaudeStreamJson.encode(b"typed", outcome.msg_uuid)]
+        );
+        assert_eq!(echoes(&seen), 1, "오늘 경로 — 합성 에코 한 건");
+        assert!(seq_list_events(&seen).is_empty());
+    }
+
+    // TRD §7-1: 턴 중(`Available`) → `Queued` 가 `send_input` 보다 먼저 링에 있다 · 합성 에코 없음.
+    #[test]
+    fn a_user_input_during_a_turn_is_queued_before_its_write_and_not_echoed() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.start_turn();
+        let seen = fx.watch();
+
+        let outcome = fx
+            .session
+            .write_input_from("안녕".as_bytes(), InputOrigin::User)
+            .unwrap();
+        let id = outcome.msg_uuid.to_string();
+
+        let writes = fx.gate.writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(
+            writes[0].0,
+            InputEncoder::ClaudeStreamJson.encode("안녕".as_bytes(), outcome.msg_uuid),
+            "쓰는 줄은 오늘과 같다(uuid 단 user 줄)"
+        );
+        assert_eq!(writes[0].1, vec![id.clone()], "쓰기 순간 명부에 이미 섰다");
+        assert_eq!(seq_list_events(&seen), vec![queued_op(&id, "안녕")]);
+        assert_eq!(echoes(&seen), 0, "목록 갈래는 합성 에코를 내지 않는다");
+    }
+
+    // TRD §7-1: 턴 없음 ∧ 명부 있음 → Queued(PRD §3-5).
+    #[test]
+    fn a_user_input_while_items_wait_between_turns_is_queued() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.session.core.emit(queued("q0"));
+        assert!(!fx.turns.is_in_turn(fx.id(), 0));
+        assert_eq!(fx.pending.get(fx.id(), 0), Some(true));
+
+        let outcome = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(
+            fx.listed(),
+            vec!["q0".to_string(), outcome.msg_uuid.to_string()]
+        );
+    }
+
+    // TRD §7-1: drain `started` 의 `Delivered` 가 적힌 뒤(코어 턴 중 · 첫 출력 전) → Queued.
+    #[test]
+    fn a_user_input_after_a_drain_started_before_any_output_is_queued() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.session.core.emit(queued("q0"));
+        fx.session
+            .core
+            .emit(OutputEvent::QueuedInput(QueuedInputEvent::Delivered {
+                id: "q0".into(),
+            }));
+        assert!(fx.listed().is_empty());
+        assert_eq!(fx.pending.get(fx.id(), 0), Some(false));
+        assert!(fx.turns.is_in_turn(fx.id(), 0), "받음 = 진행");
+        let seen = fx.watch();
+
+        let outcome = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(fx.listed(), vec![outcome.msg_uuid.to_string()]);
+        assert_eq!(echoes(&seen), 0);
+    }
+
+    /// 목록을 비우는 drain `Delivered` 의 emit 을 명부 환원 **뒤**, 턴 관측 **앞**에서 붙잡는 분류기 — id
+    /// [`DRAIN_GATE_ID`] 한 건에만 걸리므로 병행하는 다른 시험과 섞이지 않는다.
+    static DRAIN_GATE: Mutex<Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>> = Mutex::new(None);
+    const DRAIN_GATE_ID: &str = "drain-gate";
+    fn drain_gated_classifier(event: &OutputEvent) -> Option<TurnSignal> {
+        if let OutputEvent::QueuedInput(QueuedInputEvent::Delivered { id }) = event {
+            if id == DRAIN_GATE_ID {
+                let gate = DRAIN_GATE.lock().unwrap().take();
+                if let Some((entered, release)) = gate {
+                    entered.send(()).unwrap();
+                    release.recv().unwrap();
+                }
+            }
+        }
+        crate::backend::claude::classify_turn(event)
+    }
+
+    // TRD §7-1: 목록을 비우는 drain `Delivered` 의 emit 안(명부는 비었고 진행은 아직)에 들어온 입력 → Queued —
+    //   분류가 명부를 읽지 않고 대기 목록 표를 먼저 읽는다.
+    #[test]
+    fn a_user_input_inside_the_draining_delivered_emit_is_queued() {
+        let fx = Classified::new(drain_gated_classifier);
+        fx.ack.set_available();
+        fx.session.core.emit(queued(DRAIN_GATE_ID));
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        *DRAIN_GATE.lock().unwrap() = Some((entered_tx, release_rx));
+
+        let core = fx.session.core.clone();
+        let pump = std::thread::spawn(move || {
+            core.emit(OutputEvent::QueuedInput(QueuedInputEvent::Delivered {
+                id: DRAIN_GATE_ID.into(),
+            }))
+        });
+        entered_rx.recv().unwrap();
+        assert!(fx.listed().is_empty(), "전제: 명부는 이미 비었다");
+        assert!(!fx.turns.is_in_turn(fx.id(), 0), "전제: 진행은 아직이다");
+        assert_eq!(
+            fx.pending.get(fx.id(), 0),
+            Some(true),
+            "전제: 「비었다」도 아직"
+        );
+
+        let outcome = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+        release_tx.send(()).unwrap();
+        pump.join().unwrap();
+
+        assert_eq!(fx.listed(), vec![outcome.msg_uuid.to_string()]);
+        assert_eq!(
+            fx.pending.get(fx.id(), 0),
+            Some(true),
+            "락 밖으로 미룬 「비었다」가 뒤에 선 「찼다」를 덮지 않는다"
+        );
+    }
+
+    // TRD §7-1: 분류가 명부를 읽지 않는다 — 대기 목록 표만 본다(표와 명부가 갈린 상태를 손으로 만든다).
+    #[test]
+    fn the_classification_reads_the_pending_table_not_the_registry() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.session.core.emit(queued("q0"));
+        fx.pending.set(fx.id(), 0, 1_000, false);
+        let seen = fx.watch();
+        fx.session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+        assert!(
+            seq_list_events(&seen).is_empty(),
+            "명부가 차 있어도 표가 비었으면 한가다"
+        );
+        assert_eq!(echoes(&seen), 1);
+
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.pending.set(fx.id(), 0, 1_000, true);
+        let outcome = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+        assert_eq!(
+            fx.listed(),
+            vec![outcome.msg_uuid.to_string()],
+            "명부가 비어 있어도 표가 찼으면 목록 갈래다"
+        );
+    }
+
+    // TRD §7-1: Queued 갈래가 턴 표에 아무것도 안 적는다(입력 경로는 진행을 쓰지 않는다).
+    #[test]
+    fn the_queued_branch_writes_nothing_to_the_turn_table() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.pending.set(fx.id(), 0, 1_000, true);
+        let before = fx.turns.get(fx.id(), 0).unwrap();
+
+        fx.session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        let after = fx.turns.get(fx.id(), 0).unwrap();
+        assert!(!after.in_turn);
+        assert_eq!(after.last_signal, before.last_signal);
+    }
+
+    // TRD §7-1: `Unknown` → Queued(가정) · 쓰기 뒤에 `Queued`(쓰기 순간 링에 없다).
+    #[test]
+    fn an_unknown_ack_announces_queued_only_after_a_successful_write() {
+        let fx = Classified::claude();
+        fx.start_turn();
+        let seen = fx.watch();
+
+        let outcome = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+        let id = outcome.msg_uuid.to_string();
+
+        let writes = fx.gate.writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 1);
+        assert!(writes[0].1.is_empty(), "쓰기 순간 명부에 없다");
+        assert_eq!(seq_list_events(&seen), vec![queued_op(&id, "typed")]);
+        assert_eq!(echoes(&seen), 0);
+    }
+
+    // TRD §7-1: `Unknown` 쓰기 실패 → 사건 0 건 · `Err`.
+    #[test]
+    fn an_unknown_ack_write_failure_emits_nothing() {
+        let fx = Classified::claude();
+        fx.start_turn();
+        fx.gate.fail.store(true, Ordering::SeqCst);
+        let seen = fx.watch();
+
+        assert!(matches!(
+            fx.session.write_input_from(b"typed", InputOrigin::User),
+            Err(PtyError::WriteFailed(_))
+        ));
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(fx.listed().is_empty());
+    }
+
+    // TRD §7-1: 쓰기를 붙잡아 둔 동안 펌프 쪽에서 `AckUnavailable` 을 세우고 쓰기를 실패시키면 그 글이 말풍선
+    //   (`Delivered`)이 되지 않는다 · 펌프 쪽 방출은 입력 자물쇠를 안 잡는다.
+    #[test]
+    fn a_failed_unknown_ack_write_is_not_turned_into_a_bubble_by_ack_unavailable() {
+        let fx = Classified::claude();
+        fx.start_turn();
+        let seen = fx.watch();
+        let (entered, release) = fx.hold_next_write();
+
+        let session = fx.session.clone();
+        let writer =
+            std::thread::spawn(move || session.write_input_from(b"typed", InputOrigin::User));
+        entered.recv().unwrap();
+        assert!(
+            fx.session.input_order.try_lock().is_err(),
+            "전제: 쓰기가 자물쇠를 쥐고 있다"
+        );
+
+        let (done_tx, done_rx) = mpsc::channel();
+        let (core, ack) = (fx.session.core.clone(), fx.ack.clone());
+        std::thread::spawn(move || {
+            assert!(ack.try_set_unavailable());
+            core.emit(OutputEvent::QueuedInput(QueuedInputEvent::AckUnavailable {
+                delivered: vec![],
+            }));
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("펌프 쪽 방출이 입력 자물쇠를 기다렸다");
+
+        fx.gate.fail.store(true, Ordering::SeqCst);
+        release.send(()).unwrap();
+        assert!(writer.join().unwrap().is_err());
+
+        assert_eq!(
+            seq_list_events(&seen),
+            vec![QueuedInputEvent::AckUnavailable { delivered: vec![] }],
+            "쓰지 못한 글은 목록에도 말풍선에도 오르지 않는다"
+        );
+        assert!(fx.listed().is_empty());
+        assert_eq!(echoes(&seen), 0);
+    }
+
+    // TRD §7-1: `Unavailable` → 턴 중이어도 오늘 에코(N1 (a)).
+    #[test]
+    fn an_unavailable_ack_takes_todays_path_even_during_a_turn() {
+        let fx = Classified::claude();
+        assert!(fx.ack.try_set_unavailable());
+        fx.start_turn();
+        let seen = fx.watch();
+
+        fx.session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(fx.written().len(), 1);
+        assert_eq!(echoes(&seen), 1);
+        assert!(seq_list_events(&seen).is_empty());
+    }
+
+    // TRD §7-1: `origin=Mail` → 턴 중이어도 `Queued` 없음, 오늘 에코 그대로(AC22) · 우편은 입력 자물쇠를 안 탄다.
+    #[test]
+    fn a_mail_input_takes_todays_path_even_during_a_turn() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.start_turn();
+        let seen = fx.watch();
+
+        let _order = fx.session.input_order.lock().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let session = fx.session.clone();
+        std::thread::spawn(move || {
+            session.write_input_from(b"a", InputOrigin::Mail).unwrap();
+            session.write_input_observed(b"b").unwrap();
+            session.submit_input_observed(b"c").unwrap();
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("우편이 입력 자물쇠를 기다렸다");
+
+        assert_eq!(fx.written().len(), 3);
+        assert_eq!(echoes(&seen), 3);
+        assert!(seq_list_events(&seen).is_empty());
+    }
+
+    // TRD §7-1: 쓰기 실패 → `Dropped{Rejected}` + `Err`.
+    #[test]
+    fn a_failed_queued_write_is_dropped_as_rejected_and_errors() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.start_turn();
+        fx.gate.fail.store(true, Ordering::SeqCst);
+        let seen = fx.watch();
+
+        assert!(matches!(
+            fx.session.write_input_from(b"typed", InputOrigin::User),
+            Err(PtyError::WriteFailed(_))
+        ));
+
+        let ops = seq_list_events(&seen);
+        assert_eq!(ops.len(), 2, "{ops:?}");
+        let QueuedInputEvent::Queued { id, .. } = &ops[0] else {
+            panic!("첫 사건은 Queued: {ops:?}")
+        };
+        assert_eq!(
+            ops[1],
+            QueuedInputEvent::Dropped {
+                id: id.clone(),
+                cause: DropCause::Rejected
+            }
+        );
+        assert!(fx.listed().is_empty());
+        assert_eq!(echoes(&seen), 0);
+        assert!(
+            matches!(
+                fx.session.cancel_queued_input(id),
+                Err(CancelError::NotFound)
+            ),
+            "쓰지 못해 닫힌 항목의 취소는 NOT_FOUND 다"
+        );
+    }
+
+    // ── ADR-0226 × ADR-0231: 세션 분류 갈래에서도 첫 제출 래치는 보내기 전에 한 번 센다 ──
+
+    /// 턴 중 첫 사용자 입력(`Available`) — commit 한 번이 `Queued` 방출보다, 쓰기보다 먼저다.
+    // ADR-0226
+    #[test]
+    fn a_first_queued_user_input_commits_the_latch_once_before_queued_and_the_write() {
+        let fx = Classified::with_session_id_latch();
+        fx.ack.set_available();
+        fx.start_turn();
+
+        let first = fx
+            .session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+        let second = fx
+            .session
+            .write_input_from(b"again", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(
+            fx.trace(),
+            vec!["commit:sid-1", "queued", "write", "queued", "write"],
+            "영속이 첫 목록 사건·첫 쓰기보다 먼저 · 둘째 제출은 다시 commit 하지 않는다"
+        );
+        assert_ne!(first.msg_uuid, second.msg_uuid);
+    }
+
+    /// 턴 중 첫 사용자 입력(`Unknown`) — 쓰기 뒤 `Queued` 갈래에서도 commit 이 쓰기보다 먼저다.
+    // ADR-0226
+    #[test]
+    fn a_first_unknown_ack_user_input_commits_the_latch_before_the_write() {
+        let fx = Classified::with_session_id_latch();
+        fx.start_turn();
+
+        fx.session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(fx.trace(), vec!["commit:sid-1", "write", "queued"]);
+    }
+
+    /// 사용자 종료 중이면 목록 갈래도 래치가 거절한다 — `Err` · 목록 사건 0 · 쓰기 0 · commit 0.
+    // ADR-0226
+    #[test]
+    fn a_user_kill_refuses_a_queued_user_input_without_listing_writing_or_committing() {
+        let fx = Classified::with_session_id_latch();
+        fx.ack.set_available();
+        fx.start_turn();
+        let seen = fx.watch();
+        fx.session.set_intent(TerminationIntent::UserKill);
+
+        assert_user_kill_refusal(fx.session.write_input_from(b"typed", InputOrigin::User));
+
+        assert!(seq_list_events(&seen).is_empty());
+        assert!(fx.listed().is_empty());
+        assert!(fx.written().is_empty());
+        assert!(fx.trace().is_empty(), "{:?}", fx.trace());
+    }
+
+    // TRD §7-1: 입력 자물쇠 경합 — 글 쓰기를 붙잡아 둔 채 다른 스레드가 같은 id 를 취소해도 통로에 적힌 순서는
+    //   글 줄 → 취소 줄이다.
+    #[test]
+    fn a_cancel_line_is_never_written_before_its_input_line() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.start_turn();
+        let (entered, release) = fx.hold_next_write();
+
+        let session = fx.session.clone();
+        let writer =
+            std::thread::spawn(move || session.write_input_from(b"typed", InputOrigin::User));
+        entered.recv().unwrap();
+        let listed = fx.listed();
+        assert_eq!(listed.len(), 1, "Queued 는 쓰기 앞에 섰다");
+        let id = listed[0].clone();
+
+        // ★헛돌지 않게★: 장벽으로 취소 스레드가 취소 호출 바로 앞까지 왔음을 확인하고, 그 순간 글 쓰기가 입력
+        //   자물쇠를 쥐고 있음을 확인한다 — 그래서 아래 창 동안 취소는 실제로 그 자물쇠를 다투는 중이다. 창의 길이는
+        //   순서의 근거가 아니라, 자물쇠를 건너뛰는 회귀가 제 모습을 드러낼 유예다.
+        let started = Arc::new(std::sync::Barrier::new(2));
+        let (done_tx, done_rx) = mpsc::channel();
+        let session = fx.session.clone();
+        let cancel_id = id.clone();
+        let canceller_started = started.clone();
+        let canceller = std::thread::spawn(move || {
+            canceller_started.wait();
+            let answer = session.cancel_queued_input(&cancel_id);
+            done_tx.send(()).unwrap();
+            answer
+        });
+        started.wait();
+        assert!(
+            fx.session.input_order.try_lock().is_err(),
+            "전제: 취소가 출발한 순간 글 쓰기가 자물쇠를 쥐고 있다"
+        );
+        assert!(
+            done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+            "취소는 글 쓰기가 자물쇠를 놓기 전에 끝나지 않는다"
+        );
+        assert!(fx.written().is_empty(), "붙잡힌 글 앞에 아무것도 안 적혔다");
+        assert!(
+            matches!(phase_of(&fx.session, &id), Some(RowPhase::Queued)),
+            "자물쇠를 기다리는 동안 취소 요청도 기록되지 않았다"
+        );
+        release.send(()).unwrap();
+
+        let outcome = writer.join().unwrap().unwrap();
+        done_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("글 쓰기가 끝나면 취소가 자물쇠를 얻는다");
+        assert_eq!(canceller.join().unwrap().unwrap(), CancelOutcome::Requested);
+        assert_eq!(
+            fx.written(),
+            vec![
+                InputEncoder::ClaudeStreamJson.encode(b"typed", outcome.msg_uuid),
+                test_cancel_line(&id),
+            ]
+        );
+        assert!(matches!(
+            phase_of(&fx.session, &id),
+            Some(RowPhase::Cancelling { .. })
+        ));
+    }
+
+    // TRD §7-1: 동시 두 입력의 분류와 방출 순서가 일치한다 — 한가할 때 겹친 둘은 정확히 하나가 오늘 경로(에코)고,
+    //   먼저 쓴 쪽이 그 하나다.
+    #[test]
+    fn concurrent_user_inputs_are_classified_in_the_order_they_are_written() {
+        for _ in 0..50 {
+            let fx = Classified::claude();
+            fx.ack.set_available();
+            let seen = fx.watch();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let writers: Vec<_> = ["one", "two"]
+                .into_iter()
+                .map(|text| {
+                    let (session, barrier) = (fx.session.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        session
+                            .write_input_from(text.as_bytes(), InputOrigin::User)
+                            .unwrap()
+                            .msg_uuid
+                            .to_string()
+                    })
+                })
+                .collect();
+            let ids: Vec<String> = writers.into_iter().map(|w| w.join().unwrap()).collect();
+
+            let written = fx.written();
+            assert_eq!(written.len(), 2);
+            let first = ids
+                .iter()
+                .find(|id| String::from_utf8_lossy(&written[0]).contains(id.as_str()))
+                .unwrap()
+                .clone();
+            let second = ids.iter().find(|id| **id != first).unwrap().clone();
+            assert_eq!(echoes(&seen), 1, "한가로 분류된 것은 하나뿐이다");
+            let echoed = seen
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|(_, e)| match e {
+                    OutputEvent::Structured { json, .. } => Some(json.clone()),
+                    _ => None,
+                })
+                .unwrap();
+            assert!(echoed.contains(&first), "먼저 쓴 것이 에코됐다");
+            assert_eq!(fx.listed(), vec![second], "뒤에 쓴 것이 목록에 섰다");
+        }
+    }
+
+    // 취소 대 펌프의 받음 — 확인과 `CancelRequested` 가 한 replay 구간이라, `Requested` 로 답했으면
+    //   `CancelRequested` 가 링에서 `Delivered` 보다 앞이고, `NOT_FOUND` 면 사건도 취소 줄도 없다.
+    #[test]
+    fn a_cancel_racing_the_delivered_answers_consistently_with_the_ring() {
+        for _ in 0..200 {
+            let fx = Classified::claude();
+            fx.ack.set_available();
+            fx.session.core.emit(queued("q1"));
+            let seen = fx.watch();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+
+            let (core, b) = (fx.session.core.clone(), barrier.clone());
+            let pump = std::thread::spawn(move || {
+                b.wait();
+                core.emit(OutputEvent::QueuedInput(QueuedInputEvent::Delivered {
+                    id: "q1".into(),
+                }));
+            });
+            barrier.wait();
+            let got = fx.session.cancel_queued_input("q1");
+            pump.join().unwrap();
+
+            let ops = seq_list_events(&seen);
+            let requested = ops
+                .iter()
+                .position(|op| *op == QueuedInputEvent::CancelRequested { id: "q1".into() });
+            let delivered = ops
+                .iter()
+                .position(|op| *op == QueuedInputEvent::Delivered { id: "q1".into() })
+                .expect("받음은 늘 링에 선다");
+            match got {
+                Ok(CancelOutcome::Requested) => {
+                    assert!(requested.is_some_and(|r| r < delivered), "{ops:?}");
+                    assert_eq!(fx.written(), vec![test_cancel_line("q1")]);
+                }
+                Err(CancelError::NotFound) => {
+                    assert!(requested.is_none(), "{ops:?}");
+                    assert!(fx.written().is_empty());
+                }
+                other => panic!("{other:?}"),
+            }
+            assert!(fx.listed().is_empty(), "결말은 받음이다");
+        }
+    }
+
+    // TRD §7-1(L744 세션): 오류 뒤 멈춤 ∧ 한가 ∧ 목록 빔 → Direct(쓰기 + 에코 — 세션은 그 칸을 읽지 않는다).
+    #[test]
+    fn a_halted_idle_session_still_sends_a_user_input_directly() {
+        let fx = Classified::claude();
+        fx.ack.set_available();
+        fx.turns.observe(fx.id(), 0, 1, TurnSignal::Failed);
+        fx.turns
+            .observe(fx.id(), 0, 2, TurnSignal::Ended(TurnEndKind::Clean));
+        let fact = fx.turns.get(fx.id(), 0).unwrap();
+        assert!(fact.last_end_failed && !fact.in_turn, "전제: 오류 뒤 멈춤");
+        let seen = fx.watch();
+
+        fx.session
+            .write_input_from(b"typed", InputOrigin::User)
+            .unwrap();
+
+        assert_eq!(fx.written().len(), 1);
+        assert_eq!(echoes(&seen), 1);
+        assert!(seq_list_events(&seen).is_empty());
     }
 }

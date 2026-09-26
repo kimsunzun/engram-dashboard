@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use crate::backend::TurnClassifier;
 use crate::inputs_pending::InputsPendingTable;
-use crate::queued_input::QueuedInputs;
+use crate::queued_input::{QueuedInputs, RowPhase};
 use crate::turn::{TurnObservations, TurnSignal};
 use crate::types::{
     AgentId, AgentStatus, DropCause, OutputChunk, OutputEvent, OutputFrame, OutputPayload,
@@ -111,6 +111,8 @@ struct ListStep {
     classify_at: Option<usize>,
     /// 이 사건이 명부를 비웠다 — 그 seq 로 「비었다」를 적고 초인종을 울린다(락 밖, 턴 관측 뒤).
     drained_at: Option<u64>,
+    /// 이 구간이 이 화신의 「받음 불가 판명」을 처음 환원했다 — 락 밖에서 판정 로그를 한 번 남긴다.
+    ack_unavailable_judged: bool,
 }
 
 /// 턴 관측 배선 한 벌(ADR-0113) — 표(어디에 쌓나)와 분류자(무엇이 신호인가)는 항상 같이 꽂힌다.
@@ -461,6 +463,59 @@ impl OutputCore {
             let mut replay = self.replay.lock().expect("replay poisoned");
             self.record_list_event(&mut replay, op)
         };
+        self.finish_list_step(step, observe_turn);
+    }
+
+    /// 취소 요청의 문 — 명부 확인과 `CancelRequested` 기록이 **한 replay 구간**이다.
+    ///
+    /// ★확인과 기록 사이에 펌프의 결말(`Delivered` 등)이 끼지 못한다★: 명부를 바꾸는 길은 replay 락 안의 환원
+    ///   하나뿐이라, 락 밖에서 확인하고 따로 emit 하면 그 틈에 닫힌 항목에 대해 `Requested` 를 답하고 벤더에
+    ///   취소 줄까지 보낸다. 여기서는 확인이 `Queued` 를 본 경우에만 기록하므로 답이 명부와 어긋나지 않는다.
+    // ADR-0231
+    pub(crate) fn emit_cancel_request(&self, id: &str) -> CancelRequest {
+        let step = {
+            let mut replay = self.replay.lock().expect("replay poisoned");
+            let phase = self
+                .queued_inputs
+                .lock()
+                .rows()
+                .iter()
+                .find(|row| row.id == id)
+                .map(|row| row.phase);
+            match phase {
+                None => return CancelRequest::NotListed,
+                Some(RowPhase::Cancelling { .. }) => return CancelRequest::AlreadyCancelling,
+                Some(RowPhase::Queued) => self.record_list_event(
+                    &mut replay,
+                    QueuedInputEvent::CancelRequested { id: id.to_owned() },
+                ),
+            }
+        };
+        self.finish_list_step(step, true);
+        CancelRequest::Recorded
+    }
+
+    /// 세션 분류가 읽는 바쁨 — 대기 목록 표가 「찼다」거나 턴 관측이 턴 중이다. 명부는 읽지 않는다.
+    ///
+    /// ★표 먼저, 턴 관측 나중★: 목록을 비우는 `Delivered` 의 emit 은 턴 관측의 진행을 적은 **뒤에** 「비었다」를
+    ///   적으므로, 이 순서로 읽으면 「비었다」를 본 읽기가 그 진행도 본다. 거꾸로 읽거나 명부를 읽으면 그 emit
+    ///   도중에 들어온 입력이 「빔 + 턴 없음」을 보고 한가로 분류된다.
+    /// ★표가 없는 조립(하네스)은 목록이 늘 빈 것으로 읽는다★ — 턴 관측만 남는다.
+    // ADR-0231
+    pub(crate) fn classified_input_busy(&self) -> bool {
+        pending_then_in_turn(self)
+    }
+
+    /// 목록 사건 한 구간을 락 밖에서 마무리한다 — 턴 관측 → 「비었다」 + 초인종 → fanout.
+    fn finish_list_step(&self, step: ListStep, observe_turn: bool) {
+        if step.ack_unavailable_judged {
+            // ADR-0231: 옛 CLI 판정은 화신당 한 번이다(명부의 판명 표식이 거짓 → 참인 구간 하나).
+            tracing::info!(
+                agent = %self.id,
+                epoch = self.epoch,
+                "받음 알림 불가 판정 — 이 화신은 대기 목록 없이 오늘 경로"
+            );
+        }
         if observe_turn {
             if let Some(at) = step.classify_at {
                 let (seq, event) = &step.numbered[at];
@@ -476,11 +531,13 @@ impl OutputCore {
     /// replay 락 구간의 목록 단계. 호출자가 replay 락을 쥐고 부른다.
     // ADR-0231: 락 순서 = (세션 `input_order` →) replay → 명부 → 대기 목록 표. 명부 가드는 이 replay 구간
     //   안에서만 잡고, 표는 잎이며, `StatusSink` 는 어느 락도 쥐지 않은 채 부른다(`write_drained`). 명부를 먼저
-    //   쥐고 replay 를 기다리는 자리를 만들면 이 둘이 서로를 기다린다 — 명부만 읽는 쪽(목록 조회·취소 검증)은
-    //   명부 락 하나만 잡고 emit 하지 않는다.
+    //   쥐고 replay 를 기다리는 자리를 만들면 이 둘이 서로를 기다린다 — 명부만 읽는 쪽(목록 조회·통로 정책의 취소
+    //   검증)은 명부 락 하나만 잡고 emit 하지 않고, 세션 분류의 취소 검증은 replay 락 아래에서 읽는다
+    //   (`emit_cancel_request`).
     fn record_list_event(&self, replay: &mut Ring, op: QueuedInputEvent) -> ListStep {
         let mut registry = self.queued_inputs.lock();
         let was_empty = registry.is_empty();
+        let was_judged = registry.ack_unavailable_seen();
         // 봉인이 바꿔 적기보다 먼저다 — 종료 뒤의 `Queued` 는 받음이 아니라 버림이다.
         let (events, classify_at) = match op {
             QueuedInputEvent::Queued { id, .. } if self.sealed.load(Ordering::Relaxed) => {
@@ -531,6 +588,7 @@ impl OutputCore {
             numbered.push((seq, event));
         }
         let now_empty = registry.is_empty();
+        let ack_unavailable_judged = !was_judged && registry.ack_unavailable_seen();
         drop(registry);
 
         let last_seq = numbered.last().map(|(seq, _)| *seq).expect("한 줄 이상");
@@ -549,6 +607,7 @@ impl OutputCore {
             numbered,
             classify_at,
             drained_at,
+            ack_unavailable_judged,
         }
     }
 
@@ -1089,6 +1148,48 @@ fn debug_assert_not_list_event(event: &OutputEvent) {
         !matches!(event, OutputEvent::QueuedInput(_)),
         "목록 사건이 명부를 거치지 않는 문으로 들었다: {event:?}"
     );
+}
+
+/// [`OutputCore::emit_cancel_request`] 의 답 — 명부 확인과 기록을 한 replay 구간에서 본 결과.
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CancelRequest {
+    /// `Queued` 였다 — `CancelRequested` 를 링에 세웠다. 벤더 취소 줄은 호출자가 쓴다.
+    Recorded,
+    /// 이미 취소 대기다 — 아무것도 세우지 않았다(멱등).
+    AlreadyCancelling,
+    /// 목록에 없다(모름 · 이미 결말) — 아무것도 세우지 않았다.
+    NotListed,
+}
+
+/// 세션 분류가 읽는 두 표 — 읽기 하나에 이름 하나. 순서는 부르는 쪽이 아니라 [`pending_then_in_turn`] 한 곳이
+/// 정한다(부르는 자리에서 두 읽기를 뒤바꿀 여지를 없앤다).
+// ADR-0231
+trait BusyReads {
+    /// 대기 목록 표가 이 화신을 「찼다」로 적었나. 표가 없는 조립(하네스)은 `false`.
+    fn read_pending_listed(&self) -> bool;
+    /// 턴 관측 표가 이 화신을 턴 중으로 적었나.
+    fn read_in_turn(&self) -> bool;
+}
+
+impl BusyReads for OutputCore {
+    fn read_pending_listed(&self) -> bool {
+        self.inputs_pending
+            .as_ref()
+            .and_then(|table| table.get(self.id, self.epoch))
+            .unwrap_or(false)
+    }
+
+    fn read_in_turn(&self) -> bool {
+        self.turn.table.is_in_turn(self.id, self.epoch)
+    }
+}
+
+/// 세션 분류의 두 읽기를 **이 순서로** 한다 — 대기 목록 표가 참이면 턴 관측은 읽지 않는다. 순서의 근거는
+/// [`OutputCore::classified_input_busy`].
+// ADR-0231
+fn pending_then_in_turn(reads: &impl BusyReads) -> bool {
+    reads.read_pending_listed() || reads.read_in_turn()
 }
 
 /// OutputEvent 의 **eviction 예산용** 크기 근사.
@@ -3410,5 +3511,153 @@ mod queued_tests {
             vec![0, 1, 2],
             "새 sink 는 replay + 라이브로 전부 받는다"
         );
+    }
+
+    // TRD §7-1: 분류는 대기 목록 표 → 턴 관측 순으로 읽는다(읽힌 순서를 기록한다) · 표가 참이면 턴 관측은 안 읽는다.
+    #[test]
+    fn the_classification_reads_the_pending_table_before_the_turn_table() {
+        for (pending, in_turn, busy, reads) in [
+            (true, false, true, vec!["pending"]),
+            (true, true, true, vec!["pending"]),
+            (false, true, true, vec!["pending", "turn"]),
+            (false, false, false, vec!["pending", "turn"]),
+        ] {
+            struct Scripted {
+                pending: bool,
+                in_turn: bool,
+                log: RefCell<Vec<&'static str>>,
+            }
+            impl BusyReads for Scripted {
+                fn read_pending_listed(&self) -> bool {
+                    self.log.borrow_mut().push("pending");
+                    self.pending
+                }
+                fn read_in_turn(&self) -> bool {
+                    self.log.borrow_mut().push("turn");
+                    self.in_turn
+                }
+            }
+            let reads_of = Scripted {
+                pending,
+                in_turn,
+                log: RefCell::new(Vec::new()),
+            };
+            let got = pending_then_in_turn(&reads_of);
+            assert_eq!(got, busy, "({pending}, {in_turn})");
+            assert_eq!(reads_of.log.into_inner(), reads, "({pending}, {in_turn})");
+        }
+    }
+
+    /// 두 읽기는 각자 제 표만 읽는다 — 이름이 가리키는 표와 실제로 읽는 표가 뒤바뀌면 여기서 깨진다(위 순서
+    /// 단언이 이름에 기대므로 그 짝이다).
+    // ADR-0231
+    #[test]
+    fn each_busy_reader_reads_only_its_own_table() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        assert!(!core.read_pending_listed() && !core.read_in_turn());
+
+        fx.pending.set(fx.id, EPOCH, 100, true);
+        assert!(core.read_pending_listed(), "표만 찼다");
+        assert!(!core.read_in_turn(), "턴 관측은 표를 읽지 않는다");
+
+        fx.pending.set(fx.id, EPOCH, 101, false);
+        core.emit(OutputEvent::TextDelta {
+            text: "thinking".into(),
+            turn_id: None,
+            message_id: None,
+        });
+        assert!(core.read_in_turn(), "턴 관측만 턴 중");
+        assert!(
+            !core.read_pending_listed(),
+            "목록 읽기는 턴 관측을 읽지 않는다"
+        );
+    }
+
+    /// 옛 CLI 판정 로그의 조건 — 명부의 판명 표식이 거짓 → 참으로 바뀐 구간 하나에서만 선다. 둘째 판정도, 판명
+    /// 뒤 `Queued` 에 코어가 잇는 `AckUnavailable` 도 다시 세우지 않는다.
+    // ADR-0231
+    #[test]
+    fn the_ack_unavailable_verdict_is_flagged_once_per_incarnation() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        let judged = |op: QueuedInputEvent| {
+            let mut replay = core.replay.lock().unwrap();
+            core.record_list_event(&mut replay, op)
+                .ack_unavailable_judged
+        };
+        let unavailable = || QueuedInputEvent::AckUnavailable {
+            delivered: Vec::new(),
+        };
+        let queued_op = |id: &str| QueuedInputEvent::Queued {
+            id: id.into(),
+            text: "t".into(),
+        };
+
+        assert!(!judged(queued_op("q1")));
+        assert!(judged(unavailable()), "첫 판정");
+        assert!(!judged(unavailable()), "둘째 판정은 다시 세우지 않는다");
+        assert!(!judged(queued_op("q2")), "판명 뒤 바꿔 적기");
+    }
+
+    #[test]
+    fn classified_input_busy_reads_the_two_tables_of_this_incarnation() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        assert!(!core.classified_input_busy(), "빈 목록 · 턴 없음 = 한가");
+        core.emit(queued("q1", "one"));
+        assert!(core.classified_input_busy(), "목록이 찼다");
+        core.emit(delivered("q1"));
+        assert_eq!(fx.pending(), Some(false));
+        assert!(core.classified_input_busy(), "받음 = 진행 — 턴 중");
+
+        let detached = OutputCore::new(fx.id, EPOCH, Arc::new(Quiet), TurnWiring::detached());
+        detached.emit(queued("q1", "one"));
+        assert!(
+            !detached.classified_input_busy(),
+            "표가 없는 조립은 목록을 빈 것으로 읽는다"
+        );
+    }
+
+    // 취소 요청의 문 — `Queued` 행에만 `CancelRequested` 를 세우고, 그 밖은 링을 건드리지 않는다.
+    #[test]
+    fn a_cancel_request_is_recorded_only_for_a_queued_row() {
+        let fx = Fixture::new();
+        let core = fx.core(Arc::new(Quiet), claude_classifier());
+        core.emit(queued("q1", "one"));
+        core.emit(queued("done", "two"));
+        core.emit(delivered("done"));
+        let before = ring_ops(&core).len();
+
+        assert_eq!(core.emit_cancel_request("never"), CancelRequest::NotListed);
+        assert_eq!(core.emit_cancel_request("done"), CancelRequest::NotListed);
+        assert_eq!(
+            ring_ops(&core).len(),
+            before,
+            "목록 밖 id 는 링에 아무것도 안 세운다"
+        );
+
+        assert_eq!(core.emit_cancel_request("q1"), CancelRequest::Recorded);
+        let ops = ring_ops(&core);
+        assert_eq!(ops.len(), before + 1);
+        assert_eq!(
+            ops.last().unwrap().1,
+            QueuedInputEvent::CancelRequested { id: "q1".into() }
+        );
+        assert!(matches!(
+            core.queued_inputs().lock().rows()[0].phase,
+            RowPhase::Cancelling { .. }
+        ));
+
+        assert_eq!(
+            core.emit_cancel_request("q1"),
+            CancelRequest::AlreadyCancelling
+        );
+        assert_eq!(
+            ring_ops(&core).len(),
+            before + 1,
+            "멱등 — 둘째 요청은 링을 안 건드린다"
+        );
+        assert_eq!(fx.pending(), Some(true), "취소 대기도 목록이다");
     }
 }
