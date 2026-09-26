@@ -146,8 +146,11 @@ register({
     } catch (e) {
       // ★입력 임대 거절만 코드가 없이 온다★(WS 문구가 `WriteStdin` 거절과 같다) — 버스 쪽 같은 거절과 같은
       //   `CONFLICT` 로 읽히게 붙인다. 문구로 알아본다: 접두 유무로 가르면 끊김 같은 코드 없는 실패도 걸린다.
-      if (e instanceof Error && e.message === INPUT_LOCKED_REFUSAL) {
-        throw new Error(`CONFLICT: ${e.message}`)
+      // ★운영 carrier(셸 `forward_daemon_command`)는 거절을 `Error` 가 아니라 맨 문자열로 돌려준다★ — `instanceof
+      //   Error` 로만 가르면 운영에서 한 번도 안 걸린다. 둘 다 문구로 편 뒤 비교하고, 나머지는 원래 모양 그대로 던진다.
+      const message = e instanceof Error ? e.message : typeof e === 'string' ? e : null
+      if (message === INPUT_LOCKED_REFUSAL) {
+        throw new Error(`CONFLICT: ${message}`)
       }
       throw e
     }

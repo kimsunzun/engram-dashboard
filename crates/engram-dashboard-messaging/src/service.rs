@@ -64,7 +64,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use super::busy::{AlwaysIdleGate, BusyGate};
+use super::busy::{AlwaysIdleGate, BusyGate, BusyReason};
 use super::envelope::{
     new_msg_id, wrap_message, wrap_notice, DeliveryObservation, Entrance, EnvelopeFields,
     EnvelopeFormat,
@@ -621,8 +621,11 @@ impl MessagingService {
     /// 큐를 보지 않는다(그걸 여기 섞으면 두 규칙이 다시 한 조건으로 엉킨다).
     // ADR-0121 (게이트 술어 단일 정의)
     // ADR-0116 (결정 7 — 턴 신호 없는 부류는 게이트 생략)
-    fn gate_says_busy(&self, target: &LiveAgent) -> bool {
-        target.turn_signal && self.busy.is_busy(target.id, target.epoch)
+    fn gate_busy_reason(&self, target: &LiveAgent) -> Option<BusyReason> {
+        if !target.turn_signal {
+            return None;
+        }
+        self.busy.busy_reason(target.id, target.epoch)
     }
 
     /// 입구(ingress)가 인자 검증·auth 를 마친 뒤 부르는 유일한 발송 함수다.
@@ -1563,10 +1566,13 @@ impl MessagingService {
                     }
                     continue;
                 }
-                if self.gate_says_busy(&target) {
+                if let Some(reason) = self.gate_busy_reason(&target) {
                     busy_skipped.push((target.id, target.epoch, idxs.len()));
                     restore.extend(idxs);
-                    report.gated = true;
+                    // 사유는 호출자 몫의 것을 고른다 — 남의 타깃 사유가 먼저 적혔어도 덮는다(`gated` doc).
+                    if report.gated.is_none() || target.id == caller_target {
+                        report.gated = Some(reason);
+                    }
                     continue;
                 }
                 deliver.push((target, idxs));
@@ -2559,14 +2565,17 @@ struct DrainReport {
     ///   TTL 까지 기다린다. 조건·범위는 `deferred_by_target` 의 잔여 항목이 정본이고, release 는
     ///   `panic = "abort"` 라 그 갈래가 존재하지 않는다.
     retreated: bool,
-    /// idle 게이트에 걸려 미룬 타깃이 있었다(턴 신호 있는 백엔드가 턴 중).
+    /// idle 게이트에 걸려 미룬 타깃이 있었으면 `Some(그 바쁨 사유)`(턴 신호 있는 백엔드가 바쁨 — 턴 중·
+    ///   사용자 입력 대기·오류 뒤 멈춤), 없었으면 `None`. 값은 `pending_hint` 가 힌트 문구를 고르는 데 쓴다.
+    /// ★고르는 규칙 = 처음 본 사유를 적되, 호출자 자기 타깃(`to_id` 그룹)의 사유는 언제나 덮어쓴다★ — 그래서
+    ///   호출자 몫이 걸렸으면 값은 반드시 그 몫의 사유다(ADR-0231).
     ///
-    /// ★이 축만 드레인 전체 범위인데, 그래도 사유 선택이 어긋나지 않는다★: 사유 우선순위에서 이 값은
+    /// ★게이트 여부는 드레인 전체 범위인데, 그래도 사유 선택이 어긋나지 않는다★: 사유 우선순위에서 이 값은
     ///   **맨 끝**이라(`pending_hint`), 여기까지 오면 호출자 몫은 물러나지도 실패하지도 배달되지도 않았다는
-    ///   뜻이고 발송 경로에서 그 조합은 "내 수신자가 턴 중" 하나뿐이다(방금 park 된 그 편지는 `to_id` 힌트를
-    ///   달고 같은 스냅샷으로 해석되므로 타깃이 없을 수 없다). 앞의 두 축을 범위 제한 없이 되돌리면 이 논거가
-    ///   함께 무너진다.
-    gated: bool,
+    ///   뜻이고 발송 경로에서 그 조합은 "내 수신자가 게이트에 걸렸다" 하나뿐이다(방금 park 된 그 편지는 `to_id`
+    ///   힌트를 달고 같은 스냅샷으로 해석되므로 타깃이 없을 수 없다) — 위 덮어쓰기 규칙 덕에 그때 값은 내
+    ///   수신자의 사유다. 앞의 두 축을 범위 제한 없이 되돌리면 이 논거가 함께 무너진다.
+    gated: Option<BusyReason>,
     /// ★**호출자 몫(`to_id` 그룹)의** 주입 실패 사유★ — 자기 도어벨 금지의 판정 근거이자 응답 사유 문구의
     ///   출처다. 남의 타깃이 실패한 사실은 여기 담지 않는다(그건 드레인 사실이지 호출자 몫의 결말이 아니다 —
     ///   `drain_queue` 5단계 Err 갈래 주석). 드레인 전체 범위의 그 사실은 같은 자리의 `tracing::warn!` 이
@@ -3174,11 +3183,21 @@ fn park_hint_dormant(display: &str) -> String {
     )
 }
 
-/// busy hint(spec §6 ㉮①).
-fn park_hint_busy(display: &str) -> String {
-    format!(
-        "'{display}' is mid-turn — queued; it will be delivered as one batch when that turn ends."
-    )
+/// busy hint(spec §6 ㉮①) — 문구는 실제 바쁨 사유를 말한다. 오류 뒤 멈춘 수신자에게 "턴 중" 이라고 하면
+/// 발신 LLM 이 곧 끝날 턴을 기다린다고 오독한다.
+// ADR-0231
+fn park_hint_busy(display: &str, reason: BusyReason) -> String {
+    match reason {
+        BusyReason::HaltedAfterError => format!(
+            "'{display}' stopped after a failed turn — queued; it will be delivered after the user's next turn succeeds. Nobody is notified if it expires first (24h TTL), so check with `eg_messages` if it matters."
+        ),
+        BusyReason::InputsPending => format!(
+            "'{display}' has user input waiting — queued; it will be delivered after the turn that handles that input ends."
+        ),
+        BusyReason::InTurn => format!(
+            "'{display}' is mid-turn — queued; it will be delivered as one batch when that turn ends."
+        ),
+    }
 }
 
 /// 주입 실패 hint(spec §6 ㉮③).
@@ -3219,8 +3238,8 @@ fn pending_hint(display: &str, report: &DrainReport) -> String {
     if let Some(err) = &report.caller_inject_error {
         return park_hint_inject_failed(display, err);
     }
-    if report.gated {
-        return park_hint_busy(display);
+    if let Some(reason) = report.gated {
+        return park_hint_busy(display, reason);
     }
     park_hint_queued(display)
 }
@@ -5082,7 +5101,7 @@ mod tests {
         assert_eq!(rows[0].status, SendStatus::Pending, "{rows:?}");
         assert_eq!(
             rows[0].hint.as_deref(),
-            Some(park_hint_busy("R").as_str()),
+            Some(park_hint_busy("R", BusyReason::InTurn).as_str()),
             "내 편지의 사유는 **턴 대기**다 — 남의 타깃 유예를 내 사유로 보고하면 안 된다: {rows:?}"
         );
         assert_eq!(svc.in_flight_target_count(), 0, "타깃 점유 회수 누락 없음");
@@ -5122,7 +5141,7 @@ mod tests {
         assert_eq!(rows[0].status, SendStatus::Pending, "{rows:?}");
         assert_eq!(
             rows[0].hint.as_deref(),
-            Some(park_hint_busy("R").as_str()),
+            Some(park_hint_busy("R", BusyReason::InTurn).as_str()),
             "내 편지의 사유는 **턴 대기**다 — 남의 타깃 주입 실패를 내 사유로 보고하면 안 된다: {rows:?}"
         );
 
@@ -5144,9 +5163,10 @@ mod tests {
     fn the_flush_gate_asks_the_same_predicate_the_send_path_asks() {
         // ★ADR-0121 §영향 — 게이트 술어는 한 곳에서만 정의된다★: 발송측이 "이 부류엔 게이트 없음" 으로
         //   판정하는데 flush측이 게이트에 걸어 물러나면, 순서 보장 때문에 큐에 합류한 편지를 **아무도 열지
-        //   않는다**(배달 정지). 그래서 두 측이 같은 술어(`gate_says_busy`)를 부르는지 여기서 봉인한다.
+        //   않는다**(배달 정지). 그래서 두 측이 같은 술어(`gate_busy_reason`)를 부르는지 여기서 봉인한다.
         // ★게이트를 busy 로 세팅한 채 단언한다★: 턴 신호 없는 부류는 그 값을 **보지 않아야** 한다 —
-        //   `flush_for` 가 `busy.is_busy` 를 직접 부르는 옛 형태로 돌아가면 배치가 스킵돼 여기서 빨개진다.
+        //   `flush_for` 가 `gate_busy_reason` 을 건너뛰고 게이트(`busy.busy_reason`·`busy.is_busy`)를 직접
+        //   부르는 옛 형태로 돌아가면 배치가 스킵돼 여기서 빨개진다.
         let (svc, port, gate) = svc_gated();
         let (from, me) = live_sender("alice");
         let (tui_id, tui) = live_no_turn_signal("tui");
@@ -5661,6 +5681,93 @@ mod tests {
             port.injected_bodies().is_empty(),
             "턴 중에는 stdin 에 밀지 않는다(CLI 큐 우회 금지)"
         );
+    }
+
+    // ── ADR-0231: 파킹 힌트는 실제 바쁨 사유를 말한다(운영 게이트 `BusyPolicy` + 심은 사실) ─────────────
+
+    struct SilentNotifier;
+    impl super::super::busy::IdleNotifier for SilentNotifier {
+        fn notify_idle(&self, _id: PeerId) {}
+    }
+
+    /// 운영과 같은 `BusyPolicy` 를 심은 사실 위에 세운다 — 사유는 `FakeGate`(bool 뿐)로는 못 낸다.
+    fn park_hint_under_policy(
+        seed: impl FnOnce(&super::super::busy::ScriptedTurnFacts, PeerId),
+    ) -> String {
+        let facts = super::super::busy::ScriptedTurnFacts::new();
+        let policy = Arc::new(super::super::busy::BusyPolicy::new(
+            facts.clone(),
+            Arc::new(SilentNotifier),
+        ));
+        let port = Arc::new(FakeDeliveryPort::new());
+        let svc = MessagingService::new_gated(port.clone(), Arc::new(FakeControlPlane), policy);
+        let (alice_id, alice) = live("alice");
+        port.set_roster(vec![alice]);
+        seed(&facts, alice_id);
+        let out = svc
+            .park_absent_for_test(
+                "m1",
+                ident(),
+                "bob",
+                "alice",
+                "hi",
+                Entrance::Mcp,
+                &SendMeta::default(),
+            )
+            .expect("busy 파킹은 반려 아님");
+        assert!(
+            port.injected_bodies().is_empty(),
+            "바쁜 수신자에게 밀지 않는다"
+        );
+        match out {
+            SendOutcome::Parked { hint } => hint,
+            other => panic!("busy 수신자는 파킹이어야: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_recipient_halted_after_a_failed_turn_is_not_called_mid_turn() {
+        // QA 실측: 오류 턴 뒤 멈춘(턴 아님) 수신자에게 "mid-turn" 힌트가 나갔다.
+        let hint = park_hint_under_policy(|f, id| {
+            f.set_last_end_failed(id, 0, true, Instant::now());
+        });
+        assert_eq!(
+            hint,
+            park_hint_busy("alice", BusyReason::HaltedAfterError),
+            "{hint}"
+        );
+        assert!(!hint.contains("mid-turn"), "{hint}");
+    }
+
+    #[test]
+    fn halted_after_error_wins_over_a_running_turn_and_waiting_input() {
+        let hint = park_hint_under_policy(|f, id| {
+            let now = Instant::now();
+            f.set_in_turn(id, 0, now);
+            f.set_inputs_pending(id, 0, true, now);
+            f.set_last_end_failed(id, 0, true, now);
+        });
+        assert_eq!(hint, park_hint_busy("alice", BusyReason::HaltedAfterError));
+    }
+
+    #[test]
+    fn waiting_user_input_outside_a_turn_says_so() {
+        let hint = park_hint_under_policy(|f, id| {
+            f.set_inputs_pending(id, 0, true, Instant::now());
+        });
+        assert_eq!(hint, park_hint_busy("alice", BusyReason::InputsPending));
+        assert!(hint.contains("user input waiting"), "{hint}");
+    }
+
+    #[test]
+    fn a_running_turn_keeps_the_mid_turn_hint_even_with_waiting_input() {
+        let hint = park_hint_under_policy(|f, id| {
+            let now = Instant::now();
+            f.set_in_turn(id, 0, now);
+            f.set_inputs_pending(id, 0, true, now);
+        });
+        assert_eq!(hint, park_hint_busy("alice", BusyReason::InTurn));
+        assert!(hint.contains("mid-turn"), "{hint}");
     }
 
     #[test]

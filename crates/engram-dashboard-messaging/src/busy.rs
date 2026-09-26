@@ -62,12 +62,34 @@ use crate::PeerId;
 /// ★턴 관측(`in_turn`)에만 건다★ — `inputs_pending`·`last_end_failed` 는 이 상한이 풀지 않는다(모듈 헤더).
 pub const BUSY_MAX_TURN: Duration = Duration::from_secs(30 * 60);
 
-/// ★idle 게이트 조회 seam(ADR-0012)★ — MessagingService 가 "이 수신자가 지금 턴 중인가" 를 묻는 유일한 문.
+/// ★idle 게이트 조회 seam(ADR-0012)★ — MessagingService 가 "이 수신자가 지금 우편을 받을 수 있나" 를 묻는
+/// 유일한 문. 서비스가 부르는 것은 `busy_reason` 하나다(배달 판정 = `is_some()`, 힌트 문구 = 그 값).
 ///
 /// ★계약★: 순수 조회 — 부작용 없음, 블로킹 없음(짧은 락만). messaging 락을 **든 채** 불려도 안전해야
 ///   한다(현 호출부는 락 밖에서 부르지만, 이 계약을 지켜 두면 미래 호출 지점이 늘어도 데드락이 없다).
 pub trait BusyGate: Send + Sync {
     fn is_busy(&self, id: PeerId, epoch: u32) -> bool;
+
+    /// 바쁘면 그 사유, 아니면 `None`. ★서비스는 이 값의 `is_some()` 으로 배달을 막고 그 값으로 힌트 문구를
+    /// 고른다★ — `MessagingService` 는 `is_busy` 를 부르지 않는다.
+    /// ★`is_busy` 는 언제나 이것의 `is_some()` 과 같아야 한다★: 둘 중 하나를 재정의하면 둘이 어긋나지 않게
+    /// 함께 맞춘다. 사유를 모르는 구현은 기본값(`is_busy` 면 턴 중)으로 답한다.
+    // ADR-0231
+    fn busy_reason(&self, id: PeerId, epoch: u32) -> Option<BusyReason> {
+        self.is_busy(id, epoch).then_some(BusyReason::InTurn)
+    }
+}
+
+/// 수신자가 우편을 못 받는 사유 — 힌트 문구 선택용. 둘 이상 겹치면 위에 적힌 것이 이긴다(`BusyPolicy::busy_reason`).
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusyReason {
+    /// 마지막 턴이 오류로 끝났고 그 뒤 성공한 턴이 아직 없다.
+    HaltedAfterError,
+    /// 턴 중이다(상한으로 잔해 판정된 턴은 여기 들지 않는다).
+    InTurn,
+    /// 턴은 아니지만 사용자 대기 목록이 비지 않았다.
+    InputsPending,
 }
 
 /// 게이트 미배선/관측 불가 폴백 — **항상 idle**(= 즉시 주입, spec §5 capability 폴백).
@@ -188,24 +210,34 @@ impl BusyPolicy {
     }
 
     pub fn is_busy(&self, id: PeerId, epoch: u32) -> bool {
-        let Some(fact) = self.facts.turn_fact(id, epoch) else {
-            return false;
-        };
+        self.busy_reason(id, epoch).is_some()
+    }
+
+    /// 바쁨 판정과 그 사유를 한 번의 사실 조회로 낸다 — `is_busy` 는 이것의 `is_some()` 이다.
+    pub fn busy_reason(&self, id: PeerId, epoch: u32) -> Option<BusyReason> {
+        let fact = self.facts.turn_fact(id, epoch)?;
         // ADR-0231: 상한 장부를 보지 않는다 — 이 두 사실은 30 분이 지나도 바쁨이다(모듈 헤더).
-        if fact.inputs_pending || fact.last_end_failed {
-            return true;
+        if fact.last_end_failed {
+            return Some(BusyReason::HaltedAfterError);
         }
-        if !fact.in_turn {
-            return false;
+        let live_turn = fact.in_turn && {
+            let ledger = self.stale.lock().expect("busy stale ledger poisoned");
+            ledger.get(&(id, epoch)) != Some(&fact.last_signal)
+        };
+        if live_turn {
+            return Some(BusyReason::InTurn);
         }
-        let ledger = self.stale.lock().expect("busy stale ledger poisoned");
-        ledger.get(&(id, epoch)) != Some(&fact.last_signal)
+        fact.inputs_pending.then_some(BusyReason::InputsPending)
     }
 }
 
 impl BusyGate for BusyPolicy {
     fn is_busy(&self, id: PeerId, epoch: u32) -> bool {
         BusyPolicy::is_busy(self, id, epoch)
+    }
+
+    fn busy_reason(&self, id: PeerId, epoch: u32) -> Option<BusyReason> {
+        BusyPolicy::busy_reason(self, id, epoch)
     }
 }
 
@@ -513,5 +545,22 @@ mod tests {
     fn always_idle_gate_never_reports_busy() {
         let g = AlwaysIdleGate;
         assert!(!g.is_busy(PeerId::new_v4(), 7));
+        assert_eq!(g.busy_reason(PeerId::new_v4(), 7), None);
+    }
+
+    #[test]
+    fn a_stale_turn_with_waiting_input_reports_the_input_not_the_turn() {
+        // 잔해로 판정된 턴은 사유가 아니다 — 바쁨을 떠받치는 것은 대기 목록뿐이다.
+        let (p, f, _n) = policy();
+        let id = PeerId::new_v4();
+        let t0 = Instant::now();
+        f.set_in_turn(id, 0, t0);
+        f.set_inputs_pending(id, 0, true, t0);
+        assert_eq!(p.busy_reason(id, 0), Some(BusyReason::InTurn));
+        p.sweep_stale_busy(t0 + BUSY_MAX_TURN);
+        assert_eq!(p.busy_reason(id, 0), Some(BusyReason::InputsPending));
+        f.set_inputs_pending(id, 0, false, t0);
+        assert_eq!(p.busy_reason(id, 0), None);
+        assert!(!p.is_busy(id, 0), "사유 없음 = 바쁘지 않음");
     }
 }

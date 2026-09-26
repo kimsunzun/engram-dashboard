@@ -321,6 +321,32 @@ describe('agent.cancelQueuedInput', () => {
     )
   })
 
+  it('운영 carrier 처럼 맨 문자열로 온 임대 거절 문구도 CONFLICT 로 읽힌다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw INPUT_LOCKED_REFUSAL
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      `CONFLICT: ${INPUT_LOCKED_REFUSAL}`,
+    )
+  })
+
+  it('맨 문자열로 온 다른 거절(NOT_FOUND)은 문자열 그대로 다시 던진다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw 'NOT_FOUND: no waiting input'
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toBe(
+      'NOT_FOUND: no waiting input',
+    )
+  })
+
+  it('문자열도 Error 도 아닌 거절은 건드리지 않는다', async () => {
+    const odd = { code: 'X' }
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw odd
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toBe(odd)
+  })
+
   it('코드를 단 실패(NOT_FOUND)와 코드 없는 다른 실패(끊김)는 그대로 둔다', async () => {
     clientMock.cancelQueuedInput.mockImplementation(async () => {
       throw new Error('NOT_FOUND: no waiting input')
