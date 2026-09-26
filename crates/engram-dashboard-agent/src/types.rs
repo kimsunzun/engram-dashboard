@@ -1082,8 +1082,8 @@ pub struct SinkError;
 /// frame) → 코어 transport-agnostic.
 pub trait OutputSink: Send + Sync + 'static {
     /// ★계약 = 막히지 않는다 — 못 보내면 기다리지 말고 `SinkError`★. 이 호출은 줄을 쥔 채 불리는 자리가
-    /// 둘이다(둘 다 ADR-0006 「lock 미보유 send」의 예외) — 세션의 입력 자물쇠(`SessionClassified`)와 codex
-    /// 통로의 방출 줄(`Announcer.order` — `announce`). 여기서 기다리는 구현은 그 화신의 입력·취소(codex 는
+    /// 둘이다(둘 다 ADR-0006 「lock 미보유 send」의 예외) — 세션의 입력 자물쇠(`input_order` —
+    /// `SessionClassified` 경로)와 codex 통로의 방출 줄(`Announcer.order` — `announce`). 여기서 기다리는 구현은 그 화신의 입력·취소(codex 는
     /// 입력과 라이터의 방출)를 함께 멈춘다.
     // ADR-0231
     fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError>;

@@ -734,8 +734,9 @@ impl TurnClose {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HandOverPolicy {
     /// 넘길 수 있으면 곧바로. 운영은 안 쓴다 — 시험이 seam 으로 끼워 두 정책의 갈림을 재는 변형이다. ★붙듦이
-    ///   벤더 경계를 놓치게 되어도 저절로 되돌아갈 자리가 아니다★ — 그때는 사용자와 다시 연다(`HAND_OVER_POLICY`
-    ///   doc · ADR-0231 결정 2 · ADR-0234 결정 4).
+    ///   벤더 경계를 놓치게 되어도 저절로 되돌아갈 자리가 아니다★ — 그때 할 일은 `HAND_OVER_POLICY` doc 이
+    ///   적는다(답 끝 창만 좁아지면 `ANSWER_SEGMENT_HOLDS = false` · 도구 끝 창이 좁아지면 코드 전에 사용자에게
+    ///   다시 묻는다 — ADR-0231 결정 2 · ADR-0234 결정 4).
     #[cfg_attr(not(test), allow(dead_code))]
     Immediate,
     /// 측정(M15 · M16)이 「붙들어도 늦지 않다」를 세운 구간(도구 · 답)에서만 쥐고, 경계 신호에 곧바로 넘긴다.
