@@ -463,10 +463,12 @@ const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 
 /// app-server 통로의 넘기기 정책을 고르는 자리 — ★codex backend 의 상수 하나다(사용자 설정 표면을 늘리지
-/// 않는다)★(TRD §5-5). 붙드는 정책은 M15 반응 지연이 녹일 때만 켠다 — 빨가면 도구 구간을 못 맞춰 붙듦이
-/// 전달을 한 경계 늦춘다.
+/// 않는다)★(TRD §5-5). seam 없이 지은 통로의 기본값도 이것이다 — 시험대가 운영 정책을 그대로 잰다.
+/// 붙드는 정책은 M15 반응 지연이 녹여 켰다(도구 끝 반응 합 2275 µs < 창 최소 6 ms · 답 끝 221 µs < 9.4 ms —
+/// `docs/research/mid-turn-m15-measurements-2026-09-26.md`). ★벤더가 그 창을 좁히면 `Immediate` 로 되돌린다★ —
+/// 붙든 글이 경계를 놓쳐 한 경계 늦는다(잃지는 않는다).
 // ADR-0231
-const HAND_OVER_POLICY: HandOverPolicy = HandOverPolicy::Immediate;
+const HAND_OVER_POLICY: HandOverPolicy = HandOverPolicy::AtEarliestBoundary;
 
 /// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
 /// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
@@ -1155,9 +1157,11 @@ impl AgentBackend for CodexBackend {
     //   통로만 알고(턴 도중 글은 목록에 서고 말풍선이 없다), 그 말풍선의 uuid 가 우리 id 라 되울림의
     //   `clientId` 와 한 벌로 접힌다. 세션 층 에코는 그 가름을 모르므로 이 모드의 세션은 에코를 내지
     //   않는다(`AgentSession` 의 통로 턴 동사 갈래).
-    //   ★하한 미달 통로는 말풍선을 안 낸다★ — 되울림에 `clientId` 가 없어 dedup 키가 갈리고(우리 uuid vs
-    //   codex item id) 같은 질문이 두 벌 남는다. 그 겹침이 ADR-0193 의 「거부한 대안」이 실측을 근거로
-    //   기각한 바로 그것이다. 터미널 모드는 PTY 가 스스로 되울린다.
+    //   ★하한 미달 통로는 말풍선을 안 낸다★ — 되울림 말풍선의 `uuid` 는 `clientId` 가 먼저고 없을 때만 codex
+    //   item id 다(번역기의 되울림 중복 기억은 늘 item id 로 센다 — `decoder` 의 유저 메시지 번역). 하한 미달의
+    //   되울림엔 `clientId` 가 없어 그 `uuid` 가 item id 가 되므로, 통로가 우리 id 로 말풍선을 내면 프론트의
+    //   `uuid` dedup 이 둘을 못 접어 같은 질문이 두 벌 남는다. 그 겹침이 ADR-0193 의 「거부한 대안」이 실측을
+    //   근거로 기각한 바로 그것이다. 터미널 모드는 PTY 가 스스로 되울린다.
     // ADR-0193
     // ADR-0231
 

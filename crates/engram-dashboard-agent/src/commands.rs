@@ -186,8 +186,9 @@ declare_commands! {
         parent: Option<String>,
     } errors [NOT_FOUND, CONFLICT];
 
-    /// 산 에이전트가 턴 도중 받아 아직 전달하지 않은 입력 목록(비종결만). `state` = `queued`(우리 목록에서
-    /// 기다린다 — 에이전트에 아직 안 넘겼거나, 넘겼고 대기로 확인됐다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
+    /// 산 에이전트가 턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록(비종결만). `state` = `queued`(확인 전 —
+    /// 우리가 쥐고 있거나 에이전트에 넘겨 결말을 기다린다. codex 는 넘길 수 있는 가장 이른 경계에서 steer 로,
+    /// claude 는 곧바로 CLI 대기열로 넘긴다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
     /// 목록에 남고 우편이 그 결말을 기다리며, 취소하면 곧바로 빠진다) | `cancelling`(취소를 요청했다 — 에이전트가
     /// 결말을 낼 때까지 남는다). `cancel.answer` = `none`(아직 답이 없다) | `not_removed`(에이전트가 못 뺐다고
     /// 답했거나 요청이 실패했다) · `cancel.vendor_closed` = 에이전트가 그 항목을 이미 닫았다.

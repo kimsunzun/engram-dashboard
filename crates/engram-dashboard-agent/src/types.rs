@@ -81,6 +81,10 @@ pub enum OutputEvent {
     ///     이 부류다). 종료로 읽으면 한 턴이 사고 횟수만큼 쪼개진다.
     ///   - [`TurnEnd`](Self::TurnEnd) = **턴이 끝났다**. 실패로 끝난 턴도 이쪽 어휘로 온다.
     /// ★그래서 「재시도되나」를 칸으로 따로 내보내지 않는다★ — 그 구별은 이벤트 타입이 이미 지고 있다.
+    /// ★claude 의 실패한 턴은 `Error` 뒤 [`MessageDone`](Self::MessageDone) 으로 온다★ — `TurnEnd` 를 쓰지
+    ///   않는 그 백엔드는 실패한 `result` 줄 하나에서 둘을 이 순서로 내고, 턴 분류기가 그 `Error` 를 머리말로
+    ///   알아보아 뒤따르는 끝을 오류 끝으로 접는다(`backend/claude` 의 `RESULT_FAILURE_DETAIL`). ★그 머리말이 없는
+    ///   `Error` 는 턴 오류가 아니다★ — 줄 버퍼 넘침(`partial-line buffer overflow`)이 그 예다.
     Error(String),
     /// 위 정형 variant로 안 잡히는 backend별 구조화 이벤트의 탈출구(forward-compat).
     /// kind=이벤트 종류 태그, json=원본 직렬화 payload. core는 내용을 해석하지 않는다.
