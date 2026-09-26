@@ -6,7 +6,8 @@
 //   사건이 없어 항목이 그대로 남는 것이 맞다. 글을 거두지 못한 경우도 따로 알리지 않는다.
 // ★✕ 의 모양은 명부 상태가 정한다★(단순화 계획 2026-09-26 항목 8): 취소 요청이 답을 기다리는 행은 ✕ 를 누를 수
 //   없고(행은 그대로 남는다), 통로가 에이전트에 넘긴 행(`sent`)은 ✕ 가 없다 — 넘긴 글은 거둘 수 없고 받음으로만
-//   빠진다. 못 뺐다는 답이 온 행은 보통 행으로 돌아간다.
+//   빠진다. 못 뺐다는 답(`not_removed`)이 온 행도 넘긴 행처럼 그린다(✕ 없음) — 글은 이미 넘어갔고 ✕ 를 다시
+//   눌러도 할 수 있는 일이 없다.
 
 import { useState } from 'react'
 import { X } from 'lucide-react'
@@ -72,19 +73,21 @@ export function QueuedInputList({
     >
       {collapsedSide === 'newest' && more}
       {shown.map((entry) => {
-        // 취소 요청이 답을 기다린다 — 못 뺐다는 답(`not_removed`)이 오면 보통 행으로 돌아간다.
+        // 취소 요청이 답을 기다린다 — 못 뺐다는 답(`not_removed`)이 오면 넘긴 행처럼 선다(글이 이미 넘어갔다).
         const asking = entry.phase.state === 'cancelling' && entry.phase.answer === 'none'
+        const handedOver =
+          entry.sent || (entry.phase.state === 'cancelling' && entry.phase.answer === 'not_removed')
         return (
           <li
             key={entry.id}
             data-queued-input={entry.id}
-            data-queued-state={entry.sent ? 'sent' : asking ? 'cancelling' : 'queued'}
+            data-queued-state={handedOver ? 'sent' : asking ? 'cancelling' : 'queued'}
             className="flex min-w-0 items-center gap-1"
           >
             <span title={entry.text} className="min-w-0 flex-1 truncate text-[12px] text-muted">
               {entry.text}
             </span>
-            {!entry.sent && (
+            {!handedOver && (
               <button
                 type="button"
                 title={t('chat.queuedRemove')}

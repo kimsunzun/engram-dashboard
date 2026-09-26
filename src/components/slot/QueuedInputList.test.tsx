@@ -1,5 +1,6 @@
 // ADR-0231: 대기 입력 목록의 그리기 규칙 — 머리줄 없음 · 열린 항목 전부(취소 대기 포함) · 3 + 「외 N개」(눌러 펼침) ·
-//   툴팁 전문 · ✕ 는 넘기지 않은 항목에(Tab 으로 닿는 버튼) · 취소 답을 기다리는 동안 ✕ 잠김 · 넘긴 항목은 ✕ 없음 ·
+//   툴팁 전문 · ✕ 는 넘기지 않은 항목에(Tab 으로 닿는 버튼) · 취소 답을 기다리는 동안 ✕ 잠김 · 넘긴 항목과
+//   못 뺐다는 답이 온 항목은 ✕ 없음 ·
 //   ✕ 는 명령을 디스패치할 뿐 스스로 감추지 않는다.
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -54,11 +55,12 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(dispatchMock.fireAndForget).not.toHaveBeenCalled()
   })
 
-  it('못 뺐다는 답이 온 행은 보통 행으로 돌아간다(✕ 가 다시 눌린다)', () => {
-    render(<QueuedInputList agentId={AGENT} entries={[cancelling('B', 'not_removed')]} />)
-    expect(shownIds()).toEqual(['B'])
-    expect(removeButton('B')?.disabled).toBe(false)
-    expect(document.querySelector('[data-queued-input="B"]')?.getAttribute('data-queued-state')).toBe('queued')
+  it('못 뺐다는 답이 온 행은 넘긴 행처럼 선다 — 글이 이미 넘어갔으니 ✕ 가 없다', () => {
+    render(<QueuedInputList agentId={AGENT} entries={[cancelling('B', 'not_removed'), waiting('C')]} />)
+    expect(shownIds()).toEqual(['B', 'C'])
+    expect(removeButton('B')).toBeNull()
+    expect(removeButton('C')).not.toBeNull()
+    expect(document.querySelector('[data-queued-input="B"]')?.getAttribute('data-queued-state')).toBe('sent')
   })
 
   it('넘긴 행은 ✕ 가 없다 — 취소 대기였어도(✕ 가 넘기기와 겹쳤다) 「보냄」으로 선다', () => {
