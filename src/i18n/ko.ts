@@ -112,6 +112,7 @@ export const ko = {
     renameFailed: '이름 변경 실패: {err}', // ADR-0061 리치화.
     reparentFailed: '이동 실패: {err}', // ADR-0072 트리 계층 — 드래그 재부모화.
     rename: '에이전트 이름 변경', // §5 LLM 제어 — RenameProfile.
+    cancelQueuedInput: '대기 입력을 목록에서 빼기', // ADR-0231 — 목록 ✕ 와 같은 command.
   },
   preset: {
     create: '프리셋 생성',
@@ -138,6 +139,11 @@ export const ko = {
     // 이 셸이 모르는 이벤트가 도착했을 때. 방향이 한쪽뿐이라 원인을 단정할 수 있다 — 모르는 어휘는
     //   데몬에서 오므로 뒤처진 쪽은 언제나 셸이다.
     unsupportedEvent: '표시할 수 없는 신호 {count}건 — 앱이 데몬보다 오래된 버전일 수 있습니다',
+    // 대기 입력 목록(ADR-0231). ✕ 문구는 두 백엔드·모든 항목이 같다 — 글을 거두는지는 백엔드가 가르므로 경고를
+    //   덧붙이지 않는다(넘긴 codex 항목에는 「버려짐」이 틀린 말이다 — 사용자 답 2026-09-26).
+    queuedRemove: '목록에서 빼기',
+    queuedMore: '외 {count}개',
+    queuedListLabel: '보내기 대기 중인 입력', // 화면 밖 이름(aria-label) — 목록엔 머리줄이 없다.
   },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {

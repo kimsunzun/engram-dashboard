@@ -7,6 +7,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { t } from '../i18n'
 import type { AgentProfile, AgentOutputFormat } from '../api/types'
 import { agentClient } from '../api/clientFactory'
+import { INPUT_LOCKED_REFUSAL } from '../api/agentClient'
 import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
 import { matchDeclaredSpelling } from './enumArg'
@@ -119,6 +120,37 @@ register({
     const raw = args?.name
     const name = typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : null
     return agentClient.renameProfile(id.trim(), name)
+  },
+})
+
+register({
+  id: 'agent.cancelQueuedInput',
+  title: t('agent.cancelQueuedInput'),
+  category: 'agent',
+  // ★`help` 를 달지 말 것★ — 같은 이름을 데몬이 이미 버스에서 답한다(`engram-dashboard-agent` 의 선언). help 가
+  //   있으면 셸이 이 이름을 창 command 등록 묶음에 싣고, 그 이름 충돌 검사가 **묶음 전체**를 거절해 이 창의 모든
+  //   command 가 버스에서 빠진다. 창 안(✕ · `window.__engramCmd`) 전용이다.
+  // ADR-0231: 목록 ✕ 와 LLM 이 같은 핸들을 흔든다. 스스로 감추지 않는다 — 결말은 링 사건으로 목록에 돌아온다.
+  run: async (args) => {
+    const agentId = args?.agentId
+    const inputId = args?.inputId
+    if (typeof agentId !== 'string' || !agentId.trim()) {
+      throw new Error(`[agent.cancelQueuedInput] agentId 가 비어 있음: ${String(agentId)}`)
+    }
+    if (typeof inputId !== 'string' || !inputId) {
+      throw new Error(`[agent.cancelQueuedInput] inputId 가 비어 있음: ${String(inputId)}`)
+    }
+    try {
+      // 결말 낱말은 문자열 그대로 돌려준다 — 더 새 데몬의 낱말도 버리지 않는다.
+      return { outcome: await agentClient.cancelQueuedInput(agentId.trim(), inputId) }
+    } catch (e) {
+      // ★입력 임대 거절만 코드가 없이 온다★(WS 문구가 `WriteStdin` 거절과 같다) — 버스 쪽 같은 거절과 같은
+      //   `CONFLICT` 로 읽히게 붙인다. 문구로 알아본다: 접두 유무로 가르면 끊김 같은 코드 없는 실패도 걸린다.
+      if (e instanceof Error && e.message === INPUT_LOCKED_REFUSAL) {
+        throw new Error(`CONFLICT: ${e.message}`)
+      }
+      throw e
+    }
   },
 })
 

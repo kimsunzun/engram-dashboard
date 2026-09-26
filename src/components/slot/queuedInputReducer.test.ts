@@ -83,6 +83,24 @@ describe('queuedInputReducer — 이 판만의 표면', () => {
     expect(registry.tombstoneCount()).toBe(0)
   })
 
+  // ADR-0231: 머리 점프로 닫힘 사건을 잃은 항목 — 결말을 모르니 원인 모름과 같은 되살림 가능 묘비다.
+  it('adoptSnapshot: 스냅숏에도 뒤의 Queued 에도 없는 열린 항목은 되살림 가능 묘비로 접는다', () => {
+    const registry = new QueuedInputRegistry()
+    registry.reduce({ kind: 'Queued', id: 'gone', text: 'G' })
+    registry.reduce({ kind: 'Queued', id: 'listed', text: 'L' })
+    registry.reduce({ kind: 'Queued', id: 'fresh', text: 'F' })
+    registry.adoptSnapshot([], [{ kind: 'Queued', id: 'fresh', text: 'F' }], new Set(['listed']))
+    expect(registry.rows().map((r) => r.id)).toEqual(['listed', 'fresh'])
+    expect(registry.tombstone('gone')).toBe(true)
+    expect(registry.tombstone('listed')).toBeUndefined()
+    expect(registry.tombstone('fresh')).toBeUndefined()
+    // 되살림: 뒤늦은 벤더 받음은 결말을 받음으로 고쳐 읽는다.
+    expect(registry.reduce({ kind: 'Delivered', id: 'gone' })).toEqual([
+      { id: 'gone', verdict: { kind: 'Delivered' } },
+    ])
+    expect(registry.tombstone('gone')).toBe(false)
+  })
+
   it('clear() 는 묘비·판명 표식까지 비운다', () => {
     const registry = new QueuedInputRegistry()
     registry.reduce({ kind: 'Queued', id: 'a', text: 'A' })

@@ -68,8 +68,9 @@ type AgentId = Uuid;
 /// 프론트 decodeOutputFrame 이 미지 tag 로 조용히 skip(전방 호환, M0)하고 M2 가 정식 소비한다.
 pub const MARKER_TAG: u8 = 255;
 
-/// 마커 프레임 총 길이 = tag(1) + agentId(16) + epoch(4) + gen(8) + flags(1) = 30바이트.
-pub const MARKER_FRAME_LEN: usize = 1 + 16 + 4 + 8 + 1;
+/// 마커 프레임 총 길이 = tag(1) + agentId(16) + epoch(4) + gen(8) + flags(1) + replay_from(8) = 38바이트.
+/// ★셸과 웹뷰가 한 빌드로 나가므로 웹뷰는 이보다 짧은 마커를 받지 않는다★(ADR-0231 — 옛 30바이트 포함).
+pub const MARKER_FRAME_LEN: usize = 1 + 16 + 4 + 8 + 1 + 8;
 
 /// replay 경계 마커의 논리 내용(gen 펜스 + 플래그). agentId·epoch 는 인코딩 시 붙인다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,6 +86,11 @@ pub struct Marker {
     /// [`encode_marker_frame`] 도 실패 마커의 bit2 를 지운다. 실패엔 Ack 이 안 왔을 수 있어 값이 없는
     /// 자리다. 뷰 쪽 계약(ADR-0226 A4): 이 비트는 성공 flush 에서만 읽는다.
     pub continues_conversation: bool,
+    /// 이 replay 의 머리 — 그 세대 `SubscribeAck.replay_from`(데몬이 실제로 처음 보낸 seq · 빈 ring 이면
+    /// 다음에 발급할 seq). 뷰가 성공 flush 를 `max(마지막+1, replay_from)` 에서 시작한다(ADR-0231).
+    /// ★버퍼의 최소 seq 로 대신할 수 없어 받는다★ — replay 가 비면 틀린다. Ack 전이면 0 이고, 실패 마커에선
+    /// 뜻이 없다(뷰가 flush 하지 않는다).
+    pub replay_from: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,6 +142,7 @@ struct InFlight {
     acked: bool,
     truncated: bool,
     continues_conversation: bool,
+    replay_from: u64,
     /// ★좀비 플래그(FIX-1)★: 실패 마커를 이미 1회 발행했음(재발행 금지 표시). 근거는
     ///   [`ReplayFlightSet::check_deadlines`].
     failed: bool,
@@ -150,6 +157,7 @@ impl InFlight {
             acked: false,
             truncated: false,
             continues_conversation: false,
+            replay_from: 0,
             failed: false,
             deadline: now + deadline,
         }
@@ -211,11 +219,13 @@ impl ReplayFlightSet {
 
     /// single-flight 라 도착하는 Ack 는 항상 유일 outstanding in-flight 의 것이다(좀비 포함 — 만료
     /// 세대의 late Ack 도 그 슬롯을 가리킨다). 그래서 gen 대조 없이 현 슬롯에 그대로 각인한다.
+    /// `replay_from` = 그 Ack 의 replay 머리 — 이 세대의 성공 마커가 싣는다([`Marker::replay_from`]).
     pub fn on_ack(
         &mut self,
         agent: AgentId,
         truncated: bool,
         continues_conversation: bool,
+        replay_from: u64,
         now: Instant,
     ) {
         let deadline = self.deadline;
@@ -224,6 +234,7 @@ impl ReplayFlightSet {
                 inf.acked = true;
                 inf.truncated = truncated;
                 inf.continues_conversation = continues_conversation;
+                inf.replay_from = replay_from;
                 inf.deadline = now + deadline;
             }
         }
@@ -261,6 +272,7 @@ impl ReplayFlightSet {
             truncated: inf.truncated,
             failed: false,
             continues_conversation: inf.continues_conversation,
+            replay_from: inf.replay_from,
         };
         let send_next = advance_next(f, now, deadline);
         Resolution::Emit { marker, send_next }
@@ -297,6 +309,7 @@ impl ReplayFlightSet {
                             truncated: inf.truncated,
                             failed: true,
                             continues_conversation: false,
+                            replay_from: inf.replay_from,
                         },
                     ));
                 }
@@ -347,6 +360,7 @@ impl ReplayFlightSet {
                 truncated: inf.truncated,
                 failed: true,
                 continues_conversation: false,
+                replay_from: inf.replay_from,
             })
         };
         let send_next = advance_next(f, now, deadline);
@@ -373,11 +387,13 @@ fn advance_next(f: &mut AgentFlight, now: Instant, deadline: Duration) -> bool {
     }
 }
 
-/// replay 경계 마커를 wire 프레임 bytes 로 인코딩(Channel 내부 계약, ADR-0046). 레이아웃(M2 파서 계약):
-/// `[tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1]`.
+/// replay 경계 마커를 wire 프레임 bytes 로 인코딩(Channel 내부 계약, ADR-0046). 레이아웃(M2 파서 계약 ·
+/// 웹뷰 `decodeReplayMarker` 와 한 쌍):
+/// `[tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE]` — 38바이트 고정.
 ///
-/// ★엔디안(FIX-4 — 마커 프레임 전체 BE 통일)★: agentId 는 RFC4122 network order(frame 헤더 동형), epoch·gen
-/// 은 모두 **big-endian**(binary frame 헤더가 uniformly BE 인 것과 동일 규약 — M2 파서가 한 규약으로 읽게).
+/// ★엔디안(FIX-4 — 마커 프레임 전체 BE 통일)★: agentId 는 RFC4122 network order(frame 헤더 동형), epoch·gen·
+/// replay_from 은 모두 **big-endian**(binary frame 헤더가 uniformly BE 인 것과 동일 규약 — M2 파서가 한 규약으로
+/// 읽게). `replay_from` 은 flags 뒤 끝자리에 붙였다(ADR-0231) — 앞 칸 오프셋이 그대로라 옛 판독이 안 밀린다.
 /// flags bit0=truncated, bit1=failed, bit2=continues_conversation.
 /// ★bit2 는 실패 마커(bit1)에서 늘 0 이다 — 입력 `Marker` 가 참을 들고 와도 여기서 지운다(ADR-0226)★.
 pub fn encode_marker_frame(agent_id: AgentId, epoch: u32, marker: Marker) -> Vec<u8> {
@@ -397,6 +413,8 @@ pub fn encode_marker_frame(agent_id: AgentId, epoch: u32, marker: Marker) -> Vec
         flags |= 0b0000_0100;
     }
     buf.push(flags);
+    // ADR-0231
+    buf.extend_from_slice(&marker.replay_from.to_be_bytes());
     buf
 }
 
@@ -433,7 +451,7 @@ mod tests {
         let a = aid(1);
         let now = t0();
         assert_eq!(fs.request_replay(a, now).generation, 1);
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, send_next } => {
                 assert_eq!(marker.generation, 1);
@@ -442,7 +460,7 @@ mod tests {
             other => panic!("성공 마커여야: {other:?}"),
         }
         assert_eq!(fs.request_replay(a, now).generation, 2, "gen 단조(리셋 0)");
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
             Resolution::Emit {
@@ -468,7 +486,7 @@ mod tests {
             !w1.send_now && !w2.send_now,
             "in-flight 중이라 즉시 발사 안 함"
         );
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, send_next } => {
                 assert_eq!(marker.generation, 1, "해소되는 건 현 in-flight(gen1)");
@@ -476,7 +494,7 @@ mod tests {
             }
             other => panic!("성공 마커여야: {other:?}"),
         }
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, send_next } => {
                 assert_eq!(marker.generation, 2);
@@ -498,7 +516,7 @@ mod tests {
             Resolution::Ignore,
             "Ack 전 Complete 무시"
         );
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
             Resolution::Emit {
@@ -542,7 +560,7 @@ mod tests {
                 .is_empty(),
             "좀비는 실패 마커 재발행 없음"
         );
-        fs.on_ack(a, false, false, start + Duration::from_millis(400));
+        fs.on_ack(a, false, false, 0, start + Duration::from_millis(400));
         match fs.on_complete(a, start + Duration::from_millis(500)) {
             Resolution::Emit { marker, send_next } => {
                 assert_eq!(marker.generation, 1, "★성공 마커는 gen1 — gen2 아님★");
@@ -551,7 +569,7 @@ mod tests {
             }
             other => panic!("late Complete 는 성공 마커: {other:?}"),
         }
-        fs.on_ack(a, false, false, start + Duration::from_millis(600));
+        fs.on_ack(a, false, false, 0, start + Duration::from_millis(600));
         match fs.on_complete(a, start + Duration::from_millis(700)) {
             Resolution::Emit { marker, send_next } => {
                 assert_eq!(marker.generation, 2);
@@ -601,7 +619,7 @@ mod tests {
                 .send_now,
             "좀비 슬롯 점유로 새 요청은 병합"
         );
-        fs.on_ack(a, false, false, start + Duration::from_millis(300));
+        fs.on_ack(a, false, false, 0, start + Duration::from_millis(300));
         assert!(matches!(
             fs.on_complete(a, start + Duration::from_millis(300)),
             Resolution::Emit {
@@ -621,7 +639,7 @@ mod tests {
         let a = aid(1);
         let start = t0();
         fs.request_replay(a, start);
-        fs.on_ack(a, false, false, start);
+        fs.on_ack(a, false, false, 0, start);
         let mut now = start;
         for _ in 0..5 {
             now += Duration::from_millis(80); // deadline(100ms) 전에 진행.
@@ -683,7 +701,7 @@ mod tests {
             other => panic!("해제여야: {other:?}"),
         }
         // gen2 가 in-flight 로 올라섰다 — 정상 Ack/Complete 로 성공 마커까지 간다.
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
             Resolution::Emit {
@@ -765,7 +783,7 @@ mod tests {
         let a = aid(1);
         let now = t0();
         fs.request_replay(a, now);
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
 
         assert_eq!(
             fs.on_refused(a, now),
@@ -816,7 +834,7 @@ mod tests {
         let next = fs.request_replay(a, now);
         assert_eq!(next.generation, 2, "gen 단조(1 소진 → 2)");
         assert!(next.send_now, "단절 청소로 슬롯 비어 즉시 재발사");
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         assert!(matches!(
             fs.on_complete(a, now),
             Resolution::Emit {
@@ -847,7 +865,7 @@ mod tests {
         let a = aid(1);
         let now = t0();
         fs.request_replay(a, now);
-        fs.on_ack(a, true, false, now); // 데몬이 하한 초과 과거를 잘랐음.
+        fs.on_ack(a, true, false, 0, now); // 데몬이 하한 초과 과거를 잘랐음.
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
                 assert!(marker.truncated, "SubscribeAck.truncated 가 마커로 전파");
@@ -866,9 +884,14 @@ mod tests {
             truncated: true,
             failed: false,
             continues_conversation: false,
+            replay_from: 0x99aa_bbcc_ddee_ff01,
         };
         let buf = encode_marker_frame(a, 7, marker);
-        assert_eq!(buf.len(), MARKER_FRAME_LEN, "30바이트");
+        assert_eq!(
+            MARKER_FRAME_LEN, 38,
+            "웹뷰 decodeReplayMarker 의 길이와 한 쌍"
+        );
+        assert_eq!(buf.len(), MARKER_FRAME_LEN, "38바이트");
         assert_eq!(buf[0], MARKER_TAG, "tag=255");
         assert_eq!(&buf[1..17], a.as_bytes(), "agentId 16바이트");
         assert_eq!(&buf[17..21], &7u32.to_be_bytes(), "epoch BE");
@@ -878,6 +901,11 @@ mod tests {
             "gen BE(FIX-4 — 프레임 전체 BE 통일)"
         );
         assert_eq!(buf[29], 0b0000_0001, "flags: truncated=bit0");
+        assert_eq!(
+            &buf[30..38],
+            &0x99aa_bbcc_ddee_ff01u64.to_be_bytes(),
+            "replay_from BE — flags 뒤 끝자리(ADR-0231)"
+        );
     }
 
     #[test]
@@ -891,6 +919,7 @@ mod tests {
                 truncated: false,
                 failed: true,
                 continues_conversation: false,
+                replay_from: 0,
             },
         );
         assert_eq!(buf[29], 0b0000_0010, "flags: failed=bit1");
@@ -908,9 +937,10 @@ mod tests {
                 truncated: false,
                 failed: false,
                 continues_conversation: true,
+                replay_from: 0,
             },
         );
-        assert_eq!(success.len(), MARKER_FRAME_LEN, "길이 30 불변");
+        assert_eq!(success.len(), MARKER_FRAME_LEN, "길이 38 불변");
         assert_eq!(
             success[29], 0b0000_0100,
             "flags: continues_conversation=bit2"
@@ -923,9 +953,10 @@ mod tests {
                 truncated: true,
                 failed: true,
                 continues_conversation: true,
+                replay_from: 0,
             },
         );
-        assert_eq!(failure.len(), MARKER_FRAME_LEN, "길이 30 불변");
+        assert_eq!(failure.len(), MARKER_FRAME_LEN, "길이 38 불변");
         assert_eq!(
             failure[29], 0b0000_0011,
             "실패 마커는 입력이 참이어도 bit2 0 — bit0·bit1 은 그대로"
@@ -938,7 +969,7 @@ mod tests {
         let a = aid(1);
         let now = t0();
         fs.request_replay(a, now);
-        fs.on_ack(a, false, true, now);
+        fs.on_ack(a, false, true, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
                 assert!(marker.continues_conversation, "Ack 의 표식이 성공 마커로");
@@ -957,7 +988,7 @@ mod tests {
         let a = aid(1);
         let start = t0();
         fs.request_replay(a, start);
-        fs.on_ack(a, false, true, start);
+        fs.on_ack(a, false, true, 0, start);
         let expired = fs.check_deadlines(start + Duration::from_millis(200));
         assert_eq!(expired.len(), 1);
         assert!(expired[0].1.failed);
@@ -983,7 +1014,7 @@ mod tests {
         fs.request_replay(a, start);
         let expired = fs.check_deadlines(start + Duration::from_millis(200));
         assert!(!expired[0].1.continues_conversation, "Ack 전 만료 = 표식 0");
-        fs.on_ack(a, false, true, start + Duration::from_millis(300));
+        fs.on_ack(a, false, true, 0, start + Duration::from_millis(300));
         assert!(matches!(
             fs.on_complete(a, start + Duration::from_millis(400)),
             Resolution::Emit {
@@ -1025,7 +1056,7 @@ mod tests {
         let now = t0();
         fs.request_replay(a, now); // gen1
         fs.request_replay(a, now); // gen2 병합
-        fs.on_ack(a, false, true, now);
+        fs.on_ack(a, false, true, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, send_next } => {
                 assert_eq!(marker.generation, 1);
@@ -1034,7 +1065,7 @@ mod tests {
             }
             other => panic!("성공 마커여야: {other:?}"),
         }
-        fs.on_ack(a, false, false, now);
+        fs.on_ack(a, false, false, 0, now);
         match fs.on_complete(a, now) {
             Resolution::Emit { marker, .. } => {
                 assert_eq!(marker.generation, 2);
@@ -1045,5 +1076,60 @@ mod tests {
             }
             other => panic!("성공 마커여야: {other:?}"),
         }
+    }
+
+    // ── replay 머리(ADR-0231) — Ack 에서 성공 마커까지 ───────────────────────────────
+    #[test]
+    fn replay_from_propagates_from_the_ack_to_the_success_marker() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        fs.request_replay(a, now);
+        fs.on_ack(a, true, false, 40, now);
+        match fs.on_complete(a, now) {
+            Resolution::Emit { marker, .. } => {
+                assert_eq!(marker.replay_from, 40, "Ack 의 replay_from 이 성공 마커로");
+                assert!(marker.truncated, "옆 칸은 그대로");
+            }
+            other => panic!("성공 마커여야: {other:?}"),
+        }
+    }
+
+    // ★빈 replay 의 머리 0 이 그대로 간다★ — 새 화신(빈 ring)은 머리 0 을 받고, 뷰가 그 값으로 flush 를 시작해
+    //   마커 뒤로 늦게 온 seq 0 을 붙든다. 「0 = 모름」으로 특별취급하지 않는다(Ack 전 기본값과 같은 수라도
+    //   성공 마커는 늘 Ack 뒤에만 선다).
+    #[test]
+    fn an_empty_replays_head_zero_reaches_the_marker_bytes() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        fs.request_replay(a, now);
+        fs.on_ack(a, false, false, 0, now);
+        let Resolution::Emit { marker, .. } = fs.on_complete(a, now) else {
+            panic!("성공 마커여야");
+        };
+        let buf = encode_marker_frame(a, 3, marker);
+        assert_eq!(&buf[30..38], &0u64.to_be_bytes());
+    }
+
+    // ★머리는 세대마다 자기 Ack 의 값이다★ — 병합돼 뒤이어 나간 세대가 앞 세대의 머리를 물려받지 않는다.
+    #[test]
+    fn the_next_generation_carries_its_own_acks_replay_from() {
+        let mut fs = ReplayFlightSet::new(dl());
+        let a = aid(1);
+        let now = t0();
+        fs.request_replay(a, now); // gen1
+        fs.request_replay(a, now); // gen2 병합
+        fs.on_ack(a, false, false, 40, now);
+        let Resolution::Emit { marker, send_next } = fs.on_complete(a, now) else {
+            panic!("gen1 성공 마커여야");
+        };
+        assert_eq!((marker.generation, marker.replay_from), (1, 40));
+        assert!(send_next);
+        fs.on_ack(a, false, false, 55, now);
+        let Resolution::Emit { marker, .. } = fs.on_complete(a, now) else {
+            panic!("gen2 성공 마커여야");
+        };
+        assert_eq!((marker.generation, marker.replay_from), (2, 55));
     }
 }

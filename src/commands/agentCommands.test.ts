@@ -9,6 +9,7 @@ const clientMock = vi.hoisted(() => ({
   // refreshProfiles(eventBus) 가 부르는 listProfiles — 생성 직후 store/tree 반영 검증용. 기본 []
   //   (테스트별로 mockResolvedValueOnce 로 생성 프로필을 실어 반환).
   listProfiles: vi.fn(async () => [] as unknown[]),
+  cancelQueuedInput: vi.fn(async (): Promise<string> => 'requested'),
 }))
 vi.mock('../api/clientFactory', () => ({
   agentClient: {
@@ -17,6 +18,7 @@ vi.mock('../api/clientFactory', () => ({
     createClaudeProfile: (...args: unknown[]) => clientMock.createClaudeProfile(...(args as [])),
     createCodexProfile: (...args: unknown[]) => clientMock.createCodexProfile(...(args as [])),
     listProfiles: (...args: unknown[]) => clientMock.listProfiles(...(args as [])),
+    cancelQueuedInput: (...args: unknown[]) => clientMock.cancelQueuedInput(...(args as [])),
   },
   getAgentClient: vi.fn(),
 }))
@@ -28,7 +30,8 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 import './agentCommands' // side-effect register
-import { run, runAsHuman } from './registry'
+import { getCommand, list, run, runAsHuman } from './registry'
+import { INPUT_LOCKED_REFUSAL } from '../api/agentClient'
 import { fireAndForget } from './dispatch'
 import { buildSlotMenu } from './slotMenu'
 import { useAgentStore } from '../store/agentStore'
@@ -39,6 +42,8 @@ beforeEach(() => {
   clientMock.createClaudeProfile.mockClear()
   clientMock.createCodexProfile.mockClear()
   clientMock.listProfiles.mockClear()
+  clientMock.cancelQueuedInput.mockReset()
+  clientMock.cancelQueuedInput.mockImplementation(async () => 'requested')
   dialogMock.open.mockReset()
   useAgentStore.setState({ presets: [], profiles: [] })
 })
@@ -282,5 +287,64 @@ describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
       'agentlist.createCodex',
       'agentlist.createCodexJson',
     ])
+  })
+})
+
+// ── ADR-0231: 대기 입력 ✕ 와 LLM 이 같은 핸들을 흔든다 ─────────────────────────────────────
+describe('agent.cancelQueuedInput', () => {
+  it('등록돼 있고 help 가 없다 — 버스 명단에 안 오른다(데몬이 답하는 이름이라 오르면 등록 묶음 전체가 반려된다)', () => {
+    expect(getCommand('agent.cancelQueuedInput')).toBeDefined()
+    expect(getCommand('agent.cancelQueuedInput')?.help).toBeUndefined()
+    expect(list().find((c) => c.id === 'agent.cancelQueuedInput')?.help).toBeUndefined()
+  })
+
+  it('agentId·inputId 로 agentClient.cancelQueuedInput 을 부르고 결말 낱말을 돌려준다', async () => {
+    await expect(run('agent.cancelQueuedInput', { agentId: ' a1 ', inputId: 'q1' })).resolves.toEqual({
+      outcome: 'requested',
+    })
+    expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q1')
+  })
+
+  it('모르는 결말 낱말도 그대로 돌려준다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => 'deferred')
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).resolves.toEqual({
+      outcome: 'deferred',
+    })
+  })
+
+  it('코드 없이 온 임대 거절 문구는 CONFLICT 로 읽힌다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw new Error(INPUT_LOCKED_REFUSAL)
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      `CONFLICT: ${INPUT_LOCKED_REFUSAL}`,
+    )
+  })
+
+  it('코드를 단 실패(NOT_FOUND)와 코드 없는 다른 실패(끊김)는 그대로 둔다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw new Error('NOT_FOUND: no waiting input')
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      /^NOT_FOUND: no waiting input$/,
+    )
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw new Error('connection lost')
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      /^connection lost$/,
+    )
+  })
+
+  it('빈 agentId·inputId 는 보내지 않고 던진다', async () => {
+    await expect(run('agent.cancelQueuedInput', { agentId: '  ', inputId: 'q1' })).rejects.toThrow(/agentId/)
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1' })).rejects.toThrow(/inputId/)
+    expect(clientMock.cancelQueuedInput).not.toHaveBeenCalled()
+  })
+
+  it('사람 경로(✕ 클릭 → fireAndForget)도 같은 명령을 부른다', async () => {
+    fireAndForget('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q2' })
+    await Promise.resolve()
+    expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q2')
   })
 })

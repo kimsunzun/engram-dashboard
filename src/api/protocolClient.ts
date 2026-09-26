@@ -17,17 +17,28 @@
 //   것" 이라는 없는 사실을 지어내게 된다). 프레임 쪽 판정도 같은 규칙이라 **불일치 = 내 것 아님(drop)**
 //   이고, 화신이 갈렸다는 판정은 권위인 명부만 낸다. 떨어뜨린 프레임은 잃는 게 아니다 — 부착이 전량
 //   replay 를 다시 청구한다.
+//
+// ★뷰에 배달하는 다음 seq 는 늘 `마지막+1` 이다(ADR-0231)★: 데몬은 seq 발급·링 push 는 replay 락 안에서
+//   하지만 fanout 은 락 밖에서 한다(ADR-0006) — 두 생산자가 거의 동시에 emit 하면 붙은 뷰에 N+1 이 N 보다
+//   먼저 온다. 먼저 온 쪽을 흘려 커서를 올리면 뒤늦은 N 을 dedup 이 **영구히** 버린다(대기 목록 사건이면
+//   그 창의 목록이 틀린 채 남는다). 그래서 구멍 뒤 프레임은 버리지도 흘리지도 않고 붙들었다가 구멍이 메워지면
+//   차례로 흘린다 — live 에서도, 버퍼→live 경계(flush)에서도. 구멍이 없으면 지연 없이 곧바로 흘린다.
+//   ★구멍을 기다리는 시한은 없다★(시한은 정답을 가르는 매직 넘버다 — ADR-0038): 데몬 sink 와 셸 중계는
+//   seq 를 건너뛰지 않는다(자리채움 · 끊기)는 것이 전제이고, 붙든 양은 붙듦 상한만 묶는다 — 넘치면 버퍼
+//   국면으로 돌아가 전량 replay 를 다시 청한다(`holdLive`).
 
 import type {
   AgentClient,
   ConnectionState,
   OutputChunk,
   OutputSubscription,
+  QueuedInputListing,
   ReplayLiveInfo,
   ViewOutputState,
   ViewPhase,
   ViewResetFn,
 } from './agentClient'
+import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { InboundMessage, Transport } from './transport'
 import type {
   AgentBackendKind,
@@ -51,6 +62,14 @@ const WATCHDOG_MS = 10_000
  */
 const VIEW_BUFFER_MAX_BYTES = 4 * 1024 * 1024
 const VIEW_BUFFER_MAX_FRAMES = 8192
+/**
+ * live 붙듦 목록(`SubState.heldFrames`) 상한 — ★데몬 링 상한(`output_core.rs` `REPLAY_MAX_EVENTS` 4096 ·
+ * `REPLAY_MAX_BYTES` 2 MiB)보다 작게 둔다★. 넘침 회복은 전량 replay 로 구멍을 메우는데, 붙든 양이 링보다
+ * 크면 구멍 자리는 이미 링에서 밀려나 회복이 늘 잘림으로만 끝난다.
+ */
+// ADR-0231
+const HELD_MAX_BYTES = 1024 * 1024
+const HELD_MAX_FRAMES = 2048
 
 interface BufferedFrame {
   tag: number
@@ -74,6 +93,8 @@ interface HeldMarker {
   truncated: boolean
   failed: boolean
   continuesConversation: boolean
+  /** 이 replay 의 머리(`InboundMessage` replayBoundary 의 같은 칸) — flush 시작점에 쓴다. */
+  replayFrom: number
 }
 
 // ── 내부 구독 상태(뷰 단위, ADR-0046 F1) ──────────────────────────────────────────────
@@ -95,6 +116,13 @@ interface SubState {
    */
   heldMarker: HeldMarker | undefined
   lastDeliveredSeq: number
+  /**
+   * live 에서 구멍(`lastDeliveredSeq+1` 미도착) 뒤에 먼저 온 프레임 — seq → 프레임. `lastDeliveredSeq+1` 이
+   * 오면 이어진 만큼 차례로 흘린다(`releaseHeld`). ★live 가 아닌 국면에선 늘 비어 있다★ — 버퍼 국면으로
+   * 드는 자리(`startBuffering`)와 detached 가 비우고, flush 가 새로 채운다.
+   */
+  heldFrames: Map<number, BufferedFrame>
+  heldBytes: number
   /**
    * 이 뷰가 읽고 있는 화신의 표식(불투명 — 대소 비교 금지). undefined = 아직 어느 화신인지 모른다.
    * ★채택하는 자리는 성공 마커 하나뿐이다(flushToLive)★ — 프레임에서 주워 담지 않는다(그 이유는
@@ -247,9 +275,9 @@ export class ProtocolClient implements AgentClient {
   /**
    * 정규화 output frame — agent 를 보는 모든 뷰로 fan-out(ADR-0046 §2 상태전이표).
    *
-   * ★tag 무관 공통 규율★: epoch 가드·seq dedup 은 tag(0 터미널/1 구조화)를 안 본다 — tag0/tag1 은 core
+   * ★tag 무관 공통 규율★: epoch 가드·seq dedup·붙듦은 tag(0 터미널/1 구조화)를 안 본다 — tag0/tag1 은 core
    *   OutputCore 의 같은 seq 공간을 공유한다(한 pump 발급). tag 는 배달 시 onChunk 에 실어 소비자가 렌더
-   *   경로만 가른다.
+   *   경로만 가른다. 그래서 데몬·셸이 싣지 못한 사건 자리에 보내는 tag1 자리채움도 터미널 뷰의 구멍을 메운다.
    */
   private handleOutput(f: {
     tag: number
@@ -268,8 +296,14 @@ export class ProtocolClient implements AgentClient {
       if (st.epoch !== undefined && f.epoch !== st.epoch) continue
       if (st.phase === 'live') {
         if (f.seq <= st.lastDeliveredSeq) continue
+        // ADR-0231: 구멍 뒤 프레임은 흘리지 않고 붙든다(파일 머리 「다음 seq 는 늘 마지막+1」).
+        if (f.seq > st.lastDeliveredSeq + 1) {
+          this.holdLive(st, { tag: f.tag, seq: f.seq, bytes: f.bytes, epoch: f.epoch })
+          continue
+        }
         st.lastDeliveredSeq = f.seq
         st.onChunk({ tag: f.tag, seq: f.seq, bytes: f.bytes })
+        this.releaseHeld(st)
         continue
       }
       // ★프레임으로는 표식을 채택하지 않는다(load-bearing)★: 표식 미상으로 부착한 뷰가 **먼저 온 프레임**
@@ -309,6 +343,42 @@ export class ProtocolClient implements AgentClient {
   }
 
   /**
+   * live 의 구멍 뒤 프레임 하나를 붙든다. 같은 seq 가 이미 붙어 있으면 버린다(같은 화신의 같은 seq = 같은 사건).
+   *
+   * ★넘치면 재요청 사다리가 아니라 `startBuffering` 이다(load-bearing)★: 사다리(`ladderRerequest`)는 예약한
+   *   재청구를 `phase !== 'buffering'` 이면 버리므로, live 에서 부르면 재청구는 영영 안 나가고 붙든 것만
+   *   남는다. 같은 화신이라 `newSession=false` — 커서를 지켜 겹치는 앞부분은 dedup 이 먹고, 다시 온 replay 가
+   *   flush 규칙으로 구멍을 메운다(구멍 자리가 링에서 밀려났으면 replay 머리에서 건너뛴다 — 잘림).
+   */
+  // ADR-0231
+  private holdLive(st: SubState, f: BufferedFrame): void {
+    if (st.heldFrames.has(f.seq)) return
+    st.heldFrames.set(f.seq, f)
+    st.heldBytes += f.bytes.length
+    if (st.heldBytes > HELD_MAX_BYTES || st.heldFrames.size > HELD_MAX_FRAMES) {
+      console.warn(`[ProtocolClient] live 붙듦 상한 초과(agent=${st.agentId}) — 버퍼 국면으로 돌려 재요청`)
+      this.startBuffering(st, st.epoch, /*resetLadder*/ false, /*newSession*/ false)
+    }
+  }
+
+  /** `lastDeliveredSeq+1` 부터 이어진 붙든 프레임을 차례로 흘린다. */
+  private releaseHeld(st: SubState): void {
+    let next = st.heldFrames.get(st.lastDeliveredSeq + 1)
+    while (next) {
+      st.heldFrames.delete(next.seq)
+      st.heldBytes -= next.bytes.length
+      st.lastDeliveredSeq = next.seq
+      st.onChunk({ tag: next.tag, seq: next.seq, bytes: next.bytes })
+      next = st.heldFrames.get(st.lastDeliveredSeq + 1)
+    }
+  }
+
+  private dropHeld(st: SubState): void {
+    st.heldFrames = new Map()
+    st.heldBytes = 0
+  }
+
+  /**
    * ★replay 경계 마커(ADR-0046 §2)★ — transport 가 tag=255 마커를 정규화해 올린 제어 이벤트.
    */
   private handleReplayBoundary(m: {
@@ -318,6 +388,7 @@ export class ProtocolClient implements AgentClient {
     truncated: boolean
     failed: boolean
     continuesConversation: boolean
+    replayFrom: number
   }): void {
     for (const st of this.viewsForAgent(m.agentId)) {
       this.evalMarker(st, m)
@@ -329,7 +400,7 @@ export class ProtocolClient implements AgentClient {
    * 이 순간의 SubState 로 본다(리뷰 finding: 등록 시점 아님).
    */
   private evalMarker(st: SubState, m: HeldMarker): void {
-    // live·error 뷰: 마커(어떤 gen이든) 무시 — fan-out 으로 도달하는 남의 replay 경계. live 는 dedup 만으로 충분(§2).
+    // live·error 뷰: 마커(어떤 gen이든) 무시 — fan-out 으로 도달하는 남의 replay 경계. live 는 dedup·붙듦으로 충분(§2).
     if (st.phase !== 'buffering') return
     // ★myGen 미확정(NEW-3)★: 마커를 버리지 않고 최고 gen 1개 보관 → myGen 확정 시 재평가(resolveHeldMarker).
     //   교체 규칙(FIX-3): (a) 더 높은 gen 이면 교체 · (b) 같은 gen 인데 보관분은 failed 이고 신규는 성공이면
@@ -347,6 +418,7 @@ export class ProtocolClient implements AgentClient {
           truncated: m.truncated,
           failed: m.failed,
           continuesConversation: m.continuesConversation,
+          replayFrom: m.replayFrom,
         }
       }
       return
@@ -371,7 +443,7 @@ export class ProtocolClient implements AgentClient {
     // 성공 마커는 epoch 를 채택하므로(flushToLive) 여기서 걸러야 한다 — 구세대/구 epoch replay 의 경계를
     //   자기 것으로 오인하면 불완전한 버퍼가 flush 된다.
     if (st.epoch !== undefined && m.epoch !== st.epoch) return
-    this.flushToLive(st, m.epoch, m.truncated, m.continuesConversation)
+    this.flushToLive(st, m.epoch, m.truncated, m.continuesConversation, m.replayFrom)
   }
 
   private flushToLive(
@@ -379,6 +451,7 @@ export class ProtocolClient implements AgentClient {
     epoch: number,
     truncated: boolean,
     continuesConversation: boolean,
+    replayFrom: number,
   ): void {
     // ★epoch 채택★: 성공 마커의 epoch 로 확정(src-tauri decide_epoch 1차 필터를 통과한 값 — ADR-0046 은
     //   ADR-0007 "epoch 권위=SubscribeAck 단독"을 amends: src-tauri 필터 + 프론트는 필터된 frame/마커 채택).
@@ -397,8 +470,24 @@ export class ProtocolClient implements AgentClient {
     const ordered = st.buffer.filter((f) => f.epoch === epoch).sort((a, b) => a.seq - b.seq)
     st.buffer = []
     st.bufferBytes = 0
+    this.dropHeld(st)
+    // ADR-0231: 정렬만 하고 다 흘리지 않는다 — `max(마지막+1, replay 머리)` 에서 이어진 만큼만 흘리고 첫 구멍
+    //   뒤는 붙듦으로 옮긴다. 데몬은 `ReplayComplete` 를 subscribers 락 밖에서 연결 큐에 넣으므로 역전된 라이브
+    //   프레임이 마커 앞뒤로 갈린다(`[…L, L+2, 마커, L+1]`) — 구멍 뒤를 먼저 흘리면 뒤늦은 L+1 을 live dedup 이
+    //   버린다. `마지막+1` 을 건너뛰어도 되는 자리는 replay 머리 하나뿐이다(replay 는 링 전량이고 링은 연속이라
+    //   머리 앞의 빈자리는 링 축출이다). ★머리를 버퍼 최소 seq 로 추정하지 말 것★ — replay 가 비었을 때
+    //   (새 화신에서 seq 1 이 마커 앞 · 0 이 마커 뒤) 1 부터 흘리고 0 을 버린다.
+    const start = Math.max(st.lastDeliveredSeq + 1, replayFrom)
+    st.lastDeliveredSeq = start - 1
     for (const frame of ordered) {
       if (frame.seq <= st.lastDeliveredSeq) continue
+      if (frame.seq > st.lastDeliveredSeq + 1) {
+        if (!st.heldFrames.has(frame.seq)) {
+          st.heldFrames.set(frame.seq, frame)
+          st.heldBytes += frame.bytes.length
+        }
+        continue
+      }
       st.lastDeliveredSeq = frame.seq
       st.onChunk({ tag: frame.tag, seq: frame.seq, bytes: frame.bytes })
     }
@@ -407,8 +496,8 @@ export class ProtocolClient implements AgentClient {
     st.attempts = 0
     this.clearTimers(st)
     // ADR-0226: 이 화신이 이어받기 화신인가를 성공 마커가 싣고 온 그대로 넘긴다 — 뷰 상태에 담아 두지
-    //   않는다(마커 한 장이 곧 그 replay 의 권위다).
-    st.onState?.('live', { continuesConversation })
+    //   않는다(마커 한 장이 곧 그 replay 의 권위다). 표식은 대기 입력 재부착 대조의 화신 거름이 쓴다(ADR-0231).
+    st.onState?.('live', { continuesConversation, epoch })
   }
 
   /**
@@ -460,6 +549,8 @@ export class ProtocolClient implements AgentClient {
     st.phase = 'buffering'
     st.buffer = []
     st.bufferBytes = 0
+    // ADR-0231: 붙든 것도 버린다 — 이제 올 전량 replay 가 그 자리를 다시 채운다.
+    this.dropHeld(st)
     if (newSession) st.restartPending = true
     st.epoch = epoch
     st.myGen = undefined
@@ -509,7 +600,7 @@ export class ProtocolClient implements AgentClient {
       return
     }
     if (st.epoch !== undefined && held.epoch !== st.epoch) return
-    this.flushToLive(st, held.epoch, held.truncated, held.continuesConversation)
+    this.flushToLive(st, held.epoch, held.truncated, held.continuesConversation, held.replayFrom)
   }
 
   private armWatchdog(st: SubState): void {
@@ -578,6 +669,7 @@ export class ProtocolClient implements AgentClient {
     st.phase = 'detached'
     st.buffer = []
     st.bufferBytes = 0
+    this.dropHeld(st)
     st.myGen = undefined
     st.heldMarker = undefined
     this.clearTimers(st)
@@ -704,6 +796,30 @@ export class ProtocolClient implements AgentClient {
       this.resolvePending(s.request_id, s.chunks)
       return
     }
+    // ADR-0231: 대기 입력 두 명령의 전용 reply — 보내는 메서드와 한 쌍이다(이 갈래가 없으면 promise 가 영영
+    //   안 풀린다). 거절은 위 `Error` 갈래가 같은 request_id 로 reject 한다.
+    if ('QueuedInputs' in msg) {
+      const q = msg.QueuedInputs as {
+        request_id: string
+        inputs?: QueuedInputRow[]
+        as_of_seq?: number | null
+        epoch: number
+        stopped_after_error?: boolean
+      }
+      const listing: QueuedInputListing = {
+        inputs: Array.isArray(q.inputs) ? q.inputs : [],
+        as_of_seq: typeof q.as_of_seq === 'number' ? q.as_of_seq : null,
+        epoch: q.epoch,
+        stopped_after_error: q.stopped_after_error === true,
+      }
+      this.resolvePending(q.request_id, listing)
+      return
+    }
+    if ('QueuedInputCancelReply' in msg) {
+      const c = msg.QueuedInputCancelReply as { request_id: string; outcome: string }
+      this.resolvePending(c.request_id, c.outcome)
+      return
+    }
     if ('StatusChanged' in msg) {
       const s = msg.StatusChanged as { agent_id: string; status: AgentStatus; epoch: number }
       for (const cb of this.statusCbs) cb(s.agent_id, s.status, s.epoch)
@@ -773,6 +889,8 @@ export class ProtocolClient implements AgentClient {
       myGen: undefined,
       heldMarker: undefined,
       lastDeliveredSeq: -1,
+      heldFrames: new Map(),
+      heldBytes: 0,
       epoch: undefined,
       restartPending: false,
       token,
@@ -842,7 +960,13 @@ export class ProtocolClient implements AgentClient {
   getViewOutputState(viewId: string): ViewOutputState | null {
     const st = this.subs.get(viewId)
     if (!st) return null
-    return { agentId: st.agentId, phase: st.phase, buffered: st.buffer.length, attempts: st.attempts }
+    return {
+      agentId: st.agentId,
+      phase: st.phase,
+      buffered: st.buffer.length,
+      held: st.heldFrames.size,
+      attempts: st.attempts,
+    }
   }
 
   // ── 명령(인터페이스 → wire) ───────────────────────────────────────────────────────
@@ -885,6 +1009,16 @@ export class ProtocolClient implements AgentClient {
   getSnapshot(agentId: string): Promise<unknown[]> {
     return this.sendCommand<unknown[]>((request_id) => ({
       GetSnapshot: { agent_id: agentId, request_id },
+    }))
+  }
+  listQueuedInputs(agentId: string): Promise<QueuedInputListing> {
+    return this.sendCommand<QueuedInputListing>((request_id) => ({
+      ListQueuedInputs: { agent_id: agentId, request_id },
+    }))
+  }
+  cancelQueuedInput(agentId: string, inputId: string): Promise<string> {
+    return this.sendCommand<string>((request_id) => ({
+      CancelQueuedInput: { agent_id: agentId, input_id: inputId, request_id },
     }))
   }
   stopDaemon(force: boolean): Promise<void> {

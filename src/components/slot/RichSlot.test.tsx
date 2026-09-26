@@ -29,6 +29,10 @@ const captured = vi.hoisted(() => ({
 }))
 const clientMock = vi.hoisted(() => ({
   writeStdin: vi.fn(async () => undefined) as (id: string, bytes: Uint8Array) => Promise<void>,
+  // ADR-0231 재부착 대조 — 'live'(표식 실림)마다 불린다. 테스트가 답을 늦게 풀려고 갈아끼운다.
+  listQueuedInputs: vi.fn(async () => ({ inputs: [], as_of_seq: null, epoch: 0, stopped_after_error: false })) as (
+    id: string,
+  ) => Promise<unknown>,
   // 연결 상태 표면(ADR-0148 부재 판정의 절반) — 등록 즉시 현재 상태로 1회 발화하는 실물 계약을 따른다.
   connectionState: 'connected' as 'connected' | 'reconnecting' | 'down',
   stateCbs: new Set<(s: 'connected' | 'reconnecting' | 'down') => void>(),
@@ -52,6 +56,7 @@ vi.mock('../../api/clientFactory', () => ({
       },
     ),
     writeStdin: (id: string, bytes: Uint8Array) => clientMock.writeStdin(id, bytes),
+    listQueuedInputs: (id: string) => clientMock.listQueuedInputs(id),
     resizePty: vi.fn(async () => undefined),
     get connectionState() {
       return clientMock.connectionState
@@ -121,6 +126,12 @@ beforeEach(() => {
   captured.onState = null
   captured.onReset = null
   clientMock.writeStdin = vi.fn(async () => undefined)
+  clientMock.listQueuedInputs = vi.fn(async () => ({
+    inputs: [],
+    as_of_seq: null,
+    epoch: 0,
+    stopped_after_error: false,
+  }))
   clientMock.connectionState = 'connected'
   clientMock.stateCbs.clear()
   agentStoreState.agents = []
@@ -1174,5 +1185,118 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(loadingPanel()).toBeNull()
     expect(emptyState()).toBeNull()
     expect(screen.getByText('Wait')).toBeTruthy()
+  })
+})
+
+// ── ADR-0231: 대기 입력 목록 배치 · 빈 상태 게이트 · 재부착 대조 배선 ─────────────────────────
+function queuedFrame(seq: number, op: Record<string, unknown>): OutputChunk {
+  return tag1(seq, JSON.stringify({ type: 'QueuedInput', op }))
+}
+function queuedList(): HTMLElement | null {
+  return document.querySelector('[data-queued-inputs="1"]')
+}
+function listedIds(): string[] {
+  return Array.from(document.querySelectorAll('[data-queued-input]')).map(
+    (el) => el.getAttribute('data-queued-input') ?? '',
+  )
+}
+/** 답을 테스트가 푸는 목록 조회 — 부른 순서대로 풀개를 쌓는다. */
+function deferredListing(): Array<(listing: unknown) => void> {
+  const resolvers: Array<(listing: unknown) => void> = []
+  clientMock.listQueuedInputs = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)))
+  return resolvers
+}
+
+describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
+  it('대기 항목이 서 있으면 빈 상태가 아니다 — 목록은 입력창 위, 라벨과 한 묶음, textarea 는 remount 되지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireState('live')
+    expect(emptyState()).not.toBeNull()
+    expect(queuedList()).toBeNull()
+    const before = textarea()
+
+    act(() => captured.onChunk!(queuedFrame(0, { kind: 'Queued', id: 'X', text: 'hello' })))
+    expect(emptyState()).toBeNull()
+    expect(listedIds()).toEqual(['X'])
+    const list = queuedList()!
+    const label = document.querySelector('[data-rich-label="1"]')!
+    expect(label.parentElement).toBe(list.parentElement)
+    expect(list.compareDocumentPosition(textarea()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(textarea()).toBe(before)
+
+    // 받음 → 목록에서 빠지고 그 자리에 말풍선. 입력창은 여전히 같은 엘리먼트다.
+    act(() => captured.onChunk!(queuedFrame(1, { kind: 'Delivered', id: 'X' })))
+    expect(queuedList()).toBeNull()
+    expect(screen.getByText('hello')).toBeTruthy()
+    expect(textarea()).toBe(before)
+  })
+
+  it('목록 사건은 대기 표시를 푼다(P1b 판정 유지 — 알아들은 프레임)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedCompletedTurn()
+    fireEvent.change(textarea(), { target: { value: 'again' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+    expect(screen.queryByText('Wait')).toBeTruthy()
+    act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'Y', text: 'again' })))
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  it("'live'(표식 실림)마다 목록을 물어 링에 없던 대기 항목을 되찾는다", async () => {
+    const resolvers = deferredListing()
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(40, JSON.stringify({ type: 'TextDelta', text: 'long turn' }))))
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    expect(clientMock.listQueuedInputs).toHaveBeenCalledWith(AGENT)
+    await act(async () => {
+      resolvers[0]({
+        inputs: [{ id: 'Q', text: 'evicted but waiting', state: 'queued', cancel: null }],
+        as_of_seq: 30,
+        epoch: 5,
+        stopped_after_error: false,
+      })
+    })
+    expect(listedIds()).toEqual(['Q'])
+  })
+
+  it('표식 없는 live 는 묻지 않는다(답의 화신을 가를 수 없다)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireState('live')
+    expect(clientMock.listQueuedInputs).not.toHaveBeenCalled()
+  })
+
+  it('답이 오기 전에 버퍼 국면에 들면 늦게 온 옛 답은 버린다 · 다른 화신의 답도 버린다', async () => {
+    const resolvers = deferredListing()
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    fireState('buffering')
+    const row = { id: 'Q', text: 'stale', state: 'queued', cancel: null }
+    await act(async () => {
+      resolvers[0]({ inputs: [row], as_of_seq: null, epoch: 5, stopped_after_error: false })
+    })
+    expect(queuedList()).toBeNull()
+
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    await act(async () => {
+      resolvers[1]({ inputs: [row], as_of_seq: null, epoch: 6, stopped_after_error: false })
+    })
+    expect(queuedList()).toBeNull()
+  })
+
+  it('목록 조회가 실패해도(잠든 에이전트) 슬롯은 그대로다', async () => {
+    clientMock.listQueuedInputs = vi.fn(async () => {
+      throw new Error('NOT_FOUND: agent is not running')
+    })
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    await flush()
+    expect(emptyState()).not.toBeNull()
+    expect(queuedList()).toBeNull()
   })
 })

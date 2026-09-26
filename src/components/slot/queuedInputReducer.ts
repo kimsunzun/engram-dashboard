@@ -11,6 +11,7 @@
 import type { DeliveredCopy } from '../../../crates/engram-dashboard-protocol/bindings/DeliveredCopy'
 import type { DropCause } from '../../../crates/engram-dashboard-protocol/bindings/DropCause'
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
+import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 
 /** 묘비 상한 — 넘치면 가장 먼저 든 묘비부터 버린다(FIFO). ★골든 머리의 `tombstone_cap` 과 같아야 한다★. */
 // ADR-0231
@@ -63,6 +64,34 @@ function resurrectable(verdict: QueuedVerdict): boolean {
 
 function verdictOfDrop(cause: DropCause): QueuedVerdict {
   return cause === 'Withdrawn' ? CANCELLED : discarded(cause)
+}
+
+/**
+ * 목록 조회 행(wire `QueuedInputRow`) → 환원 상태 한 줄. `unconfirmed` 는 조회 순간 덧댄 표지라 환원으로는
+ * `queued` 다. 모르는 낱말·깨진 모양(더 새 데몬)이면 `null` — 그 행은 대조에서 빠지고 그 id 는 누산기의 지금
+ * 상태 그대로 남는다(던지지 않는다).
+ */
+// ADR-0231
+export function entryOfListedRow(row: QueuedInputRow): QueuedEntry | null {
+  if (row === null || typeof row !== 'object') return null
+  const { id, text, state, cancel } = row
+  if (typeof id !== 'string' || typeof text !== 'string') return null
+  switch (state) {
+    case 'queued':
+    case 'unconfirmed':
+      return { id, text, phase: { state: 'queued' } }
+    case 'cancelling':
+      if (cancel === null || typeof cancel !== 'object') return null
+      if (cancel.answer !== 'none' && cancel.answer !== 'not_removed') return null
+      if (typeof cancel.vendor_closed !== 'boolean') return null
+      return {
+        id,
+        text,
+        phase: { state: 'cancelling', answer: cancel.answer, vendorClosed: cancel.vendor_closed },
+      }
+    default:
+      return null
+  }
 }
 
 /**
@@ -146,6 +175,55 @@ export class QueuedInputRegistry {
     this.ackUnavailable = false
   }
 
+  /**
+   * 재부착 대조 — 스냅숏 행마다 그 상태에서 출발해 `later`(스냅숏 seq **뒤**의 사건, 링 순서) 중 그 id 의 것과
+   * `AckUnavailable` 만 다시 환원하고, 그 결과로 이 명부의 그 id 자리를 갈아 끼운다(열림 = 항목 · 닫힘 = 묘비).
+   * 스냅숏에 없는 열린 항목은 `later` 에 그 id 의 `Queued` 가 있으면(스냅숏 뒤에 섰다) 그대로 두고, 없으면
+   * 원인 모름으로 닫는다(되살림 가능 묘비 — 아래 본문).
+   * ★seq ≤ 스냅숏 seq 인 사건을 `later` 에 넣지 말 것★ — 스냅숏에 이미 들어 있어 두 번 환원된다.
+   * 순서 = 남은 스냅숏 행(데몬 명부 순) 다음에 나머지(스냅숏 뒤에 선 항목). 말풍선은 모른다(목록만 고친다).
+   * @param listed 답에 실린 **모든** 행의 id — `rows` 가 거른 행(모르는 낱말)의 id 도 든다. 그 id 는 「있다」로
+   *   세어 닫지 않는다(모르는 낱말이지 결말이 아니다).
+   */
+  // ADR-0231
+  adoptSnapshot(
+    rows: readonly QueuedEntry[],
+    later: readonly QueuedInputEvent[],
+    listed: ReadonlySet<string>,
+  ): void {
+    // ADR-0231: TRD L627 은 「스냅숏에 없는 id 는 누산기가 이미 봤다」라 두지만 머리 점프가 그 전제를 깬다 —
+    //   flush 가 커서를 뒤의 replay 머리로 건너뛰면(같은 화신 재부착 · 붙듦 넘침 재버퍼) 누산기는 비우지 않은 채
+    //   닫힘 사건만 링에서 밀려나 잃는다. 스냅숏 seq 에 열려 있던 항목은 스냅숏에 든다는 것이 이 판정의 근거라,
+    //   점프가 없으면 오늘과 같은 결과다.
+    const queuedLater = new Set<string>()
+    for (const op of later) if (op.kind === 'Queued') queuedLater.add(op.id)
+    this.items = this.items.filter((entry) => {
+      if (listed.has(entry.id) || queuedLater.has(entry.id)) return true
+      this.entomb(entry.id, true)
+      return false
+    })
+    const adopted: QueuedEntry[] = []
+    for (const row of rows) {
+      // 환원 규칙은 id 마다 따로 선다(모두에 걸리는 것은 `AckUnavailable` 하나) — 한 행짜리 명부로 다시 돌린다.
+      const scratch = new QueuedInputRegistry()
+      scratch.items = [row]
+      for (const op of later) {
+        if (op.kind === 'AckUnavailable' || op.id === row.id) scratch.reduce(op)
+      }
+      const at = this.position(row.id)
+      if (at !== -1) this.items.splice(at, 1)
+      const left = scratch.row(row.id)
+      if (left !== undefined) {
+        this.tombstones.delete(row.id)
+        adopted.push(left)
+      } else {
+        const mark = scratch.tombstone(row.id)
+        if (mark !== undefined) this.entomb(row.id, mark)
+      }
+    }
+    this.items = [...adopted, ...this.items]
+  }
+
   private position(id: string): number {
     return this.items.findIndex((entry) => entry.id === id)
   }
@@ -169,6 +247,12 @@ export class QueuedInputRegistry {
       if (!oldest.done) this.tombstones.delete(oldest.value)
     }
     this.tombstones.set(id, canRevive)
+  }
+
+  /** 결말을 아는 묘비 — 이미 있으면 되살림 표시만 고친다(자리는 그대로 — FIFO 순서가 안 흔들린다). */
+  private entomb(id: string, canRevive: boolean): void {
+    if (this.tombstones.has(id)) this.tombstones.set(id, canRevive)
+    else this.bury(id, canRevive)
   }
 
   private clearResurrectable(id: string): void {

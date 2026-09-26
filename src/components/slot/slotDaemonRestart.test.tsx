@@ -141,6 +141,7 @@ class FakeTransport implements Transport {
         truncated: false,
         failed,
         continuesConversation: false,
+        replayFrom: 0,
       }),
     )
   }

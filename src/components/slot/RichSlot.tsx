@@ -35,6 +35,8 @@ import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
+import type { QueuedEntry } from './queuedInputReducer'
+import { QueuedInputList } from './QueuedInputList'
 import { isRenderedItem, StructuredTextView } from './StructuredTextView'
 import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
@@ -70,6 +72,8 @@ export default function RichSlot({ viewId, agentId }: RichSlotProps) {
 function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) {
   // 순서 보존 렌더 item 스트림(text/칩/구분선) — 누산기 스냅샷을 그대로 담는다(ADR-0045 §52).
   const [items, setItems] = useState<StructuredItem[]>([])
+  // ADR-0231: 입력창 위 대기 입력 목록 — 누산기 `snapshotQueued()` 의 사본(그리기 거름까지 지난 것).
+  const [queued, setQueued] = useState<readonly QueuedEntry[]>([])
   const [turnDone, setTurnDone] = useState(false)
   // ★로컬 awaiting 플래그(FIX 5b)★: 전송 직후~첫 응답 바이트 도착 사이의 공백을 메운다. turnDone 은
   //   누산기가 턴 종료 신호(MessageDone · TurnEnd)로만 세우므로, 직전 턴이 idle 인 상태에서 새로 보내면
@@ -148,6 +152,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     const acc = accRef.current
     acc.reset() // 히스토리 replay 가 동일 상태로 재구성(StrictMode 중복도 방지)
     setItems([])
+    setQueued([])
     setTurnDone(false)
     setAwaiting(false) // 스트리밍 힌트 stale 방지
     // ADR-0145: 복원 완료 표시도 여기서 내린다 — 안 내리면 이전 세션의 완료 상태를 물려받아 목록이 빈
@@ -165,6 +170,29 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     let cancelled = false
     const lastSeq = { current: -1 }
 
+    // 목록이 빈 채로 머무는 동안은 같은 참조를 지킨다 — 거의 모든 프레임이 이 경우라 리렌더를 늘리지 않는다.
+    const refreshQueued = (): void => {
+      const next = acc.snapshotQueued()
+      setQueued((prev) => (prev.length === 0 && next.length === 0 ? prev : next))
+    }
+
+    // ★재부착 대조(ADR-0231 · TRD §5-7)★: 링 상한을 넘는 긴 턴에서 다시 붙으면 `Queued` 가 링에서 밀려나
+    //   아직 대기 중인 항목이 이 창의 목록에서 사라진다 — `'live'` 마다 데몬 명부를 한 번 물어 맞춘다.
+    //   답이 늦게 와도 스냅숏 seq 로 라이브 사건과 맞추고(누산기), 이 replay 주기를 떠나면 세대로 버린다.
+    const reconcileQueued = (epoch: number): void => {
+      const gen = acc.beginQueuedReconcile(epoch)
+      agentClient.listQueuedInputs(agentId).then(
+        (listing) => {
+          if (cancelled) return
+          if (acc.offerQueuedSnapshot(gen, listing) === 'applied') refreshQueued()
+        },
+        // 잠든 에이전트(NOT_FOUND)·끊김 — 목록은 링이 준 그대로 둔다. 기록만 멈춘다.
+        () => {
+          if (!cancelled) acc.abandonQueuedReconcile(gen)
+        },
+      )
+    }
+
     agentClient
       .subscribeOutput(
         viewId,
@@ -176,12 +204,16 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           // ★tag 게이트(S15/ADR-0045)★: 이 슬롯은 구조화(tag1)만 렌더한다. tag0(터미널 raw 바이트)이 오면
           //   무시한다 — 구조화 에이전트라도 백엔드가 tag0 을 흘릴 수 있고(과도기), xterm 이 아니라 여기서
           //   바이트를 파싱하면 깨진다. seq 는 위에서 이미 전진시켰으므로(tag 무관 한 seq 공간) dedup 은
-          //   tag0 를 건너뛰어도 정합하다.
-          if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) return
+          //   tag0 를 건너뛰어도 정합하다. 누산기에도 seq 는 알린다 — 쥔 대조 답이 그 seq 를 기다릴 수 있다.
+          if (chunk.tag !== FRAME_TAG_STRUCTURED_EVENT) {
+            if (acc.observeSeq(chunk.seq)) refreshQueued()
+            return
+          }
           // tag1 payload = StructuredEvent JSON 1건.
-          const understood = acc.feed(chunk.bytes)
+          const understood = acc.feed(chunk.bytes, chunk.seq)
           // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
           setItems([...acc.snapshot()])
+          refreshQueued()
           setTurnDone(acc.isTurnDone())
           // ★알아들은 프레임에만 표시 주도권을 turnDone 에 넘긴다★: 못 알아들은 프레임(모르는 종류·
           //   malformed JSON)은 turnDone 을 갱신하지 못하므로, 그때 awaiting 을 풀면 표시가 **직전 턴의**
@@ -197,7 +229,15 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           if (cancelled) return
           setReplayDone(state === 'live')
           setPhase(state)
-          if (state === 'live') setContinuesConversation(info?.continuesConversation ?? false)
+          if (state === 'live') {
+            setContinuesConversation(info?.continuesConversation ?? false)
+            // 표식이 없으면 답이 어느 화신 것인지 못 가르므로 대조하지 않는다(링이 준 목록 그대로 — 오늘과 같다).
+            if (info?.epoch !== undefined) reconcileQueued(info.epoch)
+          } else {
+            // live 를 떠났다 — 새 replay 주기다. 진행 중인 대조는 옛 주기의 것이라 버린다(대조 세대).
+            //   ★붙듦 넘침의 `startBuffering` 도 여기('buffering')로 온다★ — 같은 화신이라 비우기(onReset)는 안 온다.
+            acc.abandonQueuedReconcile()
+          }
         },
         // 비우기 의무·onReset 필수 전달의 근거는 TerminalSlot 동형(여기선 누산기까지 되돌린다).
         // ★전송 흔적도 함께 내린다★: 이 콜백은 **다른 화신**의 이력이 지금부터 온다는 뜻이라, 앞서 나간
@@ -210,6 +250,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           if (cancelled) return
           acc.reset()
           setItems([])
+          setQueued([])
           setTurnDone(false)
           setAwaiting(false)
           setHasSent(false)
@@ -301,7 +342,10 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   //   세션도 복원이 끝나기 전엔 0건이라 안내가 떴다가 대화로 바뀐다(깜빡임). hasSent 를 함께 보는 이유 =
   //   첫 전송 직후 items 가 채워지기 전 구간도 이미 "대화 시작"이라 빈 상태가 아니다.
   //   ADR-0226: 이어받기 화신은 복원 끝 + 0건이어도 이력이 뒤따라올 수 있어 빈 상태 대신 아래 로딩을 그린다.
-  const showEmpty = replayDone && !continuesConversation && !hasSent && items.length === 0
+  //   ADR-0231: 다른 창·LLM 이 보낸 대기 입력이 서 있어도 첫 화면이 아니다.
+  const hasQueued = queued.length > 0
+  const showEmpty =
+    replayDone && !continuesConversation && !hasSent && items.length === 0 && !hasQueued
 
   // ADR-0226: 이어받기 화신이 아직 이력을 못 받았다 — 국면(복원 중·부재)과 무관한 부분. 끝나는 길은
   //   첫 이력(hasHistoryRow) · 입력(hasSent) · 재시작(새 화신의 비우기 + 'live' 거짓) 셋이다.
@@ -380,19 +424,20 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         </div>
       )}
 
-      {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
-          으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리).
+      {/* 입력 묶음 = [대기 입력 목록 · 입력창](ADR-0231). 목록은 입력창 **위**에 서고, 정체성 라벨은 이 묶음 머리에
+          붙어 목록이 이름표를 가리지 않는다.
           ★textarea 는 두 배치에서 같은 엘리먼트다(ADR-0145)★: 자리(부모 children 인덱스)를 고정하고
           className·rows 만 갈아 React 가 remount 하지 않게 한다 — 갈라 두면 전송·IME·포커스 가드가
-          두 벌이 되고, 전환 순간 입력 중이던 포커스가 끊긴다. */}
+          두 벌이 되고, 전환 순간 입력 중이던 포커스가 끊긴다. 라벨·목록이 `{조건 && …}` 로 **늘 같은 자식 자리**를
+          차지하는 것도 같은 이유다(목록이 서고 빠질 때 입력창 줄이 밀리지 않는다). */}
       <div
         className={
           showEmpty
-            ? 'flex flex-none items-stretch justify-center px-4'
-            : 'relative flex flex-none items-stretch border-t border-border px-2 py-1.5'
+            ? 'flex flex-none flex-col'
+            : 'relative flex flex-none flex-col border-t border-border'
         }
       >
-        {/* ★정체성 라벨(§ user request)★: claude-code 터미널처럼 입력창 바로 위(우측)에 작은 라벨을 오버랩
+        {/* ★정체성 라벨(§ user request)★: claude-code 터미널처럼 입력 묶음 바로 위(우측)에 작은 라벨을 오버랩
             (absolute -top — 줄을 차지하지 않음)해 어느 에이전트인지 이름만 표시(중복 이름 허용). pointer-events-none
             으로 입력·스크롤을 막지 않는다. 상태 글리프는 트리가 담당.
             빈 상태에서는 접는다 — 입력창 바로 위가 제품명 문구 자리라 겹친다(ADR-0145 §2 구성). */}
@@ -405,42 +450,53 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             {headerName}
           </div>
         )}
-        <textarea
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            e.stopPropagation()
-            // ★한국어 IME 조합 확정 Enter 오발사 방지(주 사용자가 한국어)★: WebView2 에서 한글 조합을
-            //   확정하는 Enter 는 isComposing=true(keyCode 229)로 keydown 이 온다 — 이걸 전송으로 처리하면
-            //   조합만 끝내려던 Enter 가 미완성 입력을 조기 전송한다. 조합 중 Enter 는 전송 분기 전에 흘려보낸다.
-            if (e.nativeEvent.isComposing || e.keyCode === 229) return
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              send()
-            }
-          }}
-          // 우선순위 = 종료 > 빈 상태 > 하단. 종료 표시가 먼저다(어느 배치든 종료면 그 사실이 이긴다).
-          // ★비활성(disabled)은 이보다 넓고 문구는 종료만 말한다★: 연결 끊김·구독 정지에 "종료됨" 을
-          //   적으면 판정이 흔들리는 구간에 단정을 남기게 되고, 그건 막이 문구를 뺀 이유와 어긋난다
-          //   (SlotUnavailableVeil 헤더).
-          placeholder={
-            agentGone
-              ? t('agent.terminatedPlaceholder')
-              : showEmpty
-                ? t('agent.emptyInputPlaceholder')
-                : t('agent.inputPlaceholder')
-          }
-          disabled={agentUnavailable}
-          rows={showEmpty ? 3 : 2}
-          // 빈 상태만 둥근 모서리에 조금 크게(ADR-0145 §5) — 하단 배치는 기존 고대비 바 그대로.
-          // 하단 좌우 여백은 대화 본문(ChatRow px-4)과 들여쓰기를 크게 어긋내지 않는 선으로 잡고 세로
-          // 여백은 그대로 둬 바 높이·성격을 유지한다. 빈 상태는 넓은 박스라 좌우를 더 주고 위쪽도 한 단계 띄운다.
+        {hasQueued && <QueuedInputList agentId={agentId} entries={queued} />}
+        {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
+            으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}
+        <div
           className={
             showEmpty
-              ? 'w-full max-w-[560px] resize-none rounded-xl border border-border bg-surface px-5 py-4 text-[14px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50'
-              : 'flex-1 resize-none rounded border border-border bg-surface px-3 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50'
+              ? 'flex flex-none items-stretch justify-center px-4'
+              : 'flex flex-none items-stretch px-2 py-1.5'
           }
-        />
+        >
+          <textarea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => {
+              e.stopPropagation()
+              // ★한국어 IME 조합 확정 Enter 오발사 방지(주 사용자가 한국어)★: WebView2 에서 한글 조합을
+              //   확정하는 Enter 는 isComposing=true(keyCode 229)로 keydown 이 온다 — 이걸 전송으로 처리하면
+              //   조합만 끝내려던 Enter 가 미완성 입력을 조기 전송한다. 조합 중 Enter 는 전송 분기 전에 흘려보낸다.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault()
+                send()
+              }
+            }}
+            // 우선순위 = 종료 > 빈 상태 > 하단. 종료 표시가 먼저다(어느 배치든 종료면 그 사실이 이긴다).
+            // ★비활성(disabled)은 이보다 넓고 문구는 종료만 말한다★: 연결 끊김·구독 정지에 "종료됨" 을
+            //   적으면 판정이 흔들리는 구간에 단정을 남기게 되고, 그건 막이 문구를 뺀 이유와 어긋난다
+            //   (SlotUnavailableVeil 헤더).
+            placeholder={
+              agentGone
+                ? t('agent.terminatedPlaceholder')
+                : showEmpty
+                  ? t('agent.emptyInputPlaceholder')
+                  : t('agent.inputPlaceholder')
+            }
+            disabled={agentUnavailable}
+            rows={showEmpty ? 3 : 2}
+            // 빈 상태만 둥근 모서리에 조금 크게(ADR-0145 §5) — 하단 배치는 기존 고대비 바 그대로.
+            // 하단 좌우 여백은 대화 본문(ChatRow px-4)과 들여쓰기를 크게 어긋내지 않는 선으로 잡고 세로
+            // 여백은 그대로 둬 바 높이·성격을 유지한다. 빈 상태는 넓은 박스라 좌우를 더 주고 위쪽도 한 단계 띄운다.
+            className={
+              showEmpty
+                ? 'w-full max-w-[560px] resize-none rounded-xl border border-border bg-surface px-5 py-4 text-[14px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50'
+                : 'flex-1 resize-none rounded border border-border bg-surface px-3 py-1.5 text-[13px] text-foreground outline-none placeholder:text-muted focus:border-accent disabled:opacity-50'
+            }
+          />
+        </div>
       </div>
 
       {/* ADR-0148: 타겟한 에이전트가 지금 없을 때(프로세스 종료 · 연결 끊김 · 구독이 출력을 못 내는 상태 —

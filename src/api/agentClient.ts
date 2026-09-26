@@ -6,6 +6,7 @@
 // transport(Tauri Channel / WS binary frame)와 base64/디코딩은 transport 내부에 숨긴다 —
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
+import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type {
   AgentBackendKind,
   AgentInfo,
@@ -15,6 +16,28 @@ import type {
   Preset,
   RestoreReport,
 } from './types'
+
+/**
+ * 대기 입력 목록 조회 답(ADR-0231) — 버스 `agent.listQueuedInputs` 의 답과 같은 모양·낱말이다(두 표면이 같은
+ * 동사). `inputs` 는 결말 전 항목만, 든 순서(가장 오래된 것이 앞). ★낱말 칸(`state` · `cancel.answer`)은
+ * 문자열이다★ — 더 새 데몬의 낱말이 올 수 있으니 모르는 값은 그 행만 건너뛴다.
+ * `as_of_seq` = 행이 환원한 마지막 목록 사건의 seq(`null` = 없다) — 재부착 대조가 라이브 사건과 맞추는 값이고
+ * `epoch` 화신 안에서만 견준다. `stopped_after_error` = 그 화신이 오류 뒤 멈춤 중(우편이 멈춰 있다).
+ */
+export interface QueuedInputListing {
+  inputs: QueuedInputRow[]
+  as_of_seq: number | null
+  epoch: number
+  stopped_after_error: boolean
+}
+
+/**
+ * 입력 임대 거절 문구 — 데몬 `connection_core.rs` 의 `INPUT_LOCKED_REFUSAL` 과 **바이트 같다**(시험이 잰다).
+ * ★`CODE:` 접두가 없다★(`WriteStdin` 거절과 같은 문구라서) — 그래서 이 문구 자체로 알아본다. 버스 쪽 같은
+ * 거절의 코드는 `CONFLICT` 다.
+ */
+// ADR-0231
+export const INPUT_LOCKED_REFUSAL = 'input locked by another viewer; acquire first'
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
 
@@ -65,6 +88,11 @@ export interface ReplayLiveInfo {
    * 0건일 수 있다(이어받기가 실패했거나 이력이 늦게 온다). 옛 데몬·셸은 이 사실을 안 실어 늘 false 다.
    */
   continuesConversation: boolean
+  /**
+   * 이 replay 를 채택한 화신의 표식(불투명 — 일치/불일치만 본다). ProtocolClient 는 늘 싣는다. 없으면 그 뷰는
+   * 대기 입력 재부착 대조를 하지 않는다(답이 어느 화신 것인지 가를 수 없다 — ADR-0231).
+   */
+  epoch?: number
 }
 
 /**
@@ -89,6 +117,11 @@ export interface ViewOutputState {
   phase: ViewPhase
   /** buffering 중 축적 프레임 수(디버그·관측). */
   buffered: number
+  /**
+   * live 에서 구멍 뒤에 붙들고 있는 프레임 수(ADR-0231). 0 이 아닌 채 머물면 그 뷰는 아직 안 온 seq 를
+   * 기다리며 뒤를 그리지 않는 중이다 — 기다림에 시한이 없으므로 이 값이 멈춤을 보는 유일한 창이다.
+   */
+  held: number
   /** 재요청 사다리 시도 횟수(0=아직 재요청 안 함). */
   attempts: number
 }
@@ -199,6 +232,18 @@ export interface AgentClient {
   resizePty(agentId: string, cols: number, rows: number): Promise<void>
   getAgents(): Promise<AgentInfo[]>
   getSnapshot(agentId: string): Promise<unknown[]>
+  /**
+   * 대기 입력 목록 조회(ADR-0231 — WS `ListQueuedInputs`). 입력 임대를 보지 않는다. 잠든 에이전트는
+   * `NOT_FOUND: …` 로 reject 된다.
+   */
+  listQueuedInputs(agentId: string): Promise<QueuedInputListing>
+  /**
+   * 대기 입력 하나를 취소한다 — 화면 ✕ 와 같은 명령(WS `CancelQueuedInput`). resolve 값 = 결말 낱말
+   * (`requested` = 요청을 넘겼고 결말은 목록 사건으로 온다 · `cancelled` = 곧바로 취소됐다 · 더 새 데몬이면
+   * 모르는 낱말일 수 있다). reject = `NOT_FOUND: …`(모르는·이미 결말 난 id) · `INTERNAL: …` · 입력 임대
+   * 거절은 ★코드 접두 없는★ [`INPUT_LOCKED_REFUSAL`] 문구 그대로다(`WriteStdin` 과 같다).
+   */
+  cancelQueuedInput(agentId: string, inputId: string): Promise<string>
   /**
    * 데몬 graceful 종료(ADR-0021 §5). StopDaemon AgentCommand 전송 — 데몬이 자식 PTY 를 정리하고
    * 스스로 내려간다. force=false 면 실활성 에이전트가 있을 때 데몬이 거부(Error). DaemonControl.stop 이

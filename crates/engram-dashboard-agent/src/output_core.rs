@@ -823,9 +823,11 @@ impl OutputCore {
         let sink_id = sink.sink_id();
         let mut subscribers_guard = self.subscribers.lock().expect("subscribers poisoned");
         subscribers_guard.push(sink.clone());
-        let snapshot = {
+        // ★다음 발급 seq 는 스냅숏과 같은 replay 락 아래에서 읽는다★ — 발급은 전부 그 락 안이라(emit ·
+        //   seed · 배치 · 목록 사건 · 종료 합성) 이 값이 곧 스냅숏 바로 뒤에 올 첫 seq 다.
+        let (snapshot, next_seq) = {
             let replay_guard = self.replay.lock().expect("replay poisoned");
-            replay_guard.snapshot()
+            (replay_guard.snapshot(), self.seq.load(Ordering::Relaxed))
         };
 
         let oldest = snapshot.first().map(|c| c.seq).unwrap_or(0);
@@ -849,13 +851,19 @@ impl OutputCore {
 
         let to_send = &snapshot[start_idx..];
 
-        let replay_from = to_send
-            .first()
-            .map(|c| c.seq)
-            .unwrap_or_else(|| match after_seq {
-                Some(s) => s.saturating_add(1),
-                None => latest.saturating_add(1),
-            });
+        // ★빈 ring 은 다음 발급 seq(ADR-0231)★ — 옛 `latest+1` 은 빈 ring 의 `latest` 를 0 으로 읽어 새
+        //   화신에서 1 이 됐다(첫 발급은 0). 뷰가 이 값을 빈 replay 의 flush 시작점으로 쓰므로 하나 크면
+        //   마커 뒤로 늦게 온 seq 0 을 건너뛴다. 비지 않은 ring 은 옛 값 그대로다.
+        let replay_from = to_send.first().map(|c| c.seq).unwrap_or_else(|| {
+            if snapshot.is_empty() {
+                next_seq
+            } else {
+                match after_seq {
+                    Some(s) => s.saturating_add(1),
+                    None => latest.saturating_add(1),
+                }
+            }
+        });
 
         let outcome = SubscribeOutcome {
             kind,
@@ -2280,6 +2288,30 @@ mod tests {
 
         core.emit(OutputEvent::TerminalBytes(b"d".to_vec()));
         assert_eq!(sink.seqs(), vec![3]);
+    }
+
+    // ★빈 ring 의 replay 머리 = 다음 발급 seq(ADR-0231)★ — 새 화신은 0. 옛 값(`latest+1` = 1)이면 뷰가
+    //   빈 replay 의 flush 를 1 부터 시작해, 마커 뒤로 늦게 온 seq 0 을 건너뛴다. 세 갈래(전량 · 화신 표식
+    //   불일치 · 같은 화신 이어받기)가 모두 같은 값을 싣는다.
+    #[test]
+    fn subscribe_from_empty_ring_replay_from_is_the_next_seq() {
+        for (after_seq, epoch_matches) in [(None, true), (Some(5), false), (Some(5), true)] {
+            let core = new_core(MockStatusSink::new());
+            let sink = MockSink::new();
+            let out = core.subscribe_from(sink.clone(), after_seq, epoch_matches, |_| {});
+            assert_eq!(out.replayed, 0);
+            assert_eq!(
+                out.replay_from, 0,
+                "빈 ring 은 첫 발급 seq({after_seq:?}, {epoch_matches})"
+            );
+
+            core.emit(OutputEvent::TerminalBytes(b"a".to_vec()));
+            assert_eq!(
+                sink.seqs(),
+                vec![out.replay_from],
+                "머리 = 실제로 처음 오는 seq"
+            );
+        }
     }
 
     #[test]

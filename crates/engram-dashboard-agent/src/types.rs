@@ -981,7 +981,8 @@ pub struct SubscribeOutcome {
     pub sink_id: SinkId,
     pub oldest_seq: u64,
     pub latest_seq: u64,
-    /// 실제 처음 전송한 chunk 의 seq. 보낼 게 없으면 "다음 live seq" 추정치.
+    /// 실제 처음 전송한 chunk 의 seq. 보낸 게 없으면 — 빈 ring 은 다음 발급 seq(replay 락 아래에서
+    /// 읽은 값 · ADR-0231), 이어받을 꼬리가 없으면 `after_seq+1`.
     pub replay_from: u64,
     /// 실제 전송한 chunk 수(0 가능).
     pub replayed: usize,

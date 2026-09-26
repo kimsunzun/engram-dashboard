@@ -13,13 +13,50 @@ const FRAME_HEADER_LEN = 1 + 16 + 4 + 8
 //   종결마다 같은 출력 Channel 로 합성해 흘리고, transport(decodeReplayMarker)만 해석한다. 데몬 binary
 //   frame(tag0/1)과 seq 공간이 다르므로 decodeOutputFrame 은 이 tag 를 여전히 skip(전방 호환).
 export const FRAME_TAG_REPLAY_MARKER = 255
-// 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1] — 길이 30.
+// 마커 포맷(big-endian): [tag=255:1][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE] — 길이 38.
 //   flags: bit0=truncated · bit1=failed · bit2=continues_conversation(src-tauri replay_flight 와 일치).
-const MARKER_LEN = 1 + 16 + 4 + 8 + 1
+//   replay_from = 그 replay 의 머리(SubscribeAck 의 같은 칸 — ADR-0231). 셸과 웹뷰가 한 빌드로 나가므로
+//   이보다 짧은(옛 30바이트) 마커는 받지 않는다 — 비마커로 떨어져 뷰는 watchdog·사다리를 탄다.
+const MARKER_LEN = 1 + 16 + 4 + 8 + 1 + 8
 const MARKER_FLAG_TRUNCATED = 0x01
 const MARKER_FLAG_FAILED = 0x02
 // ADR-0226: 이 화신은 저장된 대화를 이어받으려고 떴다 — 이어받기의 성공 여부가 아니다. 실패 마커는 늘 0.
 const MARKER_FLAG_CONTINUES = 0x04
+
+/**
+ * 자리채움 `Error` 의 문구 — 프로토콜 `placeholder.rs` 의 `PLACEHOLDER_ERROR_MESSAGE` 와 **바이트 같다**(시험이
+ * 잰다). 사람이 읽는 불투명 문자열이다 — 이 값으로 분기하지 않는다.
+ */
+// ADR-0231
+export const PLACEHOLDER_ERROR_MESSAGE = '이 출력 사건을 싣지 못했습니다'
+
+/**
+ * 자리채움 tag1 페이로드 — `StructuredEvent::Error { message: PLACEHOLDER_ERROR_MESSAGE }` 의 JSON 으로, 데몬
+ * sink·셸 중계가 싣는 페이로드와 바이트 같다. 부를 때마다 새 배열이다.
+ */
+// ADR-0231
+export function placeholderErrorPayload(): Uint8Array {
+  return new TextEncoder().encode(JSON.stringify({ type: 'Error', message: PLACEHOLDER_ERROR_MESSAGE }))
+}
+
+/**
+ * binary frame 머리만 읽는다 — tag 를 가리지 않는다(codec.rs `peek_frame_header` 의 역). 머리보다 짧으면
+ * null — seq 를 읽을 수 없는 프레임이다.
+ */
+export function peekFrameHeader(
+  buf: ArrayBuffer,
+): { tag: number; agentId: string; epoch: number; seq: number } | null {
+  if (buf.byteLength < FRAME_HEADER_LEN) return null
+  const view = new DataView(buf)
+  const tag = view.getUint8(0)
+  // agentId: byte[1..17] = AgentId(Uuid).as_bytes() — RFC4122 network order(표준 바이트 그대로).
+  // 16바이트 hex 후 8-4-4-4-12 하이픈 삽입 = 구독 시 보낸 소문자 하이픈 UUID 와 동일 표현.
+  const agentId = bytesToUuid(new Uint8Array(buf, 1, 16))
+  // epoch/seq: codec.rs 가 to_be_bytes — BE 로 읽는다(false=big-endian).
+  const epoch = view.getUint32(17, false)
+  const seq = Number(view.getBigUint64(21, false)) // seq 는 number 로 유지(설계 결정)
+  return { tag, agentId, epoch, seq }
+}
 
 /**
  * binary output frame 디코드. 헤더 미만 길이·미지원 tag(≥2) 시 null(무시).
@@ -28,26 +65,14 @@ const MARKER_FLAG_CONTINUES = 0x04
 export function decodeOutputFrame(
   buf: ArrayBuffer,
 ): { tag: number; agentId: string; epoch: number; seq: number; payload: Uint8Array } | null {
-  if (buf.byteLength < FRAME_HEADER_LEN) return null
-  const view = new DataView(buf)
-  const tag = view.getUint8(0)
+  const header = peekFrameHeader(buf)
+  if (header === null) return null
   // F1 회귀: 옛 코드는 tag1 도 null-drop 해 구조화 출력이 무음 유실됐다 — tag1 도 통과시킨다.
   // ★ADR-0046 전방 호환(M0)★: replay 경계 마커(tag=255)도 같은 출력 Channel 로 오지만 여기선 해석하지
   //   않는다(소비는 decodeReplayMarker, M2). 미지 tag 를 payload 로 오해하지 않게 tag0/tag1 외는 길이
   //   무관 전부 null 로 버린다.
-  if (tag !== FRAME_TAG_TERMINAL_BYTES && tag !== FRAME_TAG_STRUCTURED_EVENT) return null
-
-  // agentId: byte[1..17] = AgentId(Uuid).as_bytes() — RFC4122 network order(표준 바이트 그대로).
-  // 16바이트 hex 후 8-4-4-4-12 하이픈 삽입 = 구독 시 보낸 소문자 하이픈 UUID 와 동일 표현.
-  const bytes = new Uint8Array(buf, 1, 16)
-  const agentId = bytesToUuid(bytes)
-
-  // epoch/seq: codec.rs 가 to_be_bytes — BE 로 읽는다(false=big-endian).
-  const epoch = view.getUint32(17, false)
-  const seq = Number(view.getBigUint64(21, false)) // seq 는 number 로 유지(설계 결정)
-
-  const payload = new Uint8Array(buf, FRAME_HEADER_LEN)
-  return { tag, agentId, epoch, seq, payload }
+  if (header.tag !== FRAME_TAG_TERMINAL_BYTES && header.tag !== FRAME_TAG_STRUCTURED_EVENT) return null
+  return { ...header, payload: new Uint8Array(buf, FRAME_HEADER_LEN) }
 }
 
 /**
@@ -64,6 +89,7 @@ export function decodeReplayMarker(
   truncated: boolean
   failed: boolean
   continuesConversation: boolean
+  replayFrom: number
 } | null {
   if (buf.byteLength < MARKER_LEN) return null
   const view = new DataView(buf)
@@ -79,6 +105,8 @@ export function decodeReplayMarker(
     truncated: (flags & MARKER_FLAG_TRUNCATED) !== 0,
     failed: (flags & MARKER_FLAG_FAILED) !== 0,
     continuesConversation: (flags & MARKER_FLAG_CONTINUES) !== 0,
+    // seq 와 같은 폭으로 읽는다(decodeOutputFrame 의 seq 도 number) — flush 가 둘을 견준다.
+    replayFrom: Number(view.getBigUint64(30, false)),
   }
 }
 

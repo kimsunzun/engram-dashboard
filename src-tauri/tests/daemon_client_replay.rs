@@ -95,7 +95,7 @@ fn flight() -> ReplayFlightSet {
     ReplayFlightSet::new(Duration::from_secs(10))
 }
 
-// 마커 프레임에서 gen(BE u64)과 플래그 셋(bit0~2)을 도로 꺼낸다 — 레이아웃 정본은
+// 마커 프레임에서 gen(BE u64)·플래그 셋(bit0~2)·replay 머리(BE u64)를 도로 꺼낸다 — 레이아웃 정본은
 // `engram_dashboard_lib::daemon_client::replay_flight::encode_marker_frame` 문단이고, 여기선 그 값을
 // 읽기만 한다.
 fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
@@ -110,6 +110,7 @@ fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
         0,
         "정의 안 된 플래그 비트: {flags:#010b}"
     );
+    let replay_from = u64::from_be_bytes(frame[30..38].try_into().unwrap());
     (
         agent,
         epoch,
@@ -118,6 +119,7 @@ fn decode_marker(frame: &[u8]) -> (AgentId, u32, Marker) {
             truncated: flags & 0b0000_0001 != 0,
             failed: flags & 0b0000_0010 != 0,
             continues_conversation: flags & 0b0000_0100 != 0,
+            replay_from,
         },
     )
 }
@@ -197,7 +199,7 @@ fn refusal_leaves_an_acked_healthy_subscription_alone() {
     let now = Instant::now();
 
     fs.request_replay(agent, now);
-    fs.on_ack(agent, false, false, now);
+    fs.on_ack(agent, false, false, 0, now);
 
     let plan = plan_subscribe_refusal(&mut fs, &subs, agent, now);
     assert!(plan.marker_frame.is_none(), "acked 슬롯엔 실패 마커 없음");
@@ -474,11 +476,57 @@ fn a_replay_complete_carries_the_acks_continues_conversation_in_bit2() {
     assert_eq!(out.0.len(), 1, "완료 하나 = 마커 하나");
     let (labels, frame) = &out.0[0];
     assert_eq!(labels.as_slice(), &[MAIN_WINDOW_LABEL.to_string()]);
-    assert_eq!(frame.len(), MARKER_FRAME_LEN, "길이 30 불변");
+    assert_eq!(frame.len(), MARKER_FRAME_LEN, "길이 38 불변");
     assert_eq!(frame[29], 0b0000_0100, "성공 + 이어받기 = bit2 하나만");
     let (_, _, marker) = decode_marker(frame);
     assert!(marker.continues_conversation);
     assert!(!marker.truncated && !marker.failed);
+}
+
+// ★Ack 의 replay 머리가 창으로 가는 마커 바이트까지 간다(ADR-0231)★ — 옛 배선은 Ack 의 이 칸을 패턴 `..`
+//   로 버렸다. 뷰는 이 값으로 성공 flush 를 시작하므로(`max(마지막+1, replay_from)`), 빠지면 빈 replay 의 새
+//   화신에서 마커 뒤로 늦게 온 seq 0 을 건너뛴다. 값을 0 이 아닌 수로 두어 「안 실어도 0」이 우연히 맞는
+//   모양을 막는다.
+#[test]
+fn a_replay_complete_carries_the_acks_replay_from() {
+    let mut fs = flight();
+    let mut subs = Subs::new();
+    let agent = AgentId::new_v4();
+    let router = router_showing(agent);
+    let now = Instant::now();
+
+    fs.request_replay(agent, now);
+    let _ = feed(
+        &AgentEvent::SubscribeAck {
+            agent_id: agent,
+            action: engram_dashboard_protocol::SubscribeAction::Reset,
+            current_epoch: 3,
+            oldest_seq: 40,
+            latest_seq: 60,
+            replay_from: 40,
+            truncated: true,
+            continues_conversation: false,
+        },
+        &mut fs,
+        &mut subs,
+        &router,
+        now,
+    );
+    let (out, _) = feed(
+        &AgentEvent::ReplayComplete {
+            agent_id: agent,
+            epoch: 3,
+        },
+        &mut fs,
+        &mut subs,
+        &router,
+        now,
+    );
+
+    assert_eq!(out.0.len(), 1, "완료 하나 = 마커 하나");
+    let (_, _, marker) = decode_marker(&out.0[0].1);
+    assert!(!marker.failed);
+    assert_eq!(marker.replay_from, 40, "Ack 의 replay 머리가 마커까지");
 }
 
 // replay 계열이 아닌 이벤트는 이 함수가 삼키면 안 된다 — 삼키면 인바운드 명령과 broadcast 가 통째로

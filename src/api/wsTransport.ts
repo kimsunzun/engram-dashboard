@@ -12,7 +12,12 @@ import { invoke } from '@tauri-apps/api/core'
 
 import type { ConnectionState } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
-import { decodeOutputFrame } from './wsFrame'
+import {
+  decodeOutputFrame,
+  FRAME_TAG_STRUCTURED_EVENT,
+  peekFrameHeader,
+  placeholderErrorPayload,
+} from './wsFrame'
 
 // ── discover_daemon DTO(discovery.rs DaemonInfoDto 미러) ──────────────────────────
 interface DaemonInfoDto {
@@ -32,6 +37,7 @@ interface WsReplayEntry {
     truncated: boolean
     epoch: number | undefined
     continuesConversation: boolean
+    replayFrom: number
   }
   pending?: {
     gen: bigint
@@ -297,14 +303,33 @@ export class WsTransport implements Transport {
             this.messageCb?.({ kind: 'control', event: msg })
           } else if (event.data instanceof ArrayBuffer) {
             const f = decodeOutputFrame(event.data)
-            if (!f) return
+            if (f) {
+              this.messageCb?.({
+                kind: 'output',
+                tag: f.tag, // frame 종류(0 터미널 / 1 구조화) — ProtocolClient 가 소비 경로 분기.
+                agentId: f.agentId,
+                epoch: f.epoch,
+                seq: f.seq,
+                bytes: f.payload,
+              })
+              return
+            }
+            // ADR-0231: 버리면 그 seq 에 구멍이 서서 뷰가 뒤를 붙든 채 멈춘다 — 셸 중계(`frame_relay.rs`)와 같게
+            //   모르는 tag 는 같은 seq 의 자리채움으로 올리고, seq 를 못 읽는 짧은 프레임은 끊는다(다시 붙은 뷰가
+            //   전량 replay 를 청한다). 닫은 뒤의 메시지는 브라우저가 흘리지 않는다(readyState 가 OPEN 이 아니다).
+            const header = peekFrameHeader(event.data)
+            if (header === null) {
+              console.warn(`[wsTransport] frame too short for a header (${event.data.byteLength} B) — closing for a full replay`)
+              ws.close()
+              return
+            }
             this.messageCb?.({
               kind: 'output',
-              tag: f.tag, // frame 종류(0 터미널 / 1 구조화) — ProtocolClient 가 소비 경로 분기.
-              agentId: f.agentId,
-              epoch: f.epoch,
-              seq: f.seq,
-              bytes: f.payload,
+              tag: FRAME_TAG_STRUCTURED_EVENT,
+              agentId: header.agentId,
+              epoch: header.epoch,
+              seq: header.seq,
+              bytes: placeholderErrorPayload(),
             })
           }
         }
@@ -413,7 +438,7 @@ export class WsTransport implements Transport {
       if (!entry.pending) this.wsReplay.delete(agentId)
       return Promise.reject(e instanceof Error ? e : new Error(String(e)))
     }
-    entry.inflight = { gen, truncated: false, epoch: undefined, continuesConversation: false }
+    entry.inflight = { gen, truncated: false, epoch: undefined, continuesConversation: false, replayFrom: 0 }
     return Promise.resolve(gen)
   }
 
@@ -426,6 +451,7 @@ export class WsTransport implements Transport {
       const a = msg.SubscribeAck as {
         agent_id: string
         current_epoch: number
+        replay_from?: number
         truncated: boolean
         continues_conversation?: boolean
       }
@@ -434,6 +460,9 @@ export class WsTransport implements Transport {
         entry.inflight.epoch = a.current_epoch
         entry.inflight.truncated = a.truncated
         entry.inflight.continuesConversation = a.continues_conversation === true
+        // ADR-0231: 직결 경로의 replay 머리 — Tauri 경로는 셸이 마커에 실어 온다. 필드가 없으면 0 —
+        //   그대로 두면 flush 의 `Math.max` 가 NaN 이 된다.
+        entry.inflight.replayFrom = typeof a.replay_from === 'number' ? a.replay_from : 0
       }
       return
     }
@@ -456,6 +485,7 @@ export class WsTransport implements Transport {
         truncated: entry.inflight.truncated,
         failed: true,
         continuesConversation: false,
+        replayFrom: entry.inflight.replayFrom,
       })
       return
     }
@@ -464,7 +494,9 @@ export class WsTransport implements Transport {
       const entry = this.wsReplay.get(c.agent_id)
       if (!entry?.inflight) return
       // 미종결 요청을 성공 boundary 로 종결 — 경계 gen = 이 replay 를 종결하는 요청의 gen(마지막값 오각인
-      //   방지). epoch 은 Ack 관측치, 없으면 Complete 의 epoch, 그것도 없으면 0(직결 근사).
+      //   방지). epoch 은 Ack 관측치, 없으면 Complete 의 epoch, 그것도 없으면 0(직결 근사). replay 머리도
+      //   Ack 관측치이고 없으면 0(직결 근사) — 그 값이 실제 머리보다 작고 replay 가 잘렸으면 뷰는 머리 앞
+      //   구멍을 영영 못 메워 붙듦 상한까지 멈춘다. Ack 는 늘 replay 앞에 오므로 그 갈래는 운영에 없다.
       const done = entry.inflight
       this.settleReplay(c.agent_id, entry, {
         epoch: done.epoch ?? c.epoch ?? 0,
@@ -472,6 +504,7 @@ export class WsTransport implements Transport {
         truncated: done.truncated,
         failed: false,
         continuesConversation: done.continuesConversation,
+        replayFrom: done.replayFrom,
       })
     }
   }
@@ -488,6 +521,7 @@ export class WsTransport implements Transport {
       truncated: boolean
       failed: boolean
       continuesConversation: boolean
+      replayFrom: number
     },
   ): void {
     entry.inflight = undefined
@@ -502,6 +536,7 @@ export class WsTransport implements Transport {
           truncated: false,
           epoch: undefined,
           continuesConversation: false,
+          replayFrom: 0,
         }
       } catch {
         // 송신 실패(끊김) — in-flight 못 세운다. 대기자는 gen 은 받되(계약상 gen 반환) 마커는 재연결

@@ -18,7 +18,9 @@ export type AgentEvent = { "Hello": { protocol_version: number, daemon_version: 
  */
 capabilities: Capabilities | null, } } | { "Ack": { request_id: RequestId, } } | { "SubscribeAck": { agent_id: string, action: SubscribeAction, current_epoch: number, oldest_seq: number, latest_seq: number, 
 /**
- * 이 seq+1 부터 replay 를 보낸다(클라가 dedup 기준).
+ * 이 replay 의 머리 — 실제로 처음 보낸 seq. 보낸 것이 없으면 빈 ring 은 다음에 발급할 seq,
+ * 이어받을 꼬리가 없으면 `after_seq+1`. ★dedup 기준(「마지막으로 본 seq」)이 아니다★ — 뷰는
+ * 이 값을 flush 시작점 `max(마지막+1, replay_from)` 에만 쓴다(ADR-0231).
  */
 replay_from: number, 
 /**
