@@ -4,6 +4,8 @@ on:
   push:
     # ★모든 브랜치★ — 좁히면 그 브랜치 작업에는 게이트가 아예 없어진다. 로컬을 quick 으로 낮춘
     # 분담(`/qa` 바인딩)과 맞물리면 무게이트 구간이 생긴다. public repo 라 러너 비용이 0 이다.
+    # ★이 말은 브랜치 축의 것이다★ — 경로 축은 아래 `paths` 가 문서 경로만 뺀다. 어느 브랜치든
+    # 문서 밖 파일을 하나라도 바꾼 push 는 그대로 전부 돈다.
     branches:
       - '**'
     # 버전 태그 push = 릴리즈 트리거(맨 아래 release-build → release-publish 2단). 태그 push 에서는
@@ -14,12 +16,50 @@ on:
     # 그 전제를 CI 가 확인 없이 믿게 되고, 검증된 적 없는 커밋에서 배포물이 나갈 수 있다.
     tags:
       - 'v*'
+    # ADR-0232: 바뀐 파일이 **전부** 아래에서 빠진 경로 안이면 이 워크플로를 띄우지 않는다. 목록의 정본은
+    # 여기다 — 다른 문서에 베끼지 않는다.
+    # ★제외 목록(denylist)이다★ — 첫 줄 `'**'` 가 전부를 넣고(경로 필터가 없을 때의 기본 동작과 같다) `!` 줄이
+    # 빼므로, 모르는 경로는 전부 "돈다"로 떨어진다. 포함 목록은 한 항목을 빠뜨리면 그 경로에서 게이트가
+    # **조용히 사라지고**, 제외 목록은 빠뜨려도 **한 번 더 돌 뿐**이다. CI 에 닿는 경로는 흩어져 있고 이름만으로는
+    # 안 보인다(`prompts/` · `rust-toolchain.toml` · `vitest.config.ts` 같은 것).
+    # `paths-ignore` 가 아니라 `paths` 인 것은 되살리기 때문이다 — `!` 는 `paths` 에서만 먹고, 한 이벤트에 둘을
+    # 함께 둘 수 없다(GitHub 문서 "Workflow syntax" — `paths`/`paths-ignore` 절).
+    # ★순서가 뜻이다 — 뒤에 맞는 패턴이 앞의 판정을 뒤집는다★. 그래서 되살리는 줄은 **맨 끝**에 둔다 — 그 뒤에
+    # `!` 줄을 더하면 도로 빠진다.
+    # ★제외를 더하기 전에 그 경로 아래를 CI·빌드 스크립트·코드·테스트가 읽는지부터 본다 — 읽는 파일이 있으면
+    # 끝에서 그 파일을 되살린다★. 빠진 경로만 바뀐 push 는 어떤 게이트도 보지 않는다.
+    # ★`**/*.md` 로 넓히지 말 것★ — `prompts/engram-help.md` 는 `include_str!` 로 바이너리에 구워지고
+    # (`crates/engram-dashboard-daemon/src/bin/engram.rs:231`) `prompts/agent-priming.md` 는 배포판에 실린다
+    # (`scripts/build-release.ps1` manifest). 둘 다 확장자로는 문서와 구분되지 않는다.
+    # 태그 push 에는 경로 필터가 평가되지 않는다(같은 절) — 위 `v*` 릴리즈 트리거는 이 목록과 무관하게 돈다.
+    # `workflow_dispatch` 에는 경로 필터가 없다.
+    # 받아들인 예외(같은 절): diff 가 3,000 파일을 넘고 필터에 맞는 파일이 앞 3,000 개 안에 없으면 돌지 않는다.
+    # ★이 워크플로의 체크를 branch protection·ruleset 의 필수 체크로 걸면 문서만 바꾼 브랜치의 PR 이 머지를
+    # 못 한다★ — 경로 필터로 건너뛴 워크플로의 체크는 "Pending" 으로 남는다(GitHub 문서 "Troubleshooting
+    # required status checks" — skipped but required 절). 필수 체크를 걸게 되면 ADR-0232 를 다시 연다.
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!CLAUDE.md'
+      - '!README.md'
+      - '!.claude/**'
+      - '.claude/skill-bindings/qa.md' # frontend 잡의 `npm test` 가 읽는다(`src/util/launcherWiring.test.ts:76`)
   pull_request:
     branches:
       - master
+    # 위 push 의 `paths` 와 같은 목록이다 — 순서까지(ADR-0232). 한쪽만 고치면 push 와 PR 이 서로 다른 변경에서
+    # 돈다. PR 은 이번 push 가 아니라 PR 전체의 변경(토픽 브랜치가 base 와 마지막으로 맞춰진 커밋부터의
+    # three-dot diff)으로 판정된다(GitHub 문서 "Workflow syntax" — Git diff comparisons 절).
+    paths:
+      - '**'
+      - '!docs/**'
+      - '!CLAUDE.md'
+      - '!README.md'
+      - '!.claude/**'
+      - '.claude/skill-bindings/qa.md'
   workflow_dispatch:
 
-# 같은 ref 에 새 push 가 오면 앞 실행을 취소한다(뒤진 결과로 판정하지 않기 위해).
+# 같은 ref 에 새 push 가 실행을 띄우면 앞 실행을 취소한다(뒤진 결과로 판정하지 않기 위해).
 # ★단 태그 실행은 예외★ — 이 워크플로에는 이제 되돌릴 수 없는 외부 부작용(릴리즈 생성 + 에셋 업로드)을
 # 가진 잡(release-publish)이 있다. 실행 중 취소는 잡을 죽이므로 "릴리즈는 생겼는데 에셋이 없거나 잘린"
 # 상태를 남기고, 재시도는 'release already exists' 로 죽는다(자동 회복 없음).
