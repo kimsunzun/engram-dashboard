@@ -206,6 +206,8 @@ pub enum MidTurnPolicy {
     SessionClassified { cancel_line: fn(&str) -> Vec<u8> },
     /// 통로가 분류·해제·취소를 다 진다(codex JSON) — 세션은 [`TurnInput`] 을 넘기고 취소는
     /// `AgentTransport::withdraw` 로 넘기기만 한다. 입력 자물쇠를 타지 않는다(순서는 통로 상태 락이 진다).
+    /// ★세션 id 첫 제출 래치의 제출도 세션이 세지 않는다★ — 이 정책을 신고하는 backend 는 통로에 첫 턴 포트를
+    ///   꽂아야 한다(`backend::FirstTurnSink` 의 짝 규율 · ADR-0226 개정).
     TransportOwned,
 }
 

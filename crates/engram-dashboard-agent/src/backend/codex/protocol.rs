@@ -213,6 +213,8 @@ pub(crate) mod method {
     pub(crate) const THREAD_START: &str = "thread/start";
     pub(crate) const THREAD_RESUME: &str = "thread/resume";
     pub(crate) const TURN_START: &str = "turn/start";
+    /// 도는 턴에 입력 하나를 넣는다 — 턴을 열지 않는다(ADR-0231).
+    pub(crate) const TURN_STEER: &str = "turn/steer";
     pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
 
     /// 이어받은 스레드의 지난 item 을 **페이지로** 받는다(ADR-0203).
@@ -536,6 +538,30 @@ pub(crate) enum UserInput {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TurnStartParams {
     pub(crate) thread_id: String,
+    pub(crate) input: Vec<UserInput>,
+    /// 첫 입력의 되울림(`userMessage`)에 `clientId` 로 돌아오는 우리 id(0.140.0 부터 — 실측 0.156.1).
+    /// ★`None` 이면 칸 자체를 안 싣는다★ — 식별자 없는 입력과 하한 미달 화신의 봉투가 이 칸이 생기기
+    /// 전과 바이트 단위로 같다.
+    // ADR-0231
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_user_message_id: Option<String>,
+}
+
+/// `turn/steer` — 도는 턴에 입력 하나를 넣는다. 성공 응답은 `{turnId}` 이고 그것은 **수락**이지 받음이
+/// 아니다(받음은 `clientId` 단 되울림 — 실측 0.156.1). 응답 본문은 읽지 않는다.
+///
+/// ★`expectedTurnId` 는 벤더가 요구하는 선행조건이다★ — 그 턴이 이미 끝났거나 id 가 어긋나면 오류
+///   응답(`-32600 "no active turn to steer"`)이 온다. 그래서 끝난 턴에 늦게 닿은 steer 가 다음 턴에 섞이지
+///   않는다.
+/// ★`clientUserMessageId` 를 `Option` 으로 두지 않은 것은 의도다★ — 스키마에서는 선택 칸이지만 steer 는
+///   하한 충족 화신의 식별자 든 항목만 나간다(식별자가 없으면 넘긴 글을 되울림으로 대조할 수 없다).
+// ADR-0231
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnSteerParams {
+    pub(crate) thread_id: String,
+    pub(crate) expected_turn_id: String,
+    pub(crate) client_user_message_id: String,
     pub(crate) input: Vec<UserInput>,
 }
 
@@ -1017,12 +1043,52 @@ mod tests {
             input: vec![UserInput::Text {
                 text: "hello".to_string(),
             }],
+            client_user_message_id: None,
         })
         .unwrap();
         assert_eq!(field(&v, "threadId"), "t-1");
         let item = &field(&v, "input").as_array().unwrap()[0];
         assert_eq!(field(item, "type"), "text");
         assert_eq!(field(item, "text"), "hello");
+        assert!(
+            v.get("clientUserMessageId").is_none(),
+            "식별자 없는 봉투에 칸이 생겼다: {v}"
+        );
+    }
+
+    // ADR-0231
+    #[test]
+    fn turn_start_params_carry_the_client_message_id_under_its_wire_name() {
+        let v = serde_json::to_value(TurnStartParams {
+            thread_id: "t-1".to_string(),
+            input: vec![UserInput::Text {
+                text: "hello".to_string(),
+            }],
+            client_user_message_id: Some("u-1".to_string()),
+        })
+        .unwrap();
+        assert_eq!(field(&v, "clientUserMessageId"), "u-1");
+    }
+
+    // ADR-0231
+    #[test]
+    fn turn_steer_params_field_names() {
+        let v = serde_json::to_value(TurnSteerParams {
+            thread_id: "t-1".to_string(),
+            expected_turn_id: "u-9".to_string(),
+            client_user_message_id: "c-1".to_string(),
+            input: vec![UserInput::Text {
+                text: "more".to_string(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(field(&v, "threadId"), "t-1");
+        assert_eq!(field(&v, "expectedTurnId"), "u-9");
+        assert_eq!(field(&v, "clientUserMessageId"), "c-1");
+        let item = &field(&v, "input").as_array().unwrap()[0];
+        assert_eq!(field(item, "type"), "text");
+        assert_eq!(field(item, "text"), "more");
+        assert_eq!(v.as_object().unwrap().len(), 4, "모르는 칸이 실렸다: {v}");
     }
 
     #[test]

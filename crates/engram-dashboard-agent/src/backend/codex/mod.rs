@@ -60,10 +60,10 @@ use self::decoder::CodexAppServerDecoder;
 use self::protocol::{
     AskForApproval, SandboxMode, ThreadOpen, ThreadResumeParams, ThreadStartParams,
 };
-use self::transport::CodexAppServerTransport;
+use self::transport::{CodexAppServerTransport, HandOverPolicy};
 use crate::backend::{
-    console_command, inject_cli_entrance, AgentBackend, InputEncoder, SessionIdSink, SpawnParts,
-    TransportShape, TurnClassifier,
+    console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
+    SpawnParts, TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -461,6 +461,12 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
 /// 기본값은 상류가 바꿀 수 있고 바뀌어도 우리 argv 는 조용히 그대로다).
 const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
+
+/// app-server 통로의 넘기기 정책을 고르는 자리 — ★codex backend 의 상수 하나다(사용자 설정 표면을 늘리지
+/// 않는다)★(TRD §5-5). 붙드는 정책은 M15 반응 지연이 녹일 때만 켠다 — 빨가면 도구 구간을 못 맞춰 붙듦이
+/// 전달을 한 경계 늦춘다.
+// ADR-0231
+const HAND_OVER_POLICY: HandOverPolicy = HandOverPolicy::Immediate;
 
 /// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
 /// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
@@ -1056,47 +1062,68 @@ impl AgentBackend for CodexBackend {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        first_turn_sink: Option<FirstTurnSink>,
         resume_session_id: Option<Uuid>,
         link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
-        let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
-            if is_app_server(command) {
-                let (t, pid) = CodexAppServerTransport::open(
-                    spec,
-                    true,
-                    self.output_decoder(command),
-                    thread_open(spec, resume_session_id, priming_text(control)),
-                    sid_sink,
-                    link_sink,
-                )?;
-                (Box::new(t), pid)
-            } else {
-                // ★터미널 모드에는 세울 연결이 없다★ — `declares_link()` 가 false 라 포트도 `None` 이다.
-                let (t, pid) = PtyTransport::open(spec, cols, rows)?;
-                // ★세션 id 회수는 **여기부터** 시작한다 — 자식이 이미 떠 있어야 락이 생긴다★
-                //   (ADR-0218). 돌릴지와 그 재료는 전부 [`thread_lock::plan_capture`] 가 정하므로
-                //   (조건의 정본 = 그 doc) 이 자리가 하는 일은 자식의 신원 두 칸과 **우리 쪽** 기본
-                //   락 폴더를 건네는 것뿐이다 — 자식이 다른 홈을 받았으면 그쪽이 이긴다.
-                // ADR-0218
-                let child_start =
-                    pid.and_then(engram_dashboard_base::platform::process_creation_time);
-                // ★게이트가 보는 사실 = 「이어받기 argv 가 실제로 나갔나」★ — 손잡이의 **존재**가
-                //   아니다. 실을 수 없는 값이면 위 `build_spec` 이 새 대화 argv 를 냈고, 그 화신은
-                //   회수 대상이다. 두 자리가 같은 술어([`resume_argument`])를 본다.
-                let resumes_by_argv = resume_session_id.and_then(resume_argument).is_some();
-                if let Some(plan) = thread_lock::plan_capture(
-                    &spec.env,
-                    resumes_by_argv,
-                    pid,
-                    child_start,
-                    sid_sink,
-                    thread_lock::lock_dir(),
-                ) {
-                    thread_lock::spawn_capture(plan);
-                }
-                (Box::new(t), pid)
-            };
+        let (transport, child_pid, mid_turn, delivery_ack): (
+            Box<dyn AgentTransport>,
+            Option<u32>,
+            MidTurnPolicy,
+            Arc<DeliveryAck>,
+        ) = if is_app_server(command) {
+            let (t, pid) = CodexAppServerTransport::open(
+                spec,
+                true,
+                self.output_decoder(command),
+                thread_open(spec, resume_session_id, priming_text(control)),
+                sid_sink,
+                link_sink,
+            )?;
+            // ★`TransportOwned` 와 첫 턴 포트는 짝이다 — 한쪽만 두지 말 것★: 그 모드의 세션은 제출을 세지
+            //   않으므로, 포트가 통로에 안 꽂히면 어느 화신도 thread id 를 영속하지 못한다(오류 없음).
+            // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
+            let t = t
+                .with_hand_over(HAND_OVER_POLICY)
+                .with_first_turn(first_turn_sink);
+            // ADR-0231: 통로가 분류·넘기기·취소를 진다. 받음 가능 여부는 통로의 하한 판정이 채우는 **바로 그**
+            //   Arc 다 — 따로 만들면 세션과 통로가 서로 다른 값을 본다.
+            let ack = t.delivery_ack();
+            (Box::new(t), pid, MidTurnPolicy::TransportOwned, ack)
+        } else {
+            // ★터미널 모드에는 세울 연결이 없다★ — `declares_link()` 가 false 라 포트도 `None` 이다.
+            // ★첫 턴 포트도 버린다★ — 이 모드는 세션이 제출을 센다(ADR-0226 결정 11 — 회수와 제출 중 늦은 쪽).
+            drop(first_turn_sink);
+            let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+            // ★세션 id 회수는 **여기부터** 시작한다 — 자식이 이미 떠 있어야 락이 생긴다★
+            //   (ADR-0218). 돌릴지와 그 재료는 전부 [`thread_lock::plan_capture`] 가 정하므로
+            //   (조건의 정본 = 그 doc) 이 자리가 하는 일은 자식의 신원 두 칸과 **우리 쪽** 기본
+            //   락 폴더를 건네는 것뿐이다 — 자식이 다른 홈을 받았으면 그쪽이 이긴다.
+            // ADR-0218
+            let child_start = pid.and_then(engram_dashboard_base::platform::process_creation_time);
+            // ★게이트가 보는 사실 = 「이어받기 argv 가 실제로 나갔나」★ — 손잡이의 **존재**가
+            //   아니다. 실을 수 없는 값이면 위 `build_spec` 이 새 대화 argv 를 냈고, 그 화신은
+            //   회수 대상이다. 두 자리가 같은 술어([`resume_argument`])를 본다.
+            let resumes_by_argv = resume_session_id.and_then(resume_argument).is_some();
+            if let Some(plan) = thread_lock::plan_capture(
+                &spec.env,
+                resumes_by_argv,
+                pid,
+                child_start,
+                sid_sink,
+                thread_lock::lock_dir(),
+            ) {
+                thread_lock::spawn_capture(plan);
+            }
+            // 터미널은 오늘 경로 그대로다 — 목록도 받음 알림도 없다.
+            (
+                Box::new(t),
+                pid,
+                MidTurnPolicy::None,
+                Arc::new(DeliveryAck::new()),
+            )
+        };
         Ok(SpawnParts {
             transport,
             child_pid,
@@ -1104,10 +1131,8 @@ impl AgentBackend for CodexBackend {
             encoder: self.input_encoder(command),
             turn_classifier: self.turn_classifier(),
             reads_messages: self.reads_messages(),
-            // ADR-0231: 아직 목록을 쓰지 않는다 — 통로가 분류·해제를 지게 되면 app-server 갈래만
-            //   `TransportOwned` 로 뒤집고, 이 Arc 를 통로에도 건넨다(하한 판정).
-            mid_turn: MidTurnPolicy::None,
-            delivery_ack: Arc::new(DeliveryAck::new()),
+            mid_turn,
+            delivery_ack,
         })
     }
 
@@ -1126,10 +1151,15 @@ impl AgentBackend for CodexBackend {
 
     // ★합성 입력 에코를 선언하지 않는다 — 되살리지 말 것★: 이 백엔드는 유저 메시지를 스스로
     //   `item/*` 의 `userMessage` item 으로 되울리고(실측), 번역기가 그것을 「우리가 보낸 것」으로
-    //   표시해 흘린다. 여기에 합성 에코를 더하면 같은 질문이 화면에 두 벌 남는다 — 둘의 dedup 키가
-    //   다르기 때문이다(합성 쪽은 우리 uuid, 되울린 쪽은 codex item id). 그 겹침이 ADR-0193 의
-    //   「거부한 대안」이 실측을 근거로 기각한 바로 그것이다.
+    //   표시해 흘린다. app-server 모드의 한가한 입력 말풍선은 **통로가** 낸다 — 한가냐 턴 도중이냐는
+    //   통로만 알고(턴 도중 글은 목록에 서고 말풍선이 없다), 그 말풍선의 uuid 가 우리 id 라 되울림의
+    //   `clientId` 와 한 벌로 접힌다. 세션 층 에코는 그 가름을 모르므로 이 모드의 세션은 에코를 내지
+    //   않는다(`AgentSession` 의 통로 턴 동사 갈래).
+    //   ★하한 미달 통로는 말풍선을 안 낸다★ — 되울림에 `clientId` 가 없어 dedup 키가 갈리고(우리 uuid vs
+    //   codex item id) 같은 질문이 두 벌 남는다. 그 겹침이 ADR-0193 의 「거부한 대안」이 실측을 근거로
+    //   기각한 바로 그것이다. 터미널 모드는 PTY 가 스스로 되울린다.
     // ADR-0193
+    // ADR-0231
 
     /// ★선언하지 않으면 번역기가 조립되지 않고 바이트가 그대로 흘러 화면이 깨진다 — 오류도 경고도 없다★.
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
@@ -1162,8 +1192,14 @@ impl AgentBackend for CodexBackend {
 /// ★터미널 모드와 공유해도 되는 이유(모드별 분기 불필요)★: 그 모드는 decoder 가 없어 `TerminalBytes` 만
 ///   흐르므로 이 매핑을 그대로 써도 신호가 하나도 나오지 않는다.
 /// ★`Ended` 앞에 `Progress` 가 없어도 안전하다(코드 근거)★: 표는 `Ended` 를 `in_turn = false` 로 적을
-///   뿐이라 짝 없는 종료는 등록 직후 상태와 같은 값을 쓰고(`crate::turn::TurnObservations::observe_at`),
-///   `in_turn_snapshot` 은 `in_turn` 인 것만 싣는다. 그래서 「시작 신호」를 지어내 채울 이유가 없다.
+///   뿐이라 짝 없는 종료도 턴 중을 켜지 않고(`crate::turn::TurnObservations::observe_at`), `in_turn_snapshot` 은
+///   `in_turn` 인 것만 싣는다. 그래서 「시작 신호」를 지어내 채울 이유가 없다. ★짝 없는 오류 끝은 등록 직후 상태가
+///   아니다★ — `last_end_failed` 를 세운다: `turn/start` 출구는 의도이고(요청 단계 실패도 이상한 끝이다 — 사용자 결정
+///   N11), 연결이 서지 못한 화신의 경계는 그 화신이 곧 끝나 `forget` 이 지운다.
+/// ★오류 끝 = 이 화신의 턴으로 귀속된 `TurnEnd{Failed}`★ — 번역된 `turn/completed(failed)`(이른 종료 풀기 포함)와
+///   통로의 포기 경로(`end_turn_if`). 턴 표가 `last_end_failed` 로 접어 커널이 우편을 붙든다(ADR-0231 — 통로의
+///   `halted` 와 같은 계기지만 그 칸을 쓰는 쪽은 이 분류기 하나다). ★귀속 게이트가 막은 남의 턴 끝과 늦은 받음 뒤의
+///   표시용 경계(`emit_without_turn_observation`)는 여기를 지나지 않는다★ — 멈춤을 세우지도 풀지도 않는다.
 /// ★명부 사건은 `Delivered` 까지 전부 `None` 이다(claude 와 다르다)★: 이 백엔드의 `Delivered` 는 턴 끝
 ///   **뒤에도** 온다(수락 모름의 늦은 에코 · 되살림). 그것이 「턴 중」을 다시 켜면 그 화신은 30 분
 ///   fail-open 밸브까지 우편이 막힌다. 턴 시작의 관측은 되울린 유저 메시지(`Structured`)가 이미 진다.
@@ -1177,10 +1213,9 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         | OutputEvent::Structured { .. } => Some(TurnSignal::Progress),
         OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
             TurnOutcome::Completed => TurnEndKind::Clean,
-            // TODO(ADR-0231): 실패 끝은 아직 「그 밖」이다 — 통로의 오류 뒤 멈춤과 함께 `Failed` 로 바꾼다.
-            TurnOutcome::Failed { .. } | TurnOutcome::Interrupted | TurnOutcome::Unknown => {
-                TurnEndKind::Other
-            }
+            TurnOutcome::Failed { .. } => TurnEndKind::Failed,
+            // 끊긴 끝은 멈춤을 세우지도 풀지도 않는다(ADR-0192 — claude 와 맞춘다). 뜻 모를 결말도 같다.
+            TurnOutcome::Interrupted | TurnOutcome::Unknown => TurnEndKind::Other,
         })),
         // 결말을 싣지 않는 끝이라 오류 뒤 멈춤을 세우지도 풀지도 않는다.
         OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Other)),
@@ -1974,30 +2009,58 @@ mod tests {
         assert_eq!(enc.encode(body, Uuid::new_v4()), body.to_vec());
     }
 
-    /// ★되살리지 마라 — 합성 입력 에코는 기각된 대안이다(ADR-0193 「거부한 대안」)★: codex 가
-    /// `userMessage` item 으로 되울리는 것과 겹쳐 같은 질문이 화면에 두 벌 남는다(dedup 키가 서로
-    /// 다르다). 유저 발화를 화면에 올리는 것은 그 되울림의 **번역**이 진다(이 폴더 `decoder`).
-    /// ★두 모드를 다 재는 것이 요점이다★ — 세션 층은 backend 가 아니라 [`InputEncoder`] 를 들고 dispatch
+    /// ★되살리지 마라★ — 터미널 모드는 PTY 가 입력을 스스로 되울린다(세션의 합성 에코는 그것이 없는 json
+    /// 모드를 흉내내는 장치다 — ADR-0044). 세션 층은 backend 가 아니라 [`InputEncoder`] 를 들고 dispatch
     /// 표를 지나므로, 선언만 보고 그 표를 안 보면 되살아난 에코가 초록인 채 지나간다.
     ///
-    /// ★★이 부재에 **화면 복원의 순서**도 걸려 있다(ADR-0203) — 되살리려면 그 순서를 먼저 풀어야 한다★★:
-    /// app-server 모드의 이력은 핸드셰이크 **뒤에** 상대에게 요청해서 받는데, 세션은 그 창에서도 입력을
-    /// 받아 큐에 세운다(그것이 옳다 — 최대 10 초 동안 입력을 거절하는 쪽이 더 나쁘다). 에코가 있으면 그
-    /// 입력이 **즉시** 링에 실리고, 뒤늦게 도착한 복원 이력이 그 아래 깔려 **사용자의 새 말이 복원된 옛
-    /// 대화보다 위에** 그려진다. 오늘 그 일이 안 일어나는 이유는 순서를 지키는 장치가 아니라 **에코가
-    /// 없다는 이 사실**이다.
-    /// ★그 창에서 사용자가 보는 것★ = 자기 말풍선 대신 프론트의 대기 표시이고, 게이트가 열린 뒤 상대가
-    /// 되울린 `userMessage` item 이 정상 순서로 말풍선을 세운다.
+    /// app-server 모드의 말풍선은 이 표가 아니라 통로가 낸다(ADR-0231 — 세션은 통로 턴 동사 갈래에서 에코를
+    /// 내지 않고, 하한 미달 통로는 말풍선을 안 낸다 — ADR-0193 「거부한 대안」). ★그 말풍선이 **화면 복원의
+    /// 순서**를 깨지 않는 것은 통로의 한가 조건 덕이다(ADR-0203)★: 이력은 핸드셰이크 **뒤에** 받아 게이트
+    /// (`Link::Ready`) 앞에 올리는데 합성 말풍선은 `Ready` 에서만 서므로, 그 창에 친 글은 말풍선 없이 목록에
+    /// 선다. 그 조건을 풀면 사용자의 새 말이 복원된 옛 대화보다 위에 그려진다.
     #[test]
-    fn neither_mode_makes_a_synthetic_input_echo() {
-        for command in [codex_app_server(vec![]), codex(vec![])] {
-            let enc = CodexBackend.input_encoder(&command);
-            assert!(
-                enc.input_echo_event("안녕 codex".as_bytes(), Uuid::new_v4())
-                    .is_none(),
-                "{enc:?}: 합성 에코가 되살아났다"
-            );
-        }
+    fn the_terminal_mode_makes_no_synthetic_input_echo() {
+        let enc = CodexBackend.input_encoder(&codex(vec![]));
+        assert!(
+            enc.input_echo_event("안녕 codex".as_bytes(), Uuid::new_v4())
+                .is_none(),
+            "{enc:?}: 합성 에코가 되살아났다"
+        );
+    }
+
+    /// app-server 모드만 목록을 통로에 맡기고, 받음 가능 여부는 통로의 하한 판정이 채우는 **바로 그** Arc 다.
+    /// 통로는 `dyn` 으로 감싸여 나오므로 주인 수로 잰다 — 조립점 몫 하나 + 통로의 판정 칸 하나(그 칸이
+    /// `delivery_ack()` 가 내주는 것이라는 사실은 통로 쪽 시험
+    /// `the_transport_hands_out_the_very_ack_its_verdict_fills` 가 잰다). 따로 만든 Arc 면 1 이다.
+    #[cfg(windows)]
+    #[test]
+    fn only_the_app_server_spawn_hands_the_list_to_the_transport_with_the_transport_s_own_ack() {
+        let probe = CommandSpec {
+            program: "cmd.exe".into(),
+            args: ["/c", "ping", "-n", "30", "127.0.0.1"]
+                .map(String::from)
+                .to_vec(),
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+        let open = |command: &AgentCommand| {
+            crate::backend::open_spawn(command, &probe, 80, 24, None, None, None, None, None)
+                .expect("open_spawn")
+        };
+
+        let json = open(&codex_app_server(vec![]));
+        assert!(matches!(json.mid_turn, MidTurnPolicy::TransportOwned));
+        assert_eq!(
+            Arc::strong_count(&json.delivery_ack),
+            2,
+            "통로의 판정 칸과 나눠 쥔 Arc 가 아니다 — 세션과 통로가 서로 다른 값을 본다"
+        );
+        json.transport.shutdown();
+
+        let terminal = open(&codex(vec![]));
+        assert!(matches!(terminal.mid_turn, MidTurnPolicy::None));
+        assert_eq!(Arc::strong_count(&terminal.delivery_ack), 1);
+        terminal.transport.shutdown();
     }
 
     #[test]
@@ -2011,14 +2074,17 @@ mod tests {
             Some(TurnSignal::Ended(TurnEndKind::Clean))
         );
         // 결말이 무엇이든 턴은 끝난 것이다 — 실패·중단·미상이 여기서 갈리면 그 결말의 대기 표시가 남는다.
-        // 실패 끝이 아직 「그 밖」인 것은 오류 뒤 멈춤을 통로와 함께 켜기 전까지의 의도다(ADR-0231).
-        for outcome in [
-            TurnOutcome::Failed {
-                detail: Some("boom".into()),
-            },
-            TurnOutcome::Interrupted,
-            TurnOutcome::Unknown,
-        ] {
+        // 실패는 오류 끝이고(오류 뒤 멈춤 — ADR-0231), 끊김·미상은 「그 밖」이다(멈춤을 세우지도 풀지도 않는다).
+        assert_eq!(
+            classify(&OutputEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Failed {
+                    detail: Some("boom".into()),
+                },
+            }),
+            Some(TurnSignal::Ended(TurnEndKind::Failed))
+        );
+        for outcome in [TurnOutcome::Interrupted, TurnOutcome::Unknown] {
             assert_eq!(
                 classify(&OutputEvent::TurnEnd {
                     turn_id: None,
@@ -2408,6 +2474,9 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       $tid = 'MISSING'
       if ($line -match '"threadId":"([^"]+)"') { $tid = $Matches[1] }
       Send ('{"id":' + $rid + ',' + RESUME_REPLY_PLACEHOLDER + '}')
+    } elseif ($line -match '"method":"turn/start"') {
+      Send ('{"id":' + $rid + ',"result":{"turn":{"id":"fake-turn"}}}')
+      Send '{"method":"item/started","params":{"threadId":"THREAD_ID_PLACEHOLDER","turnId":"fake-turn","item":{"type":"userMessage","id":"fake-user-item","content":[{"type":"text","text":"echo"}]}}}'
     }
   }
 }
@@ -2444,6 +2513,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             80,
             24,
             Some(sink),
+            None,
             None,
             Some(link_sink),
             None,
@@ -2519,6 +2589,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             80,
             24,
             Some(sink),
+            None,
             Some(resume_target),
             Some(link_sink),
             None,
@@ -2638,6 +2709,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             80,
             24,
             Some(sink),
+            None,
             Some(resume_target),
             Some(link_sink),
             None,
@@ -2812,6 +2884,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             24,
             Some(sink),
             None,
+            None,
             Some(link_sink),
             None,
         )
@@ -2910,6 +2983,106 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
             "종점에 닿았는데 자식이 수거된 흔적이 없다 — `Failed` 와 `Exited{{code:None}}` 는 자식이 살아 \
              있어도 서므로, 그것만으로는 「세션만 끝나고 프로세스는 남았다」와 구별되지 않는다(관측: {seen:?})"
         );
+        assert!(
+            leftover.is_empty(),
+            "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
+        );
+    }
+
+    /// ★턴을 통로가 지는 모드의 짝 — 첫 턴 포트가 실 통로까지 꽂히고, 핸드셰이크가 아니라 상대의 유저 메시지
+    /// 되울림에서 불린다(ADR-0226 개정 · 사용자 결정 2026-09-26)★.
+    ///
+    /// 기록 포트는 핸드셰이크에서 불렸는데 첫 턴 포트는 아직이다 → 턴 하나를 넘기면 가짜가 `turn/start` 에
+    ///   답하고 유저 메시지를 되울린다 → 첫 턴 포트가 한 번 불린다. 가짜의 판이 하한 미달이라 되울림에
+    ///   `clientId` 가 없다 — 그래도 센다. 세션이 그 모드에서 세지 않는다는 쪽은 `session.rs` 시험이 잰다.
+    #[cfg(windows)]
+    #[test]
+    fn an_app_server_spawn_counts_the_first_turn_at_the_echo_not_at_the_handshake() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, InputOrigin, StatusSink, TurnInput};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: Uuid, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let thread_id = Uuid::new_v4().to_string();
+        let fake = bake_fake_app_server(&thread_id, FakeResume::EchoesTheThreadId);
+
+        let recorded: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: SessionIdSink = {
+            let recorded = recorded.clone();
+            Arc::new(move |id: &str| recorded.lock().unwrap().push(id.to_string()))
+        };
+        let first_turns = Arc::new(AtomicUsize::new(0));
+        let first_turn: FirstTurnSink = {
+            let first_turns = first_turns.clone();
+            Arc::new(move || {
+                first_turns.fetch_add(1, Ordering::SeqCst);
+            })
+        };
+        let (link_sink, delivered) = link_recorder();
+
+        let parts = crate::backend::open_spawn(
+            &codex_app_server(vec![]),
+            &fake.spec,
+            80,
+            24,
+            Some(sink),
+            Some(first_turn),
+            None,
+            Some(link_sink),
+            None,
+        )
+        .expect("open_spawn");
+        assert!(
+            matches!(parts.mid_turn, MidTurnPolicy::TransportOwned),
+            "전제: 이 모드가 턴을 통로가 지는 모드다"
+        );
+
+        wait_for_the_fake_to_listen(&fake);
+        parts.transport.start(Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            1,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        )));
+        wait_for_recording(|| !recorded.lock().unwrap().is_empty(), &delivered, &fake);
+        wait_until(
+            || !delivered.lock().unwrap().is_empty(),
+            "연결 결말이 배달되는 것",
+        );
+        let ready = matches!(
+            delivered.lock().unwrap().first(),
+            Some(crate::transport::LinkResolution::Ready)
+        );
+        let before_any_turn = first_turns.load(Ordering::SeqCst);
+
+        parts
+            .transport
+            .send_turn(TurnInput {
+                id: "u-1".into(),
+                body: b"hi".to_vec(),
+                origin: InputOrigin::User,
+            })
+            .expect("받는다");
+        wait_until(
+            || first_turns.load(Ordering::SeqCst) > 0,
+            "가짜의 유저 메시지 되울림에 첫 턴 포트가 불리는 것",
+        );
+        parts.transport.shutdown();
+
+        let leftover = fake.remove();
+        assert!(ready, "연결이 서지 않았다: {:?}", delivered.lock().unwrap());
+        assert_eq!(
+            before_any_turn, 0,
+            "핸드셰이크만으로 첫 턴을 셌다 — 입력 없이 끈 화신의 0턴 id 가 영속된다"
+        );
+        assert_eq!(first_turns.load(Ordering::SeqCst), 1);
+        assert_eq!(*recorded.lock().unwrap(), vec![thread_id]);
         assert!(
             leftover.is_empty(),
             "가짜 app-server 파일을 지우지 못했다: {leftover:?}"
@@ -3592,6 +3765,7 @@ mod terminal_capture_wiring {
                 80,
                 24,
                 Some(sink),
+                None,
                 // ★`None` = fresh 화신★ — 이어받기였다면 회수가 아예 안 돌아야 한다(아래 형제 단언).
                 None,
                 None,
@@ -3689,6 +3863,7 @@ mod terminal_capture_wiring {
                 80,
                 24,
                 Some(sink),
+                None,
                 Some(thread_id),
                 None,
                 None,

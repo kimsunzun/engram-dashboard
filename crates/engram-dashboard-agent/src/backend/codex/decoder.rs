@@ -54,7 +54,7 @@ use serde_json::Value;
 
 use super::protocol::{self, method, Inbound};
 use crate::transport::OutputDecoder;
-use crate::types::{OutputEvent, TurnOutcome};
+use crate::types::{OutputEvent, QueuedInputEvent, TurnOutcome};
 
 /// 로그 한 줄에 실을 상대 문자열 상한(문자 수). ★오류 본문이 4KB 에 이르는 경우가 실측됐다★
 /// (모르는 메서드 오류가 유효 메서드 160 개를 전부 열거한다) — 자르지 않으면 로그가 그것으로 덮인다.
@@ -267,6 +267,10 @@ enum ItemOrigin {
 
 /// 도구 호출로 옮기는 `ThreadItem` 변형. 나머지는 우리 중립 어휘에 자리가 없거나
 /// (추론·계획·리뷰 모드 전환) 다른 알림이 이미 나른다.
+///
+/// ★통로의 넘기기 구간도 이 표를 읽는다([`item_class`] 의 도구 항목)★ — 여기 든 변형은 끝날 때까지 쥐는
+///   쪽으로 세므로, 넓히려면 그 변형의 `item/completed` 뒤에 벤더의 대기분 확인이 온다는 근거(소스 또는
+///   M7 방식 측정)가 먼저다. 근거 없이 넓히면 그 끝을 기다리다 확인을 놓친다(TRD §5-5).
 const TOOL_ITEM_TYPES: &[&str] = &[
     "mcpToolCall",
     "dynamicToolCall",
@@ -275,6 +279,52 @@ const TOOL_ITEM_TYPES: &[&str] = &[
     "fileChange",
     "webSearch",
 ];
+
+/// 모델 출력 `ThreadItem` 변형 — 통로의 답 구간을 세운다. `plan` 은 도구가 아니라 델타로 흐르는 모델
+/// 출력이라 답과 같게 친다(TRD §5-5).
+// ADR-0231
+const OUTPUT_ITEM_TYPES: &[&str] = &[AGENT_MESSAGE_ITEM_TYPE, "reasoning", "plan"];
+
+/// 끝(`item/completed`)이 답 끝 신호인 출력 변형 — 그 순간 넘긴 글이 같은 턴의 후속 샘플링에 들었다
+/// (M6 T3 · `plan` 포함 M16 녹). ★`reasoning` 은 없다★ — 그 끝 뒤에는 같은 샘플링이 답을 이어 쓴다.
+// ADR-0231
+const ANSWER_ITEM_TYPES: &[&str] = &[AGENT_MESSAGE_ITEM_TYPE, "plan"];
+
+/// 통로의 넘기기 구간 판정이 읽는 item 분류(TRD §5-5) — 통로는 어휘를 따로 베끼지 않고 이것을 부른다.
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ItemClass {
+    /// [`TOOL_ITEM_TYPES`] — 도는 동안 도구 구간이고, 마지막 것이 끝나면 도구 끝 신호다.
+    Tool,
+    /// [`OUTPUT_ITEM_TYPES`] — 가장 최근에 섰으면 답 구간이다.
+    Output,
+    /// 나머지 전부 — 되울림 `userMessage` · 도구인지 벤더 근거를 안 본 아는 변형 · 어휘에 없는 변형.
+    ///   ★모호하면 여기로 떨어진다★ — 이 구간은 어느 정책에서도 곧바로 넘긴다(일찍 넘기는 것은 무해하다).
+    Other,
+}
+
+// ADR-0231
+pub(super) fn item_class(item_type: &str) -> ItemClass {
+    if TOOL_ITEM_TYPES.contains(&item_type) {
+        ItemClass::Tool
+    } else if OUTPUT_ITEM_TYPES.contains(&item_type) {
+        ItemClass::Output
+    } else {
+        ItemClass::Other
+    }
+}
+
+/// 이 변형의 `item/completed` 가 (도는 도구가 없을 때) 답 끝 신호인가 — [`ANSWER_ITEM_TYPES`].
+// ADR-0231
+pub(super) fn ends_answer(item_type: &str) -> bool {
+    ANSWER_ITEM_TYPES.contains(&item_type)
+}
+
+/// 이 변형이 되울린 유저 메시지인가 — [`USER_MESSAGE_ITEM_TYPE`].
+// ADR-0226
+pub(super) fn is_user_message(item_type: &str) -> bool {
+    item_type == USER_MESSAGE_ITEM_TYPE
+}
 
 /// 옮기지 못한 관측의 등급 — 로그 레벨과 문구를 정한다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -575,7 +625,7 @@ impl CodexAppServerDecoder {
             // ★버리지 않는다 — 이것이 재부착 뒤 화면을 되살리는 재료다★: 우리 쪽에는 이 대화의
             //   유저 발화를 복원할 다른 재료가 없다(입력 시점 합성 에코를 선언하지 않으므로 — 이
             //   폴더 `mod.rs` 의 그 자리 · ADR-0193).
-            return self.user_message(item, method_name, origin != ItemOrigin::Completed);
+            return self.user_message(item, method_name, origin);
         }
         // ★이력 전용 arm — 라이브 두 갈래는 여기 안 들어온다★(사유 정본 = [`AGENT_MESSAGE_ITEM_TYPE`]).
         if origin == ItemOrigin::History && kind == AGENT_MESSAGE_ITEM_TYPE {
@@ -639,19 +689,32 @@ impl CodexAppServerDecoder {
     ///   결함으로 계수한다.
     /// ★같은 것이라 빼는 둘째 알림은 「옮기지 못한 관측」으로 세지 않는다★ — 그 맵의 뜻은 **버린 것**
     ///   이고, 이것은 이미 올라간 것이다. 여기에 섞으면 그 맵이 드리프트 탐지기이기를 그만둔다.
+    /// ★`clientId`(우리가 `clientUserMessageId` 로 실은 id)가 있으면 말풍선 **바로 앞에**
+    ///   `QueuedInput(Delivered{clientId})` 를 낸다 — 라이브 두 문에서만★. 벤더가 그 글을 이력에 넣은
+    ///   순간이 받음이다(TRD §5-5 「소비 에코」). 이력 문은 내지 않는다: 지난 기록은 받음 사건이 아니고,
+    ///   이력 덩이를 싣는 코어 문은 목록 사건을 받지 않는다.
+    // ADR-0231
     fn user_message(
         &mut self,
         item: &Value,
         method_name: &str,
-        at_item_start: bool,
+        origin: ItemOrigin,
     ) -> Vec<OutputEvent> {
+        let at_item_start = origin != ItemOrigin::Completed;
         let id = item.get("id").and_then(|v| v.as_str());
-        // ★기억에 담고 대조하는 것은 **와이어와 같은 상한**을 거친 id 뿐이다★ — 그 id 는 `uuid` 로도
-        //   같은 상한에서 걸러지는데([`user_message_event`]) 여기만 원형을 담으면, 칸 수 상한
-        //   ([`MAX_EMITTED_USER_ITEMS`])이 길이를 못 막아 상대가 길이를 정하는 문자열이 세션 내내 남는다.
-        //   ★대가 = 상한을 넘긴 id 의 말풍선은 `started`/`completed` 양쪽에서 올라 두 벌 남는다★ —
-        //   프론트의 `uuid` dedup 도 같은 상한에 걸려 비어 있어 거기서도 안 걸린다. 길이 판정을 자르기로
-        //   바꾸지 않는 사유는 [`bounded_id`] 와 같다(잘린 둘이 같아지면 서로 다른 말이 한 벌로 접힌다).
+        // 대조 토큰이라 자르지 않고 거른다(사유 = [`MAX_ID_BYTES`]) — 걸러지면 오늘처럼 item id 로 간다.
+        let client_id = item
+            .get("clientId")
+            .and_then(|v| v.as_str())
+            .filter(|c| c.len() <= MAX_ID_BYTES);
+        // ★기억에 담고 대조하는 것은 **와이어와 같은 상한**을 거친 item id 뿐이다★ — 원형을 담으면 칸 수
+        //   상한([`MAX_EMITTED_USER_ITEMS`])이 길이를 못 막아 상대가 길이를 정하는 문자열이 세션 내내 남는다.
+        // ★이 키는 말풍선 `uuid` 와 다르다★ — `uuid` 는 `clientId`(같은 상한을 지난 것)가 먼저고 없을 때만 이
+        //   키다(아래 [`user_message_event`] 호출). 그래서 item id 가 상한을 넘기면 이 기억이 `started`/`completed`
+        //   짝을 못 잡아 말풍선이 두 번 나가고, `clientId` 가 있으면 `Delivered` 도 두 번 나간다. 그 뒤는 `clientId`
+        //   가 가른다 — 있으면 두 말풍선의 `uuid` 가 같아 프론트의 `uuid` dedup 이 한 벌로 접고, 없으면(하한 미달 ·
+        //   식별자 없이 든 입력 · 우리가 넣지 않은 글) `uuid` 가 비어 두 벌 남는다. 길이 판정을 자르기로 바꾸지 않는 사유는
+        //   [`bounded_id`] 와 같다(잘린 둘이 같아지면 서로 다른 말이 한 벌로 접힌다).
         let dedup_key = id.filter(|s| s.len() <= MAX_ID_BYTES);
         if dedup_key.is_some_and(|seen| self.emitted_user_items.iter().any(|k| k == seen)) {
             return Vec::new();
@@ -666,15 +729,21 @@ impl CodexAppServerDecoder {
                 return Vec::new();
             }
         }
+        let delivered = match (origin, client_id) {
+            (ItemOrigin::History, _) | (_, None) => None,
+            (_, Some(c)) => Some(OutputEvent::QueuedInput(QueuedInputEvent::Delivered {
+                id: c.to_string(),
+            })),
+        };
         // 텍스트 조각이 하나도 없는 유저 메시지(이미지·오디오·mention 만) — 빈 말풍선을 만들지 않고
-        //   일상 계수로 흘린다. 그 입력 종류를 나를 어휘가 우리에게 없다.
-        let Some(event) = user_message_event(item) else {
+        //   일상 계수로 흘린다. 그 입력 종류를 나를 어휘가 우리에게 없다. 받음은 그래도 받음이다.
+        let Some(event) = user_message_event(item, client_id.or(dedup_key)) else {
             self.observe(
                 format!("item:{method_name}#{USER_MESSAGE_ITEM_TYPE}"),
                 Observed::Routine,
                 "",
             );
-            return Vec::new();
+            return delivered.into_iter().collect();
         };
         if let Some(id) = dedup_key {
             // 오래된 것부터 밀어낸다 — 세션이 길어진다고 이 기억이 자라면 안 된다.
@@ -683,7 +752,7 @@ impl CodexAppServerDecoder {
             }
             self.emitted_user_items.push_back(id.to_string());
         }
-        vec![event]
+        delivered.into_iter().chain([event]).collect()
     }
 
     /// `thread/tokenUsage/updated` → [`OutputEvent::Usage`].
@@ -1027,20 +1096,16 @@ fn overflow_event(seen: usize) -> OutputEvent {
 ///   소비자가 `uuid` 를 dedup 키로 집는다. 그래서 claude 쪽 같은 모양과 **글자 그대로 같아야** 하고,
 ///   그 사실이 이 두 벌을 한 함수로 합칠 이유는 되지 않는다 — 합치면 그 함수가 두 백엔드 폴더 밖에
 ///   살아야 한다. (그 hoist 는 한 번 시도됐다가 되돌려졌다.)
-/// ★`uuid` 에 실리는 것은 **codex 의 item id** 다 — 우리 uuid 가 아니다★: 이 경로에는 우리가 심은
-///   식별자가 없다(입력 봉투를 통로가 만들고, 합성 에코를 선언하지 않는다). 스키마가 그 `id` 를
-///   required 로 적으므로(0.154.0 `UserMessageThreadItem`) 실제로는 언제나 실리지만, 없으면 칸을
-///   비운다 — 없는 키는 dedup 대상이 아니라 그대로 보존된다.
+/// ★`uuid` = 호출자가 고른 dedup 키★ — item 의 `clientId`(우리가 `clientUserMessageId` 로 실은 id —
+///   통로의 합성 말풍선·목록 항목과 같은 값이라 한 벌로 접힌다)가 있으면 그것, 없으면 **codex 의 item
+///   id** 다. 스키마가 그 `id` 를 required 로 적으므로(0.154.0 `UserMessageThreadItem`) 실제로는 언제나
+///   실리지만, 없으면 칸을 비운다 — 없는 키는 dedup 대상이 아니라 그대로 보존된다.
 /// ★텍스트 조각 여럿은 개행으로 잇는다★ — 스키마는 `content` 를 배열로 두고 조각 사이 구분자를
 ///   정하지 않는다. 붙여 쓰면 낱말이 엉기므로 줄을 나눈다(우리 선택 · 실측된 관례가 아니다).
-/// ★길이는 [`clip`] 으로 거르되 **마스킹하지 않는다 — 되살리지 말 것**★: 이것은 진단 문자열이 아니라
-/// 사용자가 친 말 그대로이고, 마스킹은 그 기록을 변형한다(claude 쪽 유저 블록도 같은 운반선에 마스킹
-/// 없이 싣는다 — `backend/claude/mod.rs` 의 `input_echo_event`). 마스킹 규율이 겨냥하는 것은
-/// **진단 문자열**이다.
 // ADR-0004
 // ADR-0045
 // ADR-0193
-fn user_message_event(item: &Value) -> Option<OutputEvent> {
+fn user_message_event(item: &Value, uuid: Option<&str>) -> Option<OutputEvent> {
     let text = item
         .get("content")
         .and_then(|v| v.as_array())?
@@ -1052,7 +1117,20 @@ fn user_message_event(item: &Value) -> Option<OutputEvent> {
     if text.is_empty() {
         return None;
     }
-    let text = clip(&text, MAX_TRANSCRIPT_CHARS);
+    Some(user_bubble(&text, uuid))
+}
+
+/// 「우리가 보낸 것」 말풍선 한 개 — 되울린 유저 메시지와 통로의 합성 말풍선(Direct)이 같은 모양을 쓴다.
+///
+/// ★json 모양은 소비자 계약이다★(사유 = [`user_message_event`] doc). `uuid` 는 dedup 키라 호출자가
+///   이미 [`MAX_ID_BYTES`] 로 거른 값을 넘긴다.
+/// ★길이는 [`clip`] 으로 거르되 **마스킹하지 않는다 — 되살리지 말 것**★: 이것은 진단 문자열이 아니라
+/// 사용자가 친 말 그대로이고, 마스킹은 그 기록을 변형한다(claude 쪽 유저 블록도 같은 운반선에 마스킹
+/// 없이 싣는다 — `backend/claude/mod.rs` 의 `input_echo_event`). 마스킹 규율이 겨냥하는 것은
+/// **진단 문자열**이다.
+// ADR-0231
+pub(super) fn user_bubble(text: &str, uuid: Option<&str>) -> OutputEvent {
+    let text = clip(text, MAX_TRANSCRIPT_CHARS);
 
     #[derive(serde::Serialize)]
     struct TextBlock<'a> {
@@ -1065,17 +1143,13 @@ fn user_message_event(item: &Value) -> Option<OutputEvent> {
     let block = TextBlock {
         kind: "text",
         text: &text,
-        // dedup 키라 자르지 않고 거른다 — 자른 둘이 같아지면 서로 다른 말이 한 벌로 접힌다.
-        uuid: item
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|id| id.len() <= MAX_ID_BYTES),
+        uuid,
     };
-    Some(OutputEvent::Structured {
+    OutputEvent::Structured {
         kind: "user".to_string(),
         // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
         json: serde_json::to_string(&block).unwrap_or_default(),
-    })
+    }
 }
 
 /// 도구 변형 item 한 개 → [`OutputEvent::ToolCall`].
@@ -1852,6 +1926,99 @@ mod tests {
                 .get("item:item/started#userMessage"),
             Some(&1)
         );
+    }
+
+    // ── 소비 에코(`clientId`) — ADR-0231 ────────────────────────────────────
+
+    fn client_item(client_id: Option<&str>) -> Value {
+        let mut item = serde_json::json!({"type": "userMessage", "id": "codex-item-1",
+                                          "content": [{"type": "text", "text": "hi"}]});
+        if let Some(c) = client_id {
+            item["clientId"] = Value::String(c.to_string());
+        }
+        item
+    }
+
+    fn bubble_uuid(event: &OutputEvent) -> Option<String> {
+        match event {
+            OutputEvent::Structured { kind, json } if kind == "user" => {
+                let v: Value = serde_json::from_str(json).unwrap();
+                v["uuid"].as_str().map(str::to_string)
+            }
+            other => panic!("유저 말풍선이 아니다: {other:?}"),
+        }
+    }
+
+    /// ★받음은 말풍선 **바로 앞**이다★ — 누산기는 `Delivered` 자리에 목록 항목의 말풍선을 세우고, 뒤이은
+    /// 되울림은 같은 uuid 라 한 벌로 접는다. uuid 가 codex item id 로 남으면 말풍선이 두 벌 선다.
+    #[test]
+    fn an_echo_carrying_our_client_id_is_delivered_right_before_a_bubble_keyed_by_it() {
+        for method_name in [method::ITEM_STARTED, method::ITEM_COMPLETED] {
+            let events = decode_notification(
+                method_name,
+                serde_json::json!({"threadId": "t", "turnId": "u", "item": client_item(Some("ours-1"))}),
+            );
+            match events.as_slice() {
+                [OutputEvent::QueuedInput(QueuedInputEvent::Delivered { id }), bubble] => {
+                    assert_eq!(id, "ours-1", "{method_name}");
+                    assert_eq!(
+                        bubble_uuid(bubble).as_deref(),
+                        Some("ours-1"),
+                        "{method_name}"
+                    );
+                }
+                other => panic!("{method_name}: 받음 + 말풍선이 아니다: {other:?}"),
+            }
+        }
+    }
+
+    /// `clientId` 가 없으면 오늘 그대로다 — 받음 없이 codex item id 로 말풍선 하나.
+    #[test]
+    fn an_echo_without_a_client_id_is_today_s_bubble_and_no_delivery() {
+        let events = decode_notification(
+            method::ITEM_STARTED,
+            serde_json::json!({"threadId": "t", "turnId": "u", "item": client_item(None)}),
+        );
+        match events.as_slice() {
+            [bubble] => assert_eq!(bubble_uuid(bubble).as_deref(), Some("codex-item-1")),
+            other => panic!("말풍선 하나가 아니다: {other:?}"),
+        }
+    }
+
+    /// 한 item 의 두 알림은 받음·말풍선 **한 벌**이다 — 둘째는 item id 대조에 걸려 통째로 빠진다.
+    #[test]
+    fn the_second_notification_of_an_echo_repeats_neither_delivery_nor_bubble() {
+        let mut d = CodexAppServerDecoder::new();
+        let params = serde_json::json!({"threadId": "t", "turnId": "u", "item": client_item(Some("ours-1"))});
+        let first = d.decode(notification_line(method::ITEM_STARTED, params.clone()).as_bytes());
+        let second = d.decode(notification_line(method::ITEM_COMPLETED, params).as_bytes());
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(second.is_empty(), "{second:?}");
+    }
+
+    /// ★이력 문은 받음을 내지 않는다★ — 지난 기록은 받음 사건이 아니고, 이력 덩이를 싣는 코어 문은 목록
+    /// 사건을 받지 않는다(debug 빌드에서 단언이 터진다). 말풍선 uuid 는 라이브와 같은 규칙이다.
+    #[test]
+    fn the_history_door_keys_the_bubble_by_client_id_but_delivers_nothing() {
+        let (_, _, history) = through_each_door(client_item(Some("ours-1")));
+        match history.as_slice() {
+            [bubble] => assert_eq!(bubble_uuid(bubble).as_deref(), Some("ours-1")),
+            other => panic!("말풍선 하나가 아니다: {other:?}"),
+        }
+    }
+
+    /// 상한을 넘긴 `clientId` 는 없는 것과 같다 — 대조 토큰이라 자르지 않고 거른다.
+    #[test]
+    fn an_oversize_client_id_falls_back_to_today_s_bubble() {
+        let long = "c".repeat(MAX_ID_BYTES + 1);
+        let events = decode_notification(
+            method::ITEM_STARTED,
+            serde_json::json!({"threadId": "t", "turnId": "u", "item": client_item(Some(&long))}),
+        );
+        match events.as_slice() {
+            [bubble] => assert_eq!(bubble_uuid(bubble).as_deref(), Some("codex-item-1")),
+            other => panic!("말풍선 하나가 아니다: {other:?}"),
+        }
     }
 
     // ── 턴 경계(`turn/completed`) ────────────────────────────────────────────
@@ -2819,5 +2986,53 @@ mod tests {
     #[test]
     fn truncate_cuts_on_character_boundaries() {
         assert_eq!(truncate(&"한".repeat(10), 3), "한한한…");
+    }
+
+    // ── 넘기기 구간 분류 (ADR-0231 · TRD §5-5) ───────────────────────────
+
+    /// 도구 = 도구 호출 어휘 여섯 · 출력 = `agentMessage`·`reasoning`·`plan` · 나머지(아는 변형 · 모르는
+    /// 변형 · 빈 문자열)는 전부 그 밖이다. 답 끝 신호는 `agentMessage`·`plan` 의 끝뿐이다.
+    #[test]
+    fn item_class_reads_the_tool_vocabulary_and_everything_unproven_falls_to_other() {
+        let table: &[(&str, ItemClass, bool)] = &[
+            ("commandExecution", ItemClass::Tool, false),
+            ("fileChange", ItemClass::Tool, false),
+            ("mcpToolCall", ItemClass::Tool, false),
+            ("dynamicToolCall", ItemClass::Tool, false),
+            ("collabAgentToolCall", ItemClass::Tool, false),
+            ("webSearch", ItemClass::Tool, false),
+            ("agentMessage", ItemClass::Output, true),
+            ("plan", ItemClass::Output, true),
+            ("reasoning", ItemClass::Output, false),
+            ("userMessage", ItemClass::Other, false),
+            ("hookPrompt", ItemClass::Other, false),
+            ("contextCompaction", ItemClass::Other, false),
+            ("enteredReviewMode", ItemClass::Other, false),
+            ("exitedReviewMode", ItemClass::Other, false),
+            ("imageView", ItemClass::Other, false),
+            ("imageGeneration", ItemClass::Other, false),
+            ("sleep", ItemClass::Other, false),
+            ("subAgentActivity", ItemClass::Other, false),
+            ("functionCallOutput", ItemClass::Other, false),
+            ("someFutureVariant", ItemClass::Other, false),
+            ("", ItemClass::Other, false),
+        ];
+        for (kind, class, answer) in table {
+            assert_eq!(item_class(kind), *class, "{kind}");
+            assert_eq!(ends_answer(kind), *answer, "{kind}");
+        }
+        // 표가 아는 변형을 전부 덮는다 — 스키마의 새 변형이 이 표를 조용히 빠져나가지 않게.
+        for kind in KNOWN_ITEM_TYPES {
+            assert!(
+                table.iter().any(|(k, _, _)| k == kind),
+                "{kind} 가 분류 표에 없다"
+            );
+        }
+        for kind in TOOL_ITEM_TYPES.iter().chain(OUTPUT_ITEM_TYPES) {
+            assert!(
+                KNOWN_ITEM_TYPES.contains(kind),
+                "{kind} 가 스키마 어휘에 없다"
+            );
+        }
     }
 }

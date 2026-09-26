@@ -348,8 +348,11 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     replayDone && !continuesConversation && !hasSent && items.length === 0 && !hasQueued
 
   // ADR-0226: 이어받기 화신이 아직 이력을 못 받았다 — 국면(복원 중·부재)과 무관한 부분. 끝나는 길은
-  //   첫 이력(hasHistoryRow) · 입력(hasSent) · 재시작(새 화신의 비우기 + 'live' 거짓) 셋이다.
-  const historyPending = continuesConversation && !hasSent && !hasHistoryRow
+  //   첫 행(hasHistoryRow — 이력이든 전달된 말풍선이든) · 재시작(새 화신의 비우기 + 'live' 거짓) 둘이다.
+  // ADR-0231: ★입력(hasSent)을 끝나는 길로 되살리지 말 것★ — 연결 중 친 글은 행이 아니라 대기 목록에 서고,
+  //   이력이 오면 이력이, 끝내 안 오면 연결 뒤 전달된 말풍선이 로딩을 걷는다. 입력으로 걷으면 이력이 오기 전
+  //   빈 판이 비친다.
+  const historyPending = continuesConversation && !hasHistoryRow
   // 그 대기를 로딩 패널로 **그리는** 조건 — 복원이 끝났고 막이 없을 때만(부재면 막이 이긴다).
   //   ★타이머로 끝내지 않는다★(ADR-0038) — 이력이 끝내 안 오면 입력이 빠져나갈 길이다.
   const awaitingHistory = replayDone && historyPending && !agentUnavailable
@@ -360,7 +363,9 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   //   ADR-0226: 이력 대기 중에는 대기 꼬리를 내린다 — usage 만 온 창에서 로딩 패널과 함께 뜬다. 그 밖의
   //   창은 위 규칙 그대로다. ★awaitingHistory 가 아니라 historyPending 으로 내린다★: 같은 화신 재부착의
   //   'buffering' 이나 부재 막 동안 패널만 잠깐 내려간 창에 꼬리(경과 초 포함)가 끼면 패널 → 꼬리 → 패널로
-  //   깜빡인다. awaiting 항은 건드리지 않는다: 전송이 곧 대기를 끝내므로 둘은 겹치지 않는다.
+  //   깜빡인다. ★awaiting 항은 이 게이트 밖에 둔다★: 연결 중 친 글은 로딩을 걷지 않으므로 전송 직후 둘이
+  //   겹친다 — 대기 목록 사건이 오면 awaiting 이 풀려 꼬리가 내려간다. 그 사건이 없는 길(목록을 안 쓰는
+  //   통로 · 판정 전)에서는 이 꼬리가 「보낸 글이 걸려 있다」의 유일한 표시라 게이트 안으로 넣지 않는다.
   //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
   const streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)
 

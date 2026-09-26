@@ -202,6 +202,18 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
 // ADR-0185
 pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// 「이 화신의 대화에 턴이 실제로 생겼다」를 조립점에 알리는 **한 동사** 포트 — 조립점은 세션 id 첫 제출
+/// 래치의 제출 입력을 여기 꽂는다.
+///
+/// ★부르는 쪽은 턴을 통로가 지는(`MidTurnPolicy::TransportOwned`) backend 의 통로뿐이다★ — 그 모드의 세션은
+///   제출을 세지 않고, 통로가 상대의 **첫 유저 메시지 되울림**에서 이것을 부른다. 그 밖의 backend 는 세션이
+///   보내기 전에 세므로 이 포트를 무시한다. ★둘은 짝이다★: `TransportOwned` 를 신고하면서 이 포트를 통로에
+///   안 꽂으면 어느 화신도 id 를 영속하지 못한다(오류 없이 모든 이어받기가 새 대화가 된다).
+/// 여러 번 불려도 된다 — 받는 쪽(래치)이 첫 번만 센다.
+// ADR-0226
+// ADR-0231
+pub type FirstTurnSink = Arc<dyn Fn() + Send + Sync>;
+
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {
     /// **우리가** 세션 id 를 뽑아 spawn 때 이 프로그램에 건네주나.
@@ -412,6 +424,10 @@ pub trait AgentBackend: Send + Sync {
     /// ★순서 계약★: 이 포트는 **그 세션으로 무엇을 보내기 전에** 불린다. 그래서 기록됐는지 되묻는
     ///   둘째 동사가 필요 없다(포트가 한 동사인 이유 — [`SessionIdSink`]).
     ///
+    /// `first_turn_sink` = 이 화신의 대화에 턴이 실제로 생긴 순간을 알릴 곳([`FirstTurnSink`]). ★턴을 통로가
+    ///   지는(`MidTurnPolicy::TransportOwned`) 모드를 신고하는 backend 만 그 통로에 꽂는다 — 나머지는
+    ///   무시한다★(그 모드의 세션은 제출을 세지 않는다 — 짝 규율은 그 타입의 doc).
+    ///
     /// `resume_session_id` = 이 spawn 이 **이어받을** 저장된 backend sid. `None` = 이어받지 않는다
     ///   (Fresh 로 띄우거나, 저장된 값이 없거나, 이 backend 의 이어받기 축이 꺼져 있다).
     /// ★[`AgentBackend::build_spec`] 의 `session_id` 와 **다른 값이다 — 같은 것으로 접지 말 것**★:
@@ -454,15 +470,16 @@ pub trait AgentBackend: Send + Sync {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        first_turn_sink: Option<FirstTurnSink>,
         resume_session_id: Option<Uuid>,
         // 연결의 결말을 배달할 곳 — `declares_link()` 가 true 인 backend 에만 온다.
         _link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
-        // 이 기본값은 세션 id 를 받아 오지도, 통로로 이어받지도, 제어 평면 데이터를 핸드셰이크에 싣지도
-        //   않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는 것과 같아야 한다:
-        //   rustdoc 이 시그니처를 그대로 렌더한다).
-        let _ = (sid_sink, resume_session_id, control);
+        // 이 기본값은 세션 id 를 받아 오지도, 턴을 통로가 지지도, 통로로 이어받지도, 제어 평면 데이터를
+        //   핸드셰이크에 싣지도 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는
+        //   것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
+        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -769,6 +786,7 @@ pub fn open_spawn(
     cols: u16,
     rows: u16,
     sid_sink: Option<SessionIdSink>,
+    first_turn_sink: Option<FirstTurnSink>,
     resume_session_id: Option<Uuid>,
     link_sink: Option<LinkSink>,
     control: Option<&ControlEndpoint>,
@@ -779,6 +797,7 @@ pub fn open_spawn(
         cols,
         rows,
         sid_sink,
+        first_turn_sink,
         resume_session_id,
         link_sink,
         control,
@@ -1565,7 +1584,8 @@ mod tests {
                 //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts = open_spawn(c, &probe, 80, 24, None, None, None, None).expect("open_spawn");
+            let parts =
+                open_spawn(c, &probe, 80, 24, None, None, None, None, None).expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();

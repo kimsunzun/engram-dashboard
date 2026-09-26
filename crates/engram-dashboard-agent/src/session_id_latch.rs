@@ -3,6 +3,9 @@
 //! 입력 둘이 **둘 다** 일어난 첫 순간에 commit 포트를 한 번 부른다. 순서는 상관없다.
 //! - [`SessionIdLatch::offer`] — 이 화신의 세션 id 가 알려졌다(backend·통로는 [`SessionIdLatch::offer_sink`] 로 받는다).
 //! - [`SessionIdLatch::note_submission`] — 이 화신의 첫 사용자 턴이 상대에게 **나가기 직전**이다.
+//!   ★턴을 통로가 지는 모드(codex JSON)는 예외다★: 세션이 세지 않고, 상대가 유저 메시지를 **처음
+//!   되울린** 순간 통로가 [`SessionIdLatch::first_turn_sink`] 로 부른다 — 그 모드의 commit 은 첫 턴
+//!   **뒤**에 난다(보내고 되울림 전에 죽으면 영속이 없고 다음 활성화는 새 대화다 — 수용한 결말).
 //!
 //! 제출 없이 화신이 끝나면 포트는 한 번도 안 불린다 — 「저장된 id 가 있다 ⟺ 이어받을 대화가 있다」가
 //! 여기서 선다.
@@ -31,7 +34,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::backend::SessionIdSink;
+use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::types::AgentId;
 
 pub(crate) struct SessionIdLatch {
@@ -75,6 +78,16 @@ impl SessionIdLatch {
         Arc::new(move |raw: &str| latch.offer(raw))
     }
 
+    /// 턴을 통로가 지는 모드의 통로에 건네는 첫 턴 포트 — 부르면 [`SessionIdLatch::note_submission`] 이다.
+    ///
+    /// 그 모드는 세션이 제출을 세지 않는다. ✕ 로 거둘 수 있는 첫 입력을 보낼 때 세면 대화 없는 id 가 영속되기
+    ///   때문이다. 통로가 상대의 첫 유저 메시지 되울림에서 이 포트를 부른다.
+    // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(대화에 턴이 생긴 = 첫 되울림) 영속한다.
+    pub(crate) fn first_turn_sink(self: &Arc<Self>) -> FirstTurnSink {
+        let latch = Arc::clone(self);
+        Arc::new(move || latch.note_submission())
+    }
+
     pub(crate) fn offer(&self, raw: &str) {
         let mut state = self.lock_state();
         let outcome = if state.committed || state.pending.is_some() {
@@ -107,6 +120,8 @@ impl SessionIdLatch {
 
     /// 첫 턴이 나가기 **직전**에 부른다. id 를 이미 받았으면 그 자리에서 commit 하고, commit 이 돌아온 뒤에
     /// 돌아온다 — 호출자는 이 호출이 돌아온 **뒤에** 턴을 보내야 「첫 턴 전에 영속」이 선다.
+    /// ★턴을 통로가 지는 모드에서는 첫 되울림 **뒤에** 불린다([`Self::first_turn_sink`])★ — 그 모드에는
+    ///   「첫 턴 전에 영속」이 없다.
     pub(crate) fn note_submission(&self) {
         if self.settled.load(Ordering::Acquire) {
             return;
@@ -175,6 +190,25 @@ mod tests {
             "제출 전에는 부르지 않는다"
         );
         latch.note_submission();
+
+        assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
+    }
+
+    /// 첫 턴 포트(`first_turn_sink`)도 같은 제출 입력이다 — 통로가 턴을 지는 모드는 이것으로만 센다(ADR-0226
+    ///   개정). 여러 번 불려도 commit 은 한 번이다.
+    #[test]
+    fn the_first_turn_port_is_the_submission_input_and_commits_once() {
+        let (port, calls) = recording_port();
+        let latch = latch_with(port);
+        let first_turn = latch.first_turn_sink();
+
+        (latch.offer_sink())("sid-1");
+        assert!(
+            calls.lock().unwrap().is_empty(),
+            "첫 턴 전에는 부르지 않는다"
+        );
+        first_turn();
+        first_turn();
 
         assert_eq!(calls.lock().unwrap().as_slice(), ["sid-1"]);
     }

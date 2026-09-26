@@ -1495,6 +1495,10 @@ impl AgentManager {
             DEFAULT_COLS,
             DEFAULT_ROWS,
             Some(latch.offer_sink()),
+            // ★턴을 통로가 지는 backend 는 여기로 제출을 센다★ — 그 모드의 세션은 세지 않는다. 꽂을지는
+            //   backend 가 정한다(나머지는 버린다).
+            // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
+            Some(latch.first_turn_sink()),
             resume_session_id,
             link_sink,
             // ★위 `build_command_spec` 에 넘긴 것과 **같은 endpoint** 다★ — 명령줄로 번역할 것은 거기서
@@ -3188,6 +3192,28 @@ mod tests {
         assert_eq!(p.old_session_ids, history, "거절인데 이력이 움직였다");
     }
 
+    /// (f) ★이어받은 화신의 첫 되울림은 쓸 것이 없다★ — 핸드셰이크가 준 id 가 저장값 그대로면, 통로가 첫 턴
+    ///   포트를 불러 commit 이 돌아도 칸도 이력도 움직이지 않는다(비교-교체의 「이미 같은 값」 · ADR-0226 개정).
+    #[test]
+    fn a_resumed_thread_s_first_echo_changes_nothing() {
+        let (profiles, id, epoch) = sink_fixture();
+        let stored = Uuid::new_v4();
+        assert!(profiles.observe_session_id(id, Some(epoch), stored));
+        let history = profiles.get(id).expect("프로필").old_session_ids;
+        let latch = SessionIdLatch::new(
+            id,
+            epoch,
+            session_id_sink(profiles.clone(), id, epoch, Some(stored)),
+        );
+
+        (latch.offer_sink())(&stored.to_string());
+        (latch.first_turn_sink())();
+
+        let p = profiles.get(id).expect("프로필");
+        assert_eq!(p.backend_session_id, Some(stored));
+        assert_eq!(p.old_session_ids, history, "같은 값인데 이력이 움직였다");
+    }
+
     /// ★우리 sid 는 발급 축 backend 에만 나간다(ADR-0185 · ADR-0226)★ — 선언 표를 **읽어서** 잰다.
     ///
     /// 자기 id 를 스스로 발급하는 backend(codex)에 값이 나가면, 그 값이 `open_spawn` 보다 먼저 래치에
@@ -3370,6 +3396,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .expect("open_spawn");
         let caps = parts.transport.capabilities();
@@ -3390,6 +3417,7 @@ mod tests {
             &probe_spec(),
             DEFAULT_COLS,
             DEFAULT_ROWS,
+            None,
             None,
             None,
             None,
@@ -6231,6 +6259,12 @@ mod tests {
         assert!(
             spawning.contains("Some(latch.offer_sink())"),
             "`open_spawn` 의 기록 포트가 래치의 수령 포트가 아니다 — 받아 온 id 가 래치를 비켜 간다"
+        );
+        // ★턴을 통로가 지는 모드(codex JSON)의 제출은 이 포트로만 온다★ — 빠지면 그 모드의 어느 화신도 id 를
+        //   영속하지 못한다(세션은 그 모드에서 세지 않는다 — ADR-0226 개정).
+        assert!(
+            spawning.contains("Some(latch.first_turn_sink())"),
+            "`open_spawn` 에 래치의 첫 턴 포트가 안 실린다 — 통로가 턴을 지는 모드의 id 가 영영 영속되지 않는다"
         );
         assert!(
             !spawning.contains("Some(session_id_sink("),

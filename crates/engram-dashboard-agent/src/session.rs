@@ -144,6 +144,8 @@ impl AgentSession {
     ///
     /// ★운영 조립점에서 빠뜨리면 모든 이어받기가 조용히 사라진다★ — 제출이 한 번도 안 세어져 어느
     ///   화신도 id 를 영속하지 못하고, 다음 활성화가 전부 새 대화가 된다(오류는 없다).
+    /// ★`TransportOwned` 세션은 이 래치의 제출을 세지 않는다★ — 같은 래치의 첫 턴 포트가 통로에 꽂혀
+    ///   있어야 한다([`SessionIdLatch::first_turn_sink`] · 조립점 = `open_spawn`).
     // ADR-0226
     pub(crate) fn with_session_id_latch(mut self, latch: Arc<SessionIdLatch>) -> Self {
         self.session_id_latch = Some(latch);
@@ -346,12 +348,16 @@ impl AgentSession {
 
     /// 지금 보내는 쓰기 — 오늘 경로의 본체. `turn_origin` = `Some` 이면 통로 턴 동사로 출처와 함께 넘긴다
     /// (`TransportOwned`), `None` 이면 `send_input(Raw)` 다. 두 갈래가 넘기는 바이트는 같다.
+    /// ★`Some` 갈래는 합성 에코를 내지 않는다 — 인코더가 에코를 선언해도★: 그 갈래의 말풍선과 목록 사건은
+    ///   통로가 분류해 낸다(한가 = 합성 말풍선 · 그 밖 = `Queued`). 세션이 한 벌 더 내면 목록에 선 글이
+    ///   말풍선으로도 그려진다.
     fn write_now(
         &self,
         bytes: &[u8],
         turn_origin: Option<InputOrigin>,
     ) -> Result<WriteOutcome, PtyError> {
         // ADR-0226: 턴을 여는 쓰기는 보내기 **전에** 센다 — 첫 턴이 상대에게 가기 전에 세션 id 가 영속된다.
+        //   `Some` 갈래(`TransportOwned`)는 사용자 종료 거절만 타고 세지 않는다(그 함수 doc).
         self.count_turn_submission(bytes)?;
         // ★이 유저 턴의 메시지 uuid(replay dedup 키)★: 한 write_input 당 하나 생성해 (a) stdin user
         //   라인(encode)과 (b) 입력-시점 합성 에코(input_echo_event) **양쪽에 같은 값**으로 넘긴다.
@@ -379,8 +385,11 @@ impl AgentSession {
         //   text(resume 재개분)는 dedup 되지 않아 전부 보존된다(vanish 회귀 제거).
         //   ★락 규율(ADR-0006)★: 새 락 없이 core.emit 재사용 — emit 이 replay/subscribers 락을 짧게만
         //   잡고 lock 밖 send 하는 규율을 그대로 탄다. send_input 성공 후 emit 이라 순서도 자연스럽다.
-        if let Some(event) = self.encoder.input_echo_event(bytes, msg_uuid) {
-            self.core.emit(event);
+        // ADR-0231: 통로 턴 동사로 넘긴 글의 말풍선은 통로가 낸다(이 함수 doc).
+        if turn_origin.is_none() {
+            if let Some(event) = self.encoder.input_echo_event(bytes, msg_uuid) {
+                self.core.emit(event);
+            }
         }
         let n = bytes.len();
         Ok(WriteOutcome {
@@ -476,6 +485,10 @@ impl AgentSession {
     /// 이 쓰기가 턴을 연다면([`InputEncoder::submits_turn`]) 세션 id 래치에 제출을 센다 — 호출자는 그 쓰기를
     /// **보내기 전에** 부르고, `Err` 면 보내지 않는다. 래치가 없으면 무동작이다.
     ///
+    /// ★`TransportOwned` 는 세지 않는다 — 아래 사용자 종료 거절만 탄다★: 그 모드의 첫 입력은 ✕ 로 거둘 수
+    ///   있어, 보낼 때 세면 대화 없는 id 가 영속된다. 그 모드의 제출은 통로가 상대의 첫 유저 메시지 되울림에서
+    ///   래치의 첫 턴 포트로 센다([`SessionIdLatch::first_turn_sink`]) — 「첫 턴 전에 영속」이 그 모드에는 없다.
+    ///
     /// ★사용자 종료 중이면 세지도 보내지도 않는다(`Err`)★: 세고 보내면 대화 없는 id 가 영속되고, 세지만
     ///   않고 보내면 입력 큐가 닫히기 전에 받아들여진 턴이 죽어 가는 자식에게 넘어가 **영속되지 않은 id 의
     ///   대화**가 생길 수 있다. 결말은 큐가 닫힌 뒤의 `send_input` 과 같은 `WriteFailed` 다 — 그 오류를
@@ -499,6 +512,10 @@ impl AgentSession {
             return Err(PtyError::WriteFailed(
                 "사용자가 이 에이전트를 종료하는 중이라 턴을 보내지 않았다".into(),
             ));
+        }
+        // ADR-0226 · ADR-0231: 사용자 결정 — 이 모드의 id 는 진짜가 된 때(첫 되울림) 통로가 센다.
+        if matches!(self.mid_turn, MidTurnPolicy::TransportOwned) {
+            return Ok(());
         }
         latch.note_submission();
         Ok(())
@@ -1537,6 +1554,87 @@ mod tests {
         );
     }
 
+    // ── 통로가 턴을 지는 모드의 제출(ADR-0226 개정 · 사용자 결정 2026-09-26) ──
+    //
+    // ★그 모드의 세션은 제출을 세지 않는다 — 사용자 종료 거절만 탄다★. 대화에 턴이 생긴 것은 상대의 첫
+    //   되울림이고, 통로가 래치의 첫 턴 포트로 센다(되울림 쪽 = `backend/codex/transport.rs` 시험).
+
+    /// 래치를 실은 `TransportOwned` 세션 — 래치는 비어 있다(운영에서는 통로의 핸드셰이크가 offer 한다).
+    fn transport_owned_latched() -> (
+        AgentSession,
+        Arc<Probe>,
+        Arc<SessionIdLatch>,
+        Arc<Mutex<Vec<Ev>>>,
+    ) {
+        let (session, probe) = probed(InputEncoder::TransportFramed, MidTurnPolicy::TransportOwned);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let latch = SessionIdLatch::new(session.id, 0, recording_port(&events));
+        (
+            session.with_session_id_latch(latch.clone()),
+            probe,
+            latch,
+            events,
+        )
+    }
+
+    /// (b) — 보내기는 세지 않는다(사람 입력도 우편도). commit 은 첫 턴 포트(통로가 보는 첫 되울림)에서 난다.
+    #[test]
+    fn a_transport_owned_write_leaves_the_commit_to_the_first_echo() {
+        let (session, probe, latch, events) = transport_owned_latched();
+        latch.offer("sid-1");
+
+        session
+            .write_input_from(b"hi", InputOrigin::User)
+            .expect("넘긴다");
+        session.write_input_observed(b"letter").expect("넘긴다");
+        assert_eq!(probe.turns.lock().unwrap().len(), 2);
+        assert_eq!(
+            commits(&events),
+            0,
+            "보내는 순간 영속했다 — ✕ 로 거둔 첫 입력도 0턴 id 를 남긴다"
+        );
+
+        (latch.first_turn_sink())();
+        assert_eq!(*events.lock().unwrap(), vec![Ev::Commit("sid-1".into())]);
+    }
+
+    /// (c) — 핸드셰이크 전에 친 첫 입력을 ✕ 로 거두면 아무것도 영속하지 않는다. 보낼 때 세면 뒤이어 온 thread
+    ///   id 를 그 자리에서 commit 해 0턴 id 가 남는다 — 되살리지 말 것.
+    #[test]
+    fn a_first_input_withdrawn_before_any_echo_persists_nothing() {
+        let (session, probe, latch, events) = transport_owned_latched();
+        let typed = session
+            .write_input_from(b"hi", InputOrigin::User)
+            .expect("넘긴다");
+        latch.offer("sid-1");
+        let id = typed.msg_uuid.to_string();
+        session.core.emit(queued(&id));
+        *probe.withdraw_answer.lock().unwrap() = Some(Withdraw::Withdrawn);
+
+        assert_eq!(
+            session.cancel_queued_input(&id).unwrap(),
+            CancelOutcome::Cancelled
+        );
+        assert_eq!(commits(&events), 0);
+    }
+
+    /// (g) — 사용자 종료 중이면 그 모드도 넘기지 않는다 — 세지 않는다고 거절까지 걷지 않는다.
+    #[test]
+    fn a_user_kill_refuses_a_transport_owned_turn_and_persists_nothing() {
+        let (session, probe, latch, events) = transport_owned_latched();
+        latch.offer("sid-1");
+        session.set_intent(TerminationIntent::UserKill);
+
+        assert_user_kill_refusal(session.write_input_from(b"hi", InputOrigin::User));
+        assert_user_kill_refusal(session.write_input_observed(b"letter"));
+
+        assert!(
+            probe.turns.lock().unwrap().is_empty(),
+            "사용자 종료 중에 턴이 넘어갔다"
+        );
+        assert_eq!(commits(&events), 0);
+    }
+
     // ── 구독 응답의 화신 사실(ADR-0226) ──
 
     #[test]
@@ -2066,6 +2164,29 @@ mod tests {
             "턴은 통로 턴 동사로만 간다"
         );
         assert!(list_events(&seen).is_empty(), "분류는 통로가 한다");
+    }
+
+    /// 통로 턴 동사 갈래의 말풍선은 통로가 낸다 — 인코더가 합성 에코를 선언해도 세션은 한 벌도 안 낸다.
+    /// 같은 인코더의 정책 `None`(대조군)은 오늘처럼 에코를 낸다.
+    #[test]
+    fn a_transport_owned_write_makes_no_session_echo_even_with_an_echoing_encoder() {
+        let (session, probe) = probed(
+            InputEncoder::ClaudeStreamJson,
+            MidTurnPolicy::TransportOwned,
+        );
+        let seen = watch(&session);
+        session.write_input_from(b"hi", InputOrigin::User).unwrap();
+        session.write_input_observed(b"letter").unwrap();
+        assert_eq!(probe.turns.lock().unwrap().len(), 2);
+        assert!(seen.lock().unwrap().is_empty(), "세션이 사건을 냈다");
+
+        let (control, _probe) = probed(InputEncoder::ClaudeStreamJson, MidTurnPolicy::None);
+        let seen = watch(&control);
+        control.write_input_from(b"hi", InputOrigin::User).unwrap();
+        assert!(
+            matches!(&seen.lock().unwrap()[..], [OutputEvent::Structured { kind, .. }] if kind == "user"),
+            "대조군이 에코를 안 냈다 — 이 시험이 아무것도 재지 않는다"
+        );
     }
 
     // ── ADR-0231: 세션 분류(SessionClassified) — 사용자 입력 · 취소 (TRD §7-1 claude 세션 행) ──

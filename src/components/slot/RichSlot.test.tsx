@@ -1059,16 +1059,47 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(textarea()).toBe(before)
   })
 
-  it('입력하면 로딩이 걷히고 대기 표시로 넘어간다', async () => {
+  // ADR-0231: 입력은 로딩을 걷지 않는다 — 연결 중 친 글은 대기 목록에 서고, 로딩을 걷는 것은 행(이력 ·
+  //   전달된 말풍선)이다. 입력으로 걷으면 이력이 오기 전 빈 판이 비친다.
+  it('입력은 로딩을 걷지 않는다 — 목록에 선 글이 전달된 말풍선이 되는 순간 걷힌다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     fireLive(true)
     fireEvent.change(textarea(), { target: { value: 'hello' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
-
-    expect(loadingPanel()).toBeNull()
+    expect(loadingPanel()).not.toBeNull()
     expect(emptyState()).toBeNull()
+
+    act(() => captured.onChunk!(queuedFrame(0, { kind: 'Queued', id: 'X', text: 'hello' })))
+    expect(loadingPanel()).not.toBeNull()
+    expect(listedIds()).toEqual(['X'])
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    act(() => captured.onChunk!(queuedFrame(1, { kind: 'Delivered', id: 'X' })))
+    expect(loadingPanel()).toBeNull()
+    expect(queuedList()).toBeNull()
+    expect(screen.getByText('hello')).toBeTruthy()
+    expect(screen.getByText('Wait')).toBeTruthy()
+  })
+
+  it('한가할 때 친 글의 합성 말풍선도 행이라 로딩을 걷는다 — 전송 자체는 걷지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    fireEvent.change(textarea(), { target: { value: 'hi' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+    expect(loadingPanel()).not.toBeNull()
+
+    const echo = JSON.stringify({
+      type: 'Structured',
+      kind: 'user',
+      json: JSON.stringify({ type: 'text', text: 'hi', uuid: 'D1' }),
+    })
+    act(() => captured.onChunk!(tag1(0, echo)))
+    expect(loadingPanel()).toBeNull()
+    expect(screen.getByText('hi')).toBeTruthy()
     expect(screen.getByText('Wait')).toBeTruthy()
   })
 
@@ -1241,6 +1272,42 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     await flush()
     expect(screen.queryByText('Wait')).toBeTruthy()
     act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'Y', text: 'again' })))
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  // P1b 판정 2: 받음 배치는 턴이 닫힌 뒤에 와도 대기 표시를 켠다 — codex 는 턴 도중 친 글을 다음 턴 머리에
+  //   넘기므로 그 `Delivered` 가 새 턴의 첫 사건이고, 추론 구간은 번역되지 않아 그 뒤 한동안 사건이 없다.
+  //   ★그래서 누산기 쪽에서 배치의 재개를 막지 않는다★ — 막으면 그 구간에 대기 표시가 꺼진다. 끄는 것은 생산자가
+  //   그 턴에 내는 경계다(턴이 없는 자리에 받음을 놓지 않는 것이 생산자 몫).
+  it('턴 도중 친 글 — 목록에 섰다가 다음 턴 머리의 받음 자리에 말풍선 한 벌, 대기 표시는 그 턴의 경계가 끈다', async () => {
+    const turnEnd = JSON.stringify({ type: 'TurnEnd', outcome: { kind: 'Completed' } })
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'working' }))))
+    fireEvent.change(textarea(), { target: { value: 'also this' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+    act(() => captured.onChunk!(queuedFrame(1, { kind: 'Queued', id: 'Q', text: 'also this' })))
+    expect(listedIds()).toEqual(['Q'])
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(2, turnEnd)))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(listedIds()).toEqual(['Q'])
+
+    const echo = JSON.stringify({
+      type: 'Structured',
+      kind: 'user',
+      json: JSON.stringify({ type: 'text', text: 'also this', uuid: 'Q' }),
+    })
+    act(() => captured.onChunk!(queuedFrame(3, { kind: 'Delivered', id: 'Q' })))
+    act(() => captured.onChunk!(tag1(4, echo)))
+    expect(queuedList()).toBeNull()
+    expect(screen.getAllByText('also this')).toHaveLength(1)
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(5, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
+    act(() => captured.onChunk!(tag1(6, turnEnd)))
     expect(screen.queryByText('Wait')).toBeNull()
   })
 

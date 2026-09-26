@@ -31,8 +31,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::backend::{
-    console_command, inject_cli_entrance, AgentBackend, InputEncoder, SessionIdSink, SpawnParts,
-    TransportShape, TurnClassifier,
+    console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
+    SpawnParts, TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -408,6 +408,9 @@ impl AgentBackend for ClaudeBackend {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        // ★이 backend 의 턴은 세션이 센다★ — 턴을 통로가 지는 모드가 없어(`mid_turn_policy`) 이 포트를 부를
+        //   자리가 없다(ADR-0226 — 세션이 보내기 전에 센다).
+        first_turn_sink: Option<FirstTurnSink>,
         resume_session_id: Option<Uuid>,
         // ★이 backend 는 세울 연결이 없다 — `declares_link()` 가 false 라 조립점이 애초에 `None` 을
         //   준다. 받아 두고 무시하는 것이 계약이다(`session_id` 칸과 같은 모양).
@@ -417,7 +420,7 @@ impl AgentBackend for ClaudeBackend {
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
-        let _ = (sid_sink, resume_session_id, control);
+        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
         let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
