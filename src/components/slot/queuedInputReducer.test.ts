@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest'
 
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
-import { QueuedInputRegistry, TOMBSTONE_CAP, type QueuedVerdict } from './queuedInputReducer'
+import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
+import { entryOfListedRow, QueuedInputRegistry, TOMBSTONE_CAP, type QueuedVerdict } from './queuedInputReducer'
 import { goldenRowOf, queuedInputGolden as golden, type GoldenCase } from './testing/queuedInputGolden'
 
 function verdictName(verdict: QueuedVerdict): string {
@@ -72,6 +73,21 @@ describe('queuedInputReducer — 이 판만의 표면', () => {
     registry.reduce({ kind: 'CancelRequested', id: 'a' })
     expect(before?.phase).toEqual({ state: 'queued' })
     expect(registry.row('a')?.phase).toEqual({ state: 'cancelling', answer: 'none', vendorClosed: false })
+  })
+
+  it('목록 조회 행: `sent` 는 넘김 표지가 선 대기 행 · `queued`·`unconfirmed`·`cancelling` 은 표지 없음', () => {
+    const row = (state: string, cancel: QueuedInputRow['cancel'] = null): QueuedInputRow => ({
+      id: 'a',
+      text: 'A',
+      state,
+      cancel,
+    })
+    expect(entryOfListedRow(row('sent'))).toEqual({ id: 'a', text: 'A', phase: { state: 'queued' }, sent: true })
+    for (const state of ['queued', 'unconfirmed']) {
+      expect(entryOfListedRow(row(state))?.sent, state).toBe(false)
+    }
+    expect(entryOfListedRow(row('cancelling', { answer: 'not_removed', vendor_closed: false }))?.sent).toBe(false)
+    expect(entryOfListedRow(row('handed'))).toBeNull()
   })
 
   it('모르는 kind(더 새 데몬)는 null 을 돌려주고 상태를 건드리지 않는다', () => {

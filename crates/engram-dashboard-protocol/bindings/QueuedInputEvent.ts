@@ -10,4 +10,4 @@ import type { DropCause } from "./DropCause";
  * ★`AckUnavailable.delivered` 는 링에 적힐 때 늘 채워져 있다(agent 코어가 채운다)★ — 그 사건이 받음으로
  *   닫는 항목마다 (id, 본문) 한 벌. 링 창이 `Queued` 를 잃은 창도 이 사본으로 그 자리 말풍선을 그린다.
  */
-export type QueuedInputEvent = { "kind": "Queued", id: string, text: string, } | { "kind": "CancelRequested", id: string, } | { "kind": "CancelAnswered", id: string, removed: boolean, } | { "kind": "CancelFailed", id: string, } | { "kind": "Delivered", id: string, } | { "kind": "Dropped", id: string, cause: DropCause, } | { "kind": "AckUnavailable", delivered: Array<DeliveredCopy>, };
+export type QueuedInputEvent = { "kind": "Queued", id: string, text: string, } | { "kind": "CancelRequested", id: string, } | { "kind": "CancelAnswered", id: string, removed: boolean, } | { "kind": "CancelFailed", id: string, } | { "kind": "HandedOver", id: string, sent: boolean, } | { "kind": "Delivered", id: string, } | { "kind": "Dropped", id: string, cause: DropCause, } | { "kind": "AckUnavailable", delivered: Array<DeliveredCopy>, };

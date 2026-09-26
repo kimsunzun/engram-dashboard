@@ -4,7 +4,9 @@ import type { QueuedInputCancel } from "./QueuedInputCancel";
 /**
  * 대기 입력 목록의 한 줄([`AgentEvent::QueuedInputs`] 의 원소) — 버스 `agent.listQueuedInputs` 행과 같은 모양·낱말.
  *
- * `state` = `queued` | `unconfirmed` | `cancelling`. ★`unconfirmed` 는 명부의 환원 상태가 아니다★ — 조회 순간
+ * `state` = `queued` | `sent` | `unconfirmed` | `cancelling`. `sent` = 통로가 벤더에 넘긴 대기 행(환원 상태 — 재부착
+ *   대조는 넘김 표지가 선 행으로 읽는다 · 취소 대기 행의 표지는 `cancelling` 에 묻힌다).
+ *   ★`unconfirmed` 는 명부의 환원 상태가 아니다★ — 조회 순간
  *   통로가 수락 모름으로 쥔 항목을 덧댄 표지라 `as_of_seq` 와 한 원자가 아니고, 재부착 대조는 `queued` 로 읽는다.
  * ★낱말 칸을 enum 으로 올리지 않는다★ — 낱말이 늘 때 구셸이 응답 전체를 못 읽는 대신 그 행만 모르는 낱말로
  *   받는다(버스 행도 문자열이다).

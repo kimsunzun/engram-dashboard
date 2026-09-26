@@ -2135,6 +2135,10 @@ mod tests {
                 removed: false,
             },
             QueuedInputEvent::CancelFailed { id: id() },
+            QueuedInputEvent::HandedOver {
+                id: id(),
+                sent: true,
+            },
             QueuedInputEvent::Delivered { id: id() },
             QueuedInputEvent::Dropped {
                 id: id(),

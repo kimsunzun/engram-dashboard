@@ -6,12 +6,13 @@ import goldenSource from '../../../../crates/engram-dashboard-agent/src/queued_i
 import type { QueuedInputEvent } from '../../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { QueuedEntry } from '../queuedInputReducer'
 
-/** 골든 행 = 목록 조회 행과 같은 낱말(`state` · `cancel`). */
+/** 골든 행 = 목록 조회 행과 같은 낱말(`state` · `cancel`). `sent` 는 넘김 표지가 선 행에만 `true` 로 실린다(없으면 안 넘김). */
 export interface GoldenRow {
   id: string
   text: string
   state: 'queued' | 'cancelling'
   cancel: null | { answer: 'none' | 'not_removed'; vendor_closed: boolean }
+  sent?: true
 }
 
 export interface GoldenCase {
@@ -35,12 +36,15 @@ export interface QueuedInputGolden {
 export const queuedInputGolden = JSON.parse(goldenSource) as QueuedInputGolden
 
 export function goldenRowOf(entry: QueuedEntry): GoldenRow {
-  return entry.phase.state === 'queued'
-    ? { id: entry.id, text: entry.text, state: 'queued', cancel: null }
-    : {
-        id: entry.id,
-        text: entry.text,
-        state: 'cancelling',
-        cancel: { answer: entry.phase.answer, vendor_closed: entry.phase.vendorClosed },
-      }
+  const row: GoldenRow =
+    entry.phase.state === 'queued'
+      ? { id: entry.id, text: entry.text, state: 'queued', cancel: null }
+      : {
+          id: entry.id,
+          text: entry.text,
+          state: 'cancelling',
+          cancel: { answer: entry.phase.answer, vendor_closed: entry.phase.vendorClosed },
+        }
+  if (entry.sent) row.sent = true
+  return row
 }

@@ -1,6 +1,6 @@
 {
   "tombstone_cap": 1024,
-  "_format": "Shared golden for the queued-input reducer (Rust crates/engram-dashboard-agent/src/queued_input.rs and the TS accumulator). events = wire op objects fed in order (seq = index + 1). expect.items = open rows exactly, in order; expect.tombstones = id -> resurrectable, each must match; expect.tombstone_count = exact; expect.absent = ids that are neither row nor tombstone; expect.ack_unavailable = the verdict mark; expect.outcomes = id -> every verdict the reducer returned for that id, in order (Delivered | Cancelled | Discarded:<cause>), listed ids only.",
+  "_format": "Shared golden for the queued-input reducer (Rust crates/engram-dashboard-agent/src/queued_input.rs and the TS accumulator). events = wire op objects fed in order (seq = index + 1). expect.items = open rows exactly, in order (a row carries the key sent = true only while its last HandedOver said sent; the key is absent otherwise); expect.tombstones = id -> resurrectable, each must match; expect.tombstone_count = exact; expect.absent = ids that are neither row nor tombstone; expect.ack_unavailable = the verdict mark; expect.outcomes = id -> every verdict the reducer returned for that id, in order (Delivered | Cancelled | Discarded:<cause>), listed ids only.",
   "cases": [
     {
       "name": "queued lists the item",
@@ -468,6 +468,60 @@
         {"kind": "Delivered", "id": "a"}
       ],
       "expect": {"items": [], "tombstones": {"a": false}, "tombstone_count": 1, "absent": [], "ack_unavailable": false, "outcomes": {"a": ["Discarded:Unknown", "Delivered"]}}
+    },
+    {
+      "name": "handed over marks the row sent and it stays listed",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "Queued", "id": "b", "text": "text b"},
+        {"kind": "HandedOver", "id": "a", "sent": true}
+      ],
+      "expect": {"items": [{"id": "a", "text": "text a", "state": "queued", "cancel": null, "sent": true}, {"id": "b", "text": "text b", "state": "queued", "cancel": null}], "tombstones": {}, "tombstone_count": 0, "absent": [], "ack_unavailable": false, "outcomes": {}}
+    },
+    {
+      "name": "handed back to held clears the sent mark",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "HandedOver", "id": "a", "sent": true},
+        {"kind": "HandedOver", "id": "a", "sent": false}
+      ],
+      "expect": {"items": [{"id": "a", "text": "text a", "state": "queued", "cancel": null}], "tombstones": {}, "tombstone_count": 0, "absent": [], "ack_unavailable": false, "outcomes": {}}
+    },
+    {
+      "name": "handed over of an unknown id is a no-op",
+      "events": [
+        {"kind": "HandedOver", "id": "x", "sent": true},
+        {"kind": "HandedOver", "id": "y", "sent": false}
+      ],
+      "expect": {"items": [], "tombstones": {}, "tombstone_count": 0, "absent": ["x", "y"], "ack_unavailable": false, "outcomes": {}}
+    },
+    {
+      "name": "handed over after delivered is a no-op",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "Delivered", "id": "a"},
+        {"kind": "HandedOver", "id": "a", "sent": true}
+      ],
+      "expect": {"items": [], "tombstones": {"a": false}, "tombstone_count": 1, "absent": [], "ack_unavailable": false, "outcomes": {"a": ["Delivered"]}}
+    },
+    {
+      "name": "a sent row leaves only by its echo",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "HandedOver", "id": "a", "sent": true},
+        {"kind": "Delivered", "id": "a"}
+      ],
+      "expect": {"items": [], "tombstones": {"a": false}, "tombstone_count": 1, "absent": [], "ack_unavailable": false, "outcomes": {"a": ["Delivered"]}}
+    },
+    {
+      "name": "codex cancel racing a push: not removed, the row stays cancelling and takes the sent mark",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "CancelRequested", "id": "a"},
+        {"kind": "CancelAnswered", "id": "a", "removed": false},
+        {"kind": "HandedOver", "id": "a", "sent": true}
+      ],
+      "expect": {"items": [{"id": "a", "text": "text a", "state": "cancelling", "cancel": {"answer": "not_removed", "vendor_closed": false}, "sent": true}], "tombstones": {}, "tombstone_count": 0, "absent": [], "ack_unavailable": false, "outcomes": {}}
     },
     {
       "name": "tombstone cap: 1024 + 1 evicts the oldest; a repeated tombstone keeps its place",

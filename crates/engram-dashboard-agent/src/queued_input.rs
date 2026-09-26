@@ -54,6 +54,9 @@ pub struct QueuedRow {
     pub id: String,
     pub text: String,
     pub phase: RowPhase,
+    /// 통로가 벤더에 넘겼다(마지막 `HandedOver` 의 값) — 단계(`phase`)와 따로 선다: 넘긴 뒤에 온 ✕ 는 취소 대기이면서
+    ///   넘긴 행이다. 결말이 아니다(행은 받음·거둠까지 남는다).
+    pub sent: bool,
 }
 
 /// 한 id 가 종결에 닿은 결말.
@@ -124,6 +127,7 @@ impl Registry {
             }
             QueuedInputEvent::CancelAnswered { id, removed: false }
             | QueuedInputEvent::CancelFailed { id } => self.on_not_removed(id, &mut closed),
+            QueuedInputEvent::HandedOver { id, sent } => self.on_handed_over(id, *sent),
             QueuedInputEvent::Delivered { id } => self.on_delivered(id, &mut closed),
             QueuedInputEvent::Dropped { id, cause } => self.on_dropped(id, *cause, &mut closed),
             QueuedInputEvent::AckUnavailable { delivered } => {
@@ -193,7 +197,16 @@ impl Registry {
             id: id.to_owned(),
             text: text.to_owned(),
             phase: RowPhase::Queued,
+            sent: false,
         });
+    }
+
+    /// 넘김 표지 — 항목이면 단계와 무관하게 표지만 갈아 끼운다(결말 없음). 모르는 id · 묘비(받음 뒤 늦게 온 표지)는
+    /// 무동작이다 — 표지가 행을 지어내지 않는다.
+    fn on_handed_over(&mut self, id: &str, sent: bool) {
+        if let Some(at) = self.position(id) {
+            self.items[at].sent = sent;
+        }
     }
 
     fn on_cancel_requested(&mut self, id: &str) {
@@ -209,7 +222,7 @@ impl Registry {
     }
 
     /// `removed:true` = 벤더가 그 글을 자기 큐에서 뺐다 — 다시 배출될 수 없으니 수명주기 줄을 기다리지 않고
-    /// 닫는다. 기다리면 그 줄이 끝내 안 오는 날, 모든 창에서 빠진 항목이 목록을 쥔 채 남아 우편을 막는다.
+    /// 닫는다. 기다리면 그 줄이 끝내 안 오는 날, 취소한 항목이 목록을 쥔 채 남아 우편을 막는다.
     fn on_removed(&mut self, id: &str, closed: &mut Vec<(String, Verdict)>) {
         if let Some(at) = self.position(id) {
             if matches!(self.items[at].phase, RowPhase::Cancelling { .. }) {
@@ -218,8 +231,8 @@ impl Registry {
         }
     }
 
-    /// `removed:false` · 요청 실패. ★목록으로 되돌리지 않는다★ — 되돌리면 ✕ 로 모든 창에서 빠진 항목이
-    /// 다시 그려진다.
+    /// `removed:false` · 요청 실패. ★대기로 되돌리지 않는다★ — 응답 칸(`NotRemoved`)이 뒤이은 벤더 닫힘의 원인을
+    /// 가른다(그리기는 이 행을 보통 행으로 그린다 — 단순화 계획 2026-09-26 항목 8).
     fn on_not_removed(&mut self, id: &str, closed: &mut Vec<(String, Verdict)>) {
         let Some(at) = self.position(id) else {
             return;
@@ -414,10 +427,13 @@ impl CancelAnswer {
 ///
 /// ★`Unconfirmed` 는 환원 상태가 아니다★ — 조회 순간의 통로 상태(`AgentTransport::unconfirmed_inputs`)라
 /// 행 스냅숏(`as_of_seq`)과 한 원자가 아니다. 재부착 대조는 그것을 `Queued` 로 읽는다.
+/// `Sent` = 넘김 표지(`QueuedRow::sent`)가 선 `Queued` 행 — 환원 상태라 `as_of_seq` 와 한 원자다. ★취소 대기 행의
+///   표지는 싣지 않는다★(`cancelling` 낱말이 이긴다 — 행 모양을 늘리지 않으려는 대가다).
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListedState {
     Queued,
+    Sent,
     Unconfirmed,
     Cancelling {
         answer: CancelAnswer,
@@ -430,6 +446,7 @@ impl ListedState {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Queued => "queued",
+            Self::Sent => "sent",
             Self::Unconfirmed => "unconfirmed",
             Self::Cancelling { .. } => "cancelling",
         }
@@ -456,12 +473,13 @@ pub struct QueuedListing {
     pub stopped_after_error: bool,
 }
 
-/// 명부 행에 수락 모름 표지를 덧댄다 — `Queued` 행만 바뀐다(취소 대기가 이긴다). 명부에 없는 id 는 버린다
-/// (행을 지어내지 않는다).
+/// 명부 행에 수락 모름 표지를 덧댄다 — `Queued` 행만 바뀐다(취소 대기가 이긴다 · 넘김 표지가 선 행은 `Sent` 그대로 —
+/// 환원 상태가 조회 순간의 표지를 이긴다). 명부에 없는 id 는 버린다(행을 지어내지 않는다).
 pub(crate) fn overlay_unconfirmed(rows: Vec<QueuedRow>, unconfirmed: &[String]) -> Vec<ListedRow> {
     rows.into_iter()
         .map(|row| {
             let state = match row.phase {
+                RowPhase::Queued if row.sent => ListedState::Sent,
                 RowPhase::Queued if unconfirmed.contains(&row.id) => ListedState::Unconfirmed,
                 RowPhase::Queued => ListedState::Queued,
                 RowPhase::Cancelling {
@@ -530,6 +548,10 @@ mod tests {
                 removed: v["removed"].as_bool().expect("removed"),
             },
             "CancelFailed" => QueuedInputEvent::CancelFailed { id: text(v, "id") },
+            "HandedOver" => QueuedInputEvent::HandedOver {
+                id: text(v, "id"),
+                sent: v["sent"].as_bool().expect("sent"),
+            },
             "Delivered" => QueuedInputEvent::Delivered { id: text(v, "id") },
             "Dropped" => QueuedInputEvent::Dropped {
                 id: text(v, "id"),
@@ -558,7 +580,8 @@ mod tests {
         }
     }
 
-    /// 행의 JSON 모양 = 목록 조회 응답의 행과 같은 낱말(`state` · `cancel`).
+    /// 행의 JSON 모양 = 목록 조회 응답의 행과 같은 낱말(`state` · `cancel`). 넘김 표지는 선 행에만 `"sent": true` 로
+    /// 싣는다(골든 `_format`) — 표지 없는 사례를 고치지 않으려는 모양이다.
     fn row_json(row: &QueuedRow) -> Value {
         let (state, cancel) = match row.phase {
             RowPhase::Queued => ("queued", Value::Null),
@@ -576,7 +599,12 @@ mod tests {
                 }),
             ),
         };
-        serde_json::json!({ "id": row.id, "text": row.text, "state": state, "cancel": cancel })
+        let mut json =
+            serde_json::json!({ "id": row.id, "text": row.text, "state": state, "cancel": cancel });
+        if row.sent {
+            json["sent"] = Value::Bool(true);
+        }
+        json
     }
 
     fn check_case(case: &Value) {
@@ -664,6 +692,7 @@ mod tests {
                 let tag = match kind {
                     "Dropped" => format!("Dropped:{}", ev["cause"].as_str().expect("cause")),
                     "CancelAnswered" => format!("CancelAnswered:{}", ev["removed"]),
+                    "HandedOver" => format!("HandedOver:{}", ev["sent"]),
                     other => other.to_owned(),
                 };
                 if !seen.contains(&tag) {
@@ -677,6 +706,8 @@ mod tests {
             "CancelAnswered:true",
             "CancelAnswered:false",
             "CancelFailed",
+            "HandedOver:true",
+            "HandedOver:false",
             "Delivered",
             "Dropped:Withdrawn",
             "Dropped:Interrupted",
@@ -720,6 +751,7 @@ mod tests {
                     id: "a".into(),
                     text: "하나".into(),
                     phase: RowPhase::Queued,
+                    sent: false,
                 },
                 QueuedRow {
                     id: "b".into(),
@@ -728,6 +760,7 @@ mod tests {
                         answer: CancelAnswer::Unanswered,
                         vendor_closed: false,
                     },
+                    sent: false,
                 },
             ]
         );
@@ -784,18 +817,30 @@ mod tests {
             id: id.into(),
             text: format!("text of {id}"),
             phase,
+            sent: false,
         };
         let cancelling = RowPhase::Cancelling {
             answer: CancelAnswer::NotRemoved,
             vendor_closed: true,
+        };
+        let sent = |id: &str, phase| QueuedRow {
+            sent: true,
+            ..row(id, phase)
         };
         let listed = overlay_unconfirmed(
             vec![
                 row("plain", RowPhase::Queued),
                 row("held", RowPhase::Queued),
                 row("withdrawing", cancelling),
+                sent("pushed", RowPhase::Queued),
+                sent("pushed-then-cancelled", cancelling),
             ],
-            &["held".into(), "withdrawing".into(), "not-listed".into()],
+            &[
+                "held".into(),
+                "withdrawing".into(),
+                "pushed".into(),
+                "not-listed".into(),
+            ],
         );
         let states: Vec<(&str, ListedState)> =
             listed.iter().map(|r| (r.id.as_str(), r.state)).collect();
@@ -811,8 +856,16 @@ mod tests {
                         vendor_closed: true
                     }
                 ),
+                ("pushed", ListedState::Sent),
+                (
+                    "pushed-then-cancelled",
+                    ListedState::Cancelling {
+                        answer: CancelAnswer::NotRemoved,
+                        vendor_closed: true
+                    }
+                ),
             ],
-            "취소 대기가 표지를 이기고, 명부에 없는 id 는 행이 되지 않는다"
+            "취소 대기가 두 표지를 이기고, 넘김 표지가 수락 모름을 이기며, 명부에 없는 id 는 행이 되지 않는다"
         );
         assert_eq!(listed[1].text, "text of held");
     }
@@ -821,6 +874,7 @@ mod tests {
     #[test]
     fn the_listing_words_are_pinned() {
         assert_eq!(ListedState::Queued.as_str(), "queued");
+        assert_eq!(ListedState::Sent.as_str(), "sent");
         assert_eq!(ListedState::Unconfirmed.as_str(), "unconfirmed");
         assert_eq!(
             ListedState::Cancelling {

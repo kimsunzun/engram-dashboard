@@ -101,8 +101,8 @@ declare_commands! {
         /// 입력 id — `agent.cancelQueuedInput` 의 `input_id` 로 그대로 쓴다.
         id: String,
         text: String,
-        /// `queued` | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 — 우편이 그 결말을 기다린다) |
-        /// `cancelling`(취소 대기 — 결말이 날 때까지 목록에 남는다).
+        /// `queued` | `sent`(통로가 넘겼고 되울림을 기다린다) | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 —
+        /// 우편이 그 결말을 기다린다) | `cancelling`(취소 대기 — 결말이 날 때까지 목록에 남는다).
         state: String,
         /// `cancelling` 행만 싣는다 — 그 밖은 `null`.
         cancel: Option<QueuedInputCancel>,
@@ -187,8 +187,9 @@ declare_commands! {
     } errors [NOT_FOUND, CONFLICT];
 
     /// 산 에이전트가 턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록(비종결만). `state` = `queued`(확인 전 —
-    /// 우리가 쥐고 있거나 에이전트에 넘겨 결말을 기다린다. codex 는 넘길 수 있는 가장 이른 경계에서 steer 로,
-    /// claude 는 곧바로 CLI 대기열로 넘긴다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
+    /// 우리가 쥐고 있거나 에이전트에 넘겨 결말을 기다린다. codex 는 도는 턴의 도구가 끝날 때 steer 로, 도구 없이 턴이
+    /// 끝나면 다음 턴으로 넘긴다 · claude 는 곧바로 CLI 대기열로 넘긴다) | `sent`(codex 가 에이전트에 넘겼고 받았다는
+    /// 되울림을 기다린다 — 취소해도 빠지지 않는다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
     /// 목록에 남고 우편이 그 결말을 기다리며, 취소하면 곧바로 빠진다) | `cancelling`(취소를 요청했다 — 에이전트가
     /// 결말을 낼 때까지 남는다). `cancel.answer` = `none`(아직 답이 없다) | `not_removed`(에이전트가 못 뺐다고
     /// 답했거나 요청이 실패했다) · `cancel.vendor_closed` = 에이전트가 그 항목을 이미 닫았다.
@@ -1018,7 +1019,7 @@ fn verb_list_queued_inputs(
                         answer: answer.as_str().to_string(),
                         vendor_closed,
                     }),
-                    ListedState::Queued | ListedState::Unconfirmed => None,
+                    ListedState::Queued | ListedState::Sent | ListedState::Unconfirmed => None,
                 },
             })
             .collect(),
@@ -2960,6 +2961,7 @@ mod tests {
             rows: vec![
                 listed("q1", ListedState::Queued),
                 listed("q2", ListedState::Unconfirmed),
+                listed("q5", ListedState::Sent),
                 listed(
                     "q3",
                     ListedState::Cancelling {
@@ -2993,6 +2995,7 @@ mod tests {
                 "inputs": [
                     { "id": "q1", "text": "text of q1", "state": "queued", "cancel": null },
                     { "id": "q2", "text": "text of q2", "state": "unconfirmed", "cancel": null },
+                    { "id": "q5", "text": "text of q5", "state": "sent", "cancel": null },
                     { "id": "q3", "text": "text of q3", "state": "cancelling",
                       "cancel": { "answer": "not_removed", "vendor_closed": true } },
                     { "id": "q4", "text": "text of q4", "state": "cancelling",

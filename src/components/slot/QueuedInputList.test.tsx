@@ -1,5 +1,6 @@
-// ADR-0231: 대기 입력 목록의 그리기 규칙 — 머리줄 없음 · queued 만 · 3 + 「외 N개」(눌러 펼침) · 툴팁 전문 ·
-//   ✕ 는 모든 항목에(Tab 으로 닿는 버튼) · ✕ 는 명령을 디스패치할 뿐 스스로 감추지 않는다.
+// ADR-0231: 대기 입력 목록의 그리기 규칙 — 머리줄 없음 · 열린 항목 전부(취소 대기 포함) · 3 + 「외 N개」(눌러 펼침) ·
+//   툴팁 전문 · ✕ 는 넘기지 않은 항목에(Tab 으로 닿는 버튼) · 취소 답을 기다리는 동안 ✕ 잠김 · 넘긴 항목은 ✕ 없음 ·
+//   ✕ 는 명령을 디스패치할 뿐 스스로 감추지 않는다.
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -14,12 +15,21 @@ import type { QueuedEntry } from './queuedInputReducer'
 import { t } from '../../i18n'
 
 const AGENT = 'agent-1'
-const waiting = (id: string, text = `text ${id}`): QueuedEntry => ({ id, text, phase: { state: 'queued' } })
-const cancelling = (id: string): QueuedEntry => ({
+const waiting = (id: string, text = `text ${id}`): QueuedEntry => ({
+  id,
+  text,
+  phase: { state: 'queued' },
+  sent: false,
+})
+const cancelling = (id: string, answer: 'none' | 'not_removed' = 'none'): QueuedEntry => ({
   id,
   text: `text ${id}`,
-  phase: { state: 'cancelling', answer: 'none', vendorClosed: false },
+  phase: { state: 'cancelling', answer, vendorClosed: false },
+  sent: false,
 })
+const sent = (entry: QueuedEntry): QueuedEntry => ({ ...entry, sent: true })
+const removeButton = (id: string): HTMLButtonElement | null =>
+  document.querySelector(`[data-queued-input="${id}"] button`)
 const shownIds = (): string[] =>
   Array.from(document.querySelectorAll('[data-queued-input]')).map((el) => el.getAttribute('data-queued-input') ?? '')
 const moreButton = (): HTMLElement | null => document.querySelector('[data-queued-more="1"]')
@@ -33,12 +43,37 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it('queued 만 그린다 — 취소 대기는 그리지 않는다(남는 것이 없으면 통째로 안 그린다)', () => {
+  // ADR-0231: 단순화 계획 2026-09-26 항목 8 — ✕ 는 명부가 뺐다고 확인한 뒤에만 행을 뺀다(미리 감추지 않는다).
+  it('취소 대기도 그린다 — 답을 기다리는 동안 ✕ 가 잠긴다', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), cancelling('B'), waiting('C')]} />)
-    expect(shownIds()).toEqual(['A', 'C'])
-    cleanup()
-    const { container } = render(<QueuedInputList agentId={AGENT} entries={[cancelling('B')]} />)
-    expect(container.firstChild).toBeNull()
+    expect(shownIds()).toEqual(['A', 'B', 'C'])
+    expect(removeButton('B')?.disabled).toBe(true)
+    expect(removeButton('A')?.disabled).toBe(false)
+    expect(document.querySelector('[data-queued-input="B"]')?.getAttribute('data-queued-state')).toBe('cancelling')
+    fireEvent.click(removeButton('B')!)
+    expect(dispatchMock.fireAndForget).not.toHaveBeenCalled()
+  })
+
+  it('못 뺐다는 답이 온 행은 보통 행으로 돌아간다(✕ 가 다시 눌린다)', () => {
+    render(<QueuedInputList agentId={AGENT} entries={[cancelling('B', 'not_removed')]} />)
+    expect(shownIds()).toEqual(['B'])
+    expect(removeButton('B')?.disabled).toBe(false)
+    expect(document.querySelector('[data-queued-input="B"]')?.getAttribute('data-queued-state')).toBe('queued')
+  })
+
+  it('넘긴 행은 ✕ 가 없다 — 취소 대기였어도(✕ 가 넘기기와 겹쳤다) 「보냄」으로 선다', () => {
+    render(
+      <QueuedInputList
+        agentId={AGENT}
+        entries={[sent(waiting('A')), waiting('B'), sent(cancelling('C', 'not_removed'))]}
+      />,
+    )
+    expect(shownIds()).toEqual(['A', 'B', 'C'])
+    expect(removeButton('A')).toBeNull()
+    expect(removeButton('C')).toBeNull()
+    expect(removeButton('B')).not.toBeNull()
+    expect(document.querySelector('[data-queued-input="A"]')?.getAttribute('data-queued-state')).toBe('sent')
+    expect(screen.getAllByRole('button', { name: t('chat.queuedRemove') })).toHaveLength(1)
   })
 
   it('머리줄이 없다 — 항목 줄과 ✕ 말고 다른 글이 없다', () => {

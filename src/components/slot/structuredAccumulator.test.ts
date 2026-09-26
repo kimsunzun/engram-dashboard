@@ -723,10 +723,8 @@ describe('StructuredEventAccumulator — 대기 입력(ADR-0231)', () => {
       const acc = new StructuredEventAccumulator()
       feedAll(acc, c.events.map(queuedInput))
       expect(acc.queuedRows().map(goldenRowOf), `[${c.name}] 목록`).toEqual(c.expect.items)
-      // 골든엔 되울림이 없다 — 「이미 그린 uuid」 거름이 비어 있으니 그릴 목록 = 대기 칸 그대로.
-      expect(listed(acc), `[${c.name}] 그릴 목록`).toEqual(
-        c.expect.items.filter((r) => r.state === 'queued').map((r) => r.id),
-      )
+      // 골든엔 되울림이 없다 — 「이미 그린 uuid」 거름이 비어 있으니 그릴 목록 = 열린 항목 그대로(취소 대기 포함).
+      expect(listed(acc), `[${c.name}] 그릴 목록`).toEqual(c.expect.items.map((r) => r.id))
     }
   })
 
@@ -830,27 +828,64 @@ describe('StructuredEventAccumulator — 대기 입력(ADR-0231)', () => {
     }
   })
 
-  it('취소 대기 감춤: CancelRequested 를 환원한 순간 그릴 목록에서 빠지고 CancelFailed 뒤에도 안 돌아온다', () => {
+  // ADR-0231: 단순화 계획 2026-09-26 항목 8 — ✕ 는 미리 감추지 않는다. 행은 명부가 뺐다고 확인하는 사건이 환원될
+  //   때까지 남고(claude 와 codex 가 같은 규칙), 못 뺐다는 답은 행을 보통 행으로 되돌린다.
+  it('✕ 는 확인된 제거까지 행을 남긴다 — 취소 대기도 그리고, removed:true · Dropped{Withdrawn} 에서만 빠진다', () => {
     const ring = [queued('X'), queued('Y'), cancelRequested('X')]
     const a = new StructuredEventAccumulator()
     const b = new StructuredEventAccumulator()
     feedAll(a, ring)
     feedAll(b, ring)
-    expect(listed(a)).toEqual(['Y'])
+    expect(listed(a)).toEqual(['X', 'Y'])
     expect(listed(b)).toEqual(listed(a))
-    // 환원 상태에는 남는다(결말 대기).
-    expect(a.queuedRows().map((e) => [e.id, e.phase.state])).toEqual([
+    expect(a.snapshotQueued().map((e) => [e.id, e.phase.state])).toEqual([
       ['X', 'cancelling'],
       ['Y', 'queued'],
     ])
-    feedAll(a, [cancelFailed('X')])
+    feedAll(a, [cancelAnswered('X', true)])
     expect(listed(a)).toEqual(['Y'])
-    feedAll(a, [cancelAnswered('X', false)])
-    expect(listed(a)).toEqual(['Y'])
-    // reset 뒤 전량 재생도 같게 감춘다.
+    expect(bubbles(a)).toEqual([])
+    feedAll(b, [dropped('X', 'Withdrawn')])
+    expect(listed(b)).toEqual(['Y'])
+    // reset 뒤 전량 재생도 같다.
     a.reset()
-    feedAll(a, [...ring, cancelFailed('X')])
-    expect(listed(a)).toEqual(['Y'])
+    feedAll(a, ring)
+    expect(listed(a)).toEqual(['X', 'Y'])
+  })
+
+  it('못 뺐다는 답(removed:false · CancelFailed)은 행을 보통 행으로 되돌리고 받음에서 말풍선으로 빠진다', () => {
+    for (const answer of [cancelAnswered('X', false), cancelFailed('X')]) {
+      const acc = new StructuredEventAccumulator()
+      feedAll(acc, [queued('X', '못 뺀 글'), cancelRequested('X'), answer])
+      expect(listed(acc)).toEqual(['X'])
+      expect(acc.snapshotQueued()[0].phase).toEqual({
+        state: 'cancelling',
+        answer: 'not_removed',
+        vendorClosed: false,
+      })
+      feedAll(acc, [delivered('X')])
+      expect(listed(acc)).toEqual([])
+      expect(bubbles(acc)).toEqual([['X', '못 뺀 글']])
+    }
+  })
+
+  it('넘김 표지: HandedOver 가 행을 「보냄」으로 · 되돌림이 풀고 · 받음만이 행을 뺀다(늦은 표지는 무동작)', () => {
+    const handedOver = (id: string, sentMark: boolean) => queuedInput({ kind: 'HandedOver', id, sent: sentMark })
+    const acc = new StructuredEventAccumulator()
+    feedAll(acc, [queued('X', '넘긴 글'), queued('Y'), handedOver('X', true)])
+    expect(acc.snapshotQueued().map((e) => [e.id, e.sent])).toEqual([
+      ['X', true],
+      ['Y', false],
+    ])
+    feedAll(acc, [handedOver('X', false)])
+    expect(acc.snapshotQueued()[0].sent).toBe(false)
+    feedAll(acc, [handedOver('X', true), delivered('X'), handedOver('X', true)])
+    expect(listed(acc)).toEqual(['Y'])
+    expect(bubbles(acc)).toEqual([['X', '넘긴 글']])
+    // ✕ 가 넘기기와 겹쳤다 — 못 뺐다는 답 뒤에 표지가 서도 행은 남아 「보냄」이다.
+    const race = new StructuredEventAccumulator()
+    feedAll(race, [queued('Z'), cancelRequested('Z'), cancelAnswered('Z', false), handedOver('Z', true)])
+    expect(race.snapshotQueued().map((e) => [e.id, e.sent])).toEqual([['Z', true]])
   })
 
   it('취소 대기의 결말: (나) Delivered = 그 자리 말풍선 · (가)·(다) = 아무것도', () => {
@@ -866,11 +901,12 @@ describe('StructuredEventAccumulator — 대기 입력(ADR-0231)', () => {
     }
   })
 
-  it('넘긴 codex 항목의 ✕: 응답 false 로 곧바로 빠지고 Delivered 가 말풍선 한 벌(둘째 Delivered 는 무동작)', () => {
+  it('넘긴 codex 항목의 ✕: 응답 false 뒤에도 행은 남고 Delivered 가 행을 빼며 말풍선 한 벌(둘째 Delivered 는 무동작)', () => {
     const acc = new StructuredEventAccumulator()
     feedAll(acc, [queued('X', '넘긴 글'), cancelRequested('X'), cancelAnswered('X', false)])
-    expect(listed(acc)).toEqual([])
+    expect(listed(acc)).toEqual(['X'])
     feedAll(acc, [delivered('X'), delivered('X')])
+    expect(listed(acc)).toEqual([])
     expect(bubbles(acc)).toEqual([['X', '넘긴 글']])
   })
 
@@ -987,7 +1023,7 @@ describe('StructuredEventAccumulator — 대기 입력(ADR-0231)', () => {
     expect(listed(acc)).toEqual(list)
     expect(acc.queuedRows().map(goldenRowOf)).toEqual(rows)
     expect(acc.isTurnDone()).toBe(done)
-    expect(list).toEqual(['Z'])
+    expect(list).toEqual(['Y', 'Z'])
   })
 
   it('reset 은 묘비까지 비운다 — 재생 전 링 밖의 종결이 새 링의 Queued 를 버리지 않는다', () => {
@@ -1038,6 +1074,21 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
     expect(listed(acc)).toEqual(['X'])
   })
 
+  // ADR-0231: 단순화 계획 2026-09-26 항목 9 — 다시 붙은 창도 넘긴 행을 「보냄」(✕ 없음)으로 그린다.
+  it('재부착: 목록 조회의 `sent` 행은 넘김 표지가 선 행이 되고, 스냅숏 뒤의 표지 사건이 그 위에 다시 선다', () => {
+    const acc = new StructuredEventAccumulator()
+    feedAt(acc, 20, textDelta('a'))
+    const gen = acc.beginQueuedReconcile(7)
+    feedAt(acc, 21, queuedInput({ kind: 'HandedOver', id: 'Y', sent: false }))
+    const sentRow = (id: string): SnapshotRow => ({ id, text: `text ${id}`, state: 'sent', cancel: null })
+    expect(acc.offerQueuedSnapshot(gen, snapshot([sentRow('X'), sentRow('Y'), queuedRow('Z')], 20))).toBe('applied')
+    expect(acc.snapshotQueued().map((e) => [e.id, e.phase.state, e.sent])).toEqual([
+      ['X', 'queued', true],
+      ['Y', 'queued', false],
+      ['Z', 'queued', false],
+    ])
+  })
+
   it('tag0 처럼 feed 를 안 지나는 프레임의 seq 도 배달로 센다', () => {
     const acc = new StructuredEventAccumulator()
     const gen = acc.beginQueuedReconcile(7)
@@ -1061,14 +1112,14 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
   })
 
   // TRD §5-7 의 경합: 질의가 Queued{X} 를 읽은 뒤 다른 창의 ✕ 가 낸 CancelRequested{X} 가 답보다 먼저 온다.
-  it('질의 뒤 라이브 CancelRequested{X}(seq > S) 가 답보다 먼저 와도 X 가 다시 그려지지 않는다', () => {
+  it('질의 뒤 라이브 CancelRequested{X}(seq > S) 가 답보다 먼저 와도 X 가 대기로 되돌아가지 않는다(취소 대기 그대로)', () => {
     const acc = new StructuredEventAccumulator()
     feedAt(acc, 10, queued('X'))
     const gen = acc.beginQueuedReconcile(7)
     feedAt(acc, 11, cancelRequested('X'))
-    expect(listed(acc)).toEqual([])
+    expect(listed(acc)).toEqual(['X'])
     expect(acc.offerQueuedSnapshot(gen, snapshot([queuedRow('X')], 10))).toBe('applied')
-    expect(listed(acc)).toEqual([])
+    expect(listed(acc)).toEqual(['X'])
     expect(phaseOf(acc, 'X')).toEqual({ state: 'cancelling', answer: 'none', vendorClosed: false })
   })
 
@@ -1079,7 +1130,7 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
     // 누산기는 X 를 모른다 — 이 사건을 「모름 → 버린다」로 흘린다.
     feedAt(acc, 51, cancelRequested('X'))
     expect(acc.offerQueuedSnapshot(gen, snapshot([queuedRow('X', 'held body')], 40))).toBe('applied')
-    expect(listed(acc), '취소 대기는 그리지 않는다').toEqual([])
+    expect(listed(acc), '취소 대기도 그린다(✕ 잠김)').toEqual(['X'])
     expect(phaseOf(acc, 'X')?.state).toBe('cancelling')
     feedAt(acc, 52, delivered('X'))
     expect(bubbles(acc)).toEqual([['X', 'held body']])
@@ -1219,7 +1270,7 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
 
     const gen = acc.beginQueuedReconcile(7)
     expect(acc.offerQueuedSnapshot(gen, snapshot([cancellingRow('X')], 51))).toBe('applied')
-    expect(listed(acc)).toEqual([])
+    expect(listed(acc)).toEqual(['X'])
     expect(phaseOf(acc, 'X')?.state).toBe('cancelling')
   })
 

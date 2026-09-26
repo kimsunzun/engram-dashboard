@@ -4,6 +4,9 @@
 // ★✕ 는 명령을 디스패치할 뿐 스스로 감추지 않는다★: 항목이 빠지는 것은 데몬 명부의 결말이 링 사건으로 돌아와
 //   누산기가 그 항목을 뺄 때다 — 창마다 감춤 상태를 두면 다른 창·앱 재시작과 갈린다. 거절(입력 임대)이면
 //   사건이 없어 항목이 그대로 남는 것이 맞다. 글을 거두지 못한 경우도 따로 알리지 않는다.
+// ★✕ 의 모양은 명부 상태가 정한다★(단순화 계획 2026-09-26 항목 8): 취소 요청이 답을 기다리는 행은 ✕ 를 누를 수
+//   없고(행은 그대로 남는다), 통로가 에이전트에 넘긴 행(`sent`)은 ✕ 가 없다 — 넘긴 글은 거둘 수 없고 받음으로만
+//   빠진다. 못 뺐다는 답이 온 행은 보통 행으로 돌아간다.
 
 import { useState } from 'react'
 import { X } from 'lucide-react'
@@ -17,7 +20,7 @@ export interface QueuedInputListProps {
   agentId: string
   /**
    * 그릴 항목 — 든 순서(가장 오래된 것이 앞). 누산기 `snapshotQueued()` 를 그대로 준다(이미 말풍선으로 그린
-   * uuid 는 거기서 빠진다). `queued` 가 아닌 항목(취소 대기)은 여기서도 그리지 않는다.
+   * uuid 는 거기서 빠진다). 취소 대기 항목도 그린다 — 답을 기다리는 동안 ✕ 만 잠긴다.
    */
   entries: readonly QueuedEntry[]
   // ★아래 셋은 사용자가 「나중에 조정」하기로 한 값이다★ — 조정이 이 기본값 한 자리에서 끝나게 둔다.
@@ -38,16 +41,15 @@ export function QueuedInputList({
   defaultExpanded = false,
 }: QueuedInputListProps) {
   const [expanded, setExpanded] = useState(defaultExpanded)
-  const waiting = entries.filter((entry) => entry.phase.state === 'queued')
-  if (waiting.length === 0) return null
+  if (entries.length === 0) return null
 
-  const collapsed = !expanded && waiting.length > collapsedCount
-  const hidden = collapsed ? waiting.length - collapsedCount : 0
+  const collapsed = !expanded && entries.length > collapsedCount
+  const hidden = collapsed ? entries.length - collapsedCount : 0
   const shown = !collapsed
-    ? waiting
+    ? entries
     : collapsedSide === 'oldest'
-      ? waiting.slice(0, collapsedCount)
-      : waiting.slice(waiting.length - collapsedCount)
+      ? entries.slice(0, collapsedCount)
+      : entries.slice(entries.length - collapsedCount)
   const more = hidden > 0 && (
     <li>
       <button
@@ -69,22 +71,34 @@ export function QueuedInputList({
       className="flex max-h-40 flex-col gap-0.5 overflow-y-auto px-2 pt-1.5"
     >
       {collapsedSide === 'newest' && more}
-      {shown.map((entry) => (
-        <li key={entry.id} data-queued-input={entry.id} className="flex min-w-0 items-center gap-1">
-          <span title={entry.text} className="min-w-0 flex-1 truncate text-[12px] text-muted">
-            {entry.text}
-          </span>
-          <button
-            type="button"
-            title={t('chat.queuedRemove')}
-            aria-label={t('chat.queuedRemove')}
-            onClick={() => fireAndForget('agent.cancelQueuedInput', { agentId, inputId: entry.id })}
-            className="flex-none rounded p-0.5 text-muted hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+      {shown.map((entry) => {
+        // 취소 요청이 답을 기다린다 — 못 뺐다는 답(`not_removed`)이 오면 보통 행으로 돌아간다.
+        const asking = entry.phase.state === 'cancelling' && entry.phase.answer === 'none'
+        return (
+          <li
+            key={entry.id}
+            data-queued-input={entry.id}
+            data-queued-state={entry.sent ? 'sent' : asking ? 'cancelling' : 'queued'}
+            className="flex min-w-0 items-center gap-1"
           >
-            <X size={12} aria-hidden="true" />
-          </button>
-        </li>
-      ))}
+            <span title={entry.text} className="min-w-0 flex-1 truncate text-[12px] text-muted">
+              {entry.text}
+            </span>
+            {!entry.sent && (
+              <button
+                type="button"
+                title={t('chat.queuedRemove')}
+                aria-label={t('chat.queuedRemove')}
+                disabled={asking}
+                onClick={() => fireAndForget('agent.cancelQueuedInput', { agentId, inputId: entry.id })}
+                className="flex-none rounded p-0.5 text-muted hover:text-foreground disabled:opacity-40 disabled:hover:text-muted focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
+              >
+                <X size={12} aria-hidden="true" />
+              </button>
+            )}
+          </li>
+        )
+      })}
       {collapsedSide === 'oldest' && more}
     </ul>
   )

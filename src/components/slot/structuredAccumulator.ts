@@ -281,6 +281,7 @@ export class StructuredEventAccumulator {
     // 배치 본문은 앞선 `Queued` 의 사본이다 — 환원이 그 항목을 지우기 전에 잡는다.
     const pending = op.kind === 'Delivered' ? this.queued.row(op.id) : undefined
     if (op.kind === 'AckUnavailable' && !isCopyList(op.delivered)) return false
+    if (op.kind === 'HandedOver' && typeof op.sent !== 'boolean') return false
     if (this.queued.reduce(op) === null) {
       console.warn(
         '[structuredAccumulator] 모르는 QueuedInput kind — 버린다:',
@@ -338,15 +339,16 @@ export class StructuredEventAccumulator {
   }
 
   /**
-   * `QueuedInputList` 가 그릴 항목 — 대기(`queued`)이고 아직 말풍선으로 그리지 않은 uuid 만, 든 순서(가장
-   * 오래된 것이 앞). 취소 대기는 모든 창에서 안 그린다. 매번 새 배열이다.
+   * `QueuedInputList` 가 그릴 항목 — 열린 항목 중 아직 말풍선으로 그리지 않은 uuid 만, 든 순서(가장 오래된 것이
+   * 앞). 매번 새 배열이다.
+   * ★취소 대기도 그린다★(단순화 계획 2026-09-26 항목 8 — ✕ 는 명부가 뺐다고 확인한 뒤에만 행을 뺀다): ✕ 를 누른
+   *   행은 결말 사건(`CancelAnswered{removed:true}` · `Dropped{Withdrawn}` 등)이 환원될 때까지 남는다 — 미리 감추면
+   *   거두지 못한 글이 목록에서도 대화에서도 안 보이는 창이 생긴다.
    * ★거름은 그리기에만 선다★ — 명부와 같은 환원 상태는 `queuedRows()`.
    */
   // ADR-0231
   snapshotQueued(): QueuedEntry[] {
-    return this.queued
-      .rows()
-      .filter((entry) => entry.phase.state === 'queued' && !this.seenUserUuids.has(entry.id))
+    return this.queued.rows().filter((entry) => !this.seenUserUuids.has(entry.id))
   }
 
   /** 환원 상태 그대로(취소 대기 · 이미 그린 uuid 포함) — agent 명부·골든과 같은 값이다. */

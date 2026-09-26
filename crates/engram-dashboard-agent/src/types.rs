@@ -120,6 +120,11 @@ pub enum QueuedInputEvent {
     /// 취소 요청 자체가 실패했다(오류 응답 · 취소 줄 쓰기 실패). ★목록으로 되돌리지 않는다★ — 취소 대기
     ///   그대로 「못 뺐다」이고 결말은 벤더 수명주기가 정한다.
     CancelFailed { id: String },
+    /// 통로가 그 글을 벤더에 넘겼다(`sent: true` — codex `turn/steer`·`turn/start` 를 썼다) · 쥔 자리로 되돌렸다
+    ///   (`false` — 에코 없이 턴이 끝났다 · steer 거절 · 쓰기 실패). ★결말이 아니다★ — 행은 목록에 남고(넘긴 행은 ✕ 가
+    ///   숨는다) 빠지는 것은 여전히 `Delivered`·`Dropped`·취소 응답이다. 목록에 없는 id 면 무동작.
+    ///   ★값은 통로의 지금 단계다★ — 같은 id 에 여러 번 올 수 있고 마지막 것이 이긴다. claude 는 내지 않는다.
+    HandedOver { id: String, sent: bool },
     /// 벤더가 턴에 넣었다 → 목록에서 빠지고 대화 끝 말풍선.
     Delivered { id: String },
     /// 전달되지 않았다. `Rejected` 는 그 id 로 그린 말풍선도 지운다(누산기의 그리기 규칙).

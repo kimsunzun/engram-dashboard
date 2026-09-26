@@ -1256,6 +1256,7 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
             QueuedInputEvent::CancelRequested { id }
             | QueuedInputEvent::CancelAnswered { id, .. }
             | QueuedInputEvent::CancelFailed { id }
+            | QueuedInputEvent::HandedOver { id, .. }
             | QueuedInputEvent::Delivered { id }
             | QueuedInputEvent::Dropped { id, .. } => id.len(),
         },

@@ -841,6 +841,10 @@ fn queued_input_to_wire(op: &CoreQueuedInputEvent) -> WireQueuedInputEvent {
         CoreQueuedInputEvent::CancelFailed { id } => {
             WireQueuedInputEvent::CancelFailed { id: id.clone() }
         }
+        CoreQueuedInputEvent::HandedOver { id, sent } => WireQueuedInputEvent::HandedOver {
+            id: id.clone(),
+            sent: *sent,
+        },
         CoreQueuedInputEvent::Delivered { id } => {
             WireQueuedInputEvent::Delivered { id: id.clone() }
         }
@@ -900,7 +904,7 @@ fn queued_listing_to_wire(
                     answer: answer.as_str().to_string(),
                     vendor_closed,
                 }),
-                ListedState::Queued | ListedState::Unconfirmed => None,
+                ListedState::Queued | ListedState::Sent | ListedState::Unconfirmed => None,
             },
         })
         .collect();
@@ -5247,6 +5251,12 @@ mod tests {
             wire(CoreQueuedInputEvent::CancelFailed { id: id() }),
             WireQueuedInputEvent::CancelFailed { id: id() }
         );
+        for sent in [true, false] {
+            assert_eq!(
+                wire(CoreQueuedInputEvent::HandedOver { id: id(), sent }),
+                WireQueuedInputEvent::HandedOver { id: id(), sent }
+            );
+        }
         assert_eq!(
             wire(CoreQueuedInputEvent::Delivered { id: id() }),
             WireQueuedInputEvent::Delivered { id: id() }

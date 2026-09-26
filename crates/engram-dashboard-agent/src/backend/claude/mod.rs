@@ -3028,6 +3028,7 @@ mod tests {
                         QueuedInputEvent::CancelRequested { .. } => "cancel-requested",
                         QueuedInputEvent::CancelAnswered { .. } => "cancel-answered",
                         QueuedInputEvent::CancelFailed { .. } => "cancel-failed",
+                        QueuedInputEvent::HandedOver { .. } => "handed-over",
                         QueuedInputEvent::Delivered { .. } => "delivered",
                         QueuedInputEvent::Dropped { .. } => "dropped",
                         QueuedInputEvent::AckUnavailable { .. } => "ack-unavailable",

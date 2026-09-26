@@ -37,6 +37,11 @@ export interface QueuedEntry {
   readonly id: string
   readonly text: string
   readonly phase: QueuedPhase
+  /**
+   * 통로가 벤더에 넘겼다(마지막 `HandedOver` 의 값) — 단계와 따로 선다(넘긴 뒤의 ✕ 는 취소 대기이면서 넘긴 행이다).
+   * 결말이 아니다 — 행은 받음·거둠까지 남고, 그리기는 넘긴 행의 ✕ 를 숨긴다.
+   */
+  readonly sent: boolean
 }
 
 /** 한 id 가 종결에 닿은 결말. `Discarded` 의 원인은 `Withdrawn` 이 아니다(그 원인은 늘 `Cancelled`). */
@@ -68,7 +73,8 @@ function verdictOfDrop(cause: DropCause): QueuedVerdict {
 
 /**
  * 목록 조회 행(wire `QueuedInputRow`) → 환원 상태 한 줄. `unconfirmed` 는 조회 순간 덧댄 표지라 환원으로는
- * `queued` 다. 모르는 낱말·깨진 모양(더 새 데몬)이면 `null` — 그 행은 대조에서 빠지고 그 id 는 누산기의 지금
+ * `queued` 다 · `sent` 는 넘김 표지가 선 `queued` 다(취소 대기 행은 표지를 싣지 않는다 — 넘기지 않은 것으로 읽는다).
+ * 모르는 낱말·깨진 모양(더 새 데몬)이면 `null` — 그 행은 대조에서 빠지고 그 id 는 누산기의 지금
  * 상태 그대로 남는다(던지지 않는다).
  */
 // ADR-0231
@@ -79,7 +85,9 @@ export function entryOfListedRow(row: QueuedInputRow): QueuedEntry | null {
   switch (state) {
     case 'queued':
     case 'unconfirmed':
-      return { id, text, phase: { state: 'queued' } }
+      return { id, text, phase: { state: 'queued' }, sent: false }
+    case 'sent':
+      return { id, text, phase: { state: 'queued' }, sent: true }
     case 'cancelling':
       if (cancel === null || typeof cancel !== 'object') return null
       if (cancel.answer !== 'none' && cancel.answer !== 'not_removed') return null
@@ -88,6 +96,7 @@ export function entryOfListedRow(row: QueuedInputRow): QueuedEntry | null {
         id,
         text,
         phase: { state: 'cancelling', answer: cancel.answer, vendorClosed: cancel.vendor_closed },
+        sent: false,
       }
     default:
       return null
@@ -126,6 +135,9 @@ export class QueuedInputRegistry {
         break
       case 'CancelFailed':
         this.onNotRemoved(op.id, closed)
+        break
+      case 'HandedOver':
+        this.onHandedOver(op.id, op.sent)
         break
       case 'Delivered':
         this.onDelivered(op.id, closed)
@@ -262,7 +274,13 @@ export class QueuedInputRegistry {
   private onQueued(id: string, text: string): void {
     // 이미 항목이면 무동작(재방출 없음) · 묘비면 버린다(늦은 `Queued` 가 영구 항목을 만들지 않게).
     if (this.position(id) !== -1 || this.tombstones.has(id)) return
-    this.items.push({ id, text, phase: { state: 'queued' } })
+    this.items.push({ id, text, phase: { state: 'queued' }, sent: false })
+  }
+
+  /** 넘김 표지 — 항목이면 단계와 무관하게 표지만 갈아 끼운다(결말 없음). 모르는 id · 묘비는 무동작(행을 지어내지 않는다). */
+  private onHandedOver(id: string, sent: boolean): void {
+    const at = this.position(id)
+    if (at !== -1) this.items[at] = { ...this.items[at], sent }
   }
 
   private onCancelRequested(id: string): void {
@@ -278,7 +296,10 @@ export class QueuedInputRegistry {
     if (at !== -1 && this.items[at].phase.state === 'cancelling') this.close(at, CANCELLED, closed)
   }
 
-  /** `removed:false` · 요청 실패. ★목록으로 되돌리지 않는다★ — 되돌리면 ✕ 로 모든 창에서 빠진 항목이 다시 그려진다. */
+  /**
+   * `removed:false` · 요청 실패. ★대기로 되돌리지 않는다★ — 응답 칸(`not_removed`)이 뒤이은 벤더 닫힘의 원인을
+   * 가른다(그리기는 이 행을 보통 행으로 그린다 — 단순화 계획 2026-09-26 항목 8).
+   */
   private onNotRemoved(id: string, closed: QueuedClosure[]): void {
     const at = this.position(id)
     if (at === -1) return
