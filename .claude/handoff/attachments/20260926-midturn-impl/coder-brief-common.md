@@ -10,7 +10,8 @@ You are a coder subagent. Implement ONLY your assigned chunk. Working directory:
 
 ## Rules
 - Build must stand after your chunk: `cargo build`, the touched crates' tests, `cargo fmt --check`, `npx tsc --noEmit` / `npm test` if you touched `src/`.
-- ★Run every build/test through `scripts/run-detached.ps1` (usage: `.claude/skill-bindings/qa.md` 「분리 실행」 lines 70–93) and judge by the `__EXIT` marker; read only the lines you need from the log. Crates that spawn real processes (agent, daemon, base) need `-- --test-threads=4`. Never bare `cargo test` at the root.
+- ★Run every build/test through `scripts/run-detached.ps1` (usage: `.claude/skill-bindings/qa.md` 「분리 실행」 lines 70–93) and judge by the `__EXIT` marker; read only the lines you need from the log. Crates that spawn real processes (agent, daemon, base) need `-- --test-threads=4`. Never bare `cargo test` at the root. Run each batch command (`npx …`, `npm …`) as its own run-detached call — chaining `a && npm test` loses the `__EXIT` marker.
+- Edit source containing escapes (`'\n'`, `\\`, quotes) with the Edit/Write tools, not python/bash heredocs — a heredoc turned `'\n'` into a real newline (P3a) and quoted heredocs failed (P5c).
 - Keep `OutputCore::new` and `AgentSession::new` signatures (add builders). `transport/{pty,stdio,input_queue}.rs`, `src/components/slot/TerminalSlot.tsx`, `src/lab/terminal/` must have diff 0 vs master.
 - TDD: write the tests your chunk's plan row lists (TRD §7-1 line refs), with fixtures only — no real agents in unit tests.
 - Do not change behaviour beyond your chunk's "no worse than today" statement.

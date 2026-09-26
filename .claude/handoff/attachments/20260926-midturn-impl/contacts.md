@@ -172,3 +172,51 @@ export const INPUT_LOCKED_REFUSAL  // moved here from protocolClient (review fix
 - ★`delete channel.onmessage` is a no-op on the real `@tauri-apps/api` Channel (prototype accessor)★ — old Channel keeps delivering until Rust replaces it, and frames across re-registration rely on that; comment added at `tauriTransport.ts` `doRegisterOutputChannel`. P6: CLAUDE.md 「통합 micro-rules」 `delete channel.onmessage` rationale is overstated (FakeChannel in tests hides it).
 - Advisories not acted on: flush-time held-cap check (A2); pre-existing concurrent `registerListeners` from `init()` + first `doConnect` can leak a listener set (A3 — a leaked 'connected' listener could resurrect a closed transport); N1 flush discards contiguous frames below a later-generation head (data loss only, rare).
 - P6 docs owed (add): TRD L597/L627/L750; CLAUDE.md 「통합 micro-rules」 (hold/contiguity, reconciliation: live → list query → apply after S → generation; replay waits for Channel registration); contacts P5b "held overflow (4 MiB/8192)" line is stale.
+
+## P3a (WIP a4e17af) — claude decoder/classifier
+```rust
+// backend/claude/mod.rs
+fn cancel_line(id: &str) -> Vec<u8>   // private, ~:686, `#[cfg_attr(not(test), allow(dead_code))]` — P3b sets MidTurnPolicy::SessionClassified { cancel_line } in the JSON branch and deletes the attr
+// bytes = {"type":"control_request","request_id":"cancel:<id>","request":{"subtype":"cancel_async_message","message_uuid":"<id>"}}\n
+pub fn ClaudeStreamDecoder::with_delivery_ack(ack: Arc<DeliveryAck>) -> Self   // open_spawn makes ONE Arc: decoder clone + SpawnParts.delivery_ack; terminal branch stays Unknown
+const RESULT_FAILURE_DETAIL = "claude stream-json result reported failure"      // only an Error starting with this → TurnSignal::Failed (line-overflow Error → None)
+```
+- consume_line(line, events, LineSource::{Live(&DeliveryAck), Transcript}) — lifecycle `started→Delivered`, `cancelled→Dropped{Unknown}`, `discarded→Dropped{AgentEnded}`, `refused→Dropped{Rejected}`, `queued/completed`→nothing; `control_response` `cancel:*` → `CancelAnswered{removed}` / `CancelFailed`; init with `msg_lifecycle_v1` → Available, without → CAS winner emits one `AckUnavailable{[]}`; Transcript: `attachment{queued_command, commandMode:"prompt"}` → user bubble (uuid `source_uuid`), `queue-operation` skipped.
+- ★CLI 2.1.280 emits `command_lifecycle` for EVERY uuid-bearing input (idle Direct and mail too)★ → from P3a on, production emits `Delivered`/`Dropped` for ordinary inputs (registry: unknown id → tombstone; front: already-drawn echo → no-op; `refused` → drawn bubble removed). Old CLI (no capability) → one `AckUnavailable{[]}` per incarnation.
+- Classifier: `TurnEnd{Failed}` → `Ended(Failed)`; `interrupted` result still → MessageDone → Clean (clears halt — TRD L413 leaves it to the interrupt feature).
+- P6 owed: TRD L744 (overflow Error ≠ turn error — carried item wins); TRD L414 (`commandMode:"prompt"` only); `types.rs` `OutputEvent::Error` doc (claude failed turns = Error + MessageDone, not TurnEnd).
+
+## P5 gate — DONE (af9ebe3): review deep PASS after fixes · CI green (run 36208419586) · local QA full PASS
+- Real-claude 6/6 (with `ENGRAM_TEST_REQUIRE_CLAUDE=1`, no skips) · ADR-0130: no new matches (P4's 2 lines remain) · GUI isolated release instance: claude/codex JSON chat, terminal, reload ×3, popout ×3 (+ popout reloads) → live, held 0, no queued list. Forced shell↔daemon reconnect NOT done (no non-destructive procedure) — reloads cover re-attach.
+- Suspicious, likely pre-existing (not checked against 96ead26) → for the user: (1) terminal replay garbled when its tab is hidden at reload (0-width hidden xterm?); (2) codex chat shows claude branding right after `agent.spawnInto` until reload.
+- QA tooling: `getViewOutputState` only via `window.__ENGRAM_AGENT__` (not in `__engramCmd`); isolated worktree teardown needs robocopy `/MIR` (long paths). A debug shell would load wt2's vite on 1420 → QA used a release shell.
+
+## P2a (WIP) — codex transport pending model (all private to `backend/codex/transport.rs`)
+```rust
+struct State { …, pending: VecDeque<PendingItem>, next_arrival: u64, … }
+impl State { fn push_pending(&mut self, id: Option<String>, body: Vec<u8>, origin: InputOrigin); } // pushes Held, listed=false, announced=true (★P2b: parameterise for classified items★), cancel_asked=false, death=None
+struct PendingItem { id: Option<String> /* None = legacy send_input: no withdraw, no echo match, never listed */, body: Vec<u8>, origin: InputOrigin, stage: Stage, listed: bool, announced: bool, arrival: u64 /* monotonic over ALL items */, cancel_asked: bool, death: Option<DropCause> }
+enum Stage { Held, InFlight { gen: u64, turn_id: Option<String> /* None = turn/start reply not yet */, awaiting_reply: bool }, Unconfirmed }
+fn accept_input(state: &SharedState, id: Option<String>, body: Vec<u8>, origin: InputOrigin) -> Result<(), PtyError>; // closed → Down → limit checks, then push + notify_all
+fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError>; // codex override = accept_input(Some(id), …)
+```
+- `take_turn_locked` still pops the head at take (P2a holds only `Held`). `#[allow(dead_code)]` on `PendingItem`/`Stage` — remove when read. No per-state `gen` counter yet (P2b adds it with its first reader).
+- ★P2b must keep id-less (`None`) items out of settlement★ (pop at take, no `clientUserMessageId`) — else they sit `Unconfirmed` forever and block mail; legacy `turn/start` bytes stay identical.
+
+## P3b (WIP 62d6081) — claude session classification + cancel
+```rust
+// output_core.rs (crate-internal)
+pub(crate) enum CancelRequest { Recorded, AlreadyCancelling, NotListed }
+impl OutputCore { pub(crate) fn emit_cancel_request(&self, id: &str) -> CancelRequest; /* registry check + CancelRequested in ONE replay section */ pub(crate) fn classified_input_busy(&self) -> bool; /* pending table then turn table, never the registry */ }
+// session.rs: fn write_user_classified(&self, bytes) — input_order held through classify → emit → send; Available: Queued→send (fail → Dropped{Rejected}); Unknown: send→Queued (fail → nothing); Unavailable/idle → write_now (today); Mail → no lock
+// claude: fn mid_turn_policy(command) -> MidTurnPolicy  (JSON → SessionClassified{cancel_line}, terminal → None)
+```
+- Lock order live: `input_order → replay → registry → pending`; pump/emit/finish never take `input_order`. ★Fanout (sink sends) now runs while holding `input_order` on the session path★ — an ADR-0006 exception to name in P6 (CLAUDE.md 「emit은 … lock 미보유 send」 refers to the subscribers lock).
+- Cancel vs pump `Delivered`: `Delivered` first → NotFound, no line; after → Requested, line written, row closes as Delivered.
+
+## P3 review (deep, 2026-09-26) — codex PASS · concurrency lens PASS · doc-aware FIX (minor) → fixes pending
+- Adopted (orchestrator, delegated; TRD deviation → final report): ack Available only on a lifecycle line with a non-empty `command_uuid` AND a known state word (vendor drift → stays Unknown → init without v1 → Unavailable → today's path). TRD §5-4 「command_lifecycle 줄을 처음 보면 Available」 → P6 amend.
+- Fix items: latch regression tests on the SessionClassified path (Available/Unknown/UserKill); `info!` on the first pump `AckUnavailable` reduction (agent, epoch); named reader fns for the busy read order + non-vacuous cancel-order test.
+- Residual accepted → P6 TRD §5-9: kernel check-then-write gap lets mail released just before a user `Queued` hit stdin before that user item (pre-existing class). WS cancel arm parks a tokio worker on `input_order` (bounded; accepted). `Unknown` has no fallback if a CLI sends neither init nor lifecycle (TRD-accepted, M4).
+- P6 owed (add): TRD L255 (overflow Error ≠ turn error; the prefix rule), L230 (cancel check+record atomic), L234/CLAUDE.md lock order incl. `input_order`, ADR-0006 exception above.
+- Re-verify: codex PASS · doc-aware PASS. Advisories → P6: TRD L742 test list (「첫 command_lifecycle → Available」) also amend; §5-9 residual — the recognisable-line gate only helps when drift comes with an init lacking `msg_lifecycle_v1` (capability kept + renamed keys → rows never close, no ceiling); optional test pinning `LIFECYCLE_STATES` ≡ `lifecycle_event` words.
