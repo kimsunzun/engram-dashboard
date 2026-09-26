@@ -14,9 +14,9 @@ Base: `338740f` (code = P2 `3014247` + P8 `37ecc5e`; comment-only edits since). 
 2. Tool item of the current turn completes → push every held user item (typed order), one `turn/steer` per item with its own `clientUserMessageId`; rows stay, now 「보냄」, ✕ hidden. Mail is never steered.
 3. codex `userMessage` echo with that `clientId` → `Delivered` → row leaves, bubble at chat end. This is the ONLY way an item leaves the list as delivered.
 4. Turn ends with held items and no tool completion → first held user item opens the next turn (`turn/start`); once that turn's id is known, the rest are pushed into it immediately (arm `steer_due`) → all in one turn.
-5. Sent item without echo when the turn closes (any `TurnClose`), or steer refused (incl. −32600 no active turn) → back to held (「대기」, ✕ back) → rides step 4.
+5. Sent item without echo when the turn closes `Completed`/`Unknown`/`Interrupted`, or a steer TIMING refusal (−32600 no active turn, not steerable, id mismatch) → back to held (「대기」, ✕ back) → rides step 4. ★FAILURE closes (`Failed`, `Rejected` = turn/start error reply or write failure, `Unanswered` = deadline/unreadable/oversized id) and a steer WRITE failure → the carried un-echoed user item is `Dropped{Rejected}` (row removed, Direct bubble erased, no notice) — user 2026-09-26 「실패는 지워 … 에러 났는데 뭔가 대기목록에 뜨는것도 이상하잖아」.★ Never-pushed held items are untouched by any close.
 6. After a failed turn (`halted`) → nothing auto-sent; held rows stay; next user item clears the halt. After an interrupted turn → NOT halted: held/returned items go at the next idle (step 4).
-7. `turn/start` rejected → item stays held and visible (no `Dropped{Rejected}` for user items).
+7. (superseded by 5) `turn/start` rejected/unanswered → the carrier is dropped (failure).
 8. ✕ on a held row → request; row stays (✕ disabled) until the backend's removal event (`Dropped{Withdrawn}` / `CancelAnswered{removed:true}`) → then the row goes. If it was already pushed → backend answers not-removed and emits 「sent」 → row stays as 「보냄」 → step 3. claude: row goes only when the CLI cancel answer says removed; else it stays until `Delivered`.
 9. Reattach/popout: `listQueuedInputs` rows carry the sent state so 「보냄」 survives.
 10. codex < 0.140 (no `clientId` in echo): feature stays off exactly as today (keep the version floor as is).
