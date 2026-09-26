@@ -220,3 +220,167 @@ impl OutputCore { pub(crate) fn emit_cancel_request(&self, id: &str) -> CancelRe
 - Residual accepted → P6 TRD §5-9: kernel check-then-write gap lets mail released just before a user `Queued` hit stdin before that user item (pre-existing class). WS cancel arm parks a tokio worker on `input_order` (bounded; accepted). `Unknown` has no fallback if a CLI sends neither init nor lifecycle (TRD-accepted, M4).
 - P6 owed (add): TRD L255 (overflow Error ≠ turn error; the prefix rule), L230 (cancel check+record atomic), L234/CLAUDE.md lock order incl. `input_order`, ADR-0006 exception above.
 - Re-verify: codex PASS · doc-aware PASS. Advisories → P6: TRD L742 test list (「첫 command_lifecycle → Available」) also amend; §5-9 residual — the recognisable-line gate only helps when drift comes with an init lacking `msg_lifecycle_v1` (capability kept + renamed keys → rows never close, no ceiling); optional test pinning `LIFECYCLE_STATES` ≡ `lifecycle_event` words.
+
+## P2b1 (WIP b8dd06b) — codex floor verdict, announce, clientUserMessageId, echo matching, withdraw(Held)
+```rust
+// protocol.rs
+pub(crate) struct TurnStartParams { thread_id, input, #[serde(skip_serializing_if="Option::is_none")] client_user_message_id: Option<String> }
+// decoder.rs
+pub(super) fn user_bubble(text: &str, uuid: Option<&str>) -> OutputEvent
+// transport.rs (private)
+const CLIENT_MESSAGE_ID_FLOOR = (0,140,0); enum Floor { Pending, Above, Below } /* State.floor */
+struct Announcer { order: Mutex<()>, ack: Arc<DeliveryAck> }   // lock order: order → state
+fn announce(core, state, &Announcer); fn settle_floor(core, state, &Announcer, Floor); fn floor_verdict(cli_version, user_agent) -> Floor;
+fn withdraw_item(state, core: Option<&OutputCore>, id) -> Withdraw;
+impl State { fn push_pending(..) /* classifies: Mail|no id → none; User+Pending → undecided; User+Ready∧Idle∧empty → Direct(listed=false); else Queued(listed=true) */; fn take_delivered(&mut self, id) -> Option<PendingItem>; fn turn_start_carrier(&mut self, gen) -> Option<&mut PendingItem>; fn drop_listed(&mut self, pos, cause) -> Option<QueuedInputEvent>; }
+impl CodexAppServerTransport { core: OnceLock<Arc<OutputCore>>; #[allow(dead_code)] pub(crate) fn delivery_ack(&self) -> Arc<DeliveryAck> /* P2c: put into SpawnParts.delivery_ack in codex open_spawn */ }
+```
+- Verdict source: `thread/start|resume` `cliVersion` first, then `initialize.userAgent`; applied in `writer_loop` after `record_session_id`, before `hydrate_history`/`open_gate`. Below → every item loses its id (today's path, no events, no `AckUnavailable`).
+- `gen` = the turn seq (`TurnState::Active.seq`) — no separate counter (deviates from TRD L459 wording). Carrier = `InFlight{gen==seq, turn_id: None, awaiting_reply: true}`; on reply → `turn_id=Some, awaiting_reply=false`.
+- Echo: `clientId` (≤128 B) → bubble uuid + `Delivered{clientId}` right before it (item/started|completed only; history door uses clientId as uuid, no Delivered). Reader `note_delivered` removes the id whatever the stage (TRD L494 "Delivered wins"). Delivered once per item (TRD L356 says twice → P6).
+- withdraw: listed Held announced → remove + `Dropped{Withdrawn}`; listed Held unannounced → death mark (announcer emits Queued then Dropped); Direct/Mail/pre-verdict/unknown → NotHeld; InFlight/Unconfirmed → NotHeld + TODO (P2e).
+- ★Until P2b2★: an id-bearing InFlight item without an echo never leaves pending (blocks Direct, counts to the limit). Mail items with ids (above floor) also become InFlight (TRD L481).
+- P6 owed: TRD L356, L459; `codex/mod.rs` `output_decoder` dedup-key comment stale after P2c.
+
+## P2b2 (WIP) — codex turn-end disposition v1
+```rust
+enum TurnClose { Completed, Failed, Interrupted, Rejected, Unanswered }   // of_completion(params) reads turn.status: interrupted | failed | else Completed
+struct EarlyCompletion { turn_id, boundary: Option<OutputEvent>, close: TurnClose }
+impl State { fn close_turn_items(&mut self, gen: u64, close: TurnClose) -> Vec<QueuedInputEvent> }  // ★guards + `_` arms — a new TurnClose variant compiles silently; P2e2/P2f must revisit★
+fn end_turn_if(state, core, seq, detail, close: TurnClose) -> bool; fn turn_write_failed(state, pending, core, id, seq, e)
+```
+- Table: listed-in-turn: Interrupted → Dropped{Interrupted} · Rejected → Dropped{Rejected} · Completed/Failed/Unanswered → Unconfirmed (no event). Direct-in-turn: Rejected → Dropped{Rejected}, else silent removal. Mail-in-turn: silent removal. Listed Held: Interrupted → Dropped{Interrupted}, else kept. Mail Held / id-less / older Unconfirmed / death-marked: kept.
+- Disposition events emitted outside the lock and BEFORE the turn boundary. Stream close → core `finish` synthesis only.
+- TRD reading: L486 = steer error replies only (turn/start error → Rejected, L504); Mail Held on interrupt kept (L497/L688 wording vs L481 — dropping would lose mail).
+- ★Window after P2c and before P2e2★: an Unconfirmed item has no ✕ exit (withdraw → NotHeld) and keeps `inputs_pending` true → mail blocked until late echo / agent end (anomaly-only). Not gated mid-phase, so acceptable; P2e2 closes it.
+
+## P3 gate (64fe0bd): review deep PASS after fixes · CI green (run 36212104534) · local QA full = PARTIAL (every run check PASS)
+- GUI claude trials 1, 2, 4, 8, 10, 11, 13 (reload/popout/shell restart/forced daemon disconnect), 14 (LLM surface incl. real `engram agent.*Queued*` from another agent), 15 (themes), 16 (mail waits for the list), AC29 halt (max-turns failure → `stopped_after_error` true → mail parked → user turn RECOVER → mail flows) — all PASS; held 0; no flicker/dup/stuck rows.
+- NOT RUN: trial 3 (✕ losing race — window inside the daemon; §7-1 fixtures stand in) · trial 9 part 2 (not reproducible on claude per TRD) · trial 16 terminal-slot mail.
+- Real-claude tests: 6/6 on a clean rerun; ★`c2_live_mid_turn_send_parks_and_delivers_after_turn_end` failed 1/3 under build load★ (first send to an idle recipient → `pending` with the overlapping-drain hint; guess: collides with the first-appearance flush) — flaky, cause unverified → final report / P6 QA re-check. `c1_park_then_spawn_auto_delivers` self-SKIPs its main axis every run (pre-existing, P5 too).
+- Defects found → follow-up chunk (in progress): front `agent.cancelQueuedInput` CONFLICT mapping needs `instanceof Error` but the production carrier rejects with a string (`agentCommands.ts:149`); mail hint says "mid-turn" for a halted-after-error / list-waiting recipient (`messaging/src/service.rs:3180`).
+- For the user (pre-existing/likely): daemon WARN "structured event dropped from wire snapshot (B7 미배선)" now also for `kind="QueuedInput"` (per event?); codex branding after spawnInto; wait timer resets on reattach / ticks after kill (→ next-task memo). Unexpected Korean inputs "아이우에오"/"ㅇ" appeared in the visible QA window — most likely a person at the window; behaviour correct.
+
+## QA fix (pushed 160ba1e on top of 64fe0bd) — review light PASS after wording fix
+- Remote tip = `160ba1e`. Local branch = `64fe0bd` → WIP P2a `aa9441b` → P2b1 `b8dd06b` → P2b2 `e09d549` → QA-fix WIPs `783dede`,`03600c0` (same content as 160ba1e) → (P2c…). ★P2 gate squash = `git reset --soft 160ba1e`★ (index keeps the local tree; diff vs 160ba1e = P2 only — verify with `git diff --stat 160ba1e HEAD` first). Never force-push.
+- Local QA of the fix itself (CONFLICT mapping under a real lease conflict; halted-recipient mail hint text) → fold into the P2 QA run.
+
+## P2c (WIP) — codex flip to TransportOwned
+- codex app-server `open_spawn`: `mid_turn: TransportOwned`, `delivery_ack: t.delivery_ack()`; session `write_now` emits the echo only when `turn_origin.is_none()` (no session echo on TransportOwned). TurnInput id = the write's `Uuid::new_v4()` (= `WriteOutcome.msg_uuid`). No `input_order` on this path (TRD L226/L238). Mail → `send_turn(origin: Mail)`.
+- RichSlot: `historyPending = continuesConversation && !hasHistoryRow` (TRD L621).
+- Ruling (2): front NOT changed — `placeUserBubble` sets `turnDone=false` (TRD L602); a codex `Delivered` is the head of the next turn, whose boundary follows. Residual: turn/start `Unanswered` → vendor starts late → unattributable `turn/completed` → "Wait" stays (pre-existing class). ★P2e2/P2f owe: a late echo placed while settling with no debt / halted must be followed by a boundary or not placed★.
+- ★Open concern for P2 review (ADR-0226)★: `count_turn_submission` runs in `write_now` before `send_turn`; on a fresh codex agent the first input typed before `Link::Ready` becomes Queued → if ✕-withdrawn, the latch already counted → a zero-turn thread id may be persisted (can codex resume a zero-turn thread? unverified). Before the flip nothing was withdrawable.
+- Below-floor codex continuing agent: loading panel now stays after send until the vendor echo (no producer events below floor) — accepted, report.
+
+## ★User decision 2026-09-26 — codex session id persists at the FIRST USER-MESSAGE ECHO (ADR-0226 amendment)★
+- Quotes: 「세션 id가 저장되는건 우리가 보내는 시점이 아니고 오는 시점이잖아」 → 「제출하는게 아니고 코덱스가 뱉는거 기준으로 저장하라고 최초 뱉을때가 완전한 타이밍인거잖아. 미세하게 중간에 종료되서 저장안되는건 그냥 초기화 하라고하고」 → (asked A = first echo vs B = thread/start reply) → 「일단 실제 아이디가 생성된 기준이어야지 당연히. 그게 사용자 글을 에코할때잖아.」
+- Decision: codex JSON (TransportOwned) persists the thread id when codex first echoes a user message in the live stream (the conversation really has a turn), NOT when the session counts our submission. Dies between send and echo → nothing persisted → next activation starts fresh (accepted: 「그냥 초기화」).
+- Rejected: counting at session receive (today — a pre-Ready first input that is ✕-withdrawn persists a 0-turn id); persisting at `thread/start` reply (B — 0-turn ids for agents that never send / withdraw).
+- Scope: codex JSON only. claude unchanged (its first Queued input implies a prior counted turn). codex terminal unchanged (ADR-0226 decision 11).
+- Implement as chunk "P2c-fix" right after P2d (same files). P6: record via `/adr` (amendment of ADR-0226 — new number if it reverses a decision; stamp the old one).
+
+## P2d (WIP) — codex segment tracking, policy seam, M15 trace
+- decoder: `ItemClass{Tool,Output,Other}`, `item_class()`, `ends_answer()` (agentMessage|plan; reasoning excluded).
+- transport: `HandOverPolicy{Immediate,AtEarliestBoundary}` (mod.rs `const HAND_OVER_POLICY = Immediate`, seam `with_hand_over`), `HandOver{Now,Hold}`, `Zone{Blocked,BoundaryOpen,Tool,Answer,Other}`, `verdict(zone, answer_holds)`, `const ANSWER_SEGMENT_HOLDS = true`; `State.{policy, segment, unseen_signal, next_signal_seq}`, `zone_of(pos)`, `hand_over(pos)` (dead until P2e1); `Signal{TurnId,ToolEnd,AnswerEnd,TokenUsage}` → `raise()` + notify; `Job::Woke(Wake)` (writer only traces it — ★P2e1 folds the steer decision into this wake; the "steer during output flood" hop is woken by announce, P2e1 takes its own wake Instant★). Reader entry points `handle_line_at` / `resolve_at`.
+- `zone_of` TODOs for settlement / halt / steer-rejected (P2e1/P2e2/P2f).
+- M15 trace: target `engram::codex_handover` debug; `phase="signal"` {signal, seq, lag_us, handle_us, recv_ms, emitted_ms} and `phase="wake"` {signal, seq, coalesced, lag_us, wake_us}; pair by seq; leg ② `phase="steer"` = P2e1 TODO. Contract doc on `HANDOVER_TRACE`.
+
+## P2c-fix (WIP) — codex JSON thread id persists at the first user-message echo
+- `pub type FirstTurnSink = Arc<dyn Fn() + Send + Sync>` (`crate::backend`); `SessionIdLatch::first_turn_sink()` = port calling the existing `note_submission()` (latch state machine unchanged); `AgentBackend::open_spawn(.., sid_sink, first_turn_sink, resume_session_id, ..)` gained the param (trait, 3 impls, dispatch fn, manager wiring next to `offer_sink`); codex app-server branch `.with_first_turn(sink)` paired with `TransportOwned`; terminal drops it.
+- codex `Reader::witness_first_turn` fires once (`take()`) on the first live `item/started|completed` with type `userMessage` (clientId or not; mail and below-floor turns count; foreign threadId skipped; history never). Called with no lock held, after the line's events + trace → the one profile save per incarnation now runs on the codex reader thread (bounded by the agents.json rewrite, ADR-0071).
+- Session: `count_turn_submission` keeps the UserKill refusal, returns early for TransportOwned without `note_submission`.
+- Resolves the P2c "open concern" (withdrawn pre-Ready first input no longer persists a 0-turn id).
+- Residuals → P2 review / final report: vendor drift (no userMessage echo) → never persists, only the latch "Held" info log (optional warn when an attributed turn completes with the port unfired); commit-port panic on the reader thread (unwind → pump Failed; release aborts); kill-vs-late-commit window (same as record_session_id's).
+- ★P6 owed★: CLAUDE.md 「핵심 불변식」 last bullet (codex JSON exception — suggested text in the coder report: 「★codex JSON(`TransportOwned`)은 세션이 세지 않고 통로가 상대의 첫 유저 메시지 되울림에서 래치의 첫 턴 포트(`FirstTurnSink`)를 부른다 — 첫 턴 뒤 영속이고, 보내고 되울림 전에 죽으면 영속이 없다(사용자 결정 2026-09-26 · ADR-0226 개정)★」); ADR-0226 decisions 2 and 11 + 「영향/불변식」 → `/adr` amendment (new ADR number, stamp 0226); check `docs/reference/backend-capabilities.md` for codex persistence timing.
+
+## P2e1 (WIP d959322) — codex steer, gated off (474k tokens · 105 tools · 25 min — upper bound; P2e2 split into P2e2a/P2e2b)
+```rust
+// protocol.rs
+pub(crate) const method::TURN_STEER = "turn/steer";
+pub(crate) struct TurnSteerParams { thread_id, expected_turn_id, client_user_message_id: String /* steer only carries id-bearing items */, input }
+// transport.rs (private)
+const STEER_ENABLED: bool = false;   // sets State::steer in State::new(); P2e2b deletes const + field
+struct State { …, steer: bool /*test seam; helper steering(h)*/, steer_refused: Option<u64> /*turn seq; zone_of → Blocked for that turn*/, woken_by: Option<(SignalMark, Instant)> }
+enum Waiter { …, Steer { id: String, gen: u64 } }
+impl State { fn steer_replied(&mut self, id, gen, reply: SteerReply) -> SteerMove }  // SteerReply{Accepted,Refused,Unanswered} · SteerMove{Stale, Moved(Option<QueuedInputEvent>)}
+fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer>;  // candidate = oldest Held User item; Mail skipped (neither steers nor blocks); unannounced / Direct / Hold → wait (no skip); needs Active{turn_id: Some} ∧ Floor::Above ∧ steer
+struct Steer { request, item, gen, line, hop: Hop }  enum Hop { Signal{mark, seen}, Announce{seen} }
+struct Wake { mark, seen, steer: Option<Steer> }  enum Job { …, Steer(Steer) }  enum Issued { Written(Instant), Failed, Closed }
+fn issue_steer(state, pending, core, steer, write) -> Issued;  fn steer_write_failed(..) /* → Dropped{Rejected}, turn continues */
+enum Traced { Wake(Wake), Steer(Hop, Instant) }   // trace lines held back until the wake's steers are written
+```
+- Replies: Accepted/Unanswered → `awaiting_reply=false` only. Refused → item back to Held in place (no event) + `steer_refused=Some(gen)`; with `cancel_asked` → `Dropped{Withdrawn}`. Stale = any reply whose item is not `InFlight{gen, Some(_), awaiting_reply: true}`.
+- `withdraw(InFlight)` → TooLate + `CancelRequested` + `CancelAnswered{removed:false}` (first ✕ only; outside lock). ★Live in production too★ (turn/start carrier window before echo) — no-echo case leaves a `Cancelling` row that blocks mail until P2e2a's `Dropped{Unknown}`.
+- M15 leg ②: `phase="steer"` {hop: signal|announce, signal, seq, steer_us, hop_us}; pairs with `wake` by seq. `woken_by` cleared only when the writer sleeps (skew documented on `Hop`).
+- TODOs: :528 (P2e2 settlement → Blocked; P2f halted) · :549 (P2e2b enable) · :1073 (close_turn_items: cancel_asked → Dropped{Unknown}; awaiting steer reply → wait for settlement) · :1112 (steer reply after turn end is Stale today) · :4001 (withdraw(Unconfirmed) → TooLate + 3 events + wake) · :1186 (P2f arrival).
+- ★Gate must stay off until settlement★: turn completes between steer take and reply → item Unconfirmed, later −32600 Stale → stays grey though rejected.
+- Not unit-tested: `writer_loop` wiring (needs ChildStdin). Stale anchors: `sweep_deadlines` ≈ :2505, `ReaderExit` drop ≈ :3100.
+
+## P2e2a (WIP fe93077) — codex settlement, Unconfirmed exits, Dropped{Unknown} (471k tokens · 115 tools · 30 min)
+```rust
+struct Settling { gen: u64, deadline: Instant }   // State.settling: Option<Settling>; "awaited" derived: State::awaiting(gen) over PendingItem::awaits_reply_in(gen) = InFlight{gen, awaiting_reply: true}
+impl State {
+  fn settle_if_resolved(&mut self) -> bool;                       // single close point — debt is set here (P2e2b)
+  fn expire_settlement(&mut self, now) -> Option<Disposal>;       // + free fn expire_settlement(state, core, now), end of sweep_deadlines
+  fn acceptance_unknown(&mut self, pos) -> Option<QueuedInputEvent>; // listed → Unconfirmed · listed+cancel_asked → Dropped{Unknown} · unlisted → silent removal
+  fn close_turn_items(&mut self, gen, close: TurnClose) -> Disposal; // exhaustive, no guard/_ arm
+}
+struct Disposal { events: Vec<QueuedInputEvent>, unechoed: Option<(u64,u64)> }  fn emit(self, core) // outside lock
+enum SteerMove { Stale, Moved(Disposal) }
+struct Anomalies { unechoed: u64, late_echoes: u64 }   // State.anomalies, per incarnation
+Reader::note_delivered(&self, events) -> bool          // true → display-only TurnEnd{turn_id: None, Completed} via emit_without_turn_observation
+```
+- Settlement opens only when a steer still awaits its reply at `completed`/`failed` → never in production with steer off. While open: `take_turn_locked` → None, `zone_of` → Blocked. Closes on echo / reply / steer deadline / write failure / own deadline; `ReaderExit` drops it.
+- Replies in settlement: Accepted (no echo) / Unanswered → acceptance unknown (+ unechoed counter); Refused → Held in place (cancel_asked → Dropped{Withdrawn}).
+- ✕ on Unconfirmed → TooLate + CancelRequested + CancelAnswered{removed:false} + Dropped{Unknown}, removed, writer woken. Late echo → Delivered + removal + notify_all + warn(count,total); if Idle and not `ours` → synthetic display boundary (P2c ruling (2) resolved: place + boundary; also covers halted Idle).
+- Writer wake = `cv.notify_all()` in the same state-lock section (no new hook).
+- ★Orchestrator decision 2026-09-26 (delegated; TRD deviation → final report + P6)★: **debt (`follow_up_owed`) is judged only for items that entered via `turn/steer`** — TRD L540's literal rule would also fire for `turn/start` carriers (turn completes with no output item after the echo) and send an empty `turn/start` in production with steer off (M9: model repeats its previous answer). A carrier's turn always samples its input first; M10 "recorded only" is a steer phenomenon; (a) is no worse than today.
+- Residuals: `debug_assert!(settling.is_none())` on open (reader-thread panic in debug if ever violated) · race: `note_delivered` reads Idle before emit — a Direct send in between → boundary right after that Direct bubble hides "Wait" until first output · `unechoed` also counts steers whose own deadline expired before turn end.
+- P6 owed: TRD L458 (awaited derived, not stored) · TRD §5-5/§5-7 synthetic display boundary after a late echo · `output_core.rs` doc of `emit_without_turn_observation` (「호출자는 오늘 둘」, 「종료 신호를 낼 이벤트는 이 문으로 보내지 않는다」) stale → P2e2b fixes the comment.
+- TODOs: P2e2b L610 (const) · L1184 (debt, immediate close) · L1233 (debt at settle_if_resolved) · L2368 (Idle order) · P2f L589 (halted Idle → Blocked) · L1354 (arrival) · `TODO(ADR-0231)` on `TurnClose::Failed` and codex `classify_turn`.
+
+## P2e2b (WIP 79ffcc2) — codex debt issuance, Idle order, steer ENABLED (444k tokens · 126 tools · 24 min)
+```rust
+struct State { …, unanswered: Option<u64> /*gen; set in note_delivered for InFlight{steered:true} of the open turn; cleared by an Output item/started of the current turn id; taken at every close*/, follow_up_owed: Option<u64>, debt_paid_by: Option<u64> /*only for the abnormal-end warn*/ }
+struct Settling { gen, deadline, owes: bool }   struct Anomalies { unechoed, late_echoes, unpaid }   // Disposal gains unpaid: Option<u64>
+enum Opening { Item(usize), FollowUp }   impl State { fn idle_opening(&self) -> Option<Opening> }  // Above: user Held (Direct incl.; waits if unannounced) → FollowUp (empty turn/start, no clientUserMessageId) → mail only if no Unconfirmed; Below/Pending: today's FIFO
+enum Stage { Held, InFlight { gen, turn_id, awaiting_reply, steered: bool }, Unconfirmed }   // steered only via take_steer_locked
+```
+- Debt = `unanswered == gen ∧ close == Completed`, set in `close_turn_items` (no settlement) or via `Settling.owes` → `settle_if_resolved`. Carrier (incl. re-sent after refusal) never owes. Debt cleared at issue (user or empty turn; mail never clears). Paying turn ends abnormally → no reissue, `unpaid += 1` + warn.
+- `STEER_ENABLED` + `State::steer` deleted; steer gated only on `Floor::Above`. `zone_of` Idle derives from `idle_opening()`.
+- Intended above-floor behaviour change: a Held user item opens before older Held mail; mail (incl. legacy id-less `send_input`) waits while any Unconfirmed exists.
+- ★P2f plug points★: halted → top of the Above branch of `idle_opening` (while halted: `Item(first user Held)` only if some user item has `arrival` > mark, else None — no FollowUp, no mail); `zone_of` follows automatically. Set halted in `close_turn_items`' `match close` (Failed/Rejected/Unanswered split already there).
+- Residuals now live in production (steer on): P2e2a `debug_assert!(settling.is_none())`, the `note_delivered` Idle race. Unverified: the empty follow-up turn streams assistant output with no preceding user bubble — front rendering / "Wait" needs P2 GUI QA.
+- P6 owed: TRD L540 / L520 / L656 contradict the steered-only debt decision (amend); TRD L458 field list (+ `unanswered`, `Settling.owes`, `debt_paid_by`, `Anomalies.unpaid`, `InFlight.steered`); TRD tension L542 vs L670/L746 on `debt_paid_by`. P2e1 anchor list in this file is stale.
+- TODOs: :559 `TODO(ADR-0231)` Failed → halted (P2f) · :599 AtEarliestBoundary (P8) · :619 / :1055 / :1447 `TODO(P2f)` · codex/mod.rs:1210 `TODO(ADR-0231)` classify_turn Failed.
+
+## M15 phase A (2026-09-26) — setup works, measurement defect found
+- Driving surface = direct WS client to the daemon (`scratchpad/m15drive.mjs`: daemon.json → `Auth` → `CreateProfile{backend:'codex', output_format:'StreamJson'}` → `SpawnProfile` → `Subscribe` → `WriteStdin`). No GUI / client shell / vite needed. `engram` CLI unusable (per-agent token, no input verb). Daemon launched directly via `launch-detached.ps1 -EnvVars 'RUST_LOG=warn,engram::codex_handover=debug','ENGRAM_DATA_DIR=<isolated>'` works. Flood helper `flood.js N sleepMs batch` (model-written inline loops break on cmd quoting).
+- Observed: all three phases emitted; format matches the parser; turn-id hop and announce steers work end to end.
+- ★Defect (P2d trace)★: `lag_us` measures from the previous short read, so time the reader spends BLOCKED in `read()` waiting for codex (model thinking, idle between turns — up to 101 s) counts as lag; contradicts the `HANDOVER_TRACE` doc. codex emit→pick = 0–3 ms vs lag_us 21–178 ms. Fix: count only busy time (timestamp before each read; exclude the blocked interval). → P2 fix round.
+- Debug build: `handle_us` 2.1 ms parsing a 4000-line `item/completed` → phase B must use a `--release` daemon.
+- Command-output deltas are not forwarded to subscribers (driver keys off ToolCall). Parallel tools not yet reproduced (codex ran two echoes sequentially).
+- README header stale (says steer off). Phase B estimate ≈ 35 codex turns, 20–40 min.
+
+## P2 review (deep, 2026-09-26, snapshot df1ab8d) — FIX → fix round "P2g"
+- codex blind **FIX** (61k tokens, 2 tool calls): echo before the steer reply → `note_delivered` removes the item → `close_turn_items` sees nothing awaited → next `turn/start` may open before the reply; later reply Stale (transport.rs ~:3992). Fix: keep the reply obligation after the item leaves.
+- doc-aware **FIX**: F1 halt / settlement / debt transitions unlogged (logging-conventions 「계측 의무」); F2 unknown/missing `turn.status` → `TurnClose::Completed` lifts the transport halt and can set debt while the kernel (`Ended(Other)`) keeps `last_end_failed` → add an Unknown close that neither raises nor lifts the halt and owes no debt. Advisories: A1 empty follow-up measured only on 0.156.1 (floor 0.140) → residual §5-9; A2 RichSlot loading gate also reaches claude (continuing claude with a Queued first input keeps the loading panel until Delivered) → report.
+- concurrency lens **PASS** (no lost wake, no lock cycle, `debug_assert` unreachable, reducer correct under every interleaving). Advisories → residuals: F1 previous `TurnEnd` can land after the next Direct bubble (cosmetic "Wait" hidden until first output); F2 list-drained doorbell rings before `TurnEnd{Failed}` is observed → one mail can slip into the halted transport (same class as §5-9 check-then-write). Out-of-lens: kernel halt below floor = by design (TRD L250, confirmed by doc-aware).
+- Doc debts (P6, from doc-aware): CLAUDE.md 「핵심 불변식」 codex JSON persistence exception + `order → state` lock / fanout-under-`order` ADR-0006 exception; ADR-0226 amendment; `docs/reference/backend-capabilities.md` L38/L43/L121; TRD L540/L520/L656 (steered-only debt), L458 field list (+ `unanswered`, `Settling.owes`, `debt_paid_by`, `Anomalies.unpaid`, `InFlight.steered`, `halted`, `floor`), L356, L459, §5-5/§5-7 display boundary, L245, §5-9 (A1, unknown status); `decoder.rs:710-714` comment (fixed in P2g).
+
+## P2g (WIP 4ba00b5) — review fixes (407k tokens · 96 tools · 18 min; one rate-limit death before any edit → resumed)
+- `State.steers_owed: Vec<SteerOwed{gen, item, echoed}>` (reply obligation outlives the item; created in `take_steer_locked`, released by reply / steer deadline / write failure / settlement expiry / ReaderExit); `awaiting(gen)` = owed entry ∨ pending item awaiting; refused-after-echo → release + `Anomalies.refused_after_echo` + warn, no resurrection; `push_pending` Direct also requires `settling.is_none()`.
+- `enum Transition{Halted, HaltLifted, SettlementOpened, SettlementClosed, DebtSet, Discarded}` logged after unlock (halt info, rest debug); `Job::Turn{follow_up, paid}` → writer logs empty follow-up written (info) / debt paid (debug).
+- `TurnClose::Unknown` (missing / `inProgress` / unknown status): disposition as Completed, halt unchanged, no debt, not unpaid.
+- `DrainMark{drained, blocked}`: reader lag = busy time only (blocked `read()` excluded); known upper-side error after an idle wait documented. M15 README updated (pre-P2g logs invalid for verdicts).
+- Re-verify: codex PASS (thread check OK) · doc-aware PASS (F1/F2 closed; nit: `refused_after_echo` warn lacks `agent` field) · concurrency PASS. ★P2 review gate = PASS after fixes★.
+- Residuals (→ P6 §5-9 + final report): concurrency F1 (previous `TurnEnd` after next Direct bubble — cosmetic) · F2 (drained doorbell before `TurnEnd{Failed}` → one mail into the halted transport; new bounded variant: during an owed-reply-only Completed settlement the kernel sees an empty list → mail Held in the transport ≤ 30 s; kill in that window drops it) · A1 empty follow-up measured only on 0.156.1 · A2 RichSlot loading gate reaches claude · owed-only settlement moves the mail wait from kernel to transport (bounded).
+- Doc debts added (P6, TRD): L458 (+ `steers_owed`, `refused_after_echo`; awaited now stored), L460 + L522 (settlement can stand with an empty list; Queued because Direct requires no settlement), L516 + L518 step 1 ("unanswered steer requests of T, echoed or not"), L525 (echo delivers, settlement keeps waiting for the reply), §5-5 L495–502 add an unknown/missing-status row (disposition as completed, settlement yes, halt unchanged, no debt). L251 needs no change.
+
+## P8 (WIP 939d9c7) — codex default `AtEarliestBoundary` (341k tokens · 112 tools · 18 min)
+- `HAND_OVER_POLICY = AtEarliestBoundary` (codex/mod.rs), `State::new()` defaults from the const (Harness = production policy); `Immediate` kept via `with_hand_over` (fallback: revert if the vendor narrows the window). Zone table unchanged; gap fixed: Answer → Other on `item/started` now wakes the writer (no Signal). `answered_turn` helper ends its answer at a boundary (16 debt/settlement/halt tests depended on mid-answer steering). Gates: agent 1124 · daemon 746.
+- Review (code deep): codex blind FIX — "held text before a failed turn stalls until the user types" · doc-aware PASS ("halt design AC24, not a leak") · concurrency PASS (N1 trace mislabel for the new wake; N2 = same halt amplification, "confirm intended"). ★Resolved = by design★: TRD §10-1 item 9 (Q8, user decision) — codex never auto-sends after an error end; held items wait for the next user message (older first), not even after limits reset; claude = vendor behaviour. Orchestrator first recommended auto-sending (B) without checking the record → corrected to the user (2026-09-26). N1 → P8-fix.
+- User (2026-09-26): after everything, discuss simplification / refactoring candidates together (「다끝난뒤에 단순화 한번 나하고 얘기해보자」). Also asked: does queued input vanish on a claude usage-limit error? → unknown (not measured; claude = vendor); offered an error-turn check in the final QA (answer pending).
+- TRD 9판 committed locally (`5cc8ce0`, 410k tokens · 157 tools · 31 min) → `/review doc full` running. Other docs owed (from the TRD worker): CLAUDE.md (ownership split, lock order four locks + `order → state`, two fanout-under-lock exceptions, codex JSON persistence exception, replay→live seq, micro-rules hold/caps/reconcile/Channel wait, `last_end_failed` cursor) · ADR-0006 · ADR-0226 amendment (new ADR, stamp) · ADR-0231 check · `docs/reference/backend-capabilities.md` L38/L43/L121 · `docs/reference/architecture-overview.md` input path.
+- P8-fix (`7d0bf7d`, `1ec0486`): trace `hop="zone"` + `State::zone_opened` (cleared on a new Hold zone and on any boundary signal) · `refused_after_echo` warn gets `agent` · comments (`output_decoder`, `OutputEvent::Error`) · `agent.listQueuedInputs` summary + `commands.schema.json` regenerated + `prompts/engram-help.md` · M15 parser accepts `hop=zone`. codex re-verify r1 FIX (stale zone marker) → r2 pending.
+- TRD 9판 review (doc full): codex cut-advocate FIX ×7 (9판 notes vs struck 8판 text in the same line: L383 leaf, L157/L164/L873 "remaining measurement / stop and ask"; M15/P8 repeated in ~10 places → keep numbers at L164, decision at L873, index at L1109; L26 old order + master-merge instruction; L497 "second Delivered"; L644–647; L25 list vs L32 vs §10-6) · doc-aware FIX ×10 (F1 ★orchestrator plan "M15 red → don't ask" contradicted PRD R8 / PRD §10 / ADR-0231 decision 2 / §10-1 23 — never triggered (M15 green); record it as such★ · F2 §10-6 decider labels (review fixes are orchestrator-adopted → final report; L1106 → orchestrator) · F3 add `INPUT_QUEUE_LIMIT` row · F4 strike L335/L766/L521/L527, L513 "셋"→넷 · F5 M16 before P0 (`6290c5b`), M15 after P2 (`9ebebe8`) · F6 master merge done (`6787c83`) · F7 L227 first_turn_sink wording · F8 code comments cite 8판 TRD lines (`queuedInputReducer.ts:194`, `session.rs:3048`) → P6 · F9 lock order `order → {state, replay → registry → table}` for ADR-0006 · F10 L603 「실측」→「판독」). All user attributions verified word for word; all spot-checked behaviour claims match code.
