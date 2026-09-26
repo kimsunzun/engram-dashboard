@@ -60,7 +60,7 @@ use self::decoder::CodexAppServerDecoder;
 use self::protocol::{
     AskForApproval, SandboxMode, ThreadOpen, ThreadResumeParams, ThreadStartParams,
 };
-use self::transport::{CodexAppServerTransport, HandOverPolicy};
+use self::transport::CodexAppServerTransport;
 use crate::backend::{
     console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
     SpawnParts, TransportShape, TurnClassifier,
@@ -461,18 +461,6 @@ fn mcp_attachment(control: Option<&ControlEndpoint>) -> McpAttachment {
 /// 기본값은 상류가 바꿀 수 있고 바뀌어도 우리 argv 는 조용히 그대로다).
 const APP_SERVER_SUBCOMMAND: &str = "app-server";
 const APP_SERVER_STDIO_FLAG: &str = "--stdio";
-
-/// app-server 통로의 넘기기 정책을 고르는 자리 — ★codex backend 의 상수 하나다(사용자 설정 표면을 늘리지
-/// 않는다)★(TRD §5-5). seam 없이 지은 통로의 기본값도 이것이다 — 시험대가 운영 정책을 그대로 잰다.
-/// 붙드는 정책은 M15 반응 지연이 녹여 켰다(도구 끝 반응 합 2275 µs < 창 최소 6 ms · 답 끝 221 µs < 9.4 ms —
-/// `docs/research/mid-turn-m15-measurements-2026-09-26.md`). ★재론 트리거 = 벤더가 그 창을 좁힌다(재측정 빨강) —
-/// 저절로 되돌리지 않는다★: 좁아진 창에서 붙든 글은 경계를 놓쳐 한 경계 늦는다(잃지는 않는다). 답 끝 창만
-/// 좁아지면 `ANSWER_SEGMENT_HOLDS = false`(답 구간만 곧바로 — 사용자 질문이 아니다, 그 상수 doc) · 도구 끝 창이
-/// 좁아지면 코드 전에 사용자에게 다시 묻는다(ADR-0231 결정 2 · ADR-0234 결정 4). `Immediate` 는 통로를 짓는
-/// seam(`with_hand_over`)으로만 끼우는 변형이지 정해 둔 되돌림 자리가 아니다.
-// ADR-0231
-// ADR-0234
-const HAND_OVER_POLICY: HandOverPolicy = HandOverPolicy::AtEarliestBoundary;
 
 /// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에
 /// 실리므로) — 사용자가 일부러 건 값을 말없이 지우지 않도록 그 자리에서 경고하게 한다.
@@ -1090,9 +1078,7 @@ impl AgentBackend for CodexBackend {
             // ★`TransportOwned` 와 첫 턴 포트는 짝이다 — 한쪽만 두지 말 것★: 그 모드의 세션은 제출을 세지
             //   않으므로, 포트가 통로에 안 꽂히면 어느 화신도 thread id 를 영속하지 못한다(오류 없음).
             // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
-            let t = t
-                .with_hand_over(HAND_OVER_POLICY)
-                .with_first_turn(first_turn_sink);
+            let t = t.with_first_turn(first_turn_sink);
             // ADR-0231: 통로가 분류·넘기기·취소를 진다. 받음 가능 여부는 통로의 하한 판정이 채우는 **바로 그**
             //   Arc 다 — 따로 만들면 세션과 통로가 서로 다른 값을 본다.
             let ack = t.delivery_ack();

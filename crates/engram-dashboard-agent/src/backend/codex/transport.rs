@@ -1,8 +1,8 @@
 //! CodexAppServerTransport — `codex app-server --stdio` 자식 프로세스용 [`AgentTransport`] 구현.
 //!
 //! ★이 파일이 소유하는 것★: 자식 프로세스 + Job Object · 단일 stdin writer · 리더(pump) · 나간 요청의
-//!   대기표와 id 계수기 · thread id 와 준비 상태 · 게이트되는 입력 큐 · 현재 턴의 구간 추적과 넘기기
-//!   정책([`HandOverPolicy`] — TRD §5-5). 나가는 봉투의 id·메서드·순서를
+//!   대기표와 id 계수기 · thread id 와 준비 상태 · 게이트되는 입력 큐 · 도는 턴의 도구 끝에 쥔 글을 넘기는
+//!   계기([`State::steer_due`] — 단순화 계획 2026-09-26). 나가는 봉투의 id·메서드·순서를
 //!   전부 여기서 쥔다 — 그래서 [`AgentTransport::send_input`] 이 받는 바이트는 와이어 프레임이 아니라
 //!   **메시지 본문**이다([`crate::backend::InputEncoder::TransportFramed`]).
 //!
@@ -161,8 +161,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::decoder::{
-    ends_answer, history_turn_boundary, is_user_message, item_class, user_bubble,
-    CodexAppServerDecoder, ItemClass,
+    history_turn_boundary, is_tool_item, is_user_message, user_bubble, CodexAppServerDecoder,
 };
 use super::protocol::{
     self, method, ClientInfo, Inbound, InitializeParams, InitializeResponse, RequestId,
@@ -413,15 +412,12 @@ struct State {
     /// `Arc` 를 들고 있어 세션 하나치 메모리가 함께 남고, `shutdown()` 은 reaper 경로에서 불리지 않아
     /// 아무도 그것을 깨우지 않는다.
     closed: bool,
-    /// 통로를 지을 때 정해지고 그 화신 동안 안 바뀐다([`CodexAppServerTransport::with_hand_over`] — 안 끼우면 운영
-    ///   상수 `HAND_OVER_POLICY`).
+    /// 도구 끝 계기 — 우리 지금 턴의 도구 항목이 끝났다([`Reader::note_tool_item`]) · 또는 턴 id 가 막 온 턴에 쥔 사용자
+    ///   글이 남았다([`Reader::resolve`]). 서 있는 동안 라이터가 쥔 사용자 글을 친 순서대로 하나씩 steer 로 넘기고, 넘길
+    ///   것이 없어지면 내린다([`take_steer_locked`]) — 도구 끝 하나가 쥔 글 전부를 넘긴다(단순화 계획 2026-09-26 — 「도구
+    ///   하나 끝나면 슬쩍 끼워 넣는다」). ★세우는 쪽이 같은 락 구간에서 `notify_all` 한다★.
     // ADR-0231
-    policy: HandOverPolicy,
-    // ADR-0231
-    segment: Segment,
-    /// 라이터가 아직 못 본 경계 신호([`State::raise`]) — 라이터가 깨어 집는다([`next_job`]).
-    // ADR-0231
-    unseen_signal: Option<Signal>,
+    steer_due: bool,
     /// 오류 뒤 멈춤 — 우리 턴이 이상하게 끝났다(`failed` · `turn/start` 출구 — [`TurnClose`]).
     ///   ★서 있는 동안 Idle 은 턴을 하나도 열지 않는다★([`State::idle_opening`]) — 쥔 사용자 글 · 우편 모두 저절로 안
     ///   나간다(TRD §5-5 「오류 뒤 멈춤」 · 사용자 결정 N11).
@@ -434,9 +430,9 @@ struct State {
     ///   표현하면 귀속 게이트가 늦은 에코를 우리 턴으로 세어 턴 표를 다시 켠다(TRD §5-5 「벤더가 보낸 에코」 조건 ①).
     // ADR-0231
     halted: bool,
-    /// 「steer 거절」 표시 — steer 가 오류 응답을 받은 턴의 표식([`TurnState::Active`] 의 `seq`). 그 턴 동안은 쥔
-    ///   항목을 하나도 넘기지 않는다(넘길 수 없음 — [`State::zone_of`]). 벤더가 그 턴의 창을 닫았으므로 같은 턴에
-    ///   다시 보내는 고리를 만들지 않는다. 다음 턴은 표식이 달라 저절로 풀린다.
+    /// 「steer 거절」 표시 — steer 가 오류 응답을 받았거나 쓰지 못한 턴의 표식([`TurnState::Active`] 의 `seq`). 그 턴
+    ///   동안은 쥔 항목을 하나도 넘기지 않는다([`take_steer_locked`]). 벤더가 그 턴의 창을 닫았으므로(쓰기 실패면 같은
+    ///   쓰기가 또 실패할 것이므로) 같은 턴에 다시 보내는 고리를 만들지 않는다. 다음 턴은 표식이 달라 저절로 풀린다.
     // ADR-0231
     steer_refused: Option<u64>,
 }
@@ -535,15 +531,15 @@ enum TurnClose {
     ///   끝」(`TurnOutcome::Unknown` → `TurnEndKind::Other`)으로 접어 `last_end_failed` 를 오류 끝으로 세우지 않는다.
     Unknown,
     /// `turn/completed` 의 `failed`. 이것과 `Rejected`·`Unanswered` 가 실패 끝이다 — 그 턴이 실은 에코 없는 사용자 글을
-    ///   거절(`Dropped{Rejected}`)로 지우고 오류 뒤 멈춤을 세운다([`State::close_turn_items`] · [`State::halted`]).
+    ///   쥔 자리로 되돌리고(다른 끝과 같다) 오류 뒤 멈춤을 세운다([`State::close_turn_items`] · [`State::halted`]).
     Failed,
     /// `turn/completed` 의 `interrupted` — 벤더는 넘긴 것을 에코도 이력도 없이 버린다(M6). 실패 끝이 아니다 — 멈춤을
     ///   세우지 않고 실은 글을 지우지 않는다: 쥔 글과 쥔 자리로 돌아온 글은 다음 Idle 에 나간다(사용자 결정 2026-09-26).
     Interrupted,
     /// `turn/start` 가 벤더에 닿지 않았거나 벤더가 거절했다 — 쓰기 실패 · 오류 응답.
     Rejected,
-    /// `turn/start` 를 벤더가 받았는지 모른다 — 응답 시한 · 응답 해독 실패 · 상한을 넘은 turn id. 실패 끝이라 실은 항목은
-    ///   `Failed` 와 같이 지운다(받혔으면 그 전에 온 에코가 이미 받음으로 닫았다).
+    /// `turn/start` 를 벤더가 받았는지 모른다 — 응답 시한 · 응답 해독 실패 · 상한을 넘은 turn id. 실패 끝이라 처분은
+    ///   `Failed` 와 같다(받혔으면 그 전에 온 에코가 이미 받음으로 닫았다).
     Unanswered,
 }
 
@@ -563,137 +559,7 @@ impl TurnClose {
     }
 }
 
-// ── 넘기기 정책 · 구간 추적 (TRD §5-5) ────────────────────────────────────────
-
-/// 쥔 항목을 도는 턴에 언제 넘기나 — 정책의 전부는 [`HandOverPolicy::verdict`] 의 구간 표다.
-///
-/// 고르는 자리 = codex backend 의 상수 하나(`mod.rs` 의 `HAND_OVER_POLICY` — 사용자 설정 표면을 늘리지
-/// 않는다). seam 없이 지은 통로도 그 값이다([`State::new`]). 시험은 통로를 짓는 seam
-/// ([`CodexAppServerTransport::with_hand_over`])으로 바꿔 끼운다.
-/// ★✕ 는 정책과 무관하다★ — 정책이 가르는 것은 누른 ✕ 가 글을 거두느냐(쥔 항목) 목록에서만 빼느냐(넘긴
-///   항목)뿐이다.
-// ADR-0231
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HandOverPolicy {
-    /// 넘길 수 있으면 곧바로. 운영은 안 쓴다 — 시험이 seam 으로 끼워 두 정책의 갈림을 재는 변형이다. ★붙듦이
-    ///   벤더 경계를 놓치게 되어도 저절로 되돌아갈 자리가 아니다★ — 그때 할 일은 `HAND_OVER_POLICY` doc 이
-    ///   적는다(답 끝 창만 좁아지면 `ANSWER_SEGMENT_HOLDS = false` · 도구 끝 창이 좁아지면 코드 전에 사용자에게
-    ///   다시 묻는다 — ADR-0231 결정 2 · ADR-0234 결정 4).
-    #[cfg_attr(not(test), allow(dead_code))]
-    Immediate,
-    /// 측정(M15 · M16)이 「붙들어도 늦지 않다」를 세운 구간(도구 · 답)에서만 쥐고, 경계 신호에 곧바로 넘긴다.
-    AtEarliestBoundary,
-}
-
-/// [`HandOverPolicy::verdict`] 의 답.
-// ADR-0231
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HandOver {
-    Now,
-    Hold,
-}
-
-/// 쥔 항목 하나가 선 구간 — 통로가 자기 상태로 판정한다([`State::zone_of`]). TRD §5-5 구간 표의 다섯 행이다.
-// ADR-0231
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Zone {
-    /// 넘길 수 없음 — 연결 중 · 닫힘 · 턴 id 대기(`Active{turn_id: None}` · Idle 에서 머리 뒤 항목) · 「steer
-    ///   거절」 표시된 턴([`State::steer_refused`]) · 표식 뒤 사용자 글이 없는 오류 뒤
-    ///   멈춤의 Idle([`State::halted`]). 넘길 수단이 아직(또는 그 턴에는 더) 없어 붙듦이 전달을 늦추지 않는다.
-    Blocked,
-    /// 경계 열림 — 턴 id 가 막 옴 · 경계 신호 직후부터 그 턴의 다음 `item/started` 까지 · 턴을 막 열려는
-    ///   참(Idle)의 머리. 지금 넘기면 다가오는 대기분 확인에 든다.
-    BoundaryOpen,
-    /// 현재 턴에 `item/started` 뒤 `item/completed` 가 안 온 도구 항목이 있다.
-    Tool,
-    /// 도는 도구가 없고, 경계 열림이 닫힌 뒤 가장 최근에 선 항목이 출력 항목이다.
-    Answer,
-    /// 도는 도구가 없고, 가장 최근에 선 항목이 도구도 출력도 아니다 — 모호한 자리는 전부 여기로 온다.
-    Other,
-}
-
-/// `AtEarliestBoundary` 가 답 구간을 쥐나 — M16 녹(2026-09-26 · 도구 없는 답 14/14 · 도구 뒤 답 12/12 ·
-/// `plan` 14/14, 창 최소 9.4 ms — `docs/research/mid-turn-m16-measurements-2026-09-26.md`). 적이었다면
-/// `false`(답 구간도 곧바로 — PRD §3-1 이 이미 정한 갈래라 사용자 질문이 아니다).
-// ADR-0231
-const ANSWER_SEGMENT_HOLDS: bool = true;
-
-impl HandOverPolicy {
-    /// TRD §5-5 구간 표 — 넘길 수 없음은 두 정책 모두 쥐고, 경계 열림과 그 밖은 두 정책 모두 곧바로다.
-    ///   `answer_holds` = [`ANSWER_SEGMENT_HOLDS`](시험이 두 값을 다 재려고 인자로 받는다).
-    // ADR-0231
-    fn verdict(self, zone: Zone, answer_holds: bool) -> HandOver {
-        match (self, zone) {
-            (_, Zone::Blocked) => HandOver::Hold,
-            (_, Zone::BoundaryOpen | Zone::Other) => HandOver::Now,
-            (HandOverPolicy::Immediate, Zone::Tool | Zone::Answer) => HandOver::Now,
-            (HandOverPolicy::AtEarliestBoundary, Zone::Tool) => HandOver::Hold,
-            (HandOverPolicy::AtEarliestBoundary, Zone::Answer) if answer_holds => HandOver::Hold,
-            (HandOverPolicy::AtEarliestBoundary, Zone::Answer) => HandOver::Now,
-        }
-    }
-}
-
-/// 한 턴에 도는 도구로 기억하는 항목 수의 상한 — 메모리 경계일 뿐이다(이만큼의 병렬 도구는 본 적이
-/// 없다 — 미측정). ★넘친 항목은 안 센다 — 그러면 도구 끝이 일찍 선다★: 일찍 넘기는 쪽이라 무해하다
-/// (TRD §5-5). 끝을 안 알린 항목은 샘플링 끝(`tokenUsage`)과 다음 턴이 비운다.
-const RUNNING_TOOLS_LIMIT: usize = 64;
-
-/// 현재 턴의 구간 — ★리더가 상태 락 아래서, 현재 턴 id 의 줄로만 갱신한다★([`Reader::track_segment`]).
-/// 끊긴 턴 도구의 늦은 완료는 옛 턴 id 로 오므로(M6) 그 줄은 아무것도 안 바꾼다.
-///
-/// ★`Immediate` 도 추적하고 경계 신호에 라이터를 깨운다★ — 넘기기 판단에 안 쓸 뿐이다(TRD §5-5).
-// ADR-0231
-#[derive(Debug, Default)]
-struct Segment {
-    /// 이 칸이 가리키는 턴. ★지금 턴 id 와 다르면 칸 전체가 낡았다★ — 그때는 경계 열림으로 읽는다(턴 id
-    ///   가 막 온 자리이고, 모호하면 곧바로 쪽이다).
-    turn_id: Option<String>,
-    /// `item/started` 뒤 `item/completed` 가 안 온 도구 항목의 item id.
-    running_tools: Vec<String>,
-    boundary_open: bool,
-    /// 그 턴에서 가장 최근에 선(`item/started`) 항목의 분류.
-    latest: Option<ItemClass>,
-}
-
-impl Segment {
-    /// 턴 id 가 막 온 구간 — 경계 열림이다.
-    fn opened(turn_id: &str) -> Self {
-        Segment {
-            turn_id: Some(turn_id.to_string()),
-            running_tools: Vec::new(),
-            boundary_open: true,
-            latest: None,
-        }
-    }
-
-    fn zone(&self, current_turn: &str) -> Zone {
-        if self.turn_id.as_deref() != Some(current_turn) || self.boundary_open {
-            Zone::BoundaryOpen
-        } else if !self.running_tools.is_empty() {
-            Zone::Tool
-        } else if self.latest == Some(ItemClass::Output) {
-            Zone::Answer
-        } else {
-            Zone::Other
-        }
-    }
-}
-
-/// 라이터를 깨우는 구간 사건 — 뒤 셋이 TRD §5-5 의 경계 신호이고, 첫째는 턴 id 가 막 온 경계 열림이다.
-// ADR-0231
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Signal {
-    /// `turn/start` 응답이 턴 id 를 줬다.
-    TurnId,
-    /// 도는 도구 집합이 비는 `item/completed` — 병렬이면 마지막 것이다.
-    ToolEnd,
-    /// 도는 도구가 없을 때 온 답 끝 변형([`ends_answer`])의 `item/completed`.
-    AnswerEnd,
-    /// `thread/tokenUsage/updated` — 샘플링 끝. ★도구 집합을 비운다★: 끝을 안 알린 항목이 다음 구간을 도구
-    ///   구간으로 오판시키지 않게.
-    TokenUsage,
-}
+// ── 턴 도중 넘기기 계측 (단순화 계획 2026-09-26 항목 11) ─────────────────────────────
 
 /// 턴 도중 넘기기 계측 줄의 target — `RUST_LOG=engram::codex_steer=debug` 로 켠다. 꺼져 있으면 재료도 안 모은다
 /// ([`SteerTrace::enabled`] — 기본 레벨 warn 에서는 한 줄도 안 나간다). 줄은 사건마다 하나다.
@@ -796,55 +662,14 @@ impl State {
             next_turn_seq: 0,
             early_completions: VecDeque::new(),
             closed: false,
-            policy: super::HAND_OVER_POLICY,
-            segment: Segment::default(),
-            unseen_signal: None,
+            steer_due: false,
             halted: false,
             steer_refused: None,
         }
     }
 
-    /// 경계 신호를 세운다 — ★호출자가 같은 락 구간에서 `notify_all` 한다★. 라이터가 앞 신호를 아직 안
-    /// 집었으면 그 신호를 둔다(깨우는 일은 같다).
-    // ADR-0231
-    fn raise(&mut self, signal: Signal) {
-        if self.unseen_signal.is_none() {
-            self.unseen_signal = Some(signal);
-        }
-    }
-
-    /// `pos` 의 쥔 항목이 선 구간(TRD §5-5 구간 표). ★Idle 이 넘기는 것은 Idle 순서가 다음에 여는 머리 하나다★
-    /// ([`State::idle_opening`]) — 뒤 항목은 그 `turn/start` 가 연 턴의 id 를 기다리므로 이미 턴 id 대기로 본다.
-    // ADR-0231
-    fn zone_of(&self, pos: usize) -> Zone {
-        if self.closed || !matches!(self.link, Link::Ready) {
-            return Zone::Blocked;
-        }
-        match &self.turn {
-            TurnState::Idle => {
-                if self.idle_opening() == Some(pos) {
-                    Zone::BoundaryOpen
-                } else {
-                    Zone::Blocked
-                }
-            }
-            TurnState::Active { turn_id: None, .. } => Zone::Blocked,
-            TurnState::Active { seq, .. } if self.steer_refused == Some(*seq) => Zone::Blocked,
-            TurnState::Active {
-                turn_id: Some(current),
-                ..
-            } => self.segment.zone(current),
-        }
-    }
-
-    /// 쥔 항목 `pos` 를 지금 넘기나 — 이 화신의 정책으로 [`State::zone_of`] 를 읽는다.
-    fn hand_over(&self, pos: usize) -> HandOver {
-        self.policy.verdict(self.zone_of(pos), ANSWER_SEGMENT_HOLDS)
-    }
-
     /// Idle 이 다음에 여는 턴의 쥔 항목 자리 — TRD §5-5 「턴을 여는 순서 = 사용자 먼저」(PRD §3-9 · 사용자 결정 N6).
-    /// ★상태만으로 정한다★: 턴을 여는 자리([`take_turn_locked`])와 구간 판정([`State::zone_of`])이 같은 답을 읽는다. 턴이
-    /// 열릴 수 있는지(`Ready` · `Idle`)는 부르는 쪽이 본다.
+    /// ★상태만으로 정한다★. 턴이 열릴 수 있는지(`Ready` · `Idle`)는 부르는 쪽([`take_turn_locked`])이 본다.
     ///   1. 가장 오래된 사용자 `Held`(Direct · 턴 끝에서 쥔 자리로 돌아온 글 포함). 방출 전이어도 그것이 머리다 — 여는
     ///      쪽이 방출을 기다린다(건너뛰지 않는다 — 친 순서).
     ///   2. 없으면 가장 오래된 우편(식별자 없는 항목 포함).
@@ -958,18 +783,18 @@ impl State {
     ///   `InFlight` 를 보고 대기로 분류되고, 턴이 끝나는 길 하나라도 이것을 빠뜨리면 그 항목이 pending 에
     ///   영영 남아 새 글이 전부 대기로 간다(TRD §5-5 「다섯 출구」 불변식).
     ///
-    /// | 항목 | `Completed` · `Unknown` · `Interrupted` | `Failed` · `Rejected` · `Unanswered` |
-    /// |---|---|---|
-    /// | 그 턴에 넘긴 사용자 항목(목록 · Direct) — 에코 없음 | 쥔 자리로 되돌린다(사건 없음 — 목록 행 · 그린 말풍선 그대로) | `Dropped{Rejected}` — 목록 행을 빼고 그린 말풍선을 지운다 |
-    /// | 그 턴에 넘긴 사용자 항목 — 넘긴 뒤 ✕ 가 닿았다 | `Dropped{Withdrawn}` | `Dropped{Withdrawn}` |
-    /// | 그 턴에 넘긴 우편 | 사건 없이 뺀다 | 사건 없이 뺀다 |
-    /// | 쥔 항목 | 그대로 | 그대로 |
+    /// | 항목 | 어느 끝이든(`Completed` · `Unknown` · `Interrupted` · `Failed` · `Rejected` · `Unanswered`) |
+    /// |---|---|
+    /// | 그 턴에 넘긴 사용자 항목(목록 · Direct) — 에코 없음 | 쥔 자리로 되돌린다(사건 없음 — 목록 행 · 그린 말풍선 그대로) |
+    /// | 그 턴에 넘긴 사용자 항목 — 넘긴 뒤 ✕ 가 닿았다 | `Dropped{Withdrawn}` |
+    /// | 그 턴에 넘긴 우편 | 사건 없이 뺀다 |
+    /// | 쥔 항목 | 그대로 |
     ///
-    /// ★받음(에코)만이 넘긴 글을 목록에서 받음으로 뺀다★ — 끝이 결말을 말했거나 끊긴 턴의 에코 없는 글은 다시 쥐고 다음
-    ///   턴을 탄다(Idle 순서 — [`State::idle_opening`]). 자리를 안 옮기므로 친 순서가 그대로다. 뒤늦은 에코가 오면 쥔 채로
-    ///   받음이 된다([`State::take_delivered`] — 다시 나가지 않는다).
-    /// ★실패 끝은 그 턴이 실은 글을 지운다★(사용자 결정 2026-09-26 「실패는 지워」) — 다시 쥐지 않는다. 그 턴 도중 쥐여
-    ///   넘긴 적 없는 글은 어느 끝에도 그대로다(멈춤이 그 글을 기다리게 한다 — [`State::halted`]).
+    /// ★받음(에코)만이 넘긴 글을 목록에서 받음으로 뺀다★ — 에코 없이 끝난 턴의 글은 다시 쥐고 다음 턴을 탄다(Idle 순서 —
+    ///   [`State::idle_opening`]). 자리를 안 옮기므로 친 순서가 그대로다. 뒤늦은 에코가 오면 쥔 채로 받음이 된다
+    ///   ([`State::take_delivered`] — 다시 나가지 않는다).
+    /// ★실패 끝도 지우지 않는다★(사용자 결정 2026-09-26 B — 「실패는 지워」를 대신한다) — 되돌린 글과 쥔 글은 아래
+    ///   멈춤([`State::halted`])이 다음 사용자 글까지 기다리게 한다. 실패 끝과 나머지 끝이 갈리는 것은 그 멈춤뿐이다.
     /// ✕ 가 닿은 항목을 쥐지 않는 것은 사용자가 이미 뺐기 때문이다 — 되돌리면 다음 턴에 나간다.
     /// 우편은 다시 쥐지 않는다(오늘 처분 그대로) — 목록 밖이라 그 글의 결말은 커널이 진다.
     /// ★steer 응답을 기다리지 않는다★ — 받힌 steer 의 에코는 `turn/completed` 보다 먼저 오므로(TRD §3-2 · M10) 이 끝에서
@@ -1003,14 +828,9 @@ impl State {
             } else if item.cancel_asked {
                 Fate::Drop(DropCause::Withdrawn)
             } else {
-                match close {
-                    TurnClose::Completed | TurnClose::Unknown | TurnClose::Interrupted => {
-                        Fate::Held
-                    }
-                    TurnClose::Failed | TurnClose::Rejected | TurnClose::Unanswered => {
-                        Fate::Drop(DropCause::Rejected)
-                    }
-                }
+                // ★끝의 모양과 무관하게 쥔 자리로 되돌린다★(사용자 결정 2026-09-26 B — 오류에도 지우지 않고 멈춘다):
+                //   실패 끝은 아래에서 멈춤을 세우므로 되돌린 글은 다음 사용자 글까지 기다린다.
+                Fate::Held
             };
             match fate {
                 Fate::Keep => pos += 1,
@@ -1056,8 +876,9 @@ impl State {
         out
     }
 
-    /// steer 가 오류 응답을 받았다 — 벤더가 그 글을 안 가졌다(`-32600` 「돌고 있는 턴 없음」 · 리뷰·압축 턴 · id 불일치
-    /// 모두 같다 — [`Reader::resolve`]). 돌려주는 값 = 호출자가 락 밖에서 낼 것(`None` = 무동작).
+    /// steer 가 오류 응답을 받았거나 쓰지 못했다 — 벤더가 그 글을 안 가졌다(`-32600` 「돌고 있는 턴 없음」 · 리뷰·압축 턴 ·
+    /// id 불일치 · 쓰기 실패 모두 같다 — [`Reader::resolve`] · [`steer_write_failed`]). 돌려주는 값 = 호출자가 락 밖에서 낼
+    /// 것(`None` = 무동작).
     ///
     /// ★(id, 세대)와 **지금 단계**가 맞을 때만 움직인다★(세대 가림 — TRD §5-5): 에코로 이미 빠졌거나 턴 끝이 처분한(쥔
     ///   자리로 돌려놓았거나 지운) 항목은 늦은 거절이 두 번 움직이지 못한다 — 그 턴에 「steer 거절」 표시도 달지 않는다(받힌 글의 거절은 그
@@ -1558,18 +1379,6 @@ impl CodexAppServerTransport {
     // ADR-0231
     pub(crate) fn delivery_ack(&self) -> Arc<DeliveryAck> {
         self.announcer.ack.clone()
-    }
-
-    /// 넘기기 정책을 끼운다 — 통로를 짓는 seam 이다([`HandOverPolicy`]). ★`start()` 전에 부른다★ — 그 뒤에
-    /// 바꾸면 한 화신 안에서 정책이 갈린다.
-    // ADR-0231
-    pub(super) fn with_hand_over(self, policy: HandOverPolicy) -> Self {
-        self.state
-            .0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .policy = policy;
-        self
     }
 
     /// 첫 턴 포트를 끼운다 — ★`start()` 전에 부른다★(리더가 그때 가져간다). 이 통로의 세션은 제출을 세지
@@ -2084,16 +1893,7 @@ enum Job {
     Turn { id: i64, seq: u64, line: String },
     /// 이번 깨어남은 시한 훑기뿐이다.
     Sweep,
-    /// 경계 신호를 본 깨어남 — 그 신호가 푼 steer 가 있으면 함께 싣는다(신호를 집은 **같은 락 구간**에서 집는다 —
-    ///   [`next_job`]).
-    // ADR-0231
-    Woke {
-        /// 깨운 신호 — 시험만 읽는다(라이터는 어느 신호든 같게 다룬다).
-        #[cfg_attr(not(test), allow(dead_code))]
-        signal: Signal,
-        steer: Option<Steer>,
-    },
-    /// 쥔 항목 하나를 도는 턴에 넘긴다 — 쓰기 전에 대기표를 먼저 건다([`issue_steer`]).
+    /// 도구 끝 계기가 푼 쥔 항목 하나를 도는 턴에 넘긴다 — 쓰기 전에 대기표를 먼저 건다([`issue_steer`]).
     // ADR-0231
     Steer(Steer),
 }
@@ -2149,39 +1949,55 @@ fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
     }
 }
 
-/// 도는 턴에 넘길 쥔 항목 하나를 집어 `InFlight` 로 옮기고 그 `turn/steer` 를 만든다 — 넘기기 규칙의 턴 도중
-/// 갈래(TRD §5-5). ★턴을 열지 않는다★ — 여는 자리는 여전히 [`take_turn_locked`] 하나다(ADR-0193).
+/// 도구 끝 계기([`State::steer_due`])가 서 있으면 도는 턴에 넘길 쥔 항목 하나를 집어 `InFlight` 로 옮기고 그
+/// `turn/steer` 를 만든다 — 턴 도중 넘기기의 전부다(단순화 계획 2026-09-26). ★턴을 열지 않는다★ — 여는 자리는 여전히
+/// [`take_turn_locked`] 하나다(ADR-0193).
 ///
 /// 후보 = 가장 오래된 `Held` **사용자** 항목. ★우편은 건너뛴다★ — 목록 밖이라 앞지르기 금지에 들지 않고, 턴
-///   끝까지 쥐였다가 Idle 에서 나간다(쥔 우편이 사용자 항목의 steer 를 막지 않는다). 후보가 방출 전이거나 목록
-///   항목이 아니거나(Direct 는 `turn/start` 로만 나간다) 정책이 쥐라고 답하면 기다린다 — ★건너뛰지 않는다★(친
-///   순서). 한 요청에 한 항목이다(PRD §3-8) — 여럿이면 라이터가 차례로 다시 부른다.
-/// ★턴 id 를 아는 턴에서만 선다★ — `expectedTurnId` 가 벤더의 선행조건이라 그 전에는 넘길 수단이 없다(구간 표의
-///   턴 id 대기 — [`State::zone_of`]). 하한 미달 화신은 식별자가 없어 오늘 경로 그대로다.
+///   끝까지 쥐였다가 Idle 에서 나간다(쥔 우편이 사용자 항목의 steer 를 막지 않는다). 한 요청에 한 항목이다(PRD §3-8)
+///   — 계기가 선 동안 라이터가 차례로 다시 불러 쥔 글을 친 순서대로 전부 넘긴다(항목마다 제 `clientUserMessageId`).
+/// ★넘길 것이 없으면 계기를 내린다★ — 쥔 사용자 글 없음 · 턴 id 를 아는 도는 턴 없음(`expectedTurnId` 가 벤더의
+///   선행조건이다) · 그 턴의 「steer 거절」 표시([`State::steer_refused`]) · 후보가 목록 항목이 아님(Direct 는
+///   `turn/start` 로만 나간다) · 하한 미달(식별자가 없다 — 오늘 경로). 그 뒤에 친 글은 다음 도구 끝이나 턴 끝(Idle
+///   순서)을 기다린다.
+/// ★후보가 방출 전이면 계기를 둔 채 기다린다★ — 건너뛰지 않고(친 순서) 방출이 라이터를 깨운다([`announce`]).
 /// ★✕ 와 같은 락에서 갈린다★ — 여기서 `InFlight` 로 옮긴 뒤에 온 ✕ 는 넘긴 쪽(`TooLate`)이다.
 // ADR-0231
 fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
-    if s.floor != Floor::Above {
+    if !s.steer_due {
         return None;
     }
-    let TurnState::Active {
-        seq: gen,
-        turn_id: Some(turn_id),
-    } = &s.turn
-    else {
-        return None;
+    let target = match (&s.turn, &s.thread_id) {
+        (
+            TurnState::Active {
+                seq,
+                turn_id: Some(turn_id),
+            },
+            Some(thread_id),
+        ) if s.floor == Floor::Above
+            && matches!(s.link, Link::Ready)
+            && s.steer_refused != Some(*seq) =>
+        {
+            Some((*seq, turn_id.clone(), thread_id.clone()))
+        }
+        _ => None,
     };
-    let (gen, turn_id) = (*gen, turn_id.clone());
-    let thread_id = s.thread_id.clone()?;
     let pos = s
         .pending
         .iter()
-        .position(|p| matches!(p.stage, Stage::Held) && p.origin == InputOrigin::User)?;
+        .position(|p| matches!(p.stage, Stage::Held) && p.origin == InputOrigin::User);
+    let (Some((gen, turn_id, thread_id)), Some(pos)) = (target, pos) else {
+        s.steer_due = false;
+        return None;
+    };
     let head = &s.pending[pos];
-    if !head.announced || !head.listed || s.hand_over(pos) != HandOver::Now {
+    if !head.announced {
         return None;
     }
-    let item = head.id.clone()?;
+    let Some(item) = head.id.clone().filter(|_| head.listed) else {
+        s.steer_due = false;
+        return None;
+    };
     let params = TurnSteerParams {
         thread_id,
         expected_turn_id: turn_id.clone(),
@@ -2206,8 +2022,10 @@ fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
             })
         }
         Err(e) => {
-            // 직렬화가 실패할 수 없는 타입이지만 계약상 열려 있다 — 항목은 쥔 채로 남아 턴 끝에 나간다.
+            // 직렬화가 실패할 수 없는 타입이지만 계약상 열려 있다 — 항목은 쥔 채로 남아 턴 끝에 나간다. 계기를 내려
+            //   깨어날 때마다 같은 실패를 되풀이하지 않는다.
             tracing::warn!("turn/steer 직렬화 실패 — 이 항목은 쥔 채로 남는다: {e}");
+            s.steer_due = false;
             None
         }
     }
@@ -2220,19 +2038,13 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
         if s.closed {
             return None;
         }
-        // ★신호를 제어 줄보다 먼저 집고, 그 신호가 푼 steer 도 같은 락 구간에서 집는다★ — 락을 놓았다 다시 잡는
-        //   틈과 제어 줄 쓰기가 신호 → steer 쓰기 사이에 끼지 않게.
-        // ADR-0231
-        if let Some(signal) = s.unseen_signal.take() {
-            let steer = take_steer_locked(&mut s, next_id);
-            return Some(Job::Woke { signal, steer });
-        }
         if let Some(line) = s.outbox.pop_front() {
             return Some(Job::Line(line));
         }
         if let Some(job) = take_turn_locked(&mut s, next_id) {
             return Some(job);
         }
+        // 도구 끝 계기가 선 동안 쥔 사용자 글을 하나씩 — 넘길 것이 없어지면 그 함수가 계기를 내린다.
         // ADR-0231
         if let Some(steer) = take_steer_locked(&mut s, next_id) {
             return Some(Job::Steer(steer));
@@ -2311,8 +2123,8 @@ fn end_turn_if(
     }
 }
 
-/// 라이터가 연 턴의 `turn/start` 를 못 썼다 — 대기표를 거두고 그 턴을 닫는다. 벤더에 닿지 않았으므로 그
-/// 글은 거절(`Rejected`)이다.
+/// 라이터가 연 턴의 `turn/start` 를 못 썼다 — 대기표를 거두고 그 턴을 거절(`Rejected`)로 닫는다(벤더에 닿지
+/// 않았다 — 그 글은 쥔 자리로 돌아가 멈춤 뒤에서 기다린다 · [`State::close_turn_items`]).
 ///
 /// ★이 실패는 호출자에게 돌아갈 길이 없다★ — 그 호출은 이미 `Ok` 를 받고 떠났다. 남는 것은 이 턴을 실패로
 ///   닫는 것뿐이다(정정 채널을 새로 만들지 않는다).
@@ -2340,7 +2152,7 @@ fn turn_write_failed(
 enum Issued {
     /// 다 썼다.
     Written,
-    /// 못 썼다 — 그 항목은 거절로 닫았다([`steer_write_failed`]).
+    /// 못 썼다 — 그 항목은 쥔 자리로 돌렸다([`steer_write_failed`]).
     Failed,
     /// 대기표가 닫혔다 — 통로가 닫혔다는 뜻이라 라이터가 끝난다.
     Closed,
@@ -2374,9 +2186,11 @@ fn issue_steer(
     }
 }
 
-/// 라이터가 집은 steer 를 못 썼다 — 대기표를 거두고 그 항목을 거절(`Dropped{Rejected}`)로 닫는다. 벤더에 닿지
-/// 않았다. ★턴은 그대로 둔다★ — steer 는 턴을 열지 않았고 그 턴은 벤더에서 계속 돈다(오류 뒤 멈춤의 계기도
-/// 아니다 — TRD §5-5 다섯 출구). 세대 가림은 응답과 같다 — 그 사이 다른 단계로 옮겨 간 항목은 안 건드린다.
+/// 라이터가 집은 steer 를 못 썼다 — 대기표를 거두고 그 항목을 쥔 자리로 되돌린다(벤더에 닿지 않았다 · 사용자 결정
+/// 2026-09-26 B — 지우지 않는다). 처분은 steer 거절과 같다([`State::hold_refused_steer`]): 그 턴에 「steer 거절」 표시를
+/// 달아 같은 턴의 다음 도구 끝이 같은 글을 곧바로 다시 쓰는 고리를 안 만들고, 다음 Idle 이 연다 · ✕ 가 닿았으면 거둔다.
+/// ★턴은 그대로 둔다★ — steer 는 턴을 열지 않았고 그 턴은 벤더에서 계속 돈다(오류 뒤 멈춤의 계기도 아니다 — TRD §5-5
+/// 다섯 출구). 세대 가림도 거절과 같다 — 턴이 쓰기 전에 끝나 이미 처분된 항목은 안 건드리고 표시도 안 단다.
 // ADR-0231
 fn steer_write_failed(
     state: &SharedState,
@@ -2386,21 +2200,16 @@ fn steer_write_failed(
     e: &PtyError,
 ) {
     pending.forget(steer.request);
-    let dropped = {
+    let held = {
         let (lock, cv) = &**state;
         let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
-        // 턴이 쓰기 전에 끝났으면 항목은 턴 끝이 이미 처분했다 — 이 대조가 비껴 간다.
-        let pos = s.pending.iter().position(|p| {
-            p.id.as_deref() == Some(steer.item.as_str())
-                && matches!(p.stage, Stage::InFlight { gen, .. } if gen == steer.gen)
-        });
-        let dropped = pos.and_then(|pos| s.drop_listed(pos, DropCause::Rejected));
+        let held = s.hold_refused_steer(&steer.item, steer.gen);
         cv.notify_all();
-        dropped
+        held
     };
-    tracing::warn!("codex app-server turn/steer 전송 실패 — 그 글은 거절로 닫는다: {e}");
-    if let Some(op) = dropped {
-        core.emit(OutputEvent::QueuedInput(op));
+    tracing::warn!("codex app-server turn/steer 전송 실패 — 그 글은 쥔 자리로 돌아간다: {e}");
+    if let Some(out) = held {
+        out.emit(core);
     }
 }
 
@@ -2848,7 +2657,6 @@ fn writer_loop(
         };
         let steer = match job {
             Job::Sweep => None,
-            Job::Woke { steer, .. } => steer,
             Job::Steer(steer) => Some(steer),
             Job::Line(line) => {
                 if let Err(e) = write_line(&stdin, &line) {
@@ -3371,14 +3179,18 @@ impl Reader {
                                             cv.notify_all();
                                             (drops, held.boundary)
                                         }
-                                        // ★턴 id 가 막 왔다 — 경계 열림이다★(TRD §5-5 구간 표): 턴 id 를
-                                        //   기다리며 쥔 항목이 이제 넘어갈 수 있으므로 라이터를 깨운다.
+                                        // ★턴 id 가 막 왔다★ — 이 턴을 여는 동안 쥔 사용자 글(턴 끝에 남은 글 ·
+                                        //   응답 전에 친 글)이 있으면 도구 끝을 기다리지 않고 곧바로 이 턴에 넣는다
+                                        //   — 턴 끝의 남은 글이 한 턴에 모인다(단순화 계획 2026-09-26 항목 4).
                                         // ADR-0231
                                         None => {
-                                            if let Some(opened) = ours.as_deref().filter(|_| newly)
+                                            if newly
+                                                && s.pending.iter().any(|p| {
+                                                    matches!(p.stage, Stage::Held)
+                                                        && p.origin == InputOrigin::User
+                                                })
                                             {
-                                                s.segment = Segment::opened(opened);
-                                                s.raise(Signal::TurnId);
+                                                s.steer_due = true;
                                                 cv.notify_all();
                                             }
                                             (Disposal::default(), None)
@@ -3417,7 +3229,7 @@ impl Reader {
                         );
                     }
                 },
-                // `turn/start` 의 오류 응답은 거절(`Rejected`)이다 — 실은 사용자 글은 턴 끝 처분이 거절로 지우고
+                // `turn/start` 의 오류 응답은 거절(`Rejected`)이다 — 실은 사용자 글은 턴 끝 처분이 쥔 자리로 되돌리고
                 //   멈춤이 선다([`State::close_turn_items`]).
                 // ADR-0231
                 Err(msg) => {
@@ -3532,32 +3344,35 @@ impl Reader {
         idle
     }
 
-    /// 구간 추적(TRD §5-5) — item 줄과 `tokenUsage` 를 상태 락 아래서 [`Segment`] 에 먹이고, 경계 신호면
-    /// 세우고 라이터를 깨운다(신호 없이 쥐던 구간이 풀리면 깨우기만 한다). 돌려주는 값 = 도구 항목의 계측 줄
-    /// ([`STEER_TRACE`] — 락 밖에서 찍을 것).
+    /// 도구 끝 계기(단순화 계획 2026-09-26 — t3code 모양): 우리 지금 턴의 도구 항목([`is_tool_item`])이 끝나면
+    /// (`item/completed`) [`State::steer_due`] 를 세우고 라이터를 깨운다 — 그 도구 끝이 쥔 사용자 글을 전부 넘긴다.
+    /// 돌려주는 값 = 도구 항목의 계측 줄([`STEER_TRACE`]의 `tool_start` · `tool_end` — 락 밖에서 찍을 것).
     ///
-    /// ★세는 것은 우리 thread(알면)의 **지금 턴 id** 줄뿐이다★ — 옛 턴 id 의 늦은 완료(M6)는 구간도 신호도
-    ///   안 바꾼다. 턴 id 가 오기 전(`Active{turn_id: None}`)의 줄도 안 센다: 그 구간은 어차피 넘길 수 없음이고,
-    ///   응답이 오면 경계 열림으로 시작한다 — 그 전에 선 도구를 놓쳐도 일찍 넘기는 쪽이다.
-    /// ★번역보다 **먼저** 부른다★ — 신호가 라이터에 닿는 시각이 반응 지연이고, 번역·emit 은 그 뒤에 해도
-    ///   걸리는 순서가 없다.
+    /// ★세는 것은 우리 thread(알면)의 **지금 턴 id** 줄뿐이다★ — 옛 턴 id 의 늦은 완료(끊긴 턴의 도구 — M6)는 계기가
+    ///   아니다. 턴 id 가 오기 전(`Active{turn_id: None}`)의 줄도 안 센다: 그 전에는 넘길 수단이 없고(`expectedTurnId`),
+    ///   응답이 턴 id 를 주는 자리가 쥔 글을 따로 넘긴다([`Reader::resolve`]).
+    /// ★병렬 도구도 끝마다 계기다★ — 도는 도구를 세지 않는다. 끝난 도구 하나가 곧 끼워 넣을 자리다.
+    /// ★번역보다 **먼저** 부른다★ — 계기가 라이터에 닿는 시각이 반응 지연이고, 번역·emit 은 그 뒤에 해도 걸리는 순서가
+    ///   없다.
     // ADR-0231
-    fn track_segment(&self, method_name: &str, params: Option<&Value>) -> Option<SteerTrace> {
+    fn note_tool_item(&self, method_name: &str, params: Option<&Value>) -> Option<SteerTrace> {
         let started = method_name == method::ITEM_STARTED;
         let completed = method_name == method::ITEM_COMPLETED;
-        if !started && !completed && method_name != method::THREAD_TOKEN_USAGE_UPDATED {
+        if !started && !completed {
             return None;
         }
         let params = params?;
-        let incoming_turn = params.get("turnId").and_then(|v| v.as_str())?;
-        let incoming_thread = params.get("threadId").and_then(|v| v.as_str());
         let item = params.get("item");
         let kind = item
             .and_then(|i| i.get("type"))
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        if !is_tool_item(kind) {
+            return None;
+        }
+        let incoming_turn = params.get("turnId").and_then(|v| v.as_str())?;
+        let incoming_thread = params.get("threadId").and_then(|v| v.as_str());
         let item_id = item.and_then(|i| i.get("id")).and_then(|v| v.as_str());
-        let class = item_class(kind);
 
         let (lock, cv) = &*self.state;
         let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -3573,18 +3388,9 @@ impl Reader {
             } if current == incoming_turn => {}
             _ => return None,
         }
-        if s.segment.turn_id.as_deref() != Some(incoming_turn) {
-            s.segment = Segment::opened(incoming_turn);
-        }
-        // 도구 항목의 시작·끝 계측 줄 — id 를 대조할 수 없는 도구(없음 · 넘침)는 안 찍는다.
-        // ADR-0231
+        // 도구 항목의 시작·끝 계측 줄 — id 를 대조할 수 없는 도구(없음 · 넘침)는 안 찍는다(계기는 그래도 선다).
         let trace = match item_id {
-            Some(id)
-                if class == ItemClass::Tool
-                    && id.len() <= MAX_TURN_ID_BYTES
-                    && (started || completed)
-                    && SteerTrace::enabled() =>
-            {
+            Some(id) if id.len() <= MAX_TURN_ID_BYTES && SteerTrace::enabled() => {
                 let phase = if started { "tool_start" } else { "tool_end" };
                 let held = completed.then(|| {
                     s.pending
@@ -3599,49 +3405,8 @@ impl Reader {
             }
             _ => None,
         };
-        let policy = s.policy;
-        let seg = &mut s.segment;
-        let signal = if started {
-            let held_before = policy.verdict(seg.zone(incoming_turn), ANSWER_SEGMENT_HOLDS);
-            // 벤더가 다음 항목을 시작했다면 대기분 확인은 지났다 — 경계 열림이 닫힌다.
-            seg.boundary_open = false;
-            seg.latest = Some(class);
-            // ★id 가 없거나 넘치는 도구는 안 센다★ — 끝을 대조할 수 없으니, 세면 그 구간이 영영 도구로 남는다.
-            match item_id {
-                Some(id)
-                    if class == ItemClass::Tool
-                        && id.len() <= MAX_TURN_ID_BYTES
-                        && seg.running_tools.len() < RUNNING_TOOLS_LIMIT
-                        && !seg.running_tools.iter().any(|t| t == id) =>
-                {
-                    seg.running_tools.push(id.to_string());
-                }
-                _ => {}
-            }
-            // ★쥐던 구간이 신호 없이 곧바로 구간이 되면(답 → 그 밖) 라이터를 깨운다★ — 경계 신호가 아니라 신호는 안
-            //   세우지만, 안 깨우면 쥔 글이 다음 훑기(`SWEEP_INTERVAL`)까지 머물러 그 사이의 대기분 확인을 놓칠 수 있다.
-            // ADR-0231
-            let held_after = policy.verdict(seg.zone(incoming_turn), ANSWER_SEGMENT_HOLDS);
-            if held_before == HandOver::Hold && held_after == HandOver::Now {
-                cv.notify_all();
-            }
-            None
-        } else if completed {
-            if class == ItemClass::Tool {
-                let before = seg.running_tools.len();
-                seg.running_tools.retain(|t| Some(t.as_str()) != item_id);
-                (seg.running_tools.len() < before && seg.running_tools.is_empty())
-                    .then_some(Signal::ToolEnd)
-            } else {
-                (seg.running_tools.is_empty() && ends_answer(kind)).then_some(Signal::AnswerEnd)
-            }
-        } else {
-            seg.running_tools.clear();
-            Some(Signal::TokenUsage)
-        };
-        if let Some(signal) = signal {
-            s.segment.boundary_open = true;
-            s.raise(signal);
+        if completed {
+            s.steer_due = true;
             cv.notify_all();
         }
         trace
@@ -3708,8 +3473,8 @@ impl Reader {
             Ok(Inbound::Request { id, method, .. }) => self.refuse(&id, &method),
             Ok(Inbound::Notification { method, params }) => {
                 // ADR-0231
-                // 계측 줄은 락을 놓은 곧바로 찍는다 — 그 신호가 푼 steer 줄(라이터)보다 앞서도록.
-                if let Some(t) = self.track_segment(&method, params.as_ref()) {
+                // 계측 줄은 락을 놓은 곧바로 찍는다 — 그 계기가 푼 steer 줄(라이터)보다 앞서도록.
+                if let Some(t) = self.note_tool_item(&method, params.as_ref()) {
                     t.write();
                 }
                 // ★번역기에는 **원본 줄 바이트**를 그대로 넣는다★ — 두 번째 입구를 만들면 그쪽의 라인
@@ -8103,14 +7868,36 @@ mod tests {
         assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
     }
 
-    /// ★에코 없이 끝난 턴의 사용자 글(목록 · Direct)은 끝의 모양으로 갈린다★ — 결말을 말한 끝(`completed` · 뜻 모를
-    /// status)과 끊기는 쥔 자리로 돌려 다음 턴을 한 번 태우고(멈춤 없음), 실패 끝(`failed` · `turn/start` 의 쓰기 실패 ·
-    /// 오류 응답 · 시한 · 해독 실패 · 긴 turn id)은 거절로 지운다(`Dropped{Rejected}` — 목록 행이 빠지고 그린 말풍선이
-    /// 지워진다 · 다시 안 나간다 · 멈춤이 선다 — 사용자 결정 2026-09-26 「실패는 지워」). 응답 뒤 · 응답 앞(이른 종료 풀기)
-    /// 모두 같다. 우편은 사건 없이 빠진다. 처분 사건은 경계 앞이다.
+    /// 넘긴 사용자 글 `id` 가 실패 끝 뒤 쥔 자리로 돌아와 멈춤 뒤에서 기다린다 — 사건 0 건(목록 행 · 그린 말풍선 그대로) ·
+    /// 멈춘 동안 턴 0 건 · 다음 사용자 글이 멈춤을 풀면 돌아온 글이 그 글보다 먼저 다음 턴을 **한 번** 탄다(남은 것이 먼저).
+    fn assert_held_behind_the_halt(h: Harness, whose: Whose, end: End, id: &str, t: &[String]) {
+        let at = format!("{whose:?}/{end:?}");
+        assert_eq!(t, ["end failed"], "{at}: 목록 사건이 났다");
+        assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{at}");
+        let rows: Vec<String> = match whose {
+            Whose::Listed => vec![id.to_string()],
+            _ => Vec::new(),
+        };
+        assert_eq!(row_ids(&h), rows, "{at}: 목록이 바뀌었다");
+        assert!(with_state(&h.state, |s| s.halted), "{at}: 멈춤이 안 섰다");
+        assert!(take(&h).is_none(), "{at}: 멈춤 중에 턴이 열렸다");
+        accept_user(&h.state, "next", "again");
+        announce(&h.reader.core, &h.state, &announcer());
+        let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
+        assert_eq!(
+            v["params"]["clientUserMessageId"], id,
+            "{at}: 돌아온 글이 멈춤을 푼 글보다 먼저 안 나갔다"
+        );
+        assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
+    }
+
+    /// ★에코 없이 끝난 턴의 사용자 글(목록 · Direct)은 끝의 모양과 무관하게 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 B
+    /// — 「실패는 지워」를 대신한다). 결말을 말한 끝(`completed` · 뜻 모를 status)과 끊기는 다음 턴을 곧바로 한 번 태우고
+    /// (멈춤 없음), 실패 끝(`failed` · `turn/start` 의 쓰기 실패 · 오류 응답 · 시한 · 해독 실패 · 긴 turn id)은 멈춤이 서서
+    /// 다음 사용자 글까지 기다린다 — 어느 쪽도 사건이 없다(목록 행 · 그린 말풍선 그대로). 응답 뒤 · 응답 앞(이른 종료 풀기)
+    /// 모두 같다. 우편은 사건 없이 빠진다.
     #[test]
-    fn a_turn_that_ends_without_our_echo_returns_its_user_item_to_held_unless_the_close_is_a_failure(
-    ) {
+    fn a_turn_that_ends_without_our_echo_returns_its_user_item_to_held_whatever_the_close() {
         for (end, ending) in [
             (End::Completed("completed"), "end completed"),
             (End::Completed("inProgress"), "end unknown"),
@@ -8135,28 +7922,16 @@ mod tests {
             End::LongTurnId,
         ] {
             for whose in [Whose::Listed, Whose::Direct] {
-                let at = format!("{whose:?}/{end:?}");
                 let (h, id, t) = end_a_turn(whose, end);
-                assert_eq!(
-                    t,
-                    [format!("dropped {id} Rejected"), "end failed".into()],
-                    "{at}"
-                );
-                assert!(
-                    with_state(&h.state, |s| s.pending.is_empty()),
-                    "{at}: 지운 글이 남았다"
-                );
-                assert!(row_ids(&h).is_empty(), "{at}: 명부에 남았다");
-                assert!(with_state(&h.state, |s| s.halted), "{at}: 멈춤이 안 섰다");
-                assert!(take(&h).is_none(), "{at}: 지운 글을 다시 보냈다");
+                assert_held_behind_the_halt(h, whose, end, id, &t);
             }
             let (h, _, t) = end_a_turn(Whose::Mail, end);
             assert_left_silently(h, Whose::Mail, end, &t, "end failed");
         }
     }
 
-    /// 쥔 자리로 돌아간 글마다 `held_again` 계측 줄이 하나다 — 넘긴 턴의 id 와 그 끝의 모양을 싣는다. 실패 끝이 지운
-    /// 글은 줄이 없다(쥔 자리로 안 돌아갔다).
+    /// 쥔 자리로 돌아간 글마다 `held_again` 계측 줄이 하나다 — 그 끝의 모양과 (알면) 넘긴 턴의 id 를 싣는다. 실패 끝도
+    /// 쥔 자리로 돌리므로 줄이 선다 — 턴 id 를 받기 전에 거절된 `turn/start` 의 글은 `turn_id` 가 없다.
     #[test]
     fn a_return_to_held_writes_one_held_again_line_with_the_close() {
         let captured = Arc::new(Mutex::new(Vec::new()));
@@ -8183,6 +7958,10 @@ mod tests {
                 (
                     vec!["close", "item_id", "message", "phase", "turn_id"],
                     ["U1", "q-1", "Interrupted"]
+                ),
+                (
+                    vec!["close", "item_id", "message", "phase"],
+                    ["-", "q-1", "Rejected"]
                 ),
                 (
                     vec!["close", "item_id", "message", "phase", "turn_id"],
@@ -8467,7 +8246,7 @@ mod tests {
         let _ = writer.join();
     }
 
-    // ── 구간 추적 · 넘기기 정책 · 계측 줄 (ADR-0231 · TRD §5-5) ─────────────
+    // ── 도구 끝 계기 · 계측 줄 (ADR-0231 · 단순화 계획 2026-09-26) ─────────────
 
     /// item 알림 한 줄 — 우리 thread(`T`)의 `turn` 턴.
     fn item_line(method_name: &str, turn: &str, kind: &str, id: &str) -> String {
@@ -8489,445 +8268,140 @@ mod tests {
             .handle_line(item_line(method::ITEM_COMPLETED, turn, kind, id).as_bytes());
     }
 
-    fn usage(h: &mut Harness, turn: &str) {
-        let line = serde_json::json!({
-            "method": method::THREAD_TOKEN_USAGE_UPDATED,
-            "params": {"threadId": "T", "turnId": turn, "tokenUsage": {}},
-        })
-        .to_string();
-        h.reader.handle_line(line.as_bytes());
-    }
-
-    fn output_delta(h: &mut Harness, turn: &str, i: usize) {
-        let line = serde_json::json!({
-            "method": "item/commandExecution/outputDelta",
-            "params": {"threadId": "T", "turnId": turn, "itemId": "c", "delta": format!("line {i}\n")},
-        })
-        .to_string();
-        h.reader.handle_line(line.as_bytes());
-    }
-
-    fn held_pos(state: &SharedState) -> usize {
-        with_state(state, |s| {
-            s.pending
-                .iter()
-                .position(|p| matches!(p.stage, Stage::Held))
-                .expect("쥔 항목이 있다")
-        })
-    }
-
-    /// 연결이 서고 라이터가 턴을 열어 그 `turn/start` 응답이 턴 id `turn` 을 준 자리 — 뒤에 쥔 항목 하나를
-    /// 남기고 그 자리를 돌려준다(구간 판정은 쥔 항목에 대해 묻는다).
-    fn turn_with_id(h: &mut Harness, turn: &str) -> usize {
-        make_ready(&h.state, "T");
+    /// 우리 턴의 도구가 막 끝난 자리에서 라이터가 집을 steer — 도구 끝 계기를 [`Reader::note_tool_item`] 처럼 세우고
+    /// 집는다(`None` = 넘길 것이 없다). [`next_job`] 의 훑기 대기를 거치지 않는다.
+    fn steer_at_tool_end(h: &Harness) -> Option<Steer> {
         with_state(&h.state, |s| {
-            s.push_legacy(b"head");
-            s.push_legacy(b"behind");
-        });
-        let (request, _) = open_turn(h);
-        reply(h, request, turn);
-        held_pos(&h.state)
-    }
-
-    /// 쥔 항목 `pos` 의 (구간, `Immediate` 의 답, `AtEarliestBoundary` 의 답) — 정책은 통로 상태의 칸으로 끼운다.
-    fn verdicts(state: &SharedState, pos: usize) -> (Zone, HandOver, HandOver) {
-        with_state(state, |s| {
-            let saved = s.policy;
-            s.policy = HandOverPolicy::Immediate;
-            let immediate = s.hand_over(pos);
-            s.policy = HandOverPolicy::AtEarliestBoundary;
-            let boundary = s.hand_over(pos);
-            s.policy = saved;
-            (s.zone_of(pos), immediate, boundary)
+            s.steer_due = true;
+            take_steer_locked(s, &h.next_id)
         })
     }
 
-    fn take_signal(state: &SharedState) -> Option<Signal> {
-        with_state(state, |s| s.unseen_signal.take())
+    /// 라이터가 지금 집을 steer — 계기를 세우지 않고 서 있던 것만 쓴다(`None` = 라이터는 잠든다).
+    fn steer_next(h: &Harness) -> Option<Steer> {
+        with_state(&h.state, |s| take_steer_locked(s, &h.next_id))
     }
 
-    /// 라이터가 신호를 보고 깬 한 건([`Job::Woke`]).
-    struct Woke {
-        signal: Signal,
-        steer: Option<Steer>,
+    fn steer_due(state: &SharedState) -> bool {
+        with_state(state, |s| s.steer_due)
     }
 
-    fn woke(h: &Harness) -> Woke {
+    /// 라이터가 집는 다음 일이 steer 여야 한다 — 계기가 서 있으면 [`next_job`] 은 기다리지 않고 곧바로 돌아온다.
+    fn next_steer_job(h: &Harness, why: &str) -> Steer {
         match next_job(&h.state, &h.next_id) {
-            Some(Job::Woke { signal, steer }) => Woke { signal, steer },
-            _ => panic!("라이터가 신호를 못 봤다"),
+            Some(Job::Steer(s)) => s,
+            _ => panic!("{why}"),
         }
     }
 
-    /// TRD §5-5 구간 표가 정책의 전부다 — 넘길 수 없음은 두 정책 모두 쥐고 · 경계 열림과 그 밖은 두 정책
-    /// 모두 곧바로 · 도구는 `AtEarliestBoundary` 만 쥐고 · 답은 M16 상수대로(녹 = 쥔다 · 적 = 곧바로).
+    /// ★우리 지금 턴의 도구 항목 끝만 계기다★ — 도구 아닌 항목의 끝(출력 · 되울림 · 도구인지 근거 없는 아는 변형 · 모르는
+    /// 변형) · 도구의 시작 · 다른 턴 id(끊긴 턴 도구의 늦은 완료 — M6) · 남의 thread 의 도구 끝은 아무것도 안 넘긴다(쥔
+    /// 글은 쥔 채로). 같은 턴의 도구 끝이 오면 그제야 넘긴다.
     #[test]
-    fn the_zone_table_is_the_whole_policy_for_both_implementations() {
-        use super::HandOver::{Hold, Now};
-        use super::HandOverPolicy::{AtEarliestBoundary, Immediate};
-        // (구간, Immediate, AtEarliestBoundary · M16 녹, AtEarliestBoundary · M16 적)
-        let rows = [
-            (Zone::Blocked, Hold, Hold, Hold),
-            (Zone::BoundaryOpen, Now, Now, Now),
-            (Zone::Tool, Now, Hold, Hold),
-            (Zone::Answer, Now, Hold, Now),
-            (Zone::Other, Now, Now, Now),
-        ];
-        for (zone, immediate, green, red) in rows {
-            for holds in [true, false] {
-                assert_eq!(Immediate.verdict(zone, holds), immediate, "{zone:?}");
-            }
-            assert_eq!(AtEarliestBoundary.verdict(zone, true), green, "{zone:?}");
-            assert_eq!(AtEarliestBoundary.verdict(zone, false), red, "{zone:?}");
-        }
-    }
-
-    /// 넘길 수 없음 = 연결 중 · 턴 id 대기(Idle 머리 뒤 포함) · 끊김 · 닫힘 — 두 정책 모두 쥔다. 턴을 막 열려는
-    /// 참의 머리(가장 오래된 `Held` — 넘긴 항목은 건너뛴다)만 경계 열림이다.
-    #[test]
-    fn nothing_hands_over_before_a_turn_id_except_the_head_that_opens_the_turn() {
-        use super::HandOver::{Hold, Now};
-        let h = harness();
-        with_state(&h.state, |s| {
-            s.push_legacy(b"a");
-            s.push_legacy(b"b");
-            s.push_legacy(b"c");
-        });
-        assert_eq!(
-            verdicts(&h.state, 0),
-            (Zone::Blocked, Hold, Hold),
-            "연결 중"
-        );
-
-        make_ready(&h.state, "T");
-        assert_eq!(
-            verdicts(&h.state, 0),
-            (Zone::BoundaryOpen, Now, Now),
-            "Idle 의 머리"
-        );
-        assert_eq!(
-            verdicts(&h.state, 1),
-            (Zone::Blocked, Hold, Hold),
-            "머리 뒤는 턴 id 대기"
-        );
-        with_state(&h.state, |s| {
-            s.pending[0].stage = Stage::InFlight {
-                gen: 0,
-                turn_id: None,
-            }
-        });
-        assert_eq!(
-            verdicts(&h.state, 1),
-            (Zone::BoundaryOpen, Now, Now),
-            "넘긴 항목은 머리가 아니다"
-        );
-
-        activate(&h.state, 0, None);
-        assert_eq!(
-            verdicts(&h.state, 1),
-            (Zone::Blocked, Hold, Hold),
-            "턴 id 대기"
-        );
-        assert_eq!(
-            verdicts(&h.state, 2),
-            (Zone::Blocked, Hold, Hold),
-            "턴 id 대기"
-        );
-
-        activate(&h.state, 1, Some("t1"));
-        assert_eq!(
-            verdicts(&h.state, 1).0,
-            Zone::BoundaryOpen,
-            "구간이 없는 턴 id = 막 온 턴 id"
-        );
-        with_state(&h.state, |s| s.link = Link::Down("끝".to_string()));
-        assert_eq!(verdicts(&h.state, 1), (Zone::Blocked, Hold, Hold), "끊김");
-        with_state(&h.state, |s| {
-            s.link = Link::Ready;
-            s.closed = true;
-        });
-        assert_eq!(verdicts(&h.state, 1), (Zone::Blocked, Hold, Hold), "닫힘");
-    }
-
-    /// 턴 id 가 막 오면 경계 열림이고 라이터를 깨운다 — 그 턴의 다음 `item/started`(여기서는 에코)가 닫는다.
-    #[test]
-    fn a_turn_id_opens_the_boundary_until_the_next_item_starts() {
-        use super::HandOver::Now;
+    fn only_a_tool_item_ending_in_our_current_turn_arms_the_steer() {
         let mut h = harness();
-        let pos = turn_with_id(&mut h, "t1");
-        assert_eq!(verdicts(&h.state, pos), (Zone::BoundaryOpen, Now, Now));
-        assert_eq!(woke(&h).signal, Signal::TurnId);
-
-        item_started(&mut h, "t1", "userMessage", "echo");
-        assert_eq!(
-            verdicts(&h.state, pos),
-            (Zone::Other, Now, Now),
-            "에코가 경계 열림을 닫는다"
-        );
-    }
-
-    /// 병렬 도구 — `AtEarliestBoundary` 는 도구가 도는 동안 쥐고 **마지막** 완료에서만 곧바로다. `Immediate` 는
-    /// 내내 곧바로다. 경계 열림이 닫힌 뒤의 구간은 그 항목의 분류대로다.
-    #[test]
-    fn parallel_tools_hold_under_the_boundary_policy_until_the_last_one_completes() {
-        use super::HandOver::{Hold, Now};
-        let mut h = harness();
-        let pos = turn_with_id(&mut h, "t1");
-        take_signal(&h.state);
-
-        item_started(&mut h, "t1", "commandExecution", "a");
-        item_started(&mut h, "t1", "mcpToolCall", "b");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Tool, Now, Hold));
-        item_completed(&mut h, "t1", "commandExecution", "a");
-        assert_eq!(take_signal(&h.state), None, "첫 완료는 신호가 아니다");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Tool, Now, Hold));
-        item_completed(&mut h, "t1", "mcpToolCall", "b");
-        assert_eq!(take_signal(&h.state), Some(Signal::ToolEnd));
-        assert_eq!(verdicts(&h.state, pos), (Zone::BoundaryOpen, Now, Now));
-
-        item_started(&mut h, "t1", "agentMessage", "m");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Answer, Now, Hold));
-    }
-
-    /// 도구가 끝날 때까지 출력을 쏟아도 구간은 그대로고 신호는 완료 한 줄에서만 선다 — 델타 줄은 추적이 안 본다.
-    #[test]
-    fn an_output_flood_inside_a_tool_neither_signals_nor_moves_the_segment() {
-        let mut h = harness();
-        let pos = turn_with_id(&mut h, "t1");
-        take_signal(&h.state);
-
-        item_started(&mut h, "t1", "commandExecution", "c");
-        for i in 0..2000 {
-            output_delta(&mut h, "t1", i);
-        }
-        assert_eq!(take_signal(&h.state), None);
-        assert_eq!(verdicts(&h.state, pos).0, Zone::Tool);
-        item_completed(&mut h, "t1", "commandExecution", "c");
-        assert_eq!(take_signal(&h.state), Some(Signal::ToolEnd));
-        assert_eq!(take_signal(&h.state), None, "도구 끝 뒤로 신호가 더 섰다");
-    }
-
-    /// 답 끝 = 도는 도구가 없을 때의 `agentMessage`·`plan` 완료뿐이다 — `reasoning` 의 끝과 도구가 도는 중의 답
-    /// 끝은 신호가 아니다. `plan` 의 시작은 출력 항목(답 구간)이다.
-    #[test]
-    fn only_an_agent_message_or_plan_completing_with_no_tool_running_ends_the_answer() {
-        use super::HandOver::{Hold, Now};
-        let mut h = harness();
-        let pos = turn_with_id(&mut h, "t1");
-        take_signal(&h.state);
-
-        item_started(&mut h, "t1", "reasoning", "r");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Answer, Now, Hold));
-        item_completed(&mut h, "t1", "reasoning", "r");
-        assert_eq!(
-            take_signal(&h.state),
-            None,
-            "reasoning 의 끝은 신호가 아니다"
-        );
-
-        item_started(&mut h, "t1", "agentMessage", "m1");
-        item_completed(&mut h, "t1", "agentMessage", "m1");
-        assert_eq!(take_signal(&h.state), Some(Signal::AnswerEnd));
-        assert_eq!(verdicts(&h.state, pos), (Zone::BoundaryOpen, Now, Now));
-
-        item_started(&mut h, "t1", "plan", "p");
-        assert_eq!(
-            verdicts(&h.state, pos),
-            (Zone::Answer, Now, Hold),
-            "plan 은 출력 항목"
-        );
-        item_completed(&mut h, "t1", "plan", "p");
-        assert_eq!(take_signal(&h.state), Some(Signal::AnswerEnd));
-
-        item_started(&mut h, "t1", "webSearch", "w");
-        item_started(&mut h, "t1", "agentMessage", "m2");
-        item_completed(&mut h, "t1", "agentMessage", "m2");
-        assert_eq!(take_signal(&h.state), None, "도구가 도는 중의 답 끝");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Tool, Now, Hold));
-    }
-
-    /// 샘플링 끝(`tokenUsage`)은 도구 집합을 비우고 신호를 세운다 — 끝을 안 알린 항목이 다음 구간을 도구로
-    /// 오판시키지 않고, 비운 도구의 늦은 완료는 신호가 아니다.
-    #[test]
-    fn token_usage_empties_the_tool_set_and_signals() {
-        use super::HandOver::{Hold, Now};
-        let mut h = harness();
-        let pos = turn_with_id(&mut h, "t1");
-        take_signal(&h.state);
-
-        item_started(&mut h, "t1", "fileChange", "never-ends");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Tool, Now, Hold));
-        usage(&mut h, "t1");
-        assert_eq!(take_signal(&h.state), Some(Signal::TokenUsage));
-        assert_eq!(verdicts(&h.state, pos), (Zone::BoundaryOpen, Now, Now));
-
-        item_started(&mut h, "t1", "agentMessage", "m");
-        assert_eq!(
-            verdicts(&h.state, pos),
-            (Zone::Answer, Now, Hold),
-            "도구로 남지 않는다"
-        );
-        item_completed(&mut h, "t1", "fileChange", "never-ends");
-        assert_eq!(take_signal(&h.state), None);
-    }
-
-    /// 그 밖 항목(되울림 · 도구인지 근거 없는 아는 변형 · 모르는 변형)이 가장 최근에 서면 두 정책 모두 곧바로고,
-    /// 그 항목은 도구 집합에 안 든다(끝나도 신호 없음).
-    #[test]
-    fn other_items_hand_over_at_once_and_never_join_the_tool_set() {
-        use super::HandOver::Now;
-        let mut h = harness();
-        let pos = turn_with_id(&mut h, "t1");
-        take_signal(&h.state);
-
-        let kinds = [
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "t1");
+        accept_user(&h.state, "q-1", "x");
+        announce(&h.reader.core, &h.state, &ann);
+        for kind in [
+            "agentMessage",
+            "reasoning",
+            "plan",
             "userMessage",
-            "hookPrompt",
             "contextCompaction",
             "imageView",
-            "imageGeneration",
-            "sleep",
-            "subAgentActivity",
-            "functionCallOutput",
-            "enteredReviewMode",
             "someFutureVariant",
-        ];
-        for (i, kind) in kinds.iter().enumerate() {
-            let id = format!("o{i}");
-            item_started(&mut h, "t1", kind, &id);
-            assert_eq!(verdicts(&h.state, pos), (Zone::Other, Now, Now), "{kind}");
-            item_completed(&mut h, "t1", kind, &id);
-            assert_eq!(take_signal(&h.state), None, "{kind}");
+        ] {
+            item_started(&mut h, "t1", kind, "o");
+            item_completed(&mut h, "t1", kind, "o");
+            assert!(
+                !steer_due(&h.state),
+                "{kind}: 도구 아닌 항목의 끝이 계기를 세웠다"
+            );
         }
-        assert!(with_state(&h.state, |s| s.segment.running_tools.is_empty()));
-    }
-
-    /// 추적은 우리 thread 의 **지금 턴 id** 줄만 본다 — 끊긴 턴 도구의 늦은 완료(옛 턴 id · M6) · 남의 thread ·
-    /// 턴 id 가 오기 전의 줄은 구간도 신호도 안 바꾼다. 새 턴 id 는 구간을 새로 연다.
-    #[test]
-    fn only_the_current_turn_id_moves_the_segment() {
-        use super::HandOver::{Hold, Now};
-        let mut h = harness();
-        turn_with_id(&mut h, "t1");
-        item_started(&mut h, "t1", "commandExecution", "old-tool");
-        h.reader
-            .handle_line(completed_line("T", "t1", "interrupted").as_bytes());
-        assert_eq!(turn_seq(&h.state), None, "t1 이 끝났다");
-
-        with_state(&h.state, |s| s.push_legacy(b"later"));
-        let (request, _) = open_turn(&h);
-        item_started(&mut h, "t2", "commandExecution", "before-reply");
-        take_signal(&h.state);
-        reply(&mut h, request, "t2");
-        assert_eq!(take_signal(&h.state), Some(Signal::TurnId));
-        let pos = held_pos(&h.state);
-        assert_eq!(verdicts(&h.state, pos), (Zone::BoundaryOpen, Now, Now));
-        assert!(
-            with_state(&h.state, |s| s.segment.running_tools.is_empty()),
-            "옛 턴의 도구도 응답 전 도구도 안 남는다"
-        );
-
-        item_started(&mut h, "t2", "agentMessage", "m");
-        item_completed(&mut h, "t1", "commandExecution", "old-tool");
-        usage(&mut h, "t1");
-        assert_eq!(take_signal(&h.state), None, "옛 턴 id");
+        item_started(&mut h, "t1", "commandExecution", "c");
+        assert!(!steer_due(&h.state), "도구의 시작이 계기를 세웠다");
+        item_completed(&mut h, "t0", "commandExecution", "old");
+        assert!(!steer_due(&h.state), "다른 턴 id 의 도구 끝");
         let foreign = serde_json::json!({
             "method": method::ITEM_COMPLETED,
-            "params": {"threadId": "X", "turnId": "t2", "item": {"type": "agentMessage", "id": "m"}},
+            "params": {"threadId": "X", "turnId": "t1", "item": {"type": "commandExecution", "id": "c"}},
         })
         .to_string();
         h.reader.handle_line(foreign.as_bytes());
-        assert_eq!(take_signal(&h.state), None, "남의 thread");
-        assert_eq!(verdicts(&h.state, pos), (Zone::Answer, Now, Hold));
+        assert!(!steer_due(&h.state), "남의 thread 의 도구 끝");
+        assert!(steer_next(&h).is_none(), "계기 없이 넘겼다");
+        assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
+
+        item_completed(&mut h, "t1", "commandExecution", "c");
+        assert!(steer_due(&h.state), "우리 턴의 도구 끝이 계기를 안 세웠다");
+        let s = steer_next(&h).expect("도구 끝이 쥔 글을 안 풀었다");
+        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
     }
 
-    /// 네 신호 모두 기다리는 라이터를 곧바로 깨운다 — 깨움이 없으면 라이터는 훑기 간격([`SWEEP_INTERVAL`])이
-    /// 다 차서야 신호를 본다(각 신호는 라이터가 막 잠든 직후에 먹인다).
+    /// ★턴 id 를 알기 전의 도구 끝은 계기가 아니다★ — `expectedTurnId` 없이는 넘길 수단이 없다. 그 턴의 id 로 온 줄이어도
+    /// 응답이 그 id 를 주기 전이면 무시되고, 쥔 글은 응답이 턴 id 를 주는 자리에서 넘어간다([`Reader::resolve`]).
     #[test]
-    fn every_signal_wakes_a_waiting_writer_at_once() {
+    fn a_tool_end_before_the_turn_id_is_known_arms_nothing() {
         let mut h = harness();
-        make_ready(&h.state, "T");
-        activate(&h.state, 0, None);
-        assert!(h
-            .pending
-            .register(5, Waiter::TurnStart { seq: 0 }, method::TURN_START));
+        let ann = above(&h);
+        accept_user(&h.state, "head", "first");
+        announce(&h.reader.core, &h.state, &ann);
+        let (request, _) = open_turn(&h);
+        accept_user(&h.state, "q-1", "x");
+        announce(&h.reader.core, &h.state, &ann);
+        item_started(&mut h, "t1", "commandExecution", "c");
+        item_completed(&mut h, "t1", "commandExecution", "c");
+        assert!(!steer_due(&h.state), "턴 id 전의 도구 끝이 계기를 세웠다");
+        assert!(steer_next(&h).is_none());
+        assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
+
+        reply(&mut h, request, "t1");
+        let s = next_steer_job(&h, "턴 id 가 쥔 글을 안 넘겼다");
+        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
+        assert_eq!(steer_params(&s)["expectedTurnId"], "t1");
+    }
+
+    /// 도구 끝은 기다리는 라이터를 곧바로 깨운다 — 깨움이 없으면 라이터는 훑기 간격([`SWEEP_INTERVAL`])이 다 차서야
+    /// 계기를 본다(도구 끝은 라이터가 잠든 뒤에 먹인다).
+    #[test]
+    fn a_tool_end_wakes_a_waiting_writer_at_once() {
+        let mut h = harness();
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "t1");
+        accept_user(&h.state, "q-1", "x");
+        announce(&h.reader.core, &h.state, &ann);
         let (tx, rx) = mpsc::channel();
         let writer = {
             let state = h.state.clone();
             let next_id = h.next_id.clone();
             std::thread::spawn(move || {
                 while let Some(job) = next_job(&state, &next_id) {
-                    if let Job::Woke { signal, .. } = job {
-                        let _ = tx.send(signal);
+                    if let Job::Steer(s) = job {
+                        let _ = tx.send(s.item);
                     }
                 }
             })
         };
-        let expect = |want: Signal, fed: Instant| {
-            let got = rx
-                .recv_timeout(Duration::from_secs(5))
-                .expect("라이터가 안 깼다");
-            assert_eq!(got, want);
-            assert!(
-                fed.elapsed() < SWEEP_INTERVAL / 2,
-                "{want:?}: 깨움 없이 훑기로 봤다({:?})",
-                fed.elapsed()
-            );
-        };
-
-        let fed = Instant::now();
-        reply(&mut h, 5, "t1");
-        expect(Signal::TurnId, fed);
+        // 라이터가 쥔 글을 보고 잠들 틈.
+        std::thread::sleep(Duration::from_millis(50));
         item_started(&mut h, "t1", "commandExecution", "c");
         let fed = Instant::now();
         item_completed(&mut h, "t1", "commandExecution", "c");
-        expect(Signal::ToolEnd, fed);
-        item_started(&mut h, "t1", "agentMessage", "m");
-        let fed = Instant::now();
-        item_completed(&mut h, "t1", "agentMessage", "m");
-        expect(Signal::AnswerEnd, fed);
-        let fed = Instant::now();
-        usage(&mut h, "t1");
-        expect(Signal::TokenUsage, fed);
+        let got = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("도구 끝인데 안 넘겼다");
+        assert_eq!(got, "q-1");
+        assert!(
+            fed.elapsed() < SWEEP_INTERVAL / 2,
+            "깨움 없이 훑기로 넘겼다({:?})",
+            fed.elapsed()
+        );
 
         with_state(&h.state, |s| s.closed = true);
         h.state.1.notify_all();
         writer.join().expect("라이터");
-    }
-
-    /// 라이터가 못 본 신호가 겹치면 가장 오래된 것을 둔다. 한 번 집으면 빈다.
-    #[test]
-    fn signals_the_writer_has_not_seen_keep_the_oldest() {
-        let mut h = harness();
-        turn_with_id(&mut h, "t1");
-        item_started(&mut h, "t1", "commandExecution", "c");
-        item_completed(&mut h, "t1", "commandExecution", "c");
-        usage(&mut h, "t1");
-
-        assert_eq!(woke(&h).signal, Signal::TurnId);
-        assert!(with_state(&h.state, |s| s.unseen_signal.is_none()));
-    }
-
-    /// 넘기기 정책은 통로를 짓는 자리에서 끼운다 — 끼우지 않으면 운영 상수(`AtEarliestBoundary`)이고, seam 으로
-    /// `Immediate` 를 끼울 수 있다(되돌아갈 자리).
-    #[cfg(windows)]
-    #[test]
-    fn the_hand_over_policy_is_chosen_where_the_transport_is_built() {
-        let (t, _) = open_probe(&["/c", "echo seam-probe"]);
-        assert_eq!(
-            with_state(&t.state, |s| s.policy),
-            super::super::HAND_OVER_POLICY
-        );
-        assert_eq!(
-            super::super::HAND_OVER_POLICY,
-            HandOverPolicy::AtEarliestBoundary
-        );
-        let t = t.with_hand_over(HandOverPolicy::Immediate);
-        assert_eq!(
-            with_state(&t.state, |s| s.policy),
-            HandOverPolicy::Immediate
-        );
-        t.shutdown();
     }
 
     /// [`STEER_TRACE`] 줄 하나 — 칸 이름 → 값(문자열로).
@@ -8975,14 +8449,12 @@ mod tests {
             tracing::subscriber::with_default(TraceCapture(captured.clone()), || {
                 let mut h = harness_with_real_decoder();
                 let ann = above(&h);
-                on_default_policy(&h);
                 running_turn(&mut h, &ann, "t1");
-                take_signal(&h.state);
                 item_started(&mut h, "t1", "commandExecution", "c");
                 accept_user(&h.state, "q-1", "a");
                 announce(&h.reader.core, &h.state, &ann);
                 item_completed(&mut h, "t1", "commandExecution", "c");
-                let s = woke(&h).steer.expect("도구 끝이 쥔 글을 안 풀었다");
+                let s = steer_next(&h).expect("도구 끝이 쥔 글을 안 풀었다");
                 let first = s.request;
                 // 라이터가 하는 그대로 — 쓰기를 마친 뒤 찍는다([`writer_loop`]).
                 let trace = s.trace().expect("줄이 켜져 있는데 재료가 없다");
@@ -8992,7 +8464,9 @@ mod tests {
 
                 accept_user(&h.state, "q-2", "b");
                 announce(&h.reader.core, &h.state, &ann);
-                let s = steer_now(&h).expect("둘째 글이 안 넘어갔다");
+                item_started(&mut h, "t1", "commandExecution", "c2");
+                item_completed(&mut h, "t1", "commandExecution", "c2");
+                let s = steer_next(&h).expect("둘째 도구 끝이 쥔 글을 안 풀었다");
                 let second = s.request;
                 issue(&h, s);
                 steer_refused_reply(&mut h, second);
@@ -9023,23 +8497,25 @@ mod tests {
                     ["steer", "t1", "q-1"]
                 ),
                 (base.to_vec(), ["echo", "t1", "q-1"]),
+                (base.to_vec(), ["tool_start", "t1", "c2"]),
+                (
+                    vec!["held", "item_id", "message", "phase", "turn_id"],
+                    ["tool_end", "t1", "c2"]
+                ),
                 (base.to_vec(), ["refused", "t1", "q-2"]),
             ],
             "{lines:?}"
         );
         assert_eq!(lines[1]["held"], "1", "쥔 사용자 항목 수");
+        assert_eq!(lines[5]["held"], "1", "쥔 사용자 항목 수");
         assert_eq!(lines[2]["request"], first.to_string());
         assert_ne!(first, second);
     }
 
     // ── steer — 도는 턴에 넘기기 · 응답 짝짓기 · 넘긴 항목의 ✕ (ADR-0231 · TRD §5-5) ──
     //
-    // 판정(`Above`)이 난 연결이면 운영 그대로 steer 한다 — 이 구획은 [`above`] 시험대로 잰다.
-
-    /// 라이터가 지금 집을 steer(`None` = 라이터는 잠든다) — [`next_job`] 의 훑기 대기를 거치지 않는다.
-    fn steer_now(h: &Harness) -> Option<Steer> {
-        with_state(&h.state, |s| take_steer_locked(s, &h.next_id))
-    }
+    // 판정(`Above`)이 난 연결이면 운영 그대로 steer 한다 — 이 구획은 [`above`] 시험대로 잰다. 넘기는 계기는 도구 끝이다
+    // ([`steer_at_tool_end`] — 계기를 세운 자리에서 무엇이 넘어가고 무엇이 안 넘어가나를 잰다).
 
     /// 그 steer 의 params — 봉투의 메서드와 요청 id 까지 본다.
     fn steer_params(steer: &Steer) -> Value {
@@ -9094,9 +8570,9 @@ mod tests {
         ]
     }
 
-    /// ★턴 id 를 기다리는 동안은 넘기지 않는다 — `turn/started` 로도 안 잡는다★. `turn/start` 응답이 턴 id 를 주면
-    /// 그 신호를 본 깨어남이 머리부터 하나씩 넘기고(`expectedTurnId` · `clientUserMessageId`), 같은 깨어남의 뒤
-    /// 항목도 이어서 넘어간다. 목록 사건은 없다.
+    /// ★턴 id 를 기다리는 동안은 넘기지 않는다 — 도구 끝이 와도 · `turn/started` 로도 안 잡는다★. `turn/start` 응답이
+    /// 턴 id 를 주면 그동안 쥔 글이 도구 끝을 기다리지 않고 머리부터 하나씩 넘어가고(`expectedTurnId` ·
+    /// `clientUserMessageId`), 라이터가 차례로 뒤 항목도 이어서 넘긴다(단순화 계획 2026-09-26 항목 4). 목록 사건은 없다.
     #[test]
     fn a_held_item_is_steered_only_once_the_turn_start_reply_names_the_turn() {
         let mut h = harness();
@@ -9107,16 +8583,17 @@ mod tests {
         accept_user(&h.state, "q-1", "second");
         accept_user(&h.state, "q-2", "third");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "턴 id 전에 steer 가 나갔다");
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "턴 id 전에 steer 가 나갔다"
+        );
         h.reader.handle_line(
             br#"{"method":"turn/started","params":{"threadId":"T","turn":{"id":"t1"}}}"#,
         );
-        assert!(steer_now(&h).is_none(), "turn/started 로 턴 id 를 잡았다");
+        assert!(steer_next(&h).is_none(), "turn/started 로 턴 id 를 잡았다");
 
         reply(&mut h, request, "t1");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::TurnId);
-        let first = wake.steer.expect("턴 id 가 푼 steer 가 없다");
+        let first = next_steer_job(&h, "턴 id 가 푼 steer 가 없다");
         let p = steer_params(&first);
         assert_eq!(p["threadId"], "T");
         assert_eq!(p["expectedTurnId"], "t1");
@@ -9127,12 +8604,10 @@ mod tests {
             Some(format!("in-flight gen={seq} turn=Some(\"t1\")"))
         );
 
-        let second = match next_job(&h.state, &h.next_id) {
-            Some(Job::Steer(s)) => s,
-            _ => panic!("같은 깨어남에 둘째 항목이 안 넘어갔다"),
-        };
+        let second = next_steer_job(&h, "둘째 항목이 이어서 안 넘어갔다");
         assert_eq!(steer_params(&second)["clientUserMessageId"], "q-2");
-        assert!(steer_now(&h).is_none(), "넘길 것이 없는데 steer 가 나갔다");
+        assert!(steer_next(&h).is_none(), "넘길 것이 없는데 steer 가 나갔다");
+        assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "second"), queued("q-2", "third")],
@@ -9140,11 +8615,10 @@ mod tests {
         );
     }
 
-    /// 넘길 수 있는 구간(여기서는 턴 id 가 막 온 경계 열림 — 두 정책 모두 곧바로)의 도는 턴에 친 글은 방출 뒤 곧바로
-    /// 넘어간다 — 신호 없이 깬 라이터. 방출 전 머리는 건너뛰지 않고, 쥔 우편은 넘기지도 막지도 않으며,
-    /// Direct 는 steer 로 나가지 않는다.
+    /// 도구 끝의 방출 전 머리는 건너뛰지 않는다 — 계기를 둔 채 기다리다 방출이 라이터를 깨우면 그 글이 넘어간다. 쥔 우편은
+    /// 넘기지도 막지도 않으며, Direct 는 steer 로 나가지 않는다(계기가 내린다).
     #[test]
-    fn a_running_turn_takes_an_announced_item_at_once_in_the_order_it_was_typed() {
+    fn a_tool_end_waits_for_an_unannounced_head_and_never_steers_mail_or_a_direct_item() {
         let mut h = harness();
         let ann = above(&h);
         running_turn(&mut h, &ann, "t1");
@@ -9156,12 +8630,14 @@ mod tests {
         )
         .unwrap();
         accept_user(&h.state, "q-1", "typed");
-        assert!(steer_now(&h).is_none(), "방출 전 머리를 건너뛰었다");
+        assert!(steer_at_tool_end(&h).is_none(), "방출 전 머리를 건너뛰었다");
+        assert!(steer_due(&h.state), "방출 전 머리 앞에서 계기가 내렸다");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("방출된 글이 곧바로 안 넘어갔다");
+        let s = steer_next(&h).expect("방출된 글이 서 있던 계기로 안 넘어갔다");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
         assert_eq!(stage_of(&h.state, "m-1").as_deref(), Some("held"));
-        assert!(steer_now(&h).is_none(), "우편이 steer 로 나갔다");
+        assert!(steer_next(&h).is_none(), "우편이 steer 로 나갔다");
+        assert!(!steer_due(&h.state), "넘길 것이 없는데 계기가 남았다");
 
         // Direct 는 한가한 순간의 머리라 턴 도중 쥐일 일이 없다 — 쥐여 있어도 steer 로 안 나가고 건너뛰지도 않는다.
         let h = harness();
@@ -9171,7 +8647,7 @@ mod tests {
         announce(&h.reader.core, &h.state, &ann);
         activate(&h.state, 5, Some("t5"));
         assert!(
-            steer_now(&h).is_none(),
+            steer_at_tool_end(&h).is_none(),
             "Direct 가 steer 로 나갔거나 건너뛰였다"
         );
     }
@@ -9186,7 +8662,7 @@ mod tests {
             let seq = running_turn(&mut h, &ann, "t1");
             accept_user(&h.state, "q-1", "x");
             announce(&h.reader.core, &h.state, &ann);
-            let s = steer_now(&h).expect("steer");
+            let s = steer_at_tool_end(&h).expect("steer");
             let request = s.request;
             assert!(matches!(issue(&h, s), Issued::Written));
             assert_eq!(h.pending.len(), 1, "대기표가 안 걸렸다");
@@ -9225,17 +8701,17 @@ mod tests {
         }
     }
 
-    /// steer 오류 응답 → 그 항목은 `Held` 로 돌아오고(목록 사건 0 건) 그 턴은 「steer 거절」 — 두 정책 모두 쥐고
-    /// 새로 든 글도 쥔다. 턴이 끝나면 되돌아온 글이 친 순서대로 다음 `turn/start` 를 열고, 그 턴에서는 다시 넘긴다.
+    /// steer 오류 응답 → 그 항목은 `Held` 로 돌아오고(목록 사건 0 건) 그 턴은 「steer 거절」 — 도구 끝이 와도 되돌아온
+    /// 글도 새로 든 글도 쥔다. 턴이 끝나면 되돌아온 글이 친 순서대로 다음 `turn/start` 를 열고, 그 턴 id 가 오면 다시
+    /// 넘긴다.
     #[test]
     fn a_refused_steer_is_held_again_and_that_turn_steers_nothing_more() {
-        use super::HandOver::Hold;
         let mut h = harness();
         let ann = above(&h);
         running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "second");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         let request = s.request;
         issue(&h, s);
         steer_refused_reply(&mut h, request);
@@ -9246,14 +8722,16 @@ mod tests {
             vec![queued("q-1", "second")],
             "되돌아온 글이 다시 방출됐다"
         );
-        assert_eq!(
-            verdicts(&h.state, held_pos(&h.state)),
-            (Zone::Blocked, Hold, Hold),
-            "「steer 거절」 표시된 턴"
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "「steer 거절」 표시된 턴에 되돌아온 글이 또 나갔다"
         );
         accept_user(&h.state, "q-2", "third");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "거절된 턴에 steer 가 또 나갔다");
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "거절된 턴에 steer 가 또 나갔다"
+        );
 
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
@@ -9269,7 +8747,7 @@ mod tests {
             .pending
             .register(id, Waiter::TurnStart { seq }, method::TURN_START));
         reply(&mut h, id, "t2");
-        let s = steer_now(&h).expect("다음 턴에는 다시 넘긴다");
+        let s = steer_next(&h).expect("다음 턴 id 에 다시 넘긴다");
         let p = steer_params(&s);
         assert_eq!(p["clientUserMessageId"], "q-2");
         assert_eq!(p["expectedTurnId"], "t2");
@@ -9284,7 +8762,7 @@ mod tests {
         running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         let request = s.request;
         issue(&h, s);
         assert_eq!(
@@ -9305,7 +8783,10 @@ mod tests {
         assert!(row_ids(&h).is_empty(), "명부에 남았다");
         accept_user(&h.state, "q-2", "y");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "거절된 턴에 steer 가 또 나갔다");
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "거절된 턴에 steer 가 또 나갔다"
+        );
     }
 
     /// ★세대 가림★ — 에코로 이미 빠진 항목의 늦은 steer 응답은 아무것도 안 움직인다(다시 쥐지 않고 · 표시도 안
@@ -9317,7 +8798,7 @@ mod tests {
         let seq = running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         let request = s.request;
         issue(&h, s);
         h.reader.handle_line(echo_line("t1", "q-1", "x").as_bytes());
@@ -9337,7 +8818,7 @@ mod tests {
 
         accept_user(&h.state, "q-2", "y");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("늦은 거절이 그 턴에 표시를 달았다");
+        let s = steer_at_tool_end(&h).expect("늦은 거절이 그 턴에 표시를 달았다");
         issue(&h, s);
         assert!(h.pending.register(
             900,
@@ -9364,7 +8845,7 @@ mod tests {
         running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         issue(&h, s);
         h.seen.lock().unwrap().clear();
 
@@ -9392,7 +8873,7 @@ mod tests {
         let seq = running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         issue(&h, s);
 
         assert_eq!(
@@ -9412,7 +8893,7 @@ mod tests {
             Some(format!("in-flight gen={seq} turn=Some(\"t1\")")),
             "✕ 가 넘긴 글을 거뒀다"
         );
-        assert!(steer_now(&h).is_none(), "다시 보냈다");
+        assert!(steer_at_tool_end(&h).is_none(), "다시 보냈다");
 
         h.reader.handle_line(echo_line("t1", "q-1", "x").as_bytes());
         let t = trace(&h.seen);
@@ -9440,36 +8921,29 @@ mod tests {
             Withdraw::Withdrawn
         );
         reply(&mut h, request, "t1");
-        assert!(woke(&h).steer.is_none(), "거둔 글이 넘어갔다");
+        assert!(
+            !steer_due(&h.state),
+            "쥔 글이 없는데 턴 id 가 계기를 세웠다"
+        );
+        assert!(steer_at_tool_end(&h).is_none(), "거둔 글이 넘어갔다");
         assert_eq!(
             list_ops(&h.seen),
             vec![queued("q-1", "x"), withdrawn("q-1")]
         );
     }
 
-    // ── 운영 정책 `AtEarliestBoundary` (ADR-0231 · TRD §5-5 구간 표 · §7 codex 통로 행) ──
-    //
-    // 아래는 seam 없이 지은 시험대 — 운영 상수 그대로 잰다([`on_default_policy`]).
+    // ── 도구 끝에 넘기기 (ADR-0231 · 단순화 계획 2026-09-26 목표 동작 1 · 2 · 4 · 5) ──
 
-    /// 시험대가 운영 정책 위에 섰나 — 상수를 `Immediate` 로 되돌리면 이 구획은 seam 으로 옮겨야 한다.
-    fn on_default_policy(h: &Harness) {
-        assert_eq!(
-            with_state(&h.state, |s| s.policy),
-            HandOverPolicy::AtEarliestBoundary,
-            "운영 기본 정책이 아니다 — 이 구획은 운영 정책을 잰다"
-        );
-    }
-
-    /// 도구 도는 중 친 글은 쥐였다가 도구 끝 신호를 본 깨어남이 친 순서대로 넘긴다 — 같은 깨어남 안에서 차례로.
-    /// 목록 사건은 `Queued` 뿐이다(쥐일 때도 넘길 때도 재방출 0 건). 쥔 우편은 넘기지도 막지도 않는다.
+    /// ★도구 끝 하나가 쥔 사용자 글 전부를 친 순서대로 넘긴다★ — 글마다 `turn/steer` 하나 · 제 `clientUserMessageId` ·
+    /// 지금 턴 id. 우편은 넘기지도 막지도 않는다(턴 끝까지 쥔다). 넘긴 글은 목록에 남고(받음은 에코뿐 — 목록 사건은
+    /// `Queued` 뿐) 다 넘기면 계기가 내린다.
     #[test]
-    fn text_typed_during_a_tool_is_held_until_the_tool_ends_then_steered_in_typed_order() {
+    fn a_current_turn_tool_end_steers_every_held_user_item_in_typed_order_and_never_mail() {
         let mut h = harness();
         let ann = above(&h);
-        on_default_policy(&h);
-        running_turn(&mut h, &ann, "t1");
-        assert_eq!(woke(&h).signal, Signal::TurnId);
+        let seq = running_turn(&mut h, &ann, "t1");
         item_started(&mut h, "t1", "commandExecution", "c");
+        accept_user(&h.state, "q-1", "a");
         accept_input(
             &h.state,
             Some("m-1".into()),
@@ -9477,42 +8951,49 @@ mod tests {
             InputOrigin::Mail,
         )
         .unwrap();
-        accept_user(&h.state, "q-1", "a");
         accept_user(&h.state, "q-2", "b");
+        accept_user(&h.state, "q-3", "c");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "도구 구간에서 넘겼다");
-        assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
-        assert_eq!(stage_of(&h.state, "q-2").as_deref(), Some("held"));
+        assert!(steer_next(&h).is_none(), "도구 도중에 넘겼다");
 
         item_completed(&mut h, "t1", "commandExecution", "c");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::ToolEnd);
-        let first = wake.steer.expect("도구 끝이 쥔 글을 안 풀었다");
-        assert_eq!(steer_params(&first)["clientUserMessageId"], "q-1");
-        assert!(matches!(issue(&h, first), Issued::Written));
-        let second = match next_job(&h.state, &h.next_id) {
-            Some(Job::Steer(s)) => s,
-            _ => panic!("같은 깨어남에 뒤 글이 안 넘어갔다"),
-        };
-        assert_eq!(steer_params(&second)["clientUserMessageId"], "q-2");
-        assert!(steer_now(&h).is_none(), "우편이 steer 로 나갔다");
+        let mut requests = Vec::new();
+        for (id, text) in [("q-1", "a"), ("q-2", "b"), ("q-3", "c")] {
+            let s = next_steer_job(&h, "도구 끝이 쥔 글을 다 안 넘겼다");
+            let p = steer_params(&s);
+            assert_eq!(p["clientUserMessageId"], id);
+            assert_eq!(p["expectedTurnId"], "t1", "{id}");
+            assert_eq!(p["input"][0]["text"], text, "{id}");
+            assert_eq!(stage_of(&h.state, id), steered_stage(seq, "t1"), "{id}");
+            requests.push(s.request);
+            assert!(matches!(issue(&h, s), Issued::Written));
+        }
+        assert!(
+            requests.windows(2).all(|w| w[0] < w[1]),
+            "요청 id 가 글마다 따로가 아니다: {requests:?}"
+        );
+        assert!(steer_next(&h).is_none(), "우편이 steer 로 나갔다");
+        assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
         assert_eq!(stage_of(&h.state, "m-1").as_deref(), Some("held"));
         assert_eq!(
+            row_ids(&h),
+            ["q-1", "q-2", "q-3"],
+            "넘긴 글이 목록에서 빠졌다"
+        );
+        assert_eq!(
             list_ops(&h.seen),
-            vec![queued("q-1", "a"), queued("q-2", "b")],
+            vec![queued("q-1", "a"), queued("q-2", "b"), queued("q-3", "c")],
             "넘기기가 목록 사건을 냈다"
         );
     }
 
-    /// 도구 도는 중의 ✕ 는 쥔 글을 거둔다(`Withdrawn` · `Dropped{Withdrawn}` · 벤더 요청 0 건) — 도구 끝 신호가 와도
-    /// 넘길 것이 없다. 겹친 둘째 ✕ 는 통로가 모르는 id 다.
+    /// 도구 도는 중의 ✕ 는 쥔 글을 거둔다(`Withdrawn` · `Dropped{Withdrawn}` · 벤더 요청 0 건) — 도구 끝이 와도 넘길 것이
+    /// 없어 계기가 곧바로 내린다. 겹친 둘째 ✕ 는 통로가 모르는 id 다.
     #[test]
     fn a_cancel_during_a_tool_withdraws_the_text_and_the_tool_end_steers_nothing() {
         let mut h = harness();
         let ann = above(&h);
-        on_default_policy(&h);
         running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
         item_started(&mut h, "t1", "commandExecution", "c");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
@@ -9526,10 +9007,8 @@ mod tests {
         );
 
         item_completed(&mut h, "t1", "commandExecution", "c");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::ToolEnd);
-        assert!(wake.steer.is_none(), "거둔 글이 넘어갔다");
-        assert!(steer_now(&h).is_none());
+        assert!(steer_next(&h).is_none(), "거둔 글이 넘어갔다");
+        assert!(!steer_due(&h.state), "넘길 것이 없는데 계기가 남았다");
         assert_eq!(h.pending.len(), 0, "벤더 요청이 나갔다");
         assert_eq!(
             list_ops(&h.seen),
@@ -9537,201 +9016,53 @@ mod tests {
         );
     }
 
-    /// 병렬 도구 — 첫 완료는 신호도 넘기기도 아니다. 도는 도구 집합이 비는 마지막 완료에서만 넘긴다(M15: 병렬 묶음
-    /// 하나에 도구 끝 신호 하나).
+    /// ★도구 끝이 없으면 턴 끝까지 쥔다★ — 도구가 끝난 **뒤에** 친 글은 그 뒤 도구가 없으면(답만 쓰고 끝) 넘어가지 않고
+    /// 목록 사건 0 건으로 남는다. 턴이 끝나면 가장 오래된 글이 `turn/start` 로 다음 턴을 열고, 그 턴 id 가 오는 순간
+    /// 나머지가 곧바로 그 턴에 든다(도구 끝을 기다리지 않는다 — 남은 글이 한 턴에 모인다).
     #[test]
-    fn parallel_tools_hold_the_typed_text_until_the_last_one_ends() {
+    fn text_typed_with_no_tool_afterwards_waits_for_the_turn_end_and_the_rest_ride_the_next_turn_once_its_id_is_known(
+    ) {
         let mut h = harness();
         let ann = above(&h);
-        on_default_policy(&h);
         running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
-        item_started(&mut h, "t1", "commandExecution", "a");
-        item_started(&mut h, "t1", "mcpToolCall", "b");
-        accept_user(&h.state, "q-1", "x");
-        announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "도구 구간에서 넘겼다");
-
-        item_completed(&mut h, "t1", "commandExecution", "a");
-        assert_eq!(take_signal(&h.state), None, "첫 완료가 신호를 세웠다");
-        assert!(steer_now(&h).is_none(), "도구가 남았는데 넘겼다");
-
-        item_completed(&mut h, "t1", "mcpToolCall", "b");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::ToolEnd);
-        let s = wake.steer.expect("마지막 완료가 쥔 글을 안 풀었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
-    }
-
-    /// 답 구간(M16 녹)은 쥔다 — `reasoning` 의 끝은 신호가 아니고, 도는 도구가 없을 때의 `agentMessage`·`plan` 끝이 쥔
-    /// 글을 넘긴다. ★한 턴 안에서 같은 `plan` id 가 다시 시작돼도 다시 쥐고 다시 넘긴다★(M16 — `<턴 id>-plan` 이
-    /// 샘플링마다 `item/started` → `item/completed` 를 되풀이한다).
-    #[test]
-    fn the_answer_segment_holds_until_the_answer_ends_even_when_a_plan_id_restarts() {
-        let mut h = harness();
-        let ann = above(&h);
-        on_default_policy(&h);
-        running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
-
-        item_started(&mut h, "t1", "reasoning", "r");
-        accept_user(&h.state, "q-1", "a");
-        announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "reasoning 중에 넘겼다");
-        item_completed(&mut h, "t1", "reasoning", "r");
-        assert_eq!(take_signal(&h.state), None);
-        item_started(&mut h, "t1", "agentMessage", "m");
-        assert!(steer_now(&h).is_none(), "답 도중에 넘겼다");
-        item_completed(&mut h, "t1", "agentMessage", "m");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::AnswerEnd);
-        let s = wake.steer.expect("답 끝이 쥔 글을 안 풀었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
-        issue(&h, s);
-
-        for (round, id) in ["q-2", "q-3"].into_iter().enumerate() {
-            item_started(&mut h, "t1", "plan", "t1-plan");
-            accept_user(&h.state, id, "x");
-            announce(&h.reader.core, &h.state, &ann);
-            assert!(steer_now(&h).is_none(), "plan 도중에 넘겼다(회차 {round})");
-            item_completed(&mut h, "t1", "plan", "t1-plan");
-            let wake = woke(&h);
-            assert_eq!(wake.signal, Signal::AnswerEnd, "회차 {round}");
-            let s = wake.steer.expect("plan 끝이 쥔 글을 안 풀었다");
-            assert_eq!(steer_params(&s)["clientUserMessageId"], id);
-            issue(&h, s);
-        }
-    }
-
-    /// 경계 열림(턴 id 가 막 옴 · 경계 신호 직후)과 그 밖(여기서는 에코가 경계 열림을 닫은 자리)은 곧바로 넘긴다.
-    #[test]
-    fn a_boundary_open_or_other_zone_hands_typed_text_over_at_once() {
-        let mut h = harness();
-        let ann = above(&h);
-        on_default_policy(&h);
-        running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
-
-        accept_user(&h.state, "q-1", "a");
-        announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("턴 id 가 막 온 경계 열림에서 쥐었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
-        issue(&h, s);
-
-        h.reader.handle_line(echo_line("t1", "q-1", "a").as_bytes());
-        accept_user(&h.state, "q-2", "b");
-        announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("그 밖 구간에서 쥐었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-2");
-        issue(&h, s);
-
         item_started(&mut h, "t1", "commandExecution", "c");
         item_completed(&mut h, "t1", "commandExecution", "c");
-        assert_eq!(take_signal(&h.state), Some(Signal::ToolEnd));
-        accept_user(&h.state, "q-3", "c");
-        announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("경계 신호 직후에 쥐었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-3");
-    }
-
-    /// 끝을 안 알린 도구 아래 쥔 글도 샘플링 끝(`tokenUsage`)이 넘긴다 — 도구 집합을 비우는 신호다.
-    #[test]
-    fn the_sampling_end_releases_text_held_under_a_tool_that_never_reported_its_end() {
-        let mut h = harness();
-        let ann = above(&h);
-        on_default_policy(&h);
-        running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
-        item_started(&mut h, "t1", "fileChange", "never-ends");
-        accept_user(&h.state, "q-1", "x");
-        announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "도구 구간에서 넘겼다");
-
-        usage(&mut h, "t1");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::TokenUsage);
-        let s = wake.steer.expect("샘플링 끝이 쥔 글을 안 풀었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-1");
-    }
-
-    /// ★답 구간에서 쥔 글은 그 밖 항목이 서는 순간 곧바로 넘어간다 — 경계 신호가 아니어도 라이터를 깨운다★. 깨움이
-    /// 없으면 라이터는 훑기 간격([`SWEEP_INTERVAL`])이 다 차서야 본다(글은 라이터가 잠든 뒤에 먹인다).
-    #[test]
-    fn held_answer_text_goes_at_once_when_an_other_item_starts() {
-        let mut h = harness();
-        let ann = above(&h);
-        on_default_policy(&h);
-        running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
-        item_started(&mut h, "t1", "reasoning", "r");
-        accept_user(&h.state, "q-1", "x");
-        announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "답 구간에서 넘겼다");
-
-        let (tx, rx) = mpsc::channel();
-        let writer = {
-            let state = h.state.clone();
-            let next_id = h.next_id.clone();
-            std::thread::spawn(move || {
-                while let Some(job) = next_job(&state, &next_id) {
-                    if let Job::Steer(s) = job {
-                        let _ = tx.send(s.item);
-                    }
-                }
-            })
-        };
-        // 라이터가 쥔 글을 보고 잠들 틈.
-        std::thread::sleep(Duration::from_millis(50));
-        let fed = Instant::now();
-        item_started(&mut h, "t1", "imageView", "v");
-        let got = rx
-            .recv_timeout(Duration::from_secs(5))
-            .expect("그 밖 구간인데 안 넘겼다");
-        assert_eq!(got, "q-1");
-        assert!(
-            fed.elapsed() < SWEEP_INTERVAL / 2,
-            "깨움 없이 훑기로 넘겼다({:?})",
-            fed.elapsed()
-        );
-
-        with_state(&h.state, |s| s.closed = true);
-        h.state.1.notify_all();
-        writer.join().expect("라이터");
-    }
-
-    /// 경계 신호를 하나도 못 받고 쥔 채 턴이 끝난 글은 목록 사건 0 건으로 남아 다음 턴에 함께 든다: 가장 오래된 글이
-    /// `turn/start` 로, 뒤 글은 그 턴 id 가 오는 깨어남에 steer 로.
-    #[test]
-    fn text_still_held_when_its_turn_ends_goes_with_the_next_turn() {
-        let mut h = harness();
-        let ann = above(&h);
-        on_default_policy(&h);
-        running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
-        item_started(&mut h, "t1", "reasoning", "r");
+        // 라이터가 하는 그대로 — 쥔 글 없는 도구 끝은 계기를 곧바로 내린다.
+        assert!(steer_next(&h).is_none());
+        assert!(!steer_due(&h.state));
         accept_user(&h.state, "q-1", "a");
         accept_user(&h.state, "q-2", "b");
+        accept_user(&h.state, "q-3", "c");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "답 구간에서 넘겼다");
+        item_started(&mut h, "t1", "agentMessage", "m");
+        item_completed(&mut h, "t1", "agentMessage", "m");
+        assert!(steer_next(&h).is_none(), "도구 끝 없이 넘겼다");
 
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
         assert_eq!(turn_seq(&h.state), None, "t1 이 안 끝났다");
-        assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
-        assert_eq!(stage_of(&h.state, "q-2").as_deref(), Some("held"));
+        for id in ["q-1", "q-2", "q-3"] {
+            assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{id}");
+        }
         assert_eq!(
             list_ops(&h.seen),
-            vec![queued("q-1", "a"), queued("q-2", "b")]
+            vec![queued("q-1", "a"), queued("q-2", "b"), queued("q-3", "c")]
         );
 
-        let (request, _, p) = opens(&h).expect("다음 턴이 안 열렸다");
+        let (request, seq, p) = opens(&h).expect("다음 턴이 안 열렸다");
         assert_eq!(p["clientUserMessageId"], "q-1");
-        assert!(steer_now(&h).is_none(), "턴 id 전에 넘겼다");
+        assert!(steer_next(&h).is_none(), "턴 id 전에 넘겼다");
         reply(&mut h, request, "t2");
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::TurnId);
-        let s = wake.steer.expect("턴 id 가 뒤 글을 안 풀었다");
-        assert_eq!(steer_params(&s)["clientUserMessageId"], "q-2");
+        for id in ["q-2", "q-3"] {
+            let s = next_steer_job(&h, "턴 id 가 남은 글을 안 넘겼다");
+            let p = steer_params(&s);
+            assert_eq!(p["clientUserMessageId"], id);
+            assert_eq!(p["expectedTurnId"], "t2", "{id}");
+            assert_eq!(stage_of(&h.state, id), steered_stage(seq, "t2"), "{id}");
+        }
+        assert!(steer_next(&h).is_none());
+        assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
+        assert!(take(&h).is_none(), "도는 턴에 turn/start 가 또 나갔다");
     }
 
     /// ★도구 끝 fixture(M7 trial 1 — 실측 codex-cli 0.156.1)★: 도구 도는 중 친 글은 쥐였다가 도구 `item/completed` 에
@@ -9751,7 +9082,6 @@ mod tests {
             }
         };
         let mut h = harness_with_real_decoder();
-        on_default_policy(&h);
         make_ready(&h.state, THREAD);
         let ann = announcer();
         settle_floor(&h.reader.core, &h.state, &ann, Floor::Above);
@@ -9761,16 +9091,14 @@ mod tests {
         let (request, _, _) = opens(&h).expect("turn/start");
         assert_eq!(request, 2);
         feed(&mut h, 1..=6);
-        assert_eq!(woke(&h).signal, Signal::TurnId);
+        assert_eq!(turn_id_of(&h.state).as_deref(), Some(TURN));
 
         accept_user(&h.state, TYPED, "Also reply with the word KIWI1.");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "도구 구간에서 넘겼다");
+        assert!(steer_next(&h).is_none(), "도구 끝 전에 넘겼다");
         h.next_id.store(3, Ordering::Relaxed);
         feed(&mut h, 7..=7);
-        let wake = woke(&h);
-        assert_eq!(wake.signal, Signal::ToolEnd);
-        let s = wake.steer.expect("도구 끝이 쥔 글을 안 풀었다");
+        let s = next_steer_job(&h, "도구 끝이 쥔 글을 안 풀었다");
         assert_eq!(s.request, 3);
         assert_eq!(steer_params(&s)["expectedTurnId"], TURN);
         issue(&h, s);
@@ -9795,16 +9123,18 @@ mod tests {
         assert!(take(&h).is_none(), "끝난 턴 뒤에 turn/start 가 나갔다");
     }
 
-    /// steer 를 못 쓰면 그 글은 거절로 닫힌다(`Dropped{Rejected}`) — 대기표는 걷히고 턴은 계속 돈다(오류 뒤 멈춤의
-    /// 계기가 아니고 「steer 거절」 표시도 안 단다 — 뒤 글은 평소대로 넘어간다).
+    /// ★steer 를 못 쓰면 그 글은 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 B — 지우지 않는다) · 목록 사건 0 건 · 대기표는
+    /// 걷히고 턴은 계속 돈다(오류 뒤 멈춤의 계기가 아니다). 그 턴에는 「steer 거절」 표시가 서 같은 턴의 다음 도구 끝이 그
+    /// 글을 곧바로 다시 쓰지 않고(재시도 고리 없음), 턴이 끝난 뒤 다음 Idle 에 `turn/start` 로 **한 번** 나간다.
     #[test]
-    fn a_steer_that_cannot_be_written_is_rejected_and_the_turn_goes_on() {
+    fn a_steer_that_cannot_be_written_is_held_not_retried_in_that_turn_and_sent_once_at_the_next_idle(
+    ) {
         let mut h = harness();
         let ann = above(&h);
         let seq = running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         let issued = issue_steer(&h.state, &h.pending, &h.reader.core, s, |_| {
             Err(PtyError::WriteFailed("broken pipe".into()))
         });
@@ -9812,43 +9142,45 @@ mod tests {
         assert_eq!(h.pending.len(), 0, "못 쓴 steer 의 대기표가 남았다");
         assert_eq!(
             list_ops(&h.seen),
-            vec![
-                queued("q-1", "x"),
-                QueuedInputEvent::Dropped {
-                    id: "q-1".into(),
-                    cause: DropCause::Rejected
-                }
-            ]
+            vec![queued("q-1", "x")],
+            "쓰기 실패가 목록 사건을 냈다"
         );
-        assert_eq!(stage_of(&h.state, "q-1"), None);
+        assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
+        assert_eq!(row_ids(&h), ["q-1"], "쓰기 실패가 목록을 바꿨다");
         assert_eq!(
             turn_seq(&h.state),
             Some(seq),
             "steer 쓰기 실패가 턴을 끝냈다"
         );
-        accept_user(&h.state, "q-2", "y");
-        announce(&h.reader.core, &h.state, &ann);
+        assert!(!halted(&h.state), "steer 쓰기 실패가 멈춤을 세웠다");
+
+        item_started(&mut h, "t1", "commandExecution", "c");
+        item_completed(&mut h, "t1", "commandExecution", "c");
         assert!(
-            steer_now(&h).is_some(),
-            "쓰기 실패가 그 턴의 steer 를 막았다"
+            steer_next(&h).is_none(),
+            "같은 턴의 도구 끝이 못 쓴 글을 다시 썼다"
         );
+        h.reader
+            .handle_line(completed_line("T", "t1", "completed").as_bytes());
+        let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
+        assert_eq!(v["params"]["clientUserMessageId"], "q-1");
+        assert!(take(&h).is_none(), "두 번 나갔다");
     }
 
-    /// ★운영은 steer 한다★ — 시험 seam 없이 지은 상태(하한 판정 `Above`)에서 도는 턴에 친 글은 턴 id 를 기다리며 쥐였다가,
-    /// `turn/start` 응답이 턴 id 를 주는 깨어남에 곧바로 넘어간다. 하한 미달 화신은 오늘 경로 그대로다 — 턴 id 가 와도
-    /// 쥔 채로 남고 턴 끝 뒤 `turn/start` 로 나간다.
+    /// ★운영은 도구 끝에 steer 한다★ — 시험 seam 없이 지은 상태(하한 판정 `Above`)에서 도는 턴에 친 글은 쥐였다가, 우리 턴의
+    /// 도구 끝 줄이 리더를 지나면 라이터가 집는 다음 일([`next_job`])이 그 글의 `turn/steer` 다. 하한 미달 화신은 오늘 경로
+    /// 그대로다 — 턴 id 가 와도 · 도구가 끝나도 쥔 채로 남고 턴 끝 뒤 `turn/start` 로 나간다.
     #[test]
-    fn production_steers_an_announced_held_head_once_the_turn_id_is_known() {
+    fn production_steers_a_held_item_through_the_writer_after_a_tool_end() {
         let mut h = harness();
         let ann = above(&h);
-        accept_user(&h.state, "head", "first");
-        announce(&h.reader.core, &h.state, &ann);
-        let (request, seq) = open_turn(&h);
+        let seq = running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        assert!(steer_now(&h).is_none(), "턴 id 전에 넘겼다");
-        reply(&mut h, request, "t1");
-        let s = woke(&h).steer.expect("턴 id 가 쥔 글을 안 풀었다");
+        item_started(&mut h, "t1", "commandExecution", "c");
+        assert!(steer_next(&h).is_none(), "도구 끝 전에 넘겼다");
+        item_completed(&mut h, "t1", "commandExecution", "c");
+        let s = next_steer_job(&h, "도구 끝이 쥔 글을 안 풀었다");
         let p = steer_params(&s);
         assert_eq!(p["clientUserMessageId"], "q-1");
         assert_eq!(p["expectedTurnId"], "t1");
@@ -9861,7 +9193,16 @@ mod tests {
         let (request, _) = open_turn(&h);
         accept_user(&h.state, "q-1", "x");
         reply(&mut h, request, "t1");
-        assert!(woke(&h).steer.is_none(), "하한 미달 화신이 steer 했다");
+        assert!(
+            steer_next(&h).is_none(),
+            "하한 미달 화신이 턴 id 에 steer 했다"
+        );
+        item_started(&mut h, "t1", "commandExecution", "c");
+        item_completed(&mut h, "t1", "commandExecution", "c");
+        assert!(
+            steer_next(&h).is_none(),
+            "하한 미달 화신이 도구 끝에 steer 했다"
+        );
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
         let v: Value = serde_json::from_str(&turn_line(take(&h))).unwrap();
@@ -10029,7 +9370,7 @@ mod tests {
     fn steer_one(h: &Harness, ann: &Announcer, id: &str, text: &str) -> i64 {
         accept_user(&h.state, id, text);
         announce(&h.reader.core, &h.state, ann);
-        let s = steer_now(h).expect("steer 가 안 나갔다");
+        let s = steer_at_tool_end(h).expect("steer 가 안 나갔다");
         let request = s.request;
         assert!(matches!(issue(h, s), Issued::Written));
         request
@@ -10062,12 +9403,18 @@ mod tests {
 
     /// ★턴 끝과 steer 응답 사이의 창★ — −32600(돌고 있는 턴 없음)이 `turn/completed` 뒤에 와도 앞에 와도 그 글은 `Held`
     /// 로 남아 `turn/start` 로 **정확히 한 번** 나간다(M10 — 순서를 가정하지 않는다) · 목록 사건 0 건 · 턴 끝은 그 응답을
-    /// 기다리지 않고 · 다시 나간 뒤 온 옛 요청의 거절은 무동작(세대 가림). 턴 도중 거절로 쥔 자리에 돌아온 글은 `failed`
-    /// 끝에도 그대로다(그 턴이 실은 글이 아니다) — 그 `turn/start` 는 멈춘 뒤 친 글이 닿은 뒤다(오류 뒤 멈춤).
+    /// 기다리지 않고 · 다시 나간 뒤 온 옛 요청의 거절은 무동작(세대 가림). `failed` 끝도 같은 글을 쥔다 — 턴 도중 거절로
+    /// 돌아온 글은 그대로이고, 거절이 오기 전의 글은 끝이 되돌린다(사용자 결정 2026-09-26 B). 그 `turn/start` 는 멈춘 뒤
+    /// 친 글이 닿은 뒤다(오류 뒤 멈춤).
     #[test]
     fn a_refused_steer_is_held_and_sent_once_whether_its_error_comes_before_or_after_the_turn_end()
     {
-        for (status, error_first) in [("completed", false), ("completed", true), ("failed", true)] {
+        for (status, error_first) in [
+            ("completed", false),
+            ("completed", true),
+            ("failed", false),
+            ("failed", true),
+        ] {
             let at = format!("{status} error_first={error_first}");
             let mut h = harness();
             let ann = above(&h);
@@ -10240,7 +9587,6 @@ mod tests {
         let mut h = harness();
         let ann = above(&h);
         running_turn(&mut h, &ann, "t1");
-        take_signal(&h.state);
         let first = steer_one(&h, &ann, "q-1", "a");
         let second = steer_one(&h, &ann, "q-2", "b");
         h.reader
@@ -10255,7 +9601,7 @@ mod tests {
             "옛 거절이 쥔 글을 움직였다"
         );
         reply(&mut h, request, "t2");
-        let s = woke(&h).steer.expect("턴 id 가 뒤 글을 안 풀었다");
+        let s = steer_next(&h).expect("턴 id 가 뒤 글을 안 풀었다");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "q-2");
         assert_eq!(
             list_ops(&h.seen),
@@ -10272,7 +9618,7 @@ mod tests {
         running_turn(&mut h, &ann, "t1");
         accept_user(&h.state, "q-1", "x");
         announce(&h.reader.core, &h.state, &ann);
-        let s = steer_now(&h).expect("steer");
+        let s = steer_at_tool_end(&h).expect("steer");
         h.reader
             .handle_line(completed_line("T", "t1", "completed").as_bytes());
         assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
@@ -10502,9 +9848,8 @@ mod tests {
         Some((id, seq, v["params"].clone()))
     }
 
-    /// 한가할 때 친 글로 턴 `turn` 을 열고, 그 글이 되울려져 모델이 답을 쓰고 마친 자리 — 그 턴의 표식. ★답을 마치게
-    /// 두는 것이 요점이다★: 운영 정책(`AtEarliestBoundary`)은 답 도중 친 글을 답 끝까지 쥐므로, 뒤이어 부르는
-    /// [`steer_one`] 이 곧바로 넘기려면 답 끝 경계가 열려 있어야 한다.
+    /// 한가할 때 친 글로 턴 `turn` 을 열고, 그 글이 되울려져 모델이 답을 쓰고 마친 자리 — 그 턴의 표식(받힌 머리 ·
+    /// 번역기가 그 턴의 줄을 본 뒤의 자리를 쓰는 시험들의 공통 준비).
     fn answered_turn(h: &mut Harness, ann: &Announcer, turn: &str) -> u64 {
         let seq = running_turn(h, ann, turn);
         h.reader
@@ -10578,11 +9923,11 @@ mod tests {
         let (request, _, p) = opens(&h).expect("U1 의 turn/start");
         assert_eq!(p["clientUserMessageId"], "u-1");
         reply(&mut h, request, "t1");
-        let s = woke(&h).steer.expect("U2 가 새 턴 id 에 안 넘어갔다");
+        let s = next_steer_job(&h, "U2 가 새 턴 id 에 안 넘어갔다");
         assert_eq!(steer_params(&s)["clientUserMessageId"], "u-2");
         let steer = s.request;
         assert!(matches!(issue(&h, s), Issued::Written));
-        assert!(steer_now(&h).is_none(), "우편이 steer 로 나갔다");
+        assert!(steer_next(&h).is_none(), "우편이 steer 로 나갔다");
         steer_accepted_reply(&mut h, steer, "t1");
         h.reader
             .handle_line(echo_line("t1", "u-1", "one").as_bytes());
@@ -10695,24 +10040,19 @@ mod tests {
         (request, seq)
     }
 
-    fn pos_of(state: &SharedState, id: &str) -> usize {
-        with_state(state, |s| {
-            s.pending
-                .iter()
-                .position(|p| p.id.as_deref() == Some(id))
-                .expect("pending 에 있다")
-        })
-    }
-
-    /// ★계기 여섯 × 종류 셋 — 어느 쪽이든 멈춤이 선다★ · 그 턴이 실은 사용자 글은 지워진다(실패 끝) · 멈춘 동안 Idle 이
-    /// 여는 턴 0 건(멈추기 전부터 쥔 사용자 글 · 쥔 우편) · 그 글은 넘길 수 없음 구간 · 다음 사용자 글이 드는 순간 멈춤이
-    /// 풀리고 남은 글을 머리로 한 `turn/start` 가 열리며 뒤 글은 그 턴 id 에 steer 로 든다 — 남은 것이 먼저, 친
-    /// 순서로(AC24).
+    /// ★계기 여섯 × 종류 셋 — 어느 쪽이든 멈춤이 선다★ · 그 턴이 실은 사용자 글은 지우지 않고 쥔 자리로 돌린다(사용자
+    /// 결정 2026-09-26 B — 우편은 오늘처럼 빠진다) · 멈춘 동안 Idle 이 여는 턴 0 건(돌아온 글 · 멈추기 전부터 쥔 사용자 글 ·
+    /// 쥔 우편) · 다음 사용자 글이 드는 순간 멈춤이 풀리고 남은 글을 머리로 한 `turn/start` 가 열리며 뒤 글은 그 턴 id 에
+    /// steer 로 든다 — 남은 것이 먼저, 친 순서로(AC24).
     #[test]
     fn every_abnormal_end_halts_whatever_the_turn_kind_until_the_next_user_item() {
         for kind in [Kind::Listed, Kind::Direct, Kind::Mail] {
-            // 멈춤이 풀린 뒤 여는 턴의 머리와 그 턴에 steer 로 드는 다음 글 — 그 턴이 실은 글은 실패 끝이 지웠다.
-            let (head, next) = ("pre", "post");
+            // 멈춤이 풀린 뒤 여는 턴의 머리와 그 턴에 steer 로 드는 다음 글 — 그 턴이 실은 사용자 글이 쥔 자리로 돌아와 머리다.
+            let (head, next) = match kind {
+                Kind::Listed => ("q-1", "pre"),
+                Kind::Direct => ("d-1", "pre"),
+                Kind::Mail => ("pre", "post"),
+            };
             for end in HALTING_ENDS {
                 let at = format!("{kind:?}/{end:?}");
                 let mut h = harness_with_real_decoder();
@@ -10724,9 +10064,9 @@ mod tests {
                 assert!(halted(&h.state), "{at}");
                 assert!(take(&h).is_none(), "{at}: 멈춤 중에 턴이 열렸다");
                 assert_eq!(
-                    verdicts(&h.state, pos_of(&h.state, "pre")).0,
-                    Zone::Blocked,
-                    "{at}"
+                    stage_of(&h.state, head).as_deref(),
+                    Some("held"),
+                    "{at}: 머리가 될 글이 쥔 자리에 없다"
                 );
 
                 accept_user(&h.state, "post", "typed after");
@@ -10738,7 +10078,7 @@ mod tests {
                     "{at}: 남은 글이 머리가 아니다"
                 );
                 reply(&mut h, request, "t9");
-                let steer = steer_now(&h).expect("다음 글이 그 턴에 안 넘어갔다");
+                let steer = steer_next(&h).expect("다음 글이 그 턴 id 에 안 넘어갔다");
                 assert_eq!(steer_params(&steer)["clientUserMessageId"], next, "{at}");
             }
         }
@@ -10829,9 +10169,9 @@ mod tests {
         }
     }
 
-    /// ★실패한 턴은 다음 사용자 글까지 쥔다 — 그 글이 들면 쥐어 있던 글이 먼저다★(그 턴이 실은 글은 지워지고, 그 턴
-    /// 도중 쥔 글이 머리다) · 멈춘 뒤 친 글이 멈춤을 푼 다음 ✕ 로 빠져도 멈춤은 다시 서지 않는다 — 남은 쥔 글이 곧바로
-    /// 나간다(풀림은 도착 사건이다).
+    /// ★실패한 턴은 다음 사용자 글까지 쥔다 — 그 글이 들면 쥐어 있던 글이 먼저다★(그 턴이 실은 글이 쥔 자리로 돌아와
+    /// 머리이고, 그 턴 도중 쥔 글이 친 순서로 뒤따른다) · 멈춘 뒤 친 글이 멈춤을 푼 다음 ✕ 로 빠져도 멈춤은 다시 서지
+    /// 않는다 — 남은 쥔 글이 곧바로 나간다(풀림은 도착 사건이다).
     #[test]
     fn a_failed_turn_holds_until_the_next_user_item_then_the_older_held_items_go_first() {
         let mut h = harness_with_real_decoder();
@@ -10852,12 +10192,14 @@ mod tests {
         assert!(!halted(&h.state), "✕ 가 멈춤을 되세웠다");
         let (request, _, p) = opens(&h).expect("쥐어 있던 글의 턴이 안 열렸다");
         assert_eq!(
-            p["clientUserMessageId"], "pre",
-            "가장 오래된 쥔 글이 머리가 아니다"
+            p["clientUserMessageId"], "d-1",
+            "쥔 자리로 돌아온 글이 머리가 아니다"
         );
         reply(&mut h, request, "t9");
-        let steer = steer_now(&h).expect("다음 쥔 글이 그 턴에 안 넘어갔다");
-        assert_eq!(steer_params(&steer)["clientUserMessageId"], "pre-2");
+        for id in ["pre", "pre-2"] {
+            let steer = next_steer_job(&h, "다음 쥔 글이 그 턴 id 에 안 넘어갔다");
+            assert_eq!(steer_params(&steer)["clientUserMessageId"], id);
+        }
     }
 
     /// ★하한 미달 화신엔 멈춤이 서지 않는다★(N1 (a)) — `failed`·출구 뒤에도 쥔 입력이 오늘처럼 곧바로 `turn/start` 로
@@ -10879,11 +10221,12 @@ mod tests {
         }
     }
 
-    /// ★`failed` 턴이 실은 에코 없는 steer 글은 지운다★(`Dropped{Rejected}` — 사용자 결정 2026-09-26 「실패는 지워」) ·
-    /// 받힌 글과 쥔 우편은 그대로 · 멈춤이 선다. 그 steer 의 응답을 기다리지 않는다 — 다음 사용자 글이 멈춤을 풀면 그
-    /// 글의 `turn/start` 가 곧바로 나가고(쥔 우편보다 먼저), 옛 요청의 뒤늦은 성공 응답은 아무것도 안 낸다.
+    /// ★`failed` 턴이 실은 에코 없는 steer 글은 지우지 않고 멈춤 뒤에 쥔다★(사용자 결정 2026-09-26 B — 「실패는 지워」를
+    /// 대신한다) · 목록 사건 0 건(행 그대로) · 받힌 글은 빠지고 쥔 우편은 그대로 · 멈춤이 선다. 그 steer 의 응답을 기다리지
+    /// 않는다 — 다음 사용자 글이 멈춤을 풀면 돌아온 글이 그 글보다 먼저 `turn/start` 로 곧바로 나가고(쥔 우편보다 먼저),
+    /// 옛 요청의 뒤늦은 성공 응답은 아무것도 안 낸다.
     #[test]
-    fn a_failed_turn_drops_its_unechoed_steer_and_the_next_user_item_opens_without_waiting_for_the_reply(
+    fn a_failed_turn_keeps_its_unechoed_steer_held_behind_the_halt_and_it_opens_first_without_waiting_for_the_reply(
     ) {
         let mut h = harness_with_real_decoder();
         let ann = above(&h);
@@ -10900,15 +10243,14 @@ mod tests {
         h.seen.lock().unwrap().clear();
         h.reader
             .handle_line(completed_line("T", "t1", "failed").as_bytes());
+        assert_eq!(list_ops(&h.seen), Vec::new(), "실패 끝이 목록 사건을 냈다");
+        assert_eq!(stage_of(&h.state, "q-1"), None, "받힌 글이 남았다");
         assert_eq!(
-            list_ops(&h.seen),
-            vec![QueuedInputEvent::Dropped {
-                id: "q-2".into(),
-                cause: DropCause::Rejected
-            }]
+            stage_of(&h.state, "q-2").as_deref(),
+            Some("held"),
+            "실패 끝이 에코 없는 글을 안 쥐었다"
         );
-        assert_eq!(stage_of(&h.state, "q-2"), None, "지운 글이 남았다");
-        assert!(row_ids(&h).is_empty(), "명부에 남았다");
+        assert_eq!(row_ids(&h), ["q-2"], "명부가 바뀌었다");
         assert_eq!(stage_of(&h.state, "m-1").as_deref(), Some("held"));
         assert!(halted(&h.state), "멈춤이 안 섰다");
         assert!(take(&h).is_none(), "멈춤 중에 턴이 열렸다");
@@ -10916,15 +10258,18 @@ mod tests {
         accept_user(&h.state, "after", "typed after");
         announce(&h.reader.core, &h.state, &ann);
         let (_, _, p) = opens(&h).expect("멈춘 뒤 친 글의 턴이 안 열렸다");
-        assert_eq!(p["clientUserMessageId"], "after");
+        assert_eq!(
+            p["clientUserMessageId"], "q-2",
+            "돌아온 글이 멈춤을 푼 글보다 먼저 안 나갔다"
+        );
         let ops = list_ops(&h.seen);
         steer_accepted_reply(&mut h, waiting, "t1");
         assert_eq!(list_ops(&h.seen), ops, "뒤늦은 응답이 목록 사건을 냈다");
     }
 
-    /// ★멈춤 중 늦은 받음★ — 실패 끝이 지운 글의 에코가 늦게 와도 받음 + 벤더 말풍선 + 표시용 경계가 서되 멈춤은
-    /// 그대로(우편 턴 0 건)이고, 그 경계는 턴 표를 지나지 않아 커널의 오류 끝(`last_end_failed`)도 그대로다(TRD §5-5
-    /// 「턴 끝 뒤에 받음이 오면」).
+    /// ★멈춤 중 늦은 받음★ — 실패 끝이 쥔 자리로 돌린 글의 에코가 늦게 오면 받음 + 벤더 말풍선 + 표시용 경계가 서고 그
+    /// 글은 빠지되(다시 안 나간다) 멈춤은 그대로(우편 턴 0 건)이고, 그 경계는 턴 표를 지나지 않아 커널의 오류
+    /// 끝(`last_end_failed`)도 그대로다(TRD §5-5 「턴 끝 뒤에 받음이 오면」).
     #[test]
     fn a_late_echo_while_halted_keeps_the_halt_and_the_kernel_s_error_end() {
         let (mut h, turns, id) = harness_with_facts();
@@ -10936,9 +10281,9 @@ mod tests {
         );
         finish_turn(&mut h, request, seq, End::Completed("failed"));
         assert_eq!(
-            stage_of(&h.state, "q-1"),
-            None,
-            "실패 끝이 실은 글을 안 지웠다"
+            stage_of(&h.state, "q-1").as_deref(),
+            Some("held"),
+            "실패 끝이 실은 글을 쥔 자리로 안 돌렸다"
         );
         assert!(halted(&h.state), "멈춤이 안 섰다");
         let failed = || turns.get(id, 1).map(|o| o.last_end_failed);
@@ -10952,6 +10297,7 @@ mod tests {
             ["delivered q-1", "bubble q-1", "end completed"]
         );
         assert!(halted(&h.state), "늦은 받음이 멈춤을 건드렸다");
+        assert_eq!(stage_of(&h.state, "q-1"), None, "받은 글이 남았다");
         assert!(take(&h).is_none(), "늦은 받음 뒤 우편 턴이 열렸다");
         assert_eq!(
             failed(),

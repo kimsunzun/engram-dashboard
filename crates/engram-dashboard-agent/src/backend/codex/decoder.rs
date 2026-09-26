@@ -268,9 +268,9 @@ enum ItemOrigin {
 /// 도구 호출로 옮기는 `ThreadItem` 변형. 나머지는 우리 중립 어휘에 자리가 없거나
 /// (추론·계획·리뷰 모드 전환) 다른 알림이 이미 나른다.
 ///
-/// ★통로의 넘기기 구간도 이 표를 읽는다([`item_class`] 의 도구 항목)★ — 여기 든 변형은 끝날 때까지 쥐는
-///   쪽으로 세므로, 넓히려면 그 변형의 `item/completed` 뒤에 벤더의 대기분 확인이 온다는 근거(소스 또는
-///   M7 방식 측정)가 먼저다. 근거 없이 넓히면 그 끝을 기다리다 확인을 놓친다(TRD §5-5).
+/// ★통로의 도구 끝 계기도 이 표를 읽는다([`is_tool_item`])★ — 여기 든 변형의 `item/completed` 가 쥔 글을 도는 턴에
+///   넘기는 자리다. 넓히려면 그 변형의 끝 뒤에 벤더의 대기분 확인이 온다는 근거(소스 또는 M7 방식 측정)가 먼저다 —
+///   근거 없는 끝에 넘기면 그 글이 확인을 놓쳐 한 경계 늦는다(잃지는 않는다 — 턴 끝이 거둔다).
 const TOOL_ITEM_TYPES: &[&str] = &[
     "mcpToolCall",
     "dynamicToolCall",
@@ -280,44 +280,11 @@ const TOOL_ITEM_TYPES: &[&str] = &[
     "webSearch",
 ];
 
-/// 모델 출력 `ThreadItem` 변형 — 통로의 답 구간을 세운다. `plan` 은 도구가 아니라 델타로 흐르는 모델
-/// 출력이라 답과 같게 친다(TRD §5-5).
+/// 이 변형이 도구 항목인가 — [`TOOL_ITEM_TYPES`]. 통로는 어휘를 따로 베끼지 않고 이것을 부른다(그 끝이 도구 끝
+/// 계기다 — 단순화 계획 2026-09-26).
 // ADR-0231
-const OUTPUT_ITEM_TYPES: &[&str] = &[AGENT_MESSAGE_ITEM_TYPE, "reasoning", "plan"];
-
-/// 끝(`item/completed`)이 답 끝 신호인 출력 변형 — 그 순간 넘긴 글이 같은 턴의 후속 샘플링에 들었다
-/// (M6 T3 · `plan` 포함 M16 녹). ★`reasoning` 은 없다★ — 그 끝 뒤에는 같은 샘플링이 답을 이어 쓴다.
-// ADR-0231
-const ANSWER_ITEM_TYPES: &[&str] = &[AGENT_MESSAGE_ITEM_TYPE, "plan"];
-
-/// 통로의 넘기기 구간 판정이 읽는 item 분류(TRD §5-5) — 통로는 어휘를 따로 베끼지 않고 이것을 부른다.
-// ADR-0231
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ItemClass {
-    /// [`TOOL_ITEM_TYPES`] — 도는 동안 도구 구간이고, 마지막 것이 끝나면 도구 끝 신호다.
-    Tool,
-    /// [`OUTPUT_ITEM_TYPES`] — 가장 최근에 섰으면 답 구간이다.
-    Output,
-    /// 나머지 전부 — 되울림 `userMessage` · 도구인지 벤더 근거를 안 본 아는 변형 · 어휘에 없는 변형.
-    ///   ★모호하면 여기로 떨어진다★ — 이 구간은 어느 정책에서도 곧바로 넘긴다(일찍 넘기는 것은 무해하다).
-    Other,
-}
-
-// ADR-0231
-pub(super) fn item_class(item_type: &str) -> ItemClass {
-    if TOOL_ITEM_TYPES.contains(&item_type) {
-        ItemClass::Tool
-    } else if OUTPUT_ITEM_TYPES.contains(&item_type) {
-        ItemClass::Output
-    } else {
-        ItemClass::Other
-    }
-}
-
-/// 이 변형의 `item/completed` 가 (도는 도구가 없을 때) 답 끝 신호인가 — [`ANSWER_ITEM_TYPES`].
-// ADR-0231
-pub(super) fn ends_answer(item_type: &str) -> bool {
-    ANSWER_ITEM_TYPES.contains(&item_type)
+pub(super) fn is_tool_item(item_type: &str) -> bool {
+    TOOL_ITEM_TYPES.contains(&item_type)
 }
 
 /// 이 변형이 되울린 유저 메시지인가 — [`USER_MESSAGE_ITEM_TYPE`].
@@ -2988,47 +2955,46 @@ mod tests {
         assert_eq!(truncate(&"한".repeat(10), 3), "한한한…");
     }
 
-    // ── 넘기기 구간 분류 (ADR-0231 · TRD §5-5) ───────────────────────────
+    // ── 도구 끝 계기의 어휘 (ADR-0231 · 단순화 계획 2026-09-26) ───────────────────
 
-    /// 도구 = 도구 호출 어휘 여섯 · 출력 = `agentMessage`·`reasoning`·`plan` · 나머지(아는 변형 · 모르는
-    /// 변형 · 빈 문자열)는 전부 그 밖이다. 답 끝 신호는 `agentMessage`·`plan` 의 끝뿐이다.
+    /// 도구 = 도구 호출 어휘 여섯뿐이다 — 출력(`agentMessage`·`reasoning`·`plan`) · 되울림 · 도구인지 근거 없는 아는 변형 ·
+    /// 모르는 변형 · 빈 문자열은 전부 아니다(그 끝은 계기가 아니다).
     #[test]
-    fn item_class_reads_the_tool_vocabulary_and_everything_unproven_falls_to_other() {
-        let table: &[(&str, ItemClass, bool)] = &[
-            ("commandExecution", ItemClass::Tool, false),
-            ("fileChange", ItemClass::Tool, false),
-            ("mcpToolCall", ItemClass::Tool, false),
-            ("dynamicToolCall", ItemClass::Tool, false),
-            ("collabAgentToolCall", ItemClass::Tool, false),
-            ("webSearch", ItemClass::Tool, false),
-            ("agentMessage", ItemClass::Output, true),
-            ("plan", ItemClass::Output, true),
-            ("reasoning", ItemClass::Output, false),
-            ("userMessage", ItemClass::Other, false),
-            ("hookPrompt", ItemClass::Other, false),
-            ("contextCompaction", ItemClass::Other, false),
-            ("enteredReviewMode", ItemClass::Other, false),
-            ("exitedReviewMode", ItemClass::Other, false),
-            ("imageView", ItemClass::Other, false),
-            ("imageGeneration", ItemClass::Other, false),
-            ("sleep", ItemClass::Other, false),
-            ("subAgentActivity", ItemClass::Other, false),
-            ("functionCallOutput", ItemClass::Other, false),
-            ("someFutureVariant", ItemClass::Other, false),
-            ("", ItemClass::Other, false),
+    fn is_tool_item_reads_the_tool_vocabulary_and_nothing_else() {
+        let table: &[(&str, bool)] = &[
+            ("commandExecution", true),
+            ("fileChange", true),
+            ("mcpToolCall", true),
+            ("dynamicToolCall", true),
+            ("collabAgentToolCall", true),
+            ("webSearch", true),
+            ("agentMessage", false),
+            ("plan", false),
+            ("reasoning", false),
+            ("userMessage", false),
+            ("hookPrompt", false),
+            ("contextCompaction", false),
+            ("enteredReviewMode", false),
+            ("exitedReviewMode", false),
+            ("imageView", false),
+            ("imageGeneration", false),
+            ("sleep", false),
+            ("subAgentActivity", false),
+            ("functionCallOutput", false),
+            ("someFutureVariant", false),
+            ("", false),
         ];
-        for (kind, class, answer) in table {
-            assert_eq!(item_class(kind), *class, "{kind}");
-            assert_eq!(ends_answer(kind), *answer, "{kind}");
+        for (kind, tool) in table {
+            assert_eq!(is_tool_item(kind), *tool, "{kind}");
         }
         // 표가 아는 변형을 전부 덮는다 — 스키마의 새 변형이 이 표를 조용히 빠져나가지 않게.
         for kind in KNOWN_ITEM_TYPES {
             assert!(
-                table.iter().any(|(k, _, _)| k == kind),
+                table.iter().any(|(k, _)| k == kind),
                 "{kind} 가 분류 표에 없다"
             );
         }
-        for kind in TOOL_ITEM_TYPES.iter().chain(OUTPUT_ITEM_TYPES) {
+        for kind in TOOL_ITEM_TYPES {
             assert!(
                 KNOWN_ITEM_TYPES.contains(kind),
                 "{kind} 가 스키마 어휘에 없다"
