@@ -115,7 +115,7 @@
 
 ### LOW
 5. **실프로세스 테스트 실행 시점 문서화** — `#[ignore]` 3건은 수동 전용. "데몬 수명주기·Job·discovery 변경 시 반드시 `--ignored` 실행"을 PR 체크리스트화.
-6. **~~CI 부재~~ → 도입 완료(ADR-0131)** — 어느 브랜치든 push하면 `.github/workflows/ci.yml` 이 검증 명령 + 격리 게이트 전부를 windows 러너에서 돈다. `v*` 태그면 릴리즈까지. **CI 미커버 3건(로컬 몫)** = GUI 실측 · 실 claude 의존 테스트(워크플로가 `--skip`) · ADR-0130 재론 트리거. 분담 정본 = `/qa` 바인딩 「CI와의 분담」. (clippy 는 정본에 없어 CI 에도 넣지 않았다.)
+6. **~~CI 부재~~ → 도입 완료(ADR-0131)** — 어느 브랜치든 push하면 `.github/workflows/ci.yml` 이 검증 명령 + 격리 게이트 전부를 windows 러너에서 돈다(단 바뀐 파일이 전부 경로 필터가 빼는 문서 경로 안이면 뜨지 않는다 — 목록 정본 = 그 파일의 `on.push.paths` · ADR-0232). `v*` 태그면 릴리즈까지. **CI 미커버 3건(로컬 몫)** = GUI 실측 · 실 claude 의존 테스트(워크플로가 `--skip`) · ADR-0130 재론 트리거. 분담 정본 = `/qa` 바인딩 「CI와의 분담」. (clippy 는 정본에 없어 CI 에도 넣지 않았다.)
 7. **`net → protocol` 심볼 게이트 부재** — 허용된 그 간선에는 agent 쪽 같은 심볼 allowlist 게이트가 없어, 간선을 타고 에이전트 어휘가 늘어도 어느 게이트도 울리지 않는다(ADR-0129 슬라이스 1 note 가 의도적 유예로 기록 — 작업항목 0-4 뒤의 자연스러운 후속).
 8. **~~src-tauri 단위테스트가 로컬 회귀에서 안 돈다~~ → 닫혔다(2026-08-24).** 두 단계로 닫혔다: ① **실행이 뚫렸다** — 옛 서술(`0xc0000139 STATUS_ENTRYPOINT_NOT_FOUND` 로 죽어 아예 실행 불가 — 실측 2026-08-05)은 `[lib] test = false` + `[[test]] lib_unit` + `build.rs` 의 `cargo:rustc-link-arg-tests=` 로 해소됐다(§1 src-tauri 실행 항목 · **결정과 거부한 대안 = ADR-0174**) ② **회귀망에 실렸다** — 남아 있던 알려진 실패가 전부 고쳐지면서 CI 가 이 스위트를 **통째로** 돌고(옛 이름 필터 없음) 워크스페이스 회귀도 `--exclude` 를 걷어 이 패키지를 함께 돈다. 그래서 `#[cfg(test)]` 에 새로 쓰는 단언의 CI 신호는 이제 통합 타깃과 같다. 이력은 `docs/process/step-log.md` 494/532/761행 부근.
    - ★그 스위트에서 가장 값어치가 큰 것 = `output_router.rs`(ArcSwap·RMW 동시성)와 `commands/popout.rs`(팝업 label 발급)★ — 앞의 「구독 재동기는 락 안」 계약이 기대는 코드가 바로 전자다. ★목록을 여기 손으로 베끼지 않는다. 정본 = `rg -l "#\[cfg\(test\)\]" src-tauri/src/`★
