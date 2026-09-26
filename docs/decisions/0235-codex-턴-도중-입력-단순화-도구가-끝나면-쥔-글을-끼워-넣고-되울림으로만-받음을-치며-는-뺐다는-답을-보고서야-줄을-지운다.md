@@ -27,7 +27,7 @@ ADR-0231 · ADR-0234 가 정한 codex 턴 도중 입력(P2 `3014247` · P8 `37ec
    - **못 뺐다는 답이 온 행은 보냄 행처럼 그린다(✕ 없음)** [사용자] — claude `removed:false` · `CancelFailed`, codex ✕ 가 넘기기와 겹친 행(`TooLate` → `CancelAnswered{removed:false}`) — 라이브와 재부착 모두. 「이미 넘어가면 codex와 같이 못누르게 하면 되지 않음?」. 프론트만 바뀐다(목록 조회와 링 사건이 이미 `not_removed` 를 싣는다 — `af30654`).
    - LLM 제어는 그대로다 — `CancelQueuedInput` · `ListQueuedInputs`(행 칸이 늘지 않고 행 `state` 의 값에 `"sent"` 가 더해졌다 — `ListedState::Sent`).
 8. **하한 미달 codex(0.140 미만 — 되울림에 `clientId` 없음) = 이 기능 전체가 꺼진 채 오늘 동작** [사용자]. 하한 판정은 그대로 둔다.
-9. **계측 = 항목마다 debug 한 줄** [고름 — 계획 항목 11]. `tracing::debug!(target: "engram::codex_steer")` · 단계 `tool_start` · `tool_end`(쥔 수) · `steer` · `refused` · `echo` · `held_again`(끝의 모양) · 턴 id 를 싣는다. M15 계측(`engram::codex_handover`)을 대신한다. 목적 = 아래 「영향」의 열린 물음.
+9. **계측 = 항목마다 debug 한 줄** [고름 — 계획 항목 11]. `tracing::debug!(target: "engram::codex_steer")` · 단계 `tool_start` · `tool_end`(쥔 수) · `steer` · `write_failed`(steer 를 못 썼다) · `refused` · `echo` · `held_again`(끝의 모양) · 턴 id 와 에이전트 id(`agent`)를 싣고, 메시지는 단계마다 한 줄 한국어다(코드 리뷰 반영 2026-09-27 — 여러 codex 에이전트를 한 데몬이 띄워도 줄을 가를 수 있게, 쓰기 실패도 이 계측만 보는 쪽에 보이게). M15 계측(`engram::codex_handover`)을 대신한다. 목적 = 아래 「영향」의 열린 물음.
 10. **UI 정지 버튼·단축키는 지금 넣지 않는다** [사용자] — 「나중에 단축키 시스템 만들때 넣을거임」.
 11. **이 설계를 넘는 것은 먼저 묻는다** [사용자] — 「단순하게 가고 복잡할것같으면 먼저 나에게 보고해」. 여기 적은 칸을 넘는 새 상태 · 새 사건 변형 · wire/`PROTOCOL_VERSION` 변경 · 새 기제가 필요해지면 짓기 전에 사용자에게 보고한다.
 

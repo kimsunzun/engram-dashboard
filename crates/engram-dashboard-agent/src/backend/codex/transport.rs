@@ -415,7 +415,8 @@ struct State {
     /// 도구 끝 계기 — 우리 지금 턴의 도구 항목이 끝났다([`Reader::note_tool_item`]) · 또는 턴 id 가 막 온 턴에 쥔 사용자
     ///   글이 남았다([`Reader::resolve`]). 서 있는 동안 라이터가 쥔 사용자 글을 친 순서대로 하나씩 steer 로 넘기고, 넘길
     ///   것이 없어지면 내린다([`take_steer_locked`]) — 도구 끝 하나가 쥔 글 전부를 넘긴다(ADR-0235 — 「도구
-    ///   하나 끝나면 슬쩍 끼워 넣는다」). ★세우는 쪽이 같은 락 구간에서 `notify_all` 한다★.
+    ///   하나 끝나면 슬쩍 끼워 넣는다」). 턴이 닫혀도 내린다([`State::close_turn_items`]). ★세우는 쪽이 같은 락
+    ///   구간에서 `notify_all` 한다★.
     // ADR-0231
     steer_due: bool,
     /// 오류 뒤 멈춤 — 우리 턴이 이상하게 끝났다(`failed` · `turn/start` 출구 — [`TurnClose`]).
@@ -457,7 +458,9 @@ impl Disposal {
     /// 본다([`end_turn_if`]).
     fn emit(self, core: &OutputCore, state: &SharedState) {
         write_transitions(core.id(), self.transitions);
-        self.traces.iter().for_each(SteerTrace::write);
+        for t in &self.traces {
+            t.write(core.id());
+        }
         for op in self.events {
             core.emit(OutputEvent::QueuedInput(op));
         }
@@ -609,26 +612,71 @@ impl TurnClose {
 /// 턴 도중 넘기기 계측 줄의 target — `RUST_LOG=engram::codex_steer=debug` 로 켠다. 꺼져 있으면 재료도 안 모은다
 /// ([`SteerTrace::enabled`] — 기본 레벨 warn 에서는 한 줄도 안 나간다). 줄은 사건마다 하나다.
 ///
-/// ★칸 이름은 계약이다★ — QA 가 로그를 이 이름으로 읽는다. 모든 줄이 `phase` · `item_id` 를 싣고 `turn_id` 는 그 턴을
-///   알 때만 싣는다. `phase` 가 줄의 종류다:
+/// ★칸 이름은 계약이다★ — QA 가 로그를 이 이름으로 읽는다. 모든 줄이 `agent` · `phase` · `item_id` 를 싣고 `turn_id` 는
+///   그 턴을 알 때만 싣는다. `phase` 가 줄의 종류다([`SteerPhase`]):
 ///   - `tool_start` — 우리 지금 턴의 도구 항목 `item/started`(`item_id` = 그 도구의 id).
 ///   - `tool_end` — 같은 도구 항목의 `item/completed`. `held` = 그 순간 쥔 사용자 항목 수.
 ///   - `steer` — 라이터가 쥔 항목 하나의 `turn/steer` 쓰기를 마쳤다(`item_id` = 그 항목 · `request` = 요청 id).
+///   - `write_failed` — 그 `turn/steer` 를 쓰지 못했다(칸은 `steer` 와 같다) — 벤더에 닿지 않았다.
 ///   - `refused` — 그 steer 가 오류 응답을 받았다(`turn_id` 는 그 턴이 아직 돌 때만).
 ///   - `echo` — 쥔 목록의 항목이 `userMessage` 되울림으로 받음이 됐다(`turn_id` = 그 항목이 들어간 턴).
 ///   - `held_again` — 넘긴 항목이 에코 없이 그 턴이 끝나 쥔 자리로 돌아갔다(`turn_id` = 넘긴 턴 · `close` = 그 끝의 모양
 ///     — [`TurnClose`] 이름).
 /// 이 줄로 QA 가 가르는 것 = 도구 하나가 끝난 뒤 넘긴 글이 다음 도구 앞에 들었나(`tool_end` → `steer` → `echo` 가 다음
 ///   `tool_start` 보다 먼저인가). ★줄 순서는 스레드 사이에서 보장되지 않는다★ — 리더(`tool_*` · `refused` · `echo`)와
-///   라이터(`steer`)가 따로 찍으므로 순서는 줄의 시각으로 본다. 줄은 상태 락을 놓은 뒤에 찍는다(사유 = [`TurnNoteLog`]).
+///   라이터(`steer` · `write_failed`)가 따로 찍으므로 순서는 줄의 시각으로 본다. 줄은 상태 락을 놓은 뒤에 찍는다(사유 =
+///   [`TurnNoteLog`]).
 // ADR-0231
 const STEER_TRACE: &str = "engram::codex_steer";
+
+/// [`STEER_TRACE`] 줄의 종류 — `phase` 칸의 값([`SteerPhase::name`] · QA 계약이라 바꾸지 않는다)과 한 줄 메시지.
+// ADR-0235
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteerPhase {
+    ToolStart,
+    ToolEnd,
+    Steer,
+    WriteFailed,
+    Refused,
+    Echo,
+    HeldAgain,
+}
+
+impl SteerPhase {
+    fn name(self) -> &'static str {
+        match self {
+            SteerPhase::ToolStart => "tool_start",
+            SteerPhase::ToolEnd => "tool_end",
+            SteerPhase::Steer => "steer",
+            SteerPhase::WriteFailed => "write_failed",
+            SteerPhase::Refused => "refused",
+            SteerPhase::Echo => "echo",
+            SteerPhase::HeldAgain => "held_again",
+        }
+    }
+
+    fn message(self) -> &'static str {
+        match self {
+            SteerPhase::ToolStart => "codex steer: 도구 시작",
+            SteerPhase::ToolEnd => "codex steer: 도구 끝 — 쥔 사용자 글을 넘길 계기",
+            SteerPhase::Steer => "codex steer: 쥔 글을 turn/steer 로 넘겼다",
+            SteerPhase::WriteFailed => {
+                "codex steer: turn/steer 를 쓰지 못했다 — 벤더에 닿지 않았다"
+            }
+            SteerPhase::Refused => "codex steer: turn/steer 거절 — 벤더가 그 글을 받지 않았다",
+            SteerPhase::Echo => "codex steer: 되울림 — 쥔 목록의 글이 받음이 됐다",
+            SteerPhase::HeldAgain => {
+                "codex steer: 에코 없이 턴이 끝나 넘긴 글을 쥔 자리로 되돌렸다"
+            }
+        }
+    }
+}
 
 /// [`STEER_TRACE`] 줄 한 건 — 재료는 상태 락 안에서 모으고 락 밖에서 찍는다.
 // ADR-0231
 #[derive(Debug)]
 struct SteerTrace {
-    phase: &'static str,
+    phase: SteerPhase,
     turn_id: Option<String>,
     item_id: String,
     /// `tool_end` 만 — 그 순간 쥔 사용자 항목 수.
@@ -645,7 +693,7 @@ impl SteerTrace {
         tracing::enabled!(target: STEER_TRACE, tracing::Level::DEBUG)
     }
 
-    fn new(phase: &'static str, turn_id: Option<&str>, item_id: &str) -> Self {
+    fn new(phase: SteerPhase, turn_id: Option<&str>, item_id: &str) -> Self {
         SteerTrace {
             phase,
             turn_id: turn_id.map(str::to_string),
@@ -656,16 +704,24 @@ impl SteerTrace {
         }
     }
 
-    fn write(&self) {
+    /// 턴 id 와 도구 항목 id 는 벤더가 준 문자열이라 [`sanitize`] 를 지나 나간다 — 우리 항목 id 도 같은 문을 지난다(칸마다
+    /// 출처를 가르지 않는다).
+    fn write(&self, agent: AgentId) {
+        let turn_id = self
+            .turn_id
+            .as_deref()
+            .map(|t| sanitize(t, LOG_STRING_LIMIT));
         tracing::debug!(
             target: STEER_TRACE,
-            phase = self.phase,
-            turn_id = self.turn_id.as_deref(),
-            item_id = self.item_id.as_str(),
+            agent = %agent,
+            phase = self.phase.name(),
+            turn_id = turn_id.as_deref(),
+            item_id = %sanitize(&self.item_id, LOG_STRING_LIMIT),
             held = self.held,
             request = self.request,
             close = self.close.map(tracing::field::debug),
-            "codex steer"
+            "{}",
+            self.phase.message()
         );
     }
 }
@@ -686,11 +742,12 @@ struct Steer {
 }
 
 impl Steer {
-    /// 이 steer 의 `steer` 계측 줄 — 라이터가 쓰기를 마친 뒤 찍는다([`writer_loop`]). 줄이 꺼져 있으면 `None`.
-    fn trace(&self) -> Option<SteerTrace> {
+    /// 이 steer 의 계측 줄 — `steer`(라이터가 쓰기를 마친 뒤 · [`writer_loop`]) · `write_failed`([`steer_write_failed`]).
+    /// 줄이 꺼져 있으면 `None`.
+    fn trace(&self, phase: SteerPhase) -> Option<SteerTrace> {
         SteerTrace::enabled().then(|| SteerTrace {
             request: Some(self.request),
-            ..SteerTrace::new("steer", Some(&self.turn_id), &self.item)
+            ..SteerTrace::new(phase, Some(&self.turn_id), &self.item)
         })
     }
 }
@@ -860,6 +917,10 @@ impl State {
             Drop(DropCause),
             Remove,
         }
+        // ADR-0235: 도구 끝 계기는 그 턴의 것이라 턴과 함께 내린다 — 남기면 라이터가 그것을 보기 전에 다음 턴을 연 경우 그
+        //   턴 id 가 온 뒤에 친 글이 도구 끝 없이 steer 로 나간다. 다음 턴에 쥔 글은 턴 id 가 오는 자리가 다시 세운다
+        //   ([`Reader::resolve`]).
+        self.steer_due = false;
         let tracing_on = SteerTrace::enabled();
         let mut out = Disposal::default();
         let mut pos = 0;
@@ -900,7 +961,7 @@ impl State {
                         {
                             out.traces.push(SteerTrace {
                                 close: Some(close),
-                                ..SteerTrace::new("held_again", turn_id.as_deref(), id)
+                                ..SteerTrace::new(SteerPhase::HeldAgain, turn_id.as_deref(), id)
                             });
                         }
                     }
@@ -2281,6 +2342,10 @@ fn steer_write_failed(
         held
     };
     tracing::warn!("codex app-server turn/steer 전송 실패 — 그 글은 쥔 자리로 돌아간다: {e}");
+    // ADR-0235: 계측만 읽는 QA 에게도 보이도록 같은 사건을 계측 줄로도 남긴다.
+    if let Some(t) = steer.trace(SteerPhase::WriteFailed) {
+        t.write(core.id());
+    }
     if let Some(out) = held {
         out.emit(core, state);
     }
@@ -2766,14 +2831,14 @@ fn writer_loop(
         let Some(steer) = steer else {
             continue;
         };
-        let trace = steer.trace();
+        let trace = steer.trace(SteerPhase::Steer);
         match issue_steer(&state, &pending, &core, steer, |line| {
             write_line(&stdin, line)
         }) {
             Issued::Closed => break,
             Issued::Written => {
                 if let Some(t) = trace {
-                    t.write();
+                    t.write(core.id());
                 }
             }
             Issued::Failed => {}
@@ -3348,7 +3413,7 @@ impl Reader {
                             TurnState::Active { seq, turn_id } if *seq == gen => turn_id.as_deref(),
                             _ => None,
                         };
-                        SteerTrace::new("refused", turn, &item)
+                        SteerTrace::new(SteerPhase::Refused, turn, &item)
                     });
                     let held = s.hold_refused_steer(&item, gen);
                     cv.notify_all();
@@ -3357,7 +3422,7 @@ impl Reader {
                 // 락 밖에서 찍고 낸다(사유 = [`TurnNoteLog`] · ADR-0006).
                 tracing::warn!("turn/steer 거절: {}", sanitize(msg, LOG_STRING_LIMIT));
                 if let Some(t) = trace {
-                    t.write();
+                    t.write(self.core.id());
                 }
                 match held {
                     None => tracing::debug!(
@@ -3418,13 +3483,15 @@ impl Reader {
                         Stage::InFlight { turn_id, .. } => turn_id.as_deref(),
                         Stage::Held => None,
                     };
-                    traces.push(SteerTrace::new("echo", turn, id));
+                    traces.push(SteerTrace::new(SteerPhase::Echo, turn, id));
                 }
             }
             cv.notify_all();
             idle
         };
-        traces.iter().for_each(SteerTrace::write);
+        for t in &traces {
+            t.write(self.core.id());
+        }
         idle
     }
 
@@ -3476,7 +3543,11 @@ impl Reader {
         // 도구 항목의 시작·끝 계측 줄 — id 를 대조할 수 없는 도구(없음 · 넘침)는 안 찍는다(계기는 그래도 선다).
         let trace = match item_id {
             Some(id) if id.len() <= MAX_TURN_ID_BYTES && SteerTrace::enabled() => {
-                let phase = if started { "tool_start" } else { "tool_end" };
+                let phase = if started {
+                    SteerPhase::ToolStart
+                } else {
+                    SteerPhase::ToolEnd
+                };
                 let held = completed.then(|| {
                     s.pending
                         .iter()
@@ -3560,7 +3631,7 @@ impl Reader {
                 // ADR-0231
                 // 계측 줄은 락을 놓은 곧바로 찍는다 — 그 계기가 푼 steer 줄(라이터)보다 앞서도록.
                 if let Some(t) = self.note_tool_item(&method, params.as_ref()) {
-                    t.write();
+                    t.write(self.core.id());
                 }
                 // ★번역기에는 **원본 줄 바이트**를 그대로 넣는다★ — 두 번째 입구를 만들면 그쪽의 라인
                 //   재조립·상한·마스킹 규율이 배송 경로 밖으로 나간다(사유 정본 = `decoder.rs` 헤더).
@@ -8060,15 +8131,15 @@ mod tests {
             got,
             vec![
                 (
-                    vec!["close", "item_id", "message", "phase", "turn_id"],
+                    vec!["agent", "close", "item_id", "message", "phase", "turn_id"],
                     ["U1", "q-1", "Interrupted"]
                 ),
                 (
-                    vec!["close", "item_id", "message", "phase"],
+                    vec!["agent", "close", "item_id", "message", "phase"],
                     ["-", "q-1", "Rejected"]
                 ),
                 (
-                    vec!["close", "item_id", "message", "phase", "turn_id"],
+                    vec!["agent", "close", "item_id", "message", "phase", "turn_id"],
                     ["U1", "q-1", "Completed"]
                 ),
             ],
@@ -8544,14 +8615,16 @@ mod tests {
         fn exit(&self, _: &tracing::span::Id) {}
     }
 
-    /// 계측 줄의 칸은 문서([`STEER_TRACE`])대로다 — 사건마다 한 줄이고, 모든 줄이 `phase` · `item_id` · (그 턴을
-    /// 알면) `turn_id` 를 싣고, `tool_end` 는 `held` 를, `steer` 는 `request` 를 더 싣는다. 도구 아닌 항목은 줄이 없다.
+    /// 계측 줄의 칸은 문서([`STEER_TRACE`])대로다 — 사건마다 한 줄이고, 모든 줄이 `agent` · `phase` · `item_id` · (그 턴을
+    /// 알면) `turn_id` 를 싣고, `tool_end` 는 `held` 를, `steer` 는 `request` 를 더 싣는다. 메시지는 그 종류의 한 줄이다.
+    /// 도구 아닌 항목은 줄이 없다.
     #[test]
     fn the_steer_trace_lines_carry_the_documented_fields_per_phase() {
         let captured = Arc::new(Mutex::new(Vec::new()));
-        let (first, second) =
+        let (first, second, agent) =
             tracing::subscriber::with_default(TraceCapture(captured.clone()), || {
                 let mut h = harness_with_real_decoder();
+                let agent = h.reader.core.id();
                 let ann = above(&h);
                 running_turn(&mut h, &ann, "t1");
                 item_started(&mut h, "t1", "commandExecution", "c");
@@ -8561,9 +8634,11 @@ mod tests {
                 let s = steer_next(&h).expect("도구 끝이 쥔 글을 안 풀었다");
                 let first = s.request;
                 // 라이터가 하는 그대로 — 쓰기를 마친 뒤 찍는다([`writer_loop`]).
-                let trace = s.trace().expect("줄이 켜져 있는데 재료가 없다");
+                let trace = s
+                    .trace(SteerPhase::Steer)
+                    .expect("줄이 켜져 있는데 재료가 없다");
                 assert!(matches!(issue(&h, s), Issued::Written));
-                trace.write();
+                trace.write(agent);
                 h.reader.handle_line(echo_line("t1", "q-1", "a").as_bytes());
 
                 accept_user(&h.state, "q-2", "b");
@@ -8574,7 +8649,7 @@ mod tests {
                 let second = s.request;
                 issue(&h, s);
                 steer_refused_reply(&mut h, second);
-                (first, second)
+                (first, second, agent.to_string())
             });
         let lines = captured.lock().unwrap();
         let got: Vec<(Vec<&str>, [&str; 3])> = lines
@@ -8587,23 +8662,23 @@ mod tests {
                 )
             })
             .collect();
-        let base = ["item_id", "message", "phase", "turn_id"];
+        let base = ["agent", "item_id", "message", "phase", "turn_id"];
         assert_eq!(
             got,
             vec![
                 (base.to_vec(), ["tool_start", "t1", "c"]),
                 (
-                    vec!["held", "item_id", "message", "phase", "turn_id"],
+                    vec!["agent", "held", "item_id", "message", "phase", "turn_id"],
                     ["tool_end", "t1", "c"]
                 ),
                 (
-                    vec!["item_id", "message", "phase", "request", "turn_id"],
+                    vec!["agent", "item_id", "message", "phase", "request", "turn_id"],
                     ["steer", "t1", "q-1"]
                 ),
                 (base.to_vec(), ["echo", "t1", "q-1"]),
                 (base.to_vec(), ["tool_start", "t1", "c2"]),
                 (
-                    vec!["held", "item_id", "message", "phase", "turn_id"],
+                    vec!["agent", "held", "item_id", "message", "phase", "turn_id"],
                     ["tool_end", "t1", "c2"]
                 ),
                 (base.to_vec(), ["refused", "t1", "q-2"]),
@@ -8614,6 +8689,57 @@ mod tests {
         assert_eq!(lines[5]["held"], "1", "쥔 사용자 항목 수");
         assert_eq!(lines[2]["request"], first.to_string());
         assert_ne!(first, second);
+        let phases = [
+            SteerPhase::ToolStart,
+            SteerPhase::ToolEnd,
+            SteerPhase::Steer,
+            SteerPhase::WriteFailed,
+            SteerPhase::Refused,
+            SteerPhase::Echo,
+            SteerPhase::HeldAgain,
+        ];
+        for l in lines.iter() {
+            assert_eq!(l["agent"], agent, "{l:?}");
+            let phase = phases
+                .iter()
+                .find(|p| p.name() == l["phase"])
+                .expect("모르는 phase");
+            assert_eq!(l["message"], phase.message(), "{l:?}");
+        }
+    }
+
+    /// steer 쓰기 실패는 기본 target 의 warn 과 별도로 계측 줄 `write_failed` 하나를 남긴다 — 계측만 읽는 QA 가 그 글이
+    /// 벤더에 안 닿은 것을 본다. 칸은 `steer` 줄과 같다(넘긴 턴 id · 그 항목 · 요청 id).
+    #[test]
+    fn a_steer_that_cannot_be_written_writes_one_write_failed_trace_line() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let (request, agent) =
+            tracing::subscriber::with_default(TraceCapture(captured.clone()), || {
+                let mut h = harness();
+                let ann = above(&h);
+                running_turn(&mut h, &ann, "t1");
+                accept_user(&h.state, "q-1", "x");
+                announce(&h.reader.core, &h.state, &ann);
+                let s = steer_at_tool_end(&h).expect("steer");
+                let request = s.request;
+                let issued = issue_steer(&h.state, &h.pending, &h.reader.core, s, |_| {
+                    Err(PtyError::WriteFailed("broken pipe".into()))
+                });
+                assert!(matches!(issued, Issued::Failed));
+                (request, h.reader.core.id().to_string())
+            });
+        let lines = captured.lock().unwrap();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let l = &lines[0];
+        assert_eq!(
+            l.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["agent", "item_id", "message", "phase", "request", "turn_id"]
+        );
+        assert_eq!(l["phase"], "write_failed");
+        assert_eq!(l["turn_id"], "t1");
+        assert_eq!(l["item_id"], "q-1");
+        assert_eq!(l["request"], request.to_string());
+        assert_eq!(l["agent"], agent);
     }
 
     // ── steer — 도는 턴에 넘기기 · 응답 짝짓기 · 넘긴 항목의 ✕ (ADR-0231 · TRD §5-5) ──
@@ -8890,6 +9016,45 @@ mod tests {
         assert!(
             steer_at_tool_end(&h).is_none(),
             "거절된 턴에 steer 가 또 나갔다"
+        );
+    }
+
+    /// 거절의 쓰기 실패 판 — 집은 뒤 ✕ 가 닿은 steer 를 못 쓰면 다시 쥐지 않고 거둔다(`Dropped{Withdrawn}` — 벤더에 닿지
+    /// 않았고 사용자는 이미 뺐다). 쓰지 못했으니 넘김 표지는 없고, 그 턴의 「steer 거절」 표시는 선다.
+    #[test]
+    fn a_steer_the_user_cancelled_that_cannot_be_written_is_withdrawn_instead_of_held() {
+        let mut h = harness();
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "t1");
+        accept_user(&h.state, "q-1", "x");
+        announce(&h.reader.core, &h.state, &ann);
+        let s = steer_at_tool_end(&h).expect("steer");
+        assert_eq!(
+            withdraw_item(&h.state, Some(&h.reader.core), "q-1"),
+            Withdraw::TooLate
+        );
+        let issued = issue_steer(&h.state, &h.pending, &h.reader.core, s, |_| {
+            Err(PtyError::WriteFailed("broken pipe".into()))
+        });
+        assert!(matches!(issued, Issued::Failed));
+
+        let mut want = vec![queued("q-1", "x")];
+        want.extend(cancel_ops("q-1"));
+        want.push(withdrawn("q-1"));
+        assert_eq!(list_ops(&h.seen), want);
+        assert!(handed(&h.seen).is_empty(), "쓰지 못한 steer 에 표지를 냈다");
+        assert_eq!(
+            stage_of(&h.state, "q-1"),
+            None,
+            "거둔 글이 pending 에 남았다"
+        );
+        assert!(row_ids(&h).is_empty(), "명부에 남았다");
+        assert_eq!(h.pending.len(), 0, "못 쓴 steer 의 대기표가 남았다");
+        accept_user(&h.state, "q-2", "y");
+        announce(&h.reader.core, &h.state, &ann);
+        assert!(
+            steer_at_tool_end(&h).is_none(),
+            "쓰기 실패한 턴에 steer 가 또 나갔다"
         );
     }
 
@@ -9185,6 +9350,108 @@ mod tests {
         assert!(row_ids(&h).is_empty(), "받은 글이 명부에 남았다");
     }
 
+    /// 넘김 표지 `sent` 를 받는 순간 그 항목의 단계를 한 번 뒤집는 구독자 — [`publish_hand_over`] 가 값을 읽고 내는 사이에
+    /// 다른 스레드의 전이(리더의 턴 끝 · 라이터가 다음 턴으로 집음)가 상태 락을 잡은 자리를 흉내 낸다. 내는 쪽은 상태 락을
+    /// 놓고 내므로 여기서 잡아도 된다.
+    struct FlipOnMark {
+        id: SinkId,
+        state: SharedState,
+        item: &'static str,
+        sent: bool,
+        to: fn() -> Stage,
+        done: AtomicBool,
+    }
+
+    impl OutputSink for FlipOnMark {
+        fn send(&self, frame: OutputFrame<'_>) -> Result<(), SinkError> {
+            let OutputPayload::Event(OutputEvent::QueuedInput(QueuedInputEvent::HandedOver {
+                id,
+                sent,
+            })) = frame.payload
+            else {
+                return Ok(());
+            };
+            if id == self.item && *sent == self.sent && !self.done.swap(true, Ordering::AcqRel) {
+                with_state(&self.state, |s| {
+                    if let Some(p) = s
+                        .pending
+                        .iter_mut()
+                        .find(|p| p.id.as_deref() == Some(self.item))
+                    {
+                        p.stage = (self.to)();
+                    }
+                });
+            }
+            Ok(())
+        }
+        fn sink_id(&self) -> SinkId {
+            self.id
+        }
+    }
+
+    fn flip_on_mark(h: &Harness, item: &'static str, sent: bool, to: fn() -> Stage) {
+        h.reader.core.subscribe(Arc::new(FlipOnMark {
+            id: SinkId::new_v4(),
+            state: h.state.clone(),
+            item,
+            sent,
+            to,
+            done: AtomicBool::new(false),
+        }));
+    }
+
+    /// 목록 조회가 그 행에 싣는 상태 낱말.
+    fn listed_state(h: &Harness, id: &str) -> String {
+        let (rows, _) = h.reader.core.queued_inputs().snapshot();
+        crate::queued_input::overlay_unconfirmed(rows, &[])
+            .into_iter()
+            .find(|r| r.id == id)
+            .map(|r| r.state.as_str().to_string())
+            .expect("목록에 없다")
+    }
+
+    /// ★표지를 읽고 내는 사이에 턴이 닫혀 쥔 자리로 돌아가면 마지막 표지는 `held` 다★ — 라이터가 steer 를 쓴 뒤 `sent` 를
+    /// 읽었는데 내기 전에 리더가 에코 없는 턴 끝으로 그 글을 되돌린 자리. 다시 읽기가 없으면 낡은 `sent` 가 링의 마지막
+    /// 표지로 남아 쥔 글이 ✕ 없는 「보냄」으로 그려진다.
+    #[test]
+    fn a_sent_mark_overtaken_by_a_return_to_held_is_followed_by_held() {
+        let mut h = harness();
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "t1");
+        accept_user(&h.state, "q-1", "x");
+        announce(&h.reader.core, &h.state, &ann);
+        let s = steer_at_tool_end(&h).expect("steer");
+        flip_on_mark(&h, "q-1", true, || Stage::Held);
+        assert!(matches!(issue(&h, s), Issued::Written));
+        assert_eq!(handed(&h.seen), ["sent q-1", "held q-1"]);
+        assert_eq!(sent_marks(&h), [("q-1".to_string(), false)]);
+        assert_eq!(listed_state(&h, "q-1"), "queued");
+    }
+
+    /// 거울 — ★표지를 읽고 내는 사이에 라이터가 그 글로 다음 턴을 열면 마지막 표지는 `sent` 다★. 리더가 에코 없는 턴 끝으로
+    /// 되돌려 `held` 를 읽었는데 내기 전에 라이터가 그 글을 `turn/start` 로 집은 자리. 다시 읽기가 없으면 넘긴 글이 ✕ 가
+    /// 다시 선 「대기」로 그려진다.
+    #[test]
+    fn a_held_mark_overtaken_by_the_next_turn_start_is_followed_by_sent() {
+        let mut h = harness();
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "t1");
+        accept_user(&h.state, "q-1", "x");
+        announce(&h.reader.core, &h.state, &ann);
+        let s = steer_at_tool_end(&h).expect("steer");
+        assert!(matches!(issue(&h, s), Issued::Written));
+        // 다음 턴(표식 1)의 `turn/start` 가 실은 자리 — 표지는 세대를 안 보므로 값은 모양만 맞춘다.
+        flip_on_mark(&h, "q-1", false, || Stage::InFlight {
+            gen: 1,
+            turn_id: None,
+        });
+        h.reader
+            .handle_line(completed_line("T", "t1", "completed").as_bytes());
+        assert_eq!(handed(&h.seen), ["sent q-1", "held q-1", "sent q-1"]);
+        assert_eq!(sent_marks(&h), [("q-1".to_string(), true)]);
+        assert_eq!(listed_state(&h, "q-1"), "sent");
+    }
+
     /// 턴 id 대기 중 쥔 항목의 ✕ 는 글을 거둔다 — 그 뒤 턴 id 가 와도 그 글은 넘어가지 않는다(넘기기와 ✕ 는 같은
     /// 상태 락에서 순서가 선다 — 반대 순서는 넘긴 항목의 ✕ 다).
     #[test]
@@ -9343,6 +9610,40 @@ mod tests {
         assert!(steer_next(&h).is_none());
         assert!(!steer_due(&h.state), "다 넘겼는데 계기가 남았다");
         assert!(take(&h).is_none(), "도는 턴에 turn/start 가 또 나갔다");
+    }
+
+    /// ★도구 끝 계기는 턴과 함께 내린다★ — 쥔 글 없는 도구 끝이 세운 계기를 라이터가 보기 전에(블로킹 쓰기 중) 턴이
+    /// 끝나고 라이터가 다음 턴부터 열면, 그 턴 id 가 쥔 글 없이 온 뒤에 친 글은 그 턴의 도구 끝을 기다린다 — 앞 턴의
+    /// 계기로 넘어가지 않는다(넘어가면 도구 끝 없이 들고, 기록만 되고 답을 못 받을 수 있다).
+    #[test]
+    fn a_tool_end_armed_just_before_its_turn_closes_does_not_steer_text_typed_into_the_next_turn() {
+        let mut h = harness();
+        let ann = above(&h);
+        running_turn(&mut h, &ann, "t1");
+        item_started(&mut h, "t1", "commandExecution", "c");
+        item_completed(&mut h, "t1", "commandExecution", "c");
+        assert!(steer_due(&h.state), "쥔 글 없는 도구 끝도 계기는 세운다");
+        h.reader
+            .handle_line(completed_line("T", "t1", "completed").as_bytes());
+        assert!(!steer_due(&h.state), "닫힌 턴의 계기가 남았다");
+
+        accept_user(&h.state, "d-1", "next");
+        announce(&h.reader.core, &h.state, &ann);
+        let (request, seq, p) = opens(&h).expect("다음 턴이 안 열렸다");
+        assert_eq!(p["clientUserMessageId"], "d-1");
+        reply(&mut h, request, "t2");
+        accept_user(&h.state, "q-1", "typed");
+        announce(&h.reader.core, &h.state, &ann);
+        assert!(
+            steer_next(&h).is_none(),
+            "앞 턴의 계기로 도구 끝 없이 넘겼다"
+        );
+        assert_eq!(stage_of(&h.state, "q-1").as_deref(), Some("held"));
+
+        item_completed(&mut h, "t2", "commandExecution", "c2");
+        let s = next_steer_job(&h, "그 턴의 도구 끝이 쥔 글을 안 넘겼다");
+        assert_eq!(steer_params(&s)["expectedTurnId"], "t2");
+        assert_eq!(stage_of(&h.state, "q-1"), steered_stage(seq, "t2"));
     }
 
     /// ★도구 끝 fixture(M7 trial 1 — 실측 codex-cli 0.156.1)★: 도구 도는 중 친 글은 쥐였다가 도구 `item/completed` 에
@@ -10480,6 +10781,63 @@ mod tests {
             let steer = next_steer_job(&h, "다음 쥔 글이 그 턴 id 에 안 넘어갔다");
             assert_eq!(steer_params(&steer)["clientUserMessageId"], id);
         }
+    }
+
+    /// ★받아들인 결과 (1) — 멈춤을 푼 글의 턴이 끊기면 쥔 글과 통로에 든 우편이 다음 Idle 에 나간다★(ADR-0235 「받아들인
+    /// 결과」 첫 항): 실패 끝이 멈춤을 세우고 → 사용자 글이 드는 순간 풀리고 → 그 뒤 연 턴이 끊겨도 멈춤은 다시 서지 않는다
+    /// → 넘긴 글은 쥔 자리로 돌아와 친 순서로 곧바로 다시 나가고, 그 사용자 턴이 끝나면 쥔 우편이 나간다.
+    #[test]
+    fn an_interrupted_turn_after_the_halt_is_lifted_lets_held_items_and_mail_go_at_the_next_idle() {
+        let mut h = harness_with_real_decoder();
+        let ann = above(&h);
+        let (request, seq) = open_kind(&mut h, &ann, Kind::Mail);
+        finish_turn(&mut h, request, seq, End::Completed("failed"));
+        assert!(halted(&h.state), "멈춤이 안 섰다");
+        assert!(take(&h).is_none(), "멈춤 중에 턴이 열렸다");
+
+        accept_user(&h.state, "u-1", "typed after");
+        assert!(!halted(&h.state), "사용자 글이 멈춤을 안 풀었다");
+        announce(&h.reader.core, &h.state, &ann);
+        let (request, _, p) = opens(&h).expect("멈춤이 풀린 뒤 턴이 안 열렸다");
+        assert_eq!(
+            p["clientUserMessageId"], "pre",
+            "쥐어 있던 글이 먼저가 아니다"
+        );
+        reply(&mut h, request, "t2");
+        let s = next_steer_job(&h, "멈춤을 푼 글이 그 턴 id 에 안 넘어갔다");
+        assert_eq!(steer_params(&s)["clientUserMessageId"], "u-1");
+        assert!(matches!(issue(&h, s), Issued::Written));
+
+        h.seen.lock().unwrap().clear();
+        h.reader
+            .handle_line(completed_line("T", "t2", "interrupted").as_bytes());
+        assert_eq!(turn_seq(&h.state), None, "끊긴 턴이 안 끝났다");
+        assert!(!halted(&h.state), "끊기가 멈춤을 다시 세웠다");
+        assert!(
+            !list_ops(&h.seen)
+                .iter()
+                .any(|op| matches!(op, QueuedInputEvent::Dropped { .. })),
+            "끊긴 턴의 글이 버려졌다"
+        );
+        for id in ["pre", "u-1"] {
+            assert_eq!(stage_of(&h.state, id).as_deref(), Some("held"), "{id}");
+        }
+
+        let (request, _, p) = opens(&h).expect("끊긴 뒤 쥔 글의 턴이 안 열렸다");
+        assert_eq!(p["clientUserMessageId"], "pre");
+        reply(&mut h, request, "t3");
+        let s = next_steer_job(&h, "쥔 글이 다음 턴 id 에 안 넘어갔다");
+        assert_eq!(steer_params(&s)["clientUserMessageId"], "u-1");
+        issue(&h, s);
+        assert!(take(&h).is_none(), "도는 턴에 쥔 우편이 나갔다");
+        h.reader
+            .handle_line(echo_line("t3", "pre", "typed before").as_bytes());
+        h.reader
+            .handle_line(echo_line("t3", "u-1", "typed after").as_bytes());
+        h.reader
+            .handle_line(completed_line("T", "t3", "completed").as_bytes());
+        let (_, _, p) = opens(&h).expect("쥔 우편이 안 나갔다");
+        assert_eq!(p["clientUserMessageId"], "m-pre");
     }
 
     /// ★하한 미달 화신엔 멈춤이 서지 않는다★(N1 (a)) — `failed`·출구 뒤에도 쥔 입력이 오늘처럼 곧바로 `turn/start` 로

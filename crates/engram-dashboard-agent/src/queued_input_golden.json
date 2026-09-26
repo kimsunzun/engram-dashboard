@@ -505,6 +505,18 @@
       "expect": {"items": [], "tombstones": {"a": false}, "tombstone_count": 1, "absent": [], "ack_unavailable": false, "outcomes": {"a": ["Delivered"]}}
     },
     {
+      "name": "handed over after dropped is a no-op (either tombstone kind)",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "Queued", "id": "b", "text": "text b"},
+        {"kind": "Dropped", "id": "a", "cause": "Interrupted"},
+        {"kind": "Dropped", "id": "b", "cause": "Unknown"},
+        {"kind": "HandedOver", "id": "a", "sent": true},
+        {"kind": "HandedOver", "id": "b", "sent": true}
+      ],
+      "expect": {"items": [], "tombstones": {"a": false, "b": true}, "tombstone_count": 2, "absent": [], "ack_unavailable": false, "outcomes": {"a": ["Discarded:Interrupted"], "b": ["Discarded:Unknown"]}}
+    },
+    {
       "name": "a sent row leaves only by its echo",
       "events": [
         {"kind": "Queued", "id": "a", "text": "text a"},
@@ -520,6 +532,16 @@
         {"kind": "CancelRequested", "id": "a"},
         {"kind": "CancelAnswered", "id": "a", "removed": false},
         {"kind": "HandedOver", "id": "a", "sent": true}
+      ],
+      "expect": {"items": [{"id": "a", "text": "text a", "state": "cancelling", "cancel": {"answer": "not_removed", "vendor_closed": false}, "sent": true}], "tombstones": {}, "tombstone_count": 0, "absent": [], "ack_unavailable": false, "outcomes": {}}
+    },
+    {
+      "name": "cancelling an already-sent row keeps the sent mark across the phase change",
+      "events": [
+        {"kind": "Queued", "id": "a", "text": "text a"},
+        {"kind": "HandedOver", "id": "a", "sent": true},
+        {"kind": "CancelRequested", "id": "a"},
+        {"kind": "CancelAnswered", "id": "a", "removed": false}
       ],
       "expect": {"items": [{"id": "a", "text": "text a", "state": "cancelling", "cancel": {"answer": "not_removed", "vendor_closed": false}, "sent": true}], "tombstones": {}, "tombstone_count": 0, "absent": [], "ack_unavailable": false, "outcomes": {}}
     },
