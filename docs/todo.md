@@ -39,6 +39,7 @@
 | 터미널 치수 전파 | 트리거 대기 | 중간 | [`todo/terminal-sizing.md`](todo/terminal-sizing.md) |
 | 재생·구독 | 트리거 대기 | 중간 | [`todo/replay-subscription.md`](todo/replay-subscription.md) |
 | 이름·기록 | 트리거 대기 | 큼 | [`todo/naming-and-records.md`](todo/naming-and-records.md) |
+| QA 절차 문서가 CI 테스트 입력이다 — 결합 풀기 | 트리거 대기 | 중간 | [`todo/qa-doc-test-coupling.md`](todo/qa-doc-test-coupling.md) |
 | 프론트엔드 모듈 분리 | 소유됨 | 불명 | [`todo/frontend-module-split.md`](todo/frontend-module-split.md) |
 | 확인만 된 것 (판단 보류) | 확인만 됨 | — | [`todo/observed-only.md`](todo/observed-only.md) |
 
@@ -51,6 +52,7 @@
 - **표시 정책 = 큼** — 1단계(터미널만)는 작지만 2단계가 앱 전역 seam 교체이고 ADR 번복이 따라온다.
 - **이름·기록 = 큼** — `epoch` 개명 하나가 코드 식별자 885곳이다(실측). 미루기로 한 사유도 그것이다.
 - **프론트엔드 모듈 분리 = 불명** — 범위가 안 정해졌다. 크기 압력은 없다(비테스트 11,285줄, 최대 파일 992줄 — 실측 2026-08-26)
+- **QA 절차 문서 결합 = 중간** — 스크립트 추출 자체는 작지만 QA 절차·테스트·CI 경로 필터·ADR-0232 가 함께 움직인다.
 
 ---
 
