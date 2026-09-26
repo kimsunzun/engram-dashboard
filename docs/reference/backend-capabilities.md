@@ -87,13 +87,16 @@
 | **`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`** — 상류가 문서화하지 않은 내부 변수. 건 값이 세션 기록의 `originator` 칸에 그대로 남는다(임의 문자열 3종 · allowlist 거절 없음). 없어지면 오류가 아니라 조용한 무시 | 실측 (0.155.1) |
 | **`developer_instructions` 로 넘긴 텍스트는 rollout 에 verbatim 으로 남는다** — 단 sqlite 쪽에는 안 간다 | 실측 2026-09-21 (0.155.x 추정) |
 | ★**`codex resume <값>` 은 틀려도 실패하지 않는다**★ — 스레드 id 로 못 읽는 문자열을 주면 그것을 **세션 이름**으로 재해석해 **새 세션을 조용히 만들고** 종료 코드 `0` 으로 끝나며 턴이 과금된다. app-server 의 `thread/resume`(모르는 id → `-32600` 에러)과 **정반대 성질**이라 두 모드를 같은 규칙으로 다루면 안 된다 | 실측 2026-09-21 (0.155.x 추정) |
-| `thread/start` 파라미터 = `threadId` 없이 `cwd` · `approvalPolicy` · `sandbox` · `clientUserMessageId` · `input` · `turnTrigger` · `toolOutput` · (턴 단위 cwd 덮어쓰기) | 소스 (0.154.0 스키마) |
+| `thread/start` 파라미터 = 전부 선택(`threadId` 없음) — `approvalPolicy` · `approvalsReviewer` · `baseInstructions` · `config` · `cwd` · `developerInstructions` · `ephemeral` · `model` · `modelProvider` · `personality` · `sandbox` · `serviceName` · `serviceTier` · `sessionStartSource` · `threadSource`. ★`input` · `clientUserMessageId` 는 여기 없다★ — 이 줄의 옛 판은 `turn/start` 의 칸을 여기 적었다(우리 구조체도 둘을 가른다 — `backend/codex/protocol.rs` 의 `ThreadStartParams` · `TurnStartParams`) | 소스 (0.156.1 스키마) |
+| `turn/start` 파라미터 = 필수 `threadId` · `input` + 선택 `clientUserMessageId` · `turnTrigger` · `toolOutput` · `cwd`(턴 단위 덮어쓰기) 등 | 소스 (0.156.1 스키마) |
 | `thread/resume` 는 `threadId` 만 필수. 선택 인자 다수 — `cwd` · `model` · `sandbox` · `approvalPolicy` · `excludeTurns` · `initialTurnsPage` · `personality` 등 | 소스 |
 | `excludeTurns: true` = `thread.turns` 를 안 채우고 메타데이터와 live-resume 상태만 준다. **이력 전량 하이드레이션은 deprecated** 이고 `thread/turns/list`·`thread/items/list` 와 함께 쓰라고 스키마가 안내한다 | 소스 |
 | 우선순위 규칙: 비실행 스레드는 `history` > 비어있지 않은 `path` > `threadId`. `threadId` 가 **실행 중인** 스레드를 가리키면 거기 재합류하고 `path` 는 일치 검사로만 쓰인다 | 소스 |
 | **sub-agent 스레드는 단독 resume 이 거부된다** — 부모를 먼저 resume 하거나 `thread/read` 로 들여다봐야 한다 | 소스 |
 | `thread/*` 메서드가 70여 개 있다 (`thread/read` · `thread/turns/list` · `thread/items/list` · `thread/search` · `thread/fork` · `thread/archive` · `thread/delete` …) | 소스 |
 | `history` · `path` 인자는 **UNSTABLE** 로 표시돼 있다(`history` 는 Codex Cloud 전용, 스키마가 "DO NOT USE" 라 적는다) | 소스 |
+
+★**위 표의 「소스」 줄은 로컬에서 대조할 수 있다**★ — `codex app-server generate-json-schema` 가 설치된 그 버전의 스키마를 뽑는다(`thread/start` · `turn/start` 줄이 그렇게 0.156.1 로 대조됐다 — 두 파라미터 목록이 뒤섞여 있던 옛 판을 그 대조가 잡았다).
 
 ★**위 표의 `(0.155.x 추정)` 은 그 라운드가 적어 둔 버전이 아니다**★ — 그 줄들이 나온 **ADR-0218 라운드 기록에 버전 문자열이 없다**(`docs/decisions/0218-…` 전문 · `docs/process/step-log.md:2445` 이하). 앞뒤 기록이 설치본을 `0.155.1` 로 적고 있어 그 사이로 끼운 것이다 — 전날 ADR-0216 이 `codex --version` 으로 확인했고, **같은 날 먼저 선 ADR-0217** 이 자기 실측을 `codex-cli 0.155.1` 이라 적는다(그 라운드가 0217 → 0218 로 갈아탄 경위 = step-log:2447). 이 문서를 고치는 2026-09-22 에 다시 물어도 `codex-cli 0.155.1` 이다. ★**그래도 「그 라운드가 0.155.1 이었다」는 실측이 아니라 양쪽 관측 사이를 이은 추론이다**★ — 되재면 `추정` 을 떼고 실측값을 적는다.
 

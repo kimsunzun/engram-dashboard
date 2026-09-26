@@ -1,12 +1,12 @@
 # ADR-0235: codex 턴 도중 입력 단순화 — 도구가 끝나면 쥔 글을 끼워 넣고 되울림으로만 받음을 치며 ✕ 는 뺐다는 답을 보고서야 줄을 지운다
 
-- 상태: 확정 (2026-09-26, 근거: 사용자 결정 2026-09-26(인용 원문 = `.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md`) + 피어 서베이 + 구현 S1–S5 로컬 착지(조각마다 게이트 녹 · 리뷰·GUI QA·CI 전))
-- 관련: Amends ADR-0231 (결정 2 넘기기 정책, 결정 3과 4의 ✕ 규칙, 결정 6과 8의 codex 몫, 결정 7 후속 턴 빚, 결정 9 정산과 수락 모름) · Amends ADR-0234 (결정 1 빚 판정, 결정 2의 항목 처분, 결정 4 넘기기 기본값) · 계획 `.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md`(사용자 결정 · 목표 동작 1–11 · 걷은 것) · `docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md` · TRD `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md`(§5-5 의 codex 통로 서술이 이 결정에 밀린다) · `docs/research/mid-turn-m15-measurements-2026-09-26.md`(계측 대상이 `engram::codex_handover` → `engram::codex_steer` 로 바뀌었다) · 관련 ADR-0233(첫 턴 영속 `witness_first_turn` 은 그대로 — 개정 아님) · ADR-0006(방출 줄 `order` 팬아웃 예외 = ADR-0234 결정 5 그대로) · ADR-0193(턴을 여는 자리는 여전히 `take_turn_locked` 하나) · step-log S21
+- 상태: 확정 (2026-09-26, 근거: 사용자 결정 2026-09-26(인용 원문 = `.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md` · 핸드오프 `.claude/handoff/history/20260926-225442-…md` · `c43d382` 판 `simplify-plan.md` — 인용별 출처는 「근거」 첫 항) + 피어 서베이 + 구현 S1–S5 로컬 착지(조각마다 게이트 녹 · 리뷰·GUI QA·CI 전))
+- 관련: Amends ADR-0231 (결정 2 넘기기 정책, 결정 3과 4의 ✕ 규칙, 결정 6과 8의 codex 몫, 결정 7 후속 턴 빚, 결정 9 정산과 수락 모름) · Amends ADR-0234 (결정 1 빚 판정, 결정 2의 항목 처분, 결정 4 넘기기 기본값) · 계획 `.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md`(사용자 결정 · 목표 동작 1–11 · 걷은 것) · `docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md` · TRD `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md`(§5-5 의 codex 통로 서술이 이 결정에 밀린다 · §0 머리 표지 — §0 ③ · §5-2 · §5-6 의 ✕ 규칙은 결정 7 에, codex 오류 뒤 멈춤 풀림(§0 ⑦ · §5-5 · §5-6 `stopped_after_error`)은 결정 4 에 밀린다) · `docs/research/mid-turn-m15-measurements-2026-09-26.md`(계측 대상이 `engram::codex_handover` → `engram::codex_steer` 로 바뀌었다) · 관련 ADR-0233(첫 턴 영속 `witness_first_turn` 은 그대로 — 개정 아님) · ADR-0006(방출 줄 `order` 팬아웃 예외 = ADR-0234 결정 5 그대로) · ADR-0193(턴을 여는 자리는 여전히 `take_turn_locked` 하나) · step-log S21
 
 ## 맥락
 ADR-0231 · ADR-0234 가 정한 codex 턴 도중 입력(P2 `3014247` · P8 `37ecc5e`)은 통로 안에 기계장치를 여럿 쌓았다 — 경계 판정과 넘기기 정책(`HandOverPolicy` · 구간 `Zone` · 운영 기본 `AtEarliestBoundary` · 답 구간 붙듦 `ANSWER_SEGMENT_HOLDS`), 턴마다 steer 응답을 기다리는 정산(`settling` · `steers_owed`), 기록만 된 글에 빈 `turn/start` 를 내는 후속 턴 빚, 수락 모름 단계(`Stage::Unconfirmed` · 이상 계수), 사용자 턴이 성공해야 풀리는 오류 뒤 멈춤, M15 계측. `transport.rs` 는 약 12.9k 줄이었고 P2 가 production 약 2.1k 줄을 더했다(핸드오프 2026-09-26 17:47).
 
-사용자는 P8 뒤에 단순화를 함께 보자고 했고(「다끝난뒤에 단순화 한번 나하고 얘기해보자」), 그 자리에서 이 설계를 과설계로 물렸다 — 「도저히 파일 여러개 필요한 구현이 아닌데」 · 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」. 피어 서베이(`docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md`)를 돌린 뒤 사용자와 다시 정했고(아래 결정), codex 경로를 순차 조각 S1–S5 로 줄였다(`672df0a` `5bcd7f6` `621c7ae` `c43d382` `2237078` `97eaa52` · 범위 `338740f..97eaa52` 24 파일 +2202/−4166). 못 뺐다는 답을 받은 행의 ✕ 규칙은 그 뒤에 따로 정했다(`af30654`).
+사용자는 P8 뒤에 단순화를 함께 보자고 했고(「다끝난뒤에 단순화 한번 나하고 얘기해보자」), 그 자리에서 이 설계를 과설계로 물렸다 — 「도저히 파일 여러개 필요한 구현이 아닌데」 · 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」. 피어 서베이(`docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md`)를 돌린 뒤 사용자와 다시 정했고(아래 결정), codex 경로를 순차 조각 S1–S5 로 줄였다(`672df0a` `5bcd7f6` `621c7ae` `c43d382` `2237078` `97eaa52` · 범위 `338740f..97eaa52` 24 파일 +2202/−4166 (.claude 제외)). 못 뺐다는 답을 받은 행의 ✕ 규칙은 그 뒤에 따로 정했다(`af30654`).
 
 ★같은 라운드 안에서 사용자 결정 하나가 뒤집혔다★ — S3b(`c43d382`)는 「실패는 지워 … 에러 났는데 뭔가 대기목록에 뜨는것도 이상하잖아」에 따라 실패로 끝난 턴의 에코 없는 글을 지웠고, 사용자가 곧이어 선택지 B(「B가 크게 구현 힘들지 않으면 해」 — 오류에도 전부 두고 멈춘다)로 바꿨다(`d724387` · S4 `2237078` 에 반영). 이 ADR 은 B 를 적는다.
 
@@ -25,14 +25,14 @@ ADR-0231 · ADR-0234 가 정한 codex 턴 도중 입력(P2 `3014247` · P8 `37ec
    - 보냄 행에는 ✕ 가 없다(넘긴 글은 거둘 수 없고 받음으로만 빠진다).
    - ✕ 를 누르면 행은 남고(✕ 비활성) 백엔드의 제거 사건(`Dropped{Withdrawn}` · `CancelAnswered{removed:true}`)이 와야 빠진다 — 곧바로 감추지 않는다. codex 쥔 행은 통로 `withdraw` 가 곧바로 `Dropped{Withdrawn}` 을 낸다. claude 는 CLI 취소 답이 뺐다고 할 때만 빠지고, 아니면 `Delivered` 까지 남는다.
    - **못 뺐다는 답이 온 행은 보냄 행처럼 그린다(✕ 없음)** [사용자] — claude `removed:false` · `CancelFailed`, codex ✕ 가 넘기기와 겹친 행(`TooLate` → `CancelAnswered{removed:false}`) — 라이브와 재부착 모두. 「이미 넘어가면 codex와 같이 못누르게 하면 되지 않음?」. 프론트만 바뀐다(목록 조회와 링 사건이 이미 `not_removed` 를 싣는다 — `af30654`).
-   - LLM 제어는 그대로다 — `CancelQueuedInput` · `ListQueuedInputs`(행에 `sent` 가 더해졌다).
+   - LLM 제어는 그대로다 — `CancelQueuedInput` · `ListQueuedInputs`(행 칸이 늘지 않고 행 `state` 의 값에 `"sent"` 가 더해졌다 — `ListedState::Sent`).
 8. **하한 미달 codex(0.140 미만 — 되울림에 `clientId` 없음) = 이 기능 전체가 꺼진 채 오늘 동작** [사용자]. 하한 판정은 그대로 둔다.
 9. **계측 = 항목마다 debug 한 줄** [고름 — 계획 항목 11]. `tracing::debug!(target: "engram::codex_steer")` · 단계 `tool_start` · `tool_end`(쥔 수) · `steer` · `refused` · `echo` · `held_again`(끝의 모양) · 턴 id 를 싣는다. M15 계측(`engram::codex_handover`)을 대신한다. 목적 = 아래 「영향」의 열린 물음.
 10. **UI 정지 버튼·단축키는 지금 넣지 않는다** [사용자] — 「나중에 단축키 시스템 만들때 넣을거임」.
 11. **이 설계를 넘는 것은 먼저 묻는다** [사용자] — 「단순하게 가고 복잡할것같으면 먼저 나에게 보고해」. 여기 적은 칸을 넘는 새 상태 · 새 사건 변형 · wire/`PROTOCOL_VERSION` 변경 · 새 기제가 필요해지면 짓기 전에 사용자에게 보고한다.
 
 ## 거부한 대안
-- **P2/P8 codex 설계를 그대로 둔다**(ADR-0231 결정 2 · 7 · 9 · ADR-0234 결정 1 · 4) [사용자] — 「도저히 파일 여러개 필요한 구현이 아닌데」 · 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」. 크기: `transport.rs` 약 12.9k 줄(P2 가 production 약 2.1k 줄) 대 피어의 같은 기능 150–1.8k 줄(t3code 약 450 — 서베이 비교표, 크기 확신도는 표에 딸림) · 걷어낸 결과 24 파일 +2202/−4166. 부품별 사유:
+- **P2/P8 codex 설계를 그대로 둔다**(ADR-0231 결정 2 · 7 · 9 · ADR-0234 결정 1 · 4) [사용자] — 「도저히 파일 여러개 필요한 구현이 아닌데」 · 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」. 크기: `transport.rs` 약 12.9k 줄(P2 가 production 약 2.1k 줄) 대 피어의 같은 기능 150–1.8k 줄(t3code 약 450 — 서베이 비교표, 크기 확신도는 표에 딸림) · 걷어낸 결과 24 파일 +2202/−4166 (.claude 제외). 부품별 사유:
   - **경계 판정 · 넘기기 정책 · 구간 · 답 구간 붙듦**(`HandOverPolicy` · `Zone` · `AtEarliestBoundary` · `ANSWER_SEGMENT_HOLDS`) — 경계를 재거나 타이밍 경합을 거는 피어가 없다(서베이 결론 3 · 확실): 벤더는 core 가 루프 머리에서 접어 넣는 것에 기대고, t3code 는 새 `tool.completed` 가 보이는지만 본다.
   - **턴 끝 정산**(steer 응답을 기다림 · `settling` · `steers_owed`) — 받힌 steer 의 에코는 `turn/completed` 앞에 온다(벤더 소스 0.156.1 · M10 적중 3건 모두 4.5–4.8 ms 앞 — ADR-0231 거부한 대안 「턴 끝 탐침」) → 턴 끝에 에코 없는 글은 안 받혔다. 벤더 TUI 도 steer 응답이 아니라 `clientId` 에코로 정산한다(서베이 2-1 · 확실).
   - **후속 턴 빚**(빈 `turn/start`) — 확인한 피어(벤더 TUI · t3code · vibe-kanban)에는 없고 벤더 TUI 도 그 손실을 받아들인다(서베이 결론 2 · 불확실 — paseo · Zed 미조사).
@@ -47,7 +47,7 @@ ADR-0231 · ADR-0234 가 정한 codex 턴 도중 입력(P2 `3014247` · P8 `37ec
 - **못 뺐다는 답이 온 행을 보통 행으로 되돌린다**(S5 `97eaa52` 착지 모양) [사용자] — 다시 선 ✕ 는 눌러도 아무 일도 하지 않는다(세션에 취소가 이미 걸려 있다 — 죽은 ✕ · `af30654` 커밋 본문). 「이미 넘어가면 codex와 같이 못누르게 하면 되지 않음?」.
 
 ## 근거
-- **사용자 결정 2026-09-26** — 인용 원문과 목표 동작 1–11 의 정본 = `.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md` · 결정 목록 = 핸드오프 `.claude/handoff/history/20260926-225442-codex-midturn-단순화-S1-S5-완료-다음은-S6문서-리뷰-QA.md` 「Decisions this session」.
+- **사용자 결정 2026-09-26** — 목표 동작 1–11 과 대부분의 인용 원문의 정본 = `.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md` · 결정 목록 = 핸드오프 `.claude/handoff/history/20260926-225442-codex-midturn-단순화-S1-S5-완료-다음은-S6문서-리뷰-QA.md` 「Decisions this session」. ★인용 몇은 계획 파일 지금 판에 없다★ — 「도저히 파일…」 · 「B가 크게…」 · 「t2code…」 · 「esc누르는게…」 · 「단축키 시스템…」은 위 핸드오프에만 있고, 「실패는 지워 … 대기목록에 뜨는것도 이상하잖아」의 뒷부분은 `c43d382` 판 계획 파일에만 남았다(`git show c43d382:.claude/handoff/attachments/20260926-midturn-impl/simplify-plan.md` — 지금 판은 앞부분만 싣는다). 「다끝난뒤에…」는 핸드오프 `.claude/handoff/history/20260926-174757-…md` 와 `.claude/handoff/attachments/20260926-midturn-impl/contacts.md` 에 있다.
 - **피어 서베이** — `docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md`(medium · 소스 직독 5 프로젝트 · cross-family 적대 리뷰 FIX 5건 반영). 모양 셋(즉시 steer · 도구 끝까지 · 턴 끝까지)과 결론 2–4 가 위 거부 사유의 출처다.
 - **실측** — M7(codex 는 도구 끝까지 붙들어도 같은 경계 10/10 — ADR-0231) · M10(받힌 steer 의 에코가 `turn/completed` 앞 — ADR-0231 거부한 대안). ★M15 는 도구 끝이 직접 깨운 steer 를 한 건도 재지 않았다★(ADR-0234 근거) — 결정 1 의 경로를 끝에서 끝까지 잰 값은 아직 없다.
 - **구현** — S1 `672df0a`(계측 교체) · S2 `5bcd7f6`(빚 제거 · 멈춤 bool) · S3a `621c7ae`(되돌림 규칙 하나 · 수락 모름 제거) · S3b `c43d382`(정산 제거) · S4 `2237078`(계기 = 도구 끝 · 선택지 B) · S5 `97eaa52`(보냄 상태 · ✕ 규칙) · `af30654`(못 뺐다는 답의 행).
@@ -65,9 +65,9 @@ ADR-0231 · ADR-0234 가 정한 codex 턴 도중 입력(P2 `3014247` · P8 `37ec
   - 멈춤을 푼 그 글을 ✕ 로 빼도 멈춤은 다시 서지 않고 앞서 쥔 글이 나간다(ADR-0231 이 거부했던 「도착 사건으로 푼다」의 거부 사유 그대로). ✕ 를 누른 그 글 자체는 새지 않는다 — 아직 쥔 글이면 빠지고, 넘긴 글이면 ✕ 가 없다. [사용자] 「ㅇㅇ」.
   - `turn/start` 가 실패한 한가 말풍선(Direct)은 남아 다음 사용자 글과 함께 다시 나간다. 목록 밖이라 ✕ 가 없다. ★지금은 받아들이되 빈도를 지켜본다★ — [사용자] 「이건 나오는거 보고 대응하자. 많이 나오면 나중에 개선」. 보류한 대안 = 실패하면 말풍선을 거둬 목록의 쥔 줄로 되돌린다(말풍선을 지우고 줄을 다시 세우는 장치가 새로 든다).
   - 따로 선 규칙이 아니다 — 규칙은 「다음 기회에 넣는다」 하나이고 그 기회는 들어오는 사건 종류가 정한다(도구 완료 → steer · 턴 끝 → 다음 턴). 그래서 모델이 답만 쓰는 동안 친 글은 턴 끝에 든다. [사용자] 「어쨋든 다음 채팅올때니깐 니가 알아서해」 · 「우리는 채 오는걸로 판단하고 있는거잖아. 물론 타입에 따라 다르겠지만」.
-  - 끈질긴 실패(예: 사용 한도)면 새 사용자 글마다 쥔 글을 한 번씩 다시 시도한다(시간 간격 자동 재시도 없음 · 버리지 않음). 목록 상한 = `INPUT_QUEUE_LIMIT`(32) — 33 번째 입력은 조용히 버리지 않고 오류로 거절한다. [사용자] 「이대로 받아들이면되는데」.
+  - 끈질긴 실패(예: 사용 한도)면 새 사용자 글마다 쥔 글을 한 번씩 다시 시도한다(시간 간격 자동 재시도 없음 · 버리지 않음). 상한 = `INPUT_QUEUE_LIMIT`(32) — ★사용자 목록이 아니라 통로 대기 큐 `pending` 전체를 센다★(우편 · 쥔 Direct 말풍선도 든다 — `backend/codex/transport.rs` 의 `INPUT_QUEUE_LIMIT` 검사) 그래서 사용자 입력이 33 번째보다 먼저 거절될 수 있다. 넘치면 조용히 버리지 않고 오류로 거절한다. [사용자] 「이대로 받아들이면되는데」.
   - 빚을 걷었으므로 steer 로 든 글이 기록만 되고 답을 못 받는 경우(M10 — ADR-0234 결정 1 의 「기록만」 현상)는 그대로 남는다 — 벤더 TUI 도 그 손실을 받아들인다(서베이 결론 2). ★받아들이되 나중에 다시 본다★ — [사용자] 「일반 받아들이고 나중에 한번 살펴보자. 어쨋든 대화가 의미없게 남는다는거잖아」. 되울림이 온 글은 codex 대화에 든 것이라 목록 밖(✕ 없음)이고 우리 쪽에 대화에서 빼는 수단은 없다.
 - ★**열린 물음(GUI QA 몫)**★ — 도구 1 이 끝난 뒤 넘긴 글이 도구 2 전에 드나, 도구 3 뒤에야 드나. `engram::codex_steer` 계측으로 본다(`RUST_LOG` 가 데몬에 닿아야 한다). 늦게 들면 벤더 즉시 steer 를 사용자가 다시 본다(거부한 대안 둘째 항).
 - **남은 잠든 배관** — codex 수락 모름의 배관이 `queued_input.rs` · `session.rs` · `commands.rs` · `manager.rs` · `connection_core.rs` · protocol · bindings 에 남아 있다(codex 의 trait 기본값은 빈 목록). 정리 후보이고 이 결정에서 걷지 않았다.
 - **다음 단순화 후보(사용자 암시 · 미결)** — 데몬이 쥔 목록(명부 + 링 사건 + seq 연속). QA 뒤 사용자와 논의한다.
-- **코드 앵커** — 남긴 자리는 `// ADR-0231`(과 `TurnClose` · `Announcer` · `announce` 의 `// ADR-0234`)을 단다. ADR-0234 「영향」이 적은 `HAND_OVER_POLICY` · `State::unanswered` 앵커는 그 심볼과 함께 사라졌다. 이 결정의 규칙을 지는 네 자리(`publish_hand_over` · `close_turn_items` · `take_steer_locked` · `note_tool_item` — `backend/codex/transport.rs`)에는 `// ADR-0235` 를 더 단다. 찾는 법 = `rg "ADR-023[145]" crates src`.
+- **코드 앵커** — 남긴 자리는 `// ADR-0231`(과 `TurnClose` · `Announcer` · `announce` 의 `// ADR-0234`)을 단다. ADR-0234 「영향」이 적은 `HAND_OVER_POLICY` · `State::unanswered` 앵커는 그 심볼과 함께 사라졌다. 이 결정의 규칙을 지는 여섯 자리(`publish_hand_over` · `close_turn_items` · `take_steer_locked` · `note_tool_item` · `push_pending` 의 멈춤 풀기 주석 · 필드 `State::halted` — `backend/codex/transport.rs`)에는 `// ADR-0235` 를 더 단다. 찾는 법 = `rg "ADR-023[145]" crates src`.

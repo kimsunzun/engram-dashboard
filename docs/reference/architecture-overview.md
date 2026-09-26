@@ -269,7 +269,7 @@ flowchart TD
   POL{"MidTurnPolicy"}
   NONE["None (터미널 · shell)<br/>오늘 경로 — 목록 없음"]
   SC["SessionClassified (claude json)<br/>입력 자물쇠 안에서 분류 — 턴 도중 User 면 Queued 사건 + stdin 에 곧바로 쓴다<br/>(벤더가 받아 두고 해제한다 · 합성 에코 없음)<br/>한가하거나 Mail 이면 오늘 경로"]
-  TO["TransportOwned (codex app-server)<br/>send_turn — 통로가 분류·붙듦·해제를 진다<br/>한가하면 turn/start · 턴 도중 글은 쥐었다가 지금 턴의 도구 항목이 끝나면<br/>하나씩 turn/steer 로 넘긴다(목록 행은 「보냄」 · 도구 끝이 없으면 다음 턴에)<br/>받음으로 빠지는 것은 되울림뿐"]
+  TO["TransportOwned (codex app-server)<br/>send_turn — 통로가 분류·붙듦·해제를 진다<br/>한가하면 turn/start · 턴 도중 글은 쥐었다가 지금 턴의 도구 항목이 끝나면<br/>하나씩 turn/steer 로 넘긴다(목록 행은 「보냄」 · 도구 끝이 없으면 다음 턴에)<br/>턴 끝에 남은 글은 첫 글이 turn/start 로 새 턴을 열고<br/>그 턴 id 가 오는 즉시 나머지를 그 턴에 steer 한다<br/>받음으로 빠지는 것은 되울림뿐"]
   SI["AgentTransport.send_input() ──▶ 에이전트 stdin"]
   ECHO["(json 모드만) 유저 에코를 OutputCore.emit ──▶ 화면에 표시<br/>(PTY는 로컬 에코라 불필요)"]
   RING["OutputCore.emit(QueuedInput 사건) ──▶ 링<br/>replay 락 안에서 대기 입력 명부(queued_input.rs)가 같은 사건을 환원<br/>프론트 queuedInputReducer.ts 가 같은 규칙으로 환원 → 입력창 위 대기 목록"]
@@ -295,7 +295,7 @@ flowchart TD
 - **우편(`Mail`)은 턴 도중에도 목록에 오르지 않는다.** codex 에선 같은 통로 대기열에 서지만 목록 밖이다.
 - **정책·넘김 판정의 정본은 코드다** — 세션 갈래 = `AgentSession::write_input_from` · `cancel_queued_input`, codex 붙듦·넘김 = `backend/codex/transport.rs` 의 `take_steer_locked`(도구 끝 계기) · `take_turn_locked`(턴을 여는 자리) · `close_turn_items`(턴 끝 처분). 여기 규칙 표를 베끼지 않는다.
 
-결정: json 모드 배선 = ADR-0044 · 메시지 시맨틱 = ADR-0087 · 주입 타이밍(idle 게이트·일괄 flush) = ADR-0104 · 배달 계측·제출 경계 = ADR-0088 · 턴 도중 입력(대기 목록 · ✕ · 오류 뒤 멈춤) = ADR-0231 · 착지 보정(방출 줄 팬아웃 예외) = ADR-0234 · codex 넘기기 단순화(도구 끝에 steer · 받음은 되울림뿐 · 「보냄」 표지 · 되울림 없이 끝난 글은 대기로) = ADR-0235.
+결정: json 모드 배선 = ADR-0044 · 메시지 시맨틱 = ADR-0087 · 주입 타이밍(idle 게이트·일괄 flush) = ADR-0104 · 배달 계측·제출 경계 = ADR-0088 · 턴 도중 입력(대기 목록 · 오류 뒤 멈춤) = ADR-0231 · 착지 보정(방출 줄 팬아웃 예외) = ADR-0234 · codex 넘기기 단순화(도구 끝에 steer · 받음은 되울림뿐 · 「보냄」 표지 · 되울림 없이 끝난 글은 대기로) = ADR-0235 · ✕ 규칙(뺐다는 답을 보고서야 행을 지운다 · 보냄 행은 ✕ 없음) = ADR-0235 결정 7(ADR-0231 결정 3·4 의 ✕ 규칙을 대신한다).
 
 ### 죽음 흐름 (종료 → 정리)
 

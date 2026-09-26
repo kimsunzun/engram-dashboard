@@ -428,7 +428,8 @@ struct State {
     /// ★통로가 스스로 여는 턴만 막는다★ — 우편이 통로에 드는 문은 커널의 `last_end_failed` 이고, 같은 계기의
     ///   `TurnEnd{Failed}` 를 codex 분류기가 접는다(`classify_turn`). ★[`TurnState`] 밖의 칸이다★ — 멈춤을 `Active` 로
     ///   표현하면 귀속 게이트가 늦은 에코를 우리 턴으로 세어 턴 표를 다시 켠다(TRD §5-5 「벤더가 보낸 에코」 조건 ①).
-    // ADR-0231
+    // ADR-0231: 멈춤 자체와 서는 자리.
+    // ADR-0235: 풀리는 자리 = 사용자 글이 드는 순간(결정 4).
     halted: bool,
     /// 「steer 거절」 표시 — steer 가 오류 응답을 받았거나 쓰지 못한 턴의 표식([`TurnState::Active`] 의 `seq`). 그 턴
     ///   동안은 쥔 항목을 하나도 넘기지 않는다([`take_steer_locked`]). 벤더가 그 턴의 창을 닫았으므로(쓰기 실패면 같은
@@ -769,7 +770,7 @@ impl State {
             cancel_asked: false,
             death: None,
         });
-        // ADR-0231: 오류 뒤 멈춤은 다음 사용자 글이 푼다 — 그 뒤 ✕ 로 그 글이 빠져도 다시 서지 않는다.
+        // ADR-0235: 오류 뒤 멈춤은 다음 사용자 글이 푼다 — 그 뒤 ✕ 로 그 글이 빠져도 다시 서지 않는다.
         origin == InputOrigin::User && std::mem::take(&mut self.halted)
     }
 

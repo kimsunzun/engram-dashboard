@@ -11,7 +11,8 @@ export type QueuedInputRow = {
 id: string, text: string, 
 /**
  * `queued` | `sent`(통로가 넘겼고 되울림을 기다린다) | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 —
- * 우편이 그 결말을 기다린다) | `cancelling`(취소 대기 — 결말이 날 때까지 목록에 남는다).
+ * 우편이 그 결말을 기다린다 · ★오늘 내는 백엔드가 없다★ — ADR-0235) | `cancelling`(취소 대기 — 결말이 날
+ * 때까지 목록에 남는다).
  */
 state: string, 
 /**
