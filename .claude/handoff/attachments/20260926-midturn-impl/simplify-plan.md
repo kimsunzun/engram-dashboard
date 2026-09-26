@@ -1,0 +1,42 @@
+# Simplification plan — codex mid-turn input (authoritative for the S-chunks; supersedes plan.md for codex)
+
+Base: `338740f` (code = P2 `3014247` + P8 `37ecc5e`; comment-only edits since). Peer survey: `docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md`.
+
+## User decisions 2026-09-26 (closed — do not re-open)
+- 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」 — codex = t3code shape: hold typed mid-turn items; on the running turn's tool-completion event push them.
+- 「내가 입력하고 대기가 되던가 창에 뜨던가 해야됨. 붕뜨면 안됨. 그게 가장 중요」 — ★an item is ALWAYS visible: a list row or a chat bubble, never neither★.
+- ✕ = option A: 「a를 하자 … X누르는것도 목록에서 실제로 빼는거 보고 빼야될듯 그냥 무조건 없애는게 아니라」 — ✕ is hidden on pushed rows; on ✕ the row stays until the backend confirms removal (both backends — shared front code).
+- Interrupt (forced stop, Esc-like) = send held items right away as a new turn (vendor Esc). Error stop (e.g. usage limit) = do not auto-send (existing 「오류 뒤 멈춤」). 「단순하게 가고 복잡할것같으면 먼저 나에게 보고해」.
+- No UI stop/shortcut now (later, with the keybinding system).
+
+## Target behaviour (codex JSON `TransportOwned`; claude path unchanged except the shared ✕ front rule)
+1. Typed during a turn → list row 「대기」 with ✕; nothing sent to codex.
+2. Tool item of the current turn completes → push every held user item (typed order), one `turn/steer` per item with its own `clientUserMessageId`; rows stay, now 「보냄」, ✕ hidden. Mail is never steered.
+3. codex `userMessage` echo with that `clientId` → `Delivered` → row leaves, bubble at chat end. This is the ONLY way an item leaves the list as delivered.
+4. Turn ends with held items and no tool completion → first held user item opens the next turn (`turn/start`); once that turn's id is known, the rest are pushed into it immediately (arm `steer_due`) → all in one turn.
+5. Sent item without echo when the turn closes (any `TurnClose`), or steer refused (incl. −32600 no active turn) → back to held (「대기」, ✕ back) → rides step 4.
+6. After a failed turn (`halted`) → nothing auto-sent; held rows stay; next user item clears the halt. After an interrupted turn → NOT halted: held/returned items go at the next idle (step 4).
+7. `turn/start` rejected → item stays held and visible (no `Dropped{Rejected}` for user items).
+8. ✕ on a held row → request; row stays (✕ disabled) until the backend's removal event (`Dropped{Withdrawn}` / `CancelAnswered{removed:true}`) → then the row goes. If it was already pushed → backend answers not-removed and emits 「sent」 → row stays as 「보냄」 → step 3. claude: row goes only when the CLI cancel answer says removed; else it stays until `Delivered`.
+9. Reattach/popout: `listQueuedInputs` rows carry the sent state so 「보냄」 survives.
+10. codex < 0.140 (no `clientId` in echo): feature stays off exactly as today (keep the version floor as is).
+11. One debug trace per item, target `engram::codex_steer`: `tool_start` · `tool_end`(held count) · `steer` · `refused` · `echo` · `held_again`(close) with turn id — so QA can see whether a push after tool 1 lands before tool 2 or only after tool 3.
+
+## Remove (codex transport; counts from the read-only map)
+A hand-over policy/zones/answer segment (`HandOverPolicy`, `Zone`, `ANSWER_SEGMENT_HOLDS`, `Segment`, `Signal`, `track_segment`, `with_hand_over`, mod.rs `HAND_OVER_POLICY`, decoder `ItemClass`/`ends_answer`) · B M15 trace (`HANDOVER_TRACE`, `LineClock`, `DrainMark`, `Hop`, `Traced`…) · C settlement (`Settling`, `SteerOwed`, `settling`, `steers_owed`, `expire_settlement`…) · D debt (`unanswered`, `follow_up_owed`, `Opening::FollowUp`…) · E `Stage::Unconfirmed`/`acceptance_unknown`/anomaly counters (trait default `unconfirmed_inputs` stays, dormant) · H halt → `halted: bool`. Keep: floor (F), two-phase announce (G — Queued before Delivered), `witness_first_turn` (ADR-0233), `PendingItem`/`push_pending`/`take_delivered`/`withdraw_item`/`take_turn_locked`/`take_steer_locked`/`note_delivered`/`TurnClose`. Keep the names `close_turn_items`/`end_turn_if` and idle sites (source-scan test `every_place_that_idles_a_turn_is_accounted_for`).
+End state fields: `pending: VecDeque<PendingItem{…, sent: Option<u64 /*gen*/>}>`, `steer_due: bool`, `halted: bool` (+ existing link/turn/thread_id/outbox/floor/next_turn_seq/early_completions/closed).
+
+## Chunks (strictly sequential — all touch transport.rs; build + tests green after each; main commits locally after each gate)
+- S1 trace swap (pilot, no behaviour change): remove B, add item 11 trace. Coder simple.
+- S2 debt out, halt → bool (item 6; interrupt not halting).
+- S3 one settle rule (items 5, 7) + settlement & Unconfirmed out. Inner order: add `sent` beside `Stage` → switch readers → return-to-held rule → delete C/E/`Stage` → tests. Split S3a/S3b if S1 cost > ~150k tokens.
+- S4 trigger = tool completion (item 2, 4): remove A; `note_tool_item` sets `steer_due` for a tool item of the current turn id (ignored before the id is known); arm `steer_due` when a `turn/start` carrier's turn id becomes known.
+- S5 ✕ + sent state (items 8, 9): new `QueuedInputEvent` variant (e.g. `HandedOver{id, sent: bool}` — emitted on steer/turn-start write and on return to held) + reducer arm in `queued_input.rs` + golden cases + ts-rs regen; `listQueuedInputs` row sent state; front: row `sent` flag, ✕ hidden when sent, NO optimistic hide on `CancelRequested` (row stays, ✕ disabled) — hide only on confirmed removal; claude same rule. No `PROTOCOL_VERSION` bump (`crates/engram-dashboard-protocol/src/lib.rs:114`).
+- S6 docs (main + `/adr`): new ADR superseding the removed parts of 0231/0234; CLAUDE.md, backend-capabilities, commands doc/schema, fixtures README, step-log; `/review doc`.
+Then `/review code deep` on the whole round, then `/qa full` (GUI) incl. the trace check.
+
+## New tests pinning the behaviour
+current-turn tool completion steers all held (order, one id each; mail not steered) · non-tool item / other turn / other thread / before turn id → nothing · no tool afterwards → waits for turn end → `turn/start`, rest pushed into that turn · steer Ok leaves the row listed; only the echo delivers · sent without echo returns to held at every close kind, rides the next turn once · −32600 → held · failed turn holds until next user item; interrupted turn does not · ✕ held → removed only on backend event; ✕ racing a push → not removed, row 「보냄」 · sent state survives `listQueuedInputs` · trace fields per phase.
+
+## ★Stop condition (user)★
+If a chunk needs anything beyond this plan — a new state beyond the listed fields, another event variant, a wire/`PROTOCOL_VERSION` change, a new mechanism, or clearly more code than the chunk's size — STOP and report instead of building it.
