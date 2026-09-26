@@ -6,6 +6,7 @@ Base: `338740f` (code = P2 `3014247` + P8 `37ecc5e`; comment-only edits since). 
 - 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」 — codex = t3code shape: hold typed mid-turn items; on the running turn's tool-completion event push them.
 - 「내가 입력하고 대기가 되던가 창에 뜨던가 해야됨. 붕뜨면 안됨. 그게 가장 중요」 — ★an item is ALWAYS visible: a list row or a chat bubble, never neither★.
 - ✕ = option A: 「a를 하자 … X누르는것도 목록에서 실제로 빼는거 보고 빼야될듯 그냥 무조건 없애는게 아니라」 — ✕ is hidden on pushed rows; on ✕ the row stays until the backend confirms removal (both backends — shared front code).
+- ✕ answered not-removed (claude `removed:false`/`CancelFailed`; codex ✕ that lost the race with a push — live and after reattach): 「이미 넘어가면 codex와 같이 못누르게 하면 되지 않음?」 — the row is drawn like a sent row (✕ hidden) instead of returning to a normal row with a dead ✕ (a second ✕ does nothing — the session already has a cancel in flight). Front-only: the listing and ring events already carry `not_removed`.
 - Interrupt (forced stop, Esc-like) = send held items right away as a new turn (vendor Esc). Error stop (e.g. usage limit) = do not auto-send (existing 「오류 뒤 멈춤」). 「단순하게 가고 복잡할것같으면 먼저 나에게 보고해」.
 - No UI stop/shortcut now (later, with the keybinding system).
 

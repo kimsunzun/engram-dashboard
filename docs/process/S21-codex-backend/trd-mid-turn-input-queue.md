@@ -428,6 +428,8 @@ id 하나의 자리는 셋 중 하나다 — **항목**(비종결: `Queued` · `
 
 ### 5-5. codex 경로 (`TransportOwned` + ADR-0198 구현)
 
+> ★**대체됨(2026-09-26 단순화 · 사용자 결정 → ADR-0235) — 이 절의 codex 넘기기 설계는 대부분 걷혔다. 아래는 9판 기록 그대로 두고 고치지 않는다.**★ 걷힌 것: 넘기기 정책(`HandOverPolicy` · 구간 표 · 답 구간 붙듦 · `AtEarliestBoundary`) · 턴 끝 정산 · 후속 턴 빚 · 수락 모름(`Unconfirmed` · `awaiting_reply`)과 이상 계수 · 거절·실패로 끝난 턴의 글을 지우는 처분. 지금 동작의 정본 = ADR-0235 와 `backend/codex/transport.rs` — 쥔 사용자 글은 도는 턴의 도구 항목이 끝날 때 steer 로 넘기고(도구가 없으면 턴 끝 다음 턴에 한꺼번에) · 에코만이 받음이며 · 에코 없이 끝난 턴의 글은 끝의 모양과 무관하게 대기로 돌아가고 · 실패 끝은 멈춤(`halted`)을 세워 다음 사용자 글이 들 때까지 기다린다(끊기는 세우지 않는다). 그대로 선 것: 통로 동사 둘(단 `TooLate` 인 행은 목록에 남아 넘긴 행으로 그려진다) · 하한 판정 · 두 단계 방출 · 첫 되울림 영속(ADR-0233).
+
 - **통로 동사 둘(기본 구현 있음 — `pty.rs`·`stdio.rs` 는 한 줄도 안 바뀐다):**
   - `AgentTransport::send_turn(&self, turn: TurnInput{ id, body, origin }) -> Result<(), PtyError>` — 기본 구현은 `send_input(InputEvent::Raw(body))` 로 위임한다(`InputEvent` 에 변형을 더하면 두 파일의 반박 불가 패턴이 깨지므로 그 길을 안 쓴다 — 고름). 세션은 `mid_turn == TransportOwned` 일 때만 이 동사를 부르고 `origin` 을 그대로 싣는다(§5-0).
   - `AgentTransport::withdraw(&self, id) -> Withdraw` — `Withdraw::{Withdrawn, TooLate, NotHeld}`(쥔 항목을 지웠다 · 이미 넘겼다 — 목록에서만 뺀다 · 통로가 모르는 id) · 기본 구현 = `NotHeld`. 세션의 취소가 `TransportOwned` 일 때 이 동사로 간다(§5-0). 처분 = 아래 「✕」.

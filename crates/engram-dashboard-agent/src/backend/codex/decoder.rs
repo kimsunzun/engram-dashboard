@@ -281,7 +281,7 @@ const TOOL_ITEM_TYPES: &[&str] = &[
 ];
 
 /// 이 변형이 도구 항목인가 — [`TOOL_ITEM_TYPES`]. 통로는 어휘를 따로 베끼지 않고 이것을 부른다(그 끝이 도구 끝
-/// 계기다 — 단순화 계획 2026-09-26).
+/// 계기다 — ADR-0235).
 // ADR-0231
 pub(super) fn is_tool_item(item_type: &str) -> bool {
     TOOL_ITEM_TYPES.contains(&item_type)
@@ -2955,7 +2955,7 @@ mod tests {
         assert_eq!(truncate(&"한".repeat(10), 3), "한한한…");
     }
 
-    // ── 도구 끝 계기의 어휘 (ADR-0231 · 단순화 계획 2026-09-26) ───────────────────
+    // ── 도구 끝 계기의 어휘 (ADR-0231 · ADR-0235) ───────────────────
 
     /// 도구 = 도구 호출 어휘 여섯뿐이다 — 출력(`agentMessage`·`reasoning`·`plan`) · 되울림 · 도구인지 근거 없는 아는 변형 ·
     /// 모르는 변형 · 빈 문자열은 전부 아니다(그 끝은 계기가 아니다).

@@ -551,8 +551,8 @@ impl AgentSession {
     ///     ★확인과 `CancelRequested` 는 한 replay 구간이다★(`OutputCore::emit_cancel_request`) — 펌프의 결말이
     ///     확인 뒤에 끼면 그 항목은 `NotFound` 로 답하고 취소 줄도 쓰지 않는다. 기록 뒤에 온 결말(늦은 받음 등)은
     ///     `Requested` 그대로이고 명부가 결말을 정한다.
-    ///     ★취소 줄 쓰기 실패 = `CancelFailed` 를 내고 `Err(Write)`★ — 항목은 취소 대기 그대로다(목록으로
-    ///     되돌리면 모든 창에서 빠진 항목이 다시 그려진다).
+    ///     ★취소 줄 쓰기 실패 = `CancelFailed` 를 내고 `Err(Write)`★ — 항목은 취소 대기 그대로 「못 뺐다」다(대기로
+    ///     되돌리지 않는 사유 = `QueuedInputEvent::CancelFailed` doc).
     ///   - `TransportOwned` — 자물쇠 없이 확인 → `withdraw`: `Withdrawn` = `Cancelled` · `TooLate` = `Requested`
     ///     · `NotHeld` = `NotFound`(확인과 거두기 사이에 결말이 났다 — 그 결말 사건이 곧 명부에 선다). 목록
     ///     사건은 통로가 낸다.
@@ -613,6 +613,7 @@ impl AgentSession {
 
     /// 목록 조회의 세션 쪽 — 명부 행과 `as_of_seq` 를 한 락 아래 읽고, 그 락을 놓은 **뒤** 통로에 수락 모름을
     /// 물어 `Queued` 행에 덧댄다. 표지는 조회 순간의 통로 상태라 행 스냅숏과 한 원자가 아니다(다음 조회가 고친다).
+    /// ★오늘 그 표지를 채우는 통로는 없다★ — codex 도 기본 구현(빈 목록)이다(`AgentTransport::unconfirmed_inputs`).
     /// 입력 자물쇠를 잡지 않는다 — 읽기다.
     // ADR-0006
     // ADR-0231

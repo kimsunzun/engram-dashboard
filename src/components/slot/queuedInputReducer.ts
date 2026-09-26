@@ -298,7 +298,7 @@ export class QueuedInputRegistry {
 
   /**
    * `removed:false` · 요청 실패. ★대기로 되돌리지 않는다★ — 응답 칸(`not_removed`)이 뒤이은 벤더 닫힘의 원인을
-   * 가른다(그리기는 이 행을 보통 행으로 그린다 — 단순화 계획 2026-09-26 항목 8).
+   * 가른다(그리기는 이 행을 넘긴 행처럼 ✕ 없이 그린다 — ADR-0235).
    */
   private onNotRemoved(id: string, closed: QueuedClosure[]): void {
     const at = this.position(id)

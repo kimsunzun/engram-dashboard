@@ -828,8 +828,8 @@ describe('StructuredEventAccumulator — 대기 입력(ADR-0231)', () => {
     }
   })
 
-  // ADR-0231: 단순화 계획 2026-09-26 항목 8 — ✕ 는 미리 감추지 않는다. 행은 명부가 뺐다고 확인하는 사건이 환원될
-  //   때까지 남고(claude 와 codex 가 같은 규칙), 못 뺐다는 답은 행을 보통 행으로 되돌린다.
+  // ADR-0231 · ADR-0235 — ✕ 는 미리 감추지 않는다. 행은 명부가 뺐다고 확인하는 사건이 환원될 때까지 남고(claude 와
+  //   codex 가 같은 규칙), 못 뺐다는 답을 받은 행은 취소 대기(`not_removed`)로 남는다(그리기는 넘긴 행처럼 ✕ 없이).
   it('✕ 는 확인된 제거까지 행을 남긴다 — 취소 대기도 그리고, removed:true · Dropped{Withdrawn} 에서만 빠진다', () => {
     const ring = [queued('X'), queued('Y'), cancelRequested('X')]
     const a = new StructuredEventAccumulator()
@@ -853,7 +853,7 @@ describe('StructuredEventAccumulator — 대기 입력(ADR-0231)', () => {
     expect(listed(a)).toEqual(['X', 'Y'])
   })
 
-  it('못 뺐다는 답(removed:false · CancelFailed)은 행을 보통 행으로 되돌리고 받음에서 말풍선으로 빠진다', () => {
+  it('못 뺐다는 답(removed:false · CancelFailed)은 행을 취소 대기(not_removed)로 남기고 받음에서 말풍선으로 빠진다', () => {
     for (const answer of [cancelAnswered('X', false), cancelFailed('X')]) {
       const acc = new StructuredEventAccumulator()
       feedAll(acc, [queued('X', '못 뺀 글'), cancelRequested('X'), answer])
@@ -1074,7 +1074,7 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
     expect(listed(acc)).toEqual(['X'])
   })
 
-  // ADR-0231: 단순화 계획 2026-09-26 항목 9 — 다시 붙은 창도 넘긴 행을 「보냄」(✕ 없음)으로 그린다.
+  // ADR-0231 · ADR-0235 — 다시 붙은 창도 넘긴 행을 「보냄」(✕ 없음)으로 그린다.
   it('재부착: 목록 조회의 `sent` 행은 넘김 표지가 선 행이 되고, 스냅숏 뒤의 표지 사건이 그 위에 다시 선다', () => {
     const acc = new StructuredEventAccumulator()
     feedAt(acc, 20, textDelta('a'))

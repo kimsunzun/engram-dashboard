@@ -4,13 +4,15 @@
 
 ## 공통 가공
 
-- **원본:** `.claude/handoff/attachments/20260925-midturn-phase0/logs/codex-*.jsonl` 의 `{t,dir,line}` 봉투에서 `dir:"out"` 인 `line` 만 꺼냈다. `meta`·`in` 은 버렸다. 「줄 범위」는 그 로그 파일의 0 기반 줄 번호다. 각 로그가 무엇을 쟀는지는 `docs/research/mid-turn-phase0-measurements-2026-09-25.md`(M6·M7) · `docs/research/mid-turn-phase0b-measurements-2026-09-26.md`(M9·M10).
+- **원본:** `.claude/handoff/attachments/20260925-midturn-phase0/logs/codex-*.jsonl` 의 `{t,dir,line}` 봉투에서 `dir:"out"` 인 `line` 만 꺼냈다. `meta`·`in` 은 버렸다. 「줄 범위」는 그 로그 파일의 0 기반 줄 번호다. 각 로그가 무엇을 쟀는지는 `docs/research/mid-turn-phase0-measurements-2026-09-25.md`(M6·M7) · `docs/research/mid-turn-phase0b-measurements-2026-09-26.md`(M9).
 - **빼낸 잡음 줄:** `mcpServer/startupStatus/updated` · `skills/changed` · `account/updated` · `account/rateLimits/updated` · `remoteControl/status/changed`(기계 이름이 실려 있다) · `thread/started`. 핸드셰이크 응답(`initialize` id 0 · `thread/start` id 1)은 범위 밖이라 없다 — 모든 파일이 첫 `turn/start` 응답에서 시작한다.
 - **개인정보 치환:** cwd → `C:\work\proj` · OS 사용자 홈 → `C:\home\user`. 스레드·턴·항목 id 는 서버 난수라 그대로 뒀다.
 - codex-cli 0.156.1 · `-c model=gpt-6-luna -c model_reasoning_effort=low -c notify=[]`(Phase 0 보고서 §1).
 - **손으로 지은 줄은 없다** — 전부 실측이다.
 
 ## 파일
+
+시험이 읽는 것은 지금 `tool_end_m7.jsonl` 하나다(`transport.rs` 의 `include_str!`) — 나머지 둘은 벤더 동작의 실측 기록으로 남는다. `record_only_m10.jsonl` 은 그것을 읽던 후속 턴 빚 시험과 함께 걷었다(ADR-0235).
 
 | 파일 | 줄 | 원본 · 줄 범위 | 보여 주는 것 |
 |---|---|---|---|

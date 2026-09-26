@@ -44,7 +44,7 @@ describe('QueuedInputList(ADR-0231)', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  // ADR-0231: 단순화 계획 2026-09-26 항목 8 — ✕ 는 명부가 뺐다고 확인한 뒤에만 행을 뺀다(미리 감추지 않는다).
+  // ADR-0231 · ADR-0235 — ✕ 는 명부가 뺐다고 확인한 뒤에만 행을 뺀다(미리 감추지 않는다).
   it('취소 대기도 그린다 — 답을 기다리는 동안 ✕ 가 잠긴다', () => {
     render(<QueuedInputList agentId={AGENT} entries={[waiting('A'), cancelling('B'), waiting('C')]} />)
     expect(shownIds()).toEqual(['A', 'B', 'C'])

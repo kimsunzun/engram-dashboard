@@ -1,6 +1,7 @@
 # 턴 도중 입력 — M15 데몬 실측 (codex 통로 넘김 반응 지연) (2026-09-26)
 
 - **상태:** 실측 완료. `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md` §3-3 의 **M15** 행(L161 — 도구 끝 `max(①) + max(리더 밀림) + max(②) < 6 ms`)을 과업으로 삼아 잰 결과다. ★TRD 본문은 이 문서가 고치지 않았다★ — M15 행에서 이 문서로 링크를 거는 일은 다음 개정의 몫이다.
+- ★**후속(2026-09-26 단순화 — ADR-0235): 이 측정이 켠 넘기기 정책은 걷혔다.**★ `HAND_OVER_POLICY = AtEarliestBoundary`(답 구간 붙듦 포함)가 코드에서 빠졌고, codex 는 이제 도는 턴의 도구 항목이 끝날 때만 쥔 글을 넘긴다. 계측 target 도 바뀌었다 — `engram::codex_handover` 는 없어지고 `engram::codex_steer`(사건마다 한 줄 · `phase` 칸)가 대신한다. 그래서 §1 · §4 의 `RUST_LOG=…engram::codex_handover=debug` 는 지금 코드에서 아무것도 켜지 않는다. 값은 제품 커밋 `4ba00b5` 의 기록으로 그대로 둔다.
 - **소비처:** TRD §3-3 M15 행 · 구현 계획 `.claude/handoff/attachments/20260926-midturn-impl/plan.md` §5. 답 끝 값은 M16 창과 견준다.
 - **선행 보고서:** [`mid-turn-m16-measurements-2026-09-26.md`](mid-turn-m16-measurements-2026-09-26.md)(답 끝 창 — 가장 좁은 창 9.4 ms). 측정 도구 설명 = `.claude/handoff/attachments/20260926-midturn-impl/m15/README.md`. 여기 되적지 않는다.
 - **잰 날:** 2026-09-26 (KST 16:18–16:31 · 로그 시각은 UTC 07:18–07:31)

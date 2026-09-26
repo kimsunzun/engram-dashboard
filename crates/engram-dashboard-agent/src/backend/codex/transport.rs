@@ -2,7 +2,7 @@
 //!
 //! ★이 파일이 소유하는 것★: 자식 프로세스 + Job Object · 단일 stdin writer · 리더(pump) · 나간 요청의
 //!   대기표와 id 계수기 · thread id 와 준비 상태 · 게이트되는 입력 큐 · 도는 턴의 도구 끝에 쥔 글을 넘기는
-//!   계기([`State::steer_due`] — 단순화 계획 2026-09-26). 나가는 봉투의 id·메서드·순서를
+//!   계기([`State::steer_due`] — ADR-0235). 나가는 봉투의 id·메서드·순서를
 //!   전부 여기서 쥔다 — 그래서 [`AgentTransport::send_input`] 이 받는 바이트는 와이어 프레임이 아니라
 //!   **메시지 본문**이다([`crate::backend::InputEncoder::TransportFramed`]).
 //!
@@ -414,7 +414,7 @@ struct State {
     closed: bool,
     /// 도구 끝 계기 — 우리 지금 턴의 도구 항목이 끝났다([`Reader::note_tool_item`]) · 또는 턴 id 가 막 온 턴에 쥔 사용자
     ///   글이 남았다([`Reader::resolve`]). 서 있는 동안 라이터가 쥔 사용자 글을 친 순서대로 하나씩 steer 로 넘기고, 넘길
-    ///   것이 없어지면 내린다([`take_steer_locked`]) — 도구 끝 하나가 쥔 글 전부를 넘긴다(단순화 계획 2026-09-26 — 「도구
+    ///   것이 없어지면 내린다([`take_steer_locked`]) — 도구 끝 하나가 쥔 글 전부를 넘긴다(ADR-0235 — 「도구
     ///   하나 끝나면 슬쩍 끼워 넣는다」). ★세우는 쪽이 같은 락 구간에서 `notify_all` 한다★.
     // ADR-0231
     steer_due: bool,
@@ -477,6 +477,7 @@ impl Disposal {
 ///   갈아 끼울 뿐이다).
 /// 상태 락은 읽는 동안만 쥔다(ADR-0006 — emit 은 락 밖).
 // ADR-0231
+// ADR-0235
 fn publish_hand_over(core: &OutputCore, state: &SharedState, id: &str) {
     let mut published = None;
     loop {
@@ -602,7 +603,7 @@ impl TurnClose {
     }
 }
 
-// ── 턴 도중 넘기기 계측 (단순화 계획 2026-09-26 항목 11) ─────────────────────────────
+// ── 턴 도중 넘기기 계측 (ADR-0235) ─────────────────────────────
 
 /// 턴 도중 넘기기 계측 줄의 target — `RUST_LOG=engram::codex_steer=debug` 로 켠다. 꺼져 있으면 재료도 안 모은다
 /// ([`SteerTrace::enabled`] — 기본 레벨 warn 에서는 한 줄도 안 나간다). 줄은 사건마다 하나다.
@@ -836,7 +837,7 @@ impl State {
     /// ★받음(에코)만이 넘긴 글을 목록에서 받음으로 뺀다★ — 에코 없이 끝난 턴의 글은 다시 쥐고 다음 턴을 탄다(Idle 순서 —
     ///   [`State::idle_opening`]). 자리를 안 옮기므로 친 순서가 그대로다. 뒤늦은 에코가 오면 쥔 채로 받음이 된다
     ///   ([`State::take_delivered`] — 다시 나가지 않는다).
-    /// ★실패 끝도 지우지 않는다★(사용자 결정 2026-09-26 B — 「실패는 지워」를 대신한다) — 되돌린 글과 쥔 글은 아래
+    /// ★실패 끝도 지우지 않는다★(사용자 결정 2026-09-26 · ADR-0235 — 「실패는 지워」를 대신한다) — 되돌린 글과 쥔 글은 아래
     ///   멈춤([`State::halted`])이 다음 사용자 글까지 기다리게 한다. 실패 끝과 나머지 끝이 갈리는 것은 그 멈춤뿐이다.
     /// ✕ 가 닿은 항목을 쥐지 않는 것은 사용자가 이미 뺐기 때문이다 — 되돌리면 다음 턴에 나간다.
     /// 우편은 다시 쥐지 않는다(오늘 처분 그대로) — 목록 밖이라 그 글의 결말은 커널이 진다.
@@ -850,6 +851,7 @@ impl State {
     /// ★`close` 의 갈래마다 따로 적는다 — `_` 로 묶지 말 것★: 새 끝이 생기면 여기서 컴파일이 멈춰야 그 끝의 처분을
     ///   정하게 된다.
     // ADR-0231
+    // ADR-0235
     fn close_turn_items(&mut self, gen: u64, close: TurnClose) -> Disposal {
         enum Fate {
             Keep,
@@ -871,7 +873,7 @@ impl State {
             } else if item.cancel_asked {
                 Fate::Drop(DropCause::Withdrawn)
             } else {
-                // ★끝의 모양과 무관하게 쥔 자리로 되돌린다★(사용자 결정 2026-09-26 B — 오류에도 지우지 않고 멈춘다):
+                // ★끝의 모양과 무관하게 쥔 자리로 되돌린다★(사용자 결정 2026-09-26 · ADR-0235 — 오류에도 지우지 않고 멈춘다):
                 //   실패 끝은 아래에서 멈춤을 세우므로 되돌린 글은 다음 사용자 글까지 기다린다.
                 Fate::Held
             };
@@ -2015,7 +2017,7 @@ fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
 }
 
 /// 도구 끝 계기([`State::steer_due`])가 서 있으면 도는 턴에 넘길 쥔 항목 하나를 집어 `InFlight` 로 옮기고 그
-/// `turn/steer` 를 만든다 — 턴 도중 넘기기의 전부다(단순화 계획 2026-09-26). ★턴을 열지 않는다★ — 여는 자리는 여전히
+/// `turn/steer` 를 만든다 — 턴 도중 넘기기의 전부다(ADR-0235). ★턴을 열지 않는다★ — 여는 자리는 여전히
 /// [`take_turn_locked`] 하나다(ADR-0193).
 ///
 /// 후보 = 가장 오래된 `Held` **사용자** 항목. ★우편은 건너뛴다★ — 목록 밖이라 앞지르기 금지에 들지 않고, 턴
@@ -2028,6 +2030,7 @@ fn take_turn_locked(s: &mut State, next_id: &AtomicI64) -> Option<Job> {
 /// ★후보가 방출 전이면 계기를 둔 채 기다린다★ — 건너뛰지 않고(친 순서) 방출이 라이터를 깨운다([`announce`]).
 /// ★✕ 와 같은 락에서 갈린다★ — 여기서 `InFlight` 로 옮긴 뒤에 온 ✕ 는 넘긴 쪽(`TooLate`)이다.
 // ADR-0231
+// ADR-0235
 fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
     if !s.steer_due {
         return None;
@@ -3261,7 +3264,7 @@ impl Reader {
                                         }
                                         // ★턴 id 가 막 왔다★ — 이 턴을 여는 동안 쥔 사용자 글(턴 끝에 남은 글 ·
                                         //   응답 전에 친 글)이 있으면 도구 끝을 기다리지 않고 곧바로 이 턴에 넣는다
-                                        //   — 턴 끝의 남은 글이 한 턴에 모인다(단순화 계획 2026-09-26 항목 4).
+                                        //   — 턴 끝의 남은 글이 한 턴에 모인다(ADR-0235).
                                         // ADR-0231
                                         None => {
                                             if newly
@@ -3424,7 +3427,7 @@ impl Reader {
         idle
     }
 
-    /// 도구 끝 계기(단순화 계획 2026-09-26 — t3code 모양): 우리 지금 턴의 도구 항목([`is_tool_item`])이 끝나면
+    /// 도구 끝 계기(ADR-0235 — t3code 모양): 우리 지금 턴의 도구 항목([`is_tool_item`])이 끝나면
     /// (`item/completed`) [`State::steer_due`] 를 세우고 라이터를 깨운다 — 그 도구 끝이 쥔 사용자 글을 전부 넘긴다.
     /// 돌려주는 값 = 도구 항목의 계측 줄([`STEER_TRACE`]의 `tool_start` · `tool_end` — 락 밖에서 찍을 것).
     ///
@@ -3435,6 +3438,7 @@ impl Reader {
     /// ★번역보다 **먼저** 부른다★ — 계기가 라이터에 닿는 시각이 반응 지연이고, 번역·emit 은 그 뒤에 해도 걸리는 순서가
     ///   없다.
     // ADR-0231
+    // ADR-0235
     fn note_tool_item(&self, method_name: &str, params: Option<&Value>) -> Option<SteerTrace> {
         let started = method_name == method::ITEM_STARTED;
         let completed = method_name == method::ITEM_COMPLETED;
@@ -3761,8 +3765,9 @@ fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Wi
                 cv.notify_all();
                 (Withdraw::Withdrawn, dropped.into_iter().collect())
             }
-            // ★이미 넘겼다 — 목록에서만 뺀다★: 결말은 벤더가 정하고(에코 = 받음 · steer 거절 = 거둠), 여기서는
-            //   취소 접수와 「벤더 큐에서 못 뺐다」를 곧바로 잇는다(codex 에는 넘긴 글을 거두는 동사가 없다).
+            // ★이미 넘겼다 — 거두지 못한다 · 행은 목록에 남는다★(프론트는 넘긴 행처럼 ✕ 없이 그린다): 결말은 벤더가
+            //   정하고(에코 = 받음 · steer 거절이나 에코 없는 턴 끝 = 거둠), 여기서는 취소 접수와 「벤더 큐에서 못
+            //   뺐다」를 곧바로 잇는다(codex 에는 넘긴 글을 거두는 동사가 없다).
             //   ★겹친 둘째 ✕(창 + LLM — 입력 자물쇠를 안 탄다)는 사건 없이 `TooLate`★ — 명부의
             //   `Cancelling`+`CancelRequested` 무동작 행이 둘째 방어다.
             // ADR-0231
@@ -7989,7 +7994,7 @@ mod tests {
         assert!(take(&h).is_none(), "{at}: 두 번 나갔다");
     }
 
-    /// ★에코 없이 끝난 턴의 사용자 글(목록 · Direct)은 끝의 모양과 무관하게 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 B
+    /// ★에코 없이 끝난 턴의 사용자 글(목록 · Direct)은 끝의 모양과 무관하게 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 · ADR-0235
     /// — 「실패는 지워」를 대신한다). 결말을 말한 끝(`completed` · 뜻 모를 status)과 끊기는 다음 턴을 곧바로 한 번 태우고
     /// (멈춤 없음), 실패 끝(`failed` · `turn/start` 의 쓰기 실패 · 오류 응답 · 시한 · 해독 실패 · 긴 turn id)은 멈춤이 서서
     /// 다음 사용자 글까지 기다린다 — 어느 쪽도 사건이 없다(목록 행 · 그린 말풍선 그대로). 응답 뒤 · 응답 앞(이른 종료 풀기)
@@ -8344,7 +8349,7 @@ mod tests {
         let _ = writer.join();
     }
 
-    // ── 도구 끝 계기 · 계측 줄 (ADR-0231 · 단순화 계획 2026-09-26) ─────────────
+    // ── 도구 끝 계기 · 계측 줄 (ADR-0231 · ADR-0235) ─────────────
 
     /// item 알림 한 줄 — 우리 thread(`T`)의 `turn` 턴.
     fn item_line(method_name: &str, turn: &str, kind: &str, id: &str) -> String {
@@ -8670,7 +8675,7 @@ mod tests {
 
     /// ★턴 id 를 기다리는 동안은 넘기지 않는다 — 도구 끝이 와도 · `turn/started` 로도 안 잡는다★. `turn/start` 응답이
     /// 턴 id 를 주면 그동안 쥔 글이 도구 끝을 기다리지 않고 머리부터 하나씩 넘어가고(`expectedTurnId` ·
-    /// `clientUserMessageId`), 라이터가 차례로 뒤 항목도 이어서 넘긴다(단순화 계획 2026-09-26 항목 4). 목록 사건은 없다.
+    /// `clientUserMessageId`), 라이터가 차례로 뒤 항목도 이어서 넘긴다(ADR-0235). 목록 사건은 없다.
     #[test]
     fn a_held_item_is_steered_only_once_the_turn_start_reply_names_the_turn() {
         let mut h = harness();
@@ -9003,7 +9008,7 @@ mod tests {
         );
     }
 
-    // ── 넘김 표지 — 넘긴 행은 「보냄」(✕ 숨김) · 되돌린 행은 「대기」 (ADR-0231 · 단순화 계획 2026-09-26 항목 8·9) ──
+    // ── 넘김 표지 — 넘긴 행은 「보냄」(✕ 숨김) · 되돌린 행은 「대기」 (ADR-0231 · ADR-0235) ──
 
     /// 명부 행의 (id, 넘김 표지) — 목록 조회·재부착이 읽는 그 값.
     fn sent_marks(h: &Harness) -> Vec<(String, bool)> {
@@ -9206,7 +9211,7 @@ mod tests {
         );
     }
 
-    // ── 도구 끝에 넘기기 (ADR-0231 · 단순화 계획 2026-09-26 목표 동작 1 · 2 · 4 · 5) ──
+    // ── 도구 끝에 넘기기 (ADR-0231 · ADR-0235) ──
 
     /// ★도구 끝 하나가 쥔 사용자 글 전부를 친 순서대로 넘긴다★ — 글마다 `turn/steer` 하나 · 제 `clientUserMessageId` ·
     /// 지금 턴 id. 우편은 넘기지도 막지도 않는다(턴 끝까지 쥔다). 넘긴 글은 목록에 남고(받음은 에코뿐 — 목록 사건은
@@ -9397,7 +9402,7 @@ mod tests {
         assert!(take(&h).is_none(), "끝난 턴 뒤에 turn/start 가 나갔다");
     }
 
-    /// ★steer 를 못 쓰면 그 글은 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 B — 지우지 않는다) · 목록 사건 0 건 · 대기표는
+    /// ★steer 를 못 쓰면 그 글은 쥔 자리로 돌아간다★(사용자 결정 2026-09-26 · ADR-0235 — 지우지 않는다) · 목록 사건 0 건 · 대기표는
     /// 걷히고 턴은 계속 돈다(오류 뒤 멈춤의 계기가 아니다). 그 턴에는 「steer 거절」 표시가 서 같은 턴의 다음 도구 끝이 그
     /// 글을 곧바로 다시 쓰지 않고(재시도 고리 없음), 턴이 끝난 뒤 다음 Idle 에 `turn/start` 로 **한 번** 나간다.
     #[test]
@@ -9678,7 +9683,7 @@ mod tests {
     /// ★턴 끝과 steer 응답 사이의 창★ — −32600(돌고 있는 턴 없음)이 `turn/completed` 뒤에 와도 앞에 와도 그 글은 `Held`
     /// 로 남아 `turn/start` 로 **정확히 한 번** 나간다(M10 — 순서를 가정하지 않는다) · 목록 사건 0 건 · 턴 끝은 그 응답을
     /// 기다리지 않고 · 다시 나간 뒤 온 옛 요청의 거절은 무동작(세대 가림). `failed` 끝도 같은 글을 쥔다 — 턴 도중 거절로
-    /// 돌아온 글은 그대로이고, 거절이 오기 전의 글은 끝이 되돌린다(사용자 결정 2026-09-26 B). 그 `turn/start` 는 멈춘 뒤
+    /// 돌아온 글은 그대로이고, 거절이 오기 전의 글은 끝이 되돌린다(사용자 결정 2026-09-26 · ADR-0235). 그 `turn/start` 는 멈춘 뒤
     /// 친 글이 닿은 뒤다(오류 뒤 멈춤).
     #[test]
     fn a_refused_steer_is_held_and_sent_once_whether_its_error_comes_before_or_after_the_turn_end()
@@ -10142,7 +10147,7 @@ mod tests {
 
     /// ★Idle 순서 = 사용자 먼저 → 우편★(PRD §3-9 · N6) — 쥔 우편과 사용자 글이 함께 있으면 먼저 친 우편보다 사용자 턴이
     /// 먼저이고, 우편은 그 턴이 끝난 뒤에 열린다. ★받힌 steer 가 답을 못 받고 끝나도 빈 `turn/start` 는 안 나간다★(후속
-    /// 턴 빚은 걷혔다 — 단순화 계획 2026-09-26).
+    /// 턴 빚은 걷혔다 — ADR-0235).
     #[test]
     fn the_idle_order_is_user_then_mail() {
         for with_user in [true, false] {
@@ -10495,7 +10500,7 @@ mod tests {
         }
     }
 
-    /// ★`failed` 턴이 실은 에코 없는 steer 글은 지우지 않고 멈춤 뒤에 쥔다★(사용자 결정 2026-09-26 B — 「실패는 지워」를
+    /// ★`failed` 턴이 실은 에코 없는 steer 글은 지우지 않고 멈춤 뒤에 쥔다★(사용자 결정 2026-09-26 · ADR-0235 — 「실패는 지워」를
     /// 대신한다) · 목록 사건 0 건(행 그대로) · 받힌 글은 빠지고 쥔 우편은 그대로 · 멈춤이 선다. 그 steer 의 응답을 기다리지
     /// 않는다 — 다음 사용자 글이 멈춤을 풀면 돌아온 글이 그 글보다 먼저 `turn/start` 로 곧바로 나가고(쥔 우편보다 먼저),
     /// 옛 요청의 뒤늦은 성공 응답은 아무것도 안 낸다.

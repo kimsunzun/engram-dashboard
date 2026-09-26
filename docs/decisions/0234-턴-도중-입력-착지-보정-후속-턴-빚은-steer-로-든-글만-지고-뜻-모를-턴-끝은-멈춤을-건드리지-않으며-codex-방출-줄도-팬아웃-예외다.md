@@ -1,7 +1,7 @@
 # ADR-0234: 턴 도중 입력 착지 보정 — 후속 턴 빚은 steer 로 든 글만 지고 뜻 모를 턴 끝은 멈춤을 건드리지 않으며 codex 방출 줄도 팬아웃 예외다
 
-- 상태: 확정 (2026-09-26, 근거: 구현 P0–P8 착지 + TRD 9판 §10-6(행마다 결정 주체) + 구현 리뷰(`/review code deep` — P2 · P3 · P8) + M15 · M16 실측)
-- 관련: Amends ADR-0231 (결정 2 재론 조건, 결정 7 빚 판정, 결정 8 계기 목록, 결정 9 codex 방출 줄 팬아웃, 결정 10 claude 받음 판정, 영향의 착지 상태와 명부 소유) · Amends ADR-0006 (codex 방출 줄 order 를 쥔 채 하는 팬아웃 예외) · TRD `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md`(§5-5 · §5-9 · §10-6) · PRD `docs/process/S21-codex-backend/prd-mid-turn-input-queue.md`(§3-1 · R8) · `docs/research/mid-turn-m15-measurements-2026-09-26.md` · `docs/research/mid-turn-m16-measurements-2026-09-26.md` · `docs/research/mid-turn-phase0b-measurements-2026-09-26.md`(M9 · M10) · 관련 ADR-0127(커널 분류기의 「그 밖의 끝」) · ADR-0233(같은 착지의 세션 id 영속 개정) · step-log S21
+- 상태: 확정 (2026-09-26, 근거: 구현 P0–P8 착지 + TRD 9판 §10-6(행마다 결정 주체) + 구현 리뷰(`/review code deep` — P2 · P3 · P8) + M15 · M16 실측) · 부분 폐기 by ADR-0235 (결정 1 빚 판정, 결정 2의 항목 처분, 결정 4 넘기기 기본값)
+- 관련: Amends ADR-0231 (결정 2 재론 조건, 결정 7 빚 판정, 결정 8 계기 목록, 결정 9 codex 방출 줄 팬아웃, 결정 10 claude 받음 판정, 영향의 착지 상태와 명부 소유) · Amends ADR-0006 (codex 방출 줄 order 를 쥔 채 하는 팬아웃 예외) · TRD `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md`(§5-5 · §5-9 · §10-6) · PRD `docs/process/S21-codex-backend/prd-mid-turn-input-queue.md`(§3-1 · R8) · `docs/research/mid-turn-m15-measurements-2026-09-26.md` · `docs/research/mid-turn-m16-measurements-2026-09-26.md` · `docs/research/mid-turn-phase0b-measurements-2026-09-26.md`(M9 · M10) · 관련 ADR-0127(커널 분류기의 「그 밖의 끝」) · ADR-0233(같은 착지의 세션 id 영속 개정) · step-log S21 · Amended by ADR-0235 (결정 1 빚 판정, 결정 2의 항목 처분, 결정 4 넘기기 기본값)
 
 ## 맥락
 ADR-0231 은 코드 전에 박혔다(그 ADR 「영향」 — 「착지 전 — 코드 없음」). 구현(P0–P8)은 TRD 8판 서술과 여러 자리에서 다르게 착지했고, TRD 9판 §10-6 이 그 차이를 행마다 결정 주체와 함께 색인한다 — 그 표의 「8판 서술」 칸이 새 ADR 의 거부한 대안이 되도록 적혀 있다.
