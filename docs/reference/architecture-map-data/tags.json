@@ -1,0 +1,2095 @@
+{
+ "meta": {
+  "base_commit": "a226f63",
+  "date": "2026-09-26",
+  "domains": [
+   "AGENT",
+   "MAIL",
+   "CMD",
+   "AUTH",
+   "COMM",
+   "DAEMON_LIFE",
+   "SCREEN",
+   "RENDER",
+   "BASE",
+   "ROOT"
+  ],
+  "note": "non-test lines; MIXED files carry line ranges (±10-20 lines). Rules: see architecture-map-notes.md 2장."
+ },
+ "files": [
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/claude/mod.rs",
+   "lines": 1136,
+   "domain": "AGENT",
+   "note": "claude backend: flags, spawn args, resume, mcp-config"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/claude/session_file.rs",
+   "lines": 227,
+   "domain": "AGENT",
+   "note": "claude session transcript file lookup"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/codex/decoder.rs",
+   "lines": 1194,
+   "domain": "AGENT",
+   "note": "codex app-server event decode to OutputEvent"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/codex/mod.rs",
+   "lines": 1173,
+   "domain": "AGENT",
+   "note": "codex backend impl, session id recovery"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/codex/protocol.rs",
+   "lines": 685,
+   "domain": "AGENT",
+   "note": "codex JSON-RPC message types (backend-specific wire)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs",
+   "lines": 472,
+   "domain": "AGENT",
+   "note": "codex thread lock-file holder -> session id recovery"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/codex/transport.rs",
+   "lines": 2639,
+   "domain": "AGENT",
+   "note": "codex app-server stdio transport; contains its own JSON-RPC pending table + request-id correlation (~170 lines COMM-like at 426-527, 742-810)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/gemini/mod.rs",
+   "lines": 142,
+   "domain": "AGENT",
+   "note": "gemini backend stub"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/mod.rs",
+   "lines": 990,
+   "domain": "AGENT",
+   "note": "AgentBackend trait + dispatch; inject_cli_entrance (90-200) = AGENT spawn provisioning (token/url carried opaquely into env/PATH); console_command (44-89) is a BASE-like platform helper"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/backend/shell/mod.rs",
+   "lines": 87,
+   "domain": "AGENT",
+   "note": "shell backend"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/commands.rs",
+   "lines": 1023,
+   "domain": "AGENT",
+   "note": "cmd adapter: agent.* verb declarations (declare_commands!) + handlers over AgentManager"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/failure.rs",
+   "lines": 38,
+   "domain": "AGENT",
+   "note": "agent failure kind"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/lib.rs",
+   "lines": 31,
+   "domain": "AGENT",
+   "note": "module list"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/manager.rs",
+   "lines": 2966,
+   "domain": "AGENT",
+   "note": "AgentManager: spawn/kill/resume/roster naming/link watch (single domain, very large; impl block 725-2955)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/name.rs",
+   "lines": 91,
+   "domain": "AGENT",
+   "note": "agent display name rules"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/output_core.rs",
+   "lines": 741,
+   "domain": "AGENT",
+   "note": "output core: seq/replay/subscribers/finalize"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/persistence/mod.rs",
+   "lines": 156,
+   "domain": "AGENT",
+   "note": "agents.json profile store"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/persistence/presets.rs",
+   "lines": 128,
+   "domain": "AGENT",
+   "note": "preset store"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/platform/file_holders.rs",
+   "lines": 164,
+   "domain": "BASE",
+   "note": "Restart Manager who-holds-file query (domain-free; sole consumer = codex backend)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/platform/mod.rs",
+   "lines": 19,
+   "domain": "BASE",
+   "note": "platform module header"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/platform/process_tree.rs",
+   "lines": 127,
+   "domain": "BASE",
+   "note": "live descendants of a PID (domain-free; sole consumer = codex backend)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/platform/windows.rs",
+   "lines": 98,
+   "domain": "BASE",
+   "note": "Job Object wrapper (domain-free; consumers = transport pty/stdio)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/preset.rs",
+   "lines": 137,
+   "domain": "AGENT",
+   "note": "preset model"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/profile.rs",
+   "lines": 845,
+   "domain": "AGENT",
+   "note": "AgentProfile/AgentCommand/ProfileRegistry, session id replace/retire"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/reaper.rs",
+   "lines": 228,
+   "domain": "AGENT",
+   "note": "exit reaper single consumer"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/session.rs",
+   "lines": 489,
+   "domain": "AGENT",
+   "note": "AgentSession = OutputCore + transport"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/session_id_latch.rs",
+   "lines": 138,
+   "domain": "AGENT",
+   "note": "first-submit latch session id persist"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/session_tracker.rs",
+   "lines": 205,
+   "domain": "AGENT",
+   "note": "claude /clear session id tracker"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/transport/api.rs",
+   "lines": 74,
+   "domain": "AGENT",
+   "note": "ApiTransport stub"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/transport/input_queue.rs",
+   "lines": 292,
+   "domain": "AGENT",
+   "note": "agent input queue/pacing"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/transport/mod.rs",
+   "lines": 129,
+   "domain": "AGENT",
+   "note": "AgentTransport/OutputDecoder seam"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/transport/pty.rs",
+   "lines": 461,
+   "domain": "AGENT",
+   "note": "PTY transport (portable-pty)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/transport/stdio.rs",
+   "lines": 448,
+   "domain": "AGENT",
+   "note": "stdio transport"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/turn.rs",
+   "lines": 254,
+   "domain": "AGENT",
+   "note": "turn observation table (consumer = MAIL busy gate)"
+  },
+  {
+   "file": "crates/engram-dashboard-agent/src/types.rs",
+   "lines": 901,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 212,
+     "domain": "AGENT",
+     "what": "status, output events, reap, CommandSpec"
+    },
+    {
+     "from": 213,
+     "to": 345,
+     "domain": "CMD",
+     "what": "CLI vocabulary consts (exe/group/verbs/flags/env); uncertain vs MAIL/AGENT"
+    },
+    {
+     "from": 346,
+     "to": 660,
+     "domain": "AGENT",
+     "what": "ToolGrant, ControlEndpoint/ControlChannel provisioning, capabilities"
+    },
+    {
+     "from": 661,
+     "to": 901,
+     "domain": "AGENT",
+     "what": "output chunk/frame, AgentInfo, PtyError, sinks"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-base/src/lib.rs",
+   "lines": 54,
+   "domain": "BASE",
+   "note": "crate root"
+  },
+  {
+   "file": "crates/engram-dashboard-base/src/logging/mod.rs",
+   "lines": 442,
+   "domain": "BASE",
+   "note": "tracing init, file log, masking"
+  },
+  {
+   "file": "crates/engram-dashboard-base/src/platform.rs",
+   "lines": 229,
+   "domain": "BASE",
+   "note": "pid liveness, process start time, child pids"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/coerce.rs",
+   "lines": 183,
+   "domain": "CMD",
+   "note": "schema/serde coercion"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/envelope.rs",
+   "lines": 101,
+   "domain": "CMD",
+   "note": "command envelope"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/error.rs",
+   "lines": 403,
+   "domain": "CMD",
+   "note": "CommandError"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/lib.rs",
+   "lines": 64,
+   "domain": "CMD",
+   "note": "crate root"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/link.rs",
+   "lines": 92,
+   "domain": "CMD",
+   "note": "transport seam + inbound receiver"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/macros.rs",
+   "lines": 353,
+   "domain": "CMD",
+   "note": "declare_commands macro"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/roster.rs",
+   "lines": 380,
+   "domain": "CMD",
+   "note": "owner roster"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/route.rs",
+   "lines": 192,
+   "domain": "CMD",
+   "note": "routing"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/spec.rs",
+   "lines": 306,
+   "domain": "CMD",
+   "note": "static spec"
+  },
+  {
+   "file": "crates/engram-dashboard-command/src/table.rs",
+   "lines": 376,
+   "domain": "CMD",
+   "note": "command table"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/agent_conn.rs",
+   "lines": 516,
+   "domain": "AGENT",
+   "note": "feature-side adapter plugging agent system into net ConnectionHandler: wire encoding of output/control, on_text dispatch into ConnectionCore, on_disconnect cleanup (touches CMD roster detach + deliveries drop, ~10 lines). Factory 435-516 is COMM-ish (uncertain)."
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/bin/engram.rs",
+   "lines": 2790,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 138,
+     "domain": "ROOT",
+     "what": "CLI header, imports"
+    },
+    {
+     "from": 139,
+     "to": 383,
+     "domain": "CMD",
+     "what": "help text loading/rendering (uncertain)"
+    },
+    {
+     "from": 384,
+     "to": 699,
+     "domain": "ROOT",
+     "what": "main/run, credentials, command model types"
+    },
+    {
+     "from": 700,
+     "to": 735,
+     "domain": "AGENT",
+     "what": "agent request body"
+    },
+    {
+     "from": 736,
+     "to": 894,
+     "domain": "CMD",
+     "what": "parse command/catalog/invoke/help"
+    },
+    {
+     "from": 895,
+     "to": 947,
+     "domain": "MAIL",
+     "what": "parse mail group"
+    },
+    {
+     "from": 948,
+     "to": 1205,
+     "domain": "AGENT",
+     "what": "parse agent spawn/new/rename/move"
+    },
+    {
+     "from": 1206,
+     "to": 1531,
+     "domain": "MAIL",
+     "what": "send args, body, send/query exit codes"
+    },
+    {
+     "from": 1532,
+     "to": 1681,
+     "domain": "AGENT",
+     "what": "agent response validation/exit codes"
+    },
+    {
+     "from": 1682,
+     "to": 2609,
+     "domain": "CMD",
+     "what": "catalog fetch/render, invoke arg binding"
+    },
+    {
+     "from": 2610,
+     "to": 2790,
+     "domain": "COMM",
+     "what": "minimal HTTP client, response parse"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/command_delivery.rs",
+   "lines": 2385,
+   "domain": "CMD",
+   "note": "command bus: deliveries/seats, local commands, deliver(), CommandBus.invoke, relay"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/command_roster.rs",
+   "lines": 451,
+   "domain": "CMD",
+   "note": "command roster: attach/detach/owner tokens/registration"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/connection_core.rs",
+   "lines": 2031,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 79,
+     "domain": "AGENT",
+     "what": "header, imports"
+    },
+    {
+     "from": 80,
+     "to": 283,
+     "domain": "COMM",
+     "what": "OutboundSink seam, inbound lanes, dispatch order"
+    },
+    {
+     "from": 284,
+     "to": 363,
+     "domain": "COMM",
+     "what": "per-connection session state (subs, viewports, latches)"
+    },
+    {
+     "from": 364,
+     "to": 497,
+     "domain": "AGENT",
+     "what": "multiview viewport sizing, input lease"
+    },
+    {
+     "from": 498,
+     "to": 845,
+     "domain": "AGENT",
+     "what": "core<->wire agent type conversions"
+    },
+    {
+     "from": 846,
+     "to": 926,
+     "domain": "ROOT",
+     "what": "ConnectionCore struct/ctor/accessors"
+    },
+    {
+     "from": 927,
+     "to": 962,
+     "domain": "CMD",
+     "what": "refuse names the daemon answers"
+    },
+    {
+     "from": 963,
+     "to": 1180,
+     "domain": "AGENT",
+     "what": "dispatch: spawn/kill/stdin/resize/subscribe/lease"
+    },
+    {
+     "from": 1181,
+     "to": 1224,
+     "domain": "DAEMON_LIFE",
+     "what": "StopDaemon arm (force policy)"
+    },
+    {
+     "from": 1225,
+     "to": 1545,
+     "domain": "AGENT",
+     "what": "dispatch: profiles, presets, snapshot, envelope fmt"
+    },
+    {
+     "from": 1546,
+     "to": 1717,
+     "domain": "CMD",
+     "what": "dispatch: register/update/list/command/outcome"
+    },
+    {
+     "from": 1718,
+     "to": 1851,
+     "domain": "AGENT",
+     "what": "handle_subscribe replay FIFO"
+    },
+    {
+     "from": 1852,
+     "to": 1912,
+     "domain": "CMD",
+     "what": "claimed owner token warning"
+    },
+    {
+     "from": 1913,
+     "to": 1934,
+     "domain": "BASE",
+     "what": "log sanitize helpers"
+    },
+    {
+     "from": 1935,
+     "to": 2017,
+     "domain": "AGENT",
+     "what": "lease/roster/profile/preset broadcasts, refusals"
+    },
+    {
+     "from": 2018,
+     "to": 2031,
+     "domain": "COMM",
+     "what": "hello event, agent list event"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/agent.rs",
+   "lines": 288,
+   "domain": "AGENT",
+   "note": "/control/agent CLI verb -> command table adapter (uncertain CMD); RosterBroadcast trait; preview helpers"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/catalog.rs",
+   "lines": 464,
+   "domain": "CMD",
+   "note": "/control/commands list merge + /control/call"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/commands.rs",
+   "lines": 190,
+   "domain": "CMD",
+   "note": "daemon command table, call_daemon_command, DaemonLocalCommands"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/ingress.rs",
+   "lines": 616,
+   "domain": "MAIL",
+   "note": "handle_send/handle_messages, send contract; ControlQueryResult envelope (440-509) is generic COMM-ish"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/mcp_config.rs",
+   "lines": 220,
+   "domain": "AGENT",
+   "note": "per-spawn mcp-config/settings files"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/mcp_server.rs",
+   "lines": 1358,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 173,
+     "domain": "COMM",
+     "what": "imports, route consts, ControlRoute table"
+    },
+    {
+     "from": 174,
+     "to": 224,
+     "domain": "AUTH",
+     "what": "mail-gated path policy"
+    },
+    {
+     "from": 225,
+     "to": 310,
+     "domain": "ROOT",
+     "what": "late-binding slots (manager/messaging/table)"
+    },
+    {
+     "from": 311,
+     "to": 359,
+     "domain": "COMM",
+     "what": "session header, tool names, server handle"
+    },
+    {
+     "from": 360,
+     "to": 647,
+     "domain": "MAIL",
+     "what": "MCP handler: ping, eg_send, eg_messages"
+    },
+    {
+     "from": 648,
+     "to": 855,
+     "domain": "AUTH",
+     "what": "bearer_auth middleware + error responses"
+    },
+    {
+     "from": 856,
+     "to": 981,
+     "domain": "MAIL",
+     "what": "/control/send, /control/messages handlers"
+    },
+    {
+     "from": 982,
+     "to": 1045,
+     "domain": "AGENT",
+     "what": "/control/agent handler"
+    },
+    {
+     "from": 1046,
+     "to": 1221,
+     "domain": "CMD",
+     "what": "/control/commands, /control/call handlers"
+    },
+    {
+     "from": 1222,
+     "to": 1358,
+     "domain": "COMM",
+     "what": "axum router + MCP service startup"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/mod.rs",
+   "lines": 306,
+   "domain": "AGENT",
+   "note": "DaemonControlChannel provision/revoke (spawn provisioning: mcp-config, priming, grants). Embeds token gen+registry.issue (AUTH, ~15 lines) and mail tool grants (MAIL, ~55 lines)."
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/priming.rs",
+   "lines": 360,
+   "domain": "AGENT",
+   "note": "priming file provider + mail-CLI text detection (MAIL-flavoured)"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/control/registry.rs",
+   "lines": 391,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 298,
+     "domain": "AUTH",
+     "what": "bearer token registry, bound identity, MCP session binding"
+    },
+    {
+     "from": 299,
+     "to": 391,
+     "domain": "MAIL",
+     "what": "delivery observer, envelope format, mid-send hook"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/lib.rs",
+   "lines": 977,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 60,
+     "domain": "ROOT",
+     "what": "module list, imports"
+    },
+    {
+     "from": 61,
+     "to": 65,
+     "domain": "DAEMON_LIFE",
+     "what": "resolve data dir"
+    },
+    {
+     "from": 66,
+     "to": 94,
+     "domain": "AUTH",
+     "what": "daemon WS token generation"
+    },
+    {
+     "from": 95,
+     "to": 170,
+     "domain": "AGENT",
+     "what": "locate engram CLI exe for spawns (uncertain DAEMON_LIFE)"
+    },
+    {
+     "from": 171,
+     "to": 224,
+     "domain": "BASE",
+     "what": "panic hook"
+    },
+    {
+     "from": 225,
+     "to": 306,
+     "domain": "ROOT",
+     "what": "DaemonWiring manager/registry build"
+    },
+    {
+     "from": 307,
+     "to": 402,
+     "domain": "ROOT",
+     "what": "accept loop assembly (uncertain COMM)"
+    },
+    {
+     "from": 403,
+     "to": 480,
+     "domain": "DAEMON_LIFE",
+     "what": "data dir, single-instance guard, portfile read, bind"
+    },
+    {
+     "from": 481,
+     "to": 790,
+     "domain": "ROOT",
+     "what": "run(): slots, messaging, flush, daemon.json write, shutdown order"
+    },
+    {
+     "from": 791,
+     "to": 977,
+     "domain": "ROOT",
+     "what": "in-process test server + mem stores (test-harness)"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/main.rs",
+   "lines": 16,
+   "domain": "ROOT",
+   "note": "daemon entry, calls run()"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/messaging_host.rs",
+   "lines": 890,
+   "domain": "MAIL",
+   "note": "delivery port over AgentManager, turn facts/busy gate, idle coalescer, flush worker & lanes"
+  },
+  {
+   "file": "crates/engram-dashboard-daemon/src/status_fanout.rs",
+   "lines": 77,
+   "domain": "AGENT",
+   "note": "StatusSink -> wire broadcast adapter"
+  },
+  {
+   "file": "crates/engram-dashboard-discovery/src/lib.rs",
+   "lines": 1319,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 387,
+     "domain": "DAEMON_LIFE",
+     "what": "data-dir resolution, write probe, install root"
+    },
+    {
+     "from": 388,
+     "to": 734,
+     "domain": "DAEMON_LIFE",
+     "what": "seams, ensure/status/read_live/stop logic"
+    },
+    {
+     "from": 735,
+     "to": 904,
+     "domain": "COMM",
+     "what": "blocking tungstenite stop client (+AuthFrame, stop cmd)"
+    },
+    {
+     "from": 905,
+     "to": 1319,
+     "domain": "DAEMON_LIFE",
+     "what": "taskkill, ensure_daemon, exe locate, daemon.json reader, WMI spawn"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/busy.rs",
+   "lines": 249,
+   "domain": "MAIL",
+   "note": "busy gate"
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/envelope.rs",
+   "lines": 287,
+   "domain": "MAIL",
+   "note": "envelope text assembly"
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/groups.rs",
+   "lines": 248,
+   "domain": "MAIL",
+   "note": "groups"
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/ledger.rs",
+   "lines": 1407,
+   "domain": "MAIL",
+   "note": "delivery ledger"
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/lib.rs",
+   "lines": 53,
+   "domain": "MAIL",
+   "note": "crate root"
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/mailbox.rs",
+   "lines": 658,
+   "domain": "MAIL",
+   "note": "mailbox"
+  },
+  {
+   "file": "crates/engram-dashboard-messaging/src/service.rs",
+   "lines": 3895,
+   "domain": "MAIL",
+   "note": "messaging service (single domain, very large)"
+  },
+  {
+   "file": "crates/engram-dashboard-net/src/auth.rs",
+   "lines": 39,
+   "domain": "AUTH",
+   "note": "AuthFrame handshake frame"
+  },
+  {
+   "file": "crates/engram-dashboard-net/src/frame_port.rs",
+   "lines": 242,
+   "domain": "COMM",
+   "note": "frame port traits (FrameSink/FrameFanout/ConnectionHandler)"
+  },
+  {
+   "file": "crates/engram-dashboard-net/src/instance.rs",
+   "lines": 318,
+   "domain": "DAEMON_LIFE",
+   "note": "single-instance guard on daemon.json (tests gated cfg(all(test,windows)) from 319)"
+  },
+  {
+   "file": "crates/engram-dashboard-net/src/lib.rs",
+   "lines": 142,
+   "domain": "COMM",
+   "note": "crate header/docs, feature gating"
+  },
+  {
+   "file": "crates/engram-dashboard-net/src/portfile.rs",
+   "lines": 88,
+   "domain": "DAEMON_LIFE",
+   "note": "daemon.json write/read/stale"
+  },
+  {
+   "file": "crates/engram-dashboard-net/src/ws.rs",
+   "lines": 888,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 263,
+     "domain": "COMM",
+     "what": "caps, keepalive cfg, registry, conn sink"
+    },
+    {
+     "from": 264,
+     "to": 430,
+     "domain": "AUTH",
+     "what": "Origin allowlist, constant-time compare, auth handshake"
+    },
+    {
+     "from": 431,
+     "to": 888,
+     "domain": "COMM",
+     "what": "conn lifecycle, write/read/dispatch/bypass tasks"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-protocol/src/codec.rs",
+   "lines": 94,
+   "domain": "COMM",
+   "note": "binary output frame codec"
+  },
+  {
+   "file": "crates/engram-dashboard-protocol/src/discovery.rs",
+   "lines": 50,
+   "domain": "DAEMON_LIFE",
+   "note": "DaemonInfo (daemon.json contract, incl. token)"
+  },
+  {
+   "file": "crates/engram-dashboard-protocol/src/domain.rs",
+   "lines": 430,
+   "domain": "COMM",
+   "note": "wire mirror of agent types/profile/preset (content is AGENT-shaped)"
+  },
+  {
+   "file": "crates/engram-dashboard-protocol/src/ids.rs",
+   "lines": 40,
+   "domain": "COMM",
+   "note": "ids, RequestId (From command RequestId)"
+  },
+  {
+   "file": "crates/engram-dashboard-protocol/src/lib.rs",
+   "lines": 104,
+   "domain": "COMM",
+   "note": "crate root, PROTOCOL_VERSION"
+  },
+  {
+   "file": "crates/engram-dashboard-protocol/src/messages.rs",
+   "lines": 869,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 274,
+     "domain": "COMM",
+     "what": "AgentCommand agent/profile/preset requests (AGENT mirror; StopDaemon DAEMON_LIFE)"
+    },
+    {
+     "from": 275,
+     "to": 353,
+     "domain": "CMD",
+     "what": "Register/Update/ListCommands, Command, CommandOutcome"
+    },
+    {
+     "from": 354,
+     "to": 518,
+     "domain": "COMM",
+     "what": "AgentEvent agent/profile/preset events (AGENT mirror)"
+    },
+    {
+     "from": 519,
+     "to": 596,
+     "domain": "CMD",
+     "what": "CommandList/CommandRequest/CommandReply events"
+    },
+    {
+     "from": 597,
+     "to": 768,
+     "domain": "COMM",
+     "what": "SubscribeAction, StructuredEvent, OutputChunk (AGENT mirror)"
+    },
+    {
+     "from": 769,
+     "to": 869,
+     "domain": "COMM",
+     "what": "request-id correlation helpers"
+    }
+   ]
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/clock.rs",
+   "lines": 69,
+   "domain": "COMM",
+   "note": "clock/deadline"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/event.rs",
+   "lines": 421,
+   "domain": "COMM",
+   "note": "transport events"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/frame.rs",
+   "lines": 75,
+   "domain": "COMM",
+   "note": "frame/close codes"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/lib.rs",
+   "lines": 207,
+   "domain": "COMM",
+   "note": "crate root"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/link.rs",
+   "lines": 202,
+   "domain": "COMM",
+   "note": "link/dialer/handshake seam"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/machine.rs",
+   "lines": 439,
+   "domain": "COMM",
+   "note": "pure peer state machine"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/peer.rs",
+   "lines": 1427,
+   "domain": "COMM",
+   "note": "per-peer supervisor task (reconnect/send)"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/pending.rs",
+   "lines": 225,
+   "domain": "COMM",
+   "note": "request/response pending table"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/policy.rs",
+   "lines": 247,
+   "domain": "COMM",
+   "note": "reconnect/queue/decode policies"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/registry.rs",
+   "lines": 214,
+   "domain": "COMM",
+   "note": "N-peer registry"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/stream.rs",
+   "lines": 379,
+   "domain": "COMM",
+   "note": "stream gen/seq dedup/gap detection"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/wire.rs",
+   "lines": 52,
+   "domain": "COMM",
+   "note": "Wire trait"
+  },
+  {
+   "file": "crates/engram-dashboard-transport/src/ws.rs",
+   "lines": 382,
+   "domain": "COMM",
+   "note": "WS link impl (feature ws)"
+  },
+  {
+   "file": "src-tauri/src/commands/agent.rs",
+   "lines": 308,
+   "domain": "AGENT",
+   "note": "thin invoke builders for agent verbs (uncertain COMM: 'forward-only'); subscribe_output = window channel registration (SCREEN/COMM); forward_daemon_command generic"
+  },
+  {
+   "file": "src-tauri/src/commands/autostart.rs",
+   "lines": 24,
+   "domain": "DAEMON_LIFE",
+   "note": "autostart get/set"
+  },
+  {
+   "file": "src-tauri/src/commands/discovery.rs",
+   "lines": 205,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 114,
+     "domain": "DAEMON_LIFE",
+     "what": "discover/start/status/read daemon info"
+    },
+    {
+     "from": 115,
+     "to": 166,
+     "domain": "COMM",
+     "what": "connect/close/connection_state invokes"
+    },
+    {
+     "from": 167,
+     "to": 205,
+     "domain": "DAEMON_LIFE",
+     "what": "daemon_stop, ensure_internal"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/commands/layout.rs",
+   "lines": 542,
+   "domain": "SCREEN",
+   "note": "layout invoke handlers + port impls (events, subs, window host); DaemonSpawner/OwnedSpawner are AGENT-port adapters (~60 lines)"
+  },
+  {
+   "file": "src-tauri/src/commands/mod.rs",
+   "lines": 18,
+   "domain": "ROOT",
+   "note": "module list"
+  },
+  {
+   "file": "src-tauri/src/commands/popout.rs",
+   "lines": 221,
+   "domain": "SCREEN",
+   "note": "popout windows"
+  },
+  {
+   "file": "src-tauri/src/commands/settings.rs",
+   "lines": 137,
+   "domain": "SCREEN",
+   "note": "UI settings invokes"
+  },
+  {
+   "file": "src-tauri/src/commands/tray.rs",
+   "lines": 25,
+   "domain": "SCREEN",
+   "note": "show/hide/quit invokes"
+  },
+  {
+   "file": "src-tauri/src/commands/view_bus.rs",
+   "lines": 131,
+   "domain": "CMD",
+   "note": "webview command report/outcome invokes"
+  },
+  {
+   "file": "src-tauri/src/daemon_client/connection.rs",
+   "lines": 1822,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 385,
+     "domain": "COMM",
+     "what": "consts, backoff, reconnect loop"
+    },
+    {
+     "from": 386,
+     "to": 396,
+     "domain": "AUTH",
+     "what": "auth frame text"
+    },
+    {
+     "from": 397,
+     "to": 888,
+     "domain": "COMM",
+     "what": "handshake, connected lifetime"
+    },
+    {
+     "from": 889,
+     "to": 1227,
+     "domain": "COMM",
+     "what": "main loop (replay flight woven in)"
+    },
+    {
+     "from": 1228,
+     "to": 1277,
+     "domain": "AGENT",
+     "what": "broadcast event -> DaemonEvents"
+    },
+    {
+     "from": 1278,
+     "to": 1340,
+     "domain": "COMM",
+     "what": "send_fire, error consts"
+    },
+    {
+     "from": 1341,
+     "to": 1397,
+     "domain": "CMD",
+     "what": "reject foreign command"
+    },
+    {
+     "from": 1398,
+     "to": 1562,
+     "domain": "AGENT",
+     "what": "apply replay event, subscribe refusal"
+    },
+    {
+     "from": 1563,
+     "to": 1621,
+     "domain": "COMM",
+     "what": "pending request correlation"
+    },
+    {
+     "from": 1622,
+     "to": 1791,
+     "domain": "CMD",
+     "what": "owner advert, outcome sink, inbound accept, register own commands"
+    },
+    {
+     "from": 1792,
+     "to": 1822,
+     "domain": "COMM",
+     "what": "wait for hello"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/daemon_client/events.rs",
+   "lines": 164,
+   "domain": "COMM",
+   "note": "DaemonEvents port -> Tauri emit (uncertain AGENT: events are agent list/status/profile)"
+  },
+  {
+   "file": "src-tauri/src/daemon_client/inbound.rs",
+   "lines": 253,
+   "domain": "CMD",
+   "note": "inbound command receiver, view hop"
+  },
+  {
+   "file": "src-tauri/src/daemon_client/lifecycle.rs",
+   "lines": 367,
+   "domain": "COMM",
+   "note": "connection generation/close/reconnect guard"
+  },
+  {
+   "file": "src-tauri/src/daemon_client/mod.rs",
+   "lines": 924,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 71,
+     "domain": "COMM",
+     "what": "modules, ConnectionState"
+    },
+    {
+     "from": 72,
+     "to": 105,
+     "domain": "DAEMON_LIFE",
+     "what": "DaemonDiscovery seam, RealDiscovery"
+    },
+    {
+     "from": 106,
+     "to": 442,
+     "domain": "COMM",
+     "what": "DaemonClient ctors, state, connect (install_command_table CMD ~15)"
+    },
+    {
+     "from": 443,
+     "to": 489,
+     "domain": "DAEMON_LIFE",
+     "what": "ensure: spawn daemon then connect"
+    },
+    {
+     "from": 490,
+     "to": 924,
+     "domain": "COMM",
+     "what": "start_connection, close, send_command, replay request"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/daemon_client/protocol_state.rs",
+   "lines": 132,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 45,
+     "domain": "COMM",
+     "what": "reply outcome mapping"
+    },
+    {
+     "from": 46,
+     "to": 119,
+     "domain": "AGENT",
+     "what": "subscription epoch decisions"
+    },
+    {
+     "from": 120,
+     "to": 132,
+     "domain": "COMM",
+     "what": "pending map helpers"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/daemon_client/replay_flight.rs",
+   "lines": 402,
+   "domain": "AGENT",
+   "note": "replay single-flight state machine + marker frame (pure)"
+  },
+  {
+   "file": "src-tauri/src/layout/apply.rs",
+   "lines": 837,
+   "domain": "SCREEN",
+   "note": "application service + ports; spawn_into/parse_backend (508-604) touch AGENT via AgentSpawner port"
+  },
+  {
+   "file": "src-tauri/src/layout/commands.rs",
+   "lines": 945,
+   "domain": "SCREEN",
+   "note": "cmd adapter: declare_commands window/tab/slot/split/ui verbs + table"
+  },
+  {
+   "file": "src-tauri/src/layout/geometry.rs",
+   "lines": 184,
+   "domain": "SCREEN",
+   "note": "geometry"
+  },
+  {
+   "file": "src-tauri/src/layout/manager.rs",
+   "lines": 812,
+   "domain": "SCREEN",
+   "note": "ViewManager"
+  },
+  {
+   "file": "src-tauri/src/layout/mod.rs",
+   "lines": 43,
+   "domain": "SCREEN",
+   "note": "LayoutState"
+  },
+  {
+   "file": "src-tauri/src/layout/spatial.rs",
+   "lines": 235,
+   "domain": "SCREEN",
+   "note": "spatial neighbor resolution"
+  },
+  {
+   "file": "src-tauri/src/layout/tree.rs",
+   "lines": 282,
+   "domain": "SCREEN",
+   "note": "tree ops"
+  },
+  {
+   "file": "src-tauri/src/layout/types.rs",
+   "lines": 203,
+   "domain": "SCREEN",
+   "note": "layout model types"
+  },
+  {
+   "file": "src-tauri/src/lib.rs",
+   "lines": 266,
+   "domain": "ROOT",
+   "note": "run(): setup wiring, handler registration"
+  },
+  {
+   "file": "src-tauri/src/main.rs",
+   "lines": 8,
+   "domain": "ROOT",
+   "note": "shell entry"
+  },
+  {
+   "file": "src-tauri/src/output_channel.rs",
+   "lines": 66,
+   "domain": "SCREEN",
+   "note": "send output bytes to window channels (uncertain COMM)"
+  },
+  {
+   "file": "src-tauri/src/output_router.rs",
+   "lines": 241,
+   "domain": "SCREEN",
+   "note": "agent->window routing, subscription delta"
+  },
+  {
+   "file": "src-tauri/src/tray/actions.rs",
+   "lines": 229,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 61,
+     "domain": "DAEMON_LIFE",
+     "what": "tray id, liveness state, autostart item"
+    },
+    {
+     "from": 62,
+     "to": 114,
+     "domain": "SCREEN",
+     "what": "show/hide main UI, quit"
+    },
+    {
+     "from": 115,
+     "to": 229,
+     "domain": "DAEMON_LIFE",
+     "what": "liveness icon, force down, autostart toggle"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/tray/core.rs",
+   "lines": 143,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 58,
+     "domain": "SCREEN",
+     "what": "menu action ids"
+    },
+    {
+     "from": 59,
+     "to": 83,
+     "domain": "DAEMON_LIFE",
+     "what": "icon state from liveness"
+    },
+    {
+     "from": 84,
+     "to": 122,
+     "domain": "SCREEN",
+     "what": "UI window enumeration"
+    },
+    {
+     "from": 123,
+     "to": 143,
+     "domain": "BASE",
+     "what": "grayscale RGBA helper"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/tray/mod.rs",
+   "lines": 260,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 142,
+     "domain": "SCREEN",
+     "what": "tray icons + menu build"
+    },
+    {
+     "from": 143,
+     "to": 169,
+     "domain": "DAEMON_LIFE",
+     "what": "daemon liveness observer"
+    },
+    {
+     "from": 170,
+     "to": 182,
+     "domain": "SCREEN",
+     "what": "menu dispatch"
+    },
+    {
+     "from": 183,
+     "to": 260,
+     "domain": "DAEMON_LIFE",
+     "what": "daemon start/stop actions"
+    }
+   ]
+  },
+  {
+   "file": "src-tauri/src/ui_settings.rs",
+   "lines": 780,
+   "domain": "SCREEN",
+   "note": "ui-settings.json load/parse/sweep/atomic write"
+  },
+  {
+   "file": "src-tauri/src/view_commands.rs",
+   "lines": 802,
+   "domain": "CMD",
+   "note": "command-request bridge to webview, reserved names"
+  },
+  {
+   "file": "src/App.tsx",
+   "lines": 79,
+   "domain": "ROOT"
+  },
+  {
+   "file": "src/api/agentClient.ts",
+   "lines": 273,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 170,
+     "domain": "COMM",
+     "what": "client contract: connection, output subscription"
+    },
+    {
+     "from": 171,
+     "to": 206,
+     "domain": "AGENT",
+     "what": "agent event/verb contract"
+    },
+    {
+     "from": 207,
+     "to": 208,
+     "domain": "DAEMON_LIFE",
+     "what": "stopDaemon contract"
+    },
+    {
+     "from": 209,
+     "to": 273,
+     "domain": "AGENT",
+     "what": "profile/preset CRUD contract"
+    }
+   ]
+  },
+  {
+   "file": "src/api/clientFactory.ts",
+   "lines": 87,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 57,
+     "domain": "COMM",
+     "what": "AgentClient singleton wiring, transport init"
+    },
+    {
+     "from": 58,
+     "to": 86,
+     "domain": "DAEMON_LIFE",
+     "what": "DaemonControl singleton, boot daemon start"
+    },
+    {
+     "from": 87,
+     "to": 87,
+     "domain": "COMM",
+     "what": "agentClient export"
+    }
+   ]
+  },
+  {
+   "file": "src/api/daemonControl.ts",
+   "lines": 115,
+   "domain": "DAEMON_LIFE"
+  },
+  {
+   "file": "src/api/decodeBase64.ts",
+   "lines": 8,
+   "domain": "COMM"
+  },
+  {
+   "file": "src/api/layoutTypes.ts",
+   "lines": 21,
+   "domain": "SCREEN",
+   "note": "re-export of layout bindings"
+  },
+  {
+   "file": "src/api/protocolClient.ts",
+   "lines": 1038,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 628,
+     "domain": "COMM",
+     "what": "replay/subscription state machine, roster observe"
+    },
+    {
+     "from": 629,
+     "to": 756,
+     "domain": "COMM",
+     "what": "wire event demux, pending req/resp"
+    },
+    {
+     "from": 757,
+     "to": 857,
+     "domain": "COMM",
+     "what": "subscribeOutput view subscription API"
+    },
+    {
+     "from": 858,
+     "to": 889,
+     "domain": "AGENT",
+     "what": "agent verbs spawn/kill/stdin/resize/list"
+    },
+    {
+     "from": 890,
+     "to": 895,
+     "domain": "DAEMON_LIFE",
+     "what": "StopDaemon command"
+    },
+    {
+     "from": 896,
+     "to": 1020,
+     "domain": "AGENT",
+     "what": "profile/preset CRUD + agent event listeners"
+    },
+    {
+     "from": 1021,
+     "to": 1038,
+     "domain": "COMM",
+     "what": "close/teardown"
+    }
+   ]
+  },
+  {
+   "file": "src/api/tauriTransport.ts",
+   "lines": 502,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 101,
+     "domain": "COMM",
+     "what": "header, state/message plumbing"
+    },
+    {
+     "from": 102,
+     "to": 172,
+     "domain": "DAEMON_LIFE",
+     "what": "connection-state apply + self-heal pull"
+    },
+    {
+     "from": 173,
+     "to": 354,
+     "domain": "COMM",
+     "what": "Tauri listen registration, output Channel"
+    },
+    {
+     "from": 355,
+     "to": 429,
+     "domain": "DAEMON_LIFE",
+     "what": "ensureReady/start daemon_connect/ensure"
+    },
+    {
+     "from": 430,
+     "to": 469,
+     "domain": "COMM",
+     "what": "forward command, request_replay"
+    },
+    {
+     "from": 470,
+     "to": 495,
+     "domain": "DAEMON_LIFE",
+     "what": "close -> daemon_close"
+    },
+    {
+     "from": 496,
+     "to": 502,
+     "domain": "COMM",
+     "what": "init listeners"
+    }
+   ]
+  },
+  {
+   "file": "src/api/transport.ts",
+   "lines": 75,
+   "domain": "COMM"
+  },
+  {
+   "file": "src/api/types.ts",
+   "lines": 203,
+   "domain": "AGENT",
+   "note": "agent/profile/preset wire types"
+  },
+  {
+   "file": "src/api/wsFrame.ts",
+   "lines": 96,
+   "domain": "COMM"
+  },
+  {
+   "file": "src/api/wsTransport.ts",
+   "lines": 582,
+   "domain": "COMM",
+   "note": "test/legacy only (not used in prod); holds discover_daemon/read_daemon_info calls (small DAEMON_LIFE part)"
+  },
+  {
+   "file": "src/commands/agentCommands.ts",
+   "lines": 202,
+   "domain": "AGENT",
+   "note": "cmd adapter"
+  },
+  {
+   "file": "src/commands/contributions.ts",
+   "lines": 20,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/commands/dispatch.ts",
+   "lines": 25,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/commands/enumArg.ts",
+   "lines": 27,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/commands/keybindings.ts",
+   "lines": 99,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/commands/presetCommands.ts",
+   "lines": 84,
+   "domain": "AGENT",
+   "note": "cmd adapter"
+  },
+  {
+   "file": "src/commands/registry.ts",
+   "lines": 202,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/commands/renderModeCommands.ts",
+   "lines": 126,
+   "domain": "RENDER",
+   "note": "cmd adapter"
+  },
+  {
+   "file": "src/commands/slotCommands.ts",
+   "lines": 144,
+   "domain": "SCREEN",
+   "note": "cmd adapter; resolve_spatial"
+  },
+  {
+   "file": "src/commands/slotContentCommands.ts",
+   "lines": 134,
+   "domain": "SCREEN",
+   "note": "cmd adapter; also spawnAgent/killAgent"
+  },
+  {
+   "file": "src/commands/slotMenu.ts",
+   "lines": 264,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/commands/tabCommands.ts",
+   "lines": 222,
+   "domain": "SCREEN",
+   "note": "cmd adapter; spawn_into = SCREEN+AGENT"
+  },
+  {
+   "file": "src/commands/viewCommandBridge.ts",
+   "lines": 147,
+   "domain": "CMD"
+  },
+  {
+   "file": "src/components/agent/AgentList.tsx",
+   "lines": 691,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 167,
+     "domain": "RENDER",
+     "what": "tree view setup, row state"
+    },
+    {
+     "from": 168,
+     "to": 193,
+     "domain": "AGENT",
+     "what": "activate reserved profile (spawnProfile)"
+    },
+    {
+     "from": 194,
+     "to": 219,
+     "domain": "SCREEN",
+     "what": "open agent in focused slot"
+    },
+    {
+     "from": 220,
+     "to": 300,
+     "domain": "AGENT",
+     "what": "kill/delete/reparent/rename profile actions"
+    },
+    {
+     "from": 301,
+     "to": 691,
+     "domain": "RENDER",
+     "what": "tree rows, context menu rendering"
+    }
+   ]
+  },
+  {
+   "file": "src/components/agent/failureKinds.ts",
+   "lines": 67,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/agent/mergeTreeNodes.ts",
+   "lines": 169,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/agent/selectOpenTarget.ts",
+   "lines": 34,
+   "domain": "SCREEN",
+   "note": "pick slot to open agent in (uncertain: SCREEN vs AGENT)"
+  },
+  {
+   "file": "src/components/agent/statusGlyph.ts",
+   "lines": 211,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/layout/AppLayout.tsx",
+   "lines": 22,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/ConnectionNotice.tsx",
+   "lines": 60,
+   "domain": "DAEMON_LIFE",
+   "note": "connection error banner"
+  },
+  {
+   "file": "src/components/layout/LayoutLeaf.tsx",
+   "lines": 328,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 111,
+     "domain": "SCREEN",
+     "what": "slot frame, rect, menu anchor"
+    },
+    {
+     "from": 112,
+     "to": 328,
+     "domain": "RENDER",
+     "what": "SlotBody content renderer dispatch"
+    }
+   ]
+  },
+  {
+   "file": "src/components/layout/Splitter.tsx",
+   "lines": 350,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/TabBar.tsx",
+   "lines": 207,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/ViewLayoutRenderer.tsx",
+   "lines": 157,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/WindowLayout.tsx",
+   "lines": 308,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/splitPreview.ts",
+   "lines": 178,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/testing/rects.ts",
+   "lines": 46,
+   "domain": "SCREEN",
+   "note": "test helper (non-.test file)"
+  },
+  {
+   "file": "src/components/layout/uiMetricsReport.ts",
+   "lines": 68,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/useSplitDrag.ts",
+   "lines": 292,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/layout/windowCanvasReport.ts",
+   "lines": 171,
+   "domain": "SCREEN"
+  },
+  {
+   "file": "src/components/slot/AgentMonitoringPicker.tsx",
+   "lines": 220,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/ClaudeMascot.tsx",
+   "lines": 95,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/CodexMascot.tsx",
+   "lines": 94,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/DomSlot.tsx",
+   "lines": 218,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/PresetPalette.tsx",
+   "lines": 340,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 85,
+     "domain": "RENDER",
+     "what": "palette setup"
+    },
+    {
+     "from": 86,
+     "to": 147,
+     "domain": "AGENT",
+     "what": "preset delete/rename calls"
+    },
+    {
+     "from": 148,
+     "to": 340,
+     "domain": "RENDER",
+     "what": "palette rendering"
+    }
+   ]
+  },
+  {
+   "file": "src/components/slot/RichSlot.tsx",
+   "lines": 452,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/SlotContextMenu.tsx",
+   "lines": 256,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/SlotErrorBoundary.tsx",
+   "lines": 58,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/SlotUnavailableVeil.tsx",
+   "lines": 43,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/StructuredTextView.tsx",
+   "lines": 561,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/TerminalSlot.tsx",
+   "lines": 406,
+   "domain": "RENDER",
+   "note": "inline writeStdin/resizePty calls"
+  },
+  {
+   "file": "src/components/slot/chat/ChatRow.tsx",
+   "lines": 72,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/chat/CopyButton.tsx",
+   "lines": 40,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/chat/Markdown.tsx",
+   "lines": 91,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/chat/ThoughtRow.tsx",
+   "lines": 64,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/chat/WaitRow.tsx",
+   "lines": 29,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/chat/railPositions.ts",
+   "lines": 34,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/monitoringPickerFilter.ts",
+   "lines": 51,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/renderMode.ts",
+   "lines": 25,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/richBranding.ts",
+   "lines": 72,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/slot/structuredAccumulator.ts",
+   "lines": 295,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/ui/LoadingPanel.tsx",
+   "lines": 37,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/ui/RootErrorBoundary.tsx",
+   "lines": 74,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/ui/nativeScrollActivity.ts",
+   "lines": 75,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/components/ui/scroll-area.tsx",
+   "lines": 92,
+   "domain": "RENDER"
+  },
+  {
+   "file": "src/i18n/index.ts",
+   "lines": 136,
+   "domain": "RENDER",
+   "note": "i18n"
+  },
+  {
+   "file": "src/i18n/ko.ts",
+   "lines": 175,
+   "domain": "RENDER",
+   "note": "i18n"
+  },
+  {
+   "file": "src/lib/utils.ts",
+   "lines": 7,
+   "domain": "BASE",
+   "note": "cn()"
+  },
+  {
+   "file": "src/main.tsx",
+   "lines": 41,
+   "domain": "ROOT"
+  },
+  {
+   "file": "src/pages/PopoutPage.tsx",
+   "lines": 50,
+   "domain": "RENDER",
+   "note": "route wrappers"
+  },
+  {
+   "file": "src/pages/TreePage.tsx",
+   "lines": 29,
+   "domain": "RENDER",
+   "note": "route wrappers"
+  },
+  {
+   "file": "src/store/agentStore.ts",
+   "lines": 75,
+   "domain": "AGENT"
+  },
+  {
+   "file": "src/store/chatStyleStore.ts",
+   "lines": 174,
+   "domain": "RENDER",
+   "note": "theme"
+  },
+  {
+   "file": "src/store/eventBus.ts",
+   "lines": 206,
+   "domain": "MIXED",
+   "ranges": [
+    {
+     "from": 1,
+     "to": 63,
+     "domain": "AGENT",
+     "what": "profile/preset refresh, reconnect resync"
+    },
+    {
+     "from": 64,
+     "to": 90,
+     "domain": "CMD",
+     "what": "install __engramCmd global"
+    },
+    {
+     "from": 91,
+     "to": 149,
+     "domain": "SCREEN",
+     "what": "layout event subscription, main window init"
+    },
+    {
+     "from": 150,
+     "to": 206,
+     "domain": "AGENT",
+     "what": "agent events -> agentStore"
+    }
+   ]
+  },
+  {
+   "file": "src/store/monitoringPickerStore.ts",
+   "lines": 43,
+   "domain": "SCREEN",
+   "note": "picker open state (uncertain: SCREEN vs RENDER)"
+  },
+  {
+   "file": "src/store/themeStore.ts",
+   "lines": 16,
+   "domain": "RENDER",
+   "note": "theme"
+  },
+  {
+   "file": "src/store/viewStore.ts",
+   "lines": 431,
+   "domain": "SCREEN",
+   "note": "includes renderModeOverride (~45 lines, RENDER-ish)"
+  },
+  {
+   "file": "src/theme/ThemeManager.ts",
+   "lines": 18,
+   "domain": "RENDER",
+   "note": "theme"
+  },
+  {
+   "file": "src/theme/uiSettings.ts",
+   "lines": 138,
+   "domain": "SCREEN",
+   "note": "UI settings sync (content is theme only; uncertain vs RENDER)"
+  },
+  {
+   "file": "src/themes.ts",
+   "lines": 29,
+   "domain": "RENDER",
+   "note": "theme"
+  },
+  {
+   "file": "src/util/basename.ts",
+   "lines": 24,
+   "domain": "BASE"
+  },
+  {
+   "file": "src/util/retryInvoke.ts",
+   "lines": 59,
+   "domain": "COMM",
+   "note": "retry helper (used also by SCREEN/theme)"
+  }
+ ]
+}
