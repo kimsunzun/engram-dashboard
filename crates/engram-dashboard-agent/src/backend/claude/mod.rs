@@ -1193,6 +1193,7 @@ const LIFECYCLE_STATES: [&str; 6] = [
 /// 비지 않은 문자열 `command_uuid` 와 아는 상태어를 함께 가진 `command_lifecycle` 줄인가 — 받음을 `Available` 로
 /// 여는 조건이다.
 // ADR-0231
+// ADR-0234
 fn is_recognisable_lifecycle(value: &serde_json::Value) -> bool {
     let has_id = value
         .get("command_uuid")

@@ -434,6 +434,7 @@ struct State {
     ///   먼저 샘플링하고, 「기록만」(M10)은 steer 의 현상이다. TRD 의 글자 그대로는 `turn/start` 의 글에도 걸려, 그 턴이
     ///   출력 없이 끝나면 운영에서 빈 `turn/start` 가 나가고 모델이 앞 답을 되풀이한다(M9 대조군).
     // ADR-0231
+    // ADR-0234
     unanswered: Option<u64>,
     /// 후속 턴 빚 — 이 표식의 `completed` 턴이 답 못 받은 받음을 남겼다(TRD §5-5 정산 3). 턴마다 하나다.
     ///   ★Idle 이 사용자 턴이나 빈 입력 `turn/start` 를 **내기로 정한 그 락 구간에서** 지운다★([`take_turn_locked`]) — 그
@@ -683,6 +684,7 @@ struct EarlyCompletion {
 
 /// 우리 턴이 끝난 모양 — 그 턴의 항목 처분([`State::close_turn_items`])을 가른다.
 // ADR-0231
+// ADR-0234
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnClose {
     /// `turn/completed` 의 `completed`. 이것과 `Failed` · `Unknown` 만 턴 끝 정산([`Settling`])을 연다.
@@ -731,8 +733,9 @@ impl TurnClose {
 // ADR-0231
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum HandOverPolicy {
-    /// 넘길 수 있으면 곧바로. 운영은 안 쓴다 — 붙듦이 벤더 경계를 놓치게 되면 되돌아갈 자리(`HAND_OVER_POLICY`)이고,
-    ///   시험이 seam 으로 끼워 두 정책의 갈림을 잰다.
+    /// 넘길 수 있으면 곧바로. 운영은 안 쓴다 — 시험이 seam 으로 끼워 두 정책의 갈림을 재는 변형이다. ★붙듦이
+    ///   벤더 경계를 놓치게 되어도 저절로 되돌아갈 자리가 아니다★ — 그때는 사용자와 다시 연다(`HAND_OVER_POLICY`
+    ///   doc · ADR-0231 결정 2 · ADR-0234 결정 4).
     #[cfg_attr(not(test), allow(dead_code))]
     Immediate,
     /// 측정(M15 · M16)이 「붙들어도 늦지 않다」를 세운 구간(도구 · 답)에서만 쥐고, 경계 신호에 곧바로 넘긴다.
@@ -1799,11 +1802,13 @@ type SharedState = Arc<(Mutex<State>, Condvar)>;
 /// `order` — ★방출은 상태 락 밖이어야 하는데(ADR-0006) 방출하는 쪽이 둘이다★(항목을 넣은 입력 스레드 ·
 ///   판정을 낸 라이터). 이 줄이 없으면 둘이 락을 놓은 사이 서로의 방출을 앞질러 목록이 친 순서와
 ///   어긋난다. 줄을 쥔 쪽은 자기 항목만이 아니라 **방출 전 항목 전부**를 도착 순서대로 낸다.
-///   ★락 순서 = `order` → 상태★. 리더와 `withdraw` 는 이 줄을 잡지 않는다 — 둘은 방출을 마친 항목만
+///   ★락 순서 = `order` → 상태★. ★`order` 를 쥔 채 emit 한다 — ADR-0006 「lock 미보유 send」의 의도된
+///   예외이고, `OutputSink::send` 가 막히지 않는다는 계약이 그것을 받친다★. 리더와 `withdraw` 는 이 줄을 잡지 않는다 — 둘은 방출을 마친 항목만
 ///   처분하고, 방출 전 항목에는 죽음 표시만 단다([`State::drop_listed`]).
 /// `ack` — 하한 판정이 채운다(`Above` = `Available` · `Below` = `Unavailable`). 조립점이 세션에 **같은**
 ///   `Arc` 를 싣는다([`CodexAppServerTransport::delivery_ack`]).
 // ADR-0231
+// ADR-0234
 struct Announcer {
     order: Mutex<()>,
     ack: Arc<DeliveryAck>,
@@ -1819,6 +1824,7 @@ struct Announcer {
 ///   우편이 30 분 fail-open 까지 막힌다(ADR-0127). codex 의 한가 판정은 통로 상태가 진다(ADR-0193).
 /// ★uuid = 항목 id★ — 벤더 되울림이 `clientId` 로 같은 값을 실어 와 누산기가 한 벌로 접는다.
 // ADR-0231
+// ADR-0234
 fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
     let _order = announcer.order.lock().unwrap_or_else(|p| p.into_inner());
     let batch: Vec<(String, String, bool)> = {
@@ -4471,7 +4477,7 @@ impl Reader {
     ///   않는다(응답으로 받아 라이터가 싣는다 — [`hydrate_history`]).
     /// ★락을 하나도 쥐지 않은 채 부른다★ — 포트 너머가 래치 commit(프로필 디스크 쓰기)이다. thread 대조에
     ///   잡은 상태 락은 그 전에 놓는다. 화면 방출보다 **뒤에** 부른다: 디스크 쓰기가 말풍선을 붙잡지 않게.
-    // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
+    // ADR-0226 · ADR-0231 · ADR-0233: 사용자 결정 — id 는 진짜가 된 때(상대의 첫 유저 메시지 되울림) 영속한다.
     fn witness_first_turn(&mut self, method_name: &str, params: Option<&Value>) {
         if self.first_turn.is_none()
             || (method_name != method::ITEM_STARTED && method_name != method::ITEM_COMPLETED)

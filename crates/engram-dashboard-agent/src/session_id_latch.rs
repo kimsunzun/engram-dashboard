@@ -82,7 +82,7 @@ impl SessionIdLatch {
     ///
     /// 그 모드는 세션이 제출을 세지 않는다. ✕ 로 거둘 수 있는 첫 입력을 보낼 때 세면 대화 없는 id 가 영속되기
     ///   때문이다. 통로가 상대의 첫 유저 메시지 되울림에서 이 포트를 부른다.
-    // ADR-0226 · ADR-0231: 사용자 결정 — id 는 진짜가 된 때(대화에 턴이 생긴 = 첫 되울림) 영속한다.
+    // ADR-0226 · ADR-0231 · ADR-0233: 사용자 결정 — id 는 진짜가 된 때(대화에 턴이 생긴 = 첫 되울림) 영속한다.
     pub(crate) fn first_turn_sink(self: &Arc<Self>) -> FirstTurnSink {
         let latch = Arc::clone(self);
         Arc::new(move || latch.note_submission())

@@ -495,6 +495,7 @@ impl AgentSession {
     ///   종료 의도가 선 순간으로 앞당길 뿐이다.
     /// ★확인은 원자 읽기 하나다★ — 락을 잡지 않는다. 래치가 이미 영속을 마친 뒤에도 확인한다.
     // ADR-0226
+    // ADR-0233
     fn count_turn_submission(&self, bytes: &[u8]) -> Result<(), PtyError> {
         let Some(latch) = &self.session_id_latch else {
             return Ok(());
@@ -3045,7 +3046,7 @@ mod tests {
         }
     }
 
-    // TRD §7-1(L744 세션): 오류 뒤 멈춤 ∧ 한가 ∧ 목록 빔 → Direct(쓰기 + 에코 — 세션은 그 칸을 읽지 않는다).
+    // TRD §7-1(「우편의 오류 뒤 멈춤」 행의 세션 칸): 오류 뒤 멈춤 ∧ 한가 ∧ 목록 빔 → Direct(쓰기 + 에코 — 세션은 그 칸을 읽지 않는다).
     #[test]
     fn a_halted_idle_session_still_sends_a_user_input_directly() {
         let fx = Classified::claude();

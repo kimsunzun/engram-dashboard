@@ -256,27 +256,46 @@ flowchart TD
 
 결정: 락 순서 = ADR-0006 · OutputSink wire 무지 = ADR-0003 · 턴 관측 표(사실은 코어, 분류는 backend seam 뒤) = ADR-0113/0127.
 
-### 입력 흐름 (사용자/LLM → claude)
+### 입력 흐름 (사용자/LLM → 에이전트)
 
-**입력은 세션이 encoder로 포장해 transport로만 나간다.** 다만 두 진입 경로는 ★같은 동사를 타지 않는다★ — 본문 write는 공유하되 **제출(submit)은 우편 배달 쪽에만 붙는다**:
+**입력은 세션이 encoder로 포장해 transport로만 나간다.** 다만 두 진입 경로는 ★같은 동사를 타지 않는다★ — 본문 write는 공유하되 **제출(submit)은 우편 배달 쪽에만 붙는다**. 그리고 쓰기는 **출처(`InputOrigin` — 사람 `User` / 우편 `Mail`)를 싣고** 세션의 턴 도중 입력 정책(`MidTurnPolicy` — backend 가 신고한다)으로 갈린다:
 
 ```mermaid
 flowchart TD
-  IN1["사용자 타이핑 / 프론트 invoke"]
-  IN2["다른 에이전트의 eg_send<br/>(제어 채널 입구 → MessagingService)"]
-  WI["AgentSession.write_input_observed(bytes) ·· 본문 write<br/>encoder.encode() : Raw(그대로) | ClaudeStreamJson(JSON 포장) + msg_uuid<br/>반환 WriteOutcome ← 배달 관측('전송 실패' vs '모델 무시' 구별, ADR-0088)"]
+  IN1["사용자 타이핑 / 프론트 invoke<br/>(출처 User)"]
+  IN2["다른 에이전트의 eg_send<br/>(제어 채널 입구 → MessagingService · 출처 Mail)"]
+  WI["AgentSession.write_input_from(bytes, origin) ·· 본문 write<br/>(우편 = write_input_observed → 출처 Mail)<br/>encoder.encode() : Raw(그대로) | ClaudeStreamJson(JSON 포장) + msg_uuid<br/>반환 WriteOutcome ← 배달 관측('전송 실패' vs '모델 무시' 구별, ADR-0088)"]
   SUBMIT["submit_input_observed ·· 우편 배달 전용<br/>본문 write → SUBMIT_PACING 만큼 대기 → 제출 write(두 번 쓴다)<br/>★대기가 제출의 일부다(빼면 제출되지 않는다 — 실측)★<br/>사람 키 입력은 이 동사를 안 탄다 — 타면 키 한 번마다 턴이 제출된다"]
-  SI["AgentTransport.send_input() ──▶ claude stdin"]
+  POL{"MidTurnPolicy"}
+  NONE["None (터미널 · shell)<br/>오늘 경로 — 목록 없음"]
+  SC["SessionClassified (claude json)<br/>입력 자물쇠 안에서 분류 — 턴 도중 User 면 Queued 사건 + stdin 에 곧바로 쓴다<br/>(벤더가 받아 두고 해제한다 · 합성 에코 없음)<br/>한가하거나 Mail 이면 오늘 경로"]
+  TO["TransportOwned (codex app-server)<br/>send_turn — 통로가 분류·붙듦·해제를 진다<br/>HandOverPolicy(기본 AtEarliestBoundary)로 가장 이른 경계까지 쥐고<br/>한가하면 turn/start · 도는 턴엔 turn/steer"]
+  SI["AgentTransport.send_input() ──▶ 에이전트 stdin"]
   ECHO["(json 모드만) 유저 에코를 OutputCore.emit ──▶ 화면에 표시<br/>(PTY는 로컬 에코라 불필요)"]
+  RING["OutputCore.emit(QueuedInput 사건) ──▶ 링<br/>replay 락 안에서 대기 입력 명부(queued_input.rs)가 같은 사건을 환원<br/>프론트 queuedInputReducer.ts 가 같은 규칙으로 환원 → 입력창 위 대기 목록"]
+  X["✕ → agent.cancelQueuedInput → AgentSession.cancel_queued_input<br/>claude = 취소 줄(cancel_async_message)을 stdin 에 · codex = 통로 withdraw(쥔 항목은 거두고, 넘긴 항목은 목록에서만 뺀다)"]
 
   IN1 --> WI
   IN2 -->|"주입 시점에 봉투 조립 (배달 또는 파킹 후 일괄 flush)"| SUBMIT
   SUBMIT --> WI
-  WI --> SI
+  WI --> POL
+  POL --> NONE --> SI
+  POL --> SC
+  SC --> SI
+  SC -.->|"목록 사건"| RING
+  POL --> TO
+  TO -.->|"목록 사건 (통로가 낸다)"| RING
   SI -->|"json 모드만"| ECHO
+  RING -.-> X
+  X -.-> SC
+  X -.-> TO
 ```
 
-결정: json 모드 배선 = ADR-0044 · 메시지 시맨틱 = ADR-0087 · 주입 타이밍(idle 게이트·일괄 flush) = ADR-0104 · 배달 계측·제출 경계 = ADR-0088.
+- **목록은 링 사건 한 줄기로만 바뀐다** — 명부(데몬)와 프론트 누산기는 같은 사건열을 같은 규칙으로 환원하고, 둘 다 골든 `crates/engram-dashboard-agent/src/queued_input_golden.json` 을 먹어 갈라지면 한쪽이 빨개진다. 명부를 바꾸는 다른 길은 없다(세션의 분류·취소도 사건을 emit 할 뿐이다).
+- **우편(`Mail`)은 턴 도중에도 목록에 오르지 않는다.** codex 에선 같은 통로 대기열에 서지만 목록 밖이다.
+- **정책·구간 판정의 정본은 코드다** — 세션 갈래 = `AgentSession::write_input_from` · `cancel_queued_input`, codex 붙듦 = `HandOverPolicy::verdict` 와 codex backend 의 `HAND_OVER_POLICY` 상수. 여기 구간 표를 베끼지 않는다.
+
+결정: json 모드 배선 = ADR-0044 · 메시지 시맨틱 = ADR-0087 · 주입 타이밍(idle 게이트·일괄 flush) = ADR-0104 · 배달 계측·제출 경계 = ADR-0088 · 턴 도중 입력(대기 목록 · 가장 이른 때 넘김 · ✕) = ADR-0231 · 착지 보정(codex 기본 넘기기 · 방출 줄 팬아웃 예외) = ADR-0234.
 
 ### 죽음 흐름 (종료 → 정리)
 

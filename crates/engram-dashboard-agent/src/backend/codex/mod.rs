@@ -465,9 +465,13 @@ const APP_SERVER_STDIO_FLAG: &str = "--stdio";
 /// app-server 통로의 넘기기 정책을 고르는 자리 — ★codex backend 의 상수 하나다(사용자 설정 표면을 늘리지
 /// 않는다)★(TRD §5-5). seam 없이 지은 통로의 기본값도 이것이다 — 시험대가 운영 정책을 그대로 잰다.
 /// 붙드는 정책은 M15 반응 지연이 녹여 켰다(도구 끝 반응 합 2275 µs < 창 최소 6 ms · 답 끝 221 µs < 9.4 ms —
-/// `docs/research/mid-turn-m15-measurements-2026-09-26.md`). ★벤더가 그 창을 좁히면 `Immediate` 로 되돌린다★ —
-/// 붙든 글이 경계를 놓쳐 한 경계 늦는다(잃지는 않는다).
+/// `docs/research/mid-turn-m15-measurements-2026-09-26.md`). ★재론 트리거 = 벤더가 그 창을 좁힌다(재측정 빨강) —
+/// 저절로 되돌리지 않는다★: 좁아진 창에서 붙든 글은 경계를 놓쳐 한 경계 늦는다(잃지는 않는다). 답 끝 창만
+/// 좁아지면 `ANSWER_SEGMENT_HOLDS = false`(답 구간만 곧바로 — 사용자 질문이 아니다, 그 상수 doc) · 도구 끝 창이
+/// 좁아지면 코드 전에 사용자에게 다시 묻는다(ADR-0231 결정 2 · ADR-0234 결정 4). `Immediate` 는 통로를 짓는
+/// seam(`with_hand_over`)으로만 끼우는 변형이지 정해 둔 되돌림 자리가 아니다.
 // ADR-0231
+// ADR-0234
 const HAND_OVER_POLICY: HandOverPolicy = HandOverPolicy::AtEarliestBoundary;
 
 /// 호출자 패스스루가 **우리와 같은 설정 키**를 세우나. `true` = 우리 오버라이드가 그것을 덮는다(뒤에

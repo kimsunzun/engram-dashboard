@@ -191,7 +191,7 @@ export class QueuedInputRegistry {
     later: readonly QueuedInputEvent[],
     listed: ReadonlySet<string>,
   ): void {
-    // ADR-0231: TRD L627 은 「스냅숏에 없는 id 는 누산기가 이미 봤다」라 두지만 머리 점프가 그 전제를 깬다 —
+    // ADR-0231: TRD §5-7(프론트 — 스냅숏 재환원)은 「스냅숏에 없는 id 는 누산기가 이미 봤다」라 두지만 머리 점프가 그 전제를 깬다 —
     //   flush 가 커서를 뒤의 replay 머리로 건너뛰면(같은 화신 재부착 · 붙듦 넘침 재버퍼) 누산기는 비우지 않은 채
     //   닫힘 사건만 링에서 밀려나 잃는다. 스냅숏 seq 에 열려 있던 항목은 스냅숏에 든다는 것이 이 판정의 근거라,
     //   점프가 없으면 오늘과 같은 결과다.
