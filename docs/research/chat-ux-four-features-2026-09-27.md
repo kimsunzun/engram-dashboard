@@ -88,6 +88,7 @@
 (수집자 정독 · 문서 — 가능성 높음. Claude Code 문서 문구는 확실.)
 
 - 경향: 터미널 계열(Claude Code·codex·paseo)은 **맨 Esc · 입력칸 범위 · 글 보존 · 안 돌면 아무것도 안 함**. 편집기 안에 사는 것들(Cursor·Zed·t3code)은 Esc 가 이미 「포커스 해제」라 피한다.
+- **Claude Code 는 Esc 에 도는 Bash 도구를 죽인다**(실측 2026-09-27 · 대화형 CLI — 확실): 90 초 동안 줄을 찍는 명령이 10 초째 Esc 를 누른 순간 쓰기를 멈췄고 뒤에 그 프로세스가 없었다 · 화면은 곧바로 「Interrupted」. codex 는 끊어도 도는 명령이 계속 돈다(TRD §9 F2). 우리 stream-json `control_request` 끊기도 그런지는 미검이다(TRD §3-5 S1 기록).
 
 ### 2-3. 선택지
 
