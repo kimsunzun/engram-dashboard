@@ -33,3 +33,11 @@
 | 파일 | 줄 | 원본 · 줄 범위 | 보여 주는 것 |
 |---|---|---|---|
 | `partial_stream_p1.jsonl` | 140 | 위 로그 `out` 1–103 · 695–744 | 매 턴 `message_start` → `content_block_start` → 델타들 → **그 블록만 담은 완결 `assistant` 줄**(같은 id) → `content_block_stop` → `message_delta` → `message_stop` → `result`. **T1** 한글 글만(델타 셋). **T2** 생각 → 글 → 도구(`input_json_delta` 일곱) → `tool_result` → 새 `message_start` → 글. **T3** 생각 → 글(델타 열다섯). **T5** A(`d24e1139…` — `sleep 8`)의 `tool_use` 줄(112) 2 s 뒤 B(`05a41fe4…`)를 씀 → B `queued`(116) → `tool_result` → B 되울림 → B `started` → 새 `message_start`(123) → 답 "DONE-A PINEAPPLE". **한가 구간** = 각 `result` 뒤 다음 입력을 쓰기 전: T1 뒤 32.0 s · T2 뒤 6.0 s · T3 뒤 6.0 s(그 뒤 T4 는 뺐다) · T5 뒤 10 s + stdin 닫고 끝날 때까지(16.4 s). 네 구간 모두 `command_lifecycle completed` 한 줄뿐이고 **최상위 `stream_event` 0 줄**이다(뺀 T4 뒤 6.0 s 도 같다). 이 세션의 transcript 에는 `stream_event` 줄이 **없었고** 완결 `assistant` 글 줄은 남아 있었다(`--resume` 이어받기도 성공 — B1 반환). |
+
+## 끊기 픽스처 (`interrupt_s1` — ADR-0238)
+
+- **원본·방법:** B2 스파이크(`docs/research/claude-interrupt-spike-2026-09-28.md`) 채취 — 보고서 §6 에 원 줄이 있다.
+
+| 파일 | 줄 | 원본 · 줄 범위 | 보여 주는 것 |
+|---|---|---|---|
+| `interrupt_s1.jsonl` | 202 | B2 채취 로그 `claude-s1-2026-09-27T15-37-24-325Z.jsonl`(`{t,dir,chunk,line}` · 0 기반) `out` 11–223 · 226–291 · 311–324 | **S1a**(1–139) 글 흐르는 중 끊기(134 뒤에 씀) → `control_response {still_queued:[]}`(135) → 잘린 완결 `assistant`(136 · `aborted:true` · 글 블록 하나 = 흘린 927 자 · `content_block_stop` 없음) → 합성 사용자 줄 `[Request interrupted by user]`(137) → `result` `error_during_execution`·`is_error:true`·`terminal_reason:"aborted_streaming"`(138) → 턴을 연 명령 `cancelled`(139). **S1b**(140–188) Bash 90 초 루프 도는 중 끊기(182 뒤) → 응답(183) → `task_notification status:"stopped"`(184) → `tool_result` `is_error:true`(185) → `[Request interrupted by user for tool use]`(186) → `result` `aborted_tools`(187) → `cancelled`(188). **뒤 턴**(189–202) 평범한 `success`. 가공 = 공통 가공 + 스크래치 경로 → `C:\work\proj`·`C:/work/logs` · 경로를 품은 `input_json_delta` 11 줄(원본 251–261)을 한 줄로 합침(35→25 · 이은 인자 = 완결 `tool_use` 입력). claude 2.1.280 · 모델 claude-opus-5-5 · B1 과 같은 스폰 인자. |

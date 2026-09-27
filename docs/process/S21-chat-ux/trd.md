@@ -232,7 +232,7 @@ impl StdioTransport {
 
 ### 3-5. 스파이크 (B2) — 출구 조건
 
-**방법**: Phase 0 하네스(`.claude/handoff/attachments/20260925-midturn-phase0/claude_harness.js`)로 claude 2.1.280 을 **최종 스폰 인자**(F4 가 먼저 착지 — `--include-partial-messages` 포함)로 띄우고 `{t,dir,line}` 을 기록한다. 결과 = 새 보고서 `docs/research/claude-interrupt-spike-2026-09-2x.md` + fixture `backend/claude/fixtures/interrupt_s1.jsonl`(`fixtures/README.md` 의 가공 규칙).
+**방법**: Phase 0 하네스(`.claude/handoff/attachments/20260925-midturn-phase0/claude_harness.js`)로 claude 2.1.280 을 **최종 스폰 인자**(F4 가 먼저 착지 — `--include-partial-messages` 포함)로 띄우고 `{t,dir,line}` 을 기록한다. 결과 = 새 보고서 `docs/research/claude-interrupt-spike-2026-09-28.md` + fixture `backend/claude/fixtures/interrupt_s1.jsonl`(`fixtures/README.md` 의 가공 규칙).
 
 | # | 시행 | 기록 | 통과 조건 |
 |---|---|---|---|
