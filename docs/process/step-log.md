@@ -2594,3 +2594,4 @@
   - **조사** — `docs/research/chat-ux-four-features-2026-09-27.md`(medium · 기능당 수집 1 · cross-family 적대 리뷰 BLOCK = claude 끊기 누락 4 건 → TRD 스파이크 조건). 인계 메모의 전제 둘이 틀렸다: 끊기는 codex 에만 있고 claude JSON 은 없다 · codex 는 도구 끝·오류를 라이브로 안 알린다.
   - **TRD** — `docs/process/S21-chat-ux/trd.md` 2판. `/review trd full` r1 = 두 리뷰어 FIX(불일치 없음 · 11 건) → 반영 → light 재검 PASS(low 4 건은 TRD §12 — 구현 때 반영).
   - **다음** — 사용자 결정 U1–U6(TRD §1) → ADR 0237~ 채번 → 구현(TRD §7 — 백엔드 1 워커 순차 · 프론트 2 워커).
+  - **TRD 3–5판(2026-09-27)** — 사용자 결정 U1–U7(U2 = codex 묶음에도 오류 수 · U2-a = 거부 따로 표기 · U7 = 채팅 승인은 다음 과제 `docs/tracking.md` T-38) · 3·4판 리뷰 FIX 반영(4판 갈림 2 건 = 알려진 한계로 수락) · 5판은 업스트림 `rust-v0.156.1` 소스 판독으로 사실을 고쳤다(거절된 명령은 이어받은 이력에 없다 · 거절된 파일 변경 = `declined`). 5판 light 재검 대기.

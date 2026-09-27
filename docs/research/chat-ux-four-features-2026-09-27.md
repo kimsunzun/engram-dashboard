@@ -192,8 +192,8 @@
 ### 8-1. 지금 우리 앱
 
 - 우리 통로는 codex 의 서버 요청(승인 요청 포함)에 **전부 JSON-RPC `METHOD_NOT_FOUND` 로 거절**하고 성공을 돌려주지 않는다(`crates/engram-dashboard-agent/src/backend/codex/transport.rs:3054-3087` · 들어오는 요청마다 `:3629` — 수집자 정독, 가능성 높음). 우리는 codex 를 `approvalPolicy: on-request` · `sandbox: workspace-write` 로 띄운다(`backend/codex/mod.rs:132-133`, 메인 대조 ✓) — 작업 폴더 밖 쓰기·네트워크는 실행 전에 승인을 묻는다.
-- ★**우리가 거절하면 codex 는 그 도구를 `declined` 가 아니라 `failed` 로 끝낸다**★ — 클라이언트 오류를 `ReviewDecision::denied("approval request failed")` 로 바꾸고 명령 item 을 `status:"failed"` · `exitCode:null` · `aggregatedOutput:null` 로 닫는다(openai/codex `codex-rs/app-server/src/bespoke_event_handling.rs:2026-2032` · `:1468-1483`, main `41f9084` — **메인 대조 ✓**). item 에는 사유 칸이 없다. `declined` 는 명시적 Decline/Cancel(우리는 안 보낸다) · guardian 심사 · 네트워크 정책 거부에서만 온다. 파일 변경 승인 거절도 `denied("approval request failed")` 인데 그 item 의 최종 상태는 **모른다**.
-- 설치본은 codex-cli 0.156.1 — 업스트림 main 과 같은 동작인지 **미확인**. 승인 교환을 담은 실측 fixture 는 없다(기존 측정은 `approvalPolicy:"never"` 로 찍었다).
+- ★**우리가 거절하면 codex 는 그 도구를 `declined` 가 아니라 `failed` 로 끝낸다**★ — 클라이언트 오류를 `ReviewDecision::denied("approval request failed")` 로 바꾸고 명령 item 을 `status:"failed"` · `exitCode:null` · `aggregatedOutput:null` 로 닫는다(openai/codex `codex-rs/app-server/src/bespoke_event_handling.rs:2026-2032` · `:1468-1483`, main `41f9084` — **메인 대조 ✓**). item 에는 사유 칸이 없다. `declined` 는 명시적 Decline/Cancel(우리는 안 보낸다) · guardian 심사 · 네트워크 정책 거부에서만 온다. 파일 변경 승인 거절도 `denied("approval request failed")` 인데 그 item 의 최종 상태는 **모른다**(★5판 정정 — `declined` 로 닫힌다 · 아래 §8-3 「5판 정정」 ① · TRD 5판 §4-7 사실★).
+- 설치본은 codex-cli 0.156.1 — 업스트림 main 과 같은 동작인지 **미확인**(5판: 명령 쪽은 태그 `rust-v0.156.1` 소스 판독으로 같음 — 가능성 높음 · 실행 미검 · TRD 5판 §4-7 사실). 승인 교환을 담은 실측 fixture 는 없다(기존 측정은 `approvalPolicy:"never"` 로 찍었다).
 - ★**지금 화면에는 아무것도 안 뜬다**★(가능성 높음 — 실측 아님): 거절 경로는 화면으로 사건을 내지 않고, 도구 끝 알림은 번역기가 버린다(`backend/codex/decoder.rs:262`). 빨간 경고 박스(`StructuredTextView.tsx:484-490`)는 codex `error` 알림(`decoder.rs:747-764`) 또는 거절 답을 못 보낸 제어 큐 넘침에서만 그린다. 남는 흔적 = codex 가 뒤이어 쓰는 글뿐.
 
 ### 8-2. 피어
@@ -210,8 +210,11 @@
 
 (수집자 정독 · gh — 가능성 높음. Cursor 기권.) 갈래 = **실패와 같이 빨갛게**(Zed · vibe-kanban · paseo) vs **따로 표기**(t3code 문구 · cline 경고 톤).
 
+- **보정(2026-09-27 · TRD 5판 — 메인 판독 · 실행 안 함 · 가능성 높음):** paseo 의 실패 낱말은 `declined` 가 아니라 `rejected`/`denied` 이고, 모르는 비지 않은 status 는 전부 「실행 중」으로 간다(`packages/server/src/server/agent/providers/tool-call-mapper-utils.ts:3-10` · `:22-36` · paseo `bbe3f17`) — codex `declined` 는 거기서 실행 중으로 그려질 것이다(판독만). t3code(`5378f87f9`)는 「Declined to …」로 적지만 `declined` 를 실패로 센다(`packages/client-runtime/src/work-log/presentation.ts:154-155` · `:418-427`). 이 두 피어는 「실행 안 됨」을 「실패」와 가르지 않는다.
+
 ### 8-3. 선택지와 결정
 
 - A 오류에 합침 — codex 가 보내는 그대로라 추가 작업 없음 · 권한에 막힌 것과 진짜 실패가 같아 보인다.
-- **B 따로 표기(결정)** — 주황 「거부됨」 · 줄 안 한 줄 사유 · 요약 「거부 N」. codex 가 `failed` 로 보내므로 **우리 통로가 거절한 item 을 기억했다가** 그 끝을 `Declined` 로 낸다(평범한 `declined` 상태도 그대로 `Declined`). 우리 앱의 거절은 전부 우리 정책(승인 창 없음) 때문이라 빨강은 없는 버그를 찾게 한다.
+- **B 따로 표기(결정)** — 주황 「거부됨」 · 줄 안 한 줄 사유 · 요약 「거부 N」. codex 가 `failed` 로 보내므로 **우리 통로가 거절한 item 을 기억했다가** 그 끝을 `Declined` 로 낸다(평범한 `declined` 상태도 그대로 `Declined`)(★5판 = 우리 거절은 `Refused` · 기억에 없는 `declined` 만 `Declined` — 사유가 출처별이다 · `Declined` 사유 「실행되지 않음」(사용자 2026-09-27) · TRD §4-7 ②-2★). 우리 앱의 거절은 전부 우리 정책(승인 창 없음) 때문이라 빨강은 없는 버그를 찾게 한다.
 - 남은 확인: B5 실측 — 0.156.1 이 우리 거절에 이미 `declined` 를 보내면 기억 장치는 뺀다 · 파일 변경 경로의 최종 상태.
+  - ★**5판 정정(2026-09-27 · 소스 판독 `rust-v0.156.1` · 실행 미검 · 가능성 높음)**★ — 이 정정이 대신하는 줄 = 위 「남은 확인」의 두 항목(「0.156.1 이 우리 거절에 이미 `declined` 를 보내면 기억 장치는 뺀다」 · 「파일 변경 경로의 최종 상태」)과 §8-1 의 「그 item 의 최종 상태는 **모른다**」 — 셋 다 낡았다. ① 파일 변경을 우리가 거절하면 `failed` 가 아니라 `declined` 로 닫힌다(`core/src/tools/handlers/apply_patch.rs:595, 608-623` · `core/src/tools/events.rs:333-343`) ② 그래서 기억 장치는 어느 쪽이든 뺄 수 없다 — 우리 거절과 벤더 `declined` 의 사유를 가르려고 늘 짓는다(결말 `Refused` / `Declined` 분리). 정본 = TRD 5판 §4-7 사실 · ②-2.

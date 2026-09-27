@@ -360,10 +360,23 @@
 - **참고 피어:** paseo(`packages/app/src/keyboard/keyboard-shortcuts.ts` — 포커스 범위 `message-input`/`other`) · t3code(재지정 가능한 명령 `thread.stop` — `packages/contracts/src/keybindings.ts`) · VS Code `when` 절. 비교 = `docs/research/chat-ux-four-features-2026-09-27.md` §2-2.
 
 ### T-37. claude 도구 결과도 중립 사건으로 — 프론트의 벤더 모양 파싱을 걷는다
-- **상태:** 보류(메인 판정 2026-09-27 — 챗 화면 라운드 범위 밖). 그 라운드는 codex 만 새 사건 `ToolResult` 를 낸다(`docs/process/S21-chat-ux/trd.md` §4-7 (c) · §11 ⑦).
+- **상태:** 보류(메인 판정 2026-09-27 — 챗 화면 라운드 범위 밖). 그 라운드는 codex 만 새 사건 `ToolResult` 를 낸다(`docs/process/S21-chat-ux/trd.md` §4-7 ④ · §11 ⑦).
 - **무엇이 문제인가:** claude 의 `tool_result` 는 사용자 블록째 `Structured{kind:"user"}` 로 가고 **프론트가 그 벤더 모양을 파싱해** 오류 여부를 읽는다(`src/components/slot/StructuredTextView.tsx:96-111` — 조사 §3-1). 「백엔드 확장」 원칙(벤더 지식은 `backend` 한 곳)에 어긋나는 선재 누수다. 챗 라운드 뒤에는 오류 표시가 백엔드마다 다른 길(claude = 프론트 파싱 · codex = `ToolResult`)로 온다.
 - **안 한 이유(그 라운드):** 결과 **내용**은 여전히 벤더 블록에서 와야 해 상태만 담은 사건은 오류 비트를 겹칠 뿐이고, claude 는 호출마다 결과가 와서 링·옛 셸 비용이 곱절로 는다(TRD §4-7 (c)).
 - **펼칠 때:** claude 번역기도 `ToolResult` 를 내고 프론트 파싱은 옛 데몬용 대체로만 남길지 · 결과 내용까지 중립 칸으로 옮길지 · 링 비용 실측.
+
+### T-38. 채팅에서 승인 받기 — codex 승인 질문을 지금은 자동 거절한다
+- **상태:** 보류(사용자 결정 2026-09-27 — 「다음 과제로 빼자. 지금 많이 엮여있어」). 챗 화면 라운드는 거절된 호출을 「거부됨」으로 보이기만 한다(`docs/process/S21-chat-ux/trd.md` §1 U7 · §4-7 ②-2). 그 판단은 ADR-0241(가안)의 거부한 대안 「채팅 승인을 이번에 짓는다」로 적는다.
+- **출처:** S21 챗 화면 TRD 4판 리뷰 갈림(이력 복원에서 우리 거절이 바뀐다 · 거절 기억 상한 16) 판정 중(TRD §12). 두 갈림은 알려진 한계로 수락했고(판정의 틀 = TRD §11 ⑨), 바른 해법이 이 항목이다. 거절된 호출의 사유 문구는 우리 거절 = 「대시보드가 승인 요청을 처리하지 않아 실행되지 않음」 · 기억에 없는 거부 = 「실행되지 않음」(사용자 결정 2026-09-27 — TRD §1 U2-a).
+- **지금 있는 것:**
+  - JSON(채팅) 모드에서 codex 의 서버 요청은 **전부 곧바로 「처리하지 않음」으로 거절된다** — `crates/engram-dashboard-agent/src/backend/codex/transport.rs:3054`(`refuse`) · 들어오는 모든 `Inbound::Request` 가 `:3629` 에서 그리로 간다. 답하지 않으면 에이전트가 영원히 멈춘다.
+  - 채팅 스폰 정책 = `AskForApproval::OnRequest` + `SandboxMode::WorkspaceWrite`(`backend/codex/mod.rs` 의 `thread_open`) — 작업 폴더 밖 쓰기 같은 동작은 승인을 묻고, 그 질문이 지금은 전부 거절된다.
+  - 터미널 모드는 `-a on-request` 로 띄운다 — codex 가 터미널에 자기 승인 프롬프트를 그리고 사람이 거기서 답할 수 있다.
+  - claude 는 두 모드 모두 `--permission-mode bypassPermissions` 로 띄운다(`backend/claude/mod.rs:158-167` · ADR-0097) — 정식 대체가 공통 제약 층인 임시 체제라 claude 는 묻지 않는다.
+- **이것이 오면:**
+  - TRD §4-7 ②-2 의 거부 귀속과 그 알려진 한계 넷(이력에 거절된 명령 행이 없다 · 상한 16 에서 밀려난 명령은 「오류」 · 이력의 파일 변경 거절과 상한 16 에서 밀려난 파일 변경 거절은 「거부됨 · 실행되지 않음」 — 우리 사유를 잃지만 거짓은 아니다)을 다시 본다 — 필요 없어질 가능성이 높다.
+  - 사용자가 「거절」로 답했을 때 벤더가 `declined` 를 내는지는 미검이다.
+- **설계 전에:** 피어가 채팅 안에서 승인 요청을 어떻게 그리고 답받는지 조사한다(CLAUDE.md 「참조 구현」).
 
 ## 결정 완료 (기록용)
 
