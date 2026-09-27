@@ -22,6 +22,7 @@ pub mod messaging_host;
 pub mod status_fanout;
 #[cfg(test)]
 mod test_doubles;
+pub mod usage_service;
 
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -453,10 +453,13 @@ pub struct UsageLimitSnapshot {
     pub plan: Option<String>,
     /// 조회가 아직 진행 중이다 — 이 답의 값은 그 조회 전의 것이고, 결과는 다음 요청의 답에 실린다.
     pub in_flight: bool,
-    pub served: UsageServed,
     /// `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
     /// 예외는 `Unavailable` 이다 — 값을 싣지 않는다.
     pub state: UsageVendorState,
+    /// 이 칸(벤더·계정)의 단조 번호 — 무엇이든 바뀌면 +1. 받는 쪽은 같은 연결(소켓) 안에서 칸마다 최댓값만
+    /// 남기고 더 작은 것은 버린다. 새 소켓이 서면 그 기억을 잊는다 — 데몬이 재시작하면 0 부터 다시 센다.
+    #[ts(type = "number")]
+    pub revision: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
@@ -502,10 +505,11 @@ pub enum UsageVendorState {
     Unavailable {
         detail: Option<UsageStateDetail>,
     },
-    /// 그 밖의 실패. `next_attempt_in_secs` = 다음 자동 조회까지 남은 초.
+    /// 그 밖의 실패. `next_attempt_in_secs` = 다음 자동 조회까지 남은 초 — 늘 정의된다(기준점이 없으면 거절
+    /// 끝 또는 지금), 이미 지났으면 0.
     Failed {
-        #[ts(type = "number | null")]
-        next_attempt_in_secs: Option<u64>,
+        #[ts(type = "number")]
+        next_attempt_in_secs: u64,
         detail: Option<UsageStateDetail>,
     },
     /// 상류가 조회를 거절했다. 이 초가 지나기 전에는 강제 새로고침도 조회를 내보내지 않는다.
@@ -552,16 +556,6 @@ impl std::fmt::Debug for UsageStateDetail {
             )
             .finish()
     }
-}
-
-/// 이 답의 값이 어떻게 나왔나.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
-#[ts(export)]
-pub enum UsageServed {
-    /// 이 요청이 기다린 조회가 방금 받아 온 값이다.
-    Fresh,
-    /// 이번 요청 동안 새로 받은 값이 없다(조회 안 함 · 실패 · 기다림 상한 초과) — 데몬이 들고 있던 값이다.
-    Cached,
 }
 
 /// 창 값의 출처.
@@ -684,8 +678,8 @@ mod tests {
             }],
             plan: Some("pro".to_string()),
             in_flight: true,
-            served: UsageServed::Cached,
             state,
+            revision: 7,
         }
     }
 
@@ -701,7 +695,7 @@ mod tests {
     #[test]
     fn usage_snapshot_serializes_to_the_exact_wire_shape() {
         let snap = usage_snapshot(UsageVendorState::Failed {
-            next_attempt_in_secs: Some(840),
+            next_attempt_in_secs: 840,
             detail: Some(detail(Some(-32603), Some("internal error"))),
         });
         assert_eq!(
@@ -723,12 +717,12 @@ mod tests {
                 }],
                 "plan": "pro",
                 "in_flight": true,
-                "served": "Cached",
                 "state": {
                     "kind": "Failed",
                     "next_attempt_in_secs": 840,
                     "detail": { "kind": "rpc_error", "code": -32603, "upstream": "internal error" }
-                }
+                },
+                "revision": 7
             })
         );
     }
@@ -779,14 +773,14 @@ mod tests {
             ),
             (
                 UsageVendorState::Failed {
-                    next_attempt_in_secs: None,
+                    next_attempt_in_secs: 0,
                     detail: None,
                 },
-                serde_json::json!({ "kind": "Failed", "next_attempt_in_secs": null, "detail": null }),
+                serde_json::json!({ "kind": "Failed", "next_attempt_in_secs": 0, "detail": null }),
             ),
             (
                 UsageVendorState::Failed {
-                    next_attempt_in_secs: Some(90),
+                    next_attempt_in_secs: 90,
                     detail: full(),
                 },
                 serde_json::json!({
@@ -839,7 +833,7 @@ mod tests {
             (
                 r#"{ "kind": "Failed", "next_attempt_in_secs": 5 }"#,
                 UsageVendorState::Failed {
-                    next_attempt_in_secs: Some(5),
+                    next_attempt_in_secs: 5,
                     detail: None,
                 },
             ),
@@ -900,12 +894,18 @@ mod tests {
             UsageScopedWindow::decl(),
             UsageVendorState::decl(),
             UsageStateDetail::decl(),
-            UsageServed::decl(),
             UsageSourceKind::decl(),
         ];
         for decl in &decls {
             assert!(!decl.contains("bigint"), "{decl}");
         }
+        let snap = UsageLimitSnapshot::decl();
+        assert!(snap.contains("revision: number,"), "{snap}");
+        // `served` 는 데몬 안에만 산다 — wire 모양에 칸도 타입 참조도 없어야 한다.
+        assert!(
+            !snap.contains("served") && !snap.contains("UsageServed"),
+            "{snap}"
+        );
         let window = UsageWindow::decl();
         assert!(window.contains("resets_at: number | null"), "{window}");
         assert!(window.contains("age_secs: number,"), "{window}");
@@ -922,7 +922,7 @@ mod tests {
                 r#"{ "kind": "NotInstalled", detail: UsageStateDetail | null, } | "#,
                 r#"{ "kind": "NeedsLogin", detail: UsageStateDetail | null, } | "#,
                 r#"{ "kind": "Unavailable", detail: UsageStateDetail | null, } | "#,
-                r#"{ "kind": "Failed", next_attempt_in_secs: number | null, "#,
+                r#"{ "kind": "Failed", next_attempt_in_secs: number, "#,
                 r#"detail: UsageStateDetail | null, } | "#,
                 r#"{ "kind": "Rejected", retry_in_secs: number, detail: UsageStateDetail | null, }"#,
             )

@@ -4,4 +4,4 @@ import type { UsageStateDetail } from "./UsageStateDetail";
 /**
  * 벤더 조회의 상태 코드. 비정상 다섯의 `detail` = 왜 그 상태인가(없으면 `null` — 원인을 모른다).
  */
-export type UsageVendorState = { "kind": "Ready" } | { "kind": "NotInstalled", detail: UsageStateDetail | null, } | { "kind": "NeedsLogin", detail: UsageStateDetail | null, } | { "kind": "Unavailable", detail: UsageStateDetail | null, } | { "kind": "Failed", next_attempt_in_secs: number | null, detail: UsageStateDetail | null, } | { "kind": "Rejected", retry_in_secs: number, detail: UsageStateDetail | null, };
+export type UsageVendorState = { "kind": "Ready" } | { "kind": "NotInstalled", detail: UsageStateDetail | null, } | { "kind": "NeedsLogin", detail: UsageStateDetail | null, } | { "kind": "Unavailable", detail: UsageStateDetail | null, } | { "kind": "Failed", next_attempt_in_secs: number, detail: UsageStateDetail | null, } | { "kind": "Rejected", retry_in_secs: number, detail: UsageStateDetail | null, };
