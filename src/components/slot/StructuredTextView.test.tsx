@@ -2,12 +2,21 @@
 //   (react-markdown 등 세부는 leaf 자체 테스트의 몫).
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
 import { StructuredTextView } from './StructuredTextView'
-import type { StructuredItem } from './structuredAccumulator'
+import {
+  StructuredEventAccumulator,
+  type StructuredItem,
+  type ToolCategory,
+  type ToolItem,
+} from './structuredAccumulator'
 import { t } from '../../i18n'
+import { useToolGroupStore } from '../../store/toolGroupStore'
 
+// 도구 묶음 펼침 스토어는 zustand 싱글톤이라 시험 간 격리.
+beforeEach(() => useToolGroupStore.setState({ bySlot: {} }))
 afterEach(() => cleanup())
 
 // (computeRailRunPositions 순수 함수 테스트는 ADR-0053 구조 분할로 ./chat/railPositions.test.ts 로 이사.)
@@ -98,7 +107,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
 
   it('tool item → 이름+힌트 헤더(접힘), 클릭하면 IN(args) 상세가 펼쳐진다', () => {
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 0 },
+      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', category: 'Read', resultMark: null, itemId: 0 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     const header = screen.getByRole('button', { name: /Read/ })
@@ -114,7 +123,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
 
   it('tool item 이 매칭 tool_result 를 가지면 펼침 시 OUT 결과를 함께 그린다', () => {
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_9', itemId: 0 },
+      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_9', category: 'Command', resultMark: null, itemId: 0 },
       {
         kind: 'structured',
         label: 'user',
@@ -281,7 +290,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   // ── tool id=null: OUT 없이 안전 렌더 ──────────────────────────────────────────────
   it('tool item 이 id=null 이면 OUT 블록 없이 name/hint 만 렌더하고 crash 하지 않는다', () => {
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Glob', argsJson: '{"pattern":"**/*.ts"}', id: null, itemId: 0 },
+      { kind: 'tool', name: 'Glob', argsJson: '{"pattern":"**/*.ts"}', id: null, category: 'Search', resultMark: null, itemId: 0 },
     ]
     expect(() => render(<StructuredTextView items={items} />)).not.toThrow()
     const header = screen.getByRole('button', { name: /Glob/ })
@@ -293,7 +302,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   // ── 매칭 안 되는 tool_result: standalone 렌더 안 함 ───────────────────────────────
   it('id 가 어떤 tool 과도 매칭되지 않는 tool_result 는 standalone 렌더하지 않는다', () => {
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 0 },
+      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', category: 'Read', resultMark: null, itemId: 0 },
       {
         kind: 'structured',
         label: 'user',
@@ -310,7 +319,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   // ── malformed json 폴백(throw 금지) — tool args + generic json ────────────────────
   it('malformed argsJson·generic json 이 와도 폴백 렌더하고 throw 하지 않는다', () => {
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Bad', argsJson: '{not valid', id: 'tu_2', itemId: 0 },
+      { kind: 'tool', name: 'Bad', argsJson: '{not valid', id: 'tu_2', category: 'Other', resultMark: null, itemId: 0 },
       { kind: 'structured', label: 'weird', json: '{also bad', itemId: 1 },
     ]
     expect(() => render(<StructuredTextView items={items} />)).not.toThrow()
@@ -326,7 +335,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   it('도구 OUT 에 삼중 백틱+마크다운이 있어도 inert 하다(heading 등 마크다운 요소 미생성 — FIX 2)', () => {
     const evil = '```\n# NOT_A_HEADING\n[link](http://evil.example)\n```'
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Cat', argsJson: '{"path":"x"}', id: 'tu_3', itemId: 0 },
+      { kind: 'tool', name: 'Cat', argsJson: '{"path":"x"}', id: 'tu_3', category: 'Other', resultMark: null, itemId: 0 },
       {
         kind: 'structured',
         label: 'user',
@@ -347,7 +356,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   it('점선(border-dashed) 레일 대신 dot-rail 골격을 쓴다', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'hi', itemId: 0 },
-      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 1 },
+      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', category: 'Read', resultMark: null, itemId: 1 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     expect(container.querySelector('.border-dashed')).toBeNull()
@@ -372,7 +381,7 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
   it('rail 점 색 = 행 종류: tool 은 초록(bg-green-500), 추론/본문은 muted', () => {
     const items: StructuredItem[] = [
       { kind: 'text', text: 'hi', itemId: 0 },
-      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', itemId: 1 },
+      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', category: 'Command', resultMark: null, itemId: 1 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     expect(container.querySelector('.rounded-full.bg-green-500')).toBeTruthy()
@@ -409,11 +418,432 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
 
   it('tool item → 헤더(아이콘 + bold 이름) + bg-surface 박스로 렌더', () => {
     const items: StructuredItem[] = [
-      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', itemId: 0 },
+      { kind: 'tool', name: 'Bash', argsJson: '{"command":"ls"}', id: 'tu_1', category: 'Command', resultMark: null, itemId: 0 },
     ]
     const { container } = render(<StructuredTextView items={items} />)
     const title = screen.getByText('Bash')
     expect(title.className).toContain('font-bold')
     expect(container.querySelector('.bg-surface.rounded-sm')).toBeTruthy()
+  })
+})
+
+// ── ADR-0239 · ADR-0241: 도구 묶음 · 끝 표식 (TRD S21-chat-ux §4-6 · §4-7 ⑨ 프론트) ──────────────
+
+let nextToolItemId = 1000
+function toolItem(
+  name: string,
+  id: string | null,
+  category: ToolCategory,
+  extra: Partial<ToolItem> = {},
+): ToolItem {
+  return {
+    kind: 'tool',
+    name,
+    argsJson: '{"path":"a.ts"}',
+    id,
+    category,
+    resultMark: null,
+    itemId: nextToolItemId++,
+    ...extra,
+  }
+}
+/** claude 가 결과 본문을 싣는 운반 행 — 그리지 않는다(skip). */
+function resultCarrier(toolUseId: string, isError: boolean): StructuredItem {
+  return {
+    kind: 'structured',
+    label: 'user',
+    json: JSON.stringify({ type: 'tool_result', tool_use_id: toolUseId, content: 'out', is_error: isError }),
+    itemId: nextToolItemId++,
+  }
+}
+const textItem = (s: string): StructuredItem => ({ kind: 'text', text: s, itemId: nextToolItemId++ })
+const thoughtItem = (s: string): StructuredItem => ({
+  kind: 'structured',
+  label: 'thinking',
+  json: JSON.stringify({ thinking: s }),
+  itemId: nextToolItemId++,
+})
+const interruptedOutcome = (): StructuredItem => ({
+  kind: 'outcome',
+  outcome: 'interrupted',
+  detail: null,
+  itemId: nextToolItemId++,
+})
+
+const groups = (c: HTMLElement) => Array.from(c.querySelectorAll<HTMLElement>('[data-tool-group]'))
+const groupHeader = (g: HTMLElement) => g.querySelector('button') as HTMLButtonElement
+const railRows = (c: HTMLElement) => c.querySelectorAll('.relative.flex.px-4').length
+const railDots = (c: HTMLElement) => c.querySelectorAll('.rounded-full').length
+const summary = (...parts: string[]) => parts.join(' · ')
+
+describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
+  it('도구 하나는 묶지 않는다 — 오늘 그 행 그대로', () => {
+    const { container } = render(
+      <StructuredTextView items={[toolItem('Read', 'r1', 'Read'), textItem('done')]} />,
+    )
+    expect(groups(container)).toEqual([])
+    expect(screen.getByRole('button', { name: 'Read' })).toBeTruthy()
+  })
+
+  it('도구 둘 이상 = 묶음 하나 · 운반 행 · 빈 생각이 끼어도 이어진다 · DOM 표지', () => {
+    const items: StructuredItem[] = [
+      toolItem('Read', 'r1', 'Read'),
+      resultCarrier('r1', false),
+      thoughtItem('   '),
+      toolItem('Grep', 'g1', 'Search'),
+      textItem('answer'),
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    const [g] = groups(container)
+    expect(groups(container)).toHaveLength(1)
+    expect(g.getAttribute('data-tool-group')).toBe('tool:r1')
+    expect(g.getAttribute('data-tool-group-open')).toBe('0')
+    expect(g.getAttribute('data-tool-group-count')).toBe('2')
+    expect(groupHeader(g).textContent).toBe(
+      summary(t('chat.toolGroupSearch', { count: '1' }), t('chat.toolGroupRead', { count: '1' })),
+    )
+    // 접힌 묶음은 멤버 행을 그리지 않는다.
+    expect(screen.queryByRole('button', { name: 'Read' })).toBeNull()
+  })
+
+  it('첫 호출에 백엔드 id 가 없으면 키 = item:<itemId>', () => {
+    const first = toolItem('Read', null, 'Read')
+    const { container } = render(<StructuredTextView items={[first, toolItem('Read', 'r2', 'Read')]} />)
+    expect(groups(container)[0].getAttribute('data-tool-group')).toBe(`item:${first.itemId}`)
+  })
+
+  it('레일은 행 목록으로 센다 — 묶음 = 레일 한 행 · 펼쳐도 멤버는 레일을 그리지 않는다(ADR-0051)', () => {
+    const items: StructuredItem[] = [
+      textItem('before'),
+      toolItem('Read', 'r1', 'Read'),
+      toolItem('Read', 'r2', 'Read'),
+      toolItem('Bash', 'b1', 'Command'),
+      textItem('after'),
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    // 글 · 묶음 · 글 = 세 행 — 셋이 이어져 연결선도 셋(top · mid · bottom).
+    expect(railRows(container)).toBe(3)
+    expect(railDots(container)).toBe(3)
+    expect(container.querySelectorAll('.w-px.bg-border').length).toBe(3)
+
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    cleanup()
+    const expanded = render(<StructuredTextView items={items} slotId="s1" />)
+    fireEvent.click(groupHeader(groups(expanded.container)[0]))
+    expect(screen.getAllByRole('button', { name: 'Read' })).toHaveLength(2)
+    expect(screen.getByRole('button', { name: 'Bash' })).toBeTruthy()
+    expect(railRows(expanded.container)).toBe(3)
+    expect(railDots(expanded.container)).toBe(3)
+  })
+
+  it('도는 턴의 마지막 묶음은 펼치고, 뒤에 생각이 와도 펼친 채 · 글이 오면 접는다', () => {
+    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+    const { container, rerender } = render(<StructuredTextView items={calls} streaming />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    expect(screen.getAllByRole('button', { name: 'Read' })).toHaveLength(2)
+
+    rerender(<StructuredTextView items={[...calls, thoughtItem('hmm')]} streaming />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+
+    rerender(<StructuredTextView items={[...calls, thoughtItem('hmm'), textItem('here')]} streaming />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+    expect(screen.queryByRole('button', { name: 'Read' })).toBeNull()
+  })
+
+  it('턴이 끝나면 마지막 묶음도 접는다', () => {
+    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+    const { container, rerender } = render(<StructuredTextView items={calls} streaming />)
+    rerender(<StructuredTextView items={calls} />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+  })
+
+  it('사람 토글이 자동 규칙을 이긴다 — 도는 중 접으면 접힌 채 · 턴 끝 뒤 펼치면 펼친 채', () => {
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+    const { container, rerender } = render(<StructuredTextView items={calls} streaming slotId="s1" />)
+    fireEvent.click(groupHeader(groups(container)[0]))
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+
+    const more = [...calls, toolItem('Read', 'r3', 'Read')]
+    rerender(<StructuredTextView items={more} streaming slotId="s1" />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+
+    const ended = [...more, textItem('answer')]
+    rerender(<StructuredTextView items={ended} slotId="s1" />)
+    fireEvent.click(groupHeader(groups(container)[0]))
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    rerender(<StructuredTextView items={[...ended]} slotId="s1" />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+  })
+
+  it('같은 사건열을 새 누산기로 다시 먹여도(replay) 고른 펼침이 그대로 붙는다', () => {
+    const events = [
+      { type: 'ToolCall', name: 'Read', args_json: '{}', id: 'r1', turn_id: null, message_id: null, category: 'Read' },
+      { type: 'ToolCall', name: 'Read', args_json: '{}', id: 'r2', turn_id: null, message_id: null, category: 'Read' },
+      { type: 'TextDelta', text: 'answer', turn_id: null, message_id: null },
+    ]
+    const snapshotOf = () => {
+      const acc = new StructuredEventAccumulator()
+      for (const ev of events) acc.feed(new TextEncoder().encode(JSON.stringify(ev as StructuredEvent)))
+      return acc.snapshot()
+    }
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const { container, rerender } = render(<StructuredTextView items={snapshotOf()} slotId="s1" />)
+    fireEvent.click(groupHeader(groups(container)[0]))
+    rerender(<StructuredTextView items={snapshotOf()} slotId="s1" />)
+    expect(groups(container)[0].getAttribute('data-tool-group')).toBe('tool:r1')
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+  })
+
+  it('slotId 가 없으면 머리를 눌러도 바뀌지 않는다(자동 규칙만)', () => {
+    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+    const { container } = render(<StructuredTextView items={calls} />)
+    const header = groupHeader(groups(container)[0])
+    expect(header.disabled).toBe(true)
+    fireEvent.click(header)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+  })
+
+  it('펼침 알림 — 마지막이 아닌 묶음은 false · 마지막 묶음은 true', () => {
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const onGroupToggle = vi.fn()
+    const items: StructuredItem[] = [
+      toolItem('Read', 'r1', 'Read'),
+      toolItem('Read', 'r2', 'Read'),
+      textItem('middle'),
+      toolItem('Bash', 'b1', 'Command'),
+      toolItem('Bash', 'b2', 'Command'),
+    ]
+    const { container } = render(
+      <StructuredTextView items={items} slotId="s1" onGroupToggle={onGroupToggle} />,
+    )
+    const [first, last] = groups(container)
+    fireEvent.click(groupHeader(first))
+    fireEvent.click(groupHeader(last))
+    expect(onGroupToggle.mock.calls).toEqual([[false], [true]])
+  })
+})
+
+describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
+  it('codex 실패(resultMark failed) → 붉은 Error 배지 · data-tool-mark="failed" · Out 칸 없음', () => {
+    const { container } = render(
+      <StructuredTextView items={[toolItem('commandExecution', 'c1', 'Command', { resultMark: 'failed' })]} />,
+    )
+    const row = container.querySelector('[data-tool-mark]') as HTMLElement
+    expect(row.getAttribute('data-tool-mark')).toBe('failed')
+    expect(screen.getByText('Error').className).toContain('text-red-500')
+    fireEvent.click(screen.getByRole('button', { name: 'commandExecution' }))
+    expect(screen.getByText('In')).toBeTruthy()
+    expect(screen.queryByText('Out')).toBeNull()
+  })
+
+  it('claude 벤더 오류(is_error) → 붉은 Error 배지 · data-tool-mark 는 없다(표식이 아니다)', () => {
+    const { container } = render(
+      <StructuredTextView items={[toolItem('Bash', 'b1', 'Command'), resultCarrier('b1', true)]} />,
+    )
+    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(container.querySelector('[data-tool-mark]')).toBeNull()
+  })
+
+  it.each([
+    ['refused', 'chat.toolRefusedReason'],
+    ['declined', 'chat.toolDeclinedReason'],
+  ] as const)('거부 행(%s) — 주황 「거부됨」 배지 · 출처별 사유 줄(접힌 채로도) · 붉은 표시 없음', (mark, reasonKey) => {
+    const { container } = render(
+      <StructuredTextView items={[toolItem('commandExecution', 'c1', 'Command', { resultMark: mark })]} />,
+    )
+    const badge = screen.getByText(t('chat.toolDeclined'))
+    expect(badge.style.color).toBe('var(--status-blocked)')
+    expect(badge.style.borderColor).toBe('var(--status-blocked)')
+    expect(screen.queryByText('Error')).toBeNull()
+    expect(container.querySelector('.text-red-500, .border-red-500, .border-red-500\\/60')).toBeNull()
+    // 머리(도구 이름)는 기본 톤이다.
+    expect(screen.getByText('commandExecution').className).toContain('text-foreground')
+
+    const row = container.querySelector('[data-tool-mark]') as HTMLElement
+    expect(row.getAttribute('data-tool-mark')).toBe('declined')
+    const detail = screen.getByRole('button', { name: 'commandExecution' })
+    expect(detail.getAttribute('aria-expanded')).toBe('false')
+    const reason = container.querySelector('[data-tool-declined-reason]') as HTMLElement
+    expect(reason.getAttribute('data-tool-declined-reason')).toBe(reasonKey)
+    expect(reason.textContent).toBe(t(reasonKey))
+  })
+
+  it('두 출처는 배지 · 색 · data-tool-mark 가 같고 사유 키만 갈린다 — 묶음 요약 「거부 2」 · 오류 칸 없음', () => {
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const items = [
+      toolItem('commandExecution', 'c1', 'Command', { resultMark: 'refused' }),
+      toolItem('fileChange', 'f1', 'Edit', { resultMark: 'declined' }),
+    ]
+    const { container } = render(<StructuredTextView items={items} slotId="s1" />)
+    const [g] = groups(container)
+    expect(groupHeader(g).textContent).toBe(
+      summary(
+        t('chat.toolGroupEdit', { count: '1' }),
+        t('chat.toolGroupCommand', { count: '1' }),
+        t('chat.toolGroupDeclined', { count: '2' }),
+      ),
+    )
+    fireEvent.click(groupHeader(g))
+    const marks = Array.from(container.querySelectorAll('[data-tool-mark]')).map((el) => el.getAttribute('data-tool-mark'))
+    expect(marks).toEqual(['declined', 'declined'])
+    const badges = screen.getAllByText(t('chat.toolDeclined'))
+    expect(badges.map((b) => b.style.color)).toEqual(['var(--status-blocked)', 'var(--status-blocked)'])
+    const reasons = Array.from(container.querySelectorAll('[data-tool-declined-reason]')).map((el) =>
+      el.getAttribute('data-tool-declined-reason'),
+    )
+    expect(reasons).toEqual(['chat.toolRefusedReason', 'chat.toolDeclinedReason'])
+  })
+
+  it('묶음 요약은 「오류 1 · 거부 1」 순서 — 거부는 오류 수에 안 든다', () => {
+    const items = [
+      toolItem('commandExecution', 'c1', 'Command', { resultMark: 'failed' }),
+      toolItem('commandExecution', 'c2', 'Command', { resultMark: 'refused' }),
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(groupHeader(groups(container)[0]).textContent).toBe(
+      summary(
+        t('chat.toolGroupCommand', { count: '2' }),
+        t('chat.toolGroupErrors', { count: '1' }),
+        t('chat.toolGroupDeclined', { count: '1' }),
+      ),
+    )
+  })
+
+  it('거부 표식이 벤더 오류 본문을 이긴다 — 배지 · 머리 셈 둘 다', () => {
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const items: StructuredItem[] = [
+      toolItem('Read', 'r1', 'Read'),
+      toolItem('Bash', 'b1', 'Command', { resultMark: 'declined' }),
+      resultCarrier('b1', true),
+    ]
+    const { container } = render(<StructuredTextView items={items} slotId="s1" />)
+    const [g] = groups(container)
+    expect(groupHeader(g).textContent).toBe(
+      summary(
+        t('chat.toolGroupRead', { count: '1' }),
+        t('chat.toolGroupCommand', { count: '1' }),
+        t('chat.toolGroupDeclined', { count: '1' }),
+      ),
+    )
+    fireEvent.click(groupHeader(g))
+    expect(screen.getByText(t('chat.toolDeclined'))).toBeTruthy()
+    expect(screen.queryByText('Error')).toBeNull()
+  })
+
+  it('사유 줄은 행이 아니다 — 레일 행 · 점 수가 표식 없는 같은 목록과 같다(ADR-0051)', () => {
+    const list = (mark: ToolItem['resultMark']): StructuredItem[] => [
+      textItem('before'),
+      toolItem('commandExecution', 'c1', 'Command', { resultMark: mark }),
+      textItem('after'),
+    ]
+    const plain = render(<StructuredTextView items={list(null)} />)
+    const plainCounts = [railRows(plain.container), railDots(plain.container)]
+    cleanup()
+    const marked = render(<StructuredTextView items={list('refused')} />)
+    expect(marked.container.querySelector('[data-tool-declined-reason]')).toBeTruthy()
+    expect([railRows(marked.container), railDots(marked.container)]).toEqual(plainCounts)
+  })
+
+  // ★TRD §11 ⑪ · §4-7 ⑨ ⓐ 고정★: 끊긴 턴의 도구 실패는 그대로 붉은 「오류」로 보이고, 바로 아래 강조된 「중단됨」
+  //   행이 맥락을 준다 — 끊긴 턴 안의 실패를 따로 가르지 않는다.
+  it('ⓐ claude — 끊긴 턴 도구의 tool_result is_error → 붉은 「Error」 · 머리 「오류 1」 · 아래에 중단 행', () => {
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const items: StructuredItem[] = [
+      toolItem('Read', 'r1', 'Read'),
+      resultCarrier('r1', false),
+      toolItem('Bash', 'b1', 'Command'),
+      resultCarrier('b1', true),
+      interruptedOutcome(),
+      { kind: 'separator', itemId: nextToolItemId++ },
+    ]
+    const { container } = render(<StructuredTextView items={items} slotId="s1" />)
+    const [g] = groups(container)
+    expect(groupHeader(g).textContent).toBe(
+      summary(
+        t('chat.toolGroupRead', { count: '1' }),
+        t('chat.toolGroupCommand', { count: '1' }),
+        t('chat.toolGroupErrors', { count: '1' }),
+      ),
+    )
+    fireEvent.click(groupHeader(g))
+    expect(screen.getByText('Error').className).toContain('text-red-500')
+    expect(container.querySelector('[data-tool-mark]')).toBeNull()
+    const outcome = screen.getByText(t('chat.turnInterrupted'))
+    expect(g.compareDocumentPosition(outcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('ⓐ codex — 끊긴 턴 뒤 늦게 온 ToolResult{Failed} → 그 행 「Error」 · 머리 「오류 1」 · 중단 행은 그대로', () => {
+    const acc = new StructuredEventAccumulator()
+    const feed = (ev: unknown) => acc.feed(new TextEncoder().encode(JSON.stringify(ev as StructuredEvent)))
+    const call = (id: string, category: ToolCategory) => ({
+      type: 'ToolCall',
+      name: 'commandExecution',
+      args_json: '{}',
+      id,
+      turn_id: 't1',
+      message_id: null,
+      category,
+    })
+    feed(call('c1', 'Read'))
+    feed(call('c2', 'Command'))
+    feed({ type: 'TurnEnd', turn_id: 't1', outcome: { kind: 'Interrupted' } })
+    feed({ type: 'ToolResult', id: 'c2', outcome: 'Failed' })
+
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const { container } = render(<StructuredTextView items={acc.snapshot()} slotId="s1" />)
+    const [g] = groups(container)
+    expect(groupHeader(g).textContent).toBe(
+      summary(
+        t('chat.toolGroupRead', { count: '1' }),
+        t('chat.toolGroupCommand', { count: '1' }),
+        t('chat.toolGroupErrors', { count: '1' }),
+      ),
+    )
+    fireEvent.click(groupHeader(g))
+    const marks = Array.from(container.querySelectorAll('[data-tool-mark]')).map((el) => el.getAttribute('data-tool-mark'))
+    expect(marks).toEqual(['failed'])
+    expect(screen.getByText('Error').className).toContain('text-red-500')
+    const outcome = screen.getByText(t('chat.turnInterrupted'))
+    expect(g.compareDocumentPosition(outcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('종류가 있으면 종류 아이콘 · Other 면 이름 휴리스틱(옛 데몬 모습 그대로)', () => {
+    const { container, rerender } = render(<StructuredTextView items={[toolItem('Glob', 'g1', 'Search')]} />)
+    const iconOf = () => container.querySelector('.mb-3 svg')?.getAttribute('class') ?? ''
+    expect(iconOf()).toContain('lucide-search')
+    rerender(<StructuredTextView items={[toolItem('Glob', 'g1', 'Other')]} />)
+    expect(iconOf()).toContain('lucide-folder-open')
+  })
+})
+
+// ── ADR-0237 U8: 중단 행 강조 ────────────────────────────────────────────────────────────
+describe('StructuredTextView 결말 행 톤 (ADR-0237 U8)', () => {
+  const titleOf = (outcome: 'failed' | 'interrupted' | 'unknown', text: string) => {
+    render(<StructuredTextView items={[{ kind: 'outcome', outcome, detail: null, itemId: 0 }]} />)
+    const title = screen.getByText(text)
+    return { title, line: title.parentElement as HTMLElement }
+  }
+
+  it('중단 = 굵게 + 강조색(text-accent) · 아이콘 · 문구 그대로', () => {
+    const { title, line } = titleOf('interrupted', t('chat.turnInterrupted'))
+    expect(title.className).toContain('font-bold')
+    expect(line.className).toContain('text-accent')
+    expect(line.className).not.toContain('text-muted')
+    expect(line.querySelector('svg')?.getAttribute('class')).toContain('lucide-circle-stop')
+  })
+
+  it('실패 = 오늘처럼 붉은 톤 + 굵게', () => {
+    const { title, line } = titleOf('failed', t('chat.turnFailed'))
+    expect(title.className).toContain('font-bold')
+    expect(line.className).toContain('text-red-500')
+    expect(line.className).not.toContain('text-accent')
+  })
+
+  it('모름 = 오늘처럼 muted · 굵게 아님', () => {
+    const { title, line } = titleOf('unknown', t('chat.turnUnknown'))
+    expect(title.className).not.toContain('font-bold')
+    expect(line.className).toContain('text-muted')
+    expect(line.className).not.toContain('text-accent')
   })
 })

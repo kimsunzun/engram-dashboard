@@ -50,20 +50,18 @@ export type ToolResultMark = 'failed' | 'declined' | 'refused'
 /** `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
 export type StructuredItem =
   | { kind: 'text'; text: string; itemId: number }
-  // id 는 백엔드 tool-use id. `category` · `resultMark` 는 누산기가 늘 채운다 — 비는 것은 손으로 지은 항목뿐이고
-  //   그때는 `'Other'` · 표식 없음으로 읽는다.
+  // id 는 백엔드 tool-use id.
   | {
       kind: 'tool'
       name: string
       argsJson: string
       id: string | null
-      category?: ToolCategory
+      category: ToolCategory
       /**
-       * 표식 없음(`null` · 칸 없음)을 성공으로 읽지 말 것 — 정상 완료뿐 아니라 끝이 안 온 호출(끊겨 아직 돈다 ·
-       * 옛 데몬 · 링에서 밀려남)과 모르는 결말도 같은 값이다. 뒤에 온 결과가 앞 표식을 덮는다(완료 · 모르는
-       * 결말이면 지운다).
+       * 표식 없음(`null`)을 성공으로 읽지 말 것 — 정상 완료뿐 아니라 끝이 안 온 호출(끊겨 아직 돈다 · 옛 데몬 ·
+       * 링에서 밀려남)과 모르는 결말도 같은 값이다. 뒤에 온 결과가 앞 표식을 덮는다(완료 · 모르는 결말이면 지운다).
        */
-      resultMark?: ToolResultMark | null
+      resultMark: ToolResultMark | null
       itemId: number
     }
   | { kind: 'usage'; inputTokens: number; outputTokens: number; itemId: number }
