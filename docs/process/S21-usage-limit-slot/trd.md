@@ -100,8 +100,8 @@ front ── UsageSlot 이 실제로 보이는 동안 회사별 60초 요청(대
 |---|---|---|
 | `NotInstalled` | `NotInstalled` | 설치 안 됨 |
 | `NeedsLogin` | `Unauthenticated` | 로그인 필요 |
-| `Failed{next_attempt}` | `Timeout`·`Unsupported`·`Spawn`·`Io`·`Parse`·`Upstream` | 조회 실패 — 다음 시도 HH:MM(= `next_auto`) |
-| `Rejected{until}` | `RateLimited`(`now < reject_until` 동안) — 지나면 `Failed{next_attempt}` | 거절됨 — N분 뒤 |
+| `Failed{next_attempt_in_secs}` | `Timeout`·`Unsupported`·`Spawn`·`Io`·`Parse`·`Upstream` | 조회 실패 — 다음 시도 HH:MM(= `next_auto`) |
+| `Rejected{retry_in_secs}` | `RateLimited`(`now < reject_until` 동안) — 지나면 `Failed{next_attempt_in_secs}` | 거절됨 — N분 뒤 |
 
 - **동시성·락:** `Mutex<UsageBook>` 은 잎 락 — 쥔 채 I/O·await·다른 락 금지(ADR-0006 원칙). 합류 = 키마다 `watch` 세대 번호 — 시작한 요청과 합류한 요청이 같은 완료를 `timeout(REPLY_WAIT_MAX)` 로 기다린다. 회사끼리는 서로를 기다리지 않는다.
 - **조회 구동·종료:** 조회는 분리된 `std::thread`(이름 `usage-probe`)에서 돈다 — tokio blocking 풀이 아니므로 런타임 drop 이 기다리지 않고, 자식은 KILL_ON_JOB_CLOSE Job 안이라(`platform/windows.rs:4`·`:35`) 데몬 프로세스가 끝나면(정상·크래시 모두) OS 가 트리째 거둔다. 그래서 graceful 종료(`lib.rs:754-782`)에 단계를 더하지 않는다(§3 #39). 버스 대기는 std 채널 `recv_timeout` 이라 런타임 타이머와 무관하다(아래 「버스」).
@@ -148,7 +148,8 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
 - **컴포넌트:** 신설 `components/slot/UsageSlot.tsx`.
   - 폭 단계(R3·D16): ResizeObserver 로 실제 폭, 단계별 자연 폭은 숨은 렌더(`visibility:hidden`)에서 잰다. 들어가는 가장 넓은 단계 · 남은 시간은 1·2단만 · 3단보다 좁으면 `text-overflow: ellipsis` — px 상수 없음.
   - 막대 = `role="meter"` + `aria-valuenow`(보이는 수)·`aria-valuetext`(D14). 값·시간은 DOM 텍스트(R27) + `data-usage-vendor`/`data-usage-window`(cdp QA 용). "갱신 중" = `pending` 또는 답의 `in_flight` — 값은 이전 것 그대로.
-  - 만료: `expired`(데몬 래치) 또는 `resets_at ≤ 지금` → %·카운트다운 숨기고 "리셋됨 — 갱신 대기"(R32). 오래됨 → 흐리게 + "N분 전" · 분 단위 tick 하나. 상태 문구(R31) 네 가지를 `t()` 로 — 실패·거절이어도 들고 있는 값은 그린다(R22).
+  - 만료: `expired`(데몬 래치) 또는 `resets_at ≤ 지금` → %·카운트다운 숨기고 "리셋됨 — 갱신 대기"(R32). 오래됨 → 작은 표시는 **숫자만 흐리게**(나이 문구 없음) · "N분 전" 은 팝업에만 · 분 단위 tick 하나. 상태 문구(R31) 네 가지를 `t()` 로 — 실패·거절이어도 들고 있는 값은 그린다(R22).
+  - 상태 배지(R31 — 사용자 결정 2026-09-27): 정상이 아닌 네 상태면 작은 표시엔 문구 대신 회사 이름 옆 **`!` 배지 하나** — 모든 폭 단계(숫자만 남는 단계 포함, 예 `C! 62·41`)에서 말줄임에 안 잘리게 이름에 붙인다. 글리프는 `⚠`(< 20%, R10)와 겹치지 않는다. 배지 요소의 `aria-label`·`title` = 그 상태의 한 줄 문구(hover 표시 + LLM 이 읽는 DOM 텍스트 — R27). 같은 문구를 팝업 맨 위 한 줄에 둔다(정본 — 터치엔 hover 없음). 문구(상태 넷·"N분 전")는 전부 `t(key)` + 값 끼워 넣기(R28 · ADR-0069)이고 시각은 `Intl` — 데몬·wire·LLM 버스 읽기 경로는 상태 코드 + 수만(예 `Failed{next_attempt_in_secs}` · `Rejected{retry_in_secs}`), 표시 문자열은 싣지 않는다.
   - 팝업(R5–R7·D8): 요약 영역이 `<button>`(클릭·Enter·Space — D14) · `position: fixed` + `clampMenuPosition`(`SlotContextMenu.tsx:33`) · Esc·바깥 클릭으로 닫힘 · 창별 절대 리셋 시각(`Intl.DateTimeFormat`) · 값마다 나이 상시 · plan(있을 때만) · 모델별 창 · 「사용량 페이지 ↗」(`@tauri-apps/plugin-opener` `openUrl` — `package.json:22`, `title` 로 목적지 설명) · ⟳(거절 중 비활성 + "거절됨 — N분 뒤"). 토글 없음. 두 회사 다 꺼짐 → 안내 한 줄(R4).
 - **메뉴(R8):** `registerSlotMenu('usage', …)` = `usageSlot.refresh` · `usageSlot.toggleClaude` · `usageSlot.toggleCodex`. ☑ 는 `SlotMenuItem`(`commands/slotMenu.ts:21-35`)에 선택 칸 `checked?: (ctx) => boolean` 을 더한다. ★상태는 메뉴 ctx 로 들어온다★ — ctx 를 만드는 자리(`LayoutLeaf.tsx:302-307`)가 이미 쥔 `node.content` 를 ctx 에 싣고, `checked(ctx)` 는 ctx 만 읽는다(스토어를 뒤지지 않는다 — ADR-0064 「메뉴에서 직접 store 호출 금지」·실행 컨텍스트는 ctx 로). `SlotContextMenu` 가 `role="menuitemcheckbox"`·`aria-checked` 로 그린다(`checked` 칸 추가 = §7 #8). 토글 실행 = `useViewStore.setSlotContent` 전량 교체(`store/viewStore.ts:213-219`). `'*'` hideOn(`slotContentCommands.ts:115`)에 `'usage'` · 빈 슬롯 「새 콘텐츠」 자식(`:94-105`)에 `slot.fill.usage`.
 - **등록점:** `SLOT_CONTENT_TYPES`·`validateSlotContent`(`tabCommands.ts:147-172`) · `LayoutLeaf.tsx:206-207`·`:283-289`. 포커스 제외는 allowlist 라 자동(`LayoutLeaf.tsx:78-86` · `selectOpenTarget.ts:14`).
@@ -246,7 +247,7 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
 | 버스 | `usage.get`/`usage.refresh` 스키마·catalog · ★`call_daemon_command` 로 불러 기다리는 경우에도 `OUTCOME_UNKNOWN` 이 아니라 행이 옴(blocking 풀 스레드에서)★ · `left_pct` 내림 | R26·R27 | 없음 |
 | 셸 | `SlotContent::Usage` serde 기본값 · `slot_content()` 반려 · `set_usage_slot` 병합 · catalog | R9·R26 | 없음(`lib_unit`) |
 | 프론트 폴러 | 가짜 타이머 + 가시성·IO 모의 — 숨은 탭·창 hidden·비연결 → 0건 · 보이게 됨·connected 전이 → 즉시 회사당 1건 · 60초마다 · `pending` 이면 건너뜀 · 슬롯 둘 → 안 겹침 · ⟳ → refresh · 꺼진 회사 0 · 실패 → 값 유지 | R8·R12·R29 | 없음(vitest) |
-| 프론트 표시 | `usageFormat` — 19.6→19 빨강 · 20.4→20 노랑 · 50.9→50 노랑 · 51→초록 · 정확히 50·20 노랑 · 0 빨강 ⚠ · 100 초록 · −5→0 · 130→100 · 없음 → 회색 "—" · 나이 · 30분 경계 · 만료 · "갱신 중" · 폭 단계·말줄임·1–2단만 남은 시간 · meter ARIA · 팝업 키보드 · 네 상태 문구 · 둘 다 꺼짐 안내 · 색 토큰만(e-ink) · 메뉴 `checked` 가 ctx 의 슬롯 내용만 읽음(스토어 무접촉) · 등록점 | R1–R11·R21·R28·R31·R32 | 없음(vitest) |
+| 프론트 표시 | `usageFormat` — 19.6→19 빨강 · 20.4→20 노랑 · 50.9→50 노랑 · 51→초록 · 정확히 50·20 노랑 · 0 빨강 ⚠ · 100 초록 · −5→0 · 130→100 · 없음 → 회색 "—" · 나이 · 30분 경계 · 만료 · "갱신 중" · 폭 단계·말줄임·1–2단만 남은 시간 · meter ARIA · 팝업 키보드 · 네 상태 문구 · 네 상태마다 모든 폭 단계에서 `!` 배지 존재 · 배지 `aria-label` = 현재 로캘의 번역 문구 = 팝업 맨 위 줄 · `⚠` 와 배지 글리프 불일치 · 오래된 값은 작은 표시에서 흐리게만(나이 문구 없음 — 팝업엔 있음) · 둘 다 꺼짐 안내 · 색 토큰만(e-ink) · 메뉴 `checked` 가 ctx 의 슬롯 내용만 읽음(스토어 무접촉) · 등록점 | R1–R11·R21·R28·R31·R32 | 없음(vitest) |
 | 화면 실측 | PRD §4 전 항목 — `/qa full`(cdp) · ★릴리즈 빌드에서 조회 때 콘솔 창이 튀지 않는다★(눈 확인) | 전부 | 앱 |
 
 ## 5. 이행 순서 (커밋마다 빌드·시험 초록 — 어디서 멈춰도 선다)
