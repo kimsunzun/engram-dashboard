@@ -87,33 +87,36 @@ export function step(s: FollowState, i: FollowInput): { state: FollowState; scro
 
 규칙(이 표가 시험 표다):
 
-1. **얼음**: 얼지 않은 상태에서 `m.client === 0` 이 오면 `frozen = true` · **`savedTop = expectTop ?? lastTop`**(그 순간의 `m.top` 은 이미 무효일 수 있어 마지막으로 유효하게 본 값을 적는다) · `scrollTo = null`. 얼어 있는 동안 `scroll`·`resize`·`attach`·`intentUp` 은 아무 칸도 안 바꾼다(규칙 2 의 풀림만 예외). `pin`·`unpin` 은 얼어 있어도 `pinned` 만 바꾼다(적용은 풀릴 때).
-2. **풀림**(`frozen` 이고 `m.client > 0` 인 `resize`·`attach`): `frozen = false` · `lastTop = m.top`. 붙어 있으면 바닥으로 쓴다. 떨어져 있으면 `savedTop !== null` 이고 `m.top !== savedTop` 일 때만 `savedTop` 으로 쓴다(`null` 이면 쓰지 않는다) — `display:none` 을 지나 `scrollTop` 이 보존되는지 모르므로(조사 §1-1) 되살리기를 늘 건다(보존되면 무동작). 끝에 `savedTop = null`.
+1. **얼음**: 얼지 않은 상태에서 `m.client === 0` 이 오면(잰 값을 싣는 입력 넷 어느 것이든) `frozen = true` · **`savedTop = expectTop ?? lastTop`**(그 순간의 `m.top` 은 이미 무효일 수 있어 마지막으로 유효하게 본 값을 적는다) · `scrollTo = null`. 얼어 있는 동안 `scroll`·`resize`·`attach`·`intentUp` 은 아무 칸도 안 바꾼다(규칙 2 의 풀림만 예외). `pin`·`unpin` 은 얼어 있어도 붙음만 바꾼다(적용은 풀릴 때 · `pin` 이 함께 내리는 `unseenGrowth` 는 규칙 10).
+2. **풀림**(`frozen` 이고 `m.client > 0` 인 `resize`·`attach`): `frozen = false` · `lastTop = m.top` · `expectTop = null`(숨기 전 쓰기의 이벤트는 얼어 있는 동안 버려졌고 위치를 다시 쟀다). 붙어 있으면 바닥으로 쓴다. 떨어져 있으면 `savedTop !== null` 이고 `m.top` 이 `savedTop` 과 다를 때만(규칙 7 의 0.5 px 폭) `savedTop` 으로 쓴다(`null` 이면 쓰지 않는다) — `display:none` 을 지나 `scrollTop` 이 보존되는지 모르므로(조사 §1-1) 되살리기를 늘 건다(보존되면 무동작). 끝에 `savedTop = null`.
 3. **우리 쓰기는 절대 풀지 않는다**: `scroll` 의 `m.top` 이 `expectTop` 과 1px 안이면 `lastTop` 만 옮기고 `expectTop = null`.
-4. **사용자 스크롤**: 그 밖의 `scroll` — 바닥 거리 `d = height − top − client`. 끝에 늘 `lastTop = top`.
+4. **사용자 스크롤**: 그 밖의 `scroll` — 바닥 거리 `d = height − top − client`. 끝에 늘 `lastTop = top` · `expectTop = null`(브라우저는 한 프레임의 위치 변화를 이벤트 하나로 합친다 — 우리 쓰기 뒤 사용자가 움직였으면 그 쓰기의 이벤트는 따로 오지 않는다).
    - 붙어 있을 때: `d > 문턱` 이고 `top < lastTop`(위로 움직였다) → `pinned = false`. 그 밖 → 그대로(문턱 안의 위 움직임은 내용 줄어듦의 클램프일 수 있다 — 풀지 않는다).
    - **떨어져 있을 때 = 위 의도 걸쇠**: 되붙기는 **아래로 움직여(`top > lastTop`) 문턱 안에 든** `scroll` 에서만 — `pinned = true` · `unseenGrowth = false`. 위로·제자리·문턱 밖 아래로는 그대로 떨어져 있다. ★문턱 안의 작은 위 휠이 규칙 5 로 푼 뒤, 그 휠이 만든 `scroll`(위로 · 문턱 안)이 곧바로 되붙이지 않게 하는 것이 이 걸쇠다★. 그 밖에 걸쇠를 푸는 길은 명시 `pin`(버튼 · 보냄 U4 · 비우기 · 명령)뿐이다.
 5. **위로 가는 입력**(`intentUp`): `height > client`(스크롤할 것이 있다)면 `pinned = false`. 문턱 안의 작은 휠도 곧바로 푼다 — 그래야 성장이 끌어내리지 않는다(되붙기는 규칙 4 의 걸쇠가 막는다).
 6. **성장**(`resize`): ★붙음을 다시 재지 않는다★(조사 §1-3 — 재면 스트리밍 성장이 「위로 올렸다」로 읽힌다). 붙어 있으면 `scrollTo = max(0, height − client)`. 떨어져 있으면 `unseenGrowth = true`.
-7. **쓰기 예고**: `scrollTo` 를 낼 때 `|m.top − scrollTo| > 0.5` 일 때만 `expectTop = scrollTo` — 이미 그 자리면 이벤트가 안 오므로 예고를 남기지 않는다(남기면 뒤의 사용자 스크롤을 우리 것으로 오인할 수 있다).
-8. 처음 상태 = `pinned: true` · `frozen: false` · `expectTop: null` · `savedTop: null`.
+7. **쓰기 예고**: 쓰기는 `|m.top − 목표| > 0.5` 일 때만 낸다 — 그때 `expectTop = scrollTo` · **`lastTop = scrollTo`**. 0.5 px 안이면 이미 그 자리라 `scrollTo = null`(쓰기도 예고도 없다) — 이벤트가 안 오므로 예고를 남기면 뒤의 사용자 스크롤을 우리 것으로 오인한다. `lastTop` 을 쓰기가 닿을 자리로 옮기는 것은 쓰기의 이벤트가 오기 전에 사용자가 위로 끈 경우 때문이다: 둘이 이벤트 하나로 합쳐져 오는데 옛 자리를 기준으로 두면 「위로」가 안 읽혀 붙은 채 남고 다음 성장이 도로 끌어내린다. 쓰기 자신의 이벤트는 `expectTop` 이 따로 알아본다(규칙 3).
+8. 처음 상태 = `pinned: true` · `frozen: false` · `lastTop: 0` · `expectTop: null` · `savedTop: null` · `unseenGrowth: false`.
+9. **새 노드**(`attach` · 얼지 않고 `m.client > 0`): `lastTop = m.top` · `expectTop = null`(옛 노드에 쓴 위치의 이벤트는 새 노드로 오지 않는다). 붙어 있으면 바닥으로 쓰고, 떨어져 있으면 쓰지 않는다.
+10. **`pin` · `unpin`**: `pin` = `pinned = true` · `unseenGrowth = false`(얼어 있어도 — 불변식 `pinned ⇒ !unseenGrowth`). `unpin` = `pinned = false` 만. 둘 다 잰 값을 싣지 않아 `scrollTo = null` — 바닥 쓰기는 훅이 `pin` 뒤에 `resize` 한 번(지금 잰 값)을 먹여 규칙 6 으로 낸다(얼어 있으면 규칙 1 이 막고 풀릴 때 규칙 2 가 쓴다).
 
 ### 2-3. 훅 — `useScrollFollow(slotId)`
 
-- 돌려주는 것: `{ viewportRef: (el: HTMLDivElement | null) => void, pinned: boolean, pin(), unpin() }`. `pinned` 은 값이 바뀔 때만 React 상태를 올린다(스크롤 이벤트마다 리렌더하지 않는다).
+- 돌려주는 것: `{ viewportRef: (el: HTMLDivElement | null) => void, pinned: boolean, unseenGrowth: boolean, scrollable: boolean, pin(), unpin() }`(`FollowHandle` = 그중 `pinned` · `pin` · `unpin`). 세 불리언은 값이 바뀔 때만 React 상태를 올린다(스크롤 이벤트마다 리렌더하지 않는다). `scrollable` = 마지막으로 유효하게 잰(`client > 0`) 값의 `height − client > 0.5` — 버튼 조건(§2-4)이지 붙음 판정이 아니다(코어는 이것을 안 본다 · 숨은 동안은 그대로 둔다).
 - ★`viewportRef`·`pin`·`unpin` 은 렌더마다 같은 함수다★ — 코어 상태·노드를 ref 에 두고 그 ref 만 읽는다(마운트 수명 동안 정체성 불변). 그래서 구독 효과(deps `[viewId, agentId]`)가 안에서 불러도 옛 함수를 쥘 걱정이 없고, ★그 deps 에 넣지 않는다★(넣으면 손잡이 정체성이 흔들릴 때 재구독 → replay 가 돈다).
 - **콜백 ref** 라 뷰포트가 내려갔다 새 노드로 붙어도(RichSlot 빈 상태 `:397`) 옛 노드의 청취자·관찰자를 떼고 새 노드에 `attach` 를 먹인다.
 - 관찰 대상 둘(ResizeObserver): 뷰포트 자신(입력창 위 대기 목록 `:458` 이 뷰포트를 줄인다 · 창 크기 · 탭 표시)과 **뷰포트의 첫 자식 요소**(Radix 내용 래퍼 — `StructuredTextView.tsx:552-557` 주석의 `display:table` 래퍼). [고름] 내용 ref 를 StructuredTextView·`<pre>` 로 내려보내지 않는다 — 두 슬롯이 손대지 않고 같은 훅을 쓴다. 대가 = Radix 내부 구조에 기댄다(§9).
-- **휠**: `wheel` 에서 `deltaY < 0` 이고, 대상에서 가장 가까운 `[data-radix-scroll-area-viewport]` 가 이 뷰포트가 아니면서 `scrollTop > 0` 이면 **안쪽 스크롤러가 먹는 입력**이라 무시한다(ThoughtRow 의 자기 ScrollArea — `chat/ThoughtRow.tsx:53-58`). 그 속성은 Radix dist 가 Viewport 에 싣는다(`node_modules/@radix-ui/react-scroll-area/dist/index.mjs` 판독). 전역 청취자를 걸지 않는다 — 뷰포트에만 건다(`use-stick-to-bottom` 기각 사유 — 조사 §1-2).
-- **키**: 뷰포트의 `keydown` 에서 `PageUp`·`Home`·`ArrowUp` → `intentUp`(같은 안쪽 스크롤러 거름). 키로 뷰포트가 스크롤되는 것은 포커스가 그 안에 있을 때뿐이라 뷰포트에 거는 것으로 충분하다.
+- **휠**: `wheel` 에서 `deltaY < 0` 이고(`ctrlKey` 는 확대/축소라 거른다), 대상에서 가장 가까운 `[data-radix-scroll-area-viewport]` 가 이 뷰포트가 아니면서 `scrollTop > 0` 이면 **안쪽 스크롤러가 먹는 입력**이라 무시한다(ThoughtRow 의 자기 ScrollArea — `chat/ThoughtRow.tsx:53-58`). 그 속성은 Radix dist 가 Viewport 에 싣는다(`node_modules/@radix-ui/react-scroll-area/dist/index.mjs` 판독). 전역 청취자를 걸지 않는다 — 뷰포트에만 건다(`use-stick-to-bottom` 기각 사유 — 조사 §1-2).
+- **키**: 뷰포트의 `keydown` 에서 `PageUp`·`Home`·`ArrowUp` → `intentUp`(같은 안쪽 스크롤러 거름 · 편집 칸(`input`·`textarea`·`select`·contentEditable) 안의 키와 IME 조합 중(`isComposing`) 키는 거른다). ★Radix Viewport 엔 `tabIndex` 가 없어 대화 글을 눌러도 포커스가 body 에 남고 keydown 이 뷰포트에 오지 않는다★ — 그래서 훅이 붙일 때 뷰포트에 `tabIndex = -1` 을 준다(클릭 · 코드로만 포커스 · 탭 순서 밖). 글을 누르면 뷰포트가 포커스를 받아 keydown 이 뷰포트를 과녁으로 오고, 슬롯 루트의 Esc 처리기(§3-2)로 그대로 번진다. 포커스 테두리는 코드베이스 관례(포커스 받는 목록 컨테이너의 inline `outline: none`)대로 지운다. 뗄 때 원래 `tabindex`(있었으면 그 값 · 없었으면 속성 삭제)와 inline `outline` 을 되돌린다.
 - **쓰기**: 코어가 낸 `scrollTo` 를 `el.scrollTop` 에 쓴다. RO 콜백은 레이아웃 뒤 · 페인트 전이라 깜빡임이 없다.
 - **관측 표면**: 뷰포트에 `data-scroll-follow="pinned" | "free"` 를 훅이 직접 적는다(React 상태 경유 없음).
 - **시험 seam**(ADR-0012): `useScrollFollow(slotId, { ResizeObserver? })` — 시험이 가짜 관찰자를 꽂는다(jsdom 엔 RO 가 없다 — `DomSlot.test.tsx:12-17` 이 이미 전역 가짜를 둔다).
 
 ### 2-4. 버튼 · 보냄 (U3 · U4)
 
-- `JumpToBottom`: `!pinned` 이 150 ms 이어지면 보인다(t3code — 탭 전환 깜빡임 방지) · lucide `ChevronDown` · 개수 없음 · 누르면 `pin()`(즉시 쓰기 — 부드러운 스크롤은 중간 이벤트를 만든다). `aria-label`·`title` = `t('slot.scrollToBottom')`. DOM `data-jump-to-bottom="1"`.
-- 상수 둘(`scrollFollow/useScrollFollow.ts` 머리): `JUMP_BUTTON_MODE: 'whenFree' | 'whenUnseen' = 'whenFree'`(U3) · `REPIN_ON_SEND = true`(U4 — RichSlot 이 읽는다).
+- `JumpToBottom`: **`!pinned && scrollable`** 이 150 ms 이어지면 보인다(t3code — 탭 전환 깜빡임 방지) · lucide `ChevronDown` · 개수 없음 · 누르면 `pin()`(즉시 쓰기 — 부드러운 스크롤은 중간 이벤트를 만든다). `aria-label`·`title` = `t('slot.scrollToBottom')`. DOM `data-jump-to-bottom="1"`. 자리 = ScrollArea 의 자식 · 가운데 `bottom-7`(RichSlot 의 이름 라벨이 영역 바닥 20 px 을 덮는다) · DomSlot 에도 같은 버튼.
+  - `scrollable` 을 거는 이유: 떨어진 뒤 뷰포트가 커지거나 내용이 줄어 다 들어오면 이미 「바닥」인데 붙음은 다시 재지 않는다(규칙 6 · ADR-0242 결정 2) — 붙음 규칙은 그대로 두고 버튼만 가린다.
+- 상수 둘(`scrollFollow/useScrollFollow.ts` 머리): `JUMP_BUTTON_MODE: 'whenFree' | 'whenUnseen' = 'whenFree'`(U3 · `'whenUnseen'` = `!pinned && unseenGrowth && scrollable`) · `REPIN_ON_SEND = true`(U4 — RichSlot 이 읽는다).
 
 ### 2-5. LLM 경로 (CLAUDE.md 「LLM-우선 제어」)
 
@@ -128,8 +131,8 @@ export function step(s: FollowState, i: FollowInput): { state: FollowState; scro
 
 ### 2-7. 시험
 
-- `followCore.test.ts`(표 시험 — 위 규칙 1–8 각각 + 조합): 우리 쓰기 뒤 이벤트는 안 푼다 · 떨어진 뒤 아래로 문턱 안에 들면 되붙기 · ★걸쇠 — 문턱 안 작은 위 휠(`intentUp`) → 그 휠의 위 `scroll`(문턱 안) → 여전히 떨어짐 · 이어 아래로 문턱 안 `scroll` → 붙음★ · 떨어진 채 제자리·위 `scroll` 은 되붙이지 않음 · 명시 `pin` 은 걸쇠를 푼다 · 붙은 채 문턱 안 위 `scroll`(클램프)은 안 푼다 · 성장 중 풀리지 않음 · 얼 때 `savedTop = expectTop ?? lastTop` · 얼음 동안 스크롤·RO·`intentUp` 무시 · 풀릴 때 붙음=바닥 / 떨어짐=`savedTop` / 떨어짐 + `savedTop` 없음 = 쓰기 없음 · 풀린 뒤 `savedTop = null` · 스크롤할 것 없는 휠은 안 푼다 · 이미 바닥인 쓰기는 예고 없음.
-- `useScrollFollow.test.tsx`(가짜 RO · `Object.defineProperty` 로 `scrollHeight`·`clientHeight`·`scrollTop`): 노드 교체 뒤 재부착 · 안쪽 Radix 뷰포트 휠 무시 · `data-scroll-follow` 값 · 리렌더 뒤 `viewportRef`·`pin`·`unpin` 정체성 불변.
+- `followCore.test.ts`(표 시험 — 위 규칙 1–10 각각 + 조합 · 쓰기의 이벤트가 오기 전 위로 끌기 → 푼다): 우리 쓰기 뒤 이벤트는 안 푼다 · 떨어진 뒤 아래로 문턱 안에 들면 되붙기 · ★걸쇠 — 문턱 안 작은 위 휠(`intentUp`) → 그 휠의 위 `scroll`(문턱 안) → 여전히 떨어짐 · 이어 아래로 문턱 안 `scroll` → 붙음★ · 떨어진 채 제자리·위 `scroll` 은 되붙이지 않음 · 명시 `pin` 은 걸쇠를 푼다 · 붙은 채 문턱 안 위 `scroll`(클램프)은 안 푼다 · 성장 중 풀리지 않음 · 얼 때 `savedTop = expectTop ?? lastTop` · 얼음 동안 스크롤·RO·`intentUp` 무시 · 풀릴 때 붙음=바닥 / 떨어짐=`savedTop` / 떨어짐 + `savedTop` 없음 = 쓰기 없음 · 풀린 뒤 `savedTop = null` · 스크롤할 것 없는 휠은 안 푼다 · 이미 바닥인 쓰기는 예고 없음.
+- `useScrollFollow.test.tsx`(가짜 RO · `Object.defineProperty` 로 `scrollHeight`·`clientHeight`·`scrollTop`): 노드 교체 뒤 재부착 · 안쪽 Radix 뷰포트 휠 무시 · `data-scroll-follow` 값 · 리렌더 뒤 `viewportRef`·`pin`·`unpin` 정체성 불변 · `tabIndex -1` 부여와 뗄 때 복원 · 포커스 받은 뷰포트의 ArrowUp · `scrollable` 이 다 들어오면 거짓(붙음은 그대로).
 - `scrollCommands.test.ts`: 손잡이 있음/없음 · `help` 가 없다(버스 미승선 — `renderModeCommands.test.ts` 의 같은 단언 모양).
 - 기존 `RichSlot.test.tsx` · `DomSlot.test.tsx` 는 무조건 스크롤을 단언하지 않는다(`rg scrollTop src --glob '*.test.*'` 의 슬롯 쪽 적중은 RO 가짜뿐) — 회귀로 그대로 돈다.
 
@@ -666,7 +669,7 @@ struct PartialMessage {
 
 | 기능 | 무엇을 재나 |
 |---|---|
-| F1 | ① 떨어진 채 탭을 돌렸다 돌아오기 — `scrollTop` 이 `display:none` 을 지나 남나(조사 §7 미검 — 코어의 되살리기가 필요했는지 기록) · 붙은 채 돌아오면 바닥 ② 창 새로고침·재구독 replay 폭주 뒤 바닥 착지 ③ 스트리밍 중 위로 휠 → 안 끌려 내려옴 · `data-scroll-follow="free"` ④ 펼친 생각 블록 안 휠 → 바깥 안 풀림 ⑤ 대기 목록이 서며 뷰포트가 줄 때 바닥 유지 ⑥ 버튼 150 ms 뒤 등장 · 누르면 바닥 ⑦ `__engramCmd('slot.scrollToBottom', {slotId})` |
+| F1 | ① 떨어진 채 탭을 돌렸다 돌아오기 — `scrollTop` 이 `display:none` 을 지나 남나(조사 §7 미검 — 코어의 되살리기가 필요했는지 기록) · 붙은 채 돌아오면 바닥 ② 창 새로고침·재구독 replay 폭주 뒤 바닥 착지 ③ 스트리밍 중 위로 휠 → 안 끌려 내려옴 · `data-scroll-follow="free"` ④ 펼친 생각 블록 안 휠 → 바깥 안 풀림 ⑤ 대기 목록이 서며 뷰포트가 줄 때 바닥 유지 ⑥ 버튼 150 ms 뒤 등장 · 누르면 바닥 · 떨어진 채 창을 키워 다 들어오면 버튼이 사라짐 ⑦ `__engramCmd.run('slot.scrollToBottom', {slotId})` ⑧ 스트리밍 중 대화 글을 누른 뒤 ArrowUp 한 번 → 안 끌려 내려옴 · `document.activeElement` 가 그 뷰포트 · 포커스 테두리 없음 · (FE-1.2 뒤) 같은 포커스에서 Esc 가 끊기로 번짐 |
 | F2 | ① 실 codex 도구 중 Esc → 중단 행 · 대기 글이 다음 턴 · 끊은 명령이 계속 도는지 기록(§9 벤더 동작 — 5판) ② (B3 뒤) 실 claude 글 흐르는 중 · 도구 중 Esc → 중단 행 · 오류 행 없음(턴 단위 Error 행) · 대기 글이 돈다 · 끊긴 도구 줄 = 붉은 오류 배지 · 묶음이 서면 「오류 1」 · 그 아래 강조된 중단 줄 — 스크린숏(§4-7 ④ · §11 ⑪) ③ 한글 조합 중 Esc = 조합만 취소 ④ 안 돌 때 Esc = 무동작 · 턴이 열리기 전(보낸 직후) Esc = 무동작(CONFLICT warn 만) · (B3 뒤) `engram agent interrupt` 를 한가할 때 = CONFLICT ⑤ 우클릭 메뉴 열린 채 Esc = **아무 일도 없다**(끊기 없음 · 메뉴는 그대로 — `SlotContextMenu` 는 Esc 처리기가 없고 바깥 `mousedown` 으로만 닫힌다 `SlotContextMenu.tsx:110-114` · Esc 닫기는 이번에 더하지 않는다) ⑥ 입력창 글 유지 ⑦ 본문 클릭 뒤 Esc(U6) ⑧ `engram agent interrupt <이름>` ⑨ (FE-2 뒤 · U8) 중단 행 = 굵게 · 강조색(`var(--accent)`) — dark · light 테마 각각 스크린숏 · 실패 행 · 모름 행은 그대로 |
 | F3 | ① 실 claude 읽기·검색 ≥2 턴 — 도는 동안 펼침 · 글이 오면 접힘 · 요약 문구 ② 실 claude 실패 도구 → 「오류 1」 ③ (B5 뒤) 실 codex 0 아닌 종료 명령(예: `exit 3`)이 든 묶음 → 머리 「오류 1」 · 펼치면 그 행에 배지 · Out 칸 없음 ④ (B5 뒤 · U2-a) 실 codex 에 읽기 하나 + cwd 밖 쓰기 **셸 명령** 하나를 시키는 프롬프트(묶음이 서게 도구 ≥2) → 우리 거절 뒤 그 명령 행 = 주황 「거부됨」 배지 + 사유 줄 「대시보드가 승인 요청을 처리하지 않아 실행되지 않음」(접힌 채로도) · 붉은 테 · 「Error」 · 붉은 경고 박스 없음 · 묶음 머리 「… · 거부 1」(「오류」 칸 없음) · `data-tool-mark="declined"` · `data-tool-declined-reason="chat.toolRefusedReason"` · 재구독 replay 뒤에도 같다 · 스크린숏(§4-7 ⑨ 채취 셋째 ⑤) · (같은 프롬프트에 편집 도구로 cwd 밖 파일 고치기를 더해) 파일 변경 거절 행도 같은 배지 · **같은 우리 사유**(codex 는 이 경로를 `declined` 로 닫는다 — `data-tool-declined-reason="chat.toolDeclinedReason"`(글 「실행되지 않음」 만)이면 귀속이 파일 변경을 놓친 것이다 · 글 포함으로 가르지 말 것 — 우리 사유의 꼬리가 같은 낱말이다 · §4-7 ②-2) ⑤ codex 묶음 개수 ⑥ 토글 · 실패 배지가 재구독 replay 뒤에도 남음 ⑦ 같은 이력 replay → 같은 묶음 ⑧ (B5 뒤) 실 codex 도구 ≥2 턴(묶음이 서게 — ④ 와 같다)에서 도는 명령을 Esc 로 끊은 뒤 그 명령이 늦게 실패 → 그 행에 붉은 「오류」 · 묶음 머리 「오류 1」 · 바로 아래 그 턴의 「중단됨」 행(사용자 결정 ⓐ — §11 ⑩ · §4-7 ⑨ 채취 둘째) · 스크린숏 ⑨ 턴 끝 뒤 새 글을 보낸 직후 지난 턴 도구의 늦은 끝이 와도 Wait 표시가 새 턴의 첫 답까지 남음(§4-7 ⑧) |
 | F4 | ① 실 claude JSON 에서 글이 점점 늘어난다 ② 블록 끝에 글이 두 벌 안 됨 ③ 도구·생각 한 번씩 ④ 그 세션 이어받기 → 글 한 벌 |

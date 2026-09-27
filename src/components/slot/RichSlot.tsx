@@ -42,6 +42,8 @@ import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 import './richBranding.css' // 색조 클래스 정의처(컴포넌트 옆 css 를 그 컴포넌트가 import 하는 규약).
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
+import { REPIN_ON_SEND, useScrollFollow } from './scrollFollow/useScrollFollow'
+import { JumpToBottom } from './scrollFollow/JumpToBottom'
 import { LoadingPanel } from '../ui/LoadingPanel'
 import { basename } from '../../util/basename'
 import { t } from '../../i18n'
@@ -98,7 +100,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   // 재구독 effect 가 reset 으로 초기화한다(replay 규율).
   const accRef = useRef<StructuredEventAccumulator>(null as unknown as StructuredEventAccumulator)
   if (accRef.current === null) accRef.current = new StructuredEventAccumulator()
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const follow = useScrollFollow(viewId)
   // 전송 순번 — 결말 콜백(성공·실패)이 "내가 아직 최신 전송인가"를 판정하는 근거. 앞선 전송의 뒤늦은
   //   결말이 진행 중인 최신 전송의 표시를 지우거나 새 화신의 전송 사실을 날조하는 것을 막는다. 비우기
   //   콜백(onReset)도 여기를 올려 날아가던 전송을 무효화한다(state 가 아니라 ref: 표시에 안 쓰인다).
@@ -165,6 +167,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     setContinuesConversation(false)
     setHasSent(false)
     setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
+    follow.pin() // ADR-0242: 비운 뒤 오는 이력이 바닥에 착지한다.
 
     let sub: OutputSubscription | null = null
     let cancelled = false
@@ -254,6 +257,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           setTurnDone(false)
           setAwaiting(false)
           setHasSent(false)
+          follow.pin() // ADR-0242: 새 화신의 이력이 바닥에 착지한다.
           // ADR-0226: 새 화신이 이어받기 화신인지는 바로 뒤 같은 틱의 'live' 가 다시 알린다.
           setContinuesConversation(false)
           sendOkRef.current = false
@@ -280,15 +284,8 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       sub?.unsubscribe()
     }
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). ★화신은 넣지 않는다 — 근거는 위 key 주석.★
+    // ★`follow` 도 넣지 않는다★ — 그 `pin` 은 마운트 수명 동안 같은 함수다(ADR-0242 · `useScrollFollow` 머리).
   }, [viewId, agentId])
-
-  // ★scrollRef = Radix Viewport(ScrollArea seam 이 forward)★:
-  //   Radix ScrollArea 의 실제 스크롤 엘리먼트는 Root 가 아니라 Viewport 다(ADR-0053). auto-scroll 이
-  //   이 Viewport 노드의 scrollTop 을 겨눠야 새 출력이 바닥에 붙는다(Root 를 겨누면 스크롤 안 됨 — 회귀 주의).
-  useEffect(() => {
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [items])
 
   const send = (): void => {
     // ★1 전송 == 완결된 유저 턴 1개(ADR-0044/0004)★: 텍스트 전체를 한 번에 보낸다. 백엔드 encoder 가
@@ -302,6 +299,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     // FIX 5a: 가드도 trim 으로 판정하므로 실제 전송도 trim 일관.
     const text = input.trim()
     setInput('')
+    if (REPIN_ON_SEND) follow.pin() // ADR-0242 · U4: 보낸 글의 답이 화면 밖에서 흐르지 않게 한다.
     setAwaiting(true) // FIX 5b: 첫 바이트를 기다리지 않고 즉시 streaming 힌트로 전환
     setHasSent(true) // ADR-0145: 대화가 시작됐으므로 첫 실행 화면을 내린다(실패하면 아래에서 되돌린다)
     const token = ++sendSeqRef.current
@@ -391,11 +389,11 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       data-rich-awaiting-history={awaitingHistory ? '1' : undefined}
     >
       {/* 대화 렌더(스크롤) — ScrollArea seam(ADR-0053: 앱 전역 Radix 오버레이 스크롤바). 순서 보존 item 스트림.
-          ★scrollRef 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 아래 하단 고정 auto-scroll
-          이 그 Viewport 노드를 겨눠야 새 출력이 바닥에 붙는다(회귀 주의). CC 룩 렌더는 StructuredTextView 소관.
+          ★ref 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 스크롤 따라가기(ADR-0242)가 그
+          노드를 재고 쓴다(Root 를 겨누면 스크롤이 안 된다). CC 룩 렌더는 StructuredTextView 소관.
           (구 "JSON ● idle" 슬림 헤더는 제거 — 상태 힌트는 스트림 끝 대기 인디케이터(WaitRow "Wait" tail) 로 대체.) */}
       {!showEmpty && (
-        <ScrollArea ref={scrollRef} className="min-h-0 flex-1">
+        <ScrollArea ref={follow.viewportRef} className="min-h-0 flex-1">
           <StructuredTextView items={items} streaming={streaming} />
           {/* ADR-0226 이력 대기 — 대화 영역 가운데 아이콘 + 옅은 막(사용자 결정 2026-09-24).
               ★여기 두는 이유★: absolute 의 기준이 ScrollArea 루트(seam 의 relative)라 대화 영역만 정확히
@@ -409,6 +407,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           {awaitingHistory && (
             <LoadingPanel className="pointer-events-none absolute inset-0 bg-foreground/8" />
           )}
+          <JumpToBottom follow={follow} />
         </ScrollArea>
       )}
 

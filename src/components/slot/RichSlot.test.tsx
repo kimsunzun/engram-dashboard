@@ -20,6 +20,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputChunk, ReplayLiveInfo, ViewPhase } from '../../api/agentClient'
 import { t } from '../../i18n'
+import { getFollow } from './scrollFollow/followRegistry'
+import { JUMP_BUTTON_DELAY_MS } from './scrollFollow/JumpToBottom'
 
 // ── subscribeOutput 콜백 캡처 + writeStdin holder(테스트마다 갈아끼움). ──
 const captured = vi.hoisted(() => ({
@@ -1365,5 +1367,102 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     await flush()
     expect(emptyState()).not.toBeNull()
     expect(queuedList()).toBeNull()
+  })
+})
+
+// ★스크롤 따라가기 배선(ADR-0242 · TRD §2-1)★: 판정은 followCore.test.ts · 훅은 useScrollFollow.test.tsx 가 잰다.
+//   여기는 슬롯이 그 훅을 대화 뷰포트에 꽂았고, 붙이는 두 자리(보냄 U4 · 비우기)와 버튼 · 손잡이 맵이 닿는지만 잰다.
+//   jsdom 엔 레이아웃이 없어 Radix Viewport 만 기하를 갖게 하고, ResizeObserver 는 호출 기록만 하는 가짜를 둔다.
+//   ★scroll 이벤트를 쏘지 않는다★ — 쏘면 Radix 스크롤바가 마운트돼 이 시험의 대상 밖을 끌어들인다.
+describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
+  const geo = { height: 1000, client: 200 }
+  const tops = new WeakMap<Element, number>()
+  const isViewport = (el: Element): boolean => el.hasAttribute('data-radix-scroll-area-viewport')
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) {
+      return isViewport(this) ? geo.height : 0
+    })
+    vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) {
+      return isViewport(this) ? geo.client : 0
+    })
+    vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) {
+      return tops.get(this) ?? 0
+    })
+    vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, v: number) {
+      tops.set(this, v)
+    })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  const viewport = (): HTMLElement => document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+  const followAttr = (): string | null => viewport().getAttribute('data-scroll-follow')
+  const jumpButton = (): HTMLElement | null => document.querySelector('[data-jump-to-bottom="1"]')
+
+  async function mountWithTurn(): Promise<void> {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedCompletedTurn()
+  }
+
+  it('대화 뷰포트에 붙어 시작하고 바닥으로 쓴다', async () => {
+    await mountWithTurn()
+    expect(followAttr()).toBe('pinned')
+    expect(viewport().scrollTop).toBe(800)
+  })
+
+  it('위로 풀린 채 보내면 다시 바닥에 붙는다(U4)', async () => {
+    await mountWithTurn()
+    tops.set(viewport(), 300)
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(followAttr()).toBe('free')
+
+    const textarea = screen.getByPlaceholderText(/메시지 입력/)
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(followAttr()).toBe('pinned')
+    expect(viewport().scrollTop).toBe(800)
+  })
+
+  it('비우기(onReset)는 다시 붙인다 — 새 화신의 이력이 바닥에 착지한다', async () => {
+    await mountWithTurn()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(followAttr()).toBe('free')
+    fireReset()
+    expect(followAttr()).toBe('pinned')
+  })
+
+  it('떨어지면 잠깐 뒤 「맨 아래로」 버튼이 뜨고, 누르면 붙고 사라진다', async () => {
+    await mountWithTurn()
+    vi.useFakeTimers()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(jumpButton()).toBeNull()
+    act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
+    // 버튼은 ScrollArea 의 자식이다 — absolute 기준이 seam 의 Root 라 스크롤되지 않는다.
+    expect(viewport().contains(jumpButton())).toBe(true)
+
+    fireEvent.click(jumpButton()!)
+    expect(followAttr()).toBe('pinned')
+    expect(jumpButton()).toBeNull()
+  })
+
+  it('손잡이 맵에 그 슬롯(viewId)으로 오른다 — LLM 경로(slot.scrollToBottom)가 이것을 부른다', async () => {
+    await mountWithTurn()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    act(() => getFollow('v1')!.pin())
+    expect(followAttr()).toBe('pinned')
+    cleanup()
+    expect(getFollow('v1')).toBeUndefined()
   })
 })
