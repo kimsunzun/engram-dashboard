@@ -48,7 +48,7 @@
 2. **Reviewer/QA subagents leave temp worktrees and multi-GB target dirs in the scratchpad** (their cleanup is permission-denied). Main must `git worktree remove --force <path>` + `rm -r <dir>` afterwards (removed ~8 GB this session).
 3. **Blind codex reviewers flag accepted design residuals** (TRD r5 RichSlot draft loss; A1 note-before-send). Resolve by showing the rationale AFTER its blind review and asking PRE-EXISTING/WITHDRAWN — it withdrew both times. Don't decide it yourself; don't feed rationale before the blind pass.
 4. **GUI probe isolation** (the qa binding §full still lacks it): `scripts/launch-detached.ps1 -Exe <daemon> -EnvVars 'ENGRAM_DATA_DIR=…','RUST_LOG=…'` FIRST, then the client with the same `ENGRAM_DATA_DIR`; teardown client first, then daemon by PID. ★`RUST_LOG=debug` on the daemon is inherited by the codex child → 30 MB in 4 min; scope it to `engram_dashboard_agent=debug,engram_dashboard_daemon=debug,engram_dashboard_lib=debug`.★ (`launch-detached.ps1` header says `-Env` but the parameter is `-EnvVars`.) `MSYS_NO_PATHCONV=1 taskkill /PID <pid> /T /F` worked for the QA worker this time.
-5. The `<internal-plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire constantly — ignore (handoff flow §0).
+5. The `<plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire constantly — ignore (handoff flow §0).
 6. Don't fix the flicker with frontend-only signals (carried — ADR-0226 「거부한 대안」 now records both reverted attempts).
 7. For doc reviews, have the author emit a claims TSV (`path<TAB>line<TAB>token`) and verify it with a shell loop — it removed pointer checking from reviewer cost this session.
 

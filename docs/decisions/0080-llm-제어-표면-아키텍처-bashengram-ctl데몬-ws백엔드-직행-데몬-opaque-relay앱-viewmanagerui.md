@@ -43,4 +43,4 @@
 - **release 게이트:** CDP/devtools 비의존. `engram-ctl`은 데몬 WS(빌드 무관 생존)에만 의존.
 - **비목표(보류, 알면서 수용한 위험):** child별 권한 스코프(R7) = `docs/tracking.md` T-11(모바일/원격 단계 재도입, 2026-07-14 사용자 재확인). MVP = 현행 단일 마스터 토큰 전권 — injection된 child의 child↔child 횡이동 위험을 수용하고 보류 유지(전제 = 로컬·신뢰 콘텐츠).
 - **동시성 메커니즘 = TRD-level, ViewManager 단일 권위 위에서 해소:** requestId dedup(at-most-once)·result correlation·timeout 재조정 등은 아키텍처 결정이 아니라 TRD 수준 문제이고, `ViewManager` 단일 권위의 순차 적용(ADR-0035) 위에서 풀린다 — 단일 권위가 순서를 확정하므로 분산 합의가 필요 없다.
-- **미확정(TRD):** portfile ACL, event journal, 명령 카탈로그 노출 어휘·발견(대상 연산은 위 "범위(MVP)"로 확정), 브로커 라우팅(앱 identity/lease·다중창·offline), stale-ref 의미론(닫힌/kill된 view·slot 주소지정), R6 robustness(멱등성·부분적용 원자성·순서/동시성·mixed-version 협상). 보안 판단은 담당 부서.
+- **미확정(TRD):** portfile ACL, event journal, 명령 카탈로그 노출 어휘·발견(대상 연산은 위 "범위(MVP)"로 확정), 브로커 라우팅(앱 identity/lease·다중창·offline), stale-ref 의미론(닫힌/kill된 view·slot 주소지정), R6 robustness(멱등성·부분적용 원자성·순서/동시성·mixed-version 협상). 보안 판단은 이 ADR 범위 밖.

@@ -2,7 +2,7 @@
 {"t":8,"dir":"meta","pid":34088}
 {"t":10.1,"dir":"in","note":"initialize","line":{"id":0,"method":"initialize","params":{"clientInfo":{"name":"engram-dashboard","version":"0.1.0"},"capabilities":{"experimentalApi":true}}}}
 {"t":432.1,"dir":"out","chunk":1,"line":{"id":0,"result":{"userAgent":"engram-dashboard/0.156.1 (Windows 10.0.26200; x86_64) unknown (engram-dashboard; 0.1.0)","codexHome":"C:\\Users\\<user>\\.codex","platformFamily":"windows","platformOs":"windows"}}}
-{"t":432.7,"dir":"out","chunk":1,"line":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"<internal-host>","installationId":"c32d2c9e-0a6c-4663-a2ce-895ba8819b5e","environmentId":null},"emittedAtMs":1790361452428}}
+{"t":432.7,"dir":"out","chunk":1,"line":{"method":"remoteControl/status/changed","params":{"status":"disabled","serverName":"<host>","installationId":"c32d2c9e-0a6c-4663-a2ce-895ba8819b5e","environmentId":null},"emittedAtMs":1790361452428}}
 {"t":433,"dir":"meta","initializeResult":{"userAgent":"engram-dashboard/0.156.1 (Windows 10.0.26200; x86_64) unknown (engram-dashboard; 0.1.0)","codexHome":"C:\\Users\\<user>\\.codex","platformFamily":"windows","platformOs":"windows"}}
 {"t":433.3,"dir":"in","note":"initialized","line":{"method":"initialized"}}
 {"t":433.5,"dir":"in","note":"thread/start","line":{"id":1,"method":"thread/start","params":{"cwd":"C:\\Users\\<user>\\AppData\\Local\\Temp\\claude\\I--Engram-apps-engram-dashboard-wt1\\d6ae22fc-f887-4a2a-8834-64e00d8c77fc\\scratchpad\\m16-codex\\cwd","approvalPolicy":"on-request","sandbox":"workspace-write"}}}

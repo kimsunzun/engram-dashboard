@@ -350,7 +350,7 @@ jobs:
       # ★feature 목록을 손으로 박아 `--all-features` 를 대체하지 말 것★ — `--all-features` 쪽이 `ws`
       #   어댑터의 optional 서드파티와 실소켓 테스트까지 컴파일한다. 그게 의도다.
       # `-- --test-threads=4` 는 붙이지 않는다 — CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md
-      #   「빌드·검증 명령」 — 그 플래그가 겨냥하는 사내 보안 에이전트 조건이 러너에 없고, 낮추면 CI 만
+      #   「빌드·검증 명령」 — 그 플래그가 겨냥하는 보안 소프트웨어 조건이 러너에 없고, 낮추면 CI 만
       #   느려진다). 로컬 명령에도 이 crate 에는 안 붙는다 — 자식 프로세스를 하나도 안 띄운다.
       - name: 'transport gate 4a: cargo test -p engram-dashboard-transport (features off)'
         shell: bash

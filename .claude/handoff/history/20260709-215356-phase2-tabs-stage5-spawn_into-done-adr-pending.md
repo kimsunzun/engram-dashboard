@@ -7,7 +7,7 @@
 ## 완료 / repo 상태
 - 브랜치 **master**, **origin/master 동기화**(`88134e2`까지 푸시). 워킹트리 clean.
 - 이번 세션 커밋(1): `88134e2` feat(layout): spawn_into 배치 지정 스폰 command (D-7·스테이지 5). 6파일 437+/3-.
-- **origin = GitHub**(github.com/kimsunzun/engram-dashboard) — 조직의 "코드=GitLab"은 게임 프로젝트 얘기, 이 대시보드는 별도 개인 tooling repo(기존 upstream 그대로).
+- **origin = GitHub**(github.com/kimsunzun/engram-dashboard) — 이 대시보드는 별도 개인 tooling repo(기존 upstream 그대로).
 
 ## 무엇이 됨 (구현 상세 — 재구현 금지)
 - **`spawn_into(window, tab?, slot?, backend?, cwd) -> Result<AgentId,String>`** (src-tauri/src/commands/layout.rs, invoke_handler 등록 lib.rs). 합성: 데몬 SpawnByCwd로 스폰(락 밖 await, Spawned reply서 AgentId 캡처) → tab 미지정 시 create_tab → 슬롯 배정. 배치는 단일 임계구역(ADR-0006).
