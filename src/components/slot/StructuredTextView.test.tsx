@@ -536,6 +536,26 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
     expect(railDots(expanded.container)).toBe(3)
   })
 
+  it('펼친 묶음 [도구 · 생각 · 도구] — 생각 행이 묶음 안에 그려지고 레일은 묶음을 한 행으로 센다', () => {
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const items: StructuredItem[] = [
+      textItem('before'),
+      toolItem('Read', 'r1', 'Read'),
+      thoughtItem('mid thought'),
+      toolItem('Grep', 'g1', 'Search'),
+      textItem('after'),
+    ]
+    const { container } = render(<StructuredTextView items={items} slotId="s1" />)
+    const [g] = groups(container)
+    fireEvent.click(groupHeader(g))
+    expect(g.getAttribute('data-tool-group-open')).toBe('1')
+    expect(g.contains(screen.getByText('Thought'))).toBe(true)
+    expect(g.contains(screen.getByRole('button', { name: 'Read' }))).toBe(true)
+    expect(g.contains(screen.getByRole('button', { name: 'Grep' }))).toBe(true)
+    expect(railRows(container)).toBe(3)
+    expect(railDots(container)).toBe(3)
+  })
+
   it('도는 턴의 마지막 묶음은 펼치고, 뒤에 생각이 와도 펼친 채 · 글이 오면 접는다', () => {
     const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
     const { container, rerender } = render(<StructuredTextView items={calls} streaming />)
@@ -747,7 +767,7 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
 
   // ★TRD §11 ⑪ · §4-7 ⑨ ⓐ 고정★: 끊긴 턴의 도구 실패는 그대로 붉은 「오류」로 보이고, 바로 아래 강조된 「중단됨」
   //   행이 맥락을 준다 — 끊긴 턴 안의 실패를 따로 가르지 않는다.
-  it('ⓐ claude — 끊긴 턴 도구의 tool_result is_error → 붉은 「Error」 · 머리 「오류 1」 · 아래에 중단 행', () => {
+  it('ⓐ claude(합성 줄 없는 경우) — 끊긴 턴 도구의 tool_result is_error → 붉은 「Error」 · 머리 「오류 1」 · 아래에 중단 행', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
     const items: StructuredItem[] = [
       toolItem('Read', 'r1', 'Read'),
@@ -771,6 +791,53 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     expect(container.querySelector('[data-tool-mark]')).toBeNull()
     const outcome = screen.getByText(t('chat.turnInterrupted'))
     expect(g.compareDocumentPosition(outcome) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  // ADR-0243: claude 의 실제 모양 — 죽은 도구의 is_error 결과 뒤에 합성 끊김 줄이 오고, 결말 행은 없다.
+  it('ⓐ claude — 끊긴 도구 is_error → 붉은 「Error」 · 머리 「오류 1」 · 아래에 끊김 표시 행 · 중단 결말 행 없음', () => {
+    const acc = new StructuredEventAccumulator()
+    const feed = (ev: unknown) => acc.feed(new TextEncoder().encode(JSON.stringify(ev as StructuredEvent)))
+    const call = (name: string, id: string, category: ToolCategory) => ({
+      type: 'ToolCall',
+      name,
+      args_json: '{}',
+      id,
+      turn_id: null,
+      message_id: null,
+      category,
+    })
+    const result = (id: string, isError: boolean) => ({
+      type: 'Structured',
+      kind: 'user',
+      json: JSON.stringify({ type: 'tool_result', tool_use_id: id, content: 'out', is_error: isError }),
+    })
+    feed(call('Read', 'r1', 'Read'))
+    feed(result('r1', false))
+    feed(call('Bash', 'b1', 'Command'))
+    feed(result('b1', true))
+    feed({
+      type: 'Structured',
+      kind: 'interrupted',
+      json: JSON.stringify({ text: '[Request interrupted by user for tool use]' }),
+    })
+    feed({ type: 'TurnEnd', turn_id: null, outcome: { kind: 'Interrupted' } })
+
+    useToolGroupStore.getState().bind('s1', 'agent-1')
+    const { container } = render(<StructuredTextView items={acc.snapshot()} slotId="s1" />)
+    const [g] = groups(container)
+    expect(groupHeader(g).textContent).toBe(
+      summary(
+        t('chat.toolGroupRead', { count: '1' }),
+        t('chat.toolGroupCommand', { count: '1' }),
+        t('chat.toolGroupErrors', { count: '1' }),
+      ),
+    )
+    fireEvent.click(groupHeader(g))
+    expect(screen.getByText('Error').className).toContain('text-red-500')
+    const note = container.querySelector('[data-interrupt-note]') as HTMLElement
+    expect(note.textContent).toBe('[Request interrupted by user for tool use]')
+    expect(g.compareDocumentPosition(note) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(screen.queryByText(t('chat.turnInterrupted'))).toBeNull()
   })
 
   it('ⓐ codex — 끊긴 턴 뒤 늦게 온 ToolResult{Failed} → 그 행 「Error」 · 머리 「오류 1」 · 중단 행은 그대로', () => {
@@ -814,6 +881,16 @@ describe('StructuredTextView 도구 끝 표식 (ADR-0241)', () => {
     expect(iconOf()).toContain('lucide-search')
     rerender(<StructuredTextView items={[toolItem('Glob', 'g1', 'Other')]} />)
     expect(iconOf()).toContain('lucide-folder-open')
+    rerender(<StructuredTextView items={[toolItem('Task', 'a1', 'Agent')]} />)
+    expect(iconOf()).toContain('lucide-bot')
+    rerender(<StructuredTextView items={[toolItem('mcp__x__y', 'm1', 'Mcp')]} />)
+    expect(iconOf()).toContain('lucide-plug')
+  })
+
+  it('타입 밖 종류 낱말(캐스트로 든 항목)도 렌더를 깨뜨리지 않고 이름 휴리스틱으로 간다', () => {
+    const odd = toolItem('Glob', 'g1', 'Weird' as unknown as ToolCategory)
+    const { container } = render(<StructuredTextView items={[odd]} />)
+    expect(container.querySelector('.mb-3 svg')?.getAttribute('class')).toContain('lucide-folder-open')
   })
 })
 
@@ -845,5 +922,56 @@ describe('StructuredTextView 결말 행 톤 (ADR-0237 U8)', () => {
     expect(title.className).not.toContain('font-bold')
     expect(line.className).toContain('text-muted')
     expect(line.className).not.toContain('text-accent')
+  })
+})
+
+// ── ADR-0243: claude 끊김 표시 행 ───────────────────────────────────────────────────────
+describe('StructuredTextView 끊김 표시 행 (ADR-0243)', () => {
+  const noteItem = (text: string): StructuredItem => ({ kind: 'interruptNote', text, itemId: nextToolItemId++ })
+
+  it('원문을 글자 그대로 — 마크다운 문자도 태그가 되지 않는다', () => {
+    const text = '[Request interrupted by user] **bold** `code` # h'
+    const { container } = render(<StructuredTextView items={[noteItem(text)]} />)
+    const note = container.querySelector('[data-interrupt-note]') as HTMLElement
+    expect(note.textContent).toBe(text)
+    expect(note.querySelector('strong, code, h1')).toBeNull()
+  })
+
+  it('U8 중단 행과 같은 모양 — 강조색 · 굵게 · CircleStop', () => {
+    const { container } = render(<StructuredTextView items={[noteItem('[Request interrupted by user]')]} />)
+    const note = container.querySelector('[data-interrupt-note]') as HTMLElement
+    expect(note.className).toContain('text-accent')
+    expect(screen.getByText('[Request interrupted by user]').className).toContain('font-bold')
+    expect(note.querySelector('svg')?.getAttribute('class')).toContain('lucide-circle-stop')
+  })
+
+  it('결말 행의 중단 갈래와 줄 · 글 클래스가 같다(U8 모양이 두 행에서 갈라지지 않는다)', () => {
+    const { container } = render(
+      <StructuredTextView
+        items={[
+          noteItem('[Request interrupted by user]'),
+          { kind: 'outcome', outcome: 'interrupted', detail: null, itemId: nextToolItemId++ },
+        ]}
+      />,
+    )
+    const note = container.querySelector('[data-interrupt-note]') as HTMLElement
+    const outcomeLine = screen.getByText(t('chat.turnInterrupted')).parentElement as HTMLElement
+    expect(note.className).toBe(outcomeLine.className)
+    expect(note.querySelector('span')?.className).toBe(outcomeLine.querySelector('span')?.className)
+  })
+
+  it('레일 한 행이고 도구 묶음을 끊는다', () => {
+    const items: StructuredItem[] = [
+      toolItem('Read', 'r1', 'Read'),
+      toolItem('Read', 'r2', 'Read'),
+      noteItem('[Request interrupted by user]'),
+      toolItem('Read', 'r3', 'Read'),
+      toolItem('Read', 'r4', 'Read'),
+    ]
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(groups(container)).toHaveLength(2)
+    // 묶음 · 표시 행 · 묶음 = 세 행.
+    expect(railRows(container)).toBe(3)
+    expect(railDots(container)).toBe(3)
   })
 })

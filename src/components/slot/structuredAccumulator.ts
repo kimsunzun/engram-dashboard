@@ -71,6 +71,9 @@ export type StructuredItem =
   | { kind: 'separator'; itemId: number }
   // 턴 결말 표식 — `detail` = 실패 사유(상대가 줬을 때만). 정상 완료는 이 item 을 만들지 않는다(구분선만).
   | { kind: 'outcome'; outcome: TurnOutcomeMark; detail: string | null; itemId: number }
+  // 백엔드가 끊긴 턴에 적는 끊김 표시(오늘 내는 곳 = claude 합성 줄) — `text` = 원문 그대로. 이 항목이 든 턴은
+  //   끊김 결말 행을 그리지 않는다(ADR-0243).
+  | { kind: 'interruptNote'; text: string; itemId: number }
   // 이 셸이 모르는 이벤트가 왔다는 표식. `count` = 연속 누적분. ★원본 payload 는 싣지 않는다★(아래 default arm).
   | { kind: 'unsupported'; count: number; itemId: number }
 
@@ -221,6 +224,14 @@ export class StructuredEventAccumulator {
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
         break
       case 'Structured': {
+        // ADR-0243: user 갈래(uuid dedup · `turnDone` 내리기)를 타지 않는다 — 사용자가 친 글이 아니다.
+        if (ev.kind === 'interrupted') {
+          const text = extractInterruptText(ev.json)
+          if (text !== null) {
+            this.items.push({ kind: 'interruptNote', text, itemId: this.nextId++ })
+            break
+          }
+        }
         // ★user uuid dedup(text 블록 한정)★: user 항목은 합성 입력-시점 에코와 claude replay 가
         //   **같은 uuid** 로 두 번 온다(백엔드 uuid dedup 계약). 이미 본 uuid 면 스킵해 한 개만 남긴다.
         //   단 dedup 대상은 `type==="text"` user 블록뿐이다 — 합성 에코가 만드는 블록이 text 하나뿐이라
@@ -264,7 +275,10 @@ export class StructuredEventAccumulator {
         //   하나라도 안 닫으면 그 대화의 대기 인디케이터가 영영 돈다.
         {
           const mark = outcomeMark(ev.outcome)
-          if (mark !== null) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
+          // ADR-0243: 끊김 표시 행이 이미 그 턴의 끊김을 말했으면 결말 행을 겹쳐 그리지 않는다 — 백엔드가 아니라
+          //   표시 행의 유무로 가른다(표시 행이 안 온 턴은 결말 행이 그대로 선다).
+          const alreadyNoted = mark?.outcome === 'interrupted' && this.currentTurnHasInterruptNote()
+          if (mark !== null && !alreadyNoted) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
         }
         this.closeTurn()
         break
@@ -305,6 +319,16 @@ export class StructuredEventAccumulator {
       }
     }
     return true
+  }
+
+  /** 마지막 구분선 뒤(= 지금 턴)에 끊김 표시 행이 있나. */
+  private currentTurnHasInterruptNote(): boolean {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const kind = this.items[i].kind
+      if (kind === 'separator') return false
+      if (kind === 'interruptNote') return true
+    }
+    return false
   }
 
   /**
@@ -611,6 +635,20 @@ function isCopyList(value: unknown): boolean {
     Array.isArray(value) &&
     value.every((copy) => copy !== null && typeof copy === 'object' && typeof copy.id === 'string')
   )
+}
+
+/** `Structured{kind:"interrupted"}` 의 `json`(`{"text": …}`)에서 원문을 뽑는다. 모양이 다르면 null(→ 탈출구 항목). */
+// ADR-0243
+function extractInterruptText(json: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (parsed === null || typeof parsed !== 'object') return null
+    const text = (parsed as Record<string, unknown>)['text']
+    // 빈 글은 그릴 것이 없는 표시 행이 되어 결말 행만 지운다 — 탈출구로 보낸다.
+    return typeof text === 'string' && text !== '' ? text : null
+  } catch {
+    return null
+  }
 }
 
 /**

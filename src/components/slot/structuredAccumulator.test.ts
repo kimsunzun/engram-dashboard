@@ -1587,3 +1587,117 @@ describe('StructuredEventAccumulator — 도구 종류 · 끝 결과(ADR-0239 ·
     expect(toolMarks(acc)).toEqual([['c1', 'failed']])
   })
 })
+
+describe('StructuredEventAccumulator — claude 끊김 표시 행(ADR-0243)', () => {
+  const SHORT = '[Request interrupted by user]'
+  const FOR_TOOL = '[Request interrupted by user for tool use]'
+  function interrupted(json: string): StructuredEvent {
+    return { type: 'Structured', kind: 'interrupted', json }
+  }
+  const note = (text: string): StructuredEvent => interrupted(JSON.stringify({ text }))
+  const interruptedEnd = turnEnd({ kind: 'Interrupted' })
+
+  it.each([SHORT, FOR_TOOL])('%s → 원문을 실은 interruptNote 항목', (text) => {
+    const acc = new StructuredEventAccumulator()
+    expect(acc.feed(encode(note(text)))).toBe(true)
+    expect(acc.snapshot()).toEqual([{ kind: 'interruptNote', text, itemId: 0 }])
+  })
+
+  it.each([
+    ['JSON 이 아니다', 'not json'],
+    ['text 칸이 없다', JSON.stringify({ other: 1 })],
+    ['text 가 문자열이 아니다', JSON.stringify({ text: 3 })],
+    ['객체가 아니다', JSON.stringify('x')],
+    ['text 가 빈 글이다', JSON.stringify({ text: '' })],
+  ])('모양이 깨진 json(%s) → 탈출구 structured 항목', (_name, json) => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(interrupted(json)))
+    expect(acc.snapshot()).toEqual([{ kind: 'structured', label: 'interrupted', json, itemId: 0 }])
+  })
+
+  it('같은 글이라도 kind=user 는 오늘처럼 사용자 말풍선이다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(userEcho(SHORT, 'u1')))
+    expect(labels(acc.snapshot())).toEqual(['user'])
+    expect(kinds(acc.snapshot())).not.toContain('interruptNote')
+  })
+
+  it('user 갈래의 부수 효과를 타지 않는다 — 닫힌 턴 뒤에 와도 turnDone 을 내리지 않고 uuid 도 안 먹는다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(textDelta('a')))
+    acc.feed(encode(messageDone))
+    acc.feed(encode(interrupted(JSON.stringify({ text: SHORT, uuid: 'u1' }))))
+    expect(acc.isTurnDone()).toBe(true)
+    // uuid 를 「본 것」에 넣었다면 이 에코가 dedup 으로 사라진다.
+    acc.feed(encode(userEcho('hello', 'u1')))
+    expect(labels(acc.snapshot()).filter((l) => l === 'user')).toHaveLength(1)
+  })
+
+  it('표시 행 뒤 TurnEnd(Interrupted) → 결말 행 없음 · 구분선은 선다 · 턴은 닫힌다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    acc.feed(encode(note(FOR_TOOL)))
+    acc.feed(encode(interruptedEnd))
+    expect(kinds(acc.snapshot())).toEqual(['tool', 'interruptNote', 'separator'])
+    expect(acc.isTurnDone()).toBe(true)
+  })
+
+  it('표시 행 없이 TurnEnd(Interrupted) → 중단 결말 행이 그대로 선다(합성 줄이 안 온 claude · codex)', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(textDelta('half')))
+    acc.feed(encode(interruptedEnd))
+    expect(kinds(acc.snapshot())).toEqual(['text', 'outcome', 'separator'])
+  })
+
+  it('앞 턴의 표시 행은 다음 턴의 중단 결말 행을 지우지 않는다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(note(SHORT)))
+    acc.feed(encode(interruptedEnd))
+    acc.feed(encode(userEcho('again', 'u2')))
+    acc.feed(encode(textDelta('b')))
+    acc.feed(encode(interruptedEnd))
+    expect(kinds(acc.snapshot())).toEqual([
+      'interruptNote',
+      'separator',
+      'structured',
+      'text',
+      'outcome',
+      'separator',
+    ])
+  })
+
+  it('표시 행이 있어도 다른 결말(Failed · Unknown)의 결말 행은 선다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(note(SHORT)))
+    acc.feed(encode(turnEnd({ kind: 'Failed', detail: 'boom' })))
+    expect(kinds(acc.snapshot())).toEqual(['interruptNote', 'outcome', 'separator'])
+  })
+
+  it('표시 행이 없는 codex 모양 사건열은 오늘과 같다', () => {
+    const acc = new StructuredEventAccumulator()
+    for (const ev of [
+      userEcho('go', 'u1'),
+      toolCall('shell', '{}', 'c1'),
+      textDelta('part'),
+      interruptedEnd,
+    ])
+      acc.feed(encode(ev))
+    expect(acc.snapshot()).toEqual([
+      { kind: 'structured', label: 'user', json: JSON.stringify({ type: 'text', text: 'go', uuid: 'u1' }), itemId: 0 },
+      { kind: 'tool', name: 'shell', argsJson: '{}', id: 'c1', category: 'Other', resultMark: null, itemId: 1 },
+      { kind: 'text', text: 'part', itemId: 2 },
+      { kind: 'outcome', outcome: 'interrupted', detail: null, itemId: 3 },
+      { kind: 'separator', itemId: 4 },
+    ])
+  })
+
+  it('refeed 시 같은 스냅숏(replay idempotence)', () => {
+    const acc = new StructuredEventAccumulator()
+    const stream = [textDelta('a'), note(SHORT), interruptedEnd, textDelta('b'), interruptedEnd]
+    stream.forEach((ev) => acc.feed(encode(ev)))
+    const first = acc.snapshot().map((it) => ({ ...it }))
+    acc.reset()
+    stream.forEach((ev) => acc.feed(encode(ev)))
+    expect(acc.snapshot()).toEqual(first)
+  })
+})

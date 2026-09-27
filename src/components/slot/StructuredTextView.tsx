@@ -29,12 +29,13 @@ import {
 
 import { cn } from '@/lib/utils'
 import { t } from '../../i18n'
-import type {
-  StructuredItem,
-  ToolCategory,
-  ToolItem,
-  ToolResultMark,
-  TurnOutcomeMark,
+import {
+  normalizeToolCategory,
+  type StructuredItem,
+  type ToolCategory,
+  type ToolItem,
+  type ToolResultMark,
+  type TurnOutcomeMark,
 } from './structuredAccumulator'
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
@@ -176,7 +177,9 @@ const CATEGORY_ICON: Record<Exclude<ToolCategory, 'Other'>, LucideIcon> = {
 
 // ADR-0239: 종류를 모르면(`'Other'` — 옛 데몬도 여기 든다) 이름 휴리스틱으로 — 옛 데몬에서 오늘 모습 그대로다.
 function toolIconOf(category: ToolCategory, name: string): LucideIcon {
-  return category === 'Other' ? toolIconFor(name) : CATEGORY_ICON[category]
+  // 거르기는 타입 밖 낱말(캐스트로 든 항목)이 `undefined` 컴포넌트로 렌더를 깨뜨리지 않게 하려는 것이다.
+  const known = normalizeToolCategory(category)
+  return known === 'Other' ? toolIconFor(name) : CATEGORY_ICON[known]
 }
 
 /** 도구 이름만 보고 고르는 아이콘 — 종류(`category`)가 `'Other'` 일 때만 쓴다. */
@@ -357,29 +360,36 @@ function ToolItemRow({
  * ★중단·모름은 붉게 칠하지 않는다★ — 중단은 사용자가 끊은 정상 경로이고, 모름은 「모른다」이지
  * 「실패했다」가 아니다. 실패만 error 톤을 쓴다(Error 행과 같은 어휘).
  */
+/**
+ * 중단의 강조 줄(U8 — 굵게 · 강조색 · `CircleStop`). 결말 행의 중단 갈래와 끊김 표시 행이 함께 쓴다 — 두 행이 같은
+ * 모양이어야 한다(ADR-0243).
+ */
+// ADR-0237
+function InterruptedLine({ children, note = false }: { children: ReactNode; note?: boolean }) {
+  return (
+    <div data-interrupt-note={note ? '' : undefined} className="flex items-center gap-2.5 text-accent">
+      <CircleStop className="size-3.5 flex-none" />
+      <span className="font-bold whitespace-pre-wrap break-words">{children}</span>
+    </div>
+  )
+}
+
 function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: string | null }) {
   const isErr = outcome === 'failed'
   // ADR-0237: 사용자 결정 U8 — 중단은 굵게 + 강조색. 실패의 빨강 · 거부의 주황과 갈리고, 모름은 그대로 muted 다.
-  const isInterrupted = outcome === 'interrupted'
-  const Icon =
-    outcome === 'failed' ? AlertTriangle : outcome === 'interrupted' ? CircleStop : CircleHelp
-  const title =
-    outcome === 'failed'
-      ? t('chat.turnFailed')
-      : outcome === 'interrupted'
-        ? t('chat.turnInterrupted')
-        : t('chat.turnUnknown')
+  const Icon = isErr ? AlertTriangle : CircleHelp
   return (
     <div className="my-1">
-      <div
-        className={cn(
-          'flex items-center gap-2.5',
-          isErr ? 'text-red-500' : isInterrupted ? 'text-accent' : 'text-muted',
-        )}
-      >
-        <Icon className="size-3.5 flex-none" />
-        <span className={cn((isErr || isInterrupted) && 'font-bold')}>{title}</span>
-      </div>
+      {outcome === 'interrupted' ? (
+        <InterruptedLine>{t('chat.turnInterrupted')}</InterruptedLine>
+      ) : (
+        <div className={cn('flex items-center gap-2.5', isErr ? 'text-red-500' : 'text-muted')}>
+          <Icon className="size-3.5 flex-none" />
+          <span className={cn(isErr && 'font-bold')}>
+            {isErr ? t('chat.turnFailed') : t('chat.turnUnknown')}
+          </span>
+        </div>
+      )}
       {detail !== null && detail !== '' && (
         // 사유는 상대가 준 신뢰할 수 없는 텍스트 — 마크다운을 태우지 않고 리터럴로만 그린다(FIX 2 와 같은 규율).
         <div
@@ -391,6 +401,19 @@ function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: str
           {detail}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * 백엔드가 끊긴 턴에 적는 끊김 표시(오늘 내는 곳 = claude 합성 줄) — 글은 원문이고 마크다운을 태우지 않는다(FIX 2 와
+ * 같은 규율).
+ */
+// ADR-0243
+function InterruptNoteRow({ text }: { text: string }) {
+  return (
+    <div className="my-1">
+      <InterruptedLine note>{text}</InterruptedLine>
     </div>
   )
 }
@@ -458,6 +481,7 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
     case 'tool':
     case 'error':
     case 'outcome':
+    case 'interruptNote':
     case 'unsupported':
       return 'assistant'
     case 'usage':
@@ -596,6 +620,13 @@ function renderItem(
       return (
         <ChatRow key={k} rail tone={item.outcome === 'failed' ? 'error' : 'default'} runPos={pos}>
           <OutcomeRow outcome={item.outcome} detail={item.detail} />
+        </ChatRow>
+      )
+
+    case 'interruptNote':
+      return (
+        <ChatRow key={k} rail runPos={pos}>
+          <InterruptNoteRow text={item.text} />
         </ChatRow>
       )
 
