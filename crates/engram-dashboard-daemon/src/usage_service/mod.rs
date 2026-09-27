@@ -5,6 +5,7 @@
 //! 「백엔드 확장」 위반이다.
 // ADR-0004
 
+pub mod book;
 pub mod clock;
 pub mod reject_store;
 
