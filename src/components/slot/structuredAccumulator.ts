@@ -601,7 +601,7 @@ const TOOL_CATEGORIES: Record<ToolCategory, true> = {
   Other: true,
 }
 
-function normalizeToolCategory(value: unknown): ToolCategory {
+export function normalizeToolCategory(value: unknown): ToolCategory {
   // `in` 이 아닌 것은 `'toString'` 같은 프로토타입 이름을 종류로 받지 않으려는 것이다.
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, value)
     ? (value as ToolCategory)

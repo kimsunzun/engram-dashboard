@@ -317,12 +317,19 @@ pub enum ToolCategory { Read, Search, List, Edit, Command, Web, Agent, Mcp, Othe
 export type DisplayRow =
   | { kind: 'item'; item: StructuredItem }
   | { kind: 'toolGroup'; key: string; members: StructuredItem[]; calls: ToolItem[]; live: boolean }
-/** turnOpen = StructuredTextView 의 `streaming`(RichSlot `:370`). */
-export function groupToolRuns(items: readonly StructuredItem[], turnOpen: boolean): DisplayRow[]
-/** vendorErrorIds = claude 파싱(`buildToolResultMap`)의 `isError` 호출 id. codex 는 항목의 `resultMark` 로 온다(§4-7 ⑧). */
-export function summarizeGroup(calls: readonly ToolItem[], vendorErrorIds: ReadonlySet<string>):
+/** turnOpen = StructuredTextView 의 `streaming`(RichSlot `:370`). rowKind = StructuredTextView 의 `rowKindOf` 그대로. */
+export function groupToolRuns(items: readonly StructuredItem[], turnOpen: boolean,
+  rowKind: (item: StructuredItem) => ChatRowKind): DisplayRow[]
+/** vendorErrorIds = claude 파싱(`buildToolResultMap`)의 `isError` 호출 id(`vendorErrorIdsOf(results)`). codex 는 항목의 `resultMark` 로 온다(§4-7 ⑧). */
+export function summarizeGroup(calls: readonly ToolItem[], vendorErrorIds: ReadonlySet<string>,
+  declinedMark: 'own' | 'error' = DECLINED_MARK):
   { counts: ReadonlyArray<readonly [ToolCategory, number]>; errors: number; declined: number }
+/** 한 호출의 판정 — 묶음 요약과 펼친 행 배지가 이 함수 하나를 쓴다(§4-7 ⑧). */
+export function toolCallVerdict(mark: ToolResultMark | null | undefined, vendorError: boolean,
+  declinedMark?: 'own' | 'error'): 'error' | 'declined' | null
 ```
+
+- ★구현 판(FE-2b-1)★: `groupToolRuns` 의 셋째 인자 `rowKind` 는 구현이 더했다 — `rowKindOf` · `parseToolResult` 는 `StructuredTextView` 안에 있고, 묶기 함수가 그 판정을 받아 쓰므로 벤더 결과 파싱이 한 곳에 남는다(ADR-0051 — 레일 계산과 같은 판정). 요약 줄 칸(순서 · 톤)은 `summaryParts(summary)` · 사유 줄 키는 `declinedReasonKey(mark)` · 벤더 오류 id 는 `vendorErrorIdsOf(buildToolResultMap(items))` · 종류 정규화는 누산기의 `normalizeToolCategory` 한 벌. `members` 는 그리는 멤버(도구 행 · 비지 않은 생각)만 담는다 — 묶음 안의 skip 행은 행 목록에서 빠진다.
 
 - **묶음 규칙**:
   - 후보 = 첫 `tool` 행부터 마지막 `tool` 행까지. 그 사이에 올 수 있는 것 = 그리지 않는 행(`rowKindOf` = `skip` — usage · claude `tool_result` 운반 행 · 빈 생각 · `StructuredTextView.tsx:377-395`)과 **비지 않은 생각**(U5 흡수 — 대안이면 이 한 줄이 「끊는다」로 바뀐다).
@@ -330,10 +337,10 @@ export function summarizeGroup(calls: readonly ToolItem[], vendorErrorIds: Reado
   - `tool` 이 ≥2 일 때만 묶음. 하나면 오늘처럼 그 행 그대로.
   - 마지막 `tool` 뒤의 생각·skip 행은 멤버가 아니다(흐름으로 돌아간다).
   - `live` = `turnOpen` 이고 묶음 뒤에 오는 행이 전부 skip·비지 않은 생각뿐이다. ★뒤에 생각이 왔다고 접지 않는다★ — 그 뒤에 도구가 이어지면 다시 펼쳐지는 깜빡임이 된다.
-  - `key` = 첫 호출의 백엔드 id(`tool:<id>`) · 없으면 `item:<itemId>` — 누산기는 같은 사건열을 같은 `itemId` 로 재구성하므로(`structuredAccumulator.ts:11-15` 멱등 불변식) replay 뒤에도 같은 키다.
+  - `key` = 첫 호출의 백엔드 id(`tool:<id>`) · 없으면 `item:<itemId>` — 누산기는 같은 사건열을 같은 `itemId` 로 재구성하므로(`structuredAccumulator.ts:11-15` 멱등 불변식) replay 뒤에도 같은 키다. 앞 묶음이 이미 같은 `tool:<id>` 를 쓰면 뒤 묶음은 `item:<itemId>` 다(구현 판). ★한계★: 링에서 밀려난 뒤 시작하는 재구독 replay 는 사건열이 달라 `item:` 키가 바뀌고, 묶음 머리 호출이 밀려나면 `tool:` 키도 바뀐다 — 그 묶음의 고른 펼침은 잃고 자동 규칙으로 돌아간다.
 - **렌더**(`StructuredTextView.tsx:514-561`): `items.map(renderItem)` 을 `groupToolRuns(items, streaming)` 의 행 목록으로 바꾼다. ★ADR-0051 불변식★ — 레일 위치(`chat/railPositions.ts`)는 **행 목록**으로 계산한다: 묶음 = `'assistant'` 한 행 · 항목 = 오늘 `rowKindOf`. 묶음은 `ChatRow rail` 하나로 그리고, 펼쳤을 때 멤버는 그 안에서 행 컴포넌트(`ToolItemRow` · `ThoughtRow`)만 그린다 — 안쪽에 `ChatRow` 레일을 두지 않으므로 레일 계산과 DOM 이 한 몸으로 남는다. `isRenderedItem`(`:402-404` — RichSlot 이 쓴다)은 항목 단위 그대로.
 - ★`StructuredTextView` 는 순수 렌더로 남는다(`:5` 책임 주석 · `:527` ADR-0050/0051 순수성)★ — 이 컴포넌트에 state · effect · 스토어 구독을 더하지 않는다. `groupToolRuns` 는 렌더 중 파생이고, 펼침 상태(`useToolGroupStore`) 읽기와 토글은 새 자식 컴포넌트 **`ToolGroupRow`**(`chat/ToolGroupRow.tsx` — props = `slotId` · `row` · `results` · `runPos` · `isLast`(마지막 묶음인가 — 렌더 중 파생) · `onGroupToggle`)가 진다. `StructuredTextView` 는 `slotId`·`onGroupToggle` 을 그대로 내려보낼 뿐이다.
-- **요약 줄**: 아이콘(lucide `Layers`) · 종류별 `t('chat.toolGroup<Kind>', {count})` 를 고정 순서(검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타)로 ` · ` 로 잇고 · 오류가 있으면 끝에 `t('chat.toolGroupErrors', {count})`(붉은 톤) · 거부가 있으면 그 뒤 `t('chat.toolGroupDeclined', {count})`(주황 톤 `var(--status-blocked)` — 우리 거절 · codex 스스로의 거부를 함께 센다 · 오류 수에 안 든다 · U2-a · §4-7 ⑧). 오류 수 = 항목 `resultMark === 'failed'`(codex — §4-7) 이거나 `buildToolResultMap`(`:117-125`)의 `isError`(claude) 인 호출 — 두 백엔드 다 선다(U2). 셰브론 · `aria-expanded`.
+- **요약 줄**: 아이콘(lucide `Layers`) · 종류별 `t('chat.toolGroup<Kind>', {count})` 를 고정 순서(검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타)로 ` · ` 로 잇고 · 오류가 있으면 끝에 `t('chat.toolGroupErrors', {count})`(붉은 톤) · 거부가 있으면 그 뒤 `t('chat.toolGroupDeclined', {count})`(주황 톤 `var(--status-blocked)` — 우리 거절 · codex 스스로의 거부를 함께 센다 · 오류 수에 안 든다 · U2-a · §4-7 ⑧). 오류 수 = 항목 `resultMark === 'failed'`(codex — §4-7) 이거나 `buildToolResultMap`(`:117-125`)의 `isError`(claude) 인 호출 — 두 백엔드 다 선다(U2). 한 호출은 오류 · 거부 중 많아야 하나에 든다(`toolCallVerdict` — 거부 표식이 벤더 `isError` 를 이긴다 · §4-7 ⑧). 셰브론 · `aria-expanded`.
 - DOM 표지: 묶음 뿌리 `data-tool-group={key}` · `data-tool-group-open="1"|"0"` · `data-tool-group-count={calls.length}`.
 - [고름] 단일 도구 행 아이콘은 `category !== 'Other'` 면 종류 아이콘, 아니면 오늘 이름 휴리스틱(`:150-167`) — 옛 데몬에서 오늘 모습 그대로.
 
@@ -342,14 +349,15 @@ export function summarizeGroup(calls: readonly ToolItem[], vendorErrorIds: Reado
 - **새** `src/store/toolGroupStore.ts`(zustand):
   ```ts
   interface ToolGroupState {
-    bySlot: Record<string, { agentId: string; open: Record<string, boolean> }>
-    bind(slotId: string, agentId: string): void   // 다른 에이전트면 그 슬롯 칸을 비운다
-    clear(slotId: string): void                   // 새 화신 비우기(onReset) 전용
-    setOpen(slotId: string, key: string, open: boolean): void
+    bySlot: Record<string, { agentId: string; open: Record<string, boolean>; mount: number | null }>
+    bind(slotId: string, agentId: string): () => void   // 다른 에이전트면 그 슬롯 칸을 비운다 · 돌려받은 함수 = 해제
+    clear(slotId: string): void                         // 새 화신 비우기(onReset) 전용
+    setOpen(slotId: string, key: string, open: boolean): boolean   // false = 그 슬롯이 지금 묶여 있지 않다 · 아무것도 안 적는다
   }
   ```
   유효 펼침 = `open[key] ?? live` — **사용자 토글이 자동 접힘을 이긴다**(양방향). 재구독·replay 는 지우지 않는다. 웹뷰 새로고침은 인메모리라 초기화된다(레이아웃과 같은 수준 — CLAUDE.md 「LLM-우선 제어」).
-- RichSlot 접착(FE-1.3): `StructuredTextView` 에 `slotId={viewId}` · 마운트 효과에서 `bind(viewId, agentId)` · onReset(`:249-266`)에서 `clear(viewId)`. `StructuredTextView` 의 새 prop 은 선택이다 — 없으면 자동 규칙만 쓴다(FE-2 가 FE-1 을 기다리지 않는다).
+  - ★구현 판(FE-2b-1 · 리뷰 FIX · 메인 결정)★: 묶임 = 그 슬롯의 대화 뷰가 이 창에 **지금 마운트돼 있다**. `bind` 가 해제 함수를 돌려주고, 해제는 묶임만 풀고 고른 값은 남긴다(다시 마운트하면 그대로 붙는다). 해제는 자기 묶임에만 먹는다 — 두 번 불러도 · 새 `bind` 뒤의 옛 해제도 새 묶임을 풀지 않는다(묶임마다 표식). `setOpen` 은 `void` 를 넓혀 `boolean` 을 돌려준다 — `false` = 한 번도 안 묶였거나 해제됐다 · 아무것도 적지 않는다. 명령이 이 값으로 「이 창에 그 뷰가 없다」를 답한다 — 렌더 모드 교체(`LayoutLeaf.tsx:270-280`) · 팝아웃 이동(ADR-0057)으로 뷰가 내려간 뒤 성공으로 답하지 않는다(ADR-0167 · 형제 `slot.scrollToBottom` 의 손잡이 명부와 같은 결).
+- RichSlot 접착(FE-1.3): `StructuredTextView` 에 `slotId={viewId}` · 마운트 효과에서 `bind(viewId, agentId)` 하고 그 정리(cleanup)에서 돌려받은 해제 함수를 부른다 · onReset(`:249-266`)에서 `clear(viewId)`. `StructuredTextView` 의 새 prop 은 선택이다 — 없으면 자동 규칙만 쓴다(FE-2 가 FE-1 을 기다리지 않는다).
 - **명령** `chat.toolGroup.setExpanded { slotId, groupKey, expanded: boolean }`(새 `src/commands/chatCommands.ts`) — ★`help` 없음★(창마다 따로 있는 프론트 상태 — `renderModeCommands.ts:8-20` · ADR-0167). 인자 검문은 `requireSlotId` 모양으로 throw. `groupKey` 는 DOM `data-tool-group` 에서 읽는다.
 
 ### 4-5. F1 과의 맞물림
@@ -489,6 +497,7 @@ ToolResult { id: String, outcome: ToolOutcome },
 - `ToolResult` 갈래: 뒤에서부터 같은 `id` 의 `tool` 항목을 찾아 copy-on-write 로 `resultMark` 를 바꾼다(`Failed` → `'failed'` · `Declined` → `'declined'` · `Refused` → `'refused'` · `Completed` → `null` · 모르는 낱말 → `null` + warn). 못 찾으면(링에서 밀려남) 버린다. **새 항목을 만들지 않는다** → `rowKindOf` · 레일 · `isRenderedItem` 무변경. `turnDone` 을 안 건드리고 ★**`false` 를 돌려준다** — 붙였든 못 찾았든★. 같은 사건열 = 같은 결과(멱등 — `ToolCall` 이 늘 먼저 온다: 라이브는 `started` → `completed`, 이력은 한 item 안에서 그 순서).
 - ★**결말 붙이기는 「새 내용이 왔다」가 아니다**★(3판 리뷰 Designer FIX · 사용자 동의 2026-09-27): `feed` 의 반환값은 `RichSlot.tsx:222`(`if (understood) setAwaiting(false)`)에서 대기 표시를 푸는 신호로만 쓰인다(소비자는 `:213` 한 곳). codex 는 끊어도 도는 명령을 죽이지 않아 지난 턴 도구의 끝이 늦게 온다(실측 `steer_m6.jsonl` — 17 초 뒤). 그 늦은 끝이 사용자가 새 글을 보낸 직후 · 새 턴이 답하기 전에 들면, `true` 를 돌려줄 경우 새 턴의 Wait 표시가 답 없이 꺼진다. 그래서 `ToolResult` 갈래는 `false` 를 돌려준다 — 행의 다시 그리기는 그대로다(`RichSlot` 이 반환값과 무관하게 `setItems([...acc.snapshot()])` 를 먼저 부른다 `:215`). `RichSlot` 의 코드는 고치지 않는다(FE-1 파일 · 반환값의 뜻이 「대기를 풀어도 되는 프레임」으로 넓어질 뿐이다 — `feed` 의 doc 을 그렇게 고친다). 단 그 호출부 주석 `RichSlot.tsx:218-221`(「알아들은 프레임에만 … 못 알아들었으면 아직 아무것도 못 들은 것이다」)은 `false` 를 「못 알아들음」으로만 읽어 `ToolResult` 의 `false`(알아들었지만 대기를 풀지 않는 프레임)와 어긋난다 → FE-1.3 이 새 뜻에 맞춰 고친다(§12 4판 4 · §7). Wait 자체의 규칙은 바꾸지 않는다(임시 구조 · 재설계는 `docs/tracking.md` T-12). I1 이 `case 'ToolResult':` 로 바꿀 때도 반환값은 그대로 `false`.
 - 요약: `summarizeGroup`(§4-3)의 `errors` = `resultMark === 'failed'` 이거나 `vendorErrorIds` 에 든 호출 · `declined` = `resultMark` 가 `'declined'` 또는 `'refused'`.
+- ★판정은 한 함수 — 구현 판(FE-2b-1)★: 묶음 요약 셈과 펼친 행 배지는 둘 다 `toolCallVerdict(mark, vendorError, declinedMark)`(`chat/toolRuns.ts`)에서 온다 — `'failed'` = 오류 · `'declined'`/`'refused'` = 거부(`DECLINED_MARK='error'` 면 오류) · 표식 없음이면 벤더 `isError` 가 오류. ★거부 표식이 벤더 `isError` 를 이긴다★ — 표식은 중립 끝 결과이고 벤더 본문 파싱은 그 결과를 아직 안 싣는 백엔드의 대체다(오늘 한 호출에 둘이 같이 오는 경로는 없다 — claude 는 `ToolResult` 를 안 낸다 · T-37 뒤에 겹칠 수 있다). 그래서 아래 `isErr` 식은 이 판정 `=== 'error'` 로 읽는다.
 - 펼친 행 `ToolItemRow`(`StructuredTextView.tsx:209`)에 prop `mark` — `isErr = result?.isError === true || mark === 'failed'`(오늘 배지 · 붉은 테 그대로 · codex 는 Out 칸이 없다) · `mark` 가 `'declined'` 또는 `'refused'` = 아래 「거부됨」 모양.
 - **「거부됨」 모양 = 사용자 결정 U2-a(따로 표기 · B) · 5판 = 출처별 사유** — 도구가 돌다 실패한 것이 아니라 실행되지 않은 것이다. 우리 거절(`refused`)은 전부 우리 정책이고(승인 UI 없음 — `backend/codex/transport.rs:3054-3087` · 채팅 승인은 다음 과제 T-38 — U7), 기억에 없는 거부(`declined`)는 벤더가 낸 것이다 — 벤더 판단 · 준비 실패 · 복원 · 상한 밀림 중 무엇인지 모르므로 사유가 이유를 말하지 않는다(②-2). ★두 표식은 배지 · 색 · 셈이 같고 사유 줄만 다르다★. 선례 = t3code 「Declined」(`apps/web/src/components/chat/MessagesTimeline.logic.ts:86-96`) · cline 경고 톤(조사 §8-2).
   - **배지**(두 표식 공용): 붉은 `Error` 배지 자리(`StructuredTextView.tsx:250-254`)에 `t('chat.toolDeclined')`(「거부됨」). 글자 · 테두리 색 = `var(--status-blocked)` — 주황 경고 토큰(`src/styles/theme.css:1-3` — dark `#d29922` · light `#9a6700` · e-ink 는 본문색 · ADR-0173). 줄 상자 테두리도 같은 토큰(반투명). 머리(`RowHeader`)는 기본 톤 그대로다 — 붉게 칠하지 않는다. [고름] 새 토큰을 짓지 않고 기존 경고 토큰을 쓴다(e-ink 무력화가 이미 들어 있다).
