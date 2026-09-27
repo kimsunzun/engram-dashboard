@@ -260,6 +260,7 @@ s6:34–48        턴 2 「Reply with exactly: AFTER-S6」 → 정상 success
 ## 10. TRD §3-4 · ADR-0238 과 어긋나거나 새로 나온 것
 
 1. ★**합성 사용자 줄 `[Request interrupted by user]` / `…for tool use]` — TRD 가 예상하지 못했다(멈춤 사유)**★ — 끊긴 턴 14/14 에서 `result` 앞에 오고(§1) transcript 에도 `user` 줄로 남는다(S1 세션 transcript 의 0 기반 21 · 33 번째 줄 — 확인했다). 오늘 경로로는 라이브에서도 이어받기 이력에서도 **사용자 말풍선**이 된다. TRD §3-4 「codex 끊김과 같은 모양 · 프론트·선 타입 무변경」 · U8(중단 줄 강조)의 화면이 이 말풍선 하나만큼 달라진다. 도구 중 끊기면 화면 순서는 「붉은 `Error` 도구 행 → `[Request interrupted by user for tool use]` 말풍선 → 중단 행」이 된다(TRD §11 ⑪ 의 모양 + 말풍선). 불변식에는 영향이 없다(§9). **어떻게 보일지(그대로 둔다 · decoder 가 거른다 · 다르게 그린다)는 사용자 체감이라 메인·사용자 판정이 필요하다** — 거른다면 무엇으로 알아보나(벤더 문자열 · `isReplay` 없는 글 전용 `user` 줄 · 위치)도 함께 갈린다. 이 문서는 고르지 않는다.
+   - 판정 = ADR-0243 (2026-09-28).
 2. **S4 의 전제 순서가 다르다(멈춤 아님)** — 2.1.280 은 되울림이 init **뒤**다. 문을 여는 줄은 `started` 이고 거기서의 끊기가 먹혔다 — 보정 불필요(§5).
 3. **끊긴 `result` 의 `subtype` 은 `interrupted` 가 아니라 `error_during_execution` 이다(TRD 가 `terminal_reason` 칸으로 예상했다)** — B3 은 픽스처 138 · 187 로 `TurnEnd{Interrupted}` 를 박는 것이 실측 근거가 된다. 손으로 지은 `subtype:"interrupted"` 시험 둘은 옛 CLI 대비로만 남는다.
 4. **턴을 연 명령의 `cancelled` 가 `result` 뒤에 온다(무해)** — 묘비 위 무동작 · 분류기 `None` · 문 안 열림(§1 · §9). TRD 는 이 줄을 적지 않았지만 번역표(`claude/mod.rs:1330`의 「`cancelled` → 모름(끊기·…)」)가 이미 덮는다.

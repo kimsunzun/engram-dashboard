@@ -1,7 +1,7 @@
 # ADR-0237: 채팅 칸 안의 Esc 는 도는 턴을 끊는다 — 명령 agent.interrupt 를 부르는 지역 술어 하나로 짓고 중단됨 행은 강조색으로 그린다
 
-- 상태: 확정 (2026-09-27, 근거: 사용자 결정 U6 · U8 (TRD `docs/process/S21-chat-ux/trd.md` §1) + TRD 5판 리뷰 FIX 반영(TRD §12) · 구현 전 · 코드 무변경)
-- 관련: Amends ADR-0235 (결정 10 UI 정지 단축키 보류) · TRD `docs/process/S21-chat-ux/trd.md`(§1 U6 · U8 · §3-1 · §3-2 · §3-3 · §3-6 · §7 FE-1.2 · FE-2 · §8-2 F2 · §10 0237) · 조사 `docs/research/chat-ux-four-features-2026-09-27.md`(§2) · ADR-0238(claude JSON 끊기 — 이 명령이 닿는 claude 통로) · ADR-0241(주황 「거부됨」 — 중단 행 색과 갈린다) · ADR-0055 · ADR-0167(명령 레지스트리 · `help` 없는 창 명령 = 창 안 전용) · ADR-0173(주황 경고 토큰 `--status-blocked`) · ADR-0155(명령 선언은 생산자 옆) · `docs/tracking.md` T-36(단축키 시스템 — 보류) · step-log S21
+- 상태: 확정 (2026-09-27, 근거: 사용자 결정 U6 · U8 (TRD `docs/process/S21-chat-ux/trd.md` §1) + TRD 5판 리뷰 FIX 반영(TRD §12) · 구현 전 · 코드 무변경) · 부분 폐기 by ADR-0243 (결정 6 claude 는 표시 행이 강조를 지고 그 턴 중단 행 생략)
+- 관련: Amends ADR-0235 (결정 10 UI 정지 단축키 보류) · TRD `docs/process/S21-chat-ux/trd.md`(§1 U6 · U8 · §3-1 · §3-2 · §3-3 · §3-6 · §7 FE-1.2 · FE-2 · §8-2 F2 · §10 0237) · 조사 `docs/research/chat-ux-four-features-2026-09-27.md`(§2) · ADR-0238(claude JSON 끊기 — 이 명령이 닿는 claude 통로) · ADR-0241(주황 「거부됨」 — 중단 행 색과 갈린다) · ADR-0055 · ADR-0167(명령 레지스트리 · `help` 없는 창 명령 = 창 안 전용) · ADR-0173(주황 경고 토큰 `--status-blocked`) · ADR-0155(명령 선언은 생산자 옆) · `docs/tracking.md` T-36(단축키 시스템 — 보류) · step-log S21 · Amended by ADR-0243 (결정 6 claude 는 표시 행이 강조를 지고 그 턴 중단 행 생략)
 
 ## 맥락
 ADR-0235 결정 10 은 「UI 정지 버튼·단축키는 지금 넣지 않는다」였다 [사용자 2026-09-26] — 「나중에 단축키 시스템 만들때 넣을거임」.
