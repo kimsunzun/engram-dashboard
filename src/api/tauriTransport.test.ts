@@ -141,8 +141,8 @@ function buildFrame(opts: { agentId: string; epoch: number; seq: number; payload
   return buf
 }
 
-// ADR-0046 replay 경계 마커 frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1].
-const MARKER_LEN = 30
+// ADR-0046 replay 경계 마커 frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE].
+const MARKER_LEN = 38
 function buildMarker(opts: {
   agentId: string
   epoch: number
@@ -150,6 +150,7 @@ function buildMarker(opts: {
   truncated?: boolean
   failed?: boolean
   continuesConversation?: boolean
+  replayFrom?: bigint
 }): ArrayBuffer {
   const buf = new ArrayBuffer(MARKER_LEN)
   const view = new DataView(buf)
@@ -163,6 +164,7 @@ function buildMarker(opts: {
   if (opts.failed) flags |= 0x02
   if (opts.continuesConversation) flags |= 0x04
   view.setUint8(29, flags)
+  view.setBigUint64(30, opts.replayFrom ?? 0n, false)
   return buf
 }
 
@@ -345,6 +347,22 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
     expect(t.connectionState).toBe('down')
     expect(h.state.subscribeOutputCalls).toBe(0)
   })
+
+  it('조회 대기 중 close() 가 끼면 뒤늦은 connected 조회로 되살아나거나 Channel 을 붙이지 않는다', async () => {
+    const t = new TauriTransport()
+    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateGate = () => {}
+    const initP = t.init()
+    await flush()
+    t.close()
+    const release = h.state.connectionStateGate
+    h.state.connectionStateGate = null
+    release?.()
+    await initP
+    await flush()
+    expect(t.connectionState).toBe('down')
+    expect(h.state.subscribeOutputCalls).toBe(0)
+  })
 })
 
 // ── FIX 7: 미지 상태 어휘 방어(retrofit 함정) ───────────────────────────────────────────
@@ -504,6 +522,90 @@ describe('TauriTransport requestReplay(ADR-0046 F2)', () => {
   })
 })
 
+// ── ADR-0231: replay 요청은 이 창의 출력 Channel 등록 뒤에만 — 셸은 등록 안 된 창 몫을 말없이 건너뛴다 ──
+describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231)', () => {
+  const callOrder = (): string[] =>
+    invokeMock.mock.calls
+      .map((c) => c[0])
+      .filter((cmd) => cmd === 'subscribe_output' || cmd === 'request_replay')
+
+  it('등록이 늦게 풀려도 request_replay 는 subscribe_output 이 풀린 뒤에야 나간다', async () => {
+    const t = new TauriTransport()
+    h.state.subscribeOutputGate = true
+    await t.start() // emit 경로 — 등록은 게이트에 막힌 채 진행 중
+    await flush()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    const replay = t.requestReplay(AGENT)
+    await flush()
+    expect(h.state.requestReplayCalls).toBe(0)
+    h.state.subscribeOutputResolvers.shift()!()
+    expect(await replay).toBe(1n)
+    expect(callOrder()).toEqual(['subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  // 리로드·팝아웃: 셸은 이미 Connected 라 ensure 가 전이 없이 Ok 로 단락하고, init 조회도 아직이다.
+  it('ensure 가 전이 없이 Ok 면 doConnect 가 조회로 연결을 받고 등록을 마친 뒤에 풀린다 — replay 는 그 뒤', async () => {
+    const t = new TauriTransport()
+    h.state.emitConnectedOnConnect = false
+    h.state.connectionStateReply = 'connected'
+    h.state.subscribeOutputGate = true
+    let ready = false
+    const p = t.ensureReady().then(() => {
+      ready = true
+    })
+    await flush(30)
+    expect(t.connectionState).toBe('connected')
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    expect(ready, '등록이 풀리기 전엔 ensureReady 도 안 풀린다').toBe(false)
+    const replay = t.requestReplay(AGENT)
+    await flush()
+    expect(h.state.requestReplayCalls).toBe(0)
+    h.state.subscribeOutputResolvers.shift()!()
+    await p
+    await replay
+    expect(callOrder()).toEqual(['subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  it('한 번도 등록되지 않았으면 request_replay 앞에서 먼저 등록한다', async () => {
+    const t = new TauriTransport()
+    h.state.emitConnectedOnConnect = false // 조회도 down — 어느 경로도 등록을 안 시작했다
+    await t.start()
+    expect(h.state.subscribeOutputCalls).toBe(0)
+    await t.requestReplay(AGENT)
+    expect(callOrder()).toEqual(['subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  it('재연결 전이의 재등록이 진행 중이면 그 완료를 기다린다', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    h.state.subscribeOutputGate = true
+    emit('daemon-connection-state', 'reconnecting')
+    emit('daemon-connection-state', 'connected')
+    await flush()
+    expect(h.state.subscribeOutputCalls).toBe(2)
+    const replay = t.requestReplay(AGENT)
+    await flush()
+    expect(h.state.requestReplayCalls).toBe(0)
+    h.state.subscribeOutputResolvers.shift()!()
+    await replay
+    expect(callOrder()).toEqual(['subscribe_output', 'subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  it('닫힌 뒤의 replay 요청은 Channel 을 새로 붙이지 않고 reject 된다', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    t.close()
+    await expect(t.requestReplay(AGENT)).rejects.toThrow()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    expect(h.state.requestReplayCalls).toBe(0)
+  })
+})
+
 describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () => {
   it('출력 Channel 로 온 마커 frame 은 replayBoundary 로 정규화(output 아님)', async () => {
     const t = new TauriTransport()
@@ -522,6 +624,7 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
       truncated: true,
       failed: false,
       continuesConversation: false,
+      replayFrom: 0,
     })
     // 마커는 output 으로 올라오지 않는다(공개 표면 미노출 — Designer 요구).
     expect(got.find((m) => m.kind === 'output')).toBeUndefined()
@@ -541,6 +644,18 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
       failed: false,
       continuesConversation: true,
     })
+  })
+
+  // ADR-0231: 뷰의 flush 시작점이 이 머리다 — 정규화에서 떨어지면 빈 replay 에서 seq 0 을 건너뛴다.
+  it('replay 머리(replay_from)가 경계에 실린다', async () => {
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.start()
+    h.state.capturedChannel!.onmessage!(
+      buildMarker({ agentId: AGENT, epoch: 7, gen: 44n, replayFrom: 40n }),
+    )
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 44n, replayFrom: 40 })
   })
 
   it('failed 플래그 전파', async () => {

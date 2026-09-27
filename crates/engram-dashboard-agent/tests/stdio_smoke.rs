@@ -83,6 +83,7 @@ fn event_tag(e: &OutputEvent) -> String {
         OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
         OutputEvent::Error(_) => "error".to_string(),
         OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
+        OutputEvent::QueuedInput(_) => "queued-input".to_string(),
     }
 }
 

@@ -23,6 +23,9 @@ export type InboundMessage =
   //   (Designer 리뷰 요구). failed=true 면 이 replay 가 완결 없이 종결됨(deadline/단절).
   //   continuesConversation = 이 화신이 저장된 대화를 이어받으려고 떴다(ADR-0226 — 성공 여부 아님).
   //   실패 경계는 언제나 false.
+  //   replayFrom = 이 replay 의 머리 — 데몬 SubscribeAck 의 `replay_from`(실제로 처음 보낸 seq · 링이
+  //   비었으면 다음에 발급할 seq). ★버퍼의 최소 seq 로 대신하지 말 것★ — replay 가 비면 틀린다(ADR-0231).
+  //   실패 경계에선 뜻이 없다(flush 하지 않는다).
   | {
       kind: 'replayBoundary'
       agentId: string
@@ -31,6 +34,7 @@ export type InboundMessage =
       truncated: boolean
       failed: boolean
       continuesConversation: boolean
+      replayFrom: number
     }
 
 /** carrier 추상 — ProtocolClient 가 의존하는 유일한 전송 표면(daemon 접속 전용, ADR-0029). */

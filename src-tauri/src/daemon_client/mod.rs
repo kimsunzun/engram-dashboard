@@ -22,6 +22,8 @@ pub mod connection;
 // ★`pub(crate)` 인 것이 요점이다★: 이 포트의 유일한 소비자는 `run_connection`(그 자체가 `pub(crate)`)이고,
 //   밖에 열어 봐야 crate 밖에서 꽂을 자리가 없다 — 열어 두면 `AppHandle` 운반통이 lib 표면으로 새 나간다.
 pub(crate) mod events;
+// ADR-0231: 출력 binary frame 한 장의 중계 판정(디코드 · 화신 표식 거름 · 보는 창) — seq 를 건너뛰지 않는다.
+mod frame_relay;
 // ADR-0155 결정 4: 데몬이 보낸 명령을 받는 입구. 적용은 연결 태스크 밖에서 돈다.
 pub mod inbound;
 mod lifecycle;

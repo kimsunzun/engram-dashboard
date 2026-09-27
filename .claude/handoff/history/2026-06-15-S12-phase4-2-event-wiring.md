@@ -20,7 +20,7 @@
 | `b79a7a4` | core `pty/`→`agent/` rename(git mv 18파일, 실 PTY 항목 이름 유지) |
 | `f6c9ce8` | CLAUDE.md 모듈맵·step-log rename 반영 + 데몬 콘솔 nit |
 
-author: 이 repo local `user.email=kimsunzun@naver.com`(개인). 건드리지 말 것. 트레일러 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
+author: 이 repo local `user.email=<user-email>`(개인). 건드리지 말 것. 트레일러 `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
 
 ## 2. 구현 실행 규약(불변, 준수 중)
 메인=오케스트레이터. 코더(opus)→**reviewer-deep**(무겁게, mutation 검증)→QA(test+tsc, GUI 실측)→게이트 후 메인 커밋. 에이전트 프롬프트에 "포그라운드 동기·폴링/백그라운드/sleep 금지·끝나면 즉시 반환" 명시.

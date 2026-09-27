@@ -618,9 +618,13 @@ pub async fn run() -> Result<(), i32> {
     // ★제어 동사의 실입구가 이 표다(ADR-0155)★ — 이 줄이 빠지면 `/control/agent` 는 요청마다 503 이다.
     //   ★위 팬아웃 set 과의 순서에 의존하지 않는다★: 표가 쥐는 것은 팬아웃 값이 아니라 슬롯이라 통지
     //   시점에 읽는다(`control::commands::make_daemon_table`).
+    // ★임대 포트는 아래 수락 루프에 넘기는 **그 `multiview`** 다(ADR-0231)★ — `clone()` 은 같은 공유 상태를
+    //   가리키는 손잡이라 수락 루프와 한 표를 본다. ★새 `MultiViewState::new()` 를 꽂으면 틀린다★ — 빈 표라
+    //   버스·CLI 취소가 뷰어의 입력 임대를 조용히 무시한다.
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(
         manager.clone(),
         roster_broadcast_slot.clone(),
+        Arc::new(multiview.clone()),
     )));
 
     // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
@@ -872,9 +876,11 @@ async fn start_test_server_inner(
     let command_table_slot = Arc::new(control::mcp_server::CommandTableSlot::new());
     let roster_broadcast_slot = Arc::new(control::mcp_server::RosterBroadcastSlot::new());
     roster_broadcast_slot.set(wiring.roster_broadcast());
+    // 임대 포트 = 수락 루프와 같은 공유 상태의 손잡이(`clone()`) — 새 `MultiViewState::new()` 면 틀린다(운영 조립 주석).
     command_table_slot.set(Arc::new(control::commands::make_daemon_table(
         manager.clone(),
         roster_broadcast_slot,
+        Arc::new(multiview.clone()),
     )));
     // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 버스를 나눠 쓸 상대가 없다 — accept loop 가
     //   유일한 소비자다. 조립 자체는 운영과 같은 함수를 쓴다.

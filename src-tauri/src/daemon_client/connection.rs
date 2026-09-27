@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 // ADR-0129 0-4: 핸드셰이크 프레임의 모양은 네트워크 lib 소유다(명령 enum 이 아니다).
 use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{
-    decode_frame, AgentCommand, AgentEvent, AgentId, DaemonInfo, RequestId, PROTOCOL_VERSION,
+    AgentCommand, AgentEvent, AgentId, DaemonInfo, RequestId, PROTOCOL_VERSION,
 };
 
 // ★별칭이 필수다★: 이 파일의 `CommandReply` 는 **다른 것**(요청/응답 상관용 `oneshot::Sender`)이다.
@@ -41,9 +41,10 @@ use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 // ADR-0012: 프론트 알림은 포트로만 나간다 — 이 파일은 실 `AppHandle` 을 이름으로도 알지 못한다.
 //   그 덕에 이 태스크는 소켓만 있으면 서고, 하네스가 핸드셰이크·재연결·왕복을 실코드로 잰다.
 use super::events::{ConnectionStateEvent, DaemonEvents};
+use super::frame_relay::{self, FrameRelay};
 use super::inbound::{InboundReceiver, InboundSlot};
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
-use super::protocol_state::{self, EpochDecision, PendingMap, SubState};
+use super::protocol_state::{self, PendingMap, SubState};
 use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
 use super::{ConnectionState, DaemonDiscovery};
 use crate::output_channel::{self, WindowChannelRegistry};
@@ -915,6 +916,8 @@ async fn main_loop(
     //   ★재전송이 쌓이지 않고 덮이는 것은 데몬 명부의 이름 단위 last-wins 에 달려 있다(ADR-0150 결정 3 의 제거
     //   + 등록 인수인계)★ — 오늘은 재연결이 새 연결 id 를 받아 옛 등록이 끊길 때 지워진다.
     register_own_commands(&mut sink, pending, my_gen, inbound).await;
+    // 모르는 tag 경고의 짝 기록 — 이 소켓 수명 동안만(재연결 뒤엔 다시 한 번 warn 한다).
+    let mut unknown_tags = frame_relay::UnknownTagLog::default();
     // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
     // 로그 미부착 — Text/Binary 청크는 per-frame 빈도라 trace 미사용 정책 유지).
     let exit = loop {
@@ -1020,33 +1023,23 @@ async fn main_loop(
                                 }
                             }
                             Message::Binary(bytes) => {
-                                // ★출력 binary frame → 무상태 통과(ADR-0046)★. 헤더(agentId·epoch)만 읽고
-                                //   epoch 필터 통과분만 targets∩registered 창 Channel 로 **원본 bytes 그대로**
-                                //   fan-out 한다 — 버퍼·cursor 없음. dedup/진도는 웹뷰 뷰 단위가 단독 소유한다.
-                                match decode_frame(&bytes) {
-                                    Ok(frame) => {
-                                        // ★진행 신호(deadline 리셋)★: 그 agent 의 frame 이 오면 replay 가 살아
-                                        //   진행 중 → single-flight deadline 리셋(healthy-slow replay 무오탐).
-                                        //   epoch 필터 전에 리셋한다 — stale frame 이어도 데몬이 살아있다는 신호.
-                                        flight.note_progress(frame.agent_id, Instant::now());
-                                        // ★epoch 필터 재배선(ADR-0046 T5)★: 옛 미러 on_frame 에 접혀 있던 epoch
-                                        //   가드를 핫패스가 직접 호출한다. SubState.epoch(SubscribeAck 로 갱신)와
-                                        //   불일치(=옛 세션 잔여)면 통과 전 drop. epoch None(첫 Ack 전)이면 통과
-                                        //   (초반 출력 유실 방지 — decide_epoch 내부 규약).
-                                        let st = subs.entry(frame.agent_id).or_default();
-                                        if protocol_state::decide_epoch(st, frame.epoch)
-                                            == EpochDecision::DropEpochMismatch
-                                        {
-                                            continue;
-                                        }
-                                        // ★targets∩registered 로 원본 frame 통과★: router.targets 는 핫패스 락
-                                        //   0(ArcSwap). 어느 창도 안 보면(labels 비면) send_to_windows 가 early
-                                        //   return, 미등록 label 은 그 안에서 skip.
-                                        let labels = router.targets(frame.agent_id);
-                                        output_channel::send_to_windows(registry, &labels, &bytes);
-                                    }
-                                    // 디코드 실패(부분/미래 프레임) → 무시(방어).
-                                    Err(_) => {}
+                                // ★출력 binary frame → 무상태 통과(ADR-0046)★ — 판정 전부(디코드 · 진행 신호 ·
+                                //   화신 표식 거름 · 보는 창)는 `frame_relay` 한 함수가 소유한다. 이 줄은
+                                //   배달구를 꽂고 「끊는다」 판정을 루프 종료로 옮길 뿐이다.
+                                let mut deliver = |labels: &[WindowLabel], bytes: &[u8]| {
+                                    output_channel::send_to_windows(registry, labels, bytes);
+                                };
+                                if frame_relay::relay_binary_frame(
+                                    &bytes,
+                                    flight,
+                                    subs,
+                                    router,
+                                    &mut unknown_tags,
+                                    Instant::now(),
+                                    &mut deliver,
+                                ) == FrameRelay::Disconnect
+                                {
+                                    break LoopExit::Disconnected;
                                 }
                             }
                             // Ping/Pong 은 tungstenite 가 자동 응답(내부). Close 면 끊김(재연결 대상).
@@ -1434,16 +1427,20 @@ pub fn apply_replay_event(
 ) -> ReplayFollowUp {
     match ev {
         // ★구독 ack★: SubState.epoch 갱신(binary 팔 decide_epoch 의 기준) + in-flight 를 acked 로 전이 +
-        //   truncated·continues_conversation(ADR-0226) 기억(성공 마커에 전파) + 진행(deadline 리셋).
+        //   truncated·continues_conversation(ADR-0226)·replay 머리 `replay_from`(ADR-0231) 기억(성공 마커에
+        //   전파) + 진행(deadline 리셋).
         //   ★ADR-0046: 버퍼/커서 reset 없음★ —
         //   epoch 전환 재구독은 프론트의 권위 명부 관측(observeRoster)이 담당한다(ADR-0164 결정 8) —
         //   구독 deps `[viewId, agentId]`는 화신 표식을 의도적으로 제외한다.
         // ★반환 bool(epoch_changed) 의도적 무시★: 옛 배선은 이 값으로 창 render_seq 를 리셋했으나, 미러
         //   버퍼 제거(ADR-0046)로 진도 상태가 src-tauri 에 없다 → 리셋 대상이 없다. epoch 채택은 프론트가
         //   성공 마커 epoch 로 한다(gen 펜스).
+        // ★`replay_from` 을 버리지 말 것(ADR-0231)★: 뷰는 성공 flush 를 `max(마지막+1, replay_from)` 에서
+        //   시작한다. 버퍼의 최소 seq 로 대신하면 빈 replay(새 화신)에서 마커 뒤로 늦게 온 seq 0 을 건너뛴다.
         AgentEvent::SubscribeAck {
             agent_id,
             current_epoch,
+            replay_from,
             truncated,
             continues_conversation,
             ..
@@ -1452,7 +1449,13 @@ pub fn apply_replay_event(
                 subs.entry(*agent_id).or_default(),
                 *current_epoch,
             );
-            flight.on_ack(*agent_id, *truncated, *continues_conversation, now);
+            flight.on_ack(
+                *agent_id,
+                *truncated,
+                *continues_conversation,
+                *replay_from,
+                now,
+            );
             ReplayFollowUp::Handled(None)
         }
         // ★replay 경계 각인(ADR-0046 M1)★: acked in-flight 를 성공 마커로 해소한다(Ack 전 도착 Complete =

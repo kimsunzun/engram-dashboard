@@ -1,0 +1,163 @@
+{"wall":1790407320021,"ev":"agent","id":"dd885ec9-aabf-4a97-9af7-3e808d9ccff5"}
+{"wall":1790407321523,"ev":"turn","t":1}
+{"wall":1790407321523,"ev":"send","tag":"A","text":"Reply with just the word OK1."}
+{"wall":1790407321524,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407321525,"ev":"QueuedInput","op":{"kind":"Queued","id":"dac99f3a-e79a-4821-9bb1-3e67049ba459","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407321920,"ev":"QueuedInput","op":{"kind":"Delivered","id":"670e7559-8b53-4df1-b8c2-30718469841f"}}
+{"wall":1790407323767,"ev":"QueuedInput","op":{"kind":"Delivered","id":"dac99f3a-e79a-4821-9bb1-3e67049ba459"}}
+{"wall":1790407326279,"ev":"TurnEnd","turn":"01a0dc97-a7b5-7541-a8eb-5e81b2854308","outcome":{"kind":"Completed"}}
+{"wall":1790407332289,"ev":"turn","t":2}
+{"wall":1790407332289,"ev":"send","tag":"A","text":"Reply with just the word OK2."}
+{"wall":1790407332290,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407332291,"ev":"QueuedInput","op":{"kind":"Queued","id":"60e9a631-6115-42a9-8e97-62f5e8eea9da","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407332444,"ev":"QueuedInput","op":{"kind":"Delivered","id":"cdd6017e-3d6b-4b5b-a005-946334281134"}}
+{"wall":1790407335227,"ev":"QueuedInput","op":{"kind":"Delivered","id":"60e9a631-6115-42a9-8e97-62f5e8eea9da"}}
+{"wall":1790407337220,"ev":"TurnEnd","turn":"01a0dc97-d1c5-7673-86fb-c3f67d26d143","outcome":{"kind":"Completed"}}
+{"wall":1790407343305,"ev":"turn","t":3}
+{"wall":1790407343305,"ev":"send","tag":"A","text":"Reply with just the word OK3."}
+{"wall":1790407343306,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407343306,"ev":"QueuedInput","op":{"kind":"Queued","id":"fb2d0521-d8bc-41bf-9b83-ee7d8b4b8e1c","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407343411,"ev":"QueuedInput","op":{"kind":"Delivered","id":"219aac83-b6f2-442f-b3d5-42e05dc4945a"}}
+{"wall":1790407345169,"ev":"QueuedInput","op":{"kind":"Delivered","id":"fb2d0521-d8bc-41bf-9b83-ee7d8b4b8e1c"}}
+{"wall":1790407347155,"ev":"TurnEnd","turn":"01a0dc97-fccb-72d1-8dc2-8cfbbb55ea7d","outcome":{"kind":"Completed"}}
+{"wall":1790407353322,"ev":"turn","t":4}
+{"wall":1790407353322,"ev":"send","tag":"A","text":"Reply with just the word OK4."}
+{"wall":1790407353323,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407353324,"ev":"QueuedInput","op":{"kind":"Queued","id":"7f2b33f3-daf8-4a99-88db-4c269fa3c929","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407353427,"ev":"QueuedInput","op":{"kind":"Delivered","id":"93705dc7-be40-4243-b761-10ecd1ee8b27"}}
+{"wall":1790407355032,"ev":"QueuedInput","op":{"kind":"Delivered","id":"7f2b33f3-daf8-4a99-88db-4c269fa3c929"}}
+{"wall":1790407357560,"ev":"TurnEnd","turn":"01a0dc98-23ec-7921-8c67-57af5c329c03","outcome":{"kind":"Completed"}}
+{"wall":1790407363583,"ev":"turn","t":5}
+{"wall":1790407363584,"ev":"send","tag":"A","text":"Reply with just the word OK5."}
+{"wall":1790407363584,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407363585,"ev":"QueuedInput","op":{"kind":"Queued","id":"9e87aaef-505d-4ad7-9cab-cbd045ce237b","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407363693,"ev":"QueuedInput","op":{"kind":"Delivered","id":"4c47b2b8-26de-49cf-b484-d42e0a7e7568"}}
+{"wall":1790407365347,"ev":"QueuedInput","op":{"kind":"Delivered","id":"9e87aaef-505d-4ad7-9cab-cbd045ce237b"}}
+{"wall":1790407367278,"ev":"TurnEnd","turn":"01a0dc98-4c01-7da0-b851-8ecff242a974","outcome":{"kind":"Completed"}}
+{"wall":1790407373349,"ev":"turn","t":6}
+{"wall":1790407373349,"ev":"send","tag":"A","text":"Reply with just the word OK6."}
+{"wall":1790407373349,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407373350,"ev":"QueuedInput","op":{"kind":"Queued","id":"7a34a7e1-5fcc-4def-b875-43b53aa917d0","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407373460,"ev":"QueuedInput","op":{"kind":"Delivered","id":"f1448e7a-eeca-4714-a90d-c0a1bc6d3fc2"}}
+{"wall":1790407375090,"ev":"QueuedInput","op":{"kind":"Delivered","id":"7a34a7e1-5fcc-4def-b875-43b53aa917d0"}}
+{"wall":1790407377648,"ev":"TurnEnd","turn":"01a0dc98-7226-7b50-9ae0-2ffe62930396","outcome":{"kind":"Completed"}}
+{"wall":1790407383864,"ev":"turn","t":7}
+{"wall":1790407383865,"ev":"send","tag":"A","text":"Reply with just the word OK7."}
+{"wall":1790407383865,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407383866,"ev":"QueuedInput","op":{"kind":"Queued","id":"ab67e62f-5ec2-4d56-bc21-6beb1d8351d5","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407383971,"ev":"QueuedInput","op":{"kind":"Delivered","id":"1bf1442d-4737-4617-b79a-c1388eb75f56"}}
+{"wall":1790407385786,"ev":"QueuedInput","op":{"kind":"Delivered","id":"ab67e62f-5ec2-4d56-bc21-6beb1d8351d5"}}
+{"wall":1790407387678,"ev":"TurnEnd","turn":"01a0dc98-9b3a-75a0-9f97-4983eaf91921","outcome":{"kind":"Completed"}}
+{"wall":1790407393879,"ev":"turn","t":8}
+{"wall":1790407393879,"ev":"send","tag":"A","text":"Reply with just the word OK8."}
+{"wall":1790407393879,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407393880,"ev":"QueuedInput","op":{"kind":"Queued","id":"69e348ae-13b2-4a6d-9d33-51d517d9efbf","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407394000,"ev":"QueuedInput","op":{"kind":"Delivered","id":"e34aa41b-3ab7-404b-91df-1bbe9c0946dc"}}
+{"wall":1790407396588,"ev":"QueuedInput","op":{"kind":"Delivered","id":"69e348ae-13b2-4a6d-9d33-51d517d9efbf"}}
+{"wall":1790407401959,"ev":"TurnEnd","turn":"01a0dc98-c259-7713-a198-a7a34baeaedd","outcome":{"kind":"Completed"}}
+{"wall":1790407408148,"ev":"turn","t":9}
+{"wall":1790407408148,"ev":"send","tag":"A","text":"Reply with just the word OK9."}
+{"wall":1790407408149,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407408149,"ev":"QueuedInput","op":{"kind":"Queued","id":"22241921-61f3-4079-8844-863ed94640d9","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407408255,"ev":"QueuedInput","op":{"kind":"Delivered","id":"d3666424-573a-45d2-85c1-1db45075ac4b"}}
+{"wall":1790407410534,"ev":"QueuedInput","op":{"kind":"Delivered","id":"22241921-61f3-4079-8844-863ed94640d9"}}
+{"wall":1790407413416,"ev":"TurnEnd","turn":"01a0dc98-fa16-7a13-8361-0bdc9f0aaebb","outcome":{"kind":"Completed"}}
+{"wall":1790407419667,"ev":"turn","t":10}
+{"wall":1790407419667,"ev":"send","tag":"A","text":"Reply with just the word OK10."}
+{"wall":1790407419668,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407419668,"ev":"QueuedInput","op":{"kind":"Queued","id":"dce0880a-176a-4688-afef-3c296f78d15e","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407419774,"ev":"QueuedInput","op":{"kind":"Delivered","id":"3e4adfd0-72f9-480e-a99c-5eff30d55079"}}
+{"wall":1790407421379,"ev":"QueuedInput","op":{"kind":"Delivered","id":"dce0880a-176a-4688-afef-3c296f78d15e"}}
+{"wall":1790407423313,"ev":"TurnEnd","turn":"01a0dc99-2715-7491-b3c9-6f0013a97dce","outcome":{"kind":"Completed"}}
+{"wall":1790407429435,"ev":"turn","t":11}
+{"wall":1790407429435,"ev":"send","tag":"A","text":"Reply with just the word OK11."}
+{"wall":1790407429436,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407429436,"ev":"QueuedInput","op":{"kind":"Queued","id":"50a817d2-dd2d-488e-a12e-94113ddb7e73","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407429538,"ev":"QueuedInput","op":{"kind":"Delivered","id":"63797039-2031-44d1-9b0a-41341ee2f679"}}
+{"wall":1790407432284,"ev":"QueuedInput","op":{"kind":"Delivered","id":"50a817d2-dd2d-488e-a12e-94113ddb7e73"}}
+{"wall":1790407434158,"ev":"TurnEnd","turn":"01a0dc99-4d3d-79f2-8c2c-359fbb796f0b","outcome":{"kind":"Completed"}}
+{"wall":1790407440198,"ev":"turn","t":12}
+{"wall":1790407440199,"ev":"send","tag":"A","text":"Reply with just the word OK12."}
+{"wall":1790407440199,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407440200,"ev":"QueuedInput","op":{"kind":"Queued","id":"dc925fba-f4a0-4293-adfa-0098d7c5129f","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407440302,"ev":"QueuedInput","op":{"kind":"Delivered","id":"12caa920-b6f7-4142-826b-434e545ace4d"}}
+{"wall":1790407442948,"ev":"QueuedInput","op":{"kind":"Delivered","id":"dc925fba-f4a0-4293-adfa-0098d7c5129f"}}
+{"wall":1790407445228,"ev":"TurnEnd","turn":"01a0dc99-7748-7962-9e4a-7245727fac87","outcome":{"kind":"Completed"}}
+{"wall":1790407451462,"ev":"turn","t":13}
+{"wall":1790407451463,"ev":"send","tag":"A","text":"Reply with just the word OK13."}
+{"wall":1790407451463,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407451464,"ev":"QueuedInput","op":{"kind":"Queued","id":"1ed79b34-a810-420e-bea1-d90b476675a4","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407451569,"ev":"QueuedInput","op":{"kind":"Delivered","id":"b05786de-f38d-4c78-aad3-fe4ee05dc6b5"}}
+{"wall":1790407453217,"ev":"QueuedInput","op":{"kind":"Delivered","id":"1ed79b34-a810-420e-bea1-d90b476675a4"}}
+{"wall":1790407456696,"ev":"TurnEnd","turn":"01a0dc99-a348-7693-ae2b-3f9c4069076e","outcome":{"kind":"Completed"}}
+{"wall":1790407462728,"ev":"turn","t":14}
+{"wall":1790407462728,"ev":"send","tag":"A","text":"Reply with just the word OK14."}
+{"wall":1790407462729,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407462730,"ev":"QueuedInput","op":{"kind":"Queued","id":"0dc00236-8e2b-4929-babb-1a06764874a4","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407462842,"ev":"QueuedInput","op":{"kind":"Delivered","id":"c88d12c3-16c8-4e00-8756-cb1f6704a7c5"}}
+{"wall":1790407465161,"ev":"QueuedInput","op":{"kind":"Delivered","id":"0dc00236-8e2b-4929-babb-1a06764874a4"}}
+{"wall":1790407467831,"ev":"TurnEnd","turn":"01a0dc99-cf4a-73d3-8bfc-99777dc40206","outcome":{"kind":"Completed"}}
+{"wall":1790407473994,"ev":"turn","t":15}
+{"wall":1790407473995,"ev":"send","tag":"A","text":"Reply with just the word OK15."}
+{"wall":1790407473995,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407473995,"ev":"QueuedInput","op":{"kind":"Queued","id":"205d8864-ae93-4354-8c0a-e309dd258250","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407474118,"ev":"QueuedInput","op":{"kind":"Delivered","id":"32878b00-71af-4d26-8025-1cf1b761ae58"}}
+{"wall":1790407476017,"ev":"QueuedInput","op":{"kind":"Delivered","id":"205d8864-ae93-4354-8c0a-e309dd258250"}}
+{"wall":1790407480607,"ev":"TurnEnd","turn":"01a0dc99-fb4c-7763-89e2-9ccdfbcd6097","outcome":{"kind":"Completed"}}
+{"wall":1790407486763,"ev":"turn","t":16}
+{"wall":1790407486763,"ev":"send","tag":"A","text":"Reply with just the word OK16."}
+{"wall":1790407486764,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407486764,"ev":"QueuedInput","op":{"kind":"Queued","id":"48b5c35d-e503-4c93-b605-a1acfb35770c","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407486867,"ev":"QueuedInput","op":{"kind":"Delivered","id":"99a72c27-0051-41dd-a348-a2394a563c9f"}}
+{"wall":1790407488539,"ev":"QueuedInput","op":{"kind":"Delivered","id":"48b5c35d-e503-4c93-b605-a1acfb35770c"}}
+{"wall":1790407491051,"ev":"TurnEnd","turn":"01a0dc9a-2d2d-7551-9dd1-92bd3d2a29ea","outcome":{"kind":"Completed"}}
+{"wall":1790407497281,"ev":"turn","t":17}
+{"wall":1790407497281,"ev":"send","tag":"A","text":"Reply with just the word OK17."}
+{"wall":1790407497282,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407497282,"ev":"QueuedInput","op":{"kind":"Queued","id":"3ec0025e-1312-4c46-8ec0-c0f1df4ddee0","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407497389,"ev":"QueuedInput","op":{"kind":"Delivered","id":"f2b0bc4f-c1e5-46d7-9110-1abbb21492d0"}}
+{"wall":1790407500538,"ev":"QueuedInput","op":{"kind":"Delivered","id":"3ec0025e-1312-4c46-8ec0-c0f1df4ddee0"}}
+{"wall":1790407502453,"ev":"TurnEnd","turn":"01a0dc9a-5643-7963-acb4-4a2d0de3f495","outcome":{"kind":"Completed"}}
+{"wall":1790407508547,"ev":"turn","t":18}
+{"wall":1790407508547,"ev":"send","tag":"A","text":"Reply with just the word OK18."}
+{"wall":1790407508548,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407508548,"ev":"QueuedInput","op":{"kind":"Queued","id":"69715c27-cf16-4fdc-ba94-5ede06c2d381","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407508650,"ev":"QueuedInput","op":{"kind":"Delivered","id":"b7436c6f-b59c-401e-9144-48ecb4c74e63"}}
+{"wall":1790407511547,"ev":"QueuedInput","op":{"kind":"Delivered","id":"69715c27-cf16-4fdc-ba94-5ede06c2d381"}}
+{"wall":1790407514156,"ev":"TurnEnd","turn":"01a0dc9a-8245-7581-83a5-af4ba4ac26fe","outcome":{"kind":"Completed"}}
+{"wall":1790407520312,"ev":"turn","t":19}
+{"wall":1790407520312,"ev":"send","tag":"A","text":"Reply with just the word OK19."}
+{"wall":1790407520312,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407520313,"ev":"QueuedInput","op":{"kind":"Queued","id":"3f58f16c-a503-4f10-931c-cf055e24c714","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407520416,"ev":"QueuedInput","op":{"kind":"Delivered","id":"01b551d7-9db3-4644-a212-bfdf5b057a7e"}}
+{"wall":1790407522162,"ev":"QueuedInput","op":{"kind":"Delivered","id":"3f58f16c-a503-4f10-931c-cf055e24c714"}}
+{"wall":1790407524495,"ev":"TurnEnd","turn":"01a0dc9a-b039-73b1-9439-d6e64dc2285d","outcome":{"kind":"Completed"}}
+{"wall":1790407530571,"ev":"turn","t":20}
+{"wall":1790407530572,"ev":"send","tag":"A","text":"Reply with just the word OK20."}
+{"wall":1790407530572,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407530573,"ev":"QueuedInput","op":{"kind":"Queued","id":"66454487-8a5e-475c-a09b-3951d06c8fee","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407530678,"ev":"QueuedInput","op":{"kind":"Delivered","id":"05737145-cf73-416f-95a3-898c6da7a281"}}
+{"wall":1790407532670,"ev":"QueuedInput","op":{"kind":"Delivered","id":"66454487-8a5e-475c-a09b-3951d06c8fee"}}
+{"wall":1790407534646,"ev":"TurnEnd","turn":"01a0dc9a-d84d-7a72-8420-f92553b43168","outcome":{"kind":"Completed"}}
+{"wall":1790407540835,"ev":"turn","t":21}
+{"wall":1790407540835,"ev":"send","tag":"A","text":"Reply with just the word OK21."}
+{"wall":1790407540835,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407540836,"ev":"QueuedInput","op":{"kind":"Queued","id":"fede306c-0c93-4991-8a5a-2c1bc6f15691","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407540938,"ev":"QueuedInput","op":{"kind":"Delivered","id":"8421b050-5d5e-4378-97ce-86175694cf20"}}
+{"wall":1790407542492,"ev":"QueuedInput","op":{"kind":"Delivered","id":"fede306c-0c93-4991-8a5a-2c1bc6f15691"}}
+{"wall":1790407545878,"ev":"TurnEnd","turn":"01a0dc9b-0064-7a63-89fb-56a651b84f6c","outcome":{"kind":"Completed"}}
+{"wall":1790407552103,"ev":"turn","t":22}
+{"wall":1790407552104,"ev":"send","tag":"A","text":"Reply with just the word OK22."}
+{"wall":1790407552104,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407552104,"ev":"QueuedInput","op":{"kind":"Queued","id":"7c8a0b9c-a3c6-45f3-bd6a-4ac0d7ccc71c","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407552210,"ev":"QueuedInput","op":{"kind":"Delivered","id":"9fb908f9-2a18-4ba6-a9f2-2b22659efb42"}}
+{"wall":1790407553995,"ev":"QueuedInput","op":{"kind":"Delivered","id":"7c8a0b9c-a3c6-45f3-bd6a-4ac0d7ccc71c"}}
+{"wall":1790407557248,"ev":"TurnEnd","turn":"01a0dc9b-2c69-7183-8309-07314232b33c","outcome":{"kind":"Completed"}}
+{"wall":1790407563364,"ev":"turn","t":23}
+{"wall":1790407563365,"ev":"send","tag":"A","text":"Reply with just the word OK23."}
+{"wall":1790407563365,"ev":"send","tag":"B","text":"Also append the word TWO to that same reply."}
+{"wall":1790407563365,"ev":"QueuedInput","op":{"kind":"Queued","id":"bae183ed-3354-480f-9fbd-4b6ef6a90dad","text":"Also append the word TWO to that same reply."}}
+{"wall":1790407563512,"ev":"QueuedInput","op":{"kind":"Delivered","id":"f80cb46c-d463-433b-bdfb-f80312aeb510"}}
+{"wall":1790407565120,"ev":"QueuedInput","op":{"kind":"Delivered","id":"bae183ed-3354-480f-9fbd-4b6ef6a90dad"}}
+{"wall":1790407567150,"ev":"TurnEnd","turn":"01a0dc9b-5866-78c0-95e2-a0dfd5aa36f3","outcome":{"kind":"Completed"}}
+{"wall":1790407573377,"ev":"done","toolCalls":0,"turnEnds":23,"fatal":null}

@@ -2,8 +2,8 @@
 //! wire 포맷이 의도치 않게 바뀌면(헤더 순서/엔디언/오프셋) 즉시 깨지게 한다.
 
 use engram_dashboard_protocol::{
-    decode_frame, encode_structured_frame, encode_terminal_frame, CodecError, FRAME_HEADER_LEN,
-    FRAME_TAG_STRUCTURED_EVENT, FRAME_TAG_TERMINAL_BYTES,
+    decode_frame, encode_structured_frame, encode_terminal_frame, peek_frame_header, CodecError,
+    FrameHeader, FRAME_HEADER_LEN, FRAME_TAG_STRUCTURED_EVENT, FRAME_TAG_TERMINAL_BYTES,
 };
 use uuid::Uuid;
 
@@ -184,4 +184,37 @@ fn short_inputs_return_too_short_not_panic() {
             "{len}바이트 입력은 TooShort"
         );
     }
+}
+
+// ── ADR-0231 헤더 칸 읽기 — tag 를 가리지 않는다 ─────────────────────────────────
+
+/// `decode_frame` 이 모르는 tag 에서 거절한 프레임도 헤더 칸은 읽힌다 — 셸이 그 seq 로 자리채움을 만든다.
+#[test]
+fn peek_reads_the_header_of_an_unknown_tag_frame() {
+    let id = Uuid::new_v4();
+    let mut frame = encode_structured_frame(id, 9, 0x0102_0304_0506_0708, b"future");
+    frame[0] = 0x07; // 아직 정의 안 된 tag
+    assert_eq!(decode_frame(&frame), Err(CodecError::UnknownTag(0x07)));
+    assert_eq!(
+        peek_frame_header(&frame),
+        Ok(FrameHeader {
+            tag: 0x07,
+            agent_id: id,
+            epoch: 9,
+            seq: 0x0102_0304_0506_0708,
+        })
+    );
+}
+
+/// 헤더 길이 미만은 peek 도 TooShort — seq 를 읽을 수 없어 자리채움을 못 만드는 유일한 모양이다.
+#[test]
+fn peek_rejects_only_short_inputs() {
+    for len in [0usize, 1, FRAME_HEADER_LEN - 1] {
+        assert_eq!(
+            peek_frame_header(&vec![0xFFu8; len]),
+            Err(CodecError::TooShort { len }),
+            "{len}바이트 입력은 TooShort"
+        );
+    }
+    assert!(peek_frame_header(&[0xFFu8; FRAME_HEADER_LEN]).is_ok());
 }

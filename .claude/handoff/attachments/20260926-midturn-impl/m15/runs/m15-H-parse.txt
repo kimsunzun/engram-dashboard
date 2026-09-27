@@ -1,0 +1,37 @@
+M15 handover trace — 253 trace lines (115 signal / 115 wake / 23 steer, 0 malformed)
+
+Signal counts:
+  tool_end     0
+  answer_end   46
+  token_usage  46
+  turn_id      23
+  coalesced wakes: 0 (signals covered by them: 0)
+
+Per signal (µs; vendor→pick in ms, cross-process wall clock — informational):
+ [answer_end]
+  reader lag (lag_us)                n=  46  min=     13  p50=     27  p95=     44  max=     47
+  leg 1 signal→wake (wake_us)        n=  46  min=     20  p50=     26  p95=     35  max=     50
+  handle (handle_us)                 n=  46  min=     12  p50=     14  p95=     16  max=     22
+  vendor emit→pick (ms)              n=  46  min=      0  p50=      0  p95=      1  max=      1
+ [token_usage]
+  reader lag (lag_us)                n=  46  min=     84  p50=    101  p95=    151  max=    152
+  leg 1 signal→wake (wake_us)        n=  46  min=     23  p50=     27  p95=     33  max=     34
+  handle (handle_us)                 n=  46  min=     13  p50=     15  p95=     17  max=     23
+  vendor emit→pick (ms)              n=  46  min=      0  p50=      0  p95=      1  max=      1
+ [turn_id]
+  reader lag (lag_us)                n=  23  min=     31  p50=     47  p95=     59  max=     65
+  leg 1 signal→wake (wake_us)        n=  23  min=     25  p50=     36  p95=     64  max=    160
+  handle (handle_us)                 n=  23  min=     13  p50=     15  p95=     23  max=     24
+
+Leg 2 wake→steer written (steer_us):
+  signal hop                         n=  23  min=     49  p50=     57  p95=     70  max=     87
+  announce hop                       n=   0  min=      -  p50=      -  p95=      -  max=      -
+  combined (max used in verdict)     n=  23  min=     49  p50=     57  p95=     70  max=     87
+  signal hop whole (hop_us)          n=  23  min=     77  p50=     96  p95=    129  max=    221
+
+Tool-end reaction: INCOMPLETE — no samples for leg1, readerLag
+Answer-end reaction: sum (compare with M16 window — not a verdict) — max leg1 50 + max reader lag 47 + max leg2 87 = 184 µs (limit < 6000 µs), dominant term: leg2
+
+Unpaired: 0 signal, 0 wake, 0 signal-hop steer
+WARNING: too few samples — tool_end wakes (leg 1): 0 < 20
+WARNING: too few samples — announce-hop steers (leg 2, output flood): 0 < 20

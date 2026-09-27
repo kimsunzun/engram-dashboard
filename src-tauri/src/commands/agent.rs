@@ -161,8 +161,9 @@ pub fn subscribe_output(
     let label = window.label().to_string();
     // ★ADR-0006★: registry std Mutex — insert 는 동기, 락 보유 중 await 0. 같은 라벨 재등록(창 reload)은
     //   덮어쓴다(옛 Channel 은 drop — 이미 죽은 webview 라 무해).
-    let mut reg = registry.lock().map_err(|e| e.to_string())?;
-    reg.insert(label, channel);
+    // ★poison 이어도 등록한다(ADR-0231)★ — 옛 `Err` 반환은 그 창이 출력을 영영 못 받게 했다(근거 정본 =
+    //   `output_channel` 모듈 헤더).
+    crate::output_channel::register_window(&registry, label, channel);
     Ok(())
 }
 

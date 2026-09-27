@@ -12,7 +12,7 @@
 ## 1. 지금 git 상태
 - 브랜치 `master`, 최신 커밋 `98c05e1` (origin 동기 완료, 미커밋 0).
 - repo: `github.com/kimsunzun/engram-dashboard` (private, 모노레포 `I:\Engram`에서 분리됨 — dashboard는 자체 .git).
-- **커밋 author 주의**: 이 repo는 local `user.email = kimsunzun@naver.com`(개인) 설정됨. global은 `nm-fc.com`(회사) 유지 — 회사 프로젝트용. 개인 repo 커밋이 회사 이메일로 안 나가게 이 설정 건드리지 말 것.
+- **커밋 author 주의**: 이 repo는 local `user.email = <user-email>`(개인) 설정됨. global은 `<company-domain>`(회사) 유지 — 회사 프로젝트용. 개인 repo 커밋이 회사 이메일로 안 나가게 이 설정 건드리지 말 것.
 - **push 차단**: auto 모드 분류기가 "에이전트의 master 직접 push"를 막을 수 있음. 사용자가 `! git push origin master`로 직접 하거나 명시 승인 시 진행.
 - 커밋 메시지 끝 트레일러: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - LF→CRLF warning은 Windows 정상, 무해(무시).

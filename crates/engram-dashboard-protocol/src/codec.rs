@@ -63,14 +63,24 @@ pub fn encode_structured_frame(agent_id: AgentId, epoch: u32, seq: u64, payload:
     encode_frame(FRAME_TAG_STRUCTURED_EVENT, agent_id, epoch, seq, payload)
 }
 
-/// unknown tag(≥2)는 계속 거부해 클라 relay 가 미지원 프레임을 흘리지 않게 한다.
-pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame<'_>, CodecError> {
+/// 헤더 칸(tag · agent id · 화신 표식 · seq) — 페이로드를 보지 않고 읽은 것.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    pub tag: u8,
+    pub agent_id: AgentId,
+    pub epoch: u32,
+    pub seq: u64,
+}
+
+/// 헤더 칸만 읽는다 — **tag 를 가리지 않는다**. 거절은 헤더 길이가 모자랄 때(`TooShort`) 하나뿐이다.
+///
+/// ★[`decode_frame`] 이 모르는 tag 에서 거절한 프레임도 여기서는 읽힌다(ADR-0231)★ — agent id · 화신
+/// 표식 · seq 는 tag 와 무관한 고정 자리라, 셸이 그 칸으로 같은 seq 의 [`crate::placeholder_error_frame`]
+/// 을 만들어 그 뷰의 seq 줄기에 구멍을 내지 않는다.
+// ADR-0231
+pub fn peek_frame_header(buf: &[u8]) -> Result<FrameHeader, CodecError> {
     if buf.len() < FRAME_HEADER_LEN {
         return Err(CodecError::TooShort { len: buf.len() });
-    }
-    let tag = buf[0];
-    if tag != FRAME_TAG_TERMINAL_BYTES && tag != FRAME_TAG_STRUCTURED_EVENT {
-        return Err(CodecError::UnknownTag(tag));
     }
     let mut id_bytes = [0u8; 16];
     id_bytes.copy_from_slice(&buf[1..17]);
@@ -84,11 +94,25 @@ pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame<'_>, CodecError> {
     seq_bytes.copy_from_slice(&buf[21..29]);
     let seq = u64::from_be_bytes(seq_bytes);
 
-    Ok(DecodedFrame {
-        tag,
+    Ok(FrameHeader {
+        tag: buf[0],
         agent_id,
         epoch,
         seq,
+    })
+}
+
+/// unknown tag(≥2)는 계속 거부해 클라 relay 가 미지원 프레임을 흘리지 않게 한다.
+pub fn decode_frame(buf: &[u8]) -> Result<DecodedFrame<'_>, CodecError> {
+    let header = peek_frame_header(buf)?;
+    if header.tag != FRAME_TAG_TERMINAL_BYTES && header.tag != FRAME_TAG_STRUCTURED_EVENT {
+        return Err(CodecError::UnknownTag(header.tag));
+    }
+    Ok(DecodedFrame {
+        tag: header.tag,
+        agent_id: header.agent_id,
+        epoch: header.epoch,
+        seq: header.seq,
         payload: &buf[FRAME_HEADER_LEN..],
     })
 }

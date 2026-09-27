@@ -12,7 +12,7 @@
 
 ## 1. 두 개의 repo — 헷갈리지 말 것
 - **engram-dashboard** (`I:/Engram/apps/engram-dashboard`) — 이 프로젝트. **이제 origin 보유**(옛 핸드오프 "push 안 함"은 outdated). 현재 **master, ahead 4**(아래 미커밋/미푸시).
-- **I:/Engram** (루트) — 개인 워크스페이스 sync repo, 원격 `github.com/kimsunzun/Engram.git`(**PRIVATE**), "집 PC 이어작업"용. 이번 세션 agents 정리분 **커밋·push 완료**(`d2709b0`).
+- **I:/Engram** (루트) — 개인 워크스페이스 sync repo, 원격 `github.com/<user>/Engram.git`(**PRIVATE**), "집 PC 이어작업"용. 이번 세션 agents 정리분 **커밋·push 완료**(`d2709b0`).
 - **I:/Engram_Workspace** — **git 밖**(추적 안 됨). 회사 민감 콘텐츠 파킹지.
 
 ## 2. engram-dashboard — 이번 세션 커밋 (master, ahead 4 = 미푸시)

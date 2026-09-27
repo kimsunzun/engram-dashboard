@@ -1,0 +1,567 @@
+{
+ "perLog": [
+  {
+   "label": "T",
+   "counts": {
+    "traceLines": 156,
+    "signals": 78,
+    "wakes": 78,
+    "coalescedWakes": 0,
+    "steersSignalHop": 0,
+    "steersAnnounceHop": 0,
+    "malformed": 0
+   },
+   "signalCounts": {
+    "tool_end": 25,
+    "answer_end": 14,
+    "token_usage": 32,
+    "turn_id": 7
+   },
+   "toolEnd": {
+    "terms": {
+     "leg1": 272,
+     "readerLag": 1405,
+     "leg2": null
+    },
+    "sumUs": null,
+    "result": "INCOMPLETE",
+    "missing": [
+     "leg2"
+    ],
+    "dominant": null
+   },
+   "answerEnd": {
+    "terms": {
+     "leg1": 44,
+     "readerLag": 60,
+     "leg2": null
+    },
+    "sumUs": null,
+    "result": "INCOMPLETE",
+    "missing": [
+     "leg2"
+    ],
+    "dominant": null
+   },
+   "unpaired": {
+    "signals": 0,
+    "wakes": 0,
+    "steers": 0
+   },
+   "duplicateSeqs": 0
+  },
+  {
+   "label": "H",
+   "counts": {
+    "traceLines": 253,
+    "signals": 115,
+    "wakes": 115,
+    "coalescedWakes": 0,
+    "steersSignalHop": 23,
+    "steersAnnounceHop": 0,
+    "malformed": 0
+   },
+   "signalCounts": {
+    "tool_end": 0,
+    "answer_end": 46,
+    "token_usage": 46,
+    "turn_id": 23
+   },
+   "toolEnd": {
+    "terms": {
+     "leg1": null,
+     "readerLag": null,
+     "leg2": 87
+    },
+    "sumUs": null,
+    "result": "INCOMPLETE",
+    "missing": [
+     "leg1",
+     "readerLag"
+    ],
+    "dominant": null
+   },
+   "answerEnd": {
+    "terms": {
+     "leg1": 50,
+     "readerLag": 47,
+     "leg2": 87
+    },
+    "sumUs": 184,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "leg2"
+   },
+   "unpaired": {
+    "signals": 0,
+    "wakes": 0,
+    "steers": 0
+   },
+   "duplicateSeqs": 0
+  },
+  {
+   "label": "F",
+   "counts": {
+    "traceLines": 98,
+    "signals": 35,
+    "wakes": 35,
+    "coalescedWakes": 0,
+    "steersSignalHop": 0,
+    "steersAnnounceHop": 28,
+    "malformed": 0
+   },
+   "signalCounts": {
+    "tool_end": 7,
+    "answer_end": 7,
+    "token_usage": 14,
+    "turn_id": 7
+   },
+   "toolEnd": {
+    "terms": {
+     "leg1": 46,
+     "readerLag": 24,
+     "leg2": 61
+    },
+    "sumUs": 131,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "leg2"
+   },
+   "answerEnd": {
+    "terms": {
+     "leg1": 59,
+     "readerLag": 75,
+     "leg2": 61
+    },
+    "sumUs": 195,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "readerLag"
+   },
+   "unpaired": {
+    "signals": 0,
+    "wakes": 0,
+    "steers": 0
+   },
+   "duplicateSeqs": 0
+  },
+  {
+   "label": "F2",
+   "counts": {
+    "traceLines": 112,
+    "signals": 42,
+    "wakes": 42,
+    "coalescedWakes": 0,
+    "steersSignalHop": 0,
+    "steersAnnounceHop": 28,
+    "malformed": 0
+   },
+   "signalCounts": {
+    "tool_end": 7,
+    "answer_end": 14,
+    "token_usage": 14,
+    "turn_id": 7
+   },
+   "toolEnd": {
+    "terms": {
+     "leg1": 783,
+     "readerLag": 631,
+     "leg2": 72
+    },
+    "sumUs": 1486,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "leg1"
+   },
+   "answerEnd": {
+    "terms": {
+     "leg1": 35,
+     "readerLag": 67,
+     "leg2": 72
+    },
+    "sumUs": 174,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "leg2"
+   },
+   "unpaired": {
+    "signals": 0,
+    "wakes": 0,
+    "steers": 0
+   },
+   "duplicateSeqs": 0
+  }
+ ],
+ "combined": {
+  "per": {
+   "tool_end": {
+    "signals": 39,
+    "readerLag": {
+     "count": 39,
+     "min": 14,
+     "p50": 113,
+     "p95": 631,
+     "max": 1405
+    },
+    "handle": {
+     "count": 39,
+     "min": 24,
+     "p50": 85,
+     "p95": 578,
+     "max": 769
+    },
+    "leg1": {
+     "count": 39,
+     "min": 33,
+     "p50": 100,
+     "p95": 598,
+     "max": 783
+    },
+    "vendorToPickMs": {
+     "count": 39,
+     "min": 0,
+     "p50": 1,
+     "p95": 3,
+     "max": 4
+    }
+   },
+   "answer_end": {
+    "signals": 81,
+    "readerLag": {
+     "count": 81,
+     "min": 13,
+     "p50": 35,
+     "p95": 48,
+     "max": 75
+    },
+    "handle": {
+     "count": 81,
+     "min": 12,
+     "p50": 14,
+     "p95": 18,
+     "max": 23
+    },
+    "leg1": {
+     "count": 81,
+     "min": 20,
+     "p50": 27,
+     "p95": 37,
+     "max": 59
+    },
+    "vendorToPickMs": {
+     "count": 81,
+     "min": 0,
+     "p50": 0,
+     "p95": 1,
+     "max": 1
+    }
+   },
+   "token_usage": {
+    "signals": 106,
+    "readerLag": {
+     "count": 106,
+     "min": 84,
+     "p50": 110,
+     "p95": 1724,
+     "max": 2722
+    },
+    "handle": {
+     "count": 106,
+     "min": 11,
+     "p50": 15,
+     "p95": 23,
+     "max": 26
+    },
+    "leg1": {
+     "count": 106,
+     "min": 18,
+     "p50": 27,
+     "p95": 37,
+     "max": 62
+    },
+    "vendorToPickMs": {
+     "count": 106,
+     "min": 0,
+     "p50": 0,
+     "p95": 1,
+     "max": 1
+    }
+   },
+   "turn_id": {
+    "signals": 44,
+    "readerLag": {
+     "count": 44,
+     "min": 30,
+     "p50": 49,
+     "p95": 78,
+     "max": 118
+    },
+    "handle": {
+     "count": 44,
+     "min": 13,
+     "p50": 16,
+     "p95": 24,
+     "max": 29
+    },
+    "leg1": {
+     "count": 44,
+     "min": 25,
+     "p50": 36,
+     "p95": 64,
+     "max": 160
+    },
+    "vendorToPickMs": {
+     "count": 0,
+     "min": null,
+     "p50": null,
+     "p95": null,
+     "max": null
+    }
+   }
+  },
+  "leg2": {
+   "signalHop": {
+    "count": 23,
+    "min": 49,
+    "p50": 57,
+    "p95": 70,
+    "max": 87
+   },
+   "signalHopTurnId": {
+    "count": 23,
+    "min": 49,
+    "p50": 57,
+    "p95": 70,
+    "max": 87
+   },
+   "signalHopBySignal": {
+    "tool_end": 0,
+    "answer_end": 0,
+    "token_usage": 0,
+    "turn_id": 23
+   },
+   "announceHop": {
+    "count": 56,
+    "min": 29,
+    "p50": 50,
+    "p95": 61,
+    "max": 72
+   },
+   "announceByRun": {
+    "T": 0,
+    "H": 0,
+    "F": 28,
+    "F2": 28
+   },
+   "combined": {
+    "count": 79,
+    "min": 29,
+    "p50": 52,
+    "p95": 70,
+    "max": 87
+   },
+   "hopUs": {
+    "count": 23,
+    "min": 77,
+    "p50": 96,
+    "p95": 129,
+    "max": 221
+   },
+   "hopUsTurnId": {
+    "count": 23,
+    "min": 77,
+    "p50": 96,
+    "p95": 129,
+    "max": 221
+   }
+  },
+  "toolEnd": {
+   "terms": {
+    "leg1": 783,
+    "readerLag": 1405,
+    "leg2": 87
+   },
+   "sumUs": 2275,
+   "result": "PASS",
+   "dominant": "readerLag"
+  },
+  "answerEnd": {
+   "terms": {
+    "leg1": 59,
+    "readerLag": 75,
+    "leg2": 87
+   },
+   "sumUs": 221,
+   "result": "PASS",
+   "dominant": "leg2"
+  }
+ },
+ "evidence": {
+  "topToolEndLag": [
+   {
+    "run": "T",
+    "ts": "2026-09-26T07:21:09.034751Z",
+    "signal": "tool_end",
+    "seq": 74,
+    "lag_us": 1405,
+    "handle_us": 241
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:29:29.495653Z",
+    "signal": "tool_end",
+    "seq": 2,
+    "lag_us": 631,
+    "handle_us": 509
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:29:54.159861Z",
+    "signal": "tool_end",
+    "seq": 8,
+    "lag_us": 614,
+    "handle_us": 567
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:30:52.663680Z",
+    "signal": "tool_end",
+    "seq": 26,
+    "lag_us": 613,
+    "handle_us": 429
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:31:11.009072Z",
+    "signal": "tool_end",
+    "seq": 32,
+    "lag_us": 586,
+    "handle_us": 769
+   }
+  ],
+  "topToolEndLeg1": [
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:31:11.007468Z",
+    "signal": "tool_end",
+    "seq": 32,
+    "lag_us": 586,
+    "wake_us": 783
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:29:54.158869Z",
+    "signal": "tool_end",
+    "seq": 8,
+    "lag_us": 614,
+    "wake_us": 598
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:31:28.673262Z",
+    "signal": "tool_end",
+    "seq": 38,
+    "lag_us": 495,
+    "wake_us": 593
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:29:29.494428Z",
+    "signal": "tool_end",
+    "seq": 2,
+    "lag_us": 631,
+    "wake_us": 525
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:30:52.662267Z",
+    "signal": "tool_end",
+    "seq": 26,
+    "lag_us": 613,
+    "wake_us": 445
+   }
+  ],
+  "topSteer": [
+   {
+    "run": "H",
+    "ts": "2026-09-26T07:24:23.342635Z",
+    "signal": "turn_id",
+    "seq": 65,
+    "steer_us": 87,
+    "hop": "signal"
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:31:10.330232Z",
+    "steer_us": 72,
+    "hop": "announce"
+   },
+   {
+    "run": "H",
+    "ts": "2026-09-26T07:22:12.944468Z",
+    "signal": "turn_id",
+    "seq": 5,
+    "steer_us": 70,
+    "hop": "signal"
+   },
+   {
+    "run": "H",
+    "ts": "2026-09-26T07:25:20.915959Z",
+    "signal": "turn_id",
+    "seq": 90,
+    "steer_us": 70,
+    "hop": "signal"
+   },
+   {
+    "run": "H",
+    "ts": "2026-09-26T07:25:31.178100Z",
+    "signal": "turn_id",
+    "seq": 95,
+    "steer_us": 65,
+    "hop": "signal"
+   }
+  ],
+  "topAnswerEndLag": [
+   {
+    "run": "F",
+    "ts": "2026-09-26T07:28:40.057350Z",
+    "signal": "answer_end",
+    "seq": 33,
+    "lag_us": 75,
+    "handle_us": 16
+   },
+   {
+    "run": "F2",
+    "ts": "2026-09-26T07:30:55.502765Z",
+    "signal": "answer_end",
+    "seq": 28,
+    "lag_us": 67,
+    "handle_us": 22
+   },
+   {
+    "run": "T",
+    "ts": "2026-09-26T07:19:09.224397Z",
+    "signal": "answer_end",
+    "seq": 22,
+    "lag_us": 60,
+    "handle_us": 14
+   },
+   {
+    "run": "T",
+    "ts": "2026-09-26T07:18:42.388201Z",
+    "signal": "answer_end",
+    "seq": 10,
+    "lag_us": 51,
+    "handle_us": 16
+   },
+   {
+    "run": "T",
+    "ts": "2026-09-26T07:19:36.782662Z",
+    "signal": "answer_end",
+    "seq": 34,
+    "lag_us": 48,
+    "handle_us": 23
+   }
+  ]
+ }
+}

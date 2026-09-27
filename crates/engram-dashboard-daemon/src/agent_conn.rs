@@ -15,10 +15,11 @@ use std::sync::Arc;
 
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::{
-    AgentId, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
+    AgentId, OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
 };
 use engram_dashboard_protocol::{
-    encode_structured_frame, encode_terminal_frame, AgentCommand, AgentEvent,
+    encode_structured_frame, encode_terminal_frame, placeholder_error_frame, AgentCommand,
+    AgentEvent,
 };
 
 use futures_util::future::BoxFuture;
@@ -62,6 +63,65 @@ impl FrameOutputSink {
     pub(crate) fn replay_dropped_flag(&self) -> Arc<AtomicBool> {
         self.replay_dropped.clone()
     }
+
+    /// 이 seq 의 사건을 싣지 못했을 때 그 자리를 채운다 — 같은 agent·화신 표식·seq 의 tag1 `Error`
+    /// 자리채움(`engram_dashboard_protocol::placeholder_error_frame`).
+    ///
+    /// ★버리지 않는 이유(ADR-0231)★: 뷰는 live 에서 `seq > 마지막+1` 을 시한 없이 붙들므로 여기서 한 seq 를
+    /// 말없이 건너뛰면 그 뒤 프레임이 붙듦 상한까지 쌓이고 그 뷰가 멈춘다. 이 두 폐기 갈래 밖의 유실은 전부
+    /// 연결을 닫아 전량 replay 로 메워지므로, 영영 안 메워지는 구멍은 이 자리에서만 생겼다.
+    /// ★`SinkError` 로 돌려서는 안 된다★ — 코어가 이 sink 를 죽은 것으로 걷어, 연결은 산 채 그 에이전트의
+    /// 출력만 조용히 끊긴다. 반환은 평소 송신과 같다(큐가 차면 그때만 `SinkError`).
+    // ADR-0231
+    pub(crate) fn send_placeholder(
+        &self,
+        agent_id: AgentId,
+        epoch: u32,
+        seq: u64,
+    ) -> Result<(), SinkError> {
+        self.enqueue(placeholder_error_frame(agent_id, epoch, seq))
+    }
+
+    fn enqueue(&self, buf: Vec<u8>) -> Result<(), SinkError> {
+        match self.frames.try_send(Frame::Binary(buf)) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.replay_dropped.store(true, Ordering::Release);
+                Err(SinkError)
+            }
+        }
+    }
+}
+
+/// agent 사건 → tag1 페이로드(wire `StructuredEvent` 의 JSON). `None` = 싣지 못한다 — 호출자가 자리채움을
+/// 보낸다(버리지 않는다 — [`FrameOutputSink::send_placeholder`]).
+fn structured_payload(ev: &OutputEvent, agent_id: AgentId) -> Option<Vec<u8>> {
+    // (1) agent→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류 배선 버그)
+    //     매핑 불가(None) → debug 는 조기 발견, release 는 warn 후 자리채움(연결 유지).
+    let Some(wire) = output_event_to_wire(ev) else {
+        debug_assert!(
+            false,
+            "TerminalBytes(tag0 전용)가 Event(tag1) arm 에 도달 — 상류 payload 분기 버그"
+        );
+        tracing::warn!(
+            agent = %agent_id,
+            "tag1 인코딩 불가(TerminalBytes 가 Event arm 도달) — 자리채움으로 대신 보낸다"
+        );
+        return None;
+    };
+    // (2) JSON 직렬화. 실패는 거의 불가능(문자열/숫자 필드뿐)하나, 나면 이 frame 만 warn 후 자리채움으로
+    //     대신 보낸다(SinkError 로 연결을 죽이지 않음 — 직렬화 실패는 슬로우 소비자와 무관한 데이터
+    //     문제다).
+    match serde_json::to_vec(&wire) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!(
+                agent = %agent_id,
+                "StructuredEvent 직렬화 실패 — 자리채움으로 대신 보낸다: {e}"
+            );
+            None
+        }
+    }
 }
 
 impl OutputSink for FrameOutputSink {
@@ -70,56 +130,20 @@ impl OutputSink for FrameOutputSink {
         //   structured frame 으로 인코딩한다. sink 가 wire 인코딩을 소유(코어는 wire 모름, ADR-0003) —
         //   Bytes 는 raw payload 를, Event 는 agent `OutputEvent` → wire `StructuredEvent`(daemon adapter)
         //   → JSON payload 를 헤더에 실어 보낸다.
-        //   ★현 배선 상태★: 구조화 이벤트 생산자(B3 decoder→pump 배선)는 아직 미배선이라 런타임엔 Bytes 만
-        //   흐른다 — Event arm 은 B7 단위테스트(합성 OutputEvent)로만 도달·검증된다(정상).
         let buf = match frame.payload {
             OutputPayload::Bytes(b) => {
                 encode_terminal_frame(frame.agent_id, frame.epoch, frame.seq, b)
             }
-            // ★tag1 인코딩(B7)★: agent OutputEvent → wire StructuredEvent(adapter) → JSON payload →
-            //   tag1 structured frame. codec 은 payload 스키마 무지(opaque) — 직렬화 형식(JSON)·이벤트
-            //   타입은 여기(daemon)가 소유한다(ADR-0045 self-describing).
-            OutputPayload::Event(ev) => {
-                // (1) agent→wire 변환. TerminalBytes 가 여기 오면(정상 경로상 tag0 로 갈려 안 옴 — 상류
-                //     배선 버그) 매핑 불가(None) → debug 는 조기 발견, release 는 warn 후 drop(연결 유지).
-                let wire = match output_event_to_wire(ev) {
-                    Some(w) => w,
-                    None => {
-                        debug_assert!(
-                            false,
-                            "TerminalBytes(tag0 전용)가 Event(tag1) arm 에 도달 — 상류 payload 분기 버그"
-                        );
-                        tracing::warn!(
-                            agent = %frame.agent_id,
-                            "tag1 인코딩 불가(TerminalBytes 가 Event arm 도달) — drop"
-                        );
-                        return Ok(());
-                    }
-                };
-                // (2) JSON 직렬화. 실패는 거의 불가능(문자열/숫자 필드뿐)하나, 나면 이 frame 만 warn 후
-                //     drop 한다(SinkError 로 연결을 죽이지 않음 — 직렬화 실패는 슬로우 소비자와 무관한
-                //     데이터 문제고, control event_json 실패 처리와 동일 관례).
-                let payload = match serde_json::to_vec(&wire) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = %frame.agent_id,
-                            "StructuredEvent 직렬화 실패 — drop: {e}"
-                        );
-                        return Ok(());
-                    }
-                };
-                // (3) tag1 frame(헤더+payload). 헤더 레이아웃은 tag0 과 동일, tag=1(codec, ADR-0045).
-                encode_structured_frame(frame.agent_id, frame.epoch, frame.seq, &payload)
-            }
+            // ★tag1 인코딩(B7)★: codec 은 payload 스키마 무지(opaque) — 직렬화 형식(JSON)·이벤트 타입은
+            //   여기(daemon)가 소유한다(ADR-0045 self-describing). 헤더 레이아웃은 tag0 과 동일, tag=1.
+            OutputPayload::Event(ev) => match structured_payload(ev, frame.agent_id) {
+                Some(payload) => {
+                    encode_structured_frame(frame.agent_id, frame.epoch, frame.seq, &payload)
+                }
+                None => return self.send_placeholder(frame.agent_id, frame.epoch, frame.seq),
+            },
         };
-        match self.frames.try_send(Frame::Binary(buf)) {
-            Ok(()) => Ok(()),
-            Err(_) => {
-                self.replay_dropped.store(true, Ordering::Release);
-                Err(SinkError)
-            }
-        }
+        self.enqueue(buf)
     }
 
     fn sink_id(&self) -> SinkId {
@@ -629,6 +653,69 @@ mod tests {
         );
 
         assert!(matches!(rx.recv().await.unwrap(), Frame::Binary(_)));
+    }
+
+    // ── 2a. 폐기 갈래의 자리채움(ADR-0231) ─────────────────────────────────────────
+    // ★갈래를 직접 때리지 않고 두 갈래가 부르는 자리채움을 잰다★ — 직렬화 실패는 지금 사건 모양(문자열·
+    //   숫자)으로 만들 수 없고, 잘못 온 `TerminalBytes` 는 debug 에서 `debug_assert` 가 먼저 멈춘다.
+    //   재는 것: 버린 seq 자리에 같은 seq 의 tag1 `Error` 가 나가고(뷰의 seq 줄기에 구멍이 없다), 반환이
+    //   `Ok` 라 sink 가 살아 다음 seq 도 나가며, 바이트가 셸의 자리채움과 같은 한 벌이다.
+    #[tokio::test]
+    async fn a_dropped_event_goes_out_as_a_placeholder_at_the_same_seq() {
+        use engram_dashboard_protocol::{
+            decode_frame, placeholder_error_frame, StructuredEvent as WireStructuredEvent,
+            FRAME_TAG_STRUCTURED_EVENT, FRAME_TAG_TERMINAL_BYTES, PLACEHOLDER_ERROR_MESSAGE,
+        };
+
+        let (tx, mut rx) = mpsc::channel::<Frame>(8);
+        let sink = FrameOutputSink::new(frame_sink(tx));
+        let agent_id = uuid::Uuid::new_v4();
+        let bytes = |seq: u64| OutputFrame {
+            agent_id,
+            epoch: 4,
+            seq,
+            payload: OutputPayload::Bytes(b"x"),
+        };
+        sink.send(bytes(5)).expect("앞 프레임");
+        sink.send_placeholder(agent_id, 4, 6)
+            .expect("자리채움은 Ok — SinkError 면 코어가 sink 를 걷는다");
+        sink.send(bytes(7))
+            .expect("sink 가 살아 다음 seq 도 나간다");
+
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            match rx.recv().await.expect("세 장") {
+                Frame::Binary(buf) => got.push(buf),
+                other => panic!("Binary 여야 함: {other:?}"),
+            }
+        }
+        let seqs: Vec<u64> = got
+            .iter()
+            .map(|b| decode_frame(b).expect("decode").seq)
+            .collect();
+        assert_eq!(seqs, vec![5, 6, 7], "구멍 없는 seq 줄기");
+
+        let placeholder = decode_frame(&got[1]).expect("decode");
+        assert_eq!(placeholder.tag, FRAME_TAG_STRUCTURED_EVENT, "tag1");
+        assert_eq!(placeholder.agent_id, agent_id);
+        assert_eq!(placeholder.epoch, 4);
+        let parsed: WireStructuredEvent =
+            serde_json::from_slice(placeholder.payload).expect("payload JSON");
+        assert_eq!(
+            parsed,
+            WireStructuredEvent::Error {
+                message: PLACEHOLDER_ERROR_MESSAGE.to_owned()
+            }
+        );
+        assert_eq!(
+            got[1],
+            placeholder_error_frame(agent_id, 4, 6),
+            "셸 중계의 자리채움과 바이트가 같다(한 벌)"
+        );
+        assert_eq!(
+            decode_frame(&got[2]).expect("decode").tag,
+            FRAME_TAG_TERMINAL_BYTES
+        );
     }
 
     // ── 2b. 2차 핸드셰이크 판별(ADR-0129 0-4) ────────────────────────────────────

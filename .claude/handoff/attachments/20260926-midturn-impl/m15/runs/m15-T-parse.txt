@@ -1,0 +1,42 @@
+M15 handover trace — 156 trace lines (78 signal / 78 wake / 0 steer, 0 malformed)
+
+Signal counts:
+  tool_end     25
+  answer_end   14
+  token_usage  32
+  turn_id      7
+  coalesced wakes: 0 (signals covered by them: 0)
+
+Per signal (µs; vendor→pick in ms, cross-process wall clock — informational):
+ [tool_end]
+  reader lag (lag_us)                n=  25  min=     38  p50=    113  p95=    303  max=   1405
+  leg 1 signal→wake (wake_us)        n=  25  min=     53  p50=    100  p95=    266  max=    272
+  handle (handle_us)                 n=  25  min=     43  p50=     85  p95=    253  max=    258
+  vendor emit→pick (ms)              n=  25  min=      0  p50=      1  p95=      1  max=      1
+ [answer_end]
+  reader lag (lag_us)                n=  14  min=     16  p50=     41  p95=     60  max=     60
+  leg 1 signal→wake (wake_us)        n=  14  min=     24  p50=     28  p95=     44  max=     44
+  handle (handle_us)                 n=  14  min=     14  p50=     15  p95=     23  max=     23
+  vendor emit→pick (ms)              n=  14  min=      0  p50=      0  p95=      1  max=      1
+ [token_usage]
+  reader lag (lag_us)                n=  32  min=     93  p50=    308  p95=    868  max=    895
+  leg 1 signal→wake (wake_us)        n=  32  min=     18  p50=     28  p95=     40  max=     42
+  handle (handle_us)                 n=  32  min=     11  p50=     16  p95=     23  max=     24
+  vendor emit→pick (ms)              n=  32  min=      0  p50=      0  p95=      1  max=      1
+ [turn_id]
+  reader lag (lag_us)                n=   7  min=     31  p50=     64  p95=     78  max=     78
+  leg 1 signal→wake (wake_us)        n=   7  min=     26  p50=     38  p95=     71  max=     71
+  handle (handle_us)                 n=   7  min=     15  p50=     19  p95=     29  max=     29
+
+Leg 2 wake→steer written (steer_us):
+  signal hop                         n=   0  min=      -  p50=      -  p95=      -  max=      -
+  announce hop                       n=   0  min=      -  p50=      -  p95=      -  max=      -
+  combined (max used in verdict)     n=   0  min=      -  p50=      -  p95=      -  max=      -
+  signal hop whole (hop_us)          n=   0  min=      -  p50=      -  p95=      -  max=      -
+
+Tool-end reaction: INCOMPLETE — no samples for leg2
+Answer-end reaction: INCOMPLETE — no samples for leg2 (compare with M16 window — not a verdict)
+
+Unpaired: 0 signal, 0 wake, 0 signal-hop steer
+WARNING: too few samples — signal-hop steers (leg 2, turn id hop): 0 < 20
+WARNING: too few samples — announce-hop steers (leg 2, output flood): 0 < 20

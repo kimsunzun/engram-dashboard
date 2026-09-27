@@ -1,0 +1,203 @@
+{
+  "counts": {
+    "traceLines": 98,
+    "signals": 35,
+    "wakes": 35,
+    "coalescedWakes": 0,
+    "steersSignalHop": 0,
+    "steersAnnounceHop": 28,
+    "malformed": 0
+  },
+  "signalCounts": {
+    "tool_end": 7,
+    "answer_end": 7,
+    "token_usage": 14,
+    "turn_id": 7
+  },
+  "perSignal": {
+    "tool_end": {
+      "readerLag": {
+        "count": 7,
+        "min": 14,
+        "p50": 16,
+        "p95": 24,
+        "max": 24
+      },
+      "handle": {
+        "count": 7,
+        "min": 24,
+        "p50": 25,
+        "p95": 32,
+        "max": 32
+      },
+      "vendorToPickMs": {
+        "count": 7,
+        "min": 0,
+        "p50": 0,
+        "p95": 1,
+        "max": 1
+      },
+      "leg1": {
+        "count": 7,
+        "min": 33,
+        "p50": 40,
+        "p95": 46,
+        "max": 46
+      }
+    },
+    "answer_end": {
+      "readerLag": {
+        "count": 7,
+        "min": 16,
+        "p50": 38,
+        "p95": 75,
+        "max": 75
+      },
+      "handle": {
+        "count": 7,
+        "min": 15,
+        "p50": 16,
+        "p95": 18,
+        "max": 18
+      },
+      "vendorToPickMs": {
+        "count": 7,
+        "min": 0,
+        "p50": 0,
+        "p95": 1,
+        "max": 1
+      },
+      "leg1": {
+        "count": 7,
+        "min": 27,
+        "p50": 30,
+        "p95": 59,
+        "max": 59
+      }
+    },
+    "token_usage": {
+      "readerLag": {
+        "count": 14,
+        "min": 92,
+        "p50": 104,
+        "p95": 125,
+        "max": 125
+      },
+      "handle": {
+        "count": 14,
+        "min": 12,
+        "p50": 14,
+        "p95": 26,
+        "max": 26
+      },
+      "vendorToPickMs": {
+        "count": 14,
+        "min": 0,
+        "p50": 0,
+        "p95": 0,
+        "max": 0
+      },
+      "leg1": {
+        "count": 14,
+        "min": 23,
+        "p50": 27,
+        "p95": 62,
+        "max": 62
+      }
+    },
+    "turn_id": {
+      "readerLag": {
+        "count": 7,
+        "min": 30,
+        "p50": 53,
+        "p95": 73,
+        "max": 73
+      },
+      "handle": {
+        "count": 7,
+        "min": 14,
+        "p50": 18,
+        "p95": 22,
+        "max": 22
+      },
+      "vendorToPickMs": {
+        "count": 0,
+        "min": null,
+        "p50": null,
+        "p95": null,
+        "max": null
+      },
+      "leg1": {
+        "count": 7,
+        "min": 31,
+        "p50": 32,
+        "p95": 63,
+        "max": 63
+      }
+    }
+  },
+  "leg2": {
+    "signalHop": {
+      "count": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "max": null
+    },
+    "announceHop": {
+      "count": 28,
+      "min": 44,
+      "p50": 51,
+      "p95": 60,
+      "max": 61
+    },
+    "combined": {
+      "count": 28,
+      "min": 44,
+      "p50": 51,
+      "p95": 60,
+      "max": 61
+    },
+    "signalHopTotal": {
+      "count": 0,
+      "min": null,
+      "p50": null,
+      "p95": null,
+      "max": null
+    }
+  },
+  "toolEnd": {
+    "terms": {
+      "leg1": 46,
+      "readerLag": 24,
+      "leg2": 61
+    },
+    "sumUs": 131,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "leg2"
+  },
+  "answerEnd": {
+    "terms": {
+      "leg1": 59,
+      "readerLag": 75,
+      "leg2": 61
+    },
+    "sumUs": 195,
+    "result": "PASS",
+    "missing": [],
+    "dominant": "readerLag"
+  },
+  "unpaired": {
+    "signals": [],
+    "wakes": [],
+    "steers": []
+  },
+  "coveredByCoalesce": [],
+  "duplicateSeqs": [],
+  "malformed": [],
+  "sampleWarnings": [
+    "tool_end wakes (leg 1): 7 < 20",
+    "signal-hop steers (leg 2, turn id hop): 0 < 20"
+  ]
+}
