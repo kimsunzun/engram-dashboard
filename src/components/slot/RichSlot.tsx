@@ -35,6 +35,7 @@ import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { fireAndForget } from '../../commands/dispatch'
 import { useAgentStore } from '../../store/agentStore'
+import { useToolGroupStore } from '../../store/toolGroupStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import type { QueuedEntry } from './queuedInputReducer'
 import { QueuedInputList } from './QueuedInputList'
@@ -82,7 +83,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   // ★로컬 awaiting 플래그(FIX 5b)★: 전송 직후~첫 응답 바이트 도착 사이의 공백을 메운다. turnDone 은
   //   누산기가 턴 종료 신호(MessageDone · TurnEnd)로만 세우므로, 직전 턴이 idle 인 상태에서 새로 보내면
   //   첫 바이트 전까지 'idle' 로 보인다. 전송 즉시 이 플래그를 세워 'streaming' 으로 뒤집고, ★누산기가
-  //   **알아들은** 응답 바이트★가 오면 해제해 이후 표시를 turnDone 에 넘긴다(아래 구독 콜백).
+  //   **대기를 풀어도 된다고 답한** 프레임★이 오면 해제해 이후 표시를 turnDone 에 넘긴다(아래 구독 콜백).
   const [awaiting, setAwaiting] = useState(false)
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
@@ -171,6 +172,8 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     setHasSent(false)
     setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
     follow.pin() // ADR-0242: 비운 뒤 오는 이력이 바닥에 착지한다.
+    // ★도구 묶음의 고른 펼침은 여기서 비우지 않는다★(ADR-0239) — 같은 화신의 replay 는 같은 묶음 키로 재구성돼
+    //   고른 값이 그대로 다시 붙어야 한다. 비우는 자리는 아래 비우기 콜백(onReset) 하나다.
 
     let sub: OutputSubscription | null = null
     let cancelled = false
@@ -216,16 +219,19 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             return
           }
           // tag1 payload = StructuredEvent JSON 1건.
-          const understood = acc.feed(chunk.bytes, chunk.seq)
+          const releasesAwaiting = acc.feed(chunk.bytes, chunk.seq)
           // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
+          //   반환값과 무관하게 먼저 그린다 — 대기를 풀지 않는 프레임도 앞선 행을 바꿨을 수 있다(아래 ②).
           setItems([...acc.snapshot()])
           refreshQueued()
           setTurnDone(acc.isTurnDone())
-          // ★알아들은 프레임에만 표시 주도권을 turnDone 에 넘긴다★: 못 알아들은 프레임(모르는 종류·
-          //   malformed JSON)은 turnDone 을 갱신하지 못하므로, 그때 awaiting 을 풀면 표시가 **직전 턴의**
-          //   낡은 turnDone 으로 판정된다 — 둘째 턴부터는 그 값이 true 라 응답이 도는 중에 대기 표시가
-          //   꺼진다(첫 턴만 보는 테스트로는 안 보이던 결함). 못 알아들었으면 아직 아무것도 못 들은 것이다.
-          if (understood) setAwaiting(false)
+          // ★`feed` 가 풀어도 된다고 답한 프레임에만 표시 주도권을 turnDone 에 넘긴다★. `false` 는 둘이다 —
+          //   ① 못 알아들은 프레임(모르는 종류·malformed JSON)은 turnDone 을 갱신하지 못하므로, 그때 awaiting 을
+          //   풀면 표시가 **직전 턴의** 낡은 turnDone 으로 판정된다 — 둘째 턴부터는 그 값이 true 라 응답이 도는
+          //   중에 대기 표시가 꺼진다(첫 턴만 보는 테스트로는 안 보이던 결함).
+          //   ② 도구 끝 결과(`ToolResult`)는 알아들었지만 응답이 아니다 — codex 는 끊어도 도는 명령을 죽이지 않아
+          //   지난 턴 도구의 끝이 늦게 오고, 보낸 직후 · 첫 답 전에 들면 새 턴의 대기 표시가 답 없이 꺼진다(ADR-0241).
+          if (releasesAwaiting) setAwaiting(false)
         },
         // ADR-0145: replay 국면 콜백 — 'live' 는 데몬이 복원 끝에 넣은 표식을 클라가 소비해 버퍼를 비운
         //   시점이다(protocolClient.flushToLive). 이력이 0건인 새 에이전트에도 같은 신호가 오므로
@@ -261,6 +267,9 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           setAwaiting(false)
           setHasSent(false)
           follow.pin() // ADR-0242: 새 화신의 이력이 바닥에 착지한다.
+          // ADR-0239: 고른 펼침도 비운다 — 새 화신은 사건열이 달라, 누산기가 0 부터 다시 매긴 항목 번호의 묶음 키
+          //   (`item:<itemId>`)가 옛 선택과 다른 묶음을 가리킨다.
+          useToolGroupStore.getState().clear(viewId)
           // ADR-0226: 새 화신이 이어받기 화신인지는 바로 뒤 같은 틱의 'live' 가 다시 알린다.
           setContinuesConversation(false)
           sendOkRef.current = false
@@ -289,6 +298,17 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립). ★화신은 넣지 않는다 — 근거는 위 key 주석.★
     // ★`follow` 도 넣지 않는다★ — 그 `pin` 은 마운트 수명 동안 같은 함수다(ADR-0242 · `useScrollFollow` 머리).
   }, [viewId, agentId])
+
+  // ADR-0239: 이 슬롯의 대화 뷰가 지금 마운트돼 있다고 펼침 저장소에 알린다 — 묶이지 않은 슬롯에는 머리 토글도
+  //   `chat.toolGroup.setExpanded` 도 적지 못한다. 정리에서 돌려받은 해제를 부른다(고른 펼침은 남는다).
+  //   `getState` 로 부르는 것은 이 컴포넌트가 저장소를 구독하지 않게 하려는 것이다 — 펼침을 읽는 것은 `ToolGroupRow` 다.
+  useEffect(() => useToolGroupStore.getState().bind(viewId, agentId), [viewId, agentId])
+
+  // ADR-0242 · TRD S21-chat-ux §4-5: 사람이 마지막이 아닌 묶음을 펼치면 따라가기를 푼다 — 붙은 채면 펼친 높이만큼
+  //   바닥으로 다시 내려가 누른 머리가 화면 위로 밀려난다. 마지막 묶음은 붙음을 그대로 둔다.
+  const onGroupToggle = (isLast: boolean): void => {
+    if (!isLast) follow.unpin()
+  }
 
   const send = (): void => {
     // ★1 전송 == 완결된 유저 턴 1개(ADR-0044/0004)★: 텍스트 전체를 한 번에 보낸다. 백엔드 encoder 가
@@ -423,7 +443,12 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           (구 "JSON ● idle" 슬림 헤더는 제거 — 상태 힌트는 스트림 끝 대기 인디케이터(WaitRow "Wait" tail) 로 대체.) */}
       {!showEmpty && (
         <ScrollArea ref={follow.viewportRef} className="min-h-0 flex-1">
-          <StructuredTextView items={items} streaming={streaming} />
+          <StructuredTextView
+            items={items}
+            streaming={streaming}
+            slotId={viewId}
+            onGroupToggle={onGroupToggle}
+          />
           {/* ADR-0226 이력 대기 — 대화 영역 가운데 아이콘 + 옅은 막(사용자 결정 2026-09-24).
               ★여기 두는 이유★: absolute 의 기준이 ScrollArea 루트(seam 의 relative)라 대화 영역만 정확히
               덮고 스크롤되지 않으며, 그 아래 형제인 입력창에는 닿지 않는다. 이는 Radix Viewport 와 그 안쪽

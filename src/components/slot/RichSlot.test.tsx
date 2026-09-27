@@ -20,6 +20,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputChunk, ReplayLiveInfo, ViewPhase } from '../../api/agentClient'
 import { t } from '../../i18n'
+import '../../commands/chatCommands' // side-effect register — 도구 묶음 command 가 마운트된 슬롯에 닿나를 잰다.
+import { run } from '../../commands/registry'
+import { useToolGroupStore } from '../../store/toolGroupStore'
 import { getFollow } from './scrollFollow/followRegistry'
 import { JUMP_BUTTON_DELAY_MS } from './scrollFollow/JumpToBottom'
 
@@ -145,6 +148,8 @@ beforeEach(() => {
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
   dispatchMock.fireAndForget.mockReset()
+  // 펼침 저장소는 모듈 전역이다 — 모든 시험이 같은 슬롯 · 에이전트(v1 · AGENT)라 앞 시험의 고른 펼침이 이어 붙는다.
+  useToolGroupStore.setState({ bySlot: {} })
 })
 
 afterEach(() => {
@@ -1650,5 +1655,199 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
     expect(document.activeElement).toBe(root())
     fireEvent.keyDown(root(), { key: 'Escape' })
     expect(interrupts()).toHaveLength(2)
+  })
+})
+
+// ★도구 묶음 접착(ADR-0239 · TRD S21-chat-ux §4-4 · §4-5)★: 묶기 · 요약 · 토글 자체는 toolRuns.test.ts ·
+//   ToolGroupRow.test.tsx 가 잰다. 여기는 슬롯이 대화 뷰에 슬롯 id 를 내려보내고 저장소에 묶였는지(머리가 살아 있고
+//   command 가 닿는다) · 묶임의 수명(마운트 · 에이전트 교체 · 새 화신) · 마지막이 아닌 묶음을 펼치면 따라가기를 푸는지만 잰다.
+describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
+  const OTHER = 'eeee-ffff-0000-1111'
+
+  function toolCallFrame(seq: number, id: string): OutputChunk {
+    return tag1(
+      seq,
+      JSON.stringify({ type: 'ToolCall', name: 'Read', args_json: '{}', id, turn_id: null, message_id: null }),
+    )
+  }
+  function turnEndFrame(seq: number): OutputChunk {
+    return tag1(seq, JSON.stringify({ type: 'TurnEnd', turn_id: null, outcome: { kind: 'Completed' } }))
+  }
+
+  /** 끝난 턴 하나 = 도구 호출 둘 — 턴이 닫혀 자동 규칙은 접는다. 묶음 키 = 첫 호출의 id(`tool:<id>`). */
+  function feedFinishedGroup(seq: number, ids: readonly [string, string]): void {
+    act(() => captured.onChunk!(toolCallFrame(seq, ids[0])))
+    act(() => captured.onChunk!(toolCallFrame(seq + 1, ids[1])))
+    act(() => captured.onChunk!(turnEndFrame(seq + 2)))
+  }
+
+  const groups = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>('[data-tool-group]'))
+  const group = (key: string): HTMLElement => {
+    const el = document.querySelector<HTMLElement>(`[data-tool-group="${key}"]`)
+    if (el === null) throw new Error(`묶음 '${key}' 이 그려져 있지 않다`)
+    return el
+  }
+  // 묶음 뿌리의 첫 버튼이 머리다 — 펼치면 멤버 행의 버튼이 그 뒤에 선다.
+  const header = (key: string): HTMLButtonElement => group(key).querySelector('button') as HTMLButtonElement
+  const openAttr = (key: string): string | null => group(key).getAttribute('data-tool-group-open')
+  const chosen = (key: string): boolean | undefined => useToolGroupStore.getState().bySlot.v1?.open[key]
+  const followAttr = (): string | null =>
+    document.querySelector('[data-radix-scroll-area-viewport]')!.getAttribute('data-scroll-follow')
+
+  it('끝난 묶음의 머리가 살아 있고, 누르면 저장소를 거쳐 펼쳐졌다 접힌다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+
+    expect(groups()).toHaveLength(1)
+    expect(group('tool:r1').getAttribute('data-tool-group-count')).toBe('2')
+    // FE-2b-2 리뷰가 잡은 결함의 회귀망 — 슬롯 id 를 안 내려보내면 머리가 꺼져 접힌 묶음을 다시 못 연다.
+    expect(header('tool:r1').disabled).toBe(false)
+    expect(openAttr('tool:r1')).toBe('0')
+
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+    expect(chosen('tool:r1')).toBe(true)
+
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('0')
+    expect(chosen('tool:r1')).toBe(false)
+  })
+
+  it('LLM command(chat.toolGroup.setExpanded)가 마운트된 슬롯에 닿고, 내려간 뒤에는 오류로 답한다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+
+    let answer: unknown
+    act(() => {
+      answer = run('chat.toolGroup.setExpanded', { slotId: 'v1', groupKey: 'tool:r1', expanded: true })
+    })
+    expect(answer).toEqual({ expanded: true })
+    expect(openAttr('tool:r1')).toBe('1')
+
+    cleanup()
+    expect(() => run('chat.toolGroup.setExpanded', { slotId: 'v1', groupKey: 'tool:r1', expanded: false })).toThrow(
+      /마운트된 슬롯 'v1'/,
+    )
+  })
+
+  it('마지막이 아닌 묶음을 펼치면 따라가기를 풀고, 마지막 묶음 · 접기는 붙음을 그대로 둔다(§4-5)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['a1', 'a2'])
+    feedFinishedGroup(3, ['b1', 'b2'])
+    expect(groups().map((g) => g.getAttribute('data-tool-group'))).toEqual(['tool:a1', 'tool:b1'])
+    expect(followAttr()).toBe('pinned')
+
+    fireEvent.click(header('tool:b1')) // 마지막 묶음
+    expect(openAttr('tool:b1')).toBe('1')
+    expect(followAttr()).toBe('pinned')
+    expect(getFollow('v1')!.pinned).toBe(true)
+
+    fireEvent.click(header('tool:a1')) // 마지막이 아닌 묶음
+    expect(openAttr('tool:a1')).toBe('1')
+    expect(followAttr()).toBe('free')
+    expect(getFollow('v1')!.pinned).toBe(false)
+
+    // 접기는 부르지 않는다 — 다시 붙인 뒤 위 묶음을 접어도 붙음이 남는다.
+    act(() => getFollow('v1')!.pin())
+    fireEvent.click(header('tool:a1'))
+    expect(openAttr('tool:a1')).toBe('0')
+    expect(followAttr()).toBe('pinned')
+  })
+
+  it('같은 에이전트로 다시 마운트하면 고른 펼침이 다시 붙고, 다른 에이전트가 오면 따라오지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+
+    // 마운트 해제(렌더 모드 교체 · 팝아웃 이동) → 같은 에이전트로 다시 — 같은 사건열의 replay 가 같은 키로 선다.
+    cleanup()
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('1')
+
+    // 같은 슬롯에 다른 에이전트 — 같은 키의 묶음이 와도 자동 규칙(접힘)으로 그려진다.
+    cleanup()
+    render(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('0')
+    expect(useToolGroupStore.getState().bySlot.v1).toMatchObject({ agentId: OTHER, open: {} })
+  })
+
+  // 옛 해제가 새 묶임을 못 푸는 것(마운트 표식)은 `toolGroupStore.test.ts` 가 잰다 — 여기서는 React 가 옛 정리를 먼저
+  //   돌려 그 순서를 가릴 수 없다.
+  it('한 인스턴스에서 에이전트가 바뀌면(key 재마운트) 새 에이전트로 다시 묶여 고른 펼침은 비고 새 머리가 적는다', async () => {
+    const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+
+    rerender(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('0')
+    // 새 인스턴스의 머리가 저장소에 적는다(새 묶임이 섰다).
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+  })
+
+  it('새 화신의 비우기(onReset)는 고른 펼침을 비운다 — 같은 키의 묶음이 와도 자동 규칙으로 그린다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+
+    fireReset()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('0')
+    // 묶임은 남는다 — 비운 뒤에도 머리가 적는다.
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+  })
+
+  it("같은 화신의 재replay('buffering' → 'live')는 고른 펼침을 지우지 않는다", async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+
+    fireState('buffering')
+    fireState('live')
+    expect(openAttr('tool:r1')).toBe('1')
+    expect(chosen('tool:r1')).toBe(true)
+  })
+
+  // ★늦은 도구 끝 창(TRD §4-7 ⑧ · ⑨ 프론트 · ADR-0241)★: codex 는 끊어도 도는 명령을 죽이지 않아 지난 턴 도구의 끝이
+  //   늦게 온다. 보낸 직후 · 첫 답 전에 그 끝이 들면 — 직전 턴이 닫혀 turnDone 이 참이라 대기 표시를 떠받치는 것은
+  //   awaiting 하나다. `ToolResult` 로 awaiting 을 풀면 여기서 "Wait" 이 답 없이 꺼진다.
+  it('보낸 직후 지난 턴 도구의 끝(ToolResult)만 오면 "Wait" 이 남고 그 행에 표식이 붙는다 — 첫 진짜 답부터는 턴이 이어받는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(toolCallFrame(0, 'c1')))
+    act(() => captured.onChunk!(turnEndFrame(1)))
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    const input = screen.getByPlaceholderText(/메시지 입력/)
+    fireEvent.change(input, { target: { value: 'next' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await flush()
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'ToolResult', id: 'c1', outcome: 'Failed' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(document.querySelector('[data-tool-mark="failed"]')).not.toBeNull()
+
+    // 첫 진짜 답 — awaiting 이 풀리고 표시는 열린 턴이 떠받친다. 턴 경계가 끈다(awaiting 이 고착됐다면 안 꺼진다).
+    act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    act(() => captured.onChunk!(turnEndFrame(4)))
+    expect(screen.queryByText('Wait')).toBeNull()
   })
 })
