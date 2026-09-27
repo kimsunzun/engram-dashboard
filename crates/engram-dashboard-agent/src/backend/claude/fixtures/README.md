@@ -22,3 +22,14 @@
 | `result_error_handbuilt.jsonl` | 8 | ★**전부 손으로 지음**★ — `lifecycle_m1.jsonl` 의 A 턴 `result`·`command_lifecycle` 줄을 본떴다 | `is_error:true` 인 `result` 는 한 번도 캡처되지 않았다(TRD §7-1 「우편의 오류 뒤 멈춤」 행). 턴 둘: ① `subtype:"success"` + `is_error:true` + `result:"API Error: 500 …"` + `api_error_status:500` ② `subtype:"error_during_execution"` + `is_error:true` + `result` 필드 없음. 각 턴 = `queued` → `started` → `result` → `completed`. uuid 는 `aaaaaaaa-0000-4000-8000-…` 가짜 값이고 `usage` 등 나머지 필드는 M1 성공 줄 그대로다. ★실제 오류 줄의 `terminal_reason`·`stop_reason`·필드 구성은 모른다★ — 실측이 생기면 갈아 끼운다. |
 
 기존 `claude_text.jsonl` · `claude_tool.jsonl` · `claude_transcript.jsonl` 은 이 작업이 건드리지 않았다.
+
+## 글자 스트리밍 픽스처 (`partial_stream_p1` — ADR-0240)
+
+- **원본:** B1 채취 로그 `claude-main-2026-09-27T15-17-20-649Z.jsonl`(`{t,dir,chunk,nl,raw}` 봉투 · `dir:"out"` 인 `raw` 만 꺼냈다). ★원본 로그는 저장소 밖(채취한 워커의 스크래치)이라 남지 않는다★. 「줄 범위」는 그 로그의 `out` 줄만 센 1 기반 번호다.
+- **스폰:** 우리 JSON 모드 인자 그대로 — `--permission-mode bypassPermissions -p --input-format stream-json --output-format stream-json --replay-user-messages --verbose --include-partial-messages --session-id <sid>` · env `MAX_THINKING_TOKENS=8000` · 제어 채널 없음 · `extra_args` 없음(그래서 모델 = CLI 기본값). claude 2.1.280 · 모델 claude-opus-5-5.
+- **가공:** 위 「공통 가공」과 같다 — 잡음 줄 넷을 뺐고 · `system/init` 설치 환경 목록을 중립 값으로 바꿨고 · 개인정보를 같은 자리표시로 바꿨다. `system/task_started` · `system/task_notification` 은 실측 그대로 남겼다(decoder 가 건너뛴다).
+- **뺀 턴:** T4(긴 답 — `out` 줄 104–694)를 통째로 뺐다. 링 압박 수치(흘린 델타 수 · 글자 수)는 B1 반환이 싣는다 — 이 픽스처로 재지 않는다.
+
+| 파일 | 줄 | 원본 · 줄 범위 | 보여 주는 것 |
+|---|---|---|---|
+| `partial_stream_p1.jsonl` | 140 | 위 로그 `out` 1–103 · 695–744 | 매 턴 `message_start` → `content_block_start` → 델타들 → **그 블록만 담은 완결 `assistant` 줄**(같은 id) → `content_block_stop` → `message_delta` → `message_stop` → `result`. **T1** 한글 글만(델타 셋). **T2** 생각 → 글 → 도구(`input_json_delta` 일곱) → `tool_result` → 새 `message_start` → 글. **T3** 생각 → 글(델타 열다섯). **T5** A(`d24e1139…` — `sleep 8`)의 `tool_use` 줄(112) 2 s 뒤 B(`05a41fe4…`)를 씀 → B `queued`(116) → `tool_result` → B 되울림 → B `started` → 새 `message_start`(123) → 답 "DONE-A PINEAPPLE". **한가 구간** = 각 `result` 뒤 다음 입력을 쓰기 전: T1 뒤 32.0 s · T2 뒤 6.0 s · T3 뒤 6.0 s(그 뒤 T4 는 뺐다) · T5 뒤 10 s + stdin 닫고 끝날 때까지(16.4 s). 네 구간 모두 `command_lifecycle completed` 한 줄뿐이고 **최상위 `stream_event` 0 줄**이다(뺀 T4 뒤 6.0 s 도 같다). 이 세션의 transcript 에는 `stream_event` 줄이 **없었고** 완결 `assistant` 글 줄은 남아 있었다(`--resume` 이어받기도 성공 — B1 반환). |

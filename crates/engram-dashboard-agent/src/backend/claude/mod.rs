@@ -25,6 +25,7 @@
 
 mod session_file;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -192,6 +193,10 @@ impl AgentBackend for ClaudeBackend {
                         //   문구가 없지만 런타임이 "When using --print, --output-format=stream-json
                         //   requires --verbose" 로 즉사시킨다(스폰 직후 에이전트 소멸로 발현). 빼면 안 됨.
                         args.push("--verbose".to_string());
+                        // 글자 스트리밍: 벤더가 `stream_event` 글 델타와 **별도로** 블록마다 완결 `assistant` 줄도
+                        //   보낸다 — 두 벌을 한 벌로 줄이는 것은 decoder 의 `PartialMessage` 다(프론트에 중복 제거가 없다).
+                        // ADR-0240
+                        args.push("--include-partial-messages".to_string());
                         // ADR-0044 후속 완료 / ADR-0008 재사용: json(stream-json) resume 활성화.
                         if let Some(sid) = session_id {
                             // ★실측(2026-07-13, claude 2.1.170)★: stream-json 헤드리스도 `--resume <sid>`
@@ -734,6 +739,20 @@ fn cancel_line(id: &str) -> Vec<u8> {
 ///   = 비정상으로 간주.
 const MAX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+/// 메시지 id 의 최대 바이트 — codex 번역기의 같은 이름 상한과 같은 값·같은 규칙이다.
+///
+/// ★자르지 않고 **거른다**★: id 는 같은지 대조하는 토큰이라(흘린 블록의 완결 글 버림이 그 대조다) 잘라 두면
+///   서로 다른 긴 둘이 같은 것으로 읽힌다. 걸러진 메시지는 흘리지 않고 완결 글 하나로 보인다. 상한이 없으면 긴
+///   id 하나가 흘린 델타마다 복제된다. 관측된 id 는 `msg_` + 26 자(30 바이트)다.
+// ADR-0240
+const MAX_MESSAGE_ID_BYTES: usize = 128;
+
+fn bounded_message_id(id: Option<&serde_json::Value>) -> Option<String> {
+    id.and_then(|v| v.as_str())
+        .filter(|s| s.len() <= MAX_MESSAGE_ID_BYTES)
+        .map(String::from)
+}
+
 /// 실패한 `result` 가 내는 [`OutputEvent::Error`] 의 머리말 — ★턴 분류기가 이 머리말로 「턴 오류」를 가른다★
 /// ([`classify_turn`]). 줄 버퍼 넘침 등 다른 `Error` 문구가 이것으로 시작하면 그 오류가 턴을 실패로 접는다.
 // ADR-0231
@@ -759,12 +778,40 @@ fn stream_decoder(ack: Arc<DeliveryAck>) -> Box<dyn OutputDecoder> {
     Box::new(ClaudeStreamDecoder::with_delivery_ack(ack))
 }
 
+/// 라이브 부분 메시지 추적 — `stream_event` 가 채우고 완결 `assistant` 줄이 읽는다.
+///
+/// ★「(메시지 id, 블록 번호)」를 지금 열린 블록으로 잡는다★: 완결 줄에는 블록 번호가 없다. 벤더 계약은 「비지
+///   않은 블록마다 완결 메시지 하나, 그 블록의 `content_block_stop` 보다 먼저」라(실측 + 공식 문서), 완결 줄이 오는
+///   순간 열려 있는 블록이 곧 그 줄의 블록이다. 벤더가 순서를 바꾸면(멈춘 뒤 완결) `open` 이 비어 완결 글을
+///   그대로 낸다 — 잃지 않고 겹치는 쪽으로 틀린다.
+// ADR-0240
+#[derive(Debug, Default)]
+struct PartialMessage {
+    /// 지금 메시지의 id(`message_start`). `None` = 추적 중인 메시지가 없다 — 이때 온 글 델타는 버린다.
+    id: Option<String>,
+    /// 시작했고 아직 멈추지 않은 블록 번호(`content_block_start` ~ `content_block_stop`).
+    open: Option<u64>,
+    /// 글 델타를 하나라도 흘린 블록 번호들.
+    streamed: BTreeSet<u64>,
+}
+
+impl PartialMessage {
+    /// 이 완결 `assistant` 줄의 글을 이미 델타로 흘렸나 — 참이면 그 줄의 `text` 블록을 내지 않는다.
+    fn streamed_the_open_block_of(&self, message_id: Option<&str>) -> bool {
+        self.id.is_some()
+            && self.id.as_deref() == message_id
+            && self.open.is_some_and(|k| self.streamed.contains(&k))
+    }
+}
+
 /// claude stream-json 라이브 decoder.
 ///
-/// ★decoder 자신의 상태 = 줄 재조립뿐이다★: 메시지 병합(같은 message.id 블록 concat)은 decoder 책임이
-///   아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해 뱉는다. 목록 항목도 모른다 —
-///   명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
+/// ★decoder 자신의 상태 = 줄 재조립 + 부분 메시지 추적(`partial`)이다★. 부분 메시지 추적은 벤더가 같은 글을
+///   델타와 완결 줄로 두 번 보내는 것을 한 벌로 줄이는 데만 쓴다 — ★프론트 누산기에는 중복 제거가 없다★(글
+///   델타를 마지막 글 항목에 잇기만 한다). 그 밖의 병합(같은 message.id 블록 잇기)은 여전히 프론트 몫이다.
+///   목록 항목도 모른다 — 명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
 /// ★받음 값(`ack`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 세션이 같은 값을 읽는다.
+// ADR-0240
 #[derive(Debug, Default)]
 pub struct ClaudeStreamDecoder {
     /// 마지막 `\n` 뒤 미완성 라인 바이트(라인-레벨 분할 재조립용).
@@ -791,6 +838,10 @@ pub struct ClaudeStreamDecoder {
     /// 떠나게 한다. 운영에서는 backend 가 `SpawnParts::delivery_ack` 에 싣는 **바로 그** Arc 다.
     // ADR-0231
     ack: Arc<DeliveryAck>,
+
+    /// 라이브 줄에만 쓴다 — 이어받기 transcript 는 이 칸 없이 번역한다(`consume_line` 의 `partial: None`).
+    // ADR-0240
+    partial: PartialMessage,
 }
 
 impl ClaudeStreamDecoder {
@@ -837,6 +888,7 @@ impl ClaudeStreamDecoder {
                 &line[..line.len() - 1],
                 &mut events,
                 LineSource::Live(&self.ack),
+                Some(&mut self.partial),
             );
         }
 
@@ -862,7 +914,12 @@ impl ClaudeStreamDecoder {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            Self::consume_line(&line, &mut events, LineSource::Live(&self.ack));
+            Self::consume_line(
+                &line,
+                &mut events,
+                LineSource::Live(&self.ack),
+                Some(&mut self.partial),
+            );
         }
         events
     }
@@ -878,8 +935,16 @@ impl ClaudeStreamDecoder {
     /// - 라이브만: `command_lifecycle` → 명부 사건 · `cancel:<uuid>` 요청의 `control_response` → 취소 응답
     ///   사건 · `system/init` → 받음 가능 여부 판정(ADR-0231).
     /// - transcript 만: `attachment{queued_command}` → 사용자 말풍선.
+    /// - `stream_event` → `partial` 이 있을 때만(라이브) 글 델타를 `TextDelta` 로 흘리고, 흘린 블록의 완결 `assistant`
+    ///   글은 내지 않는다. `partial` 이 없으면(transcript) 통째로 skip — 완결 줄이 전문을 낸다(ADR-0240).
     /// - 그 밖의 `system`/`rate_limit_event`/`queue-operation`/unknown type → skip(0개).
-    fn consume_line(line: &[u8], events: &mut Vec<OutputEvent>, source: LineSource<'_>) {
+    // ADR-0240
+    fn consume_line(
+        line: &[u8],
+        events: &mut Vec<OutputEvent>,
+        source: LineSource<'_>,
+        partial: Option<&mut PartialMessage>,
+    ) {
         // ★여기서 처음 UTF-8 디코딩★(위 buffer 불변식). lossy 가 아니라 엄격 검증 후 실패 시 skip —
         //   비-UTF8 라인은 claude 정상 출력이 아니다(터미널 경로가 아니다).
         let text = match std::str::from_utf8(line) {
@@ -901,7 +966,7 @@ impl ClaudeStreamDecoder {
                     Some(m) => m,
                     None => return,
                 };
-                let message_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
+                let message_id = bounded_message_id(msg.get("id"));
                 // ★user replay dedup 키★: line-level 이라 블록 루프 밖에서 1회 추출한다. assistant
                 //   라인엔 이 개념이 없어 None 이 된다(consume_block 의 assistant arm 은 안 쓴다).
                 let line_uuid = value.get("uuid").and_then(|v| v.as_str());
@@ -909,7 +974,19 @@ impl ClaudeStreamDecoder {
                     Some(arr) => arr,
                     None => return, // content 가 배열이 아니면(스키마 이탈) skip
                 };
+                // ★흘린 블록의 완결 글은 버린다 — 빠지면 모든 claude 답이 두 벌이다★(프론트는 이어 붙이기만 한다).
+                //   글 블록만 버린다 — 도구·생각은 델타로 흘리지 않아 완결 줄이 유일한 출처다.
+                // ADR-0240
+                let already_streamed = role == "assistant"
+                    && partial
+                        .as_deref()
+                        .is_some_and(|p| p.streamed_the_open_block_of(message_id.as_deref()));
                 for block in blocks {
+                    if already_streamed
+                        && block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    {
+                        continue;
+                    }
                     Self::consume_block(role, block, message_id.as_deref(), line_uuid, events);
                 }
             }
@@ -968,6 +1045,19 @@ impl ClaudeStreamDecoder {
                     turn_id: None,
                     message_id: None,
                 });
+                // ★턴 끝에서 추적을 비운다★ — 그 뒤 `message_start` 없이 온 늦은 델타가 버려져, 턴 끝 뒤에 진행
+                //   신호(`TextDelta`)가 「턴 중」을 다시 켜는 길이 없다(30 분 fail-open 막힘).
+                // ADR-0240
+                if let Some(partial) = partial {
+                    *partial = PartialMessage::default();
+                }
+            }
+            (Some("stream_event"), _) => {
+                // transcript(`partial: None`)는 건너뛴다 — 기록에 이 줄이 있어도 완결 줄이 전문을 낸다.
+                // ADR-0240
+                if let Some(partial) = partial {
+                    Self::consume_stream_event(&value, partial, events);
+                }
             }
             (Some("command_lifecycle"), LineSource::Live(ack)) => {
                 // 알아보는 줄이 왔다는 것이 「이 CLI 는 항목별 수명주기를 낸다」다 — init 은 턴 시작 0.6–0.9 s 뒤에야
@@ -1039,6 +1129,92 @@ impl ClaudeStreamDecoder {
         }
     }
 
+    /// 라이브 `stream_event` 한 줄 → 흘린 글 `TextDelta` 0–1 개 + `partial` 갱신.
+    ///
+    /// ★글 델타 말고는 아무 사건도 내지 않는다★ — `message_stop` 은 도구 호출마다 오므로 그것을 끝으로 옮기면 도구
+    ///   호출마다 턴이 끝나고, 부속 줄을 `Structured` 로 내면 턴 분류기가 진행으로 세어 턴 끝 뒤 30 분 막힘 경로가
+    ///   된다. 턴 끝은 `result` 한 줄뿐이다. 생각·도구 입력 델타도 버린다 — 둘은 완결 줄에서 낸다.
+    /// ★`parent_tool_use_id` 가 있는 줄은 통째로 버린다★ — 하위 에이전트의 `message_start` 가 부모의 추적을 덮으면
+    ///   부모의 흘린 블록이 완결 글로 한 번 더 나온다(하위 에이전트 델타가 오는지 자체는 미확인 — 문서와 피어가 갈린다).
+    /// ★`message_start` 없이 온 글 델타(id 없음)와 블록 번호 없는 글 델타는 버린다★ — 흘린 자리를 적을 수 없으면
+    ///   완결 글이 버려지지 않아 두 벌이 되므로, 흘리지 않고 완결 글 하나로 보인다.
+    // ADR-0240
+    fn consume_stream_event(
+        value: &serde_json::Value,
+        partial: &mut PartialMessage,
+        events: &mut Vec<OutputEvent>,
+    ) {
+        if value
+            .get("parent_tool_use_id")
+            .is_some_and(|p| !p.is_null())
+        {
+            return;
+        }
+        let Some(event) = value.get("event") else {
+            return;
+        };
+        let index = event.get("index").and_then(|v| v.as_u64());
+        match event.get("type").and_then(|t| t.as_str()) {
+            Some("message_start") => {
+                *partial = PartialMessage {
+                    id: bounded_message_id(event.get("message").and_then(|m| m.get("id"))),
+                    ..PartialMessage::default()
+                };
+            }
+            Some("content_block_start") => {
+                if index.is_some() {
+                    partial.open = index;
+                }
+            }
+            Some("content_block_delta") => {
+                let Some(delta) = event.get("delta") else {
+                    return;
+                };
+                if delta.get("type").and_then(|t| t.as_str()) != Some("text_delta") {
+                    return;
+                }
+                let (Some(id), Some(index)) = (partial.id.as_ref(), index) else {
+                    return;
+                };
+                let Some(text) = delta
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty())
+                else {
+                    return;
+                };
+                partial.streamed.insert(index);
+                // 링 압박: 바로 앞 사건이 같은 메시지의 글이면 새 사건 대신 그 글에 잇는다 — `events` 는 decode() 한
+                //   번의 몫이라 이 합치기는 펌프 한 번 읽기에 여러 줄이 왔을 때만 줄어든다(실측 2026-09-27 — 2,428 자
+                //   답의 델타 519 줄이 읽기마다 한 줄씩 와서 합쳐도 519 개).
+                //   seq 는 emit 때 매겨져 구멍이 안 생기고, 누산기는 어차피 마지막 글 항목에 잇는다.
+                // ADR-0240
+                if let Some(OutputEvent::TextDelta {
+                    text: previous,
+                    message_id: Some(previous_id),
+                    ..
+                }) = events.last_mut()
+                {
+                    if previous_id == id {
+                        previous.push_str(text);
+                        return;
+                    }
+                }
+                events.push(OutputEvent::TextDelta {
+                    text: text.to_string(),
+                    turn_id: None,
+                    message_id: Some(id.clone()),
+                });
+            }
+            Some("content_block_stop") => {
+                if index.is_some() && partial.open == index {
+                    partial.open = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// content[] 한 블록 → OutputEvent.
     ///
     /// `line_uuid`: user 라인의 line-level `uuid`(replay dedup 키). user-role 블록에만 쓴다.
@@ -1074,8 +1250,8 @@ impl ClaudeStreamDecoder {
 
         match block.get("type").and_then(|t| t.as_str()) {
             Some("text") => {
-                // 통짜 모드라 실은 델타가 아닌 완결 텍스트지만, OutputEvent 에 "완결 텍스트" variant 가
-                //   없고 TextDelta 가 텍스트 증분의 정형 표현이다.
+                // 여기 오는 것은 완결 글이다(델타로 흘리지 않은 블록 · transcript) — OutputEvent 에 "완결 텍스트"
+                //   variant 가 없고 TextDelta 가 텍스트 증분의 정형 표현이다.
                 // ★malformed 계약(FIX-B)★: 문자열 `text` 가 없으면(스키마 이탈) 빈 TextDelta 를
                 //   방출하지 않고 skip 한다 — 빈 델타는 다운스트림에 무의미한 노이즈이고, "정상 text
                 //   블록인데 내용이 빈 문자열"과 구분도 안 된다. (Structured 보존 대신 skip 선택:
@@ -1271,6 +1447,7 @@ fn judge_delivery_ack(ack: &DeliveryAck, value: &serde_json::Value) -> Option<Qu
 //   `consume_line` 의 catch-all(`_ => {}`)이 모르는 타입을 이미 무해히 스킵하므로 그 라인들은 자연 배제된다.
 //   ★예외 하나 = `attachment{queued_command}`★ — 턴 도중 접힌 입력의 본문이 거기만 남아 말풍선으로 옮긴다
 //   (`LineSource::Transcript` 갈래). 라이브 전용 줄(수명주기·취소 응답·init)은 그 갈래에서 번역하지 않는다.
+//   `stream_event` 도 부분 메시지 추적 없이(`partial: None`) 불러 건너뛴다 — 완결 줄이 글을 한 벌 낸다(ADR-0240).
 //   유일한 추가 필터는 `isSidechain:true`(sub-agent 턴) — 이건 `type` 이 여전히 user/assistant 라
 //   consume_line 이 안 걸러내므로 여기서 라인 레벨로 스킵한다.
 
@@ -1348,7 +1525,12 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
         if is_sidechain_line(trimmed) {
             continue;
         }
-        ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events, LineSource::Transcript);
+        ClaudeStreamDecoder::consume_line(
+            trimmed.as_bytes(),
+            &mut events,
+            LineSource::Transcript,
+            None,
+        );
     }
     // ★복원 히스토리는 반드시 "닫힌 턴"으로 끝낸다(load-bearing)★: 실제 `.jsonl` transcript 에는 라이브
     //   stream-json 의 `result` 라인이 **들어 있지 않다**(실측 2026-08-17 — 최근 transcript 12개 전부 0건.
@@ -2691,6 +2873,7 @@ mod tests {
                 "stream-json".to_string(),
                 "--replay-user-messages".to_string(),
                 "--verbose".to_string(),
+                "--include-partial-messages".to_string(),
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--model".to_string(),
@@ -2729,6 +2912,19 @@ mod tests {
             assert!(
                 !s.args.iter().any(|x| x == forbidden),
                 "터미널 모드에 json 인자 누출: {forbidden}"
+            );
+        }
+    }
+
+    // ADR-0240
+    #[test]
+    fn terminal_mode_has_no_partial_messages_flag() {
+        for mode in [SpawnMode::Fresh, SpawnMode::Resume] {
+            let s = spec(&terminal(vec![]), mode, Some(Uuid::new_v4()));
+            assert!(
+                !s.args.iter().any(|x| x == "--include-partial-messages"),
+                "터미널 모드 인자는 동결이다: {:?}",
+                s.args
             );
         }
     }
@@ -4357,5 +4553,739 @@ mod tests {
             .collect();
         assert!(!live_only.is_empty(), "픽스처 전제");
         assert!(parse_transcript_events(&live_only).is_empty());
+    }
+
+    // ── ADR-0240: 글자 스트리밍 — 부분 메시지 · 완결 글 버림 ─────────────────────────────
+
+    /// 최상위 `stream_event` 한 줄(개행 포함).
+    fn stream_line(event: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "stream_event",
+                "event": event,
+                "session_id": "s1",
+                "parent_tool_use_id": null,
+                "uuid": "u-stream"
+            })
+        )
+    }
+
+    fn message_start(id: &str) -> String {
+        stream_line(serde_json::json!({
+            "type": "message_start",
+            "message": { "id": id, "type": "message", "role": "assistant", "content": [] }
+        }))
+    }
+
+    fn block_start(index: u64, kind: &str) -> String {
+        stream_line(serde_json::json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": { "type": kind }
+        }))
+    }
+
+    fn text_delta(index: u64, text: &str) -> String {
+        stream_line(serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "text_delta", "text": text }
+        }))
+    }
+
+    fn block_stop(index: u64) -> String {
+        stream_line(serde_json::json!({ "type": "content_block_stop", "index": index }))
+    }
+
+    /// 블록 하나만 담은 완결 `assistant` 줄 — 벤더가 그 블록의 `content_block_stop` 보다 먼저 보낸다.
+    fn completed(id: &str, block: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "id": id, "role": "assistant", "content": [block] },
+                "parent_tool_use_id": null
+            })
+        )
+    }
+
+    fn completed_text(id: &str, text: &str) -> String {
+        completed(id, serde_json::json!({ "type": "text", "text": text }))
+    }
+
+    const RESULT_LINE: &str = "{\"type\":\"result\",\"subtype\":\"success\"}\n";
+
+    fn text_events(events: &[OutputEvent]) -> Vec<(String, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::TextDelta {
+                    text, message_id, ..
+                } => Some((text.clone(), message_id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decode_lines(lines: &[String]) -> Vec<OutputEvent> {
+        decode_all(lines.concat().as_bytes())
+    }
+
+    /// 줄마다 decode() 한 번 — 실 펌프가 델타 한 줄씩 읽는 모양(이웃 델타 합치기가 끼지 않는다).
+    fn decode_each(lines: &[String]) -> Vec<OutputEvent> {
+        let mut d = ClaudeStreamDecoder::new();
+        let mut out: Vec<OutputEvent> = lines.iter().flat_map(|l| d.decode(l.as_bytes())).collect();
+        out.extend(d.flush());
+        out
+    }
+
+    /// 1: 글 델타마다 `TextDelta`(메시지 id = `message_start` 의 것) · 그 블록의 완결 글은 안 나온다.
+    // ADR-0240
+    #[test]
+    fn streamed_text_deltas_carry_the_message_id_and_the_completed_text_is_dropped() {
+        let events = decode_each(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "Hel"),
+            text_delta(0, "lo"),
+            completed_text("m1", "Hello"),
+            block_stop(0),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![
+                ("Hel".to_string(), Some("m1".to_string())),
+                ("lo".to_string(), Some("m1".to_string())),
+            ]
+        );
+        assert_eq!(tags(&events), vec!["text", "text"]);
+    }
+
+    /// 2: 델타 없는 글 블록 · 다른 메시지의 완결 줄 · 멈춘 뒤 온 완결 줄 → 완결 전문(잃지 않는다).
+    // ADR-0240
+    #[test]
+    fn a_text_block_that_was_not_streamed_falls_back_to_the_completed_text() {
+        let no_deltas = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            completed_text("m1", "whole"),
+            block_stop(0),
+        ]);
+        assert_eq!(
+            text_events(&no_deltas),
+            vec![("whole".to_string(), Some("m1".to_string()))]
+        );
+
+        let other_message = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            completed_text("m2", "b"),
+        ]);
+        assert_eq!(
+            text_events(&other_message)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // 벤더가 순서를 바꾸면(멈춘 뒤 완결) 겹쳐 보인다 — 잃는 쪽보다 낫다.
+        let stopped_first = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            block_stop(0),
+            completed_text("m1", "a"),
+        ]);
+        assert_eq!(
+            text_events(&stopped_first)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec!["a", "a"]
+        );
+
+        // `partial` 을 거치지 않는 흐름(transcript)은 늘 완결 글을 낸다.
+        let transcript = parse_transcript_events(
+            &[
+                message_start("m1"),
+                block_start(0, "text"),
+                text_delta(0, "a"),
+                completed_text("m1", "a"),
+            ]
+            .concat(),
+        );
+        assert_eq!(tags(&transcript), vec!["text", "done"]);
+    }
+
+    /// 3: `tool_use` 는 완결 줄에서 `ToolCall` 한 번 · `input_json_delta` 는 사건 0.
+    // ADR-0240
+    #[test]
+    fn a_tool_use_comes_once_from_the_completed_line_and_its_input_deltas_are_silent() {
+        let input_delta = |partial_json: &str| {
+            stream_line(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": { "type": "input_json_delta", "partial_json": partial_json }
+            }))
+        };
+        let events = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "Let me run it."),
+            completed_text("m1", "Let me run it."),
+            block_stop(0),
+            block_start(1, "tool_use"),
+            input_delta("{\"command\":"),
+            input_delta("\"echo hi\"}"),
+            completed(
+                "m1",
+                serde_json::json!({
+                    "type": "tool_use", "id": "toolu_1", "name": "Bash",
+                    "input": { "command": "echo hi" }
+                }),
+            ),
+            block_stop(1),
+        ]);
+        assert_eq!(tags(&events), vec!["text", "tool:Bash"]);
+    }
+
+    /// 4: 생각·서명 델타는 버리고 완결 생각 블록은 오늘처럼 `Structured{thinking}` 한 번.
+    // ADR-0240
+    #[test]
+    fn thinking_deltas_are_ignored_and_the_completed_thinking_block_is_structured() {
+        let delta = |kind: &str, key: &str| {
+            stream_line(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": kind, key: "x" }
+            }))
+        };
+        let events = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "thinking"),
+            delta("thinking_delta", "thinking"),
+            delta("signature_delta", "signature"),
+            completed(
+                "m1",
+                serde_json::json!({ "type": "thinking", "thinking": "x", "signature": "sig" }),
+            ),
+            block_stop(0),
+        ]);
+        assert_eq!(tags(&events), vec!["structured:thinking"]);
+    }
+
+    /// 5: `parent_tool_use_id` 가 있는 `stream_event` 는 전부 버린다 — 그 `message_start` 도 부모 추적을 안 바꾼다.
+    // ADR-0240
+    #[test]
+    fn sub_agent_stream_events_are_dropped_and_do_not_reset_the_parent_tracking() {
+        let child = |event: serde_json::Value| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "stream_event",
+                    "event": event,
+                    "parent_tool_use_id": "toolu_parent"
+                })
+            )
+        };
+        let events = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "parent"),
+            child(serde_json::json!({
+                "type": "message_start",
+                "message": { "id": "m-child", "content": [] }
+            })),
+            child(serde_json::json!({
+                "type": "content_block_start", "index": 0, "content_block": { "type": "text" }
+            })),
+            child(serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": { "type": "text_delta", "text": "child" }
+            })),
+            completed_text("m1", "parent"),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![("parent".to_string(), Some("m1".to_string()))]
+        );
+    }
+
+    /// 6: 메시지 부속 줄 · 모르는 `event.type` → 사건 0(`MessageDone` · `TurnEnd` · `Structured` 없음).
+    // ADR-0240
+    #[test]
+    fn message_bookkeeping_stream_events_emit_nothing() {
+        let events = decode_lines(&[
+            message_start("m1"),
+            stream_line(serde_json::json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn" },
+                "usage": { "output_tokens": 5 }
+            })),
+            stream_line(serde_json::json!({ "type": "message_stop" })),
+            stream_line(serde_json::json!({ "type": "ping" })),
+            stream_line(serde_json::json!({ "type": "some_future_event", "index": 0 })),
+            "{\"type\":\"stream_event\"}\n".to_string(),
+        ]);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// 7: 새 `message_start` 가 추적을 갈아 끼운다 — 도구 루프 뒤 새 메시지의 같은 블록 번호도 새로 센다.
+    // ADR-0240
+    #[test]
+    fn a_new_message_start_replaces_the_tracking() {
+        let tool_result = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"hi\"}]}}\n".to_string();
+        let events = decode_each(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "first"),
+            completed_text("m1", "first"),
+            block_stop(0),
+            tool_result,
+            message_start("m2"),
+            block_start(0, "text"),
+            completed_text("m2", "not streamed"),
+            block_stop(0),
+            block_start(1, "text"),
+            text_delta(1, "streamed"),
+            completed_text("m2", "streamed"),
+            block_stop(1),
+            // 늦게 온 옛 메시지의 완결 줄 — 지금 추적과 id 가 달라 전문이 나온다.
+            completed_text("m1", "late"),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![
+                ("first".to_string(), Some("m1".to_string())),
+                ("not streamed".to_string(), Some("m2".to_string())),
+                ("streamed".to_string(), Some("m2".to_string())),
+                ("late".to_string(), Some("m1".to_string())),
+            ]
+        );
+    }
+
+    /// 8: `result` 뒤 `message_start` 없이 온 늦은 델타 → 사건 0.
+    // ADR-0240
+    #[test]
+    fn a_late_delta_after_the_result_emits_nothing() {
+        let mut d = ClaudeStreamDecoder::new();
+        let turn = [
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "done"),
+            completed_text("m1", "done"),
+            block_stop(0),
+            RESULT_LINE.to_string(),
+        ]
+        .concat();
+        assert_eq!(tags(&d.decode(turn.as_bytes())), vec!["text", "done"]);
+        let late = [
+            text_delta(0, "late"),
+            block_start(1, "text"),
+            text_delta(1, "late"),
+        ]
+        .concat();
+        assert!(d.decode(late.as_bytes()).is_empty());
+    }
+
+    /// 9: 한글이 든 `stream_event` 한 줄이 청크 둘에 걸쳐(글자 중간에서) 와도 `TextDelta` 는 한 번.
+    // ADR-0240
+    #[test]
+    fn a_stream_event_line_split_inside_a_hangul_character_yields_one_delta() {
+        let mut d = ClaudeStreamDecoder::new();
+        assert!(d
+            .decode(
+                [message_start("m1"), block_start(0, "text")]
+                    .concat()
+                    .as_bytes()
+            )
+            .is_empty());
+        let line = text_delta(0, "안녕하세요");
+        let bytes = line.as_bytes();
+        let cut = line.find("녕").expect("한글") + 1;
+        assert!(
+            !line.is_char_boundary(cut),
+            "시험 전제 — 글자 중간을 자른다"
+        );
+        let mut events = d.decode(&bytes[..cut]);
+        assert!(events.is_empty());
+        events.extend(d.decode(&bytes[cut..]));
+        assert_eq!(
+            text_events(&events),
+            vec![("안녕하세요".to_string(), Some("m1".to_string()))]
+        );
+    }
+
+    /// 10: 이어받기 원문에 `stream_event` 가 섞여도 완결 글은 한 벌이다(`partial: None` 은 그 줄을 건너뛴다).
+    // ADR-0240
+    #[test]
+    fn stream_events_mixed_into_a_transcript_leave_one_copy_of_the_text() {
+        let transcript = [
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "Hel"),
+            text_delta(0, "lo"),
+            completed_text("m1", "Hello"),
+            block_stop(0),
+            stream_line(serde_json::json!({ "type": "message_stop" })),
+        ]
+        .concat();
+        let events = parse_transcript_events(&transcript);
+        assert_eq!(tags(&events), vec!["text", "done"]);
+        assert_eq!(
+            text_events(&events),
+            vec![("Hello".to_string(), Some("m1".to_string()))]
+        );
+    }
+
+    /// 12: 흘린 `TextDelta` 는 진행 · 부속 줄은 사건이 없어 신호도 없다 — `result` 뒤 부속 줄이 와도 한가 그대로.
+    // ADR-0240
+    #[test]
+    fn streamed_deltas_are_progress_and_bookkeeping_lines_leave_the_turn_closed() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let in_turn = || table.get(id, epoch).expect("관측").in_turn;
+
+        let classify = ClaudeBackend.turn_classifier();
+        let streamed = d.decode(
+            [
+                message_start("m1"),
+                block_start(0, "text"),
+                text_delta(0, "x"),
+            ]
+            .concat()
+            .as_bytes(),
+        );
+        assert_eq!(tags(&streamed), vec!["text"]);
+        assert_eq!(classify(&streamed[0]), Some(TurnSignal::Progress));
+        for ev in streamed {
+            core.emit(ev);
+        }
+        assert!(in_turn());
+
+        feed(
+            &core,
+            &mut d,
+            &[block_stop(0), RESULT_LINE.to_string()].concat(),
+        );
+        assert!(!in_turn());
+
+        let bookkeeping = [
+            stream_line(serde_json::json!({ "type": "message_delta", "delta": {} })),
+            stream_line(serde_json::json!({ "type": "message_stop" })),
+            block_stop(0),
+            text_delta(0, "late"),
+        ]
+        .concat();
+        assert!(d.decode(bookkeeping.as_bytes()).is_empty());
+        feed(&core, &mut d, &bookkeeping);
+        assert!(
+            !in_turn(),
+            "턴 끝 뒤 부속 줄 · 늦은 델타는 「턴 중」을 다시 켜지 않는다"
+        );
+    }
+
+    const PARTIAL_STREAM_P1: &str = include_str!("fixtures/partial_stream_p1.jsonl");
+
+    /// 픽스처의 완결 `assistant` 줄에서 `(메시지 id, 블록 type)` 이 맞는 블록들.
+    fn completed_blocks(fixture: &str, block_type: &str) -> Vec<(String, serde_json::Value)> {
+        fixture
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "assistant")
+            .flat_map(|v| {
+                let id = v["message"]["id"].as_str().unwrap_or_default().to_string();
+                v["message"]["content"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|b| b["type"] == block_type)
+                    .map(move |b| (id.clone(), b))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn fixture_lines(fixture: &str) -> Vec<String> {
+        fixture.lines().map(|l| format!("{l}\n")).collect()
+    }
+
+    /// 누산기처럼 접는다 — 글은 마지막 글 항목에 잇고, 그 밖의 사건은 제 꼬리표로 한 항목씩.
+    fn fold_like_accumulator(events: &[OutputEvent]) -> Vec<String> {
+        let mut items: Vec<String> = Vec::new();
+        let mut last_is_text = false;
+        for (e, tag) in events.iter().zip(tags(events)) {
+            match e {
+                OutputEvent::TextDelta { text, .. } if last_is_text => {
+                    items.last_mut().expect("글 항목").push_str(text)
+                }
+                OutputEvent::TextDelta { text, .. } => {
+                    items.push(format!("text:{text}"));
+                    last_is_text = true;
+                }
+                _ => {
+                    items.push(tag);
+                    last_is_text = false;
+                }
+            }
+        }
+        items
+    }
+
+    /// 1 · 3 · 4 · 7 을 실측으로: 메시지마다 흘린 글의 이음 = 그 메시지의 완결 글(한 벌) · 글 델타 줄 하나에 사건 하나 ·
+    /// 도구는 완결 줄에서 한 번 · 생각은 완결 블록 수만큼 · 접힌 입력 뒤 새 메시지도 한 벌.
+    // ADR-0240
+    #[test]
+    fn the_partial_fixture_streams_every_text_block_exactly_once() {
+        let events = decode_each(&fixture_lines(PARTIAL_STREAM_P1));
+
+        let completed_text = completed_blocks(PARTIAL_STREAM_P1, "text");
+        let ids: std::collections::BTreeSet<&str> =
+            completed_text.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids.len(), 5, "픽스처 전제 — 글이 있는 메시지 다섯");
+        for id in ids {
+            let expected: String = completed_text
+                .iter()
+                .filter(|(i, _)| i == id)
+                .map(|(_, b)| b["text"].as_str().expect("text"))
+                .collect();
+            let streamed: String = text_events(&events)
+                .into_iter()
+                .filter(|(_, m)| m.as_deref() == Some(id))
+                .map(|(t, _)| t)
+                .collect();
+            assert_eq!(streamed, expected, "메시지 {id}");
+        }
+        let delta_lines = PARTIAL_STREAM_P1
+            .lines()
+            .filter(|l| l.contains("\"type\":\"text_delta\""))
+            .count();
+        assert_eq!(text_events(&events).len(), delta_lines);
+        assert_eq!(
+            text_events(&events).last().map(|(t, _)| t.as_str()),
+            Some("INEAPPLE"),
+            "접힌 입력 뒤 새 메시지의 끝 델타"
+        );
+
+        let non_text: Vec<String> = tags(&events).into_iter().filter(|t| t != "text").collect();
+        assert_eq!(
+            non_text,
+            vec![
+                // T1 — 글만
+                "queued:delivered",
+                "structured:user",
+                "usage",
+                "done",
+                // T2 — 생각 · 글 → 도구 → 결과 → 글
+                "queued:delivered",
+                "structured:user",
+                "structured:thinking",
+                "tool:Bash",
+                "structured:user",
+                "usage",
+                "done",
+                // T3 — 생각 · 글
+                "queued:delivered",
+                "structured:user",
+                "structured:thinking",
+                "usage",
+                "done",
+                // T5 — 도구 도중 B 를 써 접힘 → 새 message_start
+                "queued:delivered",
+                "structured:user",
+                "structured:thinking",
+                "tool:Bash",
+                "structured:user",
+                "structured:user",
+                "queued:delivered",
+                "structured:thinking",
+                "usage",
+                "done",
+            ]
+        );
+        assert_eq!(
+            non_text
+                .iter()
+                .filter(|t| *t == "structured:thinking")
+                .count(),
+            completed_blocks(PARTIAL_STREAM_P1, "thinking").len()
+        );
+    }
+
+    /// 9 · 14 를 실측으로: 청크 경계가 어디든(한글 글자 중간 포함) 누산기가 접은 항목이 같고, 한 번에 먹이면 이웃
+    /// 델타가 합쳐져도 글은 같다.
+    // ADR-0240
+    #[test]
+    fn the_partial_fixture_folds_to_the_same_items_at_any_chunk_boundary() {
+        let per_line = fold_like_accumulator(&decode_each(&fixture_lines(PARTIAL_STREAM_P1)));
+        for chunk_size in [1usize, 3, 7, 64, 4096, PARTIAL_STREAM_P1.len()] {
+            let mut d = ClaudeStreamDecoder::new();
+            let mut events = Vec::new();
+            for c in PARTIAL_STREAM_P1.as_bytes().chunks(chunk_size) {
+                events.extend(d.decode(c));
+            }
+            events.extend(d.flush());
+            assert_eq!(
+                fold_like_accumulator(&events),
+                per_line,
+                "chunk_size={chunk_size}"
+            );
+        }
+        let whole = decode_all(PARTIAL_STREAM_P1.as_bytes());
+        assert!(
+            text_events(&whole).len()
+                < text_events(&decode_each(&fixture_lines(PARTIAL_STREAM_P1))).len(),
+            "한 번에 먹이면 이웃 델타가 합쳐진다"
+        );
+    }
+
+    /// 13: 채취한 한가 구간(각 `result` 뒤 ~ 다음 입력의 `queued` 전 — T1 뒤 32 초 포함)에 최상위 `stream_event` 가 없고,
+    /// 그 구간의 사건은 진행 신호가 아니며 코어는 한가 그대로다.
+    // ADR-0240
+    #[test]
+    fn the_captured_idle_windows_carry_no_stream_events_and_no_progress() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let classify = ClaudeBackend.turn_classifier();
+
+        let mut in_window = false;
+        let mut windows = 0;
+        for line in PARTIAL_STREAM_P1.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).expect("fixture json");
+            if value["type"] == "command_lifecycle" && value["state"] == "queued" {
+                in_window = false;
+            }
+            let events = d.decode(format!("{line}\n").as_bytes());
+            if in_window {
+                assert_ne!(value["type"], "stream_event", "한가 구간의 부분 줄: {line}");
+                for e in &events {
+                    assert_ne!(classify(e), Some(TurnSignal::Progress), "{e:?}");
+                }
+            }
+            for e in events {
+                core.emit(e);
+            }
+            if in_window {
+                assert!(!table.get(id, epoch).expect("관측").in_turn);
+            }
+            if value["type"] == "result" {
+                in_window = true;
+                windows += 1;
+                assert!(!table.get(id, epoch).expect("관측").in_turn);
+            }
+        }
+        assert_eq!(windows, 4, "픽스처 전제 — 채취한 턴 넷의 끝");
+    }
+
+    /// 14: 한 decode() 안의 이웃 `TextDelta` 는 같은 `message_id` 끼리만 합쳐지고, 사이에 다른 사건이 끼면 끊긴다.
+    // ADR-0240
+    #[test]
+    fn neighbouring_deltas_merge_only_within_one_decode_and_one_message() {
+        let tool = completed(
+            "m1",
+            serde_json::json!({ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }),
+        );
+        let lines = [
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            text_delta(0, "b"),
+            block_stop(0),
+            block_start(1, "text"),
+            text_delta(1, "c"),
+            completed_text("m1", "c"),
+            block_stop(1),
+            tool,
+            text_delta(2, "d"),
+            message_start("m2"),
+            block_start(0, "text"),
+            text_delta(0, "e"),
+            text_delta(0, "f"),
+        ];
+        let merged = decode_lines(&lines);
+        assert_eq!(
+            text_events(&merged),
+            vec![
+                ("abc".to_string(), Some("m1".to_string())),
+                ("d".to_string(), Some("m1".to_string())),
+                ("ef".to_string(), Some("m2".to_string())),
+            ]
+        );
+        assert_eq!(tags(&merged), vec!["text", "tool:Bash", "text", "text"]);
+
+        let separate = decode_each(&lines);
+        assert_eq!(text_events(&separate).len(), 6);
+        assert_eq!(
+            fold_like_accumulator(&merged),
+            fold_like_accumulator(&separate)
+        );
+    }
+
+    /// 상한(128 바이트)을 넘는 메시지 id 는 자르지 않고 거른다 — 그 메시지는 흘리지 않고 완결 글 하나로 보이며
+    /// 사건에 id 가 실리지 않는다. 상한 안의 id 는 그대로 흘린다.
+    // ADR-0240
+    #[test]
+    fn a_message_id_over_the_bound_is_filtered_not_truncated() {
+        let long = "m".repeat(MAX_MESSAGE_ID_BYTES + 1);
+        let events = decode_each(&[
+            message_start(&long),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            completed_text(&long, "ab"),
+            block_stop(0),
+        ]);
+        assert_eq!(text_events(&events), vec![("ab".to_string(), None)]);
+
+        let at_bound = "m".repeat(MAX_MESSAGE_ID_BYTES);
+        let events = decode_each(&[
+            message_start(&at_bound),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            completed_text(&at_bound, "a"),
+            block_stop(0),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![("a".to_string(), Some(at_bound))]
+        );
+    }
+
+    /// 11 의 보강: 부분 줄 없는 기존 fixture 는 부분 메시지 추적이 있든 없든 사건열이 같다(Debug 문자열 전체 대조).
+    ///   기존 fixture 시험을 고치지 않고 통과시키는 것이 11 의 증거이고, 이 시험은 그 전제(추적이 아무것도 안
+    ///   버린다)를 칸까지 잰다.
+    // ADR-0240
+    #[test]
+    fn fixtures_without_partial_lines_decode_the_same_with_and_without_tracking() {
+        for fixture in [
+            TEXT_JSONL,
+            TOOL_JSONL,
+            TRANSCRIPT_JSONL,
+            LIFECYCLE_M1,
+            CANCEL_M3,
+            DRAIN_M7,
+            SLASH_M13,
+            TRANSCRIPT_QUEUED_M5,
+            RESULT_ERROR,
+        ] {
+            assert!(!fixture.contains("\"stream_event\""), "픽스처 전제");
+            let tracked = decode_all(fixture.as_bytes());
+            let ack = DeliveryAck::default();
+            let mut untracked = Vec::new();
+            for line in fixture.lines() {
+                ClaudeStreamDecoder::consume_line(
+                    line.as_bytes(),
+                    &mut untracked,
+                    LineSource::Live(&ack),
+                    None,
+                );
+            }
+            assert_eq!(format!("{tracked:?}"), format!("{untracked:?}"));
+        }
     }
 }
