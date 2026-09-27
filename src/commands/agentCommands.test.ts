@@ -10,6 +10,7 @@ const clientMock = vi.hoisted(() => ({
   //   (테스트별로 mockResolvedValueOnce 로 생성 프로필을 실어 반환).
   listProfiles: vi.fn(async () => [] as unknown[]),
   cancelQueuedInput: vi.fn(async (): Promise<string> => 'requested'),
+  interruptAgent: vi.fn(async (): Promise<void> => undefined),
 }))
 vi.mock('../api/clientFactory', () => ({
   agentClient: {
@@ -19,6 +20,7 @@ vi.mock('../api/clientFactory', () => ({
     createCodexProfile: (...args: unknown[]) => clientMock.createCodexProfile(...(args as [])),
     listProfiles: (...args: unknown[]) => clientMock.listProfiles(...(args as [])),
     cancelQueuedInput: (...args: unknown[]) => clientMock.cancelQueuedInput(...(args as [])),
+    interruptAgent: (...args: unknown[]) => clientMock.interruptAgent(...(args as [])),
   },
   getAgentClient: vi.fn(),
 }))
@@ -44,6 +46,8 @@ beforeEach(() => {
   clientMock.listProfiles.mockClear()
   clientMock.cancelQueuedInput.mockReset()
   clientMock.cancelQueuedInput.mockImplementation(async () => 'requested')
+  clientMock.interruptAgent.mockReset()
+  clientMock.interruptAgent.mockImplementation(async () => undefined)
   dialogMock.open.mockReset()
   useAgentStore.setState({ presets: [], profiles: [] })
 })
@@ -372,5 +376,70 @@ describe('agent.cancelQueuedInput', () => {
     fireAndForget('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q2' })
     await Promise.resolve()
     expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q2')
+  })
+})
+
+// ── ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다 ─────────────────────────────────────
+describe('agent.interrupt', () => {
+  it('등록돼 있고 help 가 없다 — 버스 명단에 안 오른다(데몬이 답하는 이름이라 오르면 등록 묶음 전체가 반려된다)', () => {
+    expect(getCommand('agent.interrupt')).toBeDefined()
+    expect(getCommand('agent.interrupt')?.help).toBeUndefined()
+    expect(list().find((c) => c.id === 'agent.interrupt')?.help).toBeUndefined()
+  })
+
+  it('agentId 로 agentClient.interruptAgent 를 부르고 requested 를 돌려준다', async () => {
+    await expect(run('agent.interrupt', { agentId: ' a1 ' })).resolves.toEqual({ outcome: 'requested' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith('a1')
+  })
+
+  it('빈·없는·문자열 아닌 agentId 는 보내지 않고 던진다', async () => {
+    await expect(run('agent.interrupt', { agentId: '  ' })).rejects.toThrow(/agentId/)
+    await expect(run('agent.interrupt', {})).rejects.toThrow(/agentId/)
+    await expect(run('agent.interrupt', { agentId: 7 })).rejects.toThrow(/agentId/)
+    expect(clientMock.interruptAgent).not.toHaveBeenCalled()
+  })
+
+  it('코드 없이 온 임대 거절 문구는 Error 로 오든 맨 문자열로 오든 CONFLICT 로 읽힌다', async () => {
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw new Error(INPUT_LOCKED_REFUSAL)
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw INPUT_LOCKED_REFUSAL
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
+  })
+
+  it('그 밖의 거절(끊을 턴 없음 · 끊김)은 모양 그대로 다시 던진다', async () => {
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw 'no turn to interrupt'
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toBe('no turn to interrupt')
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw new Error('connection lost')
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(/^connection lost$/)
+  })
+
+  it('부르는 쪽이 동기로 던진 임대 거절도 CONFLICT 로 읽힌다', async () => {
+    clientMock.interruptAgent.mockImplementation((() => {
+      throw new Error(INPUT_LOCKED_REFUSAL)
+    }) as unknown as () => Promise<void>)
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
+  })
+
+  it('사람 경로(Esc → fireAndForget)도 같은 명령을 부르고, 거절은 경고로만 삼킨다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw 'no turn to interrupt'
+    })
+    fireAndForget('agent.interrupt', { agentId: 'a1' })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith('a1')
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
   })
 })

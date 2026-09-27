@@ -123,6 +123,24 @@ register({
   },
 })
 
+// ADR-0231 · ADR-0237: 입력에 영향을 주는 WS 명령(대기 입력 취소 · 끊기)을 부르고, 그 거절을 버스 쪽 같은 거절과
+//   같은 코드로 편다. ★입력 임대 거절만 코드가 없이 온다★(WS 문구가 `WriteStdin` 거절과 같다) — 그것만 `CONFLICT`
+//   를 붙인다. 문구로 알아본다: 접두 유무로 가르면 끊김 같은 코드 없는 실패도 걸린다.
+// ★운영 carrier(셸 `forward_daemon_command`)는 거절을 `Error` 가 아니라 맨 문자열로 돌려준다★ — `instanceof
+//   Error` 로만 가르면 운영에서 한 번도 안 걸린다. 둘 다 문구로 편 뒤 비교하고, 나머지는 원래 모양 그대로 던진다.
+// 인자가 promise 가 아니라 함수인 것은 부르는 쪽의 동기 throw 도 같은 매핑을 지나게 하려는 것이다.
+async function withLeaseConflict<T>(call: () => Promise<T>): Promise<T> {
+  try {
+    return await call()
+  } catch (e) {
+    const message = e instanceof Error ? e.message : typeof e === 'string' ? e : null
+    if (message === INPUT_LOCKED_REFUSAL) {
+      throw new Error(`CONFLICT: ${message}`)
+    }
+    throw e
+  }
+}
+
 register({
   id: 'agent.cancelQueuedInput',
   title: t('agent.cancelQueuedInput'),
@@ -140,20 +158,25 @@ register({
     if (typeof inputId !== 'string' || !inputId) {
       throw new Error(`[agent.cancelQueuedInput] inputId 가 비어 있음: ${String(inputId)}`)
     }
-    try {
-      // 결말 낱말은 문자열 그대로 돌려준다 — 더 새 데몬의 낱말도 버리지 않는다.
-      return { outcome: await agentClient.cancelQueuedInput(agentId.trim(), inputId) }
-    } catch (e) {
-      // ★입력 임대 거절만 코드가 없이 온다★(WS 문구가 `WriteStdin` 거절과 같다) — 버스 쪽 같은 거절과 같은
-      //   `CONFLICT` 로 읽히게 붙인다. 문구로 알아본다: 접두 유무로 가르면 끊김 같은 코드 없는 실패도 걸린다.
-      // ★운영 carrier(셸 `forward_daemon_command`)는 거절을 `Error` 가 아니라 맨 문자열로 돌려준다★ — `instanceof
-      //   Error` 로만 가르면 운영에서 한 번도 안 걸린다. 둘 다 문구로 편 뒤 비교하고, 나머지는 원래 모양 그대로 던진다.
-      const message = e instanceof Error ? e.message : typeof e === 'string' ? e : null
-      if (message === INPUT_LOCKED_REFUSAL) {
-        throw new Error(`CONFLICT: ${message}`)
-      }
-      throw e
+    // 결말 낱말은 문자열 그대로 돌려준다 — 더 새 데몬의 낱말도 버리지 않는다.
+    return { outcome: await withLeaseConflict(() => agentClient.cancelQueuedInput(agentId.trim(), inputId)) }
+  },
+})
+
+register({
+  id: 'agent.interrupt',
+  title: t('agent.interrupt'),
+  category: 'agent',
+  // ★`help` 를 달지 말 것★ — 사유는 위 `agent.cancelQueuedInput` 과 같다(데몬이 같은 이름을 버스에서 답한다).
+  // ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다. `requested` = 끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝
+  //   사건이 알린다(버스 쪽 같은 이름의 결말 낱말과 같다).
+  run: async (args) => {
+    const agentId = args?.agentId
+    if (typeof agentId !== 'string' || !agentId.trim()) {
+      throw new Error(`[agent.interrupt] agentId 가 비어 있음: ${String(agentId)}`)
     }
+    await withLeaseConflict(() => agentClient.interruptAgent(agentId.trim()))
+    return { outcome: 'requested' }
   },
 })
 

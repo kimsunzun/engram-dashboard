@@ -72,6 +72,12 @@ vi.mock('../../api/clientFactory', () => ({
   getAgentClient: vi.fn(),
 }))
 
+// ── 사람 경로 명령 호출(ADR-0237 Esc 끊기) — 실행이 아니라 무엇을 불렀나만 본다. ──
+const dispatchMock = vi.hoisted(() => ({ fireAndForget: vi.fn() }))
+vi.mock('../../commands/dispatch', () => ({
+  fireAndForget: (...args: unknown[]) => dispatchMock.fireAndForget(...args),
+}))
+
 // ── agentStore stub — 슬롯이 부재 판정용으로 agents·agentsLoaded 를 조회한다. ──
 // agentsLoaded=false 가 기본 = "권위 명부 미수신" → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
 const agentStoreState = vi.hoisted(() => ({
@@ -138,6 +144,7 @@ beforeEach(() => {
   clientMock.stateCbs.clear()
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
+  dispatchMock.fireAndForget.mockReset()
 })
 
 afterEach(() => {
@@ -1457,6 +1464,30 @@ describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
     expect(jumpButton()).toBeNull()
   })
 
+  it('「맨 아래로」 를 누르면 포커스가 뷰포트에 남아 이어서 친 Esc 가 턴을 끊는다(ADR-0237 U6)', async () => {
+    agentStoreState.agents = [
+      { id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities: { control: { interrupt: true } } },
+    ]
+    agentStoreState.agentsLoaded = true
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'streaming reply' }))))
+    vi.useFakeTimers()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
+
+    // jsdom 은 클릭으로 포커스를 옮기지 않는다 — 실제 창에서 버튼을 누르면 먼저 버튼이 포커스를 받는다.
+    jumpButton()!.focus()
+    fireEvent.click(jumpButton()!)
+    expect(jumpButton()).toBeNull()
+    expect(document.activeElement).toBe(viewport())
+
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(dispatchMock.fireAndForget.mock.calls.filter(([id]) => id === 'agent.interrupt')).toEqual([
+      ['agent.interrupt', { agentId: AGENT }],
+    ])
+  })
+
   it('손잡이 맵에 그 슬롯(viewId)으로 오른다 — LLM 경로(slot.scrollToBottom)가 이것을 부른다', async () => {
     await mountWithTurn()
     fireEvent.wheel(viewport(), { deltaY: -40 })
@@ -1464,5 +1495,160 @@ describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
     expect(followAttr()).toBe('pinned')
     cleanup()
     expect(getFollow('v1')).toBeUndefined()
+  })
+})
+
+describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
+  // 'absent' = 능력 칸이 아예 없다(undefined 를 넘기면 기본값이 대신 들어간다).
+  function running(interrupt: boolean | 'absent' = true): unknown[] {
+    const capabilities = interrupt === 'absent' ? undefined : { control: { interrupt } }
+    return [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities }]
+  }
+  const interrupts = (): unknown[][] =>
+    dispatchMock.fireAndForget.mock.calls.filter(([id]) => id === 'agent.interrupt')
+  const root = (): HTMLElement => document.querySelector('[data-rich-live="1"]') as HTMLElement
+  const input = (): HTMLTextAreaElement => screen.getByPlaceholderText(/메시지 입력/) as HTMLTextAreaElement
+
+  /** 끊기 능력이 있는 에이전트의 턴이 도는 중(델타만 왔다 — 턴 끝 없음). */
+  async function mountStreaming(interrupt: boolean | 'absent' = true): Promise<void> {
+    agentStoreState.agents = running(interrupt)
+    agentStoreState.agentsLoaded = true
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'streaming reply' }))))
+    expect(screen.queryByText('Wait')).not.toBeNull()
+  }
+
+  it('조건이 전부 참이면 명령을 한 번 부르고 키를 먹는다 — 낙관 상태도 입력창 글도 그대로다', async () => {
+    await mountStreaming()
+    fireEvent.change(input(), { target: { value: '초안' } })
+
+    const notPrevented = fireEvent.keyDown(input(), { key: 'Escape' })
+
+    expect(notPrevented).toBe(false)
+    expect(interrupts()).toEqual([['agent.interrupt', { agentId: AGENT }]])
+    expect(input().value).toBe('초안')
+    expect(screen.queryByText('Wait')).not.toBeNull()
+  })
+
+  it.each<[string, Record<string, unknown>]>([
+    ['ctrl', { ctrlKey: true }],
+    ['alt', { altKey: true }],
+    ['shift', { shiftKey: true }],
+    ['meta', { metaKey: true }],
+    ['누른 채 반복', { repeat: true }],
+    ['IME 조합 중(isComposing)', { isComposing: true }],
+    ['IME 조합 중(keyCode 229)', { keyCode: 229 }],
+  ])('키 조건이 어긋나면 부르지 않는다 — %s', async (_label, init) => {
+    await mountStreaming()
+    const notPrevented = fireEvent.keyDown(input(), { key: 'Escape', ...init })
+    expect(notPrevented).toBe(true)
+    expect(interrupts()).toEqual([])
+  })
+
+  it('다른 키는 부르지 않는다', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'a' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('문서 capture 에서 먼저 먹힌 Esc(Radix 레이어)는 부르지 않는다', async () => {
+    await mountStreaming()
+    const eat = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') e.preventDefault()
+    }
+    document.addEventListener('keydown', eat, true)
+    try {
+      fireEvent.keyDown(input(), { key: 'Escape' })
+    } finally {
+      document.removeEventListener('keydown', eat, true)
+    }
+    expect(interrupts()).toEqual([])
+  })
+
+  it('오버레이 표지가 문서에 있는 동안은 부르지 않고, 걷히면 다시 부른다', async () => {
+    await mountStreaming()
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-engram-overlay', '1')
+    document.body.appendChild(overlay)
+    try {
+      expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(true)
+      expect(interrupts()).toEqual([])
+    } finally {
+      overlay.remove()
+    }
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('턴이 안 돌면 부르지 않는다(턴 끝 뒤)', async () => {
+    await mountStreaming()
+    act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'MessageDone' }))))
+    expect(screen.queryByText('Wait')).toBeNull()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it.each<[string, boolean | 'absent']>([
+    ['능력 거짓', false],
+    ['능력 칸 없음', 'absent'],
+  ])('통로가 끊기를 지원하지 않으면 부르지 않는다 — %s', async (_label, interrupt) => {
+    await mountStreaming(interrupt)
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('에이전트가 지금 없으면(명부에서 사라짐 · 연결 끊김) 부르지 않는다', async () => {
+    await mountStreaming()
+    setConnection('down')
+    fireEvent.keyDown(root(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+    setConnection('connected')
+
+    agentStoreState.agents = []
+    act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'TextDelta', text: ' more' }))))
+    expect(deadOverlay()).not.toBeNull()
+    fireEvent.keyDown(root(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('대기 입력 ✕ · 「외 N개」 를 누른 뒤에도 포커스가 칸 안에 남아 이어서 친 Esc 가 턴을 끊는다(U6)', async () => {
+    await mountStreaming()
+    for (const [seq, id] of [[1, 'Q1'], [2, 'Q2'], [3, 'Q3'], [4, 'Q4']] as const) {
+      act(() => captured.onChunk!(queuedFrame(seq, { kind: 'Queued', id, text: `later ${id}` })))
+    }
+
+    // jsdom 은 클릭으로 포커스를 옮기지 않는다 — 실제 창에서 버튼을 누르면 먼저 버튼이 포커스를 받는다.
+    const remove = document.querySelector('[data-queued-input="Q1"] button') as HTMLButtonElement
+    remove.focus()
+    fireEvent.click(remove)
+    expect(dispatchMock.fireAndForget).toHaveBeenCalledWith('agent.cancelQueuedInput', { agentId: AGENT, inputId: 'Q1' })
+    expect(document.activeElement).toBe(root())
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+
+    const more = document.querySelector('[data-queued-more="1"]') as HTMLButtonElement
+    more.focus()
+    fireEvent.click(more)
+    expect(document.querySelector('[data-queued-more="1"]')).toBeNull()
+    expect(document.activeElement).toBe(root())
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(interrupts()).toHaveLength(2)
+  })
+
+  it('칸 안 어디든(U6) — 대화 본문(뷰포트)이나 칸 루트에 포커스가 있어도 부른다', async () => {
+    await mountStreaming()
+    const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+    viewport.focus()
+    expect(document.activeElement).toBe(viewport)
+    fireEvent.keyDown(viewport, { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+
+    // 본문 여백처럼 뷰포트 밖을 누르면 루트가 포커스를 받는다(tabIndex -1 — 탭 순서 밖).
+    expect(root().tabIndex).toBe(-1)
+    root().focus()
+    expect(document.activeElement).toBe(root())
+    fireEvent.keyDown(root(), { key: 'Escape' })
+    expect(interrupts()).toHaveLength(2)
   })
 })

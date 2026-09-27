@@ -267,7 +267,12 @@ export default function PresetPalette() {
 
         {/* ── 행 우클릭 메뉴(이름변경 · 삭제) ─────────────────────────────────── */}
         {rowMenu && (
-          <div ref={rowMenuRef} style={MENU_STYLE(rowMenu.x, rowMenu.y)}>
+          <div
+            ref={rowMenuRef}
+            // ADR-0237: 이 Esc 는 메뉴를 닫는 키다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않게 하는 표지(`interruptKey.ts`).
+            data-engram-overlay="1"
+            style={MENU_STYLE(rowMenu.x, rowMenu.y)}
+          >
             {rowMenuItems(rowMenu, presets, { beginEdit, removePreset, deleting, renaming }).map(item => (
               <div
                 key={item.label}

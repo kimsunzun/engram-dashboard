@@ -117,6 +117,9 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
   return (
     <div
       ref={ref}
+      // ADR-0237: 열린 동안 채팅 칸의 Esc 는 턴을 끊지 않는다(`interruptKey.ts` 의 표지) — 이 메뉴는 Esc 로 닫히지
+      //   않지만 메뉴를 띄운 채 누른 Esc 가 뒤의 턴을 끊으면 안 된다.
+      data-engram-overlay="1"
       style={{
         position: 'fixed',
         top: pos.top,

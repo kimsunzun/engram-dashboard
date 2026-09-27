@@ -28,11 +28,12 @@
 //   소유한다. 이 컴포넌트는 "구독 → 누산기 급이 → 결과 렌더 + 입력 캡처"라는 순수 I/O 배선만 한다
 //   (§5 손발/두뇌 분리: 프론트=I/O, 제어는 백엔드측 핸들).
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react'
 
 import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
 import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
+import { fireAndForget } from '../../commands/dispatch'
 import { useAgentStore } from '../../store/agentStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import type { QueuedEntry } from './queuedInputReducer'
@@ -40,6 +41,7 @@ import { QueuedInputList } from './QueuedInputList'
 import { isRenderedItem, StructuredTextView } from './StructuredTextView'
 import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
+import { ESC_SCOPE, isInterruptEscape, OVERLAY_SELECTOR } from './interruptKey'
 import './richBranding.css' // 색조 클래스 정의처(컴포넌트 옆 css 를 그 컴포넌트가 import 하는 규약).
 import { ScrollArea } from '../ui/scroll-area' // ADR-0053: 앱 전역 Radix 오버레이 스크롤바 seam
 import { REPIN_ON_SEND, useScrollFollow } from './scrollFollow/useScrollFollow'
@@ -83,6 +85,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   //   **알아들은** 응답 바이트★가 오면 해제해 이후 표시를 turnDone 에 넘긴다(아래 구독 콜백).
   const [awaiting, setAwaiting] = useState(false)
   const [input, setInput] = useState('')
+  const inputRef = useRef<HTMLTextAreaElement>(null)
   // ADR-0145: 이력 복원이 끝났다는 신호('live')를 받았나. 빈 상태 표시의 게이트이며 재구독마다 내린다.
   const [replayDone, setReplayDone] = useState(false)
   // ADR-0226: 마지막 'live' 가 "이 화신은 저장된 대화를 이어받으려고 떴다" 고 알렸나(성공 여부가 아니다).
@@ -367,6 +370,28 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
   const streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)
 
+  // ADR-0237: 칸 안 어디서든(U6) 맨 Esc = 도는 턴 끊기. ★capture 인 이유★: 입력창 onKeyDown 이 전파를 먼저
+  //   끊어 bubble 로는 입력창의 Esc 가 여기 안 온다. ★낙관 상태를 바꾸지 않는다★ — 끊겼다는 것은 턴 끝 사건이
+  //   알린다. 입력창 글도 건드리지 않는다. 턴이 열리기 전(보낸 직후)의 Esc 는 통로가 거절하고 fireAndForget 이
+  //   경고로 삼킨다 — 다시 누르면 된다.
+  // ★능력은 옵셔널로 탄다★ — 못 읽으면 끊지 않는 쪽이 맞다(위 `command` 와 같은 사유).
+  const canInterrupt = agent?.capabilities?.control?.interrupt === true
+  const onRootKeyDownCapture = (e: KeyboardEvent<HTMLDivElement>): void => {
+    // 오버레이를 재기 전에 Esc 만 거른다 — 타자마다 문서를 훑지 않게.
+    if (e.key !== 'Escape') return
+    const fire = isInterruptEscape(e, {
+      streaming,
+      agentUnavailable,
+      canInterrupt,
+      overlayOpen: document.querySelector(OVERLAY_SELECTOR) !== null,
+      scope: ESC_SCOPE,
+      textarea: inputRef.current,
+    })
+    if (!fire) return
+    e.preventDefault()
+    fireAndForget('agent.interrupt', { agentId })
+  }
+
   return (
     <div
       // 빈 상태에선 루트가 곧 정렬 컨테이너다(justify-center) — [마스코트·문구·입력창] 묶음을 통째로
@@ -374,8 +399,12 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
       // relative = 아래 부재 오버레이(absolute inset-0)의 앵커. 안쪽 absolute 요소(입력창 위 이름 라벨)는
       //   각자 relative 부모를 갖고 있어 이 추가에 영향받지 않는다.
       // 색조는 클래스 하나로 들어온다(정의처 = richBranding.css) — claude 는 '' 라 현행 모습 그대로다.
+      // tabIndex -1 = 칸 루트가 클릭 · 코드로만 포커스를 받는다(탭 순서 밖) — 본문 여백을 눌러도 Esc 가 이 칸에
+      //   온다(ADR-0237 U6). 대화 글을 누르면 스크롤 뷰포트가 먼저 받지만 keydown 은 그대로 여기로 번진다.
+      tabIndex={-1}
+      onKeyDownCapture={onRootKeyDownCapture}
       className={[
-        'relative flex h-full w-full flex-col bg-background',
+        'relative flex h-full w-full flex-col bg-background outline-none',
         branding.tintClass,
         showEmpty ? 'justify-center' : '',
       ]
@@ -465,6 +494,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           }
         >
           <textarea
+            ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {

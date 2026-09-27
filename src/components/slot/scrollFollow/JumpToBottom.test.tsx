@@ -76,4 +76,17 @@ describe('JumpToBottom', () => {
     fireEvent.click(button()!)
     expect(f.pin).toHaveBeenCalledTimes(1)
   })
+
+  // ADR-0237: 누르면 이 버튼이 사라진다 — 포커스가 문서로 떨어지면 그 칸의 Esc 가 칸 루트에 닿지 않는다.
+  it('누르면 버튼이 쥔 포커스가 둘러싼 뷰포트(tabindex -1)로 옮겨 간다', () => {
+    const { getByTestId } = render(
+      <div data-testid="viewport" tabIndex={-1}>
+        <JumpToBottom follow={follow(false)} />
+      </div>,
+    )
+    act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
+    button()!.focus()
+    fireEvent.click(button()!)
+    expect(document.activeElement).toBe(getByTestId('viewport'))
+  })
 })

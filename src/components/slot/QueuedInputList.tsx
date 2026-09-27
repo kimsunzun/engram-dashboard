@@ -15,6 +15,7 @@ import { X } from 'lucide-react'
 import { fireAndForget } from '../../commands/dispatch'
 import { t } from '../../i18n'
 import type { QueuedEntry } from './queuedInputReducer'
+import { keepFocusInSlot } from './slotFocus'
 
 export interface QueuedInputListProps {
   /** ✕ 가 겨누는 에이전트. */
@@ -56,7 +57,11 @@ export function QueuedInputList({
       <button
         type="button"
         data-queued-more="1"
-        onClick={() => setExpanded(true)}
+        // ADR-0237: 펼치면 이 버튼이 사라진다 — 쥔 포커스를 칸 안에 남겨 Esc 가 그 칸에 닿게 한다.
+        onClick={(e) => {
+          setExpanded(true)
+          keepFocusInSlot(e.currentTarget)
+        }}
         className="rounded px-1 text-[12px] text-muted hover:text-foreground focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
       >
         {t('chat.queuedMore', { count: String(hidden) })}
@@ -93,7 +98,12 @@ export function QueuedInputList({
                 title={t('chat.queuedRemove')}
                 aria-label={t('chat.queuedRemove')}
                 disabled={asking}
-                onClick={() => fireAndForget('agent.cancelQueuedInput', { agentId, inputId: entry.id })}
+                // ADR-0237: 이 버튼은 곧 잠기거나(취소 답 대기) 행째 빠진다 — 쥔 포커스를 칸 안에 남겨 Esc 가 그
+                //   칸에 닿게 한다.
+                onClick={(e) => {
+                  fireAndForget('agent.cancelQueuedInput', { agentId, inputId: entry.id })
+                  keepFocusInSlot(e.currentTarget)
+                }}
                 className="flex-none rounded p-0.5 text-muted hover:text-foreground disabled:opacity-40 disabled:hover:text-muted focus-visible:outline focus-visible:outline-1 focus-visible:outline-accent"
               >
                 <X size={12} aria-hidden="true" />

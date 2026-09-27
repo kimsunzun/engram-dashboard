@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react'
 import { ChevronDown } from 'lucide-react'
 
 import { t } from '../../../i18n'
+import { keepFocusInSlot } from '../slotFocus'
 import { JUMP_BUTTON_MODE, type ScrollFollow } from './useScrollFollow'
 
 /** t3code 선례 — 탭 전환 같은 짧은 풀림에 버튼이 깜빡이지 않게 한다. */
@@ -38,7 +39,11 @@ export function JumpToBottom({
       aria-label={t('slot.scrollToBottom')}
       title={t('slot.scrollToBottom')}
       // 즉시 쓰기다 — 부드러운 스크롤은 중간 scroll 이벤트를 만들어 코어가 사용자 스크롤로 읽는다.
-      onClick={() => follow.pin()}
+      // ADR-0237: 붙으면 이 버튼이 곧바로 사라진다 — 쥔 포커스를 칸 안(뷰포트)에 남겨 Esc 가 그 칸에 닿게 한다.
+      onClick={(e) => {
+        follow.pin()
+        keepFocusInSlot(e.currentTarget)
+      }}
       // bottom-7 · 가운데 — RichSlot 의 이름 라벨(입력 묶음 위로 20px · 오른쪽에서 최대 70% 폭)이 영역 바닥을 덮는다.
       className="absolute bottom-7 left-1/2 z-10 -translate-x-1/2 rounded-full border border-border bg-surface p-1 text-muted shadow-sm hover:text-foreground"
     >
