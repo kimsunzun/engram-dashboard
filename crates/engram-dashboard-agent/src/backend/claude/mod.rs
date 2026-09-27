@@ -9,8 +9,12 @@
 //! 인코딩·합성 에코·출력 decoder·transcript seed 넷을 이 모듈의 함수로 직접 불렀고, 한 파일에 살던
 //! 동안은 그것이 보이지 않았다.
 //!
-//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나★: 바깥이 새 지식을 필요로 하면
-//!   그 trait 에 메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라.
+//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나 + 사용량 조회기 싱글턴
+//!   [`CLAUDE_USAGE_PROBE`]([`crate::usage::UsageProbe`]) 하나★: 바깥이 새 지식을 필요로 하면 그 trait 에
+//!   메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라. 조회기가 trait 칸이
+//!   아닌 것은 에이전트가 없어도 도는 조회라 두 겹 디스패치를 두지 않으려는 것이고, 그것을 이름으로 부를 수
+//!   있는 자리는 `backend/mod.rs` 의 등록부뿐이다 — crate 밖은 `pub(crate)` 라 컴파일러가 막고, crate 안은
+//!   아래 격리 게이트가 본다.
 //! ★격리 게이트(백엔드 폴더 넷 공통 — 이름만 바꿔 돌린다)★:
 //!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
 //!   ★히트를 세지 않는다★ — 각 히트가 `backend/mod.rs` 의 **등록부**(`pub use claude::ClaudeBackend;`)
@@ -25,6 +29,9 @@
 
 mod session_file;
 mod usage;
+mod usage_probe;
+
+pub(crate) use usage_probe::CLAUDE_USAGE_PROBE;
 
 use std::path::PathBuf;
 

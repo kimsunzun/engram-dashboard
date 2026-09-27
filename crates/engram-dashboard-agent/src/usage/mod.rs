@@ -2,17 +2,32 @@
 //!
 //! ★벤더 이름·정책(쿨타임·시한)을 여기 두지 않는다★ — 그것은 각 벤더의 backend 모듈이 진다(ADR-0004
 //!   「백엔드 확장」). 이 모듈은 벤더를 불투명 낱말 하나로만 안다.
-//! 생산자 쪽 공용 도구도 여기 산다 — 칸 값 정규화([`used_pct_from_fraction`] 등)와 기본 계정이 아닌
-//! 에이전트의 줍기를 막는 디코더 감싸개([`UsageGate`]).
+//! 생산자 쪽 공용 도구도 여기 산다 — 칸 값 정규화([`used_pct_from_fraction`] 등) · 상류 문자열 도구
+//! ([`display_text`]·[`has_word`]) · 기본 계정이 아닌 에이전트의 줍기를 막는 디코더 감싸개([`UsageGate`]).
+//! 능동 조회의 seam([`UsageProbe`]·[`ProbeSpawner`])과 그 실물([`OsProbeSpawner`]·[`ScratchDir`])도 여기다 —
+//! 벤더 조회기는 각 backend 가 이 seam 위에 구현한다.
 // ADR-0004
 
 mod gate;
 mod normalize;
+mod probe;
+mod process;
+mod scratch;
+#[cfg(test)]
+pub(crate) mod testing;
+mod text;
 
 pub use gate::{env_overrides_daemon, UsageGate};
 pub use normalize::{
     resets_at_from_epoch_secs, resets_at_from_json, used_pct_from_fraction, used_pct_from_percent,
 };
+pub use probe::{
+    finish_after_answer, ExitInfo, ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeSpawner,
+    UsagePolicy, UsageProbe,
+};
+pub use process::{OsProbeSpawner, KILL_WAIT};
+pub use scratch::{sweep_stale_scratch, ScratchDir};
+pub use text::{display_text, has_word};
 
 /// 벤더를 가리키는 불투명 낱말 — 받는 쪽은 해석하지 않고 칸 키로만 쓴다.
 ///

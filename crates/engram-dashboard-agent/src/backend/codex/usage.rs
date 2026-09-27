@@ -1,4 +1,6 @@
-//! codex 의 사용량 한도 — app-server `account/rateLimits/updated` 알림 해석과 비기본 프로필 판정.
+//! codex 의 사용량 한도 — app-server `account/rateLimits/updated` 알림 해석과 비기본 프로필 판정. 버킷·창을
+//! 가르는 규칙([`DEFAULT_LIMIT_ID`]·[`names_default_bucket`]·[`windows_by_duration`])은 조회 응답을 푸는 형제
+//! `usage_probe` 도 쓴다 — 두 출처가 같은 규칙으로 창을 가른다.
 //!
 //! ★모양의 출처가 셋이고 확신도가 다르다★:
 //!   - 칸 이름·타입 = codex-cli 0.156.1 의 JSON Schema(확실 — `protocol.rs` 의 그 구조체 doc).
@@ -29,7 +31,7 @@ pub const USAGE_VENDOR: UsageVendorKey = UsageVendorKey::new("codex");
 /// ★우리 실측으로 본 값이 아니다★ — 근거 = 스키마 설명(`rateLimitsByLimitId`: "keyed by metered `limit_id`
 ///   (for example, `codex`)")과 피어 t3code 가 이 값을 기본 버킷으로 고르는 것. 틀렸다면 증상 = 줍기가 아무것도
 ///   안 낸다(값은 조회가 채운다). 다른 버킷의 값이 기본 칸에 섞이는 반대쪽보다 그 증상이 낫다.
-const DEFAULT_LIMIT_ID: &str = "codex";
+pub(super) const DEFAULT_LIMIT_ID: &str = "codex";
 
 /// 5시간 창의 길이(분).
 const FIVE_HOUR_WINDOW_MINS: i64 = 5 * 60;
@@ -82,22 +84,31 @@ pub(super) fn observation_from_rate_limits_updated(
     })
 }
 
-/// ★`limitId` 가 없으면 기본 버킷으로 읽는다★ — 버킷이 나뉘기 전 모양(조회 응답의 `rateLimits` 가 그 옛 단일
-///   버킷 모양을 그대로 싣는다고 스키마가 적는다)이 이 칸을 싣지 않는다. 타입이 틀리면 어느 버킷인지 모르므로 버린다.
-/// ★그렇게 읽는 것은 미측정 가정이다★ — 이 알림이 이 칸 없이 오는 것을 본 적이 없다. 그래서 그 가정을 쓸 때
-///   한 번 적는다(틀렸다면 증상 = 모델별 버킷의 값이 기본 칸에 섞인다).
+/// ★`limitId` 없는 알림을 기본 버킷으로 읽는 것은 미측정 가정이다★(규칙 = [`names_default_bucket`]) — 이 알림이
+///   그 칸 없이 오는 것을 본 적이 없다. 그래서 그 가정을 쓸 때 한 번 적는다(틀렸다면 증상 = 모델별 버킷의 값이 기본
+///   칸에 섞인다).
 fn is_default_bucket(limit_id: Option<&Value>) -> bool {
+    if limit_id.is_none() {
+        note_missing_limit_id();
+    }
+    names_default_bucket(limit_id)
+}
+
+/// 스냅숏의 `limitId` 가 기본 버킷을 가리키나. 글자 그대로 대조한다.
+/// ★없거나 `null` 이면 기본 버킷으로 읽는다★ — 버킷이 나뉘기 전 모양(조회 응답의 `rateLimits` 가 그 옛 단일 버킷
+///   모양을 그대로 싣는다고 스키마가 적는다)이 이 칸을 싣지 않는다. 타입이 틀리면 어느 버킷인지 모르므로 `false`.
+pub(super) fn names_default_bucket(limit_id: Option<&Value>) -> bool {
     match limit_id {
-        None => {
-            note_missing_limit_id();
-            true
-        }
+        None | Some(Value::Null) => true,
         Some(Value::String(id)) => id == DEFAULT_LIMIT_ID,
         Some(_) => false,
     }
 }
 
-fn windows_by_duration(snapshot: &RateLimitSnapshot) -> (Option<WindowObs>, Option<WindowObs>) {
+/// 스냅숏의 두 자리 → `(5시간, 주간)`. 규칙 = [`observation_from_rate_limits_updated`] 의 첫 항목.
+pub(super) fn windows_by_duration(
+    snapshot: &RateLimitSnapshot,
+) -> (Option<WindowObs>, Option<WindowObs>) {
     let mut five_hour = None;
     let mut weekly = None;
     for window in [&snapshot.primary, &snapshot.secondary]
@@ -119,8 +130,8 @@ fn windows_by_duration(snapshot: &RateLimitSnapshot) -> (Option<WindowObs>, Opti
     (five_hour, weekly)
 }
 
-/// 두 칸이 다 비면 그 창은 「안 실렸다」다 — 줍기 관측에서 `None` 창은 받는 쪽이 들고 있던 값을 둔다.
-/// 칸마다 따로 버리는 것은 조용하고, 칸이 **하나도** 안 남으면 그때만 로그에 적는다.
+/// 두 칸이 다 비면 그 창은 `None` 이다 — 그 뜻은 관측의 출처가 정한다(줍기 = 안 실렸다 · 조회 = 없다 —
+/// [`UsageObservation`]). 칸마다 따로 버리는 것은 조용하고, 칸이 **하나도** 안 남으면 그때만 로그에 적는다.
 fn carried(window: &RateLimitWindow) -> Option<WindowObs> {
     let obs = WindowObs {
         used_pct: window.used_percent.and_then(used_pct_from_percent),
@@ -139,7 +150,7 @@ fn note_unknown_duration(minutes: Option<i64>) {
     }
     tracing::debug!(
         window_duration_mins = ?minutes,
-        "codex account/rateLimits/updated 의 모르는 창 길이를 버린다(프로세스당 한 번만 적는다)"
+        "codex 사용량 한도 스냅숏의 모르는 창 길이를 버린다(프로세스당 한 번만 적는다)"
     );
 }
 
@@ -148,7 +159,7 @@ fn note_empty_window() {
         return;
     }
     tracing::debug!(
-        "codex account/rateLimits/updated 의 창에 읽히는 칸이 하나도 없어 버린다(프로세스당 한 번만 적는다)"
+        "codex 사용량 한도 스냅숏의 창에 읽히는 칸이 하나도 없어 버린다(프로세스당 한 번만 적는다)"
     );
 }
 

@@ -1020,6 +1020,7 @@ dependencies = [
 name = "engram-dashboard-agent"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "dunce",
  "engram-dashboard-base",
  "engram-dashboard-command",
