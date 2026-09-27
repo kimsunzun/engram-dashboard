@@ -1,15 +1,12 @@
 # Engram Dashboard
 
-여러 AI 에이전트를 동시에 띄워 관리하는 Windows 데스크톱 앱입니다. 에이전트를 돌리는 데몬과 화면을 그리는 클라이언트가 분리되어 있어, 창을 닫아도 에이전트는 계속 돕니다.
+여러 AI 에이전트(Claude Code·Codex)를 동시에 띄워 관리하는 Windows 데스크톱 앱입니다. 에이전트를 돌리는 데몬과 화면을 그리는 클라이언트가 분리되어 있어, 창을 닫아도 에이전트는 계속 돕니다.
 
-![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
-![Release](https://img.shields.io/badge/release-v0.2.0-brightgreen)
-![Status](https://img.shields.io/badge/status-WIP-orange)
-![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB)
-![React](https://img.shields.io/badge/React-19-61DAFB)
-![Rust](https://img.shields.io/badge/Rust-stable-DEA584)
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue) ![Release](https://img.shields.io/github/v/release/kimsunzun/engram-dashboard) ![Status](https://img.shields.io/badge/status-WIP-orange) ![Tauri](https://img.shields.io/badge/Tauri-v2-24C8DB) ![React](https://img.shields.io/badge/React-19-61DAFB) ![Rust](https://img.shields.io/badge/Rust-stable-DEA584)
 
-> 개발 중입니다. 현재는 Windows와 Claude Code만 지원합니다.
+> 개발 중입니다. Windows 전용입니다.
+
+## 시연 영상
 
 <p align="center">
   <a href="https://youtu.be/C48aNPskxLo">
@@ -26,30 +23,34 @@
 | [1:39](https://youtu.be/C48aNPskxLo?t=99) | 데몬 테스트 |
 | [3:20](https://youtu.be/C48aNPskxLo?t=200) | 에이전트 제어와 오케스트레이션 |
 
-## 현재 구현된 것
+## 주요 기능
 
-- **화면 배치** — 창을 가로·세로로 나누면 칸이 생기고, 칸마다 에이전트를 하나씩 띄웁니다. 칸은 별도 창으로 떼어낼 수 있고, 탭을 여러 개 두면 서로 다른 배치를 오갈 수 있습니다
-- **터미널 또는 채팅** — 에이전트 출력을 터미널 그대로 볼지, JSON 출력을 받아 채팅 화면으로 볼지 만들 때 고릅니다
-- **에이전트가 직접 조작** — `engram` CLI로 명부를 읽고, 동료를 깨우고, 새 에이전트를 만들고, 화면 배치까지 바꿉니다. 사람만 쓸 수 있는 조작을 따로 만들지 않는 것이 설계 원칙입니다
-- **에이전트 간 메시징** — 서로 메시지를 주고받고, 상대가 작업 중이면 데몬이 맡아두었다가 손이 비는 시점에 전달합니다
+- **화면 배치** — 창을 나눈 칸마다 에이전트를 띄우고, 칸을 별도 창으로 떼거나 탭으로 여러 배치를 오갑니다
+- **터미널 또는 채팅** — 에이전트 출력을 터미널 그대로 보거나, JSON 출력을 받아 채팅 화면으로 봅니다
+- **Claude Code·Codex** — 두 종류의 에이전트를 한 화면에 나란히 띄웁니다
+- **에이전트가 직접 조작** — 에이전트가 `engram` CLI로 동료를 깨우고, 새 에이전트를 만들고, 화면 배치까지 바꿉니다
+- **에이전트 간 메시징** — 상대가 작업 중이면 데몬이 메시지를 맡아두었다가 손이 비는 시점에 전달합니다
 
-## 받아서 실행하기
+## 설치·실행
 
-[Releases 페이지](https://github.com/kimsunzun/engram-dashboard/releases/latest)에서 `engram-dashboard-*-windows-x64.zip`을 받아 압축을 풀고 `engram-dashboard.exe`를 실행하면 됩니다. 설치 과정은 없습니다.
-
-미리 준비해야 하는 것:
+[Releases 페이지](https://github.com/kimsunzun/engram-dashboard/releases/latest)에서 `engram-dashboard-*-windows-x64.zip`을 받아 압축을 풀고 `engram-dashboard.exe`를 실행하면 됩니다. 설치 과정은 없고, 아래만 미리 준비하면 됩니다.
 
 - Windows 10 또는 11 (x64)
-- **Claude Code 설치 및 로그인** — `claude` 명령이 `PATH`에 있어야 합니다. 없으면 에이전트를 띄울 때 원인을 알기 어려운 오류가 납니다(안내 메시지가 아직 없습니다)
+- **Claude Code 설치 및 로그인** — `claude` 명령이 `PATH`에 있어야 합니다
+- **Codex 설치 및 로그인**(선택) — Codex 에이전트를 쓸 때만 필요합니다. `codex` 명령이 `PATH`에 있어야 합니다
 - **WebView2 런타임** — 최근 Windows에는 기본 포함되어 있지만, 없는 환경(LTSC·N 에디션 등)에서는 창이 뜨지 않습니다. [Microsoft 배포 페이지](https://developer.microsoft.com/microsoft-edge/webview2/)에서 받으세요
 
+`claude`·`codex` 명령이 없으면 에이전트가 원인 안내 없이 뜨지 못합니다(안내 메시지가 아직 없습니다).
+
 **창을 닫아도 앱은 종료되지 않습니다.** 트레이로 내려갈 뿐이고 데몬과 에이전트는 계속 돕니다. 완전히 끄려면 트레이 아이콘 메뉴에서 **「완전 종료」**를 고르세요 — 실행 중인 에이전트도 함께 내려갑니다.
+
+명부와 프리셋은 실행파일 옆 `data\` 폴더에 저장됩니다. 지우거나 옮기려면 먼저 앱을 완전히 종료하세요 — 켜져 있는 동안에는 데몬이 폴더를 붙들고 있습니다.
 
 코드 서명을 하지 않아서 첫 실행 때 SmartScreen 경고가 뜰 수 있습니다.
 
 ## 개발
 
-Node.js 22.12+와 Rust stable 툴체인이 필요합니다(테스트가 플래그 없는 `require(ESM)` 에 의존합니다 — 그 아래 버전에서는 `npm test` 가 깨집니다. CI·로컬 실사용은 Node 24).
+Node.js 22.12+(테스트가 플래그 없는 `require(ESM)`에 의존합니다) · Rust stable · Windows가 필요합니다.
 
 ```bash
 git clone https://github.com/kimsunzun/engram-dashboard.git
@@ -58,33 +59,12 @@ npm install
 scripts\rebuild-run-debug.bat            # 데몬·클라이언트 빌드 + dev 서버 + 앱 실행까지 한 번에
 ```
 
-**실행은 `scripts/`의 런처로 합니다**(Windows). 앱을 셸에서 직접 띄우지 않습니다 — 그 호출이 앱 수명에 매달리고 앱 출력이 셸로 계속 거슬러 올라옵니다. 런처는 WMI(`Win32_Process.Create`)로 앱을 프로세스 트리 밖에 띄우고 출력을 파일로만 보내므로, 로그에서 필요한 줄만 읽으면 됩니다.
-
-| 런처 | 하는 일 |
-|---|---|
-| `scripts\run-debug.bat` | 클라이언트만 빌드 + dev 서버 확인 + 실행 |
-| `scripts\rebuild-run-debug.bat` | 데몬까지 재빌드(백엔드 수정 후) + 실행 |
-| `scripts\rebuild-run-debug-log.bat` | 위와 같되 앱·데몬을 `debug` 로그로 실행 |
-| `scripts\run-release.bat` | 이미 빌드된 릴리즈 실행 |
-| `scripts\rebuild-run-release.bat` | 릴리즈 새로 빌드 + 실행 |
-
-```bash
-# 빌드·테스트도 앱과 같은 규칙 — 셸에서 직접 돌리지 않고 scripts/run-detached.ps1 로 프로세스 트리 밖에서 돌리고 출력은 파일로만 받습니다(빌드 로그 전체를 삼키지 않고 필요한 줄만 읽습니다).
-#   완료 판정 = 로그 마지막 줄의 `__EXIT=<코드>`(프로세스가 사라진 것으로 판정하지 않습니다). 규칙 = CLAUDE.md 「빌드·검증 명령」, 사용법 = scripts/run-detached.ps1 헤더
-# 더는 어느 멤버도 제외하지 않습니다(사용자 결정 2026-08-25) — 제외를 떠받치던 사유 둘(Windows 크래시 · src-tauri 단위 스위트의 알려진 실패)이 차례로 죽었습니다. 수치·현황·별도 실행 명령의 정본 = CLAUDE.md 「빌드·검증 명령」 · 실행 중인 데몬이 있으면 먼저 종료(파일 잠금)
-#   `-- --test-threads=4` 는 로컬 전용이며 빼지 마세요(근거 = 같은 절). CI는 그것을 쓰지 않으며 그 차이가 의도입니다.
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "cargo test --workspace -- --test-threads=4" -WorkDir . -LogFile test.log
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "npm test" -WorkDir . -LogFile vitest.log
-#   ↑ vitest 도 예외가 아닙니다 — 위 `__EXIT` 마커로 판정하고 vitest 자신의 pass/fail 요약으로 갈음하지 마세요.
-#     「자식이 래퍼보다 오래 산다」던 옛 사유는 오진이었습니다(폐기 2026-09-22). 실제 원인은 Windows 에서 `npm` 의 실체가 `npm.cmd` 라, 래퍼 `.bat` 이 `call` 없이 부르면 제어가 안 돌아와 마커 줄이 실행되지 않은 것입니다 — 지금은 run-detached.ps1 이 대상이 배치일 때 `call` 을 붙여 마커가 그대로 붙습니다(실측). 정본 = .claude/skill-bindings/qa.md 「분리 실행」
-```
+런처 목록과 빌드·테스트를 돌리는 방법은 [scripts/README.md](scripts/README.md)에 있습니다.
 
 ## 문서
 
 - [아키텍처 개요](docs/reference/architecture-overview.md) — 전체 구조·crate 구성
-- [문서 인덱스](docs/README.md)
-- [설계 결정 기록](docs/decisions/)
-- [개발 진행 기록](docs/process/step-log.md)
+- [문서 인덱스](docs/README.md) — 설계 결정·개발 기록을 포함한 전체 문서
 
 ## 라이선스
 
