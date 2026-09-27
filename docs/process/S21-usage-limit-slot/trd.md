@@ -67,7 +67,7 @@ front ── UsageSlot 이 실제로 보이는 동안 회사별 60초 요청(대
   - 오류 분류(한 함수, §3 #6): 한도 문구 → `RateLimited{None}` · 로그인·인증 문구 → `Unauthenticated` · "not supported in this context" → `Unsupported` · 그 밖 → `Upstream`. 문구 표는 추정이다(§6 #4). 떠 있는 에이전트 프로세스에는 보내지 않는다(D7).
 - **미설치:** 응답 줄 없이 stdout EOF 를 보면 `wait_exit(deadline)` 으로 종료 상태를 받아 해석한다 — Windows = `cmd.exe` 종료코드 9009 · POSIX = spawn `NotFound` → `NotInstalled`(`usage/process.rs` 안). 마감까지 안 끝나면 `Timeout` + 트리 kill.
 - **교체 대안 B**(A 가 깨질 때만 — D2): 같은 `UsageProbe` seam 뒤 둘째 구현이다. 바뀌는 것 = ① 첫 TLS 의존 + 데몬의 첫 인터넷 송신(HTTPS 는 주입 포트로) ② 자격증명 찾기 OS 분기 한 함수(Windows·Linux = `config_dir()` `mod.rs:993` 의 파일 · macOS = Keychain · env 토큰) ③ 토큰 취급(읽기만·저장·로그 없음 — D5). 그 밖 설계는 전환 때 TRD 를 새로 쓴다.
-- **Codex** (`backend/codex/usage.rs` — `CODEX_COOLDOWN = 5분`(R15) · `CODEX_PROBE_TIMEOUT = 30초` = 멈춤 방지(평소 1초 미만 실측 · 대화 이어받기에서 약 10초 관측 1회 — 안전 여유))
+- **Codex** (`backend/codex/usage.rs` — `CODEX_COOLDOWN = 15분`(R15 — 사용자 결정 2026-09-27, Claude 와 통일) · `CODEX_PROBE_TIMEOUT = 30초` = 멈춤 방지(평소 1초 미만 실측 · 대화 이어받기에서 약 10초 관측 1회 — 안전 여유))
   - 명령 = `console_command(CODEX_PROGRAM, [APP_SERVER_SUBCOMMAND, APP_SERVER_STDIO_FLAG])`(`mod.rs:169`·`:461-462`·`:971`). env = 데몬 env 상속. cwd = 같은 방식의 임시 폴더.
   - **재사용:** `protocol.rs` 의 `classify`(`:151`)·`request_line`·`notification_line`·`error_response_line`(`:278-310`)·`InitializeParams`/`ClientInfo`/`InitializeResponse`(`:316-341`)·`method::INITIALIZE`/`INITIALIZED` + `CLIENT_NAME`(`transport.rs:288` — `protocol.rs` 로 옮긴다). **재사용 안 함:** `request_blocking`·`Pending`·`Waiter`(`transport.rs:742-797`·`:426`) — 대화 통로의 라이터 스레드·공유 상태에 묶여 있다.
   - 순서 = `initialize`(id 1) → 응답 대기(서버 요청은 `error_response_line` 으로 거절 — `transport.rs:1903` `refuse` 와 같은 뜻 · 알림은 버림) → `initialized` → `account/rateLimits/read`(id 2) → 응답 → kill.
@@ -171,7 +171,7 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
 
 **확정(2026-09-27)**
 - **Claude 능동 조회 = A**(D2) — 짧게 뜨는 CLI 에 `get_usage` 한 줄. B 는 A 가 깨질 때의 교체 대안으로만(§1-3).
-- **쿨타임 = Claude 15분 · Codex 5분**(D1·R15) — 각 벤더 파일의 이름 붙인 상수(§1-3).
+- **쿨타임 = Claude·Codex 모두 15분(사용자 결정 2026-09-27 — 통일)**(D1·R15) — 각 벤더 파일의 이름 붙인 상수(§1-3).
 - **요청형(pull)** — 보이는 슬롯이 회사별로 1분마다 묻고 데몬은 기한이 지났을 때만 조회. 멀티 클라이언트 범위 밖(R29·D19).
 - **줍기↔조회 병합 순서 규칙 없음** — 나중 쓰기가 이긴다(§6 #17).
 - 출시 전 법무·보안 확인(D3)은 A 에도 그대로 걸린다 — 표지만.
