@@ -2137,8 +2137,9 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 /// `control/agent` 라우트가 부르는 명부 통지 포트의 실물 어댑터(ADR-0132).
 ///
 /// ★왜 여기 사는가★: 통지의 내용물(어떤 이벤트를 어떤 wire 모양으로 미는가)은 이 모듈이 소유한 지식이고,
-///   `control/` 은 "명부가 바뀌었다" 만 안다. 반대로 두면 제어 라우트가 wire 매핑을 알게 되고, 데몬 층
-///   결정(ADR-0130)이 추적하는 `control/` 의 나가는 간선이 생긴다.
+///   `control/` 은 "명부가 바뀌었다" 만 안다. 반대로 두면 제어 라우트가 wire 매핑을 알게 된다.
+///   이 배치를 처음 세운 사유는 ADR-0130 의 잎 성질(`control/` 의 나가는 간선 0)이었고 그 성질은
+///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
 /// ★짝 불일치 방지★: 생성자를 통해 **한 조립에서 나온** 팬아웃과 매니저만 묶인다 —
 ///   `DaemonWiring::roster_broadcast` 가 유일한 운영 생성 지점이다(그 struct 주석의 규칙).
 pub struct RosterFanout {
