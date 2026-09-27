@@ -27,11 +27,45 @@ import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queue
  */
 export type TurnOutcomeMark = 'failed' | 'interrupted' | 'unknown'
 
+/**
+ * 도구 호출의 중립 종류(각 backend 번역기가 정한다). 칸이 없거나(옛 데몬) 모르는 낱말이면(더 새 데몬) 항목은
+ * `'Other'` 다.
+ */
+// ADR-0239: 생성물 `ToolCategory.ts` 가 오기 전에도 tsc 가 서게 같은 낱말을 지역에 둔다 — 생성물 import 로
+//   바꾸는 것은 TRD S21-chat-ux §7 I1.
+export type ToolCategory = 'Read' | 'Search' | 'List' | 'Edit' | 'Command' | 'Web' | 'Agent' | 'Mcp' | 'Other'
+
+/**
+ * 도구 호출 하나의 끝 결과. `Refused` = 호스트(대시보드)가 승인 요청을 거절해 실행되지 않았다 ·
+ * `Declined` = 실행되지 않았으나 호스트 거절로 귀속되지 않은 것 — 에이전트 스스로의 거부 · 에이전트 쪽 준비
+ * 실패 · 귀속을 잃은 호스트 거절(이어받은 이력의 복원 · 거절 기억 상한에서 밀려남)이 모두 여기 든다. 이유를
+ * 말하지 않는다.
+ */
+// ADR-0241: 생성물 `ToolOutcome.ts` 와 같은 낱말의 지역 합 — 교체 시점은 `ToolCategory` 와 같다.
+export type ToolOutcome = 'Completed' | 'Failed' | 'Declined' | 'Refused'
+
+/** 도구 행의 끝 표식 — `ToolOutcome` 에서 정상 완료를 뺀 것. */
+export type ToolResultMark = 'failed' | 'declined' | 'refused'
+
 /** `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
 export type StructuredItem =
   | { kind: 'text'; text: string; itemId: number }
-  // id 는 백엔드 tool-use id.
-  | { kind: 'tool'; name: string; argsJson: string; id: string | null; itemId: number }
+  // id 는 백엔드 tool-use id. `category` · `resultMark` 는 누산기가 늘 채운다 — 비는 것은 손으로 지은 항목뿐이고
+  //   그때는 `'Other'` · 표식 없음으로 읽는다.
+  | {
+      kind: 'tool'
+      name: string
+      argsJson: string
+      id: string | null
+      category?: ToolCategory
+      /**
+       * 표식 없음(`null` · 칸 없음)을 성공으로 읽지 말 것 — 정상 완료뿐 아니라 끝이 안 온 호출(끊겨 아직 돈다 ·
+       * 옛 데몬 · 링에서 밀려남)과 모르는 결말도 같은 값이다. 뒤에 온 결과가 앞 표식을 덮는다(완료 · 모르는
+       * 결말이면 지운다).
+       */
+      resultMark?: ToolResultMark | null
+      itemId: number
+    }
   | { kind: 'usage'; inputTokens: number; outputTokens: number; itemId: number }
   | { kind: 'error'; message: string; itemId: number }
   // 탈출구 이벤트(codex/gemini·API 모델 누수 흡수).
@@ -41,6 +75,8 @@ export type StructuredItem =
   | { kind: 'outcome'; outcome: TurnOutcomeMark; detail: string | null; itemId: number }
   // 이 셸이 모르는 이벤트가 왔다는 표식. `count` = 연속 누적분. ★원본 payload 는 싣지 않는다★(아래 default arm).
   | { kind: 'unsupported'; count: number; itemId: number }
+
+export type ToolItem = Extract<StructuredItem, { kind: 'tool' }>
 
 /**
  * 재부착 대조에 건넬 목록 조회 답 — `AgentClient.listQueuedInputs` 의 답이 그대로 맞는다.
@@ -98,8 +134,10 @@ export class StructuredEventAccumulator {
    *
    * @param seq 이 프레임의 seq. ★재부착 대조는 이 값으로만 선다★ — 빼면 이 프레임의 목록 사건이 대조 기록에
    *   안 남고 쥔 답도 이 프레임을 배달로 세지 않는다(시험 편의로만 뺀다).
-   * @returns 이 프레임을 **이해했는가**. `false` = 파싱에 실패했거나 이 셸이 모르는 종류라, 돌아온
-   *   상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다는 뜻이다.
+   * @returns 이 프레임으로 호출자가 자기 대기 상태를 풀어도 되는가. `false` 는 둘이다 — ① 파싱에 실패했거나
+   *   이 셸이 모르는 종류라, 돌아온 상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다
+   *   ② 도구 끝 결과(`ToolResult`)다 — 앞선 도구 행의 표식이 바뀌었을 수 있지만(가리키는 행이 없거나 표식이
+   *   같으면 `snapshot` 은 그대로다) 응답이 온 것은 아니다(ADR-0241).
    *   ★호출자는 이 값을 보고 자기 대기 상태를 누산기에 넘길지 정한다★ — 프레임이 왔다는 사실만으로
    *   넘기면, 못 알아들은 프레임이 「응답이 왔다」로 둔갑해 대기 표시가 꺼진다(RichSlot 의 `awaiting`).
    */
@@ -113,19 +151,29 @@ export class StructuredEventAccumulator {
   private parseAndConsume(payload: Uint8Array | string, seq: number | undefined): boolean {
     const json = typeof payload === 'string' ? payload : new TextDecoder('utf-8').decode(payload)
     if (!json) return false
-    let ev: StructuredEvent
+    let parsed: unknown
     try {
-      ev = JSON.parse(json) as StructuredEvent
+      parsed = JSON.parse(json)
     } catch (err) {
       // 통로는 바보 파이프(무정제) — malformed JSON 은 프로토콜 수준 데이터 유실 신호이므로 경고 후 스킵.
       console.warn('[structuredAccumulator] tag1 JSON 파싱 실패 — 이벤트 스킵:', err)
       return false
     }
-    return this.consume(ev, seq)
+    // `null` 을 여기서 거르지 않으면 `consume` 의 `ev.type` 읽기가 구독 콜백까지 던진다(원시값도 사건이 아니다).
+    if (parsed === null || typeof parsed !== 'object') {
+      console.warn('[structuredAccumulator] tag1 payload 가 객체가 아니다 — 이벤트 스킵:', parsed)
+      return false
+    }
+    return this.consume(parsed as StructuredEvent, seq)
   }
 
-  /** @returns 위 `feed` 와 같은 뜻 — 아는 종류였으면 true. */
+  /** @returns 위 `feed` 와 같은 뜻. */
   private consume(ev: StructuredEvent, seq: number | undefined): boolean {
+    // ADR-0241: `case` 가 아니라 가드인 것은 생성물에 이 변형이 오기 전후 둘 다 tsc 가 서게 하려는 것이다.
+    //   ★이 가지에서 `ev` 의 칸을 읽지 말 것★ — 오기 전엔 `ev` 가 `never` 로 좁혀져 칸 읽기가 tsc 오류다. 온
+    //   뒤엔 아래 `never` 망라에서 이 변형이 빠지고, 생성물의 결말 낱말이 지역 `ToolOutcome` 보다 많으면 안
+    //   빠져 거기서 빨갛다(낱말 표류 경보).
+    if (isToolResultEvent(ev)) return this.consumeToolResult(ev)
     switch (ev.type) {
       case 'TextDelta': {
         // 빈 델타("")는 phantom item(빈 Markdown 블록·의미 없는 구분선 유발)을 만들지 않도록 스킵.
@@ -146,6 +194,9 @@ export class StructuredEventAccumulator {
           name: ev.name,
           argsJson: ev.args_json,
           id: ev.id,
+          // ADR-0239: 캐스트로 읽는 것은 생성물에 이 칸이 오기 전에도 tsc 가 서게 하려는 것이다.
+          category: normalizeToolCategory((ev as { category?: unknown }).category),
+          resultMark: null,
           itemId: this.nextId++,
         })
         this.turnDone = false
@@ -267,6 +318,27 @@ export class StructuredEventAccumulator {
       this.items.push({ kind: 'separator', itemId: this.nextId++ })
     }
     this.turnDone = true
+  }
+
+  /**
+   * 도구 끝 결과를 같은 id 의 앞선 도구 행에 표식으로 붙인다 — 새 항목을 만들지 않는다. 가리키는 행이 없으면
+   * (링에서 밀려났다) 버린다.
+   * ★`turnDone` 을 건드리지 않고 늘 `false` 를 돌려준다 — 붙였든 못 찾았든★: 끊긴 턴의 도구는 계속 돌다 턴 끝
+   * 뒤(다음 턴 도중일 수도)에 끝난다. 이 프레임으로 대기를 풀면 새 턴의 대기 표시가 답 없이 꺼진다.
+   */
+  // ADR-0241
+  private consumeToolResult(ev: LocalToolResultEvent): boolean {
+    // 모양이 깨진 프레임의 `null` id 가 id 없는 도구 행에 붙지 않게 거른다.
+    if (typeof ev.id !== 'string') return false
+    const mark = toolResultMark(ev.outcome)
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i]
+      if (item.kind !== 'tool' || item.id !== ev.id) continue
+      // copy-on-write — 이전에 반환된 snapshot() 참조가 이 객체를 가리킨다(TextDelta arm 과 같은 규율).
+      if (item.resultMark !== mark) this.items[i] = { ...item, resultMark: mark }
+      return false
+    }
+    return false
   }
 
   /**
@@ -485,6 +557,55 @@ function outcomeMark(
     default:
       return { outcome: 'unknown', detail: null }
   }
+}
+
+/** 생성물 `StructuredEvent` 의 `ToolResult` 변형과 같은 모양. */
+// ADR-0241
+type LocalToolResultEvent = { type: 'ToolResult'; id: string; outcome: ToolOutcome }
+
+// ADR-0241: `type` 만 본다 — `id` · `outcome` 은 `consumeToolResult` 가 런타임에 다시 거른다.
+function isToolResultEvent(ev: unknown): ev is LocalToolResultEvent {
+  return ev !== null && typeof ev === 'object' && (ev as { type?: unknown }).type === 'ToolResult'
+}
+
+/**
+ * ★모르는 낱말(더 새 데몬)·깨진 모양은 표식 없음이다★ — 아는 셋 중 하나로 접으면 화면이 거짓 결말을 그린다
+ * (`outcomeMark` 와 같은 규율).
+ */
+function toolResultMark(outcome: unknown): ToolResultMark | null {
+  switch (outcome) {
+    case 'Failed':
+      return 'failed'
+    case 'Declined':
+      return 'declined'
+    case 'Refused':
+      return 'refused'
+    case 'Completed':
+      return null
+    default:
+      console.warn('[structuredAccumulator] 모르는 ToolResult outcome — 표식 없이 둔다:', outcome)
+      return null
+  }
+}
+
+// ADR-0239: `Record` 라 `ToolCategory` 에 낱말이 늘거나 줄면 여기서 tsc 가 빨갛다.
+const TOOL_CATEGORIES: Record<ToolCategory, true> = {
+  Read: true,
+  Search: true,
+  List: true,
+  Edit: true,
+  Command: true,
+  Web: true,
+  Agent: true,
+  Mcp: true,
+  Other: true,
+}
+
+function normalizeToolCategory(value: unknown): ToolCategory {
+  // `in` 이 아닌 것은 `'toString'` 같은 프로토타입 이름을 종류로 받지 않으려는 것이다.
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, value)
+    ? (value as ToolCategory)
+    : 'Other'
 }
 
 function isCopyList(value: unknown): boolean {
