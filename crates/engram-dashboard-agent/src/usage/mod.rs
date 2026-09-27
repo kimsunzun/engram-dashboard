@@ -116,6 +116,13 @@ pub struct UsageObservation {
     pub model_scoped: Option<Vec<ScopedWindowObs>>,
     pub plan: Option<String>,
     pub source: UsageSource,
+    /// 조회는 성공했는데 상류가 「이 계정엔 한도 정보가 없다」고 답했다 — Claude
+    /// `rate_limits_available: false`(API 키·Bedrock·Vertex·profile 권한 없는 토큰·로그아웃).
+    /// `true` 면 창 칸(`five_hour`·`weekly`·`model_scoped`)은 전부 `None` 이고 `source` 는
+    /// `Active` 다 — 만드는 쪽이 지키는 약속이다. 받는 쪽은 창 값을 전부 비우고 「정보 없음」
+    /// 상태로 접는다 — 실패가 아니다(실패는 들고 있던 값을 그대로 둔다).
+    /// `Passive` 관측은 언제나 `false` 다.
+    pub limits_unavailable: bool,
 }
 
 #[cfg(test)]
@@ -135,6 +142,7 @@ mod tests {
             model_scoped: None,
             plan: None,
             source: UsageSource::Passive,
+            limits_unavailable: false,
         }
     }
 

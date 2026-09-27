@@ -505,6 +505,7 @@ fn observation(pct: f64) -> UsageObservation {
         model_scoped: None,
         plan: None,
         source: UsageSource::Passive,
+        limits_unavailable: false,
     }
 }
 

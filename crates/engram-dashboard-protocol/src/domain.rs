@@ -454,6 +454,7 @@ pub struct UsageLimitSnapshot {
     pub in_flight: bool,
     pub served: UsageServed,
     /// `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
+    /// 예외는 `Unavailable` 이다 — 값을 싣지 않는다.
     pub state: UsageVendorState,
 }
 
@@ -491,6 +492,9 @@ pub enum UsageVendorState {
     NotInstalled,
     /// 인증 오류 — 로그인이 필요하다.
     NeedsLogin,
+    /// 조회는 됐지만 이 계정엔 한도 정보가 없다(로그아웃 · API 키 계정 · profile 권한이 없는 토큰 등)
+    /// — 스냅숏에 창 값이 없다.
+    Unavailable,
     /// 그 밖의 실패. `next_attempt_in_secs` = 다음 자동 조회까지 남은 초.
     Failed {
         #[ts(type = "number | null")]
@@ -669,7 +673,7 @@ mod tests {
         );
     }
 
-    /// 상태 다섯이 코드 + 상대 초만으로 왕복한다 — 칸이 있는 두 변형은 값·`null` 을 다 태운다.
+    /// 상태 여섯이 코드 + 상대 초만으로 왕복한다 — 칸이 있는 두 변형은 값·`null` 을 다 태운다.
     #[test]
     fn every_usage_vendor_state_roundtrips_inside_a_snapshot() {
         let cases = [
@@ -684,6 +688,10 @@ mod tests {
             (
                 UsageVendorState::NeedsLogin,
                 serde_json::json!({ "kind": "NeedsLogin" }),
+            ),
+            (
+                UsageVendorState::Unavailable,
+                serde_json::json!({ "kind": "Unavailable" }),
             ),
             (
                 UsageVendorState::Failed {
@@ -735,6 +743,7 @@ mod tests {
             UsageVendorState::inline(),
             concat!(
                 r#"{ "kind": "Ready" } | { "kind": "NotInstalled" } | { "kind": "NeedsLogin" } | "#,
+                r#"{ "kind": "Unavailable" } | "#,
                 r#"{ "kind": "Failed", next_attempt_in_secs: number | null, } | "#,
                 r#"{ "kind": "Rejected", retry_in_secs: number, }"#,
             )

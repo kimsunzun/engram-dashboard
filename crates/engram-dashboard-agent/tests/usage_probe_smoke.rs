@@ -63,8 +63,8 @@ fn codex_rate_limits_read_answers_through_the_operating_command() {
     assert_eq!(obs.vendor.as_str(), "codex");
 }
 
-/// 빈 설정 폴더 = 로그인 없음. 분류를 단정하지 않는다 — 응답 모양 수집이 목적이다(TRD §6 #4). 재는 것은 계약
-/// 하나뿐이다: 마감 안에 돌아온다.
+/// 빈 설정 폴더 = 로그인 없음. 분류를 단정하지 않는다 — 응답 모양 수집이 목적이다(TRD §6 #4). 재는 계약은
+/// 둘이다: 마감 안에 돌아온다 · 성공으로 돌아오면 「한도 정보 없음」이다.
 /// ★실측(claude 2.1.280 · 2026-09-27) = 오류가 아니라 성공 응답이다★ — `rate_limits: null` ·
 /// `subscription_type: null` · `rate_limits_available: false`(로그인된 쪽은 `true`). 상류 오류 문구는 없었다.
 #[test]
@@ -110,6 +110,12 @@ fn claude_logged_out_answer_shape() {
         "마감 안에 돌아와야 한다: {:?}",
         run.elapsed
     );
+    if let Ok(obs) = &run.result {
+        assert!(
+            obs.limits_unavailable,
+            "로그아웃 성공 응답은 「한도 정보 없음」이어야 한다"
+        );
+    }
 }
 
 /// TRD §6 #18 — 개발 빌드의 데이터 폴더는 저장소 안이라, CLI 가 작업 폴더에서 위로 올라가며 저장소의
@@ -814,10 +820,11 @@ fn read_tail(child: &mut dyn ProbeChild, lines: &mut Vec<String>) {
 
 fn summarize(obs: &UsageObservation) -> String {
     let mut out = format!(
-        "   vendor={} source={:?} plan={}\n   five_hour: {}\n   weekly:    {}\n",
+        "   vendor={} source={:?} plan={} limits_unavailable={}\n   five_hour: {}\n   weekly:    {}\n",
         obs.vendor.as_str(),
         obs.source,
         obs.plan.as_deref().unwrap_or("-"),
+        obs.limits_unavailable,
         window_text(obs.five_hour.as_ref()),
         window_text(obs.weekly.as_ref()),
     );

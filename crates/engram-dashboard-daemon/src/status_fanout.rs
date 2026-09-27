@@ -303,6 +303,7 @@ mod tests {
             model_scoped: None,
             plan: None,
             source: UsageSource::Active,
+            limits_unavailable: false,
         });
 
         assert!(fanout.texts().is_empty(), "{:?}", fanout.texts());

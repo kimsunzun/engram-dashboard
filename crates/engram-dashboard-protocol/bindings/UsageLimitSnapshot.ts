@@ -29,5 +29,6 @@ model_scoped: Array<UsageScopedWindow>, plan: string | null,
 in_flight: boolean, served: UsageServed, 
 /**
  * `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
+ * 예외는 `Unavailable` 이다 — 값을 싣지 않는다.
  */
 state: UsageVendorState, };

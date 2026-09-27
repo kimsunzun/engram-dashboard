@@ -290,10 +290,18 @@ fn ended_without_response(
 /// 우리 요청의 응답 줄 → 관측.
 ///
 /// - `response.subtype == "error"` → [`classify_error`] · 그 밖의 모르는 subtype → `Parse`.
-/// - 성공이면 `response.response` 가 사용량이다: `rate_limits`(없으면 창이 전부 없다 — `null` 은 정상 값이다.
-///   API 키 계정 등) · 그 안의 `five_hour`/`seven_day`(`{utilization 0–100, resets_at ISO 8601}`) ·
-///   모델별 주간 창 · `subscription_type` → plan.
-/// - ★`rate_limits` 칸 자체가 빠졌거나 객체도 `null` 도 아니면 `Parse` 다★ — 그것을 「창 없음」으로 읽으면 모양이
+/// - 성공이면 `response.response` 가 사용량이다: `rate_limits` · 그 안의 `five_hour`/`seven_day`
+///   (`{utilization 0–100, resets_at ISO 8601}`) · 모델별 주간 창 · `subscription_type` → plan.
+/// - 두 칸의 뜻은 CLI 2.1.280 의 응답 스키마 설명이 가른다: `rate_limits_available` = 「plan 한도가 적용되지 않으면
+///   `false`(API 키·Bedrock·Vertex·profile 권한 없는 토큰)」, `rate_limits` = 「CLI 가 받아 오지 못하면 `null`」.
+///   그래서 `null` 하나만으로는 「조회 실패」고, 명시적 `false` 만이 「이 계정엔 한도가 없다」다.
+/// - `rate_limits_available` 이 bool `false` → 「한도 정보 없음」(`limits_unavailable`). 창은 전부 `None` 이고
+///   `rate_limits` 는 모양이 무엇이든(빠져도) 읽지 않는다 — plan 은 그대로 읽는다.
+/// - 그 밖(`true`·칸 없음·bool 아님 — bool 이 아니면 없는 것으로 친다)에서 `rate_limits` 가 명시적 `null` 이면
+///   `Upstream`(= 조회 실패)이다. 받는 쪽이 들고 있던 값을 유지한다. ★CLI 쪽 조회가 429 를 받아도 오류 subtype 이
+///   아니라 이 `null` 로 온다(CLI 코드 정독)★ — 그래서 `RateLimited` 로 가르지 못하고 `Upstream` 으로 접는다.
+///   [`classify_error`] 의 한도 문구 표는 다른 버전이 오류 subtype 으로 답할 때를 위해 남긴다.
+/// - ★그 밖에 `rate_limits` 칸이 빠졌거나 객체도 `null` 도 아니면 `Parse` 다★ — 그것을 「창 없음」으로 읽으면 모양이
 ///   바뀐 응답이 성공으로 들어가 들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다.
 /// - 관측은 `Active` 라 `None` 칸 = 「없다」(받는 쪽이 비운다). 두 칸이 다 안 읽히는 창도 `None` 으로 접는다.
 fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeError> {
@@ -310,15 +318,26 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeErro
         .get("response")
         .and_then(Value::as_object)
         .ok_or_else(|| parse_error("성공 응답에 사용량 객체가 없다"))?;
-    let (five_hour, weekly, model_scoped) = match usage.get("rate_limits") {
-        Some(Value::Null) => (None, None, None),
-        Some(Value::Object(limits)) => (
-            active_window(limits.get("five_hour")),
-            active_window(limits.get("seven_day")),
-            model_scoped_windows(limits),
-        ),
-        Some(_) => return Err(parse_error("rate_limits 가 객체도 null 도 아니다")),
-        None => return Err(parse_error("사용량 객체에 rate_limits 칸이 없다")),
+    let limits_unavailable =
+        usage.get("rate_limits_available").and_then(Value::as_bool) == Some(false);
+    let (five_hour, weekly, model_scoped) = if limits_unavailable {
+        // `false` 인데 `rate_limits` 에 값이 실려 와도 읽지 않는다 — 「정보 없음」 관측이 창을 나르면 모순이다.
+        (None, None, None)
+    } else {
+        match usage.get("rate_limits") {
+            Some(Value::Null) => {
+                return Err(ProbeError::Upstream(
+                    "claude 가 사용량을 받아 오지 못했다(rate_limits 가 null)".to_owned(),
+                ));
+            }
+            Some(Value::Object(limits)) => (
+                active_window(limits.get("five_hour")),
+                active_window(limits.get("seven_day")),
+                model_scoped_windows(limits),
+            ),
+            Some(_) => return Err(parse_error("rate_limits 가 객체도 null 도 아니다")),
+            None => return Err(parse_error("사용량 객체에 rate_limits 칸이 없다")),
+        }
     };
     let plan = usage
         .get("subscription_type")
@@ -331,6 +350,7 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeErro
         model_scoped,
         plan,
         source: UsageSource::Active,
+        limits_unavailable,
     })
 }
 
@@ -633,19 +653,128 @@ mod tests {
         assert_scratch_gone(&root);
     }
 
+    fn assert_no_windows(obs: &UsageObservation) {
+        assert_eq!(obs.five_hour, None);
+        assert_eq!(obs.weekly, None);
+        assert_eq!(obs.model_scoped, None);
+        assert_eq!(obs.source, UsageSource::Active);
+    }
+
+    fn assert_fetch_failed(result: Result<UsageObservation, ProbeError>, why: &str) {
+        assert!(
+            matches!(result, Err(ProbeError::Upstream(_))),
+            "{why}: {result:?}"
+        );
+    }
+
+    /// 로그아웃한 CLI 가 답하는 모양(실측).
     #[test]
-    fn null_rate_limits_is_a_success_without_windows() {
+    fn logged_out_shape_is_limits_unavailable_without_a_plan() {
         let obs = observe(json!({
-            "subscription_type": "pro",
+            "subscription_type": null,
             "rate_limits_available": false,
             "rate_limits": null,
         }))
         .expect("관측");
-        assert_eq!(obs.five_hour, None);
-        assert_eq!(obs.weekly, None);
-        assert_eq!(obs.model_scoped, None);
-        assert_eq!(obs.plan.as_deref(), Some("pro"));
-        assert_eq!(obs.source, UsageSource::Active);
+        assert!(obs.limits_unavailable);
+        assert_no_windows(&obs);
+        assert_eq!(obs.plan, None);
+    }
+
+    /// profile 권한이 없는 토큰 — plan 은 알지만 한도는 적용되지 않는다.
+    #[test]
+    fn unavailable_with_a_plan_still_reads_the_plan() {
+        let obs = observe(json!({
+            "subscription_type": "max",
+            "rate_limits_available": false,
+            "rate_limits": null,
+        }))
+        .expect("관측");
+        assert!(obs.limits_unavailable);
+        assert_no_windows(&obs);
+        assert_eq!(obs.plan.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn unavailable_ignores_windows_carried_in_rate_limits() {
+        let mut usage = typical_usage();
+        usage["rate_limits_available"] = json!(false);
+        let obs = observe(usage).expect("관측");
+        assert!(obs.limits_unavailable);
+        assert_no_windows(&obs);
+        assert_eq!(obs.plan.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn unavailable_does_not_read_rate_limits_of_any_shape() {
+        let without_limits = json!({ "subscription_type": "max", "rate_limits_available": false });
+        let obs = observe(without_limits).expect("관측");
+        assert!(obs.limits_unavailable, "rate_limits 가 빠져도");
+        assert_no_windows(&obs);
+
+        for limits in [json!("none"), json!([]), json!(0)] {
+            let obs = observe(json!({ "rate_limits_available": false, "rate_limits": limits }))
+                .expect("관측");
+            assert!(obs.limits_unavailable, "{limits}");
+            assert_no_windows(&obs);
+        }
+    }
+
+    #[test]
+    fn null_rate_limits_without_a_false_flag_is_a_fetch_failure() {
+        assert_fetch_failed(
+            observe(json!({ "rate_limits_available": true, "rate_limits": null })),
+            "true",
+        );
+        assert_fetch_failed(
+            observe(json!({ "subscription_type": "max", "rate_limits": null })),
+            "칸 없음",
+        );
+    }
+
+    #[test]
+    fn available_with_windows_is_not_unavailable() {
+        let obs = observe(typical_usage()).expect("관측");
+        assert!(!obs.limits_unavailable);
+        assert_eq!(obs.five_hour, window(Some(42.5), Some(FIVE_HOUR_RESET)));
+        assert_eq!(obs.weekly, window(Some(13.0), Some(WEEKLY_RESET)));
+    }
+
+    /// bool 이 아닌 `rate_limits_available` 은 칸이 없는 것과 같다 — `rate_limits` 가 판정을 가른다.
+    #[test]
+    fn a_non_bool_flag_is_read_as_missing() {
+        for flag in [
+            json!("false"),
+            json!(0),
+            json!(1),
+            json!({}),
+            json!([false]),
+        ] {
+            let mut usage = typical_usage();
+            usage["rate_limits_available"] = flag.clone();
+            let obs = observe(usage).expect("관측");
+            assert!(!obs.limits_unavailable, "{flag}");
+            assert_eq!(
+                obs.five_hour,
+                window(Some(42.5), Some(FIVE_HOUR_RESET)),
+                "{flag}"
+            );
+
+            assert_fetch_failed(
+                observe(json!({ "rate_limits_available": flag.clone(), "rate_limits": null })),
+                &flag.to_string(),
+            );
+
+            for missing_or_bad in [
+                json!({ "rate_limits_available": flag.clone() }),
+                json!({ "rate_limits_available": flag.clone(), "rate_limits": "none" }),
+            ] {
+                assert!(
+                    matches!(observe(missing_or_bad), Err(ProbeError::Parse(_))),
+                    "{flag}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -756,6 +885,7 @@ mod tests {
             envelope(json!({ "subtype": 1, "request_id": "r" })),
             envelope(json!({ "subtype": "success", "request_id": "r" })),
             envelope(json!({ "subtype": "success", "request_id": "r", "response": [1] })),
+            observe(json!({ "rate_limits_available": true })),
             observe(json!({ "subscription_type": "max" })),
             observe(json!({ "rate_limits": "none" })),
             observe(json!({ "rate_limits": [] })),
@@ -846,12 +976,13 @@ mod tests {
             json!("ma\nx"),
             json!({ "tier": "max" }),
         ] {
-            let obs =
-                observe(json!({ "subscription_type": plan, "rate_limits": null })).expect("관측");
+            let obs = observe(json!({ "subscription_type": plan, "rate_limits_available": false }))
+                .expect("관측");
             assert_eq!(obs.plan, None, "{plan}");
         }
         let obs =
-            observe(json!({ "subscription_type": " team\n", "rate_limits": null })).expect("관측");
+            observe(json!({ "subscription_type": " team\n", "rate_limits_available": false }))
+                .expect("관측");
         assert_eq!(obs.plan.as_deref(), Some("team"));
     }
 

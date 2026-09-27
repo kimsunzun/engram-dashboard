@@ -303,6 +303,7 @@ fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeError
         model_scoped: model_scoped_windows(&buckets),
         plan,
         source: UsageSource::Active,
+        limits_unavailable: false,
     })
 }
 

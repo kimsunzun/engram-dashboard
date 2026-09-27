@@ -3,4 +3,4 @@
 /**
  * 벤더 조회의 상태 코드.
  */
-export type UsageVendorState = { "kind": "Ready" } | { "kind": "NotInstalled" } | { "kind": "NeedsLogin" } | { "kind": "Failed", next_attempt_in_secs: number | null, } | { "kind": "Rejected", retry_in_secs: number, };
+export type UsageVendorState = { "kind": "Ready" } | { "kind": "NotInstalled" } | { "kind": "NeedsLogin" } | { "kind": "Unavailable" } | { "kind": "Failed", next_attempt_in_secs: number | null, } | { "kind": "Rejected", retry_in_secs: number, };
