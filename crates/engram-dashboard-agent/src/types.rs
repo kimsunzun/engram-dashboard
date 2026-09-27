@@ -882,6 +882,11 @@ pub trait StatusSink: Send + Sync + 'static {
     fn agent_list_updated(&self, agents: Vec<AgentInfo>);
     /// 복원 시도 결과 통지(S9 §18-d). 기본 no-op — 복원을 안 쓰는 sink는 구현 불필요.
     fn restore_result(&self, _report: crate::profile::RestoreReport) {}
+    /// 백엔드가 사용량 한도를 관측했다(빠진 칸의 뜻 = [`crate::usage::UsageObservation`]). 기본 no-op.
+    ///
+    /// ★계약은 [`Self::turn_ended`] 와 같다(논블록·비재진입)★ — 부르는 쪽은 출력 pump 라, 여기서 멈추면 그
+    ///   화신의 출력이 함께 멈춘다.
+    fn usage_observed(&self, _obs: crate::usage::UsageObservation) {}
     /// 이 화신이 방금 한 턴을 끝냈다(ADR-0113 — 턴 관측의 push 출구). 기본 no-op.
     ///
     /// ★계약 = 논블록·비재진입(ADR-0006 콜백 규율 — 절대 위반 금지)★: 구현이 할 수 있는 일은 논블록

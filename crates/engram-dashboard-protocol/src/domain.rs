@@ -1,6 +1,8 @@
 //! 도메인 타입(wire 표현). 현 `agent::types` / `agent::profile` 의 직렬화 형태를 미러.
 //! ★이 중복을 합치려 `agent` 가 이 crate 를 의존하게 만들지 말 것★ — 그 crate 의 protocol-무의존이
 //! 불변식이라 미러가 그 대가다(정본 = `crates/engram-dashboard-agent/Cargo.toml` `[dependencies]` 주석).
+//! ★단 사용량 한도 타입(`Usage*`)은 미러가 아니다★ — 데몬 답의 모양이라 agent `usage` 의 관측 타입과
+//!   칸이 일부러 다르다(부호·나이·만료). 맞추려 들지 말 것.
 
 use ts_rs::TS;
 
@@ -428,6 +430,99 @@ pub struct SnapshotChunk {
     pub data: Vec<u8>,
 }
 
+// ── 사용량 한도 wire(요청형 — 클라이언트가 묻고 데몬이 답한다) ──────────────────────────────
+
+/// 한 벤더·계정의 사용량 상태 — 데몬이 요청에 답할 때 싣는 한 장.
+///
+/// ★시간 칸 규칙★: 절대 시각은 [`UsageWindow::resets_at`](서버가 준 epoch 초) 하나뿐이다. 나머지 시간
+///   칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 **이 답을 보낸 순간 기준 상대 초**라, 받는 쪽은
+///   받은 순간부터 흐른 만큼 더해 읽는다 — 양쪽 벽시계가 어긋나거나 되감겨도 흔들리지 않게.
+/// ★표시 문구를 싣지 않는다★ — 상태는 코드 + 수만 나르고 문구는 받는 쪽이 번역 키로 만든다.
+/// ★`null` 창·`null` 수는 「모른다」이지 0 이 아니다★ — 0% 로 그리면 안 된다.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageLimitSnapshot {
+    pub vendor: AgentBackendKind,
+    /// 같은 벤더 안의 계정 — 지금은 늘 `"default"`(데몬 env 의 기본 로그인).
+    pub account_key: String,
+    pub five_hour: Option<UsageWindow>,
+    pub weekly: Option<UsageWindow>,
+    /// 모델별 주간 창. 빈 배열 = 없음.
+    pub model_scoped: Vec<UsageScopedWindow>,
+    pub plan: Option<String>,
+    /// 조회가 아직 진행 중이다 — 이 답의 값은 그 조회 전의 것이고, 결과는 다음 요청의 답에 실린다.
+    pub in_flight: bool,
+    pub served: UsageServed,
+    /// `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
+    pub state: UsageVendorState,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageWindow {
+    /// **쓴** 양의 백분율 0–100(남은 양이 아니다).
+    pub used_pct: Option<f64>,
+    /// 리셋 시각, epoch 초.
+    #[ts(type = "number | null")]
+    pub resets_at: Option<u64>,
+    /// 이 값을 관측한 뒤 흐른 초.
+    #[ts(type = "number")]
+    pub age_secs: u64,
+    /// 데몬이 리셋 경과를 확인했다 — 한 번 서면 이 창에 새 값이 올 때까지 유지된다(벽시계가 되감겨도).
+    pub expired: bool,
+    pub source: UsageSourceKind,
+}
+
+/// 모델별 주간 창 하나. `label` = 벤더가 준 표시용 이름.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageScopedWindow {
+    pub label: String,
+    pub window: UsageWindow,
+}
+
+/// 벤더 조회의 상태 코드.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "kind")]
+#[ts(export)]
+pub enum UsageVendorState {
+    Ready,
+    /// 그 벤더의 CLI 가 없다.
+    NotInstalled,
+    /// 인증 오류 — 로그인이 필요하다.
+    NeedsLogin,
+    /// 그 밖의 실패. `next_attempt_in_secs` = 다음 자동 조회까지 남은 초.
+    Failed {
+        #[ts(type = "number | null")]
+        next_attempt_in_secs: Option<u64>,
+    },
+    /// 상류가 조회를 거절했다. 이 초가 지나기 전에는 강제 새로고침도 조회를 내보내지 않는다.
+    Rejected {
+        #[ts(type = "number")]
+        retry_in_secs: u64,
+    },
+}
+
+/// 이 답의 값이 어떻게 나왔나.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum UsageServed {
+    /// 이 요청이 기다린 조회가 방금 받아 온 값이다.
+    Fresh,
+    /// 이번 요청 동안 새로 받은 값이 없다(조회 안 함 · 실패 · 기다림 상한 초과) — 데몬이 들고 있던 값이다.
+    Cached,
+}
+
+/// 창 값의 출처.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum UsageSourceKind {
+    /// 대화 스트림에서 주웠다.
+    Passive,
+    /// 조회로 받았다.
+    Active,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +606,138 @@ mod tests {
             AgentBackendKind::ALL.len(),
             AgentBackendKind::WORDS.len(),
             "낱말 표와 짝 표가 갈렸다"
+        );
+    }
+
+    // ── 사용량 한도 wire ──
+
+    fn usage_window(used_pct: Option<f64>, source: UsageSourceKind) -> UsageWindow {
+        UsageWindow {
+            used_pct,
+            resets_at: Some(1_900_000_000),
+            age_secs: 42,
+            expired: false,
+            source,
+        }
+    }
+
+    fn usage_snapshot(state: UsageVendorState) -> UsageLimitSnapshot {
+        UsageLimitSnapshot {
+            vendor: AgentBackendKind::Codex,
+            account_key: "default".to_string(),
+            five_hour: Some(usage_window(Some(37.5), UsageSourceKind::Passive)),
+            weekly: None,
+            model_scoped: vec![UsageScopedWindow {
+                label: "opus".to_string(),
+                window: usage_window(None, UsageSourceKind::Active),
+            }],
+            plan: Some("pro".to_string()),
+            in_flight: true,
+            served: UsageServed::Cached,
+            state,
+        }
+    }
+
+    /// 전체 모양을 한 번에 잰다 — 부분 단언은 검사 안 한 칸의 이름·표기 변경을 통과시킨다.
+    #[test]
+    fn usage_snapshot_serializes_to_the_exact_wire_shape() {
+        let snap = usage_snapshot(UsageVendorState::Failed {
+            next_attempt_in_secs: Some(840),
+        });
+        assert_eq!(
+            serde_json::to_value(&snap).expect("직렬화"),
+            serde_json::json!({
+                "vendor": "codex",
+                "account_key": "default",
+                "five_hour": {
+                    "used_pct": 37.5, "resets_at": 1_900_000_000u64, "age_secs": 42,
+                    "expired": false, "source": "Passive"
+                },
+                "weekly": null,
+                "model_scoped": [{
+                    "label": "opus",
+                    "window": {
+                        "used_pct": null, "resets_at": 1_900_000_000u64, "age_secs": 42,
+                        "expired": false, "source": "Active"
+                    }
+                }],
+                "plan": "pro",
+                "in_flight": true,
+                "served": "Cached",
+                "state": { "kind": "Failed", "next_attempt_in_secs": 840 }
+            })
+        );
+    }
+
+    /// 상태 다섯이 코드 + 상대 초만으로 왕복한다 — 칸이 있는 두 변형은 값·`null` 을 다 태운다.
+    #[test]
+    fn every_usage_vendor_state_roundtrips_inside_a_snapshot() {
+        let cases = [
+            (
+                UsageVendorState::Ready,
+                serde_json::json!({ "kind": "Ready" }),
+            ),
+            (
+                UsageVendorState::NotInstalled,
+                serde_json::json!({ "kind": "NotInstalled" }),
+            ),
+            (
+                UsageVendorState::NeedsLogin,
+                serde_json::json!({ "kind": "NeedsLogin" }),
+            ),
+            (
+                UsageVendorState::Failed {
+                    next_attempt_in_secs: None,
+                },
+                serde_json::json!({ "kind": "Failed", "next_attempt_in_secs": null }),
+            ),
+            (
+                UsageVendorState::Failed {
+                    next_attempt_in_secs: Some(90),
+                },
+                serde_json::json!({ "kind": "Failed", "next_attempt_in_secs": 90 }),
+            ),
+            (
+                UsageVendorState::Rejected { retry_in_secs: 600 },
+                serde_json::json!({ "kind": "Rejected", "retry_in_secs": 600 }),
+            ),
+        ];
+        for (state, want) in cases {
+            let snap = usage_snapshot(state);
+            let json = serde_json::to_value(&snap).expect("직렬화");
+            assert_eq!(json["state"], want);
+            assert_eq!(
+                serde_json::from_value::<UsageLimitSnapshot>(json).expect("역직렬화"),
+                snap
+            );
+        }
+    }
+
+    /// 프론트가 받는 TS 모양 — u64 칸이 `bigint` 로 새면 JSON number 를 받는 코드와 타입이 갈린다.
+    #[test]
+    fn usage_ts_shapes_use_number_for_every_time_field() {
+        let decls = [
+            UsageLimitSnapshot::decl(),
+            UsageWindow::decl(),
+            UsageScopedWindow::decl(),
+            UsageVendorState::decl(),
+            UsageServed::decl(),
+            UsageSourceKind::decl(),
+        ];
+        for decl in &decls {
+            assert!(!decl.contains("bigint"), "{decl}");
+        }
+        let window = UsageWindow::decl();
+        assert!(window.contains("resets_at: number | null"), "{window}");
+        assert!(window.contains("age_secs: number,"), "{window}");
+        // 상태는 전량을 잰다 — 문구(`string`) 칸이 끼어들면 여기서 깨진다.
+        assert_eq!(
+            UsageVendorState::inline(),
+            concat!(
+                r#"{ "kind": "Ready" } | { "kind": "NotInstalled" } | { "kind": "NeedsLogin" } | "#,
+                r#"{ "kind": "Failed", next_attempt_in_secs: number | null, } | "#,
+                r#"{ "kind": "Rejected", retry_in_secs: number, }"#,
+            )
         );
     }
 }

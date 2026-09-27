@@ -288,4 +288,23 @@ mod tests {
             );
         }
     }
+
+    /// ★사용량은 방송하지 않는다★ — 클라이언트가 물을 때만 답하는 요청형이라, 여기서 관측을 흘려
+    /// 보내면 그 결정이 조용히 뒤집힌다.
+    #[test]
+    fn a_usage_observation_is_not_broadcast() {
+        use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey};
+        let (sink, fanout) = sink_with_fanout();
+
+        sink.usage_observed(UsageObservation {
+            vendor: UsageVendorKey::new("test-vendor"),
+            five_hour: None,
+            weekly: None,
+            model_scoped: None,
+            plan: None,
+            source: UsageSource::Active,
+        });
+
+        assert!(fanout.texts().is_empty(), "{:?}", fanout.texts());
+    }
 }

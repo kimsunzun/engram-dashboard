@@ -873,6 +873,11 @@ impl StatusSink for MessagingFlushSink {
         self.inner.restore_result(report);
     }
 
+    // 사용량은 flush 계기가 아니라 흘리기만 한다 — 빠뜨리면 안 되는 이유는 `turn_ended` 의 decorator 계약.
+    fn usage_observed(&self, obs: engram_dashboard_agent::usage::UsageObservation) {
+        self.inner.usage_observed(obs);
+    }
+
     /// ★턴 종료 push → flush 도어벨(ADR-0113 결정 3 — 데몬은 중계만)★. 여기서 하는 일은 coalescing
     ///   판정 + 논블록 채널 send 뿐이다(그 계약은 `StatusSink::turn_ended`).
     // ADR-0113
@@ -1403,6 +1408,56 @@ mod tests {
         notifier.request_flush(id);
         notifier.request_flush(id);
         assert_eq!(drain_msgs(&mut rx), vec![FlushMsg::Idle { id }]);
+    }
+
+    // ── 7c. 사용량 관측 — 도어벨 없이 감싼 sink 로만 흐른다 ─────────────────────────────────
+
+    struct UsageRecordingInner {
+        seen: Arc<Mutex<Vec<engram_dashboard_agent::usage::UsageObservation>>>,
+    }
+    impl StatusSink for UsageRecordingInner {
+        fn status_changed(&self, _: AgentId, _: CoreStatus, _: u32) {}
+        fn agent_list_updated(&self, _: Vec<CoreAgentInfo>) {}
+        fn usage_observed(&self, obs: engram_dashboard_agent::usage::UsageObservation) {
+            self.seen.lock().unwrap().push(obs);
+        }
+    }
+
+    #[test]
+    fn a_usage_observation_is_forwarded_to_the_wrapped_sink_and_rings_no_doorbell() {
+        use engram_dashboard_agent::usage::{
+            UsageObservation, UsageSource, UsageVendorKey, WindowObs,
+        };
+        let (tx, mut rx) = mpsc::unbounded_channel::<FlushMsg>();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = MessagingFlushSink::new_test(
+            Box::new(UsageRecordingInner { seen: seen.clone() }),
+            tx,
+            Arc::new(IdleCoalescer::new()),
+        );
+        let obs = UsageObservation {
+            vendor: UsageVendorKey::new("test-vendor"),
+            five_hour: Some(WindowObs {
+                used_pct: Some(12.5),
+                resets_at: Some(1_900_000_000),
+            }),
+            weekly: None,
+            model_scoped: None,
+            plan: Some("pro".to_string()),
+            source: UsageSource::Passive,
+        };
+
+        sink.usage_observed(obs.clone());
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![obs],
+            "decorator 계약 — 받은 관측 그대로 한 번"
+        );
+        assert!(
+            drain_msgs(&mut rx).is_empty(),
+            "사용량은 flush 계기가 아니다"
+        );
     }
 
     // ── 9b. flush worker: 2-레인 소유/종료(round-3 finding 1) ────────────────────────────────
