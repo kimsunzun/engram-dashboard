@@ -3,11 +3,13 @@
 //! ★벤더 이름·정책(쿨타임·시한)을 여기 두지 않는다★ — 그것은 각 벤더의 backend 모듈이 진다(ADR-0004
 //!   「백엔드 확장」). 이 모듈은 벤더를 불투명 낱말 하나로만 안다.
 //! 생산자 쪽 공용 도구도 여기 산다 — 칸 값 정규화([`used_pct_from_fraction`] 등) · 상류 문자열 도구
-//! ([`display_text`]·[`has_word`]) · 기본 계정이 아닌 에이전트의 줍기를 막는 디코더 감싸개([`UsageGate`]).
+//! ([`display_text`]·[`has_word`]) · 비정상 결과의 근거와 상류 원문([`UsageDetail`]·[`UpstreamText`]) · 기본 계정이
+//! 아닌 에이전트의 줍기를 막는 디코더 감싸개([`UsageGate`]).
 //! 능동 조회의 seam([`UsageProbe`]·[`ProbeSpawner`])과 그 실물([`OsProbeSpawner`]·[`ScratchDir`])도 여기다 —
 //! 벤더 조회기는 각 backend 가 이 seam 위에 구현한다.
 // ADR-0004
 
+mod detail;
 mod gate;
 mod normalize;
 mod probe;
@@ -17,13 +19,14 @@ mod scratch;
 pub(crate) mod testing;
 mod text;
 
+pub use detail::{UpstreamText, UsageDetail};
 pub use gate::{env_overrides_daemon, UsageGate};
 pub use normalize::{
     resets_at_from_epoch_secs, resets_at_from_json, used_pct_from_fraction, used_pct_from_percent,
 };
 pub use probe::{
-    finish_after_answer, ExitInfo, ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeSpawner,
-    UsagePolicy, UsageProbe,
+    finish_after_answer, ExitInfo, ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure,
+    ProbeSpawner, UsagePolicy, UsageProbe,
 };
 pub use process::{OsProbeSpawner, KILL_WAIT};
 pub use scratch::{sweep_stale_scratch, ScratchDir};
@@ -116,13 +119,13 @@ pub struct UsageObservation {
     pub model_scoped: Option<Vec<ScopedWindowObs>>,
     pub plan: Option<String>,
     pub source: UsageSource,
-    /// 조회는 성공했는데 상류가 「이 계정엔 한도 정보가 없다」고 답했다 — Claude
-    /// `rate_limits_available: false`(API 키·Bedrock·Vertex·profile 권한 없는 토큰·로그아웃).
-    /// `true` 면 창 칸(`five_hour`·`weekly`·`model_scoped`)은 전부 `None` 이고 `source` 는
+    /// `Some` = 조회는 성공했는데 상류가 「이 계정엔 한도 정보가 없다」고 답했다 — 값은 그 근거다(Claude
+    /// `rate_limits_available: false` — API 키·Bedrock·Vertex·profile 권한 없는 토큰·로그아웃).
+    /// `Some` 이면 창 칸(`five_hour`·`weekly`·`model_scoped`)은 전부 `None` 이고 `source` 는
     /// `Active` 다 — 만드는 쪽이 지키는 약속이다. 받는 쪽은 창 값을 전부 비우고 「정보 없음」
     /// 상태로 접는다 — 실패가 아니다(실패는 들고 있던 값을 그대로 둔다).
-    /// `Passive` 관측은 언제나 `false` 다.
-    pub limits_unavailable: bool,
+    /// `Passive` 관측은 언제나 `None` 이다.
+    pub limits_unavailable: Option<UsageDetail>,
 }
 
 #[cfg(test)]
@@ -142,7 +145,7 @@ mod tests {
             model_scoped: None,
             plan: None,
             source: UsageSource::Passive,
-            limits_unavailable: false,
+            limits_unavailable: None,
         }
     }
 

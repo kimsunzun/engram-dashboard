@@ -10,7 +10,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{UsageObservation, UsageVendorKey};
+use super::{UsageDetail, UsageObservation, UsageVendorKey};
 
 /// 벤더 하나의 조회 정책 — 값은 각 벤더 backend 가 정한다(받는 쪽에는 벤더 정책이 없다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,10 +21,11 @@ pub struct UsagePolicy {
     pub timeout: Duration,
 }
 
-/// 조회 실패의 분류 — 받는 쪽이 보이는 상태로 접는다.
+/// 조회 실패의 분류 — 받는 쪽이 보이는 상태로 접는다. 조회기는 이것을 [`ProbeFailure`] 에 싸서 돌려준다.
 ///
-/// ★문자열 칸에 비밀을 싣지 않는다★ — 이 값은 로그와 상태 문구로 흘러간다. 자격증명·토큰은 물론, 응답에
-///   실린 계정 식별자·env 값·stderr 원문도 넣지 않는다. 넣을 수 있는 것 = 우리가 쓴 문장과 OS 오류 문구.
+/// ★문자열 칸은 로그로 간다 — 넣을 수 있는 것 = 우리가 쓴 문장과 OS 오류 문구뿐이다★: 자격증명·토큰·env 값은
+///   물론, 상류가 준 문구(오류 문구·응답에 실린 계정 식별자·stderr)도 넣지 않는다. 상류 원문은
+///   [`UsageDetail::upstream`] 전용 칸에만 산다 — 다듬는 규칙과 행선지는 [`super::UpstreamText`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ProbeError {
     /// 조회할 프로그램이 이 PC 에 없다.
@@ -56,6 +57,62 @@ pub enum ProbeError {
     Upstream(String),
 }
 
+impl ProbeError {
+    /// 분류 낱말 — [`UsageDetail::kind`] 의 중립 실패 몫. ★wire 로 나가고 화면이 번역 없이 보인다★ — 철자를 바꾸면
+    /// 보이는 낱말이 바뀐다.
+    pub const fn kind_word(&self) -> &'static str {
+        match self {
+            Self::NotInstalled => "not_installed",
+            Self::Unauthenticated => "unauthenticated",
+            Self::RateLimited { .. } => "rate_limited",
+            Self::Unsupported => "unsupported",
+            Self::Timeout => "timeout",
+            Self::Spawn(_) => "spawn",
+            Self::Io(_) => "io",
+            Self::Parse(_) => "parse",
+            Self::Upstream(_) => "upstream",
+        }
+    }
+}
+
+/// 조회 한 번의 실패 — 분류([`ProbeError`])와 그 근거([`UsageDetail`]).
+///
+/// - `detail: None` = 근거가 분류 하나뿐이다 — 받는 쪽이 [`ProbeError::kind_word`] 로 채운다. 스포너·임시 폴더처럼
+///   seam 에서 `?` 로 올라온 실패가 이 모양이다(`From<ProbeError>`).
+/// - ★`Display` = 분류 문구 + `detail.kind` 뿐이다 — 상류 원문은 안 찍는다★. `Debug` 도 원문 대신 글자 수를 찍는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeFailure {
+    pub error: ProbeError,
+    pub detail: Option<UsageDetail>,
+}
+
+impl ProbeFailure {
+    pub fn with_detail(error: ProbeError, detail: UsageDetail) -> Self {
+        Self {
+            error,
+            detail: Some(detail),
+        }
+    }
+}
+
+impl From<ProbeError> for ProbeFailure {
+    fn from(error: ProbeError) -> Self {
+        Self {
+            error,
+            detail: None,
+        }
+    }
+}
+
+impl fmt::Display for ProbeFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.detail {
+            Some(detail) => write!(f, "{} [{}]", self.error, detail.kind),
+            None => write!(f, "{}", self.error),
+        }
+    }
+}
+
 /// 벤더 하나의 능동 조회기. 싱글턴은 각 벤더 backend 에 산다.
 pub trait UsageProbe: Send + Sync {
     /// 이 조회기가 채우는 칸의 벤더 키(정본 철자).
@@ -72,7 +129,7 @@ pub trait UsageProbe: Send + Sync {
     ///   뒤의 폴더 지우기). 더 긴 마감을 스스로 만들지 않는다.
     /// - 답을 받으면 자식을 [`finish_after_answer`] 로 끝낸다.
     /// - 외부 데이터에 패닉하지 않는다(릴리즈는 `panic = "abort"`).
-    fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeError>;
+    fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure>;
 }
 
 /// 조회 한 번에 받는 쪽이 넘기는 것.
@@ -324,6 +381,59 @@ mod tests {
             Err(ProbeError::Timeout)
         );
         assert_eq!(env(far()).require_time_left(), Ok(()));
+    }
+
+    /// 분류 낱말은 wire 로 나간다 — 바뀌면 화면의 낱말이 바뀐다.
+    #[test]
+    fn kind_words_are_the_wire_words() {
+        let cases = [
+            (ProbeError::NotInstalled, "not_installed"),
+            (ProbeError::Unauthenticated, "unauthenticated"),
+            (
+                ProbeError::RateLimited {
+                    retry_after: Some(Duration::from_secs(1)),
+                },
+                "rate_limited",
+            ),
+            (ProbeError::Unsupported, "unsupported"),
+            (ProbeError::Timeout, "timeout"),
+            (ProbeError::Spawn("x".into()), "spawn"),
+            (ProbeError::Io("x".into()), "io"),
+            (ProbeError::Parse("x".into()), "parse"),
+            (ProbeError::Upstream("x".into()), "upstream"),
+        ];
+        for (error, word) in cases {
+            assert_eq!(error.kind_word(), word, "{error:?}");
+        }
+    }
+
+    #[test]
+    fn a_bare_probe_error_becomes_a_failure_without_detail() {
+        let failure = ProbeFailure::from(ProbeError::Timeout);
+        assert_eq!(failure.error, ProbeError::Timeout);
+        assert_eq!(failure.detail, None);
+        assert_eq!(failure.to_string(), "timed out");
+    }
+
+    #[test]
+    fn display_and_debug_carry_the_kind_but_never_the_upstream_text() {
+        let failure = ProbeFailure::with_detail(
+            ProbeError::Upstream("우리 문장".into()),
+            UsageDetail {
+                kind: "vendor_class",
+                code: Some(-32600),
+                upstream: Some(crate::usage::UpstreamText::new(
+                    "someone@example.com org-1234",
+                )),
+            },
+        );
+        let shown = failure.to_string();
+        assert_eq!(shown, "upstream error: 우리 문장 [vendor_class]");
+        let all = format!("{failure} {failure:?} {failure:#?}");
+        assert!(
+            !all.contains("example.com") && !all.contains("org-1234"),
+            "{all}"
+        );
     }
 
     #[test]

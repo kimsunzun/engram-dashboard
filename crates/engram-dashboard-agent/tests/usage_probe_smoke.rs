@@ -22,8 +22,8 @@ use uuid::Uuid;
 use engram_dashboard_agent::backend::{output_decoder, usage_probe_for};
 use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat};
 use engram_dashboard_agent::usage::{
-    ExitInfo, OsProbeSpawner, ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeSpawner,
-    ScratchDir, UsageObservation, UsageProbe, UsageSource, WindowObs, KILL_WAIT,
+    ExitInfo, OsProbeSpawner, ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure,
+    ProbeSpawner, ScratchDir, UsageObservation, UsageProbe, UsageSource, WindowObs, KILL_WAIT,
 };
 
 /// 조회 한 번이 돌아와야 하는 상한 = 시한 + 자식 drop 의 종료 대기([`UsageProbe::query`] 계약) + 여유.
@@ -112,7 +112,7 @@ fn claude_logged_out_answer_shape() {
     );
     if let Ok(obs) = &run.result {
         assert!(
-            obs.limits_unavailable,
+            obs.limits_unavailable.is_some(),
             "로그아웃 성공 응답은 「한도 정보 없음」이어야 한다"
         );
     }
@@ -437,7 +437,7 @@ struct Tweaks {
 }
 
 struct ProbeRun {
-    result: Result<UsageObservation, ProbeError>,
+    result: Result<UsageObservation, ProbeFailure>,
     elapsed: Duration,
     log: ChildLog,
 }
@@ -532,8 +532,8 @@ impl ProbeRun {
     }
 }
 
-fn error_kind(err: &ProbeError) -> String {
-    match err {
+fn error_kind(err: &ProbeFailure) -> String {
+    match &err.error {
         ProbeError::NotInstalled => "NotInstalled".into(),
         ProbeError::Unauthenticated => "Unauthenticated".into(),
         ProbeError::RateLimited { retry_after } => format!("RateLimited{{{retry_after:?}}}"),
@@ -548,8 +548,8 @@ fn error_kind(err: &ProbeError) -> String {
 
 // ── 기록 겹 — 실 스포너를 감싸 줄·종료 상태를 붙든다 ─────────────────────────────────
 
-/// 조회기는 상류 원문을 밖에 내지 않는다 — 모양 수집은 이 겹에서만 된다. 자식은 여전히 실 [`OsProbeSpawner`] 가
-/// 띄운다.
+/// 조회기가 밖에 내는 상류 원문은 이름 붙은 칸의 값 하나(가린 원문 칸)뿐이다 — 응답 줄의 모양 수집은 이 겹에서만
+/// 된다. 자식은 여전히 실 [`OsProbeSpawner`] 가 띄운다.
 struct Recorder {
     tweaks: Tweaks,
     log: Arc<Mutex<ChildLog>>,
@@ -824,7 +824,7 @@ fn summarize(obs: &UsageObservation) -> String {
         obs.vendor.as_str(),
         obs.source,
         obs.plan.as_deref().unwrap_or("-"),
-        obs.limits_unavailable,
+        obs.limits_unavailable.as_ref().map_or("-", |detail| detail.kind),
         window_text(obs.five_hour.as_ref()),
         window_text(obs.weekly.as_ref()),
     );

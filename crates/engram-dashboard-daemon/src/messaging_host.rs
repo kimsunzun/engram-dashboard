@@ -1445,7 +1445,7 @@ mod tests {
             model_scoped: None,
             plan: Some("pro".to_string()),
             source: UsageSource::Passive,
-            limits_unavailable: false,
+            limits_unavailable: None,
         };
 
         sink.usage_observed(obs.clone());

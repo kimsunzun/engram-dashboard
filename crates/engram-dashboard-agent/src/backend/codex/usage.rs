@@ -81,7 +81,7 @@ pub(super) fn observation_from_rate_limits_updated(
         model_scoped: None,
         plan: None,
         source: UsageSource::Passive,
-        limits_unavailable: false,
+        limits_unavailable: None,
     })
 }
 

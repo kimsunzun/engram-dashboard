@@ -8,7 +8,8 @@
 //!   실측·출처 = `docs/research/claude-usage-query-method-survey-2026-09-27.md` §3·§7(claude 2.1.280). 그래서
 //!   칸 하나가 틀리면 그 칸만 버리고, 응답의 뼈대가 깨졌을 때만 [`ProbeError::Parse`] 다.
 //! ★응답·오류 문구를 로그와 오류 문자열에 싣지 않는다★ — 계정 정보가 실릴 수 있다. 싣는 것은 우리가 쓴
-//!   문장과 수치뿐이다.
+//!   문장과 수치뿐이다. 상류 원문은 [`UsageDetail::upstream`] 전용 칸에만 싣고, 그것도 이름 붙은 칸의 값뿐이다
+//!   (오류 응답의 `error` · 한도 두 칸 `rate_limits_available`·`rate_limits` · 「한도 정보 없음」의 `subscription_type`).
 // ADR-0004
 
 use std::ffi::OsString;
@@ -25,8 +26,9 @@ use super::CLAUDE_PROGRAM;
 use crate::backend::console_command;
 use crate::usage::{
     display_text, finish_after_answer, has_word, resets_at_from_epoch_secs, used_pct_from_percent,
-    ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ScopedWindowObs, ScratchDir, UsageObservation,
-    UsagePolicy, UsageProbe, UsageSource, UsageVendorKey, WindowObs,
+    ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure, ScopedWindowObs, ScratchDir,
+    UpstreamText, UsageDetail, UsageObservation, UsagePolicy, UsageProbe, UsageSource,
+    UsageVendorKey, WindowObs,
 };
 
 /// 자동 조회 사이의 최소 간격(사용자 결정 2026-09-27 — Codex 와 같은 값).
@@ -84,6 +86,11 @@ const NAMED_MODEL_WINDOWS: [(&str, &str); 3] = [
     ("seven_day_oauth_apps", "OAuth apps"),
 ];
 
+/// 응답 분류 낱말([`UsageDetail::kind`]) — wire 로 나가고 화면이 번역 없이 보인다.
+const KIND_RATE_LIMITS_NULL: &str = "rate_limits_null";
+const KIND_CLAUDE_ERROR: &str = "claude_error";
+const KIND_LIMITS_UNAVAILABLE: &str = "limits_unavailable";
+
 /// claude 사용량 조회기. 부르는 쪽은 싱글턴 [`CLAUDE_USAGE_PROBE`] 를 쓴다.
 pub(crate) struct ClaudeUsageProbe;
 
@@ -101,7 +108,7 @@ impl UsageProbe for ClaudeUsageProbe {
         }
     }
 
-    fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeError> {
+    fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure> {
         query_with(env, std::env::vars_os().map(|(key, _)| key))
     }
 }
@@ -110,7 +117,7 @@ impl UsageProbe for ClaudeUsageProbe {
 fn query_with(
     env: &ProbeEnv<'_>,
     daemon_env_keys: impl IntoIterator<Item = OsString>,
-) -> Result<UsageObservation, ProbeError> {
+) -> Result<UsageObservation, ProbeFailure> {
     env.require_time_left()?;
     // ★선언 순서가 drop 순서를 정한다 — 폴더가 자식보다 먼저다★: 자식이 먼저 drop(트리 kill + 종료 대기)돼야
     //   Windows 가 그 작업 폴더와 설정 파일을 지울 수 있다.
@@ -123,7 +130,7 @@ fn query_with(
     let write_error = match child.write_line(&request_line(&request_id), env.deadline) {
         Ok(()) => None,
         Err(err @ ProbeError::Io(_)) => Some(err),
-        Err(err) => return Err(err),
+        Err(err) => return Err(err.into()),
     };
     let response = await_response(child.as_mut(), &request_id, env.deadline, write_error)?;
     // ★곧바로 죽이지 않는다★ — stdin 을 닫으면 claude 는 스스로 끝나지만 1초쯤 걸리고, 그 사이 전역 설정 파일
@@ -295,16 +302,18 @@ fn ended_without_response(
 /// - 두 칸의 뜻은 CLI 2.1.280 의 응답 스키마 설명이 가른다: `rate_limits_available` = 「plan 한도가 적용되지 않으면
 ///   `false`(API 키·Bedrock·Vertex·profile 권한 없는 토큰)」, `rate_limits` = 「CLI 가 받아 오지 못하면 `null`」.
 ///   그래서 `null` 하나만으로는 「조회 실패」고, 명시적 `false` 만이 「이 계정엔 한도가 없다」다.
-/// - `rate_limits_available` 이 bool `false` → 「한도 정보 없음」(`limits_unavailable`). 창은 전부 `None` 이고
-///   `rate_limits` 는 모양이 무엇이든(빠져도) 읽지 않는다 — plan 은 그대로 읽는다.
+/// - `rate_limits_available` 이 bool `false` → 「한도 정보 없음」(`limits_unavailable` — 근거 =
+///   [`limits_unavailable_detail`]). 창은 전부 `None` 이고 `rate_limits` 는 모양이 무엇이든(빠져도) 읽지 않는다 —
+///   plan 은 그대로 읽는다.
 /// - 그 밖(`true`·칸 없음·bool 아님 — bool 이 아니면 없는 것으로 친다)에서 `rate_limits` 가 명시적 `null` 이면
 ///   `Upstream`(= 조회 실패)이다. 받는 쪽이 들고 있던 값을 유지한다. ★CLI 쪽 조회가 429 를 받아도 오류 subtype 이
 ///   아니라 이 `null` 로 온다(CLI 코드 정독)★ — 그래서 `RateLimited` 로 가르지 못하고 `Upstream` 으로 접는다.
-///   [`classify_error`] 의 한도 문구 표는 다른 버전이 오류 subtype 으로 답할 때를 위해 남긴다.
+///   [`classify_error`] 의 한도 문구 표는 다른 버전이 오류 subtype 으로 답할 때를 위해 남긴다. ★상류 오류 문구가 없는
+///   실패라 원문 = 받은 두 칸 그대로다★([`KIND_RATE_LIMITS_NULL`] — `rate_limits_available` 칸이 없으면 그 칸은 뺀다).
 /// - ★그 밖에 `rate_limits` 칸이 빠졌거나 객체도 `null` 도 아니면 `Parse` 다★ — 그것을 「창 없음」으로 읽으면 모양이
-///   바뀐 응답이 성공으로 들어가 들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다.
+///   바뀐 응답이 성공으로 들어가 들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다. 근거는 분류뿐이다.
 /// - 관측은 `Active` 라 `None` 칸 = 「없다」(받는 쪽이 비운다). 두 칸이 다 안 읽히는 창도 `None` 으로 접는다.
-fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeError> {
+fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeFailure> {
     let response = line
         .get("response")
         .and_then(Value::as_object)
@@ -312,22 +321,34 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeErro
     match response.get("subtype").and_then(Value::as_str) {
         Some("success") => {}
         Some("error") => return Err(classify_error(response.get("error"))),
-        _ => return Err(parse_error("응답의 subtype 을 모른다")),
+        _ => return Err(parse_error("응답의 subtype 을 모른다").into()),
     }
     let usage = response
         .get("response")
         .and_then(Value::as_object)
         .ok_or_else(|| parse_error("성공 응답에 사용량 객체가 없다"))?;
+    let flag = usage.get("rate_limits_available");
     let limits_unavailable =
-        usage.get("rate_limits_available").and_then(Value::as_bool) == Some(false);
-    let (five_hour, weekly, model_scoped) = if limits_unavailable {
+        (flag.and_then(Value::as_bool) == Some(false)).then(|| limits_unavailable_detail(usage));
+    let (five_hour, weekly, model_scoped) = if limits_unavailable.is_some() {
         // `false` 인데 `rate_limits` 에 값이 실려 와도 읽지 않는다 — 「정보 없음」 관측이 창을 나르면 모순이다.
         (None, None, None)
     } else {
         match usage.get("rate_limits") {
             Some(Value::Null) => {
-                return Err(ProbeError::Upstream(
-                    "claude 가 사용량을 받아 오지 못했다(rate_limits 가 null)".to_owned(),
+                let received = match flag {
+                    Some(flag) => format!("rate_limits_available: {flag}, rate_limits: null"),
+                    None => "rate_limits: null".to_owned(),
+                };
+                return Err(ProbeFailure::with_detail(
+                    ProbeError::Upstream(
+                        "claude 가 사용량을 받아 오지 못했다(rate_limits 가 null)".to_owned(),
+                    ),
+                    UsageDetail {
+                        kind: KIND_RATE_LIMITS_NULL,
+                        code: None,
+                        upstream: Some(UpstreamText::new(&received)),
+                    },
                 ));
             }
             Some(Value::Object(limits)) => (
@@ -335,8 +356,8 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeErro
                 active_window(limits.get("seven_day")),
                 model_scoped_windows(limits),
             ),
-            Some(_) => return Err(parse_error("rate_limits 가 객체도 null 도 아니다")),
-            None => return Err(parse_error("사용량 객체에 rate_limits 칸이 없다")),
+            Some(_) => return Err(parse_error("rate_limits 가 객체도 null 도 아니다").into()),
+            None => return Err(parse_error("사용량 객체에 rate_limits 칸이 없다").into()),
         }
     };
     let plan = usage
@@ -356,6 +377,20 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeErro
 
 fn parse_error(what: &str) -> ProbeError {
     ProbeError::Parse(format!("claude 사용량 응답: {what}"))
+}
+
+/// 「한도 정보 없음」의 근거 — 원문 = 판정한 칸과 `subscription_type` 을 받은 그대로(`null` 포함 · 칸이 없으면 뺀다).
+/// plan 칸은 원인을 가르는 단서라 함께 싣는다(로그아웃한 CLI 는 `null` 로 답한다 — 실측).
+fn limits_unavailable_detail(usage: &Map<String, Value>) -> UsageDetail {
+    let received = match usage.get("subscription_type") {
+        Some(plan) => format!("rate_limits_available: false, subscription_type: {plan}"),
+        None => "rate_limits_available: false".to_owned(),
+    };
+    UsageDetail {
+        kind: KIND_LIMITS_UNAVAILABLE,
+        code: None,
+        upstream: Some(UpstreamText::new(&received)),
+    }
 }
 
 /// 창 객체 하나 — `utilization` 은 이미 0–100, `resets_at` 은 ISO 8601(RFC 3339) 문자열. 틀린 칸은 그 칸만 버린다.
@@ -413,16 +448,24 @@ fn model_scoped_windows(limits: &Map<String, Value>) -> Option<Vec<ScopedWindowO
     (!windows.is_empty()).then_some(windows)
 }
 
-/// 오류 응답 → 분류. `error` 가 문자열이 아니면 JSON 표기를 그대로 문구로 본다(분류에만 쓴다).
-fn classify_error(error: Option<&Value>) -> ProbeError {
+/// 오류 응답 → 분류 + 근거([`KIND_CLAUDE_ERROR`] · 원문 = `error` 칸 값). `error` 가 문자열이 아니면 JSON 표기를 그대로
+/// 문구로 본다 — 분류와 원문 모두. `error` 가 없거나 `null` 이거나 공백뿐이면 원문도 없다.
+fn classify_error(error: Option<&Value>) -> ProbeFailure {
     let text = match error {
-        Some(Value::String(text)) => text.to_ascii_lowercase(),
-        None | Some(Value::Null) => String::new(),
-        Some(other) => other.to_string().to_ascii_lowercase(),
+        Some(Value::String(text)) => Some(text.clone()),
+        None | Some(Value::Null) => None,
+        Some(other) => Some(other.to_string()),
     };
-    let classified = classify_error_text(&text);
+    let classified = classify_error_text(&text.as_deref().unwrap_or_default().to_ascii_lowercase());
     tracing::debug!(kind = %classified, "claude 사용량 조회: 오류 응답");
-    classified
+    ProbeFailure::with_detail(
+        classified,
+        UsageDetail {
+            kind: KIND_CLAUDE_ERROR,
+            code: None,
+            upstream: text.as_deref().and_then(UpstreamText::non_blank),
+        },
+    )
 }
 
 /// ★이 문구 표는 추정이다★ — 한도·로그아웃 오류의 실제 문구를 아직 못 봤다(TRD §6 #4). 틀려도 떨어지는 곳은
@@ -504,7 +547,7 @@ mod tests {
         spawner: &ScriptedSpawner,
         root: &TempRoot,
         within: Duration,
-    ) -> Result<UsageObservation, ProbeError> {
+    ) -> Result<UsageObservation, ProbeFailure> {
         let env = ProbeEnv {
             spawner,
             deadline: Instant::now() + within,
@@ -513,7 +556,7 @@ mod tests {
         query_with(&env, daemon_keys())
     }
 
-    fn run(script: ChildScript) -> (Result<UsageObservation, ProbeError>, ScriptedSpawner) {
+    fn run(script: ChildScript) -> (Result<UsageObservation, ProbeFailure>, ScriptedSpawner) {
         let root = TempRoot::new("claude-probe");
         let spawner = ScriptedSpawner::new(script);
         let result = run_with_deadline(&spawner, &root, ROOMY);
@@ -584,15 +627,30 @@ mod tests {
         })
     }
 
-    fn observe(usage: Value) -> Result<UsageObservation, ProbeError> {
+    fn observe(usage: Value) -> Result<UsageObservation, ProbeFailure> {
         observation_from_response(&json!({
             "type": "control_response",
             "response": { "subtype": "success", "request_id": "r", "response": usage },
         }))
     }
 
-    fn rate_limits(limits: Value) -> Result<UsageObservation, ProbeError> {
+    fn rate_limits(limits: Value) -> Result<UsageObservation, ProbeFailure> {
         observe(json!({ "rate_limits": limits }))
+    }
+
+    /// 근거가 분류 하나뿐인 `Parse` 인가.
+    fn is_bare_parse(result: &Result<UsageObservation, ProbeFailure>) -> bool {
+        matches!(
+            result,
+            Err(ProbeFailure {
+                error: ProbeError::Parse(_),
+                detail: None,
+            })
+        )
+    }
+
+    fn upstream_of(detail: &UsageDetail) -> Option<&str> {
+        detail.upstream.as_ref().map(UpstreamText::as_str)
     }
 
     // ── 정책 ──
@@ -647,7 +705,7 @@ mod tests {
         let spawner = ScriptedSpawner::new(answering(typical_usage()));
         assert_eq!(
             run_with_deadline(&spawner, &root, Duration::ZERO),
-            Err(ProbeError::Timeout)
+            Err(ProbeError::Timeout.into())
         );
         assert!(spawner.commands().is_empty(), "기동을 시도했다");
         assert_scratch_gone(&root);
@@ -660,11 +718,32 @@ mod tests {
         assert_eq!(obs.source, UsageSource::Active);
     }
 
-    fn assert_fetch_failed(result: Result<UsageObservation, ProbeError>, why: &str) {
-        assert!(
-            matches!(result, Err(ProbeError::Upstream(_))),
-            "{why}: {result:?}"
-        );
+    /// `rate_limits: null` 실패 — 근거 = [`KIND_RATE_LIMITS_NULL`] + 받은 두 칸 그대로(`upstream`).
+    fn assert_fetch_failed(
+        result: Result<UsageObservation, ProbeFailure>,
+        upstream: &str,
+        why: &str,
+    ) {
+        match result {
+            Err(ProbeFailure {
+                error: ProbeError::Upstream(_),
+                detail: Some(detail),
+            }) => {
+                assert_eq!(detail.kind, KIND_RATE_LIMITS_NULL, "{why}");
+                assert_eq!(detail.code, None, "{why}");
+                assert_eq!(upstream_of(&detail), Some(upstream), "{why}");
+            }
+            other => panic!("{why}: {other:?}"),
+        }
+    }
+
+    /// 「한도 정보 없음」 — 근거 = [`KIND_LIMITS_UNAVAILABLE`] + 판정한 칸과 plan 칸을 받은 그대로(`upstream`).
+    fn assert_unavailable(obs: &UsageObservation, upstream: &str) {
+        let detail = obs.limits_unavailable.as_ref().expect("한도 정보 없음");
+        assert_eq!(detail.kind, KIND_LIMITS_UNAVAILABLE);
+        assert_eq!(detail.code, None);
+        assert_eq!(upstream_of(detail), Some(upstream));
+        assert_no_windows(obs);
     }
 
     /// 로그아웃한 CLI 가 답하는 모양(실측).
@@ -676,8 +755,10 @@ mod tests {
             "rate_limits": null,
         }))
         .expect("관측");
-        assert!(obs.limits_unavailable);
-        assert_no_windows(&obs);
+        assert_unavailable(
+            &obs,
+            "rate_limits_available: false, subscription_type: null",
+        );
         assert_eq!(obs.plan, None);
     }
 
@@ -690,9 +771,25 @@ mod tests {
             "rate_limits": null,
         }))
         .expect("관측");
-        assert!(obs.limits_unavailable);
-        assert_no_windows(&obs);
+        assert_unavailable(
+            &obs,
+            r#"rate_limits_available: false, subscription_type: "max""#,
+        );
         assert_eq!(obs.plan.as_deref(), Some("max"));
+    }
+
+    /// 원문 칸도 상한을 넘지 않는다 — 받은 plan 이 아무리 길어도.
+    #[test]
+    fn a_huge_plan_is_cut_in_the_unavailable_detail() {
+        let obs = observe(json!({
+            "subscription_type": "가".repeat(10_000),
+            "rate_limits_available": false,
+        }))
+        .expect("관측");
+        let detail = obs.limits_unavailable.expect("한도 정보 없음");
+        let upstream = upstream_of(&detail).expect("원문");
+        assert_eq!(upstream.chars().count(), 200);
+        assert!(upstream.starts_with("rate_limits_available: false, subscription_type: \"가"));
     }
 
     #[test]
@@ -700,8 +797,10 @@ mod tests {
         let mut usage = typical_usage();
         usage["rate_limits_available"] = json!(false);
         let obs = observe(usage).expect("관측");
-        assert!(obs.limits_unavailable);
-        assert_no_windows(&obs);
+        assert_unavailable(
+            &obs,
+            r#"rate_limits_available: false, subscription_type: "max""#,
+        );
         assert_eq!(obs.plan.as_deref(), Some("max"));
     }
 
@@ -709,14 +808,15 @@ mod tests {
     fn unavailable_does_not_read_rate_limits_of_any_shape() {
         let without_limits = json!({ "subscription_type": "max", "rate_limits_available": false });
         let obs = observe(without_limits).expect("관측");
-        assert!(obs.limits_unavailable, "rate_limits 가 빠져도");
-        assert_no_windows(&obs);
+        assert_unavailable(
+            &obs,
+            r#"rate_limits_available: false, subscription_type: "max""#,
+        );
 
         for limits in [json!("none"), json!([]), json!(0)] {
             let obs = observe(json!({ "rate_limits_available": false, "rate_limits": limits }))
                 .expect("관측");
-            assert!(obs.limits_unavailable, "{limits}");
-            assert_no_windows(&obs);
+            assert_unavailable(&obs, "rate_limits_available: false");
         }
     }
 
@@ -724,18 +824,30 @@ mod tests {
     fn null_rate_limits_without_a_false_flag_is_a_fetch_failure() {
         assert_fetch_failed(
             observe(json!({ "rate_limits_available": true, "rate_limits": null })),
+            "rate_limits_available: true, rate_limits: null",
             "true",
         );
         assert_fetch_failed(
             observe(json!({ "subscription_type": "max", "rate_limits": null })),
+            "rate_limits: null",
             "칸 없음",
         );
+    }
+
+    /// 실패의 로그용 문구(`Display`)에는 근거 낱말만 실린다 — 받은 두 칸은 원문 칸에만 있다.
+    #[test]
+    fn a_fetch_failure_shows_only_the_kind_in_its_display() {
+        let failure = observe(json!({ "rate_limits_available": true, "rate_limits": null }))
+            .expect_err("조회 실패");
+        let shown = failure.to_string();
+        assert!(shown.contains(KIND_RATE_LIMITS_NULL), "{shown}");
+        assert!(!shown.contains("rate_limits_available"), "{shown}");
     }
 
     #[test]
     fn available_with_windows_is_not_unavailable() {
         let obs = observe(typical_usage()).expect("관측");
-        assert!(!obs.limits_unavailable);
+        assert_eq!(obs.limits_unavailable, None);
         assert_eq!(obs.five_hour, window(Some(42.5), Some(FIVE_HOUR_RESET)));
         assert_eq!(obs.weekly, window(Some(13.0), Some(WEEKLY_RESET)));
     }
@@ -753,7 +865,7 @@ mod tests {
             let mut usage = typical_usage();
             usage["rate_limits_available"] = flag.clone();
             let obs = observe(usage).expect("관측");
-            assert!(!obs.limits_unavailable, "{flag}");
+            assert_eq!(obs.limits_unavailable, None, "{flag}");
             assert_eq!(
                 obs.five_hour,
                 window(Some(42.5), Some(FIVE_HOUR_RESET)),
@@ -762,6 +874,7 @@ mod tests {
 
             assert_fetch_failed(
                 observe(json!({ "rate_limits_available": flag.clone(), "rate_limits": null })),
+                &format!("rate_limits_available: {flag}, rate_limits: null"),
                 &flag.to_string(),
             );
 
@@ -769,10 +882,7 @@ mod tests {
                 json!({ "rate_limits_available": flag.clone() }),
                 json!({ "rate_limits_available": flag.clone(), "rate_limits": "none" }),
             ] {
-                assert!(
-                    matches!(observe(missing_or_bad), Err(ProbeError::Parse(_))),
-                    "{flag}"
-                );
+                assert!(is_bare_parse(&observe(missing_or_bad)), "{flag}");
             }
         }
     }
@@ -892,7 +1002,7 @@ mod tests {
             observe(json!({ "rate_limits": 0 })),
         ];
         for (i, case) in cases.into_iter().enumerate() {
-            assert!(matches!(case, Err(ProbeError::Parse(_))), "{i}: {case:?}");
+            assert!(is_bare_parse(&case), "{i}: {case:?}");
         }
     }
 
@@ -1002,10 +1112,7 @@ mod tests {
             let root = TempRoot::new("claude-probe-nan");
             let spawner = ScriptedSpawner::new(script);
             let result = run_with_deadline(&spawner, &root, SHORT);
-            assert!(
-                matches!(result, Err(ProbeError::Parse(_))),
-                "{number}: {result:?}"
-            );
+            assert!(is_bare_parse(&result), "{number}: {result:?}");
             assert!(!spawner.cut_at_deadline(), "{number}: 시한까지 기다렸다");
             assert_scratch_gone(&root);
         }
@@ -1066,32 +1173,60 @@ mod tests {
         }
     }
 
+    /// ★상류 문구는 원문 칸에만 실린다★ — 분류 넷 모두 근거 = [`KIND_CLAUDE_ERROR`] + `error` 칸 값(토큰 모양은 가림)이고,
+    ///   실패의 `Display`·`Debug` 에는 안 보인다.
     #[test]
-    fn error_responses_are_classified_and_never_echo_the_upstream_text() {
+    fn error_responses_carry_the_upstream_text_only_in_the_detail() {
         let secret = "someone@example.com org-1234";
-        for (error, expected) in [
-            (json!(format!("Rate limit reached for {secret}")), "rate"),
-            (json!(format!("Not logged in as {secret}")), "auth"),
+        let token = "sk-ant-abcdefghijklmnopqrstuvwxyz0123";
+        for (error, expected, upstream) in [
+            (
+                json!(format!("Rate limit reached for {secret} {token}")),
+                "rate",
+                Some(format!("Rate limit reached for {secret} ***")),
+            ),
+            (
+                json!(format!("Not logged in as {secret}")),
+                "auth",
+                Some(format!("Not logged in as {secret}")),
+            ),
             (
                 json!("get_usage is not supported in this context"),
                 "unsupported",
+                Some("get_usage is not supported in this context".to_owned()),
             ),
-            (json!(format!("boom {secret}")), "upstream"),
+            (
+                json!(format!("boom {secret}")),
+                "upstream",
+                Some(format!("boom {secret}")),
+            ),
             (
                 json!({ "message": format!("OAuth token expired for {secret}") }),
                 "auth",
+                Some(format!(
+                    r#"{{"message":"OAuth token expired for {secret}"}}"#
+                )),
             ),
-            (json!(null), "upstream"),
+            (json!(null), "upstream", None),
+            (json!(""), "upstream", None),
+            (json!("   "), "upstream", None),
         ] {
             let (result, spawner) =
                 run(ChildScript::new().reply(move |written| error_line(written, error)));
             let err = result.expect_err("오류 응답");
-            assert_eq!(kind(&err), expected);
+            assert_eq!(kind(&err.error), expected);
+            let detail = err.detail.as_ref().expect("근거");
+            assert_eq!(detail.kind, KIND_CLAUDE_ERROR);
+            assert_eq!(detail.code, None);
+            assert_eq!(upstream_of(detail), upstream.as_deref());
             let shown = format!("{err} {err:?}");
             assert!(
-                !shown.contains("example.com") && !shown.contains("org-1234"),
+                !shown.contains("example.com")
+                    && !shown.contains("org-1234")
+                    && !shown.contains("sk-ant"),
                 "{shown}"
             );
+            assert!(shown.contains(KIND_CLAUDE_ERROR), "{shown}");
             assert!(spawner.stdin_closed(), "오류 응답도 답이다 — 유예를 준다");
             assert!(spawner.child_dropped());
         }
@@ -1225,7 +1360,16 @@ mod tests {
             if expect_ok {
                 assert!(result.is_ok(), "{result:?}");
             } else {
-                assert!(matches!(result, Err(ProbeError::Io(_))), "{result:?}");
+                assert!(
+                    matches!(
+                        result,
+                        Err(ProbeFailure {
+                            error: ProbeError::Io(_),
+                            detail: None
+                        })
+                    ),
+                    "{result:?}"
+                );
             }
             assert_scratch_gone(&root);
         }
@@ -1241,7 +1385,7 @@ mod tests {
         );
         let started = Instant::now();
         let result = run_with_deadline(&spawner, &root, SHORT);
-        assert_eq!(result, Err(ProbeError::Timeout));
+        assert_eq!(result, Err(ProbeError::Timeout.into()));
         assert!(started.elapsed() >= SHORT, "마감 전에 돌아왔다");
         assert!(spawner.cut_at_deadline());
         assert!(spawner.child_dropped());
@@ -1254,7 +1398,7 @@ mod tests {
         let spawner = ScriptedSpawner::new(ChildScript::new().block_writes());
         assert_eq!(
             run_with_deadline(&spawner, &root, SHORT),
-            Err(ProbeError::Timeout)
+            Err(ProbeError::Timeout.into())
         );
         assert!(spawner.cut_at_deadline());
         assert!(spawner.written().is_empty());
@@ -1264,7 +1408,7 @@ mod tests {
     #[test]
     fn eof_without_a_response_is_classified_by_the_exit() {
         let (result, spawner) = run(ChildScript::new().exit_not_installed().stderr_tail(&["x"]));
-        assert_eq!(result, Err(ProbeError::NotInstalled));
+        assert_eq!(result, Err(ProbeError::NotInstalled.into()));
         assert!(spawner.child_dropped());
 
         let (result, _) = run(ChildScript::new()
@@ -1272,7 +1416,10 @@ mod tests {
             .exit_code(1)
             .stderr_tail(&["Error: someone@example.com is not allowed"]));
         match result {
-            Err(ProbeError::Upstream(text)) => {
+            Err(ProbeFailure {
+                error: ProbeError::Upstream(text),
+                detail: None,
+            }) => {
                 assert!(text.contains("종료 코드 1"), "{text}");
                 assert!(!text.contains("example.com"), "stderr 를 실었다: {text}");
             }
@@ -1283,7 +1430,7 @@ mod tests {
         let spawner = ScriptedSpawner::new(ChildScript::new().never_exit());
         assert_eq!(
             run_with_deadline(&spawner, &root, SHORT),
-            Err(ProbeError::Timeout)
+            Err(ProbeError::Timeout.into())
         );
         assert!(spawner.cut_at_deadline());
         assert_scratch_gone(&root);
@@ -1294,20 +1441,33 @@ mod tests {
     #[test]
     fn a_failed_request_write_still_reads_the_exit() {
         let (result, spawner) = run(ChildScript::new().fail_writes().exit_not_installed());
-        assert_eq!(result, Err(ProbeError::NotInstalled));
+        assert_eq!(result, Err(ProbeError::NotInstalled.into()));
         assert!(spawner.written().is_empty());
 
         let (result, _) = run(ChildScript::new().fail_writes().exit_code(1));
-        assert!(matches!(result, Err(ProbeError::Io(_))), "{result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(ProbeFailure {
+                    error: ProbeError::Io(_),
+                    detail: None
+                })
+            ),
+            "{result:?}"
+        );
     }
 
+    /// 스포너 seam 의 실패는 근거 없이 올라온다(`?`) — 받는 쪽이 분류 낱말로 채운다.
     #[test]
     fn a_spawn_failure_passes_through_and_cleans_up() {
         let root = TempRoot::new("claude-probe-missing");
         let spawner = ScriptedSpawner::failing(ProbeError::NotInstalled);
         assert_eq!(
             run_with_deadline(&spawner, &root, ROOMY),
-            Err(ProbeError::NotInstalled)
+            Err(ProbeFailure {
+                error: ProbeError::NotInstalled,
+                detail: None,
+            })
         );
         assert_eq!(spawner.commands().len(), 1);
         assert_scratch_gone(&root);

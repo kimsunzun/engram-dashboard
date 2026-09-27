@@ -1,20 +1,23 @@
 //! 조회기가 상류 문자열을 다루는 도구 — 표시 칸(plan·모델 이름)에 싣기 전의 정리와 오류 문구의 낱말 대조.
 //!
 //! ★상류 문자열을 로그·[`super::ProbeError`] 문구로 옮기는 도구는 여기 두지 않는다★ — 상류 문구에는 계정 정보가
-//!   실릴 수 있다. 표시 칸에 싣는 것은 이름으로 쓰이는 짧은 값뿐이고, 오류 문구는 분류에만 쓴다.
+//!   실릴 수 있다. 표시 칸에 싣는 것은 이름으로 쓰이는 짧은 값뿐이다. 오류 문구의 원문을 싣는 길은
+//!   [`super::UpstreamText`] 하나다(로그에 못 찍히는 전용 칸).
 
 /// 외부 문자열 → 표시 칸 값. 앞뒤 공백을 떼고, 비었거나 제어 문자·서식 문자·줄/문단 구분자가 있으면 `None`,
 /// 넘치면 `max_chars` 글자(바이트가 아니다)로 자른다.
 pub fn display_text(text: &str, max_chars: usize) -> Option<String> {
     let text = text.trim();
-    if text.is_empty()
-        || text
-            .chars()
-            .any(|c| c.is_control() || is_invisible_format(c))
-    {
+    if text.is_empty() || text.chars().any(is_unprintable) {
         return None;
     }
     Some(text.chars().take(max_chars).collect())
+}
+
+/// 화면에 그대로 내면 안 되는 문자 — 제어 문자(`\n`·`\t`·ESC 포함) + [`is_invisible_format`]. 표시 칸은 이것이 있으면
+/// 값을 버리고, 원문 칸은 추적할 수 있게 빈칸이나 U+FFFD 로 바꾼다(규칙 = [`super::UpstreamText::new`]).
+pub(super) fn is_unprintable(c: char) -> bool {
+    c.is_control() || is_invisible_format(c)
 }
 
 /// Unicode 일반 범주 Cf(서식 — 양방향 덮어쓰기·너비 없는 문자·태그 등) + 줄/문단 구분자(U+2028·U+2029).

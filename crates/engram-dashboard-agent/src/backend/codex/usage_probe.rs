@@ -6,9 +6,10 @@
 //!   잠깐 기다린 뒤 끝낸다([`finish_after_answer`]).
 //! ★대화 통로(`transport`)의 요청 기계를 쓰지 않는다★ — 그쪽의 대기표·라이터 스레드는 통로의 공유 상태에 묶여
 //!   있다. 여기서는 요청을 하나씩 쓰고 그 응답을 한 스레드에서 읽는다.
-//! ★응답의 `accountId` 는 읽지도 않는다 — 로그·오류 문자열·관측 어디에도 없다★(TRD §1-3): 상류가 준 문자열
-//!   (응답 · RPC 오류 문구 · stderr)은 분류에만 쓰고, 싣는 것은 우리가 쓴 문장과 수치뿐이다. serde 오류 문구도
-//!   받은 값을 되풀이할 수 있어 싣지 않는다. 예외 = 표시 칸(plan · 버킷 이름)에 싣는 짧은 이름.
+//! ★응답의 `accountId` 는 읽지도 않는다 — 로그·오류 문자열·관측·원문 칸 어디에도 없다★(TRD §1-3): 상류가 준
+//!   문자열(응답 · RPC 오류 문구 · stderr)은 로그와 오류 문자열에 싣지 않는다 — 싣는 것은 우리가 쓴 문장과 수치뿐이다.
+//!   serde 오류 문구도 받은 값을 되풀이할 수 있어 싣지 않는다. 예외 둘 = 표시 칸(plan · 버킷 이름)에 싣는 짧은 이름 ·
+//!   RPC 오류의 `error.message`(원문 전용 칸 [`UsageDetail::upstream`] — `data` 칸은 안 싣는다).
 //! 모양의 출처 = codex-cli 0.156.1 의 JSON Schema(`protocol` 의 `GetAccountRateLimitsResponse` doc).
 // ADR-0004
 
@@ -28,8 +29,8 @@ use super::{APP_SERVER_STDIO_FLAG, APP_SERVER_SUBCOMMAND, CODEX_PROGRAM};
 use crate::backend::console_command;
 use crate::usage::{
     display_text, finish_after_answer, has_word, ProbeChild, ProbeCommand, ProbeEnv, ProbeError,
-    ScopedWindowObs, ScratchDir, UsageObservation, UsagePolicy, UsageProbe, UsageSource,
-    UsageVendorKey,
+    ProbeFailure, ScopedWindowObs, ScratchDir, UpstreamText, UsageDetail, UsageObservation,
+    UsagePolicy, UsageProbe, UsageSource, UsageVendorKey,
 };
 
 /// 자동 조회 사이의 최소 간격(사용자 결정 2026-09-27 — Claude 와 같은 값).
@@ -51,6 +52,9 @@ const LABEL_MAX_CHARS: usize = 48;
 /// 모델별 창 목록의 상한. 오늘 응답의 비기본 버킷은 하나다.
 const MODEL_SCOPED_MAX: usize = 16;
 
+/// 응답 분류 낱말([`UsageDetail::kind`]) — wire 로 나가고 화면이 번역 없이 보인다.
+const KIND_RPC_ERROR: &str = "rpc_error";
+
 /// codex 사용량 조회기. 부르는 쪽은 싱글턴 [`CODEX_USAGE_PROBE`] 를 쓴다.
 pub(crate) struct CodexUsageProbe;
 
@@ -68,7 +72,7 @@ impl UsageProbe for CodexUsageProbe {
         }
     }
 
-    fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeError> {
+    fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure> {
         env.require_time_left()?;
         // ★선언 순서가 drop 순서를 정한다 — 폴더가 자식보다 먼저다★: 자식이 먼저 drop(트리 kill + 종료 대기)돼야
         //   Windows 가 그 작업 폴더를 지울 수 있다.
@@ -103,7 +107,7 @@ fn probe_command(scratch: &Path) -> ProbeCommand {
 
 /// 서버가 우리 요청 하나에 준 답 — 성공이면 `result`, 오류 응답이면 그것을 분류한 것([`classify_rpc_error`]).
 /// 바깥 `Result` 의 오류(답을 못 받음)와 가른다 — 답을 받았으면 자식에게 끝낼 유예를 준다.
-type Answer = Result<Value, ProbeError>;
+type Answer = Result<Value, ProbeFailure>;
 
 /// 악수 → 읽기 요청 → 그 답. 요청마다 그 응답이 올 때까지 기다린 뒤 다음 줄을 쓴다. 악수가 거절되면 그 거절이
 /// 답이다(읽기 요청을 안 보낸다).
@@ -242,7 +246,8 @@ fn ended_without_response(
 /// ★이 문구 표는 추정이다★ — codex 의 로그인 안 됨 오류 문구를 아직 못 봤다(TRD §6 #5 — 3단계 실 스모크가 모은다).
 ///   틀려도 떨어지는 곳은 `Upstream`(= 조회 실패)이다. 한도 문구를 [`ProbeError::RateLimited`] 로 가르지 않는 것은
 ///   TRD §3 #7 의 결정이다. `Upstream` 문구는 고정이다 — 상류 문구를 되풀이하지 않는다(코드 번호만 싣는다).
-fn classify_rpc_error(error: &RpcError) -> ProbeError {
+/// 근거는 분류와 무관하게 하나다 — [`KIND_RPC_ERROR`] + `error.code` + 원문 `error.message`(공백뿐이면 원문 없음).
+fn classify_rpc_error(error: &RpcError) -> ProbeFailure {
     const UNAUTHENTICATED: [&str; 10] = [
         "authenticat",
         "unauthenticated",
@@ -267,7 +272,14 @@ fn classify_rpc_error(error: &RpcError) -> ProbeError {
         ))
     };
     tracing::debug!(kind = %classified, "codex 사용량 조회: 오류 응답");
-    classified
+    ProbeFailure::with_detail(
+        classified,
+        UsageDetail {
+            kind: KIND_RPC_ERROR,
+            code: Some(error.code),
+            upstream: UpstreamText::non_blank(&error.message),
+        },
+    )
 }
 
 /// 읽기 응답의 `result` → 관측.
@@ -279,7 +291,7 @@ fn classify_rpc_error(error: &RpcError) -> ProbeError {
 ///   들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다. `result` 가 객체가 아니어도 `Parse`.
 /// - 창은 길이로 가른다(규칙 = 형제 `usage` 의 [`windows_by_duration`]). 관측은 `Active` 라 `None` 칸 = 「없다」.
 /// - 맵의 나머지 버킷 → 모델별 창([`model_scoped_windows`]) · `planType` → plan(기본 버킷 것, 없으면 최상위 것).
-fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeError> {
+fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeFailure> {
     let response: GetAccountRateLimitsResponse =
         serde_json::from_value(result).map_err(|_| parse_error("응답 result 가 객체가 아니다"))?;
     let buckets = response.rate_limits_by_limit_id.unwrap_or_default();
@@ -303,7 +315,7 @@ fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeError
         model_scoped: model_scoped_windows(&buckets),
         plan,
         source: UsageSource::Active,
-        limits_unavailable: false,
+        limits_unavailable: None,
     })
 }
 
@@ -365,7 +377,7 @@ mod tests {
         spawner: &ScriptedSpawner,
         root: &TempRoot,
         within: Duration,
-    ) -> Result<UsageObservation, ProbeError> {
+    ) -> Result<UsageObservation, ProbeFailure> {
         let env = ProbeEnv {
             spawner,
             deadline: Instant::now() + within,
@@ -374,7 +386,7 @@ mod tests {
         CODEX_USAGE_PROBE.query(&env)
     }
 
-    fn run(script: ChildScript) -> (Result<UsageObservation, ProbeError>, ScriptedSpawner) {
+    fn run(script: ChildScript) -> (Result<UsageObservation, ProbeFailure>, ScriptedSpawner) {
         let root = TempRoot::new("codex-probe");
         let spawner = ScriptedSpawner::new(script);
         let result = run_with_deadline(&spawner, &root, ROOMY);
@@ -474,8 +486,19 @@ mod tests {
             .collect()
     }
 
-    fn observe(result: Value) -> Result<UsageObservation, ProbeError> {
+    fn observe(result: Value) -> Result<UsageObservation, ProbeFailure> {
         observation_from_result(result)
+    }
+
+    /// 근거가 분류 하나뿐인 `Parse` 인가.
+    fn is_bare_parse(result: &Result<UsageObservation, ProbeFailure>) -> bool {
+        matches!(
+            result,
+            Err(ProbeFailure {
+                error: ProbeError::Parse(_),
+                detail: None,
+            })
+        )
     }
 
     // ── 정책 ──
@@ -533,7 +556,7 @@ mod tests {
         let spawner = ScriptedSpawner::new(answering(typical_result()));
         assert_eq!(
             run_with_deadline(&spawner, &root, Duration::ZERO),
-            Err(ProbeError::Timeout)
+            Err(ProbeError::Timeout.into())
         );
         assert!(spawner.commands().is_empty(), "기동을 시도했다");
         assert_scratch_gone(&root);
@@ -610,10 +633,7 @@ mod tests {
             json!({ "rateLimits": { "limitId": 5, "primary": window_json(1, 300, FIVE_HOUR_RESET) } }),
         ] {
             let got = observe(result.clone());
-            assert!(
-                matches!(got, Err(ProbeError::Parse(_))),
-                "{result}: {got:?}"
-            );
+            assert!(is_bare_parse(&got), "{result}: {got:?}");
         }
     }
 
@@ -681,10 +701,7 @@ mod tests {
         ];
         for result in parse_cases {
             let got = observe(result.clone());
-            assert!(
-                matches!(got, Err(ProbeError::Parse(_))),
-                "{result}: {got:?}"
-            );
+            assert!(is_bare_parse(&got), "{result}: {got:?}");
         }
 
         // 맵 칸이나 그 항목이 객체가 아니면 그 자리만 없다 — 최상위의 기본 버킷을 쓴다.
@@ -846,42 +863,91 @@ mod tests {
         ];
         for (text, expected) in cases {
             assert_eq!(
-                kind(&classify_rpc_error(&rpc_error(text))),
+                kind(&classify_rpc_error(&rpc_error(text)).error),
                 expected,
                 "{text:?}"
             );
         }
     }
 
-    /// 읽기 요청의 오류 응답도, 악수의 오류 응답도 같은 분류를 타고 — 상류 문구를 되풀이하지 않는다.
+    /// 빈 문구는 원문이 없는 것이다 — 코드는 그대로 싣는다.
     #[test]
-    fn rpc_errors_are_classified_and_never_echo_the_upstream_text() {
-        let error_line = |id: i64, message: String| {
-            json!({ "id": id, "error": { "code": -32600, "message": message } }).to_string()
+    fn a_blank_rpc_message_carries_the_code_without_upstream() {
+        for blank in ["", "  ", "   "] {
+            assert_eq!(
+                classify_rpc_error(&rpc_error(blank))
+                    .detail
+                    .and_then(|d| d.upstream),
+                None,
+                "{blank:?}"
+            );
+            let failure = classify_rpc_error(&rpc_error(blank));
+            let detail = failure.detail.expect("근거");
+            assert_eq!(detail.kind, KIND_RPC_ERROR, "{blank:?}");
+            assert_eq!(detail.code, Some(-32600), "{blank:?}");
+            assert_eq!(detail.upstream, None, "{blank:?}");
+        }
+    }
+
+    /// 읽기 요청의 오류 응답도, 악수의 오류 응답도 같은 분류를 탄다 — 근거 = [`KIND_RPC_ERROR`] + 코드 + `message`
+    ///   원문(토큰 모양은 가림 · `data` 칸은 안 싣는다)이고, 실패의 `Display`·`Debug` 에는 원문이 안 보인다.
+    #[test]
+    fn rpc_errors_carry_the_code_and_message_only_in_the_detail() {
+        const MARKER: &str = "someone@example.com";
+        const TOKEN: &str = "sk-proj-abcdefghijklmnopqrstuvwxyz";
+        let error_line = |id: i64, code: i64, message: String| {
+            json!({
+                "id": id,
+                "error": { "code": code, "message": message, "data": { "accountId": ACCOUNT_ID } },
+            })
+            .to_string()
         };
         let cases = [
             (
                 2,
-                format!("codex account authentication required ({ACCOUNT_ID})"),
+                -32600,
+                format!("codex account authentication required ({MARKER} {TOKEN})"),
                 "auth",
+                format!("codex account authentication required ({MARKER} ***)"),
             ),
             (
                 2,
-                format!("failed to fetch codex rate limits for {ACCOUNT_ID}"),
+                -32603,
+                format!("failed to fetch codex rate limits for {MARKER}"),
                 "upstream",
+                format!("failed to fetch codex rate limits for {MARKER}"),
             ),
-            (1, format!("boom {ACCOUNT_ID}"), "upstream"),
+            (
+                1,
+                -32000,
+                format!("boom {MARKER}"),
+                "upstream",
+                format!("boom {MARKER}"),
+            ),
         ];
-        for (id, message, expected) in cases {
+        for (id, code, message, expected, upstream) in cases {
             let mut script = ChildScript::new();
             if id == 2 {
                 script = script.line(init_response());
             }
-            let (result, spawner) = run(script.line(error_line(id, message)));
+            let (result, spawner) = run(script.line(error_line(id, code, message)));
             let err = result.expect_err("오류 응답");
-            assert_eq!(kind(&err), expected);
+            assert_eq!(kind(&err.error), expected);
+            let detail = err.detail.as_ref().expect("근거");
+            assert_eq!(detail.kind, KIND_RPC_ERROR);
+            assert_eq!(detail.code, Some(code));
+            assert_eq!(
+                detail.upstream.as_ref().map(UpstreamText::as_str),
+                Some(upstream.as_str())
+            );
             let shown = format!("{err} {err:?}");
-            assert!(!shown.contains(ACCOUNT_ID), "{shown}");
+            assert!(
+                !shown.contains(MARKER)
+                    && !shown.contains("sk-proj")
+                    && !shown.contains(ACCOUNT_ID),
+                "{shown}"
+            );
+            assert!(shown.contains(KIND_RPC_ERROR), "{shown}");
             assert!(spawner.stdin_closed(), "거절도 답이다 — 유예를 준다");
             assert!(spawner.child_dropped());
             if id == 1 {
@@ -987,10 +1053,7 @@ mod tests {
                     .hang_after_lines(),
             );
             let result = run_with_deadline(&spawner, &root, SHORT);
-            assert!(
-                matches!(result, Err(ProbeError::Parse(_))),
-                "{broken}: {result:?}"
-            );
+            assert!(is_bare_parse(&result), "{broken}: {result:?}");
             assert!(!spawner.cut_at_deadline(), "{broken}: 시한까지 기다렸다");
             assert_scratch_gone(&root);
         }
@@ -1066,7 +1129,16 @@ mod tests {
             if expect_ok {
                 assert!(result.is_ok(), "{result:?}");
             } else {
-                assert!(matches!(result, Err(ProbeError::Io(_))), "{result:?}");
+                assert!(
+                    matches!(
+                        result,
+                        Err(ProbeFailure {
+                            error: ProbeError::Io(_),
+                            detail: None
+                        })
+                    ),
+                    "{result:?}"
+                );
             }
             assert_scratch_gone(&root);
         }
@@ -1082,7 +1154,7 @@ mod tests {
             let spawner = ScriptedSpawner::new(script);
             let started = Instant::now();
             let result = run_with_deadline(&spawner, &root, SHORT);
-            assert_eq!(result, Err(ProbeError::Timeout));
+            assert_eq!(result, Err(ProbeError::Timeout.into()));
             assert!(started.elapsed() >= SHORT, "마감 전에 돌아왔다");
             assert!(spawner.cut_at_deadline());
             assert!(spawner.child_dropped());
@@ -1096,7 +1168,7 @@ mod tests {
         let spawner = ScriptedSpawner::new(ChildScript::new().block_writes());
         assert_eq!(
             run_with_deadline(&spawner, &root, SHORT),
-            Err(ProbeError::Timeout)
+            Err(ProbeError::Timeout.into())
         );
         assert!(spawner.cut_at_deadline());
         assert!(spawner.written().is_empty());
@@ -1106,17 +1178,20 @@ mod tests {
     #[test]
     fn eof_without_a_response_is_classified_by_the_exit() {
         let (result, spawner) = run(ChildScript::new().exit_not_installed().stderr_tail(&["x"]));
-        assert_eq!(result, Err(ProbeError::NotInstalled));
+        assert_eq!(result, Err(ProbeError::NotInstalled.into()));
         assert!(spawner.child_dropped());
 
-        // 악수 뒤에 끝나도 같다 — stderr 는 싣지 않는다.
+        // 악수 뒤에 끝나도 같다 — stderr 는 싣지 않는다(원문 칸에도).
         let stderr = format!("Error: account {ACCOUNT_ID} is not allowed");
         let (result, _) = run(ChildScript::new()
             .line(init_response())
             .exit_code(1)
             .stderr_tail(&[stderr.as_str()]));
         match result {
-            Err(ProbeError::Upstream(text)) => {
+            Err(ProbeFailure {
+                error: ProbeError::Upstream(text),
+                detail: None,
+            }) => {
                 assert!(text.contains("종료 코드 1"), "{text}");
                 assert!(!text.contains(ACCOUNT_ID), "stderr 를 실었다: {text}");
             }
@@ -1127,7 +1202,7 @@ mod tests {
         let spawner = ScriptedSpawner::new(ChildScript::new().never_exit());
         assert_eq!(
             run_with_deadline(&spawner, &root, SHORT),
-            Err(ProbeError::Timeout)
+            Err(ProbeError::Timeout.into())
         );
         assert!(spawner.cut_at_deadline());
         assert_scratch_gone(&root);
@@ -1138,20 +1213,33 @@ mod tests {
     #[test]
     fn a_failed_handshake_write_still_reads_the_exit() {
         let (result, spawner) = run(ChildScript::new().fail_writes().exit_not_installed());
-        assert_eq!(result, Err(ProbeError::NotInstalled));
+        assert_eq!(result, Err(ProbeError::NotInstalled.into()));
         assert!(spawner.written().is_empty());
 
         let (result, _) = run(ChildScript::new().fail_writes().exit_code(1));
-        assert!(matches!(result, Err(ProbeError::Io(_))), "{result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(ProbeFailure {
+                    error: ProbeError::Io(_),
+                    detail: None
+                })
+            ),
+            "{result:?}"
+        );
     }
 
+    /// 스포너 seam 의 실패는 근거 없이 올라온다(`?`) — 받는 쪽이 분류 낱말로 채운다.
     #[test]
     fn a_spawn_failure_passes_through_and_cleans_up() {
         let root = TempRoot::new("codex-probe-missing");
         let spawner = ScriptedSpawner::failing(ProbeError::NotInstalled);
         assert_eq!(
             run_with_deadline(&spawner, &root, ROOMY),
-            Err(ProbeError::NotInstalled)
+            Err(ProbeFailure {
+                error: ProbeError::NotInstalled,
+                detail: None,
+            })
         );
         assert_eq!(spawner.commands().len(), 1);
         assert_scratch_gone(&root);
@@ -1218,6 +1306,7 @@ mod tests {
             let err = observe(result.clone()).expect_err("실패");
             let shown = format!("{err} {err:?}");
             assert!(!shown.contains(ACCOUNT_ID), "{result}: {shown}");
+            assert_eq!(err.detail, None, "응답을 원문 칸에 싣지 않는다: {result}");
         }
 
         // 대화 전체로도 — 관측에 싣는 표시 칸(plan·버킷 이름) 밖의 어느 칸에 실려 와도.
@@ -1301,7 +1390,10 @@ mod tests {
                             );
                         }
                     }
-                    Err(ProbeError::Parse(_)) => {}
+                    Err(ProbeFailure {
+                        error: ProbeError::Parse(_),
+                        detail: None,
+                    }) => {}
                     Err(other) => panic!("{path:?} {value}: {other:?}"),
                 }
             }

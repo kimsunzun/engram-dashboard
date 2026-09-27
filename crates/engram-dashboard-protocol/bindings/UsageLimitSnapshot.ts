@@ -11,7 +11,8 @@ import type { UsageWindow } from "./UsageWindow";
  * ★시간 칸 규칙★: 절대 시각은 [`UsageWindow::resets_at`](서버가 준 epoch 초) 하나뿐이다. 나머지 시간
  *   칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 **이 답을 보낸 순간 기준 상대 초**라, 받는 쪽은
  *   받은 순간부터 흐른 만큼 더해 읽는다 — 양쪽 벽시계가 어긋나거나 되감겨도 흔들리지 않게.
- * ★표시 문구를 싣지 않는다★ — 상태는 코드 + 수만 나르고 문구는 받는 쪽이 번역 키로 만든다.
+ * ★상태 문구는 받는 쪽이 번역 키로 만든다★ — 상태는 코드 + 수로 나른다. 예외 = `detail`(분류 낱말 `kind`·
+ *   상류 원문 `upstream` 은 번역 없이 그대로 보인다).
  * ★`null` 창·`null` 수는 「모른다」이지 0 이 아니다★ — 0% 로 그리면 안 된다.
  */
 export type UsageLimitSnapshot = { vendor: AgentBackendKind, 
