@@ -326,7 +326,7 @@
 - **딸린 사실:** 임시 스폰 경로도 프로필을 디스크에 올린다(`manager.rs:875-899`) — 그래서 이 위험은 "언젠가"가 아니라 **codex 를 처음 띄우는 순간** 파일에 새겨진다.
 
 ### T-34. 중단(interrupt) 기능이 반쯤 배선된 채 멈춰 있다
-- **상태:** 보류(미착수). codex 작업 중 발견했으나 **codex 와 무관한 선재 미완**이라 그 범위에서 손대지 않았다.
+- **상태:** ★**착수 — S21 챗 화면 F2 가 두 절반을 다 닫는다**(사용자 결정 2026-09-27 U1·U6 · `docs/process/S21-chat-ux/trd.md` §3): claude JSON 끊기 연결(스파이크 먼저) + 채팅 칸 Esc → 명령 `agent.interrupt`.★ 아래 줄 번호는 적은 날 기준이라 낡았다(예: `stdio.rs` 끊기 = 지금 `:371-375`). 옛 상태 = 보류(미착수) — codex 작업 중 발견했으나 **codex 와 무관한 선재 미완**이라 그 범위에서 손대지 않았다.
 - **출처:** S21 codex Phase 2a 설계 중 실측(2026-09-09).
 - **증상:** wire 의 `capabilities.control.interrupt` 를 읽어 트리 노드에 `canInterrupt` 를 만드는데(`src/components/agent/mergeTreeNodes.ts:94`), **그 값을 읽는 화면 코드가 하나도 없다.** `rg "canInterrupt" src/ -g '!*.test.*'` 가 같은 파일 세 줄(타입 선언 `:55` · 대입 `:94` · 예약 노드 기본값 `:111`)만 낸다. 즉 사람이 중단을 누를 표면이 없다.
 - **반대편도 비어 있다:** `StdioTransport::interrupt()` 는 `Unsupported` 를 돌려주고(`crates/engram-dashboard-agent/src/transport/stdio.rs:316-321`), 같은 파일의 caps 가 `control.interrupt: false` 를 리터럴로 신고한다(`:363-384`). 즉 **신고도 거짓이고 실행 경로도 없다.**
@@ -339,6 +339,31 @@
 - **증상:** `src-tauri/src/daemon_client/tests.rs:2232` 의 「재연결이 Auth 송신 직후 창에 도달해야」 단언이 간헐 실패(`reconnect_close_after_auth_send_self_closes_socket`).
 - **왜 따로 세우나:** ADR-0195 의 수정(끊긴 동안 명령을 안 받음)은 이 테스트가 재는 축을 건드리지 않는다. 그 수정 뒤에도 남을 가능성이 높으니 **그때 남아 있으면 별건으로 본다.**
 - **안 한 것:** 원인 규명을 안 했다. 실패율도 30 회 표본 한 건이라 신뢰구간이 넓다.
+
+### T-36. 단축키 시스템 — 명령 표는 있는데 「키 → 명령」 연결은 칸마다 흩어져 있다
+- **상태:** 보류(사용자 결정 2026-09-27). 챗 화면 라운드는 **Esc 만 채팅 칸 안에서 되게 하고** 구조는 나중에 잡는다. 그 판단은 ADR-0237(가안 · Esc 끊기)의 거부한 대안 「단축키 시스템을 지금 만든다」로 적는다.
+- **출처:** S21 챗 화면 4건 TRD U6 논의(`docs/process/S21-chat-ux/trd.md` §1 · §3-2).
+- **지금 있는 것:**
+  - **전역 단축키 표** — `src/commands/keybindings.ts` 의 `BINDINGS` 에 `ctrl+tab → tab.next` 하나뿐이다. `when` 게이트를 보고 `fireAndForget` 으로 명령을 부른다. 재지정·연속 키(chord)는 없다(ADR-0055 골격).
+  - ★**load-bearing 입력 가드**★ — 입력 요소 · contenteditable · `.xterm` 안에서 친 키는 전역 표가 무시한다(`keybindings.ts:7-35`). 풀면 터미널·입력 타이핑을 단축키가 삼킨다(주석이 든 예 = 터미널에서 `t` 를 치면 테마가 바뀌는 회귀).
+  - 명령의 `keybinding` 칸은 **표시용 힌트뿐**이다(`src/commands/registry.ts:50`) — 실제 표와 이어져 있지 않다.
+  - **칸마다 따로 붙은 키 처리:** 채팅 입력창 Enter/Shift+Enter(`src/components/slot/RichSlot.tsx:471-481` — 모든 키의 전파를 막는다) · 팝오버 셋의 문서 전역 Esc 닫기(`AgentMonitoringPicker` · `AgentList` 행 메뉴 · `PresetPalette`) · 이름 바꾸기 입력의 Esc 취소(`TabBar` · `AgentList` · `PresetPalette`) · **이번 라운드의 채팅 칸 Esc → `agent.interrupt`**(TRD §3-2 — 조건을 한 함수에 모은다).
+  - CLAUDE.md 「LLM-우선 제어」 남은 갭 첫 줄이 「키바인딩 커스터마이징 미구현」이다.
+- **펼칠 때 쟁점:**
+  1. **범위와 우선순위** — 전역 / 포커스된 칸 / 입력창. 같은 키가 범위마다 다른 명령이다(예: Esc = 팝오버 닫기가 끊기보다 먼저).
+  2. **입력 가드와 공존** — 입력창 안에서도 먹혀야 하는 키(Esc 끊기)를 가드를 깨지 않고 허용하는 길(칸 범위 바인딩 등).
+  3. **터미널 칸** — 키는 TUI 로 그대로 가야 한다. 예외를 어떻게 선언하나.
+  4. **한글 IME 조합 중** 키는 무시한다(지금은 칸마다 `isComposing || keyCode === 229` 를 따로 본다).
+  5. **재지정과 LLM 제어** — 사용자 재지정 · 저장 위치 · 키 표를 읽고 바꾸는 명령(새 전역 핸들 금지 — 명령 표 위에).
+  6. **표시** — 팔레트·메뉴의 단축키 표기를 실제 표와 일치시킨다(`keybinding` 힌트 칸의 운명).
+- **옮겨 올 것:** 채팅 칸 Esc → 표 한 줄 「Esc → `agent.interrupt` · 채팅 칸 포커스 · 도는 중」. 끊는 동작은 명령에 있어 손댈 필요 없다. 팝오버·이름 바꾸기 Esc 도 같은 표로 올릴지는 1번 쟁점과 함께 정한다.
+- **참고 피어:** paseo(`packages/app/src/keyboard/keyboard-shortcuts.ts` — 포커스 범위 `message-input`/`other`) · t3code(재지정 가능한 명령 `thread.stop` — `packages/contracts/src/keybindings.ts`) · VS Code `when` 절. 비교 = `docs/research/chat-ux-four-features-2026-09-27.md` §2-2.
+
+### T-37. claude 도구 결과도 중립 사건으로 — 프론트의 벤더 모양 파싱을 걷는다
+- **상태:** 보류(메인 판정 2026-09-27 — 챗 화면 라운드 범위 밖). 그 라운드는 codex 만 새 사건 `ToolResult` 를 낸다(`docs/process/S21-chat-ux/trd.md` §4-7 (c) · §11 ⑦).
+- **무엇이 문제인가:** claude 의 `tool_result` 는 사용자 블록째 `Structured{kind:"user"}` 로 가고 **프론트가 그 벤더 모양을 파싱해** 오류 여부를 읽는다(`src/components/slot/StructuredTextView.tsx:96-111` — 조사 §3-1). 「백엔드 확장」 원칙(벤더 지식은 `backend` 한 곳)에 어긋나는 선재 누수다. 챗 라운드 뒤에는 오류 표시가 백엔드마다 다른 길(claude = 프론트 파싱 · codex = `ToolResult`)로 온다.
+- **안 한 이유(그 라운드):** 결과 **내용**은 여전히 벤더 블록에서 와야 해 상태만 담은 사건은 오류 비트를 겹칠 뿐이고, claude 는 호출마다 결과가 와서 링·옛 셸 비용이 곱절로 는다(TRD §4-7 (c)).
+- **펼칠 때:** claude 번역기도 `ToolResult` 를 내고 프론트 파싱은 옛 데몬용 대체로만 남길지 · 결과 내용까지 중립 칸으로 옮길지 · 링 비용 실측.
 
 ## 결정 완료 (기록용)
 

@@ -1,10 +1,10 @@
 # TRD — 챗 화면 4건: 스크롤 따라가기 · Esc 끊기 · 도구 호출 묶기 · claude 글자 스트리밍 (S21)
 
-> 상태: **2판(2026-09-27) — `/review trd full` 1 라운드 FIX 반영(두 리뷰어 FIX · 불일치 없음) · 코드 무변경.** PRD 는 건너뛰었다(동작은 직전 세션 인계 메모에서 합의 — 사용자 2026-09-27). 설계 결정은 오케스트레이터가 내렸고 이 문서는 그것을 구현 가능한 명세로 옮긴다. 결정과 다르게 가야 할 곳은 「★메인 확인 필요★」로 올렸고, 2판에서 메인 판정을 받아 본문에 반영했다(모음·판정 = §11).
+> 상태: **3판(2026-09-27) — 사용자 결정 U1–U6 반영 · U2 설계 추가(§4-7 · §7 B5) · `/review trd` 대기 · 코드 무변경.** 2판 = `/review trd full` 1 라운드 FIX 반영(두 리뷰어 FIX · 불일치 없음 · light 재검 PASS). PRD 는 건너뛰었다(동작은 직전 세션 인계 메모에서 합의 — 사용자 2026-09-27). 설계 결정은 오케스트레이터가 내렸고 이 문서는 그것을 구현 가능한 명세로 옮긴다. 결정과 다르게 가야 할 곳은 「★메인 확인 필요★」로 올렸고, 2판에서 메인 판정을 받아 본문에 반영했다(모음·판정 = §11 — 3판 새 ⑥⑦ 은 판정 대기). 사용자 체감이 갈리는 U2 세부 한 건은 「★사용자 확인★」으로 올렸다(§4-7 ⑧).
 >
-> **입력:** [조사 보고서](../../research/chat-ux-four-features-2026-09-27.md)(사실의 정본 — 여기서 되풀지 않고 `조사 §n` 으로 가리킨다). 판독 기준 = 브랜치 `v0.3.2/feat/chat-ux` 머리 `3f06e08`. 이 문서의 `파일:줄` 은 전부 그 커밋에서 직접 열어 확인했다. 벤더 = claude 2.1.280(이 PC 설치본) · codex app-server 스키마(t3code 생성본 `packages/effect-codex-app-server/src/_generated/schema.gen.ts` 판독).
+> **입력:** [조사 보고서](../../research/chat-ux-four-features-2026-09-27.md)(사실의 정본 — 여기서 되풀지 않고 `조사 §n` 으로 가리킨다). 판독 기준 = 브랜치 `v0.3.2/feat/chat-ux` 머리 `3f06e08`. 이 문서의 `파일:줄` 은 전부 그 커밋에서 직접 열어 확인했다 — 3판이 더한 것은 `095e027` 에서 열었다(`3f06e08` 뒤 커밋은 문서뿐이라 코드 줄은 같다). 벤더 = claude 2.1.280(이 PC 설치본) · codex app-server 스키마(t3code 생성본 `packages/effect-codex-app-server/src/_generated/schema.gen.ts` 판독).
 >
-> **앵커:** ADR-0004(백엔드 지식 격리) · ADR-0012(시험대) · ADR-0044/0045(stream-json · 정제는 백엔드) · ADR-0051(행 종류 ↔ 레일) · ADR-0053(ScrollArea seam) · ADR-0055/0167(명령 레지스트리 · `help` 부재 = 창 안 전용) · ADR-0056(탭 keep-alive) · ADR-0113/0127(턴 관측) · ADR-0155(명령 선언은 생산자 옆) · ADR-0231/0234/0235(턴 도중 입력).
+> **앵커:** ADR-0004(백엔드 지식 격리) · ADR-0012(시험대) · ADR-0044/0045(stream-json · 정제는 백엔드) · ADR-0051(행 종류 ↔ 레일) · ADR-0053(ScrollArea seam) · ADR-0055/0167(명령 레지스트리 · `help` 부재 = 창 안 전용) · ADR-0056(탭 keep-alive) · ADR-0113/0127(턴 관측) · ADR-0155(명령 선언은 생산자 옆) · ADR-0203(codex 이력 item — 어휘표 한 벌) · ADR-0231/0234/0235(턴 도중 입력).
 >
 > 표기: **[고름]** = 사용자 체감이 없는 내부 구현이라 이 문서가 골랐다. **U#** = 사용자 결정(§1).
 
@@ -16,29 +16,31 @@
 |---|---|---|---|
 | **F1 스크롤 따라가기** | 두 슬롯(RichSlot · DomSlot)의 무조건 `scrollTop = scrollHeight` 를 공용 훅 하나 + DOM 없는 순수 코어로 바꾼다. 붙음 플래그는 스크롤 이벤트와 위로 가는 입력으로만 바뀐다 | 프론트만 | 없음 |
 | **F2 Esc 끊기** | JSON 채팅 슬롯 안에서 맨 Esc = 도는 턴 끊기. 명령 `agent.interrupt`(창 + 데몬 버스). claude JSON 끊기를 새로 짓는다(U1) | 프론트 + agent crate | ★claude 부분은 스파이크(§3-5)가 출구 조건을 못 채우면 멈추고 사용자에게 돌아간다★ |
-| **F3 도구 호출 묶기** | 연속 도구 행 ≥2 를 렌더 시점 순수 함수로 묶는다. 종류는 각 번역기가 `ToolCall` 에 싣는 중립 `category` | 선 타입 1 필드 + 두 번역기 + 프론트 | 없음 |
+| **F3 도구 호출 묶기** | 연속 도구 행 ≥2 를 렌더 시점 순수 함수로 묶는다. 종류는 각 번역기가 `ToolCall` 에 싣는 중립 `category`. 묶음 머리 「오류 N」은 두 백엔드 다 — codex 는 도구 끝 상태를 새 선 변형 `ToolResult` 로 옮긴다(U2 · §4-7) | 선 타입 1 필드 + 새 변형 1 + 두 번역기 + 프론트 | ★B5 채취에서 0 아닌 종료가 `completed` 로 오면 멈추고 메인에 올린다(§4-7 ⑨)★ |
 | **F4 claude 글자 스트리밍** | `--include-partial-messages` + 번역기 상태(메시지 id · 열린 블록 · 흘린 블록). 흘린 블록의 완결 본문은 버린다 | 백엔드만 · 선 타입·프론트 무변경 | 없음 |
 
-- **구현 순서**(§7): 백엔드 한 워커 = F4 → F2 스파이크 → F2 구현 → F3 백엔드(각 단계 빌드 초록 · 커밋). 프론트 두 워커 = FE-1(F1 → F2 프론트 → F3 접착) ∥ FE-2(F3 프론트 — 지역 타입으로 B4 를 안 기다린다). 공유 파일은 FE-1.0 이 먼저 한 번에 친다. B4 · FE-2 뒤 I1 이 생성물 타입으로 바꾼다.
-- **열린 사용자 결정 = U1–U6**(§1). 전부 추천안으로 본문을 섰고, 다른 답이면 바뀌는 자리를 각 항목에 적었다.
-- **★메인 확인 필요★ 5 건 = 판정 완료**(§11): ①②⑤ 수락 · ③ 턴 열림 문(§3-4)으로 해소 · ④ 스파이크가 끊김을 못 가를 때만 쓰는 예비. 가장 큰 것은 claude 끊긴 턴을 `MessageDone` 대신 `TurnEnd{Interrupted}` 로 닫는 것(②) — `types.rs:70` 주석을 함께 고친다.
+- **구현 순서**(§7): 백엔드 한 워커 = F4 → F2 스파이크 → F2 구현 → F3 백엔드(B4) → U2 codex 끝(B5)(각 단계 빌드 초록 · 커밋). 프론트 두 워커 = FE-1(F1 → F2 프론트 → F3 접착) ∥ FE-2(F3 프론트 — 지역 타입 · 가드로 B4 · B5 를 안 기다린다). 공유 파일은 FE-1.0 이 먼저 한 번에 친다. ★B5 는 FE-2 의 가드 커밋 뒤에만 커밋한다★(새 변형이 프론트 `never` 망라를 건다 — §11 ⑥). B4 · B5 · FE-2 뒤 I1 이 생성물 타입으로 바꾼다.
+- **사용자 결정 U1–U6 = 완료(2026-09-27 · §1).** 다섯은 추천안 그대로다. ★U2 만 추천과 달리 「이번에 한다」★ → codex 도구 끝을 새 선 변형 `ToolResult{id, outcome}` 로 번역하고 실패·거부만 낸다 · 두 턴 분류기에서 신호 없음 · `PROTOCOL_VERSION` 은 안 올린다(§4-7). U6 과 함께 단축키 시스템은 보류(`docs/tracking.md` T-36).
+- **★사용자 확인★ 1 건**: codex `declined`(실행되지 않은 호출)를 어떻게 보이나 — 추천 = 「거부됨」 따로 · 대안 = 오류로 함께 센다(§4-7 ⑧).
+- **★메인 확인 필요★ — 2판 5 건 = 판정 완료**(§11): ①②⑤ 수락 · ③ 턴 열림 문(§3-4)으로 해소 · ④ 스파이크가 끊김을 못 가를 때만 쓰는 예비. 가장 큰 것은 claude 끊긴 턴을 `MessageDone` 대신 `TurnEnd{Interrupted}` 로 닫는 것(②) — `types.rs:70` 주석을 함께 고친다. **3판 새 2 건 = 대기**: ⑥ B5 ↔ FE-2 커밋 순서 · ⑦ claude 결과 중립화를 후속 추적 항목으로 적립.
 
 ---
 
-## 1. 사용자 결정 (U1–U6)
+## 1. 사용자 결정 (U1–U6) — 2026-09-27 결정 완료
 
-각 항목 = 추천안 먼저 · 한 줄 트레이드오프 · 답에 따라 바뀌는 자리.
+각 항목 = 사용자 결정 · 추천안 · 한 줄 트레이드오프 · 답에 따라 바뀌는 자리. U2 를 뺀 다섯은 추천안 그대로다.
 
-| # | 질문 | 추천 | 대안 | 트레이드오프 | 바뀌는 자리 |
-|---|---|---|---|---|---|
-| **U1** | claude JSON 끊기를 이번에 짓나 | **짓는다** | codex 만 먼저 | 짓지 않으면 Esc 가 claude 슬롯에서 아무 일도 안 한다(능력 `false`) — 기본 백엔드가 claude 라 체감 대부분이 빈다. 짓는 비용 = 스파이크 + 번역기 한 갈래 + 통로 주입 | 대안이면 §3-4 · §3-5 · §7 B2–B3 의 claude 부분을 뺀다. 버스 명령 · 프론트 키는 그대로 |
-| **U2** | codex 묶음에 오류·끝 표시를 이번에 하나 | **안 한다** — codex 묶음은 개수만 | codex `item/completed` 를 결과 사건으로 번역 | 하면 새 선 변형이 필요하고 **옛 셸이 새 데몬을 만나면 결과마다 「표시할 수 없는 신호」 줄을 그린다**(조사 §3-3). 안 하면 codex 묶음 머리에 오류 수가 없다 | 대안이면 새 선 변형 + codex 번역기 `ItemOrigin::Completed` 갈래(`backend/codex/decoder.rs:623`) + 누산기 갈래가 붙는다 — 별 TRD |
-| **U3** | 「맨 아래로」 버튼 | **바닥이 아니면 늘 · 셰브론 · 개수 없음 · 보이기 150 ms 늦춤** | 위로 올린 동안 새 내용이 왔을 때만 | 피어 전부가 추천안이다(조사 §1-2). 대안은 「읽다 멈춘 자리」에서 버튼이 안 떠 돌아갈 길을 못 찾는다 | 상수 `JUMP_BUTTON_MODE` 하나(§2-4). 대안이면 코어의 `unseenGrowth` 를 버튼 조건에 건다 |
-| **U4** | 보내면 다시 바닥에 붙나 | **붙는다** | 그대로 둔다 | 붙지 않으면 위를 읽다 보낸 글의 답이 화면 밖에서 흐른다. 붙으면 읽던 자리를 잃는다(paseo 선례 = 붙는다) | 상수 `REPIN_ON_SEND` 하나(§2-4) |
-| **U5** | 도구 호출 사이의 (비지 않은) 생각 블록 | **묶음에 흡수** | 묶음을 끊는다 | 끊으면 생각이 도구마다 끼는 claude 턴에서 묶음이 거의 안 선다. 흡수하면 펼쳐야 생각이 보인다(codex TUI 선례 = 흡수) | `groupToolRuns` 의 흡수 판정 한 줄(§4-3) |
-| **U6** | Esc 가 먹히는 범위 | **그 채팅 칸 안 어디든**(입력창 + 대화 본문 · 칸 루트가 클릭으로 포커스를 받는다) | 입력창 포커스일 때만 | 추천안은 본문을 클릭해 읽다가도 끊을 수 있다. 대안은 피어(Claude Code · codex · paseo)와 같고 포커스 변화가 없다 | 상수 `ESC_SCOPE` 하나 + 루트 `tabIndex` 한 줄(§3-2) |
+| # | 질문 | 사용자 결정(2026-09-27) | 추천 | 대안 | 트레이드오프 | 바뀌는 자리 |
+|---|---|---|---|---|---|---|
+| **U1** | claude JSON 끊기를 이번에 짓나 | **짓는다** — 「claude 쪽 기능 확인해서 적용」(스파이크 먼저 — §3-5 · 설계 그대로) | **짓는다** | codex 만 먼저 | 짓지 않으면 Esc 가 claude 슬롯에서 아무 일도 안 한다(능력 `false`) — 기본 백엔드가 claude 라 체감 대부분이 빈다. 짓는 비용 = 스파이크 + 번역기 한 갈래 + 통로 주입 | 대안이면 §3-4 · §3-5 · §7 B2–B3 의 claude 부분을 뺀다. 버스 명령 · 프론트 키는 그대로 |
+| **U2** | codex 묶음에 오류·끝 표시를 이번에 하나 | ★**이번에 한다 — codex 묶음에도 오류 수**(추천과 다름)★. 사용자 근거: 관례(codex TUI 의 「· N failed」 · t3code)는 요약의 개수 + 펼치면 어느 호출이 실패했나이고, codex 번역기는 끝 상태를 싣는 `item/completed` 만 버리고 있다 | 안 한다 — codex 묶음은 개수만 | codex `item/completed` 를 결과 사건으로 번역(**채택**) | 하면 새 선 변형이 필요하고 **옛 셸이 새 데몬을 만나면 결과마다 「표시할 수 없는 신호」 줄을 그린다**(조사 §3-3 — 실패·거부만 내서 줄인다 · §4-7 ③ · ⑤). 안 하면 codex 묶음 머리에 오류 수가 없다 | 새 선 변형 `ToolResult` + codex 번역기 `ItemOrigin::Completed`·`History` 갈래(`backend/codex/decoder.rs:623`) + 누산기 갈래 → **§4-7 · §7 B5** |
+| **U3** | 「맨 아래로」 버튼 | **바닥이 아니면 늘** | **바닥이 아니면 늘 · 셰브론 · 개수 없음 · 보이기 150 ms 늦춤** | 위로 올린 동안 새 내용이 왔을 때만 | 피어 전부가 추천안이다(조사 §1-2). 대안은 「읽다 멈춘 자리」에서 버튼이 안 떠 돌아갈 길을 못 찾는다 | 상수 `JUMP_BUTTON_MODE` 하나(§2-4). 대안이면 코어의 `unseenGrowth` 를 버튼 조건에 건다 |
+| **U4** | 보내면 다시 바닥에 붙나 | **붙는다** | **붙는다** | 그대로 둔다 | 붙지 않으면 위를 읽다 보낸 글의 답이 화면 밖에서 흐른다. 붙으면 읽던 자리를 잃는다(paseo 선례 = 붙는다) | 상수 `REPIN_ON_SEND` 하나(§2-4) |
+| **U5** | 도구 호출 사이의 (비지 않은) 생각 블록 | **흡수** | **묶음에 흡수** | 묶음을 끊는다 | 끊으면 생각이 도구마다 끼는 claude 턴에서 묶음이 거의 안 선다. 흡수하면 펼쳐야 생각이 보인다(codex TUI 선례 = 흡수) | `groupToolRuns` 의 흡수 판정 한 줄(§4-3) |
+| **U6** | Esc 가 먹히는 범위 | **칸 안 어디든** · 단축키 시스템은 보류(`docs/tracking.md` T-36) | **그 채팅 칸 안 어디든**(입력창 + 대화 본문 · 칸 루트가 클릭으로 포커스를 받는다) | 입력창 포커스일 때만 | 추천안은 본문을 클릭해 읽다가도 끊을 수 있다. 대안은 피어(Claude Code · codex · paseo)와 같고 포커스 변화가 없다 | 상수 `ESC_SCOPE` 하나 + 루트 `tabIndex` 한 줄(§3-2) |
 
 - 두 번 Esc(글 지우기 · 되감기)는 **이번 범위 밖**이다.
+- **단축키 시스템은 보류**(U6 과 함께 · `docs/tracking.md` T-36). Esc 는 지금 명령 `agent.interrupt` 를 부르는 **지역 술어** 하나이고(§3-2), T-36 이 키바인딩 표를 세우면 그 표의 한 줄로 옮긴다 — 끊는 동작은 명령에 있어 손댈 것이 없다. ADR-0237(가안)이 이것을 거부한 대안 「단축키 시스템을 지금 만든다」로 적는다(§10).
 
 ---
 
@@ -137,7 +139,8 @@ export function step(s: FollowState, i: FollowInput): { state: FollowState; scro
 | 파일 | 바뀜 |
 |---|---|
 | `src/commands/agentCommands.ts`(`:126-158` 옆) | `agent.interrupt { agentId }` — `agentClient.interruptAgent`(`src/api/protocolClient.ts:988-992`)를 부른다. ★`help` 없음★ — 같은 이름을 데몬이 버스에서 답한다(`:130-133` 의 `cancelQueuedInput` 주석과 같은 사유). 입력 임대 거절은 `:146-155` 와 같은 `CONFLICT:` 접두로 편다 — [고름] 그 매핑을 작은 함수로 뽑아 두 명령이 함께 쓴다. 돌려주는 값 = `{ outcome: 'requested' }` |
-| `src/components/slot/RichSlot.tsx:373-392`(루트) | `onKeyDownCapture` 로 Esc 처리(§3-2) · U6 추천안이면 `tabIndex={-1}` + `outline-none` |
+| `src/components/slot/RichSlot.tsx:373-392`(루트) | `onKeyDownCapture` 로 Esc 처리(§3-2) · U6(칸 안 어디든)이라 `tabIndex={-1}` + `outline-none` |
+| 새 `src/components/slot/interruptKey.ts` | §3-2 의 조건 전부를 담은 순수 술어 하나 |
 | 오버레이 뿌리 넷 | `data-engram-overlay` 속성 하나씩 — `SlotContextMenu.tsx`(루트) · `AgentMonitoringPicker.tsx:100`(백드롭) · `AgentList.tsx`·`PresetPalette.tsx` 의 행 메뉴 뿌리. [고름] 문서 전역 Esc 로 닫히는 셋(조사 §2-1)과 우클릭 메뉴를 한 표지로 잰다 |
 | `crates/engram-dashboard-agent/src/commands.rs` | 버스 선언 `agent.interrupt`(§3-3) |
 | `crates/engram-dashboard-agent/src/transport/stdio.rs` · `backend/claude/mod.rs` | claude 끊기(§3-4 · U1) |
@@ -153,14 +156,16 @@ export function step(s: FollowState, i: FollowInput): { state: FollowState; scro
 - IME 조합 중 아님 — `!e.nativeEvent.isComposing && e.keyCode !== 229`(`:476` 과 같은 판정)
 - `!e.defaultPrevented`(Radix 레이어는 문서 capture 에서 먼저 먹는다) · `document.querySelector('[data-engram-overlay]') === null`
 - `streaming`(`:370`) · `!agentUnavailable`(`:130`) · `agent?.capabilities?.control?.interrupt === true`
-- U6 대안이면 추가로 `e.target === textarea`
+- (`ESC_SCOPE = 'input'` 일 때만) `e.target === textarea`
+
+[고름] 위 조건 전부를 **순수 술어 하나** `isInterruptEscape(e, ctx)`(`interruptKey.ts` — `ctx` = `streaming` · `agentUnavailable` · `canInterrupt` · `overlayOpen`(루트 처리기가 위 `querySelector` 로 재서 넘긴다 — 술어는 DOM 을 안 읽는다) · `scope` · 입력창 노드)에 모은다. 루트 처리기는 그 술어가 참이면 명령을 부르기만 한다. 이 술어가 T-36(단축키 시스템 — 보류)이 세울 키바인딩 표 한 줄의 `when` 으로 그대로 옮겨 간다(§1 U6).
 
 발화하면 `e.preventDefault()` 하고 `fireAndForget('agent.interrupt', { agentId })`(`src/commands/dispatch.ts:15`) — 사람 키와 LLM 이 같은 핸들을 흔든다. ★낙관 상태를 바꾸지 않는다★ — 끊겼다는 것은 턴 끝 사건이 알린다(claude 의 응답 수신은 「멈췄다」가 아니다 — §3-5 S4). ★입력창 글은 건드리지 않는다.★
 
 - 프론트 `streaming` 은 백엔드의 턴 상태와 양 끝에서 어긋난다 — 보낸 직후 낙관적으로 켜지고(`awaiting`) 턴 끝 사건이 올 때까지 늦게 꺼진다. 앞 끝(턴이 아직 안 열렸다)의 Esc 는 통로가 `Unsupported` 로 거절하고(codex · claude 턴 열림 문 — §3-4) `fireAndForget` 가 warn 으로 삼킨다 — 무동작이고 사용자는 다시 누르면 된다. 뒤 끝은 §3-4 의 잔여 경합이다.
 
 - capture 인 이유: 입력창 `onKeyDown` 이 `e.stopPropagation()` 을 먼저 한다(`:471-472`) — bubble 로는 입력창의 Esc 가 루트에 안 온다. capture 는 입력창과 본문을 한 처리기로 덮는다.
-- 상수 `ESC_SCOPE: 'slot' | 'input' = 'slot'`(U6).
+- 상수 `ESC_SCOPE: 'slot' | 'input' = 'slot'`(U6 확정 = `'slot'`).
 
 ### 3-3. 명령 — 창 + 데몬 버스 (`agent.cancelQueuedInput` 선례)
 
@@ -246,7 +251,7 @@ impl StdioTransport {
 
 ### 3-6. 시험
 
-- 프론트: `agentCommands.test.ts` — `agent.interrupt` 인자 검문 · `interruptAgent` 호출 · 임대 거절 → `CONFLICT:` · `help` 없음. `RichSlot.test.tsx` — 조건 표(수식키 · repeat · 조합 · 오버레이 표지 · `defaultPrevented` · 안 돎 · 능력 거짓 · 부재) 각각 미발화 / 전부 참이면 한 번 발화 · 입력창 글 유지 · 본문 클릭 뒤 Esc 발화(U6).
+- 프론트: `agentCommands.test.ts` — `agent.interrupt` 인자 검문 · `interruptAgent` 호출 · 임대 거절 → `CONFLICT:` · `help` 없음. `interruptKey.test.ts` — 술어 표(아래 조건 하나씩 거짓 · 전부 참). `RichSlot.test.tsx` — 조건 표(수식키 · repeat · 조합 · 오버레이 표지 · `defaultPrevented` · 안 돎 · 능력 거짓 · 부재) 각각 미발화 / 전부 참이면 한 번 발화 · 입력창 글 유지 · 본문 클릭 뒤 Esc 발화(U6).
 - 백엔드: `stdio.rs` — 주입 함수가 `Some` 이면 `interrupt()` 가 줄 한 벌을 큐에 넣고 · `None` 이면 `Unsupported` 에 큐 무변경 · 주입 있으면 caps 참(문 값과 무관) · 주입 없으면 오늘 단언. `claude/mod.rs` — 끊기 줄 골든(`cancel_line_bytes_golden_and_its_answer_round_trips` `:4040` 모양) · 스파이크 fixture 로 끊긴 `result` → `[Usage?, TurnEnd{Interrupted}]` · `classify_turn` → `Ended(Other)` · `interrupt:` 응답 → 사건 없음 · 기존 `result_error_handbuilt.jsonl` 은 여전히 `Error` + `MessageDone`(진짜 오류 회귀).
 - 백엔드 — 턴 열림 문: 스폰 직후 함수 = `None` · 사용자 되울림 · `assistant` · 흘린 델타 · `Delivered` 줄 뒤 = `Some` · `result` 뒤 = `None` · `Dropped` · `control_response` · `system` 같은 신호 없는 줄로는 안 열린다 · 이어받기 원문으로는 안 열린다 · (④ 예비를 지을 때만) 한가할 때의 호출은 표식을 안 세워 다음 턴의 `is_error` 결과가 여전히 `Error` · 표식은 그 턴 `result` 에서 지워진다.
 - ★B3 이 **의도적으로** 고쳐 쓰는 기존 시험 둘★ — 회귀로 읽지 말 것: `result_interrupted_subtype_emits_only_done_no_error`(`claude/mod.rs:3390`) · `result_interrupted_subtype_with_is_error_false_emits_only_done`(`:3402`). 둘 다 `subtype:"interrupted"` 에 `["done"]` 을 단언하는데 ② 뒤 기대값은 `TurnEnd{Interrupted}` 한 벌(Error 없음 그대로)이다. 이름도 기대에 맞게 바꾼다. §5-5 의 11 번(기존 fixture 무수정)과는 다른 축이다 — 그쪽은 F4 가 fixture 사건열을 안 바꾼다는 증거이고 이 둘은 F2 가 뜻을 바꾸는 손 시험이다.
@@ -306,8 +311,9 @@ export type DisplayRow =
   | { kind: 'toolGroup'; key: string; members: StructuredItem[]; calls: ToolItem[]; live: boolean }
 /** turnOpen = StructuredTextView 의 `streaming`(RichSlot `:370`). */
 export function groupToolRuns(items: readonly StructuredItem[], turnOpen: boolean): DisplayRow[]
-export function summarizeGroup(calls: readonly ToolItem[], errorIds: ReadonlySet<string>):
-  { counts: ReadonlyArray<readonly [ToolCategory, number]>; errors: number }
+/** vendorErrorIds = claude 파싱(`buildToolResultMap`)의 `isError` 호출 id. codex 는 항목의 `resultMark` 로 온다(§4-7 ⑧). */
+export function summarizeGroup(calls: readonly ToolItem[], vendorErrorIds: ReadonlySet<string>):
+  { counts: ReadonlyArray<readonly [ToolCategory, number]>; errors: number; declined: number }
 ```
 
 - **묶음 규칙**:
@@ -319,7 +325,7 @@ export function summarizeGroup(calls: readonly ToolItem[], errorIds: ReadonlySet
   - `key` = 첫 호출의 백엔드 id(`tool:<id>`) · 없으면 `item:<itemId>` — 누산기는 같은 사건열을 같은 `itemId` 로 재구성하므로(`structuredAccumulator.ts:11-15` 멱등 불변식) replay 뒤에도 같은 키다.
 - **렌더**(`StructuredTextView.tsx:514-561`): `items.map(renderItem)` 을 `groupToolRuns(items, streaming)` 의 행 목록으로 바꾼다. ★ADR-0051 불변식★ — 레일 위치(`chat/railPositions.ts`)는 **행 목록**으로 계산한다: 묶음 = `'assistant'` 한 행 · 항목 = 오늘 `rowKindOf`. 묶음은 `ChatRow rail` 하나로 그리고, 펼쳤을 때 멤버는 그 안에서 행 컴포넌트(`ToolItemRow` · `ThoughtRow`)만 그린다 — 안쪽에 `ChatRow` 레일을 두지 않으므로 레일 계산과 DOM 이 한 몸으로 남는다. `isRenderedItem`(`:402-404` — RichSlot 이 쓴다)은 항목 단위 그대로.
 - ★`StructuredTextView` 는 순수 렌더로 남는다(`:5` 책임 주석 · `:527` ADR-0050/0051 순수성)★ — 이 컴포넌트에 state · effect · 스토어 구독을 더하지 않는다. `groupToolRuns` 는 렌더 중 파생이고, 펼침 상태(`useToolGroupStore`) 읽기와 토글은 새 자식 컴포넌트 **`ToolGroupRow`**(`chat/ToolGroupRow.tsx` — props = `slotId` · `row` · `results` · `runPos` · `isLast`(마지막 묶음인가 — 렌더 중 파생) · `onGroupToggle`)가 진다. `StructuredTextView` 는 `slotId`·`onGroupToggle` 을 그대로 내려보낼 뿐이다.
-- **요약 줄**: 아이콘(lucide `Layers`) · 종류별 `t('chat.toolGroup<Kind>', {count})` 를 고정 순서(검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타)로 ` · ` 로 잇고 · 오류가 있으면 끝에 `t('chat.toolGroupErrors', {count})`(붉은 톤). 오류 수 = `buildToolResultMap`(`:117-125`)의 `isError` 인 호출 id — claude 만 채워진다(U2). 셰브론 · `aria-expanded`.
+- **요약 줄**: 아이콘(lucide `Layers`) · 종류별 `t('chat.toolGroup<Kind>', {count})` 를 고정 순서(검색 · 읽기 · 목록 · 편집 · 명령 · 웹 · 에이전트 · MCP · 기타)로 ` · ` 로 잇고 · 오류가 있으면 끝에 `t('chat.toolGroupErrors', {count})`(붉은 톤) · 거부가 있으면 그 뒤 `t('chat.toolGroupDeclined', {count})`(흐린 톤 — ★사용자 확인★ §4-7 ⑧). 오류 수 = 항목 `resultMark === 'failed'`(codex — §4-7) 이거나 `buildToolResultMap`(`:117-125`)의 `isError`(claude) 인 호출 — 두 백엔드 다 선다(U2). 셰브론 · `aria-expanded`.
 - DOM 표지: 묶음 뿌리 `data-tool-group={key}` · `data-tool-group-open="1"|"0"` · `data-tool-group-count={calls.length}`.
 - [고름] 단일 도구 행 아이콘은 `category !== 'Other'` 면 종류 아이콘, 아니면 오늘 이름 휴리스틱(`:150-167`) — 옛 데몬에서 오늘 모습 그대로.
 
@@ -346,11 +352,104 @@ export function summarizeGroup(calls: readonly ToolItem[], errorIds: ReadonlySet
 ### 4-6. 시험
 
 - `toolRuns.test.ts`: 도구 1 개 = 묶음 없음 · 2 개 = 묶음 · `tool_result` 운반·usage·빈 생각 끼어도 이어짐 · 비지 않은 생각 흡수(U5) · 글/말풍선/구분선/결말/오류/모르는 사건이 끊음 · 마지막 도구 뒤 생각은 멤버 아님 · `live` 참(턴 중 · 뒤가 생각뿐) / 거짓(끊는 행이 옴 · 턴 끝) · 키 = 첫 id · id 없으면 `itemId` · 같은 사건열 두 번 = 같은 결과(replay).
-- `summarizeGroup`: 고정 순서 · 0 인 종류 생략 · 오류 수.
+- `summarizeGroup`: 고정 순서 · 0 인 종류 생략 · 오류 수(codex `resultMark` · claude 파싱 둘 다) · 거부 수.
+- U2(codex 끝 · 실패) 시험 = §4-7 ⑨.
 - `StructuredTextView.test.tsx`: 레일 위치가 행 목록과 DOM 에서 일치(ADR-0051 — 기존 레일 시험 모양) · 사용자 토글이 자동 접힘을 이김 · `data-tool-group*` 값.
 - `structuredAccumulator.test.ts`: `category` 있음·없음·모르는 낱말 → 정규화.
 - `toolGroupStore` · `chatCommands.test.ts`(`help` 없음).
 - Rust: claude 이름 표(각 낱말 + `mcp__x__y` + 모르는 이름) · codex `commandActions` 조합 표(fixture `tool_end_m7.jsonl` 의 `unknown` → `Command` 포함) · 상한을 넘는 item 도 종류는 온전한 item 에서 · 데몬 변환 일대일 · 직렬화 왕복(`category` 없는 옛 JSON 도 읽힌다).
+
+### 4-7. codex 도구 끝 · 실패 (U2 — 사용자 결정 「이번에 한다」)
+
+**무엇을**: codex 가 도구 item 의 `item/completed` 에 싣는 끝 상태를 중립 사건 하나로 옮겨, 묶음 머리 「오류 N」과 펼친 행의 배지가 codex 에서도 선다. 결과 **본문**은 옮기지 않는다 — 표시는 개수와 배지뿐이다(관례 = codex TUI 의 「· N failed」 · t3code).
+
+**사실**(확실 — 직접 확인):
+
+- codex 는 도구 item 마다 `item/started`(`status: inProgress`) 뒤 **같은 item id** 로 `item/completed` 를 끝 상태와 함께 낸다. 끝 어휘 = `commandExecution` `completed | failed | declined`(+ `exitCode`) · `fileChange` 같은 넷(`PatchApplyStatus`) · `mcpToolCall`·`dynamicToolCall` `completed | failed` · `collabAgentToolCall` `completed | failed | interrupted` · `webSearch` 는 status 칸이 없다(t3code 생성본 `schema.gen.ts:1928-1938` · `:2004-2009` · `:2278-2283` · `:2356-2366` · item 모양 `:21559-21632`).
+- 번역기는 도구 item 의 `ItemOrigin::Completed` 에서 **일부러 아무것도 안 낸다**(`backend/codex/decoder.rs:262-263` · `:623` — 한 호출을 두 번 그리지 않으려고). 그래서 끝 상태가 프론트에 닿는 길이 없다. 이력 문(`ItemOrigin::History`)은 끝난 item 을 받지만 `ToolCall` 만 낸다(같은 `:623`).
+- ★**끝이 턴 끝 뒤에 올 수 있다(실측)**★: `codex/fixtures/steer_m6.jsonl` 27 줄에 시작한 명령이, 32 줄에서 그 턴이 끊긴 뒤 **다음 턴의 `turn/completed`(49 줄) 뒤** 50 줄에서 옛 turn id · `status: completed` · `exitCode: 0` 으로 닫힌다(`fixtures/README.md:19` — 끊기 17 초 뒤).
+
+**① 선 모양 — 새 변형 `ToolResult`** [고름]
+
+```rust
+// agent types.rs — OutputEvent 에 한 변형
+/// 도구 호출 하나의 끝 결과 — 앞선 `ToolCall` 을 `id` 로 가리킨다(새 행이 아니다). 결말은 중립 enum(ADR-0004).
+ToolResult { id: String, outcome: ToolOutcome },
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutcome { Completed, Failed, Declined }
+
+// protocol messages.rs — StructuredEvent 에 같은 모양(단위 변형이라 serde·ts-rs 는 문자열)
+ToolResult { id: String, outcome: ToolOutcome },
+```
+
+- TS 접점(고정): 생성물 `crates/engram-dashboard-protocol/bindings/ToolOutcome.ts` = `"Completed" | "Failed" | "Declined"` · `StructuredEvent.ts` 에 `{ "type": "ToolResult", id: string, outcome: ToolOutcome }`.
+- `id` 는 `Option` 이 아니다 — 가리킬 호출이 없으면 사건을 내지 않는다(②).
+- 기각한 모양 둘:
+  - **`ToolCall` 에 선택 `status` 칸 + 누산기 id 병합** — 끝에서 `ToolCall` 을 한 번 더 내야 한다. 두 턴 분류기가 `ToolCall` 을 진행으로 세므로(`claude/mod.rs:541` · `codex/mod.rs:1206`) 턴 끝 뒤에 온 끝(위 실측)이 「턴 중」을 다시 켜 30 분 막힘 경로가 된다. 옛 셸은 끝마다 **같은 도구 행을 하나 더** 그린다 — 「표시할 수 없는 신호」 줄보다 나쁘다(틀린 내용이다).
+  - **`Structured{kind:…}` 탈출구** — 같은 두 분류기가 `Structured` 를 통째로 진행으로 센다(대기 입력 사건을 탈출구에 안 싣는 사유와 같다 — `types.rs:94-97`). json 을 claude `tool_result` 모양으로 지으면 옛 셸도 배지를 그리지만, 그것은 벤더 모양을 codex 번역기까지 넓혀 조사 §3-1 의 누수를 키운다.
+
+**② 상태 매핑 — codex 번역기**: 함수 하나 `tool_outcome(item, kind) -> Option<ToolOutcome>` 를 `Completed`·`History` 두 문이 같이 쓴다(ADR-0203 「두 번째 어휘표를 만들지 않는다」).
+
+| 벤더 `status` | → | 비고 |
+|---|---|---|
+| `failed` | `Failed` | 다섯 도구 변형 모두 |
+| `declined` | `Declined` | `commandExecution` · `fileChange` 만 스키마에 있다 — 다른 변형에서 오면 드리프트 계수 |
+| `completed` | `Completed` | ★내지 않는다★(③) |
+| `inProgress` | — | 이력 페이지의 아직 도는 item |
+| `interrupted`(`collabAgentToolCall`) | — | 턴 결말 행이 이미 끊김을 보인다 |
+| 칸 없음(`webSearch`) | — | 일상 |
+| 그 밖 문자열 · 문자열 아님 | — | `observe(tool-status:…, Drift)` |
+
+- ★**판정은 벤더 `status` 하나다 — `exitCode` 를 읽지 않는다**★ [고름]: 0 아닌 종료를 우리가 실패로 다시 가르면 벤더와 다른 판정이 선다(t3code 도 `status` 만 본다 — `apps/server/src/provider/Layers/CodexAdapter.ts:1013-1019`). `mcpToolCall.error` · `dynamicToolCall.success` 도 같은 이유로 안 읽는다. codex 가 0 아닌 종료를 늘 `failed` 로 적는지는 **미검**이다(가능성 높음 — t3code 시험이 `exitCode: 1` 을 `failed` 와 짝짓는다 `CodexAdapter.test.ts:1545-1552`) → B5 채취가 확인한다(⑨).
+- **발행**: `Started` 문 = 오늘 그대로(`ToolCall`) · `Completed` 문 = `tool_outcome` 이 `Failed`/`Declined` 면 `ToolResult` 하나, 그 밖엔 오늘처럼 사건 0 + 일상 계수 · `History` 문 = `[ToolCall, ToolResult?]` 이 순서. `id` 는 `ToolCall` 과 같은 `bounded_id`(`decoder.rs:1141`) — 걸러져 없으면 가리킬 행이 없으므로 내지 않고 `Malformed` 계수.
+
+**③ 실패 · 거부만 낸다** [고름]: `Completed` 는 선 어휘로만 둔다(④ 의 후속이 쓸 자리). 끝마다 내면 codex 도구 호출마다 사건이 하나씩 늘고 옛 셸의 「표시할 수 없는 신호」 줄이 **모든** 호출에 붙는데, 화면이 얻는 것은 없다 — 표시는 오류·거부 수와 배지뿐이다. ★`ToolResult` 가 없다 = 성공으로 읽지 말 것★ — 없음은 「모름」이다(옛 데몬 · 링에서 밀려남 · 끊겨 끝이 안 옴).
+
+**④ claude 는 이번에 바꾸지 않는다** [고름] — claude 번역기가 `tool_result` 블록에서 같은 `ToolResult` 를 함께 내는 안은 짓지 않는다:
+
+- 결과 **본문**은 여전히 벤더 블록(`Structured{kind:"user"}`)에서 읽는다 — 펼친 행의 Out(`StructuredTextView.tsx:262`) · `rowKindOf` 의 skip(`:390`). 상태만 싣는 중립 사건은 그 파싱을 옛 데몬 폴백으로 내리지 못하고, **같은 오류 비트가 두 곳에 산다**(한쪽이 낡는다).
+- claude 는 **모든** 호출에 결과를 낸다 — 기본 백엔드라 링 사건과 옛 셸의 표시 불가 줄이 codex 실패 수가 아니라 claude 호출 수만큼 는다.
+- 누수를 **키우지는 않는다** — codex 는 벤더 모양을 안 탄다.
+- 후속(추적 항목 후보 — §11 ⑦): 본문을 싣는 중립 결과(`ToolResult` 에 본문 칸 · `Completed` 도 냄) + 프론트 파싱을 옛 데몬 폴백으로 내리기. claude 이어받기 원문 경로와 한 사용자 줄의 여러 블록 처리(`structuredAccumulator.ts:175-190`)를 함께 옮겨야 해 이번 범위가 아니다.
+
+**⑤ 판차 — 두 방향**
+
+- **거를 값이 없다(확인)**: 셸이 데몬에 알리는 것은 인증 첫 프레임의 `protocol_version` 하나이고(`crates/engram-dashboard-net/src/auth.rs:33-38`), 데몬은 **같지 않으면 끊는다**(`net/src/ws.rs:348-363`). `Hello` 의 `capabilities` 는 데몬→셸 방향이고 지금 `None` 이다(`daemon/src/connection_core.rs:2214-2220`). 그래서 한 판 안에서 옛 셸과 새 셸을 가를 값이 없고, 연결별 변환(`connection_core.rs:765` `output_event_to_wire`)에서 걸러 낼 근거가 없다. 판을 올리면(6 → 7 · `protocol/src/lib.rs:121`) 옛 셸은 아예 못 붙어 거를 필요가 없어지지만, 개발 일상 조합(옛 데몬 + 새 셸 — discovery 가 재사용을 거부한다 `discovery/src/lib.rs:446`)을 표시 한 줄 때문에 끊는다.
+- **결정: 판을 올리지 않고 거르지 않는다** — `TurnEnd`(`protocol/src/messages.rs:743-763`) · `QueuedInput`(`:782-785`)와 같은 판단(데몬→셸 한 방향 · 옛 쪽엔 오독할 것이 없다). 새 변형 doc 에 그 한 줄을 단다.
+- 새 데몬 + 옛 셸: codex 실패·거부 호출마다 누산기 기본 갈래가 「표시할 수 없는 신호」 줄을 남긴다(연속이면 한 줄의 수만 는다 — `structuredAccumulator.ts:249-254`). 그 프레임은 `false` 를 돌려 대기 표시를 안 건드린다.
+- 옛 데몬 + 새 셸: 사건이 안 온다 → codex 오류 표시가 없을 뿐이다.
+
+**⑥ 턴 관측 · 오류 뒤 멈춤**: 두 분류기(`claude/mod.rs:538` · `codex/mod.rs:1203`)에 `OutputEvent::ToolResult { .. } => None`.
+
+- ★`Progress` 금지★ — 위 실측대로 끝은 턴 끝 뒤에도 오고, 진행으로 세면 「턴 중」이 다시 켜져 30 분 fail-open 까지 우편이 막힌다(CLAUDE.md 「턴 관측 정리」 · 「대기 입력 상태」 끝 문단). `None` 이라 도착 순서에 기대지 않는다.
+- ★`Failed` 금지★ — 도구 실패는 에이전트의 평범한 한 걸음이다. 세면 실패한 검색 한 번이 오류 뒤 멈춤(`last_end_failed`)을 세워 다음 깨끗한 턴까지 우편이 멈춘다(ADR-0231 N11).
+- 통로의 도구 끝 계기(`is_tool_item` — `decoder.rs:282-288`)는 원 줄의 item 타입을 읽으므로 이 사건과 무관하다 — `tool_end_m7` 시험(`codex/transport.rs:9653`)이 무수정 초록이어야 한다.
+- 프론트 누산기의 `ToolResult` 갈래는 `turnDone` 을 안 건드린다(⑧).
+
+**⑦ 링 · 생성물**
+
+- `estimate_cost_bytes`(`output_core.rs:1217`)에 `ToolResult { id, .. } => id.len()`(결말은 고정 크기). 실패·거부 호출당 사건 1 · 수십 바이트 — `REPLAY_MAX_EVENTS = 4096`(`:1291`)에 견주면 무시할 크기다.
+- 망라 match 전부(컴파일러가 가리킨다 · B5 한 커밋): 두 분류기 · `output_core.rs:993-1003`(변형 이름) · `:1217` · `daemon/src/connection_core.rs:765`(새 `tool_outcome_to_wire` 일대일 — `_` 갈래 없이) · 시험 `claude/mod.rs:3012-3030` · `agent/tests/stdio_smoke.rs:77-86` · `daemon/src/bin/saturation_pilot.rs:986-995`.
+- 생성물 `ToolOutcome.ts`(새) · `StructuredEvent.ts` — `cargo test -p engram-dashboard-protocol` 이 굽는다(CI sync). ★새 변형이라 프론트 `never` 망라(`structuredAccumulator.ts:243`)가 걸린다★ — 그래서 FE-2 가 가드를 먼저 두고 B5 는 그 뒤에 커밋한다(§7).
+
+**⑧ 프론트**
+
+- 누산기 `tool` 항목에 칸 `resultMark: ToolResultMark | null` — `ToolResultMark = 'failed' | 'declined'`(`TurnOutcomeMark` 와 같은 결: 정상 완료는 표식이 없다).
+- `ToolResult` 갈래: 뒤에서부터 같은 `id` 의 `tool` 항목을 찾아 copy-on-write 로 `resultMark` 를 바꾼다(`Completed` → `null` · 모르는 낱말 → `null` + warn). 못 찾으면(링에서 밀려남) 버린다. **새 항목을 만들지 않는다** → `rowKindOf` · 레일 · `isRenderedItem` 무변경. `turnDone` 을 안 건드리고 `true` 를 돌려준다. 같은 사건열 = 같은 결과(멱등 — `ToolCall` 이 늘 먼저 온다: 라이브는 `started` → `completed`, 이력은 한 item 안에서 그 순서).
+- 요약: `summarizeGroup`(§4-3)의 `errors` = `resultMark === 'failed'` 이거나 `vendorErrorIds` 에 든 호출 · `declined` = `resultMark === 'declined'`.
+- 펼친 행 `ToolItemRow`(`StructuredTextView.tsx:209`)에 prop `mark` — `isErr = result?.isError === true || mark === 'failed'`(오늘 배지 · 붉은 테 그대로 · codex 는 Out 칸이 없다) · `mark === 'declined'` = 흐린 테 배지 `t('chat.toolDeclined')`.
+- 상수 `DECLINED_MARK: 'own' | 'error' = 'own'`(`chat/toolRuns.ts` 머리) — `'error'` 면 거부를 오류로 함께 센다.
+- ★**사용자 확인** — `declined` 를 어떻게 보이나★: **추천 = 따로**(「거부됨」 배지 · 요약 끝 「거부 N」 · 붉게 칠하지 않는다). 도구가 돌다 실패한 것이 아니라 실행되지 않은 것이고, 우리 통로는 승인 요청을 늘 거절하므로(`backend/codex/transport.rs:3052-3054` — 승인 UI 없음) 고칠 자리가 다르다. t3code 도 「Declined」 를 「Failed」 와 따로 쓴다(`apps/web/src/components/chat/MessagesTimeline.logic.ts:86-96`). 대안 = 오류로 함께 센다(「오류 N」 하나 · 붉은 배지). 바뀌는 자리 = 위 상수 하나. ★우리 거절이 벤더에서 `declined` 로 닫히는지 `failed` 로 닫히는지는 미검★ — §8-2 F3 ④ 가 기록한다.
+
+**⑨ 시험**
+
+- 번역기(인라인 줄 — `decoder.rs:1594-1622` 모양): 실패 명령 `item/completed`(`failed` · `exitCode: 1`) → `[ToolResult{Failed}]` · 거부 패치(`fileChange` `declined`) → `Declined` · 실패 MCP(`mcpToolCall` `failed` + `error`) → `Failed` · `completed`(`exitCode` 가 0 이 아니어도) → 사건 0 · 기존 `item_completed_emits_nothing_but_still_inspects_the_item_type`(`:2283`) 무수정 초록 · `inProgress`·`interrupted`·`webSearch` → 0 · 모르는 status → 0 + 드리프트 계수 · id 없음/상한 초과 → 0 + `Malformed` · 이력 문 = `[ToolCall, ToolResult]` 순서.
+- **실측 fixture** 새 `codex/fixtures/tool_fail_u2.jsonl` — `codex_harness.js`(`.claude/handoff/attachments/20260925-midturn-phase0/`)로 0 아닌 종료 명령 한 턴을 떠서 `fixtures/README.md` 가공 규칙대로(표에 한 행). 시험 = 그 줄들 → `ToolCall` 뒤 `ToolResult{Failed}` 하나. ★그 채취에서 0 아닌 종료가 `completed` 로 오면 멈추고 메인에 올린다★ — 그러면 codex 명령 실패는 `status` 로 안 보이고, 판정을 `exitCode` 로 넓힐지는 사용자 체감이다. 거부 · MCP 실패는 실측 조건(승인 요청을 부르는 명령 · MCP 서버)이 무거워 위 인라인 줄로만 덮는다 — README 의 「손으로 지은 줄은 없다」는 그대로 참이다(인라인 줄은 fixture 가 아니다).
+- 두 분류기: `ToolResult` → `None`(세 결말 각각).
+- 턴 끝 뒤 끝: `steer_m6.jsonl` 49–50 줄 모양으로 `turn/completed` 뒤 `failed` 끝 → 턴 표 `in_turn` 거짓 유지 · `last_end_failed` 불변.
+- wire: 직렬화 골든 `{"type":"ToolResult","id":"i-1","outcome":"Failed"}` · 왕복 · 데몬 변환 일대일.
+- 프론트: 누산기 — 같은 id 에 붙음 · 항목 수 불변 · 없는 id 는 버림 · 턴 끝 뒤 도착해도 `turnDone` 불변 · replay 두 번 = 같은 스냅숏 · 모르는 outcome → 표식 없음. `summarizeGroup` — codex 실패 · claude 파싱 오류 · 거부 셈 · `DECLINED_MARK` 두 값. `StructuredTextView` — 배지 두 종 · codex 행에 Out 없음.
+- 골든 영향: 대기 입력 골든(`queued_input_golden.json`) 무영향(이 사건은 명부 환원에 안 든다) · 기존 codex fixture 셋(`empty_turn_m9` · `steer_m6` · `tool_end_m7`)은 도구 끝이 전부 `completed` 라 사건열이 그대로다.
 
 ---
 
@@ -437,12 +536,13 @@ struct PartialMessage {
 
 | 불변식(CLAUDE.md 「핵심 불변식」·ADR) | 기능 | 어떻게 지키나 |
 |---|---|---|
-| 턴 관측 · 30 분 fail-open(ADR-0127) | F2 · F4 | F2 = 끊긴 턴은 `TurnEnd` 로 닫힌다(S1 · S6) · 턴 밖 끊기는 턴 열림 문이 거절(S8) · F4 = 부속 줄은 신호 없음 · 늦은 델타 버림 · 한가 구간 최상위 `stream_event` 0(§5-4 — 벤더 전제) |
-| 오류 뒤 멈춤 `last_end_failed`(ADR-0231 · 0234) | F2 | 끊김 = `Ended(Other)` — 세우지도 풀지도 않는다(S2) |
+| 턴 관측 · 30 분 fail-open(ADR-0127) | F2 · F3 · F4 | F2 = 끊긴 턴은 `TurnEnd` 로 닫힌다(S1 · S6) · 턴 밖 끊기는 턴 열림 문이 거절(S8) · F3 = `ToolResult` 는 두 분류기에서 `None` — 턴 끝 뒤에 와도(실측 `steer_m6` 50 줄) 「턴 중」을 안 켠다(§4-7 ⑥) · F4 = 부속 줄은 신호 없음 · 늦은 델타 버림 · 한가 구간 최상위 `stream_event` 0(§5-4 — 벤더 전제) |
+| 오류 뒤 멈춤 `last_end_failed`(ADR-0231 · 0234) | F2 · F3 | F2 = 끊김 = `Ended(Other)` — 세우지도 풀지도 않는다(S2) · F3 = 도구 실패는 `Failed` 신호가 아니다(§4-7 ⑥) |
 | 대기 입력 한 줄기 · 글은 늘 보인다(ADR-0231 · 0235 결정 2) | F2 | 대기분이 다음 턴에 돈다(S3) · `interrupt:` 응답은 번역 안 함 |
 | 락 순서(ADR-0006) | F2 | 끊기 줄은 입력 큐만 탄다 — 새 락 간선 없음 |
-| 백엔드 지식은 `backend` 한 곳(ADR-0004) | F2 · F3 · F4 | 줄 모양 · 도구 이름 표 · `commandActions` 해석 · 부분 메시지 규칙 전부 `backend/{claude,codex}` · 통로·프론트는 중립 값만 |
-| replay→live · 누산기 멱등 | F3 · F4 | 묶음은 렌더 파생(누산기 상태 아님) · 델타도 같은 `TextDelta` 어휘 |
+| 백엔드 지식은 `backend` 한 곳(ADR-0004) | F2 · F3 · F4 | 줄 모양 · 도구 이름 표 · `commandActions` 해석 · codex 끝 상태 매핑 · 부분 메시지 규칙 전부 `backend/{claude,codex}` · 통로·프론트는 중립 값만(claude `tool_result` 파싱은 오늘 그대로 — 누수를 늘리지 않는다 · §4-7 ④) |
+| replay→live · 누산기 멱등 | F3 · F4 | 묶음은 렌더 파생(누산기 상태 아님) · `ToolResult` 는 id 로 기존 항목에 붙고 새 항목을 안 만든다 · 델타도 같은 `TextDelta` 어휘 |
+| wire 판 기준(`protocol/src/lib.rs:121` 의 doc) | F3 | `ToolResult` 로 `PROTOCOL_VERSION` 을 안 올린다 — 데몬→셸 한 방향 · 한 판 안에서 셸을 가를 값이 없다(§4-7 ⑤) |
 | 행 종류 ↔ 레일(ADR-0051) | F3 | 레일을 행 목록으로 계산 · 묶음 안에 레일 행 없음 |
 | 제어 표면 하나 · 새 전역 핸들 금지(「LLM-우선 제어」) | F1 · F2 · F3 | 레지스트리 명령 셋 · 모듈 맵 · DOM 표지 |
 | 전역 단축키 가드(`keybindings.ts:11-35`) | F2 | 손대지 않는다 |
@@ -462,16 +562,19 @@ struct PartialMessage {
 | **B2** F2 스파이크 | §3-5 S1–S8 · 보고서 · fixture 채취 | 스크래치 하네스 · `docs/research/…` · `claude/fixtures/interrupt_s1.jsonl` | ★출구 조건 미달 → 멈추고 메인에 반환(B3 의 claude 부분 착수 금지)★ |
 | **B3** F2 구현 | ⓐ 버스 `agent.interrupt`(스파이크와 무관 — B2 가 멈춰도 이것은 간다) ⓑ `with_interrupt`(`Option` 반환) · 턴 열림 문 · 끊기 줄 · `result` 분류 · `TurnEnd{Interrupted}` · 두 주석 갱신 · 기존 시험 둘 의도적 수정(§3-6) · (S2 가 못 가를 때만) ④ 표식 | `commands.rs` · `agent/bindings/*`(생성물) · `tests/command_declarations.rs` · `transport/stdio.rs` · `claude/mod.rs` · `types.rs`(주석) | 위 게이트 + `cargo test -p engram-dashboard-daemon -- --test-threads=4` |
 | **B4** F3 백엔드 | `ToolCategory` 두 벌 · wire 칸 · 데몬 변환 · 생성 자리 전부 · claude 표 · codex 판정 · 생성물 | `types.rs` · `protocol/src/messages.rs` · `protocol/bindings/*`(생성물) · `daemon/src/connection_core.rs` · `daemon/src/agent_conn.rs` · `output_core.rs` · `claude/mod.rs` · `codex/decoder.rs` | `cargo test --workspace -- --test-threads=4` 초록 · 생성물 sync |
+| **B5** U2 codex 끝(§4-7) | `ToolOutcome` 두 벌 · `ToolResult` 변형(agent · wire) · 데몬 변환 · 망라 match 전부 한 커밋(§4-7 ⑦) · codex `tool_outcome` · 두 분류기 `None` · 번역기 주석 셋 갱신(`decoder.rs:262-263` · `:523-525` · `:623` 앞) · 새 변형 doc 의 판 한 줄 · 시험 · 실측 fixture `tool_fail_u2.jsonl` · 생성물 | `types.rs` · `protocol/src/messages.rs` · `protocol/bindings/*`(생성물) · `daemon/src/connection_core.rs` · `daemon/src/bin/saturation_pilot.rs` · `output_core.rs` · `claude/mod.rs`(분류기 · 시험 이름표) · `codex/decoder.rs` · `codex/mod.rs` · `codex/fixtures/*` · `agent/tests/stdio_smoke.rs` | B4 게이트 + `npx tsc --noEmit` · `npm test`(생성물이 프론트 망라를 건다) · ★커밋 조건 = FE-2 의 가드 커밋이 트리에 있다 — 메인이 B4 반환 뒤 확인하고, 없으면 B5 지시를 FE-2 뒤로 미룬다(§11 ⑥)★ · ★채취에서 0 아닌 종료가 `completed` 면 멈추고 반환(§4-7 ⑨)★ |
 
 ### 프론트 — 워커 둘
 
 - **FE-1.0**(FE-1 의 첫 커밋 · FE-2 는 이 커밋 뒤에 시작): 공유 파일 둘을 한 번에 친다.
-  - `src/i18n/ko.ts` 키(전부): `agent.interrupt: '응답 중단'` · `slot.scrollToBottom: '맨 아래로'` · `chat.toolGroupSetExpanded: '도구 묶음 펼치기·접기'` · `chat.toolGroupSearch: '검색 {count}'` · `chat.toolGroupRead: '읽기 {count}'` · `chat.toolGroupList: '목록 {count}'` · `chat.toolGroupEdit: '편집 {count}'` · `chat.toolGroupCommand: '명령 {count}'` · `chat.toolGroupWeb: '웹 {count}'` · `chat.toolGroupAgent: '에이전트 {count}'` · `chat.toolGroupMcp: 'MCP {count}'` · `chat.toolGroupOther: '기타 {count}'` · `chat.toolGroupErrors: '오류 {count}'`(키는 두 단 — `src/i18n/index.ts` 의 `StringKey`).
+  - `src/i18n/ko.ts` 키(전부): `agent.interrupt: '응답 중단'` · `slot.scrollToBottom: '맨 아래로'` · `chat.toolGroupSetExpanded: '도구 묶음 펼치기·접기'` · `chat.toolGroupSearch: '검색 {count}'` · `chat.toolGroupRead: '읽기 {count}'` · `chat.toolGroupList: '목록 {count}'` · `chat.toolGroupEdit: '편집 {count}'` · `chat.toolGroupCommand: '명령 {count}'` · `chat.toolGroupWeb: '웹 {count}'` · `chat.toolGroupAgent: '에이전트 {count}'` · `chat.toolGroupMcp: 'MCP {count}'` · `chat.toolGroupOther: '기타 {count}'` · `chat.toolGroupErrors: '오류 {count}'` · `chat.toolGroupDeclined: '거부 {count}'` · `chat.toolDeclined: '거부됨'`(뒤 둘 = §4-7 ⑧ · 사용자가 「오류로 함께」를 고르면 안 쓰인 채 남아도 무해하다)(키는 두 단 — `src/i18n/index.ts` 의 `StringKey`).
   - `src/commands/contributions.ts:8-13` 에 `import './scrollCommands'` · `import './chatCommands'` + 두 파일을 머리 주석만 있는 빈 모듈로.
 - **FE-1**(RichSlot 소유 · 순차): FE-1.1 F1(§2 전부 · DomSlot) → FE-1.2 F2 프론트(`agentCommands.ts` · RichSlot Esc · 오버레이 표지 넷) → FE-1.3 F3 접착(`slotId` · `bind`/`clear` · `onGroupToggle` → `unpin`, FE-2 의 스토어 착지 뒤).
-- **FE-2**(FE-1 과 병렬): `chat/toolRuns.ts` · `chat/ToolGroupRow.tsx` · `store/toolGroupStore.ts` · `StructuredTextView.tsx` · `structuredAccumulator.ts`(지역 `ToolCategory` 합 — §4-1) · `commands/chatCommands.ts`. B4 를 기다리지 않고, 생성물 `ToolCategory.ts` 를 import 하지 않는다.
-- **I1 바인딩 교체**(통합 한 커밋): 주인 = 메인이 『코더(단순)』에 맡긴다 · 시점 = **B4 와 FE-2 가 둘 다 커밋된 뒤**. `structuredAccumulator.ts` 의 지역 합을 지우고 `import type { ToolCategory } from '../../../crates/engram-dashboard-protocol/bindings/ToolCategory'`(같은 파일의 기존 생성물 import 모양 `:18-21`)로 바꾼 뒤 그 이름을 다시 내보낸다 — 다른 파일의 import 는 안 바뀐다. 게이트 = `npx tsc --noEmit` · `npm test`(프론트가 쓰는 낱말이 생성물에 없으면 여기서 빨갛다 · 생성물이 낱말을 더 가졌는지는 눈으로 대조한다).
-- 겹침 점검: FE-1 ∩ FE-2 = ∅(FE-1.0 뒤) · RichSlot = FE-1 만 · StructuredTextView = FE-2 만 · I1 = FE-2 끝난 뒤라 겹침 없음.
+- **FE-2**(FE-1 과 병렬): `chat/toolRuns.ts` · `chat/ToolGroupRow.tsx` · `store/toolGroupStore.ts` · `StructuredTextView.tsx` · `structuredAccumulator.ts`(지역 `ToolCategory` 합 — §4-1 · U2 의 지역 `ToolOutcome` 합 + 가드 — 아래) · `commands/chatCommands.ts`. B4 · B5 를 기다리지 않고, 생성물 `ToolCategory.ts` · `ToolOutcome.ts` 를 import 하지 않는다.
+  - ★**U2 가드 — 생성물에 변형이 오기 전후 둘 다 `tsc` 초록이어야 한다**★: `consume` 의 `switch` 앞에 `if (isToolResultEvent(ev)) return this.consumeToolResult(ev)` · `isToolResultEvent(ev: unknown): ev is LocalToolResultEvent` · `LocalToolResultEvent = { type: 'ToolResult'; id: string; outcome: ToolOutcome }`(지역 합 `'Completed' | 'Failed' | 'Declined'`). ★가드 가지 안에서 `ev` 의 칸을 읽지 말고 도우미에 통째로 넘긴다★ — 변형이 오기 전에는 그 가지의 `ev` 가 `never` 로 좁혀져 칸 읽기가 `tsc` 오류다. 변형이 온 뒤에는 거짓 가지에서 그 변형이 빠져 `never` 망라(`:243`)가 그대로 선다 · 생성물의 결말 낱말이 지역 합보다 많으면 빠지지 않아 거기서 빨갛다(낱말 표류 경보). 두 상태 모두 TS 5.9.3 `--strict --noUnusedLocals --noUnusedParameters` 스크래치 파일로 확인했다(3판). 도우미는 `outcome` 을 런타임에 다시 거른다(더 새 데몬의 모르는 낱말 → 표식 없음).
+  - 이 가드 커밋이 B5 의 커밋 조건이다(§11 ⑥) — FE-2 는 가드를 FE-2 의 이른 커밋에 싣는다.
+- **I1 바인딩 교체**(통합 한 커밋): 주인 = 메인이 『코더(단순)』에 맡긴다 · 시점 = **B4 · B5 · FE-2 가 모두 커밋된 뒤**. `structuredAccumulator.ts` 의 지역 합 둘을 지우고 `import type { ToolCategory } from '../../../crates/engram-dashboard-protocol/bindings/ToolCategory'`·`ToolOutcome` 도 같은 모양(같은 파일의 기존 생성물 import 모양 `:18-21`)으로 바꾼 뒤 그 이름을 다시 내보낸다 — 다른 파일의 import 는 안 바뀐다. U2 가드는 `case 'ToolResult':` 갈래로 바꾼다(도우미는 그대로). 게이트 = `npx tsc --noEmit` · `npm test`(프론트가 쓰는 낱말이 생성물에 없으면 여기서 빨갛다 · 생성물이 낱말을 더 가졌는지는 눈으로 대조한다).
+- 겹침 점검: FE-1 ∩ FE-2 = ∅(FE-1.0 뒤) · RichSlot = FE-1 만 · StructuredTextView = FE-2 만 · B5 = 백엔드 파일 + 생성물뿐(프론트 소스 0) · I1 = FE-2 · B5 끝난 뒤라 겹침 없음.
 - **커밋 규율(워커 공통)**: ★어느 워커도 `*/bindings/` 아래 파일(`crates/engram-dashboard-protocol/bindings/` · `crates/engram-dashboard-agent/bindings/` · `src-tauri/bindings/`)을 손으로 쓰거나 고치지 않는다★ — 시험이 굽고 CI sync 게이트가 주인이다. 한 트리를 나눠 쓰는 워커는 커밋할 때 **자기 경로만** 스테이징한다(`git add <자기 파일>` — `git add -A`·`git add .` 금지). 남의 미커밋 변경(생성물 포함)을 자기 커밋에 싣지 않는다.
 
 ### 메인이 먼저 못 박는 접점
@@ -479,7 +582,8 @@ struct PartialMessage {
 | 접점 | 모양 | 쓰는 쪽 → 읽는 쪽 |
 |---|---|---|
 | TS `ToolCategory` | `"Read"\|"Search"\|"List"\|"Edit"\|"Command"\|"Web"\|"Agent"\|"Mcp"\|"Other"` · ToolCall `category?` | B4(생성물) · FE-2(같은 모양의 지역 합) → I1 이 하나로 |
-| `StructuredItem` `tool` | `{ kind:'tool'; name; argsJson; id; category: ToolCategory; itemId }` | FE-2 내부 |
+| TS `ToolOutcome` · `StructuredEvent` `ToolResult` | `"Completed"\|"Failed"\|"Declined"` · `{ type:"ToolResult"; id: string; outcome: ToolOutcome }` | B5(생성물) · FE-2(같은 모양의 지역 합 + 가드 — 위) → I1 이 하나로 |
+| `StructuredItem` `tool` | `{ kind:'tool'; name; argsJson; id; category: ToolCategory; resultMark: 'failed'\|'declined'\|null; itemId }` | FE-2 내부 |
 | `StructuredTextView` props | `{ items; streaming?; slotId?: string; onGroupToggle?: (isLast: boolean) => void }` | FE-2 → FE-1.3 |
 | `useToolGroupStore` | §4-4 | FE-2 → FE-1.3 |
 | `FollowHandle` | `{ pinned: boolean; pin(): void; unpin(): void }` | FE-1.1 → FE-1.3 |
@@ -491,7 +595,7 @@ struct PartialMessage {
 
 ### 8-1. 기계 게이트 (`/qa`)
 
-- 백엔드 = 각 단계 표의 명령 · 마지막 `cargo test --workspace -- --test-threads=4` · `cargo fmt --check` · 생성물 sync(`protocol/bindings` · `agent/bindings`).
+- 백엔드 = 각 단계 표의 명령 · 마지막 `cargo test --workspace -- --test-threads=4` · `cargo fmt --check` · 생성물 sync(`protocol/bindings` · `agent/bindings`). B5 는 생성물이 프론트 망라를 걸어 `npx tsc --noEmit` · `npm test` 도 돈다.
 - 프론트 = `npm test` · `npx tsc --noEmit`.
 - 격리 게이트 = CLAUDE.md 「빌드·검증 명령」 그대로(`use tauri` 0 줄 등) — 이 라운드는 crate 경계를 옮기지 않는다.
 
@@ -501,7 +605,7 @@ struct PartialMessage {
 |---|---|
 | F1 | ① 떨어진 채 탭을 돌렸다 돌아오기 — `scrollTop` 이 `display:none` 을 지나 남나(조사 §7 미검 — 코어의 되살리기가 필요했는지 기록) · 붙은 채 돌아오면 바닥 ② 창 새로고침·재구독 replay 폭주 뒤 바닥 착지 ③ 스트리밍 중 위로 휠 → 안 끌려 내려옴 · `data-scroll-follow="free"` ④ 펼친 생각 블록 안 휠 → 바깥 안 풀림 ⑤ 대기 목록이 서며 뷰포트가 줄 때 바닥 유지 ⑥ 버튼 150 ms 뒤 등장 · 누르면 바닥 ⑦ `__engramCmd('slot.scrollToBottom', {slotId})` |
 | F2 | ① 실 codex 도구 중 Esc → 중단 행 · 대기 글이 다음 턴 ② (B3 뒤) 실 claude 글 흐르는 중 · 도구 중 Esc → 중단 행 · 오류 행 없음 · 대기 글이 돈다 ③ 한글 조합 중 Esc = 조합만 취소 ④ 안 돌 때 Esc = 무동작 · 턴이 열리기 전(보낸 직후) Esc = 무동작(CONFLICT warn 만) · (B3 뒤) `engram agent interrupt` 를 한가할 때 = CONFLICT ⑤ 우클릭 메뉴 열린 채 Esc = **아무 일도 없다**(끊기 없음 · 메뉴는 그대로 — `SlotContextMenu` 는 Esc 처리기가 없고 바깥 `mousedown` 으로만 닫힌다 `SlotContextMenu.tsx:110-114` · Esc 닫기는 이번에 더하지 않는다) ⑥ 입력창 글 유지 ⑦ 본문 클릭 뒤 Esc(U6) ⑧ `engram agent interrupt <이름>` |
-| F3 | ① 실 claude 읽기·검색 ≥2 턴 — 도는 동안 펼침 · 글이 오면 접힘 · 요약 문구 ② 실패하는 도구 → 오류 수 ③ codex 묶음 개수 ④ 토글이 재구독 뒤에도 남음 ⑤ 같은 이력 replay → 같은 묶음 |
+| F3 | ① 실 claude 읽기·검색 ≥2 턴 — 도는 동안 펼침 · 글이 오면 접힘 · 요약 문구 ② 실 claude 실패 도구 → 「오류 1」 ③ (B5 뒤) 실 codex 0 아닌 종료 명령(예: `exit 3`)이 든 묶음 → 머리 「오류 1」 · 펼치면 그 행에 배지 · Out 칸 없음 ④ (B5 뒤 · 재현되면) 샌드박스 밖 쓰기처럼 codex 가 승인을 묻는 명령 → 우리 거절 뒤 그 호출이 `declined`/`failed` 중 무엇으로 닫혔나 기록 · 배지 모양(§4-7 ⑧) ⑤ codex 묶음 개수 ⑥ 토글 · 실패 배지가 재구독 replay 뒤에도 남음 ⑦ 같은 이력 replay → 같은 묶음 |
 | F4 | ① 실 claude JSON 에서 글이 점점 늘어난다 ② 블록 끝에 글이 두 벌 안 됨 ③ 도구·생각 한 번씩 ④ 그 세션 이어받기 → 글 한 벌 |
 
 ---
@@ -514,7 +618,11 @@ struct PartialMessage {
 - **F2 턴 열림 전 끊기**(③ · S4): 턴이 열리기 전(보낸 직후 · S4 결과에 따라 `init` 전까지)의 Esc 는 CONFLICT 로 거절되는 무동작이다 — 다시 누르면 된다.
 - **F2 잔여 경합**(§3-4 · S7): 턴 끝 직후의 늦은 Esc · 버스 호출이 CLI 가 스스로 연 다음 턴을 끊을 수 있다. 벤더 줄에 턴 id 가 없어 닫을 수 없다.
 - **F2 능력 표시**: claude JSON 의 `control.interrupt` 가 참이 되면 트리 `canInterrupt`(`mergeTreeNodes.ts:94`)도 참 — 오늘 소비자가 없다.
-- **F3 오류 수는 claude 만**(U2) · 펼침 상태는 인메모리(새로고침에 초기화).
+- **F3 펼침 상태는 인메모리**(새로고침에 초기화).
+- **F3 판차**(U2 · §4-7 ⑤): 새 데몬 + 옛 셸 = codex 실패·거부 호출마다 「표시할 수 없는 신호」 줄 · 옛 데몬 + 새 셸 = codex 오류 표시 없음. 한 판 안에서 셸을 가를 값이 없어 거르지 못한다 — `TurnEnd` 와 같은 수용이다.
+- **F3 codex 판정 = 벤더 `status`**: 0 아닌 종료를 벤더가 무엇으로 적는지 미검(B5 채취가 확인 — `completed` 로 오면 멈춘다) · 「못 찾음」을 종료 1 로 알리는 검색 명령이 벤더가 `failed` 로 적으면 「오류」로 보인다.
+- **F3 늦은 끝**: 끊긴 호출의 끝이 다음 턴 뒤에 오면(실측 `steer_m6`) 지난 턴의 행에 배지가 붙는다 — 정직한 표시다. 그 프레임이 「보낸 직후 · 첫 응답 전」 창에 들면 알아들은 프레임이 대기를 풀어(`RichSlot.tsx:222`) 대기 표시가 잠깐 꺼질 수 있다 — 같은 부류가 `Usage` 에도 있다.
+- **F3 claude 결과 파싱은 그대로**(§4-7 ④): 프론트가 벤더 `tool_result` 모양을 읽는 자리(조사 §3-1)는 이번에 걷지 않는다 — 후속(§11 ⑦).
 - **F3 벤더 도구 이름 표류**: claude 가 도구 이름을 바꾸면 `Other` 로 떨어진다(묶음은 그대로 선다 — 요약 문구만 「기타」).
 
 ---
@@ -523,17 +631,19 @@ struct PartialMessage {
 
 | 가안 | 결정 | 거부한 대안(사용자·메인이 확정) |
 |---|---|---|
-| **0237** | 채팅 칸 Esc = 도는 턴 끊기 · 명령 `agent.interrupt`(창 + 버스) — ★ADR-0235 결정 10(「UI 정지 버튼·단축키는 지금 넣지 않는다」)을 번복★(그 ADR 에 개정 도장) | 전역 단축키 표(가드를 연다) · 입력창만(U6 답에 따라) · 두 번 Esc |
+| **0237** | 채팅 칸 Esc = 도는 턴 끊기 · 명령 `agent.interrupt`(창 + 버스) · 범위 = 칸 안 어디든(U6) · 조건은 지역 술어 하나(§3-2) — ★ADR-0235 결정 10(「UI 정지 버튼·단축키는 지금 넣지 않는다」)을 번복★(그 ADR 에 개정 도장) | 전역 단축키 표(가드를 연다) · **단축키 시스템을 지금 만든다**(보류 — `docs/tracking.md` T-36 · Esc 는 지금 명령 `agent.interrupt` 를 부르는 지역 술어이고 나중에 키바인딩 표 한 줄로 옮긴다) · 입력창만(U6 — 사용자가 칸 안 어디든을 골랐다) · 두 번 Esc |
 | **0238** | claude JSON 끊기 = 통로 주입 제어 줄(턴 열림 문 — 턴 밖이면 `Unsupported`) · 끊긴 `result` → `TurnEnd{Interrupted}`(오류 아님 · 멈춤 불변) · 대기분은 다음 턴(`cancel_queued` 안 씀) · 잔여 경합은 벤더 한계로 문서화 | 세션 입력 자물쇠 경로(①) · `MessageDone` 유지(②) · 턴 열림 전 끊기를 미루는 큐(③) · 대기분 취소 |
 | **0239** | `ToolCall.category` 중립 선 칸 — 번역기가 정하고 프론트는 모르면 「기타」 | 프론트 이름 표(벤더 지식 누수) · 백엔드가 묶음을 만든다(표시 관심사를 선에) |
 | **0240** | claude 부분 메시지 중복 제거 = 열린 블록이 흘렸으면 완결 글을 버린다 · 턴 끝은 `result` 그대로 | 교체(새 선 변형 + replay 교체) · 꼬리 비교(paseo — 중복 모서리) · 무조건 합치기(§9 문턱을 넘을 때만 짓는다) |
-| (선택) **0241** | 스크롤 따라가기 = 직접 쓴 순수 코어 · 성장 뒤 다시 재지 않는다 | `use-stick-to-bottom`(Radix 휠 불일치 의심 · 전역 청취자) · CSS 만 · 가상화 |
+| **0241** | 도구 끝 = 새 선 변형 `ToolResult{id, outcome}` — codex 가 실패·거부만 낸다 · 판정은 벤더 `status` · 두 턴 분류기 `None` · `PROTOCOL_VERSION` 안 올림(판차 수용) · claude 는 이번에 안 바꾼다(U2 · §4-7) | `ToolCall` 선택 status + id 병합(끝이 진행 신호가 됨 · 옛 셸 중복 행) · `Structured` 탈출구(claude 모양 흉내 포함) · 판을 올려 거르기 · 모든 끝을 냄 · claude 도 상태만 냄 · `exitCode` 로 판정 |
+| (선택) **0242** | 스크롤 따라가기 = 직접 쓴 순수 코어 · 성장 뒤 다시 재지 않는다 | `use-stick-to-bottom`(Radix 휠 불일치 의심 · 전역 청취자) · CSS 만 · 가상화 |
 
-- 함께 고칠 문서: `types.rs:70` · `claude/mod.rs:551` · `:762-767` 주석 · CLAUDE.md 「핵심 불변식」(claude 끝 어휘에 끊김 `TurnEnd` 한 갈래) — 착지 라운드에서 `/review doc`.
+- **0241 을 0239 에 넣지 않고 새 번호로 두는 이유**: 거부한 대안이 서로 다른 축이다(0239 = 종류를 누가 판별하나 · 0241 = 끝 결과의 선 모양과 판차). 한 ADR 에 섞으면 한쪽을 번복할 때 다른 쪽까지 폐기 도장이 번지고, 다음 세션이 어느 대안이 어느 결정의 것인지 못 가른다.
+- 함께 고칠 문서: `types.rs:70` · `claude/mod.rs:551` · `:762-767` 주석 · `codex/decoder.rs:262-263` · `:523-525` · `:623` 앞 주석(끝에서 결과를 낸다 — B5) · CLAUDE.md 「핵심 불변식」(claude 끝 어휘에 끊김 `TurnEnd` 한 갈래 · 「대기 입력 상태」 끝 문단의 「턴 끝 뒤에 오는 사건」 예에 `ToolResult` — 선택) — 착지 라운드에서 `/review doc`.
 
 ---
 
-## 11. ★메인 확인 필요★ 모음 · 판정(2판)
+## 11. ★메인 확인 필요★ 모음 · 판정(2판 ①–⑤ · 3판 ⑥⑦)
 
 | # | 무엇 | 왜 올리나 | 메인 판정 |
 |---|---|---|---|
@@ -542,6 +652,8 @@ struct PartialMessage {
 | ③ | S4 에서 init 전 끊기가 무동작이면: 받아들인다(문서화) vs init 을 볼 때까지 끊기를 미룬다(§3-5) | 미루기는 번역기↔통로 사이에 새 공유 상태가 필요하다 | **해소** — 턴 열림 문(§3-4): 턴이 열리기 전의 Esc 는 `Unsupported`(무동작 · 정직한 답) · 사용자가 다시 누른다 · 미루는 큐 없음. S4 가 되울림 뒤 · `init` 전 틈을 보이면 문이 여는 줄만 늦춘다 |
 | ④ | S2 에서 `subtype`·`terminal_reason` 이 끊김을 못 가르면 「우리가 보냈다」 표식으로 가른다(§3-4) | 끊기와 겹친 진짜 오류를 끊김으로 접어 가릴 수 있다 | **예비로만 유지** — 스파이크가 두 칸 모두 끊김을 못 가를 때만 짓는다 · 문이 열려 있을 때만 세우고 그 턴의 `result` 에서 지운다 → 한가할 때의 호출이 다음 턴의 진짜 오류를 가리지 못한다 |
 | ⑤ | 사람이 마지막이 아닌 도구 묶음을 펼치면 따라가기를 푼다(§4-5) | 지시(「RO 가 처리한다」)에 더한 것 — 빼면 붙은 채 펼친 묶음 머리가 화면 위로 밀려난다 | **수락** |
+| ⑥ | B5 는 FE-2 의 U2 가드 커밋 뒤에만 커밋한다(§7) | 새 변형의 생성물이 프론트 `never` 망라(`structuredAccumulator.ts:243`)를 걸어, 가드 없이 들어가면 그 커밋부터 트리의 `tsc` 가 빨갛다 — 두 워커 사이에 순서가 하나 생긴다. 대안 = B5 가 누산기 한 갈래를 함께 친다(FE-2 파일과 겹친다 — 기각) | 대기 |
+| ⑦ | claude 결과 중립화(본문 포함 `ToolResult` · 프론트 파싱을 옛 데몬 폴백으로)를 후속 추적 항목으로 적는다(§4-7 ④) | 이 문서는 `docs/tracking.md` 를 안 건드린다 — 적립은 메인 몫 | 대기 |
 
 
 ## 12. 리뷰 기록 · 구현 때 반영할 것
