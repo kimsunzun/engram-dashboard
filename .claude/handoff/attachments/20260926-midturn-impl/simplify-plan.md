@@ -1,6 +1,6 @@
 # Simplification plan — codex mid-turn input (authoritative for the S-chunks; supersedes plan.md for codex)
 
-Base: `338740f` (code = P2 `3014247` + P8 `37ecc5e`; comment-only edits since). Peer survey: `docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md`.
+Base: `d65ddee` (code = P2 `3014247` + P8 `37ecc5e`; comment-only edits since). Peer survey: `docs/research/codex-mid-turn-input-peer-implementations-2026-09-26.md`.
 
 ## User decisions 2026-09-26 (closed — do not re-open)
 - 「그냥 도구하나 사용 이벤트 끝나면 그냥 슬쩍 끼워넣으라고」 — codex = t3code shape: hold typed mid-turn items; on the running turn's tool-completion event push them.

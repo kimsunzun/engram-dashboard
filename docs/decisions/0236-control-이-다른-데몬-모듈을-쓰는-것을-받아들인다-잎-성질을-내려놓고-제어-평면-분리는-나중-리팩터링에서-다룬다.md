@@ -26,7 +26,7 @@ ADR-0130 은 데몬 crate 를 더 쪼개지 않기로 하면서 재개 조건 �
 - **master `645d55d` 의 `control/` ⇄ `connection_core` production 순환(실측 2026-09-27 — `connection_core.rs` 의 `#[cfg(test)]` 모듈은 `:2032` 부터)**:
   - `connection_core` → `control/` — `ControlRegistry`(`connection_core.rs:66`) · `mcp_server::MessagingSlot`(`:856` · `:874`) · `catalog::merge`(`:1621`) · `agent::RosterBroadcast` 구현(`:1960`). 처음 든 커밋 = `7c47947`(2026-07-21).
   - `control/` → `connection_core` — 위 `sanitize_for_log` 간선. 처음 든 커밋 = `9df137f`(2026-08-20) — 그날부터 순환이다.
-- **판단 보류 기록** — todo 항목 「ADR-0130 재론 트리거가 발화했다(2026-08-23 실측)」가 — 2026-08-23 `docs/backlog.md`(`d0a2074`)에 처음 적혔고 `docs/todo/observed-only.md`(`ed0b033`)로 옮겨졌다가 이 ADR 과 같은 변경에서 지웠다(읽는 법 = `git show 5e7d522:docs/todo/observed-only.md`) — 같은 간선(`catalog.rs:36` · `commands.rs:27` · `mcp_server.rs:41`)을 적고 판단을 미뤘다. ADR-0130 · ADR-0151 · `/qa` 바인딩 본문에는 반영되지 않았다. ADR-0151 영향절의 「`control/` 은 나가는 간선 0 인 leaf」는 그 ADR 이 쓰인 2026-08-17 에는 참이었고 이틀 뒤 S20 이 깼다.
+- **판단 보류 기록** — todo 항목 「ADR-0130 재론 트리거가 발화했다(2026-08-23 실측)」가 — 2026-08-23 `docs/backlog.md`(`d0a2074`)에 처음 적혔고 `docs/todo/observed-only.md`(`ed0b033`)로 옮겨졌다가 이 ADR 과 같은 변경에서 지웠다(읽는 법 = `git show 9190f36:docs/todo/observed-only.md`) — 같은 간선(`catalog.rs:36` · `commands.rs:27` · `mcp_server.rs:41`)을 적고 판단을 미뤘다. ADR-0130 · ADR-0151 · `/qa` 바인딩 본문에는 반영되지 않았다. ADR-0151 영향절의 「`control/` 은 나가는 간선 0 인 leaf」는 그 ADR 이 쓰인 2026-08-17 에는 참이었고 이틀 뒤 S20 이 깼다.
 
 ## 영향 / 불변식
 - **ADR-0130 재개 조건 ① 은 그대로다**(ADR-0151 이 판정 기준을 이미 갈았다). **③ 은 이 묶음에 대해 관측됐고 결정 2 가 덮는다** — 조건 자체는 살아 있어 다른 순환이 생기면 여전히 재론 대상이고, 여전히 단발 명령이 없다.

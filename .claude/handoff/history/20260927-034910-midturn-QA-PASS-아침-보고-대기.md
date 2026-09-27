@@ -28,13 +28,13 @@ S1–S5 (previous session) + this session's ✕ fix, S6 docs (ADR-0235), `/revie
 ## Repo state
 
 - Branch `v0.3.2/feat/json-midturn-queue` (wt1). Remote tip still `37ecc5e`. ★Nothing pushed★.
-- Commits this session: `af30654` ✕ fix · `de1907e` `8fa6cd1` S6 docs · `746152e` doc-review fixes (+ agent binding regen) · `3b1288e` code-review fixes · `2d4c437` mid-point handoff · `6569e62` step-log · + this handoff commit.
+- Commits this session: `071f50a` ✕ fix · `ddda492` `426d124` S6 docs · `1d0ebb0` doc-review fixes (+ agent binding regen) · `7a57d52` code-review fixes · `014df62` mid-point handoff · `d2bfacd` step-log · + this handoff commit.
 - Uncommitted: only `src-tauri/bindings/*.ts` line-ending noise — leave.
-- Release builds at `2d4c437` exist in `target/release/` (daemon + client with embedded frontend). QA data dirs are in this session's scratchpad (volatile, OK to lose).
+- Release builds at `014df62` exist in `target/release/` (daemon + client with embedded frontend). QA data dirs are in this session's scratchpad (volatile, OK to lose).
 
 ## Verification state
 
-- `/qa full` on `2d4c437` = PASS. standard: build · workspace regression (58 result lines · 3158 passed · 0 failed · 20 ignored) · shell integration 4 targets · `lib_unit` 342 · fmt · isolation gates · dependency ceilings · `tsc` · `npm test` 70 files / 1344 — all `__EXIT=0`.
+- `/qa full` on `014df62` = PASS. standard: build · workspace regression (58 result lines · 3158 passed · 0 failed · 20 ignored) · shell integration 4 targets · `lib_unit` 342 · fmt · isolation gates · dependency ceilings · `tsc` · `npm test` 70 files / 1344 — all `__EXIT=0`.
 - GUI (release builds, fresh `ENGRAM_DATA_DIR`, daemon pre-started with `RUST_LOG=warn,engram::codex_steer=debug`): codex T1 tool-end push · T2 three tools (steer 0.1 ms after tool 1 end, echo 3.9 s before tool 2) · T3 parallel tools (push at the first end) · T4 answer-only waits for turn end · T5 ✕ held → removed (interim state not visible) · T6 sent survives reload, not-removed row drawn as sent — all PASS. claude C1 tool boundary · C2 ✕ held · C4 answer-only · C5 reload — PASS; C3 not-removed — NOT RUN (window 1–11 ms).
 - Reviews: `/review doc` full FIX applied; `/review code deep` FIX applied (except pending item 1); no re-review after fixes.
 - NOT run: CI (not pushed). 1 GUI pass = smoke, not race-free proof.
