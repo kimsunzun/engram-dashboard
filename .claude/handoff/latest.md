@@ -46,7 +46,7 @@ S1–S5 (previous session) + this session's ✕ fix, S6 docs (ADR-0235), `/revie
 3. Port 1420 is owned by wt2's vite → GUI QA must use release builds (`cargo build --release -p engram-dashboard-daemon` + `npm run tauri -- build --no-bundle`). Pass the same `ENGRAM_DATA_DIR` to a pre-started daemon and to the app to get daemon-side `RUST_LOG` and avoid auto-restoring stale profiles in `target/release/data`. Record short DOM states with an in-page MutationObserver (100 ms polling misses 「sent」).
 4. Parallel workers in one worktree: forbid git writes; main commits.
 5. codex reviews via `codex:codex-rescue`, foreground, `--fresh`, read-only (`~/.claude/skills/review/codex-call-spec.md`).
-6. `<internal-plugin>` hooks misfire every turn — ignore.
+6. `<plugin>` hooks misfire every turn — ignore.
 7. Next ADR number = 0236.
 
 ## Stop conditions

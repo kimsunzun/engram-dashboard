@@ -60,7 +60,7 @@ Two tracks, nothing committed this session. ① **Detached launchers stop steali
 5. codex via `codex:codex-rescue`: after any parallel/other codex call in the same cwd, **don't `--resume`** — open `--fresh`. (Direct `codex exec` for research reviews also counts.)
 6. Port 1420 belongs to wt2's vite → use the RELEASE exe with an isolated `ENGRAM_DATA_DIR` for GUI checks in wt1 (daemon first, then client; teardown by PID after checking ExecutablePath).
 7. Blob-less clone + `git grep` across tags hangs; `grep -a` over the 237 MB `claude.exe` with wide context times out — use `git show <tag>:<path>` and a node `Buffer.indexOf` script.
-8. The `<internal-plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore them; this project's handoff is the user's `handoff` skill.
+8. The `<plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore them; this project's handoff is the user's `handoff` skill.
 
 ## Stop conditions
 

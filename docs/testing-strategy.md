@@ -8,15 +8,15 @@
 
 세 층으로 나누고, **싸고 빠른 아래층에서 최대한 잡는다.** 위층(실앱/시각)은 아래층이 못 보는 것만.
 
-| 층 | 무엇을 검증 | 도구 | 속도 | 보안(EDR) |
+| 층 | 무엇을 검증 | 도구 | 속도 | 보안 소프트웨어 |
 |---|---|---|---|---|
 | **① 로직 단위** | 순수 로직(디코드/dedup/상태전이/변환) | Rust `#[test]` · (프론트)vitest | 빠름 | 무관 |
 | **② 격리 통합** | 모듈 경계 인과(seam으로 외부의존 끊고) | examples/smoke bin · `tests/` 통합 · in-process WS E2E | 중간 | 무관 |
-| **③ 실앱/시각** | 진짜 프로세스·진짜 렌더링·실제 OS | 실프로세스(#[ignore]) · CDP(`scripts/cdp.mjs`) | 느림 | **CDP는 EDR 탐지 대상** |
+| **③ 실앱/시각** | 진짜 프로세스·진짜 렌더링·실제 OS | 실프로세스(#[ignore]) · CDP(`scripts/cdp.mjs`) | 느림 | **CDP는 보안 소프트웨어 탐지 대상** |
 
 **역할 분리 규칙(중요):**
 - **로직은 ①에서.** "데이터를 제대로 처리하나"는 단위테스트로. 브라우저·실프로세스 불필요.
-- **CDP/Chrome은 ③ 전용** — 스샷·레이아웃·"진짜 앱이 실제로 뜨고 붙나" 최종 스모크. **로직 검증에 CDP eval 을 쓰지 않는다**(과용 = 느리고, EDR 마찰, 버그를 늦게 잡음).
+- **CDP/Chrome은 ③ 전용** — 스샷·레이아웃·"진짜 앱이 실제로 뜨고 붙나" 최종 스모크. **로직 검증에 CDP eval 을 쓰지 않는다**(과용 = 느리고, 보안 소프트웨어 마찰, 버그를 늦게 잡음).
 - 근거: 재연결 resume 버그(2026-06-15)는 ①에 있어야 할 로직 버그였는데 프론트 단위테스트가 없어 ③(CDP)까지 가서야 잡혔다. mock 소켓 단위테스트였으면 브라우저 없이 즉시 걸렸을 버그.
 
 ### 0-a. 배치 일원화 — 용도로 폴더를 고정한다 (시기 아님)
@@ -106,7 +106,7 @@
 > §0-a 일원화 결정(2026-06-15)에 따른 구체 실행 항목. 우선순위 순.
 
 ### HIGH
-1. **~~프론트 로직 단위테스트 도입 (vitest)~~ → 도입 완료** — vitest + `npm test`(= `vitest run`)가 게이트로 서 있고, 테스트는 `*.test.ts(x)` **코로케이션**이다. 애초 목표였던 축(decodeOutputFrame·high-water dedup·재연결 resume·request_id 매칭·clientFactory 모드·store 전이)이 여기로 내려왔다 — 재연결 버그류 회귀를 ①에서 잡는 그물이자 ②③ 부하·EDR 마찰 감소의 핵심. **남은 것은 커버리지 확장이지 도입이 아니다.**
+1. **~~프론트 로직 단위테스트 도입 (vitest)~~ → 도입 완료** — vitest + `npm test`(= `vitest run`)가 게이트로 서 있고, 테스트는 `*.test.ts(x)` **코로케이션**이다. 애초 목표였던 축(decodeOutputFrame·high-water dedup·재연결 resume·request_id 매칭·clientFactory 모드·store 전이)이 여기로 내려왔다 — 재연결 버그류 회귀를 ①에서 잡는 그물이자 ②③ 부하·보안 소프트웨어 마찰 감소의 핵심. **남은 것은 커버리지 확장이지 도입이 아니다.**
 2. **CDP 역할 재정의 + 최소화** — CDP eval 로 로직 검증하던 관행 중단. CDP = 시각(shot)·레이아웃·실앱 최종 스모크 전용. `/qa` 바인딩 §full 의 "검증은 스샷보다 eval 텍스트 유리" 문구도 이 분리에 맞게 보정 검토(eval 은 실앱 스모크 한정).
 
 ### MED
@@ -154,16 +154,16 @@ rg "engram_dashboard_protocol" crates/engram-dashboard-agent/src/   # → 0줄
 rg "^\s*use tauri" crates/engram-dashboard-base/src/       # → 0줄 (같은 ADR-0003 불변식의 짝 — 위 §1 base 절)
 rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/   # → 0줄 (입주 조건 ③)
 
-# ③ 실앱/시각 (CDP — EDR 탐지 대상, 최소 사용)
+# ③ 실앱/시각 (CDP — 보안 소프트웨어 탐지 대상, 최소 사용)
 # 실명령 정본 = /qa 바인딩 §full (여기 베끼지 않는다).
 # 앱은 셸에서 직접 띄우지 않는다 — scripts/launch-detached.ps1 경유.
 ```
 
-## 4. 보안(EDR) 주의 — CDP
+## 4. 보안 소프트웨어 주의 — CDP
 
-`scripts/cdp.mjs` 는 WebView2(Edge 기반)에 `--remote-debugging-port` 로 디버그 포트를 열고 외부 `node` 가 붙어 제어한다. 이 패턴은 보안 솔루션이 **"브라우저 프로세스 메모리 접근"** 으로 탐지한다(공격자의 자격증명 탈취 수법과 시그니처 동일). 2026-06-15 실제 탐지됨.
+`scripts/cdp.mjs` 는 WebView2(Edge 기반)에 `--remote-debugging-port` 로 디버그 포트를 열고 외부 `node` 가 붙어 제어한다. 이 패턴은 개발 PC 의 보안 소프트웨어가 **"브라우저 프로세스 메모리 접근"** 으로 탐지한다(공격자의 자격증명 탈취 수법과 시그니처 동일). 2026-06-15 실제 탐지됨.
 - **원칙**: 로직은 ①(vitest)에서 검증해 CDP 의존을 최소화. CDP 는 시각/레이아웃 확인이 꼭 필요할 때만.
-- **정식 사용이 잦아지면**: 보안관제에 개발 예외 등록 요청(대상=`msedgewebview2.exe` + 디버그 플래그 / 주체=`node` `scripts/cdp.mjs` / 루프백 `127.0.0.1`). 단 예외 가부·형태는 보안관제 소관.
+- **정식 사용이 잦아지면**: 탐지되는 조합은 대상=`msedgewebview2.exe` + 디버그 플래그 / 주체=`node` `scripts/cdp.mjs` / 루프백 `127.0.0.1` 이다 — 이 조합이 계속 탐지되는 환경에서는 CDP 사용을 늘리지 않는다.
 
 ## 5. 새 코드 추가 시 체크 (TDD, ADR-0012)
 - 순수 로직이면 → ① 단위테스트 **먼저/함께**(Rust `#[test]` 또는 프론트 vitest).

@@ -46,7 +46,7 @@ Mid-turn input implementation per `.claude/handoff/attachments/20260926-midturn-
 5. P5a + P5b land in the same phase commit.
 6. A worker can die on an API SSL error — resume it with `SendMessage` (partial edits stay).
 7. `engram.exe` CLI only works inside an engram-spawned agent (NO_TOKEN otherwise) — CLI smoke needs an agent-run probe or the WS `Command` entrance.
-8. `<internal-plugin>` hooks misfire every turn — ignore; this project's handoff is the user's `handoff` skill.
+8. `<plugin>` hooks misfire every turn — ignore; this project's handoff is the user's `handoff` skill.
 
 ## Stop conditions
 
@@ -56,7 +56,7 @@ Mid-turn input implementation per `.claude/handoff/attachments/20260926-midturn-
 
 ## For the user (collected — also the final report)
 
-- ★**Privacy (needs a user decision):** the repo is PUBLIC; the first push of this branch published older committed Phase 0 raw logs (`.claude/handoff/attachments/20260925-midturn-phase0/logs/claude-M*.jsonl`, `codex-M6/M7…`) with the OS account name (= GitHub handle) and internal plugin names, plus a 2026-09-25 handoff mentioning the company account domain. master already had similar content (`claude/fixtures/claude_{text,tool}.jsonl`, `.claude/handoff/attachments/codex-control-2026-09-16.md`, a June handoff). Options: forward scrub commit and/or history rewrite + force-push (destructive).
+- ★**Public-repo cleanup needed (user decision pending).**
 - Old codex now also stops mail after a failed turn (delegated ruling).
 - Late echo after turn end → bubble without an automatic answer (differs from the N12 explanation).
 - ADR-0130 trigger: pre-existing production matches + 2 new lines from P4 (const import) — worth a separate look.
