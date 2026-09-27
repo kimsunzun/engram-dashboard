@@ -10,15 +10,22 @@
 //!   지키는 테스트가 통째로 배송 경로 밖으로 나간다. 통로가 자기 인스턴스를 따로 만드는 길도
 //!   같은 값을 두 벌로 쪼갠다(관측 맵과 "이름별 1 회" 가드가 갈린다). **파싱 한 번이 그보다 싸다.**
 //!
-//! ★번역(알림 → 이벤트) 자체는 순수하다★ — I/O 도 시계도 전역 상태도 없고 같은 알림은 언제나
-//!   같은 이벤트를 낸다. ★단 **프레이밍은 호출 이력에 의존한다**★: 인스턴스가 드는 상태는 부분
-//!   라인 버퍼 · resync 플래그 · 진단 계수 셋이고, 앞의 둘은 산출을 바꾼다(같은 청크라도 앞선
-//!   호출에 따라 이벤트가 나기도 하고 버려지기도 한다). 골든은 그래서 **새 인스턴스**에 건다.
+//! ★번역(알림 → 이벤트) 자체는 순수하다★ — I/O 도 시계도 없고 같은 알림은 언제나 같은 이벤트를
+//!   낸다(전역 상태는 사용량 해석의 「로그 한 번」 표지뿐이고 산출에 닿지 않는다). ★단 **프레이밍은
+//!   호출 이력에 의존한다**★: 인스턴스가 드는 상태는 부분 라인 버퍼 · resync 플래그 · 진단 계수 셋 ·
+//!   pump 가 줄마다 비우는 사용량 관측이고, 앞의 둘은 산출을 바꾼다(같은 청크라도 앞선 호출에 따라
+//!   이벤트가 나기도 하고 버려지기도 한다). 골든은 그래서 **새 인스턴스**에 건다.
+//!
+//! ★사용량 한도 알림은 이벤트가 아니라 [`OutputDecoder::take_usage`] 로 나간다★ — 계정 단위 상태라
+//!   에이전트별 replay·구독자 fan-out 을 타면 안 된다(해석 = 이 폴더 `usage`).
 //!
 //! ★모르는 것은 버린다 — `Structured` 를 **배출구로** 쓰지 않는다★(TRD §6-2). 그 탈출구를 기본
 //!   경로로 쓰면 프론트가 `kind` 를 label 로 찍고 payload 를 코드블록으로 그려, 결국 **codex 메서드
 //!   이름과 프로토콜 JSON 을 사용자 화면에 띄운다.** 대신 **버린 것은 전부 계수·로그로 남는다**
 //!   (`observe`). 그 대가 = 미지의 신호가 화면에서 로그로 옮겨 간다(TRD §4-7 이 그 회계를 진다).
+//!   ★예외 = 사용량 한도 알림 **안의** 칸★: 봉투가 읽힌 뒤 칸(창 자리 포함) 하나만 틀린 것은 그 칸만 조용히
+//!   버린다. 로그로 남는 것은 버킷·창 길이를 버릴 때와 창에 남는 칸이 하나도 없을 때뿐이고, 그것도 계수 없이
+//!   프로세스당 한 번이다(이 폴더 `usage`).
 //!   ★단 `Structured` 를 아예 안 내는 것은 아니다★ — 되울린 유저 메시지 하나가 그 어휘로 나간다.
 //!   그것은 **모르는 것을 흘리는 것이 아니라 아는 것을 중립 표식으로 옮기는 것**이라 위 규율에 걸리지
 //!   않는다(`kind="user"` 안에 codex 어휘가 없다).
@@ -53,8 +60,10 @@ use engram_dashboard_base::logging::mask_secrets;
 use serde_json::Value;
 
 use super::protocol::{self, method, Inbound};
+use super::usage;
 use crate::transport::OutputDecoder;
 use crate::types::{OutputEvent, TurnOutcome};
+use crate::usage::UsageObservation;
 
 /// 로그 한 줄에 실을 상대 문자열 상한(문자 수). ★오류 본문이 4KB 에 이르는 경우가 실측됐다★
 /// (모르는 메서드 오류가 유효 메서드 160 개를 전부 열거한다) — 자르지 않으면 로그가 그것으로 덮인다.
@@ -123,7 +132,7 @@ const MAX_ROUTINE_KEYS: usize = 128;
 const MAX_EMITTED_USER_ITEMS: usize = 64;
 
 /// 우리가 **알면서 번역하지 않는** 서버 알림 이름(스키마 0.154.0 의 `ServerNotification` 81 종 중
-/// 이 번역기가 손대는 7 종을 뺀 74 종).
+/// 이 번역기가 손대는 8 종을 뺀 73 종).
 ///
 /// ★이 목록의 목적은 단 하나 — 등급을 가르는 것이다★: 여기 있는 이름은 "아직 안 옮긴 것" 이라
 /// 일상이고(debug), 여기 **없는** 이름은 상류가 새로 만든 것이라 드리프트 신호다(warn).
@@ -132,7 +141,6 @@ const MAX_EMITTED_USER_ITEMS: usize = 64;
 /// 더하면 그것은 목록에 없으므로 의도대로 warn 이 된다.
 const KNOWN_UNTRANSLATED_METHODS: &[&str] = &[
     "account/login/completed",
-    "account/rateLimits/updated",
     "account/updated",
     "app/list/updated",
     "autoApprovalReview/strictReviewRequired",
@@ -331,6 +339,9 @@ pub(crate) struct CodexAppServerDecoder {
     /// ★담는 것은 id 뿐이고, 그 id 도 [`MAX_ID_BYTES`] 를 거친 것만이다★ — 본문이든 상한 없는 id 든
     /// 상대가 길이를 정하는 문자열이라, 칸 수만 세는 이 상한으로는 총량이 유계가 되지 않는다.
     emitted_user_items: VecDeque<String>,
+
+    /// `account/rateLimits/updated` 에서 주운 사용량 관측 — pump 가 `take_usage` 로 줄마다 비운다.
+    usage_observations: Vec<UsageObservation>,
 }
 
 impl CodexAppServerDecoder {
@@ -445,6 +456,7 @@ impl CodexAppServerDecoder {
             method::ITEM_AGENT_MESSAGE_DELTA => self.text_delta(params),
             method::ITEM_STARTED => self.item(params, method_name, ItemOrigin::Started),
             method::THREAD_TOKEN_USAGE_UPDATED => self.usage(params),
+            method::ACCOUNT_RATE_LIMITS_UPDATED => self.rate_limits_updated(params),
             method::ERROR => self.error(params),
             method::TURN_COMPLETED => self.turn_completed(params),
 
@@ -708,6 +720,19 @@ impl CodexAppServerDecoder {
         }]
     }
 
+    /// `account/rateLimits/updated` → 이벤트 0개. 읽히는 관측은 [`Self::usage_observations`] 에 쌓는다(해석 규칙 =
+    /// 이 폴더 `usage`). 봉투를 못 읽으면 다른 arm 과 같이 결함으로 남기고 버린다.
+    fn rate_limits_updated(&mut self, params: Option<&Value>) -> Vec<OutputEvent> {
+        if let Some(n) = self.parse::<protocol::AccountRateLimitsUpdatedNotification>(
+            params,
+            method::ACCOUNT_RATE_LIMITS_UPDATED,
+        ) {
+            self.usage_observations
+                .extend(usage::observation_from_rate_limits_updated(&n));
+        }
+        Vec::new()
+    }
+
     /// `error` 알림 → [`OutputEvent::Error`]. ★이것은 턴 경계가 아니다★ — 재시도 가능한 스트림 오류라
     /// 이 줄 뒤에도 같은 턴이 이어진다(경계는 `turn/completed` 단독).
     ///
@@ -927,6 +952,10 @@ impl OutputDecoder for CodexAppServerDecoder {
         }
         self.discarding = false;
         Vec::new()
+    }
+
+    fn take_usage(&mut self) -> Vec<UsageObservation> {
+        std::mem::take(&mut self.usage_observations)
     }
 }
 
@@ -2632,6 +2661,12 @@ mod tests {
                 method::DEPRECATION_NOTICE,
                 serde_json::json!({"note": huge}),
             ),
+            (
+                "ACCOUNT_RATE_LIMITS_UPDATED",
+                method::ACCOUNT_RATE_LIMITS_UPDATED,
+                serde_json::json!({"rateLimits": {"limitId": huge, "limitName": huge,
+                    "primary": {"usedPercent": 1, "windowDurationMins": 300}}}),
+            ),
         ];
 
         let src = include_str!("decoder.rs");
@@ -2660,6 +2695,144 @@ mod tests {
                     "{name}: 이벤트 하나가 {weight}B — 링 상한({RING_SINGLE_EVENT_LIMIT}B)을 넘어 replay 를 비운다"
                 );
             }
+        }
+    }
+
+    // ── 사용량 한도 알림(`account/rateLimits/updated`) — 해석 규칙 자체는 `usage.rs` 시험이 잰다 ──
+
+    fn rate_limits_line(snapshot: Value) -> String {
+        notification_line(
+            method::ACCOUNT_RATE_LIMITS_UPDATED,
+            serde_json::json!({ "rateLimits": snapshot }),
+        )
+    }
+
+    fn default_bucket() -> Value {
+        serde_json::json!({
+            "limitId": "codex",
+            "primary": {"usedPercent": 37, "windowDurationMins": 300, "resetsAt": 1_790_424_706i64},
+            "secondary": {"usedPercent": 58, "windowDurationMins": 10080, "resetsAt": 1_790_739_378i64},
+        })
+    }
+
+    /// ★화면 이벤트 0개 + 관측 1건★ — 이벤트로 내면 에이전트별 replay 에 계정 상태가 실린다.
+    #[test]
+    fn rate_limits_update_is_collected_without_output_events() {
+        let line = rate_limits_line(default_bucket());
+        let mut d = CodexAppServerDecoder::new();
+        // 청크 경계가 줄 한가운데에 와도 완성 줄에서만 줍는다.
+        let (head, tail) = line.as_bytes().split_at(line.len() / 2);
+        assert!(d.decode(head).is_empty());
+        assert!(d.take_usage().is_empty(), "줄이 안 끝났는데 주웠다");
+        assert!(
+            d.decode(tail).is_empty(),
+            "사용량 알림이 화면 이벤트를 냈다"
+        );
+
+        let taken = d.take_usage();
+        assert_eq!(taken.len(), 1);
+        let obs = &taken[0];
+        assert_eq!(obs.vendor, usage::USAGE_VENDOR);
+        assert_eq!(obs.five_hour.and_then(|w| w.used_pct), Some(37.0));
+        assert_eq!(obs.weekly.and_then(|w| w.used_pct), Some(58.0));
+        assert!(d.take_usage().is_empty(), "take_usage 는 비운다");
+        assert!(d.flush().is_empty());
+        assert!(d.take_usage().is_empty());
+    }
+
+    /// 같은 청크의 여러 줄은 도착 순으로 모인다.
+    #[test]
+    fn several_updates_in_one_chunk_arrive_in_order() {
+        let mut first = default_bucket();
+        first["primary"]["usedPercent"] = 10.into();
+        let mut second = default_bucket();
+        second["primary"]["usedPercent"] = 20.into();
+        let chunk = format!("{}{}", rate_limits_line(first), rate_limits_line(second));
+        let mut d = CodexAppServerDecoder::new();
+        assert!(d.decode(chunk.as_bytes()).is_empty());
+        let pcts: Vec<_> = d
+            .take_usage()
+            .iter()
+            .map(|o| o.five_hour.and_then(|w| w.used_pct))
+            .collect();
+        assert_eq!(pcts, vec![Some(10.0), Some(20.0)]);
+    }
+
+    /// ★더는 「알면서 안 옮기는 이름」으로 세지 않는다★ — 옮기는 알림이 일상 관측 칸을 계속 차지하면 그 몫이 준다.
+    #[test]
+    fn rate_limits_update_is_no_longer_an_untranslated_observation() {
+        let mut d = CodexAppServerDecoder::new();
+        d.decode(rate_limits_line(default_bucket()).as_bytes());
+        assert!(
+            d.untranslated_observations().is_empty(),
+            "{:?}",
+            d.untranslated_observations()
+        );
+    }
+
+    /// 버린 관측은 이벤트도 관측도 내지 않고, 봉투 결함만 결함으로 남는다.
+    #[test]
+    fn unusable_rate_limits_updates_yield_nothing() {
+        let mut d = CodexAppServerDecoder::new();
+        for snapshot in [
+            serde_json::json!({"limitId": "base_model_inference",
+                "primary": {"usedPercent": 0, "windowDurationMins": 10080}}),
+            serde_json::json!({"primary": null, "secondary": null}),
+            serde_json::json!({"primary": {"usedPercent": 9, "windowDurationMins": 43200}}),
+            serde_json::json!({}),
+        ] {
+            assert!(d
+                .decode(rate_limits_line(snapshot.clone()).as_bytes())
+                .is_empty());
+            assert!(d.take_usage().is_empty(), "{snapshot}");
+        }
+        assert!(
+            d.untranslated_observations().is_empty(),
+            "모양이 맞는 봉투는 결함이 아니다"
+        );
+
+        // `rateLimits` 가 없거나 객체가 아니면 봉투 결함이다 — 다른 arm 과 같은 키로 남는다.
+        for params in [
+            serde_json::json!({}),
+            serde_json::json!({"rateLimits": null}),
+            serde_json::json!({"rateLimits": "x"}),
+            serde_json::json!("x"),
+        ] {
+            let line = notification_line(method::ACCOUNT_RATE_LIMITS_UPDATED, params.clone());
+            assert!(d.decode(line.as_bytes()).is_empty(), "{params}");
+            assert!(d.take_usage().is_empty(), "{params}");
+        }
+        assert!(
+            d.untranslated_observations()
+                .contains_key("shape:account/rateLimits/updated"),
+            "{:?}",
+            d.untranslated_observations()
+        );
+    }
+
+    /// ★배열을 칸 순서대로 읽어 그럴듯한 관측을 만들지 않는다★ — 셋 다 객체 검사 없이는 창이 실린 관측이 됐다
+    /// (params 배열 → 5시간 11 · 스냅숏 배열 → 두 창 · `null` 을 앞세운 스냅숏 배열 → 5시간 14).
+    #[test]
+    fn non_object_rate_limits_envelopes_are_not_read_positionally() {
+        for params in [
+            serde_json::json!([{"limitId": "codex",
+                "primary": {"usedPercent": 11, "windowDurationMins": 300}}]),
+            serde_json::json!({"rateLimits": ["codex",
+                {"usedPercent": 12, "windowDurationMins": 300},
+                {"usedPercent": 13, "windowDurationMins": 10080}]}),
+            serde_json::json!({"rateLimits": [null,
+                {"usedPercent": 14, "windowDurationMins": 300}]}),
+        ] {
+            let mut d = CodexAppServerDecoder::new();
+            let line = notification_line(method::ACCOUNT_RATE_LIMITS_UPDATED, params.clone());
+            assert!(d.decode(line.as_bytes()).is_empty(), "{params}");
+            assert!(d.take_usage().is_empty(), "{params}");
+            assert!(
+                d.untranslated_observations()
+                    .contains_key("shape:account/rateLimits/updated"),
+                "봉투 결함으로 남아야 한다: {params} → {:?}",
+                d.untranslated_observations()
+            );
         }
     }
 

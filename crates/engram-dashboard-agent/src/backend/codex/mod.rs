@@ -50,6 +50,7 @@ pub(crate) mod protocol;
 // ADR-0218
 pub(crate) mod thread_lock;
 pub(crate) mod transport;
+mod usage;
 
 use std::path::PathBuf;
 
@@ -1061,10 +1062,15 @@ impl AgentBackend for CodexBackend {
     ) -> Result<SpawnParts, PtyError> {
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_app_server(command) {
+                // ★줍기 판정은 여기서 건다 — `output_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
+                //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`).
+                let decoder = self
+                    .output_decoder(command)
+                    .map(|d| usage::gate_decoder(d, &spec.env));
                 let (t, pid) = CodexAppServerTransport::open(
                     spec,
                     true,
-                    self.output_decoder(command),
+                    decoder,
                     thread_open(spec, resume_session_id, priming_text(control)),
                     sid_sink,
                     link_sink,

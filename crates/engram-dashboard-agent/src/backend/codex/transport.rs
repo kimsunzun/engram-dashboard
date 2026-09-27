@@ -2232,6 +2232,8 @@ impl Reader {
                     Some(dec) => {
                         let mut events = dec.decode(line);
                         events.extend(dec.decode(b"\n"));
+                        // 사용량 관측은 이벤트가 아니다 — 귀속 게이트와 무관하게 상태 sink 로 바로 넘긴다.
+                        self.core.report_usage(dec.take_usage());
                         events
                     }
                     None => Vec::new(),
@@ -2323,6 +2325,7 @@ fn reader_loop(
             for ev in dec.flush() {
                 reader.core.emit(ev);
             }
+            reader.core.report_usage(dec.take_usage());
         }
     }
 
@@ -2941,6 +2944,78 @@ mod tests {
             "params": {"threadId": thread_id, "turnId": turn_id, "itemId": "i-1", "delta": "hi"},
         })
         .to_string()
+    }
+
+    // ── 사용량 관측의 운반(`take_usage` → `StatusSink::usage_observed`) ──
+
+    /// `usage_observed` 만 모으는 상태 sink.
+    struct UsageStatus(Arc<Mutex<Vec<crate::usage::UsageObservation>>>);
+    impl StatusSink for UsageStatus {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<crate::types::AgentInfo>) {}
+        fn usage_observed(&self, obs: crate::usage::UsageObservation) {
+            self.0.lock().unwrap().push(obs);
+        }
+    }
+
+    type SeenUsage = Arc<Mutex<Vec<crate::usage::UsageObservation>>>;
+
+    fn usage_reader(
+        decoder: Box<dyn OutputDecoder>,
+    ) -> (Reader, Arc<Mutex<Vec<OutputEvent>>>, SeenUsage) {
+        let observed: SeenUsage = Arc::new(Mutex::new(Vec::new()));
+        let core = Arc::new(OutputCore::new(
+            AgentId::new_v4(),
+            1,
+            Arc::new(UsageStatus(observed.clone())),
+            TurnWiring::detached(),
+        ));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        core.subscribe(Arc::new(EventSink {
+            id: SinkId::new_v4(),
+            seen: seen.clone(),
+        }));
+        let reader = Reader {
+            core,
+            decoder: Some(decoder),
+            state: shared(),
+            pending: Arc::new(Pending::default()),
+        };
+        (reader, seen, observed)
+    }
+
+    fn rate_limits_line() -> String {
+        serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {"limitId": "codex",
+                "primary": {"usedPercent": 37, "windowDurationMins": 300, "resetsAt": 1_790_424_706i64}}},
+        })
+        .to_string()
+    }
+
+    /// ★관측이 읽기 루프를 지나 상태 sink 까지 닿는다★ — 번역기가 모아 두기만 하고 아무도 안 비우면 오류 없이
+    /// 사라진다. 화면(구독자)에는 아무것도 가지 않는다.
+    #[test]
+    fn a_rate_limits_update_reaches_the_status_sink_not_the_screen() {
+        let (mut reader, seen, observed) = usage_reader(Box::new(CodexAppServerDecoder::new()));
+        reader.handle_line(rate_limits_line().as_bytes());
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].five_hour.and_then(|w| w.used_pct), Some(37.0));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "사용량이 화면 이벤트로 새었다"
+        );
+    }
+
+    /// 감싸개가 막은 번역기(비기본 프로필)는 sink 에 아무것도 안 넘긴다 — 판정 자체는 이 폴더 `usage` 시험이 잰다.
+    #[test]
+    fn a_gated_decoder_reports_no_usage() {
+        let gated = crate::usage::UsageGate::blocking(Box::new(CodexAppServerDecoder::new()));
+        let (mut reader, seen, observed) = usage_reader(Box::new(gated));
+        reader.handle_line(rate_limits_line().as_bytes());
+        assert!(observed.lock().unwrap().is_empty());
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// 표 + codex 분류자 + 실 번역기를 꽂은 시험대 — ★사실 계층을 실제로 재는 항목 전용★.

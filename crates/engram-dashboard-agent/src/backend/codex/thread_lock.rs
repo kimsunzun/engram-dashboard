@@ -40,7 +40,7 @@ const CODEX_HOME_SUBDIR: &str = ".codex";
 
 /// codex 상태 디렉터리를 통째로 옮기는 env 변수 — 실재를 실측으로 확인했고, **건 프로세스에만**
 /// 적용된다(`docs/research/codex-session-id-recovery-survey-2026-09-19.md` 의 `CODEX_HOME` 절).
-const CODEX_HOME_ENV: &str = "CODEX_HOME";
+pub(super) const CODEX_HOME_ENV: &str = "CODEX_HOME";
 
 /// 이 모듈이 OS 를 만나는 자리 전부 — 파일 홀더 · 폴더 목록 · 우리 프로세스 나무.
 ///
