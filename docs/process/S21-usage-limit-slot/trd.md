@@ -252,7 +252,7 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
 
 ## 5. 이행 순서 (커밋마다 빌드·시험 초록 — 어디서 멈춰도 선다)
 
-**착수 조건:** `v0.3.2/feat/json-midturn-queue` 가 master 에 머지된 뒤 — 그 브랜치가 `PROTOCOL_VERSION` 5→6 · agent catalog 4→5 · `StatusSink::inputs_drained`(`turn_ended` 바로 뒤) 를 더하고 codex transport·`output_core`·`connection_core`·`messages.rs`·`protocolClient.ts` 를 크게 바꾼다. 머지된 트리에서 이 문서의 줄 포인터를 다시 잰다.
+**착수 조건:** 없음 — 지금 master 위에서 바로 간다(사용자 결정 2026-09-27). 병행 브랜치 `v0.3.2/feat/json-midturn-queue` 도 `PROTOCOL_VERSION` 5→6 · agent catalog 4→5 · `StatusSink::inputs_drained`(`turn_ended` 바로 뒤) 를 더하고 codex transport·`output_core`·`connection_core`·`messages.rs`·`protocolClient.ts` 를 크게 바꾼다 → **나중에 머지하는 쪽이 아래 체크리스트로 충돌을 푼다**(번호는 그때 master + 1 로 다시 매긴다).
 
 **머지 체크리스트(각 해당 단계에서 확인):** ① `PROTOCOL_VERSION` = 머지 시점 master + 1 ② agent catalog = master + 1 · shell catalog = master + 1 ③ `MessagingFlushSink`·`UsageInboxSink` 가 `inputs_drained`·`usage_observed` 를 둘 다 넘김 ④ `dispatch_order` 에 새 갈래(`Detached`) ⑤ `command_request_id`·`event_reply_request_id` 쌍 ⑥ 생성물 세 폴더(agent `bindings/` 의 `commands.schema.json` 포함 — `agent/tests/ts_export.rs:94`) 재생성.
 
