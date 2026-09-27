@@ -390,7 +390,6 @@ impl UsageBook {
     /// ★구독 밖 칸은 건너뛸 뿐 빚을 건드리지 않는다★ — `subscribed` 는 명부 락 아래 뜬 사본이라 낡을 수 있다:
     /// 방금 구독한 연결이 받을 발행을 낡은 사본이 지우면 안 된다. 남은 빚은 나중에 한 장이 겹쳐 나갈 뿐이다
     /// (revision 이 가른다). `subscribed` 의 중복·모르는 벤더는 무시한다.
-    // `UsageVendorKey` 가 `Ord` 가 아니라 `BTreeSet` 을 받지 않는다 — 벤더 키 모음이면 받는다.
     pub fn plan_tick<'a>(
         &mut self,
         subscribed: impl IntoIterator<Item = &'a UsageVendorKey>,

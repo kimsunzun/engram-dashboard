@@ -8,6 +8,7 @@
 pub mod book;
 pub mod clock;
 pub mod reject_store;
+pub mod watch;
 
 /// 요청의 답이 그 요청이 기다린 조회에서 나온 값인가.
 ///

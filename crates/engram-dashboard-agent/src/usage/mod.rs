@@ -39,7 +39,7 @@ pub use text::{display_text, has_word};
 /// ★`&'static str` 만 받는 것은 의도다★ — 디스크·wire 에서 온 문자열로는 (leak 하지 않는 한) 키를 만들
 ///   수 없어 정본을 거치게 된다. `String` 으로 넓히지 말 것. 단 리터럴은 막지 못한다 — `new` 를 부르는
 ///   것은 벤더 선언과 시험 대역뿐이어야 한다(데몬이 벤더 리터럴로 부르면 ADR-0004 위반).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct UsageVendorKey(&'static str);
 
 impl UsageVendorKey {
@@ -180,5 +180,27 @@ mod tests {
     #[test]
     fn the_default_account_word_is_default() {
         assert_eq!(UsageAccountKey::default().as_str(), "default");
+    }
+
+    /// 데몬의 구독 집합(`BTreeSet`)이 이 순서로 돈다 — 낱말의 주소가 아니라 문자열 순서여야 같은 낱말이
+    /// 한 원소가 되고 집합끼리의 비교가 선다.
+    #[test]
+    fn vendor_keys_order_as_their_words() {
+        let mut keys = vec![
+            UsageVendorKey::new("b-vendor"),
+            UsageVendorKey::new("a-vendor-2"),
+            UsageVendorKey::new("a-vendor"),
+        ];
+        keys.sort();
+        assert_eq!(
+            keys.iter().map(|k| k.as_str()).collect::<Vec<_>>(),
+            ["a-vendor", "a-vendor-2", "b-vendor"]
+        );
+        let leaked: &'static str = Box::leak(String::from("a-vendor").into_boxed_str());
+        assert_eq!(
+            UsageVendorKey::new(leaked).cmp(&UsageVendorKey::new("a-vendor")),
+            std::cmp::Ordering::Equal,
+            "다른 주소의 같은 낱말은 같은 키다"
+        );
     }
 }
