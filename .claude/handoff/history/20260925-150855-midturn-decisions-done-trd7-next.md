@@ -53,7 +53,7 @@ Shared model the user confirmed: **one daemon-held pending-input list for both b
 3. **TRD editing:** no per-판 tags in the body — history goes in the header 「판 이력」 block, rejected alternatives in §10-5 (the 6판 editor spent most effort sweeping ~100 such tags). Give editors section line ranges; the whole TRD read is ~40k tokens.
 4. **Worker context:** TRD writers reached 410–450k tokens per round; don't resume one near that (571k death precedent) — spawn fresh per round.
 5. **API session limit** killed two agents mid-run overnight; `SendMessage` resume worked. After such a stop, check for leftover processes/temp files before resuming.
-6. The `nmfc-origin-dev-harness` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore; this project's handoff is the user's `handoff` skill.
+6. The `<internal-plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore; this project's handoff is the user's `handoff` skill.
 7. `codex:codex-rescue`: always `--fresh`; never `--resume` after parallel codex calls in the same cwd.
 8. Hook blocks Bash text containing `Add-Type`/`DllImport` → compiled C# helpers via `C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe` (spike helper `wp4.exe` source was in the old scratchpad `...6847046e...\scratchpad\spike-minimized\winprobe.cs` — volatile).
 9. Release-build GUI QA: set `WEBVIEW2_USER_DATA_FOLDER` to an isolated folder (else it writes into the installed app's WebView profile) and make sure no app with the same identifier is running (single-instance hand-off hijacks the launch). Port 1420 = wt2's vite.

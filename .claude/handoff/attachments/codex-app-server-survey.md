@@ -20,7 +20,7 @@ Grounding: I ran a bounded stdio handshake myself and captured the bytes (below,
 
 ### F2 — It runs on Windows over stdio. 확실 (captured bytes, my own run)
 `printf '{"id":1,"method":"initialize","params":{...}}' | codex app-server` returned:
-`{"id":1,"result":{"userAgent":"engram-spike/0.153.4 (Windows 10.0.26200; x86_64) ...","codexHome":"C:\\Users\\kimsunzun\\.codex","platformFamily":"windows","platformOs":"windows"}}`
+`{"id":1,"result":{"userAgent":"engram-spike/0.153.4 (Windows 10.0.26200; x86_64) ...","codexHome":"C:\\Users\\<user>\\.codex","platformFamily":"windows","platformOs":"windows"}}`
 and exited 0 on stdin EOF. Transports on Windows are stdio and ws only; unix sockets and the managed daemon lifecycle are Unix-only in 0.153.4 (`codex app-server daemon version` → "only supported on Unix platforms", executed).
 
 ### F3 — The server assigns the thread id. A client cannot supply one. 확실

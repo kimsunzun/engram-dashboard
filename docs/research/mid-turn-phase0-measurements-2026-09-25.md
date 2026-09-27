@@ -6,7 +6,7 @@
   - claude = `2.1.280 (Claude Code)` — PATH 의 `claude` → `%APPDATA%\npm\claude.cmd` → `node_modules\@anthropic-ai\claude-code\bin\claude.exe`. TRD 판독 기준과 **같다**.
   - codex = `codex-cli 0.156.1` — PATH 의 `codex` → `codex.cmd` → node → `codex.exe`. ★TRD 판독 기준(0.154.0)보다 **새것**이다★ — 아래 codex 결과는 전부 0.156.1 실측이다(0.154.0 에서 다시 재지 않았다).
 - **방법:** 우리 스폰 인자·와이어 형식을 그대로 흉내 내는 node 하네스가 CLI 를 직접 띄우고, 정해 둔 시점에 stdin 으로 JSON 줄을 쓰고, stdout 의 모든 줄을 **단조 시계(ms, 하네스 기동 기준)** 와 함께 JSONL 로 적는다. 모든 실행은 `scripts/run-detached.ps1` 로 셸 트리 밖에서 돌렸고 완료는 `__EXIT=0` 마커로 판정했다. 앱·데몬·다른 워크트리 프로세스는 건드리지 않았다.
-- **하네스·원시 로그 위치(세션 스크래치 — 휘발 가능):** `C:\Users\kimsunzun\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt1\6847046e-28fb-4531-a649-281ac6ab97c0\scratchpad\phase0\`
+- **하네스·원시 로그 위치(세션 스크래치 — 휘발 가능):** `C:\Users\<user>\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt1\6847046e-28fb-4531-a649-281ac6ab97c0\scratchpad\phase0\`
   - 하네스: `claude_harness.js`(시나리오 M1 · M3 · M3B · M7) · `codex_harness.js`(M6 · M7) · 분석: `sumclaude.js` · `sumcodex.js` · `m7claude.js` · `m7codex.js`
   - 원시 로그: `logs\claude-M1-2026-09-24T18-29-52-786Z.jsonl` · `logs\claude-M3-2026-09-24T18-32-48-267Z.jsonl` · `logs\claude-M3B-2026-09-24T18-38-29-346Z.jsonl` · `logs\claude-M7-2026-09-24T18-35-19-085Z.jsonl` · `logs\codex-M6-2026-09-24T18-32-49-086Z.jsonl` · `logs\codex-M7-2026-09-24T18-35-20-013Z.jsonl`
 - **확신도 범례:** 확실(원시 로그에 직접 찍힌 사실, 반복 관측) · 가능성 높음(한두 번 관측 + 코드 판독이 맞물림) · 불확실(추론·단발·외부에서 가를 수 없음)
@@ -234,7 +234,7 @@ T4  47658.8 tokenUsage/updated → 같은 핸들러에서 steer W → 47688.7 �
 ## 10. 뒷정리 · 비용
 
 - **프로세스:** 하네스가 띄운 자식 6 개(claude 4 · codex 2)는 전부 stdin 을 닫자 스스로 종료했다(로그 `exit:0`, 강제 종료 0 회). 종료 뒤 `Get-CimInstance Win32_Process` 로 하네스·`app-server --stdio`·세션 id 를 품은 명령줄을 훑어 **남은 것 0**. 03:29 이후 생긴 `node_repl.exe` 둘은 부모가 이 측정 전부터 떠 있던 다른 `codex.exe app-server`(03:19 · 전날 23:26 기동)라 이번 것이 아니다.
-- **남긴 흔적(버려도 되는 새 세션):** claude transcript 4 개 = `%USERPROFILE%\.claude\projects\C--Users-kimsunzun-AppData-Local-Temp-claude-I--Engram-apps-engram-dashboard-wt1-6847046e-28fb-4531-a649-281ac6ab97c0-scratchpad-phase0-cwd-claude\` · codex rollout 2 개 = `%USERPROFILE%\.codex\sessions\2026\09\25\rollout-…-01a0d4b1-1240-….jsonl` · `…-01a0d4b3-6048-….jsonl`. 기존 사용자 세션은 안 건드렸다.
+- **남긴 흔적(버려도 되는 새 세션):** claude transcript 4 개 = `%USERPROFILE%\.claude\projects\C--Users-<user>-AppData-Local-Temp-claude-I--Engram-apps-engram-dashboard-wt1-6847046e-28fb-4531-a649-281ac6ab97c0-scratchpad-phase0-cwd-claude\` · codex rollout 2 개 = `%USERPROFILE%\.codex\sessions\2026\09\25\rollout-…-01a0d4b1-1240-….jsonl` · `…-01a0d4b3-6048-….jsonl`. 기존 사용자 세션은 안 건드렸다.
 - **비용:** claude(haiku) 누적 약 $0.28(결과 32 턴) · codex(gpt-6-luna, low) 턴 14 개(M6 4 · M7 10 — 액수 미집계). 재시도 0 회.
 
 ## 11. 요약표

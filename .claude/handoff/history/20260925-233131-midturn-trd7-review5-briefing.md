@@ -34,7 +34,7 @@ Mid-turn input (JSON chat mode) is still in the **TRD phase — no code**. Today
 ## Repo state (at save)
 
 - wt1 on `v0.3.2/feat/json-midturn-queue`, HEAD `c72209e` (+ this handoff commit), **local only, not pushed**. 21 commits since `b008b37` (PRD `b9f3021` `15a6796` `c3959be` `1341cac`; TRD `2f456f8`…`9d8b680`; briefing copy `c72209e`). Working tree clean.
-- Briefing: artifact https://claude.ai/artifact/XBBqm9Lhz1JLgxaYb4fxHd (**private, bound to the account that published it** — the session switched to the company account `nm-fc.com` mid-way) · durable copy `.claude/handoff/attachments/20260925-midturn-briefing/midturn-briefing.html` (standalone, opens in a browser; reflects TRD `9d8b680`).
+- Briefing: artifact https://claude.ai/artifact/XBBqm9Lhz1JLgxaYb4fxHd (**private, bound to the account that published it** — the session switched to the company account `<company-domain>` mid-way) · durable copy `.claude/handoff/attachments/20260925-midturn-briefing/midturn-briefing.html` (standalone, opens in a browser; reflects TRD `9d8b680`).
 - Review helper preserved: `.claude/handoff/attachments/20260925-midturn-briefing/changed_rows.py` — `python changed_rows.py <base> <head> <path> <out>` → one entry per changed line with ±80 chars around each change (cut r5 reviewer input 345 KB → 22 KB).
 - Outside the repo, uncommitted by convention: `~/.claude/skills/review/feedback.md` (appended 2026-09-25 wt1 entry: changed-rows payload, codex resume thread-check held 4/4). Earlier-session items in qa/implement feedback.md also still there.
 
@@ -50,7 +50,7 @@ Mid-turn input (JSON chat mode) is still in the **TRD phase — no code**. Today
 3. ★**Don't settle user-visible behaviour by analogy or PRD literalism**★ — twice this session I did (N11 "give up" by analogy to Q8; N13 FIFO block from AC2) and reviewers escalated both to the user. If the PRD doesn't decide it and the user would see it → ask.
 4. When explaining to this user: plain words + small ASCII diagrams; they push back on anything that "disappears without a reason" and on disabled UI. They rejected a publish-early offer ("아냐 다 되고 해") — finish, then show.
 5. `codex:codex-rescue` blind slot: `--resume` worked r2–r5 when the prompt starts "state your previous turn in one line; if it isn't X, stop". New session → `--fresh`.
-6. `nmfc-origin-dev-harness` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore; this project's handoff is the user's `handoff` skill.
+6. `<internal-plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore; this project's handoff is the user's `handoff` skill.
 7. Git Bash python printing Korean: set `PYTHONIOENCODING=utf-8` (cp949 crash otherwise).
 8. Artifact pages are account-bound — always keep a repo copy of anything published for the user.
 

@@ -12,7 +12,7 @@
   - `6998404` DaemonClient 재연결 resume 출력 중복/유실 fix(high-water dedup)
   - `114f9ac` step-log 기록
 - **push 미실행**(이전 핸드오프대로 master 직접 push 차단 — 사용자가 `! git push origin master` 직접 또는 명시 승인 시).
-- 커밋 author: 이 repo local `user.email=kimsunzun@naver.com`(개인). 건드리지 말 것.
+- 커밋 author: 이 repo local `user.email=<user-email>`(개인). 건드리지 말 것.
 - 커밋 트레일러: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 
 ## 2. 구현 실행 규약(불변, 이번에도 준수함)

@@ -46,7 +46,7 @@ Mid-turn input implementation per `.claude/handoff/attachments/20260926-midturn-
 5. P5a + P5b land in the same phase commit.
 6. A worker can die on an API SSL error — resume it with `SendMessage` (partial edits stay).
 7. `engram.exe` CLI only works inside an engram-spawned agent (NO_TOKEN otherwise) — CLI smoke needs an agent-run probe or the WS `Command` entrance.
-8. `nmfc-origin-dev-harness` hooks misfire every turn — ignore; this project's handoff is the user's `handoff` skill.
+8. `<internal-plugin>` hooks misfire every turn — ignore; this project's handoff is the user's `handoff` skill.
 
 ## Stop conditions
 

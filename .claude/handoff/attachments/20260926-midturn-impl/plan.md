@@ -15,7 +15,7 @@ Baseline HEAD `6787c83`: since the TRD's read commit `2f456f8` nothing changed i
 ### P0 — fixtures (1 chunk · simple · worker-scout)
 - Goal: raw logs `.claude/handoff/attachments/20260925-midturn-phase0/logs/*.jsonl` (`{t,dir,line}` wrappers) → vendor-line fixtures.
 - New files: `agent/src/backend/claude/fixtures/{lifecycle_m1,cancel_m3,drain_m7,slash_m13}.jsonl` (precedent `include_str!` at `claude/mod.rs:2581`); new dir `backend/codex/fixtures/{steer_m6,record_only_m10,empty_turn_m9,tool_end_m7}.jsonl`. Hand-build and mark what was never captured: claude `is_error:true` result (TRD L744), transcript `attachment{queued_command}` (M5 shape from the Phase 0 report).
-- Scrub: `line` payloads only, no `meta`; replace absolute paths / OS user / cwd (codex thread responses echo cwd). Done: `rg -i "users\\\\|kimsunzun" fixtures` = 0; agent tests unchanged. No GUI.
+- Scrub: `line` payloads only, no `meta`; replace absolute paths / OS user / cwd (codex thread responses echo cwd). Done: `rg -i "users\\\\|<user>" fixtures` = 0; agent tests unchanged. No GUI.
 
 ### P1 — vocabulary + skeleton, zero behavior change (5 chunks)
 No worse = nobody emits `QueuedInput`; all backends report `MidTurnPolicy::None`; `inputs_pending`/`last_end_failed` always false; accumulator arm never fed.

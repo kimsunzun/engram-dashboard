@@ -5,7 +5,7 @@ You are a coder subagent. Implement ONLY your assigned chunk. Working directory:
 ## Read first
 1. `.claude/handoff/attachments/20260926-midturn-impl/plan.md` — your chunk's row, §0 rules, §3 contact points, §6 orchestrator decisions (authoritative when they differ from the TRD).
 2. The TRD lines your chunk cites: `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md` (Korean; 3–5 KB single lines, ~255k chars — NEVER read it whole: use python/`sed -n` on the cited line numbers).
-3. Comment rules (inject into your own work): `C:\Users\kimsunzun\.claude\skills\code-conventions\references\comments.md` + `.claude/skill-bindings/code-conventions.md`. Match the surrounding code's comment density and idiom; load-bearing code gets a `// ADR-0231` anchor line.
+3. Comment rules (inject into your own work): `C:\Users\<user>\.claude\skills\code-conventions\references\comments.md` + `.claude/skill-bindings/code-conventions.md`. Match the surrounding code's comment density and idiom; load-bearing code gets a `// ADR-0231` anchor line.
 4. CLAUDE.md sections 「핵심 불변식」, 「코어 격리」, 「백엔드 확장」, 「빌드·검증 명령」 (only what your chunk touches).
 
 ## Rules
