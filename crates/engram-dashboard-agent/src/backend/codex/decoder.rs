@@ -54,7 +54,7 @@ use serde_json::Value;
 
 use super::protocol::{self, method, Inbound};
 use crate::transport::OutputDecoder;
-use crate::types::{OutputEvent, QueuedInputEvent, TurnOutcome};
+use crate::types::{OutputEvent, QueuedInputEvent, ToolCategory, TurnOutcome};
 
 /// 로그 한 줄에 실을 상대 문자열 상한(문자 수). ★오류 본문이 4KB 에 이르는 경우가 실측됐다★
 /// (모르는 메서드 오류가 유효 메서드 160 개를 전부 열거한다) — 자르지 않으면 로그가 그것으로 덮인다.
@@ -1142,7 +1142,59 @@ fn tool_call(item: &Value, kind: &str, turn_id: &str) -> Option<OutputEvent> {
         turn_id: bounded_id(turn_id),
         // codex item 에는 메시지 묶음 id 개념이 없다 — 호출 식별자는 위 `id` 가 진다.
         message_id: None,
+        category: tool_category(item, kind),
     })
+}
+
+/// 도구 변형 item → 중립 종류.
+///
+/// ★온전한 item 에서 정한다 — `args_json` 에서 되읽지 말 것★: 그 칸은 [`MAX_TOOL_ARGS_BYTES`] 를 넘으면
+///   `type`·`id` 축약본이라 `commandActions` 가 없고, 큰 명령 하나가 종류를 잃는다.
+// ADR-0239
+fn tool_category(item: &Value, kind: &str) -> ToolCategory {
+    match kind {
+        "commandExecution" => command_category(item),
+        "fileChange" => ToolCategory::Edit,
+        "webSearch" => ToolCategory::Web,
+        "mcpToolCall" => ToolCategory::Mcp,
+        "collabAgentToolCall" => ToolCategory::Agent,
+        "dynamicToolCall" => ToolCategory::Other,
+        // 호출자가 [`TOOL_ITEM_TYPES`] 로 먼저 거르므로 여기 오는 것은 그 표가 넓어진 뒤 이 판정을 안 고친 경우다.
+        _ => ToolCategory::Other,
+    }
+}
+
+/// `commandExecution` 의 종류 — codex 가 명령을 풀어 적은 `commandActions[].type`(판독 어휘 `read` · `listFiles` ·
+/// `search` · `unknown`)으로 가른다.
+///
+/// 전부 `read` = Read · 전부 `listFiles` = List · `read`·`listFiles` 만 섞임 = Read · `search` 가 있고 그 밖이 이
+/// 셋뿐 = Search. ★셋 밖의 것이 하나라도 있으면 Command 다★ — `unknown` 은 codex 가 풀지 못한 명령이고(실측
+/// fixture 의 `Start-Sleep` 이 그렇다), 모르는 낱말 · `type` 없음도 같은 취급이다(읽기로 잘못 접으면 부작용 있는
+/// 명령이 「읽기」로 요약된다). 배열이 없거나 비어도 Command.
+// ADR-0239
+fn command_category(item: &Value) -> ToolCategory {
+    let Some(actions) = item.get("commandActions").and_then(Value::as_array) else {
+        return ToolCategory::Command;
+    };
+    if actions.is_empty() {
+        return ToolCategory::Command;
+    }
+    let (mut read, mut search) = (false, false);
+    for action in actions {
+        match action.get("type").and_then(Value::as_str) {
+            Some("read") => read = true,
+            Some("listFiles") => {}
+            Some("search") => search = true,
+            _ => return ToolCategory::Command,
+        }
+    }
+    if search {
+        ToolCategory::Search
+    } else if read {
+        ToolCategory::Read
+    } else {
+        ToolCategory::List
+    }
 }
 
 /// item 전체를 `args_json` 으로 — 단 [`MAX_TOOL_ARGS_BYTES`] 안에서만.
@@ -1609,8 +1661,10 @@ mod tests {
                 id,
                 turn_id,
                 message_id,
+                category,
             }] => {
                 assert_eq!(name, "commandExecution");
+                assert_eq!(*category, ToolCategory::Command);
                 assert_eq!(id.as_deref(), Some("i-9"));
                 assert_eq!(turn_id.as_deref(), Some("u-1"));
                 assert!(message_id.is_none());
@@ -1664,6 +1718,195 @@ mod tests {
             match events.as_slice() {
                 [OutputEvent::ToolCall { name, .. }] => assert_eq!(name, expected),
                 other => panic!("{expected}: ToolCall 하나가 아니다: {other:?}"),
+            }
+        }
+    }
+
+    // ── ADR-0239: 도구 item → 중립 종류 ─────────────────────────────────────────────
+
+    /// 라이브(`item/started`)와 이력 문이 **같은 종류**를 내는지까지 함께 재고 그 종류를 돌려준다.
+    fn category_through_both_doors(item: Value) -> ToolCategory {
+        let (started, _, history) = through_each_door(item);
+        let category_of = |events: &[OutputEvent]| match events {
+            [OutputEvent::ToolCall { category, .. }] => *category,
+            other => panic!("ToolCall 하나가 아니다: {other:?}"),
+        };
+        let live = category_of(&started);
+        assert_eq!(category_of(&history), live, "이력과 라이브의 종류가 갈렸다");
+        live
+    }
+
+    /// ★`commandExecution` 의 종류는 `commandActions[].type` 의 조합이 정한다★ — `unknown` 이 하나라도 있거나 배열이
+    /// 없거나 비면 명령이고, 모르는 낱말 · `type` 없음도 명령이다.
+    // ADR-0239
+    #[test]
+    fn command_actions_decide_the_category_of_a_command_execution() {
+        let action = |t: &str| serde_json::json!({"type": t, "command": "x"});
+        let cases: Vec<(&str, Option<Value>, ToolCategory)> = vec![
+            (
+                "read",
+                Some(serde_json::json!([action("read")])),
+                ToolCategory::Read,
+            ),
+            (
+                "read×2",
+                Some(serde_json::json!([action("read"), action("read")])),
+                ToolCategory::Read,
+            ),
+            (
+                "listFiles",
+                Some(serde_json::json!([action("listFiles")])),
+                ToolCategory::List,
+            ),
+            (
+                "listFiles×2",
+                Some(serde_json::json!([
+                    action("listFiles"),
+                    action("listFiles")
+                ])),
+                ToolCategory::List,
+            ),
+            (
+                "search",
+                Some(serde_json::json!([action("search")])),
+                ToolCategory::Search,
+            ),
+            (
+                "search+read",
+                Some(serde_json::json!([action("search"), action("read")])),
+                ToolCategory::Search,
+            ),
+            (
+                "listFiles+search",
+                Some(serde_json::json!([action("listFiles"), action("search")])),
+                ToolCategory::Search,
+            ),
+            (
+                "read+listFiles",
+                Some(serde_json::json!([action("read"), action("listFiles")])),
+                ToolCategory::Read,
+            ),
+            (
+                "unknown",
+                Some(serde_json::json!([action("unknown")])),
+                ToolCategory::Command,
+            ),
+            (
+                "search+unknown",
+                Some(serde_json::json!([action("search"), action("unknown")])),
+                ToolCategory::Command,
+            ),
+            (
+                "read+unknown",
+                Some(serde_json::json!([action("read"), action("unknown")])),
+                ToolCategory::Command,
+            ),
+            ("empty", Some(serde_json::json!([])), ToolCategory::Command),
+            ("missing", None, ToolCategory::Command),
+            ("null", Some(Value::Null), ToolCategory::Command),
+            (
+                "unknown word",
+                Some(serde_json::json!([action("write")])),
+                ToolCategory::Command,
+            ),
+            (
+                "no type",
+                Some(serde_json::json!([{"command": "x"}])),
+                ToolCategory::Command,
+            ),
+        ];
+        for (label, actions, want) in cases {
+            let mut item =
+                serde_json::json!({"type": "commandExecution", "id": "c1", "command": "x"});
+            if let Some(actions) = actions {
+                item["commandActions"] = actions;
+            }
+            assert_eq!(category_through_both_doors(item), want, "{label}");
+        }
+    }
+
+    /// ★실측 fixture(M7 — codex-cli 0.156.1)의 `commandActions: [{type:"unknown"}]` 는 명령이다★ — 라이브 줄 그대로와
+    /// 그 item 을 이력 문에 넣은 것 둘 다.
+    // ADR-0239
+    #[test]
+    fn the_tool_end_fixture_command_with_an_unknown_action_is_a_command() {
+        let lines: Vec<&str> = include_str!("fixtures/tool_end_m7.jsonl")
+            .lines()
+            .filter(|l| l.contains(r#""method":"item/started""#) && l.contains("commandExecution"))
+            .collect();
+        assert!(!lines.is_empty(), "fixture 에 도구 시작 줄이 없다");
+        for line in lines {
+            match decode_line(line).as_slice() {
+                [OutputEvent::ToolCall { category, .. }] => {
+                    assert_eq!(*category, ToolCategory::Command)
+                }
+                other => panic!("ToolCall 하나가 아니다: {other:?}"),
+            }
+            let v: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                category_through_both_doors(v["params"]["item"].clone()),
+                ToolCategory::Command
+            );
+        }
+    }
+
+    /// 명령 밖의 도구 변형은 item 타입 하나로 정해진다.
+    // ADR-0239
+    #[test]
+    fn each_other_tool_item_type_has_its_own_category() {
+        for (item, want) in [
+            (
+                serde_json::json!({"type": "fileChange", "id": "i-1", "changes": []}),
+                ToolCategory::Edit,
+            ),
+            (
+                serde_json::json!({"type": "webSearch", "id": "i-2", "query": "q"}),
+                ToolCategory::Web,
+            ),
+            (
+                serde_json::json!({"type": "mcpToolCall", "id": "i-3", "server": "fs", "tool": "read_file"}),
+                ToolCategory::Mcp,
+            ),
+            (
+                serde_json::json!({"type": "collabAgentToolCall", "id": "i-4", "tool": "spawn"}),
+                ToolCategory::Agent,
+            ),
+            (
+                serde_json::json!({"type": "dynamicToolCall", "id": "i-5", "tool": "custom"}),
+                ToolCategory::Other,
+            ),
+        ] {
+            let kind = item["type"].as_str().unwrap().to_owned();
+            assert_eq!(category_through_both_doors(item), want, "{kind}");
+        }
+    }
+
+    /// ★크기 상한을 넘는 item 도 종류는 온전한 item 에서 정한다★ — `args_json` 은 `commandActions` 가 없는 축약본인데
+    /// 종류는 그 안의 `search` 를 본 값이다.
+    // ADR-0239
+    #[test]
+    fn an_item_over_the_args_cap_still_gets_its_category_from_the_whole_item() {
+        let item = serde_json::json!({
+            "type": "commandExecution", "id": "c1",
+            "command": "x".repeat(MAX_TOOL_ARGS_BYTES + 1),
+            "commandActions": [{"type": "search", "command": "rg x", "query": "x"}]
+        });
+        let (started, _, history) = through_each_door(item);
+        for events in [started, history] {
+            match events.as_slice() {
+                [OutputEvent::ToolCall {
+                    args_json,
+                    category,
+                    ..
+                }] => {
+                    let back: Value = serde_json::from_str(args_json).unwrap();
+                    assert!(
+                        back.get("commandActions").is_none(),
+                        "상한을 넘었는데 축약본이 아니다: {args_json:.200}"
+                    );
+                    assert_eq!(*category, ToolCategory::Search);
+                }
+                other => panic!("ToolCall 하나가 아니다: {other:?}"),
             }
         }
     }

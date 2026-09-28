@@ -1222,12 +1222,14 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
             turn_id,
             message_id,
         } => text.len() + opt_len(turn_id) + opt_len(message_id),
+        // 종류는 고정 크기 enum 이라 무게가 없다.
         OutputEvent::ToolCall {
             name,
             args_json,
             id,
             turn_id,
             message_id,
+            category: _,
         } => name.len() + args_json.len() + opt_len(id) + opt_len(turn_id) + opt_len(message_id),
         // Usage 는 고정 크기 수치 필드 — turn_id 문자열만 반영(u64 두 개는 무시).
         OutputEvent::Usage { turn_id, .. } => opt_len(turn_id),
@@ -1364,6 +1366,7 @@ impl Default for Ring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ToolCategory;
     use std::sync::Mutex;
 
     /// 받은 출력을 (seq, bytes, is_event)로 순서대로 수집하는 mock OutputSink.
@@ -2155,6 +2158,7 @@ mod tests {
                 id: None,
                 turn_id: None,
                 message_id: None,
+                category: ToolCategory::Other,
             },
         ));
         ring.push(stored(
@@ -2165,6 +2169,7 @@ mod tests {
                 id: None,
                 turn_id: None,
                 message_id: None,
+                category: ToolCategory::Other,
             },
         ));
         ring.push(stored(
@@ -2175,6 +2180,7 @@ mod tests {
                 id: None,
                 turn_id: None,
                 message_id: None,
+                category: ToolCategory::Other,
             },
         ));
         let snap = ring.snapshot();
@@ -2251,6 +2257,7 @@ mod tests {
             id: Some("abc".into()),        // 3
             turn_id: None,
             message_id: None,
+            category: ToolCategory::Read,
         });
         assert_eq!(cost, 4 + 7 + 3);
         // TextDelta → text + optional.

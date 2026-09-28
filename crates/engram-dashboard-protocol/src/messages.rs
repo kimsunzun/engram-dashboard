@@ -723,6 +723,14 @@ pub enum StructuredEvent {
         id: Option<String>,
         turn_id: Option<String>,
         message_id: Option<String>,
+        /// 도구의 중립 종류. ★칸이 없으면(옛 데몬) 프론트 소비자는 `Other` 로 읽는다★ — 새 데몬은 늘 싣는다.
+        // ADR-0239: `PROTOCOL_VERSION` 은 이 칸으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
+        //   옛 쪽엔 오독할 것이 없다).
+        // ts-rs 는 이 serde 속성을 못 읽어 경고("failed to parse")하고 무시한다 — TS 칸 모양은 아래
+        //   `ts(optional)` 이 정한다.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        category: Option<ToolCategory>,
     },
     Usage {
         #[ts(type = "number")]
@@ -883,6 +891,26 @@ pub enum TurnOutcome {
     Interrupted,
     /// 결말을 알 수 없다(모르는 값이거나 아예 없었다). 그래도 턴은 끝난 것으로 센다.
     Unknown,
+}
+
+/// 도구 호출의 중립 종류 — [`StructuredEvent::ToolCall`] 의 `category`(agent `ToolCategory` 미러). wire 에서는
+/// 문자열 하나(`"Read"` 등).
+///
+/// ★벤더 도구 이름 · item 타입은 여기 오지 않는다★(ADR-0004) — 판정은 각 backend 번역기 안에서 끝난다.
+/// ★프론트 소비자는 모르는 낱말을 `Other` 로 읽는다★ — 더 새 데몬이 변형을 더해도 화면이 선다.
+// ADR-0239
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ToolCategory {
+    Read,
+    Search,
+    List,
+    Edit,
+    Command,
+    Web,
+    Agent,
+    Mcp,
+    Other,
 }
 
 /// 출력 청크 — 종류 불가지(설계 §2).
@@ -1050,6 +1078,15 @@ mod tests {
                 id: Some("call_1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: Some(ToolCategory::Read),
+            },
+            StructuredEvent::ToolCall {
+                name: "x".into(),
+                args_json: "{}".into(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+                category: None,
             },
             StructuredEvent::Usage {
                 input_tokens: 123,
@@ -1212,6 +1249,76 @@ mod tests {
                 r#"{{"type":"TurnEnd","turn_id":null,"outcome":{{"kind":"Failed","detail":"{raw}"}}}}"#
             )
         );
+    }
+
+    // ── 도구 종류(ADR-0239) ──────────────────────────────────────────────────────────
+
+    /// ★프론트가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 종류는 문자열 하나이고, 칸이 없는 옛 데몬의
+    /// 줄도 읽히며(→ `None`), `None` 은 칸 자체를 싣지 않는다.
+    // ADR-0239
+    #[test]
+    fn tool_call_category_wire_shape_is_pinned_and_absent_means_none() {
+        let with = StructuredEvent::ToolCall {
+            name: "Read".into(),
+            args_json: "{}".into(),
+            id: Some("c1".into()),
+            turn_id: None,
+            message_id: None,
+            category: Some(ToolCategory::Search),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null,"category":"Search"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<StructuredEvent>(&json).unwrap(),
+            with
+        );
+
+        let old = r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null}"#;
+        let back: StructuredEvent = serde_json::from_str(old).expect("칸 없는 옛 줄이 안 읽힌다");
+        assert_eq!(
+            back,
+            StructuredEvent::ToolCall {
+                name: "Read".into(),
+                args_json: "{}".into(),
+                id: Some("c1".into()),
+                turn_id: None,
+                message_id: None,
+                category: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            old,
+            "None 이 칸을 실었다"
+        );
+    }
+
+    /// ★아홉 낱말이 그대로 문자열로 오간다★ — 프론트 지역 합(`structuredAccumulator.ts`)이 같은 아홉 낱말을 쓴다.
+    // ADR-0239
+    #[test]
+    fn every_tool_category_round_trips_as_its_own_name() {
+        let all = [
+            (ToolCategory::Read, "Read"),
+            (ToolCategory::Search, "Search"),
+            (ToolCategory::List, "List"),
+            (ToolCategory::Edit, "Edit"),
+            (ToolCategory::Command, "Command"),
+            (ToolCategory::Web, "Web"),
+            (ToolCategory::Agent, "Agent"),
+            (ToolCategory::Mcp, "Mcp"),
+            (ToolCategory::Other, "Other"),
+        ];
+        for (category, name) in all {
+            let json = serde_json::to_string(&category).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<ToolCategory>(&json).unwrap(),
+                category
+            );
+        }
     }
 
     // ── 대기 입력 명부 사건(ADR-0231) ────────────────────────────────────────────────

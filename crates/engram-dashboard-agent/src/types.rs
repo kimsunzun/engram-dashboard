@@ -50,6 +50,8 @@ pub enum OutputEvent {
         id: Option<String>,
         turn_id: Option<String>,
         message_id: Option<String>,
+        /// ★`Option` 이 아니다★ — 번역기는 늘 하나를 고른다(모르면 [`ToolCategory::Other`]).
+        category: ToolCategory,
     },
     Usage {
         input_tokens: u64,
@@ -185,6 +187,25 @@ pub enum TurnOutcome {
     /// 결말을 알 수 없다 — 상대가 우리가 모르는 값을 줬거나, 아예 주지 않았다.
     /// ★그래도 턴은 끝난 것으로 센다★: 결말을 몰라 이벤트를 버리면 그 대화의 대기 표시가 영영 돈다.
     Unknown,
+}
+
+/// 도구 호출의 중립 종류 — [`OutputEvent::ToolCall`] 이 나른다. 각 backend 번역기가 정한다.
+///
+/// ★벤더 도구 이름 · item 타입은 여기 오지 않는다★(ADR-0004) — 이름 표와 판정은 `backend/claude` · `backend/codex`
+///   안에 있고, 그 바깥(코어 · 데몬 · wire · 프론트)은 이 아홉 갈래만 안다.
+// ADR-0239
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    Read,
+    Search,
+    List,
+    Edit,
+    Command,
+    Web,
+    Agent,
+    Mcp,
+    /// 위 어느 종류에도 들지 않거나 번역기가 모르는 도구 — 벤더가 도구 이름을 바꾸거나 더하면 여기로 떨어진다.
+    Other,
 }
 
 /// session→transport 입력 이벤트. 확장 가능 enum.

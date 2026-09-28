@@ -12,7 +12,7 @@
 
 ## 파일
 
-시험이 읽는 것은 지금 `tool_end_m7.jsonl` 하나다(`transport.rs` 의 `include_str!`) — 나머지 둘은 벤더 동작의 실측 기록으로 남는다. `record_only_m10.jsonl` 은 그것을 읽던 후속 턴 빚 시험과 함께 걷었다(ADR-0235).
+시험이 읽는 것은 지금 `tool_end_m7.jsonl` 하나다(`transport.rs` · `decoder.rs` 의 `include_str!`) — 나머지 둘은 벤더 동작의 실측 기록으로 남는다. `record_only_m10.jsonl` 은 그것을 읽던 후속 턴 빚 시험과 함께 걷었다(ADR-0235).
 
 | 파일 | 줄 | 원본 · 줄 범위 | 보여 주는 것 |
 |---|---|---|---|

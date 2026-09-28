@@ -45,7 +45,8 @@ use engram_dashboard_agent::profile::{
 use engram_dashboard_agent::types::{
     Capabilities as CoreCaps, DeliveredCopy as CoreDeliveredCopy, DropCause as CoreDropCause,
     OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
-    QueuedInputEvent as CoreQueuedInputEvent, TurnOutcome as CoreTurnOutcome,
+    QueuedInputEvent as CoreQueuedInputEvent, ToolCategory as CoreToolCategory,
+    TurnOutcome as CoreTurnOutcome,
 };
 
 use engram_dashboard_protocol::{
@@ -59,8 +60,8 @@ use engram_dashboard_protocol::{
     QueuedInputEvent as WireQueuedInputEvent, QueuedInputRow as WireQueuedInputRow,
     RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
     SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
-    StructuredEvent as WireStructuredEvent, SubscribeAction, TurnOutcome as WireTurnOutcome,
-    PROTOCOL_VERSION,
+    StructuredEvent as WireStructuredEvent, SubscribeAction, ToolCategory as WireToolCategory,
+    TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -783,12 +784,14 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             id,
             turn_id,
             message_id,
+            category,
         } => Some(WireStructuredEvent::ToolCall {
             name: name.clone(),
             args_json: args_json.clone(),
             id: id.clone(),
             turn_id: turn_id.clone(),
             message_id: message_id.clone(),
+            category: Some(tool_category_to_wire(*category)),
         }),
         CoreOutputEvent::Usage {
             input_tokens,
@@ -947,6 +950,23 @@ fn cancel_error_text(agent_id: AgentId, input_id: &str, e: CancelError) -> Strin
         )),
     }
     .to_string()
+}
+
+/// 도구 종류 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 종류가 늘면 여기가 컴파일 에러로 서야 새 종류가
+/// 조용히 다른 종류로 접히지 않는다. 데몬은 벤더 도구 이름을 모른다 — 판정은 각 backend 번역기가 끝냈다.
+// ADR-0239
+fn tool_category_to_wire(category: CoreToolCategory) -> WireToolCategory {
+    match category {
+        CoreToolCategory::Read => WireToolCategory::Read,
+        CoreToolCategory::Search => WireToolCategory::Search,
+        CoreToolCategory::List => WireToolCategory::List,
+        CoreToolCategory::Edit => WireToolCategory::Edit,
+        CoreToolCategory::Command => WireToolCategory::Command,
+        CoreToolCategory::Web => WireToolCategory::Web,
+        CoreToolCategory::Agent => WireToolCategory::Agent,
+        CoreToolCategory::Mcp => WireToolCategory::Mcp,
+        CoreToolCategory::Other => WireToolCategory::Other,
+    }
 }
 
 /// 턴 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 어휘가 늘면 여기가 컴파일 에러로 서야 새 결말이
@@ -5157,6 +5177,7 @@ mod tests {
                 id: Some("c1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: CoreToolCategory::Read,
             }),
             Some(W::ToolCall {
                 name: "read".into(),
@@ -5164,6 +5185,7 @@ mod tests {
                 id: Some("c1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: Some(WireToolCategory::Read),
             })
         );
 
@@ -5229,6 +5251,37 @@ mod tests {
             None,
             "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
         );
+    }
+
+    /// ★도구 종류가 하나도 접히지 않고 건너간다★ — 요약 줄이 종류별로 세므로, 한 종류가 다른 종류로 떨어지면
+    /// 묶음 머리의 개수가 틀린다. 도메인 쪽은 늘 싣고 wire 쪽은 늘 `Some` 이다(칸 없음 = 옛 데몬뿐).
+    // ADR-0239
+    #[tokio::test]
+    async fn tool_call_maps_every_category_one_to_one() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+        for (core, want) in [
+            (CoreToolCategory::Read, WireToolCategory::Read),
+            (CoreToolCategory::Search, WireToolCategory::Search),
+            (CoreToolCategory::List, WireToolCategory::List),
+            (CoreToolCategory::Edit, WireToolCategory::Edit),
+            (CoreToolCategory::Command, WireToolCategory::Command),
+            (CoreToolCategory::Web, WireToolCategory::Web),
+            (CoreToolCategory::Agent, WireToolCategory::Agent),
+            (CoreToolCategory::Mcp, WireToolCategory::Mcp),
+            (CoreToolCategory::Other, WireToolCategory::Other),
+        ] {
+            match output_event_to_wire(&CoreOutputEvent::ToolCall {
+                name: "t".into(),
+                args_json: "{}".into(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+                category: core,
+            }) {
+                Some(W::ToolCall { category, .. }) => assert_eq!(category, Some(want), "{core:?}"),
+                other => panic!("ToolCall 기대, got {other:?}"),
+            }
+        }
     }
 
     /// ★명부 사건·원인이 하나도 접히지 않고 건너간다★ — 누산기가 명부와 같은 환원을 하려면 사건열이 그대로

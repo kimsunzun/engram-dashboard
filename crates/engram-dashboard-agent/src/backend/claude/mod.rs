@@ -45,7 +45,8 @@ use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
     AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, DropCause, MidTurnPolicy,
-    ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolGrant, TurnOutcome,
+    ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolCategory, ToolGrant,
+    TurnOutcome,
 };
 
 const CLAUDE_PROGRAM: &str = "claude";
@@ -1497,6 +1498,7 @@ impl ClaudeStreamDecoder {
                     id,
                     turn_id: None,
                     message_id: message_id.map(String::from),
+                    category: tool_category(name),
                 });
             }
             // thinking·tool_result 는 정형 variant 가 없다 → Structured 탈출구로 원본 블록 보존.
@@ -1538,6 +1540,24 @@ impl ClaudeStreamDecoder {
             }
             None => block.to_string(),
         }
+    }
+}
+
+/// claude 도구 이름 → 중립 종류. ★정확 일치(대소문자 구분)다★ — 모르는 새 도구는 [`ToolCategory::Other`] 로
+/// 떨어진다(묶음은 그대로 서고 요약 문구만 「기타」가 된다). `Glob` 은 `Search` 다 — Claude Code 자신이 「파일을
+/// 찾는다」로 묶는다.
+// ADR-0239
+fn tool_category(name: &str) -> ToolCategory {
+    match name {
+        "Read" | "NotebookRead" => ToolCategory::Read,
+        "Grep" | "Glob" => ToolCategory::Search,
+        "LS" => ToolCategory::List,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ToolCategory::Edit,
+        "Bash" | "PowerShell" | "BashOutput" | "KillShell" | "KillBash" => ToolCategory::Command,
+        "WebFetch" | "WebSearch" => ToolCategory::Web,
+        "Task" | "Agent" => ToolCategory::Agent,
+        _ if name.starts_with("mcp__") => ToolCategory::Mcp,
+        _ => ToolCategory::Other,
     }
 }
 
@@ -3522,9 +3542,11 @@ mod tests {
                 args_json,
                 id,
                 message_id,
+                category,
                 ..
             } => {
                 assert_eq!(name, "Read");
+                assert_eq!(*category, ToolCategory::Read);
                 assert_eq!(id.as_deref(), Some("toolu_01LDdR9FU6CFjgEKeLPF1x1D"));
                 assert_eq!(message_id.as_deref(), Some("msg_01DXXosoarwv9i1cBXa8wVXJ"));
                 let v: serde_json::Value = serde_json::from_str(args_json).unwrap();
@@ -3733,6 +3755,52 @@ mod tests {
         );
         let ev = decode_all(line.as_bytes());
         assert_eq!(tags(&ev), vec!["structured:tool_use"]);
+    }
+
+    // ── ADR-0239: 도구 이름 → 중립 종류 ─────────────────────────────────────────────
+
+    /// ★종류는 `tool_use` 갈래가 이름 표로 정한다★ — 표의 낱말 전부 · `mcp__` 접두 · 모르는 이름(`Other`) ·
+    /// 정확 일치(대소문자가 다르면 `Other`)를 번역기 경로로 잰다.
+    // ADR-0239
+    #[test]
+    fn tool_use_name_maps_to_its_neutral_category() {
+        for (name, want) in [
+            ("Read", ToolCategory::Read),
+            ("NotebookRead", ToolCategory::Read),
+            ("Grep", ToolCategory::Search),
+            ("Glob", ToolCategory::Search),
+            ("LS", ToolCategory::List),
+            ("Edit", ToolCategory::Edit),
+            ("MultiEdit", ToolCategory::Edit),
+            ("Write", ToolCategory::Edit),
+            ("NotebookEdit", ToolCategory::Edit),
+            ("Bash", ToolCategory::Command),
+            ("PowerShell", ToolCategory::Command),
+            ("BashOutput", ToolCategory::Command),
+            ("KillShell", ToolCategory::Command),
+            ("KillBash", ToolCategory::Command),
+            ("WebFetch", ToolCategory::Web),
+            ("WebSearch", ToolCategory::Web),
+            ("Task", ToolCategory::Agent),
+            ("Agent", ToolCategory::Agent),
+            ("mcp__x__y", ToolCategory::Mcp),
+            ("TodoWrite", ToolCategory::Other),
+            ("SomeFutureTool", ToolCategory::Other),
+            ("read", ToolCategory::Other),
+            ("bash", ToolCategory::Other),
+            ("Mcp__x__y", ToolCategory::Other),
+        ] {
+            let line = format!(
+                "{}\n",
+                serde_json::json!({"type": "assistant", "message": {"id": "m1", "content": [
+                    {"type": "tool_use", "id": "t1", "name": name, "input": {}}
+                ]}})
+            );
+            match decode_all(line.as_bytes()).as_slice() {
+                [OutputEvent::ToolCall { category, .. }] => assert_eq!(*category, want, "{name}"),
+                other => panic!("{name}: ToolCall 하나가 아니다: {other:?}"),
+            }
+        }
     }
 
     #[test]
