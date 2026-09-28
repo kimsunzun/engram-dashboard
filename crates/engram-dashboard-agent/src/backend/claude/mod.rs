@@ -27,6 +27,7 @@ mod session_file;
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use uuid::Uuid;
@@ -39,7 +40,7 @@ use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
-use crate::transport::stdio::StdioTransport;
+use crate::transport::stdio::{InterruptLine, StdioTransport};
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
@@ -400,7 +401,8 @@ impl AgentBackend for ClaudeBackend {
     ///   그렇게 하면 모양 값을 가르는 둘째 switch 가 생겨 이 결정이 걷어낸 그 모양으로 되돌아간다.
     /// ★`structured: true` 를 주입하는 자리가 여기다(ADR-0044/0030)★: 파이프 자신은 나르는 바이트가
     ///   줄단위 JSON 인지 모르므로(바보 파이프) [`StdioTransport`] 는 그 값을 하드코딩하지 않고 받아서
-    ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다.
+    ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다. 끊기 줄 함수도 같은 이유로
+    ///   여기서 꽂는다 — 줄 모양과 「지금 턴이 열려 있나」는 이 backend 의 지식이다(ADR-0238).
     /// ★`sid_sink` 를 쓰지 않는 것은 이 backend 가 세션 id 를 **받아 오지 않기 때문**이다★ — 우리가
     ///   발급해 건네주고([`AgentBackend::assigns_session_id`]), 그 뒤의 drift 는 통로가 아니라 파일
     ///   감시자([`AgentBackend::session_id_source`])가 관측한다. 그쪽이 이 backend 의 기록 경로다.
@@ -429,9 +431,12 @@ impl AgentBackend for ClaudeBackend {
         let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
-                let decoder = stream_decoder(Arc::clone(&delivery_ack));
+                // 화신마다 새 문 하나를 decoder(쓰는 쪽)와 끊기 줄 함수(읽는 쪽)가 함께 쥔다.
+                // ADR-0238
+                let turn_gate = Arc::new(TurnGate::default());
+                let decoder = stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&turn_gate));
                 let (t, pid) = StdioTransport::open(spec, true, Some(decoder))?;
-                (Box::new(t), pid)
+                (Box::new(t.with_interrupt(interrupt_line(turn_gate))), pid)
             } else {
                 let (t, pid) = PtyTransport::open(spec, cols, rows)?;
                 (Box::new(t), pid)
@@ -471,11 +476,14 @@ impl AgentBackend for ClaudeBackend {
         })
     }
 
-    /// ★운영 spawn 은 이 메서드를 거치지 않는다★ — [`AgentBackend::open_spawn`] 이 화신 공유 받음 값을 쥔
-    /// decoder 를 직접 만든다. 여기서 나가는 decoder 는 판정 결과를 아무도 읽지 않는 자기 값을 쥔다.
+    /// ★운영 spawn 은 이 메서드를 거치지 않는다★ — [`AgentBackend::open_spawn`] 이 화신 공유 받음 값·턴 열림 문을
+    /// 쥔 decoder 를 직접 만든다. 여기서 나가는 decoder 는 아무도 읽지 않는 자기 값들을 쥔다.
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
         if is_stream_json(command) {
-            Some(stream_decoder(Arc::new(DeliveryAck::new())))
+            Some(stream_decoder(
+                Arc::new(DeliveryAck::new()),
+                Arc::new(TurnGate::default()),
+            ))
         } else {
             None
         }
@@ -516,9 +524,10 @@ impl AgentBackend for ClaudeBackend {
 ///   **입력 시점 유저 에코**를 이 variant 로 낸다(`user_text_echo_json` · decoder 의 user 라인). 그래서
 ///   대시보드 사용자가 터미널에 직접 입력해 시작한 턴도, 우편 주입이 시작한 턴도 이 갈래로 잡힌다 —
 ///   빼면 그 두 경로의 턴 시작이 통째로 관측 밖으로 나간다.
-/// ★`kind` 를 보지 않는 이유(현 범위의 정직한 표기)★: claude decoder 가 내는 `Structured` 는 전부 턴
-///   안에서 발생하는 라인이라 지금은 kind 구분이 불필요하다. claude 가 턴 밖 구조화 라인을 내기
-///   시작하면 여기서 kind 를 걸러야 한다.
+/// ★`kind` 는 하나만 거른다 — 끊김 표시([`INTERRUPTED_KIND`])는 진행이 아니다★: 턴이 끊겼다는 끝에 대한 표시라,
+///   진행으로 세면 그 턴의 `result` 뒤에 올 때 「턴 중」이 다시 켜져 30 분 fail-open 까지 우편이 막힌다(턴 열림
+///   문도 같은 분류를 읽으므로 열지 않는다). 나머지 `Structured` 는 전부 턴 안에서 발생하는 라인이라 kind 를
+///   가르지 않는다 — claude 가 턴 밖 구조화 라인을 내기 시작하면 여기서 그 kind 도 걸러야 한다.
 /// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고, `Error` 는 턴 경계가 아니다(실패
 ///   턴도 `MessageDone` 으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계 정보가 없는 콘솔 바이트다.
 /// ★`Error` 중 「턴 오류」(`Failed`)는 실패한 `result` 의 것 하나다 — 머리말([`RESULT_FAILURE_DETAIL`])로
@@ -527,7 +536,7 @@ impl AgentBackend for ClaudeBackend {
 ///   있다가 **다음 깨끗한 턴**을 오류 끝으로 접고, 그 화신의 우편은 사용자가 다음 턴을 성공시킬 때까지 멈춘다
 ///   (멈춤엔 상한이 없다). 칸이 아니라 머리말로 가르는 이유: `Error` 는 문자열 하나라 표식 칸을 더하면 모든
 ///   소비자의 match 가 바뀐다 — 그 문자열을 만드는 쪽과 읽는 쪽은 둘 다 이 폴더 안에 산다.
-/// ★상관 키가 없다(알려진 범위)★: claude 의 `MessageDone` 은 `turn_id`/`message_id` 가 모두 None 이라
+/// ★상관 키가 없다(알려진 범위)★: claude 의 끝(`MessageDone` · 끊김 `TurnEnd`)은 id 칸이 모두 None 이라
 ///   "어느 턴의 종료인가" 를 맞출 키가 없다. 그래서 턴 카운팅·펜싱을 하지 않고 **마지막 관측이
 ///   결정한다**. 중첩 Task 서브에이전트의 종료 라인이 부모 턴 종료로 새는지는 미검증이고, 새면 증상은
 ///   "부모가 아직 턴 중인데 idle 로 오판 → 조기 주입"(유실 없이 타이밍만 어긋남)이다.
@@ -540,8 +549,10 @@ impl AgentBackend for ClaudeBackend {
 // ADR-0113
 // ADR-0004
 // ADR-0231
+// ADR-0243
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     match event {
+        OutputEvent::Structured { kind, .. } if kind == INTERRUPTED_KIND => None,
         OutputEvent::TextDelta { .. }
         | OutputEvent::ToolCall { .. }
         | OutputEvent::Structured { .. }
@@ -551,10 +562,10 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         OutputEvent::Error(detail) if detail.starts_with(RESULT_FAILURE_DETAIL) => {
             Some(TurnSignal::Failed)
         }
-        // `result` 줄의 번역 — 실패한 `result` 도 여기로 닫힌다(그 실패는 바로 앞의 `Error` 가 싣는다).
+        // 끊기지 않은 `result` 줄의 번역 — 실패한 `result` 도 여기로 닫힌다(그 실패는 바로 앞의 `Error` 가 싣는다).
         OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Clean)),
-        // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 종료로 적는다★: 두 종료 어휘를 여기서 갈라
-        //   적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
+        // 이 decoder 가 내는 `TurnEnd` 는 끊긴 `result` 의 `Interrupted` 하나다(ADR-0238). ★다른 결말도 종료로
+        //   적는다★ — 두 종료 어휘를 여기서 갈라 적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
         OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
             TurnOutcome::Completed => TurnEndKind::Clean,
             TurnOutcome::Failed { .. } => TurnEndKind::Failed,
@@ -728,6 +739,95 @@ fn cancel_line(id: &str) -> Vec<u8> {
     line.into_bytes()
 }
 
+// ── ADR-0238: 끊기 — 턴 열림 문 + 제어 줄 ──────────────────────────────────────────
+
+/// 이 화신에 지금 끊을 턴이 열려 있나 — 라이브 decoder 가 쓰고 끊기 줄 함수([`interrupt_line`])가 읽는 화신 공유 값.
+///
+/// ★「턴 중」을 턴 관측과 같은 분류기([`classify_turn`])에서 뽑는다★ — 라이브 줄 하나의 사건 중 진행 신호가 있으면
+///   열고 끝 신호(= `result` 줄의 번역 — 끝을 내는 줄은 그것 하나다)에서 닫는다. 이어받기 원문은 이 문을 지나지
+///   않는다. 실측(B2 · claude 2.1.280): 여는 줄은 늘 그 턴의 `command_lifecycle` `started` 였고 턴 밖에서 연 줄은
+///   없었다.
+/// ★그래도 턴 관측과 같은 값은 아니다 — 앞 끝이 늦다★: 세션의 입력 시점 합성 에코(`input_echo_event`)는 턴 관측을
+///   켜지만 decoder 를 지나지 않아, 문은 벤더 `started` 에서야 열린다. 그 틈의 끊기는 거절되는 무동작이다(TRD §9
+///   「F2 턴 열림 전 끊기」).
+/// ★분류기의 「`result` 없음」 구멍을 그대로 물려받고, 턴 표의 30 분 fail-open 상한은 없다★: `result` 줄이 4 MiB
+///   재동기로 버려지거나 못 읽히거나, 벤더가 진행만 내고 `result` 없이 턴을 끝내면 문은 열린 채 남는다. 그때의
+///   끊기 줄은 한가한 CLI 에 닿는데, 실측(B2 S6)상 그 끊기는 응답 한 줄만 내는 무해한 줄이다 — 그 순간 CLI 에 대기
+///   입력이 있으면 그것을 끊을 수 있다.
+/// ★벤더는 한가할 때의 끊기를 거절하지 않는다(실측 B2 S6 — 늘 `success`)★ — 「끊을 턴이 없다」를 말해 줄 수 있는
+///   것은 이 문뿐이다. 그래서 문이 닫혔으면 줄을 보내지 않고 통로가 `Unsupported` 로 거절한다.
+/// ★좁힐 뿐 닫지 못하는 경합이 남는다★ — 문을 읽고 줄이 CLI 에 닿기 전에 그 턴이 끝나고 CLI 가 스스로 다음 턴(대기
+///   입력)을 열면 줄은 그 다음 턴을 끊는다. 벤더 `control_request` 에 턴 id 가 없어 우리 쪽으로는 가를 수 없다(실측
+///   B2 S7 — 끊긴 다음 턴은 오류 아닌 중단 턴으로 닫힌다).
+/// ★세션·통로·선 타입은 이 값을 모른다★ — 그래서 `types.rs` 가 아니라 여기 산다([`DeliveryAck`] 는 세션이 읽어
+///   거기 있다).
+// ADR-0238
+#[derive(Debug, Default)]
+struct TurnGate {
+    open: AtomicBool,
+}
+
+impl TurnGate {
+    // ★`Relaxed` 로 충분하다★ — 이 값은 다른 메모리를 싣지 않아 원자성만 필요하다. 「턴 끝(시작) 사건을 본 뒤의
+    //   끊기는 닫힌(열린) 문을 본다」는 이 값의 순서가 세우는 것이 아니다: 문 쓰기는 decode 안에서, 그 줄의
+    //   사건이 펌프에서 emit 되기 **전에** 같은 스레드가 하고, 그 사건을 본 쪽의 끊기는 emit → 소켓 왕복 → 명령
+    //   으로 이어지는 happens-before 사슬 뒤에서만 문을 읽는다. 순서를 올려도 위 잔여 경합은 닫히지 않는다.
+    fn set(&self, open: bool) {
+        self.open.store(open, Ordering::Relaxed);
+    }
+
+    fn is_open(&self) -> bool {
+        self.open.load(Ordering::Relaxed)
+    }
+}
+
+/// 끊기 요청 `request_id` 의 머리말 — 뒤에 요청마다 새 uuid v4 가 붙는다.
+///
+/// ★응답은 번역하지 않는다★ — 응답이 왔다고 턴이 멈춘 것은 아니다(끝은 그 턴의 `result` 가 알린다 · 실측 B2: 응답은
+///   늘 그 `result` 앞에 온다). [`cancel_response_event`] 는 [`CANCEL_REQUEST_PREFIX`] 만 보므로 이 머리말의 응답은
+///   사건이 없다.
+// ADR-0238
+const INTERRUPT_REQUEST_PREFIX: &str = "interrupt:";
+
+/// 도는 턴 하나를 끊어 달라는 stdin 줄(개행 포함).
+///
+/// ★벤더 계약(실측 B2 — claude 2.1.280)★: `initialize` 없이 우리 `-p` stream-json 모드에서 받힌다. 도는 Bash 도구는
+///   죽고 그 `tool_result` 는 `is_error:true` 로 온다. 응답의 `still_queued` = 이 끊기를 살아남아 다음 턴에 돌 대기
+///   메시지다. ★`cancel_queued` 같은 선택 칸을 싣지 않는다★ — 받아 둔 대기 입력은 버리지 않고 다음 턴으로 보낸다
+///   (ADR-0235 결정 4 · 5 와 같은 뜻). 키 순서는 [`wrap_user_turn`] 과 같은 이유로 typed struct 선언 순서다.
+// ADR-0238
+fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct ControlRequest {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        request_id: String,
+        request: Interrupt,
+    }
+    #[derive(serde::Serialize)]
+    struct Interrupt {
+        subtype: &'static str,
+    }
+
+    let request = ControlRequest {
+        kind: "control_request",
+        request_id: format!("{INTERRUPT_REQUEST_PREFIX}{request_uuid}"),
+        request: Interrupt {
+            subtype: "interrupt",
+        },
+    };
+    // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
+    let mut line = serde_json::to_string(&request).unwrap_or_default();
+    line.push('\n');
+    line.into_bytes()
+}
+
+/// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT).
+// ADR-0238
+fn interrupt_line(gate: Arc<TurnGate>) -> InterruptLine {
+    Arc::new(move || gate.is_open().then(|| interrupt_line_bytes(Uuid::new_v4())))
+}
+
 // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
 //
 // 스키마 근거 = 실측 fixture `backend/fixtures/claude_{text,tool}.jsonl`.
@@ -758,6 +858,62 @@ fn bounded_message_id(id: Option<&serde_json::Value>) -> Option<String> {
 // ADR-0231
 const RESULT_FAILURE_DETAIL: &str = "claude stream-json result reported failure";
 
+/// 끊긴 턴의 `result` 가 싣는 끝난 까닭(`terminal_reason`) — 글·생각·도구 입력을 흘리던 중 | 도구 실행 중.
+///
+/// ★`subtype`·`is_error` 로는 끊김을 못 가른다(실측 B2 — claude 2.1.280 · 끊긴 턴 14/14)★: 끊긴 턴은
+///   `subtype:"error_during_execution"` · `is_error:true` 로 온다 — 진짜 실행 오류와 같은 낱말이다. 오류로 읽으면
+///   Esc 한 번이 오류 행을 그리고 오류 뒤 멈춤을 세워 우편을 멈춘다. 정상 턴은 `"completed"` 였다.
+// ADR-0238
+const INTERRUPTED_TERMINAL_REASONS: [&str; 2] = ["aborted_streaming", "aborted_tools"];
+
+/// 끊긴 턴의 `result` 인가 — [`INTERRUPTED_TERMINAL_REASONS`] 이거나 `subtype:"interrupted"`(이 설치본에선 관측되지
+/// 않았다 — 옛 CLI 대비로 남긴다).
+// ADR-0238
+fn is_interrupted_result(value: &serde_json::Value) -> bool {
+    value.get("subtype").and_then(|v| v.as_str()) == Some("interrupted")
+        || value
+            .get("terminal_reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(|r| INTERRUPTED_TERMINAL_REASONS.contains(&r))
+}
+
+/// 끊김 표시 사건의 `Structured` kind — 프론트 누산기가 이 낱말을 사용자 말풍선이 아닌 끊김 표시 행으로 옮긴다.
+/// `json` = `{"text": <벤더 원문>}`.
+// ADR-0243
+const INTERRUPTED_KIND: &str = "interrupted";
+
+/// 끊긴 턴마다 CLI 가 그 턴의 `result` 앞에 스스로 넣는 사용자 줄 글의 머리 — 도구가 돌던 중이면 뒤에
+/// ` for tool use]` 가, 아니면 `]` 가 붙는다(실측 B2 — claude 2.1.280 · 14/14 · transcript 에도 남는다).
+///
+/// ★벤더 문자열 판별이다★ — 문구가 바뀌면 그 줄은 오늘처럼 사용자 말풍선으로 돌아간다(보이고, 잃는 것은 없다).
+///   ★위치(`result` 바로 앞)로 알아보지 말 것★ — 이어받은 transcript 에는 `result` 가 없다.
+// ADR-0243
+const INTERRUPT_NOTE_PREFIX: &str = "[Request interrupted by user";
+
+/// `user` 줄 하나가 끊김 합성 줄이면 그 원문 — `message.content` 가 정확히 글 블록 하나이고 그 글이
+/// [`INTERRUPT_NOTE_PREFIX`] 로 시작할 때만이다. 블록이 둘 이상이거나 글이 아닌 블록(`tool_result` 등)이면 `None`.
+///
+/// ★`isReplay:true` 줄은 제외한다★ — 사용자가 친 글이 우연히 그 머리로 시작하면 CLI 가 우리 uuid 를 실어 되울리는데
+///   (실 합성 줄에는 `isReplay` 가 없다 — 실측 B2), 그것을 끊김 표시로 바꾸면 프론트의 대기 행 대조 · uuid 중복 제거가
+///   우회되고 진행 신호도 사라진다. 평문 문자열 `content` 는 알아보지 않는다 — 관측된 적이 없고 그런 `user` 줄은
+///   애초에 번역하지 않는다.
+// ADR-0243
+fn interrupt_note_text(value: &serde_json::Value) -> Option<&str> {
+    if value.get("isReplay").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    let [block] = value.get("message")?.get("content")?.as_array()?.as_slice() else {
+        return None;
+    };
+    if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+        return None;
+    }
+    block
+        .get("text")?
+        .as_str()
+        .filter(|text| text.starts_with(INTERRUPT_NOTE_PREFIX))
+}
+
 /// `system/init` 의 `capabilities` 에서 「항목별 수명주기(`command_lifecycle`)를 낸다」를 뜻하는 낱말(실측 M4 —
 /// claude 2.1.280).
 // ADR-0231
@@ -773,9 +929,9 @@ enum LineSource<'a> {
     Transcript,
 }
 
-/// 운영 spawn 의 decoder — 화신 공유 받음 값을 채운다.
-fn stream_decoder(ack: Arc<DeliveryAck>) -> Box<dyn OutputDecoder> {
-    Box::new(ClaudeStreamDecoder::with_delivery_ack(ack))
+/// 운영 spawn 의 decoder — 화신 공유 받음 값을 채우고 턴 열림 문을 여닫는다.
+fn stream_decoder(ack: Arc<DeliveryAck>, gate: Arc<TurnGate>) -> Box<dyn OutputDecoder> {
+    Box::new(ClaudeStreamDecoder::live(ack, gate))
 }
 
 /// 라이브 부분 메시지 추적 — `stream_event` 가 채우고 완결 `assistant` 줄이 읽는다.
@@ -810,8 +966,10 @@ impl PartialMessage {
 ///   델타와 완결 줄로 두 번 보내는 것을 한 벌로 줄이는 데만 쓴다 — ★프론트 누산기에는 중복 제거가 없다★(글
 ///   델타를 마지막 글 항목에 잇기만 한다). 그 밖의 병합(같은 message.id 블록 잇기)은 여전히 프론트 몫이다.
 ///   목록 항목도 모른다 — 명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
-/// ★받음 값(`ack`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 세션이 같은 값을 읽는다.
+/// ★받음 값(`ack`)과 턴 열림 문(`gate`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 받음 값은 세션이,
+///   문은 통로에 꽂힌 끊기 줄 함수가 같은 값을 읽는다.
 // ADR-0240
+// ADR-0238
 #[derive(Debug, Default)]
 pub struct ClaudeStreamDecoder {
     /// 마지막 `\n` 뒤 미완성 라인 바이트(라인-레벨 분할 재조립용).
@@ -842,20 +1000,36 @@ pub struct ClaudeStreamDecoder {
     /// 라이브 줄에만 쓴다 — 이어받기 transcript 는 이 칸 없이 번역한다(`consume_line` 의 `partial: None`).
     // ADR-0240
     partial: PartialMessage,
+
+    /// 라이브 줄만 여닫는다([`Self::consume_live_line`]) — 이어받기 transcript 는 이 칸에 닿는 길이 없다.
+    // ADR-0238
+    gate: Arc<TurnGate>,
 }
 
 impl ClaudeStreamDecoder {
-    /// 자기만 쥐는 받음 값을 채우는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
+    /// 자기만 쥐는 받음 값·문을 채우는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// `ack` 를 채우는 decoder — 세션이 같은 Arc 를 읽는다. ★`Unknown → Unavailable` 전이를 이긴 decoder 가
-    /// `AckUnavailable{delivered: []}` 를 한 번 낸다★(같은 Arc 를 쥔 decoder 가 여럿이어도 한 번).
+    /// 시험대가 쥔 `ack` 를 채우는 decoder — 문은 아무 끊기 줄 함수와도 이어지지 않은 자기 것이다(운영 조립 =
+    /// [`Self::live`]). ★`Unknown → Unavailable` 전이를 이긴 decoder 가 `AckUnavailable{delivered: []}` 를 한 번
+    /// 낸다★(같은 Arc 를 쥔 decoder 가 여럿이어도 한 번).
     // ADR-0231
-    pub fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
+    #[cfg(test)]
+    fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
         Self {
             ack,
+            ..Self::default()
+        }
+    }
+
+    /// 운영 조립 — `ack` 는 세션이, `gate` 는 끊기 줄 함수가 같은 Arc 를 읽는다.
+    // ADR-0238
+    fn live(ack: Arc<DeliveryAck>, gate: Arc<TurnGate>) -> Self {
+        Self {
+            ack,
+            gate,
             ..Self::default()
         }
     }
@@ -884,12 +1058,7 @@ impl ClaudeStreamDecoder {
         // 마지막 개행 뒤 잔여는 tail 로 buffer 에 남겨 다음 청크와 합친다(FIX-D: 주석을 실제 코드와 일치).
         while let Some(nl) = self.buffer.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=nl).collect();
-            Self::consume_line(
-                &line[..line.len() - 1],
-                &mut events,
-                LineSource::Live(&self.ack),
-                Some(&mut self.partial),
-            );
+            self.consume_live_line(&line[..line.len() - 1], &mut events);
         }
 
         // ★단순 clear 가 아니라 resync 진입(FIX-A)★: buffer 만 비우면 이 오염 라인의 나머지 꼬리가
@@ -914,24 +1083,44 @@ impl ClaudeStreamDecoder {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            Self::consume_line(
-                &line,
-                &mut events,
-                LineSource::Live(&self.ack),
-                Some(&mut self.partial),
-            );
+            self.consume_live_line(&line, &mut events);
         }
         events
+    }
+
+    /// 라이브 줄 하나를 번역하고, 그 줄이 낸 사건을 턴 분류기에 차례로 비춰 턴 열림 문을 여닫는다 — 진행 = 연다 ·
+    /// 끝 = 닫는다. 턴 오류(`Failed`)와 신호 없는 사건은 문을 건드리지 않는다.
+    /// ★문을 여닫는 것은 사건이 펌프에서 emit 되기 전이다★ — decode 가 돌려준 뒤에야 emit 된다.
+    // ADR-0238
+    fn consume_live_line(&mut self, line: &[u8], events: &mut Vec<OutputEvent>) {
+        let first = events.len();
+        Self::consume_line(
+            line,
+            events,
+            LineSource::Live(&self.ack),
+            Some(&mut self.partial),
+        );
+        // 이 줄이 새 사건을 내지 않고 앞 글 사건에 이어 붙였으면(`consume_stream_event` 의 합치기) 여기엔 없다 — 그
+        //   앞 사건이 이미 진행으로 문을 열었고 그 뒤에 닫는 사건이 없으니 문은 그대로 열려 있다.
+        for event in &events[first..] {
+            match classify_turn(event) {
+                Some(TurnSignal::Progress) => self.gate.set(true),
+                Some(TurnSignal::Ended(_)) => self.gate.set(false),
+                Some(TurnSignal::Failed) | None => {}
+            }
+        }
     }
 
     /// 완성 라인 1개(개행 제외 바이트) → 0개 이상의 OutputEvent 를 events 에 append.
     ///
     /// 파싱 규칙 — 실패·메타는 조용히 skip(panic 금지):
     /// - 비-UTF8 / 비-JSON(예: stderr "Warning: no stdin…") → skip.
-    /// - `assistant`/`user` 라인 → message.content[] 의 각 블록을 순서대로 이벤트로.
+    /// - `assistant`/`user` 라인 → message.content[] 의 각 블록을 순서대로 이벤트로. 단 끊김 합성 `user` 줄은
+    ///   `Structured{kind:"interrupted"}` 하나로(ADR-0243 — [`interrupt_note_text`]).
     /// - `result` 라인 → MessageDone(+ result.usage 있으면 Usage 추가 emit;
     ///   is_error/subtype 이 error 계열이면 MessageDone **앞에** Error 도 emit — FIX-C).
     ///   ※ result 의 오류 표면화는 **백엔드 신규 정책**이다(프론트 파서엔 없던 판정).
+    ///   끊긴 턴의 result 는 Usage 뒤 `TurnEnd{Interrupted}` 하나 — Error·MessageDone 없음(ADR-0238).
     /// - 라이브만: `command_lifecycle` → 명부 사건 · `cancel:<uuid>` 요청의 `control_response` → 취소 응답
     ///   사건 · `system/init` → 받음 가능 여부 판정(ADR-0231).
     /// - transcript 만: `attachment{queued_command}` → 사용자 말풍선.
@@ -966,6 +1155,17 @@ impl ClaudeStreamDecoder {
                     Some(m) => m,
                     None => return,
                 };
+                // 끊김 합성 줄은 사용자 말풍선이 아니라 끊김 표시다 — 라이브 · 이어받기 둘 다.
+                // ADR-0243
+                if role == "user" {
+                    if let Some(text) = interrupt_note_text(&value) {
+                        events.push(OutputEvent::Structured {
+                            kind: INTERRUPTED_KIND.to_string(),
+                            json: serde_json::json!({ "text": text }).to_string(),
+                        });
+                        return;
+                    }
+                }
                 let message_id = bounded_message_id(msg.get("id"));
                 // ★user replay dedup 키★: line-level 이라 블록 루프 밖에서 1회 추출한다. assistant
                 //   라인엔 이 개념이 없어 None 이 된다(consume_block 의 assistant arm 은 안 쓴다).
@@ -1014,37 +1214,47 @@ impl ClaudeStreamDecoder {
                         });
                     }
                 }
-                // ★실패 턴 표면화(FIX-C)★: 늘 MessageDone 만 내면 API 오류·max-turns·거부로 실패한
-                //   턴이 "정상 완료"로 위장된다. is_error:true payload 는 미캡처(실측 fixture 없음)라
-                //   존재하는 필드만 문자열화해 담는다. 순서는 Error → MessageDone(소비자가 종료 신호를
-                //   보기 전에 오류를 알도록).
-                let is_error = value
-                    .get("is_error")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let subtype = value.get("subtype").and_then(|v| v.as_str());
-                // ★error allowlist(denylist 아님)★: 오류로 잡는 건 subtype 이 error 계열일 때만이다
-                //   (실측 error_max_turns·error_during_execution → s.starts_with("error") 로 커버).
-                //   과거엔 `s != "success"`(여집합=denylist)였으나, 유저가 Esc 로 정상 중단한 턴의
-                //   subtype:"interrupted" 마저 오류로 오분류했다 — interrupt 는 이 프로젝트 1급 정상
-                //   경로(TerminalReason::Interrupted 별도)라 실패 턴으로 위장하면 안 된다. 또 denylist 는
-                //   미래에 추가될 non-error subtype 을 자동으로 오류化한다. 그래서 방향을 뒤집어, 알려진
-                //   error 접두사만 오류로 잡고 나머지(success·interrupted·미지 non-error)는 오류 아님.
-                let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
-                if is_error || subtype_is_error {
-                    let mut detail = String::from(RESULT_FAILURE_DETAIL);
-                    if let Some(s) = subtype {
-                        detail.push_str(&format!(" (subtype={s})"));
+                // ★끊긴 턴은 오류가 아니다 — 오류 판정보다 먼저 가른다★: 끊긴 `result` 는 `is_error:true` 에
+                //   error 계열 subtype 으로 오므로(실측 B2) 아래 판정에 닿으면 실패 턴이 된다. 끊김은 `TurnEnd` 한 갈래로만
+                //   닫는다 — 턴 분류기가 `Ended(Other)` 로 읽어 오류 뒤 멈춤을 세우지도 풀지도 않는다. 그 밖의 끝은
+                //   그대로 `MessageDone` 이다(이주가 아니다).
+                // ADR-0238
+                if is_interrupted_result(&value) {
+                    events.push(OutputEvent::TurnEnd {
+                        turn_id: None,
+                        outcome: TurnOutcome::Interrupted,
+                    });
+                } else {
+                    // ★실패 턴 표면화(FIX-C)★: 늘 MessageDone 만 내면 API 오류·max-turns·거부로 실패한
+                    //   턴이 "정상 완료"로 위장된다. 진짜 실패의 payload 는 미캡처(`result_error_handbuilt` 는
+                    //   손으로 지었다)라 존재하는 필드만 문자열화해 담는다. 순서는 Error → MessageDone(소비자가
+                    //   종료 신호를 보기 전에 오류를 알도록).
+                    let is_error = value
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let subtype = value.get("subtype").and_then(|v| v.as_str());
+                    // ★error allowlist(denylist 아님)★: 오류로 잡는 건 subtype 이 error 계열일 때만이다
+                    //   (실측 error_max_turns·error_during_execution → s.starts_with("error") 로 커버).
+                    //   denylist(`s != "success"`)로 되돌리지 말 것 — 미래에 추가될 non-error subtype 을 자동으로
+                    //   오류化한다(옛 모양은 Esc 로 정상 중단한 턴의 `subtype:"interrupted"` 마저 오류로 읽었다 —
+                    //   그 subtype 은 이제 위 끊김 갈래가 먼저 가져간다).
+                    let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
+                    if is_error || subtype_is_error {
+                        let mut detail = String::from(RESULT_FAILURE_DETAIL);
+                        if let Some(s) = subtype {
+                            detail.push_str(&format!(" (subtype={s})"));
+                        }
+                        if let Some(r) = value.get("result").and_then(|v| v.as_str()) {
+                            detail.push_str(&format!(": {r}"));
+                        }
+                        events.push(OutputEvent::Error(detail));
                     }
-                    if let Some(r) = value.get("result").and_then(|v| v.as_str()) {
-                        detail.push_str(&format!(": {r}"));
-                    }
-                    events.push(OutputEvent::Error(detail));
+                    events.push(OutputEvent::MessageDone {
+                        turn_id: None,
+                        message_id: None,
+                    });
                 }
-                events.push(OutputEvent::MessageDone {
-                    turn_id: None,
-                    message_id: None,
-                });
                 // ★턴 끝에서 추적을 비운다★ — 그 뒤 `message_start` 없이 온 늦은 델타가 버려져, 턴 끝 뒤에 진행
                 //   신호(`TextDelta`)가 「턴 중」을 다시 켜는 길이 없다(30 분 fail-open 막힘).
                 // ADR-0240
@@ -1511,7 +1721,7 @@ fn claude_home() -> Option<PathBuf> {
 /// 문자열만 받는다(ADR-0012 seam 격리).
 ///
 /// - `isSidechain:true`(sub-agent 턴) 라인은 스킵한다 — 원본 대화만 복원한다.
-/// - result 라인은 라이브와 동일하게 MessageDone(+usage) 로 매핑돼 턴 경계 구분선이 생긴다.
+/// - result 라인은 라이브와 같은 번역(MessageDone · 끊긴 턴은 `TurnEnd`, + usage)이라 턴 경계 구분선이 생긴다.
 /// - 그 result 라인이 **없이 끝나면** 마지막에 합성 MessageDone 을 하나 덧붙인다(아래 이유).
 pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     let mut events = Vec::new();
@@ -1543,9 +1753,12 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     //   ★관측(ADR-0113)과 무관★: 이 합성 신호는 **replay 버퍼 전용**이다 — seed 는 턴 관측 경로를 아예
     //   거치지 않으므로(OutputCore::seed) 이걸로 busy/idle 이 부트스트랩되지 않는다. 되살리지 말 것.
     //
-    //   이미 MessageDone 으로 끝나면(픽스처·미래 claude 가 result 를 남기는 경우) 덧붙이지 않는다 —
-    //   중복 턴 경계 방지. 이벤트가 0개면(빈·메타 전용 transcript) 그대로 0개 = fresh 와 동일.
-    let already_closed = matches!(events.last(), Some(OutputEvent::MessageDone { .. }));
+    //   이미 턴 끝(MessageDone · 끊긴 턴의 TurnEnd)으로 끝나면(픽스처·미래 claude 가 result 를 남기는 경우)
+    //   덧붙이지 않는다 — 중복 턴 경계 방지. 이벤트가 0개면(빈·메타 전용 transcript) 그대로 0개 = fresh 와 동일.
+    let already_closed = matches!(
+        events.last(),
+        Some(OutputEvent::MessageDone { .. } | OutputEvent::TurnEnd { .. })
+    );
     if !events.is_empty() && !already_closed {
         events.push(OutputEvent::MessageDone {
             turn_id: None,
@@ -3582,25 +3795,40 @@ mod tests {
         assert_eq!(tags(&ev), vec!["error", "done"]);
     }
 
+    /// 끊긴 턴의 끝 한 벌 — `TurnEnd{turn_id: None, outcome: Interrupted}` 인가.
+    fn is_interrupted_end(event: &OutputEvent) -> bool {
+        matches!(
+            event,
+            OutputEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Interrupted
+            }
+        )
+    }
+
+    // 아래 둘은 손으로 지은 옛 CLI 모양(`subtype:"interrupted"`)이다 — 실측 모양은 `interrupt_s1` 픽스처가 잰다.
+    // ADR-0238
     #[test]
-    fn result_interrupted_subtype_emits_only_done_no_error() {
-        // FIX-E 회귀: 유저 Esc 정상 중단 턴(subtype:"interrupted").
+    fn result_interrupted_subtype_ends_the_turn_as_interrupted_without_an_error() {
+        // FIX-E 회귀: 유저 Esc 정상 중단 턴(subtype:"interrupted") — 오류 아님.
         let line = r#"{"type":"result","subtype":"interrupted"}"#.to_string() + "\n";
         let ev = decode_all(line.as_bytes());
         assert_eq!(
             tags(&ev),
-            vec!["done"],
-            "interrupted 는 오류 아님 → Error 없이 done 만"
+            vec!["turn-end"],
+            "interrupted 는 오류 아님 → Error 없이 끊김 끝 한 벌"
         );
+        assert!(is_interrupted_end(&ev[0]), "{ev:?}");
     }
 
     #[test]
-    fn result_interrupted_subtype_with_is_error_false_emits_only_done() {
-        // FIX-E 회귀: is_error:false 가 명시된 interrupted 도 Error 없이 done 만.
+    fn result_interrupted_subtype_with_is_error_false_ends_the_turn_as_interrupted() {
+        // FIX-E 회귀: is_error:false 가 명시된 interrupted 도 Error 없이 끊김 끝 한 벌.
         let line =
             r#"{"type":"result","subtype":"interrupted","is_error":false}"#.to_string() + "\n";
         let ev = decode_all(line.as_bytes());
-        assert_eq!(tags(&ev), vec!["done"]);
+        assert_eq!(tags(&ev), vec!["turn-end"]);
+        assert!(is_interrupted_end(&ev[0]), "{ev:?}");
     }
 
     #[test]
@@ -5287,5 +5515,527 @@ mod tests {
             }
             assert_eq!(format!("{tracked:?}"), format!("{untracked:?}"));
         }
+    }
+
+    // ── ADR-0238 · ADR-0243: 끊기 — 끊기 줄 · 턴 열림 문 · 끊긴 `result` · 합성 끊김 줄 ──────────────────
+    //
+    // 정본 = B2 스파이크 채취 `interrupt_s1`(claude 2.1.280 · README 표). 줄 번호는 1 기반.
+
+    const INTERRUPT_S1: &str = include_str!("fixtures/interrupt_s1.jsonl");
+
+    /// 문을 나눠 쥔 decoder 와 그 문을 읽는 끊기 줄 함수 — 운영 조립(`open_spawn`)과 같은 모양.
+    fn gated_decoder() -> (ClaudeStreamDecoder, InterruptLine) {
+        let gate = Arc::new(TurnGate::default());
+        let decoder = ClaudeStreamDecoder::live(Arc::new(DeliveryAck::new()), Arc::clone(&gate));
+        (decoder, interrupt_line(gate))
+    }
+
+    /// 픽스처를 한 decoder 에 한 줄씩 먹여 줄마다 (그 줄의 사건, 그 뒤 끊기 줄 함수가 줄을 주나) 를 모은다.
+    fn replay_with_gate(fixture: &str) -> Vec<(Vec<OutputEvent>, bool)> {
+        let (mut decoder, line) = gated_decoder();
+        fixture_lines(fixture)
+            .iter()
+            .map(|l| (decoder.decode(l.as_bytes()), line().is_some()))
+            .collect()
+    }
+
+    fn interrupted_note_text(event: &OutputEvent) -> Option<String> {
+        match event {
+            OutputEvent::Structured { kind, json } if kind == INTERRUPTED_KIND => {
+                let v: serde_json::Value = serde_json::from_str(json).expect("json");
+                Some(v["text"].as_str().expect("text").to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// 끊기 줄 바이트 골든(ADR-0238 결정 1 — 실측 B2 가 받아들인 모양) · 그 요청 id 의 응답과 채취한 응답 둘은 사건이
+    /// 없다(응답은 「멈췄다」가 아니다).
+    // ADR-0238
+    #[test]
+    fn interrupt_line_bytes_golden_and_its_answer_is_not_translated() {
+        let id = Uuid::parse_str("f453a7a6-672a-4ed3-ae93-a3372f66d6f2").unwrap();
+        let line = interrupt_line_bytes(id);
+        assert_eq!(
+            String::from_utf8(line.clone()).unwrap(),
+            concat!(
+                r#"{"type":"control_request","request_id":"interrupt:f453a7a6-672a-4ed3-ae93-a3372f66d6f2","#,
+                r#""request":{"subtype":"interrupt"}}"#,
+                "\n"
+            )
+        );
+
+        let sent: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": sent["request_id"], "response": {"still_queued": ["u1"]}},
+        });
+        assert!(decode_all(format!("{answer}\n").as_bytes()).is_empty());
+        for n in [135, 183] {
+            let captured = fixture_line(INTERRUPT_S1, n);
+            assert!(
+                captured.contains("\"request_id\":\"interrupt:"),
+                "픽스처 전제 {n}"
+            );
+            assert!(decode_all(captured.as_bytes()).is_empty(), "{n}");
+        }
+    }
+
+    /// 끊긴 `result` 둘(글 흐르는 중 `aborted_streaming` · 도구 실행 중 `aborted_tools`) → `[Usage?, TurnEnd{Interrupted}]`
+    /// — `Error`·`MessageDone` 없음 · 분류 `Ended(Other)` · 픽스처 어디에도 턴 오류 신호가 없다. 같은 픽스처의 정상 끝은
+    /// 오늘처럼 `[Usage, done]`.
+    // ADR-0238
+    #[test]
+    fn the_spike_s_interrupted_results_end_the_turn_as_interrupted_without_an_error() {
+        let classify = ClaudeBackend.turn_classifier();
+        let per_line = replay_with_gate(INTERRUPT_S1);
+        let result_lines: Vec<usize> = INTERRUPT_S1
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["type"] == "result"
+            })
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert_eq!(result_lines, vec![138, 187, 201], "픽스처 전제");
+
+        // 138 은 usage 가 0/0 이라 `Usage` 가 없다.
+        assert_eq!(tags(&per_line[138 - 1].0), vec!["turn-end"]);
+        assert_eq!(tags(&per_line[187 - 1].0), vec!["usage", "turn-end"]);
+        for n in [138, 187] {
+            let end = per_line[n - 1].0.last().unwrap();
+            assert!(is_interrupted_end(end), "{n}: {end:?}");
+            assert_eq!(
+                classify(end),
+                Some(TurnSignal::Ended(TurnEndKind::Other)),
+                "{n}"
+            );
+        }
+        assert_eq!(tags(&per_line[201 - 1].0), vec!["usage", "done"]);
+
+        let failed = per_line
+            .iter()
+            .flat_map(|(events, _)| events)
+            .filter(|e| classify(e) == Some(TurnSignal::Failed))
+            .count();
+        assert_eq!(failed, 0, "끊김이 턴 오류로 읽혔다");
+    }
+
+    /// 끊긴 두 턴의 꼬리를 줄마다 — 응답은 사건 0 · 잘린 완결 줄은 흘린 글이라 0(ADR-0240) · 도구 결과는 오늘처럼 `user`
+    /// · 합성 줄은 끊김 표시 · `result` 는 끊김 끝 · 뒤이은 `cancelled` 는 `Dropped`(묘비 위 무동작 — 명부 몫).
+    // ADR-0238
+    // ADR-0243
+    #[test]
+    fn the_interrupted_tails_translate_line_by_line() {
+        let per_line = replay_with_gate(INTERRUPT_S1);
+        let expected: [(usize, &[&str]); 11] = [
+            (135, &[]),
+            (136, &[]),
+            (137, &["structured:interrupted"]),
+            (138, &["turn-end"]),
+            (139, &["queued:dropped"]),
+            (183, &[]),
+            (184, &[]),
+            (185, &["structured:user"]),
+            (186, &["structured:interrupted"]),
+            (187, &["usage", "turn-end"]),
+            (188, &["queued:dropped"]),
+        ];
+        for (n, want) in expected {
+            assert_eq!(tags(&per_line[n - 1].0), want, "줄 {n}");
+        }
+    }
+
+    /// S8 — 문 궤적: 여는 줄 = 각 턴의 `started`(2 · 141 · 190) · 닫는 줄 = 각 턴의 `result`(138 · 187 · 201). 턴 밖(첫
+    /// `queued` · `result` 뒤의 `cancelled`·`completed` · 다음 턴의 `queued`)에서 여는 줄이 없다.
+    // ADR-0238
+    #[test]
+    fn the_turn_gate_opens_at_each_started_line_and_closes_at_each_result() {
+        let per_line = replay_with_gate(INTERRUPT_S1);
+        let (mut opened, mut closed, mut was_open) = (Vec::new(), Vec::new(), false);
+        for (i, (_, open)) in per_line.iter().enumerate() {
+            if *open != was_open {
+                if *open {
+                    opened.push(i + 1)
+                } else {
+                    closed.push(i + 1)
+                }
+            }
+            was_open = *open;
+        }
+        assert_eq!(opened, vec![2, 141, 190]);
+        assert_eq!(closed, vec![138, 187, 201]);
+        for n in opened {
+            assert!(
+                fixture_line(INTERRUPT_S1, n).contains("\"state\":\"started\""),
+                "픽스처 전제 {n}"
+            );
+        }
+        assert!(!was_open, "마지막 턴이 끝난 뒤 문은 닫혀 있다");
+    }
+
+    /// 사용자 되울림 · 완결 `assistant` 글 · 도구 호출 · 흘린 글 델타 · `Delivered` 줄은 저마다 문을 열고, 그 턴의
+    /// `result` 가 닫는다 — 문을 여는 사건 = 턴 분류기의 진행 신호.
+    // ADR-0238
+    #[test]
+    fn every_progress_line_opens_the_gate_and_the_result_closes_it() {
+        let echo = fixture_line(INTERRUPT_S1, 5);
+        assert!(echo.contains("\"isReplay\":true"), "픽스처 전제");
+        let tool_use = completed(
+            "m1",
+            serde_json::json!({ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }),
+        );
+        let streamed = format!(
+            "{}{}{}",
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "hi")
+        );
+        for (label, opener) in [
+            ("되울림", echo),
+            ("완결 글", completed_text("m1", "hi")),
+            ("도구 호출", tool_use),
+            ("흘린 델타", streamed),
+            ("Delivered", fixture_line(INTERRUPT_S1, 2)),
+        ] {
+            let (mut decoder, line) = gated_decoder();
+            decoder.decode(opener.as_bytes());
+            assert!(line().is_some(), "{label} 뒤엔 끊을 턴이 있다");
+            decoder.decode(RESULT_LINE.as_bytes());
+            assert!(line().is_none(), "{label}: `result` 뒤엔 끊을 턴이 없다");
+        }
+    }
+
+    /// 문은 닫힌 채 선다 · 신호 없는 줄(한가 `queued` · `system/init`·`status`·`task_notification` · 끊기 응답 · 취소 응답
+    /// · 받음 불가 init · 부분 메시지 부속 줄 · 합성 끊김 줄 · `Dropped` 로 옮는 `cancelled`)로는 열리지 않는다.
+    // ADR-0238
+    // ADR-0243
+    #[test]
+    fn the_turn_gate_starts_closed_and_signal_less_lines_do_not_open_it() {
+        let (mut decoder, line) = gated_decoder();
+        assert!(line().is_none(), "스폰 직후엔 끊을 턴이 없다");
+
+        let mut lines: Vec<String> = [1, 3, 4, 135, 137, 139, 183, 184, 186, 188]
+            .into_iter()
+            .map(|n| fixture_line(INTERRUPT_S1, n))
+            .collect();
+        lines.push(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"cancel:u1","response":{"cancelled":true}}}"#.to_string() + "\n",
+        );
+        lines.push(
+            TEXT_JSONL
+                .lines()
+                .find(|l| l.contains("\"subtype\":\"init\""))
+                .map(|l| format!("{l}\n"))
+                .expect("능력 없는 init"),
+        );
+        lines.push(message_start("m1"));
+        lines.push(block_start(0, "text"));
+        for l in &lines {
+            decoder.decode(l.as_bytes());
+            assert!(line().is_none(), "이 줄이 문을 열었다: {l}");
+        }
+    }
+
+    /// 개행 없이 끝난 마지막 줄도 문을 움직인다 — `flush` 도 라이브 줄 길을 탄다.
+    // ADR-0238
+    #[test]
+    fn a_trailing_line_flushed_at_eof_moves_the_gate_too() {
+        let (mut decoder, line) = gated_decoder();
+        let started = fixture_line(INTERRUPT_S1, 2);
+        assert!(decoder.decode(started.trim_end().as_bytes()).is_empty());
+        assert!(line().is_none(), "개행 전엔 아직 줄이 아니다");
+        assert_eq!(tags(&decoder.flush()), vec!["queued:delivered"]);
+        assert!(line().is_some());
+    }
+
+    /// 끊기 줄 함수는 부를 때마다 새 요청 id 를 싣는다 — 문이 열려 있는 동안 두 번 누르면 두 요청이다.
+    // ADR-0238
+    #[test]
+    fn each_interrupt_line_carries_a_fresh_request_id() {
+        let (mut decoder, line) = gated_decoder();
+        decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
+        let ids: Vec<String> = [line(), line()]
+            .into_iter()
+            .map(|bytes| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&bytes.expect("열린 문")).unwrap();
+                assert_eq!(v["request"]["subtype"], "interrupt");
+                v["request_id"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert!(ids
+            .iter()
+            .all(|id| id.starts_with(INTERRUPT_REQUEST_PREFIX)));
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// 끊긴 턴은 오류 뒤 멈춤을 세우지도 풀지도 않는다 — 앞선 실패 턴의 멈춤은 끊긴 턴 둘을 지나도 남고, 다음 깨끗한
+    /// 턴이 푼다. 끊긴 턴 뒤 「턴 중」도 남지 않는다(ADR-0234 · ADR-0127).
+    // ADR-0238
+    #[test]
+    fn an_interrupted_turn_neither_sets_nor_clears_the_error_halt() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let observed = || table.get(id, epoch).expect("관측");
+
+        let failed_turn: String = RESULT_ERROR
+            .lines()
+            .take(4)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        feed(&core, &mut d, &failed_turn);
+        assert!(observed().last_end_failed, "전제 — 실패 턴 뒤 멈춤");
+
+        let lines = fixture_lines(INTERRUPT_S1);
+        feed(&core, &mut d, &lines[..139].concat());
+        assert!(observed().last_end_failed, "첫 끊긴 턴이 멈춤을 풀었다");
+        assert!(!observed().in_turn, "끊긴 턴 뒤 「턴 중」이 남았다");
+        feed(&core, &mut d, &lines[139..188].concat());
+        assert!(observed().last_end_failed, "둘째 끊긴 턴이 멈춤을 풀었다");
+        assert!(!observed().in_turn);
+        feed(&core, &mut d, &lines[188..].concat());
+        assert!(!observed().last_end_failed, "깨끗한 턴이 멈춤을 푼다");
+        assert!(!observed().in_turn);
+
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        feed(
+            &core,
+            &mut ClaudeStreamDecoder::new(),
+            &lines[..139].concat(),
+        );
+        assert!(
+            !table.get(id, epoch).expect("관측").last_end_failed,
+            "끊긴 턴이 멈춤을 세웠다"
+        );
+    }
+
+    /// 합성 끊김 줄 두 문구 → 원문을 싣는 끊김 표시 하나(말풍선 아님) — 라이브와 이어받기 둘 다. 분류 = 신호 없음.
+    // ADR-0243
+    #[test]
+    fn the_synthetic_interrupt_lines_become_interrupted_notes_live_and_in_transcripts() {
+        let classify = ClaudeBackend.turn_classifier();
+        for (n, text) in [
+            (137, "[Request interrupted by user]"),
+            (186, "[Request interrupted by user for tool use]"),
+        ] {
+            let raw = fixture_line(INTERRUPT_S1, n);
+            assert!(!raw.contains("isReplay"), "픽스처 전제 {n}");
+
+            let live = decode_all(raw.as_bytes());
+            assert_eq!(live.len(), 1, "{n}: {live:?}");
+            assert_eq!(
+                interrupted_note_text(&live[0]).as_deref(),
+                Some(text),
+                "{n}"
+            );
+            assert_eq!(classify(&live[0]), None, "{n}");
+
+            let seeded = parse_transcript_events(&raw);
+            assert_eq!(
+                tags(&seeded),
+                vec!["structured:interrupted", "done"],
+                "{n}: 이력은 합성 끝으로 닫힌다"
+            );
+            assert_eq!(
+                interrupted_note_text(&seeded[0]).as_deref(),
+                Some(text),
+                "{n}"
+            );
+        }
+    }
+
+    /// 알아보지 않는 `user` 줄은 오늘 그대로 — 되울림(`isReplay:true`)은 그 글이 머리로 시작해도 말풍선 · 글 블록 둘 ·
+    /// 머리로 시작하지 않는 글 · 머리를 담은 `tool_result` 는 `Structured{user}` · 평문 문자열 `content` 는 사건 0.
+    // ADR-0243
+    #[test]
+    fn user_lines_that_are_not_the_synthetic_note_stay_as_today() {
+        let user_line = |content: serde_json::Value, extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": content },
+                "uuid": "11111111-1111-1111-1111-111111111111",
+            });
+            if let (Some(line), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
+                line.extend(extra.clone());
+            }
+            format!("{v}\n")
+        };
+        let text = |t: &str| serde_json::json!({ "type": "text", "text": t });
+        let prefixed = "[Request interrupted by user] 그런데 이건 내가 쳤다";
+
+        let cases: [(&str, String, Vec<&str>); 5] = [
+            (
+                "되울림",
+                user_line(
+                    serde_json::json!([text(prefixed)]),
+                    serde_json::json!({ "isReplay": true }),
+                ),
+                vec!["structured:user"],
+            ),
+            (
+                "글 블록 둘",
+                user_line(
+                    serde_json::json!([text("[Request interrupted by user]"), text("더")]),
+                    serde_json::json!({}),
+                ),
+                vec!["structured:user", "structured:user"],
+            ),
+            (
+                "머리로 시작하지 않는 글",
+                user_line(
+                    serde_json::json!([text("앞에 글 [Request interrupted by user]")]),
+                    serde_json::json!({}),
+                ),
+                vec!["structured:user"],
+            ),
+            (
+                "tool_result",
+                user_line(
+                    serde_json::json!([{
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": "[Request interrupted by user]"
+                    }]),
+                    serde_json::json!({}),
+                ),
+                vec!["structured:user"],
+            ),
+            (
+                "평문 문자열",
+                user_line(
+                    serde_json::json!("[Request interrupted by user]"),
+                    serde_json::json!({}),
+                ),
+                vec![],
+            ),
+        ];
+        for (label, line, want) in cases {
+            assert_eq!(tags(&decode_all(line.as_bytes())), want, "{label} 라이브");
+            let seeded = parse_transcript_events(&line);
+            assert!(
+                !tags(&seeded).contains(&"structured:interrupted".to_string()),
+                "{label} 이어받기: {seeded:?}"
+            );
+        }
+
+        // 되울림은 우리 uuid 를 실은 말풍선 그대로다 — 프론트 중복 제거 키.
+        let replay = decode_all(
+            user_line(
+                serde_json::json!([text(prefixed)]),
+                serde_json::json!({ "isReplay": true }),
+            )
+            .as_bytes(),
+        );
+        match &replay[0] {
+            OutputEvent::Structured { kind, json } => {
+                assert_eq!(kind, "user");
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["text"], prefixed);
+                assert_eq!(v["uuid"], "11111111-1111-1111-1111-111111111111");
+            }
+            other => panic!("expected Structured user, got {other:?}"),
+        }
+    }
+
+    /// 끊김 표시는 턴 분류기에서 신호가 없다 — 진행으로 세면 `result` 뒤에 올 때 「턴 중」이 다시 켜진다. 다른
+    /// `Structured` 는 여전히 진행이다.
+    // ADR-0243
+    #[test]
+    fn the_interrupted_note_is_not_turn_progress_but_other_structured_events_are() {
+        let classify = ClaudeBackend.turn_classifier();
+        let structured = |kind: &str| OutputEvent::Structured {
+            kind: kind.to_string(),
+            json: "{}".to_string(),
+        };
+        assert_eq!(classify(&structured(INTERRUPTED_KIND)), None);
+        for kind in ["user", "thinking", "tool_result", "tool_use"] {
+            assert_eq!(
+                classify(&structured(kind)),
+                Some(TurnSignal::Progress),
+                "{kind}"
+            );
+        }
+    }
+
+    /// 이어받은 이력이 끊긴 `result` 로 끝나면 그 끝이 곧 턴 경계다 — 합성 `MessageDone` 을 덧붙이지 않는다.
+    // ADR-0238
+    #[test]
+    fn a_transcript_ending_with_an_interrupted_result_is_not_double_closed() {
+        let tail = [137, 138].map(|n| fixture_line(INTERRUPT_S1, n)).concat();
+        assert_eq!(
+            tags(&parse_transcript_events(&tail)),
+            vec!["structured:interrupted", "turn-end"]
+        );
+    }
+
+    /// 운영 조립 — JSON 스폰의 통로는 끊기 능력을 신고하고, 스폰 직후엔 끊을 턴이 없어 거절하며, 그 화신의 decoder 가
+    /// `started` 줄을 읽은 뒤에는 끊기 줄을 받는다(decoder 와 끊기 줄 함수가 한 문을 나눠 쥔다).
+    // ADR-0238
+    #[cfg(windows)]
+    #[test]
+    fn the_json_spawn_shares_one_gate_between_its_decoder_and_its_interrupt_line() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
+        use std::time::{Duration, Instant};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let dir = std::env::temp_dir().join(format!("engram-claude-gate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("started.jsonl");
+        std::fs::write(&file, fixture_line(INTERRUPT_S1, 2)).expect("write");
+        // `started` 한 줄을 흘리고 stdin 을 안 읽은 채 산다 — 자식이 끝나면 입력 큐도 닫혀 끊기 줄을 받을 곳이 없다.
+        let probe = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec![
+                "/c".into(),
+                "type".into(),
+                file.to_string_lossy().into_owned(),
+                "&".into(),
+                "ping".into(),
+                "-n".into(),
+                "30".into(),
+                "127.0.0.1".into(),
+                ">nul".into(),
+            ],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+        let parts =
+            crate::backend::open_spawn(&json(vec![]), &probe, 80, 24, None, None, None, None, None)
+                .expect("open_spawn");
+        assert!(parts.transport.capabilities().control.interrupt);
+        assert!(
+            matches!(parts.transport.interrupt(), Err(PtyError::Unsupported(_))),
+            "스폰 직후엔 끊을 턴이 없다"
+        );
+
+        let core = Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            0,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
+        parts.transport.start(Arc::clone(&core));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match parts.transport.interrupt() {
+                Ok(()) => break,
+                Err(PtyError::Unsupported(_)) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                other => panic!("`started` 뒤에도 끊기 줄을 받지 않았다: {other:?}"),
+            }
+        }
+        parts.transport.shutdown();
+        core.join_pump(Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

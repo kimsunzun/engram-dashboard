@@ -34,6 +34,13 @@ use crate::types::{
 #[cfg(windows)]
 use crate::platform::JobObjectHandle;
 
+/// 「지금 도는 턴을 멈춰 달라」는 stdin 줄 한 벌을 만드는 backend 함수. 통로는 그 바이트의 뜻을 모른다(바보 파이프).
+///
+/// `None` = 「지금은 끊을 턴이 없다」 — 판정은 backend 가 하고 통로는 그대로 `Unsupported` 로 옮긴다. 파이프엔
+/// PTY 의 Ctrl-C 같은 통로 자신의 끊기 수단이 없어서, 끊기는 이 줄을 만드는 쪽의 지식이다.
+// ADR-0238
+pub type InterruptLine = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
+
 pub struct StdioTransport {
     /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child는 wait 후 exit status를 캐시하므로
     /// shutdown이 먼저 reap해도 pump의 try_wait가 같은 status를 회수한다(이중 wait 무해).
@@ -58,6 +65,10 @@ pub struct StdioTransport {
     /// 출력 정제 decoder(ADR-0004/0044). 이 통로를 만드는 backend 가 구조화 모드에 주입한다(없으면
     /// 바이트 직통 = 평문·터미널 경로). start()에서 take 해 pump 스레드로 move(=None 이면 이미 시작됨).
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
+    /// 끊기 줄 함수. `None` = 이 통로를 만든 backend 가 끊는 법을 주지 않았다 — `interrupt()` 는 늘 `Unsupported` 이고
+    /// 능력도 거짓이다.
+    // ADR-0238
+    interrupt: Option<InterruptLine>,
     #[cfg(windows)]
     job_handle: JobObjectHandle,
 }
@@ -124,11 +135,20 @@ impl StdioTransport {
             shutdown: Arc::new(AtomicBool::new(false)),
             structured,
             decoder: Mutex::new(decoder),
+            interrupt: None,
             #[cfg(windows)]
             job_handle,
         };
 
         Ok((transport, child_pid))
+    }
+
+    /// 끊기 줄 함수를 꽂는다 — 꽂으면 능력 `control.interrupt` 가 참이 된다(「지금 턴이 있다」가 아니라 「끊을 수 있는
+    /// 통로다」). `open` 인자가 아닌 것은 주입 없는 호출자(평문 stdio · 시험)가 오늘 그대로 서게 하려는 것이다.
+    // ADR-0238
+    pub fn with_interrupt(mut self, line: InterruptLine) -> Self {
+        self.interrupt = Some(line);
+        self
     }
 }
 
@@ -368,11 +388,23 @@ impl AgentTransport for StdioTransport {
         ))
     }
 
+    /// 주입된 함수가 준 줄을 입력 큐에 넣는다 — 사용자 줄과 같은 라이터 스레드가 **통째로** 쓰므로 줄이 섞이지 않는다.
+    /// ★입력 자물쇠(`input_order`)를 타지 않는다★ — 끊기는 입력 id 에 묶이지 않아 그 자물쇠가 지킬 순서가 없고, 그래서
+    ///   락 순서에 새 간선이 없다. `Ok` 는 [`Self::send_input`] 과 같이 「받았다」이지 「턴이 멈췄다」가 아니다.
+    // ADR-0238
     fn interrupt(&self) -> Result<(), PtyError> {
-        Err(PtyError::Unsupported(
-            "StdioTransport::interrupt (ADR-0044 MVP 미지원 — 파이프 Ctrl-C 없음, 후속 스파이크)"
-                .into(),
-        ))
+        let Some(line) = &self.interrupt else {
+            return Err(PtyError::Unsupported(
+                "StdioTransport::interrupt (이 통로엔 끊기 줄이 없다 — 파이프엔 Ctrl-C 가 없다)"
+                    .into(),
+            ));
+        };
+        match line() {
+            Some(bytes) => self.input.push(bytes),
+            None => Err(PtyError::Unsupported(
+                "StdioTransport::interrupt (끊을 턴이 없다)".into(),
+            )),
+        }
     }
 
     /// ADR-0001 2동사의 파이프판.
@@ -438,7 +470,7 @@ impl AgentTransport for StdioTransport {
             },
             control: ControlCaps {
                 resize: false,
-                interrupt: false,
+                interrupt: self.interrupt.is_some(),
                 cancel: false,
                 graceful_shutdown: false,
             },
@@ -502,11 +534,62 @@ mod tests {
         assert!(caps.output.structured, "json 캐리어 주입 → structured=true");
         assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
         assert!(!caps.control.resize, "파이프 resize 불가");
-        assert!(!caps.control.interrupt, "MVP interrupt 미지원");
+        assert!(
+            !caps.control.interrupt,
+            "끊기 줄을 주입하지 않은 통로 = 끊기 능력 없음"
+        );
         assert!(caps.input.raw, "stdin raw 쓰기 가능");
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
+    }
+
+    // ── 끊기 줄 주입(ADR-0238): 함수가 `Some` 이면 그 줄 한 벌이 큐에 · `None` 이면 `Unsupported` 에 큐 무변경 ──
+    // `start()` 를 부르지 않는다 — 라이터가 없어야 큐에 든 것을 그대로 꺼내 잴 수 있다.
+    #[cfg(windows)]
+    #[test]
+    fn an_injected_interrupt_line_is_queued_whole_and_a_closed_answer_is_unsupported() {
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo interrupt-probe".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let turn_open = Arc::new(AtomicBool::new(false));
+        let answer = Arc::clone(&turn_open);
+        let line: InterruptLine = Arc::new(move || {
+            answer
+                .load(Ordering::SeqCst)
+                .then(|| b"{\"stop\":1}\n".to_vec())
+        });
+
+        let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+        let transport = transport.with_interrupt(line);
+        assert!(
+            transport.capabilities().control.interrupt,
+            "주입이 있으면 능력은 참 — 지금 턴이 있나와 무관하다"
+        );
+
+        assert!(matches!(
+            transport.interrupt(),
+            Err(PtyError::Unsupported(_))
+        ));
+        assert_eq!(
+            transport.input.queued_bytes(),
+            0,
+            "거절한 끊기는 큐를 건드리지 않는다"
+        );
+
+        turn_open.store(true, Ordering::SeqCst);
+        transport.interrupt().expect("턴이 열려 있으면 줄을 받는다");
+        assert_eq!(transport.input.queued_bytes(), b"{\"stop\":1}\n".len());
+        assert_eq!(transport.input.pop(), Some(b"{\"stop\":1}\n".to_vec()));
+        turn_open.store(false, Ordering::SeqCst);
+        assert!(
+            transport.capabilities().control.interrupt,
+            "능력은 문 값을 따라 흔들리지 않는다"
+        );
+        transport.shutdown();
     }
 
     // ── FIX 1 회귀 + 라이터 스레드 회귀 ──
