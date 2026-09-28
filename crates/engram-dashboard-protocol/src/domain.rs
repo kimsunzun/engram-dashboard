@@ -475,7 +475,6 @@ pub struct UsageWindow {
     pub age_secs: u64,
     /// 데몬이 리셋 경과를 확인했다 — 한 번 서면 이 창에 새 값이 올 때까지 유지된다(벽시계가 되감겨도).
     pub expired: bool,
-    pub source: UsageSourceKind,
 }
 
 /// 모델별 주간 창 하나. `label` = 벤더가 준 표시용 이름.
@@ -556,16 +555,6 @@ impl std::fmt::Debug for UsageStateDetail {
             )
             .finish()
     }
-}
-
-/// 창 값의 출처.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
-#[ts(export)]
-pub enum UsageSourceKind {
-    /// 대화 스트림에서 주웠다.
-    Passive,
-    /// 조회로 받았다.
-    Active,
 }
 
 #[cfg(test)]
@@ -656,13 +645,12 @@ mod tests {
 
     // ── 사용량 한도 wire ──
 
-    fn usage_window(used_pct: Option<f64>, source: UsageSourceKind) -> UsageWindow {
+    fn usage_window(used_pct: Option<f64>) -> UsageWindow {
         UsageWindow {
             used_pct,
             resets_at: Some(1_900_000_000),
             age_secs: 42,
             expired: false,
-            source,
         }
     }
 
@@ -670,11 +658,11 @@ mod tests {
         UsageLimitSnapshot {
             vendor: AgentBackendKind::Codex,
             account_key: "default".to_string(),
-            five_hour: Some(usage_window(Some(37.5), UsageSourceKind::Passive)),
+            five_hour: Some(usage_window(Some(37.5))),
             weekly: None,
             model_scoped: vec![UsageScopedWindow {
                 label: "opus".to_string(),
-                window: usage_window(None, UsageSourceKind::Active),
+                window: usage_window(None),
             }],
             plan: Some("pro".to_string()),
             in_flight: true,
@@ -705,14 +693,14 @@ mod tests {
                 "account_key": "default",
                 "five_hour": {
                     "used_pct": 37.5, "resets_at": 1_900_000_000u64, "age_secs": 42,
-                    "expired": false, "source": "Passive"
+                    "expired": false
                 },
                 "weekly": null,
                 "model_scoped": [{
                     "label": "opus",
                     "window": {
                         "used_pct": null, "resets_at": 1_900_000_000u64, "age_secs": 42,
-                        "expired": false, "source": "Active"
+                        "expired": false
                     }
                 }],
                 "plan": "pro",
@@ -894,7 +882,6 @@ mod tests {
             UsageScopedWindow::decl(),
             UsageVendorState::decl(),
             UsageStateDetail::decl(),
-            UsageSourceKind::decl(),
         ];
         for decl in &decls {
             assert!(!decl.contains("bigint"), "{decl}");

@@ -37,8 +37,8 @@ pub use domain::{
     AgentBackendKind, AgentFailureKind, AgentInfo, AgentOutputFormat, AgentProfile,
     AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, EnvelopeFormat, InputCaps,
     ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
-    SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageSourceKind, UsageStateDetail,
-    UsageVendorState, UsageWindow,
+    SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
+    UsageWindow,
 };
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{

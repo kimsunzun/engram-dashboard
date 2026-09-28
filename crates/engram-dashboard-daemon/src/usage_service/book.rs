@@ -2,7 +2,7 @@
 //! ([`Now`])을 넘기고 무엇이 바뀌었는지·무엇을 할지(조회 시작·발행·잠)를 돌려받는다. 잠그는 것·조회를 띄우는
 //! 것·발행하는 것은 서비스 몫이다.
 //!
-//! ★revision 은 보이는 것이 바뀔 때만 오른다(§3 #49)★ — 스냅숏이 싣는 값(창 %·리셋·만료·출처 · 모델별 · plan ·
+//! ★revision 은 보이는 것이 바뀔 때만 오른다(§3 #49)★ — 스냅숏이 싣는 값(창 %·리셋·만료 · 모델별 · plan ·
 //!   상태 · detail) 또는 다음 자동 조회 기한. 같은 값을 다시 주워 나이만 새로워진 것은 바뀜이 아니다. 예외 = 조회
 //!   시작·끝은 늘 오른다(`in_flight` 가 바뀐다).
 //! ★시각만 흘러 생기는 바뀜(만료 래치 · 거절 끝 → 조회 실패)은 [`UsageBook::eval_time`] 이 칸에 새기고 그때
@@ -21,11 +21,11 @@ use std::time::Duration;
 
 use engram_dashboard_agent::usage::{
     ProbeError, ProbeFailure, ScopedWindowObs, UsageAccountKey, UsageDetail, UsageKey,
-    UsageObservation, UsagePolicy, UsageSource, UsageVendorKey, WindowObs,
+    UsageObservation, UsagePolicy, UsageVendorKey, WindowObs,
 };
 use engram_dashboard_protocol::{
-    AgentBackendKind, UsageLimitSnapshot, UsageScopedWindow, UsageSourceKind, UsageStateDetail,
-    UsageVendorState, UsageWindow,
+    AgentBackendKind, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
+    UsageWindow,
 };
 use serde::de::value::{Error as ValueError, StrDeserializer};
 use serde::de::IntoDeserializer;
@@ -44,6 +44,7 @@ pub const MODEL_SCOPED_MAX: usize = 16;
 /// ⟳ 최소 간격 — 칸마다 · 사람·LLM 공통 · 직전 조회 **끝**부터 잰다(§3 #38). 쿨타임은 여전히 무시한다(D11).
 pub const REFRESH_MIN_SPACING: Duration = Duration::from_secs(30);
 /// 줍기 발행을 칸마다 이 창으로 합친다(§3 #60) — 줍기 변화만이다. 조회 시작·끝·래치는 곧바로 나간다.
+/// 출처 규칙이 아니다 — 스트림 입구([`UsageBook::apply_passive`])로 몰려 드는 바뀜의 빈도 제어다(§3 #88).
 pub const USAGE_PUBLISH_COALESCE: Duration = Duration::from_secs(1);
 /// 스케줄러 잠 상한(§3 #58) — 대기 타이머가 절전을 안 셀 수 있고 리셋은 벽시계라, 복귀·시계 이동 뒤 늦음을
 /// 여기로 묶는다.
@@ -161,24 +162,18 @@ impl UsageBook {
         self.cell(key).map(|cell| cell.in_flight)
     }
 
-    /// 다음 자동 조회의 `mono` 기한(R29) = `max(max(last_query, passive_reset) + cooldown, reject_until)` —
+    /// 다음 자동 조회의 `mono` 기한(R29) = `max(max(last_query, fresh_reset) + cooldown, reject_until)` —
     /// 기준점이 없으면 `reject_until`, 그것도 없으면 `now.mono`(= 지금 기한). 진행 중인지는 보지 않는다.
     /// `None` = 모르는 키.
     pub fn next_auto(&self, key: &UsageKey, now: Now) -> Option<Duration> {
         self.cell(key).map(|cell| cell.next_auto(now))
     }
 
-    /// 줍기 관측 한 건을 창 단위로 합친다(R16·D18·D12) — 칸 = 관측의 벤더 + 기본 계정. 모르는 벤더이거나
-    /// `source` 가 `Passive` 가 아니면 아무것도 안 한다(후자는 warn).
+    /// 줍기(pump) 입구 — 관측 한 건의 값을 조회 성공과 같은 병합으로 합친다(R16·D12 · 출처를 가르지 않는다).
+    /// ★같은 것은 값 병합뿐이다★ — 조회 끝만 하는 일(거절 기한 지움 · `last_query` 기준점 · D12 표시 지움 · 성공의
+    /// `Ready`/`Unavailable` 접기)은 여기 없다. 값의 바뀜은 합칠 수 있는 빚이다([`UsageBook::coalesce_passive`]).
+    /// 칸 = 관측의 벤더 + 기본 계정. 모르는 벤더면 아무것도 안 한다.
     pub fn apply_passive(&mut self, obs: &UsageObservation, now: Now) -> PassiveApplied {
-        if obs.source != UsageSource::Passive {
-            // 빠진 칸의 뜻이 반대라(조회 = 없음) 부분 관측으로 합치면 틀린다. 값은 로그에 싣지 않는다.
-            tracing::warn!(
-                vendor = obs.vendor.as_str(),
-                "사용량 줍기 입구에 조회 관측이 왔다(source mismatch) — 버린다"
-            );
-            return PassiveApplied::default();
-        }
         let account = UsageAccountKey::default();
         let Some(cell) = self
             .cells
@@ -187,12 +182,8 @@ impl UsageBook {
         else {
             return PassiveApplied::default();
         };
-        // wire 규칙 「`Unavailable` 은 값을 싣지 않는다」 — % 가 없는 줍기는 그 칸을 아예 건드리지 않는다.
-        if matches!(cell.state, CellState::Unavailable(_)) && !carries_pct(obs) {
-            return PassiveApplied::default();
-        }
         let before = cell.visible(now);
-        cell.merge_passive(obs, now);
+        cell.merge(obs, now);
         let latched = cell.eval_time(now);
         let after = cell.visible(now);
         let changed = !before.same(&after);
@@ -221,10 +212,11 @@ impl UsageBook {
         }
     }
 
-    /// 조회 끝(성공·한도 정보 없음·실패 — 시한 초과 포함). 결과를 적용하고 `last_query = now.mono` 가 새 기준점이
-    /// 된다(D12 의 새로 들어옴도 여기서 지운다). 성공(한도 정보 없음 포함)은 거절 기한을 지운다. 진행 중이
-    /// 아니었어도 적용하고, revision 은 늘 +1 이다. 결과의 `source` 가 `Active` 가 아니어도 warn 만 하고 조회
-    /// 결과로 적용한다 — 끝이 안 서면 `in_flight` 가 남는다. 모르는 키면 아무것도 안 한다.
+    /// 조회 끝(성공·한도 정보 없음·실패 — 시한 초과 포함). 성공의 값은 줍기와 같은 한 길로 합친다 — 안 실린
+    /// 창은 들고 있던 값 그대로다. 성공은 `Ready`(한도 정보 없음이면 창을 비우고 `Unavailable`) · 실패는 값을
+    /// 건드리지 않고 그 실패 상태로 접는다. `last_query = now.mono` 가 새 기준점이 된다(D12 의 새로 들어옴도
+    /// 여기서 지운다). 성공(한도 정보 없음 포함)은 거절 기한을 지운다. 진행 중이 아니었어도 적용하고, revision
+    /// 은 늘 +1 이다. 모르는 키면 아무것도 안 한다.
     pub fn finish_probe(
         &mut self,
         key: &UsageKey,
@@ -236,15 +228,7 @@ impl UsageBook {
         };
         let reject_before = cell.reject_until;
         match result {
-            Ok(obs) => {
-                if obs.source != UsageSource::Active {
-                    tracing::warn!(
-                        vendor = obs.vendor.as_str(),
-                        "사용량 조회 결과가 조회 관측이 아니다(source mismatch) — 조회 결과로 적용한다"
-                    );
-                }
-                cell.apply_active(obs, now.mono);
-            }
+            Ok(obs) => cell.apply_success(&obs, now),
             Err(failure) => cell.apply_failure(failure, now.mono),
         }
         cell.last_query = Some(now.mono);
@@ -428,7 +412,7 @@ impl UsageBook {
 }
 
 /// 칸이 쥔 상태. 비정상 다섯은 모두 detail 을 든다(§1-4 「실패 추적」) — `Rejected` 가 끝나 `Failed` 로 보여도
-/// 그대로다. 거절 기한은 칸의 `reject_until` 이 쥔다.
+/// 그대로다. 창 값을 싣는 관측은 어느 상태든 `Ready` 로 되돌린다([`Cell::merge`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CellState {
     Ready,
@@ -460,9 +444,11 @@ struct Cell {
     plan: Option<String>,
     state: CellState,
     last_query: Option<Duration>,
-    passive_reset: Option<Duration>,
+    /// D12 — 두 창에 새 `used_pct` 가 다 실려 쿨타임 기점이 다시 선 `mono`.
+    fresh_reset: Option<Duration>,
+    /// ★상태와 따로 산다★ — 값이 와서 `Ready` 로 보여도 이 기한 전에는 자동 조회도 ⟳ 도 안 나간다(R24).
     reject_until: Option<Duration>,
-    /// D12 — 지금 기준점 뒤로 줍기 `used_pct` 가 실려 온 창(§3 #4 — 리셋만 온 창은 안 센다).
+    /// D12 — 지금 기준점 뒤로 `used_pct` 가 실려 온 창(§3 #4 — 리셋만 온 창은 안 센다).
     fresh_five_hour: bool,
     fresh_weekly: bool,
     in_flight: bool,
@@ -487,7 +473,7 @@ impl Cell {
             plan: None,
             state: CellState::Ready,
             last_query: None,
-            passive_reset: None,
+            fresh_reset: None,
             reject_until: None,
             fresh_five_hour: false,
             fresh_weekly: false,
@@ -571,7 +557,7 @@ impl Cell {
     }
 
     fn next_auto(&self, now: Now) -> Duration {
-        match self.last_query.max(self.passive_reset) {
+        match self.last_query.max(self.fresh_reset) {
             Some(reference) => {
                 let due = reference.saturating_add(self.policy.cooldown);
                 self.reject_until.map_or(due, |until| due.max(until))
@@ -593,7 +579,10 @@ impl Cell {
         }
     }
 
-    fn merge_passive(&mut self, obs: &UsageObservation, now: Now) {
+    /// 관측 하나의 값을 합친다 — 줍기·조회 성공 공통의 한 길. 실린 창·칸은 덮고 안 실린 것은 둔다
+    /// (`model_scoped`·`plan` 은 실리면 통째로 바꾼다). ★창 값(% 또는 리셋)을 하나라도 실으면 어느 상태에서든
+    /// `Ready` 다★ — 값이 온다는 것이 정상의 증거다(§3 #52). 거절 기한은 건드리지 않는다.
+    fn merge(&mut self, obs: &UsageObservation, now: Now) {
         if let Some(window) = obs.five_hour {
             merge_window(&mut self.five_hour, window, now).mark(&mut self.fresh_five_hour);
         }
@@ -601,44 +590,35 @@ impl Cell {
             merge_window(&mut self.weekly, window, now).mark(&mut self.fresh_weekly);
         }
         if let Some(list) = &obs.model_scoped {
-            self.model_scoped = scoped_windows(list, UsageSource::Passive, now.mono);
+            self.model_scoped = scoped_windows(list, now.mono);
         }
         if let Some(plan) = &obs.plan {
             self.plan = Some(plan.clone());
         }
         if self.fresh_five_hour && self.fresh_weekly {
-            self.passive_reset = Some(now.mono);
+            self.fresh_reset = Some(now.mono);
             self.fresh_five_hour = false;
             self.fresh_weekly = false;
         }
-        // 이 계정엔 한도가 있다는 증거다(§3 #52). 다른 비정상 상태는 줍기가 안 바꾼다 — 값만 합친다(R22).
-        if matches!(self.state, CellState::Unavailable(_)) && carries_pct(obs) {
+        if carries_value(obs) {
             self.state = CellState::Ready;
         }
     }
 
-    fn apply_active(&mut self, obs: UsageObservation, mono: Duration) {
+    fn apply_success(&mut self, obs: &UsageObservation, now: Now) {
         // 상류가 답을 줬으니 거절은 끝났다 — 남겨 두면 지난 기한이 다음 자동 조회를 붙든다.
         self.reject_until = None;
-        self.plan = obs.plan;
-        if let Some(detail) = obs.limits_unavailable {
-            self.five_hour = None;
-            self.weekly = None;
-            self.model_scoped.clear();
-            self.state = CellState::Unavailable(detail);
-            return;
-        }
-        self.five_hour = obs
-            .five_hour
-            .and_then(|w| Window::observed(w, UsageSource::Active, mono));
-        self.weekly = obs
-            .weekly
-            .and_then(|w| Window::observed(w, UsageSource::Active, mono));
-        self.model_scoped = obs
-            .model_scoped
-            .map(|list| scoped_windows(&list, UsageSource::Active, mono))
-            .unwrap_or_default();
-        self.state = CellState::Ready;
+        self.merge(obs, now);
+        self.state = match &obs.limits_unavailable {
+            // 계정에 대한 답이다 — wire 규칙 「`Unavailable` 은 값을 싣지 않는다」.
+            Some(detail) => {
+                self.five_hour = None;
+                self.weekly = None;
+                self.model_scoped.clear();
+                CellState::Unavailable(detail.clone())
+            }
+            None => CellState::Ready,
+        };
     }
 
     fn apply_failure(&mut self, failure: ProbeFailure, mono: Duration) {
@@ -772,7 +752,6 @@ impl Visible {
 struct Window {
     used_pct: Option<f64>,
     resets_at: Option<i64>,
-    source: UsageSource,
     /// 만료 래치(R32) — `wall >= resets_at` 을 한 번 보면 서고, 이 창의 새 값(`used_pct`)만 내린다. 벽시계가
     /// 되감겨도 안 내린다. % 는 지우지 않는다 — 가리는 것은 받는 쪽이다.
     expired: bool,
@@ -782,12 +761,11 @@ struct Window {
 
 impl Window {
     /// 두 칸 다 없으면 `None` — 값이 없는 창을 두지 않는다.
-    fn observed(obs: WindowObs, source: UsageSource, mono: Duration) -> Option<Self> {
+    fn observed(obs: WindowObs, mono: Duration) -> Option<Self> {
         let obs = ingest(obs);
         (obs.used_pct.is_some() || obs.resets_at.is_some()).then_some(Self {
             used_pct: obs.used_pct,
             resets_at: obs.resets_at,
-            source,
             expired: false,
             observed: mono,
         })
@@ -796,7 +774,6 @@ impl Window {
     fn looks_same(&self, other: &Self) -> bool {
         same_pct(self.used_pct, other.used_pct)
             && self.resets_at == other.resets_at
-            && self.source == other.source
             && self.expired == other.expired
     }
 
@@ -817,10 +794,6 @@ impl Window {
             resets_at,
             age_secs: mono.saturating_sub(self.observed).as_secs(),
             expired: self.expired,
-            source: match self.source {
-                UsageSource::Passive => UsageSourceKind::Passive,
-                UsageSource::Active => UsageSourceKind::Active,
-            },
         })
     }
 }
@@ -852,7 +825,7 @@ impl Fresh {
     }
 }
 
-/// 줍기 창 하나를 들고 있던 창에 합친다(§1-4 「줍기 관측」 · §3 #3·#46).
+/// 실린 창 하나를 들고 있던 창에 합친다(§1-4 「줍기 관측」 · §3 #3·#46) — 줍기·조회 공통.
 fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
     let obs = ingest(obs);
     let carried = if obs.used_pct.is_some() {
@@ -861,7 +834,7 @@ fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
         Fresh::Untouched
     };
     let Some(window) = slot.as_mut() else {
-        *slot = Window::observed(obs, UsageSource::Passive, now.mono);
+        *slot = Window::observed(obs, now.mono);
         return carried;
     };
     let mut fresh = carried;
@@ -870,7 +843,6 @@ fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
             window.used_pct = Some(pct);
             window.expired = false;
             window.observed = now.mono;
-            window.source = UsageSource::Passive;
             // 리셋이 지난 뒤 온 % 는 새 창의 값이고 그 창의 리셋은 모른다(R32 「새 값이 올 때까지」) — 지난 리셋을
             // 남기면 받은 자리에서 다시 만료로 보인다.
             if new.is_none() && kept.is_some_and(|at| at <= now.wall) {
@@ -878,10 +850,9 @@ fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
             }
         }
         (None, Some(old), Some(new)) if old.abs_diff(new) > RESET_SAME_TOLERANCE.as_secs() => {
-            // 새 창의 옛 % 는 틀린 값이다. 남는 값은 이 관측의 리셋뿐이라 나이·출처도 이 관측 것이다.
+            // 새 창의 옛 % 는 틀린 값이다. 남는 값은 이 관측의 리셋뿐이라 나이도 이 관측 것이다.
             window.used_pct = None;
             window.observed = now.mono;
-            window.source = UsageSource::Passive;
             fresh = Fresh::Cleared;
         }
         _ => {}
@@ -892,12 +863,8 @@ fn merge_window(slot: &mut Option<Window>, obs: WindowObs, now: Now) -> Fresh {
     fresh
 }
 
-/// 목록 전량 교체용 — 줍기든 조회든 `Some` 은 합치지 않고 통째로 바꾼다(`UsageObservation` 계약).
-fn scoped_windows(
-    list: &[ScopedWindowObs],
-    source: UsageSource,
-    mono: Duration,
-) -> Vec<(String, Window)> {
+/// 목록 전량 교체용 — `Some` 은 합치지 않고 통째로 바꾼다(`UsageObservation` 계약).
+fn scoped_windows(list: &[ScopedWindowObs], mono: Duration) -> Vec<(String, Window)> {
     if list.len() > MODEL_SCOPED_MAX {
         // 지금 생산자 둘은 상한만큼만 싣는다 — 여기 걸리면 생산자 쪽이 어긋난 것이다(타입이 상한을 선언하지는
         // 않는다).
@@ -911,22 +878,26 @@ fn scoped_windows(
         .iter()
         .take(MODEL_SCOPED_MAX)
         .filter_map(|scoped| {
-            Window::observed(scoped.window, source, mono).map(|w| (scoped.label.clone(), w))
+            Window::observed(scoped.window, mono).map(|w| (scoped.label.clone(), w))
         })
         .collect();
     windows.sort_by(|(a, _), (b, _)| a.cmp(b));
     windows
 }
 
-fn carries_pct(obs: &UsageObservation) -> bool {
-    let has = |w: &Option<WindowObs>| w.is_some_and(|w| w.used_pct.is_some());
-    has(&obs.five_hour)
-        || has(&obs.weekly)
+/// 받는 자리([`ingest`] · [`MODEL_SCOPED_MAX`])를 거친 뒤에도 창 값이 남는가 — 버려질 값은 안 센다.
+fn carries_value(obs: &UsageObservation) -> bool {
+    let has = |w: WindowObs| {
+        let w = ingest(w);
+        w.used_pct.is_some() || w.resets_at.is_some()
+    };
+    obs.five_hour.is_some_and(has)
+        || obs.weekly.is_some_and(has)
         || obs
             .model_scoped
             .iter()
             .flat_map(|list| list.iter().take(MODEL_SCOPED_MAX))
-            .any(|scoped| scoped.window.used_pct.is_some())
+            .any(|scoped| has(scoped.window))
 }
 
 /// NaN 끼리도 같다고 본다 — 생산자는 유한수를 약속하지만, 어기면 같은 값이 올 때마다 바뀜으로 읽힌다.
@@ -990,7 +961,7 @@ mod tests {
     use super::*;
     use crate::log_capture::capture_loud;
     use engram_dashboard_agent::backend::usage_probes;
-    use engram_dashboard_agent::usage::UpstreamText;
+    use engram_dashboard_agent::usage::{UpstreamText, UsageSource};
 
     const H: i64 = 3_600;
     const T0: i64 = 1_900_000_000;
@@ -1130,7 +1101,7 @@ mod tests {
         b
     }
 
-    // ── 병합(R16·D18·§3 #3·#46) ──
+    // ── 병합(R16·§3 #3·#46·#88) ──
 
     #[test]
     fn passive_keeps_windows_it_does_not_carry() {
@@ -1155,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn active_null_or_missing_windows_mean_none() {
+    fn a_probe_result_keeps_windows_it_does_not_carry() {
         let mut b = book();
         let mut full = active(
             0,
@@ -1165,14 +1136,31 @@ mod tests {
         full.model_scoped = Some(vec![scoped("m", w(Some(3.0), None))]);
         full.plan = Some("plan-a".to_owned());
         succeed(&mut b, 0, full, at(100, T0));
+        let held = snap(&b, 0, at(200, T0));
 
+        // null 창 · 빠진 창 · 빠진 목록 · 빠진 plan — 줍기와 같이 전부 그대로다.
         succeed(&mut b, 0, active(0, w(None, None), None), at(200, T0));
         let s = snap(&b, 0, at(200, T0));
-        assert_eq!(s.five_hour, None);
-        assert_eq!(s.weekly, None);
-        assert!(s.model_scoped.is_empty());
-        assert_eq!(s.plan, None);
+        assert_eq!(
+            (&s.five_hour, &s.weekly, &s.model_scoped, &s.plan),
+            (
+                &held.five_hour,
+                &held.weekly,
+                &held.model_scoped,
+                &held.plan
+            )
+        );
         assert_eq!(s.state, UsageVendorState::Ready);
+
+        // 실린 창만 덮는다.
+        succeed(&mut b, 0, active(0, None, w(Some(12.0), None)), at(300, T0));
+        let s = snap(&b, 0, at(300, T0));
+        assert_eq!(
+            (pct(&s.five_hour), pct(&s.weekly), reset(&s.weekly)),
+            (Some(40.0), Some(12.0), Some((T0 + 9 * H) as u64))
+        );
+        assert_eq!(s.model_scoped.len(), 1);
+        assert_eq!(s.plan.as_deref(), Some("plan-a"));
     }
 
     #[test]
@@ -1211,8 +1199,7 @@ mod tests {
             (pct(&s.five_hour), reset(&s.five_hour)),
             (None, Some((T0 + 10 * H) as u64))
         );
-        let five = s.five_hour.expect("리셋은 남는다");
-        assert_eq!((five.source, five.age_secs), (UsageSourceKind::Passive, 0));
+        assert_eq!(s.five_hour.expect("리셋은 남는다").age_secs, 0);
     }
 
     #[test]
@@ -1253,8 +1240,7 @@ mod tests {
             (pct(&s.five_hour), reset(&s.five_hour)),
             (Some(55.0), Some((T0 + 5 * H) as u64))
         );
-        let five = s.five_hour.expect("창");
-        assert_eq!((five.source, five.age_secs), (UsageSourceKind::Passive, 0));
+        assert_eq!(s.five_hour.expect("창").age_secs, 0);
     }
 
     #[test]
@@ -1283,6 +1269,18 @@ mod tests {
         one.model_scoped = Some(vec![scoped("c", w(Some(9.0), None))]);
         b.apply_passive(&one, at(200, T0));
         assert_eq!(labels(&b), ["c"], "실린 목록은 전량 교체");
+
+        let mut opus = active(0, None, None);
+        opus.model_scoped = Some(vec![scoped("Opus", w(Some(30.0), None))]);
+        succeed(&mut b, 0, opus, at(300, T0));
+        assert_eq!(labels(&b), ["Opus"]);
+        let mut emptied = active(0, None, None);
+        emptied.model_scoped = Some(vec![]);
+        succeed(&mut b, 0, emptied, at(400, T0));
+        assert!(
+            labels(&b).is_empty(),
+            "빈 목록도 실린 것이다 — 사라진 모델 창을 지운다"
+        );
     }
 
     // ── D12 ──
@@ -1392,12 +1390,7 @@ mod tests {
             b.next_auto(&key(0), at(200, T0)),
             Some((secs(200) + cooldown(0)).max(until))
         );
-        let s = snap(&b, 0, at(200, T0));
-        assert_eq!(tag(&s.state), "Rejected");
-        assert!(matches!(
-            s.state,
-            UsageVendorState::Rejected { retry_in_secs, .. } if retry_in_secs == (until - secs(200)).as_secs()
-        ));
+        assert_eq!(snap(&b, 0, at(200, T0)).state, UsageVendorState::Ready);
     }
 
     // ── 상태(R22·R31·§3 #52) ──
@@ -1490,6 +1483,14 @@ mod tests {
             b.next_auto(&key(0), at(1_000, T0)),
             Some(secs(1_000) + cooldown(0))
         );
+
+        // plan 을 안 실은 답은 들고 있던 plan 을 둔다.
+        let mut no_plan = active(0, None, None);
+        no_plan.limits_unavailable = Some(rich_detail());
+        succeed(&mut b, 0, no_plan, at(2_000, T0));
+        let s = snap(&b, 0, at(2_000, T0));
+        assert_eq!(tag(&s.state), "Unavailable");
+        assert_eq!(s.plan.as_deref(), Some("plan-b"));
     }
 
     #[test]
@@ -1505,57 +1506,65 @@ mod tests {
         assert_eq!(snap(&b, 0, at(300, T0)).state, UsageVendorState::Ready);
     }
 
-    #[test]
-    fn unavailable_turns_ready_on_a_passive_pct_only() {
+    fn unavailable() -> UsageBook {
         let mut b = book();
         let mut unavailable = active(0, None, None);
         unavailable.limits_unavailable = Some(rich_detail());
         succeed(&mut b, 0, unavailable, at(100, T0));
-
-        let rev = b.revision(&key(0));
-        let before = snap(&b, 0, at(200, T0));
-
-        // % 가 없는 줍기(리셋만 · plan 만 · % 없는 모델별 창)는 칸을 건드리지 않는다 — 값을 싣지 않는다.
-        let mut no_pct = passive(0, w(None, Some(T0 + H)), w(None, Some(T0 + 9 * H)));
-        no_pct.plan = Some("plan-a".to_owned());
-        no_pct.model_scoped = Some(vec![scoped("m", w(None, Some(T0 + H)))]);
-        assert_eq!(
-            b.apply_passive(&no_pct, at(200, T0)),
-            PassiveApplied::default()
-        );
-        assert_eq!(b.revision(&key(0)), rev);
-        let s = snap(&b, 0, at(200, T0));
-        assert_eq!(s, before);
-        assert_eq!((s.five_hour, s.weekly), (None, None));
-        assert!(s.model_scoped.is_empty());
-        assert_eq!(tag(&s.state), "Unavailable");
-
-        // % 가 실리면 정상으로 돌아가고 평소대로 합친다.
-        let applied = b.apply_passive(
-            &passive(0, w(None, Some(T0 + H)), w(Some(7.0), None)),
-            at(300, T0),
-        );
-        assert!(applied.changed);
-        let s = snap(&b, 0, at(300, T0));
-        assert_eq!(s.state, UsageVendorState::Ready);
-        assert_eq!(pct(&s.weekly), Some(7.0));
-        assert_eq!(reset(&s.five_hour), Some((T0 + H) as u64));
-
-        // 모델별 창의 % 도 증거다.
-        let mut b = book();
-        let mut unavailable = active(0, None, None);
-        unavailable.limits_unavailable = Some(rich_detail());
-        succeed(&mut b, 0, unavailable, at(100, T0));
-        let mut scoped_pct = passive(0, None, None);
-        scoped_pct.model_scoped = Some(vec![scoped("m", w(Some(3.0), None))]);
-        assert!(b.apply_passive(&scoped_pct, at(200, T0)).changed);
-        let s = snap(&b, 0, at(200, T0));
-        assert_eq!(s.state, UsageVendorState::Ready);
-        assert_eq!(s.model_scoped.len(), 1);
+        b
     }
 
     #[test]
-    fn passive_does_not_change_other_abnormal_states() {
+    fn unavailable_turns_ready_on_any_window_value() {
+        // 창 값이 없는 관측(plan 만 · 값 없는 모델별 창)은 상태를 안 바꾼다 — plan 은 합친다.
+        let mut b = unavailable();
+        let mut no_value = passive(0, w(None, None), None);
+        no_value.plan = Some("plan-a".to_owned());
+        no_value.model_scoped = Some(vec![scoped("m", w(None, None))]);
+        assert!(b.apply_passive(&no_value, at(200, T0)).changed);
+        let s = snap(&b, 0, at(200, T0));
+        assert_eq!(tag(&s.state), "Unavailable");
+        assert_eq!(s.plan.as_deref(), Some("plan-a"));
+        assert_eq!((s.five_hour, s.weekly), (None, None));
+        assert!(s.model_scoped.is_empty());
+
+        // 리셋만 실려도 값이다.
+        let applied = b.apply_passive(&passive(0, w(None, Some(T0 + H)), None), at(300, T0));
+        assert!(applied.changed);
+        let s = snap(&b, 0, at(300, T0));
+        assert_eq!(s.state, UsageVendorState::Ready);
+        assert_eq!(
+            (pct(&s.five_hour), reset(&s.five_hour)),
+            (None, Some((T0 + H) as u64))
+        );
+
+        // % 도 · 모델별 창의 값도 · 조회 성공도 같다.
+        let mut b = unavailable();
+        assert!(
+            b.apply_passive(&passive(0, None, w(Some(7.0), None)), at(200, T0))
+                .changed
+        );
+        let s = snap(&b, 0, at(200, T0));
+        assert_eq!(
+            (s.state, pct(&s.weekly)),
+            (UsageVendorState::Ready, Some(7.0))
+        );
+
+        let mut b = unavailable();
+        let mut scoped_value = passive(0, None, None);
+        scoped_value.model_scoped = Some(vec![scoped("m", w(None, Some(T0 + H)))]);
+        assert!(b.apply_passive(&scoped_value, at(200, T0)).changed);
+        let s = snap(&b, 0, at(200, T0));
+        assert_eq!(s.state, UsageVendorState::Ready);
+        assert_eq!(s.model_scoped.len(), 1);
+
+        let mut b = unavailable();
+        succeed(&mut b, 0, active(0, None, None), at(200, T0));
+        assert_eq!(snap(&b, 0, at(200, T0)).state, UsageVendorState::Ready);
+    }
+
+    #[test]
+    fn a_value_turns_every_abnormal_state_ready_and_keeps_merging() {
         let errors = [
             ProbeError::NotInstalled,
             ProbeError::Unauthenticated,
@@ -1571,12 +1580,70 @@ mod tests {
                 ProbeFailure::with_detail(error, rich_detail()),
                 at(200, T0),
             );
-            let state_before = snap(&b, 0, at(250, T0)).state;
+            assert_ne!(tag(&snap(&b, 0, at(250, T0)).state), "Ready", "{kind}");
             let applied = b.apply_passive(&passive(0, w(Some(70.0), None), None), at(250, T0));
             assert!(applied.changed, "{kind}");
             let s = snap(&b, 0, at(250, T0));
-            assert_eq!(s.state, state_before, "{kind}");
-            assert_eq!(pct(&s.five_hour), Some(70.0), "{kind}: 값은 반영된다");
+            assert_eq!(s.state, UsageVendorState::Ready, "{kind}: detail 도 지운다");
+            assert_eq!(
+                (pct(&s.five_hour), pct(&s.weekly)),
+                (Some(70.0), Some(10.0)),
+                "{kind}: 실린 창만 덮는다"
+            );
+        }
+
+        // 끝난 거절(`Failed` 로 새겨진 뒤) · 되살린 거절도 같다.
+        let mut b = seeded();
+        fail(&mut b, 0, rate_limited(Some(secs(90))), at(200, T0));
+        assert!(b.eval_time(&key(0), at(290, T0)));
+        assert_eq!(tag(&snap(&b, 0, at(290, T0)).state), "Failed");
+        b.apply_passive(&passive(0, None, w(None, Some(T0 + 100 * H))), at(300, T0));
+        assert_eq!(snap(&b, 0, at(300, T0)).state, UsageVendorState::Ready);
+
+        let mut b = book();
+        b.restore_rejects(&[entry(0, T0 + 90)], at(10, T0));
+        b.apply_passive(&passive(0, w(Some(5.0), None), None), at(20, T0));
+        assert_eq!(snap(&b, 0, at(20, T0)).state, UsageVendorState::Ready);
+    }
+
+    #[test]
+    fn a_value_during_a_rejection_shows_ready_but_keeps_the_deadline() {
+        for restored in [false, true] {
+            let mut b = settled();
+            if restored {
+                b.restore_rejects(&[entry(0, T0 + 190)], at(10, T0));
+            } else {
+                fail(&mut b, 0, rate_limited(Some(secs(90))), at(110, T0));
+            }
+            let until = secs(200);
+            let saved = b.reject_entries(at(150, T0));
+            assert_eq!(saved, vec![entry(0, T0 + 50)], "restored {restored}");
+            b.apply_passive(&passive(0, w(Some(41.0), None), None), at(150, T0));
+            assert_eq!(snap(&b, 0, at(150, T0)).state, UsageVendorState::Ready);
+
+            // 기한은 그대로 산다 — 저장도 · ⟳ 거절도 · 다음 자동 기한도.
+            assert_eq!(b.reject_entries(at(150, T0)), saved, "restored {restored}");
+            let before_end = Now {
+                mono: until - Duration::from_millis(1),
+                wall: T0,
+            };
+            assert_eq!(
+                judge(&mut b, 0, RequestKind::Refresh, before_end),
+                Judgment::Rejected
+            );
+            assert!(b.next_auto(&key(0), before_end) >= Some(until));
+            assert!(tick(&mut b, &[0], before_end).start.is_empty());
+
+            // 거절 끝은 `Ready` 를 조회 실패로 되돌리지 않는다 — 새길 것도 발행할 것도 없다.
+            let end = Now {
+                mono: until,
+                wall: T0,
+            };
+            let rev = b.revision(&key(0));
+            assert!(!b.eval_time(&key(0), end), "restored {restored}");
+            assert_eq!(b.revision(&key(0)), rev);
+            assert_eq!(snap(&b, 0, end).state, UsageVendorState::Ready);
+            assert_eq!(judge(&mut b, 0, RequestKind::Refresh, end), Judgment::Start);
         }
     }
 
@@ -1808,6 +1875,20 @@ mod tests {
             at(70, r + 5 * H),
         );
         assert!(!expired(&snap(&b, 0, at(70, r + 5 * H)).five_hour));
+
+        // 조회 성공이라도 그 창을 안 실었으면(null · 빠짐) 래치는 그대로다 — 풀면 옛 % 가 되살아난다.
+        let later = r + 10 * H;
+        assert!(b.eval_time(&key(0), at(80, later)));
+        succeed(
+            &mut b,
+            0,
+            active(0, w(None, None), w(Some(5.0), None)),
+            at(90, later),
+        );
+        let s = snap(&b, 0, at(90, later));
+        assert!(expired(&s.five_hour));
+        assert_eq!(pct(&s.five_hour), Some(4.0));
+        assert!(!expired(&s.weekly));
     }
 
     #[test]
@@ -1979,14 +2060,10 @@ mod tests {
                 resets_at: Some((T0 + H) as u64),
                 age_secs: 60,
                 expired: false,
-                source: UsageSourceKind::Active,
             })
         );
         let weekly = s.weekly.expect("주간");
-        assert_eq!(
-            (weekly.source, weekly.age_secs, weekly.resets_at),
-            (UsageSourceKind::Passive, 30, None)
-        );
+        assert_eq!((weekly.age_secs, weekly.resets_at), (30, None));
     }
 
     #[test]
@@ -2157,9 +2234,10 @@ mod tests {
             mono: secs(100) + REJECT_FALLBACK,
             wall: T0,
         };
-        // 값은 그대로인 줍기 — 바뀜은 거절 끝뿐이다.
-        let same = passive(0, w(None, Some(T0 + 5 * H)), None);
-        assert!(b.apply_passive(&same, end).changed);
+        // 창 값이 없는 줍기 — 바뀜은 거절 끝뿐이다.
+        let mut plan_only = passive(0, None, None);
+        plan_only.plan = Some("plan-a".to_owned());
+        assert!(b.apply_passive(&plan_only, end).changed);
         assert!(!b.eval_time(&key(0), end));
         assert_eq!(tag(&snap(&b, 0, end).state), "Failed");
     }
@@ -2231,45 +2309,34 @@ mod tests {
     }
 
     #[test]
-    fn a_passive_entry_refuses_an_active_observation() {
+    fn both_entries_merge_whatever_the_observation_says_its_source_is() {
         let mut b = seeded();
-        let rev = b.revision(&key(0));
         let (applied, loud) =
             capture_loud(|| b.apply_passive(&active(0, w(Some(99.0), None), None), at(200, T0)));
-        assert_eq!(applied, PassiveApplied::default());
-        assert_eq!(loud.len(), 1, "{loud:?}");
-        assert!(!loud[0].contains("99"), "값은 로그에 싣지 않는다: {loud:?}");
-        assert!(loud[0].contains("vendor="), "{loud:?}");
-        assert_eq!(b.revision(&key(0)), rev);
+        assert!(applied.changed);
+        assert!(loud.is_empty(), "{loud:?}");
         let s = snap(&b, 0, at(200, T0));
         assert_eq!(
             (pct(&s.five_hour), pct(&s.weekly)),
-            (Some(40.0), Some(10.0))
+            (Some(99.0), Some(10.0))
         );
-    }
 
-    #[test]
-    fn a_probe_result_with_the_wrong_source_still_finishes_the_probe() {
-        let mut b = seeded();
         assert!(b.begin_probe(&key(0)));
         let (_, loud) = capture_loud(|| {
             b.finish_probe(
                 &key(0),
                 Ok(passive(0, w(Some(5.0), None), None)),
-                at(200, T0),
+                at(300, T0),
             )
         });
-        assert_eq!(loud.len(), 1, "{loud:?}");
-        assert!(loud[0].contains("vendor="), "{loud:?}");
+        assert!(loud.is_empty(), "{loud:?}");
         assert_eq!(b.in_flight(&key(0)), Some(false));
         assert_eq!(
-            b.next_auto(&key(0), at(200, T0)),
-            Some(secs(200) + cooldown(0))
+            b.next_auto(&key(0), at(300, T0)),
+            Some(secs(300) + cooldown(0))
         );
-        let s = snap(&b, 0, at(200, T0));
-        assert_eq!(pct(&s.five_hour), Some(5.0));
-        assert_eq!(s.five_hour.expect("창").source, UsageSourceKind::Active);
-        assert_eq!(s.weekly, None, "조회 결과로 적용한다 — 빠진 창 = 없음");
+        let s = snap(&b, 0, at(300, T0));
+        assert_eq!((pct(&s.five_hour), pct(&s.weekly)), (Some(5.0), Some(10.0)));
     }
 
     #[test]
@@ -2302,18 +2369,20 @@ mod tests {
         assert_eq!(loud.len(), 1, "{loud:?}");
         assert_eq!(snap(&b, 0, at(20, T0)).model_scoped.len(), MODEL_SCOPED_MAX);
 
-        // 버린 칸의 % 는 한도가 있다는 증거로도 안 센다.
-        let mut b = book();
-        let mut unavailable = active(0, None, None);
-        unavailable.limits_unavailable = Some(rich_detail());
-        succeed(&mut b, 0, unavailable, at(10, T0));
+        // 버린 칸의 값은 정상의 증거로도 안 센다.
+        let mut b = unavailable();
         let mut beyond = passive(0, None, None);
-        beyond.model_scoped = Some(many(MODEL_SCOPED_MAX));
-        assert_eq!(
-            b.apply_passive(&beyond, at(20, T0)),
-            PassiveApplied::default()
+        beyond.model_scoped = Some(
+            (0..over)
+                .map(|i| {
+                    let value = (i >= MODEL_SCOPED_MAX).then_some(i as f64);
+                    scoped(&format!("m{i:02}"), w(value, None))
+                })
+                .collect(),
         );
-        assert_eq!(tag(&snap(&b, 0, at(20, T0)).state), "Unavailable");
+        let (applied, _) = capture_loud(|| b.apply_passive(&beyond, at(200, T0)));
+        assert_eq!(applied, PassiveApplied::default());
+        assert_eq!(tag(&snap(&b, 0, at(200, T0)).state), "Unavailable");
     }
 
     #[test]
@@ -2992,6 +3061,39 @@ mod tests {
         assert!(tick(&mut b, &[0], at_ms(202_000, T0 + 5 * H))
             .publish
             .is_empty());
+    }
+
+    #[test]
+    fn a_value_that_ends_a_visible_rejection_is_coalesced_unless_it_latches() {
+        for latches in [false, true] {
+            let mut b = settled();
+            fail(&mut b, 0, rate_limited(Some(REJECT_MAX)), at(110, T0));
+            b.broadcast_sheet(&key(0), at(200, T0));
+            // 5시간 창의 리셋(T0 + 5H)을 지난 벽시계면 같은 호출이 래치를 새긴다.
+            let wall = if latches { T0 + 5 * H } else { T0 };
+            let now = at_ms(200_300, wall);
+            let applied = b.apply_passive(&passive(0, None, w(Some(11.0), None)), now);
+            assert!(applied.changed, "latches {latches}");
+            let coalesced = b.coalesce_passive(&key(0), now);
+            if latches {
+                match coalesced {
+                    Some(Coalesce::PublishNow(sheet)) => {
+                        assert_eq!(sheet.state, UsageVendorState::Ready);
+                        assert!(expired(&sheet.five_hour));
+                    }
+                    other => panic!("래치는 합치지 않는다: {other:?}"),
+                }
+            } else {
+                assert_eq!(
+                    coalesced,
+                    Some(Coalesce::Deferred),
+                    "상태가 바뀌어도 값의 바뀜이다"
+                );
+                let plan = tick(&mut b, &[0], at_ms(201_000, wall));
+                assert_eq!(plan.publish.len(), 1, "합침 기한에 한 장");
+                assert_eq!(plan.publish[0].1.state, UsageVendorState::Ready);
+            }
+        }
     }
 
     #[test]

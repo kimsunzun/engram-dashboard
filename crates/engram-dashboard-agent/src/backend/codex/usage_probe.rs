@@ -289,15 +289,18 @@ fn classify_rpc_error(error: &RpcError) -> ProbeFailure {
 ///   쓰되, 그 `limitId` 가 기본 버킷을 가리킬 때만이다([`names_default_bucket`]).
 /// - ★기본 버킷을 못 찾으면 `Parse` 다★ — 그것을 「창 없음」으로 읽으면 다른 버킷만 실린 응답이 성공으로 들어가
 ///   들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다. `result` 가 객체가 아니어도 `Parse`.
-/// - 창은 길이로 가른다(규칙 = 형제 `usage` 의 [`windows_by_duration`]). 관측은 `Active` 라 `None` 칸 = 「없다」.
+/// - 창은 길이로 가른다(규칙 = 형제 `usage` 의 [`windows_by_duration`]). `None` 칸 = 안 실렸다(받는 쪽이 유지한다).
 /// - 맵의 나머지 버킷 → 모델별 창([`model_scoped_windows`]) · `planType` → plan(기본 버킷 것, 없으면 최상위 것).
+///   ★맵을 읽었으면 모델별 창은 비어도 `Some` 이다★ — `None` 으로 접으면 사라진 모델 창이 받는 쪽에 영영 남는다.
+///   맵이 없으면(최상위만) 다른 버킷을 모르므로 `None` 이다.
 fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeFailure> {
     let response: GetAccountRateLimitsResponse =
         serde_json::from_value(result).map_err(|_| parse_error("응답 result 가 객체가 아니다"))?;
-    let buckets = response.rate_limits_by_limit_id.unwrap_or_default();
+    let buckets = response.rate_limits_by_limit_id;
     let top_level = response.rate_limits.as_ref();
     let default = buckets
         .iter()
+        .flatten()
         .find(|(id, _)| id == DEFAULT_LIMIT_ID)
         .map(|(_, snapshot)| snapshot)
         .or_else(|| top_level.filter(|snapshot| names_default_bucket(snapshot.limit_id.as_ref())))
@@ -312,7 +315,7 @@ fn observation_from_result(result: Value) -> Result<UsageObservation, ProbeFailu
         vendor: USAGE_VENDOR,
         five_hour,
         weekly,
-        model_scoped: model_scoped_windows(&buckets),
+        model_scoped: buckets.as_deref().map(model_scoped_windows),
         plan,
         source: UsageSource::Active,
         limits_unavailable: None,
@@ -324,8 +327,8 @@ fn parse_error(what: &str) -> ProbeError {
 }
 
 /// 기본이 아닌 버킷마다 그 **주간** 창 하나(D8) — 이름 = `limitName`, 쓸 수 없으면 버킷 id. 주간 창이 없거나 이름을
-/// 못 붙이는 버킷은 뺀다. 같은 이름(ASCII 대소문자 무시)은 먼저 온 것만 남긴다(버킷 id 순). 하나도 없으면 `None`.
-fn model_scoped_windows(buckets: &[(String, RateLimitSnapshot)]) -> Option<Vec<ScopedWindowObs>> {
+/// 못 붙이는 버킷은 뺀다. 같은 이름(ASCII 대소문자 무시)은 먼저 온 것만 남긴다(버킷 id 순).
+fn model_scoped_windows(buckets: &[(String, RateLimitSnapshot)]) -> Vec<ScopedWindowObs> {
     let mut windows: Vec<ScopedWindowObs> = Vec::new();
     for (id, snapshot) in buckets {
         if windows.len() >= MODEL_SCOPED_MAX {
@@ -347,7 +350,7 @@ fn model_scoped_windows(buckets: &[(String, RateLimitSnapshot)]) -> Option<Vec<S
         }
         windows.push(ScopedWindowObs { label, window });
     }
-    (!windows.is_empty()).then_some(windows)
+    windows
 }
 
 #[cfg(test)]
@@ -587,6 +590,11 @@ mod tests {
                     vec![]
                 }
             );
+            assert_eq!(
+                obs.model_scoped.is_some(),
+                by_limit_id.is_object(),
+                "맵을 읽었으면 비어도 실린다: {by_limit_id}"
+            );
         }
         // 맵 칸이 아예 없어도, `limitId` 칸이 없어도 같다.
         let mut bare = codex_bucket();
@@ -682,7 +690,7 @@ mod tests {
             },
         }))
         .expect("관측");
-        assert_eq!(obs.model_scoped, None);
+        assert_eq!(obs.model_scoped, Some(vec![]));
     }
 
     /// ★배열이 칸 순서대로 읽혀 그럴듯한 가짜 창이 되는 일이 어느 층에서도 없다★.
@@ -720,7 +728,11 @@ mod tests {
                 window(Some(58.0), Some(WEEKLY_RESET)),
                 "{by_limit_id}"
             );
-            assert_eq!(obs.model_scoped, None, "{by_limit_id}");
+            assert_eq!(
+                obs.model_scoped,
+                by_limit_id.is_object().then(Vec::new),
+                "{by_limit_id}"
+            );
         }
 
         // 창 자리가 배열이면 그 창만 없다 · 모델 버킷이 배열이면 그 버킷만 없다.
@@ -738,7 +750,7 @@ mod tests {
         .expect("관측");
         assert_eq!(obs.five_hour, None);
         assert_eq!(obs.weekly, window(Some(58.0), Some(WEEKLY_RESET)));
-        assert_eq!(obs.model_scoped, None);
+        assert_eq!(obs.model_scoped, Some(vec![]));
     }
 
     #[test]

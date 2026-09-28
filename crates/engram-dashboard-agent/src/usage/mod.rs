@@ -95,21 +95,21 @@ pub struct ScopedWindowObs {
     pub window: WindowObs,
 }
 
-/// 관측이 어디서 왔나 — [`UsageObservation`] 의 빠진 칸의 뜻을 가른다.
+/// 관측이 어디서 왔나. 빠진 칸의 뜻은 이것과 무관하다([`UsageObservation`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageSource {
-    /// 대화 스트림에서 주웠다 — 부분 관측이다.
+    /// 대화 스트림에서 주웠다.
     Passive,
-    /// 조회로 받았다 — 그 시점의 전체 그림이다.
+    /// 조회로 받았다.
     Active,
 }
 
 /// 한 벤더의 사용량 관측 한 건.
 ///
-/// ★빠진 칸(`None`)의 뜻은 `source` 가 정한다★:
-///   - `Passive` = 안 실렸다 — 받는 쪽은 들고 있던 값을 그대로 둔다(`model_scoped`·`plan` 도 같다).
-///   - `Active` = 그 칸이 없다 — 받는 쪽은 들고 있던 값을 비운다(`model_scoped: None` = 모델별 창 없음).
-/// `model_scoped: Some` 은 어느 쪽이든 목록 전량 교체다 — 항목 단위로 합치지 않는다.
+/// ★빠진 칸(`None`)은 출처와 무관하게 「안 실렸다」다★ — 받는 쪽은 들고 있던 값을 그대로 둔다
+///   (`model_scoped`·`plan` 도 같다). 조회 결과의 null 창도 「없음」이 아니다.
+/// `model_scoped: Some` 은 목록 전량 교체다 — 항목 단위로 합치지 않는다. `Some(vec![])` 는
+///   「모델별 창 없음」이다 — 받는 쪽은 쥔 목록을 비운다(생산자는 그릇을 읽었는데 항목이 0 이면 이것을 낸다).
 /// ★관측 시각을 싣지 않는다★ — 받는 데몬이 찍는다. 생산자(디코더)는 시계를 갖지 않는다.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageObservation {

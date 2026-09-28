@@ -312,7 +312,9 @@ fn ended_without_response(
 ///   실패라 원문 = 받은 두 칸 그대로다★([`KIND_RATE_LIMITS_NULL`] — `rate_limits_available` 칸이 없으면 그 칸은 뺀다).
 /// - ★그 밖에 `rate_limits` 칸이 빠졌거나 객체도 `null` 도 아니면 `Parse` 다★ — 그것을 「창 없음」으로 읽으면 모양이
 ///   바뀐 응답이 성공으로 들어가 들고 있던 값을 전부 지운다. 실패면 받는 쪽이 값을 유지한다. 근거는 분류뿐이다.
-/// - 관측은 `Active` 라 `None` 칸 = 「없다」(받는 쪽이 비운다). 두 칸이 다 안 읽히는 창도 `None` 으로 접는다.
+/// - `None` 칸 = 안 실렸다(받는 쪽이 들고 있던 값을 유지한다). 두 칸이 다 안 읽히는 창도 `None` 으로 접는다.
+///   ★모델별 창은 `rate_limits` 객체를 읽었으면 비어도 `Some` 이다★ — `None` 으로 접으면 사라진 모델 창이 받는
+///   쪽에 영영 남는다.
 fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeFailure> {
     let response = line
         .get("response")
@@ -354,7 +356,7 @@ fn observation_from_response(line: &Value) -> Result<UsageObservation, ProbeFail
             Some(Value::Object(limits)) => (
                 active_window(limits.get("five_hour")),
                 active_window(limits.get("seven_day")),
-                model_scoped_windows(limits),
+                Some(model_scoped_windows(limits)),
             ),
             Some(_) => return Err(parse_error("rate_limits 가 객체도 null 도 아니다").into()),
             None => return Err(parse_error("사용량 객체에 rate_limits 칸이 없다").into()),
@@ -416,9 +418,9 @@ fn epoch_secs_from_iso(text: &str) -> Option<i64> {
 }
 
 /// 모델별 주간 창 — `model_scoped[]`(`{display_name, utilization, resets_at}`) 뒤에 값이 있는 이름 붙은 칸
-/// ([`NAMED_MODEL_WINDOWS`]). 같은 이름(ASCII 대소문자 무시)은 먼저 온 것만 남긴다. 하나도 없으면 `None`.
+/// ([`NAMED_MODEL_WINDOWS`]). 같은 이름(ASCII 대소문자 무시)은 먼저 온 것만 남긴다.
 /// ★`model_scoped` 항목 모양은 SDK 타입에 없다★ — CLI 가 타입보다 먼저 싣는 칸이라, 이름이 문자열인 항목만 받는다.
-fn model_scoped_windows(limits: &Map<String, Value>) -> Option<Vec<ScopedWindowObs>> {
+fn model_scoped_windows(limits: &Map<String, Value>) -> Vec<ScopedWindowObs> {
     let listed = limits
         .get("model_scoped")
         .and_then(Value::as_array)
@@ -445,7 +447,7 @@ fn model_scoped_windows(limits: &Map<String, Value>) -> Option<Vec<ScopedWindowO
         }
         windows.push(ScopedWindowObs { label, window });
     }
-    (!windows.is_empty()).then_some(windows)
+    windows
 }
 
 /// 오류 응답 → 분류 + 근거([`KIND_CLAUDE_ERROR`] · 원문 = `error` 칸 값). `error` 가 문자열이 아니면 JSON 표기를 그대로
@@ -679,8 +681,9 @@ mod tests {
         assert_eq!(obs.five_hour, window(Some(42.5), Some(FIVE_HOUR_RESET)));
         assert_eq!(obs.weekly, window(Some(13.0), Some(WEEKLY_RESET)));
         assert_eq!(
-            obs.model_scoped, None,
-            "null 모델 창·빈 목록 = 모델별 창 없음"
+            obs.model_scoped,
+            Some(vec![]),
+            "null 모델 창·빈 목록 = 모델별 창이 비었다(안 실림이 아니다)"
         );
         assert_eq!(obs.plan.as_deref(), Some("max"));
         assert!(spawner.stdin_closed(), "응답을 받고 stdin 을 닫지 않았다");
@@ -1062,7 +1065,7 @@ mod tests {
             json!({ "seven_day_opus": "3%" , "seven_day_sonnet": [], "seven_day_oauth_apps": 0 }),
         ] {
             let obs = rate_limits(limits.clone()).expect("관측");
-            assert_eq!(obs.model_scoped, None, "{limits}");
+            assert_eq!(obs.model_scoped, Some(vec![]), "{limits}");
         }
 
         let long = "x".repeat(10_000);
