@@ -51,7 +51,7 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존.
+    /// 진행 중 작업만 중단. 프로세스는 생존. 터미널 모드(PTY)는 거절한다 — 터미널이 키를 직접 받는다(ADR-0245).
     Interrupt {
         #[ts(type = "string")]
         agent_id: AgentId,

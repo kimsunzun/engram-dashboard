@@ -181,11 +181,11 @@ pub(crate) const SATURATED_REFUSAL: &str =
 /// ★`Interrupt` 를 여기 **넣지 않은 것은 의도다** — 둘 다 어긋난다★: ①로는 순서 묶음 ①에 정면으로
 ///   들고(`WriteStdin`(X) ↔ `Interrupt`(X)), ②로는 **건너뛰어도 도착 시점이 그대로다**.
 ///   ★②의 근거가 갈렸다 — 옛 문장(「`interrupt()` 가 `0x03` 을 **같은 PTY writer 로** 쓰므로 그 writer 에
-///   걸린다」)은 입력 큐가 들어오면서 죽었다★. 지금 참인 것: `interrupt()` 는 그 `0x03` 을 **그
-///   에이전트의 입력 큐에 밀어 넣고 즉시 돌아온다**(`PtyTransport::interrupt` → `send_input`). 그래서
-///   이 명령 자체는 아무것도 막지 않지만, 그 한 바이트는 **큐에 이미 선 것들 뒤에** 서고 라이터가 OS
-///   쓰기에 물려 있으면 그 물림이 풀릴 때까지 안 나간다. 줄을 건너뛰어 얻는 것은 dispatch 몇 밀리초뿐
-///   이고, **순서를 깨면서 얻는 것이 여전히 없다.**
+///   걸린다」)은 죽었다★(PTY 는 이제 끊기를 거절한다 — ADR-0245). 지금 참인 것: `interrupt()` 는 어느
+///   통로에서도 **즉시 돌아온다** — PTY 는 `Unsupported` 로 거절하고, claude JSON 통로는 끊기 줄을 그
+///   에이전트의 입력 큐에 넣고(큐에 이미 선 것들 뒤에 선다 — ADR-0238), codex 통로는 제어 큐에 넣는다.
+///   그래서 이 명령 자체는 아무것도 막지 않는다. 줄을 건너뛰어 얻는 것은 dispatch 몇 밀리초뿐이고,
+///   **순서를 깨면서 얻는 것이 여전히 없다.**
 /// ★★그 대신 기록해 둘 사실 — `Interrupt` 는 이제 포화에서 **거절된다**★★: 읽기와 처리가 한 줄이던
 ///   옛 모양에서는 읽기 루프가 기다렸으므로 모든 명령이 늦게나마 **반드시** 처리됐다. 지금 도착순
 ///   줄로 가는 것은 줄이 찬 순간 거절로 답해진다([`SATURATED_REFUSAL`]). 즉 압력이 걸린 순간 사용자가
@@ -241,8 +241,11 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         | AgentCommand::SpawnByCwd { .. } => DispatchOrder::Detached,
 
         // ── 줄 안: 아래 다섯 묶음이 도착 순서에 걸려 있다 ────────────────────────────
-        // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 바이트가 PTY 로
-        //    곧장 가고 그 밑에 순서를 다시 세우는 것이 없다.
+        // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 입력이 통로의 큐로
+        //    곧장 가고 그 밑에 순서를 다시 세우는 것이 없다. `Interrupt` 는 PTY 에선 거절이고(ADR-0245),
+        //    claude JSON 에선 입력과 같은 FIFO 에 서며(ADR-0238), codex 에선 제어 줄이 대기 입력보다 앞서
+        //    나가되 받아들여지는지는 도착 시점의 턴 상태에 달려 있다. 어느 쪽이든 `Interrupt` 는 ②에도
+        //    묶이므로 줄에 남는다(`Ordered`).
         // ② 입력 lease 획득/반납과 그 뒤의 입력 — `check_input` 이 읽는 표를 이 둘이 쓴다.
         // ③ 같은 연결의 `Subscribe`↔`Subscribe`/`Unsubscribe` — 등록이 코어 먼저·세션 나중이고
         //    `ReplayComplete` 는 코어 잠금을 놓은 **뒤** 큐에 드니, 겹치면 Ack/replay/Complete 가

@@ -631,7 +631,8 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 진행 중 작업만 중단(≠kill — 프로세스는 살아 있다). PTY=0x03 주입.
+    /// 진행 중 작업만 중단(≠kill — 프로세스는 살아 있다). 통로가 끊는 법을 정한다 — PTY 는 `Unsupported`
+    /// (터미널 모드는 터미널이 키를 직접 받는다 · ADR-0245).
     pub fn interrupt(&self) -> Result<(), PtyError> {
         self.transport.interrupt()
     }

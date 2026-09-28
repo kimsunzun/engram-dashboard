@@ -37,7 +37,7 @@ use crate::platform::JobObjectHandle;
 /// 「지금 도는 턴을 멈춰 달라」는 stdin 줄 한 벌을 만드는 backend 함수. 통로는 그 바이트의 뜻을 모른다(바보 파이프).
 ///
 /// `None` = 「지금은 끊을 턴이 없다」 — 판정은 backend 가 하고 통로는 그대로 `Unsupported` 로 옮긴다. 파이프엔
-/// PTY 의 Ctrl-C 같은 통로 자신의 끊기 수단이 없어서, 끊기는 이 줄을 만드는 쪽의 지식이다.
+/// Ctrl-C 같은 통로 자신의 끊기 수단이 없어서, 끊기는 이 줄을 만드는 쪽의 지식이다.
 // ADR-0238
 pub type InterruptLine = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
 

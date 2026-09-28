@@ -1580,8 +1580,10 @@ mod tests {
             let expected = match shape {
                 TransportShape::Pty => (true, true),
                 TransportShape::StdioNdjson => (false, false),
-                // 파이프라 터미널 바이트도 크기도 없다 — 단방향 파이프와 같은 짝이다. 둘을 가르는
-                //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
+                // 파이프라 터미널 바이트도 크기도 없다 — 단방향 파이프와 같은 짝이다. `interrupt` 는 이 쌍에
+                //   안 들어 있다: 파이프 쪽 그 칸은 backend 가 주입하는 값이라(ADR-0238) 통로 신고가 아니다.
+                //   오늘은 두 파이프 모양이 다 true 이고, `interrupt` 가 가르는 것은 PTY(false · ADR-0245)와
+                //   파이프다.
                 TransportShape::StdioBidiJson => (false, false),
             };
             let parts =

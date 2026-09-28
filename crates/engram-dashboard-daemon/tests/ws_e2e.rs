@@ -1203,9 +1203,11 @@ async fn case15_ws_kill_ack_and_list_excludes() {
     server.shutdown().await;
 }
 
-// ── 케이스 16: WS Interrupt → Ack(프로세스 생존) ───────────────────────────────────
+// ── 케이스 16: WS Interrupt → 터미널 모드는 거절(Error) · 프로세스 생존 ──────────────────
+// ★터미널 모드는 끊기 명령을 받지 않는다★ — 0x03 을 넣으면 한가한 TUI 가 두 번째 Ctrl-C 에 죽을 수 있다.
+// ADR-0245
 #[tokio::test]
-async fn case16_ws_interrupt_ack_process_alive() {
+async fn case16_ws_interrupt_refused_on_terminal_process_alive() {
     let server = start_test_server().await.unwrap();
     let profile_id = register_shell_profile(&server);
 
@@ -1226,11 +1228,14 @@ async fn case16_ws_interrupt_ack_process_alive() {
         request_id: req_int,
     })
     .await;
-    c.await_ack(req_int).await;
-    // 출력 정지 확인까지는 best-effort — 생존만 단언(여전히 manager 에 있음).
+    let msg = c.await_error(req_int).await;
+    assert!(
+        msg.contains("터미널 모드는 끊기 명령을 받지 않는다"),
+        "PTY 끊기는 거절 문구로 답해야 한다: {msg}"
+    );
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
-        "Interrupt 후에도 프로세스 생존(manager 에 잔존)"
+        "거절된 Interrupt 뒤에도 프로세스 생존(manager 에 잔존)"
     );
 
     server.shutdown().await;
