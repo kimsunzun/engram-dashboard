@@ -994,6 +994,7 @@ impl OutputCore {
                         OutputEvent::TerminalBytes(_) => "TerminalBytes", // 위 arm 이 처리 — 도달 안 함
                         OutputEvent::TextDelta { .. } => "TextDelta",
                         OutputEvent::ToolCall { .. } => "ToolCall",
+                        OutputEvent::ToolResult { .. } => "ToolResult",
                         OutputEvent::Usage { .. } => "Usage",
                         OutputEvent::MessageDone { .. } => "MessageDone",
                         OutputEvent::TurnEnd { .. } => "TurnEnd",
@@ -1231,6 +1232,8 @@ pub(crate) fn estimate_cost_bytes(event: &OutputEvent) -> usize {
             message_id,
             category: _,
         } => name.len() + args_json.len() + opt_len(id) + opt_len(turn_id) + opt_len(message_id),
+        // 결말은 고정 크기 enum 이라 무게가 없다.
+        OutputEvent::ToolResult { id, outcome: _ } => id.len(),
         // Usage 는 고정 크기 수치 필드 — turn_id 문자열만 반영(u64 두 개는 무시).
         OutputEvent::Usage { turn_id, .. } => opt_len(turn_id),
         OutputEvent::MessageDone {
@@ -2267,6 +2270,12 @@ mod tests {
             message_id: None,
         });
         assert_eq!(cost2, 5 + 2);
+        // ToolResult → id 만(결말은 고정 크기).
+        let cost3 = estimate_cost_bytes(&OutputEvent::ToolResult {
+            id: "exec-1".into(), // 6
+            outcome: crate::types::ToolOutcome::Failed,
+        });
+        assert_eq!(cost3, 6);
     }
 
     /// 명부 사건은 본문(글 · 말풍선 사본)을 링 무게로 센다 — 긴 글이 「건수 1」로 링 상한을 우회하지 않게.

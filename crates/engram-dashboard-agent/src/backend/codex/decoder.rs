@@ -54,7 +54,7 @@ use serde_json::Value;
 
 use super::protocol::{self, method, Inbound};
 use crate::transport::OutputDecoder;
-use crate::types::{OutputEvent, QueuedInputEvent, ToolCategory, TurnOutcome};
+use crate::types::{OutputEvent, QueuedInputEvent, ToolCategory, ToolOutcome, TurnOutcome};
 
 /// 로그 한 줄에 실을 상대 문자열 상한(문자 수). ★오류 본문이 4KB 에 이르는 경우가 실측됐다★
 /// (모르는 메서드 오류가 유효 메서드 160 개를 전부 열거한다) — 자르지 않으면 로그가 그것으로 덮인다.
@@ -259,9 +259,10 @@ const AGENT_MESSAGE_ITEM_TYPE: &str = "agentMessage";
 enum ItemOrigin {
     /// `item/started` — 라이브. 도구 호출의 발행 지점.
     Started,
-    /// `item/completed` — 라이브. 도구 호출을 **내지 않는다**(`Started` 가 이미 냈다).
+    /// `item/completed` — 라이브. 도구 호출을 **다시 내지 않는다**(`Started` 가 이미 냈다) — 끝이 실패 · 거부면 그
+    ///   결과([`OutputEvent::ToolResult`])만 낸다(ADR-0241).
     Completed,
-    /// `thread/items/list` 페이지 — 이어받기 직후의 지난 기록(ADR-0203).
+    /// `thread/items/list` 페이지 — 이어받기 직후의 지난 기록(ADR-0203). 끝난 item 이라 호출과 결과를 함께 진다.
     History,
 }
 
@@ -287,6 +288,55 @@ pub(super) fn is_tool_item(item_type: &str) -> bool {
     TOOL_ITEM_TYPES.contains(&item_type)
 }
 
+/// 도구 item 의 끝 상태(`status`) 낱말 — 변형마다 스키마 enum 이 따로다(`CommandExecutionStatus` · `PatchApplyStatus` ·
+/// `McpToolCallStatus` · `DynamicToolCallStatus` · `CollabAgentToolCallStatus` · 판독 = t3code 생성 스키마). `webSearch` 는
+/// status 칸이 없다.
+// ADR-0241
+mod tool_status {
+    pub(super) const IN_PROGRESS: &str = "inProgress";
+    pub(super) const COMPLETED: &str = "completed";
+    pub(super) const FAILED: &str = "failed";
+    pub(super) const DECLINED: &str = "declined";
+    pub(super) const INTERRUPTED: &str = "interrupted";
+
+    /// 그 변형의 스키마 어휘. status 칸이 없는 `webSearch` 와 [`super::TOOL_ITEM_TYPES`] 밖의 변형은 빈 목록이다 — ★빈 목록 =
+    /// 「이 변형엔 status 칸이 없다」★이고, 끝 상태를 읽는 쪽은 그것으로 칸의 부재가 일상인지 결함인지를 가른다.
+    pub(super) fn of(kind: &str) -> &'static [&'static str] {
+        match kind {
+            "commandExecution" | "fileChange" => &[IN_PROGRESS, COMPLETED, FAILED, DECLINED],
+            "mcpToolCall" | "dynamicToolCall" => &[IN_PROGRESS, COMPLETED, FAILED],
+            "collabAgentToolCall" => &[IN_PROGRESS, COMPLETED, FAILED, INTERRUPTED],
+            _ => &[],
+        }
+    }
+}
+
+/// [`CodexAppServerDecoder::tool_outcome`] 의 답 — 실을 결말과, 그 끝 상태를 이미 이상으로 적었는가.
+// ADR-0241
+struct ToolEnd {
+    /// 실을 결말. `None` = 실을 것이 없다(아직 돎 · 끊김 · 칸 없음 · 이상).
+    outcome: Option<ToolOutcome>,
+    /// 끝 상태를 드리프트 · 결함으로 이미 적었다 — ★서면 부르는 쪽은 `item:` 일상 계수를 더하지 않는다★. 관측 하나를
+    /// 두 등급으로 세면 드리프트가 「아는 변형, 번역 안 함」 칸에도 한 번 더 잡힌다.
+    noted: bool,
+}
+
+impl ToolEnd {
+    fn quiet(outcome: Option<ToolOutcome>) -> Self {
+        Self {
+            outcome,
+            noted: false,
+        }
+    }
+
+    fn noted(outcome: Option<ToolOutcome>) -> Self {
+        Self {
+            outcome,
+            noted: true,
+        }
+    }
+}
+
 /// 이 변형이 되울린 유저 메시지인가 — [`USER_MESSAGE_ITEM_TYPE`].
 // ADR-0226
 pub(super) fn is_user_message(item_type: &str) -> bool {
@@ -300,6 +350,9 @@ enum Observed {
     Routine,
     /// 스키마(0.154.0)에 없는 이름이다 — 상류 드리프트 의심이므로 warn.
     Drift,
+    /// 스키마가 그 자리에 적지 않은 **아는** 낱말이라 뜻대로 옮겼다 — 버리지 않았지만 상류 드리프트 의심이므로 warn.
+    /// 오늘 쓰는 자리 = 도구 변형의 스키마 어휘 밖 끝 상태(`mcpToolCall` 의 `declined` 등 — [`tool_status::of`]).
+    DriftTranslated,
     /// 아는 이름인데 모양이 다르거나 읽을 수 없다 — 결함이므로 warn.
     ///
     /// ★warn 인 것이 핵심이다★: 릴리스 데몬에는 `RUST_LOG` 가 닿지 않고 기본 레벨이 warn 이라,
@@ -330,8 +383,9 @@ pub(crate) struct CodexAppServerDecoder {
     /// ★키는 **축 접두사 + 나머지**이고, 상대가 만든 문자열은 언제나 접두사 **뒤**에만 놓인다★ —
     /// 그래서 상대가 어떤 이름을 지어 보내도 자기 축을 벗어나 다른 축의 칸에 떨어질 수 없다.
     /// 축 = `method:` (알림 이름) · `item:` (알림 이름 + item type) · `turn-status:` (턴 결말 값)
-    /// · `shape:`·`params:`·`item-type:`·`item-id:`·`tool:` (결함) · `line:`·`envelope:` (줄·봉투)
-    /// · `deprecation:`.
+    /// · `tool-status:` (도구 끝 상태 — item type + 값. 드리프트 · 빠진 칸 결함, 그리고 ★이 맵에서 유일하게 **옮긴** 관측★인
+    /// 스키마 어휘 밖의 아는 낱말 — [`Observed::DriftTranslated`]) · `shape:`·`params:`·`item-type:`·`item-id:`·`tool:`
+    /// (결함) · `line:`·`envelope:` (줄·봉투) · `deprecation:`.
     /// 접두사 뒤 내용이 어떤 글자를 담든 축은 첫 세그먼트가 정한다.
     untranslated: BTreeMap<String, u64>,
 
@@ -415,6 +469,11 @@ impl CodexAppServerDecoder {
                 reason = %sanitize(detail, LOG_STRING_LIMIT),
                 "codex app-server: 상류 드리프트 신호 — 버린다"
             ),
+            Observed::DriftTranslated => tracing::warn!(
+                observed = %key,
+                reason = %sanitize(detail, LOG_STRING_LIMIT),
+                "codex app-server: 상류 드리프트 신호 — 아는 낱말이라 뜻대로 옮겼다"
+            ),
             Observed::Malformed => tracing::warn!(
                 observed = %key,
                 reason = %sanitize(detail, LOG_STRING_LIMIT),
@@ -465,11 +524,11 @@ impl CodexAppServerDecoder {
             method::ERROR => self.error(params),
             method::TURN_COMPLETED => self.turn_completed(params),
 
-            // ★이쪽에서 나오는 이벤트는 되울린 유저 메시지 하나뿐이고, 그것도 `item/started` 가 먼저
-            //   왔으면 안 나온다★(사유 = `item`·`user_message` doc). 도구 호출은 `item/started` 단독이다
-            //   — 양쪽에서 내면 한 호출이 화면에 두 번 뜬다. 그래도 item `type` 은 들여다본다: 새 변형은
-            //   여기로도 온다. 그리고 턴 경계를 여기서 내면 한 턴이 item 개수만큼의 경계로 쪼개진다
-            //   (TRD §6-1) — 경계는 `turn/completed` 단독.
+            // ★이쪽에서 나오는 이벤트는 둘뿐이다★ — 되울린 유저 메시지(`item/started` 가 먼저 왔으면 안 나온다 —
+            //   사유 = `item`·`user_message` doc)와 도구 끝이 실패 · 거부일 때의 결과(ADR-0241). 도구 **호출**은
+            //   `item/started` 단독이다 — 양쪽에서 내면 한 호출이 화면에 두 번 뜬다. 그래도 item `type` 은
+            //   들여다본다: 새 변형은 여기로도 온다. 그리고 턴 경계를 여기서 내면 한 턴이 item 개수만큼의 경계로
+            //   쪼개진다(TRD §6-1) — 경계는 `turn/completed` 단독.
             method::ITEM_COMPLETED => self.item(params, method_name, ItemOrigin::Completed),
 
             // 상류 드리프트의 조기 신호라 이름만이 아니라 본문까지 남긴다(TRD §4-7 의 2).
@@ -521,8 +580,10 @@ impl CodexAppServerDecoder {
     /// `item/started`·`item/completed` — 같은 `ThreadItem` union 을 나르는 **알림** 쪽 문.
     ///
     /// ★라이브에서 도구 호출의 발행 지점은 `item/started` 하나다★ — 양쪽에서 내면 한 호출이 화면에
-    /// 두 번 뜬다. ★그런데 codex 가 모든 item 에 `started` 를 내는지는 미검증★ — `completed` 만 오는
-    /// item 종류가 있다면 그 호출은 사라진다(계수에는 남는다).
+    /// 두 번 뜬다. `item/completed` 는 호출이 아니라 그 **결과**를 내는 자리다(실패 · 거부일 때만 — [`Self::tool_item`]).
+    /// ★그런데 codex 가 모든 item 에 `started` 를 내는지는 미검증★ — `completed` 만 오는
+    /// item 종류가 있다면 그 호출은 사라진다: 끝이 실패 · 거부면 결과만 나가는데 가리킬 행이 없어 소비자가 버리고,
+    /// 그 밖의 끝은 `item:` 일상 계수에만 남는다.
     ///
     /// ★되울린 유저 메시지만 그 규칙을 따르지 않는다 — **먼저 온 쪽**이 올린다★: 그쪽은 한쪽에 걸면
     /// 잃는 것이 「유저 자신이 친 말」이라 대가가 다르고, 두 방향 모두 실패 사례가 있다 — `started` 가
@@ -550,8 +611,8 @@ impl CodexAppServerDecoder {
     ///   페이지는 **알림이 아니라 응답**이라 라인 스트림을 타고 오지 않는다(봉투를 벗긴 `data[]` 를
     ///   통로가 직접 들고 온다). 그래서 이 문은 라인 재조립·상한·resync 규율을 **우회하는 것이 아니라
     ///   애초에 그 규율이 걸리는 축 밖**이다 — 그 규율은 여전히 라이브 스트림 전량을 덮는다.
-    /// ★여기로 들어온 item 은 [`ItemOrigin::History`] 규칙을 받는다★ — 도구 호출을 내고(`Started` 와
-    ///   같다) 어시스턴트 본문도 낸다(`AGENT_MESSAGE_ITEM_TYPE` doc).
+    /// ★여기로 들어온 item 은 [`ItemOrigin::History`] 규칙을 받는다★ — 도구는 호출과 그 끝 결과를 함께 내고
+    ///   (`[ToolCall, ToolResult?]` — [`Self::tool_item`]) 어시스턴트 본문도 낸다(`AGENT_MESSAGE_ITEM_TYPE` doc).
     // ADR-0203
     pub(crate) fn history_item(&mut self, turn_id: &str, item: &Value) -> Vec<OutputEvent> {
         self.item_core(
@@ -620,20 +681,8 @@ impl CodexAppServerDecoder {
                 message_id: item.get("id").and_then(|v| v.as_str()).and_then(bounded_id),
             }];
         }
-        if origin != ItemOrigin::Completed && TOOL_ITEM_TYPES.contains(&kind.as_str()) {
-            // ★도구 변형인데 이벤트가 안 나오면 그건 "번역 안 함" 이 아니라 결함이다★ — 아래
-            //   일상 계수(debug)로 흘려보내면 필수 칸이 빠진 item 이 조용한 소음이 된다.
-            return match tool_call(item, &kind, turn_id) {
-                Some(event) => vec![event],
-                None => {
-                    self.observe(
-                        format!("tool:{method_name}#{kind}"),
-                        Observed::Malformed,
-                        "도구 item 에 `tool` 문자열이 없다",
-                    );
-                    Vec::new()
-                }
-            };
+        if TOOL_ITEM_TYPES.contains(&kind.as_str()) {
+            return self.tool_item(item, &kind, turn_id, method_name, origin);
         }
         // ★여기가 새 변형이 들어오는 자리다★ — 아무 신호도 안 남기면, 상류가 union 을 늘렸을 때
         //   드리프트를 보여 줄 유일한 진단이 하필 드리프트가 나타나는 지점에서 눈을 감는다.
@@ -644,6 +693,133 @@ impl CodexAppServerDecoder {
         };
         self.observe(format!("item:{method_name}#{kind}"), what, "");
         Vec::new()
+    }
+
+    /// 도구 변형 item 한 개 — 문마다 발행이 갈린다.
+    ///
+    /// - `Started` = [`OutputEvent::ToolCall`] 하나. 끝 상태는 읽지 않는다.
+    /// - `Completed` = 끝이 실패 · 거부일 때만 [`OutputEvent::ToolResult`] 하나. 그 밖엔 사건 0 + `item:` 일상 계수 — 단 끝
+    ///   상태를 이미 이상으로 적었으면([`ToolEnd::noted`]) 일상 계수는 더하지 않는다.
+    /// - `History` = `[ToolCall, ToolResult?]` 이 순서 — 이력 페이지에는 시작 알림이 없어 끝난 item 하나가 둘을 다 진다.
+    ///
+    /// ★정상 완료는 내지 않는다 — 실패 · 거부만 싣는다★: 화면이 쓰는 것은 오류 · 거부 수와 배지뿐이라, 끝마다 내면
+    ///   호출마다 사건이 하나씩 늘 뿐 얻는 것이 없다(옛 셸은 그 사건마다 「표시할 수 없는 신호」 줄을 남긴다).
+    /// ★결과의 `id` 는 호출과 같은 거르기([`bounded_id`])를 지난다★ — 걸러져 없으면 가리킬 행이 없으므로 결과를 내지
+    ///   않고 결함으로 센다.
+    // ADR-0241
+    fn tool_item(
+        &mut self,
+        item: &Value,
+        kind: &str,
+        turn_id: &str,
+        method_name: &str,
+        origin: ItemOrigin,
+    ) -> Vec<OutputEvent> {
+        let mut events = Vec::new();
+        if origin != ItemOrigin::Completed {
+            match tool_call(item, kind, turn_id) {
+                Some(call) => events.push(call),
+                None => {
+                    // ★도구 변형인데 호출이 안 나오면 그건 "번역 안 함" 이 아니라 결함이다★ — 일상 계수(debug)로
+                    //   흘려보내면 필수 칸이 빠진 item 이 조용한 소음이 된다.
+                    self.observe(
+                        format!("tool:{method_name}#{kind}"),
+                        Observed::Malformed,
+                        "도구 item 에 `tool` 문자열이 없다",
+                    );
+                    return events;
+                }
+            }
+        }
+        if origin == ItemOrigin::Started {
+            return events;
+        }
+        let end = self.tool_outcome(item, kind);
+        match end.outcome {
+            Some(outcome @ (ToolOutcome::Failed | ToolOutcome::Declined)) => {
+                match item.get("id").and_then(Value::as_str).and_then(bounded_id) {
+                    Some(id) => events.push(OutputEvent::ToolResult { id, outcome }),
+                    None => self.observe(
+                        format!("item-id:{method_name}#{kind}"),
+                        Observed::Malformed,
+                        "끝 결과를 붙일 도구 item 의 `id` 가 없거나 상한을 넘었다",
+                    ),
+                }
+            }
+            Some(ToolOutcome::Completed | ToolOutcome::Refused) | None => {
+                // ★이미 이상으로 적은 끝에 일상 계수를 더하지 않는다★ — 관측 하나는 한 등급으로만 센다(결함 id 자리와 같다).
+                if origin == ItemOrigin::Completed && !end.noted {
+                    self.observe(format!("item:{method_name}#{kind}"), Observed::Routine, "");
+                }
+            }
+        }
+        events
+    }
+
+    /// 도구 item 의 벤더 끝 상태(`status`) → 중립 결말. `Completed` · `History` 두 문이 같이 쓴다(ADR-0203 「두 번째
+    /// 어휘표를 만들지 않는다」).
+    ///
+    /// 결말 `None` = 실을 결말이 없다 — 아직 돎(`inProgress` · 이력 페이지의 도는 item) · 끊김(`interrupted` · 그 턴의
+    ///   결말 행이 이미 끊김을 보인다) · 칸 없음(`webSearch` 는 status 칸이 없다) · 이상(아래).
+    /// ★이상은 여기서 적고 [`ToolEnd::noted`] 로 알린다★ — 모르는 값 · 문자열 아닌 값(드리프트) · status 칸이 있어야 할
+    ///   변형에서 칸이 빠짐(결함 · warn — 칸 이름이 상류에서 바뀌면 실패 · 거부 배지가 전부 조용히 사라진다. 같은 판정 =
+    ///   `turn_completed` 의 빠진 `turn.status`).
+    /// ★판정은 `status` 하나다 — `exitCode` 를 읽지 말 것★: 0 아닌 종료를 우리가 실패로 다시 가르면 벤더와 다른 판정이
+    ///   선다. 실측(codex-cli 0.156.1 · fixture `tool_fail_u2`)에서 0 아닌 종료는 `failed` 로 온다. `mcpToolCall.error` ·
+    ///   `dynamicToolCall.success` 도 같은 이유로 읽지 않는다.
+    /// ★우리가 거절한 명령도 `failed` 로 닫힌다(실측 fixture `refuse_u2a`)★ — 진짜 0 아닌 종료와 갈리는 칸은
+    ///   `exitCode`(거절 = `null`) 하나뿐이고 `aggregatedOutput` 은 둘 다 `null` 이다. 그 모양으로 가르지 않는다 — 같은
+    ///   모양을 내는 다른 길(승인 콜백이 버려짐 등)이 있어 거짓 사유가 붙는다. 그래서 이 함수는 `Refused` 를 내지 않고,
+    ///   우리 거절의 귀속은 거절한 item 을 기억하는 통로의 몫이다.
+    /// ★변형별 스키마 어휘 밖의 아는 낱말(예: `mcpToolCall` 의 `declined`)은 뜻대로 옮기되 드리프트로 센다★.
+    // ADR-0241
+    fn tool_outcome(&mut self, item: &Value, kind: &str) -> ToolEnd {
+        let vocabulary = tool_status::of(kind);
+        let Some(status) = item.get("status") else {
+            if vocabulary.is_empty() {
+                return ToolEnd::quiet(None); // `webSearch` — 칸이 없는 변형이다.
+            }
+            self.observe(
+                format!("tool-status:{kind}#<없음>"),
+                Observed::Malformed,
+                "도구 item 에 required `status` 가 없다",
+            );
+            return ToolEnd::noted(None);
+        };
+        // ★상대 문자열을 키로 쓰는 것은 아는 값일 때뿐이다★(사유 = `turn_completed` 의 같은 자리) — 모르는 값은
+        //   변형마다 한 칸에 눌러 담고 실제 값은 로그 본문으로 낸다.
+        let unknown_key = || format!("tool-status:{kind}#<모르는 값>");
+        let Some(word) = status.as_str() else {
+            self.observe(
+                unknown_key(),
+                Observed::Drift,
+                &format!("문자열이 아닌 도구 끝 상태: {status}"),
+            );
+            return ToolEnd::noted(None);
+        };
+        let outcome = match word {
+            tool_status::FAILED => Some(ToolOutcome::Failed),
+            tool_status::DECLINED => Some(ToolOutcome::Declined),
+            tool_status::COMPLETED => Some(ToolOutcome::Completed),
+            tool_status::IN_PROGRESS | tool_status::INTERRUPTED => None,
+            other => {
+                self.observe(
+                    unknown_key(),
+                    Observed::Drift,
+                    &format!("모르는 도구 끝 상태: {other}"),
+                );
+                return ToolEnd::noted(None);
+            }
+        };
+        if !vocabulary.contains(&word) {
+            self.observe(
+                format!("tool-status:{kind}#{word}"),
+                Observed::DriftTranslated,
+                "이 도구 변형의 스키마 어휘에 없는 끝 상태",
+            );
+            return ToolEnd::noted(outcome);
+        }
+        ToolEnd::quiet(outcome)
     }
 
     /// 되울린 유저 메시지 item 한 개 → 「우리가 보낸 것」 표시 이벤트 0~1 개.
@@ -1908,6 +2084,395 @@ mod tests {
                 }
                 other => panic!("ToolCall 하나가 아니다: {other:?}"),
             }
+        }
+    }
+
+    // ── ADR-0241: 도구 끝 결과 ─────────────────────────────────────────────────────
+
+    /// 도구 item 하나를 `item/completed` 로 새 번역기에 넣고, 나온 사건과 그 번역기(관측 맵을 보려고)를 돌려준다.
+    fn complete_tool(item: Value) -> (Vec<OutputEvent>, CodexAppServerDecoder) {
+        let mut d = CodexAppServerDecoder::new();
+        let events = d.decode(
+            notification_line(
+                method::ITEM_COMPLETED,
+                serde_json::json!({"threadId": "t", "turnId": "u", "completedAtMs": 2i64, "item": item}),
+            )
+            .as_bytes(),
+        );
+        (events, d)
+    }
+
+    /// ★끝이 실패 · 거부면 결과 하나 — 호출은 다시 내지 않는다★. 판정은 벤더 `status` 뿐이고(명령의 `exitCode` 도,
+    /// MCP 의 `error` 도 읽지 않는다), 번역기는 `Refused` 를 내지 않는다(우리 거절의 귀속은 통로 몫).
+    // ADR-0241
+    #[test]
+    fn a_failed_or_declined_tool_end_becomes_one_tool_result_on_the_completed_door() {
+        for (item, want) in [
+            (
+                serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "false",
+                                   "commandActions": [], "status": "failed", "exitCode": 1}),
+                ToolOutcome::Failed,
+            ),
+            (
+                serde_json::json!({"type": "fileChange", "id": "i-1", "changes": [], "status": "declined"}),
+                ToolOutcome::Declined,
+            ),
+            (
+                serde_json::json!({"type": "mcpToolCall", "id": "i-1", "server": "fs", "tool": "read_file",
+                                   "arguments": {}, "status": "failed", "error": {"message": "boom"}}),
+                ToolOutcome::Failed,
+            ),
+            (
+                serde_json::json!({"type": "dynamicToolCall", "id": "i-1", "tool": "t", "status": "failed",
+                                   "success": false}),
+                ToolOutcome::Failed,
+            ),
+            (
+                serde_json::json!({"type": "collabAgentToolCall", "id": "i-1", "tool": "spawn",
+                                   "status": "failed"}),
+                ToolOutcome::Failed,
+            ),
+        ] {
+            let (events, d) = complete_tool(item.clone());
+            assert_eq!(events.len(), 1, "{item}: 결과 하나가 아니다: {events:?}");
+            match &events[0] {
+                OutputEvent::ToolResult { id, outcome } => {
+                    assert_eq!(id, "i-1", "{item}");
+                    assert_eq!(*outcome, want, "{item}");
+                }
+                other => panic!("{item}: ToolResult 가 아니다: {other:?}"),
+            }
+            assert!(
+                d.untranslated_observations().is_empty(),
+                "{item}: 옮긴 끝이 「번역 안 함」 계수로 새었다: {:?}",
+                d.untranslated_observations()
+            );
+        }
+    }
+
+    /// ★정상 완료 · 아직 돎 · 끊김 · status 칸 없음은 사건 0 이다★ — 0 아닌 `exitCode` 가 실린 `completed` 도(판정은
+    /// `status` 하나다). 오늘의 일상 계수(`item:`)는 그대로 남는다.
+    // ADR-0241
+    #[test]
+    fn other_tool_ends_emit_nothing_and_keep_the_routine_count() {
+        for item in [
+            serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "grep x",
+                               "commandActions": [], "status": "completed", "exitCode": 1}),
+            serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x",
+                               "commandActions": [], "status": "inProgress"}),
+            serde_json::json!({"type": "collabAgentToolCall", "id": "i-1", "tool": "spawn",
+                               "status": "interrupted"}),
+            serde_json::json!({"type": "webSearch", "id": "i-1", "query": "q"}),
+        ] {
+            let (events, d) = complete_tool(item.clone());
+            assert!(events.is_empty(), "{item}: {events:?}");
+            let kind = item["type"].as_str().unwrap();
+            assert_eq!(
+                d.untranslated_observations(),
+                &BTreeMap::from([(format!("item:item/completed#{kind}"), 1)]),
+                "{item}"
+            );
+        }
+    }
+
+    /// ★모르는 끝 상태는 사건 0 + 드리프트 한 칸★ — 상대 문자열은 키가 되지 않는다(서로 다른 모르는 값 둘이 같은 칸에
+    /// 쌓인다). 문자열이 아닌 값도 같은 칸이다.
+    // ADR-0241
+    #[test]
+    fn an_unknown_tool_status_emits_nothing_and_is_counted_as_drift_under_one_key() {
+        let mut d = CodexAppServerDecoder::new();
+        for status in [
+            serde_json::json!("quantumCollapsed"),
+            serde_json::json!("singularity"),
+            Value::Null,
+            serde_json::json!(7),
+        ] {
+            let events = d.decode(
+                notification_line(
+                    method::ITEM_COMPLETED,
+                    serde_json::json!({"threadId": "t", "turnId": "u", "item":
+                        {"type": "commandExecution", "id": "i-1", "command": "x", "status": status}}),
+                )
+                .as_bytes(),
+            );
+            assert!(events.is_empty(), "{status}: {events:?}");
+        }
+        let seen = d.untranslated_observations();
+        assert_eq!(
+            seen.get("tool-status:commandExecution#<모르는 값>"),
+            Some(&4),
+            "{seen:?}"
+        );
+        assert!(
+            !seen.keys().any(|k| k.contains("quantumCollapsed")),
+            "상대 문자열이 키가 됐다: {seen:?}"
+        );
+        assert!(
+            seen.get("item:item/completed#commandExecution").is_none(),
+            "드리프트가 일상 계수로도 한 번 더 잡혔다: {seen:?}"
+        );
+    }
+
+    /// 스키마가 그 변형에 적지 않은 아는 낱말(`mcpToolCall` 의 `declined`)은 뜻대로 옮기되 드리프트로 센다.
+    // ADR-0241
+    #[test]
+    fn a_known_status_outside_the_variant_vocabulary_is_translated_and_counted_as_drift() {
+        let (events, d) = complete_tool(serde_json::json!({
+            "type": "mcpToolCall", "id": "i-1", "server": "fs", "tool": "read_file", "status": "declined"
+        }));
+        assert!(
+            matches!(
+                events.as_slice(),
+                [OutputEvent::ToolResult {
+                    outcome: ToolOutcome::Declined,
+                    ..
+                }]
+            ),
+            "{events:?}"
+        );
+        assert_eq!(
+            d.untranslated_observations(),
+            &BTreeMap::from([("tool-status:mcpToolCall#declined".to_string(), 1)]),
+            "드리프트 하나만 — 일상 계수가 겹쳐 붙으면 안 된다"
+        );
+    }
+
+    /// ★끝 상태를 이미 이상으로 적었으면 일상 계수(`item:`)를 더하지 않는다★ — 관측 하나는 한 등급으로만 센다. 모르는 값 ·
+    /// 문자열 아닌 값 · 스키마 어휘 밖의 아는 낱말(결말 없음 쪽 · `webSearch` 에 실린 status 까지) 모두.
+    // ADR-0241
+    #[test]
+    fn a_tool_end_already_counted_as_drift_is_not_counted_again_as_routine() {
+        for (item, want_key) in [
+            (
+                serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x",
+                                   "status": "quantumCollapsed"}),
+                "tool-status:commandExecution#<모르는 값>",
+            ),
+            (
+                serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x", "status": 7}),
+                "tool-status:commandExecution#<모르는 값>",
+            ),
+            (
+                serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x",
+                                   "status": "interrupted"}),
+                "tool-status:commandExecution#interrupted",
+            ),
+            (
+                serde_json::json!({"type": "webSearch", "id": "i-1", "query": "q", "status": "completed"}),
+                "tool-status:webSearch#completed",
+            ),
+        ] {
+            let (events, d) = complete_tool(item.clone());
+            assert!(events.is_empty(), "{item}: {events:?}");
+            assert_eq!(
+                d.untranslated_observations(),
+                &BTreeMap::from([(want_key.to_string(), 1)]),
+                "{item}"
+            );
+        }
+    }
+
+    /// ★status 칸이 있어야 할 변형에서 칸이 빠지면 결함 한 칸이다 — 조용히 넘기지 않는다★: 상류가 칸 이름을 바꾸면 실패 ·
+    /// 거부 배지가 전부 사라지는데, 그때 남는 신호가 debug 일상 계수뿐이면 배송 구성에서 아무것도 안 남는다. 일상 계수는
+    /// 더하지 않는다. 이력 문도 같다(호출 행은 그대로 선다). 칸이 없는 `webSearch` 만 일상이다(위 `other_tool_ends…`).
+    // ADR-0241
+    #[test]
+    fn a_status_less_tool_end_on_a_status_bearing_variant_is_a_defect() {
+        for item in [
+            serde_json::json!({"type": "commandExecution", "id": "i-1", "command": "x", "commandActions": []}),
+            serde_json::json!({"type": "fileChange", "id": "i-1", "changes": []}),
+            serde_json::json!({"type": "mcpToolCall", "id": "i-1", "server": "fs", "tool": "read_file"}),
+            serde_json::json!({"type": "dynamicToolCall", "id": "i-1", "tool": "t"}),
+            serde_json::json!({"type": "collabAgentToolCall", "id": "i-1", "tool": "spawn"}),
+        ] {
+            let kind = item["type"].as_str().unwrap().to_string();
+            let (events, d) = complete_tool(item.clone());
+            assert!(events.is_empty(), "{kind}: {events:?}");
+            assert_eq!(
+                d.untranslated_observations(),
+                &BTreeMap::from([(format!("tool-status:{kind}#<없음>"), 1)]),
+                "{kind}: 결함 한 칸만 — 일상 계수가 붙거나 조용히 넘어가면 안 된다"
+            );
+
+            let mut h = CodexAppServerDecoder::new();
+            let events = h.history_item("tu", &item);
+            assert!(
+                matches!(events.as_slice(), [OutputEvent::ToolCall { .. }]),
+                "{kind}: 이력 문은 호출만 낸다: {events:?}"
+            );
+            assert_eq!(
+                h.untranslated_observations()
+                    .get(&format!("tool-status:{kind}#<없음>")),
+                Some(&1),
+                "{kind}"
+            );
+        }
+    }
+
+    /// ★빈 스키마 어휘 = 「status 칸이 없는 변형」이다★ — 빠진 status 를 일상으로 읽는 판정이 이 빈 목록에 기댄다. 도구 변형
+    /// 표에서 빈 목록은 `webSearch` 하나여야 한다: 새 변형을 표에 더하고 어휘를 안 적으면 그 변형의 빠진 status 가 조용히
+    /// 일상이 된다.
+    // ADR-0241
+    #[test]
+    fn every_tool_variant_but_web_search_has_a_status_vocabulary() {
+        for kind in TOOL_ITEM_TYPES {
+            if *kind == "webSearch" {
+                assert!(tool_status::of(kind).is_empty(), "{kind}");
+            } else {
+                assert!(
+                    !tool_status::of(kind).is_empty(),
+                    "{kind}: 도구 변형인데 스키마 어휘가 비었다"
+                );
+            }
+        }
+    }
+
+    /// ★가리킬 호출이 없으면 결과를 내지 않고 결함으로 센다★ — id 가 없거나 상한을 넘은 것(호출도 같은 거르기로 id 를
+    /// 잃는다).
+    // ADR-0241
+    #[test]
+    fn a_failed_tool_end_without_a_usable_id_emits_nothing_and_is_a_defect() {
+        for id in [None, Some("i".repeat(MAX_ID_BYTES + 1))] {
+            let mut item =
+                serde_json::json!({"type": "commandExecution", "command": "x", "status": "failed"});
+            if let Some(id) = &id {
+                item["id"] = Value::String(id.clone());
+            }
+            let (events, d) = complete_tool(item);
+            assert!(events.is_empty(), "{events:?}");
+            let seen = d.untranslated_observations();
+            assert_eq!(
+                seen.get("item-id:item/completed#commandExecution"),
+                Some(&1),
+                "{seen:?}"
+            );
+            assert!(
+                seen.get("item:item/completed#commandExecution").is_none(),
+                "결함이 「아는 변형, 번역 안 함」 계수로 새어 들어갔다: {seen:?}"
+            );
+        }
+        let long = "i".repeat(MAX_ID_BYTES);
+        let (events, _) = complete_tool(serde_json::json!({
+            "type": "commandExecution", "id": long, "command": "x", "status": "failed"
+        }));
+        assert!(
+            matches!(events.as_slice(), [OutputEvent::ToolResult { id, .. }] if *id == long),
+            "상한 안의 id 가 걸러졌다: {events:?}"
+        );
+    }
+
+    /// ★이력 문은 끝난 item 하나에서 `[ToolCall, ToolResult]` 를 이 순서로 낸다★ — 누산기는 결과를 앞선 호출 행에 붙이므로
+    /// 순서가 뒤집히면 결과가 버려진다. 같은 id 를 가리키고, 정상 완료면 호출 하나뿐이다.
+    // ADR-0241
+    #[test]
+    fn the_history_door_emits_the_call_then_its_result() {
+        for (status, want) in [
+            ("failed", Some(ToolOutcome::Failed)),
+            ("declined", Some(ToolOutcome::Declined)),
+            ("completed", None),
+            ("inProgress", None),
+        ] {
+            let item = serde_json::json!({"type": "commandExecution", "id": "c1", "command": "x",
+                                          "commandActions": [], "status": status});
+            let (started, _, history) = through_each_door(item);
+            assert!(
+                matches!(started.as_slice(), [OutputEvent::ToolCall { .. }]),
+                "{status}: 시작 문은 끝 상태를 안 읽는다: {started:?}"
+            );
+            match (history.as_slice(), want) {
+                (
+                    [OutputEvent::ToolCall { id: call_id, .. }, OutputEvent::ToolResult { id, outcome }],
+                    Some(want),
+                ) => {
+                    assert_eq!(call_id.as_deref(), Some("c1"), "{status}");
+                    assert_eq!(id, "c1", "{status}");
+                    assert_eq!(*outcome, want, "{status}");
+                }
+                ([OutputEvent::ToolCall { .. }], None) => {}
+                (other, _) => panic!("{status}: {other:?}"),
+            }
+        }
+    }
+
+    /// 이력 문도 id 를 못 쓰면 호출만 내고 결과는 결함으로 센다 — 호출 행은 id 없이도 선다(오늘 그대로).
+    // ADR-0241
+    #[test]
+    fn the_history_door_without_a_usable_id_emits_only_the_call() {
+        let mut d = CodexAppServerDecoder::new();
+        let events = d.history_item(
+            "tu",
+            &serde_json::json!({"type": "fileChange", "changes": [], "status": "declined"}),
+        );
+        assert!(
+            matches!(events.as_slice(), [OutputEvent::ToolCall { id: None, .. }]),
+            "{events:?}"
+        );
+        assert_eq!(
+            d.untranslated_observations()
+                .get("item-id:thread/items/list#fileChange"),
+            Some(&1)
+        );
+    }
+
+    /// 알림 줄만 골라 한 번역기에 차례로 넣는다 — 통로가 번역기에 넘기는 것은 알림뿐이다(응답 · 서버 요청은 `id` 를 싣는다).
+    fn decode_fixture_notifications(fixture: &str) -> Vec<OutputEvent> {
+        let mut d = CodexAppServerDecoder::new();
+        fixture
+            .lines()
+            .filter(|l| {
+                let v: Value = serde_json::from_str(l).expect("fixture 줄이 JSON 이 아니다");
+                v.get("method").is_some() && v.get("id").is_none()
+            })
+            .flat_map(|l| d.decode(format!("{l}\n").as_bytes()))
+            .collect()
+    }
+
+    /// ★실측(codex-cli 0.156.1 · fixture `tool_fail_u2` — `exit 7`)★: 0 아닌 종료는 `status: failed` 로 닫히고, 번역기는
+    /// 그 명령의 호출 뒤 같은 id 의 `ToolResult{Failed}` 를 정확히 하나 낸다.
+    // ADR-0241
+    #[test]
+    fn the_nonzero_exit_fixture_yields_the_call_then_exactly_one_failed_result() {
+        let events = decode_fixture_notifications(include_str!("fixtures/tool_fail_u2.jsonl"));
+        let tools: Vec<&OutputEvent> = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    OutputEvent::ToolCall { .. } | OutputEvent::ToolResult { .. }
+                )
+            })
+            .collect();
+        match tools.as_slice() {
+            [OutputEvent::ToolCall {
+                id: Some(call_id), ..
+            }, OutputEvent::ToolResult { id, outcome }] => {
+                assert_eq!(call_id, "exec-c8b4b685-9f78-4680-99a0-3d560fab9fd1");
+                assert_eq!(id, call_id);
+                assert_eq!(*outcome, ToolOutcome::Failed);
+            }
+            other => panic!("호출 하나 뒤 실패 결과 하나가 아니다: {other:?}"),
+        }
+    }
+
+    /// 기존 실측 fixture 셋은 도구 끝이 전부 `completed` 라 결과 사건이 하나도 없다 — 사건열이 오늘 그대로다.
+    // ADR-0241
+    #[test]
+    fn the_older_fixtures_whose_tools_all_completed_yield_no_tool_result() {
+        for (name, fixture) in [
+            ("steer_m6", include_str!("fixtures/steer_m6.jsonl")),
+            ("tool_end_m7", include_str!("fixtures/tool_end_m7.jsonl")),
+            (
+                "empty_turn_m9",
+                include_str!("fixtures/empty_turn_m9.jsonl"),
+            ),
+        ] {
+            let events = decode_fixture_notifications(fixture);
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, OutputEvent::ToolResult { .. })),
+                "{name}: {events:?}"
+            );
         }
     }
 

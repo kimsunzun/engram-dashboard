@@ -46,7 +46,7 @@ use engram_dashboard_agent::types::{
     Capabilities as CoreCaps, DeliveredCopy as CoreDeliveredCopy, DropCause as CoreDropCause,
     OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
     QueuedInputEvent as CoreQueuedInputEvent, ToolCategory as CoreToolCategory,
-    TurnOutcome as CoreTurnOutcome,
+    ToolOutcome as CoreToolOutcome, TurnOutcome as CoreTurnOutcome,
 };
 
 use engram_dashboard_protocol::{
@@ -61,7 +61,7 @@ use engram_dashboard_protocol::{
     RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
     SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
     StructuredEvent as WireStructuredEvent, SubscribeAction, ToolCategory as WireToolCategory,
-    TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
+    ToolOutcome as WireToolOutcome, TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -793,6 +793,10 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             message_id: message_id.clone(),
             category: Some(tool_category_to_wire(*category)),
         }),
+        CoreOutputEvent::ToolResult { id, outcome } => Some(WireStructuredEvent::ToolResult {
+            id: id.clone(),
+            outcome: tool_outcome_to_wire(*outcome),
+        }),
         CoreOutputEvent::Usage {
             input_tokens,
             output_tokens,
@@ -966,6 +970,18 @@ fn tool_category_to_wire(category: CoreToolCategory) -> WireToolCategory {
         CoreToolCategory::Agent => WireToolCategory::Agent,
         CoreToolCategory::Mcp => WireToolCategory::Mcp,
         CoreToolCategory::Other => WireToolCategory::Other,
+    }
+}
+
+/// 도구 끝 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 결말이 늘면 여기가 컴파일 에러로 서야 새 결말이
+/// 조용히 다른 결말로 접히지 않는다(거부가 실패로 접히면 「오류 N」이 거짓이 된다).
+// ADR-0241
+fn tool_outcome_to_wire(outcome: CoreToolOutcome) -> WireToolOutcome {
+    match outcome {
+        CoreToolOutcome::Completed => WireToolOutcome::Completed,
+        CoreToolOutcome::Failed => WireToolOutcome::Failed,
+        CoreToolOutcome::Declined => WireToolOutcome::Declined,
+        CoreToolOutcome::Refused => WireToolOutcome::Refused,
     }
 }
 
@@ -5281,6 +5297,32 @@ mod tests {
                 Some(W::ToolCall { category, .. }) => assert_eq!(category, Some(want), "{core:?}"),
                 other => panic!("ToolCall 기대, got {other:?}"),
             }
+        }
+    }
+
+    /// ★도구 끝 결말이 하나도 접히지 않고 건너간다★ — 거부가 실패로 떨어지면 묶음 머리의 「오류 N」이 거짓이 되고,
+    /// 우리 거절이 벤더 거부로 떨어지면 사유 줄이 틀린다. `id` 는 그대로 간다(누산기가 그것으로 행을 찾는다).
+    // ADR-0241
+    #[tokio::test]
+    async fn tool_result_maps_every_outcome_one_to_one() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+        for (core, want) in [
+            (CoreToolOutcome::Completed, WireToolOutcome::Completed),
+            (CoreToolOutcome::Failed, WireToolOutcome::Failed),
+            (CoreToolOutcome::Declined, WireToolOutcome::Declined),
+            (CoreToolOutcome::Refused, WireToolOutcome::Refused),
+        ] {
+            assert_eq!(
+                output_event_to_wire(&CoreOutputEvent::ToolResult {
+                    id: "i-1".into(),
+                    outcome: core,
+                }),
+                Some(W::ToolResult {
+                    id: "i-1".into(),
+                    outcome: want,
+                }),
+                "{core:?}"
+            );
         }
     }
 

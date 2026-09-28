@@ -46,7 +46,7 @@ pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent, CommandListEntry,
     DeliveredCopy, DropCause, OutputChunk, QueuedInputCancel, QueuedInputEvent, QueuedInputRow,
-    StructuredEvent, SubscribeAction, ToolCategory, TurnOutcome,
+    StructuredEvent, SubscribeAction, ToolCategory, ToolOutcome, TurnOutcome,
 };
 pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 

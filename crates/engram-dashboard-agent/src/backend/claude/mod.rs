@@ -547,10 +547,14 @@ impl AgentBackend for ClaudeBackend {
 ///   번역이라 「벤더가 이 입력을 지금 턴에서 돌리기 시작했다」는 벤더 출력의 사실이다. 나머지는 `None` —
 ///   `Dropped` 처럼 턴 끝 **뒤에** 오는 사건이 「턴 중」을 다시 켜면 그 화신은 30 분 fail-open 밸브까지
 ///   우편이 막힌다. 코어가 바꿔 적은 명부 사건(봉인 · 받음 불가 판정 뒤)은 이 분류기를 지나지 않는다.
+/// ★도구 끝 결과(`ToolResult`)는 진행도 오류도 아니다★ — 이 번역기는 아직 내지 않지만 codex 와 같은 규칙이다: 끝은
+///   턴 끝 뒤에도 올 수 있어 진행으로 세면 「턴 중」이 다시 켜지고, 도구 실패는 턴 실패가 아니라 오류로 세면 오류 뒤
+///   멈춤이 선다.
 // ADR-0113
 // ADR-0004
 // ADR-0231
 // ADR-0243
+// ADR-0241
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     match event {
         OutputEvent::Structured { kind, .. } if kind == INTERRUPTED_KIND => None,
@@ -573,6 +577,7 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
             TurnOutcome::Interrupted | TurnOutcome::Unknown => TurnEndKind::Other,
         })),
         OutputEvent::Usage { .. }
+        | OutputEvent::ToolResult { .. }
         | OutputEvent::Error(_)
         | OutputEvent::TerminalBytes(_)
         | OutputEvent::QueuedInput(_) => None,
@@ -1863,7 +1868,7 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DeliveredCopy, DropCause, CLI_EXE_ENV, CLI_EXE_NAME};
+    use crate::types::{DeliveredCopy, DropCause, ToolOutcome, CLI_EXE_ENV, CLI_EXE_NAME};
 
     // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
@@ -1904,6 +1909,29 @@ mod tests {
             assert_eq!(
                 end(outcome.clone()),
                 Some(TurnSignal::Ended(TurnEndKind::Other)),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// 도구 끝 결과는 결말이 무엇이든 턴 신호가 아니다 — 진행이면 턴 끝 뒤의 끝이 「턴 중」을 다시 켜고, 오류면 도구
+    /// 실패 하나가 오류 뒤 멈춤을 세운다.
+    // ADR-0241
+    #[test]
+    fn a_tool_result_is_never_a_turn_signal() {
+        let classify = ClaudeBackend.turn_classifier();
+        for outcome in [
+            ToolOutcome::Completed,
+            ToolOutcome::Failed,
+            ToolOutcome::Declined,
+            ToolOutcome::Refused,
+        ] {
+            assert_eq!(
+                classify(&OutputEvent::ToolResult {
+                    id: "c1".into(),
+                    outcome
+                }),
+                None,
                 "{outcome:?}"
             );
         }
@@ -3445,6 +3473,7 @@ mod tests {
                 OutputEvent::TerminalBytes(_) => "terminal".to_string(),
                 OutputEvent::TextDelta { .. } => "text".to_string(),
                 OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
+                OutputEvent::ToolResult { outcome, .. } => format!("tool-result:{outcome:?}"),
                 OutputEvent::Usage { .. } => "usage".to_string(),
                 OutputEvent::MessageDone { .. } => "done".to_string(),
                 OutputEvent::TurnEnd { .. } => "turn-end".to_string(),

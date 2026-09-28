@@ -53,6 +53,15 @@ pub enum OutputEvent {
         /// ★`Option` 이 아니다★ — 번역기는 늘 하나를 고른다(모르면 [`ToolCategory::Other`]).
         category: ToolCategory,
     },
+    /// 도구 호출 하나의 끝 결과 — 앞선 [`ToolCall`](Self::ToolCall) 을 `id` 로 가리킨다(새 행이 아니다).
+    ///
+    /// ★`id` 가 `Option` 이 아니다★ — 가리킬 호출이 없으면 번역기가 이 사건을 내지 않는다.
+    /// ★이 사건이 없다 = 성공이 아니다★ — 없음은 「모름」이다(끝이 안 옴 · 링에서 밀려남 · 옛 데몬 · 끝을 내지
+    ///   않는 백엔드).
+    /// ★턴 끝 **뒤에도** 온다(codex 실측 — 끊긴 명령이 계속 돌다 늦게 닫힌다)★ — 그래서 두 턴 분류기가 진행으로도
+    ///   오류로도 세지 않는다.
+    // ADR-0241
+    ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -206,6 +215,23 @@ pub enum ToolCategory {
     Mcp,
     /// 위 어느 종류에도 들지 않거나 번역기가 모르는 도구 — 벤더가 도구 이름을 바꾸거나 더하면 여기로 떨어진다.
     Other,
+}
+
+/// 도구 호출 끝 결과의 중립 결말 — [`OutputEvent::ToolResult`] 가 나른다.
+///
+/// ★벤더 끝 상태 문자열은 여기 오지 않는다★(ADR-0004) — 판정은 각 backend 안에서 끝난다.
+// ADR-0241
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutcome {
+    /// 정상 완료. ★지금 어느 번역기도 내지 않는다★ — 실패 · 거부만 싣고, 이 낱말은 선 어휘로만 둔다.
+    Completed,
+    Failed,
+    /// 실행되지 않았다 — 우리 거절로 귀속되지 않은 거부(벤더 스스로의 거부 · 벤더 준비 실패 · 귀속 기억을 잃은 우리
+    ///   거절). 이유는 모른다.
+    Declined,
+    /// 우리(호스트)가 승인 요청을 거절해 실행되지 않았다. ★번역기는 내지 않는다★ — 귀속은 거절한 item 을 기억하는
+    ///   codex 통로의 몫이다(ADR-0241 결정 8 — 번역 뒤 `Failed`·`Declined` 를 이것으로 바꿔 쓴다).
+    Refused,
 }
 
 /// session→transport 입력 이벤트. 확장 가능 enum.

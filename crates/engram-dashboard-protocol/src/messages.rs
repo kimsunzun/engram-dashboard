@@ -732,6 +732,14 @@ pub enum StructuredEvent {
         #[ts(optional)]
         category: Option<ToolCategory>,
     },
+    /// 도구 호출 하나의 끝 결과(agent `OutputEvent::ToolResult` 의 미러) — 앞선 `ToolCall` 을 `id` 로 가리킨다.
+    /// ★새 행이 아니다★ — 가리킬 호출이 없으면 붙일 곳이 없다.
+    ///
+    /// ★이 사건이 없다 = 성공이 아니다★ — 없음은 「모름」이다(옛 데몬 · 링에서 밀려남 · 끝이 안 옴).
+    /// ★턴 끝 **뒤에도** 온다★ — 지난 턴의 행에 붙는다. 「새 내용이 왔다」로 읽어 대기 표시를 풀지 말 것.
+    // ADR-0241: `PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
+    //   옛 셸엔 오독할 것이 없다 · 옛 데몬은 이 사건을 안 보낼 뿐이다).
+    ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         #[ts(type = "number")]
         input_tokens: u64,
@@ -913,6 +921,26 @@ pub enum ToolCategory {
     Other,
 }
 
+/// 도구 호출 끝 결과의 중립 결말 — [`StructuredEvent::ToolResult`] 의 `outcome`(agent `ToolOutcome` 미러). wire
+/// 에서는 문자열 하나(`"Failed"` 등).
+///
+/// - `Completed` = 정상 완료. ★지금 어느 데몬도 싣지 않는다★ — 실패 · 거부만 오고 이 낱말은 선 어휘로만 있다.
+/// - `Failed` = 돌다 실패했다.
+/// - `Declined` = 실행되지 않았다 — 우리 거절로 귀속되지 않은 거부. 이유는 모른다.
+/// - `Refused` = 대시보드가 승인 요청을 거절해 실행되지 않았다.
+///
+/// ★벤더 끝 상태 문자열은 여기 오지 않는다★(ADR-0004). ★프론트 소비자는 모르는 낱말을 표식 없음으로 읽는다★ —
+/// 더 새 데몬이 낱말을 더해도 화면이 선다.
+// ADR-0241
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ToolOutcome {
+    Completed,
+    Failed,
+    Declined,
+    Refused,
+}
+
 /// 출력 청크 — 종류 불가지(설계 §2).
 /// (구조화 turn 단위 출력은 TUI↔구조화 스위칭 모드 설계 때 실제 채움 — 지금은 형태만 연다.)
 ///
@@ -1087,6 +1115,10 @@ mod tests {
                 turn_id: None,
                 message_id: None,
                 category: None,
+            },
+            StructuredEvent::ToolResult {
+                id: "call_1".into(),
+                outcome: ToolOutcome::Declined,
             },
             StructuredEvent::Usage {
                 input_tokens: 123,
@@ -1318,6 +1350,49 @@ mod tests {
                 serde_json::from_str::<ToolCategory>(&json).unwrap(),
                 category
             );
+        }
+    }
+
+    // ── 도구 끝 결과(ADR-0241) ──────────────────────────────────────────────────────────
+
+    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 판별자 `"type"`, 결말은 문자열 하나.
+    // ADR-0241
+    #[test]
+    fn tool_result_wire_shape_is_pinned() {
+        for (outcome, want) in [
+            (
+                ToolOutcome::Failed,
+                r#"{"type":"ToolResult","id":"i-1","outcome":"Failed"}"#,
+            ),
+            (
+                ToolOutcome::Refused,
+                r#"{"type":"ToolResult","id":"i-1","outcome":"Refused"}"#,
+            ),
+        ] {
+            let ev = StructuredEvent::ToolResult {
+                id: "i-1".into(),
+                outcome,
+            };
+            let json = serde_json::to_string(&ev).unwrap();
+            assert_eq!(json, want);
+            assert_eq!(serde_json::from_str::<StructuredEvent>(&json).unwrap(), ev);
+        }
+    }
+
+    /// ★네 낱말이 그대로 문자열로 오간다★ — 프론트 지역 합(`structuredAccumulator.ts`)이 같은 네 낱말을 쓴다.
+    // ADR-0241
+    #[test]
+    fn every_tool_outcome_round_trips_as_its_own_name() {
+        let all = [
+            (ToolOutcome::Completed, "Completed"),
+            (ToolOutcome::Failed, "Failed"),
+            (ToolOutcome::Declined, "Declined"),
+            (ToolOutcome::Refused, "Refused"),
+        ];
+        for (outcome, name) in all {
+            let json = serde_json::to_string(&outcome).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<ToolOutcome>(&json).unwrap(), outcome);
         }
     }
 

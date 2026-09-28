@@ -78,6 +78,7 @@ fn event_tag(e: &OutputEvent) -> String {
         OutputEvent::TerminalBytes(_) => "terminal".to_string(),
         OutputEvent::TextDelta { .. } => "text".to_string(),
         OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
+        OutputEvent::ToolResult { outcome, .. } => format!("tool-result:{outcome:?}"),
         OutputEvent::Usage { .. } => "usage".to_string(),
         OutputEvent::MessageDone { .. } => "done".to_string(),
         OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
