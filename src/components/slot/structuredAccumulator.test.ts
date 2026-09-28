@@ -1335,7 +1335,7 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
 
 // ── ADR-0239 · ADR-0241: 도구 종류 · 끝 결과 ──────────────────────────────────────────
 
-/** 생성물에 `category` 칸이 오기 전후 둘 다 서게 타입 게이트를 우회해 싣는다. */
+/** 옛 데몬(칸 없음)·더 새 데몬(모르는 낱말)·깨진 값을 싣게 타입 게이트를 우회한다. */
 function toolCallOf(name: string, id: string | null, category: unknown): StructuredEvent {
   return {
     type: 'ToolCall',
@@ -1347,7 +1347,7 @@ function toolCallOf(name: string, id: string | null, category: unknown): Structu
     category,
   } as unknown as StructuredEvent
 }
-/** 생성물에 `ToolResult` 변형이 오기 전후 둘 다 서게 타입 게이트를 우회한다. */
+/** 더 새 데몬의 결말 낱말 · 깨진 `id` 를 싣게 타입 게이트를 우회한다. */
 function toolResult(id: unknown, outcome: unknown): StructuredEvent {
   return { type: 'ToolResult', id, outcome } as unknown as StructuredEvent
 }

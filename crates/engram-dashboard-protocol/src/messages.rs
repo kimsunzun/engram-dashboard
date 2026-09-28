@@ -1328,7 +1328,8 @@ mod tests {
         );
     }
 
-    /// ★아홉 낱말이 그대로 문자열로 오간다★ — 프론트 지역 합(`structuredAccumulator.ts`)이 같은 아홉 낱말을 쓴다.
+    /// ★아홉 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolCategory.ts` 로 이 낱말을 읽는다
+    /// (`structuredAccumulator.ts` 의 `TOOL_CATEGORIES`).
     // ADR-0239
     #[test]
     fn every_tool_category_round_trips_as_its_own_name() {
@@ -1379,7 +1380,8 @@ mod tests {
         }
     }
 
-    /// ★네 낱말이 그대로 문자열로 오간다★ — 프론트 지역 합(`structuredAccumulator.ts`)이 같은 네 낱말을 쓴다.
+    /// ★네 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolOutcome.ts` 로 이 낱말을 읽는다
+    /// (`structuredAccumulator.ts` 의 `toolResultMark`).
     // ADR-0241
     #[test]
     fn every_tool_outcome_round_trips_as_its_own_name() {

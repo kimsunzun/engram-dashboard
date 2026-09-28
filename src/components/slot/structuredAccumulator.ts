@@ -18,6 +18,8 @@
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
+import type { ToolCategory } from '../../../crates/engram-dashboard-protocol/bindings/ToolCategory'
+import type { ToolOutcome } from '../../../crates/engram-dashboard-protocol/bindings/ToolOutcome'
 import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bindings/TurnOutcome'
 import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queuedInputReducer'
 
@@ -27,22 +29,8 @@ import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queue
  */
 export type TurnOutcomeMark = 'failed' | 'interrupted' | 'unknown'
 
-/**
- * 도구 호출의 중립 종류(각 backend 번역기가 정한다). 칸이 없거나(옛 데몬) 모르는 낱말이면(더 새 데몬) 항목은
- * `'Other'` 다.
- */
-// ADR-0239: 생성물 `ToolCategory.ts` 가 오기 전에도 tsc 가 서게 같은 낱말을 지역에 둔다 — 생성물 import 로
-//   바꾸는 것은 TRD S21-chat-ux §7 I1.
-export type ToolCategory = 'Read' | 'Search' | 'List' | 'Edit' | 'Command' | 'Web' | 'Agent' | 'Mcp' | 'Other'
-
-/**
- * 도구 호출 하나의 끝 결과. `Refused` = 호스트(대시보드)가 승인 요청을 거절해 실행되지 않았다 ·
- * `Declined` = 실행되지 않았으나 호스트 거절로 귀속되지 않은 것 — 에이전트 스스로의 거부 · 에이전트 쪽 준비
- * 실패 · 귀속을 잃은 호스트 거절(이어받은 이력의 복원 · 거절 기억 상한에서 밀려남)이 모두 여기 든다. 이유를
- * 말하지 않는다.
- */
-// ADR-0241: 생성물 `ToolOutcome.ts` 와 같은 낱말의 지역 합 — 교체 시점은 `ToolCategory` 와 같다.
-export type ToolOutcome = 'Completed' | 'Failed' | 'Declined' | 'Refused'
+// ADR-0239 · ADR-0241: 생성물을 여기서 다시 내보내 소비자가 이 모듈 하나에서 받게 한다.
+export type { ToolCategory, ToolOutcome }
 
 /** 도구 행의 끝 표식 — `ToolOutcome` 에서 정상 완료를 뺀 것. */
 export type ToolResultMark = 'failed' | 'declined' | 'refused'
@@ -172,11 +160,6 @@ export class StructuredEventAccumulator {
 
   /** @returns 위 `feed` 와 같은 뜻. */
   private consume(ev: StructuredEvent, seq: number | undefined): boolean {
-    // ADR-0241: `case` 가 아니라 가드인 것은 생성물에 이 변형이 오기 전후 둘 다 tsc 가 서게 하려는 것이다.
-    //   ★이 가지에서 `ev` 의 칸을 읽지 말 것★ — 오기 전엔 `ev` 가 `never` 로 좁혀져 칸 읽기가 tsc 오류다. 온
-    //   뒤엔 아래 `never` 망라에서 이 변형이 빠지고, 생성물의 결말 낱말이 지역 `ToolOutcome` 보다 많으면 안
-    //   빠져 거기서 빨갛다(낱말 표류 경보).
-    if (isToolResultEvent(ev)) return this.consumeToolResult(ev)
     switch (ev.type) {
       case 'TextDelta': {
         // 빈 델타("")는 phantom item(빈 Markdown 블록·의미 없는 구분선 유발)을 만들지 않도록 스킵.
@@ -197,8 +180,8 @@ export class StructuredEventAccumulator {
           name: ev.name,
           argsJson: ev.args_json,
           id: ev.id,
-          // ADR-0239: 캐스트로 읽는 것은 생성물에 이 칸이 오기 전에도 tsc 가 서게 하려는 것이다.
-          category: normalizeToolCategory((ev as { category?: unknown }).category),
+          // ADR-0239: 타입은 좁아도 wire 값은 옛 데몬(칸 없음)·더 새 데몬(모르는 낱말)을 싣는다.
+          category: normalizeToolCategory(ev.category),
           resultMark: null,
           itemId: this.nextId++,
         })
@@ -286,6 +269,9 @@ export class StructuredEventAccumulator {
         break
       case 'QueuedInput':
         return this.consumeQueued(ev.op, seq)
+      case 'ToolResult':
+        // ADR-0241
+        return this.consumeToolResult(ev)
       default: {
         // ★모르는 이벤트를 조용히 삼키지 않는다★: 아무것도 안 하면 화면은 한 픽셀도 안 바뀌는데 호출자는
         //   프레임이 온 것으로 행동한다. 릴리스 WebView2 에는 devtools 가 없어 console 이 사용자에게 도달
@@ -352,7 +338,7 @@ export class StructuredEventAccumulator {
    * 뒤(다음 턴 도중일 수도)에 끝난다. 이 프레임으로 대기를 풀면 새 턴의 대기 표시가 답 없이 꺼진다.
    */
   // ADR-0241
-  private consumeToolResult(ev: LocalToolResultEvent): boolean {
+  private consumeToolResult(ev: ToolResultEvent): boolean {
     // 모양이 깨진 프레임의 `null` id 가 id 없는 도구 행에 붙지 않게 거른다.
     if (typeof ev.id !== 'string') return false
     const mark = toolResultMark(ev.outcome)
@@ -593,20 +579,16 @@ function outcomeMark(
   }
 }
 
-/** 생성물 `StructuredEvent` 의 `ToolResult` 변형과 같은 모양. */
 // ADR-0241
-type LocalToolResultEvent = { type: 'ToolResult'; id: string; outcome: ToolOutcome }
-
-// ADR-0241: `type` 만 본다 — `id` · `outcome` 은 `consumeToolResult` 가 런타임에 다시 거른다.
-function isToolResultEvent(ev: unknown): ev is LocalToolResultEvent {
-  return ev !== null && typeof ev === 'object' && (ev as { type?: unknown }).type === 'ToolResult'
-}
+type ToolResultEvent = Extract<StructuredEvent, { type: 'ToolResult' }>
 
 /**
  * ★모르는 낱말(더 새 데몬)·깨진 모양은 표식 없음이다★ — 아는 셋 중 하나로 접으면 화면이 거짓 결말을 그린다
  * (`outcomeMark` 와 같은 규율).
  */
-function toolResultMark(outcome: unknown): ToolResultMark | null {
+// ADR-0241: 인자가 생성물 `ToolOutcome` 이라 낱말이 늘거나 바뀌면 `default` 의 `never` 대입에서 tsc 가 빨갛다
+//   (낱말 표류 경보). 런타임에는 더 새 데몬의 모르는 값이 그대로 `default` 로 떨어진다.
+function toolResultMark(outcome: ToolOutcome): ToolResultMark | null {
   switch (outcome) {
     case 'Failed':
       return 'failed'
@@ -616,9 +598,11 @@ function toolResultMark(outcome: unknown): ToolResultMark | null {
       return 'refused'
     case 'Completed':
       return null
-    default:
-      console.warn('[structuredAccumulator] 모르는 ToolResult outcome — 표식 없이 둔다:', outcome)
+    default: {
+      const unknownWord: never = outcome
+      console.warn('[structuredAccumulator] 모르는 ToolResult outcome — 표식 없이 둔다:', unknownWord)
       return null
+    }
   }
 }
 
