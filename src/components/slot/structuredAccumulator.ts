@@ -106,6 +106,8 @@ interface QueuedReconcile {
 export class StructuredEventAccumulator {
   private items: StructuredItem[] = []
   private turnDone = false
+  // ADR-0244: 먹은 턴 경계 수 — ★reset 도 되돌리지 않는다★(호출자는 한 `feed` 앞뒤로만 견준다).
+  private turnBoundaries = 0
   // 단조 증가 item id — reset() 시 0 복귀. 같은 이벤트열을 refeed 하면 동일 id 를 재현(replay idempotence).
   private nextId = 0
   // ★user 메시지 uuid dedup(blunt-suppress → uuid dedup 교체, text 블록 한정)★: json 모드는 write_input
@@ -340,6 +342,7 @@ export class StructuredEventAccumulator {
       this.items.push({ kind: 'separator', itemId: this.nextId++ })
     }
     this.turnDone = true
+    this.turnBoundaries++
   }
 
   /**
@@ -539,6 +542,15 @@ export class StructuredEventAccumulator {
    */
   isTurnDone(): boolean {
     return this.turnDone
+  }
+
+  /**
+   * 지금까지 먹은 턴 경계(MessageDone · TurnEnd — 결말 무관) 수. 단조이고 `reset` 도 되돌리지 않는다 — 한 `feed` 앞뒤의
+   * 차가 곧 「그 프레임이 턴 경계였다」다. ★`isTurnDone` 의 거짓 → 참으로 대신하지 말 것★ — 이미 끝을 읽던 채 받은
+   * 경계(보낸 직후 · 새 턴의 첫 프레임 전)는 그 전이가 없다.
+   */
+  turnBoundaryCount(): number {
+    return this.turnBoundaries
   }
 
   /** 재구독(replay) 전 초기화 — 히스토리 전체가 다시 흘러 동일 상태로 재구성되게 한다(위 idempotent 불변식). */

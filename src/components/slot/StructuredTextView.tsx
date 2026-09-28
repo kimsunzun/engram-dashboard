@@ -648,6 +648,7 @@ export function StructuredTextView({
   streaming = false,
   slotId,
   onGroupToggle,
+  interrupting = false,
 }: {
   items: StructuredItem[]
   streaming?: boolean
@@ -658,6 +659,11 @@ export function StructuredTextView({
    * TRD S21-chat-ux §4-5: 마지막이 아닌 묶음을 펼치면 바닥 따라가기를 푼다(붙은 채면 누른 머리가 화면 위로 밀려난다).
    */
   onGroupToggle?: (isLast: boolean) => void
+  /**
+   * 끊기를 보내고 그 턴이 끝나기를 기다린다 — 대기 꼬리가 「중단하는 중」을 그린다(ADR-0244). `streaming` 이 아니면 그릴
+   * 꼬리가 없어 읽지 않는다.
+   */
+  interrupting?: boolean
 }) {
   const results = buildToolResultMap(items)
   // ADR-0241: 벤더 오류 id 는 한 렌더에 한 번 짓고 모든 묶음의 요약이 나눠 쓴다.
@@ -711,7 +717,7 @@ export function StructuredTextView({
         //   자리 매칭돼 remount 되며 WaitRow 타이머(경과 초)가 턴 도중 리셋된다. 리스트 밖 고정 노드라 상수
         //   key 로 정체성을 못박는다(변경 금지).
         <ChatRow key="__streaming__" rail runPos={tailPos}>
-          <WaitRow />
+          <WaitRow interrupting={interrupting} />
         </ChatRow>
       )}
       {showTail && (

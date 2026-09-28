@@ -37,6 +37,7 @@ import { INPUT_LOCKED_REFUSAL } from '../api/agentClient'
 import { fireAndForget } from './dispatch'
 import { buildSlotMenu } from './slotMenu'
 import { useAgentStore } from '../store/agentStore'
+import { pendingInterrupt, useInterruptStore } from '../store/interruptStore'
 
 beforeEach(() => {
   clientMock.spawnAgent.mockClear()
@@ -50,6 +51,7 @@ beforeEach(() => {
   clientMock.interruptAgent.mockImplementation(async () => undefined)
   dialogMock.open.mockReset()
   useAgentStore.setState({ presets: [], profiles: [] })
+  useInterruptStore.setState({ pending: {}, views: {} })
 })
 afterEach(() => {
   useAgentStore.setState({ presets: [], profiles: [] })
@@ -441,5 +443,117 @@ describe('agent.interrupt', () => {
     expect(clientMock.interruptAgent).toHaveBeenCalledWith('a1')
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
+  })
+})
+
+// ── ADR-0244: 끊기를 보낸 뒤 턴 끝까지 「중단하는 중」 · 그동안 다시 보내지 않는다 ───────────────────────────
+describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
+  const interrupting = (agentId: string): boolean =>
+    pendingInterrupt(useInterruptStore.getState(), agentId) !== undefined
+
+  /** 답을 시험이 푸는 끊기 요청. */
+  function deferred(): { resolve: () => void; reject: (e: unknown) => void } {
+    const handle = { resolve: () => {}, reject: (_e: unknown) => {} }
+    clientMock.interruptAgent.mockImplementation(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          handle.resolve = resolve
+          handle.reject = reject
+        }),
+    )
+    return handle
+  }
+
+  it('그 에이전트의 대화 뷰가 있으면 보내는 즉시 서고, 끊기가 받아들여져도 턴 끝까지 남는다', async () => {
+    useInterruptStore.getState().watch('a1')
+    const answer = deferred()
+    const result = run('agent.interrupt', { agentId: ' a1 ' }) as Promise<unknown>
+    expect(interrupting('a1')).toBe(true)
+    expect(interrupting('other')).toBe(false)
+    answer.resolve()
+    await expect(result).resolves.toEqual({ outcome: 'requested' })
+    expect(interrupting('a1')).toBe(true)
+    // 턴 끝에 걷는 것은 대화 뷰다(RichSlot.test.tsx).
+    useInterruptStore.getState().end('a1')
+    expect(interrupting('a1')).toBe(false)
+  })
+
+  it.each<[string, () => unknown]>([
+    ['임대 거절(CONFLICT)', () => new Error(INPUT_LOCKED_REFUSAL)],
+    ['끊을 턴 없음(맨 문자열)', () => 'no turn to interrupt'],
+    ['끊김', () => new Error('connection lost')],
+  ])('거절되면 걷는다 — %s', async (_label, error) => {
+    useInterruptStore.getState().watch('a1')
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw error()
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toBeDefined()
+    expect(interrupting('a1')).toBe(false)
+  })
+
+  it('중단하는 중에 다시 부르면 보내지 않고 requested 로 답한다', async () => {
+    useInterruptStore.getState().watch('a1')
+    await expect(run('agent.interrupt', { agentId: 'a1' })).resolves.toEqual({ outcome: 'requested' })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).resolves.toEqual({ outcome: 'requested' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    expect(interrupting('a1')).toBe(true)
+
+    // 턴이 끝나면 다음 부름은 다시 보낸다.
+    useInterruptStore.getState().end('a1')
+    await run('agent.interrupt', { agentId: 'a1' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('첫 요청이 아직 답을 기다리면 다시 부른 쪽은 그 결말을 따른다 — 거절도', async () => {
+    useInterruptStore.getState().watch('a1')
+    const answer = deferred()
+    const first = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    const second = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    answer.reject('no turn to interrupt')
+    await expect(first).rejects.toBe('no turn to interrupt')
+    await expect(second).rejects.toBe('no turn to interrupt')
+    expect(interrupting('a1')).toBe(false)
+  })
+
+  it('늦게 온 옛 요청의 거절은 그 뒤 새 요청의 중단하는 중을 걷지 않는다', async () => {
+    useInterruptStore.getState().watch('a1')
+    const oldAnswer = deferred()
+    const old = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    // 옛 요청이 답을 기다리는 동안 턴이 끝났고, 다음 턴에서 새로 끊는다.
+    useInterruptStore.getState().end('a1')
+    const newAnswer = deferred()
+    const fresh = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+
+    oldAnswer.reject('no turn to interrupt')
+    await expect(old).rejects.toBe('no turn to interrupt')
+    expect(interrupting('a1')).toBe(true)
+    newAnswer.resolve()
+    await expect(fresh).resolves.toEqual({ outcome: 'requested' })
+  })
+
+  it('이 창에 그 에이전트의 대화 뷰가 없으면 서지 않고, 다시 부르면 다시 보낸다', async () => {
+    await run('agent.interrupt', { agentId: 'a1' })
+    expect(interrupting('a1')).toBe(false)
+    await run('agent.interrupt', { agentId: 'a1' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('마지막 대화 뷰가 풀려야 걷힌다 — 같은 에이전트의 다른 뷰가 남으면 그대로다', async () => {
+    const releaseA = useInterruptStore.getState().watch('a1')
+    const releaseB = useInterruptStore.getState().watch('a1')
+    await run('agent.interrupt', { agentId: 'a1' })
+    releaseA()
+    releaseA() // 두 번 불러도 한 번만 센다.
+    expect(interrupting('a1')).toBe(true)
+    releaseB()
+    expect(interrupting('a1')).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({})
+  })
+
+  it("프로토타입 이름('constructor')을 중단하는 중으로 읽지 않는다", async () => {
+    await run('agent.interrupt', { agentId: 'constructor' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith('constructor')
   })
 })

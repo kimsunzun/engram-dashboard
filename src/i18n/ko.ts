@@ -138,6 +138,8 @@ export const ko = {
     turnFailed: '응답이 실패로 끝났습니다',
     turnInterrupted: '응답이 중단됐습니다',
     turnUnknown: '응답이 끝났습니다 — 끝난 이유는 알 수 없습니다',
+    // ADR-0244: 끊기를 보냈고 턴 끝을 기다린다 — 멈췄다는 뜻이 아니다(멈춤은 위 turnInterrupted 가 말한다).
+    interrupting: '중단하는 중…',
     // 이 셸이 모르는 이벤트가 도착했을 때. 방향이 한쪽뿐이라 원인을 단정할 수 있다 — 모르는 어휘는
     //   데몬에서 오므로 뒤처진 쪽은 언제나 셸이다.
     unsupportedEvent: '표시할 수 없는 신호 {count}건 — 앱이 데몬보다 오래된 버전일 수 있습니다',

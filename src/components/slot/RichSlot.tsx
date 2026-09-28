@@ -36,6 +36,7 @@ import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { fireAndForget } from '../../commands/dispatch'
 import { useAgentStore } from '../../store/agentStore'
 import { useToolGroupStore } from '../../store/toolGroupStore'
+import { pendingInterrupt, useInterruptStore } from '../../store/interruptStore'
 import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
 import type { QueuedEntry } from './queuedInputReducer'
 import { QueuedInputList } from './QueuedInputList'
@@ -178,6 +179,8 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     let sub: OutputSubscription | null = null
     let cancelled = false
     const lastSeq = { current: -1 }
+    // ADR-0244: 이 화신의 첫 'live' 를 지났나 — 그 전의 프레임은 이 뷰가 처음 짓는 이력이다(아래 턴 끝 재기가 거른다).
+    let caughtUp = false
 
     // 목록이 빈 채로 머무는 동안은 같은 참조를 지킨다 — 거의 모든 프레임이 이 경우라 리렌더를 늘리지 않는다.
     const refreshQueued = (): void => {
@@ -219,7 +222,16 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             return
           }
           // tag1 payload = StructuredEvent JSON 1건.
+          const boundariesBefore = acc.turnBoundaryCount()
           const releasesAwaiting = acc.feed(chunk.bytes, chunk.seq)
+          // ADR-0244: 이 프레임이 턴 경계(MessageDone · TurnEnd — 결말 무관)다 — 「중단하는 중」을 걷는다. ★렌더(`streaming`)가
+          //   아니라 프레임에서 재는 것은 끝 사건과 다음 턴의 첫 프레임이 한 렌더로 묶이면 `streaming` 이 한 번도 거짓으로 안
+          //   그려지기 때문이다★ — 그러면 표시가 다음 턴까지 남고 그 턴의 Esc 가 무시된다. ★누산기의 끝 아님 → 끝 전이로
+          //   재지 말 것★ — 보낸 직후(누산기는 앞 턴의 끝을 읽던 채)에 끊은 턴의 끝은 그 전이가 없다.
+          // ★첫 'live' 전의 프레임은 세지 않는다★ — 같은 에이전트의 뷰가 새로 붙으면 빈 누산기가 이력을 다시 지으며 옛 턴
+          //   끝마다 끝으로 넘어가, 다른 뷰에서 끊는 중인 턴의 표시를 일찍 걷는다(그러면 다시 친 Esc 가 두 번째 끊기를 보낸다).
+          //   그 뒤의 같은 화신 재buffering 이 흘리는 프레임은 세도 된다 — 위 seq 거름을 지난 것은 이 뷰가 처음 보는 프레임이다.
+          if (caughtUp && acc.turnBoundaryCount() !== boundariesBefore) useInterruptStore.getState().end(agentId)
           // 새 참조로 set(누산기 내부 배열을 in-place 갱신하므로, 상위 배열 참조를 새로 떠 리렌더 보장).
           //   반환값과 무관하게 먼저 그린다 — 대기를 풀지 않는 프레임도 앞선 행을 바꿨을 수 있다(아래 ②).
           setItems([...acc.snapshot()])
@@ -242,6 +254,11 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           setReplayDone(state === 'live')
           setPhase(state)
           if (state === 'live') {
+            // ADR-0244: 처음 따라잡았는데 열린 턴이 없다 = 끊으려던 턴은 이미 끝났다 — 그 끝이 따라잡기 전 이력에만 들어
+            //   있으면(끊던 뷰가 사라진 뒤 붙은 뷰 · 첫 buffering 중에 명령을 부름) 위 턴 끝 재기도 대기 표시 꺼짐도 못 본다.
+            //   ★열린 턴으로 끝나면 걷지 않는다★ — 다른 뷰에서 끊는 중인 턴이 바로 그 열린 턴이다.
+            if (!caughtUp && acc.isTurnDone()) useInterruptStore.getState().end(agentId)
+            caughtUp = true
             setContinuesConversation(info?.continuesConversation ?? false)
             // 표식이 없으면 답이 어느 화신 것인지 못 가르므로 대조하지 않는다(링이 준 목록 그대로 — 오늘과 같다).
             if (info?.epoch !== undefined) reconcileQueued(info.epoch)
@@ -270,6 +287,10 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           // ADR-0239: 고른 펼침도 비운다 — 새 화신은 사건열이 달라, 누산기가 0 부터 다시 매긴 항목 번호의 묶음 키
           //   (`item:<itemId>`)가 옛 선택과 다른 묶음을 가리킨다.
           useToolGroupStore.getState().clear(viewId)
+          // ADR-0244: 끊으려던 턴은 사라진 화신의 것이다. 같은 틱의 새 이력이 턴을 열어 두면 아래 `streaming` 이 거짓으로
+          //   그려지지 않으므로 여기서 걷는다.
+          useInterruptStore.getState().end(agentId)
+          caughtUp = false // 새 화신의 이력이 지금부터 흐른다 — 바로 뒤 같은 틱의 'live' 가 다시 세운다.
           // ADR-0226: 새 화신이 이어받기 화신인지는 바로 뒤 같은 틱의 'live' 가 다시 알린다.
           setContinuesConversation(false)
           sendOkRef.current = false
@@ -303,6 +324,17 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   //   `chat.toolGroup.setExpanded` 도 적지 못한다. 정리에서 돌려받은 해제를 부른다(고른 펼침은 남는다).
   //   `getState` 로 부르는 것은 이 컴포넌트가 저장소를 구독하지 않게 하려는 것이다 — 펼침을 읽는 것은 `ToolGroupRow` 다.
   useEffect(() => useToolGroupStore.getState().bind(viewId, agentId), [viewId, agentId])
+
+  // ADR-0244: 이 창에 그 에이전트의 대화 뷰가 있다고 알린다 — 없는 에이전트에는 명령이 「중단하는 중」을 세우지 않고, 마지막
+  //   뷰가 풀리면 걷힌다(`store/interruptStore.ts` 머리).
+  //   ★이 뷰의 구독이 멈춘 동안(`detached` · `error`)은 세지 않는다★ — 턴 끝을 볼 수 없는 뷰다. 공유 상태를 여기서 직접
+  //   걷으면 같은 에이전트의 멀쩡한 다른 뷰가 끊는 중인 표시까지 지워, 턴이 끝나기 전에 두 번째 끊기가 나간다. 빠지기만
+  //   하면 남은 멀쩡한 뷰가 없을 때만 마지막 뷰 규칙이 걷는다.
+  useEffect(
+    () => (subscriptionDown ? undefined : useInterruptStore.getState().watch(agentId)),
+    [agentId, subscriptionDown],
+  )
+  const interrupting = useInterruptStore((s) => pendingInterrupt(s, agentId) !== undefined)
 
   // ADR-0242 · TRD S21-chat-ux §4-5: 사람이 마지막이 아닌 묶음을 펼치면 따라가기를 푼다 — 붙은 채면 펼친 높이만큼
   //   바닥으로 다시 내려가 누른 머리가 화면 위로 밀려난다. 마지막 묶음은 붙음을 그대로 둔다.
@@ -390,9 +422,26 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
   const streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)
 
+  // ADR-0244: 대기 표시가 턴 경계 없이 꺼져도 「중단하는 중」을 걷는다 — 보낸 글이 턴을 열지 않고 대기 목록에 섰다(끊을
+  //   턴이 아직 없다). 다음에 서는 꼬리는 그 글이 여는 새 턴의 것이다. 켜짐 → 꺼짐에서만 걷는다 — 마운트 때 거짓인 것은
+  //   끝이 아니다.
+  const wasStreamingRef = useRef(streaming)
+  useEffect(() => {
+    if (wasStreamingRef.current && !streaming) useInterruptStore.getState().end(agentId)
+    wasStreamingRef.current = streaming
+  }, [streaming, agentId])
+  // ADR-0244: 에이전트가 없어졌거나 연결이 끊긴 동안은 이 창의 어느 뷰도 턴 끝을 볼 길이 없다 — 남겨 두면 이 창의 끊기
+  //   명령이 보내지 않고 「이미 보냈다」로만 답한다. ★연결이 잠깐 끊겨도 걷는다★ — 다시 붙은 뒤의 Esc 는 오늘처럼 다시 끊는다.
+  //   ★이 뷰 자신의 구독 정지(`subscriptionDown`)는 여기 넣지 않는다★ — 그것은 위 `watch` 에서 빠지는 것으로 다룬다.
+  const agentOrConnectionDown = agentGone || !connected
+  useEffect(() => {
+    if (agentOrConnectionDown && interrupting) useInterruptStore.getState().end(agentId)
+  }, [agentOrConnectionDown, interrupting, agentId])
+
   // ADR-0237: 칸 안 어디서든(U6) 맨 Esc = 도는 턴 끊기. ★capture 인 이유★: 입력창 onKeyDown 이 전파를 먼저
-  //   끊어 bubble 로는 입력창의 Esc 가 여기 안 온다. ★낙관 상태를 바꾸지 않는다★ — 끊겼다는 것은 턴 끝 사건이
-  //   알린다. 입력창 글도 건드리지 않는다. 턴이 열리기 전(보낸 직후)의 Esc 는 통로가 거절하고 fireAndForget 이
+  //   끊어 bubble 로는 입력창의 Esc 가 여기 안 온다. ★대화의 낙관 상태(awaiting · turnDone)를 바꾸지 않는다★ — 끊겼다는
+  //   것은 턴 끝 사건이 알린다. 「중단하는 중」은 명령이 세운다(ADR-0244 — 사람 키와 LLM 이 같은 길). 입력창 글도 건드리지
+  //   않는다. 턴이 열리기 전(보낸 직후)의 Esc 는 통로가 거절하고(명령이 「중단하는 중」을 걷는다) fireAndForget 이
   //   경고로 삼킨다 — 다시 누르면 된다.
   // ★능력은 옵셔널로 탄다★ — 못 읽으면 끊지 않는 쪽이 맞다(위 `command` 와 같은 사유).
   const canInterrupt = agent?.capabilities?.control?.interrupt === true
@@ -401,6 +450,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     if (e.key !== 'Escape') return
     const fire = isInterruptEscape(e, {
       streaming,
+      interrupting,
       agentUnavailable,
       canInterrupt,
       overlayOpen: document.querySelector(OVERLAY_SELECTOR) !== null,
@@ -448,6 +498,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             streaming={streaming}
             slotId={viewId}
             onGroupToggle={onGroupToggle}
+            interrupting={interrupting}
           />
           {/* ADR-0226 이력 대기 — 대화 영역 가운데 아이콘 + 옅은 막(사용자 결정 2026-09-24).
               ★여기 두는 이유★: absolute 의 기준이 ScrollArea 루트(seam 의 relative)라 대화 영역만 정확히

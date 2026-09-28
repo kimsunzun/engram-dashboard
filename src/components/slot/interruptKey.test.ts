@@ -31,6 +31,7 @@ function key(over: Partial<InterruptKeyEvent> = {}): InterruptKeyEvent {
 function ctx(over: Partial<InterruptKeyContext> = {}): InterruptKeyContext {
   return {
     streaming: true,
+    interrupting: false,
     agentUnavailable: false,
     canInterrupt: true,
     overlayOpen: false,
@@ -62,6 +63,7 @@ describe('isInterruptEscape', () => {
   it.each<[string, Partial<InterruptKeyContext>]>([
     ['오버레이가 열려 있다', { overlayOpen: true }],
     ['턴이 안 돈다', { streaming: false }],
+    ['끊기를 이미 보내고 턴 끝을 기다린다(ADR-0244)', { interrupting: true }],
     ['에이전트가 지금 없다', { agentUnavailable: true }],
     ['통로가 끊기를 지원하지 않는다', { canInterrupt: false }],
   ])('칸 조건 하나만 어긋나도 발화하지 않는다 — %s', (_label, over) => {

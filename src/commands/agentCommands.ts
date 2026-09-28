@@ -10,6 +10,7 @@ import { agentClient } from '../api/clientFactory'
 import { INPUT_LOCKED_REFUSAL } from '../api/agentClient'
 import { useAgentStore } from '../store/agentStore'
 import { refreshProfiles } from '../store/eventBus'
+import { pendingInterrupt, useInterruptStore } from '../store/interruptStore'
 import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
 import { registerSlotMenu } from './slotMenu'
@@ -170,12 +171,30 @@ register({
   // ★`help` 를 달지 말 것★ — 사유는 위 `agent.cancelQueuedInput` 과 같다(데몬이 같은 이름을 버스에서 답한다).
   // ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다. `requested` = 끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝
   //   사건이 알린다(버스 쪽 같은 이름의 결말 낱말과 같다).
+  // ADR-0244: 보내는 즉시 그 에이전트를 「중단하는 중」으로 세운다 — 칸이 그것을 그리고 그동안 Esc 를 무시한다. 거절되면
+  //   여기서 걷고, 턴 끝에 걷는 것은 칸이다(`store/interruptStore.ts`).
+  //   ★중단하는 중이면 다시 보내지 않고 쥔 요청의 결말을 돌려준다★ — 두 번째 끊기는 대기 중이던 다음 글이 연 턴에 떨어질
+  //   수 있다. 거절로 답하지 않는 것은 끊기가 이미 나가 있어 `requested` 가 참이기 때문이다. 그 요청이 아직 답을 기다리면
+  //   그 결말(거절 포함)을 그대로 따른다.
   run: async (args) => {
     const agentId = args?.agentId
     if (typeof agentId !== 'string' || !agentId.trim()) {
       throw new Error(`[agent.interrupt] agentId 가 비어 있음: ${String(agentId)}`)
     }
-    await withLeaseConflict(() => agentClient.interruptAgent(agentId.trim()))
+    const id = agentId.trim()
+    const inFlight = pendingInterrupt(useInterruptStore.getState(), id)
+    if (inFlight !== undefined) {
+      await inFlight
+      return { outcome: 'requested' }
+    }
+    const request = withLeaseConflict(() => agentClient.interruptAgent(id))
+    useInterruptStore.getState().begin(id, request)
+    try {
+      await request
+    } catch (e) {
+      useInterruptStore.getState().end(id, request)
+      throw e
+    }
     return { outcome: 'requested' }
   },
 })

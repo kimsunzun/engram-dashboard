@@ -1,7 +1,7 @@
 // ADR-0050: 결정적 어댑터 동작(매핑·흡수·필터)을 검증하고, leaf 내부 렌더(chat/*)는 스모크 수준만 본다
 //   (react-markdown 등 세부는 leaf 자체 테스트의 몫).
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
@@ -973,5 +973,39 @@ describe('StructuredTextView 끊김 표시 행 (ADR-0243)', () => {
     // 묶음 · 표시 행 · 묶음 = 세 행.
     expect(railRows(container)).toBe(3)
     expect(railDots(container)).toBe(3)
+  })
+})
+
+// ── ADR-0244: 끊기를 보낸 뒤 대기 꼬리가 「중단하는 중」을 그린다 ──────────────────────────────────────
+describe('StructuredTextView 대기 꼬리 — 중단하는 중(ADR-0244)', () => {
+  afterEach(() => vi.useRealTimers())
+  const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
+
+  it('interrupting 이면 Wait 대신 CircleStop + 「중단하는 중…」 을 그린다', () => {
+    const { container } = render(<StructuredTextView items={items} streaming interrupting />)
+    const row = container.querySelector('[data-wait-interrupting="1"]') as HTMLElement
+    expect(row).not.toBeNull()
+    expect(row.textContent).toBe(t('chat.interrupting'))
+    expect(row.querySelector('svg')?.getAttribute('class')).toContain('lucide-circle-stop')
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  it('streaming 이 아니면 interrupting 이어도 꼬리가 없다', () => {
+    const { container } = render(<StructuredTextView items={items} interrupting />)
+    expect(container.querySelector('[data-wait-interrupting="1"]')).toBeNull()
+    expect(screen.queryByText(t('chat.interrupting'))).toBeNull()
+  })
+
+  it('중단하는 중을 오가도 꼬리 행이 다시 마운트되지 않는다 — 경과 초가 이어진다', () => {
+    vi.useFakeTimers()
+    const { rerender } = render(<StructuredTextView items={items} streaming />)
+    act(() => vi.advanceTimersByTime(3000))
+    expect(screen.getByText('3s')).toBeTruthy()
+    rerender(<StructuredTextView items={items} streaming interrupting />)
+    expect(screen.queryByText('Wait')).toBeNull()
+    act(() => vi.advanceTimersByTime(2000))
+    rerender(<StructuredTextView items={items} streaming />)
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(screen.getByText('5s')).toBeTruthy()
   })
 })

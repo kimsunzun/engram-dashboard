@@ -18,11 +18,13 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
-import type { OutputChunk, ReplayLiveInfo, ViewPhase } from '../../api/agentClient'
+import { INPUT_LOCKED_REFUSAL, type OutputChunk, type ReplayLiveInfo, type ViewPhase } from '../../api/agentClient'
 import { t } from '../../i18n'
 import '../../commands/chatCommands' // side-effect register — 도구 묶음 command 가 마운트된 슬롯에 닿나를 잰다.
-import { run } from '../../commands/registry'
+import '../../commands/agentCommands' // side-effect register — 끊기 명령이 「중단하는 중」을 세우는 길까지 태운다(ADR-0244).
+import { run, type CommandArgs } from '../../commands/registry'
 import { useToolGroupStore } from '../../store/toolGroupStore'
+import { pendingInterrupt, useInterruptStore } from '../../store/interruptStore'
 import { getFollow } from './scrollFollow/followRegistry'
 import { JUMP_BUTTON_DELAY_MS } from './scrollFollow/JumpToBottom'
 
@@ -38,6 +40,7 @@ const clientMock = vi.hoisted(() => ({
   listQueuedInputs: vi.fn(async () => ({ inputs: [], as_of_seq: null, epoch: 0, stopped_after_error: false })) as (
     id: string,
   ) => Promise<unknown>,
+  interruptAgent: vi.fn(async () => undefined) as (id: string) => Promise<void>,
   // 연결 상태 표면(ADR-0148 부재 판정의 절반) — 등록 즉시 현재 상태로 1회 발화하는 실물 계약을 따른다.
   connectionState: 'connected' as 'connected' | 'reconnecting' | 'down',
   stateCbs: new Set<(s: 'connected' | 'reconnecting' | 'down') => void>(),
@@ -62,6 +65,7 @@ vi.mock('../../api/clientFactory', () => ({
     ),
     writeStdin: (id: string, bytes: Uint8Array) => clientMock.writeStdin(id, bytes),
     listQueuedInputs: (id: string) => clientMock.listQueuedInputs(id),
+    interruptAgent: (id: string) => clientMock.interruptAgent(id),
     resizePty: vi.fn(async () => undefined),
     get connectionState() {
       return clientMock.connectionState
@@ -80,6 +84,8 @@ const dispatchMock = vi.hoisted(() => ({ fireAndForget: vi.fn() }))
 vi.mock('../../commands/dispatch', () => ({
   fireAndForget: (...args: unknown[]) => dispatchMock.fireAndForget(...args),
 }))
+// 끊기 명령 모듈이 폴더 다이얼로그를 import 한다 — 이 시험들은 그 문을 부르지 않는다.
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 
 // ── agentStore stub — 슬롯이 부재 판정용으로 agents·agentsLoaded 를 조회한다. ──
 // agentsLoaded=false 가 기본 = "권위 명부 미수신" → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
@@ -143,8 +149,10 @@ beforeEach(() => {
     epoch: 0,
     stopped_after_error: false,
   }))
+  clientMock.interruptAgent = vi.fn(async () => undefined)
   clientMock.connectionState = 'connected'
   clientMock.stateCbs.clear()
+  useInterruptStore.setState({ pending: {}, views: {} })
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
   dispatchMock.fireAndForget.mockReset()
@@ -1503,6 +1511,8 @@ describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
   })
 })
 
+// ★이 표는 일부러 명령을 흉내만 낸다(`fireAndForget` mock)★ — 실제 창 명령은 한 턴의 두 번째 Esc 를 무시하므로(ADR-0244 ·
+//   아래 「중단하는 중」 표) 한 턴에 두 번 눌러 두 번 부르는 포커스 시험들은 그 mock 에 기댄다.
 describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
   // 'absent' = 능력 칸이 아예 없다(undefined 를 넘기면 기본값이 대신 들어간다).
   function running(interrupt: boolean | 'absent' = true): unknown[] {
@@ -1655,6 +1665,341 @@ describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
     expect(document.activeElement).toBe(root())
     fireEvent.keyDown(root(), { key: 'Escape' })
     expect(interrupts()).toHaveLength(2)
+  })
+})
+
+// ★Esc 뒤 「중단하는 중」(ADR-0244)★: 세우는 쪽은 창 명령이고 걷는 쪽은 칸이라, 여기서는 사람 경로를 실제 명령까지
+//   태운다(위 ADR-0237 표는 명령을 흉내만 내므로 그 시험들의 두 번째 Esc 는 여전히 부른다).
+describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 Esc 무시(ADR-0244)', () => {
+  const root = (): HTMLElement => document.querySelector('[data-rich-live="1"]') as HTMLElement
+  const input = (): HTMLTextAreaElement => screen.getByPlaceholderText(/메시지 입력/) as HTMLTextAreaElement
+  const indicator = (): Element | null => document.querySelector('[data-wait-interrupting="1"]')
+  const interrupting = (agentId = AGENT): boolean =>
+    pendingInterrupt(useInterruptStore.getState(), agentId) !== undefined
+  const turnEnd = (seq: number, kind: 'Interrupted' | 'Completed' = 'Interrupted'): OutputChunk =>
+    tag1(seq, JSON.stringify({ type: 'TurnEnd', turn_id: null, outcome: { kind } }))
+  const delta = (seq: number, text: string): OutputChunk => tag1(seq, JSON.stringify({ type: 'TextDelta', text }))
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('../../commands/dispatch')>('../../commands/dispatch')
+    dispatchMock.fireAndForget.mockImplementation((...args: unknown[]) =>
+      actual.fireAndForget(...(args as [string, CommandArgs | undefined])),
+    )
+    agentStoreState.agents = [
+      { id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities: { control: { interrupt: true } } },
+    ]
+    agentStoreState.agentsLoaded = true
+  })
+
+  /** 끊기 능력이 있는 에이전트의 턴이 도는 중(델타만 왔다 — 턴 끝 없음). */
+  async function mountStreaming(): Promise<void> {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    act(() => captured.onChunk!(delta(0, 'streaming reply')))
+    expect(screen.getByText('Wait')).toBeTruthy()
+  }
+
+  it('Esc 한 번 = 끊기 한 번 · 꼬리가 곧바로 「중단하는 중…」 · 그동안 Esc 는 보내지도 먹지도 않는다', async () => {
+    await mountStreaming()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith(AGENT)
+    expect(indicator()).not.toBeNull()
+    expect(screen.getByText(t('chat.interrupting'))).toBeTruthy()
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    // 끊기가 받아들여져도 턴 끝이 오기 전까지는 그대로다.
+    await flush()
+    expect(indicator()).not.toBeNull()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(true)
+    expect(fireEvent.keyDown(root(), { key: 'Escape' })).toBe(true)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it.each<[string, (seq: number) => OutputChunk]>([
+    ['TurnEnd(중단)', (seq) => turnEnd(seq)],
+    ['TurnEnd(완료)', (seq) => turnEnd(seq, 'Completed')],
+    ['MessageDone', (seq) => tag1(seq, JSON.stringify({ type: 'MessageDone' }))],
+  ])('턴 끝(%s)에 걷히고, 다음에 도는 턴에서는 Esc 가 다시 끊는다', async (_label, end) => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    act(() => captured.onChunk!(end(1)))
+    expect(interrupting()).toBe(false)
+    expect(indicator()).toBeNull()
+
+    act(() => captured.onChunk!(delta(2, 'next turn')))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+    expect(indicator()).not.toBeNull()
+  })
+
+  it('턴 끝과 다음 턴의 첫 프레임이 한 렌더로 묶여도 걷힌다 — 다음 턴에 표시가 남지 않고 Esc 가 먹힌다', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+
+    act(() => {
+      captured.onChunk!(turnEnd(1))
+      captured.onChunk!(delta(2, 'queued message reply'))
+    })
+    expect(indicator()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('보낸 직후 · 첫 프레임 전의 Esc 도 그 턴 끝에 걷힌다(누산기가 이미 끝으로 읽고 있던 턴)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(indicator()).not.toBeNull()
+
+    // 턴을 여는 프레임 없이 끝만 온다(누산기는 끝 → 끝) — 끝 사건 자체로 걷는다.
+    act(() => captured.onChunk!(turnEnd(2)))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(interrupting()).toBe(false)
+  })
+
+  it('보낸 직후 끊은 턴의 끝과 다음 턴의 첫 프레임이 한 렌더로 묶여도 걷힌다 — 누산기는 앞 턴의 끝을 읽던 채였다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(indicator()).not.toBeNull()
+
+    act(() => {
+      captured.onChunk!(turnEnd(2))
+      captured.onChunk!(delta(3, 'next turn'))
+    })
+    expect(interrupting()).toBe(false)
+    expect(indicator()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+    expect(indicator()).not.toBeNull()
+  })
+
+  it('보낸 글이 턴을 열지 않고 대기 목록에 서서 대기 표시가 꺼지면 걷힌다(턴 경계 없음)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'M', text: 'hello' })))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(interrupting()).toBe(false)
+  })
+
+  it.each<[string, () => unknown]>([
+    ['임대 거절(CONFLICT)', () => INPUT_LOCKED_REFUSAL],
+    ['끊을 턴 없음', () => 'no turn to interrupt'],
+  ])('끊기가 거절되면(%s) 걷히고 Esc 가 다시 끊는다', async (_label, error) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    clientMock.interruptAgent = vi.fn(async () => {
+      throw error()
+    })
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(indicator()).not.toBeNull()
+
+    await flush()
+    expect(indicator()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(warn).toHaveBeenCalled()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('같은 에이전트의 둘째 뷰가 붙어 옛 턴 끝을 replay 해도 걷히지 않는다 — 걷는 것은 라이브 턴 끝이다', async () => {
+    const history = [delta(0, 'old reply'), tag1(1, JSON.stringify({ type: 'MessageDone' })), delta(2, 'streaming reply')]
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      captured.onState!('live')
+    })
+    const view1 = captured.onChunk!
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    // 둘째 뷰 — 빈 누산기가 이력을 다시 짓는다(옛 턴 끝 seq 1 이 끝 → 끝으로 넘어간다).
+    render(<RichSlot viewId="v2" agentId={AGENT} />)
+    await flush()
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      captured.onState!('live')
+    })
+    expect(interrupting()).toBe(true)
+    expect(document.querySelectorAll('[data-wait-interrupting="1"]')).toHaveLength(2)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+
+    act(() => view1(turnEnd(3)))
+    expect(interrupting()).toBe(false)
+  })
+
+  it.each<[string, () => void]>([
+    [
+      '에이전트가 명부에서 사라짐(종료)',
+      () => {
+        agentStoreState.agents = []
+        act(() => captured.onChunk!(delta(1, ' more')))
+      },
+    ],
+    ['구독이 재요청을 소진함(error)', () => act(() => captured.onState!('error'))],
+    ['연결 끊김', () => setConnection('down')],
+  ])('부재가 되면(%s) 걷히고, 이 창의 끊기 명령이 다시 보낸다', async (_label, becomeUnavailable) => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    becomeUnavailable()
+    expect(deadOverlay()).not.toBeNull()
+    expect(interrupting()).toBe(false)
+    await act(async () => {
+      await run('agent.interrupt', { agentId: AGENT })
+    })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('둘째 뷰의 구독만 멈추면(error) 첫 뷰의 「중단하는 중」은 남고 다시 보내지 않는다 — 마지막 뷰까지 멈추면 걷힌다', async () => {
+    const history = [delta(0, 'old reply'), tag1(1, JSON.stringify({ type: 'MessageDone' })), delta(2, 'streaming reply')]
+    const first = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    const view1State = captured.onState!
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      view1State('live')
+    })
+    const view1Input = first.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.keyDown(view1Input, { key: 'Escape' })
+    await flush()
+
+    render(<RichSlot viewId="v2" agentId={AGENT} />)
+    await flush()
+    const view2State = captured.onState!
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      view2State('live')
+    })
+    expect(useInterruptStore.getState().views).toEqual({ [AGENT]: 2 })
+
+    act(() => view2State('error'))
+    expect(interrupting()).toBe(true)
+    expect(useInterruptStore.getState().views).toEqual({ [AGENT]: 1 })
+    expect(first.container.querySelector('[data-wait-interrupting="1"]')).not.toBeNull()
+    expect(fireEvent.keyDown(view1Input, { key: 'Escape' })).toBe(true)
+    await act(async () => {
+      await run('agent.interrupt', { agentId: AGENT })
+    })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+
+    act(() => view1State('error'))
+    expect(interrupting()).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({})
+  })
+
+  it.each<[string, OutputChunk[], boolean]>([
+    ['닫힌 턴으로 끝나면 걷힌다', [delta(0, 'reply'), tag1(1, JSON.stringify({ type: 'MessageDone' }))], false],
+    [
+      '열린 턴으로 끝나면 남는다',
+      [delta(0, 'reply'), tag1(1, JSON.stringify({ type: 'MessageDone' })), delta(2, 'streaming reply')],
+      true,
+    ],
+  ])('첫 buffering 중에 끊기를 불렀고 그 replay 가 %s', async (_label, replay, stays) => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    await act(async () => {
+      await run('agent.interrupt', { agentId: AGENT })
+    })
+    expect(interrupting()).toBe(true)
+
+    // 턴 끝이 따라잡기 전 이력에만 있다 — 대기 표시는 그 전후로 꺼져 있어 켜짐 → 꺼짐도 없다.
+    act(() => {
+      for (const frame of replay) captured.onChunk!(frame)
+      captured.onState!('live')
+    })
+    expect(interrupting()).toBe(stays)
+  })
+
+  it('따라잡은 뒤의 같은 화신 재buffering 은 닫힌 턴으로 끝나도 걷지 않는다 — 보낸 직후라 새 턴의 첫 프레임이 아직 없다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    act(() => {
+      captured.onState!('buffering')
+      captured.onState!('live')
+    })
+    expect(interrupting()).toBe(true)
+  })
+
+  it('새 화신(비우기)이 오면 걷힌다 — 새 화신의 이력이 같은 틱에 턴을 열어 두어도', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+
+    act(() => {
+      captured.onReset!()
+      captured.onChunk!(delta(0, 'new incarnation'))
+    })
+    expect(interrupting()).toBe(false)
+    expect(screen.getByText('Wait')).toBeTruthy()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('마운트 해제 · 에이전트 교체에 걷힌다 — 낡은 표시가 살아남지 않는다', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+    cleanup()
+    expect(interrupting()).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({})
+
+    const OTHER = 'eeee-ffff'
+    const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(delta(0, 'streaming reply')))
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupting()).toBe(true)
+    rerender(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    expect(interrupting()).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({ [OTHER]: 1 })
   })
 })
 

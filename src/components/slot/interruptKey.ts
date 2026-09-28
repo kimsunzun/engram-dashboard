@@ -34,6 +34,11 @@ export interface InterruptKeyEvent {
 export interface InterruptKeyContext {
   /** 칸이 응답을 기다리거나 받는 중으로 보인다(RichSlot 의 `streaming`). */
   streaming: boolean
+  /**
+   * 끊기를 이미 보내고 그 턴이 끝나기를 기다린다(`store/interruptStore.ts`). ADR-0244: 그동안의 Esc 는 무시한다 — 다시
+   * 보낸 끊기는 대기 중이던 다음 글이 연 턴에 떨어질 수 있다.
+   */
+  interrupting: boolean
   /** 부재 막이 선 조건(종료 · 연결 끊김 · 구독 정지). */
   agentUnavailable: boolean
   /** 그 에이전트의 통로가 끊기를 지원한다(`capabilities.control.interrupt`). */
@@ -54,7 +59,7 @@ export function isInterruptEscape(e: InterruptKeyEvent, ctx: InterruptKeyContext
   // Radix 레이어는 문서 capture 에서 먼저 먹는다 — 그 Esc 는 레이어를 닫는 키다.
   if (e.defaultPrevented) return false
   if (ctx.overlayOpen) return false
-  if (!ctx.streaming || ctx.agentUnavailable || !ctx.canInterrupt) return false
+  if (!ctx.streaming || ctx.interrupting || ctx.agentUnavailable || !ctx.canInterrupt) return false
   if (ctx.scope === 'input' && e.target !== ctx.textarea) return false
   return true
 }
