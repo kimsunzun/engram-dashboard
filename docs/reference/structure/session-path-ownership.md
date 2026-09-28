@@ -228,8 +228,9 @@ eleven booleans are literals.
   (:30), `shutdown: Arc<AtomicBool>` (:31), `reader: Mutex<Option<Box<dyn Read + Send>>>` (:33),
   `job_handle` (:35).
 - **What it owns that stdio does not:** the ConPTY master — resizable and closable, and the closing
-  is the EOF lever. Hence a real `resize` (pty.rs:297-309) and a real `interrupt` = write `0x03`
-  (pty.rs:311-313). **What stdio owns that pty does not:** a separate stderr pipe. PTY merges stderr
+  is the EOF lever. Hence a real `resize` (pty.rs:297-309). `interrupt` used to write `0x03`
+  (pty.rs:311-313); since ADR-0245 it is `Unsupported` (terminal mode handles the person's own
+  Esc/Ctrl-C). **What stdio owns that pty does not:** a separate stderr pipe. PTY merges stderr
   into the console stream, so the diagnostic buffer is always empty for PTY sessions
   (output_core.rs:59-61).
 - **Natural-exit watcher** (pty.rs:178-202), named `"engram-pty-watcher"`: polls `child.try_wait()`
@@ -1416,7 +1417,8 @@ Not reachable / gated:
   `AgentManager::{write_stdin, write_stdin_observed, submit_stdin_observed,
   write_stdin_observed_if_epoch}` (manager.rs:1577, :1581, :1594, :1628).
 - Verified by exhaustive search: the only non-test `send_input` call sites in the whole workspace are
-  session.rs:164, session.rs:214, and pty.rs:312 (`interrupt` writing `0x03` to itself).
+  session.rs:164 and session.rs:214. (pty.rs:312 — `interrupt` writing `0x03` to itself — was a third
+  until ADR-0245 made PTY interrupt `Unsupported`.)
   **No code path reaches `send_input` without going through `AgentSession`.**
 - The bytes are **always** passed through the backend encoder first (session.rs:163), so a caller
   cannot choose the framing: `Raw` copies verbatim, `ClaudeStreamJson` wraps into one JSON line
