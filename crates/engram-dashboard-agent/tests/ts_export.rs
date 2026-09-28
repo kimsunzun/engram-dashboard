@@ -11,9 +11,10 @@
 //! ★생성물은 커밋한다★ — CI 의 diff 게이트가 이 디렉토리를 봐야 어휘 drift 를 잡는다.
 
 use engram_dashboard_agent::commands::{
-    AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentListArgs, AgentListOk,
-    AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs,
-    AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentSpawnArgs, AgentSpawnOk, CATALOG_VERSION,
+    AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentInterruptArgs, AgentInterruptOk,
+    AgentListArgs, AgentListOk, AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs,
+    AgentMoveOk, AgentNewArgs, AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentSpawnArgs,
+    AgentSpawnOk, CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -65,6 +66,8 @@ fn export_typescript_bindings() {
         .expect("AgentCancelQueuedInputArgs 바인딩 export 실패");
     AgentCancelQueuedInputOk::export_all_to(out)
         .expect("AgentCancelQueuedInputOk 바인딩 export 실패");
+    AgentInterruptArgs::export_all_to(out).expect("AgentInterruptArgs 바인딩 export 실패");
+    AgentInterruptOk::export_all_to(out).expect("AgentInterruptOk 바인딩 export 실패");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("bindings/ 조회")

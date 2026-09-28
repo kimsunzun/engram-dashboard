@@ -4033,6 +4033,7 @@ mod tests {
                     names,
                     vec![
                         "agent.cancelQueuedInput",
+                        "agent.interrupt",
                         "agent.list",
                         "agent.listQueuedInputs",
                         "agent.move",

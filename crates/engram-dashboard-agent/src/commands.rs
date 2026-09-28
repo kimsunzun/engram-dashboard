@@ -29,6 +29,7 @@ use crate::types::{
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v6(2026-09-28): 이름 하나가 늘었다 — `agent.interrupt`(ADR-0237).
     // v5(2026-09-26): 이름 둘이 늘었다 — `agent.listQueuedInputs`·`agent.cancelQueuedInput`(ADR-0231).
     // v4(2026-09-22): `agent.new` 의 `backend` 어휘가 **`Claude` 하나 → `Claude`·`Codex` 둘**이 됐다
     //   (ADR-0219). 이름도 칸도 안 늘었지만 **그 칸이 받는 낱말 집합**이 바뀌었고 그것이 호출자가 보는
@@ -38,7 +39,7 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 5;
+    catalog_version: 6;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -223,6 +224,17 @@ declare_commands! {
     } -> ok AgentCancelQueuedInputOk {
         outcome: String,
     } errors [NOT_FOUND, CONFLICT];
+
+    /// 도는 턴을 끊는다(≠ kill — 프로세스는 산다). `outcome` = `requested`(끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝 사건이 알린다).
+    /// NOT_FOUND = 그런 에이전트가 없거나 잠들었다. CONFLICT = 이름이 모호하다 · 끊을 턴이 없다 · 이 에이전트는
+    /// 끊기를 지원하지 않는다 · 연결된 뷰어가 이 에이전트의 입력을 쥐고 있다.
+    #[effect(Write)]
+    #[since(6)]
+    "agent.interrupt" => args AgentInterruptArgs {
+        target: String,
+    } -> ok AgentInterruptOk {
+        outcome: String,
+    } errors [NOT_FOUND, CONFLICT];
 }
 
 /// 산 에이전트의 **입력을 움직이는** 명령 — 공통 입구가 입력 임대(`check_input`)를 먼저 본다.
@@ -230,8 +242,10 @@ declare_commands! {
 /// ★선언 매크로에 칸을 더하지 않고 여기 둔다★ — `CommandSpec` 에 표식을 얹으면 명령 crate 가 입력 임대라는
 ///   도메인을 알게 된다. 이 목록의 이름은 전부 이 블록의 `Write` 선언이어야 한다(시험이 잰다).
 /// 조회(`agent.listQueuedInputs`)는 임대를 안 본다 — 읽기다.
+/// 끊기(`agent.interrupt`)도 든다 — WS `Interrupt` 가 임대를 보는 것과 같게.
 // ADR-0231
-pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput"];
+// ADR-0237
+pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput", "agent.interrupt"];
 
 /// 명부 한 행 — 이 표가 매니저에게서 보는 것만.
 ///
@@ -288,6 +302,10 @@ pub trait AgentCommandHost: Send + Sync {
         id: AgentId,
         input_id: &str,
     ) -> Result<CancelOutcome, CancelError>;
+    /// 산 화신의 도는 턴을 끊는다. 산 세션이 없으면 `PtyError::NotFound` · 끊을 턴이 없거나 통로가 끊기를
+    /// 못 하면 `PtyError::Unsupported`.
+    // ADR-0237
+    fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError>;
 }
 
 /// 명부가 바뀌었음을 붙어 있는 클라이언트에게 알리는 출구(포트).
@@ -364,6 +382,10 @@ impl AgentCommandHost for AgentManager {
         input_id: &str,
     ) -> Result<CancelOutcome, CancelError> {
         AgentManager::cancel_queued_input(self, id, input_id)
+    }
+
+    fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+        AgentManager::interrupt(self, id)
     }
 }
 
@@ -538,6 +560,7 @@ pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged
     let move_ = (Arc::clone(&host), Arc::clone(&notify));
     let list_queued = Arc::clone(&host);
     let cancel_queued = Arc::clone(&host);
+    let interrupt = Arc::clone(&host);
 
     // ★조립 때 터뜨린다★: insert 가 반려하는 셋(선언 집합에 없는 이름 · 중복 삽입 · 선언 스키마 텍스트가
     //   JSON 이 아님) 전부 **빌드가 정하는 값**이라 런타임에 달라지지 않는다. 어느 것인지는 패닉에 함께
@@ -596,6 +619,14 @@ pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged
             }),
         )
         .expect("agent.cancelQueuedInput 을 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.interrupt",
+            blocking_handler(move |args: AgentInterruptArgs| {
+                verb_interrupt(interrupt.as_ref(), args)
+            }),
+        )
+        .expect("agent.interrupt 를 표에 꽂지 못했다");
 
     table
 }
@@ -1062,6 +1093,38 @@ fn verb_cancel_queued_input(
     }
 }
 
+// ADR-0237
+fn verb_interrupt(
+    host: &dyn AgentCommandHost,
+    args: AgentInterruptArgs,
+) -> Result<AgentInterruptOk, CommandError> {
+    let token = args.target.as_str();
+    reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
+    // 문구엔 명부 이름을 싣는다 — 공통 입구가 `target` 을 푼 id 로 바꿔 적는다(`verb_cancel_queued_input` 과 같다).
+    let agent = resolve(host, token)?;
+    let name = agent.name.as_str();
+    match host.interrupt_agent(agent.id) {
+        // ★`requested` 는 「멈췄다」가 아니다★ — 끊기를 보냈을 뿐이고 멈춤은 턴 끝 사건이 알린다.
+        Ok(()) => Ok(AgentInterruptOk {
+            outcome: "requested".to_string(),
+        }),
+        Err(PtyError::NotFound(_)) => Err(CommandError::not_found(format!(
+            "'{name}' is not running, so it has no turn to interrupt"
+        ))),
+        // 두 사유(끊을 턴이 없다 · 끊기를 못 하는 통로)를 가르지 않는다 — 통로가 한 변형으로 답하고 호출자가
+        //   할 일도 같다.
+        Err(PtyError::Unsupported(reason)) => Err(CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "'{name}' has no turn to interrupt, or this agent does not support interrupting: {reason}"
+            ),
+        )),
+        Err(other) => Err(CommandError::internal(format!(
+            "could not interrupt '{name}': {other}"
+        ))),
+    }
+}
+
 /// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
 fn not_running(token: &str) -> CommandError {
     CommandError::not_found(format!(
@@ -1245,6 +1308,10 @@ mod tests {
         cancel_answer: Mutex<Option<Result<CancelOutcome, CancelError>>>,
         /// 두 동사가 매니저에 넘긴 지목 — 푼 id 가 그대로 가는지 잰다.
         queued_calls: Mutex<Vec<(AgentId, Option<String>)>>,
+        /// 끊기의 답(한 번 쓰고 비운다). 비었으면 `Ok(())`.
+        interrupt_answer: Mutex<Option<Result<(), PtyError>>>,
+        /// 끊기가 매니저에 넘긴 지목.
+        interrupt_calls: Mutex<Vec<AgentId>>,
     }
 
     /// 명부 통지 계수기 — 「이름을 바꿨는데 트리가 옛 명부를 보여준다」의 감시자.
@@ -1450,6 +1517,15 @@ mod tests {
                 .take()
                 .unwrap_or(Err(CancelError::NotFound))
         }
+
+        fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+            self.interrupt_calls.lock().unwrap().push(id);
+            self.interrupt_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(()))
+        }
     }
 
     fn call(
@@ -1470,6 +1546,7 @@ mod tests {
             names,
             vec![
                 "agent.cancelQueuedInput",
+                "agent.interrupt",
                 "agent.list",
                 "agent.listQueuedInputs",
                 "agent.move",
@@ -3188,6 +3265,75 @@ mod tests {
         assert_eq!(unknown.code(), ErrorCode::NotFound);
         assert!(
             host.queued_calls.lock().unwrap().is_empty(),
+            "인자·지목이 서지 않으면 매니저에 닿지 않는다"
+        );
+    }
+
+    /// 통로의 답이 동사 결말로 한 줄씩 번역된다(TRD S21-chat-ux §3-3).
+    // ADR-0237
+    #[test]
+    fn interrupt_translates_every_transport_answer() {
+        let answers: Vec<(Result<(), PtyError>, Result<&str, ErrorCode>)> = vec![
+            (Ok(()), Ok("requested")),
+            (
+                Err(PtyError::NotFound(AgentId::new_v4())),
+                Err(ErrorCode::NotFound),
+            ),
+            (
+                Err(PtyError::Unsupported("no turn in flight".into())),
+                Err(ErrorCode::Conflict),
+            ),
+            (
+                Err(PtyError::WriteFailed("pipe closed".into())),
+                Err(ErrorCode::Internal),
+            ),
+        ];
+        for (answer, expected) in answers {
+            let host = FakeHost::new();
+            let id = host.with_agent("alpha", true, false);
+            let label = format!("{answer:?}");
+            *host.interrupt_answer.lock().unwrap() = Some(answer);
+            let (table, notify) = wiring(&host);
+
+            let got = call(
+                &table,
+                "agent.interrupt",
+                json!({ "target": id.to_string() }),
+            );
+            match expected {
+                Ok(word) => assert_eq!(got.expect(&label), json!({ "outcome": word }), "{label}"),
+                Err(code) => {
+                    let err = got.expect_err(&label);
+                    assert_eq!(err.code(), code, "{label}");
+                    assert!(
+                        err.message().contains("'alpha'"),
+                        "{label}: 명부 이름으로 부른다: {}",
+                        err.message()
+                    );
+                }
+            }
+            assert_eq!(*host.interrupt_calls.lock().unwrap(), vec![id], "{label}");
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                0,
+                "{label}: 명부를 바꾸지 않는다"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupt_refuses_a_blank_or_unknown_target_before_touching_the_agent() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        let (table, _notify) = wiring(&host);
+
+        let blank = call(&table, "agent.interrupt", json!({ "target": " " })).expect_err("빈 값");
+        assert_eq!(blank.code(), ErrorCode::InvalidArgument);
+        let unknown =
+            call(&table, "agent.interrupt", json!({ "target": "nobody" })).expect_err("지목 실패");
+        assert_eq!(unknown.code(), ErrorCode::NotFound);
+        assert!(
+            host.interrupt_calls.lock().unwrap().is_empty(),
             "인자·지목이 서지 않으면 매니저에 닿지 않는다"
         );
     }

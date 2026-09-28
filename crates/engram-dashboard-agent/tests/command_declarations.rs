@@ -1,8 +1,8 @@
 //! 선언 골든 — 이름 집합과 오류 집합이 조용히 갈리지 않게 못 박는다(TRD §7 「선언 파생」).
 
 use engram_dashboard_agent::commands::{
-    AgentCancelQueuedInputArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs,
-    AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
+    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::{
     command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of, Effect, ErrorCode,
@@ -18,6 +18,7 @@ fn declared_names_are_the_cli_verbs() {
         names,
         vec![
             "agent.cancelQueuedInput",
+            "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
             "agent.move",
@@ -38,7 +39,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 5
+            == 6
     );
 }
 
@@ -51,7 +52,10 @@ fn the_queued_input_verbs_are_declared_with_their_effect_and_generation() {
     let cancel = spec_of("agent.cancelQueuedInput").expect("선언");
     assert_eq!(cancel.effect, Effect::Write);
     assert_eq!(cancel.since, 5);
-    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 5);
+    let interrupt = spec_of("agent.interrupt").expect("선언");
+    assert_eq!(interrupt.effect, Effect::Write);
+    assert_eq!(interrupt.since, 6);
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 6);
 }
 
 /// ★입력을 움직이는 명령 목록은 이 crate 의 `Write` 선언만 담는다★ — 없는 이름이나 조회가 끼면 공통 입구의
@@ -67,6 +71,7 @@ fn every_input_affecting_name_is_a_declared_write_verb() {
         assert_eq!(spec.effect, Effect::Write, "{name}");
     }
     assert!(INPUT_AFFECTING.contains(&"agent.cancelQueuedInput"));
+    assert!(INPUT_AFFECTING.contains(&"agent.interrupt"));
     assert!(!INPUT_AFFECTING.contains(&"agent.listQueuedInputs"));
 }
 
@@ -103,6 +108,10 @@ fn error_sets_are_golden() {
     );
     assert_eq!(
         declared("agent.cancelQueuedInput"),
+        vec![ErrorCode::NotFound, ErrorCode::Conflict]
+    );
+    assert_eq!(
+        declared("agent.interrupt"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
     );
 }
@@ -189,6 +198,11 @@ fn required_matches_what_deserialization_actually_demands() {
             "agent.cancelQueuedInput",
             parses::<AgentCancelQueuedInputArgs>,
             json!({ "target": "alpha", "input_id": "q1" }),
+        ),
+        (
+            "agent.interrupt",
+            parses::<AgentInterruptArgs>,
+            json!({ "target": "alpha" }),
         ),
     ];
 
