@@ -23,6 +23,7 @@ pub mod book;
 pub mod clock;
 pub mod observe;
 pub mod reject_store;
+pub mod schedule;
 pub mod watch;
 
 use std::collections::{BTreeSet, HashMap};
@@ -156,8 +157,9 @@ enum Opened {
 }
 
 impl UsageService {
-    /// 함께 돌려주는 수신단은 스케줄러 스레드 몫이다 — 깸(`()`)은 많아야 하나가 대기하고, 서비스가 drop 되면
-    /// `Disconnected` 가 된다. 받는 쪽이 없어도(버렸음) 서비스는 그대로 돈다 — 깨우기만 허공에 간다.
+    /// 함께 돌려주는 수신단은 스케줄러 스레드 몫이다([`schedule::spawn_scheduler`] 에 넘긴다) — 깸(`()`)은 많아야
+    /// 하나가 대기하고, 서비스가 drop 되면 `Disconnected` 가 된다. 받는 쪽이 없어도(버렸음) 서비스는 그대로 돈다 —
+    /// 깨우기만 허공에 간다.
     pub fn new(parts: UsageParts) -> (Arc<Self>, Receiver<()>) {
         Self::build(parts, REPLY_WAIT_MAX)
     }
@@ -447,7 +449,6 @@ impl UsageService {
     /// ★계획을 뜬 책 락을 놓은 뒤 부른다★ — 락을 쥔 채 부르면 교착이다(발행이 명부를, 못 띄운 조회의 가드가 책을
     ///   잡는다). 계획의 조회는 책이 이미 `in_flight` 를 세웠으므로 여기서 반드시 띄운다(안 띄우면 그 칸은 영영
     ///   진행 중이다).
-    #[allow(dead_code)] // 스케줄러 스레드(`schedule.rs`)가 들어서면 부른다.
     fn carry_out(&self, plan: TickPlan) -> Duration {
         let TickPlan {
             start,
@@ -670,7 +671,7 @@ mod tests {
     use std::sync::{Barrier, OnceLock};
 
     const H: i64 = 3_600;
-    const T0: i64 = 1_900_000_000;
+    pub(super) const T0: i64 = 1_900_000_000;
     /// 깨움을 기다려야 하는 시험의 요청 기다림 — 깨우기가 사라지면 그 시험이 이 상한에서 드러난다.
     const LONG_WAIT: Duration = Duration::from_secs(10);
     /// 시험 쪽의 모든 기다림의 상한 — 교착·깨우기 유실이 매달리는 대신 실패하게.
@@ -681,16 +682,16 @@ mod tests {
         usage_probes()[i].key()
     }
 
-    fn key(i: usize) -> UsageKey {
+    pub(super) fn key(i: usize) -> UsageKey {
         account_key(vendor(i))
     }
 
-    fn set(indices: &[usize]) -> BTreeSet<UsageVendorKey> {
+    pub(super) fn set(indices: &[usize]) -> BTreeSet<UsageVendorKey> {
         indices.iter().map(|&i| vendor(i)).collect()
     }
 
     /// 가짜 조회기 한 번의 대본.
-    enum Scripted {
+    pub(super) enum Scripted {
         Answer(Result<UsageObservation, ProbeFailure>),
         Panic,
     }
@@ -800,7 +801,7 @@ mod tests {
 
     pub(super) struct Rig {
         pub(super) service: Arc<UsageService>,
-        wakes: Receiver<()>,
+        pub(super) wakes: Receiver<()>,
         encoder: Arc<Counting>,
         probes: Vec<&'static FakeProbe>,
         scripts: Vec<mpsc::Sender<Scripted>>,
@@ -852,7 +853,7 @@ mod tests {
         }
     }
 
-    fn rig_with(clock: Arc<dyn UsageClock>, count: usize) -> Rig {
+    pub(super) fn rig_with(clock: Arc<dyn UsageClock>, count: usize) -> Rig {
         rig_full(clock, count, LONG_WAIT)
     }
 
@@ -893,21 +894,21 @@ mod tests {
                 .expect("아는 키")
         }
 
-        fn answer(&self, i: usize, scripted: Scripted) {
+        pub(super) fn answer(&self, i: usize, scripted: Scripted) {
             self.scripts[i].send(scripted).expect("가짜 조회기");
         }
 
-        fn queries(&self, i: usize) -> usize {
+        pub(super) fn queries(&self, i: usize) -> usize {
             self.probes[i].queries.load(Ordering::SeqCst)
         }
 
         /// 그 칸의 진행 중인 조회를 기다리는 요청 수 — 버스 + async.
-        fn joiners(&self, i: usize) -> usize {
+        pub(super) fn joiners(&self, i: usize) -> usize {
             let blocking = self.service.desk().runs[&key(i)].blocking.len();
             blocking + self.service.finished[&key(i)].receiver_count()
         }
 
-        fn in_flight(&self, i: usize) -> bool {
+        pub(super) fn in_flight(&self, i: usize) -> bool {
             self.service
                 .desk()
                 .book
@@ -945,7 +946,7 @@ mod tests {
         }
     }
 
-    fn frames(log: &Log) -> Vec<UsageFrame> {
+    pub(super) fn frames(log: &Log) -> Vec<UsageFrame> {
         log.frames.lock().unwrap().clone()
     }
 
@@ -1399,19 +1400,19 @@ mod tests {
     /// 기다림 상한을 재는 시험의 요청 기다림.
     const SHORT_WAIT: Duration = Duration::from_millis(200);
 
-    fn active(i: usize, pct: f64) -> UsageObservation {
+    pub(super) fn active(i: usize, pct: f64) -> UsageObservation {
         UsageObservation {
             source: UsageSource::Active,
             ..five(i, pct, far_reset())
         }
     }
 
-    fn ok(obs: UsageObservation) -> Scripted {
+    pub(super) fn ok(obs: UsageObservation) -> Scripted {
         Scripted::Answer(Ok(obs))
     }
 
     /// 조건이 설 때까지 짧게 쉬며 본다 — [`BOUND`] 를 넘으면 실패한다.
-    fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
+    pub(super) fn wait_until(what: &str, mut ready: impl FnMut() -> bool) {
         let deadline = Instant::now() + BOUND;
         while !ready() {
             assert!(Instant::now() < deadline, "{what} — 기다림 상한");
@@ -1420,7 +1421,7 @@ mod tests {
     }
 
     /// 버스 요청을 다른 스레드에서 — 받는 쪽([`answered`])의 상한이 매달림을 실패로 만든다.
-    fn bus_request(
+    pub(super) fn bus_request(
         service: &Arc<UsageService>,
         i: usize,
         kind: RequestKind,
@@ -1433,13 +1434,13 @@ mod tests {
         rx
     }
 
-    fn answered(rx: &Receiver<Option<UsageAnswer>>) -> UsageAnswer {
+    pub(super) fn answered(rx: &Receiver<Option<UsageAnswer>>) -> UsageAnswer {
         rx.recv_timeout(BOUND)
             .expect("요청이 상한 안에 끝난다")
             .expect("아는 벤더")
     }
 
-    fn pct(sheet: &UsageLimitSnapshot) -> Option<f64> {
+    pub(super) fn pct(sheet: &UsageLimitSnapshot) -> Option<f64> {
         sheet.five_hour.as_ref().and_then(|w| w.used_pct)
     }
 
