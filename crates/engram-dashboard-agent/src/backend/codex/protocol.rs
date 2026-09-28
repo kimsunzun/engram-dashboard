@@ -240,6 +240,12 @@ pub(crate) mod method {
     /// ★이 이름 하나에 소비자가 둘이다★ — 번역기가 턴 경계로 옮기고(`decoder`), 통로가 큐 해제의
     /// 상태 기계 입력으로 읽는다(`transport`). 둘은 같은 줄을 각자 본다.
     pub(crate) const TURN_COMPLETED: &str = "turn/completed";
+
+    // 서버 → 우리 요청 중 통로가 이름으로 아는 것. ★거절은 어느 요청에나 똑같이 한다★ — 이 둘은 그 위에 거절한
+    // item 을 기억해, 그 item 의 끝을 우리 거절로 귀속한다(ADR-0241).
+    pub(crate) const ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL: &str =
+        "item/commandExecution/requestApproval";
+    pub(crate) const ITEM_FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
 }
 
 /// `TurnStatus` 의 네 값 전량(스키마 0.154.0 `definitions.TurnStatus` — 닫힌 `enum`).
@@ -263,8 +269,10 @@ pub(crate) mod turn_status {
 /// ★스키마는 코드 대역을 정하지 않는다★ — `JSONRPCErrorError.code` 는 제약 없는 i64 이고
 /// `-32xxx` 가 스키마에 한 번도 안 나온다. 우리가 봉투를 정의하는 쪽이므로 값은 우리가 고르고,
 /// JSON-RPC 2.0 관례의 "method not found" 를 빌려 쓴다(읽는 사람에게 뜻이 통한다).
-/// ★app-server 가 이 응답을 어떻게 받아들이는지는 미검증★ — 그 턴을 실패로 접는지 무시하는지
-/// 본 적이 없다. 그래도 버리는 것보다 낫다: 버리면 그 에이전트가 영구 정지한다(TRD §6-2).
+/// ★승인 요청에 온 이 답을 app-server 는 「승인 요청 실패」로 읽는다★(실측 codex-cli 0.156.1 · fixture
+/// `refuse_u2a`): 그 item 을 실행하지 않은 채 곧바로 닫고(명령 = `failed` · 파일 변경 = `declined`) 턴은 이어져
+/// `completed` 로 끝난다 — `error` 알림은 없다. 승인 아닌 요청에 대한 반응은 미검증이다. 어느 쪽이든 버리는 것보다
+/// 낫다: 버리면 그 에이전트가 영구 정지한다(TRD §6-2).
 ///
 /// 참고로 **codex 자신은 모르는 메서드에 `-32600` 을 돌려준다**(실측 0.154.0) — 즉 상대는
 /// "모르는 메서드" 를 따로 세지 않는다. 그래도 우리 쪽 값은 관례 뜻이 분명한 -32601 로 둔다:

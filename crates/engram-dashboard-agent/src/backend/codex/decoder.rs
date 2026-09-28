@@ -90,7 +90,9 @@ const MAX_TRANSCRIPT_CHARS: usize = 64 * 1024;
 /// ★자르지 않고 **거른다**★ — 이 값들은 사람이 읽는 것이 아니라 나중에 **같은지 대조할 토큰**이라,
 /// 잘라 보관하면 서로 다른 긴 둘이 같은 것으로 읽힌다(같은 판단을 이 폴더 `transport` 의
 /// `MAX_TURN_ID_BYTES` 가 한다 — 값도 같다). 관측된 id 는 UUIDv7 문자열(36 바이트)이다.
-const MAX_ID_BYTES: usize = 128;
+/// ★통로가 거절한 승인 item 을 기억할 때도 이 상한으로 거른다★ — 이 상한을 넘은 id 에는 결과가 안 나가 기억이 짝을
+/// 못 찾는다(ADR-0241).
+pub(super) const MAX_ID_BYTES: usize = 128;
 
 /// [`OutputEvent::ToolCall`] 의 `args_json` 이 쓸 수 있는 최대 바이트.
 ///

@@ -7,7 +7,8 @@
 //!   **메시지 본문**이다([`crate::backend::InputEncoder::TransportFramed`]).
 //!
 //! ★스레드 셋과 그들 사이의 벽★:
-//!   - **리더**(= pump, [`AgentTransport::start`] 가 띄운다) — decoder 를 `&mut` 로 배타 소유한다.
+//!   - **리더**(= pump, [`AgentTransport::start`] 가 띄운다) — decoder 를 `&mut` 로 배타 소유한다. 우리가 거절한
+//!     승인 item 의 기억([`RefusedItems`])도 리더 혼자 쥔다 — 락이 없다(ADR-0241).
 //!     ★stdin 락을 절대 잡지 않고 대기표를 기다리지도 않는다★. 답해야 할 줄이 오면 **outbox 에 넣고
 //!     즉시 돌아간다.** 어기면 읽기가 멈추고, 읽기가 멈추면 상대 큐가 차고, 상대가 stdout write 핸들을
 //!     안 닫아 **EOF 가 영영 안 온다** — 프로세스는 살아 있고 신호는 하나도 없다.
@@ -162,6 +163,7 @@ use serde_json::Value;
 
 use super::decoder::{
     history_turn_boundary, is_tool_item, is_user_message, user_bubble, CodexAppServerDecoder,
+    MAX_ID_BYTES,
 };
 use super::protocol::{
     self, method, ClientInfo, Inbound, InitializeParams, InitializeResponse, RequestId,
@@ -174,8 +176,8 @@ use crate::output_core::{estimate_cost_bytes, OutputCore, REPLAY_MAX_BYTES, REPL
 use crate::transport::{AgentTransport, LinkResolution, LinkSink, OutputDecoder};
 use crate::types::{
     AgentId, CommandSpec, ControlCaps, DeliveryAck, DropCause, InputCaps, InputEvent, InputOrigin,
-    OutputCaps, OutputEvent, PtyError, QueuedInputEvent, TerminalReason, TransportCaps, TurnInput,
-    TurnOutcome, Withdraw,
+    OutputCaps, OutputEvent, PtyError, QueuedInputEvent, TerminalReason, ToolOutcome,
+    TransportCaps, TurnInput, TurnOutcome, Withdraw,
 };
 
 #[cfg(windows)]
@@ -299,6 +301,16 @@ const CLIENT_NAME: &str = "engram-dashboard";
 /// 우리가 연 적 없는 턴의 종료를 흘릴 때를 위한 여유이고, 이 값이 그 여유의 상한이다. 넘으면 가장 오래된
 /// 것부터 버린다 — 늦게 온 것일수록 지금 기다리는 턴의 것일 가능성이 높다.
 const EARLY_COMPLETION_SLOTS: usize = 8;
+
+/// 우리가 거절한 승인 요청의 item id 를 기억해 두는 칸 수([`RefusedItems`]).
+///
+/// ★근거★: 상대는 우리 거절을 받은 그 자리에서 곧바로 그 item 의 끝을 낸다(실측 fixture `refuse_u2a` — 요청 ·
+/// 거절 해소 · 끝이 몇 ms 안에 온다). 그래서 **정상 운용에서 차 있는 칸은 0–1 개**다. 남는 것은 끝이 끝내 안 오는
+/// item(도중에 죽은 상대 · 승인 대기 중 끊긴 턴)뿐이고, 이 값이 그 잔여의 상한이다. 넘으면 가장 오래된 것부터
+/// 버린다 — 밀려난 item 의 늦은 끝은 우리 거절이라는 사유를 잃고 명령은 「오류」, 파일 변경은 `Declined`(이유 모름
+/// — 「거부됨 · 실행되지 않음」)로 보인다.
+// ADR-0241
+const REFUSED_ITEM_SLOTS: usize = 16;
 
 /// 붙들어 둘 turn id 의 최대 바이트. ★자르지 않고 **거른다**★ — 이 값은 사람이 읽는 관측 키가 아니라
 /// 나중에 **같은지 대조할 토큰**이라, 잘라 보관하면 서로 다른 긴 id 둘이 같은 것으로 읽힐 수 있다.
@@ -3038,6 +3050,104 @@ impl TurnNoteLog<'_> {
     }
 }
 
+/// 우리가 거절한 승인 요청의 item id — 그 item 의 라이브 끝을 우리 거절([`ToolOutcome::Refused`])로 귀속하려고
+/// 기억한다.
+///
+/// ★벤더 끝만으로는 우리 거절을 못 가른다★(실측 fixture `refuse_u2a`): 거절한 명령은 `failed` 로, 거절한 파일 변경은
+///   `declined` 로 닫혀 진짜 실패 · 벤더 스스로의 거부와 모양이 같다. 그래서 거절한 이 층이 id 를 쥐고 있다가 끝에서
+///   바꿔 쓴다. 번역기는 이 기억을 모른다 — 알림 줄만 받는 순수 번역기로 남는다.
+/// ★리더 전용이고 락이 없다★ — 적는 쪽([`Reader::refuse`])과 읽는 쪽(같은 [`Reader::handle_line`] 의 끝 알림)이 둘 다
+///   리더 스레드이고, 상대는 우리 답을 받은 뒤 끝을 내므로 기억이 늘 끝보다 먼저 선다. 상태 락([`State`])에 두면 락
+///   구간만 는다.
+/// ★비우는 자리는 그 item 의 끝 줄 하나다 — 턴 끝에서 비우지 않는다★: 끝이 턴 끝 뒤에도 온다(실측 fixture `steer_m6`
+///   마지막 줄). 턴 끝에서 비우면 그 늦은 끝이 「오류」로 보인다.
+// ADR-0241
+#[derive(Debug, Default)]
+struct RefusedItems {
+    ids: VecDeque<String>,
+}
+
+impl RefusedItems {
+    /// 거절한 item 하나를 적는다. 차 있으면 가장 오래된 것을 버린다(사유 = [`REFUSED_ITEM_SLOTS`]).
+    /// ★이미 기억한 id 는 다시 넣지 않는다★ — 상대는 승인마다 요청 → 끝을 번갈아 내 한 item 에 거절을 둘 걸지 않지만,
+    ///   그 순서가 바뀌어도 칸이 새지 않게 둔다.
+    fn remember(&mut self, item_id: &str) {
+        if self.ids.iter().any(|r| r == item_id) {
+            return;
+        }
+        if self.ids.len() >= REFUSED_ITEM_SLOTS {
+            if let Some(evicted) = self.ids.pop_front() {
+                tracing::debug!(
+                    cap = REFUSED_ITEM_SLOTS,
+                    evicted = %sanitize(&evicted, LOG_STRING_LIMIT),
+                    "codex app-server: 거절한 승인 item 기억이 상한에 찼다 — 가장 오래된 것을 버린다"
+                );
+            }
+        }
+        self.ids.push_back(item_id.to_string());
+    }
+
+    /// 한 알림 줄의 번역 결과를 우리 거절로 귀속한다. 그 줄이 기억한 item 의 `item/completed` 면 기억을 **꺼내고**
+    /// (끝 상태와 무관 — 끝 줄이 곧 비우는 자리다), 번역기가 그 id 로 낸 `Failed` · `Declined` 결과를 `Refused` 로
+    /// 바꾼다. 번역기가 결과를 안 냈으면(`completed` 등) 기억만 지운다.
+    /// ★벤더 끝 상태로 가르지 않는다★ — 벤더가 우리 거절을 `failed` 로 닫든 `declined` 로 닫든 그 사유는 우리 거절이다.
+    fn attribute(&mut self, method_name: &str, params: Option<&Value>, events: &mut [OutputEvent]) {
+        if method_name != method::ITEM_COMPLETED || self.ids.is_empty() {
+            return;
+        }
+        let Some(item_id) = params
+            .and_then(|p| p.get("item"))
+            .and_then(|i| i.get("id"))
+            .and_then(Value::as_str)
+        else {
+            return;
+        };
+        let Some(at) = self.ids.iter().position(|r| r == item_id) else {
+            return;
+        };
+        self.ids.remove(at);
+        for ev in events.iter_mut() {
+            if let OutputEvent::ToolResult { id, outcome } = ev {
+                if id == item_id && matches!(outcome, ToolOutcome::Failed | ToolOutcome::Declined) {
+                    *outcome = ToolOutcome::Refused;
+                }
+            }
+        }
+    }
+}
+
+/// 거절한 서버 요청이 우리 거절로 귀속할 도구 item 을 가리키면 그 id — 아니면 `None`(오늘처럼 거절만 한다).
+///
+/// ★가리키는 요청은 둘뿐이다 — 명령 승인과 파일 변경 승인★. 둘 다 `itemId` 가 앞서 시작한 도구 item 의 id 이고, 상대는
+///   우리 거절에 그 item 을 곧바로 닫는다(실측 fixture `refuse_u2a`). 그 밖의 요청(`item/tool/call` ·
+///   `item/permissions/requestApproval` 등 — 그 item 이 우리가 그리는 도구 행인지 모른다 · 옛 이름의 승인은 칸이
+///   `callId` 다)은 가리키지 않는다.
+/// ★명령 승인이라도 `approvalId` 나 `networkApprovalContext` 가 실려 있으면 가리키지 않는다(없거나 `null` 만)★ — 앞은
+///   하위 명령 승인이라 그 거절이 부모 item 의 실행 거절이 아니고(부모의 끝은 스크립트 전체의 결과다), 뒤는 네트워크
+///   승인이라 상대가 그 item 의 끝을 내지 않는다(업스트림 소스 판독 `rust-v0.156.1` — 가능성 높음 · 실측한 명령 승인은
+///   둘 다 없는 모양뿐이다).
+/// ★id 는 번역기와 같은 상한([`MAX_ID_BYTES`])으로 거른다★ — 넘는 id 에는 번역기가 결과를 안 내 기억이 짝을 못 찾고
+///   칸만 차지한다. 이 거르기가 붙들어 두는 바이트의 상한이기도 하다: 없으면 한 칸이 줄 상한([`MAX_LINE_BYTES`])까지의
+///   id 를 쥐고, 그런 칸이 [`REFUSED_ITEM_SLOTS`] 개까지 쌓인다.
+// ADR-0241
+fn refused_item_id<'a>(method_name: &str, params: Option<&'a Value>) -> Option<&'a str> {
+    let params = params?;
+    match method_name {
+        method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL => {
+            let carried = |key: &str| params.get(key).is_some_and(|v| !v.is_null());
+            if carried("approvalId") || carried("networkApprovalContext") {
+                return None;
+            }
+        }
+        method::ITEM_FILE_CHANGE_REQUEST_APPROVAL => {}
+        _ => return None,
+    }
+    params
+        .get("itemId")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() <= MAX_ID_BYTES)
+}
+
 struct Reader {
     core: Arc<OutputCore>,
     decoder: Option<Box<dyn OutputDecoder>>,
@@ -3046,12 +3156,18 @@ struct Reader {
     /// 첫 턴 포트 — 부르면서 비운다(화신당 한 번). `None` = 이미 불렀거나 알릴 곳이 없다.
     // ADR-0226
     first_turn: Option<FirstTurnSink>,
+    // ADR-0241
+    refused: RefusedItems,
 }
 
 impl Reader {
     /// 서버 요청을 거절한다. ★답하지 않으면 그 에이전트는 영구 정지한다★ — 그래서 모르는 요청에도
     /// 반드시 답한다. ★성공을 위장하지 않는다★: 승인 요청에 성공 응답을 돌려주면 그것이 자동 승인이다.
-    fn refuse(&self, id: &RequestId, method_name: &str) {
+    /// ★거절한 승인 요청이 도구 item 을 가리키면 그 id 를 기억한다([`RefusedItems`] · 판정 = [`refused_item_id`])★ — 그
+    ///   item 의 끝을 우리 거절로 귀속하려고. 거절 줄이 실제로 제어 큐에 들어갔을 때만 적는다: 닫혔거나 넘쳐 못 넣었으면
+    ///   상대가 답을 못 받아 끝이 안 온다.
+    // ADR-0241
+    fn refuse(&mut self, id: &RequestId, method_name: &str, params: Option<&Value>) {
         let shown = sanitize(method_name, LOG_STRING_LIMIT);
         let line = protocol::error_response_line(
             id,
@@ -3083,6 +3199,8 @@ impl Reader {
             self.core.emit(OutputEvent::Error(format!(
                 "codex app-server: 제어 큐가 가득 차 `{shown}` 요청에 답하지 못했다 — 그쪽은 그 답을 계속 기다린다"
             )));
+        } else if let Some(item_id) = refused_item_id(method_name, params) {
+            self.refused.remember(item_id);
         }
     }
 
@@ -3626,7 +3744,9 @@ impl Reader {
             return;
         }
         match protocol::classify(text) {
-            Ok(Inbound::Request { id, method, .. }) => self.refuse(&id, &method),
+            Ok(Inbound::Request { id, method, params }) => {
+                self.refuse(&id, &method, params.as_ref())
+            }
             Ok(Inbound::Notification { method, params }) => {
                 // ADR-0231
                 // 계측 줄은 락을 놓은 곧바로 찍는다 — 그 계기가 푼 steer 줄(라이터)보다 앞서도록.
@@ -3644,6 +3764,9 @@ impl Reader {
                     }
                     None => Vec::new(),
                 };
+                // ADR-0241: 번역기는 우리 거절을 모른다 — 거절한 item 의 끝은 이 층이 emit 전에 바꿔 쓴다(락 없이).
+                self.refused
+                    .attribute(&method, params.as_ref(), &mut events);
                 // ★턴 경계만 뽑아 **귀속 게이트**를 지난다 — 나머지는 그대로 흐른다★: 번역기는 우리
                 //   thread·turn id 를 몰라 「이 결말이 우리 턴의 것인가」를 답할 수 없고, 이 층은 그것만
                 //   안다(사유 정본 = [`TURN_COMPLETED`] doc).
@@ -3972,6 +4095,7 @@ impl AgentTransport for CodexAppServerTransport {
             state: self.state.clone(),
             pending: self.pending.clone(),
             first_turn: self.first_turn_sink.clone(),
+            refused: RefusedItems::default(),
         };
         let pump_core = core.clone();
         let child = self.child.clone();
@@ -4377,6 +4501,7 @@ mod tests {
             state: state.clone(),
             pending: pending.clone(),
             first_turn: None,
+            refused: RefusedItems::default(),
         };
         Harness {
             reader,
@@ -4423,6 +4548,7 @@ mod tests {
             state: state.clone(),
             pending: pending.clone(),
             first_turn: None,
+            refused: RefusedItems::default(),
         };
         (
             Harness {
@@ -4514,6 +4640,7 @@ mod tests {
             state: state.clone(),
             pending: Arc::new(Pending::default()),
             first_turn: None,
+            refused: RefusedItems::default(),
         };
         FactHarness {
             reader,
@@ -11189,5 +11316,576 @@ mod tests {
         assert_eq!(discarded.len(), 1, "{lines:?}");
         assert_eq!(discarded[0].0, tracing::Level::DEBUG);
         assert_eq!(discarded[0].1.get("agent"), Some(&agent));
+    }
+
+    // ── 우리 거절 귀속 (ADR-0241 · TRD §4-7 ②-2 · ⑨ 「통로 — 거부 귀속」 ①–⑫) ──────────────────────
+
+    fn server_request(id: i64, method_name: &str, params: Value) -> String {
+        serde_json::json!({"id": id, "method": method_name, "params": params}).to_string()
+    }
+
+    /// 명령 승인 요청 — 실측 모양(fixture `refuse_u2a`)에서 귀속이 읽는 칸과 그 곁 몇 칸만 남겼다.
+    fn command_approval(id: i64, item_id: &str) -> String {
+        server_request(
+            id,
+            method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
+            serde_json::json!({"kind": "command", "threadId": "T", "turnId": "u-1", "itemId": item_id}),
+        )
+    }
+
+    fn file_change_approval(id: i64, item_id: &str) -> String {
+        server_request(
+            id,
+            method::ITEM_FILE_CHANGE_REQUEST_APPROVAL,
+            serde_json::json!({"threadId": "T", "turnId": "u-1", "itemId": item_id,
+                               "reason": null, "grantRoot": null}),
+        )
+    }
+
+    /// 도구 item 의 끝 한 줄. 명령은 우리 거절의 실측 모양(`exitCode` · `aggregatedOutput` 이 `null`)이다.
+    fn tool_end(kind: &str, item_id: &str, status: &str) -> String {
+        let item = match kind {
+            "commandExecution" => serde_json::json!({
+                "type": kind, "id": item_id, "command": "x", "commandActions": [],
+                "status": status, "exitCode": null, "aggregatedOutput": null,
+            }),
+            _ => serde_json::json!({"type": kind, "id": item_id, "changes": [], "status": status}),
+        };
+        serde_json::json!({
+            "method": method::ITEM_COMPLETED,
+            "params": {"threadId": "T", "turnId": "u-1", "item": item},
+        })
+        .to_string()
+    }
+
+    fn command_end(item_id: &str, status: &str) -> String {
+        tool_end("commandExecution", item_id, status)
+    }
+
+    fn patch_end(item_id: &str, status: &str) -> String {
+        tool_end("fileChange", item_id, status)
+    }
+
+    fn tool_results(seen: &Arc<Mutex<Vec<OutputEvent>>>) -> Vec<(String, ToolOutcome)> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::ToolResult { id, outcome } => Some((id.clone(), *outcome)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn refusals(state: &SharedState) -> Vec<Value> {
+        outbox_lines(state)
+            .into_iter()
+            .filter(|l| l["error"]["code"] == METHOD_NOT_FOUND)
+            .collect()
+    }
+
+    fn feed(h: &mut Harness, lines: &[String]) {
+        for l in lines {
+            h.reader.handle_line(l.as_bytes());
+        }
+    }
+
+    fn result(id: &str, outcome: ToolOutcome) -> (String, ToolOutcome) {
+        (id.to_string(), outcome)
+    }
+
+    /// 기억은 한 id 에 한 칸이고, 상한을 넘으면 가장 오래된 것을 버리며 그 사실을 debug 로 남긴다.
+    #[test]
+    fn refused_items_hold_one_slot_per_id_and_drop_the_oldest_past_the_cap() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let items = tracing::subscriber::with_default(LogCapture(captured.clone()), || {
+            let mut items = RefusedItems::default();
+            items.remember("a");
+            items.remember("a");
+            assert_eq!(items.ids.len(), 1, "같은 id 가 두 칸을 먹었다");
+            for i in 0..REFUSED_ITEM_SLOTS {
+                items.remember(&format!("n-{i}"));
+            }
+            items
+        });
+        assert_eq!(items.ids.len(), REFUSED_ITEM_SLOTS);
+        assert!(
+            !items.ids.iter().any(|r| r == "a"),
+            "가장 오래된 것이 남았다"
+        );
+        assert_eq!(
+            items.ids.back(),
+            Some(&format!("n-{}", REFUSED_ITEM_SLOTS - 1))
+        );
+        let lines = captured.lock().unwrap();
+        let evicted = logged(&lines, "상한에 찼다");
+        assert_eq!(evicted.len(), 1, "{lines:?}");
+        assert_eq!(evicted[0].0, tracing::Level::DEBUG);
+        assert_eq!(evicted[0].1.get("evicted").map(String::as_str), Some("a"));
+    }
+
+    /// 끝 줄 하나가 기억을 꺼내고 그 id 의 `Failed` · `Declined` 결과만 `Refused` 로 바꾼다 — 다른 id · 다른 결말 ·
+    /// 끝이 아닌 줄은 그대로다.
+    #[test]
+    fn refused_items_rewrite_only_the_failed_or_declined_result_of_the_item_whose_end_this_is() {
+        let end_of = |id: &str| serde_json::json!({"item": {"id": id}});
+        let mut items = RefusedItems::default();
+        items.remember("a");
+        items.remember("b");
+
+        let mut events = vec![OutputEvent::ToolResult {
+            id: "a".into(),
+            outcome: ToolOutcome::Failed,
+        }];
+        items.attribute(method::ITEM_STARTED, Some(&end_of("a")), &mut events);
+        assert_eq!(items.ids.len(), 2, "끝이 아닌 줄이 기억을 꺼냈다");
+        assert!(matches!(
+            events[0],
+            OutputEvent::ToolResult {
+                outcome: ToolOutcome::Failed,
+                ..
+            }
+        ));
+
+        let mut events = vec![
+            OutputEvent::ToolResult {
+                id: "b".into(),
+                outcome: ToolOutcome::Failed,
+            },
+            OutputEvent::ToolResult {
+                id: "a".into(),
+                outcome: ToolOutcome::Declined,
+            },
+            OutputEvent::ToolResult {
+                id: "a".into(),
+                outcome: ToolOutcome::Completed,
+            },
+        ];
+        items.attribute(method::ITEM_COMPLETED, Some(&end_of("a")), &mut events);
+        let outcomes: Vec<ToolOutcome> = events
+            .iter()
+            .map(|e| match e {
+                OutputEvent::ToolResult { outcome, .. } => *outcome,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            outcomes,
+            vec![
+                ToolOutcome::Failed,
+                ToolOutcome::Refused,
+                ToolOutcome::Completed
+            ]
+        );
+        assert_eq!(items.ids, VecDeque::from(vec!["b".to_string()]));
+    }
+
+    /// id 상한의 경계 — 번역기와 같은 [`MAX_ID_BYTES`] 까지는 가리키고, 한 바이트라도 넘으면 가리키지 않는다(두 승인 모두).
+    #[test]
+    fn a_refused_item_id_is_bounded_exactly_at_the_decoders_id_limit() {
+        for method_name in [
+            method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
+            method::ITEM_FILE_CHANGE_REQUEST_APPROVAL,
+        ] {
+            let at = "x".repeat(MAX_ID_BYTES);
+            let past = "x".repeat(MAX_ID_BYTES + 1);
+            let params = |id: &str| serde_json::json!({"itemId": id});
+            assert_eq!(
+                refused_item_id(method_name, Some(&params(&at))),
+                Some(at.as_str()),
+                "{method_name}: 상한 안의 id 를 버렸다"
+            );
+            assert_eq!(
+                refused_item_id(method_name, Some(&params(&past))),
+                None,
+                "{method_name}: 상한 밖의 id 를 가리켰다"
+            );
+        }
+    }
+
+    /// ① 명령 승인(`approvalId` 없음) → 거절 줄 하나 → 같은 `itemId` 의 `failed` 끝(`exitCode: null`) = `Refused`.
+    #[test]
+    fn a_refused_command_approval_turns_its_failed_end_into_refused() {
+        let mut h = harness_with_real_decoder();
+        feed(&mut h, &[command_approval(0, "exec-1")]);
+        let lines = refusals(&h.state);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(lines[0]["id"], 0);
+
+        feed(&mut h, &[command_end("exec-1", "failed")]);
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![result("exec-1", ToolOutcome::Refused)]
+        );
+        assert!(h.reader.refused.ids.is_empty(), "끝이 기억을 안 꺼냈다");
+    }
+
+    /// ② 거절 없이 온 `failed` 끝은 `Failed` 그대로다.
+    #[test]
+    fn a_failed_end_we_never_refused_stays_failed() {
+        let mut h = harness_with_real_decoder();
+        feed(&mut h, &[command_end("exec-1", "failed")]);
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![result("exec-1", ToolOutcome::Failed)]
+        );
+    }
+
+    /// ③ 두 출처 — 한 리더에서 거절한 id 는 `Refused`, 거절 안 한 id 의 `declined` 는 벤더 거부 `Declined` 다(사유가
+    /// 갈리는 자리).
+    #[test]
+    fn in_one_reader_our_refusal_and_the_vendors_own_decline_keep_their_own_outcomes() {
+        let mut h = harness_with_real_decoder();
+        feed(
+            &mut h,
+            &[
+                command_approval(0, "exec-1"),
+                command_end("exec-2", "declined"),
+                command_end("exec-1", "failed"),
+            ],
+        );
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![
+                result("exec-2", ToolOutcome::Declined),
+                result("exec-1", ToolOutcome::Refused)
+            ]
+        );
+    }
+
+    /// ④ 파일 변경 승인 거절 → `declined` 끝(실측 모양) = `Refused` · 같은 거절 뒤 `failed` 끝이어도 `Refused`.
+    #[test]
+    fn a_refused_file_change_approval_turns_its_end_into_refused_whether_declined_or_failed() {
+        let mut h = harness_with_real_decoder();
+        feed(
+            &mut h,
+            &[
+                file_change_approval(0, "patch-1"),
+                patch_end("patch-1", "declined"),
+                file_change_approval(1, "patch-2"),
+                patch_end("patch-2", "failed"),
+            ],
+        );
+        assert_eq!(refusals(&h.state).len(), 2);
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![
+                result("patch-1", ToolOutcome::Refused),
+                result("patch-2", ToolOutcome::Refused)
+            ]
+        );
+    }
+
+    /// ⑤ 귀속 없음 — 그 밖의 요청 · 하위 명령 승인 · 네트워크 승인 · `itemId` 없음은 거절만 하고 기억하지 않는다.
+    #[test]
+    fn requests_that_do_not_point_at_a_drawn_tool_item_are_refused_but_not_remembered() {
+        let with_item = |extra: Value| {
+            let mut p = serde_json::json!({"threadId": "T", "turnId": "u-1", "itemId": "exec-1"});
+            p.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            p
+        };
+        for (name, request) in [
+            (
+                "item/tool/call",
+                server_request(0, "item/tool/call", with_item(serde_json::json!({}))),
+            ),
+            (
+                "item/permissions/requestApproval",
+                server_request(
+                    0,
+                    "item/permissions/requestApproval",
+                    with_item(serde_json::json!({})),
+                ),
+            ),
+            (
+                "하위 명령 승인",
+                server_request(
+                    0,
+                    method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
+                    with_item(serde_json::json!({"approvalId": "sub-1"})),
+                ),
+            ),
+            (
+                "네트워크 승인",
+                server_request(
+                    0,
+                    method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
+                    with_item(
+                        serde_json::json!({"networkApprovalContext": {"host": "example.com"}}),
+                    ),
+                ),
+            ),
+            (
+                "itemId 없음",
+                server_request(
+                    0,
+                    method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
+                    serde_json::json!({"threadId": "T", "turnId": "u-1"}),
+                ),
+            ),
+            (
+                "옛 이름의 승인(callId)",
+                server_request(
+                    0,
+                    "execCommandApproval",
+                    serde_json::json!({"conversationId": "T", "callId": "exec-1"}),
+                ),
+            ),
+        ] {
+            let mut h = harness_with_real_decoder();
+            feed(&mut h, &[request, command_end("exec-1", "failed")]);
+            assert_eq!(refusals(&h.state).len(), 1, "{name}: 거절이 하나가 아니다");
+            assert!(h.reader.refused.ids.is_empty(), "{name}: 기억했다");
+            assert_eq!(
+                tool_results(&h.seen),
+                vec![result("exec-1", ToolOutcome::Failed)],
+                "{name}"
+            );
+        }
+    }
+
+    /// ⑤ 이어서 — 상한(128 B)을 넘는 `itemId` 는 기억하지 않고, 그 끝에는 번역기가 결과를 안 낸다(가리킬 행이 없다).
+    /// ★기억 여부는 끝 줄 **전에** 본다★ — 끝 줄은 기억한 id 를 원래 모양대로 꺼내므로, 뒤에서 보면 거르기가 빠져도
+    ///   비어 보인다.
+    #[test]
+    fn an_item_id_past_the_id_bound_is_neither_remembered_nor_given_a_result() {
+        let long = "x".repeat(MAX_ID_BYTES + 1);
+        let mut h = harness_with_real_decoder();
+        feed(&mut h, &[command_approval(0, &long)]);
+        assert_eq!(refusals(&h.state).len(), 1);
+        assert!(h.reader.refused.ids.is_empty(), "상한 밖 id 를 기억했다");
+
+        feed(&mut h, &[command_end(&long, "failed")]);
+        assert!(
+            tool_results(&h.seen).is_empty(),
+            "{:?}",
+            tool_results(&h.seen)
+        );
+    }
+
+    /// ⑤ 의 경계 — 명령 승인의 `approvalId` · `networkApprovalContext` 가 `null` 이면 없는 것과 같다(기억한다).
+    #[test]
+    fn a_command_approval_whose_sub_and_network_fields_are_null_is_still_remembered() {
+        let mut h = harness_with_real_decoder();
+        feed(
+            &mut h,
+            &[
+                server_request(
+                    0,
+                    method::ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL,
+                    serde_json::json!({"threadId": "T", "turnId": "u-1", "itemId": "exec-1",
+                                       "approvalId": null, "networkApprovalContext": null}),
+                ),
+                command_end("exec-1", "failed"),
+            ],
+        );
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![result("exec-1", ToolOutcome::Refused)]
+        );
+    }
+
+    /// ⑥ 끝 줄이 기억을 꺼낸다 — 같은 id 의 둘째 끝은 벤더 결말 그대로이고, `completed` 끝도 꺼낸다.
+    #[test]
+    fn the_end_line_takes_the_memory_out_whatever_its_status() {
+        let mut h = harness_with_real_decoder();
+        feed(
+            &mut h,
+            &[
+                command_approval(0, "exec-1"),
+                command_end("exec-1", "failed"),
+                command_end("exec-1", "failed"),
+                file_change_approval(1, "patch-2"),
+                patch_end("patch-2", "declined"),
+                patch_end("patch-2", "declined"),
+                command_approval(2, "exec-3"),
+                command_end("exec-3", "completed"),
+            ],
+        );
+        assert!(
+            h.reader.refused.ids.is_empty(),
+            "`completed` 끝이 기억을 안 꺼냈다"
+        );
+        feed(&mut h, &[command_end("exec-3", "failed")]);
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![
+                result("exec-1", ToolOutcome::Refused),
+                result("exec-1", ToolOutcome::Failed),
+                result("patch-2", ToolOutcome::Refused),
+                result("patch-2", ToolOutcome::Declined),
+                result("exec-3", ToolOutcome::Failed),
+            ]
+        );
+    }
+
+    /// ⑦ 상한 — 거절 17 개면 첫 id 는 밀려나 그 끝이 `Failed` 이고, 둘째 id 는 `Refused` 다.
+    #[test]
+    fn past_the_slot_cap_the_oldest_refusal_loses_its_attribution() {
+        let mut h = harness_with_real_decoder();
+        let requests: Vec<String> = (0..=REFUSED_ITEM_SLOTS)
+            .map(|i| command_approval(i as i64, &format!("exec-{i}")))
+            .collect();
+        feed(&mut h, &requests);
+        assert_eq!(refusals(&h.state).len(), REFUSED_ITEM_SLOTS + 1);
+        assert_eq!(h.reader.refused.ids.len(), REFUSED_ITEM_SLOTS);
+
+        feed(
+            &mut h,
+            &[
+                command_end("exec-0", "failed"),
+                command_end("exec-1", "failed"),
+            ],
+        );
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![
+                result("exec-0", ToolOutcome::Failed),
+                result("exec-1", ToolOutcome::Refused)
+            ]
+        );
+    }
+
+    /// ⑧ 턴 끝에서 비우지 않는다 — 끝이 턴 끝 뒤에 와도(실측 `steer_m6` 마지막 줄 모양) `Refused` 다.
+    #[test]
+    fn a_turn_end_does_not_clear_the_memory() {
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 0, Some("u-1"));
+        feed(&mut h, &[command_approval(0, "exec-1")]);
+        h.reader
+            .handle_line(completed_line("T", "u-1", "completed").as_bytes());
+        assert_eq!(turn_seq(&h.state), None, "전제: 턴이 닫혔다");
+        assert_eq!(boundaries(&h.seen).len(), 1, "전제: 경계가 섰다");
+
+        feed(&mut h, &[command_end("exec-1", "failed")]);
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![result("exec-1", ToolOutcome::Refused)]
+        );
+    }
+
+    /// ⑨ 넘침 · 닫힘 — 거절 줄이 제어 큐에 못 들어갔으면 상대가 답을 못 받으므로 기억하지 않는다.
+    #[test]
+    fn a_refusal_that_never_reached_the_control_queue_is_not_remembered() {
+        let mut full = harness_with_real_decoder();
+        with_state(&full.state, |s| {
+            for i in 0..OUTBOX_LIMIT {
+                s.outbox.push_back(format!("{{\"filler\":{i}}}\n"));
+            }
+        });
+        let mut closed = harness_with_real_decoder();
+        with_state(&closed.state, |s| s.closed = true);
+
+        for (name, h) in [("넘침", &mut full), ("닫힘", &mut closed)] {
+            feed(
+                h,
+                &[
+                    command_approval(0, "exec-1"),
+                    command_end("exec-1", "failed"),
+                ],
+            );
+            assert!(refusals(&h.state).is_empty(), "{name}: 거절 줄이 들어갔다");
+            assert!(h.reader.refused.ids.is_empty(), "{name}: 기억했다");
+            assert_eq!(
+                tool_results(&h.seen),
+                vec![result("exec-1", ToolOutcome::Failed)],
+                "{name}"
+            );
+        }
+    }
+
+    /// ⑩ 새 리더 = 빈 기억 — 한 리더의 거절이 다른 리더(= 다음 화신)로 새지 않는다.
+    #[test]
+    fn a_new_reader_starts_with_no_memory() {
+        let mut first = harness_with_real_decoder();
+        feed(&mut first, &[command_approval(0, "exec-1")]);
+        assert_eq!(
+            first.reader.refused.ids.len(),
+            1,
+            "전제: 첫 리더는 기억했다"
+        );
+
+        let mut next = harness_with_real_decoder();
+        assert!(next.reader.refused.ids.is_empty());
+        feed(&mut next, &[command_end("exec-1", "failed")]);
+        assert_eq!(
+            tool_results(&next.seen),
+            vec![result("exec-1", ToolOutcome::Failed)]
+        );
+    }
+
+    /// ⑪ ★실측(codex-cli 0.156.1 · fixture `refuse_u2a` — B5 채취 셋째)★: 명령 턴 · 파일 변경 턴 각각 호출 뒤 같은 id 의
+    /// `Refused` 결과가 정확히 하나다. 서버 요청 두 줄에는 거절 줄이 하나씩 나가고(그 답은 fixture 에 없다 — 리더가
+    /// 스스로 짓는다), 사이의 `serverRequest/resolved` · `thread/status/changed` 는 귀속을 흔들지 않는다.
+    #[test]
+    fn the_refusal_fixture_yields_each_call_then_exactly_one_refused_result() {
+        const COMMAND: &str = "exec-e59b2cc3-9cdc-49a5-954d-a9e9ec098636";
+        const PATCH: &str = "exec-af747e06-e382-48e9-b906-8d02f706d9d9";
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "01a0e674-807f-7370-8321-9afa484350cd");
+        for line in include_str!("fixtures/refuse_u2a.jsonl").lines() {
+            h.reader.handle_line(line.as_bytes());
+        }
+
+        let lines = refusals(&h.state);
+        assert_eq!(
+            lines.iter().map(|l| l["id"].clone()).collect::<Vec<_>>(),
+            vec![Value::from(0), Value::from(1)],
+            "{lines:?}"
+        );
+        let seen = h.seen.lock().unwrap();
+        let tools: Vec<(&str, Option<ToolOutcome>)> = seen
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::ToolCall { id: Some(id), .. } => Some((id.as_str(), None)),
+                OutputEvent::ToolResult { id, outcome } => Some((id.as_str(), Some(*outcome))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tools,
+            vec![
+                (COMMAND, None),
+                (COMMAND, Some(ToolOutcome::Refused)),
+                (PATCH, None),
+                (PATCH, Some(ToolOutcome::Refused)),
+            ]
+        );
+        assert!(
+            !seen.iter().any(|e| matches!(e, OutputEvent::Error(_))),
+            "거절 경로가 오류를 냈다: {seen:?}"
+        );
+        drop(seen);
+        assert!(h.reader.refused.ids.is_empty(), "끝난 뒤 기억이 남았다");
+    }
+
+    /// ⑫ 같은 id 는 한 칸 — 같은 `itemId` 를 두 번 거절해도 기억은 하나라, 첫 끝이 `Refused` 로 꺼내고 둘째 끝은 `Failed`.
+    #[test]
+    fn the_same_item_refused_twice_takes_one_slot() {
+        let mut h = harness_with_real_decoder();
+        feed(
+            &mut h,
+            &[command_approval(0, "exec-1"), command_approval(1, "exec-1")],
+        );
+        assert_eq!(refusals(&h.state).len(), 2, "요청마다 답은 따로 나간다");
+        assert_eq!(h.reader.refused.ids.len(), 1);
+
+        feed(
+            &mut h,
+            &[
+                command_end("exec-1", "failed"),
+                command_end("exec-1", "failed"),
+            ],
+        );
+        assert_eq!(
+            tool_results(&h.seen),
+            vec![
+                result("exec-1", ToolOutcome::Refused),
+                result("exec-1", ToolOutcome::Failed)
+            ]
+        );
     }
 }

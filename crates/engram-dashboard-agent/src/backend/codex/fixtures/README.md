@@ -15,7 +15,7 @@
 
 ## 파일
 
-시험이 읽는 곳은 `include_str!` 로 찾는다(`rg "fixtures/" crates/engram-dashboard-agent/src/backend/codex`) — 목록을 여기 적지 않는다. 지금 아무 시험도 읽지 않는 것은 `refuse_u2a.jsonl` 하나다(우리 거절 귀속 시험이 읽을 자리 — TRD §4-7 ⑨). `steer_m6` · `empty_turn_m9` 는 「도구 끝 결과가 하나도 없다」는 회귀 확인으로만 읽힌다. `record_only_m10.jsonl` 은 그것을 읽던 후속 턴 빚 시험과 함께 걷었다(ADR-0235).
+시험이 읽는 곳은 `include_str!` 로 찾는다(`rg "fixtures/" crates/engram-dashboard-agent/src/backend/codex`) — 목록을 여기 적지 않는다. `steer_m6` · `empty_turn_m9` 는 「도구 끝 결과가 하나도 없다」는 회귀 확인으로만 읽힌다. `record_only_m10.jsonl` 은 그것을 읽던 후속 턴 빚 시험과 함께 걷었다(ADR-0235).
 
 | 파일 | 줄 | 원본 · 줄 범위 | 보여 주는 것 |
 |---|---|---|---|
