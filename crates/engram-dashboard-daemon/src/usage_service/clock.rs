@@ -4,6 +4,8 @@
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// ★구현은 서비스·명부·책을 다시 부르지 않는다★ — 서비스는 책 락을 쥔 채(구독 교체의 첫 한 장에서는 명부 →
+/// 책 락을 쥔 채) 이 시계를 읽는다. 다시 부르면 교착이다.
 pub trait UsageClock: Send + Sync + 'static {
     /// 이 시계의 기점부터 흐른 단조 시간 — 벽시계가 되감겨도 줄지 않는다. 잠든 시간은 OS 가 세는 만큼 센다.
     fn mono(&self) -> Duration;

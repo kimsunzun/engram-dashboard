@@ -237,7 +237,7 @@ pub fn deliver(snapshot: &UsageLimitSnapshot, targets: Vec<Target>, encoder: &dy
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::usage_service::book::{Now, UsageBook};
     use engram_dashboard_agent::backend::usage_probes;
@@ -273,7 +273,7 @@ mod tests {
         sheet_of(vendor(i))
     }
 
-    fn words(subscribed: &BTreeSet<UsageVendorKey>) -> String {
+    pub(crate) fn words(subscribed: &BTreeSet<UsageVendorKey>) -> String {
         subscribed
             .iter()
             .map(|v| v.as_str())
@@ -293,16 +293,16 @@ mod tests {
     }
 
     /// 출구가 명부에 들어간 뒤에도 시험이 들여다보는 기록. 출구가 살아 있는 동안 강참조가 하나 더 있다 —
-    /// `Arc::strong_count(&log) == 1` 이면 출구가 소멸했다.
+    /// `Arc::strong_count(&log) == 1` 이면 출구가 소멸했다. 서비스 시험도 쓴다.
     #[derive(Default)]
-    struct Log {
-        frames: Mutex<Vec<UsageFrame>>,
+    pub(crate) struct Log {
+        pub(crate) frames: Mutex<Vec<UsageFrame>>,
         revoked: AtomicUsize,
         after_revoke: AtomicUsize,
     }
 
     impl Log {
-        fn jsons(&self) -> Vec<String> {
+        pub(crate) fn jsons(&self) -> Vec<String> {
             self.frames
                 .lock()
                 .unwrap()
@@ -311,19 +311,19 @@ mod tests {
                 .collect()
         }
 
-        fn count(&self) -> usize {
+        pub(crate) fn count(&self) -> usize {
             self.frames.lock().unwrap().len()
         }
 
-        fn revokes(&self) -> usize {
+        pub(crate) fn revokes(&self) -> usize {
             self.revoked.load(Ordering::SeqCst)
         }
     }
 
     /// 받은 프레임을 [`Log`] 에 적는다. 거둔 뒤의 보내기는 적지 않고 따로 센다.
-    struct Recording(Arc<Log>);
+    pub(crate) struct Recording(Arc<Log>);
 
-    fn recording() -> (Recording, Arc<Log>) {
+    pub(crate) fn recording() -> (Recording, Arc<Log>) {
         let log = Arc::new(Log::default());
         (Recording(log.clone()), log)
     }
@@ -344,13 +344,13 @@ mod tests {
 
     /// JSON = 집합의 낱말들. `fail_for` 집합이면 `None`.
     #[derive(Default)]
-    struct Counting {
+    pub(crate) struct Counting {
         calls: AtomicUsize,
         fail_for: Option<BTreeSet<UsageVendorKey>>,
     }
 
     impl Counting {
-        fn calls(&self) -> usize {
+        pub(crate) fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
         }
     }
