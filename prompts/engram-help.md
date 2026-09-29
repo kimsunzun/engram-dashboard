@@ -16,7 +16,7 @@
 
   {tool} help mail     우편. 팀원에게 보내고 받는다
   {tool} help agent    에이전트. 만들고 띄우고 재배치한다
-  {tool} help window   창 · 탭 · 분할, 그 자리에 에이전트 배치
+  {tool} help window   창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*)
   {tool} help theme    테마
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
@@ -132,7 +132,7 @@ slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 �
   {tool} usage.get --backend <Claude|Codex>
       그 백엔드의 사용량 한도(5시간 · 주간 · 모델별 주간)와 조회 상태. windows 의 행마다 left_pct 가 남은 양이고 null 은 모른다는 뜻이다
   {tool} usage.refresh --backend <Claude|Codex>
-      강제로 다시 조회하고 usage.get 과 같은 행을 돌려준다. 직전 조회 뒤 30초 안이거나 state 가 Rejected 인 동안은 조회하지 않고 들고 있던 값을 준다(served = Cached)
+      강제로 다시 조회하고 usage.get 과 같은 행을 돌려준다. 직전 조회 뒤 30초 안이거나 상류 거절 기한이 남은 동안은 조회하지 않고 들고 있던 값을 준다(served = Cached). 거절 중에 값이 들어와 state 가 Ready 로 보여도 그 기한은 남는다
 ## theme
 {tool} theme — 테마는 명령이 아니라 설정 파일이다. 고치는 것은 파일, 반영하는 것은 명령 하나. 그 명령도 대시보드 창이 떠 있어야 부를 수 있다.
 

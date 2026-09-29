@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── Tauri / transport 계층 stub ────────────────────────────────────────────────
@@ -132,6 +132,7 @@ import ViewLayoutRenderer from './ViewLayoutRenderer'
 import { ANCHOR_GAP } from '../slot/SlotContextMenu'
 import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
+import { useUsageStore } from '../../store/usageStore'
 import { useViewStore } from '../../store/viewStore'
 import { rectsFor } from './testing/rects'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
@@ -1064,6 +1065,40 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   it('두 회사를 다 끈 사용량 슬롯 → ⟳ 비활성', () => {
     openUsageMenu('slot-U2', false, false)
     expect(screen.getByText('사용량 새로고침').getAttribute('aria-disabled')).toBe('true')
+  })
+
+  // ★열린 메뉴도 사용량 상태를 따라간다★ — 잎이 켠 회사의 상태를 구독해 ctx 에 싣는다(메뉴 기여는 스토어를 안 읽는다).
+  it('메뉴가 열린 채 켠 회사가 거절되면 ⟳ 가 그 자리에서 비활성이 되고, 풀리면 다시 활성', () => {
+    const rejected = {
+      snapshot: {
+        vendor: 'claude' as const,
+        account_key: 'default',
+        five_hour: null,
+        weekly: null,
+        model_scoped: [],
+        plan: null,
+        in_flight: false,
+        state: { kind: 'Rejected' as const, retry_in_secs: 600, detail: null },
+        revision: 1,
+      },
+      receivedAt: 0,
+      revision: 1,
+    }
+    useUsageStore.setState({ vendors: {} })
+    openUsageMenu('slot-U3', true, false)
+    const refresh = () => screen.getByText('사용량 새로고침')
+    expect(refresh().hasAttribute('aria-disabled')).toBe(false)
+    act(() => useUsageStore.setState({ vendors: { claude: rejected } }))
+    expect(refresh().getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(refresh())
+    expect(screen.queryByText('사용량 새로고침')).not.toBeNull() // 비활성 클릭은 메뉴를 닫지 않는다
+    act(() =>
+      useUsageStore.setState({
+        vendors: { claude: { ...rejected, snapshot: { ...rejected.snapshot, state: { kind: 'Ready' } } } },
+      }),
+    )
+    expect(refresh().hasAttribute('aria-disabled')).toBe(false)
+    useUsageStore.setState({ vendors: {} })
   })
 
   it('빈 슬롯엔 "비우기"가 없다(ADR-0065 hideOn:["empty"] 트림 — 이미 빈 슬롯 재비우기는 no-op)', () => {

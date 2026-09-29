@@ -9,7 +9,7 @@ import type { CSSProperties, SyntheticEvent } from 'react'
 
 import { fireAndForget } from '../../commands/dispatch'
 import type { CommandArgs } from '../../commands/registry'
-import type { ResolvedSlotMenuItem, SlotMenuCtx } from '../../commands/slotMenu'
+import { SLOT_MENU_ORIGIN, type ResolvedSlotMenuItem, type SlotMenuCtx } from '../../commands/slotMenu'
 
 /** 메뉴가 창 테두리에 딱 붙지 않게. */
 const MENU_MARGIN = 4
@@ -108,9 +108,11 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
+  // ★역할은 그리기만이다 — 키보드 이동(화살표·Home/End·타입어헤드)은 없다★(알려진 갭 · 이 메뉴 전부).
   return (
     <div
       ref={ref}
+      role="menu"
       style={{
         position: 'fixed',
         top: pos.top,
@@ -126,9 +128,9 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
       }}
     >
       {items.map(item => (
-        <div key={item.id}>
+        <div key={item.id} role="none">
           {item.separatorBefore && (
-            <div style={{ height: '1px', background: 'var(--border)', margin: '2px 0' }} />
+            <div role="separator" style={{ height: '1px', background: 'var(--border)', margin: '2px 0' }} />
           )}
           <MenuRow item={item} ctx={ctx} onClose={onClose} />
         </div>
@@ -147,9 +149,8 @@ function highlightOff(e: SyntheticEvent<HTMLElement>) {
 
 const DISABLED_ROW_STYLE: CSSProperties = { ...ROW_STYLE, cursor: 'default', opacity: 0.4 }
 
-/** 실행과 `when` 판정이 같은 가방을 받는다 — 둘이 갈리면 활성으로 그린 항목이 다른 인자로 돈다. */
 function commandArgs(ctx: SlotMenuCtx): CommandArgs {
-  return { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId, content: ctx.content }
+  return { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId, content: ctx.content, origin: SLOT_MENU_ORIGIN }
 }
 
 function runItem(id: string, ctx: SlotMenuCtx, onClose: () => void) {
@@ -161,7 +162,7 @@ function runItem(id: string, ctx: SlotMenuCtx, onClose: () => void) {
 
 // ★렌더 중에 부르므로 throw 를 흘리지 않는다★(slotMenu FIX-1 과 같은 fail-loud but crash-free) — error boundary 가
 //   없으면 기여 하나의 throw 가 화면을 통째로 비운다. 판정 실패 = 끔 · 비활성.
-function evaluate(item: ResolvedSlotMenuItem, what: 'checked' | 'when', fn: () => boolean): boolean {
+function evaluate(item: ResolvedSlotMenuItem, what: 'checked' | 'enabled', fn: () => boolean): boolean {
   try {
     return fn()
   } catch (err) {
@@ -173,13 +174,13 @@ function evaluate(item: ResolvedSlotMenuItem, what: 'checked' | 'when', fn: () =
 /** 실행 항목 한 줄 — 최상위와 서브메뉴 자식이 같은 것을 그린다. */
 function LeafRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: SlotMenuCtx; onClose: () => void }) {
   const checkedFn = item.checked
-  const whenFn = item.when
+  const enabledFn = item.enabled
   const checked = checkedFn ? evaluate(item, 'checked', () => checkedFn(ctx)) : undefined
-  const enabled = whenFn ? evaluate(item, 'when', () => whenFn(commandArgs(ctx))) : true
+  const enabled = enabledFn ? evaluate(item, 'enabled', () => enabledFn(ctx)) : true
   return (
     <div
       data-slot-menu-item={item.id}
-      {...(checked === undefined ? {} : { role: 'menuitemcheckbox', 'aria-checked': checked })}
+      {...(checked === undefined ? { role: 'menuitem' } : { role: 'menuitemcheckbox', 'aria-checked': checked })}
       {...(enabled ? {} : { 'aria-disabled': true, 'data-slot-menu-disabled': '' })}
       style={enabled ? ROW_STYLE : DISABLED_ROW_STYLE}
       onMouseEnter={enabled ? highlightOn : undefined}
@@ -225,6 +226,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
       ref={rowRef}
       // data-attr 로 cdp/테스트가 컨테이너를 식별.
       data-slot-menu-container={item.id}
+      role="none"
       style={{ position: 'relative' }}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => {
@@ -233,6 +235,9 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
       }}
     >
       <div
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
         style={{ ...ROW_STYLE, display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}
         tabIndex={0}
         onFocus={() => setOpen(true)}
@@ -246,6 +251,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
         <div
           ref={flyoutRef}
           data-slot-menu-flyout={item.id}
+          role="menu"
           style={{
             position: 'fixed',
             top: flyoutPos?.top ?? 0,

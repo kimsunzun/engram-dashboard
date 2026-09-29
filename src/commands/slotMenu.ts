@@ -6,21 +6,30 @@
 //   의존은 command handler(*Commands.ts / slotCommands.ts)로 밀어낸다.
 
 import type { SlotContent } from '../api/layoutTypes'
-import { getCommand, type CommandArgs } from './registry'
+import { getCommand } from './registry'
 
 /** '*' = 모든 슬롯(공통). */
 export type SlotMenuTarget = SlotContent['type'] | '*'
 
 /**
- * 메뉴를 연 슬롯의 실행 컨텍스트 — 조립처(`LayoutLeaf`)가 이미 쥔 값만 싣는다. `agentId` 는 배정 슬롯만.
- * ★`content` 가 메뉴 상태(☑)의 유일한 출처다★ — [`SlotMenuItem.checked`] 는 이것만 읽는다.
+ * 메뉴를 연 슬롯의 실행 컨텍스트 — 조립처(`LayoutLeaf`)가 싣는다. `agentId` 는 배정 슬롯만.
+ * ★메뉴 상태(☑·활성)의 유일한 출처다★ — [`SlotMenuItem.checked`]·[`SlotMenuItem.enabled`] 는 이것만 읽는다. 스토어
+ * 상태가 필요하면 조립처가 구독해 여기 싣는다(구독하므로 열린 메뉴도 따라 다시 그린다).
  */
 export interface SlotMenuCtx {
   viewId: string | null
   slotId: string
   agentId?: string | null
   content?: SlotContent
+  /** 사용량 슬롯에서만 의미가 있다 — 켠 회사 중 ⟳ 를 보낼 수 있는 것(보이는 거절이 아닌 것)이 하나라도 있나. */
+  usageRefreshable?: boolean
 }
+
+/**
+ * 메뉴가 command 에 넘기는 가방의 `origin` 값 — 이 실행이 슬롯 메뉴 클릭에서 왔다는 표지. 대부분의 handler 는 읽지
+ * 않고(ADR-0055 여분 키), 메뉴에서 눌렸을 때와 직접 호출됐을 때를 갈라야 하는 handler 만 읽는다(`usageSlot.refresh`).
+ */
+export const SLOT_MENU_ORIGIN = 'slotMenu'
 
 /**
  * 기여 항목(ADR-0064 고정 스키마 + ADR-0065 additive 확장). 두 형태 중 하나다:
@@ -51,6 +60,12 @@ export interface SlotMenuItem {
    * 상태를 실을 곳이 여기뿐이고, 상태는 조립처가 ctx 에 실어 준다.
    */
   checked?: (ctx: SlotMenuCtx) => boolean
+  /**
+   * false 면 렌더러가 비활성으로 그린다(클릭해도 실행 안 함). 없으면 늘 활성. 컨테이너엔 못 단다. `checked` 와 같은
+   * 규칙 — ★ctx 만 읽는다★. command 의 `when` 과 다른 축이다: `when` 은 키바인딩이 「못 본 것처럼 넘기는」 UI
+   * 컨텍스트 게이트이고 메뉴는 읽지 않는다.
+   */
+  enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
 /**
@@ -68,11 +83,8 @@ export interface ResolvedSlotMenuItem {
   children?: ResolvedSlotMenuItem[]
   /** 기여의 [`SlotMenuItem.checked`] 그대로. 없으면 켜고 끄는 항목이 아니다. */
   checked?: (ctx: SlotMenuCtx) => boolean
-  /**
-   * command 의 `when` 그대로 — 인자는 실행 때 넘길 ctx 가방과 같다. false 면 렌더러가 비활성으로 그린다(메뉴는
-   * 컨텍스트 발동 소비자라 키바인딩처럼 `when` 을 따른다 — `keybindings.ts`). 없으면 늘 활성.
-   */
-  when?: (args: CommandArgs) => boolean
+  /** 기여의 [`SlotMenuItem.enabled`] 그대로. 없으면 늘 활성. */
+  enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
 // ★그룹 렌더 순서 고정★(ADR-0064 §5): 콘텐츠 전용('content')을 위에, 공통 슬롯 ops('slot-ops')를 아래에
@@ -136,18 +148,15 @@ function resolveRunnable(commandId: string, target: SlotContent['type']): Resolv
     console.error(`[slotMenu] unregistered commandId "${commandId}" (target=${target}) — skipped`)
     return null
   }
-  return {
-    id: cmd.id,
-    title: cmd.title,
-    run: cmd.run,
-    group: '',
-    separatorBefore: false,
-    ...(cmd.when ? { when: cmd.when } : {}),
-  }
+  return { id: cmd.id, title: cmd.title, run: cmd.run, group: '', separatorBefore: false }
 }
 
-function withChecked(entry: ResolvedSlotMenuItem, item: SlotMenuItem): ResolvedSlotMenuItem {
-  return item.checked ? { ...entry, checked: item.checked } : entry
+function withCtxPredicates(entry: ResolvedSlotMenuItem, item: SlotMenuItem): ResolvedSlotMenuItem {
+  return {
+    ...entry,
+    ...(item.checked ? { checked: item.checked } : {}),
+    ...(item.enabled ? { enabled: item.enabled } : {}),
+  }
 }
 
 /**
@@ -178,9 +187,11 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
       console.error(`[slotMenu] container "${label}" (target=${target}) — 컨테이너는 title 필수 — skipped`)
       return false
     }
-    if (item.checked) {
-      console.error(`[slotMenu] container "${label}" (target=${target}) — 컨테이너는 checked 를 가질 수 없음 — skipped`)
-      return false
+    for (const field of ['checked', 'enabled'] as const) {
+      if (item[field]) {
+        console.error(`[slotMenu] container "${label}" (target=${target}) — 컨테이너는 ${field} 를 가질 수 없음 — skipped`)
+        return false
+      }
     }
   }
   return true
@@ -230,7 +241,7 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
         if (!validateItemShape(child, contentType, true)) continue
         // 컨테이너 자식은 항상 실행 항목(validateItemShape nested=true 가 children 재보유를 막음).
         const rc = resolveRunnable(child.commandId as string, contentType)
-        if (rc) children.push(withChecked(rc, child))
+        if (rc) children.push(withCtxPredicates(rc, child))
       }
       if (children.length === 0) {
         console.error(
@@ -250,7 +261,7 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
     } else {
       const rr = resolveRunnable(item.commandId as string, contentType)
       if (!rr) continue
-      entry = withChecked(
+      entry = withCtxPredicates(
         {
           ...rr,
           group: item.group,

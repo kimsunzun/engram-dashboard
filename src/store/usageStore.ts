@@ -134,3 +134,18 @@ export function useUsagePending(vendor: AgentBackendKind): boolean {
 export function blocksRefresh(state: UsageVendorState | undefined): boolean {
   return state?.kind === 'Rejected'
 }
+
+/**
+ * 켠 회사 중 ⟳ 를 보낼 수 있는 것 — [`blocksRefresh`] 에 안 걸리는 것. 값을 아직 못 받은 회사도 든다(⟳ 가 첫
+ * 값을 부르는 길이다). 슬롯 메뉴의 활성 판정(`LayoutLeaf` 가 구독해 ctx 에 싣는다)과 실행 때 재확인(`usageSlot.refresh`)이
+ * 이 하나를 읽는다.
+ */
+export function refreshableVendors(
+  shows: { show_claude: boolean; show_codex: boolean },
+  vendors: UsageState['vendors'],
+): AgentBackendKind[] {
+  const shown: AgentBackendKind[] = []
+  if (shows.show_claude) shown.push('claude')
+  if (shows.show_codex) shown.push('codex')
+  return shown.filter(vendor => !blocksRefresh(vendors[vendor]?.snapshot.state))
+}

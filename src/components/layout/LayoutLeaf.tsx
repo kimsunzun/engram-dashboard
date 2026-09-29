@@ -8,6 +8,7 @@ import { Plus } from 'lucide-react'
 import type { LayoutNode, SlotRect } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
+import { refreshableVendors, useUsageStore } from '../../store/usageStore'
 import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
@@ -304,11 +305,11 @@ const SlotBody = memo(function SlotBody({
         // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
         //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content)를 넘겨 각 command.run 이 백엔드
         //   권위 경로(viewStore/agentClient)로 흐르게 한다(§5 단일 제어 표면). content 종류가 가시성 게이트.
-        <SlotContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={buildSlotMenu(node.content.type)}
-          ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId, content: node.content }}
+        <SlotMenu
+          anchor={contextMenu}
+          node={node}
+          targetViewId={targetViewId}
+          slotAgentId={slotAgentId}
           onClose={onCloseMenu}
         />
       )}
@@ -331,3 +332,35 @@ const SlotBody = memo(function SlotBody({
     </div>
   )
 })
+
+/**
+ * 열린 슬롯 메뉴 — 메뉴 ctx 를 조립한다. ★메뉴가 보여 줄 스토어 상태는 여기서 구독해 ctx 에 싣는다★ — 메뉴 기여는
+ * ctx 만 읽고(ADR-0064), 구독하므로 열린 메뉴도 그 상태를 따라 다시 그린다. 구독은 메뉴가 열린 동안만 산다.
+ */
+function SlotMenu({
+  anchor,
+  node,
+  targetViewId,
+  slotAgentId,
+  onClose,
+}: {
+  anchor: MenuAnchor
+  node: SlotNode
+  targetViewId: string | null
+  slotAgentId: string | null
+  onClose: () => void
+}) {
+  const content = node.content
+  const usageRefreshable = useUsageStore(
+    s => content.type === 'usage' && refreshableVendors(content, s.vendors).length > 0,
+  )
+  return (
+    <SlotContextMenu
+      x={anchor.x}
+      y={anchor.y}
+      items={buildSlotMenu(content.type)}
+      ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId, content, usageRefreshable }}
+      onClose={onClose}
+    />
+  )
+}

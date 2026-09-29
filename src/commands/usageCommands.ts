@@ -9,50 +9,47 @@
 import type { SlotContent } from '../api/layoutTypes'
 import type { AgentBackendKind } from '../api/types'
 import { t } from '../i18n'
-import { blocksRefresh, useUsageStore } from '../store/usageStore'
+import { refreshableVendors, useUsageStore } from '../store/usageStore'
 import { useViewStore } from '../store/viewStore'
 import { register, type CommandArgs } from './registry'
-import { registerSlotMenu, type SlotMenuCtx } from './slotMenu'
+import { registerSlotMenu, SLOT_MENU_ORIGIN, type SlotMenuCtx } from './slotMenu'
 
 type UsageContent = Extract<SlotContent, { type: 'usage' }>
-
-const VENDORS: readonly AgentBackendKind[] = ['claude', 'codex']
 
 function shows(content: UsageContent, vendor: AgentBackendKind): boolean {
   return vendor === 'claude' ? content.show_claude : content.show_codex
 }
 
-function usageContentOf(args: CommandArgs | undefined): UsageContent | null {
-  const content = args?.content as SlotContent | undefined
-  return content?.type === 'usage' ? content : null
-}
-
+/** 두 칸이 다 boolean 인 사용량 content — 토글이 한 칸을 뒤집어 두 칸을 다 써 보내므로 하나라도 빠지면 못 짓는다. */
 function requireUsageContent(args: CommandArgs | undefined, cmd: string): UsageContent {
-  const content = usageContentOf(args)
-  if (!content) throw new Error(`[${cmd}] 사용량 슬롯의 content 필요(받음: ${JSON.stringify(args?.content)})`)
-  return content
-}
-
-/** 켠 회사 중 보이는 거절이 아닌 것. 값을 아직 못 받은 회사도 든다 — ⟳ 가 첫 값을 부르는 길이다. */
-function refreshTargets(content: UsageContent): AgentBackendKind[] {
-  const vendors = useUsageStore.getState().vendors
-  return VENDORS.filter(vendor => shows(content, vendor) && !blocksRefresh(vendors[vendor]?.snapshot.state))
+  const content = args?.content as Partial<Record<string, unknown>> | undefined
+  if (content?.type !== 'usage') {
+    throw new Error(`[${cmd}] 사용량 슬롯의 content 필요(받음: ${JSON.stringify(args?.content)})`)
+  }
+  if (typeof content.show_claude !== 'boolean' || typeof content.show_codex !== 'boolean') {
+    throw new Error(`[${cmd}] content 의 show_claude·show_codex 는 둘 다 boolean 이어야 함(받음: ${JSON.stringify(content)})`)
+  }
+  return content as UsageContent
 }
 
 register({
   id: 'usageSlot.refresh',
   title: t('usage.menuRefresh'),
   category: 'usage',
-  when: args => {
-    const content = usageContentOf(args)
-    return content !== null && refreshTargets(content).length > 0
-  },
   run: args => {
     const cmd = 'usageSlot.refresh'
-    const targets = refreshTargets(requireUsageContent(args, cmd))
-    // 조용한 no-op 으로 삼키지 않는다 — 메뉴에선 `when` 이 이 자리를 비활성으로 막고, 여기 닿는 것은 직접 호출뿐이다.
-    if (targets.length === 0) throw new Error(`[${cmd}] 새로고침할 회사가 없다 — 켠 회사가 없거나 전부 거절 중`)
     const usage = useUsageStore.getState()
+    const targets = refreshableVendors(requireUsageContent(args, cmd), usage.vendors)
+    if (targets.length === 0) {
+      // ★메뉴에서 왔으면 건너뛰고 직접 호출이면 throw 한다★ — 메뉴는 대상이 없으면 이 항목을 비활성으로 그리므로(아래
+      //   `enabled`) 여기 닿는 것은 그린 뒤 누르기 전에 거절이 닿은 틈뿐이고, 사람에게 오류로 돌려줄 일이 아니다.
+      //   직접 호출(`__engramCmd`)은 조용한 no-op 으로 삼키지 않는다 — 부른 쪽이 「됐다」로 읽는다.
+      if (args?.origin === SLOT_MENU_ORIGIN) {
+        console.debug(`[${cmd}] 누른 때 새로고침할 회사가 없다 — 건너뜀`)
+        return undefined
+      }
+      throw new Error(`[${cmd}] 새로고침할 회사가 없다 — 켠 회사가 없거나 전부 거절 중`)
+    }
     return Promise.all(targets.map(vendor => usage.refresh(vendor))).then(() => undefined)
   },
 })
@@ -86,7 +83,7 @@ function checkedFor(vendor: AgentBackendKind): (ctx: SlotMenuCtx) => boolean {
 }
 
 registerSlotMenu('usage', [
-  { commandId: 'usageSlot.refresh', group: 'content', order: 10 },
+  { commandId: 'usageSlot.refresh', group: 'content', order: 10, enabled: ctx => ctx.usageRefreshable === true },
   { commandId: 'usageSlot.toggleClaude', group: 'content', order: 20, checked: checkedFor('claude') },
   { commandId: 'usageSlot.toggleCodex', group: 'content', order: 30, checked: checkedFor('codex') },
 ])

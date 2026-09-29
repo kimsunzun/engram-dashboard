@@ -44,6 +44,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       viewId: 'v1',
       slotId: 's1',
       agentId: 'a1',
+      origin: 'slotMenu',
     })
     expect(it0.run).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalled()
@@ -74,6 +75,7 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       viewId: 'v1',
       slotId: 's1',
       agentId: null,
+      origin: 'slotMenu',
     })
     expect(onClose).toHaveBeenCalled()
   })
@@ -93,20 +95,23 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       viewId: 'v1',
       slotId: 's1',
       agentId: null,
+      origin: 'slotMenu',
     })
   })
 })
 
-// ── 켜고 끄는 항목 · 비활성(TRD S21 usage-limit-slot §1-8 메뉴) ──
-describe('SlotContextMenu — checked · when', () => {
+// ── 켜고 끄는 항목 · 비활성 · 역할(TRD S21 usage-limit-slot §1-8 메뉴) ──
+describe('SlotContextMenu — checked · enabled · 역할', () => {
   const usageCtx = {
     viewId: 'v1',
     slotId: 's1',
     agentId: null,
     content: { type: 'usage' as const, show_claude: true, show_codex: false },
+    usageRefreshable: true,
   }
+  const row = (id: string) => document.querySelector(`[data-slot-menu-item="${id}"]`) as HTMLElement
 
-  it('checked 가 있으면 menuitemcheckbox + aria-checked, 없으면 role 도 없다', () => {
+  it('checked 가 있으면 menuitemcheckbox + aria-checked, 없으면 menuitem · aria-checked 없음 — checked 는 ctx 를 받는다', () => {
     const seen: unknown[] = []
     render(
       <SlotContextMenu
@@ -126,16 +131,39 @@ describe('SlotContextMenu — checked · when', () => {
         onClose={vi.fn()}
       />,
     )
-    const row = (id: string) => document.querySelector(`[data-slot-menu-item="${id}"]`) as HTMLElement
     expect(row('on').getAttribute('role')).toBe('menuitemcheckbox')
     expect(row('on').getAttribute('aria-checked')).toBe('true')
     expect(row('off').getAttribute('aria-checked')).toBe('false')
-    expect(row('plain').getAttribute('role')).toBeNull()
+    expect(row('plain').getAttribute('role')).toBe('menuitem')
     expect(row('plain').hasAttribute('aria-checked')).toBe(false)
     expect(seen[0]).toBe(usageCtx)
   })
 
-  it('실행 인자에 슬롯 내용(content)이 함께 간다', () => {
+  it('역할 — 뿌리·서브메뉴 = menu · 구분선 = separator · 컨테이너 줄 = 서브메뉴를 여는 menuitem', () => {
+    const container = item('container:묶음', { title: '묶음', children: [item('kid')] })
+    render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('a'), { ...container, separatorBefore: true }]}
+        ctx={usageCtx}
+        onClose={vi.fn()}
+      />,
+    )
+    const menus = () => document.querySelectorAll('[role="menu"]')
+    expect(menus()).toHaveLength(1)
+    expect(document.querySelectorAll('[role="separator"]')).toHaveLength(1)
+    const opener = screen.getByText('묶음').parentElement as HTMLElement
+    expect(opener.getAttribute('role')).toBe('menuitem')
+    expect(opener.getAttribute('aria-haspopup')).toBe('menu')
+    expect(opener.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.mouseEnter(screen.getByText('묶음'))
+    expect(menus()).toHaveLength(2)
+    expect(opener.getAttribute('aria-expanded')).toBe('true')
+    expect(row('kid').getAttribute('role')).toBe('menuitem')
+  })
+
+  it('실행 인자에 슬롯 내용(content)과 메뉴 출처(origin)가 함께 간다', () => {
     render(<SlotContextMenu x={0} y={0} items={[item('usageSlot.toggleCodex')]} ctx={usageCtx} onClose={vi.fn()} />)
     fireEvent.click(screen.getByText('usageSlot.toggleCodex'))
     expect(dispatchMock.fireAndForget).toHaveBeenCalledWith('usageSlot.toggleCodex', {
@@ -143,32 +171,56 @@ describe('SlotContextMenu — checked · when', () => {
       slotId: 's1',
       agentId: null,
       content: usageCtx.content,
+      origin: 'slotMenu',
     })
   })
 
-  it('when 이 false → aria-disabled · 클릭해도 실행 안 함 · 메뉴를 닫지 않음 — when 은 실행 인자와 같은 가방을 받는다', () => {
+  it('enabled 가 false → 역할 있는 줄에 aria-disabled · 클릭해도 실행 안 함 · 메뉴를 닫지 않음 — enabled 는 ctx 를 받는다', () => {
     const onClose = vi.fn()
-    const when = vi.fn(() => false)
-    render(<SlotContextMenu x={0} y={0} items={[item('usageSlot.refresh', { when })]} ctx={usageCtx} onClose={onClose} />)
-    const row = screen.getByText('usageSlot.refresh')
-    expect(row.getAttribute('aria-disabled')).toBe('true')
-    fireEvent.click(row)
+    const enabled = vi.fn(() => false)
+    render(<SlotContextMenu x={0} y={0} items={[item('usageSlot.refresh', { enabled })]} ctx={usageCtx} onClose={onClose} />)
+    expect(row('usageSlot.refresh').getAttribute('role')).toBe('menuitem')
+    expect(row('usageSlot.refresh').getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(row('usageSlot.refresh'))
     expect(dispatchMock.fireAndForget).not.toHaveBeenCalled()
     expect(onClose).not.toHaveBeenCalled()
-    expect(when).toHaveBeenCalledWith({ viewId: 'v1', slotId: 's1', agentId: null, content: usageCtx.content })
+    expect(enabled).toHaveBeenCalledWith(usageCtx)
   })
 
-  it('when 이 true → 평소처럼 실행한다', () => {
+  it('enabled 가 true(또는 없음) → 평소처럼 실행한다', () => {
     render(
-      <SlotContextMenu x={0} y={0} items={[item('usageSlot.refresh', { when: () => true })]} ctx={usageCtx} onClose={vi.fn()} />,
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('usageSlot.refresh', { enabled: () => true }), item('plain')]}
+        ctx={usageCtx}
+        onClose={vi.fn()}
+      />,
     )
-    const row = screen.getByText('usageSlot.refresh')
-    expect(row.hasAttribute('aria-disabled')).toBe(false)
-    fireEvent.click(row)
+    expect(row('usageSlot.refresh').hasAttribute('aria-disabled')).toBe(false)
+    expect(row('plain').hasAttribute('aria-disabled')).toBe(false)
+    fireEvent.click(row('usageSlot.refresh'))
     expect(dispatchMock.fireAndForget).toHaveBeenCalledTimes(1)
   })
 
-  it('checked · when 이 throw → 렌더는 살고 끔 · 비활성으로 그린다', () => {
+  it('ctx 가 바뀌면 열린 메뉴가 그 자리에서 다시 판정한다', () => {
+    const enabled = (ctx: { usageRefreshable?: boolean }) => ctx.usageRefreshable === true
+    const menu = (usageRefreshable: boolean) => (
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('usageSlot.refresh', { enabled })]}
+        ctx={{ ...usageCtx, usageRefreshable }}
+        onClose={vi.fn()}
+      />
+    )
+    const { rerender } = render(menu(true))
+    expect(row('usageSlot.refresh').hasAttribute('aria-disabled')).toBe(false)
+    rerender(menu(false))
+    expect(row('usageSlot.refresh').getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('checked · enabled 가 throw → 렌더는 살고 끔 · 비활성으로 그린다', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {})
     const boom = () => {
       throw new Error('boom')
@@ -177,23 +229,27 @@ describe('SlotContextMenu — checked · when', () => {
       <SlotContextMenu
         x={0}
         y={0}
-        items={[item('a', { checked: boom }), item('b', { when: boom })]}
+        items={[item('a', { checked: boom }), item('b', { enabled: boom })]}
         ctx={usageCtx}
         onClose={vi.fn()}
       />,
     )
-    expect(screen.getByText('a').getAttribute('aria-checked')).toBe('false')
-    expect(screen.getByText('b').getAttribute('aria-disabled')).toBe('true')
+    expect(row('a').getAttribute('aria-checked')).toBe('false')
+    expect(row('b').getAttribute('aria-disabled')).toBe('true')
     // 다시 그릴 때마다 판정하므로 횟수가 아니라 항목별로 본다.
     expect(error).toHaveBeenCalledWith(expect.stringMatching(/checked 판정 실패 — "a"/), expect.any(Error))
-    expect(error).toHaveBeenCalledWith(expect.stringMatching(/when 판정 실패 — "b"/), expect.any(Error))
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/enabled 판정 실패 — "b"/), expect.any(Error))
   })
 
-  it('서브메뉴 자식도 같은 줄로 그린다(checked)', () => {
-    const container = item('container:묶음', { title: '묶음', children: [item('kid', { checked: () => true })] })
+  it('서브메뉴 자식도 같은 줄로 그린다(checked · enabled)', () => {
+    const container = item('container:묶음', {
+      title: '묶음',
+      children: [item('kid', { checked: () => true, enabled: () => false })],
+    })
     render(<SlotContextMenu x={0} y={0} items={[container]} ctx={usageCtx} onClose={vi.fn()} />)
     fireEvent.mouseEnter(screen.getByText('묶음'))
-    expect(screen.getByText('kid').getAttribute('aria-checked')).toBe('true')
+    expect(row('kid').getAttribute('aria-checked')).toBe('true')
+    expect(row('kid').getAttribute('aria-disabled')).toBe('true')
   })
 })
 

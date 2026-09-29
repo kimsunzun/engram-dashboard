@@ -322,8 +322,9 @@ declare_commands! {
 
     /// 사용량 한도를 강제로 새로 조회한다(화면 ⟳ 와 같은 명령) — 조회를 띄우고(진행 중이면 거기 붙는다) 그 끝을
     /// 최대 5초 기다려 `usage.get` 과 같은 행으로 답한다. 조회하지 않고 들고 있던 값(`Cached`)으로 답하는 경우 =
-    /// 직전 조회가 끝난 뒤 30초 안 · 상류 거절의 `retry_in_secs` 가 남았다. 칸의 뜻은 `usage.get` 과 같다. 이
-    /// 데몬이 칸을 안 드는 백엔드는 NOT_FOUND.
+    /// 직전 조회가 끝난 뒤 30초 안 · 상류 거절 기한이 남았다(거절 중에 값이 들어와 `state` 가 `Ready` 여도 기한은
+    /// 남는다 — 그때는 `retry_in_secs` 가 안 실린다). 칸의 뜻은 `usage.get` 과 같다. 이 데몬이 칸을 안 드는 백엔드는
+    /// NOT_FOUND.
     #[effect(Write)]
     #[since(6)]
     "usage.refresh" => args UsageRefreshArgs {

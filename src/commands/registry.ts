@@ -59,7 +59,8 @@ export interface Command {
    * 이 레지스트리의 항목 하나가 **두 소비자를 겸한다**: 사람 클릭·키바인딩(`dispatch.fireAndForget` →
    * [`runAsHuman`])과 LLM 표면(`window.__engramCmd` · 버스 다리 → [`run`]). 대부분은 그것이 장점이지만
    * (§5 「같은 핸들을 흔든다」), **둘 중 한쪽에만 열려야 하는 동작**이 생기면 그 겸직이 곧 구멍이 된다.
-   * 그때 닫는 축은 **인자 값이 아니라 호출자**라 `when` 으로는 못 가른다 — `when` 은 양쪽에 똑같이 적용된다.
+   * 그때 닫는 축은 **인자 값이 아니라 호출자**라 `when` 으로는 못 가른다 — `when` 은 호출자를 모르는 UI 컨텍스트
+   * 게이트이고 키바인딩 소비자만 읽는다(두 진입점 [`run`]·[`runAsHuman`] 어느 쪽도 읽지 않는다).
    *
    * ★쓰기 전에 확인할 것 — 이 칸은 §5 의 예외이고, 예외에는 사유가 필요하다★: 「LLM 이 못 지나는 UI 가
    * 뒤에 있다」는 사유가 **아니다**(그건 고칠 결함이지 닫을 근거가 아니다). 정당한 사유는 「사람이 그
@@ -75,11 +76,8 @@ export interface Command {
    * 않는다(버스 다리의 `settle` 은 이름만 있으면 `run` 을 부른다). 광고를 빼는 것으로 닫았다고 읽지 말 것.
    */
   humanOnly?: string
-  /**
-   * 노출/실행 가능 조건(후속 when-context 는 골격 밖, ADR-0055). 따르는 것은 컨텍스트 발동 소비자뿐이다 — 키바인딩은
-   * 인자 없이, 슬롯 메뉴는 실행 때 넘길 ctx 가방으로 부른다(false = 비활성). [`run`] 은 읽지 않는다.
-   */
-  when?: (args?: CommandArgs) => boolean
+  /** 노출/실행 가능 조건(후속 when-context 는 골격 밖, ADR-0055). */
+  when?: () => boolean
   /**
    * 기존 store 액션/invoke 로 라우팅한다. 반환은 그대로 흘려보낸다 —
    * 일부는 Promise(예: layout createTab → Promise<id>)라 cdp/호출부가 await 할 수 있어야 한다.
