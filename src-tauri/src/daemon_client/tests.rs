@@ -4670,6 +4670,10 @@ async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
     relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
+    // 채널을 꽂은 직후의 넛지가 아래 재계산보다 늦게 꺼내지면 그것이 A 의 관심을 먼저 보내 B 가 줄임(`Defer`)이
+    //   된다 — 표지가 나갔으면 그 넛지는 이미 처리됐다(절 머리).
+    let m = marker(&client);
+    assert_eq!(server.next_frame().await, format!("1:{m}"));
 
     assert_eq!(
         relayout(client.usage_interest(), true, true),
@@ -4692,7 +4696,7 @@ async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
 }
 
 // ── 창구는 열렸는데 명령 채널이 아직 안 꽂힌 틈의 변경 → 꽂은 직후의 넛지가 보낸다 ─────────────────
-// 첫 연결은 창구를 열고 새 소켓에 관심을 쓴 뒤 Connected 를 알리고, 그다음에야 호출자가 채널을 꽂는다. 그 틈의
+// 첫 연결은 창구를 열고 관심을 읽고 Connected 를 알리고 그 관심을 새 소켓에 쓴 뒤에야 호출자가 채널을 꽂는다. 그 틈의
 // 재계산 넛지는 창구가 `None` 을 내 no-op 이다. 틈은 `Connected` 훅으로 겨냥한다(그 발화가 틈 안이다) —
 // 훅이 채널 부재를 함께 기록해 「틈 안이었다」를 단언으로 남긴다.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4923,6 +4927,10 @@ async fn a_refresh_on_a_full_command_channel_still_writes_the_subscribe_first() 
     client.connect().await.expect("connect → connected");
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
 
+    // 채널을 꽂은 직후의 넛지가 먼저 빠져야 아래 「꺼냈다」 판정이 우리 넛지를 가리킨다 — 표지가 나갔으면 그 앞은
+    //   다 처리됐다(절 머리).
+    let m = marker(&client);
+    assert_eq!(server.next_frame().await, format!("1:{m}"));
     let (tx, socket) = client
         .lifecycle
         .current_cmd_tx()
@@ -5170,6 +5178,48 @@ async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
         keys,
         ["snapshots", "socket_epoch"],
         "웹뷰 계약 = snake_case 두 칸"
+    );
+    client.close();
+}
+
+// ── Connected 를 알릴 때 관심 상태는 이미 새 소켓을 본다(알리기 = 발화 앞 · 쓰기 = 발화 뒤) ─────────────
+// 새 소켓의 관심 쓰기는 창구를 연 자리와 발화 사이에 await 를 두지 않으려고 발화 뒤에 선다
+// (`connection::write_usage_on_open`). 관심 상태에 알리는 것은 그대로 발화 앞이라, 발화를 본 쪽의 pull 은 소켓
+// 없음(0)이 아니라 그 소켓의 표식을 받는다 — 첫 연결 · 재연결 둘 다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connected_is_announced_after_the_usage_state_sees_the_new_socket() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    let at_connected = Arc::new(std::sync::Mutex::new(Vec::new()));
+    for _ in 0..2 {
+        let usage = client.usage_interest().clone();
+        let at_connected = at_connected.clone();
+        events.then_on_connected(move || {
+            let epoch = usage
+                .lock()
+                .snapshot_for_webview(Instant::now())
+                .socket_epoch;
+            at_connected.lock().unwrap().push(epoch);
+        });
+    }
+    client.connect().await.expect("connect → connected");
+    let first = current_socket(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+
+    server.drop_current_connection();
+    assert_eq!(
+        server.next_frame().await,
+        "2:usage[Claude]",
+        "재연결한 새 소켓에도 관심 한 장"
+    );
+    let second = current_socket(&client);
+    assert_ne!(first, second);
+    assert_eq!(
+        *at_connected.lock().unwrap(),
+        vec![first, second],
+        "발화 때 관심 상태가 이미 그 소켓의 표식을 든다"
     );
     client.close();
 }

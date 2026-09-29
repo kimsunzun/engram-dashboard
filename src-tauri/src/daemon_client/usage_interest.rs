@@ -20,7 +20,8 @@
 //! 때 [`UsageInterest::sync`] 로 **그때의** 관심을 읽어 보낸다 — 읽는 순서 = 보내는 순서라 소켓의 마지막 한
 //! 장이 늘 최신 관심이다. 호출자가 락 안에서 집합을 읽어 락 밖에서 보내는 모양은 두 변경이 읽기와 전송 사이에서
 //! 엇갈리면 옛 집합이 마지막으로 닿는다 — 되살리지 말 것(TRD §3 #74). 그래서 [`InterestAction`] 은 집합을
-//! 싣지 않는다.
+//! 싣지 않고, 연결 태스크 전용 메서드(`sync`·`on_socket_open`·`on_socket_lost`·`on_snapshot`)는 `daemon_client`
+//! 밖에 열지 않는다.
 //!
 //! ## ★소켓 표식 가드★
 //! 연결 태스크가 부르는 메서드는 모두 자기 소켓 표식(`socket_epoch` — ADR-0195 · `0` = 소켓 없음)을 싣고,
@@ -248,7 +249,11 @@ impl UsageInterest {
     ///
     /// `Some` 이면 `sent := 관심` · 대기 중인 줄임 무효. `sent` 기준이라 거푸 불러도 둘째부터 `None` 이다(멱등 —
     /// 새 소켓의 `cmd_tx` 저장 직후 넛지가 여기 기댄다). 지금 소켓이 아니면 `None`.
-    pub fn sync(&mut self, socket_epoch: u64, force: bool) -> Option<BTreeSet<AgentBackendKind>> {
+    pub(super) fn sync(
+        &mut self,
+        socket_epoch: u64,
+        force: bool,
+    ) -> Option<BTreeSet<AgentBackendKind>> {
         if !self.is_current(socket_epoch) {
             self.log_foreign("sync", socket_epoch);
             return None;
@@ -272,7 +277,10 @@ impl UsageInterest {
     /// 본 가장 큰 표식보다 큰 표식에서만 움직인다(그 밖엔 `None` · 아무것도 안 바뀜). 움직이면 캐시를 비우고
     /// `sent := 관심` · 대기 중인 줄임 무효이며, 관심이 비었으면 보낼 것이 없어 `None` 이다(새 연결의 데몬 쪽
     /// 구독은 빈 집합이다).
-    pub fn on_socket_open(&mut self, socket_epoch: u64) -> Option<BTreeSet<AgentBackendKind>> {
+    pub(super) fn on_socket_open(
+        &mut self,
+        socket_epoch: u64,
+    ) -> Option<BTreeSet<AgentBackendKind>> {
         if socket_epoch <= self.max_seen_socket_epoch {
             tracing::debug!(
                 socket_epoch,
@@ -291,7 +299,7 @@ impl UsageInterest {
 
     /// 소켓 `socket_epoch` 가 끝났다(사유 무관). 지금 소켓일 때만 캐시를 비우고 `sent := ∅` · 소켓 없음으로.
     /// 대기 중인 줄임도 무효다 — 줄일 `sent` 가 사라졌고, 새 소켓은 열 때 관심을 통째로 다시 보낸다.
-    pub fn on_socket_lost(&mut self, socket_epoch: u64) {
+    pub(super) fn on_socket_lost(&mut self, socket_epoch: u64) {
         if !self.is_current(socket_epoch) {
             self.log_foreign("on_socket_lost", socket_epoch);
             return;
@@ -314,7 +322,7 @@ impl UsageInterest {
     ///   것은 데몬의 같은 집합 교체가 첫 스냅숏을 안 내기 때문이다. 어긋남마다 `debug` 한 줄.
     ///
     /// 지금 소켓이 아니면 아무것도 안 한다(빈 결과 · 캐시 불변).
-    pub fn on_snapshot(
+    pub(super) fn on_snapshot(
         &mut self,
         socket_epoch: u64,
         snapshot: &UsageLimitSnapshot,

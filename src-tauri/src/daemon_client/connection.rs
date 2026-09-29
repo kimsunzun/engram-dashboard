@@ -287,9 +287,11 @@ pub(crate) async fn run_connection(
                 generation = my_gen,
                 "데몬 WS 연결 수립(Hello 수신, 인증 성공)"
             );
-            open_usage_socket(&usage, &mut conn.sink, socket_epoch, my_gen).await;
+            // 관심 상태에 새 소켓을 알리는 것은 발화 앞, 그 집합을 쓰는 것은 뒤다([`write_usage_on_open`]).
+            let usage_open = usage.lock().on_socket_open(socket_epoch);
             // ★T7c★: 첫 connected 전이를 프론트에 push.
             events.connection_state(ConnectionStateEvent::Connected);
+            write_usage_on_open(&mut conn.sink, usage_open, my_gen).await;
             if ready_tx.send(Ok(())).is_err() {
                 // 호출자(connect await)가 사라짐 → 정리 종료.
                 tracing::debug!(
@@ -858,8 +860,10 @@ async fn connected_lifetime(
                         let _ = conn.sink_close().await;
                         break None;
                     };
-                    open_usage_socket(&usage, &mut conn.sink, next_socket, my_gen).await;
+                    // 알리기는 발화 앞, 쓰기는 뒤([`write_usage_on_open`]).
+                    let usage_open = usage.lock().on_socket_open(next_socket);
                     events.connection_state(ConnectionStateEvent::Connected);
+                    write_usage_on_open(&mut conn.sink, usage_open, my_gen).await;
                     // 회복 — attempt 리셋(wsTransport `reconnectAttempt=0` on Hello). 다음 끊김은 처음부터.
                     attempt = 0;
                     tracing::info!(generation = my_gen, "데몬 재연결 성공(Hello 수신)");
@@ -1389,7 +1393,7 @@ where
 }
 
 // ── 사용량 구독(TRD S21 usage-limit-slot §1-7) ──────────────────────────────────────────
-// `UsageSubscribe` 를 소켓에 쓰는 자리 — 새 소켓([`open_usage_socket`]) · 넛지(main_loop 의 `UsageInterest` 팔) ·
+// `UsageSubscribe` 를 소켓에 쓰는 자리 — 새 소켓([`write_usage_on_open`]) · 넛지(main_loop 의 `UsageInterest` 팔) ·
 // 대조([`relay_usage_snapshot`]) · ⟳ 새로고침 직전([`send_request`]). 모두 연결 task 안이라 순서가 이 task
 // 하나로 선다.
 
@@ -1408,22 +1412,28 @@ async fn send_usage_subscribe(
     send_fire(sink, &cmd, my_gen, kind).await;
 }
 
-/// 창구를 연 직후, main_loop 가 명령 채널을 읽기 **전에** — 관심을 새 소켓에 직접 한 장 쓴다(비었으면 안 쓴다 —
-/// 새 연결의 데몬 쪽 구독은 빈 집합이다). 넛지로 넣지 않는 이유: 이미 채널에 든 명령보다 앞서야 한다.
-/// ★두 자리(첫 연결 · 재연결)가 `open_socket_if_current` 바로 뒤에서 부르고, 짝은 창구를 닫는 두 자리의
-/// `on_socket_lost` 다★. ★Connected 발화보다 앞이다★ — 첫 연결은 그 발화 뒤 `ready` 를 알리고 호출자가
-/// 명령 채널을 꽂으므로, 여기서 읽은 관심 뒤의 변경은 꽂은 직후의 넛지가 메운다(`DaemonClient::start_connection`).
+/// 새 소켓에 관심을 직접 한 장 쓴다 — `opened` = 창구를 연 직후 부른 `on_socket_open` 의 결과(`None` = 쓸 것
+/// 없음: 관심이 비었고 새 연결의 데몬 쪽 구독은 빈 집합이다). main_loop 가 명령 채널을 읽기 **전에** 부른다 —
+/// 넛지로 넣지 않는 이유: 이미 채널에 든 명령보다 앞서야 한다.
+///
+/// ★두 자리(첫 연결 · 재연결)가 둘로 나눠 부른다 — 관심 상태에 알리기는 Connected 발화 **앞**, 이 쓰기는
+/// **뒤**★:
+/// - 알리기가 앞이라 Connected 를 본 뒤의 웹뷰 pull 은 소켓 없음(`0`)이 아니라 새 표식과 비운 캐시를 본다.
+/// - 쓰기(await)가 뒤라 창구를 연 자리와 발화 사이에 await 가 끼지 않는다 — 그 틈에 `close()` 가 들면 그 Down
+///   뒤에 이 Connected 가 나가 창들이 connected 로 굳는다. 틈은 원래 있고, await 를 두면 그것이 넓어진다.
+///
+/// 알린 뒤의 관심 변경은 이 집합에 없다 — 첫 연결은 `ready` 뒤 호출자가 명령 채널을 꽂은 직후의 넛지가
+/// (`DaemonClient::start_connection`), 재연결은 이미 산 채널에 든 넛지가 main_loop 에서 메운다. 짝은 창구를 닫는
+/// 두 자리의 `on_socket_lost` 다.
 ///
 /// 되보내도 멱등이다 — 전량 교체이고, 존재를 전제하지 않아(회사 낱말은 데몬의 정적 조회기 등록부로 푼다)
 /// 재기동한 데몬도 거절할 것이 없다. 그래서 소켓 전이를 계기로 한 재구독을 거부한 ADR-0164 에 안 걸린다.
-async fn open_usage_socket(
-    usage: &SharedUsageInterest,
+async fn write_usage_on_open(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
-    socket_epoch: u64,
+    opened: Option<BTreeSet<AgentBackendKind>>,
     my_gen: u64,
 ) {
-    let set = usage.lock().on_socket_open(socket_epoch);
-    if let Some(set) = set {
+    if let Some(set) = opened {
         send_usage_subscribe(sink, set, my_gen, "UsageSubscribe(새 소켓)").await;
     }
 }
