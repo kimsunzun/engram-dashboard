@@ -11,6 +11,7 @@ import {
   formatClock,
   formatDuration,
   formatResetAt,
+  formatResetClock,
   isExpired,
   leftFromUsed,
   readWindow,
@@ -136,6 +137,16 @@ describe('시간 문구', () => {
     const far = formatResetAt(NOW + 86_400 * 3, NOW)
     expect(far).not.toBe(clock.format(new Date((NOW + 86_400 * 3) * 1000)))
     expect(far).toContain(clock.format(new Date((NOW + 86_400 * 3) * 1000)))
+  })
+
+  it('작은 표시의 리셋 시각 — 5시간 창 「↻ HH:MM」(24시간) · 주간 창 「↻ 요일 HH:MM」(한 글자 요일, 괄호 없음)', () => {
+    // 2026-09-25 은 금요일이다. 로컬 시각으로 세워 시간대와 무관하게 같은 글자가 나온다.
+    const fri21 = new Date(2026, 8, 25, 21, 0).getTime() / 1000
+    const satMidnight = new Date(2026, 8, 26, 0, 5).getTime() / 1000
+    expect(formatResetClock(fri21, false)).toBe('↻ 21:00')
+    expect(formatResetClock(fri21, true)).toBe('↻ 금 21:00')
+    expect(formatResetClock(satMidnight, false)).toBe('↻ 00:05')
+    expect(formatResetClock(satMidnight, true)).toBe('↻ 토 00:05')
   })
 })
 

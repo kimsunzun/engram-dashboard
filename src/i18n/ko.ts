@@ -135,9 +135,6 @@ export const ko = {
   usage: {
     vendorClaude: 'Claude',
     vendorCodex: 'Codex',
-    // 숫자만 남는 폭 단계의 회사 표기 — 두 회사가 같은 글자로 시작해 한 글자로 줄이면 못 가른다.
-    vendorClaudeShort: 'Cl',
-    vendorCodexShort: 'Cx',
     windowFiveHour: '5시간',
     windowWeekly: '주간',
     stateNotInstalled: '설치 안 됨',
@@ -160,7 +157,8 @@ export const ko = {
     statusLine: '{vendor} {sentence}',
     resetWaiting: '리셋됨 — 갱신 대기',
     resetWaitingShort: '리셋됨', // 숫자만 남는 폭 단계 전용.
-    resetIn: '{duration} 뒤',
+    resetClock: '↻ {time}', // 작은 표시의 5시간 창 리셋 시각.
+    resetClockWeekday: '↻ {weekday} {time}', // 작은 표시의 주간 창 리셋 시각.
     resetsAtIn: '리셋 {time} ({duration} 뒤)',
     durationMinutes: '{minutes}분',
     durationHours: '{hours}시간',

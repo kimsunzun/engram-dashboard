@@ -141,9 +141,22 @@ const DATE_CLOCK = new Intl.DateTimeFormat(USAGE_LOCALE, {
   hourCycle: 'h23',
 })
 const DAY_KEY = new Intl.DateTimeFormat(USAGE_LOCALE, { year: 'numeric', month: 'numeric', day: 'numeric' })
+const WEEKDAY = new Intl.DateTimeFormat(USAGE_LOCALE, { weekday: 'short' })
 
 export function formatClock(epochSecs: number): string {
   return CLOCK.format(new Date(epochSecs * 1000))
+}
+
+/**
+ * 작은 표시의 리셋 시각(사용자 결정 2026-09-29) — `withWeekday` 면 요일을 앞에 단다(주간 창). 남은 시간은 팝업에만 둔다.
+ * 요일과 시각을 따로 찍어 틀에 끼우는 것은 한 포맷터로 함께 찍으면 로캘이 요일을 괄호로 감싸서다(「(금) 21:00」).
+ */
+export function formatResetClock(epochSecs: number, withWeekday: boolean): string {
+  const at = new Date(epochSecs * 1000)
+  const time = CLOCK.format(at)
+  return withWeekday
+    ? t('usage.resetClockWeekday', { weekday: WEEKDAY.format(at), time })
+    : t('usage.resetClock', { time })
 }
 
 /** 오늘(로컬 날짜)이면 시각만, 아니면 날짜 + 시각. */

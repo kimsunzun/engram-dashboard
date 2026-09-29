@@ -23,12 +23,14 @@ import {
   type UsageVendorEntry,
 } from '../../store/usageStore'
 import { ANCHOR_GAP, clampMenuPosition } from './SlotContextMenu'
+import VendorIcon from './VendorIcon'
 import {
   STALE_AFTER_SECS,
   elapsedSecs,
   formatAge,
   formatDuration,
   formatResetAt,
+  formatResetClock,
   readWindow,
   stateHead,
   statusLine,
@@ -60,12 +62,13 @@ interface WindowView {
   key: string
   label: string
   reading: WindowReading
+  /** 작은 표시의 리셋 시각에 요일을 붙이나(주간 창). */
+  weekday: boolean
 }
 
 interface VendorView {
   vendor: AgentBackendKind
   name: string
-  shortName: string
   entry: UsageVendorEntry | undefined
   /** 받은 뒤 흐른 초. */
   elapsed: number
@@ -80,10 +83,6 @@ interface VendorView {
 
 function vendorName(vendor: AgentBackendKind): string {
   return vendor === 'claude' ? t('usage.vendorClaude') : t('usage.vendorCodex')
-}
-
-function vendorShortName(vendor: AgentBackendKind): string {
-  return vendor === 'claude' ? t('usage.vendorClaudeShort') : t('usage.vendorCodexShort')
 }
 
 function buildVendorView(
@@ -103,7 +102,6 @@ function buildVendorView(
   return {
     vendor,
     name,
-    shortName: vendorShortName(vendor),
     entry,
     elapsed,
     line: sentence === null ? null : statusLine(name, sentence),
@@ -111,8 +109,18 @@ function buildVendorView(
     refreshing: pending || (snapshot?.in_flight ?? false),
     rejected: blocksRefresh(snapshot?.state),
     windows: [
-      { key: 'five_hour', label: t('usage.windowFiveHour'), reading: readWindow(windowOf('five_hour'), elapsed, nowWall) },
-      { key: 'weekly', label: t('usage.windowWeekly'), reading: readWindow(windowOf('weekly'), elapsed, nowWall) },
+      {
+        key: 'five_hour',
+        label: t('usage.windowFiveHour'),
+        reading: readWindow(windowOf('five_hour'), elapsed, nowWall),
+        weekday: false,
+      },
+      {
+        key: 'weekly',
+        label: t('usage.windowWeekly'),
+        reading: readWindow(windowOf('weekly'), elapsed, nowWall),
+        weekday: true,
+      },
     ],
   }
 }
@@ -216,6 +224,27 @@ const LINE_STYLE: CSSProperties = {
   overflow: 'hidden',
   minWidth: 0,
 }
+
+// 1·2단은 격자 하나에 모든 줄을 얹는다 — 칸을 함께 써야 두 회사·두 창의 막대·%·리셋 시각이 세로로 맞는다(사용자 결정
+//   2026-09-29). 창 하나 = 이름 | 막대 | % | 리셋 시각.
+const WINDOW_TRACKS = 'auto minmax(4em, 1fr) auto auto'
+const STAGE1_COLUMNS = `auto ${WINDOW_TRACKS} ${WINDOW_TRACKS}`
+const STAGE2_COLUMNS = `auto ${WINDOW_TRACKS}`
+const WINDOW_TRACK_COUNT = 4
+
+// 칸 사이 틈은 막대↔% 가 가장 좁다(사용자 결정 2026-09-29 — 막대와 % 를 붙여 읽게). 다른 칸 사이는 여백을 더한다.
+const GRID_STYLE: CSSProperties = {
+  display: 'grid',
+  alignItems: 'center',
+  columnGap: '4px',
+  rowGap: '2px',
+  whiteSpace: 'nowrap',
+  fontVariantNumeric: 'tabular-nums',
+}
+const NAME_TO_LABEL = '0.3em'
+const GROUP_TO_GROUP = '0.9em'
+const LABEL_TO_BAR = '0.25em'
+const PCT_TO_RESET = '0.45em'
 
 /** 요약 버튼의 화면 사각형 — 팝업은 아래로 펴고, 뒤집을 땐 요약의 위쪽 변에서 편다(요약을 덮지 않게). */
 interface Anchor {
@@ -334,42 +363,67 @@ function UsageSummary({ views, nowWall }: { views: VendorView[]; nowWall: number
 function StageRender({ stage, views, measure }: { stage: Stage; views: VendorView[]; measure: boolean }) {
   if (stage === 1) {
     return (
-      <>
-        {views.map(view => (
-          <span key={view.vendor} style={LINE_STYLE}>
-            <NameUnit view={view} short={false} measure={measure} />
-            {view.windows.map(w => (
-              <WindowSegment key={w.key} view={view} w={w} measure={measure} />
+      <span
+        {...(measure ? {} : { 'data-usage-grid': '' })}
+        style={{ ...GRID_STYLE, gridTemplateColumns: STAGE1_COLUMNS }}
+      >
+        {views.map((view, v) => (
+          <Fragment key={view.vendor}>
+            <NameUnit view={view} measure={measure} cell={{ gridRow: v + 1, gridColumn: 1 }} />
+            {view.windows.map((w, i) => (
+              <WindowCells
+                key={w.key}
+                view={view}
+                w={w}
+                measure={measure}
+                row={v + 1}
+                column={2 + i * WINDOW_TRACK_COUNT}
+                lead={i === 0 ? NAME_TO_LABEL : GROUP_TO_GROUP}
+              />
             ))}
-          </span>
+          </Fragment>
         ))}
-      </>
+      </span>
     )
   }
   if (stage === 2) {
     return (
-      <>
-        {views.map(view => (
-          <span key={view.vendor} style={{ display: 'block' }}>
-            <span style={LINE_STYLE}>
-              <NameUnit view={view} short={false} measure={measure} />
-            </span>
-            {view.windows.map(w => (
-              <span key={w.key} style={{ ...LINE_STYLE, paddingLeft: '0.75em' }}>
-                <WindowSegment view={view} w={w} measure={measure} />
-              </span>
-            ))}
-          </span>
-        ))}
-      </>
+      <span
+        {...(measure ? {} : { 'data-usage-grid': '' })}
+        style={{ ...GRID_STYLE, gridTemplateColumns: STAGE2_COLUMNS }}
+      >
+        {views.map((view, v) => {
+          const first = v * view.windows.length + 1
+          return (
+            <Fragment key={view.vendor}>
+              <NameUnit
+                view={view}
+                measure={measure}
+                cell={{ gridRow: `${first} / span ${view.windows.length}`, gridColumn: 1 }}
+              />
+              {view.windows.map((w, i) => (
+                <WindowCells
+                  key={w.key}
+                  view={view}
+                  w={w}
+                  measure={measure}
+                  row={first + i}
+                  column={2}
+                  lead={NAME_TO_LABEL}
+                />
+              ))}
+            </Fragment>
+          )
+        })}
+      </span>
     )
   }
   return (
     <>
       {views.map(view => (
         <span key={view.vendor} style={LINE_STYLE}>
-          <NameUnit view={view} short measure={measure} />
-          {/* 말줄임은 숫자 쪽에만 — 이름·배지는 줄지 않아 잘리지 않는다(R31). */}
+          <NameUnit view={view} measure={measure} />
+          {/* 말줄임은 숫자 쪽에만 — 아이콘·배지는 줄지 않아 잘리지 않는다(R31). */}
           <span
             data-usage-numbers=""
             style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
@@ -393,17 +447,22 @@ function windowAttrs(view: VendorView, w: WindowView, measure: boolean): Record<
   return measure ? {} : { 'data-usage-vendor': view.vendor, 'data-usage-window': w.key }
 }
 
-function NameUnit({ view, short, measure }: { view: VendorView; short: boolean; measure: boolean }) {
+/** 회사 아이콘 + 배지 + 갱신 중 표식 — 한 덩어리로 줄지 않는다(배지가 말줄임에 잘리지 않게 — R31). */
+function NameUnit({ view, measure, cell }: { view: VendorView; measure: boolean; cell?: CSSProperties }) {
   return (
-    <span style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.15em', fontWeight: 600 }}>
-      <span title={short && !measure ? view.name : undefined}>{short ? view.shortName : view.name}</span>
+    <span style={{ ...cell, flex: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.15em' }}>
+      <VendorIcon
+        vendor={view.vendor}
+        label={measure ? null : view.name}
+        {...(measure ? {} : { 'data-usage-icon': view.vendor })}
+      />
       {view.line !== null && <Badge view={view} measure={measure} />}
       {view.refreshing && <RefreshingMark view={view} measure={measure} />}
     </span>
   )
 }
 
-/** 비정상 상태 표식 — 글리프는 `⚠`(20% 미만 전용, R10)와 겹치지 않는다. 이름·문장은 팝업 맨 위 줄과 같다. */
+/** 비정상 상태 표식 — 이름·문장은 팝업 맨 위 줄과 같다. */
 function Badge({ view, measure }: { view: VendorView; measure: boolean }) {
   const label = view.line ?? ''
   return (
@@ -430,22 +489,62 @@ function RefreshingMark({ view, measure }: { view: VendorView; measure: boolean 
   )
 }
 
-/** 1·2단의 창 하나 — 이름 · 막대(값이 있을 때만) · 남은 % · 남은 시간(1·2단만 — D16). */
-function WindowSegment({ view, w, measure }: { view: VendorView; w: WindowView; measure: boolean }) {
+/**
+ * 1·2단 격자의 창 하나 — 이름 | 막대(값이 있을 때만) | 남은 % | 리셋 시각, `column` 부터 네 칸. 만료면 막대·%·리셋 시각
+ * 세 칸을 「리셋됨 — 갱신 대기」 한 칸이 덮는다. 감싸는 `span` 은 `display: contents` 라 칸들이 곧장 격자 항목이 되고,
+ * 값 표식(`data-usage-vendor`·`data-usage-window`)만 나른다.
+ */
+function WindowCells({
+  view,
+  w,
+  measure,
+  row,
+  column,
+  lead,
+}: {
+  view: VendorView
+  w: WindowView
+  measure: boolean
+  row: number
+  column: number
+  lead: string
+}) {
   const r = w.reading
-  const resetInSecs = r.kind === 'expired' ? null : r.resetInSecs
+  const at = (offset: number, span = 1): CSSProperties => ({
+    gridRow: row,
+    gridColumn: span === 1 ? column + offset : `${column + offset} / span ${span}`,
+  })
   return (
-    <span
-      {...windowAttrs(view, w, measure)}
-      style={{ flex: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.35em' }}
-    >
-      <span style={{ color: 'var(--text-muted)' }}>{w.label}</span>
-      {r.kind === 'value' && <Bar view={view} label={w.label} r={r} meter={false} measure={measure} />}
-      <ValueText w={w} bare={false} dimStale measure={measure} />
-      {resetInSecs !== null && (
-        <span {...(measure ? {} : { 'data-usage-reset-in': '' })} style={{ color: 'var(--text-muted)' }}>
-          {t('usage.resetIn', { duration: formatDuration(resetInSecs) })}
+    <span {...windowAttrs(view, w, measure)} style={{ display: 'contents' }}>
+      <span style={{ ...at(0), marginLeft: lead, color: 'var(--text-muted)' }}>{w.label}</span>
+      {r.kind === 'expired' ? (
+        <span style={{ ...at(1, 3), marginLeft: LABEL_TO_BAR }}>
+          <ValueText w={w} bare={false} dimStale measure={measure} />
         </span>
+      ) : (
+        <>
+          {r.kind === 'value' && (
+            <Bar
+              view={view}
+              label={w.label}
+              r={r}
+              meter={false}
+              measure={measure}
+              cell={{ ...at(1), width: 'auto', marginLeft: LABEL_TO_BAR }}
+            />
+          )}
+          <span style={{ ...at(2), textAlign: 'right' }}>
+            <ValueText w={w} bare={false} dimStale measure={measure} />
+          </span>
+          {r.resetsAt !== null && (
+            <span
+              {...(measure ? {} : { 'data-usage-reset-clock': '' })}
+              style={{ ...at(3), marginLeft: PCT_TO_RESET, color: 'var(--text-muted)' }}
+            >
+              {formatResetClock(r.resetsAt, w.weekday)}
+            </span>
+          )}
+        </>
       )}
     </span>
   )
@@ -454,7 +553,8 @@ function WindowSegment({ view, w, measure }: { view: VendorView; w: WindowView; 
 /**
  * 막대 — 값이 있을 때만 그린다(값이 없으면 막대 자체가 없다 — 0% 로 그리지 않는다, R21). `meter` = 보조기술에 막대로
  * 드러낸다(D14 — 팝업). 요약 버튼 안에서는 버튼 이름이 대신하므로 숨긴다.
- * ★색은 토큰만★ — e-ink 은 같은 토큰이 빗금·검정 채움·굵은 테두리로 풀린다(R11).
+ * ★색은 토큰만★ — e-ink 은 같은 토큰이 빗금·검정 채움·굵은 테두리로 풀린다(R11). `cell` = 격자 칸 자리·폭(1·2단은
+ * 칸 폭을 채운다).
  */
 function Bar({
   view,
@@ -462,12 +562,14 @@ function Bar({
   r,
   meter,
   measure,
+  cell,
 }: {
   view: VendorView
   label: string
   r: ValueReading
   meter: boolean
   measure: boolean
+  cell?: CSSProperties
 }) {
   const a11y = meter
     ? {
@@ -493,6 +595,7 @@ function Bar({
         borderRadius: '2px',
         background: 'var(--usage-track)',
         border: r.level === 'danger' ? 'var(--usage-danger-border)' : 'var(--usage-bar-border)',
+        ...cell,
       }}
     >
       <span
@@ -505,7 +608,8 @@ function Bar({
 
 /**
  * 남은 % 글자. `bare` = 숫자만 남는 3단(「%」 없이, 만료는 짧은 문구). 오래된 값은 숫자만 흐리게 — 나이 문구는
- * 팝업에만 둔다(R32 · 사용자 결정 2026-09-27).
+ * 팝업에만 둔다(R32 · 사용자 결정 2026-09-27). ★20% 미만에도 기호를 붙이지 않는다★ — 색 밖의 단서는 e-ink 막대
+ * 모양이 진다(사용자 결정 2026-09-29 — R10 개정).
  */
 function ValueText({
   w,
@@ -534,7 +638,6 @@ function ValueText({
       </span>
     )
   }
-  const danger = r.level === 'danger' ? (bare ? '⚠' : ' ⚠') : ''
   const dim = dimStale && r.stale
   return (
     <span
@@ -545,7 +648,7 @@ function ValueText({
       data-usage-level={measure ? undefined : r.level}
       style={{ color: `var(--usage-${r.level})`, opacity: dim ? 0.5 : undefined }}
     >
-      {`${r.visible}${bare ? '' : '%'}${danger}`}
+      {`${r.visible}${bare ? '' : '%'}`}
     </span>
   )
 }
@@ -685,6 +788,7 @@ function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) 
         key: `model:${scoped.label}`,
         label: scoped.label,
         reading: readWindow(scoped.window, view.elapsed, nowWall),
+        weekday: false,
       })
     }
   }
@@ -693,7 +797,11 @@ function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) 
   return (
     <section data-usage-popup-vendor={view.vendor} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: '0.6em' }}>
-        <span style={{ fontWeight: 600 }}>{view.name}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35em', fontWeight: 600 }}>
+          {/* 이름 글자가 바로 옆에 있어 아이콘은 장식이다 — 보조기술이 이름을 두 번 읽지 않게. */}
+          <VendorIcon vendor={view.vendor} label={null} data-usage-icon={view.vendor} />
+          <span>{view.name}</span>
+        </span>
         {snapshot?.plan != null && (
           <span data-usage-plan="" style={{ color: 'var(--text-muted)' }}>
             {t('usage.plan', { plan: snapshot.plan })}
