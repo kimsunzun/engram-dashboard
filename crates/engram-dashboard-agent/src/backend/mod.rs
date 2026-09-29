@@ -56,6 +56,19 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
     }
 }
 
+/// [`console_command`] 이 프로그램 위에 씌우는 프로세스 층 수 — 스폰한 뿌리에서 프로그램까지의 깊이다.
+// ADR-0257
+pub(crate) fn console_wrapper_depth() -> usize {
+    #[cfg(windows)]
+    {
+        1
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
+}
+
 // ── CLI 입구 주입(백엔드 공용) ────────────────────────────────────────────────
 
 /// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
@@ -1021,6 +1034,17 @@ pub fn resume_transcript_events(
 mod tests {
     use super::*;
     use crate::profile::AgentOutputFormat;
+
+    /// 층 수는 감싸기와 한 사실이다 — 감쌌으면 1, 그대로면 0.
+    #[test]
+    fn the_wrapper_depth_matches_what_console_command_wraps() {
+        let (program, args) = console_command("claude", vec!["-p".into()]);
+        let wrapped = program != "claude";
+        assert_eq!(console_wrapper_depth(), usize::from(wrapped));
+        if wrapped {
+            assert_eq!(args.get(1).map(String::as_str), Some("claude"));
+        }
+    }
 
     // ── ADR-0099 트립와이어: 새 AgentCommand variant 배선 시 capability 의식적 선언 강제 ──────
     //

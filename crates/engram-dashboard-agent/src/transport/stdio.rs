@@ -31,6 +31,7 @@ use crate::types::{
     TerminalReason, TransportCaps,
 };
 
+use crate::platform::process_group::ProcessGroup;
 #[cfg(windows)]
 use crate::platform::JobObjectHandle;
 
@@ -69,8 +70,13 @@ pub struct StdioTransport {
     /// 능력도 거짓이다.
     // ADR-0238
     interrupt: Option<InterruptLine>,
+    /// `Arc` 인 것은 [`Self::process_group`] 이 약한 손잡이를 내주려는 것이다 — 강한 참조는 여기 하나뿐이라
+    /// 통로가 사라지면 Job 핸들도 닫힌다(`KILL_ON_JOB_CLOSE`).
     #[cfg(windows)]
-    job_handle: JobObjectHandle,
+    job_handle: Arc<JobObjectHandle>,
+    /// 이 스폰이 뿌리 아래 붙이는 프로세스 수 — 그 사실을 만드는 스폰 플래그 옆에서 정한다(`open`).
+    #[cfg(windows)]
+    root_attached: usize,
 }
 
 impl StdioTransport {
@@ -101,11 +107,15 @@ impl StdioTransport {
         // Windows: 헤드리스 백그라운드 프로세스라 콘솔 창이 튀지 않게 CREATE_NO_WINDOW.
         //   (데몬은 창 없는 프로세스일 수 있어 cmd.exe shim이 콘솔을 새로 띄우는 깜빡임을 막는다.)
         #[cfg(windows)]
-        {
+        let root_attached = {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+            // 창이 없어도 숨은 콘솔은 생기고, 그 호스트(conhost.exe)가 뿌리의 자식으로 하나 붙는다 — 뿌리가 콘솔
+            // 프로그램일 때의 실측(T-40 스파이크 · cmd.exe 뿌리 4/4). 우리 stdio 스폰의 뿌리는 콘솔 CLI 다.
+            // ADR-0257
+            1
+        };
 
         let mut child = cmd
             .spawn()
@@ -123,7 +133,7 @@ impl StdioTransport {
             if let Some(pid) = child_pid {
                 job.assign(pid)?;
             }
-            job
+            Arc::new(job)
         };
 
         let transport = StdioTransport {
@@ -138,9 +148,28 @@ impl StdioTransport {
             interrupt: None,
             #[cfg(windows)]
             job_handle,
+            #[cfg(windows)]
+            root_attached,
         };
 
         Ok((transport, child_pid))
+    }
+
+    /// 이 통로가 띄운 프로세스 무리의 약한 손잡이. 통로는 그것이 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」).
+    /// `None` = 이 OS 에서는 무리를 묶는 수단이 없다(Windows 밖).
+    // ADR-0257
+    pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
+        #[cfg(windows)]
+        {
+            Some(ProcessGroup::new(
+                Arc::downgrade(&self.job_handle),
+                self.root_attached,
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     }
 
     /// 끊기 줄 함수를 꽂는다 — 꽂으면 능력 `control.interrupt` 가 참이 된다(「지금 턴이 있다」가 아니라 「끊을 수 있는
@@ -684,5 +713,125 @@ mod tests {
         );
 
         core.join_pump(Duration::from_secs(5));
+    }
+
+    // ── 무리 손잡이(ADR-0257): 통로가 사는 동안 멤버가 보이고, 통로가 사라지면 명단은 비고 누구든 `Gone` ──
+    // `shutdown()` 없이 drop 만 한다 — shutdown 은 Job 을 통째 끝내 손잡이가 강해도 명단이 빈다. drop 만이면
+    // 손잡이가 약할 때만 Job 핸들이 닫혀(`KILL_ON_JOB_CLOSE`) 무리가 끝나고, 강하면 ping 이 명단에 남는다.
+    // `start()` 를 안 불러 통로의 스레드가 없으므로 drop 뒤에 매달리는 것도 없다.
+    // cmd 는 stdin 한 줄을 받을 때까지 ping 을 안 띄운다 — `open` 이 Job 에 넣기 전에 ping 이 새어 나가지 않게.
+    #[cfg(windows)]
+    #[test]
+    fn the_process_group_sees_the_root_and_empties_once_the_transport_is_gone() {
+        use crate::platform::process_group::Verify;
+        use crate::platform::process_tree::{system_time_to_filetime, ProcessIdentity};
+        use engram_dashboard_base::platform::{pid_alive, process_start, ProcessStart};
+        use std::time::{Duration, Instant, SystemTime};
+
+        let known = |pid: u32| match process_start(pid) {
+            ProcessStart::Known(start_time) => ProcessIdentity { pid, start_time },
+            other => panic!("PID {pid} 의 시작시각을 못 읽었다: {other:?}"),
+        };
+        // 끝났어도 누가 핸들을 쥐면 시작시각은 그대로 읽히므로 종료 코드(`pid_alive`)도 함께 본다.
+        let still_running = |who: ProcessIdentity| {
+            pid_alive(who.pid) && process_start(who.pid) == ProcessStart::Known(who.start_time)
+        };
+
+        // ping 이 스스로 끝나는 데 ~9 초 — 아래 5 초 대기 안에 끝나면 그것은 Job 닫기의 몫이다. 출력은 `NUL` 로 보내
+        //   통로가 사라지며 파이프가 닫혀 쓰기 실패로 죽는 길도 막는다.
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: [
+                "/d",
+                "/c",
+                "set",
+                "/p",
+                "_=",
+                "&",
+                "ping",
+                "-n",
+                "10",
+                "127.0.0.1",
+                ">",
+                "NUL",
+            ]
+            .map(String::from)
+            .to_vec(),
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, pid) = StdioTransport::open(&spec, true, None).expect("open");
+        let root = known(pid.expect("자식 PID"));
+        let group = transport
+            .process_group()
+            .expect("Windows 통로는 무리를 내준다");
+        assert_eq!(group.root_attached(), 1);
+
+        // 콘솔 호스트는 cmd 가 뜨며 붙는다 — 그보다 넉넉히 뒤에 문을 열어, 문 뒤에 태어난 멤버 = ping 으로 가른다.
+        std::thread::sleep(Duration::from_millis(100));
+        let gate = system_time_to_filetime(SystemTime::now()).expect("벽시계");
+        // 문을 연 뒤 태어난 것이 문 시각과 같은 눈금에 걸리지 않게 벌려 둔다.
+        std::thread::sleep(Duration::from_millis(20));
+        {
+            let mut stdin = transport.stdin.lock().unwrap_or_else(|p| p.into_inner());
+            let stdin = stdin.as_mut().expect("stdin 파이프");
+            stdin.write_all(b"go\r\n").expect("문 열기");
+            stdin.flush().expect("문 열기");
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ping = loop {
+            let members = group.member_pids().expect("명단");
+            assert!(
+                members.contains(&root.pid),
+                "뿌리가 명단에 없다: {members:?}"
+            );
+            let born_after_gate = members
+                .into_iter()
+                .find_map(|pid| match process_start(pid) {
+                    ProcessStart::Known(start_time) if start_time > gate => {
+                        Some(ProcessIdentity { pid, start_time })
+                    }
+                    _ => None,
+                });
+            if let Some(ping) = born_after_gate {
+                break ping;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "10 초 안에 Job 안의 ping 을 못 봤다"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+
+        drop(transport);
+        assert_eq!(
+            group.member_pids().expect("명단"),
+            Vec::<u32>::new(),
+            "통로가 사라졌는데 명단이 남았다 — 손잡이가 Job 을 붙들고 있다"
+        );
+        assert!(matches!(group.verify(root), Ok(Verify::Gone)));
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while still_running(root) || still_running(ping) {
+            assert!(
+                Instant::now() < deadline,
+                "통로를 버린 뒤 5 초가 지나도 뿌리나 ping 이 살아 있다 — Job 이 안 닫혔다"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn there_is_no_process_group_off_windows() {
+        let spec = CommandSpec {
+            program: "true".into(),
+            args: vec![],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+        assert!(transport.process_group().is_none());
+        transport.shutdown();
     }
 }
