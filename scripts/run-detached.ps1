@@ -103,7 +103,7 @@ function Resolve-CmdTarget([string]$token, [string]$searchCwd) {
 #     exe 를 배치로 잘못 보면 **정규식이 조용히 망가진다.** 그래서 `.cmd`·`.bat` 로 **확정될 때만** 붙인다.
 #   ★「무조건 붙여도 안전하다」로 되돌리지 말 것★ — 그 옛 결론은 종료코드·`--` 이하 인자·따옴표만 재고 **`^` 를 안 재서** 나온 것이다.
 #   ★**`%` 는 이 분기가 못 고친다 — 안 고쳐진 채 남는 한계다**★(실측 2026-09-22): 래퍼가 배치 파일이라 **`call` 이 없어도**
-#     본문의 `%VAR%` 는 펴지고 홑 `%` 는 먹힌다(`"x%USERNAME%y"` → `xkimsunzuny` · `"50% done C:\pct%NOPE%path"` → `50\pctpath`,
+#     본문의 `%VAR%` 는 펴지고 홑 `%` 는 먹힌다(`"x%USERNAME%y"` → `x<user>y` · `"50% done C:\pct%NOPE%path"` → `50\pctpath`,
 #     `call` 유무 양쪽 동일). `call` 이 더하는 것은 파싱 한 판뿐이라 한 판을 견디는 `%%` 까지 먹는다(`"50%% done"` → 없으면
 #     `50% done`, 있으면 `50 done`). 즉 **`%` 가 든 인자는 이 래퍼에 넘기지 않는 것이 규칙**이고, 그 규칙은 이 변경 전후로 같다.
 $target = Resolve-CmdTarget (Get-FirstToken $Command) $WorkDir

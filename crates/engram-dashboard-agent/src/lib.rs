@@ -12,6 +12,8 @@ pub mod backend;
 pub mod commands;
 // ADR-0172
 pub mod failure;
+// ADR-0231
+pub mod inputs_pending;
 pub mod manager;
 // ADR-0101
 pub mod name;
@@ -19,6 +21,8 @@ pub mod output_core;
 pub mod platform;
 pub mod preset;
 pub mod profile;
+// ADR-0231
+pub mod queued_input;
 pub mod reaper;
 pub mod session;
 // ADR-0226

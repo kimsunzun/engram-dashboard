@@ -21,7 +21,7 @@ T7a+T7b 완료, T7c 구현됐으나 리뷰어 BLOCK. 다음 세션은 **T7c BLOC
   - `src/api/clientFactory.ts` — T7c
   - `docs/process/S14-multi-page-layout/module1-transport-spike.md` — §11 TRD +282줄
 - **BLOCK 수정 완료 후 T7a~T7c 전체 한 번에 커밋** 권장.
-- `C:\Users\kimsunzun\.claude\settings.json` — `model: sonnet → opus` 변경(로컬, git 외).
+- `C:\Users\<user>\.claude\settings.json` — `model: sonnet → opus` 변경(로컬, git 외).
 
 ## T7c BLOCK 결함 상세
 

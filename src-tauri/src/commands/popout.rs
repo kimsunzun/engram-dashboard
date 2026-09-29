@@ -206,14 +206,9 @@ pub fn cleanup_popup_window(
 
     // 2) 출력 Channel registry 에서 이 label 제거(누수 방지 — 죽은 webview Channel 이 남지 않게). Tauri
     //   부분이라 별도 락(ViewManager 무관) — 코어(모델·라우팅) 밖이라 락 밖 유지 OK(F1).
-    if let Ok(mut reg) = registry.lock() {
-        reg.remove(label);
-    } else {
-        tracing::warn!(
-            label,
-            "cleanup_popup_window: registry lock poisoned — Channel 제거 스킵"
-        );
-    }
+    //   ★poison 이어도 뺀다(ADR-0231)★ — 옛 건너뛰기는 죽은 Channel 을 남겼다(근거 정본 = `output_channel`
+    //   모듈 헤더).
+    crate::output_channel::unregister_window(registry, label);
 
     tracing::info!(label, "런타임 창 정리 완료(탭 전부 드롭·구독·Channel)");
 }

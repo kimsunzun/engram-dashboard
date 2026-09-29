@@ -28,6 +28,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import { WsTransport } from './wsTransport'
 import { ProtocolClient } from './protocolClient'
+import { placeholderErrorPayload } from './wsFrame'
 import type { InboundMessage } from './transport'
 
 const OPEN = 1
@@ -185,6 +186,35 @@ describe('WsTransport 정규화', () => {
     const out = got.find((m) => m.kind === 'output')
     expect(out).toMatchObject({ kind: 'output', agentId: AGENT, epoch: 3, seq: 9 })
     expect(Array.from((out as { bytes: Uint8Array }).bytes)).toEqual([0x41])
+    t.close()
+  })
+
+  // ADR-0231: 버리면 그 seq 에 구멍이 서서 붙든 뷰가 멈춘다 — 셸 중계와 같게 같은 seq 의 자리채움으로 올린다.
+  it('모르는 tag 의 binary frame → 같은 seq·화신의 자리채움(tag1 Error)으로 올린다', async () => {
+    const t = new WsTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    const ws = await connect(t)
+    const frame = buildFrame({ agentId: AGENT, epoch: 3, seq: 9, payload: new Uint8Array([0x41]) })
+    new DataView(frame).setUint8(0, 9)
+    ws.fireBinary(frame)
+    const out = got.find((m) => m.kind === 'output') as { tag: number; bytes: Uint8Array }
+    expect(out).toMatchObject({ kind: 'output', tag: 1, agentId: AGENT, epoch: 3, seq: 9 })
+    expect(new TextDecoder().decode(out.bytes)).toBe(new TextDecoder().decode(placeholderErrorPayload()))
+    expect(ws.closed).toBe(false)
+    t.close()
+  })
+
+  it('seq 를 못 읽는 짧은 binary frame → 올리지 않고 소켓을 닫는다(끊기 → 재연결)', async () => {
+    const t = new WsTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    const ws = await connect(t)
+    ws.fireBinary(new ArrayBuffer(FRAME_HEADER_LEN - 1))
+    expect(got.filter((m) => m.kind === 'output')).toEqual([])
+    expect(ws.closed).toBe(true)
+    ws.fireClose() // 브라우저가 close() 뒤에 내는 close 사건
+    expect(t.connectionState).toBe('reconnecting')
     t.close()
   })
 })
@@ -526,6 +556,40 @@ describe('WsTransport requestReplay single-flight(FIX-4)', () => {
     t.close()
   })
 
+  // ADR-0231: 직결 경로엔 셸 마커가 없어 replay 머리를 Ack 에서 받아 그 요청의 성공 경계에 싣는다.
+  //   ★요청마다 새로 시작한다★ — 앞 요청의 머리가 뒤 요청으로 새면 뷰가 그 사이 이력을 건너뛴다.
+  it('SubscribeAck 의 replay_from 이 그 요청의 성공 경계로 가고, 다음 요청에 새지 않는다', async () => {
+    const t = new WsTransport()
+    const ws = await connect(t)
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+
+    await t.requestReplay(AGENT)
+    const p2 = t.requestReplay(AGENT) // in-flight 중 병합 — 첫 경계 뒤 승격된다
+    ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, replay_from: 40, truncated: true } })
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 1n, replayFrom: 40 })
+
+    await p2
+    got.length = 0
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } }) // Ack 를 못 본 요청 — 직결 근사 0
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 2n, replayFrom: 0 })
+    t.close()
+  })
+
+  it('replay_from 이 없는 SubscribeAck 은 머리 0 — NaN 이 경계로 새지 않는다', async () => {
+    const t = new WsTransport()
+    const ws = await connect(t)
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+
+    await t.requestReplay(AGENT)
+    ws.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: 4, truncated: false } })
+    ws.fireText({ ReplayComplete: { agent_id: AGENT, epoch: 4 } })
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 1n, replayFrom: 0 })
+    t.close()
+  })
+
   it('거절(실패 경계)은 continuesConversation=false', async () => {
     const t = new WsTransport()
     const ws = await connect(t)
@@ -768,6 +832,51 @@ describe('WsTransport + ProtocolClient 통합(ADR-0046 뷰 직결 replay)', () =
     // 이후 라이브 프레임 직행.
     ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
     expect(received).toEqual([0, 1, 2, 3])
+    c.close()
+  })
+
+  it('live 한가운데 모르는 tag 프레임이 와도 그 seq 가 자리채움으로 채워져 뒤가 붙들리지 않는다', async () => {
+    const t = new WsTransport()
+    const c = new ProtocolClient(t)
+    const ws1 = await connect(t)
+    const received: Array<[number, number]> = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => received.push([chunk.seq, chunk.tag]))
+    await Promise.resolve()
+
+    const E = 5
+    ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 0, truncated: false } })
+    ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 0 }))
+    ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
+    const unknown = buildFrame({ agentId: AGENT, epoch: E, seq: 1 })
+    new DataView(unknown).setUint8(0, 9)
+    ws1.fireBinary(unknown)
+    ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 2 }))
+    expect(received).toEqual([
+      [0, 0],
+      [1, 1],
+      [2, 0],
+    ])
+    expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 0 })
+    c.close()
+  })
+
+  // ADR-0231: 링이 잘린 새 에이전트 — 뷰의 커서는 −1 이라 머리(Ack 의 replay_from)를 모르면 0 을 기다리며
+  //   3·4 를 붙든 채 멈춘다.
+  it('SubscribeAck 의 replay_from 이 flush 시작점이 된다(잘린 replay 의 머리 점프)', async () => {
+    const t = new WsTransport()
+    const c = new ProtocolClient(t)
+    const ws1 = await connect(t)
+    const received: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => received.push(chunk.seq))
+    await Promise.resolve()
+
+    const E = 5
+    ws1.fireText({ SubscribeAck: { agent_id: AGENT, current_epoch: E, replay_from: 3, truncated: true } })
+    ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 3 }))
+    ws1.fireBinary(buildFrame({ agentId: AGENT, epoch: E, seq: 4 }))
+    ws1.fireText({ ReplayComplete: { agent_id: AGENT, epoch: E } })
+    expect(received).toEqual([3, 4])
+    expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 0 })
     c.close()
   })
 

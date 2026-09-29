@@ -9,12 +9,15 @@
 //   3회 후 error · watchdog 재요청(fake timers)
 //   · 붙어 있는 뷰의 회전(끊긴 적 없는 재spawn) · 표식 없는 명부 항목 = 회전 취급 · 명부 부재 →
 //   붙어 있던 뷰도 detached · 표식은 프레임이 아니라 성공 마커가 정한다(앞 화신 늦은 프레임 무해)
-//   · 뷰별 dedup 독립 · unsubscribe 청소.
+//   · 뷰별 dedup 독립 · unsubscribe 청소
+//   · seq 연속(ADR-0231): live 구멍 뒤 붙듦 · flush 시작점 = max(마지막+1, replay 머리) · 붙듦 넘침 → 버퍼 국면.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProtocolClient } from './protocolClient'
-import type { ConnectionState, OutputChunk } from './agentClient'
+import connectionCoreSource from '../../crates/engram-dashboard-daemon/src/connection_core.rs?raw'
+import { StructuredEventAccumulator } from '../components/slot/structuredAccumulator'
+import { INPUT_LOCKED_REFUSAL, type ConnectionState, type OutputChunk } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import type { AgentInfo, AgentProfile, Preset, RestoreReport } from './types'
 
@@ -89,7 +92,12 @@ class MockTransport implements Transport {
     agentId: string,
     epoch: number,
     gen: bigint,
-    opts: { failed?: boolean; truncated?: boolean; continuesConversation?: boolean } = {},
+    opts: {
+      failed?: boolean
+      truncated?: boolean
+      continuesConversation?: boolean
+      replayFrom?: number
+    } = {},
   ): void {
     this.deliver({
       kind: 'replayBoundary',
@@ -99,6 +107,8 @@ class MockTransport implements Transport {
       truncated: opts.truncated ?? false,
       failed: opts.failed ?? false,
       continuesConversation: opts.continuesConversation ?? false,
+      // 기본 0 = 링이 0 부터 온전한 replay(머리 점프 없음 — 시작점은 `마지막+1`).
+      replayFrom: opts.replayFrom ?? 0,
     })
   }
   setState(s: ConnectionState): void {
@@ -181,6 +191,84 @@ describe('request_id pending 매칭', () => {
     t.control({ Snapshot: { request_id: rid1, agent_id: AGENT, chunks: [{ seq: 1 }] } })
     await expect(p1).resolves.toEqual([{ seq: 1 }])
     await expect(p2).resolves.toEqual([{ seq: 2 }])
+  })
+})
+
+// ── 대기 입력 두 명령(ADR-0231 — 전용 reply 를 request_id 로 회수) ───────────────────────────
+describe('대기 입력 명령(ADR-0231) — ListQueuedInputs · CancelQueuedInput', () => {
+  it('listQueuedInputs → ListQueuedInputs{agent_id,request_id} + QueuedInputs 로 resolve(as_of_seq 는 number)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.listQueuedInputs(AGENT)
+    await Promise.resolve()
+    const sent = t.lastSent<{ agent_id: string; request_id: string }>('ListQueuedInputs')!
+    expect(sent.agent_id).toBe(AGENT)
+    const row = { id: 'q1', text: 'hi', state: 'queued', cancel: null }
+    t.control({
+      QueuedInputs: {
+        request_id: sent.request_id,
+        agent_id: AGENT,
+        inputs: [row],
+        as_of_seq: 41,
+        epoch: 9,
+        stopped_after_error: true,
+      },
+    })
+    await expect(p).resolves.toEqual({ inputs: [row], as_of_seq: 41, epoch: 9, stopped_after_error: true })
+  })
+
+  it('as_of_seq null 은 null 그대로 · 모르는 낱말의 행도 해석 없이 넘긴다(거르는 것은 소비자)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.listQueuedInputs(AGENT)
+    await Promise.resolve()
+    const rid = t.lastSent<{ request_id: string }>('ListQueuedInputs')!.request_id
+    const odd = { id: 'q9', text: 'x', state: 'parked', cancel: { answer: 'maybe', vendor_closed: false } }
+    t.control({
+      QueuedInputs: { request_id: rid, agent_id: AGENT, inputs: [odd], as_of_seq: null, epoch: 1, stopped_after_error: false },
+    })
+    await expect(p).resolves.toEqual({ inputs: [odd], as_of_seq: null, epoch: 1, stopped_after_error: false })
+  })
+
+  it('cancelQueuedInput → CancelQueuedInput{agent_id,input_id,request_id} + QueuedInputCancelReply 의 결말 낱말로 resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.cancelQueuedInput(AGENT, 'q1')
+    await Promise.resolve()
+    const sent = t.lastSent<{ agent_id: string; input_id: string; request_id: string }>('CancelQueuedInput')!
+    expect(sent).toMatchObject({ agent_id: AGENT, input_id: 'q1' })
+    t.control({
+      QueuedInputCancelReply: { request_id: sent.request_id, agent_id: AGENT, input_id: 'q1', outcome: 'requested' },
+    })
+    await expect(p).resolves.toBe('requested')
+  })
+
+  it('모르는 결말 낱말도 던지지 않고 그대로 준다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.cancelQueuedInput(AGENT, 'q1')
+    await Promise.resolve()
+    const rid = t.lastSent<{ request_id: string }>('CancelQueuedInput')!.request_id
+    t.control({ QueuedInputCancelReply: { request_id: rid, agent_id: AGENT, input_id: 'q1', outcome: 'deferred' } })
+    await expect(p).resolves.toBe('deferred')
+  })
+
+  it('Error{request_id} 는 두 명령 모두 reject — 임대 거절은 코드 없는 문구 그대로 온다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const list = c.listQueuedInputs(AGENT)
+    const cancel = c.cancelQueuedInput(AGENT, 'q1')
+    await Promise.resolve()
+    const listRid = t.lastSent<{ request_id: string }>('ListQueuedInputs')!.request_id
+    const cancelRid = t.lastSent<{ request_id: string }>('CancelQueuedInput')!.request_id
+    t.control({ Error: { request_id: listRid, message: 'NOT_FOUND: agent is not running' } })
+    t.control({ Error: { request_id: cancelRid, message: INPUT_LOCKED_REFUSAL } })
+    await expect(list).rejects.toThrow('NOT_FOUND: agent is not running')
+    await expect(cancel).rejects.toThrow(INPUT_LOCKED_REFUSAL)
+  })
+
+  it('임대 거절 문구가 데몬 상수와 바이트 같다(갈리면 CONFLICT 매핑이 조용히 죽는다)', () => {
+    expect(connectionCoreSource).toContain(`pub(crate) const INPUT_LOCKED_REFUSAL: &str = "${INPUT_LOCKED_REFUSAL}";`)
   })
 })
 
@@ -1217,10 +1305,10 @@ describe("이어받기 화신 표식 — 'live' 에만 info 로 실린다(ADR-02
     await c.subscribeOutput(V1, AGENT, () => {}, r1.cb)
     await c.subscribeOutput(V2, AGENT, () => {}, r2.cb)
     t.marker(AGENT, 1, t.replayCalls[0].gen, { continuesConversation: true })
-    expect(r1.seen).toEqual([{ state: 'live', info: { continuesConversation: true }, argc: 2 }])
+    expect(r1.seen).toEqual([{ state: 'live', info: { continuesConversation: true, epoch: 1 }, argc: 2 }])
 
     t.marker(AGENT, 1, t.replayCalls[1].gen)
-    expect(r2.seen).toEqual([{ state: 'live', info: { continuesConversation: false }, argc: 2 }])
+    expect(r2.seen).toEqual([{ state: 'live', info: { continuesConversation: false, epoch: 1 }, argc: 2 }])
   })
 
   // 마커가 myGen 보다 먼저 오면 보관했다가 확정 때 재평가한다 — 보관 사본이 칸을 떨어뜨리면 이 경로에서만
@@ -1238,7 +1326,7 @@ describe("이어받기 화신 표식 — 'live' 에만 info 로 실린다(ADR-02
     releaseGen(gen)
     await Promise.resolve()
     await Promise.resolve()
-    expect(r.seen).toEqual([{ state: 'live', info: { continuesConversation: true }, argc: 2 }])
+    expect(r.seen).toEqual([{ state: 'live', info: { continuesConversation: true, epoch: 1 }, argc: 2 }])
   })
 
   it("'live' 가 아닌 국면(buffering·detached·error)에는 info 가 없다", async () => {
@@ -1627,5 +1715,283 @@ describe('connect/disconnect (ADR-0021 §1·note3)', () => {
     const c = new ProtocolClient(t)
     c.disconnect()
     expect(t.closed).toBe(true)
+  })
+})
+
+// ── ADR-0231: seq 연속 — 뷰에 배달하는 다음 seq 는 늘 마지막+1(live 붙듦 · flush 시작점) ─────────
+//   데몬은 fanout 을 replay 락 밖에서 하므로(ADR-0006) 두 생산자의 N·N+1 이 뒤집혀 올 수 있다. 먼저 온
+//   N+1 을 흘려 커서를 올리면 뒤늦은 N 이 영구히 버려진다 — 대기 목록 사건이면 그 창의 목록이 틀린 채 남는다.
+describe('seq 연속(ADR-0231) — live 붙듦 · flush 시작점 = max(마지막+1, replay 머리)', () => {
+  /** V1 을 붙여 0..last 를 replay 로 받고 live 로 세운 뒤, 받은 seq 기록을 비워 돌려준다. */
+  async function liveAt(
+    t: MockTransport,
+    c: ProtocolClient,
+    last: number,
+    onChunk?: (chunk: OutputChunk) => void,
+  ): Promise<number[]> {
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => {
+      got.push(chunk.seq)
+      onChunk?.(chunk)
+    })
+    for (let seq = 0; seq <= last; seq++) t.output(AGENT, 1, seq)
+    t.marker(AGENT, 1, t.replayCalls[0].gen)
+    expect(c.getViewOutputState(V1)?.phase).toBe('live')
+    got.length = 0
+    return got
+  }
+
+  it('live 에서 [5, 7, 6] → 5·6·7 순(먼저 온 7 때문에 6 이 버려지지 않는다)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got = await liveAt(t, c, 4)
+    t.output(AGENT, 1, 5)
+    t.output(AGENT, 1, 7)
+    expect(got).toEqual([5])
+    expect(c.getViewOutputState(V1)?.held).toBe(1)
+    t.output(AGENT, 1, 6)
+    expect(got).toEqual([5, 6, 7])
+    expect(c.getViewOutputState(V1)?.held).toBe(0)
+    // 붙들었다 흘린 7 이 다시 와도 두 번 그리지 않는다.
+    t.output(AGENT, 1, 7)
+    expect(got).toEqual([5, 6, 7])
+  })
+
+  it('구멍 없는 흐름은 붙들지 않고 곧바로 흘린다(터미널 뷰의 바이트·시점이 오늘과 같다)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got = await liveAt(t, c, 0)
+    for (let seq = 1; seq <= 5; seq++) {
+      t.output(AGENT, 1, seq)
+      expect(got[got.length - 1]).toBe(seq)
+      expect(c.getViewOutputState(V1)?.held).toBe(0)
+    }
+    expect(got).toEqual([1, 2, 3, 4, 5])
+  })
+
+  it('[5, 7] 뒤 시간이 흘러도 7 을 흘리지 않는다(시한 없음) — 재요청도 안 나간다', async () => {
+    vi.useFakeTimers()
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const got = await liveAt(t, c, 4)
+      t.output(AGENT, 1, 5)
+      t.output(AGENT, 1, 7)
+      await vi.advanceTimersByTimeAsync(10 * 60_000)
+      expect(got).toEqual([5])
+      expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 1 })
+      expect(t.replayCalls.length).toBe(1)
+      t.output(AGENT, 1, 6)
+      expect(got).toEqual([5, 6, 7])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('tag1 자리채움 Error 가 터미널 뷰의 구멍을 메워 뒤 프레임이 흐른다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const chunks: OutputChunk[] = []
+    await liveAt(t, c, 4, (chunk) => chunks.push(chunk))
+    chunks.length = 0
+    t.output(AGENT, 1, 6, new Uint8Array([0x41]), 0)
+    expect(chunks).toEqual([])
+    const placeholder = new TextEncoder().encode(JSON.stringify({ type: 'Error', message: 'placeholder' }))
+    t.output(AGENT, 1, 5, placeholder, 1)
+    expect(chunks.map((x) => [x.seq, x.tag])).toEqual([
+      [5, 1],
+      [6, 0],
+    ])
+  })
+
+  // 데몬은 `ReplayComplete` 를 subscribers 락 밖에서 연결 큐에 넣는다 — 연결 큐 `[…L, L+2, 마커, L+1]`.
+  it('버퍼 […L, L+2] + 성공 마커 → L 까지만 배달 · 뒤이은 L+1 → L+1·L+2 가 차례로', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    t.output(AGENT, 1, 0)
+    t.output(AGENT, 1, 1)
+    t.output(AGENT, 1, 2) // L
+    t.output(AGENT, 1, 4) // L+2 — L+1 보다 먼저 온 라이브 프레임
+    t.marker(AGENT, 1, t.replayCalls[0].gen)
+    expect(got).toEqual([0, 1, 2])
+    expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 1 })
+    t.output(AGENT, 1, 3) // L+1
+    expect(got).toEqual([0, 1, 2, 3, 4])
+    expect(c.getViewOutputState(V1)?.held).toBe(0)
+  })
+
+  it('새 화신(마지막 −1) + 마커 replay 머리 40 → 40 부터(링이 잘린 replay 의 머리 점프)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const order: string[] = []
+    await c.subscribeOutput(
+      V1,
+      AGENT,
+      (chunk) => order.push(`chunk:${chunk.seq}`),
+      undefined,
+      () => order.push('reset'),
+    )
+    for (let seq = 0; seq <= 50; seq++) t.output(AGENT, 1, seq)
+    t.marker(AGENT, 1, t.replayCalls[0].gen)
+    order.length = 0
+    // 명부가 새 표식을 말한다 = 다른 화신. 새 화신의 링은 이미 40 앞이 밀려나 있다.
+    t.control({ AgentListUpdated: { agents: [{ id: AGENT, epoch: 2 }] } })
+    const gen2 = t.replayCalls[1].gen
+    await Promise.resolve() // myGen=gen2 확정
+    for (let seq = 40; seq <= 42; seq++) t.output(AGENT, 2, seq)
+    t.marker(AGENT, 2, gen2, { replayFrom: 40, truncated: true })
+    expect(order).toEqual(['reset', 'chunk:40', 'chunk:41', 'chunk:42'])
+    t.output(AGENT, 2, 43)
+    expect(order[order.length - 1]).toBe('chunk:43')
+    expect(c.getViewOutputState(V1)?.held).toBe(0)
+  })
+
+  it('같은 화신(마지막 50) + 버퍼 40–60 → 51 부터(머리가 커서보다 앞이면 커서가 이긴다)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got = await liveAt(t, c, 50)
+    t.setState('reconnecting')
+    t.setState('connected')
+    t.control({ AgentListUpdated: { agents: [{ id: AGENT, epoch: 1 }] } })
+    const gen2 = t.replayCalls[1].gen
+    await Promise.resolve() // myGen=gen2 확정
+    for (let seq = 40; seq <= 60; seq++) t.output(AGENT, 1, seq)
+    t.marker(AGENT, 1, gen2, { replayFrom: 40 })
+    expect(got).toEqual(Array.from({ length: 10 }, (_, i) => 51 + i))
+    expect(c.getViewOutputState(V1)?.held).toBe(0)
+  })
+
+  // ★머리를 버퍼 최소 seq 로 추정하면 여기서 틀린다★: 버퍼엔 1 만 있어 1 부터 흘리고 뒤늦은 0 을 버린다.
+  it('빈 replay: 새 화신 + 마커 머리 0 · seq 1 이 마커 앞 · seq 0 이 마커 뒤 → 0·1 이 차례로 둘 다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    t.output(AGENT, 1, 1)
+    t.marker(AGENT, 1, t.replayCalls[0].gen, { replayFrom: 0 })
+    expect(got).toEqual([])
+    expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 1 })
+    t.output(AGENT, 1, 0)
+    expect(got).toEqual([0, 1])
+  })
+
+  it('보관 마커(myGen 미확정) 경로도 replay 머리를 싣는다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    let resolveGen: (() => void) | null = null
+    t.replayGenImpl = (_a, gen) =>
+      new Promise<bigint>((r) => {
+        resolveGen = () => r(gen)
+      })
+    const got: number[] = []
+    await c.subscribeOutput(V1, AGENT, (chunk) => got.push(chunk.seq))
+    const gen = t.replayCalls[0].gen
+    t.output(AGENT, 1, 40)
+    t.output(AGENT, 1, 41)
+    t.marker(AGENT, 1, gen, { replayFrom: 40 })
+    expect(got).toEqual([]) // myGen 미확정 — 보관
+    resolveGen!()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(got).toEqual([40, 41])
+  })
+
+  it('붙든 양이 상한을 넘으면 startBuffering → 재청구가 곧바로 실제로 나가고 붙듦 목록이 비워진다', async () => {
+    vi.useFakeTimers()
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      const states: string[] = []
+      const got: number[] = []
+      await c.subscribeOutput(
+        V1,
+        AGENT,
+        (chunk) => got.push(chunk.seq),
+        (s) => states.push(s),
+      )
+      t.output(AGENT, 1, 0)
+      t.marker(AGENT, 1, t.replayCalls[0].gen)
+      got.length = 0
+      // seq 1 이 안 온 채 2048 프레임을 붙든다 — 아직 상한 안(링 4096 건보다 작다).
+      for (let seq = 2; seq <= 2049; seq++) t.output(AGENT, 1, seq)
+      expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 2048 })
+      expect(t.replayCalls.length).toBe(1)
+      t.output(AGENT, 1, 2050) // 2049번째 — 넘친다
+      // ★타이머를 돌리지 않고도 재청구가 이미 나갔다★ — 사다리(백오프 뒤 buffering 검사)가 아니다.
+      expect(t.replayCalls.length).toBe(2)
+      expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'buffering', held: 0, buffered: 0 })
+      expect(states).toEqual(['live', 'buffering'])
+      expect(got).toEqual([])
+      // 같은 화신이라 커서(0)를 지킨다 — 다시 온 replay 는 1 부터 구멍 없이 흐른다(여기선 링 꼬리만 짧게).
+      const gen2 = t.replayCalls[1].gen
+      await Promise.resolve() // myGen=gen2 확정
+      for (let seq = 0; seq <= 10; seq++) t.output(AGENT, 1, seq)
+      t.marker(AGENT, 1, gen2)
+      expect(got).toEqual(Array.from({ length: 10 }, (_, i) => 1 + i))
+      expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 0 })
+      await vi.advanceTimersByTimeAsync(10_000)
+      expect(t.replayCalls.length).toBe(2) // 뒤늦은 사다리·watchdog 재청구 없음
+    } finally {
+      warn.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('붙든 바이트가 상한(1 MiB — 링 2 MiB 보다 작다)을 넘어도 같은 처분이다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const t = new MockTransport()
+      const c = new ProtocolClient(t)
+      await liveAt(t, c, 0)
+      const quarter = new Uint8Array(256 * 1024)
+      for (let seq = 2; seq <= 5; seq++) t.output(AGENT, 1, seq, quarter) // 정확히 1 MiB — 아직 상한 안
+      expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'live', held: 4 })
+      t.output(AGENT, 1, 6, new Uint8Array(1))
+      expect(t.replayCalls.length).toBe(2)
+      expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'buffering', held: 0 })
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('끊기면 붙든 것도 버린다 — 다시 붙은 replay 가 구멍을 메우고 각 seq 는 한 번만 그려진다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const got = await liveAt(t, c, 4)
+    t.output(AGENT, 1, 7)
+    expect(c.getViewOutputState(V1)?.held).toBe(1)
+    t.setState('reconnecting')
+    expect(c.getViewOutputState(V1)).toMatchObject({ phase: 'detached', held: 0 })
+    t.setState('connected')
+    t.control({ AgentListUpdated: { agents: [{ id: AGENT, epoch: 1 }] } })
+    const gen2 = t.replayCalls[1].gen
+    await Promise.resolve() // myGen=gen2 확정
+    for (let seq = 0; seq <= 8; seq++) t.output(AGENT, 1, seq)
+    t.marker(AGENT, 1, gen2)
+    expect(got).toEqual([5, 6, 7, 8])
+  })
+
+  // 누산기까지 — 틀린 목록이 이 결함의 증상이다(`Delivered{X}` 를 잃으면 X 가 남고 말풍선도 없다).
+  it('누산기까지: Queued{X}(seq N)가 대화 프레임(N+1) 뒤에 와도 X 가 목록에 서고, 뒤이은 Delivered{X} 가 말풍선을 그린다', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const acc = new StructuredEventAccumulator()
+    await liveAt(t, c, 4, (chunk) => {
+      if (chunk.tag === 1) acc.feed(chunk.bytes)
+    })
+    const ev = (e: unknown) => new TextEncoder().encode(JSON.stringify(e))
+    t.output(AGENT, 1, 6, ev({ type: 'TextDelta', text: 'answer' }), 1) // N+1 이 먼저
+    expect(acc.snapshotQueued()).toEqual([])
+    t.output(AGENT, 1, 5, ev({ type: 'QueuedInput', op: { kind: 'Queued', id: 'X', text: 'hello' } }), 1) // N
+    expect(acc.snapshotQueued().map((e) => e.id)).toEqual(['X'])
+    t.output(AGENT, 1, 7, ev({ type: 'QueuedInput', op: { kind: 'Delivered', id: 'X' } }), 1)
+    expect(acc.snapshotQueued()).toEqual([])
+    const userBubbles = acc
+      .snapshot()
+      .flatMap((it) => (it.kind === 'structured' && it.label === 'user' ? [JSON.parse(it.json)] : []))
+    expect(userBubbles).toEqual([{ type: 'text', text: 'hello', uuid: 'X' }])
   })
 })

@@ -2,7 +2,7 @@
 
 ## 한 줄 상태 · 다음 첫 액션
 - **상태:** 이번 세션 3개 작업 **완주**(전부 `/review code full` 2R + `/qa` 게이트 통과, 각 ADR 박제·step-log 기록). 전부 **로컬 커밋(master), 미push.** 워킹트리 클린. `release/` 폴더 = 3커밋 전부 반영본으로 재빌드됨(ADR-0102 QA에서 `scripts/build-release.ps1` 실행) → `release/engram-dashboard.exe` 실행 시 실 UI 부팅 **3/3 확인**.
-- **다음 첫 액션(사용자 선택):** ① **push**(GitLab, 코드) 여부 결정 → ② 후속 중 택1: **DaemonClient 부팅-레이스 resilience 확인**(아래 미결 #1) / **이름 유일성 ②**(동명 자동 suffix) / **릴리즈 GUI 실사용 추가 확인**(메시지 전송 클릭 경로).
+- **다음 첫 액션(사용자 선택):** ① **push** 여부 결정 → ② 후속 중 택1: **DaemonClient 부팅-레이스 resilience 확인**(아래 미결 #1) / **이름 유일성 ②**(동명 자동 suffix) / **릴리즈 GUI 실사용 추가 확인**(메시지 전송 클릭 경로).
 
 ## 이번 세션 커밋 (master, 미push)
 - `336299f` **feat(release): 포터블 릴리즈 폴더 조립 스크립트 (ADR-0100)** — `scripts/build-release.ps1`(Windows PS): 프론트+릴리즈 3바이너리 빌드 후 `release/`에 정확히 3 exe(engram-dashboard·daemon·send)+`prompts/`(agent-priming[-cli].md)만 조립+매니페스트 tripwire. UI 앱은 `npm run tauri -- build --no-bundle`(프로덕션 컨텍스트·frontendDist embed)로 빌드. `.gitignore`에 `release/`.

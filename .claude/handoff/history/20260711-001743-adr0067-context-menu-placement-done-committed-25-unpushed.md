@@ -11,7 +11,7 @@
 - `5e34178` feat(slot): 우클릭 **"에이전트 모니터링" 검색 팝업**으로 배치(ADR-0067) — AgentMonitoringPicker + monitoringPickerStore + 필터 + 슬롯 "생성" 제거
 
 ## 검증 상태 (쌍)
-- **돌린 것:** 각 코드변경 `/implement standard`(코더 Opus → `/review code full`[doc-aware reviewer-deep + cross-family Codex] → `/qa`). 모니터링 배치 리뷰에서 Codex **FIX 1**(팝업 재열림 stale 상태) → **key-remount**(store `openId` → `<AgentMonitoringPicker key={openId}>`)로 수정 → 재검 PASS. 최종: `npx tsc --noEmit`=0 · `npm test`=**491** · 격리 `rg "use tauri" crates/.../src/`=주석1(실 import 0) · `cargo build --lib` OK · **GUI 실측 PASS**(CDP 9223): click-to-focus(클릭·`slot.focus`·65% 링 이동 ~30ms) / 모니터링(팝업 열림·필터 match "kim"→kimsunzun·no-match "검색 결과 없음"·**선택→슬롯 콘텐츠 `{type:agent}` 배치**·선택후 닫힘·hideOn 트리슬롯 모니터링 없음·트리 "에이전트 생성" 유지).
+- **돌린 것:** 각 코드변경 `/implement standard`(코더 Opus → `/review code full`[doc-aware reviewer-deep + cross-family Codex] → `/qa`). 모니터링 배치 리뷰에서 Codex **FIX 1**(팝업 재열림 stale 상태) → **key-remount**(store `openId` → `<AgentMonitoringPicker key={openId}>`)로 수정 → 재검 PASS. 최종: `npx tsc --noEmit`=0 · `npm test`=**491** · 격리 `rg "use tauri" crates/.../src/`=주석1(실 import 0) · `cargo build --lib` OK · **GUI 실측 PASS**(CDP 9223): click-to-focus(클릭·`slot.focus`·65% 링 이동 ~30ms) / 모니터링(팝업 열림·필터 match "kim"→<user>·no-match "검색 결과 없음"·**선택→슬롯 콘텐츠 `{type:agent}` 배치**·선택후 닫힘·hideOn 트리슬롯 모니터링 없음·트리 "에이전트 생성" 유지).
 - **★do-not★:** bare `cargo test`·`cargo test -p engram-dashboard`/`--lib` = 0xc0000139(WebView2Loader 사망). member-scoped만(`-core`/`-protocol`). src-tauri 레이아웃 로직 = `cargo build` + GUI 실측이 정본.
 - **검증 안 된 것:** 경로 2(트리 우클릭 "열기"=`openInFocusedSlot`)는 코드리뷰+unit만(변경 없음), GUI 재실측 안 함. "새 콘텐츠" 서브메뉴 flyout의 생성-제거는 unit+리뷰만(CDP synthetic hover로 flyout 확장 안 잡힘). 멀티창(팝업)에서 모니터링 배치 미실측.
 
@@ -23,7 +23,7 @@
 ## 정지 조건
 - **앱 재시작 = 이번 세션에서만 자유 승인**(사용자 standing grant "하지 말라 할 때까지"). **이 grant는 세션 한정 — 다음 세션은 만료, 재확인 필요.**
 - 비자명 코드 = `/implement`(코더→review→qa) · 굵은 결정 = ADR(`/adr`) · 설계 서베이 = `/research`. 메인 직접 구현 금지. 레이아웃/시각 = eval 아닌 GUI 실측.
-- **현재 앱 실행 중**(CDP 9223, background task `bpwja47gh`). 내 GUI 실측이 부팅 빈 슬롯에 agent `kimsunzun` 배치해둠(무해한 테스트 흔적). 데몬은 client 재시작에도 생존(kimsunzun 유지 중).
+- **현재 앱 실행 중**(CDP 9223, background task `bpwja47gh`). 내 GUI 실측이 부팅 빈 슬롯에 agent `<user>` 배치해둠(무해한 테스트 흔적). 데몬은 client 재시작에도 생존(<user> 유지 중).
 
 ## 미결 / 다음 갈래
 - **slot geometry(ADR-0066 결정 3, 미구현):** 각 슬롯 `{id,x,y,w,h}`를 control surface로 노출해 LLM이 "우하단" 등 공간지시를 slot id로 번역. **프론트 `getBoundingClientRect` vs 백엔드 논리좌표** 미결(구현 시 결정).

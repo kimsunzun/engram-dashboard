@@ -37,7 +37,7 @@
 ## 근거
 
 - **설계 서베이(medium, 2026-07-24)**: 이메일 RFC·액터(gen_server call/cast, Akka ask)·FIPA-ACL·AMQP·LLM 프로토콜(A2A/AutoGen/LangGraph/Claude Code 팀) 5갈래 병렬 수집 + codex(cross-family) 적대 리뷰 1회(FIX — 교정 13건 반영: 그룹×회신계약 충돌, cc 서술성, in_reply_to≠스레드, MDN 과장 등). 수렴 코어(id·발신자·회신 상관·기한)는 3계보 교차확증 = 확실.
-- **실측(세션 내)**: 데몬 HTTP 왕복 ~3ms · engram-send.exe 스폰 ~105ms · bash 스폰 ~120ms → 속도는 결격 아님, LLM 추론이 지배항. MCP 디퍼드 = 본 세션에서 라이브 확인(planka ~70툴 이름만 상주). `allowedMcpServers: []`(유저 전역 42행)가 스폰 에이전트의 send_message 툴 부재의 원인(당일 QA 관측과 부합 — ADR-0099 배선은 정상).
+- **실측(세션 내)**: 데몬 HTTP 왕복 ~3ms · engram-send.exe 스폰 ~105ms · bash 스폰 ~120ms → 속도는 결격 아님, LLM 추론이 지배항. MCP 디퍼드 = 본 세션에서 라이브 확인(연결된 MCP 서버 하나(~70툴)의 이름만 상주). `allowedMcpServers: []`(유저 전역 42행)가 스폰 에이전트의 send_message 툴 부재의 원인(당일 QA 관측과 부합 — ADR-0099 배선은 정상).
 - **미검증(구현 QA 항목)**: `--settings` 주입의 allowedMcpServers merge 동작 · XML 봉투 실 claude 왕복(콜론 검증분 중 포맷 결합부만 재검증 — 배관은 포맷 무관이라 유효).
 
 ## 영향 / 불변식

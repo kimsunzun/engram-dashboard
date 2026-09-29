@@ -45,6 +45,10 @@ impl StatusSink for UsageObserveSink {
     fn turn_ended(&self, id: AgentId, epoch: u32) {
         self.inner.turn_ended(id, epoch);
     }
+
+    fn inputs_drained(&self, id: AgentId, epoch: u32) {
+        self.inner.inputs_drained(id, epoch);
+    }
 }
 
 #[cfg(test)]
@@ -87,6 +91,10 @@ mod tests {
         fn turn_ended(&self, id: AgentId, epoch: u32) {
             self.note(format!("turn_ended {id} {epoch}"));
         }
+
+        fn inputs_drained(&self, id: AgentId, epoch: u32) {
+            self.note(format!("inputs_drained {id} {epoch}"));
+        }
     }
 
     #[test]
@@ -106,6 +114,7 @@ mod tests {
         });
         sink.usage_observed(obs.clone());
         sink.turn_ended(id, 5);
+        sink.inputs_drained(id, 6);
 
         assert_eq!(
             *seen.lock().unwrap(),
@@ -115,6 +124,7 @@ mod tests {
                 format!("restore_result {id} 4 Resumed"),
                 format!("usage_observed {obs:?}"),
                 format!("turn_ended {id} 5"),
+                format!("inputs_drained {id} 6"),
             ]
         );
     }

@@ -117,7 +117,7 @@ lib 테스트는 이 crate를 **링크 루트**로 컴파일한다 → `run()`�
    - 예: `ViewMeta`가 생성본은 `window:tabs-updated`, 커밋본은 `view:list-updated`
    - `LayoutNode`는 생성본에 doc 주석이 아예 없고 커밋본엔 있다
    - **결론: wire 계약 드리프트는 없다. 그러나 게이트를 켜면 즉시 빨간불이 난다** — 앞서 예측한 그대로다
-3. **증거 보존 위치:** 재생성본 8개를 `<스크래치>/regenerated-bindings/`로 옮겨 뒀다(repo 트리는 클린). 스크래치 경로 = `C:\Users\kimsunzun\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt2\9146389c-db55-4ffc-87bc-65069f83d813\scratchpad\`
+3. **증거 보존 위치:** 재생성본 8개를 `<스크래치>/regenerated-bindings/`로 옮겨 뒀다(repo 트리는 클린). 스크래치 경로 = `C:\Users\<user>\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt2\9146389c-db55-4ffc-87bc-65069f83d813\scratchpad\`
    - ★**세션 스크래치라 다음 세션엔 없을 수 있다.**★ 없으면 위 A/B/C 중 하나로 다시 구우면 된다
 
 **낡은 기록:** `src-tauri/build.rs:1-7`의 `KNOWN-ISSUE` 주석이 원인은 정확히 짚었으나, `rustc-link-arg-tests` 회피책을 거부한 사유(**"이 패키지엔 테스트 타깃이 없다"**)가 **지금은 거짓**이다(`tests/`에 4개 있다). 다만 그 회피책은 **다른 이유로** 여전히 무의미하다(위 표).

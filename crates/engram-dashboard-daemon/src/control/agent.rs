@@ -32,17 +32,18 @@
 // ADR-0157
 
 use engram_dashboard_agent::types::{CLI_EXE_NAME, CLI_GROUP_AGENT};
-use engram_dashboard_command::{CommandError, CommandTable, ErrorCode};
+use engram_dashboard_command::{CommandError, ErrorCode};
+
+use crate::connection_core::INPUT_LOCKED_REFUSAL;
 
 use super::ingress::ControlQueryResult;
 
 /// 명부가 바뀌었음을 붙어 있는 클라이언트 전원에게 알리는 출구(포트).
 ///
 /// ★왜 포트인가★: 실제 통지는 전-연결 팬아웃으로 `ProfileListUpdated` 를 미는 것인데, 그 조립은
-///   `connection_core` 소유다. `control/` 이 그쪽을 직접 부르면 데몬 층 결정(ADR-0130)이 재론 대상이 되므로
-///   (이 디렉토리의 **나가는 간선 수**가 그 결정의 재론 트리거 ② 다 — 「0 건」은 2026-08-05 실측이고 지금은
-///   `command_delivery`·`command_roster` 둘이 있다) 소비자인 여기가 좁은 trait 만 소유하고 실물 어댑터는
-///   조립부가 준다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
+///   `connection_core` 소유다. 이 포트를 세운 사유는 ADR-0130 의 잎 성질(`control/` 에서 다른 데몬 모듈로
+///   나가는 간선 0)이었고 그 성질은 ADR-0236 이 내려놓았다. 소비자인 여기가 좁은 trait 만 소유하고 실물
+///   어댑터는 조립부가 주는 모양은 그대로 둔다 — 메시징 커널의 포트 규율(ADR-0110)과 같은 모양이다.
 /// ★이게 없으면 나는 증상★: 에이전트가 이름을 바꾸거나 형제를 띄워도 대시보드 트리는 **무관한 이벤트가
 ///   올 때까지 옛 명부를 보여 준다**(조용한 stale).
 /// ★부르는 쪽은 표다★ — 항목을 바꾼 동사가 통지까지 책임진다(agent `commands::RosterChanged`).
@@ -153,14 +154,15 @@ impl<'de> serde::Deserialize<'de> for CommandArgs {
 ///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 어댑터
 ///   (`mcp_server::control_agent_handler`)가 `spawn_blocking` 으로 감싼다.
 /// ★명부 통지는 여기서 안 한다★ — 표가 조립될 때 꽂힌 통지 포트가 동사별로 부른다(위 [`RosterBroadcast`]).
-pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResult {
+pub fn handle_agent(table: &super::commands::DaemonTable, req: AgentRequest) -> ControlQueryResult {
     // CLI 표면과 카탈로그 이름은 점↔공백 하나 차이다(TRD §2-1) — 그래서 동사별 표를 손으로 두지 않는다.
     let name = format!("{CLI_GROUP_AGENT}.{}", req.verb);
     let mut args = req.args.into_value();
 
     // ★검문·실행은 이웃 `commands` 의 공통 입구가 한다★ — 이 라우트가 표를 직접 부르면 버스 배달과
     //   **다른 검문**을 갖게 되고, 두 입구 중 하나만 ADR-0157 을 지키는 상태가 된다.
-    match super::commands::call_daemon_command(table, &name, &mut args, "cli") {
+    // 연결 없는 입구라 호출자는 `None` = 입력 임대 비보유자다(ADR-0231).
+    match super::commands::call_daemon_command(table, &name, &mut args, "cli", None) {
         None => unknown_verb(&req.verb),
         Some(Ok(payload)) => ControlQueryResult::Ok(payload),
         Some(Err(e)) => refused(e),
@@ -174,10 +176,19 @@ pub fn handle_agent(table: &CommandTable, req: AgentRequest) -> ControlQueryResu
 /// ★자기교정 경로는 **어댑터가** 붙인다★: 표와 도구 crate 는 자기가 어느 표면에서 불렸는지 모른다(그래서
 ///   문구에 CLI 어휘를 넣지 않는다). 이 한 줄이 없으면 호출자(LLM)는 반려를 받고도 어디서 규격을 확인할지
 ///   모른 채 같은 인자로 재시도한다.
+/// ★예외 하나 — 입력 임대 거절★(`CONFLICT` 이지만 대상 문제가 아니다): 명부를 봐도 고칠 것이 없고, 다음
+///   걸음(놓인 뒤 다시)은 거절 문구 자신이 싣는다(`commands::admit_input` 의 연결 없는 입구 꼬리). 명부 안내를
+///   붙이면 호출자는 없는 동명이인을 찾는다.
+// ADR-0231
 fn refused(e: CommandError) -> ControlQueryResult {
+    let hint = if e.message().starts_with(INPUT_LOCKED_REFUSAL) {
+        format!("{}.", e.message())
+    } else {
+        format!("{} — {}.", e.message(), recovery_for(e.code()))
+    };
     ControlQueryResult::Error {
         code: e.code().as_str(),
-        hint: format!("{} — {}.", e.message(), recovery_for(e.code())),
+        hint,
     }
 }
 
@@ -397,6 +408,28 @@ mod tests {
                 "칠 수 있는 명령이 없다: {hint}"
             );
         }
+    }
+
+    /// ★입력 임대 거절은 명부 안내를 안 단다★ — `CONFLICT` 지만 대상을 잘못 고른 것이 아니라서, 명부를
+    ///   보라고 하면 호출자는 없는 동명이인을 찾는다. 다음 걸음은 거절 문구 자신이 싣는다.
+    #[test]
+    fn a_lease_refusal_does_not_point_at_the_roster() {
+        let message = format!("{INPUT_LOCKED_REFUSAL} — tail");
+        let (code, hint) = error_of(refused(CommandError::of(
+            ErrorCode::Conflict,
+            message.clone(),
+        )));
+        assert_eq!(code, "CONFLICT");
+        assert_eq!(hint, format!("{message}."));
+        // 같은 코드의 대상 실패(동명)는 여전히 명부를 가리킨다.
+        let (_, ambiguous) = error_of(refused(CommandError::of(
+            ErrorCode::Conflict,
+            "more than one agent",
+        )));
+        assert!(
+            ambiguous.contains(&format!("{CLI_GROUP_AGENT} {AGENT_LIST_VERB}")),
+            "{ambiguous}"
+        );
     }
 
     /// 코드마다 **다음에 할 일**이 다르다 — 고칠 인자가 없는 실패에 "인자 규격을 보라" 를 달면 호출자는

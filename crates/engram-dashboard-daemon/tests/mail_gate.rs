@@ -21,7 +21,7 @@ use engram_dashboard_agent::types::{
     StatusSink,
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
-use engram_dashboard_daemon::control::commands::make_daemon_table;
+use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -204,7 +204,11 @@ async fn fixture(tag: &str) -> Fixture {
     manager_slot.set(manager.clone());
     // ★제어 라우트는 표를 태운다(ADR-0155)★: 여기를 비워 두면 그 라우트가 503 을 내, 아래 「제어는 전원
     //   개방」 단언이 게이트가 아니라 배선 부재를 재게 된다.
-    command_slot.set(Arc::new(make_daemon_table(manager, broadcast_slot)));
+    command_slot.set(Arc::new(make_daemon_table(
+        manager,
+        broadcast_slot,
+        Arc::new(NoInputLeases),
+    )));
 
     // ★판정을 손으로 심는다 — 그래서 이 픽스처만으로는 부족하다★: `provision` 이 판정을 잘못 파생해도
     //   여기 심은 값은 그대로라 전부 초록으로 남는다. 그 축은 아래
