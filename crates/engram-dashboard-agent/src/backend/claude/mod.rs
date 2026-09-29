@@ -433,7 +433,7 @@ impl AgentBackend for ClaudeBackend {
         let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
-                // ★줍기 판정은 여기서 건다 — `output_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
+                // ★줍기 판정은 여기서 건다 — 디코더를 만드는 `stream_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
                 //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`).
                 let decoder =
                     usage::gate_decoder(stream_decoder(Arc::clone(&delivery_ack)), &spec.env);

@@ -227,6 +227,10 @@ fn install_panic_hook() {
 ///   이다 — **그 슬라이스는 ADR-0130 으로 보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**:
 ///   팬아웃을 레지스트리에서만 얻게
 ///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `handle_connection` 도 포함.
+/// ★사용량 서비스도 같은 짝이다★ — `manager` 의 status sink 사슬(`UsageObserveSink`)이 관측을 넘기는 서비스와
+///   연결 계층이 구독·⟳ 를 거는 서비스가 **같은 것**이어야 한다. 어긋나면 관측은 한 서비스에 쌓이고 구독자는
+///   다른 서비스에 걸려 한 장도 안 받는다 — 역시 실패 로그 없이 조용하다. 둘을 이 struct 가 한 조립에서 함께
+///   들고 다니는 것이 그 짝을 지키는 수단이다.
 // ADR-0129
 struct DaemonWiring {
     manager: Arc<AgentManager>,
@@ -252,6 +256,9 @@ impl DaemonWiring {
 }
 
 /// 사용량 조회가 쓸 임시 폴더들의 부모 — 데이터 폴더 아래라 데몬 하나의 것이고, 그래서 기동 때 쓸어도 안전하다.
+/// ★그 안전은 쓰는 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수 없다)이고
+///   스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이어야 한다. 이 쓸기를 잠금 앞이나
+///   [`build_usage_service`] 뒤로 옮기면 살아 있는 조회의 폴더를 지울 수 있다.
 const USAGE_SCRATCH_DIR: &str = "usage-probe";
 
 fn build_daemon_wiring(
@@ -363,11 +370,12 @@ fn build_usage_service(inputs: UsageInputs) -> Arc<UsageService> {
         encoder: Arc::new(agent_conn::UsageEventEncoder),
     });
     usage.restore_rejects(&saved);
-    if let Err(e) = usage_service::schedule::spawn_scheduler(&usage, wakes) {
-        tracing::warn!(
+    match usage_service::schedule::spawn_scheduler(&usage, wakes) {
+        Ok(_) => tracing::info!(thread = "usage-scheduler", "사용량 스케줄러 스레드 시작"),
+        Err(e) => tracing::warn!(
             error = %e,
             "사용량 스케줄러 스레드를 못 띄웠다 — 자동 조회와 기한 발행 없이 돈다"
-        );
+        ),
     }
     usage
 }

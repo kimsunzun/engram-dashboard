@@ -324,7 +324,8 @@ impl ConnectionHandler for AgentConnection {
                     // ★답장은 그대로 **이 연결의 같은 프레임 출구**로 나간다★: sink 가 든 것은 연결당
                     //   단일 writer 큐의 사본이라 이 태스크가 늦게 끝나도 답이 다른 데로 새지 않는다.
                     //   대신 그 사본이 살아 있는 동안은 writer 의 송신단-드롭 자기종료가 성립하지
-                    //   않는다 — `handle_connection` 이 write 를 abort 하는 이유의 목록에 이것이 든다.
+                    //   않는다 — 네트워크 행 `ws.rs` 「사본 전수」가 `on_disconnect` 를 넘겨 사는 짧은 사본으로 꼽는
+                    //   것이 이것이고(⟳ 는 `REPLY_WAIT_MAX` 까지 든다), `handle_connection` 의 write abort 가 그래서 무해하게 만든다.
                     // ★연결이 이미 정리된 뒤에도 이 태스크는 돈다★(네트워크 행의 abort 가 안 닿는다 —
                     //   포트 계약). 그래도 **이 연결의 상태를 되살리지 않는다**: 떼어 낸 명령이 건드리는 것은
                     //   전역 manager·사용량 서비스와 전-연결·구독자 브로드캐스트뿐이고, 명부·구독·lease 같은 연결
@@ -457,8 +458,10 @@ impl ConnectionHandler for AgentConnection {
         //   놓치는 경쟁이 없다 — 넣은 곳도 빼는 곳도 각각 한 곳이고 둘 다 명부의 한 잠금 안에서 돈다.
         // ADR-0154
         self.core.commands().detach(conn_id);
-        // ★명령 명부와 같은 자리에서 사용량 명부 칸도 지운다★ — 칸이 쥔 프레임 출구 사본은 이 호출 안에서 놓인다
-        //   (위 포트 의무). 칸을 되살리는 곳이 없어 겹쳐 든 늦은 구독 교체는 버려진다(`UsageWatch::replace`).
+        // ★명령 명부와 같은 자리에서 사용량 명부 칸도 지운다★ — 칸이 쥔 프레임 출구 사본(네트워크 행 `ws.rs`
+        //   「사본 전수」의 ⑥)은 이 호출 안에서 놓인다(위 포트 의무). 단 출구가 한 장 보내는 도중 잠깐 뜬 사본은
+        //   이 호출을 넘겨 살 수 있다 — `try_send` 한 번이 전부라 같은 목록이 무해한 쪽으로 꼽는다.
+        //   칸을 되살리는 곳이 없어 겹쳐 든 늦은 구독 교체는 버려진다(`UsageWatch::replace`).
         self.core.usage().detach(conn_id);
 
         // ── 이 연결이 낸 명령 왕복 거두기(ADR-0154) ───────────────────────────────
@@ -1395,9 +1398,17 @@ mod tests {
         /// 칸 = claude 하나(가짜 조회기 — 시험이 놓아 줄 때까지 막힌다). codex 는 조회기가 있어 구독 집합에는 들지만
         /// 이 서비스에 칸이 없어 한 장이 없다. 스케줄러는 없다 — 시각은 시험이 몬다.
         fn rig() -> Rig {
+            rig_waiting(None)
+        }
+
+        /// `reply_wait` = ⟳ 답장 대기 상한. `None` 이면 운영 상한 그대로다.
+        fn rig_waiting(reply_wait: Option<Duration>) -> Rig {
             let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
             let (probe, gate) = fakes::gated_probe(probe_of(Claude), PROBED_PCT, FAR_RESET);
-            let service = fakes::service(vec![probe], clock.clone());
+            let service = match reply_wait {
+                Some(wait) => fakes::service_with_wait(vec![probe], clock.clone(), wait),
+                None => fakes::service(vec![probe], clock.clone()),
+            };
             let factory = test_factory_with(
                 Arc::new(crate::test_doubles::RecordingFanout::new()),
                 CommandRoster::new(),
@@ -1565,7 +1576,9 @@ mod tests {
         /// 않았으면 그 연결엔 한 장도 없다.
         #[tokio::test]
         async fn a_refresh_answers_a_bare_ack_and_the_value_goes_to_the_subscriber() {
-            let mut rig = rig();
+            // ★대기 상한을 길게 잡는다★ — 막힌 조회 동안 「B 에 답이 아직 없다」를 단언하므로, 운영 상한(5초)이
+            //   느린 러너에서 먼저 끝나 답이 나가 버리면 거짓 실패한다.
+            let mut rig = rig_waiting(Some(Duration::from_secs(60)));
             let mut a = Conn::greeted(&rig, 1).await;
             let mut b = Conn::greeted(&rig, 2).await;
             a.subscribe(&[Claude]).await;

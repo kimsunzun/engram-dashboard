@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::usage::{
     ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure, ProbeSpawner, UsageObservation,
@@ -101,7 +101,21 @@ pub(crate) fn service(
     probes: Vec<&'static dyn UsageProbe>,
     clock: Arc<dyn UsageClock>,
 ) -> Arc<UsageService> {
-    UsageService::new(UsageParts {
+    UsageService::new(parts(probes, clock)).0
+}
+
+/// [`service`] 와 같되 ⟳ 답장 대기 상한을 시험이 정한다 — 막힌 조회 동안 「답이 아직 없다」를 단언하는 시험이
+/// 운영 상한(`REPLY_WAIT_MAX`)에 기대지 않게 한다(느린 러너에서 그 상한이 먼저 끝나면 거짓 실패한다).
+pub(crate) fn service_with_wait(
+    probes: Vec<&'static dyn UsageProbe>,
+    clock: Arc<dyn UsageClock>,
+    reply_wait: Duration,
+) -> Arc<UsageService> {
+    UsageService::build(parts(probes, clock), reply_wait).0
+}
+
+fn parts(probes: Vec<&'static dyn UsageProbe>, clock: Arc<dyn UsageClock>) -> UsageParts {
+    UsageParts {
         probes,
         spawner: Arc::new(NoChildren),
         scratch_root: std::env::temp_dir(),
@@ -109,8 +123,7 @@ pub(crate) fn service(
         rejects: Arc::new(MemRejectStore::new()),
         clock,
         encoder: Arc::new(crate::agent_conn::UsageEventEncoder),
-    })
-    .0
+    }
 }
 
 /// 칸이 없는 서비스 — 사용량을 보지 않는 시험의 조립용.
