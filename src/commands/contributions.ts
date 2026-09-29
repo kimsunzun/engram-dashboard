@@ -1,6 +1,6 @@
 // ADR-0064 §4 불변식(산발 import 금지): 새 콘텐츠 = 그 모듈 + 여기 한 줄.
 //
-// ★로드 순서 주의★: slotCommands / slotContentCommands / presetCommands / agentCommands / usageCommands 는 command 를
+// ★로드 순서 주의★: slotCommands / slotContentCommands / presetCommands / agentCommands 는 command 를
 //   register 한 *뒤* registerSlotMenu 로 그 id 를 참조한다. buildSlotMenu 의 resolve 는 렌더 시점(우클릭)에
 //   일어나므로 import 순서와 무관하지만, 매니페스트 로드 시점엔 모든 register 가 끝나 있어야 우클릭이 안전하다
 //   — 이 파일이 전부 import 하므로 그 불변식이 성립한다.

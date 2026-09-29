@@ -132,7 +132,7 @@ slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 �
   {tool} usage.get --backend <Claude|Codex>
       그 백엔드의 사용량 한도(5시간 · 주간 · 모델별 주간)와 조회 상태. windows 의 행마다 left_pct 가 남은 양이고 null 은 모른다는 뜻이다
   {tool} usage.refresh --backend <Claude|Codex>
-      강제로 다시 조회하고 usage.get 과 같은 행을 돌려준다. 직전 조회 뒤 30초 안이거나 상류 거절 기한이 남은 동안은 조회하지 않고 들고 있던 값을 준다(served = Cached). 거절 중에 값이 들어와 state 가 Ready 로 보여도 그 기한은 남는다
+      강제로 다시 조회하고 usage.get 과 같은 행을 돌려준다. 호출 간격 제한은 없다 — 직전 조회가 막 끝났어도 다시 조회하고, 잦으면 상류가 거절할 수 있다(그 거절이 state Rejected 가 아니라 Failed 로만 보일 수도 있다). 조회하지 않고 들고 있던 값을 주는(served = Cached) 것은 상류 거절 기한이 남은 동안뿐이다. 거절 중에 값이 들어와 state 가 Ready 로 보여도 그 기한은 남는다. 조회가 실패하거나 5초 안에 안 끝나도 served = Cached 다(그때는 조회가 나갔다)
 ## theme
 {tool} theme — 테마는 명령이 아니라 설정 파일이다. 고치는 것은 파일, 반영하는 것은 명령 하나. 그 명령도 대시보드 창이 떠 있어야 부를 수 있다.
 

@@ -157,8 +157,8 @@ export const ko = {
     statusLine: '{vendor} {sentence}',
     resetWaiting: '리셋됨 — 갱신 대기',
     resetWaitingShort: '리셋됨', // 숫자만 남는 폭 단계 전용.
-    resetClock: '↻ {time}', // 작은 표시의 5시간 창 리셋 시각.
-    resetClockWeekday: '↻ {weekday} {time}', // 작은 표시의 주간 창 리셋 시각.
+    resetClock: '리셋 {time}', // 작은 표시의 리셋 시각.
+    resetDateTime: '{month}/{day} {time}', // 오늘이 아닌 리셋 시각 — 요일 없이 날짜만.
     resetsAtIn: '리셋 {time} ({duration} 뒤)',
     durationMinutes: '{minutes}분',
     durationHours: '{hours}시간',
@@ -171,7 +171,7 @@ export const ko = {
     ageDays: '{days}일 전',
     stale: '{minutes}분 넘게 새로 들어오지 않은 값',
     refreshing: '갱신 중',
-    refresh: '{vendor} 새로고침',
+    refreshAll: '사용량 새로고침', // 작은 표시 ⟳ 의 이름 · `usageSlot.refresh` 제목.
     plan: '플랜: {plan}',
     link: '사용량 페이지 ↗',
     linkTitle: '{vendor} 사용량 설정 페이지를 브라우저로 엽니다 — {url}',
@@ -185,9 +185,9 @@ export const ko = {
     a11yStatusRefreshing: '{status}, {refreshing}',
     a11yTwoVendors: '{first} · {second}',
     popupLabel: '사용량 상세',
-    hint: '우클릭해서 표시할 항목 고르기',
-    menuRefresh: '사용량 새로고침',
-    menuShow: '{vendor} 표시',
+    hint: '클릭해서 표시할 항목 고르기',
+    showOnSlot: '슬롯에 표시:', // 팝업 맨 아래 표시 토글 줄의 머리.
+    showVendor: '{vendor} 표시', // `usageSlot.toggle*` 제목.
   },
   /**
    * 구조화(챗) 슬롯 렌더 문자열.

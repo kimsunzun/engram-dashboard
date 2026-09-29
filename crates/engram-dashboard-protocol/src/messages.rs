@@ -366,8 +366,8 @@ pub enum AgentCommand {
     UsageSubscribe { vendors: Vec<AgentBackendKind> },
     /// ⟳ — 그 벤더의 사용량을 새로 조회하라. 답 = [`AgentEvent::Ack`] 이고 **값을 싣지 않는다** — 값은 그 벤더를
     /// 구독한 연결에 [`AgentEvent::UsageLimitsUpdated`] 로 간다(보낸 연결도 구독했을 때만 받는다).
-    /// `Ack` 는 조회를 띄웠으면 그 끝을 데몬의 상한(수 초)까지 기다린 뒤 온다. 거절 기한 안이거나 직전 조회
-    /// 직후면 조회 없이 곧바로 온다. 데몬이 그 벤더의 사용량을 두지 않으면 `Error`(이 `request_id`).
+    /// `Ack` 는 조회를 띄웠으면(진행 중이면 거기 붙어) 그 끝을 데몬의 상한(수 초)까지 기다린 뒤 온다. 거절 기한
+    /// 안이면 조회 없이 곧바로 온다. 데몬이 그 벤더의 사용량을 두지 않으면 `Error`(이 `request_id`).
     /// ★데몬은 이 명령을 그 연결의 도착순 줄 밖에서 돌린다★ — 같은 연결의 뒤 명령의 답이 이 답보다 먼저 올 수
     ///   있다.
     RefreshUsageLimits {

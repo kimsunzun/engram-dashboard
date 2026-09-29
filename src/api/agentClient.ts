@@ -242,7 +242,8 @@ export interface AgentClient {
   // ── 사용량 ────────────────────────────────────────────────────────────────
   /**
    * ⟳ — 그 회사의 사용량을 지금 다시 조회하게 한다. resolve = 데몬이 받았다(`Ack`)이지 값이 왔다가 아니다 — 값은
-   * [`onUsageLimitsUpdated`] 방송으로 온다. 조회 간격 상한은 데몬이 건다. 연결이 끊기면 reject.
+   * [`onUsageLimitsUpdated`] 방송으로 온다. 진행 중인 조회와 겹친 요청은 데몬이 하나로 모으고, 거절(429) 기한 안엔
+   * 조회하지 않는다. 연결이 끊기면 reject.
    */
   refreshUsageLimits(vendor: AgentBackendKind): Promise<void>
   /**

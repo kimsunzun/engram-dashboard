@@ -21,11 +21,6 @@ export interface SlotMenuCtx {
   slotId: string
   agentId?: string | null
   content?: SlotContent
-  /**
-   * 사용량 슬롯에서만 의미가 있다 — 켠 회사 중 ⟳ 를 보낼 수 있는 것(보이는 거절이 아닌 것)이 하나라도 있나. 메뉴 상태
-   * 판정 전용이라 command 실행 인자로는 넘기지 않는다(`SlotContextMenu` 의 실행 가방).
-   */
-  usageRefreshable?: boolean
 }
 
 /**

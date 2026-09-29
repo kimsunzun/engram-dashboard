@@ -321,7 +321,7 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
   })
 })
 
-describe('checked · enabled — 켜고 끄는 항목과 비활성 (TRD S21 usage-limit-slot §7 #8)', () => {
+describe('checked · enabled — 켜고 끄는 항목과 비활성 (ADR-0252)', () => {
   it('기여의 checked · enabled 를 같은 함수 그대로 싣는다 — 최상위와 서브메뉴 자식 둘 다', () => {
     reg('top'); reg('kid'); reg('plain')
     const topChecked = () => true

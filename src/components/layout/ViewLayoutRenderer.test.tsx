@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // ── Tauri / transport 계층 stub ────────────────────────────────────────────────
@@ -89,13 +89,23 @@ vi.mock('../slot/DomSlot', () => ({
 vi.mock('../slot/PresetPalette', () => ({
   default: () => <div data-testid="preset-palette" />,
 }))
-// ── UsageSlot stub — usage variant 마운트 여부와 내려보낸 켜고 끔만 확인(화면은 UsageSlot.test 담당) ──
+// ── UsageSlot stub — usage variant 마운트 여부와 내려보낸 켜고 끔·슬롯 좌표만 확인(화면은 UsageSlot.test 담당) ──
 vi.mock('../slot/UsageSlot', () => ({
-  default: ({ content }: { content: { show_claude: boolean; show_codex: boolean } }) => (
+  default: ({
+    content,
+    viewId,
+    slotId,
+  }: {
+    content: { show_claude: boolean; show_codex: boolean }
+    viewId: string | null
+    slotId: string
+  }) => (
     <div
       data-testid="usage-slot"
       data-show-claude={String(content.show_claude)}
       data-show-codex={String(content.show_codex)}
+      data-view-id={String(viewId)}
+      data-slot-id={slotId}
     />
   ),
 }))
@@ -132,7 +142,6 @@ import ViewLayoutRenderer from './ViewLayoutRenderer'
 import { ANCHOR_GAP } from '../slot/SlotContextMenu'
 import type { LayoutNode, SlotContent, SplitDir } from '../../api/layoutTypes'
 import type { AgentInfo, Capabilities } from '../../api/types'
-import { useUsageStore } from '../../store/usageStore'
 import { useViewStore } from '../../store/viewStore'
 import { rectsFor } from './testing/rects'
 import { __resetUiMetricsReportForTest } from './uiMetricsReport'
@@ -1037,68 +1046,23 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   })
 
-  // ── 사용량 슬롯 메뉴(TRD S21 usage-limit-slot §1-8) — ☑ 는 잎이 ctx 에 실은 슬롯 내용에서 온다 ──
-  function openUsageMenu(slotId: string, show_claude: boolean, show_codex: boolean): void {
+  // ── 사용량 슬롯 — 우클릭 메뉴엔 사용량 항목이 없다(사용자 결정 2026-09-29 — ⟳ 는 작은 표시, 표시 토글은 팝업) ──
+  it('사용량 슬롯 우클릭 → 사용량 항목(⟳ · 회사 표시) 없이 공통 슬롯 ops 만 · UsageSlot 은 이 슬롯 좌표를 받는다', () => {
     render(
       <ViewLayoutRenderer
-        node={contentSlotNode(slotId, { type: 'usage', show_claude, show_codex })}
+        node={contentSlotNode('slot-U1', { type: 'usage', show_claude: true, show_codex: false })}
         focusedSlotId={null}
       />,
     )
-    fireEvent.contextMenu(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement)
-  }
-
-  it('사용량 슬롯 우클릭 → ⟳ + 켠 회사 ☑ · 끈 회사 ☐ · 토글 클릭 = 한 칸만 뒤집은 전량 교체', () => {
-    openUsageMenu('slot-U1', true, false)
-    expect(screen.getByText('사용량 새로고침').hasAttribute('aria-disabled')).toBe(false)
-    expect(screen.getByText('Claude 표시').getAttribute('aria-checked')).toBe('true')
-    expect(screen.getByText('Codex 표시').getAttribute('aria-checked')).toBe('false')
-    expect(screen.queryByText('에이전트 모니터링')).toBeNull()
-    fireEvent.click(screen.getByText('Codex 표시'))
-    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U1', {
-      type: 'usage',
-      show_claude: true,
-      show_codex: true,
-    })
-  })
-
-  it('두 회사를 다 끈 사용량 슬롯 → ⟳ 비활성', () => {
-    openUsageMenu('slot-U2', false, false)
-    expect(screen.getByText('사용량 새로고침').getAttribute('aria-disabled')).toBe('true')
-  })
-
-  // ★열린 메뉴도 사용량 상태를 따라간다★ — 잎이 켠 회사의 상태를 구독해 ctx 에 싣는다(메뉴 기여는 스토어를 안 읽는다).
-  it('메뉴가 열린 채 켠 회사가 거절되면 ⟳ 가 그 자리에서 비활성이 되고, 풀리면 다시 활성', () => {
-    const rejected = {
-      snapshot: {
-        vendor: 'claude' as const,
-        account_key: 'default',
-        five_hour: null,
-        weekly: null,
-        model_scoped: [],
-        plan: null,
-        in_flight: false,
-        state: { kind: 'Rejected' as const, retry_in_secs: 600, detail: null },
-        revision: 1,
-      },
-      receivedAt: 0,
-      revision: 1,
-    }
-    useUsageStore.setState({ vendors: {} })
-    openUsageMenu('slot-U3', true, false)
-    const refresh = () => screen.getByText('사용량 새로고침')
-    expect(refresh().hasAttribute('aria-disabled')).toBe(false)
-    act(() => useUsageStore.setState({ vendors: { claude: rejected } }))
-    expect(refresh().getAttribute('aria-disabled')).toBe('true')
-    fireEvent.click(refresh())
-    expect(screen.queryByText('사용량 새로고침')).not.toBeNull() // 비활성 클릭은 메뉴를 닫지 않는다
-    act(() =>
-      useUsageStore.setState({
-        vendors: { claude: { ...rejected, snapshot: { ...rejected.snapshot, state: { kind: 'Ready' } } } },
-      }),
-    )
-    expect(refresh().hasAttribute('aria-disabled')).toBe(false)
-    useUsageStore.setState({ vendors: {} })
+    fireEvent.contextMenu(document.querySelector('[data-slot-id="slot-U1"]') as HTMLElement)
+    expect(screen.queryByText('사용량 새로고침')).toBeNull()
+    expect(screen.queryByText('Claude 표시')).toBeNull()
+    expect(screen.queryByText('Codex 표시')).toBeNull()
+    expect(document.querySelector('[data-slot-menu-item^="usageSlot."]')).toBeNull()
+    expect(document.querySelector('[data-slot-menu-item="slot.close"]')).not.toBeNull()
+    const usage = screen.getByTestId('usage-slot')
+    expect(usage.getAttribute('data-view-id')).toBe(ACTIVE_VIEW)
+    expect(usage.getAttribute('data-slot-id')).toBe('slot-U1')
   })
 
   it('빈 슬롯엔 "비우기"가 없다(ADR-0065 hideOn:["empty"] 트림 — 이미 빈 슬롯 재비우기는 no-op)', () => {

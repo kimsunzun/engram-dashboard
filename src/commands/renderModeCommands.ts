@@ -38,7 +38,7 @@ interface RenderModeCtx {
  * ★모르는 칸은 거절하지 않는다(여분 키 무시)★ — ADR-0055 의 「인자 = 객체 하나(가방), 각 handler 가
  * 필요한 키만 destructure」 그대로다. 덕분에 **나중에** 이 id 들을 슬롯 메뉴에 기여시키면(지금 기여는
  * 없다 — 이 파일에 registerSlotMenu 호출이 없다) 메뉴가 넘기는 실행 가방 `{viewId, slotId, agentId, content}`
- * (`SlotContextMenu` — 메뉴 ctx 에서 상태 판정용 칸 `usageRefreshable` 을 뺀 것)이 그대로 들어맞는다. ADR-0157 의 「입구에서 선언에 없는 칸을 거절한다」를 여기에
+ * (`SlotContextMenu` 의 `commandArgs`)이 그대로 들어맞는다. ADR-0157 의 「입구에서 선언에 없는 칸을 거절한다」를 여기에
  * 옮겨 심지 말 것 — 그 거절 목록은 **인자 선언에서 파생**해야 하는데(같은 ADR 불변식: 손으로 유지하는
  * 사본 금지) 이 다섯은 `help` 를 안 달아 파생할 선언 자체가 없다.
  */

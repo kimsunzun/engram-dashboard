@@ -1,19 +1,22 @@
 // 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-8) — 켠 회사의 남은 양을 작은 표시로 그리고, 누르면 상세 팝업을 연다.
 //
-// ★켠 회사만 그린다★ — 끈 회사는 스토어에 값이 있어도 작은 표시·팝업·배지 어디에도 없다. 조회 수요(관심)는 셸이
-//   레이아웃에서 계산하므로 이 컴포넌트는 관심을 보고하지 않는다.
+// ★조작은 command 로만 간다(§5)★ — 작은 표시의 ⟳ 는 `usageSlot.refresh`, 팝업의 표시 토글은 `usageSlot.toggle*` 를
+//   부른다. 슬롯 우클릭 메뉴엔 사용량 항목이 없다(사용자 결정 2026-09-29).
+// ★켠 회사만 그린다★ — 끈 회사는 스토어에 값이 있어도 작은 표시·배지·팝업 상세 어디에도 없고, 이름은 팝업의 표시
+//   토글 줄(다시 켤 자리)에만 남는다. 조회 수요(관심)는 셸이 레이아웃에서 계산하므로 이 컴포넌트는 관심을 보고하지 않는다.
 // ★폭 단계는 그려진 크기로 고른다(R3)★ — 단계마다 숨은 렌더의 자연 크기를 재어 실제 크기와 견준다. px 문턱을 두지
 //   않는다: 글꼴·문구·값이 바뀌면 문턱도 따라 움직여야 해서다.
 // ★시각은 분 단위 tick 하나가 굴린다★ — 나이·남은 시간·다음 시도가 요청 없이 로컬로 흐른다(R32).
 // 값은 DOM 텍스트 + `data-usage-vendor`/`data-usage-window` 로 둔다(R27 — LLM·cdp 가 읽는다).
 
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
 import { RefreshCw } from 'lucide-react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
 import type { SlotContent } from '../../api/layoutTypes'
 import type { AgentBackendKind } from '../../api/types'
+import { fireAndForget } from '../../commands/dispatch'
 import { t } from '../../i18n'
 import {
   blocksRefresh,
@@ -43,6 +46,16 @@ type Stage = 1 | 2 | 3
 type ValueReading = Extract<WindowReading, { kind: 'value' }>
 
 /**
+ * 회사마다 슬롯 내용의 표시 칸과 그 칸을 뒤집는 command. 팝업의 표시 토글 줄은 이 표의 차례로 그린다 — 회사가 늘면
+ * (`AgentBackendKind`) 타입이 빠진 줄을 잡는다.
+ */
+const VENDOR_SLOT: Record<AgentBackendKind, { show: Exclude<keyof UsageContent, 'type'>; toggle: string }> = {
+  claude: { show: 'show_claude', toggle: 'usageSlot.toggleClaude' },
+  codex: { show: 'show_codex', toggle: 'usageSlot.toggleCodex' },
+}
+const USAGE_VENDORS = Object.keys(VENDOR_SLOT) as AgentBackendKind[]
+
+/**
  * 「사용량 페이지 ↗」 목적지. ★셸의 opener 허용 목록(`src-tauri/capabilities/usage-links.json`)과 글자까지 같아야
  * 한다★ — 쿼리·끝 슬래시 하나라도 다르면 셸이 여는 것을 거절한다. 대조는 `UsageSlot.test.tsx` 가 한다.
  */
@@ -62,8 +75,6 @@ interface WindowView {
   key: string
   label: string
   reading: WindowReading
-  /** 작은 표시의 리셋 시각에 요일을 붙이나(주간 창). */
-  weekday: boolean
 }
 
 interface VendorView {
@@ -82,7 +93,12 @@ interface VendorView {
 }
 
 function vendorName(vendor: AgentBackendKind): string {
-  return vendor === 'claude' ? t('usage.vendorClaude') : t('usage.vendorCodex')
+  switch (vendor) {
+    case 'claude':
+      return t('usage.vendorClaude')
+    case 'codex':
+      return t('usage.vendorCodex')
+  }
 }
 
 function buildVendorView(
@@ -113,13 +129,11 @@ function buildVendorView(
         key: 'five_hour',
         label: t('usage.windowFiveHour'),
         reading: readWindow(windowOf('five_hour'), elapsed, nowWall),
-        weekday: false,
       },
       {
         key: 'weekly',
         label: t('usage.windowWeekly'),
         reading: readWindow(windowOf('weekly'), elapsed, nowWall),
-        weekday: true,
       },
     ],
   }
@@ -155,7 +169,16 @@ function useMinuteTick(): void {
   }, [])
 }
 
-export default function UsageSlot({ content }: { content: UsageContent }) {
+export default function UsageSlot({
+  content,
+  viewId,
+  slotId,
+}: {
+  content: UsageContent
+  /** 이 슬롯의 좌표 — ⟳·표시 토글이 command 에 그대로 싣는다. `null` = 활성 탭을 아직 모른다(토글 command 가 거절한다). */
+  viewId: string | null
+  slotId: string
+}) {
   // TRD §3 #82: 방송 잇기 뒤 부팅 pull 과 별개로, 슬롯이 늦게 놓여도 셸 캐시로 곧바로 그린다.
   useEffect(() => {
     void useUsageStore.getState().pull()
@@ -172,14 +195,7 @@ export default function UsageSlot({ content }: { content: UsageContent }) {
   if (content.show_claude) views.push(buildVendorView('claude', claude, claudePending, nowPerf, nowWall))
   if (content.show_codex) views.push(buildVendorView('codex', codex, codexPending, nowPerf, nowWall))
 
-  if (views.length === 0) {
-    return (
-      <div data-usage-slot="" data-usage-hint="" style={{ ...ROOT_STYLE, padding: '6px 8px', color: 'var(--text-muted)' }}>
-        {t('usage.hint')}
-      </div>
-    )
-  }
-  return <UsageSummary views={views} nowWall={nowWall} />
+  return <UsageSummary views={views} nowWall={nowWall} content={content} viewId={viewId} slotId={slotId} />
 }
 
 // ── 작은 표시 ──────────────────────────────────────────────────────────────────────────────
@@ -253,14 +269,27 @@ interface Anchor {
   bottom: number
 }
 
-function UsageSummary({ views, nowWall }: { views: VendorView[]; nowWall: number }) {
+function UsageSummary({
+  views,
+  nowWall,
+  content,
+  viewId,
+  slotId,
+}: {
+  views: VendorView[]
+  nowWall: number
+  content: UsageContent
+  viewId: string | null
+  slotId: string
+}) {
   const rootRef = useRef<HTMLDivElement>(null)
+  const rowRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLSpanElement>(null)
   const measure1Ref = useRef<HTMLDivElement>(null)
   const measure2Ref = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
   const [measures, setMeasures] = useState<Measures>({ avail: null, rootH: null, s1: null, s2: null, s2h: null })
-  const [anchor, setAnchor] = useState<Anchor | null>(null)
+  const [open, setOpen] = useState(false)
 
   // 실제 크기와 두 단계의 자연 크기를 한 관찰자로 잰다 — 숨은 렌더는 값·문구가 바뀌면 크기가 바뀌어 다시 불린다.
   useLayoutEffect(() => {
@@ -293,66 +322,134 @@ function UsageSummary({ views, nowWall }: { views: VendorView[]; nowWall: number
   const stage = pickStage(measures)
 
   const closePopup = useCallback((restoreFocus: boolean) => {
-    setAnchor(null)
+    setOpen(false)
     if (restoreFocus) buttonRef.current?.focus()
   }, [])
 
+  const runSlotCommand = (id: string) => fireAndForget(id, { viewId, slotId, content })
+  // 누름이 방송 전에 연달아도 옛 `content` 그대로 보낸다 — 토글 command 가 제 칸 하나만 쓰므로 다른 회사의 앞 누름을
+  //   되돌리지 않는다(`usageCommands`). 체크 표시도 `content` 다(낙관 갱신 없음 — ADR-0035).
+  const toggleShown = (vendor: AgentBackendKind) => runSlotCommand(VENDOR_SLOT[vendor].toggle)
+  const shown = Object.fromEntries(USAGE_VENDORS.map(v => [v, content[VENDOR_SLOT[v].show]])) as Record<
+    AgentBackendKind,
+    boolean
+  >
+
   return (
     <div ref={rootRef} data-usage-slot="" style={ROOT_STYLE}>
-      <button
-        ref={buttonRef}
-        type="button"
-        data-usage-summary=""
-        aria-haspopup="dialog"
-        aria-expanded={anchor !== null}
-        // 버튼의 자식은 보조기술에 평평해지므로 안의 막대·배지 대신 짧은 이름을 준다(D14).
-        aria-label={summaryLabel(views)}
-        // 키보드(Enter·Space)는 네이티브 버튼 활성화가 같은 click 으로 부른다(D14).
-        onClick={() => {
-          if (anchor !== null) {
-            setAnchor(null)
-            return
-          }
-          const rect = buttonRef.current?.getBoundingClientRect()
-          setAnchor({ left: rect?.left ?? 0, top: rect?.top ?? 0, bottom: rect?.bottom ?? 0 })
-        }}
-        style={{
-          display: 'block',
-          width: '100%',
-          padding: `${SUMMARY_PAD_Y_PX}px ${SUMMARY_PAD_X_PX}px`,
-          margin: 0,
-          border: 0,
-          background: 'transparent',
-          color: 'inherit',
-          font: 'inherit',
-          textAlign: 'left',
-          cursor: 'pointer',
-        }}
-      >
-        <span
-          ref={contentRef}
-          data-usage-content=""
-          data-usage-stage={stage}
-          style={{ display: 'block', overflow: 'hidden' }}
+      {/* ★⟳ 는 요약 버튼 밖의 형제다★ — 버튼 안에 버튼을 두지 않는다(누름이 팝업 열기와 겹친다). 요약 버튼이 남는 폭을
+          다 쓰고 ⟳ 는 줄지 않으므로, 단계를 고르는 내용 폭(avail)은 이미 ⟳ 몫을 뺀 값이다 — 측정 사본에 ⟳ 를 넣지
+          않는다(넣으면 두 번 뺀다). */}
+      <div ref={rowRef} data-usage-row="" style={{ display: 'flex', alignItems: 'center' }}>
+        <button
+          ref={buttonRef}
+          type="button"
+          data-usage-summary=""
+          aria-haspopup="dialog"
+          aria-expanded={open}
+          // 버튼의 자식은 보조기술에 평평해지므로 안의 막대·배지 대신 짧은 이름을 준다(D14). 안내 문구만 있으면 그 글자가 이름이다.
+          aria-label={views.length > 0 ? summaryLabel(views) : undefined}
+          // 키보드(Enter·Space)는 네이티브 버튼 활성화가 같은 click 으로 부른다(D14).
+          onClick={() => setOpen(o => !o)}
+          style={{
+            display: 'block',
+            flexGrow: 1,
+            flexShrink: 1,
+            flexBasis: 0,
+            minWidth: 0,
+            padding: `${SUMMARY_PAD_Y_PX}px ${SUMMARY_PAD_X_PX}px`,
+            margin: 0,
+            border: 0,
+            background: 'transparent',
+            color: 'inherit',
+            font: 'inherit',
+            textAlign: 'left',
+            cursor: 'pointer',
+          }}
         >
-          <StageRender stage={stage} views={views} measure={false} />
-        </span>
-      </button>
+          <span
+            ref={contentRef}
+            data-usage-content=""
+            data-usage-stage={stage}
+            style={{ display: 'block', overflow: 'hidden' }}
+          >
+            {views.length === 0 ? (
+              <span data-usage-hint="" style={{ color: 'var(--text-muted)' }}>
+                {t('usage.hint')}
+              </span>
+            ) : (
+              <StageRender stage={stage} views={views} nowWall={nowWall} measure={false} />
+            )}
+          </span>
+        </button>
+        {views.length > 0 && <RefreshButton views={views} onRefresh={() => runSlotCommand('usageSlot.refresh')} />}
+      </div>
       <div
         aria-hidden="true"
         style={{ position: 'absolute', top: 0, left: 0, visibility: 'hidden', pointerEvents: 'none' }}
       >
         <div ref={measure1Ref} data-usage-measure="1" style={{ width: 'max-content' }}>
-          <StageRender stage={1} views={views} measure />
+          <StageRender stage={1} views={views} nowWall={nowWall} measure />
         </div>
         <div ref={measure2Ref} data-usage-measure="2" style={{ width: 'max-content' }}>
-          <StageRender stage={2} views={views} measure />
+          <StageRender stage={2} views={views} nowWall={nowWall} measure />
         </div>
       </div>
-      {anchor !== null && (
-        <UsagePopup anchor={anchor} views={views} nowWall={nowWall} buttonRef={buttonRef} onClose={closePopup} />
+      {open && (
+        <UsagePopup
+          summaryRef={buttonRef}
+          views={views}
+          nowWall={nowWall}
+          ownerRef={rowRef}
+          shown={shown}
+          onToggle={toggleShown}
+          onClose={closePopup}
+        />
       )}
     </div>
+  )
+}
+
+/**
+ * 작은 표시의 ⟳ — 켠 회사를 한 번에 새로고침한다. 대상(켠 회사 중 보이는 거절이 아닌 것)은 command 가 누를 때
+ * 스토어로 다시 고른다.
+ */
+function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: () => void }) {
+  const label = t('usage.refreshAll')
+  const targets = views.filter(v => !v.rejected)
+  // ADR-0257: 누름을 막는 것은 아래 둘뿐이다 — 시간 간격은 두지 않는다(연타로 부를 429 는 받아들인 위험).
+  // 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11).
+  const blocked = targets.length === 0
+  // 대상의 조회가 도는 동안의 누름은 버린다 — 답이 올 때까지 「갱신 중」 표식이 그 동안을 보인다.
+  const busy = targets.some(v => v.refreshing)
+  return (
+    <button
+      type="button"
+      data-usage-refresh=""
+      aria-label={label}
+      title={label}
+      // ★`disabled` 가 아니라 `aria-disabled` 다★ — 포커스된 ⟳ 가 거절로 바뀌는 순간 `disabled` 는 포커스를 body 로
+      //   떨군다(HTML focus fixup). 포커스를 쥔 채 누름만 막는다.
+      aria-disabled={blocked || undefined}
+      aria-busy={busy || undefined}
+      onClick={() => {
+        if (!blocked && !busy) onRefresh()
+      }}
+      style={{
+        flex: 'none',
+        display: 'inline-flex',
+        marginRight: `${SUMMARY_PAD_X_PX}px`,
+        padding: '2px',
+        border: '1px solid var(--border)',
+        borderRadius: '3px',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: blocked ? 'default' : busy ? 'progress' : 'pointer',
+        opacity: blocked ? 0.4 : undefined,
+      }}
+    >
+      <RefreshCw aria-hidden="true" className="size-3.5" />
+    </button>
   )
 }
 
@@ -360,7 +457,17 @@ function UsageSummary({ views, nowWall }: { views: VendorView[]; nowWall: number
  * `measure` = 크기만 재는 숨은 사본 — 같은 글자·같은 모양을 그리되 역할·이름·`data-usage-*`·애니메이션은 싣지 않는다
  * (cdp·보조기술이 값을 두 번 읽지 않게). 줄도 `span` 인 것은 요약 버튼 안에 들어가서다(버튼 내용 = phrasing).
  */
-function StageRender({ stage, views, measure }: { stage: Stage; views: VendorView[]; measure: boolean }) {
+function StageRender({
+  stage,
+  views,
+  nowWall,
+  measure,
+}: {
+  stage: Stage
+  views: VendorView[]
+  nowWall: number
+  measure: boolean
+}) {
   if (stage === 1) {
     return (
       <span
@@ -375,6 +482,7 @@ function StageRender({ stage, views, measure }: { stage: Stage; views: VendorVie
                 key={w.key}
                 view={view}
                 w={w}
+                nowWall={nowWall}
                 measure={measure}
                 row={v + 1}
                 column={2 + i * WINDOW_TRACK_COUNT}
@@ -406,6 +514,7 @@ function StageRender({ stage, views, measure }: { stage: Stage; views: VendorVie
                   key={w.key}
                   view={view}
                   w={w}
+                  nowWall={nowWall}
                   measure={measure}
                   row={first + i}
                   column={2}
@@ -497,6 +606,7 @@ function RefreshingMark({ view, measure }: { view: VendorView; measure: boolean 
 function WindowCells({
   view,
   w,
+  nowWall,
   measure,
   row,
   column,
@@ -504,6 +614,7 @@ function WindowCells({
 }: {
   view: VendorView
   w: WindowView
+  nowWall: number
   measure: boolean
   row: number
   column: number
@@ -541,7 +652,7 @@ function WindowCells({
               {...(measure ? {} : { 'data-usage-reset-clock': '' })}
               style={{ ...at(3), marginLeft: PCT_TO_RESET, color: 'var(--text-muted)' }}
             >
-              {formatResetClock(r.resetsAt, w.weekday)}
+              {formatResetClock(r.resetsAt, nowWall)}
             </span>
           )}
         </>
@@ -670,26 +781,37 @@ function placePopup(anchor: Anchor, w: number, h: number, vw: number, vh: number
 }
 
 function UsagePopup({
-  anchor,
+  summaryRef,
   views,
   nowWall,
-  buttonRef,
+  ownerRef,
+  shown,
+  onToggle,
   onClose,
 }: {
-  anchor: Anchor
+  /** 팝업을 붙이는 요약 버튼. */
+  summaryRef: RefObject<HTMLElement | null>
   views: VendorView[]
   nowWall: number
-  buttonRef: RefObject<HTMLButtonElement | null>
+  /** 팝업을 연 요약 줄(요약 버튼 · ⟳) — 그 안의 누름·포커스는 팝업 밖으로 치지 않는다. */
+  ownerRef: RefObject<HTMLDivElement | null>
+  shown: Record<AgentBackendKind, boolean>
+  onToggle: (vendor: AgentBackendKind) => void
   onClose: (restoreFocus: boolean) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
 
-  // 내용 높이가 값에 따라 달라 그릴 때마다 재되, 같으면 멈춘다.
+  // 팝업과 요약을 그릴 때마다 재되, 자리가 같으면 멈춘다 — 팝업 높이는 값에 따라 달라지고, 열린 채 회사를 켜면 요약
+  //   격자에 줄이 늘어 연 순간의 요약 사각형으로 두면 팝업이 그 줄을 덮는다. 요약의 크기는 이 팝업의 부모가 다시
+  //   그려야 바뀐다(내용 · 단계 · 슬롯 크기는 부모의 측정 관찰자가 상태로 받는다) — 그래서 따로 관찰하지 않는다. 크기
+  //   없이 자리만 옮는 것(같은 크기 슬롯 맞바꿈 등)은 다시 재지 않는다.
   useLayoutEffect(() => {
-    if (!ref.current) return
-    const rect = ref.current.getBoundingClientRect()
-    const next = placePopup(anchor, rect.width, rect.height, window.innerWidth, window.innerHeight)
+    const popup = ref.current
+    const summary = summaryRef.current
+    if (!popup || !summary) return
+    const { width, height } = popup.getBoundingClientRect()
+    const next = placePopup(summary.getBoundingClientRect(), width, height, window.innerWidth, window.innerHeight)
     setPos(prev => (prev !== null && prev.top === next.top && prev.left === next.left ? prev : next))
   })
 
@@ -701,23 +823,27 @@ function UsagePopup({
   }, [positioned])
 
   useEffect(() => {
-    const ours = (node: Node | null): boolean =>
-      node !== null && ((ref.current?.contains(node) ?? false) || (buttonRef.current?.contains(node) ?? false))
-    // Esc 는 포커스가 팝업·요약에 있을 때만 — 다른 곳의 Esc 를 가로채지 않는다. ★포커스가 아무 데도 없을 때(body·null)도
+    const inPopup = (node: Node | null) => node !== null && (ref.current?.contains(node) ?? false)
+    const inOwner = (node: Node | null) => node !== null && (ownerRef.current?.contains(node) ?? false)
+    // Esc 는 포커스가 팝업·요약 줄에 있을 때만 — 다른 곳의 Esc 를 가로채지 않는다. ★포커스가 아무 데도 없을 때(body·null)도
     //   닫는다★ — 팝업 안의 포커스된 요소가 빠지면(다시 그려져 사라짐 등) 포커스가 body 로 떨어지고, 그때 막으면 닫을
-    //   길이 마우스뿐이다. 다른 요소로 간 포커스는 아래 focusin 이 이미 닫았다.
+    //   길이 마우스뿐이다. 다른 요소로 간 포커스는 아래 focusin 이 이미 닫았다. 요약 줄(⟳ 등)에 있던 포커스는 그 자리에 둔다.
     const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
       const active = document.activeElement
-      const nowhere = active === null || active === document.body
-      if (e.key === 'Escape' && (nowhere || ours(active))) onClose(true)
+      if (active === null || active === document.body || inPopup(active)) onClose(true)
+      else if (inOwner(active)) onClose(false)
     }
-    // 요약 버튼 위 누름은 그 버튼의 click 이 닫는다 — 여기서도 닫으면 click 이 곧바로 다시 연다.
+    // 요약 줄 위 누름은 닫지 않는다 — 요약 버튼은 자기 click 이 닫고(여기서도 닫으면 click 이 곧바로 다시 연다), ⟳ 는
+    //   팝업을 연 채 새로고침한다(상세의 「갱신 중」을 보며 누르게).
     const onDown = (e: MouseEvent) => {
-      if (!ours(e.target as Node)) onClose(false)
+      const target = e.target as Node
+      if (!inPopup(target) && !inOwner(target)) onClose(false)
     }
     // 포커스가 밖으로 나가면 닫되, 포커스는 간 자리에 둔다(되찾아 오지 않는다).
     const onFocusIn = (e: FocusEvent) => {
-      if (!ours(e.target as Node)) onClose(false)
+      const target = e.target as Node
+      if (!inPopup(target) && !inOwner(target)) onClose(false)
     }
     document.addEventListener('keydown', onKey)
     document.addEventListener('mousedown', onDown)
@@ -727,7 +853,7 @@ function UsagePopup({
       document.removeEventListener('mousedown', onDown)
       document.removeEventListener('focusin', onFocusIn)
     }
-  }, [onClose, buttonRef])
+  }, [onClose, ownerRef])
 
   const troubled = views.filter(v => v.line !== null)
   return (
@@ -773,11 +899,66 @@ function UsagePopup({
       {views.map(view => (
         <VendorDetail key={view.vendor} view={view} nowWall={nowWall} />
       ))}
+      <ShowToggles shown={shown} onToggle={onToggle} divided={views.length > 0} />
     </div>
   )
 }
 
-/** 한 회사의 상세 — 창별 절대 리셋 시각 · 값마다 나이 · plan(있을 때만) · 모델별 창(값이 있는 것만 — D8) · ⟳ · 링크. */
+// ADR-0257: 켜고 끄기의 사람 UI 는 여기 하나다 — 슬롯 우클릭 메뉴엔 사용량 항목이 없다.
+/**
+ * 팝업 맨 아래 표시 토글 줄 — 켠 회사와 끈 회사를 다 싣는다(끈 회사를 다시 켤 자리가 여기다). 체크 상태는 슬롯 내용을
+ * 그대로 그린다 — 누름은 command 로 가고, 레이아웃이 바뀐 내용을 돌려줄 때 체크가 따라 바뀐다.
+ */
+function ShowToggles({
+  shown,
+  onToggle,
+  divided,
+}: {
+  shown: Record<AgentBackendKind, boolean>
+  onToggle: (vendor: AgentBackendKind) => void
+  divided: boolean
+}) {
+  const headId = useId()
+  return (
+    <div
+      role="group"
+      aria-labelledby={headId}
+      data-usage-show-toggles=""
+      style={{
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        columnGap: '0.8em',
+        rowGap: '2px',
+        ...(divided ? { borderTop: '1px solid var(--border)', paddingTop: '6px' } : {}),
+      }}
+    >
+      <span id={headId} style={{ color: 'var(--text-muted)' }}>
+        {t('usage.showOnSlot')}
+      </span>
+      {USAGE_VENDORS.map(vendor => (
+        <label
+          key={vendor}
+          style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3em', whiteSpace: 'nowrap', cursor: 'pointer' }}
+        >
+          <input
+            type="checkbox"
+            data-usage-show={vendor}
+            checked={shown[vendor]}
+            onChange={() => onToggle(vendor)}
+            style={{ margin: 0, cursor: 'pointer' }}
+          />
+          {vendorName(vendor)}
+        </label>
+      ))}
+    </div>
+  )
+}
+
+/**
+ * 한 회사의 상세 — 창별 절대 리셋 시각 · 값마다 나이 · plan(있을 때만) · 모델별 창(값이 있는 것만 — D8) · 링크.
+ * ★회사별 ⟳ 는 두지 않는다(사용자 결정 2026-09-29)★ — 작은 표시의 ⟳ 하나가 켠 회사를 한 번에 새로고침한다.
+ */
 function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) {
   const snapshot = view.entry?.snapshot
   const rows: WindowView[] = [...view.windows]
@@ -788,11 +969,9 @@ function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) 
         key: `model:${scoped.label}`,
         label: scoped.label,
         reading: readWindow(scoped.window, view.elapsed, nowWall),
-        weekday: false,
       })
     }
   }
-  const refreshLabel = t('usage.refresh', { vendor: view.name })
   const url = USAGE_PAGE_URL[view.vendor]
   return (
     <section data-usage-popup-vendor={view.vendor} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
@@ -812,32 +991,6 @@ function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) 
             {t('usage.refreshing')}
           </span>
         )}
-        <span style={{ flex: '1 1 auto' }} />
-        {/* 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11). 30초 간격은 데몬이 지킨다.
-            ★`disabled` 가 아니라 `aria-disabled` 다★ — 포커스된 ⟳ 가 거절로 바뀌는 순간 `disabled` 는 포커스를 body 로
-            떨군다(HTML focus fixup). 포커스를 쥔 채 누름만 막는다. */}
-        <button
-          type="button"
-          data-usage-refresh={view.vendor}
-          aria-label={refreshLabel}
-          title={refreshLabel}
-          aria-disabled={view.rejected || undefined}
-          onClick={() => {
-            if (!view.rejected) void useUsageStore.getState().refresh(view.vendor)
-          }}
-          style={{
-            display: 'inline-flex',
-            padding: '2px',
-            border: '1px solid var(--border)',
-            borderRadius: '3px',
-            background: 'transparent',
-            color: 'inherit',
-            cursor: view.rejected ? 'default' : 'pointer',
-            opacity: view.rejected ? 0.4 : undefined,
-          }}
-        >
-          <RefreshCw aria-hidden="true" className="size-3.5" />
-        </button>
       </div>
       {rows.map(row => (
         <PopupWindowRow key={row.key} view={view} row={row} nowWall={nowWall} />

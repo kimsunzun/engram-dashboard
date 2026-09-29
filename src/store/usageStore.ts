@@ -128,8 +128,9 @@ export function useUsagePending(vendor: AgentBackendKind): boolean {
 }
 
 /**
- * ⟳ 를 막는 거절 = 보이는 `Rejected` 상태. 팝업 ⟳ 비활성과 슬롯 메뉴 ⟳ 판정이 이 하나를 읽는다. 값이 와서
- * `Ready` 로 보이는 동안의 거절은 여기 안 걸린다 — 그때 ⟳ 는 데몬이 조회 없이 캐시로 답한다(TRD §3 #88).
+ * ⟳ 를 막는 거절 = 보이는 `Rejected` 상태. 작은 표시 ⟳ 비활성과 `usageSlot.refresh` 의 대상 고르기가 이 하나를
+ * 읽는다. 값이 와서 `Ready` 로 보이는 동안의 거절은 여기 안 걸린다 — 그때 ⟳ 는 데몬이 조회 없이 캐시로
+ * 답한다(TRD §3 #88).
  */
 export function blocksRefresh(state: UsageVendorState | undefined): boolean {
   return state?.kind === 'Rejected'
@@ -137,8 +138,7 @@ export function blocksRefresh(state: UsageVendorState | undefined): boolean {
 
 /**
  * 켠 회사 중 ⟳ 를 보낼 수 있는 것 — [`blocksRefresh`] 에 안 걸리는 것. 값을 아직 못 받은 회사도 든다(⟳ 가 첫
- * 값을 부르는 길이다). 슬롯 메뉴의 활성 판정(`LayoutLeaf` 가 구독해 ctx 에 싣는다)과 실행 때 재확인(`usageSlot.refresh`)이
- * 이 하나를 읽는다.
+ * 값을 부르는 길이다). `usageSlot.refresh` 가 누를 때 스토어로 다시 보며 이것으로 대상을 고른다.
  */
 export function refreshableVendors(
   shows: { show_claude: boolean; show_codex: boolean },

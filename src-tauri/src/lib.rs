@@ -236,6 +236,7 @@ pub fn run() {
             commands::rename_tab,
             commands::assign_agent,
             commands::set_slot_content,
+            commands::set_usage_slot,
             commands::spawn_into,
             commands::get_view,
             commands::list_tabs,

@@ -318,7 +318,7 @@ impl UsageService {
     /// ⟳(연결 태스크)의 요청 하나(§1-4 요청 표) — `None` = 칸이 없는 벤더.
     ///
     /// 판정 전에 시각 평가를 새기고(래치·거절 끝 — 새겼으면 구독자 전부에게 한 장) 표의 행 순서대로 답한다:
-    /// - 캐시·간격·거절 → 곧바로 지금 한 장(`Cached`). ★거절은 보이든 안 보이든 같은 갈래다★ — 한 장의 상태가
+    /// - 캐시·거절 → 곧바로 지금 한 장(`Cached`). ★거절은 보이든 안 보이든 같은 갈래다★ — 한 장의 상태가
     ///   보이는 거절이면 `Rejected{retry_in_secs}` 이고, 값이 와서 `Ready` 로 보이는 동안이면 조용한 캐시다(§3 #88 ⓑ).
     /// - 시작 → 「갱신 중」 한 장을 구독자 전부에게 낸 뒤 조회를 띄운다 · 합류 → 진행 중인 조회에 붙는다. 둘 다 그
     ///   조회의 끝을 `REPLY_WAIT_MAX` 까지 기다린 뒤 지금 한 장을 답한다 — 기다린 끝 이후에 성공한 조회가 있으면
@@ -659,7 +659,6 @@ fn account_key(vendor: UsageVendorKey) -> UsageKey {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::usage_service::book::REFRESH_MIN_SPACING;
     use crate::usage_service::clock::ManualUsageClock;
     use crate::usage_service::watch::tests::{recording, words, Counting, Log};
     use crate::usage_service::watch::UsageFrame;
@@ -1796,9 +1795,33 @@ mod tests {
         assert!(!rig.in_flight(0));
     }
 
+    /// ★⟳ 에 최소 간격이 없다(사용자 결정 2026-09-29)★ — 시계를 한 틱도 안 움직인 두 번째 ⟳ 도 조회한다.
+    #[test]
+    fn a_refresh_right_after_a_finished_probe_starts_a_new_probe() {
+        let (rig, _clock) = rig();
+        let log = rig.subscriber(1, &[0]);
+        rig.answer(0, ok(active(0, 30.0)));
+        let first = rig
+            .service
+            .request_blocking(vendor(0), RequestKind::Refresh)
+            .expect("아는 벤더");
+        assert_eq!(first.served, UsageServed::Fresh);
+        assert!(!rig.in_flight(0));
+
+        rig.answer(0, ok(active(0, 31.0)));
+        let second = rig
+            .service
+            .request_blocking(vendor(0), RequestKind::Refresh)
+            .expect("아는 벤더");
+        assert_eq!(rig.queries(0), 2);
+        assert_eq!(second.served, UsageServed::Fresh);
+        assert_eq!(pct(&second.snapshot), Some(31.0));
+        assert_eq!(last_pct(&log), Some(31.0), "구독자에게도 닿았다");
+    }
+
     #[test]
     fn a_failed_probe_after_an_earlier_success_answers_cached() {
-        let (rig, clock) = rig();
+        let (rig, _clock) = rig();
         rig.answer(0, ok(active(0, 30.0)));
         let first = rig
             .service
@@ -1806,13 +1829,12 @@ mod tests {
             .expect("아는 벤더");
         assert_eq!(first.served, UsageServed::Fresh);
 
-        clock.advance_both(REFRESH_MIN_SPACING + Duration::from_secs(1));
         rig.answer(0, Scripted::Answer(Err(ProbeError::Timeout.into())));
         let second = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)
             .expect("아는 벤더");
-        assert_eq!(rig.queries(0), 2, "간격이 지나 새 조회가 떴다");
+        assert_eq!(rig.queries(0), 2, "끝난 직후의 ⟳ 도 새 조회를 띄운다");
         assert_eq!(
             second.served,
             UsageServed::Cached,
@@ -1825,7 +1847,7 @@ mod tests {
     #[test]
     fn a_joiner_that_gives_up_after_an_earlier_success_answers_cached() {
         let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
-        let rig = rig_full(clock.clone(), 2, SHORT_WAIT);
+        let rig = rig_full(clock, 2, SHORT_WAIT);
         // 앞의 성공은 요청 없이 띄워 끝낸다 — 짧은 기다림에 걸리지 않게.
         assert!(rig.service.desk().book.begin_probe(&key(0)));
         rig.service.start_probe(key(0));
@@ -1833,7 +1855,6 @@ mod tests {
         wait_until("앞 조회 끝", || ended(&rig) == 1);
         assert_eq!(rig.service.desk().runs[&key(0)].last_ok, 1);
 
-        clock.advance_both(REFRESH_MIN_SPACING + Duration::from_secs(1));
         let answer = rig
             .service
             .request_blocking(vendor(0), RequestKind::Refresh)

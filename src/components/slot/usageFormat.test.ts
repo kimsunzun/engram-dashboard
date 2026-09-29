@@ -130,23 +130,47 @@ describe('시간 문구', () => {
     expect(formatAge(86_400 * 2)).toBe('2일 전')
   })
 
-  it('시각은 Intl 로캘 포맷(R28) — 오늘이면 시각만, 아니면 날짜까지', () => {
+  it('시각은 Intl 로캘 포맷(R28) — 24시간 「HH:MM」', () => {
     const clock = new Intl.DateTimeFormat(USAGE_LOCALE, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
     expect(formatClock(NOW)).toBe(clock.format(new Date(NOW * 1000)))
-    expect(formatResetAt(NOW + 60, NOW)).toBe(clock.format(new Date((NOW + 60) * 1000)))
-    const far = formatResetAt(NOW + 86_400 * 3, NOW)
-    expect(far).not.toBe(clock.format(new Date((NOW + 86_400 * 3) * 1000)))
-    expect(far).toContain(clock.format(new Date((NOW + 86_400 * 3) * 1000)))
+  })
+})
+
+// ── 리셋 시각(사용자 결정 2026-09-29) — 같은 로컬 날짜면 「HH:MM」, 아니면 「M/D HH:MM」(요일 없음 · 0 채움 없음) ──
+describe('리셋 시각', () => {
+  // 로컬 시각으로 세워 시간대와 무관하게 같은 글자가 나온다. 지금 = 인자로 넣는다(실제 시계를 읽지 않는다).
+  const at = (month: number, day: number, hour: number, minute: number, year = 2026) =>
+    new Date(year, month - 1, day, hour, minute).getTime() / 1000
+
+  it('같은 날 → 시각만 · 다른 날 → 월/일 + 시각(요일 없음)', () => {
+    expect(formatResetAt(at(9, 30, 21, 5), at(9, 30, 9, 0))).toBe('21:05')
+    expect(formatResetAt(at(10, 1, 1, 48), at(9, 30, 9, 0))).toBe('10/1 01:48')
+    expect(formatResetAt(at(10, 3, 1, 48), at(9, 30, 9, 0))).toBe('10/3 01:48')
+    expect(formatResetAt(at(10, 1, 1, 48), at(9, 30, 9, 0))).not.toMatch(/[일월화수목금토]/)
   })
 
-  it('작은 표시의 리셋 시각 — 5시간 창 「↻ HH:MM」(24시간) · 주간 창 「↻ 요일 HH:MM」(한 글자 요일, 괄호 없음)', () => {
-    // 2026-09-25 은 금요일이다. 로컬 시각으로 세워 시간대와 무관하게 같은 글자가 나온다.
-    const fri21 = new Date(2026, 8, 25, 21, 0).getTime() / 1000
-    const satMidnight = new Date(2026, 8, 26, 0, 5).getTime() / 1000
-    expect(formatResetClock(fri21, false)).toBe('↻ 21:00')
-    expect(formatResetClock(fri21, true)).toBe('↻ 금 21:00')
-    expect(formatResetClock(satMidnight, false)).toBe('↻ 00:05')
-    expect(formatResetClock(satMidnight, true)).toBe('↻ 토 00:05')
+  it('자정 둘레 — 날짜가 바뀌면 날짜를 단다 · 같은 날 끝까지는 시각만', () => {
+    const now = at(9, 30, 23, 50)
+    expect(formatResetAt(at(9, 30, 23, 59), now)).toBe('23:59')
+    expect(formatResetAt(at(10, 1, 0, 0), now)).toBe('10/1 00:00')
+    expect(formatResetAt(at(10, 1, 0, 58), now)).toBe('10/1 00:58')
+    // 지금이 막 자정을 넘었으면 그날 안의 리셋은 시각만.
+    expect(formatResetAt(at(10, 1, 0, 58), at(10, 1, 0, 0))).toBe('00:58')
+    expect(formatResetAt(at(10, 1, 23, 59), at(10, 1, 0, 0))).toBe('23:59')
+  })
+
+  it('달·해 경계 — 월·일에 0 을 채우지 않는다', () => {
+    expect(formatResetAt(at(11, 1, 9, 5), at(10, 31, 22, 0))).toBe('11/1 09:05')
+    expect(formatResetAt(at(1, 1, 0, 5, 2027), at(12, 31, 23, 0))).toBe('1/1 00:05')
+    // 같은 월·일이라도 해가 다르면 다른 날이다.
+    expect(formatResetAt(at(9, 30, 10, 0, 2027), at(9, 30, 9, 0))).toBe('9/30 10:00')
+  })
+
+  it('작은 표시 = 「리셋 」 + 같은 규칙(창 종류와 무관 · ↻ 기호 없음)', () => {
+    const now = at(9, 30, 22, 0)
+    expect(formatResetClock(at(9, 30, 23, 58), now)).toBe('리셋 23:58')
+    expect(formatResetClock(at(10, 1, 1, 48), now)).toBe('리셋 10/1 01:48')
+    expect(formatResetClock(at(10, 1, 1, 48), now)).not.toContain('↻')
   })
 })
 

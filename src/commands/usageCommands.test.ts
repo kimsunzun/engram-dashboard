@@ -1,24 +1,25 @@
-// usageCommands — 사용량 슬롯 메뉴(TRD S21 usage-limit-slot §4 「프론트 표시」 행의 메뉴 `checked` · 등록점).
-// 메뉴 DOM(☑ 그리기·비활성)은 `SlotContextMenu.test`, 매니페스트를 거친 실제 우클릭은 `ViewLayoutRenderer.test` 가 잰다.
+// usageCommands — 사용량 슬롯의 command(TRD S21 usage-limit-slot §4 「프론트 표시」 행의 등록점 · ⟳ 대상 · 토글).
+// 그것을 부르는 화면(작은 표시의 ⟳ · 팝업의 표시 토글 줄)은 `UsageSlot.test`, 매니페스트를 거친 실제 우클릭은
+// `ViewLayoutRenderer.test` 가 잰다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }))
+const invokeMock = vi.hoisted(() => vi.fn(async (_cmd: string, _args?: unknown) => undefined as unknown))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: invokeMock }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async () => vi.fn()) }))
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({ close: vi.fn(async () => undefined), label: () => 'main' }),
 }))
 vi.mock('../api/clientFactory', () => ({ agentClient: {} }))
 
-import './usageCommands' // side-effect: register + registerSlotMenu
+import './usageCommands' // side-effect: register
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 import type { SlotContent } from '../api/layoutTypes'
 import type { AgentBackendKind } from '../api/types'
 import { useUsageStore } from '../store/usageStore'
-import { useViewStore } from '../store/viewStore'
 import { getCommand, run } from './registry'
 import { fireAndForget } from './dispatch'
-import { buildSlotMenu, type SlotMenuCtx } from './slotMenu'
+import { buildSlotMenu } from './slotMenu'
 
 const IDS = ['usageSlot.refresh', 'usageSlot.toggleClaude', 'usageSlot.toggleCodex'] as const
 
@@ -55,20 +56,18 @@ function seed(states: Partial<Record<AgentBackendKind, 'Ready' | 'Rejected' | 'F
 }
 
 const refreshSpy = vi.fn(async (_vendor: AgentBackendKind) => {})
-const setSlotContentSpy = vi.fn(async () => undefined)
 
 beforeEach(() => {
   refreshSpy.mockClear()
-  setSlotContentSpy.mockClear()
+  invokeMock.mockClear()
   useUsageStore.setState({ vendors: {}, socketEpoch: 0, pending: {}, refresh: refreshSpy })
-  useViewStore.setState({ setSlotContent: setSlotContentSpy })
 })
 afterEach(() => {
   vi.restoreAllMocks()
 })
 
 describe('등록점', () => {
-  it('셋이 등록되고 메뉴 문구는 리터럴 그대로다', () => {
+  it('셋이 등록되고 제목은 리터럴 그대로다', () => {
     expect(IDS.map(id => getCommand(id)?.title)).toEqual(['사용량 새로고침', 'Claude 표시', 'Codex 표시'])
   })
 
@@ -76,61 +75,46 @@ describe('등록점', () => {
     for (const id of IDS) expect(getCommand(id)?.help).toBeUndefined()
   })
 
-  it('usage 슬롯 메뉴 = ⟳ · Claude 표시 · Codex 표시 차례 · ☑ 는 두 토글에만 · 활성 판정은 ⟳ 에만 · command 에 when 없음', () => {
-    const own = buildSlotMenu('usage').filter(i => i.id.startsWith('usageSlot.'))
-    expect(own.map(i => i.id)).toEqual([...IDS])
-    expect(own.map(i => i.checked !== undefined)).toEqual([false, true, true])
-    expect(own.map(i => i.enabled !== undefined)).toEqual([true, false, false])
+  it('command 에 when 이 없다', () => {
     for (const id of IDS) expect(getCommand(id)?.when).toBeUndefined()
   })
 
-  it('다른 콘텐츠의 메뉴엔 오르지 않는다', () => {
-    for (const type of ['empty', 'agent', 'agent_list', 'preset_palette'] as const) {
+  it('슬롯 우클릭 메뉴에 기여하지 않는다 — 사용량 슬롯을 비롯해 어느 콘텐츠의 메뉴에도 usageSlot.* 가 없다(사용자 결정 2026-09-29)', () => {
+    for (const type of ['usage', 'empty', 'agent', 'agent_list', 'preset_palette'] as const) {
       expect(buildSlotMenu(type).some(i => i.id.startsWith('usageSlot.'))).toBe(false)
     }
   })
 })
 
-describe('☑ · 활성 = ctx 만 읽는다(ADR-0064 — 스토어 무접촉)', () => {
-  const own = () => buildSlotMenu('usage').filter(i => i.id.startsWith('usageSlot.'))
-  const ctx = (content?: SlotContent, usageRefreshable?: boolean): SlotMenuCtx => ({
-    viewId: 'v1',
-    slotId: 's1',
-    agentId: null,
-    content,
-    usageRefreshable,
-  })
+/** 셸로 나간 쓰기 — 표시 칸 쓰기 외의 invoke 는 거른다. */
+function usageWrites(): unknown[] {
+  return invokeMock.mock.calls.filter(([cmd]) => cmd === 'set_usage_slot').map(([, args]) => args)
+}
 
-  it('켠 회사 = ☑ · 끈 회사 = ☐ · ⟳ 활성 = ctx.usageRefreshable — 두 스토어 어느 쪽도 읽지 않는다', () => {
-    seed({ claude: 'Rejected', codex: 'Rejected' }) // 스토어를 읽는다면 ⟳ 가 비활성으로 나올 상태
-    const viewRead = vi.spyOn(useViewStore, 'getState')
-    const usageRead = vi.spyOn(useUsageStore, 'getState')
-    const [refresh, claude, codex] = own()
-    expect([claude.checked!(ctx(usage(true, false))), codex.checked!(ctx(usage(true, false)))]).toEqual([true, false])
-    expect([claude.checked!(ctx(usage(false, true))), codex.checked!(ctx(usage(false, true)))]).toEqual([false, true])
-    expect(refresh.enabled!(ctx(usage(true, true), true))).toBe(true)
-    expect(refresh.enabled!(ctx(usage(true, true), false))).toBe(false)
-    expect(refresh.enabled!(ctx(usage(true, true)))).toBe(false)
-    expect(viewRead).not.toHaveBeenCalled()
-    expect(usageRead).not.toHaveBeenCalled()
-  })
-
-  it('ctx 에 내용이 없거나 사용량 슬롯이 아니면 ☐', () => {
-    const [, claude] = own()
-    expect(claude.checked!(ctx())).toBe(false)
-    expect(claude.checked!(ctx({ type: 'empty' }))).toBe(false)
-  })
-})
-
-describe('표시 토글 = 전량 교체', () => {
-  it('toggleClaude → Claude 칸만 뒤집고 두 칸을 다 써 보낸다', async () => {
+describe('표시 토글 = 제 칸 하나만 쓴다', () => {
+  it('toggleClaude → Claude 칸을 뒤집은 값 하나만 · Codex 칸은 비운다(셸이 지금 값으로 지킨다)', async () => {
     await run('usageSlot.toggleClaude', { viewId: 'v1', slotId: 's1', content: usage(true, false) })
-    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', usage(false, false))
+    expect(usageWrites()).toEqual([{ viewId: 'v1', slotId: 's1', showClaude: false, showCodex: null }])
   })
 
-  it('toggleCodex → Codex 칸만 뒤집는다', async () => {
+  it('toggleCodex → Codex 칸 하나만', async () => {
     await run('usageSlot.toggleCodex', { viewId: 'v1', slotId: 's1', content: usage(true, false) })
-    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', usage(true, true))
+    expect(usageWrites()).toEqual([{ viewId: 'v1', slotId: 's1', showClaude: null, showCodex: true }])
+  })
+
+  it('방송 전의 다른 회사 연달은 누름 — 둘 다 같은 옛 내용에서 불려도 쓰기는 칸 하나씩이라 서로 덮지 않는다', async () => {
+    const stale = usage(true, false)
+    await run('usageSlot.toggleCodex', { viewId: 'v1', slotId: 's1', content: stale })
+    await run('usageSlot.toggleClaude', { viewId: 'v1', slotId: 's1', content: stale })
+    expect(usageWrites()).toEqual([
+      { viewId: 'v1', slotId: 's1', showClaude: null, showCodex: true },
+      { viewId: 'v1', slotId: 's1', showClaude: false, showCodex: null },
+    ])
+  })
+
+  it('전량 교체(set_slot_content)로 쓰지 않는다', async () => {
+    await run('usageSlot.toggleClaude', { viewId: 'v1', slotId: 's1', content: usage(true, true) })
+    expect(invokeMock.mock.calls.some(([cmd]) => cmd === 'set_slot_content')).toBe(false)
   })
 
   it('내용이 없거나 사용량 슬롯이 아니면 throw · 좌표가 없어도 throw — 어느 쪽도 쓰지 않는다', () => {
@@ -140,10 +124,10 @@ describe('표시 토글 = 전량 교체', () => {
     )
     expect(() => run('usageSlot.toggleCodex', { slotId: 's1', content: usage(true, true) })).toThrow(/viewId 필요/)
     expect(() => run('usageSlot.toggleCodex', { viewId: 'v1', content: usage(true, true) })).toThrow(/slotId 필요/)
-    expect(setSlotContentSpy).not.toHaveBeenCalled()
+    expect(invokeMock).not.toHaveBeenCalled()
   })
 
-  it('show 칸이 하나라도 boolean 이 아니면 throw — 뒤집은 값을 지을 수 없다', () => {
+  it('show 칸이 하나라도 boolean 이 아니면 throw — 토글도 ⟳ 와 같은 인자 계약이다', () => {
     const bad: Array<Record<string, unknown>> = [
       { type: 'usage', show_codex: true },
       { type: 'usage', show_claude: true },
@@ -156,12 +140,12 @@ describe('표시 토글 = 전량 교체', () => {
       )
       expect(() => run('usageSlot.refresh', { content })).toThrow(/show_claude·show_codex 는 둘 다 boolean/)
     }
-    expect(setSlotContentSpy).not.toHaveBeenCalled()
+    expect(invokeMock).not.toHaveBeenCalled()
     expect(refreshSpy).not.toHaveBeenCalled()
   })
 })
 
-describe('메뉴 ⟳ = 켠 회사 중 보이는 거절이 아닌 것만 · 누를 때 스토어로 다시 본다', () => {
+describe('⟳ = 켠 회사 중 보이는 거절이 아닌 것만 · 누를 때 스토어로 다시 본다', () => {
   it('둘 다 켜고 둘 다 정상 → 둘 다 새로고침', async () => {
     seed({ claude: 'Ready', codex: 'Failed' })
     await run('usageSlot.refresh', { content: usage(true, true) })
@@ -193,12 +177,12 @@ describe('메뉴 ⟳ = 켠 회사 중 보이는 거절이 아닌 것만 · 누�
     expect(refreshSpy).not.toHaveBeenCalled()
   })
 
-  it('메뉴를 그린 뒤 거절이 닿은 틈에 누름 — 메뉴가 부르는 fireAndForget 이 throw 를 잡아 로그만 남기고 상태는 그대로', () => {
+  it('⟳ 를 그린 뒤 거절이 닿은 틈에 누름 — 버튼이 부르는 fireAndForget 이 throw 를 잡아 로그만 남기고 상태는 그대로', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     seed({ claude: 'Rejected' })
     const before = useUsageStore.getState().vendors
     expect(() =>
-      fireAndForget('usageSlot.refresh', { viewId: 'v1', slotId: 's1', agentId: null, content: usage(true, false) }),
+      fireAndForget('usageSlot.refresh', { viewId: 'v1', slotId: 's1', content: usage(true, false) }),
     ).not.toThrow()
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/usageSlot\.refresh/), expect.any(Error))
     expect(refreshSpy).not.toHaveBeenCalled()

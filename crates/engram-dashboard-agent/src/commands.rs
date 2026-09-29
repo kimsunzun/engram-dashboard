@@ -321,10 +321,11 @@ declare_commands! {
     } errors [NOT_FOUND];
 
     /// 사용량 한도를 강제로 새로 조회한다(화면 ⟳ 와 같은 명령) — 조회를 띄우고(진행 중이면 거기 붙는다) 그 끝을
-    /// 최대 5초 기다려 `usage.get` 과 같은 행으로 답한다. 조회하지 않고 들고 있던 값(`Cached`)으로 답하는 경우 =
-    /// 직전 조회가 끝난 뒤 30초 안 · 상류 거절 기한이 남았다(거절 중에 값이 들어와 `state` 가 `Ready` 여도 기한은
-    /// 남는다 — 그때는 `retry_in_secs` 가 안 실린다). 칸의 뜻은 `usage.get` 과 같다. 이 데몬이 칸을 안 드는 백엔드는
-    /// NOT_FOUND.
+    /// 최대 5초 기다려 `usage.get` 과 같은 행으로 답한다. 호출 간격 제한은 없다 — 직전 조회가 막 끝났어도 다시
+    /// 조회하고, 잦으면 상류가 거절할 수 있다(그 거절이 `Rejected` 가 아니라 `Failed` 로만 보일 수도 있다). 조회하지
+    /// 않고 들고 있던 값(`Cached`)으로 답하는 경우 = 상류 거절 기한이 남았다(거절 중에 값이 들어와 `state` 가
+    /// `Ready` 여도 기한은 남는다 — 그때는 `retry_in_secs` 가 안 실린다). 조회가 실패하거나 5초 안에 안 끝나도
+    /// `Cached` 다(그때는 조회가 나갔다). 칸의 뜻은 `usage.get` 과 같다. 이 데몬이 칸을 안 드는 백엔드는 NOT_FOUND.
     #[effect(Write)]
     #[since(6)]
     "usage.refresh" => args UsageRefreshArgs {
@@ -442,7 +443,7 @@ pub trait RosterChanged: Send + Sync {
 pub trait UsageCommandHost: Send + Sync {
     /// 요청 표의 `Get` — 다음 자동 조회 시각 전이면 조회 없이 지금 값으로 답한다.
     fn get(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
-    /// 요청 표의 `Refresh` — 간격·거절 기한 안이면 조회 없이 지금 값으로 답한다.
+    /// 요청 표의 `Refresh` — 거절 기한 안이면 조회 없이 지금 값으로 답한다.
     fn refresh(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
 }
 

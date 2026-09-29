@@ -132,38 +132,31 @@ export function formatAge(ageSecs: number): string {
 }
 
 const CLOCK = new Intl.DateTimeFormat(USAGE_LOCALE, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-const DATE_CLOCK = new Intl.DateTimeFormat(USAGE_LOCALE, {
-  month: 'numeric',
-  day: 'numeric',
-  weekday: 'short',
-  hour: '2-digit',
-  minute: '2-digit',
-  hourCycle: 'h23',
-})
-const DAY_KEY = new Intl.DateTimeFormat(USAGE_LOCALE, { year: 'numeric', month: 'numeric', day: 'numeric' })
-const WEEKDAY = new Intl.DateTimeFormat(USAGE_LOCALE, { weekday: 'short' })
 
 export function formatClock(epochSecs: number): string {
   return CLOCK.format(new Date(epochSecs * 1000))
 }
 
-/**
- * 작은 표시의 리셋 시각(사용자 결정 2026-09-29) — `withWeekday` 면 요일을 앞에 단다(주간 창). 남은 시간은 팝업에만 둔다.
- * 요일과 시각을 따로 찍어 틀에 끼우는 것은 한 포맷터로 함께 찍으면 로캘이 요일을 괄호로 감싸서다(「(금) 21:00」).
- */
-export function formatResetClock(epochSecs: number, withWeekday: boolean): string {
-  const at = new Date(epochSecs * 1000)
-  const time = CLOCK.format(at)
-  return withWeekday
-    ? t('usage.resetClockWeekday', { weekday: WEEKDAY.format(at), time })
-    : t('usage.resetClock', { time })
+// 날짜는 `Date` 의 로컬 getter 로 가른다 — 시각을 찍는 `CLOCK` 도 같은 기본 시간대라 둘이 어긋나지 않는다.
+function sameLocalDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 }
 
-/** 오늘(로컬 날짜)이면 시각만, 아니면 날짜 + 시각. */
+// ADR-0257: 오늘이 아닌 리셋은 요일이 아니라 날짜 — 「리셋 수」 는 횟수로 읽히고, 다음 주 같은 요일이면 모호하다.
+/**
+ * 리셋 시각(사용자 결정 2026-09-29) — 지금과 같은 로컬 날짜면 「HH:MM」, 아니면 「M/D HH:MM」(요일 없음 · 월·일 0 채움
+ * 없음). 작은 표시와 팝업이 같은 규칙을 쓴다.
+ */
 export function formatResetAt(epochSecs: number, nowWallSecs: number): string {
   const at = new Date(epochSecs * 1000)
-  const sameDay = DAY_KEY.format(at) === DAY_KEY.format(new Date(nowWallSecs * 1000))
-  return sameDay ? CLOCK.format(at) : DATE_CLOCK.format(at)
+  const time = CLOCK.format(at)
+  if (sameLocalDay(at, new Date(nowWallSecs * 1000))) return time
+  return t('usage.resetDateTime', { month: String(at.getMonth() + 1), day: String(at.getDate()), time })
+}
+
+/** 작은 표시의 리셋 시각 — 남은 시간은 팝업에만 둔다. */
+export function formatResetClock(epochSecs: number, nowWallSecs: number): string {
+  return t('usage.resetClock', { time: formatResetAt(epochSecs, nowWallSecs) })
 }
 
 /**

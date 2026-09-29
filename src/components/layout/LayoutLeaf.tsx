@@ -8,7 +8,6 @@ import { Plus } from 'lucide-react'
 import type { LayoutNode, SlotRect } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
 import { useAgentStore } from '../../store/agentStore'
-import { refreshableVendors, useUsageStore } from '../../store/usageStore'
 import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
@@ -291,7 +290,7 @@ const SlotBody = memo(function SlotBody({
           <AgentList />
         ) : node.content.type === 'usage' ? (
           // 값은 usageStore 미러에서만 읽는다 — 조회 수요는 셸이 이 슬롯 내용(show_*)으로 계산한다(TRD §1-7).
-          <UsageSlot content={node.content} />
+          <UsageSlot content={node.content} viewId={targetViewId} slotId={node.id} />
         ) : (
           // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
           //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
@@ -303,9 +302,8 @@ const SlotBody = memo(function SlotBody({
       </SlotErrorBoundary>
       {contextMenu && (
         // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
-        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content + 메뉴 상태 판정용 usageRefreshable)를
-        //   넘긴다. command.run 에는 앞의 넷만 가서 백엔드 권위 경로(viewStore/agentClient)로 흐른다(§5 단일 제어 표면) —
-        //   usageRefreshable 은 기여의 enabled 만 읽는다. content 종류가 가시성 게이트.
+        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content)를 넘긴다. command.run 은 그 넷으로
+        //   백엔드 권위 경로(viewStore/agentClient)로 흐른다(§5 단일 제어 표면). content 종류가 가시성 게이트.
         <SlotMenu
           anchor={contextMenu}
           node={node}
@@ -335,8 +333,9 @@ const SlotBody = memo(function SlotBody({
 })
 
 /**
- * 열린 슬롯 메뉴 — 메뉴 ctx 를 조립한다. ★메뉴가 보여 줄 스토어 상태는 여기서 구독해 ctx 에 싣는다★ — 메뉴 기여는
- * ctx 만 읽고(ADR-0064), 구독하므로 열린 메뉴도 그 상태를 따라 다시 그린다. 구독은 메뉴가 열린 동안만 산다.
+ * 열린 슬롯 메뉴 — 메뉴 ctx 를 조립한다. ★메뉴가 보여 줄 스토어 상태가 생기면 여기서 구독해 ctx 에 싣는다(ADR-0252)★ —
+ * 메뉴 기여는 ctx 만 읽고(ADR-0064), 여기서 구독하면 열린 메뉴도 그 상태를 따라 다시 그리고 구독은 메뉴가 열린
+ * 동안만 산다. 지금 싣는 스토어 상태는 없다.
  */
 function SlotMenu({
   anchor,
@@ -352,15 +351,12 @@ function SlotMenu({
   onClose: () => void
 }) {
   const content = node.content
-  const usageRefreshable = useUsageStore(
-    s => content.type === 'usage' && refreshableVendors(content, s.vendors).length > 0,
-  )
   return (
     <SlotContextMenu
       x={anchor.x}
       y={anchor.y}
       items={buildSlotMenu(content.type)}
-      ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId, content, usageRefreshable }}
+      ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId, content }}
       onClose={onClose}
     />
   )

@@ -180,21 +180,16 @@ mod tests {
     /// ★도움말의 수가 상수와 같다★ — 호출자(LLM)가 읽는 것은 요약에 적힌 수뿐이라, 상수만 바꾸면 광고가 조용히
     /// 거짓이 된다. 요약은 agent 선언이고 상수는 이 crate 것이라 컴파일러가 둘을 잇지 않는다.
     #[test]
-    fn the_usage_help_quotes_the_wait_and_spacing_constants() {
+    fn the_usage_help_quotes_the_wait_constant() {
         use engram_dashboard_agent::commands::{UsageGetArgs, UsageRefreshArgs};
         use engram_dashboard_command::spec_item_json;
 
-        use super::super::book::REFRESH_MIN_SPACING;
-
-        for whole in [REPLY_WAIT_MAX, REFRESH_MIN_SPACING] {
-            assert_eq!(
-                whole.subsec_nanos(),
-                0,
-                "요약은 초 단위로 적는다: {whole:?}"
-            );
-        }
+        assert_eq!(
+            REPLY_WAIT_MAX.subsec_nanos(),
+            0,
+            "요약은 초 단위로 적는다: {REPLY_WAIT_MAX:?}"
+        );
         let wait = format!("최대 {}초", REPLY_WAIT_MAX.as_secs());
-        let spacing = format!("{}초 안", REFRESH_MIN_SPACING.as_secs());
         let get = spec_item_json(&UsageGetArgs::SPEC);
         let refresh = spec_item_json(&UsageRefreshArgs::SPEC);
         assert!(
@@ -204,10 +199,6 @@ mod tests {
         assert!(
             refresh.contains(&wait),
             "`usage.refresh` 도움말에 {wait} 가 없다: {refresh}"
-        );
-        assert!(
-            refresh.contains(&spacing),
-            "`usage.refresh` 도움말에 {spacing} 이 없다: {refresh}"
         );
     }
 

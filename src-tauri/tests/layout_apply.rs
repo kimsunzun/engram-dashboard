@@ -849,6 +849,59 @@ fn set_usage_slot_unknown_slot_is_err_without_resync() {
     assert_eq!(w.layout_events(), 0);
 }
 
+#[test]
+fn set_usage_slot_unknown_view_is_err_without_notify() {
+    let w = World::new();
+    let err = apply::set_usage_slot(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        None,
+        Some(true),
+    )
+    .unwrap_err();
+    assert!(err.contains("view 없음"), "err={err}");
+    assert_eq!(w.resyncs(), 0);
+    assert_eq!(w.layout_events(), 0);
+}
+
+/// 팝업의 두 토글이 방송 전에 연달아 온 경우 — 칸 하나씩만 쓰므로 어느 순서로 닿아도 끝은 같다.
+#[test]
+fn set_usage_slot_single_field_writes_from_both_vendors_land_in_either_order() {
+    type Write = (Option<bool>, Option<bool>);
+    let codex_on: Write = (None, Some(true));
+    let claude_off: Write = (Some(false), None);
+    for order in [[codex_on, claude_off], [claude_off, codex_on]] {
+        let w = World::new();
+        let view = w.main_active();
+        let slot = w.empty_slot(view);
+        apply::set_usage_slot(
+            &w.state,
+            &w.subs,
+            &w.ev,
+            view,
+            slot,
+            Some(true),
+            Some(false),
+        )
+        .unwrap();
+        for (claude, codex) in order {
+            apply::set_usage_slot(&w.state, &w.subs, &w.ev, view, slot, claude, codex).unwrap();
+        }
+        assert_eq!(
+            usage_of(&w, view, slot),
+            Some(SlotContent::Usage {
+                show_claude: false,
+                show_codex: true
+            }),
+            "order={order:?}"
+        );
+        assert_eq!(w.layout_events(), 3);
+    }
+}
+
 // ── move_slot_to_window ──────────────────────────────────────────────────────
 
 impl World {

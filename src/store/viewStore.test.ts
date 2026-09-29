@@ -185,6 +185,26 @@ describe('viewStore 탭/창 액션 → invoke (탭 소유 모델, ADR-0057)', ()
     })
   })
 
+  it('setUsageSlot → set_usage_slot invoke — 준 칸만 값, 빠진 칸은 null(셸이 지금 값으로 지킨다) · 오버라이드 clear', async () => {
+    const s = useViewStore.getState()
+    s.setRenderMode('s-usage', 'dom')
+    await s.setUsageSlot('v1', 's-usage', { show_codex: true })
+    expect(invokeMock).toHaveBeenLastCalledWith('set_usage_slot', {
+      viewId: 'v1',
+      slotId: 's-usage',
+      showClaude: null,
+      showCodex: true,
+    })
+    expect(useViewStore.getState().renderModeOverride['s-usage']).toBeUndefined()
+    await s.setUsageSlot('v1', 's-usage', { show_claude: false, show_codex: false })
+    expect(invokeMock).toHaveBeenLastCalledWith('set_usage_slot', {
+      viewId: 'v1',
+      slotId: 's-usage',
+      showClaude: false,
+      showCodex: false,
+    })
+  })
+
   it('moveSlotToWindow → move_slot_to_window invoke(viewId/slotId/toWindow) + {window,tab} 반환', async () => {
     invokeMock.mockResolvedValueOnce({ window: 'slot-popup-2', tab: 'v-new' })
     const res = await useViewStore.getState().moveSlotToWindow('v1', 's1')

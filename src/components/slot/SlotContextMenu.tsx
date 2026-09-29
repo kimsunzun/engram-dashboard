@@ -149,7 +149,7 @@ function highlightOff(e: SyntheticEvent<HTMLElement>) {
 
 const DISABLED_ROW_STYLE: CSSProperties = { ...ROW_STYLE, cursor: 'default', opacity: 0.4 }
 
-// ★실행 가방 = 슬롯 좌표 + 슬롯 내용뿐이다★ — 메뉴 상태 판정용 칸(`usageRefreshable`)은 넘기지 않는다. 호출자가 누구인지도
+// ★실행 가방 = 슬롯 좌표 + 슬롯 내용뿐이다★ — ctx 에 메뉴 상태 판정용 칸이 더해져도 넘기지 않게 칸을 골라 싣는다. 호출자가 누구인지도
 //   싣지 않는다: 같은 가방을 `__engramCmd` 가 얼마든지 지어 보낼 수 있어서 인자 값은 호출자 판정이 못 된다
 //   (`registry.ts` `humanOnly` doc — 닫는 축은 인자 값이 아니라 호출자다).
 function commandArgs(ctx: SlotMenuCtx): CommandArgs {

@@ -51,7 +51,7 @@ register({
   id: 'slot.fill.usage',
   title: t('slot.fillUsage'),
   category: 'slot',
-  // 두 회사를 켠 채로 놓는다 — 끄기는 슬롯 우클릭 메뉴가 한다(PRD R8).
+  // 두 회사를 켠 채로 놓는다 — 끄기는 팝업의 「슬롯에 표시」 줄이 `usageSlot.toggle*` 로 한다(ADR-0257).
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.fill.usage')
     return useViewStore

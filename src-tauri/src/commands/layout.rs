@@ -445,6 +445,38 @@ pub fn set_slot_content(
     )
 }
 
+/// 사용량 슬롯의 표시 칸을 칸 단위로 쓴다 — 준 칸만 바뀌고 `None` 칸은 그 슬롯의 지금 값을 지킨다. 사용량이 아니던
+/// 슬롯은 사용량이 되고 `None` 칸은 `true` 다(버스 `layout.setSlotContent` 의 Usage 와 같은 적용 함수).
+///
+/// ★`set_slot_content` 로 온전한 content 를 보내 대신하지 말 것★ — 웹뷰가 들고 있는 content 는 방송이 닿기 전엔 낡아,
+/// 다른 칸을 옛 값으로 되돌린다(Codex 켬 직후의 Claude 끔이 Codex 를 도로 끈다). 읽기와 쓰기가 한 락 안인 것은
+/// 적용 서비스가 진다. 없는 view·slot 은 `Err`.
+// ADR-0257
+#[tauri::command]
+pub fn set_usage_slot(
+    app: AppHandle,
+    state: State<'_, LayoutState>,
+    router: State<'_, Arc<OutputRouter>>,
+    client: State<'_, Arc<DaemonClient>>,
+    view_id: Uuid,
+    slot_id: Uuid,
+    show_claude: Option<bool>,
+    show_codex: Option<bool>,
+) -> Result<(), String> {
+    apply::set_usage_slot(
+        &state,
+        &RouterSubs {
+            router: &router,
+            client: &client,
+        },
+        &TauriEvents { app: &app },
+        view_id,
+        slot_id,
+        show_claude,
+        show_codex,
+    )
+}
+
 // ── 합성 command: spawn_into(D-7 배치 지정 스폰) ──────────────────────────────
 
 // 데몬에 에이전트를 스폰하고 그 agent 를 `window` 의 탭 슬롯에 배정한다. 성공 시 새 AgentId(String) 반환.

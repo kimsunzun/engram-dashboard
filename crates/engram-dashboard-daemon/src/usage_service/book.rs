@@ -41,8 +41,6 @@ pub const REJECT_MAX: Duration = Duration::from_secs(24 * 60 * 60);
 pub const RESET_SAME_TOLERANCE: Duration = Duration::from_secs(60);
 /// 모델별 창을 한 관측에서 받는 상한 — 줍기는 pump 스레드에서 곧장 돈다. 넘는 것은 앞에서부터 이만큼만 받는다.
 pub const MODEL_SCOPED_MAX: usize = 16;
-/// ⟳ 최소 간격 — 칸마다 · 사람·LLM 공통 · 직전 조회 **끝**부터 잰다(§3 #38). 쿨타임은 여전히 무시한다(D11).
-pub const REFRESH_MIN_SPACING: Duration = Duration::from_secs(30);
 /// 줍기 발행을 칸마다 이 창으로 합친다(§3 #60) — 줍기 변화만이다. 조회 시작·끝·래치는 곧바로 나간다.
 /// 출처 규칙이 아니다 — 스트림 입구([`UsageBook::apply_passive`])로 몰려 드는 바뀜의 빈도 제어다(§3 #88).
 pub const USAGE_PUBLISH_COALESCE: Duration = Duration::from_secs(1);
@@ -72,7 +70,12 @@ pub struct FinishApplied {
     pub reject_changed: bool,
 }
 
-/// 요청 종류(§1-4 요청 표). `Refresh` = ⟳ — 쿨타임을 무시하되 거절·[`REFRESH_MIN_SPACING`] 은 못 넘는다(D11).
+/// 요청 종류(§1-4 요청 표). `Refresh` = ⟳ — 쿨타임을 무시하되 거절은 못 넘는다(D11).
+///
+/// ★`Refresh` 에 최소 간격을 두지 않는다(사용자 결정 2026-09-29)★ — 조회가 막 끝난 직후의 ⟳ 도 새 조회다.
+///   남는 제동은 거절 기한(R24)과 진행 중 합류뿐이다 — 피어에 수동 간격이 없고, 상류가 막으면 부르는 쪽이 스스로
+///   줄인다.
+// ADR-0257
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
     Get,
@@ -82,7 +85,7 @@ pub enum RequestKind {
 /// [`UsageBook::judge`] 의 판정.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Judgment {
-    /// 조회 없이 지금 캐시로 답한다 — 기한 전 `Get` · 직전 조회 끝 뒤 [`REFRESH_MIN_SPACING`] 안의 `Refresh`.
+    /// 조회 없이 지금 캐시로 답한다 — 기한 전 `Get`.
     Cached,
     /// 거절 기한 전의 `Refresh` — 조회를 내보내지 않는다(R24).
     Rejected,
@@ -274,9 +277,8 @@ impl UsageBook {
     }
 
     /// 요청 하나의 판정 — §1-4 요청 표를 **위 행부터 차례로** 본다: ① `Get` 이고 `now < next_auto` → 캐시
-    /// ② `Refresh` 이고 `now < reject_until` → 거절 ③ `Refresh` 이고 직전 조회 끝 뒤 [`REFRESH_MIN_SPACING`] 안 →
-    /// 캐시 ④ 그 밖 → 진행 중이면 합류, 아니면 시작. ★합류는 ④ 에만 있다★ — 진행 중이어도 앞 세 행에 걸리면 그
-    /// 행으로 답한다. `None` = 모르는 키(아무것도 안 바뀐다).
+    /// ② `Refresh` 이고 `now < reject_until` → 거절 ③ 그 밖 → 진행 중이면 합류, 아니면 시작. ★합류는 ③ 에만
+    /// 있다★ — 진행 중이어도 앞 두 행에 걸리면 그 행으로 답한다. `None` = 모르는 키(아무것도 안 바뀐다).
     ///
     /// 판정은 [`UsageBook::eval_time`] 이 새기는 것(래치·거절 끝)을 읽지 않는다 — 부르는 쪽이 판정 전에 그것을
     /// 부르는 것은(요청 도착 행) 그 바뀜을 발행하려는 것이지 판정을 바꾸려는 것이 아니다.
@@ -286,13 +288,6 @@ impl UsageBook {
             RequestKind::Get if now.mono < cell.next_auto(now) => Judgment::Cached,
             RequestKind::Refresh if cell.reject_until.is_some_and(|until| now.mono < until) => {
                 Judgment::Rejected
-            }
-            RequestKind::Refresh
-                if cell
-                    .last_query
-                    .is_some_and(|done| now.mono < done.saturating_add(REFRESH_MIN_SPACING)) =>
-            {
-                Judgment::Cached
             }
             _ if cell.in_flight => Judgment::Join,
             _ => {
@@ -2570,56 +2565,27 @@ mod tests {
         assert_eq!(judge(&mut b, 0, RequestKind::Get, ended), Judgment::Start);
     }
 
+    /// ★최소 간격이 없다(사용자 결정 2026-09-29)★ — 조회 끝과 같은 순간의 ⟳ 도 새 조회다.
     #[test]
-    fn refresh_ignores_the_cooldown_but_not_the_spacing() {
+    fn refresh_ignores_the_cooldown_and_starts_right_after_a_finished_probe() {
         let mut b = settled();
-        let spaced = secs(100) + REFRESH_MIN_SPACING;
-        for early in [secs(100), spaced - Duration::from_millis(1)] {
-            let now = Now {
-                mono: early,
-                wall: T0,
-            };
-            assert_eq!(
-                judge(&mut b, 0, RequestKind::Refresh, now),
-                Judgment::Cached
-            );
-        }
-        assert_eq!(b.in_flight(&key(0)), Some(false));
-        let now = Now {
-            mono: spaced,
-            wall: T0,
-        };
-        assert!(now.mono < secs(100) + cooldown(0), "쿨타임 전이다");
-        assert_eq!(judge(&mut b, 0, RequestKind::Refresh, now), Judgment::Start);
-
-        // 간격은 조회 **끝**부터 — 시작이 아니다.
-        let done = spaced + secs(5);
-        b.finish_probe(
-            &key(0),
-            Ok(active(0, w(Some(1.0), None), None)),
-            Now {
-                mono: done,
-                wall: T0,
-            },
-        );
-        let again = Now {
-            mono: spaced + REFRESH_MIN_SPACING,
-            wall: T0,
-        };
+        let done = at(100, T0);
+        assert!(done.mono < secs(100) + cooldown(0), "쿨타임 전이다");
+        assert_eq!(judge(&mut b, 0, RequestKind::Get, done), Judgment::Cached);
         assert_eq!(
-            judge(&mut b, 0, RequestKind::Refresh, again),
-            Judgment::Cached
-        );
-        let again = Now {
-            mono: done + REFRESH_MIN_SPACING,
-            wall: T0,
-        };
-        assert_eq!(
-            judge(&mut b, 0, RequestKind::Refresh, again),
+            judge(&mut b, 0, RequestKind::Refresh, done),
             Judgment::Start
         );
+        assert_eq!(b.in_flight(&key(0)), Some(true));
 
-        // 조회한 적이 없으면 간격도 없다.
+        b.finish_probe(&key(0), Ok(active(0, w(Some(1.0), None), None)), done);
+        assert_eq!(b.in_flight(&key(0)), Some(false));
+        assert_eq!(
+            judge(&mut b, 0, RequestKind::Refresh, done),
+            Judgment::Start,
+            "끝난 그 순간에도"
+        );
+
         let mut b = book();
         assert_eq!(
             judge(&mut b, 0, RequestKind::Refresh, at(0, T0)),
@@ -2690,7 +2656,7 @@ mod tests {
                 judge(&mut b, 0, RequestKind::Get, due),
             ]
         };
-        let expected = [Judgment::Cached, Judgment::Cached, Judgment::Start];
+        let expected = [Judgment::Cached, Judgment::Start, Judgment::Join];
         for wall in [T0 - 2 * H, T0, T0 + 2 * H] {
             assert_eq!(judgments(wall), expected, "wall {wall}");
         }
@@ -2730,19 +2696,15 @@ mod tests {
         );
         assert_eq!(b.revision(&key(0)), rev, "합류는 아무것도 안 바꾼다");
 
-        // 표 순서 그대로 — 진행 중이어도 기한 전 `Get`·간격 안 `Refresh` 는 캐시다.
+        // 표 순서 그대로 — 진행 중이어도 기한 전 `Get` 은 캐시다. ⟳ 는 직전 조회가 막 끝났어도 합류한다.
         let mut b = settled();
         assert!(b.begin_probe(&key(0)));
         assert_eq!(
-            judge(&mut b, 0, RequestKind::Get, at(110, T0)),
+            judge(&mut b, 0, RequestKind::Get, at(100, T0)),
             Judgment::Cached
         );
         assert_eq!(
-            judge(&mut b, 0, RequestKind::Refresh, at(110, T0)),
-            Judgment::Cached
-        );
-        assert_eq!(
-            judge(&mut b, 0, RequestKind::Refresh, at(130, T0)),
+            judge(&mut b, 0, RequestKind::Refresh, at(100, T0)),
             Judgment::Join
         );
 
