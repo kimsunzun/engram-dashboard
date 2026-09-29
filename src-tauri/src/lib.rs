@@ -218,6 +218,7 @@ pub fn run() {
             commands::daemon_close,
             commands::daemon_connection_state,
             commands::forward_daemon_command,
+            commands::get_usage_snapshot,
             commands::show_main_ui,
             commands::hide_main_ui,
             commands::quit_app,

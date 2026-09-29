@@ -179,6 +179,7 @@ impl std::error::Error for HandshakeError {}
 pub enum ConnectionCommand {
     // 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
     //   1) reply 를 PendingMap[request_id] 에 넣고 → 2) cmd 를 JSON 으로 sink.send.
+    //   ⟳(`RefreshUsageLimits`)만 1) 앞에 사용량 구독 한 장을 쓴다([`send_request`]).
     // 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 으로 resolve. send/끊김 실패 시 Err.
     SendCommand {
         cmd: AgentCommand,
@@ -1095,40 +1096,16 @@ async fn main_loop(
                 let Some(cmd) = reject_foreign_command(cmd, socket_epoch) else { continue };
                 match cmd {
                     ConnectionCommand::SendCommand { cmd, reply, .. } => {
-                        // send_command 가 request_id 있는 명령만 넣지만, 방어적으로 None 이면 즉시 Err
-                        //   (매칭 키 없는 명령은 reply 가 안 와 영구 pending = hang 이므로).
-                        let Some(rid) = protocol_state::command_request_id(&cmd) else {
-                            let _ = reply.send(Err(
-                                "send_command: request_id 없는 명령은 reply 매칭 불가".to_string(),
-                            ));
-                            continue;
-                        };
-                        // ★send 전에 pending 등록★: 인코딩/송신 사이에 reply 가 먼저 도착해도(loopback
-                        //   극단) take 할 슬롯이 있어야 한다. 송신 실패 시 아래서 도로 꺼낸다.
-                        // ★중복 request_id 가드(FIX-4 — 계약 명시)★: insert 가 prior oneshot 을 *조용히*
-                        //   떨어뜨리면 그 호출자는 영구 hang 한다. 그래서 승계 규칙을 한 함수에 모아 태운다 —
-                        //   옛 슬롯을 Err 로 깨우고(no-hang) 새 reply 가 그 번호를 잇는다. ★이 번호는 바깥
-                        //   호출자 것이라 겹칠 수 있다★(그래서 여기서 패닉하지 않는다 — `register_pending` doc).
-                        register_pending(pending, rid, reply, my_gen);
-                        match serde_json::to_string(&cmd) {
-                            Ok(text) => {
-                                if let Err(e) = sink.send(Message::Text(text.into())).await {
-                                    // 송신 실패(소켓 죽음) → 방금 넣은 reply 를 도로 꺼내 Err 로 깨운다
-                                    //   (맵에 좀비 안 남김). 소켓은 곧 끊겨 다음 select 가 Disconnected.
-                                    if let Some(reply) = protocol_state::take_pending(pending, &rid) {
-                                        let _ =
-                                            reply.send(Err(format!("{SEND_FAILED_PREFIX}: {e}")));
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                // 직렬화 실패(있어선 안 됨) — pending 되돌려 Err.
-                                if let Some(reply) = protocol_state::take_pending(pending, &rid) {
-                                    let _ =
-                                        reply.send(Err(format!("{SERIALIZE_FAILED_PREFIX}: {e}")));
-                                }
-                            }
-                        }
+                        send_request(
+                            &mut sink,
+                            pending,
+                            usage,
+                            socket_epoch,
+                            cmd,
+                            reply,
+                            my_gen,
+                        )
+                        .await;
                     }
                     ConnectionCommand::Unsubscribe { agent_id, .. } => {
                         let cmd = AgentCommand::Unsubscribe { agent_id };
@@ -1332,9 +1309,89 @@ async fn send_fire(
     }
 }
 
+/// 요청/응답 명령 한 장 — main_loop 의 `SendCommand` 팔 본체. `reply` 는 여기서 오류로 깨어나거나 pending 에
+/// 든다(그 뒤는 답장 · 끊김 drain 이 깨운다) — 어느 갈래도 그냥 drop 하지 않는다.
+///
+/// ★⟳(`RefreshUsageLimits`)는 구독과 한 동작이다(TRD S21 usage-limit-slot §1-7 「⟳」)★ — 쓰기 순서 = 강제 구독
+/// 프레임(`UsageSubscribe{관심}` · 관심이 비었어도 쓴다) → pending 등록 → 새로고침 프레임. 구독이 못 나가면
+/// 새로고침은 등록도 쓰기도 안 된 채 [`SEND_FAILED_PREFIX`] 로 깨어난다: 아무것도 안 나갔으므로
+/// [`SENT_OUTCOME_UNKNOWN`] 이 아니고, `reply` 를 drop 하면 호출자가 「안 나갔다」 대신 수신 오류 문구를 본다.
+/// ★구독을 넛지로 따로 넣지 말 것★ — 넛지(`try_enqueue`)는 명령 채널이 차면 버려지는데 새로고침은 자리를
+/// 기다려 나가므로, 구독 없는 새로고침이 돌아 ⟳ 가 아무것도 안 보인다.
+///
+/// `pub(crate)` 인 것은 `tests.rs` 가 쓰기에 실패하는 가짜 sink 로 태우기 때문이다 — 루프백 소켓으로는 쓰기
+/// 실패를 결정론으로 못 만든다. 그 팔이 이 함수를 부르는 줄은 `tests.rs` 의 실 소켓 순서 시험이 잰다.
+pub(crate) async fn send_request<S>(
+    sink: &mut S,
+    pending: &mut PendingMap<CommandReply>,
+    usage: &SharedUsageInterest,
+    socket_epoch: u64,
+    cmd: AgentCommand,
+    reply: CommandReply,
+    my_gen: u64,
+) where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    // send_command 가 request_id 있는 명령만 넣지만, 방어적으로 None 이면 즉시 Err
+    //   (매칭 키 없는 명령은 reply 가 안 와 영구 pending = hang 이므로).
+    let Some(rid) = protocol_state::command_request_id(&cmd) else {
+        let _ = reply.send(Err(
+            "send_command: request_id 없는 명령은 reply 매칭 불가".to_string()
+        ));
+        return;
+    };
+    if matches!(cmd, AgentCommand::RefreshUsageLimits { .. }) {
+        // `None` = 관심 상태가 이미 더 새 소켓을 본다(승계로 밀려나는 중) — 그 소켓의 구독은 새 소켓이 열 때
+        //   보낸다. 새로고침은 여느 명령처럼 이 소켓으로 나간다.
+        let set = usage.lock().sync(socket_epoch, true);
+        if let Some(vendors) = set {
+            let subscribe = AgentCommand::UsageSubscribe {
+                vendors: vendors.into_iter().collect(),
+            };
+            if let Err(e) = write_command(sink, &subscribe).await {
+                tracing::debug!(
+                    generation = my_gen,
+                    "⟳ 앞 UsageSubscribe 송신 실패 — 새로고침은 안 보낸다: {e}"
+                );
+                let _ = reply.send(Err(e));
+                return;
+            }
+        }
+    }
+    // ★send 전에 pending 등록★: 인코딩/송신 사이에 reply 가 먼저 도착해도(loopback 극단) take 할 슬롯이
+    //   있어야 한다. 송신 실패 시 아래서 도로 꺼낸다.
+    // ★중복 request_id 가드(FIX-4 — 계약 명시)★: insert 가 prior oneshot 을 *조용히* 떨어뜨리면 그 호출자는
+    //   영구 hang 한다. 그래서 승계 규칙을 한 함수에 모아 태운다 — 옛 슬롯을 Err 로 깨우고(no-hang) 새 reply 가
+    //   그 번호를 잇는다. ★이 번호는 바깥 호출자 것이라 겹칠 수 있다★(그래서 여기서 패닉하지 않는다 —
+    //   `register_pending` doc).
+    register_pending(pending, rid, reply, my_gen);
+    if let Err(e) = write_command(sink, &cmd).await {
+        // 방금 넣은 reply 를 도로 꺼내 Err 로 깨운다(맵에 좀비 안 남김). 소켓이 죽었으면 다음 select 가
+        //   Disconnected.
+        if let Some(reply) = protocol_state::take_pending(pending, &rid) {
+            let _ = reply.send(Err(e));
+        }
+    }
+}
+
+/// 명령 한 장을 JSON Text frame 으로 쓴다. `Err` = 요청 명령의 `reply` 에 그대로 실을 문구 — 직렬화 실패
+/// [`SERIALIZE_FAILED_PREFIX`](있어선 안 되는 갈래) · 소켓 쓰기 실패 [`SEND_FAILED_PREFIX`], 뒤에 원인.
+async fn write_command<S>(sink: &mut S, cmd: &AgentCommand) -> Result<(), String>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let text = serde_json::to_string(cmd).map_err(|e| format!("{SERIALIZE_FAILED_PREFIX}: {e}"))?;
+    sink.send(Message::Text(text.into()))
+        .await
+        .map_err(|e| format!("{SEND_FAILED_PREFIX}: {e}"))
+}
+
 // ── 사용량 구독(TRD S21 usage-limit-slot §1-7) ──────────────────────────────────────────
-// `UsageSubscribe` 를 소켓에 쓰는 자리는 셋 — 새 소켓([`open_usage_socket`]) · 넛지(main_loop 의
-// `UsageInterest` 팔) · 대조([`relay_usage_snapshot`]). 셋 다 연결 task 안이라 순서가 이 task 하나로 선다.
+// `UsageSubscribe` 를 소켓에 쓰는 자리 — 새 소켓([`open_usage_socket`]) · 넛지(main_loop 의 `UsageInterest` 팔) ·
+// 대조([`relay_usage_snapshot`]) · ⟳ 새로고침 직전([`send_request`]). 모두 연결 task 안이라 순서가 이 task
+// 하나로 선다.
 
 /// 사용량 구독 집합 한 장. ★실패해도 연결을 끊지 않는다★ — 소켓이 죽었으면 다음 select 가 끊김을 보고 그
 /// 자리에서 `sent` 가 비워지며(`on_socket_lost`) 새 소켓이 관심을 다시 보낸다. replay `Subscribe` 와 달리 풀어야

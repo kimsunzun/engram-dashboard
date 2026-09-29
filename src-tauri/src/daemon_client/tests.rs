@@ -4398,6 +4398,7 @@ fn frame_label(cmd: &AgentCommand) -> String {
             format!("usage[{}]", vendors.join(","))
         }
         AgentCommand::Unsubscribe { agent_id } => format!("marker:{agent_id}"),
+        AgentCommand::RefreshUsageLimits { vendor, .. } => format!("refresh:{vendor:?}"),
         other => format!("{other:?}"),
     }
 }
@@ -4850,6 +4851,325 @@ async fn a_new_socket_sends_the_interest_before_queued_commands() {
         server.next_frame().await,
         format!("2:{m}"),
         "새 소켓에 보낸 관심이 곧 `sent` 다 — 넛지가 더 보낼 것이 없다"
+    );
+    client.close();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// ⟳ · 웹뷰 전달 차단 · 캐시 당김(TRD S21 usage-limit-slot §1-7 「⟳」·「웹뷰가 값을 받는 길」 · §4 셸 행).
+// ⟳ 는 명령 채널에서 꺼낸 그 자리에서 구독 → 새로고침을 잇는다(`connection::send_request`). 실 소켓 시험은 그
+// 팔이 그 함수를 부른다는 것과 순서를, 가짜 sink 시험은 쓰기 실패의 결말을 잰다(루프백은 쓰기 실패를 못 만든다).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use engram_dashboard_protocol::UsageWindow;
+
+use super::connection::{send_request, SEND_FAILED_PREFIX};
+use super::protocol_state::PendingMap;
+use crate::commands::agent::forward_to_daemon;
+use crate::commands::usage::{usage_snapshot_reply, UsageSnapshotReply};
+
+fn refresh_command(vendor: AgentBackendKind, request_id: RequestId) -> serde_json::Value {
+    serde_json::to_value(AgentCommand::RefreshUsageLimits { vendor, request_id }).unwrap()
+}
+
+fn ack_value(request_id: RequestId) -> serde_json::Value {
+    serde_json::to_value(AgentEvent::Ack { request_id }).unwrap()
+}
+
+// ── ⟳ = 같은 소켓에 구독 프레임 → 새로고침 프레임 ─────────────────────────────────────
+// 관심이 `sent` 와 같아도 구독을 되보낸다(강제) — 데몬 구독이 어긋나 있어도 ⟳ 한 번이 고치게. 새로고침의 답은
+// 여느 요청처럼 pending 이 풀어 웹뷰 전달 경로까지 돌아온다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_writes_the_interest_before_the_refresh_frame() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+
+    let request_id = RequestId::new();
+    let refresh = forward_to_daemon(
+        &client,
+        refresh_command(AgentBackendKind::Claude, request_id),
+    );
+    let daemon = async {
+        assert_eq!(
+            server.next_frame().await,
+            "1:usage[Claude]",
+            "새로고침 앞에 관심 한 장 — 같은 집합이어도"
+        );
+        assert_eq!(server.next_frame().await, "1:refresh:Claude");
+        server.push(AgentEvent::Ack { request_id });
+    };
+    let (reply, ()) = tokio::join!(refresh, daemon);
+    assert_eq!(reply, Ok(Some(ack_value(request_id))));
+    client.close();
+}
+
+// ── 명령 채널이 가득 차 있어도(넛지라면 버려질 상태) 구독이 새로고침 앞에 그대로 쓰인다 ──────────────────
+// 연결 task 를 관심 락에 세워 두고(넛지 한 장을 꺼내 그 락을 기다린다) 채널을 채운다. 그때 넣는 넛지는
+// `try_enqueue` 가 버리지만 ⟳ 는 자리를 기다린다 — 구독이 ⟳ 와 한 명령이라 함께 기다리고 함께 나간다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::await_holding_lock)] // 관심 락을 쥔 채 기다리는 것이 이 시험의 장치다(연결 task 를 세운다).
+async fn a_refresh_on_a_full_command_channel_still_writes_the_subscribe_first() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+
+    let (tx, socket) = client
+        .lifecycle
+        .current_cmd_tx()
+        .expect("창구가 열려 있어야");
+    let held = client.usage_interest().lock();
+    tx.try_send(ConnectionCommand::UsageInterest { socket })
+        .unwrap();
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || tx.capacity()
+            == tx.max_capacity())
+        .await,
+        "연결 task 가 넛지를 꺼내 관심 락에 섰어야"
+    );
+    while tx
+        .try_send(ConnectionCommand::UsageInterest { socket })
+        .is_ok()
+    {}
+    assert_eq!(
+        tx.capacity(),
+        0,
+        "명령 채널이 가득 — 지금의 넛지는 버려진다"
+    );
+
+    let request_id = RequestId::new();
+    let refresh = forward_to_daemon(
+        &client,
+        refresh_command(AgentBackendKind::Claude, request_id),
+    );
+    tokio::pin!(refresh);
+    assert!(
+        futures_util::poll!(&mut refresh).is_pending(),
+        "⟳ 는 버려지지 않고 채널 자리를 기다린다"
+    );
+    drop(held);
+    let daemon = async {
+        assert_eq!(server.next_frame().await, "1:usage[Claude]");
+        assert_eq!(server.next_frame().await, "1:refresh:Claude");
+        server.push(AgentEvent::Ack { request_id });
+    };
+    let (reply, ()) = tokio::join!(refresh, daemon);
+    assert_eq!(reply, Ok(Some(ack_value(request_id))));
+    drop(tx);
+    client.close();
+}
+
+// 쓰려던 명령을 frame 표기로 적고(`attempted`), 지정한 차례(0부터)의 쓰기를 실패시키는 가짜 소켓 출구.
+// `written` = 실제로 나간 것.
+#[derive(Default)]
+struct ScriptedSink {
+    attempted: Vec<String>,
+    written: Vec<String>,
+    fail_at: Option<usize>,
+}
+
+impl futures_util::Sink<Message> for ScriptedSink {
+    type Error = String;
+
+    fn poll_ready(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(self: Pin<&mut Self>, item: Message) -> Result<(), String> {
+        let this = self.get_mut();
+        let Message::Text(text) = item else {
+            panic!("명령은 Text frame 이어야");
+        };
+        let cmd: AgentCommand = serde_json::from_str(&text).expect("명령 JSON 파싱");
+        let label = frame_label(&cmd);
+        let attempt = this.attempted.len();
+        this.attempted.push(label.clone());
+        if this.fail_at == Some(attempt) {
+            return Err("가짜 소켓 쓰기 실패".to_string());
+        }
+        this.written.push(label);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+// ⟳ 한 장을 `send_request` 로 가짜 출구에 쓴다 — 관심 = `show_claude` 켠 사용량 슬롯 하나, 소켓 표식 7.
+// 반환 = (출구, pending 에 남은 수, 그 자리에서 깨어난 답 — 아직이면 `None`).
+async fn refresh_through(
+    fail_at: Option<usize>,
+    show_claude: bool,
+) -> (ScriptedSink, usize, Option<Result<AgentEvent, String>>) {
+    let usage = SharedUsageInterest::default();
+    relayout(&usage, show_claude, false);
+    let _ = usage.lock().on_socket_open(7);
+    let mut sink = ScriptedSink {
+        fail_at,
+        ..ScriptedSink::default()
+    };
+    let mut pending = PendingMap::new();
+    let (reply, mut woken) = tokio::sync::oneshot::channel();
+    let cmd = AgentCommand::RefreshUsageLimits {
+        vendor: AgentBackendKind::Claude,
+        request_id: RequestId::new(),
+    };
+    send_request(&mut sink, &mut pending, &usage, 7, cmd, reply, 1).await;
+    let woken = match woken.try_recv() {
+        Ok(result) => Some(result),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            panic!("답 oneshot 을 깨우지 않고 떨어뜨렸다")
+        }
+    };
+    (sink, pending.len(), woken)
+}
+
+// ── 구독 쓰기가 실패하면 새로고침은 등록도 쓰기도 안 된 채 「송신 실패」로 깨어난다 ─────────────────
+// 아무것도 안 나갔으므로 「전송됨·결과 불명」이 아니다 · 답을 떨어뜨리지도 않는다.
+#[tokio::test]
+async fn a_failed_subscribe_write_fails_the_refresh_as_unsent() {
+    let (sink, pending, woken) = refresh_through(Some(0), true).await;
+    assert_eq!(
+        sink.attempted,
+        vec!["usage[Claude]".to_string()],
+        "실패한 것은 구독이고 새로고침은 쓰려 하지도 않는다"
+    );
+    assert_eq!(pending, 0, "등록되지 않는다");
+    let woken = woken.expect("그 자리에서 깨어나야");
+    assert_eq!(
+        classify_disconnect_err(&woken),
+        DisconnectBranch::SendFailed,
+        "{woken:?}"
+    );
+}
+
+// ── 새로고침 쓰기가 실패하면 ⟳ 요청은 여느 요청처럼 「송신 실패」 — pending 에 남기지 않는다 ─────────────
+#[tokio::test]
+async fn a_failed_refresh_write_after_the_subscribe_fails_the_refresh() {
+    let (sink, pending, woken) = refresh_through(Some(1), true).await;
+    assert_eq!(
+        sink.attempted,
+        vec!["usage[Claude]".to_string(), "refresh:Claude".to_string()]
+    );
+    assert_eq!(sink.written, vec!["usage[Claude]".to_string()]);
+    assert_eq!(pending, 0, "도로 꺼낸다");
+    let woken = woken.expect("그 자리에서 깨어나야");
+    assert!(
+        matches!(&woken, Err(m) if m.starts_with(SEND_FAILED_PREFIX)),
+        "{woken:?}"
+    );
+}
+
+// ── 관심이 비었어도 ⟳ 는 빈 구독을 쓴다(데몬에 남은 구독을 걷는다 — 무해) · 답은 pending 이 기다린다 ─────────
+#[tokio::test]
+async fn a_refresh_with_no_interest_writes_an_empty_subscribe_first() {
+    let (sink, pending, woken) = refresh_through(None, false).await;
+    assert_eq!(
+        sink.written,
+        vec!["usage[]".to_string(), "refresh:Claude".to_string()]
+    );
+    assert_eq!(pending, 1, "답장을 기다린다");
+    assert!(woken.is_none(), "{woken:?}");
+}
+
+// ── 웹뷰가 보낸 `UsageSubscribe` 는 데몬에 닿지 않는다(사용량 구독 = 셸 단독) ──────────────────
+// request_id 가 없어 막지 않으면 fire-and-forget 으로 그대로 나간다 — 표지가 곧바로 다음 frame 이면 안 나갔다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_drops_a_webview_usage_subscribe() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    client.connect().await.expect("connect → connected");
+
+    let cmd = serde_json::to_value(AgentCommand::UsageSubscribe {
+        vendors: vec![AgentBackendKind::Claude],
+    })
+    .unwrap();
+    assert_eq!(forward_to_daemon(&client, cmd).await, Ok(None));
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        format!("1:{m}"),
+        "웹뷰의 사용량 구독은 소켓에 안 나간다"
+    );
+    client.close();
+}
+
+// ── `get_usage_snapshot` = 캐시 전부(받은 뒤 흐른 초만큼 보정) + 지금 소켓 표식 · 소켓 없음 → 빈 목록 + 0 ─────────
+// 보정 폭은 두 시각의 차로 잰다 — 받은 시각을 몰라도 두 시각의 차가 정수 초면 흐른 초의 차도 정확히 그만큼이다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    assert_eq!(
+        usage_snapshot_reply(&client, Instant::now()),
+        UsageSnapshotReply {
+            socket_epoch: 0,
+            snapshots: Vec::new(),
+        },
+        "소켓 없음"
+    );
+
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    let socket = current_socket(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+    let mut update = usage_update(AgentBackendKind::Claude, 4, &[AgentBackendKind::Claude]);
+    if let AgentEvent::UsageLimitsUpdated { snapshot, .. } = &mut update {
+        snapshot.five_hour = Some(UsageWindow {
+            used_pct: Some(12.0),
+            resets_at: None,
+            age_secs: 10,
+            expired: false,
+        });
+    }
+    server.push(update);
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || events.seen().len() >= 2).await,
+        "사용량 알림이 와야: {:?}",
+        events.seen()
+    );
+
+    let now = Instant::now();
+    let age = |reply: &UsageSnapshotReply| {
+        assert_eq!(reply.socket_epoch, socket);
+        assert_eq!(reply.snapshots.len(), 1);
+        assert_eq!(reply.snapshots[0].revision, 4);
+        reply.snapshots[0].five_hour.as_ref().unwrap().age_secs
+    };
+    let early = usage_snapshot_reply(&client, now);
+    let later = usage_snapshot_reply(&client, now + Duration::from_secs(100));
+    assert!(age(&early) >= 10);
+    assert_eq!(age(&later), age(&early) + 100, "받은 뒤 흐른 초만큼 늙는다");
+
+    let wire = serde_json::to_value(&later).unwrap();
+    let mut keys: Vec<&str> = wire
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        ["snapshots", "socket_epoch"],
+        "웹뷰 계약 = snake_case 두 칸"
     );
     client.close();
 }

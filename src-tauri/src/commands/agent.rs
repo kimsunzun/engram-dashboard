@@ -200,13 +200,21 @@ pub async fn request_replay(
 //   ProtocolClient 가 pending 을 거는 명령은 *전부* request_id 를 가지며(resizePty 만 예외=fire-and-forget),
 //   데몬은 그 명령들에 reply variant(Ack/Spawned/Created/AgentList/ProfileList/Snapshot) 또는 Error 를
 //   echo 한다(connection_core.rs dispatch). 즉 send_command await 가 영구 점유되는 명령은 없다.
-// - request_id 없는 명령(Resize/Subscribe/Unsubscribe) → fire-and-forget. 반환 `Ok(None)`(올릴 reply 없음).
-//   (Subscribe/Unsubscribe 는 ProtocolClient 가 fire-and-forget 으로 보낸다 — pending 안 검.)
+// - request_id 없는 명령(Resize 등) → fire-and-forget. 반환 `Ok(None)`(올릴 reply 없음).
+// - 구독 셋(Subscribe/Unsubscribe/UsageSubscribe) → 그 앞에서 차단. 반환 `Ok(None)`(아래 본체 주석).
 //
 // 반환 `Ok(Some(value))` = 프론트로 올릴 control event(reply), `Ok(None)` = 올릴 것 없음.
 #[tauri::command]
 pub async fn forward_daemon_command(
     client: tauri::State<'_, std::sync::Arc<DaemonClient>>,
+    cmd: serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
+    forward_to_daemon(&client, cmd).await
+}
+
+/// [`forward_daemon_command`] 의 본체 — `State` 없이 하네스가 태운다(`daemon_client/tests.rs`).
+pub(crate) async fn forward_to_daemon(
+    client: &DaemonClient,
     cmd: serde_json::Value,
 ) -> Result<Option<serde_json::Value>, String> {
     let agent_cmd: engram_dashboard_protocol::AgentCommand =
@@ -220,14 +228,18 @@ pub async fn forward_daemon_command(
     //   ProtocolClient 는 이미 subscribeOutput 첫 구독에서 Subscribe 를 안 보내지만, resubscribeAll
     //   (재연결 resume)·미래 carrier 변경이 다시 보낼 여지가 있어 Rust 가 무시로 2차 방어한다
     //   (프론트가 안 보내거나 Rust 가 무시 — 어느 쪽이든 데몬 직접 구독 0).
+    // ★사용량 구독(`UsageSubscribe`)도 셸 단독이다(TRD S21 usage-limit-slot §1-7)★: 관심은 셸이 레이아웃에서
+    //   계산하고 연결 태스크만 그 집합을 쓴다. 웹뷰의 한 장이 데몬에 닿으면 셸이 보냈다고 아는 집합(`sent`)과
+    //   데몬 구독이 어긋난다 — request_id 가 없어 막지 않으면 아래 fire-and-forget 으로 그대로 간다.
     if matches!(
         agent_cmd,
         engram_dashboard_protocol::AgentCommand::Subscribe { .. }
             | engram_dashboard_protocol::AgentCommand::Unsubscribe { .. }
+            | engram_dashboard_protocol::AgentCommand::UsageSubscribe { .. }
     ) {
         tracing::debug!(
             cmd = ?agent_cmd,
-            "forward_daemon_command: 프론트 Subscribe/Unsubscribe 차단(데몬 구독 소유=layout 델타, BLOCK-1)"
+            "forward_daemon_command: 프론트 구독 명령 차단(출력 구독=layout 델타 BLOCK-1 · 사용량 구독=셸 관심)"
         );
         return Ok(None);
     }
