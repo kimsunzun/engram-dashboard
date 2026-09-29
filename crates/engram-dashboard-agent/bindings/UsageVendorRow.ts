@@ -10,7 +10,7 @@ export type UsageVendorRow = { backend: AgentBackend,
  */
 account_key: string, plan?: string | null, 
 /**
- * 값이 있는 창만 — 5시간 · 주간 · 모델별 주간 차례.
+ * 벤더가 준 창만 — 5시간 · 주간 · 모델별 주간 차례. 사용률을 모르는 창(`used_pct: null`)도 싣는다.
  */
 windows: Array<UsageWindowRow>, 
 /**
@@ -30,16 +30,15 @@ retry_in_secs?: bigint | null,
  */
 detail_kind?: string | null, 
 /**
- * 상류가 준 수(Codex JSON-RPC `error.code`)의 10진 문자열.
- *
- * ★수가 아니라 문자열인 것은 결정이다★ — 선언 매크로가 칸 속성을 옮기지 못해 `i64` 를 실으면 TS 가
- *   `bigint` 가 된다(ts-rs 기본). wire 의 같은 칸은 `number | null` 이다(protocol `UsageStateDetail.code`).
+ * 상류가 준 수(Codex JSON-RPC `error.code`).
  */
-detail_code?: string | null, 
+detail_code?: bigint | null, 
 /**
  * 상류 원문(비밀 가림 · 공백류 제어는 공백 · 200자) — UI 와 이 행에만 가고 로그에는 안 간다.
  *
- * ★이 타입의 `Debug` 는 매크로가 derive 해 원문을 그대로 싣는다★ — `{:?}` 로 로그에 찍지 말 것. 마감 뒤
- *   결과 로그는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
+ * ★이 타입의 `Debug` 는 원문을 그대로 찍는다 — 행 통째로든 이 칸이든 `{:?}`·tracing `?` 필드로 로그에
+ *   싣지 말 것★. 선언 매크로가 `Debug` 를 늘 derive 하고 타입마다 끌 문이 없어, 가린 `Debug`(agent
+ *   `usage::UpstreamText` · protocol `UsageStateDetail`)처럼 손으로 쓸 수 없다. 로그로 가는 길은 마감 뒤 결과
+ *   로그 하나이고 거기서는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
  */
 upstream?: string | null, };

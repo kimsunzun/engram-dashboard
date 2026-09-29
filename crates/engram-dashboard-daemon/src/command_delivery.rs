@@ -2843,46 +2843,49 @@ pub(crate) mod tests {
     /// 이 시험이 없으면 나는 회귀: 배달이 본문만 기다리고 **자리를 안 보면**, 수거기가 `TIMEOUT` 을 자리에
     /// 넣어도 그것을 꺼내 프레임으로 만들 사람이 없어 **한 장도 안 나간다**. 그런데 수거기 로그는
     /// 「TIMEOUT 으로 답했다」고 적어, 서버 기록만 보면 답한 것처럼 보인다(하지 않은 일을 적는 로그).
-    #[tokio::test]
-    async fn a_local_command_that_outlives_its_deadline_still_answers_the_caller() {
-        let roster = CommandRoster::new();
-        let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
-        let deliveries = deliveries_with(clock.clone());
-        let (local, open, mut entered) = parked_local("agent.new");
+    #[test]
+    fn a_local_command_that_outlives_its_deadline_still_answers_the_caller() {
+        // 마감 뒤 성공 warn 자리를 때리므로 capture 안에서 돈다(`log_capture` 「관측 조건」①).
+        let _logged = capture_loud(async {
+            let roster = CommandRoster::new();
+            let mut caller_inbox = attach_caller(&roster, 2);
+            let clock = ManualClock::new();
+            let deliveries = deliveries_with(clock.clone());
+            let (local, open, mut entered) = parked_local("agent.new");
 
-        let round_trip = tokio::spawn(super::deliver(
-            roster.clone(),
-            deliveries.clone(),
-            Arc::new(Arc::clone(&local)),
-            2,
-            envelope("agent.new", &OwnerToken::new("whatever")),
-            ENTRANCE_SOCKET,
-        ));
-        // 전제: 본문이 **도는 중**이어야 이 시험이 그 상태를 잰다.
-        entered.recv().await.expect("본문이 들어갔다");
+            let round_trip = tokio::spawn(super::deliver(
+                roster.clone(),
+                deliveries.clone(),
+                Arc::new(Arc::clone(&local)),
+                2,
+                envelope("agent.new", &OwnerToken::new("whatever")),
+                ENTRANCE_SOCKET,
+            ));
+            // 전제: 본문이 **도는 중**이어야 이 시험이 그 상태를 잰다.
+            entered.recv().await.expect("본문이 들어갔다");
 
-        clock.advance(Duration::from_secs(11));
-        assert_eq!(deliveries.expire(), 1, "마감이 그 자리를 거둔다");
+            clock.advance(Duration::from_secs(11));
+            assert_eq!(deliveries.expire(), 1, "마감이 그 자리를 거둔다");
 
-        match next_event(&mut caller_inbox).await {
-            AgentEvent::CommandReply { reply } => {
-                let err = reply.outcome.expect_err("마감은 실패 답장이다");
-                assert_eq!(err.code(), ErrorCode::Timeout);
-                assert_eq!(err.retry(), RetryMode::Never);
+            match next_event(&mut caller_inbox).await {
+                AgentEvent::CommandReply { reply } => {
+                    let err = reply.outcome.expect_err("마감은 실패 답장이다");
+                    assert_eq!(err.code(), ErrorCode::Timeout);
+                    assert_eq!(err.retry(), RetryMode::Never);
+                }
+                other => panic!("마감도 답장 한 장으로 나가야: {other:?}"),
             }
-            other => panic!("마감도 답장 한 장으로 나가야: {other:?}"),
-        }
 
-        // 문을 열면 본문이 끝난다 — 적용된 Write 라 자리는 놓이지 않고 **보유**로 넘어간다.
-        open.send(()).expect("문 열기");
-        finished(round_trip).await;
-        assert_eq!(local.runs(), 1);
-        assert_eq!(deliveries.in_flight(), 1, "적용된 번호는 자리가 계속 쥔다");
-        // 보유 창이 지나면 수거기가 놓는다 — 안 놓으면 그 번호가 영영 막힌다.
-        clock.advance(Duration::from_secs(11));
-        assert_eq!(deliveries.expire(), 0);
-        assert_eq!(deliveries.in_flight(), 0, "창이 지나면 자리를 놓는다");
+            // 문을 열면 본문이 끝난다 — 적용된 Write 라 자리는 놓이지 않고 **보유**로 넘어간다.
+            open.send(()).expect("문 열기");
+            finished(round_trip).await;
+            assert_eq!(local.runs(), 1);
+            assert_eq!(deliveries.in_flight(), 1, "적용된 번호는 자리가 계속 쥔다");
+            // 보유 창이 지나면 수거기가 놓는다 — 안 놓으면 그 번호가 영영 막힌다.
+            clock.advance(Duration::from_secs(11));
+            assert_eq!(deliveries.expire(), 0);
+            assert_eq!(deliveries.in_flight(), 0, "창이 지나면 자리를 놓는다");
+        });
     }
 
     /// ★남이 보낸 결말이 **내가 답하는 명령의 답**이 될 수 없다★
@@ -2940,72 +2943,75 @@ pub(crate) mod tests {
     /// 계약은 같은 번호의 재질의를 막지 않으므로([`Pending::token`]) 이 코드가 그것을 견뎌야 한다. 본문은
     /// 취소할 수 없어(blocking 풀) 마감 뒤에도 돌고 있는데, 그때 자리를 갈아엎으면 에이전트가 둘 생기고
     /// 한 번호에 프레임이 둘 나간다. 자리를 붙들어 두는 것이 그 둘을 함께 막는 수단이다.
-    #[tokio::test]
-    async fn a_resend_after_the_deadline_does_not_run_the_same_local_command_twice() {
-        let roster = CommandRoster::new();
-        let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
-        let deliveries = deliveries_with(clock.clone());
-        let (local, open, mut entered) = parked_local("agent.new");
-        let env = envelope("agent.new", &OwnerToken::new("whatever"));
-        let request_id = env.request_id;
-        let args = env.args.clone();
+    #[test]
+    fn a_resend_after_the_deadline_does_not_run_the_same_local_command_twice() {
+        // 마감 뒤 성공 warn 자리를 때리므로 capture 안에서 돈다(`log_capture` 「관측 조건」①).
+        let _logged = capture_loud(async {
+            let roster = CommandRoster::new();
+            let mut caller_inbox = attach_caller(&roster, 2);
+            let clock = ManualClock::new();
+            let deliveries = deliveries_with(clock.clone());
+            let (local, open, mut entered) = parked_local("agent.new");
+            let env = envelope("agent.new", &OwnerToken::new("whatever"));
+            let request_id = env.request_id;
+            let args = env.args.clone();
 
-        let round_trip = tokio::spawn(super::deliver(
-            roster.clone(),
-            deliveries.clone(),
-            Arc::new(Arc::clone(&local)),
-            2,
-            env,
-            ENTRANCE_SOCKET,
-        ));
-        entered.recv().await.expect("본문이 들어갔다");
-        clock.advance(Duration::from_secs(11));
-        assert_eq!(deliveries.expire(), 1);
-        let timed_out = next_event(&mut caller_inbox).await;
-        assert!(
-            matches!(timed_out, AgentEvent::CommandReply { .. }),
-            "전제: 마감 답장이 먼저 나갔다"
-        );
+            let round_trip = tokio::spawn(super::deliver(
+                roster.clone(),
+                deliveries.clone(),
+                Arc::new(Arc::clone(&local)),
+                2,
+                env,
+                ENTRANCE_SOCKET,
+            ));
+            entered.recv().await.expect("본문이 들어갔다");
+            clock.advance(Duration::from_secs(11));
+            assert_eq!(deliveries.expire(), 1);
+            let timed_out = next_event(&mut caller_inbox).await;
+            assert!(
+                matches!(timed_out, AgentEvent::CommandReply { .. }),
+                "전제: 마감 답장이 먼저 나갔다"
+            );
 
-        // 규약대로 같은 번호로 재질의 — 본문은 아직 돌고 있다.
-        super::deliver(
-            roster.clone(),
-            deliveries.clone(),
-            Arc::new(Arc::clone(&local)),
-            2,
-            CommandEnvelope {
-                name: "agent.new".to_string(),
-                request_id,
-                owner: OwnerToken::new("whatever"),
-                proto_ver: 7,
-                args,
-            },
-            ENTRANCE_SOCKET,
-        )
-        .await;
+            // 규약대로 같은 번호로 재질의 — 본문은 아직 돌고 있다.
+            super::deliver(
+                roster.clone(),
+                deliveries.clone(),
+                Arc::new(Arc::clone(&local)),
+                2,
+                CommandEnvelope {
+                    name: "agent.new".to_string(),
+                    request_id,
+                    owner: OwnerToken::new("whatever"),
+                    proto_ver: 7,
+                    args,
+                },
+                ENTRANCE_SOCKET,
+            )
+            .await;
 
-        match next_event(&mut caller_inbox).await {
-            AgentEvent::CommandReply { reply } => {
-                let err = reply.outcome.expect_err("다시 돌리지 않는다");
-                assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
-                assert!(
-                    err.message().contains("still running"),
-                    "무슨 일이 벌어지는 중인지 말해야: {}",
-                    err.message()
-                );
+            match next_event(&mut caller_inbox).await {
+                AgentEvent::CommandReply { reply } => {
+                    let err = reply.outcome.expect_err("다시 돌리지 않는다");
+                    assert_eq!(err.code(), ErrorCode::OutcomeUnknown);
+                    assert!(
+                        err.message().contains("still running"),
+                        "무슨 일이 벌어지는 중인지 말해야: {}",
+                        err.message()
+                    );
+                }
+                other => panic!("재질의도 답을 받아야: {other:?}"),
             }
-            other => panic!("재질의도 답을 받아야: {other:?}"),
-        }
-        assert_eq!(
-            local.runs(),
-            1,
-            "재질의가 본문을 한 번 더 돌리면 에이전트가 둘 생긴다"
-        );
+            assert_eq!(
+                local.runs(),
+                1,
+                "재질의가 본문을 한 번 더 돌리면 에이전트가 둘 생긴다"
+            );
 
-        open.send(()).expect("문 열기");
-        finished(round_trip).await;
-        assert_eq!(local.runs(), 1);
+            open.send(()).expect("문 열기");
+            finished(round_trip).await;
+            assert_eq!(local.runs(), 1);
+        });
     }
 
     /// ★본문이 끝난 **뒤에** 온 재질의도 다시 돌리지 않는다★ — 자리가 그 번호를 계속 붙들기 때문이다.
@@ -3014,74 +3020,77 @@ pub(crate) mod tests {
     /// 빈 표를 보고 **에이전트를 하나 더 만든다**(지우는 동사가 없다 — ADR-0122).
     /// ★번호를 붙드는 곳이 **자리 하나뿐**이라는 것이 이 시험의 다른 절반이다★ — 별도 기억표를 두면 실행
     /// 여부·효과와 무관하게 번호가 남아, 아래 이웃 시험들이 재는 갈래가 전부 어긋난다.
-    #[tokio::test]
-    async fn a_resend_after_the_body_finished_is_refused_by_the_retained_seat() {
-        let roster = CommandRoster::new();
-        let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
-        let deliveries = deliveries_with(clock.clone());
-        let (local, open, mut entered) = parked_local("agent.new");
-        let env = envelope("agent.new", &OwnerToken::new("whatever"));
-        let request_id = env.request_id;
-        let args = env.args.clone();
-        let again = || CommandEnvelope {
-            name: "agent.new".to_string(),
-            request_id,
-            owner: OwnerToken::new("whatever"),
-            proto_ver: 7,
-            args: args.clone(),
-        };
+    #[test]
+    fn a_resend_after_the_body_finished_is_refused_by_the_retained_seat() {
+        // 마감 뒤 성공 warn 자리를 때리므로 capture 안에서 돈다(`log_capture` 「관측 조건」①).
+        let _logged = capture_loud(async {
+            let roster = CommandRoster::new();
+            let mut caller_inbox = attach_caller(&roster, 2);
+            let clock = ManualClock::new();
+            let deliveries = deliveries_with(clock.clone());
+            let (local, open, mut entered) = parked_local("agent.new");
+            let env = envelope("agent.new", &OwnerToken::new("whatever"));
+            let request_id = env.request_id;
+            let args = env.args.clone();
+            let again = || CommandEnvelope {
+                name: "agent.new".to_string(),
+                request_id,
+                owner: OwnerToken::new("whatever"),
+                proto_ver: 7,
+                args: args.clone(),
+            };
 
-        let round_trip = tokio::spawn(super::deliver(
-            roster.clone(),
-            deliveries.clone(),
-            Arc::new(Arc::clone(&local)),
-            2,
-            env,
-            ENTRANCE_SOCKET,
-        ));
-        entered.recv().await.expect("본문이 들어갔다");
-        clock.advance(Duration::from_secs(11));
-        assert_eq!(deliveries.expire(), 1);
-        let _timed_out = next_event(&mut caller_inbox).await;
+            let round_trip = tokio::spawn(super::deliver(
+                roster.clone(),
+                deliveries.clone(),
+                Arc::new(Arc::clone(&local)),
+                2,
+                env,
+                ENTRANCE_SOCKET,
+            ));
+            entered.recv().await.expect("본문이 들어갔다");
+            clock.advance(Duration::from_secs(11));
+            assert_eq!(deliveries.expire(), 1);
+            let _timed_out = next_event(&mut caller_inbox).await;
 
-        // 본문이 끝난다 — 자리는 **놓이지 않고** 보유로 넘어간다.
-        open.send(()).expect("문 열기");
-        finished(round_trip).await;
-        assert_eq!(
-            deliveries.in_flight(),
-            1,
-            "전제: 적용된 번호는 자리가 계속 쥔다"
-        );
+            // 본문이 끝난다 — 자리는 **놓이지 않고** 보유로 넘어간다.
+            open.send(()).expect("문 열기");
+            finished(round_trip).await;
+            assert_eq!(
+                deliveries.in_flight(),
+                1,
+                "전제: 적용된 번호는 자리가 계속 쥔다"
+            );
 
-        super::deliver(
-            roster.clone(),
-            deliveries.clone(),
-            Arc::new(Arc::clone(&local)),
-            2,
-            again(),
-            ENTRANCE_SOCKET,
-        )
-        .await;
+            super::deliver(
+                roster.clone(),
+                deliveries.clone(),
+                Arc::new(Arc::clone(&local)),
+                2,
+                again(),
+                ENTRANCE_SOCKET,
+            )
+            .await;
 
-        match next_event(&mut caller_inbox).await {
-            AgentEvent::CommandReply { reply } => {
-                let err = reply.outcome.expect_err("다시 돌리지 않는다");
-                assert_eq!(err.code(), ErrorCode::AlreadyApplied);
-                assert_eq!(err.retry(), RetryMode::Never);
+            match next_event(&mut caller_inbox).await {
+                AgentEvent::CommandReply { reply } => {
+                    let err = reply.outcome.expect_err("다시 돌리지 않는다");
+                    assert_eq!(err.code(), ErrorCode::AlreadyApplied);
+                    assert_eq!(err.retry(), RetryMode::Never);
+                }
+                other => panic!("재질의도 답을 받아야: {other:?}"),
             }
-            other => panic!("재질의도 답을 받아야: {other:?}"),
-        }
-        assert_eq!(local.runs(), 1, "두 번째 실행이 없어야 한다");
+            assert_eq!(local.runs(), 1, "두 번째 실행이 없어야 한다");
 
-        // ★보유는 유계다 — 창이 지나면 수거기가 자리를 놓는다★(알고 남긴 잔여: 그 뒤의 재질의는 새 요청이다).
-        clock.advance(Duration::from_secs(11));
-        assert_eq!(
-            deliveries.expire(),
-            0,
-            "보유 만료는 「답 못 받은 왕복」이 아니다"
-        );
-        assert_eq!(deliveries.in_flight(), 0, "창이 지나면 자리를 놓는다");
+            // ★보유는 유계다 — 창이 지나면 수거기가 자리를 놓는다★(알고 남긴 잔여: 그 뒤의 재질의는 새 요청이다).
+            clock.advance(Duration::from_secs(11));
+            assert_eq!(
+                deliveries.expire(),
+                0,
+                "보유 만료는 「답 못 받은 왕복」이 아니다"
+            );
+            assert_eq!(deliveries.in_flight(), 0, "창이 지나면 자리를 놓는다");
+        });
     }
 
     /// ★끊김은 보유를 **끝내지 않는다** — 오히려 보유가 가장 필요한 사건이다★
@@ -5223,7 +5232,7 @@ pub(crate) mod tests {
             next_attempt_in_secs: Some(70),
             retry_in_secs: None,
             detail_kind: Some("rpc_error".to_owned()),
-            detail_code: Some("-32603".to_owned()),
+            detail_code: Some(-32_603),
             upstream: Some(UPSTREAM_TEXT.to_owned()),
         })
         .expect("행 직렬화")
@@ -5268,7 +5277,7 @@ pub(crate) mod tests {
         for kept in [
             "\"state\":\"Failed\"",
             "\"detail_kind\":\"rpc_error\"",
-            "\"detail_code\":\"-32603\"",
+            "\"detail_code\":-32603",
             "\"left_pct\":60",
         ] {
             assert!(line.contains(kept), "{kept} 는 남아야 한다: {line}");

@@ -283,7 +283,7 @@ declare_commands! {
     /// `Cached`. `state` = `Ready` | `NotInstalled` | `NeedsLogin` | `Unavailable`(이 계정엔 한도 정보가 없다 — 창을
     /// 싣지 않는다) | `Failed`(`next_attempt_in_secs` = 다음 자동 조회까지) | `Rejected`(상류가 거절했다 —
     /// `retry_in_secs` 가 지나기 전엔 `usage.refresh` 도 조회하지 않는다). 실패해도 창은 마지막으로 알던 값이다.
-    /// 비정상 상태의 원인 = `detail_kind`(분류 낱말) · `detail_code`(상류가 준 수, 10진 문자열) · `upstream`(상류
+    /// 비정상 상태의 원인 = `detail_kind`(분류 낱말) · `detail_code`(상류가 준 수) · `upstream`(상류
     /// 원문 — 비밀 가림 · 200자). 창의 `left_pct` = 남은 양(`used_pct` 는 쓴 양)이고 `null` 은 모른다는 뜻이다(0 이
     /// 아니다). 시간 칸은 답한 순간 기준 상대 초이고 `resets_at` 만 epoch 초다. 이 데몬이 칸을 안 드는 백엔드는
     /// NOT_FOUND.
@@ -297,7 +297,7 @@ declare_commands! {
         /// 같은 백엔드 안의 계정 — 지금은 늘 `"default"`(데몬의 기본 로그인).
         account_key: String,
         plan: Option<String>,
-        /// 값이 있는 창만 — 5시간 · 주간 · 모델별 주간 차례.
+        /// 벤더가 준 창만 — 5시간 · 주간 · 모델별 주간 차례. 사용률을 모르는 창(`used_pct: null`)도 싣는다.
         windows: Vec<UsageWindowRow>,
         /// 조회가 아직 진행 중이다 — 이 행의 값은 그 조회 전의 것이다.
         in_flight: bool,
@@ -309,15 +309,14 @@ declare_commands! {
         retry_in_secs: Option<u64>,
         /// 비정상 상태의 분류 낱말(예 `timeout`·`rpc_error`) — 번역하지 않는 문자열이다. `null` = 원인을 모른다.
         detail_kind: Option<String>,
-        /// 상류가 준 수(Codex JSON-RPC `error.code`)의 10진 문자열.
-        ///
-        /// ★수가 아니라 문자열인 것은 결정이다★ — 선언 매크로가 칸 속성을 옮기지 못해 `i64` 를 실으면 TS 가
-        ///   `bigint` 가 된다(ts-rs 기본). wire 의 같은 칸은 `number | null` 이다(protocol `UsageStateDetail.code`).
-        detail_code: Option<String>,
+        /// 상류가 준 수(Codex JSON-RPC `error.code`).
+        detail_code: Option<i64>,
         /// 상류 원문(비밀 가림 · 공백류 제어는 공백 · 200자) — UI 와 이 행에만 가고 로그에는 안 간다.
         ///
-        /// ★이 타입의 `Debug` 는 매크로가 derive 해 원문을 그대로 싣는다★ — `{:?}` 로 로그에 찍지 말 것. 마감 뒤
-        ///   결과 로그는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
+        /// ★이 타입의 `Debug` 는 원문을 그대로 찍는다 — 행 통째로든 이 칸이든 `{:?}`·tracing `?` 필드로 로그에
+        ///   싣지 말 것★. 선언 매크로가 `Debug` 를 늘 derive 하고 타입마다 끌 문이 없어, 가린 `Debug`(agent
+        ///   `usage::UpstreamText` · protocol `UsageStateDetail`)처럼 손으로 쓸 수 없다. 로그로 가는 길은 마감 뒤 결과
+        ///   로그 하나이고 거기서는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
         upstream: Option<String>,
     } errors [NOT_FOUND];
 
@@ -344,7 +343,8 @@ declare_commands! {
         next_attempt_in_secs: Option<u64>,
         retry_in_secs: Option<u64>,
         detail_kind: Option<String>,
-        detail_code: Option<String>,
+        detail_code: Option<i64>,
+        /// 상류 원문 — ★`Debug` 가 원문을 찍는다, `{:?}` 로 로그에 싣지 말 것★(`UsageVendorRow.upstream` 의 doc).
         upstream: Option<String>,
     } errors [NOT_FOUND];
 }
@@ -3505,7 +3505,7 @@ mod tests {
             next_attempt_in_secs: Some(70),
             retry_in_secs: None,
             detail_kind: Some("rpc_error".to_owned()),
-            detail_code: Some("-32603".to_owned()),
+            detail_code: Some(-32_603),
             upstream: Some("upstream text".to_owned()),
         }
     }
@@ -3526,7 +3526,7 @@ mod tests {
         assert_eq!(got["served"], "Fresh");
         assert_eq!(got["windows"][0]["window"], "FiveHour");
         assert_eq!(got["windows"][0]["left_pct"], 60);
-        assert_eq!(got["detail_code"], "-32603");
+        assert_eq!(got["detail_code"], -32_603);
         assert_eq!(refreshed, got, "두 동사의 답은 같은 행 모양이다");
         assert_eq!(
             *usage.calls.lock().unwrap(),
@@ -3603,8 +3603,8 @@ mod tests {
             json!(["Fresh", "Cached"])
         );
         assert_eq!(
-            ok["properties"]["detail_code"]["anyOf"][0]["type"], "string",
-            "상류 수는 10진 문자열로 싣는다(i64 → TS bigint 회피)"
+            ok["properties"]["detail_code"]["anyOf"][0]["type"], "integer",
+            "상류 수는 JSON 수로 싣는다"
         );
     }
 }

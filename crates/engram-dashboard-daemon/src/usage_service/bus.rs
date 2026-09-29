@@ -14,8 +14,18 @@ use engram_dashboard_agent::commands::{
 };
 use engram_dashboard_protocol::{UsageStateDetail, UsageVendorState, UsageWindow};
 
+use std::time::Duration;
+
 use super::book::RequestKind;
-use super::{UsageAnswer, UsageServed, UsageService};
+use super::{UsageAnswer, UsageServed, UsageService, REPLY_WAIT_MAX};
+use crate::command_delivery::CommandDeliveries;
+
+// 기다리는 `usage.*` 는 버스 수거의 TIMEOUT 보다 먼저 답해야 한다 — 대기 상한에 여유 1초를 더해도 명령 마감 안.
+const _: () = assert!(
+    REPLY_WAIT_MAX.as_millis() + Duration::from_secs(1).as_millis()
+        < CommandDeliveries::DEFAULT_DEADLINE.as_millis(),
+    "사용량 답 대기 상한 + 1초가 버스 명령 마감을 넘는다 — 기다리는 usage.* 가 TIMEOUT 으로 끊긴다"
+);
 
 impl UsageCommandHost for UsageService {
     fn get(&self, backend: &AgentBackend) -> Option<UsageVendorRow> {
@@ -29,6 +39,10 @@ impl UsageCommandHost for UsageService {
 
 impl UsageService {
     /// `None` = 그 낱말의 조회기가 없거나 이 서비스가 그 칸을 안 든다(조회기 0개 조립).
+    ///
+    /// ★대기 상한([`REPLY_WAIT_MAX`])은 핸들러에 든 순간부터, 버스 마감은 자리가 열린 순간부터 잰다★ — 그 사이의
+    ///   blocking 풀 지연은 두 상수의 차(약 2초)가 받아 준다. 자리 마감에서 그 지연을 따로 빼 셈하지 않는다 — 풀이
+    ///   그보다 밀리면 답 대신 TIMEOUT 이 나가는 것은 알고 남긴 잔여다.
     fn bus_request(&self, backend: &AgentBackend, kind: RequestKind) -> Option<UsageVendorRow> {
         let vendor = usage_vendor_of(backend)?;
         let answer = self.request_blocking(vendor, kind)?;
@@ -84,7 +98,7 @@ pub(crate) fn vendor_row(backend: AgentBackend, answer: UsageAnswer) -> UsageVen
             kind,
             code,
             upstream,
-        }) => (Some(kind), code.map(|code| code.to_string()), upstream),
+        }) => (Some(kind), code, upstream),
         None => (None, None, None),
     };
     UsageVendorRow {
@@ -163,6 +177,40 @@ mod tests {
         }
     }
 
+    /// ★도움말의 수가 상수와 같다★ — 호출자(LLM)가 읽는 것은 요약에 적힌 수뿐이라, 상수만 바꾸면 광고가 조용히
+    /// 거짓이 된다. 요약은 agent 선언이고 상수는 이 crate 것이라 컴파일러가 둘을 잇지 않는다.
+    #[test]
+    fn the_usage_help_quotes_the_wait_and_spacing_constants() {
+        use engram_dashboard_agent::commands::{UsageGetArgs, UsageRefreshArgs};
+        use engram_dashboard_command::spec_item_json;
+
+        use super::super::book::REFRESH_MIN_SPACING;
+
+        for whole in [REPLY_WAIT_MAX, REFRESH_MIN_SPACING] {
+            assert_eq!(
+                whole.subsec_nanos(),
+                0,
+                "요약은 초 단위로 적는다: {whole:?}"
+            );
+        }
+        let wait = format!("최대 {}초", REPLY_WAIT_MAX.as_secs());
+        let spacing = format!("{}초 안", REFRESH_MIN_SPACING.as_secs());
+        let get = spec_item_json(&UsageGetArgs::SPEC);
+        let refresh = spec_item_json(&UsageRefreshArgs::SPEC);
+        assert!(
+            get.contains(&wait),
+            "`usage.get` 도움말에 {wait} 가 없다: {get}"
+        );
+        assert!(
+            refresh.contains(&wait),
+            "`usage.refresh` 도움말에 {wait} 가 없다: {refresh}"
+        );
+        assert!(
+            refresh.contains(&spacing),
+            "`usage.refresh` 도움말에 {spacing} 이 없다: {refresh}"
+        );
+    }
+
     /// ★내림이다★ — 반올림으로 바꾸면 첫 셋 중 둘이 깨진다. 범위 밖 사용률은 0·100 에 눌린다.
     #[test]
     fn left_pct_rounds_down_and_clamps() {
@@ -209,8 +257,7 @@ mod tests {
         );
     }
 
-    /// 상태 여섯이 단어 여섯으로 1:1 이고, 상태의 칸은 그 상태일 때만 실린다. detail 은 세 칸으로 펴진다(수는 10진
-    /// 문자열 — 음수도).
+    /// 상태 여섯이 단어 여섯으로 1:1 이고, 상태의 칸은 그 상태일 때만 실린다. detail 은 세 칸으로 펴진다.
     #[test]
     fn every_wire_state_maps_to_its_word_and_carries_only_its_own_fields() {
         let detail = || {
@@ -276,7 +323,7 @@ mod tests {
                 assert_eq!(row.detail_kind, None);
             } else {
                 assert_eq!(row.detail_kind.as_deref(), Some("rpc_error"), "{word:?}");
-                assert_eq!(row.detail_code.as_deref(), Some("-32603"), "{word:?}");
+                assert_eq!(row.detail_code, Some(-32_603), "{word:?}");
                 assert_eq!(row.upstream.as_deref(), Some("internal error"), "{word:?}");
             }
         }
