@@ -37,6 +37,9 @@ const h = vi.hoisted(() => {
     requestReplayCalls: 0,
     // ★FIX-5★: request_replay 가 돌려줄 gen 을 명시 지정(null 이면 카운터). 안전 정수 초과 케이스 재현용.
     requestReplayReply: null as number | string | null,
+    // 이 창의 Tauri label(`getCurrentWindow().label`) — 사용량 방송의 `labels` 거름이 본다.
+    windowLabel: 'main',
+    usageSnapshotReply: { socket_epoch: 0, snapshots: [] } as unknown,
   }
   class FakeChannel {
     onmessage: ((m: ArrayBuffer) => void) | null = null
@@ -103,6 +106,7 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
     if (h.state.forwardShouldReject) throw new Error('연결 끊김')
     return h.state.forwardReply
   }
+  if (cmd === 'get_usage_snapshot') return h.state.usageSnapshotReply
   if (cmd === 'request_replay') {
     // ADR-0046: src-tauri single-flight 가 gen(u64)을 부여 반환. mock 은 단조 카운터로 흉내.
     h.state.requestReplayCalls += 1
@@ -116,6 +120,12 @@ vi.mock('@tauri-apps/api/core', () => ({
   Channel: h.FakeChannel,
 }))
 
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({ label: h.state.windowLabel }),
+}))
+
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import { ProtocolClient } from './protocolClient'
 import { TauriTransport } from './tauriTransport'
 import type { InboundMessage } from './transport'
 
@@ -183,6 +193,8 @@ beforeEach(() => {
   h.state.subscribeOutputResolvers = []
   h.state.requestReplayCalls = 0
   h.state.requestReplayReply = null
+  h.state.windowLabel = 'main'
+  h.state.usageSnapshotReply = { socket_epoch: 0, snapshots: [] }
   invokeMock.mockClear()
 })
 afterEach(() => {
@@ -722,5 +734,75 @@ describe('TauriTransport 리스너 재등록(MED-1)', () => {
     await t.start()
     expect(h.state.listenCalls).toBe(afterFirst)
     expect(h.listeners.get('agent-list-updated')!.size).toBe(1)
+  })
+})
+
+// ── 사용량(TRD S21 usage-limit-slot §1-8) — 방송 수신(labels 거름) · 셸 캐시 pull ────────────────
+describe('TauriTransport 사용량', () => {
+  const snap = (vendor: 'claude' | 'codex', revision: number) =>
+    ({
+      vendor,
+      account_key: 'default',
+      five_hour: { used_pct: 40, resets_at: 1_900_000_000, age_secs: 3, expired: false },
+      weekly: null,
+      model_scoped: [],
+      plan: 'max',
+      in_flight: false,
+      state: { kind: 'Ready' },
+      revision,
+    }) as UsageLimitSnapshot
+
+  it('자기 label 이 든 방송만 control UsageLimitsUpdated{snapshot, socketEpoch} 로 올린다', async () => {
+    h.state.windowLabel = 'popup-3'
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.init()
+    emit('usage-limits-updated', { labels: ['main'], socket_epoch: 2, snapshot: snap('claude', 1) })
+    expect(got).toEqual([])
+    emit('usage-limits-updated', { labels: ['main', 'popup-3'], socket_epoch: 2, snapshot: snap('codex', 4) })
+    expect(got).toEqual([
+      { kind: 'control', event: { UsageLimitsUpdated: { snapshot: snap('codex', 4), socketEpoch: 2 } } },
+    ])
+  })
+
+  it('실 ProtocolClient 를 거쳐 onUsageLimitsUpdated 까지 — 남의 창 방송은 안 닿는다', async () => {
+    const t = new TauriTransport()
+    const c = new ProtocolClient(t)
+    const seen: Array<[number, number]> = []
+    c.onUsageLimitsUpdated((s, e) => seen.push([s.revision, e]))
+    await t.init()
+    emit('usage-limits-updated', { labels: ['agent-tree'], socket_epoch: 9, snapshot: snap('claude', 5) })
+    emit('usage-limits-updated', { labels: ['main'], socket_epoch: 9, snapshot: snap('claude', 6) })
+    expect(seen).toEqual([[6, 9]])
+  })
+
+  it('getUsageSnapshot → invoke(get_usage_snapshot) 의 snake_case 를 camelCase 로', async () => {
+    h.state.usageSnapshotReply = { socket_epoch: 11, snapshots: [snap('claude', 2), snap('codex', 8)] }
+    const t = new TauriTransport()
+    await expect(t.getUsageSnapshot()).resolves.toEqual({
+      socketEpoch: 11,
+      snapshots: [snap('claude', 2), snap('codex', 8)],
+    })
+    expect(invokeMock).toHaveBeenCalledWith('get_usage_snapshot', undefined)
+  })
+
+  it('⟳ = forward_daemon_command 의 RefreshUsageLimits 한 장 · 답 Ack 로 풀린다 — 사용량 경로의 셸 커맨드는 그것과 get_usage_snapshot 뿐(관심 보고 없음)', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('req-u1-0000-0000-0000-000000000000')
+    const t = new TauriTransport()
+    const c = new ProtocolClient(t)
+    await t.start()
+    await flush() // connected 전이가 시작한 출력 Channel 등록(subscribe_output)까지 끝낸다.
+    invokeMock.mockClear()
+    h.state.forwardReply = { Ack: { request_id: 'req-u1-0000-0000-0000-000000000000' } }
+    await expect(c.refreshUsageLimits('claude')).resolves.toBeUndefined()
+    await c.getUsageSnapshot()
+    expect(invokeMock.mock.calls).toEqual([
+      [
+        'forward_daemon_command',
+        { cmd: { RefreshUsageLimits: { vendor: 'claude', request_id: 'req-u1-0000-0000-0000-000000000000' } } },
+      ],
+      ['get_usage_snapshot', undefined],
+    ])
   })
 })

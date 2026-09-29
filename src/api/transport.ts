@@ -6,7 +6,7 @@
 // (ADR-0046 amend: 재부착 계기는 소켓이 아니라 권위 명부다), 상태를 흔들면 슬롯이 그때마다 부재 표시로
 // 깜빡인다.
 
-import type { ConnectionState } from './agentClient'
+import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 
 /**
  * carrier 가 ProtocolClient 로 올리는 **정규화된 수신 메시지**. carrier 별 인코딩(WS binary frame /
@@ -76,4 +76,10 @@ export interface Transport {
    * 뒤에 같은 gen 의 늦은 성공 마커가 오는 failed→성공 쌍은 정상 경로다.
    */
   requestReplay(agentId: string): Promise<bigint>
+
+  /**
+   * 셸 사용량 캐시 pull(TRD S21 usage-limit-slot §1-8) — 셸 커맨드라 명령 경로(ensureReady)를 타지 않고 데몬도
+   * 거치지 않는다. 계약은 [`AgentClient.getUsageSnapshot`] 그대로다(셸이 없는 carrier = `{socketEpoch: 0, snapshots: []}`).
+   */
+  getUsageSnapshot(): Promise<UsageSnapshotPull>
 }

@@ -5,6 +5,7 @@
 import { agentClient } from '../api/clientFactory'
 import { list as cmdList, run as cmdRun } from '../commands/registry'
 import { useAgentStore } from './agentStore'
+import { useUsageStore } from './usageStore'
 import { initMainWindowFromBackend, subscribeViewEvents } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
@@ -177,6 +178,16 @@ export function initEventBus(): Promise<void> {
           useAgentStore.getState().setPresets(presets)
         }),
       )
+
+      // 사용량(TRD S21 usage-limit-slot §1-8): ★방송 잇기 먼저, pull 나중★ — 역전은 스토어의 revision 이 가른다.
+      //   이 pull 을 빼지 말 것: 이 함수는 부팅 때 데몬 ensure 뒤에 돌아(App.tsx) 사용량 슬롯이 여기보다 먼저
+      //   마운트될 수 있고, 그 슬롯의 마운트 pull 은 잇기 전에 나가 그 사이 방송을 놓친다 — 이 pull 이 덮는다.
+      unlistenFns.push(
+        agentClient.onUsageLimitsUpdated((snapshot, socketEpoch) => {
+          useUsageStore.getState().merge(snapshot, socketEpoch)
+        }),
+      )
+      void useUsageStore.getState().pull()
 
       // 재연결 시 목록/프로필 재동기화(Q2) + 출력 뷰 재부착의 계기(위 resyncAfterReconnect 주석).
       // 에이전트 트리·프로필 목록은 이 트리거가 없으면 stale 이 된다(끊긴 동안의

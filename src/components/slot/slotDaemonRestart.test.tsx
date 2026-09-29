@@ -108,6 +108,9 @@ class FakeTransport implements Transport {
     this.replayCalls.push(gen)
     return Promise.resolve(gen)
   }
+  getUsageSnapshot(): Promise<{ socketEpoch: number; snapshots: [] }> {
+    return Promise.resolve({ socketEpoch: 0, snapshots: [] })
+  }
 
   // ── 구동 ──
   setState(s: ConnectionState): void {

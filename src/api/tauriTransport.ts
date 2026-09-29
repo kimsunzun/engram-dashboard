@@ -26,10 +26,25 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
-import type { ConnectionState } from './agentClient'
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import { decodeOutputFrame, decodeReplayMarker } from './wsFrame'
+
+// 셸이 웹뷰에 주는 사용량 payload 둘의 칸 이름 — ts 바인딩을 굽지 않아(원소가 protocol 타입) 손으로 맞춘다. 정본 =
+//   `src-tauri/src/commands/usage.rs` `UsageSnapshotReply` · `src-tauri/src/daemon_client/events.rs`
+//   `UsageLimitsUpdatedPayload`. 한쪽 칸 이름이 바뀌면 여기서 조용히 `undefined` 가 된다.
+interface ShellUsageSnapshotReply {
+  socket_epoch: number
+  snapshots: UsageLimitSnapshot[]
+}
+interface ShellUsageLimitsUpdated {
+  labels: string[]
+  socket_epoch: number
+  snapshot: UsageLimitSnapshot
+}
 
 export class TauriTransport implements Transport {
   private _state: ConnectionState = 'down'
@@ -245,6 +260,20 @@ export class TauriTransport implements Transport {
           this.messageCb?.({
             kind: 'control',
             event: { PresetListUpdated: { presets: e.payload } },
+          })
+        }),
+      )
+      // 셸은 전 웹뷰에 emit 하고 대상은 payload 의 `labels`(사용량 슬롯이 있는 창)로 고른다 — 자기 label 이
+      //   안 들면 버린다. ★label 은 Tauri 가 준다★(해시 라우트에서 유추하면 트리 창이 `main` 으로 읽힌다).
+      //   `socketEpoch` 는 셸이 곁들인 칸이라 데몬 wire(`subscribed` 는 셸이 대조에만 쓰고 싣지 않는다)와
+      //   섞이지 않게 camelCase 다.
+      registered.push(
+        await listen<ShellUsageLimitsUpdated>('usage-limits-updated', (e) => {
+          const { labels, socket_epoch, snapshot } = e.payload
+          if (!labels.includes(getCurrentWindow().label)) return
+          this.messageCb?.({
+            kind: 'control',
+            event: { UsageLimitsUpdated: { snapshot, socketEpoch: socket_epoch } },
           })
         }),
       )
@@ -509,6 +538,11 @@ export class TauriTransport implements Transport {
       console.warn(`[TauriTransport] request_replay gen 이 안전 정수 범위 초과(${gen}) — 정밀도 소실 가능(실무 도달 불가)`)
     }
     return BigInt(gen)
+  }
+
+  async getUsageSnapshot(): Promise<UsageSnapshotPull> {
+    const r = await invoke<ShellUsageSnapshotReply>('get_usage_snapshot')
+    return { socketEpoch: r.socket_epoch, snapshots: r.snapshots }
   }
 
   // ★세대 가드(Fix-C ①)★: generation++ 으로 in-flight doConnect 를 stale 화한다 — 뒤늦게 resolve 된
