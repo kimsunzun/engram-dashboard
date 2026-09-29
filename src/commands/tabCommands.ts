@@ -6,6 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import type { LayoutNode, SlotContent } from '../api/layoutTypes'
 import { t } from '../i18n'
 import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
@@ -146,6 +147,30 @@ function optionalUuidArg(v: unknown, name: string): string | null {
 //   접힌다(사용자 결정 2026-09-23 — 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되던 어긋남 제거).
 const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage'] as const
 
+const USAGE_SHOW_FIELDS = ['show_claude', 'show_codex'] as const
+
+function findSlotContent(node: LayoutNode, slotId: string): SlotContent | null {
+  if (node.type === 'slot') return node.id === slotId ? node.content : null
+  return findSlotContent(node.a, slotId) ?? findSlotContent(node.b, slotId)
+}
+
+/**
+ * 사용량 슬롯의 빠진 show 칸 = 그 슬롯이 이미 사용량이면 지금 값(TRD §3 #20). 버스의 `layout.setSlotContent` 는 셸이 락
+ * 안에서 같은 병합을 하므로, 이 길도 같게 두어야 두 LLM 길이 같은 결과를 낸다. 이미 사용량이 아니거나 그 뷰를 아직
+ * 모르면 빠진 채로 넘긴다 — 셸 역직렬화가 빠진 칸을 true 로 읽는다(`SlotContent::Usage` serde 기본값).
+ *
+ * ★기준은 웹뷰가 받아 둔 레이아웃이다★ — 셸의 권위 값과 그사이 어긋날 수 있다(방송이 닿기 전의 연속 호출). 락 안의
+ *   원자 병합은 버스 쪽에만 있다.
+ */
+function mergeUsageShows(viewId: string, slotId: string, content: Record<string, unknown>): Record<string, unknown> {
+  const layout = useViewStore.getState().layouts[viewId]?.layout
+  const current = layout ? findSlotContent(layout, slotId) : null
+  if (current?.type !== 'usage') return content
+  const merged = { ...content }
+  for (const field of USAGE_SHOW_FIELDS) if (merged[field] === undefined) merged[field] = current[field]
+  return merged
+}
+
 /**
  * ★SlotContent variant 형태 검증(FIX LOW)★: 태그(type)만 화이트리스트로 걸면 `{type:'agent'}` 처럼
  * agent_id 가 빠진 malformed 값이 레지스트리를 통과해 Rust 역직렬화에서야 늦게 터진다(오배치 진단 지연).
@@ -168,9 +193,8 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
       // 추가 필드 없는 unit variant — tag 만 맞으면 통과(여분 필드는 백엔드가 무시).
       break
     case 'usage':
-      // ★빠진 칸은 그대로 넘긴다★ — 셸 역직렬화가 빠진 칸을 true 로 읽는다(`SlotContent::Usage` serde 기본값).
-      //   지금 값을 지키는 병합은 이 길에 없다 — 버스의 `layout.setSlotContent` 가 그 길이다(TRD §3 #20).
-      for (const field of ['show_claude', 'show_codex'] as const) {
+      // 빠진 칸은 여기서 채우지 않는다 — 호출부가 그 슬롯의 지금 값으로 채운다(`mergeUsageShows`).
+      for (const field of USAGE_SHOW_FIELDS) {
         if (content[field] !== undefined && typeof content[field] !== 'boolean') {
           throw new Error(
             `[layout.setSlotContent] usage variant 의 ${field} 는 boolean 이어야 함(받음: ${JSON.stringify(content)})`,
@@ -202,9 +226,8 @@ register({
     // 접은 태그를 도로 얹는다 — 여분 필드(agent_id 등)는 호출자가 준 그대로 통과시키고 태그만 갈아낀다.
     const content = { ...(raw as Record<string, unknown>), type }
     validateSlotContent(content)
-    return useViewStore
-      .getState()
-      .setSlotContent(viewId, slotId, content as import('../api/layoutTypes').SlotContent)
+    const sent = type === 'usage' ? mergeUsageShows(viewId, slotId, content) : content
+    return useViewStore.getState().setSlotContent(viewId, slotId, sent as SlotContent)
   },
 })
 

@@ -24,7 +24,8 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: opener.openUrl }))
 import usageLinksSource from '../../../src-tauri/capabilities/usage-links.json?raw'
 import { useUsageStore } from '../../store/usageStore'
 import UsageSlot, { USAGE_PAGE_URL } from './UsageSlot'
-import { formatAge, formatClock, formatResetAt, statusSentence } from './usageFormat'
+import { ANCHOR_GAP } from './SlotContextMenu'
+import { formatAge, formatClock, formatResetAt, statusLine, statusSentence } from './usageFormat'
 
 const NOW = 1_900_000_000 // 벽시계(초)
 let perfNow = 50_000 // performance.now()(ms)
@@ -46,9 +47,11 @@ class FakeResizeObserver {
     this.disconnected = true
     this.observed = []
   }
-  fire(entries: Array<[Element, number]>) {
+  fire(entries: Array<[Element, number, number?]>) {
     this.cb(
-      entries.map(([target, width]) => ({ target, contentRect: { width, height: 10 } }) as unknown as ResizeObserverEntry),
+      entries.map(
+        ([target, width, height = 10]) => ({ target, contentRect: { width, height } }) as unknown as ResizeObserverEntry,
+      ),
       this as unknown as ResizeObserver,
     )
   }
@@ -111,15 +114,18 @@ function valueOf(vendor: string, window: string, root: ParentNode = summary()): 
   return q(`[data-usage-vendor="${vendor}"][data-usage-window="${window}"] [data-usage-value]`, root)
 }
 
-/** 실제 폭과 1·2단 자연 폭을 준다 — 숨은 렌더를 재는 관찰자와 같은 하나다. */
-function setWidths(avail: number, s1: number, s2: number): void {
+/**
+ * 실제 폭과 1·2단 자연 폭을 준다 — 숨은 렌더를 재는 관찰자와 같은 하나다. 높이는 기본으로 넉넉하다(슬롯 1000 · 2단 30).
+ */
+function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 30 } = {}): void {
   const live = FakeResizeObserver.instances.filter(o => !o.disconnected)
   expect(live).toHaveLength(1)
   act(() =>
     live[0].fire([
+      [q('[data-usage-slot]')!, 800, rootH],
       [q('[data-usage-content]')!, avail],
       [q('[data-usage-measure="1"]')!, s1],
-      [q('[data-usage-measure="2"]')!, s2],
+      [q('[data-usage-measure="2"]')!, s2, s2h],
     ]),
   )
 }
@@ -199,6 +205,7 @@ describe('마운트와 켠 회사', () => {
     expect(valueOf('claude', 'five_hour')!.textContent).toBe('—')
     expect(valueOf('claude', 'weekly')!.textContent).toBe('—')
     expect(q('[data-usage-badge]')).toBeNull()
+    expect(q('[data-usage-bar]')).toBeNull()
     expect(screen.queryAllByRole('meter')).toHaveLength(0)
   })
 })
@@ -212,10 +219,26 @@ describe('값·색·막대', () => {
     expect(valueOf('claude', 'weekly')!.textContent).toBe('41%')
   })
 
-  it('막대 = meter(D14) — aria-valuenow 는 보이는 수', () => {
+  it('작은 표시의 막대는 보조기술에서 숨기고 요약 버튼이 짧은 이름을 진다(버튼 자식은 평평해진다)', () => {
+    seed(snap('claude', { state: { kind: 'NeedsLogin', detail: null } }))
+    seed(snap('codex', { weekly: null, in_flight: true }))
+    mount()
+    const bars = [...summary().querySelectorAll<HTMLElement>('[data-usage-bar]')]
+    expect(bars).toHaveLength(3)
+    for (const bar of bars) {
+      expect(bar.getAttribute('aria-hidden')).toBe('true')
+      expect(bar.hasAttribute('role')).toBe(false)
+    }
+    expect(within(summary()).queryAllByRole('meter', { hidden: true })).toHaveLength(0)
+    expect(summary().getAttribute('aria-label')).toBe(
+      'Claude 5시간 62% 남음, 주간 41% 남음 (로그인 필요) · Codex 5시간 62% 남음, 주간 값 없음 (갱신 중)',
+    )
+  })
+
+  it('막대 = meter(D14 — 팝업) — aria-valuenow 는 보이는 수', () => {
     seed(snap('claude', { five_hour: { used_pct: 80.4, resets_at: NOW + 600, age_secs: 0, expired: false } }))
     mount(true, false)
-    const meters = within(summary()).getAllByRole('meter')
+    const meters = within(openPopup()).getAllByRole('meter')
     expect(meters).toHaveLength(2)
     expect(meters[0].getAttribute('aria-valuenow')).toBe('19')
     expect(meters[0].getAttribute('aria-valuemin')).toBe('0')
@@ -329,7 +352,7 @@ describe('상태 배지와 문장', () => {
     it(`${name} — 모든 폭 단계에서 이름 옆 「!」 배지 · aria-label = title = 팝업 맨 위 줄`, () => {
       seed(snap('claude', { state }))
       mount(true, false)
-      const expected = statusSentence(state, 'Claude', 0, NOW)!
+      const expected = statusLine('Claude', statusSentence(state, 0, NOW)!)
       for (const n of [1, 2, 3] as const) {
         toStage(n)
         const badge = q('[data-usage-badge="claude"]')
@@ -363,15 +386,15 @@ describe('상태 배지와 문장', () => {
       texts.push(q('[data-usage-badge]')!.getAttribute('aria-label')!)
     }
     expect(texts).toEqual([
-      '설치 안 됨',
-      '로그인 필요 (auth_error)',
-      '이 계정의 한도 정보를 받을 수 없음 (limits_unavailable)',
-      `조회 실패 — Claude 응답: rate_limits_available: true, rate_limits: null · 다음 시도 ${formatClock(NOW + 300)}`,
-      '거절됨 — 12분 뒤 (rate_limited)',
+      'Claude 설치 안 됨',
+      'Claude 로그인 필요 (auth_error)',
+      'Claude 이 계정의 한도 정보를 받을 수 없음 (limits_unavailable)',
+      `Claude 조회 실패 — 응답: rate_limits_available: true, rate_limits: null · 다음 시도 ${formatClock(NOW + 300)}`,
+      'Claude 거절됨 — 12분 뒤 (rate_limited · 429)',
     ])
   })
 
-  it('상류 원문은 번역·정화 없이 그대로 · code 는 접두 뒤 괄호', () => {
+  it('상류 원문은 번역·정화 없이 그대로 · code 는 출처 뒤 괄호 · 회사 이름은 줄 머리에 한 번', () => {
     const upstream = '{kind} 원문 $& <b>'
     seed(
       snap('codex', {
@@ -380,7 +403,7 @@ describe('상태 배지와 문장', () => {
     )
     mount(false, true)
     expect(q('[data-usage-badge="codex"]')!.getAttribute('aria-label')).toBe(
-      `조회 실패 — Codex 응답 (-32001): ${upstream} · 다음 시도 ${formatClock(NOW + 60)}`,
+      `Codex 조회 실패 — 응답 (-32001): ${upstream} · 다음 시도 ${formatClock(NOW + 60)}`,
     )
   })
 })
@@ -398,11 +421,12 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     const stale = valueOf('claude', 'five_hour')!
     expect(stale.hasAttribute('data-usage-stale')).toBe(true)
     expect(stale.style.opacity).toBe('0.5')
+    expect(stale.getAttribute('title')).toBe('30분 넘게 새로 들어오지 않은 값')
     const fresh = valueOf('claude', 'weekly')!
     expect(fresh.hasAttribute('data-usage-stale')).toBe(false)
     expect(fresh.style.opacity).toBe('')
     // 흐리게 하는 것은 숫자뿐 — 막대·이름은 그대로.
-    expect(q('[data-usage-vendor="claude"][data-usage-window="five_hour"] [role="meter"]')!.style.opacity).toBe('')
+    expect(q('[data-usage-vendor="claude"][data-usage-window="five_hour"] [data-usage-bar]')!.style.opacity).toBe('')
     expect(summary().textContent).not.toMatch(/분 전|방금/)
 
     const popup = openPopup()
@@ -424,7 +448,7 @@ describe('오래됨 · 만료 · 갱신 중', () => {
       expect(q('[data-usage-value]', seg)!.textContent).toBe('리셋됨 — 갱신 대기')
       expect(seg.textContent).not.toMatch(/%/)
       expect(q('[data-usage-reset-in]', seg)).toBeNull()
-      expect(q('[role="meter"]', seg)).toBeNull()
+      expect(q('[data-usage-bar]', seg)).toBeNull()
     }
     toStage(3)
     expect(q('[data-usage-numbers]')!.textContent).toBe('리셋됨·리셋됨')
@@ -466,7 +490,7 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     expect(q('[data-usage-reset-in]', summary())!.textContent).toBe('2시간 13분 뒤')
     expect(q('[data-usage-age]', popup)!.textContent).toBe('방금')
     const before = q('[data-usage-badge]')!.getAttribute('aria-label')
-    expect(before).toBe(`조회 실패 · 다음 시도 ${formatClock(NOW + 600)}`)
+    expect(before).toBe(`Claude 조회 실패 · 다음 시도 ${formatClock(NOW + 600)}`)
 
     advance(60_000)
     expect(q('[data-usage-reset-in]', summary())!.textContent).toBe('2시간 12분 뒤')
@@ -480,9 +504,9 @@ describe('오래됨 · 만료 · 갱신 중', () => {
   it('거절 대기 「N분 뒤」도 받은 뒤 흐른 만큼 준다', () => {
     seed(snap('claude', { state: { kind: 'Rejected', retry_in_secs: 720, detail: null } }))
     mount(true, false)
-    expect(q('[data-usage-badge]')!.getAttribute('aria-label')).toBe('거절됨 — 12분 뒤')
+    expect(q('[data-usage-badge]')!.getAttribute('aria-label')).toBe('Claude 거절됨 — 12분 뒤')
     advance(5 * 60_000)
-    expect(q('[data-usage-badge]')!.getAttribute('aria-label')).toBe('거절됨 — 7분 뒤')
+    expect(q('[data-usage-badge]')!.getAttribute('aria-label')).toBe('Claude 거절됨 — 7분 뒤')
   })
 })
 
@@ -589,7 +613,9 @@ describe('팝업', () => {
     seed(snap('codex'))
     mount()
     const popup = openPopup()
-    expect(q('[data-usage-status-line="claude"] [data-usage-status-text]', popup)!.textContent).toBe('거절됨 — 10분 뒤')
+    expect(q('[data-usage-status-line="claude"] [data-usage-status-text]', popup)!.textContent).toBe(
+      'Claude 거절됨 — 10분 뒤',
+    )
     const claudeRefresh = q('[data-usage-refresh="claude"]', popup) as HTMLButtonElement
     expect(claudeRefresh.disabled).toBe(true)
     fireEvent.click(claudeRefresh)
@@ -608,6 +634,131 @@ describe('팝업', () => {
       expect(q(`[data-usage-status-line="${vendor}"] [data-usage-status-text]`, popup)!.textContent).toBe(
         q(`[data-usage-badge="${vendor}"]`)!.getAttribute('aria-label'),
       )
+    }
+  })
+})
+
+// ── 리뷰 후속(7b) — 높이 · 리셋만 실린 창 · 뒤집기 · 포커스 · Esc · 회전 ──
+function rect(left: number, top: number, width: number, height: number): DOMRect {
+  return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON() {} } as DOMRect
+}
+
+/** 요약·팝업의 화면 사각형을 준다(jsdom 엔 레이아웃이 없다). */
+function stubRects(summaryRect: DOMRect, popupRect: DOMRect): void {
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+    if (this.hasAttribute('data-usage-popup')) return popupRect
+    if (this.hasAttribute('data-usage-summary')) return summaryRect
+    return rect(0, 0, 0, 0)
+  })
+}
+
+describe('높이 · 리셋만 실린 창', () => {
+  it('2단이 슬롯보다 키가 크면 3단 — 잘린 줄의 배지가 사라지지 않게(R31 · R3)', () => {
+    seed(snap('claude', { state: { kind: 'NeedsLogin', detail: null } }))
+    mount(true, false)
+    // 2단 높이 + 요약 버튼의 위아래 여백(4px × 2) 과 슬롯 높이를 견준다.
+    setWidths(300, 400, 200, { rootH: 53, s2h: 45 })
+    expect(stage()).toBe('2')
+    setWidths(300, 400, 200, { rootH: 52, s2h: 45 })
+    expect(stage()).toBe('3')
+    expect(q('[data-usage-badge="claude"]')).not.toBeNull()
+    // 1단은 폭만 본다 — 줄 수가 3단과 같아 3단으로 가도 얻는 것이 없다.
+    setWidths(500, 400, 200, { rootH: 10, s2h: 45 })
+    expect(stage()).toBe('1')
+  })
+
+  it('리셋 시각만 실린 창 — 막대 없이 「—」 + 남은 시간(1·2단) · 팝업엔 절대 리셋 시각(나이 없음)', () => {
+    seed(snap('claude', { five_hour: { used_pct: null, resets_at: NOW + 600, age_secs: 0, expired: false } }))
+    mount(true, false)
+    const seg = () => q('[data-usage-vendor="claude"][data-usage-window="five_hour"]', summary())!
+    for (const n of [1, 2] as const) {
+      toStage(n)
+      expect(q('[data-usage-value]', seg())!.textContent).toBe('—')
+      expect(q('[data-usage-bar]', seg())).toBeNull()
+      expect(q('[data-usage-reset-in]', seg())!.textContent).toBe('10분 뒤')
+    }
+    toStage(3)
+    expect(q('[data-usage-numbers]')!.textContent).toBe('—·41')
+    const row = q('[data-usage-window="five_hour"]', openPopup())!
+    expect(q('[data-usage-bar]', row)).toBeNull()
+    expect(q('[role="meter"]', row)).toBeNull()
+    expect(q('[data-usage-reset-at]', row)!.textContent).toBe(`리셋 ${formatResetAt(NOW + 600, NOW)} (10분 뒤)`)
+    expect(q('[data-usage-age]', row)).toBeNull()
+  })
+})
+
+describe('팝업 자리 · 포커스 · Esc', () => {
+  it('아래에 들어가면 요약 아래로 편다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    stubRects(rect(10, 10, 300, 40), rect(0, 0, 240, 200))
+    const popup = openPopup()
+    expect(popup.style.top).toBe(`${50 + ANCHOR_GAP}px`)
+  })
+
+  it('아래에 안 들어가면 요약의 위쪽 변에서 위로 편다 — 요약을 덮지 않는다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const vh = window.innerHeight
+    const summaryTop = vh - 100
+    stubRects(rect(10, summaryTop, 300, 60), rect(0, 0, 240, 200))
+    const popup = openPopup()
+    expect(popup.style.top).toBe(`${summaryTop - ANCHOR_GAP - 200}px`)
+    expect(parseFloat(popup.style.top) + 200).toBeLessThanOrEqual(summaryTop)
+  })
+
+  it('포커스는 자리를 잡아 보인 뒤에만 옮긴다 — Chromium 은 보이지 않는 요소의 focus 를 거절한다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const seen: string[] = []
+    const original = HTMLElement.prototype.focus
+    vi.spyOn(HTMLElement.prototype, 'focus').mockImplementation(function (this: HTMLElement, opts?: FocusOptions) {
+      if (this.hasAttribute('data-usage-popup')) seen.push(this.style.visibility)
+      original.call(this, opts)
+    })
+    const popup = openPopup()
+    expect(seen).toEqual(['visible'])
+    expect(document.activeElement).toBe(popup)
+  })
+
+  it('포커스가 팝업·요약 밖으로 나가면 닫고, 포커스는 간 자리에 둔다', () => {
+    seed(snap('claude'))
+    render(
+      <>
+        <UsageSlot content={{ type: 'usage', show_claude: true, show_codex: false }} />
+        <button data-testid="outside">outside</button>
+      </>,
+    )
+    openPopup()
+    act(() => summary().focus())
+    expect(screen.queryByRole('dialog')).not.toBeNull()
+    const outside = screen.getByTestId('outside')
+    act(() => outside.focus())
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(outside)
+  })
+
+  it('Esc 는 포커스가 팝업·요약에 있을 때만 닫는다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const popup = openPopup()
+    act(() => popup.blur())
+    expect(document.activeElement).toBe(document.body)
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeNull()
+    act(() => summary().focus())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(summary())
+  })
+
+  it('갱신 중 표식은 돌고, 숨은 측정 사본은 돌지 않는다', () => {
+    seed(snap('claude', { in_flight: true }))
+    mount(true, false)
+    expect(q('[data-usage-refreshing="claude"] svg')!.getAttribute('class')).toContain('animate-spin')
+    for (const n of ['1', '2']) {
+      const svg = q(`[data-usage-measure="${n}"] svg`)!
+      expect(svg.getAttribute('class')).not.toContain('animate-spin')
     }
   })
 })

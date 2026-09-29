@@ -3,6 +3,7 @@
 // ★두 시계를 섞지 않는다★: 스냅숏의 상대 칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 받은 순간
 //   (`performance.now()`) 기준이라 거기서 흐른 만큼만 더하고 뺀다 — 벽시계가 되감겨도 흔들리지 않게. 벽시계는
 //   서버가 준 절대 시각(`resets_at`)과 견줄 때만 쓴다(R29).
+// ★문장의 어순·이음 부호는 전부 `t()` 틀에 있다(R28)★ — 여기서는 어느 틀을 고를지만 정한다.
 
 import type { UsageStateDetail } from '../../../crates/engram-dashboard-protocol/bindings/UsageStateDetail'
 import type { UsageVendorState } from '../../../crates/engram-dashboard-protocol/bindings/UsageVendorState'
@@ -17,9 +18,17 @@ export const USAGE_LOCALE = 'ko-KR'
 
 export type UsageLevel = 'ok' | 'warn' | 'danger' | 'none'
 
-/** 한 창을 지금 어떻게 보이나. `none` = 들고 있는 값이 없다(0% 가 아니다 — R21). */
+/**
+ * 한 창을 지금 어떻게 보이나. `none` = 들고 있는 값이 없다(0% 가 아니다 — R21) — 리셋 시각만 실린 창이면 그 시각은
+ * 들고 있다.
+ */
 export type WindowReading =
-  | { kind: 'none' }
+  | {
+      kind: 'none'
+      resetsAt: number | null
+      /** 리셋까지 남은 초 — `resetsAt` 이 없으면 null. 만료가 아니므로 늘 0 보다 크다. */
+      resetInSecs: number | null
+    }
   | { kind: 'expired' }
   | {
       kind: 'value'
@@ -33,18 +42,17 @@ export type WindowReading =
       resetInSecs: number | null
     }
 
-// 부동소수 잔차(100 − 70.00000000000001 = 29.99…)가 내림에서 1 을 깎지 않게. R10 의 내림은 소수점 이하를 버리라는
-//   것(남은 양을 부풀리지 않게)이지 표현 오차를 버리라는 것이 아니다.
-const FLOOR_EPSILON = 1e-9
-
 /** 쓴 양(Claude 가 주는 값)을 남은 양으로 — 모든 회사가 같은 방향(쓸수록 준다)으로 보이게(R1). */
 export function leftFromUsed(usedPct: number): number {
   return 100 - usedPct
 }
 
-/** 보이는 수 = 남은 양을 0–100 으로 자른 뒤 내림(R10·D17). 색도 이 수로 정한다. */
+/**
+ * 보이는 수 = 남은 양을 0–100 으로 자른 뒤 내림(R10·D17) — 남은 양을 부풀리지 않는다(19.9999… 는 19). 색도 이 수로
+ * 정한다.
+ */
 export function visibleLeft(left: number): number {
-  return Math.floor(Math.min(100, Math.max(0, left)) + FLOOR_EPSILON)
+  return Math.floor(Math.min(100, Math.max(0, left)))
 }
 
 /** `> 50` ok · `20–50` warn(양끝 포함) · `< 20` danger · 값 없음 = none(D17). */
@@ -75,9 +83,10 @@ export function isExpired(win: UsageWindow, nowWallSecs: number): boolean {
 }
 
 export function readWindow(win: UsageWindow | null, elapsed: number, nowWallSecs: number): WindowReading {
-  if (win === null) return { kind: 'none' }
+  if (win === null) return { kind: 'none', resetsAt: null, resetInSecs: null }
   if (isExpired(win, nowWallSecs)) return { kind: 'expired' }
-  if (win.used_pct === null) return { kind: 'none' }
+  const resetInSecs = win.resets_at === null ? null : win.resets_at - nowWallSecs
+  if (win.used_pct === null) return { kind: 'none', resetsAt: win.resets_at, resetInSecs }
   const visible = visibleLeft(leftFromUsed(win.used_pct))
   const ageSecs = win.age_secs + elapsed
   return {
@@ -87,12 +96,13 @@ export function readWindow(win: UsageWindow | null, elapsed: number, nowWallSecs
     ageSecs,
     stale: isStale(ageSecs),
     resetsAt: win.resets_at,
-    resetInSecs: win.resets_at === null ? null : win.resets_at - nowWallSecs,
+    resetInSecs,
   }
 }
 
 /**
- * 분 단위 남은 시간 — 올림이고 1분 아래로 내려가지 않는다(리셋이 지나면 이 문구 대신 「리셋됨」이 선다).
+ * 분 단위 남은 시간 — 올림이고 1분 아래로 내려가지 않는다(리셋이 지나면 이 문구 대신 「리셋됨」이, 거절이 끝나면
+ * 데몬이 바꾼 상태가 선다).
  */
 export function formatDuration(secs: number): string {
   const total = Math.max(1, Math.ceil(secs / 60))
@@ -143,52 +153,86 @@ export function formatResetAt(epochSecs: number, nowWallSecs: number): string {
   return sameDay ? CLOCK.format(at) : DATE_CLOCK.format(at)
 }
 
-// 이어 붙이는 문장 부호. 상태 문구 머리에 이미 「—」가 있으면(거절됨 — N분 뒤) 상류 원문은 「·」로 잇는다.
-const DASH = ' — '
-const DOT = ' · '
-
-function withDetail(status: string, detail: UsageStateDetail | null, vendorName: string, upstreamJoin: string): string {
+/**
+ * detail 을 상태 문구에 잇는다. `afterWait` = 문구 머리가 이미 대기 시간을 「—」로 달고 있다(거절됨 — N분 뒤) — 그때는
+ * 상류 원문을 다른 틀로 이어 「—」가 겹치지 않게 한다.
+ */
+function withDetail(status: string, detail: UsageStateDetail | null, source: string, afterWait: boolean): string {
   if (detail === null) return status
   if (detail.upstream !== null) {
-    const source =
-      detail.code !== null
-        ? t('usage.detailUpstreamCode', { vendor: vendorName, code: String(detail.code), upstream: detail.upstream })
-        : t('usage.detailUpstream', { vendor: vendorName, upstream: detail.upstream })
-    return `${status}${upstreamJoin}${source}`
+    const upstream = detail.upstream
+    if (detail.code !== null) {
+      const code = String(detail.code)
+      return afterWait
+        ? t('usage.withUpstreamCodeAfterWait', { status, source, code, upstream })
+        : t('usage.withUpstreamCode', { status, source, code, upstream })
+    }
+    return afterWait
+      ? t('usage.withUpstreamAfterWait', { status, source, upstream })
+      : t('usage.withUpstream', { status, source, upstream })
   }
-  return `${status} ${t('usage.detailKind', { kind: detail.kind })}`
+  return detail.code !== null
+    ? t('usage.withKindCode', { status, kind: detail.kind, code: String(detail.code) })
+    : t('usage.withKind', { status, kind: detail.kind })
+}
+
+/** 거절 대기 — 받은 뒤 흐른 만큼 줄인 사람말 시간. */
+function rejectedHead(retryInSecs: number, elapsed: number): string {
+  return t('usage.stateRejected', { duration: formatDuration(remainingSecs(retryInSecs, elapsed)) })
 }
 
 /**
- * 비정상 상태의 한 줄 문장(R31) — 배지의 `aria-label`·`title` 과 팝업 맨 위 줄이 같은 이 문장을 쓴다. `Ready` 면 null.
- *
- * 모양 = 상태 문구 + detail(상류 원문이 있으면 「<회사> 응답[ (code)]: <원문>」, 없으면 「(<kind>)」) + 수.
- * `elapsed` = 스냅숏을 받은 뒤 흐른 초.
+ * 비정상 상태의 짧은 이름(detail·다음 시도 없이) — 요약 버튼의 접근성 이름처럼 짧게 말할 자리용. `Ready` 면 null.
  */
-export function statusSentence(
-  state: UsageVendorState,
-  vendorName: string,
-  elapsed: number,
-  nowWallSecs: number,
-): string | null {
+export function stateHead(state: UsageVendorState, elapsed: number): string | null {
   switch (state.kind) {
     case 'Ready':
       return null
     case 'NotInstalled':
-      return withDetail(t('usage.stateNotInstalled'), state.detail, vendorName, DASH)
+      return t('usage.stateNotInstalled')
     case 'NeedsLogin':
-      return withDetail(t('usage.stateNeedsLogin'), state.detail, vendorName, DASH)
+      return t('usage.stateNeedsLogin')
     case 'Unavailable':
-      return withDetail(t('usage.stateUnavailable'), state.detail, vendorName, DASH)
+      return t('usage.stateUnavailable')
+    case 'Failed':
+      return t('usage.stateFailed')
+    case 'Rejected':
+      return rejectedHead(state.retry_in_secs, elapsed)
+  }
+}
+
+/**
+ * 비정상 상태의 문장(R31) — 회사 이름 없이. 모양 = 상태 문구 + detail(상류 원문이 있으면 「응답[ (code)]: <원문>」,
+ * 없으면 「(kind[ · code])」) + 수. 상류 원문은 번역하지 않고 그대로 끼운다. `Ready` 면 null.
+ *
+ * ★출처 낱말★: `NotInstalled` 의 원문은 회사 응답이 아니라 OS 의 실행 오류일 수 있어 「오류」로 부른다.
+ * `elapsed` = 스냅숏을 받은 뒤 흐른 초.
+ */
+export function statusSentence(state: UsageVendorState, elapsed: number, nowWallSecs: number): string | null {
+  const response = t('usage.sourceResponse')
+  switch (state.kind) {
+    case 'Ready':
+      return null
+    case 'NotInstalled':
+      return withDetail(t('usage.stateNotInstalled'), state.detail, t('usage.sourceError'), false)
+    case 'NeedsLogin':
+      return withDetail(t('usage.stateNeedsLogin'), state.detail, response, false)
+    case 'Unavailable':
+      return withDetail(t('usage.stateUnavailable'), state.detail, response, false)
     case 'Failed': {
       const at = nowWallSecs + remainingSecs(state.next_attempt_in_secs, elapsed)
-      const head = withDetail(t('usage.stateFailed'), state.detail, vendorName, DASH)
-      return `${head}${DOT}${t('usage.nextAttempt', { time: formatClock(at) })}`
+      const sentence = withDetail(t('usage.stateFailed'), state.detail, response, false)
+      return t('usage.withNextAttempt', { sentence, time: formatClock(at) })
     }
-    case 'Rejected': {
-      // 기한이 로컬로 먼저 닿아도 「0분 뒤」는 보이지 않는다 — 거절 끝은 데몬이 상태를 바꿔 방송한다.
-      const minutes = Math.max(1, Math.ceil(remainingSecs(state.retry_in_secs, elapsed) / 60))
-      return withDetail(t('usage.stateRejected', { minutes: String(minutes) }), state.detail, vendorName, DOT)
-    }
+    case 'Rejected':
+      return withDetail(rejectedHead(state.retry_in_secs, elapsed), state.detail, response, true)
   }
+}
+
+/**
+ * 회사 이름을 앞에 단 한 줄 — 배지의 `aria-label`·`title` 과 팝업 맨 위 줄이 이 같은 문자열을 쓴다(R31). 문장 안에서는
+ * 회사 이름을 되풀지 않는다(「Claude 조회 실패 — 응답: …」).
+ */
+export function statusLine(vendorName: string, sentence: string): string {
+  return t('usage.statusLine', { vendor: vendorName, sentence })
 }

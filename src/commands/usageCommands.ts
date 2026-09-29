@@ -4,7 +4,7 @@
 //   있다: 조회 = `usage.get`/`usage.refresh`, 표시 = `layout.setSlotContent` 의 show_* 칸. 창 안에서는
 //   `__engramCmd.run(id, {viewId, slotId, content})` 로 이 셋을 그대로 부른다.
 // ★표시 토글은 전량 교체다★ — 메뉴 ctx 의 슬롯 내용에서 한 칸만 뒤집어 두 칸을 다 써 보낸다. 빠진 칸을 지금 값으로
-//   채우는 병합은 버스 쪽(`layout.setSlotContent`)의 몫이다(TRD §3 #20).
+//   채우는 병합은 `layout.setSlotContent`(버스 · `__engramCmd` 양쪽)의 몫이다(TRD §3 #20).
 
 import type { SlotContent } from '../api/layoutTypes'
 import type { AgentBackendKind } from '../api/types'

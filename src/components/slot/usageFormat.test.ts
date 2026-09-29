@@ -14,6 +14,8 @@ import {
   isExpired,
   leftFromUsed,
   readWindow,
+  stateHead,
+  statusLine,
   statusSentence,
   usageLevel,
   visibleLeft,
@@ -48,15 +50,31 @@ describe('보이는 수와 색 구간', () => {
 
   it('값 없음 → none(0% 가 아니다 — R21)', () => {
     expect(usageLevel(null)).toBe('none')
-    expect(readWindow(win({ used_pct: null }), 0, NOW)).toEqual({ kind: 'none' })
-    expect(readWindow(null, 0, NOW)).toEqual({ kind: 'none' })
+    expect(readWindow(win({ used_pct: null, resets_at: null }), 0, NOW)).toEqual({
+      kind: 'none',
+      resetsAt: null,
+      resetInSecs: null,
+    })
+    expect(readWindow(null, 0, NOW)).toEqual({ kind: 'none', resetsAt: null, resetInSecs: null })
   })
 
-  it('쓴 양 → 남은 양(R1) — 부동소수 잔차가 내림에서 1 을 깎지 않는다', () => {
+  it('리셋 시각만 실린 창 → none 이되 리셋 시각·남은 초는 든다', () => {
+    expect(readWindow(win({ used_pct: null, resets_at: NOW + 600 }), 0, NOW)).toEqual({
+      kind: 'none',
+      resetsAt: NOW + 600,
+      resetInSecs: 600,
+    })
+    // 리셋이 지났으면 값이 없어도 만료다.
+    expect(readWindow(win({ used_pct: null, resets_at: NOW }), 0, NOW)).toEqual({ kind: 'expired' })
+  })
+
+  it('쓴 양 → 남은 양(R1) — 내림은 보정 없이 그대로(남은 양을 부풀리지 않는다)', () => {
     expect(leftFromUsed(80.4)).toBeCloseTo(19.6)
     expect(visibleLeft(leftFromUsed(80.4))).toBe(19)
     expect(visibleLeft(leftFromUsed(79.6))).toBe(20)
-    expect(visibleLeft(leftFromUsed(70.00000000000001))).toBe(30)
+    // 경계 바로 아래 — 19.9999999999 는 20 이 아니다(노랑으로 올리지 않는다).
+    expect(visibleLeft(leftFromUsed(80.0000000001))).toBe(19)
+    expect(usageLevel(visibleLeft(leftFromUsed(80.0000000001)))).toBe('danger')
     expect(visibleLeft(29.9)).toBe(29)
   })
 })
@@ -126,55 +144,60 @@ describe('상태 문장', () => {
   const at = (secs: number) => formatClock(NOW + secs)
 
   it('다섯 상태 문구 — Ready 는 문장이 없다', () => {
-    expect(statusSentence({ kind: 'Ready' }, 'Claude', 0, NOW)).toBeNull()
-    expect(statusSentence({ kind: 'NotInstalled', detail: null }, 'Claude', 0, NOW)).toBe('설치 안 됨')
-    expect(statusSentence({ kind: 'NeedsLogin', detail: null }, 'Claude', 0, NOW)).toBe('로그인 필요')
-    expect(statusSentence({ kind: 'Unavailable', detail: null }, 'Claude', 0, NOW)).toBe(
-      '이 계정의 한도 정보를 받을 수 없음',
-    )
-    expect(statusSentence({ kind: 'Failed', next_attempt_in_secs: 300, detail: null }, 'Claude', 0, NOW)).toBe(
+    expect(statusSentence({ kind: 'Ready' }, 0, NOW)).toBeNull()
+    expect(statusSentence({ kind: 'NotInstalled', detail: null }, 0, NOW)).toBe('설치 안 됨')
+    expect(statusSentence({ kind: 'NeedsLogin', detail: null }, 0, NOW)).toBe('로그인 필요')
+    expect(statusSentence({ kind: 'Unavailable', detail: null }, 0, NOW)).toBe('이 계정의 한도 정보를 받을 수 없음')
+    expect(statusSentence({ kind: 'Failed', next_attempt_in_secs: 300, detail: null }, 0, NOW)).toBe(
       `조회 실패 · 다음 시도 ${at(300)}`,
     )
-    expect(statusSentence({ kind: 'Rejected', retry_in_secs: 720, detail: null }, 'Claude', 0, NOW)).toBe(
-      '거절됨 — 12분 뒤',
-    )
+    expect(statusSentence({ kind: 'Rejected', retry_in_secs: 720, detail: null }, 0, NOW)).toBe('거절됨 — 12분 뒤')
   })
 
   it('Unavailable 문구는 원인을 단정하지 않는다(§6 #20)', () => {
-    const s = statusSentence({ kind: 'Unavailable', detail: null }, 'Claude', 0, NOW)!
+    const s = statusSentence({ kind: 'Unavailable', detail: null }, 0, NOW)!
     expect(s).not.toMatch(/로그아웃|API 키|한도가 없는/)
   })
 
-  it('상류 원문은 번역 없이 그대로 · 없으면 (kind) · code 는 접두 뒤 괄호', () => {
-    const upstream = 'rate_limits_available: true, rate_limits: null {name} $&'
+  it('상류 원문은 번역 없이 그대로 · 회사 이름은 되풀지 않는다 · code 는 출처 뒤 괄호', () => {
+    const upstream = 'rate_limits_available: true, rate_limits: null {status} $&'
     expect(
       statusSentence(
         { kind: 'Failed', next_attempt_in_secs: 60, detail: { kind: 'rate_limits_null', code: null, upstream } },
-        'Claude',
         0,
         NOW,
       ),
-    ).toBe(`조회 실패 — Claude 응답: ${upstream} · 다음 시도 ${at(60)}`)
+    ).toBe(`조회 실패 — 응답: ${upstream} · 다음 시도 ${at(60)}`)
+    expect(
+      statusSentence(
+        { kind: 'NeedsLogin', detail: { kind: 'rpc_error', code: -32600, upstream: 'Unauthorized' } },
+        0,
+        NOW,
+      ),
+    ).toBe('로그인 필요 — 응답 (-32600): Unauthorized')
+    // 설치 안 됨의 원문은 회사 응답이 아니라 실행 오류일 수 있다.
+    expect(
+      statusSentence({ kind: 'NotInstalled', detail: { kind: 'spawn', code: null, upstream: 'program not found' } }, 0, NOW),
+    ).toBe('설치 안 됨 — 오류: program not found')
+  })
+
+  it('원문이 없으면 (kind) · code 만 있으면 (kind · code)', () => {
     expect(
       statusSentence(
         { kind: 'Failed', next_attempt_in_secs: 60, detail: { kind: 'timeout', code: null, upstream: null } },
-        'Claude',
         0,
         NOW,
       ),
     ).toBe(`조회 실패 (timeout) · 다음 시도 ${at(60)}`)
     expect(
-      statusSentence(
-        { kind: 'NeedsLogin', detail: { kind: 'rpc_error', code: -32600, upstream: 'Unauthorized' } },
-        'Codex',
-        0,
-        NOW,
-      ),
-    ).toBe('로그인 필요 — Codex 응답 (-32600): Unauthorized')
+      statusSentence({ kind: 'NeedsLogin', detail: { kind: 'rpc_error', code: -32001, upstream: null } }, 0, NOW),
+    ).toBe('로그인 필요 (rpc_error · -32001)')
+  })
+
+  it('거절 — 머리의 대기 시간 뒤에 detail · 원문은 「·」로 잇는다(「—」가 겹치지 않게)', () => {
     expect(
       statusSentence(
         { kind: 'Rejected', retry_in_secs: 120, detail: { kind: 'rate_limited', code: null, upstream: null } },
-        'Claude',
         0,
         NOW,
       ),
@@ -182,23 +205,40 @@ describe('상태 문장', () => {
     expect(
       statusSentence(
         { kind: 'Rejected', retry_in_secs: 120, detail: { kind: 'rate_limited', code: 429, upstream: 'Too Many' } },
-        'Claude',
         0,
         NOW,
       ),
-    ).toBe('거절됨 — 2분 뒤 · Claude 응답 (429): Too Many')
+    ).toBe('거절됨 — 2분 뒤 · 응답 (429): Too Many')
+    expect(
+      statusSentence(
+        { kind: 'Rejected', retry_in_secs: 120, detail: { kind: 'rate_limited', code: null, upstream: 'slow down' } },
+        0,
+        NOW,
+      ),
+    ).toBe('거절됨 — 2분 뒤 · 응답: slow down')
   })
 
-  it('다음 시도·거절 대기는 받은 뒤 흐른 만큼 줄어든다', () => {
-    expect(statusSentence({ kind: 'Failed', next_attempt_in_secs: 600, detail: null }, 'Claude', 240, NOW)).toBe(
+  it('거절 대기는 사람말 시간 — 「1440분 뒤」·「0분 뒤」가 없다', () => {
+    const rejected = (secs: number, elapsed = 0) =>
+      statusSentence({ kind: 'Rejected', retry_in_secs: secs, detail: null }, elapsed, NOW)
+    expect(rejected(4_800)).toBe('거절됨 — 1시간 20분 뒤')
+    expect(rejected(86_400)).toBe('거절됨 — 1일 뒤')
+    expect(rejected(720, 300)).toBe('거절됨 — 7분 뒤')
+    expect(rejected(60, 600)).toBe('거절됨 — 1분 뒤')
+  })
+
+  it('다음 시도는 받은 뒤 흐른 만큼 줄어든 같은 순간을 가리킨다', () => {
+    expect(statusSentence({ kind: 'Failed', next_attempt_in_secs: 600, detail: null }, 240, NOW)).toBe(
       `조회 실패 · 다음 시도 ${at(360)}`,
     )
-    expect(statusSentence({ kind: 'Rejected', retry_in_secs: 720, detail: null }, 'Claude', 300, NOW)).toBe(
-      '거절됨 — 7분 뒤',
+  })
+
+  it('한 줄 = 회사 이름 + 문장 · 짧은 이름 = detail·수 없이', () => {
+    expect(statusLine('Claude', '로그인 필요')).toBe('Claude 로그인 필요')
+    expect(stateHead({ kind: 'Ready' }, 0)).toBeNull()
+    expect(stateHead({ kind: 'Failed', next_attempt_in_secs: 60, detail: { kind: 'x', code: 1, upstream: 'y' } }, 0)).toBe(
+      '조회 실패',
     )
-    // 기한이 로컬로 먼저 닿아도 「0분 뒤」는 보이지 않는다.
-    expect(statusSentence({ kind: 'Rejected', retry_in_secs: 60, detail: null }, 'Claude', 600, NOW)).toBe(
-      '거절됨 — 1분 뒤',
-    )
+    expect(stateHead({ kind: 'Rejected', retry_in_secs: 600, detail: null }, 0)).toBe('거절됨 — 10분 뒤')
   })
 })
