@@ -73,8 +73,8 @@ pub struct FinishApplied {
 /// 요청 종류(§1-4 요청 표). `Refresh` = ⟳ — 쿨타임을 무시하되 거절은 못 넘는다(D11).
 ///
 /// ★`Refresh` 에 최소 간격을 두지 않는다(사용자 결정 2026-09-29)★ — 조회가 막 끝난 직후의 ⟳ 도 새 조회다.
-///   남는 제동은 거절 기한(R24)과 진행 중 합류뿐이다 — 피어에 수동 간격이 없고, 상류가 막으면 부르는 쪽이 스스로
-///   줄인다.
+///   남는 제동은 거절 기한(R24)과 진행 중 합류뿐이다 — 피어 다수에 수동 간격이 없고(예외·미확인 =
+///   `docs/research/usage-manual-refresh-peers-2026-09-29.md`), 상류가 막으면 부르는 쪽이 스스로 줄인다.
 // ADR-0257
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {

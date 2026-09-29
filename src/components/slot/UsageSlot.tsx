@@ -66,7 +66,7 @@ export const USAGE_PAGE_URL: Record<AgentBackendKind, string> = {
 
 const TICK_MS = 60_000
 
-// 요약 버튼의 안쪽 여백. 세로 값은 2단의 높이 판정에도 든다 — 숨은 사본은 여백 없이 재어지기 때문이다.
+// 요약 버튼의 안쪽 여백. 두 값 다 단계 판정에 든다 — 숨은 사본은 여백 없이 재어지고, 내용이 쓸 폭은 슬롯 폭에서 빼서 얻는다.
 const SUMMARY_PAD_Y_PX = 4
 const SUMMARY_PAD_X_PX = 6
 
@@ -201,20 +201,34 @@ export default function UsageSlot({
 // ── 작은 표시 ──────────────────────────────────────────────────────────────────────────────
 
 interface Measures {
-  /** 작은 표시가 쓸 수 있는 폭. */
-  avail: number | null
-  /** 슬롯 루트의 높이(`height:100%` — 내용에 따라 늘지 않는다). */
+  /** 슬롯 루트의 크기(`width`·`height:100%` — 내용·단계에 따라 변하지 않는다). */
+  rootW: number | null
   rootH: number | null
+  /**
+   * ⟳ 자리의 폭(⟳ 의 오른쪽 여백 포함). ⟳ 가 없으면(안내 문구) 0 — 관찰자는 0×0 요소를 관찰 시작 때 알리지 않아서
+   * null 이 아니라 0 에서 시작한다.
+   */
+  refreshW: number
   s1: number | null
   s2: number | null
   s2h: number | null
 }
 
 /**
+ * 내용이 쓸 수 있는 폭 = 슬롯 폭 − ⟳ 자리 − 요약 버튼의 좌우 여백. 측정 사본(`s1`·`s2`)은 ⟳ 없이 잰다 — ⟳ 몫은 여기서
+ * 한 번만 뺀다(사본에 넣으면 두 번 뺀다).
+ */
+function contentAvail({ rootW, refreshW }: Measures): number | null {
+  return rootW === null ? null : rootW - refreshW - 2 * SUMMARY_PAD_X_PX
+}
+
+/**
  * 들어가는 가장 넓은 단계. 아직 못 쟀으면 1단(가장 자세한 것). 2단은 높이도 봐서, 슬롯보다 키가 크면 3단으로 간다 —
  * 잘린 줄의 배지가 사라지면 안 된다(R31 — 모든 단계에서 배지). 3단보다 좁으면 3단이 말줄임으로 잘린다.
  */
-function pickStage({ avail, rootH, s1, s2, s2h }: Measures): Stage {
+function pickStage(m: Measures): Stage {
+  const { rootH, s1, s2, s2h } = m
+  const avail = contentAvail(m)
   if (avail === null || s1 === null) return 1
   if (s1 <= avail) return 1
   const fitsHeight = s2h === null || rootH === null || s2h + 2 * SUMMARY_PAD_Y_PX <= rootH
@@ -284,14 +298,23 @@ function UsageSummary({
 }) {
   const rootRef = useRef<HTMLDivElement>(null)
   const rowRef = useRef<HTMLDivElement>(null)
-  const contentRef = useRef<HTMLSpanElement>(null)
+  const refreshAreaRef = useRef<HTMLSpanElement>(null)
   const measure1Ref = useRef<HTMLDivElement>(null)
   const measure2Ref = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
-  const [measures, setMeasures] = useState<Measures>({ avail: null, rootH: null, s1: null, s2: null, s2h: null })
+  const [measures, setMeasures] = useState<Measures>({
+    rootW: null,
+    rootH: null,
+    refreshW: 0,
+    s1: null,
+    s2: null,
+    s2h: null,
+  })
   const [open, setOpen] = useState(false)
 
-  // 실제 크기와 두 단계의 자연 크기를 한 관찰자로 잰다 — 숨은 렌더는 값·문구가 바뀌면 크기가 바뀌어 다시 불린다.
+  // 슬롯 크기 · ⟳ 자리 · 두 단계의 자연 크기를 한 관찰자로 잰다 — 숨은 렌더는 값·문구가 바뀌면 크기가 바뀌어 다시 불린다.
+  // ★고른 단계에 따라 크기가 바뀌는 요소(요약 버튼·내용·줄)는 재지 않는다★ — 단계가 제 입력을 바꾸면 한 번 3단으로
+  //   줄어든 폭이 다시 넓어지지 않거나 단계가 오간다.
   useLayoutEffect(() => {
     if (typeof ResizeObserver === 'undefined') return
     const observer = new ResizeObserver(entries => {
@@ -302,8 +325,10 @@ function UsageSummary({
         }
         for (const entry of entries) {
           const { width, height } = entry.contentRect
-          if (entry.target === contentRef.current) put('avail', width)
-          else if (entry.target === rootRef.current) put('rootH', height)
+          if (entry.target === rootRef.current) {
+            put('rootW', width)
+            put('rootH', height)
+          } else if (entry.target === refreshAreaRef.current) put('refreshW', width)
           else if (entry.target === measure1Ref.current) put('s1', width)
           else if (entry.target === measure2Ref.current) {
             put('s2', width)
@@ -313,7 +338,7 @@ function UsageSummary({
         return next
       })
     })
-    for (const el of [rootRef.current, contentRef.current, measure1Ref.current, measure2Ref.current]) {
+    for (const el of [rootRef.current, refreshAreaRef.current, measure1Ref.current, measure2Ref.current]) {
       if (el) observer.observe(el)
     }
     return () => observer.disconnect()
@@ -337,10 +362,18 @@ function UsageSummary({
 
   return (
     <div ref={rootRef} data-usage-slot="" style={ROOT_STYLE}>
-      {/* ★⟳ 는 요약 버튼 밖의 형제다★ — 버튼 안에 버튼을 두지 않는다(누름이 팝업 열기와 겹친다). 요약 버튼이 남는 폭을
-          다 쓰고 ⟳ 는 줄지 않으므로, 단계를 고르는 내용 폭(avail)은 이미 ⟳ 몫을 뺀 값이다 — 측정 사본에 ⟳ 를 넣지
-          않는다(넣으면 두 번 뺀다). */}
-      <div ref={rowRef} data-usage-row="" style={{ display: 'flex', alignItems: 'center' }}>
+      {/* ★⟳ 는 요약 버튼 밖의 형제다★ — 버튼 안에 버튼을 두지 않는다(누름이 팝업 열기와 겹친다).
+          ★⟳ 는 모든 단계에서 내용 바로 오른쪽이다★(위치 = ADR-0257 결정 1 · 사용자 2026-09-30 「알아서 잘 붙이도록」 ·
+          방법 = TRD §3 #104) — 1·2단은 격자의 막대 칸(`1fr`)이 요약 버튼을 줄 끝까지 채우고, 3단은 채울 칸이 없어 줄이 제
+          내용 폭으로 줄어든다. 내용이 슬롯보다 넓으면 줄은 슬롯 폭에서 멈추고(`maxWidth` — 없으면 줄바꿈 없는 줄의 최소
+          폭이 ⟳ 를 슬롯 밖으로 민다) 요약 버튼이 줄어 내용을 자른다 — ⟳ 자리는 줄지 않는다. 그래서 3단에선 내용 폭이
+          바뀌면 ⟳ 가 따라 움직인다: 갱신 중 표식은 폭을 바꾸지 않게 막고(`RefreshingMarkSpace`), 자릿수·배지처럼 값이
+          바뀐 것은 움직여도 둔다. */}
+      <div
+        ref={rowRef}
+        data-usage-row=""
+        style={{ display: 'flex', alignItems: 'center', maxWidth: '100%', width: stage === 3 ? 'fit-content' : undefined }}
+      >
         <button
           ref={buttonRef}
           type="button"
@@ -355,7 +388,7 @@ function UsageSummary({
             display: 'block',
             flexGrow: 1,
             flexShrink: 1,
-            flexBasis: 0,
+            flexBasis: 'auto',
             minWidth: 0,
             padding: `${SUMMARY_PAD_Y_PX}px ${SUMMARY_PAD_X_PX}px`,
             margin: 0,
@@ -367,12 +400,7 @@ function UsageSummary({
             cursor: 'pointer',
           }}
         >
-          <span
-            ref={contentRef}
-            data-usage-content=""
-            data-usage-stage={stage}
-            style={{ display: 'block', overflow: 'hidden' }}
-          >
+          <span data-usage-content="" data-usage-stage={stage} style={{ display: 'block', overflow: 'hidden' }}>
             {views.length === 0 ? (
               <span data-usage-hint="" style={{ color: 'var(--text-muted)' }}>
                 {t('usage.hint')}
@@ -382,7 +410,10 @@ function UsageSummary({
             )}
           </span>
         </button>
-        {views.length > 0 && <RefreshButton views={views} onRefresh={() => runSlotCommand('usageSlot.refresh')} />}
+        {/* ⟳ 가 없을 때도 둔다 — 관찰자가 한 번 잡은 요소로 ⟳ 자리의 폭(없으면 0)을 받는다. */}
+        <span ref={refreshAreaRef} data-usage-refresh-area="" style={{ flex: 'none', display: 'flex' }}>
+          {views.length > 0 && <RefreshButton views={views} onRefresh={() => runSlotCommand('usageSlot.refresh')} />}
+        </span>
       </div>
       <div
         aria-hidden="true"
@@ -436,8 +467,8 @@ function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: (
         if (!blocked && !busy) onRefresh()
       }}
       style={{
-        flex: 'none',
         display: 'inline-flex',
+        // 여백은 ⟳ 쪽에 둔다 — ⟳ 자리(`data-usage-refresh-area`)의 내용 폭이 이 여백까지 감싸 단계 판정의 ⟳ 몫에 든다.
         marginRight: `${SUMMARY_PAD_X_PX}px`,
         padding: '2px',
         border: '1px solid var(--border)',
@@ -455,7 +486,8 @@ function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: (
 
 /**
  * `measure` = 크기만 재는 숨은 사본 — 같은 글자·같은 모양을 그리되 역할·이름·`data-usage-*`·애니메이션은 싣지 않는다
- * (cdp·보조기술이 값을 두 번 읽지 않게). 줄도 `span` 인 것은 요약 버튼 안에 들어가서다(버튼 내용 = phrasing).
+ * (cdp·보조기술이 값을 두 번 읽지 않게). 갱신 중 표식만은 조회 여부와 상관없이 늘 그린다(`NameUnit`). 줄도 `span` 인
+ * 것은 요약 버튼 안에 들어가서다(버튼 내용 = phrasing).
  */
 function StageRender({
   stage,
@@ -532,19 +564,28 @@ function StageRender({
       {views.map(view => (
         <span key={view.vendor} style={LINE_STYLE}>
           <NameUnit view={view} measure={measure} />
-          {/* 말줄임은 숫자 쪽에만 — 아이콘·배지는 줄지 않아 잘리지 않는다(R31). */}
-          <span
-            data-usage-numbers=""
-            style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-          >
-            {view.windows.map((w, i) => (
-              <Fragment key={w.key}>
-                {i > 0 && '·'}
-                <span {...windowAttrs(view, w, measure)}>
-                  <ValueText w={w} bare dimStale measure={measure} />
-                </span>
-              </Fragment>
-            ))}
+          <span style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center' }}>
+            {/* 말줄임은 숫자 쪽에만 — 아이콘·배지는 줄지 않아 잘리지 않는다(R31). */}
+            <span
+              data-usage-numbers=""
+              style={{
+                flex: '1 1 auto',
+                minWidth: 0,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {view.windows.map((w, i) => (
+                <Fragment key={w.key}>
+                  {i > 0 && '·'}
+                  <span {...windowAttrs(view, w, measure)}>
+                    <ValueText w={w} bare dimStale measure={measure} />
+                  </span>
+                </Fragment>
+              ))}
+            </span>
+            {!measure && !view.refreshing && <RefreshingMarkSpace view={view} />}
           </span>
         </span>
       ))}
@@ -552,21 +593,53 @@ function StageRender({
   )
 }
 
+/**
+ * 3단 줄 끝의 빈자리 — 갱신 중 표식이 없는 동안 그 표식(+ 이름 묶음 안의 틈)과 같은 폭을 비워 둔다. 3단은 줄이 내용
+ * 폭으로 줄어들어 내용 폭이 곧 ⟳ 자리라서, 표식이 켜지고 꺼질 때 ⟳ 가 움직이지 않게 한다(조회 동안 옛 자리를 다시
+ * 누르면 ⟳ 대신 요약 버튼이 눌려 팝업이 열린다).
+ * ★숫자와 함께 줄바꿈 묶음에 들고 높이가 0 이다★ — 슬롯이 좁으면 이 자리가 먼저 다음 줄(높이 0)로 넘어가 사라지고, 그다음
+ * 에야 숫자가 말줄임으로 줄어든다. 숫자 쪽에 넣으면 이 자리 때문에 말줄임이 먼저 나온다. 그래서 슬롯이 3단 내용보다 좁은
+ * 동안엔 쉬는 숫자가 폭을 다 쓰고, 조회 중엔 표식 폭(약 14px)만큼 줄어 말줄임이 더 일찍 온다 — ⟳ 는 그때도 움직이지
+ * 않는다(줄이 슬롯 폭에 묶여 있다).
+ * 측정 사본엔 두지 않는다 — 사본의 이름 묶음이 표식을 늘 세므로(`NameUnit`) 여기까지 두면 두 번 센다.
+ */
+function RefreshingMarkSpace({ view }: { view: VendorView }) {
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        flex: 'none',
+        display: 'inline-flex',
+        height: 0,
+        overflow: 'hidden',
+        visibility: 'hidden',
+        marginLeft: NAME_UNIT_GAP,
+      }}
+    >
+      <RefreshingMark view={view} measure />
+    </span>
+  )
+}
+
 function windowAttrs(view: VendorView, w: WindowView, measure: boolean): Record<string, string> {
   return measure ? {} : { 'data-usage-vendor': view.vendor, 'data-usage-window': w.key }
 }
 
+const NAME_UNIT_GAP = '0.15em'
+
 /** 회사 아이콘 + 배지 + 갱신 중 표식 — 한 덩어리로 줄지 않는다(배지가 말줄임에 잘리지 않게 — R31). */
 function NameUnit({ view, measure, cell }: { view: VendorView; measure: boolean; cell?: CSSProperties }) {
   return (
-    <span style={{ ...cell, flex: 'none', display: 'inline-flex', alignItems: 'center', gap: '0.15em' }}>
+    <span style={{ ...cell, flex: 'none', display: 'inline-flex', alignItems: 'center', gap: NAME_UNIT_GAP }}>
       <VendorIcon
         vendor={view.vendor}
         label={measure ? null : view.name}
         {...(measure ? {} : { 'data-usage-icon': view.vendor })}
       />
       {view.line !== null && <Badge view={view} measure={measure} />}
-      {view.refreshing && <RefreshingMark view={view} measure={measure} />}
+      {/* 측정 사본은 갱신 중 표식을 늘 센다 — 조회가 켜고 꺼질 때 자연 폭이 바뀌면 경계에서 조회 동안만 단계가
+          뒤집힌다(2↔3 이면 ⟳ 까지 크게 움직여 누르던 자리를 잃는다). 대가 = 1·2단이 표식 폭만큼 일찍 넘어간다. */}
+      {(view.refreshing || measure) && <RefreshingMark view={view} measure={measure} />}
     </span>
   )
 }

@@ -3,7 +3,7 @@
 // 스토어는 실물(`usageStore`)이고 값은 `setState` 로 심는다 — 받기 규칙(merge)은 `usageStore.test.ts` 가 잰다.
 // command 도 실물(`usageSlot.*` 등록)이다 — ⟳·표시 토글이 command 를 거쳐 스토어·레이아웃 쓰기에 닿는 것까지 잰다.
 // 시계는 둘 다 가짜다: 벽시계(`Date`)는 가짜 타이머, 받은 시각 기준 시계(`performance.now`)는 spy.
-// jsdom 엔 레이아웃이 없어 폭은 가짜 ResizeObserver 로 직접 준다(실제 폭 + 두 단계의 자연 폭).
+// jsdom 엔 레이아웃이 없어 폭은 가짜 ResizeObserver 로 직접 준다(슬롯 크기 · ⟳ 자리 폭 + 두 단계의 자연 폭).
 
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -138,20 +138,35 @@ function valueOf(vendor: string, window: string, root: ParentNode = summary()): 
   return q(`[data-usage-vendor="${vendor}"][data-usage-window="${window}"] [data-usage-value]`, root)
 }
 
-/**
- * 실제 폭과 1·2단 자연 폭을 준다 — 숨은 렌더를 재는 관찰자와 같은 하나다. 높이는 기본으로 넉넉하다(슬롯 1000 · 2단 30).
- */
-function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 30 } = {}): void {
+/** ⟳ 자리의 폭(⟳ + 오른쪽 여백)과 요약 버튼의 좌우 여백 합 — 실물 값에 맞춘 가짜 크기. */
+const REFRESH_AREA_W = 26
+const SUMMARY_PAD_X_TOTAL = 12
+
+function liveObserver(): FakeResizeObserver {
   const live = FakeResizeObserver.instances.filter(o => !o.disconnected)
   expect(live).toHaveLength(1)
+  return live[0]
+}
+
+/** 관찰자가 받는 크기를 그대로 준다 — 슬롯 루트 · ⟳ 자리 · 1·2단 측정 사본. */
+function fireSizes(s: { rootW: number; rootH: number; refreshW: number; s1: number; s2: number; s2h: number }): void {
   act(() =>
-    live[0].fire([
-      [q('[data-usage-slot]')!, 800, rootH],
-      [q('[data-usage-content]')!, avail],
-      [q('[data-usage-measure="1"]')!, s1],
-      [q('[data-usage-measure="2"]')!, s2, s2h],
+    liveObserver().fire([
+      [q('[data-usage-slot]')!, s.rootW, s.rootH],
+      [q('[data-usage-refresh-area]')!, s.refreshW, s.refreshW === 0 ? 0 : 22],
+      [q('[data-usage-measure="1"]')!, s.s1],
+      [q('[data-usage-measure="2"]')!, s.s2, s.s2h],
     ]),
   )
+}
+
+/**
+ * 내용이 쓸 폭(`avail`)과 1·2단 자연 폭을 준다 — 슬롯 폭은 `avail` + ⟳ 자리 + 요약 버튼 여백으로 거꾸로 세운다.
+ * 높이는 기본으로 넉넉하다(슬롯 1000 · 2단 30).
+ */
+function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 30 } = {}): void {
+  const refreshW = refreshButton() ? REFRESH_AREA_W : 0
+  fireSizes({ rootW: avail + refreshW + SUMMARY_PAD_X_TOTAL, rootH, refreshW, s1, s2, s2h })
 }
 
 /**
@@ -404,9 +419,10 @@ describe('폭 단계', () => {
       expect(m.querySelector('[aria-label]')).toBeNull()
       expect(m.querySelector('[title]')).toBeNull()
       expect(m.textContent).toContain('62%')
-      // 보이는 쪽과 같은 모양 — 한 격자 · 아이콘 · 리셋 시각.
+      // 보이는 쪽과 같은 모양 — 한 격자 · 아이콘 · 리셋 시각. 갱신 중 표식은 조회가 없어도 늘 센다.
       expect((m.firstElementChild as HTMLElement).style.display).toBe('grid')
-      expect(m.querySelectorAll('svg')).toHaveLength(1)
+      expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(1)
+      expect(m.querySelectorAll('svg.lucide')).toHaveLength(1)
       expect(m.textContent).toContain(resetText(NOW + 7_980))
     }
     expect(q('[data-usage-measure="1"]')!.parentElement!.style.visibility).toBe('hidden')
@@ -731,7 +747,7 @@ describe('작은 표시의 ⟳', () => {
       const refresh = refreshButton()!
       expect(refresh.tagName).toBe('BUTTON')
       expect(refresh.getAttribute('type')).toBe('button')
-      expect(refresh.previousElementSibling).toBe(summary())
+      expect(refresh.parentElement!.previousElementSibling).toBe(summary())
       expect(refresh.style.border).toBe('1px solid var(--border)')
       expect(q('svg', refresh)).not.toBeNull()
       expect(refresh.textContent).toBe('')
@@ -956,26 +972,185 @@ describe('팝업의 표시 토글 줄', () => {
   })
 })
 
-// ── 단계 고르기와 ⟳ — ⟳ 는 재는 폭 밖에서 제 폭을 먼저 가져간다 ──
+// ── 단계 고르기와 ⟳ — ⟳ 는 내용 바로 옆 · 단계 판정의 폭은 슬롯 폭 − ⟳ 자리 ──
 describe('단계 측정과 ⟳', () => {
-  it('⟳ 는 줄지 않는 형제 · 요약 버튼이 남는 폭을 다 쓴다 — 재는 내용 폭(avail)은 ⟳ 몫이 빠진 값이다', () => {
+  it('줄 = 요약 버튼 · ⟳ 자리(줄지 않음) 둘뿐 — ⟳ 는 측정 사본·요약 버튼 안에 없다(넣으면 ⟳ 몫을 두 번 뺀다)', () => {
     seed(snap('claude'))
     seed(snap('codex'))
     mount()
     const row = q('[data-usage-row]')!
+    const area = q('[data-usage-refresh-area]')!
     expect(row.style.display).toBe('flex')
-    expect([...row.children]).toEqual([summary(), refreshButton()])
+    expect([...row.children]).toEqual([summary(), area])
+    expect([...area.children]).toEqual([refreshButton()])
+    expect(area.style.flexGrow).toBe('0')
+    expect(area.style.flexShrink).toBe('0')
     expect(summary().style.flexGrow).toBe('1')
     expect(summary().style.flexShrink).toBe('1')
     expect(parseFloat(summary().style.minWidth)).toBe(0)
-    expect(refreshButton()!.style.flexShrink).toBe('0')
-    expect(refreshButton()!.style.flexGrow).toBe('0')
-    // 폭을 재는 요소(avail)는 요약 버튼 안 — ⟳ 는 거기에도, 두 측정 사본에도 없다(넣으면 ⟳ 몫을 두 번 뺀다).
-    const observed = FakeResizeObserver.instances.filter(o => !o.disconnected)[0].observed
-    expect(observed[1]).toBe(q('[data-usage-content]'))
-    expect(summary().contains(observed[1])).toBe(true)
     for (const n of ['1', '2']) expect(q(`[data-usage-measure="${n}"] [data-usage-refresh]`)).toBeNull()
     expect(q('[data-usage-content] [data-usage-refresh]')).toBeNull()
+  })
+
+  it('⟳ 는 모든 단계에서 내용 바로 옆 — 1·2단은 막대 칸(1fr)이 요약 버튼을 채우고, 3단은 줄이 내용 폭으로 줄어든다(슬롯 폭 상한)', () => {
+    seed(snap('claude'))
+    seed(snap('codex'))
+    mount()
+    const row = q('[data-usage-row]')!
+    for (const n of [1, 2] as const) {
+      toStage(n)
+      expect(row.style.width).toBe('')
+      const grid = q('[data-usage-grid]', summary())!
+      expect(tracks(grid.style.gridTemplateColumns)).toContain('minmax(4em, 1fr)')
+      expect(grid.style.display).toBe('grid')
+    }
+    toStage(3)
+    expect(row.style.width).toBe('fit-content')
+    expect(row.style.maxWidth).toBe('100%')
+    // 줄이 줄어도 요약 버튼은 슬롯보다 좁아질 수 있어야 한다 — 내용을 자르고 ⟳ 자리는 남긴다.
+    expect(parseFloat(summary().style.minWidth)).toBe(0)
+    expect(q('[data-usage-content]')!.style.overflow).toBe('hidden')
+    toStage(1)
+    expect(row.style.width).toBe('')
+  })
+
+  it('단계 판정 폭 = 슬롯 폭 − ⟳ 자리 − 요약 버튼 여백 — ⟳ 자리가 넓어지면 문턱도 움직인다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const at = (rootW: number, refreshW = REFRESH_AREA_W) => {
+      fireSizes({ rootW, rootH: 1000, refreshW, s1: 400, s2: 200, s2h: 30 })
+      return stage()
+    }
+    expect(at(400 + REFRESH_AREA_W + SUMMARY_PAD_X_TOTAL)).toBe('1')
+    expect(at(400 + REFRESH_AREA_W + SUMMARY_PAD_X_TOTAL - 1)).toBe('2')
+    expect(at(200 + REFRESH_AREA_W + SUMMARY_PAD_X_TOTAL)).toBe('2')
+    expect(at(200 + REFRESH_AREA_W + SUMMARY_PAD_X_TOTAL - 1)).toBe('3')
+    expect(at(400 + REFRESH_AREA_W + SUMMARY_PAD_X_TOTAL, REFRESH_AREA_W + 1)).toBe('2')
+  })
+
+  it('고른 단계가 제 입력으로 되돌아오지 않는다 — 3단으로 줄어든 내용 폭을 재지 않아, 넓어지면 1단으로 돌아간다', () => {
+    seed(snap('claude'))
+    seed(snap('codex'))
+    mount()
+    // 단계에 따라 폭이 바뀌는 요소(줄 · 요약 버튼 · 보이는 내용)는 관찰 대상이 아니다.
+    const observed = liveObserver().observed
+    for (const sel of ['[data-usage-row]', '[data-usage-summary]', '[data-usage-content]']) {
+      expect(observed).not.toContain(q(sel))
+    }
+    const wide = { rootW: 500, rootH: 1000, refreshW: REFRESH_AREA_W, s1: 400, s2: 200, s2h: 30 }
+    fireSizes(wide)
+    expect(stage()).toBe('1')
+    fireSizes({ ...wide, rootW: 120 })
+    expect(stage()).toBe('3')
+    // 3단 그림으로 다시 배치된 뒤 같은 크기를 또 알려도 3단에 머문다(오가지 않는다).
+    fireSizes({ ...wide, rootW: 120 })
+    expect(stage()).toBe('3')
+    // 관찰 대상이 아닌 요소(3단에서 줄어든 내용)의 알림은 판정에 들지 않는다.
+    act(() => liveObserver().fire([[q('[data-usage-content]')!, 40]]))
+    expect(stage()).toBe('3')
+    fireSizes(wide)
+    expect(stage()).toBe('1')
+    act(() => liveObserver().fire([[q('[data-usage-content]')!, 40]]))
+    expect(stage()).toBe('1')
+  })
+
+  it('안내 문구(켠 회사 없음) — ⟳ 자리는 비어 있고 폭 0 · 줄은 슬롯 폭을 채워 안내 전체가 누르는 자리다', () => {
+    mount(false, false)
+    const area = q('[data-usage-refresh-area]')!
+    expect(area.children).toHaveLength(0)
+    expect(liveObserver().observed).toContain(area)
+    fireSizes({ rootW: 300, rootH: 1000, refreshW: 0, s1: 0, s2: 0, s2h: 0 })
+    expect(stage()).toBe('1')
+    expect(q('[data-usage-row]')!.style.width).toBe('')
+    expect(summary().style.flexGrow).toBe('1')
+  })
+
+  it('3단 — 쉬는 줄은 끝에 갱신 중 표식과 같은 모양·폭의 빈자리, 갱신 중인 줄은 앞의 표식만(⟳ 가 움직이지 않게)', () => {
+    seed(snap('claude'))
+    seed(snap('codex'))
+    mount()
+    toStage(3)
+    const nameUnitOf = (vendor: AgentBackendKind) => q(`[data-usage-icon="${vendor}"]`, summary())!.parentElement!
+    const numbersOf = (vendor: AgentBackendKind) => q('[data-usage-numbers]', nameUnitOf(vendor).parentElement!)!
+    const spaceOf = (vendor: AgentBackendKind) => numbersOf(vendor).nextElementSibling as HTMLElement | null
+    for (const vendor of ['claude', 'codex'] as const) {
+      const line = nameUnitOf(vendor).parentElement!
+      const group = numbersOf(vendor).parentElement!
+      expect([...line.children]).toEqual([nameUnitOf(vendor), group])
+      expect(group.style.flexWrap).toBe('wrap')
+      const space = spaceOf(vendor)!
+      expect([...group.children]).toEqual([numbersOf(vendor), space])
+      // 드러나지 않는다 — 보조기술에도, cdp 값 표식에도.
+      expect(space.getAttribute('aria-hidden')).toBe('true')
+      expect(space.style.visibility).toBe('hidden')
+      for (const el of [space, ...space.querySelectorAll('*')]) {
+        const names = el.getAttributeNames()
+        expect(names.filter(a => a.startsWith('data-usage') || a === 'role' || a === 'title' || a === 'aria-label')).toEqual(
+          [],
+        )
+      }
+      // 좁을 때 먼저 다음 줄로 넘어가 사라진다 — 넘어간 줄이 높이를 보태지 않는다.
+      expect(space.style.height).toBe('0px')
+      expect(space.style.flexShrink).toBe('0')
+      expect(space.style.marginLeft).toBe(nameUnitOf(vendor).style.gap)
+      expect(q('[data-usage-refreshing]', nameUnitOf(vendor))).toBeNull()
+    }
+    const idleCopy = spaceOf('claude')!.firstElementChild as HTMLElement
+    act(() => useUsageStore.setState({ pending: { claude: 1 } }))
+    // 갱신 중인 줄: 빈자리가 빠지고 이름 묶음에 표식이 든다 — 같은 모양(돌기만 다르다) · 같은 틈.
+    expect(spaceOf('claude')).toBeNull()
+    expect([...numbersOf('claude').parentElement!.children]).toEqual([numbersOf('claude')])
+    const mark = q('[data-usage-refreshing="claude"]', nameUnitOf('claude'))!
+    expect(mark.style.cssText).toBe(idleCopy.style.cssText)
+    const cls = (el: Element) => el.querySelector('svg')!.getAttribute('class')!.replace('animate-spin', '').trim()
+    expect(cls(mark)).toBe(cls(idleCopy))
+    expect(idleCopy.querySelector('svg')!.getAttribute('class')).not.toContain('animate-spin')
+    // 다른 회사 줄은 그대로 빈자리를 둔다.
+    expect(spaceOf('codex')).not.toBeNull()
+    act(() => useUsageStore.setState({ pending: {} }))
+    expect(spaceOf('claude')).not.toBeNull()
+    expect(q('[data-usage-refreshing]', summary())).toBeNull()
+  })
+
+  it('측정 사본은 조회 여부와 상관없이 같다 — 갱신 중 표식을 늘 세어, ⟳ 를 눌러도 단계 판정 입력이 바뀌지 않는다', () => {
+    seed(snap('claude'))
+    seed(snap('codex'))
+    mount()
+    const copies = () => ['1', '2'].map(n => q(`[data-usage-measure="${n}"]`)!.innerHTML)
+    const idle = copies()
+    for (const n of ['1', '2']) {
+      const m = q(`[data-usage-measure="${n}"]`)!
+      expect(m.querySelectorAll('svg.lucide')).toHaveLength(2)
+      for (const svg of m.querySelectorAll('svg.lucide')) expect(svg.getAttribute('class')).not.toContain('animate-spin')
+    }
+    act(() => useUsageStore.setState({ pending: { claude: 1 } }))
+    expect(q('[data-usage-refreshing="claude"]', summary())).not.toBeNull()
+    expect(copies()).toEqual(idle)
+    act(() => {
+      useUsageStore.setState({ pending: {} })
+      seed(snap('codex', { in_flight: true }))
+    })
+    expect(q('[data-usage-refreshing="codex"]', summary())).not.toBeNull()
+    expect(copies()).toEqual(idle)
+    act(() => seed(snap('codex')))
+    expect(q('[data-usage-refreshing]', summary())).toBeNull()
+    expect(copies()).toEqual(idle)
+  })
+
+  it('1·2단과 측정 사본엔 빈자리가 없다(막대 칸이 표식 폭을 받는다)', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const spaces = (root: ParentNode) =>
+      [...root.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')].filter(
+        el => el.style.visibility === 'hidden' && el.style.height === '0px',
+      )
+    for (const n of [1, 2] as const) {
+      toStage(n)
+      expect(spaces(summary())).toEqual([])
+    }
+    for (const n of ['1', '2']) expect(spaces(q(`[data-usage-measure="${n}"]`)!)).toEqual([])
+    toStage(3)
+    expect(spaces(summary())).toHaveLength(1)
   })
 
   it('단계를 오가도 ⟳ 는 같은 요소로 남는다(폭이 단계에 따라 달라지지 않는다)', () => {
@@ -1357,7 +1532,8 @@ describe('측정 사본과 단계 고르기', () => {
     expect(tracks((m1.firstElementChild as HTMLElement).style.gridTemplateColumns)).toHaveLength(9)
     expect(tracks((m2.firstElementChild as HTMLElement).style.gridTemplateColumns)).toHaveLength(5)
     for (const m of [m1, m2]) {
-      expect(m.querySelectorAll('svg')).toHaveLength(2)
+      expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(2)
+      expect(m.querySelectorAll('svg.lucide')).toHaveLength(2)
       expect(m.textContent).toContain(resetText(NOW + 86_400 * 3))
     }
     setWidths(300, 400, 250)
@@ -1368,13 +1544,13 @@ describe('측정 사본과 단계 고르기', () => {
     expect(stage()).toBe('1')
   })
 
-  it('관찰 대상 = 슬롯 루트 · 보이는 내용 · 두 측정 사본 — 측정 사본은 그 단계에서 보이는 것과 같은 모양이다', () => {
+  it('관찰 대상 = 슬롯 루트 · ⟳ 자리 · 두 측정 사본 — 측정 사본은 그 단계에서 보이는 것과 같은 모양이다', () => {
     seed(snap('claude', { state: { kind: 'NeedsLogin', detail: null } }))
     seed(snap('codex', { five_hour: { used_pct: null, resets_at: NOW + 600, age_secs: 0, expired: false } }))
     mount()
     const m = { 1: q('[data-usage-measure="1"]')!, 2: q('[data-usage-measure="2"]')! }
     const live = FakeResizeObserver.instances.filter(o => !o.disconnected)
-    expect(live[0].observed).toEqual([q('[data-usage-slot]'), q('[data-usage-content]'), m[1], m[2]])
+    expect(live[0].observed).toEqual([q('[data-usage-slot]'), q('[data-usage-refresh-area]'), m[1], m[2]])
     for (const n of [1, 2] as const) {
       toStage(n)
       const shown = q('[data-usage-content]')!
@@ -1382,7 +1558,10 @@ describe('측정 사본과 단계 고르기', () => {
       const copyGrid = m[n].firstElementChild as HTMLElement
       expect(copyGrid.style.gridTemplateColumns).toBe(shownGrid.style.gridTemplateColumns)
       expect(m[n].textContent).toBe(shown.textContent)
-      expect(m[n].querySelectorAll('svg')).toHaveLength(shown.querySelectorAll('svg').length)
+      // 회사 아이콘은 같은 수 · 갱신 중 표식은 사본에만(조회가 없어도 회사마다 하나).
+      expect(m[n].querySelectorAll('svg:not(.lucide)')).toHaveLength(shown.querySelectorAll('svg:not(.lucide)').length)
+      expect(shown.querySelectorAll('svg.lucide')).toHaveLength(0)
+      expect(m[n].querySelectorAll('svg.lucide')).toHaveLength(2)
       const placed = shown.querySelectorAll('[style*="grid-column"]').length
       expect(placed).toBeGreaterThan(0)
       expect(m[n].querySelectorAll('[style*="grid-column"]')).toHaveLength(placed)
