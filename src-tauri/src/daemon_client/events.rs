@@ -23,7 +23,7 @@
 // ADR-0012
 
 use engram_dashboard_protocol::{
-    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport,
+    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport, UsageLimitSnapshot,
 };
 use tauri::Emitter;
 
@@ -65,9 +65,13 @@ impl ConnectionStateEvent {
 /// — 창이 아직 없거나 채널이 닫힌 것은 연결을 되돌릴 사유가 아니고, 프론트는 다음 broadcast·재조회로
 /// 회복한다(`crate::layout::LayoutEvents` 와 같은 계약).
 ///
-/// ★여기 있는 여섯 가지가 연결 태스크가 하는 emit 전부다★ — 그보다 넓히지 말 것. 넓히는 순간 이
+/// ★여기 있는 일곱 가지가 연결 태스크가 하는 emit 전부다★ — 그보다 넓히지 말 것. 넓히는 순간 이
 /// 포트는 「연결 태스크가 프론트에 알리는 것」이 아니라 「AppHandle 대용품」이 되고, 그러면 다시
 /// 창 없이 못 세우는 것들이 딸려 들어온다.
+/// ★일곱째([`Self::usage_limits_updated`])가 그 경고에 안 걸리는 이유★: 데몬 방송 한 장을 1:1 로 옮기는
+/// 같은 부류이고, 덧붙는 `labels`·`socket_epoch` 는 호출 자리가 순수 모듈의 결과와 자기 소켓 표식을 넘길
+/// 뿐이다 — 대조·재전송은 포트 밖(호출 자리와 `super::usage_interest`)에 있고 포트는 계산된 값만 받는다
+/// (TRD S21 usage-limit-slot §6 #23).
 pub(crate) trait DaemonEvents: Send + Sync {
     /// 연결 수명 상태 한 줄. ★wire 에 실리는 payload 는 여전히 **문자열**이고 그것이 프론트와의 계약이다★
     /// — 바뀐 것은 그 문자열을 **누가 짓나**뿐이다([`ConnectionStateEvent`] 가 어휘를 쥐고 어댑터가 굽는다).
@@ -88,6 +92,25 @@ pub(crate) trait DaemonEvents: Send + Sync {
 
     /// 프리셋 목록 갱신(ADR-0061 — CRUD 후 전 창 동기화).
     fn preset_list_updated(&self, presets: &[Preset]);
+
+    /// 사용량 한 장 — 데몬 방송 하나당 한 번. `labels` = 그 한 장을 받을 창(사용량 슬롯이 있는 창 — 비지
+    /// 않는다), `socket_epoch` = 그 한 장이 온 소켓의 표식(ADR-0195 · 받는 쪽은 이 값이 커질 때만 revision 을
+    /// 잊는다). 창을 고르는 것은 받는 웹뷰다 — 전 webview 로 내보낸다.
+    fn usage_limits_updated(
+        &self,
+        snapshot: &UsageLimitSnapshot,
+        labels: &[String],
+        socket_epoch: u64,
+    );
+}
+
+/// `"usage-limits-updated"` 의 payload — ★칸 이름이 웹뷰와의 계약이다★(TRD S21 usage-limit-slot §1-8 의
+/// `{labels, socket_epoch, snapshot}`). 바꾸면 웹뷰 수신 쪽과 함께 바꾼다.
+#[derive(serde::Serialize, Clone)]
+struct UsageLimitsUpdatedPayload<'a> {
+    labels: &'a [String],
+    socket_epoch: u64,
+    snapshot: &'a UsageLimitSnapshot,
 }
 
 /// 운영 어댑터 — 실 `AppHandle` 로 전 webview 에 push 한다.
@@ -138,6 +161,22 @@ impl DaemonEvents for TauriEmitter {
     fn preset_list_updated(&self, presets: &[Preset]) {
         let _ = self.0.emit("preset-list-updated", presets);
     }
+
+    fn usage_limits_updated(
+        &self,
+        snapshot: &UsageLimitSnapshot,
+        labels: &[String],
+        socket_epoch: u64,
+    ) {
+        let _ = self.0.emit(
+            "usage-limits-updated",
+            UsageLimitsUpdatedPayload {
+                labels,
+                socket_epoch,
+                snapshot,
+            },
+        );
+    }
 }
 
 /// 알림을 버리는 조립 — ★하네스 전용이다★.
@@ -161,4 +200,11 @@ impl DaemonEvents for NoDaemonEvents {
     fn restore_result(&self, _report: &RestoreReport) {}
     fn profile_list_updated(&self, _profiles: &[AgentProfile]) {}
     fn preset_list_updated(&self, _presets: &[Preset]) {}
+    fn usage_limits_updated(
+        &self,
+        _snapshot: &UsageLimitSnapshot,
+        _labels: &[String],
+        _socket_epoch: u64,
+    ) {
+    }
 }

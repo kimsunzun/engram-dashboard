@@ -955,8 +955,12 @@ mod tests {
             }
             assert!(mismatches(&lines) > 0, "debug 줄을 잡을 수 없다");
             lines.lock().unwrap().clear();
+            // 세는 세 번도 매번 캐시를 다시 짓는다 — 위 경합은 한 번 잡힌 뒤에도 다시 날 수 있다.
             (101..=103)
-                .map(|rev| ui.on_snapshot(1, &snap(Claude, rev), &[Claude], t0).resend)
+                .map(|rev| {
+                    tracing::callsite::rebuild_interest_cache();
+                    ui.on_snapshot(1, &snap(Claude, rev), &[Claude], t0).resend
+                })
                 .collect::<Vec<_>>()
         });
         assert_eq!(resends, vec![Some(set(&[Claude, Codex])); 3]);

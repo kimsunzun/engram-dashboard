@@ -34,7 +34,7 @@ pub mod replay_flight;
 pub mod usage_interest;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, DaemonInfo};
@@ -48,6 +48,7 @@ use events::{ConnectionStateEvent, DaemonEvents, TauriEmitter};
 use events::NoDaemonEvents;
 use inbound::InboundSlot;
 use lifecycle::Lifecycle;
+use usage_interest::UsageInterest;
 
 use crate::output_channel::WindowChannelRegistry;
 use crate::output_router::OutputRouter;
@@ -65,6 +66,26 @@ pub enum ConnectionState {
     // 비의도 끊김 후 재연결 시도 중(백오프 sleep ~ 다음 attach 시도). 소진 시 Down, 성공 시 Connected.
     // wsTransport `reconnecting` 상태 대응 — 명시 close(Down)와 구분된다(자동 회복 진행 중).
     Reconnecting,
+}
+
+/// 셸 하나의 사용량 관심 상태([`UsageInterest`])의 공유 손잡이 — 연결 태스크와 관심을 바꾸는 쪽(레이아웃
+/// 재계산 · 숨김 · 줄임 타이머)과 웹뷰 pull 이 같은 하나를 쥔다(TRD S21 usage-limit-slot §1-7).
+///
+/// ★락 차례 = `ViewManager → 이 락 → lifecycle`★ — 잎이 아니다: 이 락 안에서 넛지
+/// ([`DaemonClient::nudge_usage_interest`])를 넣으면 그 안에서 lifecycle 락을 잡는다. lifecycle 은 어느 쪽으로도
+/// 되부르지 않고 연결 태스크는 ViewManager 락을 잡지 않아 역순이 없다. 이 락 안에서는 [`UsageInterest`] 의
+/// 메서드와 그 넛지만 부르고, ★소켓 쓰기·emit 은 락을 놓은 뒤에 한다★(ADR-0006).
+///
+/// ★오염돼도 되찾는다★: 그 메서드 안에서 패닉이 나 상태가 반쯤 고쳐진 채 남아도 결과는 데몬과 어긋난 구독이나
+/// 빗나간 전달 대상이고, 다음 재계산 · 스냅숏 대조 · 새 소켓이 다시 맞춘다. 오염을 전파하면 연결 태스크가 그
+/// 자리에서 죽어 출력·명령이 통째로 멎는다.
+#[derive(Clone, Default)]
+pub struct SharedUsageInterest(Arc<Mutex<UsageInterest>>);
+
+impl SharedUsageInterest {
+    pub fn lock(&self) -> MutexGuard<'_, UsageInterest> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 // 데몬 발견 경계(seam). connect 경로는 spawn 가능(`ensure_spawn`), ensure 경로는 no-spawn
@@ -167,6 +188,9 @@ pub struct DaemonClient {
     /// ★데몬이 배달한 명령의 입구★(ADR-0155 결정 4). 늦게 채워진다 — 표의 스폰 포트가 이 클라이언트를
     ///   쥐어 조립에 순환이 있기 때문이다(`inbound::InboundSlot` doc). 연결 task 마다 clone 해 넘긴다.
     inbound: Arc<InboundSlot>,
+    /// 사용량 관심 — 재연결 task 수명을 넘어 산다(관심은 레이아웃에서 나오고 소켓과 무관하다). 연결 task 마다
+    ///   clone 해 넘긴다.
+    usage: SharedUsageInterest,
 }
 
 impl DaemonClient {
@@ -231,6 +255,7 @@ impl DaemonClient {
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
             events,
+            usage: SharedUsageInterest::default(),
         }
     }
 
@@ -262,6 +287,7 @@ impl DaemonClient {
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
             events: Arc::new(NoDaemonEvents),
+            usage: SharedUsageInterest::default(),
         }
     }
 
@@ -287,6 +313,7 @@ impl DaemonClient {
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
             events: Arc::new(NoDaemonEvents),
+            usage: SharedUsageInterest::default(),
         }
     }
 
@@ -320,6 +347,7 @@ impl DaemonClient {
             inbound: Arc::new(InboundSlot::new()),
             // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로(실물 어댑터).
             events: Arc::new(TauriEmitter(app)),
+            usage: SharedUsageInterest::default(),
         })
     }
 
@@ -357,6 +385,12 @@ impl DaemonClient {
     // 상태 변경 구독(watch). 호출자가 await 로 다음 전이를 기다리거나 현재값을 본다.
     pub fn subscribe_state(&self) -> watch::Receiver<ConnectionState> {
         self.state_rx.clone()
+    }
+
+    /// 사용량 관심 상태 — 관심을 바꾸는 쪽은 락 안에서 재계산한 뒤 결과에 따라
+    /// [`Self::nudge_usage_interest`] 를 부르고, 웹뷰 pull 은 캐시를 읽는다. 락 차례는 [`SharedUsageInterest`] doc.
+    pub fn usage_interest(&self) -> &SharedUsageInterest {
+        &self.usage
     }
 
     // 명시 연결 진입점(ADR-0021 §1) = wsTransport `start()` 대응.
@@ -536,6 +570,7 @@ impl DaemonClient {
             self.registry.clone(),
             self.events.clone(),
             self.inbound.clone(),
+            self.usage.clone(),
         ));
 
         // Hello 수신(=connected) 또는 핸드셰이크 실패를 기다린다. ★락 미보유 await★.
@@ -545,7 +580,13 @@ impl DaemonClient {
                 //   올렸으면 이 연결은 stale 이다 — cmd_tx 를 저장하면 좀비 채널이 된다. store_cmd_if_current
                 //   가 "세대 비교 + 저장" 을 원자로 해, current 일 때만 저장한다. stale 이면 저장하지 않고
                 //   cmd_tx 가 여기서 drop → 연결 task 의 cmd_rx 가 EOF → 그 task 도 곧 정리된다.
-                if !self.lifecycle.store_cmd_if_current(my_gen, cmd_tx) {
+                if self.lifecycle.store_cmd_if_current(my_gen, cmd_tx) {
+                    // ★채널을 꽂은 직후 사용량 넛지 한 장(TRD S21 usage-limit-slot §1-7 「새 소켓」)★: 연결
+                    //   task 는 창구를 연 직후 관심을 새 소켓에 이미 보냈지만, 여기까지 채널이 비어 있어 그 사이의
+                    //   재계산 넛지는 no-op 이었다 — 그 변경은 아무 데도 안 갔다. 대조는 `sent` 기준이라 그 틈에
+                    //   든 것이 없으면 이 넛지는 아무것도 안 보낸다.
+                    self.nudge_usage_interest();
+                } else {
                     // generation 가드 발동: 핸드셰이크 사이 더 새 connect/close 가 세대를 올림 → cmd_tx
                     //   미저장(좀비 채널 차단). 이 caller 입장에선 연결이 밀렸으나 핸드셰이크 자체는 성공.
                     tracing::debug!(
@@ -827,6 +868,24 @@ impl DaemonClient {
         self.try_enqueue(|socket| ConnectionCommand::Fire { cmd, socket }, "fire");
     }
 
+    /// 사용량 관심이 바뀌었을 수 있다 — 연결 task 에 **집합 없는** 넛지 한 장(TRD S21 usage-limit-slot §1-7
+    /// 「한 직렬 경로」). 보낼 집합은 연결 task 가 꺼낼 때 [`UsageInterest::sync`] 로 **그때의** 관심을 읽는다 —
+    /// 그래서 넛지가 몇 장이든 어떤 순서로 처리되든 소켓의 마지막 한 장이 최신 관심이다. 집합을 여기서 읽어
+    /// 실어 보내면 두 변경이 읽기와 전송 사이에서 엇갈릴 때 옛 집합이 마지막으로 닿는다 — 되살리지 말 것
+    /// (TRD §3 #74).
+    ///
+    /// 비블로킹이라 [`SharedUsageInterest`] 락 안에서 불러도 된다(락 차례는 그 doc).
+    /// ★창구가 닫혀 있으면 no-op 이고 그래도 된다★: 새 소켓은 창구를 열 때 관심을 통째로 다시 보내고, 첫 연결·
+    /// 승계에서 창구는 열렸는데 채널이 아직 안 꽂힌 틈은 채널을 꽂은 직후의 넛지 한 장이 메운다
+    /// (`start_connection`). 명령 채널이 차서 버려진 넛지는 그 연결의 다음 스냅숏 대조가 고친다 — 구독이
+    /// 하나도 없는 연결은 대조할 계기가 없어 ⟳ 가 고친다(TRD §6 #25).
+    pub fn nudge_usage_interest(&self) {
+        self.try_enqueue(
+            |socket| ConnectionCommand::UsageInterest { socket },
+            "usage-interest",
+        );
+    }
+
     // ★뷰 주도 replay 채번(ADR-0046 M1 — single-flight, 반환 gen)★. 뷰가 mount/remount 시 호출하면 연결
     // task 가 single-flight 로 wire `Subscribe{after_seq:None}` 를 보내거나(idle) 다음 1회에 병합(in-flight)
     // 하고, 배정된 `gen`(세대)을 돌려준다. 뷰는 그 gen 이상의 성공 마커에만 flush(gen 펜스). 마커는 연결
@@ -875,8 +934,9 @@ impl DaemonClient {
     fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
             // 창구가 닫힘 — 조용히 no-op(ADR-0046: src-tauri 무상태). ★여기서 담아 두지 않는 것이
-            //   ADR-0195 이고, 그 대가는 명령마다 다르다★ — 무해한 쪽과 유실되는 쪽의 판정은 두 진입점
-            //   doc 에 있다([`DaemonClient::unsubscribe`] · [`DaemonClient::send_fire_and_forget`]).
+            //   ADR-0195 이고, 그 대가는 명령마다 다르다★ — 무해한 쪽과 유실되는 쪽의 판정은 각 진입점
+            //   doc 에 있다([`DaemonClient::unsubscribe`] · [`DaemonClient::send_fire_and_forget`] ·
+            //   [`DaemonClient::nudge_usage_interest`]).
             tracing::debug!(%kind, "fire-and-forget: 창구 닫힘 — no-op");
             return;
         };

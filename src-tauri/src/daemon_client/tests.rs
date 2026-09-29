@@ -3409,7 +3409,7 @@ async fn foreign_socket_command_is_dropped_and_its_waiter_is_woken() {
         "gen 을 잘못 돌려주지 않고 RecvError 로 깨워야(호출자는 재요청 안전 Err 를 본다)"
     );
 
-    // ② 깨울 대기자가 없는 둘도 통과시키지 않는다(옛 소켓으로 가야 할 것이 새 소켓으로 나가면 안 된다).
+    // ② 깨울 대기자가 없는 셋도 통과시키지 않는다(옛 소켓으로 가야 할 것이 새 소켓으로 나가면 안 된다).
     assert!(
         reject_foreign_command(
             ConnectionCommand::Unsubscribe {
@@ -3436,6 +3436,14 @@ async fn foreign_socket_command_is_dropped_and_its_waiter_is_woken() {
         )
         .is_none(),
         "옛 소켓 몫 Fire 는 버려져야"
+    );
+    assert!(
+        reject_foreign_command(ConnectionCommand::UsageInterest { socket: OLD }, LIVE).is_none(),
+        "옛 소켓 몫 사용량 넛지는 버려져야"
+    );
+    assert!(
+        reject_foreign_command(ConnectionCommand::UsageInterest { socket: LIVE }, LIVE).is_some(),
+        "지금 소켓 몫 사용량 넛지는 통과해야"
     );
 
     // ③ 답장은 표식이 어긋나도 **여기서는** 안 걸린다 — 대조·로그는 자기 팔이 한다(정본은 그 자리).
@@ -3669,7 +3677,7 @@ async fn duplicate_request_id_insert_errs_prev_slot() {
 // ══════════════════════════════════════════════════════════════════════════════════
 
 use engram_dashboard_protocol::{
-    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport,
+    AgentId, AgentInfo, AgentProfile, AgentStatus, Preset, RestoreReport, UsageLimitSnapshot,
 };
 
 use super::events::{ConnectionStateEvent, DaemonEvents};
@@ -3679,6 +3687,11 @@ use super::events::{ConnectionStateEvent, DaemonEvents};
 #[derive(Default)]
 struct RecordingEvents {
     seen: std::sync::Mutex<Vec<String>>,
+    // `Connected` 발화마다 앞에서 하나씩 꺼내 돌리는 훅(빈 줄이면 아무것도 안 한다). ★연결 task 안에서 동기로
+    //   돈다★ — 그 자리는 창구를 연 뒤 · main_loop 가 명령 채널을 읽기 전 · (첫 연결이면) 호출자가 명령
+    //   채널을 꽂기 전이라, 그 틈을 벽시계 없이 겨냥하는 유일한 손잡이다. ★훅 안에서 패닉하지 말 것★ — 연결
+    //   task 가 죽어 시험이 단언 대신 시한으로 끝난다. 관측한 것은 밖으로 넘겨 시험 본문에서 단언한다.
+    on_connected: std::sync::Mutex<std::collections::VecDeque<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RecordingEvents {
@@ -3692,12 +3705,29 @@ impl RecordingEvents {
     fn seen(&self) -> Vec<String> {
         self.seen.lock().expect("recording events poisoned").clone()
     }
+
+    fn then_on_connected(&self, hook: impl FnOnce() + Send + 'static) {
+        self.on_connected
+            .lock()
+            .expect("recording events poisoned")
+            .push_back(Box::new(hook));
+    }
 }
 
 impl DaemonEvents for RecordingEvents {
     fn connection_state(&self, state: ConnectionStateEvent) {
         // ★`as_str()` 을 거쳐 적는다★ — 재려는 것은 프론트가 실제로 받는 **그 문자열**이지 enum 이름이 아니다.
         self.record(format!("state:{}", state.as_str()));
+        if state == ConnectionStateEvent::Connected {
+            let hook = self
+                .on_connected
+                .lock()
+                .expect("recording events poisoned")
+                .pop_front();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
     }
 
     fn agent_list_updated(&self, agents: &[AgentInfo]) {
@@ -3718,6 +3748,20 @@ impl DaemonEvents for RecordingEvents {
 
     fn preset_list_updated(&self, presets: &[Preset]) {
         self.record(format!("preset_list:{}", presets.len()));
+    }
+
+    fn usage_limits_updated(
+        &self,
+        snapshot: &UsageLimitSnapshot,
+        labels: &[String],
+        socket_epoch: u64,
+    ) {
+        self.record(format!(
+            "usage:{:?}:{}:{}:{socket_epoch}",
+            snapshot.vendor,
+            snapshot.revision,
+            labels.join(",")
+        ));
     }
 }
 
@@ -4286,4 +4330,526 @@ async fn explicit_close_tells_every_window_down() {
         before_drop,
         "Drop 이 발화를 보태면 안 된다(명시 close 와의 비대칭은 의도)"
     );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 사용량 구독 배선(TRD S21 usage-limit-slot §1-7 · §4 셸 행) — 새 소켓 · 넛지 · 방송 대조가 실 소켓 위에서
+// 무엇을 어떤 순서로 쓰나. 상태기의 규칙은 `usage_interest.rs` 가 소켓 없이 재고, 여기서는 연결 task 의
+// **배선**만 잰다(그 자리들은 소켓이 있어야 돈다).
+// ★순서 단언은 벽시계가 아니라 표지로 묶는다★: 클라가 명령 채널에 표지(`Unsubscribe`)를 넣으면, 그 앞에 쓰일
+// 수 있던 것은 전부 그보다 먼저 서버에 닿는다(소켓 쓰기는 연결 task 하나 · 채널은 FIFO · 한 select 팔은
+// 쓰기까지 마치고 다음 팔로 간다). 그래서 「표지가 곧바로 다음 frame 이다」가 「그 사이에 아무것도 안 나갔다」다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+use std::time::Instant;
+
+use engram_dashboard_protocol::{AgentBackendKind, UsageVendorState};
+
+use super::connection::ConnectionCommand;
+use super::usage_interest::InterestAction;
+use super::SharedUsageInterest;
+use crate::layout::{tree, SlotContent, ViewManager, MAIN_WINDOW_LABEL};
+
+// 연결마다 받은 명령 frame 을 (몇째 연결, 명령) 으로 흘려 주고, 테스트가 지금 연결로 이벤트를 밀어 넣거나 그
+// 연결을 끊게 하는 mock 서버. ★연결마다의 보내는 칸(push·closer)을 쌓아 두기만 하고 갈아 끼우지 않는다★ —
+// 갈아 끼우면 옛 연결 태스크가 끊긴 짝을 보고 스스로 소켓을 닫아, 재지 않으려던 끊김이 끼어든다.
+struct UsageServer {
+    port: u16,
+    frames: tokio::sync::mpsc::UnboundedReceiver<(u32, AgentCommand)>,
+    push: Arc<std::sync::Mutex<Vec<tokio::sync::mpsc::UnboundedSender<AgentEvent>>>>,
+    closers: Arc<std::sync::Mutex<Vec<Option<tokio::sync::oneshot::Sender<()>>>>>,
+}
+
+impl UsageServer {
+    fn push(&self, ev: AgentEvent) {
+        let push = self.push.lock().unwrap();
+        push.last()
+            .expect("받은 연결이 있어야")
+            .send(ev)
+            .expect("연결 태스크가 살아 있어야");
+    }
+
+    fn drop_current_connection(&self) {
+        let closer = self
+            .closers
+            .lock()
+            .unwrap()
+            .last_mut()
+            .and_then(Option::take);
+        if let Some(tx) = closer {
+            let _ = tx.send(());
+        }
+    }
+
+    // 다음 명령 frame 한 장을 `"<몇째 연결>:<frame_label>"` 로.
+    async fn next_frame(&mut self) -> String {
+        let (conn, cmd) = tokio::time::timeout(Duration::from_secs(5), self.frames.recv())
+            .await
+            .expect("명령 frame 이 5초 안에 와야")
+            .expect("서버 태스크가 살아 있어야");
+        format!("{conn}:{}", frame_label(&cmd))
+    }
+}
+
+fn frame_label(cmd: &AgentCommand) -> String {
+    match cmd {
+        AgentCommand::UsageSubscribe { vendors } => {
+            let vendors: Vec<String> = vendors.iter().map(|v| format!("{v:?}")).collect();
+            format!("usage[{}]", vendors.join(","))
+        }
+        AgentCommand::Unsubscribe { agent_id } => format!("marker:{agent_id}"),
+        other => format!("{other:?}"),
+    }
+}
+
+async fn spawn_usage_server() -> UsageServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (frames_tx, frames) = tokio::sync::mpsc::unbounded_channel();
+    let push = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let closers = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (push_srv, closers_srv) = (push.clone(), closers.clone());
+    tokio::spawn(async move {
+        let mut conn = 0u32;
+        while let Ok((stream, _)) = listener.accept().await {
+            conn += 1;
+            let idx = conn;
+            let (push_tx, mut push_rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+            let (close_tx, mut close_rx) = tokio::sync::oneshot::channel::<()>();
+            push_srv.lock().unwrap().push(push_tx);
+            closers_srv.lock().unwrap().push(Some(close_tx));
+            let frames_tx = frames_tx.clone();
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await; // Auth 소비
+                let hello = serde_json::to_string(&AgentEvent::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                    capabilities: None,
+                })
+                .unwrap();
+                let _ = ws.send(Message::Text(hello.into())).await;
+                loop {
+                    tokio::select! {
+                        _ = &mut close_rx => return,
+                        Some(ev) = push_rx.recv() => {
+                            let text = serde_json::to_string(&ev).unwrap();
+                            let _ = ws.send(Message::Text(text.into())).await;
+                        }
+                        msg = ws.next() => match msg {
+                            Some(Ok(Message::Text(t))) => {
+                                let cmd: AgentCommand =
+                                    serde_json::from_str(&t).expect("명령 JSON 파싱");
+                                let _ = frames_tx.send((idx, cmd));
+                            }
+                            Some(Ok(_)) => {}
+                            _ => return,
+                        },
+                    }
+                }
+            });
+        }
+    });
+    UsageServer {
+        port,
+        frames,
+        push,
+        closers,
+    }
+}
+
+// read_live 도 같은 서버를 주므로 재연결은 같은 포트로 돌아온다(둘째 연결).
+fn usage_client(
+    server: &UsageServer,
+    events: Arc<RecordingEvents>,
+) -> (DaemonClient, Arc<MockDiscovery>) {
+    let info = info_for(server.port, "usage");
+    let disco = Arc::new(MockDiscovery::new(Some(info.clone()), Ok(info)));
+    let client = DaemonClient::new_with_events(
+        Handle::current(),
+        disco.clone(),
+        super::connection::HANDSHAKE_TIMEOUT,
+        events,
+    );
+    (client, disco)
+}
+
+// 관심을 「main 의 활성 탭 = 사용량 슬롯 하나」 레이아웃으로 다시 계산한다. 넛지는 부르는 쪽이 정한다.
+fn relayout(usage: &SharedUsageInterest, show_claude: bool, show_codex: bool) -> InterestAction {
+    let mut mgr = ViewManager::new();
+    let view = mgr.windows[MAIN_WINDOW_LABEL].active;
+    let slot = tree::first_slot_id(&mgr.views[&view].layout);
+    mgr.set_slot_content(
+        view,
+        slot,
+        SlotContent::Usage {
+            show_claude,
+            show_codex,
+        },
+    )
+    .unwrap();
+    usage.lock().recompute(&mgr, Instant::now())
+}
+
+fn usage_update(
+    vendor: AgentBackendKind,
+    revision: u64,
+    subscribed: &[AgentBackendKind],
+) -> AgentEvent {
+    AgentEvent::UsageLimitsUpdated {
+        snapshot: UsageLimitSnapshot {
+            vendor,
+            account_key: "default".into(),
+            five_hour: None,
+            weekly: None,
+            model_scoped: Vec::new(),
+            plan: None,
+            in_flight: false,
+            state: UsageVendorState::Ready,
+            revision,
+        },
+        subscribed: subscribed.to_vec(),
+    }
+}
+
+// 순서 표지를 명령 채널 끝에 넣고 그 frame 표기를 돌려준다(절 머리).
+fn marker(client: &DaemonClient) -> String {
+    let id = uuid::Uuid::new_v4();
+    client.unsubscribe(id);
+    format!("marker:{id}")
+}
+
+fn current_socket(client: &DaemonClient) -> u64 {
+    client
+        .lifecycle
+        .current_cmd_tx()
+        .expect("창구가 열려 있어야")
+        .1
+}
+
+// ── 방송 한 줄 → 알림 한 번(+ labels · socket_epoch) — 호출 자리 팔의 유일한 벽 ─────────────────
+// 그 팔이 빠지면 `UsageLimitsUpdated` 는 `emit_broadcast` 의 `_ => {}` 로 떨어지고 컴파일러는 못 잡는다
+// (`connection::relay_usage_snapshot` doc). 데몬이 실어 온 구독 집합이 관심과 같으면 재전송이 없다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    let socket = current_socket(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+
+    server.push(usage_update(
+        AgentBackendKind::Claude,
+        7,
+        &[AgentBackendKind::Claude],
+    ));
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || events.seen().len() >= 2).await,
+        "사용량 알림이 와야: {:?}",
+        events.seen()
+    );
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        format!("1:{m}"),
+        "구독 집합이 같으면 재전송이 없다"
+    );
+    assert_eq!(
+        events.seen(),
+        vec![
+            "state:connected".to_string(),
+            format!("usage:Claude:7:{MAIN_WINDOW_LABEL}:{socket}"),
+        ],
+        "방송 한 장 = 알림 한 번 · 사용량 슬롯이 있는 창 · 그 소켓의 표식"
+    );
+    client.close();
+}
+
+// ── 대조 재전송은 그 소켓에 곧바로 쓰인다 ─────────────────────────────────────────
+// 데몬이 실어 온 구독 집합이 관심과 다르면 같은 팔이 관심 한 장을 되보낸다 — 알림은 그대로 나간다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mismatched_broadcast_writes_the_interest_back_on_its_socket() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, true);
+    client.connect().await.expect("connect → connected");
+    let socket = current_socket(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Claude,Codex]");
+
+    server.push(usage_update(
+        AgentBackendKind::Claude,
+        1,
+        &[AgentBackendKind::Claude],
+    ));
+    // 알림은 재전송과 같은 팔 안에서 먼저 나간다 — 그것을 본 뒤 넣은 표지는 재전송 뒤에 선다.
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || events.seen().len() >= 2).await,
+        "사용량 알림이 와야: {:?}",
+        events.seen()
+    );
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        "1:usage[Claude,Codex]",
+        "데몬에 Codex 가 빠졌다 — 바라는 집합을 되보낸다"
+    );
+    assert_eq!(server.next_frame().await, format!("1:{m}"));
+    assert_eq!(
+        events.seen(),
+        vec![
+            "state:connected".to_string(),
+            format!("usage:Claude:1:{MAIN_WINDOW_LABEL}:{socket}"),
+        ]
+    );
+    client.close();
+}
+
+// ── 옛 소켓 표식의 스냅숏은 대조·알림·캐시 어느 것도 하지 않는다 ─────────────────────────
+// 승계로 밀려난 task 가 아직 옛 소켓을 읽는 상황을 만든다: 관심 상태만 더 새 소켓이 열린 것으로 돌려 두면
+// (`on_socket_open(지금 + 1)`) 이 task 의 소켓 표식이 곧 옛 표식이다. 어긋난 구독 집합을 실어도 재전송이 없어야
+// 한다. 그 한 장이 처리됐다는 것은 같은 소켓으로 뒤따른 목록 갱신 알림이 보증한다(소켓은 순서대로 읽힌다).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_snapshot_on_a_superseded_socket_is_ignored() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    let socket = current_socket(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+
+    let _ = client.usage_interest().lock().on_socket_open(socket + 1);
+    server.push(usage_update(AgentBackendKind::Claude, 3, &[]));
+    server.push(AgentEvent::AgentListUpdated { agents: Vec::new() });
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || events
+            .seen()
+            .contains(&"agent_list:0".to_string()))
+        .await,
+        "뒤따른 목록 갱신이 와야: {:?}",
+        events.seen()
+    );
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        format!("1:{m}"),
+        "옛 표식의 한 장은 대조하지 않는다"
+    );
+    assert_eq!(
+        events.seen(),
+        vec!["state:connected".to_string(), "agent_list:0".to_string()],
+        "옛 표식의 한 장은 알리지 않는다"
+    );
+    let pulled = client
+        .usage_interest()
+        .lock()
+        .snapshot_for_webview(Instant::now());
+    assert_eq!(
+        (pulled.socket_epoch, pulled.snapshots.len()),
+        (socket + 1, 0),
+        "옛 표식의 한 장은 캐시에 들지 않는다"
+    );
+    client.close();
+}
+
+// ── 넛지는 집합을 싣지 않는다 — 몇 장이 어떤 순서로 처리되든 소켓의 마지막 한 장 = 마지막 관심 ──────────────
+// 두 재계산(A: 늘어남 → B: 뒤이은 변경)의 넛지를 거꾸로(B 몫 먼저) 넣는다. 넛지가 집합을 실었다면 A 의 옛 집합이
+// 마지막에 닿는다(TRD §3 #74). 실을 칸이 없으니 두 넛지는 같은 한 장이고, 먼저 꺼낸 쪽이 그때의(= 마지막)
+// 관심을 보내며 뒤엣것은 `sent` 와 같아 아무것도 안 보낸다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+
+    assert_eq!(
+        relayout(client.usage_interest(), true, true),
+        InterestAction::Nudge
+    );
+    assert_eq!(
+        relayout(client.usage_interest(), false, true),
+        InterestAction::Nudge
+    );
+    client.nudge_usage_interest(); // B 몫
+    client.nudge_usage_interest(); // A 몫 — 늦게 꺼내진다
+    let m = marker(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Codex]");
+    assert_eq!(
+        server.next_frame().await,
+        format!("1:{m}"),
+        "뒤의 넛지는 아무것도 안 보낸다 — 마지막 한 장이 마지막 관심"
+    );
+    client.close();
+}
+
+// ── 창구는 열렸는데 명령 채널이 아직 안 꽂힌 틈의 변경 → 꽂은 직후의 넛지가 보낸다 ─────────────────
+// 첫 연결은 창구를 열고 새 소켓에 관심을 쓴 뒤 Connected 를 알리고, 그다음에야 호출자가 채널을 꽂는다. 그 틈의
+// 재계산 넛지는 창구가 `None` 을 내 no-op 이다. 틈은 `Connected` 훅으로 겨냥한다(그 발화가 틈 안이다) —
+// 훅이 채널 부재를 함께 기록해 「틈 안이었다」를 단언으로 남긴다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_change_in_the_gap_before_the_channel_is_stored_goes_out_after_it() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    let in_gap = Arc::new(std::sync::Mutex::new(None));
+    {
+        let usage = client.usage_interest().clone();
+        let lifecycle = client.lifecycle.clone();
+        let in_gap = in_gap.clone();
+        events.then_on_connected(move || {
+            let channel_missing = lifecycle.current_cmd_tx().is_none();
+            let action = relayout(&usage, true, true);
+            *in_gap.lock().unwrap() = Some((channel_missing, action));
+        });
+    }
+    client.connect().await.expect("connect → connected");
+    assert_eq!(
+        *in_gap.lock().unwrap(),
+        Some((true, InterestAction::Nudge)),
+        "훅이 채널을 꽂기 전의 틈에서 돌았어야 — 그때의 넛지는 no-op"
+    );
+
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        "1:usage[Claude]",
+        "창구를 열 때의 관심"
+    );
+    assert_eq!(
+        server.next_frame().await,
+        "1:usage[Claude,Codex]",
+        "틈의 변경은 채널을 꽂은 직후의 넛지가 보낸다"
+    );
+    assert_eq!(server.next_frame().await, format!("1:{m}"));
+    client.close();
+}
+
+// ── 틈에 든 변경이 없으면 꽂은 직후의 넛지는 아무것도 안 보낸다(`sent` 기준 · 멱등) ──────────────────
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_nudge_after_the_channel_is_stored_sends_nothing_without_a_change() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+
+    let m = marker(&client);
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+    assert_eq!(server.next_frame().await, format!("1:{m}"));
+    client.close();
+}
+
+// ── 새 소켓 → 관심이 그 소켓 몫으로 이미 든 명령보다 먼저 · 끊긴 동안의 변경은 아무 데도 안 가고 새 소켓이 싣는다 ──
+// 재연결에서는 창구가 열리자마자 명령 채널이 살아 있다(채널은 재연결을 넘어 산다) — `Connected` 훅이 그때 넣는
+// 표지는 main_loop 가 채널을 읽기 **전에** 든다. ★훅이 못 겨냥하는 창이 하나 있다★: 창구를 연 직후 · 관심을
+// 읽기 전(그 사이에 도는 우리 코드가 없다) — 그 창에 든 명령보다도 앞선다는 것은 넛지가 아니라 소켓 직접 쓰기라는
+// 구조가 진다. 끊긴 동안의 상태는 재연결을 read_live 에서 붙잡아 두고 본다 — 창구를 닫고 소켓을 잊는 자리가
+// 재연결 루프보다 앞이라, read_live 에 닿았으면 이미 돌았다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_new_socket_sends_the_interest_before_queued_commands() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    let queued = Arc::new(std::sync::Mutex::new(None::<String>));
+    events.then_on_connected(|| {}); // 첫 연결
+    {
+        let lifecycle = client.lifecycle.clone();
+        let queued = queued.clone();
+        events.then_on_connected(move || {
+            let id = uuid::Uuid::new_v4();
+            if let Some((tx, socket)) = lifecycle.current_cmd_tx() {
+                let cmd = ConnectionCommand::Unsubscribe {
+                    agent_id: id,
+                    socket,
+                };
+                if tx.try_send(cmd).is_ok() {
+                    *queued.lock().unwrap() = Some(format!("marker:{id}"));
+                }
+            }
+        });
+    }
+    client.connect().await.expect("connect → connected");
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+    server.push(usage_update(
+        AgentBackendKind::Claude,
+        1,
+        &[AgentBackendKind::Claude],
+    ));
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || events.seen().len() >= 2).await,
+        "사용량 알림이 와야: {:?}",
+        events.seen()
+    );
+    assert_eq!(
+        client
+            .usage_interest()
+            .lock()
+            .snapshot_for_webview(Instant::now())
+            .snapshots
+            .len(),
+        1,
+        "끊기 전에는 캐시가 차 있다(아래 비움 단언의 비공허성)"
+    );
+
+    let (entered, release) = disco.gate_read_live();
+    server.drop_current_connection();
+    assert!(
+        poll_until_realtime(Duration::from_secs(5), || entered.try_recv().is_ok()).await,
+        "재연결이 read_live 에 닿아야"
+    );
+    let pulled = client
+        .usage_interest()
+        .lock()
+        .snapshot_for_webview(Instant::now());
+    assert_eq!(
+        (pulled.socket_epoch, pulled.snapshots.len()),
+        (0, 0),
+        "소켓을 잃으면 캐시를 비우고 소켓 없음으로"
+    );
+    assert!(
+        client.lifecycle.current_cmd_tx().is_none(),
+        "끊긴 동안 창구는 닫혀 있다"
+    );
+    assert_eq!(
+        relayout(client.usage_interest(), true, true),
+        InterestAction::Nudge
+    );
+    client.nudge_usage_interest(); // 창구가 닫혀 no-op
+    release.send(()).unwrap();
+
+    assert_eq!(
+        server.next_frame().await,
+        "2:usage[Claude,Codex]",
+        "새 소켓의 첫 frame = 지금 관심(끊긴 동안의 변경 포함)"
+    );
+    let after = server.next_frame().await;
+    let queued = queued
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("훅이 새 소켓 몫 표지를 넣었어야");
+    assert_eq!(
+        after,
+        format!("2:{queued}"),
+        "그 소켓에 이미 든 명령은 관심 뒤에 나간다"
+    );
+
+    client.nudge_usage_interest();
+    let m = marker(&client);
+    assert_eq!(
+        server.next_frame().await,
+        format!("2:{m}"),
+        "새 소켓에 보낸 관심이 곧 `sent` 다 — 넛지가 더 보낼 것이 없다"
+    );
+    client.close();
 }
