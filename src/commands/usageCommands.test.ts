@@ -17,7 +17,8 @@ import type { AgentBackendKind } from '../api/types'
 import { useUsageStore } from '../store/usageStore'
 import { useViewStore } from '../store/viewStore'
 import { getCommand, run } from './registry'
-import { buildSlotMenu, SLOT_MENU_ORIGIN, type SlotMenuCtx } from './slotMenu'
+import { fireAndForget } from './dispatch'
+import { buildSlotMenu, type SlotMenuCtx } from './slotMenu'
 
 const IDS = ['usageSlot.refresh', 'usageSlot.toggleClaude', 'usageSlot.toggleCodex'] as const
 
@@ -184,14 +185,24 @@ describe('메뉴 ⟳ = 켠 회사 중 보이는 거절이 아닌 것만 · 누�
     expect(refreshSpy.mock.calls.map(c => c[0])).toEqual(['claude'])
   })
 
-  it('대상이 없을 때 — 메뉴에서 왔으면(origin) 조용히 건너뛰고, 직접 부르면 throw · 둘 다 새로고침 0', () => {
-    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+  it('대상이 없으면 throw — 켠 회사가 없거나 전부 거절 · 새로고침 0', () => {
     seed({ claude: 'Rejected', codex: 'Ready' })
-    expect(run('usageSlot.refresh', { content: usage(true, false), origin: SLOT_MENU_ORIGIN })).toBeUndefined()
-    expect(debug).toHaveBeenCalledWith(expect.stringMatching(/새로고침할 회사가 없다 — 건너뜀/))
     expect(() => run('usageSlot.refresh', { content: usage(true, false) })).toThrow(/새로고침할 회사가 없다/)
     expect(() => run('usageSlot.refresh', { content: usage(false, false) })).toThrow(/새로고침할 회사가 없다/)
     expect(() => run('usageSlot.refresh', {})).toThrow(/content 필요/)
     expect(refreshSpy).not.toHaveBeenCalled()
+  })
+
+  it('메뉴를 그린 뒤 거절이 닿은 틈에 누름 — 메뉴가 부르는 fireAndForget 이 throw 를 잡아 로그만 남기고 상태는 그대로', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    seed({ claude: 'Rejected' })
+    const before = useUsageStore.getState().vendors
+    expect(() =>
+      fireAndForget('usageSlot.refresh', { viewId: 'v1', slotId: 's1', agentId: null, content: usage(true, false) }),
+    ).not.toThrow()
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/usageSlot\.refresh/), expect.any(Error))
+    expect(refreshSpy).not.toHaveBeenCalled()
+    expect(useUsageStore.getState().vendors).toBe(before)
+    expect(useUsageStore.getState().pending).toEqual({})
   })
 })

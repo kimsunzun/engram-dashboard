@@ -160,7 +160,9 @@ function findSlotContent(node: LayoutNode, slotId: string): SlotContent | null {
  * 모르면 빠진 채로 넘긴다 — 셸 역직렬화가 빠진 칸을 true 로 읽는다(`SlotContent::Usage` serde 기본값).
  *
  * ★기준은 웹뷰가 받아 둔 레이아웃이다★ — 셸의 권위 값과 그사이 어긋날 수 있다(방송이 닿기 전의 연속 호출). 락 안의
- *   원자 병합은 버스 쪽에만 있다.
+ *   원자 병합은 버스 쪽에만 있다. ★그래서 이 길(`__engramCmd`·cdp)로 사용량 content 를 보내는 LLM 은 show_claude ·
+ *   show_codex 를 둘 다 준다★ — 빠진 칸을 지금 값으로 지키려면 버스의 `layout.setSlotContent` 를 쓴다. 이 안내를
+ *   `prompts/engram-help.md` 에 두지 않는 이유 = 그 화면의 독자는 창 JS 를 못 부르는 CLI 에이전트다.
  */
 function mergeUsageShows(viewId: string, slotId: string, content: Record<string, unknown>): Record<string, unknown> {
   const layout = useViewStore.getState().layouts[viewId]?.layout

@@ -303,8 +303,9 @@ const SlotBody = memo(function SlotBody({
       </SlotErrorBoundary>
       {contextMenu && (
         // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
-        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content)를 넘겨 각 command.run 이 백엔드
-        //   권위 경로(viewStore/agentClient)로 흐르게 한다(§5 단일 제어 표면). content 종류가 가시성 게이트.
+        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content + 메뉴 상태 판정용 usageRefreshable)를
+        //   넘긴다. command.run 에는 앞의 넷만 가서 백엔드 권위 경로(viewStore/agentClient)로 흐른다(§5 단일 제어 표면) —
+        //   usageRefreshable 은 기여의 enabled 만 읽는다. content 종류가 가시성 게이트.
         <SlotMenu
           anchor={contextMenu}
           node={node}

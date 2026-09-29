@@ -21,15 +21,12 @@ export interface SlotMenuCtx {
   slotId: string
   agentId?: string | null
   content?: SlotContent
-  /** 사용량 슬롯에서만 의미가 있다 — 켠 회사 중 ⟳ 를 보낼 수 있는 것(보이는 거절이 아닌 것)이 하나라도 있나. */
+  /**
+   * 사용량 슬롯에서만 의미가 있다 — 켠 회사 중 ⟳ 를 보낼 수 있는 것(보이는 거절이 아닌 것)이 하나라도 있나. 메뉴 상태
+   * 판정 전용이라 command 실행 인자로는 넘기지 않는다(`SlotContextMenu` 의 실행 가방).
+   */
   usageRefreshable?: boolean
 }
-
-/**
- * 메뉴가 command 에 넘기는 가방의 `origin` 값 — 이 실행이 슬롯 메뉴 클릭에서 왔다는 표지. 대부분의 handler 는 읽지
- * 않고(ADR-0055 여분 키), 메뉴에서 눌렸을 때와 직접 호출됐을 때를 갈라야 하는 handler 만 읽는다(`usageSlot.refresh`).
- */
-export const SLOT_MENU_ORIGIN = 'slotMenu'
 
 /**
  * 기여 항목(ADR-0064 고정 스키마 + ADR-0065 additive 확장). 두 형태 중 하나다:

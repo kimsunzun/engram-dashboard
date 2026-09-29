@@ -12,7 +12,7 @@ import { t } from '../i18n'
 import { refreshableVendors, useUsageStore } from '../store/usageStore'
 import { useViewStore } from '../store/viewStore'
 import { register, type CommandArgs } from './registry'
-import { registerSlotMenu, SLOT_MENU_ORIGIN, type SlotMenuCtx } from './slotMenu'
+import { registerSlotMenu, type SlotMenuCtx } from './slotMenu'
 
 type UsageContent = Extract<SlotContent, { type: 'usage' }>
 
@@ -40,16 +40,10 @@ register({
     const cmd = 'usageSlot.refresh'
     const usage = useUsageStore.getState()
     const targets = refreshableVendors(requireUsageContent(args, cmd), usage.vendors)
-    if (targets.length === 0) {
-      // ★메뉴에서 왔으면 건너뛰고 직접 호출이면 throw 한다★ — 메뉴는 대상이 없으면 이 항목을 비활성으로 그리므로(아래
-      //   `enabled`) 여기 닿는 것은 그린 뒤 누르기 전에 거절이 닿은 틈뿐이고, 사람에게 오류로 돌려줄 일이 아니다.
-      //   직접 호출(`__engramCmd`)은 조용한 no-op 으로 삼키지 않는다 — 부른 쪽이 「됐다」로 읽는다.
-      if (args?.origin === SLOT_MENU_ORIGIN) {
-        console.debug(`[${cmd}] 누른 때 새로고침할 회사가 없다 — 건너뜀`)
-        return undefined
-      }
-      throw new Error(`[${cmd}] 새로고침할 회사가 없다 — 켠 회사가 없거나 전부 거절 중`)
-    }
+    // 조용한 no-op 으로 삼키지 않는다 — 부른 쪽이 「됐다」로 읽는다. 메뉴는 대상이 없으면 이 항목을 비활성으로 그리므로
+    //   (아래 `enabled`) 메뉴에서 여기 닿는 것은 그린 뒤 누르기 전에 거절이 닿은 틈뿐이고, 그 throw 는 메뉴가 부르는
+    //   `fireAndForget` 이 잡아 로그로 남긴다.
+    if (targets.length === 0) throw new Error(`[${cmd}] 새로고침할 회사가 없다 — 켠 회사가 없거나 전부 거절 중`)
     return Promise.all(targets.map(vendor => usage.refresh(vendor))).then(() => undefined)
   },
 })

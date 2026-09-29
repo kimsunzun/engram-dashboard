@@ -44,7 +44,6 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       viewId: 'v1',
       slotId: 's1',
       agentId: 'a1',
-      origin: 'slotMenu',
     })
     expect(it0.run).not.toHaveBeenCalled()
     expect(onClose).toHaveBeenCalled()
@@ -75,7 +74,6 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       viewId: 'v1',
       slotId: 's1',
       agentId: null,
-      origin: 'slotMenu',
     })
     expect(onClose).toHaveBeenCalled()
   })
@@ -95,7 +93,6 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
       viewId: 'v1',
       slotId: 's1',
       agentId: null,
-      origin: 'slotMenu',
     })
   })
 })
@@ -163,16 +160,12 @@ describe('SlotContextMenu — checked · enabled · 역할', () => {
     expect(row('kid').getAttribute('role')).toBe('menuitem')
   })
 
-  it('실행 인자에 슬롯 내용(content)과 메뉴 출처(origin)가 함께 간다', () => {
+  it('실행 인자 = 좌표 + 슬롯 내용(content) — 메뉴 상태 칸(usageRefreshable)도 호출자 표지도 넘기지 않는다', () => {
     render(<SlotContextMenu x={0} y={0} items={[item('usageSlot.toggleCodex')]} ctx={usageCtx} onClose={vi.fn()} />)
     fireEvent.click(screen.getByText('usageSlot.toggleCodex'))
-    expect(dispatchMock.fireAndForget).toHaveBeenCalledWith('usageSlot.toggleCodex', {
-      viewId: 'v1',
-      slotId: 's1',
-      agentId: null,
-      content: usageCtx.content,
-      origin: 'slotMenu',
-    })
+    const [id, args] = dispatchMock.fireAndForget.mock.calls[0] as [string, Record<string, unknown>]
+    expect(id).toBe('usageSlot.toggleCodex')
+    expect(args).toStrictEqual({ viewId: 'v1', slotId: 's1', agentId: null, content: usageCtx.content })
   })
 
   it('enabled 가 false → 역할 있는 줄에 aria-disabled · 클릭해도 실행 안 함 · 메뉴를 닫지 않음 — enabled 는 ctx 를 받는다', () => {
