@@ -1421,6 +1421,9 @@ async fn send_usage_subscribe(
 /// - 알리기가 앞이라 Connected 를 본 뒤의 웹뷰 pull 은 소켓 없음(`0`)이 아니라 새 표식과 비운 캐시를 본다.
 /// - 쓰기(await)가 뒤라 창구를 연 자리와 발화 사이에 await 가 끼지 않는다 — 그 틈에 `close()` 가 들면 그 Down
 ///   뒤에 이 Connected 가 나가 창들이 connected 로 굳는다. 틈은 원래 있고, await 를 두면 그것이 넓어진다.
+/// - ★대가 — 첫 연결에서 Connected 에 반응해 웹뷰가 곧바로 보낸 명령은 호출자가 명령 채널을 꽂기 전까지
+///   [`super::NOT_CONNECTED`] 를 받는데, 이 쓰기(소켓 한 장)만큼 그 틈이 길어진다★ — 위 `close()` 경합보다
+///   가벼워 받아들였다.
 ///
 /// 알린 뒤의 관심 변경은 이 집합에 없다 — 첫 연결은 `ready` 뒤 호출자가 명령 채널을 꽂은 직후의 넛지가
 /// (`DaemonClient::start_connection`), 재연결은 이미 산 채널에 든 넛지가 main_loop 에서 메운다. 짝은 창구를 닫는

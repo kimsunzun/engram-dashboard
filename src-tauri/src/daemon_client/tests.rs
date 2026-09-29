@@ -4934,6 +4934,45 @@ async fn a_refresh_writes_the_interest_before_the_refresh_frame() {
     client.close();
 }
 
+// ── 관심 상태가 이미 더 새 소켓을 보면 ⟳ 는 구독 없이 새로고침만 쓴다 ──────────────────────────
+// 승계로 밀려나는 중인 연결 task 의 모양이다 — 그 소켓의 구독은 새 소켓이 열 때 보낸다(`send_request`). 관심 상태만
+// 새 표식으로 옮겨 그 모양을 만든다(명령 창구는 옛 소켓 그대로라 ⟳ 는 이 소켓으로 나간다).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refresh_on_a_superseded_socket_writes_no_subscribe_before_it() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events.clone());
+    relayout(client.usage_interest(), true, false);
+    client.connect().await.expect("connect → connected");
+    let socket = current_socket(&client);
+    assert_eq!(
+        drain_until_marker(&client, &mut server).await,
+        ["1:usage[Claude]"]
+    );
+    let _ = client.usage_interest().lock().on_socket_open(socket + 1);
+
+    let request_id = RequestId::new();
+    let refresh = forward_to_daemon(
+        &client,
+        refresh_command(AgentBackendKind::Claude, request_id),
+    );
+    let daemon = async {
+        assert_eq!(
+            server.next_frame().await,
+            "1:refresh:Claude",
+            "밀려나는 소켓엔 구독을 앞세우지 않는다"
+        );
+        server.push(AgentEvent::Ack { request_id });
+    };
+    let (reply, ()) = tokio::join!(refresh, daemon);
+    assert_eq!(reply, Ok(Some(ack_value(request_id))));
+    assert_eq!(
+        drain_until_marker(&client, &mut server).await,
+        Vec::<String>::new()
+    );
+    client.close();
+}
+
 // ── 명령 채널이 가득 차 있어도(넛지라면 버려질 상태) 구독이 새로고침 앞에 그대로 쓰인다 ──────────────────
 // 연결 task 를 관심 락에 세워 두고(넛지 한 장을 꺼내 그 락을 기다린다) 채널을 채운다. 그때 넣는 넛지는
 // `try_enqueue` 가 버리지만 ⟳ 는 자리를 기다린다 — 구독이 ⟳ 와 한 명령이라 함께 기다리고 함께 나간다.
@@ -4982,7 +5021,13 @@ async fn a_refresh_on_a_full_command_channel_still_writes_the_subscribe_first() 
     tokio::pin!(refresh);
     assert!(
         futures_util::poll!(&mut refresh).is_pending(),
-        "⟳ 는 버려지지 않고 채널 자리를 기다린다"
+        "⟳ 는 버려지지 않는다 — 곧바로 오류로 끝나지 않는다"
+    );
+    // 연결 task 는 관심 락에 서 있어 자리를 비우지 않는다 — 채널이 그대로 가득이면 ⟳ 는 채널에 들지 못한 채다.
+    assert_eq!(
+        tx.capacity(),
+        0,
+        "채널이 그대로 가득 — ⟳ 는 채널 밖에서 자리를 기다린다"
     );
     drop(held);
     let daemon = async {
@@ -5070,7 +5115,7 @@ async fn refresh_through(
 // ── 구독 쓰기가 실패하면 새로고침은 등록도 쓰기도 안 된 채 「송신 실패」로 깨어난다 ─────────────────
 // 아무것도 안 나갔으므로 「전송됨·결과 불명」이 아니다 · 답을 떨어뜨리지도 않는다.
 #[tokio::test]
-async fn a_failed_subscribe_write_fails_the_refresh_as_unsent() {
+async fn a_failed_subscribe_write_fails_the_refresh_as_send_failed() {
     let (sink, pending, woken) = refresh_through(Some(0), true).await;
     assert_eq!(
         sink.attempted,
