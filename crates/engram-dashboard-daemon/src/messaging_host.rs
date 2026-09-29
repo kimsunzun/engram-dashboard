@@ -72,7 +72,7 @@ use engram_dashboard_messaging::PeerId;
 use tokio::sync::mpsc;
 
 use crate::control::registry::ControlRegistry;
-use crate::status_fanout::DaemonStatusSink;
+use crate::usage_service::observe::UsageObserveSink;
 
 // ── 배달 어댑터 ────────────────────────────────────────────────────────────────────────────────
 
@@ -433,7 +433,7 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
     }
 }
 
-/// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: `DaemonStatusSink` 를 **감싸** 로스터 변화를
+/// ★파킹 flush 트리거(ADR-0104 · S18 메시징 v1 C1)★: 상태 sink 를 **감싸** 로스터 변화를
 ///   데몬측에서 관측하고, 새로 살아났거나 화신이 갈린 이름 앞으로 파킹된 메시지를 flush 시킨다.
 ///
 /// ★왜 sink 를 감싸나(agent seam 무변경 — ADR-0104)★: 코어는 메시징을 몰라야 한다(격리 ADR-0028/0104).
@@ -459,8 +459,8 @@ impl engram_dashboard_messaging::service::FlushTrigger for ChannelIdleNotifier {
 ///   흔치 않은 skip 분기이고 데몬 기본 subscriber 는 논블록이지만, **"락 구간은 무조건 논블록" 으로 읽지 말 것**.
 ///   실제 flush(messaging 락 + port 호출 + blocking write)는 worker 스레드로 옮겨져 이 락 **밖**에 있다.
 pub struct MessagingFlushSink {
-    /// ★Box<dyn>★: 운영은 DaemonStatusSink(프론트 broadcast), 통합 테스트는 NoopSink 를 감싸 flush 만
-    ///   검증한다 — 감싼 대상이 무엇이든 diff/flush 로직은 동일하므로 trait object 로 받는다.
+    /// ★Box<dyn>★: 운영은 `UsageObserveSink(DaemonStatusSink)`(사용량 관측 + 프론트 broadcast), 통합 테스트는
+    ///   NoopSink 를 감싸 flush 만 검증한다 — 감싼 대상이 무엇이든 diff/flush 로직은 동일하므로 trait object 로 받는다.
     inner: Box<dyn StatusSink>,
     /// flush 작업(FlushMsg)을 flush worker 로 보내는 채널(unbounded — status 콜백을 절대 막지 않게).
     ///   worker 미가동/드롭이어도 send 실패는 무시(파킹은 다음 등장에 재시도 — 무손실 유지).
@@ -561,9 +561,11 @@ impl RosterDiff {
 }
 
 impl MessagingFlushSink {
-    /// 운영 생성자 — `idle` 은 flush 레인과 **공유하는** Idle coalescer 다.
+    /// 운영 생성자 — `idle` 은 flush 레인과 **공유하는** Idle coalescer 다. 운영 사슬은
+    /// `MessagingFlushSink(UsageObserveSink(DaemonStatusSink))` 하나이고, 가운데 고리를 타입으로 받아 사용량
+    /// 관측 없는 운영 사슬을 짤 수 없게 한다.
     pub fn new(
-        inner: DaemonStatusSink,
+        inner: UsageObserveSink,
         flush_tx: mpsc::UnboundedSender<FlushMsg>,
         idle: Arc<IdleCoalescer>,
     ) -> Self {

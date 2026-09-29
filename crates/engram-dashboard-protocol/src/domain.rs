@@ -430,12 +430,13 @@ pub struct SnapshotChunk {
     pub data: Vec<u8>,
 }
 
-// ── 사용량 한도 wire(요청형 — 클라이언트가 묻고 데몬이 답한다) ──────────────────────────────
+// ── 사용량 한도 wire(구독형 — 클라이언트가 벤더를 구독하고 데몬이 바뀔 때마다 보낸다) ──────────────
 
-/// 한 벤더·계정의 사용량 상태 — 데몬이 요청에 답할 때 싣는 한 장.
+/// 한 벤더·계정의 사용량 상태 — 데몬이 그 벤더를 구독한 연결에 보내는 한 장
+/// ([`AgentEvent::UsageLimitsUpdated`](crate::AgentEvent::UsageLimitsUpdated)).
 ///
 /// ★시간 칸 규칙★: 절대 시각은 [`UsageWindow::resets_at`](서버가 준 epoch 초) 하나뿐이다. 나머지 시간
-///   칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 **이 답을 보낸 순간 기준 상대 초**라, 받는 쪽은
+///   칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 **이 한 장을 뜬 순간 기준 상대 초**라, 받는 쪽은
 ///   받은 순간부터 흐른 만큼 더해 읽는다 — 양쪽 벽시계가 어긋나거나 되감겨도 흔들리지 않게.
 /// ★상태 문구는 받는 쪽이 번역 키로 만든다★ — 상태는 코드 + 수로 나른다. 예외 = `detail`(분류 낱말 `kind`·
 ///   상류 원문 `upstream` 은 번역 없이 그대로 보인다).
@@ -451,7 +452,8 @@ pub struct UsageLimitSnapshot {
     /// 모델별 주간 창. 빈 배열 = 없음.
     pub model_scoped: Vec<UsageScopedWindow>,
     pub plan: Option<String>,
-    /// 조회가 아직 진행 중이다 — 이 답의 값은 그 조회 전의 것이고, 결과는 다음 요청의 답에 실린다.
+    /// 조회가 아직 진행 중이다 — 이 한 장의 값은 그 조회 전의 것이고, 결과는 조회가 끝나면 구독한 연결에 새
+    /// 한 장으로 간다.
     pub in_flight: bool,
     /// `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
     /// 예외는 `Unavailable` 이다 — 값을 싣지 않는다.
@@ -894,6 +896,8 @@ mod tests {
             "{snap}"
         );
         let window = UsageWindow::decl();
+        // 값의 출처(줍기·능동 조회)는 사용자에게 보이지 않는다 — wire 창에 칸이 없어야 한다.
+        assert!(!window.contains("source"), "{window}");
         assert!(window.contains("resets_at: number | null"), "{window}");
         assert!(window.contains("age_secs: number,"), "{window}");
         assert_eq!(

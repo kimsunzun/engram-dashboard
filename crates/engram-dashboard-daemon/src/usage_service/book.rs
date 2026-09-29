@@ -941,7 +941,7 @@ fn wire_detail(detail: &UsageDetail) -> UsageStateDetail {
 
 /// 조회기 낱말 → wire 벤더(§1-6 키 변환) — 벤더 match 없이 wire 역직렬화에 맡긴다(대소문자는 그쪽이 접는다).
 // ADR-0004
-fn wire_vendor(vendor: UsageVendorKey) -> Option<AgentBackendKind> {
+pub(crate) fn wire_vendor(vendor: UsageVendorKey) -> Option<AgentBackendKind> {
     let word: StrDeserializer<'_, ValueError> = vendor.as_str().into_deserializer();
     match AgentBackendKind::deserialize(word) {
         Ok(kind) => Some(kind),

@@ -289,8 +289,8 @@ mod tests {
         }
     }
 
-    /// ★사용량은 방송하지 않는다★ — 클라이언트가 물을 때만 답하는 요청형이라, 여기서 관측을 흘려
-    /// 보내면 그 결정이 조용히 뒤집힌다.
+    /// ★날 관측은 여기서 방송하지 않는다★ — 사용량은 서비스가 병합한 한 장을 그 벤더를 구독한 연결에만
+    /// 보낸다(`usage_service`). 여기서 흘리면 구독 안 한 연결까지 병합 전 값을 받는다.
     #[test]
     fn a_usage_observation_is_not_broadcast() {
         use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey};

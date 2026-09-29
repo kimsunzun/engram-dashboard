@@ -6,7 +6,7 @@ use ts_rs::TS;
 
 use crate::domain::{
     AgentBackendKind, AgentInfo, AgentOutputFormat, AgentProfile, AgentStatus, Capabilities,
-    EnvelopeFormat, Preset, RestoreReport, SnapshotChunk,
+    EnvelopeFormat, Preset, RestoreReport, SnapshotChunk, UsageLimitSnapshot,
 };
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
@@ -25,7 +25,7 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 //   "AgentCommand" 라 부르면 뜻이 안 정해진다.
 // ★★활성화 셋(`Spawn`·`SpawnByCwd`·`SpawnProfile`)의 **호출 계약** — 클라이언트가 지켜야 하는 것★★
 //   데몬은 이 셋을 그 연결의 도착순 줄에서 **떼어 별도 태스크로** 돌린다(활성화는 결말까지 기다리는
-//   유일한 갈래라, 줄에 두면 그동안 그 연결의 다른 명령이 전부 함께 늦는다 — 데몬 crate 의
+//   갈래라, 줄에 두면 그동안 그 연결의 다른 명령이 전부 함께 늦는다 — 데몬 crate 의
 //   `connection_core::dispatch_order`). 그 대가가 이 계약이다:
 //   ① **활성화의 답(`Spawned`/`Error`)을 받기 전에 그 에이전트 id 앞으로 아무것도 보내지 말 것.**
 //      같은 소켓으로 `SpawnProfile(X)` 직후 `WriteStdin(X)` 을 보내면 뒤엣것이 먼저 돌아
@@ -356,6 +356,24 @@ pub enum AgentCommand {
         input_id: String,
         request_id: RequestId,
     },
+
+    // ── 사용량 한도(TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
+    /// 이 연결의 사용량 구독 집합을 **통째로** 바꾼다 — 빈 배열 = 해제, 연결이 끊기면 빈 집합이다. 답은 없다
+    /// (`request_id` 없음). 새로 든 벤더마다 [`AgentEvent::UsageLimitsUpdated`] 한 장이 이 연결에만 온다. 데몬이
+    /// 사용량을 두지 않는 벤더 낱말은 버려진다.
+    /// ★구독/해제 짝을 두지 않는다★ — 해제 한 장이 사라지면 조회가 계속 돈다. 전량 교체면 마지막 한 장이 곧
+    ///   상태다. 그래서 한 연결의 교체들은 도착순으로 적용된다.
+    UsageSubscribe { vendors: Vec<AgentBackendKind> },
+    /// ⟳ — 그 벤더의 사용량을 새로 조회하라. 답 = [`AgentEvent::Ack`] 이고 **값을 싣지 않는다** — 값은 그 벤더를
+    /// 구독한 연결에 [`AgentEvent::UsageLimitsUpdated`] 로 간다(보낸 연결도 구독했을 때만 받는다).
+    /// `Ack` 는 조회를 띄웠으면 그 끝을 데몬의 상한(수 초)까지 기다린 뒤 온다. 거절 기한 안이거나 직전 조회
+    /// 직후면 조회 없이 곧바로 온다. 데몬이 그 벤더의 사용량을 두지 않으면 `Error`(이 `request_id`).
+    /// ★데몬은 이 명령을 그 연결의 도착순 줄 밖에서 돌린다★ — 같은 연결의 뒤 명령의 답이 이 답보다 먼저 올 수
+    ///   있다.
+    RefreshUsageLimits {
+        vendor: AgentBackendKind,
+        request_id: RequestId,
+    },
 }
 
 /// 데몬 명부의 **클라이언트 투영** 한 줄([`AgentEvent::CommandList`] 의 원소).
@@ -667,6 +685,14 @@ pub enum AgentEvent {
         outcome: String,
     },
 
+    /// 사용량 한 장 — 그 벤더를 구독한 연결에만 간다([`AgentCommand::UsageSubscribe`]). 요청의 답이 아니다.
+    /// `subscribed` = 받는 연결의 구독 집합 — 데몬이 이 한 장을 짓던 순간의 것이라 한 발 늦을 수 있다.
+    /// ★같은 칸의 한 장이 뒤바뀌어 오거나 두 번 올 수 있다★ — 칸마다 가장 큰 `snapshot.revision` 만 남긴다.
+    UsageLimitsUpdated {
+        snapshot: UsageLimitSnapshot,
+        subscribed: Vec<AgentBackendKind>,
+    },
+
     /// request_id 있으면 특정 command 실패.
     Error {
         request_id: Option<RequestId>,
@@ -960,7 +986,9 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         | AgentCommand::ListCommands { request_id }
         // 대기 입력 목록(ADR-0231) — 둘 다 전용 reply(QueuedInputs/QueuedInputCancelReply)를 기다린다.
         | AgentCommand::ListQueuedInputs { request_id, .. }
-        | AgentCommand::CancelQueuedInput { request_id, .. } => Some(*request_id),
+        | AgentCommand::CancelQueuedInput { request_id, .. }
+        // ⟳ — 답은 기존 `Ack` 라 아래 event_reply_request_id 에 새 갈래가 없다.
+        | AgentCommand::RefreshUsageLimits { request_id, .. } => Some(*request_id),
         // ★명령 요청은 상관 대상이다 — 키만 봉투 안에 있다★(ADR-0155). 형제들처럼 제 칸이 없다고 여기서
         //   None 을 고르면 셸이 답장을 받고도 깨울 슬롯을 못 만들어 마감시각까지 매달린다. 아래
         //   event_reply_request_id 의 `CommandReply` 갈래와 **한 쌍으로만** 성립한다.
@@ -970,6 +998,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         AgentCommand::Resize { .. }
         | AgentCommand::Subscribe { .. }
         | AgentCommand::Unsubscribe { .. }
+        | AgentCommand::UsageSubscribe { .. }
         // ★CommandOutcome 은 **내가 보내는 답장**이라 여기 None 이다★ — 상관 키가 `reply` 안에 있지만 그것은
         //   데몬이 나에게 준 요청의 키이고, 내 pending 표의 키가 아니다. Some 을 돌려주면 답장을 보내는 그
         //   순간 그 키로 빈 pending 슬롯이 생겨 연결이 끊길 때까지 남는다.
@@ -1023,6 +1052,8 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::ProfileListUpdated { .. }
         // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
         | AgentEvent::PresetListUpdated { .. }
+        // 구독한 연결로 가는 사용량 한 장 — ⟳ 의 답(`Ack`)이 아니다.
+        | AgentEvent::UsageLimitsUpdated { .. }
         // ★CommandRequest 는 **들어오는 요청**이라 여기 None 이다(load-bearing)★ — 봉투에 request_id 가
         //   있으니 Some 이 자연스러워 보이지만, 그 키는 **데몬이 만든 요청의 키**이고 내 pending 표의 키가
         //   아니다. Some 을 돌려주면 받는 쪽이 이것을 「내가 기다린 답장」으로 읽어 봉투를 삼킨다 — 명령은
@@ -2355,5 +2386,116 @@ mod tests {
             asked.0, envelope.request_id.0,
             "봉투가 품은 uuid 그대로여야"
         );
+    }
+
+    // ── 사용량 한도 ──
+
+    #[test]
+    fn usage_commands_json_golden_and_roundtrip() {
+        for (cmd, golden) in [
+            (
+                AgentCommand::UsageSubscribe {
+                    vendors: vec![AgentBackendKind::Claude, AgentBackendKind::Codex],
+                },
+                r#"{"UsageSubscribe":{"vendors":["claude","codex"]}}"#.to_owned(),
+            ),
+            (
+                AgentCommand::UsageSubscribe { vendors: vec![] },
+                r#"{"UsageSubscribe":{"vendors":[]}}"#.to_owned(),
+            ),
+            (
+                AgentCommand::RefreshUsageLimits {
+                    vendor: AgentBackendKind::Codex,
+                    request_id: RequestId(Uuid::nil()),
+                },
+                format!(r#"{{"RefreshUsageLimits":{{"vendor":"codex","request_id":"{NIL}"}}}}"#),
+            ),
+        ] {
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert_eq!(json, golden, "사용량 명령의 wire 형태가 golden 과 불일치");
+            let back: AgentCommand = serde_json::from_str(&json).unwrap();
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        }
+        // 기본값으로 흡수되면 ⟳ 가 짝 없는 답을 기다린다.
+        assert!(serde_json::from_str::<AgentCommand>(
+            r#"{"RefreshUsageLimits":{"vendor":"claude"}}"#
+        )
+        .is_err());
+    }
+
+    /// 스냅숏 모양 전체의 정본은 `domain` 의 golden 이다 — 여기서는 이벤트 봉투와 `subscribed` 를 잰다.
+    #[test]
+    fn usage_limits_updated_json_golden_and_roundtrip() {
+        let ev = AgentEvent::UsageLimitsUpdated {
+            snapshot: UsageLimitSnapshot {
+                vendor: AgentBackendKind::Claude,
+                account_key: "default".into(),
+                five_hour: None,
+                weekly: None,
+                model_scoped: vec![],
+                plan: None,
+                in_flight: false,
+                state: crate::domain::UsageVendorState::Ready,
+                revision: 3,
+            },
+            subscribed: vec![AgentBackendKind::Claude, AgentBackendKind::Codex],
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "UsageLimitsUpdated": {
+                    "snapshot": {
+                        "vendor": "claude",
+                        "account_key": "default",
+                        "five_hour": null,
+                        "weekly": null,
+                        "model_scoped": [],
+                        "plan": null,
+                        "in_flight": false,
+                        "state": { "kind": "Ready" },
+                        "revision": 3
+                    },
+                    "subscribed": ["claude", "codex"]
+                }
+            })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// 구독은 답이 없고(대기표를 걸면 영구 pending) ⟳ 는 기존 `Ack` 와 한 쌍이며, 방송은 상관 밖이다.
+    #[test]
+    fn usage_wire_request_id_arms() {
+        let r = RequestId::new();
+        assert_eq!(
+            command_request_id(&AgentCommand::UsageSubscribe {
+                vendors: vec![AgentBackendKind::Claude],
+            }),
+            None
+        );
+        assert_eq!(
+            command_request_id(&AgentCommand::RefreshUsageLimits {
+                vendor: AgentBackendKind::Claude,
+                request_id: r,
+            }),
+            Some(r)
+        );
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::Ack { request_id: r }),
+            Some(r)
+        );
+        let updated: AgentEvent = serde_json::from_value(serde_json::json!({
+            "UsageLimitsUpdated": {
+                "snapshot": {
+                    "vendor": "codex", "account_key": "default", "five_hour": null, "weekly": null,
+                    "model_scoped": [], "plan": null, "in_flight": true,
+                    "state": { "kind": "Ready" }, "revision": 1
+                },
+                "subscribed": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(event_reply_request_id(&updated), None);
     }
 }

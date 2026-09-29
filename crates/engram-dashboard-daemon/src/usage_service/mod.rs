@@ -21,6 +21,8 @@
 
 pub mod book;
 pub mod clock;
+#[cfg(test)]
+pub(crate) mod fakes;
 pub mod observe;
 pub mod reject_store;
 pub mod schedule;
