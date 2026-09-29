@@ -43,8 +43,11 @@ use engram_dashboard_protocol::{
 use crate::layout::manager::WindowLabel;
 use crate::layout::{LayoutNode, SlotContent, ViewManager};
 
-/// 관심이 줄 때 데몬에 보내기까지 기다리는 시간 — 탭을 다른 창으로 떼는 동안(옛 창에서 빠짐 → 새 창에
-/// 듦)처럼 곧 되돌아오는 줄임을 데몬에 보내지 않으려는 창이다. 늘어남은 기다리지 않는다.
+/// 관심이 줄 때 데몬에 보내기까지 기다리는 시간 — 곧 되돌아오는 줄임(다른 탭으로 갔다 돌아오기 · 표시 토글을
+/// 껐다 켜기 · 트레이로 숨겼다 되살리기 · 슬롯·탭을 닫고 1.5초 안에 다시 놓기)을 데몬에 보내지 않으려는 창이다.
+/// 늘어남은 기다리지 않는다. ★슬롯을 다른 창으로 옮기기는 이 창에 기대지 않는다★ — 원본 슬롯이 새 창에 붙는
+/// 단계까지 남았다가 그 붙이기와 같은 락 안에서 닫히므로 관심이 애초에 줄지 않는다
+/// (`layout::apply::move_slot_to_window`).
 pub const USAGE_INTEREST_SHRINK_DELAY: Duration = Duration::from_millis(1500);
 
 /// 숨김 표시가 없는 창마다 **활성 탭**의 사용량 슬롯이 켠 회사의 합집합.
@@ -186,7 +189,7 @@ impl UsageInterest {
             InterestAction::Nudge
         } else if self.shrink_pending.is_some() && self.interest == before {
             // 같은 줄임이 이미 대기 중이다 — 세대·기한을 그대로 두어 관계없는 재계산이 줄임을 미루지 못하게 한다
-            // (TRD §1-7 의 「새 세대를 뽑아」를 이 경우만 고친다 — TRD 개정은 8단계에 적는다).
+            // (TRD §1-7 「recompute」 · §3 #91 — 같은 관심이면 새 세대를 뽑지 않는다).
             InterestAction::Unchanged
         } else if self.interest != self.sent {
             self.shrink_seq += 1;
@@ -714,7 +717,7 @@ mod tests {
         assert_eq!(ui.sync(1, false), None);
     }
 
-    /// 탭을 다른 창으로 떼는 동안처럼 기한 안에 `sent` 로 돌아오면 데몬에 아무것도 안 간다.
+    /// 트레이로 숨겼다 되살리기·슬롯을 닫고 곧 다시 놓기처럼 기한 안에 `sent` 로 돌아오면 데몬에 아무것도 안 간다.
     #[test]
     fn returning_to_sent_within_the_delay_cancels_the_shrink() {
         let t0 = Instant::now();
@@ -731,7 +734,7 @@ mod tests {
         assert!(!ui.deferral_elapsed(gen), "무효가 된 대기의 뒤늦은 기한");
         assert_eq!(ui.sync(1, false), None);
 
-        // 모델 쪽 떼기도 같다 — 옛 창에서 빠짐(줄임) → 새 창에 듦(원상).
+        // 레이아웃 쪽도 같다 — 슬롯을 비웠다가(줄임) 1.5초 안에 다른 창에 다시 놓으면(원상) 아무것도 안 간다.
         let view = main_active(&mgr);
         let slot = root_slot(&mgr, view);
         mgr.set_slot_content(view, slot, SlotContent::Empty)
