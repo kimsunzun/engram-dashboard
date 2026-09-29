@@ -386,6 +386,56 @@ describe('eventBus — 방송 잇기 먼저, pull 나중', () => {
     expect(usageSurface).toEqual(['getUsageSnapshot', 'onUsageLimitsUpdated', 'refreshUsageLimits'])
   })
 
+  // 재연결 pull — 부팅 pull 이 재시도를 다 쓰고 실패했거나, 끊긴 동안 놓친 방송을 메운다(메인 결정 2026-09-29).
+  function reconnectableClient(reply: UsageSnapshotPull = { socketEpoch: 1, snapshots: [] }) {
+    const rec = recordingClient(reply)
+    let stateCb: ((s: ConnectionState) => void) | null = null
+    const client = {
+      ...rec.client,
+      getAgents: vi.fn(async () => []),
+      listProfiles: vi.fn(async () => []),
+      listPresets: vi.fn(async () => []),
+      onConnectionStateChange: (cb: (s: ConnectionState) => void) => {
+        stateCb = cb
+        cb('connected')
+        return () => {}
+      },
+    }
+    return { ...rec, client, setState: (s: ConnectionState) => stateCb?.(s) }
+  }
+
+  it('connected 로 재전이 → pull 한 번 더(방송 리스너가 선 채) · 첫 connected · 끊김 전이는 더하지 않는다', async () => {
+    const { initEventBus } = await freshModules()
+    const rec = reconnectableClient()
+    holder.client = rec.client
+    await initEventBus()
+    await flush()
+    expect(rec.log).toEqual(['listen', 'pull(listening)'])
+    rec.setState('reconnecting')
+    await flush()
+    expect(rec.log).toEqual(['listen', 'pull(listening)'])
+    rec.setState('connected')
+    await flush()
+    expect(rec.log).toEqual(['listen', 'pull(listening)', 'pull(listening)'])
+  })
+
+  it('재연결 pull 의 반환도 merge 를 지난다 — 끊긴 동안 놓친 값이 든다', async () => {
+    const { initEventBus, useUsageStore: usage } = await freshModules()
+    const reply: UsageSnapshotPull = { socketEpoch: 1, snapshots: [] }
+    const rec = reconnectableClient(reply)
+    holder.client = rec.client
+    await initEventBus()
+    await flush()
+    expect(usage.getState().vendors.claude).toBeUndefined()
+    rec.setState('down')
+    reply.socketEpoch = 2
+    reply.snapshots = [snap('claude', 7)]
+    rec.setState('connected')
+    await flush()
+    expect(usage.getState().vendors.claude?.revision).toBe(7)
+    expect(usage.getState().socketEpoch).toBe(2)
+  })
+
   // ── 실 ProtocolClient 를 거쳐 — 끊김 전이 · Ack ──
   class FakeTransport implements Transport {
     private _state: ConnectionState = 'connected'

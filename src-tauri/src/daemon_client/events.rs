@@ -208,3 +208,48 @@ impl DaemonEvents for NoDaemonEvents {
     ) {
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engram_dashboard_protocol::{AgentBackendKind, UsageVendorState};
+
+    // ★웹뷰 계약 = snake_case 세 칸★ — 받는 쪽(`src/api/tauriTransport.ts` 의 `usage-limits-updated` 수신)이 이
+    //   이름으로 읽는다. 셸 캐시 pull 반환의 칸 이름 시험(`tests.rs`)과 짝이다.
+    #[test]
+    fn usage_limits_updated_payload_keys_are_the_webview_contract() {
+        let snapshot = UsageLimitSnapshot {
+            vendor: AgentBackendKind::Codex,
+            account_key: "default".into(),
+            five_hour: None,
+            weekly: None,
+            model_scoped: Vec::new(),
+            plan: None,
+            in_flight: false,
+            state: UsageVendorState::Ready,
+            revision: 3,
+        };
+        let labels = vec!["main".to_string()];
+        let wire = serde_json::to_value(UsageLimitsUpdatedPayload {
+            labels: &labels,
+            socket_epoch: 7,
+            snapshot: &snapshot,
+        })
+        .unwrap();
+        let mut keys: Vec<&str> = wire
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["labels", "snapshot", "socket_epoch"],
+            "웹뷰 계약 = snake_case 세 칸"
+        );
+        assert_eq!(wire["labels"], serde_json::json!(["main"]));
+        assert_eq!(wire["socket_epoch"], 7);
+        assert_eq!(wire["snapshot"]["revision"], 3);
+    }
+}

@@ -38,7 +38,7 @@ type Stage = 1 | 2 | 3
 
 /**
  * 「사용량 페이지 ↗」 목적지. ★셸의 opener 허용 목록(`src-tauri/capabilities/usage-links.json`)과 글자까지 같아야
- * 한다★ — 쿼리·끝 슬래시 하나라도 다르면 셸이 여는 것을 거절한다.
+ * 한다★ — 쿼리·끝 슬래시 하나라도 다르면 셸이 여는 것을 거절한다. 대조는 `UsageSlot.test.tsx` 가 한다.
  */
 export const USAGE_PAGE_URL: Record<AgentBackendKind, string> = {
   claude: 'https://claude.ai/settings/usage',

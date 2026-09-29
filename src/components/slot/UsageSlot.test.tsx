@@ -20,8 +20,10 @@ vi.mock('../../api/clientFactory', () => ({ agentClient: client }))
 const opener = vi.hoisted(() => ({ openUrl: vi.fn(async (_url: string) => undefined) }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: opener.openUrl }))
 
+// `?raw` 인 이유 = `index.css.test.ts` 와 같다(@types/node 가 없어 fs 를 쓰면 tsc 게이트가 깨진다).
+import usageLinksSource from '../../../src-tauri/capabilities/usage-links.json?raw'
 import { useUsageStore } from '../../store/usageStore'
-import UsageSlot from './UsageSlot'
+import UsageSlot, { USAGE_PAGE_URL } from './UsageSlot'
 import { formatAge, formatClock, formatResetAt, statusSentence } from './usageFormat'
 
 const NOW = 1_900_000_000 // 벽시계(초)
@@ -607,5 +609,20 @@ describe('팝업', () => {
         q(`[data-usage-badge="${vendor}"]`)!.getAttribute('aria-label'),
       )
     }
+  })
+})
+
+// ── 「사용량 페이지 ↗」 목적지 = 셸 opener 허용 목록 — 쿼리·끝 슬래시 하나라도 다르면 셸이 여는 것을 거절한다 ──
+describe('사용량 페이지 주소 = 셸 허용 목록(src-tauri/capabilities/usage-links.json)', () => {
+  it('회사별 주소가 허용 목록과 글자까지 같다 · 목록에 남는 주소도 없다', () => {
+    const cap = JSON.parse(usageLinksSource) as {
+      permissions: Array<string | { identifier: string; allow?: Array<{ url: string }> }>
+    }
+    const grant = cap.permissions.find(
+      (p): p is { identifier: string; allow?: Array<{ url: string }> } =>
+        typeof p === 'object' && p.identifier === 'opener:allow-open-url',
+    )
+    const allowed = (grant?.allow ?? []).map(a => a.url).sort()
+    expect(Object.values(USAGE_PAGE_URL).sort()).toEqual(allowed)
   })
 })

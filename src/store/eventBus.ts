@@ -52,6 +52,11 @@ export async function refreshPresets(): Promise<void> {
  * 통째로 다시 돌리므로 탈출구가 이미 있다.
  */
 async function resyncAfterReconnect(): Promise<void> {
+  // ★사용량도 다시 당긴다★ — 같은 스냅숏을 다시 받아도 스토어 병합 규칙이 거르므로 해가 없고, 부팅 pull 이 재시도를
+  //   다 쓰고 실패했거나 끊긴 동안 이 창이 방송을 놓친 경우를 메운다. 이 함수는 사용량 방송 잇기가 선 뒤에만 불리므로
+  //   「잇기 먼저, pull 나중」도 그대로 선다(TRD S21 usage-limit-slot 은 재연결 pull 을 두지 않았다 — 메인 결정
+  //   2026-09-29, 8단계에서 박제).
+  void useUsageStore.getState().pull()
   try {
     const agents = await agentClient.getAgents()
     useAgentStore.getState().setAgents(agents)
