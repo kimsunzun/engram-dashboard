@@ -1,0 +1,102 @@
+T-40 measurement spike — Job membership of the ~300 s hook leftover (2026-09-29)
+==============================================================================
+
+Setup (all measured on this PC)
+- claude_code_version = 2.1.284 (system/init). NOTE: the research doc used 2.1.283; npm package was updated today.
+- Harness = probe/src/main.rs (Rust, windows 0.58.0 — same crate/version as the repo). Spawn mirrors the dashboard:
+  Command("cmd.exe") ["/c","claude", --permission-mode bypassPermissions -p --input-format stream-json
+  --output-format stream-json --replay-user-messages --verbose --include-partial-messages --session-id <uuid>]
+  + --model haiku --include-hook-events (as research exp. 1), env MAX_THINKING_TOKENS=8000, piped stdio,
+  CREATE_NO_WINDOW; spawn → take pipes → JobObjectHandle::new() (KILL_ON_JOB_CLOSE only, no breakaway flags)
+  → assign(pid) (copied from stdio.rs:110-127 / platform/windows.rs:30-75).
+  Not mirrored: --mcp-config / --append-system-prompt-file (dashboard-daemon endpoints; HTTP MCP, no stdio child).
+- Measurement-only addition: a completion port associated with the Job AFTER assign → every JOB_OBJECT_MSG_NEW_PROCESS
+  was opened immediately (handle held → no PID reuse), IsProcessInJob(h, OUR job), creation time, ppid, cmdline.
+  446–572 job records per claude process; 0 unopened; 0 "opened but not in job".
+- Harness launched via scripts/run-detached.ps1 (WMI, like the daemon). Harness itself: not in any Job.
+- Real user hook setup (~/.claude untouched, no --settings). UserPromptSubmit = 4 hooks (2 fast, 2 slow:
+  handoff-trigger.sh, wiki-preconsult.sh). Interrupt 200 ms after send (research exp. 1 "E").
+- Protocol per claude process: warm turn, then up to 3 × {send "say hi", interrupt at +200 ms, snapshot at Esc+3 s;
+  if no result by Esc+10 s = HANG → apply TRD §3-4 selector + §3-5 terminate_member → wait result → follow-up turn}.
+  Cleanup = stdin EOF, then TerminateJobObject(our job) only.
+- Trials: 11 interrupt trials in 4 claude processes (pilot p1: 2, main p1–p3: 9). HANG in 3/11
+  (pilot p1t2, main p3t2, p3t3). Non-hang result latency: 285–1394 ms after Esc (8 main + 1 pilot).
+
+Q1 — Is the surviving fork child in OUR Job?  MEASURED: YES, 3/3 hangs.
+- Each hang had exactly one post-Esc survivor: `C:\Program Files\Git\usr\bin\bash.exe <plugin hook>.sh`
+  (handoff-trigger ×1, wiki-preconsult ×2), depth 5, parent = the hook-script bash at depth 4 (dead),
+  created Esc+203 / +244 / +233 ms.
+- Evidence of membership: (a) it arrived as NEW_PROCESS on OUR Job's port and IsProcessInJob(h, ourJob)=TRUE;
+  (b) it was in QueryInformationJobObject(JobObjectBasicProcessIdList) at Esc+3 s and Esc+10 s
+  (members = {cmd.exe, conhost.exe, claude.exe, orphan} = 4; non-hang trials = 3);
+  (c) terminate_member(same handle: IsProcessInJob(our job) + creation match + STILL_ACTIVE) returned Terminated.
+- Outside-Job scan (system-wide, created ≥ Esc, IsProcessInJob(our job)=FALSE, report-only): no hook-related process
+  in any trial (only this Claude Code session's own Bash-tool shells, left alone).
+- Side evidence (p3t3): the hook's stderr carried MSYS `child_copy: user heap read copy failed … windows pid 18236,
+  Win32 error 299` and 18236 is exactly the orphan → the stuck process is a half-forked child whose parent was killed
+  mid-fork-copy (inference; consistent with research §2 ②/⑤).
+
+Q2 — Wrapper depth.  MEASURED 4/4 spawns: claude.exe is a DIRECT child of the cmd.exe wrapper. No launcher layer.
+- `claude` resolves to the npm shim claude.cmd, which runs
+  `%APPDATA%\npm\node_modules\@anthropic-ai\claude-code\bin\claude.exe` inside the SAME cmd.exe (no node, no re-exec).
+- Tree right after spawn (+60 ms / +1 s), all inOurJob=TRUE:
+    d0 cmd.exe      created +0.7 ms after pre-spawn SystemTime
+    d1 conhost.exe  created +4.6–4.9 ms   (cmd.exe's console host — CREATE_NO_WINDOW still gets one)
+    d1 claude.exe   created +61–66 ms
+  → the wrapper-depth layer (depth 1) holds TWO processes: conhost.exe and claude.exe.
+- Hook chain (depths): d2 `Git\bin\bash.exe -c "bash …/hook.sh"` (Git launcher, claude's direct child)
+  → d3 conhost.exe + d3 `Git\usr\bin\bash.exe -c …` → d4 `usr\bin\bash.exe …/hook.sh` → d5+ forks
+  (d6–d8 cat/jq/awk/grep/cygwin-console-helper/conhost). taskkill.exe = d2 (claude's direct child), its conhost = d3.
+- Tree at Esc+3 s (levels 0..=2): only cmd.exe, conhost.exe, claude.exe (no long-lived claude children here:
+  no stdio MCP servers in this environment).
+- Spawn→assign gap: assign completed 33–40 µs after spawn() returned (≈2.9–3.1 ms after spawn start);
+  conhost born ≈1.6–2.1 ms after that, claude.exe ≈58–63 ms after that. Both in Job 4/4.
+
+Q3 — Processes created after Esc inside our Job.  MEASURED, 11 trials (24–26 per trial).
+  name@depth (per trial count, max lifetime):
+    taskkill.exe@d2 ×4 (two rounds: Esc+1–5 ms and Esc+~1505 ms; ≤278 ms)  — protected (claude's direct child)
+    conhost.exe@d3 ×4 (taskkill's console host; ≤277 ms)                    — NOT protected
+    hook-script bash@d5 ×5, @d6 ×5 (fork children of the dying hook trees; ≤212 ms normally)
+    cat/jq/awk/grep@d6–d7 (≤36 ms), cygwin-console-helper.exe@d6–d7 (≤88 ms), conhost@d7–d8 (≤102 ms)
+  Alive at Esc+3 s: ONLY the 3 hang orphans (3/3); in the 8+1 non-hang trials nothing post-Esc was alive at 3 s.
+  Longest-lived non-orphan: main p1t2 bash(handoff-trigger)@d5, created Esc+206 ms, lived 1171 ms
+  (same shape as the orphan but exited on its own; that turn's result came at Esc+1394 ms).
+  → In 11/11 trials the TRD rule at N=3 s would have selected exactly the stall holder and nothing else.
+  Not covered: interrupts during a running tool (Bash tool / dev server), stdio MCP servers, hooks that start after Esc.
+
+Q4 — TRD §3-4 selector applied literally.  MEASURED 3/3.
+- Candidates = Job members − protected (levels 0..=wrapper_depth+1 = 0..2, identity = pid+creation) with
+  creation ≥ Esc wall time → exactly 1 candidate each time (the orphan); identical candidate set at Esc+3 s and
+  Esc+10 s (3/3). Applied at Esc+10 s (after confirming the hang), not at 3 s.
+- terminate_member → Terminated; `result` (subtype error_during_execution) arrived 18 / 19 / 21 ms after the kill;
+  the stuck hook's `hook_response … cancelled` arrived at the same moment; claude.exe stayed alive; follow-up
+  "say ok" answered by the same claude process in 2.1 / 1.9 / 1.9 s.
+- Safety: nothing outside our Job was terminated; after TerminateJobObject(our job) no job record survived.
+
+Clock (TRD §3-6)
+- root cmd.exe creation − SystemTime taken just before spawn = +0.67…+0.79 ms (4/4, never negative);
+  first post-Esc process (taskkill) at Esc+1.1…1.4 ms → kernel creation time behaves as sub-ms here (indirect).
+  Orphan margin vs the threshold ≥ +203 ms.
+
+Where the TRD's assumptions don't match
+1. §3-4 (line 137 「claude = 뿌리에서 래퍼 깊이만큼 내려간 층」, line 140 「claude 층이 비면 정리하지 않는다」):
+   the depth-1 layer is {conhost.exe, claude.exe}, not claude alone. conhost keeps the layer non-empty even if
+   claude.exe is gone (while cmd.exe lives), so the guard does not detect "claude died". Protection only widens.
+2. §3-8 `claude_pid` field (line 212/218) and §7 G2 (line 309 `claude_pid == resolved_pid`): there are two pids at
+   the wrapper depth; the field/check needs a defined choice (or log all depth-1 pids).
+3. §8-4 (line 324): premise holds — no extra launcher layer (npm shim runs claude.exe in-process of cmd.exe);
+   only the conhost sibling is new.
+4. §8-6 (line 326): gap measured 33–40 µs; claude.exe appears ~60 ms later → safe. conhost's margin is only ~2 ms
+   (could escape the Job under load — irrelevant to T-40, relevant to KILL_ON_JOB_CLOSE reaping).
+5. §8-7 (line 327): premise measured true (3/3). §5-4 synthetic test `bash -c "(sleep 30 &)"` would only check Job
+   inheritance; the real stall holder is a half-forked child stuck in MSYS fork copy — the test won't show the stall.
+6. §0/§3-1 "0.2–0.4 초": kill→result measured 18–21 ms (research exp. 3 timing included taskkill.exe startup).
+7. §3-4 protected set: taskkill.exe (d2) is protected but its conhost (d3) is not; only matters if taskkill outlived N
+   (not observed, max 278 ms; upstream #67888 reports taskkill /T hangs).
+
+Files (scratchpad t40-spike\)
+- probe\  (Cargo.toml, src\main.rs; build: cargo build --release --offline via run-detached)
+- pilot.log, main.log            — stdout (trial lines, Q3c compact lines)
+- pilot\ , main\ : summary.txt   — full Q3 tables per trial; pN.detail.log (S3/S10 member lists, outside scans);
+                   pN.raw.log    — claude stdout/stderr (stream_event lines omitted) + our stdin lines
+- run: t40probe.exe --out <dir> --cwd <dir> --procs N --per K --q4 [--max-trials M] [--stop-after-hangs H]
