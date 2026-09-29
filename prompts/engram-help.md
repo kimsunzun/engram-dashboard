@@ -97,8 +97,8 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
       포커스를 그 슬롯으로 옮긴다. 포커스를 되읽는 명령은 없다
   {tool} slot.popout --view_id <id> --slot_id <id> [--to_window <label>]
       슬롯의 내용을 다른 창의 새 탭으로 옮긴다. to_window 를 빼면 새 창을 연다
-  {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette> [--agent_id <id>]
-      슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를 함께 준다
+  {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette|Usage> [--agent_id <id>] [--show_claude <true|false>] [--show_codex <true|false>]
+      슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를, Usage 일 때만 show_claude · show_codex(그 백엔드의 사용량 한도를 보일지)를 함께 준다. 뺀 show 칸은 그 슬롯이 이미 Usage 면 지금 값을 두고, 아니면 true 다
 
   {tool} split.list --view_id <id>
       그 탭의 구분선 전량. 행마다 split_id · dir · ratio · a_slots(왼쪽/위 쪽 슬롯) · b_slots(오른쪽/아래 쪽 슬롯). 슬롯 x 와 y 사이 구분선은 x 가 한쪽, y 가 다른 쪽 목록에 든 행이다
@@ -126,6 +126,13 @@ slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 �
       슬롯을 빈 칸으로 되돌린다. 슬롯 자체는 남는다 — 없애려면 slot.close
   {tool} tab.next [--window <label>]
       활성 탭을 다음 탭으로 옮긴다. 탭이 하나뿐이면 아무 일도 안 한다
+
+사용량 슬롯(content Usage)이 그리는 한도는 아래 둘로 직접 읽는다. 이 둘은 대시보드 창이 없어도 된다.
+
+  {tool} usage.get --backend <Claude|Codex>
+      그 백엔드의 사용량 한도(5시간 · 주간 · 모델별 주간)와 조회 상태. windows 의 행마다 left_pct 가 남은 양이고 null 은 모른다는 뜻이다
+  {tool} usage.refresh --backend <Claude|Codex>
+      강제로 다시 조회하고 usage.get 과 같은 행을 돌려준다. 직전 조회 뒤 30초 안이거나 state 가 Rejected 인 동안은 조회하지 않고 들고 있던 값을 준다(served = Cached)
 ## theme
 {tool} theme — 테마는 명령이 아니라 설정 파일이다. 고치는 것은 파일, 반영하는 것은 명령 하나. 그 명령도 대시보드 창이 떠 있어야 부를 수 있다.
 

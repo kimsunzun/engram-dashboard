@@ -75,8 +75,11 @@ export interface Command {
    * 않는다(버스 다리의 `settle` 은 이름만 있으면 `run` 을 부른다). 광고를 빼는 것으로 닫았다고 읽지 말 것.
    */
   humanOnly?: string
-  /** 노출/실행 가능 조건(후속 when-context 는 골격 밖, ADR-0055). */
-  when?: () => boolean
+  /**
+   * 노출/실행 가능 조건(후속 when-context 는 골격 밖, ADR-0055). 따르는 것은 컨텍스트 발동 소비자뿐이다 — 키바인딩은
+   * 인자 없이, 슬롯 메뉴는 실행 때 넘길 ctx 가방으로 부른다(false = 비활성). [`run`] 은 읽지 않는다.
+   */
+  when?: (args?: CommandArgs) => boolean
   /**
    * 기존 store 액션/invoke 로 라우팅한다. 반환은 그대로 흘려보낸다 —
    * 일부는 Promise(예: layout createTab → Promise<id>)라 cdp/호출부가 await 할 수 있어야 한다.

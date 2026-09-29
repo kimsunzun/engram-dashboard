@@ -9,6 +9,7 @@
 import { create } from 'zustand'
 
 import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { UsageVendorState } from '../../crates/engram-dashboard-protocol/bindings/UsageVendorState'
 import { agentClient } from '../api/clientFactory'
 import type { AgentBackendKind } from '../api/types'
 import { retryAsync } from '../util/retryInvoke'
@@ -124,4 +125,12 @@ export function useUsageVendor(vendor: AgentBackendKind): UsageVendorEntry | und
 /** 그 회사의 ⟳ 가 아직 끝나지 않았나. */
 export function useUsagePending(vendor: AgentBackendKind): boolean {
   return useUsageStore(state => (state.pending[vendor] ?? 0) > 0)
+}
+
+/**
+ * ⟳ 를 막는 거절 = 보이는 `Rejected` 상태. 팝업 ⟳ 비활성과 슬롯 메뉴 ⟳ 판정이 이 하나를 읽는다. 값이 와서
+ * `Ready` 로 보이는 동안의 거절은 여기 안 걸린다 — 그때 ⟳ 는 데몬이 조회 없이 캐시로 답한다(TRD §3 #88).
+ */
+export function blocksRefresh(state: UsageVendorState | undefined): boolean {
+  return state?.kind === 'Rejected'
 }

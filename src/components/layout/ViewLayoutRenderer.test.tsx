@@ -1036,6 +1036,36 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     })
   })
 
+  // ── 사용량 슬롯 메뉴(TRD S21 usage-limit-slot §1-8) — ☑ 는 잎이 ctx 에 실은 슬롯 내용에서 온다 ──
+  function openUsageMenu(slotId: string, show_claude: boolean, show_codex: boolean): void {
+    render(
+      <ViewLayoutRenderer
+        node={contentSlotNode(slotId, { type: 'usage', show_claude, show_codex })}
+        focusedSlotId={null}
+      />,
+    )
+    fireEvent.contextMenu(document.querySelector(`[data-slot-id="${slotId}"]`) as HTMLElement)
+  }
+
+  it('사용량 슬롯 우클릭 → ⟳ + 켠 회사 ☑ · 끈 회사 ☐ · 토글 클릭 = 한 칸만 뒤집은 전량 교체', () => {
+    openUsageMenu('slot-U1', true, false)
+    expect(screen.getByText('사용량 새로고침').hasAttribute('aria-disabled')).toBe(false)
+    expect(screen.getByText('Claude 표시').getAttribute('aria-checked')).toBe('true')
+    expect(screen.getByText('Codex 표시').getAttribute('aria-checked')).toBe('false')
+    expect(screen.queryByText('에이전트 모니터링')).toBeNull()
+    fireEvent.click(screen.getByText('Codex 표시'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U1', {
+      type: 'usage',
+      show_claude: true,
+      show_codex: true,
+    })
+  })
+
+  it('두 회사를 다 끈 사용량 슬롯 → ⟳ 비활성', () => {
+    openUsageMenu('slot-U2', false, false)
+    expect(screen.getByText('사용량 새로고침').getAttribute('aria-disabled')).toBe('true')
+  })
+
   it('빈 슬롯엔 "비우기"가 없다(ADR-0065 hideOn:["empty"] 트림 — 이미 빈 슬롯 재비우기는 no-op)', () => {
     openMenu('slot-V', null)
     expect(screen.queryByText('비우기')).toBeNull()

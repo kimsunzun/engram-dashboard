@@ -174,6 +174,8 @@ export const ko = {
     meterValueText: '{pct}% 남음',
     popupLabel: '사용량 상세',
     hint: '우클릭해서 표시할 항목 고르기',
+    menuRefresh: '사용량 새로고침',
+    menuShow: '{vendor} 표시',
   },
   /**
    * 구조화(챗) 슬롯 렌더 문자열.

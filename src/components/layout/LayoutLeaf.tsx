@@ -302,13 +302,13 @@ const SlotBody = memo(function SlotBody({
       </SlotErrorBoundary>
       {contextMenu && (
         // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
-        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId)를 넘겨 각 command.run 이 백엔드
+        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content)를 넘겨 각 command.run 이 백엔드
         //   권위 경로(viewStore/agentClient)로 흐르게 한다(§5 단일 제어 표면). content 종류가 가시성 게이트.
         <SlotContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
           items={buildSlotMenu(node.content.type)}
-          ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId }}
+          ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId, content: node.content }}
           onClose={onCloseMenu}
         />
       )}

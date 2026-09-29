@@ -15,7 +15,13 @@ import { openUrl } from '@tauri-apps/plugin-opener'
 import type { SlotContent } from '../../api/layoutTypes'
 import type { AgentBackendKind } from '../../api/types'
 import { t } from '../../i18n'
-import { useUsagePending, useUsageStore, useUsageVendor, type UsageVendorEntry } from '../../store/usageStore'
+import {
+  blocksRefresh,
+  useUsagePending,
+  useUsageStore,
+  useUsageVendor,
+  type UsageVendorEntry,
+} from '../../store/usageStore'
 import { clampMenuPosition } from './SlotContextMenu'
 import {
   elapsedSecs,
@@ -91,7 +97,7 @@ function buildVendorView(
     elapsed,
     sentence: snapshot ? statusSentence(snapshot.state, name, elapsed, nowWall) : null,
     refreshing: pending || (snapshot?.in_flight ?? false),
-    rejected: snapshot?.state.kind === 'Rejected',
+    rejected: blocksRefresh(snapshot?.state),
     windows: [
       { key: 'five_hour', label: t('usage.windowFiveHour'), reading: readWindow(windowOf('five_hour'), elapsed, nowWall) },
       { key: 'weekly', label: t('usage.windowWeekly'), reading: readWindow(windowOf('weekly'), elapsed, nowWall) },

@@ -144,7 +144,7 @@ function optionalUuidArg(v: unknown, name: string): string | null {
 // SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063).
 // ★순서가 곧 선언 철자다★ — 호출자가 어떤 대소문자로 쓰든 백엔드로 나가는 태그는 이 배열의 원소로
 //   접힌다(사용자 결정 2026-09-23 — 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되던 어긋남 제거).
-const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette'] as const
+const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage'] as const
 
 /**
  * ★SlotContent variant 형태 검증(FIX LOW)★: 태그(type)만 화이트리스트로 걸면 `{type:'agent'}` 처럼
@@ -166,6 +166,17 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
     case 'agent_list':
     case 'preset_palette':
       // 추가 필드 없는 unit variant — tag 만 맞으면 통과(여분 필드는 백엔드가 무시).
+      break
+    case 'usage':
+      // ★빠진 칸은 그대로 넘긴다★ — 셸 역직렬화가 빠진 칸을 true 로 읽는다(`SlotContent::Usage` serde 기본값).
+      //   지금 값을 지키는 병합은 이 길에 없다 — 버스의 `layout.setSlotContent` 가 그 길이다(TRD §3 #20).
+      for (const field of ['show_claude', 'show_codex'] as const) {
+        if (content[field] !== undefined && typeof content[field] !== 'boolean') {
+          throw new Error(
+            `[layout.setSlotContent] usage variant 의 ${field} 는 boolean 이어야 함(받음: ${JSON.stringify(content)})`,
+          )
+        }
+      }
       break
     // default 는 도달 불가(호출부에서 SLOT_CONTENT_TYPES 로 이미 걸러짐) — 방어만.
   }

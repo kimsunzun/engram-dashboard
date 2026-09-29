@@ -193,6 +193,32 @@ describe('layout.setSlotContent variant 형태 검증', () => {
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'A-1' })
   })
 
+  // ── 사용량 슬롯(TRD S21 usage-limit-slot §1-8) — show_* 는 있으면 boolean, 없으면 그대로(셸 serde 기본값) ──
+  it('usage variant — show_* boolean 은 그대로 · 빠진 칸은 채우지 않고 넘긴다 · 태그는 접는다', () => {
+    run('layout.setSlotContent', {
+      viewId: 'v1',
+      slotId: 's1',
+      content: { type: 'Usage', show_claude: false, show_codex: true },
+    })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'usage', show_codex: false } })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'usage' } })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: false, show_codex: true })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'usage', show_codex: false })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'usage' })
+  })
+
+  it('usage variant — show_* 가 boolean 이 아니면 invoke 전에 throw', () => {
+    for (const bad of ['false', 0, null, {}]) {
+      expect(() =>
+        run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'usage', show_claude: bad } }),
+      ).toThrow(/show_claude 는 boolean/)
+      expect(() =>
+        run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'usage', show_codex: bad } }),
+      ).toThrow(/show_codex 는 boolean/)
+    }
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
+  })
+
   it('대소문자만 접는다 — 철자가 다르면 여전히 throw', () => {
     expect(() =>
       run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'agentlist' } }),

@@ -321,6 +321,48 @@ describe('형태 검증 — 실행 항목 XOR 컨테이너 (ADR-0065, fail-loud 
   })
 })
 
+describe('checked · when — 켜고 끄는 항목과 비활성 (TRD S21 usage-limit-slot §7 #8)', () => {
+  it('기여의 checked 를 같은 함수 그대로 싣는다 — 최상위와 서브메뉴 자식 둘 다', () => {
+    reg('top'); reg('kid'); reg('plain')
+    const topChecked = () => true
+    const kidChecked = () => false
+    registerSlotMenu('usage', [
+      { commandId: 'top', group: 'content', order: 10, checked: topChecked },
+      { commandId: 'plain', group: 'content', order: 20 },
+      { title: '묶음', group: 'content', order: 30, children: [{ commandId: 'kid', group: 'content', order: 10, checked: kidChecked }] },
+    ])
+    const items = buildSlotMenu('usage')
+    expect(items[0].checked).toBe(topChecked)
+    expect(items[1].checked).toBeUndefined()
+    expect(items[2].children?.[0].checked).toBe(kidChecked)
+  })
+
+  it("command 의 when 을 그대로 싣는다 — 없으면 칸도 없다", () => {
+    const when = () => false
+    register({ id: 'gated', title: 'gated', when, run: vi.fn() })
+    reg('open')
+    registerSlotMenu('usage', [
+      { commandId: 'gated', group: 'content', order: 10 },
+      { commandId: 'open', group: 'content', order: 20 },
+    ])
+    const [gated, open] = buildSlotMenu('usage')
+    expect(gated.when).toBe(when)
+    expect('when' in open).toBe(false)
+  })
+
+  it('컨테이너에 checked → console.error + skip(렌더·부팅 검증 둘 다)', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    reg('kid')
+    registerSlotMenu('usage', [
+      { title: '묶음', group: 'content', order: 10, checked: () => true, children: [{ commandId: 'kid', group: 'content', order: 10 }] },
+    ])
+    expect(buildSlotMenu('usage')).toHaveLength(0)
+    validateSlotMenuContributions()
+    expect(error).toHaveBeenCalledTimes(2)
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/컨테이너는 checked 를 가질 수 없음/))
+  })
+})
+
 describe('하위호환 — 기존 flat 기여 무영향 (ADR-0065)', () => {
   it('{commandId, group, order} 만 있는 기존 기여는 이전과 동일하게 resolve 된다', () => {
     reg('c1'); reg('s1')
