@@ -617,10 +617,27 @@ describe('팝업', () => {
       'Claude 거절됨 — 10분 뒤',
     )
     const claudeRefresh = q('[data-usage-refresh="claude"]', popup) as HTMLButtonElement
-    expect(claudeRefresh.disabled).toBe(true)
+    expect(claudeRefresh.getAttribute('aria-disabled')).toBe('true')
+    expect(claudeRefresh.disabled).toBe(false) // 포커스를 쥘 수 있게 남긴다
     fireEvent.click(claudeRefresh)
     expect(client.refreshUsageLimits).not.toHaveBeenCalled()
-    expect((q('[data-usage-refresh="codex"]', popup) as HTMLButtonElement).disabled).toBe(false)
+    expect(q('[data-usage-refresh="codex"]', popup)!.hasAttribute('aria-disabled')).toBe(false)
+  })
+
+  it('포커스된 ⟳ 가 거절로 바뀌어도 포커스를 쥔 채 누름만 막히고, Esc 는 그대로 닫는다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const popup = openPopup()
+    const refresh = () => q('[data-usage-refresh="claude"]', popup) as HTMLButtonElement
+    act(() => refresh().focus())
+    act(() => seed(snap('claude', { revision: 2, state: { kind: 'Rejected', retry_in_secs: 600, detail: null } })))
+    expect(refresh().getAttribute('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(refresh())
+    fireEvent.click(refresh())
+    expect(client.refreshUsageLimits).not.toHaveBeenCalled()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(summary())
   })
 
   it('두 회사 비정상 → 팝업 맨 위에 회사별 한 줄씩, 각 줄 = 그 회사 배지 문장', () => {
@@ -738,15 +755,22 @@ describe('팝업 자리 · 포커스 · Esc', () => {
     expect(document.activeElement).toBe(outside)
   })
 
-  it('Esc 는 포커스가 팝업·요약에 있을 때만 닫는다', () => {
+  it('Esc 는 포커스가 팝업·요약에 있을 때 닫는다', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    openPopup()
+    act(() => summary().focus())
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(document.activeElement).toBe(summary())
+  })
+
+  it('포커스가 아무 데도 없을 때(body)도 Esc 로 닫고 포커스를 요약으로 돌린다 — 팝업 안의 포커스가 빠진 경우', () => {
     seed(snap('claude'))
     mount(true, false)
     const popup = openPopup()
     act(() => popup.blur())
     expect(document.activeElement).toBe(document.body)
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(screen.queryByRole('dialog')).not.toBeNull()
-    act(() => summary().focus())
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).toBeNull()
     expect(document.activeElement).toBe(summary())

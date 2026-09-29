@@ -468,7 +468,9 @@ pub struct UsageLimitSnapshot {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]
 pub struct UsageWindow {
-    /// **쓴** 양의 백분율 0–100(남은 양이 아니다).
+    /// **쓴** 양의 백분율 0–100(남은 양이 아니다). 생산자는 소수 넷째 자리로 반올림해 싣는다(agent
+    /// `usage/normalize.rs` 의 `PCT_SCALE`) — 받는 쪽은 남은 양을 보정 없이 `floor(100 − used_pct)` 로 보여 주므로,
+    /// 이진 부동소수 꼬리(0.55 × 100 = 55.00000000000001)가 정수 경계를 넘지 않는 것이 그 반올림에 기댄다.
     pub used_pct: Option<f64>,
     /// 리셋 시각, epoch 초.
     #[ts(type = "number | null")]

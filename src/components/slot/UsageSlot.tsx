@@ -554,7 +554,8 @@ function ValueText({
 
 /**
  * 아래로 펴는 것이 먼저, 안 들어가면 요약의 위쪽 변에서 위로 뒤집는다 — 요약의 아래쪽 변에서 뒤집으면 팝업이 요약을
- * 덮는다. 둘 다 안 들어가면(뷰포트보다 큼) 슬롯 우클릭 메뉴와 같은 밀기로 떨어진다. 가로는 그 메뉴 규칙 그대로(R7).
+ * 덮는다. 아래·위 어느 쪽에도 안 들어가면 슬롯 우클릭 메뉴와 같은 밀기로 떨어지고, ★그때는 팝업이 요약을 일부 덮을 수
+ * 있다★(화면 안에 두는 것이 먼저다). 가로는 그 메뉴 규칙 그대로(R7).
  */
 function placePopup(anchor: Anchor, w: number, h: number, vw: number, vh: number): { top: number; left: number } {
   const pushed = clampMenuPosition(anchor.left, anchor.bottom, w, h, vw, vh)
@@ -599,9 +600,13 @@ function UsagePopup({
   useEffect(() => {
     const ours = (node: Node | null): boolean =>
       node !== null && ((ref.current?.contains(node) ?? false) || (buttonRef.current?.contains(node) ?? false))
-    // Esc 는 포커스가 팝업·요약에 있을 때만 — 다른 곳의 Esc 를 가로채지 않는다.
+    // Esc 는 포커스가 팝업·요약에 있을 때만 — 다른 곳의 Esc 를 가로채지 않는다. ★포커스가 아무 데도 없을 때(body·null)도
+    //   닫는다★ — 팝업 안의 포커스된 요소가 빠지면(다시 그려져 사라짐 등) 포커스가 body 로 떨어지고, 그때 막으면 닫을
+    //   길이 마우스뿐이다. 다른 요소로 간 포커스는 아래 focusin 이 이미 닫았다.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && ours(document.activeElement)) onClose(true)
+      const active = document.activeElement
+      const nowhere = active === null || active === document.body
+      if (e.key === 'Escape' && (nowhere || ours(active))) onClose(true)
     }
     // 요약 버튼 위 누름은 그 버튼의 click 이 닫는다 — 여기서도 닫으면 click 이 곧바로 다시 연다.
     const onDown = (e: MouseEvent) => {
@@ -700,14 +705,18 @@ function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) 
           </span>
         )}
         <span style={{ flex: '1 1 auto' }} />
-        {/* 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11). 30초 간격은 데몬이 지킨다. */}
+        {/* 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11). 30초 간격은 데몬이 지킨다.
+            ★`disabled` 가 아니라 `aria-disabled` 다★ — 포커스된 ⟳ 가 거절로 바뀌는 순간 `disabled` 는 포커스를 body 로
+            떨군다(HTML focus fixup). 포커스를 쥔 채 누름만 막는다. */}
         <button
           type="button"
           data-usage-refresh={view.vendor}
           aria-label={refreshLabel}
           title={refreshLabel}
-          disabled={view.rejected}
-          onClick={() => void useUsageStore.getState().refresh(view.vendor)}
+          aria-disabled={view.rejected || undefined}
+          onClick={() => {
+            if (!view.rejected) void useUsageStore.getState().refresh(view.vendor)
+          }}
           style={{
             display: 'inline-flex',
             padding: '2px',

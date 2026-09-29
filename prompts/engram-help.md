@@ -98,7 +98,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} slot.popout --view_id <id> --slot_id <id> [--to_window <label>]
       슬롯의 내용을 다른 창의 새 탭으로 옮긴다. to_window 를 빼면 새 창을 연다
   {tool} layout.setSlotContent --view_id <id> --slot_id <id> --content <Empty|Agent|AgentList|PresetPalette|Usage> [--agent_id <id>] [--show_claude <true|false>] [--show_codex <true|false>]
-      슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를, Usage 일 때만 show_claude · show_codex(그 백엔드의 사용량 한도를 보일지)를 함께 준다. 뺀 show 칸은 그 슬롯이 이미 Usage 면 지금 값을 두고, 아니면 true 다
+      슬롯이 무엇을 보여줄지 바꾼다. content 가 Agent 일 때만 agent_id 를, Usage 일 때만 show_claude · show_codex(그 백엔드의 사용량 한도를 보일지)를 함께 준다. 뺀 show 칸은 그 슬롯이 이미 Usage 면 지금 값을 두고, 아니면 true 다. 창 안에서 __engramCmd 로 layout.setSlotContent 를 부를 때는 show_claude · show_codex 를 둘 다 준다 — 그 길은 빠진 칸을 창이 받아 둔 값으로 채워 어긋날 수 있고, 셸 락 안에서 채우는 것은 이 명령뿐이다
 
   {tool} split.list --view_id <id>
       그 탭의 구분선 전량. 행마다 split_id · dir · ratio · a_slots(왼쪽/위 쪽 슬롯) · b_slots(오른쪽/아래 쪽 슬롯). 슬롯 x 와 y 사이 구분선은 x 가 한쪽, y 가 다른 쪽 목록에 든 행이다
