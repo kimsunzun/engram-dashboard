@@ -1,7 +1,7 @@
 # ADR-0252: 슬롯 메뉴 항목에 checked 와 enabled(ctx) 를 더하고 메뉴 상태는 조립처가 ctx 로 싣는다
 
-- 상태: 확정 (2026-09-27/29, 근거: TRD §7 #8 + 리뷰 후속 — 아래 「메인 결정」 절 참조)
-- 관련: Amends ADR-0064 (SlotMenuItem 고정 스키마에 checked와 enabled 선택 칸 추가 및 새 항목 두 단계 불변식에 조립처 ctx 구독을 더함) · ADR-0065(hideOn·children additive 개정 선례) · ADR-0055/0022(command registry) · `src/commands/registry.ts` · `src/components/slot/SlotContextMenu.tsx` · step-log S21
+- 상태: 확정 (2026-09-27/29, 근거: TRD §7 #8 + 리뷰 후속 — 아래 「메인 결정」 절 참조) · 부분 폐기 by ADR-0257 (사용량 메뉴 항목이 checked 와 enabled 칸의 소비자라는 전제만)
+- 관련: Amends ADR-0064 (SlotMenuItem 고정 스키마에 checked와 enabled 선택 칸 추가 및 새 항목 두 단계 불변식에 조립처 ctx 구독을 더함) · ADR-0065(hideOn·children additive 개정 선례) · ADR-0055/0022(command registry) · `src/commands/registry.ts` · `src/components/slot/SlotContextMenu.tsx` · step-log S21 · Amended by ADR-0257 (사용량 메뉴 항목이 checked 와 enabled 칸의 소비자라는 전제만)
 
 ## 맥락
 사용량 슬롯 메뉴에 "표시 여부" 토글(체크 표시)과 항목별 활성/비활성 판정(예: 새로고침 불가능한 벤더는 ⟳ 항목 비활성화)이 필요했다. ADR-0064는 `SlotMenuItem`을 고정 스키마로 못박고, 메뉴 항목이 뷰 스토어를 직접 읽는 것을 금지한다.
@@ -22,4 +22,6 @@
 TRD §7 #8 · main-notes(7c 리뷰 FIX 2회 — `626279c`/`59bb49e` 후속).
 
 ## 영향 / 불변식
-ADR-0064의 "새 항목 = command + registerSlotMenu 등록만"이라는 불변식이 이번 결정으로 일부 휘어졌다 — **LayoutLeaf가 SlotMenu 상태를 구독해 `ctx`로 주입하는 것**도 신규 항목의 정상 경로가 됐다(`usageRefreshable` 같은 범용 `ctx` 필드가 그 통로 — 재사용 여지는 2번째 소비자가 나올 때 다시 본다). 구현 커밋: `b59a7ac`, `664d011`, `626279c`, `d49a93f`, `59bb49e`.
+ADR-0064의 "새 항목 = command + registerSlotMenu 등록만"이라는 불변식이 이번 결정으로 일부 휘어졌다 — **LayoutLeaf가 SlotMenu 상태를 구독해 `ctx`로 주입하는 것**도 신규 항목의 정상 경로가 됐다(그 통로의 첫 실물이 범용 `ctx` 필드 `usageRefreshable` 였다 — 재사용 여지는 2번째 소비자가 나올 때 다시 본다). 구현 커밋: `b59a7ac`, `664d011`, `626279c`, `d49a93f`, `59bb49e`.
+
+★**`usageRefreshable` 은 이제 없다(`910c214` — ADR-0257)**★ — 사용량 메뉴 항목이 모두 빠지면서 그 ctx 필드와 LayoutLeaf 의 사용량 스토어 구독을 걷었다. `checked`·`enabled(ctx)` 칸과 「메뉴 상태는 조립처가 구독해 ctx 로 싣는다」 규칙은 그대로 살아 있고, **지금 싣는 상태는 없다**(두 칸을 쓰는 메뉴 항목 0 — 걷을지는 ADR-0257 「영향」의 미결).

@@ -10,8 +10,8 @@
 줍기 출구는 **StatusSink 훅 + pump drain**이고, **pump 스레드에서 곧장 책(사용량 상태)에 적용**한다. 이 락은 I/O·await·다른 락을 물지 않는 잎(leaf) 락이라 pump 스레드에서 락을 잡고 병합해도 안전하다고 판단해 락 밖에서 발행한다.
 
 ## 거부한 대안
-- **`open_spawn` 포트 주입**
-- **`Structured` 배출구**(`decoder.rs:18-25`)
+- **`open_spawn` 포트 주입** — 디코더에 포트를 쥐여 주려면 `open_spawn` 에 칸이 늘어 구현 셋과 호출 약 열 곳이 따라 바뀌고, 디코더를 부수효과 있게 만든다(drain 은 디코더를 순수하게 둔다 — TRD §1-2 「훅만으로는 안 맞는 이유」 · §3 #1).
+- **`Structured` 배출구**(codex `decoder.rs:18-25` — 작성 시점 줄) — 사용량 한도는 계정 단위 상태인데 `OutputEvent::Structured` 는 에이전트별 replay 링과 구독자 fan-out 을 타는 대화 출력이다. 또 그 탈출구를 쓰면 프론트가 `kind` 를 label 로, payload 를 코드블록으로 그려 codex 메서드 이름·프로토콜 JSON 이 사용자 화면에 뜬다. 출처 = TRD 작성 전 사실 조사 `.claude/handoff/attachments/usage-slot-trd-facts-2026-09-27.md:22-30` · `crates/engram-dashboard-agent/src/backend/codex/decoder.rs` 머리 주석(「모르는 것은 버린다 — `Structured` 를 배출구로 쓰지 않는다」 · 「사용량 한도 알림은 이벤트가 아니라 `take_usage` 로 나간다」).
 - **데몬 대기 맵 + 요청 때 병합**(옛 결정) — 2026-09-27 사용자 결정으로 대체됨: 줍기 결과가 다음 요청 전까지 화면에 못 닿는다는 것이 대체 사유.
 - **전역 FIFO 큐** — 넘치면 버려지고 비우는 순서가 역전될 수 있다.
 
