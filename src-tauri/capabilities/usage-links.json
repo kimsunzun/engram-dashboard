@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "usage-links",
+  "description": "사용량 슬롯의 「사용량 페이지 ↗」 링크 — opener:allow-open-url 을 두 주소(Claude·Codex 사용량 설정 페이지)로만 좁힌다(TRD S21 usage-limit-slot §1-7). 창은 main 하나 — 슬롯을 담는 창은 main 과 팝아웃뿐이고 agent-tree 는 슬롯을 담지 않는다. 팝아웃(slot-popup-*) 몫은 popup.json 이 같은 두 주소로 준다.",
+  "windows": ["main"],
+  "permissions": [
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://claude.ai/settings/usage" },
+        { "url": "https://chatgpt.com/codex/settings/usage" }
+      ]
+    }
+  ]
+}

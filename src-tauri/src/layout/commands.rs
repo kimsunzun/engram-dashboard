@@ -14,8 +14,8 @@
 //! 선언 매크로의 타입 알파벳이 `Uuid`·중첩 enum·재귀 타입을 못 실어서 생긴 번역이다 — 매크로 제약이
 //! 원인이고 계약을 새로 만든 것이 아니다.
 //! - **id 는 전부 `String`** 이고 핸들러가 파싱한다(형식 불량 = `INVALID_ARGUMENT`).
-//! - **`SlotContent` 는 태그 + `agent_id` 두 칸으로 펴서 받는다** — 매크로의 enum 은 필드 없는 variant 만
-//!   싣는다. 조합 검사는 [`slot_content`] 가 한다.
+//! - **`SlotContent` 는 태그 + `agent_id` · `show_claude` · `show_codex` 곁칸으로 펴서 받는다** — 매크로의
+//!   enum 은 필드 없는 variant 만 싣는다. 조합 검사는 [`slot_content`] 가 한다.
 //! - **`get_view` 는 선언에 없다** — 반환이 `ViewSnapshot`(재귀 `LayoutNode`)이고 매크로가 재귀 타입에서
 //!   컴파일 에러로 멈춘다. 그래서 v1 조회는 `tab.list`·`window.list`·`slot.resolveSpatial` 셋이다.
 //!

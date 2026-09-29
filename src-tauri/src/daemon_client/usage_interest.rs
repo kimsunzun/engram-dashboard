@@ -114,7 +114,8 @@ pub struct ShrinkGen(u64);
 /// 관심 재계산이 호출자에게 시키는 일 — `sent`(이 소켓에 마지막으로 보낸 집합)와 비교한 결과다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterestAction {
-    /// 관심 = `sent` — 할 일이 없다. 대기 중이던 줄임도 무효가 됐다.
+    /// 할 일이 없다 — 관심 = `sent`(대기 중이던 줄임은 무효가 됐다), 또는 같은 관심의 줄임이 이미 대기 중이다
+    /// (그 세대·기한·타이머가 그대로 유효하다).
     Unchanged,
     /// 관심에 `sent` 밖의 회사가 있다 — 곧바로 넛지 한 장.
     Nudge,
@@ -150,7 +151,7 @@ struct Cached {
 /// 곧 `socket_epoch` 다 — 소켓이 바뀌면 캐시를 비운다.
 #[derive(Debug, Default)]
 pub struct UsageInterest {
-    /// 셸이 숨긴 창(트레이). 소멸한 창의 label 은 다음 재계산이 지운다.
+    /// 셸이 숨긴 창(트레이). 소멸한 창의 label 은 [`UsageInterest::forget_window`] 가 지운다.
     hidden: BTreeSet<WindowLabel>,
     interest: BTreeSet<AgentBackendKind>,
     usage_windows: BTreeSet<WindowLabel>,
@@ -159,7 +160,8 @@ pub struct UsageInterest {
     sent: BTreeSet<AgentBackendKind>,
     cache: BTreeMap<AgentBackendKind, Cached>,
     shrink_seq: u64,
-    /// ★불변식 — 서 있으면 `interest ⊊ sent` 다★(줄임을 세우는 것도 무르는 것도 재계산 · 보냄 · 소켓 여닫기뿐).
+    /// ★불변식 — 서 있으면 `interest ⊊ sent` 이고 `interest` 는 그 줄임을 세운 관심 그대로다★(줄임을 세우는
+    /// 것도 무르는 것도 재계산 · 보냄 · 소켓 여닫기뿐이고, 그동안 `sent` 를 바꾸는 자리는 줄임을 무른다).
     shrink_pending: Option<ShrinkGen>,
 }
 
@@ -169,15 +171,20 @@ impl UsageInterest {
     }
 
     /// 레이아웃·보임이 바뀐 뒤 관심과 방송 받을 창을 새로 계산한다 — ViewManager 락 안에서 부른다.
+    ///
+    /// ★숨김 표시는 여기서 지우지 않는다★ — 모델에 아직 없는 label 의 표시도 남긴다: 새 창으로 슬롯 옮기기는
+    /// OS 창을 먼저 열고(phase B) 락을 놓았다가 모델 창을 더하므로(phase C), 그 틈의 트레이 숨김이 지워지면
+    /// 숨은 팝아웃이 보임으로 센다. 지우는 것은 창 소멸뿐이다([`Self::forget_window`]).
     pub fn recompute(&mut self, mgr: &ViewManager, now: Instant) -> InterestAction {
-        // 팝업 label 은 다시 쓰이지 않아 남겨 두면 숨긴 채 닫힌 팝아웃마다 한 칸씩 샌다. OS 창은 모델 창보다
-        // 먼저 서지 않으므로 모델에 없는 label 의 숨김 표시는 가리킬 창이 없다.
-        self.hidden.retain(|label| mgr.windows.contains_key(label));
-        self.interest = interest_from_layout(mgr, &self.hidden);
+        let before = std::mem::replace(&mut self.interest, interest_from_layout(mgr, &self.hidden));
         self.usage_windows = usage_slot_windows(mgr);
         if !self.interest.is_subset(&self.sent) {
             self.shrink_pending = None;
             InterestAction::Nudge
+        } else if self.shrink_pending.is_some() && self.interest == before {
+            // 같은 줄임이 이미 대기 중이다 — 세대·기한을 그대로 두어 관계없는 재계산이 줄임을 미루지 못하게 한다
+            // (TRD §1-7 의 「새 세대를 뽑아」를 이 경우만 고친다 — TRD 개정은 8단계에 적는다).
+            InterestAction::Unchanged
         } else if self.interest != self.sent {
             self.shrink_seq += 1;
             let gen = ShrinkGen(self.shrink_seq);
@@ -190,6 +197,18 @@ impl UsageInterest {
             self.shrink_pending = None;
             InterestAction::Unchanged
         }
+    }
+
+    /// 창 `label` 이 소멸했다(팝업 소멸 정리가 모델에서 창을 지운 같은 락 안에서) — 숨김 표시를 지우고
+    /// [`Self::recompute`] 와 같다. label 은 다시 쓰이지 않아 남겨 두면 숨긴 채 닫힌 팝아웃마다 한 칸씩 샌다.
+    pub fn forget_window(
+        &mut self,
+        label: &str,
+        mgr: &ViewManager,
+        now: Instant,
+    ) -> InterestAction {
+        self.hidden.remove(label);
+        self.recompute(mgr, now)
     }
 
     /// 셸이 창 `label` 을 숨기거나(`false`) 다시 보인 뒤(`true`) — 숨김 표시를 고치고 [`Self::recompute`] 와 같다.
@@ -608,9 +627,40 @@ mod tests {
 
         mgr.close_window(POPUP).unwrap();
         ui.recompute(&mgr, t0);
+        assert!(ui.hidden.contains(POPUP), "재계산은 숨김 표시를 안 지운다");
+        ui.forget_window(POPUP, &mgr, t0);
         assert!(ui.hidden.is_empty(), "소멸한 창의 숨김 표시가 남았다");
         assert_eq!(ui.interest, set(&[]));
         assert!(ui.usage_windows.is_empty());
+    }
+
+    /// 새 창으로 옮기기는 OS 창을 먼저 열고 락을 놓은 뒤 모델 창을 더한다 — 그 틈의 트레이 숨김이 살아남아야
+    /// 모델 창이 선 뒤에도 그 팝아웃이 숨은 창으로 센다.
+    #[test]
+    fn a_hide_mark_before_the_model_window_exists_survives_until_forgotten() {
+        let t0 = Instant::now();
+        let mut mgr = ViewManager::new();
+        let mut ui = connected(&mgr, t0);
+
+        assert_eq!(
+            ui.set_visible(POPUP, false, &mgr, t0),
+            InterestAction::Unchanged
+        );
+        ui.recompute(&mgr, t0);
+        assert!(
+            ui.hidden.contains(POPUP),
+            "모델에 없는 label 의 표시가 지워졌다"
+        );
+
+        let popup_view = mgr.create_window(POPUP).unwrap();
+        put(&mut mgr, popup_view, usage(true, true));
+        assert_eq!(ui.recompute(&mgr, t0), InterestAction::Unchanged);
+        assert_eq!(ui.interest, set(&[]), "숨긴 팝아웃이 보임으로 셌다");
+        assert_eq!(ui.usage_windows, labels(&[POPUP]));
+
+        mgr.close_window(POPUP).unwrap();
+        ui.forget_window(POPUP, &mgr, t0);
+        assert!(ui.hidden.is_empty());
     }
 
     // ── 늘어남·줄어듦 (가짜 시각) ─────────────────────────────────────────────────
@@ -696,11 +746,43 @@ mod tests {
         let first = defer_gen(ui.recompute(&mgr, t0));
         mgr.set_slot_content(view, slot, usage(false, false))
             .unwrap();
-        let second = defer_gen(ui.recompute(&mgr, t0 + Duration::from_secs(1)));
+        let later = t0 + Duration::from_secs(1);
+        let rearmed = ui.recompute(&mgr, later);
+        assert!(
+            matches!(rearmed, InterestAction::Defer { deadline, .. } if deadline == later + USAGE_INTEREST_SHRINK_DELAY),
+            "더 줄면 새 기한으로 다시 선다: {rearmed:?}"
+        );
+        let second = defer_gen(rearmed);
         assert_ne!(first, second);
         assert!(!ui.deferral_elapsed(first));
         assert!(ui.deferral_elapsed(second));
         assert_eq!(ui.sync(1, false), Some(set(&[])));
+    }
+
+    /// 대기 중인 줄임과 같은 관심을 내는 재계산(관계없는 레이아웃 변경)은 세대·기한을 그대로 둔다 — 잇단
+    /// 재계산이 줄임을 미루지 못한다.
+    #[test]
+    fn unrelated_recomputes_during_a_pending_shrink_do_not_postpone_it() {
+        let t0 = Instant::now();
+        let (mut mgr, slot) = main_with(true, true);
+        let mut ui = connected(&mgr, t0);
+        let view = main_active(&mgr);
+
+        mgr.set_slot_content(view, slot, usage(true, false))
+            .unwrap();
+        let gen = defer_gen(ui.recompute(&mgr, t0));
+        for step in 1..=3u64 {
+            mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+            mgr.switch_tab(MAIN_WINDOW_LABEL, view).unwrap();
+            assert_eq!(
+                ui.recompute(&mgr, t0 + Duration::from_millis(500 * step)),
+                InterestAction::Unchanged,
+                "재계산 {step}"
+            );
+        }
+        assert_eq!(ui.shrink_pending, Some(gen));
+        assert!(ui.deferral_elapsed(gen), "처음 세대가 그대로 기한에 끝난다");
+        assert_eq!(ui.sync(1, false), Some(set(&[Claude])));
     }
 
     #[test]
@@ -852,19 +934,33 @@ mod tests {
         let mut ui = connected(&mgr, t0);
 
         let lines = Arc::new(Mutex::new(Vec::new()));
+        let mismatches = |lines: &Mutex<Vec<String>>| {
+            lines
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|m| m.contains("사용량 구독 어긋남"))
+                .count()
+        };
         let resends = tracing::subscriber::with_default(DebugLines(lines.clone()), || {
-            (1..=3)
+            // 콜사이트 관심은 프로세스 전역 캐시다 — 다른 시험 스레드가 같은 콜사이트를 이 구독자가 서기 전의
+            // 구독자 목록으로 등록하는 중이면 그 등록이 끝난 뒤 캐시가 「안 받음」으로 남는다(실측 — 병렬
+            // 실행에서 0 줄). 그래서 한 줄이 잡힐 때까지 캐시를 다시 짓고 되찔러 본 뒤 세기 시작한다.
+            for rev in 1..=100 {
+                tracing::callsite::rebuild_interest_cache();
+                ui.on_snapshot(1, &snap(Claude, rev), &[Claude], t0);
+                if mismatches(&lines) > 0 {
+                    break;
+                }
+            }
+            assert!(mismatches(&lines) > 0, "debug 줄을 잡을 수 없다");
+            lines.lock().unwrap().clear();
+            (101..=103)
                 .map(|rev| ui.on_snapshot(1, &snap(Claude, rev), &[Claude], t0).resend)
                 .collect::<Vec<_>>()
         });
         assert_eq!(resends, vec![Some(set(&[Claude, Codex])); 3]);
-        let mismatch_lines = lines
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|m| m.contains("사용량 구독 어긋남"))
-            .count();
-        assert_eq!(mismatch_lines, 3);
+        assert_eq!(mismatches(&lines), 3);
     }
 
     #[test]
