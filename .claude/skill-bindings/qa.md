@@ -190,7 +190,7 @@ export CLIENT_EXE="$(node scripts/build-client-shell.mjs)"   # ★클라이언�
 powershell -NoProfile -Command "\$c = Get-NetTCPConnection -LocalPort 1420 -State Listen -ErrorAction SilentlyContinue; if (\$c) { (Get-CimInstance Win32_Process -Filter \"ProcessId=\$(\$c[0].OwningProcess)\").CommandLine }"
 nohup npm run dev > /tmp/engram-vite.log 2>&1 & disown   # 위가 빈 출력일 때만(= 아무도 안 잡고 있을 때만)
 curl -s -o /dev/null --retry 60 --retry-delay 1 --retry-connrefused --max-time 120 http://localhost:1420
-# 1) 분리 실행으로 기동 — 스케줄러가 새 프로세스를 만들어 터미널 트리 밖에 둔다
+# 1) 분리 실행으로 기동 — WMI(`Win32_Process.Create`)가 새 프로세스를 만들어 터미널 트리 밖에 둔다
 powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe \$env:CLIENT_EXE -EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223'"
 #    성공 시 stdout 마지막 두 줄 = LOG=<로그경로> · PID=<pid>   ★PID를 기록한다★(teardown이 이걸 쓴다)
 #    로그까지 켜려면 값을 콤마로 잇는다 — 반드시 작은따옴표 각각:
@@ -207,7 +207,13 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - **★1420을 남이 잡고 있으면 디버그 경로를 쓰지 않는다 — 릴리스로 간다★(실측 2026-08-17):** 디버그 빌드는 화면을 품지 않고 1420에서 받아오는데 그 포트는 **먼저 잡은 워크트리 것**이다. 남의 vite를 재사용하면 **남의 화면을 측정하고 통과로 오판한다** — 앱은 정상으로 보이므로 눈치챌 단서가 없다. 위 0)의 명령줄 출력에 **지금 워크트리 경로가 아닌 다른 경로**가 보이면(예: `...engram-dashboard-wt2\...\vite.js`) 그 vite를 쓰지 말고, 사용자에게 그 프로세스를 알리고 릴리스 경로로 전환한다(릴리스 exe는 화면을 품어 포트가 필요 없다). **남의 vite를 죽이지 않는다** — 그 워크트리에서 다른 작업이 돌고 있을 수 있다.
 - **★릴리스로 갈 땐 순수 `cargo build --release`가 아니다★(실측 2026-08-18):** 그렇게 만든 exe는 여전히 `localhost:1420`을 로드해 **같은 함정에 그대로 빠진다.** 화면을 품은 exe는 `npm run tauri build -- --no-bundle`이 만든다(근거·경고 = `scripts/build-release.ps1` 헤더). 띄운 뒤 앱 안에서 URL을 확인해 `http://tauri.localhost/`인지 본다 — `localhost:1420`이면 잘못된 빌드를 측정하는 것이다.
 - **★`-Command`를 `-File`로 바꾸지 말 것★** — `-File`은 뒤 인자를 전부 문자열 리터럴로 넘겨 `'A=B','C=D'`가 **한 값 `A=B,C=D`로 뭉개진다.** 그러면 포트 인자가 오염돼 **9223이 안 열리는데 스크립트는 PID를 정상 반환**한다 — 게이트가 조용히 죽는 경로다(실측 2026-08-17). 경로에 `\`를 쓰는 것도 금지 — Git Bash가 먹어서 `exe not found`가 난다. 슬래시로 쓴다.
-- **★환경변수는 상속되지 않는다★** — 새 프로세스를 스케줄러가 만들어서 현재 셸의 `$env:...`가 안 넘어간다. 디버그 포트·`RUST_LOG`는 반드시 `-EnvVars`로 넘긴다. 빠뜨리면 포트가 안 열려 "왜 9223이 안 뜨지"로 헤맨다.
+- **★환경변수는 상속되지 않는다★** — 새 프로세스를 WMI(`Win32_Process.Create`)가 만들어서 호출자 환경을 물려받지 않는다 — 현재 셸의 `$env:...`가 안 넘어간다(`-EnvVars` 가 앱에 닿는 길은 래퍼 `.bat` 의 `set` 줄뿐이다 — `scripts/launch-detached.ps1` 의 래퍼 주석). 디버그 포트·`RUST_LOG`는 반드시 `-EnvVars`로 넘긴다. 빠뜨리면 포트가 안 열려 "왜 9223이 안 뜨지"로 헤맨다.
+- ★**실 에이전트를 띄우는 실측은 데이터 폴더를 갈라 격리한다 — 데몬을 앱보다 먼저 띄운다**★(이전 세션 실측 2026-09-28~29). 워크트리의 디버그 기본 데이터 폴더(`.engram-data/agents.json`)에는 실 cwd 를 가진 `autoRestore:true` 프로필이 있을 수 있고, 앱이 WMI 로 띄우는 데몬은 `ENGRAM_DATA_DIR` 를 상속하지 않는다(코드 파생 — `crates/engram-dashboard-discovery/src/lib.rs` 머리의 override 주석). 그래서:
+  1. 클라이언트 셸과 데몬을 둘 다 분리 실행으로 짓는다(데몬 빌드는 위 0) 의 「조건부」 경고 그대로) — `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "node scripts/build-client-shell.mjs" -WorkDir "<워크스페이스 루트>" -LogFile "<로그경로>.log"` · 같은 꼴로 `-Command "cargo build -p engram-dashboard-daemon"`(`-Command` · `-WorkDir` · `-LogFile` 셋 다 필수 — 위 「분리 실행」). ★이 경로에서는 `$CLIENT_EXE` 를 로그에서 잡는다★ — 앞 로그의 `__EXIT=0` 바로 앞 줄이 exe 절대 경로다(그 스크립트는 성공하면 stdout 에 경로 한 줄만 쓰고 진행·에러는 stderr, 래퍼가 그 뒤에 마커를 붙인다 — 코드 파생 · `scripts/build-client-shell.mjs` 머리 · `scripts/run-detached.ps1`). 그 줄로 `export CLIENT_EXE=…` 한다.
+  2. **데몬을 먼저** 띄운다 — `powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe '<$CLIENT_EXE 와 같은 폴더의 engram-dashboard-daemon.exe>' -EnvVars 'ENGRAM_DATA_DIR=<scratch>/data','RUST_LOG=info'"` (위 bash 블록의 기동 줄 1) 과 같은 `-Command` 꼴 — `-File` 이면 `-EnvVars` 가 한 값으로 뭉개진다 · 위 불릿).
+  3. 앱은 위 1) 에 같은 데이터 env 를 더해 띄운다 — `-EnvVars 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223','ENGRAM_DATA_DIR=<scratch>/data'`.
+  4. vite 는 위 0) 그대로다(1420 소유 확인 → `nohup npm run dev …`).
+  - ★**함정 — 그 데몬이 죽으면 격리가 풀린다**★: 앱이 새 데몬을 WMI 로 띄우는데 그 데몬은 env 를 못 봐 기본 폴더로 뜨고, 거기 자동복원 에이전트를 **실 폴더에서** 되살린다(앱 자신은 env 폴더를 폴링하다 시간 초과로 남는다 — 코드 파생 · 같은 파일의 「override 가 켜져 있으면 단언하지 않는다」 주석).
 - **★실측 대상이 이번 변경을 담은 빌드인지 먼저 확인한다★** — 분리 실행은 **이미 만들어진 exe**를 띄운다. 소스를 고치고 재빌드 없이 띄우면 옛 바이너리로 실측하고 **통과로 오판한다**. `node scripts/build-client-shell.mjs`는 **데몬을 빌드하지 않는다** — 백엔드를 고쳤으면 `-p engram-dashboard-daemon`도 돌린다(안 그러면 옛 데몬에 붙어 Rust 변경이 조용히 무효가 된다, ADR-0029).
 - **디버그 대신 릴리스로 볼 수도 있다** — `target/release/engram-dashboard.exe`는 화면을 품고 있어 dev 서버가 필요 없고 렌더가 즉시다. 대신 빌드가 4분대다(실측 2026-08-17). 반복 확인엔 디버그가 낫다 — dev 서버를 살려두면 재기동 렌더가 1초 안쪽이다.
 - **★`target/release/`와 `release/`는 다른 배포판이다★** — 전자는 위 런처가 만들고, 후자는 `scripts/build-release.ps1`이 조립하는 portable 폴더다. 데이터 폴더도 각자라 섞으면 엉뚱한 데몬·엉뚱한 로스터를 본다.
@@ -226,7 +232,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 
 #### 실측 조리법 — 위 3)에서 무엇을 어떤 채널로 관측하나
 
-> 위 「스샷보다 `eval` 텍스트」 불릿의 **실행 세부**다(그 판정을 되풀이하지 않는다). 이 네 갈래를 워커마다 다시 알아냈다 — 2026-08-21 한 세션에서 둘이 **독립적으로** 같은 것을 발굴했고 한쪽은 그 발굴을 "이번에 가장 비쌌던 작업"(도구 호출 84회)으로 지목했다.
+> 위 「스샷보다 `eval` 텍스트」 불릿의 **실행 세부**다(그 판정을 되풀이하지 않는다). 아래 A–D 네 갈래를 워커마다 다시 알아냈다 — 2026-08-21 한 세션에서 둘이 **독립적으로** 같은 것을 발굴했고 한쪽은 그 발굴을 "이번에 가장 비쌌던 작업"(도구 호출 84회)으로 지목했다.
 > ★**검증 표시가 항목마다 붙어 있다 — 이 절을 쓴 세션은 앱을 띄우지 않았다.**★ `코드 파생`(파일:줄이 근거) · `이전 세션 실측`(날짜) · `미검증`(아무도 돌려 본 기록이 없다) 셋으로 갈린다. 미검증 항목이 틀리면 그 자리를 고치고 표시를 올릴 것.
 
 **A. cdp.mjs가 하는 일은 셋뿐이고, 영역 지정 캡처는 없다** (코드 파생)
@@ -278,6 +284,12 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
   - ★그렇게 드러나는 것은 **덮인 네이티브 스크롤바**이고 사용자가 보는 그것이 아니다★ — 위 첫 갈래로 간다. (코드 파생 — `src/index.css:57`~`65`)
   - ★**넘침만 만들면 한 픽셀도 안 칠해진다**★ — thumb 색이 평소 transparent이고 `[data-scroll-active]`가 붙은 동안만 칠해진다(`index.css:90`~`103`). 정적 캡처를 뜨려면 표식을 손으로 붙인다(`el.setAttribute('data-scroll-active','1')`). (코드 파생) 실제 스크롤로 붙이면 마지막 스크롤 **500 ms** 뒤 자동으로 떨어진다(`SCROLL_HIDE_DELAY_MS` = `src/components/ui/scroll-area.tsx:36`, 붙이는 쪽 = `src/components/ui/nativeScrollActivity.ts`).
   - 거꾸로 **보이는 `.slider`는 DOM 주입으로 못 띄운다** — 기하가 xterm 내부 버퍼 상태에서 나오므로 실제 스크롤백을 쌓아야 한다(에이전트 출력 또는 위 C로 잡은 인스턴스에 쓰기). (미검증 — 추론)
+
+**E. 실 에이전트를 몰 때 — 띄우기 · 입력 · 끊기 · 승인** (이전 세션 실측 2026-09-28~29 — 따로 적은 것 말고는)
+- **cwd·백엔드를 골라 띄우기** = `window.__engramCmd.run('agent.spawnInto', { cwd: '<scratch>/ws-…', backend: 'claude' | 'codex' })` — 새 AgentId 를 돌려준다(코드 파생 — `src/commands/tabCommands.ts` 의 `agent.spawnInto`). cwd 는 위 격리 폴더 안에 둔다. **다시 열기** = `agent.kill`(`{ agentId }`) → `window.__ENGRAM_AGENT__.spawnProfile('<id>', false)`. ★`__ENGRAM_AGENT__` 는 정식 표면이 아니라 CLAUDE.md 「LLM-우선 제어」 의 갭 핸들이다★ — 창 레지스트리(`__engramCmd`)에는 재활성화 명령이 없고, 정식 경로는 데몬 버스의 `agent.spawn`(`target` = 깨우기 — `crates/engram-dashboard-agent/src/commands.rs`)이다(그 길로 다시 연 실측은 없다).
+- **신뢰 입력이 필요한 곳은 CDP `Input.*` 로 넣는다.** 휠·기본 스크롤은 브라우저 기본 동작이라 신뢰 입력이어야 일어난다 — 신뢰되지 않은 이벤트는 기본 동작을 일으키지 않는다(웹 플랫폼 규칙) · 페이지 안에서 만든 합성 휠 이벤트로는 뷰포트가 움직이지 않았다(이전 세션 관찰). ★키는 미검증 — 이전 세션 관찰, 조건 불명★: 합성 키 이벤트도 안 들었다고 적혔지만 Esc 끊기 경로(`RichSlot` 의 `onKeyDownCapture` → `slot/interruptKey.ts` 의 `isInterruptEscape`)는 `isTrusted` 를 보지 않는다(코드 파생) — 규칙으로 읽지 말 것. `cdp.mjs` 는 `Input.*` 를 노출하지 않으므로(위 A) 드라이버를 따로 짠다 — 지난 실측의 드라이버는 세션 스크래치에 있었고 커밋되지 않았다.
+- **claude — 보낸 직후(약 0.5 초 안)에는 끊지 않는다**(여유는 경험칙이다). 보낸 지 약 0.2 초에 끊은 한 번이 300 초 뒤에야 멈췄다 — 사용자 전역 `UserPromptSubmit` 훅이 취소된 뒤에도 끝까지 돌았다(1회 관측). 대시보드의 claude 는 사용자 `~/.claude` 훅을 물려받는다.
+- **codex — 승인 거절 시험의 쓰기 대상은 `%TEMP%` 밖에 둔다.** workspace-write 샌드박스의 codex 는 `%TEMP%` 에 승인 없이 쓴다 — 거기를 겨누면 거절할 승인 요청이 서지 않는다.
 
 ## 실패 보고 시 게이트 명칭 (골격 §3에 주입)
 

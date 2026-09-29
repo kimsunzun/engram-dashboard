@@ -425,7 +425,7 @@ ToolResult { id: String, outcome: ToolOutcome },
 - `id` 는 `Option` 이 아니다 — 가리킬 호출이 없으면 사건을 내지 않는다(②).
 - 기각한 모양 둘:
   - **`ToolCall` 에 선택 `status` 칸 + 누산기 id 병합** — 끝에서 `ToolCall` 을 한 번 더 내야 한다. 두 턴 분류기가 `ToolCall` 을 진행으로 세므로(`claude/mod.rs:541` · `codex/mod.rs:1206`) 턴 끝 뒤에 온 끝(위 실측)이 「턴 중」을 다시 켜 30 분 막힘 경로가 된다. 옛 셸은 끝마다 **같은 도구 행을 하나 더** 그린다 — 「표시할 수 없는 신호」 줄보다 나쁘다(틀린 내용이다).
-  - **`Structured{kind:…}` 탈출구** — 같은 두 분류기가 `Structured` 를 통째로 진행으로 센다(대기 입력 사건을 탈출구에 안 싣는 사유와 같다 — `types.rs:94-97`). json 을 claude `tool_result` 모양으로 지으면 옛 셸도 배지를 그리지만, 그것은 벤더 모양을 codex 번역기까지 넓혀 조사 §3-1 의 누수를 키운다.
+  - **`Structured{kind:…}` 탈출구** — 같은 두 분류기가 `Structured` 를 진행으로 센다(claude 는 끊김 표시 `kind:"interrupted"` 하나만 뺀다 — ADR-0243 · codex 는 통째로)(대기 입력 사건을 탈출구에 안 싣는 사유와 같다 — `types.rs:94-97`). json 을 claude `tool_result` 모양으로 지으면 옛 셸도 배지를 그리지만, 그것은 벤더 모양을 codex 번역기까지 넓혀 조사 §3-1 의 누수를 키운다.
 
 **② 상태 매핑 — codex 번역기**: 함수 하나 `tool_outcome(item, kind) -> Option<ToolOutcome>` 를 `Completed`·`History` 두 문이 같이 쓴다(ADR-0203 「두 번째 어휘표를 만들지 않는다」).
 
@@ -581,7 +581,7 @@ struct PartialMessage {
 ### 5-3. 불변식
 
 - **턴 끝은 `result` 한 줄 그대로**(조사 §4-4 함정) — `message_stop` 을 끝으로 옮기면 도구 호출마다 턴이 끝난다.
-- **스트림 부속 줄을 `Structured` 로 내지 않는다** — claude 턴 분류기는 `Structured` 를 통째로 진행으로 센다(`:538-545`). 턴 끝 뒤의 진행은 30 분 막힘 경로다(CLAUDE.md 「대기 입력 상태」 끝 문단).
+- **스트림 부속 줄을 `Structured` 로 내지 않는다** — claude 턴 분류기는 `Structured` 를 끊김 표시(`kind:"interrupted"` — ADR-0243) 말고는 전부 진행으로 센다(`classify_turn`). 턴 끝 뒤의 진행은 30 분 막힘 경로다(CLAUDE.md 「대기 입력 상태」 끝 문단).
 - 흘린 델타는 `TextDelta` 라 진행이다 — 턴 **안**에서만 나온다: `result` 가 상태를 지우고, `message_start` 없이 온 늦은 델타는 버리므로 턴 끝 뒤에 「턴 중」을 다시 켤 길이 없다.
   - ★이 「턴 끝 뒤 진행 없음」은 벤더 전제 하나에 기댄다 — **벤더가 턴 밖에서 최상위(`parent_tool_use_id` null) `stream_event` 를 내지 않는다**★. 한가할 때 `message_start` + 글 델타가 오면 번역기는 그것을 새 메시지로 받아 `TextDelta` 를 내고, 「턴 중」(과 §3-4 턴 열림 문)이 켜져 30 분 막힘 경로가 된다. 번역기로는 막을 수 없다(턴 도중 접힌 입력의 새 `message_start` 와 모양이 같다). 그래서 B1 채취가 확인한다(§5-4 ③).
 - **프론트 무변경**: 누산기 `TextDelta` 갈래는 마지막 글 항목에 이어 붙이고 중복 제거가 없다(`structuredAccumulator.ts:130-141`) — 제거는 번역기 몫이고 위 표가 진다. 흘린 첫 델타와 완결 본문이 같은 글 항목으로 모이므로 완결 버림이 빠지면 글이 두 벌이 된다(회귀 시험).
@@ -745,7 +745,7 @@ struct PartialMessage {
 | **0245**(7판 · 채번 완료) | 터미널 모드(PTY)에서 Ctrl-C 주입을 뺀다 · Esc · Ctrl-C 는 사람이 칠 때 터미널이 알아서 처리한다(사용자 ⑭ 2026-09-28) · 대응 = `interrupt()` `Unsupported`(버스 CONFLICT · WS `Interrupt` 오류) · 능력 `control.interrupt = false`(메인) · LLM 이 터미널 모드를 끊을 길이 없다 = 「LLM-우선 제어」 갭 · 사용자 수락(§9) · ADR-0017 결정 5 의 interrupt(Ctrl-C) 부분 · ADR-0030 의 PTY 능력 목록에 부분 개정 도장 | Ctrl-C 를 두고 끝날 위험을 문서화(사용자 — 빼기를 골랐다) · Ctrl-C 대신 Esc(TUI 의 Esc 뜻이 상태마다 갈리고 명령은 그 상태를 모른다 · 사람이 이미 키를 직접 보낸다)(메인) |
 
 - **0241 을 0239 에 넣지 않고 새 번호로 두는 이유**: 거부한 대안이 서로 다른 축이다(0239 = 종류를 누가 판별하나 · 0241 = 끝 결과의 선 모양과 판차). 한 ADR 에 섞으면 한쪽을 번복할 때 다른 쪽까지 폐기 도장이 번지고, 다음 세션이 어느 대안이 어느 결정의 것인지 못 가른다.
-- 함께 고칠 문서: CLAUDE.md 「LLM-우선 제어」 남은 갭에 「LLM 이 터미널 모드 에이전트를 끊을 길이 없다(ADR-0245 · 사용자 수락)」 — 착지 라운드의 `/review doc` 몫(지금은 CLAUDE.md 를 고치지 않는다 · 7판) · `types.rs:70` · `types.rs:94-95`(`QueuedInput` doc — `Structured` 통째 진행 전제 · 6판 · B3) · `classify_turn` doc(`kind:"interrupted"` 예외 · 6판 · B3) · `claude/mod.rs:551` · `:762-767` 주석 · `codex/decoder.rs:262-263` · `:523-525` · `:623` 앞 주석(끝에서 결과를 낸다 — B5) · `codex/transport.rs:3052-3053`(`refuse` doc — 거절한 승인 item 을 기억한다 · B5) · CLAUDE.md 「핵심 불변식」(claude 끝 어휘에 끊김 `TurnEnd` 한 갈래 · 「대기 입력 상태」 끝 문단의 「턴 끝 뒤에 오는 사건」 예에 `ToolResult` — 선택) — 착지 라운드에서 `/review doc`.
+- 함께 고칠 문서: CLAUDE.md 「LLM-우선 제어」 남은 갭에 「LLM 이 터미널 모드 에이전트를 끊을 길이 없다(ADR-0245 · 사용자 수락)」 — 착지 라운드의 `/review doc` 몫(지금은 CLAUDE.md 를 고치지 않는다 · 7판 → 착지 라운드에서 반영 2026-09-29) · `types.rs:70` · `types.rs:94-95`(`QueuedInput` doc — `Structured` 통째 진행 전제 · 6판 · B3) · `classify_turn` doc(`kind:"interrupted"` 예외 · 6판 · B3) · `claude/mod.rs:551` · `:762-767` 주석 · `codex/decoder.rs:262-263` · `:523-525` · `:623` 앞 주석(끝에서 결과를 낸다 — B5) · `codex/transport.rs:3052-3053`(`refuse` doc — 거절한 승인 item 을 기억한다 · B5) · CLAUDE.md 「핵심 불변식」(claude 끝 어휘에 끊김 `TurnEnd` 한 갈래 · 「대기 입력 상태」 끝 문단의 「턴 끝 뒤에 오는 사건」 예에 `ToolResult` — 선택) — 착지 라운드에서 `/review doc` → CLAUDE.md 두 곳(「핵심 불변식」 · 「LLM-우선 제어」)은 착지 라운드(2026-09-29)에서 반영했다.
 
 ---
 

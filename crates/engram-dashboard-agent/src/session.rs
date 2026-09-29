@@ -1247,7 +1247,10 @@ mod tests {
         assert!(caps.output.structured, "json 세션 → 구조화 출력");
         assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
         assert!(!caps.control.resize, "resize 불가");
-        assert!(!caps.control.interrupt, "interrupt 불가(MVP)");
+        assert!(
+            !caps.control.interrupt,
+            "끊기 줄을 주입하지 않은 통로 = 끊기 능력 없음(운영 claude JSON 은 backend 가 주입한다 — ADR-0238)"
+        );
         // ★ADR-0044 후속 완료★: json 모드도 --resume 지원(spike-verified, claude 2.1.170) → resume=true.
         //   build_spec 이 SpawnMode::Resume 에서 --resume 을 내고 통제-sid(ADR-0008)를 재사용하므로 sid
         //   충돌 없음.

@@ -325,14 +325,6 @@
 - **회귀망 없음:** 미지 `kind` 를 만났을 때의 동작을 재는 테스트가 워크스페이스에 **0 건**이다(S21 TRD 조사). 어느 안을 고르든 그 테스트가 함께 와야 한다.
 - **딸린 사실:** 임시 스폰 경로도 프로필을 디스크에 올린다(`manager.rs:875-899`) — 그래서 이 위험은 "언젠가"가 아니라 **codex 를 처음 띄우는 순간** 파일에 새겨진다.
 
-### T-34. 중단(interrupt) 기능이 반쯤 배선된 채 멈춰 있다
-- **상태:** ★**착수 — S21 챗 화면 F2 가 두 절반을 다 닫는다**(사용자 결정 2026-09-27 U1·U6 · `docs/process/S21-chat-ux/trd.md` §3): claude JSON 끊기 연결(스파이크 먼저) + 채팅 칸 Esc → 명령 `agent.interrupt`.★ 아래 줄 번호는 적은 날 기준이라 낡았다(예: `stdio.rs` 끊기 = 지금 `:371-375`). 옛 상태 = 보류(미착수) — codex 작업 중 발견했으나 **codex 와 무관한 선재 미완**이라 그 범위에서 손대지 않았다.
-- **출처:** S21 codex Phase 2a 설계 중 실측(2026-09-09).
-- **증상:** wire 의 `capabilities.control.interrupt` 를 읽어 트리 노드에 `canInterrupt` 를 만드는데(`src/components/agent/mergeTreeNodes.ts:94`), **그 값을 읽는 화면 코드가 하나도 없다.** `rg "canInterrupt" src/ -g '!*.test.*'` 가 같은 파일 세 줄(타입 선언 `:55` · 대입 `:94` · 예약 노드 기본값 `:111`)만 낸다. 즉 사람이 중단을 누를 표면이 없다.
-- **반대편도 비어 있다:** `StdioTransport::interrupt()` 는 `Unsupported` 를 돌려주고(`crates/engram-dashboard-agent/src/transport/stdio.rs:316-321`), 같은 파일의 caps 가 `control.interrupt: false` 를 리터럴로 신고한다(`:363-384`). 즉 **신고도 거짓이고 실행 경로도 없다.**
-- **왜 지금 값이 올라갔나:** codex app-server 는 `turn/interrupt` 가 **실측 18ms 에 성공**하고 중단 뒤 같은 대화가 그대로 쓰인다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md`). 즉 **되는 기능인데 신고도 화면도 없는** 상태가 codex 에서 처음으로 실재하게 됐다.
-- **묶인 결정:** Phase 2a 설계 문서 §10 의 capability 신고 항목(그 값을 정직하게 낼 것인가 · 레버는 무엇인가)과 transport 계약 항목. 그 둘이 정해지면 이 항목의 절반이 따라온다 — **나머지 절반(사람이 누를 표면)은 그래도 남는다.**
-
 ### T-35. 재연결 타이밍 테스트가 간헐적으로 깨진다 (ADR-0195 결함과 별건)
 - **상태:** 미착수. **ADR-0195 가 다루는 결함과 다른 테스트**다 — 같은 스위트에서 같이 나왔을 뿐이다.
 - **출처:** ADR-0195 결함 규명 중 부수 관측(2026-09-11). 단일 스위트 30 회 반복에서 **1 회 실패**.
@@ -426,6 +418,15 @@
 - **권고:** Windows 타겟이라 핵심 이슈가 무관할 가능성. spike 방식으로 **실측 결정** — Phase 2에서 Tauri Channel 연속 send + 창 닫힘 시 동작 소규모 테스트. 우리 설계는 send 실패 감지에만 의존 안 함(명시적 unsubscribe M2 + replay).
 - **선택지:** (A) `=2.4.x` 정확 핀(보수적) (B) 최신 2.x + 실측 검증. 실측 결과로 택일.
 - **담당:** ed12 — Phase 2 착수 전.
+
+### T-34. 중단(interrupt) 기능이 반쯤 배선된 채 멈춰 있었다 — ✅ 해소 (2026-09-28 · S21 챗 화면 F2)
+- **해소:** 닫았다 — S21 챗 화면 F2 · ADR-0237/0238/0245(사용자 결정 2026-09-27 U1·U6 · `docs/process/S21-chat-ux/trd.md` §3). 사람이 누를 표면 = 채팅 칸 Esc → 명령 `agent.interrupt`(창 명령 + 버스 명령 · ADR-0237) — `RichSlot` 이 능력 `control.interrupt` 를 직접 읽는다. 실행 경로 = claude JSON 은 backend 가 통로(`StdioTransport`)에 꽂은 끊기 줄 함수(`InterruptLine`)가 줄을 주면 그 줄을 입력 큐에 넣고, 함수가 없거나 「끊을 턴이 없다」(`None`)고 답하면 `Unsupported` 다 · caps 는 `control.interrupt` 를 「그 함수를 꽂았나」로 신고한다(`transport/stdio.rs` 의 `interrupt` · `capabilities` · ADR-0238). 터미널 모드(PTY)는 끊기 명령을 받지 않는다(ADR-0245).
+- **남은 것:** 트리 노드 `canInterrupt`(`src/components/agent/mergeTreeNodes.ts` — 능력 `control.interrupt` 를 옮겨 담는 칸)는 여전히 읽는 화면이 없다. `rg "canInterrupt" src/ -g '!*.test.*'` 는 `slot/interruptKey.ts` · `slot/RichSlot.tsx` 도 내지만 그것은 Esc 술어의 같은 이름 칸이다. 그대로 둔다 — 읽는 이 없는 파생 칸이라 해가 없다 · 트리에 끊기 표면을 둘 때 쓴다(메인 판단 2026-09-29).
+- **(이력) 상태:** 보류(미착수 — codex 작업 중 발견했으나 **codex 와 무관한 선재 미완**이라 그 범위에서 손대지 않았다) → 착수(S21 챗 화면 F2 · 사용자 결정 2026-09-27) → 해소.
+- **(이력) 발견 당시 진단(2026-09-09 · S21 codex Phase 2a 설계 중 실측 — 지금은 참이 아니다):**
+  - 사람이 중단을 누를 표면이 없었다 — 트리 노드 `canInterrupt` 를 읽는 화면 코드가 0 건이었다.
+  - 반대편도 비어 있었다 — `StdioTransport::interrupt()` 는 `Unsupported` 를 돌려주고 caps 가 `control.interrupt: false` 를 리터럴로 신고했다(신고도 거짓이고 실행 경로도 없다고 적었다).
+  - 그때 값이 올라간 이유 — codex app-server 는 `turn/interrupt` 가 실측 18ms 에 성공하고 중단 뒤 같은 대화가 그대로 쓰였다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md`). 되는 기능인데 신고도 화면도 없는 상태가 codex 에서 처음 실재했다.
 
 ## LLD 문서 갱신 — ✅ 완료 (2026-06-11, 코드 반영)
 

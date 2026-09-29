@@ -148,10 +148,18 @@ Body: `self.stdin.lock()` (:295) then `guard.as_mut().ok_or(PtyError::WriteFaile
 shutdown ordering invariant below. `InputEvent` has exactly one variant, `Raw(Vec<u8>)`
 (types.rs:73-77) — there is one and only one input shape.
 
-### `interrupt` (stdio.rs:316-321) — not implemented
+### `interrupt` (stdio.rs:316-321 at the snapshot) — not implemented then; since ADR-0238 it writes a backend-injected line
 
-Returns `Err(PtyError::Unsupported("StdioTransport::interrupt (ADR-0044 MVP 미지원 — 파이프 Ctrl-C
-없음, 후속 스파이크)"))`.
+At the snapshot it returned `Err(PtyError::Unsupported("StdioTransport::interrupt (ADR-0044 MVP 미지원 —
+파이프 Ctrl-C 없음, 후속 스파이크)"))`. Since ADR-0238 the transport holds one field the list above predates:
+`interrupt: Option<InterruptLine>` (`InterruptLine` = `Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>`), **injected by
+the backend** through the builder `StdioTransport::with_interrupt` — the only production caller is the stream-json
+branch of `ClaudeBackend::open_spawn`; plain stdio and the other tests inject nothing (the stdio unit test
+`an_injected_interrupt_line_is_queued_whole_and_a_closed_answer_is_unsupported` injects its own). `interrupt()` pushes the returned line
+into the input queue when the function answers `Some`, and returns `Unsupported` when it answers `None` (no turn to
+interrupt — the claude `TurnGate` is closed) or when nothing was injected. The transport never interprets the
+bytes. `capabilities()` reports `control.interrupt = self.interrupt.is_some()` — "this transport can interrupt",
+not "a turn is running". The PTY side is the reverse since ADR-0245: `Unsupported` (see the PTY section below).
 
 ### `resize` (stdio.rs:310-314) — `Err(PtyError::Unsupported("… 파이프는 터미널 크기 없음"))`
 
@@ -219,7 +227,8 @@ Causality note (:325-328): "파이프는 자식 트리가 stdout write 핸들을
 `input{raw:true, message:false, attachment:false}` · `output{terminal_bytes:false, structured:
 self.structured, markdown:false, tool_events:false, usage:false}` · `control{resize:false,
 interrupt:false, cancel:false, graceful_shutdown:false}`. Only `structured` is dynamic; the other
-eleven booleans are literals.
+eleven booleans are literals. Since ADR-0238 `interrupt` is dynamic too — `self.interrupt.is_some()`, i.e.
+whether the backend injected an interrupt line (see `interrupt` above).
 
 ## A4. `PtyTransport` — contrast only (`transport/pty.rs`)
 
@@ -247,7 +256,8 @@ eleven booleans are literals.
   touches `writer` — dropping the master is what unblocks a stuck write. stdio has no such lever,
   which is exactly why its ordering invariant exists.
 - `capabilities` (pty.rs:337-360): `terminal_bytes:true, structured:false`; `resize:true,
-  interrupt:true, cancel:false, graceful_shutdown:false`.
+  interrupt:true, cancel:false, graceful_shutdown:false`. Since ADR-0245 `interrupt` is `false` (the
+  terminal takes the person's own keys — see `interrupt` above).
 
 ## A5. `ApiTransport` — `transport/api.rs:14-73`
 
