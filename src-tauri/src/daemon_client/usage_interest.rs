@@ -112,7 +112,9 @@ fn for_each_usage_slot(node: &LayoutNode, visit: &mut dyn FnMut(bool, bool)) {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ShrinkGen(u64);
 
-/// 관심 재계산이 호출자에게 시키는 일 — `sent`(이 소켓에 마지막으로 보낸 집합)와 비교한 결과다.
+/// 관심 재계산이 호출자에게 시키는 일 — `sent`(이 소켓에 마지막으로 보낸 집합)와 비교한 결과다. 버리면 늘어남이
+/// 데몬에 안 가거나 줄임이 영영 안 간다.
+#[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterestAction {
     /// 할 일이 없다 — 관심 = `sent`(대기 중이던 줄임은 무효가 됐다), 또는 같은 관심의 줄임이 이미 대기 중이다
@@ -176,7 +178,7 @@ impl UsageInterest {
     /// ★숨김 표시는 여기서 지우지 않는다★ — 모델에 아직 없는 label 의 표시도 남긴다: 새 창으로 슬롯 옮기기는
     /// OS 창을 먼저 열고(phase B) 락을 놓았다가 모델 창을 더하므로(phase C), 그 틈의 트레이 숨김이 지워지면
     /// 숨은 팝아웃이 보임으로 센다. 지우는 것은 창 소멸뿐이다([`Self::forget_window`]).
-    pub fn recompute(&mut self, mgr: &ViewManager, now: Instant) -> InterestAction {
+    pub(super) fn recompute(&mut self, mgr: &ViewManager, now: Instant) -> InterestAction {
         let before = std::mem::replace(&mut self.interest, interest_from_layout(mgr, &self.hidden));
         self.usage_windows = usage_slot_windows(mgr);
         if !self.interest.is_subset(&self.sent) {
@@ -202,7 +204,7 @@ impl UsageInterest {
 
     /// 창 `label` 이 소멸했다(팝업 소멸 정리가 모델에서 창을 지운 같은 락 안에서) — 숨김 표시를 지우고
     /// [`Self::recompute`] 와 같다. label 은 다시 쓰이지 않아 남겨 두면 숨긴 채 닫힌 팝아웃마다 한 칸씩 샌다.
-    pub fn forget_window(
+    pub(super) fn forget_window(
         &mut self,
         label: &str,
         mgr: &ViewManager,
@@ -213,7 +215,7 @@ impl UsageInterest {
     }
 
     /// 셸이 창 `label` 을 숨기거나(`false`) 다시 보인 뒤(`true`) — 숨김 표시를 고치고 [`Self::recompute`] 와 같다.
-    pub fn set_visible(
+    pub(super) fn set_visible(
         &mut self,
         label: &str,
         visible: bool,
@@ -232,7 +234,7 @@ impl UsageInterest {
     ///
     /// ★대기는 전달이 아니라 기한에 끝난다★ — 그 넛지가 사라져도(명령 채널 포화) 대기는 이미 끝났으므로 다음
     /// 스냅숏의 대조가 관심과 비교해 고친다([`Self::on_snapshot`]).
-    pub fn deferral_elapsed(&mut self, gen: ShrinkGen) -> bool {
+    pub(super) fn deferral_elapsed(&mut self, gen: ShrinkGen) -> bool {
         if self.shrink_pending == Some(gen) {
             self.shrink_pending = None;
             true
@@ -517,7 +519,7 @@ mod tests {
     /// 소켓 1 이 열려 있고 `sent` = 관심인 상태(관심은 `mgr` 에서).
     fn connected(mgr: &ViewManager, t0: Instant) -> UsageInterest {
         let mut ui = UsageInterest::new();
-        ui.recompute(mgr, t0);
+        let _ = ui.recompute(mgr, t0);
         ui.on_socket_open(1);
         ui
     }
@@ -634,9 +636,9 @@ mod tests {
         assert!(ui.hidden.contains(POPUP));
 
         mgr.close_window(POPUP).unwrap();
-        ui.recompute(&mgr, t0);
+        let _ = ui.recompute(&mgr, t0);
         assert!(ui.hidden.contains(POPUP), "재계산은 숨김 표시를 안 지운다");
-        ui.forget_window(POPUP, &mgr, t0);
+        let _ = ui.forget_window(POPUP, &mgr, t0);
         assert!(ui.hidden.is_empty(), "소멸한 창의 숨김 표시가 남았다");
         assert_eq!(ui.interest, set(&[]));
         assert!(ui.usage_windows.is_empty());
@@ -654,7 +656,7 @@ mod tests {
             ui.set_visible(POPUP, false, &mgr, t0),
             InterestAction::Unchanged
         );
-        ui.recompute(&mgr, t0);
+        let _ = ui.recompute(&mgr, t0);
         assert!(
             ui.hidden.contains(POPUP),
             "모델에 없는 label 의 표시가 지워졌다"
@@ -667,7 +669,7 @@ mod tests {
         assert_eq!(ui.usage_windows, labels(&[POPUP]));
 
         mgr.close_window(POPUP).unwrap();
-        ui.forget_window(POPUP, &mgr, t0);
+        let _ = ui.forget_window(POPUP, &mgr, t0);
         assert!(ui.hidden.is_empty());
     }
 
@@ -1103,7 +1105,7 @@ mod tests {
             }
         );
 
-        ui.recompute(&mgr, t0);
+        let _ = ui.recompute(&mgr, t0);
         ui.on_socket_open(1);
         ui.on_snapshot(1, &snap(Claude, 1), &[Claude], t0);
         ui.on_socket_lost(1);
@@ -1132,7 +1134,7 @@ mod tests {
 
         let empty = ViewManager::new();
         let mut idle = UsageInterest::new();
-        idle.recompute(&empty, t0);
+        let _ = idle.recompute(&empty, t0);
         assert_eq!(idle.on_socket_open(1), None, "빈 관심은 보낼 것이 없다");
         assert_eq!(idle.socket_epoch, 1);
     }
@@ -1142,7 +1144,7 @@ mod tests {
         let t0 = Instant::now();
         let (mgr, _) = main_with(true, false);
         let mut ui = UsageInterest::new();
-        ui.recompute(&mgr, t0);
+        let _ = ui.recompute(&mgr, t0);
         assert!(ui.on_socket_open(5).is_some());
         ui.on_snapshot(5, &snap(Claude, 1), &[Claude], t0);
         ui.on_socket_lost(5);
@@ -1168,7 +1170,7 @@ mod tests {
 
         mgr.set_slot_content(main_active(&mgr), slot, usage(true, true))
             .unwrap();
-        ui.recompute(&mgr, t0);
+        let _ = ui.recompute(&mgr, t0);
         assert_eq!(ui.sync(1, false), None);
         assert_eq!(ui.sync(1, true), None);
         ui.on_socket_lost(1);

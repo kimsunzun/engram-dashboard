@@ -4482,7 +4482,8 @@ fn usage_client(
     (client, disco)
 }
 
-// 관심을 「main 의 활성 탭 = 사용량 슬롯 하나」 레이아웃으로 다시 계산한다. 넛지는 부르는 쪽이 정한다.
+// 관심을 「main 의 활성 탭 = 사용량 슬롯 하나」 레이아웃으로 다시 계산한다. 넛지는 부르는 쪽이 정한다 — 결과를 안 쓰는
+// 자리는 `let _ =` 로 버린다(연결 전이라 넛지가 할 일이 없거나, 시험이 넛지를 직접 넣는다).
 fn relayout(usage: &SharedUsageInterest, show_claude: bool, show_codex: bool) -> InterestAction {
     let mut mgr = ViewManager::new();
     let view = mgr.windows[MAIN_WINDOW_LABEL].active;
@@ -4558,7 +4559,7 @@ async fn a_usage_broadcast_notifies_once_with_labels_and_socket_epoch() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     let socket = current_socket(&client);
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
@@ -4597,7 +4598,7 @@ async fn a_mismatched_broadcast_writes_the_interest_back_on_its_socket() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, true);
+    let _ = relayout(client.usage_interest(), true, true);
     client.connect().await.expect("connect → connected");
     let socket = current_socket(&client);
     assert_eq!(server.next_frame().await, "1:usage[Claude,Codex]");
@@ -4639,7 +4640,7 @@ async fn a_snapshot_on_a_superseded_socket_is_ignored() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     let socket = current_socket(&client);
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
@@ -4687,7 +4688,7 @@ async fn nudges_carry_no_set_so_the_last_subscribe_is_the_last_interest() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
     // 채널을 꽂은 직후의 넛지가 아래 재계산보다 늦게 꺼내지면 그것이 A 의 관심을 먼저 보내 B 가 줄임(`Defer`)이
@@ -4724,7 +4725,7 @@ async fn a_change_in_the_gap_before_the_channel_is_stored_goes_out_after_it() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     let in_gap = Arc::new(std::sync::Mutex::new(None));
     {
         let usage = client.usage_interest().clone();
@@ -4764,7 +4765,7 @@ async fn the_nudge_after_the_channel_is_stored_sends_nothing_without_a_change() 
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
 
     let m = marker(&client);
@@ -4784,7 +4785,7 @@ async fn a_new_socket_sends_the_interest_before_queued_commands() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     let queued = Arc::new(std::sync::Mutex::new(None::<String>));
     events.then_on_connected(|| {}); // 첫 연결
     {
@@ -4911,7 +4912,7 @@ async fn a_refresh_writes_the_interest_before_the_refresh_frame() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
 
@@ -4942,7 +4943,7 @@ async fn a_refresh_on_a_superseded_socket_writes_no_subscribe_before_it() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     let socket = current_socket(&client);
     assert_eq!(
@@ -4982,7 +4983,7 @@ async fn a_refresh_on_a_full_command_channel_still_writes_the_subscribe_first() 
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
 
@@ -5089,7 +5090,7 @@ async fn refresh_through(
     show_claude: bool,
 ) -> (ScriptedSink, usize, Option<Result<AgentEvent, String>>) {
     let usage = SharedUsageInterest::default();
-    relayout(&usage, show_claude, false);
+    let _ = relayout(&usage, show_claude, false);
     let _ = usage.lock().on_socket_open(7);
     let mut sink = ScriptedSink {
         fail_at,
@@ -5199,7 +5200,7 @@ async fn get_usage_snapshot_hands_off_the_cache_with_the_socket_epoch() {
         "소켓 없음"
     );
 
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     client.connect().await.expect("connect → connected");
     let socket = current_socket(&client);
     assert_eq!(server.next_frame().await, "1:usage[Claude]");
@@ -5256,7 +5257,7 @@ async fn connected_is_announced_after_the_usage_state_sees_the_new_socket() {
     let mut server = spawn_usage_server().await;
     let events = Arc::new(RecordingEvents::default());
     let (client, _disco) = usage_client(&server, events.clone());
-    relayout(client.usage_interest(), true, false);
+    let _ = relayout(client.usage_interest(), true, false);
     let at_connected = Arc::new(std::sync::Mutex::new(Vec::new()));
     for _ in 0..2 {
         let usage = client.usage_interest().clone();
@@ -5576,7 +5577,7 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
         client: &client,
     };
 
-    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| {});
+    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| true);
     settle().await;
     assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
     tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(100)).await;
@@ -5591,7 +5592,7 @@ async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
         "그 넛지가 보내는 것 = 줄인 관심"
     );
 
-    for_each_ui_window([MAIN_WINDOW_LABEL], true, &tray, |_| {});
+    for_each_ui_window([MAIN_WINDOW_LABEL], true, &tray, |_| true);
     assert_eq!(nudges(&mut rx), 1, "늘어남은 기다리지 않는다");
     assert_eq!(
         sync_as_the_connection_task(&client, socket),
@@ -5672,4 +5673,89 @@ async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_hel
         1,
         "숨김 표시가 남아 그 창을 숨은 창으로 셌다"
     );
+}
+
+// ── 트레이 숨기기가 실패한 창은 보이는 창으로 남는다 — 관심이 줄지 않는다 ─────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_failed_tray_hide_keeps_the_window_in_the_interest() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let tray = LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    };
+
+    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| false);
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "숨기지 못한 창을 관심에서 뺐다");
+    assert_eq!(sync_as_the_connection_task(&client, socket), None);
+}
+
+// 창 빌드가 늘 성공하는 호스트 — 슬롯 옮기기가 phase B 를 지나 phase C 까지 간다.
+struct OpenWindows;
+
+impl WindowHost for OpenWindows {
+    fn open(&self, _label: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn close(&self, _label: &str) {}
+    fn is_open(&self, _label: &str) -> bool {
+        true
+    }
+}
+
+// ── 사용량 슬롯을 새 창으로 옮겨도 데몬에 아무것도 안 간다(TRD §1-9 #9) ─────────────────────────────
+// 옮기기의 모든 단계가 재계산한다 — phase A(임시 뷰로 떼기)는 원본 슬롯을 그대로 두고, phase C 가 새 창에 붙인 **같은
+// 락 안에서** 원본을 닫는다. 그래서 어느 재계산에서도 관심이 `sent` 를 떠나지 않아 줄임조차 서지 않는다. 옮긴 뒤의
+// 방송은 새 창으로 간다.
+#[tokio::test(start_paused = true)]
+async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let (view, slot) = active_slot(&state, MAIN_WINDOW_LABEL);
+
+    let moved = apply::move_slot_to_window(
+        &state,
+        &RouterSubs {
+            router: &client.router,
+            client: &client,
+        },
+        &NoLayoutEvents,
+        &OpenWindows,
+        &PopupCounter::default(),
+        view,
+        slot,
+        None,
+    )
+    .expect("새 창으로 옮기기");
+    assert_ne!(moved.window, MAIN_WINDOW_LABEL);
+    assert_eq!(nudges(&mut rx), 0, "옮기는 동안 넛지가 났다");
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "옮긴 뒤 줄임 타이머가 넛지를 냈다");
+    assert_eq!(sync_as_the_connection_task(&client, socket), None);
+
+    let outcome = client.usage_interest().lock().on_snapshot(
+        socket,
+        &UsageLimitSnapshot {
+            vendor: AgentBackendKind::Claude,
+            account_key: "default".into(),
+            five_hour: None,
+            weekly: None,
+            model_scoped: Vec::new(),
+            plan: None,
+            in_flight: false,
+            state: UsageVendorState::Ready,
+            revision: 1,
+        },
+        &[AgentBackendKind::Claude],
+        Instant::now(),
+    );
+    assert_eq!(outcome.labels, [moved.window], "방송은 새 창으로");
+    assert_eq!(outcome.resend, None);
 }

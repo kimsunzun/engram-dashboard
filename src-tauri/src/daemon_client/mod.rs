@@ -922,10 +922,16 @@ impl DaemonClient {
             InterestAction::Defer { gen, deadline } => {
                 // 기한까지의 잠을 **부른 자리에서** 이 런타임의 시계로 짓는다 — 태스크 안에서 지으면 그 첫 poll
                 //   만큼 기한이 밀리고, 가짜 시계 시험에서는 시계를 먼저 돌린 뒤 지어져 기한이 통째로 밀린다.
+                let delay = deadline.saturating_duration_since(Instant::now());
                 let sleep = {
                     let _rt = self.rt.enter();
-                    tokio::time::sleep(deadline.saturating_duration_since(Instant::now()))
+                    tokio::time::sleep(delay)
                 };
+                tracing::debug!(
+                    ?gen,
+                    delay_ms = delay.as_millis() as u64,
+                    "사용량 관심: 줄임 대기 — 기한에 넛지"
+                );
                 // 클라이언트를 붙들지 않는다 — 공유 관심 상태와 lifecycle 의 약한 참조만 쥔다(닫힌 뒤 깨면 넛지는
                 //   창구가 닫혀 no-op 이다).
                 let usage = self.usage.clone();
@@ -933,10 +939,21 @@ impl DaemonClient {
                 self.rt.spawn(async move {
                     sleep.await;
                     if !usage.lock().deferral_elapsed(gen) {
+                        tracing::debug!(
+                            ?gen,
+                            "사용량 관심: 줄임 기한 — 그 사이 무르거나 새 세대가 섰다, 넛지 없음"
+                        );
                         return;
                     }
-                    if let Some(lifecycle) = lifecycle.upgrade() {
-                        nudge_usage_on(&lifecycle);
+                    match lifecycle.upgrade() {
+                        Some(lifecycle) => {
+                            tracing::debug!(?gen, "사용량 관심: 줄임 기한 — 넛지");
+                            nudge_usage_on(&lifecycle);
+                        }
+                        None => tracing::debug!(
+                            ?gen,
+                            "사용량 관심: 줄임 기한 — 클라이언트가 사라져 넛지 없음"
+                        ),
                     }
                 });
             }
