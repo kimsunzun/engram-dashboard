@@ -205,7 +205,8 @@ pub enum AgentSpawnCommand {
 /// 것은 사람·LLM 이 손으로 친 낱말이고(`agent.spawnInto` 의 `backend`, 프론트의 `SpawnByCwd`) 거기서
 /// `Claude` 는 오타가 아니라 같은 뜻이다. 반대로 내보내는 쪽을 넓히면 `agents.json` 과 ts-rs 유니온이
 /// 갈리므로 [`Serialize`](serde::Serialize) 는 derive 그대로 둔다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
+// `Ord` = 선언 순서 — 뜻이 없고 정렬된 집합(셸의 사용량 관심 `BTreeSet`)의 열쇠로만 쓴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
 pub enum AgentBackendKind {

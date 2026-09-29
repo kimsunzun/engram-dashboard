@@ -563,7 +563,7 @@ impl ViewManager {
     }
 
     // view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체한다(ADR-0063 배치 제어 표면).
-    // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette)를
+    // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette/Usage)를
     // 받는다 — 트리(에이전트)·팔레트를 슬롯에 배치하는 §5 LLM/사람 공용 경로. ★덮어쓰기 시맨틱(assign 과
     // 동형)★: 점유 슬롯도 무조건 교체(점유 방어는 없음 — 배치 command 는 명시적 교체 의도).
     pub fn set_slot_content(
@@ -793,10 +793,11 @@ pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, Spawn
     match slot {
         Some(target) => match tree::find_slot(&view.layout, target) {
             Some(SlotContent::Empty) => Ok(target),
-            // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
+            // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette/Usage)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
             Some(SlotContent::Agent { .. })
             | Some(SlotContent::AgentList)
-            | Some(SlotContent::PresetPalette) => Err(SpawnSlotError::SlotOccupied(target)),
+            | Some(SlotContent::PresetPalette)
+            | Some(SlotContent::Usage { .. }) => Err(SpawnSlotError::SlotOccupied(target)),
             None => Err(SpawnSlotError::SlotNotFound(target)),
         },
         None => tree::first_empty_slot_id(&view.layout).ok_or(SpawnSlotError::NoEmptySlot),
@@ -1758,6 +1759,31 @@ mod tests {
         assert_eq!(
             resolve_spawn_slot(view, Some(root)),
             Err(SpawnSlotError::SlotOccupied(root))
+        );
+    }
+
+    #[test]
+    fn resolve_some_usage_slot_is_occupied() {
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        mgr.set_slot_content(
+            v,
+            root,
+            SlotContent::Usage {
+                show_claude: false,
+                show_codex: false,
+            },
+        )
+        .unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, Some(root)),
+            Err(SpawnSlotError::SlotOccupied(root))
+        );
+        assert_eq!(
+            resolve_spawn_slot(view, None),
+            Err(SpawnSlotError::NoEmptySlot)
         );
     }
 

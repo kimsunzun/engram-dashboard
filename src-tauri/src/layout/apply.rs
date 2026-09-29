@@ -467,6 +467,46 @@ pub fn set_slot_content(
     Ok(())
 }
 
+/// 슬롯을 사용량 뷰로 만든다 — 빠진 칸(`None`)은 그 슬롯이 이미 `Usage` 면 지금 값, 아니면 `true`.
+///
+/// ★지금 값을 읽는 것과 쓰는 것이 한 락 안이다★ — 호출자가 먼저 읽어 온 값으로 병합하면 그 사이에 든 다른
+/// 토글을 덮는다(한 칸만 바꾸는 호출이 다른 칸을 옛 값으로 되돌린다).
+pub fn set_usage_slot(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    view_id: Uuid,
+    slot_id: Uuid,
+    show_claude: Option<bool>,
+    show_codex: Option<bool>,
+) -> Result<(), String> {
+    let (layout, tabs) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        let (claude_now, codex_now) = match mgr
+            .slot_content(view_id, slot_id)
+            .map_err(|e| e.to_string())?
+        {
+            SlotContent::Usage {
+                show_claude,
+                show_codex,
+            } => (show_claude, show_codex),
+            _ => (true, true),
+        };
+        let content = SlotContent::Usage {
+            show_claude: show_claude.unwrap_or(claude_now),
+            show_codex: show_codex.unwrap_or(codex_now),
+        };
+        mgr.set_slot_content(view_id, slot_id, content)
+            .map_err(|e| e.to_string())?;
+        let layout = mgr.snapshot(view_id).ok();
+        let tabs = owner_tabs(&mgr, view_id);
+        subs.resync(&mgr);
+        (layout, tabs)
+    }; // ← 락 드롭
+    notify(events, layout, tabs);
+    Ok(())
+}
+
 // ★spawn_into(D-7) — 스폰 + 탭 생성(필요 시) + 슬롯 배정을 한 방으로 조립★(TRD §6 · G9). 성공 시 새 agent id.
 //
 // ## ★ordering(ADR-0006 동시성 계약 — CRITICAL)★

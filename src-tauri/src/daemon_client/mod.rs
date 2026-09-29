@@ -30,6 +30,8 @@ mod lifecycle;
 pub mod protocol_state;
 // ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri 의존 0).
 pub mod replay_flight;
+// 사용량 관심(레이아웃 → 데몬 구독 집합) + 구독 대조·캐시 상태기(순수 — TRD S21 usage-limit-slot §1-7).
+pub mod usage_interest;
 
 use std::path::PathBuf;
 use std::sync::Arc;

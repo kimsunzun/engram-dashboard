@@ -1,11 +1,18 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요).",
+  "description": "Engram Dashboard 기본 권한 — core 이벤트 listen/emit 허용(agent-list-updated 등 상태 브로드캐스트 수신에 필요). opener:allow-open-url — 사용량 슬롯의 「사용량 페이지 ↗」 링크가 기본 브라우저로 여는 두 주소(Claude·Codex 사용량 설정 페이지)로만 좁힌다(TRD S21 usage-limit-slot §1-7).",
   "windows": ["main", "agent-tree"],
   "permissions": [
     "core:default",
     "core:event:default",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://claude.ai/settings/usage" },
+        { "url": "https://chatgpt.com/codex/settings/usage" }
+      ]
+    }
   ]
 }

@@ -483,8 +483,9 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   `agent.spawnInto` 의 `backend` 가 받는 **어휘**가, 세대 6 은 그 칸의 **정책**(아는 낱말 하나를 이
     //   표면이 안 만든다)이, 세대 7 은 그 정책이 **뒤집힌 것**(그 낱말을 이 표면이 실제로 만든다 —
     //   2026-09-22 · ADR-0219)이 바뀐 세대다(넷 다 선언이라 올린다). 세대 8 은 이름이 는 세대다
-    //   (`split.setRatio`·`split.list` — ADR-0227).
-    assert_eq!(CATALOG_VERSION, 8);
+    //   (`split.setRatio`·`split.list` — ADR-0227). 세대 9 는 `layout.setSlotContent` 의 **어휘와 칸**이
+    //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7).
+    assert_eq!(CATALOG_VERSION, 9);
     assert_eq!(COMMAND_SPECS.len(), 19);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -679,6 +680,110 @@ async fn slot_content_refuses_a_contradictory_pair() {
         .await,
     );
     assert_eq!(extra.code(), ErrorCode::InvalidArgument);
+}
+
+/// `show_*` 는 `content=Usage` 에만 — 다른 종류에 붙으면 호출자는 그 회사를 켠 줄 안다.
+#[tokio::test]
+async fn slot_content_refuses_usage_flags_on_other_content() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let slot = world.empty_slot(view);
+    for (content, extra) in [
+        ("Empty", json!({ "show_claude": true })),
+        ("AgentList", json!({ "show_codex": false })),
+        ("Agent", json!({ "agent_id": "a1", "show_codex": true })),
+    ] {
+        let mut args =
+            json!({ "view_id": view.to_string(), "slot_id": slot.to_string(), "content": content });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let mail = Mailbox::default();
+        let refused = error_of(call(&receiver, &queue, &mail, "layout.setSlotContent", args).await);
+        assert_eq!(refused.code(), ErrorCode::InvalidArgument, "{content}");
+    }
+    assert_eq!(
+        tree::find_slot(&apply::get_view(&world.state, view).unwrap().layout, slot),
+        Some(&SlotContent::Empty),
+        "반려는 아무것도 안 바꾼다"
+    );
+}
+
+/// 버스의 사용량 슬롯 — 뺀 칸은 처음엔 `true`, 그 뒤로는 지금 값이다(한 칸 토글이 다른 칸을 안 건드린다).
+#[tokio::test]
+async fn slot_content_usage_merges_missing_flags() {
+    let (world, queue, receiver) = queued();
+    let view = world.main_tabs().active;
+    let slot = world.empty_slot(view);
+    let usage_at = |world: &World| {
+        tree::find_slot(&apply::get_view(&world.state, view).unwrap().layout, slot).cloned()
+    };
+
+    let placed = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "layout.setSlotContent",
+        json!({ "view_id": view.to_string(), "slot_id": slot.to_string(), "content": "Usage" }),
+    )
+    .await;
+    placed.outcome.expect("사용량 슬롯 배치");
+    assert_eq!(
+        usage_at(&world),
+        Some(SlotContent::Usage {
+            show_claude: true,
+            show_codex: true
+        })
+    );
+
+    let mail = Mailbox::default();
+    call(
+        &receiver,
+        &queue,
+        &mail,
+        "layout.setSlotContent",
+        json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "content": "Usage",
+            "show_codex": false,
+        }),
+    )
+    .await
+    .outcome
+    .expect("codex 끔");
+    assert_eq!(
+        usage_at(&world),
+        Some(SlotContent::Usage {
+            show_claude: true,
+            show_codex: false
+        })
+    );
+
+    let mail = Mailbox::default();
+    call(
+        &receiver,
+        &queue,
+        &mail,
+        "layout.setSlotContent",
+        json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "content": "Usage",
+            "show_claude": false,
+        }),
+    )
+    .await
+    .outcome
+    .expect("claude 끔");
+    assert_eq!(
+        usage_at(&world),
+        Some(SlotContent::Usage {
+            show_claude: false,
+            show_codex: false
+        }),
+        "앞서 끈 codex 가 되살아나지 않는다"
+    );
 }
 
 /// ★버스에서 창을 떼어낸다★ — 클릭 없이도 슬롯이 자기 창으로 나가고, 답장이 그 창과 새 탭을 함께 준다

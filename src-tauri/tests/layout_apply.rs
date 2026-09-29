@@ -764,6 +764,91 @@ fn set_slot_content_unknown_view_is_err() {
     assert_eq!(w.layout_events(), 0);
 }
 
+// ── set_usage_slot (TRD S21 usage-limit-slot §1-7) ──────────────────────────
+
+fn usage_of(w: &World, view: Uuid, slot: Uuid) -> Option<SlotContent> {
+    tree::find_slot(&w.snapshot(view).layout, slot).cloned()
+}
+
+/// 사용량이 아니던 슬롯 — 뺀 칸은 `true`. 에이전트 슬롯을 덮으면 그 구독이 풀린다(재동기가 락 안에서 돈다).
+#[test]
+fn set_usage_slot_over_other_content_defaults_missing_flags_to_true() {
+    let w = World::new();
+    let view = w.main_active();
+    let slot = w.empty_slot(view);
+    let agent = Uuid::new_v4();
+    apply::assign_agent(&w.state, &w.subs, &w.ev, view, slot, agent.to_string()).unwrap();
+    let before = w.resyncs();
+
+    apply::set_usage_slot(&w.state, &w.subs, &w.ev, view, slot, None, Some(false)).unwrap();
+
+    assert_eq!(
+        usage_of(&w, view, slot),
+        Some(SlotContent::Usage {
+            show_claude: true,
+            show_codex: false
+        })
+    );
+    assert_eq!(w.resyncs(), before + 1);
+    assert_eq!(w.unsubscribed(), vec![agent]);
+    assert_eq!(w.layout_events(), 2);
+}
+
+/// 이미 사용량이면 뺀 칸은 지금 값 그대로 — 한 칸 토글이 다른 칸을 되돌리지 않는다.
+#[test]
+fn set_usage_slot_keeps_the_current_value_of_a_missing_flag() {
+    let w = World::new();
+    let view = w.main_active();
+    let slot = w.empty_slot(view);
+    apply::set_usage_slot(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        view,
+        slot,
+        Some(false),
+        Some(true),
+    )
+    .unwrap();
+
+    apply::set_usage_slot(&w.state, &w.subs, &w.ev, view, slot, None, Some(false)).unwrap();
+    assert_eq!(
+        usage_of(&w, view, slot),
+        Some(SlotContent::Usage {
+            show_claude: false,
+            show_codex: false
+        })
+    );
+
+    apply::set_usage_slot(&w.state, &w.subs, &w.ev, view, slot, Some(true), None).unwrap();
+    assert_eq!(
+        usage_of(&w, view, slot),
+        Some(SlotContent::Usage {
+            show_claude: true,
+            show_codex: false
+        })
+    );
+}
+
+#[test]
+fn set_usage_slot_unknown_slot_is_err_without_resync() {
+    let w = World::new();
+    let view = w.main_active();
+    let err = apply::set_usage_slot(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        view,
+        Uuid::new_v4(),
+        Some(true),
+        Some(true),
+    )
+    .unwrap_err();
+    assert!(err.contains("slot 없음"), "err={err}");
+    assert_eq!(w.resyncs(), 0);
+    assert_eq!(w.layout_events(), 0);
+}
+
 // ── move_slot_to_window ──────────────────────────────────────────────────────
 
 impl World {
