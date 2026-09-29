@@ -96,6 +96,10 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     run('slot.fill.presetPalette', CTX)
     expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'preset_palette' })
   })
+  it('slot.fill.usage → setSlotContent(…,{type:usage, 두 회사 켬})', () => {
+    run('slot.fill.usage', CTX)
+    expect(vs.setSlotContent).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: true, show_codex: true })
+  })
 
   it('slot.createAgentHere: 다이얼로그 고른 cwd → spawnAgent → assignAgent(viewId, slotId, id)', async () => {
     dialogMock.open.mockResolvedValue('C:/picked')
@@ -135,6 +139,7 @@ describe('코어 콘텐츠(slotContentCommands) 라우팅', () => {
     expect(items[1].children?.map(c => c.id)).toEqual([
       'slot.fill.agentList',
       'slot.fill.presetPalette',
+      'slot.fill.usage',
     ])
     expect(items[1].children?.map(c => c.id)).not.toContain('slot.createAgentHere')
     expect(items.map(i => i.id)).not.toContain('slot.empty')

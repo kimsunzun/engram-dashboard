@@ -35,6 +35,7 @@ export const ko = {
     resolveSpatial: '공간 타깃 해소',
     fillAgentList: '에이전트 트리 열기',
     fillPresetPalette: '프리셋 팔레트 열기',
+    fillUsage: '사용량 한도 열기',
     newContent: '새 콘텐츠', // ADR-0065 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨.
     renderModeSet: '렌더 모드 지정',
     renderModeClear: '렌더 모드 해제',
@@ -123,6 +124,56 @@ export const ko = {
     label: '프리셋',
     empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
     deleteBtn: '삭제',
+  },
+  /**
+   * 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-8). 데몬·wire 는 상태 코드와 수만 나르고 문구는 여기서 만든다
+   * (PRD R28·R31).
+   *
+   * ★`{upstream}`·`{kind}` 에는 상류 원문·분류 낱말이 번역 없이 그대로 들어간다(R31)★ — 끼워 넣기는 값을 다시
+   *   훑지 않으므로 원문 안의 `{…}` 도 글자 그대로 남는다.
+   */
+  usage: {
+    vendorClaude: 'Claude',
+    vendorCodex: 'Codex',
+    // 숫자만 남는 폭 단계의 회사 표기 — 두 회사가 같은 글자로 시작해 한 글자로 줄이면 못 가른다.
+    vendorClaudeShort: 'Cl',
+    vendorCodexShort: 'Cx',
+    windowFiveHour: '5시간',
+    windowWeekly: '주간',
+    stateNotInstalled: '설치 안 됨',
+    stateNeedsLogin: '로그인 필요',
+    // ★원인을 단정하지 않는다(TRD §6 #20)★ — 원인 집합에 profile 권한 없는 로그인 토큰이 들어, 「로그아웃」이나
+    //   「한도 없는 계정」만 말하면 그 사용자를 오도한다.
+    stateUnavailable: '이 계정의 한도 정보를 받을 수 없음',
+    stateFailed: '조회 실패',
+    stateRejected: '거절됨 — {minutes}분 뒤',
+    detailUpstream: '{vendor} 응답: {upstream}',
+    detailUpstreamCode: '{vendor} 응답 ({code}): {upstream}',
+    detailKind: '({kind})',
+    nextAttempt: '다음 시도 {time}',
+    resetWaiting: '리셋됨 — 갱신 대기',
+    resetWaitingShort: '리셋됨', // 숫자만 남는 폭 단계 전용.
+    resetIn: '{duration} 뒤',
+    resetsAt: '리셋 {time}',
+    durationMinutes: '{minutes}분',
+    durationHours: '{hours}시간',
+    durationHoursMinutes: '{hours}시간 {minutes}분',
+    durationDays: '{days}일',
+    durationDaysHours: '{days}일 {hours}시간',
+    ageJustNow: '방금',
+    ageMinutes: '{minutes}분 전',
+    ageHours: '{hours}시간 전',
+    ageDays: '{days}일 전',
+    stale: '30분 넘게 새로 들어오지 않은 값',
+    refreshing: '갱신 중',
+    refresh: '{vendor} 새로고침',
+    plan: '플랜: {plan}',
+    link: '사용량 페이지 ↗',
+    linkTitle: '{vendor} 사용량 설정 페이지를 브라우저로 엽니다 — {url}',
+    meterLabel: '{vendor} {window} 남은 양',
+    meterValueText: '{pct}% 남음',
+    popupLabel: '사용량 상세',
+    hint: '우클릭해서 표시할 항목 고르기',
   },
   /**
    * 구조화(챗) 슬롯 렌더 문자열.

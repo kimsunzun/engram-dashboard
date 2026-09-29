@@ -48,6 +48,19 @@ register({
 })
 
 register({
+  id: 'slot.fill.usage',
+  title: t('slot.fillUsage'),
+  category: 'slot',
+  // 두 회사를 켠 채로 놓는다 — 끄기는 슬롯 우클릭 메뉴가 한다(PRD R8).
+  run: args => {
+    const { viewId, slotId } = requireCoords(args, 'slot.fill.usage')
+    return useViewStore
+      .getState()
+      .setSlotContent(viewId, slotId, { type: 'usage', show_claude: true, show_codex: true })
+  },
+})
+
+register({
   id: 'slot.createAgentHere',
   title: t('agent.create'),
   category: 'slot',
@@ -85,9 +98,9 @@ register({
 })
 
 // group='content' — 공통 slot-ops 위에 렌더.
-// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 항목(트리·팔레트)을 컨테이너 하나로 접어
-//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식은 기존 상대 순서(트리→팔레트)
-//   유지. command 는 registry 단일소스로 그대로 직접 호출 가능(§5 불변) — 서브메뉴는 presentation 일 뿐이다.
+// ★"새 콘텐츠 ▶" 1단 서브메뉴(ADR-0065)★: 콘텐츠-채움 항목(트리·팔레트·사용량)을 컨테이너 하나로 접어
+//   빈 슬롯 메뉴를 정돈한다("이 칸에 뭘 넣나" = 콘텐츠 평면 분리). 자식 순서 = 트리 → 팔레트 → 사용량.
+//   command 는 registry 단일소스로 그대로 직접 호출 가능(§5 불변) — 서브메뉴는 presentation 일 뿐이다.
 //   향후 백엔드 타입(codex/gemini) 추가 시 자식으로 붙는 확장 자리.
 // ★ADR-0067: "생성"(slot.createAgentHere) 제거★ — 스폰은 트리 소관으로 이관(reserved 프로필 더블클릭 +
 //   agent_list 슬롯 메뉴 agentlist.createAgent). command 정의 자체는 남긴다(직접 호출·향후 재사용 가능).
@@ -99,20 +112,21 @@ registerSlotMenu('empty', [
     children: [
       { commandId: 'slot.fill.agentList', group: 'content', order: 10 },
       { commandId: 'slot.fill.presetPalette', group: 'content', order: 20 },
+      { commandId: 'slot.fill.usage', group: 'content', order: 30 },
     ],
   },
 ])
 
 // ADR-0067: "에이전트 모니터링" 기여 — empty·agent 슬롯에 노출(우클릭한 slot 에 실행중 에이전트 배정).
-//   ★hideOn = ['agent_list','preset_palette']★: 소스 슬롯(트리·팔레트)에서 "여기에 에이전트를 모니터링"
-//   은 무의미하다(그 슬롯은 콘텐츠 자체가 소스 UI). '*' 보편 등록으로 empty·agent 를 함께 덮되 소스 두
-//   타입만 subtraction 으로 뺀다(ADR-0065 hideOn — allowlist 아님, 공통 단일소스 유지).
+//   ★hideOn = ['agent_list','preset_palette','usage']★: 소스 슬롯(트리·팔레트)과 사용량 슬롯에서 "여기에 에이전트를
+//   모니터링"은 무의미하다(그 슬롯은 콘텐츠 자체가 UI). '*' 보편 등록으로 empty·agent 를 함께 덮되 이 타입들만
+//   subtraction 으로 뺀다(ADR-0065 hideOn — allowlist 아님, 공통 단일소스 유지).
 registerSlotMenu('*', [
   {
     commandId: 'slot.assignRunningAgent',
     group: 'content',
     order: 5,
-    hideOn: ['agent_list', 'preset_palette'],
+    hideOn: ['agent_list', 'preset_palette', 'usage'],
   },
 ])
 
