@@ -1,0 +1,827 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>사용량 슬롯 최종 보고</title>
+<meta name="description" content="S21 사용량 한도 슬롯 — 2026-09-29 최종 보고. 7단계까지 완료, 8단계(문서) 마무리 중. 작은 표시·팝업·전체 흐름·화면·확인 요청·검증 상태·알려진 한계·커밋 목록(작은 표시·팝업 절은 2026-09-30 갱신).">
+
+<style>
+  :root {
+    --ground: #F5F7F9;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F5;
+    --ink: #131C24;
+    --ink-2: #45525E;
+    --muted: #6B7885;
+    --line: #D9E1E8;
+    --line-strong: #B9C6D1;
+    --accent: #0C6F79;
+    --accent-soft: #DCEEF0;
+    --accent-ink: #095057;
+    --wip: #6246B8;
+    --wip-soft: #EEE9FB;
+    --wip-ink: #4A3391;
+    --ok: #1E7A4C;
+    --ok-soft: #DFF2E7;
+    --bad: #B42318;
+    --bad-soft: #FCE4E1;
+    --warn: #9A5B00;
+    --warn-soft: #F7EBD8;
+    --shadow: 0 1px 2px rgba(19,28,36,.06), 0 8px 24px -12px rgba(19,28,36,.18);
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E1319;
+      --surface: #151C24;
+      --surface-2: #1B242E;
+      --ink: #E4ECF3;
+      --ink-2: #B4C2CE;
+      --muted: #8A98A6;
+      --line: #24303B;
+      --line-strong: #35444F;
+      --accent: #3FC3CE;
+      --accent-soft: #10333A;
+      --accent-ink: #7EDCE4;
+      --wip: #B19CF5;
+      --wip-soft: #231D3B;
+      --wip-ink: #CDBFFB;
+      --ok: #4CC38A;
+      --ok-soft: #0F2B1E;
+      --bad: #F2766B;
+      --bad-soft: #3A1714;
+      --warn: #DFA646;
+      --warn-soft: #33280F;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0E1319;
+    --surface: #151C24;
+    --surface-2: #1B242E;
+    --ink: #E4ECF3;
+    --ink-2: #B4C2CE;
+    --muted: #8A98A6;
+    --line: #24303B;
+    --line-strong: #35444F;
+    --accent: #3FC3CE;
+    --accent-soft: #10333A;
+    --accent-ink: #7EDCE4;
+    --wip: #B19CF5;
+    --wip-soft: #231D3B;
+    --wip-ink: #CDBFFB;
+    --ok: #4CC38A;
+    --ok-soft: #0F2B1E;
+    --bad: #F2766B;
+    --bad-soft: #3A1714;
+    --warn: #DFA646;
+    --warn-soft: #33280F;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { width: 100%; max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+  @media (min-width: 720px) { .wrap { padding: 0 32px; } }
+
+  section, header.hero {
+    padding: clamp(32px, 5vw, 56px) 0;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: clamp(14px, 2vw, 20px);
+  }
+  section:last-of-type { border-bottom: 0; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .eyebrow .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  h1 { font-size: clamp(32px, 6vw, 56px); line-height: 1.08; letter-spacing: -.025em; font-weight: 700; margin: 0; text-wrap: balance; }
+  h2 { font-size: clamp(21px, 3vw, 32px); line-height: 1.2; letter-spacing: -.02em; font-weight: 680; margin: 0; text-wrap: balance; }
+  h3 { font-size: 15px; font-weight: 640; margin: 0; }
+
+  p, li, td { overflow-wrap: anywhere; }
+  .lede { font-size: clamp(16px, 1.7vw, 18px); color: var(--ink-2); max-width: 64ch; margin: 0; }
+  .note { font-size: 14px; color: var(--muted); max-width: 80ch; margin: 0; }
+  .note b { color: var(--ink-2); font-weight: 600; }
+  ul.note { padding-left: 1.1em; display: flex; flex-direction: column; gap: 3px; }
+  code, .mono { font-family: var(--mono); }
+  code { font-size: .88em; background: var(--surface-2); border: 1px solid var(--line); border-radius: 4px; padding: .06em .32em; color: var(--ink); }
+
+  /* status */
+  .status { display: flex; flex-direction: column; border-left: 2px solid var(--accent); padding-left: clamp(14px, 2.4vw, 24px); }
+  .st { display: grid; grid-template-columns: 56px 1fr; gap: 2px 14px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 15px; color: var(--ink-2); }
+  .st:last-child { border-bottom: 0; }
+  .st .k { font-family: var(--mono); font-size: 12.5px; color: var(--accent); padding-top: 2px; }
+  .st.warn .k { color: var(--warn); }
+  .st.ok .k { color: var(--ok); }
+  .st b { color: var(--ink); font-weight: 620; }
+
+  nav.toc { display: flex; flex-wrap: wrap; gap: 8px; }
+  nav.toc a {
+    font-size: 13.5px; color: var(--ink-2); text-decoration: none;
+    border: 1px solid var(--line-strong); border-radius: 999px; padding: 3px 12px; background: var(--surface);
+  }
+  nav.toc a:hover { border-color: var(--accent); color: var(--accent-ink); }
+  nav.toc a span { font-family: var(--mono); font-size: 11.5px; color: var(--muted); margin-right: 6px; }
+
+  /* legend */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13.5px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .sw { display: inline-block; width: 22px; height: 14px; border-radius: 4px; border: 1.5px solid var(--line-strong); background: var(--surface); }
+  .sw.done { background: var(--accent-soft); border-color: var(--accent); }
+  .sw.wip  { background: var(--wip-soft); border-color: var(--wip); }
+  .sw.todo { background: transparent; border: 1.5px dashed var(--muted); }
+  .sw.ln   { height: 0; border-radius: 0; border: 0; border-top: 2px dashed var(--wip); background: none; }
+  .sw.ln2  { height: 0; border-radius: 0; border: 0; border-top: 2px solid var(--accent); background: none; }
+
+  /* diagrams */
+  .d {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 12px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .d svg { display: block; width: 100%; height: auto; min-width: 720px; }
+  .d.wide svg { min-width: 780px; }
+  .d.small svg { min-width: 560px; }
+  .sub { display: flex; flex-direction: column; gap: 8px; }
+  .sub h3 { display: flex; gap: 10px; align-items: baseline; }
+  .sub h3 .k { font-family: var(--mono); font-size: 12.5px; color: var(--accent); }
+  .hint { display: none; font-size: 12.5px; color: var(--muted); margin: 0; }
+  @media (max-width: 800px) { .hint { display: block; } }
+
+  svg.defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+  .d text { font-family: var(--sans); }
+  .d .tt { font-size: 15px; font-weight: 640; fill: var(--ink); }
+  .d .t2 { font-size: 13.5px; font-weight: 620; fill: var(--ink); }
+  .d .ts { font-size: 12.5px; fill: var(--ink-2); }
+  .d .tm { font-size: 12px; fill: var(--muted); }
+  .d .mo { font-family: var(--mono); font-size: 12px; }
+  .d .bl { font-family: var(--mono); font-size: 11px; letter-spacing: .05em; fill: var(--muted); }
+  .d .al { font-size: 12px; fill: var(--ink-2); }
+  .d .c { text-anchor: middle; }
+  .d .e { text-anchor: end; }
+  .d .okt { fill: var(--ok); }
+  .d .wipt { fill: var(--wip-ink); }
+  .d text.on-accent { fill: var(--surface); }
+
+  .d .zone { fill: var(--surface-2); stroke: var(--line-strong); stroke-width: 1; }
+  .d .zone.wip { stroke: var(--wip); stroke-width: 1.4; stroke-dasharray: 7 4; }
+  .d .zone.todo { fill: none; stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 6 4; }
+  .d .bx { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1; }
+  .d .bx.done { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+  .d .bx.wip { fill: var(--wip-soft); stroke: var(--wip); stroke-width: 1.6; }
+  .d .bx.key { stroke-width: 2.4; }
+  .d .bx.todo { fill: var(--surface); stroke: var(--muted); stroke-width: 1.3; stroke-dasharray: 5 4; }
+  .d .pill { fill: var(--surface); stroke: var(--wip); stroke-width: 1.2; }
+  .d .note-bx { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 4 3; }
+
+  .d .ln { fill: none; stroke: var(--ink-2); stroke-width: 1.3; }
+  .d .ln.wip { stroke: var(--wip); stroke-width: 1.8; }
+  .d .ln.dash { stroke-dasharray: 6 4; }
+  .d .ln.todo { stroke: var(--muted); stroke-width: 1.6; stroke-dasharray: 5 4; }
+  .d .ln.ok { stroke: var(--ok); stroke-width: 2; }
+  .d .ln.warn { stroke: var(--warn); stroke-width: 1.8; }
+  .d .ln.accent { stroke: var(--accent); stroke-width: 1.8; }
+  .d .sep { stroke: var(--line); stroke-width: 1; }
+  .d .guide { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 2 4; }
+  .d .axis { stroke: var(--line-strong); stroke-width: 1.2; }
+  .d .base { stroke: var(--line); stroke-width: 1.2; }
+
+  .f-ink { fill: var(--ink-2); }
+  .f-wip { fill: var(--wip); }
+  .f-todo { fill: var(--muted); }
+  .f-ok { fill: var(--ok); }
+  .f-warn { fill: var(--warn); }
+  .f-accent { fill: var(--accent); }
+  .p-warn-bg { fill: var(--warn-soft); }
+  .p-warn-ln { stroke: var(--warn); stroke-width: 1.6; }
+  .p-idle-bg { fill: var(--surface); }
+  .p-idle-ln { stroke: var(--muted); stroke-opacity: .45; stroke-width: 1.4; }
+
+  /* merge chips */
+  .d .chip { fill: var(--surface-2); stroke: var(--line-strong); stroke-width: 1; }
+  .d .chip.new { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+  .d .chip.gone { fill: none; stroke: var(--muted); stroke-dasharray: 4 3; }
+  .d .chip.bad { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 1.4; }
+  .d .chip.idle { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; }
+  .d .ct { font-size: 12.5px; fill: var(--ink); text-anchor: middle; }
+  .d .ct.new { fill: var(--accent-ink); font-weight: 640; }
+  .d .ct.gone { fill: var(--muted); }
+
+  /* states */
+  .d .st-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.8; }
+  .d .st-bad { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 1.6; }
+  .d .st-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.6; }
+  .d .st-idle { fill: var(--surface-2); stroke: var(--muted); stroke-width: 1.3; }
+
+  /* timelines */
+  .d .lane { fill: var(--surface-2); }
+  .d .band-ok { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; }
+  .d .band-bad { fill: var(--bad-soft); stroke: var(--bad); stroke-width: 1.2; }
+  .d .band-warn { fill: var(--warn-soft); stroke: var(--warn); stroke-width: 1.2; }
+  .d .band-idle { fill: var(--surface); stroke: var(--muted); stroke-width: 1.2; stroke-dasharray: 4 3; }
+  .d .dot { fill: var(--ink-2); }
+  .d .dot.ok { fill: var(--ok); }
+  .d .dot.act { fill: var(--accent); }
+  .d .dot.idle { fill: var(--muted); }
+
+  /* table */
+  .tbl { overflow-x: auto; -webkit-overflow-scrolling: touch; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); padding: 6px 4px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 640px; }
+  thead th { text-align: left; font-family: var(--mono); font-size: 11px; letter-spacing: .12em; color: var(--muted); font-weight: 500; padding: 8px 12px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap; }
+  tbody td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: baseline; color: var(--ink-2); }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.grp td { font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em; color: var(--accent); padding-top: 14px; border-bottom: 1px solid var(--line-strong); }
+  td.who, td.when { white-space: nowrap; width: 1%; }
+  td.when { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+  td.src { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  td b { color: var(--ink); font-weight: 620; }
+  .tag { display: inline-block; font-family: var(--mono); font-size: 11px; letter-spacing: .06em; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .tag.user { background: var(--accent-soft); color: var(--accent-ink); }
+  .tag.main { background: var(--surface-2); color: var(--ink-2); border: 1px solid var(--line-strong); }
+  .tag.lim { background: var(--warn-soft); color: var(--warn); }
+  .tag.ok { background: var(--ok-soft); color: var(--ok); }
+  .tag.bad { background: var(--bad-soft); color: var(--bad); }
+
+  /* screenshots */
+  .shots { display: flex; flex-wrap: wrap; gap: 18px; align-items: flex-start; }
+  .shot-card { display: flex; flex-direction: column; gap: 8px; }
+  .shot {
+    position: relative; overflow: hidden; border-radius: 8px; border: 1px solid var(--line-strong);
+    box-shadow: var(--shadow); background: #0b0f13;
+  }
+  .shot img { position: absolute; max-width: none; image-rendering: -webkit-optimize-contrast; }
+  .shot-cap { font-size: 13px; color: var(--ink-2); max-width: 34ch; }
+  .shot-cap b { color: var(--ink); }
+  .shot-cap .why { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .full-shot { width: 100%; max-width: 620px; }
+  .full-shot img { position: static; width: 100%; height: auto; display: block; }
+
+  /* cropped full-window captures: the card sets the display width, the frame keeps the crop's aspect ratio,
+     and the image is scaled/offset in % of the frame (so it shrinks on narrow screens instead of spilling). */
+  .shot-card.crop { max-width: 100%; }
+  .shot.crop { width: 100%; }
+  .shot.crop img { height: auto; }
+  .sub-h { font-size: 15px; font-weight: 640; margin: 6px 0 0; color: var(--ink); }
+
+  /* checklist */
+  .chk { display: flex; flex-direction: column; gap: 0; }
+  .chk-row { display: grid; grid-template-columns: 1fr; gap: 4px; padding: 14px 0; border-bottom: 1px solid var(--line); }
+  .chk-row:last-child { border-bottom: 0; }
+  .chk-n { font-family: var(--mono); font-size: 11.5px; color: var(--accent); }
+  .chk-title { font-size: 15px; font-weight: 640; color: var(--ink); }
+  .chk-body { font-size: 14px; color: var(--ink-2); }
+  .chk-why { font-size: 13px; color: var(--muted); }
+  .chk-why b { color: var(--ink-2); font-weight: 600; }
+  .flag { display: inline-block; font-family: var(--mono); font-size: 10.5px; letter-spacing: .05em; padding: 1px 7px; border-radius: 999px; background: var(--warn-soft); color: var(--warn); margin-left: 6px; vertical-align: middle; }
+  .flag.done { background: var(--ok-soft); color: var(--ok); }
+  /* resolved rows keep their original text (struck, muted) and add a 「지금」 line */
+  .chk-row.resolved .chk-body, .chk-row.resolved .chk-why { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line-strong); }
+  .chk-row.resolved .chk-why b { color: var(--muted); }
+  .chk-now { font-size: 14px; color: var(--ink-2); border-left: 2px solid var(--ok); padding-left: 10px; margin-top: 2px; }
+  .chk-now b { color: var(--ok); font-weight: 640; }
+  li.done-item { color: var(--muted); }
+  li.done-item .flag { margin-left: 0; margin-right: 6px; }
+
+  details.commits summary { cursor: pointer; font-size: 14px; color: var(--accent-ink); font-weight: 620; padding: 4px 0; }
+  details.commits[open] summary { margin-bottom: 8px; }
+  .commit-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .commit-list li { background: var(--surface); padding: 8px 12px; font-size: 13px; display: flex; gap: 10px; }
+  .commit-list .h { font-family: var(--mono); font-size: 12px; color: var(--accent); flex: none; }
+  .commit-list .m { color: var(--ink-2); }
+
+  footer { padding: 24px 0 40px; font-size: 13px; color: var(--muted); }
+  footer code { font-size: 12px; }
+</style>
+</head>
+<body>
+
+<svg class="defs" aria-hidden="true" focusable="false">
+  <defs>
+    <marker id="a-ink" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-ink"/></marker>
+    <marker id="a-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-accent"/></marker>
+    <marker id="a-wip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-wip"/></marker>
+    <marker id="a-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-ok"/></marker>
+  </defs>
+</svg>
+
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow"><span>S21 · 사용량 한도 슬롯 · 최종 보고 · 2026-09-29</span></div>
+    <h1>Claude·Codex 사용량을 대시보드 한켠에서 본다</h1>
+    <p class="lede">화면부터 보고, 확인이 필요한 곳만 짚어 주세요.</p>
+    <div class="status">
+      <div class="st ok"><span class="k">결론</span><span><b>1~8단계(구현·문서) 완료, 그 뒤 후속 개편까지 반영.</b> 작은 화면 개편 · ⟳·켜고 끄기 재배치 · ⟳ 를 내용 바로 옆으로(2026-09-29~30 사용자 결정) — 각각 리뷰·회귀·GUI 검증을 통과했습니다(04 절).</span></div>
+      <div class="st warn"><span class="k">주의</span><span><b>아직 push 하지 않았고 CI 는 한 번도 안 돌았습니다.</b> 지금까지 통과한 것은 전부 이 PC 로컬 실행 결과입니다.</span></div>
+      <div class="st"><span class="k">기준</span><span><code>v0.3.2/feat/usage-limit-slot</code> · 최신 커밋 <code>5a12bfc</code>(문서) — 마지막 코드 커밋 <code>d88dfee</code>(⟳ 자리) · 결정 기록 문서 <code>37b6c9e</code></span></div>
+    </div>
+    <div class="shot-card crop" style="width:802px;">
+      <div class="shot crop" style="aspect-ratio:802/62;">
+        <img src="final-2026-09-29/qa4-stage1-idle.png" alt="대시보드 슬롯에 표시된 사용량 — 위 Claude, 아래 Codex, 각각 5시간·주간 막대와 남은 퍼센트, 리셋 시각, 오른쪽 끝 새로고침 버튼" style="width:199.501%;left:-99.501%;top:-54.839%;">
+      </div>
+      <p class="shot-cap" style="max-width:64ch;"><b>실제로 이렇게 보입니다(2026-09-30 캡처).</b> 회사 아이콘(위 Claude · 아래 Codex) 옆에 5시간·주간 막대, 남은 %, 리셋 시각. Claude 5시간 80%·주간 37%, Codex 5시간 91%·주간 34% — 초록은 절반 넘게 남음, 주황은 절반 이하. 오른쪽 ⟳ 하나가 두 회사를 함께 새로 고칩니다.</p>
+    </div>
+    <nav class="toc" aria-label="목차">
+      <a href="#s0-preview"><span>00</span>작은 표시</a>
+      <a href="#s0-popup"><span>00</span>팝업</a>
+      <a href="#s1"><span>01</span>전체 흐름</a>
+      <a href="#s2"><span>02</span>화면</a>
+      <a href="#s3"><span>03</span>확인해 주세요</a>
+      <a href="#s4"><span>04</span>검증 상태</a>
+      <a href="#s5"><span>05</span>알려진 한계</a>
+      <a href="#s6"><span>06</span>커밋 목록</a>
+    </nav>
+  </header>
+
+  <!-- 00 작은 표시 (옛 「수정안 미리보기」 — 반영 완료 뒤 지금 모습으로 갱신 2026-09-30) -->
+  <section id="s0-preview">
+    <div class="eyebrow"><span class="num">00</span><span>작은 표시 · 반영 완료</span></div>
+    <h2>작은 표시 — 아이콘·세로 정렬·리셋 시각, ⟳ 는 내용 바로 옆 하나</h2>
+    <p class="lede">전에 여기 있던 「수정안 미리보기」는 그대로 구현했고, 그 뒤 ⟳ 자리까지 정해 반영했습니다(2026-09-29·30 사용자 결정). 아래는 지금 화면 캡처입니다 — 왼쪽부터 넓은 순.</p>
+
+    <div class="shots">
+      <div class="shot-card crop" style="width:802px;">
+        <div class="shot crop" style="aspect-ratio:802/62;">
+          <img src="final-2026-09-29/qa4-stage1-idle.png" alt="1단계 — 회사마다 한 줄, 두 줄의 칸이 세로로 맞고 오른쪽 끝에 새로고침 버튼" style="width:199.501%;left:-99.501%;top:-54.839%;">
+        </div>
+        <p class="shot-cap" style="max-width:64ch;"><b>1단계 (넓을 때)</b> — 회사마다 한 줄에 5시간·주간. 두 회사 줄의 칸(창 이름·막대·%·리셋)이 세로로 맞습니다. 막대가 남는 폭을 채우므로 ⟳ 는 내용 끝, 곧 슬롯 오른쪽에 붙습니다.</p>
+      </div>
+      <div class="shot-card crop" style="width:378px;">
+        <div class="shot crop" style="aspect-ratio:378/108;">
+          <img src="final-2026-09-29/qa4-stage2-idle.png" alt="2단계 — 창마다 한 줄, 회사 아이콘이 두 줄에 걸침, 오른쪽에 새로고침 버튼" style="width:423.280%;left:-323.280%;top:-31.481%;">
+        </div>
+        <p class="shot-cap"><b>2단계 (중간)</b> — 창마다 한 줄. 회사 아이콘이 그 회사의 두 줄에 걸칩니다. ⟳ 는 역시 내용 바로 옆입니다.</p>
+      </div>
+      <div class="shot-card crop" style="width:254px;">
+        <div class="shot crop" style="aspect-ratio:254/62;">
+          <img src="final-2026-09-29/qa4-stage3-idle.png" alt="3단계 — 아이콘과 숫자만, 새로고침 버튼이 숫자 바로 옆" style="width:629.921%;left:-529.921%;top:-54.839%;">
+        </div>
+        <p class="shot-cap"><b>3단계 (좁을 때)</b> — 아이콘 + 남은 % 숫자만(5시간·주간). ⟳ 는 숫자 바로 옆에 붙고 슬롯의 나머지는 비워 둡니다. 숫자 뒤에 약 14px 여유를 남겨 둡니다.</p>
+      </div>
+      <div class="shot-card crop" style="width:254px;">
+        <div class="shot crop" style="aspect-ratio:254/62;">
+          <img src="final-2026-09-29/qa4-stage3-refreshing.png" alt="3단계 새로고침 중 — 아이콘 옆에 도는 표식, 새로고침 버튼 위치는 그대로" style="width:629.921%;left:-529.921%;top:-54.839%;">
+        </div>
+        <p class="shot-cap"><b>3단계 — 새로 고치는 중</b> — 아이콘 옆에 도는 표식이 생겨 숫자가 밀리지만, 그 약 14px 여유를 쓰므로 ⟳ 는 움직이지 않습니다(왼쪽 그림과 같은 자리).</p>
+      </div>
+    </div>
+
+    <ul class="note">
+      <li><b>리셋 시각은 「리셋 00:58」 꼴</b> — 오늘이 아닌 날이면 요일 대신 날짜로 「리셋 10/1 01:48」. 남은 시간(「N 뒤」)은 팝업에만 둡니다. 3단계는 %만 보이고 리셋 시각도 팝업에서 봅니다.</li>
+      <li><b>⟳ 는 작은 표시에 하나</b> — 누르면 켠 회사(Claude·Codex)를 함께 새로 고칩니다. 세 단계 모두 내용 바로 옆에 있고, 두 회사를 다 끄면 ⟳ 도 사라집니다.</li>
+      <li><b>누르는 간격 제한(30초)은 없앴습니다.</b> 조회가 도는 동안 누른 것은 무시하고(도는 표식이 보이는 동안), 막는 경우는 서비스가 거절한 동안(「거절됨 — N분 뒤」)뿐입니다 — 켠 회사가 전부 거절 중이면 ⟳ 가 흐려지고 눌러도 요청이 나가지 않습니다. 일부만 거절 중이면 나머지만 새로 고칩니다.</li>
+      <li><b>새로 고치는 동안에도 폭 단계는 바뀌지 않습니다</b> — 단계를 고를 때 도는 표식 자리까지 미리 셉니다.</li>
+      <li><b>⚠ 는 없앴습니다</b> — 색(초록 / 주황 / 빨강)이 대신합니다. 퍼센트는 남은 양입니다.</li>
+      <li><b>회사 아이콘은 자리표시입니다</b> — 최종 모양은 아직 정하지 않았습니다.</li>
+    </ul>
+  </section>
+
+  <!-- 00 팝업 (2026-09-30 추가 — 「브리핑인데 왜 팝업은 없어?」) -->
+  <section id="s0-popup">
+    <div class="eyebrow"><span class="num">00</span><span>팝업</span></div>
+    <h2>작은 표시를 누르면 여는 상세 — 남은 시간과 켜고 끄기는 여기</h2>
+    <p class="lede">작은 표시 아무 곳이나 클릭하면 열립니다. 켠 회사마다 상세를 전부 보이고, 맨 아래 한 줄에서 회사별로 켜고 끕니다. <b>팝업엔 ⟳ 가 없습니다</b> — 새로고침은 작은 표시의 ⟳ 하나입니다.</p>
+
+    <div class="shot-card crop" style="width:878px;">
+      <div class="shot crop" style="aspect-ratio:878/456;">
+        <img src="final-2026-09-29/qa4-popup-dark.png" alt="팝업 — Claude·Codex 카드마다 창별 막대, 남은 퍼센트, 리셋 시각과 남은 시간, 값의 나이, 사용량 페이지 링크, 맨 아래 슬롯에 표시 체크 두 개. 오른쪽 위에 팝업을 연 작은 표시" style="width:182.232%;left:-82.232%;top:-7.456%;">
+      </div>
+      <p class="shot-cap" style="max-width:64ch;"><b>다크 테마</b> — 오른쪽 위가 누른 작은 표시, 가운데가 팝업입니다. 슬롯 가장자리에서 열어도 잘리지 않게 슬롯 밖으로 뜹니다(여기선 왼쪽으로).</p>
+    </div>
+    <div class="shots">
+      <div class="shot-card crop" style="width:494px;">
+        <div class="shot crop" style="aspect-ratio:494/336;">
+          <img src="final-2026-09-29/qa4-popup-light.png" alt="라이트 테마의 팝업" style="width:323.887%;left:-146.964%;top:-44.643%;">
+        </div>
+        <p class="shot-cap"><b>라이트 테마</b> — 같은 내용, 배경만 밝게.</p>
+      </div>
+      <div class="shot-card crop" style="width:494px;">
+        <div class="shot crop" style="aspect-ratio:494/336;">
+          <img src="final-2026-09-29/qa4-popup-e-ink.png" alt="e-ink 테마의 팝업 — 흑백, 주간 막대는 빗금" style="width:323.887%;left:-146.964%;top:-44.643%;">
+        </div>
+        <p class="shot-cap"><b>e-ink 테마</b> — 색 대신 채움 모양으로 가릅니다(주황 구간 = 빗금).</p>
+      </div>
+    </div>
+
+    <ul class="note">
+      <li><b>회사마다</b> — 아이콘 + 이름 · 플랜(값이 있을 때만, 예 「플랜: max」) · 5시간·주간 막대와 남은 % · 모델별 창이 있으면 그 줄도(그림의 Fable · gpt-reserve) · 「사용량 페이지 ↗」 링크(마우스를 올리면 목적지 설명).</li>
+      <li><b>시간은 「리셋 11:29 (4시간 36분 뒤)」 꼴</b> — 리셋 시각 + 남은 시간. 다른 날이면 「리셋 10/4 11:59 (4일 5시간 뒤)」. 줄 끝엔 그 값의 나이(「1분 전」·「방금」).</li>
+      <li><b>새로 고치는 동안</b> 회사 이름 줄 끝에 「갱신 중」이 붙습니다. 팝업을 연 채 작은 표시의 ⟳ 를 눌러도 팝업은 닫히지 않습니다 — 「갱신 중」을 보며 누를 수 있게.</li>
+      <li><b>문제가 있으면</b> 맨 위에 그 회사의 상태 한 줄(조회 실패·거절됨·로그인 필요 등)이 뜹니다 — 작은 표시의 <code>!</code> 배지에 마우스를 올렸을 때와 같은 문장입니다.</li>
+    </ul>
+
+    <h3 class="sub-h">맨 아래 「슬롯에 표시: ☑ Claude ☑ Codex」</h3>
+    <div class="shots">
+      <div class="shot-card crop" style="width:452px;">
+        <div class="shot crop" style="aspect-ratio:452/200;">
+          <img src="final-2026-09-29/qa3-popup-codex-off.png" alt="Codex 를 끈 팝업 — Claude 상세만 있고 맨 아래 Claude 체크됨, Codex 체크 해제" style="width:353.982%;left:-1.327%;top:-37.000%;">
+        </div>
+        <p class="shot-cap"><b>Codex 를 끈 모습</b> — 상세엔 켠 Claude 만 남고, 끈 Codex 는 체크 줄에만 있습니다(다시 켤 자리).</p>
+      </div>
+      <div class="shot-card crop" style="width:297px;">
+        <div class="shot crop" style="aspect-ratio:297/92;">
+          <img src="final-2026-09-29/qa3-both-off.png" alt="둘 다 끈 모습 — 작은 표시에 「클릭해서 표시할 항목 고르기」 한 줄, 팝업엔 체크 줄만" style="width:538.721%;left:-1.010%;top:-41.304%;">
+        </div>
+        <p class="shot-cap"><b>둘 다 끈 모습</b> — 작은 표시엔 「클릭해서 표시할 항목 고르기」 한 줄(⟳ 없음), 누르면 체크 줄만 있는 팝업.</p>
+      </div>
+    </div>
+    <ul class="note">
+      <li><b>끈 회사는 작은 표시·팝업 상세 어디에도 없고, 조회하지도 않습니다</b> — 구독에서 빠지므로 그 회사 값은 오가지 않습니다.</li>
+      <li><b>슬롯 우클릭 메뉴엔 사용량 항목이 없습니다</b> — ⟳ 와 표시 체크 둘 다 뺐습니다(2026-09-29 사용자 결정 — 켜고 끄기는 팝업으로, ⟳ 는 작은 표시로). LLM 은 같은 동작을 명령(<code>usageSlot.refresh</code> · <code>usageSlot.toggleClaude</code> · <code>usageSlot.toggleCodex</code>)으로 부릅니다.</li>
+      <li>Codex 끈 모습·둘 다 끈 모습은 2026-09-30 새벽 캡처입니다(⟳ 자리를 옮기기 전) — 팝업 부분만 잘라 실었고, 그 부분은 지금과 같습니다.</li>
+    </ul>
+  </section>
+
+  <!-- 01 전체 흐름 -->
+  <section id="s1">
+    <div class="eyebrow"><span class="num">01</span><span>전체 흐름</span></div>
+    <h2>값이 오는 길 둘, 화면까지 가는 길 하나</h2>
+    <div class="legend">
+      <span><i class="sw ln2"></i>값이 자동으로 흐르는 경로(구독형)</span>
+      <span><i class="sw ln"></i>LLM(에이전트)이 직접 부르는 명령 경로</span>
+    </div>
+    <div class="d wide">
+      <svg viewBox="0 0 1180 400" role="img" aria-labelledby="f1t f1d">
+        <title id="f1t">사용량 슬롯 전체 흐름</title>
+        <desc id="f1d">CLI 조회와 에이전트 줍기 두 곳에서 온 값이 데몬 UsageService 로 모이고, wire 의 UsageLimitsUpdated 로 구독한 연결에만 방송되며, 셸이 레이아웃에서 관심을 계산해 구독을 걸고 줄임은 1.5초 지연 뒤 확정하며 대조 재전송을 하고, 웹뷰가 socket epoch 와 revision 으로 병합해 UsageSlot 에 그린다. 별도로 LLM 은 usage.get·usage.refresh 로 데몬에 직접 묻고, layout.setSlotContent 로 슬롯을 셸에 직접 만들거나 켠다.</desc>
+
+        <rect class="bx done" x="10" y="55" width="170" height="120" rx="8"/>
+        <text class="tt" x="24" y="80">CLI 조회 / 줍기</text>
+        <text class="ts" x="24" y="102">claude -p get_usage</text>
+        <text class="ts" x="24" y="120">app-server rateLimits</text>
+        <text class="tm" x="24" y="142">+ 이미 돌던 에이전트의</text>
+        <text class="tm" x="24" y="158">스트림 값(줍기)</text>
+
+        <rect class="zone" x="210" y="35" width="220" height="160" rx="10"/>
+        <text class="t2" x="224" y="58">데몬 UsageService</text>
+        <text class="ts" x="224" y="82">기록부 · 스케줄러</text>
+        <text class="ts" x="224" y="100">조회 스레드 · 거절 기한</text>
+        <text class="tm" x="224" y="124">회사마다 값 하나로 합침</text>
+        <text class="tm" x="224" y="142">(출처 무관 — 줍기·조회 동일 규칙)</text>
+
+        <rect class="bx done key" x="460" y="55" width="250" height="120" rx="8"/>
+        <text class="tt" x="474" y="80">wire</text>
+        <text class="ts mo" x="474" y="102">UsageLimitsUpdated</text>
+        <text class="tm" x="474" y="124">구독한 연결에만 방송</text>
+        <text class="tm" x="474" y="142">(연결마다 켠 회사만)</text>
+
+        <rect class="zone" x="740" y="20" width="220" height="190" rx="10"/>
+        <text class="t2" x="754" y="44">셸</text>
+        <text class="ts" x="754" y="68">레이아웃에서 관심 계산</text>
+        <text class="tm" x="754" y="86">(보이는 창의 켠 회사)</text>
+        <text class="ts" x="754" y="108">줄어들 때만 1.5초 지연</text>
+        <text class="tm" x="754" y="126">(짧은 깜빡임에 구독 안 끊음)</text>
+        <text class="ts" x="754" y="150">재연결 · 재계산 뒤</text>
+        <text class="tm" x="754" y="168">대조 재전송(diff)</text>
+
+        <rect class="bx done" x="990" y="55" width="180" height="70" rx="8"/>
+        <text class="t2" x="1004" y="80">웹뷰</text>
+        <text class="tm" x="1004" y="99">socket epoch·revision</text>
+        <text class="tm" x="1004" y="115">낮은 쪽은 버림</text>
+
+        <rect class="bx done" x="990" y="150" width="180" height="50" rx="8"/>
+        <text class="t2" x="1004" y="180">UsageSlot 화면</text>
+
+        <path class="ln accent" d="M180 115 H208" marker-end="url(#a-accent)"/>
+        <path class="ln accent" d="M430 115 H458" marker-end="url(#a-accent)"/>
+        <path class="ln accent" d="M710 115 H738" marker-end="url(#a-accent)"/>
+        <path class="ln accent" d="M960 90 H988" marker-end="url(#a-accent)"/>
+        <path class="ln accent" d="M1080 125 V148" marker-end="url(#a-accent)"/>
+
+        <!-- LLM branch -->
+        <rect class="bx" x="210" y="255" width="220" height="70" rx="8"/>
+        <text class="t2" x="224" y="280">LLM 경로</text>
+        <text class="ts mo" x="224" y="300">usage.get · usage.refresh</text>
+        <path class="ln dash" d="M320 253 V197" marker-end="url(#a-ink)"/>
+        <text class="al c" x="360" y="230">데몬에 직접 묻는다</text>
+
+        <rect class="bx" x="740" y="255" width="220" height="70" rx="8"/>
+        <text class="t2" x="754" y="280">LLM 경로</text>
+        <text class="ts mo" x="754" y="300">layout.setSlotContent</text>
+        <path class="ln dash" d="M850 253 V212" marker-end="url(#a-ink)"/>
+        <text class="al c" x="900" y="234">슬롯을 만들거나 켠다</text>
+
+        <text class="bl" x="10" y="360">데몬은 값을 한 곳에만 쥔다 — 셸·웹뷰는 그 값을 옮겨 그릴 뿐, 따로 계산하지 않는다.</text>
+      </svg>
+    </div>
+    <p class="hint">← 그림은 옆으로 밀어서 봅니다.</p>
+    <ul class="note">
+      <li><b>구독이 없으면 데몬은 스스로 조회하지 않습니다</b> — 슬롯이 화면에 보이는 동안만 그 회사를 구독하고, 조회도 그때만 돕니다.</li>
+      <li><b>LLM 경로는 구독과 무관하게 동작</b>합니다 — 사용자가 안 보고 있어도 에이전트가 <code>usage.get</code> 을 부르면 데몬이 즉시(필요하면 조회해서) 답합니다.</li>
+    </ul>
+  </section>
+
+  <!-- 02 화면 -->
+  <section id="s2">
+    <div class="eyebrow"><span class="num">02</span><span>화면</span></div>
+    <h2>너비·높이에 따라 세 단계로 줄어듭니다</h2>
+    <p class="note">슬롯이 놓인 칸이 좁아질수록 정보를 줄여서 보여줍니다. <b>세 단계의 지금 모습은 위 <a href="#s0-preview">「작은 표시」</a> 절, 팝업은 <a href="#s0-popup">「팝업」</a> 절</b>에 있습니다 — 여기엔 높이 규칙·테마·트레이 동작을 둡니다.</p>
+    <div class="shots">
+      <div class="shot-card">
+        <div class="shot" style="width:250px;height:170px;">
+          <img src="final-2026-09-29/g6-stage3-height96.png" alt="높이가 낮은 칸에서 3단계로 떨어진 모습(개편 전 캡처)" style="width:1920px;top:-10px;left:0px;">
+        </div>
+        <p class="shot-cap"><b>높이가 모자라도 3단계</b> — 2단계가 들어갈 너비여도 칸 높이가 모자라면(2단계는 네 줄이라 키가 큽니다) 3단계로 갑니다. 어느 크기에서도 <code>!</code> 배지가 잘리지 않게 하려는 것입니다.<span class="flag">설계서 이탈</span><span class="why">개편 전(2026-09-29) 캡처라 회사 약자 Cl·Cx 와 ⚠ 가 보입니다 — 둘 다 지금은 없고, 높이 규칙만 그대로입니다.</span></p>
+      </div>
+      <div class="shot-card crop" style="width:378px;">
+        <div class="shot crop" style="aspect-ratio:378/108;">
+          <img src="final-2026-09-29/qa4-popup-light.png" alt="라이트 테마에서의 작은 표시(2단계)" style="width:423.280%;left:-323.280%;top:-31.481%;">
+        </div>
+        <p class="shot-cap"><b>라이트 테마</b> — 색(초록 / 주황 / 빨강) 그대로, 배경만 밝게.</p>
+      </div>
+      <div class="shot-card crop" style="width:378px;">
+        <div class="shot crop" style="aspect-ratio:378/108;">
+          <img src="final-2026-09-29/qa4-popup-e-ink.png" alt="e-ink 테마에서의 작은 표시(2단계) — 흑백, 주간 막대는 빗금" style="width:423.280%;left:-323.280%;top:-31.481%;">
+        </div>
+        <p class="shot-cap"><b>e-ink 테마</b> — 색 대신 채움 모양으로 가릅니다. 주황 구간은 빗금, 빨강 구간은 검정 채움 + 굵은 테두리(이 캡처엔 빨강 구간이 없습니다).</p>
+      </div>
+    </div>
+    <p class="note">예전 이 자리의 「팝업(회사마다 ⟳)」·「우클릭 메뉴(사용량 새로고침 · 회사별 표시 체크)」 캡처는 뺐습니다 — 2026-09-29 사용자 결정으로 팝업의 ⟳ 와 메뉴의 사용량 항목이 모두 없어졌습니다.</p>
+
+    <div class="d small">
+      <svg viewBox="0 0 900 170" role="img" aria-labelledby="f2t f2d">
+        <title id="f2t">트레이 숨김·표시 타임라인</title>
+        <desc id="f2d">트레이로 숨기면 구독이 곧바로 끊기지 않고 1.5초 뒤에 줄어들며, 그 사이 다시 보이면 타이머가 취소된다. 반대로 다시 표시하면 지연 없이 곧바로 구독한다.</desc>
+        <rect class="lane" x="150" y="20" width="720" height="46" rx="6"/>
+        <rect class="lane" x="150" y="92" width="720" height="46" rx="6"/>
+        <text class="t2" x="10" y="48">트레이 숨김</text>
+        <text class="t2" x="10" y="120">트레이 표시</text>
+
+        <circle class="dot act" cx="200" cy="43" r="6"/>
+        <text class="ts" x="212" y="39">숨김</text>
+        <rect class="band-idle" x="240" y="28" width="200" height="30" rx="4"/>
+        <text class="tm" x="248" y="47">1.5초 대기(같은 관심이면 타이머 유지)</text>
+        <circle class="dot ok" cx="460" cy="43" r="6"/>
+        <text class="ts" x="472" y="39">구독 해제 · 자동 조회 멈춤</text>
+
+        <circle class="dot act" cx="200" cy="115" r="6"/>
+        <text class="ts" x="212" y="111">표시</text>
+        <circle class="dot ok" cx="260" cy="115" r="6"/>
+        <text class="ts" x="272" y="111">지연 없이 곧바로 구독 · 대조 재전송</text>
+
+        <path class="ln" d="M200 49 V60" marker-end="url(#a-ink)"/>
+        <path class="ln" d="M460 49 V60" marker-end="url(#a-ink)"/>
+        <line class="axis" x1="150" y1="150" x2="870" y2="150"/>
+        <text class="bl" x="150" y="166">0.0s</text>
+        <text class="bl" x="440" y="166">1.5s</text>
+      </svg>
+    </div>
+    <p class="hint">← 그림은 옆으로 밀어서 봅니다.</p>
+  </section>
+
+  <!-- 03 확인해 주세요 -->
+  <section id="s3">
+    <div class="eyebrow"><span class="num">03</span><span>★확인해 주세요★</span></div>
+    <h2>메인이 대신 정한 것들 — 문구·동작과 이유</h2>
+    <p class="note">기획 문서(PRD·TRD)가 세부까지 정하지 않은 부분은 구현하면서 메인이 하나를 골라야 했습니다. 각 항목의 실제 문구·동작과 그렇게 고른 이유입니다. <span class="flag">설계서 이탈</span> 표시는 PRD·TRD 에 적힌 것과 다르게 구현된 항목입니다.</p>
+
+    <div class="chk">
+      <div class="chk-row">
+        <div class="chk-n">01</div>
+        <div class="chk-title">사용량 정보를 못 받을 때 문구</div>
+        <div class="chk-body">「<b>이 계정의 한도 정보를 받을 수 없음</b>」</div>
+        <div class="chk-why"><b>이유</b> — 원인(로그인 문제인지, CLI 가 없는지, 일시 오류인지)을 문구에서 단정하지 않고 중립적으로 표현했습니다.</div>
+      </div>
+      <div class="chk-row resolved">
+        <div class="chk-n">02</div>
+        <div class="chk-title">새로고침(⟳) 버튼 위치<span class="flag">설계서 이탈</span><span class="flag done">해결 · 2026-09-30</span></div>
+        <div class="chk-body">팝업(회사별 카드마다 하나)과 우클릭 메뉴 두 곳에만 있습니다. 가장 좁은 3단계 화면에는 없습니다.</div>
+        <div class="chk-why"><b>이유</b> — PRD(R12)는 「세 곳」을 요구했지만, 가장 좁은 표시에는 ⟳ 를 넣을 자리가 없어 뺐습니다.</div>
+        <div class="chk-now"><b>지금</b> — ⟳ 는 작은 표시의 버튼 하나로 바꿨고(팝업·우클릭 메뉴의 ⟳ 는 없앰, 2026-09-29 사용자 결정 · ADR-0257), 세 단계 모두에 있습니다. 3단계에서 ⟳ 가 내용과 멀리 떨어지던 문제는 <b>내용 바로 옆에 붙이는 것</b>으로 정해 반영했습니다(2026-09-30 사용자 결정). → <a href="#s0-preview">「작은 표시」</a></div>
+      </div>
+      <div class="chk-row resolved">
+        <div class="chk-n">03</div>
+        <div class="chk-title">메뉴에서 회사 표시를 껐다 켤 때<span class="flag done">바뀜 · 2026-09-30</span></div>
+        <div class="chk-body">슬롯 내용을 부분 수정하지 않고 <b>통째로 다시 그립니다</b>(전체 교체).</div>
+        <div class="chk-why"><b>이유</b> — TRD 가 고른 방식입니다. 그 순간 LLM 이 같은 슬롯을 다른 용도로 바꾸고 있었다면 그 변경과 겹칠 수 있는데, 드문 경우라 받아들였습니다.</div>
+        <div class="chk-now"><b>지금</b> — 켜고 끄기는 팝업 맨 아래 「슬롯에 표시」로 옮겼고, 체크 하나는 <b>자기 회사 칸만</b> 셸에 보냅니다. 셸이 레이아웃 잠금 안에서 그 칸만 바꾸고 나머지는 지금 값을 지킵니다(새 셸 커맨드 <code>set_usage_slot</code>). 전체 교체를 버린 이유 = 두 체크를 빠르게 연달아 누르거나 LLM 이 동시에 쓰면 서로를 덮어서입니다(ADR-0257 · TRD §3 #102 ⑤). 반영 전에 같은 체크를 다시 누르면 두 번째 누름은 사실상 무시됩니다(현행 유지 — 사용자 결정 2026-09-30). → <a href="#s0-popup">「팝업」</a></div>
+      </div>
+      <div class="chk-row resolved">
+        <div class="chk-n">04</div>
+        <div class="chk-title">칸 높이가 낮으면 곧바로 가장 좁은 3단계로<span class="flag">설계서 이탈</span><span class="flag done">바뀜 · 문구 정정</span></div>
+        <div class="chk-body">너비가 넉넉해도 세로 공간이 부족하면 1·2단계를 건너뛰고 3단계로 갑니다.</div>
+        <div class="chk-why"><b>이유</b> — 설계서는 너비만 기준으로 정했지만, 리뷰에서 「경고 배지는 어떤 크기에서도 보여야 한다」(PRD R31)는 지적이 나와 높이 조건을 추가했습니다.</div>
+        <div class="chk-now"><b>지금</b> — 높이는 <b>2단계에서만</b> 봅니다. 1단계가 들어갈 너비면 높이와 상관없이 1단계(두 줄)이고, 1단계가 안 들어가 2단계(네 줄)를 고를 때 칸 높이가 모자라면 3단계로 갑니다. 이유(어느 크기에서도 <code>!</code> 배지가 잘리지 않게)는 그대로입니다.</div>
+      </div>
+      <div class="chk-row resolved">
+        <div class="chk-n">05</div>
+        <div class="chk-title">가장 좁은 화면의 회사 이름<span class="flag done">바뀜 · 2026-09-29</span></div>
+        <div class="chk-body">Claude → <b>Cl</b>, Codex → <b>Cx</b></div>
+        <div class="chk-why"><b>이유</b> — 가장 좁은 폭에는 전체 이름이 들어가지 않습니다.</div>
+        <div class="chk-now"><b>지금</b> — 작은 표시는 모든 단계에서 회사 이름 대신 작은 회사 아이콘을 씁니다(사용자 결정). 이름은 팝업에만 나옵니다. → <a href="#s0-preview">「작은 표시」</a></div>
+      </div>
+      <div class="chk-row resolved">
+        <div class="chk-n">06</div>
+        <div class="chk-title">새로고침이 진행 중이어도 ⟳ 버튼을 막지 않음<span class="flag done">바뀜 · 2026-09-29</span></div>
+        <div class="chk-body">조회가 돌고 있을 때 ⟳ 를 다시 눌러도 비활성화되지 않습니다.</div>
+        <div class="chk-why"><b>이유</b> — 30초 안에 다시 눌러도 데몬이 새 조회 대신 들고 있는 값으로 답하므로, 버튼을 잠글 필요가 없다고 봤습니다.</div>
+        <div class="chk-now"><b>지금</b> — 30초 간격 제한을 없앴습니다(사용자 결정). 조회가 도는 동안 누른 것은 무시하고, 막는 경우는 서비스가 거절한 동안뿐입니다 — 켠 회사가 전부 거절 중이면 ⟳ 가 흐려지고 요청이 나가지 않습니다. → <a href="#s0-preview">「작은 표시」</a></div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">07</div>
+        <div class="chk-title">거절(429) 대기 시간 표현</div>
+        <div class="chk-body">분 단위 숫자 대신 사람이 읽는 말로 — 예: 「<b>1시간 20분 뒤</b>」</div>
+        <div class="chk-why"><b>이유</b> — 그대로 숫자만 보여주는 것보다 읽기 쉽습니다.</div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">08</div>
+        <div class="chk-title">벤더 원문 메시지가 없을 때</div>
+        <div class="chk-body">분류값·코드만 있으면 「<b>(kind · code)</b>」 형태로 표시</div>
+        <div class="chk-why"><b>이유</b> — 아무것도 안 보여주는 것보다 원인 분류라도 보여주는 편이 낫다고 판단했습니다.</div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">09</div>
+        <div class="chk-title">상태 문장이 조립되는 모양(예시)</div>
+        <div class="chk-body">「Claude · 조회 실패 · 다음 시도 14:15」처럼 회사 · 상태 · 부가 정보를 가운뎃점으로 이어 한 문장으로 만듭니다.</div>
+        <div class="chk-why"><b>이유</b> — 상태별로 문구를 따로 만들지 않고 공통 틀에 끼워 넣어, 새 상태가 추가돼도 문장 구조가 흐트러지지 않게 했습니다.</div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">10</div>
+        <div class="chk-title">detail_code 의 타입 — 정수 그대로 vs TS bigint<span class="flag">리뷰 불일치</span></div>
+        <div class="chk-body">Rust 의 64비트 정수를 TypeScript 로 옮길 때 지금은 <b>bigint</b> 로 갑니다.</div>
+        <div class="chk-why"><b>이유</b> — codex 리뷰는 큰 값에서 정밀도가 깨질 수 있다며 FIX 를 냈고, Claude 리뷰는 지금 값 범위에서는 문제없다며 PASS 를 냈습니다. 의견이 갈려 <b>사용자 판단이 필요</b>합니다.</div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">11</div>
+        <div class="chk-title">연결이 끊겼다 되살아나면 사용량 값을 다시 당겨옵니다<span class="flag">설계서 이탈</span></div>
+        <div class="chk-body">소켓 재연결 시 웹뷰가 사용량 값을 능동적으로 다시 요청합니다.</div>
+        <div class="chk-why"><b>이유</b> — 설계서엔 없던 동작인데, 리뷰에서 「데몬 시작 직후 첫 조회가 실패하면 그 뒤로도 값이 영영 안 온다」는 구멍이 지적돼 추가했습니다.</div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">12</div>
+        <div class="chk-title">숨김으로 줄어드는 중 같은 관심이면 타이머를 유지</div>
+        <div class="chk-body">트레이로 숨겼다가 1.5초 안에 다시 같은 회사가 보이면, 대기 타이머를 취소하는 대신 그대로 둡니다.</div>
+        <div class="chk-why"><b>이유</b> — 탭을 빠르게 오가거나 트레이가 순간 깜빡이는 정도로 매번 타이머를 리셋하지 않기 위해서입니다.</div>
+      </div>
+      <div class="chk-row resolved">
+        <div class="chk-n">13</div>
+        <div class="chk-title">메뉴 항목의 체크·활성 조건 — 새 스키마<span class="flag done">해당 없음 — 메뉴 항목 제거</span></div>
+        <div class="chk-body">메뉴 항목에 체크 표시(<code>checked</code>)와 활성 조건 함수(<code>enabled(ctx)</code>)를 더했습니다 — ADR-0252.</div>
+        <div class="chk-why"><b>이유</b> — 처음엔 기존 명령 조건식(<code>Command.when</code>)을 넓혀 쓰려 했지만, 그러면 사용자에게 값이 새는 경로가 생긴다는 리뷰 지적을 받아 되돌리고 이 방식으로 바꿨습니다.</div>
+        <div class="chk-now"><b>지금</b> — 슬롯 우클릭 메뉴의 사용량 항목이 전부 없어져(ADR-0257) 이 슬롯에서 확인할 것이 없습니다. 두 칸 자체는 공용 메뉴 기반에 쓰는 곳 없이 남아 있고, 걷을지는 뒤로 미뤘습니다(메인 결정 2026-09-29 · TRD §3 #102 ②).</div>
+      </div>
+      <div class="chk-row">
+        <div class="chk-n">14</div>
+        <div class="chk-title">새로고침 스피너는 「동작 줄이기」·e-ink 에서도 돕니다</div>
+        <div class="chk-body">접근성 설정으로 애니메이션을 줄이거나 e-ink 테마를 써도 ⟳ 스피너는 계속 회전합니다.</div>
+        <div class="chk-why"><b>이유</b> — 이번에 새로 정한 게 아니라, 2026-08-24 에 이미 내려진 사용자 결정을 그대로 따랐습니다.</div>
+      </div>
+    </div>
+
+    <p class="note" style="margin-top:8px;"><b>그 밖에 아직 사용자 확인이 남은 것</b></p>
+    <ul class="note">
+      <li class="done-item"><span class="flag done">반영 완료</span><a href="#s0-preview">위 「수정안 미리보기」</a> — 아이콘·세로 정렬·⚠ 제거·리셋 시각 표시로 바꾸는 안, 구현 전 확인 필요 → 확인받아 구현했고, 그 절은 지금 모습(「작은 표시」)으로 바꿨습니다.</li>
+      <li>QA 바인딩 문서의 설정 오류 정정 묶음(3건) + 슬롯 레시피 + engram 토큰 레시피</li>
+      <li><code>CLAUDE.md</code> 에 박힌 테스트 수치(워크스페이스 결과 줄·통과 수 등) 최신화</li>
+      <li>이 브랜치를 지금 push 해도 되는지</li>
+    </ul>
+  </section>
+
+  <!-- 04 검증 상태 -->
+  <section id="s4">
+    <div class="eyebrow"><span class="num">04</span><span>검증 상태</span></div>
+    <h2>무엇을 어떻게 확인했나</h2>
+    <div class="tbl">
+      <table>
+        <thead><tr><th>단계</th><th>리뷰 강도·판정</th><th>비고</th></tr></thead>
+        <tbody>
+          <tr class="grp"><td colspan="3">4단계 — 데몬 사용량 서비스</td></tr>
+          <tr><td>병합·서비스 본체·조회 구동·스케줄러(4d)</td><td><span class="tag ok">deep · PASS</span></td><td class="src">커밋 <code>128ad56</code></td></tr>
+
+          <tr class="grp"><td colspan="3">5단계 — wire·조립·LLM 명령</td></tr>
+          <tr><td>wire + 조립 + 연결 계층(5a)</td><td><span class="tag lim">FIX → 반영</span></td><td class="src"><code>7aad8f7</code> → <code>4fd426a</code></td></tr>
+          <tr><td>버스 usage.get·usage.refresh(5b)</td><td><span class="tag lim">FIX → 반영 · 이견 1건 남음</span></td><td class="src"><code>56776d6</code> → <code>c68b885</code> (항목 10)</td></tr>
+
+          <tr class="grp"><td colspan="3">6단계 — 셸 구독</td></tr>
+          <tr><td>슬롯 콘텐츠·링크 권한·관심 계산(6a)</td><td><span class="tag lim">FIX → 반영</span></td><td class="src"><code>1ee3b29</code> → <code>547f83f</code></td></tr>
+          <tr><td>연결 배선(6b1)</td><td><span class="tag lim">FIX → 반영</span></td><td class="src"><code>00e6683</code> → <code>0561249</code></td></tr>
+          <tr><td>⟳ 경로(6b2)</td><td><span class="tag ok">시험 보강</span></td><td class="src"><code>31ca403</code> → <code>c1eb031</code></td></tr>
+          <tr><td>관심 재계산 배선(6c)</td><td><span class="tag lim">codex FIX(트레이 표식 순서) → 반영</span></td><td class="src"><code>871bc8f</code> → <code>6539832</code></td></tr>
+
+          <tr class="grp"><td colspan="3">7단계 — 화면</td></tr>
+          <tr><td>데이터 경로(7a)</td><td><span class="tag lim">doc-aware PASS · codex FIX(재연결 미당김) → 반영</span></td><td class="src"><code>088266e</code> → <code>664d011</code></td></tr>
+          <tr><td>화면 렌더링(7b)</td><td><span class="tag lim">양쪽 FIX → 반영 2라운드</span></td><td class="src"><code>846a3e4</code> → <code>a7946c0</code>, <code>d49a93f</code></td></tr>
+          <tr><td>메뉴·LLM 경로(7c)</td><td><span class="tag lim">양쪽 FIX → 반영 2라운드</span></td><td class="src"><code>b59a7ac</code> → <code>626279c</code>, <code>59bb49e</code></td></tr>
+
+          <tr class="grp"><td colspan="3">최종 QA(로컬 · 8단계 착수 전, 2026-09-29)</td></tr>
+          <tr><td>워크스페이스 전체 회귀</td><td><span class="tag ok">PASS</span></td><td class="src">결과 줄 59 · 3617 통과 · 0 실패 · 28 무시</td></tr>
+          <tr><td>셸 단위(lib_unit)</td><td><span class="tag ok">PASS</span></td><td class="src">401건</td></tr>
+          <tr><td>프론트(vitest)</td><td><span class="tag ok">PASS</span></td><td class="src">1491건</td></tr>
+          <tr><td>GUI 실측(1~7단계 시나리오)</td><td><span class="tag ok">PASS</span></td><td class="src">구독 따라감 · 트레이 숨김/복원 · 새로고침 뒤 재그림 · 메뉴 · 팝업(그때의 화면 — 지금 모습은 아래 2026-09-30 행)</td></tr>
+          <tr><td>실제 데몬 확인</td><td><span class="tag ok">PASS</span></td><td class="src"><code>engram usage.get</code> 으로 Claude·Codex 실 CLI 조회, 2~3초 내 응답</td></tr>
+
+          <tr class="grp"><td colspan="3">후속 개편(2026-09-29~30 · 사용자 결정)</td></tr>
+          <tr><td>작은 화면 개편 — 아이콘·세로 정렬·⚠ 제거·리셋 시각</td><td><span class="tag lim">tsc · vitest 1505 만</span></td><td class="src"><code>6598291</code> — 커밋 때 /review code·/qa full 은 안 돌림(뒤의 /qa full 두 번은 이 코드가 들어간 트리 전체를 돌았음)</td></tr>
+          <tr><td>⟳·켜고 끄기 재배치 · 30초 간격 제거 · 리셋 표기</td><td><span class="tag ok">code full 4회차 PASS</span></td><td class="src"><code>910c214</code> — /qa full PASS(워크스페이스 3620 · lib_unit 401 · vitest 1528 · GUI 4항목)</td></tr>
+          <tr><td>⟳ 를 모든 단계에서 내용 바로 옆으로</td><td><span class="tag ok">code full 3회차 PASS</span></td><td class="src"><code>d88dfee</code> — /qa full PASS(아래 2026-09-30 QA)</td></tr>
+
+          <tr class="grp"><td colspan="3">최신 QA(로컬 · 2026-09-30 · <code>d88dfee</code>)</td></tr>
+          <tr><td>워크스페이스 전체 회귀</td><td><span class="tag ok">PASS</span></td><td class="src">3620 통과</td></tr>
+          <tr><td>프론트(vitest)</td><td><span class="tag ok">PASS</span></td><td class="src">1535건</td></tr>
+          <tr><td>GUI 실측(8항목)</td><td><span class="tag ok">PASS</span></td><td class="src">단계별 ⟳ 간격 6 / 6 / 19.8px · 새로 고치는 중 ⟳ 이동 0 · 좁은 3단계 · 단계 경계 근처에서 새로 고쳐도 단계 불변 · 크기 바꾸며 훑어도 깜빡임 없음 · 팝업 + 표시 체크 · 보조기술 트리에 군더더기 없음. 스크린샷 = 이 문서의 「작은 표시」·「팝업」 절(qa4 캡처)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note"><b>★안 한 것★</b> — CI(아직 push 안 해 실행 자체가 없음) · 릴리즈 빌드에서 콘솔 창이 안 뜨는지 확인 · macOS·Linux(POSIX) 동작 · 비정상 상태(로그인 필요·설치 안 됨·거절됨 등) 실측 · 실제 트레이 아이콘 클릭 · 팝업의 「사용량 페이지 ↗」 링크 클릭.</p>
+  </section>
+
+  <!-- 05 알려진 한계 -->
+  <section id="s5">
+    <div class="eyebrow"><span class="num">05</span><span>알려진 한계</span></div>
+    <h2>고치지 않고 받아들인 것</h2>
+    <ul class="note">
+      <li><b>새 의존성이 들어온 직후 개발 모드 첫 로드가 빈 화면으로 뜰 수 있음</b> — 새로고침 한 번이면 해결됩니다.</li>
+      <li><b>팝업의 경과 시간 표시가 최대 60초까지 늦게 갱신</b>될 수 있습니다.</li>
+      <li><b>막대 정렬이 1~2px 미세하게 어긋나는 곳</b>이 있습니다.</li>
+      <li><b>사용량 값을 실제로 내보내는 시점을 로그로 남기지 않습니다</b> — 문제가 생겨도 그 지점만으로는 추적이 어렵습니다.</li>
+      <li><b>드물게 동시에 64개 이상의 usage.* 호출이 몰리면</b>(비정상 상황) 다른 버스 명령이 최대 5초까지 밀릴 수 있습니다(설계상 받아들인 위험).</li>
+      <li><b>RUST_LOG=trace 로 두면 소켓 프레임 내용이 그대로 로그에 찍힙니다</b> — 이번에 새로 생긴 문제는 아니고 예전부터 있던 동작입니다.</li>
+    </ul>
+  </section>
+
+  <!-- 06 커밋 목록 -->
+  <section id="s6">
+    <div class="eyebrow"><span class="num">06</span><span>커밋 목록</span></div>
+    <h2>이 기능에 실린 커밋</h2>
+    <p class="note">브랜치엔 다른 작업(턴 도중 입력) 커밋도 섞여 있어, 사용량 슬롯과 무관한 것은 뺐습니다. 최신 순.</p>
+    <details class="commits">
+      <summary>36개 커밋 펼치기</summary>
+      <ul class="commit-list">
+        <li><span class="h">5a12bfc</span><span class="m">docs(handoff): 사용량 슬롯 문서가 인용하는 인계 첨부 4건을 저장소에 추적</span></li>
+        <li><span class="h">37b6c9e</span><span class="m">docs: ⟳·켜고 끄기 재배치 결정 기록(ADR-0257) · PRD·TRD 개정 · 조사 3건 · 추적 항목 T-36~38 · step-log</span></li>
+        <li><span class="h">d88dfee</span><span class="m">fix(front): ⟳ 를 모든 폭 단계에서 내용 바로 옆으로 — 새로 고치는 중에도 안 움직이고, 새로 고침 때문에 단계가 바뀌지 않음</span></li>
+        <li><span class="h">910c214</span><span class="m">feat(usage): 새로고침·표시 켜고 끄기 재배치 — 작은 표시의 ⟳ 하나 · 팝업 「슬롯에 표시」 · 수동 30초 간격 제거 · 리셋 표기를 낱말 + 날짜로</span></li>
+        <li><span class="h">6598291</span><span class="m">feat(front): 작은 표시 개편 — 회사 아이콘 · 한 격자 세로 정렬 · ⚠ 제거 · 남은 시간 대신 리셋 시각</span></li>
+        <li><span class="h">a7df21f</span><span class="m">docs(step-log): 사용량 한도 슬롯 5–8단계 기록</span></li>
+        <li><span class="h">eeb7258</span><span class="m">docs(trd): 구현을 반영한 TRD 개정 · 5–7단계 구현 표시</span></li>
+        <li><span class="h">257359c</span><span class="m">docs(adr): 사용량 한도 슬롯 결정 기록 0246–0256 · ADR-0064 개정 링크 · 인덱스</span></li>
+        <li><span class="h">a0f225e</span><span class="m">docs(shell): 줄임 지연 이유 주석 정정</span></li>
+        <li><span class="h">59bb49e</span><span class="m">fix(front): 7c 재검토 후속 — origin 인자 걷음 · 인자 가방 주석 · 도움말 코드 주석화</span></li>
+        <li><span class="h">d49a93f</span><span class="m">fix(front): 7b 재검토 후속 — ⟳ 비활성 aria-disabled · Esc 가드 · 도움말 두 칸 안내</span></li>
+        <li><span class="h">626279c</span><span class="m">fix(front): 7c 리뷰 후속 — 명령 when 확장 되돌림 · 메뉴 항목 enabled(ctx) · 메뉴 역할</span></li>
+        <li><span class="h">a7946c0</span><span class="m">fix(front): 7b 리뷰 후속 — 팝업 포커스 · 높이 모자라면 3단계 · 거절 시간 사람말</span></li>
+        <li><span class="h">664d011</span><span class="m">fix(front,shell): 7a·7b 리뷰 후속 — 재연결 때 사용량 당김 · 방송 칸 이름 고정 시험</span></li>
+        <li><span class="h">b59a7ac</span><span class="m">feat(front): 사용량 슬롯 메뉴·LLM 경로 — SlotMenuItem.checked · 표시 토글 · 메뉴 ⟳</span></li>
+        <li><span class="h">846a3e4</span><span class="m">feat(front): 사용량 슬롯 화면 — UsageSlot(너비 단계·막대·배지·팝업) · usageFormat · 테마 토큰</span></li>
+        <li><span class="h">6539832</span><span class="m">fix(shell): 6c 리뷰 후속 — 트레이 숨김은 OS 성공 뒤 표식</span></li>
+        <li><span class="h">088266e</span><span class="m">feat(front): 사용량 데이터 경로 — getUsageSnapshot · 방송 수신 · usageStore 병합 규칙</span></li>
+        <li><span class="h">c1eb031</span><span class="m">test(shell): 6b2 리뷰 후속 — 대체된 소켓 ⟳ 시험</span></li>
+        <li><span class="h">871bc8f</span><span class="m">feat(shell): 사용량 관심 재계산 배선 — 레이아웃 resync · 트레이 숨김/표시 · 축소 지연 타이머</span></li>
+        <li><span class="h">0561249</span><span class="m">fix(shell): 6b1 리뷰 후속 — 새 소켓 구독 쓰기를 Connected 뒤로</span></li>
+        <li><span class="h">31ca403</span><span class="m">feat(shell): 사용량 ⟳ 경로 — RefreshUsageLimits 직전 강제 구독</span></li>
+        <li><span class="h">00e6683</span><span class="m">feat(shell): 사용량 연결 배선 — 소켓 열림·끊김 · 방송 수신·대조 재전송</span></li>
+        <li><span class="h">547f83f</span><span class="m">fix(shell): 6a 리뷰 후속 — 숨김 표식은 소멸 경로에서만 지움</span></li>
+        <li><span class="h">1ee3b29</span><span class="m">feat(shell): 사용량 슬롯 콘텐츠·setSlotContent show_* · 관심 계산 순수 모듈</span></li>
+        <li><span class="h">c68b885</span><span class="m">fix(agent,daemon): 5b 리뷰 후속 — detail_code 정수 복귀 · 대기/마감 상수 고정</span></li>
+        <li><span class="h">56776d6</span><span class="m">feat(agent,daemon): 버스 usage.get·usage.refresh — UsageVendorRow · 동기 포트</span></li>
+        <li><span class="h">4fd426a</span><span class="m">fix(daemon,net,agent): 5a 리뷰 후속 — 프레임 사본 목록 · 스케줄러 기동 로그</span></li>
+        <li><span class="h">7aad8f7</span><span class="m">feat(protocol,daemon): 사용량 wire + 조립 + 연결 계층 — PROTOCOL_VERSION 7</span></li>
+        <li><span class="h">a320058</span><span class="m">docs(readme): GitHub 메인 페이지 정리</span></li>
+        <li><span class="h">294c1bf</span><span class="m">chore(release): 제품 버전을 0.3.2 로 올린다</span></li>
+        <li><span class="h">32e9a99</span><span class="m">docs: 문서 표현을 다듬는다</span></li>
+        <li><span class="h">8107642</span><span class="m">docs(claude-md): 실측 수치 갱신</span></li>
+        <li><span class="h">9c9f78a</span><span class="m">docs: 다시 만든 커밋의 새 해시로 문서 참조를 옮긴다</span></li>
+        <li><span class="h">3f0dd1f</span><span class="m">docs(qa): qa.md 에 덤프 읽는 법 한 줄</span></li>
+        <li><span class="h">7fcf3d5</span><span class="m">docs: 추적 파일의 예시 값을 자리표시로 통일한다</span></li>
+      </ul>
+    </details>
+  </section>
+
+  <footer>
+    출처 — <code>docs/process/S21-usage-limit-slot/prd.md</code> · <code>trd.md</code> · <code>crates/engram-dashboard-daemon/src/usage_service/</code> · <code>crates/engram-dashboard-agent/src/usage/</code> · <code>src/components/slot/UsageSlot*</code> · <code>git log 128ad56..HEAD</code>. 이전 진행 상황은 <code>docs/process/S21-usage-limit-slot/overview-2026-09-29.html</code>(1~4단계). 만든 날 2026-09-29 · 작은 표시·팝업·화면 절과 확인 목록 표시 갱신 2026-09-30(<code>src/components/slot/UsageSlot.tsx</code> · <code>src/i18n/ko.ts</code> · PRD R2·R5·R8·R12 대조).
+  </footer>
+
+</div>
+</body>
+</html>
