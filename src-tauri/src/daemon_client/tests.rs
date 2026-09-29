@@ -4399,6 +4399,11 @@ fn frame_label(cmd: &AgentCommand) -> String {
         }
         AgentCommand::Unsubscribe { agent_id } => format!("marker:{agent_id}"),
         AgentCommand::RefreshUsageLimits { vendor, .. } => format!("refresh:{vendor:?}"),
+        AgentCommand::RegisterCommands { .. } => "register".to_string(),
+        AgentCommand::CommandOutcome { reply } => match &reply.outcome {
+            Ok(_) => "outcome:ok".to_string(),
+            Err(e) => format!("outcome:err:{e:?}"),
+        },
         other => format!("{other:?}"),
     }
 }
@@ -4520,6 +4525,21 @@ fn marker(client: &DaemonClient) -> String {
     let id = uuid::Uuid::new_v4();
     client.unsubscribe(id);
     format!("marker:{id}")
+}
+
+// 표지를 넣고 그 앞에 나간 frame 을 전부 모아 돌려준다 — connect 직후에 부르면 창구를 연 몫과 채널을 꽂은 직후의
+// 넛지 몫이 여기서 다 흘러나가, 뒤의 단언이 그 넛지와 경합하지 않는다(그 넛지가 뒤의 재계산보다 늦게 꺼내지면
+// 뒤의 재계산이 보낼 것을 먼저 보낸다).
+async fn drain_until_marker(client: &DaemonClient, server: &mut UsageServer) -> Vec<String> {
+    let m = marker(client);
+    let mut before = Vec::new();
+    loop {
+        let frame = server.next_frame().await;
+        if frame.split_once(':').is_some_and(|(_, label)| label == m) {
+            return before;
+        }
+        before.push(frame);
+    }
 }
 
 fn current_socket(client: &DaemonClient) -> u64 {
@@ -5222,4 +5242,389 @@ async fn connected_is_announced_after_the_usage_state_sees_the_new_socket() {
         "발화 때 관심 상태가 이미 그 소켓의 표식을 든다"
     );
     client.close();
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 사용량 관심 재계산 자리(TRD S21 usage-limit-slot §1-7 「재계산 자리」 · §4 셸 관심 행) — 레이아웃 쓰기 · 팝업
+// 소멸 · 트레이 숨김·보임이 관심을 다시 계산하고, 그 결과(곧바로 넛지 · 1.5초 줄임 타이머)를 처리하나.
+// ★하네스 둘★: 버스 경로의 완료 기준(LLM 이 놓은 사용량 슬롯 → 셸이 실제로 구독)은 실 소켓 위에서 벽시계로 잰다.
+// 줄임 기한은 가짜 시계로 잰다 — 연결 태스크 없이 명령 창구만 열어 넛지가 채널에 쌓이게 하고(`captured_channel`),
+// 연결 태스크가 넛지를 꺼낼 때 하는 일(`sync`)을 시험이 대신 부른다. 실 소켓과 가짜 시계를 섞지 않는 것은 가짜
+// 시계의 자동 전진이 핸드셰이크 시한을 먼저 터뜨리기 때문이다(`advance_until` 쪽 머리).
+// ══════════════════════════════════════════════════════════════════════════════════
+
+use std::collections::BTreeSet;
+
+use engram_dashboard_command::{CommandEnvelope, CommandTable, OwnerToken};
+
+use super::inbound::{InboundReceiver, RuntimeSpawner};
+use super::usage_interest::USAGE_INTEREST_SHRINK_DELAY;
+use crate::commands::layout::{OwnedSubs, RouterSubs};
+use crate::commands::popout::{drop_window_in_model, PopupCounter};
+use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
+use crate::layout::{
+    apply, AgentSpawner, LayoutEvents, LayoutState, ViewSnapshot, WindowHost, WindowTabsPayload,
+};
+use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
+use crate::ui_settings::{LoadedTheme, UiSettingsRefresh};
+
+const POPUP: &str = "slot-popup-7";
+
+struct NoLayoutEvents;
+
+impl LayoutEvents for NoLayoutEvents {
+    fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
+    fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+}
+
+struct NoWindows;
+
+impl WindowHost for NoWindows {
+    fn open(&self, _label: &str) -> Result<(), String> {
+        Err("이 시험에는 OS 창이 없다".to_string())
+    }
+    fn close(&self, _label: &str) {}
+    fn is_open(&self, _label: &str) -> bool {
+        false
+    }
+}
+
+struct NoSpawner;
+
+impl AgentSpawner for NoSpawner {
+    fn spawn_by_cwd<'a>(
+        &'a self,
+        _cwd: String,
+        _backend: Option<AgentBackendKind>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send + 'a>> {
+        Box::pin(async { Err("이 시험은 스폰하지 않는다".to_string()) })
+    }
+}
+
+struct NoUiSettings;
+
+impl UiSettingsRefresh for NoUiSettings {
+    fn refresh(&self) -> Result<LoadedTheme, String> {
+        Err("이 시험에는 UI 설정이 없다".to_string())
+    }
+}
+
+// 운영 버스 표와 같은 구독 재동기 어댑터(`OwnedSubs` — 사람 경로의 `RouterSubs` 에 넘긴다)를 끼운 레이아웃 명령 표.
+fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
+    make_table(LayoutPorts {
+        state: state.clone(),
+        subs: Arc::new(OwnedSubs {
+            router: client.router.clone(),
+            client: Arc::clone(client),
+        }),
+        events: Arc::new(NoLayoutEvents),
+        windows: Arc::new(NoWindows),
+        labels: Arc::new(PopupCounter::default()),
+        spawner: Arc::new(NoSpawner),
+        ui_settings: Arc::new(NoUiSettings),
+    })
+}
+
+// 데몬이 배달하는 셸 명령 한 장(LLM 의 `engram layout.setSlotContent …` 가 셸에 닿는 모양).
+fn bus_request(name: &str, args: serde_json::Value) -> AgentEvent {
+    AgentEvent::CommandRequest {
+        envelope: CommandEnvelope {
+            name: name.to_string(),
+            request_id: engram_dashboard_command::RequestId::new(),
+            owner: OwnerToken::new("shell"),
+            proto_ver: CATALOG_VERSION,
+            args,
+        },
+    }
+}
+
+// `window` 활성 탭의 첫 슬롯.
+fn active_slot(state: &LayoutState, window: &str) -> (uuid::Uuid, uuid::Uuid) {
+    let mgr = state.0.lock().unwrap();
+    let view = mgr.windows[window].active;
+    (view, tree::first_slot_id(&mgr.views[&view].layout))
+}
+
+fn set_usage_slot(
+    state: &LayoutState,
+    client: &DaemonClient,
+    window: &str,
+    show_claude: bool,
+    show_codex: bool,
+) {
+    let (view, slot) = active_slot(state, window);
+    apply::set_usage_slot(
+        state,
+        &RouterSubs {
+            router: &client.router,
+            client,
+        },
+        &NoLayoutEvents,
+        view,
+        slot,
+        Some(show_claude),
+        Some(show_codex),
+    )
+    .expect("사용량 슬롯 배치");
+}
+
+// 연결하지 않는 클라이언트 — 명령 창구는 `captured_channel` 이 연다.
+fn idle_client() -> DaemonClient {
+    DaemonClient::new(
+        Handle::current(),
+        Arc::new(MockDiscovery::new(
+            None,
+            Err("이 시험은 연결하지 않는다".to_string()),
+        )),
+    )
+}
+
+// 연결 태스크 없이 명령 창구만 연다 — 넛지가 소켓 대신 돌려준 채널에 쌓인다. 사용량 상태도 그 소켓을 보게 한다
+// (관심이 빈 채 열므로 `sent` = ∅).
+fn captured_channel(
+    client: &DaemonClient,
+) -> (tokio::sync::mpsc::Receiver<ConnectionCommand>, u64) {
+    let generation = client.lifecycle.bump_and_capture(None);
+    let socket = client
+        .lifecycle
+        .open_socket_if_current(generation)
+        .expect("방금 올린 세대");
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    assert!(client.lifecycle.store_cmd_if_current(generation, tx));
+    assert_eq!(client.usage_interest().lock().on_socket_open(socket), None);
+    (rx, socket)
+}
+
+// 쌓인 넛지 수. 넛지 말고 다른 명령이 들었으면 이 절의 전제가 깨진 것이다.
+fn nudges(rx: &mut tokio::sync::mpsc::Receiver<ConnectionCommand>) -> usize {
+    let mut count = 0;
+    while let Ok(cmd) = rx.try_recv() {
+        assert!(
+            matches!(cmd, ConnectionCommand::UsageInterest { .. }),
+            "넛지 말고 다른 명령이 들었다: {cmd:?}"
+        );
+        count += 1;
+    }
+    count
+}
+
+// 연결 태스크가 넛지를 꺼낼 때 하는 일 — 그 소켓에 쓸 집합.
+fn sync_as_the_connection_task(
+    client: &DaemonClient,
+    socket: u64,
+) -> Option<BTreeSet<AgentBackendKind>> {
+    client.usage_interest().lock().sync(socket, false)
+}
+
+// main 의 활성 탭 = Claude 만 켠 사용량 슬롯 · 그 관심을 이미 보낸 상태(`sent` = {Claude}).
+fn subscribed_to_claude(
+    state: &LayoutState,
+    client: &DaemonClient,
+    rx: &mut tokio::sync::mpsc::Receiver<ConnectionCommand>,
+    socket: u64,
+) {
+    set_usage_slot(state, client, MAIN_WINDOW_LABEL, true, false);
+    assert_eq!(nudges(rx), 1, "늘어남은 곧바로 넛지");
+    assert_eq!(
+        sync_as_the_connection_task(client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+}
+
+// 가짜 시계에서 깬 타이머 태스크가 돌 틈 — `yield_now` 는 드라이버를 한 번 돌린 뒤 깨운다.
+async fn settle() {
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+}
+
+// ── 완료 기준: LLM 이 버스로 놓은 사용량 슬롯 → 셸이 실제로 구독한다 · 버스로 끈 회사는 기한 뒤에 빠진다 ──────
+// 데몬이 배달한 `layout.setSlotContent` 가 운영과 같은 길(인바운드 → 표 → 적용 서비스 → `OwnedSubs` →
+// `RouterSubs::resync`)을 타 관심을 다시 계산하고, 그 넛지가 같은 소켓에 `UsageSubscribe` 를 쓴다.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_usage_slot_placed_over_the_bus_subscribes_and_a_bus_toggle_off_shrinks_later() {
+    let mut server = spawn_usage_server().await;
+    let events = Arc::new(RecordingEvents::default());
+    let (client, _disco) = usage_client(&server, events);
+    let client = Arc::new(client);
+    let state = LayoutState::new();
+    client.inbound.set(Arc::new(InboundReceiver::new(
+        bus_table(&state, &client),
+        Arc::new(RuntimeSpawner(Handle::current())),
+        CATALOG_VERSION,
+    )));
+    client.connect().await.expect("connect → connected");
+    assert_eq!(
+        drain_until_marker(&client, &mut server).await,
+        ["1:register"],
+        "사용량 슬롯이 없으면 구독이 안 나간다"
+    );
+
+    let (view, slot) = active_slot(&state, MAIN_WINDOW_LABEL);
+    let slot_args = |extra: serde_json::Value| {
+        let mut args = serde_json::json!({
+            "view_id": view.to_string(),
+            "slot_id": slot.to_string(),
+            "content": "Usage",
+        });
+        args.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        args
+    };
+    server.push(bus_request(
+        "layout.setSlotContent",
+        slot_args(serde_json::json!({})),
+    ));
+    // 답장과 넛지는 서로 다른 길로 연결 태스크에 든다 — 둘 사이 차례는 계약이 아니다.
+    let mut placed = vec![server.next_frame().await, server.next_frame().await];
+    placed.sort();
+    assert_eq!(placed, ["1:outcome:ok", "1:usage[Claude,Codex]"]);
+    assert_eq!(
+        drain_until_marker(&client, &mut server).await,
+        Vec::<String>::new()
+    );
+
+    let asked = std::time::Instant::now();
+    server.push(bus_request(
+        "layout.setSlotContent",
+        slot_args(serde_json::json!({ "show_codex": false })),
+    ));
+    assert_eq!(
+        server.next_frame().await,
+        "1:outcome:ok",
+        "줄임은 곧바로 안 나간다"
+    );
+    assert_eq!(server.next_frame().await, "1:usage[Claude]");
+    // 타이머는 기한보다 일찍 깨지 않는다 — 아래쪽 여유는 밀리초 반올림 몫뿐이다.
+    assert!(
+        asked.elapsed() >= USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(20),
+        "줄인 구독이 기한 전에 나갔다: {:?}",
+        asked.elapsed()
+    );
+    client.close();
+}
+
+// ── 레이아웃 쓰기 한 번 → 재계산 한 번(`RouterSubs::resync`) ─────────────────────────────
+// `sent` 가 빈 채로(연결 태스크가 꺼내지 않는다) 늘어난 관심은 재계산마다 넛지를 한 장씩 낸다 — 넛지 수가 곧
+// 재계산 수다.
+#[tokio::test]
+async fn one_layout_write_recomputes_the_usage_interest_once() {
+    let client = idle_client();
+    let (mut rx, _socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    set_usage_slot(&state, &client, MAIN_WINDOW_LABEL, true, true);
+    assert_eq!(nudges(&mut rx), 1);
+}
+
+// ── 트레이 숨김 → 기한 뒤 줄인 관심 · 보임 → 곧바로 늘어난 관심 ─────────────────────────────
+// 트레이 두 함수가 창마다 하는 일(`for_each_ui_window` + 운영 구현 `LayoutUsageVisibility`)을 그대로 태운다 —
+// 빠진 것은 창 목록을 OS 에서 뜨는 것과 OS 창 호출뿐이다.
+#[tokio::test(start_paused = true)]
+async fn tray_hide_shrinks_after_the_delay_and_show_grows_at_once() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let tray = LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    };
+
+    for_each_ui_window([MAIN_WINDOW_LABEL], false, &tray, |_| {});
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY - Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "기한 전");
+    tokio::time::advance(Duration::from_millis(200)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1, "기한에 넛지 한 장");
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::new()),
+        "그 넛지가 보내는 것 = 줄인 관심"
+    );
+
+    for_each_ui_window([MAIN_WINDOW_LABEL], true, &tray, |_| {});
+    assert_eq!(nudges(&mut rx), 1, "늘어남은 기다리지 않는다");
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+}
+
+// ── 기한 안에 다시 보이면 줄임이 물러진다 — 뒤늦게 깬 타이머는 아무것도 안 낸다 ─────────────────
+#[tokio::test(start_paused = true)]
+async fn showing_again_within_the_delay_cancels_the_shrink() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    subscribed_to_claude(&state, &client, &mut rx, socket);
+    let tray = LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    };
+
+    tray.set_visible(MAIN_WINDOW_LABEL, false);
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY / 2).await;
+    settle().await;
+    tray.set_visible(MAIN_WINDOW_LABEL, true);
+    assert_eq!(nudges(&mut rx), 0, "`sent` 로 돌아왔다 — 보낼 것이 없다");
+
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY * 2).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "물러진 줄임의 타이머가 넛지를 냈다");
+    assert_eq!(sync_as_the_connection_task(&client, socket), None);
+}
+
+// ── 팝업 소멸 → 그 창의 관심이 기한 뒤에 빠진다 ─────────────────────────────────────────
+#[tokio::test(start_paused = true)]
+async fn a_destroyed_popup_leaves_the_interest_after_the_delay() {
+    let client = idle_client();
+    let (mut rx, socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::from([AgentBackendKind::Claude]))
+    );
+
+    assert!(drop_window_in_model(POPUP, &state, &client.router, &client));
+    settle().await;
+    assert_eq!(nudges(&mut rx), 0, "줄임은 곧바로 안 나간다");
+    tokio::time::advance(USAGE_INTEREST_SHRINK_DELAY + Duration::from_millis(100)).await;
+    settle().await;
+    assert_eq!(nudges(&mut rx), 1);
+    assert_eq!(
+        sync_as_the_connection_task(&client, socket),
+        Some(BTreeSet::new())
+    );
+}
+
+// ── 팝업 소멸은 모델이 그 창을 쥐지 않았어도 숨김 표시를 잊는다 ─────────────────────────────────
+// 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더한다 — 그 틈에 트레이가 숨기고 창이 닫히면 모델엔
+// 그 창이 없다. 같은 label 을 다시 세우면(시험만 — 운영 label 은 다시 안 쓰인다) 잊힌 표시는 보임으로 센다.
+#[tokio::test]
+async fn a_destroyed_popup_forgets_its_hidden_mark_even_when_the_model_never_held_it() {
+    let client = idle_client();
+    let (mut rx, _socket) = captured_channel(&client);
+    let state = LayoutState::new();
+    LayoutUsageVisibility {
+        state: &state,
+        client: &client,
+    }
+    .set_visible(POPUP, false);
+    assert!(drop_window_in_model(POPUP, &state, &client.router, &client));
+    assert_eq!(nudges(&mut rx), 0);
+
+    state.0.lock().unwrap().create_window(POPUP).unwrap();
+    set_usage_slot(&state, &client, POPUP, true, false);
+    assert_eq!(
+        nudges(&mut rx),
+        1,
+        "숨김 표시가 남아 그 창을 숨은 창으로 셌다"
+    );
 }

@@ -6,7 +6,7 @@
 //! 트레이 핸들러(mod.rs on_menu_event)도, command(commands/tray.rs)도 전부 이 함수들만 호출 —
 //! 동작 로직 중복 금지. core.rs(순수 판정)와 분리: 여기는 실제 창/아이콘/데몬을 만진다(불순).
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tauri::menu::CheckMenuItem;
@@ -17,6 +17,8 @@ use tauri_plugin_autostart::ManagerExt;
 use super::core::{self, IconState};
 use super::TrayIcons;
 use crate::commands::popout::is_popup_label;
+use crate::daemon_client::DaemonClient;
+use crate::layout::LayoutState;
 
 // 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
 pub const TRAY_ID: &str = "engram-main-tray";
@@ -61,14 +63,16 @@ pub struct AutostartCheck(pub CheckMenuItem<Wry>);
 // ADR-0229
 pub fn show_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
-    for label in core::ui_windows(windows.keys().map(String::as_str), is_popup_label) {
-        let Some(w) = windows.get(label) else {
-            continue;
-        };
-        let _ = w.show();
-        let _ = w.unminimize();
-        let _ = w.set_focus();
-    }
+    with_usage_visibility(app, |usage| {
+        for_each_ui_window(windows.keys().map(String::as_str), true, usage, |label| {
+            let Some(w) = windows.get(label) else {
+                return;
+            };
+            let _ = w.show();
+            let _ = w.unminimize();
+            let _ = w.set_focus();
+        });
+    });
 }
 
 // 메인과 팝아웃 창을 전부 숨긴다(파괴 아님 — WebView 상주, [`show_main_ui`] 로 복귀). 메인 X 도 여기로
@@ -76,10 +80,75 @@ pub fn show_main_ui(app: &AppHandle) {
 // ADR-0229
 pub fn hide_main_ui(app: &AppHandle) {
     let windows = app.webview_windows();
-    for label in core::ui_windows(windows.keys().map(String::as_str), is_popup_label) {
-        if let Some(w) = windows.get(label) {
-            let _ = w.hide();
-        }
+    with_usage_visibility(app, |usage| {
+        for_each_ui_window(windows.keys().map(String::as_str), false, usage, |label| {
+            if let Some(w) = windows.get(label) {
+                let _ = w.hide();
+            }
+        });
+    });
+}
+
+/// 트레이 보이기·숨기기가 창 하나의 보임을 바꿀 때 사용량 관심에 알리는 자리(ADR-0012 seam — 운영 =
+/// [`LayoutUsageVisibility`], 시험 = 기록형). 숨긴 창의 사용량 슬롯은 관심에서 빠진다(TRD S21 usage-limit-slot
+/// §1-7 「숨김」).
+pub(crate) trait UsageVisibility {
+    fn set_visible(&self, label: &str, visible: bool);
+}
+
+/// 운영 구현 — 창마다 ViewManager 락을 **짧게** 잡고 그 안에서 사용량 관심만 다시 계산한다.
+pub(crate) struct LayoutUsageVisibility<'a> {
+    pub state: &'a LayoutState,
+    pub client: &'a DaemonClient,
+}
+
+impl UsageVisibility for LayoutUsageVisibility<'_> {
+    fn set_visible(&self, label: &str, visible: bool) {
+        let Ok(mgr) = self.state.0.lock() else {
+            tracing::warn!(
+                label,
+                visible,
+                "[tray] 레이아웃 락 오염 — 사용량 관심 재계산 스킵"
+            );
+            return;
+        };
+        self.client.usage_window_visibility(label, visible, &mgr);
+    }
+}
+
+// 클라이언트 생성이 실패한 조립(`lib.rs` setup — 앱은 계속 뜬다)에는 사용량 관심이 없다 — 창만 다룬다.
+struct NoUsageVisibility;
+
+impl UsageVisibility for NoUsageVisibility {
+    fn set_visible(&self, _label: &str, _visible: bool) {}
+}
+
+fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn UsageVisibility)) {
+    match (
+        app.try_state::<LayoutState>(),
+        app.try_state::<Arc<DaemonClient>>(),
+    ) {
+        (Some(state), Some(client)) => run(&LayoutUsageVisibility {
+            state: &state,
+            client: &client,
+        }),
+        _ => run(&NoUsageVisibility),
+    }
+}
+
+// 트레이가 다룰 창마다([`core::ui_windows`] 순서) 사용량 관심을 먼저 고치고 OS 창을 다룬다(`os`).
+// ★`os` 는 락 밖에서 불린다★ — 운영 구현의 ViewManager 락은 `set_visible` 한 번 안에서 잡혔다 풀린다. 이 함수는
+//   명령 워커 스레드에서도 돌고(`commands/tray.rs`), OS 창 호출을 그 락 안에 두면 창 호스트 포트와 같은 교착
+//   위험이다(`layout::apply` 의 `WindowHost` doc).
+pub(crate) fn for_each_ui_window<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+    visible: bool,
+    usage: &dyn UsageVisibility,
+    mut os: impl FnMut(&'a str),
+) {
+    for label in core::ui_windows(labels, is_popup_label) {
+        usage.set_visible(label, visible);
+        os(label);
     }
 }
 
@@ -226,4 +295,46 @@ pub fn toggle_autostart(app: &AppHandle) {
         }
     }
     tracing::info!(enabled = new_state, "[tray] 부팅 자동 시작 토글");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct Log(RefCell<Vec<String>>);
+
+    impl UsageVisibility for Log {
+        fn set_visible(&self, label: &str, visible: bool) {
+            self.0.borrow_mut().push(format!("usage:{label}:{visible}"));
+        }
+    }
+
+    // 보이기·숨기기가 다루는 창마다 — 그 창의 OS 호출보다 먼저 — 사용량 관심에 보임을 알린다. 다루지 않는 창
+    //   (`agent-tree`)은 관심에도 안 알린다.
+    #[test]
+    fn each_ui_window_tells_the_usage_interest_before_its_os_call() {
+        for visible in [false, true] {
+            let log = Log::default();
+            for_each_ui_window(
+                ["main", "slot-popup-2", "agent-tree", "slot-popup-1"],
+                visible,
+                &log,
+                |label| log.0.borrow_mut().push(format!("os:{label}")),
+            );
+            assert_eq!(
+                log.0.into_inner(),
+                [
+                    format!("usage:slot-popup-1:{visible}"),
+                    "os:slot-popup-1".to_string(),
+                    format!("usage:slot-popup-2:{visible}"),
+                    "os:slot-popup-2".to_string(),
+                    format!("usage:main:{visible}"),
+                    "os:main".to_string(),
+                ]
+            );
+        }
+    }
 }

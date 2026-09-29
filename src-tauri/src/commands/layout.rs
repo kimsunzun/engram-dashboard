@@ -74,6 +74,7 @@ pub(crate) struct RouterSubs<'a> {
 impl SubscriptionSync for RouterSubs<'_> {
     fn resync(&self, mgr: &ViewManager) {
         send_subscription_delta(self.client, self.router.rebuild(mgr));
+        self.client.usage_layout_changed(mgr);
     }
 }
 
@@ -128,9 +129,10 @@ impl LayoutEvents for OwnedEvents {
     }
 }
 
-struct OwnedSubs {
-    router: Arc<OutputRouter>,
-    client: Arc<DaemonClient>,
+// 셸 단위 시험이 버스 경로(표 → 적용 서비스 → 이 어댑터 → 실 소켓)를 창 없이 세우려고 crate 안에 연다.
+pub(crate) struct OwnedSubs {
+    pub(crate) router: Arc<OutputRouter>,
+    pub(crate) client: Arc<DaemonClient>,
 }
 
 impl SubscriptionSync for OwnedSubs {

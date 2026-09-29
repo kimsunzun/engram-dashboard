@@ -35,7 +35,7 @@ pub mod usage_interest;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, DaemonInfo};
 use tokio::runtime::Handle;
@@ -48,8 +48,9 @@ use events::{ConnectionStateEvent, DaemonEvents, TauriEmitter};
 use events::NoDaemonEvents;
 use inbound::InboundSlot;
 use lifecycle::Lifecycle;
-use usage_interest::UsageInterest;
+use usage_interest::{InterestAction, UsageInterest};
 
+use crate::layout::ViewManager;
 use crate::output_channel::WindowChannelRegistry;
 use crate::output_router::OutputRouter;
 
@@ -387,8 +388,9 @@ impl DaemonClient {
         self.state_rx.clone()
     }
 
-    /// 사용량 관심 상태 — 관심을 바꾸는 쪽은 락 안에서 재계산한 뒤 결과에 따라
-    /// [`Self::nudge_usage_interest`] 를 부르고, 웹뷰 pull 은 캐시를 읽는다. 락 차례는 [`SharedUsageInterest`] doc.
+    /// 사용량 관심 상태 — 웹뷰 pull 이 캐시를 읽는다. 관심을 바꾸는 쪽은 이 손잡이가 아니라 재계산 셋
+    /// ([`Self::usage_layout_changed`] · [`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`])을
+    /// 부른다 — 결과 처리(넛지 · 줄임 타이머)가 거기 한 벌이다. 락 차례는 [`SharedUsageInterest`] doc.
     pub fn usage_interest(&self) -> &SharedUsageInterest {
         &self.usage
     }
@@ -880,10 +882,65 @@ impl DaemonClient {
     /// (`start_connection`). 명령 채널이 차서 버려진 넛지는 그 연결의 다음 스냅숏 대조가 고친다 — 구독이
     /// 하나도 없는 연결은 대조할 계기가 없어 ⟳ 가 고친다(TRD §6 #25).
     pub fn nudge_usage_interest(&self) {
-        self.try_enqueue(
-            |socket| ConnectionCommand::UsageInterest { socket },
-            "usage-interest",
-        );
+        nudge_usage_on(&self.lifecycle);
+    }
+
+    /// 레이아웃이 바뀌었다 — 사용량 관심을 다시 계산하고 그 결과대로 넛지하거나 줄임 타이머를 띄운다(TRD S21
+    /// usage-limit-slot §1-7 「재계산 자리」). 레이아웃 쓰기의 구독 재동기(`layout::SubscriptionSync`)가 부른다.
+    ///
+    /// ★ViewManager 락 안에서 부른다★ — 락 차례는 [`SharedUsageInterest`] doc 그대로이고, 하는 일은 메모리 안
+    /// 계산 · 비블로킹 넛지 · 타이머 태스크 기동뿐이라 그 포트의 「락 안 · 동기 · 비블로킹」 계약을 지킨다. 이 셋
+    /// 형제([`Self::usage_window_destroyed`] · [`Self::usage_window_visibility`])도 같다.
+    pub fn usage_layout_changed(&self, mgr: &ViewManager) {
+        let action = self.usage.lock().recompute(mgr, Instant::now());
+        self.run_usage_action(action);
+    }
+
+    /// 팝업 창 `label` 이 소멸했다 — 모델에서 창을 지운 같은 ViewManager 락 안에서 부른다. 모델이 그 창을
+    /// 쥐고 있었는지와 무관하게 그 label 의 숨김 표시를 잊는다([`UsageInterest::forget_window`]).
+    pub fn usage_window_destroyed(&self, label: &str, mgr: &ViewManager) {
+        let action = self.usage.lock().forget_window(label, mgr, Instant::now());
+        self.run_usage_action(action);
+    }
+
+    /// 셸이 창 `label` 을 숨겼거나(`false`) 다시 보였다(`true`) — 트레이 보이기·숨기기가 창마다 ViewManager 락을
+    /// 짧게 잡고 부른다(OS 창 호출은 그 락 밖).
+    pub fn usage_window_visibility(&self, label: &str, visible: bool, mgr: &ViewManager) {
+        let action = self
+            .usage
+            .lock()
+            .set_visible(label, visible, mgr, Instant::now());
+        self.run_usage_action(action);
+    }
+
+    // 재계산 결과를 처리하는 한 자리 — 사용량 관심 락은 이미 놓았다(넛지는 집합을 싣지 않아 락 밖이어도 순서가
+    // 안 엇갈린다 — [`Self::nudge_usage_interest`]).
+    fn run_usage_action(&self, action: InterestAction) {
+        match action {
+            InterestAction::Unchanged => {}
+            InterestAction::Nudge => self.nudge_usage_interest(),
+            InterestAction::Defer { gen, deadline } => {
+                // 기한까지의 잠을 **부른 자리에서** 이 런타임의 시계로 짓는다 — 태스크 안에서 지으면 그 첫 poll
+                //   만큼 기한이 밀리고, 가짜 시계 시험에서는 시계를 먼저 돌린 뒤 지어져 기한이 통째로 밀린다.
+                let sleep = {
+                    let _rt = self.rt.enter();
+                    tokio::time::sleep(deadline.saturating_duration_since(Instant::now()))
+                };
+                // 클라이언트를 붙들지 않는다 — 공유 관심 상태와 lifecycle 의 약한 참조만 쥔다(닫힌 뒤 깨면 넛지는
+                //   창구가 닫혀 no-op 이다).
+                let usage = self.usage.clone();
+                let lifecycle = Arc::downgrade(&self.lifecycle);
+                self.rt.spawn(async move {
+                    sleep.await;
+                    if !usage.lock().deferral_elapsed(gen) {
+                        return;
+                    }
+                    if let Some(lifecycle) = lifecycle.upgrade() {
+                        nudge_usage_on(&lifecycle);
+                    }
+                });
+            }
+        }
     }
 
     // ★뷰 주도 replay 채번(ADR-0046 M1 — single-flight, 반환 gen)★. 뷰가 mount/remount 시 호출하면 연결
@@ -927,22 +984,8 @@ impl DaemonClient {
             .map_err(|_| "replay 요청 미전송(연결 끊김) — 프론트 재요청 안전".to_string())
     }
 
-    // fire-and-forget enqueue 공통(동기 try_send). 비연결=no-op, full/닫힘=debug 로깅.
-    //
-    // ★명령을 **만들어 주는 클로저**를 받는다(ADR-0195)★: 소켓 표식은 창구를 여는 그 한 번의 락
-    // 조회에서만 나오므로, 완성된 명령을 받으면 그 칸을 채울 값이 없다.
     fn try_enqueue(&self, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
-        let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
-            // 창구가 닫힘 — 조용히 no-op(ADR-0046: src-tauri 무상태). ★여기서 담아 두지 않는 것이
-            //   ADR-0195 이고, 그 대가는 명령마다 다르다★ — 무해한 쪽과 유실되는 쪽의 판정은 각 진입점
-            //   doc 에 있다([`DaemonClient::unsubscribe`] · [`DaemonClient::send_fire_and_forget`] ·
-            //   [`DaemonClient::nudge_usage_interest`]).
-            tracing::debug!(%kind, "fire-and-forget: 창구 닫힘 — no-op");
-            return;
-        };
-        if let Err(e) = cmd_tx.try_send(make(socket)) {
-            tracing::debug!(%kind, "fire-and-forget enqueue 실패(full/닫힘): {e}");
-        }
+        try_enqueue_on(&self.lifecycle, make, kind);
     }
 
     // ── 재연결·백오프·generation 가드·closedByUser ──────────────────────────────────
@@ -961,6 +1004,33 @@ impl DaemonClient {
     // 없다 — ADR-0046 이후 진도 거처는 웹뷰 뷰 단위(프론트 lastDeliveredSeq) 단독이고, src-tauri 상태는
     // 요청 부기(epoch·single-flight replay_flight)뿐이다. binary frame 라우팅은 connection.rs 가 OutputRouter
     // (targets∩registered 창 Channel)로, replay 경계 마커 합성은 replay_flight 상태기계가 담당한다.
+}
+
+// fire-and-forget enqueue 공통(동기 try_send). 비연결=no-op, full/닫힘=debug 로깅. 클라이언트 없이 lifecycle 만
+// 받는 것은 줄임 타이머 태스크가 클라이언트를 붙들지 않고 넛지하기 위해서다(`DaemonClient::run_usage_action`).
+//
+// ★명령을 **만들어 주는 클로저**를 받는다(ADR-0195)★: 소켓 표식은 창구를 여는 그 한 번의 락
+// 조회에서만 나오므로, 완성된 명령을 받으면 그 칸을 채울 값이 없다.
+fn try_enqueue_on(lifecycle: &Lifecycle, make: impl FnOnce(u64) -> ConnectionCommand, kind: &str) {
+    let Some((cmd_tx, socket)) = lifecycle.current_cmd_tx() else {
+        // 창구가 닫힘 — 조용히 no-op(ADR-0046: src-tauri 무상태). ★여기서 담아 두지 않는 것이
+        //   ADR-0195 이고, 그 대가는 명령마다 다르다★ — 무해한 쪽과 유실되는 쪽의 판정은 각 진입점
+        //   doc 에 있다([`DaemonClient::unsubscribe`] · [`DaemonClient::send_fire_and_forget`] ·
+        //   [`DaemonClient::nudge_usage_interest`]).
+        tracing::debug!(%kind, "fire-and-forget: 창구 닫힘 — no-op");
+        return;
+    };
+    if let Err(e) = cmd_tx.try_send(make(socket)) {
+        tracing::debug!(%kind, "fire-and-forget enqueue 실패(full/닫힘): {e}");
+    }
+}
+
+fn nudge_usage_on(lifecycle: &Lifecycle) {
+    try_enqueue_on(
+        lifecycle,
+        |socket| ConnectionCommand::UsageInterest { socket },
+        "usage-interest",
+    );
 }
 
 // 연결 태스크를 접는 사유·불변식은 [`DaemonClient::close_on_drop`] 이 단독 소유한다 — 여기 다시 적지 않는다.
