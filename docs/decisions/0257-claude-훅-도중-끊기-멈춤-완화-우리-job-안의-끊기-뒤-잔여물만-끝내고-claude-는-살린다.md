@@ -1,6 +1,6 @@
 # ADR-0257: claude 훅 도중 끊기 멈춤 완화 — 우리 Job 안의 끊기 뒤 잔여물만 끝내고 claude 는 살린다
 
-- 상태: 확정 (2026-09-30, 근거: 사용자 결정 2026-09-29 (채택안 · N = 3 초 · 결정 1–4 — TRD `docs/process/S21-chat-ux/trd-t40.md` §1) + 측정 스파이크 2026-09-29 (TRD §3-0) · 구현 전 · TRD 5판 재검 전)
+- 상태: 확정 (2026-09-30, 근거: 사용자 결정 2026-09-29 (채택안 · N = 3 초 · 결정 1–4 — TRD `docs/process/S21-chat-ux/trd-t40.md` §1) + 측정 스파이크 2026-09-29 (TRD §3-0) · 구현 전 · TRD `/review trd` deep 4 회차 전원 PASS(5판 — 마지막 회차는 codex 가 4→5판 변경분만 확인))
 - 관련: TRD `docs/process/S21-chat-ux/trd-t40.md`(§0 · §1 · §3-0 · §3-2 – §3-6 · §8 · §9) · 조사 `docs/research/claude-interrupt-hook-hang-2026-09-29.md`(§2 · §4 · §6 · §7) · `docs/tracking.md` T-40 · ADR-0001(kill 인과) · ADR-0004(백엔드 지식 격리) · ADR-0006(락 순서) · ADR-0012(시험대) · ADR-0175(바닥 crate 입주 조건) · ADR-0217(제어 끝점이 에이전트 신원을 싣는다) · ADR-0218(신원 = PID + 시작시각) · ADR-0230(플랫폼 중립) · ADR-0245(터미널 모드는 끊기 명령 없음) · CLAUDE.md 「핵심 불변식」 락 순서 줄 · step-log S21 · Amends ADR-0238 (결정 3과 5) · Amends ADR-0244 (결정 2)
 
 ## 맥락
@@ -69,7 +69,7 @@
 - **사용자 결정(2026-09-29)** — 원문은 「결정」 각 항. 기록 = TRD §1 · 조사 §7 · T-40.
 - **조사** — `docs/research/claude-interrupt-hook-hang-2026-09-29.md`(light · 적대 리뷰 없음). 원인 §2 · 사고 §4 · 피어 §6 · 결정 §7.
 - **측정 스파이크(TRD §3-0)** — claude 2.1.284 · 끊기 11 번 · 멈춤 3 번. 원시 로그는 세션 스크래치에만 있다(휘발 · 커밋하지 않음). ★스폰은 대시보드를 본떴을 뿐 같지 않다(`--include-hook-events` · `--model haiku` 를 더하고 데몬 끝점 인자를 뺐다) — 실제 대시보드 경로의 판정은 TRD §7 G1 이다★.
-- ★**검증 상태**★ — 구현 전 · TRD 5판 재검 전. 표본은 멈춤 3 번이다.
+- ★**검증 상태**★ — 구현 전 · TRD `/review trd` deep 4 회차 전원 PASS(5판 — 마지막 회차는 codex 가 4→5판 변경분만 확인). 표본은 멈춤 3 번이다.
 
 ## 영향 / 불변식
 - **범위** — claude JSON(stream-json) 한 경로. codex · 터미널 모드 · 프론트 · 선 타입 · 버스 명령 · `open_spawn` 시그니처는 무변경(TRD §0). Windows 에서만 동작하고 다른 OS 는 무동작이다.
