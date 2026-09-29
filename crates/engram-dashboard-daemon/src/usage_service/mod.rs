@@ -20,6 +20,7 @@
 // ADR-0006
 
 pub mod book;
+mod bus;
 pub mod clock;
 #[cfg(test)]
 pub(crate) mod fakes;

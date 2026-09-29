@@ -761,6 +761,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
             manager.clone(),
             broadcast_slot.clone(),
             Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
+            Arc::new(engram_dashboard_daemon::control::commands::NoUsageLimits),
         ),
     ));
     let messaging = Arc::new(

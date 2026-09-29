@@ -1180,9 +1180,11 @@ pub trait LocalCommands: Send + Sync {
     /// ★입구 검문(ADR-0157)이 이 **안에** 있어야 한다★: 검문 없이 표를 부르는 구현을 꽂으면 이 경로가
     /// 검문 없이 도는 두 번째 입구가 된다 — 오타 칸 하나가 조용히 다른 동작으로 실행되는 그 실패다.
     /// ★`Ok` payload 는 **로그에 실린다**★(마감 뒤 완료 — [`log_late_local`]). 그래서 이 포트로 나가는
-    /// 성공 payload 에 자격증명·토큰 같은 비밀을 담지 말 것. ★오늘 실물(`agent.*`)이 id·이름·상태뿐인 것은
-    /// 아니다★ — `agent.listQueuedInputs` 의 payload 는 사용자가 친 글을 싣는다. 그것이 로그에 안 앉는 이유는
-    /// 그 기록이 **붙든 Write 의 성공**에만 payload 를 싣기 때문이다(읽기는 사건만 남긴다 — [`log_late_local`]).
+    /// 성공 payload 에 자격증명·토큰 같은 비밀을 담지 말 것. ★오늘 실물(`agent.*`·`usage.*`)이 id·이름·상태뿐인
+    /// 것은 아니다★ — `agent.listQueuedInputs` 의 payload 는 사용자가 친 글을, `usage.*` 의 행은 상류 원문
+    /// (`upstream`)을 싣는다. 앞의 것이 로그에 안 앉는 이유는 그 기록이 **붙든 Write 의 성공**에만 payload 를 싣기
+    /// 때문이고(읽기는 사건만 남긴다 — [`log_late_local`]), 뒤의 것은 붙든 Write(`usage.refresh`)라 실리는데 그
+    /// 기록이 싣기 전에 **이름이 `upstream` 인 키를 명령과 무관하게 깊이 끝까지 걷는다**([`strip_upstream`]).
     /// `caller` = 호출한 연결(입력 임대 판정의 재료 — ADR-0231). `None` = 연결 없는 입구(`/control/call`)이고
     /// 임대 보유자로 치지 않는다.
     fn run(
@@ -1489,6 +1491,8 @@ const MAX_LATE_OUTCOME_CHARS: usize = 512;
 /// 필요한 것이 payload 의 `agent_id` 라서 문구에 그대로 싣는다.
 /// ★레벨이 `warn` 인 이유★: 데이터가 깨진 것은 아니지만 **호출자가 아는 상태와 실제 상태가 갈렸다**.
 /// 죽음(`JoinError`)만 `error` 로 갈라 형제 갈래와 같은 줄을 쓴다([`log_local_death`]).
+/// ★실는 payload 는 사본에서 `upstream` 키를 걷은 것이다([`strip_upstream`])★ — 상류 원문은 UI 와 LLM 행에만
+///   간다(TRD S21 usage-limit-slot §1-4 「버스」 개정 4).
 fn log_late_local(
     joined: LocalJoin,
     retained: bool,
@@ -1500,13 +1504,16 @@ fn log_late_local(
         // ★payload 는 **붙든 것**에만 싣는다★: 실을 이유가 「호출자가 모르는 채 남은 것을 되찾는 실마리」인데,
         //   붙들지 않는 결말(읽기 · 반려)에는 되찾을 것이 없다. 그리고 읽기의 payload 는 명부 전량이라
         //   에이전트들의 **cwd 절대 경로**가 통째로 로그에 앉는다 — 그건 이 줄이 사려던 값이 아니다.
-        Ok((_, Some(Ok(payload)))) if retained => tracing::warn!(
-            entrance,
-            command = name,
-            %request_id,
-            outcome = %sanitize_within(&payload.to_string(), MAX_LATE_OUTCOME_CHARS),
-            "마감 뒤에 끝난 데몬 자기 명령이 **성공했다** — 호출자는 TIMEOUT 을 받았으므로 이 결과를 모른다"
-        ),
+        Ok((_, Some(Ok(mut payload)))) if retained => {
+            strip_upstream(&mut payload);
+            tracing::warn!(
+                entrance,
+                command = name,
+                %request_id,
+                outcome = %sanitize_within(&payload.to_string(), MAX_LATE_OUTCOME_CHARS),
+                "마감 뒤에 끝난 데몬 자기 명령이 **성공했다** — 호출자는 TIMEOUT 을 받았으므로 이 결과를 모른다"
+            )
+        }
         // 되찾을 것이 없는 성공(읽기) — 사건은 남기되 내용은 안 싣는다.
         Ok((_, Some(Ok(_)))) => tracing::debug!(
             entrance,
@@ -1530,6 +1537,22 @@ fn log_late_local(
             "마감 뒤에 끝난 1단계가 빈손이었다 — 전달 단계로 넘길 기회는 이미 지났다"
         ),
         Err(joined) => log_local_death(&joined, request_id, name, entrance),
+    }
+}
+
+/// 로그에 싣기 전 payload 에서 **이름이 `upstream` 인 객체 키를 깊이와 무관하게 전부** 걷는다.
+///
+/// ★명령 이름을 보지 않는다★ — 이름(`usage.*`)으로 가르면 다른 명령이 같은 칸을 실을 때 뚫린다. 배열 안의
+///   객체까지 내려간다. ★키 이름이 계약이다★ — 상류 원문 칸(agent `UsageVendorRow.upstream`)의 이름을 바꾸면
+///   여기와 핀 시험이 함께 바뀌어야 한다.
+fn strip_upstream(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.remove("upstream");
+            map.values_mut().for_each(strip_upstream);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_upstream),
+        _ => {}
     }
 }
 
@@ -5166,5 +5189,142 @@ pub(crate) mod tests {
             bus.relayed_counter().load(Ordering::SeqCst),
             bus.deliveries().in_flight()
         );
+    }
+
+    // ── 마감 뒤 결과 로그의 원문 걷기(TRD S21 usage-limit-slot §1-4 「버스」 개정 4) ─────────────────────
+    //
+    // ★마감 뒤 갈래를 곧장 부른다★ — 재는 것은 「그 갈래가 무엇을 싣나」이고, 마감을 넘기는 배달 경로는 위 시험들이
+    //   이미 잰다. ★셋 다 capture 안에서만 그 callsite 를 때린다★(`log_capture` 「관측 조건」①).
+
+    const UPSTREAM_TEXT: &str = "upstream said: quota blob 7f3a";
+
+    /// 실제 행 타입으로 지은 `usage.*` 답 — 칸 이름(`upstream`)이 바뀌면 여기서 컴파일이 멈춘다.
+    fn usage_payload() -> serde_json::Value {
+        use engram_dashboard_agent::commands::{
+            AgentBackend, UsageServedWord, UsageStateWord, UsageVendorRow, UsageWindowRow,
+            UsageWindowWord,
+        };
+        serde_json::to_value(UsageVendorRow {
+            backend: AgentBackend::Codex,
+            account_key: "default".to_owned(),
+            plan: None,
+            windows: vec![UsageWindowRow {
+                window: UsageWindowWord::FiveHour,
+                label: None,
+                used_pct: Some(40.0),
+                left_pct: Some(60),
+                resets_at: Some(1_900_000_000),
+                age_secs: 3,
+                expired: false,
+            }],
+            in_flight: false,
+            served: UsageServedWord::Cached,
+            state: UsageStateWord::Failed,
+            next_attempt_in_secs: Some(70),
+            retry_in_secs: None,
+            detail_kind: Some("rpc_error".to_owned()),
+            detail_code: Some("-32603".to_owned()),
+            upstream: Some(UPSTREAM_TEXT.to_owned()),
+        })
+        .expect("행 직렬화")
+    }
+
+    fn late_success(name: &str, payload: serde_json::Value) -> LocalJoin {
+        Ok((
+            envelope(name, &OwnerToken::new("whatever")),
+            Some(Ok(payload)),
+        ))
+    }
+
+    /// ★붙든 Write(`usage.refresh`)의 마감 뒤 성공은 payload 를 싣되 상류 원문은 빼고 싣는다★ — 나머지 칸은 남는다
+    /// (그 줄이 있는 이유 = 호출자가 모르는 결과를 되찾는 실마리).
+    #[test]
+    fn a_late_usage_row_is_logged_without_its_upstream_text() {
+        let payload = usage_payload();
+        assert!(
+            payload.to_string().contains(UPSTREAM_TEXT),
+            "전제: 행이 원문을 싣는다"
+        );
+        let request_id = RequestId::new();
+
+        let ((), logged) = crate::log_capture::capture_loud(|| {
+            log_late_local(
+                late_success("usage.refresh", payload),
+                true,
+                request_id,
+                "usage.refresh",
+                ENTRANCE_SOCKET,
+            )
+        });
+
+        let [line] = logged.as_slice() else {
+            panic!("한 줄이어야 한다: {logged:?}");
+        };
+        assert!(
+            !line.contains(UPSTREAM_TEXT),
+            "원문이 로그에 앉았다: {line}"
+        );
+        assert!(!line.contains("\"upstream\""), "키째 걷는다: {line}");
+        for kept in [
+            "\"state\":\"Failed\"",
+            "\"detail_kind\":\"rpc_error\"",
+            "\"detail_code\":\"-32603\"",
+            "\"left_pct\":60",
+        ] {
+            assert!(line.contains(kept), "{kept} 는 남아야 한다: {line}");
+        }
+    }
+
+    /// ★명령 이름과 무관하게, 깊이와 무관하게 걷는다★ — 이름으로 가르면(`usage.` 로 시작하는 것만) 다른 명령이 같은
+    /// 칸을 실을 때 뚫리고, 맨 위만 보면 배열·중첩 객체 안의 원문이 샌다.
+    #[test]
+    fn the_upstream_scrub_ignores_the_command_name_and_reaches_nested_keys() {
+        let payload = json!({
+            "agent_id": "a1",
+            "upstream": "TOP-LEVEL-ORIGINAL",
+            "rows": [{ "keep": 7, "detail": { "upstream": "NESTED-ORIGINAL" } }],
+        });
+
+        let ((), logged) = crate::log_capture::capture_loud(|| {
+            log_late_local(
+                late_success("agent.new", payload),
+                true,
+                RequestId::new(),
+                "agent.new",
+                ENTRANCE_SOCKET,
+            )
+        });
+
+        let [line] = logged.as_slice() else {
+            panic!("한 줄이어야 한다: {logged:?}");
+        };
+        assert!(!line.contains("TOP-LEVEL-ORIGINAL"), "{line}");
+        assert!(!line.contains("NESTED-ORIGINAL"), "{line}");
+        assert!(!line.contains("upstream"), "{line}");
+        assert!(line.contains("\"agent_id\":\"a1\""), "{line}");
+        assert!(line.contains("\"keep\":7"), "{line}");
+    }
+
+    /// 읽기(`usage.get`)의 마감 뒤 성공은 번호를 안 붙들므로 **payload 없이 debug 한 줄**이다 — 이름 대조가 아니라
+    /// `retained` 로 가르는 기존 규칙이다.
+    #[test]
+    fn a_late_usage_get_is_a_payloadless_debug_line() {
+        let logged = crate::log_capture::capture_levels(|| {
+            log_late_local(
+                late_success("usage.get", usage_payload()),
+                false,
+                RequestId::new(),
+                "usage.get",
+                ENTRANCE_SOCKET,
+            )
+        });
+
+        let [(level, line)] = logged.as_slice() else {
+            panic!("한 줄이어야 한다: {logged:?}");
+        };
+        assert_eq!(*level, tracing::Level::DEBUG, "{line}");
+        assert!(!line.contains("outcome="), "payload 를 싣지 않는다: {line}");
+        assert!(!line.contains(UPSTREAM_TEXT), "{line}");
+        assert!(line.contains("usage.get"), "{line}");
     }
 }

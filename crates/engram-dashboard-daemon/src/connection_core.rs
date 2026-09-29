@@ -2301,14 +2301,16 @@ mod tests {
     }
 
     /// wire 낱말(소문자)과 버스 낱말(대문자 시작)이 한 칸을 친다 — 칸 키는 들어온 철자가 아니라 조회기의 키다.
+    /// 버스 쪽은 `usage.*` 의 데몬 실물이 실제로 부르는 그 함수(agent `usage_vendor_of`)로 잰다.
     #[test]
     fn wire_and_bus_words_reach_the_same_usage_key() {
+        use engram_dashboard_agent::commands::{usage_vendor_of, AgentBackend};
         for (wire, bus) in [
-            (WireBackendKind::Claude, "Claude"),
-            (WireBackendKind::Codex, "Codex"),
+            (WireBackendKind::Claude, AgentBackend::Claude),
+            (WireBackendKind::Codex, AgentBackend::Codex),
         ] {
             let from_wire = usage_vendor_key(wire).expect("wire 벤더마다 조회기가 있다");
-            let from_bus = usage_probe_for(bus).expect("버스 낱말").key();
+            let from_bus = usage_vendor_of(&bus).expect("버스 낱말마다 조회기가 있다");
             assert_eq!(from_wire, from_bus, "{wire:?}");
         }
     }
@@ -2622,6 +2624,7 @@ mod tests {
                     manager.clone(),
                     Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
                     Arc::new(multiview.clone()),
+                    Arc::new(crate::control::commands::NoUsageLimits),
                 )));
                 Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
             });
@@ -3812,54 +3815,7 @@ mod tests {
         }
     }
 
-    /// `note_claimed_owner` 가 낸 이벤트를 **레벨과 함께** 모은다 — 이 파일엔 로그 수집기가 없어 여기 둔다.
-    /// `with_default` 는 이 스레드에만 걸려 병렬 테스트와 섞이지 않는다(`command_roster` 의 같은 형태).
-    ///
-    /// ★DEBUG 까지 켜는 이유★: 「조용하다」를 WARN 만 보고 판정하면 **debug 갈래로 떨어진 것**과 **아무
-    /// 갈래에도 안 간 것**이 같아 보인다.
-    fn capture_logs(body: impl FnOnce()) -> Vec<(tracing::Level, String)> {
-        use tracing::subscriber;
-
-        struct Collector {
-            lines: Arc<StdMutex<Vec<(tracing::Level, String)>>>,
-        }
-        struct Visit<'a>(&'a mut String);
-        impl tracing::field::Visit for Visit<'_> {
-            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                self.0.push_str(&format!("{}={:?} ", f.name(), v));
-            }
-        }
-        impl subscriber::Subscriber for Collector {
-            fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-                *m.level() <= tracing::Level::DEBUG
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
-                tracing::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                let mut buf = String::new();
-                event.record(&mut Visit(&mut buf));
-                self.lines
-                    .lock()
-                    .expect("lines poisoned")
-                    .push((*event.metadata().level(), buf));
-            }
-            fn enter(&self, _: &tracing::Id) {}
-            fn exit(&self, _: &tracing::Id) {}
-        }
-
-        let lines: Arc<StdMutex<Vec<(tracing::Level, String)>>> = Arc::default();
-        subscriber::with_default(
-            Collector {
-                lines: lines.clone(),
-            },
-            body,
-        );
-        let captured = lines.lock().expect("lines poisoned");
-        captured.clone()
-    }
+    use crate::log_capture::capture_levels as capture_logs;
 
     // ── 주장한 주인 토큰의 판정(ADR-0154) ────────────────────────────────────────
     //
@@ -4102,6 +4058,7 @@ mod tests {
             core.manager().clone(),
             Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
             Arc::new(core.multiview().clone()),
+            Arc::new(crate::control::commands::NoUsageLimits),
         )));
 
         let req = rid();
@@ -4129,7 +4086,9 @@ mod tests {
                         "agent.new",
                         "agent.rename",
                         "agent.spawn",
-                        "tab.create"
+                        "tab.create",
+                        "usage.get",
+                        "usage.refresh"
                     ],
                     "두 출처가 이름순 한 목록으로 합쳐진다"
                 );

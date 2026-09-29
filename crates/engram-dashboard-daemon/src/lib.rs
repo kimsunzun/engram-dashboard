@@ -723,6 +723,7 @@ pub async fn run() -> Result<(), i32> {
         manager.clone(),
         roster_broadcast_slot.clone(),
         Arc::new(multiview.clone()),
+        wiring.usage.clone(),
     )));
 
     // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
@@ -988,6 +989,7 @@ async fn start_test_server_inner(
         manager.clone(),
         roster_broadcast_slot,
         Arc::new(multiview.clone()),
+        wiring.usage.clone(),
     )));
     // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 버스를 나눠 쓸 상대가 없다 — accept loop 가
     //   유일한 소비자다. 조립 자체는 운영과 같은 함수를 쓴다.
