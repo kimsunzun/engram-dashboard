@@ -1,12 +1,12 @@
 # TRD — T-40: claude 훅 도중 끊기의 약 300 초 멈춤 완화 — 우리 Job 안의 끊기 뒤 잔여물만 끝낸다 (S21)
 
-> 상태: **초안 5판 · 리뷰 3 라운드 반영 · 재검 전 (2026-09-30)** — 5판 = 리뷰 3 라운드(아키텍트 PASS · 끝내기 안전 PASS · codex BLOCK 한 건) 반영: ★시계 두 값을 자물쇠 **안**에서 읽어 기록 순서와 표본 순서를 맞췄다 · 전이는 단조 값을 되감지 않는다(§3-2 · §3-6)★ · 끝내기 확정 구간 안의 OS 호출을 정확히 `TerminateProcess` 한 번으로 줄였다 — 핸들 닫기 · 실패 분류는 놓은 뒤(§3-3 · §3-5) · 시험 명세 보강(§5) · `process_start(0)` = 못 읽음(§3-4). 4판 = 리뷰 2 라운드(codex BLOCK · 끝내기 안전 FIX · 아키텍트 FIX — 1 라운드 지적은 전부 해소 확인) 반영: ★확인과 `TerminateProcess` 사이의 틈을 닫았다 — 검증은 자물쇠 밖에서 핸들로, 「아직 해야 하나」 재확인과 `TerminateProcess` 는 자물쇠 안에서 한 번에(잎 자물쇠 규칙의 유일한 예외 · §3-3)★ · 일꾼 기동 실패가 에피소드를 버려두지 않는다(§3-2) · 멤버 PID 와 표 · 시작시각의 짝을 두 번 읽어 맞춘다(§3-4) · 걷기는 「사라짐」은 건너뛰고 「못 읽음」은 Job 멤버일 때만 멈춘다(§3-4) · 표 스냅숏은 「끝」 오류만 끝으로 본다(§3-4 · §11) · 시계 닻을 기록 · 판마다 다시 잡고 뒤로 뛰면 그만큼 쉬며, 멤버마다 「지금보다 미래에 태어났나」를 본다(§3-6) · 시험을 고쳤다(§5 — 실제 시계 음성 시험 · 좀비 부모 · 명단 늘리기 시험을 작게) · 사실 정정 둘(§3-0 스폰 · `open_spawn` 의 `control` 주석). 3판 = 리뷰 1 라운드 반영 · 결정 4. 2판 = 측정 스파이크(§3-0). 코드 무변경. 동작 결정은 사용자가 내렸고(§1) 이 문서는 그것을 구현 가능한 명세로 옮긴다. 사용자 체감이 없는 내부 구현은 이 문서가 골랐다(**[고름]**).
+> 상태: **초안 14판 · 끊기 뒤 탄생 기록 + Esc 때 스냅숏 · 리뷰 전 (2026-09-30)** — 14판 = 13판에 확인 라운드 고침 셋: ⓐ ★「쓰기 전 탄생은 후보가 아니다」를 알림이 쌓이는 때(문서 없음)가 아니라 **쓰기 확인 때 찍은 Job 멤버 번호 명단(쓰기 명단 W)** 으로 세운다 — 13판의 표지 패킷은 걷었다★ ⓑ 듣는 스레드를 **먼저** 띄우고 그 뒤에 Job 을 포트에 붙인다(붙이기가 실패하면 스레드는 끝난다 — 쌓일 알림이 없다) ⓒ 쓰기와 W 사이에 태어난 것은 빠진다(놓침 — 잰 여유 · 시험). 13판 = 12판에 라운드 4 고침: ⓐ (14판이 대체) ⓑ 포트 떼기가 실패하면 듣는 스레드가 계속 꺼내 버린다 · 듣는 스레드 패닉 막이 ⓒ taskkill 고리에도 생성 순서 ⓓ 끝내기가 거절되면 판 전체를 멈춘다 ⓔ 「묵은」이면 에피소드를 세우지 않는다 · 여는 이 가드가 모든 비정상 출구를 덮는다 ⓕ 기록 세부(켤 때 경계 · 넘침 초기화 · 기록이 사라지면 `snapshot_failed(port)`) ⓖ 한 차례에 확인 마감 하나 ⓗ 생성 순서 검사는 사용자 결정이 아니라 **[고름]**(사용자에게는 알렸다) ⓘ §9 를 ADR 줄 단위로 ⓙ 첫 에피소드의 붙일 때 되알림 ⓚ `tear_down_failed_activation` 도 물러남 시작을 부른다. 12판의 뼈대(결정 11 — 첫 끊기부터 판까지 가입 알림으로 태어나는 것을 곧바로 열어 기록 · 끊기 전 조상은 Esc 때 스냅숏 · 고리마다 부모 생성 ≤ 자식 생성 · 끝낸 뒤 확인하고 다시 고르기 최대 3 차례 · claude 의 `taskkill /PID <꼭대기>` · 쓰인 뒤 탄생만 후보 · 여는 이 하나 · 포트 수명 · `kill_agent` 첫 줄의 물러남 · 쓰기 확인 패닉 막이)는 그대로다. ★새 `windows` feature 둘(`Win32_System_IO` · `Wdk_System_Threading`) = 의존성 변경 · §10★. 판 이력 = `git log -- docs/process/S21-chat-ux/trd-t40.md`. 코드 무변경. 사용자 체감이 없는 내부 구현은 이 문서가 골랐다(**[고름]**).
 >
-> **입력:** 추적 [`docs/tracking.md` T-40](../../tracking.md) · 조사 [`docs/research/claude-interrupt-hook-hang-2026-09-29.md`](../../research/claude-interrupt-hook-hang-2026-09-29.md)(사실의 정본 — 여기서 되풀지 않고 `조사 §n` 으로 가리킨다) · 앞선 TRD [`trd.md`](trd.md) §3-4(claude JSON 끊기 설계 — ADR-0238). 판독 기준 = 브랜치 `v0.3.3/feat/chat-ux` 머리 `cd08209`. 이 문서의 `파일:줄` 은 전부 그 커밋에서 직접 열었다(4판이 더한 것 포함). `windows` crate API 는 이 PC 레지스트리의 `windows-0.58.0` 소스에서 확인했다. 측정 스파이크(2026-09-29 · claude 2.1.284) = 세션 스크래치의 `t40-spike\WRITEUP.txt` 와 그 옆 로그(**휘발 · 커밋하지 않음** — §3-0).
+> **입력:** 추적 [`docs/tracking.md` T-40](../../tracking.md) · 조사 [`docs/research/claude-interrupt-hook-hang-2026-09-29.md`](../../research/claude-interrupt-hook-hang-2026-09-29.md) · 앞선 TRD [`trd.md`](trd.md) §3-4(ADR-0238). **판독 기준** — 코드 = 1단계 커밋 `9fa9215`(**HEAD**) · 5판의 2·3단계 = `refs/backup/t40-clock-design-20260930`(**백업**). `windows` crate = 이 PC 의 `windows-0.58.0` 소스. 측정 = `.claude/handoff/attachments/` 의 `20260929-t40-spike/` · `20260930-msys-ppid-spike/` · `20260930-t40-provenance-spike/`(`WRITEUP.txt` · `main.log` · `pilot.log` · ★`procs/p1..p6.procs.tsv`(main) · `procs/pilot-p1.procs.tsv`(pilot) — 둘 다 보존★ · `probe/`). claude 내부 = claude 2.1.284 번들 코드 읽기(2026-09-30). MS Learn = `JOBOBJECT_ASSOCIATE_COMPLETION_PORT` · I/O Completion Ports(§3-5).
 >
-> **앵커:** ADR-0001(kill 인과) · ADR-0004(백엔드 지식 격리) · ADR-0006(락 순서) · ADR-0012(시험대) · ADR-0175(바닥 crate 입주 조건) · ADR-0217(제어 끝점이 에이전트 신원을 싣는다) · ADR-0218(신원 = PID + 시작시각) · ADR-0230(플랫폼 중립) · ADR-0238(claude 끊기 · 턴 열림 문) · ADR-0244(「중단하는 중…」 동안 Esc 무시 — 프론트) · ADR-0245(터미널 모드는 끊기 명령 없음).
+> **앵커:** ADR-0001 · ADR-0004 · ADR-0006 · ADR-0012 · ADR-0175 · ADR-0217 · ADR-0218(★열린 핸들로 신원을 붙든다★) · ADR-0230 · ADR-0238(★결정 2 · 3 · 5 개정★) · ADR-0244 · ADR-0245 · **ADR-0257**(부분 대체 · §9).
 >
-> 표기: **[고름]** = 이 문서가 고른 내부 구현(사유를 같이 적는다). **[사용자]** = 사용자 결정. **에피소드** = 끊기 한 판 — 받아들인 끊기로 시작해 그 턴의 끝 또는 정리 한 번으로 끝난다(§3-2).
+> 표기: **[고름]** · **[사용자]**. **에피소드** = 끊기 한 판. **스냅숏** = 첫 끊기 때 우리 Job 멤버를 붙든 것. **탄생 기록** = 그 에피소드 동안 가입 알림으로 온 프로세스를 곧바로 열어 붙든 것(순번 `seq`). **사실** = 부모 PID · 생성 시각 · 실행 파일 · 명령줄(붙든 핸들로 한 번 읽는다). **알려진 고리** = 스냅숏 또는 탄생 기록에 있는 프로세스. **훅 실행기** = claude 가 훅마다 띄우는 `…\Git\bin\bash.exe -c "bash …"`.
 
 ---
 
@@ -14,551 +14,413 @@
 
 | 무엇 | 어디 | 요지 |
 |---|---|---|
-| **끊기 기록** | `backend/claude` 의 턴 열림 문 `TurnGate` — `open` 을 자물쇠 안으로 옮기고 에피소드 · 시계 닻 칸을 둔다 | 끊기 줄 함수가 **자물쇠 하나 안에서** 「문이 열렸나」를 보고 에피소드를 적는다(시계 닻도 그 자리에서 다시 잡는다). decoder 의 턴 끝은 **같은 자물쇠 안에서** 문을 닫고 에피소드를 지운다 |
-| **N 초 확인** | `backend/claude/leftover.rs`(신설)의 일꾼 스레드 — 화신당 동시에 하나 | 일꾼 하나가 에피소드를 정리와 뒤 확인까지 쥔다. 가장 최근 끊기에서 N 초 지나면 정리한다. ★후보마다 검증은 자물쇠 밖에서 핸들로 하고, 「같은 에피소드 · 턴 끝 없음 · 가장 최근 끊기에서 N 초」 재확인과 `TerminateProcess` 는 **자물쇠 안에서 한 번에** 한다 — 재확인과 끝내기 사이에 끊기나 턴 끝이 끼어들 틈이 없다★. 정리를 한 번 돈 에피소드는 다시 쓰지 않는다 |
-| **고르기** | 같은 파일의 순수 함수들 | 보호 집합 = 뿌리 사슬 + 래퍼 층(claude + 통로가 붙인 콘솔 호스트) + 그 아래 한 층. 래퍼 층 식구 수가 예상 모양과 정확히 같을 때만 정리한다. 후보 = Job 멤버 − 보호 집합 · 생성 시각 ≥ 문턱 · 생성 시각 ≤ 지금 · **부모가 죽었다**(결정 4). 신원 = (PID, 생성 시각)이고 ★멤버의 시작시각은 표 스냅숏 앞뒤로 두 번 읽어 같을 때만 쓴다★. 명단 · 표 · 멤버 시작시각 · 시계 중 하나라도 못 믿으면 정리하지 않는다(닫힌 쪽). 스파이크에서 규칙은 3/3 멈춤에서 잔여물 하나만 골랐다(§3-0) |
-| **OS 조각** | `platform/windows.rs` 의 `JobObjectHandle` — 명단 · 검증 · 끝내기 | ① Job 멤버 명단(완전할 때만) ② 멤버 검증 — **같은 핸들로** 「우리 Job 소속 · 생성 시각 일치 · 아직 살아 있음」 → 검증된 핸들 ③ 그 핸들로 `TerminateProcess`. 다른 OS 에는 Job 이 없어 조각 자체가 없다 |
-| **닿는 길** | `StdioTransport::process_group()`(`pub(crate)`) → 중립 손잡이 `ProcessGroup` | 통로는 「내가 띄운 프로세스 무리의 약한 손잡이 + 내 스폰이 뿌리 아래 붙이는 프로세스 수(콘솔 호스트)」만 내준다 — claude 를 모른다. 비Windows 는 `None` |
-| **바닥 crate** | `base` 의 `platform` 에 함수 둘 | ① 프로세스 표(pid, ppid) 한 장 — 「끝」 오류만 끝으로 보고 그 밖의 실패는 `None` ② 시작시각 조회의 결과를 「앎 · 사라짐 · 못 읽음」 셋으로 가른다. 기존 `child_pids` · `process_creation_time` 은 그 위로 옮겨 동작이 같다 |
-| **고지 · 대체 · 끄기** | 없음 [사용자 결정 1·2·3] | 화면은 평소 끊김과 똑같다(정리 뒤 `result` 도 보통 끊김과 같은 모양 — §3-0 · 3/3). 로그(warn)만 남긴다. 정리 뒤에도 턴 끝이 안 와도 더 하지 않는다. 끄는 수단은 두지 않는다 |
-| **영향 범위** | claude JSON(stream-json) 한 경로 | codex · 터미널 모드 · 프론트 · 선 타입 · 버스 명령 · `open_spawn` 시그니처는 무변경(§3-9) |
+| **끊기 기록** | `backend/claude/leftover.rs` 의 `GateCell` | 문 자물쇠 구간 ① → (새 에피소드 · 여는 이는 하나) 자물쇠 밖에서 탄생 기록을 켜고 스냅숏 → 구간 ② 에서 연다(그 사이 턴이 닫혔으면 줄을 주지 않는다 · 기록 번호 · 차례가 바뀌었으면 줄만 주고 에피소드는 세우지 않는다). N 초는 줄이 stdin 에 **쓰인 순간**부터 · ★쓰인 직후 라이터가 Job 멤버 번호 명단 W 를 한 번 찍는다 — 후보는 W 밖이어야 한다★ |
+| **탄생 기록** | 듣는 스레드(화신당 하나 · 첫 끊기에 뜬다 · ★뜬 뒤에 Job 을 포트에 붙인다★) | Job 가입 알림을 기다려 기록 중이면 곧바로 열어 사실을 읽고 붙든다(끝남 알림 버림 · 결정 6). 기록 중이 아니면 버린다(결정 7). 실패하면 포트를 떼고 그 화신은 기록하지 않는다 |
+| **N 초 확인** | 일꾼 스레드 | 쓰인 끊기 + N 에 판. 고르고 → 끝내고(순번 순 · 재확인 + `TerminateProcess` 는 문 자물쇠 안) → 끝남을 확인하고 → 다시 고른다(최대 3 회) |
+| **고르기** | 같은 파일 | 후보 = 기록된 탄생 · ★번호가 쓰기 명단 W 에 없음(= 줄이 쓰이기 전부터 살아 있던 것이 아님)★ · 스냅숏 밖 · 산 것. 끝내는 것은 모두를 채운 것: ① 부모가 알려진 고리 · 끝남(결정 11) ② 훅 사본(부모와 실행 파일이 같고 명령줄이 같거나 부모가 `-c "bash …"`)(결정 10) ③ claude 까지 모든 고리가 알려짐 · 끝남 · **부모 생성 ≤ 자식 생성**(결정 9 · 11 · 5) ④ 꼭대기 = 훅 실행기이고 이 에피소드에 claude 가 띄운 **`taskkill /PID <꼭대기> /T /F`** 탄생이 있으며 그 taskkill 이 꼭대기보다 늦게 태어났다(결정 10) |
+| **물러남** | 통로 · 세션 · manager | ★`kill_agent` 시작(권한 회수 · `Exiting` 전)에 manager 가 세션 → 통로의 「물러남 시작」을 부른다★ — 통로가 쥔 읽기 전용 `RetiringSignal` 이 선다 · 판 · 재확인이 본다 |
+| **OS 조각** | `platform/windows.rs` | 명단(1단계) · 붙들기(`pin_member` — 소속 · 사실 · 끝내기 권한 선택) · 가입 알림 포트(`watch_births` 한 번 — 포트 → 듣는 스레드 기동 → 붙이기 순서를 API 가 강제 · `unwatch_births` · `next`) |
+| **고지 · 대체 · 끄기** | 없음 [결정 1·2·3] | 화면은 평소 끊김과 같다 · warn 로그만 |
 
-- **구현 순서**(§6): ① 바닥 함수 둘 + OS 조각 + 중립 손잡이 + 층 걷기 → ② 순수 코어(가짜 포트 시험) → ③ 배선 → ④ 문서(ADR · CLAUDE.md · `base` 머리). 어느 단계에서 멈춰도 빌드와 기존 시험이 선다.
-- **새 의존·feature 없음**(§11). `base` 는 기존 입주자 `platform` 에 함수 둘이 늘고 기존 함수 둘이 그 위로 옮긴다(게이트 셋 통과 · 자리 근거 — §11).
-- **새 ADR 필요** — 가안 ADR-0246(§9). ADR-0238 결정 3 · 5 와 ADR-0244 결정 2 를 개정한다.
-- **사용자 결정 필요 = 0 건**(§10): 끄는 수단 = 두지 않는다(결정 3) · 부모가 살아 있는 후보 = 건드리지 않는다(결정 4).
+- **잰 멈춤에 대면(추론 — 기록에 규칙을 대 본 것): 10/10** — 표가 있는 7 번(09-30 A 5 · 백그라운드 p3bg · pilot p1bg)은 사슬 · 생성 순서 · 훅 사본 · `taskkill /PID <꼭대기>`(7/7 · 2 차례씩)까지 표로 서고, 09-29 3 번은 같은 모양으로 본다(§3-0). ★다시 돌릴 수 있는 대조 = `20260930-t40-provenance-spike/r4sim.py` — 표 7 장의 taskkill 에피소드 35 개 전체에 규칙을 대 보면 주인 7 개 + p3bg 2 차례의 24776 만 고르고 다른 것은 하나도 고르지 않는다★. 조건 = 짧게 산 중간 고리를 제때 연다(하네스 4322 개 중 못 연 것 0).
+- **구현 순서**(§6): ① 1단계 걷기 · OS 조각 · 물러남 · 쓰기 확인 → ② 순수 코어 → ③ 배선 → ④ 문서. **새 ADR 필요**(§9). **사용자 확인 = 1 건**(§10 — feature 둘).
 
 ---
 
-## 1. 사용자 결정 (2026-09-29)
+## 1. 사용자 결정 (2026-09-29 · 2026-09-30)
 
 | # | 결정 | 출처 |
 |---|---|---|
-| **채택안** | 대시보드가 완화한다 — ★우리 Job Object 안의 멈춘 잔여물만 죽이고 claude 는 살린다(재시작 아님)★ | 조사 §7 · T-40 |
-| **고르기** | 실제로 끊기를 보낸 Esc 의 시각을 적는다. N 초 뒤 그 끊기의 턴 끝이 없고 가장 최근 Esc 에서 N 초 이상 지났으면, Job 멤버 중 claude 아님 · claude 의 직계 자식 아님 · 적은 시각 뒤에 생성 · 아직 살아 있음 인 것을 죽인다. 고아 여부 · 「bash」 인지 · CPU 상태는 주 기준이 아니다 | 조사 §7 |
-| **PID 규칙** | ★PID 부모만으로 고르지 말 것 — Job 명단 + 생성 시각★ | 조사 §4 |
-| **시계 · N** | 커널 생성 시각을 같은 시계(시스템 시각)의 타임스탬프와 비교 · N = 3 초(상수 한 곳 · 실측에서 세게 검증) | 조사 §7 |
-| **OS 조각** | Windows 전용 조각은 작게(Job 멤버 명단 + 하나 끝내기) · 다른 OS 무동작 · 나중에 별도 플랫폼 모듈로 옮길 수 있게 | 조사 §7 · T-40 |
-| **결정 1** | ★정리가 일어나도 화면 고지 없음★ — 평소 끊김과 똑같이 보이고 로그(tracing)만 남긴다. 사용자: 「그걸 왜 알려」 | 사용자 2026-09-29 |
-| **결정 2** | ★정리 뒤에도 턴 끝이 안 와도 대체(자동 재시작) 없음★ — 멈추면 사용자가 오늘처럼 죽이고 다시 연다. 사용자: 「너무 복잡해」 | 사용자 2026-09-29 |
-| **결정 3** | ★이 정리를 끄는 수단(환경 변수 등)을 두지 않는다★ — 스파이크에서 같이 죽은 정당한 프로세스가 0 이었다(11/11 · §3-0). 사용자: 「ㅇㅇ 두지 않고」 | 사용자 2026-09-29 |
-| **결정 4** | ★**부모가 살아 있으면 건드리지 않는다**★ — 후보는 부모가 죽은 것만 끝낸다(부모가 fork 도중 죽은 「반쯤 죽은」 잔여물의 모양 — 잰 잔여물 3/3 이 그랬다 · §3-0 Q1). 백그라운드 작업이 끊기 뒤 띄운 자식(부모 작업이 살아 있다)을 지킨다(§8 ③). 사용자: 「ㅇㅇ 조건 더해줘 어차피 잘 안일어나는 일이니깐」. ★위 「고르기」 행의 「고아 여부는 주 기준이 아니다」는 그대로다 — 이것은 주 기준(Job 멤버 · 보호 밖 · 문턱 뒤 · 생존) 위에 **덧붙인 거르개**이고 후보를 줄이기만 한다★ | 사용자 2026-09-29 |
-
-T-40 과 조사 §7 의 「TRD 에서 물을 것」 두 개(①고지 ②대체)는 결정 1·2 로, 리뷰 1 라운드가 올린 둘(끄는 수단 · 부모가 산 후보)은 결정 3·4 로 닫혔다.
+| **채택안** | ★우리 Job 안의 멈춘 잔여물만 죽이고 claude 는 살린다★ | 조사 §7 |
+| **고르기** | 실제로 끊기를 보낸 Esc 의 시각을 적는다. N 초 뒤 턴 끝이 없으면 Job 멤버 중 claude 아님 · 직계 자식 아님 · 적은 시각 뒤에 생성 · 살아 있음 인 것을 죽인다. 고아 · 「bash」 · CPU 는 주 기준이 아니다. ★14판 읽기(문구는 그대로 두고 다시 읽는다)★ — 「적은 시각 뒤에 생성」 = 기록된 탄생 가운데 줄이 쓰인 직후의 멤버 명단(W)에 없던 것 · 「가장 최근 Esc」 = 가장 최근에 쓰인 끊기 · 「claude 아님 · 직계 자식 아님」은 §3-4 가 구조로 지킨다 | 조사 §7 |
+| **PID 규칙** | ★PID 부모만으로 고르지 말 것 — Job 명단 + 생성 시각★. ★14판 읽기★ — 후보는 우리 Job 의 가입 알림에서만 · 같은 핸들로 소속 · 부모 연결 · 쓰기 명단 W 는 줄이기만 한다. ★**[고름 — 사용자 결정 아님]** 이 규칙의 「생성 시각」을 고리 두 끝의 상대 순서로 쓴다: 붙든 핸들로 읽은 부모 생성 ≤ 자식 생성(번호 재사용으로 엉뚱한 부모가 끼는 것을 거른다 · 줄이기만 한다) — 사용자에게는 알렸다(§10)★ | 조사 §4 |
+| **시계 · N** | ~~시스템 시각과 비교~~ · N = 3 초 · 단조 시각 | 조사 §7 |
+| **OS 조각** | Windows 전용 조각은 작게(명단 + 하나 끝내기) · 다른 OS 무동작 · 옮길 수 있게. 붙들기 · 사실 · 알림 포트는 그 조각 안 | 조사 §7 |
+| **결정 1 · 2 · 3** | ★고지 없음(「그걸 왜 알려」) · 대체 없음(「너무 복잡해」) · 끄는 수단 없음(「ㅇㅇ 두지 않고」)★ | 2026-09-29 |
+| **결정 4** | ★부모가 살아 있으면 건드리지 않는다★(「ㅇㅇ 조건 더해줘 어차피 잘 안일어나는 일이니깐」) — 결정 9 가 조상까지 넓혔다 | 2026-09-29 |
+| **결정 5** | ★「끊기 뒤에 태어났나」를 절대 시각 대신 **Job 가입 알림**으로 가른다★. 사용자: 「근데 생성된 절대시간말고 상대시간은 모름?」 · 「알림이 오면 그냥 그거 핸들 보관한다음에 그것들만 이터 돌면 되겠네」. ★「Esc 뒤에 태어났나」를 시각(Esc 시각과 생성 시각의 비교)으로 가르지 않는다★ | 2026-09-30 |
+| **결정 6** | ★생성만 기록하고 빠지는 것은 처리하지 않는다★(「생성된것만 기록하고 빠지는건 처리 안하고 그냥 날리면 되는거지」 · 「구지 처리하지 않아도 되는건 처리하지 않아도됨. 종료 이벤트까지 받아서 매번 빼고 그러면 번잡하잖아」) | 2026-09-30 |
+| **결정 7** | ★수집은 Esc 할 때만 · 구현은 가장 단순하게★(「어쨋든 esc 할때만 수집하는게 맞아. 그 안에서는 너가 자유롭게하면됨. 나중에 프로세스를 계속 들고있어야되는 이유가 생기면 그쪽으로 가는게 맞겠지만. 그 안에서는 구현 심플한 쪽으로 하면 될듯」) — 기록 · 붙들기는 첫 끊기부터 판까지만 · 포트를 붙인 뒤 에피소드 밖 알림은 꺼내 버린다 | 2026-09-30 |
+| **결정 8** | ~~죽은 부모가 Esc 전부터 있던 것일 때만~~(「죽은 부모가 bash 면 esc 전부터가 맞긴하겠구나. 방어 되면 그렇게 진행해.」) — ★결정 11 이 대체(모든 고리가 알려짐 · 끝남)★ | 2026-09-30 |
+| **결정 9** | ★죽은 부모에서 claude 까지 타고 올라가 살아 있으면 제외★(「ㅇㅇ 알았어. 어쨋든 부모 쭉 타고올라가서 살아있으면 제외한다는거잖아. 딱히 로직 부담도없겠네 상위부모 탐색만 하면되니」) · claude · 뿌리는 멈추는 자리 | 2026-09-30 |
+| **결정 10** | ★깨끗한 훅 표지가 있으면 더한다 · 지저분하면 남는 틈을 받아들이고 진행한다★(메인 계획 · 사용자 수락). 사용자: 「어차피 5분 멈추는것보다는 훨씬 좋은거잖아 이것들이.」 · 표지가 깨끗했다 → 훅 사본 · 훅 사슬(실행기 모양 + claude 의 `taskkill /PID`) | 2026-09-30 |
+| **결정 11** | ★3 초 동안 오는 것을 기록하고 삭제되는 것은 빼지 않는다 — 한 번 찍고 비교하는 것이 아니다★. 사용자: 「아니 내가 원래 얘기했던게 3초동안 오는거 기록하고 삭제되는건 빼지 말라고 했는데 한번 캡쳐하고 다음번에 비교하라고 해서 그렇게 진행한건데?」 → 결정 5 · 6 되살림 · 7 그대로 · 8 대체 | 2026-09-30 |
 
 ---
 
-## 2. 바뀌는 자리
+## 2. 바뀌는 자리 (기준 = HEAD `9fa9215` · 백업)
 
 | 파일 | 무엇 | 단계 |
 |---|---|---|
-| `crates/engram-dashboard-base/src/platform.rs` | `process_parent_table() -> Option<Vec<(u32, u32)>>`(Toolhelp 스냅숏 한 장 · `ERROR_NO_MORE_FILES` 만 끝 · 그 밖의 실패 = `None`) · `process_start(pid) -> ProcessStart { Known(u64), Gone, Unknown }` 추가. `child_pids`(`:150-201` — `parent == 0` 조기 반환 유지)와 `process_creation_time`(`:14-44`)은 그 위로 옮긴다(동작 동일). 모듈 머리(`:1`) 갱신 | ① |
-| `crates/engram-dashboard-base/src/lib.rs` | 입주자 요약(`:3-4`)의 `platform` 설명 갱신 | ① |
-| `crates/engram-dashboard-agent/src/platform/windows.rs` | `JobObjectHandle::member_pids`(+ 첫 용량 이음새) · `verify_member` · 검증된 핸들의 `VerifiedMember::{terminate_raw, settle}` · 결과 enum 들(§3-5) — 이 파일은 `windows` crate 와 `io` 만 쓴다 | ① |
-| `crates/engram-dashboard-agent/src/platform/process_group.rs` **신설** | 중립 손잡이 `ProcessGroup`(약한 Job 손잡이 + `root_attached`) + 중립 결과(Windows 결과를 감싼다) + 실프로세스 시험(시험마다 `#[cfg(windows)]`) | ① |
-| `crates/engram-dashboard-agent/src/platform/process_tree.rs` | 깊이 제한 · 닫힌 실패의 순수 걷기 `walk_levels` — 규칙(부모보다 먼저 태어난 것은 자식 아님 · 신원 방문 표시)은 `walk`(`:105-126`)와 같다. `subtree` 는 그대로 | ① |
-| `crates/engram-dashboard-agent/src/platform/mod.rs` | 모듈 등록 · 머리 doc 의 「플랫폼 질의 셋」 갱신(`:1-10`) | ① |
-| `crates/engram-dashboard-agent/src/transport/stdio.rs` | `job_handle` 칸(`:72-73`)을 `Arc<JobObjectHandle>` 로 · `pub(crate) fn process_group()` 추가(콘솔 호스트 수는 `CREATE_NO_WINDOW` 블록 `:101-108` 과 같은 Windows 갈래 안에서 정한다) | ① |
-| `crates/engram-dashboard-agent/src/backend/mod.rs` | `console_wrapper_depth()` 를 `console_command`(`:37-57`) 옆에 | ① |
-| `crates/engram-dashboard-agent/src/backend/claude/leftover.rs` **신설** | 상수 · 에피소드 상태기계 · 시계 닻 · 순수 계획 함수 · 포트 트레이트 둘 · 일꾼 · 로그 | ② · ③ |
-| `crates/engram-dashboard-agent/src/backend/claude/mod.rs` | `TurnGate`(`:771-788`)의 `open: AtomicBool` → `Mutex<GateState>` · decoder 의 문 여닫기(`:1111-1117`)를 전이 때만 자물쇠로 · `interrupt_line`(`:833-835`)이 자물쇠 안에서 확인 + 기록 · `open_spawn`(`:437-440`)이 정리기를 조립 · ★`open_spawn` 의 `control` 인자 주석(`:426-428` — 「여기서 또 읽으면 한 spawn 이 같은 값을 두 수단으로 보낸다」)과 버림 줄(`:431`)을 고친다 — 이제 `agent_id` 를 **로그 귀속으로만** 읽는다(통로로 다시 보내지 않으므로 그 주석이 막는 「두 수단」이 아니다)★ | ③ |
+| `crates/engram-dashboard-agent/Cargo.toml` | `windows` feature 에 **`Win32_System_IO`** · **`Wdk_System_Threading`** · 주석 | ① |
+| `…/platform/windows.rs` | **더함:** `pin_member(pid, kill)` · `PinnedMember{exited, facts, terminate_raw, classify, wait_exit}` · `ProcessFacts{ppid, create, image, cmdline}` · `watch_births(start)` · `unwatch_births` · `BirthPort{next}`. **걷음:** `verify_member` · `MemberCheck` · `VerifiedMember`(→ `PinnedMember` · 끝내기 두 메서드는 옮겨 산다). `member_pids`(HEAD `:136-218`) · `GetProcessTimes`(이제 생성 시각에 쓴다)는 그대로 | ① |
+| `…/platform/process_group.rs` | `ProcessGroup::new(job, retiring)` · `member_pids` · `pin` · `watch_births` · `unwatch_births` · `retiring` · `Pinned` · `Births` · `RetiringSignal` · **걷음:** `verify` · `Verify` · `ReadyKill` · `root_attached()` · 시험 고쳐 쓰기 | ① |
+| `…/platform/process_tree.rs` · `…/platform/mod.rs` | 1단계가 더한 셋과 시험 걷음 · 머리 doc | ① |
+| `…/transport/mod.rs` | ★`AgentTransport::begin_retire(&self) {}`(기본 무동작) 더함★ | ① |
+| `…/transport/stdio.rs` | `root_attached` 걷음 · ★`retiring: Arc<AtomicBool>` 칸 — `begin_retire()` 와 `shutdown()` 첫 줄이 세운다★ · `process_group()` = 약한 손잡이 + `RetiringSignal` · `InterruptLine` → `InterruptOut` · 시험(HEAD `:589` · `:615` · `:725` · `:768`) | ① |
+| `…/transport/input_queue.rs` | 덩이마다 선택적 부를 것 — `push_with` · `pop` 이 쌍을 준다 · `drain` 이 쓰기 성공 · `mark_written` 뒤 **자기 `catch_unwind` 안에서** 부른다(패닉은 warn 하고 계속) · 닫힘은 버린다 · 기존 시험(`:391` · `:410`) | ① |
+| `…/transport/pty.rs` | **손대지 않는다** — `drain` · `push` 의 모양이 그대로이고 `pop` 을 부르지 않는다. `begin_retire` 는 기본 무동작 | — |
+| `…/session.rs` · `…/manager.rs` | ★`Session::begin_retire()`(통로로 넘김) · `kill_agent`(HEAD `manager.rs:2884`)의 첫 줄(권한 회수 앞)과 `tear_down_failed_activation`(HEAD `:2340` — 화신 표식 대조 뒤 첫 줄)에서 부른다★ | ① |
+| `…/backend/mod.rs` | `console_wrapper_depth` 와 시험 걷음 | ① |
+| `…/backend/claude/leftover.rs` **신설**(백업에서) | 에피소드 · 여는 이 · 스냅숏 · 탄생 기록(듣는 스레드 · 기록 자물쇠) · 쓰기 확인 · 일꾼(패닉 가드) · 판(여러 차례) · 규칙 · 끝내기 확정 · 로그 | ② · ③ |
+| `…/backend/claude/mod.rs` | 백업 배선(`GateSlot` · `open_spawn` · decoder · `interrupt_line` → `InterruptOut`) · `leftover_cleaner` · `TurnGate`(HEAD `:750-800` · 시험 `:5625`) 걷고 doc · `// ADR-0238` → `GateSlot` · `started` → `deliver` · HEAD 시험 `:6070-6137` 고쳐 씀 · `control` 주석 | ①(`interrupt_line` 반환 모양만) · ③ |
 
-프론트(`src/`) · 선 타입(`types.rs` 의 `OutputEvent`) · 프로토콜 · 데몬 · 셸 · `open_spawn` 시그니처는 무변경이다.
+프론트 · 선 타입 · 프로토콜 · 데몬 · 셸 · `base` · `open_spawn` 시그니처 무변경. `base` 의 1단계 추가분(`ProcessStart` · `process_start` · `process_parent_table`)은 T-40 이 더는 부르지 않지만 기존 공개 함수의 몸통이라 남는다 — `process_creation_time` 을 `backend/codex/mod.rs:1096` · `codex/thread_lock.rs:1236` · `platform/file_holders.rs:190` · daemon `tests/ws_e2e.rs:2445` 가, `child_pids` 를 agent `tests/backend_contract.rs:1431` · daemon `tests/ws_e2e.rs:2469` 가 부른다(`rg` 2026-09-30).
 
 ---
 
 ## 3. 설계
 
-### 3-0. 실측 (스파이크 2026-09-29) — 이 설계가 기대는 사실
+### 3-0. 실측 — 이 설계가 기대는 사실
 
-- **출처:** 세션 스크래치 `t40-spike\WRITEUP.txt` + `main.log` · `pilot.log` · `main\` · `pilot\`(요약 · 멤버 명단 · claude 원문) — ★**휘발 · 커밋하지 않음**★. 하네스 = Rust · `windows 0.58.0`(저장소와 같은 판). ★**스폰은 대시보드를 본떴을 뿐 같지 않다**★ — 같은 것 = `cmd.exe /c claude …` stream-json 인자 · 파이프 · `CREATE_NO_WINDOW` · `spawn` → `JobObjectHandle::new` → `assign`(`stdio.rs:110-127` · `platform/windows.rs:30-75` 를 옮김) · 환경 `MAX_THINKING_TOKENS=8000`(대시보드도 json 모드에서 기본 주입한다 — `claude/mod.rs:215-230` · ADR-0049). 다른 것 = 대시보드가 주지 않는 `--include-hook-events` 를 더했고(대시보드 인자 = `claude/mod.rs:170-201`), `--model haiku` 를 박았다(대시보드는 프로필 추가 인자로만 모델을 받는다 — 시험 `claude/mod.rs:3118-3141`), 데몬 끝점이 드는 `--mcp-config` · `--append-system-prompt-file` 은 뺐다. 측정 전용으로 Job 완료 포트를 붙여 새 멤버마다 곧바로 핸들을 열었다(PID 재사용 없음). ★**그래서 실제 대시보드 경로의 판정은 §7 G1 이다**★.
-- **판:** claude **2.1.284**(`system/init`) — 조사는 2.1.283 이었다(오늘 npm 갱신). 사용자의 실제 훅(`UserPromptSubmit` 넷 — 느린 둘 = `handoff-trigger.sh` · `wiki-preconsult.sh`) · 보낸 뒤 200 ms 끊기(조사 실험 1 E).
-- **시행:** claude 프로세스 넷에서 끊기 11 번 · **멈춤 3/11**. 멈춤 아닌 끊기의 `result` = 끊기 뒤 285–1394 ms.
+**끊기 스파이크(09-29 · `20260929-t40-spike/`):** 대시보드 스폰을 본뜬 하네스 · 실제 훅 · 보낸 뒤 200 ms 끊기 · claude 2.1.284 · 멈춤 3/11 · 끊기 +3 s 에 산 것은 멈춤 잔여물 하나(`Git\usr\bin\bash.exe <훅>.sh` · 깊이 5 · 부모 끝남 · +3 s 멤버 넷 — `main.log:92` `:98` · `pilot.log:26`) · +3 s 에 산 것은 11/11 에서 잔여물뿐 · 뿌리 자식 = conhost + claude(4/4) · `result` 는 보통 끊김과 같다. pilot 의 `followUp=TIMEOUT` 은 하네스 파싱 결함(`20260930-t40-provenance-spike/evidence-0929/pilot-p1.raw.log:72` → `:92`).
 
-| 물음 | 실측 | 이 문서에 준 것 |
-|---|---|---|
-| Q1 멈춤을 쥔 프로세스가 **우리 Job** 에 있나 | ★**예 · 3/3**★ — 멈춤마다 끊기 뒤 살아남은 것은 정확히 하나: `Git\usr\bin\bash.exe <훅>.sh` · 깊이 5 · 부모(깊이 4 훅 bash) 죽음 · 끊기 뒤 +203 / +244 / +233 ms 생성. 근거 셋 = Job 완료 포트의 새 멤버 알림 + `IsProcessInJob(h, 우리 Job)` · 끊기 +3 s · +10 s 의 `JobObjectBasicProcessIdList` 에 있음(멤버 = cmd · conhost · claude · 잔여물 = 4, 멈춤 아닌 시행 = 3) · `terminate_member` 모양의 끝내기 = 끝남. Job 밖 전역 훑기에서 훅 관련 프로세스 0. 곁증거: 훅 stderr 의 MSYS `child_copy: … windows pid 18236, Win32 error 299` 의 PID 가 그 잔여물 → **부모가 fork 복사 도중 죽어 반쯤 fork 된 자식**(추론 — 조사 §2 ②⑤ 와 맞물린다) | §8 ⑦ 전제 해소 · §5 재정의 |
-| Q2 래퍼 깊이 | ★claude.exe 는 `cmd.exe` 의 **직계** 자식 — 런처 층 없음(4/4)★. `claude` 는 npm shim `claude.cmd` 이고 **같은 cmd.exe 안에서** `…\@anthropic-ai\claude-code\bin\claude.exe` 를 띄운다(node 없음). ★단 깊이 1 층은 **둘**이다★ — `conhost.exe`(스폰 전 시각 +4.6–4.9 ms · cmd 의 콘솔 호스트 — `CREATE_NO_WINDOW` 여도 생긴다) · `claude.exe`(+61–66 ms). 셋 다 우리 Job. 훅 사슬 = d2 `Git\bin\bash.exe`(claude 의 직계 자식 · 런처) → d3 conhost + `usr\bin\bash.exe -c` → d4 훅 bash → d5+ fork. taskkill.exe = d2 · 그 conhost = d3. `spawn` → `assign` 틈 = 33–40 µs · conhost 는 그 뒤 약 1.6–2.1 ms · claude.exe 는 약 58–63 ms | §3-4 claude 가려내기 · §3-8 · §7 G2 · §8 ④⑥ |
-| Q3 끊기 뒤 우리 Job 에 생긴 것 | 시행마다 24–26 개: taskkill@d2 ×4(두 차례 — 끊기 +1–5 ms · 약 +1505 ms · 최장 278 ms) · 그 conhost@d3 ×4(최장 277 ms) · 훅 bash@d5 ×5 · @d6 ×5(보통 ≤212 ms) · cat/jq/awk/grep@d6–7(≤36 ms) · cygwin-console-helper@d6–7(≤88 ms) · conhost@d7–8(≤102 ms). ★**끊기 +3 s 에 살아 있던 것은 11/11 시행에서 멈춤 잔여물뿐**★. 잔여물 아닌 최장 = 같은 모양의 bash 1171 ms(스스로 끝났고 그 턴의 `result` 는 +1394 ms). ★안 잰 것★ = 도구 실행 중 끊기 · 백그라운드 작업 · stdio MCP 서버 · 끊기 뒤 시작하는 훅 | N = 3 초의 여유 · §7 G6 · §8 ③ |
-| Q4 §3-4 규칙을 글자 그대로 | 후보 = 정확히 잔여물 하나(3/3) · 끊기 +3 s 와 +10 s 의 후보 집합이 같다(3/3). ★끝내기는 멈춤을 확인한 +10 s 에 했다 — +3 s 에 끝내 보지는 않았다★. 끝내기 → `result` = **18 / 19 / 21 ms** · 멈춘 훅의 `hook_response … cancelled` 가 같은 순간 · claude.exe 생존 · 이어 보낸 턴을 같은 프로세스가 1.9–2.1 s 에 답했다. Job 밖은 아무것도 안 끝냈다 | §0 · §3-1 시각 |
-| 시계 | 뿌리 cmd.exe 생성 시각 − 스폰 직전 `SystemTime` = +0.67…+0.79 ms(4/4 · 음수 없음) · 끊기 뒤 첫 프로세스(taskkill) = 끊기 +1.1…1.4 ms → 커널 생성 시각은 여기서 1 ms 아래 해상도로 보인다(간접). 잔여물은 문턱보다 ≥ +203 ms 뒤 | §3-6 |
-| 정리 뒤의 `result` 모양 | 멈춤 3 회 모두 `subtype:"error_during_execution"` · `is_error:true` · `terminal_reason:"aborted_streaming"` 이고 바로 앞에 합성 줄 `[Request interrupted by user]` 가 왔다 — 멈춤 아닌 끊기와 같은 모양(`claude/mod.rs:873` 의 끊김 판정이 그대로 잡는다 → `TurnEnd{Interrupted}`) | 결정 1(「평소 끊김과 똑같다」)이 선 줄 수준에서 성립 — GUI 는 §7 G1 |
+**MSYS 부모 스파이크(09-30):** 살아 도는 Git Bash 가 띄운 `sleep` 의 Windows 부모가 7 가지 중 5 가지에서 이미 끝난 fork — 「부모 죽음」은 가르개가 아니다.
+
+**출처 스파이크(09-30 · `20260930-t40-provenance-spike/`):** 하네스가 `assign` 뒤 Job 에 완료 포트를 붙이고(★스폰 때 · 이 설계의 「첫 끊기에 붙임」은 재지 않았다★) 듣는 스레드 하나(동시 실행 수 1 · 50 ms 대기)가 가입 알림마다 곧바로 `PROCESS_QUERY_LIMITED_INFORMATION` 로 열어 부모(`NtQueryInformationProcess` 0) · 생성 시각 · 실행 파일 · 명령줄(60)을 읽고 핸들을 쥐었다(`probe/src/main.rs:373-390` · `:587-610` · `:213` · `:251-298`) — 기록 4322 개 · ★못 연 것 0 · 열었는데 Job 밖 0★(`main.log:49` `:99` `:155` `:201` `:246` `:285`).
+- ★**다시 돌릴 수 있는 대조:** `r4sim.py`(같은 폴더 — 표 7 장의 taskkill 에피소드 35 개에 12판 규칙을 대 본다 · 생성 순서로 부모를 찾고 차례 3 번)가 주인 7 개 + p3bg 2 차례의 24776 만 고르고 다른 것은 고르지 않았다(라운드 4 끝내기 안전 리뷰가 돌렸다). 13판에서 더한 좁히기(taskkill 생성 ≥ 꼭대기 생성)는 그 출력의 `tk>=T` 칸이 보여 준다(8/8 참 — 2026-09-30 다시 돌림). 스크립트의 후보 경계는 「첫 taskkill − 5 ms 뒤 생성」이고, 14판의 쓰기 명단 W 는 그보다 이르거나 같은 자리(줄이 쓰인 직후)를 가른다 — 고른 8 개는 그 경계 뒤 262 ms 이상에 태어났다★.
+- 멈춤 5/30 + 백그라운드 반복 중 2/4 · 주인은 늘 `"…\Git\usr\bin\bash.exe" C:/…/hooks/<x>.sh` · claude 까지 조상이 모두 끝남 · 이어 보낸 턴 9/9 답함. ★끝내기 → `result` 19–35 ms 는 **주인이 하나인 모양**의 값이다 — p3bg 는 주인(32228)이 +3 s 에 산 fork(24776 · +2756 → +4093 · 그 자식 27524 +3802)를 거느렸고, 하네스가 +10 s 에 끝냈을 때 `result` 는 364 ms 뒤였다(`main.log:145` · `procs/p3.procs.tsv`) — 주인 하나가 파이프의 유일한 주인은 아니다★.
+- 훅 실행기 = `"…\Git\bin\bash.exe" -c "<hooks.json 명령>"`(맨 `.sh` 에 claude 가 `bash ` 를 붙인다) · Bash 도구 실행기(포그라운드 · 백그라운드 같음) = `-c "source …/.claude/shell-snapshots/snapshot-bash-… && … eval '<명령>' …"` — 291 대 6 · 모호 0. MSYS fork 는 부모의 명령줄을 가진다(1820/1820 · 43/43). 사건에는 PID 가 없다. 끊기 때 claude 는 훅 실행기마다 `taskkill /PID <실행기> /T /F`(두 차례) · Bash 도구 실행기에는 하지 않았다. 훅과 Bash 도구의 환경 차이(`CLAUDE_PROJECT_DIR` · `AI_AGENT`)는 PEB 읽기가 들어 안 쓴다.
+
+**14판 규칙을 멈춤 10 번에 대면(추론 — 표에 규칙을 대 본 것 · 규칙을 돌려 보지는 않았다):**
+
+| 멈춤 | 사슬(생성 = 줄이 쓰인 때 기준 · 판 = +3 s) | 알려짐 · 끝남 · 생성 순서 · 훅 사본 · taskkill | 결과 |
+|---|---|---|---|
+| 09-30 p1 · p2 · p4 · p5(`procs/p{1,2,4,5}`) | 주인(+263…+409) ← 훅 bash D(−80…−12) ← 껍데기 `-c "bash …"`(−132…−88) ← 실행기 T(−187…−172) | D 이상 스냅숏 · +3 s 전에 모두 끝남 · 부모가 늘 먼저 · 주인 = D 사본 · `taskkill /PID <T>` 2 건 | 끝낸다 4/4 |
+| 09-30 p3t3(`procs/p3`) | 주인(+454) ← D fork(+279 · 250 ms) ← 훅 bash(−6) ← 껍데기 ← 실행기 | D = 탄생 기록 · 나머지 스냅숏 · 모두 끝남 · 주인 = D 사본 · taskkill 2 건 | 끝낸다 |
+| 09-30 p3bg(`procs/p3`) | 주인 = 훅 bash(+1432) ← 껍데기(+872 · +1695 끝) ← 실행기(+75 · +1722 끝) · 주인의 fork 24776(+2756 · 산다) | 전부 탄생 기록 · 주인은 껍데기가 exec 한 스크립트(명령줄 다름 → `-c "bash …"` 갈래) · taskkill 2 건 · ★1 차례에 주인 → 끝남 확인 → 2 차례에 24776(부모 = 끝난 주인 · 사본)★ | 끝낸다(2 차례) |
+| pilot p1bg(`procs/pilot-p1`) | 주인(+352) ← D 훅 bash(+16 · +389 끝) ← 껍데기(−40) ← 실행기(−100) | D = 탄생 기록 · 나머지 스냅숏 · 주인 = D 사본 · taskkill 2 건 | 끝낸다 |
+| 09-29 main 2 · pilot 1 | 주인(+203…+244) ← 깊이 4 훅 bash(끊기 전) ← … | 스냅숏 · +3 s 멤버 넷 · 사본 · taskkill 은 09-30 의 모양으로 본다(표 없음) | 끝낸다 3/3(추론) |
+
+→ **10/10**(표로 선 7 + 모양으로 본 3). 주인이 쓰기 명단 W 밖인 것(§3-2 — 주인은 줄이 쓰이고 263 ms 이상 뒤에 태어났고 W 는 쓰인 직후에 찍는다)과 생성 순서는 10 번 모두에서 선다. 같은 판의 다른 끊기 뒤 탄생(taskkill · 그 conhost · 반복의 `sleep`/fork · `cat`/`jq`)은 부모가 살아 있거나 사본이 아니거나 꼭대기가 훅 실행기가 아니라 빠진다. 실측 판정 = §7 G1.
 
 ### 3-1. 흐름 한눈에
 
 ```
-Esc / 버스 agent.interrupt
- → manager.interrupt (manager.rs:2875-2877 — 명부 락은 get_session 뒤 이미 놓았다)
- → session.interrupt (session.rs:636-638 — 락 없음)
- → StdioTransport::interrupt (stdio.rs:395-408) → 꽂힌 끊기 줄 함수 호출
-     [backend/claude] TurnGate 자물쇠 안에서 한 번에(시계 두 값 — 벽 · 단조 — 도 자물쇠 안에서 읽는다):
-                      문이 닫혀 있으면 None(오늘 그대로 — 기록 없음)
-                      열려 있으면 시계 닻을 다시 잡고 에피소드를 열거나(새 문턱) 이어 적고 · 일꾼이 없으면 띄울 몫을 받는다
-                      자물쇠를 놓고 → (필요하면) 일꾼을 띄우고 → 줄을 준다
- → 통로가 줄을 입력 큐에 넣는다 → 라이터 스레드가 claude stdin 에 쓴다
+kill_agent 시작 ─ session.begin_retire() → 통로 retiring = true(권한 회수 · Exiting · shutdown 보다 먼저)
 
-(보통) claude 가 result 를 낸다 → decoder 가 Ended 로 분류 → 자물쇠 안에서 문 닫기 + 에피소드 지우기
-       → 일꾼이 깨어 에피소드 없음을 보고 끝난다(아무 일 없음)
+Esc → manager → session → StdioTransport::interrupt → 끊기 줄 함수
+  구간 ① — 문 닫힘 → None · 산 에피소드 → 이어 적음 · 여는 중(다른 Esc 가 열고 있음) → 줄만 준다
+         · 그 밖 → 표식 + 「여는 이」 표시
+  (여는 이만) 자물쇠 밖: 포트 · 듣는 스레드 확보(한 번 — 포트 → 스레드 기동 → Job 붙이기) → 기록 켬(R · 남은 기록은 놓은 뒤 버림) → 스냅숏
+  구간 ② — 문 닫힘 · 턴 닫힘 → None · 기록 번호 ≠ R · 전달 · 에피소드 차례 바뀜 → 줄만(에피소드 없음) · 아니면 새 에피소드
+  (여는 이 가드: ② 에 닿지 못한 모든 출구 · 에피소드를 안 세운 출구 → opening 내림 · 놓은 뒤 stop(R) · 스냅숏 버림)
+  → InterruptOut { 줄, 쓰였을 때 = 멤버 번호 명단 W 찍기 → note_written(gen, W?) } → 큐
+라이터: 쓴다 → (catch_unwind) W 찍기(아무 락 없이 · 완전하거나 오류) → note_written → W 가 있을 때만 첫 쓰임 · last_mono → 일꾼 기동
+듣는 스레드: 가입 알림 + 기록 중 → 곧바로 열어 사실 → (pid, 생성) 이 새로우면 seq 로 기록
 
-(멈춤) result 가 안 온다 → 일꾼이 「같은 에피소드 · 가장 최근 끊기에서 N 초」를 확인하고 정리 한 판
-       → 명단 · 시작시각 ×2 · 표 · 층 걷기 · 고르기(하나라도 못 믿으면 멈추고 warn)
-       → 후보마다: 자물쇠 밖에서 핸들로 검증 → 자물쇠 안에서 재확인 + TerminateProcess → 놓고 → warn 한 줄
-       → 파이프가 닫혀 claude 가 result 를 낸다(스파이크 — 끝내기 뒤 18–21 ms · 3/3 · §3-0) → 평소 끊김과 같은 화면
-         (조사 §3-3 의 0.2–0.4 초는 taskkill.exe 기동까지 잰 값이다)
-       → (하나라도 끝냈는데 N 초 뒤에도 같은 에피소드면 warn 한 줄만 더 — 대체 없음, 결정 2)
+(멈춤) 쓰인 지 N 초 → 판(최대 3 차례 · 차례마다 확인 마감 200 ms 하나):
+   후보 = 기록된 탄생 · 번호 ∉ W · 스냅숏 밖 · 산 것 → 규칙 ①–④ → 순번 순으로 끝내기(문 자물쇠 안 재확인 — 거절되면 판 전체를 멈춘다)
+   → 끝남 확인 → 기록을 다시 복사해 다시 고른다(끝낸 것은 끝난 고리) → 없으면 멈춤
 ```
 
-### 3-2. 기록 — 문 확인과 기록을 한 자물쇠로
-
-**2판의 결함(리뷰 1 A — 코드로 확인):** 2판은 `TurnGate.open`(`claude/mod.rs:771-788` — `Relaxed` 원자값)을 읽은 **뒤** 따로 기록했다. 「끊기 줄 함수가 열림을 읽음 → 펌프가 턴 끝으로 문을 닫고 기록을 지움 → 끊기 줄 함수가 기록」 순서가 나면 끝난 턴에 기록이 남고, 그 줄은 한가한 CLI 에 닿아 응답 한 줄만 내고 `result` 가 없어(`claude/mod.rs:763-764` — 실측 B2 S6) 기록이 영영 안 지워진다.
-
-**[고름] `open` 을 자물쇠 안으로 옮기고, 확인 + 기록 · 닫기 + 지우기를 각각 한 번의 자물쇠 구간으로 한다.**
+### 3-2. 기록 — 두 구간 · 여는 이 · 스냅숏 · 탄생 기록 · 쓰기 확인
 
 ```rust
-// backend/claude/mod.rs — 화신 공유 값(모양은 ADR-0238 결정 3 을 개정한다)
-struct TurnGate { state: Mutex<GateState> }
-
-// backend/claude/leftover.rs — 순수 상태(시계 값은 인자로 받는다 · OS 없음 · 패닉 없음)
-pub(super) struct GateState {
-    open: bool,                        // 쓰는 이는 decoder 하나
-    episode: Option<Episode>,          // 지금의 끊기 한 판
-    next_gen: u64,                     // 에피소드 세대 — 새 에피소드마다 +1
-    worker: bool,                      // 이 화신에 일꾼이 떠 있나
-    anchor: Option<ClockAnchor>,       // 벽시계 ↔ 단조 시계 닻(§3-6) — 정리기가 없으면 None
-    clock_hold_until: Option<Instant>, // 뒤로 뛴 시계를 본 뒤 새 에피소드의 판을 막는 끝(§3-6)
-}
-struct Episode {
-    gen: u64,
-    first_wall: u64,     // 이 에피소드 첫 끊기의 벽시계(FILETIME 척도) — 생성 시각 문턱
-    first_mono: Instant, // 같은 순간의 단조 시각
-    last_mono: Instant,  // 이 에피소드 가장 최근 끊기의 단조 시각 — 「N 초 지났나」
-    clock_ok: bool,      // 첫 끊기 때 시계를 믿을 수 있었나(§3-6)
-    phase: Phase,
-}
-enum Phase { Waiting, Cleaning, Spent { at: Instant }, Done }
+pub(super) struct GateCell { state: Mutex<GateState>, cleaner: Option<Arc<Cleaner>> }
+struct GateState { open: bool, closes: u64, delivers: u64, opening: bool, episode: Option<Episode>, next_gen: u64, worker: bool }
+struct Episode { gen: u64, first_mono: Instant, last_mono: Instant, written: bool, w: Option<Arc<[u32]>> /* 쓰기 명단 W — 첫 쓰임 때 · 정렬 */,
+                 snap: SnapState /* 인라인: Taken(Arc<Snapshot>) · Failed(사유) · Released */,
+                 rec: u64, killed_any: bool, phase: Phase }
+struct Mark { closes: u64, delivers: u64, next_gen: u64 }
+// 기록 — 또 하나의 잎 · 문 자물쇠와 겹쳐 잡지 않는다 · 독을 견딘다
+struct Recorder { active: AtomicU64 /* 0 = 없음 · 쓰기는 자물쇠 안 · 읽기는 어디서나 */, port_failed: AtomicBool, inner: Mutex<RecInner> }
+struct RecInner { next_rec: u64, next_seq: u64, births: Vec<Arc<Birth>>, full: bool }
+struct Birth { seq: u64, facts: ProcessFacts, pin: Box<dyn Pinned>, killable: bool }
 ```
 
-- **끊기 줄 함수**(`interrupt_line` — 오늘 `claude/mod.rs:833-835`) — 자물쇠를 잡고 **그 안에서** 벽 · 단조 시각을 읽은 뒤 같은 구간의 `try_interrupt(now_wall, now_mono)`:
-  - ★**왜 자물쇠 안에서 읽나 [리뷰 3 codex]**★ — 4판은 밖에서 읽었다. 끊기 A 가 t1 을 읽고 멈춘 사이 B 가 t2 > t1 을 읽고 먼저 기록하면, 뒤이어 들어온 A 가 `last_mono` 를 t1 로 **되감아** 일꾼이 B 의 t2 + N 이 차기 전(t1 + N)에 끝낼 수 있었고, A 의 묵은 표본이 시계 닻을 과거로 돌릴 수도 있었다. 자물쇠 안에서 읽으면 기록 순서가 곧 표본 순서다. 읽기는 막히지 않는 카운터 · 시스템 시각 읽기라 §3-3 자물쇠 규칙의 예외 ⓐ 로 적는다.
-  - ★**전이는 단조 값을 되감지 않는다(방어 · 순수 함수 안)**★ — 표본이 어디서 왔든 `last_mono = max(last_mono, 표본)` · 닻은 표본의 단조 값이 닻보다 이르면 다시 잡지 않는다 · 새 에피소드의 `(first_wall, first_mono)` 는 표본이 닻보다 이르면 **닻 값으로 올려** 쓴다(닻의 벽시계는 그 표본보다 늦은 순간의 값이라 문턱이 늦어질 뿐 — 덜 고르는 쪽). 그래서 앞 에피소드가 닫힌 뒤(턴 끝 · 정리)의 새 에피소드가 그보다 오래된 표본으로 문턱을 앞당길 길이 없다 — 닻은 기록 · 판마다 앞으로만 옮겨지고, 첫 끊기의 문턱은 적어도 그 닻의 순간이다.
-  - `open == false` → 거절(`None` · 기록 없음 — 오늘 그대로).
-  - 정리기가 없으면(비Windows · 조립 실패) 문 확인만 하고 줄을 준다 — 에피소드를 만들지 않는다.
-  - 시계 닻을 본다(§3-6 — 다시 잡거나 · 뒤로 뛰었으면 쉼 끝을 세운다). 잰 값은 돌려받아 자물쇠 밖에서 로그로.
-  - 에피소드 없음 · `Spent` · `Done` → **새 에피소드**(`gen = next_gen++` · 새 `first_wall` · `first_mono` · `clock_ok = 쉼 끝이 지났나` · `Waiting`).
-  - `Waiting` → `last_mono` 만 민다(문턱 유지).
-  - `Cleaning` → `last_mono` 를 밀고 `Waiting` 으로 되돌린다 — 도는 판이 다음 끝내기 확정(§3-3)에서 멈춘다.
-  - `worker == false` 면 참으로 바꾸고 「일꾼을 띄워라」를 돌려준다. 자물쇠를 놓은 **뒤** 띄운다.
-  - 적는 시점은 줄을 돌려주기 **전**(곧 통로가 큐에 넣기 전)이라 문턱은 claude 가 그 줄을 받는 시각보다 늘 이르다.
-- **일꾼 기동 실패 [리뷰 2 C2 — 고름: 에피소드를 `Done` 으로]:** 자물쇠를 다시 잡아 `worker = false` 로 되돌리고 **지금의 에피소드(세대가 무엇이든)를 `Done`** 으로 둔 뒤 warn. 사유: 그 사이 다른 끊기가 같은 에피소드를 밀었거나 새 에피소드를 열었어도 「일꾼이 떠 있다」고 믿고 아무도 띄우지 않았으므로, 에피소드를 그대로 두면 일꾼 없는 에피소드가 남는다. 곧바로 다시 띄우지 않는 것은 스레드 기동 실패가 자원 고갈이라 곧 다시 실패할 가능성이 높고, 되풀이에는 따로 상한이 들기 때문이다. 결과는 놓치는 쪽이다(그 끊기는 오늘처럼 멈출 수 있다) · 다음 끊기는 새 에피소드로 다시 띄운다.
-- **줄이 큐에 못 들어간 경우 [리뷰 2 A7 — 문서화 · 코드 변경 없음, 사유]:** 통로가 `push` 에 실패하면(`stdio.rs:403`) 에피소드는 남는다. 큐가 닫히는 길은 셋이다 — ⓐ `shutdown()`(`stdio.rs:434` — Job 도 끝나 판이 아무것도 못 고른다) ⓑ 라이터 기동 실패(`stdio.rs:266-272` — 스폰 직후라 입력이 한 번도 claude 에 닿지 않아 claude 가 턴을 열지 않고, 문은 진행 줄에서만 열리므로(`claude/mod.rs:1111-1117`) 에피소드가 생길 수 없다) ⓒ 쓰기 오류 · 라이터 패닉(`input_queue.rs:266-289` — claude 의 stdin 이 깨져 그 뒤 어떤 입력도 못 간다). ⓒ 에서는 `push` 가 **성공한 뒤** 쓰기가 실패할 수도 있어(그 모듈 계약 — 「받아 둔 뒤의 실패」는 호출자에게 돌아갈 길이 없다 · `input_queue.rs:266-269`), `push` 실패에만 거는 되돌리기는 구멍을 반만 막고 `InterruptLine` 계약(ADR-0238 결정 2)을 넓힌다. 그래서 되돌리지 않고 §8 ⑬ 에 한계로 적는다 — 남는 노출은 「stdin 이 깨진 채 도는 턴」에서 판 한 번이고, 고르는 것은 결정 4 로 부모가 죽은 것뿐이다.
-- **decoder**(`consume_live_line` — `claude/mod.rs:1111-1117`) — `open` 을 쓰는 것은 decoder 하나뿐이라, 자기 쪽에 그림자 값을 두고 **바뀔 때만** 자물쇠를 잡는다(턴마다 두 번꼴):
-  - 진행(`Progress`)이고 그림자가 닫힘 → `open = true`.
-  - 끝(`Ended`) → `open = false` + `episode = None`(한 구간). 진행은 에피소드를 건드리지 않는다. 이어받기(`LineSource::Transcript`)는 이 자리를 지나지 않는다(오늘 그대로).
-- **불변식:** 자물쇠 밖에서 보이는 어떤 순간에도 「에피소드가 `Waiting`/`Cleaning` 이면 그것은 문이 열린 뒤 받아들인 끊기다」 · 「에피소드가 `Waiting`/`Cleaning`/`Spent` 이면 일꾼이 떠 있다」(기동 실패는 에피소드를 `Done` 으로 내려 두 번째 불변식을 지킨다).
-- **자물쇠 규칙:** §3-3 끝의 문단이 정본이다(잎 자물쇠 + 예외 둘 — 시계 읽기 · `TerminateProcess` 호출 하나). 독(poison)을 견딘다 — 잡기는 늘 `lock().unwrap_or_else(PoisonError::into_inner)`(선례 `stdio.rs:160`). 안의 셈은 필드 대입과 `checked_add` · `saturating_duration_since` 뿐이라 패닉이 없다.
-- **사용자 규칙과의 대응 [고름 — 사유]:** 사용자 규칙은 「실제로 끊기를 보낸 Esc 의 시각 · 새 턴의 뒤 Esc 는 덮어쓴다 · 되풀이 Esc 는 무시되어 적히지 않는다(ADR-0244) · 따로 지우지 않는다」다.
-  - Esc 한 번의 경로에서는 에피소드의 첫 끊기 = 그 Esc 라 문턱 · 대기 기준이 규칙과 같다.
-  - ADR-0244 의 무시는 **프론트 창마다** 선다(결정 a) — 버스의 LLM 이나 다른 창의 끊기는 같은 턴 안에서 또 온다. 정리 전이면 같은 에피소드로 이어 적고, 정리를 한 번 돈 뒤면 새 에피소드(새 문턱)다.
-  - ★「따로 지우지 않는다」와는 다르다★ — 턴 끝에서 지우고, 정리를 한 번 돈 에피소드는 다시 쓰지 않는다(한 번 쓰고 버림). 그렇지 않으면 턴 끝을 놓친 기록(§8 ②)이 다음 턴들로 옛 문턱을 끌고 간다(리뷰 1 B). 사용자 체감은 없다 — 오살을 줄이는 쪽으로만 다르다.
-- **Esc 와 버스 명령을 가르지 않는다 [고름]:** backend 에는 둘 다 같은 `interrupt()` 로 닿고(CLAUDE.md 「LLM-우선 제어」 — 같은 핸들), 멈춤도 같게 난다.
+- **끊기 줄 함수**(백업 `leftover.rs:889` 를 두 구간으로):
+  1. 정리기가 없으면 오늘 그대로.
+  2. **구간 ①** — 문 닫힘 → `None` · 산 에피소드 → `Cleaning` 이면 `Waiting` · 그 `gen` 으로 받아들임 · ★`opening` 이 참(다른 Esc 가 여는 중) → 줄만 준다(`on_written` 없음 — 여는 이의 에피소드가 그 턴을 맡는다)★ · 그 밖 → `opening = true` · `Mark`.
+  3. **여는 이만** 자물쇠 밖에서: ⓐ 포트 · 듣는 스레드 확보(§3-5 — 포트 → 스레드 기동 → Job 붙이기 · `OnceLock` + 굳은 실패 표시 `port_failed` 를 함께 본다 → `Failed(port)`) ⓑ `R = recorder.start()`(`active = R` · `full` 초기화 · 남아 있던 기록은 꺼내 받아 **놓은 뒤** 버린다) ⓒ 스냅숏(아래). ★기록을 스냅숏 앞에 켠다 — 그 뒤 태어난 것은 기록되거나(명단 뒤) 명단에 든다(명단 앞) · 둘 다면 스냅숏 쪽★.
+  4. **구간 ②** — `opening = false` · 문 닫힘 · `closes` 바뀜 → `None`(줄 없음) · ★`recorder.active` 원자 읽기 ≠ R · `delivers` · `next_gen` 바뀜 → **에피소드를 세우지 않고 줄만 준다**(`on_written` 없음 — 놓침 · debug `stale`)★ · 산 에피소드가 있음 → 여는 이가 하나라 닿지 않는 갈래(`debug_assert` + 로그 · 줄만 준다) · 그 밖 → 새 에피소드(찍은 것 · `rec = R` · `written = false` · `Waiting`).
+  5. 놓은 뒤: 갈아 끼운 옛 에피소드의 스냅숏을 버리고 그 기록을 끈다 → `InterruptOut { bytes, on_written: Some(W 찍기 + note_written(gen, W)) }`.
+  - ★**여는 이 가드(drop 가드)**★: 3 에 들어설 때 세우고, 구간 ② 가 새 에피소드를 세웠을 때만 해제한다. 해제되지 않은 모든 출구(패닉 · 이른 반환 · 줄 없음 · 줄만)에서 — 문 자물쇠를 잡아 `opening = false` 를 내리고 놓은 **뒤에** `recorder.stop(R)` · 찍다 만 스냅숏을 버린다.
+- **스냅숏 찍기 [고름]:** `L = member_pids()`(완전할 때만) · `|L| > 256` → `Failed(too_many)` · 뿌리 ∉ L → `Failed(root)` · L 마다 `pin(pid, kill = false)` — 같은 핸들로 우리 Job 이면 붙들고 사실을 읽는다 · 뿌리 못 붙듦 → `Failed(root)` · 부모가 뿌리인 붙든 멤버가 둘 넘음 → `Failed(shape)`(뿌리 자식 = conhost · claude — Q2 · 추론).
+- **탄생 기록(듣는 스레드) [고름 — 결정 5 · 6 · 7 · 11]:**
+  - **한 알림:** `next(500 ms)` → 가입 알림이 아니면 버림(끝남 = 결정 6) · 가입이면 `active` 원자 읽기 → 0 이면 버림 → 아니면 **자물쇠 밖에서 곧바로** `pin(pid, kill = true)` · ★`Err` 이면 한 번 더 `pin(pid, kill = false)` → 붙들면 **고리 전용**(`killable = false` — 후보는 못 되고 사슬은 잇는다)★ · `Ok(None)`(사라짐 · Job 밖)이면 버림 → 기록 자물쇠 안에서 아직 같은 `active` 이고 ★`(pid, 생성 시각)` 이 새로우면★ `seq` 를 붙여 넣는다(512 넘으면 `full` · 넣지 않음) → 못 넣은 것은 놓은 뒤 버린다.
+  - **시작:** 뜬 스레드는 먼저 여는 이의 「붙었나」를 받는다 — `false` 면 곧바로 끝난다(§3-5).
+  - **매 차례 · 끝:** 매 알림 · 시간 초과마다 약한 Job 손잡이를 잠깐 올려 살아 있는지 · 종료 표식을 본다(★올린 `Arc` 를 `next` 에 들고 들어가지 않는다★) → 사라졌거나 섰으면 `stop(active)` 로 기록을 놓고 포트를 닫고 끝난다.
+  - ★**실패 모드**★: `next` 가 회복할 수 없는 오류이거나 한 차례의 몸통이 패닉하면(차례마다 `catch_unwind`) → `port_failed = true`(굳음 — 이후 에피소드는 `Failed(port)`) · `stop(active)` · warn 한 번 · `unwatch_births()`. 떼기가 성공하면 끝난다. ★떼기가 실패하면 끝나지 않고 **꺼내 버리기만** 계속한다(기록 안 함 · 약한 손잡이 · 종료 표식을 볼 때까지 — 화신 수명으로 묶인다) — 포트가 붙은 채 아무도 안 꺼내면 커널 큐가 커지기 때문이다(라운드 4 codex)★.
+  - **왜 곧바로 여나:** 알림의 PID 는 열어 쥐지 않으면 산 것도 재사용 안 된 것도 보장되지 않는다(MS — §3-5). 곧바로 열어 쥐면 그 뒤로 재사용되지 않고 끝난 부모의 사실도 남는다(하네스 0/4322 놓침 · 가장 짧게 산 중간 고리 = p3t3 의 D 250 ms).
+  - **켬 · 끔:** `start()` · `stop(R)` — 끄는 자리 = 판 완료 · 턴 끝 · 새 입력 · 종료 표식 걸음 · 일꾼 기동 실패 · 패닉 가드 · 갈아 끼우기 · 여는 이 가드 · 듣는 스레드의 끝 · 실패 모드. 모두 문 자물쇠를 놓은 뒤 · 꺼낸 기록은 기록 자물쇠를 놓은 뒤 버린다. 판의 복사는 `active == rec` 가 아니면 빈 것을 준다.
+- ★**쓰기 확인 — 쓰기 명단 W(확인 라운드 codex BLOCK #1)**★: 라이터가 줄을 쓰고(성공 · `mark_written` 뒤 · 아무 락 없이 · 자기 `catch_unwind` 안) 부를 것을 부른다 → ⓐ 약한 Job 손잡이를 잠깐 올려 **`member_pids()` 를 한 번** 찍고(완전하거나 오류 — 1단계 그대로) 정렬해 `W` 로 만든다(올린 `Arc` 는 곧바로 놓는다) ⓑ `note_written(gen, W 또는 실패)` — 문 자물쇠 안에서 같은 `gen` 이고 `Waiting`/`Cleaning` 이면 `last_mono = max(…, now)` · ★첫 쓰임은 W 가 있을 때만 `written = true` · `w = W`(명단 실패 · 손잡이 사라짐 → 그 에피소드는 판이 없다 · 놓침 · warn)★ · 첫 쓰임이 아니면 W 를 돌려받아 놓은 뒤 버린다 · 일꾼 몫 → 놓은 뒤 일꾼 기동.
+  - ★**왜 안전한가 — 알림이 언제 쌓이는지에 기대지 않는다**★: 후보 C 는 탄생 기록의 핸들로 붙든 것이고 판 때 살아 있다. C 가 W 를 찍기 전에 가입했다면 W 를 찍을 때도 살아 있었고(끝난 프로세스는 되살지 않는다) 명단은 완전하므로 **C 의 번호가 W 에 든다 → 후보가 아니다**. 그래서 후보는 모두 W 뒤 — 곧 줄이 쓰인 뒤 — 에 가입한 것이다. 번호로만 비교하므로 W 에 있던 번호가 끝나고 쓰인 뒤 탄생이 그 번호를 다시 쓰면 빠진다(놓침 · 안전 쪽). 기대는 것 = `member_pids` 의 완전성(1단계 — 할당 수와 목록 수가 다르면 오류) · 한 번 든 프로세스는 Job 에서 빠지지 않는다(MS 문서) · 붙든 핸들의 끝남 판정뿐이다.
+  - **알림이 쌓이는 때 · 꺼내는 순서는 효과에만 든다:** 늦게 쌓이거나 늦게 꺼내져도 후보 판정은 그대로 — 짧게 산 고리를 열기 전에 놓칠 수 있을 뿐이다(§8 ③).
+  - ★**놓침 창 — 쓰기와 W 사이**★: 줄이 쓰인 뒤 W 를 찍기 전에 태어나 W 때 살아 있던 것은 W 에 들어 **빠진다**(놓침). 틈 = 라이터가 쓰기에서 돌아와 명단 한 번 찍는 시간(짧다 — 추정 · G1 이 쓰기 → W 지연을 잰다). 잰 여유: 주인은 쓰인 뒤 263–454 ms(p3bg 주인 1.4 s · 그 fork 2.8 s — §3-0 표) · 훅 fork 는 taskkill 보다 1 ms 이상 늦고 taskkill 은 claude 가 줄을 읽은 뒤 띄운다(메인 측정). ★13판의 「흐림이 양쪽 다 사라진다」는 틀렸다 — 이 놓침 쪽 틈이 남는다★.
+  - **후보 = 번호 ∉ W 인 탄생뿐** — W 에 든 것 · W 를 찍기 전에 끝난 것은 고리로만 쓴다. 쓰이지 않은 줄의 에피소드는 판이 없다. 같은 에피소드의 뒤 끊기의 부를 것도 W 를 찍지만 `note_written` 이 버린다(첫 쓰임 것 하나 — 뒤 끊기 사이의 탄생은 여전히 후보가 될 수 있다).
+- **decoder:** 턴 열림(닫힘 → 열림일 때만) · 새 입력(라이브 `started` — 한 구간에서 에피소드를 버리고 `delivers += 1` · 닫혀 있었으면 연다 · B2 실측 claude 2.1.280) · 턴 끝(`open = false` · `episode = None` · `closes += 1`).
+- **불변식:** 「산 에피소드면 문이 열려 있다」 · 「`written` 이면 `w` 가 있다」 · 「쓰인 `Waiting`/`Cleaning` 또는 `Spent` 이면 일꾼이 떠 있다」 · 「`Taken` 스냅숏 · 켜진 기록을 가진 에피소드는 `Waiting`/`Cleaning`」 · 「`opening` 은 여는 이의 두 구간 사이에만 참」 · 「`active` 가 켜져 있으면 그것을 쥔 산 에피소드가 있거나 여는 이가 일하는 중이다」.
 
-### 3-3. N 초 확인 — 일꾼 하나가 에피소드를 끝까지 쥔다
+### 3-3. N 초 확인 · 물러남 · 자물쇠
 
-- **상수:** `leftover.rs` 의 `const INTERRUPT_LEFTOVER_GRACE: Duration = Duration::from_secs(3);` — 대기(N)와 정리 뒤 확인 간격이 이 하나를 쓴다. 스파이크(§3-0 Q3)의 여유: 멈춤 아닌 끊기의 `result` ≤ 1394 ms · 끊기 뒤 생긴 정상 프로세스의 최장 수명 1171 ms · 끊기 +3 s 에 살아 있던 것은 11/11 에서 잔여물뿐.
-- **일꾼 = 화신당 동시에 하나인 스레드**(이름 `engram-claude-leftover`). `worker` 칸이 자물쇠 안에 있어, 일꾼이 떠 있는 동안 새 끊기는 일꾼을 더 띄우지 않고 상태만 바꾼다. 일꾼은 **현재 에피소드**를 처리한다 — 에피소드가 바뀌면(새 세대) 그것을 이어 맡는다.
-- **일꾼의 한 걸음 = 자물쇠 한 구간의 `next_step(now_mono)`:**
+- **상수:** `INTERRUPT_LEFTOVER_GRACE = 3 s` · `PIN_MAX = 256` · `BIRTH_MAX = 512` · `ANCESTOR_MAX = 16` · `PASS_ROUNDS = 3` · `KILL_CONFIRM = 200 ms` · 듣는 대기 500 ms.
+- ★**물러남 시작 [고름 — 라운드 3 codex · 두 번째 지적]**★: `AgentTransport::begin_retire(&self)`(기본 무동작 — pty · codex 통로는 그대로)를 더하고 `StdioTransport` 는 자기 `retiring` 칸(`Arc<AtomicBool>`)을 세운다 · `shutdown()` 첫 줄도 세운다(다른 끝내기 길). `Session::begin_retire()` 가 통로로 넘기고, **`kill_agent`(HEAD `manager.rs:2884`)는 권한 회수 · 의도 · `Exiting` · `session.kill` 보다 먼저**, `tear_down_failed_activation`(HEAD `:2340`)은 화신 표식 대조 뒤 첫 줄에서 부른다(그 밖의 끝내기 길은 `shutdown()` 첫 줄이 세운다). 칸의 주인은 통로 · manager 는 중립 메서드만 부른다 · backend 는 `ProcessGroup::retiring()` 이 주는 읽기 전용 `RetiringSignal`(`is_set()` 만)로 읽는다 — manager 는 backend 의 문을 모른다. 남는 겹침 = 재확인이 표식을 읽은 직후의 끝내기 한 번(§8 ⑲).
+- **한 걸음 `next_step(now, retiring)`:** 표식 → 에피소드를 치우고 끝 · 없음 · `Done` · 쓰이지 않은 `Waiting` → 끝 · 쓰인 `Waiting` 전 → 잔다 · 지남 → `Cleaning` + `Ticket` → 판 · `Spent` 전 → 잔다 · 지남 → `Done` + warn(결정 2).
+- ★**판의 차례(라운드 3 끝내기 안전 F3) [고름]**★: 한 차례 = 기록 복사(기록 자물쇠 안 `Arc` 복제 · `active == rec` 가 아니면 빈 것) → 후보 · 규칙(§3-4) → `Cleanup` 을 **`seq` 오름차순**(먼저 태어난 조상부터)으로 끝내기 확정 → 그 차례에 끝낸 것들을 ★**하나의 마감(200 ms)** 안에서★ 그 핸들로 끝남 확인(`wait_exit(남은 시간)`) → 다음 차례. 끝낸 것은 다음 차례에서 「끝난 알려진 고리」로 보여, 그것이 거느리던 사본(p3bg 의 24776)이 후보가 된다. `Cleanup` 이 없으면 멈춘다 · **최대 3 차례** — 잰 가장 긴 것이 2 차례(p3bg: 주인 → 그 fork)이고 한 차례를 여유로 둔다(넘으면 warn `rounds_exhausted`). 마감 안에 안 끝난 것은 다음 차례에서 산 것으로 보여 그 아래는 빠진다(놓침).
+  - ★**재확인이 거절되면 판 전체를 멈춘다**★(턴 끝 · 새 끊기 · 새 입력 · 종료 표식으로 `still_due` 거짓 — 남은 후보와 다음 차례를 버린다 · debug `superseded`).
+  - **판 시간의 상한** = 3 차례 × (확인 마감 200 ms) + 고르기 · 복사 · 끝내기 호출 — 기다림은 판마다 많아야 0.6 s 다.
+- **끝내기 확정(5판 그대로):** 문 자물쇠 안에서 단조 시각 · 표식을 읽어 `still_due` = 표식 없음 · 같은 세대 · 쓰임 · `Cleaning` · 쓰임 + N ≤ now → 참이면 탄생 기록의 핸들로 `terminate_raw` 하나(두 시각 읽기로 감쌈) · `note_kill` → 놓은 뒤 가르기 · 확인 · 로그.
+- **판 끝:** `Spent`/`Done` · 스냅숏 `Released` · 기록 끔 — 돌려받은 것과 `Ticket` 은 자물쇠를 놓은 뒤 버린다. 완료된 판은 한 번.
+- **패닉 가드:** 되감기 → `worker = false` · `Done` · 스냅숏 · 기록 돌려받음 → 놓은 뒤 warn · 정상 종료는 가드 해제.
+- ★**자물쇠 규칙(정본 — CLAUDE.md 락 순서 줄이 옮긴다)**★
+  - **문 자물쇠 `GateCell.state` 는 잎이다: 쥔 채 로그 · 스레드 기동 · emit · 잠 · 다른 자물쇠 · 할당과 해제 · 명단 조회 · 붙들기와 핸들 닫기 · 그 밖의 OS 호출을 하지 않으며, 예외는 ⓐ 단조 시각 읽기 ⓑ 끝내기 확정의 `TerminateProcess` 호출 정확히 하나뿐이다. 원자 읽기(종료 표식 · `recorder.active`)는 허용된다. 스냅숏 · 기록 번호는 밖에서 만들어 옮겨 넣고, 치운 것과 판의 표는 놓은 뒤 버린다.**
+  - **기록 자물쇠 `Recorder.inner` 도 잎이다: 쥔 채 필드 · `Vec` 넣기 · `Arc` 복제 · 꺼내기(할당 허용)만 하고, OS 호출 · 핸들 닫기(`Arc<Birth>` 의 마지막 drop) · 로그 · 다른 자물쇠는 하지 않는다. 문 자물쇠와 겹쳐 잡지 않는다. 독을 견딘다.**
+  - 잡는 자리: 문 = 끊기 줄 함수 · 쓰기 확인(라이터 — 아무 락 없이 부르고 · W 찍기는 락 밖 · `note_written` 만 문) · decoder · 일꾼 · 판 끝 · 확정 · 패닉 가드 · 여는 이 가드 / 기록 = 듣는 스레드 · `start` · `stop` · 판의 복사.
 
-  | 상태 | 걸음 |
-  |---|---|
-  | 에피소드 없음 · `Done` | `worker = false` → 끝난다 |
-  | `Waiting` · 가장 최근 끊기 + N 전 | 남은 시간을 받아 자물쇠 밖에서 잔다 |
-  | `Waiting` · 지남 | `Cleaning` 으로 바꾸고 `(gen, first_wall, clock_ok)` 를 받아 자물쇠 밖에서 **정리 한 판**(§3-4) |
-  | `Spent{at}` · `at + N` 전 | 남은 시간만큼 잔다 |
-  | `Spent{at}` · 지남 | `Done` 으로 바꾸고 warn 「정리 뒤에도 턴 끝이 없다」 한 줄 → 다음 걸음에서 끝난다. **다시 죽이지 않고 재시작도 없다(결정 2)** |
+### 3-4. 고르기 — 규칙
 
-- ★**끝내기 확정 — 재확인과 `TerminateProcess` 를 한 자물쇠 구간에서 [리뷰 2 C1]**★. 3판은 재확인(`still_due`)을 자물쇠 안에서 한 뒤 **놓고** 끝냈다 — 그 틈에 새 끊기나 턴 끝이 들어와도 일꾼은 끝냈다. 4판의 후보 하나 처리:
-  1. 자물쇠 **밖**: `verify(who)` — 같은 핸들로 우리 Job 소속 · 생성 시각 · 생존을 확인하고 **검증된 핸들**을 받는다(§3-5). 실패면 그 후보를 건너뛴다(끝내지 않는다).
-  2. 자물쇠를 잡고 **그 안에서** 단조 시각을 읽어 `still_due(gen, now_mono)` — 에피소드가 있고 · 세대가 같고 · `Cleaning` 이고 · 가장 최근 끊기에서 N 이 지났나. 거짓이면 핸들을 **쥔 채** 자물쇠를 놓고, 놓은 **뒤에** 핸들을 버리고(`CloseHandle`) 그 판의 나머지를 버린다(debug).
-  3. 참이면 **자물쇠를 쥔 채** 검증된 핸들로 `TerminateProcess` **호출 하나만** 하고 그 날것 결과(성공/실패)를 쥔 채 자물쇠를 놓는다.
-  4. 놓은 **뒤에** 결과를 가른다 — 실패면 `WaitForSingleObject(h, 0)` 로 「그 사이 스스로 끝났나(`Gone`)」를 보고, 핸들을 닫고, 로그를 쓴다(리뷰 3 아키텍트 — 4판은 핸들을 소비하는 `terminate(self)` 라 닫기 · 실패 분류가 자물쇠 안에서 돌았다).
-  - 그래서 끊기 줄 함수 · decoder 가 자물쇠를 잡는 순간은 「끝내기 전」이거나 「끝내기 뒤」 둘 중 하나다 — 판 도중의 새 끊기(`Waiting` 으로 되돌림)나 턴 끝(에피소드 지움)은 그 뒤의 어떤 `TerminateProcess` 도 막는다.
-  - **더 깔끔한 순서는 찾지 못했다:** 「끝내는 중」 표식을 자물쇠 안에 세우고 놓은 뒤 끝내는 방식은 표식이 선 동안의 끊기 · 턴 끝을 기다리게(막게) 하거나 무시하게 되어 같은 문제로 돌아간다. 재확인과 끝내기가 원자여야 하는 이상, 가장 짧은 원자 구간이 이것이다.
-- **판 끝 `finish_pass(gen, killed, now)`(자물쇠 한 구간):** 같은 세대가 아직 `Cleaning` 이면 — 하나라도 끝냈으면 `Spent{at: now}`(N 뒤 확인), 하나도 못 끝냈으면 곧바로 `Done`(판 자신의 warn 이 사유를 이미 남겼다 — §3-8). `Waiting` 으로 되돌아갔거나 에피소드가 없거나 세대가 다르면 건드리지 않는다.
-- **한 번 쓰고 버림:** `Spent`/`Done` 인 에피소드는 다시 판을 돌지 않는다. 그 턴에 새 끊기가 오면 **새 에피소드 · 새 문턱**이다(§3-2). 옛 에피소드의 N 뒤 확인 warn 은 세대가 달라져 나가지 않는다.
-- **취소 신호가 없다 — 깰 때마다 다시 잰다:**
+**판의 순서 [고름] — 하나라도 서지 않으면 아무것도 안 끝낸다:** 1 표식 없음(debug `retiring`) → 2 스냅숏 `Taken` 이고 기록이 살아 있음(`active == rec` — 아니면 듣는 스레드가 실패해 기록을 놓은 것)(warn `snapshot_failed`(`cause` = list · root · too_many · shape · port)) → 3 붙든 뿌리가 산다(debug `root_gone` · warn `root_unknown`) → 4 차례들(§3-3) — 후보 0(첫 차례) → warn `no_new_member`(`births` · `full`) · 모두 빠짐 → warn `parent_rule`(규칙별 수) → 5 끝내기 전마다 뿌리 · 표식 재확인(밖) → 6 확정 · 확인(오류 warn · 하나도 못 끝냄 warn `all_failed`).
 
-  | 경우 | 무엇이 일어나나 |
-  |---|---|
-  | 턴 끝이 왔다 | decoder 가 에피소드를 지웠다 → 깨어 「없음」 → 끝 · 판 도중이면 다음 끝내기 확정에서 멈춘다 |
-  | 새 끊기가 왔다(정리 전) | 같은 에피소드의 `last_mono` 가 밀렸다 → 남은 만큼 더 잔다 |
-  | 새 끊기가 왔다(판 도중) | `Waiting` 으로 되돌아갔다 → 판이 다음 확정에서 멈추고 새 끊기 + N 까지 기다린 뒤 **같은 문턱**으로 다시 판을 돈다 |
-  | 새 끊기가 왔다(정리 뒤) | 새 에피소드 → 같은 일꾼이 이어 맡는다 |
-  | 세션 kill · 자연 종료 | 손잡이가 `Weak` 라 통로가 사라졌으면 명단이 빈다 · 아직 통로가 있어도 `shutdown()` 이 Job 을 통째 끝냈으면(`stdio.rs:443-448`) 명단이 비거나 멤버가 `Gone` 이다 → 아무것도 안 죽이고 에피소드는 `Done` |
+**후보** = 이 기록(`rec`)의 탄생 중 ★번호 ∉ 쓰기 명단 W(§3-2 — 쓰기 전 탄생을 막는 벽)★ · `killable` · 그 (pid, 생성)이 스냅숏에 없음 · 붙든 핸들이 끝나지 않음.
 
-- **수명 상한:** 일꾼은 마지막으로 받아들인 끊기 뒤 늦어도 **2N + 정리 시간** 안에 스스로 끝난다(끊기가 계속 오면 그만큼 산다 — 동시에 하나라 쌓이지 않는다). join 하는 이 없음(`stdio.rs:248-253` 라이터와 같은 모양). 쥐는 것은 `Arc<TurnGate>` · 정리기 `Arc` · `Weak` Job 손잡이뿐이라 **프로세스 수명을 늘리지 않는다**(§4 소유권).
-- ★**자물쇠 규칙(정본 — CLAUDE.md 락 순서 줄이 이 문장을 옮긴다)**★ — **`TurnGate.state` 는 잎 자물쇠다: 쥔 채 로그 · 스레드 기동 · emit · 잠 · 다른 자물쇠 · 그 밖의 OS 호출을 하지 않으며, 예외는 둘뿐이다 — ⓐ 시계 두 값 읽기(단조 카운터 · 시스템 시각 — 막히지 않는 읽기 · 기록 순서를 표본 순서와 맞추려고) ⓑ 끝내기 확정에서 검증된 핸들로 부르는 `TerminateProcess` 호출 정확히 하나(핸들 닫기 · 실패 분류 · 로그는 놓은 뒤).** 예외 ⓑ 가 안전한 이유: `TerminateProcess` 는 비동기다 — 종료를 시작하고 곧 돌아오며 대상이 끝나기를 기다리지 않는다(MS 문서의 서술 · 이 문서가 재지는 않았다) · 정리 판(드묾 — 멈춤 때만) 동안에만 일어난다 · 그 자물쇠를 기다릴 수 있는 것은 끊기 줄 함수(사람 · LLM 속도)와 decoder 의 문 전이(턴마다 두 번꼴)뿐이고 기다림은 그 호출 한 번 길이다 · 안에서 다른 자물쇠를 잡지 않아 락 순서에 간선이 없다. 그 밖의 OS 호출(명단 · 표 · 시작시각 · 검증 · 핸들 닫기)은 전부 자물쇠 밖이다.
+**규칙(후보 C · 기록된 부모 D). 알려진 고리 = 스냅숏의 붙든 멤버 또는 같은 기록의 탄생. ★모든 고리에서 부모의 생성 시각 ≤ 자식의 생성 시각(붙든 핸들로 읽은 두 커널 도장)이어야 한다 — 아니면 그 고리는 알려지지 않은 것이다★:**
 
-### 3-4. 고르기 — 정리 한 판의 순서와 순수 함수
-
-**판의 순서 [고름] — 앞에서부터 하나라도 서지 않으면 그 판은 아무것도 안 끝낸다(닫힌 실패):**
-
-| # | 단계 | 서지 않으면 |
-|---|---|---|
-| 0 | 약한 손잡이를 올린다 | 통로가 사라짐 → debug |
-| 1 | 에피소드의 `clock_ok`(§3-6) | 첫 끊기 무렵 시계가 뒤로 뛰었다 → **warn** |
-| 2 | Job 명단(완전한 것만 — §3-5) | 조회 실패 · 불완전 → **warn** · 빈 명단(에이전트가 이미 죽음 · Job 이 끝남) → debug — ★모양 가드 전에 끊는다★(가짜 모양 warn 방지) |
-| 3 | 멤버 시작시각 첫 읽기 `s1`(명단 직후) | — (못 읽은 멤버는 그 멤버만 빠진다) |
-| 4 | 프로세스 표 한 장(`base::platform::process_parent_table`) | 스냅숏 실패 · 목록 중간 오류 → **warn** |
-| 5 | 멤버 시작시각 둘째 읽기 `s2`(표 직후) — ★`s1 == s2` 이고 둘 다 앎일 때만 그 멤버를 쓰고, 그 값을 끝내기의 기대 시작시각으로 쓴다★ | — (어긋난 멤버는 그 멤버만 빠진다) |
-| 6 | 층 걷기 `walk_levels`(깊이 0 ‥ depth+1 — 표 기반) | 뿌리 신원 어긋남 · 보호 깊이 안의 **Job 멤버**가 시작시각을 못 읽음 → **warn** |
-| 7 | 모양 가드 `keep_set` | 래퍼 층 식구 수 ≠ 기대 → **warn** |
-| 8 | 고르기 `select_leftovers`(보호 밖 · 문턱 ≤ 생성 ≤ 지금 · 부모 죽음) | 후보 0 → **warn**(부모가 살아 있어 뺀 수 · 미래 생성으로 뺀 수를 함께) |
-| 9 | 후보마다 끝내기 확정(§3-3) | 검증 실패 → 그 후보만 건너뜀 · 재확인 거짓 → 나머지 버림(debug) |
-
-**멤버 PID ↔ 표 ↔ 시작시각의 짝 [리뷰 2 K1 — 고름]:** 명단(2) · 표(4) · 시작시각은 서로 다른 순간에 뜬다. 멤버 X(PID p)가 표 **뒤**에 죽고 p 가 우리 Job 의 새 프로세스 Z 에게 넘어가면, 시작시각 한 번만 읽으면 (p, Z 의 시작) 이 **X 의 표 줄(X 의 부모)**과 짝지어진다 — X 의 부모가 죽었으면 Z 가 「부모 죽음」으로 읽혀, 부모가 살아 있는 Z(예: 도는 `cargo` 의 새 `rustc`)를 끝낸다. 그래서 시작시각을 **표 앞뒤로 두 번** 읽는다: `s1 == s2` 면 p 는 그 사이 내내 같은 프로세스였다(PID 는 프로세스 객체가 남아 있는 동안 재사용되지 않고, 같은 번호의 새 주인은 다른 시작시각을 갖는다) → 표 줄도 그 프로세스의 것이다. 어긋나면 그 멤버를 뺀다. 끝내기의 기대 시작시각도 이 값이라, 검증(§3-5)이 다시 한 번 같은 프로세스인지 본다.
-
-**보호 집합 — 사용자 규칙의 「claude」·「claude 의 직계 자식」을 구조로 가린다 [고름]:**
-
-- 뿌리 = 통로가 띄운 자식. Windows 에서 그것은 claude 가 아니라 `cmd.exe` 래퍼다(`console_command` — `backend/mod.rs:37-57` · `stdio.rs:414-415` · `:443` 「손자(cmd 아래 claude)」). claude 는 뿌리에서 **래퍼 깊이**만큼 내려간 층(「래퍼 층」)에 있다.
-- ★**래퍼 층은 claude 하나가 아니다(스파이크 Q2 · 4/4)**★ — Windows 에서는 `cmd.exe` 의 콘솔 호스트 `conhost.exe` 가 같은 층에 있다. 그래서 「claude 층이 비면 정리하지 않는다」는 거짓 안심이다 — claude 가 죽어도 cmd.exe 가 사는 동안 conhost 가 층을 채운다.
-- **래퍼 모양 = 두 사실의 합성 [고름 — 리뷰 1 F]:** 사실마다 주인이 다르고, 각 사실의 `#[cfg]` 는 그 주인의 **함수 하나** 안에서만 선다(CLAUDE.md 「플랫폼 중립」).
-  - **래퍼 깊이** = `console_wrapper_depth()`(`console_command` 옆 · Windows 1 = `cmd.exe /c` · 그 밖 0).
-  - **스폰이 뿌리 아래 붙이는 프로세스 수** = `ProcessGroup::root_attached()` — 통로가 정한다. Windows 의 stdio 통로는 `CREATE_NO_WINDOW`(`stdio.rs:101-108`)로 콘솔 앱을 띄워 숨은 콘솔의 호스트가 뿌리의 자식으로 붙으므로 1 이다(스파이크 Q2). 그 값은 `process_group()` 의 Windows 갈래 안에 둔다. PTY 스폰이었다면 호스트가 다른 자리에 붙을 것이다(추론) — 그래서 `console_command` 의 사실이 아니다.
-  - **합성**은 claude `open_spawn` 에서 한다(두 선택이 만나는 곳 · `#[cfg]` 없음): `WrapperShape::compose(depth, root_attached)` → `layer_size = 1 + (depth == 1 ? root_attached : 0)` — 깊이 0 이면 붙은 프로세스는 프로그램의 자식(보호 층 안)이고, 깊이 1 이면 프로그램의 형제다.
-- ★**모양 가드 — 래퍼 층의 식구 수가 `layer_size` 와 정확히 같을 때만 정리한다**★. 적으면(claude 가 죽어 conhost 만 · 뿌리 신원이 어긋나 층이 빔) 멈추고 · 많으면(예상 밖 모양) 멈춘다. 스폰 방식이 바뀌어 모양이 어긋나면 **무동작**으로 드러난다(오살 아님).
-- 보호 집합 = 깊이 0 ‥ depth+1 의 신원 전부 = 뿌리 사슬 · 래퍼 층(claude **와 콘솔 호스트**) · 그 아래 한 층(claude 의 직계 자식 · 콘솔 호스트의 자식 — 후자는 관측된 적이 없다). 보호를 넓힐 뿐이다(덜 죽이는 쪽).
-- **대가 — claude 의 PID 를 따로 집지 않는다.** 로그 · G2 는 래퍼 층 전체를 싣는다(§3-8 · §7).
-- **거부한 가려내기:** ⓐ 이름으로 콘솔 호스트를 가린다(`conhost.exe`) — 실행파일 이름 읽기(OS 호출 하나 더)와 손으로 드는 이름 목록이 든다. ⓑ 생성 순서(콘솔 호스트가 먼저 — +5 ms 대 +60 ms) — 시각의 우연에 기댄다. ⓒ 가드 없이 래퍼 층 전체 보호 — 「claude 가 죽었다」를 못 가린다.
-
-**나무 걷기 — 닫힌 실패, 단 「사라짐」은 건너뛴다 [리뷰 1 J · 리뷰 2 K5/A6 · A1]:**
-
-- `base::platform::process_parent_table() -> Option<Vec<(u32 /*pid*/, u32 /*ppid*/)>>` — Toolhelp 스냅숏 **한 장**. ★`Process32NextW` 의 `ERROR_NO_MORE_FILES` 만 목록 끝이고, 그 밖의 오류는 `None`★(오늘 `child_pids` 는 어떤 오류든 끝으로 본다 — `base/src/platform.rs:189-191`. 목록이 잘리면 ppid 가 빠져 멤버가 「부모 죽음」으로 읽히고 보호 층이 줄어든다). 스냅숏 생성 · 첫 항목 실패도 `None`. `child_pids` 는 그 위로 옮긴다(`parent == 0` 조기 반환 유지 — 시험 `:266` · `None` 이면 오늘처럼 빈 목록).
-- `base::platform::process_start(pid) -> ProcessStart { Known(u64), Gone, Unknown }` — `OpenProcess` 가 `ERROR_INVALID_PARAMETER`(87)로 실패하면 `Gone`(그 번호의 프로세스가 없다 — 같은 파일의 `alive_from_open_error` 가 이미 쓰는 판정 · `:62-88`), 그 밖의 여는 실패(`ERROR_ACCESS_DENIED` 등) · `GetProcessTimes` 실패는 `Unknown`. ★`pid == 0` 은 열지 않고 곧바로 `Unknown`★(리뷰 3 — System Idle Process 는 살아 있는데 `OpenProcess` 가 바로 그 87 로 실패하는 유일한 경우라 `Gone` 으로 오독된다). `process_creation_time` 은 `Known` 만 `Some` 으로 옮긴다(동작 동일 — `process_creation_time(0) == None` 시험 `:239` 그대로).
-- 순수 `process_tree::walk_levels(root, max_depth, children: &dyn Fn(u32) -> Option<Vec<ProcessIdentity>>) -> Option<Vec<(ProcessIdentity, usize)>>` — `walk` 의 두 규칙을 그대로 쓰고, `children` 이 `None` 을 주면 **전체가 `None`** 이다.
-- 실제 `children(pid)` = 표에서 ppid 가 pid 인 줄마다 `process_start`:
-  - `Known` → 신원으로 쓴다.
-  - `Gone` → **건너뛴다**(그 사이 끝난 프로세스 — 보호할 것도 끝낼 것도 없다 · 끝내기도 `Gone` 이다).
-  - `Unknown` 이고 그 pid 가 **Job 멤버**(2 단계 명단) → **`None`**(보호해야 할지 모르는 우리 프로세스를 가릴 수 없다).
-  - `Unknown` 이고 Job 멤버가 **아님** → 건너뛴다. 예: 우리 PID 와 같은 번호를 ppid 로 단 남의 프로세스(ppid 가 묵은 값). 멤버가 아니면 후보가 될 수 없고, Job 소속은 자식에게 이어지므로 그 아래에도 멤버가 없다.
-- 뿌리 신원 확인(시작시각 대조)은 걷기 전에 한다 — 어긋나면 `None`.
-
-**순수 함수:**
+1. **부모(결정 11 · 4):** D 가 알려진 고리가 아니면(유실 · 제때 못 엶 · 순서 어긋남 · 0) `parent_unknown` · D 산다 → `parent_alive` · 오류 → `unknown` · 끝남 → 다음.
+2. **훅 사본(결정 10):** C 와 D 의 실행 파일 경로가 같고 ⓘ C 의 명령줄 == D 의 명령줄(fork 사본 — 1820/1820) 또는 ⓘⓘ `is_hook_command(D)`(C 는 그 껍데기가 exec 한 스크립트 — p3bg) → 다음 · 아니면 `not_hook_copy` · 빈 칸 → `unknown`. exec 된 프로그램(`sleep` · `cat` · 서버 · 빌드 자식)은 빠진다.
+3. **조상(결정 9 · 11):** `A₁ = D` 에서 적어 둔 부모를 따라 걷는다 · `parent(Aₖ) == 뿌리` 인 `Aₖ`(claude)에서 멈추고 판단하지 않는다 · `A₁ … Aₖ₋₁` 은 알려진 고리이고(생성 순서 포함) 끝났어야 한다 — 산다 → `ancestor_alive` · 알려지지 않음 · 0 · 순환 · 16 초과 · k = 1 · 뿌리에 먼저 닿음 → `chain_cut` · 오류 → `unknown`. 꼭대기 **T = Aₖ₋₁**.
+4. **훅 사슬(결정 10):** T 의 실행 파일 이름이 `bash.exe` 이고 `is_hook_command(T)` 이며 ★이 기록에 **부모가 claude(= `Aₖ`)이고 실행 파일이 `taskkill.exe` 이고 명령줄에 `/PID <T 의 PID>` · `/T` · `/F` 가 있고 생성이 T 의 생성 이상인** 탄생이 있다★(그 taskkill 이 T 를 가리키는 고리도 부모 · 자식 순서를 지킨다 — 번호 재사용으로 옛 T 를 가리키던 taskkill 을 걸러 낸다) → 끝낼 후보 · 아니면 `not_hook`(taskkill 이 없으면 `no_taskkill`).
+   - **`is_hook_command(f)`** = 명령줄이 「첫 토큰 · `-c` · 인자 S」 모양이고 S 가 `bash ` 로 시작하며 `shell-snapshots` 를 담지 않는다(양성 · claude 2.1.284 의 `.sh` 훅 감싸기 · 291 대 6 · 음성 표지는 좁히기만).
+   - **taskkill 표지:** claude 는 끊기 때 돌던 훅 실행기마다 `taskkill /PID <실행기> /T /F` 를 두 차례 띄운다(WRITEUP B · 표가 있는 멈춤 7/7 에서 꼭대기마다 2 건 — `procs/*.procs.tsv` 대조 2026-09-30). Bash 도구 실행기에는 띄우지 않았다. 양성 · **좁히기만** 한다 — claude 가 끊기 방식을 바꾸면 모두 놓친다(안전).
+- **고리마다 훅 사본 검사(선택 — 채택 안 함):** 껍데기 → 실행기 고리는 실행 파일이 달라(`usr\bin` 대 `bin`) 셋째 모양이 필요하고, 규칙 2 · 4 · taskkill 이 사슬을 이미 훅 나무로 묶는다 — 얻는 것이 없다.
+- **claude · 래퍼 · 콘솔 호스트:** 스냅숏에 있어 후보가 못 된다 · claude 의 직계 자식(taskkill · 끊기 뒤 뜬 훅 실행기)은 부모 claude 가 살아 1 에서 빠진다 · 뿌리 생존 = claude 생존(`cmd /c` · Q2) · 런처가 끼면 T = claude.exe → `not_hook`(모두 놓침 · 안전).
+- **모두 AND 거르개**(조사 §7 「고아 여부는 주 기준이 아니다」).
 
 ```rust
-/// 래퍼가 만드는 모양 — 두 사실의 합성(순수 · cfg 없음).
-pub(crate) struct WrapperShape { pub(crate) depth: usize, pub(crate) layer_size: usize }
-impl WrapperShape { pub(crate) fn compose(depth: usize, root_attached: usize) -> Self; }
-/// 걷기 결과에서 보호 집합 — 래퍼 층 식구 수가 `layer_size` 와 다르면 `None`.
-fn keep_set(levels: &[(ProcessIdentity, usize)], shape: WrapperShape) -> Option<Vec<ProcessIdentity>>;
-/// 명단 · 두 번 읽은 시작시각 · 표에서 멤버와 부모 상태를 만든다 — s1 ≠ s2 · 못 읽음 · ★표에 자기 줄이 없는 멤버★는 뺀다
-/// (자기 ppid 를 모르면 부모를 판정할 수 없다 — 스냅숏 전에 끝났거나 그 뒤에 명단에 들었다).
-fn members_with_parents(member_pids: &[u32], s1: &dyn Fn(u32) -> ProcessStart, table: &[(u32, u32)],
-                        s2: &dyn Fn(u32) -> ProcessStart, parent_start: &dyn Fn(u32) -> ProcessStart) -> Vec<Member>;
-struct Member { id: ProcessIdentity, parent: ParentState }
-enum ParentState { Alive(ProcessIdentity), Dead, Unknown }
-/// 후보 = 보호 집합 밖(신원 비교) · threshold ≤ 생성 ≤ now_wall · 부모 `Dead`(결정 4).
-fn select_leftovers(members: &[Member], keep: &[ProcessIdentity], threshold: u64, now_wall: u64) -> Vec<Member>;
+fn select(c: &Link, esc: &Chain) -> Verdict;   // 순수 — Chain = 스냅숏 + 기록을 (pid, 생성)으로 찾는 보기 · 「끝났나」는 주입
+fn is_hook_command(f: &ProcessFacts) -> bool;
+fn taskkill_names(f: &ProcessFacts, claude: u32) -> Option<u32>;   // `/PID n /T /F` 의 n
+enum Verdict { Cleanup { chain: Vec<u32> }, ParentAlive, ParentUnknown, NotHookCopy, AncestorAlive { pid: u32 }, ChainCut, NotHook, NoTaskkill, Unknown }
 ```
 
-- **부모 상태(결정 4) — 걷기와 같은 표 한 장에서 [PID 재사용 규칙]:** 멤버의 ppid 를 판의 표(4 단계)에서 읽는다. 표가 실패하면 판 전체가 멈추므로 부모 판정이 따로 실패할 길이 없다.
-  - ★멤버 **자신의** 줄이 표에 없으면 그 멤버를 뺀다(리뷰 3)★ — ppid 를 모르면 부모를 판정할 수 없다.
-  - `Alive(p)` = ppid 가 표에 있고 · `process_start` 가 `Known` 이고 · **시작시각 ≤ 멤버 시작시각**(`walk` 의 규칙과 같다 · 같은 눈금 허용).
-  - `Dead` = ppid 가 표에 없다 · `Gone` 이다 · 또는 **멤버보다 늦게 태어난 프로세스가 그 번호를 쥐고 있다**(PID 재사용 — 진짜 부모는 멤버를 낳을 때 살아 있었으므로 그 번호의 새 주인은 멤버보다 늦게 태어날 수밖에 없다).
-  - `Unknown` = 표에 있는데 `process_start` 가 `Unknown`(권한 밖 프로세스가 번호를 쥠 등) → **후보에서 뺀다**(판정할 수 없으면 덜 죽이는 쪽).
-  - ★표가 **끝났지만 아직 참조되는(좀비) 프로세스**를 싣는다면 죽은 부모가 `Alive` 로 읽혀 잔여물을 놓친다★(놓치는 쪽). Toolhelp 가 좀비를 싣지 않는다는 가정은 스파이크의 간접 증거(잔여물의 부모가 「죽음」으로 보였다 · 3/3)뿐이라 실프로세스 시험으로 박는다(§5 실프로세스 ⑤ · 리뷰 2 K4).
-- `select_leftovers` 의 조건은 넷의 **AND** — 보호 밖 · `created >= threshold` · ★`created <= now_wall`(판의 벽시계 — 지금보다 미래에 태어난 것으로 읽히면 그 뒤 시계가 뒤로 뛰었다는 뜻이라 뺀다 · §3-6)★ · `parent == Dead`. 결정 4 는 마지막 조건 하나로만 들어가고 후보를 줄이기만 한다. 주 기준은 여전히 앞의 것들(+ 끝내기 직전의 생존 확인)이다 — 조사 §7 「고아 여부는 주 기준이 아니다」와 어긋나지 않는다.
-- 잰 잔여물 3/3 은 부모(깊이 4 훅 bash)가 죽어 있었다(§3-0 Q1) → 결정 4 뒤에도 그대로 고른다(스파이크 Q4 의 후보 집합과 같다).
-- 비교 키는 **신원(PID + 시작시각) 쌍**이다(`ProcessIdentity` — `process_tree.rs:13-23`, ADR-0218). 보호 집합의 PID 와 같지만 시작시각이 다른 멤버는 다른 프로세스라 보호받지 않는다.
-- 문턱 비교는 `>=` 다 — 같은 눈금은 넣는다(해상도 논의 = §3-6).
-- **보호 층 밖이지만 결정 4 가 지키는 것(§8 ⑪):** taskkill.exe 는 claude 의 직계 자식(d2)이라 보호되지만 그 콘솔 호스트(d3)는 보호 층 밖이다. taskkill 이 N 초 넘게 매달려 있다면(upstream #67888) 그 conhost 의 부모(taskkill)가 살아 있으므로 결정 4 로 후보에서 빠진다. 스파이크에서 taskkill 최장 278 ms.
-
-### 3-5. OS 조각 — Job 멤버 명단 + 검증 + 끝내기
-
-**`platform/windows.rs` 의 `JobObjectHandle`(`:19-82`)에 명단 · 검증과 검증된 핸들의 끝내기.** 이 파일은 `windows` crate 와 `io` 만 쓴다 — 결과 enum 도 여기 두고(리뷰 1 E) 중립 `process_group.rs` 가 감싼다. 그래서 이 파일을 나중에 별도 플랫폼 모듈로 통째 옮길 수 있다(사용자 결정 「OS 조각」). 「하나 끝내기」가 검증과 끝내기 두 호출로 갈린 것은 끝내기 확정(§3-3)을 자물쇠 안의 `TerminateProcess` 하나로 줄이기 위해서다.
+### 3-5. OS 조각 — 명단 + 붙들기 + 사실 + 가입 알림
 
 ```rust
-pub enum MemberCheck { Ready(VerifiedMember), Gone, NotOurs }
-pub enum MemberOutcome { Terminated, Gone }
-/// 검증을 마친 프로세스 핸들 — 쥐고 있는 동안 그 PID 는 재사용되지 않는다. drop = CloseHandle.
-pub struct VerifiedMember { /* HANDLE */ }
-
-/// 지금 이 Job 에 든 프로세스 PID 전부(중첩 Job 의 멤버 포함). ★완전할 때만 Ok★.
-pub fn member_pids(&self) -> io::Result<Vec<u32>>;
-/// 같은 규칙 · 첫 용량만 주입(시험 이음새 — 늘리기 · 되풀이 경로를 적은 프로세스로 잰다).
-pub(crate) fn member_pids_with_capacity(&self, initial: usize) -> io::Result<Vec<u32>>;
-/// 그 신원이 아직 **이 Job 의 산 멤버**인지 같은 핸들로 본다. 끝내지 않는다.
-pub fn verify_member(&self, pid: u32, expected_start: u64) -> io::Result<MemberCheck>;
-impl VerifiedMember {
-    /// 검증한 그 핸들로 TerminateProcess **호출 하나만**(비동기 — 대상의 종료를 기다리지 않는다). 날것 결과만 돌려준다 —
-    /// 끝내기 확정의 자물쇠 안에서 부르는 유일한 OS 호출이다(§3-3).
-    pub fn terminate_raw(&self, exit_code: u32) -> io::Result<()>;
-    /// 자물쇠를 놓은 뒤 부른다 — 날것 결과를 가르고(실패면 WaitForSingleObject(h, 0) 로 Gone 인지) 핸들을 닫는다(self 소비).
-    pub fn settle(self, raw: io::Result<()>) -> io::Result<MemberOutcome>;
+pub(crate) struct ProcessFacts { pub ppid: u32, pub create: u64, pub image: String, pub cmdline: String }
+impl JobObjectHandle {
+    pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>>;                              // HEAD 그대로
+    pub(crate) fn pin_member(&self, pid: u32, kill: bool) -> io::Result<Option<PinnedMember>>;
+    pub(crate) fn watch_births(&self, start: impl FnOnce(Arc<BirthPort>) -> io::Result<()>) -> io::Result<()>;
+        // 포트를 만든다 → start(포트) = 듣는 스레드 기동 → 그것이 Ok 일 때만 Job 을 붙인다 · 두 번 부르지 않는 것은 정리기의 OnceLock 이 지킨다
+    pub(crate) fn unwatch_births(&self) -> io::Result<()>;        // 포트 연결을 뗀다
+}
+impl PinnedMember { fn exited(&self) -> io::Result<bool>; fn wait_exit(&self, d: Duration) -> io::Result<bool>; fn facts(&self) -> &ProcessFacts;
+                    fn terminate_raw(&self) -> io::Result<()>; fn classify(&self, raw: io::Result<()>) -> io::Result<MemberOutcome>; }
+impl BirthPort {                                   // Send + Sync — 듣는 스레드와 watch_births(붙이는 동안)가 Arc 로 쥔다 · 마지막 drop = 포트 닫기
+    fn next(&self, wait: Duration) -> io::Result<PortEvent>;   // Joined(pid) · Other · Timeout
 }
 ```
 
-- **명단 [리뷰 1 L · 리뷰 2 A2]:** `QueryInformationJobObject(JobObjectBasicProcessIdList)` 를 **상한 있는 되풀이**(최대 4 회)로 묻는다. 버퍼는 구조체 정렬로 잡고 첫 용량 64(운영) · 모자라면 `NumberOfAssignedProcesses` 의 두 배 + 16 으로 늘린다. 머리 · 항목은 구조체 필드(`NumberOfAssignedProcesses` · `NumberOfProcessIdsInList` · `ProcessIdList` 의 필드 오프셋 — 항목은 `ULONG_PTR`)로 읽는다. ★`NumberOfProcessIdsInList == NumberOfAssignedProcesses` 일 때만 완전하다★ — 아니면(또는 `ERROR_MORE_DATA`) 다시 묻고, 되풀이가 다 차면 `Err`(닫힌 실패). 항목을 `u32` 로 못 바꾸면 `Err`. 첫 용량은 이음새(`member_pids_with_capacity`)로 시험에서 1 로 줄여 늘리기 · 되풀이를 프로세스 서넛으로 잰다.
-- **검증 [리뷰 1 L]:** `OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE)` → `IsProcessInJob(h, self.handle)`(★Job 인자는 늘 우리 핸들 — NULL 이면 「아무 Job 에나 있나」가 된다★) → `GetProcessTimes` 생성 시각 == `expected_start` → `WaitForSingleObject(h, 0)`.
-  - `OpenProcess` 가 `ERROR_INVALID_PARAMETER` 면 `Gone` · 그 밖의 여는 실패는 `Err` · `IsProcessInJob` 거짓 · 생성 시각 불일치 = `NotOurs` · 그 호출 자체의 실패 = `Err` · 대기 결과 `WAIT_OBJECT_0` = `Gone` · `WAIT_TIMEOUT` = `Ready(핸들)` · 그 밖 = `Err`. ★`Ready` 가 아니면 끝내기로 가지 않는다★.
-  - 생존은 `GetExitCodeProcess == STILL_ACTIVE` 로 재지 않는다 — 종료 코드 259 로 끝난 프로세스가 산 것으로 보인다.
-- **끝내기:** `terminate_raw` = 그 핸들로 `TerminateProcess(h, LEFTOVER_EXIT_CODE)` 한 번 · 날것 결과만(자물쇠 안). `settle`(자물쇠 밖) = 성공이면 `Terminated` · 실패면 — 검증 뒤 그 사이 스스로 끝났을 수 있다 — `WaitForSingleObject(h, 0) == WAIT_OBJECT_0` 이면 `Gone`, 아니면 `Err` · 그리고 핸들을 닫는다. 재확인이 거짓인 갈래도 핸들 닫기는 자물쇠를 놓은 뒤다. `LEFTOVER_EXIT_CODE` = `0x7440` [고름] — 사후 조사에서 「T-40 정리가 끝냈다」를 종료 코드만으로 알아보게 한다. `shutdown()` 의 Job 끝내기(`:447` — 1)와 다르다.
-- **중립 손잡이(`platform/process_group.rs`):**
-
-```rust
-pub(crate) enum Verify { Ready(Box<dyn ReadyKill>), Gone, NotOurs }   // Windows 에선 MemberCheck 를 옮겨 담는다
-pub(crate) trait ReadyKill: Send {
-    fn terminate_raw(&self) -> io::Result<()>;                                  // 자물쇠 안 — OS 호출 하나
-    fn settle(self: Box<Self>, raw: io::Result<()>) -> io::Result<MemberKill>;   // 자물쇠 밖 — 분류 + 닫기
-}
-pub(crate) enum MemberKill { Terminated, Gone }
-pub(crate) struct ProcessGroup { #[cfg(windows)] job: Weak<JobObjectHandle>, root_attached: usize }
-impl ProcessGroup {
-    /// 완전한 멤버 PID 명단. 통로가 사라졌으면 Ok(빈 목록).
-    pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>>;
-    pub(crate) fn verify(&self, who: ProcessIdentity) -> io::Result<Verify>;
-    /// 이 스폰이 뿌리 아래 붙이는 프로세스 수(§3-4 래퍼 모양).
-    pub(crate) fn root_attached(&self) -> usize;
-}
-```
-
-- `#[cfg]` 갈래는 이 모듈과 통로 접근자 안에서만 선다. 비Windows 판은 빈 명단 · `Gone` 만 돌려주는 껍데기이고, `StdioTransport::process_group()` 은 비Windows 에서 `None` 이다 — 호출자(`backend/claude`)에는 `cfg!(windows)` 가 없다. 비Windows 에서는 정리기가 조립되지 않는다(오늘과 같다).
-- **통로:** `job_handle`(`stdio.rs:72-73`)을 `Arc<JobObjectHandle>` 로 바꾸고 **`pub(crate) fn process_group(&self) -> Option<ProcessGroup>`**(`StdioTransport` 는 `pub` 이지만 이 접근자는 crate 밖에 내놓지 않는다)이 `Arc::downgrade` 와 `root_attached` 를 담아 준다. 통로는 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」 · CLAUDE.md 「백엔드 확장」). `shutdown()` 의 Job 끝내기(`:443-448`)와 drop 의 `KILL_ON_JOB_CLOSE` 는 그대로다.
-- **왜 약한 손잡이인가:** 일꾼이 강한 `Arc` 를 쥐면 통로가 사라진 뒤에도 Job 핸들이 안 닫혀 `KILL_ON_JOB_CLOSE` 가 늦어진다. `Weak` 는 판 하나 동안만 올린다.
-- **Windows API 확인(`windows-0.58.0` 소스):** `QueryInformationJobObject` · `IsProcessInJob` · `JobObjectBasicProcessIdList` · `JOBOBJECT_BASIC_PROCESS_ID_LIST`(항목 = `[usize; 1]` = `ULONG_PTR`) = `Win32_System_JobObjects` · `OpenProcess` · `GetProcessTimes` · `WaitForSingleObject` · `PROCESS_SYNCHRONIZE` · `TerminateProcess` = `Win32_System_Threading` · `WAIT_OBJECT_0` · `WAIT_TIMEOUT` = `Win32_Foundation`. 셋 다 이미 켜져 있다(`crates/engram-dashboard-agent/Cargo.toml:49-56`).
+- **붙들기 · 사실:** `OpenProcess(QUERY_LIMITED | SYNCHRONIZE [| TERMINATE])` → 87 이면 `Ok(None)` → `IsProcessInJob(h, 우리 Job)`(NULL 금지) 거짓이면 `Ok(None)` → 사실 한 번: 부모 = `NtQueryInformationProcess(h, ProcessBasicInformation(0))` 의 `InheritedFromUniqueProcessId`(결과 구조체는 이 파일의 `repr(C)` — `Win32_System_Kernel` 을 켜지 않는다 · 하네스 `probe/src/main.rs:251-275`) · 생성 = `GetProcessTimes(h)` 의 생성 FILETIME(HEAD 가 이미 쓰는 함수 · 같은 핸들이라 번호가 아니라 그 프로세스의 것) · 명령줄 = `ProcessCommandLineInformation(60)`(64 KiB) · 실행 파일 = `QueryFullProcessImageNameW`. 못 읽은 칸은 빈 칸 · 생성 0(그 고리는 순서 검사를 못 서 알려지지 않은 것으로 친다). 끝났나 = `WaitForSingleObject(h, 0)` · 확인 = `WaitForSingleObject(h, 200 ms)`. 끝내기 = HEAD 의 `terminate_raw` · `LEFTOVER_EXIT_CODE = 0x7440`.
+- **가입 알림 포트:** `CreateIoCompletionPort(INVALID_HANDLE_VALUE, None, 0, 1)` → `SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, {CompletionKey: 1, CompletionPort})`(하네스 `probe/src/main.rs:373-390` 와 같은 호출) · `next` = `GetQueuedCompletionStatus` → 키 1 · 값 6 이면 `Joined(ov as u32)`(역참조 안 함) · 그 밖 `Other` · `WAIT_TIMEOUT` → `Timeout` · 그 밖 거짓 → `Err`. `watch_births` 는 포트를 만들어 `Arc` 하나를 `start` 에 넘기고 제 것은 붙이기가 끝날 때까지 쥔다(그 사이 스레드가 끝나도 포트 핸들 값이 재사용되지 않는다). `unwatch_births` = 같은 연결 호출에 `CompletionPort = NULL`(MS Learn 이 적은 떼기). 상수 `JOB_OBJECT_MSG_NEW_PROCESS = 6`(`Win32_System_SystemServices` 를 켜지 않는다).
+- ★**정리기의 포트 확보 — 꺼내는 이가 먼저(확인 라운드 codex BLOCK #2)**★: 화신마다 `OnceLock` 하나 — 처음 새 에피소드를 여는 이가 `(tx, rx)` 한 쌍을 만들고 `watch_births(|port| 듣는 스레드 기동(port, rx, …))` 를 부른 뒤 그 결과를 `tx.send(붙었나)` 로 알린다. 순서는 API 가 강제한다: **포트 → 스레드 기동(포트를 쥐고 `rx` 를 기다린다) → 기동이 `Ok` 일 때만 Job 붙이기**. 그래서 알림이 쌓일 수 있게 되는 순간에는 꺼내 줄 스레드가 이미 떠 있다.
+  - 스레드 기동 실패 → **붙이지 않는다** → 굳음(`Failed(port)`) — 쌓일 알림이 없다.
+  - 붙이기 실패 → 굳음 · 스레드는 `false` 를 받고 끝난다(붙은 적이 없으니 뗄 것도 없다).
+  - 스레드는 `false` 에서만 끝난다 — `true` 이거나 보내는 쪽이 사라졌으면(여는 이가 붙인 뒤 보내기 전에 패닉 — 붙었을 수 있다) 평소대로 돈다(붙지 않았다면 약한 손잡이 · 표식을 볼 때까지 시간 초과만 돈다 — 화신 수명).
+  - 두 번째 `watch_births` 는 코드가 막는다(OS 의 거절에 기대지 않는다). ★굳히는 것은 진짜 OS 실패뿐이고 굳은 실패는 `Recorder.port_failed` 원자 칸이다(여는 이의 ⓐ 가 `OnceLock` 값과 함께 본다)★ · 듣는 스레드의 실패 모드 → 굳음(§3-2) · 통로가 이미 사라짐(약한 손잡이)은 굳히지 않는다.
+- **MS Learn 이 말하는 것(그대로 기댄다):**
+  - 「Processes added to a job at the time a completion port is associated are also reported.」 — ★첫 에피소드에서 기존 멤버가 다시 알려진다(되알림)★ → 살아 있으면 W 에 들어 고리 전용이고 스냅숏의 (pid, 생성)과 같으면 스냅숏 쪽 — 단 그 수만큼 `BIRTH_MAX` 칸과 꺼낼 거리를 먹는다(§8 ㉒ ⓑ · G1 이 잰다).
+  - 「it is best to associate a completion port with a job when the job is inactive … you may miss messages for processes whose states change during the association」 — 붙이는 순간의 탄생은 놓칠 수 있다 → 놓침.
+  - 「messages are intended only as notifications and their delivery to the completion port is not guaranteed」 — 빠진 가입 알림 → 알려지지 않은 고리 · 후보 아님 → **놓침(오살 아님)**.
+  - 「you cannot guarantee that this process is still active or that the identifier has not been recycled … unless you maintain an open handle」 — 곧바로 열어 쥔다 · 열기 전 재사용은 생성 순서가 거른다(§3-7).
+  - 「If the job is nested, the message is sent to every I/O completion port associated with any job in the parent job chain」 — 다시 알려지면 (pid, 생성)이 같아 한 번만 기록된다.
+  - 포트를 `NULL` 로 주면 연결이 풀린다(Windows 8 이상 — 문서화된 떼기).
+- **중립 손잡이 · 통로:** `ProcessGroup { job: Weak (cfg windows), retiring: RetiringSignal }` · `member_pids` · `pin` · `watch_births` · `unwatch_births` · `retiring` · 비Windows 껍데기 = 명단 `Ok(빈)` · 붙들기 `Ok(None)` · 포트 `Err(Unsupported)`. `process_group()` = `ProcessGroup::new(Arc::downgrade(&job), RetiringSignal::of(&self.retiring))`. 붙든 핸들 · 포트 · 표식은 Job 을 붙들지 않는다(듣는 스레드가 매 차례 잠깐 올리는 것 말고 — §8 ⑲).
 
 ### 3-6. 시계
 
-- **벽시계 = std `SystemTime::now()` 를 FILETIME 척도(1601 기점 · 100 ns)로 바꾼 값 [고름].** 커널 생성 시각(`GetProcessTimes`)과 같은 시스템 시각이다(사용자 결정). `GetSystemTimeAsFileTime` 을 직접 부르면 `Win32_System_SystemInformation` feature 가 새로 든다. ★1970 ↔ 1601 기점 변환이 틀리면 모든 멤버가 문턱 뒤로 읽혀 **떼로 죽인다** — 실제 시계 음성 시험이 막는다(§5 실프로세스 ②)★.
-- **해상도 — 놓치기만 한다:** 커널 생성 시각이 벽시계보다 거칠다면(한 틱 안으로 내림) 문턱 **직후 한 틱 안에** 생긴 잔여물이 빠진다(오늘처럼 멈춤). 해상도로는 문턱 전 프로세스가 문턱 뒤로 읽히지 않는다. 간접 실측(스파이크): 뿌리 생성 − 스폰 직전 `SystemTime` = +0.67…+0.79 ms(4/4 · 음수 없음) · 끊기 뒤 첫 프로세스 = +1.1…1.4 ms → 1 ms 아래로 보인다. 잔여물은 문턱보다 **≥ +203 ms** 뒤였다(3/3).
-- **벽시계가 뒤로 뛰는 것 — 잘못 고를 수 있다 [리뷰 1 I]:** 비교는 멤버의 생성 시각(태어날 때 찍힘)과 `first_wall`(Esc 때 찍힘)이므로, 위험한 틈은 **멤버가 태어난 뒤 ~ Esc 기록 전** 사이의 뒤로 뛰기다. X 만큼 뒤로 뛰었으면 Esc 전 X 안에 태어난 프로세스가 `created >= threshold` 를 지난다. 같은 뛰기는 `walk` 의 「부모보다 먼저 태어난 것은 자식 아님」(`process_tree.rs:114`)과 결정 4 의 부모 판정도 속인다. 반대로 **기록 뒤**의 뒤로 뛰기는 안전하다 — 기록 뒤에 태어난 것이 더 이르게 읽혀 빠질 뿐이다(놓치는 쪽). 앞으로 뛰기도 안전하다.
-- **시계 닻 — 기록 · 판마다 다시 잡고, 뒤로 뛰면 그만큼 쉰다 [리뷰 2 K3/A3 — 고름]:** 3판은 닻을 조립 때 한 번만 잡아, 정당한 1 초 넘는 NTP 보정 한 번이나 긴 세션의 슬루 누적이 그 화신의 정리를 영영 끄게 했다.
-  - `ClockAnchor { wall, mono }` 는 `GateState` 안에 있다(정리기 조립 때 처음 — 뿌리 스폰 직후 · claude.exe 보다 앞).
-  - `observe_clock(now_wall, now_mono)`(자물쇠 안 · 순수 — 두 값도 자물쇠 안에서 읽는다 · §3-2) = `drift = anchor.wall + (now_mono − anchor.mono) − now_wall`(양수 = 벽시계가 뒤처짐 = 뒤로 뜀). ★표본의 단조 값이 닻보다 이르면(있어서는 안 되는 역순 표본) 닻을 건드리지 않는다 — 닻은 앞으로만 간다★.
-    - `drift ≤ CLOCK_STEP_TOLERANCE`(1 초 [고름]) → **닻을 지금으로 다시 잡는다**(허용치 안의 슬루 · 오차가 쌓이지 않는다).
-    - `drift > 허용치` → `clock_hold_until = max(기존, now_mono + drift)` 로 세우고 닻을 지금으로 다시 잡는다. 뒤로 X 뛰었으면 **단조 시간으로 X 가 지난 뒤**부터는 뛰기 전에 태어난 프로세스의 생성 시각이 모두 벽시계보다 앞선다 — 그때부터 연 에피소드는 안전하다.
-    - 앞으로 뛰었으면(음수) 다시 잡는다.
-  - **어디서 보나:** ⓐ 끊기 줄 함수의 `try_interrupt`(기록과 한 구간) — 새 에피소드의 `clock_ok = (clock_hold_until 이 없거나 이미 지남)` ⓑ 판 시작 — 쉼 끝 · 닻 갱신만 하고 판을 막지는 않는다(기록 뒤의 뛰기는 안전하므로). 이 구간에서 읽은 벽시계를 고르기의 `now_wall` 로 쓴다(그 뒤 태어난 것은 미래 생성으로 빠진다 — 덜 고르는 쪽). 판의 `clock_ok` 가 거짓이면 판은 아무것도 안 끝낸다(§3-4 1 단계 · warn).
-  - **멤버마다 한 겹 더:** 고르기의 `created <= now_wall`(§3-4) — 지금 벽시계보다 미래에 태어난 것으로 읽히는 멤버는 그 뒤 시계가 뒤로 뛰었다는 증거라 뺀다. 닻이 허용치 안이라 못 본 뛰기의 일부도 여기서 걸린다.
-  - **재기:** 모든 판의 로그(끝냄 · 못 끝냄 둘 다)가 그 판에서 잰 `clock_drift_ms` 를 싣고, 허용치를 넘는 뛰기는 본 자리에서 warn 한다 — 빈도가 로그로 쌓인다.
-  - **남는 노출:** 허용치(1 초) 안의 뒤로 뛰기는 못 본다 — Esc 전 그만큼 안에 태어난 프로세스가 문턱을 지날 수 있고, 부모와 자식이 태어난 사이에 그런 뛰기가 끼면 자식의 생성 시각이 부모보다 이르게 읽혀 **살아 있는 부모가 「부모 죽음」(재사용)으로** 뒤집힐 수 있다(§8 ⑤ · 드묾).
-- **대기(N 초)는 단조 시각(`Instant`)으로 잰다** — 벽시계가 뛰어도 「N 초 지났나」가 흔들리지 않는다.
+벽시계와의 비교 · 「Esc 뒤에 태어났나」를 시각으로 가르기를 쓰지 않는다(결정 5). 「끊기 뒤 탄생」 = 기록을 켠 뒤 온 가입 알림(후보는 쓰기 명단 W 밖) · 「끊기 전부터」 = 스냅숏 · W. 커널 생성 시각은 **한 고리의 두 끝(부모 · 자식)을 서로 비교**하는 데와 규칙 4 의 taskkill ≥ T 에만 쓴다 — [고름] 이고 사용자 결정이 아니다(결정 5 는 Esc 와 시각을 비교하지 않는다는 것만 정했다). 시계가 두 생성 사이에 뒤로 뛰면 참 부모가 「자식보다 늦게」로 읽혀 **놓친다**(안전 쪽). 단조 시각은 N · `waited_ms` · `terminate_max_us` · 확인 대기에만.
 
 ### 3-7. PID 재사용 · 조사 §4 사고 규칙 대조
 
 | 틈 | 막는 것 |
 |---|---|
-| 후보가 우리 것인가 | 후보는 **Job 명단**에서만 나온다 — 커널이 추적하는 소속이다. PID 부모 연결로 후보를 넓히지 않는다(조사 §4 규칙). 명단이 불완전하면 판을 멈춘다 |
-| 명단 · 표 · 시작시각 사이에 멤버 번호가 재사용됨 | 시작시각을 표 앞뒤로 두 번 읽어 같을 때만 쓴다(§3-4 · 리뷰 2 K1) |
-| 검증 뒤 그 PID 가 죽고 남에게 재사용됨 | 검증과 끝내기가 **같은 핸들**이다 — 열린 핸들은 그 프로세스를 붙들어 번호가 재사용되지 않는다 |
-| 재확인과 끝내기 사이에 턴 끝 · 새 끊기 | 재확인과 `TerminateProcess` 가 한 자물쇠 구간이다(§3-3 · 리뷰 2 C1) |
-| 보호 집합이 PID 재사용에 속음 | 걷기는 `walk` 규칙(부모보다 먼저 태어난 「자식」은 버린다)을 쓴다. claude 는 살아 있어 그 PID 가 남에게 넘어가 있을 수 없다 |
-| 보호 집합이 **실패**에 줄어듦 | 표 목록 중간 오류 · 보호 깊이의 **Job 멤버** 시작시각 못 읽음 → 판 전체 `None`(§3-4). 「사라짐」과 멤버 아닌 남의 「못 읽음」만 건너뛴다 |
-| 보호 집합 · 부모 판정이 **시계 뛰기**에 속음 | 시계 닻 + 쉼 · 멤버의 `created <= now_wall`(§3-6) |
-| 부모가 좀비로 표에 남음 | 놓치는 쪽뿐(죽은 부모가 `Alive`) · 실프로세스 시험이 박는다(§5 ⑤) |
+| 후보가 우리 것인가 | 우리 Job 의 가입 알림에서만 · 연 핸들로 `IsProcessInJob(우리 Job)` · 부모 연결 · W 는 줄이기만 |
+| 알림 뒤 ~ 열기 사이 재사용 | 곧바로 연다(하네스 0/4322) · Job 밖이면 버린다 · Job 안의 다른 새 프로세스면 그 자신의 사실로 기록된다 |
+| ★기록된 부모 번호가 엉뚱한 프로세스를 가리킴(사슬 이어 붙이기)★ | 붙든 번호는 붙든 뒤 재사용되지 않는다. 붙들기 **전**의 재사용(스냅숏 전에 끝난 조상 · 열기 전에 끝난 부모)이면 그 번호의 새 주인은 끝난 참 부모보다 — 곧 자식보다 — 늦게 태어났다 → **부모 생성 > 자식 생성** 이라 그 고리는 알려지지 않은 것 → 놓침. 남는 것 = 두 생성 사이에 시계가 뒤로 뛰어 순서가 뒤집히는 경우(§8 ⑰ ⓑ) |
+| 연 뒤 ~ 끝내기 | 같은 핸들(기록 때 끝내기 권한까지) |
+| 끊기 뒤 태어나 판 전에 죽은 중간 고리 | 탄생 기록이 붙들어 사실을 남긴다 |
+| 재확인과 끝내기 사이 턴 끝 · 새 끊기 · 새 입력 | 문 자물쇠 한 구간 |
+| 통로 종료 | `kill_agent` 시작에서 표식이 선다 · 재확인이 읽는다 · 직후 겹침은 해가 없다 |
+| taskkill 이 옛 꼭대기를 가리킴 | taskkill 생성 ≥ T 생성이어야 한다 — T 의 번호를 재사용한 뒤의 T 를 옛 taskkill 이 가리키는 모양을 거른다 |
+| 두 Esc 가 함께 에피소드를 열려 함 | 여는 이는 하나(`opening` · drop 가드) · 기록 번호 대조(`active == R` — 아니면 에피소드 없이 줄만) |
+| 줄이 쓰이기 전 / 뒤의 가입 | ★쓰기 명단 W(§3-2)★ — 쓰기 전에 가입해 판 때 산 것은 W 에 든다(명단 완전성 · 되살지 않음) · W 의 번호를 쓰인 뒤 탄생이 재사용하면 빠진다(놓침) · 쓰기와 W 사이 탄생도 빠진다(놓침) · 명단 실패면 에피소드에 판이 없다. 알림이 쌓이는 때에는 기대지 않는다 |
+| 알림 유실 · 붙이는 순간 | 알려지지 않은 고리 → 놓침 |
+| claude · 래퍼 · 콘솔 호스트 | 스냅숏에 있다 · 걷기는 claude 에서 멈춘다 · 뿌리 자식이 둘 넘으면 `Failed(shape)` |
 
 ### 3-8. 로그
 
-`docs/reference/logging-conventions.md` 「형식」 — 메시지는 한국어 한 줄, 식별자·수치는 필드. 레벨 기준 = 같은 문서 `:23`(warn = 비정상이나 안전 폴백).
-
-**에이전트 귀속 [리뷰 1 C]:** `open_spawn` 은 이미 `control: Option<&ControlEndpoint>` 를 받고(`backend/mod.rs:466-478` · 넘기는 자리 `manager.rs:1508`) 그 끝점이 `agent_id` 를 싣는다(`types.rs:649`). 그 칸의 doc 은 「backend 조립 인자로 따로 받는 형태로 되돌리지 말 것」이라 적는다(`types.rs:644-647` · ADR-0217 결정 5). 그래서 정리기는 `control.map(|c| c.agent_id)` 를 쥐고 로그 필드 `agent` 로 싣는다. ★claude `open_spawn` 은 지금 `control` 을 일부러 읽지 않는다고 적고 버린다(`claude/mod.rs:426-431` — 「여기서 또 읽으면 한 spawn 이 같은 값을 두 수단으로 보낸다」) — ③ 단계가 그 주석과 버림 줄을 고친다(리뷰 2 A5): 이제 `agent_id` 하나를 **로그 귀속으로만** 읽고 통로로 다시 보내지 않으므로 그 주석이 막는 「두 수단」이 아니다★.
-- `None` 인 때 = 제어 채널이 없는 스폰(`manager.rs:1369-1395` — Noop 제어 평면 · 시험 하네스). 그때는 `agent` 필드를 빼고 `root_pid` 가 상관 키다.
+에이전트 귀속 = `control.map(|c| c.agent_id)`(ADR-0217) · 없으면 `root_pid`. 전부 자물쇠를 놓은 뒤.
 
 | 사건 | 레벨 | 필드 |
 |---|---|---|
-| 정리함(하나 이상 끝냄) | **warn** | `agent` · `root_pid` · `wrapper_layer`(래퍼 층 PID 목록) · `waited_ms`(첫 끊기부터) · `terminated`(PID · 문턱 뒤 ms · 죽은 부모의 PID) · `skipped`(`Gone`/`NotOurs`/오류 수) · `parent_alive`(결정 4 로 뺀 수) · `clock_drift_ms` |
-| **에피소드가 있는데 아무것도 못 끝냄** — 후보 0(`parent_alive` · 부모 `Unknown` · 미래 생성 수를 함께) · 모양 어긋남(`wrapper_layer` · `expected`) · 명단 조회 실패/불완전 · 표 스냅숏 실패 · 보호 층 멤버 시작시각 못 읽음 · 첫 끊기 무렵 시계 뛰기(`clock_ok` 거짓) · 후보가 전부 `Gone`/`NotOurs`/오류 | **warn** — 사유를 필드 `reason` 으로 | `agent` · `root_pid` · `waited_ms` · `clock_drift_ms` · 사유별 값 |
-| 시계가 허용치 넘게 뒤로 뜀(기록 · 판에서 봄) | warn | `agent` · `stepped_ms` · `hold_ms` |
-| 끝내기 하나의 오류(`io::Error`) | warn | `agent` · `pid` · `: {e}` |
-| 정리 뒤 N 초에도 같은 에피소드 | warn — ★하나 이상 끝낸 판 뒤에만★(못 끝낸 판은 위 줄이 이미 사유를 남겼다) | `agent` · `waited_ms` — 동작 없음(결정 2) |
-| 빈 명단(에이전트가 이미 죽음) · 손잡이 사라짐 · 턴 끝이 먼저 옴 · 판 도중 새 끊기/턴 끝으로 멈춤 · 시작시각이 두 번 읽기에서 어긋나 뺀 멤버 | debug | `agent` · 사유 |
-| 일꾼 기동 실패(에피소드 `Done`) | warn | `agent` · `: {e}` |
+| 정리함 | **warn** | `agent` · `root_pid` · `waited_ms` · `terminated`(PID · 부모 · `chain` · 차례) · `rounds` · `terminate_max_us` · `unconfirmed` · `births` · 규칙별 뺀 수 |
+| 못 끝냄(§3-4 사유 · `rounds_exhausted`) | **warn**(`reason`) | 사유별 값 |
+| 포트 · 듣는 스레드 실패(기동 실패 — 안 붙임 · 붙이기 실패 · 떼었음 · 못 떼어 버리기만 함) · 듣는 스레드 패닉 · 쓰기 확인 부를 것의 패닉 · 쓰기 명단 실패 | warn — 한 번 | `agent` · `: {e}` |
+| 끝내기 오류 · 정리 뒤 N 초에도 같음 · 일꾼 기동 실패 · 패닉 | warn | `agent` · … |
+| 에피소드 열림(첫 에피소드의 되알림 수 포함) · 쓰였다(W 크기 · 쓰기 → W 지연 µs) · 가입 → 엶 지연 · 줄 없음 · `stale`(줄만) · 여는 중에 온 끊기 · 기록 넘침 · `retiring` · `delivered` · `superseded`(판 멈춤) | debug | `agent` · 사유 |
 
-- 로그는 전부 자물쇠를 놓은 뒤 쓴다(§3-3 자물쇠 규칙).
-- **`wrapper_layer` 를 싣는 이유:** 기존 `session_tracker` 의 warn 「PID shim 감지」(`backend/claude/session_file.rs:171-180`)가 claude 자신이 적은 PID(`resolved_pid`)를 남긴다. 그 PID 가 `wrapper_layer` 안에 있으면 래퍼 모양 가정이 맞았다는 것이 로그로 확인된다(§7 G2).
+G2 는 `resolved_pid`(`session_file.rs:171-180`)가 `terminated` 에 없는지 본다.
 
 ### 3-9. 영향이 없는 것
 
-- **codex:** codex 통로(`TransportOwned`)는 자기 끊기(`turn/interrupt` + `turn_id`)를 쓰고 이 끊기 줄 함수를 지나지 않는다 — 정리기가 조립되지 않는다. 조사가 잰 결함은 claude CLI 의 훅 취소 경로다(조사 §2).
-- **터미널 모드(claude · codex PTY):** 통로가 끊기 명령을 받지 않는다(ADR-0245 · `PtyTransport` 는 `Unsupported`) → 기록이 없다. 사람이 TUI 에 직접 친 Esc 는 우리를 지나지 않는다. 조사 §2 ⑧(n=1 · 잠정)도 TUI 에서는 300 초 턴 멈춤이 보이지 않았다.
-- **프론트 · 선 타입 · 버스:** 새 사건 · 새 명령 · 새 i18n 키 없음(결정 1). 「중단하는 중…」은 평소처럼 턴 끝 사건에서 풀린다 — 멈춤 경우에는 약 N 초 + 수십 ms 뒤다(끝내기 → `result` 18–21 ms · §3-0). 정리 뒤의 `result` 는 보통 끊김과 같은 `aborted_streaming` 이고 앞에 합성 끊김 줄이 와서(§3-0 · 3/3) 번역 · 화면이 보통 끊김과 같다(ADR-0243 · `claude/mod.rs:873`).
-- **CLAUDE.md 「LLM-우선 제어」:** 자동 동작이라 사람 조작이 없고, 새 제어 표면도 없다. LLM 의 `agent.interrupt` 는 사람의 Esc 와 같은 정리를 받는다(§3-2).
-- **턴 관측(ADR-0127):** 두 지점(`finish` · `emit` 재확인)은 그대로다. 에피소드 지우기는 턴 관측이 아니라 backend decoder 안의 문 닫기 자리에 얹힌 것이다 — 셋째 호출자가 아니다.
+codex · 터미널 모드(`begin_retire` 기본 무동작) · 프론트 · 선 타입 · 버스(결정 1) · 입력 큐의 사용자 덩이(부를 것 없음) · pty 통로 코드 · 턴 관측 두 지점(ADR-0127) — 무변경.
 
 ---
 
 ## 4. 불변식 대조
 
-| 원칙 · 불변식 | 이 설계에서 |
+| 원칙 | 이 설계에서 |
 |---|---|
-| **코어 격리**(ADR-0003) | 전부 `agent` · `base` crate · tauri import 0 · `OutputSink`/`StatusSink` 무변경 |
-| **백엔드 확장**(ADR-0004) | claude 지식(끊기 줄 · 턴 끝 · 「무엇을 언제 정리하나」)은 `backend/claude` 에만 있다. 통로는 자기 프로세스 무리의 약한 손잡이와 자기 스폰이 붙이는 프로세스 수만 내준다. manager · `open_spawn` 시그니처는 바뀌지 않는다(에이전트 귀속은 기존 제어 끝점에서 — §3-8) |
-| **플랫폼 중립**(ADR-0230) | OS 갈래 = `platform/windows.rs`(Job 조각) · `platform/process_group.rs`(한 모듈 안의 `#[cfg]`) · `StdioTransport::process_group()`(이미 `#[cfg(windows)]` 인 Job 칸의 주인 — 콘솔 호스트 수도 여기) · `console_wrapper_depth()`(`console_command` 옆) · `base::platform` 의 새 함수 둘(기존 `#[cfg]` 쌍 모양). 부르는 쪽에 `cfg!(windows)` 없음. 시험 파일을 통째로 막지 않는다(§5) |
-| **락 순서**(ADR-0006 · ADR-0231) | ★새 락 = `TurnGate.state` 하나 — **잎**이다★(규칙 정본 = §3-3 끝). 쥔 채 로그 · 스레드 기동 · emit · 잠 · 다른 자물쇠 · 그 밖의 OS 호출을 하지 않는다 — **예외 둘 = 시계 두 값 읽기(막히지 않음) · 끝내기 확정의 `TerminateProcess` 호출 정확히 하나**(비동기 · 드문 판에서만 · 핸들 닫기와 분류는 놓은 뒤 · 다른 자물쇠 없음). 쥐는 자리 셋: 끊기 줄 함수(부르는 쪽이 아무 락도 안 쥔다 — `session.rs:636-638` · `manager.rs:2875-2877`) · decoder(펌프가 decode 를 emit 전에 락 없이 부른다 — `stdio.rs:309-313`) · 일꾼. 기존 락(`input_order` · replay · status · subscribers · 통로의 child/stdin)과 간선이 없다. 독을 견딘다(§3-2) |
-| **소유권 분할** | Job 은 여전히 transport 가 만들고 끝낸다 — 칸이 `Arc` 가 되고 밖으로는 `Weak` 만 나간다. ★새 사실: backend 의 일꾼 스레드가 그 약한 손잡이로 **멤버 하나씩** 검증하고 `TerminateProcess` 할 수 있다★(Job 전체가 아니라 · claude 는 보호) → CLAUDE.md 「핵심 불변식」 소유권 줄 갱신(§6 ④). kill 인과(ADR-0001 — `shutdown` → Job 끝내기 → 펌프 EOF)는 무변경 |
-| **ADR-0238 턴 열림 문** | 여닫기 규칙(진행에 열고 끝에 닫는다) · 거절(`None` → `Unsupported`) · 잔여 경합 서술 · `InterruptLine` 계약(결정 2)은 그대로다. 모양이 원자값에서 자물쇠 안 상태로 바뀌고(결정 3 개정), 「우리가 끊기를 보냈다」 기록이 생긴다(결정 5 개정 — 결과 분류가 아니라 정리 용도 · §9) |
-| **바닥 crate 입주 조건**(ADR-0175) | 새 입주자 없음 — 기존 입주자 `platform` 에 함수 둘. 자리 근거 = §11 |
+| **코어 격리**(ADR-0003) | 전부 `agent` · tauri 0 |
+| **백엔드 확장**(ADR-0004) | claude 지식(끊기 줄 · 턴 끝 · `started` · 훅 실행기 · taskkill 모양 · 무엇을 기록 · 정리하나)은 `backend/claude` 에만. 통로는 약한 손잡이 · 읽기 전용 표식 · 「쓰였을 때 부를 것」 · 중립 `begin_retire` 만 · manager 는 `begin_retire` 를 부를 뿐 backend 를 모른다 |
+| **플랫폼 중립**(ADR-0230) | OS 갈래 = `platform/windows.rs` · `process_group.rs` · 통로 접근자 · 규칙은 순수 · 부르는 쪽 `cfg!(windows)` 없음 |
+| **락 순서**(ADR-0006 · ADR-0231) | 새 잎 둘(문 · 기록) — 겹쳐 잡지 않는다 · 쓰기 확인 · 듣는 스레드 · `begin_retire` 는 아무 락 없이 부른다(`kill_agent` 의 첫 줄은 명부 락을 이미 놓았다) → 기존 락과 간선 없음 |
+| **소유권 분할** | Job · `shutdown` · `retiring` 칸은 transport — 밖으로는 `Weak` · 읽기 전용 표식 · 한 번 붙이는 포트. backend 가 에피소드 동안 명단 · 멤버 · 탄생을 붙들고 하나씩 끝낸다 → CLAUDE.md 소유권 줄(④). kill 인과(ADR-0001) 무변경 — `begin_retire` 는 칸 하나를 세울 뿐 |
+| **ADR-0238** | `TurnGate` → `GateCell`(결정 3) · 끊기 기록(결정 5) · `InterruptOut`(결정 2) · 여닫기 · 거절 그대로 · 구간 사이 턴 닫힘이면 줄 없음 |
+| **바닥 crate**(ADR-0175) | `base` 무변경 |
 
 ---
 
 ## 5. 시험 (ADR-0012)
 
-**순수 — 모든 OS에서 돈다(`leftover.rs` · `process_tree.rs` · `base` 의 `#[cfg(test)]`):**
+**순수 — 모든 OS(가짜 포트 · 시계 · 표식 · 가짜 `Pinned` 는 drop 때 두 자물쇠가 잡혀 있었는지 적는다):**
 
 | 대상 | 경우 |
 |---|---|
-| **에피소드 상태기계** | 닫힌 문 → 거절 · 기록 없음 · 첫 끊기 → `Waiting` + 일꾼 몫 · 둘째(`Waiting`) → `last_mono` 만 · 일꾼 몫 없음 · 문턱 유지 · 끝(`close_turn`) → 에피소드 없음 · ★불변식 시험: 임의의 전이열 뒤 「`Waiting`/`Cleaning` ⇒ 문 열림」 · 「`Waiting`/`Cleaning`/`Spent` ⇒ `worker`」★ |
-| **리뷰 1 A 엇갈림** | `close_turn` 뒤의 `try_interrupt` 는 거절 · 기록 없음 · 두 스레드가 `close_turn`/`try_interrupt` 를 번갈아 두드려도 위 불변식이 선다(스트레스 · 짧게) |
-| **리뷰 2 C1 확정 틈** | 가짜 포트의 `verify` 안에서(자물쇠 밖) `close_turn` 을 부르면 → 그 후보의 `terminate_raw` 가 **불리지 않는다** · 같은 자리에서 `try_interrupt` 를 부르면 → 불리지 않고 새 끊기 + N 까지 아무것도 안 끝난다 · ★확정 구간 안에서 불리는 포트 호출은 `terminate_raw` 하나뿐 — 가짜 포트가 `terminate_raw` 중에는 자물쇠가 잡혀 있고 `settle`(닫기 · 분류) · `verify` · 그 밖의 호출 중에는 잡혀 있지 않음을 확인 · 재확인 거짓 갈래의 핸들 버리기도 자물쇠 밖(리뷰 3 아키텍트)★ |
-| **리뷰 3 codex 역순 표본** | ⓐ 순수: 전이에 표본을 역순으로 먹인다 — t2 를 먼저 기록한 뒤 t1(< t2) → `last_mono` 는 t2 에 머문다 · 닻의 단조 값은 되감기지 않는다 · 닻보다 이른 표본으로 연 새 에피소드의 `first_wall`/`first_mono` 는 닻 값으로 올라간다 ⓑ 장벽 시험: 두 스레드가 장벽에서 함께 출발해 `try_interrupt` 경로를 두드린다 — 가짜 시계가 읽기마다 전역 순번을 찍는다 → 기록(자물쇠 구간)의 순서와 그 안에서 읽힌 표본의 순번이 같은 순서다 · 기록마다 `last_mono` · 닻의 단조 값이 줄지 않는다 · 일꾼의 첫 확정은 가장 늦은 표본 + N 전에 오지 않는다 |
-| **리뷰 2 C2 기동 실패** | 일꾼 기동 실패 전에 다른 끊기가 에피소드를 밀었거나 새로 열었어도 → 기동 실패 뒤 `worker == false` · 에피소드 `Done` · 다음 끊기는 새 에피소드 + 기동 시도 |
-| **리뷰 1 B ① 판 도중 끊기** | `Cleaning` 중 끊기 → `Waiting` · 다음 확정 거짓 → 나머지 버림 · 새 끊기 + N 전엔 아무것도 안 끝냄 · 다음 판의 문턱 = 같은 첫 끊기 · 일꾼 기동 1 회 |
-| **리뷰 1 B ① 정리 뒤 끊기** | `Spent` 중 끊기 → 새 세대 · 새 문턱 · 일꾼 기동 없음 · 옛 세대의 N 뒤 warn 안 나감 |
-| **리뷰 1 B ② 묵은 기록** | 턴 끝을 놓친 `Waiting` → 판 **한 번**만 돌고 `Spent`/`Done` · 그 뒤 새 끊기 없이는 판 없음 · 새 끊기는 새 문턱 |
-| **일꾼 수명** | 에피소드 없음 · `Done` → 일꾼 끝 · `worker` 내림 · 가짜 시계로 「마지막 끊기 + 2N + 판」 안에 끝남 |
-| **독** | 자물쇠를 쥔 스레드를 패닉시킨 뒤에도 `try_interrupt` · `close_turn` · `next_step` 이 돈다 |
-| **판 순서(가짜 포트)** | 빈 명단 → debug 로 끝나고 모양 warn 없음 · 명단 `Err` → warn · `clock_ok` 거짓 → warn · 표 `None` → warn · 모양 어긋남 → warn · 후보 0 → warn · 하나 이상 끝냄 → warn + N 뒤 확인 · 못 끝냄 → N 뒤 확인 없음 · ★스파이크 Q3 모양의 표에서 후보 = 잔여물 하나★ |
-| **리뷰 2 K1 짝** | 멤버 p 의 `s1 ≠ s2`(표 앞뒤 사이에 번호가 새 프로세스로 넘어감) → 그 멤버 빠짐 · `s2` 가 `Gone`/`Unknown` → 빠짐 · 표 줄 p 가 옛 신원(부모 죽음)이고 멤버는 새 신원(부모 살아 있음)인 모양 → 끝내지 않는다 · 끝내기의 기대 시작시각 = `s2` |
-| `select_leftovers` | 문턱 앞 = 빠짐 · 문턱과 같음 = 듦 · ★생성 > 판의 벽시계 = 빠짐★ · 보호 신원 = 빠짐 · 보호 집합과 PID 는 같고 시작시각이 다른 멤버 = 듦 · 부모 `Alive` = 빠짐 · `Dead` = 듦 · `Unknown` = 빠짐 · 백그라운드 빌드 모양(살아 있는 `cargo` 아래 문턱 뒤 `rustc`) = 빠짐 · 스파이크 잔여물 모양 = 듦 |
-| `members_with_parents` | ★멤버 자신의 줄이 표에 없음 = 그 멤버 빠짐★ · 부모가 표에 없음 = `Dead` · 부모 `Gone` = `Dead` · 표의 ppid 번호를 멤버보다 늦게 태어난 프로세스가 쥠 = `Dead` · 부모 시작시각 ≤ 멤버 = `Alive` · 같은 눈금 = `Alive` · 부모 `Unknown` = `Unknown` |
-| `keep_set` · `compose` | `compose(1, 1) = {1, 2}` — {conhost, claude} = `Some` · {conhost} 하나 = `None` · 셋 = `None` · 빈 층 = `None` · `compose(0, 0) = {0, 1}` — {뿌리} = `Some` · `compose(0, 1) = {0, 1}` |
-| `walk_levels` · `children` | `children` 이 `None` → 전체 `None` · ★보호 깊이의 자식이 `Gone` → 건너뛰고 계속★ · ★`Unknown` 이고 Job 멤버 아님 → 건너뜀 · `Unknown` 이고 Job 멤버 → `None`(리뷰 2 K5)★ · ppid 가 claude 인데 claude 보다 먼저 태어난 항목 = 자식 아님 · 깊이 상한 · 순환처럼 보이는 표에서 끝남 |
-| 시계 닻 | 허용치 안 드리프트 → 다시 잡음(기록마다 조금씩 쌓여도 넘지 않는다) · 뒤로 1 초 초과 → 쉼 끝 = 지금 + 뛴 양 · 쉼 중에 연 에피소드 `clock_ok` 거짓 · 쉼 뒤 에피소드 참 · 판 시작의 뛰기 → 판은 막지 않고 쉼만 · 앞으로 뛰기 → 다시 잡음 · FILETIME 변환(1970 ↔ 1601 기점 상수) 골든 |
-| `base::process_parent_table` 의 끝 판정 | 목록 순회 오류 분류를 순수 함수로 뽑아 — `ERROR_NO_MORE_FILES` = 끝 · 그 밖 = 실패(`None`) · `child_pids(0)` 은 빈 목록(기존 시험 `:266` 유지) |
-| decoder 배선(`claude/mod.rs` 시험 — `gated_decoder` `:5623-5628` 모양) | 진행 줄 → 끊기 함수가 줄을 주고 에피소드가 선다 · `result` 줄 → 지워진다 · 끊긴 `result`(`TurnEnd{Interrupted}`)도 지운다 · 닫힌 문의 끊기는 기록 없음 · 이어받기 줄은 건드리지 않는다 · 진행 줄이 이어져도 자물쇠는 전이 때만 잡힌다 |
+| 상태기계 · 불변식 | 임의 전이열(① · ② · 쓰기 확인 · `open_turn` · `deliver` · `close_turn` · 걸음 · 판 끝 · 패닉) 뒤 §3-2 불변식 전부(「`written` 이면 `w`」 포함) |
+| 두 구간 · 여는 이 | `close_turn` → ② `None` · ★`deliver` · `active ≠ R` · 다른 에피소드 → 줄만 주고 에피소드 없음 · `stop(R)` · 스냅숏 버림(놓은 뒤)★ · 두 Esc 가 엇갈림: 둘째 ① 이 `opening` 을 보고 줄만 준다(기록 · 스냅숏 0) · 여는 이의 ② 뒤 셋째 Esc 는 이어 적음 · ★여는 이 가드: 패닉 · 이른 반환 · 줄 없음 · 줄만 — 모든 출구에서 `opening` 내림 · `stop(R)` · 찍다 만 스냅숏 버림 · 둘 다 자물쇠 밖★ |
+| ★쓰기 확인 · 쓰기 명단 W(14판)★ | 쓰이지 않으면 판 없음 · 확인이 W 를 찍은 뒤 `last_mono` · 일꾼 · ★명단 실패 · 손잡이 사라짐 → 첫 쓰임이 서지 않는다(판 없음 · warn)★ · ★쓰기 전에 가입해 산 탄생 → W 에 든다 → 후보 아님(가짜 포트가 그 가입을 **W 뒤에** 늦게 내줘도 — 알림 때에 기대지 않음을 잰다)★ · ★쓰기와 W 사이에 가입한 탄생 → W 에 든다 → 빠짐(놓침 창)★ · W 뒤 가입 → 후보 · W 의 번호가 끝나고 쓰인 뒤 탄생이 재사용 → 빠짐(놓침) · 쓰기 전에 가입해 W 전에 끝난 것 → 고리 전용 · 둘째 끊기의 W 는 버린다(놓은 뒤) · W 는 문 자물쇠 밖에서 찍고 밖에서 버린다 · 부를 것이 패닉 → warn · 큐는 계속 쓴다 |
+| 스냅숏 | `Failed(list · root · too_many · shape · port)` · 기록을 스냅숏 앞에 켠다 · 이어 적는 끊기는 명단 · 기록 켬 0 |
+| 탄생 기록 | 기록 중 가입 → `pin(kill = true)` → `seq` · 아님 → 버림 · 끝남 → 버림 · ★`pin(kill = true)` `Err` → 고리 전용(`killable = false`) · 후보 아님 · 사슬은 잇는다★ · ★(pid, 생성) 같으면 한 번 · pid 같고 생성 다르면 따로★ · 512 넘음 → `full` · ★`start` 가 `full` 을 비우고 남은 기록을 밖에서 버린다 · 판의 복사는 `active ≠ rec` 면 빈 것 · 에피소드가 사는데 기록이 사라짐 → `snapshot_failed(port)` · 기록 자물쇠가 독에 걸려도 돈다★ · 기록 자물쇠 안 OS 호출 · 핸들 닫기 0 · 약한 손잡이 사라짐 · 표식 → 기록 놓고 끝 · 듣는 스레드는 올린 `Arc` 를 쥔 채 기다리지 않는다(가짜 포트가 기다리는 동안의 강한 수를 적는다) |
+| ★듣는 스레드 실패 모드(새)★ | `next` 오류 · 차례 몸통 패닉 → `port_failed` 굳음 · `stop(active)` · warn 한 번 · `unwatch` → 성공이면 끝 · ★실패면 끝나지 않고 꺼내 버리기만(기록 0) — 약한 손잡이 · 표식에서 끝★ · 다음 에피소드의 ⓐ 가 굳은 칸을 보고 `Failed(port)` |
+| ★포트 확보 — 꺼내는 이가 먼저★ | 처음 여는 이만 `watch_births` · 두 번째 부름 없음(코드) · ★가짜 Job 이 부름 순서를 적는다: 포트 → 스레드 기동 → 붙이기★ · ★기동 실패 → 붙이기가 불리지 않는다 · 굳음★ · ★붙이기 실패 → 굳음 · 스레드가 `false` 를 받고 끝난다(떼기 안 부름)★ · 보내는 쪽이 사라짐 → 스레드는 돈다 · 약한 손잡이 사라짐은 굳히지 않음 |
+| ★규칙 — 스파이크 모양★ | p1 · p3t3 · pilot 모양 → `Cleanup` · p3bg 모양 → 1 차례 주인 `Cleanup` → 확인 → 2 차례 fork 24776 `Cleanup` · ★taskkill 탄생이 없음 · `/PID` 가 다른 번호 · 부모가 claude 가 아님 · taskkill 생성 < T 생성 → `NoTaskkill`★ · ★부모 생성 > 자식 생성(재사용 흉내) → `ChainCut`/`ParentUnknown`★ · 중간 고리 알림 유실 → `ChainCut` · 반복의 `sleep` → `NotHookCopy` · 반복 bash 산다 → `AncestorAlive` · taskkill → `ParentAlive` · Bash 도구 사슬 전멸 뒤 서브셸 → `NotHook` · 순환 · 17 걸음 · k = 1 · 뿌리 먼저 → `ChainCut` · 런처 모양 → `NotHook` |
+| 판의 차례 | `seq` 오름차순으로 끝낸다 · ★한 차례의 확인은 마감 하나(200 ms)를 나눠 쓴다(가짜 시계로 차례 기다림 합 ≤ 200 ms)★ · 마감 안에 안 끝남 → 다음 차례에서 산 것 · 그 아래 빠짐 · 3 차례 넘음 → `rounds_exhausted` · `Cleanup` 없으면 멈춤 · ★재확인 거절(턴 끝 · 새 끊기 · 새 입력 · 표식) → 남은 후보와 다음 차례를 버리고 판 끝(debug)★ |
+| `is_hook_command` · `taskkill_names` | 실행기 · 껍데기 → 참 · Bash 도구 · `shell-snapshots` · `node` · `.cmd` · `-lc` · 빈 칸 → 거짓 / `taskkill.exe /PID 35688 /T /F` → 35688 · `/T` 나 `/F` 빠짐 · 다른 실행 파일 → 없음 |
+| 종료 표식 · 새 입력 · 뿌리 재확인 · 패닉 가드 · 끝내기 시간 | 11판 그대로 · ★`RetiringSignal` 에 세우는 메서드 없음★ |
+| decoder 배선(백업 `decoder_with_gate` `:5692`) | 진행 · `result` · 둘째 `started` → 버림 · 여는 `started` 는 한 구간 · 이어받기 무시 |
 
-**실프로세스 — `platform/process_group.rs` 의 시험마다 `#[cfg(windows)]`(선례 = `process_tree.rs:244-262`). 파일 전체를 `#![cfg(windows)]` 로 막지 않는다 — 비Windows 에는 「`process_group()` 이 `None` · 껍데기가 빈 명단」 시험이 따로 선다. ★한 시험이 띄우는 프로세스는 서넛 이하로 둔다(CLAUDE.md — 프로세스 생성 몰림이 개발 PC 터미널을 죽인다)★:**
+**실프로세스 — 시험마다 `#[cfg(windows)]` · 넷 이하(콘솔 호스트 포함) · 도우미 = HEAD `process_group.rs:176`:**
 
-1. Job 에 넣은 `cmd.exe /c ping …` 의 손자 `ping.exe` 가 `member_pids()` 에 든다 · 검증 → `Ready` · 끝내기 = `Terminated` · 곧 사라진다 · 종료 코드 = `LEFTOVER_EXIT_CODE`.
-2. ★**실제 시계 음성 시험(무시 안 함 · 리뷰 2 K2 로 다시 짬)**★ — 3판의 모양(A · B 가 시험 프로세스의 자식)은 결정 4 뒤로 둘 다 부모가 살아 있어 문턱을 한 번도 거치지 않는다. 그래서: 중간 다리(`cmd.exe /c start "" /b <오래 사는 자식>` — 다리는 곧 끝난다)로 A 를 시험 Job 에 띄우고 다리가 끝나기를 기다린 뒤 ★다리의 `Child` 를 버려 핸들을 닫는다(리뷰 3 — 「A 의 부모 죽음」이 좀비 가정에 기대지 않게 · 좀비는 ⑤ 가 따로 잰다)★ → 실제 `wall_now()` 를 읽는다 → 같은 방식으로 B 를 띄운다. ★다리는 `CREATE_NO_WINDOW` 없이 시험의 콘솔을 물려받게 띄운다고 적는다 — 다리가 자기 콘솔 호스트를 얻으면 그것도 우리 Job · 문턱 뒤 · 다리가 끝나면 부모 죽음 · B 가 붙어 있는 동안 삶이라 함께 고를 수 있다(시험 러너에 콘솔이 없으면 새로 생길 수 있다)★. 그 뒤 ⓐ ★A · B 가 `member_pids()` 에 있음을 먼저 단언★ ⓑ **A 의 부모 상태가 `Dead` 임을 단언**한다(그래야 A 가 빠지는 이유가 문턱뿐이다) ⓒ 판의 고르기(보호 집합 비움) — ★B ∈ 고른 것 · A ∉ 고른 것 · 나머지는 전부 ppid 가 다리 둘 중 하나인 것(다리의 콘솔 호스트)★ ⓓ 실제 멤버의 생성 시각으로 술어를 직접 단언 — `created(A) < wall` · `created(B) >= wall` ⓔ 시험 프로세스 자신의 생성 시각 < `wall_now()`. 기점 변환 결함(모두가 문턱 뒤로 읽혀 떼로 죽이는 것)을 잡는다.
-3. ★**시작시각이 어긋난 신원 = `NotOurs` — 우리 Job 의 산 멤버로 잰다**★ · 그 프로세스는 끝난 뒤에도 살아 있다.
-4. ★**다른 Job 의 프로세스는 끝내지 않는다**★ — 남(F)을 **다른 Job** 에 넣고 그 신원을 주면 `NotOurs` · F 는 살아 있다(조사 §4 사고의 회귀망). ★**중첩 Job 변형**★ — 부모 Job P 에 X 를 넣은 뒤 우리 Job 에도 넣어 우리 Job 을 P 아래로 중첩 · F 는 P 에만 → `NotOurs` · F 생존(`IsProcessInJob` 에 NULL Job 을 넘기는 결함을 잡는다).
-5. ★**좀비 부모 [리뷰 2 K4]**★ — Job 안의 P 가 자식 C 를 띄운다(`cmd.exe /c start "" /b ping …` 모양) · 시험이 P 의 핸들을 쥔 채 P 를 끝낸다 → `process_parent_table` 에 P 가 **없고** C 의 부모 상태 = `Dead`. 표가 좀비를 싣는다면 이 시험이 빨개지고 결정 4 가 잔여물을 놓치는 모양이 드러난다(프로세스 셋 — ②와 같이 다리가 콘솔 호스트를 얻으면 넷 · 다리는 시험의 콘솔을 물려받게 띄운다).
-6. 명단 늘리기 — `member_pids_with_capacity(1)` 로 멤버 서넛을 물어 늘리기 · 되풀이 경로를 지나고 전부 나온다(리뷰 2 A2 — 3판의 80 개 띄우기를 대신한다).
-7. `#[ignore]`(Git Bash 필요): **명시 경로**(`C:\Program Files\Git\usr\bin\bash.exe` — 없으면 명시 패닉 · `PATH` 의 `bash` 는 WSL 일 수 있어 쓰지 않는다)로 `-c "(sleep 30 &)"` 를 띄워 부모 없는 MSYS fork 자식이 **우리 Job 멤버로 남는지** · 부모 상태 `Dead` 인지 · 끝나는지. ★이 시험은 **Job 상속**만 잰다 — 멈춤은 재현하지 않는다(실제 멈춤을 쥔 것은 반쯤 fork 된 자식 — §3-0 Q1)★.
+1. 명단(HEAD `:498` · `:456` — 도우미를 `pin_member` 의 `exited()` 로). 2. 붙든 멤버 끝내기 · 종료 코드 · `wait_exit`(HEAD `:346`). 3. 다른 Job · 부모 Job 에만 → `Ok(None)`(`:405` `:425`). 4. `:381` 걷음. 5. `#[ignore]` Git Bash — MSYS fork 자식(`:527`).
+6. 사실 — 문 달린 `cmd` X: 부모 = 시험 프로세스 · 생성 ≥ 시험 프로세스의 생성 · 실행 파일 · 명령줄(`QUERY_LIMITED`). 7. 가입 알림 — 시험이 `start` 가 받은 포트를 쥔다 · ★`start` 가 `Err` 면 붙지 않는다(뒤에 띄운 `ping` 이 그 포트에 안 온다 — `Timeout`)★ · `Ok` 면 붙인 뒤 X(되알림)가 `Joined` · X 가 띄운 `ping` `Joined` · 끝남 `Other` · `unwatch_births` 뒤 새 멤버는 안 온다. 8. `#[ignore]` Git Bash — 껍데기 `bash -c "bash x.sh"` 아래 스크립트(exec) · 서브셸(사본) · `sleep`(아님).
+9. 통로 — HEAD `:725` 을 시계 없이(100 ms 유지) · ★`begin_retire()` · `shutdown()` 이 `retiring()` 을 세운다★ · 통로를 버리면 명단 빈 · 붙들기 `Ok(None)`. 10. 쓰기 확인 — 쓰인 뒤 한 번 · 닫히면 안 불림 · 부를 것 안 `push` 교착 없음 · 부를 것 패닉 → 다음 덩이도 쓰인다.
+11. manager — `kill_agent` 가 `begin_retire` 를 권한 회수보다 먼저 · `tear_down_failed_activation` 이 표식 대조 뒤 첫 줄에서 부른다(가짜 통로가 부름 순서를 적는다).
+12. `leftover.rs` 실물 포트 — R(`CREATE_NO_WINDOW` 문 달린 `cmd`)이 띄운 B 가 끊기 뒤 P(ping)를 띄우고 끝남 → P 생존 · `not_hook_copy` · 끊기 전 탄생만 → `no_new_member` · 부모가 산 끊기 뒤 자식 → `parent_alive`. 13. `#[ignore]` MSYS 반복 · 파이프 → 생존.
 
-`base` 는 자기 시험(`child_pids_finds_spawned_child` 옆)에 「띄운 자식이 표에 부모와 함께 든다」 · 「`process_start` 가 끝난 번호에 `Gone`」 · ★「`process_start(0)` = `Unknown`」(리뷰 3)★을 더한다. 프로세스를 띄우는 시험이라 `cargo test -p engram-dashboard-agent -- --test-threads=4` · `cargo test -p engram-dashboard-base -- --test-threads=4` 로 돈다(CLAUDE.md 「병렬은 테스트 바이너리마다 걸린다」). CI 는 1–6 을 Windows 러너에서 돈다.
+★끝내는 경로의 실프로세스 시험은 없다★(claude 훅 실행기 모양 아래 사본 고아는 넷을 넘는다) — 순수 시험(스파이크 모양) + §7 G1. `cargo test -p engram-dashboard-agent -- --test-threads=4` · CI 는 `#[ignore]` 를 뺀 전부.
 
 ---
 
 ## 6. 구현 순서 — 어디서 멈춰도 빌드가 선다
 
-한 무리(`agent` · `base`)라 **코더 하나 · 순차**가 기본이다. ①과 ②는 파일이 안 겹쳐 둘로 나눌 수 있다 — 그러려면 메인이 접점(`ProcessIdentity`(기존) · `ProcessStart` · `Verify`/`ReadyKill`/`MemberKill` · `WrapperShape` · §3-4 의 순수 함수 · 아래 포트 둘의 시그니처)을 먼저 못 박는다.
+코더 하나 · 순차. **먼저:** `git diff HEAD -- crates/` 가 비어야 한다.
+
+**접점:**
 
 ```rust
-// leftover.rs 의 포트 — 실물은 ③ 에서 조립한다
-pub(super) trait ProcessPort: Send + Sync {
-    fn member_pids(&self) -> io::Result<Vec<u32>>;           // 완전한 명단만 · 통로가 사라졌으면 Ok(빈)
-    fn parent_table(&self) -> Option<Vec<(u32, u32)>>;       // 표 한 장 · 실패 = None
-    fn start(&self, pid: u32) -> ProcessStart;               // Known / Gone / Unknown
-    fn verify(&self, who: ProcessIdentity) -> io::Result<Verify>;   // 자물쇠 밖 · Ready 의 terminate_raw 만 자물쇠 안(settle 은 밖)
-}
-pub(super) trait LeftoverClock: Send + Sync {
-    fn wall_now(&self) -> u64;          // FILETIME 척도
-    fn mono_now(&self) -> Instant;
-    fn sleep(&self, d: Duration);
-    fn spawn(&self, body: Box<dyn FnOnce() + Send>) -> io::Result<()>;
-}
+pub(crate) struct ProcessFacts { pub ppid: u32, pub create: u64, pub image: String, pub cmdline: String }
+pub(crate) struct RetiringSignal(Arc<AtomicBool>);                          // is_set() 만 · 만드는 것은 통로
+pub(crate) trait Pinned: Send + Sync { fn exited(&self) -> io::Result<bool>; fn wait_exit(&self, d: Duration) -> io::Result<bool>;
+    fn facts(&self) -> &ProcessFacts; fn terminate_raw(&self) -> io::Result<()>; fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill>; }
+pub(crate) trait Births: Send + Sync { fn next(&self, wait: Duration) -> io::Result<PortEvent>; }   // Joined(pid) · Other · Timeout
+impl ProcessGroup { fn member_pids(&self) -> io::Result<Vec<u32>>; fn pin(&self, pid: u32, kill: bool) -> io::Result<Option<Box<dyn Pinned>>>;
+    fn watch_births(&self, start: impl FnOnce(Arc<dyn Births>) -> io::Result<()>) -> io::Result<()>;   // 포트 → start → Ok 면 붙이기
+    fn unwatch_births(&self) -> io::Result<()>; fn retiring(&self) -> RetiringSignal; }
+// transport
+pub trait AgentTransport { /* … */ fn begin_retire(&self) {} }
+pub type OnWritten = Box<dyn FnOnce() + Send>;
+pub struct InterruptOut { pub bytes: Vec<u8>, pub on_written: Option<OnWritten> }
+pub type InterruptLine = Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>;
+// InputQueue: Inner.pending: VecDeque<(Vec<u8>, Option<OnWritten>)> · push(b) = push_with(b, None) · push_with(b, cb)
+//             pop() -> Option<(Vec<u8>, Option<OnWritten>)> · drain: write → mark_written → catch_unwind(cb()) (패닉 = warn · 계속)
 ```
 
-| 단계 | 내용 | 멈춰도 서는 이유 | 커밋 |
-|---|---|---|---|
-| ① | `base::platform::{process_parent_table, process_start}` + `child_pids` · `process_creation_time` 을 그 위로(동작 동일) + `base` 머리 둘(`lib.rs:3-4` · `platform.rs:1`) · OS 조각(`member_pids`(+ 이음새) · `verify_member` · `VerifiedMember::{terminate_raw, settle}` · 결과 enum) · `ProcessGroup` · 중립 결과 · `process_tree::walk_levels` · 통로 `Arc` 칸 + `pub(crate) process_group()` · `console_wrapper_depth()` · §5 실프로세스 시험 · `walk_levels` · 표 시험 | 새 함수는 시험 말고는 아무도 안 부른다 · `child_pids` · `process_creation_time` 기존 시험과 소비자가 동작 불변을 잰다 · 통로의 Job 동작 무변경 | 1 |
-| ② | `leftover.rs`: 상수 · `GateState` 전이(시계 닻 포함) · `WrapperShape` · 순수 계획 함수 · 포트 둘 · 일꾼 몸통 · 끝내기 확정 · 판 · 로그 · 가짜 포트 시험 | 모듈은 등록되지만 배선이 없다 | 1 |
-| ③ | `TurnGate` 를 `Mutex<GateState>` 로(끊기 줄 함수 · decoder 가 새 연산을 쓴다) · `open_spawn`(`:437-440`)이 `t.process_group()` · 뿌리 신원(`process_start(pid)`) · `WrapperShape::compose(console_wrapper_depth(), group.root_attached())` · 첫 시계 닻 · `control.map(|c| c.agent_id)` 로 정리기 조립(손잡이 · 뿌리 신원이 없으면 `None` — 오늘 그대로) · ★`control` 인자 주석(`:426-428`)과 버림 줄(`:431`) 고침★ · 실물 포트 둘 · decoder 배선 시험 · 앵커 | 이 단계가 처음으로 동작을 바꾼다 · 기존 끊기 시험(`gated_decoder`)이 문 동작 불변을 잰다 | 1 |
-| ④ | 문서 — ADR-0246(`/adr` — ADR-0238 결정 3 · 5 와 ADR-0244 결정 2 개정 링크 · §9) · CLAUDE.md: ⓐ 「핵심 불변식」 소유권 분할 줄의 `transport=…/job` → 「Job 은 transport 가 만들고 끝내며 밖으로는 약한 손잡이만 · backend 일꾼이 멤버 하나씩 검증하고 끝낼 수 있다」 ⓑ `TurnGate` 줄(「decoder 와 그 함수가 같은 `Arc` 로 쥔다」)에 자물쇠 안 상태 · 에피소드 · 일꾼 ⓒ 락 순서에 새 잎 락 `TurnGate.state` 와 그 예외 둘(§3-3 끝의 정본 문장을 그대로) ⓓ 「백엔드 모듈 맵」 `base` 항목의 `platform` 설명(「PID liveness·프로세스 시작시각·자식 PID 열거」 → 프로세스 표 · 시작시각 세 갈래 판정) · T-40 은 GUI 실측 뒤 해소 | load-bearing 문서 → `/review doc` | 1 |
+**조립(백업 `claude/mod.rs:443-449`):** `GateSlot` → `stream_decoder` → `StdioTransport::open` → `leftover_cleaner`(`process_group()?` · 뿌리 0 이면 `None` · `Cleaner::new(port, clock, root_pid, retiring, agent)` — 포트 · 듣는 스레드는 첫 에피소드에서) → `GateCell::new` · `slot.get_or_init` → `with_interrupt(interrupt_line(gate))` → `start()`.
 
-- `output_decoder()`(`claude/mod.rs:480-491` — 운영 밖 조립)는 자기 문을 만들 뿐 정리기를 꽂지 않는다.
-- CI 에 `-D warnings` 가 없어(`.github/workflows/ci.yml` 확인) ①② 사이의 미사용 경고는 게이트가 아니다 — ③ 에서 전부 쓰인다.
+**백업에서(`leftover.rs`):** 살림 = `INTERRUPT_LEFTOVER_GRACE` · `ProcessPort`(고쳐서) · `LeftoverClock` · `SystemClock` · `Phase` · `Episode` · `GateState` · `Accepted` · `Step` · `Ticket` · 전이들 · `Commit` · `Cleaner` · `GateCell` · `run_worker`(패닉 가드) · `Stop` … `PassReport` · `run_pass`(차례 · 순서 교체 · 확정 구간 `:1173-1191` 모양 그대로) · `log_*`. 걷음 = 시계 · 모양 · 옛 고르기와 그 시험. `claude/mod.rs` = 11판과 같음.
+
+| 단계 | 내용 | 멈춰도 서는 이유 |
+|---|---|---|
+| ① | 아래 순서 | 바뀌는 이름은 1단계 시험 · HEAD `interrupt_line` · `kill_agent` 첫 줄 말고 아무도 안 부른다 |
+| ② | `leftover.rs` + 시험 · `mod leftover;` | 배선 없음 |
+| ③ | 배선 · `TurnGate` 걷기 · `started` · 앵커 · HEAD 시험 `:6070-6137` | 처음 동작이 바뀐다 |
+| ④ | 새 ADR · ADR-0257 부분 폐기 도장 · ADR-0238 링크 · CLAUDE.md(소유권 · `TurnGate` → `GateCell` · 락 순서에 새 잎 둘 · 「의존성」 feature 둘 · `begin_retire`) · `session-path-ownership.md:160` | `/review doc` |
+
+- **① 의 순서(각 걸음이 홀로 컴파일):** 1. `root_attached` 걷기 — 통로 칸 · 블록 · `ProcessGroup::new(job, root_attached)` → `new(job)` · `detached()` · `root_attached()` 와 ★그것을 단언하던 시험 두 줄(HEAD `process_group.rs:144` · stdio `:768`)을 같은 걸음에서★ 2. `console_wrapper_depth` 걷기 3. stdio `:725` 을 시계 없이 고친 뒤 `process_tree` 셋 걷기 4. `Cargo.toml` feature 둘 + `windows.rs` 의 `pin_member` · 사실 · `watch_births(start)` · `unwatch_births` · `BirthPort{next}` · 시험 6 · 7 · 8 5. `begin_retire`(trait 기본 · `StdioTransport` 칸 · `shutdown` 첫 줄 · `Session` · `kill_agent` 첫 줄 · `tear_down_failed_activation`) + 시험 11 6. `process_group.rs` 의 `new(job, retiring)` · `pin` · `watch_births` · `unwatch_births` · `retiring` · `Pinned` · `Births` · `RetiringSignal` + HEAD 시험(`:346` `:405` `:425` `:456` `:527`)과 도우미(`identity` · `parent_is_dead` · stdio 시험의 `known` · `still_running`)를 `pin` 으로 옮긴 **뒤** `verify` · `Verify` · `ReadyKill` · `verify_member` · `MemberCheck` · `:381` 걷기 + 시험 9 7. `InterruptOut` · 큐 모양(`push_with` · `pop` 쌍 · `drain` 의 `catch_unwind`) + HEAD `interrupt_line` 을 `InterruptOut { bytes, on_written: None }` 으로 · ★stdio 시험 `:589` · `:615`(`pop` 이 쌍을 준다) · `input_queue.rs` 시험 `:391` · `:410`★ · 시험 10 8. 머리 doc.
 
 ---
 
 ## 7. 검증 계획
 
-**기계 게이트(`/qa`):** `cargo test -p engram-dashboard-agent -- --test-threads=4` · `cargo test -p engram-dashboard-base -- --test-threads=4` · 워크스페이스 회귀 · `cargo fmt --check` · 코어 격리 `rg "^\s*use tauri" crates/engram-dashboard-agent/src/` · `crates/engram-dashboard-base/src/`(→ 0) · `base` 입주자 상호 무참조 · `base` 의존 상한(→ 1 줄). 프론트 무변경이라 `npm test` 는 `/qa` 바인딩 범위대로.
+**기계 게이트(`/qa`):** agent 시험(`--test-threads=4`) · 워크스페이스 회귀(manager 시험 포함) · `cargo fmt --check` · 코어 격리 `rg` · 생성물 sync.
 
-**GUI 실측(`/qa full` 격리 인스턴스 · 실제 대시보드 스폰 · 실제 claude · 실제 전역 훅 — ★N 을 세게 재는 자리이자 스파이크가 못 본 실제 경로의 판정★):**
+**GUI 실측(`/qa full` · 실제 대시보드 · claude · 훅):**
 
 | # | 시나리오 | 통과 조건 |
 |---|---|---|
-| G1 | 조사 실험 1 E 재현 — 실제 `UserPromptSubmit` 훅 · 보낸 뒤 약 0.2 초 Esc · **10 회 이상** | 매 회 「중단하는 중…」이 **N + 1 초(4 초) 안에** 풀린다(스파이크: 멈춤 아닌 끊기 ≤ 1.4 초 · 정리 뒤 `result` 18–21 ms) · 멈춘 회만 정리 warn · 나머지는 warn 0 · 멈춘 회의 화면이 보통 끊김과 같다(끊김 표시 행 — ADR-0243 · 오류 행 없음) · 다음 턴이 같은 claude 에서 답한다. ★스파이크는 +10 s 에 끝냈다 — +3 s 에 실제로 끝내는 것은 여기서 처음 잰다★ |
-| G2 | 로그 대조 | `session_tracker` warn 의 `resolved_pid` 가 정리 warn 의 `wrapper_layer` 안에 있다(스파이크 Q2 = {conhost, claude}) · 「아무것도 못 끝냄」 warn 0 · 끝낸 PID 가 전부 정리 warn 에 있고 종료 코드 = `0x7440` · `clock_drift_ms` 가 허용치 안 |
-| G3 | 조사 E-late(보낸 뒤 3 초 Esc) · 훅 없음 | 정리 warn 0 |
-| G4 | 조사 B20(선언된 `sleep 20` 훅이 **Esc 전에** 시작) | 끝낸 것 0 · 「후보 0」 warn 한 줄(기대) · 턴 끝은 오늘처럼 약 20 초 |
-| G5 | 정리가 난 턴 전후의 MCP 서버 · 다른 에이전트 · 다른 워크트리 빌드 | 살아 있다(조사 §4 같은 오살 없음) |
-| G6 | ★스파이크가 안 덮은 것★ — ⓐ Bash 도구가 도는 중(예: 긴 `sleep`)에 Esc ⓑ 대시보드 실제 스폰(데몬 MCP 끝점 포함)에서 끊기 ⓒ ★**백그라운드 작업이 도는 중**(Bash `run_in_background` 로 `cargo build` 등 — 끊기 뒤에도 자식 `rustc`/`link.exe` 를 새로 띄운다)에 훅 멈춤을 일으킨다★ | ⓐ 끊기 뒤 N 초 안에 턴 끝이 오면 정리 warn 0 · 안 오면 끝낸 것이 전부 끊기 뒤 생긴 · 보호 밖 · 부모가 죽은 것 ⓑ 정리 전후 우리 MCP 연결이 안 끊긴다 ⓒ 빌드 자식(부모 작업이 살아 있다)은 하나도 안 끝나고(결정 4) 잔여물만 끝난다 · 빌드가 성공한다 |
+| G1 | `UserPromptSubmit` 훅 · 보낸 뒤 약 0.2 초 Esc · **10 회 이상** | 멈춘 회는 N + 1 초 안에 풀린다(기대 10/10 · 못 풀면 `reason`) · `terminated` = 훅 스크립트 bash(와 그 사본) · `chain` 꼭대기 = 훅 실행기 · `rounds` · 멈추지 않은 회는 warn 0 · 다음 턴이 답한다 · `terminate_max_us` 수 ms 이하 · 포트 실패 warn 0 · ★첫 에피소드(첫 끊기에 붙인 포트 — 하네스는 스폰 때 붙였다)도 끝낸다★ · ★적는다: 첫 에피소드의 탄생 수 · `full` · 붙이기 → 열기 지연 · ★쓰기 → W 지연과 첫 주인 탄생까지의 여유(놓침 창 — §8 ㉓)★(§8 ㉒ⓑ)★ |
+| G1b | 대기 입력을 두고 Esc | `started` 로 버려지는 비율(놓침 · §8 ⑱) |
+| G2 | 로그 대조 | `terminated` 에 claude PID 없음 · 종료 코드 `0x7440` · `snapshot_failed` · `root_unknown` warn 0 |
+| G3 · G4 · G5 | E-late · B20 · 다른 에이전트 · MCP · 빌드 | 정리 0 · 약 20 초 · 살아 있다 |
+| G6 | Bash 도구 도중 Esc · 데몬 MCP · `run_in_background` 빌드 · MSYS 반복 · 파이프 — 그 중에 훅 멈춤 | 백그라운드 · 도구의 프로세스는 하나도 안 끝난다 · 잔여물만 끝난다 |
+| G7 | 멈춘 턴 도중 에이전트 kill | 정리 warn 0 · `retiring` debug |
 
-- 멈춤은 경합이라(스파이크 3/11 · 조사 §2 ⑦ — 7 번 중 2 번) G1 에서 멈춤이 한 번도 안 나면 표본을 늘린다. 멈춤 0 으로 끝나면 「정리 경로 미관측」으로 보고하고 PASS 로 적지 않는다.
-- ★G1 에서 잔여물이 정리되지 않고 300 초가 그대로면★ 「아무것도 못 끝냄」 warn 의 `reason` 부터 본다(모양 · 시계 · 명단 · 표 · 부모 상태) — 어느 쪽이든 닫힌 실패라 오살은 없다.
+- 멈춤이 안 나면 표본을 늘리고 「정리 경로 미관측」(PASS 아님). 못 끝냄 warn 의 `reason` 으로 모양을 가른다 — 모두 닫힌 실패다.
 
 ---
 
 ## 8. 위험 · 알려진 한계
 
-1. **잔여 경합(ADR-0238 결정 7):** 끊기 줄이 앞 턴의 `result` 뒤 다음 턴에 닿으면, 앞 턴의 끝이 에피소드를 지워 그 다음 턴의 멈춤은 정리되지 않는다 — 오늘 그대로. claude 끊기 줄에 턴 id 가 없어 닫을 수 없다.
-2. **턴 끝을 놓침 — `result` 유실(4 MiB 재동기 · 못 읽음 · 벤더 이상) · 문 구멍(`claude/mod.rs:759-764`):** 턴이 실제로 끝났는데 decoder 가 모르면 그 에피소드는 N 에 **판을 한 번** 돈다 — 끝난 턴과 멈춘 턴을 가를 수 없다. 그때의 후보에 **다음 턴의 프로세스**가 들 수 있다(예: 대기 입력 B 의 훅 bash). ★fork 도중의 훅 bash 를 끝내면 그 자체가 300 초 잔여물을 만들 수 있다(조사 §2 ② 의 모양 · 추론)★. 막는 것 둘: ⓐ 결정 4 — 도는 훅의 bash 사슬은 부모가 살아 있어 후보가 못 된다(스파이크 Q2 의 사슬: d2 런처 → d3 → d4 → d5 가 모두 산 부모를 둔다). 남는 것은 부모가 이미 죽은 것뿐이다. ⓑ 한 번 쓰고 버림(§3-3). 문 구멍 상태의 끊기는 한가한 CLI 에 닿아 `result` 가 없으므로 그 끊기마다 판이 한 번 돌지만, 그 끊기 뒤 태어난 것만 고른다(한가한 CLI 아래엔 대개 없다).
-3. **끊기 뒤 태어나 N 초 넘게 사는 정당한 프로세스 — 결정 4 로 좁혔다:**
-   - ★**백그라운드 작업의 자식(리뷰 1 M 이 찾은 피해 부류) — 이제 빠진다**★: claude 의 백그라운드 작업(Bash `run_in_background` — 예: `cargo build`)이 [Esc, Esc+N] 에 새로 띄운 자식(`rustc` · `link.exe` — 깊이 4 이상)은 부모 작업이 살아 있어 후보가 못 된다(결정 4 · §7 G6 ⓒ). 부모 판정의 짝 틈은 두 번 읽기가 막는다(§3-4 · 리뷰 2 K1).
-   - 도는 훅의 손자도 같은 이유로 빠진다(부모가 살아 있다).
-   - **남는 노출** = 끊기 뒤 태어나 N 에 살아 있는데 **부모가 이미 죽은** 정당한 프로세스(예: 스스로 부모를 떠나는 데몬화 — 끊기 뒤 N 초 안에 claude 아래에서 새로 떠야 한다). 스파이크 11/11 에서 그런 것은 없었다. 조사 §7 「잘못 발화해도 맞는 것은 Esc 뒤에 생긴 프로세스뿐이다」.
-   - ★**결정 4 로 새로 놓치는 것**★ = 멈춤을 쥔 것의 부모가 **살아 있는** 모양(아직 관측 없음 — 잰 3/3 은 부모가 죽어 있었다) · 표가 좀비 부모를 싣는 경우(§5 ⑤ 가 박는다). 그 모양이 나오면 정리는 그것을 건드리지 않고 그 끊기는 오늘처럼 멈춘다(「후보 0」 warn 이 부모가 살아 있어 뺀 수를 남긴다). 사용자: 「어차피 잘 안일어나는 일이니깐」.
-4. **래퍼 모양 가정 — 실측으로 섰다(스파이크 Q2 · 4/4):** claude.exe 는 `cmd.exe` 의 직계 자식이고 런처 층이 없다. 같은 층의 콘솔 호스트는 §3-4 가 층 식구 수로 흡수했다. 남는 위험: 설치 방식이 바뀌어 런처가 한 겹 끼면 래퍼 층이 {conhost, 런처} 로 모양 검사를 **통과**하고 「claude 의 직계 자식」이 한 층 어긋난다. G2 의 `resolved_pid ∈ wrapper_layer` 대조가 그것을 잡는다(런처면 실패한다).
-5. **시계:** 해상도는 놓치기만 한다(§3-6). 허용치(1 초)를 넘는 뒤로 뛰기는 닻이 보고 그만큼 쉰다(놓치는 쪽 · warn). ★허용치 안의 뒤로 뛰기는 못 본다★ — Esc 전 그만큼 안에 태어난 프로세스가 문턱을 지날 수 있고, 부모와 자식이 태어난 사이에 그런 뛰기가 끼면 자식이 부모보다 이르게 읽혀 **살아 있는 부모가 「부모 죽음」(재사용)으로 뒤집힐 수 있다**(결정 4 가 지키던 자식이 후보가 된다 · 드묾 — 두 탄생이 뛰기 폭 안에 붙어 있어야 한다). 멤버의 `created <= now_wall` 이 그 일부를 거른다. 닻은 기록 · 판마다 다시 잡혀 슬루는 쌓이지 않는다 — 다만 긴 휴지 뒤 첫 끊기에서는 그 사이 쌓인 슬루가 허용치를 넘으면 한 번 쉰다(빈도는 `clock_drift_ms` 로그로 잰다).
-6. **스폰 직후의 Job 편입 틈 — 실측(스파이크 Q2):** `spawn` 이 돌아온 뒤 `assign`(`stdio.rs:110-127`) 완료까지 33–40 µs 였고 claude.exe 는 그 약 58–63 ms 뒤에 생겼다 → claude 트리가 Job 밖으로 샐 여지는 사실상 없다(4/4 모두 Job 안). ★콘솔 호스트는 `assign` 뒤 약 1.6–2.1 ms 에 생겨 여유가 좁다★ — 부하가 크면 Job 밖에 날 수 있고 그러면 `KILL_ON_JOB_CLOSE` 가 그것을 못 거둔다. T-40 범위 밖이다(걷기는 Job 이 아니라 프로세스 표를 걸어 모양 가드에는 영향이 없다) — 기록만 한다.
-7. **전제 — 실측으로 섰다(스파이크 Q1 · 3/3):** 멈춤을 쥔 잔여물은 우리 Job 멤버였다(완료 포트 알림 · `IsProcessInJob` · 멤버 명단 셋 다). 표본은 멈춤 3 번이다.
-8. **대체 없음(결정 2):** 정리가 턴을 못 풀면 사용자가 죽이고 다시 연다 — warn 한 줄이 그 사실을 남긴다.
-9. **Windows 에서만 동작한다.** 다른 OS 는 무동작이다(조사 §8 — Windows 에서만 쟀다).
-10. **upstream 이 고치면(#85250) 이 경로는 잠든다** — 턴 끝이 N 안에 오므로 판이 돌지 않는다. 걷어낼 필요는 없고, 걷을지는 그때 정한다. 스파이크의 claude 2.1.284 에서도 멈춤은 그대로 났다(3/11).
-11. **taskkill 의 콘솔 호스트는 보호 층 밖이다(§3-4) — 결정 4 가 막는다:** taskkill 이 N 초 넘게 매달리면(upstream #67888) 그 conhost 의 부모가 살아 있으므로 후보가 못 된다. taskkill 이 죽은 뒤에도 그 conhost 가 남았다면 후보가 된다(부모 죽음 · 문턱 뒤) — 스파이크에서 taskkill 최장 278 ms · 그 conhost 최장 277 ms 로 함께 끝났다(44 개 관측).
-12. **닫힌 실패의 대가:** 명단 불완전 · 표 목록 중간 오류 · 보호 깊이의 Job 멤버 시작시각 못 읽음 · 첫 끊기 무렵 시계 뛰기 · 일꾼 기동 실패 가운데 하나라도 나면 그 판(또는 에피소드)은 아무것도 안 끝낸다 — 그 끊기는 오늘처럼 멈춘다(warn 이 사유를 남긴다). 한 에피소드에 판은 한 번이라 다시 시도하지 않는다.
-13. **줄이 claude 에 안 닿았는데 에피소드가 남는 경우(§3-2 · 리뷰 2 A7):** 입력 큐가 쓰기 오류 · 라이터 패닉으로 닫혀 claude 의 stdin 이 깨진 채 턴이 돌면, 끊기는 전해지지 않았는데 에피소드가 남아 N 에 판이 한 번 돈다(`push` 성공 뒤 쓰기가 실패하는 경우도 같다 — 되돌릴 신호가 없다). 고르는 것은 끊기 뒤 태어나 N 에 살아 있고 부모가 죽은 보호 밖 멤버뿐이다. 라이터 기동 실패(스폰 직후)는 문이 열리지 않아 해당 없다 · `shutdown()` 은 Job 이 끝나 해당 없다.
-14. **끝내기 확정은 잎 자물쇠 안의 OS 호출 하나(`TerminateProcess`)다(§3-3 — 시계 읽기 외엔 그것뿐):** `TerminateProcess` 가 드물게 늦으면(대상이 커널 안에서 끝내기 어려운 상태 등 · 관측 없음) 그동안 끊기 줄 함수와 decoder 의 문 전이가 기다린다. 판 동안에만 · 후보 수만큼이다.
+1. **잔여 경합(ADR-0238 결정 7):** 구간 사이 턴 닫힘이면 줄 없음으로 조금 좁혔다.
+2. **턴 끝을 놓침:** 다음 `started` 가 버린다(B2).
+3. **놓침(오늘처럼 300 초):** 가입 알림 유실 · 붙이는 순간 · 짧은 중간 고리를 열기 전에 끝남 · 시계가 두 생성 사이에 뒤로 뜀 · 기록 넘침 · 부모 · 조상이 산다 · 사슬이 알려지지 않음 · 훅 감싸기 · 끊기 방식(taskkill)이 바뀜 · 명령줄을 못 읽음 · 대기 입력의 `started` · 포트 실패 · 쓰기 명단 실패(판이 없다) · 끝냄 확인이 200 ms 를 넘음 · 3 차례를 넘는 fork 세대 · 쓰기와 W 사이에 태어난 주인(㉓) · W 의 번호를 재사용한 주인. 잰 10 번에서는 없었다(추론).
+4. **래퍼 모양:** cmd 와 claude 사이에 런처 → 모두 놓친다.
+5. **스냅숏 · 기록의 한계:** 명단 불완전 · 열기 전 재사용 → 생성 순서가 거른다 · 붙드는 수 ≤ 256 + 512 · 쥐는 시간 ≈ N 초 · 중첩 Job 재보고 → 한 번만.
+6. **스폰 직후 편입 틈:** 범위 밖. 7. **전제(실측):** 주인 = 훅 스크립트 bash(사본 또는 껍데기가 exec 한 것) · 사슬 전멸 · taskkill 이 꼭대기를 가리킨다. 8. **대체 없음:** 이어 보낸 턴 9/9. 9. **Windows 에서만.** 10. **upstream 이 고치면 잠든다.** 11. **taskkill 과 그 conhost:** 부모 claude 산다 · 사본 아님.
+12. **닫힌 실패의 대가:** 스냅숏 · 포트 · 뿌리 · 일꾼 · 패닉 실패는 아무것도 안 끝낸다.
+13. **줄이 안 닿음 — 닫혔다(쓰기 확인).** 14. **`TerminateProcess` 가 문 자물쇠 안:** `terminate_max_us`. 15. **부모 번호의 한계:** `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` — 규칙을 다 채워야 끝난다. 16. **뿌리 · claude 생존 틈:** ms · 차례마다 본다.
+17. ★**남는 오살 틈**★:
+    - ⓐ **창 = (첫 쓰임의 W, 마지막으로 쓰인 끊기 + N + 차례들]** 의 가입 중 훅 사본 · 사슬 전멸 · 꼭대기 = 훅 실행기 · claude 의 taskkill 이 그 꼭대기를 가리킴 — **claude 가 taskkill 한 훅 나무의 스크립트 · 서브셸이 살아남은 것**이다. 끝내는 것은 끊기의 뜻과 맞는다. Bash 도구 사슬(taskkill 없음 · 감싸기 다름) · exec 된 프로그램 · 산 작업 아래의 것은 빠진다. claude 가 Bash 도구를 훅처럼 감싸고 taskkill 까지 하게 바뀌면 들어올 수 있다(⑳).
+    - ⓑ **사슬 이어 붙이기(재평가 — 라운드 3 F1):** 부모 번호의 재사용은 생성 순서가 거른다. 남는 것 = 재사용과 **그 두 생성 사이의 시계 뒤로 뛰기**가 겹치고 엉뚱한 사슬이 규칙을 다 채울 때 — 무시할 만하다(추론).
+18. **대기 입력의 `started` 가 멈춘 턴을 버림(놓침):** G1b.
+19. **통로 종료 겹침:** `kill_agent` 첫 줄 · `tear_down_failed_activation` · `shutdown` 첫 줄에서 표식이 서므로 겹침은 「재확인이 읽은 직후」 한 번뿐 · 해가 없다. 듣는 스레드는 매 차례 약한 손잡이를 잠깐(µs) 올린다 — 그 순간 통로가 사라지면 Job 핸들 닫기(`KILL_ON_JOB_CLOSE`)가 그만큼 늦는다.
+20. **claude 판 따라 모양이 바뀜:** 훅 · Bash 도구 감싸기 · `bash ` 붙이기 · taskkill 방식 · MSYS 명령줄 복사는 문서 없는 내부(2.1.284) — 판마다 출처 스파이크를 다시 돌린다.
+21. **포트는 한 번 붙는다 · 꺼내는 이가 먼저:** 듣는 스레드가 뜬 뒤에만 붙인다 — 기동 실패면 붙이지 않는다 · 붙이기 실패면 스레드가 끝난다(§3-5). 에피소드 밖 알림은 듣는 스레드가 버린다 · 스레드가 오류 · 패닉으로 끝나면 떼고 굳힌다(`Failed(port)`) — ★떼기가 실패하면 스레드는 끝나지 않고 약한 손잡이가 죽거나 `retiring` 이 설 때까지 꺼내서 버리기만 한다★(큐가 쌓이지 않는다 · 한 화신 동안).
+22. ★**추론 목록**★ — ★**안전을 떠받치는 것(틀리면 엉뚱한 것을 끝낼 수 있다)**★: ⓐ claude 의 직계 자식 중 훅이 아닌 것이 `-c "bash …"` 를 쓰지 않는다(이 설정 하나만 쟀다 — taskkill 표지가 둘째 벽) ⓑ 뿌리 자식 = conhost + claude(claude 를 고르는 모양 — 둘 넘으면 `Failed(shape)`) ⓒ 사슬 이어 붙이기에 시계 뒤로 뛰기가 겹치지 않는다(⑰ ⓑ) ⓓ claude 내부 모양(⑳ — 문서 없음 · 판마다 스파이크). ★「쓰기 전 탄생은 후보가 아니다」는 여기 없다 — 쓰기 명단 W(문서 API 의 완전성 + 붙든 핸들)가 세운다(§3-2)★.
+    **효과에만 드는 것(틀리면 놓친다):** ⓔ **첫 끊기에 붙이는 포트는 하네스가 재지 않았다**(하네스는 스폰 때 붙였다 — 붙일 때 이미 있던 멤버를 되알린다는 문서대로면 첫 에피소드는 되알림으로 `BIRTH_MAX` 자리와 큐를 먼저 쓴다 · G1 이 잰다) ⓕ 가입 알림은 가입하는 자리에서 쌓이고 한 스레드가 쌓인 순서로 꺼낸다(늦으면 짧게 산 고리를 열기 전에 놓친다) ⓖ 멈춤 주인이 파이프의 유일한 주인은 아니다(p3bg — 차례가 그것을 겨냥한다) ⓗ `TERMINATE` 권한 열기는 bash 주인에서만 쟀다(실패하면 고리 전용) ⓘ 명령줄 클래스 60 을 `QUERY_LIMITED` 로 읽는 것은 하네스 실측이지 문서 서술이 아니다 ⓙ 다른 Windows 판에서의 권한 ⓚ 쓰기 → W 틈이 주인 탄생보다 훨씬 짧다(㉓). (포트 `NULL` 떼기는 문서 서술이라 뺐다.)
+23. ★**놓침 창 — 쓰기와 W 사이(확인 라운드 codex BLOCK #3)**★: 줄이 쓰인 뒤 라이터가 W 를 찍기 전에 가입해 W 때 산 것은 W 에 들어 후보가 못 된다. 틈은 라이터가 쓰기에서 돌아와 명단 호출 하나를 하는 시간이다(짧다 — 추정 · G1 이 로그의 쓰기 → W 지연으로 잰다). 잰 여유: 주인은 쓰인 뒤 263–454 ms(p3bg 주인 1.4 s · 그 fork 2.8 s) · 훅 fork 는 taskkill 보다 1 ms 이상 늦고 taskkill 은 claude 가 줄을 읽은 뒤 띄운다(메인 측정 · §3-0 표). 시험 = §5 「쓰기 확인 · 쓰기 명단 W」 행. ★13판의 「흐림이 양쪽 다 사라진다」는 이 쪽에서 틀렸다 — 이 틈은 남고, 방향은 놓침이다★.
 
 ---
 
 ## 9. ADR 후보 · 앵커
 
-**가안 ADR-0246 — 「claude 끊기 뒤 턴 끝이 N 초 안 오면 우리 Job 안의 끊기 뒤 생긴 잔여물만 끝내고 claude 는 살린다 — 화면 고지도 대체도 끄는 수단도 없다」** (번호 = `/adr` 가 채번 · `docs/decisions` 마지막 = 0245 확인)
+**새 ADR — 「claude 끊기 뒤 잔여물은 첫 끊기부터 판까지 Job 가입 알림으로 기록한 탄생 가운데 줄이 쓰인 직후의 멤버 명단에 없던 것으로서, 끊기 전 스냅숏과 탄생 기록으로 claude 까지 끊김 없이(부모가 먼저 태어난) 알려진 사슬이 모두 끝났고 훅 사본이며 꼭대기가 claude 가 taskkill 한 훅 실행기인 것만 끝낸다 — 벽시계는 쓰지 않는다」**(`/adr` 채번). ADR-0257 부분 대체 · ADR-0238 결정 2 · 3 · 5 개정 · ADR-0244 결정 2 개정 유지.
 
-- **결정 [사용자]:** §1 표 전부(채택안 · 고르기 · PID 규칙 · 시계 · N · OS 조각 · 결정 1 · 2 · 3 · 4). ★결정 4 = 부모가 살아 있으면 건드리지 않는다 — 후보는 부모가 죽은 것만(부모 판정 = 표의 ppid 가 살아 있고 자기보다 먼저 태어났나 · 번호를 늦게 태어난 프로세스가 쥐면 죽은 것 · 판정 불가면 건드리지 않음). 주 기준 위의 덧붙인 거르개이고 「고아 여부는 주 기준이 아니다」(조사 §7)와 어긋나지 않는다★.
-- **구현 세부 [TRD — 뒤집을 수 있다]:** 문 확인과 기록을 한 자물쇠로(§3-2) · 에피소드 = 첫 끊기가 문턱 · 가장 최근 끊기가 대기 · 한 번 쓰고 버림 · 일꾼 하나 · 일꾼 기동 실패는 에피소드 `Done`(§3-2 · §3-3) · ★끝내기 확정 = 자물쇠 밖 핸들 검증 + 자물쇠 안 재확인과 `TerminateProcess` 호출 하나 · 닫기와 분류는 놓은 뒤 · 시계 두 값은 자물쇠 안에서 읽고 전이는 단조 값을 되감지 않는다★(§3-2 · §3-3) · 래퍼 모양 = 래퍼 깊이 + 스폰이 붙인 프로세스 수 · 모양이 어긋나면 정리 안 함(§3-4) · 멤버 시작시각 두 번 읽기 · 명단 · 표 · 멤버 시작시각 실패는 닫힌 쪽 · 사라짐은 건너뜀(§3-4) · 시계 닻 다시 잡기와 쉼 · 멤버의 미래 생성 거르기(§3-6) · 끝내기 = 같은 핸들로 우리 Job 소속 · 신원 · 생존 확인(§3-5).
-- **개정 링크(명시):**
-  - **ADR-0238 결정 3** — `TurnGate { open: AtomicBool }` 가 `Mutex<GateState>`(열림 + 에피소드 + 일꾼 + 시계 닻 칸)로 바뀐다. 여닫기 규칙과 거절 계약은 그대로다.
-  - **ADR-0238 결정 5** — 「우리가 끊기를 보냈다」 표식은 결과 분류용 예비로만 두기로 했었다(`TurnGate.interrupt_sent`). 이 ADR 이 그 자리에 **정리 용도의** 기록(에피소드)을 세운다. 끊김 분류는 여전히 `terminal_reason` 이 하고 이 기록을 읽지 않는다.
-  - **ADR-0244 결정 2** — 「백엔드는 바뀌지 않는다 · 턴마다 끊기 한 번 표식은 대체된다」. 이 ADR 로 backend 가 바뀐다: 되풀이 끊기를 거절하지는 않지만(막는 자리는 여전히 프론트) 에피소드로 **기록한다**.
-- **거부한 대안(출처가 있는 것만):**
-  - **claude 재시작(죽이고 이어받기)** — 채택안이 「claude 는 살린다(재시작이 아니다)」(조사 §7). 피어 중 t3code(`query.close()` 뒤 `--resume`) · happy(죽이기 + resume)가 이 모양이다(조사 §6).
-  - **정리했다는 화면 고지** — 사용자 「그걸 왜 알려」(결정 1).
-  - **정리 뒤에도 안 끝나면 자동 재시작** — 사용자 「너무 복잡해」(결정 2).
-  - **끄는 수단(환경 변수)** — 사용자 「ㅇㅇ 두지 않고」(결정 3).
-  - **부모가 산 후보도 고른다(규칙 글자 그대로)** — 백그라운드 작업이 끊기 뒤 띄운 자식을 끝낼 수 있다(리뷰 1 M). 사용자가 좁히기를 골랐다: 「ㅇㅇ 조건 더해줘 어차피 잘 안일어나는 일이니깐」(결정 4).
-  - **PID 부모 연결로 고르기**(부모 뒤 생성 검사를 더해도) — 조사 §4 사고(남의 `link.exe` 등을 죽였고, PID 재사용으로 21 번 중 4 번 · 18 번 중 3 번 남의 것을 골랐다).
-  - **고아 여부 · 「bash」 인지 · CPU 상태를 주 기준으로** — 정당한 고아(예: dev 서버)가 있고 한가한 프로세스는 얼어 보인다(조사 §7).
-  - **피어의 다른 모양(조사 §6)** — 유예 뒤 로컬에서 턴을 닫기(Zed 30 초 — 「a new session may be required」) · 트리 통째 죽이기(vibe-kanban · paseo · crystal) · 끊지 않고 기다리기(VS Code 확장 · claude-code-action). 조사 §6 은 「claude 를 살려 둔 채 자손만 죽이는 피어는 없다」고 적고, 사용자는 §7 을 골랐다.
-  - **upstream 수정을 기다리기** — CHANGELOG 2.1.284 까지 수정 없음 · 「claude 의 일반 결함이지만 우리 모드에서 드러난다 → 대시보드가 완화한다」(조사 §7 판단).
-  - [TRD] **`open_spawn` 에 `agent_id` 인자** — 제어 끝점이 이미 싣고, 따로 받는 형태로 되돌리지 말라는 결정이 있다(ADR-0217 결정 5 · `types.rs:644-647`).
-  - [TRD] **재확인 뒤 자물쇠를 놓고 끝내기** — 그 틈에 턴 끝 · 새 끊기가 들어와도 끝낸다(리뷰 2 C1).
-  - [TRD] **`push` 실패 때 에피소드 되돌리기** — `push` 성공 뒤의 쓰기 실패를 못 덮어 구멍을 반만 막고 `InterruptLine` 계약을 넓힌다(§3-2 · 리뷰 2 A7).
-
-**앵커(`// ADR-0246`) 달 자리:** `JobObjectHandle::member_pids` · `verify_member` · `VerifiedMember::{terminate_raw, settle}` · `MemberCheck`/`MemberOutcome` · `platform/process_group.rs` 머리 · `process_tree::walk_levels` · `base::platform::process_parent_table` · `process_start` · `StdioTransport::process_group` · `console_wrapper_depth` · `leftover.rs` 머리 · `INTERRUPT_LEFTOVER_GRACE` · `CLOCK_STEP_TOLERANCE` · `LEFTOVER_EXIT_CODE` · `GateState` · 끝내기 확정 구간 · `select_leftovers` · `members_with_parents` · `keep_set` · `WrapperShape::compose` · `TurnGate` · decoder 의 문 여닫기 · `interrupt_line` 의 `try_interrupt` · `open_spawn` 의 정리기 조립과 `control` 주석. 기존 `// ADR-0238` 앵커는 그대로 둔다.
+- **대체되는 것(ADR-0257 줄 번호 = 이 브랜치 HEAD):** `:11` 「맥락」 사고 근거 줄(→ 14판의 고리는 붙든 핸들 사이에서만 잇는다) · `:26` 결정 3 의 수단(「Job 명단 + 생성 시각」 → Job 가입 알림 + 붙든 핸들) · `:27` 결정 4 의 시계(N = 3 초는 그대로) · `:32` 결정 9 의 판정 수단(생성 순서 부모 판정 → 결정 9 · 10 · 11 + 고리마다 부모 ≤ 자식 생성) · `:35`–`:39` 「구현 요지」 전부 · `:42` ADR-0238 결정 3 개정 문구(→ `GateCell`) · `:58`–`:60` 「거부한 대안」 의 「문턱 뒤 생성」 근거 줄 · `:65` 「`push` 실패 되돌리기」(→ 쓰기 확인 · 쓰기 명단 W) · `:71` 「근거」 원자료 줄 · `:76` `TurnGate.state` 잎 줄(→ 잎 둘 — §3-3) · `:77` 닫힌 실패 목록(→ §3-4 판의 차례) · `:78` 한계 ② ③ ⑤ ⑬ · `:80` `base` 줄 · `:81` 코드 앵커 목록(`// ADR-0238` → `GateSlot`).
+- **다시 읽고 글은 그대로:** `:25` 결정 2 「적은 시각 뒤에 생성」 = 줄이 쓰인 직후의 멤버 명단(W)에 없던 가입으로 읽는다(사용자 문구는 두고 새 ADR 이 읽는 법을 적는다) · `:28` 결정 5 「OS 조각 작게」 = 조각이 명단 · 붙들기 · 사실 · 포트 · 끝내기로 늘었으나 전부 `windows.rs` 한 곳 · 다른 OS 무동작 · `:77` 「한 에피소드에 판은 한 번」 = 판 한 번이 차례 ≤ 3 을 품는다.
+- **그대로:** 결정 1 · 6–8(고지 · 대체 · 끄기) · 결정 9 의 「부모가 살아 있으면 건드리지 않는다」.
+- ★**`:55` 「PID 부모 연결로 고르기(「부모 뒤 생성」 검사를 더해도)」 와의 화해**★ — 그 거부는 **Job 밖 PID 까지 부모 번호로 잇던** 사고(남의 `link.exe` · 재사용 21 중 4)에 대한 것이다. 14판은 ① 후보를 우리 Job 의 가입 알림에서만 받고(쓰기 명단 W 밖) ② 고리를 **붙든 핸들(스냅숏 · 같은 기록의 탄생) 사이에서만** 잇고 ③ 부모 ≤ 자식 생성 검사는 후보를 **줄이기만** 한다 — 부모 연결이 후보를 늘리는 자리는 없다. 그래서 거부를 뒤집지 않고 그 안에서 선다.
+- **ADR-0238 개정 한 줄 더:** `:66` 락 순서 줄 「새 락 간선 없음」 → 「새 잎 둘(문 · 기록) · 겹쳐 잡지 않는다 · 쓰기 확인은 라이터 스레드에서 명단을 락 밖에서 찍고 문 자물쇠만 잠깐 · 기존 락과 간선 없음」.
+- **결정 [사용자]:** §1 결정 5 · 6 · 7 · 9 · 10 · 11 · 8 은 11 이 대체. ★고리의 생성 순서 검사 · 규칙 4 의 taskkill ≥ T 는 [TRD] 고름이고 사용자 결정이 아니다(메인이 알렸다)★.
+- **거부한 대안:** 벽시계(5판) · 스냅숏 한 번 찍고 비교(7–10판 — 끊기 뒤 태어나 죽은 고리를 잃는다 · 결정 11) · 6판의 여러 스레드 비우기 · 부모 죽음만 · 죽은 부모가 bash 인가 · 조부모 한 층 · Esc 사이에도 모으기 · 끝남 처리 · [TRD] 판 때 표 · Toolhelp 부모 · 사슬이 끊겨도 끝내기 · `pid_alive` · Esc 마다 다시 찍기 · 문 자물쇠 안 찍기 · 보호 집합 · 래퍼 모양 · 누적 가입 수 · 실행 파일만 비교 · 환경 변수(PEB) · 스트림 사건으로 잇기(PID 없음) · 에피소드 나이 상한 · 포트를 스폰 때 붙이고 늘 듣기(결정 7) · 알림 때 PID 만 적기 · ★「Esc 뒤에 태어났나」를 생성 시각으로 가르기(결정 5)★ · ★쓰기 확인 때 쓰는 쪽이 후보 경계(`next_seq`)를 적기(12판 — 큐에 먼저 쌓였으나 아직 안 꺼낸 알림이 경계 뒤로 섞인다)★ · ★같은 포트에 표지 패킷을 올려 경계를 긋기(13판 — 「가입하는 자리에서 쌓인다」는 문서가 없어 안전의 근거가 못 된다 · 쓰기 명단 W 로 대체)★ · 듣는 스레드를 붙인 뒤에 띄우기(13판까지 — 기동 실패 + 떼기 실패면 아무도 안 꺼내는 큐가 남는다) · 낡은 스냅숏으로 에피소드를 세우기(12판 — 세우지 않고 줄만 돌려준다) · 고리마다 훅 사본 검사(얻는 것 없음) · 끝낸 뒤 확인 없이 한 번에 끝내기(p3bg 의 fork 세대를 놓친다) · manager 가 backend 의 문을 직접 세움(백엔드 확장).
+- **앵커:** `pin_member` · 사실 · `watch_births` · `unwatch_births` · `BirthPort` · `ProcessFacts` · `RetiringSignal` · `AgentTransport::begin_retire` · `kill_agent` 첫 줄 · `ProcessGroup` · `StdioTransport::process_group` · `InterruptOut` · 큐의 부를 것 · `leftover.rs` 머리 · `GateCell` · `Recorder` · 듣는 스레드 · 여는 이 · 두 구간 · 스냅숏 · `note_written`(쓰기 명단 W) · `deliver` · 판의 차례 · 끝내기 확정 · `select` · `is_hook_command` · `taskkill_names` · 패닉 가드 · `open_spawn` 조립 · `interrupt_line`. `TurnGate` 의 `// ADR-0238` → `GateSlot`.
 
 ---
 
 ## 10. 사용자 결정 필요
 
-> 4판 기준: **남은 사용자 결정 없음.** 리뷰 2 라운드는 사용자 체감이 있는 새 갈림을 만들지 않았다(전부 내부 구현).
+> 14판 기준: **사용자 확인 1 건**(의존성 변경). 고리의 생성 순서 검사 · taskkill ≥ T 는 [고름] — 사용자에게 알렸다(결정 아님).
 
-1. **이 정리를 끄는 수단을 둘지 — 닫힘: 두지 않는다**(결정 3 · 사용자 2026-09-29 · 「ㅇㅇ 두지 않고」).
-2. **부모가 살아 있는 후보를 건드릴지 — 닫힘: 건드리지 않는다**(결정 4 · 사용자 2026-09-29 · 「ㅇㅇ 조건 더해줘 어차피 잘 안일어나는 일이니깐」). 올렸던 두 갈래: (a) 규칙 글자 그대로 — 백그라운드 작업이 끊기 뒤 띄운 자식이 끝내질 수 있다 · (b) 좁히기 — 부모가 산 것은 빼고 부모가 죽은 것만 고른다(잰 잔여물 3/3 이 그 모양). 사용자는 (b) 를 「부모가 살아 있으면 건드리지 않는다」로 정했다 — 메인이 올린 (b) 의 「문턱 전에 태어난 부모」 단서 없이, **부모가 살아 있기만 하면** 뺀다(§3-4). 대가 = 부모가 산 멈춤 잔여물은 못 고른다(§8 ③).
+1. ★**(확인) 새 `windows` feature 둘**★ — `Win32_System_IO`(완료 포트 — 가입 알림을 받는 유일한 공개 수단 · 결정 5 · 11) · `Wdk_System_Threading`(`NtQueryInformationProcess` — 핸들로 부모 · 명령줄 · 결정 10 · 11). 새 crate 없음 · `Cargo.lock` 무변경.
+2. 닫힘: 결정 1–7 · 9 · 10 · 11(§1).
 
 ---
 
 ## 11. 의존성 · 자리
 
-- **새 crate 없음 · 새 `windows` feature 없음.** 쓰는 API 는 `Win32_System_JobObjects`(`QueryInformationJobObject` · `IsProcessInJob` · `JobObjectBasicProcessIdList`) · `Win32_System_Threading`(`OpenProcess` · `GetProcessTimes` · `WaitForSingleObject` · `PROCESS_SYNCHRONIZE` · `TerminateProcess`) · `Win32_Foundation`(`WAIT_OBJECT_0` · `WAIT_TIMEOUT`) — 전부 `crates/engram-dashboard-agent/Cargo.toml:49-56` 에 이미 켜져 있다(`windows-0.58.0` 소스에서 정의 위치 확인). `base` 의 새 함수는 이미 켜진 `Win32_System_Diagnostics_ToolHelp` · `Win32_System_Threading` · `Win32_Foundation`(`crates/engram-dashboard-base/Cargo.toml:19-24`)만 쓴다.
-- 벽시계는 std `SystemTime` 이다 — `GetSystemTimeAsFileTime` 을 쓰면 `Win32_System_SystemInformation` 이 새로 들어 피했다.
-- **`base` 변경 = 기존 입주자 `platform` 에 함수 둘(`process_parent_table` · `process_start`) + 기존 함수 둘(`child_pids` · `process_creation_time`)을 그 위로.** 게이트 셋(CLAUDE.md 「빌드·검증 명령」)을 그대로 지난다 — 워크스페이스 의존 0(의존 상한 1 줄) · `use tauri` 0 · 입주자(`logging` · `platform`) 상호 무참조.
-- **왜 `agent` 가 아니라 `base` 인가 [리뷰 2 A1 — 자리 근거]:** ADR-0175 결정 2 는 Job Object 래퍼를 소비자가 `agent` 안(통로 둘)뿐이라 `agent` 에 남겼고, `process_tree` · `file_holders` 도 같은 「소비자 하나」 사유로 `agent` 에 있다(`platform/mod.rs:4-7`). 이번 두 함수는 사정이 다르다:
-  - ⓐ **이미 `base` 에 있는 것의 몸통이다** — `child_pids` 의 Toolhelp 순회와 `process_creation_time` 의 여는 판정을 각각 그 위로 옮긴다. `agent` 에 두면 같은 Toolhelp 순회가 두 crate 에 사본으로 생기거나(「재사용, 복제 금지」), `base` 의 기존 함수를 `agent` 가 감싸 오류를 다시 가려야 한다.
-  - ⓑ **feature 가 이미 `base` 에만 있다** — Toolhelp(`Win32_System_Diagnostics_ToolHelp`)는 `base` 만 켠다(CLAUDE.md 「의존성」 — `agent` 는 Job Object · Restart Manager 쪽). `agent` 에 두면 그 feature 를 `agent` 에 새로 켜야 한다.
-  - ⓒ **소비자 둘 이상(입주 조건 ①)** — 옮긴 뒤 `child_pids` · `process_creation_time`(과 그 위의 `pid_alive_with_start_time` · `current_process_start_time`)의 기존 소비자(`net` · `discovery` · `daemon` · `agent` 의 codex backend · `process_tree` · 시험들 — `rg -l "engram_dashboard_base::platform" crates`)가 이 몸통을 쓰고, 정리기가 하나 더 쓴다 · 도메인 지식 0(조건 ②) · 입주자 무참조(조건 ③).
-- **`base` 머리 갱신(① 단계):** `crates/engram-dashboard-base/src/lib.rs:3-4`(입주자 요약 — 「PID liveness · 프로세스 시작시각 · 자식 PID 열거」 → 프로세스 표 · 시작시각 세 갈래 판정을 더한다) · `crates/engram-dashboard-base/src/platform.rs:1`(모듈 머리). CLAUDE.md 「백엔드 모듈 맵」의 `base` 항목은 ④ 단계(§6).
+- ★**새 feature 둘 — `Win32_System_IO` · `Wdk_System_Threading`**★(`windows-0.58.0` — `Win32/System/mod.rs:55` · `IO/mod.rs:34` `CreateIoCompletionPort` · `:70` `GetQueuedCompletionStatus` / `Cargo.toml:398` · `Wdk/System/Threading/mod.rs:34` `NtQueryInformationProcess` · `:192` · `:195`). 켜지 않은 것 = `Win32_System_Kernel`(`repr(C)` 로 대신) · `Win32_System_SystemServices`(상수로).
+- **쓰는 API:** JobObjects(`QueryInformationJobObject` · `IsProcessInJob` · `SetInformationJobObject` · `JobObjectAssociateCompletionPortInformation`) · Threading(`OpenProcess` · `GetProcessTimes` · `WaitForSingleObject` · `TerminateProcess` · `QueryFullProcessImageNameW`) · IO · Foundation · Wdk.
+- **`base` 무변경** — 1단계 추가분은 기존 공개 함수의 몸통으로 남는다(소비자 = §2 끝 `rg`).
+- **1단계 코드의 운명:** 그대로 = `member_pids` · `LEFTOVER_EXIT_CODE` · `MemberOutcome` · `terminate_raw` · `GetProcessTimes` 사용 · 통로의 `Arc` Job 칸 · 바뀜 = `VerifiedMember` → `PinnedMember` · `ProcessGroup::{new, detached}` · `process_group()` · 걷음 = `verify_member` · `MemberCheck` · `Verify` · `ReadyKill` · `root_attached`(둘) · `console_wrapper_depth` · `process_tree` 셋 · 그 시험들 · 더함 = `pin_member` · `ProcessFacts` · `watch_births` · `unwatch_births` · `BirthPort` · `Pinned` · `Births` · `RetiringSignal` · `begin_retire` · `InterruptOut` · 큐의 부를 것.

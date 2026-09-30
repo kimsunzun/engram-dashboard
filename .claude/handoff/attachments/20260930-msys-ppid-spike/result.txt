@@ -1,0 +1,38 @@
+
+=== CASE 1 loop  launchedBashPid=29480 alive=True t0=12:40:41.532
+  child sleep.exe pid=36464 created=12:40:41.915 ppid=21420 ppidAlive=NO
+  chain: sleep.exe(36464) <- <dead 21420>
+  direct children of launched bash: conhost.exe(40308)
+  [2nd iter] child pid=20572 ppid=38972 alive=False name=
+  killed: 20572,29480,40308; leftover: bash.exe(3460)
+=== CASE 2 bg&wait  launchedBashPid=39356 alive=True t0=12:40:52.562
+  child sleep.exe pid=25160 created=12:40:52.733 ppid=25488 ppidAlive=NO
+  chain: sleep.exe(25160) <- <dead 25488>
+  direct children of launched bash: conhost.exe(19828)
+  killed: 19828,25160,39356; leftover: 
+=== CASE 3 pipeline  launchedBashPid=35380 alive=True t0=12:40:56.328
+  child sleep.exe pid=37164 created=12:40:56.525 ppid=28748 ppidAlive=NO
+  chain: sleep.exe(37164) <- <dead 28748>
+  direct children of launched bash: conhost.exe(29352)
+  killed: 29352,35380,37164; leftover: 
+=== CASE 4 subshell  launchedBashPid=32524 alive=True t0=12:41:00.205
+  child sleep.exe pid=33272 created=12:41:00.400 ppid=30016 ppidAlive=NO
+  chain: sleep.exe(33272) <- <dead 30016>
+  direct children of launched bash: conhost.exe(36584)
+  killed: 32524,33272,36584; leftover: 
+=== CASE 5 exec-last  launchedBashPid=34440 alive=True t0=12:41:04.013
+  child sleep.exe pid=35196 created=12:41:04.144 ppid=34440 ppidAlive=YES name=bash.exe created=12:41:04.034
+  chain: sleep.exe(35196) <- bash.exe(34440)
+  direct children of launched bash: conhost.exe(12792), sleep.exe(35196)
+  killed: 12792,34440,35196; leftover: 
+=== CASE 6 native loop  launchedBashPid=36064 alive=True t0=12:41:07.924
+  child PING.EXE pid=2624 created=12:41:08.169 ppid=36452 ppidAlive=YES name=bash.exe created=12:41:08.123
+  chain: PING.EXE(2624) <- bash.exe(36452) <- bash.exe(36064)
+  direct children of launched bash: conhost.exe(32572), bash.exe(36452)
+  killed: 23944,32572,36064,36068; leftover: 
+=== CASE 7 cmdsubst  launchedBashPid=34684 alive=True t0=12:41:17.901
+  child sleep.exe pid=5800 created=12:41:18.084 ppid=26740 ppidAlive=NO
+  chain: sleep.exe(5800) <- <dead 26740>
+  direct children of launched bash: conhost.exe(40564), bash.exe(21420)
+  killed: 5800,21420,34684,40564; leftover: 
+DONE
