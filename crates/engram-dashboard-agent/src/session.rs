@@ -637,6 +637,11 @@ impl AgentSession {
         self.transport.interrupt()
     }
 
+    /// 통로에 물러남을 예고한다([`AgentTransport::begin_retire`]) — 자원은 거두지 않는다([`Self::kill`] 몫).
+    pub(crate) fn begin_retire(&self) {
+        self.transport.begin_retire();
+    }
+
     /// 자원 강제 종료 + pump 종료 대기. **이 2동사 순서(shutdown THEN join_pump)가 kill 인과의 핵심.**
     /// shutdown이 master를 drop해 pump read를 EOF로 깨우고(→core.finish(Killed)), join_pump가
     /// 그 pump 종료를 기다린다. 역전 시 hang(아직 살아있는 pump를 기다림).

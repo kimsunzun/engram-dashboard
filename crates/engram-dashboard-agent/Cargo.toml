@@ -46,6 +46,12 @@ engram-dashboard-command = { path = "../engram-dashboard-command", features = ["
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
 #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
 #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.
+# `Win32_System_IO` = Job 가입 알림을 받는 완료 포트(`CreateIoCompletionPort` · `GetQueuedCompletionStatus`)
+#   몫 — 멤버가 새로 든 것을 듣는 공개 수단이 그것뿐이고, claude 끊기 뒤 잔여물 정리가 「끊기 뒤에
+#   태어났나」를 시각이 아니라 그 알림으로 가른다(T-40).
+# `Wdk_System_Threading` = `NtQueryInformationProcess` 몫 — 같은 정리가 붙든 핸들로 부모 PID 와 명령줄을
+#   읽는다(T-40). ★`Win32_System_Kernel` · `Win32_System_SystemServices` 는 켜지 않는다★ — 그 결과
+#   구조체와 알림 번호 상수만 쓰려고 켤 일이라 `platform/windows.rs` 가 `repr(C)` 와 상수로 대신한다.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_System_JobObjects",
@@ -53,4 +59,6 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_System_RestartManager",
+    "Win32_System_IO",
+    "Wdk_System_Threading",
 ] }

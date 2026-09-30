@@ -20,6 +20,9 @@
 //!   돌아가는 `Err` ⓒ 그리고 대개 곧 이어지는 pump 의 종점 전이다 — 파이프가 깨졌다는 것은 reader 도
 //!   곧 EOF 를 본다는 뜻이라, 사람이 보는 신호는 결국 그 종료다.
 //!
+//! 덩이마다 「실제로 나간 뒤 부를 것」([`OnWritten`])을 실을 수 있다 — `Ok` 가 「나갔다」를 뜻하지 않게 된 뒤에도
+//! 한 덩이가 나간 순간을 알아야 하는 쪽이 쓰는 문이다.
+//!
 //! tauri import 0.
 
 use std::collections::VecDeque;
@@ -27,6 +30,21 @@ use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::types::{AgentId, PtyError};
+
+/// 덩이 하나가 **실제로 OS 로 나간 뒤** 라이터가 부를 것.
+///
+/// - 불리는 때 = 그 덩이의 쓰기가 성공하고 회계가 풀린 뒤, **이 큐의 락을 하나도 쥐지 않은 채** 라이터 스레드에서
+///   한 번. 그래서 이 안에서 같은 큐에 다시 넣어도 매달리지 않는다.
+/// - 안 불리는 때 = 큐가 받지 않았다(`Err`) · 꺼내기 전에 큐가 닫혔다 · 쓰기가 실패했다. 셋 다 부르지 않고 버린다(drop).
+/// - ★꺼낸 뒤에 큐가 닫혀도 그 쓰기가 성공하면 불린다★ — 그래서 이 부름은 큐를 닫는 쪽(통로의 끝내기
+///   `shutdown()` · 스트림 끝)과 겹칠 수 있다. 물러난 뒤에 하면 안 되는 일이면 이 안에서 물러남 표시
+///   ([`RetiringSignal`](crate::platform::process_group::RetiringSignal))를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
+/// - ★panic 하지 않게 짠다★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라,
+///   릴리스에서는 이 안의 panic 이 프로세스를 죽인다. 라이터가 두른 `catch_unwind`(잡아 `error` 로 남기고 다음 덩이를
+///   계속 쓴다 — 큐를 닫지 않는다)는 unwind 빌드(개발·시험)에서만 서는 안전망이다.
+/// - 라이터 스레드 하나가 뒤 덩이도 쓰므로, 이 안에서 오래 막히면 그만큼 뒤 입력이 늦는다. 이 안에서 큐가 비기를
+///   기다리면([`InputQueue::wait_drained`]) 자기를 기다린다.
+pub type OnWritten = Box<dyn FnOnce() + Send>;
 
 /// 아직 OS 로 나가지 못한 입력의 상한(바이트). ★넘으면 그 호출이 `Err` 로 돌아간다 — 버리지 않는다★
 /// (ADR-0190 의 처분 그대로. 조용히 버리는 갈래는 그 ADR 이 이미 기각했다).
@@ -58,7 +76,7 @@ pub const INPUT_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
 const WAKE_BACKSTOP: Duration = Duration::from_millis(500);
 
 struct Inner {
-    pending: VecDeque<Vec<u8>>,
+    pending: VecDeque<(Vec<u8>, Option<OnWritten>)>,
     /// **아직 OS 로 나가지 않은** 페이로드 바이트 합 = `pending` 이 든 것 **+ 라이터가 꺼내 들고 쓰는
     /// 중인 것**. [`InputQueue::push`] 가 더하고 [`InputQueue::mark_written`] 이 뺀다(매번 순회하지
     /// 않기 위해 합계를 들고 다닌다).
@@ -108,6 +126,15 @@ impl InputQueue {
     /// ② 상한을 넘는다. 받아 둔 뒤의 실패는 이 반환값이 아니라 다음 호출의 `Err` 로 나타난다
     /// (모듈 헤더의 계약 문단).
     pub(crate) fn push(&self, bytes: Vec<u8>) -> Result<(), PtyError> {
+        self.push_with(bytes, None)
+    }
+
+    /// [`push`](Self::push) 에 그 덩이가 나간 뒤 부를 것을 함께 싣는다(계약 = [`OnWritten`]). `Err` 면 부르지 않고 버린다.
+    pub(crate) fn push_with(
+        &self,
+        bytes: Vec<u8>,
+        on_written: Option<OnWritten>,
+    ) -> Result<(), PtyError> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(reason) = &inner.closed {
             return Err(PtyError::WriteFailed(reason.clone()));
@@ -123,7 +150,7 @@ impl InputQueue {
             )));
         }
         inner.bytes = after;
-        inner.pending.push_back(bytes);
+        inner.pending.push_back((bytes, on_written));
         inner.pushed_seq += 1;
         // ★락을 쥔 채 알린다★ — 이것이 [`WAKE_BACKSTOP`] 이 백스톱에 그치는 이유다.
         self.wake.notify_one();
@@ -137,7 +164,7 @@ impl InputQueue {
     ///   마저 쓰려 해도 전부 실패한다. codex 라이터의 처분과 같다.
     /// ★꺼내도 [`Inner::bytes`] 는 **줄지 않는다**★ — 꺼낸 덩이는 아직 나간 것이 아니다. 그 회계를
     ///   푸는 것은 [`mark_written`](Self::mark_written) 하나뿐이고, 근거는 그 필드 doc.
-    pub(crate) fn pop(&self) -> Option<Vec<u8>> {
+    pub(crate) fn pop(&self) -> Option<(Vec<u8>, Option<OnWritten>)> {
         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         loop {
             if inner.closed.is_some() {
@@ -163,13 +190,17 @@ impl InputQueue {
     /// ★첫 사유가 이기는 이유★: 실제 원인은 언제나 먼저 온 쪽이다(쓰기 실패 → 그 뒤 종료). 나중 사유로
     ///   덮으면 진단이 「에이전트를 종료했다」로 뭉개진다.
     pub(crate) fn close(&self, reason: &str) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
-        if inner.closed.is_none() {
-            inner.closed = Some(reason.to_string());
-        }
-        inner.pending.clear();
-        inner.bytes = 0;
-        self.wake.notify_all();
+        let abandoned = {
+            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            if inner.closed.is_none() {
+                inner.closed = Some(reason.to_string());
+            }
+            inner.bytes = 0;
+            self.wake.notify_all();
+            std::mem::take(&mut inner.pending)
+        };
+        // 버리는 덩이의 부를 것은 락을 놓은 뒤에 버린다 — 그것이 쥔 값의 drop 이 이 큐로 돌아와도 매달리지 않게.
+        drop(abandoned);
     }
 
     /// 덩이 하나가 **실제로 OS 로 나갔다**. 라이터만 부른다([`drain`]).
@@ -248,7 +279,8 @@ impl InputQueue {
 ///   **열린 채** 남아, 이후 `send_input` 이 계속 `Ok` 를 돌려주다가 상한에 닿는 순간부터 **틀린
 ///   사유**(「상한 초과」)로 거절한다 — 진짜 원인은 그 로그 어디에도 없다. 그 사이 바이트는 하나도
 ///   안 나간다. `spawn` 실패 갈래(`pty.rs`·`stdio.rs`)가 이미 고른 규율과 같은 자리다: **라이터가
-///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.**
+///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.** ★단 unwind 빌드에서만 선다★ — 릴리스는
+///   `panic = "abort"`(워크스페이스 루트 `Cargo.toml` 의 `[profile.release]`)라 panic 이 곧 프로세스의 끝이다.
 /// ★`agent` 는 로그 귀속용★ — 이 경고들은 「받아 둔 뒤 실패한 쓰기」의 **유일한 흔적**이라, 에이전트가
 ///   여럿이면 누구 것인지가 없으면 흔적이 아니다(`docs/reference/logging-conventions.md` 의 형식 규약).
 pub(crate) fn drain(
@@ -258,11 +290,28 @@ pub(crate) fn drain(
     mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
 ) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        while let Some(chunk) = queue.pop() {
+        while let Some((chunk, on_written)) = queue.pop() {
             match write(&chunk) {
-                // ★성공을 세는 이 한 줄이 [`InputQueue::wait_drained`] 의 유일한 진행 신호다★.
-                //   같은 줄이 [`Inner::bytes`] 회계도 푼다 — 「나갔다」가 두 뜻을 함께 갖는다.
-                Ok(()) => queue.mark_written(chunk.len()),
+                Ok(()) => {
+                    // ★성공을 세는 이 한 줄이 [`InputQueue::wait_drained`] 의 유일한 진행 신호다★.
+                    //   같은 줄이 [`Inner::bytes`] 회계도 푼다 — 「나갔다」가 두 뜻을 함께 갖는다.
+                    queue.mark_written(chunk.len());
+                    // 부를 것의 panic 은 여기서 멈춘다 — 바깥 가드까지 가면 큐가 닫혀 멀쩡한 입력 경로가 죽는다.
+                    // ★unwind 빌드에서만 선다★ — 릴리스는 `panic = "abort"` 라 이 자리에서 프로세스가 죽는다
+                    //   ([`OnWritten`] 의 계약이 panic 없는 부를 것을 요구하는 이유).
+                    if let Some(on_written) = on_written {
+                        if let Err(payload) =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_written))
+                        {
+                            // 레벨 = error — 격리돼도 panic 은 error 다(`docs/reference/logging-conventions.md` 의 레벨 표).
+                            tracing::error!(
+                                agent = %agent,
+                                "{label} 입력 덩이가 나간 뒤 부를 것이 panic 했다 — 다음 덩이는 계속 쓴다: {}",
+                                panic_message(&*payload)
+                            );
+                        }
+                    }
+                }
                 Err(e) => {
                     // ★이 실패는 그 바이트를 보낸 호출자에게 돌아갈 길이 없다★ — 그 호출은 이미 `Ok` 를
                     //   받고 떠났다. 여기서 할 수 있는 것은 사유를 남기고 통로를 닫아 **다음** 호출부터
@@ -277,11 +326,7 @@ pub(crate) fn drain(
     }));
 
     if let Err(payload) = outcome {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .map(|s| s.to_string())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let msg = panic_message(&*payload);
         let reason = format!("{label} 입력 라이터가 panic 했다: {msg}");
         // 레벨 = error. 이 에이전트의 입력 경로가 **복구 불가**로 죽었고 사람이 봐야 한다
         //   (`docs/reference/logging-conventions.md` 의 레벨 표 — panic 은 error).
@@ -290,10 +335,18 @@ pub(crate) fn drain(
     }
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "<non-string panic payload>".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Arc;
     use std::time::Instant;
 
@@ -388,7 +441,7 @@ mod tests {
         // 하나가 **실제로 나가면** 그만큼 다시 받는다 — 상한이 영구 사망 선고가 아님.
         // ★꺼내는 것만으로는 자리가 안 난다★ — 그 회계의 정본과 회귀망은 아래
         //   `in_flight_bytes_still_count_against_the_bound`.
-        let popped = queue.pop().expect("하나 꺼내기");
+        let (popped, _) = queue.pop().expect("하나 꺼내기");
         assert_eq!(popped.len(), half);
         queue.mark_written(popped.len());
         queue.push(vec![b'c'; 1]).expect("자리가 나면 다시 받는다");
@@ -407,7 +460,7 @@ mod tests {
             .push(vec![b'a'; INPUT_QUEUE_MAX_BYTES])
             .expect("상한 전량은 들어간다");
 
-        let in_flight = queue.pop().expect("라이터가 하나 꺼낸다");
+        let (in_flight, _) = queue.pop().expect("라이터가 하나 꺼낸다");
         assert_eq!(in_flight.len(), INPUT_QUEUE_MAX_BYTES);
         assert_eq!(
             queue.queued_bytes(),
@@ -544,5 +597,221 @@ mod tests {
             Err(PtyError::WriteFailed(msg)) => assert!(msg.contains("진짜 원인"), "{msg}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    // ── 나간 뒤 부를 것(`OnWritten`) ──
+
+    type Written = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    /// 적은 덩이를 `written` 에 차례로 모으는 라이터 스레드.
+    fn spawn_recording_writer(
+        queue: &Arc<InputQueue>,
+        written: &Written,
+    ) -> std::thread::JoinHandle<()> {
+        let (seen, writer_queue) = (written.clone(), queue.clone());
+        std::thread::spawn(move || {
+            drain(&writer_queue, "시험", test_agent(), |b| {
+                seen.lock().unwrap().push(b.to_vec());
+                Ok(())
+            });
+        })
+    }
+
+    fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "5 초 안에 안 됐다: {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// 쓰기 성공 뒤 한 번 — 그때 그 덩이는 이미 적혔고 회계도 풀렸다. 안에서 큐 락을 잡아 보므로 락을 쥔 채 부르면
+    /// 매달려 시한에 걸린다. 넣기를 라이터보다 먼저 끝내 그때의 회계(뒤 덩이 몫만 남음)가 결정적이다.
+    #[test]
+    fn on_written_runs_once_after_its_chunk_is_written_without_the_queue_lock() {
+        let queue = Arc::new(InputQueue::new());
+        let written: Written = Arc::new(Mutex::new(Vec::new()));
+        let calls: Arc<Mutex<Vec<(Vec<Vec<u8>>, usize)>>> = Arc::new(Mutex::new(Vec::new()));
+        let (log, seen, probe) = (calls.clone(), written.clone(), queue.clone());
+        queue.push(b"plain".to_vec()).expect("push");
+        queue
+            .push_with(
+                b"marked".to_vec(),
+                Some(Box::new(move || {
+                    let so_far = seen.lock().unwrap().clone();
+                    log.lock().unwrap().push((so_far, probe.queued_bytes()));
+                })),
+            )
+            .expect("push_with");
+        queue.push(b"after".to_vec()).expect("push");
+
+        let handle = spawn_recording_writer(&queue, &written);
+        wait_until(|| written.lock().unwrap().len() == 3, "세 덩이가 나가기");
+        queue.close("시험 종료");
+        handle.join().expect("라이터 스레드 panic");
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            vec![(vec![b"plain".to_vec(), b"marked".to_vec()], b"after".len())],
+            "부를 것은 제 덩이가 적히고 회계가 풀린 뒤 한 번만 불린다"
+        );
+    }
+
+    /// 나가지 못한 덩이의 부를 것은 불리지 않고 버려진다(쥔 채 남지 않는다) — 꺼내기 전 닫힘 · 쓰기 실패 · 받지 않음.
+    #[test]
+    fn on_written_is_dropped_uncalled_when_its_chunk_never_goes_out() {
+        struct CountDrop(Arc<AtomicUsize>);
+        impl Drop for CountDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let marked = || -> Option<OnWritten> {
+            let token = CountDrop(drops.clone());
+            let calls = calls.clone();
+            Some(Box::new(move || {
+                let _held = &token;
+                calls.fetch_add(1, Ordering::SeqCst);
+            }))
+        };
+
+        let queue = InputQueue::new();
+        queue.push_with(b"a".to_vec(), marked()).expect("push_with");
+        queue.close("시험 종료");
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "닫힘이 부를 것을 쥐고 있다"
+        );
+        let mut wrote = false;
+        drain(&queue, "시험", test_agent(), |_| {
+            wrote = true;
+            Ok(())
+        });
+        assert!(!wrote, "닫힌 뒤에 썼다");
+
+        let queue = InputQueue::new();
+        queue.push_with(b"b".to_vec(), marked()).expect("push_with");
+        drain(&queue, "시험", test_agent(), |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "파이프가 끊겼다",
+            ))
+        });
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            2,
+            "쓰기 실패 뒤에도 쥐고 있다"
+        );
+
+        assert!(queue.push_with(b"c".to_vec(), marked()).is_err());
+        let queue = InputQueue::new();
+        assert!(queue
+            .push_with(vec![b'x'; INPUT_QUEUE_MAX_BYTES + 1], marked())
+            .is_err());
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            4,
+            "받지 않은 부를 것이 남았다"
+        );
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "나가지 못한 덩이의 부를 것이 불렸다"
+        );
+    }
+
+    /// 꺼낸 뒤 쓰는 사이에 큐가 닫혀도 그 쓰기가 성공하면 부를 것은 한 번 불린다 — 닫힘이 막아 주지 않는다. 가짜
+    /// 쓰기 안에서 닫아 그 창을 결정적으로 만든다. 뒤 덩이는 닫힘에 걸려 안 나간다.
+    #[test]
+    fn on_written_still_runs_when_the_queue_closes_after_its_chunk_was_popped() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let queue = InputQueue::new();
+        queue
+            .push_with(
+                b"popped".to_vec(),
+                Some(Box::new(move || {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                })),
+            )
+            .expect("push_with");
+        queue.push(b"left".to_vec()).expect("push");
+
+        let mut wrote = Vec::new();
+        drain(&queue, "시험", test_agent(), |b| {
+            wrote.push(b.to_vec());
+            queue.close("쓰는 사이 닫힘");
+            Ok(())
+        });
+
+        assert_eq!(wrote, vec![b"popped".to_vec()], "닫힌 뒤 남은 덩이를 썼다");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "꺼낸 뒤 닫혀도 쓰기가 성공했으면 한 번 불려야 한다"
+        );
+    }
+
+    /// 부를 것 안에서 같은 큐에 넣어도 매달리지 않고, 넣은 것은 뒤이어 나간다.
+    #[test]
+    fn a_push_from_inside_on_written_does_not_deadlock() {
+        let queue = Arc::new(InputQueue::new());
+        let again = queue.clone();
+        queue
+            .push_with(
+                b"first".to_vec(),
+                Some(Box::new(move || {
+                    again
+                        .push(b"from-callback".to_vec())
+                        .expect("부를 것 안의 push");
+                })),
+            )
+            .expect("push_with");
+
+        let written: Written = Arc::new(Mutex::new(Vec::new()));
+        let handle = spawn_recording_writer(&queue, &written);
+        wait_until(
+            || written.lock().unwrap().len() == 2,
+            "부를 것 안에서 넣은 덩이가 나가기 — 큐 락을 쥔 채 불렀으면 여기서 매달린다",
+        );
+        queue.close("시험 종료");
+        handle.join().expect("라이터 스레드 panic");
+        assert_eq!(
+            *written.lock().unwrap(),
+            vec![b"first".to_vec(), b"from-callback".to_vec()]
+        );
+    }
+
+    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다. ★unwind 빌드에서만
+    /// 도는 항목이다★ — 릴리스는 `panic = "abort"` 라 이 갈래 자체가 없다.
+    #[cfg(panic = "unwind")]
+    #[test]
+    fn a_panicking_on_written_does_not_stop_later_chunks() {
+        let queue = Arc::new(InputQueue::new());
+        queue
+            .push_with(b"first".to_vec(), Some(Box::new(|| panic!("부를 것 폭발"))))
+            .expect("push_with");
+        queue.push(b"second".to_vec()).expect("push");
+
+        let written: Written = Arc::new(Mutex::new(Vec::new()));
+        let handle = spawn_recording_writer(&queue, &written);
+        wait_until(|| written.lock().unwrap().len() == 2, "뒤 덩이가 나가기");
+        queue
+            .push(b"third".to_vec())
+            .expect("부를 것의 panic 이 큐를 닫았다");
+        wait_until(
+            || written.lock().unwrap().len() == 3,
+            "그 뒤에 넣은 덩이가 나가기",
+        );
+        queue.close("시험 종료");
+        handle.join().expect("라이터 스레드 panic");
+        assert_eq!(
+            *written.lock().unwrap(),
+            vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
+        );
     }
 }

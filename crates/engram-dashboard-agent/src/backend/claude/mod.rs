@@ -40,7 +40,7 @@ use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
-use crate::transport::stdio::{InterruptLine, StdioTransport};
+use crate::transport::stdio::{InterruptLine, InterruptOut, StdioTransport};
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
@@ -831,7 +831,12 @@ fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
 /// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT).
 // ADR-0238
 fn interrupt_line(gate: Arc<TurnGate>) -> InterruptLine {
-    Arc::new(move || gate.is_open().then(|| interrupt_line_bytes(Uuid::new_v4())))
+    Arc::new(move || {
+        gate.is_open().then(|| InterruptOut {
+            bytes: interrupt_line_bytes(Uuid::new_v4()),
+            on_written: None,
+        })
+    })
 }
 
 // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
@@ -5854,9 +5859,9 @@ mod tests {
         decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
         let ids: Vec<String> = [line(), line()]
             .into_iter()
-            .map(|bytes| {
+            .map(|out| {
                 let v: serde_json::Value =
-                    serde_json::from_slice(&bytes.expect("열린 문")).unwrap();
+                    serde_json::from_slice(&out.expect("열린 문").bytes).unwrap();
                 assert_eq!(v["request"]["subtype"], "interrupt");
                 v["request_id"].as_str().unwrap().to_string()
             })
