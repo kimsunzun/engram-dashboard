@@ -449,7 +449,7 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
       - 셸 시험 — `tree.rs` `ratio_clamps_to_the_shell_bounds`(`:628-638` — 0.05·0.1·0.9 글자값) · `manager.rs` `set_split_ratio_clamps_to_the_ratio_bounds`(`:2278`) · `px_minimum_keeps_both_sides_at_least_min_pane_px_on_the_split_axis`(`:2344`). 이 시험의 「바깥: L = 1000 → m/L = 0.1 이라 비율 한계가 이긴다」(`:2367-2370`)는 새 한계에서 px 가 이긴다로 뒤집힌다.
       - `without_canvas_or_metrics_only_the_ratio_bounds_apply`(`:2400`)의 `0.01` 요청이 `RATIO_MIN` 으로 잘리는 단언(`:2414-2419`)은 새 값에 맞춰 요청값을 다시 고른다. `an_ancestor_ratio_that_would_collapse_a_deep_leaf_is_too_small`(`:2524` — 루트 0.9·0.1 사슬)은 새 한계에서 다시 잰다.
       - 상수 이름으로 쓴 시험은 그대로 선다 — `geometry.rs:573-585` · `spatial.rs:456`(한계가 양수인 한).
-      - ★LLM 이 읽는 명령 요약★ = `split.setRatio` 선언의 「셸이 0.1~0.9 로 자르고」(`src-tauri/src/layout/commands.rs:232`). 가드 시험 `both_ratio_commands_define_the_ratio_as_the_a_side_share`(`src-tauri/tests/layout_commands.rs:1126-1144`)가 요약에 `format!("{}~{}", RATIO_MIN, RATIO_MAX)` 가 들었는지 잰다 — 새 값이면 「0.01~0.99」 로 써야 선다. 시험 파일은 손대지 않아도 된다.
+      - ★LLM 이 읽는 명령 요약★ = `split.setRatio` 선언의 「셸이 0.1~0.9 로 자르고」(`src-tauri/src/layout/commands.rs:232`). 가드 시험 `both_ratio_commands_define_the_ratio_as_the_a_side_share`(`src-tauri/tests/layout_commands.rs:1126-1144`)가 요약에 `format!("{}~{}", RATIO_MIN, RATIO_MAX)` 가 들었는지 잰다 — 새 값이면 「0.01~0.99」 로 써야 선다. ~~시험 파일은 손대지 않아도 된다.~~ ★틀렸다(구현 — 리뷰 판정)★: 같은 파일의 `set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_values` 가 옛 한계를 글자로 박고 있었다(범위 밖 요청의 기대값 0.9 · 0.1 · 하한 아래 요청 0.05) — 기대값을 `tree::RATIO_MIN`·`tree::RATIO_MAX` 로, 하한 아래 요청을 0.005 로 바꿨다.
       - 주석 = `src-tauri/src/layout/types.rs:87`(「0.1~0.9」). 새 값의 `// ADR-0260` 앵커를 `tree.rs` 상수에 단다(기존 `// ADR-0227`·`// ADR-0140` 옆).
       - 프론트 코드는 상수를 갖지 않는다(스냅샷 `ratio_min/max`). `splitPreview.ts` 는 식이 그대로라 손대지 않는다. 시험 고정값(`src/components/layout/testing/rects.ts:21` `TEST_RATIO_BOUNDS` · `useSplitDrag.test.tsx:144` · `Splitter.test.tsx:51`)은 한계를 인자로 받는 순수 시험이라 안 맞춰도 선다 — 맞출지는 코더 판단.
     - ④ **시험·검증.**
@@ -484,8 +484,8 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
     - ③ **리셋 = 모래시계(ADR-0259 결정 3).**
       - 자리는 둘이다 — 작은 표시(`WindowCells` 의 리셋 칸 `UsageSlot.tsx:723-730` — 지금 `formatResetClock` = 「리셋 {time}」)와 팝업(`PopupWindowRow` `:1110-1114` — 지금 `resetsAtIn` = 「리셋 {time} ({duration} 뒤)」).
       - 둘 다 lucide `Hourglass`(`lucide-react` ^1.23.0 — `package.json:29` · 설치본에 `hourglass.mjs` 실재) + 보이는 글자 = `formatResetAt`(`usageFormat.ts:150`)이다. 오늘이면 시각이고, 아니면 날짜 + 시각이다(ADR-0258 결정 4 의 날짜 규칙 그대로). 팝업은 남은 시간 괄호를 그대로 붙인다(R2).
-      - 툴팁(`title`)·스크린리더 이름 = 「리셋 11:29」 — 지금 `usage.resetClock` 문구(`ko.ts:160`)를 이름 틀로 남기고 `formatResetClock`(`usageFormat.ts:158`)이 그 이름을 짓는다. 팝업의 이름에 남은 시간을 넣을지는 메인 제안: 보이는 글자에 이미 있으니 이름은 「리셋 11:29」 만. 아이콘 자체는 `aria-hidden` 이고 이름은 감싼 요소가 진다.
-      - 문구 키 `resetsAtIn` 은 낱말을 뺀 틀로 바꾼다(예 「{time} ({duration} 뒤)」).
+      - 툴팁(`title`)·스크린리더 이름 = 「리셋 11:29」 — 지금 `usage.resetClock` 문구(`ko.ts:160`)를 이름 틀로 남기고 `formatResetClock`(`usageFormat.ts:158`)이 그 이름을 짓는다. 팝업의 이름에 남은 시간을 넣을지는 메인 제안: 보이는 글자에 이미 있으니 이름은 「리셋 11:29」 만. 아이콘 자체는 `aria-hidden` 이고 이름은 감싼 요소가 진다. ★메인 결정(구현 — 리뷰 판정)★: 감싼 요소(`ResetMark`)는 `role="img"` + `title` 만 단다 — 스크린리더 이름은 `title` 에서 선다. `aria-label` 을 같은 글로 함께 달면 이름에 쓰이지 않은 `title` 이 설명으로 붙어 같은 말이 두 번 읽힌다(accname). 툴팁(`title`)은 사용자 결정이라 남긴다.
+      - ~~문구 키 `resetsAtIn` 은 낱말을 뺀 틀로 바꾼다(예 「{time} ({duration} 뒤)」).~~ ★메인 결정(구현 — 리뷰 판정)★: 팝업의 리셋 자리 = `<ResetMark/>`(모래시계 + 시각 · `role="img"` · `title` = 「리셋 11:29」) + 공백 글자 + 형제 `span`(`data-usage-reset-in`)이고, 문구 키는 `resetsAtIn` 대신 `resetIn: '({duration} 뒤)'` 다. 남은 시간을 표식 밖 형제로 뺀 것은 접근성 규칙 때문이다 — 이름은 「리셋 HH:MM」 만이고 `role="img"` 는 안의 글자를 보조기술에 감추므로, 남은 시간을 안에 두면 읽히지 않는다. ★그래서 시각 → 남은 시간의 어순이 문구 틀이 아니라 코드에 있다 — PRD R28(어순·이음 부호는 문구 틀에)에서 벗어난다(받아들인 대가)★. 둘 사이의 공백 글자는 DOM 글자를 읽는 쪽(R27 — LLM·cdp)을 위한 것이고, 보이는 틈은 flex `gap` 이 그린다(flex 안에서 공백만 든 글자는 그려지지 않는다).
       - 1단 격자의 리셋 칸이 낱말만큼 좁아져 단계 문턱이 움직인다 — px 문턱이 없으니(R3) 새 코드는 없다.
       - R27(값·시간은 DOM 텍스트)은 시각 글자로 선다. 「리셋」 낱말은 DOM 텍스트에서 빠지고 `title`·접근성 이름에만 남는다(메인 판단 — 받아들인다).
       - 시험 — `UsageSlot.test.tsx` 「리셋 시각은 1·2단에만(「리셋 HH:MM」 …)」(`:376`) · 「다른 날의 리셋 시각은 「M/D HH:MM」」(`:667`) · `usageFormat.test.ts` 의 `formatResetClock` 단언을 새 모양으로 바꾼다. 새 시험 = 아이콘이 있다 · `title` = 「리셋 HH:MM」 · 리셋 자리에 화살표 아이콘이 없다(`RefreshCw` 는 ⟳ 와 갱신 중 표식에만).
@@ -501,7 +501,7 @@ CLI 가 옛 모양을 내면 Claude 는 줍기로 fresh 가 서지 않는다 →
       - 시험(새 회귀망) — 팝업을 열고 닫아도 `refreshUsageLimits` 호출 0 · pull 은 마운트 때 한 번뿐.
     - ⑥ **켜고 끄기 현행 유지(ADR-0259 결정 7) — 코드 변경 없음.** 끈 회사는 `views` 에 들지 않는다(`UsageSlot.tsx:195-196`). 그래서 작은 표시·팝업 상세 어디에도 없고, 표시 토글 줄(`ShowToggles` `:985-1029`)에만 다시 켤 자리로 남는다. 시험은 이미 있다(`UsageSlot.test.tsx:250`).
     - ⑦ **구현 덩어리 — 둘이고 파일이 겹치지 않는다.**
-      - (a) = #105 — `src-tauri/src/layout/`(`tree.rs`·`manager.rs`·`types.rs` 주석 · `commands.rs` 의 `split.setRatio` 요약 + 시험) · 요약 가드 `src-tauri/tests/layout_commands.rs`(돌리기만 — 고칠 것 없음) · 프론트 시험 고정값(선택). ★`splitPreview.ts` 는 코드 변경이 없다★ — 식이 그대로이고 한계는 스냅샷으로 온다.
+      - (a) = #105 — `src-tauri/src/layout/`(`tree.rs`·`manager.rs`·`types.rs` 주석 · `commands.rs` 의 `split.setRatio` 요약 + 시험) · 요약 가드 `src-tauri/tests/layout_commands.rs`(~~돌리기만 — 고칠 것 없음~~ ★고칠 것 있음 — 같은 파일의 비율 클램프 시험이 옛 한계를 박고 있었다(#105 ③)★) · 프론트 시험 고정값(선택). ★`splitPreview.ts` 는 코드 변경이 없다★ — 식이 그대로이고 한계는 스냅샷으로 온다.
       - (b) = 이 항목 — `src/components/slot/UsageSlot.tsx` · `usageFormat.ts` · `src/i18n/ko.ts`. ★처음 목록 밖으로 더 필요한 파일★ = `src/commands/usageCommands.ts`(② ⓒ) · `src/styles/theme.css`(④ — 메인 제안을 따를 때) · 시험 `UsageSlot.test.tsx` · `usageFormat.test.ts` · `src/commands/usageCommands.test.ts`.
       - (a)·(b) 사이에 겹치는 파일이 없다 — 병렬로 가도 된다.
       - (b) 안의 순서(어디서 멈춰도 선다) — ① 높이 폴백 걷기(단독) → ③ 모래시계(문구 틀 + 두 자리) → ② 머리 나이 + 줄 나이 걷기 → ② ⓑ·ⓒ 회사별 ⟳ + 명령 인자 → ④ 호박색(② 의 나이 위에).

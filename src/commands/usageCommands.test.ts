@@ -190,3 +190,45 @@ describe('⟳ = 켠 회사 중 보이는 거절이 아닌 것만 · 누를 때 �
     expect(useUsageStore.getState().pending).toEqual({})
   })
 })
+
+// ── 회사 하나 새로고침(ADR-0259 결정 2) — 팝업의 회사별 ⟳ 와 LLM 이 같은 command 에 `vendor` 를 더해 부른다 ──
+describe('⟳ 의 vendor 인자 = 그 회사 하나', () => {
+  it('있으면 그 회사만 — 다른 켠 회사는 새로고침하지 않는다', async () => {
+    seed({ claude: 'Ready', codex: 'Ready' })
+    await run('usageSlot.refresh', { content: usage(true, true), vendor: 'codex' })
+    expect(refreshSpy.mock.calls.map(c => c[0])).toEqual(['codex'])
+  })
+
+  it('없으면 지금처럼 켠 회사 전부', async () => {
+    seed({ claude: 'Ready', codex: 'Ready' })
+    await run('usageSlot.refresh', { content: usage(true, true) })
+    expect(refreshSpy.mock.calls.map(c => c[0])).toEqual(['claude', 'codex'])
+  })
+
+  it('조회 실패(Failed)·아직 값 없음은 거절이 아니다 — 새로고침한다', async () => {
+    seed({ codex: 'Failed' })
+    await run('usageSlot.refresh', { content: usage(true, true), vendor: 'codex' })
+    await run('usageSlot.refresh', { content: usage(true, true), vendor: 'claude' })
+    expect(refreshSpy.mock.calls.map(c => c[0])).toEqual(['codex', 'claude'])
+  })
+
+  it('끈 회사면 throw — 전역 ⟳ 의 「대상 0」 처럼 조용히 삼키지 않는다', () => {
+    seed({ claude: 'Ready', codex: 'Ready' })
+    expect(() => run('usageSlot.refresh', { content: usage(true, false), vendor: 'codex' })).toThrow(/codex 는 이 슬롯에서 꺼져 있다/)
+    expect(refreshSpy).not.toHaveBeenCalled()
+  })
+
+  it('보이는 거절(Rejected)이면 throw — 다른 회사는 건드리지 않는다', () => {
+    seed({ claude: 'Rejected', codex: 'Ready' })
+    expect(() => run('usageSlot.refresh', { content: usage(true, true), vendor: 'claude' })).toThrow(/claude 는 거절 중이다/)
+    expect(refreshSpy).not.toHaveBeenCalled()
+  })
+
+  it('모르는 회사·문자열이 아닌 값이면 throw · content 계약은 그대로', () => {
+    for (const vendor of ['gemini', '', null, 1, 'toString', 'show_claude']) {
+      expect(() => run('usageSlot.refresh', { content: usage(true, true), vendor })).toThrow(/vendor 는 claude·codex 중 하나/)
+    }
+    expect(() => run('usageSlot.refresh', { vendor: 'claude' })).toThrow(/content 필요/)
+    expect(refreshSpy).not.toHaveBeenCalled()
+  })
+})

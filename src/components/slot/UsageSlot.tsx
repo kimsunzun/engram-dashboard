@@ -1,17 +1,17 @@
 // 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-8) — 켠 회사의 남은 양을 작은 표시로 그리고, 누르면 상세 팝업을 연다.
 //
-// ★조작은 command 로만 간다(§5)★ — 작은 표시의 ⟳ 는 `usageSlot.refresh`, 팝업의 표시 토글은 `usageSlot.toggle*` 를
-//   부른다. 슬롯 우클릭 메뉴엔 사용량 항목이 없다(사용자 결정 2026-09-29).
+// ★조작은 command 로만 간다(§5)★ — 작은 표시의 ⟳(켠 회사 전부)와 팝업의 회사별 ⟳(`vendor` 인자)는 `usageSlot.refresh`,
+//   팝업의 표시 토글은 `usageSlot.toggle*` 를 부른다. 슬롯 우클릭 메뉴엔 사용량 항목이 없다(사용자 결정 2026-09-29).
 // ★켠 회사만 그린다★ — 끈 회사는 스토어에 값이 있어도 작은 표시·배지·팝업 상세 어디에도 없고, 이름은 팝업의 표시
 //   토글 줄(다시 켤 자리)에만 남는다. 조회 수요(관심)는 셸이 레이아웃에서 계산하므로 이 컴포넌트는 관심을 보고하지 않는다.
-// ★폭 단계는 그려진 크기로 고른다(R3)★ — 단계마다 숨은 렌더의 자연 크기를 재어 실제 크기와 견준다. px 문턱을 두지
+// ★폭 단계는 그려진 폭으로 고른다(R3)★ — 단계마다 숨은 렌더의 자연 폭을 재어 실제 폭과 견준다. px 문턱을 두지
 //   않는다: 글꼴·문구·값이 바뀌면 문턱도 따라 움직여야 해서다.
 // ★시각은 분 단위 tick 하나가 굴린다★ — 나이·남은 시간·다음 시도가 요청 없이 로컬로 흐른다(R32).
 // 값은 DOM 텍스트 + `data-usage-vendor`/`data-usage-window` 로 둔다(R27 — LLM·cdp 가 읽는다).
 
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, RefObject } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { Hourglass, RefreshCw } from 'lucide-react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 
 import type { SlotContent } from '../../api/layoutTypes'
@@ -34,6 +34,8 @@ import {
   formatDuration,
   formatResetAt,
   formatResetClock,
+  isStale,
+  oldestAgeSecs,
   readWindow,
   stateHead,
   statusLine,
@@ -66,7 +68,7 @@ export const USAGE_PAGE_URL: Record<AgentBackendKind, string> = {
 
 const TICK_MS = 60_000
 
-// 요약 버튼의 안쪽 여백. 두 값 다 단계 판정에 든다 — 숨은 사본은 여백 없이 재어지고, 내용이 쓸 폭은 슬롯 폭에서 빼서 얻는다.
+// 요약 버튼의 안쪽 여백. 가로 값은 단계 판정에 든다 — 숨은 사본은 여백 없이 재어지고, 내용이 쓸 폭은 슬롯 폭에서 빼서 얻는다.
 const SUMMARY_PAD_Y_PX = 4
 const SUMMARY_PAD_X_PX = 6
 
@@ -201,9 +203,8 @@ export default function UsageSlot({
 // ── 작은 표시 ──────────────────────────────────────────────────────────────────────────────
 
 interface Measures {
-  /** 슬롯 루트의 크기(`width`·`height:100%` — 내용·단계에 따라 변하지 않는다). */
+  /** 슬롯 루트의 폭(`width:100%` — 내용·단계에 따라 변하지 않는다). */
   rootW: number | null
-  rootH: number | null
   /**
    * ⟳ 자리의 폭(⟳ 의 오른쪽 여백 포함). ⟳ 가 없으면(안내 문구) 0 — 관찰자는 0×0 요소를 관찰 시작 때 알리지 않아서
    * null 이 아니라 0 에서 시작한다.
@@ -211,7 +212,6 @@ interface Measures {
   refreshW: number
   s1: number | null
   s2: number | null
-  s2h: number | null
 }
 
 /**
@@ -222,17 +222,16 @@ function contentAvail({ rootW, refreshW }: Measures): number | null {
   return rootW === null ? null : rootW - refreshW - 2 * SUMMARY_PAD_X_PX
 }
 
-/**
- * 들어가는 가장 넓은 단계. 아직 못 쟀으면 1단(가장 자세한 것). 2단은 높이도 봐서, 슬롯보다 키가 크면 3단으로 간다 —
- * 잘린 줄의 배지가 사라지면 안 된다(R31 — 모든 단계에서 배지). 3단보다 좁으면 3단이 말줄임으로 잘린다.
- */
+// ADR-0259: 단계는 폭으로만 고른다 — 높이 폴백(2단이 슬롯보다 키가 크면 3단)을 되살리지 말 것. 되살리면 낮은 슬롯에서
+//   1단이 2단을 건너뛰고 곧장 3단으로 간다. 높이가 모자라면 루트의 `overflow: hidden` 이 아래 줄을 자르고, 그 줄의
+//   배지도 함께 가려진다(받아들인 대가 — PRD R31).
+/** 들어가는 가장 넓은 단계. 아직 못 쟀으면 1단(가장 자세한 것). 3단보다 좁으면 3단이 말줄임으로 잘린다. */
 function pickStage(m: Measures): Stage {
-  const { rootH, s1, s2, s2h } = m
+  const { s1, s2 } = m
   const avail = contentAvail(m)
   if (avail === null || s1 === null) return 1
   if (s1 <= avail) return 1
-  const fitsHeight = s2h === null || rootH === null || s2h + 2 * SUMMARY_PAD_Y_PX <= rootH
-  if (s2 !== null && s2 <= avail && fitsHeight) return 2
+  if (s2 !== null && s2 <= avail) return 2
   return 3
 }
 
@@ -302,17 +301,10 @@ function UsageSummary({
   const measure1Ref = useRef<HTMLDivElement>(null)
   const measure2Ref = useRef<HTMLDivElement>(null)
   const buttonRef = useRef<HTMLButtonElement>(null)
-  const [measures, setMeasures] = useState<Measures>({
-    rootW: null,
-    rootH: null,
-    refreshW: 0,
-    s1: null,
-    s2: null,
-    s2h: null,
-  })
+  const [measures, setMeasures] = useState<Measures>({ rootW: null, refreshW: 0, s1: null, s2: null })
   const [open, setOpen] = useState(false)
 
-  // 슬롯 크기 · ⟳ 자리 · 두 단계의 자연 크기를 한 관찰자로 잰다 — 숨은 렌더는 값·문구가 바뀌면 크기가 바뀌어 다시 불린다.
+  // 슬롯 폭 · ⟳ 자리 · 두 단계의 자연 폭을 한 관찰자로 잰다 — 숨은 렌더는 값·문구가 바뀌면 크기가 바뀌어 다시 불린다.
   // ★고른 단계에 따라 크기가 바뀌는 요소(요약 버튼·내용·줄)는 재지 않는다★ — 단계가 제 입력을 바꾸면 한 번 3단으로
   //   줄어든 폭이 다시 넓어지지 않거나 단계가 오간다.
   useLayoutEffect(() => {
@@ -324,16 +316,11 @@ function UsageSummary({
           if (next[key] !== value) next = { ...next, [key]: value }
         }
         for (const entry of entries) {
-          const { width, height } = entry.contentRect
-          if (entry.target === rootRef.current) {
-            put('rootW', width)
-            put('rootH', height)
-          } else if (entry.target === refreshAreaRef.current) put('refreshW', width)
+          const { width } = entry.contentRect
+          if (entry.target === rootRef.current) put('rootW', width)
+          else if (entry.target === refreshAreaRef.current) put('refreshW', width)
           else if (entry.target === measure1Ref.current) put('s1', width)
-          else if (entry.target === measure2Ref.current) {
-            put('s2', width)
-            put('s2h', height)
-          }
+          else if (entry.target === measure2Ref.current) put('s2', width)
         }
         return next
       })
@@ -352,6 +339,8 @@ function UsageSummary({
   }, [])
 
   const runSlotCommand = (id: string) => fireAndForget(id, { viewId, slotId, content })
+  const refreshVendor = (vendor: AgentBackendKind) =>
+    fireAndForget('usageSlot.refresh', { viewId, slotId, content, vendor })
   // 누름이 방송 전에 연달아도 옛 `content` 그대로 보낸다 — 토글 command 가 제 칸 하나만 쓰므로 다른 회사의 앞 누름을
   //   되돌리지 않는다(`usageCommands`). 체크 표시도 `content` 다(낙관 갱신 없음 — ADR-0035).
   const toggleShown = (vendor: AgentBackendKind) => runSlotCommand(VENDOR_SLOT[vendor].toggle)
@@ -383,6 +372,8 @@ function UsageSummary({
           // 버튼의 자식은 보조기술에 평평해지므로 안의 막대·배지 대신 짧은 이름을 준다(D14). 안내 문구만 있으면 그 글자가 이름이다.
           aria-label={views.length > 0 ? summaryLabel(views) : undefined}
           // 키보드(Enter·Space)는 네이티브 버튼 활성화가 같은 click 으로 부른다(D14).
+          // ADR-0259: 열고 닫기만 한다 — 팝업을 열 때 조회를 붙이지 말 것. 주기 조회가 있으니 열 때 받지 않는 것이
+          //   관용이고, 붙이면 여는 동작마다 Claude 429 위험이 커진다(429 가 거절 중 차단에 안 걸린다 — TRD §6 #21).
           onClick={() => setOpen(o => !o)}
           style={{
             display: 'block',
@@ -434,6 +425,7 @@ function UsageSummary({
           ownerRef={rowRef}
           shown={shown}
           onToggle={toggleShown}
+          onRefresh={refreshVendor}
           onClose={closePopup}
         />
       )}
@@ -446,17 +438,46 @@ function UsageSummary({
  * 스토어로 다시 고른다.
  */
 function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: () => void }) {
-  const label = t('usage.refreshAll')
   const targets = views.filter(v => !v.rejected)
+  return (
+    <RefreshIconButton
+      label={t('usage.refreshAll')}
+      blocked={targets.length === 0}
+      busy={targets.some(v => v.refreshing)}
+      onRefresh={onRefresh}
+      attrs={{ 'data-usage-refresh': '' }}
+      // 여백은 ⟳ 쪽에 둔다 — ⟳ 자리(`data-usage-refresh-area`)의 내용 폭이 이 여백까지 감싸 단계 판정의 ⟳ 몫에 든다.
+      marginRight={SUMMARY_PAD_X_PX}
+    />
+  )
+}
+
+/**
+ * ⟳ 모양 버튼 — 작은 표시의 ⟳ 와 팝업의 회사별 ⟳ 가 같은 누름 규칙을 쓴다(ADR-0259 결정 2 — 전역 ⟳ 규칙 준용).
+ * `blocked` = 보이는 거절이라 누름을 막는다 · `busy` = 대상의 조회가 돌고 있어 누름을 버린다.
+ */
+function RefreshIconButton({
+  label,
+  blocked,
+  busy,
+  onRefresh,
+  attrs,
+  marginRight,
+}: {
+  label: string
+  blocked: boolean
+  busy: boolean
+  onRefresh: () => void
+  attrs: Record<string, string>
+  marginRight?: number
+}) {
   // ADR-0258: 누름을 막는 것은 아래 둘뿐이다 — 시간 간격은 두지 않는다(연타로 부를 429 는 받아들인 위험).
-  // 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11).
-  const blocked = targets.length === 0
-  // 대상의 조회가 도는 동안의 누름은 버린다 — 답이 올 때까지 「갱신 중」 표식이 그 동안을 보인다.
-  const busy = targets.some(v => v.refreshing)
+  // 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11). 조회가 도는 동안의 누름은 버린다 — 답이 올
+  //   때까지 「갱신 중」 표식이 그 동안을 보인다.
   return (
     <button
       type="button"
-      data-usage-refresh=""
+      {...attrs}
       aria-label={label}
       title={label}
       // ★`disabled` 가 아니라 `aria-disabled` 다★ — 포커스된 ⟳ 가 거절로 바뀌는 순간 `disabled` 는 포커스를 body 로
@@ -468,8 +489,7 @@ function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: (
       }}
       style={{
         display: 'inline-flex',
-        // 여백은 ⟳ 쪽에 둔다 — ⟳ 자리(`data-usage-refresh-area`)의 내용 폭이 이 여백까지 감싸 단계 판정의 ⟳ 몫에 든다.
-        marginRight: `${SUMMARY_PAD_X_PX}px`,
+        marginRight,
         padding: '2px',
         border: '1px solid var(--border)',
         borderRadius: '3px',
@@ -721,15 +741,51 @@ function WindowCells({
             <ValueText w={w} bare={false} dimStale measure={measure} />
           </span>
           {r.resetsAt !== null && (
-            <span
-              {...(measure ? {} : { 'data-usage-reset-clock': '' })}
-              style={{ ...at(3), marginLeft: PCT_TO_RESET, color: 'var(--text-muted)' }}
-            >
-              {formatResetClock(r.resetsAt, nowWall)}
-            </span>
+            <ResetMark
+              resetsAt={r.resetsAt}
+              nowWall={nowWall}
+              measure={measure}
+              attrs={{ 'data-usage-reset-clock': '' }}
+              style={{ ...at(3), marginLeft: PCT_TO_RESET }}
+            />
           )}
         </>
       )}
+    </span>
+  )
+}
+
+const RESET_ICON_GAP = '0.15em'
+
+// ADR-0259: 리셋 = 모래시계 + 시각 — 낱말 「리셋」 은 툴팁(`title`)에만 남는다. 화살표 아이콘(`History`·`RotateCcw`·
+//   `RotateCw`·`Repeat` 등)을 쓰지 말 것 — ⟳ 와 섞인다.
+/**
+ * 리셋 시각 — 작은 표시와 팝업이 같이 쓴다. 툴팁 = 「리셋 11:29」(다른 날이면 날짜 + 시각). `measure` = 숨은 사본(이름·
+ * 역할·`attrs` 없음).
+ */
+function ResetMark({
+  resetsAt,
+  nowWall,
+  measure,
+  attrs,
+  style,
+}: {
+  resetsAt: number
+  nowWall: number
+  measure: boolean
+  attrs?: Record<string, string>
+  style?: CSSProperties
+}) {
+  const name = formatResetClock(resetsAt, nowWall)
+  return (
+    <span
+      // `aria-label` 을 따로 달지 않는다 — `role="img"` 는 이름을 `title` 에서 얻고, 같은 글을 `aria-label` 로도 주면
+      //   이름에 안 쓰인 `title` 이 설명으로 붙어 같은 말이 두 번 읽힌다(accname).
+      {...(measure ? {} : { ...attrs, role: 'img', title: name })}
+      style={{ display: 'inline-flex', alignItems: 'center', gap: RESET_ICON_GAP, color: 'var(--text-muted)', ...style }}
+    >
+      <Hourglass aria-hidden="true" className="size-3" />
+      {formatResetAt(resetsAt, nowWall)}
     </span>
   )
 }
@@ -853,6 +909,8 @@ function placePopup(anchor: Anchor, w: number, h: number, vw: number, vh: number
   return pushed
 }
 
+// ADR-0259: 팝업은 조회를 부르지 않는다 — 팝업 안에서 새로 받는 길은 회사별 ⟳ 뿐이다(열 때 조회 없음의 사유 = 요약
+//   버튼 onClick).
 function UsagePopup({
   summaryRef,
   views,
@@ -860,6 +918,7 @@ function UsagePopup({
   ownerRef,
   shown,
   onToggle,
+  onRefresh,
   onClose,
 }: {
   /** 팝업을 붙이는 요약 버튼. */
@@ -870,6 +929,8 @@ function UsagePopup({
   ownerRef: RefObject<HTMLDivElement | null>
   shown: Record<AgentBackendKind, boolean>
   onToggle: (vendor: AgentBackendKind) => void
+  /** 회사 하나 새로고침 — 팝업은 열린 채다. */
+  onRefresh: (vendor: AgentBackendKind) => void
   onClose: (restoreFocus: boolean) => void
 }) {
   const ref = useRef<HTMLDivElement>(null)
@@ -970,7 +1031,7 @@ function UsagePopup({
         </div>
       )}
       {views.map(view => (
-        <VendorDetail key={view.vendor} view={view} nowWall={nowWall} />
+        <VendorDetail key={view.vendor} view={view} nowWall={nowWall} onRefresh={onRefresh} />
       ))}
       <ShowToggles shown={shown} onToggle={onToggle} divided={views.length > 0} />
     </div>
@@ -1029,11 +1090,24 @@ function ShowToggles({
 }
 
 /**
- * 한 회사의 상세 — 창별 절대 리셋 시각 · 값마다 나이 · plan(있을 때만) · 모델별 창(값이 있는 것만 — D8) · 링크.
- * ★회사별 ⟳ 는 두지 않는다(사용자 결정 2026-09-29)★ — 작은 표시의 ⟳ 하나가 켠 회사를 한 번에 새로고침한다.
+ * 한 회사의 상세 — 머리(이름 · plan(있을 때만) · 나이 · 그 회사만의 ⟳) · 창별 절대 리셋 시각 · 모델별 창(값이 있는 것만
+ * — D8) · 링크. 나이는 머리에 한 번이고 창 줄마다 되풀지 않는다(ADR-0259 결정 1).
  */
-function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) {
+function VendorDetail({
+  view,
+  nowWall,
+  onRefresh,
+}: {
+  view: VendorView
+  nowWall: number
+  onRefresh: (vendor: AgentBackendKind) => void
+}) {
   const snapshot = view.entry?.snapshot
+  // ADR-0259: 머리의 나이 = 5시간·주간 두 창(`view.windows`) 가운데 가장 오래된 나이 — 아래에서 덧붙이는 모델별 창을
+  //   넣지 말 것(사용자 결정). 줍기는 모델별 창을 싣지 않아 대화가 이어지는 동안 그 창만 몇 시간씩 늙고, 넣으면 두 창이
+  //   새것인데도 머리가 오래됨(호박색)으로 보인다. 두 창 다 값이 없으면 나이를 쓰지 않는다. 호박색도 이 값을 본다.
+  const age = oldestAgeSecs(view.windows.map(w => w.reading))
+  const stale = age !== null && isStale(age)
   const rows: WindowView[] = [...view.windows]
   if (snapshot && snapshot.state.kind !== 'Unavailable') {
     for (const scoped of snapshot.model_scoped) {
@@ -1059,6 +1133,33 @@ function VendorDetail({ view, nowWall }: { view: VendorView; nowWall: number }) 
             {t('usage.plan', { plan: snapshot.plan })}
           </span>
         )}
+        {snapshot?.plan != null && age !== null && (
+          <span aria-hidden="true" style={{ color: 'var(--text-muted)' }}>
+            {t('usage.headSeparator')}
+          </span>
+        )}
+        {/* ADR-0259: 나이와 ⟳ 는 붙여 둔다 — 시간 바로 옆의 ⟳ 라야 새로고침으로 읽힌다(사용자 결정). 나이에 시계 아이콘을
+            붙이지 말 것(「아이콘 2개 나와서 난잡」). */}
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35em' }}>
+          {age !== null && (
+            <span
+              data-usage-age=""
+              {...(stale
+                ? { 'data-usage-stale': '', title: t('usage.stale', { minutes: String(STALE_AFTER_SECS / 60) }) }
+                : {})}
+              style={{ color: stale ? 'var(--usage-stale)' : 'var(--text-muted)' }}
+            >
+              {formatAge(age)}
+            </span>
+          )}
+          <RefreshIconButton
+            label={t('usage.refreshVendor', { vendor: view.name })}
+            blocked={view.rejected}
+            busy={view.refreshing}
+            onRefresh={() => onRefresh(view.vendor)}
+            attrs={{ 'data-usage-vendor-refresh': view.vendor }}
+          />
+        </span>
         {view.refreshing && (
           <span data-usage-refreshing-text="" style={{ color: 'var(--text-muted)' }}>
             {t('usage.refreshing')}
@@ -1105,16 +1206,18 @@ function PopupWindowRow({ view, row, nowWall }: { view: VendorView; row: WindowV
     >
       <span style={{ color: 'var(--text-muted)', minWidth: '3.5em' }}>{row.label}</span>
       {r.kind === 'value' && <Bar view={view} label={row.label} r={r} meter measure={false} />}
-      {/* 팝업은 흐리게 하지 않는다 — 대신 값마다 나이를 늘 보인다(R32). */}
+      {/* 팝업은 흐리게 하지 않는다 — 오래됨은 회사 머리의 나이가 호박색으로 보인다(R32 · ADR-0259). */}
       <ValueText w={row} bare={false} dimStale={false} measure={false} />
       {resetsAt !== null && resetInSecs !== null && (
-        <span data-usage-reset-at="" style={{ color: 'var(--text-muted)' }}>
-          {t('usage.resetsAtIn', { time: formatResetAt(resetsAt, nowWall), duration: formatDuration(resetInSecs) })}
-        </span>
-      )}
-      {r.kind === 'value' && (
-        <span data-usage-age="" style={{ color: 'var(--text-muted)' }}>
-          {formatAge(r.ageSecs)}
+        // 남은 시간은 이름 밖에 둔다 — 이름(「리셋 11:29」)을 진 표식은 안의 글자를 보조기술에 감추므로, 안에 넣으면
+        //   남은 시간이 읽히지 않는다.
+        // 둘 사이의 공백 글자는 DOM 글자를 읽는 쪽(R27 — LLM·cdp)을 위한 것이다. 보이는 틈은 `gap` 이 그린다 — flex
+        //   안에서 공백만 든 글자는 그려지지 않는다.
+        <span data-usage-reset-at="" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3em' }}>
+          <ResetMark resetsAt={resetsAt} nowWall={nowWall} measure={false} />{' '}
+          <span data-usage-reset-in="" style={{ color: 'var(--text-muted)' }}>
+            {t('usage.resetIn', { duration: formatDuration(resetInSecs) })}
+          </span>
         </span>
       )}
     </div>

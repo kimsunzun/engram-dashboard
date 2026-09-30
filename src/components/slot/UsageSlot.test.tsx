@@ -3,7 +3,7 @@
 // 스토어는 실물(`usageStore`)이고 값은 `setState` 로 심는다 — 받기 규칙(merge)은 `usageStore.test.ts` 가 잰다.
 // command 도 실물(`usageSlot.*` 등록)이다 — ⟳·표시 토글이 command 를 거쳐 스토어·레이아웃 쓰기에 닿는 것까지 잰다.
 // 시계는 둘 다 가짜다: 벽시계(`Date`)는 가짜 타이머, 받은 시각 기준 시계(`performance.now`)는 spy.
-// jsdom 엔 레이아웃이 없어 폭은 가짜 ResizeObserver 로 직접 준다(슬롯 크기 · ⟳ 자리 폭 + 두 단계의 자연 폭).
+// jsdom 엔 레이아웃이 없어 폭은 가짜 ResizeObserver 로 직접 준다(슬롯 폭 · ⟳ 자리 폭 + 두 단계의 자연 폭).
 
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -35,7 +35,7 @@ import '../../commands/usageCommands' // side-effect: usageSlot.* 등록
 import { useUsageStore } from '../../store/usageStore'
 import UsageSlot, { USAGE_PAGE_URL } from './UsageSlot'
 import { ANCHOR_GAP } from './SlotContextMenu'
-import { formatAge, formatClock, formatResetAt, statusLine, statusSentence } from './usageFormat'
+import { formatAge, formatClock, formatResetAt, STALE_AFTER_SECS, statusLine, statusSentence } from './usageFormat'
 
 // theme.css 원문을 Node fs 로 읽는다 — 까닭과 선언 모양은 `store/chatStyleStore.test.ts` 와 같다.
 declare function require(id: string): { readFileSync(p: string, enc: string): string }
@@ -162,7 +162,7 @@ function fireSizes(s: { rootW: number; rootH: number; refreshW: number; s1: numb
 
 /**
  * 내용이 쓸 폭(`avail`)과 1·2단 자연 폭을 준다 — 슬롯 폭은 `avail` + ⟳ 자리 + 요약 버튼 여백으로 거꾸로 세운다.
- * 높이는 기본으로 넉넉하다(슬롯 1000 · 2단 30).
+ * 높이는 기본으로 넉넉하다(슬롯 1000 · 2단 30) — 단계는 높이를 보지 않지만(ADR-0259) 관찰자는 높이도 싣는다.
  */
 function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 30 } = {}): void {
   const refreshW = refreshButton() ? REFRESH_AREA_W : 0
@@ -170,7 +170,7 @@ function setWidths(avail: number, s1: number, s2: number, { rootH = 1000, s2h = 
 }
 
 /**
- * 작은 표시의 리셋 문구 — 포맷터와 따로 세운 기대값(`Date` 의 로컬 getter). 지금(`NOW`)과 같은 로컬 날짜면 「HH:MM」,
+ * 리셋 시각의 보이는 글자 — 포맷터와 따로 세운 기대값(`Date` 의 로컬 getter). 지금(`NOW`)과 같은 로컬 날짜면 「HH:MM」,
  * 아니면 「M/D HH:MM」. 시간대에 따라 NOW + 몇 시간이 자정을 넘을 수 있어 날짜를 늘 직접 견준다.
  */
 function resetText(epochSecs: number): string {
@@ -179,7 +179,33 @@ function resetText(epochSecs: number): string {
   const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
   const sameDay =
     d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
-  return `리셋 ${sameDay ? time : `${d.getMonth() + 1}/${d.getDate()} ${time}`}`
+  return sameDay ? time : `${d.getMonth() + 1}/${d.getDate()} ${time}`
+}
+
+/** 리셋 시각의 이름(툴팁·보조기술) — 보이는 자리엔 낱말 대신 모래시계가 선다(ADR-0259). */
+function resetName(epochSecs: number): string {
+  return `리셋 ${resetText(epochSecs)}`
+}
+
+/** 팝업 창 줄의 리셋 자리 — 모래시계 표식(툴팁 = 이름)과 그 뒤의 남은 시간. */
+function popupReset(row: ParentNode): { mark: HTMLElement; text: string; name: string | null; after: string } {
+  const at = q('[data-usage-reset-at]', row)!
+  const mark = q('[role="img"]', at)!
+  return {
+    mark,
+    text: mark.textContent!,
+    name: mark.getAttribute('title'),
+    after: q('[data-usage-reset-in]', at)!.textContent!,
+  }
+}
+
+/** 팝업의 회사 머리 — 회사 섹션의 첫 줄. */
+function popupHead(popup: ParentNode, vendor: string): HTMLElement {
+  return q(`[data-usage-popup-vendor="${vendor}"]`, popup)!.firstElementChild as HTMLElement
+}
+
+function vendorRefresh(popup: ParentNode, vendor: string): HTMLButtonElement {
+  return q(`[data-usage-vendor-refresh="${vendor}"]`, popup) as HTMLButtonElement
 }
 
 /** 격자 칸 목록 — `minmax(…, …)` 안의 공백은 칸을 가르지 않는다. */
@@ -261,7 +287,9 @@ describe('마운트와 켠 회사', () => {
     const popup = openPopup()
     expect(q('[data-usage-popup-vendor="codex"]', popup)).toBeNull()
     expect(q('[data-usage-status-line]', popup)).toBeNull()
-    // 이름이 남는 자리는 표시 토글 줄뿐이다(다시 켤 자리) — 꺼진 채로.
+    expect(vendorRefresh(popup, 'codex')).toBeNull()
+    expect(vendorRefresh(popup, 'claude')).not.toBeNull()
+    // 이름이 남는 자리는 표시 토글 줄뿐이다(다시 켤 자리) — 꺼진 채로(ADR-0259 결정 7).
     const toggles = q('[data-usage-show-toggles]', popup)!
     for (const child of popup.children) {
       if (child !== toggles) expect(child.textContent).not.toContain('Codex')
@@ -373,19 +401,22 @@ describe('폭 단계', () => {
     expect(stage()).toBe('1')
   })
 
-  it('리셋 시각은 1·2단에만(「리셋 HH:MM」 · 다른 날이면 「리셋 M/D HH:MM」 · 요일·남은 시간 없음), 3단은 숫자만(「%」 없이)', () => {
+  it('리셋 시각은 1·2단에만 — 모래시계 + 「HH:MM」(다른 날이면 「M/D HH:MM」 · 요일·남은 시간·낱말 없음) · 이름 = 「리셋 …」, 3단은 숫자만(「%」 없이)', () => {
     seed(snap('claude'))
     mount(true, false)
-    const clock = (w: string) =>
-      q(`[data-usage-vendor="claude"][data-usage-window="${w}"] [data-usage-reset-clock]`, summary())!.textContent
+    const cell = (w: string) =>
+      q(`[data-usage-vendor="claude"][data-usage-window="${w}"] [data-usage-reset-clock]`, summary())!
     for (const n of [1, 2] as const) {
       toStage(n)
       expect(summary().querySelectorAll('[data-usage-reset-clock]')).toHaveLength(2)
-      expect(clock('five_hour')).toBe(resetText(NOW + 7_980))
-      expect(clock('weekly')).toBe(resetText(NOW + 86_400 * 3))
-      expect(clock('weekly')).toMatch(/^리셋 \d{1,2}\/\d{1,2} \d{2}:\d{2}$/)
-      expect(clock('weekly')).not.toMatch(/[일월화수목금토]/)
-      expect(summary().textContent).not.toMatch(/뒤|↻/)
+      expect(cell('five_hour').textContent).toBe(resetText(NOW + 7_980))
+      expect(cell('weekly').textContent).toBe(resetText(NOW + 86_400 * 3))
+      expect(cell('weekly').textContent).toMatch(/^\d{1,2}\/\d{1,2} \d{2}:\d{2}$/)
+      expect(cell('weekly').textContent).not.toMatch(/[일월화수목금토]/)
+      expect(cell('five_hour').getAttribute('title')).toBe(resetName(NOW + 7_980))
+      expect(cell('weekly').getAttribute('title')).toBe(resetName(NOW + 86_400 * 3))
+      // 낱말 「리셋」 은 툴팁에만 — DOM 글자에서는 빠진다(ADR-0259 결정 3).
+      expect(summary().textContent).not.toMatch(/리셋|뒤|↻/)
     }
     toStage(3)
     expect(summary().querySelectorAll('[data-usage-reset-clock]')).toHaveLength(0)
@@ -422,7 +453,8 @@ describe('폭 단계', () => {
       // 보이는 쪽과 같은 모양 — 한 격자 · 아이콘 · 리셋 시각. 갱신 중 표식은 조회가 없어도 늘 센다.
       expect((m.firstElementChild as HTMLElement).style.display).toBe('grid')
       expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(1)
-      expect(m.querySelectorAll('svg.lucide')).toHaveLength(1)
+      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(1)
+      expect(m.querySelectorAll('svg.lucide-hourglass')).toHaveLength(2)
       expect(m.textContent).toContain(resetText(NOW + 7_980))
     }
     expect(q('[data-usage-measure="1"]')!.parentElement!.style.visibility).toBe('hidden')
@@ -493,7 +525,7 @@ describe('상태 배지와 문장', () => {
 
 // ── 오래됨·만료·갱신 중(R32) ──
 describe('오래됨 · 만료 · 갱신 중', () => {
-  it('30분 넘은 값 → 작은 표시는 숫자만 흐리게(나이 문구 없음) · 팝업은 나이를 보이고 흐리지 않는다', () => {
+  it('30분 넘은 값 → 작은 표시는 숫자만 흐리게(나이 문구 없음) · 팝업은 흐리지 않고 회사 머리의 나이를 호박색으로', () => {
     seed(
       snap('claude', {
         five_hour: { used_pct: 38, resets_at: NOW + 7_980, age_secs: 1_801, expired: false },
@@ -513,9 +545,15 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     expect(summary().textContent).not.toMatch(/분 전|방금/)
 
     const popup = openPopup()
-    expect(q('[data-usage-window="five_hour"] [data-usage-age]', popup)!.textContent).toBe('30분 전')
-    expect(q('[data-usage-window="weekly"] [data-usage-age]', popup)!.textContent).toBe('30분 전')
-    expect(q('[data-usage-stale]', popup)).toBeNull()
+    expect(q('[data-usage-value][data-usage-stale]', popup)).toBeNull()
+    expect(q('[data-usage-window] [data-usage-age]', popup)).toBeNull()
+    expect(popup.querySelectorAll('[data-usage-age]')).toHaveLength(1)
+    // 머리의 나이 = 두 창 가운데 오래된 쪽(1801초) — 30분을 넘어 호박색이다(ADR-0259 결정 4).
+    const age = q('[data-usage-age]', popupHead(popup, 'claude'))!
+    expect(age.textContent).toBe('30분 전')
+    expect(age.hasAttribute('data-usage-stale')).toBe(true)
+    expect(age.style.color).toBe('var(--usage-stale)')
+    expect(age.getAttribute('title')).toBe('30분 넘게 새로 들어오지 않은 값')
   })
 
   it('리셋 시각이 지나면(또는 데몬 래치) %·남은 시간을 숨기고 「리셋됨 — 갱신 대기」', () => {
@@ -573,14 +611,15 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     )
     mount(true, false)
     const popup = openPopup()
-    const resetAt = () => q('[data-usage-window="five_hour"] [data-usage-reset-at]', popup)!.textContent
-    expect(resetAt()).toBe(`리셋 ${formatResetAt(NOW + 7_980, NOW)} (2시간 13분 뒤)`)
+    const reset = () => popupReset(q('[data-usage-window="five_hour"]', popup)!)
+    expect(reset().text).toBe(formatResetAt(NOW + 7_980, NOW))
+    expect(reset().after).toBe('(2시간 13분 뒤)')
     expect(q('[data-usage-age]', popup)!.textContent).toBe('방금')
     const before = q('[data-usage-badge]')!.getAttribute('aria-label')
     expect(before).toBe(`Claude 조회 실패 · 다음 시도 ${formatClock(NOW + 600)}`)
 
     advance(60_000)
-    expect(resetAt()).toBe(`리셋 ${formatResetAt(NOW + 7_980, NOW)} (2시간 12분 뒤)`)
+    expect(reset().after).toBe('(2시간 12분 뒤)')
     expect(q('[data-usage-age]', popup)!.textContent).toBe(formatAge(60))
     // 다음 시도 시각 자체는 같은 순간을 가리킨다(받은 순간 기준 상대 초 − 흐른 초 + 지금).
     expect(q('[data-usage-badge]')!.getAttribute('aria-label')).toBe(before)
@@ -636,7 +675,7 @@ describe('팝업', () => {
     expect(screen.queryByRole('dialog')).toBeNull()
   })
 
-  it('창별 절대 리셋 시각 · 값마다 나이 · plan 은 있을 때만 · 모델별 창은 값이 있는 것만', () => {
+  it('창별 절대 리셋 시각 · 나이는 회사 머리에 한 번(창 줄엔 없음) · plan 은 있을 때만 · 모델별 창은 값이 있는 것만', () => {
     seed(
       snap('claude', {
         plan: 'max_20x',
@@ -653,11 +692,12 @@ describe('팝업', () => {
     const claude = q('[data-usage-popup-vendor="claude"]', popup)!
     const five = q('[data-usage-window="five_hour"]', claude)!
     expect(q('[data-usage-value]', five)!.textContent).toBe('62%')
-    expect(q('[data-usage-reset-at]', five)!.textContent).toBe(`리셋 ${formatResetAt(NOW + 7_980, NOW)} (2시간 13분 뒤)`)
-    expect(q('[data-usage-age]', five)!.textContent).toBe('2분 전')
-    expect(q('[data-usage-window="weekly"] [data-usage-reset-at]', claude)!.textContent).toContain(
-      formatResetAt(NOW + 86_400 * 3, NOW),
-    )
+    expect(popupReset(five).text).toBe(formatResetAt(NOW + 7_980, NOW))
+    expect(popupReset(five).after).toBe('(2시간 13분 뒤)')
+    expect(popupReset(q('[data-usage-window="weekly"]', claude)!).text).toBe(formatResetAt(NOW + 86_400 * 3, NOW))
+    expect(q('[data-usage-window] [data-usage-age]', claude)).toBeNull()
+    expect(claude.querySelectorAll('[data-usage-age]')).toHaveLength(1)
+    expect(q('[data-usage-age]', popupHead(popup, 'claude'))!.textContent).toBe('2분 전')
     expect(q('[data-usage-plan]', claude)!.textContent).toBe('플랜: max_20x')
     expect(q('[data-usage-window="model:Opus"] [data-usage-value]', claude)!.textContent).toBe('30%')
     expect(q('[data-usage-window="model:Sonnet"]', claude)).toBeNull()
@@ -668,8 +708,11 @@ describe('팝업', () => {
     seed(snap('claude'))
     mount(true, false)
     const popup = openPopup()
-    const weekly = q('[data-usage-window="weekly"] [data-usage-reset-at]', popup)!.textContent!
-    expect(weekly).toBe(`${resetText(NOW + 86_400 * 3)} (3일 뒤)`)
+    const weekly = popupReset(q('[data-usage-window="weekly"]', popup)!)
+    expect(weekly.text).toBe(resetText(NOW + 86_400 * 3))
+    expect(weekly.text).toMatch(/^\d{1,2}\/\d{1,2} \d{2}:\d{2}$/)
+    expect(weekly.name).toBe(resetName(NOW + 86_400 * 3))
+    expect(weekly.after).toBe('(3일 뒤)')
   })
 
   it('「사용량 페이지 ↗」 → openUrl 에 정확한 주소 · title 이 목적지를 말한다', () => {
@@ -689,13 +732,26 @@ describe('팝업', () => {
     ])
   })
 
-  it('팝업엔 회사별 ⟳ 가 없다 — 새로고침은 작은 표시의 ⟳ 하나다', () => {
+  it('팝업엔 회사마다 ⟳ 하나 — 이름 「<회사> 사용량 새로고침」 · 작은 표시의 전역 ⟳ 는 팝업 밖에 그대로(ADR-0259 결정 2)', () => {
     seed(snap('claude'))
     seed(snap('codex'))
     mount()
     const popup = openPopup()
     expect(q('[data-usage-refresh]', popup)).toBeNull()
-    expect(within(popup).queryAllByRole('button', { name: /새로고침/ })).toHaveLength(0)
+    expect(within(popup).getAllByRole('button', { name: /새로고침/ })).toEqual([
+      vendorRefresh(popup, 'claude'),
+      vendorRefresh(popup, 'codex'),
+    ])
+    expect(within(popup).getByRole('button', { name: 'Claude 사용량 새로고침' })).toBe(vendorRefresh(popup, 'claude'))
+    expect(within(popup).getByRole('button', { name: 'Codex 사용량 새로고침' })).toBe(vendorRefresh(popup, 'codex'))
+    for (const vendor of ['claude', 'codex']) {
+      const button = vendorRefresh(popup, vendor)
+      expect(popupHead(popup, vendor).contains(button)).toBe(true)
+      expect(button.getAttribute('type')).toBe('button')
+      expect(q('svg.lucide-refresh-cw', button)).not.toBeNull()
+    }
+    expect(refreshButton()).not.toBeNull()
+    expect(popup.contains(refreshButton())).toBe(false)
   })
 
   it('보이는 거절 → 팝업 맨 위 「거절됨 — N분 뒤」', () => {
@@ -730,6 +786,315 @@ describe('팝업', () => {
       expect(q(`[data-usage-status-line="${vendor}"] [data-usage-status-text]`, popup)!.textContent).toBe(
         q(`[data-usage-badge="${vendor}"]`)!.getAttribute('aria-label'),
       )
+    }
+  })
+})
+
+// ── 팝업 회사 머리(ADR-0259 결정 1·2·4·5) — 「<아이콘> <이름> 플랜: max · 1분 전 ⟳」 ──
+describe('팝업 회사 머리', () => {
+  const REJECTED = { kind: 'Rejected' as const, retry_in_secs: 600, detail: null }
+
+  it('머리 = 아이콘·이름 · 플랜 · 「·」 · 나이 + ⟳(붙어 있다) · 갱신 중이면 끝에 「갱신 중」 — 시계 아이콘 없음', () => {
+    seed(
+      snap('claude', {
+        plan: 'max',
+        five_hour: { used_pct: 38, resets_at: NOW + 7_980, age_secs: 60, expired: false },
+        weekly: { used_pct: 59, resets_at: NOW + 86_400 * 3, age_secs: 0, expired: false },
+      }),
+    )
+    mount(true, false)
+    const popup = openPopup()
+    const head = popupHead(popup, 'claude')
+    expect(head.children).toHaveLength(4)
+    const [name, plan, sep, group] = [...head.children] as HTMLElement[]
+    expect(name.textContent).toBe('Claude')
+    expect(plan.hasAttribute('data-usage-plan')).toBe(true)
+    expect(plan.textContent).toBe('플랜: max')
+    expect(sep.textContent).toBe('·')
+    expect(sep.getAttribute('aria-hidden')).toBe('true')
+    expect([...group.children]).toEqual([q('[data-usage-age]', head), vendorRefresh(popup, 'claude')])
+    expect(q('[data-usage-age]', head)!.textContent).toBe('1분 전')
+    // lucide 아이콘은 ⟳ 하나뿐 — 나이에 시계 아이콘을 붙이지 않는다.
+    expect([...head.querySelectorAll('svg.lucide')].map(svg => svg.closest('button'))).toEqual([
+      vendorRefresh(popup, 'claude'),
+    ])
+    act(() => useUsageStore.setState({ pending: { claude: 1 } }))
+    expect(head.lastElementChild!.hasAttribute('data-usage-refreshing-text')).toBe(true)
+    expect(head.lastElementChild!.textContent).toBe('갱신 중')
+    expect(vendorRefresh(popup, 'claude').parentElement).toBe(group)
+  })
+
+  it('플랜이 없으면 이름 뒤에 곧바로 나이 — 「·」 도 없다', () => {
+    seed(snap('codex'))
+    mount(false, true)
+    const head = popupHead(openPopup(), 'codex')
+    expect(q('[data-usage-plan]', head)).toBeNull()
+    expect(head.children).toHaveLength(2)
+    expect(head.textContent).toBe('Codex방금')
+  })
+
+  it('나이 = 5시간·주간 가운데 가장 오래된 것 — 더 묵은 모델별 창은 넣지 않는다(호박색도 같다)', () => {
+    seed(
+      snap('claude', {
+        five_hour: { used_pct: 38, resets_at: NOW + 7_980, age_secs: 60, expired: false },
+        weekly: { used_pct: 59, resets_at: NOW + 86_400 * 3, age_secs: 600, expired: false },
+        model_scoped: [
+          { label: 'Opus', window: { used_pct: 70, resets_at: NOW + 86_400 * 2, age_secs: 7_200, expired: false } },
+        ],
+      }),
+    )
+    mount(true, false)
+    const popup = openPopup()
+    const age = q('[data-usage-age]', popupHead(popup, 'claude'))!
+    expect(age.textContent).toBe('10분 전')
+    expect(age.hasAttribute('data-usage-stale')).toBe(false)
+    expect(q('[data-usage-window="model:Opus"] [data-usage-value]', popup)!.textContent).toBe('30%')
+  })
+
+  it('한 창이 빠지면 남은 창의 나이 · 두 창 다 값이 없으면 나이 없음(모델별 창에 값이 있어도 · Unavailable 도) · ⟳ 는 남는다', () => {
+    seed(snap('claude', { weekly: null, five_hour: { used_pct: 38, resets_at: NOW + 7_980, age_secs: 300, expired: false } }))
+    mount(true, false)
+    expect(q('[data-usage-age]', popupHead(openPopup(), 'claude'))!.textContent).toBe('5분 전')
+
+    cleanup()
+    seed(
+      snap('claude', {
+        revision: 2,
+        plan: 'max',
+        five_hour: null,
+        weekly: { used_pct: null, resets_at: NOW + 600, age_secs: 0, expired: false },
+        model_scoped: [
+          { label: 'Opus', window: { used_pct: 70, resets_at: NOW + 86_400, age_secs: 0, expired: false } },
+        ],
+      }),
+    )
+    mount(true, false)
+    const popup = openPopup()
+    const head = popupHead(popup, 'claude')
+    expect(q('[data-usage-age]', head)).toBeNull()
+    expect(head.textContent).not.toContain('·')
+    expect(vendorRefresh(popup, 'claude')).not.toBeNull()
+    expect(q('[data-usage-window="model:Opus"]', popup)).not.toBeNull()
+
+    cleanup()
+    seed(snap('claude', { revision: 3, state: { kind: 'Unavailable', detail: null } }))
+    mount(true, false)
+    expect(q('[data-usage-age]', popupHead(openPopup(), 'claude'))).toBeNull()
+  })
+
+  it('호박색 경계 — 1800초는 평소 색, 1801초는 호박색(`--usage-stale`) · 작은 표시의 흐림과 같은 상수', () => {
+    const at = (age: number, revision: number) =>
+      snap('claude', {
+        revision,
+        five_hour: { used_pct: 38, resets_at: NOW + 7_980, age_secs: age, expired: false },
+        weekly: { used_pct: 59, resets_at: NOW + 86_400 * 3, age_secs: 0, expired: false },
+      })
+    seed(at(STALE_AFTER_SECS, 1))
+    mount(true, false)
+    const fresh = q('[data-usage-age]', popupHead(openPopup(), 'claude'))!
+    expect(fresh.textContent).toBe('30분 전')
+    expect(fresh.hasAttribute('data-usage-stale')).toBe(false)
+    expect(fresh.hasAttribute('title')).toBe(false)
+    expect(fresh.style.color).toBe('var(--text-muted)')
+
+    cleanup()
+    seed(at(STALE_AFTER_SECS + 1, 2))
+    mount(true, false)
+    const stale = q('[data-usage-age]', popupHead(openPopup(), 'claude'))!
+    expect(stale.hasAttribute('data-usage-stale')).toBe(true)
+    expect(stale.style.color).toBe('var(--usage-stale)')
+    expect(stale.getAttribute('title')).toBe('30분 넘게 새로 들어오지 않은 값')
+    // 작은 표시는 숫자만 흐리다 — 같은 창이 같은 순간에 오래됨으로 넘어간다.
+    expect(valueOf('claude', 'five_hour')!.hasAttribute('data-usage-stale')).toBe(true)
+  })
+
+  it('분 tick 으로 30분을 넘으면 요청 없이 호박색이 된다', () => {
+    seed(
+      snap('claude', {
+        five_hour: { used_pct: 38, resets_at: NOW + 7_980, age_secs: STALE_AFTER_SECS - 30, expired: false },
+        weekly: { used_pct: 59, resets_at: NOW + 86_400 * 3, age_secs: 0, expired: false },
+      }),
+    )
+    mount(true, false)
+    const popup = openPopup()
+    const age = () => q('[data-usage-age]', popupHead(popup, 'claude'))!
+    expect(age().hasAttribute('data-usage-stale')).toBe(false)
+    advance(60_000)
+    expect(age().hasAttribute('data-usage-stale')).toBe(true)
+    expect(age().textContent).toBe('30분 전')
+    expect(client.refreshUsageLimits).not.toHaveBeenCalled()
+    expect(client.getUsageSnapshot).toHaveBeenCalledTimes(1)
+  })
+
+  it('회사별 ⟳ = 그 회사만 새로고침 · 팝업은 열린 채 · 포커스는 ⟳ 에 · 도는 동안 다시 누르면 버린다', async () => {
+    seed(snap('claude'))
+    seed(snap('codex'))
+    mount()
+    const popup = openPopup()
+    const codex = vendorRefresh(popup, 'codex')
+    fireEvent.mouseDown(codex)
+    act(() => codex.focus())
+    fireEvent.click(codex)
+    expect(client.refreshUsageLimits.mock.calls.map(c => c[0])).toEqual(['codex'])
+    expect(screen.getByRole('dialog')).toBe(popup)
+    expect(document.activeElement).toBe(vendorRefresh(popup, 'codex'))
+    // 그 회사만 「갱신 중」 — 다른 회사의 ⟳ 는 누를 수 있다.
+    expect(vendorRefresh(popup, 'codex').getAttribute('aria-busy')).toBe('true')
+    expect(vendorRefresh(popup, 'claude').hasAttribute('aria-busy')).toBe(false)
+    fireEvent.click(vendorRefresh(popup, 'codex'))
+    expect(client.refreshUsageLimits).toHaveBeenCalledTimes(1)
+    await act(async () => {})
+    expect(vendorRefresh(popup, 'codex').hasAttribute('aria-busy')).toBe(false)
+  })
+
+  it('보이는 거절이면 그 회사 ⟳ 만 aria-disabled(disabled 아님) · 누름은 command 에 닿지 않는다', () => {
+    seed(snap('claude', { state: REJECTED }))
+    seed(snap('codex'))
+    mount()
+    const popup = openPopup()
+    const claude = vendorRefresh(popup, 'claude')
+    expect(claude.getAttribute('aria-disabled')).toBe('true')
+    expect(claude.disabled).toBe(false)
+    expect(vendorRefresh(popup, 'codex').hasAttribute('aria-disabled')).toBe(false)
+    const warn = vi.spyOn(console, 'warn')
+    fireEvent.click(claude)
+    expect(client.refreshUsageLimits).not.toHaveBeenCalled()
+    expect(warn).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBe(popup)
+  })
+
+  it('그 회사의 조회가 도는 동안(⟳ 대기 · 상대의 in_flight) 누름은 버린다 — 끝나면 다시 받는다', async () => {
+    seed(snap('claude', { in_flight: true }))
+    seed(snap('codex'))
+    mount()
+    const popup = openPopup()
+    expect(vendorRefresh(popup, 'claude').getAttribute('aria-busy')).toBe('true')
+    fireEvent.click(vendorRefresh(popup, 'claude'))
+    act(() => {
+      seed(snap('claude', { revision: 2, in_flight: false }))
+      useUsageStore.setState({ pending: { claude: 1 } })
+    })
+    fireEvent.click(vendorRefresh(popup, 'claude'))
+    expect(client.refreshUsageLimits).not.toHaveBeenCalled()
+    act(() => useUsageStore.setState({ pending: {} }))
+    fireEvent.click(vendorRefresh(popup, 'claude'))
+    expect(client.refreshUsageLimits.mock.calls.map(c => c[0])).toEqual(['claude'])
+    await act(async () => {})
+  })
+
+  it('포커스된 회사 ⟳ 가 거절로 바뀌어도 포커스를 쥔 채 누름만 막힌다 · 팝업은 열린 채', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const popup = openPopup()
+    act(() => vendorRefresh(popup, 'claude').focus())
+    act(() => seed(snap('claude', { revision: 2, state: REJECTED })))
+    expect(vendorRefresh(popup, 'claude').getAttribute('aria-disabled')).toBe('true')
+    expect(document.activeElement).toBe(vendorRefresh(popup, 'claude'))
+    fireEvent.click(vendorRefresh(popup, 'claude'))
+    expect(client.refreshUsageLimits).not.toHaveBeenCalled()
+    expect(screen.getByRole('dialog')).toBe(popup)
+  })
+
+  it('팝업을 열고 닫아도 조회 0 — pull 은 마운트 때 한 번뿐(ADR-0259 결정 5)', () => {
+    seed(snap('claude'))
+    seed(snap('codex'))
+    mount()
+    for (let i = 0; i < 3; i++) {
+      openPopup()
+      fireEvent.click(summary())
+      expect(screen.queryByRole('dialog')).toBeNull()
+    }
+    openPopup()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    openPopup()
+    fireEvent.mouseDown(document.body)
+    expect(screen.queryByRole('dialog')).toBeNull()
+    expect(client.refreshUsageLimits).not.toHaveBeenCalled()
+    expect(client.getUsageSnapshot).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── 모래시계(ADR-0259 결정 3) — 낱말 「리셋」 은 이름에만 · 화살표 아이콘 없음 ──
+describe('리셋 표기 = 모래시계', () => {
+  const NOT_HOURGLASS = /lucide-(refresh|rotate|history|repeat|undo|redo|arrow|clock|alarm|calendar)/
+
+  /** `scope` = 표식을 품은 요소 — 이름으로 찾아 같은 요소인지 본다(`title` 이 이름이 된다). */
+  function expectHourglass(scope: HTMLElement, mark: HTMLElement, at: number): void {
+    expect(mark.getAttribute('role')).toBe('img')
+    expect(mark.getAttribute('title')).toBe(resetName(at))
+    expect(mark.hasAttribute('aria-label')).toBe(false)
+    expect(within(scope).getByRole('img', { name: resetName(at) })).toBe(mark)
+    expect(mark.textContent).toBe(resetText(at))
+    const svgs = [...mark.querySelectorAll('svg')]
+    expect(svgs).toHaveLength(1)
+    expect(svgs[0].getAttribute('class')).toContain('lucide-hourglass')
+    expect(svgs[0].getAttribute('class')).not.toMatch(NOT_HOURGLASS)
+    expect(svgs[0].getAttribute('aria-hidden')).toBe('true')
+  }
+
+  it('작은 표시(1·2단)와 팝업의 리셋 자리가 같은 모양 — 툴팁 「리셋 HH:MM」 이 곧 이름(aria-label 없음) · 아이콘은 보조기술에 숨김', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    for (const n of [1, 2] as const) {
+      toStage(n)
+      for (const [w, at] of [
+        ['five_hour', NOW + 7_980],
+        ['weekly', NOW + 86_400 * 3],
+      ] as const) {
+        const seg = q(`[data-usage-vendor="claude"][data-usage-window="${w}"]`, summary())!
+        expectHourglass(seg, q('[data-usage-reset-clock]', seg)!, at)
+      }
+    }
+    const popup = openPopup()
+    for (const [w, at] of [
+      ['five_hour', NOW + 7_980],
+      ['weekly', NOW + 86_400 * 3],
+    ] as const) {
+      const row = q(`[data-usage-window="${w}"]`, popup)!
+      const reset = popupReset(row)
+      expectHourglass(row, reset.mark, at)
+      // 남은 시간은 이름을 진 표식 밖 — 보이는 글자로 남고(보조기술도 읽는다) 이름엔 들지 않는다.
+      expect(reset.mark.contains(q('[data-usage-reset-in]', row))).toBe(false)
+      expect(reset.name).not.toContain('뒤')
+      // DOM 글자로 읽어도 시각과 남은 시간이 떨어져 있다(R27).
+      expect(q('[data-usage-reset-at]', row)!.textContent).toBe(`${resetText(at)} ${reset.after}`)
+    }
+  })
+
+  it('리셋 표식은 이름과 설명이 겹치지 않는다 — aria-label·title 을 함께 단 표식이 없다(작은 표시·팝업·모델별 창)', () => {
+    seed(
+      snap('claude', {
+        model_scoped: [
+          { label: 'Opus', window: { used_pct: 70, resets_at: NOW + 86_400 * 2, age_secs: 0, expired: false } },
+        ],
+      }),
+    )
+    mount(true, false)
+    openPopup()
+    const marks = [
+      ...document.querySelectorAll<HTMLElement>('[data-usage-reset-clock], [data-usage-reset-at] [role="img"]'),
+    ]
+    // 작은 표시 두 창 + 팝업 세 줄(5시간·주간·Opus).
+    expect(marks).toHaveLength(5)
+    for (const mark of marks) {
+      expect(mark.hasAttribute('title')).toBe(true)
+      expect(mark.hasAttribute('aria-label')).toBe(false)
+    }
+  })
+
+  it('↻ 모양(RefreshCw)은 ⟳ 와 갱신 중 표식에만 — 리셋 자리에 화살표 아이콘이 없다', () => {
+    seed(snap('claude', { in_flight: true }))
+    mount(true, false)
+    openPopup()
+    const resets = [...document.querySelectorAll<HTMLElement>('[data-usage-reset-clock], [data-usage-reset-at]')]
+    expect(resets.length).toBeGreaterThan(0)
+    for (const el of resets) {
+      for (const svg of el.querySelectorAll('svg')) expect(svg.getAttribute('class')).not.toMatch(NOT_HOURGLASS)
+    }
+    for (const svg of document.querySelectorAll('svg.lucide-refresh-cw')) {
+      expect(
+        svg.closest('[data-usage-refresh], [data-usage-vendor-refresh], [data-usage-refreshing], [data-usage-measure]'),
+      ).not.toBeNull()
     }
   })
 })
@@ -1120,7 +1485,7 @@ describe('단계 측정과 ⟳', () => {
     const idle = copies()
     for (const n of ['1', '2']) {
       const m = q(`[data-usage-measure="${n}"]`)!
-      expect(m.querySelectorAll('svg.lucide')).toHaveLength(2)
+      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(2)
       for (const svg of m.querySelectorAll('svg.lucide')) expect(svg.getAttribute('class')).not.toContain('animate-spin')
     }
     act(() => useUsageStore.setState({ pending: { claude: 1 } }))
@@ -1164,7 +1529,7 @@ describe('단계 측정과 ⟳', () => {
   })
 })
 
-// ── 리뷰 후속(7b) — 높이 · 리셋만 실린 창 · 뒤집기 · 포커스 · Esc · 회전 ──
+// ── 낮은 슬롯(단계는 폭으로만) · 리셋만 실린 창 · 팝업 자리 · 포커스 · Esc · 회전 ──
 function rect(left: number, top: number, width: number, height: number): DOMRect {
   return { left, top, width, height, right: left + width, bottom: top + height, x: left, y: top, toJSON() {} } as DOMRect
 }
@@ -1179,21 +1544,25 @@ function stubRects(summaryRect: DOMRect, popupRect: DOMRect): void {
 }
 
 describe('높이 · 리셋만 실린 창', () => {
-  it('2단이 슬롯보다 키가 크면 3단 — 잘린 줄의 배지가 사라지지 않게(R31 · R3)', () => {
+  it('단계는 폭으로만 — 2단이 슬롯보다 키가 커도 폭이 허락하면 2단이고 슬롯 루트가 아래를 자른다(ADR-0259 결정 6)', () => {
     seed(snap('claude', { state: { kind: 'NeedsLogin', detail: null } }))
     mount(true, false)
-    // 2단 높이 + 요약 버튼의 위아래 여백(4px × 2) 과 슬롯 높이를 견준다.
     setWidths(300, 400, 200, { rootH: 53, s2h: 45 })
     expect(stage()).toBe('2')
-    setWidths(300, 400, 200, { rootH: 52, s2h: 45 })
-    expect(stage()).toBe('3')
+    for (const rootH of [52, 20, 1]) {
+      setWidths(300, 400, 200, { rootH, s2h: 45 })
+      expect(stage()).toBe('2')
+    }
+    expect(q('[data-usage-slot]')!.style.overflow).toBe('hidden')
+    // 잘려 보이지 않아도 배지는 DOM 에 그대로 있다(받아들인 대가 — 가려질 뿐 사라지지 않는다).
     expect(q('[data-usage-badge="claude"]')).not.toBeNull()
-    // 1단은 폭만 본다 — 줄 수가 3단과 같아 3단으로 가도 얻는 것이 없다.
     setWidths(500, 400, 200, { rootH: 10, s2h: 45 })
     expect(stage()).toBe('1')
+    setWidths(199, 400, 200, { rootH: 1000, s2h: 45 })
+    expect(stage()).toBe('3')
   })
 
-  it('리셋 시각만 실린 창 — 막대 없이 「—」 + 리셋 시각(1·2단) · 팝업엔 절대 리셋 시각(나이 없음)', () => {
+  it('리셋 시각만 실린 창 — 막대 없이 「—」 + 리셋 시각(1·2단) · 팝업엔 절대 리셋 시각(창 줄엔 나이 없음)', () => {
     seed(snap('claude', { five_hour: { used_pct: null, resets_at: NOW + 600, age_secs: 0, expired: false } }))
     mount(true, false)
     const seg = () => q('[data-usage-vendor="claude"][data-usage-window="five_hour"]', summary())!
@@ -1208,7 +1577,8 @@ describe('높이 · 리셋만 실린 창', () => {
     const row = q('[data-usage-window="five_hour"]', openPopup())!
     expect(q('[data-usage-bar]', row)).toBeNull()
     expect(q('[role="meter"]', row)).toBeNull()
-    expect(q('[data-usage-reset-at]', row)!.textContent).toBe(`리셋 ${formatResetAt(NOW + 600, NOW)} (10분 뒤)`)
+    expect(popupReset(row).text).toBe(formatResetAt(NOW + 600, NOW))
+    expect(popupReset(row).after).toBe('(10분 뒤)')
     expect(q('[data-usage-age]', row)).toBeNull()
   })
 })
@@ -1309,7 +1679,7 @@ describe('팝업 자리 · 포커스 · Esc', () => {
     mount(true, false)
     expect(q('[data-usage-refreshing="claude"] svg')!.getAttribute('class')).toContain('animate-spin')
     for (const n of ['1', '2']) {
-      const svg = q(`[data-usage-measure="${n}"] svg.lucide`)!
+      const svg = q(`[data-usage-measure="${n}"] svg.lucide-refresh-cw`)!
       expect(svg.getAttribute('class')).not.toContain('animate-spin')
     }
   })
@@ -1397,14 +1767,17 @@ describe('회사 아이콘', () => {
       expect(usage).toContain('--usage-danger: var(--status-danger);')
       expect(usage).toContain('--usage-vendor-claude: var(--vendor-claude);')
       expect(usage).toContain('--usage-vendor-codex: var(--vendor-codex);')
+      // 팝업 머리의 오래된 나이(호박색 — ADR-0259 결정 4).
+      expect(usage).toContain('--usage-stale: var(--status-blocked);')
       expect(usage, `${theme} 사용량 줄에 색 리터럴`).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
       const base = block(theme, '--bg')
-      for (const token of ['--status-danger', '--vendor-claude', '--vendor-codex']) {
+      for (const token of ['--status-danger', '--status-blocked', '--vendor-claude', '--vendor-codex']) {
         expect(base, `${theme} 바탕에 ${token} 가 없다`).toMatch(new RegExp(`${token}:\\s*[^;]+;`))
       }
     }
     const eink = block('e-ink', '--bg')
-    for (const token of ['--status-danger', '--vendor-claude', '--vendor-codex']) {
+    // e-ink 의 호박색은 본문색이다 — 색 단서 없이 흐린 글자보다 진해질 뿐이다(TRD §6 #30 미정).
+    for (const token of ['--status-danger', '--status-blocked', '--vendor-claude', '--vendor-codex']) {
       expect(eink).toContain(`${token}: var(--text);`)
     }
   })
@@ -1533,7 +1906,8 @@ describe('측정 사본과 단계 고르기', () => {
     expect(tracks((m2.firstElementChild as HTMLElement).style.gridTemplateColumns)).toHaveLength(5)
     for (const m of [m1, m2]) {
       expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(2)
-      expect(m.querySelectorAll('svg.lucide')).toHaveLength(2)
+      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(2)
+      expect(m.querySelectorAll('svg.lucide-hourglass')).toHaveLength(4)
       expect(m.textContent).toContain(resetText(NOW + 86_400 * 3))
     }
     setWidths(300, 400, 250)
@@ -1558,36 +1932,32 @@ describe('측정 사본과 단계 고르기', () => {
       const copyGrid = m[n].firstElementChild as HTMLElement
       expect(copyGrid.style.gridTemplateColumns).toBe(shownGrid.style.gridTemplateColumns)
       expect(m[n].textContent).toBe(shown.textContent)
-      // 회사 아이콘은 같은 수 · 갱신 중 표식은 사본에만(조회가 없어도 회사마다 하나).
+      // 회사 아이콘·모래시계는 같은 수 · 갱신 중 표식은 사본에만(조회가 없어도 회사마다 하나).
       expect(m[n].querySelectorAll('svg:not(.lucide)')).toHaveLength(shown.querySelectorAll('svg:not(.lucide)').length)
-      expect(shown.querySelectorAll('svg.lucide')).toHaveLength(0)
-      expect(m[n].querySelectorAll('svg.lucide')).toHaveLength(2)
+      expect(m[n].querySelectorAll('svg.lucide-hourglass')).toHaveLength(shown.querySelectorAll('svg.lucide-hourglass').length)
+      expect(shown.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(0)
+      expect(m[n].querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(2)
       const placed = shown.querySelectorAll('[style*="grid-column"]').length
       expect(placed).toBeGreaterThan(0)
       expect(m[n].querySelectorAll('[style*="grid-column"]')).toHaveLength(placed)
     }
   })
 
-  it('높이 되돌림 — 새 2단 격자가 슬롯보다 키가 크면 3단(아이콘 + 숫자만, 배지는 아이콘 옆)', () => {
+  it('높이 되돌림 없음 — 2단 격자가 슬롯보다 키가 커도 2단 그대로(두 회사 · 배지는 아이콘 옆 · ADR-0259 결정 6)', () => {
     seed(snap('claude', { state: { kind: 'NeedsLogin', detail: null } }))
     seed(snap('codex', { state: { kind: 'NotInstalled', detail: null } }))
     mount()
-    // 2단 높이 + 요약 버튼 위아래 여백(4px × 2) 과 슬롯 높이를 견준다.
     setWidths(300, 400, 250, { rootH: 68, s2h: 60 })
     expect(stage()).toBe('2')
     setWidths(300, 400, 250, { rootH: 67, s2h: 60 })
-    expect(stage()).toBe('3')
+    expect(stage()).toBe('2')
     const shown = q('[data-usage-content]')!
-    expect(q('[data-usage-grid]', shown)).toBeNull()
-    expect(q('[data-usage-bar]', shown)).toBeNull()
-    expect(q('[data-usage-reset-clock]', shown)).toBeNull()
-    expect(shown.textContent).not.toMatch(/5시간|주간|리셋/)
-    expect(shown.querySelectorAll('[data-usage-numbers]')).toHaveLength(2)
+    expect(q('[data-usage-grid]', shown)).not.toBeNull()
+    expect(shown.querySelectorAll('[data-usage-reset-clock]')).toHaveLength(4)
     for (const vendor of ['claude', 'codex']) {
       const badge = q(`[data-usage-badge="${vendor}"]`, shown)!
       expect(badge.previousElementSibling).toBe(q(`[data-usage-icon="${vendor}"]`, shown))
     }
-    expect(shown.textContent).toBe('!62·41!62·41')
   })
 })
 

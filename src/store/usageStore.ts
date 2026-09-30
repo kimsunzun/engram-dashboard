@@ -128,8 +128,8 @@ export function useUsagePending(vendor: AgentBackendKind): boolean {
 }
 
 /**
- * ⟳ 를 막는 거절 = 보이는 `Rejected` 상태. 작은 표시 ⟳ 비활성과 `usageSlot.refresh` 의 대상 고르기가 이 하나를
- * 읽는다. 값이 와서 `Ready` 로 보이는 동안의 거절은 여기 안 걸린다 — 그때 ⟳ 는 데몬이 조회 없이 캐시로
+ * ⟳ 를 막는 거절 = 보이는 `Rejected` 상태. 두 ⟳(작은 표시 · 팝업 회사별)의 비활성과 `usageSlot.refresh` 의 대상
+ * 고르기가 이 하나를 읽는다. 값이 와서 `Ready` 로 보이는 동안의 거절은 여기 안 걸린다 — 그때 ⟳ 는 데몬이 조회 없이 캐시로
  * 답한다(TRD §3 #88).
  */
 export function blocksRefresh(state: UsageVendorState | undefined): boolean {

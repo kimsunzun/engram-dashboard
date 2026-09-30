@@ -13,7 +13,9 @@ import {
   formatResetAt,
   formatResetClock,
   isExpired,
+  isStale,
   leftFromUsed,
+  oldestAgeSecs,
   readWindow,
   stateHead,
   statusLine,
@@ -97,6 +99,27 @@ describe('나이 · 오래됨 · 만료', () => {
     expect(readWindow(win({ age_secs: STALE_AFTER_SECS - 10 }), 11, NOW)).toMatchObject({ stale: true })
   })
 
+  it('isStale — 호박색(팝업 머리)과 흐림(작은 표시)이 같은 경계를 쓴다: 1800초는 평소 · 1801초는 오래됨', () => {
+    expect(isStale(STALE_AFTER_SECS)).toBe(false)
+    expect(isStale(STALE_AFTER_SECS + 1)).toBe(true)
+    expect(STALE_AFTER_SECS).toBe(1800)
+  })
+
+  it('가장 오래된 나이 — 값이 있는 창 가운데 최댓값 · 값 없음·만료 창은 세지 않는다 · 그런 창이 없으면 null', () => {
+    const at = (age: number) => readWindow(win({ age_secs: age }), 0, NOW)
+    expect(oldestAgeSecs([at(60), at(125)])).toBe(125)
+    expect(oldestAgeSecs([at(125), at(60)])).toBe(125)
+    // 한 창이 빠져도(값 없음) 남은 창의 나이다.
+    expect(oldestAgeSecs([at(60), readWindow(null, 0, NOW)])).toBe(60)
+    expect(oldestAgeSecs([readWindow(win({ used_pct: null, age_secs: 9_999 }), 0, NOW), at(30)])).toBe(30)
+    // 만료 창은 값을 들지 않는다.
+    expect(oldestAgeSecs([readWindow(win({ age_secs: 9_999, expired: true }), 0, NOW), at(30)])).toBe(30)
+    expect(oldestAgeSecs([readWindow(null, 0, NOW), readWindow(win({ used_pct: null }), 0, NOW)])).toBeNull()
+    expect(oldestAgeSecs([])).toBeNull()
+    // 받은 뒤 흐른 초가 든 나이다.
+    expect(oldestAgeSecs([readWindow(win({ age_secs: 100 }), 60, NOW)])).toBe(160)
+  })
+
   it('만료 = 데몬 래치 또는 리셋 시각이 지남(같은 순간 포함)', () => {
     expect(isExpired(win({ expired: true, resets_at: NOW + 999 }), NOW)).toBe(true)
     expect(isExpired(win({ resets_at: NOW }), NOW)).toBe(true)
@@ -166,7 +189,7 @@ describe('리셋 시각', () => {
     expect(formatResetAt(at(9, 30, 10, 0, 2027), at(9, 30, 9, 0))).toBe('9/30 10:00')
   })
 
-  it('작은 표시 = 「리셋 」 + 같은 규칙(창 종류와 무관 · ↻ 기호 없음)', () => {
+  it('리셋 시각의 이름(툴팁·보조기술) = 「리셋 」 + 같은 규칙 — 작은 표시·팝업 공통(창 종류와 무관 · ↻ 기호 없음)', () => {
     const now = at(9, 30, 22, 0)
     expect(formatResetClock(at(9, 30, 23, 58), now)).toBe('리셋 23:58')
     expect(formatResetClock(at(10, 1, 1, 48), now)).toBe('리셋 10/1 01:48')

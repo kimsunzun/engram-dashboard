@@ -157,9 +157,9 @@ export const ko = {
     statusLine: '{vendor} {sentence}',
     resetWaiting: '리셋됨 — 갱신 대기',
     resetWaitingShort: '리셋됨', // 숫자만 남는 폭 단계 전용.
-    resetClock: '리셋 {time}', // 작은 표시의 리셋 시각.
+    resetClock: '리셋 {time}', // 리셋 시각의 이름(툴팁·보조기술) — 보이는 자리엔 낱말 대신 모래시계가 선다.
     resetDateTime: '{month}/{day} {time}', // 오늘이 아닌 리셋 시각 — 요일 없이 날짜만.
-    resetsAtIn: '리셋 {time} ({duration} 뒤)',
+    resetIn: '({duration} 뒤)', // 팝업에서 리셋 시각 뒤에 붙는 남은 시간.
     durationMinutes: '{minutes}분',
     durationHours: '{hours}시간',
     durationHoursMinutes: '{hours}시간 {minutes}분',
@@ -172,7 +172,9 @@ export const ko = {
     stale: '{minutes}분 넘게 새로 들어오지 않은 값',
     refreshing: '갱신 중',
     refreshAll: '사용량 새로고침', // 작은 표시 ⟳ 의 이름 · `usageSlot.refresh` 제목.
+    refreshVendor: '{vendor} 사용량 새로고침', // 팝업 회사 머리의 ⟳.
     plan: '플랜: {plan}',
+    headSeparator: '·', // 팝업 회사 머리의 플랜과 나이 사이.
     link: '사용량 페이지 ↗',
     linkTitle: '{vendor} 사용량 설정 페이지를 브라우저로 엽니다 — {url}',
     meterLabel: '{vendor} {window} 남은 양',

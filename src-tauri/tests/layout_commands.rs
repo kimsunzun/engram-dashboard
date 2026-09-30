@@ -1220,7 +1220,7 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
         .expect("x");
     assert_eq!(left.x1, 0.3, "0.3 이 그대로 a(왼쪽) 칸의 몫이 된다");
 
-    for (asked, clamped) in [(1.5, 0.9), (-1.0, 0.1)] {
+    for (asked, clamped) in [(1.5, tree::RATIO_MAX), (-1.0, tree::RATIO_MIN)] {
         let ok = world
             .ask(
                 &receiver,
@@ -1243,12 +1243,15 @@ async fn set_ratio_writes_through_the_apply_service_and_clamps_out_of_range_valu
             &receiver,
             &queue,
             "split.setRatio",
-            json!({ "view_id": view.to_string(), "split_id": outer.to_string(), "ratio": 0.05 }),
+            json!({ "view_id": view.to_string(), "split_id": outer.to_string(), "ratio": 0.005 }),
         )
         .await
         .outcome
-        .expect("이미 0.1");
-    assert_eq!(ok, json!({ "ratio": 0.1, "outcome": "Unchanged" }));
+        .expect("이미 하한");
+    assert_eq!(
+        ok,
+        json!({ "ratio": tree::RATIO_MIN, "outcome": "Unchanged" })
+    );
 }
 
 #[tokio::test]

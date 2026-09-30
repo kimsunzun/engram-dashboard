@@ -77,6 +77,15 @@ export function isStale(ageSecs: number): boolean {
   return ageSecs > STALE_AFTER_SECS
 }
 
+/** 값이 있는 창 가운데 가장 오래된 나이(초) — 그런 창이 없으면 null. 만료 창은 값을 들지 않으므로 세지 않는다. */
+export function oldestAgeSecs(readings: WindowReading[]): number | null {
+  let oldest: number | null = null
+  for (const r of readings) {
+    if (r.kind === 'value' && (oldest === null || r.ageSecs > oldest)) oldest = r.ageSecs
+  }
+  return oldest
+}
+
 /** 데몬 래치(`expired`) 또는 리셋 시각이 지남(R32). */
 export function isExpired(win: UsageWindow, nowWallSecs: number): boolean {
   return win.expired || (win.resets_at !== null && win.resets_at <= nowWallSecs)
@@ -154,7 +163,7 @@ export function formatResetAt(epochSecs: number, nowWallSecs: number): string {
   return t('usage.resetDateTime', { month: String(at.getMonth() + 1), day: String(at.getDate()), time })
 }
 
-/** 작은 표시의 리셋 시각 — 남은 시간은 팝업에만 둔다. */
+/** 리셋 시각의 이름(툴팁·보조기술) — 보이는 자리엔 낱말 대신 모래시계가 선다(ADR-0259). */
 export function formatResetClock(epochSecs: number, nowWallSecs: number): string {
   return t('usage.resetClock', { time: formatResetAt(epochSecs, nowWallSecs) })
 }
