@@ -51,7 +51,7 @@ register({
   id: 'slot.fill.usage',
   title: t('slot.fillUsage'),
   category: 'slot',
-  // 두 회사를 켠 채로 놓는다 — 끄기는 팝업의 「슬롯에 표시」 줄이 `usageSlot.toggle*` 로 한다(ADR-0257).
+  // 두 회사를 켠 채로 놓는다 — 끄기는 팝업의 「슬롯에 표시」 줄이 `usageSlot.toggle*` 로 한다(ADR-0258).
   run: args => {
     const { viewId, slotId } = requireCoords(args, 'slot.fill.usage')
     return useViewStore

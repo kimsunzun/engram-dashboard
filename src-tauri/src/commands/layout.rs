@@ -451,7 +451,7 @@ pub fn set_slot_content(
 /// ★`set_slot_content` 로 온전한 content 를 보내 대신하지 말 것★ — 웹뷰가 들고 있는 content 는 방송이 닿기 전엔 낡아,
 /// 다른 칸을 옛 값으로 되돌린다(Codex 켬 직후의 Claude 끔이 Codex 를 도로 끈다). 읽기와 쓰기가 한 락 안인 것은
 /// 적용 서비스가 진다. 없는 view·slot 은 `Err`.
-// ADR-0257
+// ADR-0258
 #[tauri::command]
 pub fn set_usage_slot(
     app: AppHandle,

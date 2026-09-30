@@ -5,7 +5,7 @@
 // ★`help` 를 달지 않는다(TRD §3 #26)★ — 달면 버스에 올라 데몬의 `usage.refresh` 와 겹친다. 밖(LLM·CLI)의 길은 이미
 //   있다: 조회 = `usage.get`/`usage.refresh`, 표시 = `layout.setSlotContent` 의 show_* 칸. 창 안에서는
 //   `__engramCmd.run(id, {viewId, slotId, content})` 로 이 셋을 그대로 부른다.
-// ADR-0257
+// ADR-0258
 // ★표시 토글은 제 칸 하나만 쓴다★ — 부른 쪽이 준 슬롯 내용에서 그 칸을 뒤집은 절댓값 하나를 `set_usage_slot` 으로
 //   보내고, 다른 칸은 셸이 락 안에서 지금 값으로 지킨다. 두 칸을 다 지어 보내면(전량 교체) 방송 전에 연달은 다른 회사
 //   토글을 옛 값으로 되돌린다 — 웹뷰의 content 는 방송이 닿기 전엔 낡았다. 절댓값이라 방송 전에 같은 칸을 두 번

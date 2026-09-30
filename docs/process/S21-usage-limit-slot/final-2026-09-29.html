@@ -618,14 +618,14 @@
         <div class="chk-title">새로고침(⟳) 버튼 위치<span class="flag">설계서 이탈</span><span class="flag done">해결 · 2026-09-30</span></div>
         <div class="chk-body">팝업(회사별 카드마다 하나)과 우클릭 메뉴 두 곳에만 있습니다. 가장 좁은 3단계 화면에는 없습니다.</div>
         <div class="chk-why"><b>이유</b> — PRD(R12)는 「세 곳」을 요구했지만, 가장 좁은 표시에는 ⟳ 를 넣을 자리가 없어 뺐습니다.</div>
-        <div class="chk-now"><b>지금</b> — ⟳ 는 작은 표시의 버튼 하나로 바꿨고(팝업·우클릭 메뉴의 ⟳ 는 없앰, 2026-09-29 사용자 결정 · ADR-0257), 세 단계 모두에 있습니다. 3단계에서 ⟳ 가 내용과 멀리 떨어지던 문제는 <b>내용 바로 옆에 붙이는 것</b>으로 정해 반영했습니다(2026-09-30 사용자 결정). → <a href="#s0-preview">「작은 표시」</a></div>
+        <div class="chk-now"><b>지금</b> — ⟳ 는 작은 표시의 버튼 하나로 바꿨고(팝업·우클릭 메뉴의 ⟳ 는 없앰, 2026-09-29 사용자 결정 · ADR-0258 — 팝업의 회사별 ⟳ 는 2026-09-30 ADR-0259 로 되살림 · 구현 전), 세 단계 모두에 있습니다. 3단계에서 ⟳ 가 내용과 멀리 떨어지던 문제는 <b>내용 바로 옆에 붙이는 것</b>으로 정해 반영했습니다(2026-09-30 사용자 결정). → <a href="#s0-preview">「작은 표시」</a></div>
       </div>
       <div class="chk-row resolved">
         <div class="chk-n">03</div>
         <div class="chk-title">메뉴에서 회사 표시를 껐다 켤 때<span class="flag done">바뀜 · 2026-09-30</span></div>
         <div class="chk-body">슬롯 내용을 부분 수정하지 않고 <b>통째로 다시 그립니다</b>(전체 교체).</div>
         <div class="chk-why"><b>이유</b> — TRD 가 고른 방식입니다. 그 순간 LLM 이 같은 슬롯을 다른 용도로 바꾸고 있었다면 그 변경과 겹칠 수 있는데, 드문 경우라 받아들였습니다.</div>
-        <div class="chk-now"><b>지금</b> — 켜고 끄기는 팝업 맨 아래 「슬롯에 표시」로 옮겼고, 체크 하나는 <b>자기 회사 칸만</b> 셸에 보냅니다. 셸이 레이아웃 잠금 안에서 그 칸만 바꾸고 나머지는 지금 값을 지킵니다(새 셸 커맨드 <code>set_usage_slot</code>). 전체 교체를 버린 이유 = 두 체크를 빠르게 연달아 누르거나 LLM 이 동시에 쓰면 서로를 덮어서입니다(ADR-0257 · TRD §3 #102 ⑤). 반영 전에 같은 체크를 다시 누르면 두 번째 누름은 사실상 무시됩니다(현행 유지 — 사용자 결정 2026-09-30). → <a href="#s0-popup">「팝업」</a></div>
+        <div class="chk-now"><b>지금</b> — 켜고 끄기는 팝업 맨 아래 「슬롯에 표시」로 옮겼고, 체크 하나는 <b>자기 회사 칸만</b> 셸에 보냅니다. 셸이 레이아웃 잠금 안에서 그 칸만 바꾸고 나머지는 지금 값을 지킵니다(새 셸 커맨드 <code>set_usage_slot</code>). 전체 교체를 버린 이유 = 두 체크를 빠르게 연달아 누르거나 LLM 이 동시에 쓰면 서로를 덮어서입니다(ADR-0258 · TRD §3 #102 ⑤). 반영 전에 같은 체크를 다시 누르면 두 번째 누름은 사실상 무시됩니다(현행 유지 — 사용자 결정 2026-09-30). → <a href="#s0-popup">「팝업」</a></div>
       </div>
       <div class="chk-row resolved">
         <div class="chk-n">04</div>
@@ -689,7 +689,7 @@
         <div class="chk-title">메뉴 항목의 체크·활성 조건 — 새 스키마<span class="flag done">해당 없음 — 메뉴 항목 제거</span></div>
         <div class="chk-body">메뉴 항목에 체크 표시(<code>checked</code>)와 활성 조건 함수(<code>enabled(ctx)</code>)를 더했습니다 — ADR-0252.</div>
         <div class="chk-why"><b>이유</b> — 처음엔 기존 명령 조건식(<code>Command.when</code>)을 넓혀 쓰려 했지만, 그러면 사용자에게 값이 새는 경로가 생긴다는 리뷰 지적을 받아 되돌리고 이 방식으로 바꿨습니다.</div>
-        <div class="chk-now"><b>지금</b> — 슬롯 우클릭 메뉴의 사용량 항목이 전부 없어져(ADR-0257) 이 슬롯에서 확인할 것이 없습니다. 두 칸 자체는 공용 메뉴 기반에 쓰는 곳 없이 남아 있고, 걷을지는 뒤로 미뤘습니다(메인 결정 2026-09-29 · TRD §3 #102 ②).</div>
+        <div class="chk-now"><b>지금</b> — 슬롯 우클릭 메뉴의 사용량 항목이 전부 없어져(ADR-0258) 이 슬롯에서 확인할 것이 없습니다. 두 칸 자체는 공용 메뉴 기반에 쓰는 곳 없이 남아 있고, 걷을지는 뒤로 미뤘습니다(메인 결정 2026-09-29 · TRD §3 #102 ②).</div>
       </div>
       <div class="chk-row">
         <div class="chk-n">14</div>
@@ -779,7 +779,7 @@
       <summary>36개 커밋 펼치기</summary>
       <ul class="commit-list">
         <li><span class="h">5a12bfc</span><span class="m">docs(handoff): 사용량 슬롯 문서가 인용하는 인계 첨부 4건을 저장소에 추적</span></li>
-        <li><span class="h">37b6c9e</span><span class="m">docs: ⟳·켜고 끄기 재배치 결정 기록(ADR-0257) · PRD·TRD 개정 · 조사 3건 · 추적 항목 T-36~38 · step-log</span></li>
+        <li><span class="h">37b6c9e</span><span class="m">docs: ⟳·켜고 끄기 재배치 결정 기록(ADR-0257 — 현 ADR-0258) · PRD·TRD 개정 · 조사 3건 · 추적 항목 T-36~38 · step-log</span></li>
         <li><span class="h">d88dfee</span><span class="m">fix(front): ⟳ 를 모든 폭 단계에서 내용 바로 옆으로 — 새로 고치는 중에도 안 움직이고, 새로 고침 때문에 단계가 바뀌지 않음</span></li>
         <li><span class="h">910c214</span><span class="m">feat(usage): 새로고침·표시 켜고 끄기 재배치 — 작은 표시의 ⟳ 하나 · 팝업 「슬롯에 표시」 · 수동 30초 간격 제거 · 리셋 표기를 낱말 + 날짜로</span></li>
         <li><span class="h">6598291</span><span class="m">feat(front): 작은 표시 개편 — 회사 아이콘 · 한 격자 세로 정렬 · ⚠ 제거 · 남은 시간 대신 리셋 시각</span></li>

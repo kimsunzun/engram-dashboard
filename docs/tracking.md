@@ -336,7 +336,7 @@
 ### T-38. 사용량 한도 슬롯 ADR 열 건에 코드 앵커가 없다
 - **상태:** 착수 가능(미착수). 코드 주석 한 줄씩이라 동작은 바뀌지 않는다 — 단 소스가 바뀌므로 커밋 전 QA 는 돈다(CLAUDE.md 「구현 실행 규약」 인라인 예외).
 - **출처:** 사용량 한도 슬롯 브랜치(`v0.3.2/feat/usage-limit-slot`) 문서 리뷰 후속(2026-09-30).
-- **무엇이 문제인가:** CLAUDE.md 「설계 결정 기록」은 load-bearing 코드에 `// ADR-NNNN` 앵커를 달게 한다(다음 세션의 발견 표면 둘 중 하나). 이 브랜치의 ADR 열두 건(0246–0257) 가운데 코드에서 `rg "ADR-02(4[6-9]|5[0-9])"` 로 잡히는 것은 **0252 · 0257 둘뿐**이다(HEAD `910c214` 실측 — 0252 는 `LayoutLeaf.tsx` 의 문서 주석 한 곳 + 테스트 둘). 0246–0251 · 0253–0256 열 건은 코드 쪽 발견 표면이 없다.
+- **무엇이 문제인가:** CLAUDE.md 「설계 결정 기록」은 load-bearing 코드에 `// ADR-NNNN` 앵커를 달게 한다(다음 세션의 발견 표면 둘 중 하나). 이 브랜치의 ADR 열두 건(0246–0256 · 0258) 가운데 코드에서 `rg "ADR-02(4[6-9]|5[0-9])"` 로 잡히는 것은 **0252 · 0257 둘뿐**이다(HEAD `910c214` 실측 · 옛 0257 = 현 0258 — 0252 는 `LayoutLeaf.tsx` 의 문서 주석 한 곳 + 테스트 둘). 0246–0251 · 0253–0256 열 건은 코드 쪽 발견 표면이 없다.
 - **앵커 후보(각 ADR 이 묶는 자리 — 달기 전에 다시 잴 것):** 0246 = backend 등록부 `usage_probes`/`usage_probe_for`(`crates/engram-dashboard-agent/src/backend/mod.rs`) · 0247 = `OutputDecoder::take_usage`(`transport/mod.rs`) · pump drain 자리 · daemon `usage_service/observe.rs` · 0248 = `backend/claude/usage_probe.rs` · 0249 = `usage/process.rs` · daemon 조회 스레드 기동 · 0250 = daemon `usage_service/clock.rs` · `reject_store.rs` · 0251 = agent `commands.rs` 의 usage 블록 · daemon `usage_service/bus.rs` · 0253 = protocol `UsageLimitsUpdated` · `book.rs` 의 revision · 0254 = `src-tauri/src/daemon_client/usage_interest.rs` · daemon `usage_service/watch.rs`·`schedule.rs` · 0255 = agent `usage/detail.rs`·`usage/text.rs` · protocol `UsageStateDetail` · 0256 = `book.rs` 의 병합.
 - **할 것:** 위 자리마다 앵커 한 줄 → `/adr lint`(앵커 고아 검사) → 커밋 전 QA.
 
@@ -347,7 +347,7 @@
 
 ### T-36. 반영 전 재입력 — 앱 전체 공용 처리
 - **상태:** 후속 주제(사용자 결정 2026-09-30: 사용량 슬롯 브랜치는 현행 유지, 공용 처리는 후속).
-- **출처:** 사용량 슬롯 팝업 체크박스 리뷰(ADR-0257 · `docs/process/S21-usage-limit-slot/trd.md` §3 #102 ⑤).
+- **출처:** 사용량 슬롯 팝업 체크박스 리뷰(ADR-0258 · `docs/process/S21-usage-limit-slot/trd.md` §3 #102 ⑤).
 - **내용:** 반영(echo) 전에 다시 들어온 입력을 앱 전체에서 어떻게 다룰지 — 같은 칸 체크박스 재클릭뿐 아니라 중복 효과(탭 `+` 두 번 · 같은 슬롯 분할 두 번 · 에이전트 종료·생성 · LLM `spawn_into` 동시 호출의 중복 생성)와 옛 값에서 계산한 상대 조작(Ctrl+Tab 두 번 = 한 칸)까지 — 실태·선례·선택지 = `docs/research/pre-echo-reinput-2026-09-30.md`.
 
 ### T-35. 재연결 타이밍 테스트가 간헐적으로 깨진다 (ADR-0195 결함과 별건)

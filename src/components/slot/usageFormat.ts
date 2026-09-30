@@ -142,7 +142,7 @@ function sameLocalDay(a: Date, b: Date): boolean {
   return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
 }
 
-// ADR-0257: 오늘이 아닌 리셋은 요일 대신 날짜.
+// ADR-0258: 오늘이 아닌 리셋은 요일 대신 날짜.
 /**
  * 리셋 시각(사용자 결정 2026-09-29) — 지금과 같은 로컬 날짜면 「HH:MM」, 아니면 「M/D HH:MM」(요일 없음 · 월·일 0 채움
  * 없음). 작은 표시와 팝업이 같은 규칙을 쓴다.
