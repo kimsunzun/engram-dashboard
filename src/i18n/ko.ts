@@ -161,6 +161,8 @@ export const ko = {
     toolGroupErrors: '오류 {count}',
     // ADR-0241: 거부는 오류 키에 합치지 않고 따로 둔다 — 실행되지 않은 호출과 실패한 호출은 다른 사실이다.
     toolGroupDeclined: '거부 {count}',
+    // ADR-0263: 도는 묶음 머리의 진행형 — 끝나면 빠지고 종류별 수만 남는 것이 과거형이다.
+    toolGroupRunning: '진행 중…',
     toolDeclined: '거부됨', // 배지 — 두 결말(Refused · Declined)이 같이 쓴다.
     // ADR-0241: 사유는 결말별로 갈린다. Refused = 대시보드가 거절했다고 귀속된 호출 · Declined = 우리에게
     //   귀속되지 않은 거부(백엔드 스스로의 거부, 또는 복원되거나 밀려난 파일 변경 거절). Declined 문구에 백엔드

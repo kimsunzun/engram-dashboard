@@ -42,9 +42,10 @@ describe('chat.toolGroup.setExpanded', () => {
 
   it('그 슬롯의 그 묶음 펼침을 고르고 { expanded } 를 돌려준다 — 두 방향', () => {
     expect(run(ID, { slotId: 's1', groupKey: 'tool:call_1', expanded: true })).toEqual({ expanded: true })
-    expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'tool:call_1', false)).toBe(true)
+    expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'tool:call_1')).toBe(true)
     expect(run(ID, { slotId: 's1', groupKey: 'item:7', expanded: false })).toEqual({ expanded: false })
-    expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'item:7', true)).toBe(false)
+    expect(effectiveOpen(useToolGroupStore.getState(), 's1', 'item:7')).toBe(false)
+    expect(bySlot().s1.open).toEqual({ 'tool:call_1': true, 'item:7': false }) // 접힘도 고른 값으로 적힌다.
   })
 
   it('여분 칸(viewId 등)이 섞인 가방도 그대로 통과한다', () => {

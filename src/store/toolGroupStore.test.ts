@@ -5,30 +5,30 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { effectiveOpen, useToolGroupStore } from './toolGroupStore'
 
 const store = () => useToolGroupStore.getState()
-const openOf = (slotId: string, key: string, live: boolean) => effectiveOpen(store(), slotId, key, live)
+const openOf = (slotId: string, key: string) => effectiveOpen(store(), slotId, key)
 
 // zustand 싱글톤이라 시험 간 격리.
 beforeEach(() => useToolGroupStore.setState({ bySlot: {} }))
 
 describe('toolGroupStore', () => {
-  it('고른 값이 없으면 자동 규칙(live) 그대로', () => {
+  it('고른 값이 없으면 접힘', () => {
     store().bind('s1', 'a1')
-    expect([openOf('s1', 'tool:x', true), openOf('s1', 'tool:x', false)]).toEqual([true, false])
+    expect(openOf('s1', 'tool:x')).toBe(false)
   })
 
-  it('고른 값이 자동 규칙을 두 방향 다 이긴다', () => {
+  it('고른 값이 두 방향 다 그대로 선다', () => {
     store().bind('s1', 'a1')
     expect(store().setOpen('s1', 'tool:x', true)).toBe(true)
     expect(store().setOpen('s1', 'tool:y', false)).toBe(true)
-    expect(openOf('s1', 'tool:x', false)).toBe(true)
-    expect(openOf('s1', 'tool:y', true)).toBe(false)
+    expect(openOf('s1', 'tool:x')).toBe(true)
+    expect(openOf('s1', 'tool:y')).toBe(false)
   })
 
   it('슬롯마다 따로다', () => {
     store().bind('s1', 'a1')
     store().bind('s2', 'a1')
     store().setOpen('s1', 'tool:x', true)
-    expect(openOf('s2', 'tool:x', false)).toBe(false)
+    expect(openOf('s2', 'tool:x')).toBe(false)
   })
 
   it('한 번도 묶이지 않은 슬롯의 setOpen 은 false 를 돌려주고 아무것도 적지 않는다', () => {
@@ -36,10 +36,10 @@ describe('toolGroupStore', () => {
     expect(store().bySlot).toEqual({})
   })
 
-  it('slotId 가 없으면 자동 규칙만 쓴다', () => {
+  it('slotId 가 없으면 고른 값을 안 읽고 늘 접힘', () => {
     store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
-    expect(effectiveOpen(store(), undefined, 'tool:x', false)).toBe(false)
+    expect(effectiveOpen(store(), undefined, 'tool:x')).toBe(false)
   })
 
   it('해제 뒤 setOpen 은 false — 고른 값은 남고, 같은 에이전트로 다시 마운트하면 그대로 붙는다', () => {
@@ -49,7 +49,7 @@ describe('toolGroupStore', () => {
     expect(store().setOpen('s1', 'tool:y', true)).toBe(false)
     expect(store().bySlot.s1.open).toEqual({ 'tool:x': true })
     store().bind('s1', 'a1')
-    expect(openOf('s1', 'tool:x', false)).toBe(true)
+    expect(openOf('s1', 'tool:x')).toBe(true)
     expect(store().setOpen('s1', 'tool:y', true)).toBe(true)
   })
 
@@ -75,7 +75,7 @@ describe('toolGroupStore', () => {
     store().bind('s1', 'a1')
     store().setOpen('s1', 'tool:x', true)
     store().bind('s1', 'a1')
-    expect(openOf('s1', 'tool:x', false)).toBe(true)
+    expect(openOf('s1', 'tool:x')).toBe(true)
   })
 
   it('다른 에이전트로 bind 하면 그 슬롯 칸을 비운다 — 해제된 칸이어도', () => {
@@ -84,7 +84,7 @@ describe('toolGroupStore', () => {
     release()
     store().bind('s1', 'a2')
     expect(store().bySlot.s1).toMatchObject({ agentId: 'a2', open: {} })
-    expect(openOf('s1', 'tool:x', false)).toBe(false)
+    expect(openOf('s1', 'tool:x')).toBe(false)
   })
 
   it('clear 는 고른 값만 비우고 묶임은 남긴다 — 뒤 setOpen 이 그대로 먹힌다', () => {
@@ -115,8 +115,8 @@ describe('toolGroupStore', () => {
 
   it('프로토타입 이름(슬롯 id · 키)을 칸으로 읽지 않는다', () => {
     expect(store().setOpen('constructor', 'tool:x', true)).toBe(false)
-    expect(openOf('toString', 'tool:x', false)).toBe(false)
+    expect(openOf('toString', 'tool:x')).toBe(false)
     store().bind('s1', 'a1')
-    expect(openOf('s1', 'constructor', true)).toBe(true)
+    expect(openOf('s1', 'constructor')).toBe(false)
   })
 })

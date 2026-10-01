@@ -9,7 +9,7 @@ import { ChevronDown, ChevronRight, Layers } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { t } from '../../../i18n'
-import { effectiveOpen, useToolGroupStore } from '../../../store/toolGroupStore'
+import { chosenOpen, useToolGroupStore } from '../../../store/toolGroupStore'
 import type { StructuredItem } from '../structuredAccumulator'
 import { ChatRow } from './ChatRow'
 import type { RailRunPosition } from './railPositions'
@@ -30,9 +30,9 @@ export interface ToolGroupRowProps {
   runPos: RailRunPosition | undefined
   /** 이 묶음이 목록의 마지막 묶음인가 — `onGroupToggle` 에 그대로 실린다. */
   isLast: boolean
-  /** 펼쳤을 때 멤버 한 줄 — 레일 없는 행 컴포넌트를 돌려준다. */
+  /** 머리 밑 멤버 한 줄(펼쳤을 때 · 도는 동안의 마지막 호출) — 레일 없는 행 컴포넌트를 돌려준다. */
   renderMember: (item: StructuredItem) => ReactNode
-  /** 펼침 상태의 슬롯 — 없으면 자동 규칙(`row.live`)만 쓰고 머리를 눌러도 바뀌지 않는다. */
+  /** 펼침 상태의 슬롯 — 없으면 고른 값이 없는 묶음으로 그리고 머리를 눌러도 바뀌지 않는다. */
   slotId?: string
   /** 사람이 머리를 눌러 펼쳤다 — 접을 때와 command 로 바뀔 때는 부르지 않는다. */
   onGroupToggle?: (isLast: boolean) => void
@@ -51,8 +51,11 @@ export function ToolGroupRow({
   slotId,
   onGroupToggle,
 }: ToolGroupRowProps) {
-  // ADR-0239: 고른 값이 있으면 그것, 없으면 자동 규칙 — 도는 턴의 마지막 묶음은 펼치고 그 뒤에 글이 오면 접는다.
-  const open = useToolGroupStore((s) => effectiveOpen(s, slotId, row.key, row.live))
+  const chosen = useToolGroupStore((s) => chosenOpen(s, slotId, row.key))
+  const open = chosen ?? false
+  // ADR-0263 결정 1: 고른 값이 없으면 도는 동안 지금 도는 호출(마지막 호출) 한 줄을 머리 밑에 두고, 끝나면 머리만 남긴다.
+  //   고른 값은 양방향으로 이긴다 — 도는 중에 접으면 그 한 줄도 없다.
+  const shown = open ? row.members : chosen === undefined && row.live ? row.calls.slice(-1) : []
   // ADR-0241: 요약 셈은 펼친 행 배지와 같은 판정(`toolCallVerdict`)이다 — 거부는 오류 수에 안 든다.
   const parts = summaryParts(summarizeGroup(row.calls, vendorErrorIds, DECLINED_MARK))
   const toggle = () => {
@@ -71,6 +74,7 @@ export function ToolGroupRow({
         data-tool-group={row.key}
         data-tool-group-open={open ? '1' : '0'}
         data-tool-group-count={row.calls.length}
+        data-tool-group-live={row.live ? '1' : '0'}
       >
         <button
           type="button"
@@ -101,10 +105,14 @@ export function ToolGroupRow({
               </Fragment>
             ))}
           </span>
+          {/* ADR-0263: 진행형 표시는 `live` 가 정한다. 요약 칸 밖에 두어 좁은 폭에서 잘리는 쪽은 요약이다. */}
+          {row.live && (
+            <span className="flex-none animate-pulse text-muted">{t('chat.toolGroupRunning')}</span>
+          )}
         </button>
-        {open && (
+        {shown.length > 0 && (
           <div className="mt-1 border-l border-border pl-3">
-            {row.members.map((item) => (
+            {shown.map((item) => (
               <div key={item.itemId} style={{ paddingTop: 'var(--chat-rail-row-pt)' }}>
                 {renderMember(item)}
               </div>

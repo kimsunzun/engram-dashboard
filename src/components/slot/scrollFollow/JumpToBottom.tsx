@@ -44,7 +44,8 @@ export function JumpToBottom({
         follow.pin()
         keepFocusInSlot(e.currentTarget)
       }}
-      // bottom-7 · 가운데 — RichSlot 의 이름 라벨(입력 묶음 위로 20px · 오른쪽에서 최대 70% 폭)이 영역 바닥을 덮는다.
+      // bottom-7 · 가운데 — 옛 이름 라벨이 영역 바닥을 덮던 때 정한 높이다. 라벨은 이제 영역 밖 대기 줄(WaitStrip)에 서서
+      //   덮지 않는다 — 버튼을 내릴지는 보이는 변화라 사용자 몫으로 남겼다(2026-10-01).
       className="absolute bottom-7 left-1/2 z-10 -translate-x-1/2 rounded-full border border-border bg-surface p-1 text-muted shadow-sm hover:text-foreground"
     >
       <ChevronDown className="size-4" />

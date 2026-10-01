@@ -32,7 +32,8 @@ export const DECLINED_MARK: DeclinedMarkMode = 'own'
  *   처음부터 되감는 replay 뒤에도. ★링에서 밀려난 뒤 시작하는 재구독 replay 는 사건열이 다르다★ — `itemId` 가 앞당겨져
  *   `item:` 키가 바뀌고, 묶음 머리 호출이 밀려나면 `tool:` 키도 바뀐다. 그 묶음의 고른 펼침은 잃는다 — ★그리고 스토어는
  *   재구독에 비워지지 않으므로 앞당겨진 `item:<n>` 이 **다른** 묶음의 키와 겹치면 그 묶음이 옛 묶음의 펼침을 물려받는다★.
- * - `live` = 턴이 열려 있고 이 묶음 뒤에 그리는 항목이 생각뿐이다 — 고른 값이 없으면 이 값대로 펼친다.
+ * - `live` = 턴이 열려 있고 이 묶음 뒤에 그리는 항목이 생각뿐이다 — 머리가 진행형이고, 고른 펼침이 없으면 마지막 호출 한
+ *   줄이 머리 밑에 보인다(ADR-0263 결정 1).
  */
 export type DisplayRow =
   | { kind: 'item'; item: StructuredItem }
@@ -98,7 +99,8 @@ export function groupToolRuns(
       i += 1
       continue
     }
-    // ADR-0239: 뒤에 생각이 왔다고 접지 않는다 — 그 뒤에 도구가 이어지면 다시 펼쳐지는 깜빡임이 된다.
+    // ADR-0239: 뒤에 생각이 왔다고 끝난 것으로 보지 않는다 — 그 뒤에 도구가 이어지면 진행형 표시와 마지막 호출 줄이 꺼졌다
+    //   켜지는 깜빡임이 된다.
     const live = turnOpen && j === items.length
     rows.push({ kind: 'toolGroup', key: groupKeyOf(first, usedKeys), members, calls, live })
     i = lastCall + 1

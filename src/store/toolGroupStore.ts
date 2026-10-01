@@ -1,4 +1,4 @@
-// ADR-0239: 채팅 도구 묶음의 펼침 상태 — 슬롯마다 사람 · LLM 이 고른 값만 담는다(고르지 않은 묶음은 자동 규칙).
+// ADR-0239: 채팅 도구 묶음의 펼침 상태 — 슬롯마다 사람 · LLM 이 고른 값만 담는다(고르지 않은 묶음은 접힌다).
 //   프론트 전용 · 인메모리라 웹뷰 새로고침에 초기화된다(레이아웃과 같은 수준 — CLAUDE.md 「LLM-우선 제어」).
 //   ★재구독 · replay 는 지우지 않는다★ — 묶음 키가 replay 뒤에도 같아서(`components/slot/chat/toolRuns.ts`) 고른 값이
 //   그대로 다시 붙는다. 비우는 것은 에이전트가 바뀔 때(`bind`)와 새 화신으로 대화가 비워질 때(`clear`)뿐이다.
@@ -11,7 +11,7 @@
 import { create } from 'zustand'
 
 /**
- * 한 슬롯의 칸 — `open` = 묶음 키 → 고른 펼침(키가 없으면 그 묶음은 자동 규칙) · `mount` = 지금 묶임의 표식(`null` =
+ * 한 슬롯의 칸 — `open` = 묶음 키 → 고른 펼침(키가 없으면 그 묶음은 접힌다) · `mount` = 지금 묶임의 표식(`null` =
  * 마운트되지 않음 — 고른 값은 남아 다시 마운트될 때 그대로 붙는다).
  */
 export interface ToolGroupSlot {
@@ -45,20 +45,22 @@ function own<T>(record: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(record, key) ? record[key] : undefined
 }
 
-/**
- * 묶음이 지금 펼쳐져 있나 — 고른 값이 있으면 그것, 없으면 `live`(자동 규칙). 고른 값이 자동 펼침 · 자동 접힘을 둘
- * 다 이긴다. `slotId` 가 없으면 자동 규칙만 쓴다.
- */
-export function effectiveOpen(
+/** 사람 · LLM 이 고른 펼침 — `undefined` = 고른 값이 없다(`slotId` 가 없을 때도). */
+export function chosenOpen(
   state: Pick<ToolGroupState, 'bySlot'>,
   slotId: string | undefined,
   key: string,
-  live: boolean,
-): boolean {
-  if (slotId === undefined) return live
+): boolean | undefined {
+  if (slotId === undefined) return undefined
   const slot = own(state.bySlot, slotId)
-  const chosen = slot === undefined ? undefined : own(slot.open, key)
-  return chosen ?? live
+  return slot === undefined ? undefined : own(slot.open, key)
+}
+
+/** 묶음이 지금 다 펼쳐져 있나 — 고른 값이 있으면 그것(펼침 · 접힘 둘 다), 없으면 접힘. */
+export function effectiveOpen(state: Pick<ToolGroupState, 'bySlot'>, slotId: string | undefined, key: string): boolean {
+  // ADR-0263 결정 1: 도는 묶음도 통째로 펼치지 않는다(Claude Code 관례) — 고른 값이 없으면 도는 동안 마지막 호출 한 줄만
+  //   보인다(`ToolGroupRow`). ★도는 꼬리 묶음을 통째로 자동 펼치지 말 것★ — 턴이 끝나는 순간 접히며 그 높이만큼 대화가 튄다.
+  return chosenOpen(state, slotId, key) ?? false
 }
 
 // 묶임마다 새 표식 — 해제 함수가 자기 묶임일 때만 풀게 한다(StrictMode 의 마운트 · 정리 · 마운트, 늦은 정리).

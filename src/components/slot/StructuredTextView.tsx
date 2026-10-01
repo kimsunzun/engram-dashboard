@@ -39,7 +39,6 @@ import {
 } from './structuredAccumulator'
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
-import { WaitRow } from './chat/WaitRow'
 // ADR-0053 구조 분할: 이 파일은 dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계).
 import { ChatRow } from './chat/ChatRow'
 import {
@@ -648,45 +647,38 @@ export function StructuredTextView({
   streaming = false,
   slotId,
   onGroupToggle,
-  interrupting = false,
 }: {
   items: StructuredItem[]
   streaming?: boolean
-  /** 도구 묶음 펼침 상태를 둘 슬롯(`store/toolGroupStore.ts`) — 없으면 묶음은 자동 규칙으로만 펼치고 접힌다. */
+  /** 도구 묶음 펼침 상태를 둘 슬롯(`store/toolGroupStore.ts`) — 없으면 묶음은 고른 값 없이 그리고 머리를 눌러도 바뀌지 않는다. */
   slotId?: string
   /**
    * 사람이 도구 묶음 머리를 눌러 펼쳤다 — 접을 때는 부르지 않는다. `isLast` = 그 묶음이 목록의 마지막 묶음인가.
    * TRD S21-chat-ux §4-5: 마지막이 아닌 묶음을 펼치면 바닥 따라가기를 푼다(붙은 채면 누른 머리가 화면 위로 밀려난다).
    */
   onGroupToggle?: (isLast: boolean) => void
-  /**
-   * 끊기를 보내고 그 턴이 끝나기를 기다린다 — 대기 꼬리가 「중단하는 중」을 그린다(ADR-0244). `streaming` 이 아니면 그릴
-   * 꼬리가 없어 읽지 않는다.
-   */
-  interrupting?: boolean
 }) {
   const results = buildToolResultMap(items)
   // ADR-0241: 벤더 오류 id 는 한 렌더에 한 번 짓고 모든 묶음의 요약이 나눠 쓴다.
   const vendorErrorIds = vendorErrorIdsOf(results)
   // ADR-0239: 묶기는 렌더 중 파생이다 — 누산기도 백엔드도 묶음을 만들지 않고, 펼침 상태는 `ToolGroupRow` 가 읽는다.
   const rows = groupToolRuns(items, streaming, rowKindOf)
-  // ★showTail = streaming★: 콘텐츠 유무 게이트 없이 streaming 이면 곧바로 대기 인디케이터(WaitRow)를 붙인다 —
-  //   전송 즉시(awaiting=true, items 아직 빔) 인디케이터가 뜬다("첫 바이트 전엔 무표시" 갭 제거). fresh/idle
-  //   슬롯 오작동은 상류 streaming 파생(awaiting || (!turnDone && items.length>0), RichSlot FIX 5)이 이미
-  //   막으므로(never-sent 슬롯 = streaming=false) 여기서 재게이트 불필요.
-  const showTail = streaming
   // ADR-0051: rail run 위치를 순수 계산으로 미리 뽑는다(렌더 중 파생 — state/effect 아님, ADR-0050 순수성
-  //   유지). streaming tail(WaitRow)도 마지막 assistant 행으로 함께 계산해, 직전 실 행이 tail 과 연결선으로
-  //   이어지게 한다(tail 이 없으면 bottom/single 로 clean-end). ★항목이 아니라 행 목록으로 센다★ — 묶음은
-  //   레일 한 행(assistant)이고 멤버는 레일을 그리지 않는다.
+  //   유지). ★항목이 아니라 행 목록으로 센다★ — 묶음은 레일 한 행(assistant)이고 멤버는 레일을 그리지 않는다.
   const kinds = rows.map((row) => (row.kind === 'toolGroup' ? 'assistant' : rowKindOf(row.item)))
-  if (showTail) kinds.push('assistant')
   const positions = computeRailRunPositions(kinds)
-  const tailPos = showTail ? (positions[positions.length - 1] ?? 'single') : 'single'
   let lastGroup = -1
+  let lastDrawn = -1
   rows.forEach((row, i) => {
     if (row.kind === 'toolGroup') lastGroup = i
+    if (kinds[i] !== 'skip') lastDrawn = i
   })
+  const lastRow = lastDrawn >= 0 ? rows[lastDrawn] : undefined
+  // 마지막 행 아래 여백 — 턴 구분선(h-3)이 끝이면 그것이 여백이고, 아니면 같은 높이의 빈 블록을 둔다. 턴이 끝나 구분선이
+  //   붙는 순간 이 블록과 자리를 바꿀 뿐 목록 높이는 그대로다. ★패딩이 아니라 실제 높이 블록★: Radix ScrollArea 의
+  //   display:table 래퍼가 마지막 요소의 하단 패딩을 scrollHeight 에 안 넣어, 바닥에 붙어 따라가는 동안(ADR-0242) 패딩은
+  //   뷰포트 밖으로 밀려 안 보인다(실측 2026-07-08).
+  const bottomSpacer = lastRow !== undefined && !(lastRow.kind === 'item' && lastRow.item.kind === 'separator')
   const renderMember = (item: StructuredItem) => renderGroupMember(item, results)
   return (
     // 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
@@ -711,23 +703,7 @@ export function StructuredTextView({
           />
         ),
       )}
-      {showTail && (
-        // 구 "Thinking…" pulse 라벨을 임시 "Wait + 점 + 경과 초" 로 대체(임시·추후 재설계 — WaitRow 헤더 참조).
-        //   ★FIX 3(안정 key)★: key="__streaming__" — 없으면 streaming 토글/리렌더 시 직전 실 item 이 이 행과
-        //   자리 매칭돼 remount 되며 WaitRow 타이머(경과 초)가 턴 도중 리셋된다. 리스트 밖 고정 노드라 상수
-        //   key 로 정체성을 못박는다(변경 금지).
-        <ChatRow key="__streaming__" rail runPos={tailPos}>
-          <WaitRow interrupting={interrupting} />
-        </ChatRow>
-      )}
-      {showTail && (
-        // 대기 tail 하단 여백 — 일반 메시지는 턴 종료 시 뒤에 깔리는 separator(h-3)로 입력창과 간격이 생기지만,
-        //   awaiting Wait 은 아직 turnDone 이 아니라(응답 대기) separator 가 없어 입력창에 딱 붙는다. 같은 높이의
-        //   빈 스페이서로 일반 메시지와 동일한 하단 간격(12px)을 준다. ★패딩이 아니라 실제 높이 블록★: Radix
-        //   ScrollArea 의 display:table 래퍼가 마지막 요소의 하단 패딩을 scrollHeight 에 안 넣어, 바닥에 붙어
-        //   따라가는 동안(ADR-0242) 패딩은 뷰포트 밖으로 밀려 안 보인다. 높이 가진 블록은 표가 세므로 정상 반영된다.
-        <div aria-hidden className="h-3" />
-      )}
+      {bottomSpacer && <div aria-hidden data-chat-bottom-spacer="1" className="h-3" />}
     </div>
   )
 }

@@ -168,13 +168,13 @@ describe('groupToolRuns — 묶음 짓기', () => {
   })
 })
 
-describe('groupToolRuns — live(자동 펼침)', () => {
+describe('groupToolRuns — live(도는 중 — 머리 시제)', () => {
   it('턴 중 · 묶음이 꼬리면 live', () => {
     const rows = groupToolRuns([text('go'), tool('a'), tool('b')], true, rowKind)
     expect(groupsOf(rows)[0].live).toBe(true)
   })
 
-  it('턴 중 · 뒤가 생각 · 그리지 않는 행뿐이면 live 그대로 — 생각이 왔다고 접지 않는다', () => {
+  it('턴 중 · 뒤가 생각 · 그리지 않는 행뿐이면 live 그대로 — 생각이 왔다고 끝난 것으로 보지 않는다', () => {
     const rows = groupToolRuns([tool('a'), tool('b'), thought('hmm'), usage(), thought('  ')], true, rowKind)
     expect(groupsOf(rows)[0].live).toBe(true)
   })
@@ -189,7 +189,7 @@ describe('groupToolRuns — live(자동 펼침)', () => {
     expect(groupsOf(rows)[0].live).toBe(false)
   })
 
-  it('꼬리 묶음만 live — 앞 묶음은 접힌다', () => {
+  it('꼬리 묶음만 live — 앞 묶음은 끝난 것이다', () => {
     const rows = groupToolRuns([tool('a'), tool('b'), text('x'), tool('c'), tool('d')], true, rowKind)
     expect(groupsOf(rows).map(g => g.live)).toEqual([false, true])
   })

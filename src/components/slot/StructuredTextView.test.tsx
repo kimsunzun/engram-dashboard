@@ -1,7 +1,7 @@
 // ADR-0050: 결정적 어댑터 동작(매핑·흡수·필터)을 검증하고, leaf 내부 렌더(chat/*)는 스모크 수준만 본다
 //   (react-markdown 등 세부는 leaf 자체 테스트의 몫).
 
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
@@ -221,44 +221,57 @@ describe('StructuredTextView dispatch (ADR-0050)', () => {
     expect(spacer?.className).toContain('h-3')
   })
 
-  it('streaming=true 면 스트림 끝에 대기 인디케이터(WaitRow "Wait" 라벨)를 붙인다', () => {
+  // 사용자 결정 2026-10-01: 대기 표시는 목록 밖 입력창 위 줄(RichSlot · `chat/WaitRow.tsx`)의 몫이다.
+  it('streaming 이어도 목록 안에 대기 표시를 그리지 않고, 마지막 행이 그쪽으로 레일을 잇지 않는다', () => {
     const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
-    render(<StructuredTextView items={items} streaming />)
-    // 경과 초는 타이머 flakiness 회피로 단언 안 함.
-    expect(screen.getByText('Wait')).toBeTruthy()
-  })
-
-  it('streaming=true 면 items 가 비어도 대기 인디케이터를 즉시 보여준다(showTail = streaming)', () => {
-    const { container } = render(<StructuredTextView items={[]} streaming />)
-    expect(screen.getByText('Wait')).toBeTruthy()
-    // rail 경로 크래시 없음: kinds=['assistant'] → single, tailPos='single'(연결선 없음).
-    expect(container.querySelector('.relative.flex.px-4')).toBeTruthy()
-    expect(container.querySelector('.w-px.bg-border')).toBeNull()
-  })
-
-  it('streaming=false(기본)면 대기 인디케이터가 없다', () => {
-    const items: StructuredItem[] = [{ kind: 'text', text: 'done', itemId: 0 }]
-    render(<StructuredTextView items={items} />)
+    const { container } = render(<StructuredTextView items={items} streaming />)
     expect(screen.queryByText('Wait')).toBeNull()
+    expect(container.querySelector('[data-wait-strip]')).toBeNull()
+    expect(container.querySelector('.w-px.bg-border')).toBeNull() // 한 행 = single — 연결선 없음
   })
 
-  // ★오류 행 뒤에도 대기 인디케이터가 붙는다★: `Error` 는 턴 경계가 아니라 재시도 가능한 스트림 오류일
-  //   수 있어(그쪽 누산기 arm), 마지막 item 이 오류여도 턴은 열린 채일 수 있다. 오류를 「끝」으로 읽어
-  //   여기서 tail 을 잠그면 상류가 고친 깜빡임이 이 층에서 되살아난다.
-  it('마지막 item 이 error 여도 streaming 이면 대기 인디케이터가 붙는다', () => {
+  // ── 마지막 행 아래 여백 — 턴 구분선과 같은 높이(h-3) 블록이 정확히 하나 ──────────────────────
+  const bottomSpacers = (c: HTMLElement) => c.querySelectorAll('[data-chat-bottom-spacer]')
+  const lastChildClass = (c: HTMLElement) => (c.firstElementChild as HTMLElement).lastElementChild?.className ?? ''
+
+  it('끝이 턴 구분선이 아니면 여백 블록(h-3)을 하나 붙인다 — 오류 · 모르는 사건 행이 끝이어도', () => {
+    for (const last of [
+      { kind: 'text', text: 'working', itemId: 1 },
+      { kind: 'error', message: 'overloaded [willRetry]', itemId: 1 },
+      { kind: 'unsupported', count: 2, itemId: 1 },
+    ] as StructuredItem[]) {
+      const { container } = render(<StructuredTextView items={[{ kind: 'text', text: 'a', itemId: 0 }, last]} streaming />)
+      expect(bottomSpacers(container)).toHaveLength(1)
+      expect(lastChildClass(container)).toContain('h-3')
+      cleanup()
+    }
+  })
+
+  it('끝이 턴 구분선이면(뒤에 그리지 않는 행만 있어도) 여백 블록을 따로 두지 않는다', () => {
     const items: StructuredItem[] = [
-      { kind: 'text', text: 'working', itemId: 0 },
-      { kind: 'error', message: 'overloaded (serverOverloaded) [willRetry]', itemId: 1 },
+      { kind: 'text', text: 'done', itemId: 0 },
+      { kind: 'separator', itemId: 1 },
+      { kind: 'usage', inputTokens: 2, outputTokens: 5, itemId: 2 },
     ]
-    render(<StructuredTextView items={items} streaming />)
-    expect(screen.getByText('Wait')).toBeTruthy()
+    const { container } = render(<StructuredTextView items={items} />)
+    expect(bottomSpacers(container)).toHaveLength(0)
+    expect(container.querySelectorAll('div[aria-hidden].h-3')).toHaveLength(1)
   })
 
-  // 모르는 이벤트 표식도 같다 — 그 행이 떴다는 것이 「턴이 끝났다」는 뜻은 아니다.
-  it('마지막 item 이 unsupported 여도 streaming 이면 대기 인디케이터가 붙는다', () => {
-    const items: StructuredItem[] = [{ kind: 'unsupported', count: 2, itemId: 0 }]
-    render(<StructuredTextView items={items} streaming />)
-    expect(screen.getByText('Wait')).toBeTruthy()
+  it('그리는 행이 없으면 여백 블록도 없다', () => {
+    const { container } = render(<StructuredTextView items={[]} streaming />)
+    expect(container.querySelectorAll('div[aria-hidden].h-3')).toHaveLength(0)
+  })
+
+  // ★턴 끝에 목록 높이가 들썩이지 않는다★ — 여백 블록이 구분선과 자리를 바꿀 뿐, 끝의 h-3 은 하나 그대로다.
+  it('턴이 끝나 구분선이 붙어도 끝의 h-3 은 정확히 하나다', () => {
+    const reply: StructuredItem = { kind: 'text', text: 'reply', itemId: 0 }
+    const { container, rerender } = render(<StructuredTextView items={[reply]} streaming />)
+    expect(container.querySelectorAll('div[aria-hidden].h-3')).toHaveLength(1)
+    rerender(<StructuredTextView items={[reply, { kind: 'separator', itemId: 1 }]} />)
+    expect(container.querySelectorAll('div[aria-hidden].h-3')).toHaveLength(1)
+    expect(bottomSpacers(container)).toHaveLength(0)
+    expect(lastChildClass(container)).toContain('h-3')
   })
 
   it('malformed json 이 와도 throw 하지 않고 폴백 렌더한다(안전 파서)', () => {
@@ -556,44 +569,70 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
     expect(railDots(container)).toBe(3)
   })
 
-  it('도는 턴의 마지막 묶음은 펼치고, 뒤에 생각이 와도 펼친 채 · 글이 오면 접는다', () => {
-    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+  // ADR-0263 결정 1: 도는 묶음은 통째로 펼치지 않는다 — 머리(진행형) + 지금 도는 마지막 호출 한 줄, 끝나면 머리만(과거형).
+  const readCall = (id: string) => toolItem('Read', id, 'Read', { argsJson: JSON.stringify({ path: `${id}.ts` }) })
+  const shownHints = () => screen.queryAllByText(/^r\d\.ts$/).map((el) => el.textContent)
+
+  it('도는 턴의 마지막 묶음은 머리 + 마지막 호출 한 줄 · 호출이 늘면 그 줄이 바뀌고 · 글이 오면 머리만', () => {
+    const calls = [readCall('r1'), readCall('r2')]
     const { container, rerender } = render(<StructuredTextView items={calls} streaming />)
-    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
-    expect(screen.getAllByRole('button', { name: 'Read' })).toHaveLength(2)
+    const g = groups(container)[0]
+    const head = groupHeader(g)
+    const live = () => groups(container)[0].getAttribute('data-tool-group-live')
+    expect(g.getAttribute('data-tool-group-open')).toBe('0')
+    expect(live()).toBe('1')
+    expect(screen.getByText(t('chat.toolGroupRunning'))).toBeTruthy()
+    expect(shownHints()).toEqual(['r2.ts'])
 
-    rerender(<StructuredTextView items={[...calls, thoughtItem('hmm')]} streaming />)
-    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    const more = [...calls, thoughtItem('hmm'), readCall('r3')]
+    rerender(<StructuredTextView items={more} streaming />)
+    expect(groups(container)[0]).toBe(g) // 같은 노드에서 수만 는다
+    expect(groupHeader(g)).toBe(head)
+    expect(g.getAttribute('data-tool-group-count')).toBe('3')
+    expect(g.getAttribute('data-tool-group-open')).toBe('0')
+    expect(shownHints()).toEqual(['r3.ts'])
 
-    rerender(<StructuredTextView items={[...calls, thoughtItem('hmm'), textItem('here')]} streaming />)
-    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
-    expect(screen.queryByRole('button', { name: 'Read' })).toBeNull()
+    rerender(<StructuredTextView items={[...more, textItem('here')]} streaming />)
+    expect(groups(container)[0]).toBe(g)
+    expect(live()).toBe('0')
+    expect(screen.queryByText(t('chat.toolGroupRunning'))).toBeNull()
+    expect(shownHints()).toEqual([])
   })
 
-  it('턴이 끝나면 마지막 묶음도 접는다', () => {
-    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+  it('턴이 끝나면 꼬리 묶음도 머리만 — 과거형', () => {
+    const calls = [readCall('r1'), readCall('r2')]
     const { container, rerender } = render(<StructuredTextView items={calls} streaming />)
     rerender(<StructuredTextView items={calls} />)
     expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+    expect(groups(container)[0].getAttribute('data-tool-group-live')).toBe('0')
+    expect(shownHints()).toEqual([])
   })
 
-  it('사람 토글이 자동 규칙을 이긴다 — 도는 중 접으면 접힌 채 · 턴 끝 뒤 펼치면 펼친 채', () => {
+  it('사람 토글이 이긴다 — 도는 중 펼치면 전부 보이며 자라고 턴 끝에도 그대로 · 도는 중 접으면 머리만', () => {
     useToolGroupStore.getState().bind('s1', 'agent-1')
-    const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
+    const calls = [readCall('r1'), readCall('r2')]
     const { container, rerender } = render(<StructuredTextView items={calls} streaming slotId="s1" />)
     fireEvent.click(groupHeader(groups(container)[0]))
-    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    expect(shownHints()).toEqual(['r1.ts', 'r2.ts'])
 
-    const more = [...calls, toolItem('Read', 'r3', 'Read')]
+    const more = [...calls, readCall('r3')]
     rerender(<StructuredTextView items={more} streaming slotId="s1" />)
+    expect(shownHints()).toEqual(['r1.ts', 'r2.ts', 'r3.ts'])
+
+    fireEvent.click(groupHeader(groups(container)[0]))
     expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
+    expect(shownHints()).toEqual([]) // 도는 중이어도 고른 접힘은 마지막 호출 줄까지 걷는다
+    fireEvent.click(groupHeader(groups(container)[0]))
 
     const ended = [...more, textItem('answer')]
     rerender(<StructuredTextView items={ended} slotId="s1" />)
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    expect(shownHints()).toEqual(['r1.ts', 'r2.ts', 'r3.ts'])
     fireEvent.click(groupHeader(groups(container)[0]))
-    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
     rerender(<StructuredTextView items={[...ended]} slotId="s1" />)
-    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
+    expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('0')
   })
 
   it('같은 사건열을 새 누산기로 다시 먹여도(replay) 고른 펼침이 그대로 붙는다', () => {
@@ -615,7 +654,7 @@ describe('StructuredTextView 도구 묶음 (ADR-0239)', () => {
     expect(groups(container)[0].getAttribute('data-tool-group-open')).toBe('1')
   })
 
-  it('slotId 가 없으면 머리를 눌러도 바뀌지 않는다(자동 규칙만)', () => {
+  it('slotId 가 없으면 늘 접힌 채이고 머리를 눌러도 바뀌지 않는다', () => {
     const calls = [toolItem('Read', 'r1', 'Read'), toolItem('Read', 'r2', 'Read')]
     const { container } = render(<StructuredTextView items={calls} />)
     const header = groupHeader(groups(container)[0])
@@ -973,39 +1012,5 @@ describe('StructuredTextView 끊김 표시 행 (ADR-0243)', () => {
     // 묶음 · 표시 행 · 묶음 = 세 행.
     expect(railRows(container)).toBe(3)
     expect(railDots(container)).toBe(3)
-  })
-})
-
-// ── ADR-0244: 끊기를 보낸 뒤 대기 꼬리가 「중단하는 중」을 그린다 ──────────────────────────────────────
-describe('StructuredTextView 대기 꼬리 — 중단하는 중(ADR-0244)', () => {
-  afterEach(() => vi.useRealTimers())
-  const items: StructuredItem[] = [{ kind: 'text', text: 'working', itemId: 0 }]
-
-  it('interrupting 이면 Wait 대신 CircleStop + 「중단하는 중…」 을 그린다', () => {
-    const { container } = render(<StructuredTextView items={items} streaming interrupting />)
-    const row = container.querySelector('[data-wait-interrupting="1"]') as HTMLElement
-    expect(row).not.toBeNull()
-    expect(row.textContent).toBe(t('chat.interrupting'))
-    expect(row.querySelector('svg')?.getAttribute('class')).toContain('lucide-circle-stop')
-    expect(screen.queryByText('Wait')).toBeNull()
-  })
-
-  it('streaming 이 아니면 interrupting 이어도 꼬리가 없다', () => {
-    const { container } = render(<StructuredTextView items={items} interrupting />)
-    expect(container.querySelector('[data-wait-interrupting="1"]')).toBeNull()
-    expect(screen.queryByText(t('chat.interrupting'))).toBeNull()
-  })
-
-  it('중단하는 중을 오가도 꼬리 행이 다시 마운트되지 않는다 — 경과 초가 이어진다', () => {
-    vi.useFakeTimers()
-    const { rerender } = render(<StructuredTextView items={items} streaming />)
-    act(() => vi.advanceTimersByTime(3000))
-    expect(screen.getByText('3s')).toBeTruthy()
-    rerender(<StructuredTextView items={items} streaming interrupting />)
-    expect(screen.queryByText('Wait')).toBeNull()
-    act(() => vi.advanceTimersByTime(2000))
-    rerender(<StructuredTextView items={items} streaming />)
-    expect(screen.getByText('Wait')).toBeTruthy()
-    expect(screen.getByText('5s')).toBeTruthy()
   })
 })

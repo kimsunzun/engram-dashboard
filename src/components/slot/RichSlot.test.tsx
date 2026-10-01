@@ -5,11 +5,10 @@
 //   파생 streaming(= awaiting || (!turnDone && items.length>0))이 계속 true 라 표시가 고착.
 //   fix: catch 에서 setAwaiting(false). 여기서 그 복귀를 관측한다.
 //
-// ★관측 표면(ADR-0053 헤더 제거 이후)★: 구 "JSON ● idle/○ streaming" 슬림 헤더가 제거돼, streaming 의
-//   유일한 시각 신호는 스트림 끝 대기 인디케이터(WaitRow "Wait" 라벨, StructuredTextView)뿐이다. 이 tail 은
-//   streaming 이면 뜬다(showTail = streaming). 그래서 관측 가능한 상태를 만들려고, 구독 콜백을 캡처해
+// ★관측 표면★: streaming 의 유일한 시각 신호는 입력창 위 대기 표시 줄의 "Wait" 라벨(`chat/WaitRow.tsx`)이고,
+//   streaming 이면 뜬다. 그래서 관측 가능한 상태를 만들려고, 구독 콜백을 캡처해
 //   TextDelta + MessageDone 을 먹인다 → items=[text,separator] & turnDone=true. 그러면 streaming = awaiting
-//   로 좁혀져(!turnDone 항이 죽음), "Wait" tail 의 유무가 곧 awaiting 의 거울이 된다.
+//   로 좁혀져(!turnDone 항이 죽음), "Wait" 표시의 유무가 곧 awaiting 의 거울이 된다.
 //
 // 전략: agentClient(clientFactory)·agentStore 를 slotTagGate.test.tsx 와 동일 패턴으로 stub. subscribeOutput
 //   콜백을 캡처(onChunk)해 tag1(StructuredEvent) chunk 를 주입하고, writeStdin 을 reject/resolve 로 갈아끼운다.
@@ -118,7 +117,7 @@ async function flush(): Promise<void> {
 
 /**
  * 콘텐츠 1턴을 완결 상태로 주입한다(TextDelta → MessageDone). 결과: items=[text,separator], turnDone=true.
- * 이 상태에서 streaming = awaiting 로 좁혀져(!turnDone 항 무력화) "Wait" tail 이 awaiting 을 그대로 반영.
+ * 이 상태에서 streaming = awaiting 로 좁혀져(!turnDone 항 무력화) "Wait" 표시가 awaiting 을 그대로 반영.
  */
 function feedCompletedTurn(): void {
   act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'assistant reply' }))))
@@ -211,6 +210,47 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
 
     // 성공 경로 — 아직 응답 이벤트가 없으므로 awaiting 브리지로 streaming 유지.
     expect(screen.getByText('Wait')).toBeTruthy()
+  })
+})
+
+// 사용자 결정 2026-10-01: 대기 표시는 스크롤 목록 밖 · 입력창 바로 위의 늘 서 있는 줄에 선다.
+describe('RichSlot(live) — 대기 표시 줄', () => {
+  it('대화 중이면 줄이 늘 서 있고 스크롤 목록 밖 · 입력 묶음 바로 위다 — 표시는 도는 동안만 그 안에', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedCompletedTurn()
+    const strip = document.querySelector('[data-wait-strip="1"]') as HTMLElement
+    const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+    const textarea = screen.getByPlaceholderText(/메시지 입력/)
+    const label = document.querySelector('[data-rich-label="1"]') as HTMLElement
+    expect(strip).not.toBeNull()
+    expect(viewport.contains(strip)).toBe(false)
+    expect(strip.nextElementSibling?.contains(textarea)).toBe(true)
+    expect(strip.contains(label)).toBe(true) // 정체성 라벨은 이 줄의 오른쪽 칸이다 — 띄워 겹치지 않는다
+    expect(label.className).not.toContain('absolute')
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await flush()
+    const wait = screen.getByText('Wait')
+    expect(document.querySelector('[data-wait-strip="1"]')).toBe(strip)
+    expect(strip.contains(wait)).toBe(true)
+    expect(viewport.contains(wait)).toBe(false)
+    // 대기 글이 왼쪽 · 라벨이 오른쪽에 한 줄로 서고, 라벨은 대기 표시가 켜져도 같은 노드다.
+    expect(wait.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(document.querySelector('[data-rich-label="1"]')).toBe(label)
+    // 입력창은 줄이 끼어도 같은 노드다(textarea 주석 — 두 배치에서 같은 엘리먼트).
+    expect(screen.getByPlaceholderText(/메시지 입력/)).toBe(textarea)
+  })
+
+  it('첫 실행 화면(빈 상태)에는 줄도 라벨도 없다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live', { continuesConversation: false }))
+    expect(emptyState()).not.toBeNull()
+    expect(document.querySelector('[data-wait-strip="1"]')).toBeNull()
+    expect(document.querySelector('[data-rich-label="1"]')).toBeNull() // 빈 상태의 라벨 접힘은 그대로다
   })
 })
 
@@ -983,8 +1023,8 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
   })
 
   // 실측상 이어받기의 첫 라이브 프레임이 usage 다. 그걸로 대기를 끝내면 이력이 오기 전 빈 목록이 비치고,
-  //   대기 꼬리 판정까지 그걸로 하면 로딩과 대기 꼬리가 함께 뜬다.
-  it('행을 안 그리는 usage 만 온 동안 로딩이 유지되고 대기 꼬리는 없다', async () => {
+  //   대기 표시 판정까지 그걸로 하면 로딩과 대기 표시가 함께 뜬다.
+  it('행을 안 그리는 usage 만 온 동안 로딩이 유지되고 대기 표시는 없다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE))) // replay 는 'live' 보다 먼저 배달된다
@@ -998,9 +1038,9 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).toBeNull()
   })
 
-  // 패널이 잠깐 내려가는 창(같은 화신 재부착의 'buffering')에도 꼬리를 세우지 않는다 — 세우면 패널 →
-  //   대기 꼬리(경과 초) → 패널로 깜빡인다. 대기 꼬리를 내리는 근거는 국면이 아니라 "아직 이력이 없다" 다.
-  it("대기 중 'buffering' 으로 패널이 내려가도 대기 꼬리가 끼지 않는다(턴 열린 usage 만)", async () => {
+  // 패널이 잠깐 내려가는 창(같은 화신 재부착의 'buffering')에도 대기 표시를 세우지 않는다 — 세우면 패널 →
+  //   대기 표시(경과 초) → 패널로 깜빡인다. 대기 표시를 내리는 근거는 국면이 아니라 "아직 이력이 없다" 다.
+  it("대기 중 'buffering' 으로 패널이 내려가도 대기 표시가 끼지 않는다(턴 열린 usage 만)", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE))) // 턴은 열린 채(turnDone=false)
@@ -1021,7 +1061,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     ['연결 끊김', () => setConnection('down')],
     ["'detached'", () => fireState('detached')],
     ["'error'", () => fireState('error')],
-  ])('부재 막(%s) 아래에도 대기 꼬리가 끼지 않는다(턴 열린 usage 만)', async (_name, goUnavailable) => {
+  ])('부재 막(%s) 아래에도 대기 표시가 끼지 않는다(턴 열린 usage 만)', async (_name, goUnavailable) => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE)))
@@ -1225,12 +1265,12 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).not.toBeNull()
   })
 
-  // 대기 꼬리 규칙은 이력 대기 밖에서 표식 도입 전 그대로다 — 행을 안 그리는 usage 만 온 창도 턴이 안
-  //   닫혔으면 꼬리가 뜬다. 꼬리를 내리는 것은 로딩 패널이 떠 있는 동안뿐이다(바로 위 usage 케이스).
+  // 대기 표시 규칙은 이력 대기 밖에서 표식 도입 전 그대로다 — 행을 안 그리는 usage 만 온 창도 턴이 안
+  //   닫혔으면 대기 표시가 뜬다. 대기 표시를 내리는 것은 로딩 패널이 떠 있는 동안뿐이다(바로 위 usage 케이스).
   it.each([
     ['info 없음', undefined],
     ['거짓', { continuesConversation: false }],
-  ])("표식 %s + usage 만 온 창 → 로딩 없이 대기 꼬리가 뜬다(표식 도입 전 규칙)", async (_name, info) => {
+  ])("표식 %s + usage 만 온 창 → 로딩 없이 대기 표시가 뜬다(표식 도입 전 규칙)", async (_name, info) => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE)))
@@ -1261,7 +1301,7 @@ function deferredListing(): Array<(listing: unknown) => void> {
 }
 
 describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
-  it('대기 항목이 서 있으면 빈 상태가 아니다 — 목록은 입력창 위, 라벨과 한 묶음, textarea 는 remount 되지 않는다', async () => {
+  it('대기 항목이 서 있으면 빈 상태가 아니다 — 목록은 입력창 위 · 라벨은 그 위 줄, textarea 는 remount 되지 않는다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     fireState('live')
@@ -1274,7 +1314,8 @@ describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
     expect(listedIds()).toEqual(['X'])
     const list = queuedList()!
     const label = document.querySelector('[data-rich-label="1"]')!
-    expect(label.parentElement).toBe(list.parentElement)
+    expect(label.closest('[data-wait-strip="1"]')).not.toBeNull() // 라벨은 목록 위 대기 표시 줄에 — 목록이 가리지 않는다
+    expect(label.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(list.compareDocumentPosition(textarea()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(textarea()).toBe(before)
 
@@ -1700,7 +1741,7 @@ describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 
     expect(screen.getByText('Wait')).toBeTruthy()
   }
 
-  it('Esc 한 번 = 끊기 한 번 · 꼬리가 곧바로 「중단하는 중…」 · 그동안 Esc 는 보내지도 먹지도 않는다', async () => {
+  it('Esc 한 번 = 끊기 한 번 · 대기 표시가 곧바로 「중단하는 중…」 · 그동안 Esc 는 보내지도 먹지도 않는다', async () => {
     await mountStreaming()
     expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
     expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
@@ -2019,7 +2060,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     return tag1(seq, JSON.stringify({ type: 'TurnEnd', turn_id: null, outcome: { kind: 'Completed' } }))
   }
 
-  /** 끝난 턴 하나 = 도구 호출 둘 — 턴이 닫혀 자동 규칙은 접는다. 묶음 키 = 첫 호출의 id(`tool:<id>`). */
+  /** 끝난 턴 하나 = 도구 호출 둘 — 고른 값이 없으면 접힌다. 묶음 키 = 첫 호출의 id(`tool:<id>`). */
   function feedFinishedGroup(seq: number, ids: readonly [string, string]): void {
     act(() => captured.onChunk!(toolCallFrame(seq, ids[0])))
     act(() => captured.onChunk!(toolCallFrame(seq + 1, ids[1])))
@@ -2116,7 +2157,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     feedFinishedGroup(0, ['r1', 'r2'])
     expect(openAttr('tool:r1')).toBe('1')
 
-    // 같은 슬롯에 다른 에이전트 — 같은 키의 묶음이 와도 자동 규칙(접힘)으로 그려진다.
+    // 같은 슬롯에 다른 에이전트 — 같은 키의 묶음이 와도 기본(접힘)으로 그려진다.
     cleanup()
     render(<RichSlot viewId="v1" agentId={OTHER} />)
     await flush()
@@ -2142,7 +2183,7 @@ describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
     expect(openAttr('tool:r1')).toBe('1')
   })
 
-  it('새 화신의 비우기(onReset)는 고른 펼침을 비운다 — 같은 키의 묶음이 와도 자동 규칙으로 그린다', async () => {
+  it('새 화신의 비우기(onReset)는 고른 펼침을 비운다 — 같은 키의 묶음이 와도 기본(접힘)으로 그린다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     feedFinishedGroup(0, ['r1', 'r2'])

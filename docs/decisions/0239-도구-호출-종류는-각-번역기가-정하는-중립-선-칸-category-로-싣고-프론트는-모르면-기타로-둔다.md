@@ -1,7 +1,7 @@
 # ADR-0239: 도구 호출 종류는 각 번역기가 정하는 중립 선 칸 category 로 싣고 프론트는 모르면 기타로 둔다
 
-- 상태: 확정 (2026-09-27, 근거: 사용자 결정 U5 (TRD `docs/process/S21-chat-ux/trd.md` §1) + TRD 5판 §4-1 · §4-2 · §4-3 + TRD 5판 리뷰 FIX 반영(TRD §12) · 구현 전 · 코드 무변경)
-- 관련: TRD `docs/process/S21-chat-ux/trd.md`(§1 U5 · §4-1 · §4-2 · §4-3 · §4-6 · §6 · §7 B4 · FE-2 · I1 · §9 · §10 0239) · 조사 `docs/research/chat-ux-four-features-2026-09-27.md`(§3) · ADR-0241(도구 끝 결과 — 같은 묶음의 「오류 N」 · 「거부 N」) · ADR-0004(backend 지식 격리) · ADR-0051(행 종류 ↔ 레일) · ADR-0050(StructuredTextView 순수 렌더) · ADR-0167(`help` 없는 창 명령) · step-log S21
+- 상태: 확정 (2026-09-27, 근거: 사용자 결정 U5 (TRD `docs/process/S21-chat-ux/trd.md` §1) + TRD 5판 §4-1 · §4-2 · §4-3 + TRD 5판 리뷰 FIX 반영(TRD §12) · 구현 전 · 코드 무변경) · 부분 폐기 by ADR-0263 (결정 4의 도는 동안 마지막 묶음 자동 펼침)
+- 관련: TRD `docs/process/S21-chat-ux/trd.md`(§1 U5 · §4-1 · §4-2 · §4-3 · §4-6 · §6 · §7 B4 · FE-2 · I1 · §9 · §10 0239) · 조사 `docs/research/chat-ux-four-features-2026-09-27.md`(§3) · ADR-0241(도구 끝 결과 — 같은 묶음의 「오류 N」 · 「거부 N」) · ADR-0004(backend 지식 격리) · ADR-0051(행 종류 ↔ 레일) · ADR-0050(StructuredTextView 순수 렌더) · ADR-0167(`help` 없는 창 명령) · step-log S21 · Amended by ADR-0263 (결정 4의 도는 동안 마지막 묶음 자동 펼침)
 
 ## 맥락
 챗 화면 4건 중 도구 호출 묶기는 연속된 도구 행 ≥2 를 묶음 하나로 접고, 그 머리에 종류별 개수를 고정 순서로 ` · ` 로 이은 요약 줄을 단다(TRD §4-3). 요약이 종류를 세려면 호출마다 종류가 있어야 한다. 도구 이름과 item 타입은 벤더마다 다르다 — claude 는 `Read` · `Grep` · `Bash` 같은 도구 이름을, codex 는 `commandExecution` · `fileChange` 같은 item 타입과 `commandActions` 를 싣는다. 오늘 단일 도구 행의 아이콘은 프론트의 이름 휴리스틱(`StructuredTextView.tsx:150-167`)이 고른다.

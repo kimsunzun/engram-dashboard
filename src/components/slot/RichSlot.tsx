@@ -41,6 +41,7 @@ import { StructuredEventAccumulator, type StructuredItem } from './structuredAcc
 import type { QueuedEntry } from './queuedInputReducer'
 import { QueuedInputList } from './QueuedInputList'
 import { isRenderedItem, StructuredTextView } from './StructuredTextView'
+import { WaitStrip } from './chat/WaitRow'
 import { richBranding } from './richBranding'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
 import { ESC_SCOPE, isInterruptEscape, OVERLAY_SELECTOR } from './interruptKey'
@@ -137,7 +138,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   const agentUnavailable = agentGone || !connected || subscriptionDown
 
   // ★정체성 라벨(§ user request)★: json 모드는 터미널의 claude 웰컴 배너 같은 "어느 에이전트인지" 신호가
-  //   없다. 우측 상단에 작은 라벨을 오버랩해 이름만 표시한다(아래 render — 줄을 차지하지 않음). 표시명은
+  //   없다. 입력창 위 대기 줄(WaitStrip)의 오른쪽에 작은 라벨로 이름만 표시한다(아래 render). 표시명은
   //   트리(displayNameOf)와 동일 규칙: display_name override ?? agent.name ?? cwd basename(중복 이름 허용).
   const profiles = useAgentStore((s) => s.profiles)
   // profiles 는 실 store 에선 항상 배열([])이지만, 일부 단위테스트 mock 은 s.profiles 를 안 채운다 → 방어적 옵셔널.
@@ -413,17 +414,17 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
   // ★FIX 5★: 초기 turnDone=false 인데 items 가 비어 있으면(fresh/idle 슬롯) !turnDone 만으로 shimmer·streaming
   //   배지가 뜨는 오작동이 있었다. items.length>0 조건으로 좁혀 idle 을 idle 로 표시하되, (a) 실제 스트리밍 중
   //   신호와 (b) '전송 직후 첫 토큰 대기(awaiting)' 는 그대로 살린다.
-  //   ADR-0226: 이력 대기 중에는 대기 꼬리를 내린다 — usage 만 온 창에서 로딩 패널과 함께 뜬다. 그 밖의
+  //   ADR-0226: 이력 대기 중에는 대기 표시를 내린다 — usage 만 온 창에서 로딩 패널과 함께 뜬다. 그 밖의
   //   창은 위 규칙 그대로다. ★awaitingHistory 가 아니라 historyPending 으로 내린다★: 같은 화신 재부착의
-  //   'buffering' 이나 부재 막 동안 패널만 잠깐 내려간 창에 꼬리(경과 초 포함)가 끼면 패널 → 꼬리 → 패널로
+  //   'buffering' 이나 부재 막 동안 패널만 잠깐 내려간 창에 대기 표시(경과 초 포함)가 끼면 패널 → 표시 → 패널로
   //   깜빡인다. ★awaiting 항은 이 게이트 밖에 둔다★: 연결 중 친 글은 로딩을 걷지 않으므로 전송 직후 둘이
-  //   겹친다 — 대기 목록 사건이 오면 awaiting 이 풀려 꼬리가 내려간다. 그 사건이 없는 길(목록을 안 쓰는
-  //   통로 · 판정 전)에서는 이 꼬리가 「보낸 글이 걸려 있다」의 유일한 표시라 게이트 안으로 넣지 않는다.
+  //   겹친다 — 대기 목록 사건이 오면 awaiting 이 풀려 대기 표시가 내려간다. 그 사건이 없는 길(목록을 안 쓰는
+  //   통로 · 판정 전)에서는 이 표시가 「보낸 글이 걸려 있다」의 유일한 표시라 게이트 안으로 넣지 않는다.
   //   (파생 표현값 — 구독/누산/send 데이터 흐름은 건드리지 않는다. ADR-0044/0045/0046.)
   const streaming = awaiting || (!turnDone && items.length > 0 && !historyPending)
 
   // ADR-0244: 대기 표시가 턴 경계 없이 꺼져도 「중단하는 중」을 걷는다 — 보낸 글이 턴을 열지 않고 대기 목록에 섰다(끊을
-  //   턴이 아직 없다). 다음에 서는 꼬리는 그 글이 여는 새 턴의 것이다. 켜짐 → 꺼짐에서만 걷는다 — 마운트 때 거짓인 것은
+  //   턴이 아직 없다). 다음에 서는 대기 표시는 그 글이 여는 새 턴의 것이다. 켜짐 → 꺼짐에서만 걷는다 — 마운트 때 거짓인 것은
   //   끝이 아니다.
   const wasStreamingRef = useRef(streaming)
   useEffect(() => {
@@ -466,8 +467,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     <div
       // 빈 상태에선 루트가 곧 정렬 컨테이너다(justify-center) — [마스코트·문구·입력창] 묶음을 통째로
       //   세로 가운데 놓는다. 위아래 spacer 로 나누면 위쪽에 든 마스코트·문구 높이만큼 묶음이 위로 밀린다.
-      // relative = 아래 부재 오버레이(absolute inset-0)의 앵커. 안쪽 absolute 요소(입력창 위 이름 라벨)는
-      //   각자 relative 부모를 갖고 있어 이 추가에 영향받지 않는다.
+      // relative = 아래 부재 오버레이(absolute inset-0)의 앵커.
       // 색조는 클래스 하나로 들어온다(정의처 = richBranding.css) — claude 는 '' 라 현행 모습 그대로다.
       // tabIndex -1 = 칸 루트가 클릭 · 코드로만 포커스를 받는다(탭 순서 밖) — 본문 여백을 눌러도 Esc 가 이 칸에
       //   온다(ADR-0237 U6). 대화 글을 누르면 스크롤 뷰포트가 먼저 받지만 keydown 은 그대로 여기로 번진다.
@@ -489,8 +489,7 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
     >
       {/* 대화 렌더(스크롤) — ScrollArea seam(ADR-0053: 앱 전역 Radix 오버레이 스크롤바). 순서 보존 item 스트림.
           ★ref 는 이 seam 이 실제 스크롤 노드(Radix Viewport)로 forward 한다 — 스크롤 따라가기(ADR-0242)가 그
-          노드를 재고 쓴다(Root 를 겨누면 스크롤이 안 된다). CC 룩 렌더는 StructuredTextView 소관.
-          (구 "JSON ● idle" 슬림 헤더는 제거 — 상태 힌트는 스트림 끝 대기 인디케이터(WaitRow "Wait" tail) 로 대체.) */}
+          노드를 재고 쓴다(Root 를 겨누면 스크롤이 안 된다). CC 룩 렌더는 StructuredTextView 소관. */}
       {!showEmpty && (
         <ScrollArea ref={follow.viewportRef} className="min-h-0 flex-1">
           <StructuredTextView
@@ -498,7 +497,6 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
             streaming={streaming}
             slotId={viewId}
             onGroupToggle={onGroupToggle}
-            interrupting={interrupting}
           />
           {/* ADR-0226 이력 대기 — 대화 영역 가운데 아이콘 + 옅은 막(사용자 결정 2026-09-24).
               ★여기 두는 이유★: absolute 의 기준이 ScrollArea 루트(seam 의 relative)라 대화 영역만 정확히
@@ -514,6 +512,27 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
           )}
           <JumpToBottom follow={follow} />
         </ScrollArea>
+      )}
+      {/* 대기 표시 줄 — 스크롤 목록 밖이라 켜지고 꺼져도 대화 높이와 바닥 따라가기를 흔들지 않는다(WaitRow 헤더).
+          ★`{조건 && …}` 로 자식 자리를 하나 고정해 둔다★ — 아래 입력 묶음의 자리가 밀리지 않는다(textarea 주석).
+          ★정체성 라벨(§ user request)은 이 줄의 오른쪽 칸이다★ — claude-code 터미널처럼 입력창 바로 위 우측에 어느
+          에이전트인지 이름만 표시한다(중복 이름 허용 · 상태 글리프는 트리 몫). 대기 글과 한 줄을 나눠 쓰고 좁으면 라벨이
+          잘린다. 입력 묶음 위에 띄워 겹치면(absolute) 좁은 칸에서 「중단하는 중…」 과 경과 초를 가린다. 빈 상태에는 줄이
+          없어 라벨도 없다 — 입력창 바로 위가 제품명 문구 자리다(ADR-0145 §2 구성). */}
+      {!showEmpty && (
+        <WaitStrip
+          streaming={streaming}
+          interrupting={interrupting}
+          label={
+            <div
+              data-rich-label="1"
+              title={headerName}
+              className="pointer-events-none min-w-0 truncate rounded border border-border bg-surface px-1.5 py-0.5 text-[11px] text-muted"
+            >
+              {headerName}
+            </div>
+          }
+        />
       )}
 
       {/* ADR-0145 빈 상태 윗단 — 표식 + 제품명. 세로 중앙 정렬은 루트가 잡고(justify-center)
@@ -533,32 +552,12 @@ function LiveRichSlot({ viewId, agentId }: { viewId: string; agentId: string }) 
         </div>
       )}
 
-      {/* 입력 묶음 = [대기 입력 목록 · 입력창](ADR-0231). 목록은 입력창 **위**에 서고, 정체성 라벨은 이 묶음 머리에
-          붙어 목록이 이름표를 가리지 않는다.
+      {/* 입력 묶음 = [대기 입력 목록 · 입력창](ADR-0231). 목록은 입력창 **위**에 선다.
           ★textarea 는 두 배치에서 같은 엘리먼트다(ADR-0145)★: 자리(부모 children 인덱스)를 고정하고
           className·rows 만 갈아 React 가 remount 하지 않게 한다 — 갈라 두면 전송·IME·포커스 가드가
-          두 벌이 되고, 전환 순간 입력 중이던 포커스가 끊긴다. 라벨·목록이 `{조건 && …}` 로 **늘 같은 자식 자리**를
+          두 벌이 되고, 전환 순간 입력 중이던 포커스가 끊긴다. 목록이 `{조건 && …}` 로 **늘 같은 자식 자리**를
           차지하는 것도 같은 이유다(목록이 서고 빠질 때 입력창 줄이 밀리지 않는다). */}
-      <div
-        className={
-          showEmpty
-            ? 'flex flex-none flex-col'
-            : 'relative flex flex-none flex-col border-t border-border'
-        }
-      >
-        {/* ★정체성 라벨(§ user request)★: claude-code 터미널처럼 입력 묶음 바로 위(우측)에 작은 라벨을 오버랩
-            (absolute -top — 줄을 차지하지 않음)해 어느 에이전트인지 이름만 표시(중복 이름 허용). pointer-events-none
-            으로 입력·스크롤을 막지 않는다. 상태 글리프는 트리가 담당.
-            빈 상태에서는 접는다 — 입력창 바로 위가 제품명 문구 자리라 겹친다(ADR-0145 §2 구성). */}
-        {!showEmpty && (
-          <div
-            data-rich-label="1"
-            title={headerName}
-            className="pointer-events-none absolute -top-5 right-3 z-10 max-w-[70%] truncate rounded border border-border bg-surface px-1.5 py-0.5 text-[11px] text-muted"
-          >
-            {headerName}
-          </div>
-        )}
+      <div className={showEmpty ? 'flex flex-none flex-col' : 'flex flex-none flex-col border-t border-border'}>
         {hasQueued && <QueuedInputList agentId={agentId} entries={queued} />}
         {/* 입력창 — Enter 전송 / Shift+Enter 줄바꿈(별도 전송 버튼 없음). ★포커스 가드★: stopPropagation
             으로 키 입력이 상위/전역 키바인딩으로 새지 않게 한다(터미널 슬롯의 onData 캡처와 동형 격리). */}

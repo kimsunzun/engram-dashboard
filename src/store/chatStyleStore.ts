@@ -28,6 +28,7 @@ export type ChatStyleKey =
   | 'railDotTop' // 점 마커 top(콘텐츠 첫 줄 근처)
   | 'fontSize' // 채팅 base font-size(chat.css 와 동기)
   | 'lineHeight' // 채팅 base line-height
+  | 'waitStripH' // 입력창 위 대기 표시 줄 높이(사용자 결정 2026-10-01)
 
 export type ChatStyleValues = Record<ChatStyleKey, string>
 
@@ -44,6 +45,7 @@ export const CHAT_STYLE_DEFAULTS: ChatStyleValues = {
   railDotTop: '0.5625rem',
   fontSize: '13px',
   lineHeight: '1.45',
+  waitStripH: '1.75rem',
 }
 
 // ADR-0051: StructuredTextView/theme.css/chat.css 가 이 변수들을 var() 로 읽는다.
@@ -58,6 +60,7 @@ const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
   railDotTop: '--chat-rail-dot-top',
   fontSize: '--chat-font-size',
   lineHeight: '--chat-line-height',
+  waitStripH: '--chat-wait-strip-h',
 }
 
 const STORAGE_KEY = 'engram.chatStyle'
@@ -99,7 +102,7 @@ const CHAT_STYLE_KEYS = Object.keys(CHAT_STYLE_DEFAULTS) as ChatStyleKey[]
 function isChatStyleKey(key: string): key is ChatStyleKey {
   // ADR-0051: 고정 배열 멤버십으로 판정한다. `key in CHAT_STYLE_DEFAULTS` 는 프로토타입 체인을 타서
   //   constructor·__proto__·toString 등 Object.prototype 상속 키가 true 로 통과 → store·localStorage 오염.
-  //   CHAT_STYLE_KEYS(고정 10키)만 own key 로 인정해 프로토타입 오염을 원천 차단한다.
+  //   CHAT_STYLE_KEYS(고정 11키)만 own key 로 인정해 프로토타입 오염을 원천 차단한다.
   return CHAT_STYLE_KEYS.includes(key as ChatStyleKey)
 }
 
