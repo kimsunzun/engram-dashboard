@@ -1208,9 +1208,13 @@ impl AgentBackend for CodexBackend {
 /// ★명부 사건은 `Delivered` 까지 전부 `None` 이다(claude 와 다르다)★: 이 백엔드의 `Delivered` 는 턴 끝
 ///   **뒤에도** 온다(턴 끝에서 쥔 자리로 돌아온 글의 늦은 에코 · 되살림). 그것이 「턴 중」을 다시 켜면 그 화신은 30 분
 ///   fail-open 밸브까지 우편이 막힌다. 턴 시작의 관측은 되울린 유저 메시지(`Structured`)가 이미 진다.
+/// ★도구 끝 결과(`ToolResult`)는 결말이 무엇이든 `None` 이다★: 끊긴 명령은 계속 돌다 **턴 끝 뒤에** 닫힌다(실측
+///   fixture `interrupt_fail_b5`) — 진행으로 세면 한가한 화신이 「턴 중」으로 되살아나 30 분 fail-open 까지 우편이
+///   막힌다. 그리고 도구 실패는 에이전트의 평범한 한 걸음이라, 오류로 세면 실패한 명령 하나가 오류 뒤 멈춤을 세운다.
 // ADR-0113
 // ADR-0004
 // ADR-0231
+// ADR-0241
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     match event {
         OutputEvent::TextDelta { .. }
@@ -1225,6 +1229,7 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         // 결말을 싣지 않는 끝이라 오류 뒤 멈춤을 세우지도 풀지도 않는다.
         OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Other)),
         OutputEvent::Usage { .. }
+        | OutputEvent::ToolResult { .. }
         | OutputEvent::Error(_)
         | OutputEvent::TerminalBytes(_)
         | OutputEvent::QueuedInput(_) => None,
@@ -2168,6 +2173,87 @@ mod tests {
                 "{ev:?}"
             );
         }
+    }
+
+    /// 도구 끝 결과는 결말이 무엇이든 턴 신호가 아니다(사유 = [`classify_turn`] doc).
+    // ADR-0241
+    #[test]
+    fn a_tool_result_is_never_a_turn_signal() {
+        use crate::types::ToolOutcome;
+        let classify = CodexBackend.turn_classifier();
+        for outcome in [
+            ToolOutcome::Completed,
+            ToolOutcome::Failed,
+            ToolOutcome::Declined,
+            ToolOutcome::Refused,
+        ] {
+            assert_eq!(
+                classify(&OutputEvent::ToolResult {
+                    id: "c1".into(),
+                    outcome
+                }),
+                None,
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// ★실측(codex-cli 0.156.1 · fixture `interrupt_fail_b5`): 끊긴 명령의 `failed` 끝이 턴 끝 **뒤에** 온다★ — 번역기는
+    /// 그 끝을 `TurnEnd{Interrupted}` 뒤의 `ToolResult{Failed}` 로 내고, 그 사건을 턴 표에 먹여도 한가한 화신이 「턴 중」으로
+    /// 되살아나지 않고 오류 뒤 멈춤도 서지 않는다(진행으로 세면 30 분 fail-open 까지 우편이 막힌다).
+    // ADR-0241
+    #[test]
+    fn a_late_tool_failure_after_an_interrupted_turn_does_not_reopen_the_turn() {
+        let classify = CodexBackend.turn_classifier();
+        let mut decoder = CodexAppServerDecoder::new();
+        let mut events = Vec::new();
+        for line in include_str!("fixtures/interrupt_fail_b5.jsonl").lines() {
+            // 통로가 번역기에 넘기는 것은 알림뿐이다 — 응답 줄(`id` 실음)은 거른다.
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("fixture 줄이 JSON 이 아니다");
+            if v.get("method").is_some() && v.get("id").is_none() {
+                events.extend(decoder.decode(format!("{line}\n").as_bytes()));
+            }
+        }
+        let end = events
+            .iter()
+            .position(|e| {
+                matches!(
+                    e,
+                    OutputEvent::TurnEnd {
+                        outcome: TurnOutcome::Interrupted,
+                        ..
+                    }
+                )
+            })
+            .expect("끊긴 턴 끝이 없다");
+        let late = events
+            .iter()
+            .position(|e| matches!(e, OutputEvent::ToolResult { .. }))
+            .expect("늦은 도구 끝 결과가 없다");
+        assert!(end < late, "도구 끝이 턴 끝 뒤가 아니다: {events:?}");
+        assert!(
+            matches!(
+                &events[late],
+                OutputEvent::ToolResult { id, outcome: crate::types::ToolOutcome::Failed }
+                    if id == "exec-ee015669-6082-43c0-ab16-2a89375b485b"
+            ),
+            "{:?}",
+            events[late]
+        );
+        assert_eq!(classify(&events[late]), None);
+
+        let table = crate::turn::TurnObservations::new();
+        let agent = uuid::Uuid::new_v4();
+        table.register(agent, 1);
+        for (seq, event) in events.iter().enumerate() {
+            if let Some(signal) = classify(event) {
+                table.observe(agent, 1, seq as u64, signal);
+            }
+        }
+        let seen = table.get(agent, 1).expect("관측이 없다");
+        assert!(!seen.in_turn, "늦은 도구 끝이 턴을 다시 열었다");
+        assert!(!seen.last_end_failed, "도구 실패가 오류 뒤 멈춤을 세웠다");
     }
 
     /// 터미널 모드는 decoder 가 없어 `TerminalBytes` 만 흐른다 — 그래서 같은 분류자를 모드별 분기 없이

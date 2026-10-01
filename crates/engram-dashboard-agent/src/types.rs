@@ -50,7 +50,18 @@ pub enum OutputEvent {
         id: Option<String>,
         turn_id: Option<String>,
         message_id: Option<String>,
+        /// ★`Option` 이 아니다★ — 번역기는 늘 하나를 고른다(모르면 [`ToolCategory::Other`]).
+        category: ToolCategory,
     },
+    /// 도구 호출 하나의 끝 결과 — 앞선 [`ToolCall`](Self::ToolCall) 을 `id` 로 가리킨다(새 행이 아니다).
+    ///
+    /// ★`id` 가 `Option` 이 아니다★ — 가리킬 호출이 없으면 번역기가 이 사건을 내지 않는다.
+    /// ★이 사건이 없다 = 성공이 아니다★ — 없음은 「모름」이다(끝이 안 옴 · 링에서 밀려남 · 옛 데몬 · 끝을 내지
+    ///   않는 백엔드).
+    /// ★턴 끝 **뒤에도** 온다(codex 실측 — 끊긴 명령이 계속 돌다 늦게 닫힌다)★ — 그래서 두 턴 분류기가 진행으로도
+    ///   오류로도 세지 않는다.
+    // ADR-0241
+    ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -67,8 +78,9 @@ pub enum OutputEvent {
     /// ★한 턴에 완료 항목이 여럿인 백엔드가 있다(실측)★ — 거기서는 **턴 끝 ≠ 메시지 끝**이라
     ///   `MessageDone` 에 결말을 접으면 한 턴이 여러 경계로 쪼개진다. 그리고 결말을
     ///   [`Error`](Self::Error) 로 접으면 **사용자가 정상 중단한 턴이 실패로 찍힌다.**
-    /// ★`MessageDone` 을 이것으로 이주시키지 않는다★ — claude 는 그대로 `MessageDone` 을 쓴다.
-    ///   두 어휘는 공존하고, 어느 쪽을 내는지는 각 백엔드 decoder 가 정한다.
+    /// ★`MessageDone` 을 이것으로 이주시키지 않는다★ — claude 는 끝을 그대로 `MessageDone` 으로 내고, 끊긴 턴
+    ///   한 갈래만 이것(`Interrupted`)으로 낸다(ADR-0238). 두 어휘는 공존하고, 어느 쪽을 내는지는 각 백엔드
+    ///   decoder 가 정한다.
     /// ★결말은 **중립 enum** 이다 — 백엔드의 원시 상태 문자열을 그대로 싣지 않는다★(ADR-0004).
     TurnEnd {
         turn_id: Option<String>,
@@ -81,9 +93,10 @@ pub enum OutputEvent {
     ///     이 부류다). 종료로 읽으면 한 턴이 사고 횟수만큼 쪼개진다.
     ///   - [`TurnEnd`](Self::TurnEnd) = **턴이 끝났다**. 실패로 끝난 턴도 이쪽 어휘로 온다.
     /// ★그래서 「재시도되나」를 칸으로 따로 내보내지 않는다★ — 그 구별은 이벤트 타입이 이미 지고 있다.
-    /// ★claude 의 실패한 턴은 `Error` 뒤 [`MessageDone`](Self::MessageDone) 으로 온다★ — `TurnEnd` 를 쓰지
-    ///   않는 그 백엔드는 실패한 `result` 줄 하나에서 둘을 이 순서로 내고, 턴 분류기가 그 `Error` 를 머리말로
-    ///   알아보아 뒤따르는 끝을 오류 끝으로 접는다(`backend/claude` 의 `RESULT_FAILURE_DETAIL`). ★그 머리말이 없는
+    /// ★claude 의 실패한 턴은 `Error` 뒤 [`MessageDone`](Self::MessageDone) 으로 온다★ — 실패를 `TurnEnd` 에
+    ///   싣지 않는 그 백엔드는(끊긴 턴만 `TurnEnd` 다) 실패한 `result` 줄 하나에서 둘을 이 순서로 내고, 턴
+    ///   분류기가 그 `Error` 를 머리말로 알아보아 뒤따르는 끝을 오류 끝으로 접는다(`backend/claude` 의
+    ///   `RESULT_FAILURE_DETAIL`). ★그 머리말이 없는
     ///   `Error` 는 턴 오류가 아니다★ — 줄 버퍼 넘침(`partial-line buffer overflow`)이 그 예다.
     Error(String),
     /// 위 정형 variant로 안 잡히는 backend별 구조화 이벤트의 탈출구(forward-compat).
@@ -92,7 +105,8 @@ pub enum OutputEvent {
     /// 대기 입력 명부 사건 — 백엔드 중립. 해석(환원 규칙)의 정본은 [`crate::queued_input`].
     ///
     /// ★[`Structured`](Self::Structured) 탈출구에 싣지 않는다★ — claude 턴 분류기가 `Structured` 를
-    ///   통째로 진행 신호로 세므로, 거기 실리면 턴 끝 뒤에 온 명부 사건이 「턴 중」을 다시 켠다.
+    ///   끊김 표시(`kind:"interrupted"` — ADR-0243) 말고는 전부 진행 신호로 세므로, 거기 실리면 턴 끝 뒤에 온
+    ///   명부 사건이 「턴 중」을 다시 켠다.
     // ADR-0231
     QueuedInput(QueuedInputEvent),
 }
@@ -182,6 +196,42 @@ pub enum TurnOutcome {
     /// 결말을 알 수 없다 — 상대가 우리가 모르는 값을 줬거나, 아예 주지 않았다.
     /// ★그래도 턴은 끝난 것으로 센다★: 결말을 몰라 이벤트를 버리면 그 대화의 대기 표시가 영영 돈다.
     Unknown,
+}
+
+/// 도구 호출의 중립 종류 — [`OutputEvent::ToolCall`] 이 나른다. 각 backend 번역기가 정한다.
+///
+/// ★벤더 도구 이름 · item 타입은 여기 오지 않는다★(ADR-0004) — 이름 표와 판정은 `backend/claude` · `backend/codex`
+///   안에 있고, 그 바깥(코어 · 데몬 · wire · 프론트)은 이 아홉 갈래만 안다.
+// ADR-0239
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCategory {
+    Read,
+    Search,
+    List,
+    Edit,
+    Command,
+    Web,
+    Agent,
+    Mcp,
+    /// 위 어느 종류에도 들지 않거나 번역기가 모르는 도구 — 벤더가 도구 이름을 바꾸거나 더하면 여기로 떨어진다.
+    Other,
+}
+
+/// 도구 호출 끝 결과의 중립 결말 — [`OutputEvent::ToolResult`] 가 나른다.
+///
+/// ★벤더 끝 상태 문자열은 여기 오지 않는다★(ADR-0004) — 판정은 각 backend 안에서 끝난다.
+// ADR-0241
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolOutcome {
+    /// 정상 완료. ★지금 어느 번역기도 내지 않는다★ — 실패 · 거부만 싣고, 이 낱말은 선 어휘로만 둔다.
+    Completed,
+    Failed,
+    /// 실행되지 않았다 — 우리 거절로 귀속되지 않은 거부(벤더 스스로의 거부 · 벤더 준비 실패 · 귀속 기억을 잃은 우리
+    ///   거절). 이유는 모른다.
+    Declined,
+    /// 우리(호스트)가 승인 요청을 거절해 실행되지 않았다. ★번역기는 내지 않는다★ — 귀속은 거절한 item 을 기억하는
+    ///   codex 통로의 몫이다(ADR-0241 결정 8 — 번역 뒤 `Failed`·`Declined` 를 이것으로 바꿔 쓴다).
+    Refused,
 }
 
 /// session→transport 입력 이벤트. 확장 가능 enum.

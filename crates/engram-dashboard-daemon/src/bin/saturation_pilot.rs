@@ -988,6 +988,7 @@ fn decoded_variant_key(ev: &OutputEvent) -> String {
         OutputEvent::TerminalBytes(_) => "TerminalBytes",
         OutputEvent::TextDelta { .. } => "TextDelta",
         OutputEvent::ToolCall { .. } => "ToolCall",
+        OutputEvent::ToolResult { .. } => "ToolResult",
         OutputEvent::Usage { .. } => "Usage",
         OutputEvent::MessageDone { .. } => "MessageDone",
         OutputEvent::TurnEnd { .. } => "TurnEnd",

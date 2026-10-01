@@ -1,0 +1,38 @@
+label | line | kind | result(ms after Esc, subtype) | S3 TRD candidates {L=launcher} | Q4 kills | follow-up (line)
+p1t1(#1) | 21 | ok | 557 error_during_execution |  |  |  
+p1t2(#2) | 23 | HANG | 10085 error_during_execution | bash.exe(wiki-preconsult):38108+294ms{L=bash.exe[wiki-preconsult]} | bash.exe(wiki-preconsult):38108=Terminated ->result 20ms | success:1995ms (:28)
+p1t3(#3) | 29 | ok | 476 error_during_execution |  |  |  
+p1t4(#4) | 31 | ok | 555 error_during_execution |  |  |  
+p1t5(#5) | 33 | ok | 351 error_during_execution |  |  |  
+p1bg | 39 | ok | 445 error_during_execution | sleep.exe:9408+2346ms{L=bash.exe[bg]} |  |  
+p2t1(#6) | 71 | ok | 468 error_during_execution |  |  |  
+p2t2(#7) | 73 | ok | 522 error_during_execution |  |  |  
+p2t3(#8) | 75 | ok | 321 error_during_execution |  |  |  
+p2t4(#9) | 77 | ok | 325 error_during_execution |  |  |  
+p2t5(#10) | 79 | HANG | 10087 error_during_execution | bash.exe(wiki-preconsult):39700+263ms{L=bash.exe[wiki-preconsult]} | bash.exe(wiki-preconsult):39700=Terminated ->result 19ms | success:2278ms (:84)
+p2bg | 89 | ok | 509 error_during_execution | sleep.exe:20988+2038ms{L=bash.exe[bg]} |  |  
+p3t1(#11) | 123 | ok | 416 error_during_execution |  |  |  
+p3t2(#12) | 125 | ok | 342 error_during_execution |  |  |  
+p3t3(#13) | 127 | HANG | 10134 error_during_execution | bash.exe(wiki-preconsult):23604+454ms{L=bash.exe[wiki-preconsult]} | bash.exe(wiki-preconsult):23604=Terminated ->result 35ms | success:2533ms (:132)
+p3t4(#14) | 133 | ok | 359 error_during_execution |  |  |  
+p3t5(#15) | 135 | ok | 352 error_during_execution |  |  |  
+p3bg | 141 | HANG | 10527 error_during_execution | sleep.exe:9032+1078ms{L=bash.exe[bg]}, bash.exe(handoff-trigger):32228+1432ms{L=bash.exe[handoff-trigger]}, conhost.exe:39424+1708ms{L=taskkill.exe}, cat.exe:30144+1808ms{L=bash.exe[wiki-preconsult]}, conhost.exe:38576+2 | bash.exe(handoff-trigger):32228=Terminated, bash.exe(handoff-trigger):5256=Gone(exited), conhost.exe:4812=Gone(exited), sleep.exe:40308=SKIPPED(not hook chain) ->result 364ms | success:3540ms (:146)
+p4t1(#16) | 180 | ok | 657 error_during_execution |  |  |  
+p4t2(#17) | 182 | ok | 1160 error_during_execution |  |  |  
+p4t3(#18) | 184 | ok | 762 error_during_execution |  |  |  
+p4t4(#19) | 186 | HANG | 10142 error_during_execution | bash.exe(handoff-trigger):37340+409ms{L=bash.exe[handoff-trigger]} | bash.exe(handoff-trigger):37340=Terminated ->result 35ms | success:2152ms (:191)
+p4t5(#20) | 192 | ok | 459 error_during_execution |  |  |  
+p5t1(#21) | 225 | ok | 354 error_during_execution |  |  |  
+p5t2(#22) | 227 | ok | 371 error_during_execution |  |  |  
+p5t3(#23) | 229 | ok | 468 error_during_execution |  |  |  
+p5t4(#24) | 231 | HANG | 10088 error_during_execution | bash.exe(wiki-preconsult):7056+358ms{L=bash.exe[wiki-preconsult]} | bash.exe(wiki-preconsult):7056=Terminated ->result 19ms | success:2079ms (:236)
+p5t5(#25) | 237 | ok | 341 error_during_execution |  |  |  
+p6t1(#26) | 268 | ok | 413 error_during_execution |  |  |  
+p6t2(#27) | 270 | ok | 447 error_during_execution |  |  |  
+p6t3(#28) | 272 | ok | 472 error_during_execution |  |  |  
+p6t4(#29) | 274 | ok | 504 error_during_execution |  |  |  
+p6t5(#30) | 276 | ok | 676 error_during_execution |  |  |  
+
+A trials=30 HANG=5 LATE=0 ok=25
+A follow-ups: ['success:1995ms', 'success:2278ms', 'success:2533ms', 'success:2152ms', 'success:2079ms']
+bg trials: [('p1bg', 'ok', ''), ('p2bg', 'ok', ''), ('p3bg', 'HANG', 'success:3540ms')]

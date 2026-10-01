@@ -22,6 +22,7 @@ const refreshPresetsMock = vi.hoisted(() => vi.fn(async () => undefined))
 vi.mock('../../store/eventBus', () => ({ refreshPresets: refreshPresetsMock }))
 
 import PresetPalette, { presetDisplayName } from './PresetPalette'
+import { OVERLAY_SELECTOR } from './interruptKey'
 import { useAgentStore } from '../../store/agentStore'
 import type { Preset } from '../../api/types'
 
@@ -140,6 +141,16 @@ describe('PresetPalette 렌더', () => {
     fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
     fireEvent.click(screen.getByText('삭제'))
     expect(clientMock.deletePreset).toHaveBeenCalledWith('pr1')
+  })
+
+  it('행 메뉴는 열린 동안만 오버레이 표지를 단다(ADR-0237) — 문서 Esc 가 닫으면 함께 사라진다', () => {
+    seedPresets(preset('pr1', 'C:/work/engram'))
+    render(<PresetPalette />)
+    expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
+    fireEvent.contextMenu(document.querySelector('[data-preset-id="pr1"]') as HTMLElement)
+    expect(document.querySelector(OVERLAY_SELECTOR)?.textContent).toContain('삭제')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
   })
 
   it('행 우클릭 메뉴 "이름 변경" → 인라인 입력 → Enter 확정 → renamePreset(id, trimmed)', () => {

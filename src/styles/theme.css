@@ -23,6 +23,7 @@
    함께 조정한다(기존 top-[-12px]↔pt-3 암묵 커플링을 변수로 대체). */
 :root {
   --chat-rail-row-pt: 0.8rem;     /* rail 행 top-padding(행간 리듬) — 사용자 라이브 튜닝 확정값 */
+  --chat-wait-strip-h: 1.75rem;   /* 입력창 위 대기 표시 줄 높이(사용자 결정 2026-10-01 — 두세 줄로 키울 때 이 값만 바꾼다) */
   --chat-plain-row-pt: 0.7rem;    /* 비-rail 행 top-padding — 사용자 라이브 튜닝 확정값 */
   --chat-user-py: 7px;            /* 유저 버블 세로 padding — 사용자 라이브 튜닝 확정값 */
   --chat-user-px: 0.9rem;         /* 유저 버블 가로 padding(§5 LLM 제어 표면 — userPy 와 대칭) */

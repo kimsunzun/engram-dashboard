@@ -1,0 +1,47 @@
+diff --git a/crates/engram-dashboard-agent/src/platform/process_group.rs b/crates/engram-dashboard-agent/src/platform/process_group.rs
+index 1a729c9..f5a537a 100644
+--- a/crates/engram-dashboard-agent/src/platform/process_group.rs
++++ b/crates/engram-dashboard-agent/src/platform/process_group.rs
+@@ -643,9 +643,21 @@ pub(crate) mod tests {
+     #[test]
+     fn a_dead_parent_held_open_is_off_the_list_and_reads_dead() {
+         let (job, group) = new_group();
++        // C(ping)의 출력을 받는 파일 — C 가 첫 줄을 쓴 뒤에야 P 를 끝낸다. 기동을 마치지 않은 C 는 P 가 끝날 때
++        // 함께 죽어(종료 코드 0xC000010A) 명단이 빈다(병렬 부하에서 11/60 · 끝낼 때 C 나이 1~4 ms 인 판 · 실측).
++        // 첫 줄은 제 코드를 돌기 시작한 ping 만 쓴다.
++        let ready =
++            std::env::temp_dir().join(format!("t40-dead-parent-{}.txt", std::process::id()));
++        let _ = std::fs::remove_file(&ready);
+         // P 는 ping 을 띄운 뒤 둘째 `set /p` 에서 stdin 을 기다리며 산다 — 끝은 아래 kill 한 곳이다. 둘째 `set /p`
+         // 가 없으면 `cmd /c` 가 `start /b` 직후 끝나 P 가 탐침 전에 이미 죽어 있다(실측 5/5).
+-        let mut parent = spawn_gated_cmd("start \"\" /b ping -n 30 127.0.0.1 & set /p _=", 0);
++        let mut parent = spawn_gated_cmd(
++            &format!(
++                "start \"\" /b ping -n 30 127.0.0.1 >\"{}\" & set /p _=",
++                ready.display()
++            ),
++            0,
++        );
+         let parent_pid = parent.id();
+         job.assign(parent_pid).expect("Job 편입");
+         let gate = open_gate_keeping_stdin(&mut parent);
+@@ -660,6 +672,9 @@ pub(crate) mod tests {
+                     (member.facts().ppid == parent_pid).then_some((pid, member))
+                 })
+         });
++        wait_until("ping 의 첫 줄", || {
++            (std::fs::metadata(&ready).ok()?.len() > 0).then_some(())
++        });
+         assert!(
+             parent.try_wait().expect("상태").is_none(),
+             "P 가 탐침 전에 끝났다"
+@@ -689,6 +704,9 @@ pub(crate) mod tests {
+             "C 의 부모가 끝남으로 안 읽힌다"
+         );
+         drop(parent);
++        job.terminate(1).expect("Job 끝내기");
++        let _ = child.wait_exit(Duration::from_secs(5));
++        let _ = std::fs::remove_file(&ready);
+     }
+ 
+     /// ① 첫 칸 하나로 물어도 늘려 되물어 전부 나온다.

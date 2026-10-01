@@ -1,0 +1,31 @@
+# python corr.py <scratch>/main
+hook batches: launcher count == hook_started count: 81 mismatch: 6
+   mismatch: p1 SessionStart:startup started=3 launchers=0 t=1279
+   mismatch: p2 SessionStart:startup started=3 launchers=0 t=1187
+   mismatch: p3 SessionStart:startup started=3 launchers=0 t=1165
+   mismatch: p4 SessionStart:startup started=3 launchers=0 t=1263
+   mismatch: p5 SessionStart:startup started=3 launchers=0 t=1189
+   mismatch: p6 SessionStart:startup started=3 launchers=0 t=1182
+spawn delay (first hook_started line received -> launcher creation), ms: n=264 min=0.9 median=6.9 max=124.3
+hook_response received after launcher exit, ms: n=264 min=1.5 median=2.6 max=9774.8
+ordinal mapping (i-th hook_started <-> i-th launcher, checked via the response after its exit): agree=229 disagree=35 n/a=0
+  among unambiguous exits (no other batch exit within 10 ms, response <=10 ms after exit): agree=143 disagree=1
+Bash tool launchers:
+   p1 T40FG pid=39152 life=5211ms tool_use->spawn=2339ms | task_started(bg=False) at spawn+3015ms
+   p1 T40BG pid=37280 life=13547ms tool_use->spawn=362ms | task_started(bg=True) at spawn+4ms
+   p2 T40FG pid=28396 life=5212ms tool_use->spawn=2302ms | task_started(bg=False) at spawn+3006ms
+   p2 T40BG pid=36164 life=13813ms tool_use->spawn=330ms | task_started(bg=True) at spawn+4ms
+   p3 T40FG pid=20916 life=5212ms tool_use->spawn=2255ms | task_started(bg=False) at spawn+3006ms
+   p3 T40BG pid=26336 life=30384ms tool_use->spawn=358ms | task_started(bg=True) at spawn+3ms
+
+# python corr.py <scratch>/pilot
+hook batches: launcher count == hook_started count: 14 mismatch: 2
+   mismatch: p1 SessionStart:startup started=2 launchers=0 t=1999
+   mismatch: p1 SessionStart:startup started=1 launchers=0 t=2012
+spawn delay (first hook_started line received -> launcher creation), ms: n=40 min=1.0 median=6.1 max=19.0
+hook_response received after launcher exit, ms: n=40 min=1.5 median=2.3 max=9682.4
+ordinal mapping (i-th hook_started <-> i-th launcher, checked via the response after its exit): agree=36 disagree=4 n/a=0
+  among unambiguous exits (no other batch exit within 10 ms, response <=10 ms after exit): agree=25 disagree=2
+Bash tool launchers:
+   p1 T40FG pid=32492 life=5229ms tool_use->spawn=2559ms | task_started(bg=False) at spawn+3011ms
+   p1 T40BG pid=35568 life=27999ms tool_use->spawn=346ms | task_started(bg=True) at spawn+4ms

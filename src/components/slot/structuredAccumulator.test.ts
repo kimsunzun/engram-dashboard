@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { StructuredEventAccumulator, type StructuredItem } from './structuredAccumulator'
+import {
+  StructuredEventAccumulator,
+  type StructuredItem,
+  type ToolCategory,
+  type ToolResultMark,
+} from './structuredAccumulator'
 import { goldenRowOf, queuedInputGolden } from './testing/queuedInputGolden'
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
@@ -89,11 +94,19 @@ describe('StructuredEventAccumulator', () => {
     expect(acc.snapshot()).toEqual([{ kind: 'text', text: 'Hello, world', itemId: 0 }])
   })
 
-  it('ToolCall → tool 칩 item(name/args/id 보존)', () => {
+  it('ToolCall → tool 칩 item(name/args/id 보존 · 종류 칸 없으면 Other · 표식 없음)', () => {
     const acc = new StructuredEventAccumulator()
     acc.feed(encode(toolCall('Read', '{"path":"a.ts"}', 'tu_1')))
     expect(acc.snapshot()).toEqual([
-      { kind: 'tool', name: 'Read', argsJson: '{"path":"a.ts"}', id: 'tu_1', itemId: 0 },
+      {
+        kind: 'tool',
+        name: 'Read',
+        argsJson: '{"path":"a.ts"}',
+        id: 'tu_1',
+        category: 'Other',
+        resultMark: null,
+        itemId: 0,
+      },
     ])
   })
 
@@ -317,6 +330,21 @@ describe('StructuredEventAccumulator', () => {
     acc.feed(new TextEncoder().encode('{not json'))
     acc.feed(encode(textDelta('after')))
     expect(acc.snapshot()).toEqual([{ kind: 'text', text: 'after', itemId: 0 }])
+  })
+
+  it('객체가 아닌 payload(null · 원시값)는 던지지 않고 false — 경고만 남기고 상태를 안 바꾼다', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const acc = new StructuredEventAccumulator()
+      for (const payload of ['null', '42', '"TextDelta"', 'true']) {
+        expect(() => acc.feed(payload)).not.toThrow()
+        expect(acc.feed(payload)).toBe(false)
+      }
+      expect(acc.snapshot()).toEqual([])
+      expect(warnSpy).toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
   })
 
   // ── ★replay idempotence★: reset 후 같은 이벤트열 refeed → 동일 스냅샷(웹뷰 리로드 복원 규율) ──
@@ -1302,5 +1330,374 @@ describe('StructuredEventAccumulator — 재부착 대조(ADR-0231)', () => {
     feedAll(acc, [cancelRequested('X')])
     acc.offerQueuedSnapshot(gen, snapshot([queuedRow('X')], 10))
     expect(listed(acc)).toEqual(['X'])
+  })
+})
+
+// ── ADR-0239 · ADR-0241: 도구 종류 · 끝 결과 ──────────────────────────────────────────
+
+/** 옛 데몬(칸 없음)·더 새 데몬(모르는 낱말)·깨진 값을 싣게 타입 게이트를 우회한다. */
+function toolCallOf(name: string, id: string | null, category: unknown): StructuredEvent {
+  return {
+    type: 'ToolCall',
+    name,
+    args_json: '{}',
+    id,
+    turn_id: null,
+    message_id: null,
+    category,
+  } as unknown as StructuredEvent
+}
+/** 더 새 데몬의 결말 낱말 · 깨진 `id` 를 싣게 타입 게이트를 우회한다. */
+function toolResult(id: unknown, outcome: unknown): StructuredEvent {
+  return { type: 'ToolResult', id, outcome } as unknown as StructuredEvent
+}
+/** 도구 행마다 [백엔드 id, 표식]. */
+function toolMarks(acc: StructuredEventAccumulator): [string | null, ToolResultMark | null | undefined][] {
+  return acc
+    .snapshot()
+    .flatMap((it): [string | null, ToolResultMark | null | undefined][] =>
+      it.kind === 'tool' ? [[it.id, it.resultMark]] : [],
+    )
+}
+const categories = (acc: StructuredEventAccumulator): (ToolCategory | undefined)[] =>
+  acc.snapshot().flatMap((it) => (it.kind === 'tool' ? [it.category] : []))
+
+describe('StructuredEventAccumulator — 도구 종류 · 끝 결과(ADR-0239 · ADR-0241)', () => {
+  const known: ToolCategory[] = ['Read', 'Search', 'List', 'Edit', 'Command', 'Web', 'Agent', 'Mcp', 'Other']
+
+  it.each(known)('category %s 는 그대로 싣는다', (category) => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCallOf('T', 'c1', category)))
+    expect(categories(acc)).toEqual([category])
+  })
+
+  it('category 칸이 없거나 모르는 값이면 Other — 대소문자 · 프로토타입 이름도 모르는 값이다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Read', '{}', 'c0')))
+    const odd: unknown[] = ['Teleport', 'read', 'toString', 'constructor', 42, null, { kind: 'Read' }]
+    for (const value of odd) acc.feed(encode(toolCallOf('T', 'x', value)))
+    expect(categories(acc)).toEqual(Array(1 + odd.length).fill('Other'))
+  })
+
+  it.each<[string, ToolResultMark]>([
+    ['Failed', 'failed'],
+    ['Declined', 'declined'],
+    ['Refused', 'refused'],
+  ])('ToolResult(%s) → 같은 id 행의 표식 %s · 새 항목 없음 · feed 는 false', (outcome, mark) => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    acc.feed(encode(toolCall('Read', '{}', 'c2')))
+    const before = kinds(acc.snapshot())
+    expect(acc.feed(encode(toolResult('c1', outcome)))).toBe(false)
+    expect(kinds(acc.snapshot())).toEqual(before)
+    expect(toolMarks(acc)).toEqual([
+      ['c1', mark],
+      ['c2', null],
+    ])
+  })
+
+  it('Completed · 모르는 낱말 · 결말 칸 없음 → 표식 없음이고 던지지 않는다(모르는 쪽만 경고)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const acc = new StructuredEventAccumulator()
+      for (const id of ['c1', 'c2', 'c3']) acc.feed(encode(toolCall('Bash', '{}', id)))
+      expect(acc.feed(encode(toolResult('c1', 'Completed')))).toBe(false)
+      expect(warnSpy).not.toHaveBeenCalled()
+      expect(acc.feed(encode(toolResult('c2', 'TimedOut')))).toBe(false)
+      expect(acc.feed(encode(toolResult('c3', undefined)))).toBe(false)
+      expect(warnSpy).toHaveBeenCalledTimes(2)
+      expect(toolMarks(acc)).toEqual([
+        ['c1', null],
+        ['c2', null],
+        ['c3', null],
+      ])
+      expect(kinds(acc.snapshot())).toEqual(['tool', 'tool', 'tool'])
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('가리키는 행이 없으면(링에서 밀려남) 버린다 — 스냅숏 그대로 · feed 는 false', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    acc.feed(encode(messageDone))
+    const before = acc.snapshot().map((it) => ({ ...it }))
+    expect(acc.feed(encode(toolResult('gone', 'Failed')))).toBe(false)
+    expect(acc.snapshot()).toEqual(before)
+  })
+
+  it('깨진 프레임의 null id 는 id 없는 도구 행에 붙지 않는다 — 버린 프레임의 결말은 경고하지 않는다', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const acc = new StructuredEventAccumulator()
+      acc.feed(encode(toolCall('Glob', '{}', null)))
+      expect(acc.feed(encode(toolResult(null, 'Failed')))).toBe(false)
+      expect(acc.feed(encode(toolResult(null, 'Newer')))).toBe(false)
+      expect(toolMarks(acc)).toEqual([[null, null]])
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('뒤에 온 결과가 앞 표식을 덮는다 — Failed 뒤 Completed = 표식 없음 · Failed 뒤 모르는 낱말 = 표식 없음 + 경고', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const acc = new StructuredEventAccumulator()
+      acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+      acc.feed(encode(toolCall('Bash', '{}', 'c2')))
+      acc.feed(encode(toolResult('c1', 'Failed')))
+      acc.feed(encode(toolResult('c2', 'Failed')))
+      expect(toolMarks(acc)).toEqual([
+        ['c1', 'failed'],
+        ['c2', 'failed'],
+      ])
+      expect(acc.feed(encode(toolResult('c1', 'Completed')))).toBe(false)
+      expect(warnSpy).not.toHaveBeenCalled()
+      expect(acc.feed(encode(toolResult('c2', 'Newer')))).toBe(false)
+      expect(warnSpy).toHaveBeenCalledTimes(1)
+      expect(toolMarks(acc)).toEqual([
+        ['c1', null],
+        ['c2', null],
+      ])
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('같은 id 의 행이 둘이면 뒤의 행에 붙는다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'dup')))
+    acc.feed(encode(toolCall('Bash', '{}', 'dup')))
+    acc.feed(encode(toolResult('dup', 'Failed')))
+    expect(toolMarks(acc)).toEqual([
+      ['dup', null],
+      ['dup', 'failed'],
+    ])
+  })
+
+  it('copy-on-write — 붙이기 전에 받은 snapshot 의 행 객체는 바뀌지 않는다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    const row = acc.snapshot()[0]
+    acc.feed(encode(toolResult('c1', 'Failed')))
+    expect(row).toMatchObject({ resultMark: null })
+    expect(acc.snapshot()[0]).not.toBe(row)
+    expect(acc.snapshot()[0]).toMatchObject({ resultMark: 'failed' })
+  })
+
+  it('turnDone 을 건드리지 않는다 — 턴 중에 와도 · 턴 끝 뒤에 와도', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    acc.feed(encode(toolCall('Bash', '{}', 'c2')))
+    acc.feed(encode(toolResult('c1', 'Failed')))
+    expect(acc.isTurnDone()).toBe(false)
+    acc.feed(encode(turnEnd({ kind: 'Completed' })))
+    acc.feed(encode(toolResult('c2', 'Failed')))
+    expect(acc.isTurnDone()).toBe(true)
+    expect(toolMarks(acc)).toEqual([
+      ['c1', 'failed'],
+      ['c2', 'failed'],
+    ])
+  })
+
+  // ★재는 것(TRD S21-chat-ux §4-7 ⑧)★: 끊긴 턴의 도구 끝이 새 글을 보낸 직후 · 새 턴이 답하기 전에 들 때
+  //   새 턴의 대기 표시가 꺼지지 않을 것. 첫 턴만 보면 turnDone 이 아직 false 라 공짜로 통과하므로 두 턴으로 잰다.
+  it('늦은 끝은 새 턴의 대기 표시를 끄지 않고 행에 표식만 붙인다 — 다음 진짜 항목이 대기를 넘겨받는다', () => {
+    const m = slotModel()
+    m.frame(toolCall('Bash', '{}', 'c1'))
+    m.frame(turnEnd({ kind: 'Interrupted' }))
+    expect(m.streaming).toBe(false)
+
+    m.send()
+    m.frame(toolResult('c1', 'Failed'))
+    expect(m.streaming).toBe(true)
+    expect(toolMarks(m.acc)).toEqual([['c1', 'failed']])
+
+    m.frame(textDelta('turn 2'))
+    m.frame(turnEnd({ kind: 'Completed' }, 't2'))
+    expect(m.streaming).toBe(false)
+  })
+
+  // ★ⓐ 고정(사용자 결정 2026-09-27 · TRD S21-chat-ux §11 ⑩)★: 끊긴 턴의 도구가 계속 돌다 실패로 늦게 끝나면 그
+  //   행에 보통 실패 표식이 붙고 그 턴의 「중단됨」 결말 행은 그대로 남는다 — 누산기에 따로 가르는 규칙이 없다.
+  it('ⓐ 끊긴 턴 행의 늦은 Failed(다음 턴 끝 뒤 도착) → 그 행 표식 failed · 끊긴 결말 행 그대로', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    acc.feed(encode(toolCall('Bash', '{}', 'c2')))
+    acc.feed(encode(turnEnd({ kind: 'Interrupted' }, 't1')))
+    acc.feed(encode(textDelta('turn 2')))
+    acc.feed(encode(turnEnd({ kind: 'Completed' }, 't2')))
+    const outcomeRow = acc.snapshot().find((it) => it.kind === 'outcome')
+    const before = kinds(acc.snapshot())
+
+    expect(acc.feed(encode(toolResult('c1', 'Failed')))).toBe(false)
+
+    expect(toolMarks(acc)).toEqual([
+      ['c1', 'failed'],
+      ['c2', null],
+    ])
+    expect(kinds(acc.snapshot())).toEqual(before)
+    expect(outcomeRow).toEqual({ kind: 'outcome', outcome: 'interrupted', detail: null, itemId: 2 })
+    expect(acc.snapshot().filter((it) => it.kind === 'outcome')).toEqual([outcomeRow])
+    expect(acc.isTurnDone()).toBe(true)
+  })
+
+  it('같은 사건열을 두 번 먹이면 같은 스냅숏이다(표식 · 종류 · itemId · feed 반환 포함 · replay)', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const acc = new StructuredEventAccumulator()
+      const stream: StructuredEvent[] = [
+        toolCallOf('Grep', 'c1', 'Search'),
+        toolCallOf('Bash', 'c2', 'Command'),
+        toolCallOf('Edit', 'c3', 'Edit'),
+        toolCall('Web', '{}', 'c4'),
+        toolResult('c2', 'Failed'),
+        toolResult('c3', 'Refused'),
+        turnEnd({ kind: 'Interrupted' }),
+        toolResult('c1', 'Declined'),
+        toolResult('gone', 'Failed'),
+        toolResult('c4', 'Newer'),
+      ]
+      const returns = stream.map((ev) => acc.feed(encode(ev)))
+      const first = acc.snapshot().map((it) => ({ ...it }))
+      acc.reset()
+      expect(stream.map((ev) => acc.feed(encode(ev)))).toEqual(returns)
+      expect(acc.snapshot()).toEqual(first)
+      expect(ids(acc.snapshot())).toEqual(ids(first))
+      expect(toolMarks(acc)).toEqual([
+        ['c1', 'declined'],
+        ['c2', 'failed'],
+        ['c3', 'refused'],
+        ['c4', null],
+      ])
+      expect(categories(acc)).toEqual(['Search', 'Command', 'Edit', 'Other'])
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('ToolResult 프레임의 seq 도 배달로 센다 — false 를 돌려줘도 쥔 대조 답이 그 seq 에서 선다', () => {
+    const acc = new StructuredEventAccumulator()
+    feedAt(acc, 1, toolCall('Bash', '{}', 'c1'))
+    const gen = acc.beginQueuedReconcile(7)
+    expect(acc.offerQueuedSnapshot(gen, snapshot([queuedRow('X')], 2))).toBe('held')
+    feedAt(acc, 2, toolResult('c1', 'Failed'))
+    expect(listed(acc)).toEqual(['X'])
+    expect(toolMarks(acc)).toEqual([['c1', 'failed']])
+  })
+})
+
+describe('StructuredEventAccumulator — claude 끊김 표시 행(ADR-0243)', () => {
+  const SHORT = '[Request interrupted by user]'
+  const FOR_TOOL = '[Request interrupted by user for tool use]'
+  function interrupted(json: string): StructuredEvent {
+    return { type: 'Structured', kind: 'interrupted', json }
+  }
+  const note = (text: string): StructuredEvent => interrupted(JSON.stringify({ text }))
+  const interruptedEnd = turnEnd({ kind: 'Interrupted' })
+
+  it.each([SHORT, FOR_TOOL])('%s → 원문을 실은 interruptNote 항목', (text) => {
+    const acc = new StructuredEventAccumulator()
+    expect(acc.feed(encode(note(text)))).toBe(true)
+    expect(acc.snapshot()).toEqual([{ kind: 'interruptNote', text, itemId: 0 }])
+  })
+
+  it.each([
+    ['JSON 이 아니다', 'not json'],
+    ['text 칸이 없다', JSON.stringify({ other: 1 })],
+    ['text 가 문자열이 아니다', JSON.stringify({ text: 3 })],
+    ['객체가 아니다', JSON.stringify('x')],
+    ['text 가 빈 글이다', JSON.stringify({ text: '' })],
+  ])('모양이 깨진 json(%s) → 탈출구 structured 항목', (_name, json) => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(interrupted(json)))
+    expect(acc.snapshot()).toEqual([{ kind: 'structured', label: 'interrupted', json, itemId: 0 }])
+  })
+
+  it('같은 글이라도 kind=user 는 오늘처럼 사용자 말풍선이다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(userEcho(SHORT, 'u1')))
+    expect(labels(acc.snapshot())).toEqual(['user'])
+    expect(kinds(acc.snapshot())).not.toContain('interruptNote')
+  })
+
+  it('user 갈래의 부수 효과를 타지 않는다 — 닫힌 턴 뒤에 와도 turnDone 을 내리지 않고 uuid 도 안 먹는다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(textDelta('a')))
+    acc.feed(encode(messageDone))
+    acc.feed(encode(interrupted(JSON.stringify({ text: SHORT, uuid: 'u1' }))))
+    expect(acc.isTurnDone()).toBe(true)
+    // uuid 를 「본 것」에 넣었다면 이 에코가 dedup 으로 사라진다.
+    acc.feed(encode(userEcho('hello', 'u1')))
+    expect(labels(acc.snapshot()).filter((l) => l === 'user')).toHaveLength(1)
+  })
+
+  it('표시 행 뒤 TurnEnd(Interrupted) → 결말 행 없음 · 구분선은 선다 · 턴은 닫힌다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(toolCall('Bash', '{}', 'c1')))
+    acc.feed(encode(note(FOR_TOOL)))
+    acc.feed(encode(interruptedEnd))
+    expect(kinds(acc.snapshot())).toEqual(['tool', 'interruptNote', 'separator'])
+    expect(acc.isTurnDone()).toBe(true)
+  })
+
+  it('표시 행 없이 TurnEnd(Interrupted) → 중단 결말 행이 그대로 선다(합성 줄이 안 온 claude · codex)', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(textDelta('half')))
+    acc.feed(encode(interruptedEnd))
+    expect(kinds(acc.snapshot())).toEqual(['text', 'outcome', 'separator'])
+  })
+
+  it('앞 턴의 표시 행은 다음 턴의 중단 결말 행을 지우지 않는다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(note(SHORT)))
+    acc.feed(encode(interruptedEnd))
+    acc.feed(encode(userEcho('again', 'u2')))
+    acc.feed(encode(textDelta('b')))
+    acc.feed(encode(interruptedEnd))
+    expect(kinds(acc.snapshot())).toEqual([
+      'interruptNote',
+      'separator',
+      'structured',
+      'text',
+      'outcome',
+      'separator',
+    ])
+  })
+
+  it('표시 행이 있어도 다른 결말(Failed · Unknown)의 결말 행은 선다', () => {
+    const acc = new StructuredEventAccumulator()
+    acc.feed(encode(note(SHORT)))
+    acc.feed(encode(turnEnd({ kind: 'Failed', detail: 'boom' })))
+    expect(kinds(acc.snapshot())).toEqual(['interruptNote', 'outcome', 'separator'])
+  })
+
+  it('표시 행이 없는 codex 모양 사건열은 오늘과 같다', () => {
+    const acc = new StructuredEventAccumulator()
+    for (const ev of [
+      userEcho('go', 'u1'),
+      toolCall('shell', '{}', 'c1'),
+      textDelta('part'),
+      interruptedEnd,
+    ])
+      acc.feed(encode(ev))
+    expect(acc.snapshot()).toEqual([
+      { kind: 'structured', label: 'user', json: JSON.stringify({ type: 'text', text: 'go', uuid: 'u1' }), itemId: 0 },
+      { kind: 'tool', name: 'shell', argsJson: '{}', id: 'c1', category: 'Other', resultMark: null, itemId: 1 },
+      { kind: 'text', text: 'part', itemId: 2 },
+      { kind: 'outcome', outcome: 'interrupted', detail: null, itemId: 3 },
+      { kind: 'separator', itemId: 4 },
+    ])
+  })
+
+  it('refeed 시 같은 스냅숏(replay idempotence)', () => {
+    const acc = new StructuredEventAccumulator()
+    const stream = [textDelta('a'), note(SHORT), interruptedEnd, textDelta('b'), interruptedEnd]
+    stream.forEach((ev) => acc.feed(encode(ev)))
+    const first = acc.snapshot().map((it) => ({ ...it }))
+    acc.reset()
+    stream.forEach((ev) => acc.feed(encode(ev)))
+    expect(acc.snapshot()).toEqual(first)
   })
 })

@@ -631,9 +631,15 @@ impl AgentSession {
         Ok(())
     }
 
-    /// 진행 중 작업만 중단(≠kill — 프로세스는 살아 있다). PTY=0x03 주입.
+    /// 진행 중 작업만 중단(≠kill — 프로세스는 살아 있다). 통로가 끊는 법을 정한다 — PTY 는 `Unsupported`
+    /// (터미널 모드는 터미널이 키를 직접 받는다 · ADR-0245).
     pub fn interrupt(&self) -> Result<(), PtyError> {
         self.transport.interrupt()
+    }
+
+    /// 통로에 물러남을 예고한다([`AgentTransport::begin_retire`]) — 자원은 거두지 않는다([`Self::kill`] 몫).
+    pub(crate) fn begin_retire(&self) {
+        self.transport.begin_retire();
     }
 
     /// 자원 강제 종료 + pump 종료 대기. **이 2동사 순서(shutdown THEN join_pump)가 kill 인과의 핵심.**
@@ -1246,7 +1252,10 @@ mod tests {
         assert!(caps.output.structured, "json 세션 → 구조화 출력");
         assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
         assert!(!caps.control.resize, "resize 불가");
-        assert!(!caps.control.interrupt, "interrupt 불가(MVP)");
+        assert!(
+            !caps.control.interrupt,
+            "끊기 줄을 주입하지 않은 통로 = 끊기 능력 없음(운영 claude JSON 은 backend 가 주입한다 — ADR-0238)"
+        );
         // ★ADR-0044 후속 완료★: json 모드도 --resume 지원(spike-verified, claude 2.1.170) → resume=true.
         //   build_spec 이 SpawnMode::Resume 에서 --resume 을 내고 통제-sid(ADR-0008)를 재사용하므로 sid
         //   충돌 없음.

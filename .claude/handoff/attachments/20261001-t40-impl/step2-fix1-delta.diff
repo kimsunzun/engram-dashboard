@@ -1,0 +1,254 @@
+diff --git a/C:/Users/kimsunzun/AppData/Local/Temp/t40-impl/leftover-step2-final.rs b/crates/engram-dashboard-agent/src/backend/claude/leftover.rs
+index 460f000..c49ed1a 100644
+--- a/C:/Users/kimsunzun/AppData/Local/Temp/t40-impl/leftover-step2-final.rs
++++ b/crates/engram-dashboard-agent/src/backend/claude/leftover.rs
+@@ -17,11 +17,11 @@
+ //!   할당과 해제 · OS 호출 · 다른 자물쇠는 하지 않는다(유일한 예외는 끝내기 확정의 끝내기 호출 하나). 빼낸 것은 놓은 뒤
+ //!   버린다. 기록 자물쇠와 겹쳐 잡지 않는다.
+ //! 명세 = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
+ // ADR-0257
+ 
+-// 2단계는 규칙과 탄생 기록만 세우고 배선은 하나도 하지 않는다. 3단계 배선이 이것들을 부르게 되면 이 allow 를 걷는다.
++// 2단계는 이 모듈 전체(규칙 · 탄생 기록 · 문 · 일꾼 · 정리 한 판)를 세우되 배선은 하나도 하지 않는다(배선 = 3단계). 3단계 배선이 이것들을 부르게 되면 이 allow 를 걷는다.
+ #![allow(dead_code)]
+ 
+ use std::any::Any;
+ use std::fmt;
+ use std::io;
+@@ -1487,15 +1487,14 @@ impl GateState {
+             ep.killed_any = true;
+         }
+     }
+ 
+     /// 판 끝 — 같은 세대가 아직 `Cleaning` 일 때만 `Spent`(무엇이든 끝냈다)/`Done` 으로 매듭짓고 스냅숏 · 기록을
+-    /// 내놓는다. 판 도중 끊기로 `Waiting` 에 돌아갔으면 쥔 채 다음 판을 기다린다. 그 세대가 지금까지 하나라도
+-    /// 끝냈나를 함께 준다(세대가 바뀌었으면 이 판의 것만).
+-    fn finish_pass(&mut self, gen: u64, killed: bool, now: Instant) -> (Released, bool) {
++    /// 내놓는다. 판 도중 끊기로 `Waiting` 에 돌아갔으면 쥔 채 다음 판을 기다린다.
++    fn finish_pass(&mut self, gen: u64, killed: bool, now: Instant) -> Released {
+         let Some(ep) = self.episode.as_mut().filter(|ep| ep.gen == gen) else {
+-            return (Released::default(), killed);
++            return Released::default();
+         };
+         ep.killed_any |= killed;
+         let released = if ep.phase == Phase::Cleaning {
+             ep.phase = if ep.killed_any {
+                 Phase::Spent { at: now }
+@@ -1504,11 +1503,11 @@ impl GateState {
+             };
+             ep.release()
+         } else {
+             Released::default()
+         };
+-        (released, ep.killed_any)
++        released
+     }
+ 
+     /// 일꾼이 없어졌다(기동 실패 · 패닉) — 세대가 무엇이든 지금 에피소드를 `Done` 으로 내린다. 그 사이 다른 끊기가
+     /// 세운 에피소드도 「일꾼이 떠 있다」고 믿고 아무도 안 띄웠기 때문이다. 곧바로 다시 띄우지 않는다.
+     fn abandon(&mut self) -> Released {
+@@ -1965,19 +1964,18 @@ impl<G: Group> GateCell<G> {
+         if let Some(ep) = dropped {
+             self.release(ep.into_released());
+         }
+     }
+ 
+-    /// 판 끝(TRD §3-3) — 그 세대가 지금까지 하나라도 끝냈나를 준다.
+-    fn end_pass(&self, cleaner: &Cleaner<G>, gen: u64, killed: bool) -> bool {
+-        let (released, episode_killed) = {
++    /// 판 끝(TRD §3-3).
++    fn end_pass(&self, cleaner: &Cleaner<G>, gen: u64, killed: bool) {
++        let released = {
+             let mut state = self.lock();
+             let now = cleaner.clock.mono_now();
+             state.finish_pass(gen, killed, now)
+         };
+         self.release(released);
+-        episode_killed
+     }
+ 
+     /// 빼낸 것을 버리고 그 기록을 끈다 — 두 자물쇠 밖에서 부른다.
+     fn release(&self, released: Released) {
+         let Released { snap, w, rec } = released;
+@@ -2169,10 +2167,11 @@ fn run_pass<G: Group>(
+     let mut report = PassReport::default();
+     let killed = match precheck(
+         &ticket,
+         cleaner.recorder.active(),
+         cleaner.retiring.is_set(),
++        cleaner.recorder.port_failed(),
+     ) {
+         Ok(snapshot) => kill_rounds(cell, cleaner, &ticket, snapshot, &mut report),
+         Err(why) => {
+             report.stop = Some(PassStop::NotReady(why));
+             false
+@@ -2524,16 +2523,25 @@ enum NotReady {
+     RootGone,
+     /// 뿌리 끝남 조회 실패(warn `root_unknown`).
+     RootUnknown(io::Error),
+ }
+ 
+-/// 판의 순서 1–3 — 표식 없음 → 스냅숏이 섰고 그 기록이 아직 켜져 있음(`active` = 지금 켜진 번호) → 붙든 뿌리가 산다.
+-/// 뿌리 끝남 조회는 OS 호출이라 두 자물쇠 밖에서 부른다.
+-fn precheck(ticket: &Ticket, active: u64, retiring: bool) -> Result<&Snapshot, NotReady> {
++/// 판의 순서 1–3 — 표식 없음 → 포트가 실패로 굳지 않음(`port_failed`) · 스냅숏이 섰고 그 기록이 아직 켜져 있음
++/// (`active` = 지금 켜진 번호) → 붙든 뿌리가 산다. 포트가 굳었으면 새 멤버를 못 들었을 수 있어 「새 멤버 없음」 대신
++/// `snapshot_failed(port)` 다. 뿌리 끝남 조회는 OS 호출이라 두 자물쇠 밖에서 부른다.
++fn precheck(
++    ticket: &Ticket,
++    active: u64,
++    retiring: bool,
++    port_failed: bool,
++) -> Result<&Snapshot, NotReady> {
+     if retiring {
+         return Err(NotReady::Retiring);
+     }
++    if port_failed {
++        return Err(NotReady::Snapshot(SnapCause::Port));
++    }
+     let snap = match &ticket.snap {
+         SnapState::Taken(snap) if ticket.rec != 0 && active == ticket.rec => snap,
+         SnapState::Taken(_) => return Err(NotReady::Snapshot(SnapCause::Port)),
+         SnapState::Failed(cause) => return Err(NotReady::Snapshot(*cause)),
+         SnapState::Released => return Err(NotReady::Released),
+@@ -5661,11 +5669,12 @@ mod gate_tests {
+         let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+         let Step::Pass(ticket) = step else {
+             panic!("판이 서야 한다");
+         };
+         assert_eq!(&*ticket.w, &[ROOT, CONHOST, CLAUDE, X, Z, P][..]);
+-        let snapshot = precheck(&ticket, rig.recorder.active(), false).expect("판의 순서 1–3");
++        let snapshot =
++            precheck(&ticket, rig.recorder.active(), false, false).expect("판의 순서 1–3");
+         let births = rig.recorder.copy(ticket.rec);
+         let snapshot_links = snapshot.links();
+         let birth_links: Vec<Link<'_>> = births.iter().map(|b| b.link()).collect();
+         let exited = |l: &Link<'_>| -> io::Result<bool> {
+             births
+@@ -5755,12 +5764,11 @@ mod gate_tests {
+         };
+         assert!(matches!(
+             st.begin_interrupt(t + N + ms(5)),
+             Begin::Continue { gen: 2 }
+         ));
+-        let (released, killed_any) = st.finish_pass(ticket.gen, true, t + N + ms(9));
+-        assert!(killed_any);
++        let released = st.finish_pass(ticket.gen, true, t + N + ms(9));
+         assert_eq!(released.rec, 0);
+         let ep = st.episode.as_ref().expect("에피소드");
+         assert_eq!((ep.phase, ep.rec), (Phase::Waiting, 6));
+         assert!(ep.killed_any);
+         // 다시 N 을 기다린다.
+@@ -5780,13 +5788,13 @@ mod gate_tests {
+         };
+         let Step::Pass(ticket) = st.next_step(t + N, false) else {
+             panic!("판");
+         };
+         let at = t + N + ms(300);
+-        let (released, killed_any) = st.finish_pass(ticket.gen, true, at);
+-        assert!(killed_any);
++        let released = st.finish_pass(ticket.gen, true, at);
+         assert_eq!(released.rec, 4);
++        assert!(st.episode.as_ref().is_some_and(|ep| ep.killed_any));
+         assert_eq!(
+             st.episode.as_ref().map(|ep| ep.phase),
+             Some(Phase::Spent { at })
+         );
+         assert!(
+@@ -5810,12 +5818,12 @@ mod gate_tests {
+             ..GateState::default()
+         };
+         let Step::Pass(ticket) = st.next_step(t + N, false) else {
+             panic!("판");
+         };
+-        let (_, killed_any) = st.finish_pass(ticket.gen, false, t + N);
+-        assert!(!killed_any);
++        let _ = st.finish_pass(ticket.gen, false, t + N);
++        assert!(st.episode.as_ref().is_some_and(|ep| !ep.killed_any));
+         assert_eq!(st.episode.as_ref().map(|ep| ep.phase), Some(Phase::Done));
+     }
+ 
+     /// 끝내기 확정의 재확인은 같은 세대 · 쓰인 `Cleaning` · N 이 지난 때에만 선다. 표식이면 `Retiring`. 끝냄 표시는
+     /// 같은 세대에만.
+@@ -5967,30 +5975,30 @@ mod gate_tests {
+         let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+         let Step::Pass(ticket) = step else {
+             panic!("판");
+         };
+         let active = rig.recorder.active();
+-        assert!(precheck(&ticket, active, false).is_ok());
++        assert!(precheck(&ticket, active, false, false).is_ok());
+         assert!(matches!(
+-            precheck(&ticket, active, true),
++            precheck(&ticket, active, true, false),
+             Err(NotReady::Retiring)
+         ));
+ 
+         rig.group.exit_of(ROOT).store(EXITED, Ordering::SeqCst);
+         assert!(matches!(
+-            precheck(&ticket, active, false),
++            precheck(&ticket, active, false, false),
+             Err(NotReady::RootGone)
+         ));
+         rig.group.exit_of(ROOT).store(FAILING, Ordering::SeqCst);
+         assert!(matches!(
+-            precheck(&ticket, active, false),
++            precheck(&ticket, active, false, false),
+             Err(NotReady::RootUnknown(_))
+         ));
+ 
+         drop(rig.recorder.stop(active));
+         assert!(matches!(
+-            precheck(&ticket, rig.recorder.active(), false),
++            precheck(&ticket, rig.recorder.active(), false, false),
+             Err(NotReady::Snapshot(SnapCause::Port))
+         ));
+         rig.cell.end_pass(&rig.cleaner, ticket.gen, false);
+         drop(ticket);
+         rig.check();
+@@ -6005,15 +6013,44 @@ mod gate_tests {
+         let step = failed.cell.lock().next_step(failed.clock.mono_now(), false);
+         let Step::Pass(ticket) = step else {
+             panic!("판");
+         };
+         assert!(matches!(
+-            precheck(&ticket, failed.recorder.active(), false),
++            precheck(&ticket, failed.recorder.active(), false, false),
+             Err(NotReady::Snapshot(SnapCause::List))
+         ));
+     }
+ 
++    /// 포트가 실패로 굳었으면 스냅숏 · 기록이 멀쩡해도 판은 서지 않는다 — `no_new_member` 가 아니라
++    /// `snapshot_failed(port)` 다. 표식이 먼저다.
++    #[test]
++    fn a_failed_port_stops_the_pass_as_a_port_snapshot_failure() {
++        let rig = GateRig::new();
++        rig.open();
++        let out = rig.esc_with_check();
++        rig.write(out);
++        rig.clock.advance(N);
++        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
++        let Step::Pass(ticket) = step else {
++            panic!("판");
++        };
++        let active = rig.recorder.active();
++        assert!(precheck(&ticket, active, false, rig.recorder.port_failed()).is_ok());
++        rig.recorder.fail_port();
++        assert!(matches!(
++            precheck(&ticket, active, false, rig.recorder.port_failed()),
++            Err(NotReady::Snapshot(SnapCause::Port))
++        ));
++        assert!(matches!(
++            precheck(&ticket, active, true, rig.recorder.port_failed()),
++            Err(NotReady::Retiring)
++        ));
++        rig.cell.end_pass(&rig.cleaner, ticket.gen, false);
++        drop(ticket);
++        rig.check();
++    }
++
+     // ── 판의 차례 ─────────────────────────────────────────────────────────────────────
+ 
+     fn pids_rounds(report: &PassReport) -> Vec<(u32, u32)> {
+         report.terminated.iter().map(|k| (k.pid, k.round)).collect()
+     }

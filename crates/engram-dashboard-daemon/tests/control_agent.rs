@@ -1236,6 +1236,7 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
         names,
         vec![
             "agent.cancelQueuedInput",
+            "agent.interrupt",
             "agent.list",
             "agent.listQueuedInputs",
             "agent.move",

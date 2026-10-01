@@ -16,7 +16,7 @@
 //! (구 한계 "LIVE-forward 만 / 스왑 시 backfill 안 됨, ADR-0041" 은 ADR-0046 뷰 직결 replay 로 해소 —
 //! 어느 mount 든 requestReplay 전량 backfill 로 채운다.)
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import { agentClient } from '../../api/clientFactory'
 import { FRAME_TAG_TERMINAL_BYTES } from '../../api/wsFrame'
@@ -24,6 +24,8 @@ import type { OutputSubscription, ViewPhase } from '../../api/agentClient'
 import { useAgentStore } from '../../store/agentStore'
 import { ScrollArea } from '../ui/scroll-area'
 import { SlotUnavailableVeil } from './SlotUnavailableVeil'
+import { useScrollFollow } from './scrollFollow/useScrollFollow'
+import { JumpToBottom } from './scrollFollow/JumpToBottom'
 
 interface DomSlotProps {
   /** 구독 키(ADR-0046) = 슬롯 id. 같은 agentId 두 슬롯도 독립 구독·독립 진도(버그 B 해소). */
@@ -75,10 +77,7 @@ function splitTrailingEsc(s: string): [string, string] {
 export default function DomSlot({ viewId, agentId }: DomSlotProps) {
   // React state 로 들고 리렌더 — 관측용이라 xterm 같은 명령형 write 대신 선언적 렌더.
   const [text, setText] = useState('')
-  // ★scrollRef = ScrollArea Viewport(공용 seam 이 forward, ADR-0053)★: 실제 overflow/scrollTop 노드는
-  //   Radix Viewport 다. 하단 고정 auto-scroll(scrollTop=scrollHeight)이 이 노드를 겨눠야 tail 이 붙는다
-  //   (구 raw <pre overflow:auto> 는 pre 자신이 스크롤 노드였음 — seam 전환으로 대상이 Viewport 로 이동).
-  const scrollRef = useRef<HTMLDivElement>(null)
+  const follow = useScrollFollow(viewId)
   // 구독이 마지막으로 알린 국면 — 아래 배지의 근거(TerminalSlot 동형).
   const [phase, setPhase] = useState<ViewPhase | null>(null)
 
@@ -106,6 +105,7 @@ export default function DomSlot({ viewId, agentId }: DomSlotProps) {
   useEffect(() => {
     setText('') // C2: StrictMode 중복 방지
     setPhase(null) // 새 구독의 국면은 그 구독의 통지가 다시 세운다.
+    follow.pin() // ADR-0242: 비운 뒤 오는 이력이 바닥에 착지한다.
     // stream=true 로 청크 경계에 걸친 멀티바이트 UTF-8 보존. 다른 화신이 붙을 때 갈아 끼운다(아래 onReset) —
     //   앞 화신의 미완 바이트를 물고 있으면 새 replay 첫 글자에 깨진 문자가 붙는다.
     let decoder = new TextDecoder()
@@ -153,6 +153,7 @@ export default function DomSlot({ viewId, agentId }: DomSlotProps) {
         () => {
           if (cancelled) return
           setText('')
+          follow.pin() // ADR-0242: 새 화신의 이력이 바닥에 착지한다.
           lastSeq.current = -1
           pending = ''
           decoder = new TextDecoder()
@@ -176,23 +177,18 @@ export default function DomSlot({ viewId, agentId }: DomSlotProps) {
     // ★렌더러 스왑/remount 도 재구독이 requestReplay 전량 backfill 로 해소(ADR-0046)★ — 스왑 이전 출력도
     //   뷰 buffering→마커 flush 로 복원된다(구 "LIVE-forward 만" 한계는 ADR-0046 로 해소, 파일 헤더 참조).
     // viewId 포함 — 구독 키(ADR-0046, 같은 agentId 두 슬롯 독립).
+    // ★`follow` 는 넣지 않는다★ — 그 `pin` 은 마운트 수명 동안 같은 함수다(ADR-0242 · `useScrollFollow` 머리).
   }, [viewId, agentId])
-
-  // ★대상 = ScrollArea Viewport★(위 scrollRef 주석).
-  useEffect(() => {
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [text])
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', boxSizing: 'border-box' }}>
       {/* 스크롤 표면 = 공용 ScrollArea seam(ADR-0053) — 구 raw <pre overflow:auto> 를 오버레이 스크롤바로
-          교체. ref 는 Viewport(실제 스크롤 노드)로 forward 되어 하단 고정 auto-scroll 대상이 된다.
+          교체. ref 는 Viewport(실제 스크롤 노드)로 forward 되어 스크롤 따라가기(ADR-0242)가 재고 쓰는 노드가 된다.
           data-dom-mode / data-agent-id: cdp eval·테스트에서 DOM 모드 마운트 여부·대상 확인용 마커는 안쪽
           <pre>(관측 텍스트 노드)에 유지한다(RichSlot 관례 동형 — textContent 로 읽힌다).
           입력 처리 없음 — read-only 관측기(입력은 TerminalSlot/agentClient.writeStdin 경로, 파일 헤더 참조). */}
       <ScrollArea
-        ref={scrollRef}
+        ref={follow.viewportRef}
         style={{ width: '100%', height: '100%', background: 'var(--bg)' }}
       >
         <pre
@@ -211,6 +207,7 @@ export default function DomSlot({ viewId, agentId }: DomSlotProps) {
         >
           {text}
         </pre>
+        <JumpToBottom follow={follow} />
       </ScrollArea>
       {agentUnavailable && <SlotUnavailableVeil phase={phase} />}
     </div>

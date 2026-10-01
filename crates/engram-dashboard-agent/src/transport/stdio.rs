@@ -7,6 +7,8 @@
 //! ★무정제 불변(ADR-0044/0045)★: transport 층은 stdout 바이트의 스키마를 모른다 — decoder 가
 //!   없으면 `OutputEvent::TerminalBytes`로 그대로 넘기고(캐리어 variant 재사용), 있으면 주입된
 //!   decoder 를 적용만 한다. 파싱은 backend decoder 소관이지 이 층도 프론트도 아니다.
+//!   끊기 줄과 그 줄이 나간 뒤 부를 것([`InterruptOut`])도 입력 큐로 넘기기만 하고, 무리 손잡이와 물러남 표시
+//!   (`StdioTransport::process_group`)는 내주기만 한다 — 쓰임은 backend 가 안다.
 //!
 //! ★PTY와 결정적 차이 — watcher 불필요★: ConPTY는 master가 살아 있으면 자식이 스스로 exit해도
 //!   reader에 EOF를 안 줘서 PtyTransport가 자연 종료 감지용 watcher 스레드를 둔다. **파이프는
@@ -24,15 +26,30 @@ use std::sync::{Arc, Mutex};
 use engram_dashboard_base::logging::mask_secrets;
 
 use crate::output_core::OutputCore;
-use crate::transport::input_queue::{self, InputQueue};
+use crate::transport::input_queue::{self, InputQueue, OnWritten};
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps,
 };
 
+use crate::platform::process_group::ProcessGroup;
 #[cfg(windows)]
-use crate::platform::JobObjectHandle;
+use crate::platform::{process_group::RetiringSignal, JobObjectHandle};
+
+/// 끊기 줄 함수가 주는 것 — stdin 에 쓸 줄 한 벌과, 그 줄이 실제로 파이프로 나간 뒤 라이터가 부를 것(계약 =
+/// [`OnWritten`] — 나가지 못하면 불리지 않고 버려진다). 통로는 둘 다 입력 큐로 넘기기만 한다.
+pub struct InterruptOut {
+    pub bytes: Vec<u8>,
+    pub on_written: Option<OnWritten>,
+}
+
+/// 「지금 도는 턴을 멈춰 달라」는 stdin 줄 한 벌을 만드는 backend 함수. 통로는 그 바이트의 뜻을 모른다(바보 파이프).
+///
+/// `None` = 「지금은 끊을 턴이 없다」 — 판정은 backend 가 하고 통로는 그대로 `Unsupported` 로 옮긴다. 파이프엔
+/// Ctrl-C 같은 통로 자신의 끊기 수단이 없어서, 끊기는 이 줄을 만드는 쪽의 지식이다.
+// ADR-0238
+pub type InterruptLine = Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>;
 
 pub struct StdioTransport {
     /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child는 wait 후 exit status를 캐시하므로
@@ -51,6 +68,10 @@ pub struct StdioTransport {
     stderr: Mutex<Option<ChildStderr>>,
     /// shutdown(kill) 진행 신호. set(Release)면 pump가 종료 시 Killed로 전이(pump가 Acquire).
     shutdown: Arc<AtomicBool>,
+    /// 물러남 표시 — [`AgentTransport::begin_retire`] 와 `shutdown()` 첫 줄이 세우고 아무도 내리지 않는다. 이 통로는
+    /// 읽지 않고 [`Self::process_group`] 에 읽기 전용 사본으로 실어 내줄 뿐이다 — 쓰임은 통로가 모른다. `Arc` 인 것은
+    /// 내준 사본이 통로보다 오래 살 수 있어서다(칸을 나눠 쥔다).
+    retiring: Arc<AtomicBool>,
     /// 이 파이프가 나르는 출력이 구조화 스트림(NDJSON)인지. ★주입값이다(ADR-0044/0030/0191)★:
     /// "구조화냐"는 파이프가 아니라 그 프로그램의 출력 형식(backend 지식)이 정하므로, 이 통로를 만드는
     /// backend 가 `open` 인자로 주입한다(하드코딩 금지 — 평문 stdio 엔 false). capabilities()가 그대로 신고.
@@ -58,8 +79,14 @@ pub struct StdioTransport {
     /// 출력 정제 decoder(ADR-0004/0044). 이 통로를 만드는 backend 가 구조화 모드에 주입한다(없으면
     /// 바이트 직통 = 평문·터미널 경로). start()에서 take 해 pump 스레드로 move(=None 이면 이미 시작됨).
     decoder: Mutex<Option<Box<dyn OutputDecoder>>>,
+    /// 끊기 줄 함수. `None` = 이 통로를 만든 backend 가 끊는 법을 주지 않았다 — `interrupt()` 는 늘 `Unsupported` 이고
+    /// 능력도 거짓이다.
+    // ADR-0238
+    interrupt: Option<InterruptLine>,
+    /// `Arc` 인 것은 [`Self::process_group`] 이 약한 손잡이를 내주려는 것이다 — 강한 참조는 여기 하나뿐이라
+    /// 통로가 사라지면 Job 핸들도 닫힌다(`KILL_ON_JOB_CLOSE`).
     #[cfg(windows)]
-    job_handle: JobObjectHandle,
+    job_handle: Arc<JobObjectHandle>,
 }
 
 impl StdioTransport {
@@ -112,7 +139,7 @@ impl StdioTransport {
             if let Some(pid) = child_pid {
                 job.assign(pid)?;
             }
-            job
+            Arc::new(job)
         };
 
         let transport = StdioTransport {
@@ -122,13 +149,40 @@ impl StdioTransport {
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
             shutdown: Arc::new(AtomicBool::new(false)),
+            retiring: Arc::new(AtomicBool::new(false)),
             structured,
             decoder: Mutex::new(decoder),
+            interrupt: None,
             #[cfg(windows)]
             job_handle,
         };
 
         Ok((transport, child_pid))
+    }
+
+    /// 이 통로가 띄운 프로세스 무리의 약한 손잡이 — 물러남 표시의 읽기 전용 사본을 함께 싣는다. 통로는 그것이
+    /// 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」). `None` = 이 OS 에서는 무리를 묶는 수단이 없다(Windows 밖).
+    // ADR-0262
+    pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
+        #[cfg(windows)]
+        {
+            Some(ProcessGroup::new(
+                Arc::downgrade(&self.job_handle),
+                RetiringSignal::of(&self.retiring),
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    }
+
+    /// 끊기 줄 함수를 꽂는다 — 꽂으면 능력 `control.interrupt` 가 참이 된다(「지금 턴이 있다」가 아니라 「끊을 수 있는
+    /// 통로다」). `open` 인자가 아닌 것은 주입 없는 호출자(평문 stdio · 시험)가 오늘 그대로 서게 하려는 것이다.
+    // ADR-0238
+    pub fn with_interrupt(mut self, line: InterruptLine) -> Self {
+        self.interrupt = Some(line);
+        self
     }
 }
 
@@ -370,11 +424,27 @@ impl AgentTransport for StdioTransport {
         ))
     }
 
+    /// 주입된 함수가 준 줄을 입력 큐에 넣는다 — 사용자 줄과 같은 라이터 스레드가 **통째로** 쓰므로 줄이 섞이지 않는다.
+    /// ★입력 자물쇠(`input_order`)를 타지 않는다★ — 끊기는 입력 id 에 묶이지 않아 그 자물쇠가 지킬 순서가 없고, 그래서
+    ///   락 순서에 새 간선이 없다. `Ok` 는 [`Self::send_input`] 과 같이 「받았다」이지 「턴이 멈췄다」가 아니다.
+    // ADR-0238
     fn interrupt(&self) -> Result<(), PtyError> {
-        Err(PtyError::Unsupported(
-            "StdioTransport::interrupt (ADR-0044 MVP 미지원 — 파이프 Ctrl-C 없음, 후속 스파이크)"
-                .into(),
-        ))
+        let Some(line) = &self.interrupt else {
+            return Err(PtyError::Unsupported(
+                "StdioTransport::interrupt (이 통로엔 끊기 줄이 없다 — 파이프엔 Ctrl-C 가 없다)"
+                    .into(),
+            ));
+        };
+        match line() {
+            Some(InterruptOut { bytes, on_written }) => self.input.push_with(bytes, on_written),
+            None => Err(PtyError::Unsupported(
+                "StdioTransport::interrupt (끊을 턴이 없다)".into(),
+            )),
+        }
+    }
+
+    fn begin_retire(&self) {
+        self.retiring.store(true, Ordering::Release);
     }
 
     /// ADR-0001 2동사의 파이프판.
@@ -394,6 +464,10 @@ impl AgentTransport for StdioTransport {
     ///   락이 해제된다. 그 뒤에야 try_lock 으로 stdin 을 best-effort 정리한다(blocking lock 절대 금지).
     /// ※graceful-exit-via-stdin-close 는 필요 없다 — 어차피 여기서 kill 하므로.
     fn shutdown(&self) {
+        // 0. 물러남 표시를 무엇보다 먼저 — `begin_retire` 를 거치지 않는 끝내기 길도 있어서, 표시를 보는 쪽이 아래
+        //    종료와 겹치는 창을 여기서도 가장 좁게 둔다. 아래 순서 불변식은 건드리지 않는다(원자 쓰기 하나다).
+        self.retiring.store(true, Ordering::Release);
+
         // 1. shutdown 신호 — pump가 종료 시 Killed로 전이.
         self.shutdown.store(true, Ordering::Release);
 
@@ -440,7 +514,7 @@ impl AgentTransport for StdioTransport {
             },
             control: ControlCaps {
                 resize: false,
-                interrupt: false,
+                interrupt: self.interrupt.is_some(),
                 cancel: false,
                 graceful_shutdown: false,
             },
@@ -504,11 +578,125 @@ mod tests {
         assert!(caps.output.structured, "json 캐리어 주입 → structured=true");
         assert!(!caps.output.terminal_bytes, "터미널 바이트 아님");
         assert!(!caps.control.resize, "파이프 resize 불가");
-        assert!(!caps.control.interrupt, "MVP interrupt 미지원");
+        assert!(
+            !caps.control.interrupt,
+            "끊기 줄을 주입하지 않은 통로 = 끊기 능력 없음"
+        );
         assert!(caps.input.raw, "stdin raw 쓰기 가능");
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
+    }
+
+    // ── 끊기 줄 주입(ADR-0238): 함수가 `Some` 이면 그 줄 한 벌이 부를 것과 함께 큐에 · `None` 이면 `Unsupported` 에 큐 무변경 ──
+    // `start()` 를 부르지 않는다 — 라이터가 없어야 큐에 든 것을 그대로 꺼내 잴 수 있다.
+    #[cfg(windows)]
+    #[test]
+    fn an_injected_interrupt_line_is_queued_whole_and_a_closed_answer_is_unsupported() {
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo interrupt-probe".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let turn_open = Arc::new(AtomicBool::new(false));
+        let answer = Arc::clone(&turn_open);
+        let fired = Arc::new(AtomicBool::new(false));
+        let mark = Arc::clone(&fired);
+        let line: InterruptLine = Arc::new(move || {
+            let mark = Arc::clone(&mark);
+            answer.load(Ordering::SeqCst).then(|| InterruptOut {
+                bytes: b"{\"stop\":1}\n".to_vec(),
+                on_written: Some(Box::new(move || mark.store(true, Ordering::SeqCst))),
+            })
+        });
+
+        let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+        let transport = transport.with_interrupt(line);
+        assert!(
+            transport.capabilities().control.interrupt,
+            "주입이 있으면 능력은 참 — 지금 턴이 있나와 무관하다"
+        );
+
+        assert!(matches!(
+            transport.interrupt(),
+            Err(PtyError::Unsupported(_))
+        ));
+        assert_eq!(
+            transport.input.queued_bytes(),
+            0,
+            "거절한 끊기는 큐를 건드리지 않는다"
+        );
+
+        turn_open.store(true, Ordering::SeqCst);
+        transport.interrupt().expect("턴이 열려 있으면 줄을 받는다");
+        assert_eq!(transport.input.queued_bytes(), b"{\"stop\":1}\n".len());
+        let (bytes, on_written) = transport.input.pop().expect("큐에 든 끊기 줄");
+        assert_eq!(bytes, b"{\"stop\":1}\n".to_vec());
+        on_written.expect("줄과 함께 준 부를 것이 큐까지 따라온다")();
+        assert!(fired.load(Ordering::SeqCst));
+        turn_open.store(false, Ordering::SeqCst);
+        assert!(
+            transport.capabilities().control.interrupt,
+            "능력은 문 값을 따라 흔들리지 않는다"
+        );
+        transport.shutdown();
+    }
+
+    // ── 물러남 표시: `begin_retire` 와 `shutdown` 이 각각 세운다 · 무리 손잡이가 내준 읽기 전용 표시도 그것을 보고
+    //    통로가 사라진 뒤에도 선 채다 · 예고는 자원을 거두지 않는다 ──
+    // 표시는 OS 와 무관하므로 모든 OS 에서 돈다 — 곧 끝나는 무해한 자식으로 통로만 세운다. 무리 손잡이는 Windows
+    // 통로에만 있다.
+    #[test]
+    fn begin_retire_and_shutdown_each_raise_the_retiring_flag() {
+        #[cfg(windows)]
+        let (program, args) = ("cmd.exe", vec!["/c".into(), "echo retire-probe".into()]);
+        #[cfg(not(windows))]
+        let (program, args) = ("true", Vec::new());
+        let spec = CommandSpec {
+            program: program.into(),
+            args,
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+
+        let (announced, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+        let handed = announced.process_group().map(|group| group.retiring());
+        assert_eq!(
+            handed.is_some(),
+            cfg!(windows),
+            "무리 손잡이는 Windows 통로에만 있다"
+        );
+        assert!(
+            !announced.retiring.load(Ordering::Acquire),
+            "갓 연 통로가 이미 물러나는 중이다"
+        );
+        assert!(!handed.as_ref().is_some_and(|signal| signal.is_set()));
+        announced.begin_retire();
+        assert!(announced.retiring.load(Ordering::Acquire));
+        assert!(
+            handed.as_ref().is_none_or(|signal| signal.is_set()),
+            "내준 표시가 예고를 못 본다"
+        );
+        announced
+            .send_input(InputEvent::Raw(b"still-open\n".to_vec()))
+            .expect("예고가 입력 큐를 닫았다 — 거두기는 shutdown 몫이다");
+        announced.shutdown();
+
+        let (shut, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+        let handed = shut.process_group().map(|group| group.retiring());
+        assert!(!shut.retiring.load(Ordering::Acquire));
+        assert!(!handed.as_ref().is_some_and(|signal| signal.is_set()));
+        shut.shutdown();
+        assert!(
+            shut.retiring.load(Ordering::Acquire),
+            "예고 없이 온 종료가 물러남 표시를 세우지 않는다"
+        );
+        drop(shut);
+        assert!(
+            handed.as_ref().is_none_or(|signal| signal.is_set()),
+            "예고 없이 온 종료를 내준 표시가 못 본다 — 통로가 사라진 뒤에도 선 채여야 한다"
+        );
     }
 
     // ── FIX 1 회귀 + 라이터 스레드 회귀 ──
@@ -603,5 +791,121 @@ mod tests {
         );
 
         core.join_pump(Duration::from_secs(5));
+    }
+
+    // ── 무리 손잡이(ADR-0262): 통로가 사는 동안 멤버가 보이고, 통로가 사라지면 명단은 비고 아무도 못 붙든다 ──
+    // `shutdown()` 없이 drop 만 한다 — shutdown 은 Job 을 통째 끝내 손잡이가 강해도 명단이 빈다. drop 만이면
+    // 손잡이가 약할 때만 Job 핸들이 닫혀(`KILL_ON_JOB_CLOSE`) 무리가 끝나고, 강하면 ping 이 명단에 남는다. 붙든
+    // 멤버도 Job 을 붙들지 않아야 무리가 끝난다 — 뿌리와 ping 을 붙든 채 버린다.
+    // `start()` 를 안 불러 통로의 스레드가 없으므로 drop 뒤에 매달리는 것도 없다.
+    // cmd 는 stdin 한 줄을 받을 때까지 ping 을 안 띄운다 — `open` 이 Job 에 넣기 전에 ping 이 새어 나가지 않게.
+    #[cfg(windows)]
+    #[test]
+    fn the_process_group_sees_the_root_and_empties_once_the_transport_is_gone() {
+        use std::time::{Duration, Instant};
+
+        // ping 이 스스로 끝나는 데 ~9 초 — 아래 5 초 대기 안에 끝나면 그것은 Job 닫기의 몫이다. 출력은 `NUL` 로 보내
+        //   통로가 사라지며 파이프가 닫혀 쓰기 실패로 죽는 길도 막는다.
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: [
+                "/d",
+                "/c",
+                "set",
+                "/p",
+                "_=",
+                "&",
+                "ping",
+                "-n",
+                "10",
+                "127.0.0.1",
+                ">",
+                "NUL",
+            ]
+            .map(String::from)
+            .to_vec(),
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, pid) = StdioTransport::open(&spec, true, None).expect("open");
+        let root_pid = pid.expect("자식 PID");
+        let group = transport
+            .process_group()
+            .expect("Windows 통로는 무리를 내준다");
+        let root = group
+            .pin(root_pid, false)
+            .expect("붙들기")
+            .expect("뿌리는 우리 멤버다");
+
+        // 콘솔 호스트는 cmd 가 뜨며 붙는다 — 그보다 넉넉히 뒤에 명단을 찍고 문을 열어, 그 명단에 없던 멤버 = ping 으로
+        //   가른다(시각을 견주지 않는다).
+        std::thread::sleep(Duration::from_millis(100));
+        let before_gate = group.member_pids().expect("문 앞 명단");
+        assert!(
+            before_gate.contains(&root_pid),
+            "뿌리가 명단에 없다: {before_gate:?}"
+        );
+        {
+            let mut stdin = transport.stdin.lock().unwrap_or_else(|p| p.into_inner());
+            let stdin = stdin.as_mut().expect("stdin 파이프");
+            stdin.write_all(b"go\r\n").expect("문 열기");
+            stdin.flush().expect("문 열기");
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let ping = loop {
+            let members = group.member_pids().expect("명단");
+            assert!(
+                members.contains(&root_pid),
+                "뿌리가 명단에 없다: {members:?}"
+            );
+            let born_after_gate = members
+                .into_iter()
+                .filter(|pid| !before_gate.contains(pid))
+                .find_map(|pid| group.pin(pid, false).ok().flatten());
+            if let Some(ping) = born_after_gate {
+                break ping;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "10 초 안에 Job 안의 ping 을 못 봤다"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(!root.exited().expect("끝났나") && !ping.exited().expect("끝났나"));
+
+        drop(transport);
+        assert_eq!(
+            group.member_pids().expect("명단"),
+            Vec::<u32>::new(),
+            "통로가 사라졌는데 명단이 남았다 — 손잡이가 Job 을 붙들고 있다"
+        );
+        assert!(
+            group.pin(root_pid, false).expect("붙들기").is_none(),
+            "통로가 사라졌는데 뿌리를 붙들었다"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        for member in [&root, &ping] {
+            let left = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                member.wait_exit(left).expect("끝나기 대기"),
+                "통로를 버린 뒤 5 초가 지나도 뿌리나 ping 이 살아 있다 — Job 이 안 닫혔다: {:?}",
+                member.facts()
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn there_is_no_process_group_off_windows() {
+        let spec = CommandSpec {
+            program: "true".into(),
+            args: vec![],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+        assert!(transport.process_group().is_none());
+        transport.shutdown();
     }
 }

@@ -658,9 +658,12 @@ mod tests {
     // ── 1b. (S15 B7) Event(구조화) payload 를 tag1 frame 으로 인코딩하는지 ──────
     #[tokio::test]
     async fn frame_output_sink_encodes_event_as_tag1_structured_frame() {
-        use engram_dashboard_agent::types::OutputEvent as CoreOutputEvent;
+        use engram_dashboard_agent::types::{
+            OutputEvent as CoreOutputEvent, ToolCategory as CoreToolCategory,
+        };
         use engram_dashboard_protocol::{
-            decode_frame, StructuredEvent as WireStructuredEvent, FRAME_TAG_STRUCTURED_EVENT,
+            decode_frame, StructuredEvent as WireStructuredEvent, ToolCategory as WireToolCategory,
+            FRAME_TAG_STRUCTURED_EVENT,
         };
 
         let (tx, mut rx) = mpsc::channel::<Frame>(8);
@@ -672,6 +675,7 @@ mod tests {
             id: Some("call_1".into()),
             turn_id: Some("t9".into()),
             message_id: None,
+            category: CoreToolCategory::Read,
         };
         let frame = OutputFrame {
             agent_id,
@@ -698,6 +702,7 @@ mod tests {
                         id: Some("call_1".into()),
                         turn_id: Some("t9".into()),
                         message_id: None,
+                        category: Some(WireToolCategory::Read),
                     },
                     "tag1 payload 가 wire StructuredEvent 로 무손실 복원"
                 );

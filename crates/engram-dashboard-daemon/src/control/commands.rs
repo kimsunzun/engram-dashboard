@@ -431,15 +431,17 @@ mod tests {
 
     /// ★CLI 동사 명단에서 기대값을 **파생**한다★ — 손으로 적으면 agent 에 동사가 늘어도 이 단언이 옛
     ///   명단을 그대로 통과시킨다. 선언 없이 늘어난 동사는 CLI 가 부를 수 없는 채로 남는다.
-    /// ★CLI 동사가 없는 이름은 아래 목록에 적은 것뿐이다★ — 대기 목록 두 동사는 `engram agent <동사>` 에
-    ///   올리지 않고(`CLI_AGENT_VERBS` 밖) 버스·`engram call` 로만 부른다. 목록에 없는 이름이 표에 늘면
+    /// ★CLI 동사가 없는 이름은 아래 목록에 적은 것뿐이다★ — 대기 목록 두 동사와 끊기(`agent.interrupt` —
+    ///   ADR-0237)는 `engram agent <동사>` 에 올리지 않고(`CLI_AGENT_VERBS` 밖) 버스·범용 호출
+    ///   (`engram <이름> …`)로만 부른다. 목록에 없는 이름이 표에 늘면
     ///   CLI 에 올릴지를 정하지 않은 채 늘어난 것이라 여기서 멈춘다. 사용량 두 동사(`usage.*`)는 `agent` 계열이
     ///   아니라 계열 라우트(`/control/agent`)에 애초에 안 닿는다 — 전체 이름으로만 부른다.
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 4] = [
+        const BUS_ONLY: [&str; 5] = [
             "agent.cancelQueuedInput",
+            "agent.interrupt",
             "agent.listQueuedInputs",
             "usage.get",
             "usage.refresh",

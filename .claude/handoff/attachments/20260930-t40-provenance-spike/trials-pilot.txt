@@ -1,0 +1,7 @@
+label | line | kind | result(ms after Esc, subtype) | S3 TRD candidates {L=launcher} | Q4 kills | follow-up (line)
+p1t1(#1) | 15 | ok | 723 error_during_execution |  |  |  
+p1bg | 21 | HANG | 10088 error_during_execution | bash.exe(wiki-preconsult):3256+352ms{L=bash.exe[wiki-preconsult]}, sleep.exe:24060+2173ms{L=bash.exe[bg]} | bash.exe(wiki-preconsult):3256=Terminated, sleep.exe:11552=SKIPPED(not hook chain) ->result 19ms | success:1948ms (:26)
+
+A trials=1 HANG=0 LATE=0 ok=1
+A follow-ups: []
+bg trials: [('p1bg', 'HANG', 'success:1948ms')]

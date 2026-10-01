@@ -56,7 +56,8 @@ pub async fn agent_kill(
     expect_ack(client.send_command(cmd).await)
 }
 
-// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존.
+// 진행 중 작업만 중단. 프로세스는 생존. 터미널 모드(PTY)는 거절한다 — 터미널이 키를 직접 받는다.
+// ADR-0245
 #[tauri::command]
 pub async fn agent_interrupt(
     client: State<'_, Arc<DaemonClient>>,

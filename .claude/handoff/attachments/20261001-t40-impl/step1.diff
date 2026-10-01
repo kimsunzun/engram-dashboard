@@ -1,0 +1,3118 @@
+diff --git a/crates/engram-dashboard-agent/Cargo.toml b/crates/engram-dashboard-agent/Cargo.toml
+index 563cace..132fb17 100644
+--- a/crates/engram-dashboard-agent/Cargo.toml
++++ b/crates/engram-dashboard-agent/Cargo.toml
+@@ -46,6 +46,12 @@ engram-dashboard-command = { path = "../engram-dashboard-command", features = ["
+ # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
+ #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
+ #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.
++# `Win32_System_IO` = Job 가입 알림을 받는 완료 포트(`CreateIoCompletionPort` · `GetQueuedCompletionStatus`)
++#   몫 — 멤버가 새로 든 것을 듣는 공개 수단이 그것뿐이고, claude 끊기 뒤 잔여물 정리가 「끊기 뒤에
++#   태어났나」를 시각이 아니라 그 알림으로 가른다(T-40).
++# `Wdk_System_Threading` = `NtQueryInformationProcess` 몫 — 같은 정리가 붙든 핸들로 부모 PID 와 명령줄을
++#   읽는다(T-40). ★`Win32_System_Kernel` · `Win32_System_SystemServices` 는 켜지 않는다★ — 그 결과
++#   구조체와 알림 번호 상수만 쓰려고 켤 일이라 `platform/windows.rs` 가 `repr(C)` 와 상수로 대신한다.
+ [target.'cfg(windows)'.dependencies]
+ windows = { version = "0.58", features = [
+     "Win32_System_JobObjects",
+@@ -53,4 +59,6 @@ windows = { version = "0.58", features = [
+     "Win32_System_Threading",
+     "Win32_Security",
+     "Win32_System_RestartManager",
++    "Win32_System_IO",
++    "Wdk_System_Threading",
+ ] }
+diff --git a/crates/engram-dashboard-agent/src/backend/claude/mod.rs b/crates/engram-dashboard-agent/src/backend/claude/mod.rs
+index 72e66af..a38e1fc 100644
+--- a/crates/engram-dashboard-agent/src/backend/claude/mod.rs
++++ b/crates/engram-dashboard-agent/src/backend/claude/mod.rs
+@@ -40,7 +40,7 @@ use crate::failure::AgentFailureKind;
+ use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
+ use crate::session_tracker::SessionIdSource;
+ use crate::transport::pty::PtyTransport;
+-use crate::transport::stdio::{InterruptLine, StdioTransport};
++use crate::transport::stdio::{InterruptLine, InterruptOut, StdioTransport};
+ use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
+ use crate::turn::{TurnEndKind, TurnSignal};
+ use crate::types::{
+@@ -831,7 +831,12 @@ fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
+ /// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT).
+ // ADR-0238
+ fn interrupt_line(gate: Arc<TurnGate>) -> InterruptLine {
+-    Arc::new(move || gate.is_open().then(|| interrupt_line_bytes(Uuid::new_v4())))
++    Arc::new(move || {
++        gate.is_open().then(|| InterruptOut {
++            bytes: interrupt_line_bytes(Uuid::new_v4()),
++            on_written: None,
++        })
++    })
+ }
+ 
+ // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
+@@ -5854,9 +5859,9 @@ mod tests {
+         decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
+         let ids: Vec<String> = [line(), line()]
+             .into_iter()
+-            .map(|bytes| {
++            .map(|out| {
+                 let v: serde_json::Value =
+-                    serde_json::from_slice(&bytes.expect("열린 문")).unwrap();
++                    serde_json::from_slice(&out.expect("열린 문").bytes).unwrap();
+                 assert_eq!(v["request"]["subtype"], "interrupt");
+                 v["request_id"].as_str().unwrap().to_string()
+             })
+diff --git a/crates/engram-dashboard-agent/src/backend/mod.rs b/crates/engram-dashboard-agent/src/backend/mod.rs
+index 274cd42..f861101 100644
+--- a/crates/engram-dashboard-agent/src/backend/mod.rs
++++ b/crates/engram-dashboard-agent/src/backend/mod.rs
+@@ -56,19 +56,6 @@ pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<
+     }
+ }
+ 
+-/// [`console_command`] 이 프로그램 위에 씌우는 프로세스 층 수 — 스폰한 뿌리에서 프로그램까지의 깊이다.
+-// ADR-0257
+-pub(crate) fn console_wrapper_depth() -> usize {
+-    #[cfg(windows)]
+-    {
+-        1
+-    }
+-    #[cfg(not(windows))]
+-    {
+-        0
+-    }
+-}
+-
+ // ── CLI 입구 주입(백엔드 공용) ────────────────────────────────────────────────
+ 
+ /// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
+@@ -1035,17 +1022,6 @@ mod tests {
+     use super::*;
+     use crate::profile::AgentOutputFormat;
+ 
+-    /// 층 수는 감싸기와 한 사실이다 — 감쌌으면 1, 그대로면 0.
+-    #[test]
+-    fn the_wrapper_depth_matches_what_console_command_wraps() {
+-        let (program, args) = console_command("claude", vec!["-p".into()]);
+-        let wrapped = program != "claude";
+-        assert_eq!(console_wrapper_depth(), usize::from(wrapped));
+-        if wrapped {
+-            assert_eq!(args.get(1).map(String::as_str), Some("claude"));
+-        }
+-    }
+-
+     // ── ADR-0099 트립와이어: 새 AgentCommand variant 배선 시 capability 의식적 선언 강제 ──────
+     //
+     // ★ 와일드카드를 절대 추가하지 말 것 ★ — 새 AgentCommand variant가 생기면 이 match가
+diff --git a/crates/engram-dashboard-agent/src/manager.rs b/crates/engram-dashboard-agent/src/manager.rs
+index b6eca02..5c3d48f 100644
+--- a/crates/engram-dashboard-agent/src/manager.rs
++++ b/crates/engram-dashboard-agent/src/manager.rs
+@@ -2353,6 +2353,9 @@ impl AgentManager {
+             );
+             return;
+         }
++        // 물러남 예고가 첫 걸음이다(사유 = `kill_agent` 의 같은 줄). ★표식 대조 **뒤**여야 한다★ — 앞이면 산 후임의
++        //   통로가 되돌릴 수 없는 물러남 표시를 받는다.
++        session.begin_retire();
+         self.control.revoke(id, session.epoch);
+         let _ = session.enter_exiting();
+         session.kill(Duration::from_secs(5));
+@@ -2883,6 +2886,10 @@ impl AgentManager {
+     /// 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
+     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
+         let session = self.get_session(agent_id)?;
++        // ★물러남 예고가 첫 걸음이다 — 권한 회수 · 의도 · `Exiting` · `session.kill` 보다 먼저★: 통로가 뒤에서 돌리는
++        //   일이 아래 종료와 겹치는 창을 가장 좁게 둔다. 자원을 거두지 않는 예고라 아래 인과(ADR-0001)는 그대로이고,
++        //   명부 락은 `get_session` 이 이미 놓았다(ADR-0006).
++        session.begin_retire();
+         let epoch = session.epoch;
+ 
+         // 0. ★제어 채널 토큰 즉시 폐기 — 블로킹 kill **전에**(FIX 4)★. 이 revoke 가 session.kill(최대
+@@ -3541,6 +3548,10 @@ mod tests {
+     }
+ 
+     fn bare_manager() -> AgentManager {
++        bare_manager_with_control(Arc::new(NoopControlChannel))
++    }
++
++    fn bare_manager_with_control(control: Arc<dyn ControlChannel>) -> AgentManager {
+         let tag = uuid::Uuid::new_v4();
+         let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
+             FileProfileStore::new(std::env::temp_dir().join(format!("engram-epoch-w-{tag}"))),
+@@ -3555,7 +3566,7 @@ mod tests {
+             },
+             Arc::new(|_, _| {}),
+         ));
+-        AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker)
++        AgentManager::new_with_control(Arc::new(NoopStatus), profiles, presets, tracker, control)
+     }
+ 
+     /// 같은 id 재삽입 = 재시작(incarnation 교체) 모사.
+@@ -4021,6 +4032,178 @@ mod tests {
+         );
+     }
+ 
++    // ── 물러남 예고의 자리: 끝내기로 정한 첫 걸음 ──
++    // 한 기록에 제어 채널(권한 회수) · 코어의 상태 알림(`Exiting`) · 통로(예고 · 종료)가 부른 차례대로 적는다. 종료
++    //   의도는 적을 동사가 없어 예고 순간의 값을 따로 찍는다.
++
++    type CallLog = Arc<Mutex<Vec<&'static str>>>;
++
++    struct LoggingControl(CallLog);
++    impl ControlChannel for LoggingControl {
++        fn provision(
++            &self,
++            _id: AgentId,
++            _epoch: u32,
++            _needs: crate::types::ControlChannelNeeds,
++        ) -> Result<Option<crate::types::ControlEndpoint>, crate::types::ProvisionError> {
++            Ok(None)
++        }
++        fn revoke(&self, _id: AgentId, _epoch: u32) {
++            self.0.lock().expect("log poisoned").push("revoke");
++        }
++    }
++
++    struct LoggingStatus(CallLog);
++    impl StatusSink for LoggingStatus {
++        fn status_changed(&self, _id: AgentId, s: AgentStatus, _e: u32) {
++            if matches!(s, AgentStatus::Exiting) {
++                self.0.lock().expect("log poisoned").push("exiting");
++            }
++        }
++        fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
++    }
++
++    struct RetireProbe {
++        log: CallLog,
++        intent: Arc<AtomicU8>,
++        intent_at_retire: Arc<Mutex<Option<u8>>>,
++    }
++    impl AgentTransport for RetireProbe {
++        fn start(&self, _core: Arc<OutputCore>) {}
++        fn send_input(&self, _input: InputEvent) -> Result<(), PtyError> {
++            Ok(())
++        }
++        fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
++            Ok(())
++        }
++        fn interrupt(&self) -> Result<(), PtyError> {
++            Ok(())
++        }
++        fn begin_retire(&self) {
++            *self.intent_at_retire.lock().expect("intent poisoned") =
++                Some(self.intent.load(Ordering::SeqCst));
++            self.log.lock().expect("log poisoned").push("begin_retire");
++        }
++        fn shutdown(&self) {
++            self.log.lock().expect("log poisoned").push("shutdown");
++        }
++        fn capabilities(&self) -> TransportCaps {
++            TransportCaps {
++                input: InputCaps {
++                    raw: true,
++                    message: false,
++                    attachment: false,
++                },
++                output: OutputCaps {
++                    terminal_bytes: false,
++                    structured: true,
++                    markdown: false,
++                    tool_events: false,
++                    usage: false,
++                },
++                control: ControlCaps {
++                    resize: false,
++                    interrupt: true,
++                    cancel: false,
++                    graceful_shutdown: false,
++                },
++            }
++        }
++    }
++
++    /// 명부에 `epoch` 화신 하나를 꽂는다 — 코어의 상태 알림과 통로가 `log` 에 적는다. 돌려주는 것 = 예고 순간의 종료 의도.
++    fn put_retire_probe(
++        manager: &AgentManager,
++        id: AgentId,
++        epoch: u32,
++        log: &CallLog,
++    ) -> Arc<Mutex<Option<u8>>> {
++        let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
++        let intent_at_retire = Arc::new(Mutex::new(None));
++        let core = Arc::new(OutputCore::new(
++            id,
++            epoch,
++            Arc::new(LoggingStatus(log.clone())),
++            TurnWiring::detached(),
++        ));
++        let session = Arc::new(AgentSession::new(
++            id,
++            std::path::PathBuf::from("."),
++            epoch,
++            80,
++            24,
++            intent.clone(),
++            BackendCaps {
++                session: SessionCaps {
++                    resume: false,
++                    snapshot: false,
++                    cwd_env: false,
++                },
++                model: ModelCaps {
++                    select: false,
++                    temperature: false,
++                    max_tokens: false,
++                },
++            },
++            InputEncoder::Raw,
++            true,
++            core,
++            Box::new(RetireProbe {
++                log: log.clone(),
++                intent,
++                intent_at_retire: intent_at_retire.clone(),
++            }),
++        ));
++        manager
++            .sessions
++            .write()
++            .expect("sessions poisoned")
++            .insert(id, session);
++        intent_at_retire
++    }
++
++    #[test]
++    fn a_kill_announces_retirement_before_revocation_intent_exiting_and_shutdown() {
++        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
++        let manager = bare_manager_with_control(Arc::new(LoggingControl(log.clone())));
++        let id = AgentId::new_v4();
++        let intent_at_retire = put_retire_probe(&manager, id, 7, &log);
++
++        manager.kill_agent(id).expect("명부에 있는 세션");
++
++        assert_eq!(
++            *log.lock().expect("log poisoned"),
++            vec!["begin_retire", "revoke", "exiting", "shutdown"],
++            "물러남 예고가 권한 회수 · `Exiting` · 종료보다 먼저 오지 않는다"
++        );
++        assert_eq!(
++            *intent_at_retire.lock().expect("intent poisoned"),
++            Some(TerminationIntent::None as u8),
++            "예고 때 사용자 종료 의도가 이미 서 있다 — 예고가 의도 뒤로 밀렸다"
++        );
++    }
++
++    #[test]
++    fn a_failed_activation_teardown_announces_retirement_first_and_only_to_its_own_incarnation() {
++        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
++        let manager = bare_manager_with_control(Arc::new(LoggingControl(log.clone())));
++        let id = AgentId::new_v4();
++        let _ = put_retire_probe(&manager, id, 42, &log);
++
++        manager.tear_down_failed_activation(id, 41);
++        assert!(
++            log.lock().expect("log poisoned").is_empty(),
++            "죽은 화신의 정리가 산 후임에게 물러남을 예고했다 — 그 표시는 되돌릴 수 없다"
++        );
++
++        manager.tear_down_failed_activation(id, 42);
++        assert_eq!(
++            *log.lock().expect("log poisoned"),
++            vec!["begin_retire", "revoke", "exiting", "shutdown"],
++            "자기 화신의 정리가 물러남 예고로 시작하지 않는다"
++        );
++    }
++
+     /// ★★아직 결말이 안 난 활성화를 「도는 중」이라고 답하지 않는다★★ — 두 호출자가 갈리는 자리.
+     ///
+     /// 연결을 선언하는 통로에서는 세션이 명부에 오른 뒤에도 그 화신이 입력을 받을 수 있는지가 아직
+diff --git a/crates/engram-dashboard-agent/src/platform/mod.rs b/crates/engram-dashboard-agent/src/platform/mod.rs
+index 58118fb..c41491a 100644
+--- a/crates/engram-dashboard-agent/src/platform/mod.rs
++++ b/crates/engram-dashboard-agent/src/platform/mod.rs
+@@ -1,12 +1,11 @@
+-//! 플랫폼 질의 넷 — 자식 프로세스 그룹 정리(Windows Job Object) · 그 무리의 멤버를 하나씩 다루는 중립 손잡이
+-//! ([`process_group`] — 명단 · 검증 · 끝내기) · 「이 파일을 지금 누가 열고 있나」([`file_holders`]) · 「이 PID
+-//! 아래 무엇이 살아 있나」([`process_tree`]).
++//! 플랫폼 질의 넷 — 자식 프로세스 그룹 정리(Windows Job Object) · 그 무리의 중립 손잡이([`process_group`] — 명단 ·
++//! 멤버 붙들기(사실 · 끝내기) · 가입 알림 · 물러남 표시) · 「이 파일을 지금 누가 열고 있나」([`file_holders`]) ·
++//! 「이 PID 아래 무엇이 살아 있나」([`process_tree`]).
+ //!
+ //! PID liveness 헬퍼는 여기 없다 — 소비자가 이 crate 밖에 셋이라 `engram-dashboard-base` 의
+ //! `platform` 으로 이사했다(ADR-0175 결정 1). ★여기 있는 넷은 그 조건을 못 채운다★ — 소비자가 전부 이
+-//! crate 안이다: Job Object 래퍼는 `transport::pty`·`transport::stdio`, `file_holders` 는 codex 세션 id
+-//! 회수(ADR-0218 결정 11), `process_tree` 는 그 회수와 claude 끊기 뒤 잔여물 정리, `process_group` 은 그
+-//! 정리 하나다(ADR-0257).
++//! crate 안이다: Job Object 래퍼는 `transport::pty`·`transport::stdio`, `file_holders` 와 `process_tree` 는 codex
++//! 세션 id 회수(ADR-0218 결정 11), `process_group` 은 claude 끊기 뒤 잔여물 정리다(ADR-0257).
+ //!
+ //! ★Job Object 래퍼 말고는 crate 밖으로 안 나간다★ — 소비자가 전부 이 crate 안이다.
+ 
+diff --git a/crates/engram-dashboard-agent/src/platform/process_group.rs b/crates/engram-dashboard-agent/src/platform/process_group.rs
+index 1ec0e17..6bf1b52 100644
+--- a/crates/engram-dashboard-agent/src/platform/process_group.rs
++++ b/crates/engram-dashboard-agent/src/platform/process_group.rs
+@@ -1,70 +1,128 @@
+-//! 통로가 띄운 프로세스 무리의 **중립 손잡이** — 멤버 명단 · 멤버 하나의 검증 · 검증된 것 하나 끝내기.
++//! 통로가 띄운 프로세스 무리의 **중립 손잡이** — 멤버 명단 · 멤버 하나 붙들기(사실 · 끝내기) · 가입 알림 포트 ·
++//! 통로의 물러남 표시(읽기 전용).
+ //!
+-//! 무엇을 끝낼지는 모른다(ADR-0004) — 고르기는 이것을 받아 쓰는 쪽의 몫이고, 여기는 받은 신원이 아직 우리
+-//! 무리의 산 멤버인지 OS 에 묻고 그 핸들로 끝낼 뿐이다.
++//! 무엇을 끝낼지는 모른다(ADR-0004) — 고르기는 이것을 받아 쓰는 쪽의 몫이고, 여기는 받은 번호가 우리 무리의
++//! 멤버인지 OS 에 물어 붙들고 그 핸들로 사실을 읽고 끝낼 뿐이다.
+ //!
+ //! ★OS 갈래는 이 모듈 안에서만 선다(ADR-0230)★ — Windows 는 Job Object 조각을 감싸고, 그 밖의 OS 는 멤버가
+-//! 없고 누구든 `Gone` 인 껍데기다. 부르는 쪽에는 `cfg!(windows)` 가 없다.
++//! 없고 아무도 못 붙들며 포트가 `Unsupported` 인 껍데기다. 부르는 쪽에는 `cfg!(windows)` 가 없다. OS 와 무관한
++//! 값 타입([`ProcessFacts`] · [`PortEvent`])은 여기 한 벌만 두고 Windows 조각이 가져다 쓴다.
+ //!
+ //! ★Job 을 약하게 쥔다★ — 강하게 쥐면 통로가 사라진 뒤에도 Job 핸들이 안 닫혀 `KILL_ON_JOB_CLOSE` 가 늦어진다.
+-//! 부를 때마다 잠깐 올리고, 통로가 사라졌으면 명단은 비고 검증은 `Gone` 이다.
++//! 부를 때마다 잠깐 올리고, 통로가 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`] 이다. 내준
++//! 붙든 멤버 · 포트 · 표시는 Job 을 붙들지 않는다.
+ // ADR-0257
+ 
+ use std::io;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Arc;
+ #[cfg(windows)]
+ use std::sync::Weak;
++use std::time::Duration;
+ 
+-use super::process_tree::ProcessIdentity;
+ #[cfg(windows)]
+-use super::windows::{
+-    JobObjectHandle, MemberCheck, MemberOutcome, VerifiedMember, LEFTOVER_EXIT_CODE,
+-};
++use super::windows::{BirthPort, JobObjectHandle, MemberOutcome, PinnedMember};
+ 
+-/// [`ProcessGroup::verify`] 의 답. `Ready` 만 끝내기로 간다.
++/// 붙든 핸들로 **한 번** 읽은 사실 — 번호가 아니라 그 프로세스 객체의 것이다. 못 읽은 칸은 `ppid` · `create` =
++/// 0 · 문자열 = 빈 문자열이다.
+ ///
+-/// - `Gone` = 그 번호의 프로세스가 없거나 이미 끝났다 · 무리가 이미 사라졌다.
+-/// - `NotOurs` = 산 프로세스지만 우리 무리 밖이거나 시작시각이 달라 그 신원이 아니다.
+-pub(crate) enum Verify {
+-    Ready(Box<dyn ReadyKill>),
+-    Gone,
+-    NotOurs,
++/// - `ppid` = 만들 때 적힌 부모 번호 — 그 번호가 지금도 같은 부모라는 보장은 없다.
++/// - `create` = 생성 시각(FILETIME · 100 ns) — 두 프로세스의 생성 순서를 비교하는 데만 뜻이 있다.
++/// - `image` = 실행 파일 전체 경로(Win32 형식) · `cmdline` = 명령줄 그대로.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++pub(crate) struct ProcessFacts {
++    pub ppid: u32,
++    pub create: u64,
++    pub image: String,
++    pub cmdline: String,
++}
++
++/// [`Births::next`] 의 답.
++///
++/// - `Joined(pid)` = 멤버가 새로 들었다. 번호뿐이라 꺼낸 때 이미 끝나 재사용됐을 수 있다 — 곧바로 붙들어야
++///   신원이 선다.
++/// - `Other` = 그 밖의 알림(끝남 등) 또는 이 포트의 것이 아닌 패킷.
++/// - `Timeout` = 기다리는 동안 알림이 없었다.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum PortEvent {
++    Joined(u32),
++    Other,
++    Timeout,
++}
++
++/// 통로의 물러남 표시를 **읽기만** 하는 사본 — 칸의 주인(통로)이 [`Self::of`] 로 만들어 [`ProcessGroup`] 에 싣는다.
++/// ★세우는 메서드가 없다★ — 세우는 것은 칸의 주인뿐이고, 읽는 쪽은 manager 도 통로의 문도 모른 채 이것만 본다.
++#[derive(Debug, Clone)]
++pub(crate) struct RetiringSignal(Arc<AtomicBool>);
++
++impl RetiringSignal {
++    /// 칸을 나눠 쥔다 — 칸의 주인만 부른다. 주인은 `Release` 로 세운다.
++    pub(crate) fn of(flag: &Arc<AtomicBool>) -> Self {
++        Self(Arc::clone(flag))
++    }
++
++    pub(crate) fn is_set(&self) -> bool {
++        self.0.load(Ordering::Acquire)
++    }
+ }
+ 
+-/// 검증을 마친 멤버 하나 — 쥐고 있는 동안 그 PID 는 남에게 넘어가지 않는다.
++/// 우리 무리의 멤버로 확인하고 붙든 프로세스 하나 — 쥐는 동안 그 번호는 재사용되지 않고, 끝난 뒤에도 사실은
++/// 남는다. 무리(Job)를 붙들지 않는다. 버리면 핸들이 닫힌다.
+ ///
+-/// 두 단계로 갈린 것은 부르는 쪽이 자물쇠 안에서 OS 호출을 **하나만** 하게 하려는 것이다: `terminate_raw` =
+-/// 끝내기 호출 하나 · `settle` = 그 결과 가르기와 핸들 닫기. `settle` 없이 버려도 핸들은 닫힌다.
+-pub(crate) trait ReadyKill: Send {
++/// 끝내기가 두 메서드로 갈린 것은 부르는 쪽이 자물쇠 안에서 OS 호출을 **하나만** 하게 하려는 것이다:
++/// `terminate_raw` = 끝내기 호출 하나 · `classify` = 그 날것 결과 가르기.
++pub(crate) trait Pinned: Send + Sync {
++    /// 지금 끝났나 — 기다리지 않는다. `Err` = 대기 조회 자체의 실패.
++    fn exited(&self) -> io::Result<bool>;
++    /// `d` 까지 끝나기를 기다린다 — 끝났으면 `true`. `Err` = 대기 조회 자체의 실패.
++    fn wait_exit(&self, d: Duration) -> io::Result<bool>;
++    fn facts(&self) -> &ProcessFacts;
++    /// 끝내기 호출 하나 — 대상이 끝나기를 기다리지 않는다. 끝내기 권한 없이 붙든 것은 늘 `Err` 다.
+     fn terminate_raw(&self) -> io::Result<()>;
+-    fn settle(self: Box<Self>, raw: io::Result<()>) -> io::Result<MemberKill>;
++    /// [`Self::terminate_raw`] 의 날것 결과를 가른다 — 실패여도 그 사이 스스로 끝났으면 `Gone` 이다.
++    fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill>;
++}
++
++/// 무리의 가입 알림 포트 — [`ProcessGroup::watch_births`] 가 `start` 에 넘긴다. 여러 스레드가 나눠 쥐고, 마지막
++/// 것이 사라지면 포트가 닫힌다. 무리(Job)를 붙들지 않는다.
++///
++/// 알림은 통지일 뿐 배달이 보장되지 않는다(MS Learn) — 빠진 가입은 여기서 알 수 없다.
++pub(crate) trait Births: Send + Sync {
++    /// 알림 하나를 `wait` 까지 기다려 꺼낸다. `Err` = 꺼내기 자체의 실패(포트가 닫힘 등).
++    fn next(&self, wait: Duration) -> io::Result<PortEvent>;
+ }
+ 
+-/// `Gone` = 검증 뒤 끝내기 전에 스스로 끝났다.
++/// `Gone` = 붙든 뒤 끝내기 전에 스스로 끝났다.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum MemberKill {
+     Terminated,
+     Gone,
+ }
+ 
++/// 통로가 이미 사라져 무리가 없을 때 [`ProcessGroup::watch_births`] · [`ProcessGroup::unwatch_births`] 가 돌려주는
++/// `Err` 종류 — OS 실패가 아니라서 포트 실패로 굳히지 않는다(TRD t40 §3-5). 포트 만들기 · 붙이기 · 떼기의 OS 실패는
++/// 이 종류가 아니다(`Other` 로 감싼다) — 단 `start` 가 이 종류를 돌려주면 가를 수 없다.
++pub(crate) const GROUP_GONE: io::ErrorKind = io::ErrorKind::NotConnected;
++
+ pub(crate) struct ProcessGroup {
+     #[cfg(windows)]
+     job: Weak<JobObjectHandle>,
+-    root_attached: usize,
++    retiring: RetiringSignal,
+ }
+ 
+ impl ProcessGroup {
+     #[cfg(windows)]
+-    pub(crate) fn new(job: Weak<JobObjectHandle>, root_attached: usize) -> Self {
+-        Self { job, root_attached }
++    pub(crate) fn new(job: Weak<JobObjectHandle>, retiring: RetiringSignal) -> Self {
++        Self { job, retiring }
+     }
+ 
+     /// 무리가 이미 사라진 손잡이 — 모든 OS 에서 같은 모양이다.
+     #[cfg(test)]
+-    pub(crate) fn detached(root_attached: usize) -> Self {
++    pub(crate) fn detached(retiring: RetiringSignal) -> Self {
+         Self {
+             #[cfg(windows)]
+             job: Weak::new(),
+-            root_attached,
++            retiring,
+         }
+     }
+ 
+@@ -83,65 +141,179 @@ impl ProcessGroup {
+         }
+     }
+ 
+-    /// 그 신원이 아직 우리 무리의 산 멤버인지 본다. 끝내지 않는다. `Err` = 판정에 드는 OS 조회가 실패했다.
+-    pub(crate) fn verify(&self, who: ProcessIdentity) -> io::Result<Verify> {
++    /// 그 번호의 프로세스를 **우리 무리의 멤버일 때만** 붙들고 사실을 한 번 읽는다. 살았는지는 보지 않는다.
++    ///
++    /// `kill` = 끝내기 권한도 연다. `Ok(None)` = 그 번호의 프로세스가 없다 · 우리 무리 밖이다 · 통로가 이미
++    /// 사라졌다 · 이 OS 에는 무리가 없다. `Err` = 여는 실패(부재 말고 — 권한 거부 등) · 소속 조회 실패.
++    pub(crate) fn pin(&self, pid: u32, kill: bool) -> io::Result<Option<Box<dyn Pinned>>> {
++        #[cfg(windows)]
++        {
++            let Some(job) = self.job.upgrade() else {
++                return Ok(None);
++            };
++            Ok(job
++                .pin_member(pid, kill)?
++                .map(|member| Box::new(JobPin(member)) as Box<dyn Pinned>))
++        }
++        #[cfg(not(windows))]
++        {
++            let _ = (pid, kill);
++            Ok(None)
++        }
++    }
++
++    /// 가입 알림 포트를 만들어 `start` 에 넘기고, **`start` 가 `Ok` 일 때만** 무리를 그 포트에 붙인다 — 알림이 쌓일
++    /// 수 있게 되는 때에는 꺼낼 쪽이 이미 포트를 쥐고 있다. `start` 의 `Err` 는 그대로 돌려준다(붙지 않았다).
++    ///
++    /// 붙일 때 이미 든 멤버도 `Joined` 로 다시 알려진다. ★한 무리에 한 번만 부른다★ — 두 번째 부름을 여기서 막지
++    /// 않는다(부르는 쪽 몫). `Err` 종류: [`GROUP_GONE`] = 통로가 이미 사라졌다(`start` 는 불리지 않았다) ·
++    /// `Unsupported` = 이 OS 에는 무리가 없다(`start` 는 불리지 않았다) · 그 밖 = `start` 의 오류 · 포트 만들기 ·
++    /// 붙이기의 OS 실패.
++    pub(crate) fn watch_births(
++        &self,
++        start: impl FnOnce(Arc<dyn Births>) -> io::Result<()>,
++    ) -> io::Result<()> {
+         #[cfg(windows)]
+         {
+             let Some(job) = self.job.upgrade() else {
+-                return Ok(Verify::Gone);
++                return Err(group_gone());
+             };
+-            Ok(match job.verify_member(who.pid, who.start_time)? {
+-                MemberCheck::Ready(member) => Verify::Ready(Box::new(JobMember(member))),
+-                MemberCheck::Gone => Verify::Gone,
+-                MemberCheck::NotOurs => Verify::NotOurs,
++            job.watch_births(|port| {
++                let port: Arc<dyn Births> = port;
++                start(port)
+             })
+         }
+         #[cfg(not(windows))]
+         {
+-            let _ = who;
+-            Ok(Verify::Gone)
++            drop(start);
++            Err(no_group_here())
++        }
++    }
++
++    /// 무리의 포트 연결을 뗀다 — 뗀 뒤 태어난 멤버는 알려지지 않는다. `Err` 종류는 [`Self::watch_births`] 와 같다.
++    pub(crate) fn unwatch_births(&self) -> io::Result<()> {
++        #[cfg(windows)]
++        {
++            let Some(job) = self.job.upgrade() else {
++                return Err(group_gone());
++            };
++            job.unwatch_births()
++        }
++        #[cfg(not(windows))]
++        {
++            Err(no_group_here())
+         }
+     }
+ 
+-    /// 이 스폰이 뿌리 아래 붙이는 프로세스 수 — 프로그램이 아니라 스폰 방식이 만드는 것(예: 콘솔 호스트).
+-    pub(crate) fn root_attached(&self) -> usize {
+-        self.root_attached
++    pub(crate) fn retiring(&self) -> RetiringSignal {
++        self.retiring.clone()
+     }
+ }
+ 
+ #[cfg(windows)]
+-struct JobMember(VerifiedMember);
++struct JobPin(PinnedMember);
+ 
+ #[cfg(windows)]
+-impl ReadyKill for JobMember {
++impl Pinned for JobPin {
++    fn exited(&self) -> io::Result<bool> {
++        self.0.exited()
++    }
++
++    fn wait_exit(&self, d: Duration) -> io::Result<bool> {
++        self.0.wait_exit(d)
++    }
++
++    fn facts(&self) -> &ProcessFacts {
++        self.0.facts()
++    }
++
+     fn terminate_raw(&self) -> io::Result<()> {
+-        self.0.terminate_raw(LEFTOVER_EXIT_CODE)
++        self.0.terminate_raw()
+     }
+ 
+-    fn settle(self: Box<Self>, raw: io::Result<()>) -> io::Result<MemberKill> {
+-        Ok(match self.0.settle(raw)? {
++    fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill> {
++        Ok(match self.0.classify(raw)? {
+             MemberOutcome::Terminated => MemberKill::Terminated,
+             MemberOutcome::Gone => MemberKill::Gone,
+         })
+     }
+ }
+ 
+-// 실프로세스 도우미는 `backend::claude` 의 고르기 실측 시험도 쓴다 — 그 시험을 여기 두면 이 층이 claude 를 부른다.
++#[cfg(windows)]
++impl Births for BirthPort {
++    fn next(&self, wait: Duration) -> io::Result<PortEvent> {
++        // 경로 호출은 고유 메서드를 먼저 고른다 — 이 trait 메서드로 되돌아오지 않는다.
++        BirthPort::next(self, wait)
++    }
++}
++
++#[cfg(windows)]
++fn group_gone() -> io::Error {
++    io::Error::new(GROUP_GONE, "통로가 이미 사라졌다 — 무리가 없다")
++}
++
++#[cfg(not(windows))]
++fn no_group_here() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::Unsupported,
++        "이 OS 에는 프로세스 무리가 없다",
++    )
++}
++
++// 실프로세스 도우미는 `windows.rs` 의 시험도 쓴다. claude 잔여물 정리의 실물 시험은 여기 두지 않는다 — 두면 이 층이
++// claude 를 부른다.
+ #[cfg(test)]
+ pub(crate) mod tests {
+     use super::*;
+ 
+-    /// 통로가 사라진 손잡이 · 비Windows 껍데기가 같은 답을 준다 — 멤버 없음 · 누구든 `Gone`.
++    /// 통로가 사라진 손잡이 · 비Windows 껍데기가 같은 답을 준다 — 멤버 없음 · 아무도 못 붙듦 · 포트 없음(`start` 를
++    /// 부르지 않는다). 종류만 OS 마다 갈린다.
+     #[test]
+     fn a_group_without_a_live_job_lists_nothing_and_owns_nobody() {
+-        let group = ProcessGroup::detached(1);
++        let group = ProcessGroup::detached(RetiringSignal::of(&Arc::default()));
+         assert_eq!(group.member_pids().expect("명단"), Vec::<u32>::new());
+-        let me = ProcessIdentity {
+-            pid: std::process::id(),
+-            start_time: 1,
++        for kill in [false, true] {
++            assert!(group
++                .pin(std::process::id(), kill)
++                .expect("붙들기")
++                .is_none());
++        }
++
++        let refused = if cfg!(windows) {
++            GROUP_GONE
++        } else {
++            io::ErrorKind::Unsupported
+         };
+-        assert!(matches!(group.verify(me), Ok(Verify::Gone)));
+-        assert_eq!(group.root_attached(), 1);
++        let mut started = false;
++        let watched = group.watch_births(|_| {
++            started = true;
++            Ok(())
++        });
++        assert_eq!(watched.expect_err("무리가 없는데 붙었다").kind(), refused);
++        assert!(!started, "무리가 없는데 꺼낼 쪽을 띄웠다");
++        assert_eq!(
++            group
++                .unwatch_births()
++                .expect_err("무리가 없는데 뗐다")
++                .kind(),
++            refused
++        );
++    }
++
++    /// 내준 표시는 칸의 주인이 세운 것을 따른다 — 무리 손잡이를 거쳐도, 복제해도 같은 칸이다.
++    #[test]
++    fn a_retiring_signal_follows_the_flag_it_shares() {
++        let flag = Arc::new(AtomicBool::new(false));
++        let group = ProcessGroup::detached(RetiringSignal::of(&flag));
++        let signal = group.retiring();
++        let copy = signal.clone();
++        assert!(!signal.is_set());
++        assert!(!group.retiring().is_set());
++
++        flag.store(true, Ordering::Release);
++        assert!(signal.is_set());
++        assert!(copy.is_set());
++        assert!(group.retiring().is_set());
+     }
+ 
+     // ── 실프로세스(Windows) — 시험마다 몇 개만 차례로 띄운다: 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md) ──
+@@ -149,14 +321,12 @@ pub(crate) mod tests {
+     #[cfg(windows)]
+     use std::io::Write;
+     #[cfg(windows)]
+-    use std::process::{Child, Command, Stdio};
+-    #[cfg(windows)]
+-    use std::sync::Arc;
++    use std::process::{Child, ChildStdin, Command, Stdio};
+     #[cfg(windows)]
+-    use std::time::{Duration, Instant};
++    use std::time::Instant;
+ 
+     #[cfg(windows)]
+-    use engram_dashboard_base::platform::{process_parent_table, process_start, ProcessStart};
++    use crate::platform::windows::LEFTOVER_EXIT_CODE;
+ 
+     #[cfg(windows)]
+     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+@@ -166,7 +336,7 @@ pub(crate) mod tests {
+     #[cfg(windows)]
+     pub(crate) fn new_group() -> (Arc<JobObjectHandle>, ProcessGroup) {
+         let job = Arc::new(JobObjectHandle::new().expect("Job 생성"));
+-        let group = ProcessGroup::new(Arc::downgrade(&job), 1);
++        let group = ProcessGroup::new(Arc::downgrade(&job), RetiringSignal::of(&Arc::default()));
+         (job, group)
+     }
+ 
+@@ -191,6 +361,15 @@ pub(crate) mod tests {
+         let _ = stdin.write_all(b"go\r\n");
+     }
+ 
++    /// [`open_gate`] 와 같되 stdin 을 닫지 않고 돌려준다 — `line` 이 stdin 을 다시 읽으면(`set /p`) 돌려준 끝을
++    /// 쥐는 동안 거기서 기다린다.
++    #[cfg(windows)]
++    fn open_gate_keeping_stdin(child: &mut Child) -> ChildStdin {
++        let mut stdin = child.stdin.take().expect("stdin 파이프");
++        stdin.write_all(b"go\r\n").expect("문 열기");
++        stdin
++    }
++
+     /// 콘솔 없이 도는 `ping` 하나 — 콘솔 호스트를 끌고 오지 않는다.
+     #[cfg(windows)]
+     fn spawn_lone_ping() -> Child {
+@@ -217,14 +396,6 @@ pub(crate) mod tests {
+         }
+     }
+ 
+-    #[cfg(windows)]
+-    pub(crate) fn identity(pid: u32) -> ProcessIdentity {
+-        match process_start(pid) {
+-            ProcessStart::Known(start_time) => ProcessIdentity { pid, start_time },
+-            other => panic!("PID {pid} 의 시작시각을 못 읽었다: {other:?}"),
+-        }
+-    }
+-
+     /// 실행 파일 경로(소문자). 못 열면 `None`.
+     #[cfg(windows)]
+     fn image_path(pid: u32) -> Option<String> {
+@@ -260,29 +431,30 @@ pub(crate) mod tests {
+         image_path(pid).is_some_and(|p| p.ends_with("\\ping.exe"))
+     }
+ 
+-    /// 표의 자기 줄에서 부모 PID.
+     #[cfg(windows)]
+-    pub(crate) fn parent_row(table: &[(u32, u32)], pid: u32) -> Option<u32> {
+-        table.iter().find(|(p, _)| *p == pid).map(|(_, ppid)| *ppid)
++    fn pin_ours(group: &ProcessGroup, pid: u32, kill: bool) -> Box<dyn Pinned> {
++        group
++            .pin(pid, kill)
++            .expect("붙들기")
++            .unwrap_or_else(|| panic!("PID {pid} 가 우리 무리의 멤버가 아니다"))
+     }
+ 
++    /// 붙든 멤버의 부모가 끝났나 — 적힌 부모 번호를 우리 무리에서 붙들 수 없다 · 붙든 부모가 끝났다 · 그 번호를
++    /// 자기보다 늦게 태어난 것이 쥐었다. ★부모가 우리 무리에서 태어났다는 전제다★ — 무리 밖의 산 부모도 「끝남」
++    /// 으로 읽힌다. 못 붙들면(권한 거부 등) 끝남으로 치지 않는다.
+     #[cfg(windows)]
+-    fn ppid_of(table: &[(u32, u32)], pid: u32) -> u32 {
+-        parent_row(table, pid).unwrap_or_else(|| panic!("PID {pid} 의 줄이 표에 없다"))
+-    }
+-
+-    /// TRD t40 §3-4 의 「부모 죽음」을 시험용으로 옮긴 사본 — 부모가 표에 없다 · 사라졌다 · 그 번호를 자기보다
+-    /// 늦게 태어난 것이 쥐었다.
+-    #[cfg(windows)]
+-    fn parent_is_dead(table: &[(u32, u32)], member: ProcessIdentity) -> bool {
+-        let ppid = ppid_of(table, member.pid);
+-        if !table.iter().any(|(p, _)| *p == ppid) {
+-            return true;
+-        }
+-        match process_start(ppid) {
+-            ProcessStart::Gone => true,
+-            ProcessStart::Known(parent_start) => parent_start > member.start_time,
+-            ProcessStart::Unknown => false,
++    fn parent_is_dead(group: &ProcessGroup, member: &dyn Pinned) -> bool {
++        let child = member.facts();
++        assert!(
++            child.ppid != 0 && child.create != 0,
++            "부모 번호나 생성 시각을 못 읽었다: {child:?}"
++        );
++        match group.pin(child.ppid, false) {
++            Ok(None) => true,
++            Ok(Some(parent)) => {
++                parent.exited().expect("끝났나") || parent.facts().create > child.create
++            }
++            Err(_) => false,
+         }
+     }
+ 
+@@ -320,14 +492,6 @@ pub(crate) mod tests {
+             unsafe { GetExitCodeProcess(self.0, &mut code) }.ok()?;
+             Some(code)
+         }
+-
+-        fn alive(&self) -> bool {
+-            use windows::Win32::Foundation::WAIT_TIMEOUT;
+-            use windows::Win32::System::Threading::WaitForSingleObject;
+-            // SAFETY: 유효 핸들 · 기다리지 않는 조회.
+-            let state = unsafe { WaitForSingleObject(self.0, 0) };
+-            state == WAIT_TIMEOUT
+-        }
+     }
+ 
+     #[cfg(windows)]
+@@ -340,10 +504,11 @@ pub(crate) mod tests {
+         }
+     }
+ 
+-    /// ① Job 안 cmd 의 자식 ping 을 검증하고 끝낸다 — 종료 코드로 누가 끝냈는지 남는다.
++    /// ② Job 안 cmd 의 자식 ping 을 끝내기 권한으로 붙들어 끝낸다 — 붙든 핸들로 끝남을 기다리고, 종료 코드로 누가
++    /// 끝냈는지 남는다. 끝난 뒤에도 쥐고 있어 그 번호는 명단 확인 동안 재사용되지 않는다.
+     #[cfg(windows)]
+     #[test]
+-    fn a_verified_member_is_terminated_with_the_leftover_code() {
++    fn a_pinned_member_is_terminated_with_the_leftover_code() {
+         let (job, group) = new_group();
+         let mut root = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
+         job.assign(root.id()).expect("Job 편입");
+@@ -356,50 +521,35 @@ pub(crate) mod tests {
+                 .into_iter()
+                 .find(|&pid| is_ping(pid))
+         });
+-        let who = identity(ping);
+         let watch = Watch::open(ping);
++        let member = pin_ours(&group, ping, true);
++        assert!(!member.exited().expect("끝났나"));
+ 
+-        let Verify::Ready(ready) = group.verify(who).expect("검증") else {
+-            panic!("산 멤버가 Ready 가 아니다");
+-        };
+-        let raw = ready.terminate_raw();
+-        assert_eq!(ready.settle(raw).expect("끝내기"), MemberKill::Terminated);
++        let raw = member.terminate_raw();
++        assert_eq!(
++            member.classify(raw).expect("끝내기"),
++            MemberKill::Terminated
++        );
++        assert!(
++            member
++                .wait_exit(Duration::from_secs(5))
++                .expect("끝나기 대기"),
++            "5 초 안에 안 끝났다"
++        );
++        assert!(member.exited().expect("끝났나"));
+         assert_eq!(
+-            watch.exit_code_within(Duration::from_secs(5)),
++            watch.exit_code_within(Duration::ZERO),
+             Some(LEFTOVER_EXIT_CODE)
+         );
+         drop(watch);
+         wait_until("명단에서 빠진 ping", || {
+             (!group.member_pids().ok()?.contains(&ping)).then_some(())
+         });
++        drop(member);
+         let _ = root.wait();
+     }
+ 
+-    /// ③ 우리 Job 의 산 멤버라도 시작시각이 다르면 다른 프로세스다 — 끝내기로 가지 않고 그 프로세스는 산다.
+-    #[cfg(windows)]
+-    #[test]
+-    fn a_member_with_another_start_time_is_not_ours_and_survives() {
+-        let (job, group) = new_group();
+-        let mut ping = spawn_lone_ping();
+-        job.assign(ping.id()).expect("Job 편입");
+-        let who = identity(ping.id());
+-
+-        let stale = ProcessIdentity {
+-            pid: who.pid,
+-            start_time: who.start_time.wrapping_add(1),
+-        };
+-        assert!(matches!(group.verify(stale), Ok(Verify::NotOurs)));
+-        assert!(ping.try_wait().expect("상태").is_none(), "검증이 죽였다");
+-        assert!(
+-            matches!(group.verify(who), Ok(Verify::Ready(_))),
+-            "맞는 신원은 Ready 여야 앞 단언이 뜻이 있다"
+-        );
+-
+-        let _ = ping.kill();
+-        let _ = ping.wait();
+-    }
+-
+-    /// ④ 다른 Job 의 프로세스는 우리 것이 아니다(조사 §4 사고의 회귀망).
++    /// ③ 다른 Job 의 산 프로세스는 붙들지 않는다(조사 §4 사고의 회귀망).
+     #[cfg(windows)]
+     #[test]
+     fn a_process_in_another_job_is_not_ours() {
+@@ -408,17 +558,19 @@ pub(crate) mod tests {
+         let mut stranger = spawn_lone_ping();
+         other.assign(stranger.id()).expect("남의 Job 편입");
+ 
+-        assert!(matches!(
+-            group.verify(identity(stranger.id())),
+-            Ok(Verify::NotOurs)
+-        ));
++        for kill in [false, true] {
++            assert!(
++                group.pin(stranger.id(), kill).expect("붙들기").is_none(),
++                "남의 Job 멤버를 붙들었다(끝내기 권한 {kill})"
++            );
++        }
+         assert!(stranger.try_wait().expect("상태").is_none(), "남이 죽었다");
+ 
+         let _ = stranger.kill();
+         let _ = stranger.wait();
+     }
+ 
+-    /// ④ 중첩 변형 — 우리 Job 이 부모 Job P 아래로 중첩돼도 P 에만 든 남은 우리 것이 아니다. Job 인자로 NULL 을
++    /// ③ 중첩 변형 — 우리 Job 이 부모 Job P 아래로 중첩돼도 P 에만 든 남은 우리 것이 아니다. Job 인자로 NULL 을
+     /// 넘기면(「아무 Job 에나 들었나」) 여기서 빨개진다.
+     #[cfg(windows)]
+     #[test]
+@@ -433,13 +585,13 @@ pub(crate) mod tests {
+         parent.assign(stranger.id()).expect("부모 Job 에만 편입");
+ 
+         assert!(
+-            matches!(group.verify(identity(member.id())), Ok(Verify::Ready(_))),
+-            "중첩이 안 섰다 — 우리 멤버가 Ready 가 아니다"
++            group.pin(member.id(), true).expect("붙들기").is_some(),
++            "중첩이 안 섰다 — 우리 멤버를 못 붙들었다"
++        );
++        assert!(
++            group.pin(stranger.id(), true).expect("붙들기").is_none(),
++            "부모 Job 에만 든 남을 붙들었다"
+         );
+-        assert!(matches!(
+-            group.verify(identity(stranger.id())),
+-            Ok(Verify::NotOurs)
+-        ));
+         assert!(stranger.try_wait().expect("상태").is_none(), "남이 죽었다");
+ 
+         for child in [&mut member, &mut stranger] {
+@@ -448,27 +600,80 @@ pub(crate) mod tests {
+         }
+     }
+ 
+-    /// ⑤ 끝났지만 핸들이 붙든(좀비) 부모는 표에 없어야 한다 — 표가 좀비를 싣는다면 죽은 부모가 산 것으로 읽혀
+-    /// 잔여물을 놓친다. Job 명단에서도 빠지고 명단은 완전하다 — 좀비가 멤버 수에만 남으면 명단이 영영 불완전해
+-    /// 정리가 한 번도 돌지 못한다.
++    /// ⑦ 손잡이를 거친 포트 — `start` 의 오류는 그대로 오고(붙지 않음), 받은 포트에서 붙일 때 이미 든 멤버가
++    /// `Joined` 로 다시 알려진다. 붙이기 · 떼기의 OS 동작 자체는 `windows.rs` 의 ⑦ 이 잰다.
++    #[cfg(windows)]
++    #[test]
++    fn a_port_through_the_group_reports_the_members_already_in() {
++        let (job, group) = new_group();
++        let mut ping = spawn_lone_ping();
++        job.assign(ping.id()).expect("Job 편입");
++
++        let refused = group.watch_births(|_| Err(io::Error::other("기동 실패 흉내")));
++        assert_eq!(
++            refused
++                .expect_err("start 의 실패가 그대로 와야 한다")
++                .to_string(),
++            "기동 실패 흉내"
++        );
++
++        let mut held = None;
++        group
++            .watch_births(|port| {
++                held = Some(port);
++                Ok(())
++            })
++            .expect("붙이기");
++        let port = held.expect("start 가 포트를 받았다");
++        let deadline = Instant::now() + Duration::from_secs(10);
++        while port.next(Duration::from_millis(100)).expect("꺼내기") != PortEvent::Joined(ping.id())
++        {
++            assert!(
++                Instant::now() < deadline,
++                "10 초 안에 ping 의 되알림을 못 봤다"
++            );
++        }
++        group.unwatch_births().expect("떼기");
++
++        let _ = ping.kill();
++        let _ = ping.wait();
++    }
++
++    /// ① 끝났지만 핸들이 붙든(좀비) 부모 — Job 명단에서 빠지고 명단은 완전하다(좀비가 멤버 수에만 남으면 명단이
++    /// 영영 불완전해 정리가 한 번도 돌지 못한다). 붙든 자식에서 보면 그 부모는 끝났다 — 좀비가 산 것으로 읽히면
++    /// 잔여물을 놓친다.
+     #[cfg(windows)]
+     #[test]
+-    fn a_dead_parent_held_open_is_not_in_the_table() {
++    fn a_dead_parent_held_open_is_off_the_list_and_reads_dead() {
+         let (job, group) = new_group();
+-        let mut parent = spawn_gated_cmd("start \"\" /b ping -n 30 127.0.0.1", 0);
++        // P 는 ping 을 띄운 뒤 둘째 `set /p` 에서 stdin 을 기다리며 산다 — 끝은 아래 kill 한 곳이다. 둘째 `set /p`
++        // 가 없으면 `cmd /c` 가 `start /b` 직후 끝나 P 가 탐침 전에 이미 죽어 있다(실측 5/5).
++        let mut parent = spawn_gated_cmd("start \"\" /b ping -n 30 127.0.0.1 & set /p _=", 0);
+         let parent_pid = parent.id();
+         job.assign(parent_pid).expect("Job 편입");
+-        open_gate(&mut parent);
+-        let child = wait_until("P 가 띄운 ping", || {
+-            let table = process_parent_table()?;
++        let gate = open_gate_keeping_stdin(&mut parent);
++        let (child_pid, child) = wait_until("P 가 띄운 ping", || {
+             group
+                 .member_pids()
+                 .ok()?
+                 .into_iter()
+-                .find(|&pid| is_ping(pid) && parent_row(&table, pid) == Some(parent_pid))
++                .filter(|&pid| is_ping(pid))
++                .find_map(|pid| {
++                    let member = group.pin(pid, false).ok()??;
++                    (member.facts().ppid == parent_pid).then_some((pid, member))
++                })
+         });
++        assert!(
++            parent.try_wait().expect("상태").is_none(),
++            "P 가 탐침 전에 끝났다"
++        );
++        assert!(
++            !parent_is_dead(&group, child.as_ref()),
++            "산 P 가 끝남으로 읽힌다 — 아래 단언이 뜻이 없다"
++        );
+         let _ = parent.kill();
+         let _ = parent.wait();
++        drop(gate);
+         // `parent` 를 아직 쥐고 있다 — 그 핸들이 P 의 프로세스 객체를 붙든다.
+ 
+         let members = group
+@@ -478,21 +683,18 @@ pub(crate) mod tests {
+             !members.contains(&parent_pid),
+             "끝났지만 핸들이 붙든 P 가 명단에 남았다: {members:?}"
+         );
+-        assert!(members.contains(&child), "산 C 가 명단에 없다: {members:?}");
+-
+-        let table = process_parent_table().expect("표");
+         assert!(
+-            !table.iter().any(|(pid, _)| *pid == parent_pid),
+-            "끝났지만 핸들이 붙든 P 가 표에 있다 — 표가 좀비를 싣는다"
++            members.contains(&child_pid),
++            "산 C 가 명단에 없다: {members:?}"
+         );
+         assert!(
+-            parent_is_dead(&table, identity(child)),
+-            "C 의 부모가 죽음으로 안 읽힌다"
++            parent_is_dead(&group, child.as_ref()),
++            "C 의 부모가 끝남으로 안 읽힌다"
+         );
+         drop(parent);
+     }
+ 
+-    /// ⑥ 첫 칸 하나로 물어도 늘려 되물어 전부 나온다.
++    /// ① 첫 칸 하나로 물어도 늘려 되물어 전부 나온다.
+     #[cfg(windows)]
+     #[test]
+     fn a_one_slot_first_ask_still_lists_every_member() {
+@@ -519,7 +721,7 @@ pub(crate) mod tests {
+         let _ = root.wait();
+     }
+ 
+-    /// ⑦ 부모가 끝난 MSYS fork 자식이 우리 Job 멤버로 남는지 · 부모 죽음으로 읽히는지 · 끝나는지.
++    /// ⑤ 부모가 끝난 MSYS fork 자식이 우리 Job 멤버로 남는지 · 부모 끝남으로 읽히는지 · 끝나는지.
+     /// ★Job 상속만 잰다 — 멈춤은 재현하지 않는다★. `PATH` 의 `bash` 는 WSL 일 수 있어 경로를 박는다.
+     #[cfg(windows)]
+     #[test]
+@@ -552,33 +754,33 @@ pub(crate) mod tests {
+         drop(bash);
+ 
+         let orphans = wait_until("부모가 끝난 MSYS 프로세스", || {
+-            let table = process_parent_table()?;
+-            let found: Vec<ProcessIdentity> = group
++            let found: Vec<(u32, Box<dyn Pinned>)> = group
+                 .member_pids()
+                 .ok()?
+                 .into_iter()
+-                .filter(|&pid| image_path(pid).is_some_and(|p| p.contains("\\usr\\bin\\")))
+-                .filter(|&pid| parent_row(&table, pid).is_some())
+-                .filter_map(|pid| match process_start(pid) {
+-                    ProcessStart::Known(start_time) => Some(ProcessIdentity { pid, start_time }),
+-                    _ => None,
++                .filter_map(|pid| Some((pid, group.pin(pid, true).ok()??)))
++                .filter(|(_, m)| {
++                    m.facts()
++                        .image
++                        .to_ascii_lowercase()
++                        .contains("\\usr\\bin\\")
+                 })
+-                .filter(|m| parent_is_dead(&table, *m))
++                .filter(|(_, m)| parent_is_dead(&group, m.as_ref()))
+                 .collect();
+             (!found.is_empty()).then_some(found)
+         });
+-        for orphan in orphans {
+-            let watch = Watch::open(orphan.pid);
+-            let Verify::Ready(ready) = group.verify(orphan).expect("검증") else {
+-                panic!("부모가 끝난 멤버 {} 가 Ready 가 아니다", orphan.pid);
+-            };
+-            let raw = ready.terminate_raw();
+-            assert_eq!(ready.settle(raw).expect("끝내기"), MemberKill::Terminated);
++        for (pid, orphan) in orphans {
++            let watch = Watch::open(pid);
++            let raw = orphan.terminate_raw();
++            assert_eq!(
++                orphan.classify(raw).expect("끝내기"),
++                MemberKill::Terminated
++            );
+             assert_eq!(
+                 watch.exit_code_within(Duration::from_secs(5)),
+                 Some(LEFTOVER_EXIT_CODE)
+             );
+-            assert!(!watch.alive());
++            assert!(orphan.exited().expect("끝났나"));
+         }
+     }
+ }
+diff --git a/crates/engram-dashboard-agent/src/platform/process_tree.rs b/crates/engram-dashboard-agent/src/platform/process_tree.rs
+index 92dbcce..4e9e319 100644
+--- a/crates/engram-dashboard-agent/src/platform/process_tree.rs
++++ b/crates/engram-dashboard-agent/src/platform/process_tree.rs
+@@ -1,23 +1,14 @@
+ //! 「이 PID 아래 지금 어떤 프로세스들이 살아 있나」를 OS 에 묻는다 — 각자의 신원(PID + 시작시각)과 함께.
+ //!
+ //! ★무엇을 찾으려고 묻는지는 이 파일이 모른다(ADR-0004)★ — 받는 것은 뿌리 하나이고 돌려주는 것은
+-//! 신원(과 깊이) 목록뿐이다. 도메인 지식이 0 이라 여기 있고, 소비자가 전부 이 crate 안이라(codex 세션 id
+-//! 회수 · claude 끊기 뒤 잔여물 정리) 바닥 crate 로는 안 내려간다(ADR-0175 입주 조건 ① · `file_holders` 와
+-//! 같은 자리·같은 사유).
++//! 신원 목록뿐이다. 도메인 지식이 0 이라 여기 있고, 소비자가 하나뿐이라 바닥 crate 로는 안 내려간다
++//! (ADR-0175 입주 조건 ① · `file_holders` 와 같은 자리·같은 사유).
+ //!
+-//! ★[`subtree`] 의 셈은 `engram_dashboard_base::platform` 의 두 primitive 를 **조립만** 한다★ — 자식 열거와
+-//! 시작시각 조회를 여기서 다시 쓰지 않는다. 그 위에 더하는 것은 「뿌리의 신원을 먼저 확인하고, 거기서부터
+-//! 걸어 내려간다」는 규칙이다.
++//! ★셈은 `engram_dashboard_base::platform` 의 두 primitive 를 **조립만** 한다★ — 자식 열거와 시작시각
++//! 조회를 여기서 다시 쓰지 않는다. 이 파일이 더하는 것은 「뿌리의 신원을 먼저 확인하고, 거기서부터
++//! 걸어 내려간다」는 규칙 하나다.
+ //!
+ //! 진입점 = [`subtree`]. 실패는 값으로 돌려준다(panic 없음).
+-//!
+-//! [`walk_levels`] 는 같은 두 규칙의 **닫힌 실패** 판이다 — 깊이를 달고, 한 층이라도 모르면 전체가 `None` 이다.
+-//! OS 는 부르는 쪽이 주는 `children` 뒤에 있다(표 한 장에서 만드는 법 = [`children_from_table`]).
+-
+-use std::collections::VecDeque;
+-use std::time::{SystemTime, UNIX_EPOCH};
+-
+-use engram_dashboard_base::platform::ProcessStart;
+ 
+ /// 한 프로세스의 신원.
+ ///
+@@ -31,23 +22,6 @@ pub(crate) struct ProcessIdentity {
+     pub(crate) start_time: u64,
+ }
+ 
+-/// `SystemTime` 을 [`ProcessIdentity::start_time`] 의 척도(FILETIME — 1601-01-01 UTC 부터 100 ns 눈금 · 모자란
+-/// 눈금은 이른 쪽으로 버린다)로 옮긴다. `None` = 1601 보다 이르거나 u64 를 넘는다.
+-///
+-/// ★기점 변환이 틀리면 모든 프로세스가 한쪽으로 쏠려 읽힌다★ — 벽시계와 생성 시각을 견주는 쪽이 이 값을 쓴다.
+-// ADR-0257
+-pub(crate) fn system_time_to_filetime(t: SystemTime) -> Option<u64> {
+-    // 1601-01-01 부터 1970-01-01 까지 = 11 644 473 600 초.
+-    const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+-    match t.duration_since(UNIX_EPOCH) {
+-        Ok(after) => {
+-            UNIX_EPOCH_AS_FILETIME.checked_add(u64::try_from(after.as_nanos() / 100).ok()?)
+-        }
+-        Err(before) => UNIX_EPOCH_AS_FILETIME
+-            .checked_sub(u64::try_from(before.duration().as_nanos().div_ceil(100)).ok()?),
+-    }
+-}
+-
+ /// `root` 와 그 아래 **살아 있는** 후손 전부의 신원.
+ ///
+ /// - ★`root` 의 시작시각이 `root_start_time` 과 다르면 **빈 목록**이다★ — 그 PID 는 더는 우리가 띄운
+@@ -151,69 +125,6 @@ fn walk(
+     out
+ }
+ 
+-/// 뿌리에서 `max_depth` 층까지 걸어 신원과 깊이(뿌리 = 0)를 돌려준다. 규칙은 [`walk`] 와 같다.
+-///
+-/// - `children` 이 한 번이라도 `None` 을 주면 **전체가 `None`** 이다 — 한 층이라도 모르면 「이 깊이 안에 있는
+-///   것」을 말할 수 없다.
+-/// - `max_depth` 층의 항목은 담되 그 아래는 묻지 않는다.
+-/// - 깊이는 가장 얕은 길의 것이다(넓이 우선) — 같은 신원이 두 층에 보이는 표에서도 얕은 쪽으로 읽힌다.
+-// ADR-0257
+-pub(crate) fn walk_levels(
+-    root: ProcessIdentity,
+-    max_depth: usize,
+-    children: &dyn Fn(u32) -> Option<Vec<ProcessIdentity>>,
+-) -> Option<Vec<(ProcessIdentity, usize)>> {
+-    let mut out = vec![(root, 0)];
+-    let mut visited = vec![root];
+-    let mut frontier = VecDeque::from([(root, 0)]);
+-    while let Some((parent, depth)) = frontier.pop_front() {
+-        if depth >= max_depth {
+-            continue;
+-        }
+-        for child in children(parent.pid)? {
+-            if child.start_time < parent.start_time || visited.contains(&child) {
+-                continue;
+-            }
+-            visited.push(child);
+-            frontier.push_back((child, depth + 1));
+-            out.push((child, depth + 1));
+-        }
+-    }
+-    Some(out)
+-}
+-
+-/// [`walk_levels`] 의 `children` 을 프로세스 표 `(pid, ppid)` 한 장에서 만든다 — ppid 가 그 PID 인 줄마다
+-/// `start` 로 시작시각을 묻는다.
+-///
+-/// - 앎 → 신원.
+-/// - 사라짐 → 건너뛴다. 그 프로세스 객체가 이미 없다 — 지킬 것도 끝낼 것도 없다. 끝났어도 누가 핸들을 쥐고
+-///   있으면 사라짐이 아니라 앎이다(`ProcessStart` 의 doc).
+-/// - 못 읽음 · `members` 에 든 PID → `None`. 지켜야 할지 모르는 우리 프로세스를 가릴 수 없다.
+-/// - 못 읽음 · 멤버 아님 → 건너뛴다. 멤버가 아니면 끝낼 후보가 못 되고, Job 소속은 자식에게 이어지므로 그
+-///   아래에도 멤버가 없다(예: 묵은 ppid 로 우리 PID 를 단 남의 프로세스).
+-// ADR-0257
+-pub(crate) fn children_from_table<'a>(
+-    table: &'a [(u32, u32)],
+-    start: &'a dyn Fn(u32) -> ProcessStart,
+-    members: &'a [u32],
+-) -> impl Fn(u32) -> Option<Vec<ProcessIdentity>> + 'a {
+-    move |parent| {
+-        let mut kids = Vec::new();
+-        for &(pid, ppid) in table {
+-            if ppid != parent {
+-                continue;
+-            }
+-            match start(pid) {
+-                ProcessStart::Known(start_time) => kids.push(ProcessIdentity { pid, start_time }),
+-                ProcessStart::Gone => {}
+-                ProcessStart::Unknown if members.contains(&pid) => return None,
+-                ProcessStart::Unknown => {}
+-            }
+-        }
+-        Some(kids)
+-    }
+-}
+-
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -321,216 +232,6 @@ mod tests {
+         assert_eq!(got.len(), 3, "{got:?}");
+     }
+ 
+-    // ── 층 걷기 · 표에서 자식 만들기(ADR-0257) ──────────────────────────────────────
+-
+-    fn known_table(
+-        rows: &[(u32, Vec<ProcessIdentity>)],
+-    ) -> impl Fn(u32) -> Option<Vec<ProcessIdentity>> + '_ {
+-        let rows = table(rows);
+-        move |pid| Some(rows(pid))
+-    }
+-
+-    /// PID → 시작시각 조회 결과. 없는 PID 는 사라짐.
+-    fn starts(known: &[(u32, ProcessStart)]) -> impl Fn(u32) -> ProcessStart + '_ {
+-        move |pid| {
+-            known
+-                .iter()
+-                .find(|(p, _)| *p == pid)
+-                .map(|(_, s)| *s)
+-                .unwrap_or(ProcessStart::Gone)
+-        }
+-    }
+-
+-    #[test]
+-    fn levels_carry_their_depth_from_the_root() {
+-        let claude = id(20, WRAPPER.start_time + 1);
+-        let hook = id(30, WRAPPER.start_time + 2);
+-        let got = walk_levels(
+-            WRAPPER,
+-            5,
+-            &known_table(&[(WRAPPER.pid, vec![claude]), (claude.pid, vec![hook])]),
+-        );
+-        assert_eq!(got, Some(vec![(WRAPPER, 0), (claude, 1), (hook, 2)]));
+-    }
+-
+-    #[test]
+-    fn one_unknown_layer_makes_the_whole_walk_unknown() {
+-        let claude = id(20, WRAPPER.start_time + 1);
+-        let children = |pid: u32| {
+-            if pid == WRAPPER.pid {
+-                Some(vec![claude])
+-            } else if pid == claude.pid {
+-                None
+-            } else {
+-                Some(Vec::new())
+-            }
+-        };
+-        assert_eq!(walk_levels(WRAPPER, 5, &children), None);
+-    }
+-
+-    /// 상한 층의 항목은 담기지만 그 아래는 묻지 않는다 — 물었다면 `None` 이 전체를 덮었을 것이다.
+-    #[test]
+-    fn the_depth_cap_lists_the_last_layer_without_asking_below_it() {
+-        let claude = id(20, WRAPPER.start_time + 1);
+-        let hook = id(30, WRAPPER.start_time + 2);
+-        let children = |pid: u32| {
+-            if pid == WRAPPER.pid {
+-                Some(vec![claude])
+-            } else if pid == claude.pid {
+-                Some(vec![hook])
+-            } else {
+-                None
+-            }
+-        };
+-        assert_eq!(
+-            walk_levels(WRAPPER, 2, &children),
+-            Some(vec![(WRAPPER, 0), (claude, 1), (hook, 2)])
+-        );
+-        assert_eq!(walk_levels(WRAPPER, 0, &children), Some(vec![(WRAPPER, 0)]));
+-    }
+-
+-    /// ppid 가 claude 인데 claude 보다 먼저 태어난 항목 — 재사용된 번호를 타고 온 남이다.
+-    #[test]
+-    fn a_layer_entry_born_before_its_parent_is_not_its_child() {
+-        let claude = id(20, WRAPPER.start_time + 10);
+-        let stranger = id(31, WRAPPER.start_time + 5);
+-        let got = walk_levels(
+-            WRAPPER,
+-            5,
+-            &known_table(&[(WRAPPER.pid, vec![claude]), (claude.pid, vec![stranger])]),
+-        );
+-        assert_eq!(got, Some(vec![(WRAPPER, 0), (claude, 1)]));
+-    }
+-
+-    #[test]
+-    fn a_cycle_shaped_table_ends_the_level_walk() {
+-        let a = id(10, WRAPPER.start_time + 1);
+-        let b = id(11, WRAPPER.start_time + 1);
+-        let got = walk_levels(
+-            WRAPPER,
+-            usize::MAX,
+-            &known_table(&[
+-                (WRAPPER.pid, vec![a]),
+-                (a.pid, vec![b]),
+-                (b.pid, vec![a, b]),
+-            ]),
+-        )
+-        .expect("모두 앎");
+-        assert_eq!(got, vec![(WRAPPER, 0), (a, 1), (b, 2)]);
+-    }
+-
+-    /// 같은 신원이 두 층에 보이면 얕은 쪽이다 — 깊게 읽히면 보호 층 밖으로 밀려난다.
+-    #[test]
+-    fn an_entry_seen_on_two_layers_takes_the_shallower_depth() {
+-        let a = id(10, WRAPPER.start_time + 1);
+-        let b = id(11, WRAPPER.start_time + 2);
+-        let got = walk_levels(
+-            WRAPPER,
+-            5,
+-            &known_table(&[(WRAPPER.pid, vec![a, b]), (a.pid, vec![b])]),
+-        );
+-        assert_eq!(got, Some(vec![(WRAPPER, 0), (a, 1), (b, 1)]));
+-    }
+-
+-    #[test]
+-    fn a_gone_child_is_skipped_and_the_walk_goes_on() {
+-        let table = [(20, WRAPPER.pid), (21, WRAPPER.pid), (30, 21), (99, 7)];
+-        let start = starts(&[
+-            (20, ProcessStart::Gone),
+-            (21, ProcessStart::Known(WRAPPER.start_time + 1)),
+-            (30, ProcessStart::Known(WRAPPER.start_time + 2)),
+-            (99, ProcessStart::Known(WRAPPER.start_time + 3)),
+-        ]);
+-        let members = [WRAPPER.pid, 20, 21, 30];
+-        let children = children_from_table(&table, &start, &members);
+-        assert_eq!(
+-            walk_levels(WRAPPER, 2, &children),
+-            Some(vec![
+-                (WRAPPER, 0),
+-                (id(21, WRAPPER.start_time + 1), 1),
+-                (id(30, WRAPPER.start_time + 2), 2),
+-            ])
+-        );
+-    }
+-
+-    #[test]
+-    fn an_unreadable_member_within_reach_makes_the_walk_unknown() {
+-        let table = [(20, WRAPPER.pid), (21, WRAPPER.pid)];
+-        let start = starts(&[
+-            (20, ProcessStart::Unknown),
+-            (21, ProcessStart::Known(WRAPPER.start_time + 1)),
+-        ]);
+-        let members = [WRAPPER.pid, 20, 21];
+-        let children = children_from_table(&table, &start, &members);
+-        assert_eq!(walk_levels(WRAPPER, 2, &children), None);
+-    }
+-
+-    /// 예: 묵은 ppid 로 우리 PID 를 단 남 — 권한 밖이라 못 읽지만 우리 Job 멤버가 아니다.
+-    #[test]
+-    fn an_unreadable_non_member_is_skipped() {
+-        let table = [(20, WRAPPER.pid), (21, WRAPPER.pid)];
+-        let start = starts(&[
+-            (20, ProcessStart::Unknown),
+-            (21, ProcessStart::Known(WRAPPER.start_time + 1)),
+-        ]);
+-        let members = [WRAPPER.pid, 21];
+-        let children = children_from_table(&table, &start, &members);
+-        assert_eq!(
+-            walk_levels(WRAPPER, 2, &children),
+-            Some(vec![(WRAPPER, 0), (id(21, WRAPPER.start_time + 1), 1)])
+-        );
+-    }
+-
+-    // ── 벽시계 → FILETIME 척도(ADR-0257) ─────────────────────────────────────────────
+-
+-    #[test]
+-    fn the_wall_clock_lands_on_the_filetime_scale() {
+-        use std::time::Duration;
+-        assert_eq!(
+-            system_time_to_filetime(UNIX_EPOCH),
+-            Some(116_444_736_000_000_000)
+-        );
+-        assert_eq!(
+-            system_time_to_filetime(UNIX_EPOCH + Duration::from_secs(1)),
+-            Some(116_444_736_010_000_000)
+-        );
+-        // 2026-01-01T00:00:00Z = 유닉스 1 767 225 600 초.
+-        assert_eq!(
+-            system_time_to_filetime(UNIX_EPOCH + Duration::from_secs(1_767_225_600)),
+-            Some(134_116_992_000_000_000)
+-        );
+-        assert_eq!(
+-            system_time_to_filetime(UNIX_EPOCH + Duration::from_nanos(150)),
+-            Some(116_444_736_000_000_001),
+-            "모자란 눈금은 이른 쪽으로 버린다"
+-        );
+-        assert_eq!(
+-            system_time_to_filetime(UNIX_EPOCH - Duration::from_nanos(200)),
+-            Some(116_444_735_999_999_998),
+-            "1970 앞"
+-        );
+-        assert_eq!(
+-            system_time_to_filetime(UNIX_EPOCH - Duration::from_secs(11_644_473_600)),
+-            Some(0),
+-            "1601-01-01 = 0"
+-        );
+-    }
+-
+-    /// 기점이 어긋나면 이 차이가 수백 년으로 벌어진다.
+-    #[cfg(windows)]
+-    #[test]
+-    fn the_wall_clock_now_is_just_after_this_process_was_born() {
+-        let born = engram_dashboard_base::platform::process_creation_time(std::process::id())
+-            .expect("자기 creation time 조회 가능");
+-        let now = system_time_to_filetime(SystemTime::now()).expect("지금은 척도 안");
+-        assert!(born < now, "태어난 시각 {born} 이 지금 {now} 보다 늦다");
+-        const ONE_HOUR: u64 = 3_600 * 10_000_000;
+-        assert!(
+-            now - born < ONE_HOUR,
+-            "시험 프로세스가 한 시간 넘게 늙었다고 읽혔다: {born} → {now}"
+-        );
+-    }
+-
+     #[test]
+     fn an_unknown_root_has_no_subtree() {
+         assert!(subtree(0, 1).is_empty());
+diff --git a/crates/engram-dashboard-agent/src/platform/windows.rs b/crates/engram-dashboard-agent/src/platform/windows.rs
+index 60a1ef7..5f77f98 100644
+--- a/crates/engram-dashboard-agent/src/platform/windows.rs
++++ b/crates/engram-dashboard-agent/src/platform/windows.rs
+@@ -2,31 +2,42 @@
+ //!
+ //! 통로가 띄운 자식 프로세스를 Job에 묶어, 우리가 명시적으로 죽이거나(TerminateJobObject)
+ //! 호스트 프로세스가 크래시될 때(KILL_ON_JOB_CLOSE) 손자 프로세스까지 함께 정리한다.
+-//! 멤버 하나씩 다루는 조각(명단 · 검증 · 끝내기)도 여기다 — 무엇을 끝낼지는 모르고, 고르는 쪽이 준 신원만
+-//! 확인한다(ADR-0257).
++//! 멤버 하나씩 다루는 조각(명단 · 붙들기와 사실 · 끝내기)과 Job 가입 알림 포트도 여기다 — 무엇을 끝낼지는
++//! 모르고, 고르는 쪽이 준 번호가 이 Job 의 멤버인지만 확인해 붙든다(ADR-0257).
+ //!
+ //! 호출 순서/플래그는 Phase 0 spike(examples/spike.rs)에서 Windows 실측 검증한 것과 동일하다.
+ //! 이 파일은 platform 전용이라 windows crate import는 허용되지만, tauri import는 0개여야 한다.
+-//! ★`windows` crate 와 `io` 말고는 쓰지 않는다★ — 결과 타입도 여기 두고 중립 손잡이(`process_group`)가
+-//! 감싼다. 그래야 이 파일을 별도 플랫폼 모듈로 통째 옮길 수 있다(사용자 결정 2026-09-29).
++//! ★`windows` crate · 표준 라이브러리 · 중립 손잡이(`process_group`)의 OS 무관 값 타입 둘(`ProcessFacts` ·
++//! `PortEvent`) 말고는 쓰지 않는다★ — 나머지 결과 타입은 여기 두고 중립 손잡이가 감싼다. 그래야 이 파일을 별도
++//! 플랫폼 모듈로 통째 옮길 수 있다(사용자 결정 2026-09-29).
+ 
+ use std::io;
++use std::sync::Arc;
++use std::time::Duration;
+ 
+-use windows::core::HRESULT;
++use windows::core::{HRESULT, PWSTR};
++use windows::Wdk::System::Threading::{
++    NtQueryInformationProcess, ProcessBasicInformation, ProcessCommandLineInformation,
++};
+ use windows::Win32::Foundation::{
+-    CloseHandle, BOOL, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, HANDLE, WAIT_FAILED,
+-    WAIT_OBJECT_0, WAIT_TIMEOUT,
++    CloseHandle, BOOL, ERROR_INVALID_PARAMETER, ERROR_MORE_DATA, FILETIME, HANDLE,
++    INVALID_HANDLE_VALUE, UNICODE_STRING, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+ };
+ use windows::Win32::System::JobObjects::{
+-    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob, JobObjectBasicProcessIdList,
++    AssignProcessToJobObject, CreateJobObjectW, IsProcessInJob,
++    JobObjectAssociateCompletionPortInformation, JobObjectBasicProcessIdList,
+     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+-    TerminateJobObject, JOBOBJECT_BASIC_PROCESS_ID_LIST, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
++    TerminateJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_PROCESS_ID_LIST,
++    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+ };
+ use windows::Win32::System::Threading::{
+-    GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject,
+-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
++    GetProcessTimes, OpenProcess, QueryFullProcessImageNameW, TerminateProcess,
++    WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
++    PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+ };
++use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
++
++use super::process_group::{PortEvent, ProcessFacts};
+ 
+ /// 끊기 뒤 잔여물 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 그 정리가 끝낸 것을 알아본다.
+ /// `shutdown()` 의 Job 통째 끝내기(1)와 겹치지 않게 골랐다.
+@@ -38,19 +49,57 @@ const MEMBER_LIST_INITIAL: usize = 64;
+ /// 명단 되묻기 상한 — 묻는 사이 멤버가 계속 늘어 완전한 명단을 못 받으면 여기서 멈춘다(닫힌 실패).
+ const MEMBER_LIST_ATTEMPTS: usize = 4;
+ 
+-/// [`JobObjectHandle::verify_member`] 의 답. `Ready` 가 아니면 끝내지 않는다.
++/// 완료 포트 패킷의 바이트 수 칸에 실려 오는 Job 알림 번호 — 멤버가 새로 들었다. 이 상수 하나 때문에
++/// `Win32_System_SystemServices` 를 켜지 않으려 여기 둔다.
++const JOB_OBJECT_MSG_NEW_PROCESS: u32 = 6;
++/// Job 을 포트에 붙일 때 주는 키 — 이 키로 온 패킷만 Job 알림으로 읽는다.
++const BIRTH_PORT_KEY: usize = 1;
++/// 실행 파일 경로 버퍼(UTF-16 칸) — Win32 경로의 최대 길이.
++const IMAGE_PATH_CHARS: usize = 32_768;
++/// 명령줄 버퍼 — 머리(`UNICODE_STRING`) 뒤에 가장 긴 명령줄(32 767 자)이 들어가는 크기. 모자라면 명령줄은 빈 칸이다.
++const COMMAND_LINE_BYTES: usize = core::mem::size_of::<UNICODE_STRING>() + 65_536;
++
++/// `NtQueryInformationProcess(ProcessBasicInformation)` 의 결과 배치 — `Win32_System_Kernel` 을 켜지 않으려
++/// 여기 둔다. 포인터 칸은 같은 크기 · 정렬의 `usize` 로 받는다.
++#[allow(non_camel_case_types)]
++#[repr(C)]
++#[derive(Default)]
++struct PROCESS_BASIC_INFORMATION {
++    _exit_status: i32,
++    _peb_base_address: usize,
++    _affinity_mask: usize,
++    _base_priority: i32,
++    _unique_process_id: usize,
++    inherited_from_unique_process_id: usize,
++}
++
++/// 우리 Job 멤버로 확인하고 붙든 프로세스 — 쥐는 동안 그 PID 는 재사용되지 않는다(열린 핸들이 프로세스 객체를
++/// 붙든다). 끝난 뒤에도 쥘 수 있다. drop = CloseHandle.
++#[derive(Debug)]
++pub(crate) struct PinnedMember {
++    handle: HANDLE,
++    facts: ProcessFacts,
++}
++
++// SAFETY: 프로세스 핸들은 어느 스레드에서 써도 된다. 메서드는 핸들로 OS 조회 · 끝내기만 하고, 닫기는 이 값이
++//   단독 소유한 drop 한 번뿐이다.
++unsafe impl Send for PinnedMember {}
++unsafe impl Sync for PinnedMember {}
++
++/// Job 가입 알림 포트 — [`JobObjectHandle::watch_births`] 가 만든다. 여러 스레드가 `Arc` 로 나눠 쥐고, 마지막
++/// drop 이 포트 핸들을 닫는다.
+ ///
+-/// - `Gone` = 그 번호의 프로세스가 없거나 이미 끝났다.
+-/// - `NotOurs` = 산 프로세스지만 이 Job 밖이거나 시작시각이 달라 그 신원이 아니다.
+-// ADR-0257
++/// 알림은 통지일 뿐 배달이 보장되지 않는다(MS Learn) — 빠진 가입은 여기서 알 수 없다.
+ #[derive(Debug)]
+-pub(crate) enum MemberCheck {
+-    Ready(VerifiedMember),
+-    Gone,
+-    NotOurs,
++pub(crate) struct BirthPort {
++    handle: HANDLE,
+ }
+ 
+-/// [`VerifiedMember::settle`] 의 답. `Gone` = 검증 뒤 끝내기 전에 스스로 끝났다.
++// SAFETY: 완료 포트 핸들은 여러 스레드가 동시에 꺼내도 되는 커널 객체다. 닫기는 마지막 `Arc` 의 drop 한 번뿐이다.
++unsafe impl Send for BirthPort {}
++unsafe impl Sync for BirthPort {}
++
++/// [`PinnedMember::classify`] 의 답. `Gone` = 붙든 뒤 끝내기 전에 스스로 끝났다.
+ // ADR-0257
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum MemberOutcome {
+@@ -58,17 +107,6 @@ pub(crate) enum MemberOutcome {
+     Gone,
+ }
+ 
+-/// 검증을 마친 프로세스 핸들 — 쥐고 있는 동안 그 PID 는 재사용되지 않는다(열린 핸들이 프로세스 객체를
+-/// 붙든다). drop = CloseHandle.
+-// ADR-0257
+-#[derive(Debug)]
+-pub(crate) struct VerifiedMember {
+-    handle: HANDLE,
+-}
+-
+-// SAFETY: 프로세스 핸들은 어느 스레드에서 써도 된다. 이 값이 단독 소유하고 닫기는 drop 한 번뿐이다.
+-unsafe impl Send for VerifiedMember {}
+-
+ pub struct JobObjectHandle {
+     handle: HANDLE,
+ }
+@@ -217,103 +255,302 @@ impl JobObjectHandle {
+         )))
+     }
+ 
+-    /// 그 신원이 아직 **이 Job 의 산 멤버**인지 같은 핸들로 본다. 끝내지 않는다.
++    /// 그 번호의 프로세스를 열어 **이 Job 의 멤버일 때만** 붙들고 사실을 한 번 읽는다. 살았는지는 보지 않는다
++    /// ([`PinnedMember::exited`]).
+     ///
+-    /// `Err` = 여는 실패(부재 말고) · Job 소속 · 시작시각 · 대기 조회 자체의 실패 — 무엇이든 끝내기로 가지 않는다.
+-    // ADR-0257
+-    pub(crate) fn verify_member(&self, pid: u32, expected_start: u64) -> io::Result<MemberCheck> {
+-        // SAFETY: 끝내기 · 시각 조회 · 대기에 드는 권한만 연다.
+-        let handle = match unsafe {
+-            OpenProcess(
+-                PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+-                false,
+-                pid,
+-            )
+-        } {
++    /// `kill` = 끝내기 권한도 연다 — `false` 로 붙든 것은 [`PinnedMember::terminate_raw`] 가 늘 실패한다.
++    /// `Ok(None)` = 그 번호의 프로세스가 없다 · 이 Job 밖이다. `Err` = 여는 실패(부재 말고 — 권한 거부 등) ·
++    /// 소속 조회 실패.
++    pub(crate) fn pin_member(&self, pid: u32, kill: bool) -> io::Result<Option<PinnedMember>> {
++        let mut access = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
++        if kill {
++            access |= PROCESS_TERMINATE;
++        }
++        // SAFETY: 조회 · 대기(· 끝내기) 권한만 연다.
++        let handle = match unsafe { OpenProcess(access, false, pid) } {
+             Ok(h) => h,
+             Err(e) if e.code() == HRESULT::from_win32(ERROR_INVALID_PARAMETER.0) => {
+-                return Ok(MemberCheck::Gone)
++                return Ok(None)
+             }
+             Err(e) => return Err(win_err(e)),
+         };
+-        let member = VerifiedMember { handle };
++        let mut member = PinnedMember {
++            handle,
++            facts: ProcessFacts::default(),
++        };
+ 
+         let mut in_job = BOOL::default();
+         // SAFETY: 두 유효 핸들 + 스택 출력. ★Job 인자는 늘 우리 핸들이다★ — NULL 이면 「아무 Job 에나
+         //   들었나」로 바뀌어 남의 Job 멤버를 우리 것으로 본다.
+         unsafe { IsProcessInJob(member.handle, self.handle, &mut in_job) }.map_err(win_err)?;
+         if !in_job.as_bool() {
+-            return Ok(MemberCheck::NotOurs);
++            return Ok(None);
+         }
++        member.facts = read_facts(member.handle);
++        Ok(Some(member))
++    }
++
++    /// 가입 알림 포트를 만들어 `start` 에 넘기고, **`start` 가 `Ok` 일 때만** 이 Job 을 그 포트에 붙인다 — 알림이
++    /// 쌓일 수 있게 되는 때에는 꺼낼 쪽이 이미 포트를 쥐고 있다. `start` 의 `Err` 는 그대로 돌려준다(붙지 않았다).
++    ///
++    /// 붙일 때 이미 든 멤버도 `Joined` 로 다시 알려진다 · 붙이는 동안 상태가 바뀐 멤버의 알림은 빠질 수 있다
++    /// (MS Learn). ★한 Job 에 한 번만 부른다★ — 두 번째 부름은 여기서 막지 않는다(부르는 쪽 몫).
++    pub(crate) fn watch_births(
++        &self,
++        start: impl FnOnce(Arc<BirthPort>) -> io::Result<()>,
++    ) -> io::Result<()> {
++        // SAFETY: 파일 없이 새 포트만 만든다(INVALID_HANDLE_VALUE · 기존 포트 없음 · 동시 실행 1).
++        let handle =
++            unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, HANDLE::default(), 0, 1) }
++                .map_err(win_err)?;
++        let port = Arc::new(BirthPort { handle });
++        start(Arc::clone(&port))?;
++        let attached = self.associate_port(port.handle);
++        // 붙이기가 끝난 뒤에 놓는다 — `start` 쪽이 먼저 놓아 핸들이 닫히면 그 값이 재사용돼 남의 핸들을 붙일 수 있다.
++        drop(port);
++        attached
++    }
++
++    /// 이 Job 의 포트 연결을 뗀다(포트 자리에 NULL — MS Learn 이 적은 떼기). 뗀 뒤 태어난 멤버는 알려지지 않는다.
++    pub(crate) fn unwatch_births(&self) -> io::Result<()> {
++        self.associate_port(HANDLE::default())
++    }
+ 
+-        let mut creation = FILETIME::default();
+-        let mut exit = FILETIME::default();
+-        let mut kernel = FILETIME::default();
+-        let mut user = FILETIME::default();
+-        // SAFETY: 유효 핸들 + 스택의 4개 FILETIME 출력 포인터.
++    fn associate_port(&self, port: HANDLE) -> io::Result<()> {
++        let info = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
++            CompletionKey: core::ptr::without_provenance_mut(BIRTH_PORT_KEY),
++            CompletionPort: port,
++        };
++        // SAFETY: 유효한 Job 핸들 + 스택 구조체 포인터와 정확한 크기. 클래스와 구조체 타입이 일치한다.
+         unsafe {
+-            GetProcessTimes(
+-                member.handle,
+-                &mut creation,
+-                &mut exit,
+-                &mut kernel,
+-                &mut user,
++            SetInformationJobObject(
++                self.handle,
++                JobObjectAssociateCompletionPortInformation,
++                &info as *const _ as *const core::ffi::c_void,
++                core::mem::size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>() as u32,
+             )
+         }
+-        .map_err(win_err)?;
+-        let start = ((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64);
+-        if start != expected_start {
+-            return Ok(MemberCheck::NotOurs);
+-        }
+-
+-        // 생존을 종료 코드(STILL_ACTIVE = 259)로 재지 않는다 — 259 로 끝난 프로세스가 산 것으로 보인다.
+-        // SAFETY: 유효 핸들 · 기다리지 않는 조회.
+-        match unsafe { WaitForSingleObject(member.handle, 0) } {
+-            WAIT_OBJECT_0 => Ok(MemberCheck::Gone),
+-            WAIT_TIMEOUT => Ok(MemberCheck::Ready(member)),
+-            WAIT_FAILED => Err(io::Error::last_os_error()),
+-            other => Err(io::Error::other(format!(
+-                "프로세스 대기가 뜻밖의 값 {:#x} 를 돌려줬다",
+-                other.0
+-            ))),
+-        }
++        .map_err(win_err)
+     }
+ }
+ 
+-impl VerifiedMember {
+-    /// 검증한 그 핸들로 `TerminateProcess` **호출 하나만** 한다. 비동기 — 대상이 끝나기를 기다리지 않는다.
+-    /// 날것 결과만 돌려주며 가르기와 닫기는 [`Self::settle`] 이 한다(자물쇠 안에서 부를 수 있게 좁혔다).
+-    // ADR-0257
+-    pub(crate) fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
+-        // ★실패도 힙을 쓰지 않는 오류로 만든다★ — 자물쇠 안에서 불리므로 `win_err`(`io::Error::other` = 상자 할당)를
+-        //   쓰지 않는다. windows 0.58 의 `ok()` 는 `GetLastError` 를 읽기만 해 마지막 오류가 그대로 남아 있다.
+-        // SAFETY: 검증 때 PROCESS_TERMINATE 로 연 유효 핸들.
+-        unsafe { TerminateProcess(self.handle, exit_code) }.map_err(|_| io::Error::last_os_error())
++impl PinnedMember {
++    /// 지금 끝났나 — 기다리지 않는다. `Err` = 대기 조회 자체의 실패.
++    pub(crate) fn exited(&self) -> io::Result<bool> {
++        signaled_within(self.handle, 0)
+     }
+ 
+-    /// [`Self::terminate_raw`] 의 날것 결과를 가르고 핸들을 닫는다. 실패여도 그 사이 스스로 끝났으면 `Gone` 이다.
+-    // ADR-0257
+-    pub(crate) fn settle(self, raw: io::Result<()>) -> io::Result<MemberOutcome> {
+-        match raw {
+-            Ok(()) => Ok(MemberOutcome::Terminated),
+-            // SAFETY: 유효 핸들 · 기다리지 않는 조회.
+-            Err(_) if unsafe { WaitForSingleObject(self.handle, 0) } == WAIT_OBJECT_0 => {
+-                Ok(MemberOutcome::Gone)
++    /// `limit` 까지 끝나기를 기다린다 — 끝났으면 `true`. `Err` = 대기 조회 자체의 실패.
++    pub(crate) fn wait_exit(&self, limit: Duration) -> io::Result<bool> {
++        signaled_within(self.handle, finite_millis(limit))
++    }
++
++    pub(crate) fn facts(&self) -> &ProcessFacts {
++        &self.facts
++    }
++
++    /// 붙든 그 핸들로 [`LEFTOVER_EXIT_CODE`] 를 주는 `TerminateProcess` **호출 하나만** 한다. 비동기 — 대상이
++    /// 끝나기를 기다리지 않는다. 날것 결과만 돌려주며 가르기는 [`Self::classify`] 가 한다(자물쇠 안에서 부를 수
++    /// 있게 좁혔다). `kill = false` 로 붙든 것은 늘 `Err` 다.
++    pub(crate) fn terminate_raw(&self) -> io::Result<()> {
++        terminate_handle(self.handle, LEFTOVER_EXIT_CODE)
++    }
++
++    /// [`Self::terminate_raw`] 의 날것 결과를 가른다. 실패여도 그 사이 스스로 끝났으면 `Gone` 이다. 핸들은 닫지
++    /// 않는다(drop 이 닫는다).
++    pub(crate) fn classify(&self, raw: io::Result<()>) -> io::Result<MemberOutcome> {
++        classify_terminate(self.handle, raw)
++    }
++}
++
++impl BirthPort {
++    /// 알림 하나를 `wait` 까지 기다려 꺼낸다. `Err` = 꺼내기 자체의 실패(포트가 닫힘 등).
++    pub(crate) fn next(&self, wait: Duration) -> io::Result<PortEvent> {
++        let mut message = 0u32;
++        let mut key = 0usize;
++        let mut overlapped: *mut OVERLAPPED = core::ptr::null_mut();
++        // SAFETY: 유효 포트 핸들 + 스택 출력 셋 · 유한 대기.
++        let dequeued = unsafe {
++            GetQueuedCompletionStatus(
++                self.handle,
++                &mut message,
++                &mut key,
++                &mut overlapped,
++                finite_millis(wait),
++            )
++        };
++        match dequeued {
++            Ok(()) if key == BIRTH_PORT_KEY && message == JOB_OBJECT_MSG_NEW_PROCESS => {
++                // Job 알림은 OVERLAPPED 칸에 포인터가 아니라 PID 를 싣는다 — 역참조하지 않는다.
++                let pid = overlapped as usize;
++                u32::try_from(pid).map(PortEvent::Joined).map_err(|_| {
++                    io::Error::other(format!("Job 가입 알림의 PID {pid:#x} 가 u32 를 넘는다"))
++                })
+             }
+-            Err(e) => Err(e),
++            Ok(()) => Ok(PortEvent::Other),
++            Err(e) if e.code() == HRESULT::from_win32(WAIT_TIMEOUT.0) => Ok(PortEvent::Timeout),
++            Err(e) => Err(win_err(e)),
+         }
+     }
+ }
+ 
+-impl Drop for VerifiedMember {
++impl Drop for PinnedMember {
+     fn drop(&mut self) {
+-        // SAFETY: verify_member 가 연 유효 핸들을 한 번만 닫는다.
++        // SAFETY: pin_member 가 연 유효 핸들을 한 번만 닫는다.
+         unsafe {
+             let _ = CloseHandle(self.handle);
+         }
+     }
+ }
+ 
++impl Drop for BirthPort {
++    fn drop(&mut self) {
++        // SAFETY: watch_births 가 만든 유효 포트 핸들을 마지막 `Arc` 가 한 번만 닫는다.
++        unsafe {
++            let _ = CloseHandle(self.handle);
++        }
++    }
++}
++
++/// `TerminateProcess` 호출 하나. ★실패도 힙을 쓰지 않는 오류로 만든다★ — 자물쇠 안에서 불리므로
++/// `win_err`(`io::Error::other` = 상자 할당)를 쓰지 않는다. windows 0.58 의 `ok()` 는 `GetLastError` 를 읽기만 해
++/// 마지막 오류가 그대로 남아 있다.
++// ADR-0257
++fn terminate_handle(handle: HANDLE, exit_code: u32) -> io::Result<()> {
++    // SAFETY: 호출자가 쥔 유효 프로세스 핸들 — 끝내기 권한이 없으면 OS 가 거절한다.
++    unsafe { TerminateProcess(handle, exit_code) }.map_err(|_| io::Error::last_os_error())
++}
++
++/// 끝내기 날것 결과 가르기 — 실패여도 그 사이 스스로 끝났으면 `Gone`.
++// ADR-0257
++fn classify_terminate(handle: HANDLE, raw: io::Result<()>) -> io::Result<MemberOutcome> {
++    match raw {
++        Ok(()) => Ok(MemberOutcome::Terminated),
++        // SAFETY: 호출자가 쥔 유효 핸들 · 기다리지 않는 조회.
++        Err(_) if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 => {
++            Ok(MemberOutcome::Gone)
++        }
++        Err(e) => Err(e),
++    }
++}
++
++/// 대기 ms — `u32::MAX` 는 INFINITE 라 그 아래로 자른다.
++fn finite_millis(wait: Duration) -> u32 {
++    u32::try_from(wait.as_millis())
++        .unwrap_or(u32::MAX)
++        .min(u32::MAX - 1)
++}
++
++/// 핸들이 `millis` 안에 신호를 받았나(= 끝났나). 생존을 종료 코드(STILL_ACTIVE = 259)로 재지 않는다 — 259 로
++/// 끝난 프로세스가 산 것으로 보인다.
++fn signaled_within(handle: HANDLE, millis: u32) -> io::Result<bool> {
++    // SAFETY: 호출자가 쥔 유효 핸들 · 유한 대기.
++    match unsafe { WaitForSingleObject(handle, millis) } {
++        WAIT_OBJECT_0 => Ok(true),
++        WAIT_TIMEOUT => Ok(false),
++        WAIT_FAILED => Err(io::Error::last_os_error()),
++        other => Err(io::Error::other(format!(
++            "프로세스 대기가 뜻밖의 값 {:#x} 를 돌려줬다",
++            other.0
++        ))),
++    }
++}
++
++fn read_facts(handle: HANDLE) -> ProcessFacts {
++    ProcessFacts {
++        ppid: parent_pid(handle).unwrap_or(0),
++        create: creation_time(handle).unwrap_or(0),
++        image: image_path(handle).unwrap_or_default(),
++        cmdline: command_line(handle).unwrap_or_default(),
++    }
++}
++
++fn parent_pid(handle: HANDLE) -> Option<u32> {
++    let mut info = PROCESS_BASIC_INFORMATION::default();
++    let size = core::mem::size_of::<PROCESS_BASIC_INFORMATION>() as u32;
++    let mut written = 0u32;
++    // SAFETY: 유효 핸들 + 그 클래스의 배치대로 잡은 스택 구조체와 정확한 크기 + 스택 출력.
++    let status = unsafe {
++        NtQueryInformationProcess(
++            handle,
++            ProcessBasicInformation,
++            (&mut info as *mut PROCESS_BASIC_INFORMATION).cast(),
++            size,
++            &mut written,
++        )
++    };
++    // 돌려받은 크기까지 맞아야 배치를 믿는다.
++    if status.is_err() || written != size {
++        return None;
++    }
++    u32::try_from(info.inherited_from_unique_process_id).ok()
++}
++
++fn creation_time(handle: HANDLE) -> Option<u64> {
++    let mut creation = FILETIME::default();
++    let mut exit = FILETIME::default();
++    let mut kernel = FILETIME::default();
++    let mut user = FILETIME::default();
++    // SAFETY: 유효 핸들 + 스택의 4개 FILETIME 출력 포인터.
++    unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }.ok()?;
++    Some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
++}
++
++fn image_path(handle: HANDLE) -> Option<String> {
++    let mut buf = vec![0u16; IMAGE_PATH_CHARS];
++    let mut len = IMAGE_PATH_CHARS as u32;
++    // SAFETY: 유효 핸들 + 길이를 알려 준 쓰기 가능 버퍼 + 스택 입출력 길이.
++    unsafe {
++        QueryFullProcessImageNameW(
++            handle,
++            PROCESS_NAME_WIN32,
++            PWSTR(buf.as_mut_ptr()),
++            &mut len,
++        )
++    }
++    .ok()?;
++    buf.get(..len as usize).map(String::from_utf16_lossy)
++}
++
++/// `QUERY_LIMITED` 권한으로 읽힌다는 것은 문서가 아니라 실측이다(TRD t40 §8 ㉒ⓘ) — 거절되면 빈 칸이 된다.
++fn command_line(handle: HANDLE) -> Option<String> {
++    const HEAD: usize = core::mem::size_of::<UNICODE_STRING>();
++    // u64 칸으로 잡아 머리의 포인터 칸 정렬을 맞춘다.
++    let mut buf = vec![0u64; COMMAND_LINE_BYTES.div_ceil(8)];
++    let bytes = buf.len() * 8;
++    let mut written = 0u32;
++    // SAFETY: 유효 핸들 + 쓰기 가능한 `bytes` 바이트 버퍼(8 정렬) + 스택 출력.
++    let status = unsafe {
++        NtQueryInformationProcess(
++            handle,
++            ProcessCommandLineInformation,
++            buf.as_mut_ptr().cast(),
++            u32::try_from(bytes).ok()?,
++            &mut written,
++        )
++    };
++    if status.is_err() {
++        return None;
++    }
++    // SAFETY: 버퍼는 머리 크기 이상이고 8 정렬이다. `UNICODE_STRING` 은 Copy 라 값으로 읽는다.
++    let head = unsafe { buf.as_ptr().cast::<UNICODE_STRING>().read() };
++    let units = usize::from(head.Length) / 2;
++    if units == 0 {
++        return Some(String::new());
++    }
++    // 글자는 커널이 우리 버퍼 안 머리 뒤에 채우고 Buffer 가 그 자리를 가리킨다 — 그 주소를 그대로 믿지 않고
++    //   우리 버퍼 안의 오프셋으로 바꿔 범위를 확인한 뒤 우리 버퍼에서 읽는다.
++    let offset = (head.Buffer.0 as usize).checked_sub(buf.as_ptr() as usize)?;
++    if offset < HEAD || !offset.is_multiple_of(2) || offset.checked_add(units * 2)? > bytes {
++        return None;
++    }
++    // SAFETY: [offset, offset + units * 2) 는 위에서 확인한 버퍼 안 범위이고 2 정렬이다(버퍼가 8 정렬).
++    let text = unsafe {
++        core::slice::from_raw_parts(buf.as_ptr().cast::<u8>().add(offset).cast::<u16>(), units)
++    };
++    Some(String::from_utf16_lossy(text))
++}
++
+ impl Drop for JobObjectHandle {
+     fn drop(&mut self) {
+         // 핸들이 닫히면 KILL_ON_JOB_CLOSE 덕에 잔여 프로세스도 OS가 정리한다.
+@@ -329,3 +566,351 @@ impl Drop for JobObjectHandle {
+ fn win_err(e: windows::core::Error) -> io::Error {
+     io::Error::other(e)
+ }
++
++// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md).
++#[cfg(test)]
++mod tests {
++    use std::io::Write;
++    use std::process::{Command, Stdio};
++    use std::time::Instant;
++
++    use engram_dashboard_base::platform::{process_start, ProcessStart};
++
++    use super::*;
++    use crate::platform::process_group::tests::{is_ping, open_gate, spawn_gated_cmd, wait_until};
++
++    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
++    const DETACHED_PROCESS: u32 = 0x0000_0008;
++
++    /// `want` 에 맞는 알림이 올 때까지 꺼낸다(10 초) — 그 앞의 알림은 버린다.
++    fn next_matching(
++        port: &BirthPort,
++        what: &str,
++        mut want: impl FnMut(PortEvent) -> bool,
++    ) -> PortEvent {
++        let deadline = Instant::now() + Duration::from_secs(10);
++        loop {
++            let event = port
++                .next(Duration::from_millis(100))
++                .expect("포트에서 꺼내기");
++            if want(event) {
++                return event;
++            }
++            assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
++        }
++    }
++
++    /// 쌓인 알림을 `Timeout` 이 날 때까지 비운다.
++    fn drain(port: &BirthPort) {
++        for _ in 0..100 {
++            if port
++                .next(Duration::from_millis(300))
++                .expect("포트에서 꺼내기")
++                == PortEvent::Timeout
++            {
++                return;
++            }
++        }
++        panic!("알림이 그치지 않는다");
++    }
++
++    /// ⑥ 붙든 핸들로 읽은 사실 — 부모 = 띄운 이 시험 프로세스 · 생성은 이 시험 프로세스보다 늦다 · 실행 파일 ·
++    /// 명령줄(조회 권한만으로). 조회 권한만으로 붙든 것은 끝낼 수 없다.
++    #[test]
++    fn a_pinned_member_carries_its_facts_and_ends_only_with_the_kill_right() {
++        let job = JobObjectHandle::new().expect("Job 생성");
++        assert!(
++            job.pin_member(std::process::id(), false)
++                .expect("붙들기")
++                .is_none(),
++            "Job 밖의 이 시험 프로세스를 붙들었다"
++        );
++        assert!(
++            job.pin_member(0, false).expect("붙들기").is_none(),
++            "없는 번호를 붙들었다"
++        );
++
++        let mut x = spawn_gated_cmd("rem t40-facts", CREATE_NO_WINDOW);
++        job.assign(x.id()).expect("Job 편입");
++
++        let watcher = job
++            .pin_member(x.id(), false)
++            .expect("붙들기")
++            .expect("우리 멤버");
++        let facts = watcher.facts();
++        assert_eq!(facts.ppid, std::process::id(), "부모: {facts:?}");
++        let ProcessStart::Known(me) = process_start(std::process::id()) else {
++            panic!("이 시험 프로세스의 생성 시각을 못 읽었다");
++        };
++        assert!(facts.create >= me, "생성이 부모보다 이르다: {facts:?}");
++        assert!(
++            facts.image.to_ascii_lowercase().ends_with("\\cmd.exe"),
++            "실행 파일: {facts:?}"
++        );
++        assert!(
++            facts.cmdline.contains("set /p _= & rem t40-facts"),
++            "명령줄: {facts:?}"
++        );
++        assert!(!watcher.exited().expect("끝났나"));
++
++        let refused = watcher.terminate_raw();
++        assert!(refused.is_err(), "끝내기 권한 없이 끝냈다");
++        assert!(
++            watcher.classify(refused).is_err(),
++            "산 프로세스의 거절이 Gone 으로 읽혔다"
++        );
++        assert!(x.try_wait().expect("상태").is_none(), "조회 핸들이 죽였다");
++
++        let killer = job
++            .pin_member(x.id(), true)
++            .expect("붙들기")
++            .expect("우리 멤버");
++        let raw = killer.terminate_raw();
++        assert_eq!(
++            killer.classify(raw).expect("끝내기"),
++            MemberOutcome::Terminated
++        );
++        assert!(
++            watcher
++                .wait_exit(Duration::from_secs(5))
++                .expect("끝나기 대기"),
++            "5 초 안에 안 끝났다"
++        );
++        assert!(watcher.exited().expect("끝났나"));
++        let status = x.wait().expect("종료");
++        assert_eq!(status.code(), Some(LEFTOVER_EXIT_CODE as i32));
++    }
++
++    /// ⑦-가 `start` 가 실패하면 Job 은 포트에 붙지 않는다 — 원래 멤버의 되알림도, 그 뒤 Job 안에서 태어난 것도
++    /// 오지 않는다(붙었다면 둘 다 이미 쌓여 있다 — ⑦-나).
++    #[test]
++    fn a_failed_start_leaves_the_job_unwatched() {
++        let job = JobObjectHandle::new().expect("Job 생성");
++        let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
++        job.assign(x.id()).expect("Job 편입");
++
++        let mut held = None;
++        let refused = job.watch_births(|port| {
++            held = Some(port);
++            Err(io::Error::other("기동 실패 흉내"))
++        });
++        assert_eq!(
++            refused
++                .expect_err("start 의 실패가 그대로 와야 한다")
++                .to_string(),
++            "기동 실패 흉내"
++        );
++        let port = held.expect("start 가 포트를 받았다");
++
++        open_gate(&mut x);
++        wait_until("Job 안의 ping", || {
++            job.member_pids()
++                .ok()?
++                .into_iter()
++                .find(|&pid| is_ping(pid))
++        });
++        let event = port.next(Duration::from_millis(500)).expect("꺼내기");
++        assert_eq!(event, PortEvent::Timeout, "붙지 않은 포트에 알림이 왔다");
++
++        job.terminate(1).expect("Job 끝내기");
++        let _ = x.wait();
++    }
++
++    /// ⑦-나 붙은 포트 — 붙일 때 이미 든 X 가 다시 알려지고 · X 가 띄운 ping 이 `Joined` · 그 ping 이 끝나면
++    /// `Other` · 뗀 뒤 태어난 멤버는 알려지지 않는다.
++    #[test]
++    fn a_watched_job_reports_births_until_unwatched() {
++        let job = JobObjectHandle::new().expect("Job 생성");
++        // 문이 둘이다 — 첫 줄에 첫 ping, 둘째 줄에 둘째 ping. 둘째 문은 뗀 뒤에 연다.
++        let mut x = spawn_gated_cmd(
++            "ping -n 30 127.0.0.1 & set /p _= & ping -n 30 127.0.0.1",
++            CREATE_NO_WINDOW,
++        );
++        let root = x.id();
++        job.assign(root).expect("Job 편입");
++        let mut gate = x.stdin.take().expect("stdin 파이프");
++
++        let mut held = None;
++        job.watch_births(|port| {
++            held = Some(port);
++            Ok(())
++        })
++        .expect("붙이기");
++        let port = held.expect("start 가 포트를 받았다");
++        next_matching(&port, "X 의 되알림", |e| e == PortEvent::Joined(root));
++
++        gate.write_all(b"go\r\n").expect("첫 문");
++        let PortEvent::Joined(first) = next_matching(
++            &port,
++            "X 가 띄운 ping",
++            |e| matches!(e, PortEvent::Joined(pid) if is_ping(pid)),
++        ) else {
++            unreachable!("Joined 만 고른다")
++        };
++        // 끝까지 쥔다 — 둘째 ping 이 이 번호를 재사용하지 못하게.
++        let ping = job
++            .pin_member(first, true)
++            .expect("붙들기")
++            .expect("우리 멤버");
++        assert_eq!(ping.facts().ppid, root, "ping 의 부모: {:?}", ping.facts());
++        let raw = ping.terminate_raw();
++        assert_eq!(
++            ping.classify(raw).expect("끝내기"),
++            MemberOutcome::Terminated
++        );
++        next_matching(&port, "ping 의 끝남", |e| e == PortEvent::Other);
++
++        job.unwatch_births().expect("떼기");
++        drain(&port);
++
++        gate.write_all(b"go\r\n").expect("둘째 문");
++        let second = wait_until("뗀 뒤 태어난 ping", || {
++            job.member_pids()
++                .ok()?
++                .into_iter()
++                .find(|&pid| pid != first && is_ping(pid))
++        });
++        let deadline = Instant::now() + Duration::from_millis(500);
++        while Instant::now() < deadline {
++            let event = port.next(Duration::from_millis(100)).expect("꺼내기");
++            assert!(
++                !matches!(event, PortEvent::Joined(_)),
++                "뗀 뒤 태어난 {second} 이 알려졌다: {event:?}"
++            );
++        }
++
++        job.terminate(1).expect("Job 끝내기");
++        drop(gate);
++        let _ = x.wait();
++    }
++
++    /// ⑧ MSYS 명령줄의 세 모양 — 훅 사본 판정이 기댄다(TRD t40 §3-0): 껍데기가 exec 한 스크립트는 제 명령줄을
++    /// 갖고 · 그 서브셸(fork)은 부모와 실행 파일 · 명령줄이 같고 · 스크립트가 exec 한 `sleep` 은 다르다.
++    /// 껍데기는 문(`read _`)을 지난 뒤 명령 하나를 exec 한다 — 훅의 `-c "bash x.sh"` 처럼 fork 없이 넘기면서
++    /// 모두 Job 안에서 태어나게. 콘솔 없이 띄워 콘솔 호스트를 끌고 오지 않는다(껍데기 · 스크립트 · 서브셸 ·
++    /// `sleep` 넷).
++    #[test]
++    #[ignore = "Git Bash(C:\\Program Files\\Git\\usr\\bin\\bash.exe) 가 있어야 한다"]
++    fn msys_births_carry_exec_fork_and_foreign_command_lines() {
++        use std::os::windows::process::CommandExt;
++        const BASH: &str = r"C:\Program Files\Git\usr\bin\bash.exe";
++        assert!(
++            std::path::Path::new(BASH).exists(),
++            "{BASH} 가 없다 — PATH 의 bash 로 대신하지 않는다"
++        );
++        let script = std::env::temp_dir().join(format!("t40-facts-{}.sh", std::process::id()));
++        // 비대화 셸은 백그라운드 명령의 stdin 을 /dev/null 로 돌린다 — 서브셸이 파이프를 fd 3 으로 받아 기다려야
++        // 끝까지 산다.
++        std::fs::write(
++            &script,
++            "exec 3<&0\n( read _ <&3 ) &\nexec /usr/bin/sleep 30\n",
++        )
++        .expect("스크립트 쓰기");
++        let script_arg = script.to_string_lossy().replace('\\', "/");
++        let script_name = script
++            .file_name()
++            .expect("파일 이름")
++            .to_string_lossy()
++            .into_owned();
++
++        let job = JobObjectHandle::new().expect("Job 생성");
++        // `/usr/bin` 을 절대 경로로 부른다 — Git 런처를 거치지 않은 `usr\bin\bash.exe` 는 `PATH` 에 `/usr/bin` 이
++        // 없다(실측).
++        let mut shell = Command::new(BASH)
++            .args(["-c", &format!("read _; exec /usr/bin/bash {script_arg}")])
++            .stdin(Stdio::piped())
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .creation_flags(DETACHED_PROCESS)
++            .spawn()
++            .expect("bash 기동");
++        let root = shell.id();
++        job.assign(root).expect("Job 편입");
++        // 서브셸의 `read _` 가 이 파이프에서 기다린다 — 끝까지 쥔다.
++        let mut gate = shell.stdin.take().expect("stdin 파이프");
++        let shell_pin = job
++            .pin_member(root, false)
++            .expect("붙들기")
++            .expect("우리 멤버");
++
++        let mut held = None;
++        job.watch_births(|port| {
++            held = Some(port);
++            Ok(())
++        })
++        .expect("붙이기");
++        let port = held.expect("start 가 포트를 받았다");
++        gate.write_all(b"go\n").expect("문");
++
++        // 태어나는 대로 붙든다 — 짧게 사는 fork 를 끝나기 전에 연다.
++        let mut births: Vec<(u32, PinnedMember)> = Vec::new();
++        let find = |births: &[(u32, PinnedMember)]| {
++            let runs =
++                |m: &PinnedMember, exe: &str| m.facts().image.to_ascii_lowercase().ends_with(exe);
++            let (script_pid, script) = births
++                .iter()
++                .find(|(_, m)| m.facts().ppid == root && runs(m, "\\bash.exe"))?;
++            let (_, fork) = births
++                .iter()
++                .find(|(_, m)| m.facts().ppid == *script_pid && runs(m, "\\bash.exe"))?;
++            let (_, sleep) = births
++                .iter()
++                .find(|(_, m)| m.facts().ppid == *script_pid && runs(m, "\\sleep.exe"))?;
++            Some((
++                script.facts().clone(),
++                fork.facts().clone(),
++                sleep.facts().clone(),
++            ))
++        };
++        let deadline = Instant::now() + Duration::from_secs(10);
++        let (script_facts, fork_facts, sleep_facts) = loop {
++            if let Some(found) = find(&births) {
++                break found;
++            }
++            assert!(
++                Instant::now() < deadline,
++                "10 초 안에 스크립트 · 서브셸 · sleep 을 다 못 봤다: {:#?}",
++                births
++                    .iter()
++                    .map(|(pid, m)| (pid, m.facts()))
++                    .collect::<Vec<_>>()
++            );
++            if let PortEvent::Joined(pid) = port.next(Duration::from_millis(100)).expect("꺼내기")
++            {
++                if pid != root {
++                    if let Some(member) = job.pin_member(pid, false).expect("붙들기") {
++                        births.push((pid, member));
++                    }
++                }
++            }
++        };
++        let shell_facts = shell_pin.facts().clone();
++
++        assert!(
++            shell_facts.cmdline.contains("exec /usr/bin/bash"),
++            "껍데기: {shell_facts:?}"
++        );
++        assert!(
++            script_facts.cmdline.contains(&script_name)
++                && script_facts.cmdline != shell_facts.cmdline,
++            "exec 한 스크립트가 제 명령줄을 갖지 않는다: {script_facts:?} / {shell_facts:?}"
++        );
++        assert_eq!(
++            fork_facts.image, script_facts.image,
++            "서브셸: {fork_facts:?}"
++        );
++        assert_eq!(
++            fork_facts.cmdline, script_facts.cmdline,
++            "서브셸이 스크립트의 명령줄 사본이 아니다"
++        );
++        assert!(
++            sleep_facts.cmdline.contains("sleep") && sleep_facts.cmdline != script_facts.cmdline,
++            "sleep 이 스크립트의 명령줄을 가졌다: {sleep_facts:?}"
++        );
++
++        job.terminate(1).expect("Job 끝내기");
++        drop(gate);
++        let _ = shell.wait();
++        let _ = std::fs::remove_file(&script);
++    }
++}
+diff --git a/crates/engram-dashboard-agent/src/session.rs b/crates/engram-dashboard-agent/src/session.rs
+index a9b74ea..cce860b 100644
+--- a/crates/engram-dashboard-agent/src/session.rs
++++ b/crates/engram-dashboard-agent/src/session.rs
+@@ -637,6 +637,11 @@ impl AgentSession {
+         self.transport.interrupt()
+     }
+ 
++    /// 통로에 물러남을 예고한다([`AgentTransport::begin_retire`]) — 자원은 거두지 않는다([`Self::kill`] 몫).
++    pub(crate) fn begin_retire(&self) {
++        self.transport.begin_retire();
++    }
++
+     /// 자원 강제 종료 + pump 종료 대기. **이 2동사 순서(shutdown THEN join_pump)가 kill 인과의 핵심.**
+     /// shutdown이 master를 drop해 pump read를 EOF로 깨우고(→core.finish(Killed)), join_pump가
+     /// 그 pump 종료를 기다린다. 역전 시 hang(아직 살아있는 pump를 기다림).
+diff --git a/crates/engram-dashboard-agent/src/transport/input_queue.rs b/crates/engram-dashboard-agent/src/transport/input_queue.rs
+index 12614d2..ce83f0f 100644
+--- a/crates/engram-dashboard-agent/src/transport/input_queue.rs
++++ b/crates/engram-dashboard-agent/src/transport/input_queue.rs
+@@ -20,6 +20,9 @@
+ //!   돌아가는 `Err` ⓒ 그리고 대개 곧 이어지는 pump 의 종점 전이다 — 파이프가 깨졌다는 것은 reader 도
+ //!   곧 EOF 를 본다는 뜻이라, 사람이 보는 신호는 결국 그 종료다.
+ //!
++//! 덩이마다 「실제로 나간 뒤 부를 것」([`OnWritten`])을 실을 수 있다 — `Ok` 가 「나갔다」를 뜻하지 않게 된 뒤에도
++//! 한 덩이가 나간 순간을 알아야 하는 쪽이 쓰는 문이다.
++//!
+ //! tauri import 0.
+ 
+ use std::collections::VecDeque;
+@@ -28,6 +31,16 @@ use std::time::{Duration, Instant};
+ 
+ use crate::types::{AgentId, PtyError};
+ 
++/// 덩이 하나가 **실제로 OS 로 나간 뒤** 라이터가 부를 것.
++///
++/// - 불리는 때 = 그 덩이의 쓰기가 성공하고 회계가 풀린 뒤, **이 큐의 락을 하나도 쥐지 않은 채** 라이터 스레드에서
++///   한 번. 그래서 이 안에서 같은 큐에 다시 넣어도 매달리지 않는다.
++/// - 안 불리는 때 = 큐가 받지 않았다(`Err`) · 쓰기 전에 큐가 닫혔다 · 쓰기가 실패했다. 셋 다 부르지 않고 버린다(drop).
++/// - panic 은 라이터가 잡아 `warn` 하고 다음 덩이를 계속 쓴다 — 큐를 닫지 않는다.
++/// - 라이터 스레드 하나가 뒤 덩이도 쓰므로, 이 안에서 오래 막히면 그만큼 뒤 입력이 늦는다. 이 안에서 큐가 비기를
++///   기다리면([`InputQueue::wait_drained`]) 자기를 기다린다.
++pub type OnWritten = Box<dyn FnOnce() + Send>;
++
+ /// 아직 OS 로 나가지 못한 입력의 상한(바이트). ★넘으면 그 호출이 `Err` 로 돌아간다 — 버리지 않는다★
+ /// (ADR-0190 의 처분 그대로. 조용히 버리는 갈래는 그 ADR 이 이미 기각했다).
+ ///
+@@ -58,7 +71,7 @@ pub const INPUT_QUEUE_MAX_BYTES: usize = 2 * 1024 * 1024;
+ const WAKE_BACKSTOP: Duration = Duration::from_millis(500);
+ 
+ struct Inner {
+-    pending: VecDeque<Vec<u8>>,
++    pending: VecDeque<(Vec<u8>, Option<OnWritten>)>,
+     /// **아직 OS 로 나가지 않은** 페이로드 바이트 합 = `pending` 이 든 것 **+ 라이터가 꺼내 들고 쓰는
+     /// 중인 것**. [`InputQueue::push`] 가 더하고 [`InputQueue::mark_written`] 이 뺀다(매번 순회하지
+     /// 않기 위해 합계를 들고 다닌다).
+@@ -108,6 +121,15 @@ impl InputQueue {
+     /// ② 상한을 넘는다. 받아 둔 뒤의 실패는 이 반환값이 아니라 다음 호출의 `Err` 로 나타난다
+     /// (모듈 헤더의 계약 문단).
+     pub(crate) fn push(&self, bytes: Vec<u8>) -> Result<(), PtyError> {
++        self.push_with(bytes, None)
++    }
++
++    /// [`push`](Self::push) 에 그 덩이가 나간 뒤 부를 것을 함께 싣는다(계약 = [`OnWritten`]). `Err` 면 부르지 않고 버린다.
++    pub(crate) fn push_with(
++        &self,
++        bytes: Vec<u8>,
++        on_written: Option<OnWritten>,
++    ) -> Result<(), PtyError> {
+         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+         if let Some(reason) = &inner.closed {
+             return Err(PtyError::WriteFailed(reason.clone()));
+@@ -123,7 +145,7 @@ impl InputQueue {
+             )));
+         }
+         inner.bytes = after;
+-        inner.pending.push_back(bytes);
++        inner.pending.push_back((bytes, on_written));
+         inner.pushed_seq += 1;
+         // ★락을 쥔 채 알린다★ — 이것이 [`WAKE_BACKSTOP`] 이 백스톱에 그치는 이유다.
+         self.wake.notify_one();
+@@ -137,7 +159,7 @@ impl InputQueue {
+     ///   마저 쓰려 해도 전부 실패한다. codex 라이터의 처분과 같다.
+     /// ★꺼내도 [`Inner::bytes`] 는 **줄지 않는다**★ — 꺼낸 덩이는 아직 나간 것이 아니다. 그 회계를
+     ///   푸는 것은 [`mark_written`](Self::mark_written) 하나뿐이고, 근거는 그 필드 doc.
+-    pub(crate) fn pop(&self) -> Option<Vec<u8>> {
++    pub(crate) fn pop(&self) -> Option<(Vec<u8>, Option<OnWritten>)> {
+         let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+         loop {
+             if inner.closed.is_some() {
+@@ -163,13 +185,17 @@ impl InputQueue {
+     /// ★첫 사유가 이기는 이유★: 실제 원인은 언제나 먼저 온 쪽이다(쓰기 실패 → 그 뒤 종료). 나중 사유로
+     ///   덮으면 진단이 「에이전트를 종료했다」로 뭉개진다.
+     pub(crate) fn close(&self, reason: &str) {
+-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+-        if inner.closed.is_none() {
+-            inner.closed = Some(reason.to_string());
+-        }
+-        inner.pending.clear();
+-        inner.bytes = 0;
+-        self.wake.notify_all();
++        let abandoned = {
++            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
++            if inner.closed.is_none() {
++                inner.closed = Some(reason.to_string());
++            }
++            inner.bytes = 0;
++            self.wake.notify_all();
++            std::mem::take(&mut inner.pending)
++        };
++        // 버리는 덩이의 부를 것은 락을 놓은 뒤에 버린다 — 그것이 쥔 값의 drop 이 이 큐로 돌아와도 매달리지 않게.
++        drop(abandoned);
+     }
+ 
+     /// 덩이 하나가 **실제로 OS 로 나갔다**. 라이터만 부른다([`drain`]).
+@@ -258,11 +284,25 @@ pub(crate) fn drain(
+     mut write: impl FnMut(&[u8]) -> std::io::Result<()>,
+ ) {
+     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+-        while let Some(chunk) = queue.pop() {
++        while let Some((chunk, on_written)) = queue.pop() {
+             match write(&chunk) {
+-                // ★성공을 세는 이 한 줄이 [`InputQueue::wait_drained`] 의 유일한 진행 신호다★.
+-                //   같은 줄이 [`Inner::bytes`] 회계도 푼다 — 「나갔다」가 두 뜻을 함께 갖는다.
+-                Ok(()) => queue.mark_written(chunk.len()),
++                Ok(()) => {
++                    // ★성공을 세는 이 한 줄이 [`InputQueue::wait_drained`] 의 유일한 진행 신호다★.
++                    //   같은 줄이 [`Inner::bytes`] 회계도 푼다 — 「나갔다」가 두 뜻을 함께 갖는다.
++                    queue.mark_written(chunk.len());
++                    // 부를 것의 panic 은 여기서 멈춘다 — 바깥 가드까지 가면 큐가 닫혀 멀쩡한 입력 경로가 죽는다.
++                    if let Some(on_written) = on_written {
++                        if let Err(payload) =
++                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_written))
++                        {
++                            tracing::warn!(
++                                agent = %agent,
++                                "{label} 입력 덩이가 나간 뒤 부를 것이 panic 했다 — 다음 덩이는 계속 쓴다: {}",
++                                panic_message(&*payload)
++                            );
++                        }
++                    }
++                }
+                 Err(e) => {
+                     // ★이 실패는 그 바이트를 보낸 호출자에게 돌아갈 길이 없다★ — 그 호출은 이미 `Ok` 를
+                     //   받고 떠났다. 여기서 할 수 있는 것은 사유를 남기고 통로를 닫아 **다음** 호출부터
+@@ -277,11 +317,7 @@ pub(crate) fn drain(
+     }));
+ 
+     if let Err(payload) = outcome {
+-        let msg = payload
+-            .downcast_ref::<&str>()
+-            .map(|s| s.to_string())
+-            .or_else(|| payload.downcast_ref::<String>().cloned())
+-            .unwrap_or_else(|| "<non-string panic payload>".to_string());
++        let msg = panic_message(&*payload);
+         let reason = format!("{label} 입력 라이터가 panic 했다: {msg}");
+         // 레벨 = error. 이 에이전트의 입력 경로가 **복구 불가**로 죽었고 사람이 봐야 한다
+         //   (`docs/reference/logging-conventions.md` 의 레벨 표 — panic 은 error).
+@@ -290,10 +326,18 @@ pub(crate) fn drain(
+     }
+ }
+ 
++fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
++    payload
++        .downcast_ref::<&str>()
++        .map(|s| s.to_string())
++        .or_else(|| payload.downcast_ref::<String>().cloned())
++        .unwrap_or_else(|| "<non-string panic payload>".to_string())
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use std::sync::atomic::{AtomicBool, Ordering};
++    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+     use std::sync::Arc;
+     use std::time::Instant;
+ 
+@@ -388,7 +432,7 @@ mod tests {
+         // 하나가 **실제로 나가면** 그만큼 다시 받는다 — 상한이 영구 사망 선고가 아님.
+         // ★꺼내는 것만으로는 자리가 안 난다★ — 그 회계의 정본과 회귀망은 아래
+         //   `in_flight_bytes_still_count_against_the_bound`.
+-        let popped = queue.pop().expect("하나 꺼내기");
++        let (popped, _) = queue.pop().expect("하나 꺼내기");
+         assert_eq!(popped.len(), half);
+         queue.mark_written(popped.len());
+         queue.push(vec![b'c'; 1]).expect("자리가 나면 다시 받는다");
+@@ -407,7 +451,7 @@ mod tests {
+             .push(vec![b'a'; INPUT_QUEUE_MAX_BYTES])
+             .expect("상한 전량은 들어간다");
+ 
+-        let in_flight = queue.pop().expect("라이터가 하나 꺼낸다");
++        let (in_flight, _) = queue.pop().expect("라이터가 하나 꺼낸다");
+         assert_eq!(in_flight.len(), INPUT_QUEUE_MAX_BYTES);
+         assert_eq!(
+             queue.queued_bytes(),
+@@ -545,4 +589,186 @@ mod tests {
+             other => panic!("{other:?}"),
+         }
+     }
++
++    // ── 나간 뒤 부를 것(`OnWritten`) ──
++
++    type Written = Arc<Mutex<Vec<Vec<u8>>>>;
++
++    /// 적은 덩이를 `written` 에 차례로 모으는 라이터 스레드.
++    fn spawn_recording_writer(
++        queue: &Arc<InputQueue>,
++        written: &Written,
++    ) -> std::thread::JoinHandle<()> {
++        let (seen, writer_queue) = (written.clone(), queue.clone());
++        std::thread::spawn(move || {
++            drain(&writer_queue, "시험", test_agent(), |b| {
++                seen.lock().unwrap().push(b.to_vec());
++                Ok(())
++            });
++        })
++    }
++
++    fn wait_until(mut done: impl FnMut() -> bool, what: &str) {
++        let deadline = Instant::now() + Duration::from_secs(5);
++        while !done() {
++            assert!(Instant::now() < deadline, "5 초 안에 안 됐다: {what}");
++            std::thread::sleep(Duration::from_millis(5));
++        }
++    }
++
++    /// 쓰기 성공 뒤 한 번 — 그때 그 덩이는 이미 적혔고 회계도 풀렸다. 안에서 큐 락을 잡아 보므로 락을 쥔 채 부르면
++    /// 매달려 시한에 걸린다. 넣기를 라이터보다 먼저 끝내 그때의 회계(뒤 덩이 몫만 남음)가 결정적이다.
++    #[test]
++    fn on_written_runs_once_after_its_chunk_is_written_without_the_queue_lock() {
++        let queue = Arc::new(InputQueue::new());
++        let written: Written = Arc::new(Mutex::new(Vec::new()));
++        let calls: Arc<Mutex<Vec<(Vec<Vec<u8>>, usize)>>> = Arc::new(Mutex::new(Vec::new()));
++        let (log, seen, probe) = (calls.clone(), written.clone(), queue.clone());
++        queue.push(b"plain".to_vec()).expect("push");
++        queue
++            .push_with(
++                b"marked".to_vec(),
++                Some(Box::new(move || {
++                    let so_far = seen.lock().unwrap().clone();
++                    log.lock().unwrap().push((so_far, probe.queued_bytes()));
++                })),
++            )
++            .expect("push_with");
++        queue.push(b"after".to_vec()).expect("push");
++
++        let handle = spawn_recording_writer(&queue, &written);
++        wait_until(|| written.lock().unwrap().len() == 3, "세 덩이가 나가기");
++        queue.close("시험 종료");
++        handle.join().expect("라이터 스레드 panic");
++
++        assert_eq!(
++            *calls.lock().unwrap(),
++            vec![(vec![b"plain".to_vec(), b"marked".to_vec()], b"after".len())],
++            "부를 것은 제 덩이가 적히고 회계가 풀린 뒤 한 번만 불린다"
++        );
++    }
++
++    /// 나가지 못한 덩이의 부를 것은 불리지 않고 버려진다(쥔 채 남지 않는다) — 쓰기 전 닫힘 · 쓰기 실패 · 받지 않음.
++    #[test]
++    fn on_written_is_dropped_uncalled_when_its_chunk_never_goes_out() {
++        struct CountDrop(Arc<AtomicUsize>);
++        impl Drop for CountDrop {
++            fn drop(&mut self) {
++                self.0.fetch_add(1, Ordering::SeqCst);
++            }
++        }
++        let calls = Arc::new(AtomicUsize::new(0));
++        let drops = Arc::new(AtomicUsize::new(0));
++        let marked = || -> Option<OnWritten> {
++            let token = CountDrop(drops.clone());
++            let calls = calls.clone();
++            Some(Box::new(move || {
++                let _held = &token;
++                calls.fetch_add(1, Ordering::SeqCst);
++            }))
++        };
++
++        let queue = InputQueue::new();
++        queue.push_with(b"a".to_vec(), marked()).expect("push_with");
++        queue.close("시험 종료");
++        assert_eq!(
++            drops.load(Ordering::SeqCst),
++            1,
++            "닫힘이 부를 것을 쥐고 있다"
++        );
++        let mut wrote = false;
++        drain(&queue, "시험", test_agent(), |_| {
++            wrote = true;
++            Ok(())
++        });
++        assert!(!wrote, "닫힌 뒤에 썼다");
++
++        let queue = InputQueue::new();
++        queue.push_with(b"b".to_vec(), marked()).expect("push_with");
++        drain(&queue, "시험", test_agent(), |_| {
++            Err(std::io::Error::new(
++                std::io::ErrorKind::BrokenPipe,
++                "파이프가 끊겼다",
++            ))
++        });
++        assert_eq!(
++            drops.load(Ordering::SeqCst),
++            2,
++            "쓰기 실패 뒤에도 쥐고 있다"
++        );
++
++        assert!(queue.push_with(b"c".to_vec(), marked()).is_err());
++        let queue = InputQueue::new();
++        assert!(queue
++            .push_with(vec![b'x'; INPUT_QUEUE_MAX_BYTES + 1], marked())
++            .is_err());
++        assert_eq!(
++            drops.load(Ordering::SeqCst),
++            4,
++            "받지 않은 부를 것이 남았다"
++        );
++
++        assert_eq!(
++            calls.load(Ordering::SeqCst),
++            0,
++            "나가지 못한 덩이의 부를 것이 불렸다"
++        );
++    }
++
++    /// 부를 것 안에서 같은 큐에 넣어도 매달리지 않고, 넣은 것은 뒤이어 나간다.
++    #[test]
++    fn a_push_from_inside_on_written_does_not_deadlock() {
++        let queue = Arc::new(InputQueue::new());
++        let again = queue.clone();
++        queue
++            .push_with(
++                b"first".to_vec(),
++                Some(Box::new(move || {
++                    again
++                        .push(b"from-callback".to_vec())
++                        .expect("부를 것 안의 push");
++                })),
++            )
++            .expect("push_with");
++
++        let written: Written = Arc::new(Mutex::new(Vec::new()));
++        let handle = spawn_recording_writer(&queue, &written);
++        wait_until(
++            || written.lock().unwrap().len() == 2,
++            "부를 것 안에서 넣은 덩이가 나가기 — 큐 락을 쥔 채 불렀으면 여기서 매달린다",
++        );
++        queue.close("시험 종료");
++        handle.join().expect("라이터 스레드 panic");
++        assert_eq!(
++            *written.lock().unwrap(),
++            vec![b"first".to_vec(), b"from-callback".to_vec()]
++        );
++    }
++
++    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다.
++    #[test]
++    fn a_panicking_on_written_does_not_stop_later_chunks() {
++        let queue = Arc::new(InputQueue::new());
++        queue
++            .push_with(b"first".to_vec(), Some(Box::new(|| panic!("부를 것 폭발"))))
++            .expect("push_with");
++        queue.push(b"second".to_vec()).expect("push");
++
++        let written: Written = Arc::new(Mutex::new(Vec::new()));
++        let handle = spawn_recording_writer(&queue, &written);
++        wait_until(|| written.lock().unwrap().len() == 2, "뒤 덩이가 나가기");
++        queue
++            .push(b"third".to_vec())
++            .expect("부를 것의 panic 이 큐를 닫았다");
++        wait_until(
++            || written.lock().unwrap().len() == 3,
++            "그 뒤에 넣은 덩이가 나가기",
++        );
++        queue.close("시험 종료");
++        handle.join().expect("라이터 스레드 panic");
++        assert_eq!(
++            *written.lock().unwrap(),
++            vec![b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
++        );
++    }
+ }
+diff --git a/crates/engram-dashboard-agent/src/transport/mod.rs b/crates/engram-dashboard-agent/src/transport/mod.rs
+index 04655c5..b71ca79 100644
+--- a/crates/engram-dashboard-agent/src/transport/mod.rs
++++ b/crates/engram-dashboard-agent/src/transport/mod.rs
+@@ -113,6 +113,17 @@ pub trait AgentTransport: Send + Sync {
+     /// ≠kill. 진행 중 작업만 중단 — 프로세스는 살아 있다.
+     fn interrupt(&self) -> Result<(), PtyError>;
+ 
++    /// 이 통로가 곧 물러난다는 예고 — manager 가 이 화신을 끝내기로 정한 첫 걸음에서(권한 회수 · `Exiting` ·
++    /// [`Self::shutdown`] 보다 먼저) 아무 락 없이 부른다. 뒤에서 도는 일을 가진 통로는 이것을 보고 그 일을 멈출 수 있다.
++    /// ★자원은 거두지 않는다 — 그것은 [`Self::shutdown`] 몫이고 kill 인과(ADR-0001)는 그대로다★. 막히지 않아야 하고
++    ///   (kill 경로가 그 뒤에 선다) 여러 번 불려도 같아야 한다.
++    /// ★밖에서 관측될 결말(상태 전이 · 연결 결말 배달 · 입력 거절)을 여기서 내지 않는다★ — 이 예고는 사용자 종료 의도
++    ///   ([`crate::session::AgentSession::termination_intent`])가 서기 **전**에 온다. 결말이 의도보다 먼저 보이면
++    ///   활성화 판정이 사용자의 취소를 실패로 읽는다.
++    /// ★모든 끝내기 길이 이것을 먼저 부르지는 않는다★ — 물러남을 알아야 하는 통로는 [`Self::shutdown`] 에서도 같은
++    ///   것을 세운다. 기본 구현 = 무동작.
++    fn begin_retire(&self) {}
++
+     /// 자원 강제 종료(멱등). pump 종료 대기는 여기서 안 함(core.join_pump 몫).
+     fn shutdown(&self);
+ 
+diff --git a/crates/engram-dashboard-agent/src/transport/stdio.rs b/crates/engram-dashboard-agent/src/transport/stdio.rs
+index 1785f73..355d1db 100644
+--- a/crates/engram-dashboard-agent/src/transport/stdio.rs
++++ b/crates/engram-dashboard-agent/src/transport/stdio.rs
+@@ -7,6 +7,8 @@
+ //! ★무정제 불변(ADR-0044/0045)★: transport 층은 stdout 바이트의 스키마를 모른다 — decoder 가
+ //!   없으면 `OutputEvent::TerminalBytes`로 그대로 넘기고(캐리어 variant 재사용), 있으면 주입된
+ //!   decoder 를 적용만 한다. 파싱은 backend decoder 소관이지 이 층도 프론트도 아니다.
++//!   끊기 줄과 그 줄이 나간 뒤 부를 것([`InterruptOut`])도 입력 큐로 넘기기만 하고, 무리 손잡이와 물러남 표시
++//!   (`StdioTransport::process_group`)는 내주기만 한다 — 쓰임은 backend 가 안다.
+ //!
+ //! ★PTY와 결정적 차이 — watcher 불필요★: ConPTY는 master가 살아 있으면 자식이 스스로 exit해도
+ //!   reader에 EOF를 안 줘서 PtyTransport가 자연 종료 감지용 watcher 스레드를 둔다. **파이프는
+@@ -24,7 +26,7 @@ use std::sync::{Arc, Mutex};
+ use engram_dashboard_base::logging::mask_secrets;
+ 
+ use crate::output_core::OutputCore;
+-use crate::transport::input_queue::{self, InputQueue};
++use crate::transport::input_queue::{self, InputQueue, OnWritten};
+ use crate::transport::{AgentTransport, OutputDecoder};
+ use crate::types::{
+     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
+@@ -33,14 +35,21 @@ use crate::types::{
+ 
+ use crate::platform::process_group::ProcessGroup;
+ #[cfg(windows)]
+-use crate::platform::JobObjectHandle;
++use crate::platform::{process_group::RetiringSignal, JobObjectHandle};
++
++/// 끊기 줄 함수가 주는 것 — stdin 에 쓸 줄 한 벌과, 그 줄이 실제로 파이프로 나간 뒤 라이터가 부를 것(계약 =
++/// [`OnWritten`] — 나가지 못하면 불리지 않고 버려진다). 통로는 둘 다 입력 큐로 넘기기만 한다.
++pub struct InterruptOut {
++    pub bytes: Vec<u8>,
++    pub on_written: Option<OnWritten>,
++}
+ 
+ /// 「지금 도는 턴을 멈춰 달라」는 stdin 줄 한 벌을 만드는 backend 함수. 통로는 그 바이트의 뜻을 모른다(바보 파이프).
+ ///
+ /// `None` = 「지금은 끊을 턴이 없다」 — 판정은 backend 가 하고 통로는 그대로 `Unsupported` 로 옮긴다. 파이프엔
+ /// Ctrl-C 같은 통로 자신의 끊기 수단이 없어서, 끊기는 이 줄을 만드는 쪽의 지식이다.
+ // ADR-0238
+-pub type InterruptLine = Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>;
++pub type InterruptLine = Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>;
+ 
+ pub struct StdioTransport {
+     /// pump(try_wait)와 shutdown(kill+wait)이 공유. std Child는 wait 후 exit status를 캐시하므로
+@@ -59,6 +68,10 @@ pub struct StdioTransport {
+     stderr: Mutex<Option<ChildStderr>>,
+     /// shutdown(kill) 진행 신호. set(Release)면 pump가 종료 시 Killed로 전이(pump가 Acquire).
+     shutdown: Arc<AtomicBool>,
++    /// 물러남 표시 — [`AgentTransport::begin_retire`] 와 `shutdown()` 첫 줄이 세우고 아무도 내리지 않는다. 이 통로는
++    /// 읽지 않고 [`Self::process_group`] 에 읽기 전용 사본으로 실어 내줄 뿐이다 — 쓰임은 통로가 모른다. `Arc` 인 것은
++    /// 내준 사본이 통로보다 오래 살 수 있어서다(칸을 나눠 쥔다).
++    retiring: Arc<AtomicBool>,
+     /// 이 파이프가 나르는 출력이 구조화 스트림(NDJSON)인지. ★주입값이다(ADR-0044/0030/0191)★:
+     /// "구조화냐"는 파이프가 아니라 그 프로그램의 출력 형식(backend 지식)이 정하므로, 이 통로를 만드는
+     /// backend 가 `open` 인자로 주입한다(하드코딩 금지 — 평문 stdio 엔 false). capabilities()가 그대로 신고.
+@@ -74,9 +87,6 @@ pub struct StdioTransport {
+     /// 통로가 사라지면 Job 핸들도 닫힌다(`KILL_ON_JOB_CLOSE`).
+     #[cfg(windows)]
+     job_handle: Arc<JobObjectHandle>,
+-    /// 이 스폰이 뿌리 아래 붙이는 프로세스 수 — 그 사실을 만드는 스폰 플래그 옆에서 정한다(`open`).
+-    #[cfg(windows)]
+-    root_attached: usize,
+ }
+ 
+ impl StdioTransport {
+@@ -107,15 +117,11 @@ impl StdioTransport {
+         // Windows: 헤드리스 백그라운드 프로세스라 콘솔 창이 튀지 않게 CREATE_NO_WINDOW.
+         //   (데몬은 창 없는 프로세스일 수 있어 cmd.exe shim이 콘솔을 새로 띄우는 깜빡임을 막는다.)
+         #[cfg(windows)]
+-        let root_attached = {
++        {
+             use std::os::windows::process::CommandExt;
+             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+             cmd.creation_flags(CREATE_NO_WINDOW);
+-            // 창이 없어도 숨은 콘솔은 생기고, 그 호스트(conhost.exe)가 뿌리의 자식으로 하나 붙는다 — 뿌리가 콘솔
+-            // 프로그램일 때의 실측(T-40 스파이크 · cmd.exe 뿌리 4/4). 우리 stdio 스폰의 뿌리는 콘솔 CLI 다.
+-            // ADR-0257
+-            1
+-        };
++        }
+ 
+         let mut child = cmd
+             .spawn()
+@@ -143,27 +149,26 @@ impl StdioTransport {
+             stdout: Mutex::new(stdout),
+             stderr: Mutex::new(stderr),
+             shutdown: Arc::new(AtomicBool::new(false)),
++            retiring: Arc::new(AtomicBool::new(false)),
+             structured,
+             decoder: Mutex::new(decoder),
+             interrupt: None,
+             #[cfg(windows)]
+             job_handle,
+-            #[cfg(windows)]
+-            root_attached,
+         };
+ 
+         Ok((transport, child_pid))
+     }
+ 
+-    /// 이 통로가 띄운 프로세스 무리의 약한 손잡이. 통로는 그것이 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」).
+-    /// `None` = 이 OS 에서는 무리를 묶는 수단이 없다(Windows 밖).
++    /// 이 통로가 띄운 프로세스 무리의 약한 손잡이 — 물러남 표시의 읽기 전용 사본을 함께 싣는다. 통로는 그것이
++    /// 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」). `None` = 이 OS 에서는 무리를 묶는 수단이 없다(Windows 밖).
+     // ADR-0257
+     pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
+         #[cfg(windows)]
+         {
+             Some(ProcessGroup::new(
+                 Arc::downgrade(&self.job_handle),
+-                self.root_attached,
++                RetiringSignal::of(&self.retiring),
+             ))
+         }
+         #[cfg(not(windows))]
+@@ -429,13 +434,17 @@ impl AgentTransport for StdioTransport {
+             ));
+         };
+         match line() {
+-            Some(bytes) => self.input.push(bytes),
++            Some(InterruptOut { bytes, on_written }) => self.input.push_with(bytes, on_written),
+             None => Err(PtyError::Unsupported(
+                 "StdioTransport::interrupt (끊을 턴이 없다)".into(),
+             )),
+         }
+     }
+ 
++    fn begin_retire(&self) {
++        self.retiring.store(true, Ordering::Release);
++    }
++
+     /// ADR-0001 2동사의 파이프판.
+     ///
+     /// ★kill 인과(파이프판)★: PtyTransport는 master drop→ConPTY close→reader EOF로 pump를 깨우지만,
+@@ -453,6 +462,10 @@ impl AgentTransport for StdioTransport {
+     ///   락이 해제된다. 그 뒤에야 try_lock 으로 stdin 을 best-effort 정리한다(blocking lock 절대 금지).
+     /// ※graceful-exit-via-stdin-close 는 필요 없다 — 어차피 여기서 kill 하므로.
+     fn shutdown(&self) {
++        // 0. 물러남 표시를 무엇보다 먼저 — `begin_retire` 를 거치지 않는 끝내기 길도 있어서, 표시를 보는 쪽이 아래
++        //    종료와 겹치는 창을 여기서도 가장 좁게 둔다. 아래 순서 불변식은 건드리지 않는다(원자 쓰기 하나다).
++        self.retiring.store(true, Ordering::Release);
++
+         // 1. shutdown 신호 — pump가 종료 시 Killed로 전이.
+         self.shutdown.store(true, Ordering::Release);
+ 
+@@ -573,7 +586,7 @@ mod tests {
+         json.shutdown();
+     }
+ 
+-    // ── 끊기 줄 주입(ADR-0238): 함수가 `Some` 이면 그 줄 한 벌이 큐에 · `None` 이면 `Unsupported` 에 큐 무변경 ──
++    // ── 끊기 줄 주입(ADR-0238): 함수가 `Some` 이면 그 줄 한 벌이 부를 것과 함께 큐에 · `None` 이면 `Unsupported` 에 큐 무변경 ──
+     // `start()` 를 부르지 않는다 — 라이터가 없어야 큐에 든 것을 그대로 꺼내 잴 수 있다.
+     #[cfg(windows)]
+     #[test]
+@@ -586,10 +599,14 @@ mod tests {
+         };
+         let turn_open = Arc::new(AtomicBool::new(false));
+         let answer = Arc::clone(&turn_open);
++        let fired = Arc::new(AtomicBool::new(false));
++        let mark = Arc::clone(&fired);
+         let line: InterruptLine = Arc::new(move || {
+-            answer
+-                .load(Ordering::SeqCst)
+-                .then(|| b"{\"stop\":1}\n".to_vec())
++            let mark = Arc::clone(&mark);
++            answer.load(Ordering::SeqCst).then(|| InterruptOut {
++                bytes: b"{\"stop\":1}\n".to_vec(),
++                on_written: Some(Box::new(move || mark.store(true, Ordering::SeqCst))),
++            })
+         });
+ 
+         let (transport, _pid) = StdioTransport::open(&spec, true, None).expect("open");
+@@ -612,7 +629,10 @@ mod tests {
+         turn_open.store(true, Ordering::SeqCst);
+         transport.interrupt().expect("턴이 열려 있으면 줄을 받는다");
+         assert_eq!(transport.input.queued_bytes(), b"{\"stop\":1}\n".len());
+-        assert_eq!(transport.input.pop(), Some(b"{\"stop\":1}\n".to_vec()));
++        let (bytes, on_written) = transport.input.pop().expect("큐에 든 끊기 줄");
++        assert_eq!(bytes, b"{\"stop\":1}\n".to_vec());
++        on_written.expect("줄과 함께 준 부를 것이 큐까지 따라온다")();
++        assert!(fired.load(Ordering::SeqCst));
+         turn_open.store(false, Ordering::SeqCst);
+         assert!(
+             transport.capabilities().control.interrupt,
+@@ -621,6 +641,62 @@ mod tests {
+         transport.shutdown();
+     }
+ 
++    // ── 물러남 표시: `begin_retire` 와 `shutdown` 이 각각 세운다 · 무리 손잡이가 내준 읽기 전용 표시도 그것을 보고
++    //    통로가 사라진 뒤에도 선 채다 · 예고는 자원을 거두지 않는다 ──
++    // 표시는 OS 와 무관하므로 모든 OS 에서 돈다 — 곧 끝나는 무해한 자식으로 통로만 세운다. 무리 손잡이는 Windows
++    // 통로에만 있다.
++    #[test]
++    fn begin_retire_and_shutdown_each_raise_the_retiring_flag() {
++        #[cfg(windows)]
++        let (program, args) = ("cmd.exe", vec!["/c".into(), "echo retire-probe".into()]);
++        #[cfg(not(windows))]
++        let (program, args) = ("true", Vec::new());
++        let spec = CommandSpec {
++            program: program.into(),
++            args,
++            env: vec![],
++            cwd: std::path::PathBuf::from("."),
++        };
++
++        let (announced, _pid) = StdioTransport::open(&spec, true, None).expect("open");
++        let handed = announced.process_group().map(|group| group.retiring());
++        assert_eq!(
++            handed.is_some(),
++            cfg!(windows),
++            "무리 손잡이는 Windows 통로에만 있다"
++        );
++        assert!(
++            !announced.retiring.load(Ordering::Acquire),
++            "갓 연 통로가 이미 물러나는 중이다"
++        );
++        assert!(!handed.as_ref().is_some_and(|signal| signal.is_set()));
++        announced.begin_retire();
++        assert!(announced.retiring.load(Ordering::Acquire));
++        assert!(
++            handed.as_ref().is_none_or(|signal| signal.is_set()),
++            "내준 표시가 예고를 못 본다"
++        );
++        announced
++            .send_input(InputEvent::Raw(b"still-open\n".to_vec()))
++            .expect("예고가 입력 큐를 닫았다 — 거두기는 shutdown 몫이다");
++        announced.shutdown();
++
++        let (shut, _pid) = StdioTransport::open(&spec, true, None).expect("open");
++        let handed = shut.process_group().map(|group| group.retiring());
++        assert!(!shut.retiring.load(Ordering::Acquire));
++        assert!(!handed.as_ref().is_some_and(|signal| signal.is_set()));
++        shut.shutdown();
++        assert!(
++            shut.retiring.load(Ordering::Acquire),
++            "예고 없이 온 종료가 물러남 표시를 세우지 않는다"
++        );
++        drop(shut);
++        assert!(
++            handed.as_ref().is_none_or(|signal| signal.is_set()),
++            "예고 없이 온 종료를 내준 표시가 못 본다 — 통로가 사라진 뒤에도 선 채여야 한다"
++        );
++    }
++
+     // ── FIX 1 회귀 + 라이터 스레드 회귀 ──
+     // 잰다(둘):
+     //   (A) ★부른 쪽이 매달리지 않는다★ — 라이터가 파이프 backpressure 로 블록한 **그 상태에서** 온
+@@ -715,27 +791,16 @@ mod tests {
+         core.join_pump(Duration::from_secs(5));
+     }
+ 
+-    // ── 무리 손잡이(ADR-0257): 통로가 사는 동안 멤버가 보이고, 통로가 사라지면 명단은 비고 누구든 `Gone` ──
++    // ── 무리 손잡이(ADR-0257): 통로가 사는 동안 멤버가 보이고, 통로가 사라지면 명단은 비고 아무도 못 붙든다 ──
+     // `shutdown()` 없이 drop 만 한다 — shutdown 은 Job 을 통째 끝내 손잡이가 강해도 명단이 빈다. drop 만이면
+-    // 손잡이가 약할 때만 Job 핸들이 닫혀(`KILL_ON_JOB_CLOSE`) 무리가 끝나고, 강하면 ping 이 명단에 남는다.
++    // 손잡이가 약할 때만 Job 핸들이 닫혀(`KILL_ON_JOB_CLOSE`) 무리가 끝나고, 강하면 ping 이 명단에 남는다. 붙든
++    // 멤버도 Job 을 붙들지 않아야 무리가 끝난다 — 뿌리와 ping 을 붙든 채 버린다.
+     // `start()` 를 안 불러 통로의 스레드가 없으므로 drop 뒤에 매달리는 것도 없다.
+     // cmd 는 stdin 한 줄을 받을 때까지 ping 을 안 띄운다 — `open` 이 Job 에 넣기 전에 ping 이 새어 나가지 않게.
+     #[cfg(windows)]
+     #[test]
+     fn the_process_group_sees_the_root_and_empties_once_the_transport_is_gone() {
+-        use crate::platform::process_group::Verify;
+-        use crate::platform::process_tree::{system_time_to_filetime, ProcessIdentity};
+-        use engram_dashboard_base::platform::{pid_alive, process_start, ProcessStart};
+-        use std::time::{Duration, Instant, SystemTime};
+-
+-        let known = |pid: u32| match process_start(pid) {
+-            ProcessStart::Known(start_time) => ProcessIdentity { pid, start_time },
+-            other => panic!("PID {pid} 의 시작시각을 못 읽었다: {other:?}"),
+-        };
+-        // 끝났어도 누가 핸들을 쥐면 시작시각은 그대로 읽히므로 종료 코드(`pid_alive`)도 함께 본다.
+-        let still_running = |who: ProcessIdentity| {
+-            pid_alive(who.pid) && process_start(who.pid) == ProcessStart::Known(who.start_time)
+-        };
++        use std::time::{Duration, Instant};
+ 
+         // ping 이 스스로 끝나는 데 ~9 초 — 아래 5 초 대기 안에 끝나면 그것은 Job 닫기의 몫이다. 출력은 `NUL` 로 보내
+         //   통로가 사라지며 파이프가 닫혀 쓰기 실패로 죽는 길도 막는다.
+@@ -761,17 +826,23 @@ mod tests {
+             cwd: std::path::PathBuf::from("."),
+         };
+         let (transport, pid) = StdioTransport::open(&spec, true, None).expect("open");
+-        let root = known(pid.expect("자식 PID"));
++        let root_pid = pid.expect("자식 PID");
+         let group = transport
+             .process_group()
+             .expect("Windows 통로는 무리를 내준다");
+-        assert_eq!(group.root_attached(), 1);
++        let root = group
++            .pin(root_pid, false)
++            .expect("붙들기")
++            .expect("뿌리는 우리 멤버다");
+ 
+-        // 콘솔 호스트는 cmd 가 뜨며 붙는다 — 그보다 넉넉히 뒤에 문을 열어, 문 뒤에 태어난 멤버 = ping 으로 가른다.
++        // 콘솔 호스트는 cmd 가 뜨며 붙는다 — 그보다 넉넉히 뒤에 명단을 찍고 문을 열어, 그 명단에 없던 멤버 = ping 으로
++        //   가른다(시각을 견주지 않는다).
+         std::thread::sleep(Duration::from_millis(100));
+-        let gate = system_time_to_filetime(SystemTime::now()).expect("벽시계");
+-        // 문을 연 뒤 태어난 것이 문 시각과 같은 눈금에 걸리지 않게 벌려 둔다.
+-        std::thread::sleep(Duration::from_millis(20));
++        let before_gate = group.member_pids().expect("문 앞 명단");
++        assert!(
++            before_gate.contains(&root_pid),
++            "뿌리가 명단에 없다: {before_gate:?}"
++        );
+         {
+             let mut stdin = transport.stdin.lock().unwrap_or_else(|p| p.into_inner());
+             let stdin = stdin.as_mut().expect("stdin 파이프");
+@@ -782,17 +853,13 @@ mod tests {
+         let ping = loop {
+             let members = group.member_pids().expect("명단");
+             assert!(
+-                members.contains(&root.pid),
++                members.contains(&root_pid),
+                 "뿌리가 명단에 없다: {members:?}"
+             );
+             let born_after_gate = members
+                 .into_iter()
+-                .find_map(|pid| match process_start(pid) {
+-                    ProcessStart::Known(start_time) if start_time > gate => {
+-                        Some(ProcessIdentity { pid, start_time })
+-                    }
+-                    _ => None,
+-                });
++                .filter(|pid| !before_gate.contains(pid))
++                .find_map(|pid| group.pin(pid, false).ok().flatten());
+             if let Some(ping) = born_after_gate {
+                 break ping;
+             }
+@@ -802,6 +869,7 @@ mod tests {
+             );
+             std::thread::sleep(Duration::from_millis(20));
+         };
++        assert!(!root.exited().expect("끝났나") && !ping.exited().expect("끝났나"));
+ 
+         drop(transport);
+         assert_eq!(
+@@ -809,15 +877,19 @@ mod tests {
+             Vec::<u32>::new(),
+             "통로가 사라졌는데 명단이 남았다 — 손잡이가 Job 을 붙들고 있다"
+         );
+-        assert!(matches!(group.verify(root), Ok(Verify::Gone)));
++        assert!(
++            group.pin(root_pid, false).expect("붙들기").is_none(),
++            "통로가 사라졌는데 뿌리를 붙들었다"
++        );
+ 
+         let deadline = Instant::now() + Duration::from_secs(5);
+-        while still_running(root) || still_running(ping) {
++        for member in [&root, &ping] {
++            let left = deadline.saturating_duration_since(Instant::now());
+             assert!(
+-                Instant::now() < deadline,
+-                "통로를 버린 뒤 5 초가 지나도 뿌리나 ping 이 살아 있다 — Job 이 안 닫혔다"
++                member.wait_exit(left).expect("끝나기 대기"),
++                "통로를 버린 뒤 5 초가 지나도 뿌리나 ping 이 살아 있다 — Job 이 안 닫혔다: {:?}",
++                member.facts()
+             );
+-            std::thread::sleep(Duration::from_millis(20));
+         }
+     }
+ 

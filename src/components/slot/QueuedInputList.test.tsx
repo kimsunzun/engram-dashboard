@@ -142,4 +142,24 @@ describe('QueuedInputList(ADR-0231)', () => {
     })
     expect(shownIds()).toEqual(['A', 'B'])
   })
+
+  // ADR-0237: 누른 버튼이 잠기거나 사라져도 포커스가 문서로 떨어지지 않는다 — 칸의 Esc 가 칸 루트에 닿아야 한다.
+  it('✕ · 「외 N개」 를 누르면 버튼이 쥔 포커스가 칸 컨테이너(tabindex -1)로 옮겨 간다', () => {
+    const entries = ['A', 'B', 'C', 'D'].map((id) => waiting(id))
+    render(
+      <div data-testid="slot" tabIndex={-1}>
+        <QueuedInputList agentId={AGENT} entries={entries} />
+      </div>,
+    )
+    const slot = screen.getByTestId('slot')
+
+    removeButton('A')!.focus()
+    fireEvent.click(removeButton('A')!)
+    expect(document.activeElement).toBe(slot)
+
+    moreButton()!.focus()
+    fireEvent.click(moreButton()!)
+    expect(moreButton()).toBeNull()
+    expect(document.activeElement).toBe(slot)
+  })
 })

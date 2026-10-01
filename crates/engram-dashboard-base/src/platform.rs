@@ -1,4 +1,5 @@
-//! PID liveness + 프로세스 시작시각(creation time) 헬퍼.
+//! PID liveness · 프로세스 시작시각(creation time) 조회와 그 결과의 세 갈래(앎 · 사라짐 · 못 읽음) ·
+//! 프로세스 표(pid, ppid) 한 장.
 //!
 //! ★왜 바닥 crate 인가★: "그 PID 가 아직 그 프로세스인가" 를 판정하는 곳이 셋이다 — `net`(portfile 의
 //! stale 판정) · `discovery`(데몬 발견) · `daemon`(daemon.json 에 자기 시작시각 기록). 셋 다 판정 로직을
@@ -11,20 +12,42 @@
 //! 난다. 그래서 "PID 살아있음 AND 그 PID 의 현재 creation time == 기록된 값"으로 판정해
 //! PID 재사용을 직접 구분한다.
 
-/// u64 = GetProcessTimes lpCreationTime(FILETIME — 1601-01-01 UTC 부터 100나노초 간격 수)의
-/// high/low 32비트를 합친 값. 같은 프로세스면 불변, 재사용 PID 면 다르다.
+/// 한 PID 의 시작시각을 물은 결과 — 「못 읽었다」를 한 갈래로 뭉개지 않는다.
+///
+/// - `Known` = 그 PID 인 프로세스의 생성 시각. 척도는 [`process_creation_time`] 과 같다. ★끝났어도 누가 그
+///   핸들을 쥐고 있으면(프로세스 객체가 남아 있으면) `Known` 이다★ — 「살아 있다」가 아니다.
+/// - `Gone` = 그 번호의 프로세스 객체가 지금 없다(여는 실패가 87 일 때만).
+/// - `Unknown` = 있는지 없는지 모른다 — 열 권한이 없거나 그 밖의 이유로 못 열었거나 시각 조회가 실패했다.
+///   PID 0 과 이 수단이 없는 OS 도 여기다.
+// ADR-0257
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessStart {
+    Known(u64),
+    Gone,
+    Unknown,
+}
+
+/// `Gone` 은 확실한 부재 신호에만 선다 — 여는 실패의 판정은 `pid_alive` 의 것과 같은 하나다(87 만 부재).
+// ADR-0257
 #[cfg(windows)]
-pub fn process_creation_time(pid: u32) -> Option<u64> {
+pub fn process_start(pid: u32) -> ProcessStart {
     use windows::Win32::Foundation::{CloseHandle, FILETIME};
     use windows::Win32::System::Threading::{
         GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
+    // System Idle Process 는 살아 있는데 `OpenProcess` 가 부재와 같은 87 로 실패한다 — 열면 `Gone` 으로 읽힌다.
     if pid == 0 {
-        return None;
+        return ProcessStart::Unknown;
     }
     // SAFETY: 최소 권한으로 PID 핸들 open.
-    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(h) => h,
+        Err(e) if alive_from_open_error(win32_from_hresult(e.code().0)) => {
+            return ProcessStart::Unknown
+        }
+        Err(_) => return ProcessStart::Gone,
+    };
 
     let mut creation = FILETIME::default();
     let mut exit = FILETIME::default();
@@ -38,9 +61,18 @@ pub fn process_creation_time(pid: u32) -> Option<u64> {
         let _ = CloseHandle(handle);
     }
     if !ok {
-        return None;
+        return ProcessStart::Unknown;
     }
-    Some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
+    ProcessStart::Known(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
+}
+
+/// u64 = GetProcessTimes lpCreationTime(FILETIME — 1601-01-01 UTC 부터 100나노초 간격 수)의
+/// high/low 32비트를 합친 값. 같은 프로세스면 불변, 재사용 PID 면 다르다.
+pub fn process_creation_time(pid: u32) -> Option<u64> {
+    match process_start(pid) {
+        ProcessStart::Known(start) => Some(start),
+        ProcessStart::Gone | ProcessStart::Unknown => None,
+    }
 }
 
 /// 데몬이 daemon.json 에 기록할 값.
@@ -155,60 +187,79 @@ pub fn pid_alive_with_start_time(pid: u32, expected_start: u64) -> bool {
 ///
 /// best-effort: 스냅샷/순회 실패 시 빈 Vec. ppid 는 OS 가 즉시 갱신하지 않는 경우가 있어
 /// (부모가 죽으면 ppid 가 stale 일 수 있음) "살아있는 부모의 직계 자식" 용도로만 신뢰한다.
-#[cfg(windows)]
 pub fn child_pids(parent: u32) -> Vec<u32> {
+    if parent == 0 {
+        return Vec::new();
+    }
+    process_parent_table()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|&(_, ppid)| ppid == parent)
+        .map(|(pid, _)| pid)
+        .collect()
+}
+
+/// 지금 떠 있는 프로세스 전부의 `(pid, ppid)` — Toolhelp 스냅숏 **한 장**.
+///
+/// `None` = 목록을 끝까지 못 읽었다(스냅숏 생성 · 첫 항목 · 순회 중 「끝」이 아닌 오류). ★잘린 목록을 돌려주지
+/// 않는다★ — 빠진 줄은 호출자에게 「그 프로세스가 없다」로 읽힌다. ppid 의 단서는 [`child_pids`] 와 같다.
+// ADR-0257
+#[cfg(windows)]
+pub fn process_parent_table() -> Option<Vec<(u32, u32)>> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
         TH32CS_SNAPPROCESS,
     };
 
-    let mut out = Vec::new();
-    if parent == 0 {
-        return out;
-    }
     // SAFETY: 전체 프로세스 스냅샷 생성.
-    let snapshot = match unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) } {
-        Ok(h) => h,
-        Err(_) => return out,
-    };
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
 
     let mut entry = PROCESSENTRY32W {
         dwSize: core::mem::size_of::<PROCESSENTRY32W>() as u32,
         ..Default::default()
     };
-
-    // SAFETY: 유효 스냅샷 핸들 + dwSize 가 채워진 entry.
-    let first = unsafe { Process32FirstW(snapshot, &mut entry) };
-    if first.is_ok() {
+    let mut read_all = || {
+        // SAFETY: 유효 스냅샷 핸들 + dwSize 가 채워진 entry.
+        unsafe { Process32FirstW(snapshot, &mut entry) }.ok()?;
+        let mut rows = Vec::new();
         loop {
-            if entry.th32ParentProcessID == parent {
-                out.push(entry.th32ProcessID);
-            }
+            rows.push((entry.th32ProcessID, entry.th32ParentProcessID));
             // SAFETY: 같은 유효 핸들 + entry.
-            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
-                break;
+            match unsafe { Process32NextW(snapshot, &mut entry) } {
+                Ok(()) => {}
+                Err(e) if list_ended(e.code().0) => return Some(rows),
+                Err(_) => return None,
             }
         }
-    }
+    };
+    let table = read_all();
     // SAFETY: CreateToolhelp32Snapshot 이 반환한 유효 핸들을 한 번만 닫는다.
     unsafe {
         let _ = CloseHandle(snapshot);
     }
-    out
+    table
+}
+
+/// `Process32NextW` 의 실패 하나가 목록의 끝인가. windows-rs 는 그 실패를 `HRESULT_FROM_WIN32(GetLastError())`
+/// 로 싸서 주고, 끝은 `ERROR_NO_MORE_FILES`(18) 하나뿐이다 — 그 밖은 목록이 도중에 잘렸다는 뜻이다.
+#[cfg(any(windows, test))]
+fn list_ended(hr: i32) -> bool {
+    const HRESULT_FROM_ERROR_NO_MORE_FILES: i32 = 0x8007_0012_u32 as i32;
+    hr == HRESULT_FROM_ERROR_NO_MORE_FILES
 }
 
 // ── non-windows stub ─────────────────────────────────────────────────────────────
 
 #[cfg(not(windows))]
-pub fn process_creation_time(_pid: u32) -> Option<u64> {
-    None
+pub fn process_start(_pid: u32) -> ProcessStart {
+    ProcessStart::Unknown
 }
 
 /// non-windows: 프로세스 트리 열거 미구현(데몬은 Windows 1차).
 #[cfg(not(windows))]
-pub fn child_pids(_parent: u32) -> Vec<u32> {
-    Vec::new()
+pub fn process_parent_table() -> Option<Vec<(u32, u32)>> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -295,6 +346,90 @@ mod tests {
             found,
             "spawn 한 자식 PID({child_pid}) 가 child_pids({me}) 에 나타나야"
         );
+    }
+
+    // ── 프로세스 표 · 시작시각 세 갈래(ADR-0257) ──────────────────────────────────────
+
+    #[test]
+    fn only_no_more_files_ends_the_list() {
+        assert!(list_ended(0x8007_0012_u32 as i32));
+        assert!(!list_ended(0x8007_0005_u32 as i32), "ACCESS_DENIED = 잘림");
+        assert!(!list_ended(0x8007_0018_u32 as i32), "BAD_LENGTH = 잘림");
+        assert!(!list_ended(0), "GetLastError 가 비어 있던 실패 = 잘림");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_end_code_is_the_shape_windows_rs_gives() {
+        use windows::core::HRESULT;
+        use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
+        assert!(list_ended(HRESULT::from_win32(ERROR_NO_MORE_FILES.0).0));
+    }
+
+    #[test]
+    fn pid_zero_start_is_unknown_not_gone() {
+        assert_eq!(process_start(0), ProcessStart::Unknown);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_table_lists_a_spawned_child_with_its_parent() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping -n 3 127.0.0.1 > NUL"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe spawn");
+        let row = (child.id(), std::process::id());
+
+        let mut found = false;
+        for _ in 0..50 {
+            let table = process_parent_table().expect("스냅숏 한 장");
+            if table.contains(&row) {
+                found = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(found, "띄운 자식의 줄 {row:?} 이 표에 없다");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_exited_pid_starts_as_gone() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "exit"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe spawn");
+        let pid = child.id();
+        // 우리 핸들이 프로세스 객체를 붙들고 있어 끝났어도 읽힌다.
+        let ProcessStart::Known(start) = process_start(pid) else {
+            panic!("쥔 자식의 시작시각을 못 읽었다");
+        };
+        let _ = child.wait();
+        drop(child);
+
+        // 다른 핸들(콘솔 호스트 등)이 늦게 놓을 수 있어 옛 신원이 사라질 때까지 기다린다.
+        let mut now = process_start(pid);
+        for _ in 0..100 {
+            if now != ProcessStart::Known(start) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            now = process_start(pid);
+        }
+        match now {
+            ProcessStart::Gone => {}
+            // 번호가 벌써 남에게 넘어갔다 — 옛 신원이 사라진 것은 같다(PID 재사용은 막을 수 없다).
+            ProcessStart::Known(other) if other != start => {}
+            other => panic!("끝난 PID {pid} 가 {other:?} 로 읽혔다"),
+        }
     }
 
     #[cfg(windows)]

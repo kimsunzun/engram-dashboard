@@ -27,16 +27,20 @@
 //!
 //! tauri import 0.
 
+mod leftover;
 mod session_file;
 mod usage;
 mod usage_probe;
 
 pub(crate) use usage_probe::CLAUDE_USAGE_PROBE;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use uuid::Uuid;
+
+use leftover::{Cleaner, GateCell, LogTag, SystemClock};
 
 use crate::backend::{
     console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
@@ -46,12 +50,13 @@ use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
 use crate::session_tracker::SessionIdSource;
 use crate::transport::pty::PtyTransport;
-use crate::transport::stdio::StdioTransport;
+use crate::transport::stdio::{InterruptLine, StdioTransport};
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::{TurnEndKind, TurnSignal};
 use crate::types::{
     AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, DropCause, MidTurnPolicy,
-    ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolGrant, TurnOutcome,
+    ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolCategory, ToolGrant,
+    TurnOutcome,
 };
 use crate::usage::UsageObservation;
 
@@ -201,6 +206,10 @@ impl AgentBackend for ClaudeBackend {
                         //   문구가 없지만 런타임이 "When using --print, --output-format=stream-json
                         //   requires --verbose" 로 즉사시킨다(스폰 직후 에이전트 소멸로 발현). 빼면 안 됨.
                         args.push("--verbose".to_string());
+                        // 글자 스트리밍: 벤더가 `stream_event` 글 델타와 **별도로** 블록마다 완결 `assistant` 줄도
+                        //   보낸다 — 두 벌을 한 벌로 줄이는 것은 decoder 의 `PartialMessage` 다(프론트에 중복 제거가 없다).
+                        // ADR-0240
+                        args.push("--include-partial-messages".to_string());
                         // ADR-0044 후속 완료 / ADR-0008 재사용: json(stream-json) resume 활성화.
                         if let Some(sid) = session_id {
                             // ★실측(2026-07-13, claude 2.1.170)★: stream-json 헤드리스도 `--resume <sid>`
@@ -404,7 +413,8 @@ impl AgentBackend for ClaudeBackend {
     ///   그렇게 하면 모양 값을 가르는 둘째 switch 가 생겨 이 결정이 걷어낸 그 모양으로 되돌아간다.
     /// ★`structured: true` 를 주입하는 자리가 여기다(ADR-0044/0030)★: 파이프 자신은 나르는 바이트가
     ///   줄단위 JSON 인지 모르므로(바보 파이프) [`StdioTransport`] 는 그 값을 하드코딩하지 않고 받아서
-    ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다.
+    ///   caps 로 신고한다. 아는 쪽은 `--output-format` 을 고른 이 backend 다. 끊기 줄 함수도 같은 이유로
+    ///   여기서 꽂는다 — 줄 모양과 「지금 턴이 열려 있나」는 이 backend 의 지식이다(ADR-0238).
     /// ★`sid_sink` 를 쓰지 않는 것은 이 backend 가 세션 id 를 **받아 오지 않기 때문**이다★ — 우리가
     ///   발급해 건네주고([`AgentBackend::assigns_session_id`]), 그 뒤의 drift 는 통로가 아니라 파일
     ///   감시자([`AgentBackend::session_id_source`])가 관측한다. 그쪽이 이 backend 의 기록 경로다.
@@ -425,20 +435,32 @@ impl AgentBackend for ClaudeBackend {
         //   준다. 받아 두고 무시하는 것이 계약이다(`session_id` 칸과 같은 모양).
         _link_sink: Option<LinkSink>,
         // ★제어 평면은 이 backend 에서 **전부 명령줄로** 번역된다([`AgentBackend::build_spec`]) — 통로
-        //   핸드셰이크에 실을 것이 없다. 여기서 또 읽으면 한 spawn 이 같은 값을 두 수단으로 보낸다.
+        //   핸드셰이크에 또 실으면 한 spawn 이 같은 값을 두 수단으로 보낸다. 여기서는 `agent_id` 하나를 잔여물 정리
+        //   로그의 귀속으로만 읽고 통로로 보내지 않으니 그 경우가 아니다.
+        // ADR-0262
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
-        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
+        let _ = (sid_sink, first_turn_sink, resume_session_id);
         let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
+                // 화신마다 새 문 하나를 decoder(여닫는 쪽)와 끊기 줄 함수(열림을 보고 끊기 에피소드를 세우는 쪽)가
+                // 함께 쥔다. 정리기가 통로의 무리 · 뿌리를 알아야 해서 문은 통로를 연 뒤에 서고, decoder 는 자리로 받는다.
+                // ADR-0238
+                // ADR-0262
+                let gate_slot = GateSlot::default();
                 // ★줍기 판정은 여기서 건다 — 디코더를 만드는 `stream_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
-                //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`).
-                let decoder =
-                    usage::gate_decoder(stream_decoder(Arc::clone(&delivery_ack)), &spec.env);
+                //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`). 감싸개는 사용량 줍기만
+                //   가리고 decode/flush 는 그대로 넘기므로 문 여닫기(decoder 안)는 영향이 없다.
+                let decoder = usage::gate_decoder(
+                    stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&gate_slot)),
+                    &spec.env,
+                );
                 let (t, pid) = StdioTransport::open(spec, true, Some(decoder))?;
-                (Box::new(t), pid)
+                let gate = GateCell::new(leftover_cleaner(&t, pid, control.map(|c| c.agent_id)));
+                gate_slot.get_or_init(|| Arc::clone(&gate));
+                (Box::new(t.with_interrupt(interrupt_line(gate))), pid)
             } else {
                 let (t, pid) = PtyTransport::open(spec, cols, rows)?;
                 (Box::new(t), pid)
@@ -478,11 +500,14 @@ impl AgentBackend for ClaudeBackend {
         })
     }
 
-    /// ★운영 spawn 은 이 메서드를 거치지 않는다★ — [`AgentBackend::open_spawn`] 이 화신 공유 받음 값을 쥔
-    /// decoder 를 직접 만든다. 여기서 나가는 decoder 는 판정 결과를 아무도 읽지 않는 자기 값을 쥔다.
+    /// ★운영 spawn 은 이 메서드를 거치지 않는다★ — [`AgentBackend::open_spawn`] 이 화신 공유 받음 값·턴 열림 문을
+    /// 쥔 decoder 를 직접 만든다. 여기서 나가는 decoder 는 아무도 읽지 않는 받음 값을 쥐고, 문 자리는 비어 있다.
     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
         if is_stream_json(command) {
-            Some(stream_decoder(Arc::new(DeliveryAck::new())))
+            Some(stream_decoder(
+                Arc::new(DeliveryAck::new()),
+                GateSlot::default(),
+            ))
         } else {
             None
         }
@@ -523,9 +548,10 @@ impl AgentBackend for ClaudeBackend {
 ///   **입력 시점 유저 에코**를 이 variant 로 낸다(`user_text_echo_json` · decoder 의 user 라인). 그래서
 ///   대시보드 사용자가 터미널에 직접 입력해 시작한 턴도, 우편 주입이 시작한 턴도 이 갈래로 잡힌다 —
 ///   빼면 그 두 경로의 턴 시작이 통째로 관측 밖으로 나간다.
-/// ★`kind` 를 보지 않는 이유(현 범위의 정직한 표기)★: claude decoder 가 내는 `Structured` 는 전부 턴
-///   안에서 발생하는 라인이라 지금은 kind 구분이 불필요하다. claude 가 턴 밖 구조화 라인을 내기
-///   시작하면 여기서 kind 를 걸러야 한다.
+/// ★`kind` 는 하나만 거른다 — 끊김 표시([`INTERRUPTED_KIND`])는 진행이 아니다★: 턴이 끊겼다는 끝에 대한 표시라,
+///   진행으로 세면 그 턴의 `result` 뒤에 올 때 「턴 중」이 다시 켜져 30 분 fail-open 까지 우편이 막힌다(턴 열림
+///   문도 같은 분류를 읽으므로 열지 않는다). 나머지 `Structured` 는 전부 턴 안에서 발생하는 라인이라 kind 를
+///   가르지 않는다 — claude 가 턴 밖 구조화 라인을 내기 시작하면 여기서 그 kind 도 걸러야 한다.
 /// ★`Usage`/`Error` 가 종료가 아닌 이유★: `Usage` 는 턴 중간에도 오고, `Error` 는 턴 경계가 아니다(실패
 ///   턴도 `MessageDone` 으로 닫힌다 — decoder FIX-C). `TerminalBytes` 는 턴 경계 정보가 없는 콘솔 바이트다.
 /// ★`Error` 중 「턴 오류」(`Failed`)는 실패한 `result` 의 것 하나다 — 머리말([`RESULT_FAILURE_DETAIL`])로
@@ -534,7 +560,7 @@ impl AgentBackend for ClaudeBackend {
 ///   있다가 **다음 깨끗한 턴**을 오류 끝으로 접고, 그 화신의 우편은 사용자가 다음 턴을 성공시킬 때까지 멈춘다
 ///   (멈춤엔 상한이 없다). 칸이 아니라 머리말로 가르는 이유: `Error` 는 문자열 하나라 표식 칸을 더하면 모든
 ///   소비자의 match 가 바뀐다 — 그 문자열을 만드는 쪽과 읽는 쪽은 둘 다 이 폴더 안에 산다.
-/// ★상관 키가 없다(알려진 범위)★: claude 의 `MessageDone` 은 `turn_id`/`message_id` 가 모두 None 이라
+/// ★상관 키가 없다(알려진 범위)★: claude 의 끝(`MessageDone` · 끊김 `TurnEnd`)은 id 칸이 모두 None 이라
 ///   "어느 턴의 종료인가" 를 맞출 키가 없다. 그래서 턴 카운팅·펜싱을 하지 않고 **마지막 관측이
 ///   결정한다**. 중첩 Task 서브에이전트의 종료 라인이 부모 턴 종료로 새는지는 미검증이고, 새면 증상은
 ///   "부모가 아직 턴 중인데 idle 로 오판 → 조기 주입"(유실 없이 타이밍만 어긋남)이다.
@@ -544,11 +570,17 @@ impl AgentBackend for ClaudeBackend {
 ///   번역이라 「벤더가 이 입력을 지금 턴에서 돌리기 시작했다」는 벤더 출력의 사실이다. 나머지는 `None` —
 ///   `Dropped` 처럼 턴 끝 **뒤에** 오는 사건이 「턴 중」을 다시 켜면 그 화신은 30 분 fail-open 밸브까지
 ///   우편이 막힌다. 코어가 바꿔 적은 명부 사건(봉인 · 받음 불가 판정 뒤)은 이 분류기를 지나지 않는다.
+/// ★도구 끝 결과(`ToolResult`)는 진행도 오류도 아니다★ — 이 번역기는 아직 내지 않지만 codex 와 같은 규칙이다: 끝은
+///   턴 끝 뒤에도 올 수 있어 진행으로 세면 「턴 중」이 다시 켜지고, 도구 실패는 턴 실패가 아니라 오류로 세면 오류 뒤
+///   멈춤이 선다.
 // ADR-0113
 // ADR-0004
 // ADR-0231
+// ADR-0243
+// ADR-0241
 pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
     match event {
+        OutputEvent::Structured { kind, .. } if kind == INTERRUPTED_KIND => None,
         OutputEvent::TextDelta { .. }
         | OutputEvent::ToolCall { .. }
         | OutputEvent::Structured { .. }
@@ -558,16 +590,17 @@ pub(crate) fn classify_turn(event: &OutputEvent) -> Option<TurnSignal> {
         OutputEvent::Error(detail) if detail.starts_with(RESULT_FAILURE_DETAIL) => {
             Some(TurnSignal::Failed)
         }
-        // `result` 줄의 번역 — 실패한 `result` 도 여기로 닫힌다(그 실패는 바로 앞의 `Error` 가 싣는다).
+        // 끊기지 않은 `result` 줄의 번역 — 실패한 `result` 도 여기로 닫힌다(그 실패는 바로 앞의 `Error` 가 싣는다).
         OutputEvent::MessageDone { .. } => Some(TurnSignal::Ended(TurnEndKind::Clean)),
-        // ★이 decoder 는 `TurnEnd` 를 내지 않는다 — 그래도 종료로 적는다★: 두 종료 어휘를 여기서 갈라
-        //   적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
+        // 이 decoder 가 내는 `TurnEnd` 는 끊긴 `result` 의 `Interrupted` 하나다(ADR-0238). ★다른 결말도 종료로
+        //   적는다★ — 두 종료 어휘를 여기서 갈라 적으면 어느 날 그것이 흘러왔을 때 종료가 조용히 사라진다.
         OutputEvent::TurnEnd { outcome, .. } => Some(TurnSignal::Ended(match outcome {
             TurnOutcome::Completed => TurnEndKind::Clean,
             TurnOutcome::Failed { .. } => TurnEndKind::Failed,
             TurnOutcome::Interrupted | TurnOutcome::Unknown => TurnEndKind::Other,
         })),
         OutputEvent::Usage { .. }
+        | OutputEvent::ToolResult { .. }
         | OutputEvent::Error(_)
         | OutputEvent::TerminalBytes(_)
         | OutputEvent::QueuedInput(_) => None,
@@ -735,6 +768,108 @@ fn cancel_line(id: &str) -> Vec<u8> {
     line.into_bytes()
 }
 
+// ── ADR-0238: 끊기 — 턴 열림 문 + 제어 줄 ──────────────────────────────────────────
+
+/// 이 화신의 턴 열림 문([`GateCell`])을 받는 자리 — 라이브 decoder 가 이것으로 문을 여닫고, 끊기 줄 함수
+/// ([`interrupt_line`])는 같은 문을 직접 쥔다.
+///
+/// ★문을 바로 쥐지 않고 자리로 받는 이유★: 문은 잔여물 정리기를 품고 정리기는 통로가 띄운 뿌리 프로세스와 그 무리를
+///   알아야 해서 통로를 연 **뒤**에야 서는데, decoder 는 그 **전**에 통로에 넘어간다(`StdioTransport::open` 인자).
+///   펌프는 `start` 에서야 돌므로 자리는 첫 줄보다 먼저 채워진다. 비어 있으면 decoder 는 문을 건드리지 않는다.
+/// ★「턴 중」을 턴 관측과 같은 분류기([`classify_turn`])에서 뽑는다★ — 라이브 줄 하나의 사건 중 진행 신호가 있으면
+///   열고 끝 신호(= `result` 줄의 번역 — 끝을 내는 줄은 그것 하나다)에서 닫는다. 진행 가운데 새 입력(라이브 `started`
+///   의 번역 `Delivered`)은 따로 알린다 — 그 턴의 끊기 에피소드를 버리고 닫혀 있었으면 한 구간에서 연다. 이어받기
+///   원문은 이 문을 지나지 않는다. 실측(B2 · claude 2.1.280): 여는 줄은 늘 그 턴의 `command_lifecycle` `started` 였고
+///   턴 밖에서 연 줄은 없었다.
+/// ★그래도 턴 관측과 같은 값은 아니다 — 앞 끝이 늦다★: 세션의 입력 시점 합성 에코(`input_echo_event`)는 턴 관측을
+///   켜지만 decoder 를 지나지 않아, 문은 벤더 `started` 에서야 열린다. 그 틈의 끊기는 거절되는 무동작이다(TRD §9
+///   「F2 턴 열림 전 끊기」).
+/// ★분류기의 「`result` 없음」 구멍을 그대로 물려받고, 턴 표의 30 분 fail-open 상한은 없다★: `result` 줄이 4 MiB
+///   재동기로 버려지거나 못 읽히거나, 벤더가 진행만 내고 `result` 없이 턴을 끝내면 문은 열린 채 남는다. 그때의
+///   끊기 줄은 한가한 CLI 에 닿는데, 실측(B2 S6)상 그 끊기는 응답 한 줄만 내는 무해한 줄이다 — 그 순간 CLI 에 대기
+///   입력이 있으면 그것을 끊을 수 있다. 그 끊기가 연 에피소드도 턴 끝으로 지워지지 않아 쓰인 지 N 초 뒤 정리 판이
+///   돈다(고르기 규칙을 채우는 잔여물이 없으면 아무것도 끝내지 않는다).
+/// ★벤더는 한가할 때의 끊기를 거절하지 않는다(실측 B2 S6 — 늘 `success`)★ — 「끊을 턴이 없다」를 말해 줄 수 있는
+///   것은 이 문뿐이다. 그래서 문이 닫혔으면 줄을 보내지 않고 통로가 `Unsupported` 로 거절한다.
+/// ★좁힐 뿐 닫지 못하는 경합이 남는다★ — 문을 읽고 줄이 CLI 에 닿기 전에 그 턴이 끝나고 CLI 가 스스로 다음 턴(대기
+///   입력)을 열면 줄은 그 다음 턴을 끊는다. 벤더 `control_request` 에 턴 id 가 없어 우리 쪽으로는 가를 수 없다(실측
+///   B2 S7 — 끊긴 다음 턴은 오류 아닌 중단 턴으로 닫힌다).
+/// ★세션·통로·선 타입은 이 값을 모른다★ — 그래서 `types.rs` 가 아니라 이 폴더에 산다([`DeliveryAck`] 는 세션이
+///   읽어 거기 있다).
+// ADR-0238
+// ADR-0262
+type GateSlot = Arc<OnceLock<Arc<GateCell>>>;
+
+/// 이 화신의 잔여물 정리기. `None` = 문만 여닫는다 — 통로가 프로세스 무리를 내주지 않거나(Windows 밖) 뿌리 PID 가
+/// 없다. 포트 · 듣는 스레드는 여기서 띄우지 않는다 — 첫 끊기 에피소드가 띄운다. 로그 귀속은 제어 채널의 에이전트
+/// id 이고, 없으면 뿌리 PID 로 잇는다(ADR-0217).
+// ADR-0262
+fn leftover_cleaner(
+    transport: &StdioTransport,
+    root_pid: Option<u32>,
+    agent: Option<AgentId>,
+) -> Option<Arc<Cleaner>> {
+    let group = transport.process_group()?;
+    let root_pid = root_pid.filter(|&pid| pid != 0)?;
+    Some(Arc::new(Cleaner::new(
+        Arc::new(group),
+        Arc::new(SystemClock),
+        root_pid,
+        LogTag::new(agent, root_pid),
+    )))
+}
+
+/// 끊기 요청 `request_id` 의 머리말 — 뒤에 요청마다 새 uuid v4 가 붙는다.
+///
+/// ★응답은 번역하지 않는다★ — 응답이 왔다고 턴이 멈춘 것은 아니다(끝은 그 턴의 `result` 가 알린다 · 실측 B2: 응답은
+///   늘 그 `result` 앞에 온다). [`cancel_response_event`] 는 [`CANCEL_REQUEST_PREFIX`] 만 보므로 이 머리말의 응답은
+///   사건이 없다.
+// ADR-0238
+const INTERRUPT_REQUEST_PREFIX: &str = "interrupt:";
+
+/// 도는 턴 하나를 끊어 달라는 stdin 줄(개행 포함).
+///
+/// ★벤더 계약(실측 B2 — claude 2.1.280)★: `initialize` 없이 우리 `-p` stream-json 모드에서 받힌다. 도는 Bash 도구는
+///   죽고 그 `tool_result` 는 `is_error:true` 로 온다. 응답의 `still_queued` = 이 끊기를 살아남아 다음 턴에 돌 대기
+///   메시지다. ★`cancel_queued` 같은 선택 칸을 싣지 않는다★ — 받아 둔 대기 입력은 버리지 않고 다음 턴으로 보낸다
+///   (ADR-0235 결정 4 · 5 와 같은 뜻). 키 순서는 [`wrap_user_turn`] 과 같은 이유로 typed struct 선언 순서다.
+// ADR-0238
+fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
+    #[derive(serde::Serialize)]
+    struct ControlRequest {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        request_id: String,
+        request: Interrupt,
+    }
+    #[derive(serde::Serialize)]
+    struct Interrupt {
+        subtype: &'static str,
+    }
+
+    let request = ControlRequest {
+        kind: "control_request",
+        request_id: format!("{INTERRUPT_REQUEST_PREFIX}{request_uuid}"),
+        request: Interrupt {
+            subtype: "interrupt",
+        },
+    };
+    // to_string 은 이 형태에선 실패하지 않는다 — 방어적으로 unwrap_or_default.
+    let mut line = serde_json::to_string(&request).unwrap_or_default();
+    line.push('\n');
+    line.into_bytes()
+}
+
+/// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT). 줄을
+/// 줄지 · 쓰인 뒤 부를 것(쓰기 확인)을 실을지는 문이 정한다 — 에피소드를 세우거나 이어 적은 끊기는 줄을 돌려주기
+/// **전에** 문 안에 적힌다. 다른 끊기가 에피소드를 여는 중에 온 끊기 · 여는 사이 차례가 바뀐 끊기는 에피소드 없이
+/// 줄만 나간다(쓰기 확인도 없다).
+// ADR-0238
+// ADR-0262
+fn interrupt_line(gate: Arc<GateCell>) -> InterruptLine {
+    Arc::new(move || gate.interrupt(interrupt_line_bytes(Uuid::new_v4())))
+}
+
 // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
 //
 // 스키마 근거 = 실측 fixture `backend/fixtures/claude_{text,tool}.jsonl`.
@@ -746,10 +881,80 @@ fn cancel_line(id: &str) -> Vec<u8> {
 ///   = 비정상으로 간주.
 const MAX_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
+/// 메시지 id 의 최대 바이트 — codex 번역기의 같은 이름 상한과 같은 값·같은 규칙이다.
+///
+/// ★자르지 않고 **거른다**★: id 는 같은지 대조하는 토큰이라(흘린 블록의 완결 글 버림이 그 대조다) 잘라 두면
+///   서로 다른 긴 둘이 같은 것으로 읽힌다. 걸러진 메시지는 흘리지 않고 완결 글 하나로 보인다. 상한이 없으면 긴
+///   id 하나가 흘린 델타마다 복제된다. 관측된 id 는 `msg_` + 26 자(30 바이트)다.
+// ADR-0240
+const MAX_MESSAGE_ID_BYTES: usize = 128;
+
+fn bounded_message_id(id: Option<&serde_json::Value>) -> Option<String> {
+    id.and_then(|v| v.as_str())
+        .filter(|s| s.len() <= MAX_MESSAGE_ID_BYTES)
+        .map(String::from)
+}
+
 /// 실패한 `result` 가 내는 [`OutputEvent::Error`] 의 머리말 — ★턴 분류기가 이 머리말로 「턴 오류」를 가른다★
 /// ([`classify_turn`]). 줄 버퍼 넘침 등 다른 `Error` 문구가 이것으로 시작하면 그 오류가 턴을 실패로 접는다.
 // ADR-0231
 const RESULT_FAILURE_DETAIL: &str = "claude stream-json result reported failure";
+
+/// 끊긴 턴의 `result` 가 싣는 끝난 까닭(`terminal_reason`) — 글·생각·도구 입력을 흘리던 중 | 도구 실행 중.
+///
+/// ★`subtype`·`is_error` 로는 끊김을 못 가른다(실측 B2 — claude 2.1.280 · 끊긴 턴 14/14)★: 끊긴 턴은
+///   `subtype:"error_during_execution"` · `is_error:true` 로 온다 — 진짜 실행 오류와 같은 낱말이다. 오류로 읽으면
+///   Esc 한 번이 오류 행을 그리고 오류 뒤 멈춤을 세워 우편을 멈춘다. 정상 턴은 `"completed"` 였다.
+// ADR-0238
+const INTERRUPTED_TERMINAL_REASONS: [&str; 2] = ["aborted_streaming", "aborted_tools"];
+
+/// 끊긴 턴의 `result` 인가 — [`INTERRUPTED_TERMINAL_REASONS`] 이거나 `subtype:"interrupted"`(이 설치본에선 관측되지
+/// 않았다 — 옛 CLI 대비로 남긴다).
+// ADR-0238
+fn is_interrupted_result(value: &serde_json::Value) -> bool {
+    value.get("subtype").and_then(|v| v.as_str()) == Some("interrupted")
+        || value
+            .get("terminal_reason")
+            .and_then(|v| v.as_str())
+            .is_some_and(|r| INTERRUPTED_TERMINAL_REASONS.contains(&r))
+}
+
+/// 끊김 표시 사건의 `Structured` kind — 프론트 누산기가 이 낱말을 사용자 말풍선이 아닌 끊김 표시 행으로 옮긴다.
+/// `json` = `{"text": <벤더 원문>}`.
+// ADR-0243
+const INTERRUPTED_KIND: &str = "interrupted";
+
+/// 끊긴 턴마다 CLI 가 그 턴의 `result` 앞에 스스로 넣는 사용자 줄 글의 머리 — 도구가 돌던 중이면 뒤에
+/// ` for tool use]` 가, 아니면 `]` 가 붙는다(실측 B2 — claude 2.1.280 · 14/14 · transcript 에도 남는다).
+///
+/// ★벤더 문자열 판별이다★ — 문구가 바뀌면 그 줄은 오늘처럼 사용자 말풍선으로 돌아간다(보이고, 잃는 것은 없다).
+///   ★위치(`result` 바로 앞)로 알아보지 말 것★ — 이어받은 transcript 에는 `result` 가 없다.
+// ADR-0243
+const INTERRUPT_NOTE_PREFIX: &str = "[Request interrupted by user";
+
+/// `user` 줄 하나가 끊김 합성 줄이면 그 원문 — `message.content` 가 정확히 글 블록 하나이고 그 글이
+/// [`INTERRUPT_NOTE_PREFIX`] 로 시작할 때만이다. 블록이 둘 이상이거나 글이 아닌 블록(`tool_result` 등)이면 `None`.
+///
+/// ★`isReplay:true` 줄은 제외한다★ — 사용자가 친 글이 우연히 그 머리로 시작하면 CLI 가 우리 uuid 를 실어 되울리는데
+///   (실 합성 줄에는 `isReplay` 가 없다 — 실측 B2), 그것을 끊김 표시로 바꾸면 프론트의 대기 행 대조 · uuid 중복 제거가
+///   우회되고 진행 신호도 사라진다. 평문 문자열 `content` 는 알아보지 않는다 — 관측된 적이 없고 그런 `user` 줄은
+///   애초에 번역하지 않는다.
+// ADR-0243
+fn interrupt_note_text(value: &serde_json::Value) -> Option<&str> {
+    if value.get("isReplay").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    let [block] = value.get("message")?.get("content")?.as_array()?.as_slice() else {
+        return None;
+    };
+    if block.get("type").and_then(|t| t.as_str()) != Some("text") {
+        return None;
+    }
+    block
+        .get("text")?
+        .as_str()
+        .filter(|text| text.starts_with(INTERRUPT_NOTE_PREFIX))
+}
 
 /// `system/init` 의 `capabilities` 에서 「항목별 수명주기(`command_lifecycle`)를 낸다」를 뜻하는 낱말(실측 M4 —
 /// claude 2.1.280).
@@ -766,18 +971,48 @@ enum LineSource<'a> {
     Transcript,
 }
 
-/// 운영 spawn 의 decoder — 화신 공유 받음 값을 채운다.
-fn stream_decoder(ack: Arc<DeliveryAck>) -> Box<dyn OutputDecoder> {
-    Box::new(ClaudeStreamDecoder::with_delivery_ack(ack))
+/// 운영 spawn 의 decoder — 화신 공유 받음 값을 채우고 턴 열림 문을 여닫는다.
+fn stream_decoder(ack: Arc<DeliveryAck>, gate: GateSlot) -> Box<dyn OutputDecoder> {
+    Box::new(ClaudeStreamDecoder::live(ack, gate))
+}
+
+/// 라이브 부분 메시지 추적 — `stream_event` 가 채우고 완결 `assistant` 줄이 읽는다.
+///
+/// ★「(메시지 id, 블록 번호)」를 지금 열린 블록으로 잡는다★: 완결 줄에는 블록 번호가 없다. 벤더 계약은 「비지
+///   않은 블록마다 완결 메시지 하나, 그 블록의 `content_block_stop` 보다 먼저」라(실측 + 공식 문서), 완결 줄이 오는
+///   순간 열려 있는 블록이 곧 그 줄의 블록이다. 벤더가 순서를 바꾸면(멈춘 뒤 완결) `open` 이 비어 완결 글을
+///   그대로 낸다 — 잃지 않고 겹치는 쪽으로 틀린다.
+// ADR-0240
+#[derive(Debug, Default)]
+struct PartialMessage {
+    /// 지금 메시지의 id(`message_start`). `None` = 추적 중인 메시지가 없다 — 이때 온 글 델타는 버린다.
+    id: Option<String>,
+    /// 시작했고 아직 멈추지 않은 블록 번호(`content_block_start` ~ `content_block_stop`).
+    open: Option<u64>,
+    /// 글 델타를 하나라도 흘린 블록 번호들.
+    streamed: BTreeSet<u64>,
+}
+
+impl PartialMessage {
+    /// 이 완결 `assistant` 줄의 글을 이미 델타로 흘렸나 — 참이면 그 줄의 `text` 블록을 내지 않는다.
+    fn streamed_the_open_block_of(&self, message_id: Option<&str>) -> bool {
+        self.id.is_some()
+            && self.id.as_deref() == message_id
+            && self.open.is_some_and(|k| self.streamed.contains(&k))
+    }
 }
 
 /// claude stream-json 라이브 decoder.
 ///
-/// ★decoder 자신의 상태 = 줄 재조립과, pump 가 청크마다 비우는 사용량 관측뿐이다★: 메시지 병합(같은 message.id
-///   블록 concat)은 decoder 책임이 아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해
-///   뱉는다. 목록 항목도 모른다 —
-///   명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
-/// ★받음 값(`ack`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 세션이 같은 값을 읽는다.
+/// ★decoder 자신의 상태 = 줄 재조립 + 부분 메시지 추적(`partial`) + pump 가 청크마다 비우는 사용량 관측(`usage`)이다★.
+///   부분 메시지 추적은 벤더가 같은 글을
+///   델타와 완결 줄로 두 번 보내는 것을 한 벌로 줄이는 데만 쓴다 — ★프론트 누산기에는 중복 제거가 없다★(글
+///   델타를 마지막 글 항목에 잇기만 한다). 그 밖의 병합(같은 message.id 블록 잇기)은 여전히 프론트 몫이다.
+///   목록 항목도 모른다 — 명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
+/// ★받음 값(`ack`)과 턴 열림 문(`gate`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 받음 값은 세션이,
+///   문은 통로에 꽂힌 끊기 줄 함수가 같은 값을 읽는다.
+// ADR-0240
+// ADR-0238
 #[derive(Debug, Default)]
 pub struct ClaudeStreamDecoder {
     /// 마지막 `\n` 뒤 미완성 라인 바이트(라인-레벨 분할 재조립용).
@@ -807,20 +1042,56 @@ pub struct ClaudeStreamDecoder {
     /// 떠나게 한다. 운영에서는 backend 가 `SpawnParts::delivery_ack` 에 싣는 **바로 그** Arc 다.
     // ADR-0231
     ack: Arc<DeliveryAck>,
+
+    /// 라이브 줄에만 쓴다 — 이어받기 transcript 는 이 칸 없이 번역한다(`consume_line` 의 `partial: None`).
+    // ADR-0240
+    partial: PartialMessage,
+
+    /// 라이브 줄만 여닫는다([`Self::consume_live_line`]) — 이어받기 transcript 는 이 칸에 닿는 길이 없다.
+    // ADR-0238
+    gate: GateSlot,
+
+    /// 이 decoder 가 문에 마지막으로 알린 열림. 문의 열림을 쓰는 것은 이 decoder 하나뿐이라 문의 값과 같다 — 그래서
+    /// 진행 사건마다 문의 자물쇠를 잡지 않고 닫힘 → 열림일 때만 잡는다.
+    gate_open: bool,
+
+    /// 문에 알린 것 — 「어느 사건에 무엇을 몇 번 알리나」를 재는 시험용.
+    #[cfg(test)]
+    gate_moves: Vec<GateMove>,
+}
+
+/// decoder 가 문에 알리는 것 — 진행(닫힘 → 열림) · 새 입력(라이브 `started`) · 턴 끝.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateMove {
+    Open,
+    Deliver,
+    Close,
 }
 
 impl ClaudeStreamDecoder {
-    /// 자기만 쥐는 받음 값을 채우는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
+    /// 자기만 쥐는 받음 값을 채우고 문 자리는 비어 있는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// `ack` 를 채우는 decoder — 세션이 같은 Arc 를 읽는다. ★`Unknown → Unavailable` 전이를 이긴 decoder 가
-    /// `AckUnavailable{delivered: []}` 를 한 번 낸다★(같은 Arc 를 쥔 decoder 가 여럿이어도 한 번).
+    /// 시험대가 쥔 `ack` 를 채우는 decoder — 문 자리는 비어 있다(운영 조립 = [`Self::live`]).
+    /// ★`Unknown → Unavailable` 전이를 이긴 decoder 가 `AckUnavailable{delivered: []}` 를 한 번
+    /// 낸다★(같은 Arc 를 쥔 decoder 가 여럿이어도 한 번).
     // ADR-0231
-    pub fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
+    #[cfg(test)]
+    fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
         Self {
             ack,
+            ..Self::default()
+        }
+    }
+
+    /// 운영 조립 — `ack` 는 세션이, `gate` 에 채워질 문은 끊기 줄 함수가 같은 Arc 로 읽는다.
+    // ADR-0238
+    fn live(ack: Arc<DeliveryAck>, gate: GateSlot) -> Self {
+        Self {
+            ack,
+            gate,
             ..Self::default()
         }
     }
@@ -849,12 +1120,7 @@ impl ClaudeStreamDecoder {
         // 마지막 개행 뒤 잔여는 tail 로 buffer 에 남겨 다음 청크와 합친다(FIX-D: 주석을 실제 코드와 일치).
         while let Some(nl) = self.buffer.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=nl).collect();
-            Self::consume_line(
-                &line[..line.len() - 1],
-                &mut events,
-                LineSource::Live(&self.ack),
-                Some(&mut self.usage),
-            );
+            self.consume_live_line(&line[..line.len() - 1], &mut events);
         }
 
         // ★단순 clear 가 아니라 resync 진입(FIX-A)★: buffer 만 비우면 이 오염 라인의 나머지 꼬리가
@@ -879,34 +1145,88 @@ impl ClaudeStreamDecoder {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            Self::consume_line(
-                &line,
-                &mut events,
-                LineSource::Live(&self.ack),
-                Some(&mut self.usage),
-            );
+            self.consume_live_line(&line, &mut events);
         }
         events
+    }
+
+    /// 라이브 줄 하나를 번역하고, 그 줄이 낸 사건을 턴 분류기에 차례로 비춰 턴 열림 문에 알린다 — 진행 = 연다(닫혀
+    /// 있을 때만) · 새 입력(`Delivered` = 라이브 `started`) = 그 턴의 끊기 에피소드를 버리고 연다 · 끝 = 닫으면서
+    /// 에피소드를 버린다. 턴 오류(`Failed`)와 신호 없는 사건은 문을 건드리지 않는다.
+    /// ★문에 알리는 것은 사건이 펌프에서 emit 되기 전이다★ — decode 가 돌려준 뒤에야 emit 된다.
+    // ADR-0238
+    // ADR-0262
+    fn consume_live_line(&mut self, line: &[u8], events: &mut Vec<OutputEvent>) {
+        let first = events.len();
+        Self::consume_line(
+            line,
+            events,
+            LineSource::Live(&self.ack),
+            Some(&mut self.partial),
+            Some(&mut self.usage),
+        );
+        // 이 줄이 새 사건을 내지 않고 앞 글 사건에 이어 붙였으면(`consume_stream_event` 의 합치기) 여기엔 없다 — 그
+        //   앞 사건이 이미 진행으로 문을 열었고 그 뒤에 닫는 사건이 없으니 문은 그대로 열려 있다.
+        for event in &events[first..] {
+            // 새 입력은 분류기에서 진행이지만 따로 알린다 — 턴을 여는 `started` 도 「연다」와 「버린다」를 두 번에 나눠
+            //   알리지 않는다(문 자물쇠 한 구간).
+            if matches!(
+                event,
+                OutputEvent::QueuedInput(QueuedInputEvent::Delivered { .. })
+            ) {
+                self.move_gate(GateMove::Deliver);
+                continue;
+            }
+            match classify_turn(event) {
+                Some(TurnSignal::Progress) if !self.gate_open => self.move_gate(GateMove::Open),
+                Some(TurnSignal::Ended(_)) => self.move_gate(GateMove::Close),
+                Some(TurnSignal::Progress | TurnSignal::Failed) | None => {}
+            }
+        }
+    }
+
+    /// 문에 하나를 알린다(문 자물쇠 한 구간). 펌프는 decode 를 아무 락 없이 부르므로 다른 락에서 문 자물쇠로 드는
+    /// 간선이 생기지 않는다 — 문 자물쇠가 잎이라는 것(쥔 채 아무것도 잡지 않는다)은 [`GateCell`] 쪽이 지킨다. 자리가
+    /// 비었으면 아무것도 안 한다.
+    // ADR-0262
+    fn move_gate(&mut self, to: GateMove) {
+        let Some(gate) = self.gate.get() else {
+            return;
+        };
+        match to {
+            GateMove::Open => gate.open_turn(),
+            GateMove::Deliver => gate.deliver(),
+            GateMove::Close => gate.close_turn(),
+        }
+        self.gate_open = to != GateMove::Close;
+        #[cfg(test)]
+        self.gate_moves.push(to);
     }
 
     /// 완성 라인 1개(개행 제외 바이트) → 0개 이상의 OutputEvent 를 events 에 append.
     ///
     /// 파싱 규칙 — 실패·메타는 조용히 skip(panic 금지):
     /// - 비-UTF8 / 비-JSON(예: stderr "Warning: no stdin…") → skip.
-    /// - `assistant`/`user` 라인 → message.content[] 의 각 블록을 순서대로 이벤트로.
+    /// - `assistant`/`user` 라인 → message.content[] 의 각 블록을 순서대로 이벤트로. 단 끊김 합성 `user` 줄은
+    ///   `Structured{kind:"interrupted"}` 하나로(ADR-0243 — [`interrupt_note_text`]).
     /// - `result` 라인 → MessageDone(+ result.usage 있으면 Usage 추가 emit;
     ///   is_error/subtype 이 error 계열이면 MessageDone **앞에** Error 도 emit — FIX-C).
     ///   ※ result 의 오류 표면화는 **백엔드 신규 정책**이다(프론트 파서엔 없던 판정).
+    ///   끊긴 턴의 result 는 Usage 뒤 `TurnEnd{Interrupted}` 하나 — Error·MessageDone 없음(ADR-0238).
     /// - 라이브만: `command_lifecycle` → 명부 사건 · `cancel:<uuid>` 요청의 `control_response` → 취소 응답
     ///   사건 · `system/init` → 받음 가능 여부 판정(ADR-0231).
     /// - transcript 만: `attachment{queued_command}` → 사용자 말풍선.
+    /// - `stream_event` → `partial` 이 있을 때만(라이브) 글 델타를 `TextDelta` 로 흘리고, 흘린 블록의 완결 `assistant`
+    ///   글은 내지 않는다. `partial` 이 없으면(transcript) 통째로 skip — 완결 줄이 전문을 낸다(ADR-0240).
     /// - `rate_limit_event` → 이벤트 0개. `observations` 가 `Some` 이면 사용량 관측을 거기 더한다
     ///   (`usage.rs`). `None` = 줍지 않는다 — 지나간 기록(transcript)을 읽는 호출자다.
     /// - 그 밖의 `system`/`queue-operation`/unknown type → skip(0개).
+    // ADR-0240
     fn consume_line(
         line: &[u8],
         events: &mut Vec<OutputEvent>,
         source: LineSource<'_>,
+        partial: Option<&mut PartialMessage>,
         observations: Option<&mut Vec<UsageObservation>>,
     ) {
         // ★여기서 처음 UTF-8 디코딩★(위 buffer 불변식). lossy 가 아니라 엄격 검증 후 실패 시 skip —
@@ -930,7 +1250,18 @@ impl ClaudeStreamDecoder {
                     Some(m) => m,
                     None => return,
                 };
-                let message_id = msg.get("id").and_then(|v| v.as_str()).map(String::from);
+                // 끊김 합성 줄은 사용자 말풍선이 아니라 끊김 표시다 — 라이브 · 이어받기 둘 다.
+                // ADR-0243
+                if role == "user" {
+                    if let Some(text) = interrupt_note_text(&value) {
+                        events.push(OutputEvent::Structured {
+                            kind: INTERRUPTED_KIND.to_string(),
+                            json: serde_json::json!({ "text": text }).to_string(),
+                        });
+                        return;
+                    }
+                }
+                let message_id = bounded_message_id(msg.get("id"));
                 // ★user replay dedup 키★: line-level 이라 블록 루프 밖에서 1회 추출한다. assistant
                 //   라인엔 이 개념이 없어 None 이 된다(consume_block 의 assistant arm 은 안 쓴다).
                 let line_uuid = value.get("uuid").and_then(|v| v.as_str());
@@ -938,7 +1269,19 @@ impl ClaudeStreamDecoder {
                     Some(arr) => arr,
                     None => return, // content 가 배열이 아니면(스키마 이탈) skip
                 };
+                // ★흘린 블록의 완결 글은 버린다 — 빠지면 모든 claude 답이 두 벌이다★(프론트는 이어 붙이기만 한다).
+                //   글 블록만 버린다 — 도구·생각은 델타로 흘리지 않아 완결 줄이 유일한 출처다.
+                // ADR-0240
+                let already_streamed = role == "assistant"
+                    && partial
+                        .as_deref()
+                        .is_some_and(|p| p.streamed_the_open_block_of(message_id.as_deref()));
                 for block in blocks {
+                    if already_streamed
+                        && block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    {
+                        continue;
+                    }
                     Self::consume_block(role, block, message_id.as_deref(), line_uuid, events);
                 }
             }
@@ -966,37 +1309,60 @@ impl ClaudeStreamDecoder {
                         });
                     }
                 }
-                // ★실패 턴 표면화(FIX-C)★: 늘 MessageDone 만 내면 API 오류·max-turns·거부로 실패한
-                //   턴이 "정상 완료"로 위장된다. is_error:true payload 는 미캡처(실측 fixture 없음)라
-                //   존재하는 필드만 문자열화해 담는다. 순서는 Error → MessageDone(소비자가 종료 신호를
-                //   보기 전에 오류를 알도록).
-                let is_error = value
-                    .get("is_error")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let subtype = value.get("subtype").and_then(|v| v.as_str());
-                // ★error allowlist(denylist 아님)★: 오류로 잡는 건 subtype 이 error 계열일 때만이다
-                //   (실측 error_max_turns·error_during_execution → s.starts_with("error") 로 커버).
-                //   과거엔 `s != "success"`(여집합=denylist)였으나, 유저가 Esc 로 정상 중단한 턴의
-                //   subtype:"interrupted" 마저 오류로 오분류했다 — interrupt 는 이 프로젝트 1급 정상
-                //   경로(TerminalReason::Interrupted 별도)라 실패 턴으로 위장하면 안 된다. 또 denylist 는
-                //   미래에 추가될 non-error subtype 을 자동으로 오류化한다. 그래서 방향을 뒤집어, 알려진
-                //   error 접두사만 오류로 잡고 나머지(success·interrupted·미지 non-error)는 오류 아님.
-                let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
-                if is_error || subtype_is_error {
-                    let mut detail = String::from(RESULT_FAILURE_DETAIL);
-                    if let Some(s) = subtype {
-                        detail.push_str(&format!(" (subtype={s})"));
+                // ★끊긴 턴은 오류가 아니다 — 오류 판정보다 먼저 가른다★: 끊긴 `result` 는 `is_error:true` 에
+                //   error 계열 subtype 으로 오므로(실측 B2) 아래 판정에 닿으면 실패 턴이 된다. 끊김은 `TurnEnd` 한 갈래로만
+                //   닫는다 — 턴 분류기가 `Ended(Other)` 로 읽어 오류 뒤 멈춤을 세우지도 풀지도 않는다. 그 밖의 끝은
+                //   그대로 `MessageDone` 이다(이주가 아니다).
+                // ADR-0238
+                if is_interrupted_result(&value) {
+                    events.push(OutputEvent::TurnEnd {
+                        turn_id: None,
+                        outcome: TurnOutcome::Interrupted,
+                    });
+                } else {
+                    // ★실패 턴 표면화(FIX-C)★: 늘 MessageDone 만 내면 API 오류·max-turns·거부로 실패한
+                    //   턴이 "정상 완료"로 위장된다. 진짜 실패의 payload 는 미캡처(`result_error_handbuilt` 는
+                    //   손으로 지었다)라 존재하는 필드만 문자열화해 담는다. 순서는 Error → MessageDone(소비자가
+                    //   종료 신호를 보기 전에 오류를 알도록).
+                    let is_error = value
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let subtype = value.get("subtype").and_then(|v| v.as_str());
+                    // ★error allowlist(denylist 아님)★: 오류로 잡는 건 subtype 이 error 계열일 때만이다
+                    //   (실측 error_max_turns·error_during_execution → s.starts_with("error") 로 커버).
+                    //   denylist(`s != "success"`)로 되돌리지 말 것 — 미래에 추가될 non-error subtype 을 자동으로
+                    //   오류化한다(옛 모양은 Esc 로 정상 중단한 턴의 `subtype:"interrupted"` 마저 오류로 읽었다 —
+                    //   그 subtype 은 이제 위 끊김 갈래가 먼저 가져간다).
+                    let subtype_is_error = subtype.map(|s| s.starts_with("error")).unwrap_or(false);
+                    if is_error || subtype_is_error {
+                        let mut detail = String::from(RESULT_FAILURE_DETAIL);
+                        if let Some(s) = subtype {
+                            detail.push_str(&format!(" (subtype={s})"));
+                        }
+                        if let Some(r) = value.get("result").and_then(|v| v.as_str()) {
+                            detail.push_str(&format!(": {r}"));
+                        }
+                        events.push(OutputEvent::Error(detail));
                     }
-                    if let Some(r) = value.get("result").and_then(|v| v.as_str()) {
-                        detail.push_str(&format!(": {r}"));
-                    }
-                    events.push(OutputEvent::Error(detail));
+                    events.push(OutputEvent::MessageDone {
+                        turn_id: None,
+                        message_id: None,
+                    });
                 }
-                events.push(OutputEvent::MessageDone {
-                    turn_id: None,
-                    message_id: None,
-                });
+                // ★턴 끝에서 추적을 비운다★ — 그 뒤 `message_start` 없이 온 늦은 델타가 버려져, 턴 끝 뒤에 진행
+                //   신호(`TextDelta`)가 「턴 중」을 다시 켜는 길이 없다(30 분 fail-open 막힘).
+                // ADR-0240
+                if let Some(partial) = partial {
+                    *partial = PartialMessage::default();
+                }
+            }
+            (Some("stream_event"), _) => {
+                // transcript(`partial: None`)는 건너뛴다 — 기록에 이 줄이 있어도 완결 줄이 전문을 낸다.
+                // ADR-0240
+                if let Some(partial) = partial {
+                    Self::consume_stream_event(&value, partial, events);
+                }
             }
             (Some("rate_limit_event"), _) => {
                 if let Some(observations) = observations {
@@ -1073,6 +1439,92 @@ impl ClaudeStreamDecoder {
         }
     }
 
+    /// 라이브 `stream_event` 한 줄 → 흘린 글 `TextDelta` 0–1 개 + `partial` 갱신.
+    ///
+    /// ★글 델타 말고는 아무 사건도 내지 않는다★ — `message_stop` 은 도구 호출마다 오므로 그것을 끝으로 옮기면 도구
+    ///   호출마다 턴이 끝나고, 부속 줄을 `Structured` 로 내면 턴 분류기가 진행으로 세어 턴 끝 뒤 30 분 막힘 경로가
+    ///   된다. 턴 끝은 `result` 한 줄뿐이다. 생각·도구 입력 델타도 버린다 — 둘은 완결 줄에서 낸다.
+    /// ★`parent_tool_use_id` 가 있는 줄은 통째로 버린다★ — 하위 에이전트의 `message_start` 가 부모의 추적을 덮으면
+    ///   부모의 흘린 블록이 완결 글로 한 번 더 나온다(하위 에이전트 델타가 오는지 자체는 미확인 — 문서와 피어가 갈린다).
+    /// ★`message_start` 없이 온 글 델타(id 없음)와 블록 번호 없는 글 델타는 버린다★ — 흘린 자리를 적을 수 없으면
+    ///   완결 글이 버려지지 않아 두 벌이 되므로, 흘리지 않고 완결 글 하나로 보인다.
+    // ADR-0240
+    fn consume_stream_event(
+        value: &serde_json::Value,
+        partial: &mut PartialMessage,
+        events: &mut Vec<OutputEvent>,
+    ) {
+        if value
+            .get("parent_tool_use_id")
+            .is_some_and(|p| !p.is_null())
+        {
+            return;
+        }
+        let Some(event) = value.get("event") else {
+            return;
+        };
+        let index = event.get("index").and_then(|v| v.as_u64());
+        match event.get("type").and_then(|t| t.as_str()) {
+            Some("message_start") => {
+                *partial = PartialMessage {
+                    id: bounded_message_id(event.get("message").and_then(|m| m.get("id"))),
+                    ..PartialMessage::default()
+                };
+            }
+            Some("content_block_start") => {
+                if index.is_some() {
+                    partial.open = index;
+                }
+            }
+            Some("content_block_delta") => {
+                let Some(delta) = event.get("delta") else {
+                    return;
+                };
+                if delta.get("type").and_then(|t| t.as_str()) != Some("text_delta") {
+                    return;
+                }
+                let (Some(id), Some(index)) = (partial.id.as_ref(), index) else {
+                    return;
+                };
+                let Some(text) = delta
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .filter(|t| !t.is_empty())
+                else {
+                    return;
+                };
+                partial.streamed.insert(index);
+                // 링 압박: 바로 앞 사건이 같은 메시지의 글이면 새 사건 대신 그 글에 잇는다 — `events` 는 decode() 한
+                //   번의 몫이라 이 합치기는 펌프 한 번 읽기에 여러 줄이 왔을 때만 줄어든다(실측 2026-09-27 — 2,428 자
+                //   답의 델타 519 줄이 읽기마다 한 줄씩 와서 합쳐도 519 개).
+                //   seq 는 emit 때 매겨져 구멍이 안 생기고, 누산기는 어차피 마지막 글 항목에 잇는다.
+                // ADR-0240
+                if let Some(OutputEvent::TextDelta {
+                    text: previous,
+                    message_id: Some(previous_id),
+                    ..
+                }) = events.last_mut()
+                {
+                    if previous_id == id {
+                        previous.push_str(text);
+                        return;
+                    }
+                }
+                events.push(OutputEvent::TextDelta {
+                    text: text.to_string(),
+                    turn_id: None,
+                    message_id: Some(id.clone()),
+                });
+            }
+            Some("content_block_stop") => {
+                if index.is_some() && partial.open == index {
+                    partial.open = None;
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// content[] 한 블록 → OutputEvent.
     ///
     /// `line_uuid`: user 라인의 line-level `uuid`(replay dedup 키). user-role 블록에만 쓴다.
@@ -1108,8 +1560,8 @@ impl ClaudeStreamDecoder {
 
         match block.get("type").and_then(|t| t.as_str()) {
             Some("text") => {
-                // 통짜 모드라 실은 델타가 아닌 완결 텍스트지만, OutputEvent 에 "완결 텍스트" variant 가
-                //   없고 TextDelta 가 텍스트 증분의 정형 표현이다.
+                // 여기 오는 것은 완결 글이다(델타로 흘리지 않은 블록 · transcript) — OutputEvent 에 "완결 텍스트"
+                //   variant 가 없고 TextDelta 가 텍스트 증분의 정형 표현이다.
                 // ★malformed 계약(FIX-B)★: 문자열 `text` 가 없으면(스키마 이탈) 빈 TextDelta 를
                 //   방출하지 않고 skip 한다 — 빈 델타는 다운스트림에 무의미한 노이즈이고, "정상 text
                 //   블록인데 내용이 빈 문자열"과 구분도 안 된다. (Structured 보존 대신 skip 선택:
@@ -1145,6 +1597,7 @@ impl ClaudeStreamDecoder {
                     id,
                     turn_id: None,
                     message_id: message_id.map(String::from),
+                    category: tool_category(name),
                 });
             }
             // thinking·tool_result 는 정형 variant 가 없다 → Structured 탈출구로 원본 블록 보존.
@@ -1186,6 +1639,24 @@ impl ClaudeStreamDecoder {
             }
             None => block.to_string(),
         }
+    }
+}
+
+/// claude 도구 이름 → 중립 종류. ★정확 일치(대소문자 구분)다★ — 모르는 새 도구는 [`ToolCategory::Other`] 로
+/// 떨어진다(묶음은 그대로 서고 요약 문구만 「기타」가 된다). `Glob` 은 `Search` 다 — Claude Code 자신이 「파일을
+/// 찾는다」로 묶는다.
+// ADR-0239
+fn tool_category(name: &str) -> ToolCategory {
+    match name {
+        "Read" | "NotebookRead" => ToolCategory::Read,
+        "Grep" | "Glob" => ToolCategory::Search,
+        "LS" => ToolCategory::List,
+        "Edit" | "MultiEdit" | "Write" | "NotebookEdit" => ToolCategory::Edit,
+        "Bash" | "PowerShell" | "BashOutput" | "KillShell" | "KillBash" => ToolCategory::Command,
+        "WebFetch" | "WebSearch" => ToolCategory::Web,
+        "Task" | "Agent" => ToolCategory::Agent,
+        _ if name.starts_with("mcp__") => ToolCategory::Mcp,
+        _ => ToolCategory::Other,
     }
 }
 
@@ -1305,6 +1776,7 @@ fn judge_delivery_ack(ack: &DeliveryAck, value: &serde_json::Value) -> Option<Qu
 //   `consume_line` 의 catch-all(`_ => {}`)이 모르는 타입을 이미 무해히 스킵하므로 그 라인들은 자연 배제된다.
 //   ★예외 하나 = `attachment{queued_command}`★ — 턴 도중 접힌 입력의 본문이 거기만 남아 말풍선으로 옮긴다
 //   (`LineSource::Transcript` 갈래). 라이브 전용 줄(수명주기·취소 응답·init)은 그 갈래에서 번역하지 않는다.
+//   `stream_event` 도 부분 메시지 추적 없이(`partial: None`) 불러 건너뛴다 — 완결 줄이 글을 한 벌 낸다(ADR-0240).
 //   유일한 추가 필터는 `isSidechain:true`(sub-agent 턴) — 이건 `type` 이 여전히 user/assistant 라
 //   consume_line 이 안 걸러내므로 여기서 라인 레벨로 스킵한다.
 
@@ -1368,7 +1840,7 @@ fn claude_home() -> Option<PathBuf> {
 /// 문자열만 받는다(ADR-0012 seam 격리).
 ///
 /// - `isSidechain:true`(sub-agent 턴) 라인은 스킵한다 — 원본 대화만 복원한다.
-/// - result 라인은 라이브와 동일하게 MessageDone(+usage) 로 매핑돼 턴 경계 구분선이 생긴다.
+/// - result 라인은 라이브와 같은 번역(MessageDone · 끊긴 턴은 `TurnEnd`, + usage)이라 턴 경계 구분선이 생긴다.
 /// - 그 result 라인이 **없이 끝나면** 마지막에 합성 MessageDone 을 하나 덧붙인다(아래 이유).
 pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     let mut events = Vec::new();
@@ -1382,11 +1854,12 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
         if is_sidechain_line(trimmed) {
             continue;
         }
-        // 줍지 않는다 — 지나간 한도는 지금 값이 아니다.
+        // 줍지 않는다 — 지나간 한도는 지금 값이 아니다. 부분 메시지 추적도 없다(`partial: None` — 위 doc).
         ClaudeStreamDecoder::consume_line(
             trimmed.as_bytes(),
             &mut events,
             LineSource::Transcript,
+            None,
             None,
         );
     }
@@ -1401,9 +1874,12 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
     //   ★관측(ADR-0113)과 무관★: 이 합성 신호는 **replay 버퍼 전용**이다 — seed 는 턴 관측 경로를 아예
     //   거치지 않으므로(OutputCore::seed) 이걸로 busy/idle 이 부트스트랩되지 않는다. 되살리지 말 것.
     //
-    //   이미 MessageDone 으로 끝나면(픽스처·미래 claude 가 result 를 남기는 경우) 덧붙이지 않는다 —
-    //   중복 턴 경계 방지. 이벤트가 0개면(빈·메타 전용 transcript) 그대로 0개 = fresh 와 동일.
-    let already_closed = matches!(events.last(), Some(OutputEvent::MessageDone { .. }));
+    //   이미 턴 끝(MessageDone · 끊긴 턴의 TurnEnd)으로 끝나면(픽스처·미래 claude 가 result 를 남기는 경우)
+    //   덧붙이지 않는다 — 중복 턴 경계 방지. 이벤트가 0개면(빈·메타 전용 transcript) 그대로 0개 = fresh 와 동일.
+    let already_closed = matches!(
+        events.last(),
+        Some(OutputEvent::MessageDone { .. } | OutputEvent::TurnEnd { .. })
+    );
     if !events.is_empty() && !already_closed {
         events.push(OutputEvent::MessageDone {
             turn_id: None,
@@ -1491,7 +1967,7 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DeliveredCopy, DropCause, CLI_EXE_ENV, CLI_EXE_NAME};
+    use crate::types::{DeliveredCopy, DropCause, ToolOutcome, CLI_EXE_ENV, CLI_EXE_NAME};
 
     // ── backend/claude/ 단위 테스트 ─────────────────────────────────────────
 
@@ -1532,6 +2008,29 @@ mod tests {
             assert_eq!(
                 end(outcome.clone()),
                 Some(TurnSignal::Ended(TurnEndKind::Other)),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// 도구 끝 결과는 결말이 무엇이든 턴 신호가 아니다 — 진행이면 턴 끝 뒤의 끝이 「턴 중」을 다시 켜고, 오류면 도구
+    /// 실패 하나가 오류 뒤 멈춤을 세운다.
+    // ADR-0241
+    #[test]
+    fn a_tool_result_is_never_a_turn_signal() {
+        let classify = ClaudeBackend.turn_classifier();
+        for outcome in [
+            ToolOutcome::Completed,
+            ToolOutcome::Failed,
+            ToolOutcome::Declined,
+            ToolOutcome::Refused,
+        ] {
+            assert_eq!(
+                classify(&OutputEvent::ToolResult {
+                    id: "c1".into(),
+                    outcome
+                }),
+                None,
                 "{outcome:?}"
             );
         }
@@ -2734,6 +3233,7 @@ mod tests {
                 "stream-json".to_string(),
                 "--replay-user-messages".to_string(),
                 "--verbose".to_string(),
+                "--include-partial-messages".to_string(),
                 "--session-id".to_string(),
                 sid.to_string(),
                 "--model".to_string(),
@@ -2772,6 +3272,19 @@ mod tests {
             assert!(
                 !s.args.iter().any(|x| x == forbidden),
                 "터미널 모드에 json 인자 누출: {forbidden}"
+            );
+        }
+    }
+
+    // ADR-0240
+    #[test]
+    fn terminal_mode_has_no_partial_messages_flag() {
+        for mode in [SpawnMode::Fresh, SpawnMode::Resume] {
+            let s = spec(&terminal(vec![]), mode, Some(Uuid::new_v4()));
+            assert!(
+                !s.args.iter().any(|x| x == "--include-partial-messages"),
+                "터미널 모드 인자는 동결이다: {:?}",
+                s.args
             );
         }
     }
@@ -3059,6 +3572,7 @@ mod tests {
                 OutputEvent::TerminalBytes(_) => "terminal".to_string(),
                 OutputEvent::TextDelta { .. } => "text".to_string(),
                 OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
+                OutputEvent::ToolResult { outcome, .. } => format!("tool-result:{outcome:?}"),
                 OutputEvent::Usage { .. } => "usage".to_string(),
                 OutputEvent::MessageDone { .. } => "done".to_string(),
                 OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
@@ -3156,9 +3670,11 @@ mod tests {
                 args_json,
                 id,
                 message_id,
+                category,
                 ..
             } => {
                 assert_eq!(name, "Read");
+                assert_eq!(*category, ToolCategory::Read);
                 assert_eq!(id.as_deref(), Some("toolu_01LDdR9FU6CFjgEKeLPF1x1D"));
                 assert_eq!(message_id.as_deref(), Some("msg_01DXXosoarwv9i1cBXa8wVXJ"));
                 let v: serde_json::Value = serde_json::from_str(args_json).unwrap();
@@ -3476,6 +3992,52 @@ mod tests {
         assert_eq!(tags(&ev), vec!["structured:tool_use"]);
     }
 
+    // ── ADR-0239: 도구 이름 → 중립 종류 ─────────────────────────────────────────────
+
+    /// ★종류는 `tool_use` 갈래가 이름 표로 정한다★ — 표의 낱말 전부 · `mcp__` 접두 · 모르는 이름(`Other`) ·
+    /// 정확 일치(대소문자가 다르면 `Other`)를 번역기 경로로 잰다.
+    // ADR-0239
+    #[test]
+    fn tool_use_name_maps_to_its_neutral_category() {
+        for (name, want) in [
+            ("Read", ToolCategory::Read),
+            ("NotebookRead", ToolCategory::Read),
+            ("Grep", ToolCategory::Search),
+            ("Glob", ToolCategory::Search),
+            ("LS", ToolCategory::List),
+            ("Edit", ToolCategory::Edit),
+            ("MultiEdit", ToolCategory::Edit),
+            ("Write", ToolCategory::Edit),
+            ("NotebookEdit", ToolCategory::Edit),
+            ("Bash", ToolCategory::Command),
+            ("PowerShell", ToolCategory::Command),
+            ("BashOutput", ToolCategory::Command),
+            ("KillShell", ToolCategory::Command),
+            ("KillBash", ToolCategory::Command),
+            ("WebFetch", ToolCategory::Web),
+            ("WebSearch", ToolCategory::Web),
+            ("Task", ToolCategory::Agent),
+            ("Agent", ToolCategory::Agent),
+            ("mcp__x__y", ToolCategory::Mcp),
+            ("TodoWrite", ToolCategory::Other),
+            ("SomeFutureTool", ToolCategory::Other),
+            ("read", ToolCategory::Other),
+            ("bash", ToolCategory::Other),
+            ("Mcp__x__y", ToolCategory::Other),
+        ] {
+            let line = format!(
+                "{}\n",
+                serde_json::json!({"type": "assistant", "message": {"id": "m1", "content": [
+                    {"type": "tool_use", "id": "t1", "name": name, "input": {}}
+                ]}})
+            );
+            match decode_all(line.as_bytes()).as_slice() {
+                [OutputEvent::ToolCall { category, .. }] => assert_eq!(*category, want, "{name}"),
+                other => panic!("{name}: ToolCall 하나가 아니다: {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn text_block_without_text_field_is_skipped() {
         // FIX-B: 문자열 text 가 없는 text 블록은 빈 TextDelta 대신 skip(정보 유실 없음 → 조용히 버림).
@@ -3536,25 +4098,40 @@ mod tests {
         assert_eq!(tags(&ev), vec!["error", "done"]);
     }
 
+    /// 끊긴 턴의 끝 한 벌 — `TurnEnd{turn_id: None, outcome: Interrupted}` 인가.
+    fn is_interrupted_end(event: &OutputEvent) -> bool {
+        matches!(
+            event,
+            OutputEvent::TurnEnd {
+                turn_id: None,
+                outcome: TurnOutcome::Interrupted
+            }
+        )
+    }
+
+    // 아래 둘은 손으로 지은 옛 CLI 모양(`subtype:"interrupted"`)이다 — 실측 모양은 `interrupt_s1` 픽스처가 잰다.
+    // ADR-0238
     #[test]
-    fn result_interrupted_subtype_emits_only_done_no_error() {
-        // FIX-E 회귀: 유저 Esc 정상 중단 턴(subtype:"interrupted").
+    fn result_interrupted_subtype_ends_the_turn_as_interrupted_without_an_error() {
+        // FIX-E 회귀: 유저 Esc 정상 중단 턴(subtype:"interrupted") — 오류 아님.
         let line = r#"{"type":"result","subtype":"interrupted"}"#.to_string() + "\n";
         let ev = decode_all(line.as_bytes());
         assert_eq!(
             tags(&ev),
-            vec!["done"],
-            "interrupted 는 오류 아님 → Error 없이 done 만"
+            vec!["turn-end"],
+            "interrupted 는 오류 아님 → Error 없이 끊김 끝 한 벌"
         );
+        assert!(is_interrupted_end(&ev[0]), "{ev:?}");
     }
 
     #[test]
-    fn result_interrupted_subtype_with_is_error_false_emits_only_done() {
-        // FIX-E 회귀: is_error:false 가 명시된 interrupted 도 Error 없이 done 만.
+    fn result_interrupted_subtype_with_is_error_false_ends_the_turn_as_interrupted() {
+        // FIX-E 회귀: is_error:false 가 명시된 interrupted 도 Error 없이 끊김 끝 한 벌.
         let line =
             r#"{"type":"result","subtype":"interrupted","is_error":false}"#.to_string() + "\n";
         let ev = decode_all(line.as_bytes());
-        assert_eq!(tags(&ev), vec!["done"]);
+        assert_eq!(tags(&ev), vec!["turn-end"]);
+        assert!(is_interrupted_end(&ev[0]), "{ev:?}");
     }
 
     #[test]
@@ -4507,5 +5084,1449 @@ mod tests {
             .collect();
         assert!(!live_only.is_empty(), "픽스처 전제");
         assert!(parse_transcript_events(&live_only).is_empty());
+    }
+
+    // ── ADR-0240: 글자 스트리밍 — 부분 메시지 · 완결 글 버림 ─────────────────────────────
+
+    /// 최상위 `stream_event` 한 줄(개행 포함).
+    fn stream_line(event: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "stream_event",
+                "event": event,
+                "session_id": "s1",
+                "parent_tool_use_id": null,
+                "uuid": "u-stream"
+            })
+        )
+    }
+
+    fn message_start(id: &str) -> String {
+        stream_line(serde_json::json!({
+            "type": "message_start",
+            "message": { "id": id, "type": "message", "role": "assistant", "content": [] }
+        }))
+    }
+
+    fn block_start(index: u64, kind: &str) -> String {
+        stream_line(serde_json::json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": { "type": kind }
+        }))
+    }
+
+    fn text_delta(index: u64, text: &str) -> String {
+        stream_line(serde_json::json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "text_delta", "text": text }
+        }))
+    }
+
+    fn block_stop(index: u64) -> String {
+        stream_line(serde_json::json!({ "type": "content_block_stop", "index": index }))
+    }
+
+    /// 블록 하나만 담은 완결 `assistant` 줄 — 벤더가 그 블록의 `content_block_stop` 보다 먼저 보낸다.
+    fn completed(id: &str, block: serde_json::Value) -> String {
+        format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "assistant",
+                "message": { "id": id, "role": "assistant", "content": [block] },
+                "parent_tool_use_id": null
+            })
+        )
+    }
+
+    fn completed_text(id: &str, text: &str) -> String {
+        completed(id, serde_json::json!({ "type": "text", "text": text }))
+    }
+
+    const RESULT_LINE: &str = "{\"type\":\"result\",\"subtype\":\"success\"}\n";
+
+    fn text_events(events: &[OutputEvent]) -> Vec<(String, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                OutputEvent::TextDelta {
+                    text, message_id, ..
+                } => Some((text.clone(), message_id.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn decode_lines(lines: &[String]) -> Vec<OutputEvent> {
+        decode_all(lines.concat().as_bytes())
+    }
+
+    /// 줄마다 decode() 한 번 — 실 펌프가 델타 한 줄씩 읽는 모양(이웃 델타 합치기가 끼지 않는다).
+    fn decode_each(lines: &[String]) -> Vec<OutputEvent> {
+        let mut d = ClaudeStreamDecoder::new();
+        let mut out: Vec<OutputEvent> = lines.iter().flat_map(|l| d.decode(l.as_bytes())).collect();
+        out.extend(d.flush());
+        out
+    }
+
+    /// 1: 글 델타마다 `TextDelta`(메시지 id = `message_start` 의 것) · 그 블록의 완결 글은 안 나온다.
+    // ADR-0240
+    #[test]
+    fn streamed_text_deltas_carry_the_message_id_and_the_completed_text_is_dropped() {
+        let events = decode_each(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "Hel"),
+            text_delta(0, "lo"),
+            completed_text("m1", "Hello"),
+            block_stop(0),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![
+                ("Hel".to_string(), Some("m1".to_string())),
+                ("lo".to_string(), Some("m1".to_string())),
+            ]
+        );
+        assert_eq!(tags(&events), vec!["text", "text"]);
+    }
+
+    /// 2: 델타 없는 글 블록 · 다른 메시지의 완결 줄 · 멈춘 뒤 온 완결 줄 → 완결 전문(잃지 않는다).
+    // ADR-0240
+    #[test]
+    fn a_text_block_that_was_not_streamed_falls_back_to_the_completed_text() {
+        let no_deltas = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            completed_text("m1", "whole"),
+            block_stop(0),
+        ]);
+        assert_eq!(
+            text_events(&no_deltas),
+            vec![("whole".to_string(), Some("m1".to_string()))]
+        );
+
+        let other_message = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            completed_text("m2", "b"),
+        ]);
+        assert_eq!(
+            text_events(&other_message)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // 벤더가 순서를 바꾸면(멈춘 뒤 완결) 겹쳐 보인다 — 잃는 쪽보다 낫다.
+        let stopped_first = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            block_stop(0),
+            completed_text("m1", "a"),
+        ]);
+        assert_eq!(
+            text_events(&stopped_first)
+                .into_iter()
+                .map(|(t, _)| t)
+                .collect::<Vec<_>>(),
+            vec!["a", "a"]
+        );
+
+        // `partial` 을 거치지 않는 흐름(transcript)은 늘 완결 글을 낸다.
+        let transcript = parse_transcript_events(
+            &[
+                message_start("m1"),
+                block_start(0, "text"),
+                text_delta(0, "a"),
+                completed_text("m1", "a"),
+            ]
+            .concat(),
+        );
+        assert_eq!(tags(&transcript), vec!["text", "done"]);
+    }
+
+    /// 3: `tool_use` 는 완결 줄에서 `ToolCall` 한 번 · `input_json_delta` 는 사건 0.
+    // ADR-0240
+    #[test]
+    fn a_tool_use_comes_once_from_the_completed_line_and_its_input_deltas_are_silent() {
+        let input_delta = |partial_json: &str| {
+            stream_line(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": { "type": "input_json_delta", "partial_json": partial_json }
+            }))
+        };
+        let events = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "Let me run it."),
+            completed_text("m1", "Let me run it."),
+            block_stop(0),
+            block_start(1, "tool_use"),
+            input_delta("{\"command\":"),
+            input_delta("\"echo hi\"}"),
+            completed(
+                "m1",
+                serde_json::json!({
+                    "type": "tool_use", "id": "toolu_1", "name": "Bash",
+                    "input": { "command": "echo hi" }
+                }),
+            ),
+            block_stop(1),
+        ]);
+        assert_eq!(tags(&events), vec!["text", "tool:Bash"]);
+    }
+
+    /// 4: 생각·서명 델타는 버리고 완결 생각 블록은 오늘처럼 `Structured{thinking}` 한 번.
+    // ADR-0240
+    #[test]
+    fn thinking_deltas_are_ignored_and_the_completed_thinking_block_is_structured() {
+        let delta = |kind: &str, key: &str| {
+            stream_line(serde_json::json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": { "type": kind, key: "x" }
+            }))
+        };
+        let events = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "thinking"),
+            delta("thinking_delta", "thinking"),
+            delta("signature_delta", "signature"),
+            completed(
+                "m1",
+                serde_json::json!({ "type": "thinking", "thinking": "x", "signature": "sig" }),
+            ),
+            block_stop(0),
+        ]);
+        assert_eq!(tags(&events), vec!["structured:thinking"]);
+    }
+
+    /// 5: `parent_tool_use_id` 가 있는 `stream_event` 는 전부 버린다 — 그 `message_start` 도 부모 추적을 안 바꾼다.
+    // ADR-0240
+    #[test]
+    fn sub_agent_stream_events_are_dropped_and_do_not_reset_the_parent_tracking() {
+        let child = |event: serde_json::Value| {
+            format!(
+                "{}\n",
+                serde_json::json!({
+                    "type": "stream_event",
+                    "event": event,
+                    "parent_tool_use_id": "toolu_parent"
+                })
+            )
+        };
+        let events = decode_lines(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "parent"),
+            child(serde_json::json!({
+                "type": "message_start",
+                "message": { "id": "m-child", "content": [] }
+            })),
+            child(serde_json::json!({
+                "type": "content_block_start", "index": 0, "content_block": { "type": "text" }
+            })),
+            child(serde_json::json!({
+                "type": "content_block_delta", "index": 0,
+                "delta": { "type": "text_delta", "text": "child" }
+            })),
+            completed_text("m1", "parent"),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![("parent".to_string(), Some("m1".to_string()))]
+        );
+    }
+
+    /// 6: 메시지 부속 줄 · 모르는 `event.type` → 사건 0(`MessageDone` · `TurnEnd` · `Structured` 없음).
+    // ADR-0240
+    #[test]
+    fn message_bookkeeping_stream_events_emit_nothing() {
+        let events = decode_lines(&[
+            message_start("m1"),
+            stream_line(serde_json::json!({
+                "type": "message_delta",
+                "delta": { "stop_reason": "end_turn" },
+                "usage": { "output_tokens": 5 }
+            })),
+            stream_line(serde_json::json!({ "type": "message_stop" })),
+            stream_line(serde_json::json!({ "type": "ping" })),
+            stream_line(serde_json::json!({ "type": "some_future_event", "index": 0 })),
+            "{\"type\":\"stream_event\"}\n".to_string(),
+        ]);
+        assert!(events.is_empty(), "{events:?}");
+    }
+
+    /// 7: 새 `message_start` 가 추적을 갈아 끼운다 — 도구 루프 뒤 새 메시지의 같은 블록 번호도 새로 센다.
+    // ADR-0240
+    #[test]
+    fn a_new_message_start_replaces_the_tracking() {
+        let tool_result = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\",\"content\":\"hi\"}]}}\n".to_string();
+        let events = decode_each(&[
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "first"),
+            completed_text("m1", "first"),
+            block_stop(0),
+            tool_result,
+            message_start("m2"),
+            block_start(0, "text"),
+            completed_text("m2", "not streamed"),
+            block_stop(0),
+            block_start(1, "text"),
+            text_delta(1, "streamed"),
+            completed_text("m2", "streamed"),
+            block_stop(1),
+            // 늦게 온 옛 메시지의 완결 줄 — 지금 추적과 id 가 달라 전문이 나온다.
+            completed_text("m1", "late"),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![
+                ("first".to_string(), Some("m1".to_string())),
+                ("not streamed".to_string(), Some("m2".to_string())),
+                ("streamed".to_string(), Some("m2".to_string())),
+                ("late".to_string(), Some("m1".to_string())),
+            ]
+        );
+    }
+
+    /// 8: `result` 뒤 `message_start` 없이 온 늦은 델타 → 사건 0.
+    // ADR-0240
+    #[test]
+    fn a_late_delta_after_the_result_emits_nothing() {
+        let mut d = ClaudeStreamDecoder::new();
+        let turn = [
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "done"),
+            completed_text("m1", "done"),
+            block_stop(0),
+            RESULT_LINE.to_string(),
+        ]
+        .concat();
+        assert_eq!(tags(&d.decode(turn.as_bytes())), vec!["text", "done"]);
+        let late = [
+            text_delta(0, "late"),
+            block_start(1, "text"),
+            text_delta(1, "late"),
+        ]
+        .concat();
+        assert!(d.decode(late.as_bytes()).is_empty());
+    }
+
+    /// 9: 한글이 든 `stream_event` 한 줄이 청크 둘에 걸쳐(글자 중간에서) 와도 `TextDelta` 는 한 번.
+    // ADR-0240
+    #[test]
+    fn a_stream_event_line_split_inside_a_hangul_character_yields_one_delta() {
+        let mut d = ClaudeStreamDecoder::new();
+        assert!(d
+            .decode(
+                [message_start("m1"), block_start(0, "text")]
+                    .concat()
+                    .as_bytes()
+            )
+            .is_empty());
+        let line = text_delta(0, "안녕하세요");
+        let bytes = line.as_bytes();
+        let cut = line.find("녕").expect("한글") + 1;
+        assert!(
+            !line.is_char_boundary(cut),
+            "시험 전제 — 글자 중간을 자른다"
+        );
+        let mut events = d.decode(&bytes[..cut]);
+        assert!(events.is_empty());
+        events.extend(d.decode(&bytes[cut..]));
+        assert_eq!(
+            text_events(&events),
+            vec![("안녕하세요".to_string(), Some("m1".to_string()))]
+        );
+    }
+
+    /// 10: 이어받기 원문에 `stream_event` 가 섞여도 완결 글은 한 벌이다(`partial: None` 은 그 줄을 건너뛴다).
+    // ADR-0240
+    #[test]
+    fn stream_events_mixed_into_a_transcript_leave_one_copy_of_the_text() {
+        let transcript = [
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "Hel"),
+            text_delta(0, "lo"),
+            completed_text("m1", "Hello"),
+            block_stop(0),
+            stream_line(serde_json::json!({ "type": "message_stop" })),
+        ]
+        .concat();
+        let events = parse_transcript_events(&transcript);
+        assert_eq!(tags(&events), vec!["text", "done"]);
+        assert_eq!(
+            text_events(&events),
+            vec![("Hello".to_string(), Some("m1".to_string()))]
+        );
+    }
+
+    /// 12: 흘린 `TextDelta` 는 진행 · 부속 줄은 사건이 없어 신호도 없다 — `result` 뒤 부속 줄이 와도 한가 그대로.
+    // ADR-0240
+    #[test]
+    fn streamed_deltas_are_progress_and_bookkeeping_lines_leave_the_turn_closed() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let in_turn = || table.get(id, epoch).expect("관측").in_turn;
+
+        let classify = ClaudeBackend.turn_classifier();
+        let streamed = d.decode(
+            [
+                message_start("m1"),
+                block_start(0, "text"),
+                text_delta(0, "x"),
+            ]
+            .concat()
+            .as_bytes(),
+        );
+        assert_eq!(tags(&streamed), vec!["text"]);
+        assert_eq!(classify(&streamed[0]), Some(TurnSignal::Progress));
+        for ev in streamed {
+            core.emit(ev);
+        }
+        assert!(in_turn());
+
+        feed(
+            &core,
+            &mut d,
+            &[block_stop(0), RESULT_LINE.to_string()].concat(),
+        );
+        assert!(!in_turn());
+
+        let bookkeeping = [
+            stream_line(serde_json::json!({ "type": "message_delta", "delta": {} })),
+            stream_line(serde_json::json!({ "type": "message_stop" })),
+            block_stop(0),
+            text_delta(0, "late"),
+        ]
+        .concat();
+        assert!(d.decode(bookkeeping.as_bytes()).is_empty());
+        feed(&core, &mut d, &bookkeeping);
+        assert!(
+            !in_turn(),
+            "턴 끝 뒤 부속 줄 · 늦은 델타는 「턴 중」을 다시 켜지 않는다"
+        );
+    }
+
+    const PARTIAL_STREAM_P1: &str = include_str!("fixtures/partial_stream_p1.jsonl");
+
+    /// 픽스처의 완결 `assistant` 줄에서 `(메시지 id, 블록 type)` 이 맞는 블록들.
+    fn completed_blocks(fixture: &str, block_type: &str) -> Vec<(String, serde_json::Value)> {
+        fixture
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .filter(|v| v["type"] == "assistant")
+            .flat_map(|v| {
+                let id = v["message"]["id"].as_str().unwrap_or_default().to_string();
+                v["message"]["content"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|b| b["type"] == block_type)
+                    .map(move |b| (id.clone(), b))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn fixture_lines(fixture: &str) -> Vec<String> {
+        fixture.lines().map(|l| format!("{l}\n")).collect()
+    }
+
+    /// 누산기처럼 접는다 — 글은 마지막 글 항목에 잇고, 그 밖의 사건은 제 꼬리표로 한 항목씩.
+    fn fold_like_accumulator(events: &[OutputEvent]) -> Vec<String> {
+        let mut items: Vec<String> = Vec::new();
+        let mut last_is_text = false;
+        for (e, tag) in events.iter().zip(tags(events)) {
+            match e {
+                OutputEvent::TextDelta { text, .. } if last_is_text => {
+                    items.last_mut().expect("글 항목").push_str(text)
+                }
+                OutputEvent::TextDelta { text, .. } => {
+                    items.push(format!("text:{text}"));
+                    last_is_text = true;
+                }
+                _ => {
+                    items.push(tag);
+                    last_is_text = false;
+                }
+            }
+        }
+        items
+    }
+
+    /// 1 · 3 · 4 · 7 을 실측으로: 메시지마다 흘린 글의 이음 = 그 메시지의 완결 글(한 벌) · 글 델타 줄 하나에 사건 하나 ·
+    /// 도구는 완결 줄에서 한 번 · 생각은 완결 블록 수만큼 · 접힌 입력 뒤 새 메시지도 한 벌.
+    // ADR-0240
+    #[test]
+    fn the_partial_fixture_streams_every_text_block_exactly_once() {
+        let events = decode_each(&fixture_lines(PARTIAL_STREAM_P1));
+
+        let completed_text = completed_blocks(PARTIAL_STREAM_P1, "text");
+        let ids: std::collections::BTreeSet<&str> =
+            completed_text.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids.len(), 5, "픽스처 전제 — 글이 있는 메시지 다섯");
+        for id in ids {
+            let expected: String = completed_text
+                .iter()
+                .filter(|(i, _)| i == id)
+                .map(|(_, b)| b["text"].as_str().expect("text"))
+                .collect();
+            let streamed: String = text_events(&events)
+                .into_iter()
+                .filter(|(_, m)| m.as_deref() == Some(id))
+                .map(|(t, _)| t)
+                .collect();
+            assert_eq!(streamed, expected, "메시지 {id}");
+        }
+        let delta_lines = PARTIAL_STREAM_P1
+            .lines()
+            .filter(|l| l.contains("\"type\":\"text_delta\""))
+            .count();
+        assert_eq!(text_events(&events).len(), delta_lines);
+        assert_eq!(
+            text_events(&events).last().map(|(t, _)| t.as_str()),
+            Some("INEAPPLE"),
+            "접힌 입력 뒤 새 메시지의 끝 델타"
+        );
+
+        let non_text: Vec<String> = tags(&events).into_iter().filter(|t| t != "text").collect();
+        assert_eq!(
+            non_text,
+            vec![
+                // T1 — 글만
+                "queued:delivered",
+                "structured:user",
+                "usage",
+                "done",
+                // T2 — 생각 · 글 → 도구 → 결과 → 글
+                "queued:delivered",
+                "structured:user",
+                "structured:thinking",
+                "tool:Bash",
+                "structured:user",
+                "usage",
+                "done",
+                // T3 — 생각 · 글
+                "queued:delivered",
+                "structured:user",
+                "structured:thinking",
+                "usage",
+                "done",
+                // T5 — 도구 도중 B 를 써 접힘 → 새 message_start
+                "queued:delivered",
+                "structured:user",
+                "structured:thinking",
+                "tool:Bash",
+                "structured:user",
+                "structured:user",
+                "queued:delivered",
+                "structured:thinking",
+                "usage",
+                "done",
+            ]
+        );
+        assert_eq!(
+            non_text
+                .iter()
+                .filter(|t| *t == "structured:thinking")
+                .count(),
+            completed_blocks(PARTIAL_STREAM_P1, "thinking").len()
+        );
+    }
+
+    /// 9 · 14 를 실측으로: 청크 경계가 어디든(한글 글자 중간 포함) 누산기가 접은 항목이 같고, 한 번에 먹이면 이웃
+    /// 델타가 합쳐져도 글은 같다.
+    // ADR-0240
+    #[test]
+    fn the_partial_fixture_folds_to_the_same_items_at_any_chunk_boundary() {
+        let per_line = fold_like_accumulator(&decode_each(&fixture_lines(PARTIAL_STREAM_P1)));
+        for chunk_size in [1usize, 3, 7, 64, 4096, PARTIAL_STREAM_P1.len()] {
+            let mut d = ClaudeStreamDecoder::new();
+            let mut events = Vec::new();
+            for c in PARTIAL_STREAM_P1.as_bytes().chunks(chunk_size) {
+                events.extend(d.decode(c));
+            }
+            events.extend(d.flush());
+            assert_eq!(
+                fold_like_accumulator(&events),
+                per_line,
+                "chunk_size={chunk_size}"
+            );
+        }
+        let whole = decode_all(PARTIAL_STREAM_P1.as_bytes());
+        assert!(
+            text_events(&whole).len()
+                < text_events(&decode_each(&fixture_lines(PARTIAL_STREAM_P1))).len(),
+            "한 번에 먹이면 이웃 델타가 합쳐진다"
+        );
+    }
+
+    /// 13: 채취한 한가 구간(각 `result` 뒤 ~ 다음 입력의 `queued` 전 — T1 뒤 32 초 포함)에 최상위 `stream_event` 가 없고,
+    /// 그 구간의 사건은 진행 신호가 아니며 코어는 한가 그대로다.
+    // ADR-0240
+    #[test]
+    fn the_captured_idle_windows_carry_no_stream_events_and_no_progress() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let classify = ClaudeBackend.turn_classifier();
+
+        let mut in_window = false;
+        let mut windows = 0;
+        for line in PARTIAL_STREAM_P1.lines() {
+            let value: serde_json::Value = serde_json::from_str(line).expect("fixture json");
+            if value["type"] == "command_lifecycle" && value["state"] == "queued" {
+                in_window = false;
+            }
+            let events = d.decode(format!("{line}\n").as_bytes());
+            if in_window {
+                assert_ne!(value["type"], "stream_event", "한가 구간의 부분 줄: {line}");
+                for e in &events {
+                    assert_ne!(classify(e), Some(TurnSignal::Progress), "{e:?}");
+                }
+            }
+            for e in events {
+                core.emit(e);
+            }
+            if in_window {
+                assert!(!table.get(id, epoch).expect("관측").in_turn);
+            }
+            if value["type"] == "result" {
+                in_window = true;
+                windows += 1;
+                assert!(!table.get(id, epoch).expect("관측").in_turn);
+            }
+        }
+        assert_eq!(windows, 4, "픽스처 전제 — 채취한 턴 넷의 끝");
+    }
+
+    /// 14: 한 decode() 안의 이웃 `TextDelta` 는 같은 `message_id` 끼리만 합쳐지고, 사이에 다른 사건이 끼면 끊긴다.
+    // ADR-0240
+    #[test]
+    fn neighbouring_deltas_merge_only_within_one_decode_and_one_message() {
+        let tool = completed(
+            "m1",
+            serde_json::json!({ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }),
+        );
+        let lines = [
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            text_delta(0, "b"),
+            block_stop(0),
+            block_start(1, "text"),
+            text_delta(1, "c"),
+            completed_text("m1", "c"),
+            block_stop(1),
+            tool,
+            text_delta(2, "d"),
+            message_start("m2"),
+            block_start(0, "text"),
+            text_delta(0, "e"),
+            text_delta(0, "f"),
+        ];
+        let merged = decode_lines(&lines);
+        assert_eq!(
+            text_events(&merged),
+            vec![
+                ("abc".to_string(), Some("m1".to_string())),
+                ("d".to_string(), Some("m1".to_string())),
+                ("ef".to_string(), Some("m2".to_string())),
+            ]
+        );
+        assert_eq!(tags(&merged), vec!["text", "tool:Bash", "text", "text"]);
+
+        let separate = decode_each(&lines);
+        assert_eq!(text_events(&separate).len(), 6);
+        assert_eq!(
+            fold_like_accumulator(&merged),
+            fold_like_accumulator(&separate)
+        );
+    }
+
+    /// 상한(128 바이트)을 넘는 메시지 id 는 자르지 않고 거른다 — 그 메시지는 흘리지 않고 완결 글 하나로 보이며
+    /// 사건에 id 가 실리지 않는다. 상한 안의 id 는 그대로 흘린다.
+    // ADR-0240
+    #[test]
+    fn a_message_id_over_the_bound_is_filtered_not_truncated() {
+        let long = "m".repeat(MAX_MESSAGE_ID_BYTES + 1);
+        let events = decode_each(&[
+            message_start(&long),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            completed_text(&long, "ab"),
+            block_stop(0),
+        ]);
+        assert_eq!(text_events(&events), vec![("ab".to_string(), None)]);
+
+        let at_bound = "m".repeat(MAX_MESSAGE_ID_BYTES);
+        let events = decode_each(&[
+            message_start(&at_bound),
+            block_start(0, "text"),
+            text_delta(0, "a"),
+            completed_text(&at_bound, "a"),
+            block_stop(0),
+        ]);
+        assert_eq!(
+            text_events(&events),
+            vec![("a".to_string(), Some(at_bound))]
+        );
+    }
+
+    /// 11 의 보강: 부분 줄 없는 기존 fixture 는 부분 메시지 추적이 있든 없든 사건열이 같다(Debug 문자열 전체 대조).
+    ///   기존 fixture 시험을 고치지 않고 통과시키는 것이 11 의 증거이고, 이 시험은 그 전제(추적이 아무것도 안
+    ///   버린다)를 칸까지 잰다.
+    // ADR-0240
+    #[test]
+    fn fixtures_without_partial_lines_decode_the_same_with_and_without_tracking() {
+        for fixture in [
+            TEXT_JSONL,
+            TOOL_JSONL,
+            TRANSCRIPT_JSONL,
+            LIFECYCLE_M1,
+            CANCEL_M3,
+            DRAIN_M7,
+            SLASH_M13,
+            TRANSCRIPT_QUEUED_M5,
+            RESULT_ERROR,
+        ] {
+            assert!(!fixture.contains("\"stream_event\""), "픽스처 전제");
+            let tracked = decode_all(fixture.as_bytes());
+            let ack = DeliveryAck::default();
+            let mut untracked = Vec::new();
+            for line in fixture.lines() {
+                ClaudeStreamDecoder::consume_line(
+                    line.as_bytes(),
+                    &mut untracked,
+                    LineSource::Live(&ack),
+                    None,
+                    None,
+                );
+            }
+            assert_eq!(format!("{tracked:?}"), format!("{untracked:?}"));
+        }
+    }
+
+    // ── ADR-0238 · ADR-0243: 끊기 — 끊기 줄 · 턴 열림 문 · 끊긴 `result` · 합성 끊김 줄 ──────────────────
+    //
+    // 정본 = B2 스파이크 채취 `interrupt_s1`(claude 2.1.280 · README 표). 줄 번호는 1 기반.
+
+    const INTERRUPT_S1: &str = include_str!("fixtures/interrupt_s1.jsonl");
+
+    /// 문을 나눠 쥔 decoder 와 그 문을 읽는 끊기 줄 함수 — 운영 조립(`open_spawn`)에서 정리기만 뺀 모양.
+    fn gated_decoder() -> (ClaudeStreamDecoder, InterruptLine) {
+        let (decoder, gate) = decoder_with_gate(GateCell::new(None));
+        (decoder, interrupt_line(gate))
+    }
+
+    fn decoder_with_gate(gate: Arc<GateCell>) -> (ClaudeStreamDecoder, Arc<GateCell>) {
+        let slot = Arc::new(OnceLock::from(Arc::clone(&gate)));
+        let decoder = ClaudeStreamDecoder::live(Arc::new(DeliveryAck::new()), slot);
+        (decoder, gate)
+    }
+
+    /// 픽스처를 한 decoder 에 한 줄씩 먹여 줄마다 (그 줄의 사건, 그 뒤 끊기 줄 함수가 줄을 주나) 를 모은다.
+    fn replay_with_gate(fixture: &str) -> Vec<(Vec<OutputEvent>, bool)> {
+        let (mut decoder, line) = gated_decoder();
+        fixture_lines(fixture)
+            .iter()
+            .map(|l| (decoder.decode(l.as_bytes()), line().is_some()))
+            .collect()
+    }
+
+    fn interrupted_note_text(event: &OutputEvent) -> Option<String> {
+        match event {
+            OutputEvent::Structured { kind, json } if kind == INTERRUPTED_KIND => {
+                let v: serde_json::Value = serde_json::from_str(json).expect("json");
+                Some(v["text"].as_str().expect("text").to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// 끊기 줄 바이트 골든(ADR-0238 결정 1 — 실측 B2 가 받아들인 모양) · 그 요청 id 의 응답과 채취한 응답 둘은 사건이
+    /// 없다(응답은 「멈췄다」가 아니다).
+    // ADR-0238
+    #[test]
+    fn interrupt_line_bytes_golden_and_its_answer_is_not_translated() {
+        let id = Uuid::parse_str("f453a7a6-672a-4ed3-ae93-a3372f66d6f2").unwrap();
+        let line = interrupt_line_bytes(id);
+        assert_eq!(
+            String::from_utf8(line.clone()).unwrap(),
+            concat!(
+                r#"{"type":"control_request","request_id":"interrupt:f453a7a6-672a-4ed3-ae93-a3372f66d6f2","#,
+                r#""request":{"subtype":"interrupt"}}"#,
+                "\n"
+            )
+        );
+
+        let sent: serde_json::Value = serde_json::from_slice(&line).unwrap();
+        let answer = serde_json::json!({
+            "type": "control_response",
+            "response": {"subtype": "success", "request_id": sent["request_id"], "response": {"still_queued": ["u1"]}},
+        });
+        assert!(decode_all(format!("{answer}\n").as_bytes()).is_empty());
+        for n in [135, 183] {
+            let captured = fixture_line(INTERRUPT_S1, n);
+            assert!(
+                captured.contains("\"request_id\":\"interrupt:"),
+                "픽스처 전제 {n}"
+            );
+            assert!(decode_all(captured.as_bytes()).is_empty(), "{n}");
+        }
+    }
+
+    /// 끊긴 `result` 둘(글 흐르는 중 `aborted_streaming` · 도구 실행 중 `aborted_tools`) → `[Usage?, TurnEnd{Interrupted}]`
+    /// — `Error`·`MessageDone` 없음 · 분류 `Ended(Other)` · 픽스처 어디에도 턴 오류 신호가 없다. 같은 픽스처의 정상 끝은
+    /// 오늘처럼 `[Usage, done]`.
+    // ADR-0238
+    #[test]
+    fn the_spike_s_interrupted_results_end_the_turn_as_interrupted_without_an_error() {
+        let classify = ClaudeBackend.turn_classifier();
+        let per_line = replay_with_gate(INTERRUPT_S1);
+        let result_lines: Vec<usize> = INTERRUPT_S1
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["type"] == "result"
+            })
+            .map(|(i, _)| i + 1)
+            .collect();
+        assert_eq!(result_lines, vec![138, 187, 201], "픽스처 전제");
+
+        // 138 은 usage 가 0/0 이라 `Usage` 가 없다.
+        assert_eq!(tags(&per_line[138 - 1].0), vec!["turn-end"]);
+        assert_eq!(tags(&per_line[187 - 1].0), vec!["usage", "turn-end"]);
+        for n in [138, 187] {
+            let end = per_line[n - 1].0.last().unwrap();
+            assert!(is_interrupted_end(end), "{n}: {end:?}");
+            assert_eq!(
+                classify(end),
+                Some(TurnSignal::Ended(TurnEndKind::Other)),
+                "{n}"
+            );
+        }
+        assert_eq!(tags(&per_line[201 - 1].0), vec!["usage", "done"]);
+
+        let failed = per_line
+            .iter()
+            .flat_map(|(events, _)| events)
+            .filter(|e| classify(e) == Some(TurnSignal::Failed))
+            .count();
+        assert_eq!(failed, 0, "끊김이 턴 오류로 읽혔다");
+    }
+
+    /// 끊긴 두 턴의 꼬리를 줄마다 — 응답은 사건 0 · 잘린 완결 줄은 흘린 글이라 0(ADR-0240) · 도구 결과는 오늘처럼 `user`
+    /// · 합성 줄은 끊김 표시 · `result` 는 끊김 끝 · 뒤이은 `cancelled` 는 `Dropped`(묘비 위 무동작 — 명부 몫).
+    // ADR-0238
+    // ADR-0243
+    #[test]
+    fn the_interrupted_tails_translate_line_by_line() {
+        let per_line = replay_with_gate(INTERRUPT_S1);
+        let expected: [(usize, &[&str]); 11] = [
+            (135, &[]),
+            (136, &[]),
+            (137, &["structured:interrupted"]),
+            (138, &["turn-end"]),
+            (139, &["queued:dropped"]),
+            (183, &[]),
+            (184, &[]),
+            (185, &["structured:user"]),
+            (186, &["structured:interrupted"]),
+            (187, &["usage", "turn-end"]),
+            (188, &["queued:dropped"]),
+        ];
+        for (n, want) in expected {
+            assert_eq!(tags(&per_line[n - 1].0), want, "줄 {n}");
+        }
+    }
+
+    /// S8 — 문 궤적: 여는 줄 = 각 턴의 `started`(2 · 141 · 190) · 닫는 줄 = 각 턴의 `result`(138 · 187 · 201). 턴 밖(첫
+    /// `queued` · `result` 뒤의 `cancelled`·`completed` · 다음 턴의 `queued`)에서 여는 줄이 없다.
+    // ADR-0238
+    #[test]
+    fn the_turn_gate_opens_at_each_started_line_and_closes_at_each_result() {
+        let per_line = replay_with_gate(INTERRUPT_S1);
+        let (mut opened, mut closed, mut was_open) = (Vec::new(), Vec::new(), false);
+        for (i, (_, open)) in per_line.iter().enumerate() {
+            if *open != was_open {
+                if *open {
+                    opened.push(i + 1)
+                } else {
+                    closed.push(i + 1)
+                }
+            }
+            was_open = *open;
+        }
+        assert_eq!(opened, vec![2, 141, 190]);
+        assert_eq!(closed, vec![138, 187, 201]);
+        for n in opened {
+            assert!(
+                fixture_line(INTERRUPT_S1, n).contains("\"state\":\"started\""),
+                "픽스처 전제 {n}"
+            );
+        }
+        assert!(!was_open, "마지막 턴이 끝난 뒤 문은 닫혀 있다");
+    }
+
+    /// 사용자 되울림 · 완결 `assistant` 글 · 도구 호출 · 흘린 글 델타 · `Delivered` 줄은 저마다 문을 열고, 그 턴의
+    /// `result` 가 닫는다 — 문을 여는 사건 = 턴 분류기의 진행 신호.
+    // ADR-0238
+    #[test]
+    fn every_progress_line_opens_the_gate_and_the_result_closes_it() {
+        let echo = fixture_line(INTERRUPT_S1, 5);
+        assert!(echo.contains("\"isReplay\":true"), "픽스처 전제");
+        let tool_use = completed(
+            "m1",
+            serde_json::json!({ "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }),
+        );
+        let streamed = format!(
+            "{}{}{}",
+            message_start("m1"),
+            block_start(0, "text"),
+            text_delta(0, "hi")
+        );
+        for (label, opener) in [
+            ("되울림", echo),
+            ("완결 글", completed_text("m1", "hi")),
+            ("도구 호출", tool_use),
+            ("흘린 델타", streamed),
+            ("Delivered", fixture_line(INTERRUPT_S1, 2)),
+        ] {
+            let (mut decoder, line) = gated_decoder();
+            decoder.decode(opener.as_bytes());
+            assert!(line().is_some(), "{label} 뒤엔 끊을 턴이 있다");
+            decoder.decode(RESULT_LINE.as_bytes());
+            assert!(line().is_none(), "{label}: `result` 뒤엔 끊을 턴이 없다");
+        }
+    }
+
+    /// 문은 닫힌 채 선다 · 신호 없는 줄(한가 `queued` · `system/init`·`status`·`task_notification` · 끊기 응답 · 취소 응답
+    /// · 받음 불가 init · 부분 메시지 부속 줄 · 합성 끊김 줄 · `Dropped` 로 옮는 `cancelled`)로는 열리지 않는다.
+    // ADR-0238
+    // ADR-0243
+    #[test]
+    fn the_turn_gate_starts_closed_and_signal_less_lines_do_not_open_it() {
+        let (mut decoder, line) = gated_decoder();
+        assert!(line().is_none(), "스폰 직후엔 끊을 턴이 없다");
+
+        let mut lines: Vec<String> = [1, 3, 4, 135, 137, 139, 183, 184, 186, 188]
+            .into_iter()
+            .map(|n| fixture_line(INTERRUPT_S1, n))
+            .collect();
+        lines.push(
+            r#"{"type":"control_response","response":{"subtype":"success","request_id":"cancel:u1","response":{"cancelled":true}}}"#.to_string() + "\n",
+        );
+        lines.push(
+            TEXT_JSONL
+                .lines()
+                .find(|l| l.contains("\"subtype\":\"init\""))
+                .map(|l| format!("{l}\n"))
+                .expect("능력 없는 init"),
+        );
+        lines.push(message_start("m1"));
+        lines.push(block_start(0, "text"));
+        for l in &lines {
+            decoder.decode(l.as_bytes());
+            assert!(line().is_none(), "이 줄이 문을 열었다: {l}");
+        }
+    }
+
+    /// 개행 없이 끝난 마지막 줄도 문을 움직인다 — `flush` 도 라이브 줄 길을 탄다.
+    // ADR-0238
+    #[test]
+    fn a_trailing_line_flushed_at_eof_moves_the_gate_too() {
+        let (mut decoder, line) = gated_decoder();
+        let started = fixture_line(INTERRUPT_S1, 2);
+        assert!(decoder.decode(started.trim_end().as_bytes()).is_empty());
+        assert!(line().is_none(), "개행 전엔 아직 줄이 아니다");
+        assert_eq!(tags(&decoder.flush()), vec!["queued:delivered"]);
+        assert!(line().is_some());
+    }
+
+    /// 끊기 줄 함수는 부를 때마다 새 요청 id 를 싣는다 — 문이 열려 있는 동안 두 번 누르면 두 요청이다.
+    // ADR-0238
+    #[test]
+    fn each_interrupt_line_carries_a_fresh_request_id() {
+        let (mut decoder, line) = gated_decoder();
+        decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
+        let ids: Vec<String> = [line(), line()]
+            .into_iter()
+            .map(|out| {
+                let v: serde_json::Value =
+                    serde_json::from_slice(&out.expect("열린 문").bytes).unwrap();
+                assert_eq!(v["request"]["subtype"], "interrupt");
+                v["request_id"].as_str().unwrap().to_string()
+            })
+            .collect();
+        assert!(ids
+            .iter()
+            .all(|id| id.starts_with(INTERRUPT_REQUEST_PREFIX)));
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    /// 끊긴 턴은 오류 뒤 멈춤을 세우지도 풀지도 않는다 — 앞선 실패 턴의 멈춤은 끊긴 턴 둘을 지나도 남고, 다음 깨끗한
+    /// 턴이 푼다. 끊긴 턴 뒤 「턴 중」도 남지 않는다(ADR-0234 · ADR-0127).
+    // ADR-0238
+    #[test]
+    fn an_interrupted_turn_neither_sets_nor_clears_the_error_halt() {
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        let mut d = ClaudeStreamDecoder::new();
+        let observed = || table.get(id, epoch).expect("관측");
+
+        let failed_turn: String = RESULT_ERROR
+            .lines()
+            .take(4)
+            .map(|l| format!("{l}\n"))
+            .collect();
+        feed(&core, &mut d, &failed_turn);
+        assert!(observed().last_end_failed, "전제 — 실패 턴 뒤 멈춤");
+
+        let lines = fixture_lines(INTERRUPT_S1);
+        feed(&core, &mut d, &lines[..139].concat());
+        assert!(observed().last_end_failed, "첫 끊긴 턴이 멈춤을 풀었다");
+        assert!(!observed().in_turn, "끊긴 턴 뒤 「턴 중」이 남았다");
+        feed(&core, &mut d, &lines[139..188].concat());
+        assert!(observed().last_end_failed, "둘째 끊긴 턴이 멈춤을 풀었다");
+        assert!(!observed().in_turn);
+        feed(&core, &mut d, &lines[188..].concat());
+        assert!(!observed().last_end_failed, "깨끗한 턴이 멈춤을 푼다");
+        assert!(!observed().in_turn);
+
+        let table = Arc::new(crate::turn::TurnObservations::new());
+        let (core, id, epoch) = observed_core(&table);
+        feed(
+            &core,
+            &mut ClaudeStreamDecoder::new(),
+            &lines[..139].concat(),
+        );
+        assert!(
+            !table.get(id, epoch).expect("관측").last_end_failed,
+            "끊긴 턴이 멈춤을 세웠다"
+        );
+    }
+
+    /// 합성 끊김 줄 두 문구 → 원문을 싣는 끊김 표시 하나(말풍선 아님) — 라이브와 이어받기 둘 다. 분류 = 신호 없음.
+    // ADR-0243
+    #[test]
+    fn the_synthetic_interrupt_lines_become_interrupted_notes_live_and_in_transcripts() {
+        let classify = ClaudeBackend.turn_classifier();
+        for (n, text) in [
+            (137, "[Request interrupted by user]"),
+            (186, "[Request interrupted by user for tool use]"),
+        ] {
+            let raw = fixture_line(INTERRUPT_S1, n);
+            assert!(!raw.contains("isReplay"), "픽스처 전제 {n}");
+
+            let live = decode_all(raw.as_bytes());
+            assert_eq!(live.len(), 1, "{n}: {live:?}");
+            assert_eq!(
+                interrupted_note_text(&live[0]).as_deref(),
+                Some(text),
+                "{n}"
+            );
+            assert_eq!(classify(&live[0]), None, "{n}");
+
+            let seeded = parse_transcript_events(&raw);
+            assert_eq!(
+                tags(&seeded),
+                vec!["structured:interrupted", "done"],
+                "{n}: 이력은 합성 끝으로 닫힌다"
+            );
+            assert_eq!(
+                interrupted_note_text(&seeded[0]).as_deref(),
+                Some(text),
+                "{n}"
+            );
+        }
+    }
+
+    /// 알아보지 않는 `user` 줄은 오늘 그대로 — 되울림(`isReplay:true`)은 그 글이 머리로 시작해도 말풍선 · 글 블록 둘 ·
+    /// 머리로 시작하지 않는 글 · 머리를 담은 `tool_result` 는 `Structured{user}` · 평문 문자열 `content` 는 사건 0.
+    // ADR-0243
+    #[test]
+    fn user_lines_that_are_not_the_synthetic_note_stay_as_today() {
+        let user_line = |content: serde_json::Value, extra: serde_json::Value| {
+            let mut v = serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": content },
+                "uuid": "11111111-1111-1111-1111-111111111111",
+            });
+            if let (Some(line), Some(extra)) = (v.as_object_mut(), extra.as_object()) {
+                line.extend(extra.clone());
+            }
+            format!("{v}\n")
+        };
+        let text = |t: &str| serde_json::json!({ "type": "text", "text": t });
+        let prefixed = "[Request interrupted by user] 그런데 이건 내가 쳤다";
+
+        let cases: [(&str, String, Vec<&str>); 5] = [
+            (
+                "되울림",
+                user_line(
+                    serde_json::json!([text(prefixed)]),
+                    serde_json::json!({ "isReplay": true }),
+                ),
+                vec!["structured:user"],
+            ),
+            (
+                "글 블록 둘",
+                user_line(
+                    serde_json::json!([text("[Request interrupted by user]"), text("더")]),
+                    serde_json::json!({}),
+                ),
+                vec!["structured:user", "structured:user"],
+            ),
+            (
+                "머리로 시작하지 않는 글",
+                user_line(
+                    serde_json::json!([text("앞에 글 [Request interrupted by user]")]),
+                    serde_json::json!({}),
+                ),
+                vec!["structured:user"],
+            ),
+            (
+                "tool_result",
+                user_line(
+                    serde_json::json!([{
+                        "type": "tool_result",
+                        "tool_use_id": "t1",
+                        "content": "[Request interrupted by user]"
+                    }]),
+                    serde_json::json!({}),
+                ),
+                vec!["structured:user"],
+            ),
+            (
+                "평문 문자열",
+                user_line(
+                    serde_json::json!("[Request interrupted by user]"),
+                    serde_json::json!({}),
+                ),
+                vec![],
+            ),
+        ];
+        for (label, line, want) in cases {
+            assert_eq!(tags(&decode_all(line.as_bytes())), want, "{label} 라이브");
+            let seeded = parse_transcript_events(&line);
+            assert!(
+                !tags(&seeded).contains(&"structured:interrupted".to_string()),
+                "{label} 이어받기: {seeded:?}"
+            );
+        }
+
+        // 되울림은 우리 uuid 를 실은 말풍선 그대로다 — 프론트 중복 제거 키.
+        let replay = decode_all(
+            user_line(
+                serde_json::json!([text(prefixed)]),
+                serde_json::json!({ "isReplay": true }),
+            )
+            .as_bytes(),
+        );
+        match &replay[0] {
+            OutputEvent::Structured { kind, json } => {
+                assert_eq!(kind, "user");
+                let v: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(v["text"], prefixed);
+                assert_eq!(v["uuid"], "11111111-1111-1111-1111-111111111111");
+            }
+            other => panic!("expected Structured user, got {other:?}"),
+        }
+    }
+
+    /// 끊김 표시는 턴 분류기에서 신호가 없다 — 진행으로 세면 `result` 뒤에 올 때 「턴 중」이 다시 켜진다. 다른
+    /// `Structured` 는 여전히 진행이다.
+    // ADR-0243
+    #[test]
+    fn the_interrupted_note_is_not_turn_progress_but_other_structured_events_are() {
+        let classify = ClaudeBackend.turn_classifier();
+        let structured = |kind: &str| OutputEvent::Structured {
+            kind: kind.to_string(),
+            json: "{}".to_string(),
+        };
+        assert_eq!(classify(&structured(INTERRUPTED_KIND)), None);
+        for kind in ["user", "thinking", "tool_result", "tool_use"] {
+            assert_eq!(
+                classify(&structured(kind)),
+                Some(TurnSignal::Progress),
+                "{kind}"
+            );
+        }
+    }
+
+    /// 이어받은 이력이 끊긴 `result` 로 끝나면 그 끝이 곧 턴 경계다 — 합성 `MessageDone` 을 덧붙이지 않는다.
+    // ADR-0238
+    #[test]
+    fn a_transcript_ending_with_an_interrupted_result_is_not_double_closed() {
+        let tail = [137, 138].map(|n| fixture_line(INTERRUPT_S1, n)).concat();
+        assert_eq!(
+            tags(&parse_transcript_events(&tail)),
+            vec!["structured:interrupted", "turn-end"]
+        );
+    }
+
+    /// 운영 조립 — JSON 스폰의 통로는 끊기 능력을 신고하고, 스폰 직후엔 끊을 턴이 없어 거절하며, 그 화신의 decoder 가
+    /// `started` 줄을 읽은 뒤에는 끊기 줄을 받는다(decoder 와 끊기 줄 함수가 한 문을 나눠 쥔다).
+    // ADR-0238
+    #[cfg(windows)]
+    #[test]
+    fn the_json_spawn_shares_one_gate_between_its_decoder_and_its_interrupt_line() {
+        use crate::output_core::{OutputCore, TurnWiring};
+        use crate::types::{AgentInfo, AgentStatus, StatusSink};
+        use std::time::{Duration, Instant};
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        let dir = std::env::temp_dir().join(format!("engram-claude-gate-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let file = dir.join("started.jsonl");
+        std::fs::write(&file, fixture_line(INTERRUPT_S1, 2)).expect("write");
+        // `started` 한 줄을 흘리고 stdin 을 안 읽은 채 산다 — 자식이 끝나면 입력 큐도 닫혀 끊기 줄을 받을 곳이 없다.
+        let probe = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec![
+                "/c".into(),
+                "type".into(),
+                file.to_string_lossy().into_owned(),
+                "&".into(),
+                "ping".into(),
+                "-n".into(),
+                "30".into(),
+                "127.0.0.1".into(),
+                ">nul".into(),
+            ],
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+        let parts =
+            crate::backend::open_spawn(&json(vec![]), &probe, 80, 24, None, None, None, None, None)
+                .expect("open_spawn");
+        assert!(parts.transport.capabilities().control.interrupt);
+        assert!(
+            matches!(parts.transport.interrupt(), Err(PtyError::Unsupported(_))),
+            "스폰 직후엔 끊을 턴이 없다"
+        );
+
+        let core = Arc::new(OutputCore::new(
+            Uuid::new_v4(),
+            0,
+            Arc::new(NoopStatus),
+            TurnWiring::detached(),
+        ));
+        parts.transport.start(Arc::clone(&core));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match parts.transport.interrupt() {
+                Ok(()) => break,
+                Err(PtyError::Unsupported(_)) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                other => panic!("`started` 뒤에도 끊기 줄을 받지 않았다: {other:?}"),
+            }
+        }
+        parts.transport.shutdown();
+        core.join_pump(Duration::from_secs(5));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── ADR-0262: decoder · 끊기 줄 함수 ↔ 끊기 에피소드 ──────────────────────────────────────────────────
+
+    /// 정리기를 품은 문과 그 문을 나눠 쥔 decoder · 끊기 줄 함수 — `open_spawn` 의 조립에서 무리만 이미 사라진 손잡이로
+    /// 바꾼 모양. 포트를 못 써 에피소드의 스냅숏은 실패로 서지만 에피소드는 선다. 시험은 쓰기 확인을 부르지 않으므로
+    /// 일꾼도 듣는 스레드도 뜨지 않는다.
+    fn cleaned_decoder() -> (ClaudeStreamDecoder, InterruptLine, Arc<GateCell>) {
+        use crate::platform::process_group::{ProcessGroup, RetiringSignal};
+        let retiring = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let group = ProcessGroup::detached(RetiringSignal::of(&retiring));
+        let cleaner = Cleaner::new(
+            Arc::new(group),
+            Arc::new(SystemClock),
+            4242,
+            LogTag::new(None, 4242),
+        );
+        let (decoder, gate) = decoder_with_gate(GateCell::new(Some(Arc::new(cleaner))));
+        (decoder, interrupt_line(Arc::clone(&gate)), gate)
+    }
+
+    /// 에피소드는 `GateCell` 의 Debug 로만 보인다.
+    fn has_episode(gate: &GateCell) -> bool {
+        let shown = format!("{gate:?}");
+        assert!(shown.contains("cleaner: true"), "{shown}");
+        shown.contains("episode: Some")
+    }
+
+    /// 다른 입력 하나의 `started` — 이미 열린 턴에 닿는 둘째 새 입력.
+    const SECOND_STARTED: &str = "{\"type\":\"command_lifecycle\",\"command_uuid\":\"u2\",\"state\":\"started\",\"uuid\":\"x\",\"session_id\":\"s\"}\n";
+
+    /// 스폰 직후 · 턴 끝 뒤의 끊기는 줄도 에피소드도 없다 · 진행 줄이 연 문의 끊기는 쓰기 확인을 실은 줄을 주고
+    /// 에피소드를 연다 · 같은 턴의 진행 줄은 에피소드를 건드리지 않는다 · `result` 가 문을 닫고 에피소드를 버린다.
+    // ADR-0262
+    #[test]
+    fn an_interrupt_on_an_open_turn_opens_an_episode_that_the_turn_end_drops() {
+        let (mut decoder, line, gate) = cleaned_decoder();
+        assert!(line().is_none(), "스폰 직후엔 끊을 턴이 없다");
+        assert!(!has_episode(&gate));
+
+        decoder.decode(completed_text("m1", "hi").as_bytes());
+        assert!(gate.is_open());
+        assert!(!has_episode(&gate), "진행 줄은 에피소드를 만들지 않는다");
+
+        let out = line().expect("열린 문");
+        assert!(
+            out.on_written.is_some(),
+            "받아들인 끊기는 쓰기 확인을 싣는다"
+        );
+        assert!(has_episode(&gate), "받아들인 끊기가 에피소드를 연다");
+        decoder.decode(completed_text("m1", "more").as_bytes());
+        assert!(has_episode(&gate), "진행 줄이 에피소드를 버렸다");
+
+        decoder.decode(RESULT_LINE.as_bytes());
+        assert!(!gate.is_open());
+        assert!(!has_episode(&gate), "턴 끝이 에피소드를 버린다");
+        assert!(line().is_none());
+        assert!(!has_episode(&gate));
+        assert_eq!(decoder.gate_moves, vec![GateMove::Open, GateMove::Close]);
+    }
+
+    /// 끊긴 `result`(`TurnEnd{Interrupted}`)도 턴 끝이다 — 문을 닫고 에피소드를 버린다.
+    // ADR-0262
+    #[test]
+    fn an_interrupted_result_also_drops_the_episode() {
+        let (mut decoder, line, gate) = cleaned_decoder();
+        let lines = fixture_lines(INTERRUPT_S1);
+        for l in &lines[..137] {
+            decoder.decode(l.as_bytes());
+        }
+        assert!(line().is_some());
+        assert!(has_episode(&gate));
+
+        let end = decoder.decode(lines[137].as_bytes());
+        assert!(
+            end.last().is_some_and(is_interrupted_end),
+            "픽스처 전제: {end:?}"
+        );
+        assert!(!gate.is_open());
+        assert!(!has_episode(&gate));
+    }
+
+    /// 열린 턴에 닿은 둘째 새 입력(`started`)은 그 턴의 끊기 에피소드를 버리고 문은 열어 둔다 — 그 뒤 끊기는 새
+    /// 에피소드를 연다.
+    // ADR-0262
+    #[test]
+    fn a_second_started_drops_the_episode_and_keeps_the_turn_open() {
+        let (mut decoder, line, gate) = cleaned_decoder();
+        decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
+        assert!(line().is_some());
+        assert!(has_episode(&gate));
+
+        decoder.decode(SECOND_STARTED.as_bytes());
+        assert!(gate.is_open(), "새 입력이 문을 닫았다");
+        assert!(!has_episode(&gate), "새 입력이 에피소드를 버리지 않았다");
+
+        assert!(line().is_some());
+        assert!(
+            has_episode(&gate),
+            "새 입력 뒤 끊기가 에피소드를 열지 않았다"
+        );
+        assert_eq!(
+            decoder.gate_moves,
+            vec![GateMove::Deliver, GateMove::Deliver]
+        );
+    }
+
+    /// 턴을 여는 `started` 는 문에 한 번(새 입력)만 알린다 — 「연다」를 따로 부르지 않는다. 진행 줄이 이어져도 문은
+    /// 닫힘 → 열림일 때만 부르고, 턴 끝마다 한 번 닫는다 — 픽스처의 세 턴 = 여섯 번.
+    // ADR-0262
+    #[test]
+    fn the_opening_started_is_one_move_and_progress_moves_only_at_transitions() {
+        let (mut decoder, _line, gate) = cleaned_decoder();
+        let classify = ClaudeBackend.turn_classifier();
+        let lines = fixture_lines(INTERRUPT_S1);
+        let started = lines
+            .iter()
+            .filter(|l| l.contains("\"state\":\"started\""))
+            .count();
+        assert_eq!(started, 3, "픽스처 전제 — 턴마다 `started` 하나");
+
+        decoder.decode(lines[1].as_bytes());
+        assert_eq!(decoder.gate_moves, vec![GateMove::Deliver]);
+        assert!(gate.is_open());
+
+        let mut progress = 0;
+        for l in &lines[2..137] {
+            progress += decoder
+                .decode(l.as_bytes())
+                .iter()
+                .filter(|e| classify(e) == Some(TurnSignal::Progress))
+                .count();
+        }
+        assert!(progress > 1, "픽스처 전제 — 첫 턴의 진행 사건 {progress}");
+        assert_eq!(decoder.gate_moves, vec![GateMove::Deliver]);
+
+        for l in &lines[137..] {
+            decoder.decode(l.as_bytes());
+        }
+        use GateMove::{Close, Deliver};
+        assert_eq!(
+            decoder.gate_moves,
+            vec![Deliver, Close, Deliver, Close, Deliver, Close]
+        );
+        assert!(!gate.is_open());
+    }
+
+    /// 이어받기 원문은 문에 닿지 않는다 — 진행 · 끊긴 `result` 가 든 턴 하나를 이어받아도 닫힌 문은 닫힌 채, 열린 문과
+    /// 그 에피소드는 그대로다.
+    // ADR-0262
+    #[test]
+    fn transcript_lines_never_touch_the_gate() {
+        let (mut decoder, line, gate) = cleaned_decoder();
+        let turn = fixture_lines(INTERRUPT_S1)[..138].concat();
+        assert!(!parse_transcript_events(&turn).is_empty(), "픽스처 전제");
+        assert!(!gate.is_open(), "이어받기가 문을 열었다");
+
+        decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
+        assert!(line().is_some());
+        parse_transcript_events(&turn);
+        assert!(gate.is_open(), "이어받기가 문을 닫았다");
+        assert!(has_episode(&gate), "이어받기가 에피소드를 버렸다");
+    }
+
+    /// 정리기는 통로의 프로세스 무리와 뿌리 PID 가 함께 있어야 선다 — 뿌리 PID 가 없거나 0 이면 문만 여닫는다.
+    // ADR-0262
+    #[cfg(windows)]
+    #[test]
+    fn the_cleaner_needs_the_process_group_and_a_root_pid() {
+        let probe = CommandSpec {
+            program: "cmd.exe".into(),
+            args: ["/c", "ping", "-n", "30", "127.0.0.1", ">nul"]
+                .map(String::from)
+                .to_vec(),
+            env: vec![],
+            cwd: PathBuf::from("."),
+        };
+        let (t, pid) = StdioTransport::open(&probe, true, None).expect("open");
+        assert!(leftover_cleaner(&t, pid, None).is_some());
+        assert!(leftover_cleaner(&t, None, None).is_none());
+        assert!(leftover_cleaner(&t, Some(0), None).is_none());
+        t.shutdown();
     }
 }

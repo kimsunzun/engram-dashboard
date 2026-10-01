@@ -13,6 +13,7 @@ vi.mock('../../commands/dispatch', () => ({
 }))
 
 import SlotContextMenu, { ANCHOR_GAP, clampMenuPosition, flyoutPosition } from './SlotContextMenu'
+import { OVERLAY_SELECTOR } from './interruptKey'
 
 function item(id: string, over: Partial<ResolvedSlotMenuItem> = {}): ResolvedSlotMenuItem {
   return { id, title: id, run: vi.fn(), group: 'slot-ops', separatorBefore: false, ...over }
@@ -24,6 +25,21 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+})
+
+describe('SlotContextMenu — 오버레이 표지(ADR-0237)', () => {
+  it('뿌리가 표지를 단다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않는다', () => {
+    const { container } = render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('slot.close')]}
+        ctx={{ viewId: 'v1', slotId: 's1', agentId: 'a1' }}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(document.querySelector(OVERLAY_SELECTOR)).toBe(container.firstElementChild)
+  })
 })
 
 describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {

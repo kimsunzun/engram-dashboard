@@ -2353,6 +2353,9 @@ impl AgentManager {
             );
             return;
         }
+        // 물러남 예고가 첫 걸음이다(사유 = `kill_agent` 의 같은 줄). ★표식 대조 **뒤**여야 한다★ — 앞이면 산 후임의
+        //   통로가 되돌릴 수 없는 물러남 표시를 받는다.
+        session.begin_retire();
         self.control.revoke(id, session.epoch);
         let _ = session.enter_exiting();
         session.kill(Duration::from_secs(5));
@@ -2883,6 +2886,10 @@ impl AgentManager {
     /// 호출자가 "사라짐"을 단언하려면 폴링해야 한다(headless 테스트가 그렇게 한다).
     pub fn kill_agent(&self, agent_id: AgentId) -> Result<(), PtyError> {
         let session = self.get_session(agent_id)?;
+        // ★물러남 예고가 첫 걸음이다 — 권한 회수 · 의도 · `Exiting` · `session.kill` 보다 먼저★: 통로가 뒤에서 돌리는
+        //   일이 아래 종료와 겹치는 창을 가장 좁게 둔다. 자원을 거두지 않는 예고라 아래 인과(ADR-0001)는 그대로이고,
+        //   명부 락은 `get_session` 이 이미 놓았다(ADR-0006).
+        session.begin_retire();
         let epoch = session.epoch;
 
         // 0. ★제어 채널 토큰 즉시 폐기 — 블로킹 kill **전에**(FIX 4)★. 이 revoke 가 session.kill(최대
@@ -3541,6 +3548,10 @@ mod tests {
     }
 
     fn bare_manager() -> AgentManager {
+        bare_manager_with_control(Arc::new(NoopControlChannel))
+    }
+
+    fn bare_manager_with_control(control: Arc<dyn ControlChannel>) -> AgentManager {
         let tag = uuid::Uuid::new_v4();
         let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
             FileProfileStore::new(std::env::temp_dir().join(format!("engram-epoch-w-{tag}"))),
@@ -3555,7 +3566,7 @@ mod tests {
             },
             Arc::new(|_, _| {}),
         ));
-        AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker)
+        AgentManager::new_with_control(Arc::new(NoopStatus), profiles, presets, tracker, control)
     }
 
     /// 같은 id 재삽입 = 재시작(incarnation 교체) 모사.
@@ -4018,6 +4029,178 @@ mod tests {
             *kills.lock().expect("shutdowns poisoned"),
             1,
             "자기 화신의 정리가 돌지 않았다 — 실패한 세션이 아무도 못 거두는 채로 남는다"
+        );
+    }
+
+    // ── 물러남 예고의 자리: 끝내기로 정한 첫 걸음 ──
+    // 한 기록에 제어 채널(권한 회수) · 코어의 상태 알림(`Exiting`) · 통로(예고 · 종료)가 부른 차례대로 적는다. 종료
+    //   의도는 적을 동사가 없어 예고 순간의 값을 따로 찍는다.
+
+    type CallLog = Arc<Mutex<Vec<&'static str>>>;
+
+    struct LoggingControl(CallLog);
+    impl ControlChannel for LoggingControl {
+        fn provision(
+            &self,
+            _id: AgentId,
+            _epoch: u32,
+            _needs: crate::types::ControlChannelNeeds,
+        ) -> Result<Option<crate::types::ControlEndpoint>, crate::types::ProvisionError> {
+            Ok(None)
+        }
+        fn revoke(&self, _id: AgentId, _epoch: u32) {
+            self.0.lock().expect("log poisoned").push("revoke");
+        }
+    }
+
+    struct LoggingStatus(CallLog);
+    impl StatusSink for LoggingStatus {
+        fn status_changed(&self, _id: AgentId, s: AgentStatus, _e: u32) {
+            if matches!(s, AgentStatus::Exiting) {
+                self.0.lock().expect("log poisoned").push("exiting");
+            }
+        }
+        fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+    }
+
+    struct RetireProbe {
+        log: CallLog,
+        intent: Arc<AtomicU8>,
+        intent_at_retire: Arc<Mutex<Option<u8>>>,
+    }
+    impl AgentTransport for RetireProbe {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, _input: InputEvent) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn begin_retire(&self) {
+            *self.intent_at_retire.lock().expect("intent poisoned") =
+                Some(self.intent.load(Ordering::SeqCst));
+            self.log.lock().expect("log poisoned").push("begin_retire");
+        }
+        fn shutdown(&self) {
+            self.log.lock().expect("log poisoned").push("shutdown");
+        }
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: false,
+                    structured: true,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: true,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+
+    /// 명부에 `epoch` 화신 하나를 꽂는다 — 코어의 상태 알림과 통로가 `log` 에 적는다. 돌려주는 것 = 예고 순간의 종료 의도.
+    fn put_retire_probe(
+        manager: &AgentManager,
+        id: AgentId,
+        epoch: u32,
+        log: &CallLog,
+    ) -> Arc<Mutex<Option<u8>>> {
+        let intent = Arc::new(AtomicU8::new(TerminationIntent::None as u8));
+        let intent_at_retire = Arc::new(Mutex::new(None));
+        let core = Arc::new(OutputCore::new(
+            id,
+            epoch,
+            Arc::new(LoggingStatus(log.clone())),
+            TurnWiring::detached(),
+        ));
+        let session = Arc::new(AgentSession::new(
+            id,
+            std::path::PathBuf::from("."),
+            epoch,
+            80,
+            24,
+            intent.clone(),
+            BackendCaps {
+                session: SessionCaps {
+                    resume: false,
+                    snapshot: false,
+                    cwd_env: false,
+                },
+                model: ModelCaps {
+                    select: false,
+                    temperature: false,
+                    max_tokens: false,
+                },
+            },
+            InputEncoder::Raw,
+            true,
+            core,
+            Box::new(RetireProbe {
+                log: log.clone(),
+                intent,
+                intent_at_retire: intent_at_retire.clone(),
+            }),
+        ));
+        manager
+            .sessions
+            .write()
+            .expect("sessions poisoned")
+            .insert(id, session);
+        intent_at_retire
+    }
+
+    #[test]
+    fn a_kill_announces_retirement_before_revocation_intent_exiting_and_shutdown() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let manager = bare_manager_with_control(Arc::new(LoggingControl(log.clone())));
+        let id = AgentId::new_v4();
+        let intent_at_retire = put_retire_probe(&manager, id, 7, &log);
+
+        manager.kill_agent(id).expect("명부에 있는 세션");
+
+        assert_eq!(
+            *log.lock().expect("log poisoned"),
+            vec!["begin_retire", "revoke", "exiting", "shutdown"],
+            "물러남 예고가 권한 회수 · `Exiting` · 종료보다 먼저 오지 않는다"
+        );
+        assert_eq!(
+            *intent_at_retire.lock().expect("intent poisoned"),
+            Some(TerminationIntent::None as u8),
+            "예고 때 사용자 종료 의도가 이미 서 있다 — 예고가 의도 뒤로 밀렸다"
+        );
+    }
+
+    #[test]
+    fn a_failed_activation_teardown_announces_retirement_first_and_only_to_its_own_incarnation() {
+        let log: CallLog = Arc::new(Mutex::new(Vec::new()));
+        let manager = bare_manager_with_control(Arc::new(LoggingControl(log.clone())));
+        let id = AgentId::new_v4();
+        let _ = put_retire_probe(&manager, id, 42, &log);
+
+        manager.tear_down_failed_activation(id, 41);
+        assert!(
+            log.lock().expect("log poisoned").is_empty(),
+            "죽은 화신의 정리가 산 후임에게 물러남을 예고했다 — 그 표시는 되돌릴 수 없다"
+        );
+
+        manager.tear_down_failed_activation(id, 42);
+        assert_eq!(
+            *log.lock().expect("log poisoned"),
+            vec!["begin_retire", "revoke", "exiting", "shutdown"],
+            "자기 화신의 정리가 물러남 예고로 시작하지 않는다"
         );
     }
 

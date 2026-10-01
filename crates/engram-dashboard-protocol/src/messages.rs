@@ -51,7 +51,7 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존.
+    /// 진행 중 작업만 중단. 프로세스는 생존. 터미널 모드(PTY)는 거절한다 — 터미널이 키를 직접 받는다(ADR-0245).
     Interrupt {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -749,7 +749,23 @@ pub enum StructuredEvent {
         id: Option<String>,
         turn_id: Option<String>,
         message_id: Option<String>,
+        /// 도구의 중립 종류. ★칸이 없으면(옛 데몬) 프론트 소비자는 `Other` 로 읽는다★ — 새 데몬은 늘 싣는다.
+        // ADR-0239: `PROTOCOL_VERSION` 은 이 칸으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
+        //   옛 쪽엔 오독할 것이 없다).
+        // ts-rs 는 이 serde 속성을 못 읽어 경고("failed to parse")하고 무시한다 — TS 칸 모양은 아래
+        //   `ts(optional)` 이 정한다.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        category: Option<ToolCategory>,
     },
+    /// 도구 호출 하나의 끝 결과(agent `OutputEvent::ToolResult` 의 미러) — 앞선 `ToolCall` 을 `id` 로 가리킨다.
+    /// ★새 행이 아니다★ — 가리킬 호출이 없으면 붙일 곳이 없다.
+    ///
+    /// ★이 사건이 없다 = 성공이 아니다★ — 없음은 「모름」이다(옛 데몬 · 링에서 밀려남 · 끝이 안 옴).
+    /// ★턴 끝 **뒤에도** 온다★ — 지난 턴의 행에 붙는다. 「새 내용이 왔다」로 읽어 대기 표시를 풀지 말 것.
+    // ADR-0241: `PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
+    //   옛 셸엔 오독할 것이 없다 · 옛 데몬은 이 사건을 안 보낼 뿐이다).
+    ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         #[ts(type = "number")]
         input_tokens: u64,
@@ -909,6 +925,46 @@ pub enum TurnOutcome {
     Interrupted,
     /// 결말을 알 수 없다(모르는 값이거나 아예 없었다). 그래도 턴은 끝난 것으로 센다.
     Unknown,
+}
+
+/// 도구 호출의 중립 종류 — [`StructuredEvent::ToolCall`] 의 `category`(agent `ToolCategory` 미러). wire 에서는
+/// 문자열 하나(`"Read"` 등).
+///
+/// ★벤더 도구 이름 · item 타입은 여기 오지 않는다★(ADR-0004) — 판정은 각 backend 번역기 안에서 끝난다.
+/// ★프론트 소비자는 모르는 낱말을 `Other` 로 읽는다★ — 더 새 데몬이 변형을 더해도 화면이 선다.
+// ADR-0239
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ToolCategory {
+    Read,
+    Search,
+    List,
+    Edit,
+    Command,
+    Web,
+    Agent,
+    Mcp,
+    Other,
+}
+
+/// 도구 호출 끝 결과의 중립 결말 — [`StructuredEvent::ToolResult`] 의 `outcome`(agent `ToolOutcome` 미러). wire
+/// 에서는 문자열 하나(`"Failed"` 등).
+///
+/// - `Completed` = 정상 완료. ★지금 어느 데몬도 싣지 않는다★ — 실패 · 거부만 오고 이 낱말은 선 어휘로만 있다.
+/// - `Failed` = 돌다 실패했다.
+/// - `Declined` = 실행되지 않았다 — 우리 거절로 귀속되지 않은 거부. 이유는 모른다.
+/// - `Refused` = 대시보드가 승인 요청을 거절해 실행되지 않았다.
+///
+/// ★벤더 끝 상태 문자열은 여기 오지 않는다★(ADR-0004). ★프론트 소비자는 모르는 낱말을 표식 없음으로 읽는다★ —
+/// 더 새 데몬이 낱말을 더해도 화면이 선다.
+// ADR-0241
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ToolOutcome {
+    Completed,
+    Failed,
+    Declined,
+    Refused,
 }
 
 /// 출력 청크 — 종류 불가지(설계 §2).
@@ -1081,6 +1137,19 @@ mod tests {
                 id: Some("call_1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: Some(ToolCategory::Read),
+            },
+            StructuredEvent::ToolCall {
+                name: "x".into(),
+                args_json: "{}".into(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+                category: None,
+            },
+            StructuredEvent::ToolResult {
+                id: "call_1".into(),
+                outcome: ToolOutcome::Declined,
             },
             StructuredEvent::Usage {
                 input_tokens: 123,
@@ -1243,6 +1312,121 @@ mod tests {
                 r#"{{"type":"TurnEnd","turn_id":null,"outcome":{{"kind":"Failed","detail":"{raw}"}}}}"#
             )
         );
+    }
+
+    // ── 도구 종류(ADR-0239) ──────────────────────────────────────────────────────────
+
+    /// ★프론트가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 종류는 문자열 하나이고, 칸이 없는 옛 데몬의
+    /// 줄도 읽히며(→ `None`), `None` 은 칸 자체를 싣지 않는다.
+    // ADR-0239
+    #[test]
+    fn tool_call_category_wire_shape_is_pinned_and_absent_means_none() {
+        let with = StructuredEvent::ToolCall {
+            name: "Read".into(),
+            args_json: "{}".into(),
+            id: Some("c1".into()),
+            turn_id: None,
+            message_id: None,
+            category: Some(ToolCategory::Search),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null,"category":"Search"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<StructuredEvent>(&json).unwrap(),
+            with
+        );
+
+        let old = r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null}"#;
+        let back: StructuredEvent = serde_json::from_str(old).expect("칸 없는 옛 줄이 안 읽힌다");
+        assert_eq!(
+            back,
+            StructuredEvent::ToolCall {
+                name: "Read".into(),
+                args_json: "{}".into(),
+                id: Some("c1".into()),
+                turn_id: None,
+                message_id: None,
+                category: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            old,
+            "None 이 칸을 실었다"
+        );
+    }
+
+    /// ★아홉 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolCategory.ts` 로 이 낱말을 읽는다
+    /// (`structuredAccumulator.ts` 의 `TOOL_CATEGORIES`).
+    // ADR-0239
+    #[test]
+    fn every_tool_category_round_trips_as_its_own_name() {
+        let all = [
+            (ToolCategory::Read, "Read"),
+            (ToolCategory::Search, "Search"),
+            (ToolCategory::List, "List"),
+            (ToolCategory::Edit, "Edit"),
+            (ToolCategory::Command, "Command"),
+            (ToolCategory::Web, "Web"),
+            (ToolCategory::Agent, "Agent"),
+            (ToolCategory::Mcp, "Mcp"),
+            (ToolCategory::Other, "Other"),
+        ];
+        for (category, name) in all {
+            let json = serde_json::to_string(&category).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<ToolCategory>(&json).unwrap(),
+                category
+            );
+        }
+    }
+
+    // ── 도구 끝 결과(ADR-0241) ──────────────────────────────────────────────────────────
+
+    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 판별자 `"type"`, 결말은 문자열 하나.
+    // ADR-0241
+    #[test]
+    fn tool_result_wire_shape_is_pinned() {
+        for (outcome, want) in [
+            (
+                ToolOutcome::Failed,
+                r#"{"type":"ToolResult","id":"i-1","outcome":"Failed"}"#,
+            ),
+            (
+                ToolOutcome::Refused,
+                r#"{"type":"ToolResult","id":"i-1","outcome":"Refused"}"#,
+            ),
+        ] {
+            let ev = StructuredEvent::ToolResult {
+                id: "i-1".into(),
+                outcome,
+            };
+            let json = serde_json::to_string(&ev).unwrap();
+            assert_eq!(json, want);
+            assert_eq!(serde_json::from_str::<StructuredEvent>(&json).unwrap(), ev);
+        }
+    }
+
+    /// ★네 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolOutcome.ts` 로 이 낱말을 읽는다
+    /// (`structuredAccumulator.ts` 의 `toolResultMark`).
+    // ADR-0241
+    #[test]
+    fn every_tool_outcome_round_trips_as_its_own_name() {
+        let all = [
+            (ToolOutcome::Completed, "Completed"),
+            (ToolOutcome::Failed, "Failed"),
+            (ToolOutcome::Declined, "Declined"),
+            (ToolOutcome::Refused, "Refused"),
+        ];
+        for (outcome, name) in all {
+            let json = serde_json::to_string(&outcome).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<ToolOutcome>(&json).unwrap(), outcome);
+        }
     }
 
     // ── 대기 입력 명부 사건(ADR-0231) ────────────────────────────────────────────────

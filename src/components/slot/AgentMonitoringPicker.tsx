@@ -98,6 +98,8 @@ export default function AgentMonitoringPicker() {
     //   rgba 는 오버레이 관용 — 색조가 아니라 명도 딤이라 테마 무관). zIndex 는 SlotContextMenu(1000/1001) 위.
     <div
       data-monitoring-picker-backdrop="1"
+      // ADR-0237: 이 Esc 는 팝업을 닫는 키다 — 열린 동안 채팅 칸의 Esc 가 턴을 끊지 않게 하는 표지(`interruptKey.ts`).
+      data-engram-overlay="1"
       onClick={close}
       style={{
         position: 'fixed',

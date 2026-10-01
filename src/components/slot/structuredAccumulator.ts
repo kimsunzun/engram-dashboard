@@ -18,6 +18,8 @@
 import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
 import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
+import type { ToolCategory } from '../../../crates/engram-dashboard-protocol/bindings/ToolCategory'
+import type { ToolOutcome } from '../../../crates/engram-dashboard-protocol/bindings/ToolOutcome'
 import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bindings/TurnOutcome'
 import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queuedInputReducer'
 
@@ -27,11 +29,29 @@ import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queue
  */
 export type TurnOutcomeMark = 'failed' | 'interrupted' | 'unknown'
 
+// ADR-0239 · ADR-0241: 생성물을 여기서 다시 내보내 소비자가 이 모듈 하나에서 받게 한다.
+export type { ToolCategory, ToolOutcome }
+
+/** 도구 행의 끝 표식 — `ToolOutcome` 에서 정상 완료를 뺀 것. */
+export type ToolResultMark = 'failed' | 'declined' | 'refused'
+
 /** `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
 export type StructuredItem =
   | { kind: 'text'; text: string; itemId: number }
   // id 는 백엔드 tool-use id.
-  | { kind: 'tool'; name: string; argsJson: string; id: string | null; itemId: number }
+  | {
+      kind: 'tool'
+      name: string
+      argsJson: string
+      id: string | null
+      category: ToolCategory
+      /**
+       * 표식 없음(`null`)을 성공으로 읽지 말 것 — 정상 완료뿐 아니라 끝이 안 온 호출(끊겨 아직 돈다 · 옛 데몬 ·
+       * 링에서 밀려남)과 모르는 결말도 같은 값이다. 뒤에 온 결과가 앞 표식을 덮는다(완료 · 모르는 결말이면 지운다).
+       */
+      resultMark: ToolResultMark | null
+      itemId: number
+    }
   | { kind: 'usage'; inputTokens: number; outputTokens: number; itemId: number }
   | { kind: 'error'; message: string; itemId: number }
   // 탈출구 이벤트(codex/gemini·API 모델 누수 흡수).
@@ -39,8 +59,13 @@ export type StructuredItem =
   | { kind: 'separator'; itemId: number }
   // 턴 결말 표식 — `detail` = 실패 사유(상대가 줬을 때만). 정상 완료는 이 item 을 만들지 않는다(구분선만).
   | { kind: 'outcome'; outcome: TurnOutcomeMark; detail: string | null; itemId: number }
+  // 백엔드가 끊긴 턴에 적는 끊김 표시(오늘 내는 곳 = claude 합성 줄) — `text` = 원문 그대로. 이 항목이 든 턴은
+  //   끊김 결말 행을 그리지 않는다(ADR-0243).
+  | { kind: 'interruptNote'; text: string; itemId: number }
   // 이 셸이 모르는 이벤트가 왔다는 표식. `count` = 연속 누적분. ★원본 payload 는 싣지 않는다★(아래 default arm).
   | { kind: 'unsupported'; count: number; itemId: number }
+
+export type ToolItem = Extract<StructuredItem, { kind: 'tool' }>
 
 /**
  * 재부착 대조에 건넬 목록 조회 답 — `AgentClient.listQueuedInputs` 의 답이 그대로 맞는다.
@@ -69,6 +94,8 @@ interface QueuedReconcile {
 export class StructuredEventAccumulator {
   private items: StructuredItem[] = []
   private turnDone = false
+  // ADR-0244: 먹은 턴 경계 수 — ★reset 도 되돌리지 않는다★(호출자는 한 `feed` 앞뒤로만 견준다).
+  private turnBoundaries = 0
   // 단조 증가 item id — reset() 시 0 복귀. 같은 이벤트열을 refeed 하면 동일 id 를 재현(replay idempotence).
   private nextId = 0
   // ★user 메시지 uuid dedup(blunt-suppress → uuid dedup 교체, text 블록 한정)★: json 모드는 write_input
@@ -98,8 +125,10 @@ export class StructuredEventAccumulator {
    *
    * @param seq 이 프레임의 seq. ★재부착 대조는 이 값으로만 선다★ — 빼면 이 프레임의 목록 사건이 대조 기록에
    *   안 남고 쥔 답도 이 프레임을 배달로 세지 않는다(시험 편의로만 뺀다).
-   * @returns 이 프레임을 **이해했는가**. `false` = 파싱에 실패했거나 이 셸이 모르는 종류라, 돌아온
-   *   상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다는 뜻이다.
+   * @returns 이 프레임으로 호출자가 자기 대기 상태를 풀어도 되는가. `false` 는 둘이다 — ① 파싱에 실패했거나
+   *   이 셸이 모르는 종류라, 돌아온 상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다
+   *   ② 도구 끝 결과(`ToolResult`)다 — 앞선 도구 행의 표식이 바뀌었을 수 있지만(가리키는 행이 없거나 표식이
+   *   같으면 `snapshot` 은 그대로다) 응답이 온 것은 아니다(ADR-0241).
    *   ★호출자는 이 값을 보고 자기 대기 상태를 누산기에 넘길지 정한다★ — 프레임이 왔다는 사실만으로
    *   넘기면, 못 알아들은 프레임이 「응답이 왔다」로 둔갑해 대기 표시가 꺼진다(RichSlot 의 `awaiting`).
    */
@@ -113,18 +142,23 @@ export class StructuredEventAccumulator {
   private parseAndConsume(payload: Uint8Array | string, seq: number | undefined): boolean {
     const json = typeof payload === 'string' ? payload : new TextDecoder('utf-8').decode(payload)
     if (!json) return false
-    let ev: StructuredEvent
+    let parsed: unknown
     try {
-      ev = JSON.parse(json) as StructuredEvent
+      parsed = JSON.parse(json)
     } catch (err) {
       // 통로는 바보 파이프(무정제) — malformed JSON 은 프로토콜 수준 데이터 유실 신호이므로 경고 후 스킵.
       console.warn('[structuredAccumulator] tag1 JSON 파싱 실패 — 이벤트 스킵:', err)
       return false
     }
-    return this.consume(ev, seq)
+    // `null` 을 여기서 거르지 않으면 `consume` 의 `ev.type` 읽기가 구독 콜백까지 던진다(원시값도 사건이 아니다).
+    if (parsed === null || typeof parsed !== 'object') {
+      console.warn('[structuredAccumulator] tag1 payload 가 객체가 아니다 — 이벤트 스킵:', parsed)
+      return false
+    }
+    return this.consume(parsed as StructuredEvent, seq)
   }
 
-  /** @returns 위 `feed` 와 같은 뜻 — 아는 종류였으면 true. */
+  /** @returns 위 `feed` 와 같은 뜻. */
   private consume(ev: StructuredEvent, seq: number | undefined): boolean {
     switch (ev.type) {
       case 'TextDelta': {
@@ -146,6 +180,9 @@ export class StructuredEventAccumulator {
           name: ev.name,
           argsJson: ev.args_json,
           id: ev.id,
+          // ADR-0239: 타입은 좁아도 wire 값은 옛 데몬(칸 없음)·더 새 데몬(모르는 낱말)을 싣는다.
+          category: normalizeToolCategory(ev.category),
+          resultMark: null,
           itemId: this.nextId++,
         })
         this.turnDone = false
@@ -172,6 +209,14 @@ export class StructuredEventAccumulator {
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
         break
       case 'Structured': {
+        // ADR-0243: user 갈래(uuid dedup · `turnDone` 내리기)를 타지 않는다 — 사용자가 친 글이 아니다.
+        if (ev.kind === 'interrupted') {
+          const text = extractInterruptText(ev.json)
+          if (text !== null) {
+            this.items.push({ kind: 'interruptNote', text, itemId: this.nextId++ })
+            break
+          }
+        }
         // ★user uuid dedup(text 블록 한정)★: user 항목은 합성 입력-시점 에코와 claude replay 가
         //   **같은 uuid** 로 두 번 온다(백엔드 uuid dedup 계약). 이미 본 uuid 면 스킵해 한 개만 남긴다.
         //   단 dedup 대상은 `type==="text"` user 블록뿐이다 — 합성 에코가 만드는 블록이 text 하나뿐이라
@@ -215,12 +260,18 @@ export class StructuredEventAccumulator {
         //   하나라도 안 닫으면 그 대화의 대기 인디케이터가 영영 돈다.
         {
           const mark = outcomeMark(ev.outcome)
-          if (mark !== null) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
+          // ADR-0243: 끊김 표시 행이 이미 그 턴의 끊김을 말했으면 결말 행을 겹쳐 그리지 않는다 — 백엔드가 아니라
+          //   표시 행의 유무로 가른다(표시 행이 안 온 턴은 결말 행이 그대로 선다).
+          const alreadyNoted = mark?.outcome === 'interrupted' && this.currentTurnHasInterruptNote()
+          if (mark !== null && !alreadyNoted) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
         }
         this.closeTurn()
         break
       case 'QueuedInput':
         return this.consumeQueued(ev.op, seq)
+      case 'ToolResult':
+        // ADR-0241
+        return this.consumeToolResult(ev)
       default: {
         // ★모르는 이벤트를 조용히 삼키지 않는다★: 아무것도 안 하면 화면은 한 픽셀도 안 바뀌는데 호출자는
         //   프레임이 온 것으로 행동한다. 릴리스 WebView2 에는 devtools 가 없어 console 이 사용자에게 도달
@@ -258,6 +309,16 @@ export class StructuredEventAccumulator {
     return true
   }
 
+  /** 마지막 구분선 뒤(= 지금 턴)에 끊김 표시 행이 있나. */
+  private currentTurnHasInterruptNote(): boolean {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const kind = this.items[i].kind
+      if (kind === 'separator') return false
+      if (kind === 'interruptNote') return true
+    }
+    return false
+  }
+
   /**
    * 턴 경계 닫기 — 구분선 1개 + `turnDone`. 연속 종료는 구분선을 겹쳐 쌓지 않고, 선행 item 이 없으면
    * 구분선을 만들지 않는다(맨 앞 빈 경계 방지).
@@ -267,6 +328,28 @@ export class StructuredEventAccumulator {
       this.items.push({ kind: 'separator', itemId: this.nextId++ })
     }
     this.turnDone = true
+    this.turnBoundaries++
+  }
+
+  /**
+   * 도구 끝 결과를 같은 id 의 앞선 도구 행에 표식으로 붙인다 — 새 항목을 만들지 않는다. 가리키는 행이 없으면
+   * (링에서 밀려났다) 버린다.
+   * ★`turnDone` 을 건드리지 않고 늘 `false` 를 돌려준다 — 붙였든 못 찾았든★: 끊긴 턴의 도구는 계속 돌다 턴 끝
+   * 뒤(다음 턴 도중일 수도)에 끝난다. 이 프레임으로 대기를 풀면 새 턴의 대기 표시가 답 없이 꺼진다.
+   */
+  // ADR-0241
+  private consumeToolResult(ev: ToolResultEvent): boolean {
+    // 모양이 깨진 프레임의 `null` id 가 id 없는 도구 행에 붙지 않게 거른다.
+    if (typeof ev.id !== 'string') return false
+    const mark = toolResultMark(ev.outcome)
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i]
+      if (item.kind !== 'tool' || item.id !== ev.id) continue
+      // copy-on-write — 이전에 반환된 snapshot() 참조가 이 객체를 가리킨다(TextDelta arm 과 같은 규율).
+      if (item.resultMark !== mark) this.items[i] = { ...item, resultMark: mark }
+      return false
+    }
+    return false
   }
 
   /**
@@ -447,6 +530,15 @@ export class StructuredEventAccumulator {
     return this.turnDone
   }
 
+  /**
+   * 지금까지 먹은 턴 경계(MessageDone · TurnEnd — 결말 무관) 수. 단조이고 `reset` 도 되돌리지 않는다 — 한 `feed` 앞뒤의
+   * 차가 곧 「그 프레임이 턴 경계였다」다. ★`isTurnDone` 의 거짓 → 참으로 대신하지 말 것★ — 이미 끝을 읽던 채 받은
+   * 경계(보낸 직후 · 새 턴의 첫 프레임 전)는 그 전이가 없다.
+   */
+  turnBoundaryCount(): number {
+    return this.turnBoundaries
+  }
+
   /** 재구독(replay) 전 초기화 — 히스토리 전체가 다시 흘러 동일 상태로 재구성되게 한다(위 idempotent 불변식). */
   reset(): void {
     this.items = []
@@ -487,11 +579,72 @@ function outcomeMark(
   }
 }
 
+// ADR-0241
+type ToolResultEvent = Extract<StructuredEvent, { type: 'ToolResult' }>
+
+/**
+ * ★모르는 낱말(더 새 데몬)·깨진 모양은 표식 없음이다★ — 아는 셋 중 하나로 접으면 화면이 거짓 결말을 그린다
+ * (`outcomeMark` 와 같은 규율).
+ */
+// ADR-0241: 인자가 생성물 `ToolOutcome` 이라 낱말이 늘거나 바뀌면 `default` 의 `never` 대입에서 tsc 가 빨갛다
+//   (낱말 표류 경보). 런타임에는 더 새 데몬의 모르는 값이 그대로 `default` 로 떨어진다.
+function toolResultMark(outcome: ToolOutcome): ToolResultMark | null {
+  switch (outcome) {
+    case 'Failed':
+      return 'failed'
+    case 'Declined':
+      return 'declined'
+    case 'Refused':
+      return 'refused'
+    case 'Completed':
+      return null
+    default: {
+      const unknownWord: never = outcome
+      console.warn('[structuredAccumulator] 모르는 ToolResult outcome — 표식 없이 둔다:', unknownWord)
+      return null
+    }
+  }
+}
+
+// ADR-0239: `Record` 라 `ToolCategory` 에 낱말이 늘거나 줄면 여기서 tsc 가 빨갛다.
+const TOOL_CATEGORIES: Record<ToolCategory, true> = {
+  Read: true,
+  Search: true,
+  List: true,
+  Edit: true,
+  Command: true,
+  Web: true,
+  Agent: true,
+  Mcp: true,
+  Other: true,
+}
+
+export function normalizeToolCategory(value: unknown): ToolCategory {
+  // `in` 이 아닌 것은 `'toString'` 같은 프로토타입 이름을 종류로 받지 않으려는 것이다.
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, value)
+    ? (value as ToolCategory)
+    : 'Other'
+}
+
 function isCopyList(value: unknown): boolean {
   return (
     Array.isArray(value) &&
     value.every((copy) => copy !== null && typeof copy === 'object' && typeof copy.id === 'string')
   )
+}
+
+/** `Structured{kind:"interrupted"}` 의 `json`(`{"text": …}`)에서 원문을 뽑는다. 모양이 다르면 null(→ 탈출구 항목). */
+// ADR-0243
+function extractInterruptText(json: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (parsed === null || typeof parsed !== 'object') return null
+    const text = (parsed as Record<string, unknown>)['text']
+    // 빈 글은 그릴 것이 없는 표시 행이 되어 결말 행만 지운다 — 탈출구로 보낸다.
+    return typeof text === 'string' && text !== '' ? text : null
+  } catch {
+    return null
+  }
 }
 
 /**

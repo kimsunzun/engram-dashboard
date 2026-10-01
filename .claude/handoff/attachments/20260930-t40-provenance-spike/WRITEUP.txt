@@ -1,0 +1,167 @@
+T-40 measurement spike #2 — stall reproduction, post-kill follow-up, and process provenance (2026-09-30)
+=======================================================================================================
+
+Setup (all measured on this PC, claude_code_version = 2.1.284 in every process: main.log:16/66/118/175/220/263)
+- Harness = probe/src/main.rs, a COPY of the 2026-09-29 harness (that folder untouched), same spawn shape as the
+  dashboard: cmd.exe /c claude --permission-mode bypassPermissions -p --input-format stream-json --output-format
+  stream-json --replay-user-messages --verbose --include-partial-messages --session-id <uuid> --model haiku
+  --include-hook-events, MAX_THINKING_TOKENS=8000, piped stdio, CREATE_NO_WINDOW, spawn -> Job (KILL_ON_JOB_CLOSE)
+  -> assign; completion port associated after assign, every NEW_PROCESS opened at once and the handle held
+  (no PID reuse; dead parents stay resolvable). Launched only via scripts/run-detached.ps1; one claude at a time.
+- Protocol A (unchanged): warm turn, then per interrupt trial "say hi", interrupt at +200 ms, snapshot at Esc+3 s,
+  HANG = no result by Esc+10 s -> TRD §3-4 selector -> terminate_member -> wait result -> follow-up "say ok".
+  Changes: follow-up timeout 120 s (was 90 s); on follow-up timeout a stall capture (job members + chains,
+  pending hook ids, command_lifecycle, last 40 stream lines, one extra interrupt) would be written — never fired.
+- Protocol B (new), in processes p1–p3 after their A trials: (i) "Use the Bash tool to run exactly …
+  T40FG=1; sleep 5; echo done", (ii) "… with run_in_background set to true … T40BG=1; while true; do sleep 2;
+  done", 7 s observation, then one extra interrupt trial with the loop alive ("pNbg": report-only; on HANG it kills
+  only candidates whose claude-direct ancestor is a hook launcher). Haiku used the exact commands 3/3 + pilot.
+- Every stdout line is stamped with the wall clock at receipt; every job record (creation/exit FILETIME, ppid,
+  image, full cmdline) is dumped to pN.procs.tsv; offline scripts: analyze.py (claude-direct-child catalog +
+  descendant tallies), corr.py (hook-event <-> process correlation), timeline.py (merged B timeline), trials.py.
+- Real user hook setup (~/.claude untouched): UserPromptSubmit = 4 (orca claude-hook.cmd, wiki-preconsult.sh,
+  handoff-trigger.sh, plugin-notice.sh); PreToolUse(Bash) = 3 (python -c checker, orca, pre-build-check.sh);
+  PostToolUse = orca; Stop = orca + codex stop-review-gate (node); SessionStart = orca + codex (node) +
+  plugin-autoupdate.sh.
+- Runs: pilot (1 proc: 1 A trial + B + bg trial; pilot.log), main (6 procs: 30 A trials, B in p1–p3, 3 bg trials;
+  main.log). Cleanup each proc: stdin EOF, TerminateJobObject(our job); afterwards 0 job records alive
+  (main.log:48/98/154/200/245/284), 0 processes outside our job with T40 markers (…:50/100/156/202/247/286),
+  0 t40probe / harness claude.exe left (verified system-wide after the run).
+- Files here: main.log, pilot.log (stdout, user name redacted), trials-main.txt / trials-pilot.txt, corr.txt,
+  b-timeline-p1.txt, analyze-main.txt, evidence-0929/pilot-p1.raw.log (the 2026-09-29 pilot raw log, redacted),
+  probe/ (Cargo.toml, Cargo.lock, src/main.rs), *.py. Raw per-process logs (pN.raw.log / detail / B / procs.tsv,
+  3.6 MB) stay in the session scratchpad prov\main, prov\pilot (volatile).
+
+Per-trial table (main.log; result = ms after Esc; S3 candidates = TRD selector at Esc+3 s, {L=claude-direct ancestor})
+  label       line  kind  result  S3 candidates                              Q4 kill -> result   follow-up
+  p1t1..p1t5  21-33 1 HANG / 4 ok (351–557)
+    p1t2      23    HANG  10085   bash(wiki-preconsult) 38108 Esc+294 {hook}  Terminated -> 20 ms  success 1995 ms (:28)
+  p2t1..p2t5  71-79 1 HANG / 4 ok (321–522)
+    p2t5      79    HANG  10087   bash(wiki-preconsult) 39700 Esc+263 {hook}  Terminated -> 19 ms  success 2278 ms (:84)
+  p3t1..p3t5 123-135 1 HANG / 4 ok (342–416)
+    p3t3      127   HANG  10134   bash(wiki-preconsult) 23604 Esc+454 {hook}  Terminated -> 35 ms  success 2533 ms (:132)
+  p4t1..p4t5 180-192 1 HANG / 4 ok (459–1160)
+    p4t4      186   HANG  10142   bash(handoff-trigger) 37340 Esc+409 {hook}  Terminated -> 35 ms  success 2152 ms (:191)
+  p5t1..p5t5 225-237 1 HANG / 4 ok (341–468)
+    p5t4      231   HANG  10088   bash(wiki-preconsult) 7056 Esc+358 {hook}   Terminated -> 19 ms  success 2079 ms (:236)
+  p6t1..p6t5 268-276 0 HANG / 5 ok (413–676)
+  In every one of the 25 ok trials the S3 candidate set was EMPTY; in every HANG it was exactly the one stall holder.
+  bg trials (Bash loop alive, report-only):
+    p1bg      39    ok    445     sleep.exe 9408 Esc+2346 {BASH_TOOL bg}                       —
+    p2bg      89    ok    509     sleep.exe 20988 Esc+2038 {BASH_TOOL bg}                      —
+    p3bg      141   HANG  10527   6 cands: bg sleep.exe, handoff-trigger bash ×2, taskkill's conhost ×2, hook cat.exe
+                                  (hooks started AFTER Esc here: launchers created Esc+7/+74 ms, main.log:152)
+                                  kill handoff-trigger 32228 -> 364 ms (:145), follow-up success 3540 ms (:146)
+    pilot p1bg (pilot.log:21-26) HANG, cands wiki-preconsult 3256 + bg sleep.exe; killed hook only -> 19 ms;
+                                  follow-up success 1948 ms.
+
+A. Stall reproduction and post-kill follow-up
+- HANG rate (protocol A): 5/30 = 17 % today (main.log:290); 2026-09-29: 3/11. Combined 8/41 ≈ 20 %.
+  Plus 2 HANGs in 4 bg-loop trials (different conditions, counted separately).
+- Stall holder, 5/5 today (and 3/3 on 09-29): exactly one process alive at Esc+3 s and Esc+10 s:
+  "C:\Program Files\Git\usr\bin\bash.exe" C:/Users/<user>/.claude/plugins/cache/nmfc-origin-plugins/
+  nmfc-origin-dev-harness/2.11.0/hooks/<wiki-preconsult|handoff-trigger>.sh, depth 5–6, created Esc+263…454 ms,
+  every ancestor up to claude.exe already dead (chains in scratch main/pN.detail.log, S10 member lines).
+  Its hook's hook_response arrived only after we killed it (19–35 ms later). The MSYS "child_copy … Win32 error
+  299" stderr names the holder in 1/5 today (p1t2, pid 38108); it also appears in non-hang trials -> not a marker.
+- Follow-up after killing only the holder: answered 5/5 (1995–2533 ms, main.log:28/84/132/191/236) + 2/2 in bg
+  trials (3540 ms main.log:146; 1948 ms pilot.log:26). With 09-29 main (1916/1876 ms): 9/9 real follow-ups
+  answered, 0 hangs. Follow-up-hang rate = 0/9 (0/5 in protocol A today).
+- The 09-29 "followUp(same claude)=TIMEOUT>90000ms" (09-29 pilot.log:29-30) was a HARNESS PARSE ARTIFACT, not a
+  claude stall: evidence-0929/pilot-p1.raw.log:72 sends "say ok" at 140360.0 ms and :92 has the success result at
+  142469.8 ms (2.1 s later, "stop_reason":"end_turn", then command_lifecycle completed :93). The same file shows the
+  pilot's "warm=TIMEOUT>120000ms" had its success result at :32 (6.5 s after :8). All 4 result lines of that log:
+  success results contain a nested "type":"message" BEFORE the top-level "type":"result", error_during_execution
+  results have "type":"result" first — the pilot build classified by the first "type" occurrence, so it saw only the
+  interrupt results. The preserved 09-29 main.rs has the key-order-independent top_field (fix made between pilot and
+  main; pilot source not preserved — inference from 4/4 line shapes, high confidence). Today's harness uses
+  top_field; the stall-capture path never fired.
+
+B. Provenance — hook chain vs Bash-tool chain
+Claude-direct children seen in main (analyze-main.txt aggregate): HOOK launcher 291, taskkill.exe 202, git.exe 18,
+reg.exe 12, rg 18 (image = claude.exe, argv0 "rg"), where.exe 6, cmd.exe 6 (REG QUERY MachineGuid), BASH_TOOL 6,
+first-Bash-use helpers 9 (bash -c env / bash -lc "echo $PATH" / snapshot maker, 3 each).
+Exact command-line shapes (claude 2.1.284, Git for Windows at C:\Program Files\Git):
+  (1) hook launcher (depth 2):   "C:\Program Files\Git\bin\bash.exe" -c "<hooks.json command>"
+        e.g. -c "bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"
+             -c "C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo {}"
+             -c "node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.mjs\""
+             -c "python -c \"import sys,json,re; …\""
+      depth 3: "C:\Program Files\Git\bin\..\usr\bin\bash.exe" -c "<same string>" (+ conhost 0xffffffff -ForceV1)
+      depth 4 (.sh): "C:\Program Files\Git\usr\bin\bash.exe" C:/Users/<user>/.claude/plugins/cache/…/hooks/<x>.sh
+      depth 5+: forks with the SAME cmdline as depth 4, plus exec'd tools (cat, jq, grep, awk, tr, git, …).
+  (2) Bash tool, foreground AND run_in_background — identical shape (depth 2):
+      "C:\Program Files\Git\bin\bash.exe" -c "source /c/Users/<user>/.claude/shell-snapshots/snapshot-bash-<ms>-<rand>.sh
+       2>/dev/null || true && export TEMP='…' TMP='…' && export <plugin env, e.g. CODEX_COMPANION_SESSION_ID=…,
+       CLAUDE_PLUGIN_DATA=…> … && eval '<the command>' < /dev/null && pwd -P >| '<TMP>/claude-<4 hex>-cwd'"
+      depth 3/4 forks: "…\usr\bin\bash.exe" -c "<same string>"; exec'd leaves: "C:\Program Files\Git\usr\bin\sleep.exe" 5 / 2
+  (3) first Bash use only: "…\bin\bash.exe" -c env; "…\bin\bash.exe" -lc "echo \"$PATH\"";
+      "…\bin\bash.exe" -c -l "SNAPSHOT_FILE='C:\Users\<user>\.claude\shell-snapshots\snapshot-bash-….sh' …"
+  (4) interrupt: "C:\WINDOWS\System32\taskkill.exe /PID <hook launcher pid> /T /F", one per running hook launcher,
+      two rounds (~1–15 ms and ~1.5 s after the interrupt; the 2nd round hits already-dead pids: 105/200).
+Verdict:
+- At the claude-direct-child layer the two are separable by command line: 291 hook launchers vs 6 Bash-tool
+  launchers, 0 ambiguous (shape (1) never starts with `source …shell-snapshots…`; shape (2) always does).
+  Confidence high for this version/install; it rests on undocumented claude internals (the `bash ` prefix, the
+  snapshot wrapper, Git-bash launcher) -> re-verify per claude version.
+- Below the launcher, only MSYS FORK children carry the marker (cmdline copied from the parent): bash.exe under
+  hook launchers 1820/1820 carried the hook command / script path; bash.exe under Bash-tool launchers 43/43 carried
+  the shell-snapshots line. Exec'd programs carry only their own argv: no marker for sleep/cat/jq/grep/git/conhost
+  (node/cmd show the hook script path only because it is their argument).
+- All observed stall holders (5 today + 3 on 09-29 + 2 bg-trial hangs) are bash.exe whose own cmdline is
+  `usr\bin\bash.exe <…/hooks/<name>.sh>` — self-identifying as hook even with every ancestor dead.
+- "Parent is dead" is NOT a separator: exec'd children normally outlive their Windows parent under MSYS
+  (bg-loop sleep.exe 31/31, hook-tree cat/tr/grep ~all; analyze-main.txt last block).
+- foreground vs background Bash: not separable by process; only by stream events (below). A background loop
+  survives interrupts (claude never taskkilled a Bash-tool launcher on interrupt; it did so on stdin EOF, 2/3) and
+  keeps creating post-Esc children, so the TRD §3-4 selector picked a bg-loop sleep.exe in 3/3 bg trials (+pilot).
+- Caveats: a Bash-tool command that itself launches a script (e.g. `bash foo/hooks/x.sh`) produces exec'd bash
+  descendants WITHOUT the snapshot marker (not measured, follows from the fork/exec rule); hook commands that are not
+  bash (node/cmd/python) produce descendants with no marker; the Store-alias python of the PreToolUse hook never
+  appeared as a job record (0 in 12 runs, although the hook answered) — where it ran was not measured.
+Stream-event correlation:
+- hook_started carries only type/subtype, hook_id, hook_name (e.g. "UserPromptSubmit", "PreToolUse:Bash"),
+  hook_event, uuid, session_id. hook_response adds output, stdout, stderr, exit_code, outcome
+  (success/cancelled). No pid, no command, no script path in either.
+- Timing (corr.txt): UserPromptSubmit/PreToolUse/PostToolUse/Stop launchers spawn 0.9–124 ms (median 6.9 ms, n=264)
+  after the hook_started line is received; a batch's hook_started lines are ~0.1 ms apart, so timing identifies the
+  batch, not the member. Spawn order = hook_started order = config order in 143/144 unambiguous cases (ordinal
+  heuristic only). SessionStart hook_started lines arrive ~0.4 s AFTER their launchers spawned (6/6 processes).
+- hook_response arrives ~2.6 ms (median; 1.5 ms min) after the hook's process tree releases its pipe — normally the
+  launcher's exit, but in a stall only after the orphan dies (max 9775 ms). So "hook_started without hook_response
+  N s after Esc" names the stalled hook_id/hook_name, but no event maps it to a pid.
+- Bash tool: assistant tool_use {name:"Bash", input:{command, description, run_in_background:true}} (key absent in
+  fg); tool_use -> launcher spawn = 2.26–2.34 s fg (first use: PreToolUse hooks + env/PATH probe + snapshot maker)
+  and 0.33–0.36 s bg. system/task_started {task_id, tool_use_id, description, is_backgrounded, task_type:"local_bash"}
+  arrives 3–4 ms after the bg launcher spawn (is_backgrounded:true) but 3.0 s after the fg spawn (is_backgrounded:
+  false; 3/3 + pilot — apparently emitted only once a fg command runs ~3 s). fg ends with task_notification
+  {status:"completed"} ~5 ms after launcher exit. bg tool_result: "Command running in background with ID:
+  <task_id>. Output is being written to: …\tasks\<task_id>.output …". No pid anywhere (b-timeline-p1.txt:20/39/40/47,
+  :79/92/93/98).
+- The only process-level link claude itself exposes is the taskkill /PID <launcher> command line at interrupt; the
+  holder is by construction NOT in that tree when taskkill enumerates it (it is born during the kill, Esc+263…454 ms,
+  while the first-round taskkills run ~250–420 ms), so linking it needs ancestry recorded before its parents die
+  (our port + held handles did that; a snapshot-only walk after Esc cannot — its ppid points at a dead process).
+
+C. How the UserPromptSubmit hooks are run
+- Via `bash <path>`, not via the shebang. hooks.json has the bare path (`${CLAUDE_PLUGIN_ROOT}/hooks/
+  wiki-preconsult.sh`; the scripts start with `#!/usr/bin/env bash`), but claude 2.1.284 spawns
+  `"C:\Program Files\Git\bin\bash.exe" -c "bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"` (same for
+  handoff-trigger, plugin-notice, plugin-autoupdate, pre-build-check), and the script runs as
+  `"C:\Program Files\Git\usr\bin\bash.exe" C:/Users/<user>/.claude/plugins/cache/…/hooks/wiki-preconsult.sh`.
+  No env.exe appears in any of the 291 hook-launcher subtrees (env.exe only under claude's own `bash -c env`).
+  Non-.sh commands are passed verbatim (orca `….cmd || echo {}` -> cmd.exe /c …; `node "…mjs"`; `python -c …`).
+
+Not measured
+- Interrupt while a (foreground) Bash tool command is running; stdio MCP servers; hooks from --settings/project
+  settings; other claude versions / other Git-bash locations; the natural ~300 s resolution (we kill at Esc+10 s);
+  where the Store-alias python.exe runs; the dashboard binary itself (harness mirrors its spawn).
+- Side observation, not investigated: claude did not exit within 5 s of stdin EOF in p3 (bg loop alive) and also
+  in p4–p6 (no Bash tool used); p1/p2 exited with code 1 (main.log:47/97/153/199/244/283). TerminateJobObject
+  reaped everything in all cases.
+
+How to rerun
+  cargo build --release --offline --target-dir <scratch>\prov\target   (in probe\, via run-detached)
+  t40probe.exe --out <dir> --cwd <dir> --procs 10 --per 5 --q4 --b 3 --max-trials 30 [--stop-after-hangs H]
+               [--fu-timeout 120000] [--cap-min 75]
+  python analyze.py <dir> | corr.py <dir> | timeline.py <dir> p1 B-fg | trials.py main.log

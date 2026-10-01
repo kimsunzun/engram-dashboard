@@ -125,6 +125,17 @@ pub trait AgentTransport: Send + Sync {
     /// ≠kill. 진행 중 작업만 중단 — 프로세스는 살아 있다.
     fn interrupt(&self) -> Result<(), PtyError>;
 
+    /// 이 통로가 곧 물러난다는 예고 — manager 가 이 화신을 끝내기로 정한 첫 걸음에서(권한 회수 · `Exiting` ·
+    /// [`Self::shutdown`] 보다 먼저) 아무 락 없이 부른다. 뒤에서 도는 일을 가진 통로는 이것을 보고 그 일을 멈출 수 있다.
+    /// ★자원은 거두지 않는다 — 그것은 [`Self::shutdown`] 몫이고 kill 인과(ADR-0001)는 그대로다★. 막히지 않아야 하고
+    ///   (kill 경로가 그 뒤에 선다) 여러 번 불려도 같아야 한다.
+    /// ★밖에서 관측될 결말(상태 전이 · 연결 결말 배달 · 입력 거절)을 여기서 내지 않는다★ — 이 예고는 사용자 종료 의도
+    ///   ([`crate::session::AgentSession::termination_intent`])가 서기 **전**에 온다. 결말이 의도보다 먼저 보이면
+    ///   활성화 판정이 사용자의 취소를 실패로 읽는다.
+    /// ★모든 끝내기 길이 이것을 먼저 부르지는 않는다★ — 물러남을 알아야 하는 통로는 [`Self::shutdown`] 에서도 같은
+    ///   것을 세운다. 기본 구현 = 무동작.
+    fn begin_retire(&self) {}
+
     /// 자원 강제 종료(멱등). pump 종료 대기는 여기서 안 함(core.join_pump 몫).
     fn shutdown(&self);
 

@@ -43,6 +43,7 @@ export const ko = {
     domModeDisable: 'DOM 모드 끄기',
     domModeToggle: 'DOM 모드 전환',
     renderFailed: '이 슬롯을 표시하지 못했습니다 — 우클릭 메뉴로 비우거나 닫을 수 있습니다',
+    scrollToBottom: '맨 아래로',
   },
   window: {
     create: '새 창',
@@ -114,6 +115,7 @@ export const ko = {
     reparentFailed: '이동 실패: {err}', // ADR-0072 트리 계층 — 드래그 재부모화.
     rename: '에이전트 이름 변경', // §5 LLM 제어 — RenameProfile.
     cancelQueuedInput: '대기 입력을 목록에서 빼기', // ADR-0231 — 목록 ✕ 와 같은 command.
+    interrupt: '응답 중단',
   },
   preset: {
     create: '프리셋 생성',
@@ -192,7 +194,7 @@ export const ko = {
     showVendor: '{vendor} 표시', // `usageSlot.toggle*` 제목.
   },
   /**
-   * 구조화(챗) 슬롯 렌더 문자열.
+   * 구조화(챗) 슬롯 문자열 — 렌더 문구와 그 슬롯의 command 제목.
    *
    * ★프로토콜 낱말을 여기 적지 않는다★ — 이벤트 이름·백엔드 상태 문자열·JSON 은 화면에 올리지 않는다
    *   (`docs/process/S21-codex-backend/trd-phase2a.md` §6-2). 값은 사용자가 읽을 사실만 적는다.
@@ -203,6 +205,8 @@ export const ko = {
     turnFailed: '응답이 실패로 끝났습니다',
     turnInterrupted: '응답이 중단됐습니다',
     turnUnknown: '응답이 끝났습니다 — 끝난 이유는 알 수 없습니다',
+    // ADR-0244: 끊기를 보냈고 턴 끝을 기다린다 — 멈췄다는 뜻이 아니다(멈춤은 위 turnInterrupted 가 말한다).
+    interrupting: '중단하는 중…',
     // 이 셸이 모르는 이벤트가 도착했을 때. 방향이 한쪽뿐이라 원인을 단정할 수 있다 — 모르는 어휘는
     //   데몬에서 오므로 뒤처진 쪽은 언제나 셸이다.
     unsupportedEvent: '표시할 수 없는 신호 {count}건 — 앱이 데몬보다 오래된 버전일 수 있습니다',
@@ -211,6 +215,28 @@ export const ko = {
     queuedRemove: '목록에서 빼기',
     queuedMore: '외 {count}개',
     queuedListLabel: '보내기 대기 중인 입력', // 화면 밖 이름(aria-label) — 목록엔 머리줄이 없다.
+    toolGroupSetExpanded: '도구 묶음 펼치기·접기',
+    toolGroupSearch: '검색 {count}',
+    toolGroupRead: '읽기 {count}',
+    toolGroupList: '목록 {count}',
+    toolGroupEdit: '편집 {count}',
+    toolGroupCommand: '명령 {count}',
+    toolGroupWeb: '웹 {count}',
+    toolGroupAgent: '에이전트 {count}',
+    toolGroupMcp: 'MCP {count}',
+    toolGroupOther: '기타 {count}',
+    toolGroupErrors: '오류 {count}',
+    // ADR-0241: 거부는 오류 키에 합치지 않고 따로 둔다 — 실행되지 않은 호출과 실패한 호출은 다른 사실이다.
+    toolGroupDeclined: '거부 {count}',
+    // ADR-0263: 도는 묶음 머리의 진행형 — 끝나면 빠지고 종류별 수만 남는 것이 과거형이다.
+    toolGroupRunning: '진행 중…',
+    toolDeclined: '거부됨', // 배지 — 두 결말(Refused · Declined)이 같이 쓴다.
+    // ADR-0241: 사유는 결말별로 갈린다. Refused = 대시보드가 거절했다고 귀속된 호출 · Declined = 우리에게
+    //   귀속되지 않은 거부(백엔드 스스로의 거부, 또는 복원되거나 밀려난 파일 변경 거절). Declined 문구에 백엔드
+    //   이름을 넣지 않는다 — 프론트 문자열은 백엔드 중립이다(ADR-0004). T-43 이 claude 결과를 이 결말로 내게
+    //   되면 그 결과도 이 문구를 쓴다.
+    toolRefusedReason: '대시보드가 승인 요청을 처리하지 않아 실행되지 않음',
+    toolDeclinedReason: '실행되지 않음',
   },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {
