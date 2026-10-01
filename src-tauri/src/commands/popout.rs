@@ -24,7 +24,8 @@ use crate::daemon_client::DaemonClient;
 use crate::layout::{apply, LabelSource, LayoutState, SlotMove, WindowHost, MAIN_WINDOW_LABEL};
 use crate::output_router::OutputRouter;
 
-// 팝업/런타임 창 label prefix. capabilities/popup.json 의 `"slot-popup-*"` glob 과 짝(변경 시 양쪽 동기).
+// 팝업/런타임 창 label prefix. capabilities/popup.json·usage-links.json 의 `"slot-popup-*"` glob 과 짝(변경 시
+// 함께 동기).
 // ★의미 확장(ADR-0057/G8)★: "팝업" → "런타임 창"(create_window 포함). prefix 값은 불변(Destroyed 정리
 // 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
 const POPUP_LABEL_PREFIX: &str = "slot-popup-";
@@ -183,26 +184,10 @@ pub fn cleanup_popup_window(
         return;
     }
 
-    // 1) 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 — ★전부 같은 락 안★.
-    //   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
-    //   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
-    //   그 agent 를 재추가하면 stale 1→0 unsubscribe 가 방금 형성된 라이브 구독을 죽인다
-    //   (`output_router::rebuild` 의 호출 계약 위반 — 정본은 그 함수 주석이고 ★ADR-0006 에 「델타 enqueue
-    //   는 락 안」 조항은 없다★). 이제 적용 서비스(`SubscriptionSync::resync`)·move_slot_to_window 와
-    //   일관되게 발화도 락 안이다(unsubscribe 는 동기 try_send — await/network 0, lifecycle 락 독립 →
-    //   데드락 없음).
-    {
-        let Ok(mut mgr) = state.0.lock() else {
-            tracing::warn!(label, "cleanup_popup_window: lock poisoned — 정리 스킵");
-            return;
-        };
-        // 창이 이미 모델에서 지워졌으면 rebuild 만.
-        let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
-        // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1).
-        for a in delta.to_unsubscribe {
-            client.unsubscribe(a);
-        }
-    } // ← 락 드롭
+    // 1) 모델 정리 — ViewManager 락 한 번 안(아래 함수).
+    if !drop_window_in_model(label, state, router, client) {
+        return;
+    }
 
     // 2) 출력 Channel registry 에서 이 label 제거(누수 방지 — 죽은 webview Channel 이 남지 않게). Tauri
     //   부분이라 별도 락(ViewManager 무관) — 코어(모델·라우팅) 밖이라 락 밖 유지 OK(F1).
@@ -211,6 +196,39 @@ pub fn cleanup_popup_window(
     crate::output_channel::unregister_window(registry, label);
 
     tracing::info!(label, "런타임 창 정리 완료(탭 전부 드롭·구독·Channel)");
+}
+
+// 창 소멸 정리의 모델 몫 — 창의 모든 탭 View 드롭 + windows 엔트리 제거 + 라우팅 표 재계산 + 구독 정리 발화 +
+// 사용량 관심 재계산, ★전부 같은 락 안★. `false` = 락 오염(정리 스킵). 창(`AppHandle`) 없이 서므로 셸 단위
+// 시험이 이것을 직접 부른다.
+//   ★F1 REAL 동시성 버그 수정★: 옛 코드는 델타(cleanup_window_core rebuild)를 락 안에서 계산하고
+//   `to_unsubscribe` 발화를 락 드롭 뒤에 했다 → 계산~발화 사이 다른 command(assign_agent/spawn/move)가
+//   그 agent 를 재추가하면 stale 1→0 unsubscribe 가 방금 형성된 라이브 구독을 죽인다
+//   (`output_router::rebuild` 의 호출 계약 위반 — 정본은 그 함수 주석이고 ★ADR-0006 에 「델타 enqueue
+//   는 락 안」 조항은 없다★). 이제 적용 서비스(`SubscriptionSync::resync`)·move_slot_to_window 와
+//   일관되게 발화도 락 안이다(unsubscribe 는 동기 try_send — await/network 0, lifecycle 락 독립 →
+//   데드락 없음).
+pub(crate) fn drop_window_in_model(
+    label: &str,
+    state: &LayoutState,
+    router: &OutputRouter,
+    client: &DaemonClient,
+) -> bool {
+    let Ok(mut mgr) = state.0.lock() else {
+        tracing::warn!(label, "cleanup_popup_window: lock poisoned — 정리 스킵");
+        return false;
+    };
+    // 창이 이미 모델에서 지워졌으면 rebuild 만.
+    let delta = crate::output_router::cleanup_window_core(&mut mgr, router, label);
+    // 이 창이 마지막이던 agent 는 1→0 → Unsubscribe(락 안 발화 — F1).
+    for a in delta.to_unsubscribe {
+        client.unsubscribe(a);
+    }
+    // ★모델이 이 창을 쥐고 있었는지로 가르지 않는다(TRD S21 usage-limit-slot §1-7 「창 소멸」)★ — 숨김 표시는
+    //   모델과 따로 선다: 새 창으로 슬롯 옮기기는 OS 창을 먼저 열고 모델 창을 나중에 더하므로, 그 틈에 숨겨졌다
+    //   닫힌 창은 모델에 없어도 표시가 남는다. label 은 다시 쓰이지 않아(`PopupCounter`) 여기서 안 지우면 샌다.
+    client.usage_window_destroyed(label, &mgr);
+    true
 }
 
 // ── 테스트: label 발급·prefix 판정(창 생성 자체는 running app 필요라 GUI 검증) ──────────

@@ -21,7 +21,7 @@ T-40 (claude hook-interrupt ~300 s stall) is implemented, reviewed, QA'd, measur
    - The user said they'd check how Claude Code itself behaves; ask them for that observation if it decides a fork (e.g. group from the 1st or 2nd tool; spinner inside the list or pinned below).
    - An investigation subagent was started and then cancelled by the user — no findings exist; start fresh.
    - Process: these are user-visible behaviour changes on an approved feature → `/implement "<fix>" standard` (frontend; coder worker-senior), `/review code full`, `/qa full` (GUI). Keep it lean per the user's simplification decision.
-2. Ask the user to re-test, then ask for **master merge** (CLAUDE.md 「브랜치·커밋」: merge-tree → commit-tree (master first parent) → update-ref with old SHA; `--no-ff` semantics; merge body lists contents). After merge: re-run `/adr index --write` (README index will conflict with master's 0258–0261 rows) and renumber tracking T-36..T-39 collisions (master has different T-36..T-39; T-40/T-41 don't collide).
+2. Ask the user to re-test, then ask for **master merge** (CLAUDE.md 「브랜치·커밋」: merge-tree → commit-tree (master first parent) → update-ref with old SHA; `--no-ff` semantics; merge body lists contents). After merge: re-run `/adr index --write` (README index will conflict with master's 0258–0261 rows) and renumber tracking T-42..T-45 collisions (master has different T-42..T-45; T-40/T-41 don't collide).
 
 ## What landed this session (all on `v0.3.3/feat/chat-ux`, pushed)
 

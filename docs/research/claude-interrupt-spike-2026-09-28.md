@@ -96,7 +96,7 @@ t(ms)      픽스처  줄
 ```
 
 - **Bash 도구는 멈췄고 프로세스는 죽었다(확실).** 마지막 틱 `tick 6 1790523600`(= 15:40:00 UTC)은 끊은 그 초(`tool_result` 의 `timestamp` = 15:40:00.311Z)다. 대화형 Claude Code 의 Esc 와 같다(TRD §9 대조).
-- **`tool_result`:** `is_error:true` · `content` 는 **문자열**. 대화형 CLI 기록의 본문과 같은 문장이다. 줄 수준에 `tool_use_result:"User rejected tool use"` · `tool_result_meta[].non_execution_kind:"user-rejected"` 가 함께 온다(구조화된 표지 — T-37 에 쓸 만하다. 이번 표시 규칙(TRD §11 ⑪)은 여기에 기대지 않는다).
+- **`tool_result`:** `is_error:true` · `content` 는 **문자열**. 대화형 CLI 기록의 본문과 같은 문장이다. 줄 수준에 `tool_use_result:"User rejected tool use"` · `tool_result_meta[].non_execution_kind:"user-rejected"` 가 함께 온다(구조화된 표지 — T-43 에 쓸 만하다. 이번 표시 규칙(TRD §11 ⑪)은 여기에 기대지 않는다).
 - **판정: 통과** — 끊은 뒤 33 ms 에 `result`.
 
 ### 2-3. 뒤 턴 (픽스처 189–202)

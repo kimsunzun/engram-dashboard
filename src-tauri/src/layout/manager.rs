@@ -425,6 +425,8 @@ impl ViewManager {
     //    클램프한다(거절하지 않는다). 그 범위가 비면 지금 값 그대로 `TooSmall`. 화면 드래그의 쌍둥이
     //    `src/components/layout/splitPreview.ts` 의 `ratioRange` 가 같은 식·같은 입력(보고한 정수 캔버스 ×
     //    스냅샷 상자)으로 범위를 구한다 — 한쪽만 바꾸면 확정값이 여기서 다시 잘려 뗄 때 튄다(TRD §2c/§2f).
+    //    둘 중 하나라도 모르면(보고 전·팝아웃 직후) ③ 만 걸려 `min_pane_px` 보다 얇은 칸이 나올 수 있다 —
+    //    ③ 의 한계를 작게 둔 대가로 받아들였다(ADR-0260).
     // ⑤ 그 값을 쓰면 **새로** 면적 0 이 되는 칸이 있으면 `TooSmall` — 조상 비율이 깊은 자손을 무너뜨리는
     //    경로를 막는다. 쓰기 전부터 면적 0 이던 칸(쓰기 경로로는 안 생긴다)은 비교에서 뺀다 — 안 빼면 그런
     //    칸 하나가 이 뷰의 모든 비율 쓰기를 잠근다.
@@ -563,7 +565,7 @@ impl ViewManager {
     }
 
     // view 안 slot_id 슬롯의 콘텐츠를 `content`(SlotContent 제네릭)로 교체한다(ADR-0063 배치 제어 표면).
-    // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette)를
+    // assign_agent 의 미러이나 에이전트 전용이 아니라 유니온 전체(Empty/Agent/AgentList/PresetPalette/Usage)를
     // 받는다 — 트리(에이전트)·팔레트를 슬롯에 배치하는 §5 LLM/사람 공용 경로. ★덮어쓰기 시맨틱(assign 과
     // 동형)★: 점유 슬롯도 무조건 교체(점유 방어는 없음 — 배치 command 는 명시적 교체 의도).
     pub fn set_slot_content(
@@ -793,10 +795,11 @@ pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, Spawn
     match slot {
         Some(target) => match tree::find_slot(&view.layout, target) {
             Some(SlotContent::Empty) => Ok(target),
-            // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
+            // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette/Usage)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
             Some(SlotContent::Agent { .. })
             | Some(SlotContent::AgentList)
-            | Some(SlotContent::PresetPalette) => Err(SpawnSlotError::SlotOccupied(target)),
+            | Some(SlotContent::PresetPalette)
+            | Some(SlotContent::Usage { .. }) => Err(SpawnSlotError::SlotOccupied(target)),
             None => Err(SpawnSlotError::SlotNotFound(target)),
         },
         None => tree::first_empty_slot_id(&view.layout).ok_or(SpawnSlotError::NoEmptySlot),
@@ -1762,6 +1765,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_some_usage_slot_is_occupied() {
+        let mut mgr = ViewManager::new();
+        let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        let root = first_slot_of(&mgr, v);
+        mgr.set_slot_content(
+            v,
+            root,
+            SlotContent::Usage {
+                show_claude: false,
+                show_codex: false,
+            },
+        )
+        .unwrap();
+        let view = mgr.views.get(&v).unwrap();
+        assert_eq!(
+            resolve_spawn_slot(view, Some(root)),
+            Err(SpawnSlotError::SlotOccupied(root))
+        );
+        assert_eq!(
+            resolve_spawn_slot(view, None),
+            Err(SpawnSlotError::NoEmptySlot)
+        );
+    }
+
+    #[test]
     fn resolve_some_missing_slot_errors() {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
@@ -2269,7 +2297,7 @@ mod tests {
             &mut mgr,
             v,
             split,
-            0.05,
+            0.005,
             SplitRatioResult {
                 ratio: tree::RATIO_MIN,
                 outcome: SplitRatioOutcome::Unchanged,
@@ -2338,11 +2366,9 @@ mod tests {
             Ok(applied(0.4)),
             "범위 안은 그대로"
         );
-        // 바깥: L = 1000 → m/L = 0.1 이라 비율 한계가 이긴다.
-        assert_eq!(
-            mgr.set_split_ratio(v, outer, 0.05),
-            Ok(applied(tree::RATIO_MIN))
-        );
+        // 바깥: L = 1000 → m/L = 0.1 이 비율 한계보다 커서 px 가 이긴다.
+        assert_eq!(mgr.set_split_ratio(v, outer, 0.05), Ok(applied(0.1)));
+        assert_eq!(mgr.set_split_ratio(v, outer, 0.99), Ok(applied(0.9)));
 
         // 위아래 분할은 캔버스 높이로 잰다: L = 400 → 허용 [0.25, 0.75].
         let (mut tb, tv, split) = one_split(SplitDir::TopBottom);
@@ -2351,6 +2377,54 @@ mod tests {
             .unwrap();
         assert_eq!(tb.set_split_ratio(tv, split, 0.1), Ok(applied(0.25)));
         assert_eq!(tb.set_split_ratio(tv, split, 0.9), Ok(applied(0.75)));
+    }
+
+    // ADR-0260
+    #[test]
+    fn at_the_screen_minimum_either_pane_of_a_top_bottom_split_stops_at_30px() {
+        // 화면 최소 칸 = 30px(프론트 `MIN_PANE_PX`). 위 칸의 벽은 하한, 아래 칸의 벽은 상한이다.
+        let (mut mgr, v, split) = one_split(SplitDir::TopBottom);
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 800, 1000).unwrap();
+        mgr.set_ui_metrics(MAIN_WINDOW_LABEL, metrics(1.0, 1.0, 1.0, 1.0, 30))
+            .unwrap();
+        let row = mgr
+            .list_splits(v)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("분할 하나");
+        let (top, bottom) = (row.a_slots[0], row.b_slots[0]);
+        let height = |mgr: &ViewManager, slot| {
+            let f = mgr.slot_px(v, slot).unwrap().unwrap().frame;
+            f.y1 - f.y0
+        };
+
+        // L = 1000 → 허용 [0.03, 0.97].
+        assert_eq!(mgr.set_split_ratio(v, split, 0.01), Ok(applied(0.03)));
+        assert_eq!(height(&mgr, top), 30);
+        assert_untouched(
+            &mut mgr,
+            v,
+            split,
+            0.0,
+            SplitRatioResult {
+                ratio: 0.03,
+                outcome: SplitRatioOutcome::Unchanged,
+            },
+        );
+        assert_eq!(mgr.set_split_ratio(v, split, 0.99), Ok(applied(0.97)));
+        assert_eq!(height(&mgr, bottom), 30);
+
+        // L 이 3000px 를 넘으면 30/L 이 비율 한계보다 작아 비율 한계가 이긴다(L = 5000 → 0.006).
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 800, 5000).unwrap();
+        assert_eq!(
+            mgr.set_split_ratio(v, split, 0.0),
+            Ok(applied(tree::RATIO_MIN))
+        );
+        assert_eq!(
+            mgr.set_split_ratio(v, split, 1.0),
+            Ok(applied(tree::RATIO_MAX))
+        );
     }
 
     #[test]
@@ -2378,6 +2452,10 @@ mod tests {
             .set_window_canvas(MAIN_WINDOW_LABEL, 500, 500)
             .unwrap();
         assert_eq!(only_canvas.set_split_ratio(v1, s1, 0.1), Ok(applied(0.1)));
+        assert_eq!(
+            only_canvas.set_split_ratio(v1, s1, 0.0),
+            Ok(applied(tree::RATIO_MIN))
+        );
 
         let (mut only_metrics, v2, s2) = one_split(SplitDir::LeftRight);
         only_metrics
@@ -2385,11 +2463,12 @@ mod tests {
             .unwrap();
         assert_eq!(only_metrics.set_split_ratio(v2, s2, 0.1), Ok(applied(0.1)));
         assert_eq!(
-            only_metrics.set_split_ratio(v2, s2, 0.01),
-            Ok(SplitRatioResult {
-                ratio: tree::RATIO_MIN,
-                outcome: SplitRatioOutcome::Unchanged,
-            })
+            only_metrics.set_split_ratio(v2, s2, 0.001),
+            Ok(applied(tree::RATIO_MIN))
+        );
+        assert_eq!(
+            only_metrics.set_split_ratio(v2, s2, 0.999),
+            Ok(applied(tree::RATIO_MAX))
         );
     }
 
@@ -2503,20 +2582,26 @@ mod tests {
             target = new;
         }
         let root = split_ids(&mgr, v)[0];
-        // 루트를 0.9 로 두면 사슬 전체가 폭 0.1 에서 시작해 맨 끝 칸들이 폭 0 이 된다.
-        assert_untouched(
-            &mut mgr,
-            v,
-            root,
-            0.9,
-            SplitRatioResult {
-                ratio: tree::SPLIT_RATIO,
-                outcome: SplitRatioOutcome::TooSmall,
-            },
-        );
+        // 루트를 0.9 로 두면 사슬 전체가 폭 0.1 에서 시작해 맨 끝 칸들이 폭 0 이 된다. 한계 끝은 더 좁다.
+        for asked in [0.9, tree::RATIO_MAX] {
+            assert_untouched(
+                &mut mgr,
+                v,
+                root,
+                asked,
+                SplitRatioResult {
+                    ratio: tree::SPLIT_RATIO,
+                    outcome: SplitRatioOutcome::TooSmall,
+                },
+            );
+        }
         assert_every_leaf_has_area(&mgr, v);
-        // 대조: 사슬이 더 넓어지는 쪽(0.1)은 아무 칸도 안 무너뜨려 적용된다 — 거름이 일괄 거절이 아니다.
+        // 대조: 사슬이 더 넓어지는 쪽은 아무 칸도 안 무너뜨려 적용된다 — 거름이 일괄 거절이 아니다.
         assert_eq!(mgr.set_split_ratio(v, root, 0.1), Ok(applied(0.1)));
+        assert_eq!(
+            mgr.set_split_ratio(v, root, tree::RATIO_MIN),
+            Ok(applied(tree::RATIO_MIN))
+        );
         assert_every_leaf_has_area(&mgr, v);
     }
 

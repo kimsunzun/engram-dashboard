@@ -386,6 +386,16 @@ impl OutputCore {
         }
     }
 
+    /// 디코더가 내준 사용량 관측을 상태 sink 로 넘긴다 — 출력 pump 가 디코더의 `take_usage` 결과를 그대로
+    /// 건넨다([`crate::transport::OutputDecoder::take_usage`]).
+    /// ★링·seq·구독자·턴 관측을 건드리지 않는다★ — 사용량은 이 화신의 출력이 아니라 계정 단위 상태다.
+    /// ★락을 하나도 쥐지 않고 부른다★ — sink 계약(논블록·비재진입)을 믿는 쪽이 여기다.
+    pub(crate) fn report_usage(&self, observations: Vec<crate::usage::UsageObservation>) {
+        for obs in observations {
+            self.status_sink.usage_observed(obs);
+        }
+    }
+
     fn emit_inner(&self, event: OutputEvent, observe_turn: bool) {
         let event = match event {
             OutputEvent::QueuedInput(op) => return self.emit_list_event(op, observe_turn),

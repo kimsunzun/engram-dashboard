@@ -7,6 +7,7 @@
 // 인터페이스는 "디코드된 바이트 청크"만 노출(§3-a 손발/두뇌 분리: 프론트=순수 I/O).
 
 import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 import type {
   AgentBackendKind,
   AgentInfo,
@@ -40,6 +41,18 @@ export interface QueuedInputListing {
 export const INPUT_LOCKED_REFUSAL = 'input locked by another viewer; acquire first'
 
 export type ConnectionState = 'connected' | 'reconnecting' | 'down'
+
+/**
+ * 셸 사용량 캐시 한 벌(TRD S21 usage-limit-slot §1-8) — 셸이 지금 소켓에서 받은 회사별 최고 revision 한 장씩,
+ * 받은 뒤 흐른 만큼 상대 시간 칸을 옮긴 것.
+ * `socketEpoch` = 그 소켓의 표식(ADR-0195 — 셸 프로세스 안에서 되감기지 않아 대소가 곧 소켓 순서다). ★`0` = 셸에
+ * 소켓이 없다★ — 그때 `snapshots` 는 비고, 받는 쪽은 들고 있는 표식을 바꾸지 않는다. 화신 표식(ADR-0163)과 달리
+ * 대소 비교가 성립한다.
+ */
+export interface UsageSnapshotPull {
+  socketEpoch: number
+  snapshots: UsageLimitSnapshot[]
+}
 
 /** 디코드된 출력 청크 — transport 무관(base64/binary frame 은 클라 내부에서 이미 풀림). */
 export interface OutputChunk {
@@ -219,6 +232,25 @@ export interface AgentClient {
    * broadcast 하면 store 미러를 갱신한다(AgentEvent::PresetListUpdated 라우팅).
    */
   onPresetListUpdated(cb: (presets: Preset[]) => void): () => void
+  /**
+   * 사용량 스냅숏 방송(TRD S21 usage-limit-slot §1-8). 셸이 이 창을 대상으로 고른 것만 온다. `socketEpoch` =
+   * [`UsageSnapshotPull`] 의 그것 — 셸을 거치지 않는 직결 carrier 의 데몬 프레임에는 표식이 없어 `0` 으로 온다.
+   * 같은 회사의 옛 사본이 늦게 올 수 있다(pull 과 서로 순서를 보장하지 않는다) — 가르는 것은 받는 쪽이다.
+   */
+  onUsageLimitsUpdated(cb: (snapshot: UsageLimitSnapshot, socketEpoch: number) => void): () => void
+
+  // ── 사용량 ────────────────────────────────────────────────────────────────
+  /**
+   * ⟳ — 그 회사의 사용량을 지금 다시 조회하게 한다. resolve = 데몬이 받았다(`Ack`)이지 값이 왔다가 아니다 — 값은
+   * [`onUsageLimitsUpdated`] 방송으로 온다. 진행 중인 조회와 겹친 요청은 데몬이 하나로 모으고, 거절(429) 기한 안엔
+   * 조회하지 않는다. 연결이 끊기면 reject.
+   */
+  refreshUsageLimits(vendor: AgentBackendKind): Promise<void>
+  /**
+   * 셸 사용량 캐시를 당긴다(데몬 왕복 없음). ★방송 수신([`onUsageLimitsUpdated`])을 건 **뒤에** 부른다★ — 먼저
+   * 부르면 그 사이의 방송을 놓친다. 셸이 없는 carrier 에서는 늘 `{socketEpoch: 0, snapshots: []}`.
+   */
+  getUsageSnapshot(): Promise<UsageSnapshotPull>
 
   // ── 명령 ──────────────────────────────────────────────────────────────────
   /**

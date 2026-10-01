@@ -12,6 +12,7 @@ import TerminalSlot from '../slot/TerminalSlot'
 import RichSlot from '../slot/RichSlot'
 import DomSlot from '../slot/DomSlot'
 import PresetPalette from '../slot/PresetPalette'
+import UsageSlot from '../slot/UsageSlot'
 import AgentList from '../agent/AgentList'
 import { isContentSlot } from '../agent/selectOpenTarget'
 import { agentPresence } from '../agent/mergeTreeNodes'
@@ -201,11 +202,12 @@ const SlotBody = memo(function SlotBody({
   //   실패·지연이 실제로 가능하고, 그 구간에 presence 는 'unknown' 으로 보인다. 기억이 있는데 그걸로
   //   뷰를 내리면 보존하려던 대화가 그 자리에서 영구 소실된다(데몬 ring 도 이미 없다).
   const keepDeadView = agent == null && kept != null && (presence === 'reserved' || !profilesLoaded)
-  // preset_palette·agent_list variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
+  // preset_palette·agent_list·usage variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
   //   플레이스홀더 스타일이 이들 레이아웃을 깨지 않게, ADR-0060/0061/0062).
   const isPresetPalette = node.content.type === 'preset_palette'
   const isAgentList = node.content.type === 'agent_list'
-  const hasContent = capsReady || keepDeadView || isPresetPalette || isAgentList
+  const isUsage = node.content.type === 'usage'
+  const hasContent = capsReady || keepDeadView || isPresetPalette || isAgentList || isUsage
   return (
     <div
       ref={borderRef}
@@ -286,6 +288,9 @@ const SlotBody = memo(function SlotBody({
         ) : node.content.type === 'agent_list' ? (
           // 조작은 AgentList 내부에서 agentClient/viewStore(단일 제어 표면)로 흐른다(§5).
           <AgentList />
+        ) : node.content.type === 'usage' ? (
+          // 값은 usageStore 미러에서만 읽는다 — 조회 수요는 셸이 이 슬롯 내용(show_*)으로 계산한다(TRD §1-7).
+          <UsageSlot content={node.content} viewId={targetViewId} slotId={node.id} />
         ) : (
           // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
           //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
@@ -297,13 +302,13 @@ const SlotBody = memo(function SlotBody({
       </SlotErrorBoundary>
       {contextMenu && (
         // ADR-0064: 통합 슬롯 메뉴 — buildSlotMenu(content.type) 로 (콘텐츠 전용 ∪ 공통 '*') command 참조를
-        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId)를 넘겨 각 command.run 이 백엔드
-        //   권위 경로(viewStore/agentClient)로 흐르게 한다(§5 단일 제어 표면). content 종류가 가시성 게이트.
-        <SlotContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={buildSlotMenu(node.content.type)}
-          ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId }}
+        //   결정적 정렬·resolve 해 항목을 만들고, ctx(viewId/slotId/agentId/content)를 넘긴다. command.run 은 그 넷으로
+        //   백엔드 권위 경로(viewStore/agentClient)로 흐른다(§5 단일 제어 표면). content 종류가 가시성 게이트.
+        <SlotMenu
+          anchor={contextMenu}
+          node={node}
+          targetViewId={targetViewId}
+          slotAgentId={slotAgentId}
           onClose={onCloseMenu}
         />
       )}
@@ -326,3 +331,33 @@ const SlotBody = memo(function SlotBody({
     </div>
   )
 })
+
+/**
+ * 열린 슬롯 메뉴 — 메뉴 ctx 를 조립한다. ★메뉴가 보여 줄 스토어 상태가 생기면 여기서 구독해 ctx 에 싣는다(ADR-0252)★ —
+ * 메뉴 기여는 ctx 만 읽고(ADR-0064), 여기서 구독하면 열린 메뉴도 그 상태를 따라 다시 그리고 구독은 메뉴가 열린
+ * 동안만 산다. 지금 싣는 스토어 상태는 없다.
+ */
+function SlotMenu({
+  anchor,
+  node,
+  targetViewId,
+  slotAgentId,
+  onClose,
+}: {
+  anchor: MenuAnchor
+  node: SlotNode
+  targetViewId: string | null
+  slotAgentId: string | null
+  onClose: () => void
+}) {
+  const content = node.content
+  return (
+    <SlotContextMenu
+      x={anchor.x}
+      y={anchor.y}
+      items={buildSlotMenu(content.type)}
+      ctx={{ viewId: targetViewId, slotId: node.id, agentId: slotAgentId, content }}
+      onClose={onClose}
+    />
+  )
+}

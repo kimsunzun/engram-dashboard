@@ -5,9 +5,9 @@
 //!   명령 버스 배달의 1단계(`command_delivery`). 셋 다 [`call_daemon_command`] 하나로 들어오므로 입구
 //!   검문(ADR-0157)을 건너뛰는 표면이 없다. 표가 슬롯에 안 꽂혀 있으면 두 라우트는 503 이고 배달은
 //!   1단계 미스다.
-//! ★선언은 여기 없다★ — `agent.*` 의 계약은 agent 가 소유하고(ADR-0155 결정 1: 선언이 사는 곳이 곧
-//!   주인이다) 이 파일은 그 선언에 데몬의 실물(매니저 · 명부 통지 팬아웃)을 꽂기만 한다. 데몬 자기
-//!   명령(`mail.*`)이 생기면 그때 선언 블록이 이 crate 로 들어온다.
+//! ★선언은 여기 없다★ — `agent.*`·`usage.*` 의 계약은 agent 가 소유하고(ADR-0155 결정 1: 선언이 사는 곳이 곧
+//!   주인이다) 이 파일은 그 선언에 데몬의 실물(매니저 · 명부 통지 팬아웃 · 사용량 서비스)을 꽂기만 한다. 데몬
+//!   자기 명령(`mail.*`)이 생기면 그때 선언 블록이 이 crate 로 들어온다.
 //!
 //! 진입점: [`make_daemon_table`](조립) · [`call_daemon_command`](세 표면의 공통 입구) ·
 //! [`DaemonLocalCommands`](배달 1단계 어댑터) · [`InputLease`](입력 임대 포트).
@@ -18,7 +18,8 @@
 use std::sync::Arc;
 
 use engram_dashboard_agent::commands::{
-    make_table, resolve_in, AgentCommandHost, RosterChanged, INPUT_AFFECTING,
+    make_table, resolve_in, AgentBackend, AgentCommandHost, RosterChanged, UsageCommandHost,
+    UsageVendorRow, INPUT_AFFECTING,
 };
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
@@ -33,7 +34,7 @@ use crate::connection_core::INPUT_LOCKED_REFUSAL;
 
 use super::mcp_server::{CommandTableSlot, RosterBroadcastSlot};
 
-/// `agent.*` 표에 데몬 실물을 꽂는다.
+/// `agent.*`·`usage.*` 표에 데몬 실물을 꽂는다.
 ///
 /// ★blocking 계약이 그대로 딸려 온다★: 핸들러 본문은 프로필 락을 쥔 채 디스크를 쓰고 resume 조기
 ///   종료를 폴링한다(agent `make_table` doc). 그래서 이 표는 [`call_daemon_command`] 로만 부르고, 그
@@ -48,15 +49,23 @@ use super::mcp_server::{CommandTableSlot, RosterBroadcastSlot};
 /// ★`lease` 는 WS 연결이 쥐는 **그 한 부**여야 한다★(운영 = 수락 루프에 넘기는 `MultiViewState`). 그
 ///   값의 `clone()` 은 같은 공유 상태를 가리키는 손잡이라 괜찮다. ★새 `MultiViewState::new()` 를 넘기면
 ///   틀린다★ — 빈 표라 버스·CLI 의 입력 영향 명령이 임대를 조용히 무시한다(에러도 로그도 없다).
+/// ★`usage` 는 연결 계층이 구독·⟳ 를 거는 **그 서비스**여야 한다★(운영 = `DaemonWiring.usage`) — 다른 서비스를
+///   꽂으면 버스와 화면이 서로 다른 책을 보고, 버스 조회의 결과가 구독자에게 안 닿는다. 운영 밖 조립은
+///   [`NoUsageLimits`] 를 꽂는다.
 // ADR-0155
 // ADR-0231
 pub fn make_daemon_table(
     manager: Arc<AgentManager>,
     broadcast: Arc<RosterBroadcastSlot>,
     lease: Arc<dyn InputLease>,
+    usage: Arc<dyn UsageCommandHost>,
 ) -> DaemonTable {
     DaemonTable {
-        table: make_table(manager.clone(), Arc::new(LateRosterBroadcast(broadcast))),
+        table: make_table(
+            manager.clone(),
+            Arc::new(LateRosterBroadcast(broadcast)),
+            usage,
+        ),
         roster: manager,
         lease,
     }
@@ -106,6 +115,22 @@ pub struct NoInputLeases;
 impl InputLease for NoInputLeases {
     fn permits(&self, _agent_id: AgentId, _caller: Option<ConnId>) -> bool {
         true
+    }
+}
+
+/// 사용량 서비스를 세우지 않는 조립(스모크 bin · 제어 라우트 하네스)의 사용량 포트 — 칸이 없다. `usage.*` 는
+/// `NOT_FOUND` 로 답한다(값으로 실패 — 패닉 없음).
+///
+/// ★운영 조립에 꽂지 말 것★ — 운영은 연결 계층과 같은 서비스를 꽂는다([`make_daemon_table`]).
+pub struct NoUsageLimits;
+
+impl UsageCommandHost for NoUsageLimits {
+    fn get(&self, _backend: &AgentBackend) -> Option<UsageVendorRow> {
+        None
+    }
+
+    fn refresh(&self, _backend: &AgentBackend) -> Option<UsageVendorRow> {
+        None
     }
 }
 
@@ -325,6 +350,8 @@ mod tests {
 
     use super::super::agent::RosterBroadcast;
     use super::*;
+    use crate::usage_service::clock::OsUsageClock;
+    use crate::usage_service::fakes::{self, ProbeGate};
 
     #[derive(Default)]
     struct MemProfileStore {
@@ -407,19 +434,23 @@ mod tests {
     /// ★CLI 동사가 없는 이름은 아래 목록에 적은 것뿐이다★ — 대기 목록 두 동사와 끊기(`agent.interrupt` —
     ///   ADR-0237)는 `engram agent <동사>` 에 올리지 않고(`CLI_AGENT_VERBS` 밖) 버스·범용 호출
     ///   (`engram <이름> …`)로만 부른다. 목록에 없는 이름이 표에 늘면
-    ///   CLI 에 올릴지를 정하지 않은 채 늘어난 것이라 여기서 멈춘다.
+    ///   CLI 에 올릴지를 정하지 않은 채 늘어난 것이라 여기서 멈춘다. 사용량 두 동사(`usage.*`)는 `agent` 계열이
+    ///   아니라 계열 라우트(`/control/agent`)에 애초에 안 닿는다 — 전체 이름으로만 부른다.
     // ADR-0231
     #[test]
     fn the_daemon_table_holds_every_cli_agent_verb() {
-        const BUS_ONLY: [&str; 3] = [
+        const BUS_ONLY: [&str; 5] = [
             "agent.cancelQueuedInput",
             "agent.interrupt",
             "agent.listQueuedInputs",
+            "usage.get",
+            "usage.refresh",
         ];
         let table = make_daemon_table(
             manager(),
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
         );
 
         let mut held: Vec<&str> = table.specs().map(|spec| spec.name).collect();
@@ -444,6 +475,7 @@ mod tests {
             manager(),
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
         );
 
         register_one(&table);
@@ -464,6 +496,7 @@ mod tests {
             manager(),
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
         )));
         slot
     }
@@ -616,7 +649,12 @@ mod tests {
     #[test]
     fn the_notifier_reads_the_slot_when_called_not_when_the_table_is_built() {
         let slot = Arc::new(RosterBroadcastSlot::new());
-        let table = make_daemon_table(manager(), slot.clone(), Arc::new(NoInputLeases));
+        let table = make_daemon_table(
+            manager(),
+            slot.clone(),
+            Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
+        );
 
         let broadcast = Arc::new(CountingBroadcast::default());
         slot.set(broadcast.clone());
@@ -681,6 +719,7 @@ mod tests {
             manager.clone(),
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
         );
         let ids = names
             .iter()
@@ -879,7 +918,12 @@ mod tests {
     fn a_blank_or_non_string_target_is_left_for_the_verb_to_refuse() {
         let (manager, ids) = manager_with(&["alpha"]);
         let lease = HeldBy::new(ids[0], 7);
-        let table = make_daemon_table(manager, Arc::new(RosterBroadcastSlot::new()), lease.clone());
+        let table = make_daemon_table(
+            manager,
+            Arc::new(RosterBroadcastSlot::new()),
+            lease.clone(),
+            Arc::new(NoUsageLimits),
+        );
 
         for target in [json!("   "), json!(5)] {
             let err = call_daemon_command(
@@ -907,7 +951,12 @@ mod tests {
     fn listing_and_roster_verbs_do_not_consult_the_lease() {
         let (manager, ids) = manager_with(&["alpha"]);
         let lease = HeldBy::new(ids[0], 7);
-        let table = make_daemon_table(manager, Arc::new(RosterBroadcastSlot::new()), lease.clone());
+        let table = make_daemon_table(
+            manager,
+            Arc::new(RosterBroadcastSlot::new()),
+            lease.clone(),
+            Arc::new(NoUsageLimits),
+        );
 
         let listed = call_daemon_command(
             &table,
@@ -941,6 +990,7 @@ mod tests {
             manager(),
             Arc::new(RosterBroadcastSlot::new()),
             Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
         );
         for name in INPUT_AFFECTING {
             let spec = table
@@ -958,6 +1008,97 @@ mod tests {
             assert_eq!(
                 schema["properties"]["target"]["type"], "string",
                 "{name}: target 은 문자열이어야 한다 — {schema}"
+            );
+        }
+    }
+
+    // ── 사용량(`usage.*` — TRD S21 usage-limit-slot §1-4 「버스」) ─────────────────────────────────────
+
+    fn usage_table(usage: Arc<dyn UsageCommandHost>) -> DaemonTable {
+        make_daemon_table(
+            manager(),
+            Arc::new(RosterBroadcastSlot::new()),
+            Arc::new(NoInputLeases),
+            usage,
+        )
+    }
+
+    /// 막힌 조회가 들어왔다는 신호 — 영영 안 오면 매달리지 않고 시한(10초)에 실패한다.
+    fn wait_entered(gate: &mut ProbeGate) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            match gate.entered.try_recv() {
+                Ok(()) => return,
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+                    if std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(e) => panic!("조회가 시작돼야 한다: {e:?}"),
+            }
+        }
+    }
+
+    /// ★기다리는 버스 요청도 `OUTCOME_UNKNOWN` 이 아니라 행으로 답한다(TRD §3 #17)★ — 공통 입구는 첫 poll 에서 끝나는
+    /// 핸들러만 몬다([`drive_to_completion`]). 조회가 막혀 있는 동안은 답이 없고(부른 스레드에서 기다린다), 놓으면
+    /// 그 조회가 받아 온 값이 `Fresh` 로 온다. 버스 낱말(`Claude`)이 조회기 키의 칸에 닿는 것도 함께 본다.
+    #[test]
+    fn a_waiting_bus_request_answers_a_row_through_the_common_entrance() {
+        let real = engram_dashboard_agent::backend::usage_probe_for("claude").expect("조회기");
+        let (probe, mut gate) = fakes::gated_probe(real, 37.5, 1_900_000_000);
+        // ★대기 상한을 길게 잡는다★ — 「아직 답이 없다」를 단언하므로 운영 상한(5초)이 느린 러너에서 먼저 끝나 답이
+        //   나가 버리면 거짓 실패한다.
+        let service = fakes::service_with_wait(
+            vec![probe],
+            Arc::new(OsUsageClock::new()),
+            Duration::from_secs(60),
+        );
+        let table = Arc::new(usage_table(service));
+        let (answered, answer) = std::sync::mpsc::channel();
+        let caller = Arc::clone(&table);
+        // blocking 풀 스레드 흉내 — 이 입구는 런타임 밖의 스레드에서 불린다.
+        let worker = std::thread::spawn(move || {
+            let mut args = json!({ "backend": "Claude" });
+            let outcome = call_daemon_command(&caller, "usage.get", &mut args, "bus", Some(1))
+                .expect("이 표의 이름");
+            let _ = answered.send(outcome);
+        });
+
+        wait_entered(&mut gate);
+        assert!(
+            answer.recv_timeout(Duration::from_millis(200)).is_err(),
+            "답은 조회 끝을 기다린다"
+        );
+        gate.release.send(()).expect("막힌 조회");
+        let row = answer
+            .recv_timeout(Duration::from_secs(10))
+            .expect("조회 끝 뒤엔 답이 온다")
+            .expect("OUTCOME_UNKNOWN 이 아니라 행");
+        worker.join().expect("부른 스레드");
+
+        assert_eq!(row["backend"], "Claude");
+        assert_eq!(
+            row["served"], "Fresh",
+            "기다린 조회가 받아 온 값이다: {row}"
+        );
+        assert_eq!(row["in_flight"], false);
+        assert_eq!(row["state"], "Ready");
+        assert_eq!(row["windows"][0]["window"], "FiveHour");
+        assert_eq!(row["windows"][0]["used_pct"], 37.5);
+        assert_eq!(row["windows"][0]["left_pct"], 62);
+    }
+
+    /// 사용량 서비스가 없는 조립은 `usage.*` 를 **값으로** 실패한다(패닉 없음) — wire ⟳ 의 같은 부재와 같은 코드.
+    #[test]
+    fn a_table_without_usage_limits_answers_not_found_by_value() {
+        let table = usage_table(Arc::new(NoUsageLimits));
+        for name in ["usage.get", "usage.refresh"] {
+            let err = call(&table, name, json!({ "backend": "Claude" })).expect_err("칸이 없다");
+            assert_eq!(err.code(), ErrorCode::NotFound, "{name}");
+            assert!(
+                err.message()
+                    .contains("this daemon keeps no usage limits for backend 'Claude'"),
+                "{name}: {err}"
             );
         }
     }

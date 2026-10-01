@@ -17,9 +17,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProtocolClient } from './protocolClient'
 import connectionCoreSource from '../../crates/engram-dashboard-daemon/src/connection_core.rs?raw'
 import { StructuredEventAccumulator } from '../components/slot/structuredAccumulator'
-import { INPUT_LOCKED_REFUSAL, type ConnectionState, type OutputChunk } from './agentClient'
+import {
+  INPUT_LOCKED_REFUSAL,
+  type ConnectionState,
+  type OutputChunk,
+  type UsageSnapshotPull,
+} from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import type { AgentInfo, AgentProfile, Preset, RestoreReport } from './types'
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 
 class MockTransport implements Transport {
   sent: unknown[] = []
@@ -76,6 +82,10 @@ class MockTransport implements Transport {
     this.replayCalls.push({ agentId, gen })
     if (this.replayGenImpl) return this.replayGenImpl(agentId, gen)
     return Promise.resolve(gen)
+  }
+  usagePull: UsageSnapshotPull = { socketEpoch: 0, snapshots: [] }
+  getUsageSnapshot(): Promise<UsageSnapshotPull> {
+    return Promise.resolve(this.usagePull)
   }
 
   // ── 테스트 구동 ──
@@ -1674,6 +1684,71 @@ describe('이벤트 라우팅(eventBus 공통 표면)', () => {
     const mine = [{ id: 'mine' }] as unknown as AgentInfo[]
     t.control({ AgentList: { request_id: rid, agents: mine } })
     await expect(p).resolves.toEqual(mine)
+  })
+})
+
+// ── 사용량(TRD S21 usage-limit-slot §1-8) ───────────────────────────────────────────────
+describe('사용량 — 방송 갈래 · ⟳ · 셸 캐시 pull', () => {
+  const snap = (revision: number) =>
+    ({
+      vendor: 'claude',
+      account_key: 'default',
+      five_hour: null,
+      weekly: null,
+      model_scoped: [],
+      plan: null,
+      in_flight: false,
+      state: { kind: 'Ready' },
+      revision,
+    }) as UsageLimitSnapshot
+
+  it('UsageLimitsUpdated → onUsageLimitsUpdated(snapshot, socketEpoch) · off 뒤 안 옴', () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const seen: Array<[UsageLimitSnapshot, number]> = []
+    const off = c.onUsageLimitsUpdated((s, e) => seen.push([s, e]))
+    t.control({ UsageLimitsUpdated: { snapshot: snap(3), socketEpoch: 7 } })
+    expect(seen).toEqual([[snap(3), 7]])
+    off()
+    t.control({ UsageLimitsUpdated: { snapshot: snap(4), socketEpoch: 7 } })
+    expect(seen).toHaveLength(1)
+  })
+
+  it('표식 없는 데몬 프레임(직결 carrier — subscribed 만 있다) → socketEpoch 0', () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const seen: number[] = []
+    c.onUsageLimitsUpdated((_s, e) => seen.push(e))
+    t.control({ UsageLimitsUpdated: { snapshot: snap(1), subscribed: ['claude'] } })
+    expect(seen).toEqual([0])
+  })
+
+  it('refreshUsageLimits → RefreshUsageLimits{vendor, request_id} 한 장만 · Ack 로 void resolve', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.refreshUsageLimits('codex')
+    await Promise.resolve()
+    expect(t.sent).toEqual([{ RefreshUsageLimits: { vendor: 'codex', request_id: 'req-1' } }])
+    t.control({ Ack: { request_id: 'req-1' } })
+    await expect(p).resolves.toBeUndefined()
+  })
+
+  it('refreshUsageLimits 대기 중 끊김 → reject(connection lost)', async () => {
+    const t = new MockTransport()
+    const c = new ProtocolClient(t)
+    const p = c.refreshUsageLimits('claude')
+    await Promise.resolve()
+    t.setState('reconnecting')
+    await expect(p).rejects.toThrow('connection lost')
+  })
+
+  it('getUsageSnapshot → transport 에 위임(명령 경로·ensureReady 를 타지 않는다)', async () => {
+    const t = new MockTransport()
+    t.usagePull = { socketEpoch: 5, snapshots: [snap(2)] }
+    const c = new ProtocolClient(t)
+    await expect(c.getUsageSnapshot()).resolves.toEqual({ socketEpoch: 5, snapshots: [snap(2)] })
+    expect(t.ensureReadyCalls).toBe(0)
+    expect(t.sent).toEqual([])
   })
 })
 

@@ -2,7 +2,8 @@
 //!
 //! ★이 폴더가 세우는 규칙 = codex 지식은 여기 안에만 산다(ADR-0004)★. 근거·게이트·게이트가
 //! 못 보는 것의 정본은 `backend/claude/mod.rs` 헤더이고 여기 되풀어 적지 않는다 — 이름만 바꿔
-//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 하나뿐이다 — 세션 id 회수의
+//! 읽는다. 밖으로 나가는 표면은 [`crate::backend::AgentBackend`] 구현 + 사용량 조회기 싱글턴
+//! [`CODEX_USAGE_PROBE`] 둘뿐이다(조회기가 trait 칸이 아닌 사유도 그 헤더) — 세션 id 회수의
 //! 폴링도 [`thread_lock`] 안에서 돌고 그 모듈을 부르는 자리는 이 폴더뿐이다(ADR-0218 결정 11).
 //!
 //! ★여기 적힌 codex 사실은 실측이다(codex-cli 0.153.4, 이 PC, 인증됨 — 2026-09-08 재확인)★.
@@ -50,6 +51,10 @@ pub(crate) mod protocol;
 // ADR-0218
 pub(crate) mod thread_lock;
 pub(crate) mod transport;
+mod usage;
+mod usage_probe;
+
+pub(crate) use usage_probe::CODEX_USAGE_PROBE;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -159,15 +164,16 @@ fn thread_open(
 /// 그 아래 생기는 손자·증손자가 Job 을 벗어날 수 없고, `TerminateJobObject` 가 트리를 통째로 끝낸다
 /// (ADR-0001 의 2 동사).
 /// ★편입은 spawn **뒤**라 그 사이 창은 그 보장 밖이다★ — 그 창에서 태어난 자손은 Job 에 안 들어간다.
-/// 이 저장소의 통로 셋이 전부 같은 모양이고(`CREATE_SUSPENDED` 는 한 줄도 없다) 기존 teardown 테스트는
-/// 정착 상태만 재므로, 이 창은 **재 본 적이 없다**. 고치는 것은 세 통로를 함께 건드리는 별건이다.
+/// 에이전트 통로 셋(`pty`·`stdio`·codex 통로)이 전부 띄운 뒤에 넣는 모양이고 기존 teardown 테스트는 정착
+/// 상태만 재므로, 이 창은 **재 본 적이 없다**. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회
+/// 실행기다 — 멈춘 채 띄워 Job 에 넣은 뒤 깨운다(`usage::process` + `platform::resume_suspended_process`).
+const CODEX_PROGRAM: &str = "codex";
+
 /// 「그 스레드의 기록이 없다」를 뜻하는 상대 문구(소문자 비교). ★실측된 응답에서 그대로 딴다★ —
 /// `-32600` + `no rollout found for thread id`(`docs/reference/backend-capabilities.md` §1).
 /// ★코드가 아니라 이 문구가 판정 기준인 이유★: 같은 코드가 설정 오류·중복 `initialize`·하위 스레드
 /// 이어받기에도 온다. 코드로 가르면 멀쩡한 손잡이가 무관한 실패에서 「이어받을 대화 없음」 도장을 받는다.
 const NO_ROLLOUT_MARKER: &str = "no rollout found";
-
-const CODEX_PROGRAM: &str = "codex";
 
 /// codex 가 작업 폴더를 받는 플래그. ★프로세스 cwd 와 별개다★ — `CommandSpec.cwd` 는 우리가 프로세스를
 /// 어디서 띄우나이고, 이 값은 codex 가 **어느 폴더를 워크스페이스로 신뢰·편집하나**다. 둘을 같은 값으로
@@ -1067,10 +1073,15 @@ impl AgentBackend for CodexBackend {
             MidTurnPolicy,
             Arc<DeliveryAck>,
         ) = if is_app_server(command) {
+            // ★줍기 판정은 여기서 건다 — `output_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
+            //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`).
+            let decoder = self
+                .output_decoder(command)
+                .map(|d| usage::gate_decoder(d, &spec.env));
             let (t, pid) = CodexAppServerTransport::open(
                 spec,
                 true,
-                self.output_decoder(command),
+                decoder,
                 thread_open(spec, resume_session_id, priming_text(control)),
                 sid_sink,
                 link_sink,

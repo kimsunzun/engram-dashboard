@@ -40,7 +40,8 @@ pub use domain::{
     AgentBackendKind, AgentFailureKind, AgentInfo, AgentOutputFormat, AgentProfile,
     AgentSpawnCommand, AgentStatus, Capabilities, ControlCaps, EnvelopeFormat, InputCaps,
     ModelCaps, OutputCaps, Preset, RestartPolicy, RestoreOutcome, RestoreReport, SessionCaps,
-    SnapshotChunk,
+    SnapshotChunk, UsageLimitSnapshot, UsageScopedWindow, UsageStateDetail, UsageVendorState,
+    UsageWindow,
 };
 pub use ids::{AgentId, PresetId, ProfileId, RequestId};
 pub use messages::{
@@ -115,7 +116,18 @@ pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 /// 변형 doc)과 목록 응답의 `stopped_after_error` 칸. bump 를 강제하는 것은 명령 축 하나다. (사용자 승인 —
 /// ADR-0231)
 ///
+/// v7: 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-6) — 명령 `AgentCommand::UsageSubscribe`(구독 집합 전량
+/// 교체 · 답 없음)·`AgentCommand::RefreshUsageLimits`(⟳ · 답 = 기존 `Ack`) + 구독한 연결로 가는
+/// `AgentEvent::UsageLimitsUpdated`. 명령 변형을 더한 것이라 v3·v6 과 같은 **비관용 additive** 다 — 구데몬 +
+/// 신셸이면 구데몬이 두 명령을 디코드하지 못해 파싱 실패 `Error{request_id: None}` 로 답한다. 그 오류는 상관 키가
+/// 없어 셸이 어느 명령의 실패인지 모른다 — 구독 실패는 알아볼 수 없이 슬롯이 빈 채 남고, ⟳ 는 셸의 답장
+/// 상한까지 매달린다. 둘 다 v4 의 기준(조용한 오작동)에 든다. 그래서 auth 의 version check + discovery 의
+/// version-mismatch 거부가 구 데몬을 **재사용하지 않고 거부/재기동**하게 강제한다(재는 자리 = v4 항목과 같다).
+/// ★같은 판에 실려 나가지만 bump 사유가 아닌 것★: 사용량 스냅숏 모양(`UsageLimitSnapshot` 의 `revision` ·
+/// 비정상 상태의 `detail`)과 이벤트의 `subscribed` 칸. 이 브랜치 전에는 사용량 wire 를 나르는 변형이 없어
+/// 그 모양을 읽는 옛 피어가 없다. bump 를 강제하는 것은 명령 축 하나다.
+///
 /// ★이 기준을 대고 **안 올리기로** 한 변경도 있다★ — 턴 경계 + 결말을 나르는
 /// [`StructuredEvent::TurnEnd`] 추가가 그것이다. 두 방향 분석과 그 결론은 그 변형 자신의 doc 에 산다 —
 /// 여기 되풀어 적지 않는다. **기준의 집은 이 자리, 그 판단의 집은 저쪽이다.**
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;

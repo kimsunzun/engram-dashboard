@@ -22,6 +22,7 @@ pub mod messaging_host;
 pub mod status_fanout;
 #[cfg(test)]
 mod test_doubles;
+pub mod usage_service;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,9 +40,14 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use connection_core::MultiViewState;
+use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
 use engram_dashboard_net::frame_port::FrameFanout;
 use engram_dashboard_net::ws::ConnRegistry;
 use status_fanout::DaemonStatusSink;
+use usage_service::clock::OsUsageClock;
+use usage_service::observe::UsageObserveSink;
+use usage_service::reject_store::{FileRejectStore, RejectStore};
+use usage_service::{OsProbeThreads, ProbeThreads, UsageParts, UsageService};
 
 // ADR-0129 슬라이스 1: 네트워크 행이 소유한 타입인데 **이 crate 의 공개 시그니처에 나타나므로**
 //   재수출한다(`start_test_server_with_keepalive` — `tests/ws_e2e.rs` 가 부른다). 표준 Rust API
@@ -221,12 +227,18 @@ fn install_panic_hook() {
 ///   이다 — **그 슬라이스는 ADR-0130 으로 보류됐으므로 예정 작업이 아니라 재개 시의 처방이다**:
 ///   팬아웃을 레지스트리에서만 얻게
 ///   만들면 **모든** 호출 지점에서 맞는 짝이 곧 발견 가능한 짝이 된다 — `handle_connection` 도 포함.
+/// ★사용량 서비스도 같은 짝이다★ — `manager` 의 status sink 사슬(`UsageObserveSink`)이 관측을 넘기는 서비스와
+///   연결 계층이 구독·⟳ 를 거는 서비스가 **같은 것**이어야 한다. 어긋나면 관측은 한 서비스에 쌓이고 구독자는
+///   다른 서비스에 걸려 한 장도 안 받는다 — 역시 실패 로그 없이 조용하다. 둘을 이 struct 가 한 조립에서 함께
+///   들고 다니는 것이 그 짝을 지키는 수단이다.
 // ADR-0129
 struct DaemonWiring {
     manager: Arc<AgentManager>,
     /// 연결이 등록되는 맵. `manager` 안의 status sink 가 팬아웃하는 그 맵과 **같은 것**이다
     /// (`ConnRegistry` 는 내부가 Arc — clone 이 같은 맵을 본다).
     registry: ConnRegistry,
+    /// `manager` 의 status sink 사슬이 관측을 넘기는 그 서비스 — 연결 계층이 구독·⟳ 를 같은 것에 건다.
+    usage: Arc<UsageService>,
 }
 
 impl DaemonWiring {
@@ -243,6 +255,12 @@ impl DaemonWiring {
     }
 }
 
+/// 사용량 조회가 쓸 임시 폴더들의 부모 — 데이터 폴더 아래라 데몬 하나의 것이고, 그래서 기동 때 쓸어도 안전하다.
+/// ★그 안전은 쓰는 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수 없다)이고
+///   스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이어야 한다. 이 쓸기를 잠금 앞이나
+///   [`build_usage_service`] 뒤로 옮기면 살아 있는 조회의 폴더를 지울 수 있다.
+const USAGE_SCRATCH_DIR: &str = "usage-probe";
+
 fn build_daemon_wiring(
     data_dir: &std::path::Path,
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
@@ -251,19 +269,40 @@ fn build_daemon_wiring(
 ) -> DaemonWiring {
     let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
     let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
+    let scratch_root = data_dir.join(USAGE_SCRATCH_DIR);
+    // 조회가 하나도 돌기 전이다 — 지난 기동이 못 지운 임시 폴더만 남아 있다.
+    engram_dashboard_agent::usage::sweep_stale_scratch(&scratch_root);
     build_daemon_wiring_with_store(
         profile_store,
         preset_store,
+        UsageInputs {
+            rejects: Arc::new(FileRejectStore::new(data_dir)),
+            probes: engram_dashboard_agent::backend::usage_probes().to_vec(),
+            spawner: Arc::new(OsProbeSpawner),
+            threads: Arc::new(OsProbeThreads),
+            scratch_root,
+        },
         control,
         flush_tx,
         idle_coalescer,
     )
 }
 
+/// 사용량 서비스가 조립 밖에서 받는 부품 — 운영은 실물([`build_daemon_wiring`]), 테스트 서버는 조회기 0개.
+/// 시계와 인코더는 둘 다 실물이라 여기 없다.
+struct UsageInputs {
+    rejects: Arc<dyn RejectStore>,
+    probes: Vec<&'static dyn UsageProbe>,
+    spawner: Arc<dyn ProbeSpawner>,
+    threads: Arc<dyn ProbeThreads>,
+    scratch_root: PathBuf,
+}
+
 /// build_daemon_wiring 의 store 주입형 — 테스트가 in-memory store 를 끼워 디스크/Embedded 와 격리한다.
 fn build_daemon_wiring_with_store(
     store: Arc<dyn ProfileStore>,
     preset_store: Arc<dyn PresetStore>,
+    usage_inputs: UsageInputs,
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
@@ -273,8 +312,10 @@ fn build_daemon_wiring_with_store(
     //   않으려 생성을 한 자리로 모았다(ADR-0129 결정 3 — 조립 행만 두 행을 다 안다).
     let registry = ConnRegistry::new();
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
-    let status_sink = Arc::new(messaging_host::MessagingFlushSink::new(
-        DaemonStatusSink::new(fanout),
+    let usage = build_usage_service(usage_inputs);
+    let status_sink = Arc::new(status_chain(
+        fanout,
+        usage.clone(),
         flush_tx,
         idle_coalescer,
     ));
@@ -298,7 +339,59 @@ fn build_daemon_wiring_with_store(
         tracker,
         control,
     ));
-    DaemonWiring { manager, registry }
+    DaemonWiring {
+        manager,
+        registry,
+        usage,
+    }
+}
+
+/// 사용량 서비스를 세운다 — 저장된 거절 기한을 **연결을 받기 전에** 되살리고 스케줄러 스레드를 띄운다.
+///
+/// ★스케줄러를 못 띄워도 데몬은 뜬다★ — 요청(⟳)·줍기·구독 교체는 그대로 돌고, 멈추는 것은 시간이 이끄는 일(자동
+///   조회 · 기한이 차서 나가는 발행)뿐이다. 스레드는 서비스를 약하게만 쥐어 서비스가 drop 되면 스스로 끝난다 —
+///   그래서 소유는 `manager` 의 status sink 사슬과 연결 계층이 진다.
+fn build_usage_service(inputs: UsageInputs) -> Arc<UsageService> {
+    let UsageInputs {
+        rejects,
+        probes,
+        spawner,
+        threads,
+        scratch_root,
+    } = inputs;
+    let saved = rejects.load();
+    let (usage, wakes) = UsageService::new(UsageParts {
+        probes,
+        spawner,
+        scratch_root,
+        threads,
+        rejects,
+        clock: Arc::new(OsUsageClock::new()),
+        encoder: Arc::new(agent_conn::UsageEventEncoder),
+    });
+    usage.restore_rejects(&saved);
+    match usage_service::schedule::spawn_scheduler(&usage, wakes) {
+        Ok(_) => tracing::info!(thread = "usage-scheduler", "사용량 스케줄러 스레드 시작"),
+        Err(e) => tracing::warn!(
+            error = %e,
+            "사용량 스케줄러 스레드를 못 띄웠다 — 자동 조회와 기한 발행 없이 돈다"
+        ),
+    }
+    usage
+}
+
+/// 운영 status sink 사슬 — `MessagingFlushSink(UsageObserveSink(DaemonStatusSink))`.
+fn status_chain(
+    fanout: Arc<dyn FrameFanout>,
+    usage: Arc<UsageService>,
+    flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
+    idle_coalescer: Arc<messaging_host::IdleCoalescer>,
+) -> messaging_host::MessagingFlushSink {
+    messaging_host::MessagingFlushSink::new(
+        UsageObserveSink::new(Box::new(DaemonStatusSink::new(fanout)), usage),
+        flush_tx,
+        idle_coalescer,
+    )
 }
 
 // ── accept loop (main + 테스트 공유) ──────────────────────────────────────────────
@@ -327,7 +420,11 @@ async fn run_accept_loop(
     // ★팬아웃 포트를 인자로 받지 않고 여기서 뽑는 이유(ADR-0129)★: 아래 accept 갈래가 등록하는 **그 값**
     //   에서 뽑으므로 "브로드캐스트 대상 ≠ 등록 대상" 을 이 함수 안에서는 쓸 수가 없다. 조립 밖에서 여전히
     //   표현 가능한 자리와 그 판정 규칙은 `DaemonWiring` 주석에 있다.
-    let DaemonWiring { manager, registry } = wiring;
+    let DaemonWiring {
+        manager,
+        registry,
+        usage,
+    } = wiring;
     let fanout: Arc<dyn FrameFanout> = Arc::new(registry.clone());
     let handlers: Arc<dyn engram_dashboard_net::frame_port::ConnectionHandlerFactory> =
         Arc::new(agent_conn::AgentConnections::new(
@@ -339,6 +436,7 @@ async fn run_accept_loop(
             bus.roster().clone(),
             bus.deliveries().clone(),
             Arc::clone(bus.locals()),
+            usage,
             shutdown_tx,
         ));
 
@@ -625,6 +723,7 @@ pub async fn run() -> Result<(), i32> {
         manager.clone(),
         roster_broadcast_slot.clone(),
         Arc::new(multiview.clone()),
+        wiring.usage.clone(),
     )));
 
     // 6.4) idle 게이트 조립 — ★턴 관측 자체는 코어가 출력 pump 에서 직접 적재하므로 여기서 배선할
@@ -862,9 +961,18 @@ async fn start_test_server_inner(
     let messaging_slot = Arc::new(control::mcp_server::MessagingSlot::new());
     let (flush_tx, flush_rx) = tokio::sync::mpsc::unbounded_channel::<messaging_host::FlushMsg>();
     let idle_coalescer = Arc::new(messaging_host::IdleCoalescer::new());
+    // ★조회기 0개 — 이 서버에서는 어떤 경로로도 실 CLI 가 뜨지 않는다★(구독·⟳ 는 칸이 없어 조회를 시작할 수 없다).
+    //   사용량 wire 의 연결 계층 시험은 가짜 조회기를 단 서비스로 `agent_conn` 에서 잰다.
     let wiring = build_daemon_wiring_with_store(
         store,
         preset_store,
+        UsageInputs {
+            rejects: Arc::new(usage_service::reject_store::MemRejectStore::new()),
+            probes: Vec::new(),
+            spawner: Arc::new(OsProbeSpawner),
+            threads: Arc::new(OsProbeThreads),
+            scratch_root: std::env::temp_dir(),
+        },
         control,
         flush_tx.clone(),
         idle_coalescer.clone(),
@@ -881,6 +989,7 @@ async fn start_test_server_inner(
         manager.clone(),
         roster_broadcast_slot,
         Arc::new(multiview.clone()),
+        wiring.usage.clone(),
     )));
     // 이 서버는 MCP 제어 평면을 배선하지 않으므로(위 Noop) 버스를 나눠 쓸 상대가 없다 — accept loop 가
     //   유일한 소비자다. 조립 자체는 운영과 같은 함수를 쓴다.
@@ -984,6 +1093,55 @@ impl PresetStore for MemPresetStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 운영 status sink 사슬에 세 고리가 다 든다 — 사용량 관측은 서비스까지 가서 구독한 연결이 받고(전-연결로는
+    /// 안 흐른다) 상태 사건은 팬아웃까지 간다. 고리 차례는 생성자가 타입으로 묶는다(`MessagingFlushSink::new` 가
+    /// `UsageObserveSink` 를 받는다).
+    #[test]
+    fn the_status_chain_feeds_the_usage_service_and_the_fanout() {
+        use engram_dashboard_agent::types::{AgentStatus, StatusSink};
+        use engram_dashboard_agent::usage::{UsageObservation, UsageSource, WindowObs};
+        use engram_dashboard_net::frame_port::{Frame, FrameSink};
+
+        let real = engram_dashboard_agent::backend::usage_probes()[0];
+        let (probe, _gate) = usage_service::fakes::gated_probe(real, 10.0, 2_000_000_000);
+        let usage = usage_service::fakes::service(vec![probe], Arc::new(OsUsageClock::new()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Frame>(8);
+        let frames: Arc<dyn FrameSink> = Arc::new(test_doubles::FakeFrameSink::new(tx));
+        usage.attach(1, agent_conn::ConnUsageOutlet::new(frames));
+        usage.replace_subscription(1, [real.key()].into());
+        assert!(rx.try_recv().is_ok(), "첫 한 장");
+
+        let fanout = Arc::new(test_doubles::RecordingFanout::new());
+        let (flush_tx, _flush_rx) = tokio::sync::mpsc::unbounded_channel();
+        let chain = status_chain(
+            fanout.clone(),
+            usage,
+            flush_tx,
+            Arc::new(messaging_host::IdleCoalescer::new()),
+        );
+
+        chain.usage_observed(UsageObservation {
+            vendor: real.key(),
+            five_hour: Some(WindowObs {
+                used_pct: Some(40.0),
+                resets_at: None,
+            }),
+            weekly: None,
+            model_scoped: None,
+            plan: None,
+            source: UsageSource::Passive,
+            limits_unavailable: None,
+        });
+        let Ok(Frame::Text(text)) = rx.try_recv() else {
+            panic!("관측이 서비스를 거쳐 구독한 연결에 닿아야 한다");
+        };
+        assert!(text.contains("UsageLimitsUpdated"), "{text}");
+        assert!(fanout.texts().is_empty(), "{:?}", fanout.texts());
+
+        chain.status_changed(uuid::Uuid::new_v4(), AgentStatus::Killed, 1);
+        assert!(fanout.sole_text().contains("StatusChanged"));
+    }
 
     #[test]
     fn token_is_64_hex_chars() {

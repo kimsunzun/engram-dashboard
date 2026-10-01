@@ -43,6 +43,19 @@ pub enum SlotContent {
     /// 프리셋 팔레트(등록된 cwd 프리셋 버튼셋) 뷰. MVP=필드 없는 unit — 프리셋 목록 데이터는
     /// 데몬 소유(presets.json, ADR-0061)라 여기 담지 않고 PresetRegistry wire 로 별도 흐른다.
     PresetPalette,
+    /// 사용량 한도 뷰. 두 칸 = 이 슬롯이 켠 회사 — 셸은 이것으로 데몬 사용량 구독(관심)을 계산한다
+    /// (`daemon_client::usage_interest`). 값 자체는 여기 담지 않는다.
+    /// 칸이 빠진 입력은 `true` 로 읽는다 — `{"type":"usage"}` 한 장이 두 회사를 다 켠 슬롯이다.
+    Usage {
+        #[serde(default = "enabled")]
+        show_claude: bool,
+        #[serde(default = "enabled")]
+        show_codex: bool,
+    },
+}
+
+fn enabled() -> bool {
+    true
 }
 
 impl SlotContent {
@@ -53,7 +66,10 @@ impl SlotContent {
     pub fn agent_id(&self) -> Option<&str> {
         match self {
             SlotContent::Agent { agent_id } => Some(agent_id),
-            SlotContent::Empty | SlotContent::AgentList | SlotContent::PresetPalette => None,
+            SlotContent::Empty
+            | SlotContent::AgentList
+            | SlotContent::PresetPalette
+            | SlotContent::Usage { .. } => None,
         }
     }
 }
@@ -68,7 +84,7 @@ pub enum LayoutNode {
         id: Uuid,
         content: SlotContent,
     },
-    /// ratio = a 가 차지하는 비율(`tree::RATIO_MIN`~`RATIO_MAX` = 0.1~0.9 로 클램프, 기본 0.5).
+    /// ratio = a 가 차지하는 비율(`tree::RATIO_MIN`~`RATIO_MAX` 로 클램프, 기본 0.5).
     Split {
         /// 이 split 노드의 정체 — 분할마다 새로 뽑고, 노드가 자리를 옮겨도(형제 승격) 따라간다. 프론트는
         /// 이 값(스냅샷 `split_rects` 의 `split_id` 로도 실린다)을 구분선(`Splitter`)의 key 와 드래그 미리보기가
@@ -199,5 +215,39 @@ impl LayoutNode {
             id: Uuid::new_v4(),
             content: SlotContent::Empty,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SlotContent;
+
+    #[test]
+    fn a_usage_slot_reads_missing_flags_as_on() {
+        let both: SlotContent = serde_json::from_str(r#"{"type":"usage"}"#).unwrap();
+        assert_eq!(
+            both,
+            SlotContent::Usage {
+                show_claude: true,
+                show_codex: true
+            }
+        );
+        let one: SlotContent =
+            serde_json::from_str(r#"{"type":"usage","show_codex":false}"#).unwrap();
+        assert_eq!(
+            one,
+            SlotContent::Usage {
+                show_claude: true,
+                show_codex: false
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(SlotContent::Usage {
+                show_claude: false,
+                show_codex: true
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "usage", "show_claude": false, "show_codex": true })
+        );
     }
 }

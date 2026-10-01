@@ -21,7 +21,7 @@ use engram_dashboard_agent::types::{
     StatusSink,
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
-use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases};
+use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -208,6 +208,7 @@ async fn fixture(tag: &str) -> Fixture {
         manager,
         broadcast_slot,
         Arc::new(NoInputLeases),
+        Arc::new(NoUsageLimits),
     )));
 
     // ★판정을 손으로 심는다 — 그래서 이 픽스처만으로는 부족하다★: `provision` 이 판정을 잘못 파생해도

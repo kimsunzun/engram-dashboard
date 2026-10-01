@@ -92,8 +92,8 @@
 //!   - **Job Object 편입은 spawn **뒤**라, 그 사이에 만들어진 손자는 Job 밖이다.** 편입된 뒤로는
 //!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
 //!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
-//!     같은 모양이고 이 저장소에 `CREATE_SUSPENDED` 는 한 줄도 없다. 고치는 것은 세 통로를 함께 건드리는
-//!     별건이다.
+//!     같은 모양이다. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회 실행기다 — 멈춘 채 띄워
+//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + `platform::resume_suspended_process`).
 //!   - **핸드셰이크가 실패하면 [`writer_loop`] 이 우리 쪽 stdin 을 놓는다 — 갈래를 가리지 않는다.**
 //!     ★한때 여기 「자식·리더·라이터는 그대로 남고 매니저가 거둘 때까지 상주한다」로 적혀 있었다. 그것은
 //!     낡은 서술을 넘어 **거짓이었다 — 아무도 그 세션을 거두지 않는다**★: 수거를 여는 것은 pump 의
@@ -169,7 +169,7 @@ use super::protocol::{
     self, method, ClientInfo, Inbound, InitializeParams, InitializeResponse, RequestId,
     SortDirection, Thread, ThreadItemsListParams, ThreadItemsListResponse, ThreadOpen,
     ThreadResumeResponse, ThreadStartResponse, TurnInterruptParams, TurnStartParams,
-    TurnStartResponse, TurnSteerParams, UserInput, METHOD_NOT_FOUND,
+    TurnStartResponse, TurnSteerParams, UserInput, CLIENT_NAME, METHOD_NOT_FOUND,
 };
 use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::output_core::{estimate_cost_bytes, OutputCore, REPLAY_MAX_BYTES, REPLAY_MAX_EVENTS};
@@ -291,9 +291,6 @@ const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 /// ★근거★: 위 4KB 오류 본문이 자르지 않으면 로그 한 줄을 통째로 덮는다. 512 자면 메서드 이름과 사유
 /// 첫 문장이 남는다.
 const LOG_STRING_LIMIT: usize = 512;
-
-/// `initialize` 에 싣는 클라이언트 이름. 상대는 이 값을 자기 로그·`user_agent` 에 적는다.
-const CLIENT_NAME: &str = "engram-dashboard";
 
 /// 응답보다 먼저 온 종료 알림의 turn id 를 붙들어 두는 칸 수.
 ///
@@ -3760,6 +3757,8 @@ impl Reader {
                     Some(dec) => {
                         let mut events = dec.decode(line);
                         events.extend(dec.decode(b"\n"));
+                        // 사용량 관측은 이벤트가 아니다 — 귀속 게이트와 무관하게 상태 sink 로 바로 넘긴다.
+                        self.core.report_usage(dec.take_usage());
                         events
                     }
                     None => Vec::new(),
@@ -3870,6 +3869,7 @@ fn reader_loop(
             for ev in dec.flush() {
                 reader.core.emit(ev);
             }
+            reader.core.report_usage(dec.take_usage());
         }
     }
 
@@ -4604,6 +4604,80 @@ mod tests {
             "params": {"threadId": thread_id, "turnId": turn_id, "itemId": "i-1", "delta": "hi"},
         })
         .to_string()
+    }
+
+    // ── 사용량 관측의 운반(`take_usage` → `StatusSink::usage_observed`) ──
+
+    /// `usage_observed` 만 모으는 상태 sink.
+    struct UsageStatus(Arc<Mutex<Vec<crate::usage::UsageObservation>>>);
+    impl StatusSink for UsageStatus {
+        fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+        fn agent_list_updated(&self, _agents: Vec<crate::types::AgentInfo>) {}
+        fn usage_observed(&self, obs: crate::usage::UsageObservation) {
+            self.0.lock().unwrap().push(obs);
+        }
+    }
+
+    type SeenUsage = Arc<Mutex<Vec<crate::usage::UsageObservation>>>;
+
+    fn usage_reader(
+        decoder: Box<dyn OutputDecoder>,
+    ) -> (Reader, Arc<Mutex<Vec<OutputEvent>>>, SeenUsage) {
+        let observed: SeenUsage = Arc::new(Mutex::new(Vec::new()));
+        let core = Arc::new(OutputCore::new(
+            AgentId::new_v4(),
+            1,
+            Arc::new(UsageStatus(observed.clone())),
+            TurnWiring::detached(),
+        ));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        core.subscribe(Arc::new(EventSink {
+            id: SinkId::new_v4(),
+            seen: seen.clone(),
+        }));
+        let reader = Reader {
+            core,
+            decoder: Some(decoder),
+            state: shared(),
+            pending: Arc::new(Pending::default()),
+            first_turn: None,
+            refused: RefusedItems::default(),
+        };
+        (reader, seen, observed)
+    }
+
+    fn rate_limits_line() -> String {
+        serde_json::json!({
+            "method": "account/rateLimits/updated",
+            "params": {"rateLimits": {"limitId": "codex",
+                "primary": {"usedPercent": 37, "windowDurationMins": 300, "resetsAt": 1_790_424_706i64}}},
+        })
+        .to_string()
+    }
+
+    /// ★관측이 읽기 루프를 지나 상태 sink 까지 닿는다★ — 번역기가 모아 두기만 하고 아무도 안 비우면 오류 없이
+    /// 사라진다. 화면(구독자)에는 아무것도 가지 않는다.
+    #[test]
+    fn a_rate_limits_update_reaches_the_status_sink_not_the_screen() {
+        let (mut reader, seen, observed) = usage_reader(Box::new(CodexAppServerDecoder::new()));
+        reader.handle_line(rate_limits_line().as_bytes());
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].five_hour.and_then(|w| w.used_pct), Some(37.0));
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "사용량이 화면 이벤트로 새었다"
+        );
+    }
+
+    /// 감싸개가 막은 번역기(비기본 프로필)는 sink 에 아무것도 안 넘긴다 — 판정 자체는 이 폴더 `usage` 시험이 잰다.
+    #[test]
+    fn a_gated_decoder_reports_no_usage() {
+        let gated = crate::usage::UsageGate::blocking(Box::new(CodexAppServerDecoder::new()));
+        let (mut reader, seen, observed) = usage_reader(Box::new(gated));
+        reader.handle_line(rate_limits_line().as_bytes());
+        assert!(observed.lock().unwrap().is_empty());
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// 표 + codex 분류자 + 실 번역기를 꽂은 시험대 — ★사실 계층을 실제로 재는 항목 전용★.

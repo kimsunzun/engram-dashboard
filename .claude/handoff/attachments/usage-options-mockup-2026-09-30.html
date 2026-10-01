@@ -1,0 +1,438 @@
+<title>사용량 표시 시안</title>
+<style>
+:root{color-scheme:light;--bg:#f3f3f1;--fg:#1c1c1c;--muted:#5d5d5d;--card:#ffffff;--line:#dadad6;--tag:#ececea;--rec:#1a7f37;--rec-bg:#e3f3e7;--rec-line:#9fd3ad;--bad:#b42318;--bad-bg:#fdeceb;--bad-line:#efb2ac;--code:#ececea}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#151517;--fg:#e8e8e8;--muted:#a3a3a3;--card:#1e1e21;--line:#303035;--tag:#2c2c31;--rec:#5bd06f;--rec-bg:#143020;--rec-line:#2c6b3c;--bad:#ff8a80;--bad-bg:#3a1714;--bad-line:#7a2e27;--code:#2c2c31}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#151517;--fg:#e8e8e8;--muted:#a3a3a3;--card:#1e1e21;--line:#303035;--tag:#2c2c31;--rec:#5bd06f;--rec-bg:#143020;--rec-line:#2c6b3c;--bad:#ff8a80;--bad-bg:#3a1714;--bad-line:#7a2e27;--code:#2c2c31}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 "Pretendard","Noto Sans KR","Segoe UI Variable Text","Segoe UI","Malgun Gothic",system-ui,sans-serif;-webkit-text-size-adjust:100%}
+.wrap{max-width:1180px;margin:0 auto;padding:20px 16px 48px;display:flex;flex-direction:column;gap:18px}
+h1{font-size:20px;margin:0}
+h2{font-size:16px;margin:0}
+.sub{margin:2px 0 0;color:var(--muted);font-size:13px}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:12.5px;color:var(--muted)}
+.legend .k{display:inline-flex;align-items:center;gap:6px}
+.legend b{color:var(--fg);font-weight:600}
+.sw{display:inline-block;width:22px;height:7px;border-radius:2px}
+.sec{display:flex;flex-direction:column;gap:10px}
+.opts{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,520px),1fr));gap:14px}
+.opts.one{grid-template-columns:repeat(auto-fill,minmax(min(100%,340px),1fr))}
+.opts.list{grid-template-columns:minmax(0,1fr)}
+.opt.wide{grid-column:1/-1}
+.opt{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px}
+.opt.is-rec{border-color:var(--rec-line);box-shadow:inset 3px 0 0 var(--rec)}
+.opt.is-bad{border-color:var(--bad-line);box-shadow:inset 3px 0 0 var(--bad)}
+.oh{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px}
+.oh b{font-weight:600}
+.tag{font:600 12px/1 ui-monospace,"Cascadia Code",Consolas,monospace;background:var(--tag);color:var(--fg);padding:4px 6px;border-radius:5px}
+.badge{font-size:12px;font-weight:600;padding:2px 7px;border-radius:999px}
+.badge.rec{color:var(--rec);background:var(--rec-bg)}
+.badge.bad{color:var(--bad);background:var(--bad-bg)}
+.to{margin:0;font-size:13px}
+.nt{margin:0;font-size:12.5px;color:var(--muted)}
+.nt b{color:var(--fg)}
+.pe{margin:0;font-size:12.5px;color:var(--muted);display:flex;gap:6px;align-items:baseline}
+.pk{flex:none;font-size:11px;font-weight:600;color:var(--fg);background:var(--tag);padding:1px 6px;border-radius:4px}
+/* ---- dark app mock (fixed colors: depicts the app's dark theme) ---- */
+.stage{min-width:0;overflow-x:auto;background:#0a0a0a;border:1px solid #242424;border-radius:6px;padding:10px;color:#e0e0e0;color-scheme:dark;font:12px/1.35 "Segoe UI Variable Text","Segoe UI","Malgun Gothic",system-ui,sans-serif;font-variant-numeric:tabular-nums}
+.stage-row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start}
+.state{margin:0;flex:none;display:flex;flex-direction:column;gap:5px}
+.state figcaption{color:#8a8a8a;font-size:11px}
+.m{color:#888888}
+.ok{color:#3fb950}.warn{color:#d29922}.danger{color:#f85149}
+.f-ok{background:#3fb950}.f-warn{background:#d29922}.f-danger{background:#f85149}
+.bar{display:inline-block;flex:none;width:4em;height:.6em;border-radius:2px;background:rgba(136,136,136,.25);overflow:hidden}
+.bar>i{display:block;height:100%}
+.ic{width:12px;height:12px;flex:none;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;display:inline-block}
+.ic14{width:14px;height:14px}
+.ic24{width:24px;height:24px}
+.vi{width:16px;height:16px;flex:none;display:inline-block;fill:none}
+.vi.claude{color:#d97757}.vi.codex{color:#c9c9c9}
+.pop{position:relative;display:flex;flex-direction:column;gap:8px;padding:8px 10px;background:#141414;border:1px solid #242424;border-radius:4px;box-shadow:0 2px 8px rgba(0,0,0,.3);white-space:nowrap;color:#e0e0e0}
+.pop.mini{gap:0}
+.corner{position:absolute;top:6px;right:8px;display:inline-flex}
+.vs{display:flex;flex-direction:column;gap:3px}
+.vh{display:flex;align-items:center;gap:.6em}
+.vn{display:inline-flex;align-items:center;gap:.35em;font-weight:600}
+.hx{display:inline-flex;align-items:center;gap:.45em}
+.pr{display:flex;align-items:center;gap:.5em;padding-left:.75em}
+.pl{color:#888888;min-width:3.5em}
+.rs{display:inline-flex;align-items:center;gap:.25em;color:#888888}
+.age{display:inline-flex;align-items:center;gap:.25em;color:#888888}
+.age.stale{color:#d29922}
+.lk{color:#4a9eff;text-decoration:underline}
+.tg{display:flex;align-items:center;column-gap:.8em;border-top:1px solid #242424;padding-top:6px}
+.cbl{display:inline-flex;align-items:center;gap:.3em;color:#e0e0e0}
+.cb{display:inline-flex;width:13px;height:13px;border-radius:2px;background:#2f7de1}
+.cb svg{width:13px;height:13px}
+.fr{margin-left:auto;padding-left:1.2em;display:inline-flex;align-items:center;gap:.45em}
+.rb{display:inline-flex;align-items:center;justify-content:center;padding:2px;border:1px solid #242424;border-radius:3px;color:#e0e0e0;background:transparent}
+.rb.sm{padding:1px}
+.rb.busy{color:#888888}
+.spin{animation:spin 1s linear infinite;transform-origin:50% 50%}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.spin{animation:none}}
+.slot{display:flex;align-items:center;gap:8px;width:max-content;padding:4px 6px;border:1px solid #1f3a5c;border-radius:2px}
+.sd{display:grid;grid-template-columns:16px auto 4.5em auto auto auto 4.5em auto auto;align-items:center;column-gap:.35em;row-gap:4px;white-space:nowrap}
+.sd .bar{width:100%}
+.sd .rs{margin-left:.1em}
+.sd .g2{margin-left:.6em}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);clip-path:inset(50%);white-space:nowrap}
+.trio{display:flex;flex-wrap:wrap;gap:10px}
+.ti{display:grid;grid-template-columns:auto auto;grid-template-rows:auto auto;column-gap:10px;align-items:center;padding:8px 10px;background:#0a0a0a;border:1px solid #242424;border-radius:6px;color:#e0e0e0;min-width:0}
+.ti .big{grid-row:1/3;display:inline-flex;color:#c8c8c8}
+.ti .sm12{display:inline-flex;color:#888888}
+.ti .tl{font-size:11.5px;line-height:1.3;color:#bdbdbd}
+code{font:12px ui-monospace,"Cascadia Code",Consolas,monospace;background:var(--code);padding:1px 4px;border-radius:4px}
+</style>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+<symbol id="i-timer-reset" viewBox="0 0 24 24"><path d="M10 2h4"/><path d="M12 14v-4"/><path d="M4 13a8 8 0 0 1 8-7 8 8 0 1 1-5.3 14L4 17.6"/><path d="M9 17H4v5"/></symbol>
+<symbol id="i-calendar-clock" viewBox="0 0 24 24"><path d="M16 14v2.2l1.6 1"/><path d="M16 2v4"/><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M3 10h5"/><path d="M8 2v4"/><circle cx="16" cy="16" r="6"/></symbol>
+<symbol id="i-clock-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6h4"/></symbol>
+<symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M5 22h14"/><path d="M5 2h14"/><path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22"/><path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2"/></symbol>
+<symbol id="i-rotate-ccw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></symbol>
+<symbol id="i-refresh-ccw" viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 16h5v5"/></symbol>
+<symbol id="i-alarm-clock" viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2"/><path d="M5 3 2 6"/><path d="m22 6-3-3"/><path d="M6.38 18.7 4 21"/><path d="M17.64 18.67 20 21"/></symbol>
+<symbol id="i-refresh-cw" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></symbol>
+<symbol id="v-claude" viewBox="0 0 16 16"><g stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><line x1="8" y1="1.4" x2="8" y2="4.3"/><line x1="8" y1="11.7" x2="8" y2="14.6"/><line x1="1.4" y1="8" x2="4.3" y2="8"/><line x1="11.7" y1="8" x2="14.6" y2="8"/><line x1="3.2" y1="3.2" x2="5.1" y2="5.1"/><line x1="10.9" y1="10.9" x2="12.8" y2="12.8"/><line x1="12.8" y1="3.2" x2="10.9" y2="5.1"/><line x1="5.1" y1="10.9" x2="3.2" y2="12.8"/></g><circle cx="8" cy="8" r="2.1" fill="currentColor"/></symbol>
+<symbol id="v-codex" viewBox="0 0 16 16"><polygon points="8,1.4 13.6,4.75 13.6,11.25 8,14.6 2.4,11.25 2.4,4.75" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><circle cx="8" cy="8" r="2" fill="currentColor"/></symbol>
+</svg>
+<div class="wrap">
+<header><h1>사용량 표시 시안</h1><p class="sub">두 가지를 고른다 — ① 팝업의 「몇 분 전」과 ⟳ 자리 ② 「리셋」 글자를 아이콘으로 바꿀지</p></header>
+<div class="legend">
+<span class="k"><b>% = 남은 양</b></span>
+<span class="k"><span class="sw" style="background:#3fb950"></span>50 초과</span>
+<span class="k"><span class="sw" style="background:#d29922"></span>20–50</span>
+<span class="k"><span class="sw" style="background:#f85149"></span>20 미만</span>
+<span class="k">기준 시각 9/30 10:43 · 값은 실제 조회 표본</span>
+<span class="k">아이콘에 마우스를 올리면 툴팁</span>
+</div>
+<section class="sec"><h2>① 「몇 분 전」 · 팝업 ⟳</h2>
+<p class="nt">호박색 기준 = 자동 갱신 간격 15분을 넘긴 값. 지금 코드는 30분이 지나야 「오래된 값」으로 친다 — 두 기준을 하나로 맞출지도 함께 정해야 한다. 24시간이 넘으면 「N분 전」 대신 날짜·시각으로 적는 것이 다른 곳의 관례다.</p>
+<div class="opts"><article class="opt">
+<div class="oh"><span class="tag">현재</span><b>줄마다 「1분 전」</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>지금 앱</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span><span class="m">1분 전</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span><span class="m">1분 전</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span><span class="m">1분 전</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span><span class="m">1분 전</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span><span class="m">1분 전</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span><span class="m">1분 전</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure></div></div>
+<p class="to">한 회사 값은 한 번에 오니 같은 「1분 전」이 줄마다 반복된다 — 시끄럽다.</p><p class="pe"><span class="pk">다른 곳은</span>줄마다 붙이는 곳은 없었다.</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">F1</span><b>회사마다 한 번 + 회사별 ⟳</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>평소</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure></div></div>
+<p class="to">조용하고 어느 회사가 언제 왔는지 바로 보인다. 오래된 값도 같은 회색이라 눈에 안 띈다.</p><p class="pe"><span class="pk">다른 곳은</span>가장 흔한 모양 — CodexBar·Orca·Paseo 가 회사 머리에 한 번, 옅은 글자로 둔다.</p><p class="nt">회사별 ⟳ 는 9/29 결정(⟳ 하나)을 되돌린다. <b>F1-b</b> = 모양은 같고 어느 ⟳ 를 눌러도 켠 회사 전부를 새로 받는다 — 그러면 ⟳ 를 둘 둘 이유가 약하다.</p>
+</article>
+<article class="opt wide">
+<div class="oh"><span class="tag">F2</span><b>오래됐을 때만 + ⟳ 하나(오른쪽 위)</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>평소 — 아무것도 없음</figcaption><div class="pop has-corner"><span class="corner"><span class="rb sm" title="사용량 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure><figure class="state"><figcaption>오래됨 — Codex 18분 전</figcaption><div class="pop has-corner"><span class="corner"><span class="rb sm" title="사용량 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age stale" title="자동 갱신 간격(15분)보다 오래된 값"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>18분 전</span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure></div></div>
+<p class="to">평소엔 가장 깨끗하다. 대신 「방금 받은 값」이라는 확인이 안 보이고, 표시가 갑자기 생겼다 사라진다.</p><p class="pe"><span class="pk">다른 곳은</span>Codex CLI <code>/status</code> 는 15분 지나면 흐린 경고, CodexBar(Linux)는 max(10분, 간격×2) 지나면 「out of date」.</p>
+</article>
+<article class="opt wide">
+<div class="oh"><span class="tag">F3a</span><b>늘 한 번(history 아이콘), 오래되면 호박색 + 회사별 ⟳</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>평소</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure><figure class="state"><figcaption>오래됨 — Codex 18분 전</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age stale" title="자동 갱신 간격(15분)보다 오래된 값"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>18분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure></div></div>
+<p class="to">사용자가 본 모양. 확인(회색)과 경고(호박색)를 한 자리에서 한다. 흠: 반시계 화살표가 바로 옆 ⟳ 와 짝지어 「되돌리기·새로고침」 단추 쌍으로 읽힐 수 있다.</p><p class="pe"><span class="pk">다른 곳은</span>F1(늘 옅게)과 F2(오래되면 경고)를 합친 모양.</p>
+</article>
+<article class="opt is-rec wide">
+<div class="oh"><span class="tag">F3b</span><b>늘 한 번(시계 아이콘 · 또는 아이콘 없이), 오래되면 호박색 + 회사별 ⟳</b><span class="badge rec">추천 후보</span></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>평소 — clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure><figure class="state"><figcaption>오래됨 — Codex 18분 전</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age stale" title="자동 갱신 간격(15분)보다 오래된 값"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>18분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span></div></div></figure><figure class="state"><figcaption>아이콘 없이 — 옅은 글자만</figcaption><div class="pop mini"><div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때">1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div></div></figure></div></div><div class="stage"><div class="stage-row"><figure class="state"><figcaption>갱신 중 ① 시간 자리에 「갱신 중」</figcaption><div class="pop mini"><div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="m">갱신 중</span><span class="rb sm busy" title="갱신 중"><svg class="ic spin" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div></div></figure><figure class="state"><figcaption>갱신 중 ② 시간은 그대로, ⟳ 만 돈다</figcaption><div class="pop mini"><div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm busy" title="갱신 중"><svg class="ic spin" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div></div></figure></div></div>
+<p class="to">F3a 와 같은 동작, 화살표 없는 시계라 ⟳ 와 안 겹친다. 비용: ⟳ 가 회사 수만큼.</p><p class="pe"><span class="pk">다른 곳은</span>CodexBar 는 갱신 중에 그 자리 글자를 「Refreshing…」으로 바꾼다 = ①. 지금 앱도 머리에 「갱신 중」을 띄운다.</p><p class="nt">추천 이유: 흔한 자리(회사 머리 한 번) + 오래됨 경고 + ⟳ 와 모양 충돌 없음. 갱신 중은 ① 을 권한다.</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">F4</span><b>팝업 전체에 한 번(오른쪽 아래)</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>평소</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+<div class="pr"><span class="pl">Fable</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/4 12:00 (4일 1시간 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+<div class="pr"><span class="pl">gpt-reserve</span><span class="bar"><i class="f-ok" style="width:100%"></i></span><span class="ok">100%</span><span class="rs">리셋 10/7 10:43 (7일 뒤)</span></div>
+<div><span class="lk">사용량 페이지 ↗</span></div>
+</section><div class="tg"><span class="m">슬롯에 표시:</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Claude</span><span class="cbl"><span class="cb"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.8 6.3l2.1 2.1 4.3-4.6" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></span>Codex</span><span class="fr"><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="사용량 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div></div></figure></div></div>
+<p class="to">글자가 가장 적다. 두 회사를 따로 받으면(한쪽 실패·한쪽만 켬·한쪽만 다시 받음) 한 줄 시간이 틀린다 — 둘을 늘 같이 받을 때만 정확하다.</p><p class="pe"><span class="pk">다른 곳은</span>조사한 곳은 전부 회사별이었다 — 전체 한 번은 나오지 않았다.</p>
+</article></div></section>
+<section class="sec"><h2>② 「리셋」 표시</h2>
+<p class="nt">아이콘은 글자와 같은 회색·12px. 팝업 머리엔 ①의 몇 분 전 아이콘 두 가지(Claude = history, Codex = clock-3)와 ⟳ 를 함께 그려 겹침이 보이게 했다. 3단(<span style="font-variant-numeric:tabular-nums">63·35</span>)은 리셋 글자가 없어 영향 없음.</p>
+<p class="pe"><span class="pk">다른 곳은</span>시계·모래시계 아이콘 하나만으로 리셋을 표시한 곳은 조사에서 없었다 — R1–R3·R6 은 새 시도다.</p>
+<div class="opts list"><article class="opt">
+<div class="oh"><span class="tag">R0</span><b>현재 — 「리셋」 글자</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs">리셋 11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs">리셋 10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs">리셋 11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs">리셋 10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">뜻이 가장 분명하다. 두 글자가 칸마다 반복돼 싸 보인다.</p><p class="pe"><span class="pk">다른 곳은</span>⟳ 새로고침 단추가 있는 Orca·Paseo 는 리셋에 낱말을 쓴다.</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">R1</span><b>timer-reset (타이머 + 되돌림 화살표)</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-timer-reset"/></svg><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">뜻(「타이머 다시」)은 맞다. 왼쪽 아래 되돌림 화살표가 history 아이콘과 닮았다 — 충돌이 낮지만 0 은 아니다.</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">R2</span><b>calendar-clock (달력 + 시계)</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">「예정된 날짜·시각」으로 읽힌다. 12px 에선 안쪽 시계가 뭉개지고, 오늘 시각에도 달력이 붙어 어색하다.</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">R2b</span><b>오늘 = clock-3 · 다른 날 = calendar-clock</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-calendar-clock"/></svg><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">날짜가 붙었는지를 아이콘이 한 번 더 알려 준다. 대신 오늘 시계(clock-3)가 F3b 의 몇 분 전 아이콘과 같은 모양이 된다.</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt is-rec">
+<div class="oh"><span class="tag">R3</span><b>hourglass (모래시계)</b><span class="badge rec">추천 후보</span></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">원도 화살표도 없는 유일한 모양이라 몇 분 전 아이콘·⟳ 와 12px 에서도 안 섞인다. 「다 떨어지면 다시 찬다」로 읽힌다. 흠: 옛 「기다리는 중」 커서와 닮았다.</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">R6</span><b>alarm-clock (자명종)</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-alarm-clock"/></svg><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">「이때 울린다」 — 정해진 시각 느낌은 맞다. 원 + 바늘이라 F3b 의 시계와 닮았다(다리·종으로만 갈린다).</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt is-bad">
+<div class="oh"><span class="tag">R4</span><b>rotate-ccw (반시계 화살표)</b><span class="badge bad">나쁜 예</span></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">⟳ 새로고침의 거울 모양이고, history 아이콘은 이 아이콘에 시곗바늘만 더한 것이다(선이 같다). refresh-ccw 도 ⟳ 를 뒤집은 것이라 같은 문제.</p><p class="pe"><span class="pk">다른 곳은</span>↻ 를 리셋에 쓴 곳은 새로고침 단추가 없거나(t3code 모바일), 둘 다 같은 화살표라 섞인다(Usage4Claude).</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">R5</span><b>표시 없이 시각만</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><span class="sr">리셋 </span>11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><span class="sr">리셋 </span>10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><span class="sr">리셋 </span>11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><span class="sr">리셋 </span>10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><span class="sr">리셋 </span>11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><span class="sr">리셋 </span>10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">가장 조용하다. 무슨 시각인지는 툴팁과 익숙함에 기댄다 — 처음 보면 「받은 시각」으로 오해할 수 있다.</p><p class="pe"><span class="pk">다른 곳은</span>CodexBar 메뉴 막대는 「in 4d 1h」처럼 낱말 없이 쓰고, 낱말은 스크린리더용 이름에만 둔다.</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article>
+<article class="opt">
+<div class="oh"><span class="tag">R7</span><b>「~」만 붙이기 (~11:29 = 11:29까지)</b></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>작은 표시 (1단)</figcaption><div class="slot"><div class="sd"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><span class="sr">리셋 </span>~11:29</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><span class="sr">리셋 </span>~10/4 11:59</span><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span class="m">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><span class="sr">리셋 </span>~11:32</span><span class="m g2">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><span class="sr">리셋 </span>~10/4 02:10</span></div><span class="rb" title="사용량 새로고침"><svg class="ic ic14" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></div></figure><figure class="state"><figcaption>팝업 — 머리: Claude = history · Codex = clock-3</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><span class="sr">리셋 </span>~11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><span class="sr">리셋 </span>~10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section>
+<section class="vs">
+<div class="vh"><span class="vn"><svg class="vi codex" aria-hidden="true" focusable="false"><use href="#v-codex"/></svg><span>Codex</span></span><span class="m">플랜: plus</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Codex 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:86%"></i></span><span class="ok">86%</span><span class="rs" title="리셋 11:32"><span class="sr">리셋 </span>~11:32 (48분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:33%"></i></span><span class="warn">33%</span><span class="rs" title="리셋 10/4 02:10"><span class="sr">리셋 </span>~10/4 02:10 (3일 15시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">글자 하나로 「까지」를 준다 — R5 보다 뜻이 한 발 더 분명하다. 「리셋」이 아니라 「마감」으로 읽힐 수도 있다.</p><p class="pe"><span class="pk">다른 곳은</span>CodexBar 식(낱말 없이, 뜻은 툴팁·스크린리더에)과 같은 갈래.</p><p class="nt">읽기: 툴팁·스크린리더 모두 「리셋 11:29」 (보이지 않는 글자 「리셋」을 함께 싣는다)</p>
+</article></div></section>
+<section class="sec"><h2>함께 보기 — 세 아이콘 나란히 (크게 · 실제 12px)</h2><div class="opts one">
+<article class="opt is-rec"><div class="oh"><span class="tag">F3b + R3</span><b>추천 조합</b><span class="badge rec">추천 후보</span></div>
+<div class="trio"><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg></span><span class="tl">몇 분 전<br>(언제 받았나)</span></span><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg></span><span class="tl">리셋<br>(언제 다시 차나)</span></span><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span><span class="tl">⟳ 새로고침<br>(지금 다시 받기)</span></span></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>팝업</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-clock-3"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">셋 다 모양이 다르다: 시계 / 모래시계 / 화살표 둘. 화살표는 누르는 단추(⟳) 하나에만 있다.</p>
+</article>
+<article class="opt"><div class="oh"><span class="tag">F3a + R3</span><b>사용자가 본 history 로</b></div>
+<div class="trio"><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-history"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg></span><span class="tl">몇 분 전</span></span><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg></span><span class="tl">리셋</span></span><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span><span class="tl">⟳ 새로고침</span></span></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>팝업</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-hourglass"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">리셋과는 안 겹친다. 남는 흠은 머리의 history 와 ⟳ 가 나란히 「화살표 둘」로 보이는 것 하나.</p>
+</article>
+<article class="opt is-bad"><div class="oh"><span class="tag">F3a + R4</span><b>피할 조합</b><span class="badge bad">나쁜 예</span></div>
+<div class="trio"><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-history"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg></span><span class="tl">몇 분 전</span></span><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg></span><span class="tl">리셋(R4)</span></span><span class="ti"><span class="big"><svg class="ic ic24" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span><span class="sm12"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span><span class="tl">⟳ 새로고침</span></span></div>
+<div class="stage"><div class="stage-row"><figure class="state"><figcaption>팝업</figcaption><div class="pop"><section class="vs">
+<div class="vh"><span class="vn"><svg class="vi claude" aria-hidden="true" focusable="false"><use href="#v-claude"/></svg><span>Claude</span></span><span class="m">플랜: max</span><span class="hx"><span class="m">·</span><span class="age" title="이 값을 받은 때"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-history"/></svg>1분 전</span><span class="rb sm" title="Claude 새로고침"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-refresh-cw"/></svg></span></span></div>
+<div class="pr"><span class="pl">5시간</span><span class="bar"><i class="f-ok" style="width:63%"></i></span><span class="ok">63%</span><span class="rs" title="리셋 11:29"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>11:29 (46분 뒤)</span></div>
+<div class="pr"><span class="pl">주간</span><span class="bar"><i class="f-warn" style="width:35%"></i></span><span class="warn">35%</span><span class="rs" title="리셋 10/4 11:59"><svg class="ic" aria-hidden="true" focusable="false"><use href="#i-rotate-ccw"/></svg><span class="sr">리셋 </span>10/4 11:59 (4일 1시간 뒤)</span></div>
+
+</section></div></figure></div></div>
+<p class="to">셋 다 「원 + 화살표」 — 12px 에선 어느 게 누르는 단추인지 모양으로 못 가른다.</p>
+</article>
+</div></section>
+</div>

@@ -53,18 +53,19 @@ describe('슬롯 메뉴 기여 — 가시성 hideOn (ADR-0067)', () => {
     expect(allIds('agent')).toContain('slot.assignRunningAgent')
   })
 
-  it('소스 슬롯(agent_list/preset_palette)엔 hideOn 으로 빠진다', () => {
+  it('소스 슬롯(agent_list/preset_palette)·사용량 슬롯엔 hideOn 으로 빠진다', () => {
     expect(allIds('agent_list')).not.toContain('slot.assignRunningAgent')
     expect(allIds('preset_palette')).not.toContain('slot.assignRunningAgent')
+    expect(allIds('usage')).not.toContain('slot.assignRunningAgent')
   })
 })
 
 describe('스폰 정리 — "생성" 제거 회귀 (ADR-0067)', () => {
-  it('empty "새 콘텐츠" 서브메뉴는 트리·팔레트만(생성 제거)', () => {
+  it('empty "새 콘텐츠" 서브메뉴는 트리·팔레트·사용량만(생성 제거)', () => {
     const container = buildSlotMenu('empty').find(i => i.id === 'container:새 콘텐츠')
     expect(container).toBeDefined()
     const childIds = container!.children!.map(c => c.id)
-    expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.presetPalette'])
+    expect(childIds).toEqual(['slot.fill.agentList', 'slot.fill.presetPalette', 'slot.fill.usage'])
     expect(childIds).not.toContain('slot.createAgentHere')
   })
 })

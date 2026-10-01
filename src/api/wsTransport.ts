@@ -10,7 +10,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
-import type { ConnectionState } from './agentClient'
+import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import {
   decodeOutputFrame,
@@ -440,6 +440,11 @@ export class WsTransport implements Transport {
     }
     entry.inflight = { gen, truncated: false, epoch: undefined, continuesConversation: false, replayFrom: 0 }
     return Promise.resolve(gen)
+  }
+
+  // 셸 캐시가 없는 carrier — 데몬 직결이라 사용량 구독(`UsageSubscribe`)을 보내는 주체도 없다. 운영은 Tauri 고정(ADR-0036).
+  getUsageSnapshot(): Promise<UsageSnapshotPull> {
+    return Promise.resolve({ socketEpoch: 0, snapshots: [] })
   }
 
   // 데몬 wire 이벤트를 관측해 replay 경계(replayBoundary)를 합성한다(legacy 직결 single-flight). SubscribeAck

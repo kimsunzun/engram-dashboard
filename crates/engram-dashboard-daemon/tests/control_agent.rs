@@ -20,7 +20,7 @@ use engram_dashboard_command::{CommandEnvelope, CommandReply};
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus, CommandDeliveries};
 use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
-use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases};
+use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
@@ -371,6 +371,7 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
             manager.clone(),
             broadcast_slot.clone(),
             Arc::new(NoInputLeases),
+            Arc::new(NoUsageLimits),
         )));
     }
 
@@ -1242,7 +1243,9 @@ async fn the_listing_carries_both_sources_with_the_help_bytes_intact() {
             "agent.new",
             "agent.rename",
             "agent.spawn",
-            "tab.create"
+            "tab.create",
+            "usage.get",
+            "usage.refresh"
         ],
         "두 출처가 이름순 한 목록으로 합쳐진다: {body}"
     );

@@ -34,11 +34,13 @@ import type {
   OutputSubscription,
   QueuedInputListing,
   ReplayLiveInfo,
+  UsageSnapshotPull,
   ViewOutputState,
   ViewPhase,
   ViewResetFn,
 } from './agentClient'
 import type { QueuedInputRow } from '../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
 import type { InboundMessage, Transport } from './transport'
 import type {
   AgentBackendKind,
@@ -178,6 +180,7 @@ export class ProtocolClient implements AgentClient {
   private restoreCbs = new Set<(report: RestoreReport) => void>()
   private profileListCbs = new Set<(profiles: AgentProfile[]) => void>()
   private presetListCbs = new Set<(presets: Preset[]) => void>()
+  private usageCbs = new Set<(snapshot: UsageLimitSnapshot, socketEpoch: number) => void>()
 
   private offMessage: (() => void) | null = null
   private offState: (() => void) | null = null
@@ -791,6 +794,13 @@ export class ProtocolClient implements AgentClient {
       for (const cb of this.presetListCbs) cb(presets)
       return
     }
+    if ('UsageLimitsUpdated' in msg) {
+      // `socketEpoch` 는 셸 carrier 가 곁들인다 — 직결 carrier 가 올린 데몬 프레임엔 없어 0(= 표식 모름)으로 넘긴다.
+      const u = msg.UsageLimitsUpdated as { snapshot: UsageLimitSnapshot; socketEpoch?: unknown }
+      const socketEpoch = typeof u.socketEpoch === 'number' ? u.socketEpoch : 0
+      for (const cb of this.usageCbs) cb(u.snapshot, socketEpoch)
+      return
+    }
     if ('Snapshot' in msg) {
       const s = msg.Snapshot as { request_id: string; agent_id: string; chunks: unknown[] }
       this.resolvePending(s.request_id, s.chunks)
@@ -1120,6 +1130,14 @@ export class ProtocolClient implements AgentClient {
     return this.sendCommand<void>((request_id) => ({ RenamePreset: { preset_id: id, name, request_id } }))
   }
 
+  // ── 사용량(TRD S21 usage-limit-slot §1-8) ──────────────────────────────────────
+  refreshUsageLimits(vendor: AgentBackendKind): Promise<void> {
+    return this.sendCommand<void>((request_id) => ({ RefreshUsageLimits: { vendor, request_id } }))
+  }
+  getUsageSnapshot(): Promise<UsageSnapshotPull> {
+    return this.transport.getUsageSnapshot()
+  }
+
   // ── 상태/목록/복원/프로필 이벤트 — 레지스트리 등록 + remove disposer ──────────────────
   onAgentListUpdated(cb: (agents: AgentInfo[]) => void): () => void {
     this.agentListCbs.add(cb)
@@ -1149,6 +1167,12 @@ export class ProtocolClient implements AgentClient {
     this.presetListCbs.add(cb)
     return () => {
       this.presetListCbs.delete(cb)
+    }
+  }
+  onUsageLimitsUpdated(cb: (snapshot: UsageLimitSnapshot, socketEpoch: number) => void): () => void {
+    this.usageCbs.add(cb)
+    return () => {
+      this.usageCbs.delete(cb)
     }
   }
 

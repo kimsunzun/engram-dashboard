@@ -14,8 +14,8 @@
 //! 선언 매크로의 타입 알파벳이 `Uuid`·중첩 enum·재귀 타입을 못 실어서 생긴 번역이다 — 매크로 제약이
 //! 원인이고 계약을 새로 만든 것이 아니다.
 //! - **id 는 전부 `String`** 이고 핸들러가 파싱한다(형식 불량 = `INVALID_ARGUMENT`).
-//! - **`SlotContent` 는 태그 + `agent_id` 두 칸으로 펴서 받는다** — 매크로의 enum 은 필드 없는 variant 만
-//!   싣는다. 조합 검사는 [`slot_content`] 가 한다.
+//! - **`SlotContent` 는 태그 + `agent_id` · `show_claude` · `show_codex` 곁칸으로 펴서 받는다** — 매크로의
+//!   enum 은 필드 없는 variant 만 싣는다. 조합 검사는 [`slot_content`] 가 한다.
 //! - **`get_view` 는 선언에 없다** — 반환이 `ViewSnapshot`(재귀 `LayoutNode`)이고 매크로가 재귀 타입에서
 //!   컴파일 에러로 멈춘다. 그래서 v1 조회는 `tab.list`·`window.list`·`slot.resolveSpatial` 셋이다.
 //!
@@ -55,6 +55,8 @@ use crate::ui_settings::UiSettingsRefresh;
 //   없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만 만지던 화면 명령 둘은 ADR-0167 이
 //   내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고
 //   레지스트리에 이름을 싣지 않는다 — ADR-0227).
+// ★세대 9 = `layout.setSlotContent` 가 사용량 슬롯(`content=Usage` + `show_claude`·`show_codex`)을 받는 세대★
+//   (TRD S21 usage-limit-slot §1-7) — 이름은 그대로고 인자 어휘와 칸이 는 세대다.
 // ★세대 8 = 분할 비율 명령 둘(`split.setRatio`·`split.list`)이 든 세대★(ADR-0227).
 // ★세대 7 = 그 `backend` 칸이 `"codex"` 를 **실제로 만드는** 세대★(2026-09-22 · ADR-0219) — 인자의
 //   **타입도 낱말 집합도 그대로**고(wire 어휘는 claude·codex 둘 그대로, 모르는 낱말은 여전히 모르는
@@ -71,7 +73,7 @@ use crate::ui_settings::UiSettingsRefresh;
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 8;
+    catalog_version: 9;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -102,12 +104,13 @@ declare_commands! {
         Fallback,
     }
 
-    /// 슬롯에 무엇을 담나 — `Agent` 만 `agent_id` 를 함께 받는다.
+    /// 슬롯에 무엇을 담나 — `Agent` 만 `agent_id` 를, `Usage` 만 `show_claude`·`show_codex` 를 함께 받는다.
     enum SlotContentKind {
         Empty,
         Agent,
         AgentList,
         PresetPalette,
+        Usage,
     }
 
     /// 비율 쓰기의 결말 — `Applied` = 바꿨다 · `Unchanged` = 자른 값이 지금 값과 같다(무변경) ·
@@ -226,7 +229,7 @@ declare_commands! {
     /// 분할(구분선) 하나의 비율을 정한다. ratio = a 쪽(왼쪽/위) 칸의 몫 — 창 전체가 아니라 그 분할이 나누는
     /// 영역 안의 몫이고, a 쪽에 칸이 여럿이면 그 묶음 전체의 몫이다. 0.3 이면 그 영역의 30% 를 왼쪽(위아래
     /// 분할이면 위)이 갖는다. split_id 는 split.list 가 준다.
-    /// 범위 밖 값은 오류가 아니다: 셸이 0.1~0.9 로 자르고, 그 창의 크기를 알면 두 쪽이 각각 화면 최소 칸
+    /// 범위 밖 값은 오류가 아니다: 셸이 0.01~0.99 로 자르고, 그 창의 크기를 알면 두 쪽이 각각 화면 최소 칸
     /// 크기 이상이 되게 한 번 더 자른 뒤 그 값을 적용하고 답의 ratio 로 돌려준다.
     /// outcome — Applied = 바꿨다 · Unchanged = 그렇게 자른 값이 지금 값과 같아 바꾼 것이 없다 ·
     /// TooSmall = 분할이 너무 작아서(또는 그 값이면 어떤 칸이 사라져서) 손대지 않았다. Applied 가 아니면
@@ -299,6 +302,8 @@ declare_commands! {
     } -> ok SlotAssignAgentOk {} errors [CONFLICT];
 
     /// 슬롯이 무엇을 보여줄지 바꾼다. content=Agent 일 때만 agent_id 를 함께 준다.
+    /// content=Usage 일 때만 show_claude·show_codex(그 회사를 보일지)를 줄 수 있다 — 뺀 칸은 그 슬롯이
+    /// 이미 Usage 면 지금 값을 그대로 두고, 아니면 true 다.
     #[effect(Write)]
     #[since(1)]
     "layout.setSlotContent" => args LayoutSetSlotContentArgs {
@@ -306,6 +311,8 @@ declare_commands! {
         slot_id: String,
         content: SlotContentKind,
         agent_id: Option<String>,
+        show_claude: Option<bool>,
+        show_codex: Option<bool>,
     } -> ok LayoutSetSlotContentOk {} errors [CONFLICT];
 
     /// 에이전트를 새로 띄우고 그 자리에 배치한다(스폰 + 필요하면 새 탭 + 슬롯 배정).
@@ -763,15 +770,34 @@ fn verb_set_slot_content(
 ) -> Result<LayoutSetSlotContentOk, CommandError> {
     let view = uuid_arg("view_id", &args.view_id)?;
     let slot = uuid_arg("slot_id", &args.slot_id)?;
-    let content = slot_content(args.content, args.agent_id.as_deref())?;
-    apply::set_slot_content(
-        &ports.state,
-        ports.subs.as_ref(),
-        ports.events.as_ref(),
-        view,
-        slot,
-        content,
-    )
+    let write = slot_content(
+        args.content,
+        args.agent_id.as_deref(),
+        args.show_claude,
+        args.show_codex,
+    )?;
+    match write {
+        SlotContentWrite::Replace(content) => apply::set_slot_content(
+            &ports.state,
+            ports.subs.as_ref(),
+            ports.events.as_ref(),
+            view,
+            slot,
+            content,
+        ),
+        SlotContentWrite::Usage {
+            show_claude,
+            show_codex,
+        } => apply::set_usage_slot(
+            &ports.state,
+            ports.subs.as_ref(),
+            ports.events.as_ref(),
+            view,
+            slot,
+            show_claude,
+            show_codex,
+        ),
+    }
     .map_err(not_applied)?;
     Ok(LayoutSetSlotContentOk {})
 }
@@ -914,29 +940,59 @@ fn uuid_arg_from(field: &str, given: &str, source: &str) -> Result<Uuid, Command
     })
 }
 
-/// 태그 + `agent_id` 두 칸 → 하나의 [`SlotContent`].
+/// 버스 한 번이 슬롯에 쓰는 것. `Usage` 는 뺀 칸을 슬롯의 지금 값으로 채워야 해서 ViewManager 락 안에서야
+/// [`SlotContent`] 가 된다(`apply::set_usage_slot`).
+enum SlotContentWrite {
+    Replace(SlotContent),
+    Usage {
+        show_claude: Option<bool>,
+        show_codex: Option<bool>,
+    },
+}
+
+/// 태그 + 곁칸(`agent_id` · `show_claude`·`show_codex`) → 슬롯에 쓸 것.
 ///
 /// ★어긋난 조합을 조용히 고치지 않는다★: `Agent` 인데 id 가 없으면 빈 슬롯이 되고, `Empty` 인데 id 가
-/// 붙어 있으면 호출자는 그 에이전트가 붙은 줄 안다. 둘 다 반려한다.
+/// 붙어 있으면 호출자는 그 에이전트가 붙은 줄 안다. `Usage` 가 아닌데 `show_*` 가 붙어 있으면 호출자는 그
+/// 회사를 켠 줄 안다. 셋 다 반려한다.
 fn slot_content(
     kind: SlotContentKind,
     agent_id: Option<&str>,
-) -> Result<SlotContent, CommandError> {
+    show_claude: Option<bool>,
+    show_codex: Option<bool>,
+) -> Result<SlotContentWrite, CommandError> {
     let agent_id = optional_text("agent_id", agent_id)?;
-    match (kind, agent_id) {
-        (SlotContentKind::Agent, Some(id)) => Ok(SlotContent::Agent {
+    let shows = show_claude.is_some() || show_codex.is_some();
+    let replace = match (kind, agent_id) {
+        (SlotContentKind::Agent, Some(id)) => SlotContent::Agent {
             agent_id: id.to_string(),
-        }),
-        (SlotContentKind::Agent, None) => Err(CommandError::invalid_argument(
-            "content=Agent needs agent_id — use slot.assignAgent if you only want to attach a running agent",
-        )),
-        (_, Some(_)) => Err(CommandError::invalid_argument(
-            "agent_id only applies to content=Agent, so drop this field",
-        )),
-        (SlotContentKind::Empty, None) => Ok(SlotContent::Empty),
-        (SlotContentKind::AgentList, None) => Ok(SlotContent::AgentList),
-        (SlotContentKind::PresetPalette, None) => Ok(SlotContent::PresetPalette),
+        },
+        (SlotContentKind::Agent, None) => {
+            return Err(CommandError::invalid_argument(
+                "content=Agent needs agent_id — use slot.assignAgent if you only want to attach a running agent",
+            ))
+        }
+        (_, Some(_)) => {
+            return Err(CommandError::invalid_argument(
+                "agent_id only applies to content=Agent, so drop this field",
+            ))
+        }
+        (SlotContentKind::Usage, None) => {
+            return Ok(SlotContentWrite::Usage {
+                show_claude,
+                show_codex,
+            })
+        }
+        (SlotContentKind::Empty, None) => SlotContent::Empty,
+        (SlotContentKind::AgentList, None) => SlotContent::AgentList,
+        (SlotContentKind::PresetPalette, None) => SlotContent::PresetPalette,
+    };
+    if shows {
+        return Err(CommandError::invalid_argument(
+            "show_claude/show_codex only apply to content=Usage, so drop these fields",
+        ));
     }
+    Ok(SlotContentWrite::Replace(replace))
 }
 
 // ★단위 테스트가 이 파일에 없는 것은 「둘 수 없어서」가 아니라 「아직 안 두어서」다★. 이 패키지의

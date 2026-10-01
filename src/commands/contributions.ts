@@ -13,6 +13,7 @@ import './presetCommands'
 import './agentCommands'
 import './scrollCommands'
 import './chatCommands'
+import './usageCommands'
 
 import { validateSlotMenuContributions } from './slotMenu'
 

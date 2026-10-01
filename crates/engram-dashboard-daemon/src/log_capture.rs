@@ -3,21 +3,22 @@
 //! ★왜 레벨을 둘 다 잡나★: 이것을 쓰는 시험들이 재는 것은 「어느 레벨로 냈나」가 아니라 「그 사건이
 //! 남았나 / 그 필드에 무엇이 갔나」다. 레벨별로 함수를 쪼개면 같은 질문에 하네스가 둘 생긴다.
 //!
-//! 진입점: [`capture_loud`](동기 본문) · [`capture_loud_async`](future 본문).
+//! 진입점: [`capture_loud`](동기 본문) · [`capture_loud_async`](future 본문) · [`capture_levels`](`≤DEBUG` +
+//! 레벨 — 아래 「덮는 범위」의 둘째 갈래).
 //!
 //! ## ★덮는 범위 — 「이 crate 의 로그 관측 하네스는 여기 하나」가 **아니다**★
 //!
-//! 이 모듈이 흡수한 것은 **WARN|ERROR 을 레벨 구분 없이 필드 텍스트로** 모으는 갈래 하나뿐이다. 손으로 쓴
-//! 구독자가 셋 남아 있고, 셋 다 **레벨 축이 달라** 이 함수로 그대로 갈아탈 수 없다:
+//! 이 모듈이 흡수한 것은 두 갈래다 — **WARN|ERROR 을 레벨 구분 없이 필드 텍스트로**([`capture_loud`]) · **`≤DEBUG`
+//! 를 레벨과 함께**([`capture_levels`]). 손으로 쓴 구독자가 둘 남아 있고, 둘 다 **레벨 축이 달라** 이 함수들로
+//! 그대로 갈아탈 수 없다:
 //!
 //! - `command_roster` 의 `capture_info` — INFO **만** 잡는다(다른 레벨이 섞이면 그 시험이 재는 「그 한 줄」이 흐려진다).
-//! - `connection_core` 의 `capture_logs` — `≤DEBUG` 를 잡고 **레벨을 값으로 함께** 돌려준다(레벨 자체가 단언 대상이다).
 //! - `control::mod` 의 `WarnCollector` — WARN **만** 잡는다(ERROR 이 섞이면 그 시험이 보는 「그 WARN 이 났나」가
 //!   흐려진다). 시험 함수 **안**에 사는 유일한 사본이다.
 //!
 //! ★합치려면 레벨 술어와 반환 모양을 인자로 열어야 하고, 그건 「같은 질문에 하네스 하나」를 사는 대신
 //! **하네스 자체를 설정 가능한 것으로** 만드는 거래다★ — 이 라운드에서 그 거래를 하지 않았다. 여기 새 갈래를
-//! 더할 때는 위 셋 중 하나로 되는지 먼저 볼 것(넷째 사본이 최악이다).
+//! 더할 때는 위 넷(이 모듈 둘 + 남은 사본 둘) 중 하나로 되는지 먼저 볼 것(다섯째 사본이 최악이다).
 //!
 //! ## ★관측 조건 — 이것을 모르면 **빈손이 실패로 보인다**★
 //!
@@ -100,4 +101,45 @@ pub(crate) fn capture_loud_async<F: std::future::Future<Output = ()>>(body: F) -
             .block_on(body);
     });
     lines
+}
+
+/// 동기 본문이 낸 `≤DEBUG` 이벤트를 **레벨과 함께** 모은다.
+///
+/// ★DEBUG 까지 켜는 이유★: 「조용하다」를 WARN 만 보고 판정하면 **debug 갈래로 떨어진 것**과 **아무 갈래에도 안
+/// 간 것**이 같아 보인다. `with_default` 는 이 스레드에만 걸려 병렬 시험과 섞이지 않는다 — 단 위 「관측 조건」①이
+/// 그대로 걸린다(그 callsite 를 때리는 시험은 전부 capture 안에서 돌린다).
+pub(crate) fn capture_levels(body: impl FnOnce()) -> Vec<(tracing::Level, String)> {
+    struct Leveled {
+        lines: Arc<Mutex<Vec<(tracing::Level, String)>>>,
+    }
+    impl tracing::subscriber::Subscriber for Leveled {
+        fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+            *m.level() <= tracing::Level::DEBUG
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut buf = String::new();
+            event.record(&mut Visit(&mut buf));
+            self.lines
+                .lock()
+                .expect("lines poisoned")
+                .push((*event.metadata().level(), buf));
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+    }
+
+    let lines: Arc<Mutex<Vec<(tracing::Level, String)>>> = Arc::default();
+    tracing::subscriber::with_default(
+        Leveled {
+            lines: lines.clone(),
+        },
+        body,
+    );
+    let captured = lines.lock().expect("lines poisoned").clone();
+    captured
 }
