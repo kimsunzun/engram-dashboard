@@ -3,6 +3,12 @@
 //! ★relay 관측 방식(honest note)★: 산 json 에이전트를 실제 스폰하고 write_input 이 send_input 성공 직후
 //!   **동기**로 내는 입력 에코를 OutputSink 로 잡는다. 이 에코는 claude 왕복 이전에 발행되므로 claude
 //!   응답 지연·인증과 무관하게 결정적이다.
+//!
+//! ★실 claude 축은 CI 에서 돌지 않는다★(`ci.yml` 의 `--skip` 목록 — 러너에 claude 가 없다). 그래서 로컬에서는
+//!   관측 실패를 통과가 아니라 **실패**로 낸다 — 통과로 넘기면 이 축을 확인하는 곳이 아무 데도 남지 않는다
+//!   (사용자 결정 2026-10-02 · T-46). 예외 = `c1_park_then_spawn_auto_delivers` 는 `#[ignore]`(사유 = 그 속성).
+//!   ★claude 부재는 `require_claude` 가 잡지 못한다★ — 스폰은 성공하고 프로세스가 뒤늦게 죽으므로 그때는
+//!   뒤의 단언이 실패한다.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -78,23 +84,14 @@ fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
     cond()
 }
 
-/// ★CI 강제 knob(M2)★: cargo 는 test 의 stdout 을 기본 캡처해 삼키므로, loud print 를 해도 통과 요약엔
-///   "ok" 만 남아 skip 이 조용히 새어 나간다. env `ENGRAM_TEST_REQUIRE_CLAUDE=1` 이 설정돼 있으면(=
-///   claude 가 반드시 있어야 하는 CI 레인) skip 을 **panic 으로 승격**해 테스트를 실제로 실패시킨다 —
-///   "silent skip 금지" 강제. 미설정(로컬 개발 기본)이면 기존대로 loud print 후 조용히 Ok 로 넘어간다.
-fn skip_no_claude(test: &str) {
-    let line = format!(
-        "SKIPPED [{test}]: claude(stream-json) 에이전트 스폰 실패 — relay 실측 불가(claude 부재/인증). \
-         registry/ingress 단위 테스트가 로직을 커버하나 end-to-end relay 는 이 머신에서 미검증."
+/// ★건너뛰지 않고 실패한다★: cargo 는 test 의 stdout 을 삼켜 skip 해도 통과 요약엔 "ok" 만 남는다 —
+///   로컬이 이 축의 유일한 검증 자리라(모듈 머리말) 조용한 skip 은 미검증을 초록으로 감춘다.
+///   잡는 것은 「에이전트가 목록에 안 오름」뿐이다 — claude 부재 자체는 못 가린다(모듈 머리말).
+fn require_claude(test: &str) -> ! {
+    panic!(
+        "[{test}]: claude(stream-json) 에이전트가 목록에 오르지 않음(claude 부재·인증 실패 가능) — \
+         이 축은 CI 에서 돌지 않으므로 로컬에서 실패로 낸다."
     );
-    println!("{line}");
-    eprintln!("{line}");
-    if std::env::var("ENGRAM_TEST_REQUIRE_CLAUDE").as_deref() == Ok("1") {
-        panic!(
-            "ENGRAM_TEST_REQUIRE_CLAUDE=1 인데 [{test}] 가 claude 부재로 skip 됨 — \
-             이 레인은 silent skip 을 금지한다(claude(stream-json) 스폰이 반드시 성공해야 함)."
-        );
-    }
 }
 
 /// 운영 `run()` 의 조립 순서를 미러한 배선.
@@ -454,10 +451,7 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
     let (manager, registry, base, data_dir, handle, _messaging, _busy) = wire("relay").await;
 
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "bee") else {
-        skip_no_claude("control_send_relays_wrapped_line_to_json_agent");
-        let _ = std::fs::remove_dir_all(&data_dir);
-        handle.shutdown().await;
-        return;
+        require_claude("control_send_relays_wrapped_line_to_json_agent");
     };
 
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -514,7 +508,7 @@ async fn control_send_relays_wrapped_line_to_json_agent() {
 //   revoke 하면 401 로 먼저 막혀 commit-point 에 못 닿는다(revoke 와 send 사이 mid-flight 주입은 단일
 //   동기 요청에서 결정적으로 못 만든다). 그래서 공통 핸들러를 직접 부른다: 발신자 신원을 산 상태로
 //   만들었다가 **relay 직전에 revoke** 한 뒤 handle_send 호출 → 배달됨 관측. 도달 가능 수신자가 필요하므로
-//   json claude 스폰에 의존(loud skip).
+//   json claude 스폰에 의존(claude 부재면 실패).
 #[tokio::test]
 async fn control_send_revoked_sender_still_delivers_observation() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -525,10 +519,7 @@ async fn control_send_revoked_sender_still_delivers_observation() {
         wire("revoked-delivers").await;
 
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "target-b") else {
-        skip_no_claude("control_send_revoked_sender_still_delivers_observation");
-        let _ = std::fs::remove_dir_all(&data_dir);
-        handle.shutdown().await;
-        return;
+        require_claude("control_send_revoked_sender_still_delivers_observation");
     };
 
     let seen = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -599,7 +590,7 @@ impl engram_dashboard_messaging::envelope::DeliveryObserver for DeliveryCapture 
 }
 
 // ── ADR-0088(FIX-3/FIX-4): claude 바이너리 없이 배달-경계 관측을 구동하는 세션 seam ──────────────
-// ★왜 seam 인가★: 위 e2e 테스트는 산 claude 스폰이 필요해(claude 부재 머신에선 skip) 배달 관측의
+// ★왜 seam 인가★: 위 e2e 테스트는 산 claude 스폰이 필요해(claude 부재 머신에선 실패) 배달 관측의
 //   core 단언이 바이너리 유무에 매인다(FIX-4). 여기 helper 는 `AgentManager::insert_test_session` 으로
 //   **structured=true 캐리어를 흉내 내되 write 성공/실패를 우리가 정하는** 세션을 맵에 직접 꽂는다 —
 //   claude 없이 handle_send 의 성공/실패 두 갈래를 모두 실측한다.
@@ -1308,10 +1299,7 @@ async fn control_send_delivery_observation_records_bytes_and_correlated_ids() {
     let (manager, registry, _base, data_dir, handle, messaging, _busy) = wire("delivery-obs").await;
 
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "obs-target") else {
-        skip_no_claude("control_send_delivery_observation_records_bytes_and_correlated_ids");
-        let _ = std::fs::remove_dir_all(&data_dir);
-        handle.shutdown().await;
-        return;
+        require_claude("control_send_delivery_observation_records_bytes_and_correlated_ids");
     };
 
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -1828,6 +1816,7 @@ async fn stage1_lifecycle_recipient_absent_is_a_failed_row_with_no_observation()
 //   폴링이라, current-thread 런타임에선 이 test task 가 스레드를 붙잡고 도는 동안 flush worker task 가
 //   폴링될 틈이 없어 flush 가 진행되지 않는다. (`wait_until` 을 async 폴링으로 바꾸면 default 런타임도
 //   가능하나 이 헬퍼는 다수 동기 테스트가 공유하므로 런타임 flavor 로만 격리한다.)
+#[ignore = "입력을 주지 않아 busy 창이 오지 않아 핵심 단언이 매번 건너뛰어진다 — 맡아 둔 우편 배달 축은 c2_busy_recipient_parks_then_batch_flushes_on_turn_end 가 결정적으로 덮는다(2026-10-02 · T-46)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c1_park_then_spawn_auto_delivers() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -1858,15 +1847,10 @@ async fn c1_park_then_spawn_auto_delivers() {
     //   만드는 데몬 레벨 테스트가 필요하다(백로그).
     let target_name = "late-recv";
     let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target_name) else {
-        skip_no_claude("c1_park_then_spawn_auto_delivers");
-        let _ = std::fs::remove_dir_all(&data_dir);
-        handle.shutdown().await;
-        return;
+        require_claude("c1_park_then_spawn_auto_delivers");
     };
 
     // ── 2) 그 에이전트가 **턴 진행 중**(프라이밍 응답)일 때를 잡는다 ──────────────────────────
-    //    실 claude 라 타이밍이 우리 손에 없다 — busy 창을 못 잡으면(이미 idle) 이 축은 검증 불가이므로
-    //    조용한 초록 대신 명시적 스킵으로 남긴다(하네스 한계를 감추지 않는다).
     let saw_busy = wait_until(Duration::from_secs(20), || {
         busy.is_busy(info.id, info.epoch)
     });
@@ -2169,8 +2153,7 @@ async fn c2_a_recipient_that_dies_mid_turn_leaves_no_busy_ghost() {
 // ★이 축이 더하는 것★: busy 관측이 **실 claude decoder** 가 만든 이벤트로 일어난다(합성 emit 아님) —
 //   "capability 프록시(structured = 턴 이벤트 있음)" 가 실제로 성립하는지의 실측이다.
 // ★단언이 비대칭인 이유★: "턴 중 발송 → pending" 은 hard assert 다. 반면 **턴 종료 후 배달**은 claude 가
-//   실제로 `result` 라인을 내야 하므로(인증·네트워크·모델 지연) 관측되면 단언하고 시간 내 안 오면 loud
-//   경고로 넘어간다 — `ENGRAM_TEST_REQUIRE_CLAUDE=1` 레인에선 panic 으로 승격한다.
+//   실제로 `result` 라인을 내야 하지만(인증·네트워크·모델 지연) 90s 안에 안 오면 실패로 낸다(모듈 머리말).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
     use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
@@ -2191,10 +2174,7 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
 
     let target = "c2-live-recv";
     let Some((info, _tok)) = spawn_json_agent(&manager, &registry, target) else {
-        skip_no_claude("c2_live_mid_turn_send_parks_and_delivers_after_turn_end");
-        let _ = std::fs::remove_dir_all(&data_dir);
-        handle.shutdown().await;
-        return;
+        require_claude("c2_live_mid_turn_send_parks_and_delivers_after_turn_end");
     };
 
     // 입력 전 claude 는 조용하다 — system/init 은 decoder 가 흘린다.
@@ -2255,21 +2235,13 @@ async fn c2_live_mid_turn_send_parks_and_delivers_after_turn_end() {
             },
         )
     });
-    if delivered {
-        assert_eq!(messaging.parked_len(target), 0, "턴 종료 flush 로 큐 비움");
-    } else {
-        eprintln!(
-            "[c2_live] 턴 종료(result)가 90s 내 관측되지 않아 turn-end 배달 축은 미확인 \
-             (parked={}) — 실 claude 응답 의존 축, 결정적 단언은 c2_busy_recipient_parks_* 가 담당",
-            messaging.parked_len(target)
-        );
-        if std::env::var("ENGRAM_TEST_REQUIRE_CLAUDE").as_deref() == Ok("1") {
-            panic!(
-                "ENGRAM_TEST_REQUIRE_CLAUDE=1 레인에서 실 claude 턴 종료 후 파킹 배달이 관측되지 않음 \
-                 (턴 이벤트 관측/idle flush 회귀 의심)"
-            );
-        }
-    }
+    assert!(
+        delivered,
+        "[c2_live] 턴 종료(result) 후 파킹 배달이 90s 내 관측되지 않음(parked={}) — \
+         턴 이벤트 관측/idle flush 회귀 또는 실 claude 응답 지연",
+        messaging.parked_len(target)
+    );
+    assert_eq!(messaging.parked_len(target), 0, "턴 종료 flush 로 큐 비움");
 
     manager.kill_agent(info.id).ok();
     let _ = wait_until(Duration::from_secs(5), || manager.list_agents().is_empty());
@@ -2781,10 +2753,7 @@ async fn mcp_send_message_tool_happy_and_error() {
     let (manager, registry, _base, data_dir, handle, _messaging, _busy) = wire("mcp-tool").await;
 
     let Some((b_info, _b_tok)) = spawn_json_agent(&manager, &registry, "recv") else {
-        skip_no_claude("mcp_send_message_tool_happy_and_error");
-        let _ = std::fs::remove_dir_all(&data_dir);
-        handle.shutdown().await;
-        return;
+        require_claude("mcp_send_message_tool_happy_and_error");
     };
 
     let sender = AgentId::new_v4();
