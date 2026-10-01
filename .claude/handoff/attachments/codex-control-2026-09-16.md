@@ -57,8 +57,8 @@
 
 ## 플러그인 — 전제 둘이 사실과 달랐다
 
-- **codex 플러그인은 설치돼 있지 않다.** `claude plugin list` = clangd-lsp · nmfc-origin-dev-harness ·
-  nmfc-origin-wiki · nmfc-ue5-bridge. `known_marketplaces.json` 에 `openai-codex` 항목 자체가 없다.
+- **codex 플러그인은 설치돼 있지 않다.** `claude plugin list` = clangd-lsp · <plugin> ·
+  <plugin> · <plugin>. `known_marketplaces.json` 에 `openai-codex` 항목 자체가 없다.
 - **플러그인 전역 활성은 이미 돼 있다.** `~/.claude/settings.json` 의 `enabledPlugins` 에 셋이 `true`.
   비활성은 clangd-lsp 하나뿐이다.
 - **기억하던 것의 정체 = MCP 서버이고 그것은 죽어 있다.** `~/.claude.json` 에 `codex mcp-server` 설정이
@@ -82,7 +82,7 @@
 1. **thread_id 를 어디에 두나** — ★핵심 갭★. Claude Code 서브에이전트는 매번 새로 떠서 UUID 를 스스로
    기억하지 못한다. 파일에 적고 워커마다 넘겨야 한다.
 2. **호출 껍데기** — 기동 → UUID 회수 → 명시 resume → `-o` 회수 → `--json` usage 파싱.
-   현행 `/codex-cross-review` 의 `codex-review.py` 는 **매 호출 fresh** 라 이 축이 통째로 없다.
+   현행 `/<skill>` 의 `codex-review.py` 는 **매 호출 fresh** 라 이 축이 통째로 없다.
 3. **예산·중단 정책** — 몇 턴/몇 토큰에서 끊고 새로 여나. 위 손익분기 미측정이 선결.
 
 ## 정본 관계

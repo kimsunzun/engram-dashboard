@@ -29,11 +29,13 @@ use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
 use engram_dashboard_agent::manager::default_shell;
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
+use engram_dashboard_agent::queued_input::{ListedRow, ListedState, QueuedListing};
 use engram_dashboard_agent::types::{
-    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, OutputSink, ReplayKind, SinkId,
-    SubscribeReply,
+    AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, CancelError, InputOrigin,
+    OutputSink, PtyError, ReplayKind, SinkId, SubscribeReply,
 };
 
+use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_agent::preset::Preset as CorePreset;
 use engram_dashboard_agent::profile::{
@@ -42,21 +44,26 @@ use engram_dashboard_agent::profile::{
     RestoreOutcome as CoreRestoreOutcome,
 };
 use engram_dashboard_agent::types::{
-    Capabilities as CoreCaps, OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
-    TurnOutcome as CoreTurnOutcome,
+    Capabilities as CoreCaps, DeliveredCopy as CoreDeliveredCopy, DropCause as CoreDropCause,
+    OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
+    QueuedInputEvent as CoreQueuedInputEvent, ToolCategory as CoreToolCategory,
+    ToolOutcome as CoreToolOutcome, TurnOutcome as CoreTurnOutcome,
 };
+use engram_dashboard_agent::usage::UsageVendorKey;
 
 use engram_dashboard_protocol::{
     AgentBackendKind as WireBackendKind, AgentCommand, AgentEvent,
     AgentFailureKind as WireFailureKind, AgentInfo as WireAgentInfo,
     AgentOutputFormat as WireAgentOutputFormat, AgentProfile as WireProfile,
     AgentSpawnCommand as WireSpawnCommand, Capabilities as WireCaps,
-    ControlCaps as WireControlCaps, EnvelopeFormat as WireEnvelopeFormat,
-    InputCaps as WireInputCaps, ModelCaps as WireModelCaps, OutputCaps as WireOutputCaps,
-    Preset as WirePreset, RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome,
-    RestoreReport, SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
-    StructuredEvent as WireStructuredEvent, SubscribeAction, TurnOutcome as WireTurnOutcome,
-    PROTOCOL_VERSION,
+    ControlCaps as WireControlCaps, DeliveredCopy as WireDeliveredCopy, DropCause as WireDropCause,
+    EnvelopeFormat as WireEnvelopeFormat, InputCaps as WireInputCaps, ModelCaps as WireModelCaps,
+    OutputCaps as WireOutputCaps, Preset as WirePreset, QueuedInputCancel as WireQueuedInputCancel,
+    QueuedInputEvent as WireQueuedInputEvent, QueuedInputRow as WireQueuedInputRow,
+    RestartPolicy as WireRestartPolicy, RestoreOutcome as WireRestoreOutcome, RestoreReport,
+    SessionCaps as WireSessionCaps, SnapshotChunk as WireSnapshotChunk,
+    StructuredEvent as WireStructuredEvent, SubscribeAction, ToolCategory as WireToolCategory,
+    ToolOutcome as WireToolOutcome, TurnOutcome as WireTurnOutcome, PROTOCOL_VERSION,
 };
 
 use tokio::sync::watch;
@@ -64,6 +71,8 @@ use tokio::sync::watch;
 use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
+use crate::usage_service::book::RequestKind;
+use crate::usage_service::UsageService;
 use engram_dashboard_command::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
@@ -177,11 +186,11 @@ pub(crate) const SATURATED_REFUSAL: &str =
 /// ★`Interrupt` 를 여기 **넣지 않은 것은 의도다** — 둘 다 어긋난다★: ①로는 순서 묶음 ①에 정면으로
 ///   들고(`WriteStdin`(X) ↔ `Interrupt`(X)), ②로는 **건너뛰어도 도착 시점이 그대로다**.
 ///   ★②의 근거가 갈렸다 — 옛 문장(「`interrupt()` 가 `0x03` 을 **같은 PTY writer 로** 쓰므로 그 writer 에
-///   걸린다」)은 입력 큐가 들어오면서 죽었다★. 지금 참인 것: `interrupt()` 는 그 `0x03` 을 **그
-///   에이전트의 입력 큐에 밀어 넣고 즉시 돌아온다**(`PtyTransport::interrupt` → `send_input`). 그래서
-///   이 명령 자체는 아무것도 막지 않지만, 그 한 바이트는 **큐에 이미 선 것들 뒤에** 서고 라이터가 OS
-///   쓰기에 물려 있으면 그 물림이 풀릴 때까지 안 나간다. 줄을 건너뛰어 얻는 것은 dispatch 몇 밀리초뿐
-///   이고, **순서를 깨면서 얻는 것이 여전히 없다.**
+///   걸린다」)은 죽었다★(PTY 는 이제 끊기를 거절한다 — ADR-0245). 지금 참인 것: `interrupt()` 는 어느
+///   통로에서도 **즉시 돌아온다** — PTY 는 `Unsupported` 로 거절하고, claude JSON 통로는 끊기 줄을 그
+///   에이전트의 입력 큐에 넣고(큐에 이미 선 것들 뒤에 선다 — ADR-0238), codex 통로는 제어 큐에 넣는다.
+///   그래서 이 명령 자체는 아무것도 막지 않는다. 줄을 건너뛰어 얻는 것은 dispatch 몇 밀리초뿐이고,
+///   **순서를 깨면서 얻는 것이 여전히 없다.**
 /// ★★그 대신 기록해 둘 사실 — `Interrupt` 는 이제 포화에서 **거절된다**★★: 읽기와 처리가 한 줄이던
 ///   옛 모양에서는 읽기 루프가 기다렸으므로 모든 명령이 늦게나마 **반드시** 처리됐다. 지금 도착순
 ///   줄로 가는 것은 줄이 찬 순간 거절로 답해진다([`SATURATED_REFUSAL`]). 즉 압력이 걸린 순간 사용자가
@@ -201,12 +210,13 @@ pub(crate) fn inbound_lane(cmd: &AgentCommand) -> InboundLane {
 
 /// [`DispatchOrder`] 판정.
 ///
-/// ★떼어 내는 것은 활성화 셋뿐이다★: 이 셋만이 dispatch 안에서 **결말이 날 때까지** 기다린다(전형
-///   2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은 `Spawn` 갈래 주석).
+/// ★떼어 내는 것은 활성화 셋과 ⟳(`RefreshUsageLimits`)뿐이다★: 이것들만이 dispatch 안에서 **끝이 날 때까지**
+///   기다린다 — 활성화는 결말까지(전형 2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은
+///   `Spawn` 갈래 주석), ⟳ 는 조회 끝까지(상한 = `usage_service::REPLY_WAIT_MAX`).
 ///   나머지 전부는 await 지점이 없거나(맵 조회·PTY write·목록 인코딩) 이미 자기 태스크로 나간다
 ///   (`Command` 의 배달). 그래서 줄에 남겨도 다음 명령을 재지 않는다.
-/// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★ — 중복 활성화를 막는 것은 dispatch 의
-///   도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
+/// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★(⟳ 의 근거는 그 갈래 주석) — 중복 활성화를
+///   막는 것은 dispatch 의 도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
 ///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
 ///   띄우려는 두 요청은 옛날부터 그 가드로만 갈렸다(그 가드가 닫지 못하는 잔여 창 = ADR-0082).
 /// ★★대신 **이것들 사이·이것과 뒤 명령 사이의 순서는 보장되지 않는다**★★: 같은 연결에서
@@ -234,11 +244,18 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         //   그대로 부르지만(실 프로세스 생성), 그 blocking 자체는 이 변경의 범위가 아니다 — 여기서
         //   재는 것은 「순서가 뜻을 갖는가」뿐이고, 매번 새 uuid 를 만드는 즉석 생성이라 겹칠 짝이
         //   애초에 없다.
-        | AgentCommand::SpawnByCwd { .. } => DispatchOrder::Detached,
+        | AgentCommand::SpawnByCwd { .. }
+        // ★⟳ 도 줄 밖이다★ — 조회를 띄우면 그 끝을 상한(`usage_service::REPLY_WAIT_MAX`)까지 기다린다. 줄에 두면
+        //   그동안 이 연결의 `WriteStdin` 까지 밀린다. 순서가 뜻을 갖지 않는다: 같은 벤더의 ⟳ 둘은 서비스가 한
+        //   조회로 합류시키고, 구독 교체와의 앞뒤는 값이 어느 쪽이든 방송으로 닿는다.
+        | AgentCommand::RefreshUsageLimits { .. } => DispatchOrder::Detached,
 
         // ── 줄 안: 아래 다섯 묶음이 도착 순서에 걸려 있다 ────────────────────────────
-        // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 바이트가 PTY 로
-        //    곧장 가고 그 밑에 순서를 다시 세우는 것이 없다.
+        // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 입력이 통로의 큐로
+        //    곧장 가고 그 밑에 순서를 다시 세우는 것이 없다. `Interrupt` 는 PTY 에선 거절이고(ADR-0245),
+        //    claude JSON 에선 입력과 같은 FIFO 에 서며(ADR-0238), codex 에선 제어 줄이 대기 입력보다 앞서
+        //    나가되 받아들여지는지는 도착 시점의 턴 상태에 달려 있다. 어느 쪽이든 `Interrupt` 는 ②에도
+        //    묶이므로 줄에 남는다(`Ordered`).
         // ② 입력 lease 획득/반납과 그 뒤의 입력 — `check_input` 이 읽는 표를 이 둘이 쓴다.
         // ③ 같은 연결의 `Subscribe`↔`Subscribe`/`Unsubscribe` — 등록이 코어 먼저·세션 나중이고
         //    `ReplayComplete` 는 코어 잠금을 놓은 **뒤** 큐에 드니, 겹치면 Ack/replay/Complete 가
@@ -273,7 +290,13 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         | AgentCommand::UpdateCommands { .. }
         | AgentCommand::ListCommands { .. }
         | AgentCommand::Command { .. }
-        | AgentCommand::CommandOutcome { .. } => DispatchOrder::InOrder,
+        | AgentCommand::CommandOutcome { .. }
+        | AgentCommand::ListQueuedInputs { .. }
+        // ADR-0231: 취소는 ① 에 든다 — 같은 연결의 앞선 `WriteStdin` 을 앞지르면 그 글을 명부가 아직 모른다.
+        | AgentCommand::CancelQueuedInput { .. }
+        // 사용량 구독은 전량 교체라 도착순이 곧 뜻이다 — 연달아 온 두 교체는 마지막이 이겨야 한다. 처리에 await 가
+        //   없어 줄을 붙들지 않는다.
+        | AgentCommand::UsageSubscribe { .. } => DispatchOrder::InOrder,
     }
 }
 
@@ -377,6 +400,11 @@ enum LeasePass {
     Denied,
 }
 
+/// [`LeasePass::Denied`] 의 거절 문구 — 입력에 영향을 주는 WS 명령(`Interrupt`·`WriteStdin`·`CancelQueuedInput`)이
+/// **같은 글자**로 거절한다(비보유자는 어느 동사로 와도 같은 답을 받는다).
+// ADR-0231
+pub(crate) const INPUT_LOCKED_REFUSAL: &str = "input locked by another viewer; acquire first";
+
 impl MultiViewState {
     pub fn new() -> Self {
         Self::default()
@@ -450,10 +478,17 @@ impl MultiViewState {
     }
 
     fn check_input(&self, agent_id: AgentId, conn_id: ConnId) -> LeasePass {
+        self.lease_pass(agent_id, Some(conn_id))
+    }
+
+    /// 입력 임대 판정의 **유일한 자리** — WS(`check_input`)와 버스·CLI(`InputLease`)가 여기로 든다.
+    /// `caller == None` 은 연결 없는 호출자라 보유자일 수 없다(누가 쥐었으면 거절).
+    // ADR-0231
+    fn lease_pass(&self, agent_id: AgentId, caller: Option<ConnId>) -> LeasePass {
         let g = self.inner.lock().expect("multiview poisoned");
         match g.leases.get(&agent_id) {
             None => LeasePass::Allow,
-            Some(&holder) if holder == conn_id => LeasePass::Allow,
+            Some(&holder) if Some(holder) == caller => LeasePass::Allow,
             Some(_) => LeasePass::Denied,
         }
     }
@@ -472,6 +507,13 @@ impl MultiViewState {
             g.leases.remove(a);
         }
         freed
+    }
+}
+
+// ADR-0231: 명령 표 공통 입구의 임대 포트 — 판정은 WS 와 같은 `lease_pass` 한 자리다.
+impl crate::control::commands::InputLease for MultiViewState {
+    fn permits(&self, agent_id: AgentId, caller: Option<ConnId>) -> bool {
+        matches!(self.lease_pass(agent_id, caller), LeasePass::Allow)
     }
 }
 
@@ -754,12 +796,18 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             id,
             turn_id,
             message_id,
+            category,
         } => Some(WireStructuredEvent::ToolCall {
             name: name.clone(),
             args_json: args_json.clone(),
             id: id.clone(),
             turn_id: turn_id.clone(),
             message_id: message_id.clone(),
+            category: Some(tool_category_to_wire(*category)),
+        }),
+        CoreOutputEvent::ToolResult { id, outcome } => Some(WireStructuredEvent::ToolResult {
+            id: id.clone(),
+            outcome: tool_outcome_to_wire(*outcome),
         }),
         CoreOutputEvent::Usage {
             input_tokens,
@@ -788,6 +836,164 @@ pub(crate) fn output_event_to_wire(ev: &CoreOutputEvent) -> Option<WireStructure
             kind: kind.clone(),
             json: json.clone(),
         }),
+        CoreOutputEvent::QueuedInput(op) => Some(WireStructuredEvent::QueuedInput {
+            op: queued_input_to_wire(op),
+        }),
+    }
+}
+
+/// 명부 사건 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 사건·원인이 늘면 여기가 컴파일 에러로 서야 새 어휘가
+/// 조용히 다른 사건으로 접히지 않는다(프론트 누산기가 명부와 같은 환원을 하려면 사건열이 그대로 건너가야 한다).
+// ADR-0231
+fn queued_input_to_wire(op: &CoreQueuedInputEvent) -> WireQueuedInputEvent {
+    match op {
+        CoreQueuedInputEvent::Queued { id, text } => WireQueuedInputEvent::Queued {
+            id: id.clone(),
+            text: text.clone(),
+        },
+        CoreQueuedInputEvent::CancelRequested { id } => {
+            WireQueuedInputEvent::CancelRequested { id: id.clone() }
+        }
+        CoreQueuedInputEvent::CancelAnswered { id, removed } => {
+            WireQueuedInputEvent::CancelAnswered {
+                id: id.clone(),
+                removed: *removed,
+            }
+        }
+        CoreQueuedInputEvent::CancelFailed { id } => {
+            WireQueuedInputEvent::CancelFailed { id: id.clone() }
+        }
+        CoreQueuedInputEvent::HandedOver { id, sent } => WireQueuedInputEvent::HandedOver {
+            id: id.clone(),
+            sent: *sent,
+        },
+        CoreQueuedInputEvent::Delivered { id } => {
+            WireQueuedInputEvent::Delivered { id: id.clone() }
+        }
+        CoreQueuedInputEvent::Dropped { id, cause } => WireQueuedInputEvent::Dropped {
+            id: id.clone(),
+            cause: drop_cause_to_wire(*cause),
+        },
+        CoreQueuedInputEvent::AckUnavailable { delivered } => {
+            WireQueuedInputEvent::AckUnavailable {
+                delivered: delivered
+                    .iter()
+                    .map(|CoreDeliveredCopy { id, text }| WireDeliveredCopy {
+                        id: id.clone(),
+                        text: text.clone(),
+                    })
+                    .collect(),
+            }
+        }
+    }
+}
+
+fn drop_cause_to_wire(cause: CoreDropCause) -> WireDropCause {
+    match cause {
+        CoreDropCause::Withdrawn => WireDropCause::Withdrawn,
+        CoreDropCause::Interrupted => WireDropCause::Interrupted,
+        CoreDropCause::AgentEnded => WireDropCause::AgentEnded,
+        CoreDropCause::Rejected => WireDropCause::Rejected,
+        CoreDropCause::Unknown => WireDropCause::Unknown,
+    }
+}
+
+/// 목록 조회 한 번의 답 → wire. 낱말은 버스 `agent.listQueuedInputs` 가 쓰는 그 `as_str` 들이다(두 표면이 같은
+/// 글자를 싣는다). 구조 분해로 받는 것은 manager 쪽에 칸이 늘면 여기가 컴파일 에러로 서게 하려는 것이다.
+// ADR-0231
+fn queued_listing_to_wire(
+    request_id: engram_dashboard_protocol::RequestId,
+    agent_id: AgentId,
+    listing: QueuedListing,
+) -> AgentEvent {
+    let QueuedListing {
+        rows,
+        as_of_seq,
+        epoch,
+        stopped_after_error,
+    } = listing;
+    let inputs = rows
+        .into_iter()
+        .map(|ListedRow { id, text, state }| WireQueuedInputRow {
+            id,
+            text,
+            state: state.as_str().to_string(),
+            cancel: match state {
+                ListedState::Cancelling {
+                    answer,
+                    vendor_closed,
+                } => Some(WireQueuedInputCancel {
+                    answer: answer.as_str().to_string(),
+                    vendor_closed,
+                }),
+                ListedState::Queued | ListedState::Sent | ListedState::Unconfirmed => None,
+            },
+        })
+        .collect();
+    AgentEvent::QueuedInputs {
+        request_id,
+        agent_id,
+        inputs,
+        as_of_seq,
+        epoch,
+        stopped_after_error,
+    }
+}
+
+/// 목록 조회 실패 → `Error` 문구(`CODE: 문구`). manager 의 실패는 「산 세션이 없다」 하나다.
+fn list_error_text(agent_id: AgentId, e: PtyError) -> String {
+    match e {
+        PtyError::NotFound(_) => CommandError::not_found(format!(
+            "agent {agent_id} is not running, so it holds no queued inputs — an asleep agent has nothing waiting"
+        )),
+        other => CommandError::internal(format!(
+            "listing the queued inputs of agent {agent_id} failed: {other}"
+        )),
+    }
+    .to_string()
+}
+
+/// 취소 실패 → `Error` 문구(`CODE: 문구`) — 코드는 버스 `agent.cancelQueuedInput` 과 같다.
+fn cancel_error_text(agent_id: AgentId, input_id: &str, e: CancelError) -> String {
+    match e {
+        // 「이미 결말이 났다」와 「잠들었다」를 가르지 않는다 — 호출자가 할 일이 같다(목록을 다시 본다).
+        CancelError::NotFound => CommandError::not_found(format!(
+            "agent {agent_id} has no waiting input '{input_id}' — it was already delivered, cancelled or dropped, or the agent is not running; list its queued inputs to see what is still waiting"
+        )),
+        // 다시 보내라고 안내하지 않는다 — 항목은 취소 대기 그대로라 재요청은 아무것도 쓰지 않고 `requested` 다.
+        CancelError::Write(e) => CommandError::internal(format!(
+            "the cancel request for '{input_id}' could not be written to agent {agent_id}: {e} — the item stays in the cancelling state and sending it again will not resend it; its fate now follows the agent's own lifecycle, so watch it in the queued-input list"
+        )),
+    }
+    .to_string()
+}
+
+/// 도구 종류 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 종류가 늘면 여기가 컴파일 에러로 서야 새 종류가
+/// 조용히 다른 종류로 접히지 않는다. 데몬은 벤더 도구 이름을 모른다 — 판정은 각 backend 번역기가 끝냈다.
+// ADR-0239
+fn tool_category_to_wire(category: CoreToolCategory) -> WireToolCategory {
+    match category {
+        CoreToolCategory::Read => WireToolCategory::Read,
+        CoreToolCategory::Search => WireToolCategory::Search,
+        CoreToolCategory::List => WireToolCategory::List,
+        CoreToolCategory::Edit => WireToolCategory::Edit,
+        CoreToolCategory::Command => WireToolCategory::Command,
+        CoreToolCategory::Web => WireToolCategory::Web,
+        CoreToolCategory::Agent => WireToolCategory::Agent,
+        CoreToolCategory::Mcp => WireToolCategory::Mcp,
+        CoreToolCategory::Other => WireToolCategory::Other,
+    }
+}
+
+/// 도구 끝 결말 도메인 → wire. ★`_` 갈래를 쓰지 않는다★ — 결말이 늘면 여기가 컴파일 에러로 서야 새 결말이
+/// 조용히 다른 결말로 접히지 않는다(거부가 실패로 접히면 「오류 N」이 거짓이 된다).
+// ADR-0241
+fn tool_outcome_to_wire(outcome: CoreToolOutcome) -> WireToolOutcome {
+    match outcome {
+        CoreToolOutcome::Completed => WireToolOutcome::Completed,
+        CoreToolOutcome::Failed => WireToolOutcome::Failed,
+        CoreToolOutcome::Declined => WireToolOutcome::Declined,
+        CoreToolOutcome::Refused => WireToolOutcome::Refused,
     }
 }
 
@@ -816,6 +1022,27 @@ pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protoc
     status_to_wire(&status)
 }
 
+/// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
+///
+/// ★키는 들어온 낱말이 아니라 조회기의 키다★ — 버스 입구(대문자 낱말)와 같은 칸을 치려면 두 입구가 같은 조회기
+///   키로 모여야 한다. 벤더를 match 하지 않고 wire 낱말을 거친다.
+// ADR-0004
+fn usage_vendor_key(vendor: WireBackendKind) -> Option<UsageVendorKey> {
+    let word = serde_json::to_value(vendor).ok()?;
+    usage_probe_for(word.as_str()?).map(|probe| probe.key())
+}
+
+fn no_usage_text(vendor: WireBackendKind) -> String {
+    let word = serde_json::to_value(vendor)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    CommandError::not_found(format!(
+        "this daemon keeps no usage limits for backend '{word}'"
+    ))
+    .to_string()
+}
+
 /// None = 직렬화 실패(이 함수가 이미 로그를 남겼다).
 pub(crate) fn event_json(ev: &AgentEvent) -> Option<String> {
     match serde_json::to_string(ev) {
@@ -838,8 +1065,7 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 // ── ConnectionCore ────────────────────────────────────────────────────────────────
 
 /// ★이 struct 는 **연결마다 새로 만들어진다**(`agent_conn::AgentConnections::handler_for`)★. 서버 전체에
-/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 아래 6개
-/// (manager · multiview · fanout · control_registry · messaging · shutdown_tx)가 전부 그렇다.
+/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 필드 전부가 그렇다.
 /// ★그래서 새 필드를 넣을 때 반드시 확인할 것★: 공유 핸들이 아닌 값을 여기 넣으면 "서버 전체 1개" 로
 /// 읽히는 자리에 조용히 **연결마다 별개**인 상태가 생긴다. 연결 고유 상태의 자리는 `ConnectionSession`
 /// (dispatch 에 주입)이다.
@@ -861,6 +1087,7 @@ pub struct ConnectionCore {
     /// 이 데몬이 **스스로 답하는** 명령 — 배달 1단계이자 발견 목록의 한쪽(`command_delivery`).
     // ADR-0155
     locals: Arc<dyn LocalCommands>,
+    usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -875,6 +1102,7 @@ impl ConnectionCore {
         commands: CommandRoster,
         deliveries: CommandDeliveries,
         locals: Arc<dyn LocalCommands>,
+        usage: Arc<UsageService>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -886,8 +1114,13 @@ impl ConnectionCore {
             commands,
             deliveries,
             locals,
+            usage,
             shutdown_tx,
         }
+    }
+
+    pub fn usage(&self) -> &UsageService {
+        &self.usage
     }
 
     pub fn multiview(&self) -> &MultiViewState {
@@ -1070,9 +1303,7 @@ impl ConnectionCore {
             } => {
                 let result = match multiview.check_input(agent_id, conn_id) {
                     LeasePass::Allow => manager.interrupt(agent_id).map_err(|e| e.to_string()),
-                    LeasePass::Denied => {
-                        Err("input locked by another viewer; acquire first".to_string())
-                    }
+                    LeasePass::Denied => Err(INPUT_LOCKED_REFUSAL.to_string()),
                 };
                 reply(sink, request_id, result);
             }
@@ -1082,13 +1313,12 @@ impl ConnectionCore {
                 data,
                 request_id,
             } => {
+                // ADR-0231: 뷰어가 친 입력 = 사람의 입력(`User`) — 턴 도중이면 대기 목록에 오를 수 있는 유일한 입구다.
                 let result = match multiview.check_input(agent_id, conn_id) {
                     LeasePass::Allow => manager
-                        .write_stdin(agent_id, &data)
+                        .write_stdin(agent_id, &data, InputOrigin::User)
                         .map_err(|e| e.to_string()),
-                    LeasePass::Denied => {
-                        Err("input locked by another viewer; acquire first".to_string())
-                    }
+                    LeasePass::Denied => Err(INPUT_LOCKED_REFUSAL.to_string()),
                 };
                 reply(sink, request_id, result);
             }
@@ -1702,6 +1932,73 @@ impl ConnectionCore {
                     message: refusal.into(),
                 }));
             }
+
+            // ★두 갈래 모두 버스 `agent.listQueuedInputs`·`agent.cancelQueuedInput` 과 같은 manager 동사를
+            //   부른다★ — 두 표면이 같은 값을 싣는다. 실패는 `Error` 문구 머리에 오류 코드를 싣는다(`CODE: 문구`).
+            // 목록 조회는 읽기라 입력 임대를 보지 않는다.
+            // ADR-0231
+            AgentCommand::ListQueuedInputs {
+                agent_id,
+                request_id,
+            } => match manager.list_queued_inputs(agent_id) {
+                Ok(listing) => {
+                    let _ = sink.enqueue(Outbound::event(queued_listing_to_wire(
+                        request_id, agent_id, listing,
+                    )));
+                }
+                Err(e) => send_error(sink, Some(request_id), list_error_text(agent_id, e)),
+            },
+
+            // ★임대 검사는 `WriteStdin` 과 같다★ — 비보유자는 같은 문구로 거절되고 manager 에 닿지 않는다.
+            // ADR-0231
+            AgentCommand::CancelQueuedInput {
+                agent_id,
+                input_id,
+                request_id,
+            } => match multiview.check_input(agent_id, conn_id) {
+                LeasePass::Denied => {
+                    send_error(sink, Some(request_id), INPUT_LOCKED_REFUSAL.to_string())
+                }
+                LeasePass::Allow => match manager.cancel_queued_input(agent_id, &input_id) {
+                    Ok(outcome) => {
+                        let _ = sink.enqueue(Outbound::event(AgentEvent::QueuedInputCancelReply {
+                            request_id,
+                            agent_id,
+                            input_id,
+                            outcome: outcome.as_str().to_string(),
+                        }));
+                    }
+                    Err(e) => send_error(
+                        sink,
+                        Some(request_id),
+                        cancel_error_text(agent_id, &input_id, e),
+                    ),
+                },
+            },
+
+            // ── 사용량 한도(TRD S21 usage-limit-slot §1-6) ───────────────────────────────────
+            // 첫 한 장은 서비스가 이 연결의 출구로 곧장 보낸다 — 이 줄의 답이 아니다.
+            AgentCommand::UsageSubscribe { vendors } => {
+                let vendors = vendors.into_iter().filter_map(usage_vendor_key).collect();
+                self.usage.replace_subscription(conn_id, vendors);
+            }
+
+            // ★칸이 없으면 `Ack` 가 아니라 `Error` 다★ — 조용한 `Ack` 는 셸이 「조회했다」로 읽고 값을 영영 기다린다.
+            AgentCommand::RefreshUsageLimits { vendor, request_id } => {
+                let answered = match usage_vendor_key(vendor) {
+                    Some(key) => self
+                        .usage
+                        .request(key, RequestKind::Refresh)
+                        .await
+                        .is_some(),
+                    None => false,
+                };
+                if answered {
+                    reply(sink, request_id, Ok(()));
+                } else {
+                    send_error(sink, Some(request_id), no_usage_text(vendor));
+                }
+            }
         }
         DispatchFlow::Continue
     }
@@ -1942,8 +2239,9 @@ pub(crate) fn broadcast_lease_changed(fanout: &dyn FrameFanout, agent_id: AgentI
 /// `control/agent` 라우트가 부르는 명부 통지 포트의 실물 어댑터(ADR-0132).
 ///
 /// ★왜 여기 사는가★: 통지의 내용물(어떤 이벤트를 어떤 wire 모양으로 미는가)은 이 모듈이 소유한 지식이고,
-///   `control/` 은 "명부가 바뀌었다" 만 안다. 반대로 두면 제어 라우트가 wire 매핑을 알게 되고, 데몬 층
-///   결정(ADR-0130)이 추적하는 `control/` 의 나가는 간선이 생긴다.
+///   `control/` 은 "명부가 바뀌었다" 만 안다. 반대로 두면 제어 라우트가 wire 매핑을 알게 된다.
+///   이 배치를 처음 세운 사유는 ADR-0130 의 잎 성질(`control/` 의 나가는 간선 0)이었고 그 성질은
+///   ADR-0236 이 내려놓았다 — 모양은 그대로 둔다.
 /// ★짝 불일치 방지★: 생성자를 통해 **한 조립에서 나온** 팬아웃과 매니저만 묶인다 —
 ///   `DaemonWiring::roster_broadcast` 가 유일한 운영 생성 지점이다(그 struct 주석의 규칙).
 pub struct RosterFanout {
@@ -2041,6 +2339,21 @@ mod tests {
         RequestId(uuid::Uuid::new_v4())
     }
 
+    /// wire 낱말(소문자)과 버스 낱말(대문자 시작)이 한 칸을 친다 — 칸 키는 들어온 철자가 아니라 조회기의 키다.
+    /// 버스 쪽은 `usage.*` 의 데몬 실물이 실제로 부르는 그 함수(agent `usage_vendor_of`)로 잰다.
+    #[test]
+    fn wire_and_bus_words_reach_the_same_usage_key() {
+        use engram_dashboard_agent::commands::{usage_vendor_of, AgentBackend};
+        for (wire, bus) in [
+            (WireBackendKind::Claude, AgentBackend::Claude),
+            (WireBackendKind::Codex, AgentBackend::Codex),
+        ] {
+            let from_wire = usage_vendor_key(wire).expect("wire 벤더마다 조회기가 있다");
+            let from_bus = usage_vendor_of(&bus).expect("버스 낱말마다 조회기가 있다");
+            assert_eq!(from_wire, from_bus, "{wire:?}");
+        }
+    }
+
     /// ★[`inbound_lane`] 의 판정표★ — 줄이 찼을 때 **무엇이 줄을 건너뛰는가**.
     ///
     /// ★`Interrupt` 가 `Ordered` 인 것이 이 시험의 핵심 단언이다★: 사람의 직관은 「취소니까 당연히
@@ -2077,6 +2390,11 @@ mod tests {
                 profile_id: uuid::Uuid::new_v4(),
                 request_id: rid(),
             },
+            AgentCommand::UsageSubscribe { vendors: vec![] },
+            AgentCommand::RefreshUsageLimits {
+                vendor: WireBackendKind::Codex,
+                request_id: rid(),
+            },
         ];
         for cmd in &ordered {
             assert_eq!(
@@ -2095,7 +2413,7 @@ mod tests {
     /// 커지는 것이 위험한 방향이다). 「줄에 남는 쪽」은 다섯 순서 묶음의 대표로 충분하다 — 새
     /// variant 가 빠뜨려지는 것은 이 테스트가 아니라 `dispatch_order` 의 exhaustive match 가 잡는다.
     #[test]
-    fn only_the_three_activation_commands_leave_the_arrival_queue() {
+    fn only_the_activations_and_the_usage_refresh_leave_the_arrival_queue() {
         use engram_dashboard_command::OwnerToken;
 
         let detached = vec![
@@ -2113,12 +2431,16 @@ mod tests {
                 backend: None,
                 request_id: rid(),
             },
+            AgentCommand::RefreshUsageLimits {
+                vendor: WireBackendKind::Claude,
+                request_id: rid(),
+            },
         ];
         for cmd in &detached {
             assert_eq!(
                 dispatch_order(cmd),
                 DispatchOrder::Detached,
-                "활성화는 줄 밖이어야 한다: {cmd:?}"
+                "끝까지 기다리는 명령은 줄 밖이어야 한다: {cmd:?}"
             );
         }
 
@@ -2131,6 +2453,16 @@ mod tests {
                 request_id: rid(),
             },
             AgentCommand::Interrupt {
+                agent_id,
+                request_id: rid(),
+            },
+            AgentCommand::CancelQueuedInput {
+                agent_id,
+                input_id: "q1".into(),
+                request_id: rid(),
+            },
+            // 대기 목록 조회도 줄에 남는다 — 같은 연결의 앞선 입력·취소를 앞질러 읽지 않는다.
+            AgentCommand::ListQueuedInputs {
                 agent_id,
                 request_id: rid(),
             },
@@ -2168,6 +2500,10 @@ mod tests {
                 force: true,
                 kill_agents: true,
                 request_id: rid(),
+            },
+            // 사용량 구독 — 전량 교체라 마지막이 이겨야 한다.
+            AgentCommand::UsageSubscribe {
+                vendors: vec![WireBackendKind::Claude],
             },
         ];
         for cmd in &in_order {
@@ -2308,7 +2644,7 @@ mod tests {
         watch::Receiver<bool>,
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
-        test_core_built(deliveries, &|_| {
+        test_core_built(deliveries, &|_, _| {
             Arc::new(crate::command_delivery::NoLocalCommands)
         })
     }
@@ -2319,14 +2655,18 @@ mod tests {
     /// 꾸미면 그 사본이 운영과 조용히 어긋난다. 매니저는 디스크도 PTY 도 없는 이 하네스의 것을 그대로 쓴다.
     fn test_core_with_own_agent_table() -> (ConnectionCore, watch::Receiver<bool>) {
         // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다 — 재는 쪽은 `test_core_recording`.
-        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &|manager| {
-            let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
-            slot.set(Arc::new(crate::control::commands::make_daemon_table(
-                manager.clone(),
-                Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
-            )));
-            Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
-        });
+        // 임대 포트는 코어가 쥐는 그 `MultiViewState` 다 — 운영 조립(`lib.rs`)과 같은 모양이다.
+        let (core, rx, _fanout) =
+            test_core_built(CommandDeliveries::new(), &|manager, multiview| {
+                let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
+                slot.set(Arc::new(crate::control::commands::make_daemon_table(
+                    manager.clone(),
+                    Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
+                    Arc::new(multiview.clone()),
+                    Arc::new(crate::control::commands::NoUsageLimits),
+                )));
+                Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
+            });
         (core, rx)
     }
 
@@ -2340,7 +2680,7 @@ mod tests {
         let slot = Arc::new(crate::control::mcp_server::CommandTableSlot::new());
         let for_locals = slot.clone();
         // 팬아웃 기록은 이 갈래의 검증 대상이 아니라 흘린다(위 형제와 같은 이유).
-        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &move |_| {
+        let (core, rx, _fanout) = test_core_built(CommandDeliveries::new(), &move |_, _| {
             Arc::new(crate::control::commands::DaemonLocalCommands::new(
                 for_locals.clone(),
             ))
@@ -2355,7 +2695,7 @@ mod tests {
     ///   넘기고 끝내면 밖에서는 같은 것을 다시 쥘 수 없다.
     fn test_core_built(
         deliveries: CommandDeliveries,
-        locals: &dyn Fn(&Arc<AgentManager>) -> Arc<dyn LocalCommands>,
+        locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
     ) -> (
         ConnectionCore,
         watch::Receiver<bool>,
@@ -2404,17 +2744,20 @@ mod tests {
         ));
         let manager = Arc::new(AgentManager::new(status_sink, profiles, presets, tracker));
         let manager_for_locals = manager.clone();
+        let multiview = MultiViewState::new();
+        let locals = locals(&manager_for_locals, &multiview);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let control_registry = Arc::new(ControlRegistry::new());
         let core = ConnectionCore::new(
             manager,
-            MultiViewState::new(),
+            multiview,
             fanout,
             control_registry,
             Arc::new(crate::control::mcp_server::MessagingSlot::new()),
             CommandRoster::new(),
             deliveries,
-            locals(&manager_for_locals),
+            locals,
+            crate::usage_service::fakes::idle_service(),
             shutdown_tx,
         );
         (core, shutdown_rx, recording)
@@ -3100,6 +3443,348 @@ mod tests {
         }
     }
 
+    // ── 대기 입력 목록 WS 두 명령(ADR-0231) ───────────────────────────────────────
+    mod queued_seam {
+        use std::sync::atomic::AtomicU8;
+        use std::sync::Arc;
+
+        use engram_dashboard_agent::backend::InputEncoder;
+        use engram_dashboard_agent::manager::AgentManager;
+        use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
+        use engram_dashboard_agent::session::AgentSession;
+        use engram_dashboard_agent::transport::AgentTransport;
+        use engram_dashboard_agent::types::{
+            AgentId, AgentInfo, AgentStatus, BackendCaps, ControlCaps, InputCaps, InputEvent,
+            ModelCaps, OutputCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps,
+            StatusSink, TransportCaps,
+        };
+
+        struct NoopStatus;
+        impl StatusSink for NoopStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+
+        /// 수락 모름으로 쥔 id 만 답하는 통로 — 쓰기는 삼킨다.
+        struct SeamTransport {
+            unconfirmed: Vec<String>,
+        }
+        impl AgentTransport for SeamTransport {
+            fn start(&self, _core: Arc<OutputCore>) {}
+            fn send_input(&self, _input: InputEvent) -> Result<(), PtyError> {
+                Ok(())
+            }
+            fn unconfirmed_inputs(&self) -> Vec<String> {
+                self.unconfirmed.clone()
+            }
+            fn resize(&self, _c: u16, _r: u16) -> Result<(), PtyError> {
+                Ok(())
+            }
+            fn interrupt(&self) -> Result<(), PtyError> {
+                Ok(())
+            }
+            fn shutdown(&self) {}
+            fn capabilities(&self) -> TransportCaps {
+                TransportCaps {
+                    input: InputCaps {
+                        raw: true,
+                        message: false,
+                        attachment: false,
+                    },
+                    output: OutputCaps {
+                        terminal_bytes: false,
+                        structured: true,
+                        markdown: false,
+                        tool_events: false,
+                        usage: false,
+                    },
+                    control: ControlCaps {
+                        resize: false,
+                        interrupt: false,
+                        cancel: false,
+                        graceful_shutdown: false,
+                    },
+                }
+            }
+        }
+
+        /// 명부를 `events` 로 채운 산 세션을 꽂는다. ★중간 입력 정책은 `None` 이다★ — 주입 세션에 정책을 싣는
+        /// 공개 seam 이 없어, 이 세션의 취소는 오늘의 모든 백엔드처럼 늘 NOT_FOUND 다.
+        pub(super) fn insert(
+            manager: &Arc<AgentManager>,
+            epoch: u32,
+            events: Vec<QueuedInputEvent>,
+            unconfirmed: &[&str],
+        ) -> AgentId {
+            let id = AgentId::new_v4();
+            let core = Arc::new(OutputCore::new(
+                id,
+                epoch,
+                Arc::new(NoopStatus),
+                TurnWiring::detached(),
+            ));
+            for event in events {
+                core.emit(OutputEvent::QueuedInput(event));
+            }
+            let session = Arc::new(AgentSession::new(
+                id,
+                std::path::PathBuf::from("seam-root"),
+                epoch,
+                80,
+                24,
+                Arc::new(AtomicU8::new(0)),
+                BackendCaps {
+                    session: SessionCaps {
+                        resume: true,
+                        snapshot: false,
+                        cwd_env: true,
+                    },
+                    model: ModelCaps {
+                        select: false,
+                        temperature: false,
+                        max_tokens: false,
+                    },
+                },
+                InputEncoder::ClaudeStreamJson,
+                true,
+                core,
+                Box::new(SeamTransport {
+                    unconfirmed: unconfirmed.iter().map(|id| id.to_string()).collect(),
+                }),
+            ));
+            manager.insert_test_session(session);
+            id
+        }
+    }
+
+    async fn dispatch_one(
+        core: &ConnectionCore,
+        conn_id: ConnId,
+        cmd: AgentCommand,
+    ) -> Vec<AgentEvent> {
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(conn_id);
+        core.dispatch(cmd, &session, &mock).await;
+        mock.events()
+    }
+
+    /// ★목록 조회는 임대를 안 본다★ — 남이 임대를 쥔 에이전트도 그대로 읽힌다. 응답은 명부의 환원 상태를 빠짐없이
+    /// 싣는다: 취소 대기 행의 두 칸 · 수락 모름 표지(명부가 `Queued` 인 행에만 — 취소 대기가 이긴다) ·
+    /// `as_of_seq` · 화신 표식 · 턴 관측 표의 멈춤 칸.
+    #[tokio::test]
+    async fn list_queued_inputs_skips_the_lease_and_carries_the_whole_listing() {
+        use engram_dashboard_agent::turn::{TurnEndKind, TurnSignal};
+        use engram_dashboard_agent::types::QueuedInputEvent as Q;
+
+        let (core, _rx) = test_core();
+        let agent_id = queued_seam::insert(
+            &core.manager,
+            7,
+            vec![
+                Q::Queued {
+                    id: "q1".into(),
+                    text: "first".into(),
+                },
+                Q::Queued {
+                    id: "q2".into(),
+                    text: "second".into(),
+                },
+                Q::Queued {
+                    id: "q3".into(),
+                    text: "third".into(),
+                },
+                Q::CancelRequested { id: "q3".into() },
+                Q::CancelAnswered {
+                    id: "q3".into(),
+                    removed: false,
+                },
+            ],
+            &["q2", "q3"],
+        );
+        let turns = core.manager.turns();
+        turns.register(agent_id, 7);
+        turns.observe(agent_id, 7, 1, TurnSignal::Ended(TurnEndKind::Failed));
+        let _ = core.multiview.acquire(agent_id, 2);
+
+        let req = rid();
+        let events = dispatch_one(
+            &core,
+            1,
+            AgentCommand::ListQueuedInputs {
+                agent_id,
+                request_id: req,
+            },
+        )
+        .await;
+        let [AgentEvent::QueuedInputs {
+            request_id,
+            agent_id: answered_for,
+            inputs,
+            as_of_seq,
+            epoch,
+            stopped_after_error,
+        }] = events.as_slice()
+        else {
+            panic!("QueuedInputs 1건 기대(임대에 걸리면 안 된다): {events:?}");
+        };
+        assert_eq!((*request_id, *answered_for), (req, agent_id));
+        let row = |id: &str, text: &str, state: &str, cancel| WireQueuedInputRow {
+            id: id.into(),
+            text: text.into(),
+            state: state.into(),
+            cancel,
+        };
+        assert_eq!(
+            inputs,
+            &vec![
+                row("q1", "first", "queued", None),
+                row("q2", "second", "unconfirmed", None),
+                row(
+                    "q3",
+                    "third",
+                    "cancelling",
+                    Some(WireQueuedInputCancel {
+                        answer: "not_removed".into(),
+                        vendor_closed: false,
+                    })
+                ),
+            ]
+        );
+        assert_eq!(*epoch, 7);
+        assert!(*stopped_after_error, "턴 관측 표의 오류 끝 그대로");
+        // 버스가 싣는 manager 값과 같은 seq 다(행 = 링 접두 `as_of_seq` 의 환원값).
+        let listing = core.manager.list_queued_inputs(agent_id).expect("산 세션");
+        assert!(as_of_seq.is_some(), "목록 사건을 환원한 화신");
+        assert_eq!(*as_of_seq, listing.as_of_seq);
+    }
+
+    #[tokio::test]
+    async fn list_queued_inputs_of_an_agent_without_a_live_session_is_not_found() {
+        let (core, _rx) = test_core();
+        let req = rid();
+        let events = dispatch_one(
+            &core,
+            1,
+            AgentCommand::ListQueuedInputs {
+                agent_id: uuid::Uuid::new_v4(),
+                request_id: req,
+            },
+        )
+        .await;
+        match events.as_slice() {
+            [AgentEvent::Error {
+                request_id: Some(r),
+                message,
+            }] => {
+                assert_eq!(*r, req);
+                assert!(
+                    message.starts_with("NOT_FOUND: "),
+                    "코드를 값으로 싣는다: {message}"
+                );
+            }
+            other => panic!("상관 키 달린 Error 기대: {other:?}"),
+        }
+    }
+
+    /// ★비보유자는 `WriteStdin` 과 같은 글자로 거절된다★ — 같은 에이전트에 두 명령을 보내 답을 맞댄다. 거절은
+    /// manager 에 닿기 전이다(닿았다면 없는 에이전트라 NOT_FOUND 가 났다).
+    #[tokio::test]
+    async fn cancel_queued_input_refuses_a_non_holder_exactly_like_write_stdin() {
+        let (core, _rx) = test_core();
+        let agent_id = uuid::Uuid::new_v4();
+        let _ = core.multiview.acquire(agent_id, 2);
+
+        let (write_req, cancel_req) = (rid(), rid());
+        let write = dispatch_one(
+            &core,
+            1,
+            AgentCommand::WriteStdin {
+                agent_id,
+                data: b"x".to_vec(),
+                request_id: write_req,
+            },
+        )
+        .await;
+        let cancel = dispatch_one(
+            &core,
+            1,
+            AgentCommand::CancelQueuedInput {
+                agent_id,
+                input_id: "q1".into(),
+                request_id: cancel_req,
+            },
+        )
+        .await;
+        let (
+            [AgentEvent::Error {
+                request_id: Some(w),
+                message: write_message,
+            }],
+            [AgentEvent::Error {
+                request_id: Some(c),
+                message: cancel_message,
+            }],
+        ) = (write.as_slice(), cancel.as_slice())
+        else {
+            panic!("둘 다 상관 키 달린 Error 기대: {write:?} / {cancel:?}");
+        };
+        assert_eq!((*w, *c), (write_req, cancel_req));
+        assert_eq!(cancel_message, write_message, "같은 거절 문구");
+        assert_eq!(cancel_message, INPUT_LOCKED_REFUSAL);
+    }
+
+    /// ★오늘은 늘 NOT_FOUND 다★ — 모든 백엔드가 중간 입력 정책 `None` 이라 목록에 선 id 도 취소 대상이 아니다.
+    /// 임대를 쥔 연결(통과)·아무도 안 쥔 에이전트(통과) 모두 manager 의 답까지 가서 NOT_FOUND 를 받는다.
+    #[tokio::test]
+    async fn cancel_queued_input_is_not_found_today() {
+        use engram_dashboard_agent::types::QueuedInputEvent as Q;
+
+        let (core, _rx) = test_core();
+        let live = queued_seam::insert(
+            &core.manager,
+            0,
+            vec![Q::Queued {
+                id: "q1".into(),
+                text: "first".into(),
+            }],
+            &[],
+        );
+        let _ = core.multiview.acquire(live, 1);
+        for (conn_id, agent_id) in [(1, live), (1, uuid::Uuid::new_v4())] {
+            let req = rid();
+            let events = dispatch_one(
+                &core,
+                conn_id,
+                AgentCommand::CancelQueuedInput {
+                    agent_id,
+                    input_id: "q1".into(),
+                    request_id: req,
+                },
+            )
+            .await;
+            match events.as_slice() {
+                [AgentEvent::Error {
+                    request_id: Some(r),
+                    message,
+                }] => {
+                    assert_eq!(*r, req);
+                    assert!(
+                        message.starts_with("NOT_FOUND: "),
+                        "임대는 통과하고 manager 가 NOT_FOUND: {message}"
+                    );
+                }
+                other => panic!("상관 키 달린 NOT_FOUND 기대: {other:?}"),
+            }
+        }
+        let listing = core.manager.list_queued_inputs(live).expect("산 세션");
+        assert_eq!(
+            listing.rows.len(),
+            1,
+            "거절된 취소는 명부를 건드리지 않는다"
+        );
+    }
+
     // ── AcquireInput ─────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn acquire_input_acks_and_broadcasts() {
@@ -3169,54 +3854,7 @@ mod tests {
         }
     }
 
-    /// `note_claimed_owner` 가 낸 이벤트를 **레벨과 함께** 모은다 — 이 파일엔 로그 수집기가 없어 여기 둔다.
-    /// `with_default` 는 이 스레드에만 걸려 병렬 테스트와 섞이지 않는다(`command_roster` 의 같은 형태).
-    ///
-    /// ★DEBUG 까지 켜는 이유★: 「조용하다」를 WARN 만 보고 판정하면 **debug 갈래로 떨어진 것**과 **아무
-    /// 갈래에도 안 간 것**이 같아 보인다.
-    fn capture_logs(body: impl FnOnce()) -> Vec<(tracing::Level, String)> {
-        use tracing::subscriber;
-
-        struct Collector {
-            lines: Arc<StdMutex<Vec<(tracing::Level, String)>>>,
-        }
-        struct Visit<'a>(&'a mut String);
-        impl tracing::field::Visit for Visit<'_> {
-            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                self.0.push_str(&format!("{}={:?} ", f.name(), v));
-            }
-        }
-        impl subscriber::Subscriber for Collector {
-            fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-                *m.level() <= tracing::Level::DEBUG
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
-                tracing::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                let mut buf = String::new();
-                event.record(&mut Visit(&mut buf));
-                self.lines
-                    .lock()
-                    .expect("lines poisoned")
-                    .push((*event.metadata().level(), buf));
-            }
-            fn enter(&self, _: &tracing::Id) {}
-            fn exit(&self, _: &tracing::Id) {}
-        }
-
-        let lines: Arc<StdMutex<Vec<(tracing::Level, String)>>> = Arc::default();
-        subscriber::with_default(
-            Collector {
-                lines: lines.clone(),
-            },
-            body,
-        );
-        let captured = lines.lock().expect("lines poisoned");
-        captured.clone()
-    }
+    use crate::log_capture::capture_levels as capture_logs;
 
     // ── 주장한 주인 토큰의 판정(ADR-0154) ────────────────────────────────────────
     //
@@ -3458,6 +4096,8 @@ mod tests {
         slot.set(Arc::new(crate::control::commands::make_daemon_table(
             core.manager().clone(),
             Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
+            Arc::new(core.multiview().clone()),
+            Arc::new(crate::control::commands::NoUsageLimits),
         )));
 
         let req = rid();
@@ -3478,12 +4118,17 @@ mod tests {
                 assert_eq!(
                     names,
                     vec![
+                        "agent.cancelQueuedInput",
+                        "agent.interrupt",
                         "agent.list",
+                        "agent.listQueuedInputs",
                         "agent.move",
                         "agent.new",
                         "agent.rename",
                         "agent.spawn",
-                        "tab.create"
+                        "tab.create",
+                        "usage.get",
+                        "usage.refresh"
                     ],
                     "두 출처가 이름순 한 목록으로 합쳐진다"
                 );
@@ -4597,6 +5242,7 @@ mod tests {
                 id: Some("c1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: CoreToolCategory::Read,
             }),
             Some(W::ToolCall {
                 name: "read".into(),
@@ -4604,6 +5250,7 @@ mod tests {
                 id: Some("c1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: Some(WireToolCategory::Read),
             })
         );
 
@@ -4650,9 +5297,162 @@ mod tests {
         );
 
         assert_eq!(
+            output_event_to_wire(&CoreOutputEvent::QueuedInput(
+                CoreQueuedInputEvent::Queued {
+                    id: "u1".into(),
+                    text: "hi".into(),
+                }
+            )),
+            Some(W::QueuedInput {
+                op: WireQueuedInputEvent::Queued {
+                    id: "u1".into(),
+                    text: "hi".into(),
+                }
+            })
+        );
+
+        assert_eq!(
             output_event_to_wire(&CoreOutputEvent::TerminalBytes(vec![1, 2, 3])),
             None,
             "TerminalBytes(tag0 전용)는 wire StructuredEvent 로 매핑 안 됨"
+        );
+    }
+
+    /// ★도구 종류가 하나도 접히지 않고 건너간다★ — 요약 줄이 종류별로 세므로, 한 종류가 다른 종류로 떨어지면
+    /// 묶음 머리의 개수가 틀린다. 도메인 쪽은 늘 싣고 wire 쪽은 늘 `Some` 이다(칸 없음 = 옛 데몬뿐).
+    // ADR-0239
+    #[tokio::test]
+    async fn tool_call_maps_every_category_one_to_one() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+        for (core, want) in [
+            (CoreToolCategory::Read, WireToolCategory::Read),
+            (CoreToolCategory::Search, WireToolCategory::Search),
+            (CoreToolCategory::List, WireToolCategory::List),
+            (CoreToolCategory::Edit, WireToolCategory::Edit),
+            (CoreToolCategory::Command, WireToolCategory::Command),
+            (CoreToolCategory::Web, WireToolCategory::Web),
+            (CoreToolCategory::Agent, WireToolCategory::Agent),
+            (CoreToolCategory::Mcp, WireToolCategory::Mcp),
+            (CoreToolCategory::Other, WireToolCategory::Other),
+        ] {
+            match output_event_to_wire(&CoreOutputEvent::ToolCall {
+                name: "t".into(),
+                args_json: "{}".into(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+                category: core,
+            }) {
+                Some(W::ToolCall { category, .. }) => assert_eq!(category, Some(want), "{core:?}"),
+                other => panic!("ToolCall 기대, got {other:?}"),
+            }
+        }
+    }
+
+    /// ★도구 끝 결말이 하나도 접히지 않고 건너간다★ — 거부가 실패로 떨어지면 묶음 머리의 「오류 N」이 거짓이 되고,
+    /// 우리 거절이 벤더 거부로 떨어지면 사유 줄이 틀린다. `id` 는 그대로 간다(누산기가 그것으로 행을 찾는다).
+    // ADR-0241
+    #[tokio::test]
+    async fn tool_result_maps_every_outcome_one_to_one() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+        for (core, want) in [
+            (CoreToolOutcome::Completed, WireToolOutcome::Completed),
+            (CoreToolOutcome::Failed, WireToolOutcome::Failed),
+            (CoreToolOutcome::Declined, WireToolOutcome::Declined),
+            (CoreToolOutcome::Refused, WireToolOutcome::Refused),
+        ] {
+            assert_eq!(
+                output_event_to_wire(&CoreOutputEvent::ToolResult {
+                    id: "i-1".into(),
+                    outcome: core,
+                }),
+                Some(W::ToolResult {
+                    id: "i-1".into(),
+                    outcome: want,
+                }),
+                "{core:?}"
+            );
+        }
+    }
+
+    /// ★명부 사건·원인이 하나도 접히지 않고 건너간다★ — 누산기가 명부와 같은 환원을 하려면 사건열이 그대로
+    /// 가야 한다(원인 하나가 다른 원인으로 떨어지면 되살림·말풍선 지우기가 갈린다).
+    // ADR-0231
+    #[tokio::test]
+    async fn queued_input_maps_every_event_and_cause_without_collapsing_any() {
+        use engram_dashboard_protocol::StructuredEvent as W;
+        let wire = |op| match output_event_to_wire(&CoreOutputEvent::QueuedInput(op)) {
+            Some(W::QueuedInput { op }) => op,
+            other => panic!("QueuedInput 기대, got {other:?}"),
+        };
+        let id = || "u1".to_owned();
+        assert_eq!(
+            wire(CoreQueuedInputEvent::CancelRequested { id: id() }),
+            WireQueuedInputEvent::CancelRequested { id: id() }
+        );
+        for removed in [true, false] {
+            assert_eq!(
+                wire(CoreQueuedInputEvent::CancelAnswered { id: id(), removed }),
+                WireQueuedInputEvent::CancelAnswered { id: id(), removed }
+            );
+        }
+        assert_eq!(
+            wire(CoreQueuedInputEvent::CancelFailed { id: id() }),
+            WireQueuedInputEvent::CancelFailed { id: id() }
+        );
+        for sent in [true, false] {
+            assert_eq!(
+                wire(CoreQueuedInputEvent::HandedOver { id: id(), sent }),
+                WireQueuedInputEvent::HandedOver { id: id(), sent }
+            );
+        }
+        assert_eq!(
+            wire(CoreQueuedInputEvent::Delivered { id: id() }),
+            WireQueuedInputEvent::Delivered { id: id() }
+        );
+        for (core, want) in [
+            (CoreDropCause::Withdrawn, WireDropCause::Withdrawn),
+            (CoreDropCause::Interrupted, WireDropCause::Interrupted),
+            (CoreDropCause::AgentEnded, WireDropCause::AgentEnded),
+            (CoreDropCause::Rejected, WireDropCause::Rejected),
+            (CoreDropCause::Unknown, WireDropCause::Unknown),
+        ] {
+            assert_eq!(
+                wire(CoreQueuedInputEvent::Dropped {
+                    id: id(),
+                    cause: core,
+                }),
+                WireQueuedInputEvent::Dropped {
+                    id: id(),
+                    cause: want,
+                }
+            );
+        }
+        assert_eq!(
+            wire(CoreQueuedInputEvent::AckUnavailable {
+                delivered: vec![
+                    CoreDeliveredCopy {
+                        id: "a".into(),
+                        text: "하나".into(),
+                    },
+                    CoreDeliveredCopy {
+                        id: "b".into(),
+                        text: "둘".into(),
+                    },
+                ],
+            }),
+            WireQueuedInputEvent::AckUnavailable {
+                delivered: vec![
+                    WireDeliveredCopy {
+                        id: "a".into(),
+                        text: "하나".into(),
+                    },
+                    WireDeliveredCopy {
+                        id: "b".into(),
+                        text: "둘".into(),
+                    },
+                ],
+            }
         );
     }
 
@@ -5031,6 +5831,82 @@ mod tests {
             core.manager().roster().len(),
             0,
             "반려는 아무것도 만들지 않는다"
+        );
+    }
+
+    /// ★버스의 취소도 WS 와 **같은 임대 판정**을 받는다(ADR-0231)★ — 운영 임대 상태(`MultiViewState`)가
+    /// 명령 표의 임대 포트로 꽂히고, 배달이 봉투를 낸 연결을 호출자로 넘기는지를 실물 배선으로 잰다.
+    /// 보유자는 임대를 지나 동사 본문의 답을 받는다(오늘은 늘 NOT_FOUND — 중간 입력 정책이 `None`).
+    #[tokio::test]
+    async fn a_bus_cancel_from_a_non_holder_is_refused_with_the_ws_text() {
+        use engram_dashboard_agent::types::QueuedInputEvent as Q;
+
+        let (core, _rx) = test_core_with_own_agent_table();
+        let live = queued_seam::insert(
+            core.manager(),
+            0,
+            vec![Q::Queued {
+                id: "q1".into(),
+                text: "first".into(),
+            }],
+            &[],
+        );
+        let _ = core.multiview.acquire(live, 7);
+        let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let (stranger, mut stranger_inbox) = attached_with_inbox(&core, 2);
+        let (holder, mut holder_inbox) = attached_with_inbox(&core, 7);
+        let args = serde_json::json!({ "target": live.to_string(), "input_id": "q1" });
+
+        core.dispatch(
+            bus_command_with(
+                "agent.cancelQueuedInput",
+                args.clone(),
+                engram_dashboard_command::RequestId::new(),
+            ),
+            &stranger,
+            &mock,
+        )
+        .await;
+        match next_frame_event(&mut stranger_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let err = reply.outcome.expect_err("비보유자는 거절");
+                assert_eq!(err.code(), engram_dashboard_command::ErrorCode::Conflict);
+                assert_eq!(err.message(), INPUT_LOCKED_REFUSAL, "WS 와 같은 글자");
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        }
+
+        core.dispatch(
+            bus_command_with(
+                "agent.cancelQueuedInput",
+                args,
+                engram_dashboard_command::RequestId::new(),
+            ),
+            &holder,
+            &mock,
+        )
+        .await;
+        match next_frame_event(&mut holder_inbox).await {
+            AgentEvent::CommandReply { reply } => {
+                let err = reply.outcome.expect_err("오늘은 동사가 NOT_FOUND");
+                assert_eq!(
+                    err.code(),
+                    engram_dashboard_command::ErrorCode::NotFound,
+                    "보유자는 임대를 지나 본문에 닿는다: {}",
+                    err.message()
+                );
+            }
+            other => panic!("답장이 와야: {other:?}"),
+        }
+        assert_eq!(
+            core.manager()
+                .list_queued_inputs(live)
+                .expect("산 세션")
+                .rows
+                .len(),
+            1,
+            "거절된 취소는 명부를 건드리지 않는다"
         );
     }
 }

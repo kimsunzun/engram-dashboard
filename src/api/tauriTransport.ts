@@ -26,10 +26,25 @@
 
 import { Channel, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 
-import type { ConnectionState } from './agentClient'
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 import type { InboundMessage, Transport } from './transport'
 import { decodeOutputFrame, decodeReplayMarker } from './wsFrame'
+
+// 셸이 웹뷰에 주는 사용량 payload 둘의 칸 이름 — ts 바인딩을 굽지 않아(원소가 protocol 타입) 손으로 맞춘다. 정본 =
+//   `src-tauri/src/commands/usage.rs` `UsageSnapshotReply` · `src-tauri/src/daemon_client/events.rs`
+//   `UsageLimitsUpdatedPayload`. 한쪽 칸 이름이 바뀌면 여기서 조용히 `undefined` 가 된다.
+interface ShellUsageSnapshotReply {
+  socket_epoch: number
+  snapshots: UsageLimitSnapshot[]
+}
+interface ShellUsageLimitsUpdated {
+  labels: string[]
+  socket_epoch: number
+  snapshot: UsageLimitSnapshot
+}
 
 export class TauriTransport implements Transport {
   private _state: ConnectionState = 'down'
@@ -53,6 +68,9 @@ export class TauriTransport implements Transport {
   //   붙드는 Channel 이 항상 마지막 완료분과 일치).
   private outputChannelInflight: Promise<void> | null = null
   private outputChannelRerun = false
+  // 이 창의 출력 Channel 이 지금 세대에서 등록을 마쳤나(`subscribe_output` resolve). 등록을 시작할 때와
+  //   close() 가 내린다 — replay 요청이 이 값을 본다(`awaitOutputChannel`).
+  private outputChannelRegistered = false
 
   private connectPromise: Promise<void> | null = null
 
@@ -157,6 +175,7 @@ export class TauriTransport implements Transport {
   //   이중 등록도 없다. 조회가 non-connected 를 반환하면 아무 것도 하지 않는다(이후 전이 이벤트가 처리).
   private async selfHeal(): Promise<void> {
     const versionBefore = this.stateVersion
+    const genBefore = this.generation
     let raw: string
     try {
       raw = await invoke<string>('daemon_connection_state')
@@ -168,6 +187,9 @@ export class TauriTransport implements Transport {
     if (this.stateVersion !== versionBefore) {
       return
     }
+    // 조회 대기 중 close() 가 끼었으면 버린다 — close 는 이벤트가 아니라 버전을 안 올리므로, 이 가드가 없으면
+    //   닫힌 transport 가 connected 로 되살아나 좀비 Channel 을 등록한다.
+    if (this.generation !== genBefore) return
     this.applyConnectionState(raw)
   }
 
@@ -241,6 +263,20 @@ export class TauriTransport implements Transport {
           })
         }),
       )
+      // 셸은 전 웹뷰에 emit 하고 대상은 payload 의 `labels`(사용량 슬롯이 있는 창)로 고른다 — 자기 label 이
+      //   안 들면 버린다. ★label 은 Tauri 가 준다★(해시 라우트에서 유추하면 트리 창이 `main` 으로 읽힌다).
+      //   `socketEpoch` 는 셸이 곁들인 칸이라 데몬 wire(`subscribed` 는 셸이 대조에만 쓰고 싣지 않는다)와
+      //   섞이지 않게 camelCase 다.
+      registered.push(
+        await listen<ShellUsageLimitsUpdated>('usage-limits-updated', (e) => {
+          const { labels, socket_epoch, snapshot } = e.payload
+          if (!labels.includes(getCurrentWindow().label)) return
+          this.messageCb?.({
+            kind: 'control',
+            event: { UsageLimitsUpdated: { snapshot, socketEpoch: socket_epoch } },
+          })
+        }),
+      )
       // ★연결 상태 동기화(단일 진실원)★: Rust 쪽 연결 task 가 상태 전이(connected/reconnecting/down)
       //   시 이 이벤트를 emit 한다. 프론트는 이 이벤트로만 상태를 바꾼다(doConnect 임의 전이 없음).
       //
@@ -311,7 +347,12 @@ export class TauriTransport implements Transport {
   }
 
   private async doRegisterOutputChannel(): Promise<void> {
+    const myGen = this.generation
+    this.outputChannelRegistered = false
     // 옛 Channel 정리(#13133: null 대입 아님 — delete). 멱등성의 핵심 — 좀비 onmessage 제거.
+    // ★실물 `@tauri-apps/api` Channel 에선 이 delete 가 아무것도 안 한다★(onmessage 가 프로토타입 접근자 —
+    //   `node_modules/@tauri-apps/api/core.js`) — 옛 Channel 은 Rust 가 새 것으로 갈아 끼울 때까지 계속 흘린다.
+    //   ADR-0231: 그 틈의 프레임을 잃지 않는 것이 거기 기댄다 — 떼기를 「진짜로」 만들지 말 것(갈아 끼우기 전 프레임이 빠진다).
     if (this.outputChannel) {
       delete (this.outputChannel as { onmessage?: unknown }).onmessage
       this.outputChannel = null
@@ -321,7 +362,7 @@ export class TauriTransport implements Transport {
       // raw = Rust Response::new(frame bytes). 두 종류가 같은 Channel 로 온다(ADR-0046 — 마커도 동일
       //   Channel 경로라 replay 꼬리 뒤 순서가 보존됨):
       //   - 데몬 output frame: [tag0/1][agentId:16][epoch:4][seq:8][payload]
-      //   - replay 경계 마커:  [tag255][agentId:16][epoch:4][gen:8][flags:1]
+      //   - replay 경계 마커:  [tag255][agentId:16][epoch:4][gen:8][flags:1][replay_from:8]
       // ★마커 먼저 검사★: tag 로 갈린다. 마커(tag=255)면 replayBoundary 로 정규화(공개 표면 미노출).
       const marker = decodeReplayMarker(raw)
       if (marker) {
@@ -333,6 +374,7 @@ export class TauriTransport implements Transport {
           truncated: marker.truncated,
           failed: marker.failed,
           continuesConversation: marker.continuesConversation,
+          replayFrom: marker.replayFrom,
         })
         return
       }
@@ -350,6 +392,25 @@ export class TauriTransport implements Transport {
     this.outputChannel = channel
     // window_label 은 Rust 가 호출 webview 에서 자동 주입(agent.rs subscribe_output: tauri::Window).
     await invoke('subscribe_output', { channel })
+    if (myGen === this.generation) this.outputChannelRegistered = true
+  }
+
+  /**
+   * 이 창의 출력 Channel 등록이 끝날 때까지 기다린다 — 진행 중이면 그것을, 한 번도 안 됐으면 새로 등록한다.
+   * reject = 닫혔다 · 등록 실패.
+   *
+   * ★replay 요청은 이것을 거친다(load-bearing)★: 셸은 등록 안 된 창 몫의 프레임을 말없이 건너뛴다
+   *   (`output_channel.rs` `send_to_windows`). `subscribe_output` 은 sync 명령 · `request_replay` 는 async
+   *   명령이라 부른 순서대로 돈다는 보장이 없어, 등록 전에 replay 가 흐르면 그 머리가 이 창에서 사라진다 —
+   *   뷰는 마커의 replay 머리부터 흘리려다 첫 구멍 뒤를 전부 붙들고, 한가한 에이전트면 영영 빈 화면이다.
+   */
+  // ADR-0231
+  private async awaitOutputChannel(): Promise<void> {
+    if (this.outputChannelInflight) await this.outputChannelInflight
+    if (this.outputChannelRegistered) return
+    if (this.closedByUser) throw new Error('transport closed — output Channel not registered')
+    await this.registerOutputChannel()
+    if (!this.outputChannelRegistered) throw new Error('output Channel registration superseded')
   }
 
   // ── 전송 준비 보장 = attach-only(ADR-0021) ─────────────────────────────────
@@ -385,8 +446,8 @@ export class TauriTransport implements Transport {
   }
 
   // ★연결 시도만(MED-1 + Fix-C ①·④)★: doConnect 는 (1)control 리스너 멱등 등록 (2)Rust connect/ensure
-  //   invoke 만 한다. 상태 전이와 출력 Channel 등록은 *둘 다* Rust `daemon-connection-state` emit(u5
-  //   리스너)이 단일 권위로 담당한다 — doConnect 는 이 둘을 직접 하지 않는다.
+  //   invoke 만 한다. 상태 전이와 출력 Channel 등록은 *둘 다* Rust 상태가 단일 권위로 담당한다 — 전이
+  //   emit(u5 리스너), emit 이 없었으면 같은 경로의 조회(selfHeal). doConnect 는 이 둘을 직접 하지 않는다.
   //   - registerListeners(멱등): close()→cleanupListeners 후 재연결하면 control 이벤트(목록/상태/프로필)
   //     리스너가 비어 전부 유실된다 → 매 연결마다 멱등 재등록으로 보장(이미 등록돼 있으면 no-op).
   //
@@ -419,6 +480,16 @@ export class TauriTransport implements Transport {
       //   없어 별도 분기는 불필요하나, 가독성을 위해 stale 이면 조용히 빠진다.
       if (myGen !== this.generation || this.closedByUser) {
         return
+      }
+      // ADR-0231: 셸이 이미 Connected 면 connect/ensure 는 전이 emit 없이 Ok 로 단락한다 — 리로드·팝아웃 창은
+      //   init 의 조회가 끝나기 전에 여기까지 올 수 있다. 조회로 상태를 받고, 그 전이가 시작한 출력 Channel
+      //   등록을 마친 뒤에 풀린다(곧이어 나갈 replay 요청보다 등록이 먼저 — `awaitOutputChannel`).
+      //   emit 이 온 경로는 기다리지 않는다(그 경로의 replay 요청은 `awaitOutputChannel` 이 기다린다).
+      if (this._state !== 'connected') {
+        await this.selfHeal()
+        await this.outputChannelInflight?.catch((err: unknown) => {
+          console.warn('[TauriTransport] 출력 Channel 등록 실패:', err)
+        })
       }
     } finally {
       // 이 doConnect 가 current 세대의 것일 때만 connectPromise 를 비운다 — close() 가 이미 다른
@@ -456,6 +527,8 @@ export class TauriTransport implements Transport {
   //   마커 frame(getBigUint64) 과 폭을 맞춰 gen 펜스 비교가 정밀도 소실 없이 정확하다. reply 가 number 든
   //   string 든(직렬화 폭에 따라) BigInt() 로 흡수한다.
   async requestReplay(agentId: string): Promise<bigint> {
+    // ADR-0231: 이 창의 출력 Channel 등록보다 먼저 나가지 않는다(`awaitOutputChannel`).
+    await this.awaitOutputChannel()
     const gen = await invoke<number | string>('request_replay', { agentId })
     // ★안전 정수 가드(FIX-5)★: invoke 가 u64 gen 을 JSON number 로 직렬화하면 2^53 초과분은 이미
     //   부동소수점에서 정밀도가 깨진 채 도착한다(그 뒤 BigInt() 로 바꿔도 복원 불가). 실무상 도달 불가 —
@@ -465,6 +538,11 @@ export class TauriTransport implements Transport {
       console.warn(`[TauriTransport] request_replay gen 이 안전 정수 범위 초과(${gen}) — 정밀도 소실 가능(실무 도달 불가)`)
     }
     return BigInt(gen)
+  }
+
+  async getUsageSnapshot(): Promise<UsageSnapshotPull> {
+    const r = await invoke<ShellUsageSnapshotReply>('get_usage_snapshot')
+    return { socketEpoch: r.socket_epoch, snapshots: r.snapshots }
   }
 
   // ★세대 가드(Fix-C ①)★: generation++ 으로 in-flight doConnect 를 stale 화한다 — 뒤늦게 resolve 된
@@ -484,6 +562,7 @@ export class TauriTransport implements Transport {
     // ★single-flight 재등록 취소(FIX 6)★: 진행 중 등록의 "완료 후 재등록" 플래그를 끈다 — close 후
     //   좀비 Channel 을 다시 붙이지 않게. in-flight promise 자체는 완료되며 스스로 null 로 정리한다.
     this.outputChannelRerun = false
+    this.outputChannelRegistered = false
     invoke('daemon_close').catch((e: unknown) => {
       console.warn('[TauriTransport] daemon_close 실패:', e)
     })

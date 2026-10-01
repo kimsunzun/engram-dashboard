@@ -1,7 +1,9 @@
 //! codex app-server 와이어 타입 — 봉투 · 메서드 이름 · 우리가 보내고 받는 payload.
 //!
-//! ★출처와 재생성 방법(다시 추론하지 말 것)★: 이 파일의 필드 이름·필수 여부·enum 값은 전부
-//!   codex-cli **0.154.0** 이 낸 JSON Schema 에서 읽은 것이다. 다시 뽑는 명령 =
+//! ★출처와 재생성 방법(다시 추론하지 말 것)★: 이 파일의 필드 이름·필수 여부·enum 값은
+//!   codex-cli **0.154.0** 이 낸 JSON Schema 에서 읽은 것이다 — ★예외 하나 = 사용량 한도 절
+//!   (`AccountRateLimitsUpdatedNotification`·`GetAccountRateLimits*` 와 그 아래 타입)은 **0.156.1** 의 스키마에서
+//!   읽었다★. 다시 뽑는 명령 =
 //!   `codex app-server generate-json-schema --out <dir>` — `v2/` 아래에 타입별 파일 266 개가
 //!   떨어진다. 상류가 바뀌었나를 확인할 때는 이 파일을 읽지 말고 그 명령으로 다시 뽑아 대조한다.
 //!
@@ -213,6 +215,8 @@ pub(crate) mod method {
     pub(crate) const THREAD_START: &str = "thread/start";
     pub(crate) const THREAD_RESUME: &str = "thread/resume";
     pub(crate) const TURN_START: &str = "turn/start";
+    /// 도는 턴에 입력 하나를 넣는다 — 턴을 열지 않는다(ADR-0231).
+    pub(crate) const TURN_STEER: &str = "turn/steer";
     pub(crate) const TURN_INTERRUPT: &str = "turn/interrupt";
 
     /// 이어받은 스레드의 지난 item 을 **페이지로** 받는다(ADR-0203).
@@ -235,9 +239,22 @@ pub(crate) mod method {
     pub(crate) const ERROR: &str = "error";
     pub(crate) const DEPRECATION_NOTICE: &str = "deprecationNotice";
 
+    /// ★화면 이벤트가 아니라 사용량 관측으로 옮긴다★ — 계정 단위 상태라 에이전트별 replay 를 타면 안 된다
+    /// (`decoder` 의 이 arm · 해석 = 이 폴더 `usage`).
+    pub(crate) const ACCOUNT_RATE_LIMITS_UPDATED: &str = "account/rateLimits/updated";
+
+    /// 우리 → 서버 요청 — 사용량 능동 조회 하나만 보낸다(이 폴더 `usage_probe`). 대화 통로는 이것을 안 보낸다.
+    pub(crate) const ACCOUNT_RATE_LIMITS_READ: &str = "account/rateLimits/read";
+
     /// ★이 이름 하나에 소비자가 둘이다★ — 번역기가 턴 경계로 옮기고(`decoder`), 통로가 큐 해제의
     /// 상태 기계 입력으로 읽는다(`transport`). 둘은 같은 줄을 각자 본다.
     pub(crate) const TURN_COMPLETED: &str = "turn/completed";
+
+    // 서버 → 우리 요청 중 통로가 이름으로 아는 것. ★거절은 어느 요청에나 똑같이 한다★ — 이 둘은 그 위에 거절한
+    // item 을 기억해, 그 item 의 끝을 우리 거절로 귀속한다(ADR-0241).
+    pub(crate) const ITEM_COMMAND_EXECUTION_REQUEST_APPROVAL: &str =
+        "item/commandExecution/requestApproval";
+    pub(crate) const ITEM_FILE_CHANGE_REQUEST_APPROVAL: &str = "item/fileChange/requestApproval";
 }
 
 /// `TurnStatus` 의 네 값 전량(스키마 0.154.0 `definitions.TurnStatus` — 닫힌 `enum`).
@@ -261,8 +278,10 @@ pub(crate) mod turn_status {
 /// ★스키마는 코드 대역을 정하지 않는다★ — `JSONRPCErrorError.code` 는 제약 없는 i64 이고
 /// `-32xxx` 가 스키마에 한 번도 안 나온다. 우리가 봉투를 정의하는 쪽이므로 값은 우리가 고르고,
 /// JSON-RPC 2.0 관례의 "method not found" 를 빌려 쓴다(읽는 사람에게 뜻이 통한다).
-/// ★app-server 가 이 응답을 어떻게 받아들이는지는 미검증★ — 그 턴을 실패로 접는지 무시하는지
-/// 본 적이 없다. 그래도 버리는 것보다 낫다: 버리면 그 에이전트가 영구 정지한다(TRD §6-2).
+/// ★승인 요청에 온 이 답을 app-server 는 「승인 요청 실패」로 읽는다★(실측 codex-cli 0.156.1 · fixture
+/// `refuse_u2a`): 그 item 을 실행하지 않은 채 곧바로 닫고(명령 = `failed` · 파일 변경 = `declined`) 턴은 이어져
+/// `completed` 로 끝난다 — `error` 알림은 없다. 승인 아닌 요청에 대한 반응은 미검증이다. 어느 쪽이든 버리는 것보다
+/// 낫다: 버리면 그 에이전트가 영구 정지한다(TRD §6-2).
 ///
 /// 참고로 **codex 자신은 모르는 메서드에 `-32600` 을 돌려준다**(실측 0.154.0) — 즉 상대는
 /// "모르는 메서드" 를 따로 세지 않는다. 그래도 우리 쪽 값은 관례 뜻이 분명한 -32601 로 둔다:
@@ -308,6 +327,9 @@ pub(crate) fn error_response_line(id: &RequestId, code: i64, message: &str) -> S
 }
 
 // ── initialize ────────────────────────────────────────────────────────────────
+
+/// `initialize` 에 싣는 클라이언트 이름(대화 통로·사용량 조회 공용). 상대는 이 값을 자기 로그·`user_agent` 에 적는다.
+pub(crate) const CLIENT_NAME: &str = "engram-dashboard";
 
 /// ★한 번만 보낼 수 있다★(실측 0.154.0) — 두 번째 `initialize` 는 `-32600` `"Already
 /// initialized"` 로 돌아온다. 재시도 경로가 이것을 다시 보내지 않게 할 책임은 호출자에 있다.
@@ -537,6 +559,30 @@ pub(crate) enum UserInput {
 pub(crate) struct TurnStartParams {
     pub(crate) thread_id: String,
     pub(crate) input: Vec<UserInput>,
+    /// 첫 입력의 되울림(`userMessage`)에 `clientId` 로 돌아오는 우리 id(0.140.0 부터 — 실측 0.156.1).
+    /// ★`None` 이면 칸 자체를 안 싣는다★ — 식별자 없는 입력과 하한 미달 화신의 봉투가 이 칸이 생기기
+    /// 전과 바이트 단위로 같다.
+    // ADR-0231
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) client_user_message_id: Option<String>,
+}
+
+/// `turn/steer` — 도는 턴에 입력 하나를 넣는다. 성공 응답은 `{turnId}` 이고 그것은 **수락**이지 받음이
+/// 아니다(받음은 `clientId` 단 되울림 — 실측 0.156.1). 응답 본문은 읽지 않는다.
+///
+/// ★`expectedTurnId` 는 벤더가 요구하는 선행조건이다★ — 그 턴이 이미 끝났거나 id 가 어긋나면 오류
+///   응답(`-32600 "no active turn to steer"`)이 온다. 그래서 끝난 턴에 늦게 닿은 steer 가 다음 턴에 섞이지
+///   않는다.
+/// ★`clientUserMessageId` 를 `Option` 으로 두지 않은 것은 의도다★ — 스키마에서는 선택 칸이지만 steer 는
+///   하한 충족 화신의 식별자 든 항목만 나간다(식별자가 없으면 넘긴 글을 되울림으로 대조할 수 없다).
+// ADR-0231
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TurnSteerParams {
+    pub(crate) thread_id: String,
+    pub(crate) expected_turn_id: String,
+    pub(crate) client_user_message_id: String,
+    pub(crate) input: Vec<UserInput>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -681,6 +727,178 @@ pub(crate) struct MisalignmentErrorDetails {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct MisalignmentSteer {
     pub(crate) message: String,
+}
+
+// ── 사용량 한도 알림의 params ─────────────────────────────────────────────────
+
+/// `account/rateLimits/updated`. ★이 절의 칸은 0.154.0 이 아니라 **codex-cli 0.156.1** 의 스키마에서 읽었다★
+/// (`v2/AccountRateLimitsUpdatedNotification.json` — 재생성 명령은 이 파일 헤더).
+///
+/// ★알림 하나 = 한도 버킷 **하나**의 희소 갱신이다★ — 버킷은 [`RateLimitSnapshot::limit_id`] 가 가른다. 스키마
+/// 설명이 「가장 최근 `account/rateLimits/read` 응답에 병합하라 — 비어 온 값은 앞 값을 지우지 않는다」를 적는다.
+/// 턴 중에 도착한다는 것까지 실측됐고(`docs/process/S21-codex-backend/trd-phase2a.md` L7) 실린 값은 캡처된 적이 없다.
+///
+/// ★params 와 `rateLimits` 가 JSON **객체**가 아니면 역직렬화 실패다([`object_only`])★ — 칸 단위로 느슨한 아래
+///   두 타입과 달리 여기서는 그 줄을 통째로 버린다: 알림 전체나 스냅숏 전체가 다른 모양이면 살릴 칸이 없다.
+#[derive(Debug, Clone)]
+pub(crate) struct AccountRateLimitsUpdatedNotification {
+    pub(crate) rate_limits: RateLimitSnapshot,
+}
+
+impl<'de> Deserialize<'de> for AccountRateLimitsUpdatedNotification {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Params {
+            #[serde(deserialize_with = "object_only")]
+            rate_limits: RateLimitSnapshot,
+        }
+        let params: Params = object_only(de)?;
+        Ok(Self {
+            rate_limits: params.rate_limits,
+        })
+    }
+}
+
+/// 한도 버킷 하나의 스냅숏(스키마 `RateLimitSnapshot` — 칸이 전부 optional·nullable).
+///
+/// ★칸마다 따로 실패한다★ — 타입이 틀린 칸은 그 칸만 `None` 이 되고 스냅숏은 산다([`lenient`]·[`lenient_object`]).
+/// 한 칸의 모양 변화가 알림 전체를 역직렬화 실패로 만들면 그 버킷의 나머지 값까지 잃는다.
+/// ★`limit_id` 만 원문 [`Value`] 로 받는 것은 의도다★ — 이 칸은 「어느 버킷인가」를 가르는데, 틀린 타입을
+///   `None` 으로 접으면 부재(= 기본 버킷으로 읽히는 쪽)와 구별되지 않는다. 해석은 소비자가 한다.
+/// ★이 타입 자체는 JSON 배열도 칸 순서대로 읽어 버린다★ — 객체 강제는 이 타입을 싣는 쪽(알림 ·
+///   [`GetAccountRateLimitsResponse`])의 [`object_only`] 가 진다. 새 경로에서 이 타입을 읽을 때도 반드시 그 관문을
+///   거친다 — 안 거치면 그럴듯한 가짜 창이 생긴다.
+/// `limit_name`·`plan_type` 은 조회 응답만 읽는다(줍기는 플랜·모델별 창을 싣지 않는다 — 이 폴더 `usage`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitSnapshot {
+    #[serde(default)]
+    pub(crate) limit_id: Option<Value>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub(crate) limit_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_object")]
+    pub(crate) primary: Option<RateLimitWindow>,
+    #[serde(default, deserialize_with = "lenient_object")]
+    pub(crate) secondary: Option<RateLimitWindow>,
+    /// 스키마는 닫힌 enum(`PlanType`)이지만 문자열로 받는다 — 상류가 값을 더한 날 이 칸만 읽히면 된다.
+    #[serde(default, deserialize_with = "lenient")]
+    pub(crate) plan_type: Option<String>,
+}
+
+/// 한도 창 하나(스키마 `RateLimitWindow`). 스키마 타입 = `usedPercent` int32(required) · `windowDurationMins`
+/// int64 · `resetsAt` int64(epoch 초) — 셋 다 범위 제약이 없어 범위 판정은 소비자가 한다.
+///
+/// ★`primary`/`secondary` 는 자리 이름이지 5시간/주간이 아니다★(실측 — 소비자는 `window_duration_mins` 로 가른다).
+/// ★`used_percent` 를 `f64` 로 받는 것은 의도다★ — 스키마는 정수지만 소수가 와도 거부할 이유가 없고, 칸 값이
+///   어차피 `f64` 다. 리셋 시각은 반대로 정수만 받는다(부동소수 → 정수 변환을 외부 값에 하지 않는다).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitWindow {
+    #[serde(default, deserialize_with = "lenient")]
+    pub(crate) used_percent: Option<f64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub(crate) window_duration_mins: Option<i64>,
+    #[serde(default, deserialize_with = "lenient")]
+    pub(crate) resets_at: Option<i64>,
+}
+
+// ── account/rateLimits/read ───────────────────────────────────────────────────
+
+/// `account/rateLimits/read` 의 params — ★칸을 하나도 싣지 않는다(`{}`)★. 스키마(0.156.1
+/// `v2/NullableGetAccountRateLimitsParams.json`)는 `null` 또는 칸이 전부 optional 인 객체를 받고, 탐침이 `{}` 로
+/// 실측했다(`.claude/handoff/attachments/codex-usage-probe.mjs`).
+/// ★`excludeResetCreditDetails` 를 싣지 않는 것은 실측 모양을 지키려는 것이다★ — 스키마 설명은 「배경 폴링용 —
+///   리셋 크레딧 상세 조회를 건너뛴다」이고 우리 쓰임새에 맞지만, 그 칸을 실은 요청은 재 보지 않았다.
+///
+/// 중괄호를 단 struct 인 것은 [`TurnInterruptResponse`] 와 같은 사유다 — unit struct 는 `null` 로 직렬화된다.
+#[derive(Debug, Clone, Default, Serialize)]
+pub(crate) struct GetAccountRateLimitsParams {}
+
+/// `account/rateLimits/read` 응답(스키마 0.156.1 `v2/GetAccountRateLimitsResponse.json`) — 읽는 칸 둘만.
+///
+/// ★`accountId` 를 싣지 않는 것은 결정이다★ — 응답 최상위에 계정 식별자가 온다. 읽지 않으면 이 값이 로그·오류
+///   문자열로 샐 길이 타입에서부터 없다(TRD §1-3). 필요해지면(계정 키 — TRD §3 #33) 그 값의 출구부터 정한다.
+/// ★스냅숏 자리는 전부 객체만 받는다([`object_only`])★ — 응답 자체가 객체가 아니면 역직렬화 실패이고, 스냅숏
+///   자리(`rateLimits` · 맵의 각 항목)가 객체가 아니면 **그 자리만** 없는 것으로 둔다.
+#[derive(Debug, Clone)]
+pub(crate) struct GetAccountRateLimitsResponse {
+    /// 스키마 설명 = "Backward-compatible single-bucket view" — ★기본 버킷이라는 보장이 없다★(다른 버킷을 비출 수
+    /// 있다). `None` = 없거나 `null` 이거나 객체가 아니다.
+    pub(crate) rate_limits: Option<RateLimitSnapshot>,
+    /// `rateLimitsByLimitId` — 버킷 id → 스냅숏, **id 순 정렬**(JSON 맵 순서는 serde_json 기능 조합마다 달라서
+    /// 우리가 정한다). `None` = 칸이 없거나 `null` 이거나 객체가 아니다.
+    pub(crate) rate_limits_by_limit_id: Option<Vec<(String, RateLimitSnapshot)>>,
+}
+
+impl<'de> Deserialize<'de> for GetAccountRateLimitsResponse {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Raw {
+            #[serde(default)]
+            rate_limits: Option<Value>,
+            #[serde(default)]
+            rate_limits_by_limit_id: Option<Value>,
+        }
+        let raw: Raw = object_only(de)?;
+        let snapshot = |value: Value| object_only::<_, RateLimitSnapshot>(value).ok();
+        let by_limit_id = match raw.rate_limits_by_limit_id {
+            Some(Value::Object(map)) => {
+                let mut buckets: Vec<(String, RateLimitSnapshot)> = map
+                    .into_iter()
+                    .filter_map(|(id, value)| Some((id, snapshot(value)?)))
+                    .collect();
+                buckets.sort_by(|a, b| a.0.cmp(&b.0));
+                Some(buckets)
+            }
+            _ => None,
+        };
+        Ok(Self {
+            rate_limits: raw.rate_limits.and_then(snapshot),
+            rate_limits_by_limit_id: by_limit_id,
+        })
+    }
+}
+
+/// 칸 하나를 읽되 모양이 틀리면(`null` 포함) **그 칸만** `None` 으로 둔다. 빠진 칸은 `#[serde(default)]` 가 맡는다.
+fn lenient<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Value::deserialize(de)?;
+    Ok(serde_json::from_value(value).ok())
+}
+
+/// [`lenient`] 와 같되 JSON **객체**만 받는다.
+/// ★객체 검사를 빼지 말 것★ — serde 가 만든 struct 역직렬화는 배열도 받아 칸 순서대로 채운다. 창 자리에 배열이
+///   오면 그 수들이 선언 순서대로 사용률·창 길이·리셋으로 읽혀 그럴듯한 가짜 창이 된다.
+fn lenient_object<'de, D, T>(de: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Value::deserialize(de)?;
+    Ok(if value.is_object() {
+        serde_json::from_value(value).ok()
+    } else {
+        None
+    })
+}
+
+/// JSON **객체**만 읽고 그 밖은 오류다. 객체 검사의 근거는 [`lenient_object`] 와 같다 — 배열이 칸 순서대로 읽혀
+/// 그럴듯한 가짜 값이 된다(`[{…스냅숏…}]` 인 params · `["codex", {…창…}, {…창…}]` 인 스냅숏).
+fn object_only<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let value = Value::deserialize(de)?;
+    if !value.is_object() {
+        return Err(serde::de::Error::custom("JSON 객체가 아니다"));
+    }
+    serde_json::from_value(value).map_err(serde::de::Error::custom)
 }
 
 #[cfg(test)]
@@ -1017,12 +1235,52 @@ mod tests {
             input: vec![UserInput::Text {
                 text: "hello".to_string(),
             }],
+            client_user_message_id: None,
         })
         .unwrap();
         assert_eq!(field(&v, "threadId"), "t-1");
         let item = &field(&v, "input").as_array().unwrap()[0];
         assert_eq!(field(item, "type"), "text");
         assert_eq!(field(item, "text"), "hello");
+        assert!(
+            v.get("clientUserMessageId").is_none(),
+            "식별자 없는 봉투에 칸이 생겼다: {v}"
+        );
+    }
+
+    // ADR-0231
+    #[test]
+    fn turn_start_params_carry_the_client_message_id_under_its_wire_name() {
+        let v = serde_json::to_value(TurnStartParams {
+            thread_id: "t-1".to_string(),
+            input: vec![UserInput::Text {
+                text: "hello".to_string(),
+            }],
+            client_user_message_id: Some("u-1".to_string()),
+        })
+        .unwrap();
+        assert_eq!(field(&v, "clientUserMessageId"), "u-1");
+    }
+
+    // ADR-0231
+    #[test]
+    fn turn_steer_params_field_names() {
+        let v = serde_json::to_value(TurnSteerParams {
+            thread_id: "t-1".to_string(),
+            expected_turn_id: "u-9".to_string(),
+            client_user_message_id: "c-1".to_string(),
+            input: vec![UserInput::Text {
+                text: "more".to_string(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(field(&v, "threadId"), "t-1");
+        assert_eq!(field(&v, "expectedTurnId"), "u-9");
+        assert_eq!(field(&v, "clientUserMessageId"), "c-1");
+        let item = &field(&v, "input").as_array().unwrap()[0];
+        assert_eq!(field(item, "type"), "text");
+        assert_eq!(field(item, "text"), "more");
+        assert_eq!(v.as_object().unwrap().len(), 4, "모르는 칸이 실렸다: {v}");
     }
 
     #[test]

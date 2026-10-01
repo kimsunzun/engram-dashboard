@@ -9,6 +9,8 @@ const clientMock = vi.hoisted(() => ({
   // refreshProfiles(eventBus) 가 부르는 listProfiles — 생성 직후 store/tree 반영 검증용. 기본 []
   //   (테스트별로 mockResolvedValueOnce 로 생성 프로필을 실어 반환).
   listProfiles: vi.fn(async () => [] as unknown[]),
+  cancelQueuedInput: vi.fn(async (): Promise<string> => 'requested'),
+  interruptAgent: vi.fn(async (): Promise<void> => undefined),
 }))
 vi.mock('../api/clientFactory', () => ({
   agentClient: {
@@ -17,6 +19,8 @@ vi.mock('../api/clientFactory', () => ({
     createClaudeProfile: (...args: unknown[]) => clientMock.createClaudeProfile(...(args as [])),
     createCodexProfile: (...args: unknown[]) => clientMock.createCodexProfile(...(args as [])),
     listProfiles: (...args: unknown[]) => clientMock.listProfiles(...(args as [])),
+    cancelQueuedInput: (...args: unknown[]) => clientMock.cancelQueuedInput(...(args as [])),
+    interruptAgent: (...args: unknown[]) => clientMock.interruptAgent(...(args as [])),
   },
   getAgentClient: vi.fn(),
 }))
@@ -28,10 +32,12 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }))
 
 import './agentCommands' // side-effect register
-import { run, runAsHuman } from './registry'
+import { getCommand, list, run, runAsHuman } from './registry'
+import { INPUT_LOCKED_REFUSAL } from '../api/agentClient'
 import { fireAndForget } from './dispatch'
 import { buildSlotMenu } from './slotMenu'
 import { useAgentStore } from '../store/agentStore'
+import { pendingInterrupt, useInterruptStore } from '../store/interruptStore'
 
 beforeEach(() => {
   clientMock.spawnAgent.mockClear()
@@ -39,8 +45,13 @@ beforeEach(() => {
   clientMock.createClaudeProfile.mockClear()
   clientMock.createCodexProfile.mockClear()
   clientMock.listProfiles.mockClear()
+  clientMock.cancelQueuedInput.mockReset()
+  clientMock.cancelQueuedInput.mockImplementation(async () => 'requested')
+  clientMock.interruptAgent.mockReset()
+  clientMock.interruptAgent.mockImplementation(async () => undefined)
   dialogMock.open.mockReset()
   useAgentStore.setState({ presets: [], profiles: [] })
+  useInterruptStore.setState({ pending: {}, views: {} })
 })
 afterEach(() => {
   useAgentStore.setState({ presets: [], profiles: [] })
@@ -282,5 +293,267 @@ describe('agent_list 생성 서브메뉴(ADR-0078)', () => {
       'agentlist.createCodex',
       'agentlist.createCodexJson',
     ])
+  })
+})
+
+// ── ADR-0231: 대기 입력 ✕ 와 LLM 이 같은 핸들을 흔든다 ─────────────────────────────────────
+describe('agent.cancelQueuedInput', () => {
+  it('등록돼 있고 help 가 없다 — 버스 명단에 안 오른다(데몬이 답하는 이름이라 오르면 등록 묶음 전체가 반려된다)', () => {
+    expect(getCommand('agent.cancelQueuedInput')).toBeDefined()
+    expect(getCommand('agent.cancelQueuedInput')?.help).toBeUndefined()
+    expect(list().find((c) => c.id === 'agent.cancelQueuedInput')?.help).toBeUndefined()
+  })
+
+  it('agentId·inputId 로 agentClient.cancelQueuedInput 을 부르고 결말 낱말을 돌려준다', async () => {
+    await expect(run('agent.cancelQueuedInput', { agentId: ' a1 ', inputId: 'q1' })).resolves.toEqual({
+      outcome: 'requested',
+    })
+    expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q1')
+  })
+
+  it('모르는 결말 낱말도 그대로 돌려준다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => 'deferred')
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).resolves.toEqual({
+      outcome: 'deferred',
+    })
+  })
+
+  it('코드 없이 온 임대 거절 문구는 CONFLICT 로 읽힌다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw new Error(INPUT_LOCKED_REFUSAL)
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      `CONFLICT: ${INPUT_LOCKED_REFUSAL}`,
+    )
+  })
+
+  it('운영 carrier 처럼 맨 문자열로 온 임대 거절 문구도 CONFLICT 로 읽힌다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw INPUT_LOCKED_REFUSAL
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      `CONFLICT: ${INPUT_LOCKED_REFUSAL}`,
+    )
+  })
+
+  it('맨 문자열로 온 다른 거절(NOT_FOUND)은 문자열 그대로 다시 던진다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw 'NOT_FOUND: no waiting input'
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toBe(
+      'NOT_FOUND: no waiting input',
+    )
+  })
+
+  it('문자열도 Error 도 아닌 거절은 건드리지 않는다', async () => {
+    const odd = { code: 'X' }
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw odd
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toBe(odd)
+  })
+
+  it('코드를 단 실패(NOT_FOUND)와 코드 없는 다른 실패(끊김)는 그대로 둔다', async () => {
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw new Error('NOT_FOUND: no waiting input')
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      /^NOT_FOUND: no waiting input$/,
+    )
+    clientMock.cancelQueuedInput.mockImplementation(async () => {
+      throw new Error('connection lost')
+    })
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q1' })).rejects.toThrow(
+      /^connection lost$/,
+    )
+  })
+
+  it('빈 agentId·inputId 는 보내지 않고 던진다', async () => {
+    await expect(run('agent.cancelQueuedInput', { agentId: '  ', inputId: 'q1' })).rejects.toThrow(/agentId/)
+    await expect(run('agent.cancelQueuedInput', { agentId: 'a1' })).rejects.toThrow(/inputId/)
+    expect(clientMock.cancelQueuedInput).not.toHaveBeenCalled()
+  })
+
+  it('사람 경로(✕ 클릭 → fireAndForget)도 같은 명령을 부른다', async () => {
+    fireAndForget('agent.cancelQueuedInput', { agentId: 'a1', inputId: 'q2' })
+    await Promise.resolve()
+    expect(clientMock.cancelQueuedInput).toHaveBeenCalledWith('a1', 'q2')
+  })
+})
+
+// ── ADR-0237: 채팅 칸 Esc 와 LLM 이 같은 핸들을 흔든다 ─────────────────────────────────────
+describe('agent.interrupt', () => {
+  it('등록돼 있고 help 가 없다 — 버스 명단에 안 오른다(데몬이 답하는 이름이라 오르면 등록 묶음 전체가 반려된다)', () => {
+    expect(getCommand('agent.interrupt')).toBeDefined()
+    expect(getCommand('agent.interrupt')?.help).toBeUndefined()
+    expect(list().find((c) => c.id === 'agent.interrupt')?.help).toBeUndefined()
+  })
+
+  it('agentId 로 agentClient.interruptAgent 를 부르고 requested 를 돌려준다', async () => {
+    await expect(run('agent.interrupt', { agentId: ' a1 ' })).resolves.toEqual({ outcome: 'requested' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith('a1')
+  })
+
+  it('빈·없는·문자열 아닌 agentId 는 보내지 않고 던진다', async () => {
+    await expect(run('agent.interrupt', { agentId: '  ' })).rejects.toThrow(/agentId/)
+    await expect(run('agent.interrupt', {})).rejects.toThrow(/agentId/)
+    await expect(run('agent.interrupt', { agentId: 7 })).rejects.toThrow(/agentId/)
+    expect(clientMock.interruptAgent).not.toHaveBeenCalled()
+  })
+
+  it('코드 없이 온 임대 거절 문구는 Error 로 오든 맨 문자열로 오든 CONFLICT 로 읽힌다', async () => {
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw new Error(INPUT_LOCKED_REFUSAL)
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw INPUT_LOCKED_REFUSAL
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
+  })
+
+  it('그 밖의 거절(끊을 턴 없음 · 끊김)은 모양 그대로 다시 던진다', async () => {
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw 'no turn to interrupt'
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toBe('no turn to interrupt')
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw new Error('connection lost')
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(/^connection lost$/)
+  })
+
+  it('부르는 쪽이 동기로 던진 임대 거절도 CONFLICT 로 읽힌다', async () => {
+    clientMock.interruptAgent.mockImplementation((() => {
+      throw new Error(INPUT_LOCKED_REFUSAL)
+    }) as unknown as () => Promise<void>)
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toThrow(`CONFLICT: ${INPUT_LOCKED_REFUSAL}`)
+  })
+
+  it('사람 경로(Esc → fireAndForget)도 같은 명령을 부르고, 거절은 경고로만 삼킨다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw 'no turn to interrupt'
+    })
+    fireAndForget('agent.interrupt', { agentId: 'a1' })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith('a1')
+    expect(warn).toHaveBeenCalled()
+    warn.mockRestore()
+  })
+})
+
+// ── ADR-0244: 끊기를 보낸 뒤 턴 끝까지 「중단하는 중」 · 그동안 다시 보내지 않는다 ───────────────────────────
+describe('agent.interrupt — 중단하는 중(ADR-0244)', () => {
+  const interrupting = (agentId: string): boolean =>
+    pendingInterrupt(useInterruptStore.getState(), agentId) !== undefined
+
+  /** 답을 시험이 푸는 끊기 요청. */
+  function deferred(): { resolve: () => void; reject: (e: unknown) => void } {
+    const handle = { resolve: () => {}, reject: (_e: unknown) => {} }
+    clientMock.interruptAgent.mockImplementation(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          handle.resolve = resolve
+          handle.reject = reject
+        }),
+    )
+    return handle
+  }
+
+  it('그 에이전트의 대화 뷰가 있으면 보내는 즉시 서고, 끊기가 받아들여져도 턴 끝까지 남는다', async () => {
+    useInterruptStore.getState().watch('a1')
+    const answer = deferred()
+    const result = run('agent.interrupt', { agentId: ' a1 ' }) as Promise<unknown>
+    expect(interrupting('a1')).toBe(true)
+    expect(interrupting('other')).toBe(false)
+    answer.resolve()
+    await expect(result).resolves.toEqual({ outcome: 'requested' })
+    expect(interrupting('a1')).toBe(true)
+    // 턴 끝에 걷는 것은 대화 뷰다(RichSlot.test.tsx).
+    useInterruptStore.getState().end('a1')
+    expect(interrupting('a1')).toBe(false)
+  })
+
+  it.each<[string, () => unknown]>([
+    ['임대 거절(CONFLICT)', () => new Error(INPUT_LOCKED_REFUSAL)],
+    ['끊을 턴 없음(맨 문자열)', () => 'no turn to interrupt'],
+    ['끊김', () => new Error('connection lost')],
+  ])('거절되면 걷는다 — %s', async (_label, error) => {
+    useInterruptStore.getState().watch('a1')
+    clientMock.interruptAgent.mockImplementation(async () => {
+      throw error()
+    })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).rejects.toBeDefined()
+    expect(interrupting('a1')).toBe(false)
+  })
+
+  it('중단하는 중에 다시 부르면 보내지 않고 requested 로 답한다', async () => {
+    useInterruptStore.getState().watch('a1')
+    await expect(run('agent.interrupt', { agentId: 'a1' })).resolves.toEqual({ outcome: 'requested' })
+    await expect(run('agent.interrupt', { agentId: 'a1' })).resolves.toEqual({ outcome: 'requested' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    expect(interrupting('a1')).toBe(true)
+
+    // 턴이 끝나면 다음 부름은 다시 보낸다.
+    useInterruptStore.getState().end('a1')
+    await run('agent.interrupt', { agentId: 'a1' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('첫 요청이 아직 답을 기다리면 다시 부른 쪽은 그 결말을 따른다 — 거절도', async () => {
+    useInterruptStore.getState().watch('a1')
+    const answer = deferred()
+    const first = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    const second = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    answer.reject('no turn to interrupt')
+    await expect(first).rejects.toBe('no turn to interrupt')
+    await expect(second).rejects.toBe('no turn to interrupt')
+    expect(interrupting('a1')).toBe(false)
+  })
+
+  it('늦게 온 옛 요청의 거절은 그 뒤 새 요청의 중단하는 중을 걷지 않는다', async () => {
+    useInterruptStore.getState().watch('a1')
+    const oldAnswer = deferred()
+    const old = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    // 옛 요청이 답을 기다리는 동안 턴이 끝났고, 다음 턴에서 새로 끊는다.
+    useInterruptStore.getState().end('a1')
+    const newAnswer = deferred()
+    const fresh = run('agent.interrupt', { agentId: 'a1' }) as Promise<unknown>
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+
+    oldAnswer.reject('no turn to interrupt')
+    await expect(old).rejects.toBe('no turn to interrupt')
+    expect(interrupting('a1')).toBe(true)
+    newAnswer.resolve()
+    await expect(fresh).resolves.toEqual({ outcome: 'requested' })
+  })
+
+  it('이 창에 그 에이전트의 대화 뷰가 없으면 서지 않고, 다시 부르면 다시 보낸다', async () => {
+    await run('agent.interrupt', { agentId: 'a1' })
+    expect(interrupting('a1')).toBe(false)
+    await run('agent.interrupt', { agentId: 'a1' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('마지막 대화 뷰가 풀려야 걷힌다 — 같은 에이전트의 다른 뷰가 남으면 그대로다', async () => {
+    const releaseA = useInterruptStore.getState().watch('a1')
+    const releaseB = useInterruptStore.getState().watch('a1')
+    await run('agent.interrupt', { agentId: 'a1' })
+    releaseA()
+    releaseA() // 두 번 불러도 한 번만 센다.
+    expect(interrupting('a1')).toBe(true)
+    releaseB()
+    expect(interrupting('a1')).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({})
+  })
+
+  it("프로토타입 이름('constructor')을 중단하는 중으로 읽지 않는다", async () => {
+    await run('agent.interrupt', { agentId: 'constructor' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith('constructor')
   })
 })

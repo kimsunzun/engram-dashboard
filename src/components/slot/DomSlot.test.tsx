@@ -6,7 +6,7 @@
 //
 // 전략: slotTagGate.test.tsx 와 동일 패턴으로 clientFactory·agentStore 를 stub 한다(구독은 no-op).
 
-import { cleanup, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // jsdom 은 ResizeObserver 를 제공하지 않는다 — DomSlot 이 쓰는 Radix ScrollArea 내부가 참조한다.
@@ -36,6 +36,8 @@ vi.mock('../../store/agentStore', () => ({
 }))
 
 import DomSlot from './DomSlot'
+import { agentClient } from '../../api/clientFactory'
+import { getFollow } from './scrollFollow/followRegistry'
 
 const AGENT = 'aaaa-bbbb-cccc-dddd'
 
@@ -90,5 +92,49 @@ describe('DomSlot — 에이전트 부재 표시(ADR-0148 결정 1~3)', () => {
     expect(v).not.toBeNull()
     expect(v!.textContent).toBe('')
     expect(v!.querySelector('svg')).not.toBeNull()
+  })
+})
+
+// ★스크롤 따라가기 배선(ADR-0242 · TRD §2-1)★: 판정·훅은 scrollFollow/ 시험이 잰다. 여기는 이 슬롯이 그 훅을
+//   관측 뷰포트에 꽂았고 비우기가 다시 붙이는지만 잰다. 레이아웃이 없어 Radix Viewport 만 기하를 갖게 한다.
+describe('DomSlot — 스크롤 따라가기(ADR-0242)', () => {
+  const tops = new WeakMap<Element, number>()
+  const isViewport = (el: Element): boolean => el.hasAttribute('data-radix-scroll-area-viewport')
+
+  beforeEach(() => {
+    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) {
+      return isViewport(this) ? 1000 : 0
+    })
+    vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) {
+      return isViewport(this) ? 200 : 0
+    })
+    vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) {
+      return tops.get(this) ?? 0
+    })
+    vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, v: number) {
+      tops.set(this, v)
+    })
+  })
+
+  const viewport = (): HTMLElement => document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+
+  it('관측 뷰포트에 붙어 시작하고 바닥으로 쓴다 · 손잡이 맵에 그 슬롯으로 오른다', async () => {
+    render(<DomSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    expect(viewport().getAttribute('data-scroll-follow')).toBe('pinned')
+    expect(viewport().scrollTop).toBe(800)
+    expect(getFollow('v1')).toBeDefined()
+  })
+
+  it('비우기(onReset)는 다시 붙인다', async () => {
+    render(<DomSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(viewport().getAttribute('data-scroll-follow')).toBe('free')
+
+    const calls = vi.mocked(agentClient.subscribeOutput).mock.calls
+    const onReset = calls[calls.length - 1][4]!
+    act(() => onReset())
+    expect(viewport().getAttribute('data-scroll-follow')).toBe('pinned')
   })
 })

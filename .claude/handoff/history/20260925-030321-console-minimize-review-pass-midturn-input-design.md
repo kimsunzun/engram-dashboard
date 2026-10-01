@@ -44,7 +44,7 @@ Two tracks, nothing committed this session. ① **Detached launchers stop steali
 - Untracked: `docs/research/window-spawn-sites-inventory-2026-09-25.md` (console track), `docs/research/mid-turn-input-display-2026-09-25.md` + `docs/process/S21-codex-backend/trd-mid-turn-input-queue.md` (mid-turn track), this handoff.
 - `master` = `34cdb37`, its CI run `36016045596` **green** (checked this session).
 - Outside the repo, uncommitted by convention: `I:\Engram\core\claude-global-shared\skills\qa\feedback.md` and `…\research\feedback.md` (2026-09-25 sections). `I:\Engram` is on `skill-factory/staging` with the user's edits — don't touch staging.
-- Scratch (this session, will not be the next session's scratchpad): `C:\Users\kimsunzun\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt1\0759bb2c-9ea0-4f1f-908c-7ab2600e3133\scratchpad\` — `hide\` has compiled window-measurement tools (`winmon.exe`, `fgexp.exe`, `fgtaker.exe`, `closer.exe`, `probe-gui/con.exe`, sources, `verify-a.sh`/`verify-b.sh`); `research-src\codex` = blob-less codex clone (tags rust-v0.154.0 / 0.156.1). Copy the tools into the new scratchpad if QA needs them.
+- Scratch (this session, will not be the next session's scratchpad): `C:\Users\<user>\AppData\Local\Temp\claude\I--Engram-apps-engram-dashboard-wt1\0759bb2c-9ea0-4f1f-908c-7ab2600e3133\scratchpad\` — `hide\` has compiled window-measurement tools (`winmon.exe`, `fgexp.exe`, `fgtaker.exe`, `closer.exe`, `probe-gui/con.exe`, sources, `verify-a.sh`/`verify-b.sh`); `research-src\codex` = blob-less codex clone (tags rust-v0.154.0 / 0.156.1). Copy the tools into the new scratchpad if QA needs them.
 
 ## Verification state
 
@@ -60,7 +60,7 @@ Two tracks, nothing committed this session. ① **Detached launchers stop steali
 5. codex via `codex:codex-rescue`: after any parallel/other codex call in the same cwd, **don't `--resume`** — open `--fresh`. (Direct `codex exec` for research reviews also counts.)
 6. Port 1420 belongs to wt2's vite → use the RELEASE exe with an isolated `ENGRAM_DATA_DIR` for GUI checks in wt1 (daemon first, then client; teardown by PID after checking ExecutablePath).
 7. Blob-less clone + `git grep` across tags hangs; `grep -a` over the 237 MB `claude.exe` with wide context times out — use `git show <tag>:<path>` and a node `Buffer.indexOf` script.
-8. The `nmfc-origin-dev-harness` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore them; this project's handoff is the user's `handoff` skill.
+8. The `<plugin>` UserPromptSubmit hooks (handoff trigger, wiki pre-consult) misfire on every message — ignore them; this project's handoff is the user's `handoff` skill.
 
 ## Stop conditions
 

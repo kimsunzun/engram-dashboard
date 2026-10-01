@@ -37,6 +37,9 @@ const h = vi.hoisted(() => {
     requestReplayCalls: 0,
     // ★FIX-5★: request_replay 가 돌려줄 gen 을 명시 지정(null 이면 카운터). 안전 정수 초과 케이스 재현용.
     requestReplayReply: null as number | string | null,
+    // 이 창의 Tauri label(`getCurrentWindow().label`) — 사용량 방송의 `labels` 거름이 본다.
+    windowLabel: 'main',
+    usageSnapshotReply: { socket_epoch: 0, snapshots: [] } as unknown,
   }
   class FakeChannel {
     onmessage: ((m: ArrayBuffer) => void) | null = null
@@ -103,6 +106,7 @@ const invokeMock = vi.fn(async (cmd: string, args?: Record<string, unknown>) => 
     if (h.state.forwardShouldReject) throw new Error('연결 끊김')
     return h.state.forwardReply
   }
+  if (cmd === 'get_usage_snapshot') return h.state.usageSnapshotReply
   if (cmd === 'request_replay') {
     // ADR-0046: src-tauri single-flight 가 gen(u64)을 부여 반환. mock 은 단조 카운터로 흉내.
     h.state.requestReplayCalls += 1
@@ -116,6 +120,12 @@ vi.mock('@tauri-apps/api/core', () => ({
   Channel: h.FakeChannel,
 }))
 
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({ label: h.state.windowLabel }),
+}))
+
+import type { UsageLimitSnapshot } from '../../crates/engram-dashboard-protocol/bindings/UsageLimitSnapshot'
+import { ProtocolClient } from './protocolClient'
 import { TauriTransport } from './tauriTransport'
 import type { InboundMessage } from './transport'
 
@@ -141,8 +151,8 @@ function buildFrame(opts: { agentId: string; epoch: number; seq: number; payload
   return buf
 }
 
-// ADR-0046 replay 경계 마커 frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1].
-const MARKER_LEN = 30
+// ADR-0046 replay 경계 마커 frame: [tag=255][agentId:16][epoch:4 BE][gen:8 BE][flags:1][replay_from:8 BE].
+const MARKER_LEN = 38
 function buildMarker(opts: {
   agentId: string
   epoch: number
@@ -150,6 +160,7 @@ function buildMarker(opts: {
   truncated?: boolean
   failed?: boolean
   continuesConversation?: boolean
+  replayFrom?: bigint
 }): ArrayBuffer {
   const buf = new ArrayBuffer(MARKER_LEN)
   const view = new DataView(buf)
@@ -163,6 +174,7 @@ function buildMarker(opts: {
   if (opts.failed) flags |= 0x02
   if (opts.continuesConversation) flags |= 0x04
   view.setUint8(29, flags)
+  view.setBigUint64(30, opts.replayFrom ?? 0n, false)
   return buf
 }
 
@@ -181,6 +193,8 @@ beforeEach(() => {
   h.state.subscribeOutputResolvers = []
   h.state.requestReplayCalls = 0
   h.state.requestReplayReply = null
+  h.state.windowLabel = 'main'
+  h.state.usageSnapshotReply = { socket_epoch: 0, snapshots: [] }
   invokeMock.mockClear()
 })
 afterEach(() => {
@@ -337,6 +351,22 @@ describe('TauriTransport 리로드 self-heal(Fix-D)', () => {
     await flush()
     emit('daemon-connection-state', 'down')
     expect(t.connectionState).toBe('down')
+    const release = h.state.connectionStateGate
+    h.state.connectionStateGate = null
+    release?.()
+    await initP
+    await flush()
+    expect(t.connectionState).toBe('down')
+    expect(h.state.subscribeOutputCalls).toBe(0)
+  })
+
+  it('조회 대기 중 close() 가 끼면 뒤늦은 connected 조회로 되살아나거나 Channel 을 붙이지 않는다', async () => {
+    const t = new TauriTransport()
+    h.state.connectionStateReply = 'connected'
+    h.state.connectionStateGate = () => {}
+    const initP = t.init()
+    await flush()
+    t.close()
     const release = h.state.connectionStateGate
     h.state.connectionStateGate = null
     release?.()
@@ -504,6 +534,90 @@ describe('TauriTransport requestReplay(ADR-0046 F2)', () => {
   })
 })
 
+// ── ADR-0231: replay 요청은 이 창의 출력 Channel 등록 뒤에만 — 셸은 등록 안 된 창 몫을 말없이 건너뛴다 ──
+describe('TauriTransport replay 요청 ↔ 출력 Channel 등록 순서(ADR-0231)', () => {
+  const callOrder = (): string[] =>
+    invokeMock.mock.calls
+      .map((c) => c[0])
+      .filter((cmd) => cmd === 'subscribe_output' || cmd === 'request_replay')
+
+  it('등록이 늦게 풀려도 request_replay 는 subscribe_output 이 풀린 뒤에야 나간다', async () => {
+    const t = new TauriTransport()
+    h.state.subscribeOutputGate = true
+    await t.start() // emit 경로 — 등록은 게이트에 막힌 채 진행 중
+    await flush()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    const replay = t.requestReplay(AGENT)
+    await flush()
+    expect(h.state.requestReplayCalls).toBe(0)
+    h.state.subscribeOutputResolvers.shift()!()
+    expect(await replay).toBe(1n)
+    expect(callOrder()).toEqual(['subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  // 리로드·팝아웃: 셸은 이미 Connected 라 ensure 가 전이 없이 Ok 로 단락하고, init 조회도 아직이다.
+  it('ensure 가 전이 없이 Ok 면 doConnect 가 조회로 연결을 받고 등록을 마친 뒤에 풀린다 — replay 는 그 뒤', async () => {
+    const t = new TauriTransport()
+    h.state.emitConnectedOnConnect = false
+    h.state.connectionStateReply = 'connected'
+    h.state.subscribeOutputGate = true
+    let ready = false
+    const p = t.ensureReady().then(() => {
+      ready = true
+    })
+    await flush(30)
+    expect(t.connectionState).toBe('connected')
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    expect(ready, '등록이 풀리기 전엔 ensureReady 도 안 풀린다').toBe(false)
+    const replay = t.requestReplay(AGENT)
+    await flush()
+    expect(h.state.requestReplayCalls).toBe(0)
+    h.state.subscribeOutputResolvers.shift()!()
+    await p
+    await replay
+    expect(callOrder()).toEqual(['subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  it('한 번도 등록되지 않았으면 request_replay 앞에서 먼저 등록한다', async () => {
+    const t = new TauriTransport()
+    h.state.emitConnectedOnConnect = false // 조회도 down — 어느 경로도 등록을 안 시작했다
+    await t.start()
+    expect(h.state.subscribeOutputCalls).toBe(0)
+    await t.requestReplay(AGENT)
+    expect(callOrder()).toEqual(['subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  it('재연결 전이의 재등록이 진행 중이면 그 완료를 기다린다', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    h.state.subscribeOutputGate = true
+    emit('daemon-connection-state', 'reconnecting')
+    emit('daemon-connection-state', 'connected')
+    await flush()
+    expect(h.state.subscribeOutputCalls).toBe(2)
+    const replay = t.requestReplay(AGENT)
+    await flush()
+    expect(h.state.requestReplayCalls).toBe(0)
+    h.state.subscribeOutputResolvers.shift()!()
+    await replay
+    expect(callOrder()).toEqual(['subscribe_output', 'subscribe_output', 'request_replay'])
+    t.close()
+  })
+
+  it('닫힌 뒤의 replay 요청은 Channel 을 새로 붙이지 않고 reject 된다', async () => {
+    const t = new TauriTransport()
+    await t.start()
+    t.close()
+    await expect(t.requestReplay(AGENT)).rejects.toThrow()
+    expect(h.state.subscribeOutputCalls).toBe(1)
+    expect(h.state.requestReplayCalls).toBe(0)
+  })
+})
+
 describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () => {
   it('출력 Channel 로 온 마커 frame 은 replayBoundary 로 정규화(output 아님)', async () => {
     const t = new TauriTransport()
@@ -522,6 +636,7 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
       truncated: true,
       failed: false,
       continuesConversation: false,
+      replayFrom: 0,
     })
     // 마커는 output 으로 올라오지 않는다(공개 표면 미노출 — Designer 요구).
     expect(got.find((m) => m.kind === 'output')).toBeUndefined()
@@ -541,6 +656,18 @@ describe('TauriTransport replay 경계 마커(tag=255 → replayBoundary)', () =
       failed: false,
       continuesConversation: true,
     })
+  })
+
+  // ADR-0231: 뷰의 flush 시작점이 이 머리다 — 정규화에서 떨어지면 빈 replay 에서 seq 0 을 건너뛴다.
+  it('replay 머리(replay_from)가 경계에 실린다', async () => {
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.start()
+    h.state.capturedChannel!.onmessage!(
+      buildMarker({ agentId: AGENT, epoch: 7, gen: 44n, replayFrom: 40n }),
+    )
+    expect(got.find((m) => m.kind === 'replayBoundary')).toMatchObject({ gen: 44n, replayFrom: 40 })
   })
 
   it('failed 플래그 전파', async () => {
@@ -607,5 +734,75 @@ describe('TauriTransport 리스너 재등록(MED-1)', () => {
     await t.start()
     expect(h.state.listenCalls).toBe(afterFirst)
     expect(h.listeners.get('agent-list-updated')!.size).toBe(1)
+  })
+})
+
+// ── 사용량(TRD S21 usage-limit-slot §1-8) — 방송 수신(labels 거름) · 셸 캐시 pull ────────────────
+describe('TauriTransport 사용량', () => {
+  const snap = (vendor: 'claude' | 'codex', revision: number) =>
+    ({
+      vendor,
+      account_key: 'default',
+      five_hour: { used_pct: 40, resets_at: 1_900_000_000, age_secs: 3, expired: false },
+      weekly: null,
+      model_scoped: [],
+      plan: 'max',
+      in_flight: false,
+      state: { kind: 'Ready' },
+      revision,
+    }) as UsageLimitSnapshot
+
+  it('자기 label 이 든 방송만 control UsageLimitsUpdated{snapshot, socketEpoch} 로 올린다', async () => {
+    h.state.windowLabel = 'popup-3'
+    const t = new TauriTransport()
+    const got: InboundMessage[] = []
+    t.onMessage((m) => got.push(m))
+    await t.init()
+    emit('usage-limits-updated', { labels: ['main'], socket_epoch: 2, snapshot: snap('claude', 1) })
+    expect(got).toEqual([])
+    emit('usage-limits-updated', { labels: ['main', 'popup-3'], socket_epoch: 2, snapshot: snap('codex', 4) })
+    expect(got).toEqual([
+      { kind: 'control', event: { UsageLimitsUpdated: { snapshot: snap('codex', 4), socketEpoch: 2 } } },
+    ])
+  })
+
+  it('실 ProtocolClient 를 거쳐 onUsageLimitsUpdated 까지 — 남의 창 방송은 안 닿는다', async () => {
+    const t = new TauriTransport()
+    const c = new ProtocolClient(t)
+    const seen: Array<[number, number]> = []
+    c.onUsageLimitsUpdated((s, e) => seen.push([s.revision, e]))
+    await t.init()
+    emit('usage-limits-updated', { labels: ['agent-tree'], socket_epoch: 9, snapshot: snap('claude', 5) })
+    emit('usage-limits-updated', { labels: ['main'], socket_epoch: 9, snapshot: snap('claude', 6) })
+    expect(seen).toEqual([[6, 9]])
+  })
+
+  it('getUsageSnapshot → invoke(get_usage_snapshot) 의 snake_case 를 camelCase 로', async () => {
+    h.state.usageSnapshotReply = { socket_epoch: 11, snapshots: [snap('claude', 2), snap('codex', 8)] }
+    const t = new TauriTransport()
+    await expect(t.getUsageSnapshot()).resolves.toEqual({
+      socketEpoch: 11,
+      snapshots: [snap('claude', 2), snap('codex', 8)],
+    })
+    expect(invokeMock).toHaveBeenCalledWith('get_usage_snapshot', undefined)
+  })
+
+  it('⟳ = forward_daemon_command 의 RefreshUsageLimits 한 장 · 답 Ack 로 풀린다 — 사용량 경로의 셸 커맨드는 그것과 get_usage_snapshot 뿐(관심 보고 없음)', async () => {
+    vi.spyOn(globalThis.crypto, 'randomUUID').mockReturnValue('req-u1-0000-0000-0000-000000000000')
+    const t = new TauriTransport()
+    const c = new ProtocolClient(t)
+    await t.start()
+    await flush() // connected 전이가 시작한 출력 Channel 등록(subscribe_output)까지 끝낸다.
+    invokeMock.mockClear()
+    h.state.forwardReply = { Ack: { request_id: 'req-u1-0000-0000-0000-000000000000' } }
+    await expect(c.refreshUsageLimits('claude')).resolves.toBeUndefined()
+    await c.getUsageSnapshot()
+    expect(invokeMock.mock.calls).toEqual([
+      [
+        'forward_daemon_command',
+        { cmd: { RefreshUsageLimits: { vendor: 'claude', request_id: 'req-u1-0000-0000-0000-000000000000' } } },
+      ],
+      ['get_usage_snapshot', undefined],
+    ])
   })
 })

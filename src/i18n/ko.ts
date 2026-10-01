@@ -35,6 +35,7 @@ export const ko = {
     resolveSpatial: '공간 타깃 해소',
     fillAgentList: '에이전트 트리 열기',
     fillPresetPalette: '프리셋 팔레트 열기',
+    fillUsage: '사용량 한도 열기',
     newContent: '새 콘텐츠', // ADR-0065 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨.
     renderModeSet: '렌더 모드 지정',
     renderModeClear: '렌더 모드 해제',
@@ -42,6 +43,7 @@ export const ko = {
     domModeDisable: 'DOM 모드 끄기',
     domModeToggle: 'DOM 모드 전환',
     renderFailed: '이 슬롯을 표시하지 못했습니다 — 우클릭 메뉴로 비우거나 닫을 수 있습니다',
+    scrollToBottom: '맨 아래로',
   },
   window: {
     create: '새 창',
@@ -112,6 +114,8 @@ export const ko = {
     renameFailed: '이름 변경 실패: {err}', // ADR-0061 리치화.
     reparentFailed: '이동 실패: {err}', // ADR-0072 트리 계층 — 드래그 재부모화.
     rename: '에이전트 이름 변경', // §5 LLM 제어 — RenameProfile.
+    cancelQueuedInput: '대기 입력을 목록에서 빼기', // ADR-0231 — 목록 ✕ 와 같은 command.
+    interrupt: '응답 중단',
   },
   preset: {
     create: '프리셋 생성',
@@ -124,7 +128,73 @@ export const ko = {
     deleteBtn: '삭제',
   },
   /**
-   * 구조화(챗) 슬롯 렌더 문자열.
+   * 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-8). 데몬·wire 는 상태 코드와 수만 나르고 문구는 여기서 만든다
+   * (PRD R28·R31).
+   *
+   * ★`{upstream}`·`{kind}` 에는 상류 원문·분류 낱말이 번역 없이 그대로 들어간다(R31)★ — 끼워 넣기는 값을 다시
+   *   훑지 않으므로 원문 안의 `{…}` 도 글자 그대로 남는다.
+   */
+  usage: {
+    vendorClaude: 'Claude',
+    vendorCodex: 'Codex',
+    windowFiveHour: '5시간',
+    windowWeekly: '주간',
+    stateNotInstalled: '설치 안 됨',
+    stateNeedsLogin: '로그인 필요',
+    // ★원인을 단정하지 않는다(TRD §6 #20)★ — 원인 집합에 profile 권한 없는 로그인 토큰이 들어, 「로그아웃」이나
+    //   「한도 없는 계정」만 말하면 그 사용자를 오도한다.
+    stateUnavailable: '이 계정의 한도 정보를 받을 수 없음',
+    stateFailed: '조회 실패',
+    stateRejected: '거절됨 — {duration} 뒤',
+    // 상태 문장의 틀 — detail 을 잇는 모양. `AfterWait` 는 머리가 이미 「—」로 대기 시간을 단 거절 전용이다.
+    sourceResponse: '응답',
+    sourceError: '오류', // 설치 안 됨 — 원문이 회사 응답이 아니라 실행 오류일 수 있다.
+    withUpstream: '{status} — {source}: {upstream}',
+    withUpstreamCode: '{status} — {source} ({code}): {upstream}',
+    withUpstreamAfterWait: '{status} · {source}: {upstream}',
+    withUpstreamCodeAfterWait: '{status} · {source} ({code}): {upstream}',
+    withKind: '{status} ({kind})',
+    withKindCode: '{status} ({kind} · {code})',
+    withNextAttempt: '{sentence} · 다음 시도 {time}',
+    statusLine: '{vendor} {sentence}',
+    resetWaiting: '리셋됨 — 갱신 대기',
+    resetWaitingShort: '리셋됨', // 숫자만 남는 폭 단계 전용.
+    resetClock: '리셋 {time}', // 리셋 시각의 이름(툴팁·보조기술) — 보이는 자리엔 낱말 대신 모래시계가 선다.
+    resetDateTime: '{month}/{day} {time}', // 오늘이 아닌 리셋 시각 — 요일 없이 날짜만.
+    resetIn: '({duration} 뒤)', // 팝업에서 리셋 시각 뒤에 붙는 남은 시간.
+    durationMinutes: '{minutes}분',
+    durationHours: '{hours}시간',
+    durationHoursMinutes: '{hours}시간 {minutes}분',
+    durationDays: '{days}일',
+    durationDaysHours: '{days}일 {hours}시간',
+    ageJustNow: '방금',
+    ageMinutes: '{minutes}분 전',
+    ageHours: '{hours}시간 전',
+    ageDays: '{days}일 전',
+    stale: '{minutes}분 넘게 새로 들어오지 않은 값',
+    refreshing: '갱신 중',
+    refreshAll: '사용량 새로고침', // 작은 표시 ⟳ 의 이름 · `usageSlot.refresh` 제목.
+    refreshVendor: '{vendor} 사용량 새로고침', // 팝업 회사 머리의 ⟳.
+    plan: '플랜: {plan}',
+    headSeparator: '·', // 팝업 회사 머리의 플랜과 나이 사이.
+    link: '사용량 페이지 ↗',
+    linkTitle: '{vendor} 사용량 설정 페이지를 브라우저로 엽니다 — {url}',
+    meterLabel: '{vendor} {window} 남은 양',
+    meterValueText: '{pct}% 남음',
+    // 요약 버튼의 접근성 이름 — 안의 막대·배지 대신 짧게 읽힌다(버튼의 자식은 보조기술에 평평해진다).
+    a11yWindow: '{window} {value}',
+    a11yNoValue: '값 없음',
+    a11yVendor: '{vendor} {first}, {second}',
+    a11yVendorStatus: '{vendor} {first}, {second} ({status})',
+    a11yStatusRefreshing: '{status}, {refreshing}',
+    a11yTwoVendors: '{first} · {second}',
+    popupLabel: '사용량 상세',
+    hint: '클릭해서 표시할 항목 고르기',
+    showOnSlot: '슬롯에 표시:', // 팝업 맨 아래 표시 토글 줄의 머리.
+    showVendor: '{vendor} 표시', // `usageSlot.toggle*` 제목.
+  },
+  /**
+   * 구조화(챗) 슬롯 문자열 — 렌더 문구와 그 슬롯의 command 제목.
    *
    * ★프로토콜 낱말을 여기 적지 않는다★ — 이벤트 이름·백엔드 상태 문자열·JSON 은 화면에 올리지 않는다
    *   (`docs/process/S21-codex-backend/trd-phase2a.md` §6-2). 값은 사용자가 읽을 사실만 적는다.
@@ -135,9 +205,38 @@ export const ko = {
     turnFailed: '응답이 실패로 끝났습니다',
     turnInterrupted: '응답이 중단됐습니다',
     turnUnknown: '응답이 끝났습니다 — 끝난 이유는 알 수 없습니다',
+    // ADR-0244: 끊기를 보냈고 턴 끝을 기다린다 — 멈췄다는 뜻이 아니다(멈춤은 위 turnInterrupted 가 말한다).
+    interrupting: '중단하는 중…',
     // 이 셸이 모르는 이벤트가 도착했을 때. 방향이 한쪽뿐이라 원인을 단정할 수 있다 — 모르는 어휘는
     //   데몬에서 오므로 뒤처진 쪽은 언제나 셸이다.
     unsupportedEvent: '표시할 수 없는 신호 {count}건 — 앱이 데몬보다 오래된 버전일 수 있습니다',
+    // 대기 입력 목록(ADR-0231). ✕ 문구는 두 백엔드·모든 항목이 같다 — 글을 거두는지는 백엔드가 가르므로 경고를
+    //   덧붙이지 않는다(넘긴 codex 항목에는 「버려짐」이 틀린 말이다 — 사용자 답 2026-09-26).
+    queuedRemove: '목록에서 빼기',
+    queuedMore: '외 {count}개',
+    queuedListLabel: '보내기 대기 중인 입력', // 화면 밖 이름(aria-label) — 목록엔 머리줄이 없다.
+    toolGroupSetExpanded: '도구 묶음 펼치기·접기',
+    toolGroupSearch: '검색 {count}',
+    toolGroupRead: '읽기 {count}',
+    toolGroupList: '목록 {count}',
+    toolGroupEdit: '편집 {count}',
+    toolGroupCommand: '명령 {count}',
+    toolGroupWeb: '웹 {count}',
+    toolGroupAgent: '에이전트 {count}',
+    toolGroupMcp: 'MCP {count}',
+    toolGroupOther: '기타 {count}',
+    toolGroupErrors: '오류 {count}',
+    // ADR-0241: 거부는 오류 키에 합치지 않고 따로 둔다 — 실행되지 않은 호출과 실패한 호출은 다른 사실이다.
+    toolGroupDeclined: '거부 {count}',
+    // ADR-0263: 도는 묶음 머리의 진행형 — 끝나면 빠지고 종류별 수만 남는 것이 과거형이다.
+    toolGroupRunning: '진행 중…',
+    toolDeclined: '거부됨', // 배지 — 두 결말(Refused · Declined)이 같이 쓴다.
+    // ADR-0241: 사유는 결말별로 갈린다. Refused = 대시보드가 거절했다고 귀속된 호출 · Declined = 우리에게
+    //   귀속되지 않은 거부(백엔드 스스로의 거부, 또는 복원되거나 밀려난 파일 변경 거절). Declined 문구에 백엔드
+    //   이름을 넣지 않는다 — 프론트 문자열은 백엔드 중립이다(ADR-0004). T-43 이 claude 결과를 이 결말로 내게
+    //   되면 그 결과도 이 문구를 쓴다.
+    toolRefusedReason: '대시보드가 승인 요청을 처리하지 않아 실행되지 않음',
+    toolDeclinedReason: '실행되지 않음',
   },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {

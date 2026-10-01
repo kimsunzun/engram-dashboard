@@ -6,7 +6,12 @@
 //!   그대로 `engram agent …` 의 응답이자 LLM 이 버스로 받는 답이다.
 //! ★호스팅은 데몬, 선언은 코어★ — 이 둘이 갈리는 유일한 자리다(ADR-0029 + TRD §2-3).
 //!
-//! 진입점: [`make_table`](fn.make_table.html)(조립) · [`AgentCommandHost`](trait.AgentCommandHost.html)(주입 seam).
+//! ★`usage.*`(사용량 한도 두 동사)도 여기서 선언한다 — 본문은 여기 없다★: 어휘(백엔드 낱말 `AgentBackend`·행
+//!   타입)의 생산자가 이 crate 라 선언이 여기 살고(ADR-0155 결정 1), 실물은 데몬의 사용량 서비스가 포트
+//!   [`UsageCommandHost`] 로 꽂는다(TRD S21 usage-limit-slot §3 #18).
+//!
+//! 진입점: [`make_table`](fn.make_table.html)(조립) · [`AgentCommandHost`](trait.AgentCommandHost.html)(주입 seam) ·
+//! [`UsageCommandHost`](trait.UsageCommandHost.html)(사용량 포트).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -17,17 +22,22 @@ use engram_dashboard_command::{
 
 use crate::manager::{AgentManager, RenameOutcome};
 use crate::preset::PresetId;
+use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
 use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
 use crate::types::{
-    AgentId, AgentStatus, PtyError, AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED,
-    RENAME_OUTCOME_UNCHANGED,
+    AgentId, AgentStatus, CancelError, CancelOutcome, PtyError, AGENT_STATE_LIVE,
+    AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
 };
+use crate::usage::UsageVendorKey;
 
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v6(2026-09-28·29): 이름 셋이 늘었다 — `agent.interrupt`(ADR-0237) · `usage.get`·`usage.refresh`(TRD S21
+    //   usage-limit-slot §1-6). 두 갈래가 따로 6 으로 올렸고 v6 은 어느 릴리스(태그)에도 실린 적이 없어 한 판으로 합쳤다.
+    // v5(2026-09-26): 이름 둘이 늘었다 — `agent.listQueuedInputs`·`agent.cancelQueuedInput`(ADR-0231).
     // v4(2026-09-22): `agent.new` 의 `backend` 어휘가 **`Claude` 하나 → `Claude`·`Codex` 둘**이 됐다
     //   (ADR-0219). 이름도 칸도 안 늘었지만 **그 칸이 받는 낱말 집합**이 바뀌었고 그것이 호출자가 보는
     //   선언이다 — 생성물이 그 차이를 그대로 싣는다(`bindings/commands.schema.json` 의
@@ -36,7 +46,7 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 4;
+    catalog_version: 6;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -84,6 +94,73 @@ declare_commands! {
     enum AgentOutputFormat {
         Terminal,
         StreamJson,
+    }
+
+    /// 취소 대기 항목의 두 칸 — 명부의 환원 상태 그대로다(스냅숏 위에 뒤 사건을 다시 환원하려면 둘 다 필요하다).
+    struct QueuedInputCancel {
+        /// 우리 취소 요청의 응답 — `none`(아직 없다) | `not_removed`(안 뺐다고 답했거나 요청이 실패했다).
+        answer: String,
+        /// 그 id 의 벤더 닫힘을 이미 봤다.
+        vendor_closed: bool,
+    }
+
+    /// 대기 목록의 한 줄.
+    struct QueuedInputRow {
+        /// 입력 id — `agent.cancelQueuedInput` 의 `input_id` 로 그대로 쓴다.
+        id: String,
+        text: String,
+        /// `queued` | `sent`(통로가 넘겼고 되울림을 기다린다) | `unconfirmed`(통로가 넘겼는데 받혔는지 모른다 —
+        /// 우편이 그 결말을 기다린다 · ★오늘 내는 백엔드가 없다★ — ADR-0235) | `cancelling`(취소 대기 — 결말이 날
+        /// 때까지 목록에 남는다).
+        state: String,
+        /// `cancelling` 행만 싣는다 — 그 밖은 `null`.
+        cancel: Option<QueuedInputCancel>,
+    }
+
+    // ── 사용량 한도(`usage.*` — TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
+    // ★매크로 enum 은 문자열 열거뿐이라 wire 상태(칸을 든 태그 enum)를 단어 + 선택 칸으로 편다★ — 단어는 wire
+    //   상태 여섯과 1:1 이고 칸은 그 상태일 때만 싣는다(`UsageVendorRow`).
+
+    /// 사용량 창의 종류 — `FiveHour`(5시간) · `Weekly`(주간) · `ModelWeekly`(모델별 주간 — `label` 이 그 이름).
+    enum UsageWindowWord {
+        FiveHour,
+        Weekly,
+        ModelWeekly,
+    }
+
+    /// 사용량 한도 창 하나.
+    struct UsageWindowRow {
+        window: UsageWindowWord,
+        /// `ModelWeekly` 만 싣는다(벤더가 준 표시용 이름) — 나머지는 `null`.
+        label: Option<String>,
+        /// **쓴** 양의 백분율 0–100(남은 양이 아니다). `null` = 모른다 — 0 이 아니다.
+        used_pct: Option<f64>,
+        /// 남은 양 — 화면과 같은 `floor(clamp(100 − used_pct, 0, 100))`. `used_pct` 가 `null` 이면 `null`.
+        left_pct: Option<u64>,
+        /// 리셋 시각, epoch 초 — 이 행의 유일한 절대 시각이다.
+        resets_at: Option<u64>,
+        /// 이 값을 관측한 뒤 흐른 초(답한 순간 기준).
+        age_secs: u64,
+        /// 데몬이 리셋 경과를 확인했다 — 값은 지난 창의 것이다.
+        expired: bool,
+    }
+
+    /// 답이 이 요청이 기다린 조회에서 나왔나 — 데몬 `usage_service::UsageServed` 를 그대로 옮긴 단어.
+    enum UsageServedWord {
+        /// 이 요청이 기다린 조회(또는 그 뒤의 조회)가 성공해 받아 온 값이다.
+        Fresh,
+        /// 이번 요청 동안 새로 받은 값이 없다(조회 안 함 · 실패 · 기다림 상한 초과) — 들고 있던 값이다.
+        Cached,
+    }
+
+    /// 벤더 조회의 상태 — wire `UsageVendorState` 여섯과 1:1 이다(칸은 [`UsageVendorRow`] 가 편다).
+    enum UsageStateWord {
+        Ready,
+        NotInstalled,
+        NeedsLogin,
+        Unavailable,
+        Failed,
+        Rejected,
     }
 
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
@@ -163,7 +240,138 @@ declare_commands! {
         name: String,
         parent: Option<String>,
     } errors [NOT_FOUND, CONFLICT];
+
+    /// 산 에이전트가 턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록(비종결만). `state` = `queued`(확인 전 —
+    /// 우리가 쥐고 있거나 에이전트에 넘겨 결말을 기다린다. codex 는 도는 턴의 도구가 끝날 때 steer 로, 도구 없이 턴이
+    /// 끝나면 다음 턴으로 넘긴다 · claude 는 곧바로 CLI 대기열로 넘긴다) | `sent`(codex 가 에이전트에 넘겼고 받았다는
+    /// 되울림을 기다린다 — 취소해도 빠지지 않는다) | `unconfirmed`(넘겼는데 받혔는지 모른다 —
+    /// 목록에 남고 우편이 그 결말을 기다리며, 취소하면 곧바로 빠진다 · ★오늘 내는 백엔드가 없다★ — codex 의 그
+    /// 단계는 걷혔다, ADR-0235) | `cancelling`(취소를 요청했다 — 에이전트가 결말을 낼 때까지 남는다).
+    /// `cancel.answer` = `none`(아직 답이 없다) | `not_removed`(에이전트가 못 뺐다고 답했거나 요청이 실패했다) ·
+    /// `cancel.vendor_closed` = 에이전트가 그 항목을 이미 닫았다.
+    /// `stopped_after_error` = 직전 턴이 실제 오류로 끝났고 그 뒤 성공으로 끝난 턴이 아직 없다 — 그동안 우편은
+    /// 자동으로 들어가지 않는다(커널 `last_end_failed`). codex 가 쥔 사용자 글은 새 사용자 글이 드는 순간 다시 나갈
+    /// 수 있다(ADR-0235 결정 4). 잠든 에이전트는 목록을 쥐지 않는다(NOT_FOUND).
+    #[effect(Read)]
+    #[since(5)]
+    "agent.listQueuedInputs" => args AgentListQueuedInputsArgs {
+        target: String,
+    } -> ok AgentListQueuedInputsOk {
+        inputs: Vec<QueuedInputRow>,
+        /// 행이 환원한 마지막 목록 사건의 seq(`null` = 아직 없다). `epoch` 안에서만 견준다 — 재부착 대조용.
+        as_of_seq: Option<u64>,
+        /// 화신 표식 — 일치/불일치로만 견준다.
+        epoch: u32,
+        stopped_after_error: bool,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// 대기 목록의 항목 하나를 취소한다(화면 ✕ 와 같은 명령) — `outcome` = `cancelled`(곧바로 거뒀다) |
+    /// `requested`(취소를 요청했다 — 결말은 목록이 보여 준다). 목록에 없는 id 는 NOT_FOUND. CONFLICT = 이름이
+    /// 모호하다(같은 이름이 둘 이상 — id 로 지목한다) 또는 연결된 뷰어가 이 에이전트의 입력을 쥐고 있다(놓은 뒤 다시).
+    #[effect(Write)]
+    #[since(5)]
+    "agent.cancelQueuedInput" => args AgentCancelQueuedInputArgs {
+        target: String,
+        /// ★필수다★ — 「없으면 가장 최근」 같은 기본값을 두지 않는다(TRD §5-6).
+        input_id: String,
+    } -> ok AgentCancelQueuedInputOk {
+        outcome: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// 도는 턴을 끊는다(≠ kill — 프로세스는 산다). `outcome` = `requested`(끊기를 보냈다 — 턴이 실제로 멈췄는지는 턴 끝 사건이 알린다).
+    /// NOT_FOUND = 그런 에이전트가 없거나 잠들었다. CONFLICT = 이름이 모호하다 · 끊을 턴이 없다 · 이 에이전트는
+    /// 끊기를 지원하지 않는다 · 연결된 뷰어가 이 에이전트의 입력을 쥐고 있다.
+    #[effect(Write)]
+    #[since(6)]
+    "agent.interrupt" => args AgentInterruptArgs {
+        target: String,
+    } -> ok AgentInterruptOk {
+        outcome: String,
+    } errors [NOT_FOUND, CONFLICT];
+
+    /// 백엔드 하나의 사용량 한도(5시간·주간·모델별 주간) — 데몬이 들고 있는 값이다. 다음 자동 조회 시각이 지났으면
+    /// 여기서 조회를 띄우고(진행 중이면 거기 붙는다) 그 끝을 최대 5초 기다린다 — 넘으면 들고 있던 값에
+    /// `in_flight` = true 로 답하고 조회는 계속된다. `served` = `Fresh`(이 요청이 기다린 조회가 받아 온 값) |
+    /// `Cached`. `state` = `Ready` | `NotInstalled` | `NeedsLogin` | `Unavailable`(이 계정엔 한도 정보가 없다 — 창을
+    /// 싣지 않는다) | `Failed`(`next_attempt_in_secs` = 다음 자동 조회까지) | `Rejected`(상류가 거절했다 —
+    /// `retry_in_secs` 가 지나기 전엔 `usage.refresh` 도 조회하지 않는다). 실패해도 창은 마지막으로 알던 값이다.
+    /// 비정상 상태의 원인 = `detail_kind`(분류 낱말) · `detail_code`(상류가 준 수) · `upstream`(상류
+    /// 원문 — 비밀 가림 · 200자). 창의 `left_pct` = 남은 양(`used_pct` 는 쓴 양)이고 `null` 은 모른다는 뜻이다(0 이
+    /// 아니다). 시간 칸은 답한 순간 기준 상대 초이고 `resets_at` 만 epoch 초다. 이 데몬이 칸을 안 드는 백엔드는
+    /// NOT_FOUND.
+    #[effect(Read)]
+    #[since(6)]
+    "usage.get" => args UsageGetArgs {
+        /// 어느 백엔드의 한도인가 — `agent.new` 와 같은 낱말.
+        backend: AgentBackend,
+    } -> ok UsageVendorRow {
+        backend: AgentBackend,
+        /// 같은 백엔드 안의 계정 — 지금은 늘 `"default"`(데몬의 기본 로그인).
+        account_key: String,
+        plan: Option<String>,
+        /// 벤더가 준 창만 — 5시간 · 주간 · 모델별 주간 차례. 사용률을 모르는 창(`used_pct: null`)도 싣는다.
+        windows: Vec<UsageWindowRow>,
+        /// 조회가 아직 진행 중이다 — 이 행의 값은 그 조회 전의 것이다.
+        in_flight: bool,
+        served: UsageServedWord,
+        state: UsageStateWord,
+        /// `Failed` 만 싣는다 — 다음 자동 조회까지 남은 초(이미 지났으면 0).
+        next_attempt_in_secs: Option<u64>,
+        /// `Rejected` 만 싣는다 — 이 초가 지나기 전엔 강제 새로고침도 조회를 내보내지 않는다.
+        retry_in_secs: Option<u64>,
+        /// 비정상 상태의 분류 낱말(예 `timeout`·`rpc_error`) — 번역하지 않는 문자열이다. `null` = 원인을 모른다.
+        detail_kind: Option<String>,
+        /// 상류가 준 수(Codex JSON-RPC `error.code`).
+        detail_code: Option<i64>,
+        /// 상류 원문(비밀 가림 · 공백류 제어는 공백 · 200자) — UI 와 이 행에만 가고 로그에는 안 간다.
+        ///
+        /// ★이 타입의 `Debug` 는 원문을 그대로 찍는다 — 행 통째로든 이 칸이든 `{:?}`·tracing `?` 필드로 로그에
+        ///   싣지 말 것★. 선언 매크로가 `Debug` 를 늘 derive 하고 타입마다 끌 문이 없어, 가린 `Debug`(agent
+        ///   `usage::UpstreamText` · protocol `UsageStateDetail`)처럼 손으로 쓸 수 없다. 로그로 가는 길은 마감 뒤 결과
+        ///   로그 하나이고 거기서는 JSON 사본에서 이 이름의 키를 걷어 낸다(daemon `command_delivery::log_late_local`).
+        upstream: Option<String>,
+    } errors [NOT_FOUND];
+
+    /// 사용량 한도를 강제로 새로 조회한다(화면 ⟳ 와 같은 명령) — 조회를 띄우고(진행 중이면 거기 붙는다) 그 끝을
+    /// 최대 5초 기다려 `usage.get` 과 같은 행으로 답한다. 호출 간격 제한은 없다 — 직전 조회가 막 끝났어도 다시
+    /// 조회하고, 잦으면 상류가 거절할 수 있다(그 거절이 `Rejected` 가 아니라 `Failed` 로만 보일 수도 있다). 조회하지
+    /// 않고 들고 있던 값(`Cached`)으로 답하는 경우 = 상류 거절 기한이 남았다(거절 중에 값이 들어와 `state` 가
+    /// `Ready` 여도 기한은 남는다 — 그때는 `retry_in_secs` 가 안 실린다). 조회가 실패하거나 5초 안에 안 끝나도
+    /// `Cached` 다(그때는 조회가 나갔다). 칸의 뜻은 `usage.get` 과 같다. 이 데몬이 칸을 안 드는 백엔드는 NOT_FOUND.
+    #[effect(Write)]
+    #[since(6)]
+    "usage.refresh" => args UsageRefreshArgs {
+        /// 어느 백엔드의 한도인가 — `agent.new` 와 같은 낱말.
+        backend: AgentBackend,
+    } -> ok UsageRefreshOk {
+        // ★칸은 `UsageVendorRow` 와 한 글자도 다르지 않아야 한다★ — 매크로가 명령마다 반환 struct 를 새로 지어
+        //   두 명령이 한 타입을 나눌 수 없다. 짝 맞춤은 `From<UsageVendorRow>`(분해 구조 — 칸이 갈리면 컴파일이
+        //   멈춘다)와 두 반환 스키마의 바이트 대조 시험이 진다. 칸의 뜻은 `UsageVendorRow` 쪽 doc.
+        backend: AgentBackend,
+        account_key: String,
+        plan: Option<String>,
+        windows: Vec<UsageWindowRow>,
+        in_flight: bool,
+        served: UsageServedWord,
+        state: UsageStateWord,
+        next_attempt_in_secs: Option<u64>,
+        retry_in_secs: Option<u64>,
+        detail_kind: Option<String>,
+        detail_code: Option<i64>,
+        /// 상류 원문 — ★`Debug` 가 원문을 찍는다, `{:?}` 로 로그에 싣지 말 것★(`UsageVendorRow.upstream` 의 doc).
+        upstream: Option<String>,
+    } errors [NOT_FOUND];
 }
+
+/// 산 에이전트의 **입력을 움직이는** 명령 — 공통 입구가 입력 임대(`check_input`)를 먼저 본다.
+///
+/// ★선언 매크로에 칸을 더하지 않고 여기 둔다★ — `CommandSpec` 에 표식을 얹으면 명령 crate 가 입력 임대라는
+///   도메인을 알게 된다. 이 목록의 이름은 전부 이 블록의 `Write` 선언이어야 한다(시험이 잰다).
+/// 조회(`agent.listQueuedInputs`)는 임대를 안 본다 — 읽기다.
+/// 끊기(`agent.interrupt`)도 든다 — WS `Interrupt` 가 임대를 보는 것과 같게.
+// ADR-0231
+// ADR-0237
+pub const INPUT_AFFECTING: &[&str] = &["agent.cancelQueuedInput", "agent.interrupt"];
 
 /// 명부 한 행 — 이 표가 매니저에게서 보는 것만.
 ///
@@ -210,6 +418,20 @@ pub trait AgentCommandHost: Send + Sync {
     /// ★지목은 **id 정확 일치**뿐이다★ — 이름으로는 못 찾는다(프리셋 이름은 유일하지 않다). 없는 id 와
     /// id 형식이 아닌 문자열은 둘 다 `None` 이다: 호출자가 할 일이 같아서다(목록에서 id 를 다시 고른다).
     fn preset_cwd(&self, id: &str) -> Option<String>;
+    /// 산 화신의 대기 목록. `None` = 산 세션이 없다.
+    // ADR-0231
+    fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing>;
+    /// 산 화신의 대기 입력 하나를 취소한다. 산 세션이 없으면 `CancelError::NotFound`.
+    // ADR-0231
+    fn cancel_queued_input(
+        &self,
+        id: AgentId,
+        input_id: &str,
+    ) -> Result<CancelOutcome, CancelError>;
+    /// 산 화신의 도는 턴을 끊는다. 산 세션이 없으면 `PtyError::NotFound` · 끊을 턴이 없거나 통로가 끊기를
+    /// 못 하면 `PtyError::Unsupported`.
+    // ADR-0237
+    fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError>;
 }
 
 /// 명부가 바뀌었음을 붙어 있는 클라이언트에게 알리는 출구(포트).
@@ -223,6 +445,69 @@ pub trait AgentCommandHost: Send + Sync {
 // ADR-0155
 pub trait RosterChanged: Send + Sync {
     fn roster_changed(&self);
+}
+
+/// `usage.*` 핸들러가 데몬의 사용량 서비스에게 시키는 일 **전부**(포트) — 실물 = daemon `UsageService`.
+///
+/// ★동기다 — blocking 풀 스레드에서 불린다(TRD S21 usage-limit-slot §3 #17)★: 데몬의 공통 입구는 첫 poll 에서
+///   끝나는 핸들러만 몰고(`call_daemon_command`) 기다리는 async 핸들러는 `OUTCOME_UNKNOWN` 이 된다. 그래서 두
+///   메서드는 조회 끝을 **부른 스레드에서** 기다린다(상한 5초). 실물은 std 채널로 기다린다 — 이 crate 는 async
+///   런타임을 모른 채로 남는다.
+/// ★칸은 들어온 철자가 아니라 [`usage_vendor_of`] 로 찾는다★ — 버스 낱말(`Claude`)과 wire 낱말(`claude`)이 한
+///   칸을 쳐야 한다(§3 #43).
+/// `None` = 이 데몬이 그 백엔드의 칸을 들고 있지 않다 — 핸들러가 `NOT_FOUND` 로 답한다.
+// ADR-0155
+// ADR-0012
+pub trait UsageCommandHost: Send + Sync {
+    /// 요청 표의 `Get` — 다음 자동 조회 시각 전이면 조회 없이 지금 값으로 답한다.
+    fn get(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
+    /// 요청 표의 `Refresh` — 거절 기한 안이면 조회 없이 지금 값으로 답한다.
+    fn refresh(&self, backend: &AgentBackend) -> Option<UsageVendorRow>;
+}
+
+/// 버스 낱말 → 사용량 칸의 벤더 키. `None` = 그 낱말의 조회기가 없다.
+///
+/// ★wire 입구와 같은 길이다★ — 두 입구 모두 [`usage_probe_for`](crate::backend::usage_probe_for) 로 조회기를 찾고
+///   그 조회기의 키로 칸을 삼는다(daemon `connection_core` 의 wire 쪽 짝). 들어온 철자로 키를 만들면 두 입구가
+///   다른 칸을 친다.
+// ADR-0004
+pub fn usage_vendor_of(backend: &AgentBackend) -> Option<UsageVendorKey> {
+    crate::backend::usage_probe_for(&backend_word(backend)).map(|probe| probe.key())
+}
+
+/// `usage.refresh` 의 반환 — 칸이 `UsageVendorRow` 와 같다(선언의 주석). ★분해 구조로 옮긴다(`..` 없이)★ — 어느
+/// 쪽에 칸이 늘어도 여기서 컴파일이 멈춘다.
+impl From<UsageVendorRow> for UsageRefreshOk {
+    fn from(row: UsageVendorRow) -> Self {
+        let UsageVendorRow {
+            backend,
+            account_key,
+            plan,
+            windows,
+            in_flight,
+            served,
+            state,
+            next_attempt_in_secs,
+            retry_in_secs,
+            detail_kind,
+            detail_code,
+            upstream,
+        } = row;
+        Self {
+            backend,
+            account_key,
+            plan,
+            windows,
+            in_flight,
+            served,
+            state,
+            next_attempt_in_secs,
+            retry_in_secs,
+            detail_kind,
+            detail_code,
+            upstream,
+        }
+    }
 }
 
 impl AgentCommandHost for AgentManager {
@@ -274,6 +559,22 @@ impl AgentCommandHost for AgentManager {
             .into_iter()
             .find(|preset| preset.id == id)
             .map(|preset| preset.cwd.to_string_lossy().into_owned())
+    }
+
+    fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+        AgentManager::list_queued_inputs(self, id).ok()
+    }
+
+    fn cancel_queued_input(
+        &self,
+        id: AgentId,
+        input_id: &str,
+    ) -> Result<CancelOutcome, CancelError> {
+        AgentManager::cancel_queued_input(self, id, input_id)
+    }
+
+    fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+        AgentManager::interrupt(self, id)
     }
 }
 
@@ -437,8 +738,14 @@ fn preset_not_found(id: &str) -> CommandError {
 /// ★`notify` 를 인자로 받는 이유★: 명부를 바꾼 동사는 반드시 통지해야 하는데(포트 doc 참조) 그 실물은
 ///   데몬 소유다. 조립부가 넘기게 하면 **빠뜨릴 수 없다** — trait 기본 구현으로 두면 조용히 안 부른다.
 /// ★명령이 늘어도 조립부(실행 파일)는 안 바뀐다★ — 늘어나는 것은 선언 블록과 이 함수의 한 줄이다.
+/// ★`usage` 도 같은 이유로 인자다★: `usage.*` 의 실물(데몬 사용량 서비스)은 데몬 소유라 조립부가 넘긴다. 운영
+///   밖 조립(스모크 bin · 시험)은 칸이 없는 포트를 넘긴다 — 그 조립에서 `usage.*` 는 `NOT_FOUND` 로 답한다.
 // ADR-0155
-pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged>) -> CommandTable {
+pub fn make_table(
+    host: Arc<dyn AgentCommandHost>,
+    notify: Arc<dyn RosterChanged>,
+    usage: Arc<dyn UsageCommandHost>,
+) -> CommandTable {
     let mut table = CommandTable::new(COMMAND_SPECS);
 
     let list = Arc::clone(&host);
@@ -446,6 +753,11 @@ pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged
     let new = (Arc::clone(&host), Arc::clone(&notify));
     let rename = (Arc::clone(&host), Arc::clone(&notify));
     let move_ = (Arc::clone(&host), Arc::clone(&notify));
+    let list_queued = Arc::clone(&host);
+    let cancel_queued = Arc::clone(&host);
+    let interrupt = Arc::clone(&host);
+    let usage_get = Arc::clone(&usage);
+    let usage_refresh = usage;
 
     // ★조립 때 터뜨린다★: insert 가 반려하는 셋(선언 집합에 없는 이름 · 중복 삽입 · 선언 스키마 텍스트가
     //   JSON 이 아님) 전부 **빌드가 정하는 값**이라 런타임에 달라지지 않는다. 어느 것인지는 패닉에 함께
@@ -488,8 +800,76 @@ pub fn make_table(host: Arc<dyn AgentCommandHost>, notify: Arc<dyn RosterChanged
             }),
         )
         .expect("agent.move 를 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.listQueuedInputs",
+            blocking_handler(move |args: AgentListQueuedInputsArgs| {
+                verb_list_queued_inputs(list_queued.as_ref(), args)
+            }),
+        )
+        .expect("agent.listQueuedInputs 를 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.cancelQueuedInput",
+            blocking_handler(move |args: AgentCancelQueuedInputArgs| {
+                verb_cancel_queued_input(cancel_queued.as_ref(), args)
+            }),
+        )
+        .expect("agent.cancelQueuedInput 을 표에 꽂지 못했다");
+    table
+        .insert(
+            "agent.interrupt",
+            blocking_handler(move |args: AgentInterruptArgs| {
+                verb_interrupt(interrupt.as_ref(), args)
+            }),
+        )
+        .expect("agent.interrupt 를 표에 꽂지 못했다");
+    // ★둘 다 `blocking_handler` 다(TRD §3 #17)★ — 조회 끝을 기다리는 본문이지만 async 로 두면 데몬 입구가 첫
+    //   poll 에서 `OUTCOME_UNKNOWN` 으로 끊는다. 기다림은 포트 안(std 채널)에서 끝난다.
+    table
+        .insert(
+            "usage.get",
+            blocking_handler(move |args: UsageGetArgs| verb_usage_get(usage_get.as_ref(), args)),
+        )
+        .expect("usage.get 을 표에 꽂지 못했다");
+    table
+        .insert(
+            "usage.refresh",
+            blocking_handler(move |args: UsageRefreshArgs| {
+                verb_usage_refresh(usage_refresh.as_ref(), args)
+            }),
+        )
+        .expect("usage.refresh 를 표에 꽂지 못했다");
 
     table
+}
+
+fn verb_usage_get(
+    usage: &dyn UsageCommandHost,
+    args: UsageGetArgs,
+) -> Result<UsageVendorRow, CommandError> {
+    usage
+        .get(&args.backend)
+        .ok_or_else(|| no_usage_limits(&args.backend))
+}
+
+fn verb_usage_refresh(
+    usage: &dyn UsageCommandHost,
+    args: UsageRefreshArgs,
+) -> Result<UsageRefreshOk, CommandError> {
+    usage
+        .refresh(&args.backend)
+        .map(UsageRefreshOk::from)
+        .ok_or_else(|| no_usage_limits(&args.backend))
+}
+
+/// 칸이 없는 백엔드 — wire ⟳ 의 같은 부재와 **같은 코드·같은 문장**이다(daemon `connection_core` 의
+/// `no_usage_text`). 낱말만 이 입구의 철자(`Claude`)로 싣는다.
+fn no_usage_limits(backend: &AgentBackend) -> CommandError {
+    CommandError::not_found(format!(
+        "this daemon keeps no usage limits for backend '{}'",
+        backend_word(backend)
+    ))
 }
 
 fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
@@ -886,6 +1266,113 @@ fn verb_move(
     })
 }
 
+// ★두 동사는 명부를 바꾸지 않는다 — 명부 통지를 내지 않는다★(대기 목록은 에이전트 출력 스트림으로 흐른다).
+// ADR-0231
+fn verb_list_queued_inputs(
+    host: &dyn AgentCommandHost,
+    args: AgentListQueuedInputsArgs,
+) -> Result<AgentListQueuedInputsOk, CommandError> {
+    let token = args.target.as_str();
+    reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
+    let id = resolve(host, token)?.id;
+    let listing = host
+        .list_queued_inputs(id)
+        .ok_or_else(|| not_running(token))?;
+    Ok(AgentListQueuedInputsOk {
+        inputs: listing
+            .rows
+            .into_iter()
+            .map(|row| QueuedInputRow {
+                id: row.id,
+                text: row.text,
+                state: row.state.as_str().to_string(),
+                cancel: match row.state {
+                    ListedState::Cancelling {
+                        answer,
+                        vendor_closed,
+                    } => Some(QueuedInputCancel {
+                        answer: answer.as_str().to_string(),
+                        vendor_closed,
+                    }),
+                    ListedState::Queued | ListedState::Sent | ListedState::Unconfirmed => None,
+                },
+            })
+            .collect(),
+        as_of_seq: listing.as_of_seq,
+        epoch: listing.epoch,
+        stopped_after_error: listing.stopped_after_error,
+    })
+}
+
+// ADR-0231
+fn verb_cancel_queued_input(
+    host: &dyn AgentCommandHost,
+    args: AgentCancelQueuedInputArgs,
+) -> Result<AgentCancelQueuedInputOk, CommandError> {
+    let (token, input_id) = (args.target.as_str(), args.input_id.as_str());
+    reject_blanks(&[
+        ("target", Some(token), Blank::NeedsValue),
+        ("input_id", Some(input_id), Blank::NeedsValue),
+    ])?;
+    // ★문구엔 지목 토큰이 아니라 명부 이름을 싣는다★ — 공통 입구가 `target` 을 푼 id 로 바꿔 적으므로
+    //   (데몬 `admit_input`) 여기 오는 토큰은 대개 UUID 다.
+    let agent = resolve(host, token)?;
+    let name = agent.name.as_str();
+    match host.cancel_queued_input(agent.id, input_id) {
+        Ok(outcome) => Ok(AgentCancelQueuedInputOk {
+            outcome: outcome.as_str().to_string(),
+        }),
+        // ★「이미 결말이 났다」와 「잠들었다」를 가르지 않는다★ — 호출자가 할 일이 같다(목록을 다시 본다).
+        Err(CancelError::NotFound) => Err(CommandError::not_found(format!(
+            "'{name}' has no waiting input '{input_id}' — it was already delivered, cancelled or dropped, or the agent is not running; list its queued inputs to see what is still waiting"
+        ))),
+        // ★다시 부르라고 안내하지 않는다★: 항목은 취소 대기 그대로라 재호출은 아무것도 쓰지 않고 `requested`
+        //   를 돌려준다(멱등). 결말은 에이전트 자신의 수명주기가 정한다.
+        Err(CancelError::Write(e)) => Err(CommandError::internal(format!(
+            "the cancel request for '{input_id}' could not be written to '{name}': {e} — the item stays in the cancelling state and calling again will not resend it; its fate now follows the agent's own lifecycle, so watch it in the queued-input list"
+        ))),
+    }
+}
+
+// ADR-0237
+fn verb_interrupt(
+    host: &dyn AgentCommandHost,
+    args: AgentInterruptArgs,
+) -> Result<AgentInterruptOk, CommandError> {
+    let token = args.target.as_str();
+    reject_blanks(&[("target", Some(token), Blank::NeedsValue)])?;
+    // 문구엔 명부 이름을 싣는다 — 공통 입구가 `target` 을 푼 id 로 바꿔 적는다(`verb_cancel_queued_input` 과 같다).
+    let agent = resolve(host, token)?;
+    let name = agent.name.as_str();
+    match host.interrupt_agent(agent.id) {
+        // ★`requested` 는 「멈췄다」가 아니다★ — 끊기를 보냈을 뿐이고 멈춤은 턴 끝 사건이 알린다.
+        Ok(()) => Ok(AgentInterruptOk {
+            outcome: "requested".to_string(),
+        }),
+        Err(PtyError::NotFound(_)) => Err(CommandError::not_found(format!(
+            "'{name}' is not running, so it has no turn to interrupt"
+        ))),
+        // 두 사유(끊을 턴이 없다 · 끊기를 못 하는 통로)를 가르지 않는다 — 통로가 한 변형으로 답하고 호출자가
+        //   할 일도 같다.
+        Err(PtyError::Unsupported(reason)) => Err(CommandError::of(
+            ErrorCode::Conflict,
+            format!(
+                "'{name}' has no turn to interrupt, or this agent does not support interrupting: {reason}"
+            ),
+        )),
+        Err(other) => Err(CommandError::internal(format!(
+            "could not interrupt '{name}': {other}"
+        ))),
+    }
+}
+
+/// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
+fn not_running(token: &str) -> CommandError {
+    CommandError::not_found(format!(
+        "'{token}' is not running, so it holds no queued inputs — an asleep agent has nothing waiting"
+    ))
+}
+
 fn current_name(host: &dyn AgentCommandHost, id: AgentId) -> Option<String> {
     host.roster()
         .into_iter()
@@ -929,12 +1416,15 @@ fn resolve(host: &dyn AgentCommandHost, token: &str) -> Result<ResolvedAgent, Co
 
 /// [`resolve`] 의 순수한 알맹이 — **제어 입구가 실제로 쓰는 해석 규칙 그 자체**다.
 ///
-/// ★`pub` 인 이유(이것만이 근거다)★: 데몬 crate 의 교차 대조 테스트가 우편 입구와 **같은 규칙**인지를
-/// 재려면 실입구가 쓰는 해석기를 태워야 한다. 명부를 인자로 받는 형태라 그 테스트가 `AgentCommandHost`
-/// 전체를 흉내 내지 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다.
+/// ★`pub` 인 이유 둘★: ① 데몬 crate 의 교차 대조 테스트가 우편 입구와 **같은 규칙**인지를 재려면 실입구가
+/// 쓰는 해석기를 태워야 한다. 명부를 인자로 받는 형태라 그 테스트가 `AgentCommandHost` 전체를 흉내 내지
+/// 않아도 되고, 사본을 따로 두지 않으므로 재는 것과 도는 것이 갈릴 수 없다. ② 데몬의 입력 임대 검문
+/// (`control::commands::admit_input` — 운영 경로)이 [`INPUT_AFFECTING`] 명령의 `target` 을 동사 본문과 **같은
+/// 규칙으로** 한 번 풀어 그 id 로 임대를 본다. 해석기가 둘이면 검사한 에이전트와 실행하는 에이전트가 갈린다.
 /// ★결말은 코드로 읽는다★: 부재 = `NOT_FOUND` · 동명 둘 이상 = `CONFLICT`(이 함수가 내는 두 코드다).
 // ADR-0132
 // ADR-0155
+// ADR-0231
 pub fn resolve_in(roster: &[AgentRosterRow], token: &str) -> Result<ResolvedAgent, CommandError> {
     let found = |row: &AgentRosterRow| ResolvedAgent {
         id: row.id,
@@ -1053,6 +1543,16 @@ mod tests {
         rename_on_reparent: Mutex<Option<String>>,
         /// 등록된 경로 북마크(id → cwd) — 프리셋 지목이 **실제로 폴더를 물어 온다**를 재는 재료.
         presets: Mutex<HashMap<String, String>>,
+        /// 대기 목록 조회의 답. `None` = 산 세션이 없다.
+        queued_listing: Mutex<Option<QueuedListing>>,
+        /// 대기 입력 취소의 답(한 번 쓰고 비운다). 비었으면 `NotFound`.
+        cancel_answer: Mutex<Option<Result<CancelOutcome, CancelError>>>,
+        /// 두 동사가 매니저에 넘긴 지목 — 푼 id 가 그대로 가는지 잰다.
+        queued_calls: Mutex<Vec<(AgentId, Option<String>)>>,
+        /// 끊기의 답(한 번 쓰고 비운다). 비었으면 `Ok(())`.
+        interrupt_answer: Mutex<Option<Result<(), PtyError>>>,
+        /// 끊기가 매니저에 넘긴 지목.
+        interrupt_calls: Mutex<Vec<AgentId>>,
     }
 
     /// 명부 통지 계수기 — 「이름을 바꿨는데 트리가 옛 명부를 보여준다」의 감시자.
@@ -1067,11 +1567,34 @@ mod tests {
         }
     }
 
+    /// 가짜 사용량 포트 — 받은 백엔드를 적고 심어 둔 행을 돌려준다(`None` = 칸이 없다).
+    #[derive(Default)]
+    struct FakeUsage {
+        row: Mutex<Option<UsageVendorRow>>,
+        calls: Mutex<Vec<(&'static str, AgentBackend)>>,
+    }
+
+    impl UsageCommandHost for FakeUsage {
+        fn get(&self, backend: &AgentBackend) -> Option<UsageVendorRow> {
+            self.calls.lock().unwrap().push(("get", backend.clone()));
+            self.row.lock().unwrap().clone()
+        }
+
+        fn refresh(&self, backend: &AgentBackend) -> Option<UsageVendorRow> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(("refresh", backend.clone()));
+            self.row.lock().unwrap().clone()
+        }
+    }
+
     fn wiring(host: &Arc<FakeHost>) -> (CommandTable, Arc<FakeNotify>) {
         let notify = Arc::new(FakeNotify::default());
         let table = make_table(
             Arc::clone(host) as Arc<dyn AgentCommandHost>,
             Arc::clone(&notify) as Arc<dyn RosterChanged>,
+            Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
         );
         (table, notify)
     }
@@ -1237,6 +1760,36 @@ mod tests {
         fn preset_cwd(&self, id: &str) -> Option<String> {
             self.presets.lock().unwrap().get(id).cloned()
         }
+
+        fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+            self.queued_calls.lock().unwrap().push((id, None));
+            self.queued_listing.lock().unwrap().clone()
+        }
+
+        fn cancel_queued_input(
+            &self,
+            id: AgentId,
+            input_id: &str,
+        ) -> Result<CancelOutcome, CancelError> {
+            self.queued_calls
+                .lock()
+                .unwrap()
+                .push((id, Some(input_id.to_string())));
+            self.cancel_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Err(CancelError::NotFound))
+        }
+
+        fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+            self.interrupt_calls.lock().unwrap().push(id);
+            self.interrupt_answer
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or(Ok(()))
+        }
     }
 
     fn call(
@@ -1256,11 +1809,16 @@ mod tests {
         assert_eq!(
             names,
             vec![
+                "agent.cancelQueuedInput",
+                "agent.interrupt",
                 "agent.list",
+                "agent.listQueuedInputs",
                 "agent.move",
                 "agent.new",
                 "agent.rename",
-                "agent.spawn"
+                "agent.spawn",
+                "usage.get",
+                "usage.refresh"
             ]
         );
         assert_eq!(names.len(), COMMAND_SPECS.len());
@@ -2728,6 +3286,473 @@ mod tests {
         assert_eq!(
             ok["properties"]["agents"]["items"]["properties"]["state"]["type"], "string",
             "블록 안 선언 struct 가 인라인으로 펼쳐진다"
+        );
+    }
+
+    // ── 대기 목록 조회·취소 (ADR-0231 · TRD §5-6) ──
+
+    fn listed(id: &str, state: ListedState) -> crate::queued_input::ListedRow {
+        crate::queued_input::ListedRow {
+            id: id.into(),
+            text: format!("text of {id}"),
+            state,
+        }
+    }
+
+    #[test]
+    fn the_queued_listing_carries_every_row_state_the_seq_the_incarnation_and_the_halt() {
+        let host = FakeHost::new();
+        let id = host.with_agent("alpha", true, false);
+        *host.queued_listing.lock().unwrap() = Some(QueuedListing {
+            rows: vec![
+                listed("q1", ListedState::Queued),
+                listed("q2", ListedState::Unconfirmed),
+                listed("q5", ListedState::Sent),
+                listed(
+                    "q3",
+                    ListedState::Cancelling {
+                        answer: crate::queued_input::CancelAnswer::NotRemoved,
+                        vendor_closed: true,
+                    },
+                ),
+                listed(
+                    "q4",
+                    ListedState::Cancelling {
+                        answer: crate::queued_input::CancelAnswer::Unanswered,
+                        vendor_closed: false,
+                    },
+                ),
+            ],
+            as_of_seq: Some(7),
+            epoch: 4_000_000_000,
+            stopped_after_error: true,
+        });
+        let (table, notify) = wiring(&host);
+
+        let out = call(
+            &table,
+            "agent.listQueuedInputs",
+            json!({ "target": "alpha" }),
+        )
+        .expect("조회 성공");
+        assert_eq!(
+            out,
+            json!({
+                "inputs": [
+                    { "id": "q1", "text": "text of q1", "state": "queued", "cancel": null },
+                    { "id": "q2", "text": "text of q2", "state": "unconfirmed", "cancel": null },
+                    { "id": "q5", "text": "text of q5", "state": "sent", "cancel": null },
+                    { "id": "q3", "text": "text of q3", "state": "cancelling",
+                      "cancel": { "answer": "not_removed", "vendor_closed": true } },
+                    { "id": "q4", "text": "text of q4", "state": "cancelling",
+                      "cancel": { "answer": "none", "vendor_closed": false } },
+                ],
+                "as_of_seq": 7,
+                "epoch": 4_000_000_000u32,
+                "stopped_after_error": true,
+            })
+        );
+        assert_eq!(*host.queued_calls.lock().unwrap(), vec![(id, None)]);
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "명부를 바꾸지 않는다");
+    }
+
+    #[test]
+    fn an_empty_queue_lists_no_rows_and_a_null_seq() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        *host.queued_listing.lock().unwrap() = Some(QueuedListing {
+            rows: vec![],
+            as_of_seq: None,
+            epoch: 0,
+            stopped_after_error: false,
+        });
+        let (table, _notify) = wiring(&host);
+        let out = call(
+            &table,
+            "agent.listQueuedInputs",
+            json!({ "target": "alpha" }),
+        )
+        .expect("조회 성공");
+        assert_eq!(
+            out,
+            json!({ "inputs": [], "as_of_seq": null, "epoch": 0, "stopped_after_error": false })
+        );
+    }
+
+    #[test]
+    fn listing_the_queue_of_an_asleep_unknown_or_ambiguous_agent_is_refused() {
+        let host = FakeHost::new();
+        host.with_agent("asleep", false, false);
+        host.with_agent("twin", true, false);
+        host.with_agent("twin", true, false);
+        let (table, _notify) = wiring(&host);
+
+        let asleep = call(
+            &table,
+            "agent.listQueuedInputs",
+            json!({ "target": "asleep" }),
+        )
+        .expect_err("산 세션이 없다");
+        assert_eq!(asleep.code(), ErrorCode::NotFound);
+        assert!(
+            asleep.message().contains("not running"),
+            "명부에 있는 에이전트를 없다고 하지 않는다: {}",
+            asleep.message()
+        );
+        for (target, code) in [
+            ("nobody", ErrorCode::NotFound),
+            ("twin", ErrorCode::Conflict),
+        ] {
+            let err = call(
+                &table,
+                "agent.listQueuedInputs",
+                json!({ "target": target }),
+            )
+            .expect_err("지목 실패");
+            assert_eq!(err.code(), code, "{target}");
+        }
+        let blank =
+            call(&table, "agent.listQueuedInputs", json!({ "target": " " })).expect_err("빈 값");
+        assert_eq!(blank.code(), ErrorCode::InvalidArgument);
+        assert_eq!(
+            host.queued_calls.lock().unwrap().len(),
+            1,
+            "지목이 서지 않으면 매니저에 닿지 않는다(잠든 에이전트 한 번만 물었다)"
+        );
+    }
+
+    /// TRD §7-1 데몬 행의 「취소 결과」 — 세션의 답이 동사 응답으로 한 줄씩 번역된다.
+    #[test]
+    fn cancel_translates_every_session_answer() {
+        let answers: Vec<(Result<CancelOutcome, CancelError>, Result<&str, ErrorCode>)> = vec![
+            (Ok(CancelOutcome::Cancelled), Ok("cancelled")),
+            (Ok(CancelOutcome::Requested), Ok("requested")),
+            (Err(CancelError::NotFound), Err(ErrorCode::NotFound)),
+            (
+                Err(CancelError::Write(PtyError::WriteFailed(
+                    "pipe closed".into(),
+                ))),
+                Err(ErrorCode::Internal),
+            ),
+        ];
+        for (answer, expected) in answers {
+            let host = FakeHost::new();
+            let id = host.with_agent("alpha", true, false);
+            let label = format!("{answer:?}");
+            *host.cancel_answer.lock().unwrap() = Some(answer);
+            let (table, notify) = wiring(&host);
+
+            let got = call(
+                &table,
+                "agent.cancelQueuedInput",
+                json!({ "target": "alpha", "input_id": "q1" }),
+            );
+            match expected {
+                Ok(word) => assert_eq!(got.expect(&label), json!({ "outcome": word }), "{label}"),
+                Err(code) => {
+                    let err = got.expect_err(&label);
+                    assert_eq!(err.code(), code, "{label}");
+                    if code == ErrorCode::Internal {
+                        assert!(
+                            err.message().contains("stays in the cancelling state"),
+                            "쓰기 실패는 항목이 취소 대기로 남는다고 말한다: {}",
+                            err.message()
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                *host.queued_calls.lock().unwrap(),
+                vec![(id, Some("q1".to_string()))],
+                "{label}: 푼 id 와 input_id 가 그대로 넘어간다"
+            );
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                0,
+                "{label}: 명부를 바꾸지 않는다"
+            );
+        }
+    }
+
+    /// ★실패 문구는 명부 이름으로 부른다★ — 데몬 공통 입구가 `target` 을 푼 id 로 바꿔 적으므로 토큰을 그대로
+    /// 실으면 호출자는 자기가 치지 않은 UUID 를 읽는다.
+    #[test]
+    fn cancel_failures_name_the_agent_by_its_roster_name_even_when_targeted_by_id() {
+        for answer in [
+            CancelError::NotFound,
+            CancelError::Write(PtyError::WriteFailed("pipe closed".into())),
+        ] {
+            let host = FakeHost::new();
+            let id = host.with_agent("alpha", true, false);
+            let label = format!("{answer:?}");
+            *host.cancel_answer.lock().unwrap() = Some(Err(answer));
+            let (table, _notify) = wiring(&host);
+
+            let err = call(
+                &table,
+                "agent.cancelQueuedInput",
+                json!({ "target": id.to_string(), "input_id": "q1" }),
+            )
+            .expect_err(&label);
+            assert!(
+                err.message().contains("'alpha'"),
+                "{label}: {}",
+                err.message()
+            );
+            assert!(
+                !err.message().contains(&id.to_string()),
+                "{label}: id 를 이름 자리에 싣지 않는다: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn cancel_requires_an_input_id_and_refuses_a_blank_one_before_touching_the_agent() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        let (table, _notify) = wiring(&host);
+
+        for args in [
+            json!({ "target": "alpha" }),
+            json!({ "target": "alpha", "input_id": "" }),
+            json!({ "target": "alpha", "input_id": "   " }),
+            json!({ "target": " ", "input_id": "q1" }),
+        ] {
+            let err = call(&table, "agent.cancelQueuedInput", args.clone()).expect_err("반려");
+            assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+        }
+        let unknown = call(
+            &table,
+            "agent.cancelQueuedInput",
+            json!({ "target": "nobody", "input_id": "q1" }),
+        )
+        .expect_err("지목 실패");
+        assert_eq!(unknown.code(), ErrorCode::NotFound);
+        assert!(
+            host.queued_calls.lock().unwrap().is_empty(),
+            "인자·지목이 서지 않으면 매니저에 닿지 않는다"
+        );
+    }
+
+    /// 통로의 답이 동사 결말로 한 줄씩 번역된다(TRD S21-chat-ux §3-3).
+    // ADR-0237
+    #[test]
+    fn interrupt_translates_every_transport_answer() {
+        let answers: Vec<(Result<(), PtyError>, Result<&str, ErrorCode>)> = vec![
+            (Ok(()), Ok("requested")),
+            (
+                Err(PtyError::NotFound(AgentId::new_v4())),
+                Err(ErrorCode::NotFound),
+            ),
+            (
+                Err(PtyError::Unsupported("no turn in flight".into())),
+                Err(ErrorCode::Conflict),
+            ),
+            (
+                Err(PtyError::WriteFailed("pipe closed".into())),
+                Err(ErrorCode::Internal),
+            ),
+        ];
+        for (answer, expected) in answers {
+            let host = FakeHost::new();
+            let id = host.with_agent("alpha", true, false);
+            let label = format!("{answer:?}");
+            *host.interrupt_answer.lock().unwrap() = Some(answer);
+            let (table, notify) = wiring(&host);
+
+            let got = call(
+                &table,
+                "agent.interrupt",
+                json!({ "target": id.to_string() }),
+            );
+            match expected {
+                Ok(word) => assert_eq!(got.expect(&label), json!({ "outcome": word }), "{label}"),
+                Err(code) => {
+                    let err = got.expect_err(&label);
+                    assert_eq!(err.code(), code, "{label}");
+                    assert!(
+                        err.message().contains("'alpha'"),
+                        "{label}: 명부 이름으로 부른다: {}",
+                        err.message()
+                    );
+                }
+            }
+            assert_eq!(*host.interrupt_calls.lock().unwrap(), vec![id], "{label}");
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                0,
+                "{label}: 명부를 바꾸지 않는다"
+            );
+        }
+    }
+
+    #[test]
+    fn interrupt_refuses_a_blank_or_unknown_target_before_touching_the_agent() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", true, false);
+        let (table, _notify) = wiring(&host);
+
+        let blank = call(&table, "agent.interrupt", json!({ "target": " " })).expect_err("빈 값");
+        assert_eq!(blank.code(), ErrorCode::InvalidArgument);
+        let unknown =
+            call(&table, "agent.interrupt", json!({ "target": "nobody" })).expect_err("지목 실패");
+        assert_eq!(unknown.code(), ErrorCode::NotFound);
+        assert!(
+            host.interrupt_calls.lock().unwrap().is_empty(),
+            "인자·지목이 서지 않으면 매니저에 닿지 않는다"
+        );
+    }
+
+    #[test]
+    fn the_queue_list_schema_inlines_the_row_and_the_cancel_pair() {
+        let ok: serde_json::Value =
+            serde_json::from_str(AgentListQueuedInputsArgs::SPEC.ok_schema).expect("ok 스키마");
+        let row = &ok["properties"]["inputs"]["items"]["properties"];
+        assert_eq!(row["state"]["type"], "string");
+        assert_eq!(
+            row["cancel"]["anyOf"][0]["properties"]["vendor_closed"]["type"],
+            "boolean"
+        );
+        let required: Vec<&str> = ok["required"]
+            .as_array()
+            .expect("required")
+            .iter()
+            .map(|v| v.as_str().expect("문자열"))
+            .collect();
+        assert_eq!(required, vec!["inputs", "epoch", "stopped_after_error"]);
+    }
+
+    // ── 사용량(`usage.*` — TRD S21 usage-limit-slot §1-6) ───────────────────────────────────────────
+
+    fn usage_table(usage: &Arc<FakeUsage>) -> CommandTable {
+        make_table(
+            FakeHost::new() as Arc<dyn AgentCommandHost>,
+            Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
+            Arc::clone(usage) as Arc<dyn UsageCommandHost>,
+        )
+    }
+
+    fn usage_row() -> UsageVendorRow {
+        UsageVendorRow {
+            backend: AgentBackend::Claude,
+            account_key: "default".to_owned(),
+            plan: Some("max".to_owned()),
+            windows: vec![UsageWindowRow {
+                window: UsageWindowWord::FiveHour,
+                label: None,
+                used_pct: Some(40.0),
+                left_pct: Some(60),
+                resets_at: Some(1_900_000_000),
+                age_secs: 3,
+                expired: false,
+            }],
+            in_flight: false,
+            served: UsageServedWord::Fresh,
+            state: UsageStateWord::Failed,
+            next_attempt_in_secs: Some(70),
+            retry_in_secs: None,
+            detail_kind: Some("rpc_error".to_owned()),
+            detail_code: Some(-32_603),
+            upstream: Some("upstream text".to_owned()),
+        }
+    }
+
+    /// 두 동사가 같은 포트의 제 메서드로 가고(받은 낱말 그대로), 답은 한 겹 없이 평평한 행이며 두 동사의 답 모양이
+    /// 같다 — `usage.refresh` 의 반환 struct 가 따로 지어져도 JSON 은 한 행이다.
+    #[test]
+    fn the_usage_verbs_answer_the_ports_row_flat_and_alike() {
+        let usage = Arc::new(FakeUsage::default());
+        *usage.row.lock().unwrap() = Some(usage_row());
+        let table = usage_table(&usage);
+
+        let got = call(&table, "usage.get", json!({ "backend": "Claude" })).expect("성공");
+        let refreshed = call(&table, "usage.refresh", json!({ "backend": "Codex" })).expect("성공");
+
+        assert_eq!(got, serde_json::to_value(usage_row()).expect("행 직렬화"));
+        assert_eq!(got["state"], "Failed");
+        assert_eq!(got["served"], "Fresh");
+        assert_eq!(got["windows"][0]["window"], "FiveHour");
+        assert_eq!(got["windows"][0]["left_pct"], 60);
+        assert_eq!(got["detail_code"], -32_603);
+        assert_eq!(refreshed, got, "두 동사의 답은 같은 행 모양이다");
+        assert_eq!(
+            *usage.calls.lock().unwrap(),
+            vec![
+                ("get", AgentBackend::Claude),
+                ("refresh", AgentBackend::Codex)
+            ]
+        );
+    }
+
+    /// 칸이 없는 백엔드는 **값으로** 실패한다(패닉 없음) — wire ⟳ 의 같은 부재와 같은 코드·같은 문장이다.
+    #[test]
+    fn a_backend_without_a_usage_slot_fails_by_value_with_not_found() {
+        let usage = Arc::new(FakeUsage::default());
+        let table = usage_table(&usage);
+        for name in ["usage.get", "usage.refresh"] {
+            let err = call(&table, name, json!({ "backend": "Codex" })).expect_err("칸이 없다");
+            assert_eq!(err.code(), ErrorCode::NotFound, "{name}");
+            assert!(
+                err.message()
+                    .contains("this daemon keeps no usage limits for backend 'Codex'"),
+                "{name}: {err}"
+            );
+        }
+    }
+
+    /// ★버스 낱말(대문자 시작)이 wire 낱말(소문자)과 같은 칸 키에 닿는다★ — 선언 낱말 전부. 들어온 철자로 키를
+    /// 지으면 두 입구가 다른 칸을 친다(TRD §3 #43).
+    #[test]
+    fn every_declared_backend_reaches_the_usage_key_its_wire_word_reaches() {
+        let every = |backend: &AgentBackend| match backend {
+            // 선언 낱말이 늘면 여기서 컴파일이 멈춘다 — 아래 목록에 더할 것.
+            AgentBackend::Claude | AgentBackend::Codex => (),
+        };
+        for backend in [AgentBackend::Claude, AgentBackend::Codex] {
+            every(&backend);
+            let bus = usage_vendor_of(&backend).unwrap_or_else(|| panic!("{backend:?} 의 조회기"));
+            let wire_word = backend_word(&backend).to_ascii_lowercase();
+            let wire = crate::backend::usage_probe_for(&wire_word)
+                .unwrap_or_else(|| panic!("{wire_word} 의 조회기"))
+                .key();
+            assert_eq!(bus, wire, "{backend:?}");
+        }
+    }
+
+    /// 두 동사의 반환 스키마는 바이트까지 같다 — 반환 struct 가 둘이라 칸이 한쪽에만 늘 수 있다(`From` 이 컴파일로
+    /// 막지만, 광고는 스키마가 나른다).
+    #[test]
+    fn the_two_usage_verbs_advertise_one_row_schema() {
+        assert_eq!(
+            UsageGetArgs::SPEC.ok_schema,
+            UsageRefreshArgs::SPEC.ok_schema
+        );
+        let ok: serde_json::Value =
+            serde_json::from_str(UsageGetArgs::SPEC.ok_schema).expect("ok 스키마");
+        let window = &ok["properties"]["windows"]["items"]["properties"];
+        assert_eq!(
+            window["window"]["enum"],
+            json!(["FiveHour", "Weekly", "ModelWeekly"])
+        );
+        assert_eq!(
+            ok["properties"]["state"]["enum"],
+            json!([
+                "Ready",
+                "NotInstalled",
+                "NeedsLogin",
+                "Unavailable",
+                "Failed",
+                "Rejected"
+            ])
+        );
+        assert_eq!(
+            ok["properties"]["served"]["enum"],
+            json!(["Fresh", "Cached"])
+        );
+        assert_eq!(
+            ok["properties"]["detail_code"]["anyOf"][0]["type"], "integer",
+            "상류 수는 JSON 수로 싣는다"
         );
     }
 }

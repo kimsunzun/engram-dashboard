@@ -344,7 +344,8 @@ pub fn handle_call(
             OwnerLookup::Unknown => CallOutcome::Answered(unknown_name(&name)),
         };
     }
-    CallOutcome::Answered(match locals.run(&name, &mut args, "cli") {
+    // 연결 없는 입구라 호출자는 `None` = 입력 임대 비보유자다(ADR-0231).
+    CallOutcome::Answered(match locals.run(&name, &mut args, "cli", None) {
         Some(Ok(payload)) => ControlQueryResult::Ok(payload),
         Some(Err(e)) => refused(e),
         // ★계약 위반이라 **다음 단계로 흘리지 않는다**★: `claim` 이 내 것이라 답했으므로 이 이름은 중계
@@ -465,6 +466,7 @@ pub fn malformed_body(reason: &str, raw: &str) -> ControlQueryResult {
 #[cfg(test)]
 mod tests {
     use engram_dashboard_command::{Effect, OwnerToken, RequestId};
+    use engram_dashboard_net::frame_port::ConnId;
 
     use super::*;
     use crate::command_delivery::NoLocalCommands;
@@ -487,6 +489,7 @@ mod tests {
             name: &str,
             _args: &mut serde_json::Value,
             _entrance: &'static str,
+            _caller: Option<ConnId>,
         ) -> Option<Result<serde_json::Value, CommandError>> {
             (name == self.0).then(|| Ok(serde_json::json!({ "ran": name })))
         }
@@ -698,6 +701,7 @@ mod tests {
                 _name: &str,
                 _args: &mut serde_json::Value,
                 _entrance: &'static str,
+                _caller: Option<ConnId>,
             ) -> Option<Result<serde_json::Value, CommandError>> {
                 None
             }

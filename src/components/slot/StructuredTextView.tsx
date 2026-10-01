@@ -7,6 +7,7 @@
 import { useState, type ComponentType, type ReactNode } from 'react'
 import {
   AlertTriangle,
+  Bot,
   Braces,
   ChevronDown,
   ChevronRight,
@@ -20,6 +21,7 @@ import {
   Globe,
   List,
   Pencil,
+  Plug,
   Search,
   SquareTerminal,
   Wrench,
@@ -27,10 +29,16 @@ import {
 
 import { cn } from '@/lib/utils'
 import { t } from '../../i18n'
-import type { StructuredItem, TurnOutcomeMark } from './structuredAccumulator'
+import {
+  normalizeToolCategory,
+  type StructuredItem,
+  type ToolCategory,
+  type ToolItem,
+  type ToolResultMark,
+  type TurnOutcomeMark,
+} from './structuredAccumulator'
 import { Markdown } from './chat/Markdown'
 import { ThoughtRow } from './chat/ThoughtRow'
-import { WaitRow } from './chat/WaitRow'
 // ADR-0053 구조 분할: 이 파일은 dispatch 오케스트레이터로만 남긴다(순수 로직 ↔ 컴포넌트 경계).
 import { ChatRow } from './chat/ChatRow'
 import {
@@ -38,6 +46,14 @@ import {
   type ChatRowKind,
   type RailRunPosition,
 } from './chat/railPositions'
+import { ToolGroupRow } from './chat/ToolGroupRow'
+import {
+  DECLINED_MARK,
+  declinedReasonKey,
+  groupToolRuns,
+  toolCallVerdict,
+  vendorErrorIdsOf,
+} from './chat/toolRuns'
 
 // ── 안전 파서 헬퍼(절대 throw 금지 — bad json 폴백) ────────────────────────────────
 
@@ -147,7 +163,25 @@ const HEADER_CLASSNAMES = 'flex items-center gap-2.5 mb-3'
 
 type LucideIcon = ComponentType<{ className?: string }>
 
-/** 도구 헤더 아이콘 휴리스틱 — 우리 tool item 은 generic(name 만) 이라 도구 종류 판별자가 없다. */
+const CATEGORY_ICON: Record<Exclude<ToolCategory, 'Other'>, LucideIcon> = {
+  Read: FileCode2,
+  Search: Search,
+  List: FolderOpen,
+  Edit: Pencil,
+  Command: SquareTerminal,
+  Web: Globe,
+  Agent: Bot,
+  Mcp: Plug,
+}
+
+// ADR-0239: 종류를 모르면(`'Other'` — 옛 데몬도 여기 든다) 이름 휴리스틱으로 — 옛 데몬에서 오늘 모습 그대로다.
+function toolIconOf(category: ToolCategory, name: string): LucideIcon {
+  // 거르기는 타입 밖 낱말(캐스트로 든 항목)이 `undefined` 컴포넌트로 렌더를 깨뜨리지 않게 하려는 것이다.
+  const known = normalizeToolCategory(category)
+  return known === 'Other' ? toolIconFor(name) : CATEGORY_ICON[known]
+}
+
+/** 도구 이름만 보고 고르는 아이콘 — 종류(`category`)가 `'Other'` 일 때만 쓴다. */
 function toolIconFor(name: string): LucideIcon {
   const n = name.toLowerCase()
   if (n.includes('multiedit') || n.includes('edit') || n.includes('write') || n.includes('replace'))
@@ -203,30 +237,55 @@ function InertCode({ code }: { code: string }) {
   )
 }
 
+// ADR-0241: 거부 행의 주황 경고 토큰 — 새 토큰을 짓지 않는다(e-ink 무력화가 이미 들어 있다 · ADR-0173).
+const DECLINED_COLOR = 'var(--status-blocked)'
+const DECLINED_BOX_BORDER = 'color-mix(in srgb, var(--status-blocked) 60%, transparent)'
+
+/**
+ * 줄 뿌리의 `data-tool-mark` — 누산기 표식에서 곧바로 온다(판정 `toolCallVerdict` 가 아니다): claude 의 벤더 오류
+ * 본문은 표식이 아니라 속성이 없다. 우리 거절(`refused`)도 `"declined"` 이고 출처는 사유 줄의 `data-tool-declined-reason`
+ * 이 가른다(ADR-0241).
+ */
+function toolMarkAttr(mark: ToolResultMark | null): 'failed' | 'declined' | undefined {
+  if (mark === 'failed') return 'failed'
+  if (mark === 'declined' || mark === 'refused') return 'declined'
+  return undefined
+}
+
 /**
  * IN/OUT 은 신뢰할 수 없는 텍스트이므로 InertCode(리터럴 <pre>)로만 렌더 — 마크다운 파싱 금지(FIX 2).
  */
 function ToolItemRow({
   name,
   argsJson,
+  category,
   result,
+  mark,
 }: {
   name: string
   argsJson: string
+  category: ToolCategory
   result: ToolResult | null
+  mark: ToolResultMark | null
 }) {
   const [open, setOpen] = useState(false)
   const hint = shortArgs(argsJson)
-  const isErr = result?.isError === true
-  const Icon = toolIconFor(name)
+  // ADR-0241: 배지는 묶음 요약과 같은 판정이다 — 두 곳이 따로 가르면 머리의 「오류 N」과 펼친 배지가 어긋난다.
+  const verdict = toolCallVerdict(mark, result?.isError === true, DECLINED_MARK)
+  const isErr = verdict === 'error'
+  const isDeclined = verdict === 'declined'
+  const reasonKey = declinedReasonKey(mark, DECLINED_MARK)
+  const Icon = toolIconOf(category, name)
   return (
-    <div>
+    <div data-tool-mark={toolMarkAttr(mark)}>
+      {/* ADR-0241: 거부 행의 머리는 기본 톤이다 — 실행되지 않은 호출을 붉게 칠하지 않는다. */}
       <RowHeader icon={Icon} title={name} tone={isErr ? 'error' : 'default'} />
       <div
         className={cn(
           'bg-surface rounded-sm overflow-hidden border',
-          isErr ? 'border-red-500/60' : 'border-border',
+          isErr ? 'border-red-500/60' : !isDeclined && 'border-border',
         )}
+        style={isDeclined ? { borderColor: DECLINED_BOX_BORDER } : undefined}
       >
         {/* aria-label 에 도구명을 실어 접근성 이름을 헤더와 일치시킨다(sub-header 텍스트는 인자 힌트라
             도구명이 없으므로, 스크린리더/테스트가 "어느 도구의 세부인지" 식별하게 name 을 명시). */}
@@ -252,7 +311,21 @@ function ToolItemRow({
               Error
             </span>
           )}
+          {isDeclined && (
+            <span
+              className="ml-auto flex-none rounded border px-1.5 text-[10px]"
+              style={{ color: DECLINED_COLOR, borderColor: DECLINED_COLOR }}
+            >
+              {t('chat.toolDeclined')}
+            </span>
+          )}
         </button>
+        {reasonKey !== null && (
+          // ADR-0241: 사유 줄은 이 줄 상자 안이다 — 새 항목도 레일 행도 아니다(ADR-0051) · 세부를 접어도 보인다.
+          <div data-tool-declined-reason={reasonKey} className="px-2.5 pb-2 text-xs text-muted">
+            {t(reasonKey)}
+          </div>
+        )}
         {open && (
           <div className="space-y-2 border-t border-border px-2.5 py-2">
             <div>
@@ -286,22 +359,36 @@ function ToolItemRow({
  * ★중단·모름은 붉게 칠하지 않는다★ — 중단은 사용자가 끊은 정상 경로이고, 모름은 「모른다」이지
  * 「실패했다」가 아니다. 실패만 error 톤을 쓴다(Error 행과 같은 어휘).
  */
+/**
+ * 중단의 강조 줄(U8 — 굵게 · 강조색 · `CircleStop`). 결말 행의 중단 갈래와 끊김 표시 행이 함께 쓴다 — 두 행이 같은
+ * 모양이어야 한다(ADR-0243).
+ */
+// ADR-0237
+function InterruptedLine({ children, note = false }: { children: ReactNode; note?: boolean }) {
+  return (
+    <div data-interrupt-note={note ? '' : undefined} className="flex items-center gap-2.5 text-accent">
+      <CircleStop className="size-3.5 flex-none" />
+      <span className="font-bold whitespace-pre-wrap break-words">{children}</span>
+    </div>
+  )
+}
+
 function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: string | null }) {
   const isErr = outcome === 'failed'
-  const Icon =
-    outcome === 'failed' ? AlertTriangle : outcome === 'interrupted' ? CircleStop : CircleHelp
-  const title =
-    outcome === 'failed'
-      ? t('chat.turnFailed')
-      : outcome === 'interrupted'
-        ? t('chat.turnInterrupted')
-        : t('chat.turnUnknown')
+  // ADR-0237: 사용자 결정 U8 — 중단은 굵게 + 강조색. 실패의 빨강 · 거부의 주황과 갈리고, 모름은 그대로 muted 다.
+  const Icon = isErr ? AlertTriangle : CircleHelp
   return (
     <div className="my-1">
-      <div className={cn('flex items-center gap-2.5', isErr ? 'text-red-500' : 'text-muted')}>
-        <Icon className="size-3.5 flex-none" />
-        <span className={cn(isErr && 'font-bold')}>{title}</span>
-      </div>
+      {outcome === 'interrupted' ? (
+        <InterruptedLine>{t('chat.turnInterrupted')}</InterruptedLine>
+      ) : (
+        <div className={cn('flex items-center gap-2.5', isErr ? 'text-red-500' : 'text-muted')}>
+          <Icon className="size-3.5 flex-none" />
+          <span className={cn(isErr && 'font-bold')}>
+            {isErr ? t('chat.turnFailed') : t('chat.turnUnknown')}
+          </span>
+        </div>
+      )}
       {detail !== null && detail !== '' && (
         // 사유는 상대가 준 신뢰할 수 없는 텍스트 — 마크다운을 태우지 않고 리터럴로만 그린다(FIX 2 와 같은 규율).
         <div
@@ -313,6 +400,19 @@ function OutcomeRow({ outcome, detail }: { outcome: TurnOutcomeMark; detail: str
           {detail}
         </div>
       )}
+    </div>
+  )
+}
+
+/**
+ * 백엔드가 끊긴 턴에 적는 끊김 표시(오늘 내는 곳 = claude 합성 줄) — 글은 원문이고 마크다운을 태우지 않는다(FIX 2 와
+ * 같은 규율).
+ */
+// ADR-0243
+function InterruptNoteRow({ text }: { text: string }) {
+  return (
+    <div className="my-1">
+      <InterruptedLine note>{text}</InterruptedLine>
     </div>
   )
 }
@@ -380,6 +480,7 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
     case 'tool':
     case 'error':
     case 'outcome':
+    case 'interruptNote':
     case 'unsupported':
       return 'assistant'
     case 'usage':
@@ -401,6 +502,31 @@ function rowKindOf(item: StructuredItem): ChatRowKind {
  */
 export function isRenderedItem(item: StructuredItem): boolean {
   return rowKindOf(item) !== 'skip'
+}
+
+function toolRowOf(item: ToolItem, results: Map<string, ToolResult>): ReactNode {
+  const result = item.id ? results.get(item.id) ?? null : null
+  return (
+    <ToolItemRow
+      name={item.name}
+      argsJson={item.argsJson}
+      category={item.category}
+      result={result}
+      mark={item.resultMark}
+    />
+  )
+}
+
+/**
+ * 펼친 묶음 안의 멤버 한 줄 — 레일(`ChatRow`) 없이 행 컴포넌트만(ADR-0051 — 묶음이 레일 한 행이다). 멤버는 도구 행과
+ * 비지 않은 생각뿐이다(`groupToolRuns` 의 계약) — 그 계약이 넓어지면 여기 갈래를 더한다.
+ */
+function renderGroupMember(item: StructuredItem, results: Map<string, ToolResult>): ReactNode {
+  if (item.kind === 'tool') return toolRowOf(item, results)
+  if (item.kind === 'structured' && item.label === 'thinking') {
+    return <ThoughtRow content={extractText(item.json, 'thinking')} />
+  }
+  return null
 }
 
 /** runPos(ADR-0051): rail 행의 run 내 위치 — 연결선 clean-ends. */
@@ -468,14 +594,12 @@ function renderItem(
         </ChatRow>
       )
 
-    case 'tool': {
-      const result = item.id ? results.get(item.id) ?? null : null
+    case 'tool':
       return (
         <ChatRow key={k} rail tone="tool" runPos={pos}>
-          <ToolItemRow name={item.name} argsJson={item.argsJson} result={result} />
+          {toolRowOf(item, results)}
         </ChatRow>
       )
-    }
 
     case 'usage':
       // 메시지별 토큰 칩은 표시하지 않는다(누적 item 종류 자체는 유지 — 렌더만 생략).
@@ -498,6 +622,13 @@ function renderItem(
         </ChatRow>
       )
 
+    case 'interruptNote':
+      return (
+        <ChatRow key={k} rail runPos={pos}>
+          <InterruptNoteRow text={item.text} />
+        </ChatRow>
+      )
+
     case 'unsupported':
       return (
         <ChatRow key={k} rail runPos={pos}>
@@ -514,23 +645,41 @@ function renderItem(
 export function StructuredTextView({
   items,
   streaming = false,
+  slotId,
+  onGroupToggle,
 }: {
   items: StructuredItem[]
   streaming?: boolean
+  /** 도구 묶음 펼침 상태를 둘 슬롯(`store/toolGroupStore.ts`) — 없으면 묶음은 고른 값 없이 그리고 머리를 눌러도 바뀌지 않는다. */
+  slotId?: string
+  /**
+   * 사람이 도구 묶음 머리를 눌러 펼쳤다 — 접을 때는 부르지 않는다. `isLast` = 그 묶음이 목록의 마지막 묶음인가.
+   * TRD S21-chat-ux §4-5: 마지막이 아닌 묶음을 펼치면 바닥 따라가기를 푼다(붙은 채면 누른 머리가 화면 위로 밀려난다).
+   */
+  onGroupToggle?: (isLast: boolean) => void
 }) {
   const results = buildToolResultMap(items)
-  // ★showTail = streaming★: 콘텐츠 유무 게이트 없이 streaming 이면 곧바로 대기 인디케이터(WaitRow)를 붙인다 —
-  //   전송 즉시(awaiting=true, items 아직 빔) 인디케이터가 뜬다("첫 바이트 전엔 무표시" 갭 제거). fresh/idle
-  //   슬롯 오작동은 상류 streaming 파생(awaiting || (!turnDone && items.length>0), RichSlot FIX 5)이 이미
-  //   막으므로(never-sent 슬롯 = streaming=false) 여기서 재게이트 불필요.
-  const showTail = streaming
+  // ADR-0241: 벤더 오류 id 는 한 렌더에 한 번 짓고 모든 묶음의 요약이 나눠 쓴다.
+  const vendorErrorIds = vendorErrorIdsOf(results)
+  // ADR-0239: 묶기는 렌더 중 파생이다 — 누산기도 백엔드도 묶음을 만들지 않고, 펼침 상태는 `ToolGroupRow` 가 읽는다.
+  const rows = groupToolRuns(items, streaming, rowKindOf)
   // ADR-0051: rail run 위치를 순수 계산으로 미리 뽑는다(렌더 중 파생 — state/effect 아님, ADR-0050 순수성
-  //   유지). streaming tail(WaitRow)도 마지막 assistant 행으로 함께 계산해, 직전 실 행이 tail 과 연결선으로
-  //   이어지게 한다(tail 이 없으면 bottom/single 로 clean-end).
-  const kinds = items.map(rowKindOf)
-  if (showTail) kinds.push('assistant')
+  //   유지). ★항목이 아니라 행 목록으로 센다★ — 묶음은 레일 한 행(assistant)이고 멤버는 레일을 그리지 않는다.
+  const kinds = rows.map((row) => (row.kind === 'toolGroup' ? 'assistant' : rowKindOf(row.item)))
   const positions = computeRailRunPositions(kinds)
-  const tailPos = showTail ? (positions[positions.length - 1] ?? 'single') : 'single'
+  let lastGroup = -1
+  let lastDrawn = -1
+  rows.forEach((row, i) => {
+    if (row.kind === 'toolGroup') lastGroup = i
+    if (kinds[i] !== 'skip') lastDrawn = i
+  })
+  const lastRow = lastDrawn >= 0 ? rows[lastDrawn] : undefined
+  // 마지막 행 아래 여백 — 턴 구분선(h-3)이 끝이면 그것이 여백이고, 아니면 같은 높이의 빈 블록을 둔다. 턴이 끝나 구분선이
+  //   붙는 순간 이 블록과 자리를 바꿀 뿐 목록 높이는 그대로다. ★패딩이 아니라 실제 높이 블록★: Radix ScrollArea 의
+  //   display:table 래퍼가 마지막 요소의 하단 패딩을 scrollHeight 에 안 넣어, 바닥에 붙어 따라가는 동안(ADR-0242) 패딩은
+  //   뷰포트 밖으로 밀려 안 보인다(실측 2026-07-08).
+  const bottomSpacer = lastRow !== undefined && !(lastRow.kind === 'item' && lastRow.item.kind === 'separator')
+  const renderMember = (item: StructuredItem) => renderGroupMember(item, results)
   return (
     // 채팅 루트 폰트/줄간격을 여기에만 스코프한다(트리·터미널 슬롯 등 앱 나머지는 영향 없음).
     //   CSS 변수로 뺀 건 LLM 제어용(ADR-0051).
@@ -538,24 +687,23 @@ export function StructuredTextView({
       className="flex flex-col pb-3 font-sans text-foreground"
       style={{ fontSize: 'var(--chat-font-size)', lineHeight: 'var(--chat-line-height)' }}
     >
-      {items.map((item, i) => renderItem(item, results, positions[i]))}
-      {showTail && (
-        // 구 "Thinking…" pulse 라벨을 임시 "Wait + 점 + 경과 초" 로 대체(임시·추후 재설계 — WaitRow 헤더 참조).
-        //   ★FIX 3(안정 key)★: key="__streaming__" — 없으면 streaming 토글/리렌더 시 직전 실 item 이 이 행과
-        //   자리 매칭돼 remount 되며 WaitRow 타이머(경과 초)가 턴 도중 리셋된다. 리스트 밖 고정 노드라 상수
-        //   key 로 정체성을 못박는다(변경 금지).
-        <ChatRow key="__streaming__" rail runPos={tailPos}>
-          <WaitRow />
-        </ChatRow>
+      {rows.map((row, i) =>
+        row.kind === 'item' ? (
+          renderItem(row.item, results, positions[i])
+        ) : (
+          <ToolGroupRow
+            key={row.key}
+            row={row}
+            vendorErrorIds={vendorErrorIds}
+            runPos={positions[i] ?? undefined}
+            isLast={i === lastGroup}
+            renderMember={renderMember}
+            slotId={slotId}
+            onGroupToggle={onGroupToggle}
+          />
+        ),
       )}
-      {showTail && (
-        // 대기 tail 하단 여백 — 일반 메시지는 턴 종료 시 뒤에 깔리는 separator(h-3)로 입력창과 간격이 생기지만,
-        //   awaiting Wait 은 아직 turnDone 이 아니라(응답 대기) separator 가 없어 입력창에 딱 붙는다. 같은 높이의
-        //   빈 스페이서로 일반 메시지와 동일한 하단 간격(12px)을 준다. ★패딩이 아니라 실제 높이 블록★: Radix
-        //   ScrollArea 의 display:table 래퍼가 마지막 요소의 하단 패딩을 scrollHeight 에 안 넣어(+ 하단 고정
-        //   auto-scroll) 패딩은 뷰포트 밖으로 밀려 안 보인다. 높이 가진 블록은 표가 세므로 정상 반영된다.
-        <div aria-hidden className="h-3" />
-      )}
+      {bottomSpacer && <div aria-hidden data-chat-bottom-spacer="1" className="h-3" />}
     </div>
   )
 }

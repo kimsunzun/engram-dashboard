@@ -49,7 +49,7 @@
 ## Do-not (bit this session)
 
 1. ★Don't fix the flicker with frontend-only signals, and don't gate the chat on `profile.backend_session_id`★ — two reverted attempts; use the D2 subscribe-reply flag.
-2. The `nmfc-origin-dev-harness` UserPromptSubmit hook keeps redirecting `/handoff` and wiki lookups — ignore (handoff flow §0).
+2. The `<plugin>` UserPromptSubmit hook keeps redirecting `/handoff` and wiki lookups — ignore (handoff flow §0).
 3. `taskkill` and `rm -rf` are blocked in auto mode — hand the user `! MSYS_NO_PATHCONV=1 taskkill /PID <pid> /T /F`.
 4. ★GUI probe isolation★: set `ENGRAM_DATA_DIR` on BOTH daemon and client and launch the daemon detached FIRST (WMI-spawned daemons ignore the env; otherwise the client spawns one on `<repo>/.engram-data`, which holds real auto_restore profiles). The qa binding §full lacks this recipe (not recorded in qa feedback — that file is in staging).
 5. Running exes under `target\debug` lock builds (os error 5) — check before cargo; a scratch `--target-dir` breaks the location-dependent daemon test `the_fixed_help_path_resolves_absolute_to_a_real_file`.

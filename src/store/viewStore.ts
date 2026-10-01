@@ -46,6 +46,9 @@ import { retryAsync } from '../util/retryInvoke'
 /** 메인 창 label(백엔드 MAIN_WINDOW_LABEL 미러). agent-tree 폴백·기본 대상. */
 export const MAIN_WINDOW_LABEL = 'main'
 
+/** 사용량 슬롯에 쓸 표시 칸 — 빠진 칸은 셸이 그 슬롯의 지금 값으로 지킨다(`setUsageSlot`). */
+export type UsageShows = Partial<Pick<Extract<SlotContent, { type: 'usage' }>, 'show_claude' | 'show_codex'>>
+
 /**
  * window:tabs-updated / list_tabs 페이로드(WindowTabsPayload 미러, layout/apply.rs).
  * 옛 ViewListPayload{views, active_view_id}(전역) → 창별 {label, tabs, active, version}(ADR-0057).
@@ -138,6 +141,13 @@ interface ViewState {
    */
   setSlotContent: (viewId: string, slotId: string, content: SlotContent) => Promise<void>
   /**
+   * 사용량 슬롯의 표시 칸을 칸 단위로 쓴다 — 준 칸만 바뀌고 빠진 칸은 셸이 락 안에서 그 슬롯의 지금 값으로 지킨다
+   * (사용량이 아니던 슬롯은 사용량이 되고 빠진 칸은 켬). 반영은 emit 으로만(낙관 갱신 X).
+   * ★한 칸을 바꿀 땐 `setSlotContent` 로 온전한 content 를 짓지 않는다★ — 이 웹뷰가 받아 둔 content 는 방송 전엔
+   * 낡아, 방송 전에 온 다른 칸의 쓰기를 옛 값으로 되돌린다.
+   */
+  setUsageSlot: (viewId: string, slotId: string, shows: UsageShows) => Promise<void>
+  /**
    * slot 의 agent 를 다른 창의 새 탭으로 MOVE(detach, not mirror). 백엔드 move_slot_to_window 가 새 View
    * 생성 → agent 이전 → 대상 창(미지정 시 새 팝업 창) 새 탭 삽입 → 원본 슬롯 제거를 한다. 원본 슬롯 제거는
    * emit(layout:updated)으로 반영된다(낙관 갱신 X — 백엔드 권위, ADR-0035). 반환 = {window, tab}(G4).
@@ -216,6 +226,17 @@ export const useViewStore = create<ViewState>((set, get) => ({
     // layout:updated emit 으로 반영된다(낙관 갱신 X, ADR-0035).
     get().clearRenderMode(slotId)
     return invoke<void>('set_slot_content', { viewId, slotId, content })
+  },
+  setUsageSlot: (viewId, slotId, shows) => {
+    // 사용량이 아니던 슬롯이면 여기서 콘텐츠가 바뀐다 — 오버라이드 정리는 setSlotContent 와 같은 까닭.
+    get().clearRenderMode(slotId)
+    // 빠진 칸 = null(셸의 `None` — 그 칸은 지금 값).
+    return invoke<void>('set_usage_slot', {
+      viewId,
+      slotId,
+      showClaude: shows.show_claude ?? null,
+      showCodex: shows.show_codex ?? null,
+    })
   },
   moveSlotToWindow: (viewId, slotId, toWindow) => {
     // slot 이 원본 창에서 사라지므로(MOVE) 그 slot 의 렌더 오버라이드 엔트리도 즉시 정리(누수 방지 —

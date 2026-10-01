@@ -15,8 +15,13 @@
 //   상태를 오직 feed 순서로만 세우고(순서 보존) reset 이 전부 비우므로, reset→같은 순서 refeed = 동일 결과다.
 //   상류(ProtocolClient)가 seq dedup·순서 보장을 하므로 이 누산기는 중복/역전 방어를 따로 하지 않는다.
 
+import type { QueuedInputEvent } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputEvent'
+import type { QueuedInputRow } from '../../../crates/engram-dashboard-protocol/bindings/QueuedInputRow'
 import type { StructuredEvent } from '../../../crates/engram-dashboard-protocol/bindings/StructuredEvent'
+import type { ToolCategory } from '../../../crates/engram-dashboard-protocol/bindings/ToolCategory'
+import type { ToolOutcome } from '../../../crates/engram-dashboard-protocol/bindings/ToolOutcome'
 import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bindings/TurnOutcome'
+import { entryOfListedRow, QueuedInputRegistry, type QueuedEntry } from './queuedInputReducer'
 
 /**
  * 턴이 **정상 완료가 아닌** 결말로 닫혔을 때 화면에 남기는 표식 — 중립 어휘(백엔드 이름이 없다).
@@ -24,11 +29,29 @@ import type { TurnOutcome } from '../../../crates/engram-dashboard-protocol/bind
  */
 export type TurnOutcomeMark = 'failed' | 'interrupted' | 'unknown'
 
+// ADR-0239 · ADR-0241: 생성물을 여기서 다시 내보내 소비자가 이 모듈 하나에서 받게 한다.
+export type { ToolCategory, ToolOutcome }
+
+/** 도구 행의 끝 표식 — `ToolOutcome` 에서 정상 완료를 뺀 것. */
+export type ToolResultMark = 'failed' | 'declined' | 'refused'
+
 /** `itemId` 는 누산기 인스턴스 내 단조 증가 id(reset 시 0 복귀, React key 로 사용). */
 export type StructuredItem =
   | { kind: 'text'; text: string; itemId: number }
   // id 는 백엔드 tool-use id.
-  | { kind: 'tool'; name: string; argsJson: string; id: string | null; itemId: number }
+  | {
+      kind: 'tool'
+      name: string
+      argsJson: string
+      id: string | null
+      category: ToolCategory
+      /**
+       * 표식 없음(`null`)을 성공으로 읽지 말 것 — 정상 완료뿐 아니라 끝이 안 온 호출(끊겨 아직 돈다 · 옛 데몬 ·
+       * 링에서 밀려남)과 모르는 결말도 같은 값이다. 뒤에 온 결과가 앞 표식을 덮는다(완료 · 모르는 결말이면 지운다).
+       */
+      resultMark: ToolResultMark | null
+      itemId: number
+    }
   | { kind: 'usage'; inputTokens: number; outputTokens: number; itemId: number }
   | { kind: 'error'; message: string; itemId: number }
   // 탈출구 이벤트(codex/gemini·API 모델 누수 흡수).
@@ -36,12 +59,43 @@ export type StructuredItem =
   | { kind: 'separator'; itemId: number }
   // 턴 결말 표식 — `detail` = 실패 사유(상대가 줬을 때만). 정상 완료는 이 item 을 만들지 않는다(구분선만).
   | { kind: 'outcome'; outcome: TurnOutcomeMark; detail: string | null; itemId: number }
+  // 백엔드가 끊긴 턴에 적는 끊김 표시(오늘 내는 곳 = claude 합성 줄) — `text` = 원문 그대로. 이 항목이 든 턴은
+  //   끊김 결말 행을 그리지 않는다(ADR-0243).
+  | { kind: 'interruptNote'; text: string; itemId: number }
   // 이 셸이 모르는 이벤트가 왔다는 표식. `count` = 연속 누적분. ★원본 payload 는 싣지 않는다★(아래 default arm).
   | { kind: 'unsupported'; count: number; itemId: number }
+
+export type ToolItem = Extract<StructuredItem, { kind: 'tool' }>
+
+/**
+ * 재부착 대조에 건넬 목록 조회 답 — `AgentClient.listQueuedInputs` 의 답이 그대로 맞는다.
+ * `as_of_seq` = 데몬 명부가 마지막으로 환원한 목록 사건의 seq(`null` = 그 화신의 목록 사건이 전부 스냅숏 뒤).
+ */
+export interface QueuedSnapshot {
+  readonly inputs: readonly QueuedInputRow[]
+  readonly as_of_seq: number | null
+  readonly epoch: number
+}
+
+/**
+ * `offerQueuedSnapshot` 의 결말. `held` = 뷰가 아직 스냅숏 seq 까지 배달받지 못해 쥐고 기다린다(그 seq 가
+ * `feed`·`observeSeq` 로 오면 그때 적용된다) · `stale` = 다른 세대·다른 화신의 답이라 버렸다.
+ */
+export type QueuedReconcileOutcome = 'applied' | 'held' | 'stale'
+
+/** 진행 중인 재부착 대조 하나 — 질의를 보낸 뒤 받은 목록 사건을 적고, 먼저 온 답을 쥔다. */
+interface QueuedReconcile {
+  readonly gen: number
+  readonly epoch: number
+  readonly log: Array<{ readonly seq: number; readonly op: QueuedInputEvent }>
+  held: { readonly rows: QueuedEntry[]; readonly listed: ReadonlySet<string>; readonly asOfSeq: number } | null
+}
 
 export class StructuredEventAccumulator {
   private items: StructuredItem[] = []
   private turnDone = false
+  // ADR-0244: 먹은 턴 경계 수 — ★reset 도 되돌리지 않는다★(호출자는 한 `feed` 앞뒤로만 견준다).
+  private turnBoundaries = 0
   // 단조 증가 item id — reset() 시 0 복귀. 같은 이벤트열을 refeed 하면 동일 id 를 재현(replay idempotence).
   private nextId = 0
   // ★user 메시지 uuid dedup(blunt-suppress → uuid dedup 교체, text 블록 한정)★: json 모드는 write_input
@@ -53,33 +107,59 @@ export class StructuredEventAccumulator {
   //   않고 보존한다(extractUserUuid 가 non-text 에 null 반환 — multi-block tool_result 소실 방지 HIGH FIX).
   //   uuid 없는 user item(과거/비-replay)도 dedup 하지 않고 전부 보존한다(vanish 방지).
   //   reset() 이 비우므로 replay idempotence 유지(refeed 시 같은 uuid 를 같은 순서로 다시 보고 재수렴).
+  // ADR-0231: 대기 입력의 말풍선도 이 집합으로 「한 id 에 한 번」을 지킨다 — `Delivered` 배치·판명 사본이
+  //   여기 넣고, 여기 든 uuid 는 목록(`snapshotQueued`)에도 안 그린다.
   private seenUserUuids = new Set<string>()
+  // ADR-0231: 대기 입력 명부의 환원 상태(agent 명부와 같은 규칙 · 같은 골든). 그리기 거름은 이 밖에서 한다.
+  private readonly queued = new QueuedInputRegistry()
+  // ADR-0231 재부착 대조: 이 인스턴스가 배달받은 가장 큰 seq(tag 무관 — 한 seq 공간). reset 이 -1 로 되돌린다.
+  private deliveredSeq = -1
+  // 대조 세대. ★reset 이 0 으로 되돌리지 않는다★ — 되돌리면 비우기 전에 보낸 질의의 답이 같은 번호를 단 새
+  //   질의의 답으로 읽혀 적용된다(그 사이 기록은 비워졌으니 스냅숏 뒤 사건을 다시 환원할 재료가 없다).
+  private reconcileGen = 0
+  private reconcile: QueuedReconcile | null = null
 
   /**
    * 라이브 경로는 항상 Uint8Array, 문자열은 테스트/편의용.
    * tag1 은 프레임 1개 = 이벤트 1개라 라인 재조립·버퍼링이 필요 없다.
    *
-   * @returns 이 프레임을 **이해했는가**. `false` = 파싱에 실패했거나 이 셸이 모르는 종류라, 돌아온
-   *   상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다는 뜻이다.
+   * @param seq 이 프레임의 seq. ★재부착 대조는 이 값으로만 선다★ — 빼면 이 프레임의 목록 사건이 대조 기록에
+   *   안 남고 쥔 답도 이 프레임을 배달로 세지 않는다(시험 편의로만 뺀다).
+   * @returns 이 프레임으로 호출자가 자기 대기 상태를 풀어도 되는가. `false` 는 둘이다 — ① 파싱에 실패했거나
+   *   이 셸이 모르는 종류라, 돌아온 상태(`snapshot`·`isTurnDone`)에 이 프레임의 뜻이 하나도 반영되지 않았다
+   *   ② 도구 끝 결과(`ToolResult`)다 — 앞선 도구 행의 표식이 바뀌었을 수 있지만(가리키는 행이 없거나 표식이
+   *   같으면 `snapshot` 은 그대로다) 응답이 온 것은 아니다(ADR-0241).
    *   ★호출자는 이 값을 보고 자기 대기 상태를 누산기에 넘길지 정한다★ — 프레임이 왔다는 사실만으로
    *   넘기면, 못 알아들은 프레임이 「응답이 왔다」로 둔갑해 대기 표시가 꺼진다(RichSlot 의 `awaiting`).
    */
-  feed(payload: Uint8Array | string): boolean {
+  feed(payload: Uint8Array | string, seq?: number): boolean {
+    const understood = this.parseAndConsume(payload, seq)
+    // 못 알아들은 프레임도 그 seq 는 배달됐다 — 쥔 대조 답이 기다리는 것은 뜻이 아니라 seq 다.
+    if (seq !== undefined) this.observeSeq(seq)
+    return understood
+  }
+
+  private parseAndConsume(payload: Uint8Array | string, seq: number | undefined): boolean {
     const json = typeof payload === 'string' ? payload : new TextDecoder('utf-8').decode(payload)
     if (!json) return false
-    let ev: StructuredEvent
+    let parsed: unknown
     try {
-      ev = JSON.parse(json) as StructuredEvent
+      parsed = JSON.parse(json)
     } catch (err) {
       // 통로는 바보 파이프(무정제) — malformed JSON 은 프로토콜 수준 데이터 유실 신호이므로 경고 후 스킵.
       console.warn('[structuredAccumulator] tag1 JSON 파싱 실패 — 이벤트 스킵:', err)
       return false
     }
-    return this.consume(ev)
+    // `null` 을 여기서 거르지 않으면 `consume` 의 `ev.type` 읽기가 구독 콜백까지 던진다(원시값도 사건이 아니다).
+    if (parsed === null || typeof parsed !== 'object') {
+      console.warn('[structuredAccumulator] tag1 payload 가 객체가 아니다 — 이벤트 스킵:', parsed)
+      return false
+    }
+    return this.consume(parsed as StructuredEvent, seq)
   }
 
-  /** @returns 위 `feed` 와 같은 뜻 — 아는 종류였으면 true. */
-  private consume(ev: StructuredEvent): boolean {
+  /** @returns 위 `feed` 와 같은 뜻. */
+  private consume(ev: StructuredEvent, seq: number | undefined): boolean {
     switch (ev.type) {
       case 'TextDelta': {
         // 빈 델타("")는 phantom item(빈 Markdown 블록·의미 없는 구분선 유발)을 만들지 않도록 스킵.
@@ -100,6 +180,9 @@ export class StructuredEventAccumulator {
           name: ev.name,
           argsJson: ev.args_json,
           id: ev.id,
+          // ADR-0239: 타입은 좁아도 wire 값은 옛 데몬(칸 없음)·더 새 데몬(모르는 낱말)을 싣는다.
+          category: normalizeToolCategory(ev.category),
+          resultMark: null,
           itemId: this.nextId++,
         })
         this.turnDone = false
@@ -126,6 +209,14 @@ export class StructuredEventAccumulator {
         this.items.push({ kind: 'error', message: ev.message, itemId: this.nextId++ })
         break
       case 'Structured': {
+        // ADR-0243: user 갈래(uuid dedup · `turnDone` 내리기)를 타지 않는다 — 사용자가 친 글이 아니다.
+        if (ev.kind === 'interrupted') {
+          const text = extractInterruptText(ev.json)
+          if (text !== null) {
+            this.items.push({ kind: 'interruptNote', text, itemId: this.nextId++ })
+            break
+          }
+        }
         // ★user uuid dedup(text 블록 한정)★: user 항목은 합성 입력-시점 에코와 claude replay 가
         //   **같은 uuid** 로 두 번 온다(백엔드 uuid dedup 계약). 이미 본 uuid 면 스킵해 한 개만 남긴다.
         //   단 dedup 대상은 `type==="text"` user 블록뿐이다 — 합성 에코가 만드는 블록이 text 하나뿐이라
@@ -136,6 +227,11 @@ export class StructuredEventAccumulator {
         if (ev.kind === 'user') {
           const uuid = extractUserUuid(ev.json)
           if (uuid !== null) {
+            // ADR-0231: ★대기 중인 uuid 의 에코는 그리지도 「본 것」에 넣지도 않는다★ — 그 말풍선은 그 id 의
+            //   `Delivered` 가 받음 자리에 그린다. 실측이 두 순서를 다 보였다: 에코가 `Delivered` 바로 앞에 오면
+            //   여기서, 뒤에 오면 아래 uuid dedup 이 받는다. 그래서 「첫 항목이 이긴다」는 대기 중이 아닌
+            //   uuid 에만 선다.
+            if (this.queued.row(uuid) !== undefined) break
             if (this.seenUserUuids.has(uuid)) break
             this.seenUserUuids.add(uuid)
           }
@@ -164,10 +260,18 @@ export class StructuredEventAccumulator {
         //   하나라도 안 닫으면 그 대화의 대기 인디케이터가 영영 돈다.
         {
           const mark = outcomeMark(ev.outcome)
-          if (mark !== null) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
+          // ADR-0243: 끊김 표시 행이 이미 그 턴의 끊김을 말했으면 결말 행을 겹쳐 그리지 않는다 — 백엔드가 아니라
+          //   표시 행의 유무로 가른다(표시 행이 안 온 턴은 결말 행이 그대로 선다).
+          const alreadyNoted = mark?.outcome === 'interrupted' && this.currentTurnHasInterruptNote()
+          if (mark !== null && !alreadyNoted) this.items.push({ kind: 'outcome', ...mark, itemId: this.nextId++ })
         }
         this.closeTurn()
         break
+      case 'QueuedInput':
+        return this.consumeQueued(ev.op, seq)
+      case 'ToolResult':
+        // ADR-0241
+        return this.consumeToolResult(ev)
       default: {
         // ★모르는 이벤트를 조용히 삼키지 않는다★: 아무것도 안 하면 화면은 한 픽셀도 안 바뀌는데 호출자는
         //   프레임이 온 것으로 행동한다. 릴리스 WebView2 에는 devtools 가 없어 console 이 사용자에게 도달
@@ -205,6 +309,16 @@ export class StructuredEventAccumulator {
     return true
   }
 
+  /** 마지막 구분선 뒤(= 지금 턴)에 끊김 표시 행이 있나. */
+  private currentTurnHasInterruptNote(): boolean {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const kind = this.items[i].kind
+      if (kind === 'separator') return false
+      if (kind === 'interruptNote') return true
+    }
+    return false
+  }
+
   /**
    * 턴 경계 닫기 — 구분선 1개 + `turnDone`. 연속 종료는 구분선을 겹쳐 쌓지 않고, 선행 item 이 없으면
    * 구분선을 만들지 않는다(맨 앞 빈 경계 방지).
@@ -214,6 +328,193 @@ export class StructuredEventAccumulator {
       this.items.push({ kind: 'separator', itemId: this.nextId++ })
     }
     this.turnDone = true
+    this.turnBoundaries++
+  }
+
+  /**
+   * 도구 끝 결과를 같은 id 의 앞선 도구 행에 표식으로 붙인다 — 새 항목을 만들지 않는다. 가리키는 행이 없으면
+   * (링에서 밀려났다) 버린다.
+   * ★`turnDone` 을 건드리지 않고 늘 `false` 를 돌려준다 — 붙였든 못 찾았든★: 끊긴 턴의 도구는 계속 돌다 턴 끝
+   * 뒤(다음 턴 도중일 수도)에 끝난다. 이 프레임으로 대기를 풀면 새 턴의 대기 표시가 답 없이 꺼진다.
+   */
+  // ADR-0241
+  private consumeToolResult(ev: ToolResultEvent): boolean {
+    // 모양이 깨진 프레임의 `null` id 가 id 없는 도구 행에 붙지 않게 거른다.
+    if (typeof ev.id !== 'string') return false
+    const mark = toolResultMark(ev.outcome)
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i]
+      if (item.kind !== 'tool' || item.id !== ev.id) continue
+      // copy-on-write — 이전에 반환된 snapshot() 참조가 이 객체를 가리킨다(TextDelta arm 과 같은 규율).
+      if (item.resultMark !== mark) this.items[i] = { ...item, resultMark: mark }
+      return false
+    }
+    return false
+  }
+
+  /**
+   * 대기 입력 명부 사건 — 환원 뒤 그리기 규칙 셋만 대화 줄을 바꾼다(`Delivered` 배치 · 판명 사본 배치 ·
+   * `Rejected` 말풍선 지우기). ★`turnDone` 을 건드리지 않는다★ — 목록 사건은 출력이 아니다(말풍선을 그린
+   * 때만 사용자 arm 처럼 내린다). 종결은 목록에서 빠질 뿐 알림 행을 그리지 않는다.
+   */
+  // ADR-0231
+  private consumeQueued(op: QueuedInputEvent | null | undefined, seq: number | undefined): boolean {
+    // `feed` 의 try/catch 는 JSON.parse 만 감싼다 — 모양이 깨진 프레임에서 던지지 않는다(outcomeMark 와 같은 규율).
+    if (op === null || typeof op !== 'object') return false
+    // 배치 본문은 앞선 `Queued` 의 사본이다 — 환원이 그 항목을 지우기 전에 잡는다.
+    const pending = op.kind === 'Delivered' ? this.queued.row(op.id) : undefined
+    if (op.kind === 'AckUnavailable' && !isCopyList(op.delivered)) return false
+    if (op.kind === 'HandedOver' && typeof op.sent !== 'boolean') return false
+    if (this.queued.reduce(op) === null) {
+      console.warn(
+        '[structuredAccumulator] 모르는 QueuedInput kind — 버린다:',
+        (op as { kind?: unknown }).kind,
+      )
+      return false
+    }
+    // 대조 기록 — 환원이 받아들인 사건만 적는다(적용 때 같은 환원기로 다시 돌리므로 거른 모양이어야 한다).
+    if (seq !== undefined && this.reconcile !== null) this.reconcile.log.push({ seq, op })
+    switch (op.kind) {
+      case 'Delivered':
+        // 대기 중이 아니던 id(되살림 · 모르는 id · 둘째 `Delivered`)는 그리지 않는다 — 되살림의 말풍선은
+        //   그 id 가 이제 대기 중이 아니라 억제되지 않는 벤더 에코가 그린다.
+        if (pending !== undefined) this.placeUserBubble(pending.id, pending.text)
+        break
+      case 'AckUnavailable':
+        // 사본마다(목록 순) 그 자리에 — 이 창이 그 `Queued` 를 링에서 잃었어도 사본 본문으로 그린다.
+        for (const copy of op.delivered) this.placeUserBubble(copy.id, copy.text)
+        break
+      case 'Dropped':
+        // 환원 상태와 무관한 그리기 규칙 — 거절만 지운다(끊기·종료·실패 턴의 말풍선은 남는다).
+        if (op.cause === 'Rejected') this.removeUserBubbles(op.id)
+        break
+      default:
+        break
+    }
+    return true
+  }
+
+  /** 받음 자리에 사용자 말풍선 — 에코·합성 에코와 같은 모양이라 렌더러가 가르지 않는다. 한 uuid 에 한 번. */
+  private placeUserBubble(id: string, text: string): void {
+    if (this.seenUserUuids.has(id)) return
+    this.seenUserUuids.add(id)
+    this.items.push({
+      kind: 'structured',
+      label: 'user',
+      json: JSON.stringify({ type: 'text', text, uuid: id }),
+      itemId: this.nextId++,
+    })
+    this.turnDone = false
+  }
+
+  /**
+   * 그 uuid 로 그린 사용자 말풍선(text 블록)을 걷는다. ★uuid 는 「본 것」에 남긴다★ — 거절은 되살림 불가라
+   * 뒤늦은 같은 uuid 를 다시 그리지 않는다. 같은 줄의 비-text 블록(tool_result)은 dedup 대상이 아니듯 여기서도
+   * 남는다.
+   */
+  private removeUserBubbles(id: string): void {
+    for (let i = this.items.length - 1; i >= 0; i--) {
+      const item = this.items[i]
+      if (item.kind === 'structured' && item.label === 'user' && extractUserUuid(item.json) === id) {
+        this.items.splice(i, 1)
+      }
+    }
+  }
+
+  /**
+   * `QueuedInputList` 가 그릴 항목 — 열린 항목 중 아직 말풍선으로 그리지 않은 uuid 만, 든 순서(가장 오래된 것이
+   * 앞). 매번 새 배열이다.
+   * ★취소 대기도 그린다★(ADR-0235 — ✕ 는 명부가 뺐다고 확인한 뒤에만 행을 뺀다): ✕ 를 누른
+   *   행은 결말 사건(`CancelAnswered{removed:true}` · `Dropped{Withdrawn}` 등)이 환원될 때까지 남는다 — 미리 감추면
+   *   거두지 못한 글이 목록에서도 대화에서도 안 보이는 창이 생긴다.
+   * ★거름은 그리기에만 선다★ — 명부와 같은 환원 상태는 `queuedRows()`.
+   */
+  // ADR-0231
+  snapshotQueued(): QueuedEntry[] {
+    return this.queued.rows().filter((entry) => !this.seenUserUuids.has(entry.id))
+  }
+
+  /** 환원 상태 그대로(취소 대기 · 이미 그린 uuid 포함) — agent 명부·골든과 같은 값이다. */
+  queuedRows(): readonly QueuedEntry[] {
+    return this.queued.rows()
+  }
+
+  /**
+   * 재부착 대조를 연다(TRD §5-7) — 목록 조회 질의를 **보내기 직전에** 부른다. 이 순간부터 받는 목록 사건을
+   * 적어 둔다(스냅숏 뒤 사건은 전부 질의가 명부를 읽은 뒤에 발급되므로 이 기록 안에 든다). 진행 중이던
+   * 대조는 버린다.
+   * @param epoch 이 뷰가 지금 읽는 화신의 표식 — 답의 표식이 다르면 버린다.
+   * @returns 이 질의의 대조 세대 — 답을 `offerQueuedSnapshot` 에 건넬 때 함께 준다.
+   */
+  // ADR-0231
+  beginQueuedReconcile(epoch: number): number {
+    this.reconcileGen += 1
+    this.reconcile = { gen: this.reconcileGen, epoch, log: [], held: null }
+    return this.reconcileGen
+  }
+
+  /**
+   * 목록 조회 답을 건넨다. 세대·화신이 맞으면 뷰가 스냅숏 seq 까지 배달받은 **뒤에** 적용한다 — 스냅숏에 있는
+   * id 는 그 행에서 출발해 적어 둔 사건 중 seq 가 더 큰 것만 다시 환원하고, 없는 id 는 스냅숏 뒤에 섰으면 지금
+   * 상태 그대로 · 아니면 원인 모름으로 닫는다(`QueuedInputRegistry.adoptSnapshot`). 적용은 목록만 고친다
+   * (말풍선을 그리지 않는다). 행의 모르는 낱말은 그 행만 빠진다 — 그 id 는 지금 상태 그대로 둔다.
+   */
+  // ADR-0231
+  offerQueuedSnapshot(gen: number, snapshot: QueuedSnapshot): QueuedReconcileOutcome {
+    const r = this.reconcile
+    if (r === null || r.gen !== gen) return 'stale'
+    if (snapshot.epoch !== r.epoch) {
+      // 다른 화신의 명부다 — 이 대조는 더 쓸 데가 없다(새 화신은 비우기 뒤 새 대조를 연다).
+      this.reconcile = null
+      return 'stale'
+    }
+    const rows: QueuedEntry[] = []
+    const listed = new Set<string>()
+    for (const row of Array.isArray(snapshot.inputs) ? snapshot.inputs : []) {
+      const id = (row as { id?: unknown } | null)?.id
+      if (typeof id === 'string') listed.add(id)
+      const entry = entryOfListedRow(row)
+      if (entry !== null) rows.push(entry)
+    }
+    // `null` = 그 화신의 목록 사건이 전부 스냅숏 뒤다 — 기다릴 seq 가 없다.
+    const asOfSeq = typeof snapshot.as_of_seq === 'number' ? snapshot.as_of_seq : -1
+    r.held = { rows, listed, asOfSeq }
+    return this.applyHeldSnapshot() ? 'applied' : 'held'
+  }
+
+  /**
+   * 진행 중인 대조를 버린다 — 뷰가 `'live'` 를 떠나 새 replay 주기에 들 때(`reset` 도 이것을 부른다). 세대를
+   * 올리므로 그 뒤 도착한 옛 답은 `stale` 이다.
+   * @param gen 주면 그 세대가 지금 세대일 때만 버린다(질의 실패 — 그 사이 새 대조가 열렸으면 건드리지 않는다).
+   */
+  // ADR-0231
+  abandonQueuedReconcile(gen?: number): void {
+    if (gen !== undefined && this.reconcile?.gen !== gen) return
+    this.reconcileGen += 1
+    this.reconcile = null
+  }
+
+  /**
+   * `feed` 를 거치지 않는 프레임(구조화 슬롯이 그리지 않는 tag0)의 seq 도 배달로 센다.
+   * @returns 쥐고 있던 대조 답이 이 배달로 적용됐나(그렇다면 목록을 다시 읽는다).
+   */
+  // ADR-0231
+  observeSeq(seq: number): boolean {
+    if (seq > this.deliveredSeq) this.deliveredSeq = seq
+    return this.applyHeldSnapshot()
+  }
+
+  private applyHeldSnapshot(): boolean {
+    const r = this.reconcile
+    if (r === null || r.held === null || this.deliveredSeq < r.held.asOfSeq) return false
+    const asOfSeq = r.held.asOfSeq
+    const later = r.log
+      .filter((entry) => entry.seq > asOfSeq)
+      .sort((a, b) => a.seq - b.seq)
+      .map((entry) => entry.op)
+    this.queued.adoptSnapshot(r.held.rows, later, r.held.listed)
+    this.reconcile = null
+    return true
   }
 
   /** 내부 배열 참조를 그대로 돌려준다 — React 소비자는 [...snapshot()] 로 새 참조를 떠서 set. */
@@ -229,12 +530,25 @@ export class StructuredEventAccumulator {
     return this.turnDone
   }
 
+  /**
+   * 지금까지 먹은 턴 경계(MessageDone · TurnEnd — 결말 무관) 수. 단조이고 `reset` 도 되돌리지 않는다 — 한 `feed` 앞뒤의
+   * 차가 곧 「그 프레임이 턴 경계였다」다. ★`isTurnDone` 의 거짓 → 참으로 대신하지 말 것★ — 이미 끝을 읽던 채 받은
+   * 경계(보낸 직후 · 새 턴의 첫 프레임 전)는 그 전이가 없다.
+   */
+  turnBoundaryCount(): number {
+    return this.turnBoundaries
+  }
+
   /** 재구독(replay) 전 초기화 — 히스토리 전체가 다시 흘러 동일 상태로 재구성되게 한다(위 idempotent 불변식). */
   reset(): void {
     this.items = []
     this.turnDone = false
     this.nextId = 0
     this.seenUserUuids.clear()
+    this.queued.clear()
+    this.deliveredSeq = -1
+    // 진행 중인 대조도 버린다 — 적어 둔 기록이 비워진 명부 위에서는 다시 환원할 재료가 못 된다.
+    this.abandonQueuedReconcile()
   }
 }
 
@@ -262,6 +576,74 @@ function outcomeMark(
       return { outcome: 'unknown', detail: null }
     default:
       return { outcome: 'unknown', detail: null }
+  }
+}
+
+// ADR-0241
+type ToolResultEvent = Extract<StructuredEvent, { type: 'ToolResult' }>
+
+/**
+ * ★모르는 낱말(더 새 데몬)·깨진 모양은 표식 없음이다★ — 아는 셋 중 하나로 접으면 화면이 거짓 결말을 그린다
+ * (`outcomeMark` 와 같은 규율).
+ */
+// ADR-0241: 인자가 생성물 `ToolOutcome` 이라 낱말이 늘거나 바뀌면 `default` 의 `never` 대입에서 tsc 가 빨갛다
+//   (낱말 표류 경보). 런타임에는 더 새 데몬의 모르는 값이 그대로 `default` 로 떨어진다.
+function toolResultMark(outcome: ToolOutcome): ToolResultMark | null {
+  switch (outcome) {
+    case 'Failed':
+      return 'failed'
+    case 'Declined':
+      return 'declined'
+    case 'Refused':
+      return 'refused'
+    case 'Completed':
+      return null
+    default: {
+      const unknownWord: never = outcome
+      console.warn('[structuredAccumulator] 모르는 ToolResult outcome — 표식 없이 둔다:', unknownWord)
+      return null
+    }
+  }
+}
+
+// ADR-0239: `Record` 라 `ToolCategory` 에 낱말이 늘거나 줄면 여기서 tsc 가 빨갛다.
+const TOOL_CATEGORIES: Record<ToolCategory, true> = {
+  Read: true,
+  Search: true,
+  List: true,
+  Edit: true,
+  Command: true,
+  Web: true,
+  Agent: true,
+  Mcp: true,
+  Other: true,
+}
+
+export function normalizeToolCategory(value: unknown): ToolCategory {
+  // `in` 이 아닌 것은 `'toString'` 같은 프로토타입 이름을 종류로 받지 않으려는 것이다.
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(TOOL_CATEGORIES, value)
+    ? (value as ToolCategory)
+    : 'Other'
+}
+
+function isCopyList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.every((copy) => copy !== null && typeof copy === 'object' && typeof copy.id === 'string')
+  )
+}
+
+/** `Structured{kind:"interrupted"}` 의 `json`(`{"text": …}`)에서 원문을 뽑는다. 모양이 다르면 null(→ 탈출구 항목). */
+// ADR-0243
+function extractInterruptText(json: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(json)
+    if (parsed === null || typeof parsed !== 'object') return null
+    const text = (parsed as Record<string, unknown>)['text']
+    // 빈 글은 그릴 것이 없는 표시 행이 되어 결말 행만 지운다 — 탈출구로 보낸다.
+    return typeof text === 'string' && text !== '' ? text : null
+  } catch {
+    return null
   }
 }
 

@@ -75,6 +75,11 @@ impl From<WindowTabsSnapshot> for WindowTabsPayload {
 /// 죽인다(F1/F2). ★이 「락 안」 요구의 근거는 ADR 조항이 아니라 `output_router::rebuild` 의 호출
 /// 계약(RMW 직렬화)이다★ — 정본은 그 함수 주석이고, ADR-0006 에는 구독 델타 조항이 없다.
 /// 그래서 구현은 동기·비블로킹이어야 한다(await·network 0 — 락 보유 중 외부 호출 금지라는 ADR-0006 원칙).
+///
+/// ★레이아웃에서 파생되는 사용량 관심의 재계산도 같은 자리다(TRD S21 usage-limit-slot §1-7)★ — 이 포트를 받는
+/// 쓰기가 곧 슬롯 내용·탭·창을 바꾸는 쓰기라, 관심이 바뀔 수 있는 자리가 전부 여기로 온다(포트를 안 받는 쓰기는
+/// 관심도 안 바꾼다 — 모듈 머리 「함수가 받는 포트」). 그 재계산이 하는 일(메모리 안 계산 · 비블로킹 넛지 ·
+/// 타이머 태스크 기동)도 위 계약 안이다.
 pub trait SubscriptionSync: Send + Sync {
     fn resync(&self, mgr: &ViewManager);
 }
@@ -456,6 +461,46 @@ pub fn set_slot_content(
 ) -> Result<(), String> {
     let (layout, tabs) = {
         let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        mgr.set_slot_content(view_id, slot_id, content)
+            .map_err(|e| e.to_string())?;
+        let layout = mgr.snapshot(view_id).ok();
+        let tabs = owner_tabs(&mgr, view_id);
+        subs.resync(&mgr);
+        (layout, tabs)
+    }; // ← 락 드롭
+    notify(events, layout, tabs);
+    Ok(())
+}
+
+/// 슬롯을 사용량 뷰로 만든다 — 빠진 칸(`None`)은 그 슬롯이 이미 `Usage` 면 지금 값, 아니면 `true`.
+///
+/// ★지금 값을 읽는 것과 쓰는 것이 한 락 안이다★ — 호출자가 먼저 읽어 온 값으로 병합하면 그 사이에 든 다른
+/// 토글을 덮는다(한 칸만 바꾸는 호출이 다른 칸을 옛 값으로 되돌린다).
+pub fn set_usage_slot(
+    state: &LayoutState,
+    subs: &dyn SubscriptionSync,
+    events: &dyn LayoutEvents,
+    view_id: Uuid,
+    slot_id: Uuid,
+    show_claude: Option<bool>,
+    show_codex: Option<bool>,
+) -> Result<(), String> {
+    let (layout, tabs) = {
+        let mut mgr = state.0.lock().map_err(|e| e.to_string())?;
+        let (claude_now, codex_now) = match mgr
+            .slot_content(view_id, slot_id)
+            .map_err(|e| e.to_string())?
+        {
+            SlotContent::Usage {
+                show_claude,
+                show_codex,
+            } => (show_claude, show_codex),
+            _ => (true, true),
+        };
+        let content = SlotContent::Usage {
+            show_claude: show_claude.unwrap_or(claude_now),
+            show_codex: show_codex.unwrap_or(codex_now),
+        };
         mgr.set_slot_content(view_id, slot_id, content)
             .map_err(|e| e.to_string())?;
         let layout = mgr.snapshot(view_id).ok();

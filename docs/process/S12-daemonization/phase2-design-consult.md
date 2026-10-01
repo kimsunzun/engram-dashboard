@@ -55,6 +55,6 @@ daemon.json 읽기→없/stale(pid 죽음)면 WMI로 데몬 spawn→port/token �
 ## 미해결 — 사용자 결정
 1. **SubscribeAck 순서 보장 방식**: (a) 데몬 단일 conn_tx enqueue 순서(코어 변경 0 유지) vs (b) OutputCore에 `SubscriptionSink::send_subscribe_ack` 추가(더 견고하나 코어 변경). 권장 (a)(코어 최소 변경 원칙).
 2. **seq u64 JS 표현**: number(현재, 2^53 한계) vs bigint/string.
-3. **port.json ACL 강도**: 명시 DACL(현 사용자+SYSTEM+Administrators vs 현 사용자 only) vs LOCALAPPDATA 상속 의존. 동일 SID는 ACL로 못 막으므로 실이득 제한 — **보안 담당 결정 영역**.
+3. **port.json ACL 강도**: 명시 DACL(현 사용자+SYSTEM+Administrators vs 현 사용자 only) vs LOCALAPPDATA 상속 의존. 동일 SID는 ACL로 못 막으므로 실이득 제한 — **별도 보안 검토 영역**.
 4. **송신 큐 모델**: 연결당 단일 conn_tx(단순, HOL 가능) vs agent별 큐+select! 다중화(HOL 완화). 권장 후자(단일 writer 유지).
 5. **Tauri WebView2 실제 Origin** 문자열 실측(allowlist 등록용).

@@ -1,0 +1,746 @@
+diff --git a/crates/engram-dashboard-agent/src/platform/process_group.rs b/crates/engram-dashboard-agent/src/platform/process_group.rs
+index 6bf1b52..5ed1d91 100644
+--- a/crates/engram-dashboard-agent/src/platform/process_group.rs
++++ b/crates/engram-dashboard-agent/src/platform/process_group.rs
+@@ -4,26 +4,30 @@
+ //! 무엇을 끝낼지는 모른다(ADR-0004) — 고르기는 이것을 받아 쓰는 쪽의 몫이고, 여기는 받은 번호가 우리 무리의
+ //! 멤버인지 OS 에 물어 붙들고 그 핸들로 사실을 읽고 끝낼 뿐이다.
+ //!
+ //! ★OS 갈래는 이 모듈 안에서만 선다(ADR-0230)★ — Windows 는 Job Object 조각을 감싸고, 그 밖의 OS 는 멤버가
+ //! 없고 아무도 못 붙들며 포트가 `Unsupported` 인 껍데기다. 부르는 쪽에는 `cfg!(windows)` 가 없다. OS 와 무관한
+-//! 값 타입([`ProcessFacts`] · [`PortEvent`])은 여기 한 벌만 두고 Windows 조각이 가져다 쓴다.
++//! 값 타입([`ProcessFacts`] · [`PortEvent`])은 여기 두고, Windows 조각은 제 모양을 따로 둬 여기서 옮겨 싣는다 —
++//! 그 조각은 이 모듈을 부르지 않는다(그 파일 헤더).
+ //!
+ //! ★Job 을 약하게 쥔다★ — 강하게 쥐면 통로가 사라진 뒤에도 Job 핸들이 안 닫혀 `KILL_ON_JOB_CLOSE` 가 늦어진다.
+-//! 부를 때마다 잠깐 올리고, 통로가 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`] 이다. 내준
+-//! 붙든 멤버 · 포트 · 표시는 Job 을 붙들지 않는다.
++//! 부를 때마다 그 호출 동안만 올린다 — 가장 긴 창은 [`ProcessGroup::watch_births`] 가 `start` 를 부르는 동안이다
++//! (그래서 `start` 는 막히지 않아야 한다). 통로가 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`]
++//! 이다. 내준 붙든 멤버 · 포트 · 표시는 Job 을 붙들지 않는다.
+ // ADR-0257
+ 
+ use std::io;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::Arc;
+ #[cfg(windows)]
+ use std::sync::Weak;
+ use std::time::Duration;
+ 
+ #[cfg(windows)]
+-use super::windows::{BirthPort, JobObjectHandle, MemberOutcome, PinnedMember};
++use super::windows::{
++    BirthPort, JobObjectHandle, MemberFacts, MemberOutcome, PinnedMember, PortOutcome,
++};
+ 
+ /// 붙든 핸들로 **한 번** 읽은 사실 — 번호가 아니라 그 프로세스 객체의 것이다. 못 읽은 칸은 `ppid` · `create` =
+ /// 0 · 문자열 = 빈 문자열이다.
+ ///
+ /// - `ppid` = 만들 때 적힌 부모 번호 — 그 번호가 지금도 같은 부모라는 보장은 없다.
+@@ -82,13 +86,17 @@ pub(crate) trait Pinned: Send + Sync {
+     /// [`Self::terminate_raw`] 의 날것 결과를 가른다 — 실패여도 그 사이 스스로 끝났으면 `Gone` 이다.
+     fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill>;
+ }
+ 
+ /// 무리의 가입 알림 포트 — [`ProcessGroup::watch_births`] 가 `start` 에 넘긴다. 여러 스레드가 나눠 쥐고, 마지막
+-/// 것이 사라지면 포트가 닫힌다. 무리(Job)를 붙들지 않는다.
++/// 것이 사라지면 포트 핸들이 닫힌다. 무리(Job)를 붙들지 않는다.
+ ///
+ /// 알림은 통지일 뿐 배달이 보장되지 않는다(MS Learn) — 빠진 가입은 여기서 알 수 없다.
++///
++/// ★무리가 붙은 채 마지막 것을 놓지 않는다 — 먼저 떼고([`ProcessGroup::unwatch_births`]) 놓는다★: 붙어 있는 동안
++/// 무리가 포트를 제 커널 참조로 쥐어 핸들이 닫혀도 포트가 남고, 아무도 안 읽는 포트에 알림이 계속 쌓인다. 그 커널
++/// 참조는 MS Learn 에 적혀 있지 않고 실측하지 않았다 — 틀려도 먼저 떼는 쪽은 잃는 것이 없다.
+ pub(crate) trait Births: Send + Sync {
+     /// 알림 하나를 `wait` 까지 기다려 꺼낸다. `Err` = 꺼내기 자체의 실패(포트가 닫힘 등).
+     fn next(&self, wait: Duration) -> io::Result<PortEvent>;
+ }
+ 
+@@ -149,13 +157,14 @@ impl ProcessGroup {
+         #[cfg(windows)]
+         {
+             let Some(job) = self.job.upgrade() else {
+                 return Ok(None);
+             };
+-            Ok(job
+-                .pin_member(pid, kill)?
+-                .map(|member| Box::new(JobPin(member)) as Box<dyn Pinned>))
++            Ok(job.pin_member(pid, kill)?.map(|member| {
++                let facts = ProcessFacts::from(member.facts());
++                Box::new(JobPin { member, facts }) as Box<dyn Pinned>
++            }))
+         }
+         #[cfg(not(windows))]
+         {
+             let _ = (pid, kill);
+             Ok(None)
+@@ -163,10 +172,13 @@ impl ProcessGroup {
+     }
+ 
+     /// 가입 알림 포트를 만들어 `start` 에 넘기고, **`start` 가 `Ok` 일 때만** 무리를 그 포트에 붙인다 — 알림이 쌓일
+     /// 수 있게 되는 때에는 꺼낼 쪽이 이미 포트를 쥐고 있다. `start` 의 `Err` 는 그대로 돌려준다(붙지 않았다).
+     ///
++    /// ★`start` 가 도는 동안 Job 을 강하게 쥔다(올린 `Arc`)★ — 그 사이 통로가 사라져도 Job 핸들이 안 닫혀
++    /// `KILL_ON_JOB_CLOSE` 가 `start` 가 막힌 만큼 늦는다. 그래서 `start` 는 꺼낼 스레드를 띄우기만 하고 막히지 않는다.
++    ///
+     /// 붙일 때 이미 든 멤버도 `Joined` 로 다시 알려진다. ★한 무리에 한 번만 부른다★ — 두 번째 부름을 여기서 막지
+     /// 않는다(부르는 쪽 몫). `Err` 종류: [`GROUP_GONE`] = 통로가 이미 사라졌다(`start` 는 불리지 않았다) ·
+     /// `Unsupported` = 이 OS 에는 무리가 없다(`start` 는 불리지 않았다) · 그 밖 = `start` 의 오류 · 포트 만들기 ·
+     /// 붙이기의 OS 실패.
+     pub(crate) fn watch_births(
+@@ -209,43 +221,62 @@ impl ProcessGroup {
+         self.retiring.clone()
+     }
+ }
+ 
+ #[cfg(windows)]
+-struct JobPin(PinnedMember);
++impl From<&MemberFacts> for ProcessFacts {
++    fn from(facts: &MemberFacts) -> Self {
++        Self {
++            ppid: facts.ppid,
++            create: facts.create,
++            image: facts.image.clone(),
++            cmdline: facts.cmdline.clone(),
++        }
++    }
++}
++
++#[cfg(windows)]
++struct JobPin {
++    member: PinnedMember,
++    facts: ProcessFacts,
++}
+ 
+ #[cfg(windows)]
+ impl Pinned for JobPin {
+     fn exited(&self) -> io::Result<bool> {
+-        self.0.exited()
++        self.member.exited()
+     }
+ 
+     fn wait_exit(&self, d: Duration) -> io::Result<bool> {
+-        self.0.wait_exit(d)
++        self.member.wait_exit(d)
+     }
+ 
+     fn facts(&self) -> &ProcessFacts {
+-        self.0.facts()
++        &self.facts
+     }
+ 
+     fn terminate_raw(&self) -> io::Result<()> {
+-        self.0.terminate_raw()
++        self.member.terminate_raw()
+     }
+ 
+     fn classify(&self, raw: io::Result<()>) -> io::Result<MemberKill> {
+-        Ok(match self.0.classify(raw)? {
++        Ok(match self.member.classify(raw)? {
+             MemberOutcome::Terminated => MemberKill::Terminated,
+             MemberOutcome::Gone => MemberKill::Gone,
+         })
+     }
+ }
+ 
+ #[cfg(windows)]
+ impl Births for BirthPort {
+     fn next(&self, wait: Duration) -> io::Result<PortEvent> {
+         // 경로 호출은 고유 메서드를 먼저 고른다 — 이 trait 메서드로 되돌아오지 않는다.
+-        BirthPort::next(self, wait)
++        Ok(match BirthPort::next(self, wait)? {
++            PortOutcome::Joined(pid) => PortEvent::Joined(pid),
++            PortOutcome::Other => PortEvent::Other,
++            PortOutcome::Timeout => PortEvent::Timeout,
++        })
+     }
+ }
+ 
+ #[cfg(windows)]
+ fn group_gone() -> io::Error {
+@@ -258,12 +289,12 @@ fn no_group_here() -> io::Error {
+         io::ErrorKind::Unsupported,
+         "이 OS 에는 프로세스 무리가 없다",
+     )
+ }
+ 
+-// 실프로세스 도우미는 `windows.rs` 의 시험도 쓴다. claude 잔여물 정리의 실물 시험은 여기 두지 않는다 — 두면 이 층이
+-// claude 를 부른다.
++// 공용 실프로세스 도우미는 `windows.rs` 의 시험에 있다(그 파일은 이 모듈을 부르지 않는다). claude 잔여물 정리의 실물
++// 시험은 여기 두지 않는다 — 두면 이 층이 claude 를 부른다.
+ #[cfg(test)]
+ pub(crate) mod tests {
+     use super::*;
+ 
+     /// 통로가 사라진 손잡이 · 비Windows 껍데기가 같은 답을 준다 — 멤버 없음 · 아무도 못 붙듦 · 포트 없음(`start` 를
+@@ -323,10 +354,12 @@ pub(crate) mod tests {
+     #[cfg(windows)]
+     use std::process::{Child, ChildStdin, Command, Stdio};
+     #[cfg(windows)]
+     use std::time::Instant;
+ 
++    #[cfg(windows)]
++    use crate::platform::windows::tests::{is_ping, open_gate, spawn_gated_cmd, wait_until};
+     #[cfg(windows)]
+     use crate::platform::windows::LEFTOVER_EXIT_CODE;
+ 
+     #[cfg(windows)]
+     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+@@ -338,31 +371,10 @@ pub(crate) mod tests {
+         let job = Arc::new(JobObjectHandle::new().expect("Job 생성"));
+         let group = ProcessGroup::new(Arc::downgrade(&job), RetiringSignal::of(&Arc::default()));
+         (job, group)
+     }
+ 
+-    /// `cmd.exe /d /c <line>` — 단 stdin 에서 한 줄을 받을 때까지 `line` 을 시작하지 않는다. 그 사이에 Job 에
+-    /// 넣으면 `line` 이 띄우는 것은 전부 Job 안에서 태어난다. [`open_gate`] 가 그 한 줄을 준다.
+-    #[cfg(windows)]
+-    pub(crate) fn spawn_gated_cmd(line: &str, flags: u32) -> Child {
+-        use std::os::windows::process::CommandExt;
+-        Command::new("cmd.exe")
+-            .raw_arg(format!("/d /c set /p _= & {line}"))
+-            .stdin(Stdio::piped())
+-            .stdout(Stdio::null())
+-            .stderr(Stdio::null())
+-            .creation_flags(flags)
+-            .spawn()
+-            .expect("cmd.exe 기동")
+-    }
+-
+-    #[cfg(windows)]
+-    pub(crate) fn open_gate(child: &mut Child) {
+-        let mut stdin = child.stdin.take().expect("stdin 파이프");
+-        let _ = stdin.write_all(b"go\r\n");
+-    }
+-
+     /// [`open_gate`] 와 같되 stdin 을 닫지 않고 돌려준다 — `line` 이 stdin 을 다시 읽으면(`set /p`) 돌려준 끝을
+     /// 쥐는 동안 거기서 기다린다.
+     #[cfg(windows)]
+     fn open_gate_keeping_stdin(child: &mut Child) -> ChildStdin {
+         let mut stdin = child.stdin.take().expect("stdin 파이프");
+@@ -382,57 +394,10 @@ pub(crate) mod tests {
+             .creation_flags(DETACHED_PROCESS)
+             .spawn()
+             .expect("ping.exe 기동")
+     }
+ 
+-    #[cfg(windows)]
+-    pub(crate) fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+-        let deadline = Instant::now() + Duration::from_secs(10);
+-        loop {
+-            if let Some(found) = probe() {
+-                return found;
+-            }
+-            assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
+-            std::thread::sleep(Duration::from_millis(20));
+-        }
+-    }
+-
+-    /// 실행 파일 경로(소문자). 못 열면 `None`.
+-    #[cfg(windows)]
+-    fn image_path(pid: u32) -> Option<String> {
+-        use windows::core::PWSTR;
+-        use windows::Win32::Foundation::CloseHandle;
+-        use windows::Win32::System::Threading::{
+-            OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+-            PROCESS_QUERY_LIMITED_INFORMATION,
+-        };
+-        // SAFETY: 조회 권한만 연다.
+-        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+-        let mut buf = [0u16; 1024];
+-        let mut len = buf.len() as u32;
+-        // SAFETY: 유효 핸들 + 길이를 알려 준 스택 버퍼.
+-        let asked = unsafe {
+-            QueryFullProcessImageNameW(
+-                handle,
+-                PROCESS_NAME_WIN32,
+-                PWSTR(buf.as_mut_ptr()),
+-                &mut len,
+-            )
+-        };
+-        // SAFETY: 방금 연 핸들을 한 번 닫는다.
+-        unsafe {
+-            let _ = CloseHandle(handle);
+-        }
+-        asked.ok()?;
+-        Some(String::from_utf16_lossy(&buf[..len as usize]).to_ascii_lowercase())
+-    }
+-
+-    #[cfg(windows)]
+-    pub(crate) fn is_ping(pid: u32) -> bool {
+-        image_path(pid).is_some_and(|p| p.ends_with("\\ping.exe"))
+-    }
+-
+     #[cfg(windows)]
+     fn pin_ours(group: &ProcessGroup, pid: u32, kill: bool) -> Box<dyn Pinned> {
+         group
+             .pin(pid, kill)
+             .expect("붙들기")
+diff --git a/crates/engram-dashboard-agent/src/platform/windows.rs b/crates/engram-dashboard-agent/src/platform/windows.rs
+index 5f77f98..273c96e 100644
+--- a/crates/engram-dashboard-agent/src/platform/windows.rs
++++ b/crates/engram-dashboard-agent/src/platform/windows.rs
+@@ -5,13 +5,13 @@
+ //! 멤버 하나씩 다루는 조각(명단 · 붙들기와 사실 · 끝내기)과 Job 가입 알림 포트도 여기다 — 무엇을 끝낼지는
+ //! 모르고, 고르는 쪽이 준 번호가 이 Job 의 멤버인지만 확인해 붙든다(ADR-0257).
+ //!
+ //! 호출 순서/플래그는 Phase 0 spike(examples/spike.rs)에서 Windows 실측 검증한 것과 동일하다.
+ //! 이 파일은 platform 전용이라 windows crate import는 허용되지만, tauri import는 0개여야 한다.
+-//! ★`windows` crate · 표준 라이브러리 · 중립 손잡이(`process_group`)의 OS 무관 값 타입 둘(`ProcessFacts` ·
+-//! `PortEvent`) 말고는 쓰지 않는다★ — 나머지 결과 타입은 여기 두고 중립 손잡이가 감싼다. 그래야 이 파일을 별도
+-//! 플랫폼 모듈로 통째 옮길 수 있다(사용자 결정 2026-09-29).
++//! ★`windows` crate 와 표준 라이브러리 말고는 쓰지 않는다★ — 결과 · 사실 · 알림 타입도 여기 두고 중립
++//! 손잡이(`process_group`)가 제 타입으로 옮겨 감싼다. 그래야 이 파일을 별도 플랫폼 모듈로 통째 옮길 수 있다(사용자
++//! 결정 2026-09-29). 시험만 바닥 crate(`engram_dashboard_base`)의 시작 시각 조회를 빌린다.
+ 
+ use std::io;
+ use std::sync::Arc;
+ use std::time::Duration;
+ 
+@@ -35,12 +35,10 @@ use windows::Win32::System::Threading::{
+     WaitForSingleObject, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA,
+     PROCESS_SYNCHRONIZE, PROCESS_TERMINATE,
+ };
+ use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
+ 
+-use super::process_group::{PortEvent, ProcessFacts};
+-
+ /// 끊기 뒤 잔여물 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 그 정리가 끝낸 것을 알아본다.
+ /// `shutdown()` 의 Job 통째 끝내기(1)와 겹치지 않게 골랐다.
+ // ADR-0257
+ pub(crate) const LEFTOVER_EXIT_CODE: u32 = 0x7440;
+ 
+@@ -71,16 +69,34 @@ struct PROCESS_BASIC_INFORMATION {
+     _base_priority: i32,
+     _unique_process_id: usize,
+     inherited_from_unique_process_id: usize,
+ }
+ 
++/// [`JobObjectHandle::pin_member`] 가 붙든 핸들로 한 번 읽은 사실. 칸의 뜻 · 못 읽은 칸의 값은 중립 손잡이의 사실
++/// 타입과 같다 — 이 파일이 중립 손잡이를 부르지 않으려 제 모양을 따로 둔다(모듈 헤더).
++#[derive(Debug, Clone, Default)]
++pub(crate) struct MemberFacts {
++    pub ppid: u32,
++    pub create: u64,
++    pub image: String,
++    pub cmdline: String,
++}
++
++/// [`BirthPort::next`] 의 답 — 뜻은 중립 손잡이의 알림 타입과 같다(따로 두는 이유도 [`MemberFacts`] 와 같다).
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum PortOutcome {
++    Joined(u32),
++    Other,
++    Timeout,
++}
++
+ /// 우리 Job 멤버로 확인하고 붙든 프로세스 — 쥐는 동안 그 PID 는 재사용되지 않는다(열린 핸들이 프로세스 객체를
+ /// 붙든다). 끝난 뒤에도 쥘 수 있다. drop = CloseHandle.
+ #[derive(Debug)]
+ pub(crate) struct PinnedMember {
+     handle: HANDLE,
+-    facts: ProcessFacts,
++    facts: MemberFacts,
+ }
+ 
+ // SAFETY: 프로세스 핸들은 어느 스레드에서 써도 된다. 메서드는 핸들로 OS 조회 · 끝내기만 하고, 닫기는 이 값이
+ //   단독 소유한 drop 한 번뿐이다.
+ unsafe impl Send for PinnedMember {}
+@@ -88,10 +104,14 @@ unsafe impl Sync for PinnedMember {}
+ 
+ /// Job 가입 알림 포트 — [`JobObjectHandle::watch_births`] 가 만든다. 여러 스레드가 `Arc` 로 나눠 쥐고, 마지막
+ /// drop 이 포트 핸들을 닫는다.
+ ///
+ /// 알림은 통지일 뿐 배달이 보장되지 않는다(MS Learn) — 빠진 가입은 여기서 알 수 없다.
++///
++/// ★Job 이 붙은 채 마지막 `Arc` 를 놓지 않는다 — 먼저 떼고([`JobObjectHandle::unwatch_births`]) 놓는다★: 붙어 있는
++/// 동안 Job 이 포트를 제 커널 참조로 쥐어 핸들이 닫혀도 포트가 남고, 아무도 안 읽는 포트에 알림이 계속 쌓인다.
++/// 그 커널 참조는 MS Learn 에 적혀 있지 않고 여기서 실측하지 않았다 — 틀려도 먼저 떼는 쪽은 잃는 것이 없다.
+ #[derive(Debug)]
+ pub(crate) struct BirthPort {
+     handle: HANDLE,
+ }
+ 
+@@ -274,11 +294,11 @@ impl JobObjectHandle {
+             }
+             Err(e) => return Err(win_err(e)),
+         };
+         let mut member = PinnedMember {
+             handle,
+-            facts: ProcessFacts::default(),
++            facts: MemberFacts::default(),
+         };
+ 
+         let mut in_job = BOOL::default();
+         // SAFETY: 두 유효 핸들 + 스택 출력. ★Job 인자는 늘 우리 핸들이다★ — NULL 이면 「아무 Job 에나
+         //   들었나」로 바뀌어 남의 Job 멤버를 우리 것으로 본다.
+@@ -343,11 +363,11 @@ impl PinnedMember {
+     /// `limit` 까지 끝나기를 기다린다 — 끝났으면 `true`. `Err` = 대기 조회 자체의 실패.
+     pub(crate) fn wait_exit(&self, limit: Duration) -> io::Result<bool> {
+         signaled_within(self.handle, finite_millis(limit))
+     }
+ 
+-    pub(crate) fn facts(&self) -> &ProcessFacts {
++    pub(crate) fn facts(&self) -> &MemberFacts {
+         &self.facts
+     }
+ 
+     /// 붙든 그 핸들로 [`LEFTOVER_EXIT_CODE`] 를 주는 `TerminateProcess` **호출 하나만** 한다. 비동기 — 대상이
+     /// 끝나기를 기다리지 않는다. 날것 결과만 돌려주며 가르기는 [`Self::classify`] 가 한다(자물쇠 안에서 부를 수
+@@ -363,11 +383,11 @@ impl PinnedMember {
+     }
+ }
+ 
+ impl BirthPort {
+     /// 알림 하나를 `wait` 까지 기다려 꺼낸다. `Err` = 꺼내기 자체의 실패(포트가 닫힘 등).
+-    pub(crate) fn next(&self, wait: Duration) -> io::Result<PortEvent> {
++    pub(crate) fn next(&self, wait: Duration) -> io::Result<PortOutcome> {
+         let mut message = 0u32;
+         let mut key = 0usize;
+         let mut overlapped: *mut OVERLAPPED = core::ptr::null_mut();
+         // SAFETY: 유효 포트 핸들 + 스택 출력 셋 · 유한 대기.
+         let dequeued = unsafe {
+@@ -381,16 +401,16 @@ impl BirthPort {
+         };
+         match dequeued {
+             Ok(()) if key == BIRTH_PORT_KEY && message == JOB_OBJECT_MSG_NEW_PROCESS => {
+                 // Job 알림은 OVERLAPPED 칸에 포인터가 아니라 PID 를 싣는다 — 역참조하지 않는다.
+                 let pid = overlapped as usize;
+-                u32::try_from(pid).map(PortEvent::Joined).map_err(|_| {
++                u32::try_from(pid).map(PortOutcome::Joined).map_err(|_| {
+                     io::Error::other(format!("Job 가입 알림의 PID {pid:#x} 가 u32 를 넘는다"))
+                 })
+             }
+-            Ok(()) => Ok(PortEvent::Other),
+-            Err(e) if e.code() == HRESULT::from_win32(WAIT_TIMEOUT.0) => Ok(PortEvent::Timeout),
++            Ok(()) => Ok(PortOutcome::Other),
++            Err(e) if e.code() == HRESULT::from_win32(WAIT_TIMEOUT.0) => Ok(PortOutcome::Timeout),
+             Err(e) => Err(win_err(e)),
+         }
+     }
+ }
+ 
+@@ -454,12 +474,12 @@ fn signaled_within(handle: HANDLE, millis: u32) -> io::Result<bool> {
+             other.0
+         ))),
+     }
+ }
+ 
+-fn read_facts(handle: HANDLE) -> ProcessFacts {
+-    ProcessFacts {
++fn read_facts(handle: HANDLE) -> MemberFacts {
++    MemberFacts {
+         ppid: parent_pid(handle).unwrap_or(0),
+         create: creation_time(handle).unwrap_or(0),
+         image: image_path(handle).unwrap_or_default(),
+         cmdline: command_line(handle).unwrap_or_default(),
+     }
+@@ -565,31 +585,76 @@ impl Drop for JobObjectHandle {
+ /// io::Error::other로 원본 에러(메시지 포함)를 보존한다.
+ fn win_err(e: windows::core::Error) -> io::Error {
+     io::Error::other(e)
+ }
+ 
+-// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md).
++// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md). 실프로세스
++// 도우미는 중립 손잡이의 시험도 가져다 쓴다 — 이 파일이 그쪽을 부르지 않게 도우미를 여기 둔다.
+ #[cfg(test)]
+-mod tests {
++pub(crate) mod tests {
+     use std::io::Write;
+-    use std::process::{Command, Stdio};
++    use std::process::{Child, Command, Stdio};
+     use std::time::Instant;
+ 
+     use engram_dashboard_base::platform::{process_start, ProcessStart};
+ 
+     use super::*;
+-    use crate::platform::process_group::tests::{is_ping, open_gate, spawn_gated_cmd, wait_until};
+ 
+     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+     const DETACHED_PROCESS: u32 = 0x0000_0008;
+ 
++    /// `cmd.exe /d /c <line>` — 단 stdin 에서 한 줄을 받을 때까지 `line` 을 시작하지 않는다. 그 사이에 Job 에
++    /// 넣으면 `line` 이 띄우는 것은 전부 Job 안에서 태어난다. [`open_gate`] 가 그 한 줄을 준다.
++    pub(crate) fn spawn_gated_cmd(line: &str, flags: u32) -> Child {
++        use std::os::windows::process::CommandExt;
++        Command::new("cmd.exe")
++            .raw_arg(format!("/d /c set /p _= & {line}"))
++            .stdin(Stdio::piped())
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .creation_flags(flags)
++            .spawn()
++            .expect("cmd.exe 기동")
++    }
++
++    pub(crate) fn open_gate(child: &mut Child) {
++        let mut stdin = child.stdin.take().expect("stdin 파이프");
++        let _ = stdin.write_all(b"go\r\n");
++    }
++
++    pub(crate) fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
++        let deadline = Instant::now() + Duration::from_secs(10);
++        loop {
++            if let Some(found) = probe() {
++                return found;
++            }
++            assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
++            std::thread::sleep(Duration::from_millis(20));
++        }
++    }
++
++    /// 그 번호의 실행 파일이 `ping.exe` 인가. 못 열면 `false`.
++    pub(crate) fn is_ping(pid: u32) -> bool {
++        // SAFETY: 조회 권한만 연다.
++        let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
++        else {
++            return false;
++        };
++        let image = image_path(handle);
++        // SAFETY: 방금 연 핸들을 한 번 닫는다.
++        unsafe {
++            let _ = CloseHandle(handle);
++        }
++        image.is_some_and(|p| p.to_ascii_lowercase().ends_with("\\ping.exe"))
++    }
++
+     /// `want` 에 맞는 알림이 올 때까지 꺼낸다(10 초) — 그 앞의 알림은 버린다.
+     fn next_matching(
+         port: &BirthPort,
+         what: &str,
+-        mut want: impl FnMut(PortEvent) -> bool,
+-    ) -> PortEvent {
++        mut want: impl FnMut(PortOutcome) -> bool,
++    ) -> PortOutcome {
+         let deadline = Instant::now() + Duration::from_secs(10);
+         loop {
+             let event = port
+                 .next(Duration::from_millis(100))
+                 .expect("포트에서 꺼내기");
+@@ -604,11 +669,11 @@ mod tests {
+     fn drain(port: &BirthPort) {
+         for _ in 0..100 {
+             if port
+                 .next(Duration::from_millis(300))
+                 .expect("포트에서 꺼내기")
+-                == PortEvent::Timeout
++                == PortOutcome::Timeout
+             {
+                 return;
+             }
+         }
+         panic!("알림이 그치지 않는다");
+@@ -708,11 +773,11 @@ mod tests {
+                 .ok()?
+                 .into_iter()
+                 .find(|&pid| is_ping(pid))
+         });
+         let event = port.next(Duration::from_millis(500)).expect("꺼내기");
+-        assert_eq!(event, PortEvent::Timeout, "붙지 않은 포트에 알림이 왔다");
++        assert_eq!(event, PortOutcome::Timeout, "붙지 않은 포트에 알림이 왔다");
+ 
+         job.terminate(1).expect("Job 끝내기");
+         let _ = x.wait();
+     }
+ 
+@@ -735,32 +800,40 @@ mod tests {
+             held = Some(port);
+             Ok(())
+         })
+         .expect("붙이기");
+         let port = held.expect("start 가 포트를 받았다");
+-        next_matching(&port, "X 의 되알림", |e| e == PortEvent::Joined(root));
++        next_matching(&port, "X 의 되알림", |e| e == PortOutcome::Joined(root));
+ 
+         gate.write_all(b"go\r\n").expect("첫 문");
+-        let PortEvent::Joined(first) = next_matching(
++        let PortOutcome::Joined(first) = next_matching(
+             &port,
+             "X 가 띄운 ping",
+-            |e| matches!(e, PortEvent::Joined(pid) if is_ping(pid)),
++            |e| matches!(e, PortOutcome::Joined(pid) if is_ping(pid)),
+         ) else {
+             unreachable!("Joined 만 고른다")
+         };
+         // 끝까지 쥔다 — 둘째 ping 이 이 번호를 재사용하지 못하게.
+         let ping = job
+             .pin_member(first, true)
+             .expect("붙들기")
+             .expect("우리 멤버");
+         assert_eq!(ping.facts().ppid, root, "ping 의 부모: {:?}", ping.facts());
++        // 끝내기 전에 비운다 — 아래 `Other` 는 끝내기 뒤에 온 것이 되고, 그때 남은 멤버는 기다리는 X 뿐이라 ping 의
++        // 끝남 말고 올 자리가 없다.
++        drain(&port);
+         let raw = ping.terminate_raw();
+         assert_eq!(
+             ping.classify(raw).expect("끝내기"),
+             MemberOutcome::Terminated
+         );
+-        next_matching(&port, "ping 의 끝남", |e| e == PortEvent::Other);
++        next_matching(&port, "ping 의 끝남", |e| e == PortOutcome::Other);
++        // 곧바로 `exited()` 로 묻지 않는다 — 끝남 알림이 프로세스 객체의 신호보다 먼저 설 수 있다(미실측).
++        assert!(
++            ping.wait_exit(Duration::from_secs(5)).expect("끝나기 대기"),
++            "`Other` 가 왔는데 붙든 ping 이 끝나지 않았다"
++        );
+ 
+         job.unwatch_births().expect("떼기");
+         drain(&port);
+ 
+         gate.write_all(b"go\r\n").expect("둘째 문");
+@@ -772,11 +845,11 @@ mod tests {
+         });
+         let deadline = Instant::now() + Duration::from_millis(500);
+         while Instant::now() < deadline {
+             let event = port.next(Duration::from_millis(100)).expect("꺼내기");
+             assert!(
+-                !matches!(event, PortEvent::Joined(_)),
++                !matches!(event, PortOutcome::Joined(_)),
+                 "뗀 뒤 태어난 {second} 이 알려졌다: {event:?}"
+             );
+         }
+ 
+         job.terminate(1).expect("Job 끝내기");
+@@ -873,11 +946,11 @@ mod tests {
+                 births
+                     .iter()
+                     .map(|(pid, m)| (pid, m.facts()))
+                     .collect::<Vec<_>>()
+             );
+-            if let PortEvent::Joined(pid) = port.next(Duration::from_millis(100)).expect("꺼내기")
++            if let PortOutcome::Joined(pid) = port.next(Duration::from_millis(100)).expect("꺼내기")
+             {
+                 if pid != root {
+                     if let Some(member) = job.pin_member(pid, false).expect("붙들기") {
+                         births.push((pid, member));
+                     }
+diff --git a/crates/engram-dashboard-agent/src/transport/input_queue.rs b/crates/engram-dashboard-agent/src/transport/input_queue.rs
+index ce83f0f..54340ec 100644
+--- a/crates/engram-dashboard-agent/src/transport/input_queue.rs
++++ b/crates/engram-dashboard-agent/src/transport/input_queue.rs
+@@ -33,12 +33,17 @@ use crate::types::{AgentId, PtyError};
+ 
+ /// 덩이 하나가 **실제로 OS 로 나간 뒤** 라이터가 부를 것.
+ ///
+ /// - 불리는 때 = 그 덩이의 쓰기가 성공하고 회계가 풀린 뒤, **이 큐의 락을 하나도 쥐지 않은 채** 라이터 스레드에서
+ ///   한 번. 그래서 이 안에서 같은 큐에 다시 넣어도 매달리지 않는다.
+-/// - 안 불리는 때 = 큐가 받지 않았다(`Err`) · 쓰기 전에 큐가 닫혔다 · 쓰기가 실패했다. 셋 다 부르지 않고 버린다(drop).
+-/// - panic 은 라이터가 잡아 `warn` 하고 다음 덩이를 계속 쓴다 — 큐를 닫지 않는다.
++/// - 안 불리는 때 = 큐가 받지 않았다(`Err`) · 꺼내기 전에 큐가 닫혔다 · 쓰기가 실패했다. 셋 다 부르지 않고 버린다(drop).
++/// - ★꺼낸 뒤에 큐가 닫혀도 그 쓰기가 성공하면 불린다★ — 그래서 이 부름은 큐를 닫는 쪽(통로의 끝내기
++///   `shutdown()` · 스트림 끝)과 겹칠 수 있다. 물러난 뒤에 하면 안 되는 일이면 이 안에서 물러남 표시
++///   ([`RetiringSignal`](crate::platform::process_group::RetiringSignal))를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
++/// - ★panic 하지 않게 짠다★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라,
++///   릴리스에서는 이 안의 panic 이 프로세스를 죽인다. 라이터가 두른 `catch_unwind`(잡아 `error` 로 남기고 다음 덩이를
++///   계속 쓴다 — 큐를 닫지 않는다)는 unwind 빌드(개발·시험)에서만 서는 안전망이다.
+ /// - 라이터 스레드 하나가 뒤 덩이도 쓰므로, 이 안에서 오래 막히면 그만큼 뒤 입력이 늦는다. 이 안에서 큐가 비기를
+ ///   기다리면([`InputQueue::wait_drained`]) 자기를 기다린다.
+ pub type OnWritten = Box<dyn FnOnce() + Send>;
+ 
+ /// 아직 OS 로 나가지 못한 입력의 상한(바이트). ★넘으면 그 호출이 `Err` 로 돌아간다 — 버리지 않는다★
+@@ -272,11 +277,12 @@ impl InputQueue {
+ /// ★★panic 도 같은 처분을 받는다 — `catch_unwind` 가 그것을 위해 있다★★: 쓰기 중 panic 하면 큐 락은
+ ///   **poison 되지 않는다**(쓰기는 락을 놓고 한다). 그래서 이 갈래를 안 잡으면 라이터만 죽고 큐는
+ ///   **열린 채** 남아, 이후 `send_input` 이 계속 `Ok` 를 돌려주다가 상한에 닿는 순간부터 **틀린
+ ///   사유**(「상한 초과」)로 거절한다 — 진짜 원인은 그 로그 어디에도 없다. 그 사이 바이트는 하나도
+ ///   안 나간다. `spawn` 실패 갈래(`pty.rs`·`stdio.rs`)가 이미 고른 규율과 같은 자리다: **라이터가
+-///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.**
++///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.** ★단 unwind 빌드에서만 선다★ — 릴리스는
++///   `panic = "abort"`(워크스페이스 루트 `Cargo.toml` 의 `[profile.release]`)라 panic 이 곧 프로세스의 끝이다.
+ /// ★`agent` 는 로그 귀속용★ — 이 경고들은 「받아 둔 뒤 실패한 쓰기」의 **유일한 흔적**이라, 에이전트가
+ ///   여럿이면 누구 것인지가 없으면 흔적이 아니다(`docs/reference/logging-conventions.md` 의 형식 규약).
+ pub(crate) fn drain(
+     queue: &InputQueue,
+     label: &str,
+@@ -289,15 +295,18 @@ pub(crate) fn drain(
+                 Ok(()) => {
+                     // ★성공을 세는 이 한 줄이 [`InputQueue::wait_drained`] 의 유일한 진행 신호다★.
+                     //   같은 줄이 [`Inner::bytes`] 회계도 푼다 — 「나갔다」가 두 뜻을 함께 갖는다.
+                     queue.mark_written(chunk.len());
+                     // 부를 것의 panic 은 여기서 멈춘다 — 바깥 가드까지 가면 큐가 닫혀 멀쩡한 입력 경로가 죽는다.
++                    // ★unwind 빌드에서만 선다★ — 릴리스는 `panic = "abort"` 라 이 자리에서 프로세스가 죽는다
++                    //   ([`OnWritten`] 의 계약이 panic 없는 부를 것을 요구하는 이유).
+                     if let Some(on_written) = on_written {
+                         if let Err(payload) =
+                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(on_written))
+                         {
+-                            tracing::warn!(
++                            // 레벨 = error — 격리돼도 panic 은 error 다(`docs/reference/logging-conventions.md` 의 레벨 표).
++                            tracing::error!(
+                                 agent = %agent,
+                                 "{label} 입력 덩이가 나간 뒤 부를 것이 panic 했다 — 다음 덩이는 계속 쓴다: {}",
+                                 panic_message(&*payload)
+                             );
+                         }
+@@ -646,11 +655,11 @@ mod tests {
+             vec![(vec![b"plain".to_vec(), b"marked".to_vec()], b"after".len())],
+             "부를 것은 제 덩이가 적히고 회계가 풀린 뒤 한 번만 불린다"
+         );
+     }
+ 
+-    /// 나가지 못한 덩이의 부를 것은 불리지 않고 버려진다(쥔 채 남지 않는다) — 쓰기 전 닫힘 · 쓰기 실패 · 받지 않음.
++    /// 나가지 못한 덩이의 부를 것은 불리지 않고 버려진다(쥔 채 남지 않는다) — 꺼내기 전 닫힘 · 쓰기 실패 · 받지 않음.
+     #[test]
+     fn on_written_is_dropped_uncalled_when_its_chunk_never_goes_out() {
+         struct CountDrop(Arc<AtomicUsize>);
+         impl Drop for CountDrop {
+             fn drop(&mut self) {
+@@ -713,10 +722,42 @@ mod tests {
+             0,
+             "나가지 못한 덩이의 부를 것이 불렸다"
+         );
+     }
+ 
++    /// 꺼낸 뒤 쓰는 사이에 큐가 닫혀도 그 쓰기가 성공하면 부를 것은 한 번 불린다 — 닫힘이 막아 주지 않는다. 가짜
++    /// 쓰기 안에서 닫아 그 창을 결정적으로 만든다. 뒤 덩이는 닫힘에 걸려 안 나간다.
++    #[test]
++    fn on_written_still_runs_when_the_queue_closes_after_its_chunk_was_popped() {
++        let calls = Arc::new(AtomicUsize::new(0));
++        let counted = calls.clone();
++        let queue = InputQueue::new();
++        queue
++            .push_with(
++                b"popped".to_vec(),
++                Some(Box::new(move || {
++                    counted.fetch_add(1, Ordering::SeqCst);
++                })),
++            )
++            .expect("push_with");
++        queue.push(b"left".to_vec()).expect("push");
++
++        let mut wrote = Vec::new();
++        drain(&queue, "시험", test_agent(), |b| {
++            wrote.push(b.to_vec());
++            queue.close("쓰는 사이 닫힘");
++            Ok(())
++        });
++
++        assert_eq!(wrote, vec![b"popped".to_vec()], "닫힌 뒤 남은 덩이를 썼다");
++        assert_eq!(
++            calls.load(Ordering::SeqCst),
++            1,
++            "꺼낸 뒤 닫혀도 쓰기가 성공했으면 한 번 불려야 한다"
++        );
++    }
++
+     /// 부를 것 안에서 같은 큐에 넣어도 매달리지 않고, 넣은 것은 뒤이어 나간다.
+     #[test]
+     fn a_push_from_inside_on_written_does_not_deadlock() {
+         let queue = Arc::new(InputQueue::new());
+         let again = queue.clone();
+@@ -743,11 +784,13 @@ mod tests {
+             *written.lock().unwrap(),
+             vec![b"first".to_vec(), b"from-callback".to_vec()]
+         );
+     }
+ 
+-    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다.
++    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다. ★unwind 빌드에서만
++    /// 도는 항목이다★ — 릴리스는 `panic = "abort"` 라 이 갈래 자체가 없다.
++    #[cfg(panic = "unwind")]
+     #[test]
+     fn a_panicking_on_written_does_not_stop_later_chunks() {
+         let queue = Arc::new(InputQueue::new());
+         queue
+             .push_with(b"first".to_vec(), Some(Box::new(|| panic!("부를 것 폭발"))))

@@ -30,22 +30,37 @@ thiserror = "1.0"
 tracing = "0.1"
 dunce = "1.0"
 ts-rs = "10"   # 선언 매크로가 인자·반환 struct 에 TS derive 를 단다(파생물 = bindings/, TRD §2-4 ①)
+# claude 사용량 조회 응답의 ISO 8601 리셋 시각 → epoch 초(`backend/claude/usage_probe.rs`). 기능은 전부 끈다 —
+#   RFC 3339 해석은 기능 없이 서고, 시계·시간대 데이터베이스(`clock`)는 필요 없다. 잠금 파일에 이미 있는 판이다
+#   (데몬은 `rmcp` 를 거쳐 이미 링크한다) — 새 패키지를 끌어오지 않는다.
+chrono = { version = "0.4", default-features = false }
 
 # 하네스 전용 실행기(`engram_dashboard_command::testing::block_on`)를 테스트 빌드에서만 켠다 —
 #   기능 요청이 dev 그래프에만 있어 운영 바이너리엔 유니피케이션되지 않는다.
 [dev-dependencies]
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 
-# 소비자는 둘이다 — `platform::windows` 의 Job Object 래퍼와 `platform::file_holders` 의 홀더 조회
+# 소비자는 셋이다 — `platform::windows` 의 Job Object 래퍼(멤버 명단 · 붙들기 · 가입 알림 포함 — ADR-0262)·스레드 깨우기와
+#   `platform::file_holders` 의 홀더 조회
 # (PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
 # `Win32_System_RestartManager` = 그 홀더 조회 몫 — 「이 파일을 누가 열고 있나」를 묻는
 #   `RmStartSession`/`RmRegisterResources`/`RmGetList`/`RmEndSession` 넷이 그 feature 뒤에 있다.
 #   codex 세션 id 회수가 그 답 위에 선다(ADR-0218 결정 1·11).
 # ★`Win32_Storage_FileSystem` 을 다시 켜지 말 것★ — 그것을 쓰던 유일한 자리는 codex 훅 등록의 8.3 단축
 #   경로 변환이었고, 훅 기계장치가 ADR-0216 으로 걷히며 함께 사라졌다.
+# `Win32_System_Diagnostics_ToolHelp` = 사용량 조회(`usage::process`)가 멈춘 채 띄운 자식을 Job 에 넣은 뒤
+#   깨우는 몫 — std 가 첫 스레드 핸들을 내주지 않아 스레드 스냅숏(`CreateToolhelp32Snapshot`·`Thread32First`/
+#   `Thread32Next`)으로 그 스레드를 찾는다(`platform::windows::resume_suspended_process`). 같은 판의 `windows`
+#   에 기능 하나를 켤 뿐이라 잠금 파일에 새 패키지가 들지 않는다(base 는 이미 이 기능을 켠다).
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
 #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
 #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.
+# `Win32_System_IO` = Job 가입 알림을 받는 완료 포트(`CreateIoCompletionPort` · `GetQueuedCompletionStatus`)
+#   몫 — 멤버가 새로 든 것을 듣는 공개 수단이 그것뿐이고, claude 끊기 뒤 잔여물 정리가 「끊기 뒤에
+#   태어났나」를 시각이 아니라 그 알림으로 가른다(T-40).
+# `Wdk_System_Threading` = `NtQueryInformationProcess` 몫 — 같은 정리가 붙든 핸들로 부모 PID 와 명령줄을
+#   읽는다(T-40). ★`Win32_System_Kernel` · `Win32_System_SystemServices` 는 켜지 않는다★ — 그 결과
+#   구조체와 알림 번호 상수만 쓰려고 켤 일이라 `platform/windows.rs` 가 `repr(C)` 와 상수로 대신한다.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_System_JobObjects",
@@ -53,4 +68,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_System_RestartManager",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Wdk_System_Threading",
 ] }

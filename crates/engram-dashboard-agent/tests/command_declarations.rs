@@ -1,7 +1,9 @@
 //! 선언 골든 — 이름 집합과 오류 집합이 조용히 갈리지 않게 못 박는다(TRD §7 「선언 파생」).
 
 use engram_dashboard_agent::commands::{
-    AgentListArgs, AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, COMMAND_SPECS,
+    AgentCancelQueuedInputArgs, AgentInterruptArgs, AgentListArgs, AgentListQueuedInputsArgs,
+    AgentMoveArgs, AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, UsageGetArgs, UsageRefreshArgs,
+    COMMAND_SPECS, INPUT_AFFECTING,
 };
 use engram_dashboard_command::{
     command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of, Effect, ErrorCode,
@@ -16,11 +18,16 @@ fn declared_names_are_the_cli_verbs() {
     assert_eq!(
         names,
         vec![
+            "agent.cancelQueuedInput",
+            "agent.interrupt",
             "agent.list",
+            "agent.listQueuedInputs",
             "agent.move",
             "agent.new",
             "agent.rename",
-            "agent.spawn"
+            "agent.spawn",
+            "usage.get",
+            "usage.refresh"
         ]
     );
 }
@@ -35,8 +42,54 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 4
+            == 7 // v6 에서 둘이 늘었다 — `agent.interrupt` · `usage.refresh`
     );
+}
+
+/// 대기 목록 두 동사(ADR-0231) — 조회는 `Read`, 취소는 `Write` 이고 둘 다 카탈로그 5 에 들어왔다.
+#[test]
+fn the_queued_input_verbs_are_declared_with_their_effect_and_generation() {
+    let list = spec_of("agent.listQueuedInputs").expect("선언");
+    assert_eq!(list.effect, Effect::Read);
+    assert_eq!(list.since, 5);
+    let cancel = spec_of("agent.cancelQueuedInput").expect("선언");
+    assert_eq!(cancel.effect, Effect::Write);
+    assert_eq!(cancel.since, 5);
+    let interrupt = spec_of("agent.interrupt").expect("선언");
+    assert_eq!(interrupt.effect, Effect::Write);
+    assert_eq!(interrupt.since, 6);
+}
+
+/// 사용량 두 동사(TRD S21 usage-limit-slot §1-6) — 조회는 `Read`, 강제 새로고침은 `Write` 이고 둘 다 카탈로그 6 에
+/// 들어왔다. ★`usage.refresh` 가 `Write` 인 것은 계약이다★ — 배달이 그 값으로 번호를 붙든다(같은 번호의 재전송이
+/// 조회를 다시 띄우지 않는다). 그래서 마감 뒤 결과 로그가 그 payload 를 싣고, 거기서 원문이 걷힌다(daemon
+/// `command_delivery`).
+#[test]
+fn the_usage_verbs_are_declared_with_their_effect_and_generation() {
+    let get = spec_of("usage.get").expect("선언");
+    assert_eq!(get.effect, Effect::Read);
+    assert_eq!(get.since, 6);
+    let refresh = spec_of("usage.refresh").expect("선언");
+    assert_eq!(refresh.effect, Effect::Write);
+    assert_eq!(refresh.since, 6);
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 6);
+}
+
+/// ★입력을 움직이는 명령 목록은 이 crate 의 `Write` 선언만 담는다★ — 없는 이름이나 조회가 끼면 공통 입구의
+/// 임대 검사가 엉뚱한 명령을 막거나 막아야 할 명령을 놓친다.
+#[test]
+fn every_input_affecting_name_is_a_declared_write_verb() {
+    assert!(!INPUT_AFFECTING.is_empty());
+    for name in INPUT_AFFECTING {
+        let spec = COMMAND_SPECS
+            .iter()
+            .find(|s| s.name == *name)
+            .unwrap_or_else(|| panic!("{name} 은 이 블록의 선언이어야 한다"));
+        assert_eq!(spec.effect, Effect::Write, "{name}");
+    }
+    assert!(INPUT_AFFECTING.contains(&"agent.cancelQueuedInput"));
+    assert!(INPUT_AFFECTING.contains(&"agent.interrupt"));
+    assert!(!INPUT_AFFECTING.contains(&"agent.listQueuedInputs"));
 }
 
 #[test]
@@ -65,6 +118,22 @@ fn error_sets_are_golden() {
         declared("agent.move"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
     );
+    // 지목이 빗나가면 NOT_FOUND · 동명 둘이면 CONFLICT(`resolve_in`) — 두 동사도 `target` 을 푼다.
+    assert_eq!(
+        declared("agent.listQueuedInputs"),
+        vec![ErrorCode::NotFound, ErrorCode::Conflict]
+    );
+    assert_eq!(
+        declared("agent.cancelQueuedInput"),
+        vec![ErrorCode::NotFound, ErrorCode::Conflict]
+    );
+    assert_eq!(
+        declared("agent.interrupt"),
+        vec![ErrorCode::NotFound, ErrorCode::Conflict]
+    );
+    // 칸이 없는 백엔드 = NOT_FOUND(wire ⟳ 와 같은 코드).
+    assert_eq!(declared("usage.get"), vec![ErrorCode::NotFound]);
+    assert_eq!(declared("usage.refresh"), vec![ErrorCode::NotFound]);
 }
 
 /// ★광고된 집합은 실제로 날 수 있는 것 전부여야 한다★ — 인자 반려와 내부 실패는 어느 명령에서나 난다.
@@ -139,6 +208,31 @@ fn required_matches_what_deserialization_actually_demands() {
             "agent.move",
             parses::<AgentMoveArgs>,
             json!({ "target": "alpha", "parent": null }),
+        ),
+        (
+            "agent.listQueuedInputs",
+            parses::<AgentListQueuedInputsArgs>,
+            json!({ "target": "alpha" }),
+        ),
+        (
+            "agent.cancelQueuedInput",
+            parses::<AgentCancelQueuedInputArgs>,
+            json!({ "target": "alpha", "input_id": "q1" }),
+        ),
+        (
+            "agent.interrupt",
+            parses::<AgentInterruptArgs>,
+            json!({ "target": "alpha" }),
+        ),
+        (
+            "usage.get",
+            parses::<UsageGetArgs>,
+            json!({ "backend": "Claude" }),
+        ),
+        (
+            "usage.refresh",
+            parses::<UsageRefreshArgs>,
+            json!({ "backend": "Codex" }),
         ),
     ];
 
@@ -244,7 +338,7 @@ fn an_absent_option_option_field_is_refused_while_null_is_a_value() {
     assert!(absent.to_string().contains("parent"), "{absent}");
 }
 
-/// 링커 수집이 **다른 crate 의 선언까지** 훑는지 — 이 테스트 바이너리에 링크된 것은 agent 의 5개뿐이다.
+/// 링커 수집이 **다른 crate 의 선언까지** 훑는지 — 이 테스트 바이너리에 링크된 것은 agent 의 선언뿐이다.
 #[test]
 fn linker_collection_sees_the_declaring_crate() {
     let mut collected: Vec<&str> = command_specs().map(|s| s.name).collect();

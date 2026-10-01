@@ -6,7 +6,7 @@ use ts_rs::TS;
 
 use crate::domain::{
     AgentBackendKind, AgentInfo, AgentOutputFormat, AgentProfile, AgentStatus, Capabilities,
-    EnvelopeFormat, Preset, RestoreReport, SnapshotChunk,
+    EnvelopeFormat, Preset, RestoreReport, SnapshotChunk, UsageLimitSnapshot,
 };
 use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 
@@ -25,7 +25,7 @@ use crate::ids::{AgentId, PresetId, ProfileId, RequestId};
 //   "AgentCommand" 라 부르면 뜻이 안 정해진다.
 // ★★활성화 셋(`Spawn`·`SpawnByCwd`·`SpawnProfile`)의 **호출 계약** — 클라이언트가 지켜야 하는 것★★
 //   데몬은 이 셋을 그 연결의 도착순 줄에서 **떼어 별도 태스크로** 돌린다(활성화는 결말까지 기다리는
-//   유일한 갈래라, 줄에 두면 그동안 그 연결의 다른 명령이 전부 함께 늦는다 — 데몬 crate 의
+//   갈래라, 줄에 두면 그동안 그 연결의 다른 명령이 전부 함께 늦는다 — 데몬 crate 의
 //   `connection_core::dispatch_order`). 그 대가가 이 계약이다:
 //   ① **활성화의 답(`Spawned`/`Error`)을 받기 전에 그 에이전트 id 앞으로 아무것도 보내지 말 것.**
 //      같은 소켓으로 `SpawnProfile(X)` 직후 `WriteStdin(X)` 을 보내면 뒤엣것이 먼저 돌아
@@ -51,7 +51,7 @@ pub enum AgentCommand {
         agent_id: AgentId,
         request_id: RequestId,
     },
-    /// 진행 중 작업만 중단(Ctrl+C). 프로세스는 생존.
+    /// 진행 중 작업만 중단. 프로세스는 생존. 터미널 모드(PTY)는 거절한다 — 터미널이 키를 직접 받는다(ADR-0245).
     Interrupt {
         #[ts(type = "string")]
         agent_id: AgentId,
@@ -336,6 +336,44 @@ pub enum AgentCommand {
         )]
         reply: CommandReply,
     },
+
+    // ── 대기 입력 목록(ADR-0231) ─────────────────────────────────────────────────────
+    // 버스 `agent.listQueuedInputs`·`agent.cancelQueuedInput` 의 WS 짝 — 데몬이 같은 manager 값을 싣는다.
+    /// 산 화신의 대기 입력 목록 조회. 응답은 전용 reply [`AgentEvent::QueuedInputs`]. ★입력 임대를 보지 않는다★
+    /// (읽기다). 산 세션이 없으면 `Error`(`NOT_FOUND: …`).
+    ListQueuedInputs {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        request_id: RequestId,
+    },
+    /// 대기 입력 하나를 취소한다(화면 ✕ 와 같은 명령). 응답은 전용 reply [`AgentEvent::QueuedInputCancelReply`].
+    /// ★입력 임대는 `WriteStdin` 과 같은 검사를 거친다★ — 비보유자는 같은 문구의 `Error` 로 거절된다.
+    /// 목록에 없는 id(모르는 · 이미 결말이 난 · 잠든 에이전트)는 `Error`(`NOT_FOUND: …`).
+    /// `input_id` 는 필수다 — 「없으면 가장 최근」 같은 기본값을 두지 않는다.
+    CancelQueuedInput {
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        input_id: String,
+        request_id: RequestId,
+    },
+
+    // ── 사용량 한도(TRD S21 usage-limit-slot §1-6) ──────────────────────────────────────
+    /// 이 연결의 사용량 구독 집합을 **통째로** 바꾼다 — 빈 배열 = 해제, 연결이 끊기면 빈 집합이다. 답은 없다
+    /// (`request_id` 없음). 새로 든 벤더마다 [`AgentEvent::UsageLimitsUpdated`] 한 장이 이 연결에만 온다. 데몬이
+    /// 사용량을 두지 않는 벤더 낱말은 버려진다.
+    /// ★구독/해제 짝을 두지 않는다★ — 해제 한 장이 사라지면 조회가 계속 돈다. 전량 교체면 마지막 한 장이 곧
+    ///   상태다. 그래서 한 연결의 교체들은 도착순으로 적용된다.
+    UsageSubscribe { vendors: Vec<AgentBackendKind> },
+    /// ⟳ — 그 벤더의 사용량을 새로 조회하라. 답 = [`AgentEvent::Ack`] 이고 **값을 싣지 않는다** — 값은 그 벤더를
+    /// 구독한 연결에 [`AgentEvent::UsageLimitsUpdated`] 로 간다(보낸 연결도 구독했을 때만 받는다).
+    /// `Ack` 는 조회를 띄웠으면(진행 중이면 거기 붙어) 그 끝을 데몬의 상한(수 초)까지 기다린 뒤 온다. 거절 기한
+    /// 안이면 조회 없이 곧바로 온다. 데몬이 그 벤더의 사용량을 두지 않으면 `Error`(이 `request_id`).
+    /// ★데몬은 이 명령을 그 연결의 도착순 줄 밖에서 돌린다★ — 같은 연결의 뒤 명령의 답이 이 답보다 먼저 올 수
+    ///   있다.
+    RefreshUsageLimits {
+        vendor: AgentBackendKind,
+        request_id: RequestId,
+    },
 }
 
 /// 데몬 명부의 **클라이언트 투영** 한 줄([`AgentEvent::CommandList`] 의 원소).
@@ -355,6 +393,37 @@ pub struct CommandListEntry {
     pub name: String,
     pub help: String,
     pub available: bool,
+}
+
+/// 대기 입력 목록의 한 줄([`AgentEvent::QueuedInputs`] 의 원소) — 버스 `agent.listQueuedInputs` 행과 같은 모양·낱말.
+///
+/// `state` = `queued` | `sent` | `unconfirmed` | `cancelling`. `sent` = 통로가 벤더에 넘긴 대기 행(환원 상태 — 재부착
+///   대조는 넘김 표지가 선 행으로 읽는다 · 취소 대기 행의 표지는 `cancelling` 에 묻힌다).
+///   ★`unconfirmed` 는 명부의 환원 상태가 아니다★ — 조회 순간
+///   통로가 수락 모름으로 쥔 항목을 덧댄 표지라 `as_of_seq` 와 한 원자가 아니고, 재부착 대조는 `queued` 로 읽는다.
+/// ★낱말 칸을 enum 으로 올리지 않는다★ — 낱말이 늘 때 구셸이 응답 전체를 못 읽는 대신 그 행만 모르는 낱말로
+///   받는다(버스 행도 문자열이다).
+/// `cancel` = `cancelling` 행에만 실린다(그 밖은 `null`).
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct QueuedInputRow {
+    /// [`AgentCommand::CancelQueuedInput`] 의 `input_id` 로 그대로 쓴다.
+    pub id: String,
+    pub text: String,
+    pub state: String,
+    pub cancel: Option<QueuedInputCancel>,
+}
+
+/// 취소 대기 행의 두 칸 — 명부의 환원 상태 그대로다(스냅숏 위에 뒤 사건을 다시 환원하려면 둘 다 필요하다).
+/// `answer` = `none`(우리 취소 요청의 응답이 아직 없다) | `not_removed`(안 뺐다고 답했거나 요청이 실패했다).
+/// `vendor_closed` = 그 id 의 벤더 닫힘을 이미 봤다.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct QueuedInputCancel {
+    pub answer: String,
+    pub vendor_closed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, TS)]
@@ -380,7 +449,9 @@ pub enum AgentEvent {
         oldest_seq: u64,
         #[ts(type = "number")]
         latest_seq: u64,
-        /// 이 seq+1 부터 replay 를 보낸다(클라가 dedup 기준).
+        /// 이 replay 의 머리 — 실제로 처음 보낸 seq. 보낸 것이 없으면 빈 ring 은 다음에 발급할 seq,
+        /// 이어받을 꼬리가 없으면 `after_seq+1`. ★dedup 기준(「마지막으로 본 seq」)이 아니다★ — 뷰는
+        /// 이 값을 flush 시작점 `max(마지막+1, replay_from)` 에만 쓴다(ADR-0231).
         #[ts(type = "number")]
         replay_from: u64,
         /// ring 밖으로 밀려 일부 손실(clear+tail).
@@ -526,7 +597,7 @@ pub enum AgentEvent {
     /// 이 variant 가 클라이언트를 「데몬 명령 **수신** peer」로 만든다 — ADR-0081 이 「신규 능력」으로 적은
     /// 그것이고, 그 ADR 의 3-variant opaque relay 봉투는 ADR-0155 이 이 통합 봉투로 대체했다.
     ///
-    /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지 18개는 알림이거나 내가 보낸 명령의 답장이다. 그래서
+    /// ★이 enum 의 유일한 「요청」 variant 다★ — 나머지는 전부 알림이거나 내가 보낸 명령의 답장이다. 그래서
     /// 받는 쪽은 이것만 [`AgentEvent`] 소비 흐름에서 갈라내 인바운드 수신기로 넘기고, 답은
     /// [`AgentCommand::CommandOutcome`] 으로 되돌린다. [`event_reply_request_id`] 가 여기 `None` 을 주는 것이
     /// 계약이다 — `Some` 이면 받는 쪽 pending 매칭이 이 요청을 「내가 기다린 답장」으로 읽고 삼킨다(그 봉투는
@@ -582,6 +653,44 @@ pub enum AgentEvent {
             type = "{ request_id: string, outcome: { Ok: unknown } | { Err: { code?: string | null, message?: string | null, retry?: string | null, [key: string]: unknown } } }"
         )]
         reply: CommandReply,
+    },
+
+    /// [`AgentCommand::ListQueuedInputs`] 응답(전용 reply) — 버스 `agent.listQueuedInputs` 의 답과 같은 값이다.
+    ///
+    /// `inputs` = 비종결 항목만(목록 순서 그대로). `as_of_seq` = 행이 환원한 마지막 목록 사건의 seq(`null` = 이
+    /// 화신의 목록 사건이 아직 없다) — ★`epoch` 안에서만 견준다★(재부착 대조가 스냅숏과 라이브 사건을 이 seq 로
+    /// 맞춘다). `stopped_after_error` = 오류로 끝난 턴 뒤라 사용자의 다음 턴이 성공할 때까지 우편이 멈춰 있다.
+    /// ★broadcast 로 바꾸지 말 것★ — [`AgentEvent::CommandList`] 와 같은 이유로 구형 셸 안전이 「전용 reply」에 선다.
+    // ADR-0231
+    QueuedInputs {
+        request_id: RequestId,
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        inputs: Vec<QueuedInputRow>,
+        #[ts(type = "number | null")]
+        as_of_seq: Option<u64>,
+        epoch: u32,
+        stopped_after_error: bool,
+    },
+    /// [`AgentCommand::CancelQueuedInput`] 응답(전용 reply). ★「취소됐다」가 아니라 취소 요청에 대한 답이다★ —
+    /// `outcome` = `cancelled`(곧바로 거뒀다) | `requested`(취소를 요청했다 · 이미 취소 대기였다 — 결말은 뒤따르는
+    /// 목록 사건이 정한다). 그래서 이름이 `…Cancelled` 가 아니다. 실패(임대 거절 · `NOT_FOUND` · 취소 줄 쓰기
+    /// 실패)는 이 variant 가 아니라 `Error` 로 온다.
+    // ADR-0231
+    QueuedInputCancelReply {
+        request_id: RequestId,
+        #[ts(type = "string")]
+        agent_id: AgentId,
+        input_id: String,
+        outcome: String,
+    },
+
+    /// 사용량 한 장 — 그 벤더를 구독한 연결에만 간다([`AgentCommand::UsageSubscribe`]). 요청의 답이 아니다.
+    /// `subscribed` = 받는 연결의 구독 집합 — 데몬이 이 한 장을 짓던 순간의 것이라 한 발 늦을 수 있다.
+    /// ★같은 칸의 한 장이 뒤바뀌어 오거나 두 번 올 수 있다★ — 칸마다 가장 큰 `snapshot.revision` 만 남긴다.
+    UsageLimitsUpdated {
+        snapshot: UsageLimitSnapshot,
+        subscribed: Vec<AgentBackendKind>,
     },
 
     /// request_id 있으면 특정 command 실패.
@@ -640,7 +749,23 @@ pub enum StructuredEvent {
         id: Option<String>,
         turn_id: Option<String>,
         message_id: Option<String>,
+        /// 도구의 중립 종류. ★칸이 없으면(옛 데몬) 프론트 소비자는 `Other` 로 읽는다★ — 새 데몬은 늘 싣는다.
+        // ADR-0239: `PROTOCOL_VERSION` 은 이 칸으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
+        //   옛 쪽엔 오독할 것이 없다).
+        // ts-rs 는 이 serde 속성을 못 읽어 경고("failed to parse")하고 무시한다 — TS 칸 모양은 아래
+        //   `ts(optional)` 이 정한다.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        category: Option<ToolCategory>,
     },
+    /// 도구 호출 하나의 끝 결과(agent `OutputEvent::ToolResult` 의 미러) — 앞선 `ToolCall` 을 `id` 로 가리킨다.
+    /// ★새 행이 아니다★ — 가리킬 호출이 없으면 붙일 곳이 없다.
+    ///
+    /// ★이 사건이 없다 = 성공이 아니다★ — 없음은 「모름」이다(옛 데몬 · 링에서 밀려남 · 끝이 안 옴).
+    /// ★턴 끝 **뒤에도** 온다★ — 지난 턴의 행에 붙는다. 「새 내용이 왔다」로 읽어 대기 표시를 풀지 말 것.
+    // ADR-0241: `PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다 — `TurnEnd` 와 같은 판단(데몬→셸 한 방향 ·
+    //   옛 셸엔 오독할 것이 없다 · 옛 데몬은 이 사건을 안 보낼 뿐이다).
+    ToolResult { id: String, outcome: ToolOutcome },
     Usage {
         #[ts(type = "number")]
         input_tokens: u64,
@@ -692,6 +817,81 @@ pub enum StructuredEvent {
     /// 위 정형 variant 로 안 잡히는 backend별 이벤트의 탈출구(forward-compat).
     /// kind=종류 태그, json=원본 직렬화 payload(프론트가 kind 로 분기·해석).
     Structured { kind: String, json: String },
+    /// 대기 입력 명부 사건(agent `OutputEvent::QueuedInput` 의 미러). 모양 = `{"type":"QueuedInput","op":{"kind":…}}`.
+    ///
+    /// ★프론트 누산기는 이 사건열을 agent 명부와 **같은 환원 규칙**으로 읽는다★ — 두 판의 공유 골든은
+    ///   `crates/engram-dashboard-agent/src/queued_input_golden.json` 이고, 그 사건 객체가 곧 `op` 의 모양이다.
+    /// ★`PROTOCOL_VERSION` 은 이 변형으로 올리지 않는다★ — [`StructuredEvent::TurnEnd`] 와 같은 판단이다
+    ///   (데몬→셸 한 방향 · 구데몬은 이 사건을 안 보낼 뿐 오독할 것이 없다).
+    // ADR-0231
+    QueuedInput { op: QueuedInputEvent },
+}
+
+/// 대기 입력 명부 사건 — agent `QueuedInputEvent` 의 미러. 판별자 = `"kind"`(바깥 봉투의 `"type"` 과 겹치지
+/// 않게 — [`TurnOutcome`] 과 같은 이유).
+///
+/// ★`Delivered` 는 본문을 싣지 않는다★ — 말풍선 본문은 앞선 `Queued` 의 `text`(우리 로컬 사본)다.
+/// ★`AckUnavailable.delivered` 는 링에 적힐 때 늘 채워져 있다(agent 코어가 채운다)★ — 그 사건이 받음으로
+///   닫는 항목마다 (id, 본문) 한 벌. 링 창이 `Queued` 를 잃은 창도 이 사본으로 그 자리 말풍선을 그린다.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "kind")]
+#[ts(export)]
+pub enum QueuedInputEvent {
+    Queued {
+        id: String,
+        text: String,
+    },
+    CancelRequested {
+        id: String,
+    },
+    /// `removed: true` 만 결말(취소됨)이다 — `false` 는 뒤이은 벤더 닫힘의 원인을 가르는 재료다.
+    CancelAnswered {
+        id: String,
+        removed: bool,
+    },
+    CancelFailed {
+        id: String,
+    },
+    /// 넘김 표지 — `sent: true` = 통로가 벤더에 넘겼다 · `false` = 쥔 자리로 되돌렸다. 결말이 아니다(행은 남는다 —
+    ///   넘긴 행은 ✕ 가 숨는다). 목록에 없는 id 면 무동작 · 마지막 것이 이긴다.
+    HandedOver {
+        id: String,
+        sent: bool,
+    },
+    Delivered {
+        id: String,
+    },
+    /// `Rejected` 는 그 id 로 그린 말풍선도 지운다.
+    Dropped {
+        id: String,
+        cause: DropCause,
+    },
+    AckUnavailable {
+        delivered: Vec<DeliveredCopy>,
+    },
+}
+
+/// [`QueuedInputEvent::Dropped`] 의 원인 — wire 에서는 문자열 하나(`"Withdrawn"` 등).
+/// ★`Unknown` 만 되살림 가능한 묘비를 남긴다★(뒤늦은 `Delivered` 가 이긴다).
+// ADR-0231
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum DropCause {
+    Withdrawn,
+    Interrupted,
+    AgentEnded,
+    Rejected,
+    Unknown,
+}
+
+/// [`QueuedInputEvent::AckUnavailable`] 이 싣는 말풍선 사본.
+// ADR-0231
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct DeliveredCopy {
+    pub id: String,
+    pub text: String,
 }
 
 /// 턴이 **어떻게** 끝났나 — [`StructuredEvent::TurnEnd`] 가 나르는 중립 어휘(agent `TurnOutcome` 미러).
@@ -725,6 +925,46 @@ pub enum TurnOutcome {
     Interrupted,
     /// 결말을 알 수 없다(모르는 값이거나 아예 없었다). 그래도 턴은 끝난 것으로 센다.
     Unknown,
+}
+
+/// 도구 호출의 중립 종류 — [`StructuredEvent::ToolCall`] 의 `category`(agent `ToolCategory` 미러). wire 에서는
+/// 문자열 하나(`"Read"` 등).
+///
+/// ★벤더 도구 이름 · item 타입은 여기 오지 않는다★(ADR-0004) — 판정은 각 backend 번역기 안에서 끝난다.
+/// ★프론트 소비자는 모르는 낱말을 `Other` 로 읽는다★ — 더 새 데몬이 변형을 더해도 화면이 선다.
+// ADR-0239
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ToolCategory {
+    Read,
+    Search,
+    List,
+    Edit,
+    Command,
+    Web,
+    Agent,
+    Mcp,
+    Other,
+}
+
+/// 도구 호출 끝 결과의 중립 결말 — [`StructuredEvent::ToolResult`] 의 `outcome`(agent `ToolOutcome` 미러). wire
+/// 에서는 문자열 하나(`"Failed"` 등).
+///
+/// - `Completed` = 정상 완료. ★지금 어느 데몬도 싣지 않는다★ — 실패 · 거부만 오고 이 낱말은 선 어휘로만 있다.
+/// - `Failed` = 돌다 실패했다.
+/// - `Declined` = 실행되지 않았다 — 우리 거절로 귀속되지 않은 거부. 이유는 모른다.
+/// - `Refused` = 대시보드가 승인 요청을 거절해 실행되지 않았다.
+///
+/// ★벤더 끝 상태 문자열은 여기 오지 않는다★(ADR-0004). ★프론트 소비자는 모르는 낱말을 표식 없음으로 읽는다★ —
+/// 더 새 데몬이 낱말을 더해도 화면이 선다.
+// ADR-0241
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub enum ToolOutcome {
+    Completed,
+    Failed,
+    Declined,
+    Refused,
 }
 
 /// 출력 청크 — 종류 불가지(설계 §2).
@@ -799,7 +1039,12 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         //   전용 reply CommandList 로 온다(아래 event_reply_request_id 가 그 짝).
         | AgentCommand::RegisterCommands { request_id, .. }
         | AgentCommand::UpdateCommands { request_id, .. }
-        | AgentCommand::ListCommands { request_id } => Some(*request_id),
+        | AgentCommand::ListCommands { request_id }
+        // 대기 입력 목록(ADR-0231) — 둘 다 전용 reply(QueuedInputs/QueuedInputCancelReply)를 기다린다.
+        | AgentCommand::ListQueuedInputs { request_id, .. }
+        | AgentCommand::CancelQueuedInput { request_id, .. }
+        // ⟳ — 답은 기존 `Ack` 라 아래 event_reply_request_id 에 새 갈래가 없다.
+        | AgentCommand::RefreshUsageLimits { request_id, .. } => Some(*request_id),
         // ★명령 요청은 상관 대상이다 — 키만 봉투 안에 있다★(ADR-0155). 형제들처럼 제 칸이 없다고 여기서
         //   None 을 고르면 셸이 답장을 받고도 깨울 슬롯을 못 만들어 마감시각까지 매달린다. 아래
         //   event_reply_request_id 의 `CommandReply` 갈래와 **한 쌍으로만** 성립한다.
@@ -809,6 +1054,7 @@ pub fn command_request_id(cmd: &AgentCommand) -> Option<RequestId> {
         AgentCommand::Resize { .. }
         | AgentCommand::Subscribe { .. }
         | AgentCommand::Unsubscribe { .. }
+        | AgentCommand::UsageSubscribe { .. }
         // ★CommandOutcome 은 **내가 보내는 답장**이라 여기 None 이다★ — 상관 키가 `reply` 안에 있지만 그것은
         //   데몬이 나에게 준 요청의 키이고, 내 pending 표의 키가 아니다. Some 을 돌려주면 답장을 보내는 그
         //   순간 그 키로 빈 pending 슬롯이 생겨 연결이 끊길 때까지 남는다.
@@ -840,6 +1086,9 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         //   움직여야 하는 한 쌍이다 — 이 쌍의 고정은 이 crate 의 테스트가 박는다
         //   (`cargo test -p engram-dashboard-protocol`, CI 가 항상 실행).
         | AgentEvent::CommandList { request_id, .. }
+        // 대기 입력 목록(ADR-0231) — 위 command_request_id 의 두 갈래와 한 쌍이다.
+        | AgentEvent::QueuedInputs { request_id, .. }
+        | AgentEvent::QueuedInputCancelReply { request_id, .. }
         | AgentEvent::Spawned { request_id, .. } => Some(*request_id),
         // ★명령 답장도 상관 대상이다 — 위 `AgentCommand::Command` 갈래의 짝★(ADR-0155). 요청이 Some 을
         //   주는데 여기서 None 을 고르면 그 슬롯을 깨울 짝이 없어져 연결이 끊길 때까지 안 풀린다.
@@ -859,6 +1108,8 @@ pub fn event_reply_request_id(ev: &AgentEvent) -> Option<RequestId> {
         | AgentEvent::ProfileListUpdated { .. }
         // PresetListUpdated = broadcast(request_id 없음, ADR-0061) — pending 매칭 대상 아님.
         | AgentEvent::PresetListUpdated { .. }
+        // 구독한 연결로 가는 사용량 한 장 — ⟳ 의 답(`Ack`)이 아니다.
+        | AgentEvent::UsageLimitsUpdated { .. }
         // ★CommandRequest 는 **들어오는 요청**이라 여기 None 이다(load-bearing)★ — 봉투에 request_id 가
         //   있으니 Some 이 자연스러워 보이지만, 그 키는 **데몬이 만든 요청의 키**이고 내 pending 표의 키가
         //   아니다. Some 을 돌려주면 받는 쪽이 이것을 「내가 기다린 답장」으로 읽어 봉투를 삼킨다 — 명령은
@@ -886,6 +1137,19 @@ mod tests {
                 id: Some("call_1".into()),
                 turn_id: None,
                 message_id: Some("m1".into()),
+                category: Some(ToolCategory::Read),
+            },
+            StructuredEvent::ToolCall {
+                name: "x".into(),
+                args_json: "{}".into(),
+                id: None,
+                turn_id: None,
+                message_id: None,
+                category: None,
+            },
+            StructuredEvent::ToolResult {
+                id: "call_1".into(),
+                outcome: ToolOutcome::Declined,
             },
             StructuredEvent::Usage {
                 input_tokens: 123,
@@ -924,6 +1188,20 @@ mod tests {
             StructuredEvent::Structured {
                 kind: "custom".into(),
                 json: r#"{"k":1}"#.into(),
+            },
+            StructuredEvent::QueuedInput {
+                op: QueuedInputEvent::Dropped {
+                    id: "u1".into(),
+                    cause: DropCause::Unknown,
+                },
+            },
+            StructuredEvent::QueuedInput {
+                op: QueuedInputEvent::AckUnavailable {
+                    delivered: vec![DeliveredCopy {
+                        id: "u2".into(),
+                        text: "hi".into(),
+                    }],
+                },
             },
         ];
         for ev in cases {
@@ -1034,6 +1312,213 @@ mod tests {
                 r#"{{"type":"TurnEnd","turn_id":null,"outcome":{{"kind":"Failed","detail":"{raw}"}}}}"#
             )
         );
+    }
+
+    // ── 도구 종류(ADR-0239) ──────────────────────────────────────────────────────────
+
+    /// ★프론트가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 종류는 문자열 하나이고, 칸이 없는 옛 데몬의
+    /// 줄도 읽히며(→ `None`), `None` 은 칸 자체를 싣지 않는다.
+    // ADR-0239
+    #[test]
+    fn tool_call_category_wire_shape_is_pinned_and_absent_means_none() {
+        let with = StructuredEvent::ToolCall {
+            name: "Read".into(),
+            args_json: "{}".into(),
+            id: Some("c1".into()),
+            turn_id: None,
+            message_id: None,
+            category: Some(ToolCategory::Search),
+        };
+        let json = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null,"category":"Search"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<StructuredEvent>(&json).unwrap(),
+            with
+        );
+
+        let old = r#"{"type":"ToolCall","name":"Read","args_json":"{}","id":"c1","turn_id":null,"message_id":null}"#;
+        let back: StructuredEvent = serde_json::from_str(old).expect("칸 없는 옛 줄이 안 읽힌다");
+        assert_eq!(
+            back,
+            StructuredEvent::ToolCall {
+                name: "Read".into(),
+                args_json: "{}".into(),
+                id: Some("c1".into()),
+                turn_id: None,
+                message_id: None,
+                category: None,
+            }
+        );
+        assert_eq!(
+            serde_json::to_string(&back).unwrap(),
+            old,
+            "None 이 칸을 실었다"
+        );
+    }
+
+    /// ★아홉 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolCategory.ts` 로 이 낱말을 읽는다
+    /// (`structuredAccumulator.ts` 의 `TOOL_CATEGORIES`).
+    // ADR-0239
+    #[test]
+    fn every_tool_category_round_trips_as_its_own_name() {
+        let all = [
+            (ToolCategory::Read, "Read"),
+            (ToolCategory::Search, "Search"),
+            (ToolCategory::List, "List"),
+            (ToolCategory::Edit, "Edit"),
+            (ToolCategory::Command, "Command"),
+            (ToolCategory::Web, "Web"),
+            (ToolCategory::Agent, "Agent"),
+            (ToolCategory::Mcp, "Mcp"),
+            (ToolCategory::Other, "Other"),
+        ];
+        for (category, name) in all {
+            let json = serde_json::to_string(&category).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<ToolCategory>(&json).unwrap(),
+                category
+            );
+        }
+    }
+
+    // ── 도구 끝 결과(ADR-0241) ──────────────────────────────────────────────────────────
+
+    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 판별자 `"type"`, 결말은 문자열 하나.
+    // ADR-0241
+    #[test]
+    fn tool_result_wire_shape_is_pinned() {
+        for (outcome, want) in [
+            (
+                ToolOutcome::Failed,
+                r#"{"type":"ToolResult","id":"i-1","outcome":"Failed"}"#,
+            ),
+            (
+                ToolOutcome::Refused,
+                r#"{"type":"ToolResult","id":"i-1","outcome":"Refused"}"#,
+            ),
+        ] {
+            let ev = StructuredEvent::ToolResult {
+                id: "i-1".into(),
+                outcome,
+            };
+            let json = serde_json::to_string(&ev).unwrap();
+            assert_eq!(json, want);
+            assert_eq!(serde_json::from_str::<StructuredEvent>(&json).unwrap(), ev);
+        }
+    }
+
+    /// ★네 낱말이 그대로 문자열로 오간다★ — 프론트는 생성물 `ToolOutcome.ts` 로 이 낱말을 읽는다
+    /// (`structuredAccumulator.ts` 의 `toolResultMark`).
+    // ADR-0241
+    #[test]
+    fn every_tool_outcome_round_trips_as_its_own_name() {
+        let all = [
+            (ToolOutcome::Completed, "Completed"),
+            (ToolOutcome::Failed, "Failed"),
+            (ToolOutcome::Declined, "Declined"),
+            (ToolOutcome::Refused, "Refused"),
+        ];
+        for (outcome, name) in all {
+            let json = serde_json::to_string(&outcome).unwrap();
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(serde_json::from_str::<ToolOutcome>(&json).unwrap(), outcome);
+        }
+    }
+
+    // ── 대기 입력 명부 사건(ADR-0231) ────────────────────────────────────────────────
+
+    /// ★프론트 누산기가 이 글자를 그대로 읽는다 — golden 으로 못 박는다★: 바깥 판별자 `"type"`, 사건 판별자
+    /// `"kind"`, 원인은 문자열 하나, 사본은 `{id,text}` 배열.
+    #[test]
+    fn queued_input_wire_shape_is_pinned() {
+        let json = |op| serde_json::to_string(&StructuredEvent::QueuedInput { op }).unwrap();
+        assert_eq!(
+            json(QueuedInputEvent::Queued {
+                id: "u1".into(),
+                text: "hi".into()
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"Queued","id":"u1","text":"hi"}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::CancelAnswered {
+                id: "u1".into(),
+                removed: false
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"CancelAnswered","id":"u1","removed":false}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::HandedOver {
+                id: "u1".into(),
+                sent: true
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"HandedOver","id":"u1","sent":true}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::Dropped {
+                id: "u1".into(),
+                cause: DropCause::AgentEnded
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"Dropped","id":"u1","cause":"AgentEnded"}}"#
+        );
+        assert_eq!(
+            json(QueuedInputEvent::AckUnavailable {
+                delivered: vec![DeliveredCopy {
+                    id: "u2".into(),
+                    text: "yo".into()
+                }]
+            }),
+            r#"{"type":"QueuedInput","op":{"kind":"AckUnavailable","delivered":[{"id":"u2","text":"yo"}]}}"#
+        );
+        let causes: Vec<String> = [
+            DropCause::Withdrawn,
+            DropCause::Interrupted,
+            DropCause::AgentEnded,
+            DropCause::Rejected,
+            DropCause::Unknown,
+        ]
+        .iter()
+        .map(|c| {
+            serde_json::to_value(c)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+        assert_eq!(
+            causes,
+            [
+                "Withdrawn",
+                "Interrupted",
+                "AgentEnded",
+                "Rejected",
+                "Unknown"
+            ]
+        );
+    }
+
+    /// 공유 골든의 사건 객체가 곧 wire `op` 다 — 누산기는 그 객체를 `{type:"QueuedInput", op}` 로 먹는다. 골든을
+    /// 고쳐 wire 가 못 읽는 모양이 들어오면 여기서 빨개진다(파일은 agent crate 에 있다 — 명부 옆이 집이다).
+    #[test]
+    fn the_shared_queued_input_golden_speaks_the_wire_shape() {
+        let golden: serde_json::Value = serde_json::from_str(include_str!(
+            "../../engram-dashboard-agent/src/queued_input_golden.json"
+        ))
+        .expect("골든 JSON");
+        let mut fed = 0;
+        for case in golden["cases"].as_array().expect("cases") {
+            for ev in case["events"].as_array().expect("events") {
+                let op: QueuedInputEvent = serde_json::from_value(ev.clone())
+                    .unwrap_or_else(|e| panic!("wire 가 못 읽는 골든 사건 {ev}: {e}"));
+                assert_eq!(&serde_json::to_value(&op).unwrap(), ev, "왕복 무손실");
+                fed += 1;
+            }
+        }
+        assert!(fed > 0);
     }
 
     // ── 구독 응답의 이어받기 표식(ADR-0226) ──────────────────────────────────────────
@@ -1499,6 +1984,173 @@ mod tests {
         );
     }
 
+    // ── 대기 입력 목록 wire(ADR-0231) — 프론트·셸이 이 글자를 그대로 읽는다 ─────────────
+    const NIL: &str = "00000000-0000-0000-0000-000000000000";
+
+    #[test]
+    fn queued_input_commands_json_golden_and_roundtrip() {
+        let list = AgentCommand::ListQueuedInputs {
+            agent_id: Uuid::nil(),
+            request_id: RequestId(Uuid::nil()),
+        };
+        let cancel = AgentCommand::CancelQueuedInput {
+            agent_id: Uuid::nil(),
+            input_id: "q1".into(),
+            request_id: RequestId(Uuid::nil()),
+        };
+        for (cmd, golden) in [
+            (
+                list,
+                format!(r#"{{"ListQueuedInputs":{{"agent_id":"{NIL}","request_id":"{NIL}"}}}}"#),
+            ),
+            (
+                cancel,
+                format!(
+                    r#"{{"CancelQueuedInput":{{"agent_id":"{NIL}","input_id":"q1","request_id":"{NIL}"}}}}"#
+                ),
+            ),
+        ] {
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert_eq!(
+                json, golden,
+                "대기 입력 명령의 wire 형태가 golden 과 불일치"
+            );
+            let back: AgentCommand = serde_json::from_str(&json).unwrap();
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        }
+    }
+
+    /// 행 모양·낱말은 버스 `agent.listQueuedInputs` 행과 같다 — 취소 대기 행만 두 칸(`answer`·`vendor_closed`)을
+    /// 싣고, 그 밖은 `cancel: null`. `as_of_seq` 는 JSON number(프론트 바인딩도 `number | null`).
+    #[test]
+    fn queued_inputs_reply_json_golden_and_roundtrip() {
+        let reply = AgentEvent::QueuedInputs {
+            request_id: RequestId(Uuid::nil()),
+            agent_id: Uuid::nil(),
+            inputs: vec![
+                QueuedInputRow {
+                    id: "q1".into(),
+                    text: "first".into(),
+                    state: "queued".into(),
+                    cancel: None,
+                },
+                QueuedInputRow {
+                    id: "q2".into(),
+                    text: "second".into(),
+                    state: "cancelling".into(),
+                    cancel: Some(QueuedInputCancel {
+                        answer: "not_removed".into(),
+                        vendor_closed: true,
+                    }),
+                },
+            ],
+            as_of_seq: Some(7),
+            epoch: 3,
+            stopped_after_error: true,
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"QueuedInputs":{{"request_id":"{NIL}","agent_id":"{NIL}","inputs":[{{"id":"q1","text":"first","state":"queued","cancel":null}},{{"id":"q2","text":"second","state":"cancelling","cancel":{{"answer":"not_removed","vendor_closed":true}}}}],"as_of_seq":7,"epoch":3,"stopped_after_error":true}}}}"#
+            ),
+            "QueuedInputs wire 형태가 golden 과 불일치"
+        );
+        let back: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+
+        let empty = AgentEvent::QueuedInputs {
+            request_id: RequestId(Uuid::nil()),
+            agent_id: Uuid::nil(),
+            inputs: vec![],
+            as_of_seq: None,
+            epoch: 0,
+            stopped_after_error: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            format!(
+                r#"{{"QueuedInputs":{{"request_id":"{NIL}","agent_id":"{NIL}","inputs":[],"as_of_seq":null,"epoch":0,"stopped_after_error":false}}}}"#
+            ),
+            "목록 사건이 아직 없는 화신 = as_of_seq null"
+        );
+    }
+
+    #[test]
+    fn queued_input_cancel_reply_json_golden_and_roundtrip() {
+        let reply = AgentEvent::QueuedInputCancelReply {
+            request_id: RequestId(Uuid::nil()),
+            agent_id: Uuid::nil(),
+            input_id: "q1".into(),
+            outcome: "requested".into(),
+        };
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(
+            json,
+            format!(
+                r#"{{"QueuedInputCancelReply":{{"request_id":"{NIL}","agent_id":"{NIL}","input_id":"q1","outcome":"requested"}}}}"#
+            ),
+            "QueuedInputCancelReply wire 형태가 golden 과 불일치"
+        );
+        let back: AgentEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(json, serde_json::to_string(&back).unwrap());
+    }
+
+    /// ★명령↔답장 두 쌍 박제★ — 한쪽만 `Some` 이면 셸이 그 왕복을 연결이 끊기거나 답장 상한이 찰 때까지 붙든다.
+    #[test]
+    fn queued_input_commands_and_replies_pair_by_request_id() {
+        let r = RequestId::new();
+        let agent_id = Uuid::new_v4();
+        let pairs = [
+            (
+                AgentCommand::ListQueuedInputs {
+                    agent_id,
+                    request_id: r,
+                },
+                AgentEvent::QueuedInputs {
+                    request_id: r,
+                    agent_id,
+                    inputs: vec![],
+                    as_of_seq: None,
+                    epoch: 0,
+                    stopped_after_error: false,
+                },
+            ),
+            (
+                AgentCommand::CancelQueuedInput {
+                    agent_id,
+                    input_id: "q1".into(),
+                    request_id: r,
+                },
+                AgentEvent::QueuedInputCancelReply {
+                    request_id: r,
+                    agent_id,
+                    input_id: "q1".into(),
+                    outcome: "cancelled".into(),
+                },
+            ),
+        ];
+        for (cmd, reply) in pairs {
+            assert_eq!(command_request_id(&cmd), Some(r), "{cmd:?}");
+            assert_eq!(event_reply_request_id(&reply), Some(r), "{reply:?}");
+        }
+    }
+
+    /// `input_id` 에 기본값이 없다 — 빠진 취소는 「가장 최근」 같은 것으로 흡수되지 않고 반려된다.
+    #[test]
+    fn queued_input_commands_reject_missing_fields() {
+        for json in [
+            format!(r#"{{"CancelQueuedInput":{{"agent_id":"{NIL}","request_id":"{NIL}"}}}}"#),
+            format!(r#"{{"CancelQueuedInput":{{"agent_id":"{NIL}","input_id":"q1"}}}}"#),
+            format!(r#"{{"ListQueuedInputs":{{"agent_id":"{NIL}"}}}}"#),
+        ] {
+            assert!(
+                serde_json::from_str::<AgentCommand>(&json).is_err(),
+                "빠진 칸이 기본값으로 흡수되면 안 된다: {json}"
+            );
+        }
+    }
+
     /// `request_id` 가 빠진 패킷은 **거절돼야 한다** — 이 crate 의 `RequestId::default()` 는 새 v4 를
     /// 찍으므로 `#[serde(default)]` 가 붙으면 조용히 짝 없는 상관 키가 생긴다(답장이 영영 안 붙는다).
     /// 그 attribute 가 실수로 들어오면 이 단언이 먼저 깨진다.
@@ -1918,5 +2570,116 @@ mod tests {
             asked.0, envelope.request_id.0,
             "봉투가 품은 uuid 그대로여야"
         );
+    }
+
+    // ── 사용량 한도 ──
+
+    #[test]
+    fn usage_commands_json_golden_and_roundtrip() {
+        for (cmd, golden) in [
+            (
+                AgentCommand::UsageSubscribe {
+                    vendors: vec![AgentBackendKind::Claude, AgentBackendKind::Codex],
+                },
+                r#"{"UsageSubscribe":{"vendors":["claude","codex"]}}"#.to_owned(),
+            ),
+            (
+                AgentCommand::UsageSubscribe { vendors: vec![] },
+                r#"{"UsageSubscribe":{"vendors":[]}}"#.to_owned(),
+            ),
+            (
+                AgentCommand::RefreshUsageLimits {
+                    vendor: AgentBackendKind::Codex,
+                    request_id: RequestId(Uuid::nil()),
+                },
+                format!(r#"{{"RefreshUsageLimits":{{"vendor":"codex","request_id":"{NIL}"}}}}"#),
+            ),
+        ] {
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert_eq!(json, golden, "사용량 명령의 wire 형태가 golden 과 불일치");
+            let back: AgentCommand = serde_json::from_str(&json).unwrap();
+            assert_eq!(json, serde_json::to_string(&back).unwrap());
+        }
+        // 기본값으로 흡수되면 ⟳ 가 짝 없는 답을 기다린다.
+        assert!(serde_json::from_str::<AgentCommand>(
+            r#"{"RefreshUsageLimits":{"vendor":"claude"}}"#
+        )
+        .is_err());
+    }
+
+    /// 스냅숏 모양 전체의 정본은 `domain` 의 golden 이다 — 여기서는 이벤트 봉투와 `subscribed` 를 잰다.
+    #[test]
+    fn usage_limits_updated_json_golden_and_roundtrip() {
+        let ev = AgentEvent::UsageLimitsUpdated {
+            snapshot: UsageLimitSnapshot {
+                vendor: AgentBackendKind::Claude,
+                account_key: "default".into(),
+                five_hour: None,
+                weekly: None,
+                model_scoped: vec![],
+                plan: None,
+                in_flight: false,
+                state: crate::domain::UsageVendorState::Ready,
+                revision: 3,
+            },
+            subscribed: vec![AgentBackendKind::Claude, AgentBackendKind::Codex],
+        };
+        let json = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "UsageLimitsUpdated": {
+                    "snapshot": {
+                        "vendor": "claude",
+                        "account_key": "default",
+                        "five_hour": null,
+                        "weekly": null,
+                        "model_scoped": [],
+                        "plan": null,
+                        "in_flight": false,
+                        "state": { "kind": "Ready" },
+                        "revision": 3
+                    },
+                    "subscribed": ["claude", "codex"]
+                }
+            })
+        );
+        let back: AgentEvent = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), json);
+    }
+
+    /// 구독은 답이 없고(대기표를 걸면 영구 pending) ⟳ 는 기존 `Ack` 와 한 쌍이며, 방송은 상관 밖이다.
+    #[test]
+    fn usage_wire_request_id_arms() {
+        let r = RequestId::new();
+        assert_eq!(
+            command_request_id(&AgentCommand::UsageSubscribe {
+                vendors: vec![AgentBackendKind::Claude],
+            }),
+            None
+        );
+        assert_eq!(
+            command_request_id(&AgentCommand::RefreshUsageLimits {
+                vendor: AgentBackendKind::Claude,
+                request_id: r,
+            }),
+            Some(r)
+        );
+        assert_eq!(
+            event_reply_request_id(&AgentEvent::Ack { request_id: r }),
+            Some(r)
+        );
+        let updated: AgentEvent = serde_json::from_value(serde_json::json!({
+            "UsageLimitsUpdated": {
+                "snapshot": {
+                    "vendor": "codex", "account_key": "default", "five_hour": null, "weekly": null,
+                    "model_scoped": [], "plan": null, "in_flight": true,
+                    "state": { "kind": "Ready" }, "revision": 1
+                },
+                "subscribed": []
+            }
+        }))
+        .unwrap();
+        assert_eq!(event_reply_request_id(&updated), None);
     }
 }

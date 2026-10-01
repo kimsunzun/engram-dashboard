@@ -288,4 +288,24 @@ mod tests {
             );
         }
     }
+
+    /// ★날 관측은 여기서 방송하지 않는다★ — 사용량은 서비스가 병합한 한 장을 그 벤더를 구독한 연결에만
+    /// 보낸다(`usage_service`). 여기서 흘리면 구독 안 한 연결까지 병합 전 값을 받는다.
+    #[test]
+    fn a_usage_observation_is_not_broadcast() {
+        use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey};
+        let (sink, fanout) = sink_with_fanout();
+
+        sink.usage_observed(UsageObservation {
+            vendor: UsageVendorKey::new("test-vendor"),
+            five_hour: None,
+            weekly: None,
+            model_scoped: None,
+            plan: None,
+            source: UsageSource::Active,
+            limits_unavailable: None,
+        });
+
+        assert!(fanout.texts().is_empty(), "{:?}", fanout.texts());
+    }
 }

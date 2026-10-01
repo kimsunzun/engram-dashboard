@@ -1,7 +1,8 @@
 //! turn — (에이전트, epoch)별 **턴 진행 관측 표**. 코어가 소유하는 에이전트 "사실" 계층
 //! (ADR-0113 결정 1 · ADR-0119 결정 4 — 명부 옆자리).
 //!
-//! ★이 모듈이 소유하는 것 = 관측된 사실뿐★: "이 화신이 지금 턴 중인가" 와 "마지막 턴 신호가 언제였나".
+//! ★이 모듈이 소유하는 것 = 관측된 사실뿐★: "이 화신이 지금 턴 중인가" · "마지막 턴 신호가 언제였나" ·
+//!   "마지막 턴 끝이 오류였고 그 뒤 깨끗한 끝이 아직 없나"(오류 뒤 멈춤 — ADR-0231).
 //!   폴백·상한·도어벨 같은 **해석은 소비자 몫**이다(ADR-0113 결정 2) — 소비자마다 오판 비용이 다르다
 //!   (우편은 "안 가는 것" 이 최악이라 idle 쪽으로 무너지는 폴백을 쓰고, 입력 잠금은 다른 상한을 원한다).
 //!   여기에 정책을 넣으면 한 소비자의 가치판단이 전원에게 강제된다.
@@ -49,8 +50,23 @@ use crate::types::AgentId;
 pub enum TurnSignal {
     /// 그 이벤트를 낸 백엔드가 "이 화신은 턴 진행 중" 으로 분류했다.
     Progress,
-    /// 그 이벤트를 낸 백엔드가 "이 화신의 턴이 끝났다" 로 분류했다.
-    Ended,
+    /// 이 턴이 오류를 만났다 — ★`in_turn` 을 바꾸지 않는다★. 표가 쥐었다가 그 턴의 `Ended` 에서
+    /// `last_end_failed` 로 접는다(끝을 보기 전엔 멈춤이 서지 않는다).
+    // ADR-0231
+    Failed,
+    /// 그 이벤트를 낸 백엔드가 "이 화신의 턴이 끝났다" 로 분류했다 — 끝의 종류를 싣는다.
+    Ended(TurnEndKind),
+}
+
+/// 턴 끝의 종류 — `last_end_failed` 접기 규칙의 입력(ADR-0231).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnEndKind {
+    /// 깨끗한 성공 끝 — 멈춤을 푼다.
+    Clean,
+    /// 오류 끝 — 멈춤을 세운다.
+    Failed,
+    /// 그 밖의 끝(끊김·미상) — 멈춤을 세우지도 풀지도 않는다.
+    Other,
 }
 
 /// 한 (에이전트, epoch)의 턴 관측 스냅샷. 부재(`Option::None`)는 **미관측**이지 idle 이 아니다 —
@@ -61,6 +77,10 @@ pub struct TurnObservation {
     /// 이 화신에 대해 마지막으로 턴 신호를 관측한 시각. 소비자가 "이 관측이 얼마나 늙었나" 를 자기
     /// 기준으로 판정하는 축이다(멈춘 턴 탐지 등).
     pub last_signal: Instant,
+    /// 이 화신의 마지막 턴 끝이 오류였고 그 뒤 깨끗한 성공 끝이 아직 없다(오류 뒤 멈춤). 「그 밖」 끝은
+    /// 이 값을 바꾸지 않는다. 등록 직후 = 거짓.
+    // ADR-0231
+    pub last_end_failed: bool,
 }
 
 /// 턴 관측 표 — `AgentManager` 가 하나 소유하고 그 매니저의 모든 `OutputCore` 가 공유한다.
@@ -79,7 +99,27 @@ struct Entry {
     last_signal: Instant,
     /// 이 항목을 마지막으로 갱신한 **출력 seq**(같은 epoch 안에서만 비교 가능 — 화신이 바뀌면 seq 는 0
     /// 부터 다시 센다). 발행 순서와 적용 순서가 갈릴 때 늦은 신호를 걸러내는 축이다(`observe_at`).
+    /// ★`in_turn`·`last_signal` 의 커서다 — 멈춤 칸은 `last_end_seq` 가 따로 거른다★.
     last_seq: u64,
+    /// 마지막으로 접은 `Ended` 의 seq — 멈춤 칸(`error_seq`·`last_end_failed`)의 커서(ADR-0231).
+    last_end_seq: Option<u64>,
+    /// 아직 어느 `Ended` 도 접지 않은 `Failed` 의 가장 이른 seq — 그보다 큰 seq 의 `Ended` 가 접고 비운다.
+    error_seq: Option<u64>,
+    last_end_failed: bool,
+}
+
+impl Entry {
+    fn fresh(epoch: u32, at: Instant) -> Self {
+        Self {
+            epoch,
+            in_turn: false,
+            last_signal: at,
+            last_seq: 0,
+            last_end_seq: None,
+            error_seq: None,
+            last_end_failed: false,
+        }
+    }
 }
 
 impl Default for TurnObservations {
@@ -122,15 +162,7 @@ impl TurnObservations {
 
     /// 시각 주입형 [`Self::register`].
     pub fn register_at(&self, id: AgentId, epoch: u32, at: Instant) {
-        self.lock().insert(
-            id,
-            Entry {
-                epoch,
-                in_turn: false,
-                last_signal: at,
-                last_seq: 0,
-            },
-        );
+        self.lock().insert(id, Entry::fresh(epoch, at));
     }
 
     /// 턴 신호 1건 반영(관측 시각 = 지금).
@@ -170,37 +202,72 @@ impl TurnObservations {
     ///
     /// ★시각은 매 관측마다 갱신한다★: 정상적으로 길게 도는 턴은 신호가 계속 오므로 늙지 않고, 신호가
     ///   끊긴 것만 늙는다 — 소비자의 "멈춘 턴" 판정이 그 축 위에서 성립한다.
+    /// ★`last_end_failed` 접기(두 백엔드 — `TurnEndKind`)★: `Ended` 에서 오류 끝이거나 그보다 작은 seq 의
+    ///   `Failed` 를 쥐었으면 참 · 깨끗한 끝이면 거짓 · 그 밖이면 그대로. 쥔 `Failed` 는 그 `Ended` 가 비운다.
+    /// ★멈춤 칸은 **자기 커서**(`last_end_seq`)로 거른다 — 진행 커서(`last_seq`)로 거르지 말 것★: pump 가
+    ///   `Failed` 를 seq N 으로 발급받고 표에 적기 전에 다른 스레드의 진행(N+1)이 먼저 적히면, 진행 커서는
+    ///   그 `Failed` 를 버리고 뒤의 `Ended(Clean)`(N+2)이 링 순서상 오류로 끝난 턴을 깨끗하다고 접는다(그
+    ///   수신자 앞 우편이 오류 뒤 멈춤 없이 들어간다). 그래서 `Failed`·`Ended` 는 마지막으로 접은 `Ended`
+    ///   보다 작은 seq 일 때만 버리고, `Failed` 는 쥐었다가(가장 이른 seq) 그보다 큰 seq 의 `Ended` 가 접는다.
+    ///   `in_turn`·`last_seq`·`last_signal` 은 그 신호가 가장 새 것일 때만 바꾼다 — 뒤 seq 의 진행은 다음 턴이다.
+    /// ★남는 틈(정직 표기)★: 접은 `Ended` 보다 작은 seq 의 `Failed` 가 그 `Ended` **뒤에** 적히면 버려진다 —
+    ///   그 `Failed` 가 어느 끝에 속하는지 가를 앞 끝의 seq 를 쥐지 않는다. `Failed` 와 그 턴의 `Ended` 를 같은
+    ///   스레드(출력 pump)가 내는 한 이 적용 순서는 생기지 않는다.
     /// ★남는 잔여와 그것을 지금 막지 않는 근거★: 두 화신의 표식이 2^-32 로 겹치면 이 일치 검사가 그
     ///   한 화신 동안 무력해진다(`ProfileRegistry::epoch_for_spawn` — 인접 보장은 같은 프로세스 안에서만
     ///   선다). 터졌을 때의 결말은 "턴 중인데 idle 로 보여 우편이 이르게 들어간다" 이고, 이 프로젝트는
     ///   그 이른 주입을 "안 가는 메일" 보다 낫다고 못박았다(ADR-0104).
     // ADR-0007
+    // ADR-0231
     pub fn observe_at(&self, id: AgentId, epoch: u32, seq: u64, signal: TurnSignal, at: Instant) {
         let mut g = self.lock();
-        if let Some(cur) = g.get(&id) {
-            if cur.epoch != epoch {
-                return;
+        if g.get(&id).is_some_and(|cur| cur.epoch != epoch) {
+            return;
+        }
+        let e = g.entry(id).or_insert_with(|| Entry::fresh(epoch, at));
+        let newest = seq >= e.last_seq;
+        let before_last_end = e.last_end_seq.is_some_and(|end| seq < end);
+        match signal {
+            TurnSignal::Progress => {
+                if !newest {
+                    return;
+                }
+                e.in_turn = true;
             }
-            if seq < cur.last_seq {
-                return;
+            TurnSignal::Failed => {
+                if before_last_end {
+                    return;
+                }
+                e.error_seq = Some(e.error_seq.map_or(seq, |held| held.min(seq)));
+            }
+            TurnSignal::Ended(kind) => {
+                if before_last_end {
+                    return;
+                }
+                // 이 끝보다 뒤에 발급된 오류는 다음 턴의 것이다 — 접지도 비우지도 않는다.
+                let held = e.error_seq.is_some_and(|err| err < seq);
+                e.last_end_failed = match kind {
+                    TurnEndKind::Failed => true,
+                    _ if held => true,
+                    TurnEndKind::Clean => false,
+                    TurnEndKind::Other => e.last_end_failed,
+                };
+                if held {
+                    e.error_seq = None;
+                }
+                e.last_end_seq = Some(seq);
+                if newest {
+                    e.in_turn = false;
+                }
             }
         }
-        // ★`last_signal` 을 뒤로 되감지 않는다★: 시각은 락 **밖**에서 찍히므로(위 `observe`), 늦게 찍은
-        //   신호가 먼저 적용될 수 있다. 되감기면 상한 판정이 그만큼 일찍 잔해로 오판한다 — 공짜로
-        //   닫히므로 닫는다.
-        let last_signal = match g.get(&id) {
-            Some(cur) if cur.epoch == epoch => at.max(cur.last_signal),
-            _ => at,
-        };
-        g.insert(
-            id,
-            Entry {
-                epoch,
-                in_turn: signal == TurnSignal::Progress,
-                last_signal,
-                last_seq: seq,
-            },
-        );
+        if newest {
+            // ★`last_signal` 을 뒤로 되감지 않는다★: 시각은 락 **밖**에서 찍히므로(위 `observe`), 늦게 찍은
+            //   신호가 먼저 적용될 수 있다. 되감기면 상한 판정이 그만큼 일찍 잔해로 오판한다 — 공짜로
+            //   닫히므로 닫는다.
+            e.last_signal = at.max(e.last_signal);
+            e.last_seq = seq;
+        }
     }
 
     /// 이 (에이전트, epoch)의 관측값. `None` = 미관측(다른 epoch 만 관측된 경우 포함).
@@ -211,6 +278,7 @@ impl TurnObservations {
             .map(|e| TurnObservation {
                 in_turn: e.in_turn,
                 last_signal: e.last_signal,
+                last_end_failed: e.last_end_failed,
             })
     }
 
@@ -272,7 +340,7 @@ mod tests {
         let id = AgentId::new_v4();
         t.observe(id, 0, 1, TurnSignal::Progress);
         assert!(t.is_in_turn(id, 0));
-        t.observe(id, 0, 1, TurnSignal::Ended);
+        t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Clean));
         assert!(!t.is_in_turn(id, 0));
         assert!(t.get(id, 0).is_some(), "종료 후에도 관측 사실은 남는다");
     }
@@ -321,7 +389,7 @@ mod tests {
         assert!(t.is_in_turn(id, live), "전제: 산 화신이 턴 중으로 관측됨");
 
         // 배출이 덜 끝난 죽은 화신이 이제야 신호를 낸다.
-        t.observe(id, dying, 4, TurnSignal::Ended);
+        t.observe(id, dying, 4, TurnSignal::Ended(TurnEndKind::Clean));
 
         assert!(
             t.is_in_turn(id, live),
@@ -362,7 +430,7 @@ mod tests {
         let done_id = AgentId::new_v4();
         let t0 = Instant::now();
         t.observe_at(busy, 3, 1, TurnSignal::Progress, t0);
-        t.observe_at(done_id, 0, 1, TurnSignal::Ended, t0);
+        t.observe_at(done_id, 0, 1, TurnSignal::Ended(TurnEndKind::Clean), t0);
         assert_eq!(t.in_turn_snapshot(), vec![(busy, 3, t0)]);
     }
 
@@ -374,7 +442,7 @@ mod tests {
         let id = AgentId::new_v4();
         let t0 = Instant::now();
         t.observe_at(id, 0, 5, TurnSignal::Progress, t0);
-        t.observe_at(id, 0, 6, TurnSignal::Ended, t0);
+        t.observe_at(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean), t0);
         assert!(!t.is_in_turn(id, 0));
 
         // 뒤늦게 도착한 seq 5 진행 신호 — 무시돼야 한다.
@@ -407,7 +475,7 @@ mod tests {
         // seq 5 가 늦은 시각을 들고 먼저 적용된다.
         t.observe_at(id, 0, 5, TurnSignal::Progress, later);
         // seq 6 은 정상 수용(더 최신 발행)이지만 시각은 더 이르다.
-        t.observe_at(id, 0, 6, TurnSignal::Ended, t0);
+        t.observe_at(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean), t0);
 
         assert!(!t.is_in_turn(id, 0), "수용된 신호의 상태는 반영된다");
         assert_eq!(
@@ -455,5 +523,163 @@ mod tests {
         t.forget(id, 1);
         assert_eq!(t.get(id, 1), None);
         assert_eq!(t.len(), 0);
+    }
+
+    // ── 오류 뒤 멈춤 — `last_end_failed` 접기(ADR-0231) ──
+
+    fn failed_after_end(t: &TurnObservations, id: AgentId) -> bool {
+        t.get(id, 0).expect("관측됨").last_end_failed
+    }
+
+    #[test]
+    fn an_error_held_through_the_end_or_an_error_end_sets_the_halt() {
+        let t = TurnObservations::new();
+        let claude = AgentId::new_v4();
+        t.register(claude, 0);
+        t.observe(claude, 0, 1, TurnSignal::Progress);
+        t.observe(claude, 0, 2, TurnSignal::Failed);
+        t.observe(claude, 0, 3, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(failed_after_end(&t, claude), "오류를 쥔 채 온 끝 = 오류 끝");
+
+        let codex = AgentId::new_v4();
+        t.register(codex, 0);
+        t.observe(codex, 0, 1, TurnSignal::Progress);
+        t.observe(codex, 0, 2, TurnSignal::Ended(TurnEndKind::Failed));
+        assert!(failed_after_end(&t, codex));
+    }
+
+    #[test]
+    fn the_error_signal_alone_neither_halts_nor_touches_in_turn() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 1, TurnSignal::Progress);
+        t.observe(id, 0, 2, TurnSignal::Failed);
+        let o = t.get(id, 0).expect("관측됨");
+        assert!(o.in_turn, "오류 신호가 턴을 끝내지 않는다");
+        assert!(!o.last_end_failed, "끝을 보기 전엔 멈춤이 서지 않는다");
+
+        let idle = AgentId::new_v4();
+        t.register(idle, 0);
+        t.observe(idle, 0, 1, TurnSignal::Failed);
+        assert!(!t.is_in_turn(idle, 0), "오류 신호가 턴을 켜지 않는다");
+    }
+
+    #[test]
+    fn the_next_clean_end_releases_and_an_other_end_keeps_the_halt() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Failed));
+        t.observe(id, 0, 2, TurnSignal::Ended(TurnEndKind::Other));
+        assert!(failed_after_end(&t, id), "끊긴 끝은 멈춤을 풀지 않는다");
+        t.observe(id, 0, 3, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(!failed_after_end(&t, id), "깨끗한 끝이 푼다");
+        t.observe(id, 0, 4, TurnSignal::Ended(TurnEndKind::Other));
+        assert!(
+            !failed_after_end(&t, id),
+            "끊긴 끝은 멈춤을 세우지도 않는다"
+        );
+    }
+
+    #[test]
+    fn an_error_in_the_releasing_turn_keeps_the_halt_and_the_held_error_does_not_leak() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Failed));
+        t.observe(id, 0, 2, TurnSignal::Failed);
+        t.observe(id, 0, 3, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(failed_after_end(&t, id), "그 턴도 오류면 참 그대로");
+        // 쥔 오류는 그 턴의 끝이 비운다 — 다음 턴까지 새면 깨끗한 턴이 멈춤을 다시 세운다.
+        t.observe(id, 0, 4, TurnSignal::Progress);
+        t.observe(id, 0, 5, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(!failed_after_end(&t, id));
+    }
+
+    #[test]
+    fn a_held_error_wins_over_an_other_end() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 1, TurnSignal::Failed);
+        t.observe(id, 0, 2, TurnSignal::Ended(TurnEndKind::Other));
+        assert!(failed_after_end(&t, id));
+    }
+
+    #[test]
+    fn late_writes_with_a_smaller_seq_leave_the_halt_alone() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 5, TurnSignal::Ended(TurnEndKind::Failed));
+        t.observe(id, 0, 4, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(
+            failed_after_end(&t, id),
+            "늦은 깨끗한 끝이 멈춤을 풀면 안 된다"
+        );
+
+        t.observe(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean));
+        t.observe(id, 0, 5, TurnSignal::Failed);
+        t.observe(id, 0, 7, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(
+            !failed_after_end(&t, id),
+            "버려진 오류 신호가 쥐어져 다음 끝을 오류로 만들면 안 된다"
+        );
+    }
+
+    // ★멈춤 칸의 커서 회귀★: 진행 커서로 거르면 뒤 seq 의 진행이 먼저 적힌 것만으로 오류 끝이 버려진다.
+    #[test]
+    fn an_error_end_applied_behind_a_newer_progress_still_sets_the_halt() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 6, TurnSignal::Progress);
+        t.observe(id, 0, 5, TurnSignal::Ended(TurnEndKind::Failed));
+        let o = t.get(id, 0).expect("관측됨");
+        assert!(o.last_end_failed, "링 순서상 오류로 끝난 턴이다");
+        assert!(
+            o.in_turn,
+            "뒤 seq 의 진행은 다음 턴이다 — 늦은 끝이 끄지 않는다"
+        );
+    }
+
+    #[test]
+    fn an_error_applied_behind_a_newer_progress_is_held_into_the_next_end() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 6, TurnSignal::Progress);
+        t.observe(id, 0, 5, TurnSignal::Failed);
+        t.observe(id, 0, 7, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(
+            failed_after_end(&t, id),
+            "진행 커서에 밀린 오류가 버려지면 오류로 끝난 턴이 깨끗하게 접힌다"
+        );
+    }
+
+    // 끝보다 뒤에 발급된 오류는 그 끝이 접지도 비우지도 않는다 — 다음 끝이 접는다.
+    #[test]
+    fn an_error_issued_after_a_late_end_is_left_for_the_next_end() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 7, TurnSignal::Failed);
+        t.observe(id, 0, 6, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(!failed_after_end(&t, id), "앞 턴은 깨끗하게 끝났다");
+        t.observe(id, 0, 8, TurnSignal::Ended(TurnEndKind::Clean));
+        assert!(failed_after_end(&t, id), "그 오류는 다음 턴의 끝이 접는다");
+    }
+
+    #[test]
+    fn forget_drops_the_halt_and_a_new_incarnation_starts_clear() {
+        let t = TurnObservations::new();
+        let id = AgentId::new_v4();
+        t.register(id, 0);
+        t.observe(id, 0, 1, TurnSignal::Ended(TurnEndKind::Failed));
+        t.forget(id, 0);
+        assert_eq!(t.get(id, 0), None);
+        t.register(id, 1);
+        assert!(!t.get(id, 1).expect("등록됨").last_end_failed);
     }
 }

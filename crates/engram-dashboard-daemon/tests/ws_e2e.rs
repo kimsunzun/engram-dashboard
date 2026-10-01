@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use engram_dashboard_agent::profile::{AgentCommand, AgentOutputFormat, AgentProfile, SpawnMode};
+use engram_dashboard_agent::types::InputOrigin;
 use engram_dashboard_daemon::{
     start_test_server, start_test_server_with_keepalive, KeepaliveConfig, TestServerHandle,
 };
@@ -632,7 +633,7 @@ async fn case04_output_order_exact() {
 
     server
         .manager
-        .write_stdin(id, b"echo CASE4_MARKER\r\n")
+        .write_stdin(id, b"echo CASE4_MARKER\r\n", InputOrigin::User)
         .unwrap();
 
     let seqs = collect_frame_seqs_until_marker(&mut c, id, "CASE4_MARKER").await;
@@ -648,7 +649,10 @@ async fn case05_replay_then_live_order() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
 
-    server.manager.write_stdin(id, b"echo PREFILL\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo PREFILL\r\n", InputOrigin::User)
+        .unwrap();
     wait_for_output(&server, id, 1).await;
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
@@ -690,7 +694,10 @@ async fn case05_replay_then_live_order() {
     }
     assert!(replay_frames >= 1, "PREFILL replay frame 이 1건 이상");
 
-    server.manager.write_stdin(id, b"echo LIVE5\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo LIVE5\r\n", InputOrigin::User)
+        .unwrap();
     let live = collect_frames_until_marker(&mut c, id, "LIVE5").await;
     assert!(!live.is_empty(), "ReplayComplete 후 live frame 도착해야");
 
@@ -712,12 +719,18 @@ async fn case06_after_seq_resume_tail_only() {
         after_seq: None,
     })
     .await;
-    server.manager.write_stdin(id, b"echo R6A\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo R6A\r\n", InputOrigin::User)
+        .unwrap();
     let first = collect_frame_seqs_until_marker(&mut c, id, "R6A").await;
     let last_seq = *first.iter().max().unwrap();
 
     drop(c);
-    server.manager.write_stdin(id, b"echo R6B\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo R6B\r\n", InputOrigin::User)
+        .unwrap();
     wait_for_output(&server, id, (last_seq as usize) + 2).await;
 
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
@@ -769,7 +782,7 @@ async fn case07_truncated_replay() {
         .manager
         .write_stdin(
             id,
-            b"for /L %i in (1,1,40000) do @echo TRUNCATE_LINE_PADDING_XXXXXXXXXXXXXXXXXXXXXXXXXXXX %i\r\n",
+            b"for /L %i in (1,1,40000) do @echo TRUNCATE_LINE_PADDING_XXXXXXXXXXXXXXXXXXXXXXXXXXXX %i\r\n", InputOrigin::User,
         )
         .unwrap();
 
@@ -817,7 +830,10 @@ async fn case08_epoch_mismatch_reset() {
     let id = spawn_shell_agent(&server);
     let epoch = server.manager.agent_epoch(id).unwrap();
 
-    server.manager.write_stdin(id, b"echo E8\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo E8\r\n", InputOrigin::User)
+        .unwrap();
     wait_for_output(&server, id, 1).await;
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;
@@ -899,7 +915,7 @@ async fn case09_slow_consumer_closed_others_unaffected() {
         .manager
         .write_stdin(
             id,
-            b"for /L %i in (1,1,200000) do @echo SLOW9_PADDING_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX %i\r\n",
+            b"for /L %i in (1,1,200000) do @echo SLOW9_PADDING_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX %i\r\n", InputOrigin::User,
         )
         .unwrap();
 
@@ -942,12 +958,18 @@ async fn case10_reconnect_lossless() {
         after_seq: None,
     })
     .await;
-    server.manager.write_stdin(id, b"echo RC10A\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo RC10A\r\n", InputOrigin::User)
+        .unwrap();
     let got1 = collect_frame_seqs_until_marker(&mut c1, id, "RC10A").await;
     let max1 = *got1.iter().max().unwrap();
     drop(c1);
 
-    server.manager.write_stdin(id, b"echo RC10B\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo RC10B\r\n", InputOrigin::User)
+        .unwrap();
     wait_for_output(&server, id, (max1 as usize) + 2).await;
 
     let mut c2 = Client::connect_and_auth(server.port, &server.token).await;
@@ -994,6 +1016,7 @@ async fn case11_high_throughput_no_deadlock() {
         .write_stdin(
             id,
             b"for /L %i in (1,1,3000) do @echo HT11 %i\r\necho HT11_DONE\r\n",
+            InputOrigin::User,
         )
         .unwrap();
 
@@ -1036,8 +1059,14 @@ async fn case12_multi_subscribe_demux() {
     .await;
     wait_replay_complete(&mut c, id_b).await;
 
-    server.manager.write_stdin(id_a, b"echo AAA12\r\n").unwrap();
-    server.manager.write_stdin(id_b, b"echo BBB12\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id_a, b"echo AAA12\r\n", InputOrigin::User)
+        .unwrap();
+    server
+        .manager
+        .write_stdin(id_b, b"echo BBB12\r\n", InputOrigin::User)
+        .unwrap();
 
     let mut saw_a = false;
     let mut saw_b = false;
@@ -1174,9 +1203,11 @@ async fn case15_ws_kill_ack_and_list_excludes() {
     server.shutdown().await;
 }
 
-// ── 케이스 16: WS Interrupt → Ack(프로세스 생존) ───────────────────────────────────
+// ── 케이스 16: WS Interrupt → 터미널 모드는 거절(Error) · 프로세스 생존 ──────────────────
+// ★터미널 모드는 끊기 명령을 받지 않는다★ — 0x03 을 넣으면 한가한 TUI 가 두 번째 Ctrl-C 에 죽을 수 있다.
+// ADR-0245
 #[tokio::test]
-async fn case16_ws_interrupt_ack_process_alive() {
+async fn case16_ws_interrupt_refused_on_terminal_process_alive() {
     let server = start_test_server().await.unwrap();
     let profile_id = register_shell_profile(&server);
 
@@ -1197,11 +1228,14 @@ async fn case16_ws_interrupt_ack_process_alive() {
         request_id: req_int,
     })
     .await;
-    c.await_ack(req_int).await;
-    // 출력 정지 확인까지는 best-effort — 생존만 단언(여전히 manager 에 있음).
+    let msg = c.await_error(req_int).await;
+    assert!(
+        msg.contains("터미널 모드는 끊기 명령을 받지 않는다"),
+        "PTY 끊기는 거절 문구로 답해야 한다: {msg}"
+    );
     assert!(
         server.manager.agent_epoch(profile_id).is_some(),
-        "Interrupt 후에도 프로세스 생존(manager 에 잔존)"
+        "거절된 Interrupt 뒤에도 프로세스 생존(manager 에 잔존)"
     );
 
     server.shutdown().await;
@@ -1276,7 +1310,7 @@ async fn case18_ws_unsubscribe_stops_live() {
     wait_replay_complete(&mut c, profile_id).await;
     server
         .manager
-        .write_stdin(profile_id, b"echo PRE_UNSUB\r\n")
+        .write_stdin(profile_id, b"echo PRE_UNSUB\r\n", InputOrigin::User)
         .unwrap();
     let _ = collect_frames_until_marker(&mut c, profile_id, "PRE_UNSUB").await;
 
@@ -1304,7 +1338,7 @@ async fn case18_ws_unsubscribe_stops_live() {
     }
     server
         .manager
-        .write_stdin(profile_id, b"echo POST_UNSUB\r\n")
+        .write_stdin(profile_id, b"echo POST_UNSUB\r\n", InputOrigin::User)
         .unwrap();
 
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
@@ -2043,7 +2077,10 @@ async fn case41_ws_get_snapshot() {
     let server = start_test_server().await.unwrap();
     let id = spawn_shell_agent(&server);
 
-    server.manager.write_stdin(id, b"echo SNAP41\r\n").unwrap();
+    server
+        .manager
+        .write_stdin(id, b"echo SNAP41\r\n", InputOrigin::User)
+        .unwrap();
     wait_for_output(&server, id, 1).await;
 
     let mut c = Client::connect_and_auth(server.port, &server.token).await;

@@ -1,0 +1,57 @@
+{"wall":1790407092843,"ev":"agent","id":"b4ee36a0-b5e6-43af-9464-45a88eb20f50"}
+{"wall":1790407094343,"ev":"turn","t":1,"parallel":false}
+{"wall":1790407094344,"ev":"send","tag":"tools","text":"Run these four commands one at a time, sequentially, as four"}
+{"wall":1790407094773,"ev":"QueuedInput","op":{"kind":"Delivered","id":"2a741fdb-2ebe-4402-ad2e-2e3454de6647"}}
+{"wall":1790407103765,"ev":"ToolCall","id":"exec-5e65cdbe-1e5e-404f-89e1-ebb1ad0a3806","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 1000'"}
+{"wall":1790407109102,"ev":"ToolCall","id":"exec-9500388c-83c0-4844-abef-8276af7ea45d","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000'"}
+{"wall":1790407114860,"ev":"ToolCall","id":"exec-f99e3b50-f035-4450-82d2-4874dacc1301","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 5000'"}
+{"wall":1790407120209,"ev":"ToolCall","id":"exec-895e854a-7d0b-449a-ba36-68867ec72a1b","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 2000'"}
+{"wall":1790407122441,"ev":"TurnEnd","turn":"01a0dc94-304a-7f90-a29e-589803be5997","outcome":{"kind":"Completed"}}
+{"wall":1790407128643,"ev":"turn","t":2,"parallel":false}
+{"wall":1790407128643,"ev":"send","tag":"tools","text":"Run these four commands one at a time, sequentially, as four"}
+{"wall":1790407128780,"ev":"QueuedInput","op":{"kind":"Delivered","id":"c60f8157-e5c5-4447-999c-cea051191f81"}}
+{"wall":1790407134895,"ev":"ToolCall","id":"exec-8d3ed6db-ea69-44d7-b8a1-217ef58bfec1","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 1000'"}
+{"wall":1790407139063,"ev":"ToolCall","id":"exec-3e5d7d0b-cd3c-41c1-8b60-fc3f87e1308c","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000'"}
+{"wall":1790407143198,"ev":"ToolCall","id":"exec-4ab7c1af-3911-40f4-940c-8698dad0bf7b","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 5000'"}
+{"wall":1790407147129,"ev":"ToolCall","id":"exec-1183653e-74a0-45e9-af56-1d1ffdd2719d","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 2000'"}
+{"wall":1790407149265,"ev":"TurnEnd","turn":"01a0dc94-b645-7cf1-bccb-bd9a64065d71","outcome":{"kind":"Completed"}}
+{"wall":1790407155429,"ev":"turn","t":3,"parallel":false}
+{"wall":1790407155429,"ev":"send","tag":"tools","text":"Run these four commands one at a time, sequentially, as four"}
+{"wall":1790407155546,"ev":"QueuedInput","op":{"kind":"Delivered","id":"0f87cc36-37f6-4dda-ad40-f5f0a5f14076"}}
+{"wall":1790407160051,"ev":"ToolCall","id":"exec-13380d02-c37f-4df3-b8f5-4e572347d40f","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 1000'"}
+{"wall":1790407164148,"ev":"ToolCall","id":"exec-efd157c4-d5d6-441d-a49e-b9e8a3885b9a","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000'"}
+{"wall":1790407168188,"ev":"ToolCall","id":"exec-6456cd87-a3b6-4b1d-9bb3-11d4a14e4ec5","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 5000'"}
+{"wall":1790407173650,"ev":"ToolCall","id":"exec-5baa4020-d3b1-4e29-915d-6ab8fce51b99","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 2000'"}
+{"wall":1790407176802,"ev":"TurnEnd","turn":"01a0dc95-1ee7-76c0-8552-60baefbabb62","outcome":{"kind":"Completed"}}
+{"wall":1790407182959,"ev":"turn","t":4,"parallel":false}
+{"wall":1790407182959,"ev":"send","tag":"tools","text":"Run these four commands one at a time, sequentially, as four"}
+{"wall":1790407183076,"ev":"QueuedInput","op":{"kind":"Delivered","id":"75530d53-9f52-4365-b48f-0fbc0a6973c7"}}
+{"wall":1790407187966,"ev":"ToolCall","id":"exec-1e5b21fe-f8ce-4d7a-a9aa-6dcf98a713b3","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 1000'"}
+{"wall":1790407192291,"ev":"ToolCall","id":"exec-1b698ed8-8540-4ef5-a3f0-33ac0d8d70f9","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000'"}
+{"wall":1790407196888,"ev":"ToolCall","id":"exec-2933d7c5-29a8-4f5d-8874-7049f7765ca1","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 5000'"}
+{"wall":1790407201577,"ev":"ToolCall","id":"exec-9c1f1638-428a-4a3d-9b76-ccc759c249c5","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 2000'"}
+{"wall":1790407203775,"ev":"TurnEnd","turn":"01a0dc95-8a71-7e52-bc63-572a17310018","outcome":{"kind":"Completed"}}
+{"wall":1790407209993,"ev":"turn","t":5,"parallel":false}
+{"wall":1790407209993,"ev":"send","tag":"tools","text":"Run these four commands one at a time, sequentially, as four"}
+{"wall":1790407210152,"ev":"QueuedInput","op":{"kind":"Delivered","id":"ae9e697f-3a64-4a92-8667-8a5087499132"}}
+{"wall":1790407214211,"ev":"ToolCall","id":"exec-530ff5e0-4c82-4f54-95c5-990eb373b92d","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 1000'"}
+{"wall":1790407218164,"ev":"ToolCall","id":"exec-49b888d1-4960-40e4-b709-a6eff45045a0","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000'"}
+{"wall":1790407222319,"ev":"ToolCall","id":"exec-fdcc4882-f716-441f-8b32-82f3c691530b","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 5000'"}
+{"wall":1790407227431,"ev":"ToolCall","id":"exec-15eede9d-a79b-45b3-a743-0ed2ac4460a2","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 2000'"}
+{"wall":1790407229696,"ev":"TurnEnd","turn":"01a0dc95-f40b-7731-b0c1-5974c9ae42e4","outcome":{"kind":"Completed"}}
+{"wall":1790407235773,"ev":"turn","t":6,"parallel":false}
+{"wall":1790407235773,"ev":"send","tag":"tools","text":"Run these four commands one at a time, sequentially, as four"}
+{"wall":1790407235887,"ev":"QueuedInput","op":{"kind":"Delivered","id":"5646117f-8550-4af8-8f76-07e6273f1824"}}
+{"wall":1790407239911,"ev":"ToolCall","id":"exec-faef5335-0e81-448e-9584-5534cd89e522","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 1000'"}
+{"wall":1790407244247,"ev":"ToolCall","id":"exec-e0afc7be-f6d4-4e34-8033-be6f186cd6eb","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000'"}
+{"wall":1790407248866,"ev":"ToolCall","id":"exec-c4ac2a84-e3f8-4bc0-864a-80b2fade4488","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 5000'"}
+{"wall":1790407253063,"ev":"ToolCall","id":"exec-9ac2b34f-f176-47c0-8856-0fd45d9580b5","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 2000'"}
+{"wall":1790407255347,"ev":"TurnEnd","turn":"01a0dc96-58bf-7dc3-b3fe-020d196788a4","outcome":{"kind":"Completed"}}
+{"wall":1790407261558,"ev":"turn","t":7,"parallel":true}
+{"wall":1790407261558,"ev":"send","tag":"parallel","text":"Run these three commands in parallel: issue all three tool c"}
+{"wall":1790407261717,"ev":"QueuedInput","op":{"kind":"Delivered","id":"4adbc24d-5a7a-4418-838f-1fe200e3c456"}}
+{"wall":1790407267670,"ev":"ToolCall","id":"exec-e6504403-9fbc-4826-9fa3-cdf31c174c41","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000 20 100'"}
+{"wall":1790407267708,"ev":"ToolCall","id":"exec-b89d7f9a-b204-4304-a4b6-381616207468","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000 20 100'"}
+{"wall":1790407267745,"ev":"ToolCall","id":"exec-ab732bdd-d885-4574-91b8-3d3b1b04d688","name":"commandExecution","command":"\"C:\\\\Program Files\\\\PowerShell\\\\7\\\\pwsh.exe\" -Command 'node flood.js 3000 20 100'"}
+{"wall":1790407270676,"ev":"TurnEnd","turn":"01a0dc96-bd77-7083-9027-7cc8387d98d9","outcome":{"kind":"Completed"}}
+{"wall":1790407276824,"ev":"done","toolCalls":27,"turnEnds":7,"fatal":null}

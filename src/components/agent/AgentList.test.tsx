@@ -65,6 +65,7 @@ import AgentList, { statusGlyphColor, statusGlyphIcon } from './AgentList'
 //   옛 importer 를 위한 통로일 뿐이라 새 축을 거기로 늘리지 않는다.
 import { rowGlyphColor, rowGlyphIcon, rowPhase } from './statusGlyph'
 import { useAgentStore } from '../../store/agentStore'
+import { OVERLAY_SELECTOR } from '../slot/interruptKey'
 import type { AgentInfo, AgentProfile, Capabilities } from '../../api/types'
 import type { LayoutNode } from '../../api/layoutTypes'
 
@@ -406,6 +407,16 @@ describe('배경 우클릭 = 자체 메뉴 없음(통합 슬롯 메뉴로 버블
 
 // ── 행 우클릭 메뉴: 종료·이름변경 wired / 재시작 disabled(ADR-0061 리치화) ──────────
 describe('행 우클릭 메뉴', () => {
+  it('열린 동안만 오버레이 표지를 단다(ADR-0237) — 문서 Esc 가 닫으면 함께 사라진다', () => {
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
+    fireEvent.contextMenu(document.querySelector('[data-agent-row="a1"]') as HTMLElement)
+    expect(document.querySelector(OVERLAY_SELECTOR)?.textContent).toContain('종료')
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(document.querySelector(OVERLAY_SELECTOR)).toBeNull()
+  })
+
   it('실행중 행: 종료는 killAgent 호출, 재시작은 "준비 중" 비활성(no-op)', () => {
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)

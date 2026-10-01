@@ -4,8 +4,9 @@
 //! 오직 `backend/<이름>/` 폴더다.
 //!
 //! ★이 파일은 어느 백엔드의 항목도 이름으로 부르지 않는다★: 백엔드 이름이 적히는 자리는 **등록부**
-//! (`pub mod`·`pub use`·정적 싱글턴)와 **두 dispatch 표**(`backend_for` · `backend_for_encoder`)뿐이고,
-//! 백엔드별 지식은 전부 [`AgentBackend`] 메서드로만 나온다. 게이트는 `backend/claude/mod.rs` 헤더.
+//! (`pub mod`·`pub use`·정적 싱글턴 · 사용량 조회기 표 [`usage_probes`])와 **두 dispatch 표**(`backend_for` ·
+//! `backend_for_encoder`)뿐이고, 백엔드별 지식은 전부 [`AgentBackend`] 메서드와 [`UsageProbe`] 구현으로만 나온다.
+//! 게이트는 `backend/claude/mod.rs` 헤더.
 //!
 //! tauri import 0.
 
@@ -31,9 +32,10 @@ use crate::transport::pty::PtyTransport;
 use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
 use crate::turn::TurnSignal;
 use crate::types::{
-    AgentId, BackendCaps, CommandSpec, ControlEndpoint, OutputEvent, PtyError, CLI_EXE_ENV,
-    CLI_EXE_NAME, TOKEN_ENV,
+    AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, MidTurnPolicy, OutputEvent,
+    PtyError, CLI_EXE_ENV, CLI_EXE_NAME, TOKEN_ENV,
 };
+use crate::usage::UsageProbe;
 
 /// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
 /// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
@@ -201,6 +203,18 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
 // ADR-0004
 // ADR-0185
 pub type SessionIdSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// 「이 화신의 대화에 턴이 실제로 생겼다」를 조립점에 알리는 **한 동사** 포트 — 조립점은 세션 id 첫 제출
+/// 래치의 제출 입력을 여기 꽂는다.
+///
+/// ★부르는 쪽은 턴을 통로가 지는(`MidTurnPolicy::TransportOwned`) backend 의 통로뿐이다★ — 그 모드의 세션은
+///   제출을 세지 않고, 통로가 상대의 **첫 유저 메시지 되울림**에서 이것을 부른다. 그 밖의 backend 는 세션이
+///   보내기 전에 세므로 이 포트를 무시한다. ★둘은 짝이다★: `TransportOwned` 를 신고하면서 이 포트를 통로에
+///   안 꽂으면 어느 화신도 id 를 영속하지 못한다(오류 없이 모든 이어받기가 새 대화가 된다).
+/// 여러 번 불려도 된다 — 받는 쪽(래치)이 첫 번만 센다.
+// ADR-0226
+// ADR-0231
+pub type FirstTurnSink = Arc<dyn Fn() + Send + Sync>;
 
 /// unit struct로 구현되어 &'static으로 사용된다 — 상태 없음.
 pub trait AgentBackend: Send + Sync {
@@ -412,6 +426,10 @@ pub trait AgentBackend: Send + Sync {
     /// ★순서 계약★: 이 포트는 **그 세션으로 무엇을 보내기 전에** 불린다. 그래서 기록됐는지 되묻는
     ///   둘째 동사가 필요 없다(포트가 한 동사인 이유 — [`SessionIdSink`]).
     ///
+    /// `first_turn_sink` = 이 화신의 대화에 턴이 실제로 생긴 순간을 알릴 곳([`FirstTurnSink`]). ★턴을 통로가
+    ///   지는(`MidTurnPolicy::TransportOwned`) 모드를 신고하는 backend 만 그 통로에 꽂는다 — 나머지는
+    ///   무시한다★(그 모드의 세션은 제출을 세지 않는다 — 짝 규율은 그 타입의 doc).
+    ///
     /// `resume_session_id` = 이 spawn 이 **이어받을** 저장된 backend sid. `None` = 이어받지 않는다
     ///   (Fresh 로 띄우거나, 저장된 값이 없거나, 이 backend 의 이어받기 축이 꺼져 있다).
     /// ★[`AgentBackend::build_spec`] 의 `session_id` 와 **다른 값이다 — 같은 것으로 접지 말 것**★:
@@ -454,15 +472,16 @@ pub trait AgentBackend: Send + Sync {
         cols: u16,
         rows: u16,
         sid_sink: Option<SessionIdSink>,
+        first_turn_sink: Option<FirstTurnSink>,
         resume_session_id: Option<Uuid>,
         // 연결의 결말을 배달할 곳 — `declares_link()` 가 true 인 backend 에만 온다.
         _link_sink: Option<LinkSink>,
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
-        // 이 기본값은 세션 id 를 받아 오지도, 통로로 이어받지도, 제어 평면 데이터를 핸드셰이크에 싣지도
-        //   않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는 것과 같아야 한다:
-        //   rustdoc 이 시그니처를 그대로 렌더한다).
-        let _ = (sid_sink, resume_session_id, control);
+        // 이 기본값은 세션 id 를 받아 오지도, 턴을 통로가 지지도, 통로로 이어받지도, 제어 평면 데이터를
+        //   핸드셰이크에 싣지도 않는다 — 밑줄 이름 대신 여기서 명시적으로 버린다(이름은 위 doc 이 부르는
+        //   것과 같아야 한다: rustdoc 이 시그니처를 그대로 렌더한다).
+        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
         let (transport, child_pid) = PtyTransport::open(spec, cols, rows)?;
         Ok(SpawnParts {
             transport: Box::new(transport),
@@ -471,6 +490,8 @@ pub trait AgentBackend: Send + Sync {
             encoder: self.input_encoder(command),
             turn_classifier: self.turn_classifier(),
             reads_messages: self.reads_messages(),
+            mid_turn: MidTurnPolicy::None,
+            delivery_ack: Arc::new(DeliveryAck::new()),
         })
     }
 
@@ -639,6 +660,14 @@ pub struct SpawnParts {
     pub encoder: InputEncoder,
     pub turn_classifier: TurnClassifier,
     pub reads_messages: bool,
+    /// 턴 도중 입력을 누가 분류·해제하나 — 세션이 이 값으로만 가른다.
+    // ADR-0231
+    pub mid_turn: MidTurnPolicy,
+    /// 이 화신의 받음 알림 가능 여부 — ★backend 가 자기 디코더·통로에 건넨 **바로 그** Arc 를 싣는다★. 따로
+    ///   만들면 세션이 읽는 값과 디코더가 채우는 값이 갈리고, 그 어긋남은 오류 없이 영원한 `Unknown` 으로만
+    ///   보인다.
+    // ADR-0231
+    pub delivery_ack: Arc<DeliveryAck>,
 }
 
 /// 출력 이벤트 → 턴 신호 매핑 함수(ADR-0113). 백엔드가 자기 함수를 내주고 `OutputCore` 가 그 포인터를
@@ -674,8 +703,8 @@ fn backend_for(c: &AgentCommand) -> &'static dyn AgentBackend {
 /// 명령은 갖고 있지 않아(소유권 분할) 여기서 되짚는다.
 ///
 /// `None` = 그 태그에는 backend 지식이 없다(바이트 통과).
-/// ★백엔드 이름은 이 표와 바로 위 `backend_for`, 그리고 싱글턴 선언에만 적는다★ — 그 바깥에서 백엔드
-///   이름이 나오면 `backend/<이름>/` 폴더 격리가 샌 것이다(ADR-0004).
+/// ★백엔드 이름은 이 표와 바로 위 `backend_for`, 아래 [`usage_probes`], 그리고 싱글턴 선언에만 적는다★ —
+///   그 바깥에서 백엔드 이름이 나오면 `backend/<이름>/` 폴더 격리가 샌 것이다(ADR-0004).
 fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
     match e {
         InputEncoder::Raw => None,
@@ -683,6 +712,29 @@ fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
         // 봉투를 통로가 만드는 태그라 backend 가 감쌀 것이 없다 — `encode` 는 통과, 에코도 없다.
         InputEncoder::TransportFramed => None,
     }
+}
+
+// ── 사용량 조회기 등록부 ───────────────────────────────────────────────────────
+
+/// 사용량 능동 조회기 전량 — 받는 쪽(데몬)은 키 목록·쿨타임·시한을 여기서만 받는다(벤더 이름·정책을 모른다).
+///
+/// ★[`AgentBackend`] 의 칸이 아닌 것은 의도다★ — 조회는 에이전트 없이 돈다. trait 칸이면 명령 하나를 지어내
+///   `backend_for` 를 거쳐야 하는 두 겹 디스패치가 된다.
+/// 키는 서로 다르다(시험이 잰다).
+// ADR-0004
+pub fn usage_probes() -> [&'static dyn UsageProbe; 2] {
+    [&claude::CLAUDE_USAGE_PROBE, &codex::CODEX_USAGE_PROBE]
+}
+
+/// 낱말 → 그 벤더의 조회기. `None` = 그 낱말의 조회기가 없다.
+///
+/// ASCII 대소문자를 가리지 않는다 — wire(`"claude"`)와 버스(`"Claude"`, `agent.new` 의 낱말)가 한 조회기에 닿는다.
+/// ★칸 키는 들어온 낱말이 아니라 돌려받은 조회기의 [`UsageProbe::key`] 로 만든다★ — 들어온 철자로 키를 만들면
+///   두 입구가 다른 칸을 친다.
+pub fn usage_probe_for(word: &str) -> Option<&'static dyn UsageProbe> {
+    usage_probes()
+        .into_iter()
+        .find(|probe| probe.key().as_str().eq_ignore_ascii_case(word))
 }
 
 // ── 자유 함수 dispatch ─────────────────────────────────────────────────────────
@@ -759,6 +811,7 @@ pub fn open_spawn(
     cols: u16,
     rows: u16,
     sid_sink: Option<SessionIdSink>,
+    first_turn_sink: Option<FirstTurnSink>,
     resume_session_id: Option<Uuid>,
     link_sink: Option<LinkSink>,
     control: Option<&ControlEndpoint>,
@@ -769,6 +822,7 @@ pub fn open_spawn(
         cols,
         rows,
         sid_sink,
+        first_turn_sink,
         resume_session_id,
         link_sink,
         control,
@@ -1096,7 +1150,10 @@ mod tests {
         };
         let claude_classify = turn_classifier(&json);
         assert_eq!(claude_classify(&delta), Some(TurnSignal::Progress));
-        assert_eq!(claude_classify(&done), Some(TurnSignal::Ended));
+        assert_eq!(
+            claude_classify(&done),
+            Some(TurnSignal::Ended(crate::turn::TurnEndKind::Clean))
+        );
         // ★`Structured` 해석이 백엔드별인 이유의 회귀★: claude 는 입력 시점 유저 에코를 여기 싣기에
         //   진행으로 세지만, 매핑을 선언하지 않은 backend 는 같은 이벤트에 침묵해야 한다 — 안 그러면
         //   턴과 무관한 구조화 메타 라인이 종료 신호 없는 영구 "턴 중" 을 만든다.
@@ -1548,11 +1605,14 @@ mod tests {
             let expected = match shape {
                 TransportShape::Pty => (true, true),
                 TransportShape::StdioNdjson => (false, false),
-                // 파이프라 터미널 바이트도 크기도 없다 — 단방향 파이프와 같은 짝이다. 둘을 가르는
-                //   `interrupt` 는 이 쌍에 안 들어 있는데, 그 칸은 PTY 도 true 라 통로를 못 가른다.
+                // 파이프라 터미널 바이트도 크기도 없다 — 단방향 파이프와 같은 짝이다. `interrupt` 는 이 쌍에
+                //   안 들어 있다: 파이프 쪽 그 칸은 backend 가 주입하는 값이라(ADR-0238) 통로 신고가 아니다.
+                //   오늘은 두 파이프 모양이 다 true 이고, `interrupt` 가 가르는 것은 PTY(false · ADR-0245)와
+                //   파이프다.
                 TransportShape::StdioBidiJson => (false, false),
             };
-            let parts = open_spawn(c, &probe, 80, 24, None, None, None, None).expect("open_spawn");
+            let parts =
+                open_spawn(c, &probe, 80, 24, None, None, None, None, None).expect("open_spawn");
             let caps = parts.transport.capabilities();
             let actual = (caps.output.terminal_bytes, caps.control.resize);
             parts.transport.shutdown();
@@ -1750,5 +1810,102 @@ mod tests {
                 .any(|e| matches!(e, OutputEvent::MessageDone { .. })),
             "trait object decode 가 result 라인을 MessageDone 으로 정제해야 함: {ev:?}"
         );
+    }
+
+    // ── 사용량 조회기 등록부 ──────────────────────────────────────────────────────
+
+    /// `agent.new` 가 받는 백엔드 낱말 전량(직렬화 철자). ★match 에 와일드카드를 넣지 말 것★ — 선언 어휘에
+    /// 낱말이 늘면 여기서 컴파일이 깨져, 그 백엔드에 사용량 조회기를 둘지 정하게 한다.
+    fn agent_new_backend_words() -> Vec<String> {
+        use crate::commands::AgentBackend;
+        let all = [AgentBackend::Claude, AgentBackend::Codex];
+        for backend in &all {
+            match backend {
+                AgentBackend::Claude | AgentBackend::Codex => {}
+            }
+        }
+        all.iter()
+            .map(|backend| {
+                serde_json::to_value(backend)
+                    .expect("직렬화")
+                    .as_str()
+                    .expect("unit variant 는 낱말로 직렬화된다")
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn usage_probe_keys_are_the_agent_new_backend_words() {
+        let words = agent_new_backend_words();
+        assert_eq!(
+            usage_probes().len(),
+            words.len(),
+            "조회기와 `agent.new` 낱말이 하나씩 짝지어야 한다: {words:?}"
+        );
+        for word in &words {
+            let probe = usage_probe_for(word)
+                .unwrap_or_else(|| panic!("`agent.new` 낱말 {word} 의 조회기가 없다"));
+            assert!(
+                probe.key().as_str().eq_ignore_ascii_case(word),
+                "{word} → {}",
+                probe.key().as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn usage_probe_keys_are_unique() {
+        let probes = usage_probes();
+        for (i, a) in probes.iter().enumerate() {
+            for b in &probes[i + 1..] {
+                assert!(
+                    !a.key().as_str().eq_ignore_ascii_case(b.key().as_str()),
+                    "키가 겹친다: {}",
+                    a.key().as_str()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn usage_probe_for_ignores_ascii_case_and_refuses_unknown_words() {
+        for spellings in [["claude", "Claude", "CLAUDE"], ["codex", "Codex", "CODEX"]] {
+            let canonical = usage_probe_for(spellings[0])
+                .unwrap_or_else(|| panic!("{}", spellings[0]))
+                .key();
+            for word in spellings {
+                let probe = usage_probe_for(word).unwrap_or_else(|| panic!("{word}"));
+                assert_eq!(probe.key(), canonical, "{word}");
+            }
+        }
+        for unknown in ["", "codx", "gemini", "shell", " claude", "claude "] {
+            assert!(
+                usage_probe_for(unknown).is_none(),
+                "모르는 낱말 {unknown:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn usage_probe_policies_are_the_vendor_values() {
+        use crate::usage::UsagePolicy;
+        use std::time::Duration;
+
+        let fifteen_minutes = Duration::from_secs(15 * 60);
+        for (word, timeout) in [
+            ("claude", Duration::from_secs(15)),
+            ("codex", Duration::from_secs(30)),
+        ] {
+            let probe = usage_probe_for(word).unwrap_or_else(|| panic!("{word}"));
+            assert_eq!(
+                probe.policy(),
+                UsagePolicy {
+                    cooldown: fifteen_minutes,
+                    timeout,
+                },
+                "{word}"
+            );
+        }
     }
 }

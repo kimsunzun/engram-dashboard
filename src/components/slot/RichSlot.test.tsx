@@ -5,11 +5,10 @@
 //   파생 streaming(= awaiting || (!turnDone && items.length>0))이 계속 true 라 표시가 고착.
 //   fix: catch 에서 setAwaiting(false). 여기서 그 복귀를 관측한다.
 //
-// ★관측 표면(ADR-0053 헤더 제거 이후)★: 구 "JSON ● idle/○ streaming" 슬림 헤더가 제거돼, streaming 의
-//   유일한 시각 신호는 스트림 끝 대기 인디케이터(WaitRow "Wait" 라벨, StructuredTextView)뿐이다. 이 tail 은
-//   streaming 이면 뜬다(showTail = streaming). 그래서 관측 가능한 상태를 만들려고, 구독 콜백을 캡처해
+// ★관측 표면★: streaming 의 유일한 시각 신호는 입력창 위 대기 표시 줄의 "Wait" 라벨(`chat/WaitRow.tsx`)이고,
+//   streaming 이면 뜬다. 그래서 관측 가능한 상태를 만들려고, 구독 콜백을 캡처해
 //   TextDelta + MessageDone 을 먹인다 → items=[text,separator] & turnDone=true. 그러면 streaming = awaiting
-//   로 좁혀져(!turnDone 항이 죽음), "Wait" tail 의 유무가 곧 awaiting 의 거울이 된다.
+//   로 좁혀져(!turnDone 항이 죽음), "Wait" 표시의 유무가 곧 awaiting 의 거울이 된다.
 //
 // 전략: agentClient(clientFactory)·agentStore 를 slotTagGate.test.tsx 와 동일 패턴으로 stub. subscribeOutput
 //   콜백을 캡처(onChunk)해 tag1(StructuredEvent) chunk 를 주입하고, writeStdin 을 reject/resolve 로 갈아끼운다.
@@ -18,8 +17,15 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FRAME_TAG_STRUCTURED_EVENT } from '../../api/wsFrame'
-import type { OutputChunk, ReplayLiveInfo, ViewPhase } from '../../api/agentClient'
+import { INPUT_LOCKED_REFUSAL, type OutputChunk, type ReplayLiveInfo, type ViewPhase } from '../../api/agentClient'
 import { t } from '../../i18n'
+import '../../commands/chatCommands' // side-effect register — 도구 묶음 command 가 마운트된 슬롯에 닿나를 잰다.
+import '../../commands/agentCommands' // side-effect register — 끊기 명령이 「중단하는 중」을 세우는 길까지 태운다(ADR-0244).
+import { run, type CommandArgs } from '../../commands/registry'
+import { useToolGroupStore } from '../../store/toolGroupStore'
+import { pendingInterrupt, useInterruptStore } from '../../store/interruptStore'
+import { getFollow } from './scrollFollow/followRegistry'
+import { JUMP_BUTTON_DELAY_MS } from './scrollFollow/JumpToBottom'
 
 // ── subscribeOutput 콜백 캡처 + writeStdin holder(테스트마다 갈아끼움). ──
 const captured = vi.hoisted(() => ({
@@ -29,6 +35,11 @@ const captured = vi.hoisted(() => ({
 }))
 const clientMock = vi.hoisted(() => ({
   writeStdin: vi.fn(async () => undefined) as (id: string, bytes: Uint8Array) => Promise<void>,
+  // ADR-0231 재부착 대조 — 'live'(표식 실림)마다 불린다. 테스트가 답을 늦게 풀려고 갈아끼운다.
+  listQueuedInputs: vi.fn(async () => ({ inputs: [], as_of_seq: null, epoch: 0, stopped_after_error: false })) as (
+    id: string,
+  ) => Promise<unknown>,
+  interruptAgent: vi.fn(async () => undefined) as (id: string) => Promise<void>,
   // 연결 상태 표면(ADR-0148 부재 판정의 절반) — 등록 즉시 현재 상태로 1회 발화하는 실물 계약을 따른다.
   connectionState: 'connected' as 'connected' | 'reconnecting' | 'down',
   stateCbs: new Set<(s: 'connected' | 'reconnecting' | 'down') => void>(),
@@ -52,6 +63,8 @@ vi.mock('../../api/clientFactory', () => ({
       },
     ),
     writeStdin: (id: string, bytes: Uint8Array) => clientMock.writeStdin(id, bytes),
+    listQueuedInputs: (id: string) => clientMock.listQueuedInputs(id),
+    interruptAgent: (id: string) => clientMock.interruptAgent(id),
     resizePty: vi.fn(async () => undefined),
     get connectionState() {
       return clientMock.connectionState
@@ -64,6 +77,14 @@ vi.mock('../../api/clientFactory', () => ({
   },
   getAgentClient: vi.fn(),
 }))
+
+// ── 사람 경로 명령 호출(ADR-0237 Esc 끊기) — 실행이 아니라 무엇을 불렀나만 본다. ──
+const dispatchMock = vi.hoisted(() => ({ fireAndForget: vi.fn() }))
+vi.mock('../../commands/dispatch', () => ({
+  fireAndForget: (...args: unknown[]) => dispatchMock.fireAndForget(...args),
+}))
+// 끊기 명령 모듈이 폴더 다이얼로그를 import 한다 — 이 시험들은 그 문을 부르지 않는다.
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
 
 // ── agentStore stub — 슬롯이 부재 판정용으로 agents·agentsLoaded 를 조회한다. ──
 // agentsLoaded=false 가 기본 = "권위 명부 미수신" → 빈 목록을 부재로 오인하지 않는다(ADR-0148 가드).
@@ -96,7 +117,7 @@ async function flush(): Promise<void> {
 
 /**
  * 콘텐츠 1턴을 완결 상태로 주입한다(TextDelta → MessageDone). 결과: items=[text,separator], turnDone=true.
- * 이 상태에서 streaming = awaiting 로 좁혀져(!turnDone 항 무력화) "Wait" tail 이 awaiting 을 그대로 반영.
+ * 이 상태에서 streaming = awaiting 로 좁혀져(!turnDone 항 무력화) "Wait" 표시가 awaiting 을 그대로 반영.
  */
 function feedCompletedTurn(): void {
   act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'assistant reply' }))))
@@ -121,10 +142,21 @@ beforeEach(() => {
   captured.onState = null
   captured.onReset = null
   clientMock.writeStdin = vi.fn(async () => undefined)
+  clientMock.listQueuedInputs = vi.fn(async () => ({
+    inputs: [],
+    as_of_seq: null,
+    epoch: 0,
+    stopped_after_error: false,
+  }))
+  clientMock.interruptAgent = vi.fn(async () => undefined)
   clientMock.connectionState = 'connected'
   clientMock.stateCbs.clear()
+  useInterruptStore.setState({ pending: {}, views: {} })
   agentStoreState.agents = []
   agentStoreState.agentsLoaded = false
+  dispatchMock.fireAndForget.mockReset()
+  // 펼침 저장소는 모듈 전역이다 — 모든 시험이 같은 슬롯 · 에이전트(v1 · AGENT)라 앞 시험의 고른 펼침이 이어 붙는다.
+  useToolGroupStore.setState({ bySlot: {} })
 })
 
 afterEach(() => {
@@ -178,6 +210,47 @@ describe('RichSlot(live) — send() 실패 시 awaiting 해제', () => {
 
     // 성공 경로 — 아직 응답 이벤트가 없으므로 awaiting 브리지로 streaming 유지.
     expect(screen.getByText('Wait')).toBeTruthy()
+  })
+})
+
+// 사용자 결정 2026-10-01: 대기 표시는 스크롤 목록 밖 · 입력창 바로 위의 늘 서 있는 줄에 선다.
+describe('RichSlot(live) — 대기 표시 줄', () => {
+  it('대화 중이면 줄이 늘 서 있고 스크롤 목록 밖 · 입력 묶음 바로 위다 — 표시는 도는 동안만 그 안에', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedCompletedTurn()
+    const strip = document.querySelector('[data-wait-strip="1"]') as HTMLElement
+    const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+    const textarea = screen.getByPlaceholderText(/메시지 입력/)
+    const label = document.querySelector('[data-rich-label="1"]') as HTMLElement
+    expect(strip).not.toBeNull()
+    expect(viewport.contains(strip)).toBe(false)
+    expect(strip.nextElementSibling?.contains(textarea)).toBe(true)
+    expect(strip.contains(label)).toBe(true) // 정체성 라벨은 이 줄의 오른쪽 칸이다 — 띄워 겹치지 않는다
+    expect(label.className).not.toContain('absolute')
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    await flush()
+    const wait = screen.getByText('Wait')
+    expect(document.querySelector('[data-wait-strip="1"]')).toBe(strip)
+    expect(strip.contains(wait)).toBe(true)
+    expect(viewport.contains(wait)).toBe(false)
+    // 대기 글이 왼쪽 · 라벨이 오른쪽에 한 줄로 서고, 라벨은 대기 표시가 켜져도 같은 노드다.
+    expect(wait.compareDocumentPosition(label) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(document.querySelector('[data-rich-label="1"]')).toBe(label)
+    // 입력창은 줄이 끼어도 같은 노드다(textarea 주석 — 두 배치에서 같은 엘리먼트).
+    expect(screen.getByPlaceholderText(/메시지 입력/)).toBe(textarea)
+  })
+
+  it('첫 실행 화면(빈 상태)에는 줄도 라벨도 없다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live', { continuesConversation: false }))
+    expect(emptyState()).not.toBeNull()
+    expect(document.querySelector('[data-wait-strip="1"]')).toBeNull()
+    expect(document.querySelector('[data-rich-label="1"]')).toBeNull() // 빈 상태의 라벨 접힘은 그대로다
   })
 })
 
@@ -950,8 +1023,8 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
   })
 
   // 실측상 이어받기의 첫 라이브 프레임이 usage 다. 그걸로 대기를 끝내면 이력이 오기 전 빈 목록이 비치고,
-  //   대기 꼬리 판정까지 그걸로 하면 로딩과 대기 꼬리가 함께 뜬다.
-  it('행을 안 그리는 usage 만 온 동안 로딩이 유지되고 대기 꼬리는 없다', async () => {
+  //   대기 표시 판정까지 그걸로 하면 로딩과 대기 표시가 함께 뜬다.
+  it('행을 안 그리는 usage 만 온 동안 로딩이 유지되고 대기 표시는 없다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE))) // replay 는 'live' 보다 먼저 배달된다
@@ -965,9 +1038,9 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).toBeNull()
   })
 
-  // 패널이 잠깐 내려가는 창(같은 화신 재부착의 'buffering')에도 꼬리를 세우지 않는다 — 세우면 패널 →
-  //   대기 꼬리(경과 초) → 패널로 깜빡인다. 대기 꼬리를 내리는 근거는 국면이 아니라 "아직 이력이 없다" 다.
-  it("대기 중 'buffering' 으로 패널이 내려가도 대기 꼬리가 끼지 않는다(턴 열린 usage 만)", async () => {
+  // 패널이 잠깐 내려가는 창(같은 화신 재부착의 'buffering')에도 대기 표시를 세우지 않는다 — 세우면 패널 →
+  //   대기 표시(경과 초) → 패널로 깜빡인다. 대기 표시를 내리는 근거는 국면이 아니라 "아직 이력이 없다" 다.
+  it("대기 중 'buffering' 으로 패널이 내려가도 대기 표시가 끼지 않는다(턴 열린 usage 만)", async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE))) // 턴은 열린 채(turnDone=false)
@@ -988,7 +1061,7 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     ['연결 끊김', () => setConnection('down')],
     ["'detached'", () => fireState('detached')],
     ["'error'", () => fireState('error')],
-  ])('부재 막(%s) 아래에도 대기 꼬리가 끼지 않는다(턴 열린 usage 만)', async (_name, goUnavailable) => {
+  ])('부재 막(%s) 아래에도 대기 표시가 끼지 않는다(턴 열린 usage 만)', async (_name, goUnavailable) => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE)))
@@ -1048,16 +1121,47 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(textarea()).toBe(before)
   })
 
-  it('입력하면 로딩이 걷히고 대기 표시로 넘어간다', async () => {
+  // ADR-0231: 입력은 로딩을 걷지 않는다 — 연결 중 친 글은 대기 목록에 서고, 로딩을 걷는 것은 행(이력 ·
+  //   전달된 말풍선)이다. 입력으로 걷으면 이력이 오기 전 빈 판이 비친다.
+  it('입력은 로딩을 걷지 않는다 — 목록에 선 글이 전달된 말풍선이 되는 순간 걷힌다', async () => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     fireLive(true)
     fireEvent.change(textarea(), { target: { value: 'hello' } })
     fireEvent.keyDown(textarea(), { key: 'Enter' })
     await flush()
-
-    expect(loadingPanel()).toBeNull()
+    expect(loadingPanel()).not.toBeNull()
     expect(emptyState()).toBeNull()
+
+    act(() => captured.onChunk!(queuedFrame(0, { kind: 'Queued', id: 'X', text: 'hello' })))
+    expect(loadingPanel()).not.toBeNull()
+    expect(listedIds()).toEqual(['X'])
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    act(() => captured.onChunk!(queuedFrame(1, { kind: 'Delivered', id: 'X' })))
+    expect(loadingPanel()).toBeNull()
+    expect(queuedList()).toBeNull()
+    expect(screen.getByText('hello')).toBeTruthy()
+    expect(screen.getByText('Wait')).toBeTruthy()
+  })
+
+  it('한가할 때 친 글의 합성 말풍선도 행이라 로딩을 걷는다 — 전송 자체는 걷지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireLive(true)
+    fireEvent.change(textarea(), { target: { value: 'hi' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+    expect(loadingPanel()).not.toBeNull()
+
+    const echo = JSON.stringify({
+      type: 'Structured',
+      kind: 'user',
+      json: JSON.stringify({ type: 'text', text: 'hi', uuid: 'D1' }),
+    })
+    act(() => captured.onChunk!(tag1(0, echo)))
+    expect(loadingPanel()).toBeNull()
+    expect(screen.getByText('hi')).toBeTruthy()
     expect(screen.getByText('Wait')).toBeTruthy()
   })
 
@@ -1161,12 +1265,12 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(emptyState()).not.toBeNull()
   })
 
-  // 대기 꼬리 규칙은 이력 대기 밖에서 표식 도입 전 그대로다 — 행을 안 그리는 usage 만 온 창도 턴이 안
-  //   닫혔으면 꼬리가 뜬다. 꼬리를 내리는 것은 로딩 패널이 떠 있는 동안뿐이다(바로 위 usage 케이스).
+  // 대기 표시 규칙은 이력 대기 밖에서 표식 도입 전 그대로다 — 행을 안 그리는 usage 만 온 창도 턴이 안
+  //   닫혔으면 대기 표시가 뜬다. 대기 표시를 내리는 것은 로딩 패널이 떠 있는 동안뿐이다(바로 위 usage 케이스).
   it.each([
     ['info 없음', undefined],
     ['거짓', { continuesConversation: false }],
-  ])("표식 %s + usage 만 온 창 → 로딩 없이 대기 꼬리가 뜬다(표식 도입 전 규칙)", async (_name, info) => {
+  ])("표식 %s + usage 만 온 창 → 로딩 없이 대기 표시가 뜬다(표식 도입 전 규칙)", async (_name, info) => {
     render(<RichSlot viewId="v1" agentId={AGENT} />)
     await flush()
     act(() => captured.onChunk!(tag1(0, USAGE)))
@@ -1174,5 +1278,962 @@ describe('RichSlot(live) — ADR-0226 이어받기 화신의 이력 대기', () 
     expect(loadingPanel()).toBeNull()
     expect(emptyState()).toBeNull()
     expect(screen.getByText('Wait')).toBeTruthy()
+  })
+})
+
+// ── ADR-0231: 대기 입력 목록 배치 · 빈 상태 게이트 · 재부착 대조 배선 ─────────────────────────
+function queuedFrame(seq: number, op: Record<string, unknown>): OutputChunk {
+  return tag1(seq, JSON.stringify({ type: 'QueuedInput', op }))
+}
+function queuedList(): HTMLElement | null {
+  return document.querySelector('[data-queued-inputs="1"]')
+}
+function listedIds(): string[] {
+  return Array.from(document.querySelectorAll('[data-queued-input]')).map(
+    (el) => el.getAttribute('data-queued-input') ?? '',
+  )
+}
+/** 답을 테스트가 푸는 목록 조회 — 부른 순서대로 풀개를 쌓는다. */
+function deferredListing(): Array<(listing: unknown) => void> {
+  const resolvers: Array<(listing: unknown) => void> = []
+  clientMock.listQueuedInputs = vi.fn(() => new Promise((resolve) => resolvers.push(resolve)))
+  return resolvers
+}
+
+describe('RichSlot(live) — 대기 입력 목록(ADR-0231)', () => {
+  it('대기 항목이 서 있으면 빈 상태가 아니다 — 목록은 입력창 위 · 라벨은 그 위 줄, textarea 는 remount 되지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireState('live')
+    expect(emptyState()).not.toBeNull()
+    expect(queuedList()).toBeNull()
+    const before = textarea()
+
+    act(() => captured.onChunk!(queuedFrame(0, { kind: 'Queued', id: 'X', text: 'hello' })))
+    expect(emptyState()).toBeNull()
+    expect(listedIds()).toEqual(['X'])
+    const list = queuedList()!
+    const label = document.querySelector('[data-rich-label="1"]')!
+    expect(label.closest('[data-wait-strip="1"]')).not.toBeNull() // 라벨은 목록 위 대기 표시 줄에 — 목록이 가리지 않는다
+    expect(label.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(list.compareDocumentPosition(textarea()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(textarea()).toBe(before)
+
+    // 받음 → 목록에서 빠지고 그 자리에 말풍선. 입력창은 여전히 같은 엘리먼트다.
+    act(() => captured.onChunk!(queuedFrame(1, { kind: 'Delivered', id: 'X' })))
+    expect(queuedList()).toBeNull()
+    expect(screen.getByText('hello')).toBeTruthy()
+    expect(textarea()).toBe(before)
+  })
+
+  it('목록 사건은 대기 표시를 푼다(P1b 판정 유지 — 알아들은 프레임)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedCompletedTurn()
+    fireEvent.change(textarea(), { target: { value: 'again' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+    expect(screen.queryByText('Wait')).toBeTruthy()
+    act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'Y', text: 'again' })))
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  // P1b 판정 2: 받음 배치는 턴이 닫힌 뒤에 와도 대기 표시를 켠다 — codex 는 턴 도중 친 글을 다음 턴 머리에
+  //   넘기므로 그 `Delivered` 가 새 턴의 첫 사건이고, 추론 구간은 번역되지 않아 그 뒤 한동안 사건이 없다.
+  //   ★그래서 누산기 쪽에서 배치의 재개를 막지 않는다★ — 막으면 그 구간에 대기 표시가 꺼진다. 끄는 것은 생산자가
+  //   그 턴에 내는 경계다(턴이 없는 자리에 받음을 놓지 않는 것이 생산자 몫).
+  it('턴 도중 친 글 — 목록에 섰다가 다음 턴 머리의 받음 자리에 말풍선 한 벌, 대기 표시는 그 턴의 경계가 끈다', async () => {
+    const turnEnd = JSON.stringify({ type: 'TurnEnd', outcome: { kind: 'Completed' } })
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'working' }))))
+    fireEvent.change(textarea(), { target: { value: 'also this' } })
+    fireEvent.keyDown(textarea(), { key: 'Enter' })
+    await flush()
+    act(() => captured.onChunk!(queuedFrame(1, { kind: 'Queued', id: 'Q', text: 'also this' })))
+    expect(listedIds()).toEqual(['Q'])
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(2, turnEnd)))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(listedIds()).toEqual(['Q'])
+
+    const echo = JSON.stringify({
+      type: 'Structured',
+      kind: 'user',
+      json: JSON.stringify({ type: 'text', text: 'also this', uuid: 'Q' }),
+    })
+    act(() => captured.onChunk!(queuedFrame(3, { kind: 'Delivered', id: 'Q' })))
+    act(() => captured.onChunk!(tag1(4, echo)))
+    expect(queuedList()).toBeNull()
+    expect(screen.getAllByText('also this')).toHaveLength(1)
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(5, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
+    act(() => captured.onChunk!(tag1(6, turnEnd)))
+    expect(screen.queryByText('Wait')).toBeNull()
+  })
+
+  it("'live'(표식 실림)마다 목록을 물어 링에 없던 대기 항목을 되찾는다", async () => {
+    const resolvers = deferredListing()
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(40, JSON.stringify({ type: 'TextDelta', text: 'long turn' }))))
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    expect(clientMock.listQueuedInputs).toHaveBeenCalledWith(AGENT)
+    await act(async () => {
+      resolvers[0]({
+        inputs: [{ id: 'Q', text: 'evicted but waiting', state: 'queued', cancel: null }],
+        as_of_seq: 30,
+        epoch: 5,
+        stopped_after_error: false,
+      })
+    })
+    expect(listedIds()).toEqual(['Q'])
+  })
+
+  it('표식 없는 live 는 묻지 않는다(답의 화신을 가를 수 없다)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    fireState('live')
+    expect(clientMock.listQueuedInputs).not.toHaveBeenCalled()
+  })
+
+  it('답이 오기 전에 버퍼 국면에 들면 늦게 온 옛 답은 버린다 · 다른 화신의 답도 버린다', async () => {
+    const resolvers = deferredListing()
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    fireState('buffering')
+    const row = { id: 'Q', text: 'stale', state: 'queued', cancel: null }
+    await act(async () => {
+      resolvers[0]({ inputs: [row], as_of_seq: null, epoch: 5, stopped_after_error: false })
+    })
+    expect(queuedList()).toBeNull()
+
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    await act(async () => {
+      resolvers[1]({ inputs: [row], as_of_seq: null, epoch: 6, stopped_after_error: false })
+    })
+    expect(queuedList()).toBeNull()
+  })
+
+  it('목록 조회가 실패해도(잠든 에이전트) 슬롯은 그대로다', async () => {
+    clientMock.listQueuedInputs = vi.fn(async () => {
+      throw new Error('NOT_FOUND: agent is not running')
+    })
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live', { continuesConversation: false, epoch: 5 }))
+    await flush()
+    expect(emptyState()).not.toBeNull()
+    expect(queuedList()).toBeNull()
+  })
+})
+
+// ★스크롤 따라가기 배선(ADR-0242 · TRD §2-1)★: 판정은 followCore.test.ts · 훅은 useScrollFollow.test.tsx 가 잰다.
+//   여기는 슬롯이 그 훅을 대화 뷰포트에 꽂았고, 붙이는 두 자리(보냄 U4 · 비우기)와 버튼 · 손잡이 맵이 닿는지만 잰다.
+//   jsdom 엔 레이아웃이 없어 Radix Viewport 만 기하를 갖게 하고, ResizeObserver 는 호출 기록만 하는 가짜를 둔다.
+//   ★scroll 이벤트를 쏘지 않는다★ — 쏘면 Radix 스크롤바가 마운트돼 이 시험의 대상 밖을 끌어들인다.
+describe('RichSlot(live) — 스크롤 따라가기(ADR-0242)', () => {
+  const geo = { height: 1000, client: 200 }
+  const tops = new WeakMap<Element, number>()
+  const isViewport = (el: Element): boolean => el.hasAttribute('data-radix-scroll-area-viewport')
+
+  beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    )
+    vi.spyOn(Element.prototype, 'scrollHeight', 'get').mockImplementation(function (this: Element) {
+      return isViewport(this) ? geo.height : 0
+    })
+    vi.spyOn(Element.prototype, 'clientHeight', 'get').mockImplementation(function (this: Element) {
+      return isViewport(this) ? geo.client : 0
+    })
+    vi.spyOn(Element.prototype, 'scrollTop', 'get').mockImplementation(function (this: Element) {
+      return tops.get(this) ?? 0
+    })
+    vi.spyOn(Element.prototype, 'scrollTop', 'set').mockImplementation(function (this: Element, v: number) {
+      tops.set(this, v)
+    })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  const viewport = (): HTMLElement => document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+  const followAttr = (): string | null => viewport().getAttribute('data-scroll-follow')
+  const jumpButton = (): HTMLElement | null => document.querySelector('[data-jump-to-bottom="1"]')
+
+  async function mountWithTurn(): Promise<void> {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedCompletedTurn()
+  }
+
+  it('대화 뷰포트에 붙어 시작하고 바닥으로 쓴다', async () => {
+    await mountWithTurn()
+    expect(followAttr()).toBe('pinned')
+    expect(viewport().scrollTop).toBe(800)
+  })
+
+  it('위로 풀린 채 보내면 다시 바닥에 붙는다(U4)', async () => {
+    await mountWithTurn()
+    tops.set(viewport(), 300)
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(followAttr()).toBe('free')
+
+    const textarea = screen.getByPlaceholderText(/메시지 입력/)
+    fireEvent.change(textarea, { target: { value: 'hello' } })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+    expect(followAttr()).toBe('pinned')
+    expect(viewport().scrollTop).toBe(800)
+  })
+
+  it('비우기(onReset)는 다시 붙인다 — 새 화신의 이력이 바닥에 착지한다', async () => {
+    await mountWithTurn()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(followAttr()).toBe('free')
+    fireReset()
+    expect(followAttr()).toBe('pinned')
+  })
+
+  it('떨어지면 잠깐 뒤 「맨 아래로」 버튼이 뜨고, 누르면 붙고 사라진다', async () => {
+    await mountWithTurn()
+    vi.useFakeTimers()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    expect(jumpButton()).toBeNull()
+    act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
+    // 버튼은 ScrollArea 의 자식이다 — absolute 기준이 seam 의 Root 라 스크롤되지 않는다.
+    expect(viewport().contains(jumpButton())).toBe(true)
+
+    fireEvent.click(jumpButton()!)
+    expect(followAttr()).toBe('pinned')
+    expect(jumpButton()).toBeNull()
+  })
+
+  it('「맨 아래로」 를 누르면 포커스가 뷰포트에 남아 이어서 친 Esc 가 턴을 끊는다(ADR-0237 U6)', async () => {
+    agentStoreState.agents = [
+      { id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities: { control: { interrupt: true } } },
+    ]
+    agentStoreState.agentsLoaded = true
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'streaming reply' }))))
+    vi.useFakeTimers()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    act(() => vi.advanceTimersByTime(JUMP_BUTTON_DELAY_MS))
+
+    // jsdom 은 클릭으로 포커스를 옮기지 않는다 — 실제 창에서 버튼을 누르면 먼저 버튼이 포커스를 받는다.
+    jumpButton()!.focus()
+    fireEvent.click(jumpButton()!)
+    expect(jumpButton()).toBeNull()
+    expect(document.activeElement).toBe(viewport())
+
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(dispatchMock.fireAndForget.mock.calls.filter(([id]) => id === 'agent.interrupt')).toEqual([
+      ['agent.interrupt', { agentId: AGENT }],
+    ])
+  })
+
+  it('손잡이 맵에 그 슬롯(viewId)으로 오른다 — LLM 경로(slot.scrollToBottom)가 이것을 부른다', async () => {
+    await mountWithTurn()
+    fireEvent.wheel(viewport(), { deltaY: -40 })
+    act(() => getFollow('v1')!.pin())
+    expect(followAttr()).toBe('pinned')
+    cleanup()
+    expect(getFollow('v1')).toBeUndefined()
+  })
+})
+
+// ★이 표는 일부러 명령을 흉내만 낸다(`fireAndForget` mock)★ — 실제 창 명령은 한 턴의 두 번째 Esc 를 무시하므로(ADR-0244 ·
+//   아래 「중단하는 중」 표) 한 턴에 두 번 눌러 두 번 부르는 포커스 시험들은 그 mock 에 기댄다.
+describe('RichSlot(live) — Esc 는 도는 턴을 끊는다(ADR-0237)', () => {
+  // 'absent' = 능력 칸이 아예 없다(undefined 를 넘기면 기본값이 대신 들어간다).
+  function running(interrupt: boolean | 'absent' = true): unknown[] {
+    const capabilities = interrupt === 'absent' ? undefined : { control: { interrupt } }
+    return [{ id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities }]
+  }
+  const interrupts = (): unknown[][] =>
+    dispatchMock.fireAndForget.mock.calls.filter(([id]) => id === 'agent.interrupt')
+  const root = (): HTMLElement => document.querySelector('[data-rich-live="1"]') as HTMLElement
+  const input = (): HTMLTextAreaElement => screen.getByPlaceholderText(/메시지 입력/) as HTMLTextAreaElement
+
+  /** 끊기 능력이 있는 에이전트의 턴이 도는 중(델타만 왔다 — 턴 끝 없음). */
+  async function mountStreaming(interrupt: boolean | 'absent' = true): Promise<void> {
+    agentStoreState.agents = running(interrupt)
+    agentStoreState.agentsLoaded = true
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(tag1(0, JSON.stringify({ type: 'TextDelta', text: 'streaming reply' }))))
+    expect(screen.queryByText('Wait')).not.toBeNull()
+  }
+
+  it('조건이 전부 참이면 명령을 한 번 부르고 키를 먹는다 — 낙관 상태도 입력창 글도 그대로다', async () => {
+    await mountStreaming()
+    fireEvent.change(input(), { target: { value: '초안' } })
+
+    const notPrevented = fireEvent.keyDown(input(), { key: 'Escape' })
+
+    expect(notPrevented).toBe(false)
+    expect(interrupts()).toEqual([['agent.interrupt', { agentId: AGENT }]])
+    expect(input().value).toBe('초안')
+    expect(screen.queryByText('Wait')).not.toBeNull()
+  })
+
+  it.each<[string, Record<string, unknown>]>([
+    ['ctrl', { ctrlKey: true }],
+    ['alt', { altKey: true }],
+    ['shift', { shiftKey: true }],
+    ['meta', { metaKey: true }],
+    ['누른 채 반복', { repeat: true }],
+    ['IME 조합 중(isComposing)', { isComposing: true }],
+    ['IME 조합 중(keyCode 229)', { keyCode: 229 }],
+  ])('키 조건이 어긋나면 부르지 않는다 — %s', async (_label, init) => {
+    await mountStreaming()
+    const notPrevented = fireEvent.keyDown(input(), { key: 'Escape', ...init })
+    expect(notPrevented).toBe(true)
+    expect(interrupts()).toEqual([])
+  })
+
+  it('다른 키는 부르지 않는다', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'a' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('문서 capture 에서 먼저 먹힌 Esc(Radix 레이어)는 부르지 않는다', async () => {
+    await mountStreaming()
+    const eat = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') e.preventDefault()
+    }
+    document.addEventListener('keydown', eat, true)
+    try {
+      fireEvent.keyDown(input(), { key: 'Escape' })
+    } finally {
+      document.removeEventListener('keydown', eat, true)
+    }
+    expect(interrupts()).toEqual([])
+  })
+
+  it('오버레이 표지가 문서에 있는 동안은 부르지 않고, 걷히면 다시 부른다', async () => {
+    await mountStreaming()
+    const overlay = document.createElement('div')
+    overlay.setAttribute('data-engram-overlay', '1')
+    document.body.appendChild(overlay)
+    try {
+      expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(true)
+      expect(interrupts()).toEqual([])
+    } finally {
+      overlay.remove()
+    }
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+  })
+
+  it('턴이 안 돌면 부르지 않는다(턴 끝 뒤)', async () => {
+    await mountStreaming()
+    act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'MessageDone' }))))
+    expect(screen.queryByText('Wait')).toBeNull()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it.each<[string, boolean | 'absent']>([
+    ['능력 거짓', false],
+    ['능력 칸 없음', 'absent'],
+  ])('통로가 끊기를 지원하지 않으면 부르지 않는다 — %s', async (_label, interrupt) => {
+    await mountStreaming(interrupt)
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('에이전트가 지금 없으면(명부에서 사라짐 · 연결 끊김) 부르지 않는다', async () => {
+    await mountStreaming()
+    setConnection('down')
+    fireEvent.keyDown(root(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+    setConnection('connected')
+
+    agentStoreState.agents = []
+    act(() => captured.onChunk!(tag1(1, JSON.stringify({ type: 'TextDelta', text: ' more' }))))
+    expect(deadOverlay()).not.toBeNull()
+    fireEvent.keyDown(root(), { key: 'Escape' })
+    expect(interrupts()).toEqual([])
+  })
+
+  it('대기 입력 ✕ · 「외 N개」 를 누른 뒤에도 포커스가 칸 안에 남아 이어서 친 Esc 가 턴을 끊는다(U6)', async () => {
+    await mountStreaming()
+    for (const [seq, id] of [[1, 'Q1'], [2, 'Q2'], [3, 'Q3'], [4, 'Q4']] as const) {
+      act(() => captured.onChunk!(queuedFrame(seq, { kind: 'Queued', id, text: `later ${id}` })))
+    }
+
+    // jsdom 은 클릭으로 포커스를 옮기지 않는다 — 실제 창에서 버튼을 누르면 먼저 버튼이 포커스를 받는다.
+    const remove = document.querySelector('[data-queued-input="Q1"] button') as HTMLButtonElement
+    remove.focus()
+    fireEvent.click(remove)
+    expect(dispatchMock.fireAndForget).toHaveBeenCalledWith('agent.cancelQueuedInput', { agentId: AGENT, inputId: 'Q1' })
+    expect(document.activeElement).toBe(root())
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+
+    const more = document.querySelector('[data-queued-more="1"]') as HTMLButtonElement
+    more.focus()
+    fireEvent.click(more)
+    expect(document.querySelector('[data-queued-more="1"]')).toBeNull()
+    expect(document.activeElement).toBe(root())
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(interrupts()).toHaveLength(2)
+  })
+
+  it('칸 안 어디든(U6) — 대화 본문(뷰포트)이나 칸 루트에 포커스가 있어도 부른다', async () => {
+    await mountStreaming()
+    const viewport = document.querySelector('[data-radix-scroll-area-viewport]') as HTMLElement
+    viewport.focus()
+    expect(document.activeElement).toBe(viewport)
+    fireEvent.keyDown(viewport, { key: 'Escape' })
+    expect(interrupts()).toHaveLength(1)
+
+    // 본문 여백처럼 뷰포트 밖을 누르면 루트가 포커스를 받는다(tabIndex -1 — 탭 순서 밖).
+    expect(root().tabIndex).toBe(-1)
+    root().focus()
+    expect(document.activeElement).toBe(root())
+    fireEvent.keyDown(root(), { key: 'Escape' })
+    expect(interrupts()).toHaveLength(2)
+  })
+})
+
+// ★Esc 뒤 「중단하는 중」(ADR-0244)★: 세우는 쪽은 창 명령이고 걷는 쪽은 칸이라, 여기서는 사람 경로를 실제 명령까지
+//   태운다(위 ADR-0237 표는 명령을 흉내만 내므로 그 시험들의 두 번째 Esc 는 여전히 부른다).
+describe('RichSlot(live) — Esc 뒤 「중단하는 중…」 · 턴 끝까지 Esc 무시(ADR-0244)', () => {
+  const root = (): HTMLElement => document.querySelector('[data-rich-live="1"]') as HTMLElement
+  const input = (): HTMLTextAreaElement => screen.getByPlaceholderText(/메시지 입력/) as HTMLTextAreaElement
+  const indicator = (): Element | null => document.querySelector('[data-wait-interrupting="1"]')
+  const interrupting = (agentId = AGENT): boolean =>
+    pendingInterrupt(useInterruptStore.getState(), agentId) !== undefined
+  const turnEnd = (seq: number, kind: 'Interrupted' | 'Completed' = 'Interrupted'): OutputChunk =>
+    tag1(seq, JSON.stringify({ type: 'TurnEnd', turn_id: null, outcome: { kind } }))
+  const delta = (seq: number, text: string): OutputChunk => tag1(seq, JSON.stringify({ type: 'TextDelta', text }))
+
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('../../commands/dispatch')>('../../commands/dispatch')
+    dispatchMock.fireAndForget.mockImplementation((...args: unknown[]) =>
+      actual.fireAndForget(...(args as [string, CommandArgs | undefined])),
+    )
+    agentStoreState.agents = [
+      { id: AGENT, cwd: 'C:/x', status: { type: 'Running' }, capabilities: { control: { interrupt: true } } },
+    ]
+    agentStoreState.agentsLoaded = true
+  })
+
+  /** 끊기 능력이 있는 에이전트의 턴이 도는 중(델타만 왔다 — 턴 끝 없음). */
+  async function mountStreaming(): Promise<void> {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    act(() => captured.onChunk!(delta(0, 'streaming reply')))
+    expect(screen.getByText('Wait')).toBeTruthy()
+  }
+
+  it('Esc 한 번 = 끊기 한 번 · 대기 표시가 곧바로 「중단하는 중…」 · 그동안 Esc 는 보내지도 먹지도 않는다', async () => {
+    await mountStreaming()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+    expect(clientMock.interruptAgent).toHaveBeenCalledWith(AGENT)
+    expect(indicator()).not.toBeNull()
+    expect(screen.getByText(t('chat.interrupting'))).toBeTruthy()
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    // 끊기가 받아들여져도 턴 끝이 오기 전까지는 그대로다.
+    await flush()
+    expect(indicator()).not.toBeNull()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(true)
+    expect(fireEvent.keyDown(root(), { key: 'Escape' })).toBe(true)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+  })
+
+  it.each<[string, (seq: number) => OutputChunk]>([
+    ['TurnEnd(중단)', (seq) => turnEnd(seq)],
+    ['TurnEnd(완료)', (seq) => turnEnd(seq, 'Completed')],
+    ['MessageDone', (seq) => tag1(seq, JSON.stringify({ type: 'MessageDone' }))],
+  ])('턴 끝(%s)에 걷히고, 다음에 도는 턴에서는 Esc 가 다시 끊는다', async (_label, end) => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    act(() => captured.onChunk!(end(1)))
+    expect(interrupting()).toBe(false)
+    expect(indicator()).toBeNull()
+
+    act(() => captured.onChunk!(delta(2, 'next turn')))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+    expect(indicator()).not.toBeNull()
+  })
+
+  it('턴 끝과 다음 턴의 첫 프레임이 한 렌더로 묶여도 걷힌다 — 다음 턴에 표시가 남지 않고 Esc 가 먹힌다', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+
+    act(() => {
+      captured.onChunk!(turnEnd(1))
+      captured.onChunk!(delta(2, 'queued message reply'))
+    })
+    expect(indicator()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('보낸 직후 · 첫 프레임 전의 Esc 도 그 턴 끝에 걷힌다(누산기가 이미 끝으로 읽고 있던 턴)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(indicator()).not.toBeNull()
+
+    // 턴을 여는 프레임 없이 끝만 온다(누산기는 끝 → 끝) — 끝 사건 자체로 걷는다.
+    act(() => captured.onChunk!(turnEnd(2)))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(interrupting()).toBe(false)
+  })
+
+  it('보낸 직후 끊은 턴의 끝과 다음 턴의 첫 프레임이 한 렌더로 묶여도 걷힌다 — 누산기는 앞 턴의 끝을 읽던 채였다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(indicator()).not.toBeNull()
+
+    act(() => {
+      captured.onChunk!(turnEnd(2))
+      captured.onChunk!(delta(3, 'next turn'))
+    })
+    expect(interrupting()).toBe(false)
+    expect(indicator()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(fireEvent.keyDown(input(), { key: 'Escape' })).toBe(false)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+    expect(indicator()).not.toBeNull()
+  })
+
+  it('보낸 글이 턴을 열지 않고 대기 목록에 서서 대기 표시가 꺼지면 걷힌다(턴 경계 없음)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    act(() => captured.onChunk!(queuedFrame(2, { kind: 'Queued', id: 'M', text: 'hello' })))
+    expect(screen.queryByText('Wait')).toBeNull()
+    expect(interrupting()).toBe(false)
+  })
+
+  it.each<[string, () => unknown]>([
+    ['임대 거절(CONFLICT)', () => INPUT_LOCKED_REFUSAL],
+    ['끊을 턴 없음', () => 'no turn to interrupt'],
+  ])('끊기가 거절되면(%s) 걷히고 Esc 가 다시 끊는다', async (_label, error) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    clientMock.interruptAgent = vi.fn(async () => {
+      throw error()
+    })
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(indicator()).not.toBeNull()
+
+    await flush()
+    expect(indicator()).toBeNull()
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(warn).toHaveBeenCalled()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('같은 에이전트의 둘째 뷰가 붙어 옛 턴 끝을 replay 해도 걷히지 않는다 — 걷는 것은 라이브 턴 끝이다', async () => {
+    const history = [delta(0, 'old reply'), tag1(1, JSON.stringify({ type: 'MessageDone' })), delta(2, 'streaming reply')]
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      captured.onState!('live')
+    })
+    const view1 = captured.onChunk!
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    // 둘째 뷰 — 빈 누산기가 이력을 다시 짓는다(옛 턴 끝 seq 1 이 끝 → 끝으로 넘어간다).
+    render(<RichSlot viewId="v2" agentId={AGENT} />)
+    await flush()
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      captured.onState!('live')
+    })
+    expect(interrupting()).toBe(true)
+    expect(document.querySelectorAll('[data-wait-interrupting="1"]')).toHaveLength(2)
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+
+    act(() => view1(turnEnd(3)))
+    expect(interrupting()).toBe(false)
+  })
+
+  it.each<[string, () => void]>([
+    [
+      '에이전트가 명부에서 사라짐(종료)',
+      () => {
+        agentStoreState.agents = []
+        act(() => captured.onChunk!(delta(1, ' more')))
+      },
+    ],
+    ['구독이 재요청을 소진함(error)', () => act(() => captured.onState!('error'))],
+    ['연결 끊김', () => setConnection('down')],
+  ])('부재가 되면(%s) 걷히고, 이 창의 끊기 명령이 다시 보낸다', async (_label, becomeUnavailable) => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    becomeUnavailable()
+    expect(deadOverlay()).not.toBeNull()
+    expect(interrupting()).toBe(false)
+    await act(async () => {
+      await run('agent.interrupt', { agentId: AGENT })
+    })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('둘째 뷰의 구독만 멈추면(error) 첫 뷰의 「중단하는 중」은 남고 다시 보내지 않는다 — 마지막 뷰까지 멈추면 걷힌다', async () => {
+    const history = [delta(0, 'old reply'), tag1(1, JSON.stringify({ type: 'MessageDone' })), delta(2, 'streaming reply')]
+    const first = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    const view1State = captured.onState!
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      view1State('live')
+    })
+    const view1Input = first.container.querySelector('textarea') as HTMLTextAreaElement
+    fireEvent.keyDown(view1Input, { key: 'Escape' })
+    await flush()
+
+    render(<RichSlot viewId="v2" agentId={AGENT} />)
+    await flush()
+    const view2State = captured.onState!
+    act(() => {
+      for (const frame of history) captured.onChunk!(frame)
+      view2State('live')
+    })
+    expect(useInterruptStore.getState().views).toEqual({ [AGENT]: 2 })
+
+    act(() => view2State('error'))
+    expect(interrupting()).toBe(true)
+    expect(useInterruptStore.getState().views).toEqual({ [AGENT]: 1 })
+    expect(first.container.querySelector('[data-wait-interrupting="1"]')).not.toBeNull()
+    expect(fireEvent.keyDown(view1Input, { key: 'Escape' })).toBe(true)
+    await act(async () => {
+      await run('agent.interrupt', { agentId: AGENT })
+    })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(1)
+
+    act(() => view1State('error'))
+    expect(interrupting()).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({})
+  })
+
+  it.each<[string, OutputChunk[], boolean]>([
+    ['닫힌 턴으로 끝나면 걷힌다', [delta(0, 'reply'), tag1(1, JSON.stringify({ type: 'MessageDone' }))], false],
+    [
+      '열린 턴으로 끝나면 남는다',
+      [delta(0, 'reply'), tag1(1, JSON.stringify({ type: 'MessageDone' })), delta(2, 'streaming reply')],
+      true,
+    ],
+  ])('첫 buffering 중에 끊기를 불렀고 그 replay 가 %s', async (_label, replay, stays) => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    await act(async () => {
+      await run('agent.interrupt', { agentId: AGENT })
+    })
+    expect(interrupting()).toBe(true)
+
+    // 턴 끝이 따라잡기 전 이력에만 있다 — 대기 표시는 그 전후로 꺼져 있어 켜짐 → 꺼짐도 없다.
+    act(() => {
+      for (const frame of replay) captured.onChunk!(frame)
+      captured.onState!('live')
+    })
+    expect(interrupting()).toBe(stays)
+  })
+
+  it('따라잡은 뒤의 같은 화신 재buffering 은 닫힌 턴으로 끝나도 걷지 않는다 — 보낸 직후라 새 턴의 첫 프레임이 아직 없다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onState!('live'))
+    feedCompletedTurn()
+    fireEvent.change(input(), { target: { value: 'hello' } })
+    fireEvent.keyDown(input(), { key: 'Enter' })
+    await flush()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+
+    act(() => {
+      captured.onState!('buffering')
+      captured.onState!('live')
+    })
+    expect(interrupting()).toBe(true)
+  })
+
+  it('새 화신(비우기)이 오면 걷힌다 — 새 화신의 이력이 같은 틱에 턴을 열어 두어도', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+
+    act(() => {
+      captured.onReset!()
+      captured.onChunk!(delta(0, 'new incarnation'))
+    })
+    expect(interrupting()).toBe(false)
+    expect(screen.getByText('Wait')).toBeTruthy()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(clientMock.interruptAgent).toHaveBeenCalledTimes(2)
+  })
+
+  it('마운트 해제 · 에이전트 교체에 걷힌다 — 낡은 표시가 살아남지 않는다', async () => {
+    await mountStreaming()
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    await flush()
+    expect(interrupting()).toBe(true)
+    cleanup()
+    expect(interrupting()).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({})
+
+    const OTHER = 'eeee-ffff'
+    const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(delta(0, 'streaming reply')))
+    fireEvent.keyDown(input(), { key: 'Escape' })
+    expect(interrupting()).toBe(true)
+    rerender(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    expect(interrupting()).toBe(false)
+    expect(useInterruptStore.getState().views).toEqual({ [OTHER]: 1 })
+  })
+})
+
+// ★도구 묶음 접착(ADR-0239 · TRD S21-chat-ux §4-4 · §4-5)★: 묶기 · 요약 · 토글 자체는 toolRuns.test.ts ·
+//   ToolGroupRow.test.tsx 가 잰다. 여기는 슬롯이 대화 뷰에 슬롯 id 를 내려보내고 저장소에 묶였는지(머리가 살아 있고
+//   command 가 닿는다) · 묶임의 수명(마운트 · 에이전트 교체 · 새 화신) · 마지막이 아닌 묶음을 펼치면 따라가기를 푸는지만 잰다.
+describe('RichSlot(live) — 도구 묶음 접착(ADR-0239)', () => {
+  const OTHER = 'eeee-ffff-0000-1111'
+
+  function toolCallFrame(seq: number, id: string): OutputChunk {
+    return tag1(
+      seq,
+      JSON.stringify({ type: 'ToolCall', name: 'Read', args_json: '{}', id, turn_id: null, message_id: null }),
+    )
+  }
+  function turnEndFrame(seq: number): OutputChunk {
+    return tag1(seq, JSON.stringify({ type: 'TurnEnd', turn_id: null, outcome: { kind: 'Completed' } }))
+  }
+
+  /** 끝난 턴 하나 = 도구 호출 둘 — 고른 값이 없으면 접힌다. 묶음 키 = 첫 호출의 id(`tool:<id>`). */
+  function feedFinishedGroup(seq: number, ids: readonly [string, string]): void {
+    act(() => captured.onChunk!(toolCallFrame(seq, ids[0])))
+    act(() => captured.onChunk!(toolCallFrame(seq + 1, ids[1])))
+    act(() => captured.onChunk!(turnEndFrame(seq + 2)))
+  }
+
+  const groups = (): HTMLElement[] => Array.from(document.querySelectorAll<HTMLElement>('[data-tool-group]'))
+  const group = (key: string): HTMLElement => {
+    const el = document.querySelector<HTMLElement>(`[data-tool-group="${key}"]`)
+    if (el === null) throw new Error(`묶음 '${key}' 이 그려져 있지 않다`)
+    return el
+  }
+  // 묶음 뿌리의 첫 버튼이 머리다 — 펼치면 멤버 행의 버튼이 그 뒤에 선다.
+  const header = (key: string): HTMLButtonElement => group(key).querySelector('button') as HTMLButtonElement
+  const openAttr = (key: string): string | null => group(key).getAttribute('data-tool-group-open')
+  const chosen = (key: string): boolean | undefined => useToolGroupStore.getState().bySlot.v1?.open[key]
+  const followAttr = (): string | null =>
+    document.querySelector('[data-radix-scroll-area-viewport]')!.getAttribute('data-scroll-follow')
+
+  it('끝난 묶음의 머리가 살아 있고, 누르면 저장소를 거쳐 펼쳐졌다 접힌다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+
+    expect(groups()).toHaveLength(1)
+    expect(group('tool:r1').getAttribute('data-tool-group-count')).toBe('2')
+    // FE-2b-2 리뷰가 잡은 결함의 회귀망 — 슬롯 id 를 안 내려보내면 머리가 꺼져 접힌 묶음을 다시 못 연다.
+    expect(header('tool:r1').disabled).toBe(false)
+    expect(openAttr('tool:r1')).toBe('0')
+
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+    expect(chosen('tool:r1')).toBe(true)
+
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('0')
+    expect(chosen('tool:r1')).toBe(false)
+  })
+
+  it('LLM command(chat.toolGroup.setExpanded)가 마운트된 슬롯에 닿고, 내려간 뒤에는 오류로 답한다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+
+    let answer: unknown
+    act(() => {
+      answer = run('chat.toolGroup.setExpanded', { slotId: 'v1', groupKey: 'tool:r1', expanded: true })
+    })
+    expect(answer).toEqual({ expanded: true })
+    expect(openAttr('tool:r1')).toBe('1')
+
+    cleanup()
+    expect(() => run('chat.toolGroup.setExpanded', { slotId: 'v1', groupKey: 'tool:r1', expanded: false })).toThrow(
+      /마운트된 슬롯 'v1'/,
+    )
+  })
+
+  it('마지막이 아닌 묶음을 펼치면 따라가기를 풀고, 마지막 묶음 · 접기는 붙음을 그대로 둔다(§4-5)', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['a1', 'a2'])
+    feedFinishedGroup(3, ['b1', 'b2'])
+    expect(groups().map((g) => g.getAttribute('data-tool-group'))).toEqual(['tool:a1', 'tool:b1'])
+    expect(followAttr()).toBe('pinned')
+
+    fireEvent.click(header('tool:b1')) // 마지막 묶음
+    expect(openAttr('tool:b1')).toBe('1')
+    expect(followAttr()).toBe('pinned')
+    expect(getFollow('v1')!.pinned).toBe(true)
+
+    fireEvent.click(header('tool:a1')) // 마지막이 아닌 묶음
+    expect(openAttr('tool:a1')).toBe('1')
+    expect(followAttr()).toBe('free')
+    expect(getFollow('v1')!.pinned).toBe(false)
+
+    // 접기는 부르지 않는다 — 다시 붙인 뒤 위 묶음을 접어도 붙음이 남는다.
+    act(() => getFollow('v1')!.pin())
+    fireEvent.click(header('tool:a1'))
+    expect(openAttr('tool:a1')).toBe('0')
+    expect(followAttr()).toBe('pinned')
+  })
+
+  it('같은 에이전트로 다시 마운트하면 고른 펼침이 다시 붙고, 다른 에이전트가 오면 따라오지 않는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+
+    // 마운트 해제(렌더 모드 교체 · 팝아웃 이동) → 같은 에이전트로 다시 — 같은 사건열의 replay 가 같은 키로 선다.
+    cleanup()
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('1')
+
+    // 같은 슬롯에 다른 에이전트 — 같은 키의 묶음이 와도 기본(접힘)으로 그려진다.
+    cleanup()
+    render(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('0')
+    expect(useToolGroupStore.getState().bySlot.v1).toMatchObject({ agentId: OTHER, open: {} })
+  })
+
+  // 옛 해제가 새 묶임을 못 푸는 것(마운트 표식)은 `toolGroupStore.test.ts` 가 잰다 — 여기서는 React 가 옛 정리를 먼저
+  //   돌려 그 순서를 가릴 수 없다.
+  it('한 인스턴스에서 에이전트가 바뀌면(key 재마운트) 새 에이전트로 다시 묶여 고른 펼침은 비고 새 머리가 적는다', async () => {
+    const { rerender } = render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+
+    rerender(<RichSlot viewId="v1" agentId={OTHER} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('0')
+    // 새 인스턴스의 머리가 저장소에 적는다(새 묶임이 섰다).
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+  })
+
+  it('새 화신의 비우기(onReset)는 고른 펼침을 비운다 — 같은 키의 묶음이 와도 기본(접힘)으로 그린다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+
+    fireReset()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    expect(openAttr('tool:r1')).toBe('0')
+    // 묶임은 남는다 — 비운 뒤에도 머리가 적는다.
+    fireEvent.click(header('tool:r1'))
+    expect(openAttr('tool:r1')).toBe('1')
+  })
+
+  it("같은 화신의 재replay('buffering' → 'live')는 고른 펼침을 지우지 않는다", async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    feedFinishedGroup(0, ['r1', 'r2'])
+    fireEvent.click(header('tool:r1'))
+
+    fireState('buffering')
+    fireState('live')
+    expect(openAttr('tool:r1')).toBe('1')
+    expect(chosen('tool:r1')).toBe(true)
+  })
+
+  // ★늦은 도구 끝 창(TRD §4-7 ⑧ · ⑨ 프론트 · ADR-0241)★: codex 는 끊어도 도는 명령을 죽이지 않아 지난 턴 도구의 끝이
+  //   늦게 온다. 보낸 직후 · 첫 답 전에 그 끝이 들면 — 직전 턴이 닫혀 turnDone 이 참이라 대기 표시를 떠받치는 것은
+  //   awaiting 하나다. `ToolResult` 로 awaiting 을 풀면 여기서 "Wait" 이 답 없이 꺼진다.
+  it('보낸 직후 지난 턴 도구의 끝(ToolResult)만 오면 "Wait" 이 남고 그 행에 표식이 붙는다 — 첫 진짜 답부터는 턴이 이어받는다', async () => {
+    render(<RichSlot viewId="v1" agentId={AGENT} />)
+    await flush()
+    act(() => captured.onChunk!(toolCallFrame(0, 'c1')))
+    act(() => captured.onChunk!(turnEndFrame(1)))
+    expect(screen.queryByText('Wait')).toBeNull()
+
+    const input = screen.getByPlaceholderText(/메시지 입력/)
+    fireEvent.change(input, { target: { value: 'next' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    await flush()
+    expect(screen.getByText('Wait')).toBeTruthy()
+
+    act(() => captured.onChunk!(tag1(2, JSON.stringify({ type: 'ToolResult', id: 'c1', outcome: 'Failed' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    expect(document.querySelector('[data-tool-mark="failed"]')).not.toBeNull()
+
+    // 첫 진짜 답 — awaiting 이 풀리고 표시는 열린 턴이 떠받친다. 턴 경계가 끈다(awaiting 이 고착됐다면 안 꺼진다).
+    act(() => captured.onChunk!(tag1(3, JSON.stringify({ type: 'TextDelta', text: 'answer' }))))
+    expect(screen.getByText('Wait')).toBeTruthy()
+    act(() => captured.onChunk!(turnEndFrame(4)))
+    expect(screen.queryByText('Wait')).toBeNull()
   })
 })

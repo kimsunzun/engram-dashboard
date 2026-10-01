@@ -8,7 +8,8 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, SyntheticEvent } from 'react'
 
 import { fireAndForget } from '../../commands/dispatch'
-import type { ResolvedSlotMenuItem } from '../../commands/slotMenu'
+import type { CommandArgs } from '../../commands/registry'
+import type { ResolvedSlotMenuItem, SlotMenuCtx } from '../../commands/slotMenu'
 
 /** 메뉴가 창 테두리에 딱 붙지 않게. */
 const MENU_MARGIN = 4
@@ -75,13 +76,6 @@ export function flyoutPosition(
   return { top, left: clampedLeft }
 }
 
-/** agentId 는 배정 슬롯만. */
-export interface SlotMenuCtx {
-  viewId: string | null
-  slotId: string
-  agentId?: string | null
-}
-
 interface SlotContextMenuProps {
   x: number
   y: number
@@ -114,9 +108,14 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
     return () => document.removeEventListener('mousedown', handler)
   }, [onClose])
 
+  // ★역할은 그리기만이다 — 키보드 이동(화살표·Home/End·타입어헤드)은 없다★(알려진 갭 · 이 메뉴 전부).
   return (
     <div
       ref={ref}
+      role="menu"
+      // ADR-0237: 열린 동안 채팅 칸의 Esc 는 턴을 끊지 않는다(`interruptKey.ts` 의 표지) — 이 메뉴는 Esc 로 닫히지
+      //   않지만 메뉴를 띄운 채 누른 Esc 가 뒤의 턴을 끊으면 안 된다.
+      data-engram-overlay="1"
       style={{
         position: 'fixed',
         top: pos.top,
@@ -132,9 +131,9 @@ export default function SlotContextMenu({ x, y, items, ctx, onClose }: SlotConte
       }}
     >
       {items.map(item => (
-        <div key={item.id}>
+        <div key={item.id} role="none">
           {item.separatorBefore && (
-            <div style={{ height: '1px', background: 'var(--border)', margin: '2px 0' }} />
+            <div role="separator" style={{ height: '1px', background: 'var(--border)', margin: '2px 0' }} />
           )}
           <MenuRow item={item} ctx={ctx} onClose={onClose} />
         </div>
@@ -151,11 +150,60 @@ function highlightOff(e: SyntheticEvent<HTMLElement>) {
   e.currentTarget.style.background = 'transparent'
 }
 
+const DISABLED_ROW_STYLE: CSSProperties = { ...ROW_STYLE, cursor: 'default', opacity: 0.4 }
+
+// ★실행 가방 = 슬롯 좌표 + 슬롯 내용뿐이다★ — ctx 에 메뉴 상태 판정용 칸이 더해져도 넘기지 않게 칸을 골라 싣는다. 호출자가 누구인지도
+//   싣지 않는다: 같은 가방을 `__engramCmd` 가 얼마든지 지어 보낼 수 있어서 인자 값은 호출자 판정이 못 된다
+//   (`registry.ts` `humanOnly` doc — 닫는 축은 인자 값이 아니라 호출자다).
+function commandArgs(ctx: SlotMenuCtx): CommandArgs {
+  return { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId, content: ctx.content }
+}
+
 function runItem(id: string, ctx: SlotMenuCtx, onClose: () => void) {
   // ADR-0064/0055: 팔레트·키바인딩·LLM 소비자와 동일 helper 재사용 — sync throw·async reject·thenable 삼킴
   //   안전망을 재구현하지 않는다.
-  fireAndForget(id, { viewId: ctx.viewId, slotId: ctx.slotId, agentId: ctx.agentId })
+  fireAndForget(id, commandArgs(ctx))
   onClose()
+}
+
+// ★렌더 중에 부르므로 throw 를 흘리지 않는다★(slotMenu FIX-1 과 같은 fail-loud but crash-free) — error boundary 가
+//   없으면 기여 하나의 throw 가 화면을 통째로 비운다. 판정 실패 = 끔 · 비활성.
+function evaluate(item: ResolvedSlotMenuItem, what: 'checked' | 'enabled', fn: () => boolean): boolean {
+  try {
+    return fn()
+  } catch (err) {
+    console.error(`[SlotContextMenu] ${what} 판정 실패 — "${item.id}" 를 ${what === 'checked' ? '끔' : '비활성'}으로 그린다:`, err)
+    return false
+  }
+}
+
+/** 실행 항목 한 줄 — 최상위와 서브메뉴 자식이 같은 것을 그린다. */
+function LeafRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: SlotMenuCtx; onClose: () => void }) {
+  const checkedFn = item.checked
+  const enabledFn = item.enabled
+  const checked = checkedFn ? evaluate(item, 'checked', () => checkedFn(ctx)) : undefined
+  const enabled = enabledFn ? evaluate(item, 'enabled', () => enabledFn(ctx)) : true
+  return (
+    <div
+      data-slot-menu-item={item.id}
+      {...(checked === undefined ? { role: 'menuitem' } : { role: 'menuitemcheckbox', 'aria-checked': checked })}
+      {...(enabled ? {} : { 'aria-disabled': true, 'data-slot-menu-disabled': '' })}
+      style={enabled ? ROW_STYLE : DISABLED_ROW_STYLE}
+      onMouseEnter={enabled ? highlightOn : undefined}
+      onMouseLeave={enabled ? highlightOff : undefined}
+      onClick={e => {
+        e.stopPropagation()
+        if (enabled) runItem(item.id, ctx, onClose)
+      }}
+    >
+      {checked !== undefined && (
+        <span aria-hidden="true" style={{ display: 'inline-block', width: '1.2em' }}>
+          {checked ? '✓' : ''}
+        </span>
+      )}
+      {item.title}
+    </div>
+  )
 }
 
 /**
@@ -177,28 +225,14 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
     )
   }, [isContainer, open])
 
-  if (!isContainer) {
-    return (
-      <div
-        data-slot-menu-item={item.id}
-        style={ROW_STYLE}
-        onMouseEnter={highlightOn}
-        onMouseLeave={highlightOff}
-        onClick={e => {
-          e.stopPropagation()
-          runItem(item.id, ctx, onClose)
-        }}
-      >
-        {item.title}
-      </div>
-    )
-  }
+  if (!isContainer) return <LeafRow item={item} ctx={ctx} onClose={onClose} />
 
   return (
     <div
       ref={rowRef}
       // data-attr 로 cdp/테스트가 컨테이너를 식별.
       data-slot-menu-container={item.id}
+      role="none"
       style={{ position: 'relative' }}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => {
@@ -207,6 +241,9 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
       }}
     >
       <div
+        role="menuitem"
+        aria-haspopup="menu"
+        aria-expanded={open}
         style={{ ...ROW_STYLE, display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center' }}
         tabIndex={0}
         onFocus={() => setOpen(true)}
@@ -220,6 +257,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
         <div
           ref={flyoutRef}
           data-slot-menu-flyout={item.id}
+          role="menu"
           style={{
             position: 'fixed',
             top: flyoutPos?.top ?? 0,
@@ -235,19 +273,7 @@ function MenuRow({ item, ctx, onClose }: { item: ResolvedSlotMenuItem; ctx: Slot
           }}
         >
           {item.children!.map(child => (
-            <div
-              key={child.id}
-              data-slot-menu-item={child.id}
-              style={ROW_STYLE}
-              onMouseEnter={highlightOn}
-              onMouseLeave={highlightOff}
-              onClick={e => {
-                e.stopPropagation()
-                runItem(child.id, ctx, onClose)
-              }}
-            >
-              {child.title}
-            </div>
+            <LeafRow key={child.id} item={child} ctx={ctx} onClose={onClose} />
           ))}
         </div>
       )}

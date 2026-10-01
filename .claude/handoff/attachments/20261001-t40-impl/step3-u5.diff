@@ -1,0 +1,862 @@
+diff --git a/crates/engram-dashboard-agent/src/backend/claude/leftover.rs b/crates/engram-dashboard-agent/src/backend/claude/leftover.rs
+index c49ed1a..e7a4dd3 100644
+--- a/crates/engram-dashboard-agent/src/backend/claude/leftover.rs
++++ b/crates/engram-dashboard-agent/src/backend/claude/leftover.rs
+@@ -17,13 +17,10 @@
+ //!   할당과 해제 · OS 호출 · 다른 자물쇠는 하지 않는다(유일한 예외는 끝내기 확정의 끝내기 호출 하나). 빼낸 것은 놓은 뒤
+ //!   버린다. 기록 자물쇠와 겹쳐 잡지 않는다.
+ //! 명세 = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
+ // ADR-0257
+ 
+-// 2단계는 이 모듈 전체(규칙 · 탄생 기록 · 문 · 일꾼 · 정리 한 판)를 세우되 배선은 하나도 하지 않는다(배선 = 3단계). 3단계 배선이 이것들을 부르게 되면 이 allow 를 걷는다.
+-#![allow(dead_code)]
+-
+ use std::any::Any;
+ use std::fmt;
+ use std::io;
+ use std::panic::{self, AssertUnwindSafe};
+ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+@@ -578,20 +575,12 @@ impl BirthWatch {
+ 
+     /// 탄생을 기록할 수 있나 — `Ok` = 듣는 스레드가 돌고 무리가 포트에 붙었다. `Err` = 포트를 못 쓴다(그 에피소드는
+     /// `Failed(port)`): 확보 실패 · 무리가 이미 없음 · 듣는 스레드가 실패로 굳힘([`Recorder::port_failed`]).
+     ///
+     /// 듣는 스레드가 무리가 사라져서 · 물러나서 끝난 뒤에도 `Ok` 다 — 끝나며 켜진 기록을 껐고, 그 뒤 켠 기록에는 탄생이
+-    /// 안 든다(놓침 쪽). 처음 부름은 붙이는 동안 Job 을 강하게 쥐지만 막히지 않는다 — 스레드를 띄우기만 한다.
+-    pub(super) fn ensure(
+-        &self,
+-        group: &Arc<ProcessGroup>,
+-        recorder: &Arc<Recorder>,
+-        tag: &LogTag,
+-    ) -> Result<(), ()> {
+-        self.ensure_with(group, recorder, tag, spawn_listener)
+-    }
+-
++    /// 안 든다(놓침 쪽). 처음 부름은 붙이는 동안 Job 을 강하게 쥐지만 막히지 않는다 — `spawn` 은 듣는 스레드를 띄우기만
++    /// 한다(처음 부름만 쓴다).
+     fn ensure_with<G: Group>(
+         &self,
+         group: &Arc<G>,
+         recorder: &Arc<Recorder>,
+         tag: &LogTag,
+@@ -605,17 +594,10 @@ impl BirthWatch {
+         }
+         acquired
+     }
+ }
+ 
+-fn spawn_listener(body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+-    std::thread::Builder::new()
+-        .name(LISTENER_THREAD.into())
+-        .spawn(body)
+-        .map(drop)
+-}
+-
+ /// 포트 확보가 어디까지 갔나 — 실패를 가르는 데만 쓴다.
+ #[derive(Clone, Copy)]
+ enum Stage {
+     BeforeStart,
+     StartFailed,
+@@ -1728,10 +1710,11 @@ impl<G: Group> GateCell<G> {
+ 
+     fn lock(&self) -> MutexGuard<'_, GateState> {
+         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+     }
+ 
++    #[cfg(test)]
+     pub(super) fn is_open(&self) -> bool {
+         self.lock().open
+     }
+ 
+     /// 끊기 줄 함수의 몸통 — 문이 닫혔으면 `None`(줄 없음). 줄을 주면 `on_written` 은 이 끊기가 에피소드를 세웠거나 산
+@@ -4244,11 +4227,13 @@ mod birth_tests {
+         let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
+         job.assign(x.id()).expect("Job 편입");
+         let recorder = Arc::new(Recorder::new());
+         let watch = BirthWatch::new();
+         assert_eq!(
+-            watch.ensure(&group, &recorder, &LogTag::new(None, x.id())),
++            watch.ensure_with(&group, &recorder, &LogTag::new(None, x.id()), |body| {
++                SystemClock.spawn(LISTENER_THREAD, body)
++            }),
+             Ok(())
+         );
+         let (r, _) = recorder.start();
+         open_gate(&mut x);
+ 
+@@ -6568,5 +6553,225 @@ mod gate_tests {
+             passes > 40 && opened > 500 && line_only > 50 && no_line > 50,
+             "{seen}"
+         );
+     }
+ }
++
++/// 실물 무리 · 포트 · 듣는 스레드 · 쓰기 확인 · 일꾼 · 판을 한 줄로 잇는다(TRD §5 실프로세스 12). 시험마다 넷 이하
++/// (콘솔 호스트 포함)를 띄운다. ★끝내는 경로는 재지 않는다★ — claude 훅 실행기 모양 아래 사본은 넷을 넘어 순수
++/// 시험(스파이크 모양)이 잰다. 여기서는 판의 사유가 로그에 남고 아무것도 끝나지 않는 것을 본다.
++#[cfg(all(test, windows))]
++mod real_tests {
++    use super::test_support::{Capture, Line};
++    use super::*;
++
++    use std::collections::BTreeMap;
++    use std::io::Write;
++
++    use crate::platform::process_group::tests::{
++        is_ping, new_group, open_gate, spawn_gated_cmd, wait_until,
++    };
++
++    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
++    const LINE: &[u8] = b"{\"type\":\"control_request\"}\n";
++
++    /// 잠은 기다리지 않고 단조 시각을 그만큼 민다 — 일꾼이 N 을 곧바로 지난다. 일꾼 몸통은 쌓아 두고 시험 스레드가
++    /// 돌린다(판의 로그를 잡으려고). 듣는 스레드는 진짜로 띄운다.
++    #[derive(Default)]
++    struct SkipClock {
++        skipped_ns: AtomicU64,
++        workers: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
++    }
++
++    impl LeftoverClock for SkipClock {
++        fn mono_now(&self) -> Instant {
++            Instant::now() + Duration::from_nanos(self.skipped_ns.load(Ordering::SeqCst))
++        }
++
++        fn sleep(&self, d: Duration) {
++            let ns = u64::try_from(d.as_nanos()).expect("시험 잠");
++            self.skipped_ns.fetch_add(ns, Ordering::SeqCst);
++        }
++
++        fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
++            if name == WORKER_THREAD {
++                self.workers.lock().unwrap().push(body);
++                Ok(())
++            } else {
++                SystemClock.spawn(name, body)
++            }
++        }
++    }
++
++    /// 뿌리 `root` 의 정리기와 그 문 — `open_spawn` 의 조립에서 시계만 바꾼 모양.
++    fn cleaner_for(
++        group: &Arc<ProcessGroup>,
++        root: u32,
++    ) -> (Arc<SkipClock>, Arc<Cleaner>, Arc<GateCell>) {
++        let clock = Arc::new(SkipClock::default());
++        let cleaner = Arc::new(Cleaner::new(
++            Arc::clone(group),
++            Arc::clone(&clock) as Arc<dyn LeftoverClock>,
++            root,
++            LogTag::new(None, root),
++        ));
++        let cell = GateCell::new(Some(Arc::clone(&cleaner)));
++        (clock, cleaner, cell)
++    }
++
++    /// 열린 턴에 끊기 하나를 받고 그 줄이 쓰인 것으로 친다 — 쓰기 확인이 쓰기 명단을 찍고 일꾼 하나를 부른다.
++    /// 돌려주는 것 = 그 에피소드의 기록 번호.
++    fn interrupt_and_write(cell: &Arc<GateCell>, cleaner: &Cleaner, clock: &SkipClock) -> u64 {
++        cell.open_turn();
++        let out = cell.interrupt(LINE.to_vec()).expect("끊기 줄");
++        let rec = cleaner.recorder.active();
++        assert_ne!(rec, 0, "기록이 켜지지 않았다");
++        let on_written = out.on_written.expect("쓰기 확인");
++        on_written();
++        assert_eq!(
++            clock.workers.lock().unwrap().len(),
++            1,
++            "쓰인 끊기가 일꾼을 부르지 않았다"
++        );
++        rec
++    }
++
++    /// 쌓인 일꾼을 이 스레드에서 끝까지 돌리고 그동안의 로그를 준다.
++    fn run_workers(clock: &SkipClock) -> Vec<Line> {
++        let lines = Arc::new(Mutex::new(Vec::new()));
++        let bodies: Vec<_> = clock.workers.lock().unwrap().drain(..).collect();
++        for body in bodies {
++            tracing::subscriber::with_default(Capture(Arc::clone(&lines)), body);
++        }
++        let taken = lines.lock().unwrap().clone();
++        taken
++    }
++
++    /// 판이 남긴 사유 줄 하나 — 아무것도 끝내지 않았다(정리함 줄이 없다).
++    fn the_pass_line(lines: &[Line]) -> BTreeMap<String, String> {
++        assert!(
++            !lines
++                .iter()
++                .any(|(_, fields)| fields.contains_key("terminated")),
++            "무언가를 끝냈다: {lines:?}"
++        );
++        let mut reasons = lines
++            .iter()
++            .filter(|(_, fields)| fields.contains_key("reason"));
++        let (_, fields) = reasons.next().expect("판의 사유 줄");
++        assert!(reasons.next().is_none(), "사유 줄이 둘이다: {lines:?}");
++        fields.clone()
++    }
++
++    /// 창 없는 콘솔의 R 이 콘솔 호스트를 띄울 때까지 기다린다 — 문을 열기 전 R 의 자식은 그것 하나다. 그 호스트는
++    /// R 이 Job 에 든 뒤에 태어나기도 해서(실측), 기다리지 않으면 쓰기 명단 뒤의 산 탄생(부모 R 산다)으로 끼어든다.
++    fn console_host_born(r: &std::process::Child) {
++        wait_until("R 의 콘솔 호스트", || {
++            (!engram_dashboard_base::platform::child_pids(r.id()).is_empty()).then_some(())
++        });
++    }
++
++    /// 끊기 뒤 R 이 띄운 B(`cmd`)가 P(ping)를 띄우고 끝났다 — P 의 부모는 끝났지만 P 는 B 의 사본이 아니다. P 는 산다.
++    /// R · 그 콘솔 호스트 · B · P 넷.
++    #[test]
++    fn a_ping_left_by_an_exited_cmd_is_not_a_hook_copy_and_survives() {
++        let (job, group) = new_group();
++        let group = Arc::new(group);
++        // R = 문 → B → 둘째 줄을 기다림(뿌리가 판 때 살아 있게). B = P 를 뒤로 띄우고 한 줄을 기다린 뒤 끝난다.
++        let mut r = spawn_gated_cmd(
++            r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
++            CREATE_NO_WINDOW,
++        );
++        job.assign(r.id()).expect("Job 편입");
++        console_host_born(&r);
++        let (clock, cleaner, cell) = cleaner_for(&group, r.id());
++        let rec = interrupt_and_write(&cell, &cleaner, &clock);
++
++        let mut stdin = r.stdin.take().expect("stdin 파이프");
++        stdin.write_all(b"go\r\n").expect("R 의 문");
++        let (b, p) = wait_until("기록된 B · P", || {
++            let births = cleaner.recorder.copy(rec);
++            let b = births
++                .iter()
++                .find(|x| x.facts.ppid == r.id() && image_is(&x.facts.image, "cmd.exe"))
++                .cloned()?;
++            let p = births
++                .iter()
++                .find(|x| x.facts.ppid == b.pid && image_is(&x.facts.image, "ping.exe"))
++                .cloned()?;
++            Some((b, p))
++        });
++        assert!(b.killable && p.killable);
++        stdin.write_all(b"b\r\n").expect("B 의 줄");
++        wait_until("끝난 B", || {
++            matches!(b.pin.exited(), Ok(true)).then_some(())
++        });
++
++        let pass = the_pass_line(&run_workers(&clock));
++        assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
++        assert_eq!(pass["not_hook_copy"], "1", "{pass:?}");
++        assert_eq!(pass["parent_alive"], "0", "{pass:?}");
++        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
++
++        drop((b, p));
++        job.terminate(1).expect("Job 끝내기");
++        drop(stdin);
++        let _ = r.wait();
++    }
++
++    /// 끊기 전에 태어난 것만 있다 — 쓰기 명단에 들어 후보가 없다(붙일 때 되알려져 기록에 들어도). R · 그 콘솔
++    /// 호스트 · ping 셋.
++    #[test]
++    fn births_before_the_interrupt_leave_no_new_member() {
++        let (job, group) = new_group();
++        let group = Arc::new(group);
++        let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
++        job.assign(r.id()).expect("Job 편입");
++        open_gate(&mut r);
++        wait_until("명단의 ping", || {
++            group
++                .member_pids()
++                .ok()?
++                .into_iter()
++                .find(|&pid| is_ping(pid))
++        });
++        let (clock, cleaner, cell) = cleaner_for(&group, r.id());
++        interrupt_and_write(&cell, &cleaner, &clock);
++
++        let pass = the_pass_line(&run_workers(&clock));
++        assert_eq!(pass["reason"], "no_new_member", "{pass:?}");
++
++        job.terminate(1).expect("Job 끝내기");
++        let _ = r.wait();
++    }
++
++    /// 끊기 뒤 태어났지만 부모(뿌리 R)가 산다. R · 그 콘솔 호스트 · ping 셋.
++    #[test]
++    fn a_birth_under_a_live_parent_is_parent_alive() {
++        let (job, group) = new_group();
++        let group = Arc::new(group);
++        let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
++        job.assign(r.id()).expect("Job 편입");
++        console_host_born(&r);
++        let (clock, cleaner, cell) = cleaner_for(&group, r.id());
++        let rec = interrupt_and_write(&cell, &cleaner, &clock);
++
++        open_gate(&mut r);
++        let p = wait_until("기록된 ping", || {
++            cleaner
++                .recorder
++                .copy(rec)
++                .into_iter()
++                .find(|x| x.facts.ppid == r.id() && image_is(&x.facts.image, "ping.exe"))
++        });
++
++        let pass = the_pass_line(&run_workers(&clock));
++        assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
++        assert_eq!(pass["parent_alive"], "1", "{pass:?}");
++        assert_eq!(pass["not_hook_copy"], "0", "{pass:?}");
++        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
++
++        drop(p);
++        job.terminate(1).expect("Job 끝내기");
++        let _ = r.wait();
++    }
++}
+diff --git a/crates/engram-dashboard-agent/src/backend/claude/mod.rs b/crates/engram-dashboard-agent/src/backend/claude/mod.rs
+index cd70454..3835e70 100644
+--- a/crates/engram-dashboard-agent/src/backend/claude/mod.rs
++++ b/crates/engram-dashboard-agent/src/backend/claude/mod.rs
+@@ -26,24 +26,25 @@
+ mod leftover;
+ mod session_file;
+ 
+ use std::collections::BTreeSet;
+ use std::path::PathBuf;
+-use std::sync::atomic::{AtomicBool, Ordering};
+-use std::sync::Arc;
++use std::sync::{Arc, OnceLock};
+ 
+ use uuid::Uuid;
+ 
++use leftover::{Cleaner, GateCell, LogTag, SystemClock};
++
+ use crate::backend::{
+     console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
+     SpawnParts, TransportShape, TurnClassifier,
+ };
+ use crate::failure::AgentFailureKind;
+ use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
+ use crate::session_tracker::SessionIdSource;
+ use crate::transport::pty::PtyTransport;
+-use crate::transport::stdio::{InterruptLine, InterruptOut, StdioTransport};
++use crate::transport::stdio::{InterruptLine, StdioTransport};
+ use crate::transport::{AgentTransport, LinkSink, OutputDecoder};
+ use crate::turn::{TurnEndKind, TurnSignal};
+ use crate::types::{
+     AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, DropCause, MidTurnPolicy,
+     ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolCategory, ToolGrant,
+@@ -423,24 +424,30 @@ impl AgentBackend for ClaudeBackend {
+         resume_session_id: Option<Uuid>,
+         // ★이 backend 는 세울 연결이 없다 — `declares_link()` 가 false 라 조립점이 애초에 `None` 을
+         //   준다. 받아 두고 무시하는 것이 계약이다(`session_id` 칸과 같은 모양).
+         _link_sink: Option<LinkSink>,
+         // ★제어 평면은 이 backend 에서 **전부 명령줄로** 번역된다([`AgentBackend::build_spec`]) — 통로
+-        //   핸드셰이크에 실을 것이 없다. 여기서 또 읽으면 한 spawn 이 같은 값을 두 수단으로 보낸다.
++        //   핸드셰이크에 또 실으면 한 spawn 이 같은 값을 두 수단으로 보낸다. 여기서는 `agent_id` 하나를 잔여물 정리
++        //   로그의 귀속으로만 읽고 통로로 보내지 않으니 그 경우가 아니다.
++        // ADR-0257
+         control: Option<&ControlEndpoint>,
+     ) -> Result<SpawnParts, PtyError> {
+         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
+-        let _ = (sid_sink, first_turn_sink, resume_session_id, control);
++        let _ = (sid_sink, first_turn_sink, resume_session_id);
+         let delivery_ack = Arc::new(DeliveryAck::new());
+         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
+             if is_stream_json(command) {
+-                // 화신마다 새 문 하나를 decoder(쓰는 쪽)와 끊기 줄 함수(읽는 쪽)가 함께 쥔다.
++                // 화신마다 새 문 하나를 decoder(여닫는 쪽)와 끊기 줄 함수(열림을 보고 끊기 에피소드를 세우는 쪽)가
++                // 함께 쥔다. 정리기가 통로의 무리 · 뿌리를 알아야 해서 문은 통로를 연 뒤에 서고, decoder 는 자리로 받는다.
+                 // ADR-0238
+-                let turn_gate = Arc::new(TurnGate::default());
+-                let decoder = stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&turn_gate));
++                // ADR-0257
++                let gate_slot = GateSlot::default();
++                let decoder = stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&gate_slot));
+                 let (t, pid) = StdioTransport::open(spec, true, Some(decoder))?;
+-                (Box::new(t.with_interrupt(interrupt_line(turn_gate))), pid)
++                let gate = GateCell::new(leftover_cleaner(&t, pid, control.map(|c| c.agent_id)));
++                gate_slot.get_or_init(|| Arc::clone(&gate));
++                (Box::new(t.with_interrupt(interrupt_line(gate))), pid)
+             } else {
+                 let (t, pid) = PtyTransport::open(spec, cols, rows)?;
+                 (Box::new(t), pid)
+             };
+         Ok(SpawnParts {
+@@ -477,16 +484,16 @@ impl AgentBackend for ClaudeBackend {
+             json: user_text_echo_json(text, msg_uuid),
+         })
+     }
+ 
+     /// ★운영 spawn 은 이 메서드를 거치지 않는다★ — [`AgentBackend::open_spawn`] 이 화신 공유 받음 값·턴 열림 문을
+-    /// 쥔 decoder 를 직접 만든다. 여기서 나가는 decoder 는 아무도 읽지 않는 자기 값들을 쥔다.
++    /// 쥔 decoder 를 직접 만든다. 여기서 나가는 decoder 는 아무도 읽지 않는 받음 값을 쥐고, 문 자리는 비어 있다.
+     fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+         if is_stream_json(command) {
+             Some(stream_decoder(
+                 Arc::new(DeliveryAck::new()),
+-                Arc::new(TurnGate::default()),
++                GateSlot::default(),
+             ))
+         } else {
+             None
+         }
+     }
+@@ -746,48 +753,57 @@ fn cancel_line(id: &str) -> Vec<u8> {
+     line.into_bytes()
+ }
+ 
+ // ── ADR-0238: 끊기 — 턴 열림 문 + 제어 줄 ──────────────────────────────────────────
+ 
+-/// 이 화신에 지금 끊을 턴이 열려 있나 — 라이브 decoder 가 쓰고 끊기 줄 함수([`interrupt_line`])가 읽는 화신 공유 값.
++/// 이 화신의 턴 열림 문([`GateCell`])을 받는 자리 — 라이브 decoder 가 이것으로 문을 여닫고, 끊기 줄 함수
++/// ([`interrupt_line`])는 같은 문을 직접 쥔다.
+ ///
++/// ★문을 바로 쥐지 않고 자리로 받는 이유★: 문은 잔여물 정리기를 품고 정리기는 통로가 띄운 뿌리 프로세스와 그 무리를
++///   알아야 해서 통로를 연 **뒤**에야 서는데, decoder 는 그 **전**에 통로에 넘어간다(`StdioTransport::open` 인자).
++///   펌프는 `start` 에서야 돌므로 자리는 첫 줄보다 먼저 채워진다. 비어 있으면 decoder 는 문을 건드리지 않는다.
+ /// ★「턴 중」을 턴 관측과 같은 분류기([`classify_turn`])에서 뽑는다★ — 라이브 줄 하나의 사건 중 진행 신호가 있으면
+-///   열고 끝 신호(= `result` 줄의 번역 — 끝을 내는 줄은 그것 하나다)에서 닫는다. 이어받기 원문은 이 문을 지나지
+-///   않는다. 실측(B2 · claude 2.1.280): 여는 줄은 늘 그 턴의 `command_lifecycle` `started` 였고 턴 밖에서 연 줄은
+-///   없었다.
++///   열고 끝 신호(= `result` 줄의 번역 — 끝을 내는 줄은 그것 하나다)에서 닫는다. 진행 가운데 새 입력(라이브 `started`
++///   의 번역 `Delivered`)은 따로 알린다 — 그 턴의 끊기 에피소드를 버리고 닫혀 있었으면 한 구간에서 연다. 이어받기
++///   원문은 이 문을 지나지 않는다. 실측(B2 · claude 2.1.280): 여는 줄은 늘 그 턴의 `command_lifecycle` `started` 였고
++///   턴 밖에서 연 줄은 없었다.
+ /// ★그래도 턴 관측과 같은 값은 아니다 — 앞 끝이 늦다★: 세션의 입력 시점 합성 에코(`input_echo_event`)는 턴 관측을
+ ///   켜지만 decoder 를 지나지 않아, 문은 벤더 `started` 에서야 열린다. 그 틈의 끊기는 거절되는 무동작이다(TRD §9
+ ///   「F2 턴 열림 전 끊기」).
+ /// ★분류기의 「`result` 없음」 구멍을 그대로 물려받고, 턴 표의 30 분 fail-open 상한은 없다★: `result` 줄이 4 MiB
+ ///   재동기로 버려지거나 못 읽히거나, 벤더가 진행만 내고 `result` 없이 턴을 끝내면 문은 열린 채 남는다. 그때의
+ ///   끊기 줄은 한가한 CLI 에 닿는데, 실측(B2 S6)상 그 끊기는 응답 한 줄만 내는 무해한 줄이다 — 그 순간 CLI 에 대기
+-///   입력이 있으면 그것을 끊을 수 있다.
++///   입력이 있으면 그것을 끊을 수 있다. 그 끊기가 연 에피소드도 턴 끝으로 지워지지 않아 쓰인 지 N 초 뒤 정리 판이
++///   돈다(고르기 규칙을 채우는 잔여물이 없으면 아무것도 끝내지 않는다).
+ /// ★벤더는 한가할 때의 끊기를 거절하지 않는다(실측 B2 S6 — 늘 `success`)★ — 「끊을 턴이 없다」를 말해 줄 수 있는
+ ///   것은 이 문뿐이다. 그래서 문이 닫혔으면 줄을 보내지 않고 통로가 `Unsupported` 로 거절한다.
+ /// ★좁힐 뿐 닫지 못하는 경합이 남는다★ — 문을 읽고 줄이 CLI 에 닿기 전에 그 턴이 끝나고 CLI 가 스스로 다음 턴(대기
+ ///   입력)을 열면 줄은 그 다음 턴을 끊는다. 벤더 `control_request` 에 턴 id 가 없어 우리 쪽으로는 가를 수 없다(실측
+ ///   B2 S7 — 끊긴 다음 턴은 오류 아닌 중단 턴으로 닫힌다).
+-/// ★세션·통로·선 타입은 이 값을 모른다★ — 그래서 `types.rs` 가 아니라 여기 산다([`DeliveryAck`] 는 세션이 읽어
+-///   거기 있다).
++/// ★세션·통로·선 타입은 이 값을 모른다★ — 그래서 `types.rs` 가 아니라 이 폴더에 산다([`DeliveryAck`] 는 세션이
++///   읽어 거기 있다).
+ // ADR-0238
+-#[derive(Debug, Default)]
+-struct TurnGate {
+-    open: AtomicBool,
+-}
+-
+-impl TurnGate {
+-    // ★`Relaxed` 로 충분하다★ — 이 값은 다른 메모리를 싣지 않아 원자성만 필요하다. 「턴 끝(시작) 사건을 본 뒤의
+-    //   끊기는 닫힌(열린) 문을 본다」는 이 값의 순서가 세우는 것이 아니다: 문 쓰기는 decode 안에서, 그 줄의
+-    //   사건이 펌프에서 emit 되기 **전에** 같은 스레드가 하고, 그 사건을 본 쪽의 끊기는 emit → 소켓 왕복 → 명령
+-    //   으로 이어지는 happens-before 사슬 뒤에서만 문을 읽는다. 순서를 올려도 위 잔여 경합은 닫히지 않는다.
+-    fn set(&self, open: bool) {
+-        self.open.store(open, Ordering::Relaxed);
+-    }
+-
+-    fn is_open(&self) -> bool {
+-        self.open.load(Ordering::Relaxed)
+-    }
++// ADR-0257
++type GateSlot = Arc<OnceLock<Arc<GateCell>>>;
++
++/// 이 화신의 잔여물 정리기. `None` = 문만 여닫는다 — 통로가 프로세스 무리를 내주지 않거나(Windows 밖) 뿌리 PID 가
++/// 없다. 포트 · 듣는 스레드는 여기서 띄우지 않는다 — 첫 끊기 에피소드가 띄운다. 로그 귀속은 제어 채널의 에이전트
++/// id 이고, 없으면 뿌리 PID 로 잇는다(ADR-0217).
++// ADR-0257
++fn leftover_cleaner(
++    transport: &StdioTransport,
++    root_pid: Option<u32>,
++    agent: Option<AgentId>,
++) -> Option<Arc<Cleaner>> {
++    let group = transport.process_group()?;
++    let root_pid = root_pid.filter(|&pid| pid != 0)?;
++    Some(Arc::new(Cleaner::new(
++        Arc::new(group),
++        Arc::new(SystemClock),
++        root_pid,
++        LogTag::new(agent, root_pid),
++    )))
+ }
+ 
+ /// 끊기 요청 `request_id` 의 머리말 — 뒤에 요청마다 새 uuid v4 가 붙는다.
+ ///
+ /// ★응답은 번역하지 않는다★ — 응답이 왔다고 턴이 멈춘 것은 아니다(끝은 그 턴의 `result` 가 알린다 · 실측 B2: 응답은
+@@ -827,19 +843,17 @@ fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
+     let mut line = serde_json::to_string(&request).unwrap_or_default();
+     line.push('\n');
+     line.into_bytes()
+ }
+ 
+-/// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT).
++/// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT). 줄을
++/// 줄지 · 쓰인 뒤 부를 것(쓰기 확인)을 실을지는 문이 정한다 — 받아들인 끊기는 줄을 돌려주기 **전에** 문 안에 끊기
++/// 에피소드로 적힌다.
+ // ADR-0238
+-fn interrupt_line(gate: Arc<TurnGate>) -> InterruptLine {
+-    Arc::new(move || {
+-        gate.is_open().then(|| InterruptOut {
+-            bytes: interrupt_line_bytes(Uuid::new_v4()),
+-            on_written: None,
+-        })
+-    })
++// ADR-0257
++fn interrupt_line(gate: Arc<GateCell>) -> InterruptLine {
++    Arc::new(move || gate.interrupt(interrupt_line_bytes(Uuid::new_v4())))
+ }
+ 
+ // ── S15 B2: claude stream-json(NDJSON) → OutputEvent decoder (ADR-0044/0045) ────────
+ //
+ // 스키마 근거 = 실측 fixture `backend/fixtures/claude_{text,tool}.jsonl`.
+@@ -940,11 +954,11 @@ enum LineSource<'a> {
+     ///   `seed` 로 들어온 `QueuedInput` 을 거부한다). 대신 접혀 들어간 입력의 첨부 줄을 말풍선으로 옮긴다.
+     Transcript,
+ }
+ 
+ /// 운영 spawn 의 decoder — 화신 공유 받음 값을 채우고 턴 열림 문을 여닫는다.
+-fn stream_decoder(ack: Arc<DeliveryAck>, gate: Arc<TurnGate>) -> Box<dyn OutputDecoder> {
++fn stream_decoder(ack: Arc<DeliveryAck>, gate: GateSlot) -> Box<dyn OutputDecoder> {
+     Box::new(ClaudeStreamDecoder::live(ack, gate))
+ }
+ 
+ /// 라이브 부분 메시지 추적 — `stream_event` 가 채우고 완결 `assistant` 줄이 읽는다.
+ ///
+@@ -1013,34 +1027,50 @@ pub struct ClaudeStreamDecoder {
+     // ADR-0240
+     partial: PartialMessage,
+ 
+     /// 라이브 줄만 여닫는다([`Self::consume_live_line`]) — 이어받기 transcript 는 이 칸에 닿는 길이 없다.
+     // ADR-0238
+-    gate: Arc<TurnGate>,
++    gate: GateSlot,
++
++    /// 이 decoder 가 문에 마지막으로 알린 열림. 문의 열림을 쓰는 것은 이 decoder 하나뿐이라 문의 값과 같다 — 그래서
++    /// 진행 사건마다 문의 자물쇠를 잡지 않고 닫힘 → 열림일 때만 잡는다.
++    gate_open: bool,
++
++    /// 문에 알린 것 — 「어느 사건에 무엇을 몇 번 알리나」를 재는 시험용.
++    #[cfg(test)]
++    gate_moves: Vec<GateMove>,
++}
++
++/// decoder 가 문에 알리는 것 — 진행(닫힘 → 열림) · 새 입력(라이브 `started`) · 턴 끝.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum GateMove {
++    Open,
++    Deliver,
++    Close,
+ }
+ 
+ impl ClaudeStreamDecoder {
+-    /// 자기만 쥐는 받음 값·문을 채우는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
++    /// 자기만 쥐는 받음 값을 채우고 문 자리는 비어 있는 decoder — 판정 결과를 아무도 읽지 않는 조립(시험·smoke)용.
+     pub fn new() -> Self {
+         Self::default()
+     }
+ 
+-    /// 시험대가 쥔 `ack` 를 채우는 decoder — 문은 아무 끊기 줄 함수와도 이어지지 않은 자기 것이다(운영 조립 =
+-    /// [`Self::live`]). ★`Unknown → Unavailable` 전이를 이긴 decoder 가 `AckUnavailable{delivered: []}` 를 한 번
++    /// 시험대가 쥔 `ack` 를 채우는 decoder — 문 자리는 비어 있다(운영 조립 = [`Self::live`]).
++    /// ★`Unknown → Unavailable` 전이를 이긴 decoder 가 `AckUnavailable{delivered: []}` 를 한 번
+     /// 낸다★(같은 Arc 를 쥔 decoder 가 여럿이어도 한 번).
+     // ADR-0231
+     #[cfg(test)]
+     fn with_delivery_ack(ack: Arc<DeliveryAck>) -> Self {
+         Self {
+             ack,
+             ..Self::default()
+         }
+     }
+ 
+-    /// 운영 조립 — `ack` 는 세션이, `gate` 는 끊기 줄 함수가 같은 Arc 를 읽는다.
++    /// 운영 조립 — `ack` 는 세션이, `gate` 에 채워질 문은 끊기 줄 함수가 같은 Arc 로 읽는다.
+     // ADR-0238
+-    fn live(ack: Arc<DeliveryAck>, gate: Arc<TurnGate>) -> Self {
++    fn live(ack: Arc<DeliveryAck>, gate: GateSlot) -> Self {
+         Self {
+             ack,
+             gate,
+             ..Self::default()
+         }
+@@ -1098,14 +1128,16 @@ impl ClaudeStreamDecoder {
+             self.consume_live_line(&line, &mut events);
+         }
+         events
+     }
+ 
+-    /// 라이브 줄 하나를 번역하고, 그 줄이 낸 사건을 턴 분류기에 차례로 비춰 턴 열림 문을 여닫는다 — 진행 = 연다 ·
+-    /// 끝 = 닫는다. 턴 오류(`Failed`)와 신호 없는 사건은 문을 건드리지 않는다.
+-    /// ★문을 여닫는 것은 사건이 펌프에서 emit 되기 전이다★ — decode 가 돌려준 뒤에야 emit 된다.
++    /// 라이브 줄 하나를 번역하고, 그 줄이 낸 사건을 턴 분류기에 차례로 비춰 턴 열림 문에 알린다 — 진행 = 연다(닫혀
++    /// 있을 때만) · 새 입력(`Delivered` = 라이브 `started`) = 그 턴의 끊기 에피소드를 버리고 연다 · 끝 = 닫으면서
++    /// 에피소드를 버린다. 턴 오류(`Failed`)와 신호 없는 사건은 문을 건드리지 않는다.
++    /// ★문에 알리는 것은 사건이 펌프에서 emit 되기 전이다★ — decode 가 돌려준 뒤에야 emit 된다.
+     // ADR-0238
++    // ADR-0257
+     fn consume_live_line(&mut self, line: &[u8], events: &mut Vec<OutputEvent>) {
+         let first = events.len();
+         Self::consume_line(
+             line,
+             events,
+@@ -1113,18 +1145,44 @@ impl ClaudeStreamDecoder {
+             Some(&mut self.partial),
+         );
+         // 이 줄이 새 사건을 내지 않고 앞 글 사건에 이어 붙였으면(`consume_stream_event` 의 합치기) 여기엔 없다 — 그
+         //   앞 사건이 이미 진행으로 문을 열었고 그 뒤에 닫는 사건이 없으니 문은 그대로 열려 있다.
+         for event in &events[first..] {
++            // 새 입력은 분류기에서 진행이지만 따로 알린다 — 턴을 여는 `started` 도 「연다」와 「버린다」를 두 번에 나눠
++            //   알리지 않는다(문 자물쇠 한 구간).
++            if matches!(
++                event,
++                OutputEvent::QueuedInput(QueuedInputEvent::Delivered { .. })
++            ) {
++                self.move_gate(GateMove::Deliver);
++                continue;
++            }
+             match classify_turn(event) {
+-                Some(TurnSignal::Progress) => self.gate.set(true),
+-                Some(TurnSignal::Ended(_)) => self.gate.set(false),
+-                Some(TurnSignal::Failed) | None => {}
++                Some(TurnSignal::Progress) if !self.gate_open => self.move_gate(GateMove::Open),
++                Some(TurnSignal::Ended(_)) => self.move_gate(GateMove::Close),
++                Some(TurnSignal::Progress | TurnSignal::Failed) | None => {}
+             }
+         }
+     }
+ 
++    /// 문에 하나를 알린다(문 자물쇠 한 구간). 펌프는 decode 를 아무 락 없이 부르므로 문 자물쇠가 잎이라는 규칙이
++    /// 선다. 자리가 비었으면 아무것도 안 한다.
++    // ADR-0257
++    fn move_gate(&mut self, to: GateMove) {
++        let Some(gate) = self.gate.get() else {
++            return;
++        };
++        match to {
++            GateMove::Open => gate.open_turn(),
++            GateMove::Deliver => gate.deliver(),
++            GateMove::Close => gate.close_turn(),
++        }
++        self.gate_open = to != GateMove::Close;
++        #[cfg(test)]
++        self.gate_moves.push(to);
++    }
++
+     /// 완성 라인 1개(개행 제외 바이트) → 0개 이상의 OutputEvent 를 events 에 append.
+     ///
+     /// 파싱 규칙 — 실패·메타는 조용히 skip(panic 금지):
+     /// - 비-UTF8 / 비-JSON(예: stderr "Warning: no stdin…") → skip.
+     /// - `assistant`/`user` 라인 → message.content[] 의 각 블록을 순서대로 이벤트로. 단 끊김 합성 `user` 줄은
+@@ -5624,17 +5682,22 @@ mod tests {
+     //
+     // 정본 = B2 스파이크 채취 `interrupt_s1`(claude 2.1.280 · README 표). 줄 번호는 1 기반.
+ 
+     const INTERRUPT_S1: &str = include_str!("fixtures/interrupt_s1.jsonl");
+ 
+-    /// 문을 나눠 쥔 decoder 와 그 문을 읽는 끊기 줄 함수 — 운영 조립(`open_spawn`)과 같은 모양.
++    /// 문을 나눠 쥔 decoder 와 그 문을 읽는 끊기 줄 함수 — 운영 조립(`open_spawn`)에서 정리기만 뺀 모양.
+     fn gated_decoder() -> (ClaudeStreamDecoder, InterruptLine) {
+-        let gate = Arc::new(TurnGate::default());
+-        let decoder = ClaudeStreamDecoder::live(Arc::new(DeliveryAck::new()), Arc::clone(&gate));
++        let (decoder, gate) = decoder_with_gate(GateCell::new(None));
+         (decoder, interrupt_line(gate))
+     }
+ 
++    fn decoder_with_gate(gate: Arc<GateCell>) -> (ClaudeStreamDecoder, Arc<GateCell>) {
++        let slot = Arc::new(OnceLock::from(Arc::clone(&gate)));
++        let decoder = ClaudeStreamDecoder::live(Arc::new(DeliveryAck::new()), slot);
++        (decoder, gate)
++    }
++
+     /// 픽스처를 한 decoder 에 한 줄씩 먹여 줄마다 (그 줄의 사건, 그 뒤 끊기 줄 함수가 줄을 주나) 를 모은다.
+     fn replay_with_gate(fixture: &str) -> Vec<(Vec<OutputEvent>, bool)> {
+         let (mut decoder, line) = gated_decoder();
+         fixture_lines(fixture)
+             .iter()
+@@ -6139,6 +6202,188 @@ mod tests {
+         }
+         parts.transport.shutdown();
+         core.join_pump(Duration::from_secs(5));
+         let _ = std::fs::remove_dir_all(&dir);
+     }
++
++    // ── ADR-0257: decoder · 끊기 줄 함수 ↔ 끊기 에피소드 ──────────────────────────────────────────────────
++
++    /// 정리기를 품은 문과 그 문을 나눠 쥔 decoder · 끊기 줄 함수 — `open_spawn` 의 조립에서 무리만 이미 사라진 손잡이로
++    /// 바꾼 모양. 포트를 못 써 에피소드의 스냅숏은 실패로 서지만 에피소드는 선다. 시험은 쓰기 확인을 부르지 않으므로
++    /// 일꾼도 듣는 스레드도 뜨지 않는다.
++    fn cleaned_decoder() -> (ClaudeStreamDecoder, InterruptLine, Arc<GateCell>) {
++        use crate::platform::process_group::{ProcessGroup, RetiringSignal};
++        let retiring = Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let group = ProcessGroup::detached(RetiringSignal::of(&retiring));
++        let cleaner = Cleaner::new(
++            Arc::new(group),
++            Arc::new(SystemClock),
++            4242,
++            LogTag::new(None, 4242),
++        );
++        let (decoder, gate) = decoder_with_gate(GateCell::new(Some(Arc::new(cleaner))));
++        (decoder, interrupt_line(Arc::clone(&gate)), gate)
++    }
++
++    /// 에피소드는 `GateCell` 의 Debug 로만 보인다.
++    fn has_episode(gate: &GateCell) -> bool {
++        let shown = format!("{gate:?}");
++        assert!(shown.contains("cleaner: true"), "{shown}");
++        shown.contains("episode: Some")
++    }
++
++    /// 다른 입력 하나의 `started` — 이미 열린 턴에 닿는 둘째 새 입력.
++    const SECOND_STARTED: &str = "{\"type\":\"command_lifecycle\",\"command_uuid\":\"u2\",\"state\":\"started\",\"uuid\":\"x\",\"session_id\":\"s\"}\n";
++
++    /// 스폰 직후 · 턴 끝 뒤의 끊기는 줄도 에피소드도 없다 · 진행 줄이 연 문의 끊기는 쓰기 확인을 실은 줄을 주고
++    /// 에피소드를 연다 · 같은 턴의 진행 줄은 에피소드를 건드리지 않는다 · `result` 가 문을 닫고 에피소드를 버린다.
++    // ADR-0257
++    #[test]
++    fn an_interrupt_on_an_open_turn_opens_an_episode_that_the_turn_end_drops() {
++        let (mut decoder, line, gate) = cleaned_decoder();
++        assert!(line().is_none(), "스폰 직후엔 끊을 턴이 없다");
++        assert!(!has_episode(&gate));
++
++        decoder.decode(completed_text("m1", "hi").as_bytes());
++        assert!(gate.is_open());
++        assert!(!has_episode(&gate), "진행 줄은 에피소드를 만들지 않는다");
++
++        let out = line().expect("열린 문");
++        assert!(
++            out.on_written.is_some(),
++            "받아들인 끊기는 쓰기 확인을 싣는다"
++        );
++        assert!(has_episode(&gate), "받아들인 끊기가 에피소드를 연다");
++        decoder.decode(completed_text("m1", "more").as_bytes());
++        assert!(has_episode(&gate), "진행 줄이 에피소드를 버렸다");
++
++        decoder.decode(RESULT_LINE.as_bytes());
++        assert!(!gate.is_open());
++        assert!(!has_episode(&gate), "턴 끝이 에피소드를 버린다");
++        assert!(line().is_none());
++        assert!(!has_episode(&gate));
++        assert_eq!(decoder.gate_moves, vec![GateMove::Open, GateMove::Close]);
++    }
++
++    /// 끊긴 `result`(`TurnEnd{Interrupted}`)도 턴 끝이다 — 문을 닫고 에피소드를 버린다.
++    // ADR-0257
++    #[test]
++    fn an_interrupted_result_also_drops_the_episode() {
++        let (mut decoder, line, gate) = cleaned_decoder();
++        let lines = fixture_lines(INTERRUPT_S1);
++        for l in &lines[..137] {
++            decoder.decode(l.as_bytes());
++        }
++        assert!(line().is_some());
++        assert!(has_episode(&gate));
++
++        let end = decoder.decode(lines[137].as_bytes());
++        assert!(
++            end.last().is_some_and(is_interrupted_end),
++            "픽스처 전제: {end:?}"
++        );
++        assert!(!gate.is_open());
++        assert!(!has_episode(&gate));
++    }
++
++    /// 열린 턴에 닿은 둘째 새 입력(`started`)은 그 턴의 끊기 에피소드를 버리고 문은 열어 둔다 — 그 뒤 끊기는 새
++    /// 에피소드를 연다.
++    // ADR-0257
++    #[test]
++    fn a_second_started_drops_the_episode_and_keeps_the_turn_open() {
++        let (mut decoder, line, gate) = cleaned_decoder();
++        decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
++        assert!(line().is_some());
++        assert!(has_episode(&gate));
++
++        decoder.decode(SECOND_STARTED.as_bytes());
++        assert!(gate.is_open(), "새 입력이 문을 닫았다");
++        assert!(!has_episode(&gate), "새 입력이 에피소드를 버리지 않았다");
++
++        assert!(line().is_some());
++        assert!(
++            has_episode(&gate),
++            "새 입력 뒤 끊기가 에피소드를 열지 않았다"
++        );
++        assert_eq!(
++            decoder.gate_moves,
++            vec![GateMove::Deliver, GateMove::Deliver]
++        );
++    }
++
++    /// 턴을 여는 `started` 는 문에 한 번(새 입력)만 알린다 — 「연다」를 따로 부르지 않는다. 진행 줄이 이어져도 문은
++    /// 닫힘 → 열림일 때만 부르고, 턴 끝마다 한 번 닫는다 — 픽스처의 세 턴 = 여섯 번.
++    // ADR-0257
++    #[test]
++    fn the_opening_started_is_one_move_and_progress_moves_only_at_transitions() {
++        let (mut decoder, _line, gate) = cleaned_decoder();
++        let classify = ClaudeBackend.turn_classifier();
++        let lines = fixture_lines(INTERRUPT_S1);
++        let started = lines
++            .iter()
++            .filter(|l| l.contains("\"state\":\"started\""))
++            .count();
++        assert_eq!(started, 3, "픽스처 전제 — 턴마다 `started` 하나");
++
++        decoder.decode(lines[1].as_bytes());
++        assert_eq!(decoder.gate_moves, vec![GateMove::Deliver]);
++        assert!(gate.is_open());
++
++        let mut progress = 0;
++        for l in &lines[2..137] {
++            progress += decoder
++                .decode(l.as_bytes())
++                .iter()
++                .filter(|e| classify(e) == Some(TurnSignal::Progress))
++                .count();
++        }
++        assert!(progress > 1, "픽스처 전제 — 첫 턴의 진행 사건 {progress}");
++        assert_eq!(decoder.gate_moves, vec![GateMove::Deliver]);
++
++        for l in &lines[137..] {
++            decoder.decode(l.as_bytes());
++        }
++        use GateMove::{Close, Deliver};
++        assert_eq!(
++            decoder.gate_moves,
++            vec![Deliver, Close, Deliver, Close, Deliver, Close]
++        );
++        assert!(!gate.is_open());
++    }
++
++    /// 이어받기 원문은 문에 닿지 않는다 — 진행 · 끊긴 `result` 가 든 턴 하나를 이어받아도 닫힌 문은 닫힌 채, 열린 문과
++    /// 그 에피소드는 그대로다.
++    // ADR-0257
++    #[test]
++    fn transcript_lines_never_touch_the_gate() {
++        let (mut decoder, line, gate) = cleaned_decoder();
++        let turn = fixture_lines(INTERRUPT_S1)[..138].concat();
++        assert!(!parse_transcript_events(&turn).is_empty(), "픽스처 전제");
++        assert!(!gate.is_open(), "이어받기가 문을 열었다");
++
++        decoder.decode(fixture_line(INTERRUPT_S1, 2).as_bytes());
++        assert!(line().is_some());
++        parse_transcript_events(&turn);
++        assert!(gate.is_open(), "이어받기가 문을 닫았다");
++        assert!(has_episode(&gate), "이어받기가 에피소드를 버렸다");
++    }
++
++    /// 정리기는 통로의 프로세스 무리와 뿌리 PID 가 함께 있어야 선다 — 뿌리 PID 가 없거나 0 이면 문만 여닫는다.
++    // ADR-0257
++    #[cfg(windows)]
++    #[test]
++    fn the_cleaner_needs_the_process_group_and_a_root_pid() {
++        let probe = CommandSpec {
++            program: "cmd.exe".into(),
++            args: ["/c", "ping", "-n", "30", "127.0.0.1", ">nul"]
++                .map(String::from)
++                .to_vec(),
++            env: vec![],
++            cwd: PathBuf::from("."),
++        };
++        let (t, pid) = StdioTransport::open(&probe, true, None).expect("open");
++        assert!(leftover_cleaner(&t, pid, None).is_some());
++        assert!(leftover_cleaner(&t, None, None).is_none());
++        assert!(leftover_cleaner(&t, Some(0), None).is_none());
++        t.shutdown();
++    }
+ }

@@ -22,8 +22,8 @@ use engram_dashboard_agent::profile::{
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
-    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlEndpoint, NoopControlChannel,
-    ProvisionError, StatusSink,
+    AgentId, AgentInfo, AgentStatus, ControlChannel, ControlEndpoint, InputOrigin,
+    NoopControlChannel, ProvisionError, StatusSink,
 };
 
 #[derive(Clone)]
@@ -1112,7 +1112,9 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
     );
 
     // CR 없는 키 입력은 턴을 열지 않는다.
-    manager.write_stdin(id, b"hello").expect("키 입력");
+    manager
+        .write_stdin(id, b"hello", InputOrigin::User)
+        .expect("키 입력");
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         None,
@@ -1120,7 +1122,9 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
     );
 
     // 첫 제출 — 이 호출이 돌아온 뒤에는 명부와 디스크 둘 다에 앉아 있어야 한다.
-    manager.write_stdin(id, b"\r").expect("제출");
+    manager
+        .write_stdin(id, b"\r", InputOrigin::User)
+        .expect("제출");
     assert_eq!(
         profiles.get(id).and_then(|p| p.backend_session_id),
         Some(minted),

@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -c "irm https://herdr.dev/install.ps1 | iex"
 curl.exe -fsSLo install.cmd https://herdr.dev/install.cmd && install.cmd && del install.cmd
 ```
 
-★**둘 다 회사 PC 에서 원격 스크립트를 받아 실행하는 방식이라 보안 정책 확인이 먼저다**★(앞의 것은 실행 정책 우회까지 건다) — 가부는 담당 부서가 판단하고 이 문서는 내리지 않는다. 대안 경로는 **막힘을 비켜 가는 길이지 허가가 아니다.**
+★**둘 다 원격 스크립트를 받아 실행하는 방식이라 보안 정책 확인이 먼저다**★(앞의 것은 실행 정책 우회까지 건다) — 가부는 이 문서가 내리지 않는다. 대안 경로는 **막힘을 비켜 가는 길이지 허가가 아니다.**
 
 - Windows GA 의 근거(소스 확인): `docs/next/CHANGELOG.md:147`("Windows support is now generally available through stable releases…") · `docs/next/website/src/content/docs/install.mdx:6`("generally available, with documented platform-specific limitations and ongoing fixes"). ★줄 번호는 `v0.9.1` 체크아웃 기준이다★ — 옛 master 에서는 CHANGELOG 가 `:32` 였다.
 
@@ -124,7 +124,7 @@ curl.exe -fsSLo install.cmd https://herdr.dev/install.cmd && install.cmd && del 
 1. ★**Orca 앱(런타임)이 떠 있어야 한다**★ — 가이드의 전제 첫 줄이 "`orca status --json` should show a running runtime" 이다(`skill-guides/orchestration.md:49` · 현 master 가이드도 첫 단계에서 런타임부터 확인한다 — gh 조회 2026-09-23). 명령이 그 런타임으로 가는 RPC 라(`:52`) 런타임이 없으면 갈 곳이 없다(추정 — 꺼 놓고 돌려 보지는 않았다).
 2. **Orca CLI 를 PATH 에 올린다** — Settings 에서, 또는 아래 대화상자가 함께 한다. Windows 는 **사용자 PATH 를 레지스트리에** 쓴다. ★**설치 프로그램은 이것을 안 한다**★(`src/main/cli/cli-installer.ts:208`).
 3. **스킬 설치** — 앱의 「Enable orchestration」 대화상자가 **2·3 을 한 버튼으로 한다**: 「Install CLI & skill」(`src/renderer/src/components/floating-terminal/FloatingTerminalOrchestrationDialog.tsx:156`)이 터미널을 열기 전에 CLI 가 PATH 에 없으면 먼저 등록하고(`:165-170` 의 `onBeforeOpenTerminal` → `src/renderer/src/lib/agent-skill-cli-prerequisite.ts:21` → `:43` `window.api.cli.install()`), 그다음 스킬 설치 명령을 도는 터미널을 연다. 명령 문자열은 `src/shared/agent-feature-install-commands.ts` 가 **조립만** 한다. 손으로 치면 `npx skills add https://github.com/stablyai/orca --skill orchestration --global`(Node 필요).
-   - ★**이 명령도 보안 정책 확인이 먼저다**★ — 서드파티 npm 패키지(`skills`)를 받아 실행하고, 그것이 **전역 에이전트 스킬 폴더에 쓴다**(`--agent` 를 안 주고 감지가 0 이면 알려진 에이전트 약 75종 전부에 깐다고 조립기 주석이 적는다 — `agent-feature-install-commands.ts:50-52`). 가부는 담당 부서가 판단하고 이 문서는 내리지 않는다.
+   - ★**이 명령도 보안 정책 확인이 먼저다**★ — 서드파티 npm 패키지(`skills`)를 받아 실행하고, 그것이 **전역 에이전트 스킬 폴더에 쓴다**(`--agent` 를 안 주고 감지가 0 이면 알려진 에이전트 약 75종 전부에 깐다고 조립기 주석이 적는다 — `agent-feature-install-commands.ts:50-52`). 가부는 이 문서가 내리지 않는다.
 4. **에이전트에게 조율·감독을 시키거나 `/orchestration` 을 친다.**
 
 - localStorage `orca.orchestration.enabled`(`src/renderer/src/lib/orchestration-setup-state.ts:2`)는 **셋업을 마쳤다는 표시일 뿐**이다.

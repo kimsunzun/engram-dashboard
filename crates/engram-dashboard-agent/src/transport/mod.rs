@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::output_core::OutputCore;
-use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps};
+use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps, TurnInput, Withdraw};
 
 pub mod api;
 pub mod input_queue;
@@ -38,6 +38,18 @@ pub trait OutputDecoder: Send {
 
     /// 스트림 종료 시 최대 1회 호출 — 개행으로 종단되지 않은 잔여 라인을 마저 처리한다.
     fn flush(&mut self) -> Vec<OutputEvent>;
+
+    /// 지금까지 해석하며 모아 둔 사용량 한도 관측을 **꺼내 비운다**(도착 순). 부르는 쪽은 출력 pump 이고
+    /// `decode`·`flush` 를 부를 때마다 곧이어 부른다 — 그래서 구현체가 쌓아 두는 양은 청크 하나 분량이다.
+    /// ★기본 = 빈 벡터★: 사용량을 싣지 않는 스트림의 디코더는 구현하지 않는다.
+    /// ★`OutputEvent` 로 내지 않는 이유★: 사용량은 계정 단위 상태라 에이전트별 replay·구독자 fan-out 을
+    ///   타면 안 된다 — pump 가 이것을 [`crate::types::StatusSink::usage_observed`] 로 따로 넘긴다.
+    /// ★감싸는 디코더는 이 메서드도 반드시 넘긴다★ — 기본 몸체가 있어 빠뜨려도 컴파일된다. 그러면 통과형
+    ///   감싸개는 관측을 조용히 잃고, 막는 감싸개([`crate::usage::UsageGate`])는 안쪽을 영영 비우지 않아 그
+    ///   벡터가 에이전트 수명 내내 자란다.
+    fn take_usage(&mut self) -> Vec<crate::usage::UsageObservation> {
+        Vec::new()
+    }
 }
 
 // ★PTY 출력 바이트를 backend 클로저에 흘리는 seam 을 여기 되살리지 말 것(ADR-0217/ADR-0218)★ —
@@ -61,6 +73,35 @@ pub trait AgentTransport: Send + Sync {
     ///   [`input_queue`] 모듈 헤더(콘솔 계열)와 codex 통로의 `send_input` doc 이다.
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError>;
 
+    /// 턴 하나를 출처와 함께 넘긴다 — 세션은 `MidTurnPolicy::TransportOwned` 일 때만 부른다. 수령 의미는
+    /// [`AgentTransport::send_input`] 과 같다.
+    /// ★기본 구현 = 본문을 `send_input(Raw)` 로 그대로★ — 턴을 스스로 분류하지 않는 통로(PTY·stdio)는 이것을
+    ///   구현하지 않는다. `InputEvent` 에 변형을 더하는 길은 쓰지 않는다: 그 통로들의 반박 불가 패턴
+    ///   (`let InputEvent::Raw(b) = input`)이 깨진다.
+    // ADR-0231
+    fn send_turn(&self, turn: TurnInput) -> Result<(), PtyError> {
+        self.send_input(InputEvent::Raw(turn.body))
+    }
+
+    /// 대기 입력 하나를 거둔다 — 세션의 취소가 `MidTurnPolicy::TransportOwned` 일 때 이리로 넘어온다.
+    /// 목록 사건(거둠 · 취소 요청)은 **통로가** 낸다 — 그 항목을 쥐었는지 넘겼는지는 통로만 안다.
+    /// ★기본 구현 = `NotHeld`★ — 아무것도 쥐지 않는 통로다.
+    // ADR-0231
+    fn withdraw(&self, _id: &str) -> Withdraw {
+        Withdraw::NotHeld
+    }
+
+    /// 수락 모름으로 쥔 대기 입력의 id — 넘겼는데 벤더가 받았는지 모르는 항목(목록 조회가 `unconfirmed` 로
+    /// 덧댄다). 그 전이는 목록 사건이 없어 명부에는 `Queued` 그대로다.
+    /// ★조회 순간의 통로 상태다★ — 명부 스냅숏과 한 원자가 아니고, 호출자는 명부 락을 놓은 **뒤** 부른다
+    ///   (두 락을 겹쳐 쥐지 않는다 — ADR-0006).
+    /// ★기본 구현 = 빈 목록이고, 오늘 이것을 덮는 통로는 없다★ — codex 통로도 수락 모름 단계를 걷어(ADR-0235) 기본
+    ///   구현을 쓴다. 이 동사와 목록 낱말 `unconfirmed` 는 잠든 채 남는다.
+    // ADR-0231
+    fn unconfirmed_inputs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// ★이 호출 시점까지 받아 둔 입력이 **실제로 나갈 때까지** 기다린다★ — `Ok` = 나갔다.
     ///
     /// ★왜 있나★: [`AgentTransport::send_input`] 의 `Ok` 는 「받았다」이지 「갔다」가 아니다. 그 둘의
@@ -83,6 +124,17 @@ pub trait AgentTransport: Send + Sync {
 
     /// ≠kill. 진행 중 작업만 중단 — 프로세스는 살아 있다.
     fn interrupt(&self) -> Result<(), PtyError>;
+
+    /// 이 통로가 곧 물러난다는 예고 — manager 가 이 화신을 끝내기로 정한 첫 걸음에서(권한 회수 · `Exiting` ·
+    /// [`Self::shutdown`] 보다 먼저) 아무 락 없이 부른다. 뒤에서 도는 일을 가진 통로는 이것을 보고 그 일을 멈출 수 있다.
+    /// ★자원은 거두지 않는다 — 그것은 [`Self::shutdown`] 몫이고 kill 인과(ADR-0001)는 그대로다★. 막히지 않아야 하고
+    ///   (kill 경로가 그 뒤에 선다) 여러 번 불려도 같아야 한다.
+    /// ★밖에서 관측될 결말(상태 전이 · 연결 결말 배달 · 입력 거절)을 여기서 내지 않는다★ — 이 예고는 사용자 종료 의도
+    ///   ([`crate::session::AgentSession::termination_intent`])가 서기 **전**에 온다. 결말이 의도보다 먼저 보이면
+    ///   활성화 판정이 사용자의 취소를 실패로 읽는다.
+    /// ★모든 끝내기 길이 이것을 먼저 부르지는 않는다★ — 물러남을 알아야 하는 통로는 [`Self::shutdown`] 에서도 같은
+    ///   것을 세운다. 기본 구현 = 무동작.
+    fn begin_retire(&self) {}
 
     /// 자원 강제 종료(멱등). pump 종료 대기는 여기서 안 함(core.join_pump 몫).
     fn shutdown(&self);
@@ -126,4 +178,85 @@ pub enum LinkResolution {
     /// 연결이 서지 못했다. `reason` = 사람이 읽을 사유이자 backend 분류의 입력 — 이 통로의 실패
     /// 문구는 stdout 의 JSON-RPC 오류라 콘솔 꼬리에도 stderr 진단 꼬리에도 없다.
     Failed { reason: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ControlCaps, InputCaps, InputOrigin, OutputCaps};
+    use std::sync::Mutex;
+
+    /// 기본 구현만 쓰는 통로 — `send_input` 만 기록한다.
+    struct RawOnly(Mutex<Vec<Vec<u8>>>);
+    impl AgentTransport for RawOnly {
+        fn start(&self, _core: Arc<OutputCore>) {}
+        fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
+            let InputEvent::Raw(bytes) = input;
+            self.0.lock().unwrap().push(bytes);
+            Ok(())
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn interrupt(&self) -> Result<(), PtyError> {
+            Ok(())
+        }
+        fn shutdown(&self) {}
+        fn capabilities(&self) -> TransportCaps {
+            TransportCaps {
+                input: InputCaps {
+                    raw: true,
+                    message: false,
+                    attachment: false,
+                },
+                output: OutputCaps {
+                    terminal_bytes: true,
+                    structured: false,
+                    markdown: false,
+                    tool_events: false,
+                    usage: false,
+                },
+                control: ControlCaps {
+                    resize: false,
+                    interrupt: false,
+                    cancel: false,
+                    graceful_shutdown: false,
+                },
+            }
+        }
+    }
+
+    #[test]
+    fn the_default_send_turn_hands_the_body_to_send_input_byte_for_byte() {
+        let t = RawOnly(Mutex::new(Vec::new()));
+        for origin in [InputOrigin::User, InputOrigin::Mail] {
+            t.send_turn(TurnInput {
+                id: "id-1".into(),
+                body: b"echo hi\r\n\x03".to_vec(),
+                origin,
+            })
+            .unwrap();
+        }
+        assert_eq!(
+            *t.0.lock().unwrap(),
+            vec![b"echo hi\r\n\x03".to_vec(), b"echo hi\r\n\x03".to_vec()],
+            "기본 구현은 출처와 무관하게 본문만 그대로 넘긴다 — id·출처는 바이트에 안 섞인다"
+        );
+    }
+
+    #[test]
+    fn the_default_withdraw_holds_nothing() {
+        let t = RawOnly(Mutex::new(Vec::new()));
+        assert_eq!(t.withdraw("id-1"), Withdraw::NotHeld);
+        assert!(
+            t.0.lock().unwrap().is_empty(),
+            "거두기는 아무것도 쓰지 않는다"
+        );
+    }
+
+    #[test]
+    fn the_default_transport_holds_no_unconfirmed_input() {
+        let t = RawOnly(Mutex::new(Vec::new()));
+        assert!(t.unconfirmed_inputs().is_empty());
+    }
 }

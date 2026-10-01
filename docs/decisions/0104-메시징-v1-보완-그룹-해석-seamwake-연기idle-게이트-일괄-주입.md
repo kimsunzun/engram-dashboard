@@ -1,7 +1,7 @@
 # ADR-0104: 메시징 v1 보완 — 그룹 해석 seam·wake 연기·idle 게이트 일괄 주입
 
-- 상태: 확정 (2026-07-24, 근거: 사용자 결정 — S18 설계 확정(ADR-0103) 직후 재검토 세션에서 3쟁점 논의·확정) · 부분 폐기 by ADR-0112 (결정 1 런타임 등록 명단 소스, 결정 2 잠든 수신자 파킹)
-- 관련: ADR-0103(메시징 v1 본체 — 이 ADR은 그 보완) · `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md` §4·§5·§7·§8 · ADR-0096(봉투 wrap seam) · ADR-0101(WYSIWYA 이름) · ADR-0012(seam 격리) · step-log S18 · Amended by ADR-0112 (결정 1 런타임 등록 명단 소스, 결정 2 잠든 수신자 파킹)
+- 상태: 확정 (2026-07-24, 근거: 사용자 결정 — S18 설계 확정(ADR-0103) 직후 재검토 세션에서 3쟁점 논의·확정) · 부분 폐기 by ADR-0112 (결정 1 런타임 등록 명단 소스, 결정 2 잠든 수신자 파킹) · 부분 폐기 by ADR-0231 (결정 3 idle 게이트의 한가에 사용자 목록 빔과 오류 뒤 멈춤 아님을 더함(상한 없음))
+- 관련: ADR-0103(메시징 v1 본체 — 이 ADR은 그 보완) · `docs/process/S18-messaging-v1/spec/messaging-v1-spec.md` §4·§5·§7·§8 · ADR-0096(봉투 wrap seam) · ADR-0101(WYSIWYA 이름) · ADR-0012(seam 격리) · step-log S18 · Amended by ADR-0112 (결정 1 런타임 등록 명단 소스, 결정 2 잠든 수신자 파킹) · Amended by ADR-0231 (결정 3 idle 게이트의 한가에 사용자 목록 빔과 오류 뒤 멈춤 아님을 더함(상한 없음))
 
 ## 맥락
 

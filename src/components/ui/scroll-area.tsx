@@ -17,8 +17,8 @@
 //!   - 스크롤 중에만 등장(type="scroll") · 스크롤 멈춤 후 scrollHideDelay(500ms) 뒤 숨김. hover 에는
 //!     반응하지 않는다(ADR-0053 사용자 결정 — 전체 화면 hover 로 스크롤바가 너무 일찍 보이는 문제 해소).
 //!   - ★스크롤 대상 = ScrollArea.Viewport(Root 아님)★: 실제 overflow/scrollTop 은 viewport DOM 노드다.
-//!     RichSlot/DomSlot 의 하단 고정 auto-scroll(scrollTop = scrollHeight)이 이 노드를 겨눠야 하므로 ref 를
-//!     Viewport 로 forward 한다. Root 로 겨누면 스크롤이 동작하지 않는다(회귀 주의).
+//!     RichSlot/DomSlot 의 스크롤 따라가기(ADR-0242 — 붙어 있을 때만 바닥으로 쓴다)가 이 노드를 재고 써야
+//!     하므로 ref 를 Viewport 로 forward 한다. Root 로 겨누면 스크롤이 동작하지 않는다(회귀 주의).
 //!   - ★children 의 absolute 오버레이는 Root 에 붙는다★: Root 만 positioned(relative)이고 Viewport 와 그 안쪽
 //!     콘텐츠 래퍼는 positioned 가 아니어야 한다. 그래야 children 이 얹은 `absolute inset-0` 막이 스크롤되지
 //!     않고 이 영역만 정확히 덮는다 — RichSlot 의 이력 대기 로딩 막이 여기에 기댄다(ADR-0226). Viewport 에
@@ -51,8 +51,8 @@ export interface ScrollAreaProps {
   'data-testid'?: string
 }
 
-// ADR-0053: ref 는 Viewport(실제 스크롤 노드)로 forward 한다 — RichSlot/DomSlot 이 이 ref 로 하단 고정
-//   스크롤을 건다(위 헤더 불변식).
+// ADR-0053: ref 는 Viewport(실제 스크롤 노드)로 forward 한다 — RichSlot/DomSlot 이 이 ref 에 스크롤
+//   따라가기(ADR-0242)를 꽂는다(위 헤더 불변식).
 export const ScrollArea = forwardRef<HTMLDivElement, ScrollAreaProps>(function ScrollArea(
   { children, className, viewportClassName, style, viewportStyle, orientation = 'vertical', ...rest },
   viewportRef,

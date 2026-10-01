@@ -20,6 +20,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputEvent, OutputFrame,
     OutputPayload, OutputSink, SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey, WindowObs};
 
 // ── RecordingSink: (seq, bytes) 바이트 + 구조화 이벤트 태그 누적 ─────────────────────
 #[derive(Clone)]
@@ -78,24 +79,31 @@ fn event_tag(e: &OutputEvent) -> String {
         OutputEvent::TerminalBytes(_) => "terminal".to_string(),
         OutputEvent::TextDelta { .. } => "text".to_string(),
         OutputEvent::ToolCall { name, .. } => format!("tool:{name}"),
+        OutputEvent::ToolResult { outcome, .. } => format!("tool-result:{outcome:?}"),
         OutputEvent::Usage { .. } => "usage".to_string(),
         OutputEvent::MessageDone { .. } => "done".to_string(),
         OutputEvent::TurnEnd { .. } => "turn-end".to_string(),
         OutputEvent::Error(_) => "error".to_string(),
         OutputEvent::Structured { kind, .. } => format!("structured:{kind}"),
+        OutputEvent::QueuedInput(_) => "queued-input".to_string(),
     }
 }
 
-// ── RecordingStatusSink: terminal 전이 횟수(finalize 1회 검증) ─────────────────────
+// ── RecordingStatusSink: terminal 전이 횟수(finalize 1회 검증) + 사용량 관측 ─────────────
 #[derive(Clone)]
 struct RecordingStatusSink {
     statuses: Arc<Mutex<Vec<AgentStatus>>>,
+    usage: Arc<Mutex<Vec<UsageObservation>>>,
 }
 impl RecordingStatusSink {
     fn new() -> Self {
         Self {
             statuses: Arc::new(Mutex::new(Vec::new())),
+            usage: Arc::new(Mutex::new(Vec::new())),
         }
+    }
+    fn usage(&self) -> Vec<UsageObservation> {
+        self.usage.lock().unwrap().clone()
     }
     fn terminal_count(&self) -> usize {
         self.statuses
@@ -119,6 +127,9 @@ impl StatusSink for RecordingStatusSink {
         self.statuses.lock().unwrap().push(status);
     }
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+    fn usage_observed(&self, obs: UsageObservation) {
+        self.usage.lock().unwrap().push(obs);
+    }
 }
 
 fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
@@ -481,6 +492,157 @@ fn stdio_real_claude_decoder_emits_structured_event() {
         "실 ClaudeStreamDecoder 가 result 라인을 MessageDone 으로 정제 못함: {tags:?}"
     );
     assert!(!out.has_bytes(), "구조화 경로에 콘솔 바이트 누출");
+}
+
+// ── 사용량 줍기: pump 가 디코더의 관측을 상태 sink 로 넘긴다 ────────────────────────────
+
+fn observation(pct: f64) -> UsageObservation {
+    UsageObservation {
+        vendor: UsageVendorKey::new("test-vendor"),
+        five_hour: Some(WindowObs {
+            used_pct: Some(pct),
+            resets_at: Some(1_900_000_000),
+        }),
+        weekly: None,
+        model_scoped: None,
+        plan: None,
+        source: UsageSource::Passive,
+        limits_unavailable: None,
+    }
+}
+
+/// `decode` 마다 10 %, `flush` 에서 20 % 관측을 쌓는 디코더 — pump 가 두 자리 모두에서 비우는지 잰다.
+struct UsageEmittingDecoder {
+    pending: Vec<UsageObservation>,
+}
+impl OutputDecoder for UsageEmittingDecoder {
+    fn decode(&mut self, _chunk: &[u8]) -> Vec<OutputEvent> {
+        self.pending.push(observation(10.0));
+        Vec::new()
+    }
+    fn flush(&mut self) -> Vec<OutputEvent> {
+        self.pending.push(observation(20.0));
+        Vec::new()
+    }
+    fn take_usage(&mut self) -> Vec<UsageObservation> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[test]
+fn stdio_pump_forwards_usage_after_decode_and_flush() {
+    let decoder: Box<dyn OutputDecoder> = Box::new(UsageEmittingDecoder {
+        pending: Vec::new(),
+    });
+    let (transport, _pid) = StdioTransport::open(
+        &spec("cmd.exe", &["/c", "echo USAGE-ME"]),
+        true,
+        Some(decoder),
+    )
+    .expect("open");
+
+    let status_sink = RecordingStatusSink::new();
+    let core = Arc::new(OutputCore::new(
+        Uuid::new_v4(),
+        0,
+        Arc::new(status_sink.clone()),
+        TurnWiring::detached(),
+    ));
+    let transport: Box<dyn AgentTransport> = Box::new(transport);
+    transport.start(core.clone());
+
+    assert!(
+        wait_until(Duration::from_secs(5), || matches!(
+            core.status(),
+            AgentStatus::Exited { .. }
+        )),
+        "종료 미도달: {:?}",
+        core.status()
+    );
+    core.join_pump(Duration::from_secs(5));
+
+    let pcts: Vec<Option<f64>> = status_sink
+        .usage()
+        .iter()
+        .map(|o| o.five_hour.and_then(|w| w.used_pct))
+        .collect();
+    assert!(
+        pcts.iter().any(|p| *p == Some(10.0)),
+        "decode 뒤 관측이 sink 에 안 닿음: {pcts:?}"
+    );
+    assert_eq!(
+        pcts.last(),
+        Some(&Some(20.0)),
+        "flush 뒤 관측이 마지막에 와야 함: {pcts:?}"
+    );
+}
+
+/// 실 `ClaudeStreamDecoder` 로 한 바퀴 — `rate_limit_event` 줄이 출력 이벤트 없이 sink 의 관측이 된다.
+/// (NDJSON 을 임시 파일로 흘리는 사유 = `stdio_real_claude_decoder_emits_structured_event`)
+#[test]
+fn stdio_real_claude_decoder_reports_rate_limit_usage() {
+    use engram_dashboard_agent::backend::claude::ClaudeStreamDecoder;
+    use std::io::Write;
+
+    let ndjson = concat!(
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","utilization":0.55,"resetsAt":1790425800}}"#,
+        "\n",
+        r#"{"type":"result","subtype":"success"}"#,
+        "\n",
+    );
+    let mut path = std::env::temp_dir();
+    path.push(format!("engram-usage-ndjson-{}.jsonl", Uuid::new_v4()));
+    {
+        let mut f = std::fs::File::create(&path).expect("temp create");
+        f.write_all(ndjson.as_bytes()).expect("temp write");
+    }
+    let path_str = path.to_string_lossy().to_string();
+
+    let decoder: Box<dyn OutputDecoder> = Box::new(ClaudeStreamDecoder::new());
+    let (transport, _pid) = StdioTransport::open(
+        &spec("cmd.exe", &["/c", "type", &path_str]),
+        true,
+        Some(decoder),
+    )
+    .expect("open");
+
+    let status_sink = RecordingStatusSink::new();
+    let core = Arc::new(OutputCore::new(
+        Uuid::new_v4(),
+        0,
+        Arc::new(status_sink.clone()),
+        TurnWiring::detached(),
+    ));
+    let transport: Box<dyn AgentTransport> = Box::new(transport);
+    transport.start(core.clone());
+    let out = RecordingSink::new();
+    core.subscribe(Arc::new(out.clone()));
+
+    assert!(
+        wait_until(Duration::from_secs(5), || matches!(
+            core.status(),
+            AgentStatus::Exited { .. }
+        )),
+        "종료 미도달"
+    );
+    core.join_pump(Duration::from_secs(5));
+    let _ = std::fs::remove_file(&path);
+
+    let usage = status_sink.usage();
+    assert_eq!(usage.len(), 1, "{usage:?}");
+    assert_eq!(
+        usage[0].five_hour,
+        Some(WindowObs {
+            used_pct: Some(55.0),
+            resets_at: Some(1_790_425_800),
+        })
+    );
+    let tags = out.event_tags();
+    assert_eq!(
+        tags,
+        vec!["done".to_string()],
+        "rate_limit_event 는 출력 이벤트가 되지 않는다"
+    );
 }
 
 #[test]

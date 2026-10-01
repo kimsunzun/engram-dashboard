@@ -13,8 +13,10 @@ use super::types::{LayoutNode, SlotContent, SplitDir};
 /// 분할 비율(= a 쪽, 즉 왼쪽/위 칸이 차지하는 몫)의 셸 전역 한계.
 // ADR-0227
 // ADR-0140
-pub const RATIO_MIN: f64 = 0.1;
-pub const RATIO_MAX: f64 = 0.9;
+// ADR-0260: 칸 최소는 px 클램프(`min_pane_px`)가 맡는다 — 이 값이면 축 3000px 까지 그쪽이 이긴다. 단 0 보다
+// 커야 한다: `geometry::boundary` 가 트리에 직접 심은 극단값을 이 한계로 잘라 면적 0 잎을 막는다.
+pub const RATIO_MIN: f64 = 0.01;
+pub const RATIO_MAX: f64 = 0.99;
 
 /// 새 분할의 비율 — `split_in_tree` 가 쓰고, 분할의 표현 가능성 가드가 같은 값으로 새 경계를 미리 잰다.
 pub const SPLIT_RATIO: f64 = 0.5;
@@ -628,13 +630,16 @@ mod tests {
     fn ratio_clamps_to_the_shell_bounds() {
         assert_eq!(clamp_ratio(-0.5), RATIO_MIN);
         assert_eq!(clamp_ratio(0.0), RATIO_MIN);
-        assert_eq!(clamp_ratio(0.05), RATIO_MIN);
+        assert_eq!(clamp_ratio(0.005), RATIO_MIN);
         assert_eq!(clamp_ratio(1.5), RATIO_MAX);
         assert_eq!(clamp_ratio(1.0), RATIO_MAX);
+        assert_eq!(clamp_ratio(0.995), RATIO_MAX);
         assert_eq!(clamp_ratio(f64::INFINITY), RATIO_MAX);
         assert_eq!(clamp_ratio(f64::NEG_INFINITY), RATIO_MIN);
-        assert_eq!(clamp_ratio(0.1), 0.1);
-        assert_eq!(clamp_ratio(0.9), 0.9);
+        assert_eq!(clamp_ratio(0.01), 0.01);
+        assert_eq!(clamp_ratio(0.99), 0.99);
+        assert_eq!(clamp_ratio(0.05), 0.05);
+        assert_eq!(clamp_ratio(0.95), 0.95);
         assert_eq!(clamp_ratio(0.3), 0.3);
     }
 

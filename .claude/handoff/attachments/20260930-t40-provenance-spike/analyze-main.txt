@@ -1,0 +1,607 @@
+# python analyze.py <scratch>/main  (one line per claude-direct child; aggregate at the end)
+===== p1: claude.exe pid=35724 direct children=115 job records=815
+  +    136.3ms pid=33404 life=57ms sub=1 reg.exe query HKLM\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    140.7ms pid=15924 life=55ms sub=1 reg.exe query HKCU\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    260.7ms pid=24900 life=116ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    319.6ms pid=39104 life=128ms sub=1 where.exe git | 
+  +    450.7ms pid=29648 life=88ms sub=2 git.exe -c core.hooksPath=/dev/null -c core.fsmonitor= -C  | 
+  +    613.7ms pid=33664 life=103ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    802.8ms pid=40420 life=201ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | 
+  +    812.7ms pid=22104 life=231ms sub=3 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | 
+  +    818.9ms pid=37764 life=5922ms sub=135 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | 
+  +    901.9ms pid=32544 life=75ms sub=1 rg --no-config --files --hidden C:\Users\<user>\Ap | 
+  +   6800.9ms pid=26304 life=212ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.2ms after hook_started(UserPromptSubmit,id=118bf1c2)
+  +   6805.9ms pid=32568 life=627ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.2ms after hook_started(UserPromptSubmit,id=118bf1c2)
+  +   6809.1ms pid=25760 life=544ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.5ms after hook_started(UserPromptSubmit,id=118bf1c2)
+  +   6812.8ms pid=37908 life=181ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.1ms after hook_started(UserPromptSubmit,id=118bf1c2)
+  +   7497.5ms pid=24004 life=65ms sub=1 cmd.exe /d /s /c "%windir%\System32\REG.exe QUERY HKEY_LOC | +62.8ms after hook_response(UserPromptSubmit,id=e39147d7)
+  +   7555.5ms pid=34152 life=72ms sub=1 rg --version | +120.8ms after hook_response(UserPromptSubmit,id=e39147d7)
+  +   7568.5ms pid=14304 life=78ms sub=1 rg --no-config --files --hidden --no-ignore --max-dep | +133.8ms after hook_response(UserPromptSubmit,id=e39147d7)
+  +   8562.2ms pid=27896 life=200ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(Stop,id=c29f043e)
+  +   8566.7ms pid=31328 life=443ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.4ms after hook_started(Stop,id=c29f043e)
+  +  10576.3ms pid=13980 life=178ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(UserPromptSubmit,id=2dd17655)
+  +  10581.2ms pid=40536 life=501ms sub=14 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=2dd17655)
+  +  10584.5ms pid=28748 life=498ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.0ms after hook_started(UserPromptSubmit,id=2dd17655)
+  +  10588.4ms pid=3792 life=166ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.9ms after hook_started(UserPromptSubmit,id=2dd17655)
+  +  10768.3ms pid=21072 life=319ms sub=1 taskkill.exe /PID 40536 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:061da7c0-e
+  +  10771.5ms pid=40820 life=316ms sub=1 taskkill.exe /PID 28748 /T /F | +4.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:061da7c0-e
+  +  12272.1ms pid=34868 life=264ms sub=1 taskkill.exe /PID 40536 /T /F | +948.4ms after result/error_during_execution
+  +  12277.0ms pid=23716 life=269ms sub=1 taskkill.exe /PID 28748 /T /F | +953.3ms after result/error_during_execution
+  +  15349.9ms pid=33432 life=200ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=1f84212c)
+  +  15355.3ms pid=26208 life=512ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.4ms after hook_started(UserPromptSubmit,id=1f84212c)
+  +  15358.8ms pid=30800 life=538ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.9ms after hook_started(UserPromptSubmit,id=1f84212c)
+  +  15362.5ms pid=39252 life=184ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.6ms after hook_started(UserPromptSubmit,id=1f84212c)
+  +  15542.5ms pid=24140 life=337ms sub=1 taskkill.exe /PID 33432 /T /F | +1.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:772b86cc-5
+  +  15546.7ms pid=7164 life=324ms sub=1 taskkill.exe /PID 26208 /T /F | +5.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:772b86cc-5
+  +  15550.1ms pid=33820 life=350ms sub=1 taskkill.exe /PID 30800 /T /F | +9.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:772b86cc-5
+  +  15553.6ms pid=40552 life=344ms sub=1 taskkill.exe /PID 39252 /T /F | +12.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:772b86cc-5
+  +  17048.1ms pid=25660 life=393ms sub=1 taskkill.exe /PID 33432 /T /F | +1137.9ms after hook_response(UserPromptSubmit,id=e8caa440)
+  +  17053.0ms pid=3548 life=393ms sub=1 taskkill.exe /PID 26208 /T /F | +1142.8ms after hook_response(UserPromptSubmit,id=e8caa440)
+  +  17057.5ms pid=27944 life=403ms sub=1 taskkill.exe /PID 30800 /T /F | +1147.3ms after hook_response(UserPromptSubmit,id=e8caa440)
+  +  17060.8ms pid=31476 life=400ms sub=1 taskkill.exe /PID 39252 /T /F | +1150.6ms after hook_response(UserPromptSubmit,id=e8caa440)
+  +  26136.6ms pid=20408 life=182ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=b368a78a)
+  +  26141.6ms pid=40340 life=580ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.0ms after hook_started(UserPromptSubmit,id=b368a78a)
+  +  26145.2ms pid=34004 life=502ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.6ms after hook_started(UserPromptSubmit,id=b368a78a)
+  +  26149.7ms pid=15856 life=162ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.0ms after hook_started(UserPromptSubmit,id=b368a78a)
+  +  27681.4ms pid=1764 life=186ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=fc21d1f4)
+  +  27686.1ms pid=39440 life=431ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.5ms after hook_started(Stop,id=fc21d1f4)
+  +  29636.6ms pid=27616 life=207ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=0e44c05c)
+  +  29641.8ms pid=21568 life=482ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.1ms after hook_started(UserPromptSubmit,id=0e44c05c)
+  +  29645.5ms pid=32480 life=491ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.8ms after hook_started(UserPromptSubmit,id=0e44c05c)
+  +  29649.6ms pid=28008 life=177ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.9ms after hook_started(UserPromptSubmit,id=0e44c05c)
+  +  29830.0ms pid=4368 life=299ms sub=1 taskkill.exe /PID 27616 /T /F | +1.3ms after hook_response(UserPromptSubmit,id=0e44c05c)
+  +  29833.7ms pid=25748 life=294ms sub=1 taskkill.exe /PID 21568 /T /F | +5.0ms after hook_response(UserPromptSubmit,id=0e44c05c)
+  +  29837.5ms pid=36980 life=302ms sub=1 taskkill.exe /PID 32480 /T /F | +8.8ms after hook_response(UserPromptSubmit,id=0e44c05c)
+  +  31334.3ms pid=32228 life=307ms sub=1 taskkill.exe /PID 27616 /T /F | +1030.1ms after result/error_during_execution
+  +  31338.5ms pid=25564 life=296ms sub=1 taskkill.exe /PID 21568 /T /F | +1034.3ms after result/error_during_execution
+  +  31343.6ms pid=39832 life=302ms sub=1 taskkill.exe /PID 32480 /T /F | +1039.4ms after result/error_during_execution
+  +  34403.3ms pid=37952 life=207ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=43947542)
+  +  34409.2ms pid=38324 life=590ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.8ms after hook_started(UserPromptSubmit,id=43947542)
+  +  34412.8ms pid=32728 life=601ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.5ms after hook_started(UserPromptSubmit,id=43947542)
+  +  34416.9ms pid=33144 life=179ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.6ms after hook_started(UserPromptSubmit,id=43947542)
+  +  34595.1ms pid=30372 life=413ms sub=1 taskkill.exe /PID 37952 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c3325860-7
+  +  34599.4ms pid=19976 life=406ms sub=1 taskkill.exe /PID 38324 /T /F | +5.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c3325860-7
+  +  34603.4ms pid=25128 life=416ms sub=1 taskkill.exe /PID 32728 /T /F | +9.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c3325860-7
+  +  34607.7ms pid=32708 life=411ms sub=1 taskkill.exe /PID 33144 /T /F | +14.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c3325860-7
+  +  36099.3ms pid=34144 life=353ms sub=1 taskkill.exe /PID 37952 /T /F | +950.8ms after result/error_during_execution
+  +  36103.8ms pid=38644 life=377ms sub=1 taskkill.exe /PID 38324 /T /F | +955.3ms after result/error_during_execution
+  +  36108.5ms pid=13040 life=372ms sub=1 taskkill.exe /PID 32728 /T /F | +960.0ms after result/error_during_execution
+  +  36112.8ms pid=38080 life=372ms sub=1 taskkill.exe /PID 33144 /T /F | +964.3ms after result/error_during_execution
+  +  39172.8ms pid=768 life=187ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +7.2ms after hook_started(UserPromptSubmit,id=da63fe8d)
+  +  39178.6ms pid=30752 life=498ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +13.0ms after hook_started(UserPromptSubmit,id=da63fe8d)
+  +  39183.0ms pid=36420 life=484ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +17.4ms after hook_started(UserPromptSubmit,id=da63fe8d)
+  +  39188.5ms pid=40396 life=168ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +22.9ms after hook_started(UserPromptSubmit,id=da63fe8d)
+  +  39359.9ms pid=28280 life=295ms sub=1 taskkill.exe /PID 768 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:f7e3dfb0-6
+  +  39363.3ms pid=5848 life=317ms sub=1 taskkill.exe /PID 30752 /T /F | +4.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:f7e3dfb0-6
+  +  39366.7ms pid=34028 life=304ms sub=1 taskkill.exe /PID 36420 /T /F | +8.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:f7e3dfb0-6
+  +  40863.5ms pid=4292 life=326ms sub=1 taskkill.exe /PID 768 /T /F | +1154.1ms after result/error_during_execution
+  +  40867.8ms pid=7816 life=311ms sub=1 taskkill.exe /PID 30752 /T /F | +1158.4ms after result/error_during_execution
+  +  40872.8ms pid=29116 life=321ms sub=1 taskkill.exe /PID 36420 /T /F | +1163.3ms after result/error_during_execution
+  +  43935.9ms pid=29400 life=235ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(UserPromptSubmit,id=e3e2a631)
+  +  43942.1ms pid=6148 life=751ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +7.0ms after hook_started(UserPromptSubmit,id=e3e2a631)
+  +  43946.6ms pid=40760 life=637ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +11.5ms after hook_started(UserPromptSubmit,id=e3e2a631)
+  +  43951.7ms pid=16988 life=201ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +16.6ms after hook_started(UserPromptSubmit,id=e3e2a631)
+  +  46988.5ms pid=36580 life=337ms sub=2 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=] | +0.9ms after hook_started(PreToolUse:Bash,id=caa3957b)
+  +  46991.9ms pid=29652 life=183ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +4.4ms after hook_started(PreToolUse:Bash,id=caa3957b)
+  +  46996.0ms pid=28860 life=245ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"] | +8.5ms after hook_started(PreToolUse:Bash,id=caa3957b)
+  +  47345.9ms pid=15696 life=135ms sub=3 bash.exe -c env | +18.9ms after hook_response(PreToolUse:Bash,id=5af02d12)
+  +  47350.4ms pid=29360 life=909ms sub=24 LOGIN_PATH_PROBE: bash -lc "echo \"$PATH\"" | +23.4ms after hook_response(PreToolUse:Bash,id=5af02d12)
+  +  48262.5ms pid=28728 life=1053ms sub=30 SNAPSHOT_MAKER: bash -c -l "SNAPSHOT_FILE=..." | +935.5ms after hook_response(PreToolUse:Bash,id=5af02d12)
+  +  49322.7ms pid=39152 life=5211ms sub=5 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>" | +1995.7ms after hook_response(PreToolUse:Bash,id=5af02d12)
+  +  54546.7ms pid=32240 life=186ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.2ms after hook_started(PostToolUse:Bash,id=48f76e50)
+  +  55827.6ms pid=27524 life=214ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=f3154c9b)
+  +  55831.6ms pid=39208 life=521ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +4.8ms after hook_started(Stop,id=f3154c9b)
+  +  57877.1ms pid=8200 life=212ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=fc5b2a4a)
+  +  57887.5ms pid=31680 life=575ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +11.3ms after hook_started(UserPromptSubmit,id=fc5b2a4a)
+  +  57891.2ms pid=33360 life=499ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +15.0ms after hook_started(UserPromptSubmit,id=fc5b2a4a)
+  +  57894.8ms pid=38716 life=185ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +18.6ms after hook_started(UserPromptSubmit,id=fc5b2a4a)
+  +  60935.6ms pid=25768 life=345ms sub=2 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=] | +0.9ms after hook_started(PreToolUse:Bash,id=26a7895a)
+  +  60939.1ms pid=12304 life=183ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +4.4ms after hook_started(PreToolUse:Bash,id=26a7895a)
+  +  60947.5ms pid=28684 life=250ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"] | +12.7ms after hook_started(PreToolUse:Bash,id=26a7895a)
+  +  61294.4ms pid=37280 life=13547ms sub=17 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>" | +11.3ms after hook_response(PreToolUse:Bash,id=28355ab9)
+  +  61304.3ms pid=36624 life=191ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.2ms after hook_started(PostToolUse:Bash,id=465258e6)
+  +  62372.6ms pid=29956 life=172ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.1ms after hook_started(Stop,id=fcc459fe)
+  +  62376.7ms pid=25108 life=423ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.2ms after hook_started(Stop,id=fcc459fe)
+  +  71401.9ms pid=13520 life=246ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=60f11a13)
+  +  71406.7ms pid=30984 life=522ms sub=10 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=60f11a13)
+  +  71415.8ms pid=16076 life=506ms sub=10 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +14.8ms after hook_started(UserPromptSubmit,id=60f11a13)
+  +  71419.7ms pid=25180 life=223ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +18.8ms after hook_started(UserPromptSubmit,id=60f11a13)
+  +  71515.0ms pid=38888 life=416ms sub=1 taskkill.exe /PID 13520 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:77445a07-e
+  +  71528.2ms pid=34564 life=405ms sub=1 taskkill.exe /PID 30984 /T /F | +14.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:77445a07-e
+  +  71532.2ms pid=39296 life=396ms sub=1 taskkill.exe /PID 16076 /T /F | +18.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:77445a07-e
+  +  71536.4ms pid=40724 life=393ms sub=1 taskkill.exe /PID 25180 /T /F | +22.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:77445a07-e
+  +  73020.1ms pid=31380 life=336ms sub=1 taskkill.exe /PID 13520 /T /F | +1061.6ms after result/error_during_execution
+  +  73032.2ms pid=29540 life=357ms sub=1 taskkill.exe /PID 30984 /T /F | +1073.8ms after result/error_during_execution
+  +  73036.7ms pid=23656 life=343ms sub=1 taskkill.exe /PID 16076 /T /F | +1078.3ms after result/error_during_execution
+  +  73046.2ms pid=6864 life=342ms sub=1 taskkill.exe /PID 25180 /T /F | +1087.7ms after result/error_during_execution
+  +  74593.0ms pid=35672 life=252ms sub=1 taskkill.exe /PID 37280 /T /F | +2634.6ms after result/error_during_execution
+
+===== p2: claude.exe pid=27284 direct children=107 job records=805
+  +    135.0ms pid=31504 life=58ms sub=1 reg.exe query HKLM\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    139.3ms pid=7056 life=54ms sub=1 reg.exe query HKCU\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    251.6ms pid=35944 life=101ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    301.9ms pid=38196 life=116ms sub=1 where.exe git | 
+  +    421.6ms pid=3392 life=88ms sub=2 git.exe -c core.hooksPath=/dev/null -c core.fsmonitor= -C  | 
+  +    586.7ms pid=12896 life=101ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    760.2ms pid=30180 life=202ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | 
+  +    766.8ms pid=29220 life=6258ms sub=135 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | 
+  +    772.3ms pid=32080 life=233ms sub=3 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | 
+  +    857.8ms pid=16740 life=76ms sub=1 rg --no-config --files --hidden C:\Users\<user>\Ap | 
+  +   7088.6ms pid=30488 life=235ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=a284804b)
+  +   7094.1ms pid=27904 life=697ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.5ms after hook_started(UserPromptSubmit,id=a284804b)
+  +   7097.9ms pid=40296 life=607ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.3ms after hook_started(UserPromptSubmit,id=a284804b)
+  +   7102.1ms pid=23496 life=202ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.5ms after hook_started(UserPromptSubmit,id=a284804b)
+  +   7879.5ms pid=34132 life=101ms sub=1 cmd.exe /d /s /c "%windir%\System32\REG.exe QUERY HKEY_LOC | +86.2ms after hook_response(UserPromptSubmit,id=413a57cf)
+  +   7983.9ms pid=35104 life=88ms sub=1 rg --version | +190.5ms after hook_response(UserPromptSubmit,id=413a57cf)
+  +   7996.2ms pid=27816 life=91ms sub=1 rg --no-config --files --hidden --no-ignore --max-dep | +202.9ms after hook_response(UserPromptSubmit,id=413a57cf)
+  +   9001.9ms pid=6096 life=198ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=a9942dd4)
+  +   9006.1ms pid=3476 life=446ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.0ms after hook_started(Stop,id=a9942dd4)
+  +  11019.7ms pid=32480 life=181ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(UserPromptSubmit,id=61c3f084)
+  +  11024.8ms pid=30092 life=481ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.9ms after hook_started(UserPromptSubmit,id=61c3f084)
+  +  11028.2ms pid=21516 life=489ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.4ms after hook_started(UserPromptSubmit,id=61c3f084)
+  +  11033.7ms pid=31408 life=166ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.8ms after hook_started(UserPromptSubmit,id=61c3f084)
+  +  11212.1ms pid=31352 life=298ms sub=1 taskkill.exe /PID 30092 /T /F | +2.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:ea9ecb92-9
+  +  11215.5ms pid=12788 life=306ms sub=1 taskkill.exe /PID 21516 /T /F | +5.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:ea9ecb92-9
+  +  12716.6ms pid=33968 life=270ms sub=1 taskkill.exe /PID 30092 /T /F | +1038.1ms after result/error_during_execution
+  +  12721.4ms pid=29540 life=257ms sub=1 taskkill.exe /PID 21516 /T /F | +1042.9ms after result/error_during_execution
+  +  15790.4ms pid=30064 life=198ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=e88a24d7)
+  +  15795.5ms pid=36816 life=533ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.0ms after hook_started(UserPromptSubmit,id=e88a24d7)
+  +  15799.2ms pid=32124 life=525ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.7ms after hook_started(UserPromptSubmit,id=e88a24d7)
+  +  15803.3ms pid=34872 life=176ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.8ms after hook_started(UserPromptSubmit,id=e88a24d7)
+  +  15980.8ms pid=38164 life=349ms sub=1 taskkill.exe /PID 30064 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:7a0d2ec6-0
+  +  15984.5ms pid=38972 life=348ms sub=1 taskkill.exe /PID 36816 /T /F | +5.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:7a0d2ec6-0
+  +  15987.9ms pid=34572 life=341ms sub=1 taskkill.exe /PID 32124 /T /F | +8.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:7a0d2ec6-0
+  +  15991.4ms pid=30996 life=342ms sub=1 taskkill.exe /PID 34872 /T /F | +12.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:7a0d2ec6-0
+  +  17486.0ms pid=28084 life=351ms sub=1 taskkill.exe /PID 30064 /T /F | +985.1ms after result/error_during_execution
+  +  17490.8ms pid=31560 life=346ms sub=1 taskkill.exe /PID 36816 /T /F | +989.9ms after result/error_during_execution
+  +  17494.9ms pid=5256 life=347ms sub=1 taskkill.exe /PID 32124 /T /F | +994.0ms after result/error_during_execution
+  +  17500.1ms pid=38596 life=342ms sub=1 taskkill.exe /PID 34872 /T /F | +999.2ms after result/error_during_execution
+  +  20563.5ms pid=34192 life=173ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=2892f3a5)
+  +  20568.3ms pid=26708 life=464ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=2892f3a5)
+  +  20571.7ms pid=39536 life=469ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.2ms after hook_started(UserPromptSubmit,id=2892f3a5)
+  +  20575.4ms pid=24272 life=149ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.9ms after hook_started(UserPromptSubmit,id=2892f3a5)
+  +  20757.0ms pid=28452 life=279ms sub=1 taskkill.exe /PID 26708 /T /F | +1.3ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:6040aec5-6
+  +  20760.0ms pid=5216 life=285ms sub=1 taskkill.exe /PID 39536 /T /F | +4.3ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:6040aec5-6
+  +  22260.4ms pid=23792 life=264ms sub=1 taskkill.exe /PID 26708 /T /F | +1184.1ms after result/error_during_execution
+  +  22264.5ms pid=28688 life=252ms sub=1 taskkill.exe /PID 39536 /T /F | +1188.2ms after result/error_during_execution
+  +  25333.7ms pid=21240 life=178ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=d2267d3e)
+  +  25338.5ms pid=40920 life=466ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.8ms after hook_started(UserPromptSubmit,id=d2267d3e)
+  +  25342.0ms pid=38908 life=461ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.3ms after hook_started(UserPromptSubmit,id=d2267d3e)
+  +  25345.6ms pid=32488 life=153ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.8ms after hook_started(UserPromptSubmit,id=d2267d3e)
+  +  25526.0ms pid=35916 life=283ms sub=1 taskkill.exe /PID 40920 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:b551dfcd-2
+  +  25533.9ms pid=30992 life=273ms sub=1 taskkill.exe /PID 38908 /T /F | +9.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:b551dfcd-2
+  +  27029.6ms pid=11088 life=262ms sub=1 taskkill.exe /PID 40920 /T /F | +1180.1ms after result/error_during_execution
+  +  27038.3ms pid=35092 life=258ms sub=1 taskkill.exe /PID 38908 /T /F | +1188.9ms after result/error_during_execution
+  +  30097.3ms pid=6020 life=177ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=e75c4033)
+  +  30102.1ms pid=30208 life=482ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=e75c4033)
+  +  30105.3ms pid=39904 life=478ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.0ms after hook_started(UserPromptSubmit,id=e75c4033)
+  +  30108.8ms pid=24004 life=160ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.4ms after hook_started(UserPromptSubmit,id=e75c4033)
+  +  30290.3ms pid=4548 life=297ms sub=1 taskkill.exe /PID 30208 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:fa111af5-1
+  +  30293.4ms pid=33820 life=294ms sub=1 taskkill.exe /PID 39904 /T /F | +4.3ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:fa111af5-1
+  +  31794.3ms pid=16132 life=355ms sub=1 taskkill.exe /PID 30208 /T /F | +1128.5ms after hook_response(UserPromptSubmit,id=2a2e5f71)
+  +  31800.8ms pid=26764 life=358ms sub=1 taskkill.exe /PID 39904 /T /F | +1134.9ms after hook_response(UserPromptSubmit,id=2a2e5f71)
+  +  40889.0ms pid=31344 life=197ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=61f51839)
+  +  40894.0ms pid=1228 life=615ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.0ms after hook_started(UserPromptSubmit,id=61f51839)
+  +  40901.4ms pid=24044 life=534ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +13.4ms after hook_started(UserPromptSubmit,id=61f51839)
+  +  40905.4ms pid=34472 life=166ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +17.4ms after hook_started(UserPromptSubmit,id=61f51839)
+  +  42730.4ms pid=30360 life=174ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(Stop,id=bb982872)
+  +  42733.9ms pid=30888 life=416ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +4.9ms after hook_started(Stop,id=bb982872)
+  +  44669.8ms pid=11216 life=184ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=b79deb22)
+  +  44674.6ms pid=6356 life=593ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=b79deb22)
+  +  44678.1ms pid=34864 life=515ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.2ms after hook_started(UserPromptSubmit,id=b79deb22)
+  +  44681.8ms pid=39152 life=176ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.8ms after hook_started(UserPromptSubmit,id=b79deb22)
+  +  47048.5ms pid=7816 life=337ms sub=2 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=] | +0.9ms after hook_started(PreToolUse:Bash,id=0badc018)
+  +  47052.4ms pid=11992 life=174ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +4.8ms after hook_started(PreToolUse:Bash,id=0badc018)
+  +  47056.0ms pid=13412 life=246ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"] | +8.4ms after hook_started(PreToolUse:Bash,id=0badc018)
+  +  47407.5ms pid=39664 life=132ms sub=3 bash.exe -c env | +20.3ms after hook_response(PreToolUse:Bash,id=d89c8dc0)
+  +  47412.2ms pid=6064 life=869ms sub=24 LOGIN_PATH_PROBE: bash -lc "echo \"$PATH\"" | +25.1ms after hook_response(PreToolUse:Bash,id=d89c8dc0)
+  +  48284.4ms pid=38288 life=1055ms sub=30 SNAPSHOT_MAKER: bash -c -l "SNAPSHOT_FILE=..." | +897.3ms after hook_response(PreToolUse:Bash,id=d89c8dc0)
+  +  49345.6ms pid=28396 life=5212ms sub=5 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>" | +1958.5ms after hook_response(PreToolUse:Bash,id=d89c8dc0)
+  +  54568.4ms pid=20816 life=169ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(PostToolUse:Bash,id=5ca552aa)
+  +  55685.1ms pid=32196 life=181ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=8f8574b7)
+  +  55689.3ms pid=39364 life=421ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.0ms after hook_started(Stop,id=8f8574b7)
+  +  57627.6ms pid=25116 life=181ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=f5772514)
+  +  57632.6ms pid=21436 life=557ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.9ms after hook_started(UserPromptSubmit,id=f5772514)
+  +  57636.1ms pid=11100 life=479ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.3ms after hook_started(UserPromptSubmit,id=f5772514)
+  +  57640.0ms pid=12868 life=157ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.3ms after hook_started(UserPromptSubmit,id=f5772514)
+  +  60511.7ms pid=12020 life=316ms sub=2 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=] | +0.9ms after hook_started(PreToolUse:Bash,id=b04449c4)
+  +  60515.4ms pid=33308 life=171ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +4.6ms after hook_started(PreToolUse:Bash,id=b04449c4)
+  +  60523.1ms pid=30332 life=232ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"] | +12.3ms after hook_started(PreToolUse:Bash,id=b04449c4)
+  +  60838.6ms pid=36164 life=13813ms sub=17 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>" | +9.5ms after hook_response(PreToolUse:Bash,id=5310a5a5)
+  +  60848.1ms pid=29156 life=179ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.2ms after hook_started(PostToolUse:Bash,id=412447b2)
+  +  62202.1ms pid=38516 life=175ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(Stop,id=07f075ac)
+  +  62206.0ms pid=25160 life=417ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +4.9ms after hook_started(Stop,id=07f075ac)
+  +  71221.3ms pid=27444 life=188ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(UserPromptSubmit,id=5ec076dc)
+  +  71225.9ms pid=32068 life=452ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.4ms after hook_started(UserPromptSubmit,id=5ec076dc)
+  +  71229.7ms pid=21760 life=449ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.3ms after hook_started(UserPromptSubmit,id=5ec076dc)
+  +  71233.7ms pid=21100 life=166ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.3ms after hook_started(UserPromptSubmit,id=5ec076dc)
+  +  71345.2ms pid=9980 life=320ms sub=1 taskkill.exe /PID 27444 /T /F | +6.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:08fe73a2-2
+  +  71348.4ms pid=37240 life=334ms sub=1 taskkill.exe /PID 32068 /T /F | +10.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:08fe73a2-2
+  +  71351.4ms pid=11408 life=331ms sub=1 taskkill.exe /PID 21760 /T /F | +13.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:08fe73a2-2
+  +  71354.8ms pid=18236 life=325ms sub=1 taskkill.exe /PID 21100 /T /F | +16.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:08fe73a2-2
+  +  72849.7ms pid=7672 life=285ms sub=1 taskkill.exe /PID 27444 /T /F | +1002.2ms after result/error_during_execution
+  +  72853.9ms pid=26976 life=305ms sub=1 taskkill.exe /PID 32068 /T /F | +1006.4ms after result/error_during_execution
+  +  72858.4ms pid=38420 life=302ms sub=1 taskkill.exe /PID 21760 /T /F | +1010.9ms after result/error_during_execution
+  +  72861.6ms pid=1556 life=298ms sub=1 taskkill.exe /PID 21100 /T /F | +1014.1ms after result/error_during_execution
+  +  74406.7ms pid=12904 life=248ms sub=1 taskkill.exe /PID 36164 /T /F | +2559.2ms after result/error_during_execution
+
+===== p3: claude.exe pid=40848 direct children=114 job records=867
+  +    128.7ms pid=28684 life=55ms sub=1 reg.exe query HKLM\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    132.9ms pid=31576 life=51ms sub=1 reg.exe query HKCU\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    244.3ms pid=10868 life=96ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    294.6ms pid=36764 life=116ms sub=1 where.exe git | 
+  +    413.7ms pid=33832 life=93ms sub=2 git.exe -c core.hooksPath=/dev/null -c core.fsmonitor= -C  | 
+  +    580.0ms pid=27916 life=104ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    760.9ms pid=35644 life=188ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | 
+  +    767.0ms pid=33432 life=5896ms sub=135 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | 
+  +    772.0ms pid=38228 life=215ms sub=3 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | 
+  +    846.4ms pid=40580 life=73ms sub=1 rg --no-config --files --hidden C:\Users\<user>\Ap | 
+  +   6714.9ms pid=32984 life=184ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.2ms after hook_started(UserPromptSubmit,id=05fd87f6)
+  +   6720.6ms pid=38124 life=645ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +7.0ms after hook_started(UserPromptSubmit,id=05fd87f6)
+  +   6724.5ms pid=40220 life=550ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.9ms after hook_started(UserPromptSubmit,id=05fd87f6)
+  +   6729.5ms pid=31416 life=161ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +15.9ms after hook_started(UserPromptSubmit,id=05fd87f6)
+  +   7436.7ms pid=23652 life=68ms sub=1 cmd.exe /d /s /c "%windir%\System32\REG.exe QUERY HKEY_LOC | +69.1ms after hook_response(UserPromptSubmit,id=2b843d63)
+  +   7495.0ms pid=33668 life=97ms sub=1 rg --version | +127.4ms after hook_response(UserPromptSubmit,id=2b843d63)
+  +   7507.6ms pid=30892 life=73ms sub=1 rg --no-config --files --hidden --no-ignore --max-dep | +140.0ms after hook_response(UserPromptSubmit,id=2b843d63)
+  +   8631.7ms pid=40552 life=180ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=a76957f2)
+  +   8636.4ms pid=40224 life=427ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.6ms after hook_started(Stop,id=a76957f2)
+  +  10637.0ms pid=26192 life=192ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=99dafb1f)
+  +  10641.9ms pid=22152 life=559ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=99dafb1f)
+  +  10645.6ms pid=20728 life=563ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.4ms after hook_started(UserPromptSubmit,id=99dafb1f)
+  +  10649.9ms pid=27604 life=171ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.7ms after hook_started(UserPromptSubmit,id=99dafb1f)
+  +  10829.5ms pid=33780 life=372ms sub=1 taskkill.exe /PID 26192 /T /F | +1.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c8844808-b
+  +  10833.2ms pid=39672 life=373ms sub=1 taskkill.exe /PID 22152 /T /F | +5.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c8844808-b
+  +  10837.0ms pid=34456 life=376ms sub=1 taskkill.exe /PID 20728 /T /F | +9.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c8844808-b
+  +  12334.5ms pid=29584 life=337ms sub=1 taskkill.exe /PID 26192 /T /F | +1090.7ms after result/error_during_execution
+  +  12338.7ms pid=22872 life=343ms sub=1 taskkill.exe /PID 22152 /T /F | +1094.9ms after result/error_during_execution
+  +  12343.9ms pid=27588 life=345ms sub=1 taskkill.exe /PID 20728 /T /F | +1100.1ms after result/error_during_execution
+  +  15407.2ms pid=27616 life=180ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=3f76e483)
+  +  15412.7ms pid=40232 life=486ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.4ms after hook_started(UserPromptSubmit,id=3f76e483)
+  +  15416.4ms pid=32012 life=481ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.1ms after hook_started(UserPromptSubmit,id=3f76e483)
+  +  15420.3ms pid=3548 life=155ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.1ms after hook_started(UserPromptSubmit,id=3f76e483)
+  +  15598.5ms pid=31136 life=305ms sub=1 taskkill.exe /PID 40232 /T /F | +1.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:28ccf0fe-c
+  +  15601.4ms pid=29932 life=301ms sub=1 taskkill.exe /PID 32012 /T /F | +4.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:28ccf0fe-c
+  +  17102.5ms pid=7648 life=361ms sub=1 taskkill.exe /PID 40232 /T /F | +1163.1ms after result/error_during_execution
+  +  17108.8ms pid=39308 life=345ms sub=1 taskkill.exe /PID 32012 /T /F | +1169.4ms after result/error_during_execution
+  +  20180.7ms pid=38240 life=338ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.7ms after hook_started(UserPromptSubmit,id=7ce8a6cb)
+  +  20188.9ms pid=33144 life=713ms sub=9 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +9.9ms after hook_started(UserPromptSubmit,id=7ce8a6cb)
+  +  20193.6ms pid=19556 life=721ms sub=10 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +14.5ms after hook_started(UserPromptSubmit,id=7ce8a6cb)
+  +  20198.8ms pid=5556 life=279ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +19.8ms after hook_started(UserPromptSubmit,id=7ce8a6cb)
+  +  20367.1ms pid=26780 life=543ms sub=1 taskkill.exe /PID 38240 /T /F | +1.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:59562f25-7
+  +  20372.1ms pid=38612 life=539ms sub=1 taskkill.exe /PID 33144 /T /F | +6.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:59562f25-7
+  +  20377.0ms pid=31616 life=546ms sub=1 taskkill.exe /PID 19556 /T /F | +11.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:59562f25-7
+  +  20382.6ms pid=26736 life=541ms sub=1 taskkill.exe /PID 5556 /T /F | +17.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:59562f25-7
+  +  21872.9ms pid=27144 life=400ms sub=1 taskkill.exe /PID 38240 /T /F | +955.2ms after hook_response(UserPromptSubmit,id=559a2785)
+  +  21879.9ms pid=32532 life=422ms sub=1 taskkill.exe /PID 33144 /T /F | +962.1ms after hook_response(UserPromptSubmit,id=559a2785)
+  +  21886.9ms pid=34564 life=423ms sub=1 taskkill.exe /PID 19556 /T /F | +969.1ms after hook_response(UserPromptSubmit,id=559a2785)
+  +  21893.8ms pid=21072 life=415ms sub=1 taskkill.exe /PID 5556 /T /F | +976.0ms after hook_response(UserPromptSubmit,id=559a2785)
+  +  31016.8ms pid=40876 life=242ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.5ms after hook_started(UserPromptSubmit,id=8f832d85)
+  +  31023.6ms pid=39028 life=743ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +8.3ms after hook_started(UserPromptSubmit,id=8f832d85)
+  +  31027.9ms pid=3716 life=630ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +12.6ms after hook_started(UserPromptSubmit,id=8f832d85)
+  +  31033.4ms pid=3792 life=212ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +18.1ms after hook_started(UserPromptSubmit,id=8f832d85)
+  +  32993.6ms pid=38048 life=242ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(Stop,id=4e9e947a)
+  +  33000.1ms pid=38516 life=529ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +7.9ms after hook_started(Stop,id=4e9e947a)
+  +  35052.1ms pid=30480 life=187ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=739cd562)
+  +  35057.8ms pid=40304 life=501ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.7ms after hook_started(UserPromptSubmit,id=739cd562)
+  +  35061.6ms pid=29192 life=495ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.5ms after hook_started(UserPromptSubmit,id=739cd562)
+  +  35065.7ms pid=27840 life=167ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.6ms after hook_started(UserPromptSubmit,id=739cd562)
+  +  35244.3ms pid=11100 life=319ms sub=1 taskkill.exe /PID 40304 /T /F | +1.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:ab541ee1-4
+  +  35247.4ms pid=30872 life=314ms sub=1 taskkill.exe /PID 29192 /T /F | +4.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:ab541ee1-4
+  +  36749.0ms pid=16688 life=266ms sub=1 taskkill.exe /PID 40304 /T /F | +1146.4ms after result/error_during_execution
+  +  36753.1ms pid=10548 life=268ms sub=1 taskkill.exe /PID 29192 /T /F | +1150.6ms after result/error_during_execution
+  +  39817.0ms pid=34684 life=179ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.3ms after hook_started(UserPromptSubmit,id=4c99366a)
+  +  39821.6ms pid=30936 life=499ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.8ms after hook_started(UserPromptSubmit,id=4c99366a)
+  +  39825.2ms pid=26560 life=496ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.4ms after hook_started(UserPromptSubmit,id=4c99366a)
+  +  39829.3ms pid=39480 life=161ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.6ms after hook_started(UserPromptSubmit,id=4c99366a)
+  +  40009.8ms pid=33016 life=315ms sub=1 taskkill.exe /PID 30936 /T /F | +1.3ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:895d78d4-1
+  +  40013.0ms pid=35972 life=312ms sub=1 taskkill.exe /PID 26560 /T /F | +4.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:895d78d4-1
+  +  41513.6ms pid=23984 life=275ms sub=1 taskkill.exe /PID 30936 /T /F | +1153.1ms after result/error_during_execution
+  +  41516.8ms pid=4336 life=278ms sub=1 taskkill.exe /PID 26560 /T /F | +1156.3ms after result/error_during_execution
+  +  44582.9ms pid=14524 life=179ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=90a92fca)
+  +  44587.7ms pid=34144 life=575ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.7ms after hook_started(UserPromptSubmit,id=90a92fca)
+  +  44591.2ms pid=20964 life=492ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.2ms after hook_started(UserPromptSubmit,id=90a92fca)
+  +  44594.7ms pid=37344 life=157ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.7ms after hook_started(UserPromptSubmit,id=90a92fca)
+  +  46574.1ms pid=34216 life=327ms sub=2 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=] | +0.9ms after hook_started(PreToolUse:Bash,id=46e4a28b)
+  +  46577.8ms pid=28200 life=177ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +4.6ms after hook_started(PreToolUse:Bash,id=46e4a28b)
+  +  46581.6ms pid=27120 life=238ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"] | +8.4ms after hook_started(PreToolUse:Bash,id=46e4a28b)
+  +  46923.4ms pid=17652 life=129ms sub=3 bash.exe -c env | +20.4ms after hook_response(PreToolUse:Bash,id=57886211)
+  +  46928.3ms pid=36852 life=849ms sub=24 LOGIN_PATH_PROBE: bash -lc "echo \"$PATH\"" | +25.3ms after hook_response(PreToolUse:Bash,id=57886211)
+  +  47780.7ms pid=34024 life=1038ms sub=30 SNAPSHOT_MAKER: bash -c -l "SNAPSHOT_FILE=..." | +877.7ms after hook_response(PreToolUse:Bash,id=57886211)
+  +  48824.7ms pid=20916 life=5212ms sub=5 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>" | +1921.6ms after hook_response(PreToolUse:Bash,id=57886211)
+  +  54047.1ms pid=35964 life=170ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.1ms after hook_started(PostToolUse:Bash,id=70e25b01)
+  +  55135.0ms pid=13604 life=184ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=34c85cd6)
+  +  55145.1ms pid=33968 life=434ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +10.9ms after hook_started(Stop,id=34c85cd6)
+  +  57105.0ms pid=32480 life=204ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.3ms after hook_started(UserPromptSubmit,id=f7c1e889)
+  +  57110.6ms pid=27036 life=602ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.8ms after hook_started(UserPromptSubmit,id=f7c1e889)
+  +  57114.2ms pid=26704 life=519ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.5ms after hook_started(UserPromptSubmit,id=f7c1e889)
+  +  57118.4ms pid=33572 life=180ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.7ms after hook_started(UserPromptSubmit,id=f7c1e889)
+  +  59643.3ms pid=20816 life=342ms sub=2 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=] | +1.0ms after hook_started(PreToolUse:Bash,id=3792e83e)
+  +  59647.2ms pid=18236 life=178ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +4.8ms after hook_started(PreToolUse:Bash,id=3792e83e)
+  +  59655.2ms pid=30960 life=247ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"] | +12.9ms after hook_started(PreToolUse:Bash,id=3792e83e)
+  +  59997.9ms pid=26336 life=30384ms sub=31 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>" | +10.8ms after hook_response(PreToolUse:Bash,id=21f18fc3)
+  +  60007.8ms pid=37552 life=301ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.1ms after hook_started(PostToolUse:Bash,id=d83bb09c)
+  +  61217.3ms pid=24636 life=308ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(Stop,id=776c77d8)
+  +  61224.1ms pid=39872 life=742ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +8.2ms after hook_started(Stop,id=776c77d8)
+  +  70741.3ms pid=36804 life=1828ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +2.0ms after hook_started(UserPromptSubmit,id=0ce98b5e)
+  +  70755.4ms pid=27196 life=2212ms sub=6 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +16.1ms after hook_started(UserPromptSubmit,id=0ce98b5e)
+  +  70795.8ms pid=12808 life=1719ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +6.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:01931878-f
+  +  70863.2ms pid=35688 life=1648ms sub=20 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +74.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:01931878-f
+  +  70894.0ms pid=28760 life=2048ms sub=1 taskkill.exe /PID 36804 /T /F | +105.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:01931878-f
+  +  70904.7ms pid=29260 life=2095ms sub=1 taskkill.exe /PID 27196 /T /F | +115.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:01931878-f
+  +  70913.6ms pid=12180 life=1637ms sub=1 taskkill.exe /PID 35688 /T /F | +124.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:01931878-f
+  +  70919.7ms pid=21056 life=2030ms sub=1 taskkill.exe /PID 12808 /T /F | +130.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:01931878-f
+  +  72431.6ms pid=39076 life=798ms sub=1 taskkill.exe /PID 36804 /T /F | +1505.7ms after control_response/
+  +  72454.2ms pid=29864 life=1822ms sub=1 taskkill.exe /PID 27196 /T /F | +1528.2ms after control_response/
+  +  72459.8ms pid=32648 life=3024ms sub=1 taskkill.exe /PID 35688 /T /F | +1533.9ms after control_response/
+  +  72479.1ms pid=4292 life=749ms sub=1 taskkill.exe /PID 12808 /T /F | +1553.1ms after control_response/
+  +  81836.2ms pid=26744 life=357ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.5ms after hook_started(UserPromptSubmit,id=8708ceab)
+  +  81845.8ms pid=12904 life=1488ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +11.2ms after hook_started(UserPromptSubmit,id=8708ceab)
+  +  81852.0ms pid=27372 life=1224ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +17.3ms after hook_started(UserPromptSubmit,id=8708ceab)
+  +  81859.3ms pid=35076 life=296ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +24.7ms after hook_started(UserPromptSubmit,id=8708ceab)
+  +  84342.2ms pid=34800 life=504ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +2.3ms after hook_started(Stop,id=0016b86d)
+  +  84359.8ms pid=20564 life=971ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +19.9ms after hook_started(Stop,id=0016b86d)
+
+===== p4: claude.exe pid=32252 direct children=84 job records=651
+  +    131.7ms pid=34560 life=55ms sub=1 reg.exe query HKLM\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    136.4ms pid=38836 life=53ms sub=1 reg.exe query HKCU\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    253.1ms pid=36272 life=109ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    306.2ms pid=39960 life=124ms sub=1 where.exe git | 
+  +    433.7ms pid=36580 life=87ms sub=2 git.exe -c core.hooksPath=/dev/null -c core.fsmonitor= -C  | 
+  +    581.3ms pid=28224 life=112ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    795.3ms pid=36544 life=243ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | 
+  +    802.5ms pid=38296 life=11279ms sub=135 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | 
+  +    809.7ms pid=24408 life=272ms sub=3 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | 
+  +    942.4ms pid=39472 life=86ms sub=1 rg --no-config --files --hidden C:\Users\<user>\Ap | 
+  +  12251.9ms pid=36756 life=402ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(UserPromptSubmit,id=6ff1f3fe)
+  +  12260.0ms pid=3972 life=956ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +9.5ms after hook_started(UserPromptSubmit,id=6ff1f3fe)
+  +  12265.6ms pid=34568 life=843ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +15.1ms after hook_started(UserPromptSubmit,id=6ff1f3fe)
+  +  12273.1ms pid=24776 life=335ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +22.6ms after hook_started(UserPromptSubmit,id=6ff1f3fe)
+  +  13150.7ms pid=23652 life=102ms sub=1 cmd.exe /d /s /c "%windir%\System32\REG.exe QUERY HKEY_LOC | +39.9ms after hook_response(UserPromptSubmit,id=8543998c)
+  +  13367.0ms pid=23780 life=106ms sub=1 rg --version | +135.5ms after hook_response(UserPromptSubmit,id=37765c52)
+  +  13384.3ms pid=3152 life=110ms sub=1 rg --no-config --files --hidden --no-ignore --max-dep | +152.9ms after hook_response(UserPromptSubmit,id=37765c52)
+  +  14496.7ms pid=30480 life=200ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(Stop,id=27dc087b)
+  +  14503.3ms pid=40304 life=550ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +7.6ms after hook_started(Stop,id=27dc087b)
+  +  16650.8ms pid=34024 life=265ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=80514e0a)
+  +  16656.4ms pid=38868 life=652ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +6.7ms after hook_started(UserPromptSubmit,id=80514e0a)
+  +  16661.0ms pid=31648 life=648ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +11.2ms after hook_started(UserPromptSubmit,id=80514e0a)
+  +  16666.4ms pid=12824 life=233ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +16.6ms after hook_started(UserPromptSubmit,id=80514e0a)
+  +  16842.0ms pid=33524 life=467ms sub=1 taskkill.exe /PID 34024 /T /F | +2.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c9da20b4-f
+  +  16846.8ms pid=21368 life=466ms sub=1 taskkill.exe /PID 31648 /T /F | +6.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c9da20b4-f
+  +  16851.5ms pid=20956 life=460ms sub=1 taskkill.exe /PID 38868 /T /F | +11.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c9da20b4-f
+  +  16856.7ms pid=36924 life=452ms sub=1 taskkill.exe /PID 12824 /T /F | +16.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:c9da20b4-f
+  +  18347.9ms pid=10612 life=559ms sub=1 taskkill.exe /PID 34024 /T /F | +850.6ms after result/error_during_execution
+  +  18352.9ms pid=24132 life=558ms sub=1 taskkill.exe /PID 31648 /T /F | +855.6ms after result/error_during_execution
+  +  18359.4ms pid=9504 life=566ms sub=1 taskkill.exe /PID 38868 /T /F | +862.1ms after result/error_during_execution
+  +  18365.2ms pid=31476 life=541ms sub=1 taskkill.exe /PID 12824 /T /F | +867.9ms after result/error_during_execution
+  +  21424.7ms pid=21516 life=615ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(UserPromptSubmit,id=94e97f50)
+  +  21431.5ms pid=29188 life=1135ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +8.2ms after hook_started(UserPromptSubmit,id=94e97f50)
+  +  21440.8ms pid=33664 life=1127ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +17.5ms after hook_started(UserPromptSubmit,id=94e97f50)
+  +  21449.3ms pid=30920 life=512ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +26.0ms after hook_started(UserPromptSubmit,id=94e97f50)
+  +  21624.9ms pid=38780 life=839ms sub=1 taskkill.exe /PID 21516 /T /F | +9.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:3ca6243c-1
+  +  21637.7ms pid=34472 life=943ms sub=1 taskkill.exe /PID 29188 /T /F | +21.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:3ca6243c-1
+  +  21656.3ms pid=30316 life=924ms sub=1 taskkill.exe /PID 33664 /T /F | +40.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:3ca6243c-1
+  +  21672.2ms pid=37400 life=894ms sub=1 taskkill.exe /PID 30920 /T /F | +56.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:3ca6243c-1
+  +  23134.8ms pid=38480 life=329ms sub=1 taskkill.exe /PID 21516 /T /F | +359.0ms after result/error_during_execution
+  +  23157.0ms pid=25496 life=335ms sub=1 taskkill.exe /PID 29188 /T /F | +381.1ms after result/error_during_execution
+  +  23171.5ms pid=1144 life=336ms sub=1 taskkill.exe /PID 33664 /T /F | +395.6ms after result/error_during_execution
+  +  23185.9ms pid=40160 life=334ms sub=1 taskkill.exe /PID 30920 /T /F | +410.1ms after result/error_during_execution
+  +  26198.8ms pid=24900 life=277ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.1ms after hook_started(UserPromptSubmit,id=ca2fb849)
+  +  26204.6ms pid=40432 life=625ms sub=11 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.8ms after hook_started(UserPromptSubmit,id=ca2fb849)
+  +  26208.8ms pid=31208 life=643ms sub=11 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +11.1ms after hook_started(UserPromptSubmit,id=ca2fb849)
+  +  26213.3ms pid=27832 life=246ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +15.5ms after hook_started(UserPromptSubmit,id=ca2fb849)
+  +  26389.0ms pid=30704 life=425ms sub=1 taskkill.exe /PID 24900 /T /F | +1.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:07ba810e-2
+  +  26394.3ms pid=35504 life=440ms sub=1 taskkill.exe /PID 40432 /T /F | +7.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:07ba810e-2
+  +  26399.9ms pid=31512 life=457ms sub=1 taskkill.exe /PID 31208 /T /F | +12.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:07ba810e-2
+  +  26405.1ms pid=20728 life=427ms sub=1 taskkill.exe /PID 27832 /T /F | +18.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:07ba810e-2
+  +  27897.4ms pid=36164 life=392ms sub=1 taskkill.exe /PID 24900 /T /F | +748.1ms after result/error_during_execution
+  +  27902.4ms pid=40484 life=381ms sub=1 taskkill.exe /PID 40432 /T /F | +753.1ms after result/error_during_execution
+  +  27907.4ms pid=36804 life=392ms sub=1 taskkill.exe /PID 31208 /T /F | +758.1ms after result/error_during_execution
+  +  27912.1ms pid=21660 life=393ms sub=1 taskkill.exe /PID 27832 /T /F | +762.8ms after result/error_during_execution
+  +  30984.2ms pid=28628 life=271ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(UserPromptSubmit,id=79345957)
+  +  30991.4ms pid=26780 life=630ms sub=7 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +8.7ms after hook_started(UserPromptSubmit,id=79345957)
+  +  30996.3ms pid=26948 life=244ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.6ms after hook_started(UserPromptSubmit,id=79345957)
+  +  31000.9ms pid=28696 life=630ms sub=7 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +18.2ms after hook_started(UserPromptSubmit,id=79345957)
+  +  31174.4ms pid=35508 life=448ms sub=1 taskkill.exe /PID 28628 /T /F | +2.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:34488d63-d
+  +  31179.5ms pid=39284 life=448ms sub=1 taskkill.exe /PID 26780 /T /F | +7.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:34488d63-d
+  +  31184.4ms pid=2840 life=452ms sub=1 taskkill.exe /PID 28696 /T /F | +12.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:34488d63-d
+  +  31189.4ms pid=28236 life=442ms sub=1 taskkill.exe /PID 26948 /T /F | +17.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:34488d63-d
+  +  32682.3ms pid=31004 life=387ms sub=1 taskkill.exe /PID 28628 /T /F | +870.1ms after hook_response(UserPromptSubmit,id=d0b6b19b)
+  +  32685.3ms pid=31572 life=383ms sub=1 taskkill.exe /PID 26780 /T /F | +873.2ms after hook_response(UserPromptSubmit,id=d0b6b19b)
+  +  32689.8ms pid=29440 life=378ms sub=1 taskkill.exe /PID 28696 /T /F | +877.6ms after hook_response(UserPromptSubmit,id=d0b6b19b)
+  +  32695.6ms pid=27592 life=376ms sub=1 taskkill.exe /PID 26948 /T /F | +883.5ms after hook_response(UserPromptSubmit,id=d0b6b19b)
+  +  41827.5ms pid=12708 life=203ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=cc1f7dd7)
+  +  41832.5ms pid=38384 life=633ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.8ms after hook_started(UserPromptSubmit,id=cc1f7dd7)
+  +  41836.1ms pid=40284 life=553ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.4ms after hook_started(UserPromptSubmit,id=cc1f7dd7)
+  +  41840.0ms pid=5588 life=186ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.4ms after hook_started(UserPromptSubmit,id=cc1f7dd7)
+  +  43518.8ms pid=26100 life=190ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(Stop,id=2f5ac88f)
+  +  43523.3ms pid=39240 life=441ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.4ms after hook_started(Stop,id=2f5ac88f)
+  +  45483.3ms pid=39604 life=171ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=8fd2014f)
+  +  45492.9ms pid=27616 life=514ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.5ms after hook_started(UserPromptSubmit,id=8fd2014f)
+  +  45496.6ms pid=33308 life=528ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +14.2ms after hook_started(UserPromptSubmit,id=8fd2014f)
+  +  45500.2ms pid=33964 life=162ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +17.8ms after hook_started(UserPromptSubmit,id=8fd2014f)
+  +  45676.7ms pid=5712 life=352ms sub=1 taskkill.exe /PID 33308 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:e553622b-f
+  +  45680.0ms pid=24948 life=332ms sub=1 taskkill.exe /PID 27616 /T /F | +4.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:e553622b-f
+  +  47185.2ms pid=8776 life=356ms sub=1 taskkill.exe /PID 33308 /T /F | +1050.3ms after result/error_during_execution
+  +  47190.4ms pid=36260 life=338ms sub=1 taskkill.exe /PID 27616 /T /F | +1055.5ms after result/error_during_execution
+  +  48767.4ms pid=34724 life=221ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +2632.6ms after result/error_during_execution
+  +  48773.2ms pid=10112 life=4993ms sub=110 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | +2638.4ms after result/error_during_execution
+  +  48777.9ms pid=20872 life=600ms sub=11 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | +2643.1ms after result/error_during_execution
+
+===== p5: claude.exe pid=2532 direct children=72 job records=611
+  +    126.3ms pid=32088 life=64ms sub=1 reg.exe query HKLM\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    131.4ms pid=27896 life=59ms sub=1 reg.exe query HKCU\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    251.0ms pid=29416 life=102ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    301.0ms pid=40136 life=114ms sub=1 where.exe git | 
+  +    418.6ms pid=39148 life=88ms sub=2 git.exe -c core.hooksPath=/dev/null -c core.fsmonitor= -C  | 
+  +    591.2ms pid=12532 life=102ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    756.8ms pid=37276 life=198ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | 
+  +    764.5ms pid=15696 life=4558ms sub=103 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | 
+  +    769.6ms pid=34028 life=230ms sub=3 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | 
+  +    835.9ms pid=29116 life=76ms sub=1 rg --no-config --files --hidden C:\Users\<user>\Ap | 
+  +   5405.3ms pid=37340 life=280ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +2.0ms after hook_started(UserPromptSubmit,id=8b9b2169)
+  +   5411.5ms pid=35508 life=755ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +8.3ms after hook_started(UserPromptSubmit,id=8b9b2169)
+  +   5417.3ms pid=34876 life=656ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +14.1ms after hook_started(UserPromptSubmit,id=8b9b2169)
+  +   5423.8ms pid=19732 life=248ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +20.6ms after hook_started(UserPromptSubmit,id=8b9b2169)
+  +   6257.5ms pid=34100 life=75ms sub=1 cmd.exe /d /s /c "%windir%\System32\REG.exe QUERY HKEY_LOC | +81.1ms after hook_response(UserPromptSubmit,id=2c045ecd)
+  +   6329.4ms pid=39844 life=80ms sub=1 rg --version | +153.1ms after hook_response(UserPromptSubmit,id=2c045ecd)
+  +   6340.8ms pid=4252 life=87ms sub=1 rg --no-config --files --hidden --no-ignore --max-dep | +164.5ms after hook_response(UserPromptSubmit,id=2c045ecd)
+  +   7869.4ms pid=37816 life=218ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.3ms after hook_started(Stop,id=43895bc6)
+  +   7874.1ms pid=14576 life=527ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +6.1ms after hook_started(Stop,id=43895bc6)
+  +   9976.3ms pid=40764 life=187ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=f7f0185d)
+  +   9982.0ms pid=36540 life=504ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.6ms after hook_started(UserPromptSubmit,id=f7f0185d)
+  +   9985.9ms pid=2108 life=490ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.6ms after hook_started(UserPromptSubmit,id=f7f0185d)
+  +   9989.9ms pid=25760 life=161ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.6ms after hook_started(UserPromptSubmit,id=f7f0185d)
+  +  10167.8ms pid=36852 life=321ms sub=1 taskkill.exe /PID 36540 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:b97391ab-c
+  +  10171.0ms pid=39168 life=309ms sub=1 taskkill.exe /PID 2108 /T /F | +4.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:b97391ab-c
+  +  11671.5ms pid=31996 life=274ms sub=1 taskkill.exe /PID 36540 /T /F | +1151.1ms after result/error_during_execution
+  +  11676.4ms pid=21204 life=265ms sub=1 taskkill.exe /PID 2108 /T /F | +1156.0ms after result/error_during_execution
+  +  14751.7ms pid=37508 life=185ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=648243a3)
+  +  14757.1ms pid=30888 life=526ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.4ms after hook_started(UserPromptSubmit,id=648243a3)
+  +  14760.8ms pid=27000 life=523ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.2ms after hook_started(UserPromptSubmit,id=648243a3)
+  +  14765.0ms pid=39472 life=157ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.4ms after hook_started(UserPromptSubmit,id=648243a3)
+  +  14944.5ms pid=23120 life=344ms sub=1 taskkill.exe /PID 30888 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:424efad8-4
+  +  14948.0ms pid=29700 life=340ms sub=1 taskkill.exe /PID 27000 /T /F | +4.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:424efad8-4
+  +  16448.2ms pid=36248 life=269ms sub=1 taskkill.exe /PID 30888 /T /F | +1133.7ms after result/error_during_execution
+  +  16453.5ms pid=28724 life=263ms sub=1 taskkill.exe /PID 27000 /T /F | +1138.9ms after result/error_during_execution
+  +  19520.5ms pid=33168 life=174ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(UserPromptSubmit,id=481fa360)
+  +  19525.2ms pid=27424 life=482ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +5.6ms after hook_started(UserPromptSubmit,id=481fa360)
+  +  19528.6ms pid=34592 life=482ms sub=14 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +8.9ms after hook_started(UserPromptSubmit,id=481fa360)
+  +  19532.3ms pid=38132 life=161ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +12.7ms after hook_started(UserPromptSubmit,id=481fa360)
+  +  19712.7ms pid=6436 life=301ms sub=1 taskkill.exe /PID 34592 /T /F | +1.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:b1900d55-3
+  +  19715.8ms pid=27664 life=298ms sub=1 taskkill.exe /PID 27424 /T /F | +4.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:b1900d55-3
+  +  21217.5ms pid=29192 life=288ms sub=1 taskkill.exe /PID 34592 /T /F | +1038.0ms after result/error_during_execution
+  +  21220.9ms pid=36052 life=285ms sub=1 taskkill.exe /PID 27424 /T /F | +1041.4ms after result/error_during_execution
+  +  24287.8ms pid=19528 life=207ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.1ms after hook_started(UserPromptSubmit,id=43113f89)
+  +  24293.4ms pid=29284 life=581ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.8ms after hook_started(UserPromptSubmit,id=43113f89)
+  +  24297.1ms pid=3476 life=579ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.4ms after hook_started(UserPromptSubmit,id=43113f89)
+  +  24301.0ms pid=33328 life=184ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.4ms after hook_started(UserPromptSubmit,id=43113f89)
+  +  24479.4ms pid=31616 life=397ms sub=1 taskkill.exe /PID 19528 /T /F | +1.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:0d16919d-3
+  +  24483.9ms pid=22760 life=394ms sub=1 taskkill.exe /PID 29284 /T /F | +6.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:0d16919d-3
+  +  24488.2ms pid=27416 life=395ms sub=1 taskkill.exe /PID 3476 /T /F | +10.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:0d16919d-3
+  +  24492.4ms pid=3480 life=383ms sub=1 taskkill.exe /PID 33328 /T /F | +14.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:0d16919d-3
+  +  25985.4ms pid=40276 life=373ms sub=1 taskkill.exe /PID 19528 /T /F | +1003.1ms after hook_response(UserPromptSubmit,id=adb908b9)
+  +  25988.6ms pid=29884 life=368ms sub=1 taskkill.exe /PID 29284 /T /F | +1006.3ms after hook_response(UserPromptSubmit,id=adb908b9)
+  +  25993.1ms pid=23832 life=366ms sub=1 taskkill.exe /PID 3476 /T /F | +1010.8ms after hook_response(UserPromptSubmit,id=adb908b9)
+  +  25997.4ms pid=31624 life=360ms sub=1 taskkill.exe /PID 33328 /T /F | +1015.2ms after hook_response(UserPromptSubmit,id=adb908b9)
+  +  35078.0ms pid=28524 life=184ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.0ms after hook_started(UserPromptSubmit,id=239a5c1a)
+  +  35082.9ms pid=35076 life=577ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.8ms after hook_started(UserPromptSubmit,id=239a5c1a)
+  +  35086.4ms pid=10548 life=498ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.3ms after hook_started(UserPromptSubmit,id=239a5c1a)
+  +  35090.8ms pid=35504 life=153ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.8ms after hook_started(UserPromptSubmit,id=239a5c1a)
+  +  36722.8ms pid=12804 life=170ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(Stop,id=90eddb96)
+  +  36727.7ms pid=9588 life=412ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +5.8ms after hook_started(Stop,id=90eddb96)
+  +  38661.3ms pid=24936 life=188ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=15d1ac1c)
+  +  38666.2ms pid=29392 life=495ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +5.8ms after hook_started(UserPromptSubmit,id=15d1ac1c)
+  +  38669.9ms pid=37668 life=494ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.5ms after hook_started(UserPromptSubmit,id=15d1ac1c)
+  +  38673.4ms pid=36452 life=167ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.0ms after hook_started(UserPromptSubmit,id=15d1ac1c)
+  +  38852.8ms pid=37744 life=312ms sub=1 taskkill.exe /PID 29392 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:dd50e091-e
+  +  38856.5ms pid=19828 life=311ms sub=1 taskkill.exe /PID 37668 /T /F | +4.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:dd50e091-e
+  +  40358.3ms pid=29960 life=289ms sub=1 taskkill.exe /PID 29392 /T /F | +1165.3ms after result/error_during_execution
+  +  40361.4ms pid=25060 life=277ms sub=1 taskkill.exe /PID 37668 /T /F | +1168.4ms after result/error_during_execution
+  +  41937.3ms pid=39540 life=188ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +2744.3ms after result/error_during_execution
+  +  41941.9ms pid=30404 life=5003ms sub=109 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | +2748.9ms after result/error_during_execution
+  +  41945.8ms pid=12192 life=582ms sub=11 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | +2752.8ms after result/error_during_execution
+
+===== p6: claude.exe pid=39480 direct children=76 job records=573
+  +    133.2ms pid=25664 life=55ms sub=1 reg.exe query HKLM\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    137.7ms pid=24720 life=51ms sub=1 reg.exe query HKCU\SOFTWARE\Policies\ClaudeCode /v Setting | 
+  +    248.9ms pid=39500 life=100ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    300.5ms pid=29264 life=115ms sub=1 where.exe git | 
+  +    418.6ms pid=33648 life=86ms sub=2 git.exe -c core.hooksPath=/dev/null -c core.fsmonitor= -C  | 
+  +    584.3ms pid=23264 life=98ms sub=2 git.exe -c core.askPass= -c protocol.ext.allow=never -c su | 
+  +    762.0ms pid=40800 life=213ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | 
+  +    769.6ms pid=35464 life=3990ms sub=103 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | 
+  +    775.7ms pid=38156 life=245ms sub=3 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | 
+  +    852.3ms pid=34964 life=88ms sub=1 rg --no-config --files --hidden C:\Users\<user>\Ap | 
+  +   4811.7ms pid=36704 life=186ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=5683ba15)
+  +   4816.9ms pid=38552 life=556ms sub=16 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.1ms after hook_started(UserPromptSubmit,id=5683ba15)
+  +   4820.4ms pid=40188 life=477ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.7ms after hook_started(UserPromptSubmit,id=5683ba15)
+  +   4824.6ms pid=3548 life=165ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.8ms after hook_started(UserPromptSubmit,id=5683ba15)
+  +   5434.1ms pid=39792 life=57ms sub=1 cmd.exe /d /s /c "%windir%\System32\REG.exe QUERY HKEY_LOC | +59.1ms after hook_response(UserPromptSubmit,id=308fdd80)
+  +   5485.9ms pid=9012 life=65ms sub=1 rg --version | +110.8ms after hook_response(UserPromptSubmit,id=308fdd80)
+  +   5495.7ms pid=40704 life=68ms sub=1 rg --no-config --files --hidden --no-ignore --max-dep | +120.7ms after hook_response(UserPromptSubmit,id=308fdd80)
+  +   6447.8ms pid=29748 life=170ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(Stop,id=b9dfe326)
+  +   6455.3ms pid=25768 life=425ms sub=9 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m] | +8.4ms after hook_started(Stop,id=b9dfe326)
+  +   8450.7ms pid=1188 life=190ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.8ms after hook_started(UserPromptSubmit,id=d0bd815d)
+  +   8456.1ms pid=3716 life=497ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.2ms after hook_started(UserPromptSubmit,id=d0bd815d)
+  +   8460.6ms pid=37164 life=484ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.7ms after hook_started(UserPromptSubmit,id=d0bd815d)
+  +   8464.3ms pid=13596 life=170ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.4ms after hook_started(UserPromptSubmit,id=d0bd815d)
+  +   8642.4ms pid=16084 life=310ms sub=1 taskkill.exe /PID 1188 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:24f137b3-e
+  +   8645.7ms pid=31980 life=312ms sub=1 taskkill.exe /PID 3716 /T /F | +4.6ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:24f137b3-e
+  +   8649.2ms pid=30364 life=300ms sub=1 taskkill.exe /PID 37164 /T /F | +8.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:24f137b3-e
+  +  10147.4ms pid=25320 life=303ms sub=1 taskkill.exe /PID 1188 /T /F | +1093.2ms after result/error_during_execution
+  +  10152.1ms pid=29440 life=299ms sub=1 taskkill.exe /PID 3716 /T /F | +1098.0ms after result/error_during_execution
+  +  10156.7ms pid=17264 life=303ms sub=1 taskkill.exe /PID 37164 /T /F | +1102.6ms after result/error_during_execution
+  +  13221.4ms pid=30684 life=198ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.2ms after hook_started(UserPromptSubmit,id=93472bc5)
+  +  13226.5ms pid=29160 life=593ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.3ms after hook_started(UserPromptSubmit,id=93472bc5)
+  +  13230.1ms pid=21408 life=589ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +10.0ms after hook_started(UserPromptSubmit,id=93472bc5)
+  +  13234.5ms pid=36260 life=175ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +14.4ms after hook_started(UserPromptSubmit,id=93472bc5)
+  +  13411.2ms pid=22672 life=401ms sub=1 taskkill.exe /PID 30684 /T /F | +1.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:04eaa3c7-1
+  +  13415.6ms pid=39388 life=409ms sub=1 taskkill.exe /PID 29160 /T /F | +5.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:04eaa3c7-1
+  +  13419.6ms pid=36100 life=405ms sub=1 taskkill.exe /PID 21408 /T /F | +9.8ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:04eaa3c7-1
+  +  13424.0ms pid=36052 life=400ms sub=1 taskkill.exe /PID 36260 /T /F | +14.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:04eaa3c7-1
+  +  14916.6ms pid=31996 life=359ms sub=1 taskkill.exe /PID 30684 /T /F | +1059.7ms after result/error_during_execution
+  +  14920.2ms pid=37420 life=366ms sub=1 taskkill.exe /PID 29160 /T /F | +1063.4ms after result/error_during_execution
+  +  14925.3ms pid=28256 life=343ms sub=1 taskkill.exe /PID 21408 /T /F | +1068.5ms after result/error_during_execution
+  +  14930.4ms pid=21948 life=352ms sub=1 taskkill.exe /PID 36260 /T /F | +1073.6ms after result/error_during_execution
+  +  17986.5ms pid=24776 life=179ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +0.9ms after hook_started(UserPromptSubmit,id=1452098d)
+  +  17991.7ms pid=30856 life=486ms sub=14 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.1ms after hook_started(UserPromptSubmit,id=1452098d)
+  +  17995.3ms pid=28932 life=474ms sub=13 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +9.7ms after hook_started(UserPromptSubmit,id=1452098d)
+  +  17999.0ms pid=11352 life=166ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +13.4ms after hook_started(UserPromptSubmit,id=1452098d)
+  +  18178.0ms pid=30704 life=304ms sub=1 taskkill.exe /PID 30856 /T /F | +1.2ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:4f549db9-7
+  +  18181.0ms pid=21868 life=292ms sub=1 taskkill.exe /PID 28932 /T /F | +4.3ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:4f549db9-7
+  +  19682.5ms pid=14008 life=280ms sub=1 taskkill.exe /PID 30856 /T /F | +1033.4ms after result/error_during_execution
+  +  19685.6ms pid=36992 life=291ms sub=1 taskkill.exe /PID 28932 /T /F | +1036.5ms after result/error_during_execution
+  +  22762.9ms pid=40432 life=218ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.4ms after hook_started(UserPromptSubmit,id=e3732b6f)
+  +  22770.3ms pid=38972 life=537ms sub=12 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +8.8ms after hook_started(UserPromptSubmit,id=e3732b6f)
+  +  22774.8ms pid=29004 life=538ms sub=15 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +13.3ms after hook_started(UserPromptSubmit,id=e3732b6f)
+  +  22779.0ms pid=34136 life=178ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +17.5ms after hook_started(UserPromptSubmit,id=e3732b6f)
+  +  22948.6ms pid=34856 life=354ms sub=1 taskkill.exe /PID 40432 /T /F | +1.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:707035a3-9
+  +  22952.6ms pid=26960 life=359ms sub=1 taskkill.exe /PID 38972 /T /F | +5.7ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:707035a3-9
+  +  22956.8ms pid=13980 life=362ms sub=1 taskkill.exe /PID 29004 /T /F | +9.9ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:707035a3-9
+  +  22961.3ms pid=5784 life=365ms sub=1 taskkill.exe /PID 34136 /T /F | +14.4ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:707035a3-9
+  +  24454.0ms pid=39544 life=340ms sub=1 taskkill.exe /PID 40432 /T /F | +1002.9ms after result/error_during_execution
+  +  24459.2ms pid=26948 life=378ms sub=1 taskkill.exe /PID 38972 /T /F | +1008.0ms after result/error_during_execution
+  +  24463.9ms pid=26636 life=372ms sub=1 taskkill.exe /PID 29004 /T /F | +1012.7ms after result/error_during_execution
+  +  24468.1ms pid=37560 life=373ms sub=1 taskkill.exe /PID 34136 /T /F | +1016.9ms after result/error_during_execution
+  +  27553.8ms pid=21660 life=249ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +1.1ms after hook_started(UserPromptSubmit,id=dcb8d52d)
+  +  27559.1ms pid=29584 life=636ms sub=11 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"] | +6.4ms after hook_started(UserPromptSubmit,id=dcb8d52d)
+  +  27563.7ms pid=40224 life=633ms sub=11 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"] | +11.0ms after hook_started(UserPromptSubmit,id=dcb8d52d)
+  +  27567.7ms pid=36000 life=219ms sub=3 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"] | +15.0ms after hook_started(UserPromptSubmit,id=dcb8d52d)
+  +  27746.3ms pid=31352 life=451ms sub=1 taskkill.exe /PID 21660 /T /F | +2.0ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:a1a3fad0-e
+  +  27751.5ms pid=29900 life=448ms sub=1 taskkill.exe /PID 29584 /T /F | +7.1ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:a1a3fad0-e
+  +  27756.8ms pid=2532 life=447ms sub=1 taskkill.exe /PID 40224 /T /F | +12.5ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:a1a3fad0-e
+  +  27761.7ms pid=25160 life=441ms sub=1 taskkill.exe /PID 36000 /T /F | +17.3ms after IN[interrupt] {"type":"control_request","request_id":"interrupt:a1a3fad0-e
+  +  29253.2ms pid=39028 life=440ms sub=1 taskkill.exe /PID 21660 /T /F | +832.5ms after result/error_during_execution
+  +  29258.0ms pid=23952 life=419ms sub=1 taskkill.exe /PID 29584 /T /F | +837.3ms after result/error_during_execution
+  +  29265.0ms pid=40136 life=428ms sub=1 taskkill.exe /PID 40224 /T /F | +844.3ms after result/error_during_execution
+  +  29270.4ms pid=34796 life=422ms sub=1 taskkill.exe /PID 36000 /T /F | +849.7ms after result/error_during_execution
+  +  30843.3ms pid=21240 life=211ms sub=4 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo] | +2422.5ms after result/error_during_execution
+  +  30848.3ms pid=33868 life=4999ms sub=108 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-autoupdate.sh"] | +2427.5ms after result/error_during_execution
+  +  30852.6ms pid=37788 life=576ms sub=11 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/session-lifecycle-hook.] | +2431.9ms after result/error_during_execution
+
+===== aggregate claude-direct-child categories: {'reg.exe': 12, 'git.exe': 18, 'where.exe': 6, 'HOOK': 291, 'rg --no-config --files --hidden C': 6, 'cmd.exe': 6, 'rg': 12, 'taskkill.exe': 202, 'bash.exe': 3, 'LOGIN_PATH_PROBE': 3, 'SNAPSHOT_MAKER': 3, 'BASH_TOOL': 6}
+===== descendants by launcher category: (exe, own-cmdline marker) -> count
+    reg.exe {('conhost.exe', 'none'): 12}
+    git.exe {('conhost.exe', 'none'): 18, ('git.exe', 'none'): 18}
+    where.exe {('conhost.exe', 'none'): 6}
+    HOOK {('bash.exe', 'hook-marker'): 1820, ('conhost.exe', 'none'): 372, ('git.exe', 'none'): 185, ('jq.exe', 'none'): 140, ('cat.exe', 'none'): 117, ('cmd.exe', 'hook-marker'): 90, ('tr.exe', 'none'): 69, ('awk.exe', 'none'): 62, ('grep.exe', 'none'): 61, ('sh.exe', 'none'): 45, ('git-credential-manager.exe', 'none'): 44, ('date.exe', 'none'): 37, ('timeout.exe', 'none'): 32, ('node.exe', 'hook-marker'): 27, ('git-remote-https.exe', 'none'): 16, ('cygwin-console-helper.exe', 'none'): 15, ('mv.exe', 'none'): 14, ('cut.exe', 'none'): 13, ('mkdir.exe', 'none'): 13, ('sort.exe', 'none'): 9, ('sed.exe', 'none'): 9, ('wc.exe', 'none'): 9, ('rm.exe', 'none'): 6}
+    rg --no-config --files --hidden C {('conhost.exe', 'none'): 6}
+    cmd.exe {('reg.exe', 'none'): 6}
+    rg {('conhost.exe', 'none'): 12}
+    taskkill.exe {('conhost.exe', 'none'): 202}
+    bash.exe {('conhost.exe', 'none'): 3, ('bash.exe', 'none'): 3, ('env.exe', 'none'): 3}
+    LOGIN_PATH_PROBE {('bash.exe', 'snapshot-marker'): 57, ('conhost.exe', 'none'): 3, ('locale.exe', 'none'): 3, ('git.exe', 'none'): 3, ('which.exe', 'none'): 3, ('hostname.exe', 'none'): 3}
+    SNAPSHOT_MAKER {('bash.exe', 'tool-marker'): 66, ('cat.exe', 'none'): 9, ('conhost.exe', 'none'): 3, ('locale.exe', 'none'): 3, ('git.exe', 'none'): 3, ('which.exe', 'none'): 3, ('hostname.exe', 'none'): 3}
+    BASH_TOOL {('bash.exe', 'tool-marker'): 43, ('sleep.exe', 'none'): 31, ('conhost.exe', 'none'): 6}
+===== descendants that OUTLIVED their Windows parent (parent exited first), same keys
+    reg.exe {('conhost.exe', 'none'): 12}
+    git.exe {('conhost.exe', 'none'): 18}
+    where.exe {('conhost.exe', 'none'): 6}
+    HOOK {('conhost.exe', 'none'): 307, ('cat.exe', 'none'): 116, ('bash.exe', 'hook-marker'): 75, ('tr.exe', 'none'): 68, ('grep.exe', 'none'): 60, ('awk.exe', 'none'): 50, ('date.exe', 'none'): 36, ('timeout.exe', 'none'): 19, ('mv.exe', 'none'): 14, ('cut.exe', 'none'): 13, ('mkdir.exe', 'none'): 13, ('sort.exe', 'none'): 9, ('sed.exe', 'none'): 9, ('wc.exe', 'none'): 9, ('rm.exe', 'none'): 6, ('git.exe', 'none'): 6, ('sh.exe', 'none'): 2, ('git-credential-manager.exe', 'none'): 1, ('git-remote-https.exe', 'none'): 1}
+    rg --no-config --files --hidden C {('conhost.exe', 'none'): 6}
+    rg {('conhost.exe', 'none'): 12}
+    taskkill.exe {('conhost.exe', 'none'): 202}
+    bash.exe {('conhost.exe', 'none'): 3}
+    LOGIN_PATH_PROBE {('conhost.exe', 'none'): 3, ('locale.exe', 'none'): 3, ('which.exe', 'none'): 3, ('hostname.exe', 'none'): 3}
+    SNAPSHOT_MAKER {('cat.exe', 'none'): 9, ('conhost.exe', 'none'): 3, ('locale.exe', 'none'): 3, ('which.exe', 'none'): 3, ('hostname.exe', 'none'): 3}
+    BASH_TOOL {('sleep.exe', 'none'): 31, ('conhost.exe', 'none'): 4}

@@ -6,7 +6,7 @@
 // (ADR-0046 amend: 재부착 계기는 소켓이 아니라 권위 명부다), 상태를 흔들면 슬롯이 그때마다 부재 표시로
 // 깜빡인다.
 
-import type { ConnectionState } from './agentClient'
+import type { ConnectionState, UsageSnapshotPull } from './agentClient'
 
 /**
  * carrier 가 ProtocolClient 로 올리는 **정규화된 수신 메시지**. carrier 별 인코딩(WS binary frame /
@@ -23,6 +23,9 @@ export type InboundMessage =
   //   (Designer 리뷰 요구). failed=true 면 이 replay 가 완결 없이 종결됨(deadline/단절).
   //   continuesConversation = 이 화신이 저장된 대화를 이어받으려고 떴다(ADR-0226 — 성공 여부 아님).
   //   실패 경계는 언제나 false.
+  //   replayFrom = 이 replay 의 머리 — 데몬 SubscribeAck 의 `replay_from`(실제로 처음 보낸 seq · 링이
+  //   비었으면 다음에 발급할 seq). ★버퍼의 최소 seq 로 대신하지 말 것★ — replay 가 비면 틀린다(ADR-0231).
+  //   실패 경계에선 뜻이 없다(flush 하지 않는다).
   | {
       kind: 'replayBoundary'
       agentId: string
@@ -31,6 +34,7 @@ export type InboundMessage =
       truncated: boolean
       failed: boolean
       continuesConversation: boolean
+      replayFrom: number
     }
 
 /** carrier 추상 — ProtocolClient 가 의존하는 유일한 전송 표면(daemon 접속 전용, ADR-0029). */
@@ -72,4 +76,10 @@ export interface Transport {
    * 뒤에 같은 gen 의 늦은 성공 마커가 오는 failed→성공 쌍은 정상 경로다.
    */
   requestReplay(agentId: string): Promise<bigint>
+
+  /**
+   * 셸 사용량 캐시 pull(TRD S21 usage-limit-slot §1-8) — 셸 커맨드라 명령 경로(ensureReady)를 타지 않고 데몬도
+   * 거치지 않는다. 계약은 [`AgentClient.getUsageSnapshot`] 그대로다(셸이 없는 carrier = `{socketEpoch: 0, snapshots: []}`).
+   */
+  getUsageSnapshot(): Promise<UsageSnapshotPull>
 }

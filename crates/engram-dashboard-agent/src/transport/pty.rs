@@ -368,8 +368,6 @@ impl AgentTransport for PtyTransport {
     fn send_input(&self, input: InputEvent) -> Result<(), PtyError> {
         let InputEvent::Raw(bytes) = input;
         // ★받아들인 입력만 빗장을 올린다 — 거절당한 것으로는 안 올린다★(정본 = `input_seen` 필드 doc).
-        //   ★`interrupt()` 도 이 자리를 지난다 — 빼지 말 것★: 그쪽도 같은 큐로 실제 바이트(0x03)를
-        //   보내므로 「사용자가 아직 아무것도 안 쳤다」가 깨지는 것은 똑같다.
         let accepted = self.input.push(bytes);
         if accepted.is_ok() {
             self.input_seen.store(true, Ordering::Release);
@@ -395,17 +393,18 @@ impl AgentTransport for PtyTransport {
         Ok(())
     }
 
-    /// ★0x03 은 **같은 FIFO 에 선다** — 큐에 이미 든 입력을 추월하지 않는다★.
+    /// ★터미널 모드는 끊기 명령을 받지 않는다 — 터미널이 키를 직접 받는다★(사용자 결정 2026-09-28).
     ///
-    /// ★그것이 결정이다(현상 유지)★: 큐가 생기기 전에도 인터럽트는 `send_input` 과 **같은 writer 락**을
-    ///   지나 도착 순서대로 나갔다. 큐를 들이면서 그 순서를 바꾸면 이 변경이 성능 변경이 아니라 **동작
-    ///   변경**이 된다 — 그 판단은 사용자 몫이라 여기서 하지 않는다.
-    /// ★codex 통로는 다르다 — 그쪽을 근거로 여기를 고치지 말 것★: 거기서는 인터럽트가 별도 `outbox` 로
-    ///   가고 라이터가 그것을 입력 턴보다 **먼저** 집는다. 그럴 근거가 그쪽에만 있다 — 거기서는 거절
-    ///   응답이 큐에 선 유저 턴 뒤에서 기다리면 상대가 그 요청의 답을 영영 못 받는다(제어 줄과 데이터가
-    ///   같은 JSON-RPC 통로를 공유한다). PTY 에는 그 사실이 없다.
+    /// ★Ctrl-C(0x03)를 대신 넣지 말 것★: 통로는 턴이 도는지 모르고, claude·codex TUI 는 한가할 때 두 번째
+    ///   Ctrl-C 에 **종료할 수 있다**(가능성 높음 — codex 소스 판독 · claude 미측정, ADR-0245) — 버스
+    ///   `agent.interrupt` 가 「≠ kill — 프로세스는 산다」 계약을 깨고 에이전트를 죽일 수 있다. 끊고 싶은 사람은 터미널 슬롯에서 Esc·Ctrl-C 를 직접 치고, 그 키는 평범한 입력
+    ///   (`send_input`)으로 흐른다. 거절은 버스에서 CONFLICT 로 번역된다.
+    // ADR-0245
     fn interrupt(&self) -> Result<(), PtyError> {
-        self.send_input(InputEvent::Raw(vec![0x03]))
+        Err(PtyError::Unsupported(
+            "PtyTransport::interrupt (터미널 모드는 끊기 명령을 받지 않는다 — 터미널이 키를 직접 받는다)"
+                .into(),
+        ))
     }
 
     /// 자원 폐쇄 1~5단계는 **절대순서**다.
@@ -451,7 +450,8 @@ impl AgentTransport for PtyTransport {
             },
             control: ControlCaps {
                 resize: true,
-                interrupt: true,
+                // ADR-0245: 끊기는 터미널이 직접 받는다 — [`Self::interrupt`] 참조.
+                interrupt: false,
                 cancel: false,
                 graceful_shutdown: false,
             },
@@ -708,6 +708,32 @@ mod input_seen_latch {
         assert!(
             transport.input_seen.load(Ordering::Acquire),
             "입력이 들어왔는데 빗장이 안 올라갔다"
+        );
+        transport.shutdown();
+    }
+
+    /// ★끊기 명령은 거절되고 PTY 에 아무것도 안 쓴다★ — 0x03 이 다시 큐에 들면 한가한 TUI 를 죽일 수 있다.
+    // ADR-0245
+    #[test]
+    fn interrupt_is_refused_and_writes_nothing() {
+        let (transport, _pid) = PtyTransport::open(&echo("x"), 80, 24).expect("open");
+        // ★`start()` 전에 잰다★ — 라이터가 없어야 큐에 든 것이 빠지지 않아 「안 썼다」가 결정적이다.
+        assert!(
+            matches!(transport.interrupt(), Err(PtyError::Unsupported(_))),
+            "터미널 모드 끊기는 `Unsupported` 여야 한다"
+        );
+        assert_eq!(
+            transport.input.queued_bytes(),
+            0,
+            "거절한 끊기가 입력 큐에 바이트를 남겼다"
+        );
+        assert!(
+            !transport.input_seen.load(Ordering::Acquire),
+            "거절한 끊기가 입력 빗장을 올렸다"
+        );
+        assert!(
+            !transport.capabilities().control.interrupt,
+            "끊기를 거절하는 통로가 끊기 능력을 신고한다"
         );
         transport.shutdown();
     }

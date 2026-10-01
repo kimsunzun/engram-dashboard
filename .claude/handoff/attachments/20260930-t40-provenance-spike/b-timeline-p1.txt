@@ -1,0 +1,109 @@
+# python timeline.py <scratch>/main p1 B-fg
+     +0.1ms EV   IN[B-fg] {"type":"user","message":{"role":"user","content":[{"type":"
+    +10.4ms EV   hook_started(UserPromptSubmit,id=5d3e1d3b)
+    +10.6ms EV   hook_started(UserPromptSubmit,id=46d5617e)
+    +10.6ms EV   hook_started(UserPromptSubmit,id=88c6a25f)
+    +10.7ms EV   hook_started(UserPromptSubmit,id=e3e2a631)
+    +11.5ms SPAWN pid=29400 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+    +17.7ms SPAWN pid=6148 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"]
+    +22.2ms SPAWN pid=40760 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"]
+    +27.3ms SPAWN pid=16988 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"]
+   +227.9ms EXIT  pid=16988 (HOOK)
+   +230.6ms EV   hook_response(UserPromptSubmit,id=e3e2a631)
+   +246.6ms EXIT  pid=29400 (HOOK)
+   +253.7ms EV   hook_response(UserPromptSubmit,id=5d3e1d3b)
+   +659.3ms EXIT  pid=40760 (HOOK)
+   +661.8ms EV   hook_response(UserPromptSubmit,id=88c6a25f)
+   +769.2ms EXIT  pid=6148 (HOOK)
+   +771.8ms EV   hook_response(UserPromptSubmit,id=46d5617e)
+  +2570.3ms EV   assistant
+  +3059.3ms EV   assistant.tool_use(id=..qB4cBj,input={"command": "T40FG=1; sleep 5; echo done", "description": "Run the specified command with environment variable an
+  +3063.0ms EV   hook_started(PreToolUse:Bash,id=5af02d12)
+  +3063.1ms EV   hook_started(PreToolUse:Bash,id=3c7f6376)
+  +3063.2ms EV   hook_started(PreToolUse:Bash,id=caa3957b)
+  +3064.1ms SPAWN pid=36580 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=]
+  +3067.6ms SPAWN pid=29652 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+  +3071.6ms SPAWN pid=28860 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"]
+  +3250.7ms EXIT  pid=29652 (HOOK)
+  +3256.8ms EV   hook_response(PreToolUse:Bash,id=3c7f6376)
+  +3317.1ms EXIT  pid=28860 (HOOK)
+  +3319.0ms EV   hook_response(PreToolUse:Bash,id=caa3957b)
+  +3400.9ms EXIT  pid=36580 (HOOK)
+  +3402.6ms EV   hook_response(PreToolUse:Bash,id=5af02d12)
+  +3421.5ms SPAWN pid=15696 bash.exe -c env
+  +3426.0ms SPAWN pid=29360 LOGIN_PATH_PROBE: bash -lc "echo \"$PATH\""
+  +3556.0ms EXIT  pid=15696 (bash.exe -c env)
+  +4334.9ms EXIT  pid=29360 (LOGIN_PATH_PROBE)
+  +4338.1ms SPAWN pid=28728 SNAPSHOT_MAKER: bash -c -l "SNAPSHOT_FILE=..."
+  +5391.0ms EXIT  pid=28728 (SNAPSHOT_MAKER)
+  +5398.3ms SPAWN pid=39152 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>"
+  +8413.0ms EV   task_started(task=b2f2ilx65,tool=qB4cBj,bg=False,status=None)
+ +10609.5ms EXIT  pid=39152 (BASH_TOOL)
+ +10614.3ms EV   task_notification(task=b2f2ilx65,tool=qB4cBj,bg=None,status=completed)
+ +10621.1ms EV   hook_started(PostToolUse:Bash,id=48f76e50)
+ +10622.3ms SPAWN pid=32240 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+ +10808.2ms EXIT  pid=32240 (HOOK)
+ +10810.0ms EV   hook_response(PostToolUse:Bash,id=48f76e50)
+ +10813.6ms EV   user.tool_result(..qB4cBj: done)
+ +11877.9ms EV   assistant
+ +11886.7ms EV   assistant
+ +11902.3ms EV   hook_started(Stop,id=afbb51b6)
+ +11902.4ms EV   hook_started(Stop,id=f3154c9b)
+ +11903.2ms SPAWN pid=27524 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+ +11907.2ms SPAWN pid=39208 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m]
+ +12116.8ms EXIT  pid=27524 (HOOK)
+ +12119.2ms EV   hook_response(Stop,id=afbb51b6)
+ +12428.4ms EXIT  pid=39208 (HOOK)
+ +12431.0ms EV   hook_response(Stop,id=f3154c9b)
+ +12437.1ms EV   result/success
+
+# python timeline.py <scratch>/main p1 B-bg
+     +0.1ms EV   IN[B-bg] {"type":"user","message":{"role":"user","content":[{"type":"
+     +8.7ms EV   hook_started(UserPromptSubmit,id=ee16eb17)
+     +8.8ms EV   hook_started(UserPromptSubmit,id=ab04c652)
+     +8.9ms EV   hook_started(UserPromptSubmit,id=74610184)
+     +8.9ms EV   hook_started(UserPromptSubmit,id=fc5b2a4a)
+     +9.8ms SPAWN pid=8200 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+    +20.2ms SPAWN pid=31680 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/wiki-preconsult.sh"]
+    +23.9ms SPAWN pid=33360 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/handoff-trigger.sh"]
+    +27.5ms SPAWN pid=38716 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/plugin-notice.sh"]
+   +212.0ms EXIT  pid=38716 (HOOK)
+   +214.1ms EV   hook_response(UserPromptSubmit,id=fc5b2a4a)
+   +221.4ms EXIT  pid=8200 (HOOK)
+   +223.5ms EV   hook_response(UserPromptSubmit,id=ee16eb17)
+   +522.7ms EXIT  pid=33360 (HOOK)
+   +524.4ms EV   hook_response(UserPromptSubmit,id=74610184)
+   +595.5ms EXIT  pid=31680 (HOOK)
+   +597.2ms EV   hook_response(UserPromptSubmit,id=ab04c652)
+  +2442.3ms EV   assistant
+  +3065.1ms EV   assistant.tool_use(id=..vjafXd,input={"command": "T40BG=1; while true; do sleep 2; done", "description": "Start background loop", "run_in_background":
+  +3067.4ms EV   hook_started(PreToolUse:Bash,id=28355ab9)
+  +3067.4ms EV   hook_started(PreToolUse:Bash,id=ae879343)
+  +3067.5ms EV   hook_started(PreToolUse:Bash,id=26a7895a)
+  +3068.4ms SPAWN pid=25768 HOOK: bash -c "<hooks.json command>" [python -c \"import sys,json,re; d=json.load(sys.stdin); cmd=]
+  +3071.8ms SPAWN pid=12304 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+  +3080.2ms SPAWN pid=28684 HOOK: bash -c "<hooks.json command>" [bash ${CLAUDE_PLUGIN_ROOT}/hooks/pre-build-check.sh"]
+  +3254.8ms EXIT  pid=12304 (HOOK)
+  +3256.9ms EV   hook_response(PreToolUse:Bash,id=ae879343)
+  +3329.7ms EXIT  pid=28684 (HOOK)
+  +3335.5ms EV   hook_response(PreToolUse:Bash,id=26a7895a)
+  +3413.8ms EXIT  pid=25768 (HOOK)
+  +3415.9ms EV   hook_response(PreToolUse:Bash,id=28355ab9)
+  +3427.2ms SPAWN pid=37280 BASH_TOOL: bash -c "source <snapshot> ... && eval '<cmd>' < /dev/null && pwd -P >| <cwdfile>"
+  +3430.9ms EV   task_started(task=blmna5d54,tool=vjafXd,bg=True,status=None)
+  +3435.8ms EV   hook_started(PostToolUse:Bash,id=465258e6)
+  +3437.0ms SPAWN pid=36624 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+  +3627.6ms EXIT  pid=36624 (HOOK)
+  +3629.4ms EV   hook_response(PostToolUse:Bash,id=465258e6)
+  +3632.5ms EV   user.tool_result(..vjafXd: Command running in background with ID: blmna5d54. Output is being written to: C:)
+  +4470.4ms EV   assistant
+  +4488.9ms EV   assistant
+  +4504.2ms EV   hook_started(Stop,id=44493736)
+  +4504.3ms EV   hook_started(Stop,id=fcc459fe)
+  +4505.3ms SPAWN pid=29956 HOOK: bash -c "<hooks.json command>" [C:/Users/<user>/.orca/agent-hooks/claude-hook.cmd || echo]
+  +4509.4ms SPAWN pid=25108 HOOK: bash -c "<hooks.json command>" [node \"${CLAUDE_PLUGIN_ROOT}/scripts/stop-review-gate-hook.m]
+  +4677.7ms EXIT  pid=29956 (HOOK)
+  +4679.7ms EV   hook_response(Stop,id=44493736)
+  +4932.8ms EXIT  pid=25108 (HOOK)
+  +4934.6ms EV   hook_response(Stop,id=fcc459fe)
+  +4938.5ms EV   result/success

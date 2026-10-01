@@ -148,10 +148,23 @@ Body: `self.stdin.lock()` (:295) then `guard.as_mut().ok_or(PtyError::WriteFaile
 shutdown ordering invariant below. `InputEvent` has exactly one variant, `Raw(Vec<u8>)`
 (types.rs:73-77) — there is one and only one input shape.
 
-### `interrupt` (stdio.rs:316-321) — not implemented
+### `interrupt` (stdio.rs:316-321 at the snapshot) — not implemented then; since ADR-0238 it writes a backend-injected line
 
-Returns `Err(PtyError::Unsupported("StdioTransport::interrupt (ADR-0044 MVP 미지원 — 파이프 Ctrl-C
-없음, 후속 스파이크)"))`.
+At the snapshot it returned `Err(PtyError::Unsupported("StdioTransport::interrupt (ADR-0044 MVP 미지원 —
+파이프 Ctrl-C 없음, 후속 스파이크)"))`. Since ADR-0238 the transport holds one field the list above predates:
+`interrupt: Option<InterruptLine>` (`InterruptLine` = `Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>`, and
+`InterruptOut { bytes, on_written: Option<OnWritten> }` since ADR-0262 — it was `Option<Vec<u8>>` under ADR-0238), **injected by
+the backend** through the builder `StdioTransport::with_interrupt` — the only production caller is the stream-json
+branch of `ClaudeBackend::open_spawn`; plain stdio and the other tests inject nothing (the stdio unit test
+`an_injected_interrupt_line_is_queued_whole_and_a_closed_answer_is_unsupported` injects its own). `interrupt()` pushes the returned line
+into the input queue when the function answers `Some` (`push_with(bytes, on_written)` — the writer thread calls
+`on_written` after the line is written, holding no lock; a closed queue drops it), and returns `Unsupported` when it
+answers `None` (no turn to interrupt — the claude turn gate `GateCell` is closed; it was `TurnGate` before ADR-0262) or
+when nothing was injected. The transport never interprets the bytes or the callback. Since ADR-0262 the transport
+also owns a `retiring: Arc<AtomicBool>` flag, raised by `begin_retire()` (first line of `kill_agent`) and by the first
+line of `shutdown()`, and hands the backend only a weak process-group handle plus a read-only `RetiringSignal`
+(`process_group()`). `capabilities()` reports `control.interrupt = self.interrupt.is_some()` — "this transport can interrupt",
+not "a turn is running". The PTY side is the reverse since ADR-0245: `Unsupported` (see the PTY section below).
 
 ### `resize` (stdio.rs:310-314) — `Err(PtyError::Unsupported("… 파이프는 터미널 크기 없음"))`
 
@@ -219,7 +232,8 @@ Causality note (:325-328): "파이프는 자식 트리가 stdout write 핸들을
 `input{raw:true, message:false, attachment:false}` · `output{terminal_bytes:false, structured:
 self.structured, markdown:false, tool_events:false, usage:false}` · `control{resize:false,
 interrupt:false, cancel:false, graceful_shutdown:false}`. Only `structured` is dynamic; the other
-eleven booleans are literals.
+eleven booleans are literals. Since ADR-0238 `interrupt` is dynamic too — `self.interrupt.is_some()`, i.e.
+whether the backend injected an interrupt line (see `interrupt` above).
 
 ## A4. `PtyTransport` — contrast only (`transport/pty.rs`)
 
@@ -228,8 +242,9 @@ eleven booleans are literals.
   (:30), `shutdown: Arc<AtomicBool>` (:31), `reader: Mutex<Option<Box<dyn Read + Send>>>` (:33),
   `job_handle` (:35).
 - **What it owns that stdio does not:** the ConPTY master — resizable and closable, and the closing
-  is the EOF lever. Hence a real `resize` (pty.rs:297-309) and a real `interrupt` = write `0x03`
-  (pty.rs:311-313). **What stdio owns that pty does not:** a separate stderr pipe. PTY merges stderr
+  is the EOF lever. Hence a real `resize` (pty.rs:297-309). `interrupt` used to write `0x03`
+  (pty.rs:311-313); since ADR-0245 it is `Unsupported` (terminal mode handles the person's own
+  Esc/Ctrl-C). **What stdio owns that pty does not:** a separate stderr pipe. PTY merges stderr
   into the console stream, so the diagnostic buffer is always empty for PTY sessions
   (output_core.rs:59-61).
 - **Natural-exit watcher** (pty.rs:178-202), named `"engram-pty-watcher"`: polls `child.try_wait()`
@@ -246,7 +261,8 @@ eleven booleans are literals.
   touches `writer` — dropping the master is what unblocks a stuck write. stdio has no such lever,
   which is exactly why its ordering invariant exists.
 - `capabilities` (pty.rs:337-360): `terminal_bytes:true, structured:false`; `resize:true,
-  interrupt:true, cancel:false, graceful_shutdown:false`.
+  interrupt:true, cancel:false, graceful_shutdown:false`. Since ADR-0245 `interrupt` is `false` (the
+  terminal takes the person's own keys — see `interrupt` above).
 
 ## A5. `ApiTransport` — `transport/api.rs:14-73`
 
@@ -1416,7 +1432,8 @@ Not reachable / gated:
   `AgentManager::{write_stdin, write_stdin_observed, submit_stdin_observed,
   write_stdin_observed_if_epoch}` (manager.rs:1577, :1581, :1594, :1628).
 - Verified by exhaustive search: the only non-test `send_input` call sites in the whole workspace are
-  session.rs:164, session.rs:214, and pty.rs:312 (`interrupt` writing `0x03` to itself).
+  session.rs:164 and session.rs:214. (pty.rs:312 — `interrupt` writing `0x03` to itself — was a third
+  until ADR-0245 made PTY interrupt `Unsupported`.)
   **No code path reaches `send_input` without going through `AgentSession`.**
 - The bytes are **always** passed through the backend encoder first (session.rs:163), so a caller
   cannot choose the framing: `Raw` copies verbatim, `ClaudeStreamJson` wraps into one JSON line

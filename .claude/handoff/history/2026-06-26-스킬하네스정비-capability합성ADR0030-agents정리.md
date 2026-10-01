@@ -8,12 +8,12 @@
 3. **다음 작업 = 프론트 본작업**, 단 **터미널 렌더 버그**(아래 §4)가 그 토대라 먼저 본다.
 
 ## 0. 한 줄 요약
-① capability 산출을 transport(물리)⊕backend(프로그램) **합성**으로 정확화(shell resume=false 교정, ADR-0030). ② 스킬 4종(review/qa/adr/research) 하네스 정비 — flow 포인터 명령형 게이트화·피드백 절 공용 추출·학습용 usage-log(권장) 추가. ③ CLAUDE.md embedded 잔재 정리. ④ **I:/Engram repo** agents 정리: web-runner 폐기, office-butler(회사콘텐츠)를 Engram_Workspace(git 밖)로 분리, 컨텍스트위생 룰을 global-rules로 승격 — **이건 I:/Engram에 커밋·push 완료**.
+① capability 산출을 transport(물리)⊕backend(프로그램) **합성**으로 정확화(shell resume=false 교정, ADR-0030). ② 스킬 4종(review/qa/adr/research) 하네스 정비 — flow 포인터 명령형 게이트화·피드백 절 공용 추출·학습용 usage-log(권장) 추가. ③ CLAUDE.md embedded 잔재 정리. ④ **I:/Engram repo** agents 정리: web-runner 폐기, office-butler를 Engram_Workspace(git 밖)로 분리, 컨텍스트위생 룰을 global-rules로 승격 — **이건 I:/Engram에 커밋·push 완료**.
 
 ## 1. 두 개의 repo — 헷갈리지 말 것
 - **engram-dashboard** (`I:/Engram/apps/engram-dashboard`) — 이 프로젝트. **이제 origin 보유**(옛 핸드오프 "push 안 함"은 outdated). 현재 **master, ahead 4**(아래 미커밋/미푸시).
-- **I:/Engram** (루트) — 개인 워크스페이스 sync repo, 원격 `github.com/kimsunzun/Engram.git`(**PRIVATE**), "집 PC 이어작업"용. 이번 세션 agents 정리분 **커밋·push 완료**(`d2709b0`).
-- **I:/Engram_Workspace** — **git 밖**(추적 안 됨). 회사 민감 콘텐츠 파킹지.
+- **I:/Engram** (루트) — 개인 워크스페이스 sync repo, 원격 `github.com/<user>/Engram.git`(**PRIVATE**), "다른 PC 이어작업"용. 이번 세션 agents 정리분 **커밋·push 완료**(`d2709b0`).
+- **I:/Engram_Workspace** — **git 밖**(추적 안 됨) 작업 공간.
 
 ## 2. engram-dashboard — 이번 세션 커밋 (master, ahead 4 = 미푸시)
 | 커밋 | 내용 |
@@ -63,4 +63,4 @@
 - 빌드 잠금(os error 5): 실행 중 dev/exe → `taskkill //F //IM engram-dashboard.exe //IM engram-dashboard-daemon.exe`. cdp 포트 9223 고정.
 - 커밋 멀티라인 = PowerShell here-string(`@'...'@`). 커밋 트레일러 Co-Authored-By.
 - **Windows cwd-lock 주의:** agents 폴더 이동/삭제가 "file in use"로 막히면 그 폴더를 cwd로 둔 claude/셸 세션 때문. `Get-CimInstance Win32_Process | ? CommandLine -like *<dir>*`로 PID 찾고 사용자 확인 후 종료(임의 kill 금지 — claude 세션 다수).
-- I:/Engram는 PRIVATE GitHub sync(집 PC와 공유) — force-push/이력재작성 시 집 PC clone 깨짐 주의.
+- I:/Engram는 PRIVATE GitHub sync(다른 PC와 공유) — force-push/이력재작성 시 다른 PC clone 깨짐 주의.
