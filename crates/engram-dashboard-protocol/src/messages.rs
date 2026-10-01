@@ -685,6 +685,7 @@ pub enum AgentEvent {
         outcome: String,
     },
 
+    // ADR-0253
     /// 사용량 한 장 — 그 벤더를 구독한 연결에만 간다([`AgentCommand::UsageSubscribe`]). 요청의 답이 아니다.
     /// `subscribed` = 받는 연결의 구독 집합 — 데몬이 이 한 장을 짓던 순간의 것이라 한 발 늦을 수 있다.
     /// ★같은 칸의 한 장이 뒤바뀌어 오거나 두 번 올 수 있다★ — 칸마다 가장 큰 `snapshot.revision` 만 남긴다.

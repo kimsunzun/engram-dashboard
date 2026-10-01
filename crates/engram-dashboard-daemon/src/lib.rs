@@ -80,55 +80,12 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
     Ok(s)
 }
 
-// ── ENGRAM_EXE 주입 (설계 §5 · ADR-0014 방향) ─────────────────────────────────────────
-//
-// ★리포 안에 이 값을 읽는 코드·프라이밍이 없다(실측 2026-08-12)★ — 앱 exe 는 argv 로 동사를 받지 않고
-// (ADR-0132 결정 1), 에이전트가 쓰는 제어·우편 CLI 는 `engram` 이다(ENGRAM_CLI_EXE — locate_send_exe).
-// 값은 데몬 exe 의 **형제**인 앱 exe 절대경로다(locate_daemon_exe 와 대칭 — 배포 시 동거).
-//
-// ★그래도 남겨 둔 이유·지울 조건★: 리포 밖 스크립트·매뉴얼이 이 env 를 읽는지는 여기서 확인할 수 없다.
-// 그것들이 안 읽는다는 게 확인되면 이 함수와 호출부(run 의 0.6)를 함께 지운다 — 형제 블록
-// locate_send_exe 의 "지우지 말 것" 과 상태가 반대다(그쪽은 지우면 CLI 입구가 사라진다).
-//
-// ★agent 를 안 건드린다★: env 를 CommandSpec/manager.spawn_agent 로 threading 하면 agent crate 가
-// "형제 exe 경로" 개념을 알게 된다 — 주입은 데몬 부팅 1지점에 가둔다.
-//
-// ★best-effort★: 앱 exe 를 못 찾아도(개발 중 부분 빌드 등) env 만 미세팅으로 남고 데몬 기동은 막지
-// 않는다.
-
-/// ★SAFETY(std::env::set_var)★: 부팅 최초(run 진입 직후, 다른 스레드 spawn 전)에 1회만 호출한다 —
-/// 이 시점엔 tokio worker 외 경쟁 스레드가 env 를 동시 읽지 않으므로 data race 위험이 없다.
-fn set_engram_exe_env() {
-    const APP_EXE: &str = if cfg!(windows) {
-        "engram-dashboard.exe"
-    } else {
-        "engram-dashboard"
-    };
-    // 이미 세팅돼 있으면(상위가 명시 주입) 존중 — 덮어쓰지 않는다.
-    if std::env::var_os("ENGRAM_EXE").is_some() {
-        return;
-    }
-    if let Ok(daemon_exe) = std::env::current_exe() {
-        if let Some(dir) = daemon_exe.parent() {
-            let app_exe = dir.join(APP_EXE);
-            if app_exe.is_file() {
-                std::env::set_var("ENGRAM_EXE", &app_exe);
-                tracing::info!(path = %app_exe.display(), "ENGRAM_EXE 주입(자식 PTY 상속)");
-                return;
-            }
-        }
-    }
-    tracing::warn!(
-        "ENGRAM_EXE 미주입 — 데몬 exe 형제에 앱 exe 가 없음(에이전트 CLI 입구와 무관 — 그쪽은 ENGRAM_CLI_EXE)"
-    );
-}
-
 // ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────
 //
 // ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
 // 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
 // **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
-// **형제**에서 절대경로를 찾아(set_engram_exe_env·locate_daemon_exe 와 동일 대칭 — 배포 시 세 exe 동거),
+// **형제**에서 절대경로를 찾아(locate_daemon_exe 와 대칭 — 배포 시 세 exe 동거),
 // provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
 // **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
 // 경로가 아니다.
@@ -137,8 +94,7 @@ fn set_engram_exe_env() {
 // 백엔드(claude)는 제어 CLI 를 잃을 뿐이고, 비-MCP 백엔드 스폰은 우편 입구가 0 이 되므로 provision 에서
 // fail-closed 로 막힌다. warn 로그로 원인을 남긴다(관측성).
 
-/// set_engram_exe_env 와 동형이나 여기선 env 를 세팅하지 않고 **경로 값**을 돌려준다(env 주입은
-/// backend 소유).
+/// env 를 세팅하지 않고 **경로 값**을 돌려준다(env 주입은 backend 소유).
 ///
 /// ★호출자가 하나뿐이어도 지우지 말 것★: 이 값은 **비-MCP 백엔드의 유일한 우편 입구**이자(그쪽은 MCP
 /// 입구가 아예 없다) **모든 스폰의 제어 입구**이고, 없으면 비-MCP provision 이 fail-closed 로 스폰을 막는다
@@ -512,10 +468,6 @@ pub async fn run() -> Result<(), i32> {
     //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단") 가시화한다. ★데몬 전체는 죽이지 않는다★ —
     //   연결 task panic 은 tokio 가 이미 격리하고, pump panic 은 B-2 가 Failed 로 전이시킨다.
     install_panic_hook();
-
-    // 0.6) ENGRAM_EXE 주입 — 이 위치가 set_engram_exe_env SAFETY 주석이 요구하는 "부팅 최초 1회"(다른
-    //   스레드 spawn 전)다. 값의 소비자와 존치 조건은 그 함수 주석.
-    set_engram_exe_env();
 
     // 1) data_dir 생성 + 쓰기 가능 확인.
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면

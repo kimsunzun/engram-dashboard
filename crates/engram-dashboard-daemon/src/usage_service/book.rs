@@ -577,6 +577,7 @@ impl Cell {
     /// 관측 하나의 값을 합친다 — 줍기·조회 성공 공통의 한 길. 실린 창·칸은 덮고 안 실린 것은 둔다
     /// (`model_scoped`·`plan` 은 실리면 통째로 바꾼다). ★창 값(% 또는 리셋)을 하나라도 실으면 어느 상태에서든
     /// `Ready` 다★ — 값이 온다는 것이 정상의 증거다(§3 #52). 거절 기한은 건드리지 않는다.
+    // ADR-0256
     fn merge(&mut self, obs: &UsageObservation, now: Now) {
         if let Some(window) = obs.five_hour {
             merge_window(&mut self.five_hour, window, now).mark(&mut self.fresh_five_hour);
