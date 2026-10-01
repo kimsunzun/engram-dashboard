@@ -136,6 +136,10 @@ impl ProcessGroup {
     }
 
     /// 완전한 멤버 PID 명단(뿌리 포함). 통로가 사라졌으면 `Ok(빈 목록)` · 불완전하면 `Err`.
+    ///
+    /// ★막 끝난 멤버가 잠깐 남을 수 있다★ — 명단에서 빠지는 때가 끝남(붙든 핸들의 대기가 돌아옴)보다 늦을 수
+    /// 있다(CI 실측 2026-10-01). 살았는지는 명단이 아니라 붙든 핸들([`Pinned::exited`])로 본다.
+    // ADR-0262
     pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>> {
         #[cfg(windows)]
         {
@@ -688,12 +692,16 @@ pub(crate) mod tests {
         drop(gate);
         // `parent` 를 아직 쥐고 있다 — 그 핸들이 P 의 프로세스 객체를 붙든다.
 
-        let members = group
-            .member_pids()
-            .expect("끝났지만 핸들이 붙든 멤버가 있어도 명단은 완전해야 한다");
-        assert!(
-            !members.contains(&parent_pid),
-            "끝났지만 핸들이 붙든 P 가 명단에 남았다: {members:?}"
+        // 대기가 돌아온 직후에는 P 가 아직 명단에 있을 수 있다(`member_pids` 문서) — 빠지기만 기다린다. 완전함은
+        // 기다리지 않는다: 부를 때마다 서야 한다.
+        let members = wait_until(
+            "명단에서 빠진 P(끝났지만 핸들이 붙든 것)",
+            || {
+                let members = group
+                    .member_pids()
+                    .expect("끝났지만 핸들이 붙든 멤버가 있어도 명단은 완전해야 한다");
+                (!members.contains(&parent_pid)).then_some(members)
+            },
         );
         assert!(
             members.contains(&child_pid),
