@@ -19,9 +19,6 @@
 //! 명세 = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
 // ADR-0257
 
-// 2단계는 이 모듈 전체(규칙 · 탄생 기록 · 문 · 일꾼 · 정리 한 판)를 세우되 배선은 하나도 하지 않는다(배선 = 3단계). 3단계 배선이 이것들을 부르게 되면 이 allow 를 걷는다.
-#![allow(dead_code)]
-
 use std::any::Any;
 use std::fmt;
 use std::io;
@@ -580,16 +577,8 @@ impl BirthWatch {
     /// `Failed(port)`): 확보 실패 · 무리가 이미 없음 · 듣는 스레드가 실패로 굳힘([`Recorder::port_failed`]).
     ///
     /// 듣는 스레드가 무리가 사라져서 · 물러나서 끝난 뒤에도 `Ok` 다 — 끝나며 켜진 기록을 껐고, 그 뒤 켠 기록에는 탄생이
-    /// 안 든다(놓침 쪽). 처음 부름은 붙이는 동안 Job 을 강하게 쥐지만 막히지 않는다 — 스레드를 띄우기만 한다.
-    pub(super) fn ensure(
-        &self,
-        group: &Arc<ProcessGroup>,
-        recorder: &Arc<Recorder>,
-        tag: &LogTag,
-    ) -> Result<(), ()> {
-        self.ensure_with(group, recorder, tag, spawn_listener)
-    }
-
+    /// 안 든다(놓침 쪽). 처음 부름은 붙이는 동안 Job 을 강하게 쥐지만 막히지 않는다 — `spawn` 은 듣는 스레드를 띄우기만
+    /// 한다(처음 부름만 쓴다).
     fn ensure_with<G: Group>(
         &self,
         group: &Arc<G>,
@@ -605,13 +594,6 @@ impl BirthWatch {
         }
         acquired
     }
-}
-
-fn spawn_listener(body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
-    std::thread::Builder::new()
-        .name(LISTENER_THREAD.into())
-        .spawn(body)
-        .map(drop)
 }
 
 /// 포트 확보가 어디까지 갔나 — 실패를 가르는 데만 쓴다.
@@ -1730,6 +1712,7 @@ impl<G: Group> GateCell<G> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    #[cfg(test)]
     pub(super) fn is_open(&self) -> bool {
         self.lock().open
     }
@@ -4246,7 +4229,9 @@ mod birth_tests {
         let recorder = Arc::new(Recorder::new());
         let watch = BirthWatch::new();
         assert_eq!(
-            watch.ensure(&group, &recorder, &LogTag::new(None, x.id())),
+            watch.ensure_with(&group, &recorder, &LogTag::new(None, x.id()), |body| {
+                SystemClock.spawn(LISTENER_THREAD, body)
+            }),
             Ok(())
         );
         let (r, _) = recorder.start();
@@ -6568,5 +6553,225 @@ mod gate_tests {
             passes > 40 && opened > 500 && line_only > 50 && no_line > 50,
             "{seen}"
         );
+    }
+}
+
+/// 실물 무리 · 포트 · 듣는 스레드 · 쓰기 확인 · 일꾼 · 판을 한 줄로 잇는다(TRD §5 실프로세스 12). 시험마다 넷 이하
+/// (콘솔 호스트 포함)를 띄운다. ★끝내는 경로는 재지 않는다★ — claude 훅 실행기 모양 아래 사본은 넷을 넘어 순수
+/// 시험(스파이크 모양)이 잰다. 여기서는 판의 사유가 로그에 남고 아무것도 끝나지 않는 것을 본다.
+#[cfg(all(test, windows))]
+mod real_tests {
+    use super::test_support::{Capture, Line};
+    use super::*;
+
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    use crate::platform::process_group::tests::{
+        is_ping, new_group, open_gate, spawn_gated_cmd, wait_until,
+    };
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const LINE: &[u8] = b"{\"type\":\"control_request\"}\n";
+
+    /// 잠은 기다리지 않고 단조 시각을 그만큼 민다 — 일꾼이 N 을 곧바로 지난다. 일꾼 몸통은 쌓아 두고 시험 스레드가
+    /// 돌린다(판의 로그를 잡으려고). 듣는 스레드는 진짜로 띄운다.
+    #[derive(Default)]
+    struct SkipClock {
+        skipped_ns: AtomicU64,
+        workers: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
+    }
+
+    impl LeftoverClock for SkipClock {
+        fn mono_now(&self) -> Instant {
+            Instant::now() + Duration::from_nanos(self.skipped_ns.load(Ordering::SeqCst))
+        }
+
+        fn sleep(&self, d: Duration) {
+            let ns = u64::try_from(d.as_nanos()).expect("시험 잠");
+            self.skipped_ns.fetch_add(ns, Ordering::SeqCst);
+        }
+
+        fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()> {
+            if name == WORKER_THREAD {
+                self.workers.lock().unwrap().push(body);
+                Ok(())
+            } else {
+                SystemClock.spawn(name, body)
+            }
+        }
+    }
+
+    /// 뿌리 `root` 의 정리기와 그 문 — `open_spawn` 의 조립에서 시계만 바꾼 모양.
+    fn cleaner_for(
+        group: &Arc<ProcessGroup>,
+        root: u32,
+    ) -> (Arc<SkipClock>, Arc<Cleaner>, Arc<GateCell>) {
+        let clock = Arc::new(SkipClock::default());
+        let cleaner = Arc::new(Cleaner::new(
+            Arc::clone(group),
+            Arc::clone(&clock) as Arc<dyn LeftoverClock>,
+            root,
+            LogTag::new(None, root),
+        ));
+        let cell = GateCell::new(Some(Arc::clone(&cleaner)));
+        (clock, cleaner, cell)
+    }
+
+    /// 열린 턴에 끊기 하나를 받고 그 줄이 쓰인 것으로 친다 — 쓰기 확인이 쓰기 명단을 찍고 일꾼 하나를 부른다.
+    /// 돌려주는 것 = 그 에피소드의 기록 번호.
+    fn interrupt_and_write(cell: &Arc<GateCell>, cleaner: &Cleaner, clock: &SkipClock) -> u64 {
+        cell.open_turn();
+        let out = cell.interrupt(LINE.to_vec()).expect("끊기 줄");
+        let rec = cleaner.recorder.active();
+        assert_ne!(rec, 0, "기록이 켜지지 않았다");
+        let on_written = out.on_written.expect("쓰기 확인");
+        on_written();
+        assert_eq!(
+            clock.workers.lock().unwrap().len(),
+            1,
+            "쓰인 끊기가 일꾼을 부르지 않았다"
+        );
+        rec
+    }
+
+    /// 쌓인 일꾼을 이 스레드에서 끝까지 돌리고 그동안의 로그를 준다.
+    fn run_workers(clock: &SkipClock) -> Vec<Line> {
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let bodies: Vec<_> = clock.workers.lock().unwrap().drain(..).collect();
+        for body in bodies {
+            tracing::subscriber::with_default(Capture(Arc::clone(&lines)), body);
+        }
+        let taken = lines.lock().unwrap().clone();
+        taken
+    }
+
+    /// 판이 남긴 사유 줄 하나 — 아무것도 끝내지 않았다(정리함 줄이 없다).
+    fn the_pass_line(lines: &[Line]) -> BTreeMap<String, String> {
+        assert!(
+            !lines
+                .iter()
+                .any(|(_, fields)| fields.contains_key("terminated")),
+            "무언가를 끝냈다: {lines:?}"
+        );
+        let mut reasons = lines
+            .iter()
+            .filter(|(_, fields)| fields.contains_key("reason"));
+        let (_, fields) = reasons.next().expect("판의 사유 줄");
+        assert!(reasons.next().is_none(), "사유 줄이 둘이다: {lines:?}");
+        fields.clone()
+    }
+
+    /// 창 없는 콘솔의 R 이 콘솔 호스트를 띄울 때까지 기다린다 — 문을 열기 전 R 의 자식은 그것 하나다. 그 호스트는
+    /// R 이 Job 에 든 뒤에 태어나기도 해서(실측), 기다리지 않으면 쓰기 명단 뒤의 산 탄생(부모 R 산다)으로 끼어든다.
+    fn console_host_born(r: &std::process::Child) {
+        wait_until("R 의 콘솔 호스트", || {
+            (!engram_dashboard_base::platform::child_pids(r.id()).is_empty()).then_some(())
+        });
+    }
+
+    /// 끊기 뒤 R 이 띄운 B(`cmd`)가 P(ping)를 띄우고 끝났다 — P 의 부모는 끝났지만 P 는 B 의 사본이 아니다. P 는 산다.
+    /// R · 그 콘솔 호스트 · B · P 넷.
+    #[test]
+    fn a_ping_left_by_an_exited_cmd_is_not_a_hook_copy_and_survives() {
+        let (job, group) = new_group();
+        let group = Arc::new(group);
+        // R = 문 → B → 둘째 줄을 기다림(뿌리가 판 때 살아 있게). B = P 를 뒤로 띄우고 한 줄을 기다린 뒤 끝난다.
+        let mut r = spawn_gated_cmd(
+            r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
+            CREATE_NO_WINDOW,
+        );
+        job.assign(r.id()).expect("Job 편입");
+        console_host_born(&r);
+        let (clock, cleaner, cell) = cleaner_for(&group, r.id());
+        let rec = interrupt_and_write(&cell, &cleaner, &clock);
+
+        let mut stdin = r.stdin.take().expect("stdin 파이프");
+        stdin.write_all(b"go\r\n").expect("R 의 문");
+        let (b, p) = wait_until("기록된 B · P", || {
+            let births = cleaner.recorder.copy(rec);
+            let b = births
+                .iter()
+                .find(|x| x.facts.ppid == r.id() && image_is(&x.facts.image, "cmd.exe"))
+                .cloned()?;
+            let p = births
+                .iter()
+                .find(|x| x.facts.ppid == b.pid && image_is(&x.facts.image, "ping.exe"))
+                .cloned()?;
+            Some((b, p))
+        });
+        assert!(b.killable && p.killable);
+        stdin.write_all(b"b\r\n").expect("B 의 줄");
+        wait_until("끝난 B", || {
+            matches!(b.pin.exited(), Ok(true)).then_some(())
+        });
+
+        let pass = the_pass_line(&run_workers(&clock));
+        assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
+        assert_eq!(pass["not_hook_copy"], "1", "{pass:?}");
+        assert_eq!(pass["parent_alive"], "0", "{pass:?}");
+        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
+
+        drop((b, p));
+        job.terminate(1).expect("Job 끝내기");
+        drop(stdin);
+        let _ = r.wait();
+    }
+
+    /// 끊기 전에 태어난 것만 있다 — 쓰기 명단에 들어 후보가 없다(붙일 때 되알려져 기록에 들어도). R · 그 콘솔
+    /// 호스트 · ping 셋.
+    #[test]
+    fn births_before_the_interrupt_leave_no_new_member() {
+        let (job, group) = new_group();
+        let group = Arc::new(group);
+        let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
+        job.assign(r.id()).expect("Job 편입");
+        open_gate(&mut r);
+        wait_until("명단의 ping", || {
+            group
+                .member_pids()
+                .ok()?
+                .into_iter()
+                .find(|&pid| is_ping(pid))
+        });
+        let (clock, cleaner, cell) = cleaner_for(&group, r.id());
+        interrupt_and_write(&cell, &cleaner, &clock);
+
+        let pass = the_pass_line(&run_workers(&clock));
+        assert_eq!(pass["reason"], "no_new_member", "{pass:?}");
+
+        job.terminate(1).expect("Job 끝내기");
+        let _ = r.wait();
+    }
+
+    /// 끊기 뒤 태어났지만 부모(뿌리 R)가 산다. R · 그 콘솔 호스트 · ping 셋.
+    #[test]
+    fn a_birth_under_a_live_parent_is_parent_alive() {
+        let (job, group) = new_group();
+        let group = Arc::new(group);
+        let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
+        job.assign(r.id()).expect("Job 편입");
+        console_host_born(&r);
+        let (clock, cleaner, cell) = cleaner_for(&group, r.id());
+        let rec = interrupt_and_write(&cell, &cleaner, &clock);
+
+        open_gate(&mut r);
+        let p = wait_until("기록된 ping", || {
+            cleaner
+                .recorder
+                .copy(rec)
+                .into_iter()
+                .find(|x| x.facts.ppid == r.id() && image_is(&x.facts.image, "ping.exe"))
+        });
+
+        let pass = the_pass_line(&run_workers(&clock));
+        assert_eq!(pass["reason"], "parent_rule", "{pass:?}");
+        assert_eq!(pass["parent_alive"], "1", "{pass:?}");
+        assert_eq!(pass["not_hook_copy"], "0", "{pass:?}");
+        assert!(!p.pin.exited().expect("끝났나"), "P 가 끝났다");
+
+        drop(p);
+        job.terminate(1).expect("Job 끝내기");
+        let _ = r.wait();
     }
 }
