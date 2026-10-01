@@ -26,3 +26,4 @@
 |---|---|---|
 | `shell-crate-boundary-survey-2026-08-23.md` | 셸(`src-tauri`) 10,637줄 중 어디까지 crate로 떼어낼 수 있나 — `use tauri` 실측 + 의존 방향 | 경계 실측 완료 · **모양 미결**(사용자 검토 중) · 연결 = T-27 |
 | `socket-head-of-line-blocking-2026-09-17.md` | 활성화 하나가 클라↔데몬 소켓 수신을 통째로 막는다 — 코드 3지점 + 「직렬은 가드가 아니다」 반증 | 구조 부채 계측 · **네트워크 리팩토링에 편입**(사용자 결정 2026-09-17) |
+| `architecture-discussion-2026-09-26.md` | transport 부착 전 전체 의존관계·모듈 쪼개기 논의 — 모듈 순서 Q&A 에서 나온 사실과 결정 후보 | **논의 중** · 후보 1(`platform` crate 분리)·2(`command`·`messaging` 의 base 의존 허용)·3(로그는 base 경유만)·4(base 에 범용 헬퍼 모듈) 방향 확정 · 큰 절 A(로깅 시스템 설계) 요구 수집 · 연결 = T-46 |
