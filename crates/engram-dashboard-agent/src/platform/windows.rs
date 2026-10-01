@@ -981,6 +981,8 @@ pub(crate) mod tests {
             "sleep 이 스크립트의 명령줄을 가졌다: {sleep_facts:?}"
         );
 
+        // 포트를 놓기 전에 뗀다(BirthPort 의 규칙).
+        job.unwatch_births().expect("떼기");
         job.terminate(1).expect("Job 끝내기");
         drop(gate);
         let _ = shell.wait();

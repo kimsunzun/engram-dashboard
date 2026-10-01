@@ -38,7 +38,7 @@ use crate::types::{AgentId, PtyError};
 /// - 안 불리는 때 = 큐가 받지 않았다(`Err`) · 꺼내기 전에 큐가 닫혔다 · 쓰기가 실패했다. 셋 다 부르지 않고 버린다(drop).
 /// - ★꺼낸 뒤에 큐가 닫혀도 그 쓰기가 성공하면 불린다★ — 그래서 이 부름은 큐를 닫는 쪽(통로의 끝내기
 ///   `shutdown()` · 스트림 끝)과 겹칠 수 있다. 물러난 뒤에 하면 안 되는 일이면 이 안에서 물러남 표시
-///   ([`RetiringSignal`](crate::platform::process_group::RetiringSignal))를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
+///   (`crate::platform::process_group::RetiringSignal`)를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
 /// - ★panic 하지 않게 짠다★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라,
 ///   릴리스에서는 이 안의 panic 이 프로세스를 죽인다. 라이터가 두른 `catch_unwind`(잡아 `error` 로 남기고 다음 덩이를
 ///   계속 쓴다 — 큐를 닫지 않는다)는 unwind 빌드(개발·시험)에서만 서는 안전망이다.

@@ -10,9 +10,10 @@
 //! 그 조각은 이 모듈을 부르지 않는다(그 파일 헤더).
 //!
 //! ★Job 을 약하게 쥔다★ — 강하게 쥐면 통로가 사라진 뒤에도 Job 핸들이 안 닫혀 `KILL_ON_JOB_CLOSE` 가 늦어진다.
-//! 부를 때마다 그 호출 동안만 올린다 — 가장 긴 창은 [`ProcessGroup::watch_births`] 가 `start` 를 부르는 동안이다
-//! (그래서 `start` 는 막히지 않아야 한다). 통로가 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`]
-//! 이다. 내준 붙든 멤버 · 포트 · 표시는 Job 을 붙들지 않는다.
+//! 부를 때마다 그 호출 동안만 올린다([`ProcessGroup::is_gone`] 은 올리지도 않는다) — 가장 긴 창은
+//! [`ProcessGroup::watch_births`] 가 `start` 를 부르는 동안이다(그래서 `start` 는 막히지 않아야 한다). 통로가
+//! 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`] 이다. 내준 붙든 멤버 · 포트 · 표시는 Job 을 붙들지
+//! 않는다.
 // ADR-0257
 
 use std::io;
@@ -220,6 +221,19 @@ impl ProcessGroup {
     pub(crate) fn retiring(&self) -> RetiringSignal {
         self.retiring.clone()
     }
+
+    /// 통로가 사라져 무리가 없나 — Job 을 올리지 않고 본다(부작용 없음 · 그 사이 Job 핸들 닫기를 늦추지 않는다). 한 번
+    /// 참이면 계속 참이다. 이 OS 에는 무리가 없어 늘 참이다.
+    pub(crate) fn is_gone(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.job.strong_count() == 0
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -302,6 +316,7 @@ pub(crate) mod tests {
     #[test]
     fn a_group_without_a_live_job_lists_nothing_and_owns_nobody() {
         let group = ProcessGroup::detached(RetiringSignal::of(&Arc::default()));
+        assert!(group.is_gone());
         assert_eq!(group.member_pids().expect("명단"), Vec::<u32>::new());
         for kill in [false, true] {
             assert!(group
@@ -356,8 +371,11 @@ pub(crate) mod tests {
     #[cfg(windows)]
     use std::time::Instant;
 
+    // 다시 내보낸다 — `windows` 모듈은 `platform` 밖에서 안 보이는데, claude 잔여물 정리의 실물 시험이 이 도우미를 쓴다.
     #[cfg(windows)]
-    use crate::platform::windows::tests::{is_ping, open_gate, spawn_gated_cmd, wait_until};
+    pub(crate) use crate::platform::windows::tests::{
+        is_ping, open_gate, spawn_gated_cmd, wait_until,
+    };
     #[cfg(windows)]
     use crate::platform::windows::LEFTOVER_EXIT_CODE;
 
@@ -467,6 +485,20 @@ pub(crate) mod tests {
                 let _ = windows::Win32::Foundation::CloseHandle(self.0);
             }
         }
+    }
+
+    /// 손잡이는 Job 을 붙들지 않는다 — 통로가 Job 을 놓으면 그때부터 사라진 것으로 읽힌다.
+    #[cfg(windows)]
+    #[test]
+    fn a_group_is_gone_once_its_job_is_dropped() {
+        let (job, group) = new_group();
+        assert!(!group.is_gone());
+        drop(job);
+        assert!(group.is_gone());
+        assert!(group
+            .pin(std::process::id(), false)
+            .expect("붙들기")
+            .is_none());
     }
 
     /// ② Job 안 cmd 의 자식 ping 을 끝내기 권한으로 붙들어 끝낸다 — 붙든 핸들로 끝남을 기다리고, 종료 코드로 누가
@@ -611,9 +643,21 @@ pub(crate) mod tests {
     #[test]
     fn a_dead_parent_held_open_is_off_the_list_and_reads_dead() {
         let (job, group) = new_group();
+        // C(ping)의 출력을 받는 파일 — C 가 첫 줄을 쓴 뒤에야 P 를 끝낸다. 기동을 마치지 않은 C 는 P 가 끝날 때
+        // 함께 죽어(종료 코드 0xC000010A) 명단이 빈다(병렬 부하에서 11/60 · 끝낼 때 C 나이 1~4 ms 인 판 · 실측).
+        // 첫 줄은 제 코드를 돌기 시작한 ping 만 쓴다.
+        let ready =
+            std::env::temp_dir().join(format!("t40-dead-parent-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&ready);
         // P 는 ping 을 띄운 뒤 둘째 `set /p` 에서 stdin 을 기다리며 산다 — 끝은 아래 kill 한 곳이다. 둘째 `set /p`
         // 가 없으면 `cmd /c` 가 `start /b` 직후 끝나 P 가 탐침 전에 이미 죽어 있다(실측 5/5).
-        let mut parent = spawn_gated_cmd("start \"\" /b ping -n 30 127.0.0.1 & set /p _=", 0);
+        let mut parent = spawn_gated_cmd(
+            &format!(
+                "start \"\" /b ping -n 30 127.0.0.1 >\"{}\" & set /p _=",
+                ready.display()
+            ),
+            0,
+        );
         let parent_pid = parent.id();
         job.assign(parent_pid).expect("Job 편입");
         let gate = open_gate_keeping_stdin(&mut parent);
@@ -627,6 +671,9 @@ pub(crate) mod tests {
                     let member = group.pin(pid, false).ok()??;
                     (member.facts().ppid == parent_pid).then_some((pid, member))
                 })
+        });
+        wait_until("ping 의 첫 줄", || {
+            (std::fs::metadata(&ready).ok()?.len() > 0).then_some(())
         });
         assert!(
             parent.try_wait().expect("상태").is_none(),
@@ -657,6 +704,9 @@ pub(crate) mod tests {
             "C 의 부모가 끝남으로 안 읽힌다"
         );
         drop(parent);
+        job.terminate(1).expect("Job 끝내기");
+        let _ = child.wait_exit(Duration::from_secs(5));
+        let _ = std::fs::remove_file(&ready);
     }
 
     /// ① 첫 칸 하나로 물어도 늘려 되물어 전부 나온다.
