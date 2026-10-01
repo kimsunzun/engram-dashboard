@@ -428,7 +428,7 @@ impl AgentBackend for ClaudeBackend {
         // ★제어 평면은 이 backend 에서 **전부 명령줄로** 번역된다([`AgentBackend::build_spec`]) — 통로
         //   핸드셰이크에 또 실으면 한 spawn 이 같은 값을 두 수단으로 보낸다. 여기서는 `agent_id` 하나를 잔여물 정리
         //   로그의 귀속으로만 읽고 통로로 보내지 않으니 그 경우가 아니다.
-        // ADR-0257
+        // ADR-0262
         control: Option<&ControlEndpoint>,
     ) -> Result<SpawnParts, PtyError> {
         // 위 doc 이 말한 대로 쓰지 않는다 — 밑줄 이름을 쓰면 rustdoc 이 렌더하는 시그니처가 doc 과 어긋난다.
@@ -439,7 +439,7 @@ impl AgentBackend for ClaudeBackend {
                 // 화신마다 새 문 하나를 decoder(여닫는 쪽)와 끊기 줄 함수(열림을 보고 끊기 에피소드를 세우는 쪽)가
                 // 함께 쥔다. 정리기가 통로의 무리 · 뿌리를 알아야 해서 문은 통로를 연 뒤에 서고, decoder 는 자리로 받는다.
                 // ADR-0238
-                // ADR-0257
+                // ADR-0262
                 let gate_slot = GateSlot::default();
                 let decoder = stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&gate_slot));
                 let (t, pid) = StdioTransport::open(spec, true, Some(decoder))?;
@@ -782,13 +782,13 @@ fn cancel_line(id: &str) -> Vec<u8> {
 /// ★세션·통로·선 타입은 이 값을 모른다★ — 그래서 `types.rs` 가 아니라 이 폴더에 산다([`DeliveryAck`] 는 세션이
 ///   읽어 거기 있다).
 // ADR-0238
-// ADR-0257
+// ADR-0262
 type GateSlot = Arc<OnceLock<Arc<GateCell>>>;
 
 /// 이 화신의 잔여물 정리기. `None` = 문만 여닫는다 — 통로가 프로세스 무리를 내주지 않거나(Windows 밖) 뿌리 PID 가
 /// 없다. 포트 · 듣는 스레드는 여기서 띄우지 않는다 — 첫 끊기 에피소드가 띄운다. 로그 귀속은 제어 채널의 에이전트
 /// id 이고, 없으면 뿌리 PID 로 잇는다(ADR-0217).
-// ADR-0257
+// ADR-0262
 fn leftover_cleaner(
     transport: &StdioTransport,
     root_pid: Option<u32>,
@@ -846,10 +846,11 @@ fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
 }
 
 /// 통로에 꽂는 끊기 줄 함수 — 문이 열려 있을 때만 줄을 준다(`None` → 통로 `Unsupported` → 버스 CONFLICT). 줄을
-/// 줄지 · 쓰인 뒤 부를 것(쓰기 확인)을 실을지는 문이 정한다 — 받아들인 끊기는 줄을 돌려주기 **전에** 문 안에 끊기
-/// 에피소드로 적힌다.
+/// 줄지 · 쓰인 뒤 부를 것(쓰기 확인)을 실을지는 문이 정한다 — 에피소드를 세우거나 이어 적은 끊기는 줄을 돌려주기
+/// **전에** 문 안에 적힌다. 다른 끊기가 에피소드를 여는 중에 온 끊기 · 여는 사이 차례가 바뀐 끊기는 에피소드 없이
+/// 줄만 나간다(쓰기 확인도 없다).
 // ADR-0238
-// ADR-0257
+// ADR-0262
 fn interrupt_line(gate: Arc<GateCell>) -> InterruptLine {
     Arc::new(move || gate.interrupt(interrupt_line_bytes(Uuid::new_v4())))
 }
@@ -1135,7 +1136,7 @@ impl ClaudeStreamDecoder {
     /// 에피소드를 버린다. 턴 오류(`Failed`)와 신호 없는 사건은 문을 건드리지 않는다.
     /// ★문에 알리는 것은 사건이 펌프에서 emit 되기 전이다★ — decode 가 돌려준 뒤에야 emit 된다.
     // ADR-0238
-    // ADR-0257
+    // ADR-0262
     fn consume_live_line(&mut self, line: &[u8], events: &mut Vec<OutputEvent>) {
         let first = events.len();
         Self::consume_line(
@@ -1164,9 +1165,10 @@ impl ClaudeStreamDecoder {
         }
     }
 
-    /// 문에 하나를 알린다(문 자물쇠 한 구간). 펌프는 decode 를 아무 락 없이 부르므로 문 자물쇠가 잎이라는 규칙이
-    /// 선다. 자리가 비었으면 아무것도 안 한다.
-    // ADR-0257
+    /// 문에 하나를 알린다(문 자물쇠 한 구간). 펌프는 decode 를 아무 락 없이 부르므로 다른 락에서 문 자물쇠로 드는
+    /// 간선이 생기지 않는다 — 문 자물쇠가 잎이라는 것(쥔 채 아무것도 잡지 않는다)은 [`GateCell`] 쪽이 지킨다. 자리가
+    /// 비었으면 아무것도 안 한다.
+    // ADR-0262
     fn move_gate(&mut self, to: GateMove) {
         let Some(gate) = self.gate.get() else {
             return;
@@ -6205,7 +6207,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── ADR-0257: decoder · 끊기 줄 함수 ↔ 끊기 에피소드 ──────────────────────────────────────────────────
+    // ── ADR-0262: decoder · 끊기 줄 함수 ↔ 끊기 에피소드 ──────────────────────────────────────────────────
 
     /// 정리기를 품은 문과 그 문을 나눠 쥔 decoder · 끊기 줄 함수 — `open_spawn` 의 조립에서 무리만 이미 사라진 손잡이로
     /// 바꾼 모양. 포트를 못 써 에피소드의 스냅숏은 실패로 서지만 에피소드는 선다. 시험은 쓰기 확인을 부르지 않으므로
@@ -6236,7 +6238,7 @@ mod tests {
 
     /// 스폰 직후 · 턴 끝 뒤의 끊기는 줄도 에피소드도 없다 · 진행 줄이 연 문의 끊기는 쓰기 확인을 실은 줄을 주고
     /// 에피소드를 연다 · 같은 턴의 진행 줄은 에피소드를 건드리지 않는다 · `result` 가 문을 닫고 에피소드를 버린다.
-    // ADR-0257
+    // ADR-0262
     #[test]
     fn an_interrupt_on_an_open_turn_opens_an_episode_that_the_turn_end_drops() {
         let (mut decoder, line, gate) = cleaned_decoder();
@@ -6265,7 +6267,7 @@ mod tests {
     }
 
     /// 끊긴 `result`(`TurnEnd{Interrupted}`)도 턴 끝이다 — 문을 닫고 에피소드를 버린다.
-    // ADR-0257
+    // ADR-0262
     #[test]
     fn an_interrupted_result_also_drops_the_episode() {
         let (mut decoder, line, gate) = cleaned_decoder();
@@ -6287,7 +6289,7 @@ mod tests {
 
     /// 열린 턴에 닿은 둘째 새 입력(`started`)은 그 턴의 끊기 에피소드를 버리고 문은 열어 둔다 — 그 뒤 끊기는 새
     /// 에피소드를 연다.
-    // ADR-0257
+    // ADR-0262
     #[test]
     fn a_second_started_drops_the_episode_and_keeps_the_turn_open() {
         let (mut decoder, line, gate) = cleaned_decoder();
@@ -6312,7 +6314,7 @@ mod tests {
 
     /// 턴을 여는 `started` 는 문에 한 번(새 입력)만 알린다 — 「연다」를 따로 부르지 않는다. 진행 줄이 이어져도 문은
     /// 닫힘 → 열림일 때만 부르고, 턴 끝마다 한 번 닫는다 — 픽스처의 세 턴 = 여섯 번.
-    // ADR-0257
+    // ADR-0262
     #[test]
     fn the_opening_started_is_one_move_and_progress_moves_only_at_transitions() {
         let (mut decoder, _line, gate) = cleaned_decoder();
@@ -6352,7 +6354,7 @@ mod tests {
 
     /// 이어받기 원문은 문에 닿지 않는다 — 진행 · 끊긴 `result` 가 든 턴 하나를 이어받아도 닫힌 문은 닫힌 채, 열린 문과
     /// 그 에피소드는 그대로다.
-    // ADR-0257
+    // ADR-0262
     #[test]
     fn transcript_lines_never_touch_the_gate() {
         let (mut decoder, line, gate) = cleaned_decoder();
@@ -6368,7 +6370,7 @@ mod tests {
     }
 
     /// 정리기는 통로의 프로세스 무리와 뿌리 PID 가 함께 있어야 선다 — 뿌리 PID 가 없거나 0 이면 문만 여닫는다.
-    // ADR-0257
+    // ADR-0262
     #[cfg(windows)]
     #[test]
     fn the_cleaner_needs_the_process_group_and_a_root_pid() {

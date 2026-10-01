@@ -1,0 +1,47 @@
+crates/engram-dashboard-agent/src\transport\stdio.rs:593:    fn an_injected_interrupt_line_is_queued_whole_and_a_closed_answer_is_unsupported() {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:443:                let gate_slot = GateSlot::default();
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:444:                let decoder = stream_decoder(Arc::clone(&delivery_ack), Arc::clone(&gate_slot));
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:446:                let gate = GateCell::new(leftover_cleaner(&t, pid, control.map(|c| c.agent_id)));
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:448:                (Box::new(t.with_interrupt(interrupt_line(gate))), pid)
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:490:    fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:492:            Some(stream_decoder(
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:494:                GateSlot::default(),
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:759:/// ([`interrupt_line`])는 같은 문을 직접 쥔다.
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:786:type GateSlot = Arc<OnceLock<Arc<GateCell>>>;
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:792:fn leftover_cleaner(
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:822:fn interrupt_line_bytes(request_uuid: Uuid) -> Vec<u8> {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:853:fn interrupt_line(gate: Arc<GateCell>) -> InterruptLine {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:854:    Arc::new(move || gate.interrupt(interrupt_line_bytes(Uuid::new_v4())))
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:959:fn stream_decoder(ack: Arc<DeliveryAck>, gate: GateSlot) -> Box<dyn OutputDecoder> {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:1032:    gate: GateSlot,
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:1071:    fn live(ack: Arc<DeliveryAck>, gate: GateSlot) -> Self {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:5690:        (decoder, interrupt_line(gate))
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:5722:    fn interrupt_line_bytes_golden_and_its_answer_is_not_translated() {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:5724:        let line = interrupt_line_bytes(id);
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:5921:    fn each_interrupt_line_carries_a_fresh_request_id() {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:5984:    fn the_synthetic_interrupt_lines_become_interrupted_notes_live_and_in_transcripts() {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:6145:    fn the_json_spawn_shares_one_gate_between_its_decoder_and_its_interrupt_line() {
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:6224:        (decoder, interrupt_line(Arc::clone(&gate)), gate)
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:6384:        assert!(leftover_cleaner(&t, pid, None).is_some());
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:6385:        assert!(leftover_cleaner(&t, None, None).is_none());
+crates/engram-dashboard-agent/src\backend\claude\mod.rs:6386:        assert!(leftover_cleaner(&t, Some(0), None).is_none());
+crates/engram-dashboard-agent/src\backend\codex\mod.rs:1073:                self.output_decoder(command),
+crates/engram-dashboard-agent/src\backend\codex\mod.rs:1159:    fn output_decoder(&self, command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+crates/engram-dashboard-agent/src\backend\codex\mod.rs:2260:        assert!(CodexBackend.output_decoder(&codex(vec![])).is_none());
+crates/engram-dashboard-agent/src\backend\codex\mod.rs:2262:            .output_decoder(&codex_app_server(vec![]))
+crates/engram-dashboard-agent/src\backend\mod.rs:606:    fn output_decoder(&self, _command: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+crates/engram-dashboard-agent/src\backend\mod.rs:997:/// [`AgentBackend::output_decoder`] 가 소유하고 이 함수는 dispatch 뿐이다 — session 은 encoder 태그만,
+crates/engram-dashboard-agent/src\backend\mod.rs:1000:pub fn output_decoder(c: &AgentCommand) -> Option<Box<dyn OutputDecoder>> {
+crates/engram-dashboard-agent/src\backend\mod.rs:1001:    backend_for(c).output_decoder(c)
+crates/engram-dashboard-agent/src\backend\mod.rs:1011:///   dispatch 만 부르고 경로 규칙을 모른다. `output_decoder`(라이브 정제)의 resume 방향 짝.
+crates/engram-dashboard-agent/src\backend\mod.rs:1482:    //   ② output_decoder 유무 — 출력이 구조화라 정제가 필요한가
+crates/engram-dashboard-agent/src\backend\mod.rs:1494:        // (input_encoder, output_decoder 유무, transport_shape)
+crates/engram-dashboard-agent/src\backend\mod.rs:1539:                output_decoder(c).is_some(),
+crates/engram-dashboard-agent/src\backend\mod.rs:1541:                "variant {c:?}: output_decoder 유무 불일치 — 위 expected_codec_axis 를 따라 의식적으로 선언할 것"
+crates/engram-dashboard-agent/src\backend\mod.rs:1744:    // ── S15 B3: output_decoder dispatch(입력 encoder 의 대칭) ──────────────────────
+crates/engram-dashboard-agent/src\backend\mod.rs:1746:    fn output_decoder_dispatch_by_mode() {
+crates/engram-dashboard-agent/src\backend\mod.rs:1760:            output_decoder(&term).is_none(),
+crates/engram-dashboard-agent/src\backend\mod.rs:1764:            output_decoder(&shell).is_none(),
+crates/engram-dashboard-agent/src\backend\mod.rs:1768:            output_decoder(&json).is_some(),
+crates/engram-dashboard-agent/src\backend\mod.rs:1774:    fn output_decoder_produces_structured_events_through_trait_object() {
+crates/engram-dashboard-agent/src\backend\mod.rs:1780:        let mut dec = output_decoder(&json).expect("json → decoder");

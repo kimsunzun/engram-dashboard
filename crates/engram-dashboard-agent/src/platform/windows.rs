@@ -3,7 +3,7 @@
 //! 통로가 띄운 자식 프로세스를 Job에 묶어, 우리가 명시적으로 죽이거나(TerminateJobObject)
 //! 호스트 프로세스가 크래시될 때(KILL_ON_JOB_CLOSE) 손자 프로세스까지 함께 정리한다.
 //! 멤버 하나씩 다루는 조각(명단 · 붙들기와 사실 · 끝내기)과 Job 가입 알림 포트도 여기다 — 무엇을 끝낼지는
-//! 모르고, 고르는 쪽이 준 번호가 이 Job 의 멤버인지만 확인해 붙든다(ADR-0257).
+//! 모르고, 고르는 쪽이 준 번호가 이 Job 의 멤버인지만 확인해 붙든다(ADR-0262).
 //!
 //! 호출 순서/플래그는 Phase 0 spike(examples/spike.rs)에서 Windows 실측 검증한 것과 동일하다.
 //! 이 파일은 platform 전용이라 windows crate import는 허용되지만, tauri import는 0개여야 한다.
@@ -39,7 +39,7 @@ use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStat
 
 /// 끊기 뒤 잔여물 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 그 정리가 끝낸 것을 알아본다.
 /// `shutdown()` 의 Job 통째 끝내기(1)와 겹치지 않게 골랐다.
-// ADR-0257
+// ADR-0262
 pub(crate) const LEFTOVER_EXIT_CODE: u32 = 0x7440;
 
 /// 운영에서 명단을 처음 물을 때의 칸 수. 모자라면 늘린다.
@@ -120,7 +120,7 @@ unsafe impl Send for BirthPort {}
 unsafe impl Sync for BirthPort {}
 
 /// [`PinnedMember::classify`] 의 답. `Gone` = 붙든 뒤 끝내기 전에 스스로 끝났다.
-// ADR-0257
+// ADR-0262
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemberOutcome {
     Terminated,
@@ -195,7 +195,7 @@ impl JobObjectHandle {
     ///
     /// ★완전할 때만 `Ok`★ — 되묻기 상한 안에 명단 수가 Job 의 멤버 수와 같아지지 않으면 `Err` 다. 빠진 멤버는
     /// 호출자에게 「우리 것이 아니다」로 읽힌다.
-    // ADR-0257
+    // ADR-0262
     pub(crate) fn member_pids(&self) -> io::Result<Vec<u32>> {
         self.member_pids_with_capacity(MEMBER_LIST_INITIAL)
     }
@@ -435,14 +435,14 @@ impl Drop for BirthPort {
 /// `TerminateProcess` 호출 하나. ★실패도 힙을 쓰지 않는 오류로 만든다★ — 자물쇠 안에서 불리므로
 /// `win_err`(`io::Error::other` = 상자 할당)를 쓰지 않는다. windows 0.58 의 `ok()` 는 `GetLastError` 를 읽기만 해
 /// 마지막 오류가 그대로 남아 있다.
-// ADR-0257
+// ADR-0262
 fn terminate_handle(handle: HANDLE, exit_code: u32) -> io::Result<()> {
     // SAFETY: 호출자가 쥔 유효 프로세스 핸들 — 끝내기 권한이 없으면 OS 가 거절한다.
     unsafe { TerminateProcess(handle, exit_code) }.map_err(|_| io::Error::last_os_error())
 }
 
 /// 끝내기 날것 결과 가르기 — 실패여도 그 사이 스스로 끝났으면 `Gone`.
-// ADR-0257
+// ADR-0262
 fn classify_terminate(handle: HANDLE, raw: io::Result<()>) -> io::Result<MemberOutcome> {
     match raw {
         Ok(()) => Ok(MemberOutcome::Terminated),

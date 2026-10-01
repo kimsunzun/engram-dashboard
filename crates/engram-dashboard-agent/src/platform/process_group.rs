@@ -14,7 +14,7 @@
 //! [`ProcessGroup::watch_births`] 가 `start` 를 부르는 동안이다(그래서 `start` 는 막히지 않아야 한다). 통로가
 //! 사라졌으면 명단은 비고 아무도 못 붙들며 포트는 [`GROUP_GONE`] 이다. 내준 붙든 멤버 · 포트 · 표시는 Job 을 붙들지
 //! 않는다.
-// ADR-0257
+// ADR-0262
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};

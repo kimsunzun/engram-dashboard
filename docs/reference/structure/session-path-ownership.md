@@ -152,13 +152,18 @@ shutdown ordering invariant below. `InputEvent` has exactly one variant, `Raw(Ve
 
 At the snapshot it returned `Err(PtyError::Unsupported("StdioTransport::interrupt (ADR-0044 MVP 미지원 —
 파이프 Ctrl-C 없음, 후속 스파이크)"))`. Since ADR-0238 the transport holds one field the list above predates:
-`interrupt: Option<InterruptLine>` (`InterruptLine` = `Arc<dyn Fn() -> Option<Vec<u8>> + Send + Sync>`), **injected by
+`interrupt: Option<InterruptLine>` (`InterruptLine` = `Arc<dyn Fn() -> Option<InterruptOut> + Send + Sync>`, and
+`InterruptOut { bytes, on_written: Option<OnWritten> }` since ADR-0262 — it was `Option<Vec<u8>>` under ADR-0238), **injected by
 the backend** through the builder `StdioTransport::with_interrupt` — the only production caller is the stream-json
 branch of `ClaudeBackend::open_spawn`; plain stdio and the other tests inject nothing (the stdio unit test
 `an_injected_interrupt_line_is_queued_whole_and_a_closed_answer_is_unsupported` injects its own). `interrupt()` pushes the returned line
-into the input queue when the function answers `Some`, and returns `Unsupported` when it answers `None` (no turn to
-interrupt — the claude `TurnGate` is closed) or when nothing was injected. The transport never interprets the
-bytes. `capabilities()` reports `control.interrupt = self.interrupt.is_some()` — "this transport can interrupt",
+into the input queue when the function answers `Some` (`push_with(bytes, on_written)` — the writer thread calls
+`on_written` after the line is written, holding no lock; a closed queue drops it), and returns `Unsupported` when it
+answers `None` (no turn to interrupt — the claude turn gate `GateCell` is closed; it was `TurnGate` before ADR-0262) or
+when nothing was injected. The transport never interprets the bytes or the callback. Since ADR-0262 the transport
+also owns a `retiring: Arc<AtomicBool>` flag, raised by `begin_retire()` (first line of `kill_agent`) and by the first
+line of `shutdown()`, and hands the backend only a weak process-group handle plus a read-only `RetiringSignal`
+(`process_group()`). `capabilities()` reports `control.interrupt = self.interrupt.is_some()` — "this transport can interrupt",
 not "a turn is running". The PTY side is the reverse since ADR-0245: `Unsupported` (see the PTY section below).
 
 ### `resize` (stdio.rs:310-314) — `Err(PtyError::Unsupported("… 파이프는 터미널 크기 없음"))`

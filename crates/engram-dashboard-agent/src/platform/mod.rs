@@ -5,7 +5,7 @@
 //! PID liveness 헬퍼는 여기 없다 — 소비자가 이 crate 밖에 셋이라 `engram-dashboard-base` 의
 //! `platform` 으로 이사했다(ADR-0175 결정 1). ★여기 있는 넷은 그 조건을 못 채운다★ — 소비자가 전부 이
 //! crate 안이다: Job Object 래퍼는 `transport::pty`·`transport::stdio`, `file_holders` 와 `process_tree` 는 codex
-//! 세션 id 회수(ADR-0218 결정 11), `process_group` 은 claude 끊기 뒤 잔여물 정리다(ADR-0257).
+//! 세션 id 회수(ADR-0218 결정 11), `process_group` 은 claude 끊기 뒤 잔여물 정리다(ADR-0262).
 //!
 //! ★Job Object 래퍼 말고는 crate 밖으로 안 나간다★ — 소비자가 전부 이 crate 안이다.
 

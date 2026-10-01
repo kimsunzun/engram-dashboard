@@ -162,7 +162,7 @@ impl StdioTransport {
 
     /// 이 통로가 띄운 프로세스 무리의 약한 손잡이 — 물러남 표시의 읽기 전용 사본을 함께 싣는다. 통로는 그것이
     /// 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」). `None` = 이 OS 에서는 무리를 묶는 수단이 없다(Windows 밖).
-    // ADR-0257
+    // ADR-0262
     pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
         #[cfg(windows)]
         {
@@ -791,7 +791,7 @@ mod tests {
         core.join_pump(Duration::from_secs(5));
     }
 
-    // ── 무리 손잡이(ADR-0257): 통로가 사는 동안 멤버가 보이고, 통로가 사라지면 명단은 비고 아무도 못 붙든다 ──
+    // ── 무리 손잡이(ADR-0262): 통로가 사는 동안 멤버가 보이고, 통로가 사라지면 명단은 비고 아무도 못 붙든다 ──
     // `shutdown()` 없이 drop 만 한다 — shutdown 은 Job 을 통째 끝내 손잡이가 강해도 명단이 빈다. drop 만이면
     // 손잡이가 약할 때만 Job 핸들이 닫혀(`KILL_ON_JOB_CLOSE`) 무리가 끝나고, 강하면 ping 이 명단에 남는다. 붙든
     // 멤버도 Job 을 붙들지 않아야 무리가 끝난다 — 뿌리와 ping 을 붙든 채 버린다.

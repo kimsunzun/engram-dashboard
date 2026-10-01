@@ -17,7 +17,7 @@
 //!   할당과 해제 · OS 호출 · 다른 자물쇠는 하지 않는다(유일한 예외는 끝내기 확정의 끝내기 호출 하나). 빼낸 것은 놓은 뒤
 //!   버린다. 기록 자물쇠와 겹쳐 잡지 않는다.
 //! 명세 = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
-// ADR-0257
+// ADR-0262
 
 use std::any::Any;
 use std::fmt;
@@ -111,7 +111,7 @@ pub(super) fn candidates<'a>(view: &Chain<'a>, w: &[u32]) -> Vec<&'a Link<'a>> {
 ///    않는다). 4. 꼭대기 T 가 훅 실행기이고, 이 기록에 claude 가 띄운 `taskkill /PID <T> /T /F` 가 T 이후에 태어났다.
 ///
 /// `exited` 는 D 와 claude 직전까지의 조상에만 부른다.
-// ADR-0257
+// ADR-0262
 pub(super) fn select(c: &Link<'_>, view: &Chain<'_>) -> Verdict {
     if view.root_pid == 0 {
         return Verdict::Unknown;
@@ -345,7 +345,7 @@ impl Birth {
 /// ★기록 자물쇠는 잎이다★ — 쥔 채 필드 · `Vec` · `Arc` 복제 · 꺼내기만 하고, OS 호출 · 핸들 닫기(`Arc<Birth>` 의
 /// 마지막 drop) · 로그 · 다른 자물쇠는 하지 않는다. 문 자물쇠와 겹쳐 잡지 않는다. 그래서 꺼낸 기록은 돌려주고, 받은
 /// 쪽이 자물쇠가 놓인 뒤 버린다. 독에 걸려도 그대로 쓴다.
-// ADR-0257
+// ADR-0262
 pub(super) struct Recorder {
     /// 쓰기는 자물쇠 안에서만 — 「같은 기록인가」 판정과 넣기 · 꺼내기가 한 구간이 된다.
     active: AtomicU64,
@@ -561,7 +561,7 @@ impl Group for ProcessGroup {
 
 /// 화신 하나의 가입 알림 포트 확보 — 처음 부른 이만 포트를 만들고 듣는 스레드를 띄우고 무리를 붙이며, 그 뒤로는 그
 /// 결과를 읽는다. 무리에 두 번째 `watch_births` 가 가지 않게 막는 것이 이것이다(OS 의 거절에 기대지 않는다).
-// ADR-0257
+// ADR-0262
 pub(super) struct BirthWatch {
     acquired: OnceLock<Result<(), ()>>,
 }
@@ -707,7 +707,7 @@ impl fmt::Display for Failure {
 ///
 /// ★차례마다 `catch_unwind` 를 두르지만 릴리스는 `panic = "abort"` 다★ — 그래서 몸통은 패닉하지 않게 짠다(풀기 ·
 /// 첨자 없음 · 독 견딤). 두른 것은 unwind 빌드(개발 · 시험)의 안전망이다.
-// ADR-0257
+// ADR-0262
 fn listen<G: Group>(l: Listener<G>) {
     if let Ok(false) = l.attached.recv() {
         return;
@@ -927,6 +927,7 @@ fn micros(d: Duration) -> u64 {
 /// (스파이크 2026-09-29): 멈춤 아닌 끊기의 `result` ≤ 1394 ms · 끊기 뒤 생긴 정상 프로세스의 최장 수명 1171 ms ·
 /// 끊기 +3 s 에 살아 있던 것은 11/11 시행에서 멈춤 잔여물뿐.
 // ADR-0257
+// ADR-0262
 pub(super) const INTERRUPT_LEFTOVER_GRACE: Duration = Duration::from_secs(3);
 
 /// 스냅숏이 붙드는 멤버 수의 상한 — 명단이 이보다 길면 그 에피소드는 `Failed(too_many)` 다.
@@ -937,7 +938,7 @@ const ROOT_CHILDREN_MAX: usize = 2;
 
 /// 한 판이 끝내기까지 가는 차례의 상한 — 잰 가장 긴 판이 2 차례(p3bg: 주인 → 그 fork)이고 한 차례를 여유로 둔다.
 /// 그 뒤에도 끝낼 후보가 남으면 끝내지 않고 warn `rounds_exhausted`.
-// ADR-0257
+// ADR-0262
 pub(super) const PASS_ROUNDS: u32 = 3;
 
 /// 한 차례에 끝낸 것들의 끝남 확인 마감 — 차례마다 하나를 나눠 쓴다. 그래서 판의 기다림은 많아야
@@ -948,7 +949,7 @@ const WORKER_THREAD: &str = "engram-claude-leftover";
 const LISTENER_THREAD: &str = "engram-claude-births";
 
 /// 정리기가 읽는 단조 시계 · 기다림 · 스레드 기동 — 실물 = [`SystemClock`]. 일꾼과 듣는 스레드가 이것으로 뜬다.
-// ADR-0257
+// ADR-0262
 pub(super) trait LeftoverClock: Send + Sync {
     /// ★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다.
     fn mono_now(&self) -> Instant;
@@ -1506,7 +1507,7 @@ impl GateState {
 
 /// 한 화신의 정리기 — 무리 손잡이 · 탄생 기록 · 포트 확보 · 시계 · 뿌리 · 물러남 표시 · 로그 귀속. 조립하지 못하면
 /// 만들지 않는다(그때 [`GateCell`] 은 문만 여닫는다).
-// ADR-0257
+// ADR-0262
 pub(super) struct Cleaner<G: Group = ProcessGroup> {
     group: Arc<G>,
     recorder: Arc<Recorder>,
@@ -1562,7 +1563,7 @@ impl<G: Group> Cleaner<G> {
 
 /// 새 에피소드의 스냅숏 [고름] — 완전한 명단의 멤버마다 조회 권한만으로 붙들어 사실을 읽는다. 못 붙든 뿌리 밖 멤버
 /// (끝남 · 무리 밖 · 거절)는 빠진다 — 알려지지 않은 고리라 그 아래는 놓친다. 두 자물쇠 밖에서 부른다.
-// ADR-0257
+// ADR-0262
 fn take_snapshot<G: Group>(group: &G, root_pid: u32) -> SnapState {
     let Ok(pids) = group.member_pids() else {
         return SnapState::Failed(SnapCause::List);
@@ -1627,7 +1628,7 @@ fn write_list<G: Group>(group: &G) -> Result<Arc<[u32]>, Unlisted> {
 }
 
 /// 턴 열림 문 + 끊기 에피소드 — 화신마다 하나, 끊기 줄 함수 · decoder · 쓰기 확인 · 일꾼이 같은 `Arc` 로 쥔다.
-// ADR-0257
+// ADR-0262
 pub(super) struct GateCell<G: Group = ProcessGroup> {
     state: Mutex<GateState>,
     cleaner: Option<Arc<Cleaner<G>>>,
@@ -1722,7 +1723,7 @@ impl<G: Group> GateCell<G> {
     ///
     /// 여는 이는 하나다: 자물쇠 밖에서 포트를 확보하고 → 기록을 켜고 → 스냅숏을 찍는다. ★기록을 스냅숏 앞에 켠다★ —
     /// 그 사이 태어난 것은 기록되거나(명단 뒤) 스냅숏에 든다(명단 앞).
-    // ADR-0257
+    // ADR-0262
     pub(super) fn interrupt(self: &Arc<Self>, bytes: Vec<u8>) -> Option<InterruptOut> {
         let Some(cleaner) = self.cleaner.as_ref() else {
             let open = self.lock().open;
@@ -1975,7 +1976,7 @@ impl<G: Group> GateCell<G> {
 /// ★패닉 가드는 unwind 빌드(개발 · 시험)에서만 선다 — 릴리스는 `panic = "abort"` 다★. 그래서 몸통은 패닉하지 않게
 /// 짠다(풀기 · 첨자 없음 · 독 견딤). 되감기면 지금 에피소드를 `Done` 으로 내리고 쥔 것을 놓는다 — 일꾼 없이 쓰인
 /// 에피소드가 남지 않게.
-// ADR-0257
+// ADR-0262
 fn run_worker<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) {
     let mut guard = WorkerGuard { cell, armed: true };
     while worker_turn(cell, cleaner) {}
@@ -2141,7 +2142,7 @@ struct PassReport {
 /// 끝났거나 끝내기가 실패한 것이 다음 차례에 산 것으로 보여 거듭 끝내지 않게).
 ///
 /// 늘 판 끝으로 매듭짓고, 로그 · 복사한 기록 · `ticket` 은 두 자물쇠 밖에서 버린다.
-// ADR-0257
+// ADR-0262
 fn run_pass<G: Group>(
     cell: &Arc<GateCell<G>>,
     cleaner: &Arc<Cleaner<G>>,
@@ -2221,7 +2222,7 @@ fn kill_rounds<G: Group>(
             }
             // ★끝내기 확정 — 재확인과 끝내기 호출 하나만 자물쇠 안★(TRD §3-3 「자물쇠 규칙」 ⓑ). 가르기 · 로그 ·
             //   핸들 버리기는 놓은 뒤다. 표식은 여기서 한 번 더 읽는다 — 남는 겹침은 이 읽기 직후의 끝내기 하나다.
-            // ADR-0257
+            // ADR-0262
             let committed = {
                 let mut state = cell.lock();
                 let now = cleaner.clock.mono_now();

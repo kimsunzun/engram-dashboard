@@ -1,0 +1,12 @@
+# Contract for the change under review (blind — what it must do, not why)
+
+Rust crate `crates/engram-dashboard-agent` (Windows-first, must stay portable). The change is preparatory: new items are not yet called from production paths (a later change wires them), except `begin_retire` (called by the manager) and the input-queue/InterruptOut shape.
+
+## Must hold
+1. `JobObjectHandle::pin_member(pid, kill)`: opens the process (query-limited + synchronize, + terminate if `kill`), returns `Ok(None)` if the pid is gone or the opened process is not in OUR job (membership checked on the SAME handle), otherwise pins that handle and reads facts once: parent pid, creation time, image path, command line. Unreadable facts → empty/0. Terminate only via that pinned handle; a non-kill pin must be unable to terminate.
+2. `watch_births(start)`: create a completion port; pass it (Arc) to `start`; ONLY if `start` returns Ok, associate the job with the port. `unwatch_births` detaches (NULL port). `BirthPort::next(wait)` → `Joined(pid)` for new-process messages with our key, `Other` otherwise, `Timeout` on wait timeout, `Err` otherwise. Port closes on last Arc drop. Must never dereference the message pointer.
+3. Neutral `ProcessGroup` (holds only a Weak to the job + a read-only retiring signal): list members, pin, watch/unwatch, retiring(). Job gone → empty list / `Ok(None)` / a distinct error kind (not a hard OS failure). Non-Windows → empty / `Ok(None)` / Unsupported. Nothing here may keep the job alive beyond a call.
+4. `AgentTransport::begin_retire()` default no-op; stdio transport sets a flag in `begin_retire` and as the first thing in `shutdown`; the flag is exposed read-only (no setter on the signal). Manager calls it first in `kill_agent` (no lock held, before revocation/intent/Exiting/shutdown) and in failed-activation teardown right after the incarnation check. It must not emit observable outcomes.
+5. Input queue: chunks carry an optional `on_written: FnOnce`. It runs exactly once, after the chunk's bytes were written, with no queue lock held, isolated from panics (panic → warn, writing continues). Never runs if the chunk was not written (queue closed, write failed, push refused). A callback that pushes to the same queue must not deadlock.
+6. Existing behaviour otherwise unchanged; PTY transport untouched; kill path order unchanged except the prepended flag store.
+7. Tests: real-process tests ≤4 processes each, deterministic (no sleeps as sync where avoidable).
