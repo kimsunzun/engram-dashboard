@@ -450,10 +450,10 @@ describe('폭 단계', () => {
       expect(m.querySelector('[aria-label]')).toBeNull()
       expect(m.querySelector('[title]')).toBeNull()
       expect(m.textContent).toContain('62%')
-      // 보이는 쪽과 같은 모양 — 한 격자 · 아이콘 · 리셋 시각. 갱신 중 표식은 조회가 없어도 늘 센다.
+      // 보이는 쪽과 같은 모양 — 한 격자 · 아이콘 · 리셋 시각.
       expect((m.firstElementChild as HTMLElement).style.display).toBe('grid')
       expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(1)
-      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(1)
+      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(0)
       expect(m.querySelectorAll('svg.lucide-hourglass')).toHaveLength(2)
       expect(m.textContent).toContain(resetText(NOW + 7_980))
     }
@@ -587,19 +587,24 @@ describe('오래됨 · 만료 · 갱신 중', () => {
     expect(client.getUsageSnapshot).toHaveBeenCalledTimes(1)
   })
 
-  it('「갱신 중」 = ⟳ 대기 또는 스냅숏 in_flight — 값은 그대로', () => {
+  it('조회 중 = ⟳ 대기 또는 스냅숏 in_flight — ⟳ 의 표식이 회사를 싣고, 값은 그대로(ADR-0261)', () => {
     seed(snap('claude', { in_flight: true }))
     seed(snap('codex'))
     mount()
-    const mark = q('[data-usage-refreshing="claude"]')!
-    expect(mark.getAttribute('aria-label')).toBe('갱신 중')
+    expect(refreshButton()!.getAttribute('data-usage-refreshing')).toBe('claude')
     expect(valueOf('claude', 'five_hour')!.textContent).toBe('62%')
-    expect(q('[data-usage-refreshing="codex"]')).toBeNull()
     act(() => useUsageStore.setState({ pending: { codex: 1 } }))
-    expect(q('[data-usage-refreshing="codex"]')).not.toBeNull()
+    expect(refreshButton()!.getAttribute('data-usage-refreshing')).toBe('claude codex')
     expect(valueOf('codex', 'five_hour')!.textContent).toBe('62%')
     const popup = openPopup()
-    expect(q('[data-usage-popup-vendor="codex"] [data-usage-refreshing-text]', popup)!.textContent).toBe('갱신 중')
+    expect(vendorRefresh(popup, 'codex').getAttribute('data-usage-refreshing')).toBe('codex')
+    expect(q('[data-usage-refreshing-text]', popup)).toBeNull()
+    act(() => {
+      useUsageStore.setState({ pending: {} })
+      seed(snap('claude', { revision: 2 }))
+    })
+    expect(refreshButton()!.hasAttribute('data-usage-refreshing')).toBe(false)
+    expect(vendorRefresh(popup, 'codex').hasAttribute('data-usage-refreshing')).toBe(false)
   })
 
   it('나이·남은 시간·다음 시도가 분 tick 하나로 로컬로 흐른다(요청 없음)', () => {
@@ -794,7 +799,7 @@ describe('팝업', () => {
 describe('팝업 회사 머리', () => {
   const REJECTED = { kind: 'Rejected' as const, retry_in_secs: 600, detail: null }
 
-  it('머리 = 아이콘·이름 · 플랜 · 「·」 · 나이 + ⟳(붙어 있다) · 갱신 중이면 끝에 「갱신 중」 — 시계 아이콘 없음', () => {
+  it('머리 = 아이콘·이름 · 플랜 · 「·」 · 나이 + ⟳(붙어 있다) · 갱신 중이어도 글자를 더하지 않는다 — 시계 아이콘 없음', () => {
     seed(
       snap('claude', {
         plan: 'max',
@@ -819,8 +824,9 @@ describe('팝업 회사 머리', () => {
       vendorRefresh(popup, 'claude'),
     ])
     act(() => useUsageStore.setState({ pending: { claude: 1 } }))
-    expect(head.lastElementChild!.hasAttribute('data-usage-refreshing-text')).toBe(true)
-    expect(head.lastElementChild!.textContent).toBe('갱신 중')
+    expect(head.children).toHaveLength(4)
+    expect(head.textContent).not.toContain('갱신 중')
+    expect(vendorRefresh(popup, 'claude').getAttribute('data-usage-refreshing')).toBe('claude')
     expect(vendorRefresh(popup, 'claude').parentElement).toBe(group)
   })
 
@@ -1082,7 +1088,7 @@ describe('리셋 표기 = 모래시계', () => {
     }
   })
 
-  it('↻ 모양(RefreshCw)은 ⟳ 와 갱신 중 표식에만 — 리셋 자리에 화살표 아이콘이 없다', () => {
+  it('↻ 모양(RefreshCw)은 ⟳ 버튼에만 — 리셋 자리에 화살표 아이콘이 없고 측정 사본에도 없다(ADR-0261)', () => {
     seed(snap('claude', { in_flight: true }))
     mount(true, false)
     openPopup()
@@ -1091,11 +1097,10 @@ describe('리셋 표기 = 모래시계', () => {
     for (const el of resets) {
       for (const svg of el.querySelectorAll('svg')) expect(svg.getAttribute('class')).not.toMatch(NOT_HOURGLASS)
     }
-    for (const svg of document.querySelectorAll('svg.lucide-refresh-cw')) {
-      expect(
-        svg.closest('[data-usage-refresh], [data-usage-vendor-refresh], [data-usage-refreshing], [data-usage-measure]'),
-      ).not.toBeNull()
-    }
+    const icons = [...document.querySelectorAll('svg.lucide-refresh-cw')]
+    expect(icons.length).toBeGreaterThan(0)
+    for (const svg of icons) expect(svg.closest('[data-usage-refresh], [data-usage-vendor-refresh]')).not.toBeNull()
+    expect(document.querySelectorAll('[data-usage-measure] svg.lucide-refresh-cw')).toHaveLength(0)
   })
 })
 
@@ -1163,12 +1168,12 @@ describe('작은 표시의 ⟳', () => {
     expect(client.refreshUsageLimits.mock.calls.map(c => c[0])).toEqual(['codex'])
   })
 
-  it('대상의 조회가 도는 동안의 누름은 버린다 — 「갱신 중」이 보이고, 답이 오면 다시 받는다', () => {
+  it('대상의 조회가 도는 동안의 누름은 버린다 — ⟳ 가 돌고, 답이 오면 다시 받는다', () => {
     seed(snap('claude'))
     seed(snap('codex'))
     mount()
     act(() => useUsageStore.setState({ pending: { codex: 1 } }))
-    expect(q('[data-usage-refreshing="codex"]')).not.toBeNull()
+    expect(refreshButton()!.getAttribute('data-usage-refreshing')).toBe('codex')
     expect(refreshButton()!.getAttribute('aria-busy')).toBe('true')
     fireEvent.click(refreshButton()!)
     expect(client.refreshUsageLimits).not.toHaveBeenCalled()
@@ -1430,92 +1435,22 @@ describe('단계 측정과 ⟳', () => {
     expect(summary().style.flexGrow).toBe('1')
   })
 
-  it('3단 — 쉬는 줄은 끝에 갱신 중 표식과 같은 모양·폭의 빈자리, 갱신 중인 줄은 앞의 표식만(⟳ 가 움직이지 않게)', () => {
-    seed(snap('claude'))
-    seed(snap('codex'))
-    mount()
-    toStage(3)
-    const nameUnitOf = (vendor: AgentBackendKind) => q(`[data-usage-icon="${vendor}"]`, summary())!.parentElement!
-    const numbersOf = (vendor: AgentBackendKind) => q('[data-usage-numbers]', nameUnitOf(vendor).parentElement!)!
-    const spaceOf = (vendor: AgentBackendKind) => numbersOf(vendor).nextElementSibling as HTMLElement | null
-    for (const vendor of ['claude', 'codex'] as const) {
-      const line = nameUnitOf(vendor).parentElement!
-      const group = numbersOf(vendor).parentElement!
-      expect([...line.children]).toEqual([nameUnitOf(vendor), group])
-      expect(group.style.flexWrap).toBe('wrap')
-      const space = spaceOf(vendor)!
-      expect([...group.children]).toEqual([numbersOf(vendor), space])
-      // 드러나지 않는다 — 보조기술에도, cdp 값 표식에도.
-      expect(space.getAttribute('aria-hidden')).toBe('true')
-      expect(space.style.visibility).toBe('hidden')
-      for (const el of [space, ...space.querySelectorAll('*')]) {
-        const names = el.getAttributeNames()
-        expect(names.filter(a => a.startsWith('data-usage') || a === 'role' || a === 'title' || a === 'aria-label')).toEqual(
-          [],
-        )
-      }
-      // 좁을 때 먼저 다음 줄로 넘어가 사라진다 — 넘어간 줄이 높이를 보태지 않는다.
-      expect(space.style.height).toBe('0px')
-      expect(space.style.flexShrink).toBe('0')
-      expect(space.style.marginLeft).toBe(nameUnitOf(vendor).style.gap)
-      expect(q('[data-usage-refreshing]', nameUnitOf(vendor))).toBeNull()
-    }
-    const idleCopy = spaceOf('claude')!.firstElementChild as HTMLElement
-    act(() => useUsageStore.setState({ pending: { claude: 1 } }))
-    // 갱신 중인 줄: 빈자리가 빠지고 이름 묶음에 표식이 든다 — 같은 모양(돌기만 다르다) · 같은 틈.
-    expect(spaceOf('claude')).toBeNull()
-    expect([...numbersOf('claude').parentElement!.children]).toEqual([numbersOf('claude')])
-    const mark = q('[data-usage-refreshing="claude"]', nameUnitOf('claude'))!
-    expect(mark.style.cssText).toBe(idleCopy.style.cssText)
-    const cls = (el: Element) => el.querySelector('svg')!.getAttribute('class')!.replace('animate-spin', '').trim()
-    expect(cls(mark)).toBe(cls(idleCopy))
-    expect(idleCopy.querySelector('svg')!.getAttribute('class')).not.toContain('animate-spin')
-    // 다른 회사 줄은 그대로 빈자리를 둔다.
-    expect(spaceOf('codex')).not.toBeNull()
-    act(() => useUsageStore.setState({ pending: {} }))
-    expect(spaceOf('claude')).not.toBeNull()
-    expect(q('[data-usage-refreshing]', summary())).toBeNull()
-  })
-
-  it('측정 사본은 조회 여부와 상관없이 같다 — 갱신 중 표식을 늘 세어, ⟳ 를 눌러도 단계 판정 입력이 바뀌지 않는다', () => {
+  it('조회가 켜지고 꺼져도 작은 표시 내용·측정 사본이 같다 — 조회 중 표시는 ⟳ 의 회전뿐(ADR-0261)', () => {
     seed(snap('claude'))
     seed(snap('codex'))
     mount()
     const copies = () => ['1', '2'].map(n => q(`[data-usage-measure="${n}"]`)!.innerHTML)
     const idle = copies()
-    for (const n of ['1', '2']) {
-      const m = q(`[data-usage-measure="${n}"]`)!
-      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(2)
-      for (const svg of m.querySelectorAll('svg.lucide')) expect(svg.getAttribute('class')).not.toContain('animate-spin')
-    }
-    act(() => useUsageStore.setState({ pending: { claude: 1 } }))
-    expect(q('[data-usage-refreshing="claude"]', summary())).not.toBeNull()
-    expect(copies()).toEqual(idle)
-    act(() => {
-      useUsageStore.setState({ pending: {} })
-      seed(snap('codex', { in_flight: true }))
-    })
-    expect(q('[data-usage-refreshing="codex"]', summary())).not.toBeNull()
-    expect(copies()).toEqual(idle)
-    act(() => seed(snap('codex')))
-    expect(q('[data-usage-refreshing]', summary())).toBeNull()
-    expect(copies()).toEqual(idle)
-  })
-
-  it('1·2단과 측정 사본엔 빈자리가 없다(막대 칸이 표식 폭을 받는다)', () => {
-    seed(snap('claude'))
-    mount(true, false)
-    const spaces = (root: ParentNode) =>
-      [...root.querySelectorAll<HTMLElement>('span[aria-hidden="true"]')].filter(
-        el => el.style.visibility === 'hidden' && el.style.height === '0px',
-      )
-    for (const n of [1, 2] as const) {
+    for (const n of [1, 2, 3] as const) {
       toStage(n)
-      expect(spaces(summary())).toEqual([])
+      const shown = q('[data-usage-content]')!.innerHTML
+      act(() => useUsageStore.setState({ pending: { claude: 1 } }))
+      expect(q('[data-usage-content]')!.innerHTML).toBe(shown)
+      expect(copies()).toEqual(idle)
+      expect(q('svg.lucide-refresh-cw', summary())).toBeNull()
+      act(() => useUsageStore.setState({ pending: {} }))
     }
-    for (const n of ['1', '2']) expect(spaces(q(`[data-usage-measure="${n}"]`)!)).toEqual([])
-    toStage(3)
-    expect(spaces(summary())).toHaveLength(1)
+    for (const n of ['1', '2']) expect(q(`[data-usage-measure="${n}"] svg.lucide-refresh-cw`)).toBeNull()
   })
 
   it('단계를 오가도 ⟳ 는 같은 요소로 남는다(폭이 단계에 따라 달라지지 않는다)', () => {
@@ -1674,14 +1609,63 @@ describe('팝업 자리 · 포커스 · Esc', () => {
     expect(document.activeElement).toBe(summary())
   })
 
-  it('갱신 중 표식은 돌고, 숨은 측정 사본은 돌지 않는다', () => {
+  it('조회 중엔 ⟳ 가 돌고, 조회가 끝나도 그 바퀴의 경계(animationiteration)까지는 돈다 · 꼬리 중 누름은 새 조회 + 처음부터(ADR-0261)', async () => {
     seed(snap('claude', { in_flight: true }))
     mount(true, false)
-    expect(q('[data-usage-refreshing="claude"] svg')!.getAttribute('class')).toContain('animate-spin')
-    for (const n of ['1', '2']) {
-      const svg = q(`[data-usage-measure="${n}"] svg.lucide-refresh-cw`)!
-      expect(svg.getAttribute('class')).not.toContain('animate-spin')
+    const svg = () => q('svg.lucide-refresh-cw', refreshButton()!)!
+    // jsdom 엔 AnimationEvent 가 없어 React 가 접두 붙은 이름으로 듣는다 — 두 이름을 다 쏜다.
+    const roundEnds = () => {
+      fireEvent.animationIteration(svg())
+      fireEvent(svg(), new Event('webkitAnimationIteration', { bubbles: true }))
     }
+    const expectTail = () => {
+      expect(svg().getAttribute('class')).toContain('animate-spin')
+      expect(refreshButton()!.hasAttribute('data-usage-refreshing')).toBe(false)
+      expect(refreshButton()!.hasAttribute('aria-busy')).toBe(false)
+    }
+    expect(svg().getAttribute('class')).toContain('animate-spin')
+    // 조회가 도는 동안의 경계에선 멈추지 않는다.
+    roundEnds()
+    expect(svg().getAttribute('class')).toContain('animate-spin')
+    // 꼬리 — 조회는 끝났고 돌던 바퀴를 마저 돈다. 조회 중이 아니므로 속성·aria-busy 가 없다.
+    act(() => seed(snap('claude', { revision: 2 })))
+    expectTail()
+    roundEnds()
+    expect(svg().getAttribute('class')).not.toContain('animate-spin')
+
+    // 경계 전에 누르면 = 보통 누름 — 명령 하나 · 아이콘을 새로 붙여 처음부터.
+    act(() => seed(snap('claude', { revision: 3, in_flight: true })))
+    act(() => seed(snap('claude', { revision: 4 })))
+    expectTail()
+    const tail = svg()
+    fireEvent.click(refreshButton()!)
+    expect(client.refreshUsageLimits.mock.calls.map(c => c[0])).toEqual(['claude'])
+    expect(svg()).not.toBe(tail)
+    expect(svg().getAttribute('class')).toContain('animate-spin')
+    await act(async () => {})
+  })
+
+  it('누르면 돌기 시작한다 · 조회 중 재누름은 조회 없이 회전만 처음부터(아이콘 교체) · 거절이면 돌지 않는다(ADR-0261)', () => {
+    seed(snap('claude'))
+    mount(true, false)
+    const svg = () => q('svg.lucide-refresh-cw', refreshButton()!)!
+    expect(svg().getAttribute('class')).not.toContain('animate-spin')
+    fireEvent.click(refreshButton()!)
+    expect(client.refreshUsageLimits).toHaveBeenCalledTimes(1)
+    const first = svg()
+    expect(first.getAttribute('class')).toContain('animate-spin')
+    act(() => useUsageStore.setState({ pending: { claude: 1 } }))
+    fireEvent.click(refreshButton()!)
+    expect(client.refreshUsageLimits).toHaveBeenCalledTimes(1)
+    expect(svg()).not.toBe(first)
+    expect(svg().getAttribute('class')).toContain('animate-spin')
+
+    cleanup()
+    seed(snap('claude', { revision: 3, state: { kind: 'Rejected', retry_in_secs: 600, detail: null } }))
+    useUsageStore.setState({ pending: {} })
+    mount(true, false)
+    fireEvent.click(refreshButton()!)
+    expect(svg().getAttribute('class')).not.toContain('animate-spin')
   })
 })
 
@@ -1878,6 +1862,63 @@ describe('한 격자 세로 정렬', () => {
   })
 })
 
+// ── 팝업 한 표(ADR-0261 · TRD §3 #108) — jsdom 은 배치를 계산하지 않아 구조·열 번호로 단언한다 ──
+describe('팝업 한 표', () => {
+  /** 팝업 창 줄에서 열 자리를 박은 칸들의 열(DOM 순서). */
+  function columns(row: HTMLElement): string[] {
+    return [...row.querySelectorAll<HTMLElement>('*')].filter(el => el.style.gridColumn !== '').map(el => el.style.gridColumn)
+  }
+
+  it('두 회사의 창 줄이 한 표에 든다 · 표는 tabular-nums · 값 줄 = 이름 1 · 막대 2 · % 3(오른쪽 맞춤) · 리셋 4 · 남은 시간 5', () => {
+    seed(snap('claude', { model_scoped: [{ label: 'Fable', window: { used_pct: 0, resets_at: NOW + 86_400 * 3, age_secs: 0, expired: false } }] }))
+    seed(snap('codex', { model_scoped: [{ label: 'gpt-reserve', window: { used_pct: 0, resets_at: NOW + 86_400 * 7, age_secs: 0, expired: false } }] }))
+    mount()
+    const popup = openPopup()
+    const tables = popup.querySelectorAll<HTMLElement>('[data-usage-popup-table]')
+    expect(tables).toHaveLength(1)
+    const table = tables[0]
+    expect(table.style.display).toBe('grid')
+    expect(table.style.fontVariantNumeric).toBe('tabular-nums')
+    const rows = [...popup.querySelectorAll<HTMLElement>('[data-usage-window]')]
+    expect(rows.map(r => `${r.getAttribute('data-usage-vendor')}:${r.getAttribute('data-usage-window')}`)).toEqual([
+      'claude:five_hour',
+      'claude:weekly',
+      'claude:model:Fable',
+      'codex:five_hour',
+      'codex:weekly',
+      'codex:model:gpt-reserve',
+    ])
+    for (const row of rows) {
+      expect(row.closest('[data-usage-popup-table]')).toBe(table)
+      expect(columns(row)).toEqual(['1', '2', '3', '4', '5'])
+      const pct = q('[data-usage-value]', row)!.parentElement!
+      expect(pct.style.gridColumn).toBe('3')
+      expect(pct.style.textAlign).toBe('right')
+    }
+  })
+
+  it('값 없는 줄은 % 가 그대로 3 열 · 리셋 없는 줄은 4·5 열이 빈다 · 만료 줄은 2 열부터 끝까지 덮는다', () => {
+    seed(
+      snap('claude', {
+        five_hour: { used_pct: null, resets_at: NOW + 600, age_secs: 0, expired: false },
+        weekly: { used_pct: 59, resets_at: null, age_secs: 0, expired: false },
+      }),
+    )
+    seed(snap('codex', { five_hour: { used_pct: 38, resets_at: NOW, age_secs: 0, expired: false } }))
+    mount()
+    const popup = openPopup()
+    const row = (vendor: string, window: string) => q(`[data-usage-vendor="${vendor}"][data-usage-window="${window}"]`, popup)!
+    const noValue = row('claude', 'five_hour')
+    expect(columns(noValue)).toEqual(['1', '3', '4', '5'])
+    expect(q('[data-usage-value]', noValue)!.textContent).toBe('—')
+    expect(q('[data-usage-value]', noValue)!.parentElement!.style.gridColumn).toBe('3')
+    expect(columns(row('claude', 'weekly'))).toEqual(['1', '2', '3'])
+    const expired = row('codex', 'five_hour')
+    expect(columns(expired)).toEqual(['1', '2 / -1'])
+    expect(q('[data-usage-value]', expired)!.textContent).toBe('리셋됨 — 갱신 대기')
+  })
+})
+
 describe('⚠ 없음(R10 개정 2026-09-29)', () => {
   it('20% 미만이어도 작은 표시(모든 단계·측정 사본)와 팝업 어디에도 ⚠ 가 없다', () => {
     const low = { used_pct: 99.5, resets_at: NOW + 600, age_secs: 0, expired: false }
@@ -1906,7 +1947,7 @@ describe('측정 사본과 단계 고르기', () => {
     expect(tracks((m2.firstElementChild as HTMLElement).style.gridTemplateColumns)).toHaveLength(5)
     for (const m of [m1, m2]) {
       expect(m.querySelectorAll('svg:not(.lucide)')).toHaveLength(2)
-      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(2)
+      expect(m.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(0)
       expect(m.querySelectorAll('svg.lucide-hourglass')).toHaveLength(4)
       expect(m.textContent).toContain(resetText(NOW + 86_400 * 3))
     }
@@ -1932,11 +1973,9 @@ describe('측정 사본과 단계 고르기', () => {
       const copyGrid = m[n].firstElementChild as HTMLElement
       expect(copyGrid.style.gridTemplateColumns).toBe(shownGrid.style.gridTemplateColumns)
       expect(m[n].textContent).toBe(shown.textContent)
-      // 회사 아이콘·모래시계는 같은 수 · 갱신 중 표식은 사본에만(조회가 없어도 회사마다 하나).
+      // 회사 아이콘·모래시계는 같은 수.
       expect(m[n].querySelectorAll('svg:not(.lucide)')).toHaveLength(shown.querySelectorAll('svg:not(.lucide)').length)
       expect(m[n].querySelectorAll('svg.lucide-hourglass')).toHaveLength(shown.querySelectorAll('svg.lucide-hourglass').length)
-      expect(shown.querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(0)
-      expect(m[n].querySelectorAll('svg.lucide-refresh-cw')).toHaveLength(2)
       const placed = shown.querySelectorAll('[style*="grid-column"]').length
       expect(placed).toBeGreaterThan(0)
       expect(m[n].querySelectorAll('[style*="grid-column"]')).toHaveLength(placed)

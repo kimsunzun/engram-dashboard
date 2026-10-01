@@ -355,9 +355,8 @@ function UsageSummary({
           ★⟳ 는 모든 단계에서 내용 바로 오른쪽이다★(위치 = ADR-0258 결정 1 · 사용자 2026-09-30 「알아서 잘 붙이도록」 ·
           방법 = TRD §3 #104) — 1·2단은 격자의 막대 칸(`1fr`)이 요약 버튼을 줄 끝까지 채우고, 3단은 채울 칸이 없어 줄이 제
           내용 폭으로 줄어든다. 내용이 슬롯보다 넓으면 줄은 슬롯 폭에서 멈추고(`maxWidth` — 없으면 줄바꿈 없는 줄의 최소
-          폭이 ⟳ 를 슬롯 밖으로 민다) 요약 버튼이 줄어 내용을 자른다 — ⟳ 자리는 줄지 않는다. 그래서 3단에선 내용 폭이
-          바뀌면 ⟳ 가 따라 움직인다: 갱신 중 표식은 폭을 바꾸지 않게 막고(`RefreshingMarkSpace`), 자릿수·배지처럼 값이
-          바뀐 것은 움직여도 둔다. */}
+          폭이 ⟳ 를 슬롯 밖으로 민다) 요약 버튼이 줄어 내용을 자른다 — ⟳ 자리는 줄지 않는다. 그래서 3단에선 자릿수·배지처럼
+          값이 바뀌어 내용 폭이 바뀌면 ⟳ 가 따라 움직인다. 조회 중 표시는 ⟳ 자신의 회전이라 내용 폭을 바꾸지 않는다(ADR-0261). */}
       <div
         ref={rowRef}
         data-usage-row=""
@@ -439,13 +438,19 @@ function UsageSummary({
  */
 function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: () => void }) {
   const targets = views.filter(v => !v.rejected)
+  // 회사별 조회 여부는 이 표식이 나른다(R27 — cdp·LLM) — 회전 하나로는 어느 회사가 도는지 안 보인다. 거절 중인 회사의
+  //   조회도 싣는다(회전은 대상만 본다).
+  const inFlight = views.filter(v => v.refreshing).map(v => v.vendor)
   return (
     <RefreshIconButton
       label={t('usage.refreshAll')}
       blocked={targets.length === 0}
       busy={targets.some(v => v.refreshing)}
       onRefresh={onRefresh}
-      attrs={{ 'data-usage-refresh': '' }}
+      attrs={{
+        'data-usage-refresh': '',
+        ...(inFlight.length > 0 ? { 'data-usage-refreshing': inFlight.join(' ') } : {}),
+      }}
       // 여백은 ⟳ 쪽에 둔다 — ⟳ 자리(`data-usage-refresh-area`)의 내용 폭이 이 여백까지 감싸 단계 판정의 ⟳ 몫에 든다.
       marginRight={SUMMARY_PAD_X_PX}
     />
@@ -454,7 +459,7 @@ function RefreshButton({ views, onRefresh }: { views: VendorView[]; onRefresh: (
 
 /**
  * ⟳ 모양 버튼 — 작은 표시의 ⟳ 와 팝업의 회사별 ⟳ 가 같은 누름 규칙을 쓴다(ADR-0259 결정 2 — 전역 ⟳ 규칙 준용).
- * `blocked` = 보이는 거절이라 누름을 막는다 · `busy` = 대상의 조회가 돌고 있어 누름을 버린다.
+ * `blocked` = 보이는 거절이라 누름을 막는다 · `busy` = 대상의 조회가 돌고 있어 누름을 버린다. 조회 중엔 아이콘이 돈다.
  */
 function RefreshIconButton({
   label,
@@ -471,9 +476,17 @@ function RefreshIconButton({
   attrs: Record<string, string>
   marginRight?: number
 }) {
+  // ADR-0261: 회전 = 조회가 켜지면(자동 조회 포함) 돌기 시작해, 조회가 끝난 뒤 돌던 바퀴의 경계(`animationiteration`)
+  //   에서 멈춘다 — 최소 한 바퀴이고, 끝에서 0° 로 튀지 않는다. 누름마다 아이콘을 새로 붙여 회전을 0° 부터 다시 시작한다
+  //   (누름의 확인 — 조회를 보내지 않은 누름도). 바퀴 길이는 `animate-spin`(1초) 그대로다.
+  // ★움직임 줄이기·e-ink 에서도 돈다★ — 이 저장소의 회전 기호 규칙(`agent/agentGlyph.css` · `ui/loading-panel.css` —
+  //   사용자 결정 2026-08-24·2026-09-24: 멈춘 스피너는 「멈춤」과 구분되지 않는다).
+  const [spinning, setSpinning] = useState(false)
+  const [spinRun, setSpinRun] = useState(0)
+  if (busy && !spinning) setSpinning(true)
   // ADR-0258: 누름을 막는 것은 아래 둘뿐이다 — 시간 간격은 두지 않는다(연타로 부를 429 는 받아들인 위험).
-  // 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않는다(R24 · D11). 조회가 도는 동안의 누름은 버린다 — 답이 올
-  //   때까지 「갱신 중」 표식이 그 동안을 보인다.
+  // 보이는 거절 중엔 막는다 — 기한 안엔 ⟳ 도 조회하지 않고 돌지도 않는다(R24 · D11). 조회가 도는 동안의 누름은 버린다 —
+  //   회전만 처음부터 다시 돈다(ADR-0261).
   return (
     <button
       type="button"
@@ -485,7 +498,10 @@ function RefreshIconButton({
       aria-disabled={blocked || undefined}
       aria-busy={busy || undefined}
       onClick={() => {
-        if (!blocked && !busy) onRefresh()
+        if (blocked) return
+        if (!busy) onRefresh()
+        setSpinning(true)
+        setSpinRun(n => n + 1)
       }}
       style={{
         display: 'inline-flex',
@@ -499,15 +515,21 @@ function RefreshIconButton({
         opacity: blocked ? 0.4 : undefined,
       }}
     >
-      <RefreshCw aria-hidden="true" className="size-3.5" />
+      <RefreshCw
+        key={spinRun}
+        aria-hidden="true"
+        className={spinning ? 'size-3.5 animate-spin' : 'size-3.5'}
+        onAnimationIteration={() => {
+          if (!busy) setSpinning(false)
+        }}
+      />
     </button>
   )
 }
 
 /**
  * `measure` = 크기만 재는 숨은 사본 — 같은 글자·같은 모양을 그리되 역할·이름·`data-usage-*`·애니메이션은 싣지 않는다
- * (cdp·보조기술이 값을 두 번 읽지 않게). 갱신 중 표식만은 조회 여부와 상관없이 늘 그린다(`NameUnit`). 줄도 `span` 인
- * 것은 요약 버튼 안에 들어가서다(버튼 내용 = phrasing).
+ * (cdp·보조기술이 값을 두 번 읽지 않게). 줄도 `span` 인 것은 요약 버튼 안에 들어가서다(버튼 내용 = phrasing).
  */
 function StageRender({
   stage,
@@ -584,60 +606,29 @@ function StageRender({
       {views.map(view => (
         <span key={view.vendor} style={LINE_STYLE}>
           <NameUnit view={view} measure={measure} />
-          <span style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center' }}>
-            {/* 말줄임은 숫자 쪽에만 — 아이콘·배지는 줄지 않아 잘리지 않는다(R31). */}
-            <span
-              data-usage-numbers=""
-              style={{
-                flex: '1 1 auto',
-                minWidth: 0,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}
-            >
-              {view.windows.map((w, i) => (
-                <Fragment key={w.key}>
-                  {i > 0 && '·'}
-                  <span {...windowAttrs(view, w, measure)}>
-                    <ValueText w={w} bare dimStale measure={measure} />
-                  </span>
-                </Fragment>
-              ))}
-            </span>
-            {!measure && !view.refreshing && <RefreshingMarkSpace view={view} />}
+          {/* 말줄임은 숫자 쪽에만 — 아이콘·배지는 줄지 않아 잘리지 않는다(R31). */}
+          <span
+            data-usage-numbers=""
+            style={{
+              flex: '1 1 auto',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {view.windows.map((w, i) => (
+              <Fragment key={w.key}>
+                {i > 0 && '·'}
+                <span {...windowAttrs(view, w, measure)}>
+                  <ValueText w={w} bare dimStale measure={measure} />
+                </span>
+              </Fragment>
+            ))}
           </span>
         </span>
       ))}
     </>
-  )
-}
-
-/**
- * 3단 줄 끝의 빈자리 — 갱신 중 표식이 없는 동안 그 표식(+ 이름 묶음 안의 틈)과 같은 폭을 비워 둔다. 3단은 줄이 내용
- * 폭으로 줄어들어 내용 폭이 곧 ⟳ 자리라서, 표식이 켜지고 꺼질 때 ⟳ 가 움직이지 않게 한다(조회 동안 옛 자리를 다시
- * 누르면 ⟳ 대신 요약 버튼이 눌려 팝업이 열린다).
- * ★숫자와 함께 줄바꿈 묶음에 들고 높이가 0 이다★ — 슬롯이 좁으면 이 자리가 먼저 다음 줄(높이 0)로 넘어가 사라지고, 그다음
- * 에야 숫자가 말줄임으로 줄어든다. 숫자 쪽에 넣으면 이 자리 때문에 말줄임이 먼저 나온다. 그래서 슬롯이 3단 내용보다 좁은
- * 동안엔 쉬는 숫자가 폭을 다 쓰고, 조회 중엔 표식 폭(약 14px)만큼 줄어 말줄임이 더 일찍 온다 — ⟳ 는 그때도 움직이지
- * 않는다(줄이 슬롯 폭에 묶여 있다).
- * 측정 사본엔 두지 않는다 — 사본의 이름 묶음이 표식을 늘 세므로(`NameUnit`) 여기까지 두면 두 번 센다.
- */
-function RefreshingMarkSpace({ view }: { view: VendorView }) {
-  return (
-    <span
-      aria-hidden="true"
-      style={{
-        flex: 'none',
-        display: 'inline-flex',
-        height: 0,
-        overflow: 'hidden',
-        visibility: 'hidden',
-        marginLeft: NAME_UNIT_GAP,
-      }}
-    >
-      <RefreshingMark view={view} measure />
-    </span>
   )
 }
 
@@ -647,7 +638,7 @@ function windowAttrs(view: VendorView, w: WindowView, measure: boolean): Record<
 
 const NAME_UNIT_GAP = '0.15em'
 
-/** 회사 아이콘 + 배지 + 갱신 중 표식 — 한 덩어리로 줄지 않는다(배지가 말줄임에 잘리지 않게 — R31). */
+/** 회사 아이콘 + 배지 — 한 덩어리로 줄지 않는다(배지가 말줄임에 잘리지 않게 — R31). */
 function NameUnit({ view, measure, cell }: { view: VendorView; measure: boolean; cell?: CSSProperties }) {
   return (
     <span style={{ ...cell, flex: 'none', display: 'inline-flex', alignItems: 'center', gap: NAME_UNIT_GAP }}>
@@ -657,9 +648,6 @@ function NameUnit({ view, measure, cell }: { view: VendorView; measure: boolean;
         {...(measure ? {} : { 'data-usage-icon': view.vendor })}
       />
       {view.line !== null && <Badge view={view} measure={measure} />}
-      {/* 측정 사본은 갱신 중 표식을 늘 센다 — 조회가 켜고 꺼질 때 자연 폭이 바뀌면 경계에서 조회 동안만 단계가
-          뒤집힌다(2↔3 이면 ⟳ 까지 크게 움직여 누르던 자리를 잃는다). 대가 = 1·2단이 표식 폭만큼 일찍 넘어간다. */}
-      {(view.refreshing || measure) && <RefreshingMark view={view} measure={measure} />}
     </span>
   )
 }
@@ -673,20 +661,6 @@ function Badge({ view, measure }: { view: VendorView; measure: boolean }) {
       style={{ color: 'var(--usage-badge)', fontWeight: 700 }}
     >
       !
-    </span>
-  )
-}
-
-// ★움직임 줄이기·e-ink 에서도 돈다★ — 이 저장소의 회전 기호 규칙(`agent/agentGlyph.css` · `ui/loading-panel.css` —
-//   사용자 결정 2026-08-24·2026-09-24: 멈춘 스피너는 「멈춤」과 구분되지 않는다). 숨은 측정 사본만 돌리지 않는다.
-function RefreshingMark({ view, measure }: { view: VendorView; measure: boolean }) {
-  const label = t('usage.refreshing')
-  return (
-    <span
-      {...(measure ? {} : { 'data-usage-refreshing': view.vendor, role: 'img', 'aria-label': label, title: label })}
-      style={{ display: 'inline-flex', color: 'var(--text-muted)' }}
-    >
-      <RefreshCw aria-hidden="true" className={measure ? 'size-3' : 'size-3 animate-spin'} />
     </span>
   )
 }
@@ -909,6 +883,25 @@ function placePopup(anchor: Anchor, w: number, h: number, vw: number, vh: number
   return pushed
 }
 
+// ADR-0261: 팝업의 두 회사 칸은 한 표다 — 격자 하나에 열을 두고 회사 칸·창 줄은 그 열을 물려받는다(`subgrid`). 줄마다
+//   따로 놓으면 긴 이름(`gpt-reserve`)이 그 줄의 막대만 밀고, % 자릿수가 그 줄의 모래시계만 민다.
+//   열 = 이름 | 막대 | 남은 % | 리셋 시각 | 남은 시간 「(… 뒤)」. 회사 머리 · 링크 줄은 열 전체에 걸친다.
+const POPUP_TABLE_STYLE: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: 'repeat(5, auto)',
+  // 팝업이 표보다 넓을 때(긴 상태 줄) `auto` 열이 남는 폭을 나눠 늘어나지 않게 — 늘면 막대와 % 사이가 벌어진다.
+  justifyContent: 'start',
+  columnGap: '0.5em',
+  // 회사 칸 사이 — 팝업의 다른 덩어리 사이 틈과 같다.
+  rowGap: '8px',
+  whiteSpace: 'nowrap',
+  fontVariantNumeric: 'tabular-nums',
+}
+const POPUP_SUBGRID: CSSProperties = { display: 'grid', gridTemplateColumns: 'subgrid', gridColumn: '1 / -1' }
+const POPUP_FULL_ROW: CSSProperties = { gridColumn: '1 / -1' }
+// 창 줄의 높이를 박는다 — 글꼴이 섞인 줄(한글 대체 글꼴 · 라틴 이름)은 내용 높이가 줄마다 달라 줄 간격이 들쭉날쭉하다.
+const POPUP_WINDOW_ROW_HEIGHT = '1.5em'
+
 // ADR-0259: 팝업은 조회를 부르지 않는다 — 팝업 안에서 새로 받는 길은 회사별 ⟳ 뿐이다(열 때 조회 없음의 사유 = 요약
 //   버튼 onClick).
 function UsagePopup({
@@ -969,7 +962,7 @@ function UsagePopup({
       else if (inOwner(active)) onClose(false)
     }
     // 요약 줄 위 누름은 닫지 않는다 — 요약 버튼은 자기 click 이 닫고(여기서도 닫으면 click 이 곧바로 다시 연다), ⟳ 는
-    //   팝업을 연 채 새로고침한다(상세의 「갱신 중」을 보며 누르게).
+    //   팝업을 연 채 새로고침한다(상세를 보며 누르게).
     const onDown = (e: MouseEvent) => {
       const target = e.target as Node
       if (!inPopup(target) && !inOwner(target)) onClose(false)
@@ -1030,9 +1023,13 @@ function UsagePopup({
           ))}
         </div>
       )}
-      {views.map(view => (
-        <VendorDetail key={view.vendor} view={view} nowWall={nowWall} onRefresh={onRefresh} />
-      ))}
+      {views.length > 0 && (
+        <div data-usage-popup-table="" style={POPUP_TABLE_STYLE}>
+          {views.map(view => (
+            <VendorDetail key={view.vendor} view={view} nowWall={nowWall} onRefresh={onRefresh} />
+          ))}
+        </div>
+      )}
       <ShowToggles shown={shown} onToggle={onToggle} divided={views.length > 0} />
     </div>
   )
@@ -1091,7 +1088,7 @@ function ShowToggles({
 
 /**
  * 한 회사의 상세 — 머리(이름 · plan(있을 때만) · 나이 · 그 회사만의 ⟳) · 창별 절대 리셋 시각 · 모델별 창(값이 있는 것만
- * — D8) · 링크. 나이는 머리에 한 번이고 창 줄마다 되풀지 않는다(ADR-0259 결정 1).
+ * — D8) · 링크. 나이는 머리에 한 번이고 창 줄마다 되풀지 않는다(ADR-0259 결정 1). 창 줄의 열은 팝업 표의 열이다(ADR-0261).
  */
 function VendorDetail({
   view,
@@ -1121,8 +1118,8 @@ function VendorDetail({
   }
   const url = USAGE_PAGE_URL[view.vendor]
   return (
-    <section data-usage-popup-vendor={view.vendor} style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.6em' }}>
+    <section data-usage-popup-vendor={view.vendor} style={{ ...POPUP_SUBGRID, rowGap: '3px' }}>
+      <div style={{ ...POPUP_FULL_ROW, display: 'flex', alignItems: 'center', gap: '0.6em' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35em', fontWeight: 600 }}>
           {/* 이름 글자가 바로 옆에 있어 아이콘은 장식이다 — 보조기술이 이름을 두 번 읽지 않게. */}
           <VendorIcon vendor={view.vendor} label={null} data-usage-icon={view.vendor} />
@@ -1157,19 +1154,17 @@ function VendorDetail({
             blocked={view.rejected}
             busy={view.refreshing}
             onRefresh={() => onRefresh(view.vendor)}
-            attrs={{ 'data-usage-vendor-refresh': view.vendor }}
+            attrs={{
+              'data-usage-vendor-refresh': view.vendor,
+              ...(view.refreshing ? { 'data-usage-refreshing': view.vendor } : {}),
+            }}
           />
         </span>
-        {view.refreshing && (
-          <span data-usage-refreshing-text="" style={{ color: 'var(--text-muted)' }}>
-            {t('usage.refreshing')}
-          </span>
-        )}
       </div>
       {rows.map(row => (
         <PopupWindowRow key={row.key} view={view} row={row} nowWall={nowWall} />
       ))}
-      <div>
+      <div style={POPUP_FULL_ROW}>
         <button
           type="button"
           data-usage-link={view.vendor}
@@ -1194,6 +1189,10 @@ function VendorDetail({
   )
 }
 
+/**
+ * 팝업의 창 한 줄 — 표의 다섯 칸에 자리를 박아 놓는다(값이 없어 막대가 없거나 리셋 시각이 없어도 뒤 칸이 당겨지지
+ * 않는다). 만료면 「리셋됨 — 갱신 대기」 한 칸이 막대부터 끝까지 덮는다.
+ */
 function PopupWindowRow({ view, row, nowWall }: { view: VendorView; row: WindowView; nowWall: number }) {
   const r = row.reading
   const resetsAt = r.kind === 'expired' ? null : r.resetsAt
@@ -1202,20 +1201,33 @@ function PopupWindowRow({ view, row, nowWall }: { view: VendorView; row: WindowV
     <div
       data-usage-vendor={view.vendor}
       data-usage-window={row.key}
-      style={{ display: 'flex', alignItems: 'center', gap: '0.5em', whiteSpace: 'nowrap', paddingLeft: '0.75em' }}
+      style={{ ...POPUP_SUBGRID, alignItems: 'center', height: POPUP_WINDOW_ROW_HEIGHT }}
     >
-      <span style={{ color: 'var(--text-muted)', minWidth: '3.5em' }}>{row.label}</span>
-      {r.kind === 'value' && <Bar view={view} label={row.label} r={r} meter measure={false} />}
-      {/* 팝업은 흐리게 하지 않는다 — 오래됨은 회사 머리의 나이가 호박색으로 보인다(R32 · ADR-0259). */}
-      <ValueText w={row} bare={false} dimStale={false} measure={false} />
+      {/* 왼쪽 들여쓰기는 이름 칸 안에 둔다 — 줄 쪽 여백은 subgrid 의 첫 열 폭에 섞인다. */}
+      <span style={{ gridColumn: 1, paddingLeft: '0.75em', color: 'var(--text-muted)' }}>{row.label}</span>
+      {r.kind === 'expired' ? (
+        <span style={{ gridColumn: '2 / -1' }}>
+          <ValueText w={row} bare={false} dimStale={false} measure={false} />
+        </span>
+      ) : (
+        <>
+          {r.kind === 'value' && (
+            <Bar view={view} label={row.label} r={r} meter measure={false} cell={{ gridColumn: 2 }} />
+          )}
+          {/* 팝업은 흐리게 하지 않는다 — 오래됨은 회사 머리의 나이가 호박색으로 보인다(R32 · ADR-0259). */}
+          <span style={{ gridColumn: 3, textAlign: 'right' }}>
+            <ValueText w={row} bare={false} dimStale={false} measure={false} />
+          </span>
+        </>
+      )}
       {resetsAt !== null && resetInSecs !== null && (
         // 남은 시간은 이름 밖에 둔다 — 이름(「리셋 11:29」)을 진 표식은 안의 글자를 보조기술에 감추므로, 안에 넣으면
         //   남은 시간이 읽히지 않는다.
-        // 둘 사이의 공백 글자는 DOM 글자를 읽는 쪽(R27 — LLM·cdp)을 위한 것이다. 보이는 틈은 `gap` 이 그린다 — flex
-        //   안에서 공백만 든 글자는 그려지지 않는다.
-        <span data-usage-reset-at="" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.3em' }}>
-          <ResetMark resetsAt={resetsAt} nowWall={nowWall} measure={false} />{' '}
-          <span data-usage-reset-in="" style={{ color: 'var(--text-muted)' }}>
+        // 둘 사이의 공백 글자는 DOM 글자를 읽는 쪽(R27 — LLM·cdp)을 위한 것이다. 보이는 틈은 칸 사이 틈이 그린다 — 격자
+        //   안에서 공백만 든 글자는 그려지지 않는다. 감싸는 `span` 은 `display: contents` 라 두 칸이 곧장 줄의 칸이 된다.
+        <span data-usage-reset-at="" style={{ display: 'contents' }}>
+          <ResetMark resetsAt={resetsAt} nowWall={nowWall} measure={false} style={{ gridColumn: 4 }} />{' '}
+          <span data-usage-reset-in="" style={{ gridColumn: 5, color: 'var(--text-muted)' }}>
             {t('usage.resetIn', { duration: formatDuration(resetInSecs) })}
           </span>
         </span>
