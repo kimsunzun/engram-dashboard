@@ -1,0 +1,644 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>사용량 슬롯 구조</title>
+<meta name="description" content="S21 사용량 한도 슬롯 TRD 요약 — 구조 그림, 요청 흐름, 확정된 결정, 기동 시나리오, 실측, 남은 위험, 다음 단계">
+
+<style>
+  :root {
+    --ground: #F5F7F9;
+    --surface: #FFFFFF;
+    --surface-2: #EEF2F5;
+    --ink: #131C24;
+    --ink-2: #45525E;
+    --muted: #6B7885;
+    --line: #D9E1E8;
+    --line-strong: #B9C6D1;
+    --accent: #0C6F79;
+    --accent-soft: #DCEEF0;
+    --accent-ink: #095057;
+    --warn: #9A5B00;
+    --warn-soft: #F7EBD8;
+    --drive: #3F5568;
+    --drive-soft: #E4EAEF;
+    --data: #6B7885;
+    --data-soft: #EBEFF2;
+    --shadow: 0 1px 2px rgba(19,28,36,.06), 0 8px 24px -12px rgba(19,28,36,.18);
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "Liberation Mono", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E1319;
+      --surface: #151C24;
+      --surface-2: #1B242E;
+      --ink: #E4ECF3;
+      --ink-2: #B4C2CE;
+      --muted: #8A98A6;
+      --line: #24303B;
+      --line-strong: #35444F;
+      --accent: #3FC3CE;
+      --accent-soft: #10333A;
+      --accent-ink: #7EDCE4;
+      --warn: #DFA646;
+      --warn-soft: #33280F;
+      --drive: #9DB2C4;
+      --drive-soft: #1E2932;
+      --data: #8A98A6;
+      --data-soft: #1A2229;
+      --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0E1319;
+    --surface: #151C24;
+    --surface-2: #1B242E;
+    --ink: #E4ECF3;
+    --ink-2: #B4C2CE;
+    --muted: #8A98A6;
+    --line: #24303B;
+    --line-strong: #35444F;
+    --accent: #3FC3CE;
+    --accent-soft: #10333A;
+    --accent-ink: #7EDCE4;
+    --warn: #DFA646;
+    --warn-soft: #33280F;
+    --drive: #9DB2C4;
+    --drive-soft: #1E2932;
+    --data: #8A98A6;
+    --data-soft: #1A2229;
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 10px 28px -14px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 16px;
+  }
+  @media (min-width: 720px) { .wrap { padding: 0 32px; } }
+
+  section, header.hero {
+    padding: clamp(36px, 5vw, 60px) 0;
+    border-bottom: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: clamp(16px, 2.2vw, 24px);
+  }
+  section:last-of-type { border-bottom: 0; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  .eyebrow .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  h1 {
+    font-size: clamp(34px, 6.2vw, 60px);
+    line-height: 1.08;
+    letter-spacing: -.025em;
+    font-weight: 700;
+    margin: 0;
+    text-wrap: balance;
+  }
+  h2 {
+    font-size: clamp(22px, 3.2vw, 34px);
+    line-height: 1.18;
+    letter-spacing: -.02em;
+    font-weight: 680;
+    margin: 0;
+    text-wrap: balance;
+  }
+  h3 { font-size: 15.5px; font-weight: 640; margin: 0; letter-spacing: -.005em; }
+
+  p, li, td { overflow-wrap: anywhere; }
+
+  .lede { font-size: clamp(16px, 1.7vw, 19px); color: var(--ink-2); max-width: 64ch; margin: 0; }
+  .note { font-size: 14px; color: var(--muted); max-width: 72ch; margin: 0; }
+  .note b { color: var(--ink-2); font-weight: 600; }
+
+  code, .mono { font-family: var(--mono); }
+  code {
+    font-size: .88em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: .06em .32em;
+    color: var(--ink);
+  }
+
+  .scroller { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+
+  /* ── status ── */
+  .status {
+    display: flex;
+    flex-direction: column;
+    border-left: 2px solid var(--accent);
+    padding-left: clamp(16px, 2.4vw, 26px);
+  }
+  .st {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 2px 14px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: 15px;
+    color: var(--ink-2);
+  }
+  .st:last-child { border-bottom: 0; }
+  .st .k { font-family: var(--mono); font-size: 12.5px; color: var(--accent); padding-top: 2px; }
+  .st.warn .k { color: var(--warn); }
+  .st b { color: var(--ink); font-weight: 620; }
+
+  .tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .08em;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+    vertical-align: 1px;
+  }
+  .tag.user { background: var(--accent-soft); color: var(--accent-ink); }
+  .tag.def { background: var(--drive-soft); color: var(--ink-2); }
+  .tag.int { background: transparent; color: var(--muted); border: 1px dashed var(--line-strong); }
+  .tag.warn { background: var(--warn-soft); color: var(--warn); }
+  .tag.data { background: var(--data-soft); color: var(--data); }
+
+  /* ── diagram ── */
+  .diagram {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    padding: 12px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  .diagram svg { display: block; width: 100%; min-width: 760px; height: auto; }
+  .diagram .zone { fill: var(--surface-2); stroke: var(--line-strong); stroke-width: 1; }
+  .diagram .bx { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1; }
+  .diagram .bx.key { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.6; }
+  .diagram .bx.ext { stroke-dasharray: 5 4; }
+  .diagram .tt { font-family: var(--sans); font-size: 15px; font-weight: 620; fill: var(--ink); }
+  .diagram .ts { font-family: var(--sans); font-size: 12px; fill: var(--muted); }
+  .diagram .m { font-family: var(--mono); }
+  .diagram .zl { font-family: var(--sans); font-size: 15px; font-weight: 680; fill: var(--ink-2); }
+  .diagram .zs { font-family: var(--sans); font-size: 12px; fill: var(--muted); }
+  .diagram .bl { font-family: var(--mono); font-size: 11.5px; letter-spacing: .06em; fill: var(--muted); }
+  .diagram .al { font-family: var(--sans); font-size: 12px; fill: var(--ink-2); }
+  .diagram .l-req { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+  .diagram .l-probe { stroke: var(--drive); stroke-width: 1.8; fill: none; }
+  .diagram .l-pass { stroke: var(--warn); stroke-width: 1.8; fill: none; }
+  .diagram .l-store { stroke: var(--muted); stroke-width: 1.4; fill: none; }
+  .diagram .f-req { fill: var(--accent); }
+  .diagram .f-probe { fill: var(--drive); }
+  .diagram .f-pass { fill: var(--warn); }
+  .diagram .f-store { fill: var(--muted); }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13.5px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .legend i { display: inline-block; width: 22px; height: 0; border-top: 2px solid; }
+  .legend .req { border-color: var(--accent); }
+  .legend .probe { border-color: var(--drive); }
+  .legend .pass { border-color: var(--warn); }
+
+  /* ── cards ── */
+  .cols {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    box-shadow: var(--shadow);
+    min-width: 0;
+  }
+  .kicker {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .08em;
+    color: var(--muted);
+  }
+  .seq { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  .seq li { position: relative; padding-left: 20px; font-size: 14px; color: var(--ink-2); }
+  .seq li::before { content: "→"; position: absolute; left: 0; top: 0; color: var(--accent); font-family: var(--mono); }
+  .seq li.stop::before { content: "✕"; color: var(--warn); }
+  .res {
+    font-size: 13.5px;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+  }
+  .res.slow { background: var(--warn-soft); color: var(--warn); }
+
+  /* ── tables ── */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  table.w { min-width: 620px; }
+  thead th {
+    text-align: left;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .12em;
+    color: var(--muted);
+    font-weight: 500;
+    padding: 0 12px 10px;
+    border-bottom: 1px solid var(--line-strong);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--line);
+    vertical-align: baseline;
+    color: var(--ink-2);
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.k { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  td.n { font-family: var(--mono); font-size: 12.5px; color: var(--muted); width: 1%; }
+  td.who { width: 1%; white-space: nowrap; }
+
+  /* ── numbers ── */
+  .stat {
+    font-family: var(--mono);
+    font-size: clamp(30px, 5vw, 42px);
+    font-weight: 600;
+    letter-spacing: -.02em;
+    line-height: 1.1;
+    color: var(--ink);
+  }
+  .stat small { font-size: .42em; color: var(--muted); font-weight: 500; letter-spacing: 0; }
+  .card ul { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 4px; }
+  .card li { font-size: 14px; color: var(--ink-2); }
+
+  /* ── risks ── */
+  .qlist { display: flex; flex-direction: column; }
+  .q {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 3px 12px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .q:last-child { border-bottom: 0; }
+  .q .i { font-family: var(--mono); font-size: 12.5px; color: var(--muted); padding-top: 3px; font-variant-numeric: tabular-nums; }
+  .q .t { font-size: 15px; color: var(--ink-2); }
+  .q .t b { color: var(--ink); font-weight: 620; }
+
+  /* ── next ── */
+  .steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 0; }
+  .steps > li {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 4px 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .steps > li:last-child { border-bottom: 0; }
+  .steps .i { font-family: var(--mono); font-size: 13px; color: var(--accent); padding-top: 2px; }
+  .steps .t { font-size: 15.5px; font-weight: 600; }
+  .steps .s { grid-column: 2; font-size: 14px; color: var(--muted); }
+  .commits { grid-column: 2; margin: 4px 0 0; padding-left: 1.4em; display: flex; flex-direction: column; gap: 3px; }
+  .commits li { font-size: 14px; color: var(--ink-2); }
+  .commits li .scope { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+  .commits li b { color: var(--ink); font-weight: 600; }
+
+  footer { padding: 24px 0 40px; font-size: 13px; color: var(--muted); }
+  footer a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- 1 -->
+  <header class="hero">
+    <div class="eyebrow"><span>S21 · 사용량 한도 슬롯</span></div>
+    <h1>사용량 슬롯<br>구조</h1>
+    <p class="lede">웹뷰 슬롯 하나에 Claude·Codex 의 <b>5시간·주간 남은 한도</b>를 작게 띄운다. 슬롯이 묻고, 데몬은 캐시로 답하거나 — 기한이 지났으면 — 짧게 뜨는 CLI 로 조회한 뒤 답한다.</p>
+    <div class="status">
+      <div class="st warn"><span class="k">주의</span><span><b>출시 전 법무·보안 확인 필요</b> — A 방식도 검토 범위에 든다. 이 문서는 판단하지 않는다(표지만).</span></div>
+      <div class="st"><span class="k">PRD</span><span><b>리뷰 통과</b> — blind 리뷰 3회 · 사용자 결정 완료</span></div>
+      <div class="st"><span class="k">TRD</span><span><b>리뷰 통과</b> — <code>/review trd full</code> 3회 (3차 FIX 1건은 권고대로 반영, 재리뷰 생략)</span></div>
+      <div class="st"><span class="k">착수</span><span><code>v0.3.2/feat/json-midturn-queue</code> 가 master 에 머지된 뒤. 번호(<code>PROTOCOL_VERSION</code> · catalog 둘)는 전부 <b>「머지 시점 master + 1」</b></span></div>
+    </div>
+  </header>
+
+  <!-- 2 -->
+  <section id="s2">
+    <div class="eyebrow"><span class="num">02</span><span>구조</span></div>
+    <h2>묻는 길 둘, 채우는 길 둘</h2>
+    <div class="diagram">
+      <svg viewBox="0 0 1000 690" role="img" aria-labelledby="dg-t dg-d">
+        <title id="dg-t">사용량 슬롯 데이터 흐름</title>
+        <desc id="dg-d">웹뷰의 UsageSlot 은 셸을 거쳐 전용 wire 요청으로, LLM 은 명령 버스로 데몬의 UsageService 에 묻는다. 서비스는 기한이 지났으면 backend 등록부를 통해 짧게 뜨는 claude 또는 codex 프로세스로 조회한다. 실행 중 에이전트의 스트림에서 주운 값은 대기 맵에 모였다가 요청 때 병합된다.</desc>
+        <defs>
+          <marker id="mk-req" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-req"/></marker>
+          <marker id="mk-probe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-probe"/></marker>
+          <marker id="mk-pass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-pass"/></marker>
+          <marker id="mk-store" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" class="f-store"/></marker>
+        </defs>
+
+        <!-- daemon zone -->
+        <rect class="zone" x="12" y="124" width="976" height="336" rx="12"/>
+        <text class="zl" x="28" y="152">데몬</text>
+        <text class="zs" x="28" y="174">요청이 올 때만 판정한다</text>
+        <text class="zs" x="28" y="192">태스크·타이머 없음</text>
+
+        <!-- row 1: clients -->
+        <rect class="bx" x="24" y="20" width="280" height="80" rx="8"/>
+        <text class="tt" x="40" y="46"><tspan class="m">UsageSlot</tspan> · 웹뷰</text>
+        <text class="ts" x="40" y="68">실제로 보이는 동안만 회사별 60초마다</text>
+        <text class="ts" x="40" y="87">⟳ = refresh · 값은 usageStore</text>
+
+        <rect class="bx" x="344" y="20" width="300" height="80" rx="8"/>
+        <text class="tt" x="360" y="46">셸 (src-tauri)</text>
+        <text class="ts" x="360" y="68"><tspan class="m">forward_daemon_command</tspan> 가 그대로 통과</text>
+        <text class="ts" x="360" y="87">새 코드 없음 · 답장 상한 30초</text>
+
+        <rect class="bx" x="684" y="20" width="292" height="80" rx="8"/>
+        <text class="tt" x="700" y="46">LLM · <tspan class="m">engram</tspan> CLI</text>
+        <text class="ts" x="700" y="68">명령 버스 <tspan class="m">usage.get</tspan> · <tspan class="m">usage.refresh</tspan></text>
+        <text class="ts" x="700" y="87"><tspan class="m">--backend Claude|Codex</tspan></text>
+
+        <path class="l-req" d="M304 60H342" marker-end="url(#mk-req)"/>
+        <path class="l-req" d="M494 100V156" marker-end="url(#mk-req)"/>
+        <path class="l-req" d="M830 100V156" marker-end="url(#mk-req)"/>
+
+        <!-- row 2: entries -->
+        <rect class="bx" x="344" y="158" width="300" height="58" rx="8"/>
+        <text class="tt" x="360" y="182">wire 입구 · <tspan class="m">Detached</tspan></text>
+        <text class="ts" x="360" y="204">GetUsageLimits · RefreshUsageLimits</text>
+
+        <rect class="bx" x="684" y="158" width="292" height="58" rx="8"/>
+        <text class="tt" x="700" y="182">버스 입구 · <tspan class="m">blocking</tspan></text>
+        <text class="ts" x="700" y="204">std 채널로 최대 5초 대기</text>
+
+        <path class="l-req" d="M494 216V244" marker-end="url(#mk-req)"/>
+        <path class="l-req" d="M830 216V244" marker-end="url(#mk-req)"/>
+
+        <!-- row 3: pending map + service -->
+        <rect class="bx" x="24" y="246" width="280" height="104" rx="8"/>
+        <text class="tt" x="40" y="273">줍기 대기 맵</text>
+        <text class="ts" x="40" y="296">(회사, 창)당 항목 하나</text>
+        <text class="ts" x="40" y="317">칸 단위로 합침 · 빠진 칸은 대기 값 유지</text>
+        <text class="ts" x="40" y="338">요청 때 병합</text>
+
+        <rect class="bx key" x="344" y="246" width="632" height="104" rx="10"/>
+        <text class="tt" x="362" y="273"><tspan class="m">UsageService</tspan> — (회사, 계정)당 한 칸</text>
+        <text class="ts" x="362" y="296">캐시 · 쿨타임 · 거절 · 진행 중 조회에 합류 · 만료 래치</text>
+        <text class="ts" x="362" y="317">자동 조회 기한 = max(마지막 조회·줍기 초기화 + 쿨타임, 거절 종료)</text>
+        <text class="ts" x="362" y="338">기다림 최대 5초 — 넘으면 캐시 + 「갱신 중」</text>
+
+        <path class="l-pass" d="M304 298H342" marker-end="url(#mk-pass)"/>
+
+        <!-- row 4: inbox + reject store -->
+        <rect class="bx" x="24" y="384" width="280" height="58" rx="8"/>
+        <text class="tt" x="40" y="408"><tspan class="m">UsageInboxSink</tspan></text>
+        <text class="ts" x="40" y="430">decorator — 관측을 창별로 쪼갬</text>
+
+        <rect class="bx" x="684" y="384" width="292" height="58" rx="8"/>
+        <text class="tt" x="700" y="408"><tspan class="m">usage_rejects.json</tspan></text>
+        <text class="ts" x="700" y="430">거절 종료 시각만 · 조립 때 먼저 읽음</text>
+
+        <path class="l-pass" d="M164 384V353" marker-end="url(#mk-pass)"/>
+        <path class="l-store" d="M830 352V381" marker-start="url(#mk-store)" marker-end="url(#mk-store)"/>
+        <path class="l-probe" d="M494 350V489" marker-end="url(#mk-probe)"/>
+        <text class="al" x="508" y="398">기한 지남 · ⟳</text>
+        <text class="al" x="508" y="416">→ 분리 std 스레드에서 조회</text>
+
+        <!-- row 5: agent crate -->
+        <text class="bl" x="976" y="481" text-anchor="end">agent crate · 데몬 프로세스 안</text>
+
+        <rect class="bx" x="24" y="492" width="280" height="72" rx="8"/>
+        <text class="tt" x="40" y="517">디코더 → pump</text>
+        <text class="ts" x="40" y="538"><tspan class="m">UsageGate</tspan> — 기본 계정만 줍는다</text>
+        <text class="ts" x="40" y="556"><tspan class="m">StatusSink::usage_observed</tspan></text>
+
+        <rect class="bx" x="344" y="492" width="632" height="72" rx="8"/>
+        <text class="tt" x="362" y="517"><tspan class="m">backend::usage_probes()</tspan> — 조회 등록부</text>
+        <text class="ts" x="362" y="538">probe 마다 key · policy · query — 벤더 지식은 backend 안에만</text>
+        <text class="ts" x="362" y="556">조회 하나에 마감 하나(쓰기·읽기·종료) · 넘으면 Job 트리째 kill</text>
+
+        <path class="l-pass" d="M164 492V445" marker-end="url(#mk-pass)"/>
+
+        <!-- row 6: external processes -->
+        <text class="bl" x="976" y="589" text-anchor="end">외부 프로세스</text>
+
+        <rect class="bx ext" x="24" y="600" width="280" height="76" rx="8"/>
+        <text class="tt" x="40" y="625">실행 중 에이전트 · 터미널 모드 제외</text>
+        <text class="ts" x="40" y="646">Claude <tspan class="m">rate_limit_event</tspan></text>
+        <text class="ts" x="40" y="665">Codex <tspan class="m">account/rateLimits/updated</tspan></text>
+
+        <rect class="bx ext" x="344" y="600" width="300" height="76" rx="8"/>
+        <text class="tt" x="360" y="625">Claude — 짧은 <tspan class="m">claude -p</tspan></text>
+        <text class="ts" x="360" y="646"><tspan class="m">get_usage</tspan> 한 줄 (A)</text>
+        <text class="ts" x="360" y="665">시한 15초 · 쿨타임 15분</text>
+
+        <rect class="bx ext" x="684" y="600" width="292" height="76" rx="8"/>
+        <text class="tt" x="700" y="625">Codex — 짧은 <tspan class="m">app-server</tspan></text>
+        <text class="ts" x="700" y="646">initialize → account/rateLimits/read</text>
+        <text class="ts" x="700" y="665">시한 30초 · 쿨타임 5분</text>
+
+        <path class="l-pass" d="M164 600V567" marker-end="url(#mk-pass)"/>
+        <path class="l-probe" d="M494 564V597" marker-end="url(#mk-probe)"/>
+        <path class="l-probe" d="M830 564V597" marker-end="url(#mk-probe)"/>
+      </svg>
+    </div>
+    <div class="legend">
+      <span><i class="req"></i>묻기 — 웹뷰(wire) · LLM(버스), 같은 서비스로</span>
+      <span><i class="probe"></i>능동 조회 — 기한 지남 또는 ⟳</span>
+      <span><i class="pass"></i>줍기 — 대화 스트림에서 공짜로</span>
+    </div>
+    <p class="note"><b>데몬 코드에 벤더 이름이 없다</b> — 회사 목록·쿨타임·시한은 backend 등록부가 준다. 방송이 없으므로 주운 값은 다음 요청(<b>≤ 60초</b>)에 화면에 닿는다.</p>
+  </section>
+
+  <!-- 3 -->
+  <section id="s3">
+    <div class="eyebrow"><span class="num">03</span><span>요청 흐름</span></div>
+    <h2>요청 하나에 답 하나 — 판정은 셋</h2>
+    <div class="cols">
+      <div class="card">
+        <span class="kicker">① usage.get · 기한 전</span>
+        <h3>캐시로 즉시 답</h3>
+        <ul class="seq">
+          <li>대기 맵을 먼저 병합 · 리셋 지난 창에 만료 래치</li>
+          <li>기한 전 — 조회 안 나감</li>
+        </ul>
+        <div class="res">즉시 캐시 (<code>Cached</code>)</div>
+      </div>
+      <div class="card">
+        <span class="kicker">② usage.get · 기한 지남</span>
+        <h3>조회한 뒤 답 — 최대 5초</h3>
+        <ul class="seq">
+          <li>조회 시작 · 이미 진행 중이면 합류(회사당 조회 1회)</li>
+          <li>5초 안에 끝남 → 새 값 · 실패면 캐시 + 실패 상태(작은 표시엔 <code>!</code> 배지)</li>
+        </ul>
+        <div class="res slow">5초 넘음 → 캐시 + 「갱신 중」. 조회는 계속 돌고 결과는 다음 요청에</div>
+      </div>
+      <div class="card">
+        <span class="kicker">③ usage.refresh (⟳)</span>
+        <h3>쿨타임 무시 — 둘만 막는다</h3>
+        <ul class="seq">
+          <li class="stop">거절 중 → 조회 안 나감 · 캐시 + 「거절됨 — N분 뒤」</li>
+          <li class="stop">직전 조회 끝 뒤 30초 안 → 캐시</li>
+          <li>그 밖 → ②와 같다</li>
+        </ul>
+        <div class="res">조회가 끝나면(성공·실패·시한) 쿨타임을 다시 센다</div>
+      </div>
+    </div>
+    <p class="note">회사끼리는 서로 안 기다린다. 요청이 5초에 포기해도 조회 스레드의 완료 가드가 「진행 중」을 반드시 푼다.</p>
+  </section>
+
+  <!-- 4 -->
+  <section id="s4">
+    <div class="eyebrow"><span class="num">04</span><span>결정</span></div>
+    <h2>확정된 것</h2>
+    <div class="scroller">
+      <table class="w">
+        <thead><tr><th>항목</th><th>값</th><th>누가</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Claude 조회</td><td><b>A</b> — 짧게 뜨는 <code>claude</code> CLI 에 <code>get_usage</code> 한 줄. 깨지면 같은 seam 뒤로 B(토큰 파일 + 비공개 사용량 주소)</td><td class="who"><span class="tag user">사용자</span></td></tr>
+          <tr><td class="k">쿨타임</td><td>Claude·Codex 모두 15분 — 15분도 안전이 증명된 간격은 아니다(출발점)</td><td class="who"><span class="tag user">사용자</span></td></tr>
+          <tr><td class="k">갱신 모델</td><td>요청형(pull) — 수요 신호·방송·데몬 타이머 없음</td><td class="who"><span class="tag user">사용자</span></td></tr>
+          <tr><td class="k">멀티 클라이언트</td><td>범위 밖 — 캐시가 조회를 합치긴 하지만 설계·검증 대상이 아니다</td><td class="who"><span class="tag user">사용자</span></td></tr>
+          <tr><td class="k">줍기↔조회 순서</td><td>규칙 없음 — 나중 쓰기가 이긴다. 실사용에서 이상하면 다시 본다</td><td class="who"><span class="tag user">사용자</span></td></tr>
+          <tr><td class="k">상태 키</td><td><code>(vendor, account_key)</code> — <code>account_key</code> 는 지금 늘 <code>"default"</code>. 여러 데몬에 붙는 미래 클라이언트용 자리</td><td class="who"><span class="tag int">내부</span></td></tr>
+          <tr><td class="k">조회 시한</td><td>Claude 15초 · Codex 30초 — 넘으면 트리째 kill, 실패로 셈, 다음 시도는 다음 쿨타임</td><td class="who"><span class="tag def">기본값</span></td></tr>
+          <tr><td class="k">답 기다림</td><td>최대 5초 — 버스 마감 7초·셸 답장 상한 30초 아래</td><td class="who"><span class="tag int">내부</span></td></tr>
+          <tr><td class="k">⟳ 간격</td><td>회사별 30초 — 사람·LLM 공통(LLM 연타가 상류 한도를 태우지 않게)</td><td class="who"><span class="tag def">기본값</span></td></tr>
+          <tr><td class="k">거절 대기</td><td><code>Retry-After</code> 없음·깨짐·과거·0 → 5분 · 상한 24시간 · 거절 종료 시각만 파일로 재시작을 건넌다</td><td class="who"><span class="tag def">기본값</span> <span class="tag int">내부</span></td></tr>
+          <tr><td class="k">상태 표시</td><td>실패·로그인 필요·설치 안 됨·거절 = 작은 표시엔 회사 이름 옆 <code>!</code> 배지만(모든 폭 · <code>⚠</code> 와 다른 글리프) · 문구는 hover·<code>aria-label</code> + 팝업 맨 위 한 줄 · 들고 있는 값은 안 지운다</td><td class="who"><span class="tag user">사용자</span></td></tr>
+          <tr><td class="k">오래된 값</td><td>30분 넘으면 작은 표시는 숫자만 흐리게 · 「N분 전」 은 팝업에만 <span class="tag user">사용자</span> · 리셋 지난 창은 「리셋됨 — 갱신 대기」</td><td class="who"><span class="tag def">기본값</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note"><span class="tag def">기본값</span> = PRD 의 「확인 필요」 기본값 — 바꿀 수 있다. <span class="tag int">내부</span> = TRD 가 정한 구현 선택.</p>
+  </section>
+
+  <!-- 5 -->
+  <section id="s5">
+    <div class="eyebrow"><span class="num">05</span><span>기동·연결</span></div>
+    <h2>새 메시지 없이 전부 선다</h2>
+    <div class="scroller">
+      <table class="w">
+        <thead><tr><th>#</th><th>상황</th><th>동작</th></tr></thead>
+        <tbody>
+          <tr><td class="n">1</td><td class="k">데몬 기동 직후 첫 요청</td><td>거절 파일을 조립 때 먼저 읽는다 — 첫 요청도 저장된 거절을 못 넘는다</td></tr>
+          <tr><td class="n">2</td><td class="k">데몬이 뜨기 전</td><td>셸이 즉시 <code>NOT_CONNECTED</code> → 이전 값 또는 「없음」 · 연결되는 순간 바로 요청</td></tr>
+          <tr><td class="n">3</td><td class="k">빈 캐시에 첫 요청</td><td>조회 1회, 답 약 1초 · 동시 요청은 회사별로 합류 · 회사끼리 안 기다림</td></tr>
+          <tr><td class="n">4</td><td class="k">데몬만 재시작</td><td>대기 요청은 오류로 깨어나 이전 값 유지 → 재연결 때 재요청 · 캐시는 비고 거절 파일은 남음</td></tr>
+          <tr><td class="n">5</td><td class="k">기동 경합</td><td>조회는 별 프로세스·별 Job — 특별 처리 없음</td></tr>
+          <tr><td class="n">6</td><td class="k">조회 중 데몬 종료</td><td>분리 스레드라 종료가 안 기다림 · Job 이 닫히며 자식 트리가 죽음</td></tr>
+          <tr><td class="n">7</td><td class="k">레이아웃 영속(미래)</td><td>복원된 슬롯이 부팅 즉시 요청해도 1–3 이 그대로 덮음</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- 6 -->
+  <section id="s6">
+    <div class="eyebrow"><span class="num">06</span><span>실측</span></div>
+    <h2>조회 한 번 ≈ 1초</h2>
+    <div class="cols">
+      <div class="card">
+        <span class="kicker">Claude · get_usage</span>
+        <div class="stat">1.2–1.4<small> 초</small></div>
+        <ul>
+          <li>claude 2.1.280 탐침 — <code>claude.exe</code> 를 직접 띄웠다. 운영 명령과 인자·env·shim 이 다르다</li>
+          <li>모델 호출 없음 = <span class="tag warn">가능성 높음</span> 증명은 아니다</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="kicker">Codex · account/rateLimits/read</span>
+        <div class="stat">0.74–0.94<small> 초</small></div>
+        <ul>
+          <li>codex-cli 0.156.1 — 우리 기동 인자·악수 그대로 3회, stderr 없음</li>
+          <li>예외 1회: 데몬 재시작 직후 대화 이어받기에서 <code>initialize</code> 약 9.7초(원인 모름) — 30초 시한이 덮는다</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- 7 -->
+  <section id="s7">
+    <div class="eyebrow"><span class="num">07</span><span>남은 위험 · 미검</span></div>
+    <h2>여덟 줄</h2>
+    <div class="qlist">
+      <div class="q"><div class="i">1</div><div class="t"><b>운영 기동 경로</b> — <code>cmd.exe /c claude</code> · 임시 파일로 주는 설정 인자 · 미설치 9009 판정 미검. 3단계 완료 조건 = 운영 명령 그대로의 실 Windows 스모크 <span class="tag warn">미검</span></div></div>
+      <div class="q"><div class="i">2</div><div class="t"><b><code>--settings &lt;파일&gt;</code></b> 이 경로를 받는지 모른다 — 안 받으면 인라인 + 스모크 <span class="tag warn">미검</span></div></div>
+      <div class="q"><div class="i">3</div><div class="t"><b>콘솔 창 깜빡임</b> — 릴리즈 빌드에서 조회 때 창이 튀지 않는지 눈으로 확인 <span class="tag warn">미검</span></div></div>
+      <div class="q"><div class="i">4</div><div class="t"><b>env 허용 목록</b> — <code>CLAUDE*</code> 를 벗기되 <code>CLAUDE_CONFIG_DIR</code> · <code>CLAUDE_CODE_OAUTH_TOKEN</code> 은 남긴다. 탐침(전부 벗김)과 다르다 <span class="tag warn">미검</span></div></div>
+      <div class="q"><div class="i">5</div><div class="t"><b>잠든 시간을 세는 시계</b> — <code>Instant</code> 의 절전 처리가 OS 마다 다르다고 알려져 있다. 다르면 시계 한 함수 안에서 가른다 <span class="tag warn">미검</span></div></div>
+      <div class="q"><div class="i">6</div><div class="t"><b>CLI 1분 공유 캐시</b> — 조회 결과가 방금 주운 값을 잠깐 덮을 수 있다. 피해 = 잠깐 조금 더 남은 것처럼 보임 <span class="tag data">수용</span></div></div>
+      <div class="q"><div class="i">7</div><div class="t"><b>법무·보안</b> — 출시 전 확인 필요. A 도 검토 범위다 <span class="tag data">표지</span></div></div>
+      <div class="q"><div class="i">8</div><div class="t"><b><code>get_usage</code> 는 EXPERIMENTAL</b> — 예고 없이 바뀌거나 사라질 수 있다. 오류 문구(429·로그아웃)도 미실측이라 분류 표는 추정이다 <span class="tag warn">추정</span></div></div>
+    </div>
+  </section>
+
+  <!-- 8 -->
+  <section id="s8">
+    <div class="eyebrow"><span class="num">08</span><span>다음</span></div>
+    <h2>머지 → 재측정 → 구현</h2>
+    <ol class="steps">
+      <li>
+        <span class="i">1</span>
+        <span class="t"><code>v0.3.2/feat/json-midturn-queue</code> 머지를 기다린다</span>
+        <span class="s">그 브랜치가 번호 둘(<code>PROTOCOL_VERSION</code> · agent catalog)·<code>StatusSink</code> 훅·codex transport·<code>messages.rs</code> 등을 크게 바꾼다.</span>
+      </li>
+      <li>
+        <span class="i">2</span>
+        <span class="t">머지된 트리에서 줄 포인터를 다시 잰다</span>
+        <span class="s">TRD §5 체크리스트 6항 — 번호 = 머지 시점 master + 1 · decorator 두 훅 전달 · <code>Detached</code> 갈래 · 상관 함수 쌍 · 생성물 재생성.</span>
+      </li>
+      <li>
+        <span class="i">3</span>
+        <span class="t"><code>/implement</code> — TRD 커밋 순서대로</span>
+        <span class="s">커밋마다 빌드·시험 초록 — 어디서 멈춰도 선다.</span>
+        <ol class="commits">
+          <li><span class="scope">agent·protocol</span> 중립 타입 · wire 도메인 타입 · <code>usage_observed</code> 훅(기본 no-op)</li>
+          <li><span class="scope">agent</span> Claude·Codex 줍기 해석 · <code>take_usage</code> · pump drain · <code>UsageGate</code></li>
+          <li><span class="scope">agent</span> 조회 seam · <code>OsProbeSpawner</code> · Claude A · Codex · 등록부 — <b>완료 = 실 Windows 스모크</b></li>
+          <li><span class="scope">daemon</span> <code>UsageService</code> — 책 · 시계 · 거절 저장 · 대기 맵 · 판정 · 합류 · 완료 가드</li>
+          <li><span class="scope">protocol·daemon</span> wire 요청(Detached) · <code>PROTOCOL_VERSION</code> · 조립 · 버스 <code>usage.*</code> — <b>완료 = 실 데몬 <code>usage.get</code> 이 행을 돌려줌</b></li>
+          <li><span class="scope">shell</span> Usage 슬롯 콘텐츠 · <code>setSlotContent</code> show_* · 링크 권한</li>
+          <li><span class="scope">front</span> 요청·답 · <code>usageStore</code> · 폴러 · <code>UsageSlot</code> · 팝업 · 메뉴 · 색 · 문구</li>
+          <li><span class="scope">docs</span> step-log · ADR · TRD 「구현:」 표시</li>
+        </ol>
+      </li>
+    </ol>
+  </section>
+
+  <footer>원문: <a href="trd.md">trd.md</a> · <a href="prd.md">prd.md</a> (같은 폴더) · 2026-09-27</footer>
+</div>
+</body>
+</html>

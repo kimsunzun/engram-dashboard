@@ -6,6 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core'
 
+import type { LayoutNode, SlotContent } from '../api/layoutTypes'
 import { t } from '../i18n'
 import { matchDeclaredSpelling } from './enumArg'
 import { register } from './registry'
@@ -144,7 +145,34 @@ function optionalUuidArg(v: unknown, name: string): string | null {
 // SlotContent 유니온 태그 화이트리스트(set_slot_content 인자 검증 — ADR-0060/0063).
 // ★순서가 곧 선언 철자다★ — 호출자가 어떤 대소문자로 쓰든 백엔드로 나가는 태그는 이 배열의 원소로
 //   접힌다(사용자 결정 2026-09-23 — 같은 낱말이 CLI 로는 되고 이 표면으로는 안 되던 어긋남 제거).
-const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette'] as const
+const SLOT_CONTENT_TYPES = ['empty', 'agent', 'agent_list', 'preset_palette', 'usage'] as const
+
+const USAGE_SHOW_FIELDS = ['show_claude', 'show_codex'] as const
+
+function findSlotContent(node: LayoutNode, slotId: string): SlotContent | null {
+  if (node.type === 'slot') return node.id === slotId ? node.content : null
+  return findSlotContent(node.a, slotId) ?? findSlotContent(node.b, slotId)
+}
+
+/**
+ * 사용량 슬롯의 빠진 show 칸 = 그 슬롯이 이미 사용량이면 지금 값(TRD §3 #20). 버스의 `layout.setSlotContent` 는 셸이 락
+ * 안에서 같은 병합을 하므로, 이 길도 같게 두어야 두 LLM 길이 같은 결과를 낸다. 이미 사용량이 아니거나 그 뷰를 아직
+ * 모르면 빠진 채로 넘긴다 — 셸 역직렬화가 빠진 칸을 true 로 읽는다(`SlotContent::Usage` serde 기본값).
+ *
+ * ★기준은 웹뷰가 받아 둔 레이아웃이다★ — 셸의 권위 값과 그사이 어긋날 수 있다(방송이 닿기 전의 연속 호출). 락 안의
+ *   원자 병합은 이 길엔 없고 셸의 `set_usage_slot`(버스와 사용량 토글 `usageSlot.toggle*` 가 탄다)에 있다. ★그래서
+ *   이 길(`__engramCmd`·cdp)로 사용량 content 를 보내는 LLM 은 show_claude · show_codex 를 둘 다 준다★ — 빠진 칸을
+ *   지금 값으로 지키려면 버스의 `layout.setSlotContent` 를 쓴다. 이 안내를 `prompts/engram-help.md` 에 두지 않는 이유 =
+ *   그 화면의 독자는 창 JS 를 못 부르는 CLI 에이전트다.
+ */
+function mergeUsageShows(viewId: string, slotId: string, content: Record<string, unknown>): Record<string, unknown> {
+  const layout = useViewStore.getState().layouts[viewId]?.layout
+  const current = layout ? findSlotContent(layout, slotId) : null
+  if (current?.type !== 'usage') return content
+  const merged = { ...content }
+  for (const field of USAGE_SHOW_FIELDS) if (merged[field] === undefined) merged[field] = current[field]
+  return merged
+}
 
 /**
  * ★SlotContent variant 형태 검증(FIX LOW)★: 태그(type)만 화이트리스트로 걸면 `{type:'agent'}` 처럼
@@ -166,6 +194,16 @@ function validateSlotContent(content: { type: string } & Record<string, unknown>
     case 'agent_list':
     case 'preset_palette':
       // 추가 필드 없는 unit variant — tag 만 맞으면 통과(여분 필드는 백엔드가 무시).
+      break
+    case 'usage':
+      // 빠진 칸은 여기서 채우지 않는다 — 호출부가 그 슬롯의 지금 값으로 채운다(`mergeUsageShows`).
+      for (const field of USAGE_SHOW_FIELDS) {
+        if (content[field] !== undefined && typeof content[field] !== 'boolean') {
+          throw new Error(
+            `[layout.setSlotContent] usage variant 의 ${field} 는 boolean 이어야 함(받음: ${JSON.stringify(content)})`,
+          )
+        }
+      }
       break
     // default 는 도달 불가(호출부에서 SLOT_CONTENT_TYPES 로 이미 걸러짐) — 방어만.
   }
@@ -191,9 +229,8 @@ register({
     // 접은 태그를 도로 얹는다 — 여분 필드(agent_id 등)는 호출자가 준 그대로 통과시키고 태그만 갈아낀다.
     const content = { ...(raw as Record<string, unknown>), type }
     validateSlotContent(content)
-    return useViewStore
-      .getState()
-      .setSlotContent(viewId, slotId, content as import('../api/layoutTypes').SlotContent)
+    const sent = type === 'usage' ? mergeUsageShows(viewId, slotId, content) : content
+    return useViewStore.getState().setSlotContent(viewId, slotId, sent as SlotContent)
   },
 })
 

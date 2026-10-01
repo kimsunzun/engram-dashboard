@@ -35,6 +35,7 @@ export const ko = {
     resolveSpatial: '공간 타깃 해소',
     fillAgentList: '에이전트 트리 열기',
     fillPresetPalette: '프리셋 팔레트 열기',
+    fillUsage: '사용량 한도 열기',
     newContent: '새 콘텐츠', // ADR-0065 "새 콘텐츠 ▶" 서브메뉴 컨테이너 라벨.
     renderModeSet: '렌더 모드 지정',
     renderModeClear: '렌더 모드 해제',
@@ -123,6 +124,72 @@ export const ko = {
     label: '프리셋',
     empty: '프리셋 없음 — 우클릭 "추가"로 폴더를 선택하세요.',
     deleteBtn: '삭제',
+  },
+  /**
+   * 사용량 한도 슬롯(TRD S21 usage-limit-slot §1-8). 데몬·wire 는 상태 코드와 수만 나르고 문구는 여기서 만든다
+   * (PRD R28·R31).
+   *
+   * ★`{upstream}`·`{kind}` 에는 상류 원문·분류 낱말이 번역 없이 그대로 들어간다(R31)★ — 끼워 넣기는 값을 다시
+   *   훑지 않으므로 원문 안의 `{…}` 도 글자 그대로 남는다.
+   */
+  usage: {
+    vendorClaude: 'Claude',
+    vendorCodex: 'Codex',
+    windowFiveHour: '5시간',
+    windowWeekly: '주간',
+    stateNotInstalled: '설치 안 됨',
+    stateNeedsLogin: '로그인 필요',
+    // ★원인을 단정하지 않는다(TRD §6 #20)★ — 원인 집합에 profile 권한 없는 로그인 토큰이 들어, 「로그아웃」이나
+    //   「한도 없는 계정」만 말하면 그 사용자를 오도한다.
+    stateUnavailable: '이 계정의 한도 정보를 받을 수 없음',
+    stateFailed: '조회 실패',
+    stateRejected: '거절됨 — {duration} 뒤',
+    // 상태 문장의 틀 — detail 을 잇는 모양. `AfterWait` 는 머리가 이미 「—」로 대기 시간을 단 거절 전용이다.
+    sourceResponse: '응답',
+    sourceError: '오류', // 설치 안 됨 — 원문이 회사 응답이 아니라 실행 오류일 수 있다.
+    withUpstream: '{status} — {source}: {upstream}',
+    withUpstreamCode: '{status} — {source} ({code}): {upstream}',
+    withUpstreamAfterWait: '{status} · {source}: {upstream}',
+    withUpstreamCodeAfterWait: '{status} · {source} ({code}): {upstream}',
+    withKind: '{status} ({kind})',
+    withKindCode: '{status} ({kind} · {code})',
+    withNextAttempt: '{sentence} · 다음 시도 {time}',
+    statusLine: '{vendor} {sentence}',
+    resetWaiting: '리셋됨 — 갱신 대기',
+    resetWaitingShort: '리셋됨', // 숫자만 남는 폭 단계 전용.
+    resetClock: '리셋 {time}', // 리셋 시각의 이름(툴팁·보조기술) — 보이는 자리엔 낱말 대신 모래시계가 선다.
+    resetDateTime: '{month}/{day} {time}', // 오늘이 아닌 리셋 시각 — 요일 없이 날짜만.
+    resetIn: '({duration} 뒤)', // 팝업에서 리셋 시각 뒤에 붙는 남은 시간.
+    durationMinutes: '{minutes}분',
+    durationHours: '{hours}시간',
+    durationHoursMinutes: '{hours}시간 {minutes}분',
+    durationDays: '{days}일',
+    durationDaysHours: '{days}일 {hours}시간',
+    ageJustNow: '방금',
+    ageMinutes: '{minutes}분 전',
+    ageHours: '{hours}시간 전',
+    ageDays: '{days}일 전',
+    stale: '{minutes}분 넘게 새로 들어오지 않은 값',
+    refreshing: '갱신 중',
+    refreshAll: '사용량 새로고침', // 작은 표시 ⟳ 의 이름 · `usageSlot.refresh` 제목.
+    refreshVendor: '{vendor} 사용량 새로고침', // 팝업 회사 머리의 ⟳.
+    plan: '플랜: {plan}',
+    headSeparator: '·', // 팝업 회사 머리의 플랜과 나이 사이.
+    link: '사용량 페이지 ↗',
+    linkTitle: '{vendor} 사용량 설정 페이지를 브라우저로 엽니다 — {url}',
+    meterLabel: '{vendor} {window} 남은 양',
+    meterValueText: '{pct}% 남음',
+    // 요약 버튼의 접근성 이름 — 안의 막대·배지 대신 짧게 읽힌다(버튼의 자식은 보조기술에 평평해진다).
+    a11yWindow: '{window} {value}',
+    a11yNoValue: '값 없음',
+    a11yVendor: '{vendor} {first}, {second}',
+    a11yVendorStatus: '{vendor} {first}, {second} ({status})',
+    a11yStatusRefreshing: '{status}, {refreshing}',
+    a11yTwoVendors: '{first} · {second}',
+    popupLabel: '사용량 상세',
+    hint: '클릭해서 표시할 항목 고르기',
+    showOnSlot: '슬롯에 표시:', // 팝업 맨 아래 표시 토글 줄의 머리.
+    showVendor: '{vendor} 표시', // `usageSlot.toggle*` 제목.
   },
   /**
    * 구조화(챗) 슬롯 렌더 문자열.

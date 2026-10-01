@@ -151,6 +151,7 @@ async fn run() -> i32 {
             manager.clone(),
             broadcast_slot.clone(),
             Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
+            Arc::new(engram_dashboard_daemon::control::commands::NoUsageLimits),
         ),
     ));
     let messaging = Arc::new(messaging_for_manager(manager.clone(), registry.clone()));

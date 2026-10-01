@@ -2,7 +2,8 @@
 
 use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentListArgs, AgentListQueuedInputsArgs, AgentMoveArgs,
-    AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, COMMAND_SPECS, INPUT_AFFECTING,
+    AgentNewArgs, AgentRenameArgs, AgentSpawnArgs, UsageGetArgs, UsageRefreshArgs, COMMAND_SPECS,
+    INPUT_AFFECTING,
 };
 use engram_dashboard_command::{
     command_specs, duplicate_command_names, lint_spec, spec_item_json, spec_of, Effect, ErrorCode,
@@ -23,7 +24,9 @@ fn declared_names_are_the_cli_verbs() {
             "agent.move",
             "agent.new",
             "agent.rename",
-            "agent.spawn"
+            "agent.spawn",
+            "usage.get",
+            "usage.refresh"
         ]
     );
 }
@@ -38,7 +41,7 @@ fn the_read_verb_is_in_the_v1_list() {
             .iter()
             .filter(|s| s.effect == Effect::Write)
             .count()
-            == 5
+            == 6
     );
 }
 
@@ -51,7 +54,21 @@ fn the_queued_input_verbs_are_declared_with_their_effect_and_generation() {
     let cancel = spec_of("agent.cancelQueuedInput").expect("선언");
     assert_eq!(cancel.effect, Effect::Write);
     assert_eq!(cancel.since, 5);
-    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 5);
+}
+
+/// 사용량 두 동사(TRD S21 usage-limit-slot §1-6) — 조회는 `Read`, 강제 새로고침은 `Write` 이고 둘 다 카탈로그 6 에
+/// 들어왔다. ★`usage.refresh` 가 `Write` 인 것은 계약이다★ — 배달이 그 값으로 번호를 붙든다(같은 번호의 재전송이
+/// 조회를 다시 띄우지 않는다). 그래서 마감 뒤 결과 로그가 그 payload 를 싣고, 거기서 원문이 걷힌다(daemon
+/// `command_delivery`).
+#[test]
+fn the_usage_verbs_are_declared_with_their_effect_and_generation() {
+    let get = spec_of("usage.get").expect("선언");
+    assert_eq!(get.effect, Effect::Read);
+    assert_eq!(get.since, 6);
+    let refresh = spec_of("usage.refresh").expect("선언");
+    assert_eq!(refresh.effect, Effect::Write);
+    assert_eq!(refresh.since, 6);
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 6);
 }
 
 /// ★입력을 움직이는 명령 목록은 이 crate 의 `Write` 선언만 담는다★ — 없는 이름이나 조회가 끼면 공통 입구의
@@ -105,6 +122,9 @@ fn error_sets_are_golden() {
         declared("agent.cancelQueuedInput"),
         vec![ErrorCode::NotFound, ErrorCode::Conflict]
     );
+    // 칸이 없는 백엔드 = NOT_FOUND(wire ⟳ 와 같은 코드).
+    assert_eq!(declared("usage.get"), vec![ErrorCode::NotFound]);
+    assert_eq!(declared("usage.refresh"), vec![ErrorCode::NotFound]);
 }
 
 /// ★광고된 집합은 실제로 날 수 있는 것 전부여야 한다★ — 인자 반려와 내부 실패는 어느 명령에서나 난다.
@@ -189,6 +209,16 @@ fn required_matches_what_deserialization_actually_demands() {
             "agent.cancelQueuedInput",
             parses::<AgentCancelQueuedInputArgs>,
             json!({ "target": "alpha", "input_id": "q1" }),
+        ),
+        (
+            "usage.get",
+            parses::<UsageGetArgs>,
+            json!({ "backend": "Claude" }),
+        ),
+        (
+            "usage.refresh",
+            parses::<UsageRefreshArgs>,
+            json!({ "backend": "Codex" }),
         ),
     ];
 

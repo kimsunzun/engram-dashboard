@@ -89,6 +89,26 @@ vi.mock('../slot/DomSlot', () => ({
 vi.mock('../slot/PresetPalette', () => ({
   default: () => <div data-testid="preset-palette" />,
 }))
+// ── UsageSlot stub — usage variant 마운트 여부와 내려보낸 켜고 끔·슬롯 좌표만 확인(화면은 UsageSlot.test 담당) ──
+vi.mock('../slot/UsageSlot', () => ({
+  default: ({
+    content,
+    viewId,
+    slotId,
+  }: {
+    content: { show_claude: boolean; show_codex: boolean }
+    viewId: string | null
+    slotId: string
+  }) => (
+    <div
+      data-testid="usage-slot"
+      data-show-claude={String(content.show_claude)}
+      data-show-codex={String(content.show_codex)}
+      data-view-id={String(viewId)}
+      data-slot-id={slotId}
+    />
+  ),
+}))
 // ── AgentList stub(ADR-0060/0062) — agent_list variant 마운트 여부만 확인(내부 배선은 AgentList.test 담당) ──
 vi.mock('../agent/AgentList', () => ({
   default: () => <div data-testid="agent-list" />,
@@ -284,6 +304,21 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     render(<ViewLayoutRenderer node={contentSlotNode('s1', { type: 'agent_list' })} focusedSlotId={null} />)
     expect(screen.getByTestId('agent-list')).toBeTruthy()
     // empty 플레이스홀더가 아니라 실 렌더러 — 중앙정렬 flex 없어야 목록 레이아웃이 안 깨진다.
+    expect(emptyIcons()).toHaveLength(0)
+    expect(borderOf('s1').style.justifyContent).not.toBe('center')
+    expect(borderOf('s1').style.overflow).toBe('hidden')
+  })
+
+  it('content.type=usage slot → UsageSlot 이 슬롯 내용(show_*)을 받아 마운트된다(hasContent=true)', () => {
+    render(
+      <ViewLayoutRenderer
+        node={contentSlotNode('s1', { type: 'usage', show_claude: true, show_codex: false })}
+        focusedSlotId={null}
+      />,
+    )
+    const usage = screen.getByTestId('usage-slot')
+    expect(usage.getAttribute('data-show-claude')).toBe('true')
+    expect(usage.getAttribute('data-show-codex')).toBe('false')
     expect(emptyIcons()).toHaveLength(0)
     expect(borderOf('s1').style.justifyContent).not.toBe('center')
     expect(borderOf('s1').style.overflow).toBe('hidden')
@@ -741,6 +776,12 @@ describe('ViewLayoutRenderer — click-to-focus 게이트(제어 슬롯 포커�
     clickSlot({ type: 'preset_palette' })
     expect(focusSlotSpy).not.toHaveBeenCalled()
   })
+
+  // 포커스 게이트는 allowlist(isContentSlot)라 새 variant 는 따로 빼지 않아도 제외된다.
+  it('usage(사용량) 슬롯 클릭 → focusSlot 미호출', () => {
+    clickSlot({ type: 'usage', show_claude: true, show_codex: true })
+    expect(focusSlotSpy).not.toHaveBeenCalled()
+  })
 })
 
 // ── ★우클릭 통합 컨텍스트 메뉴(§5, ADR-0064)★ ─────────────────────────────────────────────────
@@ -992,6 +1033,36 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
     openNewContentFlyout()
     fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
     expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-U', { type: 'preset_palette' })
+  })
+
+  it('"사용량 한도 열기"(flyout) → setSlotContent(viewId, slotId, {type:usage, 두 회사 켬})', () => {
+    openMenu('slot-W', null)
+    openNewContentFlyout()
+    fireEvent.click(screen.getByText('사용량 한도 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-W', {
+      type: 'usage',
+      show_claude: true,
+      show_codex: true,
+    })
+  })
+
+  // ── 사용량 슬롯 — 우클릭 메뉴엔 사용량 항목이 없다(사용자 결정 2026-09-29 — ⟳ 는 작은 표시, 표시 토글은 팝업) ──
+  it('사용량 슬롯 우클릭 → 사용량 항목(⟳ · 회사 표시) 없이 공통 슬롯 ops 만 · UsageSlot 은 이 슬롯 좌표를 받는다', () => {
+    render(
+      <ViewLayoutRenderer
+        node={contentSlotNode('slot-U1', { type: 'usage', show_claude: true, show_codex: false })}
+        focusedSlotId={null}
+      />,
+    )
+    fireEvent.contextMenu(document.querySelector('[data-slot-id="slot-U1"]') as HTMLElement)
+    expect(screen.queryByText('사용량 새로고침')).toBeNull()
+    expect(screen.queryByText('Claude 표시')).toBeNull()
+    expect(screen.queryByText('Codex 표시')).toBeNull()
+    expect(document.querySelector('[data-slot-menu-item^="usageSlot."]')).toBeNull()
+    expect(document.querySelector('[data-slot-menu-item="slot.close"]')).not.toBeNull()
+    const usage = screen.getByTestId('usage-slot')
+    expect(usage.getAttribute('data-view-id')).toBe(ACTIVE_VIEW)
+    expect(usage.getAttribute('data-slot-id')).toBe('slot-U1')
   })
 
   it('빈 슬롯엔 "비우기"가 없다(ADR-0065 hideOn:["empty"] 트림 — 이미 빈 슬롯 재비우기는 no-op)', () => {

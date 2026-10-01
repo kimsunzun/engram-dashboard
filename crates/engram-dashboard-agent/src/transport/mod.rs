@@ -38,6 +38,18 @@ pub trait OutputDecoder: Send {
 
     /// 스트림 종료 시 최대 1회 호출 — 개행으로 종단되지 않은 잔여 라인을 마저 처리한다.
     fn flush(&mut self) -> Vec<OutputEvent>;
+
+    /// 지금까지 해석하며 모아 둔 사용량 한도 관측을 **꺼내 비운다**(도착 순). 부르는 쪽은 출력 pump 이고
+    /// `decode`·`flush` 를 부를 때마다 곧이어 부른다 — 그래서 구현체가 쌓아 두는 양은 청크 하나 분량이다.
+    /// ★기본 = 빈 벡터★: 사용량을 싣지 않는 스트림의 디코더는 구현하지 않는다.
+    /// ★`OutputEvent` 로 내지 않는 이유★: 사용량은 계정 단위 상태라 에이전트별 replay·구독자 fan-out 을
+    ///   타면 안 된다 — pump 가 이것을 [`crate::types::StatusSink::usage_observed`] 로 따로 넘긴다.
+    /// ★감싸는 디코더는 이 메서드도 반드시 넘긴다★ — 기본 몸체가 있어 빠뜨려도 컴파일된다. 그러면 통과형
+    ///   감싸개는 관측을 조용히 잃고, 막는 감싸개([`crate::usage::UsageGate`])는 안쪽을 영영 비우지 않아 그
+    ///   벡터가 에이전트 수명 내내 자란다.
+    fn take_usage(&mut self) -> Vec<crate::usage::UsageObservation> {
+        Vec::new()
+    }
 }
 
 // ★PTY 출력 바이트를 backend 클로저에 흘리는 seam 을 여기 되살리지 말 것(ADR-0217/ADR-0218)★ —

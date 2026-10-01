@@ -9,8 +9,12 @@
 //! 인코딩·합성 에코·출력 decoder·transcript seed 넷을 이 모듈의 함수로 직접 불렀고, 한 파일에 살던
 //! 동안은 그것이 보이지 않았다.
 //!
-//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나★: 바깥이 새 지식을 필요로 하면
-//!   그 trait 에 메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라.
+//! ★밖으로 나가는 표면 = [`crate::backend::AgentBackend`] 구현 하나 + 사용량 조회기 싱글턴
+//!   [`CLAUDE_USAGE_PROBE`]([`crate::usage::UsageProbe`]) 하나★: 바깥이 새 지식을 필요로 하면 그 trait 에
+//!   메서드를 더하고 여기서 구현한다 — 바깥이 이 모듈의 항목을 이름으로 부르는 게 아니라. 조회기가 trait 칸이
+//!   아닌 것은 에이전트가 없어도 도는 조회라 두 겹 디스패치를 두지 않으려는 것이고, 그것을 이름으로 부를 수
+//!   있는 자리는 `backend/mod.rs` 의 등록부뿐이다 — crate 밖은 `pub(crate)` 라 컴파일러가 막고, crate 안은
+//!   아래 격리 게이트가 본다.
 //! ★격리 게이트(백엔드 폴더 넷 공통 — 이름만 바꿔 돌린다)★:
 //!   `rg -n --glob '*.rs' --glob '!**/backend/claude/**' "\bclaude::" crates/ src-tauri/`
 //!   ★히트를 세지 않는다★ — 각 히트가 `backend/mod.rs` 의 **등록부**(`pub use claude::ClaudeBackend;`)
@@ -24,6 +28,10 @@
 //! tauri import 0.
 
 mod session_file;
+mod usage;
+mod usage_probe;
+
+pub(crate) use usage_probe::CLAUDE_USAGE_PROBE;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -45,6 +53,7 @@ use crate::types::{
     AgentId, BackendCaps, CommandSpec, ControlEndpoint, DeliveryAck, DropCause, MidTurnPolicy,
     ModelCaps, OutputEvent, PtyError, QueuedInputEvent, SessionCaps, ToolGrant, TurnOutcome,
 };
+use crate::usage::UsageObservation;
 
 const CLAUDE_PROGRAM: &str = "claude";
 
@@ -424,7 +433,10 @@ impl AgentBackend for ClaudeBackend {
         let delivery_ack = Arc::new(DeliveryAck::new());
         let (transport, child_pid): (Box<dyn AgentTransport>, Option<u32>) =
             if is_stream_json(command) {
-                let decoder = stream_decoder(Arc::clone(&delivery_ack));
+                // ★줍기 판정은 여기서 건다 — 디코더를 만드는 `stream_decoder` 는 스폰 명세(env)를 받지 않아 판정할 수 없다★.
+                //   기본 계정이 아닌 프로필의 관측이 기본 칸에 섞이지 않게 한다(`usage.rs`).
+                let decoder =
+                    usage::gate_decoder(stream_decoder(Arc::clone(&delivery_ack)), &spec.env);
                 let (t, pid) = StdioTransport::open(spec, true, Some(decoder))?;
                 (Box::new(t), pid)
             } else {
@@ -761,8 +773,9 @@ fn stream_decoder(ack: Arc<DeliveryAck>) -> Box<dyn OutputDecoder> {
 
 /// claude stream-json 라이브 decoder.
 ///
-/// ★decoder 자신의 상태 = 줄 재조립뿐이다★: 메시지 병합(같은 message.id 블록 concat)은 decoder 책임이
-///   아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해 뱉는다. 목록 항목도 모른다 —
+/// ★decoder 자신의 상태 = 줄 재조립과, pump 가 청크마다 비우는 사용량 관측뿐이다★: 메시지 병합(같은 message.id
+///   블록 concat)은 decoder 책임이 아니다(프론트 RichSlot 이 함) — decoder 는 라인만 재조립하고 라인별로 파싱해
+///   뱉는다. 목록 항목도 모른다 —
 ///   명부 사건은 벤더 줄 하나의 1:1 번역이고, 해석은 명부·누산기의 환원 규칙이 한다.
 /// ★받음 값(`ack`)은 decoder 상태가 아니라 화신 공유 값의 손잡이다★ — 세션이 같은 값을 읽는다.
 #[derive(Debug, Default)]
@@ -786,6 +799,9 @@ pub struct ClaudeStreamDecoder {
     ///   손실하고, **그 라인이 끝나는 `\n` 이후부터** 온전히 복구하려면 "다음 개행까지 버리는"
     ///   상태가 있어야 한다.
     discarding: bool,
+
+    /// `rate_limit_event` 에서 주운 사용량 관측 — pump 가 `take_usage` 로 청크마다 비운다.
+    usage: Vec<UsageObservation>,
 
     /// 이 화신의 받음 알림 가능 여부 — `system/init` 의 능력 목록과 첫 `command_lifecycle` 줄로 `Unknown` 을
     /// 떠나게 한다. 운영에서는 backend 가 `SpawnParts::delivery_ack` 에 싣는 **바로 그** Arc 다.
@@ -837,6 +853,7 @@ impl ClaudeStreamDecoder {
                 &line[..line.len() - 1],
                 &mut events,
                 LineSource::Live(&self.ack),
+                Some(&mut self.usage),
             );
         }
 
@@ -862,7 +879,12 @@ impl ClaudeStreamDecoder {
         let mut events = Vec::new();
         if !self.buffer.is_empty() {
             let line = std::mem::take(&mut self.buffer);
-            Self::consume_line(&line, &mut events, LineSource::Live(&self.ack));
+            Self::consume_line(
+                &line,
+                &mut events,
+                LineSource::Live(&self.ack),
+                Some(&mut self.usage),
+            );
         }
         events
     }
@@ -878,8 +900,15 @@ impl ClaudeStreamDecoder {
     /// - 라이브만: `command_lifecycle` → 명부 사건 · `cancel:<uuid>` 요청의 `control_response` → 취소 응답
     ///   사건 · `system/init` → 받음 가능 여부 판정(ADR-0231).
     /// - transcript 만: `attachment{queued_command}` → 사용자 말풍선.
-    /// - 그 밖의 `system`/`rate_limit_event`/`queue-operation`/unknown type → skip(0개).
-    fn consume_line(line: &[u8], events: &mut Vec<OutputEvent>, source: LineSource<'_>) {
+    /// - `rate_limit_event` → 이벤트 0개. `observations` 가 `Some` 이면 사용량 관측을 거기 더한다
+    ///   (`usage.rs`). `None` = 줍지 않는다 — 지나간 기록(transcript)을 읽는 호출자다.
+    /// - 그 밖의 `system`/`queue-operation`/unknown type → skip(0개).
+    fn consume_line(
+        line: &[u8],
+        events: &mut Vec<OutputEvent>,
+        source: LineSource<'_>,
+        observations: Option<&mut Vec<UsageObservation>>,
+    ) {
         // ★여기서 처음 UTF-8 디코딩★(위 buffer 불변식). lossy 가 아니라 엄격 검증 후 실패 시 skip —
         //   비-UTF8 라인은 claude 정상 출력이 아니다(터미널 경로가 아니다).
         let text = match std::str::from_utf8(line) {
@@ -969,6 +998,11 @@ impl ClaudeStreamDecoder {
                     message_id: None,
                 });
             }
+            (Some("rate_limit_event"), _) => {
+                if let Some(observations) = observations {
+                    observations.extend(usage::observation_from_rate_limit_event(&value));
+                }
+            }
             (Some("command_lifecycle"), LineSource::Live(ack)) => {
                 // 알아보는 줄이 왔다는 것이 「이 CLI 는 항목별 수명주기를 낸다」다 — init 은 턴 시작 0.6–0.9 s 뒤에야
                 //   오지만 수명주기는 쓴 뒤 1 ms 안에 온다(M1·M4).
@@ -998,7 +1032,7 @@ impl ClaudeStreamDecoder {
             (Some("attachment"), LineSource::Transcript) => {
                 Self::consume_queued_command(&value, events);
             }
-            // 그 밖의 system(hook·thinking_tokens·task 알림 등)·rate_limit_event·queue-operation 등 메타 라인,
+            // 그 밖의 system(hook·thinking_tokens·task 알림 등)·queue-operation 등 메타 라인,
             //   흐름이 맞지 않는 줄, unknown type → skip.
             _ => {}
         }
@@ -1348,7 +1382,13 @@ pub(crate) fn parse_transcript_events(transcript: &str) -> Vec<OutputEvent> {
         if is_sidechain_line(trimmed) {
             continue;
         }
-        ClaudeStreamDecoder::consume_line(trimmed.as_bytes(), &mut events, LineSource::Transcript);
+        // 줍지 않는다 — 지나간 한도는 지금 값이 아니다.
+        ClaudeStreamDecoder::consume_line(
+            trimmed.as_bytes(),
+            &mut events,
+            LineSource::Transcript,
+            None,
+        );
     }
     // ★복원 히스토리는 반드시 "닫힌 턴"으로 끝낸다(load-bearing)★: 실제 `.jsonl` transcript 에는 라이브
     //   stream-json 의 `result` 라인이 **들어 있지 않다**(실측 2026-08-17 — 최근 transcript 12개 전부 0건.
@@ -1442,6 +1482,9 @@ impl crate::transport::OutputDecoder for ClaudeStreamDecoder {
     }
     fn flush(&mut self) -> Vec<OutputEvent> {
         ClaudeStreamDecoder::flush(self)
+    }
+    fn take_usage(&mut self) -> Vec<UsageObservation> {
+        std::mem::take(&mut self.usage)
     }
 }
 
@@ -3189,6 +3232,113 @@ mod tests {
             events.is_empty(),
             "메타·비-JSON 라인은 모두 skip: {events:?}"
         );
+    }
+
+    // ── 사용량 줍기(take_usage) — 해석 규칙 자체는 `usage.rs` 시험이 잰다 ──
+
+    fn take_usage(d: &mut ClaudeStreamDecoder) -> Vec<UsageObservation> {
+        crate::transport::OutputDecoder::take_usage(d)
+    }
+
+    const RATE_LIMIT_NEW_SHAPE: &str = concat!(
+        r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","rateLimitType":"five_hour","#,
+        r#""utilization":0.55,"resetsAt":1790425800,"unifiedWindows":{"five_hour":{"utilization":0.55,"#,
+        r#""resetsAt":1790425800},"seven_day":{"utilization":0.83,"resetsAt":1790856000}}}}"#,
+        "\n",
+    );
+
+    #[test]
+    fn rate_limit_event_is_collected_without_output_events() {
+        let mut d = ClaudeStreamDecoder::new();
+        // 청크 경계가 줄 한가운데에 와도 완성 줄에서만 줍는다.
+        let (head, tail) = RATE_LIMIT_NEW_SHAPE.as_bytes().split_at(40);
+        assert!(d.decode(head).is_empty());
+        assert!(
+            take_usage(&mut d).is_empty(),
+            "미완성 줄에서 주우면 안 된다"
+        );
+        assert!(
+            d.decode(tail).is_empty(),
+            "사용량은 출력 이벤트로 나가지 않는다"
+        );
+
+        let got = take_usage(&mut d);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let obs = &got[0];
+        assert_eq!(obs.source, crate::usage::UsageSource::Passive);
+        let five = obs.five_hour.expect("5시간 창");
+        assert_eq!(
+            five.used_pct,
+            Some(55.0),
+            "0.55 × 100 의 부동소수 오차가 남으면 안 된다"
+        );
+        assert_eq!(five.resets_at, Some(1_790_425_800));
+        assert_eq!(obs.weekly.and_then(|w| w.used_pct), Some(83.0));
+        assert!(take_usage(&mut d).is_empty(), "꺼낸 뒤엔 비어야 한다");
+    }
+
+    /// 픽스처의 옛 모양(사용률 없음)은 리셋만 싣고, 다른 줄의 이벤트는 그대로다.
+    #[test]
+    fn fixture_rate_limit_line_yields_reset_only_observation() {
+        let mut d = ClaudeStreamDecoder::new();
+        let mut events = d.decode(TEXT_JSONL.as_bytes());
+        events.extend(d.flush());
+        assert_eq!(
+            tags(&events),
+            vec!["queued:ack-unavailable", "text", "usage", "done"]
+        );
+
+        let got = take_usage(&mut d);
+        assert_eq!(got.len(), 1, "{got:?}");
+        let five = got[0].five_hour.expect("5시간 창");
+        assert_eq!(five.used_pct, None, "옛 모양엔 사용률이 없다 — 0 이 아니다");
+        assert_eq!(five.resets_at, Some(1_782_567_000));
+        assert_eq!(got[0].weekly, None);
+    }
+
+    #[test]
+    fn unterminated_rate_limit_line_is_collected_on_flush() {
+        let mut d = ClaudeStreamDecoder::new();
+        let line = RATE_LIMIT_NEW_SHAPE.trim_end();
+        assert!(d.decode(line.as_bytes()).is_empty());
+        assert!(take_usage(&mut d).is_empty());
+        assert!(d.flush().is_empty());
+        assert_eq!(take_usage(&mut d).len(), 1);
+    }
+
+    #[test]
+    fn empty_rate_limit_info_yields_no_observation() {
+        let mut d = ClaudeStreamDecoder::new();
+        assert!(d
+            .decode(b"{\"type\":\"rate_limit_event\",\"rate_limit_info\":{}}\n")
+            .is_empty());
+        assert!(take_usage(&mut d).is_empty());
+    }
+
+    /// 지나간 기록의 한도는 지금 값이 아니다 — transcript 복원 경로는 줍지 않는다(이벤트도 없다).
+    #[test]
+    fn transcript_rate_limit_line_yields_no_event() {
+        let events = parse_transcript_events(RATE_LIMIT_NEW_SHAPE);
+        assert!(
+            tags(&events).iter().all(|t| t == "done"),
+            "rate_limit_event 는 이벤트가 되지 않는다: {:?}",
+            tags(&events)
+        );
+    }
+
+    /// 막힌 감싸개 뒤에서는 같은 줄도 관측이 되지 않고, 출력 이벤트는 그대로 지난다.
+    #[test]
+    fn blocked_gate_hides_claude_usage_but_not_output() {
+        use crate::transport::OutputDecoder;
+        let mut gated = crate::usage::UsageGate::blocking(Box::new(ClaudeStreamDecoder::new()));
+        let mut events = gated.decode(RATE_LIMIT_NEW_SHAPE.as_bytes());
+        events.extend(gated.decode(TEXT_JSONL.as_bytes()));
+        events.extend(gated.flush());
+        assert_eq!(
+            tags(&events),
+            vec!["queued:ack-unavailable", "text", "usage", "done"]
+        );
+        assert!(gated.take_usage().is_empty());
     }
 
     #[test]

@@ -11,6 +11,7 @@ import './slotContentCommands'
 import './renderModeCommands'
 import './presetCommands'
 import './agentCommands'
+import './usageCommands'
 
 import { validateSlotMenuContributions } from './slotMenu'
 

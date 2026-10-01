@@ -1,6 +1,8 @@
 //! 도메인 타입(wire 표현). 현 `agent::types` / `agent::profile` 의 직렬화 형태를 미러.
 //! ★이 중복을 합치려 `agent` 가 이 crate 를 의존하게 만들지 말 것★ — 그 crate 의 protocol-무의존이
 //! 불변식이라 미러가 그 대가다(정본 = `crates/engram-dashboard-agent/Cargo.toml` `[dependencies]` 주석).
+//! ★단 사용량 한도 타입(`Usage*`)은 미러가 아니다★ — 데몬 답의 모양이라 agent `usage` 의 관측 타입과
+//!   칸이 일부러 다르다(부호·나이·만료). 맞추려 들지 말 것.
 
 use ts_rs::TS;
 
@@ -203,7 +205,8 @@ pub enum AgentSpawnCommand {
 /// 것은 사람·LLM 이 손으로 친 낱말이고(`agent.spawnInto` 의 `backend`, 프론트의 `SpawnByCwd`) 거기서
 /// `Claude` 는 오타가 아니라 같은 뜻이다. 반대로 내보내는 쪽을 넓히면 `agents.json` 과 ts-rs 유니온이
 /// 갈리므로 [`Serialize`](serde::Serialize) 는 derive 그대로 둔다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
+// `Ord` = 선언 순서 — 뜻이 없고 정렬된 집합(셸의 사용량 관심 `BTreeSet`)의 열쇠로만 쓴다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, TS)]
 #[serde(rename_all = "lowercase")]
 #[ts(export)]
 pub enum AgentBackendKind {
@@ -428,6 +431,137 @@ pub struct SnapshotChunk {
     pub data: Vec<u8>,
 }
 
+// ── 사용량 한도 wire(구독형 — 클라이언트가 벤더를 구독하고 데몬이 바뀔 때마다 보낸다) ──────────────
+
+/// 한 벤더·계정의 사용량 상태 — 데몬이 그 벤더를 구독한 연결에 보내는 한 장
+/// ([`AgentEvent::UsageLimitsUpdated`](crate::AgentEvent::UsageLimitsUpdated)).
+///
+/// ★시간 칸 규칙★: 절대 시각은 [`UsageWindow::resets_at`](서버가 준 epoch 초) 하나뿐이다. 나머지 시간
+///   칸(`age_secs`·`next_attempt_in_secs`·`retry_in_secs`)은 **이 한 장을 뜬 순간 기준 상대 초**라, 받는 쪽은
+///   받은 순간부터 흐른 만큼 더해 읽는다 — 양쪽 벽시계가 어긋나거나 되감겨도 흔들리지 않게.
+/// ★상태 문구는 받는 쪽이 번역 키로 만든다★ — 상태는 코드 + 수로 나른다. 예외 = `detail`(분류 낱말 `kind`·
+///   상류 원문 `upstream` 은 번역 없이 그대로 보인다).
+/// ★`null` 창·`null` 수는 「모른다」이지 0 이 아니다★ — 0% 로 그리면 안 된다.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageLimitSnapshot {
+    pub vendor: AgentBackendKind,
+    /// 같은 벤더 안의 계정 — 지금은 늘 `"default"`(데몬 env 의 기본 로그인).
+    pub account_key: String,
+    pub five_hour: Option<UsageWindow>,
+    pub weekly: Option<UsageWindow>,
+    /// 모델별 주간 창. 빈 배열 = 없음.
+    pub model_scoped: Vec<UsageScopedWindow>,
+    pub plan: Option<String>,
+    /// 조회가 아직 진행 중이다 — 이 한 장의 값은 그 조회 전의 것이고, 결과는 조회가 끝나면 구독한 연결에 새
+    /// 한 장으로 간다.
+    pub in_flight: bool,
+    /// `Ready` 가 아니어도 위 값들은 유효하다 — 실패는 마지막으로 알던 값을 지우지 않는다.
+    /// 예외는 `Unavailable` 이다 — 값을 싣지 않는다.
+    pub state: UsageVendorState,
+    /// 이 칸(벤더·계정)의 단조 번호 — 무엇이든 바뀌면 +1. 받는 쪽은 같은 연결(소켓) 안에서 칸마다 최댓값만
+    /// 남기고 더 작은 것은 버린다. 새 소켓이 서면 그 기억을 잊는다 — 데몬이 재시작하면 0 부터 다시 센다.
+    #[ts(type = "number")]
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageWindow {
+    /// **쓴** 양의 백분율 0–100(남은 양이 아니다). 생산자는 소수 넷째 자리로 반올림해 싣는다(agent
+    /// `usage/normalize.rs` 의 `PCT_SCALE`) — 받는 쪽은 남은 양을 보정 없이 `floor(100 − used_pct)` 로 보여 주므로,
+    /// 이진 부동소수 꼬리(0.55 × 100 = 55.00000000000001)가 정수 경계를 넘지 않는 것이 그 반올림에 기댄다.
+    pub used_pct: Option<f64>,
+    /// 리셋 시각, epoch 초.
+    #[ts(type = "number | null")]
+    pub resets_at: Option<u64>,
+    /// 이 값을 관측한 뒤 흐른 초.
+    #[ts(type = "number")]
+    pub age_secs: u64,
+    /// 데몬이 리셋 경과를 확인했다 — 한 번 서면 이 창에 새 값이 올 때까지 유지된다(벽시계가 되감겨도).
+    pub expired: bool,
+}
+
+/// 모델별 주간 창 하나. `label` = 벤더가 준 표시용 이름.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageScopedWindow {
+    pub label: String,
+    pub window: UsageWindow,
+}
+
+/// 벤더 조회의 상태 코드. 비정상 다섯의 `detail` = 왜 그 상태인가(없으면 `null` — 원인을 모른다).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(tag = "kind")]
+#[ts(export)]
+pub enum UsageVendorState {
+    Ready,
+    /// 그 벤더의 CLI 가 없다.
+    NotInstalled {
+        detail: Option<UsageStateDetail>,
+    },
+    /// 인증 오류 — 로그인이 필요하다.
+    NeedsLogin {
+        detail: Option<UsageStateDetail>,
+    },
+    /// 조회는 됐지만 이 계정엔 한도 정보가 없다(로그아웃 · API 키 계정 · profile 권한이 없는 토큰 등)
+    /// — 스냅숏에 창 값이 없다.
+    Unavailable {
+        detail: Option<UsageStateDetail>,
+    },
+    /// 그 밖의 실패. `next_attempt_in_secs` = 다음 자동 조회까지 남은 초 — 늘 정의된다(기준점이 없으면 거절
+    /// 끝 또는 지금), 이미 지났으면 0.
+    Failed {
+        #[ts(type = "number")]
+        next_attempt_in_secs: u64,
+        detail: Option<UsageStateDetail>,
+    },
+    /// 상류가 조회를 거절했다. 이 초가 지나기 전에는 강제 새로고침도 조회를 내보내지 않는다.
+    Rejected {
+        #[ts(type = "number")]
+        retry_in_secs: u64,
+        detail: Option<UsageStateDetail>,
+    },
+}
+
+/// 비정상 상태의 원인.
+///
+/// `kind` = 분류 낱말(예 `rate_limits_null`·`claude_error`·`rpc_error`·`limits_unavailable`·`timeout`).
+/// ★enum 이 아니라 문자열이다★ — 분류가 늘어도 옛 셸이 스냅숏 전체를 못 읽는 일이 없게. 받는 쪽은
+///   번역하지 않고 그대로 보인다.
+/// `code` = 상류가 준 수(Codex JSON-RPC `error.code`). `upstream` = 상류 원문 — 보내는 쪽이 이 순서로
+///   다듬은 것이다: 비밀 가림 → 공백류 제어(탭·개행·CR·VT·FF·NEL·U+2028/2029)는 공백, 그 밖의 제어·
+///   보이지 않는 서식 문자는 U+FFFD → 200자로 자름. 받는 쪽이 다시 정화할 필요는 없다.
+/// ★`Debug` 는 `upstream` 을 글자 수로만 찍는다★ — 어디서 `{:?}` 로 찍혀도 원문이 로그에 안 나가게.
+///   원문은 wire(`Serialize`)와 비교(`PartialEq`)만 본다.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize, TS)]
+#[ts(export)]
+pub struct UsageStateDetail {
+    pub kind: String,
+    #[ts(type = "number | null")]
+    pub code: Option<i64>,
+    pub upstream: Option<String>,
+}
+
+impl std::fmt::Debug for UsageStateDetail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        struct CharCount(usize);
+        impl std::fmt::Debug for CharCount {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "<{}자>", self.0)
+            }
+        }
+        f.debug_struct("UsageStateDetail")
+            .field("kind", &self.kind)
+            .field("code", &self.code)
+            .field(
+                "upstream",
+                &self.upstream.as_ref().map(|s| CharCount(s.chars().count())),
+            )
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -511,6 +645,281 @@ mod tests {
             AgentBackendKind::ALL.len(),
             AgentBackendKind::WORDS.len(),
             "낱말 표와 짝 표가 갈렸다"
+        );
+    }
+
+    // ── 사용량 한도 wire ──
+
+    fn usage_window(used_pct: Option<f64>) -> UsageWindow {
+        UsageWindow {
+            used_pct,
+            resets_at: Some(1_900_000_000),
+            age_secs: 42,
+            expired: false,
+        }
+    }
+
+    fn usage_snapshot(state: UsageVendorState) -> UsageLimitSnapshot {
+        UsageLimitSnapshot {
+            vendor: AgentBackendKind::Codex,
+            account_key: "default".to_string(),
+            five_hour: Some(usage_window(Some(37.5))),
+            weekly: None,
+            model_scoped: vec![UsageScopedWindow {
+                label: "opus".to_string(),
+                window: usage_window(None),
+            }],
+            plan: Some("pro".to_string()),
+            in_flight: true,
+            state,
+            revision: 7,
+        }
+    }
+
+    fn detail(code: Option<i64>, upstream: Option<&str>) -> UsageStateDetail {
+        UsageStateDetail {
+            kind: "rpc_error".to_string(),
+            code,
+            upstream: upstream.map(str::to_string),
+        }
+    }
+
+    /// 전체 모양을 한 번에 잰다 — 부분 단언은 검사 안 한 칸의 이름·표기 변경을 통과시킨다.
+    #[test]
+    fn usage_snapshot_serializes_to_the_exact_wire_shape() {
+        let snap = usage_snapshot(UsageVendorState::Failed {
+            next_attempt_in_secs: 840,
+            detail: Some(detail(Some(-32603), Some("internal error"))),
+        });
+        assert_eq!(
+            serde_json::to_value(&snap).expect("직렬화"),
+            serde_json::json!({
+                "vendor": "codex",
+                "account_key": "default",
+                "five_hour": {
+                    "used_pct": 37.5, "resets_at": 1_900_000_000u64, "age_secs": 42,
+                    "expired": false
+                },
+                "weekly": null,
+                "model_scoped": [{
+                    "label": "opus",
+                    "window": {
+                        "used_pct": null, "resets_at": 1_900_000_000u64, "age_secs": 42,
+                        "expired": false
+                    }
+                }],
+                "plan": "pro",
+                "in_flight": true,
+                "state": {
+                    "kind": "Failed",
+                    "next_attempt_in_secs": 840,
+                    "detail": { "kind": "rpc_error", "code": -32603, "upstream": "internal error" }
+                },
+                "revision": 7
+            })
+        );
+    }
+
+    /// 상태 여섯이 코드 + 상대 초 + 원인만으로 왕복한다 — 비정상 다섯은 `detail` 있음·없음을, 칸이 있는
+    /// 둘은 값·`null` 을 다 태운다. 태그 `kind`(상태)와 `detail.kind`(분류)가 한 JSON 안에 함께 산다.
+    #[test]
+    fn every_usage_vendor_state_roundtrips_inside_a_snapshot() {
+        let full = || Some(detail(Some(429), Some("slow down")));
+        let bare = || {
+            Some(UsageStateDetail {
+                kind: "timeout".to_string(),
+                code: None,
+                upstream: None,
+            })
+        };
+        let full_json =
+            serde_json::json!({ "kind": "rpc_error", "code": 429, "upstream": "slow down" });
+        let bare_json = serde_json::json!({ "kind": "timeout", "code": null, "upstream": null });
+        let cases = [
+            (
+                UsageVendorState::Ready,
+                serde_json::json!({ "kind": "Ready" }),
+            ),
+            (
+                UsageVendorState::NotInstalled { detail: None },
+                serde_json::json!({ "kind": "NotInstalled", "detail": null }),
+            ),
+            (
+                UsageVendorState::NotInstalled { detail: bare() },
+                serde_json::json!({ "kind": "NotInstalled", "detail": bare_json }),
+            ),
+            (
+                UsageVendorState::NeedsLogin { detail: None },
+                serde_json::json!({ "kind": "NeedsLogin", "detail": null }),
+            ),
+            (
+                UsageVendorState::NeedsLogin { detail: full() },
+                serde_json::json!({ "kind": "NeedsLogin", "detail": full_json }),
+            ),
+            (
+                UsageVendorState::Unavailable { detail: None },
+                serde_json::json!({ "kind": "Unavailable", "detail": null }),
+            ),
+            (
+                UsageVendorState::Unavailable { detail: bare() },
+                serde_json::json!({ "kind": "Unavailable", "detail": bare_json }),
+            ),
+            (
+                UsageVendorState::Failed {
+                    next_attempt_in_secs: 0,
+                    detail: None,
+                },
+                serde_json::json!({ "kind": "Failed", "next_attempt_in_secs": 0, "detail": null }),
+            ),
+            (
+                UsageVendorState::Failed {
+                    next_attempt_in_secs: 90,
+                    detail: full(),
+                },
+                serde_json::json!({
+                    "kind": "Failed", "next_attempt_in_secs": 90, "detail": full_json
+                }),
+            ),
+            (
+                UsageVendorState::Rejected {
+                    retry_in_secs: 600,
+                    detail: None,
+                },
+                serde_json::json!({ "kind": "Rejected", "retry_in_secs": 600, "detail": null }),
+            ),
+            (
+                UsageVendorState::Rejected {
+                    retry_in_secs: 600,
+                    detail: full(),
+                },
+                serde_json::json!({ "kind": "Rejected", "retry_in_secs": 600, "detail": full_json }),
+            ),
+        ];
+        for (state, want) in cases {
+            let snap = usage_snapshot(state);
+            let json = serde_json::to_value(&snap).expect("직렬화");
+            assert_eq!(json["state"], want);
+            assert_eq!(
+                serde_json::from_value::<UsageLimitSnapshot>(json).expect("역직렬화"),
+                snap
+            );
+        }
+    }
+
+    /// `detail` 키가 없는 패킷(이 칸 전의 데몬)은 `None` 으로 읽힌다 — 상태 하나 때문에 스냅숏 전체가
+    /// 역직렬화 실패로 무너지지 않게.
+    #[test]
+    fn usage_vendor_state_without_detail_key_reads_as_none() {
+        let cases = [
+            (
+                r#"{ "kind": "NotInstalled" }"#,
+                UsageVendorState::NotInstalled { detail: None },
+            ),
+            (
+                r#"{ "kind": "NeedsLogin" }"#,
+                UsageVendorState::NeedsLogin { detail: None },
+            ),
+            (
+                r#"{ "kind": "Unavailable" }"#,
+                UsageVendorState::Unavailable { detail: None },
+            ),
+            (
+                r#"{ "kind": "Failed", "next_attempt_in_secs": 5 }"#,
+                UsageVendorState::Failed {
+                    next_attempt_in_secs: 5,
+                    detail: None,
+                },
+            ),
+            (
+                r#"{ "kind": "Rejected", "retry_in_secs": 7 }"#,
+                UsageVendorState::Rejected {
+                    retry_in_secs: 7,
+                    detail: None,
+                },
+            ),
+        ];
+        for (raw, want) in cases {
+            assert_eq!(
+                serde_json::from_str::<UsageVendorState>(raw).expect(raw),
+                want
+            );
+        }
+    }
+
+    /// `{:?}` 는 원문을 안 낸다 — 글자 수(바이트 아님)만 낸다. wire·비교는 원문 그대로다.
+    #[test]
+    fn usage_state_detail_debug_hides_upstream_text() {
+        let secret = "token=sk-비밀값";
+        let d = detail(Some(1), Some(secret));
+        let dbg = format!("{d:?}");
+        assert!(!dbg.contains("sk-") && !dbg.contains("비밀"), "{dbg}");
+        assert!(
+            dbg.contains(&format!("<{}자>", secret.chars().count())),
+            "{dbg}"
+        );
+        assert!(
+            dbg.contains("rpc_error") && dbg.contains("Some(1)"),
+            "{dbg}"
+        );
+        let nested = format!(
+            "{:#?}",
+            UsageVendorState::NeedsLogin {
+                detail: Some(d.clone())
+            }
+        );
+        assert!(!nested.contains("sk-"), "{nested}");
+        assert_eq!(
+            serde_json::to_value(&d).expect("직렬화")["upstream"],
+            secret
+        );
+        assert_eq!(
+            format!("{:?}", detail(None, None)),
+            r#"UsageStateDetail { kind: "rpc_error", code: None, upstream: None }"#
+        );
+    }
+
+    /// 프론트가 받는 TS 모양 — u64·i64 칸이 `bigint` 로 새면 JSON number 를 받는 코드와 타입이 갈린다.
+    #[test]
+    fn usage_ts_shapes_use_number_for_every_time_field() {
+        let decls = [
+            UsageLimitSnapshot::decl(),
+            UsageWindow::decl(),
+            UsageScopedWindow::decl(),
+            UsageVendorState::decl(),
+            UsageStateDetail::decl(),
+        ];
+        for decl in &decls {
+            assert!(!decl.contains("bigint"), "{decl}");
+        }
+        let snap = UsageLimitSnapshot::decl();
+        assert!(snap.contains("revision: number,"), "{snap}");
+        // `served` 는 데몬 안에만 산다 — wire 모양에 칸도 타입 참조도 없어야 한다.
+        assert!(
+            !snap.contains("served") && !snap.contains("UsageServed"),
+            "{snap}"
+        );
+        let window = UsageWindow::decl();
+        // 값의 출처(줍기·능동 조회)는 사용자에게 보이지 않는다 — wire 창에 칸이 없어야 한다.
+        assert!(!window.contains("source"), "{window}");
+        assert!(window.contains("resets_at: number | null"), "{window}");
+        assert!(window.contains("age_secs: number,"), "{window}");
+        assert_eq!(
+            UsageStateDetail::inline(),
+            "{ kind: string, code: number | null, upstream: string | null, }"
+        );
+        // 상태는 전량을 잰다 — 문구(`string`) 칸은 `UsageStateDetail` 하나만 허용하고 여기선 이름으로만
+        // 보인다. 상태 변형에 맨 `string` 칸이 끼어들면 여기서 깨진다.
+        assert_eq!(
+            UsageVendorState::inline(),
+            concat!(
+                r#"{ "kind": "Ready" } | "#,
+                r#"{ "kind": "NotInstalled", detail: UsageStateDetail | null, } | "#,
+                r#"{ "kind": "NeedsLogin", detail: UsageStateDetail | null, } | "#,
+                r#"{ "kind": "Unavailable", detail: UsageStateDetail | null, } | "#,
+                r#"{ "kind": "Failed", next_attempt_in_secs: number, "#,
+                r#"detail: UsageStateDetail | null, } | "#,
+                r#"{ "kind": "Rejected", retry_in_secs: number, detail: UsageStateDetail | null, }"#,
+            )
         );
     }
 }

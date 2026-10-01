@@ -291,6 +291,7 @@ impl AgentTransport for StdioTransport {
                             for ev in dec.decode(&buf[..n]) {
                                 pump_core.emit(ev);
                             }
+                            pump_core.report_usage(dec.take_usage());
                         }
                         None => pump_core.emit(OutputEvent::TerminalBytes(buf[..n].to_vec())),
                     }
@@ -314,6 +315,7 @@ impl AgentTransport for StdioTransport {
                         for ev in dec.flush() {
                             pump_core.emit(ev);
                         }
+                        pump_core.report_usage(dec.take_usage());
                     }
                 }
 

@@ -97,6 +97,155 @@ describe('SlotContextMenu — 공유 dispatch 경로(FIX-3)', () => {
   })
 })
 
+// ── 켜고 끄는 항목 · 비활성 · 역할(ADR-0252) ──
+describe('SlotContextMenu — checked · enabled · 역할', () => {
+  const slotCtx = {
+    viewId: 'v1',
+    slotId: 's1',
+    agentId: null,
+    content: { type: 'agent_list' as const },
+  }
+  const row = (id: string) => document.querySelector(`[data-slot-menu-item="${id}"]`) as HTMLElement
+
+  it('checked 가 있으면 menuitemcheckbox + aria-checked, 없으면 menuitem · aria-checked 없음 — checked 는 ctx 를 받는다', () => {
+    const seen: unknown[] = []
+    render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[
+          item('on', {
+            checked: ctx => {
+              seen.push(ctx)
+              return true
+            },
+          }),
+          item('off', { checked: () => false }),
+          item('plain'),
+        ]}
+        ctx={slotCtx}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(row('on').getAttribute('role')).toBe('menuitemcheckbox')
+    expect(row('on').getAttribute('aria-checked')).toBe('true')
+    expect(row('off').getAttribute('aria-checked')).toBe('false')
+    expect(row('plain').getAttribute('role')).toBe('menuitem')
+    expect(row('plain').hasAttribute('aria-checked')).toBe(false)
+    expect(seen[0]).toBe(slotCtx)
+  })
+
+  it('역할 — 뿌리·서브메뉴 = menu · 구분선 = separator · 컨테이너 줄 = 서브메뉴를 여는 menuitem', () => {
+    const container = item('container:묶음', { title: '묶음', children: [item('kid')] })
+    render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('a'), { ...container, separatorBefore: true }]}
+        ctx={slotCtx}
+        onClose={vi.fn()}
+      />,
+    )
+    const menus = () => document.querySelectorAll('[role="menu"]')
+    expect(menus()).toHaveLength(1)
+    expect(document.querySelectorAll('[role="separator"]')).toHaveLength(1)
+    const opener = screen.getByText('묶음').parentElement as HTMLElement
+    expect(opener.getAttribute('role')).toBe('menuitem')
+    expect(opener.getAttribute('aria-haspopup')).toBe('menu')
+    expect(opener.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.mouseEnter(screen.getByText('묶음'))
+    expect(menus()).toHaveLength(2)
+    expect(opener.getAttribute('aria-expanded')).toBe('true')
+    expect(row('kid').getAttribute('role')).toBe('menuitem')
+  })
+
+  it('실행 인자 = 좌표 + 슬롯 내용(content) — ctx 에 더해진 다른 칸도 호출자 표지도 넘기지 않는다', () => {
+    const withState = { ...slotCtx, menuState: true } // 조립처가 메뉴 상태 칸을 더한 경우
+    render(<SlotContextMenu x={0} y={0} items={[item('toggle.x')]} ctx={withState} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByText('toggle.x'))
+    const [id, args] = dispatchMock.fireAndForget.mock.calls[0] as [string, Record<string, unknown>]
+    expect(id).toBe('toggle.x')
+    expect(args).toStrictEqual({ viewId: 'v1', slotId: 's1', agentId: null, content: slotCtx.content })
+  })
+
+  it('enabled 가 false → 역할 있는 줄에 aria-disabled · 클릭해도 실행 안 함 · 메뉴를 닫지 않음 — enabled 는 ctx 를 받는다', () => {
+    const onClose = vi.fn()
+    const enabled = vi.fn(() => false)
+    render(<SlotContextMenu x={0} y={0} items={[item('gated.x', { enabled })]} ctx={slotCtx} onClose={onClose} />)
+    expect(row('gated.x').getAttribute('role')).toBe('menuitem')
+    expect(row('gated.x').getAttribute('aria-disabled')).toBe('true')
+    fireEvent.click(row('gated.x'))
+    expect(dispatchMock.fireAndForget).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+    expect(enabled).toHaveBeenCalledWith(slotCtx)
+  })
+
+  it('enabled 가 true(또는 없음) → 평소처럼 실행한다', () => {
+    render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('gated.x', { enabled: () => true }), item('plain')]}
+        ctx={slotCtx}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(row('gated.x').hasAttribute('aria-disabled')).toBe(false)
+    expect(row('plain').hasAttribute('aria-disabled')).toBe(false)
+    fireEvent.click(row('gated.x'))
+    expect(dispatchMock.fireAndForget).toHaveBeenCalledTimes(1)
+  })
+
+  it('ctx 가 바뀌면 열린 메뉴가 그 자리에서 다시 판정한다', () => {
+    const enabled = (ctx: { agentId?: string | null }) => ctx.agentId != null
+    const menu = (agentId: string | null) => (
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('gated.x', { enabled })]}
+        ctx={{ ...slotCtx, agentId }}
+        onClose={vi.fn()}
+      />
+    )
+    const { rerender } = render(menu('a1'))
+    expect(row('gated.x').hasAttribute('aria-disabled')).toBe(false)
+    rerender(menu(null))
+    expect(row('gated.x').getAttribute('aria-disabled')).toBe('true')
+  })
+
+  it('checked · enabled 가 throw → 렌더는 살고 끔 · 비활성으로 그린다', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const boom = () => {
+      throw new Error('boom')
+    }
+    render(
+      <SlotContextMenu
+        x={0}
+        y={0}
+        items={[item('a', { checked: boom }), item('b', { enabled: boom })]}
+        ctx={slotCtx}
+        onClose={vi.fn()}
+      />,
+    )
+    expect(row('a').getAttribute('aria-checked')).toBe('false')
+    expect(row('b').getAttribute('aria-disabled')).toBe('true')
+    // 다시 그릴 때마다 판정하므로 횟수가 아니라 항목별로 본다.
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/checked 판정 실패 — "a"/), expect.any(Error))
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/enabled 판정 실패 — "b"/), expect.any(Error))
+  })
+
+  it('서브메뉴 자식도 같은 줄로 그린다(checked · enabled)', () => {
+    const container = item('container:묶음', {
+      title: '묶음',
+      children: [item('kid', { checked: () => true, enabled: () => false })],
+    })
+    render(<SlotContextMenu x={0} y={0} items={[container]} ctx={slotCtx} onClose={vi.fn()} />)
+    fireEvent.mouseEnter(screen.getByText('묶음'))
+    expect(row('kid').getAttribute('aria-checked')).toBe('true')
+    expect(row('kid').getAttribute('aria-disabled')).toBe('true')
+  })
+})
+
 // ── ★뷰포트 clamp(Bug1)★: 순수 helper clampMenuPosition 을 폭넓게 단위테스트한다. jsdom 은
 //    getBoundingClientRect 가 0을 돌려 컴포넌트 경로로는 넘침을 못 만들므로, 실제 clamp 로직은 이 helper
 //    테스트가 소유한다(컴포넌트는 이 helper 를 호출만 — GUI 실측은 별도). ──

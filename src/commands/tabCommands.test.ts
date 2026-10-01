@@ -10,6 +10,7 @@ vi.mock('@tauri-apps/api/window', () => ({
 import './tabCommands' // side-effect register
 import { run } from './registry'
 import { useViewStore } from '../store/viewStore'
+import type { LayoutNode } from '../api/layoutTypes'
 
 const createTabSpy = vi.fn(async () => 'new-view')
 const switchTabSpy = vi.fn(async () => undefined)
@@ -191,6 +192,58 @@ describe('layout.setSlotContent variant 형태 검증', () => {
   it('agent variant 는 태그만 접고 agent_id 는 그대로 나른다', () => {
     run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'Agent', agent_id: 'A-1' } })
     expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'agent', agent_id: 'A-1' })
+  })
+
+  // ── 사용량 슬롯(TRD S21 usage-limit-slot §1-8) — show_* 는 있으면 boolean · 빠진 칸은 그 슬롯의 지금 값(없으면 셸 serde 기본값) ──
+  it('usage variant — show_* boolean 은 그대로 · 모르는 슬롯의 빠진 칸은 채우지 않고 넘긴다 · 태그는 접는다', () => {
+    run('layout.setSlotContent', {
+      viewId: 'v1',
+      slotId: 's1',
+      content: { type: 'Usage', show_claude: false, show_codex: true },
+    })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's2', content: { type: 'usage', show_codex: false } })
+    run('layout.setSlotContent', { viewId: 'v1', slotId: 's3', content: { type: 'usage' } })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's1', { type: 'usage', show_claude: false, show_codex: true })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's2', { type: 'usage', show_codex: false })
+    expect(setSlotContentSpy).toHaveBeenCalledWith('v1', 's3', { type: 'usage' })
+  })
+
+  // 버스의 `layout.setSlotContent`(셸 락 안 병합)와 같은 결과여야 한다 — 두 LLM 길이 갈리지 않게(TRD §3 #20).
+  it('usage variant — 이미 사용량인 슬롯의 빠진 show 칸은 지금 값으로 채운다 · 준 칸은 그대로', () => {
+    const layout: LayoutNode = {
+      type: 'split',
+      id: 'sp',
+      dir: 'left_right',
+      ratio: 0.5,
+      a: { type: 'slot', id: 'u1', content: { type: 'usage', show_claude: false, show_codex: false } },
+      b: { type: 'slot', id: 'e1', content: { type: 'empty' } },
+    }
+    useViewStore.setState({ layouts: { v1: { layout } as never } })
+    try {
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 'u1', content: { type: 'usage', show_codex: true } })
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 'u1', content: { type: 'usage' } })
+      // 지금 사용량이 아닌 슬롯은 병합하지 않는다 — 셸이 빠진 칸을 true 로 읽는다.
+      run('layout.setSlotContent', { viewId: 'v1', slotId: 'e1', content: { type: 'usage', show_claude: false } })
+      expect(setSlotContentSpy.mock.calls).toEqual([
+        ['v1', 'u1', { type: 'usage', show_claude: false, show_codex: true }],
+        ['v1', 'u1', { type: 'usage', show_claude: false, show_codex: false }],
+        ['v1', 'e1', { type: 'usage', show_claude: false }],
+      ])
+    } finally {
+      useViewStore.setState({ layouts: {} })
+    }
+  })
+
+  it('usage variant — show_* 가 boolean 이 아니면 invoke 전에 throw', () => {
+    for (const bad of ['false', 0, null, {}]) {
+      expect(() =>
+        run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'usage', show_claude: bad } }),
+      ).toThrow(/show_claude 는 boolean/)
+      expect(() =>
+        run('layout.setSlotContent', { viewId: 'v1', slotId: 's1', content: { type: 'usage', show_codex: bad } }),
+      ).toThrow(/show_codex 는 boolean/)
+    }
+    expect(setSlotContentSpy).not.toHaveBeenCalled()
   })
 
   it('대소문자만 접는다 — 철자가 다르면 여전히 throw', () => {

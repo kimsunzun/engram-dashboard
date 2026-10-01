@@ -35,6 +35,7 @@ use engram_dashboard_agent::types::{
     OutputSink, PtyError, ReplayKind, SinkId, SubscribeReply,
 };
 
+use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_agent::preset::Preset as CorePreset;
 use engram_dashboard_agent::profile::{
@@ -47,6 +48,7 @@ use engram_dashboard_agent::types::{
     OutputChunk as CoreOutputChunk, OutputEvent as CoreOutputEvent,
     QueuedInputEvent as CoreQueuedInputEvent, TurnOutcome as CoreTurnOutcome,
 };
+use engram_dashboard_agent::usage::UsageVendorKey;
 
 use engram_dashboard_protocol::{
     AgentBackendKind as WireBackendKind, AgentCommand, AgentEvent,
@@ -68,6 +70,8 @@ use tokio::sync::watch;
 use crate::command_delivery::{CommandDeliveries, LocalCommands, OutcomeLanding};
 use crate::command_roster::CommandRoster;
 use crate::control::registry::ControlRegistry;
+use crate::usage_service::book::RequestKind;
+use crate::usage_service::UsageService;
 use engram_dashboard_command::{CommandDecl, CommandError, ErrorCode, OwnerToken};
 use engram_dashboard_messaging::envelope::EnvelopeFormat as CoreEnvelopeFormat;
 use engram_dashboard_net::frame_port::{ConnId, FrameFanout};
@@ -205,12 +209,13 @@ pub(crate) fn inbound_lane(cmd: &AgentCommand) -> InboundLane {
 
 /// [`DispatchOrder`] 판정.
 ///
-/// ★떼어 내는 것은 활성화 셋뿐이다★: 이 셋만이 dispatch 안에서 **결말이 날 때까지** 기다린다(전형
-///   2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은 `Spawn` 갈래 주석).
+/// ★떼어 내는 것은 활성화 셋과 ⟳(`RefreshUsageLimits`)뿐이다★: 이것들만이 dispatch 안에서 **끝이 날 때까지**
+///   기다린다 — 활성화는 결말까지(전형 2s, 백스톱 15s, 실패 판정이면 teardown 까지 합쳐 약 20s — 그 사유의 정본은
+///   `Spawn` 갈래 주석), ⟳ 는 조회 끝까지(상한 = `usage_service::REPLY_WAIT_MAX`).
 ///   나머지 전부는 await 지점이 없거나(맵 조회·PTY write·목록 인코딩) 이미 자기 태스크로 나간다
 ///   (`Command` 의 배달). 그래서 줄에 남겨도 다음 명령을 재지 않는다.
-/// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★ — 중복 활성화를 막는 것은 dispatch 의
-///   도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
+/// ★떼어 내도 되는 근거는 「순서가 뜻을 갖지 않는다」 하나다★(⟳ 의 근거는 그 갈래 주석) — 중복 활성화를
+///   막는 것은 dispatch 의 도착 순서가 아니라 manager 의 예약(`SpawnReservation`)과 재활성화 가드(`activation_in_flight`)이고,
 ///   그 둘은 연결을 모른다. 즉 이 셋을 줄에서 떼어도 **새로 열리는 창이 없다** — 같은 id 를 동시에
 ///   띄우려는 두 요청은 옛날부터 그 가드로만 갈렸다(그 가드가 닫지 못하는 잔여 창 = ADR-0082).
 /// ★★대신 **이것들 사이·이것과 뒤 명령 사이의 순서는 보장되지 않는다**★★: 같은 연결에서
@@ -238,7 +243,11 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         //   그대로 부르지만(실 프로세스 생성), 그 blocking 자체는 이 변경의 범위가 아니다 — 여기서
         //   재는 것은 「순서가 뜻을 갖는가」뿐이고, 매번 새 uuid 를 만드는 즉석 생성이라 겹칠 짝이
         //   애초에 없다.
-        | AgentCommand::SpawnByCwd { .. } => DispatchOrder::Detached,
+        | AgentCommand::SpawnByCwd { .. }
+        // ★⟳ 도 줄 밖이다★ — 조회를 띄우면 그 끝을 상한(`usage_service::REPLY_WAIT_MAX`)까지 기다린다. 줄에 두면
+        //   그동안 이 연결의 `WriteStdin` 까지 밀린다. 순서가 뜻을 갖지 않는다: 같은 벤더의 ⟳ 둘은 서비스가 한
+        //   조회로 합류시키고, 구독 교체와의 앞뒤는 값이 어느 쪽이든 방송으로 닿는다.
+        | AgentCommand::RefreshUsageLimits { .. } => DispatchOrder::Detached,
 
         // ── 줄 안: 아래 다섯 묶음이 도착 순서에 걸려 있다 ────────────────────────────
         // ① 같은 에이전트로 가는 입력끼리(`WriteStdin`↔`WriteStdin`/`Interrupt`) — 바이트가 PTY 로
@@ -280,7 +289,10 @@ pub(crate) fn dispatch_order(cmd: &AgentCommand) -> DispatchOrder {
         | AgentCommand::CommandOutcome { .. }
         | AgentCommand::ListQueuedInputs { .. }
         // ADR-0231: 취소는 ① 에 든다 — 같은 연결의 앞선 `WriteStdin` 을 앞지르면 그 글을 명부가 아직 모른다.
-        | AgentCommand::CancelQueuedInput { .. } => DispatchOrder::InOrder,
+        | AgentCommand::CancelQueuedInput { .. }
+        // 사용량 구독은 전량 교체라 도착순이 곧 뜻이다 — 연달아 온 두 교체는 마지막이 이겨야 한다. 처리에 await 가
+        //   없어 줄을 붙들지 않는다.
+        | AgentCommand::UsageSubscribe { .. } => DispatchOrder::InOrder,
     }
 }
 
@@ -971,6 +983,27 @@ pub(crate) fn core_status_to_wire(status: CoreStatus) -> engram_dashboard_protoc
     status_to_wire(&status)
 }
 
+/// wire 벤더 → 사용량 칸의 벤더 키. `None` = 그 벤더의 조회기가 없다.
+///
+/// ★키는 들어온 낱말이 아니라 조회기의 키다★ — 버스 입구(대문자 낱말)와 같은 칸을 치려면 두 입구가 같은 조회기
+///   키로 모여야 한다. 벤더를 match 하지 않고 wire 낱말을 거친다.
+// ADR-0004
+fn usage_vendor_key(vendor: WireBackendKind) -> Option<UsageVendorKey> {
+    let word = serde_json::to_value(vendor).ok()?;
+    usage_probe_for(word.as_str()?).map(|probe| probe.key())
+}
+
+fn no_usage_text(vendor: WireBackendKind) -> String {
+    let word = serde_json::to_value(vendor)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    CommandError::not_found(format!(
+        "this daemon keeps no usage limits for backend '{word}'"
+    ))
+    .to_string()
+}
+
 /// None = 직렬화 실패(이 함수가 이미 로그를 남겼다).
 pub(crate) fn event_json(ev: &AgentEvent) -> Option<String> {
     match serde_json::to_string(ev) {
@@ -993,8 +1026,7 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 // ── ConnectionCore ────────────────────────────────────────────────────────────────
 
 /// ★이 struct 는 **연결마다 새로 만들어진다**(`agent_conn::AgentConnections::handler_for`)★. 서버 전체에
-/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 아래 6개
-/// (manager · multiview · fanout · control_registry · messaging · shutdown_tx)가 전부 그렇다.
+/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 필드 전부가 그렇다.
 /// ★그래서 새 필드를 넣을 때 반드시 확인할 것★: 공유 핸들이 아닌 값을 여기 넣으면 "서버 전체 1개" 로
 /// 읽히는 자리에 조용히 **연결마다 별개**인 상태가 생긴다. 연결 고유 상태의 자리는 `ConnectionSession`
 /// (dispatch 에 주입)이다.
@@ -1016,6 +1048,7 @@ pub struct ConnectionCore {
     /// 이 데몬이 **스스로 답하는** 명령 — 배달 1단계이자 발견 목록의 한쪽(`command_delivery`).
     // ADR-0155
     locals: Arc<dyn LocalCommands>,
+    usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -1030,6 +1063,7 @@ impl ConnectionCore {
         commands: CommandRoster,
         deliveries: CommandDeliveries,
         locals: Arc<dyn LocalCommands>,
+        usage: Arc<UsageService>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -1041,8 +1075,13 @@ impl ConnectionCore {
             commands,
             deliveries,
             locals,
+            usage,
             shutdown_tx,
         }
+    }
+
+    pub fn usage(&self) -> &UsageService {
+        &self.usage
     }
 
     pub fn multiview(&self) -> &MultiViewState {
@@ -1897,6 +1936,30 @@ impl ConnectionCore {
                     ),
                 },
             },
+
+            // ── 사용량 한도(TRD S21 usage-limit-slot §1-6) ───────────────────────────────────
+            // 첫 한 장은 서비스가 이 연결의 출구로 곧장 보낸다 — 이 줄의 답이 아니다.
+            AgentCommand::UsageSubscribe { vendors } => {
+                let vendors = vendors.into_iter().filter_map(usage_vendor_key).collect();
+                self.usage.replace_subscription(conn_id, vendors);
+            }
+
+            // ★칸이 없으면 `Ack` 가 아니라 `Error` 다★ — 조용한 `Ack` 는 셸이 「조회했다」로 읽고 값을 영영 기다린다.
+            AgentCommand::RefreshUsageLimits { vendor, request_id } => {
+                let answered = match usage_vendor_key(vendor) {
+                    Some(key) => self
+                        .usage
+                        .request(key, RequestKind::Refresh)
+                        .await
+                        .is_some(),
+                    None => false,
+                };
+                if answered {
+                    reply(sink, request_id, Ok(()));
+                } else {
+                    send_error(sink, Some(request_id), no_usage_text(vendor));
+                }
+            }
         }
         DispatchFlow::Continue
     }
@@ -2237,6 +2300,21 @@ mod tests {
         RequestId(uuid::Uuid::new_v4())
     }
 
+    /// wire 낱말(소문자)과 버스 낱말(대문자 시작)이 한 칸을 친다 — 칸 키는 들어온 철자가 아니라 조회기의 키다.
+    /// 버스 쪽은 `usage.*` 의 데몬 실물이 실제로 부르는 그 함수(agent `usage_vendor_of`)로 잰다.
+    #[test]
+    fn wire_and_bus_words_reach_the_same_usage_key() {
+        use engram_dashboard_agent::commands::{usage_vendor_of, AgentBackend};
+        for (wire, bus) in [
+            (WireBackendKind::Claude, AgentBackend::Claude),
+            (WireBackendKind::Codex, AgentBackend::Codex),
+        ] {
+            let from_wire = usage_vendor_key(wire).expect("wire 벤더마다 조회기가 있다");
+            let from_bus = usage_vendor_of(&bus).expect("버스 낱말마다 조회기가 있다");
+            assert_eq!(from_wire, from_bus, "{wire:?}");
+        }
+    }
+
     /// ★[`inbound_lane`] 의 판정표★ — 줄이 찼을 때 **무엇이 줄을 건너뛰는가**.
     ///
     /// ★`Interrupt` 가 `Ordered` 인 것이 이 시험의 핵심 단언이다★: 사람의 직관은 「취소니까 당연히
@@ -2273,6 +2351,11 @@ mod tests {
                 profile_id: uuid::Uuid::new_v4(),
                 request_id: rid(),
             },
+            AgentCommand::UsageSubscribe { vendors: vec![] },
+            AgentCommand::RefreshUsageLimits {
+                vendor: WireBackendKind::Codex,
+                request_id: rid(),
+            },
         ];
         for cmd in &ordered {
             assert_eq!(
@@ -2291,7 +2374,7 @@ mod tests {
     /// 커지는 것이 위험한 방향이다). 「줄에 남는 쪽」은 다섯 순서 묶음의 대표로 충분하다 — 새
     /// variant 가 빠뜨려지는 것은 이 테스트가 아니라 `dispatch_order` 의 exhaustive match 가 잡는다.
     #[test]
-    fn only_the_three_activation_commands_leave_the_arrival_queue() {
+    fn only_the_activations_and_the_usage_refresh_leave_the_arrival_queue() {
         use engram_dashboard_command::OwnerToken;
 
         let detached = vec![
@@ -2309,12 +2392,16 @@ mod tests {
                 backend: None,
                 request_id: rid(),
             },
+            AgentCommand::RefreshUsageLimits {
+                vendor: WireBackendKind::Claude,
+                request_id: rid(),
+            },
         ];
         for cmd in &detached {
             assert_eq!(
                 dispatch_order(cmd),
                 DispatchOrder::Detached,
-                "활성화는 줄 밖이어야 한다: {cmd:?}"
+                "끝까지 기다리는 명령은 줄 밖이어야 한다: {cmd:?}"
             );
         }
 
@@ -2374,6 +2461,10 @@ mod tests {
                 force: true,
                 kill_agents: true,
                 request_id: rid(),
+            },
+            // 사용량 구독 — 전량 교체라 마지막이 이겨야 한다.
+            AgentCommand::UsageSubscribe {
+                vendors: vec![WireBackendKind::Claude],
             },
         ];
         for cmd in &in_order {
@@ -2533,6 +2624,7 @@ mod tests {
                     manager.clone(),
                     Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
                     Arc::new(multiview.clone()),
+                    Arc::new(crate::control::commands::NoUsageLimits),
                 )));
                 Arc::new(crate::control::commands::DaemonLocalCommands::new(slot))
             });
@@ -2626,6 +2718,7 @@ mod tests {
             CommandRoster::new(),
             deliveries,
             locals,
+            crate::usage_service::fakes::idle_service(),
             shutdown_tx,
         );
         (core, shutdown_rx, recording)
@@ -3722,54 +3815,7 @@ mod tests {
         }
     }
 
-    /// `note_claimed_owner` 가 낸 이벤트를 **레벨과 함께** 모은다 — 이 파일엔 로그 수집기가 없어 여기 둔다.
-    /// `with_default` 는 이 스레드에만 걸려 병렬 테스트와 섞이지 않는다(`command_roster` 의 같은 형태).
-    ///
-    /// ★DEBUG 까지 켜는 이유★: 「조용하다」를 WARN 만 보고 판정하면 **debug 갈래로 떨어진 것**과 **아무
-    /// 갈래에도 안 간 것**이 같아 보인다.
-    fn capture_logs(body: impl FnOnce()) -> Vec<(tracing::Level, String)> {
-        use tracing::subscriber;
-
-        struct Collector {
-            lines: Arc<StdMutex<Vec<(tracing::Level, String)>>>,
-        }
-        struct Visit<'a>(&'a mut String);
-        impl tracing::field::Visit for Visit<'_> {
-            fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-                self.0.push_str(&format!("{}={:?} ", f.name(), v));
-            }
-        }
-        impl subscriber::Subscriber for Collector {
-            fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
-                *m.level() <= tracing::Level::DEBUG
-            }
-            fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
-                tracing::Id::from_u64(1)
-            }
-            fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
-            fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
-            fn event(&self, event: &tracing::Event<'_>) {
-                let mut buf = String::new();
-                event.record(&mut Visit(&mut buf));
-                self.lines
-                    .lock()
-                    .expect("lines poisoned")
-                    .push((*event.metadata().level(), buf));
-            }
-            fn enter(&self, _: &tracing::Id) {}
-            fn exit(&self, _: &tracing::Id) {}
-        }
-
-        let lines: Arc<StdMutex<Vec<(tracing::Level, String)>>> = Arc::default();
-        subscriber::with_default(
-            Collector {
-                lines: lines.clone(),
-            },
-            body,
-        );
-        let captured = lines.lock().expect("lines poisoned");
-        captured.clone()
-    }
+    use crate::log_capture::capture_levels as capture_logs;
 
     // ── 주장한 주인 토큰의 판정(ADR-0154) ────────────────────────────────────────
     //
@@ -4012,6 +4058,7 @@ mod tests {
             core.manager().clone(),
             Arc::new(crate::control::mcp_server::RosterBroadcastSlot::new()),
             Arc::new(core.multiview().clone()),
+            Arc::new(crate::control::commands::NoUsageLimits),
         )));
 
         let req = rid();
@@ -4039,7 +4086,9 @@ mod tests {
                         "agent.new",
                         "agent.rename",
                         "agent.spawn",
-                        "tab.create"
+                        "tab.create",
+                        "usage.get",
+                        "usage.refresh"
                     ],
                     "두 출처가 이름순 한 목록으로 합쳐진다"
                 );

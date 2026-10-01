@@ -5,6 +5,7 @@
 import { agentClient } from '../api/clientFactory'
 import { list as cmdList, run as cmdRun } from '../commands/registry'
 import { useAgentStore } from './agentStore'
+import { useUsageStore } from './usageStore'
 import { initMainWindowFromBackend, subscribeViewEvents } from './viewStore'
 
 let unlistenFns: (() => void)[] = []
@@ -51,6 +52,11 @@ export async function refreshPresets(): Promise<void> {
  * 통째로 다시 돌리므로 탈출구가 이미 있다.
  */
 async function resyncAfterReconnect(): Promise<void> {
+  // ★사용량도 다시 당긴다★ — 같은 스냅숏을 다시 받아도 스토어 병합 규칙이 거르므로 해가 없고, 부팅 pull 이 재시도를
+  //   다 쓰고 실패했거나 끊긴 동안 이 창이 방송을 놓친 경우를 메운다. 이 함수는 사용량 방송 잇기가 선 뒤에만 불리므로
+  //   「잇기 먼저, pull 나중」도 그대로 선다(TRD S21 usage-limit-slot 은 재연결 pull 을 두지 않았다 — 메인 결정
+  //   2026-09-29, 8단계에서 박제).
+  void useUsageStore.getState().pull()
   try {
     const agents = await agentClient.getAgents()
     useAgentStore.getState().setAgents(agents)
@@ -177,6 +183,16 @@ export function initEventBus(): Promise<void> {
           useAgentStore.getState().setPresets(presets)
         }),
       )
+
+      // 사용량(TRD S21 usage-limit-slot §1-8): ★방송 잇기 먼저, pull 나중★ — 역전은 스토어의 revision 이 가른다.
+      //   이 pull 을 빼지 말 것: 이 함수는 부팅 때 데몬 ensure 뒤에 돌아(App.tsx) 사용량 슬롯이 여기보다 먼저
+      //   마운트될 수 있고, 그 슬롯의 마운트 pull 은 잇기 전에 나가 그 사이 방송을 놓친다 — 이 pull 이 덮는다.
+      unlistenFns.push(
+        agentClient.onUsageLimitsUpdated((snapshot, socketEpoch) => {
+          useUsageStore.getState().merge(snapshot, socketEpoch)
+        }),
+      )
+      void useUsageStore.getState().pull()
 
       // 재연결 시 목록/프로필 재동기화(Q2) + 출력 뷰 재부착의 계기(위 resyncAfterReconnect 주석).
       // 에이전트 트리·프로필 목록은 이 트리거가 없으면 stale 이 된다(끊긴 동안의

@@ -12,6 +12,18 @@ import { getCommand } from './registry'
 export type SlotMenuTarget = SlotContent['type'] | '*'
 
 /**
+ * 메뉴를 연 슬롯의 실행 컨텍스트 — 조립처(`LayoutLeaf`)가 싣는다. `agentId` 는 배정 슬롯만.
+ * ★메뉴 상태(☑·활성)의 유일한 출처다★ — [`SlotMenuItem.checked`]·[`SlotMenuItem.enabled`] 는 이것만 읽는다. 스토어
+ * 상태가 필요하면 조립처가 구독해 여기 싣는다(구독하므로 열린 메뉴도 따라 다시 그린다).
+ */
+export interface SlotMenuCtx {
+  viewId: string | null
+  slotId: string
+  agentId?: string | null
+  content?: SlotContent
+}
+
+/**
  * 기여 항목(ADR-0064 고정 스키마 + ADR-0065 additive 확장). 두 형태 중 하나다:
  *   - **실행 항목**: `commandId` 있음(+ `children` 없음). title/run 은 빌드 시 registry 에서 resolve.
  *   - **컨테이너**(1단 서브메뉴): `children` 있음 + 자체 `title` 필수(+ `commandId` 없음).
@@ -34,6 +46,18 @@ export interface SlotMenuItem {
   hideOn?: SlotContent['type'][]
   /** ADR-0065 1단 서브메뉴 자식들. 있으면 이 항목은 컨테이너(commandId 없이 title 필수). 자식은 flat 실행 항목만(중첩 금지). */
   children?: SlotMenuItem[]
+  /**
+   * 있으면 이 실행 항목은 켜고 끄는 항목이고, 값이 ☑ 다(렌더러 = `menuitemcheckbox`). 컨테이너엔 못 단다.
+   * ★ctx 만 읽는다 — store 를 읽지 말 것★(ADR-0064 「메뉴에서 직접 store 호출 금지」): title 이 빌드 때 고정이라
+   * 상태를 실을 곳이 여기뿐이고, 상태는 조립처가 ctx 에 실어 준다.
+   */
+  checked?: (ctx: SlotMenuCtx) => boolean
+  /**
+   * false 면 렌더러가 비활성으로 그린다(클릭해도 실행 안 함). 없으면 늘 활성. 컨테이너엔 못 단다. `checked` 와 같은
+   * 규칙 — ★ctx 만 읽는다★. command 의 `when` 과 다른 축이다: `when` 은 키바인딩이 「못 본 것처럼 넘기는」 UI
+   * 컨텍스트 게이트이고 메뉴는 읽지 않는다.
+   */
+  enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
 /**
@@ -49,6 +73,10 @@ export interface ResolvedSlotMenuItem {
   separatorBefore: boolean
   /** ADR-0065 1단 서브메뉴 — 컨테이너면 resolve 된 자식들. 실행 항목이면 undefined. */
   children?: ResolvedSlotMenuItem[]
+  /** 기여의 [`SlotMenuItem.checked`] 그대로. 없으면 켜고 끄는 항목이 아니다. */
+  checked?: (ctx: SlotMenuCtx) => boolean
+  /** 기여의 [`SlotMenuItem.enabled`] 그대로. 없으면 늘 활성. */
+  enabled?: (ctx: SlotMenuCtx) => boolean
 }
 
 // ★그룹 렌더 순서 고정★(ADR-0064 §5): 콘텐츠 전용('content')을 위에, 공통 슬롯 ops('slot-ops')를 아래에
@@ -115,6 +143,14 @@ function resolveRunnable(commandId: string, target: SlotContent['type']): Resolv
   return { id: cmd.id, title: cmd.title, run: cmd.run, group: '', separatorBefore: false }
 }
 
+function withCtxPredicates(entry: ResolvedSlotMenuItem, item: SlotMenuItem): ResolvedSlotMenuItem {
+  return {
+    ...entry,
+    ...(item.checked ? { checked: item.checked } : {}),
+    ...(item.enabled ? { enabled: item.enabled } : {}),
+  }
+}
+
 /**
  * 항목 형태 검증(ADR-0065 §영향/불변식) — 실행 항목 XOR 컨테이너. 위반이면 시끄럽게 로그하고 false(skip).
  *   - 실행 항목: commandId 有 + children 無.
@@ -142,6 +178,12 @@ function validateItemShape(item: SlotMenuItem, target: SlotMenuTarget, nested: b
     if (typeof item.title !== 'string' || item.title.length === 0) {
       console.error(`[slotMenu] container "${label}" (target=${target}) — 컨테이너는 title 필수 — skipped`)
       return false
+    }
+    for (const field of ['checked', 'enabled'] as const) {
+      if (item[field]) {
+        console.error(`[slotMenu] container "${label}" (target=${target}) — 컨테이너는 ${field} 를 가질 수 없음 — skipped`)
+        return false
+      }
     }
   }
   return true
@@ -191,7 +233,7 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
         if (!validateItemShape(child, contentType, true)) continue
         // 컨테이너 자식은 항상 실행 항목(validateItemShape nested=true 가 children 재보유를 막음).
         const rc = resolveRunnable(child.commandId as string, contentType)
-        if (rc) children.push(rc)
+        if (rc) children.push(withCtxPredicates(rc, child))
       }
       if (children.length === 0) {
         console.error(
@@ -211,11 +253,14 @@ export function buildSlotMenu(contentType: SlotContent['type']): ResolvedSlotMen
     } else {
       const rr = resolveRunnable(item.commandId as string, contentType)
       if (!rr) continue
-      entry = {
-        ...rr,
-        group: item.group,
-        separatorBefore: prevGroup !== null && prevGroup !== item.group,
-      }
+      entry = withCtxPredicates(
+        {
+          ...rr,
+          group: item.group,
+          separatorBefore: prevGroup !== null && prevGroup !== item.group,
+        },
+        item,
+      )
     }
     seen.add(key)
     resolved.push(entry)

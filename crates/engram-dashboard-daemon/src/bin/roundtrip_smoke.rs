@@ -459,6 +459,7 @@ async fn run() -> i32 {
             manager.clone(),
             broadcast_slot.clone(),
             Arc::new(engram_dashboard_daemon::control::commands::NoInputLeases),
+            Arc::new(engram_dashboard_daemon::control::commands::NoUsageLimits),
         ),
     ));
     // C1: MessagingService 조립(발송 3분기·flush) — manager 를 DeliveryPort 로 감싼다. 이 하네스는

@@ -13,7 +13,8 @@
 use engram_dashboard_agent::commands::{
     AgentCancelQueuedInputArgs, AgentCancelQueuedInputOk, AgentListArgs, AgentListOk,
     AgentListQueuedInputsArgs, AgentListQueuedInputsOk, AgentMoveArgs, AgentMoveOk, AgentNewArgs,
-    AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentSpawnArgs, AgentSpawnOk, CATALOG_VERSION,
+    AgentNewOk, AgentRenameArgs, AgentRenameOk, AgentSpawnArgs, AgentSpawnOk, UsageGetArgs,
+    UsageRefreshArgs, UsageRefreshOk, UsageVendorRow, CATALOG_VERSION,
 };
 use engram_dashboard_command::{catalog_json, command_specs, CommandSpec};
 use ts_rs::TS;
@@ -65,6 +66,10 @@ fn export_typescript_bindings() {
         .expect("AgentCancelQueuedInputArgs 바인딩 export 실패");
     AgentCancelQueuedInputOk::export_all_to(out)
         .expect("AgentCancelQueuedInputOk 바인딩 export 실패");
+    UsageGetArgs::export_all_to(out).expect("UsageGetArgs 바인딩 export 실패");
+    UsageVendorRow::export_all_to(out).expect("UsageVendorRow 바인딩 export 실패");
+    UsageRefreshArgs::export_all_to(out).expect("UsageRefreshArgs 바인딩 export 실패");
+    UsageRefreshOk::export_all_to(out).expect("UsageRefreshOk 바인딩 export 실패");
 
     let produced: Vec<String> = std::fs::read_dir(out)
         .expect("bindings/ 조회")

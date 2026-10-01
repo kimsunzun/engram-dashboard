@@ -11,4 +11,4 @@
  * epoch(화신 표식, ADR-0163)도 레이아웃 트리 밖(agentStore 소유) — 재구독 계기는 이 필드가 아니라
  * 권위 명부 관측이다(ADR-0164 결정 8).
  */
-export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "preset_palette" };
+export type SlotContent = { "type": "empty" } | { "type": "agent", agent_id: string, } | { "type": "agent_list" } | { "type": "preset_palette" } | { "type": "usage", show_claude: boolean, show_codex: boolean, };

@@ -4,22 +4,24 @@
 //! **wire 인코딩 전부**(`AgentEvent`→JSON text, `OutputFrame`→codec binary). 네트워크 행은 여기서
 //! 나온 불투명 프레임만 받는다.
 //!
-//! ★단일 writer 합류(FIFO)★: control 평면(`FrameOutboundSink`)과 출력 평면(`FrameOutputSink`)이
-//!   **같은 `FrameSink`** 로 나가므로, dispatch 가 SubscribeAck 를 replay binary 보다 먼저 넣으면
-//!   그 순서가 그대로 보존된다.
-//! ★블록 금지★: 두 sink 의 enqueue 는 pump/manager 동기 스레드에서 불릴 수 있어 `FrameSink::try_send`
+//! ★단일 writer 합류(FIFO)★: control 평면(`FrameOutboundSink`)과 출력 평면(`FrameOutputSink`), 사용량 평면
+//!   (`ConnUsageOutlet`)이 **같은 `FrameSink`** 로 나가므로, dispatch 가 SubscribeAck 를 replay binary 보다
+//!   먼저 넣으면 그 순서가 그대로 보존된다.
+//! ★블록 금지★: 세 출구의 enqueue 는 pump/manager 동기 스레드에서 불릴 수 있어 `FrameSink::try_send`
 //!   (논블록)만 쓴다. 큐 포화 시 종료 신호를 울리는 것은 `FrameSink` 구현(네트워크 행)의 몫이다.
 
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::{
     AgentId, OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
 };
+use engram_dashboard_agent::usage::UsageVendorKey;
 use engram_dashboard_protocol::{
     encode_structured_frame, encode_terminal_frame, placeholder_error_frame, AgentCommand,
-    AgentEvent,
+    AgentEvent, UsageLimitSnapshot,
 };
 
 use futures_util::future::BoxFuture;
@@ -33,6 +35,9 @@ use crate::connection_core::{
     DispatchOrder, InboundLane, MultiViewState, Outbound, OutboundSink as CoreOutboundSink,
     SinkError as CoreSinkError, SATURATED_REFUSAL,
 };
+use crate::usage_service::book::wire_vendor;
+use crate::usage_service::watch::{UsageEncoder, UsageFrame, UsageOutlet};
+use crate::usage_service::UsageService;
 use engram_dashboard_net::frame_port::{
     ConnFlow, ConnId, ConnectionHandler, ConnectionHandlerFactory, Frame, FrameFanout, FrameSink,
     Saturated,
@@ -184,6 +189,63 @@ impl CoreOutboundSink for FrameOutboundSink {
     }
 }
 
+// ── 사용량 평면(TRD S21 usage-limit-slot §1-4) ────────────────────────────────────────
+
+/// 한 연결의 사용량 출구 — `on_connect` 가 연결마다 새로 만들어 사용량 명부에 넘긴다.
+///
+/// ★`Clone` 을 달지 않는다★ — 칸(자물쇠)을 나눠 쥔 사본이 생기면 한 사본의 `revoke` 가 다른 칸의 출구를
+///   조용하게 만든다(`UsageWatch::attach` 의 계약).
+/// ★포화면 이 연결이 끝난다★ — `try_send` 실패는 프레임 출구(네트워크 행)가 종료 신호로 처리한다. 출력 평면
+///   sink 와 같은 결말이다.
+pub(crate) struct ConnUsageOutlet {
+    frames: Mutex<Option<Arc<dyn FrameSink>>>,
+}
+
+impl ConnUsageOutlet {
+    pub(crate) fn new(frames: Arc<dyn FrameSink>) -> Self {
+        Self {
+            frames: Mutex::new(Some(frames)),
+        }
+    }
+
+    fn slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<dyn FrameSink>>> {
+        // 칸 안의 일은 사본 뜨기·꺼내기뿐이라 poison 뒤에도 칸은 온전하다.
+        self.frames.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl UsageOutlet for ConnUsageOutlet {
+    fn send(&self, frame: &UsageFrame) {
+        let Some(frames) = self.slot().clone() else {
+            return;
+        };
+        let _ = frames.try_send(Frame::Text(frame.json.to_string()));
+    }
+
+    fn revoke(&self) {
+        let taken = self.slot().take();
+        drop(taken);
+    }
+}
+
+/// 사용량 한 장 → [`AgentEvent::UsageLimitsUpdated`] JSON 한 줄. `subscribed` 는 스냅숏의 `vendor` 와 같은 변환으로
+/// wire 벤더가 된다(바꿀 수 없는 키는 빠진다).
+pub(crate) struct UsageEventEncoder;
+
+impl UsageEncoder for UsageEventEncoder {
+    fn encode(
+        &self,
+        snapshot: &UsageLimitSnapshot,
+        subscribed: &BTreeSet<UsageVendorKey>,
+    ) -> Option<Arc<str>> {
+        let ev = AgentEvent::UsageLimitsUpdated {
+            snapshot: snapshot.clone(),
+            subscribed: subscribed.iter().copied().filter_map(wire_vendor).collect(),
+        };
+        event_json(&ev).map(Arc::from)
+    }
+}
+
 // ── 연결 수명 훅 ────────────────────────────────────────────────────────────────
 
 /// 연결 1개에 대응하는 에이전트측 핸들러. `ConnectionCore`(dispatch)와 그 연결의 수명 상태를 묶는다.
@@ -237,6 +299,11 @@ impl ConnectionHandler for AgentConnection {
             //   spawn 순서) 여기 도달하지 못한 연결은 프레임 한 장도 못 보낸다.
             // ADR-0154
             self.core.commands().attach(conn_id, frames);
+            // ★사용량 칸도 인사 **뒤에** 만든다★ — 칸이 서면 구독 교체의 첫 한 장이 이 출구로 곧장 나가므로, 인사
+            //   두 장보다 앞설 수 없어야 한다. 빈 집합이라 구독 전에는 아무것도 안 나간다.
+            self.core
+                .usage()
+                .attach(conn_id, ConnUsageOutlet::new(frames.clone()));
         })
     }
 
@@ -257,15 +324,16 @@ impl ConnectionHandler for AgentConnection {
                     // ★답장은 그대로 **이 연결의 같은 프레임 출구**로 나간다★: sink 가 든 것은 연결당
                     //   단일 writer 큐의 사본이라 이 태스크가 늦게 끝나도 답이 다른 데로 새지 않는다.
                     //   대신 그 사본이 살아 있는 동안은 writer 의 송신단-드롭 자기종료가 성립하지
-                    //   않는다 — `handle_connection` 이 write 를 abort 하는 이유의 목록에 이것이 든다.
+                    //   않는다 — 네트워크 행 `ws.rs` 「사본 전수」가 `on_disconnect` 를 넘겨 사는 짧은 사본으로 꼽는
+                    //   것이 이것이고(⟳ 는 `REPLY_WAIT_MAX` 까지 든다), `handle_connection` 의 write abort 가 그래서 무해하게 만든다.
                     // ★연결이 이미 정리된 뒤에도 이 태스크는 돈다★(네트워크 행의 abort 가 안 닿는다 —
-                    //   포트 계약). 그래도 **이 연결의 상태를 되살리지 않는다**: 이 셋이 건드리는 것은
-                    //   전역 manager 와 전-연결 브로드캐스트뿐이고, 명부·구독·lease 같은 연결 귀속
-                    //   상태에는 손대지 않는다(명부 쪽은 그래도 `refuse_if_detached` 가 한 겹 더 막는다).
+                    //   포트 계약). 그래도 **이 연결의 상태를 되살리지 않는다**: 떼어 낸 명령이 건드리는 것은
+                    //   전역 manager·사용량 서비스와 전-연결·구독자 브로드캐스트뿐이고, 명부·구독·lease 같은 연결
+                    //   귀속 상태에는 손대지 않는다(명부 쪽은 그래도 `refuse_if_detached` 가 한 겹 더 막는다).
                     let core = Arc::clone(&self.core);
                     let session = Arc::clone(&self.session);
                     tokio::spawn(async move {
-                        // ★이 셋은 `Close` 를 내지 않는다★(`Close` 의 출처는 `StopDaemon` 과 replay 큐
+                        // ★떼어 낸 명령은 `Close` 를 내지 않는다★(`Close` 의 출처는 `StopDaemon` 과 replay 큐
                         //   포화 둘뿐이고 둘 다 줄 안이다). 그래도 삼키지 않고 큐 안 마커로 돌려 놓는다 —
                         //   분류가 어긋나 여기로 `Close` 가 오면 연결이 조용히 안 닫히는 편보다 낫다.
                         if core.dispatch(cmd, &session, &sink).await == DispatchFlow::Close {
@@ -390,6 +458,11 @@ impl ConnectionHandler for AgentConnection {
         //   놓치는 경쟁이 없다 — 넣은 곳도 빼는 곳도 각각 한 곳이고 둘 다 명부의 한 잠금 안에서 돈다.
         // ADR-0154
         self.core.commands().detach(conn_id);
+        // ★명령 명부와 같은 자리에서 사용량 명부 칸도 지운다★ — 칸이 쥔 프레임 출구 사본(네트워크 행 `ws.rs`
+        //   「사본 전수」의 ⑥)은 이 호출 안에서 놓인다(위 포트 의무). 단 출구가 한 장 보내는 도중 잠깐 뜬 사본은
+        //   이 호출을 넘겨 살 수 있다 — `try_send` 한 번이 전부라 같은 목록이 무해한 쪽으로 꼽는다.
+        //   칸을 되살리는 곳이 없어 겹쳐 든 늦은 구독 교체는 버려진다(`UsageWatch::replace`).
+        self.core.usage().detach(conn_id);
 
         // ── 이 연결이 낸 명령 왕복 거두기(ADR-0154) ───────────────────────────────
         // ★명부 정리 **뒤**다★: 순서가 뒤집히면 왕복이 풀려 답장을 내려는 순간 이 연결이 아직 명부에 있어,
@@ -471,6 +544,7 @@ pub struct AgentConnections {
     deliveries: CommandDeliveries,
     // ADR-0155
     locals: Arc<dyn LocalCommands>,
+    usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -485,6 +559,7 @@ impl AgentConnections {
         commands: CommandRoster,
         deliveries: CommandDeliveries,
         locals: Arc<dyn LocalCommands>,
+        usage: Arc<UsageService>,
         shutdown_tx: watch::Sender<bool>,
     ) -> Self {
         Self {
@@ -496,6 +571,7 @@ impl AgentConnections {
             commands,
             deliveries,
             locals,
+            usage,
             shutdown_tx,
         }
     }
@@ -516,6 +592,7 @@ impl AgentConnections {
             self.commands.clone(),
             self.deliveries.clone(),
             Arc::clone(&self.locals),
+            Arc::clone(&self.usage),
             self.shutdown_tx.clone(),
         ));
         Arc::new(AgentConnection {
@@ -801,6 +878,7 @@ mod tests {
             Arc::new(crate::test_doubles::RecordingFanout::new()),
             CommandRoster::new(),
             CommandDeliveries::new(),
+            crate::usage_service::fakes::idle_service(),
         )
     }
 
@@ -808,6 +886,7 @@ mod tests {
         fanout: Arc<dyn FrameFanout>,
         commands: CommandRoster,
         deliveries: CommandDeliveries,
+        usage: Arc<UsageService>,
     ) -> AgentConnections {
         use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
         use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
@@ -847,6 +926,7 @@ mod tests {
             deliveries,
             // 자기 명령이 없는 조립 — 이 하네스가 보는 것은 명부·정리 순서다.
             Arc::new(crate::command_delivery::NoLocalCommands),
+            usage,
             shutdown_tx,
         )
     }
@@ -1147,6 +1227,7 @@ mod tests {
             Arc::new(crate::test_doubles::RecordingFanout::new()),
             commands,
             deliveries.clone(),
+            crate::usage_service::fakes::idle_service(),
         );
         let owner = factory.handler_for(1);
         let caller = factory.handler_for(2);
@@ -1223,6 +1304,7 @@ mod tests {
             Arc::new(crate::test_doubles::RecordingFanout::new()),
             commands.clone(),
             CommandDeliveries::new(),
+            crate::usage_service::fakes::idle_service(),
         );
         let conn = factory.build(1);
         let session = conn.session.clone();
@@ -1253,5 +1335,416 @@ mod tests {
             crate::command_roster::DETACHED_REFUSAL,
             "연결 수명 그물이 잡은 것이어야 한다"
         );
+    }
+
+    // ── 5. 사용량 평면(TRD S21 usage-limit-slot §4 「wire」·「데몬 연결 계층」) ──
+
+    mod usage {
+        use super::*;
+        use crate::usage_service::clock::ManualUsageClock;
+        use crate::usage_service::fakes;
+        use crate::usage_service::watch::{deliver, Target};
+        use engram_dashboard_agent::backend::usage_probe_for;
+        use engram_dashboard_agent::usage::{UsageObservation, UsageProbe, UsageSource, WindowObs};
+        use engram_dashboard_protocol::{AgentBackendKind, RequestId, UsageVendorState};
+        use std::time::Duration;
+
+        use AgentBackendKind::{Claude, Codex};
+
+        const T0: i64 = 1_900_000_000;
+        const FAR_RESET: i64 = T0 + 5 * 3_600;
+        /// 가짜 조회기가 돌려주는 5시간 창 사용률.
+        const PROBED_PCT: f64 = 37.5;
+
+        fn probe_of(kind: AgentBackendKind) -> &'static dyn UsageProbe {
+            let word = serde_json::to_value(kind).expect("wire 낱말");
+            usage_probe_for(word.as_str().expect("문자열")).expect("조회기")
+        }
+
+        fn key_of(kind: AgentBackendKind) -> UsageVendorKey {
+            probe_of(kind).key()
+        }
+
+        fn keys(kinds: &[AgentBackendKind]) -> BTreeSet<UsageVendorKey> {
+            kinds.iter().map(|&k| key_of(k)).collect()
+        }
+
+        fn passive(pct: f64, resets_at: i64) -> UsageObservation {
+            UsageObservation {
+                vendor: key_of(Claude),
+                five_hour: Some(WindowObs {
+                    used_pct: Some(pct),
+                    resets_at: Some(resets_at),
+                }),
+                weekly: None,
+                model_scoped: None,
+                plan: None,
+                source: UsageSource::Passive,
+                limits_unavailable: None,
+            }
+        }
+
+        fn pct(sheet: &UsageLimitSnapshot) -> Option<f64> {
+            sheet.five_hour.as_ref().and_then(|w| w.used_pct)
+        }
+
+        struct Rig {
+            factory: AgentConnections,
+            service: Arc<UsageService>,
+            clock: Arc<ManualUsageClock>,
+            gate: fakes::ProbeGate,
+        }
+
+        /// 칸 = claude 하나(가짜 조회기 — 시험이 놓아 줄 때까지 막힌다). codex 는 조회기가 있어 구독 집합에는 들지만
+        /// 이 서비스에 칸이 없어 한 장이 없다. 스케줄러는 없다 — 시각은 시험이 몬다.
+        fn rig() -> Rig {
+            rig_waiting(None)
+        }
+
+        /// `reply_wait` = ⟳ 답장 대기 상한. `None` 이면 운영 상한 그대로다.
+        fn rig_waiting(reply_wait: Option<Duration>) -> Rig {
+            let clock = Arc::new(ManualUsageClock::new(Duration::from_secs(100), T0));
+            let (probe, gate) = fakes::gated_probe(probe_of(Claude), PROBED_PCT, FAR_RESET);
+            let service = match reply_wait {
+                Some(wait) => fakes::service_with_wait(vec![probe], clock.clone(), wait),
+                None => fakes::service(vec![probe], clock.clone()),
+            };
+            let factory = test_factory_with(
+                Arc::new(crate::test_doubles::RecordingFanout::new()),
+                CommandRoster::new(),
+                CommandDeliveries::new(),
+                service.clone(),
+            );
+            Rig {
+                factory,
+                service,
+                clock,
+                gate,
+            }
+        }
+
+        struct Conn {
+            id: ConnId,
+            handler: Arc<dyn ConnectionHandler>,
+            frames: Arc<dyn FrameSink>,
+            rx: mpsc::Receiver<Frame>,
+        }
+
+        impl Conn {
+            async fn open(rig: &Rig, id: ConnId) -> Self {
+                let handler = rig.factory.handler_for(id);
+                let (tx, rx) = mpsc::channel::<Frame>(64);
+                let frames = frame_sink(tx);
+                handler.on_connect(id, &frames).await;
+                Self {
+                    id,
+                    handler,
+                    frames,
+                    rx,
+                }
+            }
+
+            /// 붙고 인사 두 장을 비운다.
+            async fn greeted(rig: &Rig, id: ConnId) -> Self {
+                let mut conn = Self::open(rig, id).await;
+                let events = conn.events();
+                assert!(
+                    matches!(
+                        events.as_slice(),
+                        [
+                            AgentEvent::Hello { .. },
+                            AgentEvent::AgentListUpdated { .. }
+                        ]
+                    ),
+                    "{events:?}"
+                );
+                conn
+            }
+
+            async fn send(&self, cmd: AgentCommand) {
+                let flow = self
+                    .handler
+                    .on_text(self.id, &command_json(&cmd), &self.frames)
+                    .await;
+                assert_eq!(flow, ConnFlow::Continue);
+            }
+
+            async fn subscribe(&self, vendors: &[AgentBackendKind]) {
+                self.send(AgentCommand::UsageSubscribe {
+                    vendors: vendors.to_vec(),
+                })
+                .await;
+            }
+
+            /// 지금 큐에 든 이벤트 전부 — 기다리지 않는다.
+            fn events(&mut self) -> Vec<AgentEvent> {
+                let mut out = Vec::new();
+                while let Ok(frame) = self.rx.try_recv() {
+                    match frame {
+                        Frame::Text(text) => {
+                            out.push(serde_json::from_str(&text).expect("이벤트 디코드"))
+                        }
+                        other => panic!("Text 여야 함: {other:?}"),
+                    }
+                }
+                out
+            }
+
+            /// 지금 큐에 든 사용량 한 장들 — 다른 이벤트가 끼어 있으면 실패다.
+            fn sheets(&mut self) -> Vec<(UsageLimitSnapshot, Vec<AgentBackendKind>)> {
+                self.events()
+                    .into_iter()
+                    .map(|ev| match ev {
+                        AgentEvent::UsageLimitsUpdated {
+                            snapshot,
+                            subscribed,
+                        } => (snapshot, subscribed),
+                        other => panic!("사용량 한 장이어야 함: {other:?}"),
+                    })
+                    .collect()
+            }
+        }
+
+        /// 실물 인코더가 지은 한 줄이 실물 출구를 거쳐 그 연결의 프레임 출구에 **한 번** 든다. 거둔 출구는 조용하고
+        /// 프레임 출구 사본을 놓았다.
+        #[tokio::test]
+        async fn the_encoded_line_reaches_the_frame_sink_once_through_the_outlet() {
+            let (tx, mut rx) = mpsc::channel::<Frame>(8);
+            let frames = frame_sink(tx);
+            let outlet: Arc<dyn UsageOutlet> = Arc::new(ConnUsageOutlet::new(frames.clone()));
+            let snapshot = UsageLimitSnapshot {
+                vendor: Claude,
+                account_key: "default".into(),
+                five_hour: None,
+                weekly: None,
+                model_scoped: vec![],
+                plan: None,
+                in_flight: false,
+                state: UsageVendorState::Ready,
+                revision: 4,
+            };
+            let subscribed = Arc::new(keys(&[Codex, Claude]));
+            let target = || Target {
+                outlet: outlet.clone(),
+                subscribed: subscribed.clone(),
+            };
+
+            deliver(&snapshot, vec![target()], &UsageEventEncoder);
+            let Ok(Frame::Text(text)) = rx.try_recv() else {
+                panic!("Text 한 장이어야 함");
+            };
+            assert!(rx.try_recv().is_err(), "한 번만 든다");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+                serde_json::to_value(AgentEvent::UsageLimitsUpdated {
+                    snapshot: snapshot.clone(),
+                    subscribed: vec![Claude, Codex],
+                })
+                .unwrap()
+            );
+
+            outlet.revoke();
+            assert_eq!(Arc::strong_count(&frames), 1, "거두면 사본을 놓는다");
+            deliver(&snapshot, vec![target()], &UsageEventEncoder);
+            assert!(rx.try_recv().is_err(), "거둔 출구는 조용하다");
+        }
+
+        /// 첫 한 장은 인사 두 장 뒤에, 구독한 연결에만 간다.
+        #[tokio::test]
+        async fn a_first_sheet_follows_the_greeting_and_reaches_only_the_subscriber() {
+            let rig = rig();
+            let mut a = Conn::open(&rig, 1).await;
+            let mut b = Conn::greeted(&rig, 2).await;
+
+            a.subscribe(&[Claude]).await;
+
+            let events = a.events();
+            let [AgentEvent::Hello { .. }, AgentEvent::AgentListUpdated { .. }, AgentEvent::UsageLimitsUpdated {
+                snapshot,
+                subscribed,
+            }] = events.as_slice()
+            else {
+                panic!("인사 두 장 → 첫 한 장이어야 함: {events:?}");
+            };
+            assert_eq!(snapshot.vendor, Claude);
+            assert_eq!(subscribed, &[Claude]);
+            assert!(b.events().is_empty());
+            assert_eq!(fakes::union(&rig.service), keys(&[Claude]));
+        }
+
+        /// ⟳ 의 답은 조회 끝을 기다린 값 없는 `Ack` 이고 값은 구독한 연결에 방송으로 간다 — 보낸 연결이 구독하지
+        /// 않았으면 그 연결엔 한 장도 없다.
+        #[tokio::test]
+        async fn a_refresh_answers_a_bare_ack_and_the_value_goes_to_the_subscriber() {
+            // ★대기 상한을 길게 잡는다★ — 막힌 조회 동안 「B 에 답이 아직 없다」를 단언하므로, 운영 상한(5초)이
+            //   느린 러너에서 먼저 끝나 답이 나가 버리면 거짓 실패한다.
+            let mut rig = rig_waiting(Some(Duration::from_secs(60)));
+            let mut a = Conn::greeted(&rig, 1).await;
+            let mut b = Conn::greeted(&rig, 2).await;
+            a.subscribe(&[Claude]).await;
+            let first = a.sheets();
+            assert_eq!(first.len(), 1);
+
+            let r = RequestId::new();
+            b.send(AgentCommand::RefreshUsageLimits {
+                vendor: Claude,
+                request_id: r,
+            })
+            .await;
+            // 조회가 막혀 있는 동안 — 「갱신 중」 한 장은 조회를 띄우기 전에 나갔고, 답은 아직이다.
+            tokio::time::timeout(Duration::from_secs(10), rig.gate.entered.recv())
+                .await
+                .expect("조회가 시작돼야 한다");
+            let started = a.sheets();
+            assert!(
+                matches!(started.as_slice(), [(sheet, _)] if sheet.in_flight),
+                "{started:?}"
+            );
+            assert!(b.events().is_empty(), "답은 조회 끝을 기다린다");
+
+            rig.gate.release.send(()).expect("막힌 조회");
+            // B 의 답을 받는 것이 동기화다 — 조회 끝의 한 장은 기다리는 요청을 깨우기 **전에** 나간다.
+            match next_event(&mut b.rx).await {
+                AgentEvent::Ack { request_id } => assert_eq!(request_id, r),
+                other => panic!("Ack 여야 함: {other:?}"),
+            }
+            assert!(b.events().is_empty(), "구독 안 한 연결엔 값이 없다");
+
+            let ended = a.sheets();
+            let [(done, subscribed)] = ended.as_slice() else {
+                panic!("조회 끝 한 장이어야 함: {ended:?}");
+            };
+            assert!(!done.in_flight);
+            assert_eq!(pct(done), Some(PROBED_PCT));
+            assert_eq!(subscribed, &[Claude]);
+            assert!(first[0].0.revision < started[0].0.revision);
+            assert!(started[0].0.revision < done.revision);
+        }
+
+        /// 칸이 없는 벤더의 ⟳ 는 조용한 `Ack` 가 아니라 그 번호의 `Error` 다.
+        #[tokio::test]
+        async fn a_refresh_for_a_vendor_without_a_slot_is_an_error_with_its_request_id() {
+            let rig = rig();
+            let mut b = Conn::greeted(&rig, 2).await;
+
+            let r = RequestId::new();
+            b.send(AgentCommand::RefreshUsageLimits {
+                vendor: Codex,
+                request_id: r,
+            })
+            .await;
+            match next_event(&mut b.rx).await {
+                AgentEvent::Error {
+                    request_id,
+                    message,
+                } => {
+                    assert_eq!(request_id, Some(r));
+                    assert!(message.starts_with("NOT_FOUND: "), "{message}");
+                }
+                other => panic!("Error 여야 함: {other:?}"),
+            }
+        }
+
+        #[tokio::test]
+        async fn a_passive_change_reaches_only_the_subscriber() {
+            let rig = rig();
+            let mut a = Conn::greeted(&rig, 1).await;
+            let mut b = Conn::greeted(&rig, 2).await;
+            a.subscribe(&[Claude]).await;
+            a.events();
+
+            rig.service.observe(&passive(40.0, FAR_RESET));
+
+            let sheets = a.sheets();
+            assert_eq!(sheets.len(), 1);
+            assert_eq!(pct(&sheets[0].0), Some(40.0));
+            assert!(b.events().is_empty());
+        }
+
+        /// 끊기면 칸이 지워지고(합집합에서 빠짐) 출구가 쥔 프레임 출구 사본이 놓인다. 끊긴 뒤 겹쳐 든 늦은 교체는 칸을
+        /// 되살리지 않는다.
+        #[tokio::test]
+        async fn a_disconnect_removes_the_slot_and_a_late_subscription_does_not_revive_it() {
+            let rig = rig();
+            let mut a = Conn::greeted(&rig, 1).await;
+            let b = Conn::greeted(&rig, 2).await;
+            a.subscribe(&[Claude]).await;
+            b.subscribe(&[Codex]).await;
+            a.events();
+
+            a.handler.on_disconnect(1);
+            assert_eq!(fakes::union(&rig.service), keys(&[Codex]));
+            assert_eq!(
+                Arc::strong_count(&a.frames),
+                1,
+                "두 명부가 쥔 프레임 출구 사본이 정리 안에서 놓인다"
+            );
+
+            a.subscribe(&[Claude]).await;
+            assert_eq!(fakes::union(&rig.service), keys(&[Codex]));
+            rig.service.observe(&passive(40.0, FAR_RESET));
+            assert!(a.events().is_empty());
+        }
+
+        /// 한 연결의 교체는 `on_text` 가 돌아오기 전에 서므로 도착순이다 — 마지막이 이긴다.
+        #[tokio::test]
+        async fn replacements_on_one_connection_apply_in_arrival_order() {
+            let rig = rig();
+            let mut a = Conn::greeted(&rig, 1).await;
+
+            a.subscribe(&[Claude, Codex]).await;
+            assert_eq!(fakes::union(&rig.service), keys(&[Claude, Codex]));
+            a.subscribe(&[]).await;
+            assert!(fakes::union(&rig.service).is_empty());
+            a.subscribe(&[Codex]).await;
+            assert_eq!(fakes::union(&rig.service), keys(&[Codex]));
+
+            let sheets = a.sheets();
+            assert_eq!(
+                sheets.len(),
+                1,
+                "칸이 있는 벤더가 든 첫 교체만 한 장: {sheets:?}"
+            );
+            assert_eq!(sheets[0].1, [Claude, Codex]);
+        }
+
+        /// 셸은 억제 없이 같은 집합을 다시 보낸다 — 그것이 되먹임을 만들지 않는다.
+        #[tokio::test]
+        async fn a_same_set_replacement_sends_nothing() {
+            let rig = rig();
+            let mut a = Conn::greeted(&rig, 1).await;
+            let mut b = Conn::greeted(&rig, 2).await;
+            a.subscribe(&[Claude]).await;
+            rig.service.observe(&passive(40.0, FAR_RESET));
+            assert_eq!(a.sheets().len(), 2);
+
+            a.subscribe(&[Claude]).await;
+            a.subscribe(&[Claude]).await;
+            assert!(a.events().is_empty());
+            assert!(b.events().is_empty());
+        }
+
+        /// 래치 예외 — 교체 시점에 리셋이 지난 창은 정확히 한 장, **교체 전** 집합을 싣고 나간다. 되풀어도 0.
+        #[tokio::test]
+        async fn a_latch_due_at_replacement_goes_out_once_with_the_set_before_it() {
+            let rig = rig();
+            let mut a = Conn::greeted(&rig, 1).await;
+            a.subscribe(&[Claude, Codex]).await;
+            rig.service.observe(&passive(40.0, T0 + 60));
+            assert_eq!(a.sheets().len(), 2);
+            rig.clock.set_wall(T0 + 120);
+
+            a.subscribe(&[Claude]).await;
+            let sheets = a.sheets();
+            let [(latched, subscribed)] = sheets.as_slice() else {
+                panic!("래치 한 장이어야 함: {sheets:?}");
+            };
+            assert!(latched.five_hour.as_ref().expect("창").expired);
+            assert_eq!(subscribed, &[Claude, Codex], "교체 전 집합");
+
+            a.subscribe(&[Claude]).await;
+            a.subscribe(&[Claude]).await;
+            assert!(a.events().is_empty());
+        }
     }
 }

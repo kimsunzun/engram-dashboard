@@ -333,6 +333,23 @@
 - **왜 지금 값이 올라갔나:** codex app-server 는 `turn/interrupt` 가 **실측 18ms 에 성공**하고 중단 뒤 같은 대화가 그대로 쓰인다(`.claude/handoff/attachments/codex-measurements-2026-09-09.md`). 즉 **되는 기능인데 신고도 화면도 없는** 상태가 codex 에서 처음으로 실재하게 됐다.
 - **묶인 결정:** Phase 2a 설계 문서 §10 의 capability 신고 항목(그 값을 정직하게 낼 것인가 · 레버는 무엇인가)과 transport 계약 항목. 그 둘이 정해지면 이 항목의 절반이 따라온다 — **나머지 절반(사람이 누를 표면)은 그래도 남는다.**
 
+### T-38. 사용량 한도 슬롯 ADR 열 건에 코드 앵커가 없다
+- **상태:** 착수 가능(미착수). 코드 주석 한 줄씩이라 동작은 바뀌지 않는다 — 단 소스가 바뀌므로 커밋 전 QA 는 돈다(CLAUDE.md 「구현 실행 규약」 인라인 예외).
+- **출처:** 사용량 한도 슬롯 브랜치(`v0.3.2/feat/usage-limit-slot`) 문서 리뷰 후속(2026-09-30).
+- **무엇이 문제인가:** CLAUDE.md 「설계 결정 기록」은 load-bearing 코드에 `// ADR-NNNN` 앵커를 달게 한다(다음 세션의 발견 표면 둘 중 하나). 이 브랜치의 ADR 열두 건(0246–0256 · 0258) 가운데 코드에서 `rg "ADR-02(4[6-9]|5[0-9])"` 로 잡히는 것은 **0252 · 0257 둘뿐**이다(HEAD `910c214` 실측 · 옛 0257 = 현 0258 — 0252 는 `LayoutLeaf.tsx` 의 문서 주석 한 곳 + 테스트 둘). 0246–0251 · 0253–0256 열 건은 코드 쪽 발견 표면이 없다.
+- **앵커 후보(각 ADR 이 묶는 자리 — 달기 전에 다시 잴 것):** 0246 = backend 등록부 `usage_probes`/`usage_probe_for`(`crates/engram-dashboard-agent/src/backend/mod.rs`) · 0247 = `OutputDecoder::take_usage`(`transport/mod.rs`) · pump drain 자리 · daemon `usage_service/observe.rs` · 0248 = `backend/claude/usage_probe.rs` · 0249 = `usage/process.rs` · daemon 조회 스레드 기동 · 0250 = daemon `usage_service/clock.rs` · `reject_store.rs` · 0251 = agent `commands.rs` 의 usage 블록 · daemon `usage_service/bus.rs` · 0253 = protocol `UsageLimitsUpdated` · `book.rs` 의 revision · 0254 = `src-tauri/src/daemon_client/usage_interest.rs` · daemon `usage_service/watch.rs`·`schedule.rs` · 0255 = agent `usage/detail.rs`·`usage/text.rs` · protocol `UsageStateDetail` · 0256 = `book.rs` 의 병합.
+- **할 것:** 위 자리마다 앵커 한 줄 → `/adr lint`(앵커 고아 검사) → 커밋 전 QA.
+
+### T-37. `todo` 를 걷고 이 파일로 합치기 — 이름도 검토
+- **상태:** 트리거 대기 — **스킬 전체 리팩토링이 끝난 뒤**(사용자 결정 2026-09-30).
+- **결정:** `docs/todo.md`(색인) · `docs/todo/*.md`(상세)를 폐기하고, 나중에 할 일은 전부 이 파일에 T- 로 적립한다(사용자: 「todo는 폐기해야겠네 동일한거잖아」 · 「그냥 트래킹에 적립해두는 식으로」). ★그때까지도 새 항목은 이 파일에 쌓는다★.
+- **할 것:** ① `todo` 항목마다 옮길 곳을 확인하고 옮긴 뒤 지운다(`docs/todo.md` 규칙 3 — 편입 없이 지우면 증발) ② `docs/README.md:29-30,40,54` · `docs/handbook/documentation-system.md` · 링크 갱신(`rg "todo\.md|docs/todo/"`) ③ `todo` 의 상태 넷(착수 가능·트리거 대기·소유됨·확인만 됨)을 이 파일 항목의 **상태** 줄로 흡수 ④ **이름** — `tracking` 은 이 목록을 부르는 범용 용어가 아니다(업계 통칭 = backlog). 바꾸면 CLAUDE.md · `docs/README.md` · ADR 의 링크를 함께 고친다 — 같은 작업에서 판단 ⑤ `/review doc`(문서 체계 변경 = load-bearing).
+
+### T-36. 반영 전 재입력 — 앱 전체 공용 처리
+- **상태:** 후속 주제(사용자 결정 2026-09-30: 사용량 슬롯 브랜치는 현행 유지, 공용 처리는 후속).
+- **출처:** 사용량 슬롯 팝업 체크박스 리뷰(ADR-0258 · `docs/process/S21-usage-limit-slot/trd.md` §3 #102 ⑤).
+- **내용:** 반영(echo) 전에 다시 들어온 입력을 앱 전체에서 어떻게 다룰지 — 같은 칸 체크박스 재클릭뿐 아니라 중복 효과(탭 `+` 두 번 · 같은 슬롯 분할 두 번 · 에이전트 종료·생성 · LLM `spawn_into` 동시 호출의 중복 생성)와 옛 값에서 계산한 상대 조작(Ctrl+Tab 두 번 = 한 칸)까지 — 실태·선례·선택지 = `docs/research/pre-echo-reinput-2026-09-30.md`.
+
 ### T-35. 재연결 타이밍 테스트가 간헐적으로 깨진다 (ADR-0195 결함과 별건)
 - **상태:** 미착수. **ADR-0195 가 다루는 결함과 다른 테스트**다 — 같은 스위트에서 같이 나왔을 뿐이다.
 - **출처:** ADR-0195 결함 규명 중 부수 관측(2026-09-11). 단일 스위트 30 회 반복에서 **1 회 실패**.
