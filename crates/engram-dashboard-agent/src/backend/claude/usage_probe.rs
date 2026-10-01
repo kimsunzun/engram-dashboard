@@ -1,5 +1,5 @@
 //! claude 의 사용량 능동 조회 — 짧게 뜨는 `claude -p`(stream-json)에 `get_usage` 제어 요청 한 줄을 보내고
-//! 그 응답을 [`UsageObservation`] 으로 푼다. 부르는 쪽은 [`CLAUDE_USAGE_PROBE`] 를 [`UsageProbe`] 로만 본다.
+//! 그 응답을 [`UsageObservation`] 으로 푼다. 부르는 쪽은 [`CLAUDE_USAGE_PROBE`] 를 [`UsageProbe`] 로만 본다(ADR-0248).
 //!
 //! ★모델 호출이 없는 요청이다 — 사용자 메시지를 한 줄도 쓰지 않는다★: stdin 에 가는 것은 제어 요청 한 줄뿐이다.
 //!   stdin 은 응답을 받을 때까지 열어 둔다(닫으면 CLI 가 끝나 응답을 못 받을 수 있다). 응답을 받으면 stdin 을 닫고

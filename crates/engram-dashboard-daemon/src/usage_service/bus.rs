@@ -1,5 +1,5 @@
 //! 버스 `usage.*` 의 데몬 실물 — agent 포트 [`UsageCommandHost`] 를 서비스에 단다(TRD S21 usage-limit-slot §1-4
-//! 「버스」 · §1-6 「버스」).
+//! 「버스」 · §1-6 「버스」 · ADR-0251).
 //!
 //! ★요청은 [`UsageService::request_blocking`] 하나로 든다★ — 버스 입구는 blocking 풀 스레드라 std 채널로 기다리고
 //!   (§3 #17 — tokio 타이머를 안 쓴다), 판정은 wire ⟳ 와 같은 책·같은 요청 표에서 한다.

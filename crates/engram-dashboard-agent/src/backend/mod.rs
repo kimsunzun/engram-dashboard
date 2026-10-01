@@ -722,6 +722,7 @@ fn backend_for_encoder(e: InputEncoder) -> Option<&'static dyn AgentBackend> {
 ///   `backend_for` 를 거쳐야 하는 두 겹 디스패치가 된다.
 /// 키는 서로 다르다(시험이 잰다).
 // ADR-0004
+// ADR-0246
 pub fn usage_probes() -> [&'static dyn UsageProbe; 2] {
     [&claude::CLAUDE_USAGE_PROBE, &codex::CODEX_USAGE_PROBE]
 }
