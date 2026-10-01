@@ -1,6 +1,6 @@
 # TRD — 저장 관리 구조: 데이터 배치 · 웹뷰 폴더 · 설정 · 화면 상태 (S21)
 
-> 상태: **초안 2판 · 리뷰 1회 반영 (2026-10-02)** · 코드 무변경. 2판 = 1판에 TRD 리뷰(설계자 · 파괴자 — 둘 다 FIX, 서로 보완) 반영 — 대응표 = §14.
+> 상태: **초안 3판 · 리뷰 2회 반영 (2026-10-02)** · 코드 무변경. 2판 = 1차 리뷰(설계자 · 파괴자 — 둘 다 FIX) 반영 · 3판 = 2차 리뷰(파괴자 FIX · 설계자 BLOCK — 같은 핵심 결함: 대기분이 디스크 확정 전에 지워진다) 반영 — 대응표 = §14.
 >
 > **입력:** PRD 결정 = [`docs/research/storage-management-survey-2026-10-02.md`](../../research/storage-management-survey-2026-10-02.md) 「0. 결정」(구속) · 같은 보고서 §1–§6(근거). **판독 기준** = 브랜치 `v0.3.3/feat/storage` HEAD `d4ff3f7` · Tauri 2.11.3 / tao 0.35.3 / tauri-runtime-wry 2.11.3 / tauri-plugin-single-instance 2.4.2 = 이 PC cargo 레지스트리 소스.
 >
@@ -18,7 +18,7 @@
 | 데몬 이전 | 데몬 기동, 새·옛 잠금을 **둘 다** 쥔 뒤 | `store\` 3파일 rename → 완료 표지를 맨 마지막에. 이동 실패 = 재시도 후 기동 중단(빈 명부로 돌지 않는다). `run\` 것은 옛 사본을 지운다 |
 | 웹뷰 폴더 | 셸 | 정적 창 둘을 Rust 에서 만들고(`create:false` + `from_config`) 모든 창에 같은 `data_directory` + 같은 브라우저 인자. 만들기 전에 쓰기 확인 |
 | 설정 | 셸 `settings` 모듈(신설) | 스키마 표 한 줄 = 설정 하나. 버스 명령 넷 + 같은 서비스를 부르는 Tauri 껍데기. 파일을 아는 것은 저장 계층 하나 |
-| 화면 상태 | 셸 `state` 모듈(신설) | 빌드 전엔 **읽기만**, 파일 변경은 단일 인스턴스 관문 뒤 `setup` 에서. 쓰는 쪽은 기록기 하나(순번으로 낡은 스냅숏 차단). 런타임 복원은 조율자 하나가 한 커밋 지점에서 바꾼다 |
+| 화면 상태 | 셸 `state` 모듈(신설) | 빌드 전엔 **읽기만**, 파일 변경은 단일 인스턴스 관문 뒤 `setup` 에서. **`state.json` 을 쓰는 것은 기록기 스레드 하나뿐**(종료 쓰기도 그 스레드가 하고 답을 준다). 대기분은 **복원분이 디스크에 확정된 뒤에만** 지운다. 런타임 복원은 조율자 하나가 한 커밋 지점에서 바꾼다 |
 | 순서 | §9 | P1 → P2(설정) → P3(상태) → P4(웹뷰). **머지 단위 = L1(P1) · L2(P2a–c) · L3(P3a–d) · L4(P4), 전체가 한 릴리스** |
 
 ## 1. 목표 · 범위
@@ -61,7 +61,7 @@
 
 1. `layout = DataLayout::resolve()` → 로그(`layout.logs_dir()`).
 2. `ensure_data_dir_writable(root)` → `layout.ensure_daemon_dirs()`.
-3. **새 잠금** `acquire(layout.daemon_file())` — 현행 세 갈래 그대로(`AlreadyRunning` = 양보 exit 0 · `FileBusy`/`AccessDenied` = exit 1 · `lib.rs:498-532`).
+3. **새 잠금** `acquire(layout.daemon_file())` — 현행 세 갈래 그대로(`AlreadyRunning` = 양보 exit 0 · `FileBusy`/`AccessDenied` = exit 1 · `lib.rs:498-532`). ★**먼저 뜬 새 데몬이 아직 레코드를 발행하기 전(잠금 획득 ~ 발행 — 이전이 이 구간에 든다)이면 뒤엣것은 `AlreadyRunning` 이 아니라 `FileBusy` 로 나간다**★ — 진단 읽기가 빈 파일을 보기 때문이고 오늘도 같은 구간이 있다. 그래서 `FileBusy` 로그 문구를 「중복 데몬 아님」에서 **「다른 프로그램, 또는 아직 발행 전인 다른 데몬이 쥐고 있음」**으로 고친다(`daemon/src/lib.rs:512`).
 4. **옛 잠금** `acquire(layout.legacy_daemon_file())` — **같은 원시 기능**을 한 번 더. `Held` = 그 guard 도 프로세스 수명 내내 쥔다(파일을 0바이트로 자른다 — 죽은 옛 데몬의 토큰을 지운다) · `AlreadyRunning{pid}` = 살아 있는 옛 데몬이 이 폴더를 쓰고 있다 → 새 guard 를 놓고 양보 exit 0 · `FileBusy`/`AccessDenied` = 3)과 같은 exit 1. **새 것을 먼저 잡는 이유:** 옛 자리에는 새 데몬이 레코드를 안 쓰므로 거기서 먼저 막히면 「이미 실행 중」을 가릴 근거가 없다 — 새 데몬 둘의 경합이 `FileBusy`(exit 1)로 오진된다.
 5. **store 이전**(§3-3) — 두 잠금을 쥔 뒤라 어떤 데몬과도 겹치지 않는다. 실패 = 기동 중단.
 6. **run 정리** — 옛 `<root>\mcp-config\` · `<root>\usage-probe\` 를 통째로 지운다. 옮기지 않는 이유: 부팅 시점의 mcp-config 는 정의상 죽은 자격증명이고(`daemon/src/lib.rs:582-585` 스윕의 근거와 같다) usage-probe 는 기동 때 쓸리는 임시물이다(`:213-218`). 실패는 warn 하고 계속 — 비밀이 남을 수 있는 자리라 다음 기동이 다시 지운다.
@@ -71,7 +71,7 @@
 
 | 조합 | 일어나는 일 | 처리 |
 |---|---|---|
-| 새 셸 + 옛 데몬(실행 중) | 새 경로에 `daemon.json` 없음 | **discovery 읽기가 두 경로를 다 읽고 살아 있는 쪽을 고른다**(둘 다 살아 있으면 새 것). 각 공개 함수가 만드는 `FileReader` 하나만 고친다(`lib.rs:640-642,664-666,692-695,767-770,938`). 버전이 같으면 옛 데몬에 붙고 다르면 기존 `VersionMismatch`. **끄기도 같은 읽기라 옛 데몬을 트레이에서 끌 수 있다** — 끈 뒤 뜨는 새 데몬이 이전한다 |
+| 새 셸 + 옛 데몬(실행 중) | 새 경로에 `daemon.json` 없음 | **discovery 읽기가 두 경로를 다 읽고 고르는 순수 함수 `pick(new, legacy, liveness)`** — 우선순위: 살아 있고 버전 맞는 레코드(둘 다면 새 것) › 살아 있는 레코드(→ `VersionMismatch`) › 죽은 레코드 › 둘 다 없음(`Ok(None)` → spawn). ★**한쪽의 파싱 실패·빈 파일·읽기 실패는 다른 쪽의 산 레코드를 가리지 못한다**★ · 산 레코드가 없고 어느 한쪽이라도 못 읽혔으면 「아직 준비 안 됨」(`Err` — 지금 `ensure_with` 가 파싱 실패를 다루는 갈래, `lib.rs:514,553-556`). 각 공개 함수가 만드는 `FileReader` 하나만 고친다(`lib.rs:640-642,664-666,692-695,767-770,938`). **끄기도 같은 읽기라 옛 데몬을 트레이에서 끌 수 있다** — 끈 뒤 뜨는 새 데몬이 이전한다 |
 | 옛 데몬 실행 중에 새 데몬 기동 | §3-1 ④ `AlreadyRunning` | 양보. **이것이 한 폴더에 데몬 둘을 막는 장치다** — 없으면 새 데몬은 새 잠금을 그냥 얻는다 |
 | 새 데몬 실행 중에 옛 데몬 기동(옛 셸이 띄움) | 옛 데몬이 루트 `daemon.json` 을 못 열고(공유 위반) 진단 읽기는 0바이트라 레코드가 없다 → `FileBusy` exit 1 | 옛 바이너리가 **두 순서 모두에서** 막힌다. 옛 셸은 5초 시간 초과 — 하향은 지원 안 함 |
 | 데몬이 없을 때 옛 데몬이 이전된 폴더에서 기동 | 루트에 명부 없음 → 빈 명부로 시작, 루트에 새로 씀 | 지원 안 함. 데이터는 `daemon\store\` 에 그대로이고, 다음 새 데몬이 그 루트 파일을 「낙오」로 보존한다(§3-3) — 절대 이기지 못한다 |
@@ -124,9 +124,12 @@ ADR-0135 「잠금 파일과 접속 파일을 나누지 마라」와 어긋나�
 ```rust
 SettingDef { key: "theme.default", kind: Kind::Choice(&["dark", "light", "e-ink"]), default: "dark",
              desc: "창별 덮어쓰기가 없는 창의 테마" },
-SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 48.0 }, default: "13px",
+SettingDef { key: "chat.style.fontSize",
+             kind: Kind::CssLength { px: (8.0, 48.0), rem: Some((0.5, 3.0)) }, default: "13px",
              desc: "챗 기본 글자 크기" },
 ```
+
+- **`CssLength` 범위는 단위마다 따로 선언한다** — `px: (min, max)` 는 필수, `rem: Option<(min, max)>` 은 그 키가 rem·em 을 받을 때만(em 은 rem 과 같은 범위). 선언 안 된 단위는 `INVALID_ARGUMENT`. 숫자 범위 하나를 단위와 무관하게 대면 `48rem` 이 통과한다. 초기 표: `fontSize` px 8–48 · rem 0.5–3 / 여백·간격 8키 px 0–200 · rem 0–12.5 / `railLineOffset` px −200–200 · rem −12.5–12.5 (기본값이 rem 인 키가 있으므로 — `chatStyleStore.ts:37-49` — rem 을 막지 않는다).
 
 - 키 = 소문자 이름공간 + 점(`theme.*` · `chat.style.*`). 마지막 마디는 기존 철자(`chat.style.fontSize`).
 - **초기 키 12개:** `theme.default` + `chat.style.*` 11개(`railRowPt` · `plainRowPt` · `userPy` · `userPx` · `userMy` · `railGutter` · `railLineOffset` · `railDotTop` · `fontSize` · `lineHeight` · `waitStripH` — 기본값은 `chatStyleStore.ts:37-49` 그대로). `lineHeight` 만 `CssNumber`, `railLineOffset` 은 음수 허용.
@@ -137,7 +140,7 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 | 종류 | 받는 입력 | 정규형(get·set 답·알림이 싣는 값) | 파일에 적는 JSON |
 |---|---|---|---|
 | `Choice` | 선택지 낱말, 대소문자 무시 | 표의 철자 그대로(`e-ink`) | 문자열 |
-| `CssLength` | 앞뒤 공백 허용 · 수 + `px\|rem\|em`(단위 대소문자 무시) | 최단 십진 + 소문자 단위(`15px` · `0.9rem` · `-1rem`), `+` 없음 | 문자열 |
+| `CssLength` | 앞뒤 공백 허용 · 수 + 그 키가 선언한 단위(대소문자 무시) · 그 단위의 범위 안 | 최단 십진 + 소문자 단위(`15px` · `0.9rem` · `-1rem`), `+` 없음 | 문자열 |
 | `CssNumber` | 단위 없는 수 | 최단 십진(`1.45`) | 문자열 |
 | `Bool`(장래) | `true`/`false` 대소문자 무시 | `true`/`false` | bool |
 | `Int`(장래) | 십진 정수 | 십진 정수 | 수 |
@@ -181,6 +184,7 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 ### 5-6. 테마 — 전역은 설정, 창별은 상태
 
 - **유효 테마(창 W) = W 의 창 테마 ?? `theme.default`.** 셸이 계산하고 기존 창별 배달(`get_ui_settings` 당기기 + `ui:settings-updated` 밀기 — `commands/settings.rs:48` · `ui_settings.rs:730`)을 그대로 쓴다 [고름]. `source` 칸은 파일이 사라지는 P3d 에서 뺀다.
+- **밀기는 한 자리에서만 계산한다:** `theme.default` 쓰기와 `window.setTheme` 쓰기는 **각자 저장을 끝낸 뒤** 같은 함수 `push_effective_themes()` 를 부르고, 그 함수가 **테마 관문 락**(가장 바깥 — 쥔 채 설정 락을 짧게 읽고 놓고 → `ViewManager`·트리 칸 락을 짧게 읽고 놓고 → 창마다 emit) 아래서 모든 창의 유효 값을 새로 계산해 민다. 마지막 밀기 = 마지막 읽기라 두 쓰기가 엇갈려도 낡은 조합이 화면에 남지 않는다(지금 `TauriUiSettings::refresh` 의 `gate` 와 같은 수법 — `commands/settings.rs:109`).
 - **바꾼 테마가 저장된다(ADR-0167 「화면 변경 미저장」 번복):** 전역 = `settings.set theme.default <값>` · 창별 = 셸 명령 **`window.setTheme {window, theme}`**(`theme:null` = 덮어쓰기 해제 — 매크로 `Option<Option<T>>`, `macros.rs:43`) · **`window.getTheme {window}`** → `{theme, effective}`. 창별 값은 그 창의 모델 항목에 들어가 **창과 같이 죽는다**(§6-3) — 부팅 쓸기가 필요 없어진다.
 - **창별 테마가 「설정 명령 넷」 밖의 다섯째 길인 이유:** 그 값은 설정이 아니라 상태이고(결정), 상태 파일은 기계가 통째로 다시 쓰므로 손 편집 경로가 될 수 없다.
 - **오늘 화면에는 테마를 바꾸는 UI 가 없다**(ADR-0167 결정 5 · `themeManager.apply` 호출부 = `main.tsx:20` · `uiSettings.ts:95,130` 뿐). 화면 UI 는 §10 F7.
@@ -196,8 +200,7 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 ### 6-1. 스키마 v1 [고름 — 기존 serde 와 같은 snake_case]
 
 ```json
-{ "version": 1, "saved_at_ms": 1759400000000, "clean_exit": false,
-  "origin": "restored", "changed": true,
+{ "version": 1, "seq": 42, "saved_at_ms": 1759400000000, "clean_exit": false,
   "windows": [
     { "id": "main", "kind": "main", "theme": "light",
       "bounds": {"x":80,"y":60,"w":1280,"h":800}, "maximized": false,
@@ -207,7 +210,8 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 ```
 
 - `layout` = 기존 `LayoutNode` serde(`#[serde(tag="type", rename_all="snake_case")]`) · 슬롯 `content` = 기존 `SlotContent` serde. 팝아웃 `id` = 창이 처음 생길 때 뽑는 UUID(§6-3) — label 이 아니다.
-- `origin` = 이 세션이 `default` 로 시작했나 `restored` 로 시작했나 · `changed` = 부팅 뒤 모델이 한 번이라도 바뀌었나. 둘은 대기분 판정(§6-5)에만 쓴다.
+- `seq` = 기록기의 스냅숏 순번(이 세션 안에서 단조) — 부팅 지문(§6-5)과 대기분 삭제 확인(§6-7)에 쓴다.
+- **「기본 모양」 판정은 칸이 아니라 내용에서 낸다** — 순수 함수 `is_default_shape(doc)` = 팝아웃 없음 · main 탭 하나 · 그 탭이 빈 슬롯 하나 · 모르는 내용 곁표 없음(ADR-0222 기본 레이아웃). 창 위치·테마·포커스·탭 이름은 보지 않는다. ★변경 카운터로 내지 않는 이유★: tao 는 창을 만들거나 보일 때도 `Moved`/`Resized` 를 내고 프론트는 부팅 때 포커스를 잡을 수 있어, 카운터는 사용자가 아무것도 안 했어도 오른다 — 그러면 「기본에서 안 바뀐 세션은 대기분을 덮지 않는다」(§6-5)에 영영 닿지 못한다.
 - 넣지 않는 것: 화면 실측값(`canvas`·`metrics` — `manager.rs:103-105`) · 렌더 모드 덮어쓰기(웹뷰 소유 — 별건) · 에이전트 런타임.
 
 ### 6-2. 메모리 타입과의 대응 · 모르는 것
@@ -215,24 +219,27 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 - 영속 DTO 는 `state/schema.rs` 에 따로 둔다 — `WindowTabs` 는 serde 가 없고(`manager.rs:98-107`) `ViewSnapshot` 은 파생값을 싣는다. `View`·`LayoutNode`·`SlotContent` 는 serde 를 재사용한다.
 - **모르는 슬롯 내용(ADR-0060 요건) = 영속 DTO 에만 있다.** DTO 의 내용 칸 = `Known(SlotContent) | Unknown(원문 JSON 객체)`(전용 코덱 — 아는 변형으로 안 풀리면 원문을 통째로 쥔다). 메모리 `SlotContent` 와 IPC·버스 타입은 **바뀌지 않는다** — `set_slot_content`·`layout.setSlotContent` 는 모르는 종류를 지금처럼 역직렬화에서 거절하고, ts-rs 바인딩도 그대로다.
   - 복원 때 그 슬롯은 메모리에서 `Empty` 로 서고, 원문은 `ViewManager` 의 곁표(`unknown_content: slot_id → 원문`, 프론트로 안 나간다)에 남는다. **스냅숏은 그 슬롯이 아직 있고 내용이 바뀐 적 없을 때 원문을 그대로 되돌려 쓴다** — 다른 곳을 고치고 다시 저장해도 새 버전이 쓴 내용이 지워지지 않는다. 그 슬롯에 내용을 넣거나 닫으면 곁표 항목이 지워진다(내용 변경 지점에서 무효화 [미검 — 구현 때 `tree` 의 내용 쓰기 진입점 하나로 모은다]).
-  - 화면에는 빈 슬롯으로 보인다. warn 한 줄.
+  - **그 슬롯은 「점유」다**(ADR-0059 의 빈/점유 판정 — 지금은 `SlotContent::is_empty`, `layout/types.rs:37,62`). 자동 배치가 그 원문을 덮지 않게 점유 판정을 `ViewManager::slot_is_free(view, slot)` = `is_empty() && 곁표에 없음` 하나로 모으고, `resolve_spawn_slot`(`manager.rs:797,805` — `tree::first_empty_slot_id` 포함)이 그것을 쓴다. 프론트의 같은 판정(`selectOpenTarget.ts` 의 `firstEmptySlotId` · 포커스 대상)은 `ViewSnapshot` 의 새 칸 `foreign_slots: Vec<slot id>` 로 같은 답을 낸다 — `SlotContent` 와 IPC 타입은 그대로다.
+  - 화면에는 「이 버전이 모르는 내용」 자리표시가 서고(빈 슬롯 메뉴로 다른 내용을 **명시적으로** 놓으면 원문은 사라진다), warn 한 줄.
 - **모르는 창 종류 · 못 읽는 탭:** 그 창/탭만 건너뛰고 warn. **`version` 이 아는 것보다 크거나 파일 전체가 못 읽히면** 기본 화면으로 시작하고 원본은 `setup` 에서 `state.json.unreadable-<ms>` 로 옮긴다 — 덮어쓰지 않는다.
 - **`ViewManager::from_persisted`**(신설 · 순수): 유니크 소유 · `active ∈ tabs` · main 최소 1탭(`manager.rs` 불변식 1–4)을 다시 세운다 — 중복 view id 는 뒤엣것 버림 · `active` 가 없으면 첫 탭 · main 탭이 없으면 기본 탭 · 탭 없는 팝아웃은 창째 버림.
 
 ### 6-3. 창 신원 · 창 속성의 자리
 
 - **영속 신원 = 창 id**(`main` · `agent-tree` 고정 · 팝아웃 = 창이 처음 생길 때 뽑는 UUID, `WindowTabs.window_id`). **runtime label 은 한 부팅 안에서만의 신원**이다 — 복원되는 팝아웃은 부팅이든 런타임 수락이든 `PopupCounter`(`popout.rs:44`)에서 **새 label** 을 받는다. 그래야 런타임 복원이 지금 떠 있는 팝아웃의 label 과 부딪히지 않는다.
-- **창별 테마·위치는 `WindowTabs` 에 산다**(`theme: Option<UiTheme>` · `bounds` · `maximized`). 창 항목과 같이 죽고, 바꿀 때 `bump_version`(`manager.rs:245`)을 거치며, 락은 `ViewManager` 하나다. ADR-0167 이 경고한 오적용(창 밖에 label 키로 값을 둔 것)이 구조적으로 사라진다.
+- **창별 테마·위치는 `WindowTabs` 에 산다**(`theme: Option<UiTheme>` · `bounds` · `maximized`). 창 항목과 같이 죽고 락은 `ViewManager` 하나다. ADR-0167 이 경고한 오적용(창 밖에 label 키로 값을 둔 것)이 구조적으로 사라진다. 바꿀 때는 `bump_version`(`manager.rs:245` — 프론트가 낡은 알림을 거르는 레이아웃 번호)이 아니라 **새 `attrs_rev`** 를 올린다 — 창을 끌 때마다 레이아웃 번호가 튀지 않게 하고, 기록기는 둘 다 본다(§6-4).
 - **트리 창(`agent-tree`)은 모델 밖이다**(`manager.rs` 헤더 「`agent-tree` 창은 이 모델 밖」). 그래서 `state/tree_attrs.rs` 의 작은 칸(테마·위치)이 따로 들고, 자기 락(잎 — 쥔 채 다른 락을 잡지 않는다)과 자기 변경 번호를 갖는다. `window.setTheme` 은 `agent-tree` 면 이쪽, 그 밖은 `WindowTabs` 로 간다.
-- **위치·크기 기록:** `WindowEvent::Moved/Resized` 에서 **최소화도 최대화도 아닐 때만** `bounds` 를 갱신한다(논리 좌표). 최대화 여부는 `maximized` 로 따로 — 복원은 마지막 보통 크기로 만든 뒤 최대화한다.
-- **락 순서(명시):** `ViewManager` 락과 설정 서비스 락은 **겹쳐 잡지 않는다** — 테마 해석은 각각을 따로 짧게 읽는다. 겹쳐야 할 날이 와도 `ViewManager` → 설정 순서만 허용하고, 설정 락을 쥔 채 `ViewManager` 락을 잡는 것은 금지다. 트리 칸 락 · 기록기 쓰기 락은 잎이다(쥔 채 아무 락도 안 잡는다).
+- **위치·크기 기록:** `WindowEvent::Moved/Resized` 에서 **최소화도 최대화도 아닐 때만** `bounds` 를 갱신한다(논리 좌표). 최대화 여부는 `maximized` 로 따로 — 복원은 마지막 보통 크기로 만든 뒤 최대화한다. ★**창 게터(`outer_position` · `inner_size` · `scale_factor` · `is_minimized` · `is_maximized`)는 `ViewManager` 락을 잡기 전에 전부 부르고, 락 안에서는 값만 적는다**★ — 레이아웃 락 보유 중 OS 호출 금지(`layout/apply.rs` 머리 「락 규율」).
+- **락 순서(명시):** 테마 관문 락(§5-6) **›** 설정 서비스 락 · `ViewManager` 락 · 트리 칸 락. 관문은 가장 바깥이고 나머지 셋은 **서로 겹쳐 잡지 않는다**(관문 아래서도 하나씩 짧게). 겹쳐야 할 날이 와도 `ViewManager` → 설정 순서만 허용하고 설정 락을 쥔 채 `ViewManager` 락을 잡는 것은 금지다. 기록기는 락을 쥐고 디스크를 만지지 않는다(복사 뒤 놓는다).
 
 ### 6-4. 저장 — 쓰는 쪽은 하나
 
-- **기록기(`state/saver.rs`) 스레드 하나**가 `state.json` 의 **유일한 쓰는 쪽**이다 [고름]. 0.5초마다 `ViewManager.version`(변경마다 +1 · 측정 보고는 안 올린다 — `manager.rs:137,245,1921`)과 트리 칸 변경 번호를 짧게 읽고, 바뀌었으면 **마지막 변경 뒤 1초 조용하거나 첫 변경 뒤 5초**에 스냅숏(락 안에서 복사 → 락 밖에서 직렬화) 한다.
-- **스냅숏 순번:** 스냅숏마다 단조 순번을 붙이고, 쓰기 락(잎) 안에서 「마지막으로 쓴 순번」보다 낮은 스냅숏은 버린다 — 낡은 스냅숏이 새 것을 덮을 수 없다. 임시 파일 이름은 순번을 담아 고유하게(`state.json.tmp-<순번>`).
-- **종료(`RunEvent::Exit`):** ① 기록기에 멈춤 신호 → 상한(2초) 안에서 join ② 마지막 스냅숏(`clean_exit:true`)을 **같은 쓰기 락** 아래 쓴다. 기록기가 I/O 에 갇혀 락을 못 얻으면 상한(2초) 뒤 포기하고 로그 — 결과는 `clean_exit:false` 로 남아 다음 부팅이 묻는다(안전한 쪽으로 실패).
-- **부팅 직후 첫 쓰기는 `clean_exit:false`**(§6-5 실행기가 한다) — 그 뒤 변경 없이 죽어도 비정상으로 읽힌다.
+- **기록기(`state/saver.rs`) 스레드 하나**가 `state.json` 의 **유일한 쓰는 쪽**이다 — 종료 쓰기도, 대기분 삭제(§6-7)도 이 스레드가 한다 [고름]. 다른 스레드는 요청을 보내고 답을 기다릴 뿐이다. 쓰는 스레드가 하나라 쓰기 락·순번 비교가 필요 없다(2판의 「순번 + 쓰기 락 + 상한」을 줄였다).
+- **주기 저장:** 0.5초마다 `ViewManager.version`(레이아웃 변경마다 +1 · 측정 보고는 안 올린다 — `manager.rs:137,245,1921`) · `attrs_rev`(§6-3) · 트리 칸 변경 번호를 짧게 읽고, 바뀌었으면 **마지막 변경 뒤 1초 조용하거나 첫 변경 뒤 5초**에 스냅숏(락 안에서 복사 → 락 밖에서 직렬화 → 고유 임시 이름 `state.json.tmp-<seq>` → `sync_all` → rename). `seq` 는 스냅숏마다 +1.
+- **요청 둘(채널 + 답):** `Flush { delete_pending: bool }` → 받은 뒤에 뜬 스냅숏을 곧바로 쓰고 `Written{seq}` 또는 `Failed` 로 답(`delete_pending` 이면 「이 순번 이상을 rename 한 뒤 대기분 삭제」 조건을 기록기 안에 걸어 둔다 — 실패해도 남아 다음 성공 쓰기가 지킨다) · `Final` → `clean_exit:true` 스냅숏을 쓰고 답한 뒤 스레드 종료.
+- **종료(`RunEvent::Exit`) = 마감 하나(2초):** `Final` 을 보내고 **같은 마감까지** 답을 기다린다. 마감을 넘기면 `closed` 표지(원자 값)를 세우고 돌아간다 — 기록기는 **rename 직전마다 `closed` 를 확인**해 서 있으면 임시 파일을 지우고 아무것도 발행하지 않는다. 결과는 직전 `clean_exit:false` 가 남아 다음 부팅이 묻는다(안전한 쪽으로 실패). 갇힌 기록기가 나중에 깨어나도 발행하지 못한다.
+- **쓰기 실패:** 로그 + 다음 주기에 다시. 실패가 이어지는 동안 대기분은 지워지지 않는다(§6-7).
+- **부팅 직후 첫 쓰기는 `clean_exit:false`**(§6-5 실행기가 기록기에 `Flush` 로 시킨다) — 그 뒤 변경 없이 죽어도 비정상으로 읽힌다.
 
 ### 6-5. 부팅 — 빌드 전엔 읽기만, 파일 변경은 관문 뒤
 
@@ -242,14 +249,21 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 | `state.json` | 대기분 | 모델 | `setup` 에서 할 일 |
 |---|---|---|---|
 | 없음 | 없음 | 기본 | 첫 쓰기 |
-| `clean_exit:true` | 무관 | 복원 | 첫 쓰기(대기분은 그대로 — 아래 표시 규칙) |
-| `false` · 내용 있음(`origin=restored` 또는 `changed`) | 무관 | 기본 | `state.json` → `state.pending.json`(덮음) · 첫 쓰기 |
-| `false` · `origin=default` 이고 `!changed` | 있음 | 기본 | **대기분을 덮지 않는다** — `state.json` 만 지움 · 첫 쓰기 |
-| `false` · `origin=default` 이고 `!changed` | 없음 | 기본 | `state.json` 지움 · 첫 쓰기(물을 것이 없다) |
+| `clean_exit:true` | 무관 | 복원 | 첫 쓰기(대기분은 그대로 — §6-7 표시 규칙) |
+| `false` · 기본 모양 아님(§6-1 `is_default_shape`) | 무관 | 기본 | `state.json` → `state.pending.json`(덮음) · 첫 쓰기 |
+| `false` · 기본 모양 | 있음 | 기본 | **대기분을 덮지 않는다** — `state.json` 만 지움 · 첫 쓰기 |
+| `false` · 기본 모양 | 없음 | 기본 | `state.json` 지움 · 첫 쓰기(물을 것이 없다) |
 | 못 읽음 · 버전 초과 | 무관 | 기본 | `.unreadable-<ms>` 로 옮김 · 첫 쓰기 |
 
-- **빌드 전:** 위 함수로 모델을 만들어 `LayoutState` 로 manage(지금 `lib.rs:59` 자리 — ADR-0102 그대로). 진단은 들고 있다가 로그가 선 뒤(`lib.rs:70`) 낸다.
-- **`setup`(관문 뒤):** ① `actions` 실행 ② 복원 모델의 팝아웃마다 창 생성(새 label · 저장된 위치 · `--hidden` 이면 숨긴 채 — `show_main_ui` 가 모든 창을 보인다, `tray/actions.rs:64-77`) — 실패한 창은 모델에서 지운다 · 어느 모니터에도 안 걸치는 위치는 버린다 ③ **파생 표 재계산 = `SubscriptionSync::resync`**(라우터 재계산 + 사용량 관심 — `commands/layout.rs:74-78`) 한 번 ④ 기록기 시작.
+모든 행 공통: 남은 `state.json.tmp-*` 를 지운다(지난 기록기가 rename 전에 죽은 흔적).
+
+- **빌드 전:** 위 함수로 모델을 만들어 `LayoutState` 로 manage(지금 `lib.rs:59` 자리 — ADR-0102 그대로). 판정에 쓴 파일의 **지문**(`seq` · `saved_at_ms` · 크기)을 계획에 담는다. 진단은 로그가 선 뒤(`lib.rs:70`) 낸다.
+- **`setup`(관문 뒤) 실행기:**
+  1. **지문 재확인.** 지금 `state.json` 의 지문이 계획과 다르면(앞 인스턴스가 끝나며 마지막 쓰기를 한 경우 — 단일 인스턴스 플러그인은 앞 인스턴스의 창을 못 찾으면 둘째를 끝내지 않는다, `windows.rs:72-94` 의 `!hwnd.is_null()` 조건) **그 파일을 덮지 않는다** — 새 내용을 `state.pending.json` 으로 보내 사용자에게 묻는다(기본 모양이면 위 표의 기본 모양 규칙).
+  2. `actions` 실행. ★**어느 동작이든 실패하면(옮기기·지우기) 원본을 그대로 두고 error 로그 — 이번 실행은 기록기를 「쓰지 않음」 모드로 띄운다**★(첫 쓰기 포함 아무것도 안 쓴다). 못 옮긴 비정상 세션을 다음 부팅이 다시 판정하게 남긴다.
+  3. 복원 모델의 팝아웃마다 창 생성(새 label · 저장된 위치 · `--hidden` 이면 숨긴 채 — `show_main_ui` 가 모든 창을 보인다, `tray/actions.rs:64-77`) — 실패한 창은 모델에서 지운다 · 어느 모니터에도 안 걸치는 위치는 버린다.
+  4. **파생 표 재계산 = `SubscriptionSync::resync`**(라우터 재계산 + 사용량 관심 — `commands/layout.rs:74-78`) 한 번.
+  5. 기록기 시작 → `Flush`(첫 쓰기 = `clean_exit:false`).
 - 기본 레이아웃(ADR-0222 — 단일 빈 슬롯)은 **복원할 상태가 없을 때만** 쓰인다(§11).
 
 ### 6-6. 정상 종료 표식 · Windows 종료/로그오프
@@ -260,14 +274,15 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 
 ### 6-7. 비정상 종료 뒤 「복원할까요?」 — 사람과 LLM 이 같은 핸들
 
-- 셸 명령(셸 표): **`restore.status`**(Read) → `{pending, saved_at_ms, windows, tabs}` · **`restore.answer {accept}`**(Write) → `{restored_windows}`, 대기분 없음 = `CONFLICT`. Tauri 껍데기 `restore_status`/`restore_answer` 가 같은 서비스를 부르고, 바뀌면 `restore:changed` 를 main 에.
+- 셸 명령(셸 표): **`restore.status`**(Read) → `{pending, saved_at_ms, windows, tabs}` · **`restore.answer {accept}`**(Write) → `{restored_windows, durable}`, 대기분 없음 = `CONFLICT` · **다른 답이 처리 중이면 `CONFLICT`**(조율자의 처리 중 표지 하나 — 수락·거절이 한 번에 하나만). Tauri 껍데기 `restore_status`/`restore_answer` 가 같은 서비스를 부르고, 바뀌면 `restore:changed` 를 main 에.
 - 프론트: main 창 상단 띠(`RestoreBanner.tsx` 신설 · 문구 `i18n/ko.ts`) — 「이전 화면 복원」/「새로 시작」. 띠가 **보이는 창에 실제로 그려지면** `restore_prompt_shown` 을 보낸다.
-- **대기분 수명:** 답하면 끝(수락 = 적용 후 삭제 · 거절 = 삭제). **답 없이 정상 종료하면 「띠가 실제로 보였을 때만」 지운다** — `--hidden` 자동 시작처럼 main 을 한 번도 안 보인 세션은 대기분을 다음 부팅으로 넘긴다.
+- **대기분 수명:** 거절 = 곧바로 삭제(기록기에 시킨다). ★**수락 = 복원분이 디스크에 확정된 뒤에만 삭제**★ — 아래 ⑤. **답 없이 정상 종료하면 「띠가 실제로 보였을 때만」 지운다**(`Final` 이 성공한 뒤 기록기가) — `--hidden` 자동 시작처럼 main 을 한 번도 안 보인 세션은 대기분을 다음 부팅으로 넘긴다.
 - **런타임 수락 = 복원 조율자 하나**(`state/restore.rs`):
   1. **준비(부수효과 없음):** 대기분 → `from_persisted` → 새 창 묶음(팝아웃마다 `PopupCounter` 의 새 label). 실패 = 아무것도 안 바뀌고 대기분 유지 · `INTERNAL`.
   2. **새 OS 창 생성(락 밖):** 숨긴 채. 하나라도 실패하면 만든 것을 전부 destroy 하고 끝 — 대기분 유지(되돌림). 기존 `move_slot_to_window` 의 phase B(창 빌드) → phase C(모델 삽입) 규율과 같고, 그 틈의 팝아웃 페이지 당기기는 기존 재시도가 덮는다(ADR-0102) [미검 — 새 창이 모델보다 먼저 뜨는 틈].
   3. **커밋(유일한 커밋 지점 · `ViewManager` 락 하나 안):** 모델 교체(main 탭 교체 · 옛 팝아웃 항목 제거 · 새 팝아웃 삽입) · `version = 지금 version + 1` · `SubscriptionSync::resync`. 이 셋을 같은 임계구역에서 한다(재계산과 발화의 순서 — `apply.rs:73-76` 의 호출 규약).
-  4. **커밋 뒤(락 밖 · 되돌리지 않음):** 탭·레이아웃 알림 → 새 창 보이기 → 옛 팝아웃 destroy(Destroyed 정리는 이미 모델에 없는 label 이라 재계산만 한다 — `popout.rs` `drop_window_in_model`) → 대기분 삭제. 여기서의 실패는 로그.
+  4. **커밋 뒤(락 밖 · 되돌리지 않음):** 탭·레이아웃 알림 → 새 창 보이기 → 옛 팝아웃 destroy(Destroyed 정리는 이미 모델에 없는 label 이라 재계산만 한다 — `popout.rs` `drop_window_in_model`). 여기서의 실패는 로그.
+  5. **확정:** 기록기에 `Flush { delete_pending: true }` 를 보내고(기록기가 받은 뒤 뜨는 스냅숏은 커밋을 담는다) 마감(2초)까지 답을 기다린다. 기록기는 **그 순번 이상의 스냅숏을 rename 까지 끝낸 뒤에만** 대기분을 지운다 — 이번 요청이 실패해도 그 조건은 기록기에 남아 다음 성공 쓰기가 지운다. 답의 `durable` = 마감 안에 그 쓰기가 성공했나. 확정 전에 앱이 죽으면 대기분이 남아 다음 부팅이 다시 묻는다(그 세션의 `state.json` 이 기본 모양이 아니면 그것이 새 대기분이 된다 — 둘 다 복원분이다).
 - 크래시 루프 격리: 복원한 화면이 다시 앱을 죽이면 다음 부팅도 묻는다 — 「새로 시작」으로 끊는다.
 
 ### 6-8. 대상 에이전트가 없는 슬롯 — 결정 그대로 두 상태 (구속)
@@ -294,16 +309,17 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 |---|---|---|
 | `DataLayout` | 없음(순수) | root → 각 경로 · 옛 경로 묶음 |
 | 데몬 이전 | 파일 시스템 = 임시 폴더 · 계획 = 순수 함수 | 표지 없음/있음 × 옛·새 유무 표 · **둘 다 있고 표지 없음 → 중단** · 낙오 보존 · 이동 실패 재시도 후 중단(쥔 핸들로 재현, `#[cfg(windows)]`) · **앞부분만 실행 → 재실행 = 같은 결과** · 표지는 맨 마지막 |
-| 옛 잠금 | net 기존 하네스 | 새 데몬이 두 guard 를 쥔 동안 옛 자리 `acquire` = `FileBusy` · 옛 데몬 레코드가 산 옛 자리 = `AlreadyRunning` · 새 데몬 둘 경합 = 뒤엣것 `AlreadyRunning`(새 잠금이 먼저) · ws_e2e 평면 폴더 기동 |
-| discovery 읽기 | `DaemonReader`(기존) | 두 경로 · 산 쪽 우선 · 둘 다 살면 새 것 · 둘 다 없음 |
+| 옛 잠금 | net 기존 하네스 | 새 데몬이 두 guard 를 쥔 동안 옛 자리 `acquire` = `FileBusy` · 옛 데몬 레코드가 산 옛 자리 = `AlreadyRunning` · 새 데몬 둘 경합 = 뒤엣것은 파일을 하나도 안 건드리고 끝난다(`AlreadyRunning` 또는 — 앞엣것이 발행 전이면 — `FileBusy` 둘 다 허용 · §3-1 ③) · ws_e2e 평면 폴더 기동 |
+| discovery 읽기 | `pick` 순수 함수 · `DaemonReader`(기존) | 산 쪽 우선 · 둘 다 살면 새 것 · **한쪽 파싱 실패/빈 파일 + 다른 쪽 산 레코드 → 산 레코드** · 둘 다 못 읽음 → 「준비 안 됨」 · 둘 다 없음 → `None` |
 | 설정 | 파일 = `SettingsFiles` 트레이트 · 알림 = 포트 | 종류별 정규화 표(§5-2) · 같은 값 무쓰기 · 기본값이면 키 삭제 · 모르는 키 보존 · 못 읽는 파일 무손상 + 첫 쓰기 `.corrupt` · RMW 가 남의 키 보존 · `rev` 단조 · 명령 표(`src-tauri/tests/layout_commands.rs` 가짜 포트) · `settings_registry.json` 내보내기 |
 | 프론트 설정 | `invoke`/`listen` 모의 | 구독 먼저 · 낡은 `rev` 버림 · 챗 스타일 적용 · 일회 가져오기(성공 시만 지움) · `theme.css` 대조 |
-| 상태 코덱 | 없음(순수) | **`Unknown` 원문 보존 왕복: 적재 → 다른 슬롯 편집 → 재저장 → 원문 JSON 동일** · 그 슬롯에 내용을 넣으면 원문 소멸 · 버전 초과 · 항목별 건너뛰기 · `from_persisted` 불변식 |
-| 부팅 판정 | 없음(순수) | §6-5 표 전 행 |
-| 기록기 | 시계 · 스냅숏 원천 · 쓰기 = 포트 | 디바운스 1초 · 상한 5초 · 무변경 무쓰기 · **낡은 순번 버림** · **쓰기 중 종료 → 마지막 쓰기 = `clean_exit:true`** · 고유 임시 이름 · 갇힌 기록기 + 종료 상한 |
-| 복원 조율자 | 창 = `WindowHost` 포트(기존) · 구독 = `SubscriptionSync`(기존) | **떠 있는 팝아웃이 같은 옛 label 을 쥔 채 수락 → 충돌 없음 · 새 label · 옛 창 destroy** · 창 생성 실패 → 되돌림 · 대기분 유지 · `version` 이 정확히 +1 · resync 1회 |
+| 상태 코덱 | 없음(순수) | **`Unknown` 원문 보존 왕복: 적재 → 다른 슬롯 편집 → 재저장 → 원문 JSON 동일** · 그 슬롯에 내용을 넣으면 원문 소멸 · **곁표 슬롯 = 점유(`slot_is_free` · `resolve_spawn_slot` 이 건너뜀) · `foreign_slots` 에 실림** · 버전 초과 · 항목별 건너뛰기 · `from_persisted` 불변식 · `is_default_shape` |
+| 부팅 판정 · 실행기 | 없음(순수) · 파일 = 포트 | §6-5 표 전 행 · **기본 부팅 → 첫 `Moved`/`Resized`·포커스 → 강제 종료 → 다음 부팅에서 대기분 보존** · **지문 불일치 → 덮지 않고 대기분으로** · **옮기기 실패 → 원본 보존 · 기록기 「쓰지 않음」** · `tmp-*` 청소 |
+| 기록기 | 시계 · 스냅숏 원천 · 파일 = 포트 | 디바운스 1초 · 상한 5초 · 무변경 무쓰기 · 고유 임시 이름 · `Flush` 답 · **`Final` 마감 초과 → `closed` 뒤엔 rename 0회(갇힌 쓰기를 풀어 줘도 발행 없음)** · **`delete_pending` 조건: 실패한 쓰기 뒤 대기분 유지 → 다음 성공 쓰기 뒤 삭제** |
+| 복원 조율자 | 창 = `WindowHost` 포트(기존) · 구독 = `SubscriptionSync`(기존) · 기록기 = 포트 | **떠 있는 팝아웃이 같은 옛 label 을 쥔 채 수락 → 충돌 없음 · 새 label · 옛 창 destroy** · 창 생성 실패 → 되돌림 · 대기분 유지 · `version` 이 정확히 +1 · resync 1회 · **기록기 쓰기 실패 → `durable:false` · 대기분 유지** · **처리 중 두 번째 `answer` → `CONFLICT`** |
 | 대기분 수명 | 보임 신호 = 인자 | 보인 뒤 정상 종료 → 삭제 · `--hidden` 세션 → 보존 |
-| 창 위치 | 모니터 목록 = 인자 | 최소화·최대화 중 기록 안 함 · 화면 밖 버림 |
+| 창 위치 | 모니터 목록 = 인자 | 최소화·최대화 중 기록 안 함 · 화면 밖 버림 · 위치·테마 변경은 `version` 을 안 올린다(`attrs_rev`) |
+| 유효 테마 밀기 | emit = 포트 | `theme.default` 쓰기와 `window.setTheme` 이 엇갈려도 마지막 밀기 = 둘 다 반영한 값 |
 | 슬롯 두 상태 | vitest(`LayoutLeaf`) | 미수신 / `reserved` / 프로필 없음 / 기억 있음 네 갈래 · 「연결 중」이 목록 수신 뒤 남지 않음 |
 | Tauri 결합부 | — | GUI 실측만(`/qa full`): 정적 창 생성 · 웹뷰 폴더 · 쓰기 실패 대화상자 · 팝아웃 복원 · 로그오프 |
 
@@ -326,15 +342,15 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 | **P2a** (L2) 설정 코어 + 전역 테마 | §5-1~5-4 · §5-6 전역 · §3-5 전역 | `src-tauri/src/settings/{mod,registry,store,migrate}.rs`(신설) · `src-tauri/src/fsutil.rs`(신설) · `ui_settings.rs` · `commands/settings.rs` · `commands/layout.rs`(`command_ports`) · `layout/commands.rs` · `lib.rs` · `src-tauri/tests/layout_commands.rs` · `src-tauri/bindings/*` | L (~1,000) |
 | **P2b** (L2) 프론트 챗 스타일 | §5-5 · §3-6 | `src/api/settingsClient.ts`(신설) · `src/store/chatStyleStore.ts` · `src/main.tsx` · 해당 `*.test.ts` | S–M (~400) |
 | **P2c** (L2) 도움말 · 프라이밍 | §5-7 1차 | `prompts/engram-help.md` · `prompts/agent-priming.md` · 데몬 `src/bin/engram.rs` · CLAUDE.md 「LLM-우선 제어」 갭 줄 | S (~200) |
-| **P3a** (L3) 상태 코어 + 기록기 | §6-1~6-4 · §6-6 | `src-tauri/src/state/{mod,schema,codec,saver,tree_attrs}.rs`(신설) · `layout/manager.rs`(`WindowTabs` 칸 · 곁표 · 스냅숏) · `layout/tree.rs`(내용 쓰기 진입점의 곁표 무효화) · `lib.rs`(기록기 · `RunEvent::Exit` · Moved/Resized) | L (~1,000) |
-| **P3b** (L3) 부팅 판정 · 복원 | §6-5 | `state/{boot,restore}.rs`(신설 — 조율자의 준비·커밋 부분 포함) · `layout/manager.rs`(`from_persisted`) · `layout/mod.rs` · `commands/popout.rs`(위치·숨김 인자) · `lib.rs` · CLAUDE.md 「레이아웃은 디스크 영속이 없다」 줄 | M–L (~900) |
-| **P3c** (L3) 확인 띠 · 런타임 수락 · 슬롯 두 상태 | §6-7 · §6-8 | `state/{pending,restore}.rs` · `layout/commands.rs`(`restore.*`) · `commands/state.rs`(신설) · `commands/mod.rs` · `lib.rs` · `src/components/layout/RestoreBanner.tsx`(신설) · `src/components/layout/LayoutLeaf.tsx` · `src/App.tsx` · `src/i18n/ko.ts` · `prompts/engram-help.md` · `src-tauri/tests/layout_commands.rs` | M–L (~900) |
+| **P3a** (L3) 상태 코어 + 기록기 — **실행 배선 없음** | §6-1~6-4 | `src-tauri/src/state/{mod,schema,codec,saver,tree_attrs}.rs`(신설) · `layout/manager.rs`(`WindowTabs` 칸 · `attrs_rev` · 곁표 · `slot_is_free` · 스냅숏 · `resolve_spawn_slot`) · `layout/tree.rs`(내용 쓰기 진입점의 곁표 무효화) · `layout/types.rs`(`ViewSnapshot.foreign_slots`) · 바인딩. ★**`lib.rs` 를 건드리지 않는다 — 기록기는 시험에서만 돈다**★(복원이 없는 채로 기록기가 돌면 이 단계의 GUI 확인이 기존 `state.json`·대기분을 덮는다) | L (~900) |
+| **P3b** (L3) 부팅 판정 · 복원 · **기록기 배선** | §6-5 · §6-6 · §6-3 기록 | `state/{boot,restore}.rs`(신설 — 조율자의 준비·커밋 부분 포함) · `layout/manager.rs`(`from_persisted`) · `layout/mod.rs` · `commands/popout.rs`(위치·숨김 인자) · `lib.rs`(빌드 전 판정 · 실행기 · 기록기 시작 · `RunEvent::Exit` · Moved/Resized — 게터는 락 밖) · CLAUDE.md 「레이아웃은 디스크 영속이 없다」 줄 | L (~1,100) |
+| **P3c** (L3) 확인 띠 · 런타임 수락 · 슬롯 두 상태 | §6-7 · §6-8 · §6-2 프론트 몫 | `state/{pending,restore}.rs` · `layout/commands.rs`(`restore.*`) · `commands/state.rs`(신설) · `commands/mod.rs` · `lib.rs` · `src/components/layout/RestoreBanner.tsx`(신설) · `src/components/layout/LayoutLeaf.tsx` · `src/components/agent/selectOpenTarget.ts`(`foreign_slots`) · `src/App.tsx` · `src/i18n/ko.ts` · `prompts/engram-help.md` · `src-tauri/tests/layout_commands.rs` | M–L (~950) |
 | **P3d** (L3) 창별 테마 이주 + 은퇴 | §5-6 창별 · §3-5 창별 · §5-7 | `state/{tree_attrs,migrate}.rs` · `layout/commands.rs`(`window.setTheme`/`getTheme` · `ui.refresh` 삭제) · `layout/manager.rs`(테마 칸 쓰기) · `commands/settings.rs` · `ui_settings.rs`(삭제) · `lib.rs`(쓸기 호출 삭제) · `src/theme/uiSettings.ts`(+시험) · `src-tauri/tests/layout_commands.rs` · `prompts/engram-help.md` | M (~600, 절반이 삭제) |
 | **P4** (L4) 웹뷰 폴더 | §4 | `src-tauri/tauri.conf.json` · `lib.rs` · `commands/popout.rs` · 공통 마무리 함수(`commands/popout.rs` 또는 새 `webview_env.rs`) | S–M (~350) |
 
 - **병렬 가능:** P2b ∥ P2c(겹침 0). 나머지는 순차(`lib.rs` · `layout/commands.rs` · `manager.rs` · 도움말 공유).
 - 단계마다 `/review code` → `/qa`(GUI 가 걸리면 full) → 커밋. 착수 전 되돌릴 지점 = 직전 단계 커밋.
-- GUI 확인 핵심: P1 실제 `.engram-data` 사본으로 기동 → 명부 보존 · 표지 · 옛 바이너리 차단 · P2a `settings.set theme.default light` → 모든 창 · 재시작 유지 · P2b `chat.style.fontSize` 즉시 반영 · P3a 바꾸고 1초 뒤 파일 · 트레이 종료 → `clean_exit:true` · P3b 탭·분할·팝아웃·위치 복원 · P3c `taskkill /F` → 띠 · `engram restore.answer` · 슬롯 「정지됨」→ 활성화 · P3d 창별 테마 재시작 유지 · P4 `data\webview\` · 팝아웃 유령 창 없음 · 못 쓰는 폴더 → 대화상자.
+- GUI 확인 핵심: P1 실제 `.engram-data` 사본으로 기동 → 명부 보존 · 표지 · 옛 바이너리 차단 · P2a `settings.set theme.default light` → 모든 창 · 재시작 유지 · P2b `chat.style.fontSize` 즉시 반영 · P3a GUI 없음(시험만) · P3b 바꾸고 1초 뒤 파일 · 트레이 종료 → `clean_exit:true` · 탭·분할·팝아웃·위치 복원 · P3c `taskkill /F` → 띠 · `engram restore.answer` · 슬롯 「정지됨」→ 활성화 · P3d 창별 테마 재시작 유지 · P4 `data\webview\` · 팝아웃 유령 창 없음 · 못 쓰는 폴더 → 대화상자.
 
 ## 10. 구현 갈림길
 
@@ -376,6 +392,8 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 | R8 | 이전이 제3자 핸들로 5회 내내 막히면 데몬이 안 뜬다 — 사용자에게는 기존 「데몬 기동 시간 초과」로 보이고 사유는 데몬 로그에만 | 수용(빈 명부보다 낫다) |
 | R9 | 설정·창별 테마·복원 답이 **셸이 떠 있을 때만** 명령으로 닿는다 | 「LLM-우선 제어」 갭으로 기록 |
 | R10 | 갓 만든 에이전트가 명부에 오르기 전 슬롯이 잠깐 「정지됨」(§6-8) | 수용 · [미검] 체감 |
+| R11 | 끝나는 중인 앞 인스턴스와의 겹침 — 지문 재확인(§6-5 ①)은 실행기 시점까지만 덮는다. 그 뒤에도 앞 인스턴스의 `Final`(최대 2초)이 남았으면 우리 첫 쓰기와 엇갈릴 수 있다 — 어느 쪽이 이겨도 파일은 온전하고, 앞 세션 내용이 졌을 때 잃는 것은 그 세션의 마지막 몇 초다 | 수용 · [미검] 겹침 실재 여부(플러그인 `windows.rs:72-94` 를 읽은 추론) |
+| R12 | `ReplaceFileW` 없이 rename 교체 + `closed` 확인과 rename 사이의 좁은 틈 — 그 틈에 발행되는 것은 `Final` 이 쓰려던 바로 그 내용이거나 더 이른 `clean_exit:false` 라 어느 쪽도 해롭지 않다 | 수용 |
 
 ## 13. 「0. 결정」과 대조 — 다듬은 것
 
@@ -385,11 +403,13 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 - 「화면에서 바꾼 테마도 저장」 → 오늘 화면에 테마 UI 가 없다(ADR-0167 결정 5). 저장되는 것은 명령으로 바꾼 테마이고 화면 UI 는 F7.
 - 「챗 스타일을 localStorage 에서 여기로」 → 권위 이전은 그대로, 값 가져오기는 옛 웹뷰 폴더 안에서만 되고 릴리스에는 가져올 값이 없다(§3-6).
 - 「창마다 재시작해도 유지되는 id」 → 영속 id(UUID)를 따로 두고 label 은 부팅마다 새로 뽑는다(§6-3).
-- 「모르는 종류 허용(ADR-0060)」 → 영속 DTO 에서만 허용하고 원문을 보존한다. 화면에는 빈 슬롯(§6-2).
+- 「모르는 종류 허용(ADR-0060)」 → 영속 DTO 에서만 허용하고 원문을 보존한다. 그 슬롯은 점유로 세고 「모르는 내용」 자리표시를 그린다(§6-2).
 - 「Windows 종료/로그오프 알림을 정상 종료로」 → `RunEvent::Exit` 하나로 된다 — 실행 확인 전(R2).
 - 「`shell\run` — 생길 때만」 → 이번에 들어갈 것이 없다.
 
-## 14. 리뷰 반영 (1회 · 2026-10-02 · A = 설계자 · B = 파괴자)
+## 14. 리뷰 반영 (A = 설계자 · B = 파괴자)
+
+### 14-1. 1차 → 2판 (2026-10-02 · 둘 다 FIX)
 
 | 지적 | 반영 자리 |
 |---|---|
@@ -405,8 +425,26 @@ SettingDef { key: "chat.style.fontSize", kind: Kind::CssLength { min: 8.0, max: 
 | 6 (A) 설정 wire 정규형 · 오류 · 한 호출 한 파일 | §5-2 |
 | 7 (A) 빈 슬롯 설정 경로 추상화 삭제 | §7 · §5-3 |
 | 8 (B-M2) 창 테마·위치 = `WindowTabs` · 트리 창 별도 · 락 순서 | §6-3 · §5-6 |
-| 9 (B-L1) 기본에서 안 바뀐 세션은 대기분을 덮지 않음 · 띠가 보였을 때만 지움 | §6-1 `origin`/`changed` · §6-5 표 · §6-7 |
+| 9 (B-L1) 기본에서 안 바뀐 세션은 대기분을 덮지 않음 · 띠가 보였을 때만 지움 | §6-1(3판에서 `is_default_shape` 로 대체) · §6-5 표 · §6-7 |
 | 10 (B-L3) 최소화·최대화 중 위치 기록 안 함 | §6-3 · §8 |
 | 11 (B-L5) discovery 두 경로 · 산 쪽 우선 | §3-2 · §8 |
 | 12 (B-L2) ADR-0167 결정 1·5 · ADR-0136 결정 3 · ADR-0222 도장 · `agents.json*` | §11 · §3-4 |
 | 13 (B-L6) P1 파일 목록 보강 | §3-4 · §9-2 P1 |
+
+### 14-2. 2판 → 3판 (2026-10-02 · 파괴자 FIX · 설계자 BLOCK)
+
+| 지적 | 반영 자리 |
+|---|---|
+| 1 (BLOCK) 수락 시 대기분이 디스크 확정 전에 지워짐 | §6-7 ⑤(기록기가 커밋을 담은 스냅숏을 rename 한 뒤에만 삭제 · 실패면 유지 · `durable`) · §6-4 `Flush` · §8 |
+| 2 `changed` 가 창 위치·테마·포커스 사건에 오염 | §6-1(`origin`/`changed` 칸 삭제 → 내용에서 내는 `is_default_shape`) · §6-5 표 · §8(기본 부팅 → 첫 `Moved`/`Resized` → 강제 종료 → 대기분 보존) |
+| 3 부팅 옮기기 실패의 경계 없음 | §6-5 실행기 ②(원본 보존 · error · 기록기 「쓰지 않음」) · §8 |
+| 4 P3a 단독이 GUI 확인 중 저장분을 덮음 | §9-2(P3a 는 실행 배선 없음 · 기록기 배선을 P3b 로) |
+| 5 종료 경로 · 마감 하나 · 마감 뒤 발행 금지 · `tmp-*` 청소 | §6-4(쓰는 스레드 하나로 단순화 · `Final` + 2초 마감 · `closed` 를 rename 직전 확인) · §6-5 공통 행 · §12 R12 |
+| 6 `CssLength` 범위가 단위를 안 봄 | §5-1(단위별 범위 · 초기 표) · §5-2 |
+| 7 `restore.answer` 동시 처리 | §6-7(처리 중이면 `CONFLICT`) · §8 |
+| 8 곁표 슬롯이 자동 배치에 빈 칸으로 보임 | §6-2(`slot_is_free` · `foreign_slots`) · §8 · §9-2 P3a/P3c |
+| 9 끝나는 앞 인스턴스와의 부팅 계획 엇갈림 | §6-5 실행기 ①(지문 재확인 → 덮지 않고 대기분) · §6-1 `seq` · §12 R11 |
+| 10 discovery 두 경로 — 한쪽 깨짐이 다른 쪽 산 레코드를 가림 | §3-2(`pick` 우선순위) · §8 |
+| 11 경합하는 새 데몬은 발행 전이면 `FileBusy` | §3-1 ③(로그 문구 수정) · §8(두 결과 허용) |
+| 12 유효 테마 밀기의 엇갈림 | §5-6(`push_effective_themes` · 테마 관문 락) · §6-3 락 순서 · §8 |
+| 13 `Moved`/`Resized` 게터는 레이아웃 락 밖 | §6-3 |
