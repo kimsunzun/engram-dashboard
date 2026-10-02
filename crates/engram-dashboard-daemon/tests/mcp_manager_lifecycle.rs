@@ -101,7 +101,7 @@ async fn make_manager_with_control(
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
         registry.clone(),
         handle.url.clone(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: 이 파일의 테스트는 CLI 입구를 쓰지 않는다.
         Arc::new(NoopPrimingProvider),
     ));
@@ -286,7 +286,7 @@ async fn provision_guard_revoke_reclaims_real_token_and_config_file() {
     let channel = DaemonControlChannel::new(
         registry.clone(),
         handle.url.clone(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None,
         Arc::new(NoopPrimingProvider),
     );
@@ -379,12 +379,12 @@ fn boot_sweep_removes_stale_configs() {
     std::fs::write(&f2, "{\"stale\":2}").unwrap();
     assert!(f1.exists() && f2.exists(), "사전 stale 파일 존재");
 
-    mcp_config::sweep_stale_configs(&data_dir);
+    mcp_config::sweep_stale_configs(&mcp_config::McpDir::new(&sub));
     assert!(!f1.exists(), "스윕 후 stale 파일 1 삭제");
     assert!(!f2.exists(), "스윕 후 stale 파일 2 삭제");
 
     let fresh = std::env::temp_dir().join(format!("engram-mcp-sweep-none-{}", AgentId::new_v4()));
-    mcp_config::sweep_stale_configs(&fresh); // panic 없이 통과해야.
+    mcp_config::sweep_stale_configs(&mcp_config::McpDir::new(fresh.join("mcp-config"))); // panic 없이 통과해야.
 
     let _ = std::fs::remove_dir_all(&data_dir);
 }

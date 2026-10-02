@@ -1,7 +1,7 @@
 # ADR-0166: UI 설정은 디스크 파일이 정본이고 ui.refresh 가 다시 읽는다
 
-- 상태: 확정 (2026-08-21, 근거: 사용자 결정 + GUI 실측)
-- 관련: ADR-0149(슬롯 언마운트 금지) · ADR-0062(e-ink 의도) · ADR-0012(seam 격리) · CLAUDE.md 「LLM-우선 제어」 · `src-tauri/src/ui_settings.rs` · `src/theme/uiSettings.ts` · step-log S20
+- 상태: 확정 (2026-08-21, 근거: 사용자 결정 + GUI 실측) · 부분 폐기 by ADR-0265 (결정 1과 3과 9)
+- 관련: ADR-0149(슬롯 언마운트 금지) · ADR-0062(e-ink 의도) · ADR-0012(seam 격리) · CLAUDE.md 「LLM-우선 제어」 · `src-tauri/src/ui_settings.rs` · `src/theme/uiSettings.ts` · step-log S20 · Amended by ADR-0265 (결정 1과 3과 9)
 
 ## 맥락
 

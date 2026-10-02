@@ -1362,8 +1362,8 @@ Release-reachable, no env gate, no dev flag, no hidden route:
   (`src/components/layout/WindowLayout.tsx:166`, template `src/i18n/ko.ts:50`).
 
 Not reachable / gated:
-- `window.__engram` store handles (theme/agent/chatStyle) — behind `if (import.meta.env.DEV)`
-  (`src/main.tsx:29-35`, stated :22-24).
+- `window.__engram` store handles (theme/agent) — behind `if (import.meta.env.DEV)`
+  (`src/main.tsx:33-38`, stated :26-28).
 - `window.__engramCmd` — **not** gated; installed in `initEventBus` for all builds
   (`src/store/eventBus.ts:86-89`), intentional per :83-85.
 - `src/lab/terminal/TerminalView.tsx` + `fixtures.ts` — **dead code**. Nothing imports them
@@ -1373,7 +1373,8 @@ Not reachable / gated:
   `Failed: <message>` text was removed by user decision (:7-10, :28-41).
 - `SubscribeFailed.reason` and unattributed `AgentEvent::Error.message` — `console.warn` only, never
   rendered (`src/api/protocolClient.ts:635`, :644).
-- `chatStyleStore` writes — no release path at all (`src/store/chatStyleStore.ts:5-12`).
+- Chat style writes — not a frontend write path: they go through shell settings in every build (`settings.set` bus /
+  `settings_set` → `settings:changed` → the `chatStyleStore` applier · ADR-0265).
 
 ### Seq / dedup / replay boundary
 

@@ -21,7 +21,7 @@ fn losing_the_subscriber_install_creates_and_prunes_nothing() {
     // 남이 먼저 깐 subscriber.
     tracing_subscriber::fmt().try_init().expect("선점해야");
 
-    let got = init_logging_with_file(&data_dir, LogKind::Daemon);
+    let got = init_logging_with_file(&logs, LogKind::Daemon);
 
     let mut left: Vec<String> = std::fs::read_dir(&logs)
         .expect("read")

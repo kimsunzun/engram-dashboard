@@ -11,10 +11,9 @@
 :root[data-theme='light'] { --usage-ok: var(--status-running); --usage-warn: var(--status-blocked); --usage-danger: var(--status-danger); --usage-none: var(--text-muted); --usage-badge: var(--status-blocked); --usage-ok-fill: var(--usage-ok); --usage-warn-fill: var(--usage-warn); --usage-danger-fill: var(--usage-danger); --usage-track: color-mix(in srgb, var(--text-muted) 25%, transparent); --usage-bar-border: 0 solid transparent; --usage-danger-border: 0 solid transparent; --usage-vendor-claude: var(--vendor-claude); --usage-vendor-codex: var(--vendor-codex); --usage-stale: var(--status-blocked); }
 :root[data-theme='e-ink']  { --usage-ok: var(--status-running); --usage-warn: var(--status-blocked); --usage-danger: var(--status-danger); --usage-none: var(--text-muted); --usage-badge: var(--text); --usage-ok-fill: var(--text-muted); --usage-warn-fill: repeating-linear-gradient(45deg, var(--text) 0 1px, transparent 1px 4px); --usage-danger-fill: var(--text); --usage-track: transparent; --usage-bar-border: 1px solid var(--text); --usage-danger-border: 2px solid var(--text); --usage-vendor-claude: var(--vendor-claude); --usage-vendor-codex: var(--vendor-codex); --usage-stale: var(--status-blocked); }
 
-/* ADR-0051: 채팅 렌더 간격·폰트 토큰 — 값의 권위는 chatStyleStore 이고, 부팅 때 이 :root 변수들을
-   setProperty 로 덮어쓴다(localStorage 영속). 여기 값이 서는 구간은 그 부팅 적용이 돌기 전까지다
-   (= chatStyleStore.ts CHAT_STYLE_DEFAULTS 와 동기). ★파싱 실패는 이 경로로 오지 않는다★ — 그때도
-   loadChatStyle 이 CHAT_STYLE_DEFAULTS 를 돌려주고 부팅 적용이 그걸 inline 으로 쓴다.
+/* ADR-0051: 채팅 렌더 간격·폰트 토큰 — 값의 권위는 셸 설정 `chat.style.*` 이고(ADR-0265), 값이 오면
+   chatStyleStore 가 이 :root 변수들을 setProperty 로 덮어쓴다. 여기 값이 서는 구간은 그 값이 오기 전의 첫 페인트다
+   (= 셸 스키마 표 `src-tauri/src/settings/registry.rs` 의 기본값과 동기 — 대조 시험은 없다, ADR-0265 「U2 의 대가」).
    색 토큰과 달리 theme(dark/light/e-ink) 무관이라 :root 한 곳에만 둔다.
    ★기본값은 이전 하드코딩(pt-3=12px 등)보다 넉넉하게 잡는다★ — 사용자 지적(우리 렌더가 확장 대비
    좁고 산만)에 대한 1차 근사치. 정확한 px 는 후속 스크린샷 반복으로 조정(핵심은 값이 변수화된 것).
@@ -26,7 +25,7 @@
   --chat-wait-strip-h: 1.75rem;   /* 입력창 위 대기 표시 줄 높이(사용자 결정 2026-10-01 — 두세 줄로 키울 때 이 값만 바꾼다) */
   --chat-plain-row-pt: 0.7rem;    /* 비-rail 행 top-padding — 사용자 라이브 튜닝 확정값 */
   --chat-user-py: 7px;            /* 유저 버블 세로 padding — 사용자 라이브 튜닝 확정값 */
-  --chat-user-px: 0.9rem;         /* 유저 버블 가로 padding(§5 LLM 제어 표면 — userPy 와 대칭) */
+  --chat-user-px: 0.9rem;         /* 유저 버블 가로 padding(userPy 와 대칭) */
   --chat-user-my: 0.375rem;       /* 유저 버블 세로 margin(이전 my-1=0.25rem 보다 넉넉 — 턴 덩어리 분리) */
   --chat-rail-gutter: 1.5rem;     /* rail gutter 폭(이전 w-6=1.5rem 유지) */
   --chat-rail-line-offset: -1rem; /* 연결선 top(위 행으로 이어짐) = -1 × --chat-rail-row-pt(커플링) */
@@ -35,7 +34,7 @@
   --chat-line-height: 1.45;       /* 채팅 base line-height — 사용자 라이브 튜닝 확정값 */
 
   /* ADR-0053: 앱 전역 오버레이 스크롤바(ScrollArea seam/Radix + xterm) 구조 토큰(크기·모양) — --chat-* 과
-     마찬가지로 theme 무관이라 여기에만 둔다(현재 LLM 제어 미노출 — §5 후속으로 chatStyle control surface 에 얹을 여지).
+     마찬가지로 theme 무관이라 여기에만 둔다(현재 LLM 제어 미노출 — §5 후속으로 셸 설정(`settings.*`)에 얹을 여지).
      이 토큰은 공용 ScrollArea(components/ui/scroll-area.css)와 xterm(index.css .xterm-viewport)이 함께 참조한다.
      ★--scrollbar-thumb(색)은 테마마다 달라야 하므로 각 :root[data-theme=...] 블록에 둔다★.
      ★--scrollbar-show-delay 제거★: type="scroll" 전환으로 hover show-delay 기법 폐기 — scrollHideDelay(500ms)

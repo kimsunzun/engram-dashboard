@@ -11,10 +11,10 @@
 //! 어디에도 붙지 않는다(비-WMI 경로는 아예 null 로 지정한다). 데몬은 부모 환경도 물려받지 않아
 //! `RUST_LOG` 도 닿지 않는다. 그래서 파일이 없으면 **기동 실패의 원인이 남는 곳이 한 군데도 없다.**
 //!
-//! ★로그 폴더는 호출자가 넘긴다 — 이 모듈이 스스로 찾지 않는다★: 데이터 폴더 해석은
-//! `engram-dashboard-discovery` 의 몫인데 그 crate 가 이쪽을 의존하므로, 여기서 그걸 부르면 고리가 된다
-//! (잎 crate 불변식 — lib.rs 헤더 입주 조건 ②). 이 모듈이 소유하는 것은 그 폴더 아래의 배치 규약
-//! (`logs/<종류>-<UTC>-<pid>.log`)뿐이다.
+//! ★로그 폴더는 호출자가 넘긴다 — 이 모듈이 스스로 찾지 않는다★: 데이터 폴더 배치는
+//! `engram-dashboard-discovery` 의 `DataLayout` 몫인데 그 crate 가 이쪽을 의존하므로, 여기서 그걸 부르면
+//! 고리가 된다(잎 crate 불변식 — lib.rs 헤더 입주 조건 ②). 이 모듈이 소유하는 것은 받은 폴더 안의 파일
+//! 이름 규약(`<종류>-<UTC>-<pid>.log`)과 `%TEMP%` 폴백 자리뿐이다.
 //!
 //! ★그 폴더를 못 쓰면 조용히 포기하지 않고 `%TEMP%` 아래로 물러난다★: 안 그러면 이 기능이 **자기
 //! 목적에서 실패한다** — 데이터 폴더를 못 쓰는 것이야말로 데몬이 기동에 실패하는 흔한 이유인데,
@@ -83,7 +83,7 @@ impl LogKind {
     }
 }
 
-/// 데이터 폴더 아래 로그가 모이는 하위 폴더 이름.
+/// 폴백 루트 아래 로그가 모이는 하위 폴더 이름. 1차 폴더는 호출자가 통째로 넘긴다.
 const LOG_SUBDIR: &str = "logs";
 
 const LOG_EXT: &str = ".log";
@@ -255,17 +255,16 @@ struct OpenedLog {
     deferred: Vec<String>,
 }
 
-/// `<data_dir>/logs/<종류>-<UTC>-<pid>.log` 를 새로 열고 그 핸들을 돌려준다.
+/// `<dir>/<종류>-<UTC>-<pid>.log` 를 새로 열고 그 핸들을 돌려준다(`dir` 은 없으면 만든다).
 ///
 /// pid 를 붙이는 이유는 같은 초에 두 번 뜬 실행이 한 파일을 나눠 쓰는 것을 막기 위해서다.
 ///
 /// 알려진 잔여(수정 안 함): pid 가 같은 UTC 초 안에서 재사용되거나 시계가 뒤로 돌면 이름이 겹치고,
 /// append 라 **두 실행분이 한 파일에 이어진다**. 머리글이 그때마다 다시 찍혀 경계는 읽을 수 있고,
 /// 이걸 막으려면 열기에 배타 생성 + 재시도 루프가 필요해 대가가 이득을 넘는다.
-fn open_run_log(data_dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
-    let dir = data_dir.join(LOG_SUBDIR);
-    std::fs::create_dir_all(&dir)?;
-    let mut deferred = prune_old_logs(&dir, kind, KEEP_PER_KIND.saturating_sub(1));
+fn open_run_log(dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
+    std::fs::create_dir_all(dir)?;
+    let mut deferred = prune_old_logs(dir, kind, KEEP_PER_KIND.saturating_sub(1));
 
     let stamp = utc_stamp(SystemTime::now());
     let path = dir.join(format!(
@@ -290,14 +289,14 @@ fn open_run_log(data_dir: &Path, kind: LogKind) -> io::Result<OpenedLog> {
 /// ★2차가 있는 이유 = 1차가 실패하는 그 상황이 곧 진단이 가장 필요한 상황이라서★: 데이터 폴더를
 /// 못 쓰면 데몬은 그 직후 기동을 포기하는데, 폴백이 없으면 그 사유가 stdout(릴리즈엔 없다)으로만
 /// 간다. 근거·이 폴백이 ADR-0134 결정 4를 침범하지 않는 이유는 이 파일 머리말.
-fn open_run_log_with_fallback(data_dir: &Path, kind: LogKind) -> Result<OpenedLog, Vec<String>> {
-    let primary = match open_run_log(data_dir, kind) {
+fn open_run_log_with_fallback(logs_dir: &Path, kind: LogKind) -> Result<OpenedLog, Vec<String>> {
+    let primary = match open_run_log(logs_dir, kind) {
         Ok(opened) => return Ok(opened),
-        Err(e) => format!("{} 를 열지 못함: {e}", data_dir.join(LOG_SUBDIR).display()),
+        Err(e) => format!("{} 를 열지 못함: {e}", logs_dir.display()),
     };
 
     let fallback_root = std::env::temp_dir().join(FALLBACK_DIR_NAME);
-    match open_run_log(&fallback_root, kind) {
+    match open_run_log(&fallback_root.join(LOG_SUBDIR), kind) {
         Ok(mut opened) => {
             opened.deferred.insert(
                 0,
@@ -340,7 +339,8 @@ pub fn init_logging() {
     init_subscriber(false);
 }
 
-/// [`init_logging`] + `<data_dir>/logs/` 아래 이번 실행 전용 파일 sink.
+/// [`init_logging`] + `logs_dir` 안의 이번 실행 전용 파일 sink. `logs_dir` = 로그 폴더 자체(데이터 폴더가
+/// 아니다 — 배치는 discovery `DataLayout::logs_dir` 이 정한다).
 ///
 /// 반환값 = 이 호출이 실제로 붙인 로그 파일 경로. **1차 폴더를 못 쓰면 `%TEMP%` 아래 경로일 수
 /// 있다**(그 사실은 반환 직전 `warn` 으로도 남는다 — 이 파일 머리말). `None` = 파일 sink 없음이고,
@@ -352,7 +352,7 @@ pub fn init_logging() {
 /// 알려진 잔여(수정 안 함): 같은 종류를 두 스레드가 동시에 부르면 둘 다 맨 앞 검사를 통과할 수 있다.
 /// 진 쪽은 `try_init` 에서 걸러져 `None` 을 돌려주고 파일도 만들지 않으므로 손상은 없다 — 정확한
 /// 배제를 하려면 초기화 전용 잠금이 필요하고, 부팅 1회 호출에 그 값은 없다.
-pub fn init_logging_with_file(data_dir: &Path, kind: LogKind) -> Option<PathBuf> {
+pub fn init_logging_with_file(logs_dir: &Path, kind: LogKind) -> Option<PathBuf> {
     if RELOAD_HANDLE.get().is_some() {
         return None;
     }
@@ -365,7 +365,7 @@ pub fn init_logging_with_file(data_dir: &Path, kind: LogKind) -> Option<PathBuf>
         return None;
     }
 
-    match open_run_log_with_fallback(data_dir, kind) {
+    match open_run_log_with_fallback(logs_dir, kind) {
         Ok(opened) => {
             let path = opened.path;
             // set 실패 = 이 정적 칸을 채운 다른 호출이 있다는 뜻인데, 그건 try_init 에 이긴 하나뿐이라
@@ -476,13 +476,17 @@ mod tests {
 
     // ── 파일 생성 ──
     #[test]
-    fn open_run_log_creates_logs_subdir_and_kind_prefixed_file() {
-        let data_dir = temp_dir("open");
-        let opened = open_run_log(&data_dir, LogKind::Daemon).expect("열려야");
+    fn open_run_log_creates_the_given_dir_and_kind_prefixed_file() {
+        let logs_dir = temp_dir("open").join("logs");
+        let opened = open_run_log(&logs_dir, LogKind::Daemon).expect("열려야");
         let path = opened.path;
 
         assert!(opened.deferred.is_empty(), "정상 경로는 진단이 없어야");
-        assert_eq!(path.parent().unwrap(), data_dir.join(LOG_SUBDIR));
+        assert_eq!(
+            path.parent().unwrap(),
+            logs_dir,
+            "받은 폴더 바로 안 — 하위 폴더를 덧붙이지 않는다"
+        );
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         assert!(name.starts_with("daemon-"), "종류 접두사: {name}");
         assert!(name.ends_with(LOG_EXT), "확장자: {name}");
@@ -599,7 +603,7 @@ mod tests {
                 .expect("write");
         }
 
-        let _opened = open_run_log(&data_dir, LogKind::Daemon).expect("열려야");
+        let _opened = open_run_log(&dir, LogKind::Daemon).expect("열려야");
 
         let count = std::fs::read_dir(&dir)
             .expect("read")

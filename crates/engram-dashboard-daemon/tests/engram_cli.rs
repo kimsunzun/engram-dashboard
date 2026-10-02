@@ -631,7 +631,7 @@ fn engram_help_lists_groups_and_group_help_documents_its_verbs() {
     assert_eq!(bare, stdout, "인자 없음 = help 와 같은 출력");
 
     // 계열 낱말 넷이 각각 자기 화면을 낸다 — 최상위 목록이 가리킨 곳에 실제로 화면이 있어야 한다.
-    for group in ["mail", "agent", "window", "theme"] {
+    for group in ["mail", "agent", "window", "settings"] {
         assert!(
             stdout.contains(&format!("{CLI_EXE_NAME} help {group}")),
             "최상위 목록이 {group} 을 가리켜야: {stdout}"
@@ -647,7 +647,7 @@ fn engram_help_lists_groups_and_group_help_documents_its_verbs() {
     // 계열 밑으로 한 칸 더 들어가는 자리는 없다 — 인자 오류로 끊고 계열 목록을 되돌려 준다.
     let (deeper, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
     assert_eq!(code, 1, "계열 다음 칸은 인자 오류: {deeper}");
-    for group in ["mail", "agent", "window", "theme"] {
+    for group in ["mail", "agent", "window", "settings"] {
         assert!(
             deeper.contains(group),
             "반려가 계열 목록을 되돌려 줘야: {deeper}"
@@ -687,6 +687,7 @@ fn engram_help_answers_before_any_credential_check_and_prints_plain_text() {
         vec!["help", "agent"],
         vec!["agent", "--help"],
         vec!["help", "window"],
+        vec!["help", "settings"],
         vec!["help", "theme"],
     ] {
         let (stdout, code) = run_cli_without_credentials(&args);
@@ -727,7 +728,7 @@ fn conventional_help_spellings_render_the_same_screens() {
         assert_eq!(code, 0);
         assert_eq!(out, canonical_root, "계열 목록 화면이 같아야: {alias:?}");
     }
-    // ★`<계열> --help` 철자를 갖는 것은 파서가 계열로 받는 둘뿐이다★: `window`·`theme` 은 데몬 쪽
+    // ★`<계열> --help` 철자를 갖는 것은 파서가 계열로 받는 둘뿐이다★: `window`·`settings` 는 데몬 쪽
     //   `<계열> <동사>` 입구가 없어 `engram help <낱말>` 로만 닿는다.
     let mut screens = vec![canonical_root.clone()];
     for group in ["mail", "agent"] {
@@ -740,11 +741,16 @@ fn conventional_help_spellings_render_the_same_screens() {
         }
         screens.push(canonical);
     }
-    for group in ["window", "theme"] {
+    for group in ["window", "settings"] {
         let (canonical, code) = run_cli_without_credentials(&["help", group]);
         assert_eq!(code, 0, "{group}: {canonical}");
         screens.push(canonical);
     }
+    // 옛 낱말 `theme` 은 개명 전 프라이밍이 가르친 철자라 settings 화면을 그대로 낸다.
+    let (settings, _) = run_cli_without_credentials(&["help", "settings"]);
+    let (old_word, code) = run_cli_without_credentials(&["help", "theme"]);
+    assert_eq!(code, 0, "theme: {old_word}");
+    assert_eq!(old_word, settings, "`help theme` 은 settings 화면이어야");
     for (i, a) in screens.iter().enumerate() {
         for b in &screens[i + 1..] {
             assert_ne!(a, b, "다섯 화면은 서로 달라야");

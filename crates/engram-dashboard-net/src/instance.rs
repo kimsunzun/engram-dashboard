@@ -204,34 +204,34 @@ fn live_owner(path: &Path) -> Option<u32> {
     }
 }
 
-/// 잠금 획득 시도.
+/// 잠금 획득 시도. `lock_file` = 붙잡을 파일(없으면 만든다).
 ///
-/// `data_dir` 은 **이미 존재해야 한다** — 폴더를 만드는 것은 호출자(데몬 기동 순서) 몫이다.
+/// `lock_file` 의 폴더는 **이미 존재해야 한다** — 폴더를 만드는 것은 호출자(데몬 기동 순서) 몫이다.
+/// 경로 계산도 호출자 몫이다(이 crate 는 데이터 폴더 배치를 모른다 — discovery `DataLayout` 이 정본).
 ///
 /// ★"이미 실행 중"의 근거는 열기 실패 + 살아 있는 레코드 둘이 겹칠 때뿐이다★: 열기 실패 하나만으로
 /// 중복을 선언하지 말 것. 열기는 제3자 핸들·권한 등 데몬과 무관한 이유로도 실패하고, 그걸 중복으로
 /// 읽으면 데몬이 원인을 남기지 않고 종료한다(원인 없는 연결 시간 초과 = ADR-0134 결정 4가 없애려는 그 증상).
 // ADR-0135
 #[cfg(windows)]
-pub fn acquire(data_dir: &Path) -> Result<Acquired, AcquireError> {
-    acquire_with(data_dir, OPEN_ATTEMPTS, OPEN_RETRY_DELAY)
+pub fn acquire(lock_file: &Path) -> Result<Acquired, AcquireError> {
+    acquire_with(lock_file, OPEN_ATTEMPTS, OPEN_RETRY_DELAY)
 }
 
 /// ★guard 를 흉내내지 않는다(모듈 헤더)★: 배제할 수단이 없는 플랫폼에서 `Held` 를 돌려주면 데몬 둘이
 /// 다 뜨고 뒤엣것이 앞엣것의 endpoint 를 덮어쓴다. 호출자가 기동을 멈추게 실패로 알린다.
 #[cfg(not(windows))]
-pub fn acquire(_data_dir: &Path) -> Result<Acquired, AcquireError> {
+pub fn acquire(_lock_file: &Path) -> Result<Acquired, AcquireError> {
     Err(AcquireError::Unsupported)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn acquire_with(data_dir: &Path, attempts: u32, delay: Duration) -> Result<Acquired, AcquireError> {
-    let path = data_dir.join(DAEMON_FILE);
+fn acquire_with(path: &Path, attempts: u32, delay: Duration) -> Result<Acquired, AcquireError> {
     let mut tried = 0;
     let mut cleared_readonly = false;
     loop {
         tried += 1;
-        match open_owned(&path) {
+        match open_owned(path) {
             Ok(file) => return Ok(Acquired::Held(InstanceGuard { file })),
             Err(e) if e.raw_os_error() == Some(ACCESS_DENIED) => {
                 // ★읽기 전용 **속성**은 걷어내고 한 번 더 해 본다(load-bearing — 없으면 영구 교착)★:
@@ -242,7 +242,7 @@ fn acquire_with(data_dir: &Path, attempts: u32, delay: Duration) -> Result<Acqui
                 //   재부팅으로도 안 풀리는 5초 연결 시간 초과다. 백업 복원·읽기 전용 매체 복사·백신
                 //   격리 해제가 모두 이 속성을 남긴다.
                 //   ★한 번만★: 지운 뒤에도 5면 속성이 아니라 ACL 이라 기다려도·다시 해도 같다.
-                if !cleared_readonly && clear_readonly_attr(&path) {
+                if !cleared_readonly && clear_readonly_attr(path) {
                     cleared_readonly = true;
                     continue;
                 }
@@ -261,14 +261,14 @@ fn acquire_with(data_dir: &Path, attempts: u32, delay: Duration) -> Result<Acqui
                 // ★마지막 시도 뒤에는 자지 않는다★: 그 대기는 아무것도 벌지 못하고 사용자가
                 //   기다리는 오류만 늦춘다. 그래서 대기는 시도 사이에만 들어간다(총 attempts-1 회).
                 if tried >= attempts {
-                    if let Some(pid) = live_owner(&path) {
+                    if let Some(pid) = live_owner(path) {
                         return Ok(Acquired::AlreadyRunning { pid });
                     }
                     // ★진단 읽기 뒤 한 번 더 연다★: 방해가 그 사이에 걷혔을 수 있는데, 그때
                     //   FileBusy 를 내면 **지금은 잡을 수 있는** 폴더를 두고 데몬이 물러난다.
                     //   ★이 성공 갈래는 테스트가 없다(알려진 미검증)★ — 방해 핸들이 정확히 이 두 줄
                     //   사이에 닫히게 만들 결정적 수단이 없다. 실패 갈래는 busy 테스트가 덮는다.
-                    return match open_owned(&path) {
+                    return match open_owned(path) {
                         Ok(file) => Ok(Acquired::Held(InstanceGuard { file })),
                         Err(_) => Err(AcquireError::FileBusy {
                             attempts: tried,
@@ -340,6 +340,10 @@ mod tests {
         matches!(r, Ok(Acquired::Held(_)))
     }
 
+    fn lock_in(dir: &Path) -> PathBuf {
+        dir.join(DAEMON_FILE)
+    }
+
     /// 테스트끼리(그리고 cargo 병렬 실행과) 폴더가 겹치지 않게 유니크 경로를 만든다 — 잠금 스코프가
     /// 폴더이므로 폴더가 겹치면 그 자체로 서로를 거부한다.
     fn fresh_dir(tag: &str) -> PathBuf {
@@ -373,14 +377,15 @@ mod tests {
     #[test]
     fn second_guard_on_same_folder_is_refused() {
         let dir = fresh_dir("same");
-        let mut first = match acquire(&dir).expect("첫 획득은 시스템 오류가 아님") {
+        let mut first = match acquire(&lock_in(&dir)).expect("첫 획득은 시스템 오류가 아님")
+        {
             Acquired::Held(g) => g,
             Acquired::AlreadyRunning { .. } => panic!("첫 데몬은 잠금을 얻어야"),
         };
         // 중복 판정은 "열기 실패 + 살아 있는 레코드" 둘이 겹칠 때다 — 첫 데몬이 발행한 뒤를 재현한다.
         first.publish(&record_of_this_process()).expect("발행");
 
-        let fast = || acquire_with(&dir, 2, Duration::from_millis(1));
+        let fast = || acquire_with(&lock_in(&dir), 2, Duration::from_millis(1));
         assert!(
             matches!(fast(), Ok(Acquired::AlreadyRunning { .. })),
             "같은 폴더의 두 번째 데몬은 거부돼야"
@@ -400,8 +405,8 @@ mod tests {
         // 포터블 배포판을 두 곳에 풀어 각자 돌리는 정상 사용.
         let a = fresh_dir("diff-a");
         let b = fresh_dir("diff-b");
-        let ga = acquire(&a).expect("A 획득");
-        let gb = acquire(&b).expect("B 획득");
+        let ga = acquire(&lock_in(&a)).expect("A 획득");
+        let gb = acquire(&lock_in(&b)).expect("B 획득");
         assert!(
             matches!(ga, Acquired::Held(_)) && matches!(gb, Acquired::Held(_)),
             "다른 폴더면 둘 다 떠야"
@@ -415,10 +420,10 @@ mod tests {
     #[test]
     fn dropping_guard_releases_the_folder() {
         let dir = fresh_dir("release");
-        let first = acquire(&dir).expect("첫 획득");
+        let first = acquire(&lock_in(&dir)).expect("첫 획득");
         drop(first);
         assert!(
-            held(acquire(&dir)),
+            held(acquire(&lock_in(&dir))),
             "가드를 놓으면 같은 폴더를 다시 잡을 수 있어야"
         );
         assert!(dir.join(DAEMON_FILE).exists(), "접속 파일은 폴더 안에 산다");
@@ -430,7 +435,7 @@ mod tests {
     #[test]
     fn a_client_can_read_the_record_while_the_daemon_holds_it() {
         let dir = fresh_dir("read-while-held");
-        let mut guard = match acquire(&dir).expect("획득") {
+        let mut guard = match acquire(&lock_in(&dir)).expect("획득") {
             Acquired::Held(g) => g,
             Acquired::AlreadyRunning { .. } => panic!("빈 폴더는 획득돼야"),
         };
@@ -459,7 +464,7 @@ mod tests {
     #[test]
     fn a_refused_daemon_does_not_touch_the_record() {
         let dir = fresh_dir("no-write-on-refusal");
-        let mut first = match acquire(&dir).expect("첫 획득") {
+        let mut first = match acquire(&lock_in(&dir)).expect("첫 획득") {
             Acquired::Held(g) => g,
             Acquired::AlreadyRunning { .. } => panic!("빈 폴더는 획득돼야"),
         };
@@ -468,7 +473,7 @@ mod tests {
 
         assert!(
             matches!(
-                acquire_with(&dir, 2, Duration::from_millis(1)),
+                acquire_with(&lock_in(&dir), 2, Duration::from_millis(1)),
                 Ok(Acquired::AlreadyRunning { .. })
             ),
             "두 번째는 거부돼야"
@@ -499,7 +504,7 @@ mod tests {
             .expect("제3자 읽기 핸들(std 기본 = 관대한 공유)");
 
         assert!(
-            held(acquire(&dir)),
+            held(acquire(&lock_in(&dir))),
             "관대한 제3자 핸들이 열려 있어도 데몬은 잠금을 얻어야"
         );
 
@@ -527,7 +532,7 @@ mod tests {
             .expect("제한적 공유 제3자 핸들");
 
         // 재시도 예산을 작게 줘 테스트가 오래 걸리지 않게 한다(운영 예산은 상수).
-        let got = acquire_with(&dir, 2, Duration::from_millis(1));
+        let got = acquire_with(&lock_in(&dir), 2, Duration::from_millis(1));
         assert!(
             matches!(got, Err(super::AcquireError::FileBusy { .. })),
             "중복이 아니라 '붙들려 있음'으로 보고돼야"
@@ -535,7 +540,7 @@ mod tests {
 
         // 방해가 사라지면 그대로 획득된다 — 재시도가 의미 있는 이유.
         drop(onlooker);
-        assert!(held(acquire(&dir)), "방해가 걷히면 획득돼야");
+        assert!(held(acquire(&lock_in(&dir))), "방해가 걷히면 획득돼야");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -557,7 +562,7 @@ mod tests {
             "읽기 전용 속성이 쓰기 열기를 막아야 이 테스트가 의미 있다"
         );
 
-        let got = acquire(&dir);
+        let got = acquire(&lock_in(&dir));
         assert!(held(got), "속성은 걷어내고 획득해야(영구 교착 금지)");
         assert!(
             !std::fs::metadata(&path)
@@ -585,7 +590,7 @@ mod tests {
             .open(&path)
             .expect("제한적 공유 제3자 핸들");
 
-        let got = acquire_with(&dir, 2, Duration::from_millis(1));
+        let got = acquire_with(&lock_in(&dir), 2, Duration::from_millis(1));
         assert!(
             matches!(got, Ok(Acquired::AlreadyRunning { .. })),
             "알려진 오진 — 바뀌었다면 설계가 바뀐 것이다: {:?}",
@@ -601,7 +606,7 @@ mod tests {
     #[test]
     fn the_record_file_cannot_be_unlinked_while_held() {
         let dir = fresh_dir("unlink");
-        let guard = acquire(&dir).expect("획득");
+        let guard = acquire(&lock_in(&dir)).expect("획득");
         assert!(matches!(guard, Acquired::Held(_)));
         let path = dir.join(DAEMON_FILE);
 

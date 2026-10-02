@@ -12,7 +12,8 @@ REM
 REM ★Closing this window does NOT stop the app★ - it is no longer our child. Close the app window.
 REM
 REM No vite needed: the release build embeds the frontend (tauri build bakes in frontendDist).
-REM Release data dir (daemon.json) = data\ NEXT TO the app exe, i.e. target\release\data (ADR-0134).
+REM Release data dir = data\ NEXT TO the app exe, i.e. target\release\data (ADR-0134); the portfile is
+REM   data\daemon\run\daemon.json.
 setlocal
 cd /d "%~dp0.."
 
@@ -38,5 +39,5 @@ if errorlevel 1 ( echo [release] LAUNCH FAILED - see the log tail above. & pause
 
 echo.
 echo [release] Launched. The PID above is the app - use it if you need to force-kill.
-echo [release] This build's daemon.json -^> target\release\data\
+echo [release] This build's daemon.json -^> target\release\data\daemon\run\
 pause

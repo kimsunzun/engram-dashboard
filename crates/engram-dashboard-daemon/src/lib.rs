@@ -34,6 +34,7 @@ use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::CLI_EXE_NAME;
 use engram_dashboard_base::logging;
+use engram_dashboard_discovery::DataLayout;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
@@ -58,8 +59,8 @@ pub use engram_dashboard_net::ws::KeepaliveConfig;
 //   `tests/ws_e2e.rs` 는 네트워크 crate 를 직접 부른다(그 crate 는 여기 normal 의존이라 테스트 타깃에서
 //   그대로 보인다) — 경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
 
-// ★파일 이름을 여기 다시 적지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
-//   성립한다(ADR-0135). 이름이 두 곳에 있으면 한쪽만 바뀌어도 그 등식이 조용히 깨진다.
+// ★경로를 여기서 조립하지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
+//   성립한다(ADR-0135). 경로는 `DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
 use engram_dashboard_net::portfile::DAEMON_FILE;
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
@@ -211,28 +212,25 @@ impl DaemonWiring {
     }
 }
 
-/// 사용량 조회가 쓸 임시 폴더들의 부모 — 데이터 폴더 아래라 데몬 하나의 것이고, 그래서 기동 때 쓸어도 안전하다.
-/// ★그 안전은 쓰는 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수 없다)이고
-///   스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이어야 한다. 이 쓸기를 잠금 앞이나
-///   [`build_usage_service`] 뒤로 옮기면 살아 있는 조회의 폴더를 지울 수 있다.
-const USAGE_SCRATCH_DIR: &str = "usage-probe";
-
 fn build_daemon_wiring(
-    data_dir: &std::path::Path,
+    layout: &DataLayout,
     control: Arc<dyn engram_dashboard_agent::types::ControlChannel>,
     flush_tx: tokio::sync::mpsc::UnboundedSender<messaging_host::FlushMsg>,
     idle_coalescer: Arc<messaging_host::IdleCoalescer>,
 ) -> DaemonWiring {
-    let profile_store = Arc::new(FileProfileStore::new(data_dir.to_path_buf()));
-    let preset_store = Arc::new(FilePresetStore::new(data_dir.to_path_buf()));
-    let scratch_root = data_dir.join(USAGE_SCRATCH_DIR);
-    // 조회가 하나도 돌기 전이다 — 지난 기동이 못 지운 임시 폴더만 남아 있다.
+    let state_dir = layout.daemon_state_dir();
+    let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
+    let preset_store = Arc::new(FilePresetStore::new(state_dir.clone()));
+    let scratch_root = layout.usage_probe_dir();
+    // ★이 쓸기의 안전은 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수
+    //   없다)이고 스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이다. 잠금 앞이나
+    //   [`build_usage_service`] 뒤로 옮기면 살아 있는 조회의 폴더를 지울 수 있다.
     engram_dashboard_agent::usage::sweep_stale_scratch(&scratch_root);
     build_daemon_wiring_with_store(
         profile_store,
         preset_store,
         UsageInputs {
-            rejects: Arc::new(FileRejectStore::new(data_dir)),
+            rejects: Arc::new(FileRejectStore::new(&state_dir)),
             probes: engram_dashboard_agent::backend::usage_probes().to_vec(),
             spawner: Arc::new(OsProbeSpawner),
             threads: Arc::new(OsProbeThreads),
@@ -458,11 +456,12 @@ pub async fn run() -> Result<(), i32> {
     // 0) ★data_dir 해석이 로깅보다 먼저다★ — 파일 로그가 그 폴더 안에 살기 때문이다. 이 함수는
     //    순수(env 조회 + 경로 조립)라 로깅 없이 돌려도 잃는 줄이 없다. 이 순서를 뒤집으면
     //    아래 1)~2) 의 기동 실패가 다시 stdout 으로만 가고, 릴리즈에서 stdout 은 아무 데도 없다.
-    let data_dir = resolve_data_dir();
+    let layout = DataLayout::new(resolve_data_dir());
+    let data_dir = layout.root().to_path_buf();
 
     // 0.1) ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
     //    적용은 호출자 책임이다(민감 출력 로깅 시 명시 적용). 근거: docs/reference/logging-conventions.md.
-    let log_file = logging::init_logging_with_file(&data_dir, logging::LogKind::Daemon);
+    let log_file = logging::init_logging_with_file(&layout.logs_dir(), logging::LogKind::Daemon);
 
     // 0.5) panic hook 설치(B-1). 데몬 내부 스레드(pump 등)가 panic 하면 silent 정지로
     //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단") 가시화한다. ★데몬 전체는 죽이지 않는다★ —
@@ -481,6 +480,13 @@ pub async fn run() -> Result<(), i32> {
         tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");
         return Err(1);
     }
+    if let Err(e) = layout.ensure_daemon_dirs() {
+        tracing::error!(
+            data_dir = %data_dir.display(),
+            "데몬 폴더(daemon/state · daemon/run)를 만들지 못해 시작할 수 없음: {e}"
+        );
+        return Err(1);
+    }
     // ADR-0134 §영향: 잠금에 이름이 없으므로, 어느 폴더를 잡았는지 사람이 확인할 유일한 수단이다.
     tracing::info!(
         data_dir = %data_dir.display(),
@@ -488,14 +494,16 @@ pub async fn run() -> Result<(), i32> {
         "데이터 폴더 결정"
     );
 
-    // 2) 단일 인스턴스 가드 = 그 데이터 폴더 안의 daemon.json 을 붙잡는 것(ADR-0135 결정 1 — 잠그는
-    //    파일과 클라이언트가 읽는 파일이 같다. 스코프는 여전히 폴더다).
+    // 2) 단일 인스턴스 가드 = 그 데이터 폴더의 접속 파일(`daemon\run\daemon.json`)을 붙잡는 것(ADR-0135
+    //    결정 1 — 잠그는 파일과 클라이언트가 읽는 파일이 같다. 스코프는 여전히 폴더다).
     //    ★guard 는 프로세스 수명 동안 살아 있어야 한다★(Drop 시 해제 = 단일성 깨짐). 여기서 얻은
     //    핸들이 아래 8)에서 접속 정보를 쓰는 그 핸들이다 — 순서가 곧 불변식이다(획득 → 쓰기).
     //    ★세 갈래를 뭉치지 말 것★: 중복(정상 양보)·제3자 방해·시스템 오류는 사용자가 할 일이 서로
     //    다르다. 하나의 에러로 접으면 릴리스에서 "왜 안 뜨는지"가 사라진다(ADR-0134 결정 4).
+    // ADR-0264
     use engram_dashboard_net::instance::{AcquireError, Acquired};
-    let mut guard = match engram_dashboard_net::instance::acquire(&data_dir) {
+    let daemon_path = layout.daemon_file();
+    let mut guard = match engram_dashboard_net::instance::acquire(&daemon_path) {
         Ok(Acquired::Held(g)) => g,
         Ok(Acquired::AlreadyRunning { pid }) => {
             // 어느 폴더가 잡혀 있었는지가 이 줄의 존재 이유다 — 없으면 "왜 안 뜨지"를 추적할 수 없다.
@@ -506,10 +514,12 @@ pub async fn run() -> Result<(), i32> {
             );
             return Ok(());
         }
+        // ★「중복 데몬 아님」으로 단정하지 마라★: 먼저 뜬 데몬이 잠금을 얻고 아직 발행하기 전(아래 8) 까지)이면
+        //   진단 읽기가 빈 파일을 봐 이 갈래로 온다.
         Err(e @ AcquireError::FileBusy { .. }) => {
             tracing::error!(
-                data_dir = %data_dir.display(),
-                "다른 프로그램이 {DAEMON_FILE} 을 붙들고 있어 시작할 수 없음(중복 데몬 아님 — 백신·인덱서·백업 확인): {e}"
+                lock_file = %daemon_path.display(),
+                "다른 프로그램, 또는 아직 발행 전인 다른 데몬이 {DAEMON_FILE} 을 쥐고 있어 시작할 수 없음(백신·인덱서·백업 확인): {e}"
             );
             return Err(1);
         }
@@ -517,21 +527,19 @@ pub async fn run() -> Result<(), i32> {
         //   "권한을 고치거나 다른 곳에 풀어라". 뭉치면 사용자가 정반대 조치를 한다.
         Err(e @ AcquireError::AccessDenied { .. }) => {
             tracing::error!(
-                data_dir = %data_dir.display(),
+                lock_file = %daemon_path.display(),
                 "{DAEMON_FILE} 에 쓸 수 없어 시작할 수 없음: {e}"
             );
             return Err(1);
         }
         Err(e) => {
             tracing::error!(
-                data_dir = %data_dir.display(),
+                lock_file = %daemon_path.display(),
                 "단일 인스턴스 가드 획득 실패: {e}"
             );
             return Err(1);
         }
     };
-
-    let daemon_path = data_dir.join(DAEMON_FILE);
 
     // 2.5) 기존 내용을 덮어쓰기 전 진단 로그.
     //
@@ -582,7 +590,8 @@ pub async fn run() -> Result<(), i32> {
 
     // 5b.5) 부팅 스윕(FIX 5). ★반드시 MCP 서버·provision 시작 전★: `control_registry` 를 방금 빈
     //   상태로 만들었으므로(위) 이 시점의 모든 기존 mcp-config 는 dead credential 이다.
-    control::mcp_config::sweep_stale_configs(&data_dir);
+    let mcp_dir = control::mcp_config::McpDir::new(layout.mcp_config_dir());
+    control::mcp_config::sweep_stale_configs(&mcp_dir);
 
     // 5c) 제어 채널 MCP 서버 기동.
     //     ★fail-closed(FIX 1)★: bind/start 실패는 **치명**이다 — 데몬을 NoopControlChannel 로 조용히
@@ -634,7 +643,7 @@ pub async fn run() -> Result<(), i32> {
             let channel = Arc::new(control::DaemonControlChannel::new(
                 control_registry.clone(),
                 url,
-                data_dir.clone(),
+                mcp_dir,
                 send_exe,
                 priming,
             ));
@@ -656,7 +665,7 @@ pub async fn run() -> Result<(), i32> {
     };
 
     // 6) AgentManager 배선.
-    let wiring = build_daemon_wiring(&data_dir, control, flush_tx.clone(), idle_coalescer.clone());
+    let wiring = build_daemon_wiring(&layout, control, flush_tx.clone(), idle_coalescer.clone());
     // ★레지스트리는 `wiring` 이 계속 들고 있다가 accept loop 로 함께 넘어간다★ — 여기서 풀어 두면
     //   짝을 어긋나게 넘길 여지가 생긴다(ADR-0129 `DaemonWiring`).
     let manager = wiring.manager.clone();
@@ -1124,8 +1133,8 @@ mod tests {
             std::env::set_var("ENGRAM_DATA_DIR", v);
         }
         assert!(
-            dir.ends_with(".engram-data"),
-            "디버그(override 없음)에서 `.engram-data` 로 끝나야(app 과 동일 폴더): {dir:?}"
+            dir.ends_with(".engram-dev"),
+            "디버그(override 없음)에서 `.engram-dev` 로 끝나야(app 과 동일 폴더): {dir:?}"
         );
         assert_eq!(
             dir, delegated,

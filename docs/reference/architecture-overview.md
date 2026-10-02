@@ -94,8 +94,8 @@ flowchart TD
 | 데몬 발견 정보(포트·토큰) | `daemon.json` — 발견 파일 **겸 단일 인스턴스 잠금 파일**(ADR-0135) | 휘발(매 기동 재발행) · 위치는 릴리스에서 실행 폴더 하위 `engram-data`(ADR-0134/0136) |
 | replay 진도·dedup·gen | **프론트 뷰(viewId)** | Rust 출력 행은 무상태 |
 | 레이아웃(창·탭·슬롯) | 셸 `src-tauri` `layout::ViewManager` | 데몬은 View를 모른다 · **디스크 영속 없음**(인메모리 — 클라 재시작 시 초기화), ADR-0035/0057 |
-| 테마·UI 설정 | 디스크 `ui-settings.json` (읽기 주인 = 셸) | **창별 값** · `ui.refresh`가 다시 읽는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167 |
-| 챗 렌더 스타일(간격·폰트) | 프론트 Zustand + localStorage | 프론트 전용 권위 — 이 문서에서 localStorage에 실리는 유일한 항목, ADR-0051 |
+| 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = P3d 전까지 디스크 `ui-settings.json` (읽기 주인 = 셸) | 셸이 창마다 유효 값(창별 ?? 전역)을 민다 — `theme.default` 쓰기(`settings.set`·`settings.reset`)와 `ui.refresh`(창별 파일을 다시 읽는다)가 밀기를 부른다 · 파일의 `theme` 키는 읽지 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167 |
+| 챗 렌더 스타일(간격·폰트) | 셸 `settings.json` `chat.style.*` | 권위 = 셸 설정 · `chatStyleStore`는 `settings:changed`를 CSS 변수에 칠하는 적용자(저장 안 함), ADR-0265 |
 
 결정: 미러 제거 = ADR-0046 · 레이아웃 권위 = ADR-0035/0057 · UI 설정 파일 = ADR-0166 · 창별 테마 = ADR-0167 · data_dir 단일결정 = discovery `default_data_dir`(위치 결정은 ADR-0134/0136이 정본 — 0024의 데이터 위치 조항은 폐기) · 시체 보존 = ADR-0083 · 제어 토큰 = ADR-0086 · 메시징 인메모리 = ADR-0103.
 
@@ -575,7 +575,7 @@ flowchart TD
 - **렌더러 선택:** 1차 축은 `renderModeOverride`고(있으면 caps를 아예 안 본다), 없을 때만 `agent.capabilities.output.structured`로 `RichSlot`/`TerminalSlot`을 가른다. `renderModeOverride`로 terminal·rich·dom 셋 중 무엇이든 강제 가능(프론트 전용 — wire는 이 개념을 모른다). (ADR-0044, 통로 무정제 조항은 0045가 폐기)
 - **구독 키 = viewId(슬롯 id)**, agentId 아님 — 같은 에이전트를 두 슬롯에 띄우면 독립 진도 2개. (ADR-0046)
 - **구독 수명:** `eventBus`는 `agentClient`의 **추상 구독**만 소유한다. 백엔드가 권위인 표면은 Tauri `listen`을 직접 걸되 **거는 쪽이 자기 disposer를 진다**. ★등록 주체를 세지 말 것★ — 늘어난다. 찾는 법 = `rg "from '@tauri-apps/api/event'" src/`.
-- **권위는 백엔드** — 스토어는 거울, 낙관적 갱신 금지. 프론트 전용 예외 = `renderModeOverride` · `chatStyleStore`(ADR-0051) · `monitoringPickerStore`(ADR-0067). ★`themeStore`는 예외가 아니라 **반쯤 셸 소유**★ — 부팅값·`ui.refresh`는 디스크(`ui-settings.json`)가 정하고, 프론트에서 바꾼 값은 저장되지 않아 다음 refresh가 덮는다. (ADR-0035, 탭 소유 모델은 ADR-0057)
+- **권위는 백엔드** — 스토어는 거울, 낙관적 갱신 금지. 프론트 전용 예외 = `renderModeOverride` · `monitoringPickerStore`(ADR-0067). ★`themeStore`는 예외가 아니라 **반쯤 셸 소유**★ — 전역 값은 셸 설정 `theme.default`(ADR-0265)가, 창별 덮어쓰기만 P3d 전까지 디스크(`ui-settings.json`)와 `ui.refresh`가 정하고, 프론트에서 바꾼 값은 저장되지 않아 셸의 다음 밀기가 덮는다. (ADR-0035, 탭 소유 모델은 ADR-0057)
 
 결정: 제어표면 단일(agentClient) = ADR-0011 · carrier 고정 = ADR-0036 · 렌더 분기 = ADR-0044 · 뷰 직결 replay = ADR-0046(단 재연결 계기 조항은 ADR-0164가 폐기 — 계기는 권위 명부) · 레이아웃 권위 = ADR-0035(탭 소유 모델은 ADR-0057로 갱신).
 
