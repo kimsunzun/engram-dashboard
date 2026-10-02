@@ -5,11 +5,15 @@ import "./index.css";
 import { useThemeStore } from "./store/themeStore";
 import { useAgentStore } from "./store/agentStore";
 import { themeManager } from "./theme/ThemeManager";
-import { loadAndApplyChatStyle, useChatStyleStore } from "./store/chatStyleStore"; // ADR-0051
+import { settingsClient } from "./api/settingsClient";
+import { installChatStyleApplier } from "./store/chatStyleStore";
 
-// ADR-0051 (FIX-1): 저장된 채팅 스타일을 첫 렌더 전에 로드·적용한다 — 데몬 bootstrap 경로와 무관하게(프론트
-// 전용 상태). 데몬이 멈춰도 스타일이 적용되고, 정상 부팅에서도 기본값 깜빡임을 최소화한다.
-loadAndApplyChatStyle();
+// ADR-0265: 셸 설정을 받아 챗 스타일을 칠한다 — 데몬 bootstrap 과 무관하게(설정의 주인은 셸) 첫 렌더 전에 건다.
+// 값은 비동기로 오고 그 전의 첫 페인트는 `theme.css` 의 `--chat-*` fallback 이다(TRD S21-storage §10 F6 (a)).
+// 페이지마다 한 번 돌아 disposer 를 쥐지 않는다 — App 의 effect 로 옮기면 두 disposer 를 effect 가 돌려줘야 한다
+// (StrictMode 이중 실행).
+installChatStyleApplier();
+settingsClient.install();
 
 // ★첫 페인트 전에 data-theme 를 반드시 박는다★ — 색 토큰은 `styles/theme.css` 의 `:root[data-theme='…']`
 // 안에만 있고 폴백이 없다. 속성이 없는 동안에는 `--text`·`--border` 가 통째로 미정의라 index.css 가 배경만
@@ -30,7 +34,6 @@ if (import.meta.env.DEV) {
   (window as unknown as { __engram?: unknown }).__engram = {
     theme: useThemeStore,
     agent: useAgentStore,
-    chatStyle: useChatStyleStore, // ADR-0051
   };
 }
 

@@ -252,9 +252,9 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
   - ★**`agent.spawn` 이 띄우는 에이전트는 챗 모드다**★(이전 세션 실측 2026-09-25). 터미널 칸(xterm)을 재야 하면 위 `createClaudeProfile(…,'Terminal')` 로 만든 뒤 `window.__ENGRAM_AGENT__.spawnProfile('<id>', <resume>)` 로 띄운다(시그니처 = `src/api/agentClient.ts:238`).
 - **레이아웃·창·탭·렌더 모드 관측은 전부 위 `__engramCmd` 로 간다** — 전용 관측 핸들은 없다. ★**그 표로 안 닿는 자리 둘**★:
   - **슬롯을 기존 창으로 옮기기.** 프론트 `slot.popout` 은 목적지 인자가 없어 **항상 새 창**이다(`src/commands/slotCommands.ts` 의 `slot.popout` — 그 주석이 셸 쪽 동명 명령과의 과도기 분열을 자인한다). 기존 창을 지목해야 하면 아래 invoke 로 간다.
-  - **챗 스타일**(여백·글자 크기)**은 릴리스 빌드에서 읽지도 바꾸지도 못한다** — 명령이 아니라 설정 데이터로 분류됐고 그 저장 경로가 아직 없다(ADR-0169). dev 빌드엔 아래 store 핸들의 `chatStyle` 칸이 남는다. 그 값을 재야 하면 **릴리스로는 못 잰다**가 답이다.
+  - **챗 스타일**(여백·글자 크기)**은 셸 설정 `chat.style.*` 이다**(ADR-0265 — 릴리스·dev 같은 길). 바꾸기 = 버스 `settings.set`(`{key: 'chat.style.fontSize', value: '16px'}`) 또는 `window.__TAURI__.core.invoke('settings_set', {key, value})`. 재기 = **인라인 값** `document.documentElement.style.getPropertyValue('--chat-font-size')`. ★`getComputedStyle` 로 재지 말 것★ — `theme.css` 가 같은 값을 fallback 으로 선언하고 있어 적용 경로가 죽어도 통과한다(ADR-0169 근거 절).
   - ★**셸 invoke 는 직통이다**★ — `withGlobalTauri` 가 켜져 있어(`src-tauri/tauri.conf.json`) command 표를 안 거치고도 `window.__TAURI__.core.invoke('list_tabs', …)`·`invoke('move_slot_to_window', {viewId, slotId, toWindow})` 를 부를 수 있다. 위 첫 갈래의 탈출구가 이것이다.
-- store 스냅샷 `window.__engram.agent.getState()` — 노출 지점 `src/main.tsx:30`(★바로 위 `:29`이 `import.meta.env.DEV` 가드라 **릴리스 빌드엔 없다**★. 위 `__ENGRAM_AGENT__`와 갈리는 지점이니 릴리스로 실측할 때 헷갈리지 말 것). 칸은 셋 = `theme`·`agent`·`chatStyle`.
+- store 스냅샷 `window.__engram.agent.getState()` — 노출 지점 `src/main.tsx:34`(★바로 위 `:33`이 `import.meta.env.DEV` 가드라 **릴리스 빌드엔 없다**★. 위 `__ENGRAM_AGENT__`와 갈리는 지점이니 릴리스로 실측할 때 헷갈리지 말 것). 칸은 둘 = `theme`·`agent`.
 
 **C. 터미널 화면 텍스트는 DOM에 없다 → 슬롯을 DOM 모드로 바꾸거나, 안 되면 fiber를 타고 `Terminal` 인스턴스의 버퍼를 읽는다**
 - ★**먼저 시도할 것 = DOM 모드**★ (코드 파생) — `node scripts/cdp.mjs eval "window.__engramCmd.run('slot.domMode.enable', { slotId: '<uuid>' })"`. 그러면 그 슬롯이 `DomSlot`으로 갈리고 **같은 출력 스트림을 ANSI만 벗겨 `<pre>` 텍스트로** 그리므로 `innerText`로 읽힌다 — 그 컴포넌트가 **CDP 관측을 목적으로 존재한다고 자기 헤더에 적어 뒀다**(`src/components/slot/DomSlot.tsx`). 되돌리기 = `slot.domMode.disable`(또는 `slot.renderMode.clear`), 토글 = `slot.domMode.toggle`.

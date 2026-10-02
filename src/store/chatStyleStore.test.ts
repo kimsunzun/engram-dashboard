@@ -1,245 +1,186 @@
-// ADR-0051: chatStyleStore 단위테스트 — 채팅 스타일 control surface(간격·폰트)의 권위·영속·CSS 적용을
-//   검증한다. 순수 로직 + jsdom(localStorage/document 존재). 사람 UI·LLM 공통 진입점(setValue/patch/reset).
+// chatStyleStore — 셸 설정 `chat.style.*` 이 :root CSS 변수에 닿는가 · 화이트리스트 밖은 막히는가 · 저장소를
+//   건드리지 않는가(ADR-0265). 설정 클라이언트는 실물에 가짜 IPC 를 꽂는다.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createSettingsClient, type SettingsClient, type SettingsIpc } from '../api/settingsClient'
 import {
-  CHAT_STYLE_DEFAULTS,
-  loadChatStyle,
-  useChatStyleStore,
+  installChatStyleApplier,
+  resetChatStyle,
+  setChatStyle,
   type ChatStyleKey,
-  type ChatStyleValues,
 } from './chatStyleStore'
 
-// FIX-3: theme.css 원문을 런타임에 읽는다(vitest=Node). 프론트 tsconfig 는 DOM 전용(@types/node 없음)이고
+// theme.css 원문을 런타임에 읽는다(vitest=Node). 프론트 tsconfig 는 DOM 전용(@types/node 없음)이고
 //   vitest 는 .css 를 빈 모듈로 처리해 `?raw`/glob 이 빈 문자열이라, Node fs 로 직접 읽는다. 여기 필요한
 //   Node 심볼만 최소 ambient 선언(전역 @types/node 의존 회피 — 이 테스트 파일 스코프 한정).
 declare function require(id: string): { readFileSync(p: string, enc: string): string }
 declare const process: { cwd(): string }
 
-const STORAGE_KEY = 'engram.chatStyle'
-
 function rootVar(name: string): string {
   return document.documentElement.style.getPropertyValue(name).trim()
 }
 
+/** 알림 한 통을 시험이 직접 밀 수 있는 클라이언트 — 당기기 답은 비어 있다. */
+function harness() {
+  let handler: ((payload: unknown) => void) | undefined
+  let rev = 0
+  const invoke = vi.fn(async (cmd: string, args?: Record<string, unknown>): Promise<unknown> => {
+    if (cmd === 'settings_get') return { rev, items: [] }
+    if (cmd === 'settings_set') return { rev: ++rev, key: args?.key, value: args?.value, changed: true }
+    if (cmd === 'settings_reset') return { rev, reset: [args?.key], changed: [] }
+    throw new Error(`예상 밖 명령 ${cmd}`)
+  })
+  const ipc: SettingsIpc = {
+    async listen(_event, h) {
+      handler = h
+      return () => {}
+    },
+    invoke: <T,>(cmd: string, args?: Record<string, unknown>) => invoke(cmd, args) as Promise<T>,
+  }
+  const client: SettingsClient = createSettingsClient(ipc)
+  return {
+    client,
+    invoke,
+    push(items: Array<[string, string]>) {
+      if (!handler) throw new Error('리스너가 아직 없다')
+      rev += 1
+      handler({ rev, items: items.map(([key, value]) => ({ key, value, is_default: false })) })
+    },
+  }
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 10; i++) await Promise.resolve()
+}
+
+let disposers: Array<() => void> = []
+
 beforeEach(() => {
-  localStorage.clear()
-  // zustand 싱글톤이라 테스트 간 격리.
-  useChatStyleStore.setState({ values: { ...CHAT_STYLE_DEFAULTS } })
-  // 이전 테스트 잔류 방지.
   document.documentElement.removeAttribute('style')
+  disposers = []
 })
 
 afterEach(() => {
-  localStorage.clear()
+  for (const d of disposers) d()
+  vi.restoreAllMocks()
 })
 
-describe('chatStyleStore (ADR-0051)', () => {
-  it('loadChatStyle: 저장값 부재 → 기본값 fallback', () => {
-    expect(loadChatStyle()).toEqual(CHAT_STYLE_DEFAULTS)
-  })
+async function installed() {
+  const h = harness()
+  disposers.push(installChatStyleApplier(h.client), h.client.install())
+  await flush()
+  return h
+}
 
-  it('loadChatStyle: 손상된 JSON → 기본값 fallback(throw 없음)', () => {
-    localStorage.setItem(STORAGE_KEY, '{not valid json')
-    expect(loadChatStyle()).toEqual(CHAT_STYLE_DEFAULTS)
-  })
-
-  it('loadChatStyle: 부분 저장값은 기본값 위에 병합(누락 키는 기본값 유지)', () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: '15px' }))
-    const loaded = loadChatStyle()
-    expect(loaded.fontSize).toBe('15px')
-    expect(loaded.railRowPt).toBe(CHAT_STYLE_DEFAULTS.railRowPt)
-  })
-
-  it('loadChatStyle: 문자열이 아닌 값은 무시하고 기본값 유지(신뢰 못할 저장값 방어)', () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ fontSize: 42, lineHeight: '1.7' }))
-    const loaded = loadChatStyle()
-    expect(loaded.fontSize).toBe(CHAT_STYLE_DEFAULTS.fontSize)
-    expect(loaded.lineHeight).toBe('1.7')
-  })
-
-  it('init: localStorage 로드 → CSS 변수 적용', () => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ railRowPt: '2rem' }))
-    useChatStyleStore.getState().init()
-    expect(useChatStyleStore.getState().values.railRowPt).toBe('2rem')
-    expect(rootVar('--chat-rail-row-pt')).toBe('2rem')
-    expect(rootVar('--chat-font-size')).toBe(CHAT_STYLE_DEFAULTS.fontSize)
-  })
-
-  it('setValue: 값 갱신 → store + CSS 변수 + localStorage 3자 반영', () => {
-    useChatStyleStore.getState().setValue('fontSize', '16px')
-    expect(useChatStyleStore.getState().values.fontSize).toBe('16px')
+describe('chatStyleStore — 적용자', () => {
+  it('chat.style.* 항목은 그 CSS 변수에 칠해진다', async () => {
+    const h = await installed()
+    h.push([
+      ['chat.style.fontSize', '16px'],
+      ['chat.style.railLineOffset', '-1rem'],
+    ])
     expect(rootVar('--chat-font-size')).toBe('16px')
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
-    expect(saved.fontSize).toBe('16px')
+    expect(rootVar('--chat-rail-line-offset')).toBe('-1rem')
   })
 
-  it('영속 round-trip: setValue 후 새 로드(loadChatStyle)가 그 값을 복원한다', () => {
-    useChatStyleStore.getState().setValue('lineHeight', '1.8')
-    const reloaded = loadChatStyle()
-    expect(reloaded.lineHeight).toBe('1.8')
+  it('설치 전에 받은 값도 설치하자마자 칠한다', async () => {
+    const h = harness()
+    disposers.push(h.client.install())
+    await flush()
+    h.push([['chat.style.lineHeight', '1.8']])
+    expect(rootVar('--chat-line-height')).toBe('')
+
+    disposers.push(installChatStyleApplier(h.client))
+    expect(rootVar('--chat-line-height')).toBe('1.8')
   })
 
-  it('patch: 여러 키 부분 갱신(다른 키는 유지)', () => {
-    const before = useChatStyleStore.getState().values.railGutter
-    useChatStyleStore.getState().patch({ fontSize: '14px', lineHeight: '1.6' })
-    const v = useChatStyleStore.getState().values
-    expect(v.fontSize).toBe('14px')
-    expect(v.lineHeight).toBe('1.6')
-    expect(v.railGutter).toBe(before)
-    expect(rootVar('--chat-font-size')).toBe('14px')
-    expect(rootVar('--chat-line-height')).toBe('1.6')
+  // ★style 속성이 비었는지로 재지 말 것★ — 프로토타입 키가 통과하면 변수 이름 자리에 함수 · 객체가 들어가
+  //   setProperty 가 조용히 아무것도 안 남겨, 가드를 `in` 으로 약하게 해도 그 단언은 초록이다. 호출 자체를 센다.
+  it('화이트리스트 밖 키 · 챗 스타일이 아닌 키 · 프로토타입 키는 setProperty 를 한 번도 부르지 않는다', async () => {
+    const h = await installed()
+    const setProperty = vi.spyOn(document.documentElement.style, 'setProperty')
+    h.push([
+      ['chat.style.bogus', '1px'],
+      ['chat.style.constructor', '2px'],
+      ['chat.style.__proto__', '3px'],
+      ['chat.style.toString', '4px'],
+      ['chat.style.hasOwnProperty', '5px'],
+      ['theme.default', 'light'],
+      ['fontSize', '6px'],
+    ])
+    expect(setProperty).not.toHaveBeenCalled()
   })
 
-  it('reset: 기본값으로 복귀 + CSS/localStorage 갱신', () => {
-    useChatStyleStore.getState().setValue('fontSize', '20px')
-    useChatStyleStore.getState().reset()
-    expect(useChatStyleStore.getState().values).toEqual(CHAT_STYLE_DEFAULTS)
-    expect(rootVar('--chat-font-size')).toBe(CHAT_STYLE_DEFAULTS.fontSize)
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
-    expect(saved.fontSize).toBe(CHAT_STYLE_DEFAULTS.fontSize)
-  })
-})
-
-// ── FIX-2: 런타임 키 화이트리스트(control surface 는 무신뢰 경계) ─────────────────────────
-describe('chatStyleStore runtime key whitelist (ADR-0051 FIX-2)', () => {
-  it('patch({ bogus }): 낯선 키는 store·localStorage 를 오염시키지 않고 bogus 로 setProperty 하지 않는다', () => {
-    const spy = vi.spyOn(document.documentElement.style, 'setProperty')
-    // 캐스트로 TS 를 우회(런타임 외부 호출 = LLM/CDP 재현).
-    useChatStyleStore
-      .getState()
-      .patch({ fontSize: '17px', bogus: 'x' } as unknown as Partial<ChatStyleValues>)
-
-    const v = useChatStyleStore.getState().values as Record<string, unknown>
-    expect(v.fontSize).toBe('17px')
-    expect('bogus' in v).toBe(false)
-
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
-    expect('bogus' in saved).toBe(false)
-    expect(saved.fontSize).toBe('17px')
-
-    const propertyNames = spy.mock.calls.map(c => String(c[0]))
-    expect(propertyNames.some(n => n.includes('bogus'))).toBe(false)
-    spy.mockRestore()
-  })
-
-  it('setValue(낯선 키): store·localStorage 무변경(no-op)', () => {
-    const before = { ...useChatStyleStore.getState().values }
-    // 캐스트로 TS 우회(런타임 외부 호출 재현).
-    const setValue = useChatStyleStore.getState().setValue as (k: string, v: string) => void
-    setValue('nope', 'y')
-    expect(useChatStyleStore.getState().values).toEqual(before)
-    const raw = localStorage.getItem(STORAGE_KEY)
-    if (raw) expect('nope' in JSON.parse(raw)).toBe(false)
+  it('구독을 풀면 더는 칠하지 않는다', async () => {
+    const h = harness()
+    const off = installChatStyleApplier(h.client)
+    disposers.push(h.client.install())
+    await flush()
+    off()
+    h.push([['chat.style.fontSize', '20px']])
+    expect(rootVar('--chat-font-size')).toBe('')
   })
 })
 
-// ── ADR-0051: 프로토타입 키 화이트리스트 우회 방어(isChatStyleKey own-key 판정) ──────────────
-//   `key in CHAT_STYLE_DEFAULTS` 는 프로토타입 체인을 타서 constructor·__proto__·toString 등
-//   Object.prototype 상속 키가 화이트리스트를 통과했다. LLM/CDP 등 런타임 외부 호출이 이 이름들을
-//   set/patch 하면 store·localStorage 가 오염되므로, 고정 11키만 통과하는지 검증한다.
-describe('chatStyleStore prototype-key bypass (ADR-0051)', () => {
-  const POLLUTING_KEYS = ['__proto__', 'constructor', 'toString', 'valueOf', 'hasOwnProperty']
-
-  it('setValue: 프로토타입 상속 키(__proto__/constructor)는 store·localStorage 에 못 들어간다', () => {
-    const before = { ...useChatStyleStore.getState().values }
-    const objProtoBefore = Object.getPrototypeOf({})
-    // 캐스트로 TS 우회(런타임 외부 호출 = LLM/CDP 재현).
-    const setValue = useChatStyleStore.getState().setValue as (k: string, v: string) => void
-
-    setValue('__proto__', '1rem')
-    setValue('constructor', 'x')
-    setValue('toString', 'y')
-
-    const v = useChatStyleStore.getState().values as Record<string, unknown>
-    for (const k of POLLUTING_KEYS) {
-      expect(Object.prototype.hasOwnProperty.call(v, k)).toBe(false)
-    }
-    expect(useChatStyleStore.getState().values).toEqual(before)
-
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull()
-
-    expect(Object.getPrototypeOf({})).toBe(objProtoBefore)
-    expect(({} as Record<string, unknown>).toString).toBe(Object.prototype.toString)
+describe('chatStyleStore — 쓰기는 셸 설정으로', () => {
+  it('setChatStyle 은 settings_set chat.style.<k> 로 간다', async () => {
+    const h = harness()
+    await setChatStyle('fontSize', '15px', h.client)
+    expect(h.invoke).toHaveBeenCalledWith('settings_set', { key: 'chat.style.fontSize', value: '15px' })
   })
 
-  it('patch({ __proto__, constructor, toString }): 프로토타입 키 전부 거른다(오염·prototype 변형 없음)', () => {
-    const before = { ...useChatStyleStore.getState().values }
-    const objProtoBefore = Object.getPrototypeOf({})
-
-    useChatStyleStore
-      .getState()
-      .patch({ __proto__: 'a', constructor: 'b', toString: 'c' } as unknown as Partial<ChatStyleValues>)
-
-    const v = useChatStyleStore.getState().values as Record<string, unknown>
-    for (const k of POLLUTING_KEYS) {
-      expect(Object.prototype.hasOwnProperty.call(v, k)).toBe(false)
-    }
-    expect(useChatStyleStore.getState().values).toEqual(before)
-    // patch 는 걸러낸 뒤에도 next(=기존 값)를 persist 한다 → 저장 JSON 에 오염 키가 없기만 하면 된다.
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
-    for (const k of POLLUTING_KEYS) {
-      expect(Object.prototype.hasOwnProperty.call(saved, k)).toBe(false)
-    }
-
-    expect(Object.getPrototypeOf({})).toBe(objProtoBefore)
+  it('resetChatStyle 은 한 키 또는 chat.style. 접두 전부를 settings_reset 으로 보낸다', async () => {
+    const h = harness()
+    await resetChatStyle('userPy', h.client)
+    await resetChatStyle(undefined, h.client)
+    expect(h.invoke).toHaveBeenNthCalledWith(1, 'settings_reset', { key: 'chat.style.userPy' })
+    expect(h.invoke).toHaveBeenNthCalledWith(2, 'settings_reset', { key: 'chat.style.' })
   })
 
-  it('patch({ fontSize, __proto__ }): 유효 키는 적용, 프로토타입 키는 드롭', () => {
-    useChatStyleStore
-      .getState()
-      .patch({ fontSize: '15px', __proto__: 'x' } as unknown as Partial<ChatStyleValues>)
+  it('설치 · 적용 · 쓰기 어디서도 localStorage 를 건드리지 않는다', async () => {
+    const getItem = vi.spyOn(Storage.prototype, 'getItem')
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    const removeItem = vi.spyOn(Storage.prototype, 'removeItem')
 
-    const v = useChatStyleStore.getState().values as Record<string, unknown>
-    expect(v.fontSize).toBe('15px')
-    expect(Object.prototype.hasOwnProperty.call(v, '__proto__')).toBe(false)
-    expect(rootVar('--chat-font-size')).toBe('15px')
+    const h = await installed()
+    h.push([['chat.style.fontSize', '16px']])
+    await setChatStyle('fontSize', '17px', h.client)
+    await resetChatStyle('fontSize', h.client)
 
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY)!)
-    expect(saved.fontSize).toBe('15px')
-    expect(Object.prototype.hasOwnProperty.call(saved, '__proto__')).toBe(false)
+    expect(rootVar('--chat-font-size')).toBe('17px')
+    expect(getItem).not.toHaveBeenCalled()
+    expect(setItem).not.toHaveBeenCalled()
+    expect(removeItem).not.toHaveBeenCalled()
   })
 })
 
-// ── FIX-3: 이중 출처 기본값 drift 감지(theme.css :root ↔ CHAT_STYLE_DEFAULTS) ─────────────
-//   기본값이 두 곳에 산다(store + theme.css :root fallback). 한쪽만 바뀌면 부팅 첫 프레임과 store 적용이
-//   어긋난다. 하나에서 다른 하나를 유도하지 않고(각자 정본), 둘이 같은지만 싸게 검증해 조용한 drift 를 잡는다.
-describe('theme.css ↔ CHAT_STYLE_DEFAULTS drift (ADR-0051 FIX-3)', () => {
-  // store 키 ↔ theme.css :root 변수명 매핑(chatStyleStore.ts CSS_VAR_BY_KEY 와 짝 — 여기 재선언해 독립 검증).
-  const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
-    railRowPt: '--chat-rail-row-pt',
-    plainRowPt: '--chat-plain-row-pt',
-    userPy: '--chat-user-py',
-    userPx: '--chat-user-px',
-    userMy: '--chat-user-my',
-    railGutter: '--chat-rail-gutter',
-    railLineOffset: '--chat-rail-line-offset',
-    railDotTop: '--chat-rail-dot-top',
-    fontSize: '--chat-font-size',
-    lineHeight: '--chat-line-height',
-    waitStripH: '--chat-wait-strip-h',
-  }
+// ── 화이트리스트 ↔ theme.css fallback ─────────────
+//   첫 페인트는 theme.css `:root` 의 `--chat-*` 가 맡는다. 적용자가 칠하는 변수 집합과 그 선언 집합이 같은지만
+//   본다 — 값(셸 스키마 표의 기본값과 같은가)은 재지 않는다(ADR-0265 「U2 의 대가」).
+describe('chatStyleStore 화이트리스트 ↔ theme.css', () => {
+  const KEYS: ChatStyleKey[] = [
+    'railRowPt',
+    'plainRowPt',
+    'userPy',
+    'userPx',
+    'userMy',
+    'railGutter',
+    'railLineOffset',
+    'railDotTop',
+    'fontSize',
+    'lineHeight',
+    'waitStripH',
+  ]
 
-  it('theme.css :root 의 11개 chat 변수 기본값이 CHAT_STYLE_DEFAULTS 와 일치한다', () => {
-    // vitest 는 프로젝트 루트에서 실행 → cwd 기준 상대 경로로 theme.css 원문을 읽는다.
-    const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
+  it('11키를 모두 받으면 theme.css 에 선언된 --chat-* 변수 전부를, 그것만 칠한다', async () => {
+    const h = await installed()
+    h.push(KEYS.map(k => [`chat.style.${k}`, '1px']))
 
-    for (const key of Object.keys(CHAT_STYLE_DEFAULTS) as ChatStyleKey[]) {
-      const varName = CSS_VAR_BY_KEY[key]
-      // `--chat-xxx: <value>;` 선언에서 값만 추출(주석·공백 무시). 변수명은 리터럴로 escape.
-      const escaped = varName.replace(/[-]/g, '\\-')
-      const m = css.match(new RegExp(`${escaped}\\s*:\\s*([^;]+);`))
-      expect(m, `theme.css 에 ${varName} 선언이 없다`).not.toBeNull()
-      const cssValue = m![1].trim()
-      expect(cssValue, `${varName}(=${key}) 기본값이 theme.css 와 store 에서 어긋남`).toBe(
-        CHAT_STYLE_DEFAULTS[key],
-      )
-    }
-  })
+    const painted = Array.from(document.documentElement.style)
+      .filter(name => name.startsWith('--chat-'))
+      .sort()
 
-  // 반대 방향 — 이 블록에 `--chat-*` 변수를 더하고 store 키를 안 만들면 dev 핸들이 그 값에 닿지 못한다.
-  it('theme.css 에 선언된 --chat-* 변수는 전부 store 키가 있다', () => {
     const css = require('node:fs').readFileSync(`${process.cwd()}/src/styles/theme.css`, 'utf8')
     // 주석 안의 변수명 인용(`--chat-rail-row-pt(커플링)` 등)을 선언으로 세지 않게 주석부터 걷는다.
     const declared = Array.from(
@@ -247,6 +188,6 @@ describe('theme.css ↔ CHAT_STYLE_DEFAULTS drift (ADR-0051 FIX-3)', () => {
       (m: RegExpMatchArray) => m[1],
     )
     expect(declared.length).toBeGreaterThan(0)
-    expect([...new Set(declared)].sort()).toEqual(Object.values(CSS_VAR_BY_KEY).sort())
+    expect(painted).toEqual([...new Set(declared)].sort())
   })
 })
