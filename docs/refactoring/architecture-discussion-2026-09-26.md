@@ -274,7 +274,7 @@
 - **0. ADR** — 후보 1~9 박제. 뒤집히는 것: ADR-0175 결정 1(platform 독립 crate 거부 · 입주 조건 ①) · ADR-0218 결정 11 · ADR-0155/0110 「워크스페이스 의존 0」 · ADR-0219 두 입구 서술 · ADR-0024 데이터 위치 공유 + T-10 종결 · ADR-0155 결정 3(봉투를 `protocol` 에 싣기).
 - **1. 바닥**
   - 1-1 base 공용 함수 + 교체(후보 4) · command·messaging 게이트 완화(후보 2) — 원자적 쓰기 세 벌의 동작부터 하나로.
-  - 1-2 로그 base 경유 전환(후보 3) — 약 530곳 · 모든 crate · **혼자 돌린다**(다른 브랜치와 충돌 큼) · 마지막에 「로그 라이브러리 직접 의존 금지」 게이트. 1-3 보다 앞 — 옮겨질 코드가 처음부터 새 방식을 쓰게.
+  - 1-2 → 아래 「사이드 작업」으로 뺐다(번호는 비워 둔다 — 옛 기록이 1-2 를 가리킨다).
   - 1-3 platform crate(후보 1) — Job Object 를 「프로세스 그룹」 핸들로 · **kill 인과 불변식이 걸려 full QA**.
 - **2. 클라·데몬 떼기**
   - 2-1 셸 → agent 끊기(후보 5) — 선행 1-1 · **① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수** · ③ 등록 거절 메시지 박스 · GUI 실측.
@@ -283,6 +283,10 @@
   - 2-4 테스트용 서버 함수를 테스트 전용 플래그 뒤로.
 - **3. transport**(별도 TRD · 별도 브랜치) — 3-1 `protocol` 정리(후보 8 · 인증 메시지 이전 · 의존 0 게이트) · 3-2 셸 부착(어댑터 · 정지 명령 클라이언트 · 접속 정보 인터페이스) · 3-3 데몬 부착 + net 걷기(후보 7).
 - **4. 안쪽 정리** — 데몬 구조 문제 · command 작은 정리 넷 · agent `transport/` 이름 변경 · agent 쪼갤지. 셸 안쪽은 플러그인과 함께.
+- **사이드 작업 — 로그 base 경유 전환(후보 3 · 옛 1-2)** — 약 530곳 · 모든 crate · 마지막에 「로그 라이브러리 직접 의존 금지」 게이트. **모듈 경계 작업이 아니라 순서에 묶이지 않는다**(사용자 2026-10-02 — 「일단 뒤로 하되 기계적으로 할 때 중간에 끼어들기해도 된다 · 모듈 경계가 아니라 아무 때나 해도 되는 사이드 작업」). crate 의존을 바꾸지 않으므로 어느 단계의 선행·후행도 아니고, crate 끼리 파일이 안 겹쳐 **crate 단위로 쪼개 넣을 수 있다**(그동안 옛·새 방식 공존 — 게이트는 맨 끝 한 번). 끼울 때 조건 둘:
+  - **단계 사이에만** — 단계를 master 에 머지한 뒤 · 다음 단계 전. 모든 crate 를 건드려 진행 중인 단계와 같은 파일을 만진다.
+  - **첫 조각 전에 입구 모양(특히 카테고리 체계)을 못 박는다** — 후보 3 은 「위험도·카테고리·메시지」 틀까지고 카테고리 나누기는 로깅 시스템 설계(큰 절 A)에 걸친다. 안 박고 시작하면 설계 확정 때 다시 고친다.
+  - ★옛 「1-3 보다 앞 — 옮겨질 코드가 처음부터 새 방식을 쓰게」 근거는 약했다★ — 전환이 기계적이라 코드가 어느 crate 에 있든 드는 품이 같다.
 - **나중(별도 트랙)** — 로깅 시스템 설계(큰 절 A) · 원격 대비.
 
 **진행 방식(사용자 2026-10-02):**
@@ -302,7 +306,7 @@
 |---|---|---|
 | CLAUDE.md 「백엔드 모듈 맵」 agent 항목의 「남은 `platform` 은 Job Object 래퍼 하나뿐」은 낡았다(실제 셋) | `CLAUDE.md` · `crates/engram-dashboard-agent/src/platform/mod.rs:1-2` | 1-3(platform 이전) 때 문장째 고침 |
 | 셸 `Cargo.toml` 주석 「agent 에서 `COMMAND_SPECS` 하나만 남았다」는 낡았다(실제 셋) | `src-tauri/Cargo.toml:62` | 2-1(셸 → agent 끊기) 때 의존째 사라짐 |
-| 데몬이 `tracing-subscriber` 를 선언만 하고 쓰지 않는다 | `crates/engram-dashboard-daemon/Cargo.toml` (CLAUDE.md 「의존성」 절 기록) | 1-2(로그 전환) 때 정리 |
+| 데몬이 `tracing-subscriber` 를 선언만 하고 쓰지 않는다 | `crates/engram-dashboard-daemon/Cargo.toml` (CLAUDE.md 「의존성」 절 기록) | 로그 전환(사이드 작업 · 옛 1-2) 때 정리 |
 | agent 가 TS 바인딩을 생성·커밋하는데 프론트가 가져다 쓰는 곳이 0 — 그런데 ts-rs 를 운영 의존으로 안고 있다 | `crates/engram-dashboard-agent/bindings/` | 4단계(agent) — 별칭 import 여부부터 확인 |
 | agent 안 `transport/`(PTY·stdio)와 transport crate(WebSocket) 이름이 같다 | `crates/engram-dashboard-agent/src/transport/` | 4단계 이름 변경 |
 | 실행 파일 위치 계산이 두 곳에 갈림 | `crates/engram-dashboard-daemon/src/lib.rs:96,146` · `crates/engram-dashboard-discovery/src/lib.rs:981` | 2-2(discovery 나누기) |
