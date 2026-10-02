@@ -30,7 +30,8 @@ fn daemon_failure_reason_survives_when_the_data_dir_cannot_hold_logs() {
     std::env::set_var("TMP", &temp_home);
     std::env::set_var("TEMP", &temp_home);
 
-    let path = init_logging_with_file(&data_dir, LogKind::Daemon).expect("폴백으로라도 열려야");
+    let path = init_logging_with_file(&data_dir.join("logs"), LogKind::Daemon)
+        .expect("폴백으로라도 열려야");
     // 데몬이 그 직후 내는 바로 그 줄(= 기동 포기 사유).
     tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: (재현)");
 

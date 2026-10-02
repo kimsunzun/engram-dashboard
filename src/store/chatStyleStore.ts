@@ -1,27 +1,28 @@
-// ADR-0051: 채팅 렌더 간격·폰트 값의 프론트 전용 권위(Zustand slice) — :root CSS 변수를 setProperty 로
-//   갱신하고 localStorage 에 영속한다. CSS 변수 레이어라 StructuredTextView/ChatRow/chat.css 는 var()
-//   참조만 하고 값은 여기서만 쓴다.
+// 셸 설정 `chat.style.*` 을 :root CSS 변수에 붙이는 적용자 — 값의 권위는 셸 설정이고(ADR-0265), 여기는 받은 값을
+//   화이트리스트(`CSS_VAR_BY_KEY`)로 변수 이름에 옮겨 setProperty 할 뿐이다. StructuredTextView/ChatRow/chat.css 는
+//   var() 만 읽는다(ADR-0051 의 CSS 변수 레이어).
 //
-// ★릴리스에서 이 값을 바꿀 경로는 없다★: 부팅 때 main.tsx 가 loadAndApplyChatStyle 로 한 번 읽어
-//   적용하는 것이 전부고, 사람 UI 도 command 도 없다. 쓰기 액션(setValue/patch/reset)에 닿는 것은 dev
-//   빌드의 window.__engram.chatStyle 뿐이다.
-//   ★그래서 예전에 저장된 값이 있으면 그게 계속 이긴다★ — loadChatStyle 이 localStorage 값을
-//   CHAT_STYLE_DEFAULTS 위에 병합하므로, 릴리스 빌드에는 그걸 되돌릴 수단이 없다(reset 도 dev 전용).
-//   여기 기본값을 고쳐도 저장분이 남은 설치본에는 안 닿는다.
-//   ★그 갭을 개별 command 로 메우지 말 것★ — 표시 상태는 「데이터 + 다시 읽기」로 다룬다(ADR-0167 결정 1).
-//   설정 영속 경로가 생기면 그것이 이 store 를 쓴다.
-//
-// ★권위 = 프론트★: 순수 렌더 프리퍼런스라 백엔드(데몬/settings.json/emit)를 안 태운다(ADR-0051 거부한
-//   대안: 백엔드 영속).
+// ★기본값을 여기 두지 않는다★ — 정본은 셸 스키마 표(`src-tauri/src/settings/registry.rs`)이고, 값이 오기 전의 첫
+//   페인트는 `theme.css` 의 `--chat-*` fallback 이 맡는다(TRD S21-storage §10 F6 (a) — 비동기).
+// ★저장하지 않는다★ — 쓰기는 `settings_set`/`settings_reset` 뿐이고, 그 결과가 알림으로 돌아와 여기서 칠해진다.
+//   localStorage 영속을 되살리지 말 것: 저장분이 셸 값과 갈려 두 출처가 된다.
+// ★키 집합 대조가 없다(U2)★ — 셸 표의 11키와 `CSS_VAR_BY_KEY` 가 어긋나면 `settings.set chat.style.X` 가
+//   `changed:true` 로 답하는데 화면은 그대로다(ADR-0265 「U2 의 대가」).
+// ADR-0265
 
-import { create } from 'zustand'
+import {
+  settingsClient,
+  type ResetOutcome,
+  type SetOutcome,
+  type SettingsClient,
+} from '../api/settingsClient'
 
 /** 채팅 스타일 키(간격+폰트 세트). 값은 CSS 길이/숫자 문자열(예: '1rem', '13px', '1.55'). */
 export type ChatStyleKey =
   | 'railRowPt' // rail 행 top-padding(행간 리듬)
   | 'plainRowPt' // 비-rail(user 버블·separator) 행 top-padding
   | 'userPy' // 유저 버블 세로 padding
-  | 'userPx' // 유저 버블 가로 padding(§5 LLM 제어 표면 — userPy 와 대칭)
+  | 'userPx' // 유저 버블 가로 padding(userPy 와 대칭)
   | 'userMy' // 유저 버블 세로 margin(턴 덩어리 분리)
   | 'railGutter' // rail gutter 폭
   | 'railLineOffset' // 연결선 top 오프셋(위 행으로 이어짐 — railRowPt 와 커플링, 보통 음수)
@@ -30,23 +31,8 @@ export type ChatStyleKey =
   | 'lineHeight' // 채팅 base line-height
   | 'waitStripH' // 입력창 위 대기 표시 줄 높이(사용자 결정 2026-10-01)
 
-export type ChatStyleValues = Record<ChatStyleKey, string>
-
-// ADR-0051: 기본값 — theme.css :root fallback 과 동기(둘 중 하나만 바뀌면 부팅 첫 프레임과 store 적용이
-//   어긋난다). 숫자는 사용자가 라이브 튜닝으로 확정한 값을 bake 한 것이다 — 임의로 "정리"하지 말 것.
-export const CHAT_STYLE_DEFAULTS: ChatStyleValues = {
-  railRowPt: '0.8rem',
-  plainRowPt: '0.7rem',
-  userPy: '7px',
-  userPx: '0.9rem',
-  userMy: '0.375rem',
-  railGutter: '1.5rem',
-  railLineOffset: '-1rem',
-  railDotTop: '0.5625rem',
-  fontSize: '13px',
-  lineHeight: '1.45',
-  waitStripH: '1.75rem',
-}
+/** 설정 키 = 이 접두 + `ChatStyleKey`(셸 표의 마지막 마디가 이 철자다). */
+const KEY_PREFIX = 'chat.style.'
 
 // ADR-0051: StructuredTextView/theme.css/chat.css 가 이 변수들을 var() 로 읽는다.
 const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
@@ -63,115 +49,41 @@ const CSS_VAR_BY_KEY: Record<ChatStyleKey, string> = {
   waitStripH: '--chat-wait-strip-h',
 }
 
-const STORAGE_KEY = 'engram.chatStyle'
+/** `chat.style.<k>` → 그 CSS 변수. 화이트리스트 밖이거나 챗 스타일 키가 아니면 `undefined`. */
+function cssVarOf(settingKey: string): string | undefined {
+  if (!settingKey.startsWith(KEY_PREFIX)) return undefined
+  const key = settingKey.slice(KEY_PREFIX.length)
+  // FIX-2: own key 로만 판정한다 — `key in CSS_VAR_BY_KEY` 는 프로토타입 체인을 타서 `chat.style.constructor` ·
+  //   `chat.style.__proto__` 같은 키가 통과한다.
+  if (!Object.prototype.hasOwnProperty.call(CSS_VAR_BY_KEY, key)) return undefined
+  return CSS_VAR_BY_KEY[key as ChatStyleKey]
+}
 
-export function loadChatStyle(): ChatStyleValues {
-  try {
-    const raw = globalThis.localStorage?.getItem(STORAGE_KEY)
-    if (!raw) return { ...CHAT_STYLE_DEFAULTS }
-    const parsed: unknown = JSON.parse(raw)
-    if (parsed === null || typeof parsed !== 'object') return { ...CHAT_STYLE_DEFAULTS }
-    const obj = parsed as Record<string, unknown>
-    const merged: ChatStyleValues = { ...CHAT_STYLE_DEFAULTS }
-    for (const key of Object.keys(CHAT_STYLE_DEFAULTS) as ChatStyleKey[]) {
-      // 문자열 값만 채택(그 외 타입/누락은 기본값 유지) — 신뢰할 수 없는 저장값 방어.
-      if (typeof obj[key] === 'string') merged[key] = obj[key]
+/** 설정 구독을 걸어 `chat.style.*` 을 :root 에 칠한다. 반환 = 구독 해제. document 가 없으면(SSR) 칠하지 않는다. */
+export function installChatStyleApplier(client: SettingsClient = settingsClient): () => void {
+  return client.subscribe(changes => {
+    const root = globalThis.document?.documentElement
+    if (!root) return
+    for (const { key, value } of changes) {
+      const cssVar = cssVarOf(key)
+      if (cssVar) root.style.setProperty(cssVar, value)
     }
-    return merged
-  } catch {
-    return { ...CHAT_STYLE_DEFAULTS }
-  }
+  })
 }
 
-/** 값을 localStorage 에 저장. 실패(용량/비활성)해도 조용히 무시 — 스타일 프리퍼런스라 치명적이지 않다. */
-function persist(values: ChatStyleValues): void {
-  try {
-    globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(values))
-  } catch {
-    /* noop — 영속 실패는 무시(메모리 store 는 그대로 동작) */
-  }
+/** 셸 설정에 쓴다 — 화면은 알림(또는 답)이 돌아온 뒤 바뀐다. 거절은 셸 오류 문자열로 reject. */
+export function setChatStyle(
+  key: ChatStyleKey,
+  value: string,
+  client: SettingsClient = settingsClient,
+): Promise<SetOutcome> {
+  return client.set(`${KEY_PREFIX}${key}`, value)
 }
 
-// ADR-0051 (FIX-2): 값이 타입 밖에서 들어오는 입구가 둘이다 — localStorage 의 JSON(신뢰할 수 없는 저장값)
-//   과 dev 핸들(window.__engram.chatStyle)의 무타입 호출. 그래서 CHAT_STYLE_DEFAULTS 의 고정 키 목록을 단일
-//   화이트리스트로 삼는다: applyToRoot 는 이 목록만 순회하고(values 에 낯선 키가 섞여도 setProperty 안 함),
-//   set/patch 는 이 목록에 없는 키를 store·localStorage 진입 전에 걸러낸다.
-const CHAT_STYLE_KEYS = Object.keys(CHAT_STYLE_DEFAULTS) as ChatStyleKey[]
-
-/** 화이트리스트 판정 — 알려진 ChatStyleKey 인가(낯선 키는 store·CSS·저장 어디에도 못 들어간다). */
-function isChatStyleKey(key: string): key is ChatStyleKey {
-  // ADR-0051: 고정 배열 멤버십으로 판정한다. `key in CHAT_STYLE_DEFAULTS` 는 프로토타입 체인을 타서
-  //   constructor·__proto__·toString 등 Object.prototype 상속 키가 true 로 통과 → store·localStorage 오염.
-  //   CHAT_STYLE_KEYS(고정 11키)만 own key 로 인정해 프로토타입 오염을 원천 차단한다.
-  return CHAT_STYLE_KEYS.includes(key as ChatStyleKey)
+/** 한 키를, `key` 를 빼면 챗 스타일 전부를 기본값으로. */
+export function resetChatStyle(
+  key?: ChatStyleKey,
+  client: SettingsClient = settingsClient,
+): Promise<ResetOutcome> {
+  return client.reset(key === undefined ? KEY_PREFIX : `${KEY_PREFIX}${key}`)
 }
-
-/**
- * 값을 :root CSS 변수에 적용(setProperty). document 부재(SSR/테스트) 시 no-op 방어.
- * ★고정 키 목록(CHAT_STYLE_KEYS)만 순회★ — Object.keys(values) 를 돌면 오염된 낯선 키가 잘못된
- *   setProperty 를 낳는다(FIX-2). values 는 화이트리스트로 이미 걸러진 것이지만 여기서도 고정 목록만 쓴다.
- */
-function applyToRoot(values: ChatStyleValues): void {
-  const root = globalThis.document?.documentElement
-  if (!root) return
-  for (const key of CHAT_STYLE_KEYS) {
-    root.style.setProperty(CSS_VAR_BY_KEY[key], values[key])
-  }
-}
-
-// ADR-0051 (FIX-1): 저장된 스타일 로드+적용을 데몬 부팅 경로에서 분리한다. chatStyle 은 프론트 전용
-//   상태라 데몬 bootstrap 성공에 의존할 이유가 없다 — 예전엔 initEventBus(bootstrapDaemonIfNeeded 이후)
-//   안에서 init() 을 불러, 데몬이 멈추면 저장값이 영영 적용 안 되고 정상 부팅에서도 첫 프레임이 기본값으로
-//   깜빡였다. 이 함수를 main.tsx 최상단(첫 렌더 전)에서 부른다. document 부재(SSR/테스트)는 applyToRoot 가 방어.
-export function loadAndApplyChatStyle(): void {
-  const loaded = loadChatStyle()
-  applyToRoot(loaded)
-  useChatStyleStore.setState({ values: loaded })
-}
-
-interface ChatStyleState {
-  values: ChatStyleValues
-  init: () => void
-  /** 단일 키 갱신 — CSS 변수 적용 + localStorage 저장. */
-  setValue: (key: ChatStyleKey, value: string) => void
-  /** 부분 병합 갱신(여러 키 한 번에). */
-  patch: (partial: Partial<ChatStyleValues>) => void
-  /** 기본값으로 초기화(+ 적용·저장). */
-  reset: () => void
-}
-
-// ADR-0051: chat-style slice — 값의 유일 권위. 액션은 항상 (set → applyToRoot → persist) 3단을 함께 한다
-//   (store·CSS·저장 3자 일관성). 초기 상태는 defaults(부팅 시 loadAndApplyChatStyle 이 localStorage 로 덮는다).
-export const useChatStyleStore = create<ChatStyleState>((set, get) => ({
-  values: { ...CHAT_STYLE_DEFAULTS },
-  init: () => {
-    const loaded = loadChatStyle()
-    applyToRoot(loaded)
-    set({ values: loaded })
-  },
-  setValue: (key, value) => {
-    // FIX-2: 낯선 키(런타임 외부 호출)는 조용히 무시 — store·localStorage 오염 차단.
-    if (!isChatStyleKey(key) || typeof value !== 'string') return
-    const next = { ...get().values, [key]: value }
-    applyToRoot(next)
-    persist(next)
-    set({ values: next })
-  },
-  patch: (partial) => {
-    // FIX-2: 화이트리스트 밖 키·비문자열 값은 병합 전에 걸러낸다 — 낯선 키는 store·localStorage 에 못 들어간다.
-    const clean: Partial<ChatStyleValues> = {}
-    for (const [k, v] of Object.entries(partial ?? {})) {
-      if (isChatStyleKey(k) && typeof v === 'string') clean[k] = v
-    }
-    const next = { ...get().values, ...clean }
-    applyToRoot(next)
-    persist(next)
-    set({ values: next })
-  },
-  reset: () => {
-    const next = { ...CHAT_STYLE_DEFAULTS }
-    applyToRoot(next)
-    persist(next)
-    set({ values: next })
-  },
-}))

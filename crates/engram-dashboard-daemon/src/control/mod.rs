@@ -27,7 +27,7 @@ use registry::ControlRegistry;
 pub struct DaemonControlChannel {
     registry: Arc<ControlRegistry>,
     mcp_url: String,
-    data_dir: PathBuf,
+    mcp_dir: mcp_config::McpDir,
     send_exe: Option<PathBuf>,
     priming: Arc<dyn PrimingProvider>,
 }
@@ -36,14 +36,14 @@ impl DaemonControlChannel {
     pub fn new(
         registry: Arc<ControlRegistry>,
         mcp_url: String,
-        data_dir: PathBuf,
+        mcp_dir: mcp_config::McpDir,
         send_exe: Option<PathBuf>,
         priming: Arc<dyn PrimingProvider>,
     ) -> Self {
         Self {
             registry,
             mcp_url,
-            data_dir,
+            mcp_dir,
             send_exe,
             priming,
         }
@@ -194,7 +194,7 @@ impl ControlChannel for DaemonControlChannel {
         // ADR-0099
         // ADR-0209
         let (config_path, settings_file) = if writes_mcp_config_file {
-            let path = mcp_config::write_config(&self.data_dir, id, epoch, &self.mcp_url, &token)
+            let path = mcp_config::write_config(&self.mcp_dir, id, epoch, &self.mcp_url, &token)
                 .map_err(|e| {
                     tracing::warn!(agent = %id, epoch, "mcp-config 기록 실패 — fail-closed(스폰 중단): {e}");
                     ProvisionError(format!("mcp-config write failed: {e}"))
@@ -203,7 +203,7 @@ impl ControlChannel for DaemonControlChannel {
             //   가 없으면 MCP 채널이 물리적으로 사라지지만, 이 조각은 "유저 전역 차단을 뒤집는 보정"
             //   이라 없어도 전역 설정이 허용이면 정상 동작한다. 그 열화로 스폰을 막으면 회귀라 warn 만
             //   남기고 조각 없이 진행한다.
-            let settings = match mcp_config::write_settings(&self.data_dir, id, epoch) {
+            let settings = match mcp_config::write_settings(&self.mcp_dir, id, epoch) {
                 Ok(p) => Some(p),
                 Err(e) => {
                     tracing::warn!(
@@ -299,8 +299,8 @@ impl ControlChannel for DaemonControlChannel {
 
     fn revoke(&self, id: AgentId, epoch: u32) {
         self.registry.revoke(id, epoch);
-        mcp_config::remove_config(&self.data_dir, id, epoch);
-        mcp_config::remove_settings(&self.data_dir, id, epoch);
+        mcp_config::remove_config(&self.mcp_dir, id, epoch);
+        mcp_config::remove_settings(&self.mcp_dir, id, epoch);
     }
 }
 
@@ -515,7 +515,7 @@ mod tests {
         let channel = DaemonControlChannel::new(
             Arc::new(ControlRegistry::new()),
             "http://127.0.0.1:1/mcp".to_string(),
-            data_dir.clone(),
+            mcp_config::McpDir::new(data_dir.join("mcp-config")),
             send_exe,
             Arc::new(RecordingPriming { seen }),
         );
@@ -638,10 +638,11 @@ mod tests {
             Some(PathBuf::from("C:/app/engram.exe")),
         );
         let id = AgentId::new_v4();
-        let cfg_dir = mcp_config::config_path(&data_dir, id, 0)
-            .parent()
-            .expect("config 경로엔 부모 폴더가 있다")
-            .to_path_buf();
+        let cfg_dir =
+            mcp_config::config_path(&mcp_config::McpDir::new(data_dir.join("mcp-config")), id, 0)
+                .parent()
+                .expect("config 경로엔 부모 폴더가 있다")
+                .to_path_buf();
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
         std::fs::write(&cfg_dir, b"occupied").expect("폴더 자리를 파일로 점유");
 
@@ -1078,7 +1079,7 @@ mod tests {
             let channel = DaemonControlChannel::new(
                 registry.clone(),
                 "http://127.0.0.1:1/mcp".to_string(),
-                data_dir.clone(),
+                mcp_config::McpDir::new(data_dir.join("mcp-config")),
                 Some(PathBuf::from(CLI_EXE_NAME)),
                 Arc::new(RecordingPriming {
                     seen: Arc::new(Mutex::new(false)),

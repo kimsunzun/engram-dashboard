@@ -6,10 +6,10 @@
 
 ## 인프라 (요약 — 정본은 코드)
 
-- **진입점은 둘이다.** `logging::init_logging()` = stdout 만 · `logging::init_logging_with_file(data_dir, kind)` = stdout **+ 파일**. 둘 다 부팅 1회·멱등이고 **먼저 부른 쪽이 이긴다**. 데몬(`crates/engram-dashboard-daemon/src/lib.rs`)과 앱 셸(`src-tauri/src/lib.rs`)은 후자를 쓴다.
+- **진입점은 둘이다.** `logging::init_logging()` = stdout 만 · `logging::init_logging_with_file(logs_dir, kind)` = stdout **+ 파일**(`logs_dir` = 로그 폴더 자체 — 호출자가 discovery `DataLayout::logs_dir()` 로 넘긴다). 둘 다 부팅 1회·멱등이고 **먼저 부른 쪽이 이긴다**. 데몬(`crates/engram-dashboard-daemon/src/lib.rs`)과 앱 셸(`src-tauri/src/lib.rs`)은 후자를 쓴다.
 - `set_log_level(level)` 런타임 토글(`EnvFilter` reload).
 - 기본 레벨 **warn**(릴리스 평상시 거의 무출력 = 기본 OFF). `RUST_LOG` 우선. 디버깅 = `RUST_LOG=debug`. **단 릴리스 데몬에는 `RUST_LOG`가 닿지 않는다**(부모 환경 미상속) — 그래서 파일 sink 가 있다.
-- **파일 sink = `<데이터 폴더>/logs/<종류>-<UTC>-<pid>.log`**(종류 = `daemon` · `app`). **동기 쓰기**(이벤트 한 줄 = write 한 번), ANSI 없음. ★**비동기 writer(`tracing_appender::non_blocking`)를 도입하지 말 것**★ — 데몬은 `std::process::exit`로 끝나 버퍼에 남은 줄, 즉 **기동 실패 직전의 마지막 줄**이 사라진다. (ADR-0138)
+- **파일 sink = `<logs_dir>/<종류>-<UTC>-<pid>.log`**(운영 = `<데이터 폴더>/logs/`)(종류 = `daemon` · `app`). **동기 쓰기**(이벤트 한 줄 = write 한 번), ANSI 없음. ★**비동기 writer(`tracing_appender::non_blocking`)를 도입하지 말 것**★ — 데몬은 `std::process::exit`로 끝나 버퍼에 남은 줄, 즉 **기동 실패 직전의 마지막 줄**이 사라진다. (ADR-0138)
 - **로그 폴더는 호출자가 넘긴다** — 데이터 폴더 해석은 `engram-dashboard-discovery`의 몫인데 그 crate가 로깅이 사는 `base`를 의존하므로, 로깅이 그것을 부르면 고리가 된다(잎 crate 불변식 — ADR-0175 결정 1. 옛 근거였던 「코어 격리」 ADR-0003도 그대로 같은 방향이다). 1차 폴더를 못 쓰면 `%TEMP%/engram-dashboard/logs/`로 물러나고, 둘 다 실패하면 파일 sink 없이 뜬다(그 경우의 주인 = 클라이언트 사전 점검, ADR-0135).
 - **보존 = 종류별 최신 10개**(이번 실행분을 포함한 상한). 정리 대상은 `<종류>-YYYYMMDD-HHMMSS-<pid>.log` **문법에 맞는 이름만**이다 — 접두사 일치로 바꾸면 다른 종류의 파일과 손으로 둔 파일까지 후보가 된다.
 - **파일 첫 줄 = 실행 머리글**(`==== engram <종류> | <UTC> | pid <n> | <exe 경로> ====`). 로그 이벤트가 아니라 이벤트 평면 밖의 한 줄이다 — 기본 레벨이 `warn`이라 정상 기동은 한 줄도 안 남아 **머리글이 없으면 파일이 통째로 빈다**. 이걸 메우려고 기동 알림 레벨을 올리지 말 것.

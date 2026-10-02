@@ -10,7 +10,7 @@ import crypto from 'node:crypto'
 import net from 'node:net'
 import { fileURLToPath } from 'node:url'
 
-// daemon.json 위치 해결 — dev(repo <root>/.engram-data) 와 release(<exe 폴더>/data) 둘 다 커버.
+// daemon.json 위치 해결 — dev(repo <root>/.engram-dev) 와 release(<exe 폴더>/data) 둘 다 커버.
 // 이 후보 탐색이 "release-safe" 의 핵심: 어느 빌드든 데몬이 떠 있으면 portfile 로 붙는다.
 //
 // ★ENGRAM_DATA_DIR 로 릴리스 데몬을 가리키게 하지 말 것★: ADR-0134 이후 그 변수는 단일 인스턴스
@@ -40,32 +40,35 @@ function readPortfile(p, attempts = PORTFILE_READ_ATTEMPTS) {
   return null
 }
 
+// 데이터 폴더 안의 portfile 자리(정본 = discovery `DataLayout::daemon_file` — ADR-0264).
+const PORTFILE_IN_DATA_DIR = path.join('daemon', 'run', 'daemon.json')
+
 function findPortfile() {
   const candidates = []
-  if (process.env.ENGRAM_DATA_DIR) candidates.push(path.join(process.env.ENGRAM_DATA_DIR, 'daemon.json'))
-  // ★스크립트 자기 위치 기준 dev 데몬★: 이 파일은 <repo>/scripts/engram.mjs 라 ../.engram-data 가 repo 의 dev
-  //   portfile 이다. 호출 cwd 와 무관하게 발견된다(에이전트가 딴 cwd 에서 불러도 OK — 메타테스트에서 노출된 갭 수정).
+  if (process.env.ENGRAM_DATA_DIR) candidates.push(path.join(process.env.ENGRAM_DATA_DIR, PORTFILE_IN_DATA_DIR))
+  // ★스크립트 자기 위치 기준 dev 데몬★: 이 파일은 <repo>/scripts/engram.mjs 라 ../.engram-dev 가 repo 의 dev
+  //   데이터 폴더다. 호출 cwd 와 무관하게 발견된다(에이전트가 딴 cwd 에서 불러도 OK — 메타테스트에서 노출된 갭 수정).
   try {
     const scriptDir = path.dirname(fileURLToPath(import.meta.url)) // <repo>/scripts
-    candidates.push(path.join(scriptDir, '..', '.engram-data', 'daemon.json'))
+    candidates.push(path.join(scriptDir, '..', '.engram-dev', PORTFILE_IN_DATA_DIR))
   } catch {}
-  // dev(추가 방어): .git 있는 repo 루트까지 걸어 올라가 <root>/.engram-data/daemon.json
+  // dev(추가 방어): .git 있는 repo 루트까지 걸어 올라가 <root>/.engram-dev
   let dir = process.cwd()
   for (let i = 0; i < 8; i++) {
-    if (fs.existsSync(path.join(dir, '.git'))) { candidates.push(path.join(dir, '.engram-data', 'daemon.json')); break }
+    if (fs.existsSync(path.join(dir, '.git'))) { candidates.push(path.join(dir, '.engram-dev', PORTFILE_IN_DATA_DIR)); break }
     const parent = path.dirname(dir)
     if (parent === dir) break
     dir = parent
   }
-  // release: <exe 폴더>/data/daemon.json (ADR-0134 · discovery::default_data_dir).
+  // release: <exe 폴더>/data (ADR-0134 · discovery::default_data_dir).
   //   릴리스 exe 는 repo 밖에도 풀릴 수 있으므로 repo 기준 후보(target/release)와 cwd 기준 후보를 함께 둔다.
   try {
     const scriptDir = path.dirname(fileURLToPath(import.meta.url)) // <repo>/scripts
-    candidates.push(path.join(scriptDir, '..', 'target', 'release', 'data', 'daemon.json'))
+    candidates.push(path.join(scriptDir, '..', 'target', 'release', 'data', PORTFILE_IN_DATA_DIR))
   } catch {}
-  candidates.push(path.join(process.cwd(), 'data', 'daemon.json'))
+  candidates.push(path.join(process.cwd(), 'data', PORTFILE_IN_DATA_DIR))
   // 살아있는 데몬을 가리키는 첫 portfile 선택 — 죽은 dev portfile 을 건너뛴다(ENGRAM_DATA_DIR 목발 제거).
-  // 이게 없으면 스테일 .engram-data/daemon.json 이 죽은 데몬을 가리켜 연결 실패한다.
+  // 이게 없으면 스테일 dev portfile 이 죽은 데몬을 가리켜 연결 실패한다.
   // ★후보별 진단을 전부 계산해 둔다★: 예전엔 첫 살아있는 후보에서 멈췄지만, 그 뒤 연결이 실패했을 때
   //   "왜 이 파일을 골랐고 다른 후보는 어땠나"를 보여주려면 전체 진단이 필요하다(연결 실패 메시지가 씀).
   //   후보 수가 적어(보통 4개 이하) 전부 계산해도 비용은 무시할 만하다.

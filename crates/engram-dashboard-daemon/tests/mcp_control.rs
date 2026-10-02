@@ -408,7 +408,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     let channel = DaemonControlChannel::new(
         registry.clone(),
         handle.url.clone(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None,
         Arc::new(NoopPrimingProvider),
     );
@@ -419,7 +419,8 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
         .expect("provision ok")
         .expect("epoch0 endpoint");
     let old_token = ep0.token.clone();
-    let old_path = mcp_config::config_path(&data_dir, id, 0);
+    let old_path =
+        mcp_config::config_path(&mcp_config::McpDir::new(data_dir.join("mcp-config")), id, 0);
     assert!(old_path.exists(), "epoch0 config 파일 생성");
     assert!(registry.validate(&old_token).is_some(), "epoch0 토큰 유효");
 
@@ -427,7 +428,8 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
         .provision(id, 1, mcp_needs())
         .expect("provision ok")
         .expect("epoch1 endpoint");
-    let new_path = mcp_config::config_path(&data_dir, id, 1);
+    let new_path =
+        mcp_config::config_path(&mcp_config::McpDir::new(data_dir.join("mcp-config")), id, 1);
     assert!(new_path.exists(), "epoch1 config 파일 생성");
     assert_eq!(
         post_initialize(&handle.url, Some(&old_token)).await,

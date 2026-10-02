@@ -8,8 +8,8 @@ REM   dev-dependency of src-tauri, so `tauri build` does NOT produce it. locate_
 REM   the daemon RIGHT NEXT TO the app exe (current_exe().parent()), so BOTH must land in target\release\.
 REM   Without this the release app cannot spawn the daemon (ExeNotFound) and hosts no agents.
 REM
-REM Release data dir (daemon.json) = data\ NEXT TO the app exe, i.e. target\release\data
-REM   (ADR-0134; NOT the dev .engram-data, and no longer %APPDATA%).
+REM Release data dir = data\ NEXT TO the app exe, i.e. target\release\data; the portfile is
+REM   data\daemon\run\daemon.json (ADR-0134; NOT the dev .engram-dev, and no longer %APPDATA%).
 REM   scripts\engram.mjs finds that portfile on its own - just run `node scripts\engram.mjs list`.
 REM ★Do NOT set ENGRAM_DATA_DIR to "point the CLI at" the release daemon (do not remove this warning):
 REM   under ADR-0134 that variable is ALSO the single-instance scope, so setting it makes the next
@@ -41,7 +41,7 @@ REM   Missing/unreadable portfile, a missing/zero/non-numeric pid, a dead pid, a
 REM   or a different executable path => kill nothing and say so. If the kill itself fails (e.g. an
 REM   elevated daemon), the script stops instead of silently building/launching against a still-locked
 REM   binary.
-set "RELEASE_PORTFILE=%ROOT%\target\release\data\daemon.json"
+set "RELEASE_PORTFILE=%ROOT%\target\release\data\daemon\run\daemon.json"
 set "EXPECTED_DAEMON_EXE=%ROOT%\target\release\engram-dashboard-daemon.exe"
 set "RELEASE_DAEMON_PID="
 REM ★Pre-clear RELEASE_DAEMON_EXE too (do not remove)★: `for /f` does not run its body when the lookup
@@ -50,6 +50,7 @@ REM   "cannot confirm => stays empty => do not kill"; without this line that pro
 set "RELEASE_DAEMON_EXE="
 if not exist "%RELEASE_PORTFILE%" goto :daemon_kill_no_portfile
 REM ★Portfile path travels to PowerShell via env var, never interpolated into a quoted literal (do
+echo [release] Hint: if a daemon from before the storage layout change is still running, stop it from the tray or Task Manager - it holds the exe.
 REM   not revert)★: a checkout path containing an apostrophe (e.g. C:\O'Brien\Engram) would break out
 REM   of a single-quoted -LiteralPath string built by text substitution, and a crafted path could
 REM   inject PowerShell. $env:RELEASE_PORTFILE is read by PowerShell itself from the process
@@ -85,7 +86,7 @@ REM   is actually gone regardless of what taskkill itself reported.
 tasklist /FI "PID eq %RELEASE_DAEMON_PID%" /FI "IMAGENAME eq engram-dashboard-daemon.exe" /NH /FO CSV | findstr /I /C:"engram-dashboard-daemon.exe" >nul && goto :daemon_kill_failed
 goto :daemon_kill_done
 :daemon_kill_no_portfile
-echo [release] No daemon pid recorded for this deployment (target\release\data\daemon.json missing) - killing nothing.
+echo [release] No daemon pid recorded for this deployment (target\release\data\daemon\run\daemon.json missing) - killing nothing.
 goto :daemon_kill_done
 :daemon_kill_bad_pid
 echo [release] Portfile at %RELEASE_PORTFILE% has no usable pid (missing, zero, or non-numeric) - killing nothing.
@@ -126,5 +127,5 @@ if errorlevel 1 ( echo [release] LAUNCH FAILED - see the log tail above. & pause
 echo.
 echo [release] The PID above is the app. NOTE: closing this window does NOT stop it - close the app window.
 echo [release] Launched. Full installers (msi/nsis): run "npm run tauri build" WITHOUT --no-bundle.
-echo [release] This build's daemon.json -^> target\release\data\
+echo [release] This build's daemon.json -^> target\release\data\daemon\run\
 pause

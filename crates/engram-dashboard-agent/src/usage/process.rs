@@ -1,4 +1,4 @@
-//! 실물 조회 스포너 — [`ProbeSpawner`] 를 OS 프로세스로 구현한다.
+//! 실물 조회 스포너 — [`ProbeSpawner`] 를 OS 프로세스로 구현한다(ADR-0249).
 //!
 //! ★조회 쪽 OS 분기는 이 모듈 안에만 있다★: 기동 플래그(Windows = 콘솔 창 없음 + 멈춘 채 띄워 Job 에 넣은 뒤
 //!   깨움 · POSIX = 새 프로세스 그룹) · 트리 kill(Windows = KILL_ON_JOB_CLOSE Job Object · POSIX = 그룹 전체에

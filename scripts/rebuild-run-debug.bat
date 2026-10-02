@@ -25,7 +25,8 @@ REM   in-progress agent work in other deployments (agents are CHILDREN of the da
 REM   hypothetical). dev and release now carry separate Tauri identifiers (src-tauri\tauri.dev.conf.json)
 REM   specifically so they can run SIMULTANEOUSLY, which makes this the normal case, not an edge case.
 REM   The daemon that owns this dev deployment records its pid in the portfile below (repo-root
-REM   `.engram-data\daemon.json` - discovery's debug-build default_data_dir, NOT target\release\data).
+REM   `.engram-dev\daemon\run\daemon.json` - discovery's debug-build default_data_dir + DataLayout,
+REM   NOT target\release\data).
 REM   We kill that pid only after tasklist confirms it is STILL an engram-dashboard-daemon.exe AND its
 REM   executable path matches THIS deployment's own daemon binary (target\debug\) - pids get recycled,
 REM   possibly by another deployment's daemon.exe, and killing a stranger's process would be far worse
@@ -33,7 +34,7 @@ REM   than the stale-daemon bug this step exists for.
 REM   Missing/unreadable portfile, a missing/zero/non-numeric pid, a dead pid, a different image name,
 REM   or a different executable path => kill nothing and say so. If the kill itself fails, the script
 REM   stops instead of silently rebuilding/launching against a still-locked binary.
-set "DEV_PORTFILE=%ROOT%\.engram-data\daemon.json"
+set "DEV_PORTFILE=%ROOT%\.engram-dev\daemon\run\daemon.json"
 set "EXPECTED_DEV_DAEMON_EXE=%ROOT%\target\debug\engram-dashboard-daemon.exe"
 set "DEV_DAEMON_PID="
 REM ★Pre-clear DEV_DAEMON_EXE too (do not remove)★: `for /f` does not run its body when the lookup
@@ -42,6 +43,7 @@ REM   "cannot confirm => stays empty => do not kill"; without this line that pro
 set "DEV_DAEMON_EXE="
 if not exist "%DEV_PORTFILE%" goto :dev_daemon_kill_no_portfile
 REM Portfile path travels to PowerShell via env var, never interpolated into a quoted literal - see
+echo [clean] Hint: if a daemon from before the storage layout change is still running, stop it from the tray or Task Manager - it holds the exe.
 REM   rebuild-run-release.bat for why (apostrophe/injection risk in the checkout path).
 REM The [int] cast is a guard, not decoration: a portfile carrying a non-numeric "pid" throws into the
 REM   catch and prints nothing. A missing pid field casts to [int]$null = 0, caught by the same
@@ -70,7 +72,7 @@ REM   exact failure mode the rebuild comment above already warns about, just fro
 tasklist /FI "PID eq %DEV_DAEMON_PID%" /FI "IMAGENAME eq engram-dashboard-daemon.exe" /NH /FO CSV | findstr /I /C:"engram-dashboard-daemon.exe" >nul && goto :dev_daemon_kill_failed
 goto :dev_daemon_kill_done
 :dev_daemon_kill_no_portfile
-echo [clean] No daemon pid recorded for this deployment (.engram-data\daemon.json missing) - killing nothing.
+echo [clean] No daemon pid recorded for this deployment (.engram-dev\daemon\run\daemon.json missing) - killing nothing.
 goto :dev_daemon_kill_done
 :dev_daemon_kill_bad_pid
 echo [clean] Portfile at %DEV_PORTFILE% has no usable pid (missing, zero, or non-numeric) - killing nothing.

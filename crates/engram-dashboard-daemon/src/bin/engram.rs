@@ -15,10 +15,10 @@
 //!   호출과 `engram help`(`--help`·`-h` 동일)가 계열 목록을, `engram help <계열>`(= `engram <계열> --help`)
 //!   이 그 계열 사용법을 낸다. help 는 stdout **평문**이고 exit 0 이다 — 읽는 쪽이 LLM 이라 파싱이 아니라
 //!   독해 대상이다. 모르는 계열·동사는 다른 인자 오류와 같은 반려 JSON(exit 1)으로 끝난다.
-//! ★화면은 다섯이고 그 아래는 없다★: `engram help` 와 계열 낱말 넷(`mail`·`agent`·`window`·`theme`)이
-//!   전부다. 계열 다음 칸에 또 낱말이 오면 화면이 아니라 인자 오류이고, 그 반려가 계열 목록을 되돌려 준다.
-//!   `window`·`theme` 은 `<계열> <동사>` 입구가 없어 `engram help <낱말>` 로만 닿는다(그 둘의 명령은 전체
-//!   이름으로 부른다 — 아래 세 번째 표면).
+//! ★화면은 다섯이고 그 아래는 없다★: `engram help` 와 계열 낱말 넷(`mail`·`agent`·`window`·`settings`)이
+//!   전부다(옛 낱말 `theme` 은 `settings` 화면에 닿는 별칭이다). 계열 다음 칸에 또 낱말이 오면 화면이
+//!   아니라 인자 오류이고, 그 반려가 계열 목록을 되돌려 준다. `window`·`settings` 는 `<계열> <동사>` 입구가
+//!   없어 `engram help <낱말>` 로만 닿는다(그 둘의 명령은 전체 이름으로 부른다 — 아래 세 번째 표면).
 //! ★help 는 크레덴셜·데몬 없이 답한다★: env 검사보다 **먼저** 처리한다 — 표면을 배우는 자리가 "이미
 //!   스폰돼 있어야" 하면 발견이 아니다.
 //!
@@ -236,11 +236,19 @@ const SECTION_ROOT: &str = "root";
 
 /// 계열 상수(`CLI_GROUP_*`)가 없는 두 화면의 낱말.
 ///
-/// ★데몬 쪽에 같은 어휘가 없는 것이 이유다★: 창·테마는 `window.list`·`ui.refresh` 처럼 **전체 이름**으로만
+/// ★데몬 쪽에 같은 어휘가 없는 것이 이유다★: 창·설정은 `window.list`·`settings.get` 처럼 **전체 이름**으로만
 ///   불리고 `<계열> <동사>` 입구가 없다. 그래서 이 둘은 `engram help <낱말>` 의 낱말로만 존재하고, 공유
 ///   상수에 올리면 파서가 받지도 않는 계열이 계열 목록에 생긴다.
 const HELP_TOPIC_WINDOW: &str = "window";
-const HELP_TOPIC_THEME: &str = "theme";
+const HELP_TOPIC_SETTINGS: &str = "settings";
+
+/// 화면의 옛 낱말 → 지금 화면. `help <낱말>` 만 받고, 계열 목록·반려 문구에는 싣지 않는다.
+///
+/// ★걷지 말 것★: 개명(TRD S21-storage §10 F14) 전에 띄웠거나 이어받은 에이전트는 옛 프라이밍
+///   (`engram help theme`)을 컨텍스트에 들고 있다 — 그 낱말이 반려되면 설정 화면을 못 찾는다.
+/// ★본문 파일의 `theme` 구획을 내지 않는다★: 그 구획은 `theme` 을 필수로 요구하는 옛 바이너리가 새 파일을
+///   받아들이게 남긴 짧은 포인터다. 별칭이 그것을 내면 읽는 쪽이 한 번 더 불러야 설정 화면에 닿는다.
+const HELP_TOPIC_ALIASES: &[(&str, HelpTopic)] = &[("theme", HelpTopic::Settings)];
 
 /// 화면 본문 한 장(구획 id → 본문).
 ///
@@ -549,7 +557,7 @@ enum HelpTopic {
     Mail,
     Agent,
     Window,
-    Theme,
+    Settings,
 }
 
 impl HelpTopic {
@@ -560,7 +568,7 @@ impl HelpTopic {
         HelpTopic::Mail,
         HelpTopic::Agent,
         HelpTopic::Window,
-        HelpTopic::Theme,
+        HelpTopic::Settings,
     ];
 
     fn section_id(self) -> &'static str {
@@ -569,7 +577,7 @@ impl HelpTopic {
             HelpTopic::Mail => CLI_GROUP_MAIL,
             HelpTopic::Agent => CLI_GROUP_AGENT,
             HelpTopic::Window => HELP_TOPIC_WINDOW,
-            HelpTopic::Theme => HELP_TOPIC_THEME,
+            HelpTopic::Settings => HELP_TOPIC_SETTINGS,
         }
     }
 
@@ -586,6 +594,12 @@ impl HelpTopic {
             .iter()
             .copied()
             .find(|t| t.group_word() == Some(word))
+            .or_else(|| {
+                HELP_TOPIC_ALIASES
+                    .iter()
+                    .find(|(alias, _)| *alias == word)
+                    .map(|&(_, topic)| topic)
+            })
     }
 }
 
@@ -4182,6 +4196,53 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_old_theme_word_reaches_the_settings_screen() {
+        for args in [vec!["help", "theme"], vec!["--help", "theme"]] {
+            match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
+                ParsedCommand::Help(t) => assert_eq!(t, HelpTopic::Settings, "{args:?}"),
+                other => panic!("help 여야({args:?}): {other:?}"),
+            }
+        }
+        // 별칭이 계열 낱말과 같으면 계열 쪽이 먼저 잡혀 별칭은 죽은 줄이 된다.
+        for (alias, _) in HELP_TOPIC_ALIASES {
+            assert!(
+                HelpTopic::ALL.iter().all(|t| t.group_word() != Some(alias)),
+                "별칭 `{alias}` 가 계열 낱말과 겹친다"
+            );
+        }
+        assert!(
+            parse_command(&argv(&["help", "theme", "extra"])).is_err(),
+            "별칭도 help 단독 호출 규칙을 따른다"
+        );
+    }
+
+    /// ★개명 전 바이너리가 요구하던 구획 전량이 본문 파일에 남아 있다★ — 하나라도 빠지면 그 바이너리는 새
+    ///   파일을 통째로 거부하고, 제 내장 사본(파일의 `theme` 키를 고치라는 옛 안내)을 낸다. 이 바이너리는 그
+    ///   여분 구획을 모르는 구획으로 무시하고, `theme` 낱말은 별칭으로 settings 화면을 낸다.
+    #[test]
+    fn the_help_file_still_satisfies_the_pre_rename_binary_and_this_one_ignores_the_extra() {
+        let text = HelpText::parse(HELP_EMBEDDED, "내장 사본");
+        for id in ["root", "mail", "agent", "window", "theme"] {
+            assert!(
+                text.sections.iter().any(|(k, _)| k == id),
+                "개명 전 바이너리가 요구하는 구획 `{id}` 가 없다"
+            );
+        }
+        assert!(text.missing().is_empty(), "여분 구획이 로드를 깨면 안 된다");
+        let compat = text.section("theme");
+        let settings = render_help_from(&text, HelpTopic::Settings);
+        assert!(
+            settings.starts_with(&format!("{CLI_EXE_NAME} {HELP_TOPIC_SETTINGS} ")),
+            "별칭 대상은 settings 구획이어야: {settings}"
+        );
+        assert_ne!(
+            settings,
+            compat.replace(HELP_TOOL_SLOT, CLI_EXE_NAME),
+            "`help theme` 이 옛 바이너리용 포인터 구획을 내면 안 된다"
+        );
+    }
+
     // ── 회신 계약 · 프라이밍 다리 ─────────────────────────────────────────────────────
 
     /// ★옮겨 온 pin(`control/priming.rs::production_priming_files_teach_the_reply_contract`)★: 예전엔
@@ -4328,13 +4389,13 @@ mod tests {
     #[test]
     fn a_help_file_missing_one_section_is_rejected_whole() {
         let full = HELP_EMBEDDED.replace("\r\n", "\n");
-        let marker = format!("{SECTION_OPEN}{HELP_TOPIC_THEME}");
+        let marker = format!("{SECTION_OPEN}{HELP_TOPIC_SETTINGS}");
         assert!(full.contains(&marker), "표시 줄 표기가 바뀌었다: {marker}");
         let crippled = full.replace(&marker, "<!-- 그냥 주석 -->");
         let text = HelpText::parse(&crippled, "crippled");
         assert_eq!(
             text.missing(),
-            vec![HELP_TOPIC_THEME.to_string()],
+            vec![HELP_TOPIC_SETTINGS.to_string()],
             "빠진 구획을 정확히 지목해야"
         );
     }

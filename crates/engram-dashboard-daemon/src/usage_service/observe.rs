@@ -1,4 +1,4 @@
-//! 줍기 관측을 사용량 서비스로 곧장 넘기는 [`StatusSink`] decorator(TRD §1-4 「줍기 경로」) — 쌓아 두지 않고
+//! 줍기 관측을 사용량 서비스로 곧장 넘기는 [`StatusSink`] decorator(TRD §1-4 「줍기 경로」 · ADR-0247) — 쌓아 두지 않고
 //! 부른 스레드(출력 pump)에서 [`UsageService::observe`] 를 부른다.
 //!
 //! ★모든 훅을 감싼 sink 로 그대로 넘긴다 — 사용량 관측도★. 훅은 기본 구현이 no-op 이라 하나를 빠뜨리면 안쪽이

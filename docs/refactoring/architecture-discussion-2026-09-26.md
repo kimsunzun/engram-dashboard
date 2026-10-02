@@ -3,7 +3,7 @@
 **목적:** transport 를 붙이기 전에 전체 의존관계와 모듈 쪼개기를 먼저 정한다(사용자가 정한 순서, 2026-09-26). 사용자가 모듈 순서대로 묻고, 답에서 나온 사실과 결정 후보를 여기 쌓는다.
 
 - **기준 코드:** master `a226f63`. 사실 항목은 전부 그 시점 코드와 대조했다.
-- **결정은 여기서 끝나지 않는다.** 방향이 선 후보는 논의를 마친 뒤 ADR 로 박고 여기서 링크한다(`../decisions/`). 착수 대기 사실은 `../tracking.md` T-46 이 진다.
+- **결정은 여기서 끝나지 않는다.** 방향이 선 후보는 논의를 마친 뒤 ADR 로 박고 여기서 링크한다(`../decisions/`). 착수 대기 사실은 `../tracking.md` T-47 이 진다.
 - 그림은 그리지 않는다(사용자 결정 2026-09-26 — 앞서 만든 `../reference/architecture-map.html` 은 초안으로만 남긴다).
 
 ---
@@ -310,7 +310,7 @@
 | 패킷 `CommandListEntry` 가 명부 항목 `RosterEntry` 와 거의 같다(`available` 은 늘 참) | `crates/engram-dashboard-protocol/src/messages.rs:392` · `crates/engram-dashboard-command/src/roster.rs:10` | 3-1(`protocol` 정리) 때 함께 볼 것 |
 | 입구 인자 검사의 순서 함정(`contains` → `check_args` → `call`) — 입구가 둘이 되면 묶음 함수로 | `crates/engram-dashboard-daemon/src/control/commands.rs:172-182` | 입구가 늘 때 |
 | `Clock` 시간 인터페이스가 네 벌(transport · daemon `command_delivery` · discovery · daemon `usage_service`) | 후보 4 표 | 1-1 |
-| tracking 재편 뒤 T-46 이 「사소한 기능·정리」 절에 들어가 있다 — 다른 워크트리(`wt2`)가 tracking 정리 중 | `docs/tracking.md` | 사용자 결정 대기 |
+| ★**후보 6 과 부딪힐 수 있다 — 2-2 착수 전에 사용자와 다시 본다**★: master 의 저장 구조 개편(ADR-0264, 2026-10-02)이 데이터 루트를 컴포넌트별(`daemon\{state,run}` · `shell\{config,state}` · `webview\` · `logs\`)로 나누고 그 경로의 **단일 출처 `DataLayout` 을 discovery 에 새로 두었다**. 후보 6(「discovery 를 뽀개 경로 규칙은 데몬으로, 셸은 각자」)과 「셸·데몬 경로를 한 곳에서 계산」이 갈린다 | `crates/engram-dashboard-discovery/src/layout.rs` · ADR-0264 | 2-2 전 사용자 결정 |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)

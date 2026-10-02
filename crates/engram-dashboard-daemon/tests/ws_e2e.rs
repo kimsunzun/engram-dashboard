@@ -2322,6 +2322,7 @@ mod real_process {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
 
+    use engram_dashboard_discovery::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
 
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
@@ -2387,7 +2388,7 @@ mod real_process {
     }
 
     fn poll_daemon_json(data_dir: &Path, deadline: std::time::Duration) -> Option<DaemonInfo> {
-        let path = data_dir.join("daemon.json");
+        let path = DataLayout::new(data_dir).daemon_file();
         let end = std::time::Instant::now() + deadline;
         while std::time::Instant::now() < end {
             if let Ok(bytes) = std::fs::read(&path) {
@@ -2434,7 +2435,9 @@ mod real_process {
         // ProfilesFile 은 비공개 구조라 동등한 JSON 을 직접 만든다(schema_version=1 + profiles 배열).
         let profiles_json = serde_json::to_string(&[profile]).expect("profile 직렬화");
         let file = format!("{{\"schema_version\":1,\"profiles\":{profiles_json}}}");
-        std::fs::write(data_dir.join("agents.json"), file).expect("agents.json 작성");
+        let state = DataLayout::new(data_dir).daemon_state_dir();
+        std::fs::create_dir_all(&state).expect("state 폴더");
+        std::fs::write(state.join("agents.json"), file).expect("agents.json 작성");
     }
 
     // ── case1: 데몬 .exe kill → PTY child(cmd.exe) Job(KILL_ON_JOB_CLOSE) 동반 정리 ──────
@@ -2610,7 +2613,9 @@ mod real_process {
             start_time: 0xDEAD_BEEF,
         };
         let stale_json = serde_json::to_vec_pretty(&stale).expect("stale 직렬화");
-        std::fs::write(data_dir.join("daemon.json"), &stale_json).expect("stale daemon.json 작성");
+        let record_path = DataLayout::new(&data_dir).daemon_file();
+        std::fs::create_dir_all(record_path.parent().expect("run 폴더")).expect("run 폴더 생성");
+        std::fs::write(&record_path, &stale_json).expect("stale daemon.json 작성");
 
         let mut daemon = spawn_daemon_iso(&ctx);
 

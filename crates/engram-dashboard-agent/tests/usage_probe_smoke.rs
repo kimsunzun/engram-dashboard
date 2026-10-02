@@ -123,7 +123,7 @@ fn claude_logged_out_answer_shape() {
 #[test]
 #[ignore = "실 claude CLI·로그인·계정의 조회 제한을 쓴다"]
 fn claude_get_usage_answers_with_the_scratch_root_inside_the_repo() {
-    let root = TempTree::at(repo_root().join(".engram-data").join("usage-probe-smoke"));
+    let root = TempTree::at(repo_root().join(".engram-dev").join("usage-probe-smoke"));
     let run = run_probe("claude", root.path(), Tweaks::default());
     run.report("claude get_usage (scratch root inside the repo)", &root);
     run.result

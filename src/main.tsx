@@ -5,11 +5,15 @@ import "./index.css";
 import { useThemeStore } from "./store/themeStore";
 import { useAgentStore } from "./store/agentStore";
 import { themeManager } from "./theme/ThemeManager";
-import { loadAndApplyChatStyle, useChatStyleStore } from "./store/chatStyleStore"; // ADR-0051
+import { settingsClient } from "./api/settingsClient";
+import { installChatStyleApplier } from "./store/chatStyleStore";
 
-// ADR-0051 (FIX-1): 저장된 채팅 스타일을 첫 렌더 전에 로드·적용한다 — 데몬 bootstrap 경로와 무관하게(프론트
-// 전용 상태). 데몬이 멈춰도 스타일이 적용되고, 정상 부팅에서도 기본값 깜빡임을 최소화한다.
-loadAndApplyChatStyle();
+// ADR-0265: 셸 설정을 받아 챗 스타일을 칠한다 — 데몬 bootstrap 과 무관하게(설정의 주인은 셸) 첫 렌더 전에 건다.
+// 값은 비동기로 오고 그 전의 첫 페인트는 `theme.css` 의 `--chat-*` fallback 이다(TRD S21-storage §10 F6 (a)).
+// 페이지마다 한 번 돌아 disposer 를 쥐지 않는다 — App 의 effect 로 옮기면 두 disposer 를 effect 가 돌려줘야 한다
+// (StrictMode 이중 실행).
+installChatStyleApplier();
+settingsClient.install();
 
 // ★첫 페인트 전에 data-theme 를 반드시 박는다★ — 색 토큰은 `styles/theme.css` 의 `:root[data-theme='…']`
 // 안에만 있고 폴백이 없다. 속성이 없는 동안에는 `--text`·`--border` 가 통째로 미정의라 index.css 가 배경만
@@ -24,13 +28,13 @@ themeManager.apply("dark");
 // getState().<액션>()으로 UI를 조작할 수 있다. 프로덕션 빌드(import.meta.env.DEV=false)에선 미노출.
 // ★레이아웃(슬롯/뷰)은 여기 없다★ — 백엔드 권위(ADR-0035)라 그 제어 표면은 command 레지스트리다
 // (window.__engramCmd).
-// ★theme 은 이제 반쯤 셸 소유다★ — 부팅값과 `ui.refresh` 는 디스크(`ui-settings.json`)에서 오고
-// (`theme/uiSettings.ts`), 여기 노출한 핸들로 바꾼 값은 저장되지 않아 다음 refresh 가 덮는다.
+// ★theme 의 권위는 셸이다★ — 전역 값은 셸 설정 `theme.default`(ADR-0265)이고, 창별 덮어쓰기만 P3d 전까지
+// `ui-settings.json` + `ui.refresh` 에서 온다(배달 = `theme/uiSettings.ts`). 여기 노출한 핸들로 바꾼 값은 저장되지
+// 않아 셸의 다음 밀기가 덮는다.
 if (import.meta.env.DEV) {
   (window as unknown as { __engram?: unknown }).__engram = {
     theme: useThemeStore,
     agent: useAgentStore,
-    chatStyle: useChatStyleStore, // ADR-0051
   };
 }
 

@@ -452,7 +452,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     let channel = DaemonControlChannel::new(
         registry.clone(),
         handle.url.clone(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
         Arc::new(NoopPrimingProvider),
     );
@@ -529,7 +529,7 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
     let channel = DaemonControlChannel::new(
         registry.clone(),
         handle.url.clone(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
         Arc::new(NoopPrimingProvider),
     );
@@ -611,7 +611,7 @@ fn codex_mails_over_mcp_and_the_cli_mirror_closes() {
     let channel = DaemonControlChannel::new(
         Arc::new(ControlRegistry::new()),
         "http://127.0.0.1:1/mcp".to_string(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         Some(std::path::PathBuf::from("C:/app/engram.exe")),
         Arc::new(FixedPrimingProvider(priming.clone())),
     );
@@ -669,7 +669,7 @@ fn a_backend_outside_the_mail_plane_survives_a_missing_cli_binary() {
     let channel = DaemonControlChannel::new(
         registry,
         "http://127.0.0.1:1/mcp".to_string(),
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // ← CLI 실행파일을 못 찾은 데몬
         Arc::new(NoopPrimingProvider),
     );

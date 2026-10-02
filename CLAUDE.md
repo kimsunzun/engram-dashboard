@@ -107,7 +107,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 **모든 기능이 LLM으로 제어 가능해야 한다.** LLM이 메인 조작 주체, 사람 클릭은 보조 — 둘이 같은 핸들을 흔든다. 프론트는 렌더링만 소유하고 제어는 소유하지 않는다.
 
 - **제어 표면은 이미 있다(실측). "없으니 만들어야 한다"고 읽고 두 번째 표면을 짓지 말 것.** 레이아웃·창·탭·슬롯은 백엔드 소유(ADR-0035/0057), 프론트는 `window.__engramCmd` 레지스트리(ADR-0055/0064).
-- **남은 갭:** 키바인딩 커스터마이징 미구현 · 트리 선택 상태 미커버 · **챗 스타일은 릴리스 빌드에 제어 경로가 없다**(ADR-0169) · **정식 표면(버스·`__engramCmd`)으로는 LLM 이 터미널 모드 에이전트를 끊을 길이 없다**(`agent.interrupt` 는 CONFLICT 로 답하고 버스에 날 입력 명령이 없다 — ADR-0245 · 사용자 수락) · **버스 밖 전역 핸들 공존** — "단일 표면"은 지향이지 현황이 아니다.
+- **남은 갭:** 키바인딩 커스터마이징 미구현 · 트리 선택 상태 미커버 · **정식 표면(버스·`__engramCmd`)으로는 LLM 이 터미널 모드 에이전트를 끊을 길이 없다**(`agent.interrupt` 는 CONFLICT 로 답하고 버스에 날 입력 명령이 없다 — ADR-0245 · 사용자 수락) · **셸 명령 표(`src-tauri/src/layout/commands.rs`)의 명령 전부(창·탭·슬롯·분할·`settings.*`·`ui.refresh` 등 — `usage.*` 처럼 데몬이 주인인 것은 제외)는 셸이 데몬에 붙어 있을 때만 닿는다**(TRD S21-storage §12 R9) · **버스 밖 전역 핸들 공존** — "단일 표면"은 지향이지 현황이 아니다.
   - ★**그 핸들 명단을 여기 적지 말 것 — 명단은 낡고, 낡은 명단은 없는 갭을 지키게 만든다**★. **찾는 법 = `rg "\)\.__ENGRAM_|\)\.__engram" src/ -g '!*.test.*'`** — `).__NAME` 대입 형태만 잡아 **살아 있는 전역 대입만** 돌려준다(이름 문자열을 그냥 grep하면 타입 주석·테스트·주석까지 딸려 와 열 배로 부푼다). ★**그 결과에서 `__engramCmd` 한 줄은 곁문이 아니라 정식 표면이다**★ — 위 항이 가리키는 그것이고, 나머지가 갭이다.
   - ★**"왜 아직 있나"를 각 핸들 주석에서 찾을 수 있다고 기대하지 말 것**★ — 스스로 임시라 자인하는 것도 있고, **정식 §5 표면인 척 적혀 있는 것도 있다.** 자인하던 핸들들은 이미 걷혔고, 남은 쪽이 더 조용하다. 판정은 이 절이 하고 주석은 근거가 아니다.
 - **레이아웃은 디스크 영속이 없다** — 인메모리뿐이라 클라이언트 재시작 시 초기화된다.
@@ -161,7 +161,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 - **messaging** — 메시징 커널. **워크스페이스 crate 무의존**(컴파일러 강제 벽). 접합은 lib이 소유한 포트 trait뿐이고 실물 어댑터는 데몬이 소유한다. (ADR-0110 — 턴 관측 명단·분류는 ADR-0127이 코어로 승격, TapHost 포트는 폐지)
 - **net** — 데몬의 네트워크 행(WS·Origin·핸드셰이크·연결 수명·단일 writer·keepalive·팬아웃·프레임 포트·단일 인스턴스·portfile). **경계·격리 게이트·의존 상한의 정본은 그 crate `src/lib.rs` 헤더.** (ADR-0129)
 - **daemon** — `AgentManager` 소유, 소켓 수락 루프와 네트워크 행 조립. 이벤트버스 single-push(ADR-0028). 메시징 호스트 조립실(ADR-0110).
-- **discovery** — 데몬 발견·기동(`ensure_daemon`·WMI spawn·폴링) + `default_data_dir`. **판정 로직만 주입 seam 뒤로 분리**돼 WMI·sleep 없이 단독 테스트된다(crate 전체가 순수한 게 아니다). (ADR-0024)
+- **discovery** — 데몬 발견·기동(`ensure_daemon`·WMI spawn·폴링) + `default_data_dir` + **데이터 폴더 배치 `DataLayout`**(디렉터리와 둘 이상의 프로세스가 보는 파일 — `daemon.json` — 경로의 단일 출처. 한 저장소만 쓰는 파일 이름은 그 저장소가 소유한다 · ADR-0264). **판정 로직만 주입 seam 뒤로 분리**돼 WMI·sleep 없이 단독 테스트된다(crate 전체가 순수한 게 아니다). (ADR-0024)
 - **protocol** — wire 계약 + codec + ts-rs 바인딩.
 - **src-tauri** — 데몬 클라이언트 셸(창·트레이·discovery·로컬 command). **에이전트 in-proc 호스팅 X — `AgentManager` 소유는 데몬이다.** (ADR-0029)
 
@@ -183,7 +183,7 @@ Tauri v2 + React 19 + Rust(portable-pty) 기반 **Claude 에이전트 관리 네
 
 - **제어 표면(불변):** 컴포넌트·스토어는 `agentClient`(단일 `ProtocolClient`)에만 의존한다(개별 IPC 헬퍼 직접 호출 금지 — ADR-0011이 거부한 `ptyApi` 형태. 그런 모듈은 지금 없다). carrier = transport seam, 운영은 `TauriTransport` 고정(ADR-0036). 교체점은 transport이고, `WsTransport`는 테스트·직결 흔적이다(ADR-0020/0029).
 - **폴더:** api · commands(제어 표면 — registry/dispatch/contributions + 버스 다리) · components(layout/agent/slot/ui) · i18n · lab · lib · pages · store · styles · theme · util.
-- **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — 단 **raw `listen` 수명은 각 등록 주체가 따로 진다**. ★**등록 주체를 세지 말 것 — 늘어난다**★(옛 문장이 "둘로 갈린다"였는데 실제로는 넷이 됐고, 그 어긋남을 두 번 연속 리뷰가 잡았다). 대신 **가름 규칙**을 쓴다: `eventBus`는 `agentClient`의 **추상 구독**만 받고, **백엔드가 권위인 표면**은 Tauri `listen`을 직접 걸되 **거는 쪽이 자기 disposer를 소유한다**. 오늘 그 예외에 드는 것 = 에이전트 이벤트(전송 계층) · 레이아웃·탭 · 창 레이아웃 · UI 설정 · 버스 다리. **찾는 법 = `rg "from '@tauri-apps/api/event'" src/`** — 손으로 적은 명단은 또 낡는다.
+- **구독(콜백) 수명은 `eventBus`가 한 곳에서 소유한다** — 단 **raw `listen` 수명은 각 등록 주체가 따로 진다**. ★**등록 주체를 세지 말 것 — 늘어난다**★(옛 문장이 "둘로 갈린다"였는데 실제로는 넷이 됐고, 그 어긋남을 두 번 연속 리뷰가 잡았다). 대신 **가름 규칙**을 쓴다: `eventBus`는 `agentClient`의 **추상 구독**만 받고, **백엔드가 권위인 표면**은 Tauri `listen`을 직접 걸되 **거는 쪽이 자기 disposer를 소유한다**. 오늘 그 예외에 드는 것 = 에이전트 이벤트(전송 계층) · 레이아웃·탭 · 창 레이아웃 · UI 설정 · 셸 설정 · 버스 다리. **찾는 법 = `rg "from '@tauri-apps/api/event'" src/`** — 손으로 적은 명단은 또 낡는다.
 - **통합 micro-rules:** 구독 effect deps `[viewId, agentId]`(화신 표식 제외 — ADR-0046 구독 키 + ADR-0164) · 구독 전 `terminal.reset()` · seq 연속(「replay→live」 불변식 — 붙듦 상한 `HELD_MAX_FRAMES` · `HELD_MAX_BYTES`(`src/api/protocolClient.ts`)는 데몬 링 상한 `REPLAY_MAX_EVENTS` · `REPLAY_MAX_BYTES` 보다 작게 둔다: 크면 구멍 자리가 이미 링에서 밀려나 넘침 회복이 늘 잘림으로 끝난다 · 넘치면 재요청 사다리가 아니라 `startBuffering`(사다리는 live 에서 재청구를 안 낸다) — ADR-0231) · replay 경계 = gen 펜스 성공 마커(마커가 replay 머리를 싣고, flush 는 `max(마지막+1, 머리)` 부터 이어진 만큼만) · ★replay 요청은 그 창의 출력 Channel 등록 뒤★(`awaitOutputChannel` — 셸은 미등록 창 몫을 말없이 건너뛰어, 먼저 흐르면 한가한 에이전트의 뷰가 영영 빈다) · 구조화 뷰는 `'live'` 마다 대기 목록 재부착 대조(`ListQueuedInputs` 한 번 → 뷰가 스냅숏 seq `as_of_seq` 까지 배달받은 뒤 적용 · 대조 세대로 옛 답을 버림 · 스냅숏에도 그 뒤 `Queued` 에도 없는 열린 행 = 되살림 가능 묘비 — 링에서 밀려난 사건을 메운다 · ADR-0231) · `delete channel.onmessage`(null 아님 — ★실 Tauri Channel 에선 무동작이고, 재등록 틈의 프레임이 그 무동작에 기댄다 — 떼기를 진짜로 만들지 말 것★) · 입력 가드 · resize debounce 50ms.
 
 ## 창 구성

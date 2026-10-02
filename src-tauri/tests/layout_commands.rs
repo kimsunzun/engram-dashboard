@@ -54,7 +54,8 @@ use engram_dashboard_lib::daemon_client::inbound::{
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
-    make_table, LayoutPorts, SlotPopoutArgs, SplitListArgs, SplitSetRatioArgs, UiRefreshArgs,
+    make_table, LayoutPorts, SettingsGetArgs, SettingsResetArgs, SettingsSchemaArgs,
+    SettingsSetArgs, SlotPopoutArgs, SplitListArgs, SplitSetRatioArgs, UiRefreshArgs,
     WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::geometry::Insets;
@@ -63,10 +64,14 @@ use engram_dashboard_lib::layout::{
     SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost,
     WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
+use engram_dashboard_lib::settings::{
+    SettingItem, SettingsEvents, SettingsService, SettingsSnapshot, THEME_DEFAULT,
+};
 use engram_dashboard_lib::ui_settings::{
-    deliver_per_window, load_settings, parse_settings, read_capped, sweep_dead_windows,
-    write_atomic, LoadedTheme, SettingsSource, SweepOutcome, ThemeSource, UiSettingsPayload,
-    UiSettingsRefresh, UiTheme, DEFAULT_THEME, MAX_REFUSED_DETAILS,
+    deliver_per_window, global_theme, load_settings, parse_settings, read_capped,
+    sweep_dead_windows, write_atomic, EffectiveThemes, LoadedTheme, SettingsSource, SweepOutcome,
+    ThemeSource, ThemeWindows, UiSettingsPayload, UiSettingsRefresh, UiTheme, DEFAULT_THEME,
+    MAX_REFUSED_DETAILS,
 };
 use engram_dashboard_lib::view_commands::{
     reserved_names, ViewArgSchema, ViewCommandBridge, ViewCommandDecl, ViewCommandHelp,
@@ -201,6 +206,74 @@ impl FakeUiSettings {
     }
 }
 
+/// 설정 알림 포트 대역 — 창도 Tauri 도 없이 「무엇을 언제 알렸나」만 남긴다.
+#[derive(Default)]
+struct FakeSettingsEvents {
+    changed: Mutex<Vec<SettingsSnapshot>>,
+    theme_pushes: Mutex<usize>,
+    /// `changed` 가 불린 스레드 — 쓰기 본문이 어디서 돌았나.
+    threads: Mutex<Vec<std::thread::ThreadId>>,
+}
+
+impl SettingsEvents for FakeSettingsEvents {
+    fn changed(&self, change: &SettingsSnapshot) {
+        self.changed.lock().unwrap().push(change.clone());
+        self.threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+    }
+
+    fn theme_default_changed(&self) {
+        *self.theme_pushes.lock().unwrap() += 1;
+    }
+}
+
+impl FakeSettingsEvents {
+    fn changes(&self) -> Vec<SettingsSnapshot> {
+        self.changed.lock().unwrap().clone()
+    }
+
+    fn theme_pushes(&self) -> usize {
+        *self.theme_pushes.lock().unwrap()
+    }
+
+    fn threads(&self) -> Vec<std::thread::ThreadId> {
+        self.threads.lock().unwrap().clone()
+    }
+}
+
+/// 시험 하나 몫의 셸 config 폴더 — 적재는 폴더를 만들지 않고 첫 쓰기가 만든다. 끝나면 치운다.
+struct ConfigDir(std::path::PathBuf);
+
+impl ConfigDir {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        ConfigDir(std::env::temp_dir().join(format!(
+            "engram-layout-commands-settings-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("시계")
+                .as_nanos()
+        )))
+    }
+
+    /// 셸 `setup` 이 하는 그대로 — 적재 뒤 쓰기를 연다.
+    fn service(&self) -> Arc<SettingsService> {
+        let service = SettingsService::load_from_dir(&self.0);
+        service.enable_writes();
+        Arc::new(service)
+    }
+}
+
+impl Drop for ConfigDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 // ── 태스크 spawner 하네스 ────────────────────────────────────────────────────
 
 /// 태스크를 받아 **쥐고만** 있는다 — 테스트가 [`Queued::drain`] 으로 직접 돌린다.
@@ -324,6 +397,11 @@ struct World {
     state: LayoutState,
     windows: Arc<Windows>,
     ui: Arc<FakeUiSettings>,
+    /// 표가 쥔 것과 같은 서비스 — 시험이 명령 밖에서 값을 확인한다.
+    settings: Arc<SettingsService>,
+    settings_events: Arc<FakeSettingsEvents>,
+    /// 쥐고만 있다 — 시험이 끝나면 폴더를 치운다.
+    _config: ConfigDir,
     mail: Mailbox,
     spawn_requests: mpsc::UnboundedReceiver<SpawnRequest>,
 }
@@ -333,6 +411,9 @@ impl World {
         let state = LayoutState::new();
         let windows = Arc::new(Windows::default());
         let ui = Arc::new(FakeUiSettings::default());
+        let config = ConfigDir::new();
+        let settings = config.service();
+        let settings_events = Arc::new(FakeSettingsEvents::default());
         let (tx, spawn_requests) = mpsc::unbounded_channel();
         let ports = LayoutPorts {
             state: state.clone(),
@@ -343,12 +424,17 @@ impl World {
             labels: Arc::new(PopupCounter::default()),
             spawner: Arc::new(DaemonSpawner { requests: tx }),
             ui_settings: Arc::clone(&ui) as Arc<dyn UiSettingsRefresh>,
+            settings: Arc::clone(&settings),
+            settings_events: Arc::clone(&settings_events) as Arc<dyn SettingsEvents>,
         };
         (
             World {
                 state,
                 windows,
                 ui,
+                settings,
+                settings_events,
+                _config: config,
                 mail: Mailbox::default(),
                 spawn_requests,
             },
@@ -452,6 +538,10 @@ fn the_table_holds_exactly_the_declared_commands() {
         vec![
             "agent.spawnInto",
             "layout.setSlotContent",
+            "settings.get",
+            "settings.reset",
+            "settings.schema",
+            "settings.set",
             "slot.assignAgent",
             "slot.close",
             "slot.focus",
@@ -484,9 +574,10 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   표면이 안 만든다)이, 세대 7 은 그 정책이 **뒤집힌 것**(그 낱말을 이 표면이 실제로 만든다 —
     //   2026-09-22 · ADR-0219)이 바뀐 세대다(넷 다 선언이라 올린다). 세대 8 은 이름이 는 세대다
     //   (`split.setRatio`·`split.list` — ADR-0227). 세대 9 는 `layout.setSlotContent` 의 **어휘와 칸**이
-    //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7).
-    assert_eq!(CATALOG_VERSION, 9);
-    assert_eq!(COMMAND_SPECS.len(), 19);
+    //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7). 세대 10 은
+    //   이름이 넷 늘고(`settings.*`) `ui.refresh` 답의 `theme` 출처가 설정으로 바뀐 세대다(TRD S21-storage §5-4).
+    assert_eq!(CATALOG_VERSION, 10);
+    assert_eq!(COMMAND_SPECS.len(), 23);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
         2,
@@ -499,6 +590,14 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     );
     assert_eq!(SplitSetRatioArgs::SPEC.since, 8);
     assert_eq!(SplitListArgs::SPEC.since, 8);
+    for since in [
+        SettingsGetArgs::SPEC.since,
+        SettingsSetArgs::SPEC.since,
+        SettingsResetArgs::SPEC.since,
+        SettingsSchemaArgs::SPEC.since,
+    ] {
+        assert_eq!(since, 10);
+    }
 }
 
 #[test]
@@ -1071,6 +1170,464 @@ async fn ui_refresh_leaves_the_layout_untouched() {
     );
     assert_eq!(after.active, before.active);
     assert_eq!(world.slots(after.active), slots_before);
+}
+
+// ── (B) 셸 설정 — settings.get · set · reset · schema (TRD S21-storage §5-4) ──────────
+//
+// 서비스는 실물이고(임시 폴더 위 — 셸 setup 처럼 쓰기를 연 것) 알림만 가짜다. 재는 것 = 봉투가 표가 쥔 **그
+// 서비스**에 닿나 · 서비스의 오류 종류가 같은 이름의 코드로 나가나 · **실제로 바뀐 쓰기에만** 알리나. 값
+// 정규화·파일 관용은 서비스 옆 단위 시험(`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
+
+fn setting(key: &str, value: &str, is_default: bool) -> SettingItem {
+    SettingItem {
+        key: key.to_string(),
+        value: value.to_string(),
+        is_default,
+    }
+}
+
+#[tokio::test]
+async fn settings_get_answers_from_the_shared_service() {
+    let (world, queue, receiver) = queued();
+
+    let all = call(&receiver, &queue, &world.mail, "settings.get", json!({}))
+        .await
+        .outcome
+        .expect("성공 답장");
+    assert_eq!(all["rev"], 0);
+    let items = all["items"].as_array().expect("items");
+    assert_eq!(items.len(), 12);
+    assert_eq!(
+        items[0],
+        json!({"key": "theme.default", "value": "dark", "is_default": true})
+    );
+
+    world.mail.clear();
+    let chat = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.get",
+        json!({"key": "chat.style."}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+    let keys: Vec<&str> = chat["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|item| item["key"].as_str().expect("key"))
+        .collect();
+    assert_eq!(keys.len(), 11);
+    assert!(
+        keys.iter().all(|key| key.starts_with("chat.style.")),
+        "{keys:?}"
+    );
+}
+
+/// ★표가 쥔 서비스가 사람 경로와 **같은 인스턴스**다★ — 다른 인스턴스면 LLM 이 바꾼 값을 화면이 못 본다.
+/// 그리고 디스크에 남아 다음 적재(= 재시작)에 읽힌다.
+#[tokio::test]
+async fn settings_set_writes_through_the_shared_service_and_announces_once() {
+    let (world, queue, receiver) = queued();
+
+    let reply = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.set",
+        json!({"key": "theme.default", "value": "E-INK"}),
+    )
+    .await;
+
+    assert_eq!(
+        reply.outcome.expect("성공 답장"),
+        json!({"rev": 1, "key": "theme.default", "value": "e-ink", "changed": true}),
+        "답의 value 는 정규형이다"
+    );
+    assert_eq!(
+        world.settings.effective(THEME_DEFAULT).as_deref(),
+        Some("e-ink")
+    );
+    assert_eq!(
+        world.settings_events.changes(),
+        vec![SettingsSnapshot {
+            rev: 1,
+            items: vec![setting("theme.default", "e-ink", false)],
+        }]
+    );
+    assert_eq!(
+        world.settings_events.theme_pushes(),
+        1,
+        "전역 테마가 바뀌면 창마다 다시 민다"
+    );
+    assert_eq!(
+        SettingsService::load_from_dir(&world._config.0)
+            .effective(THEME_DEFAULT)
+            .as_deref(),
+        Some("e-ink"),
+        "재시작을 넘긴다"
+    );
+}
+
+#[tokio::test]
+async fn a_set_that_changes_nothing_is_answered_but_never_announced() {
+    let (world, queue, receiver) = queued();
+
+    let reply = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.set",
+        json!({"key": "theme.default", "value": "dark"}),
+    )
+    .await;
+
+    assert_eq!(
+        reply.outcome.expect("성공 답장"),
+        json!({"rev": 0, "key": "theme.default", "value": "dark", "changed": false})
+    );
+    assert!(world.settings_events.changes().is_empty());
+    assert_eq!(world.settings_events.theme_pushes(), 0);
+}
+
+#[tokio::test]
+async fn a_change_to_another_key_is_announced_without_a_theme_push() {
+    let (world, queue, receiver) = queued();
+
+    let reply = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.set",
+        json!({"key": "chat.style.fontSize", "value": "15.0PX"}),
+    )
+    .await;
+
+    assert_eq!(reply.outcome.expect("성공 답장")["value"], "15px");
+    assert_eq!(
+        world.settings_events.changes(),
+        vec![SettingsSnapshot {
+            rev: 1,
+            items: vec![setting("chat.style.fontSize", "15px", false)],
+        }]
+    );
+    assert_eq!(world.settings_events.theme_pushes(), 0);
+}
+
+#[tokio::test]
+async fn an_unknown_setting_is_not_found_on_every_settings_command() {
+    let (world, queue, receiver) = queued();
+
+    for (name, args) in [
+        ("settings.get", json!({"key": "no.such.key"})),
+        ("settings.get", json!({"key": "nothing."})),
+        ("settings.set", json!({"key": "no.such.key", "value": "x"})),
+        ("settings.reset", json!({"key": "nothing."})),
+        ("settings.schema", json!({"key": "no.such.key"})),
+    ] {
+        world.mail.clear();
+        let err = error_of(call(&receiver, &queue, &world.mail, name, args.clone()).await);
+        assert_eq!(err.code(), ErrorCode::NotFound, "{name} {args}");
+    }
+    assert!(world.settings_events.changes().is_empty());
+}
+
+#[tokio::test]
+async fn a_malformed_setting_is_an_invalid_argument_and_changes_nothing() {
+    let (world, queue, receiver) = queued();
+
+    for args in [
+        json!({"key": "theme.default", "value": "purple"}),
+        json!({"key": "chat.style.fontSize", "value": "48rem"}),
+        json!({"key": "theme.", "value": "light"}),
+        json!({"key": "", "value": "light"}),
+        json!({"key": "theme.default", "value": "  "}),
+    ] {
+        world.mail.clear();
+        let err =
+            error_of(call(&receiver, &queue, &world.mail, "settings.set", args.clone()).await);
+        assert_eq!(err.code(), ErrorCode::InvalidArgument, "{args}");
+    }
+    world.mail.clear();
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "settings.set",
+            json!({"key": "theme.default", "value": "purple"}),
+        )
+        .await,
+    );
+    assert!(
+        err.message().contains("theme.default"),
+        "어느 키의 형식인지가 문구에 있어야 한다: {}",
+        err.message()
+    );
+
+    assert_eq!(world.settings.get(None).expect("읽기").rev, 0);
+    assert!(world.settings_events.changes().is_empty());
+}
+
+/// 셸 `setup` 이 쓰기를 열기 전에 온 쓰기 — 서비스의 `Internal` 이 `INTERNAL` 로 나가고 디스크는 그대로다.
+#[tokio::test]
+async fn a_write_before_the_shell_opens_writes_is_internal() {
+    let (world, mut ports) = World::build();
+    let closed = ConfigDir::new();
+    ports.settings = Arc::new(SettingsService::load_from_dir(&closed.0));
+    let queue = Arc::new(Queued::default());
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::clone(&queue) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "settings.set",
+            json!({"key": "theme.default", "value": "light"}),
+        )
+        .await,
+    );
+
+    assert_eq!(err.code(), ErrorCode::Internal);
+    assert!(world.settings_events.changes().is_empty());
+    assert!(!closed.0.exists(), "쓰기 전에 폴더를 만들었다");
+}
+
+/// ★쓰기 본문은 적용 태스크를 폴링하는 런타임 스레드가 아니라 블로킹 풀에서 돈다★ — `sync_all` 을 기다리는
+/// 동안 그 워커에 얹힌 다른 태스크(연결 소켓 포함)가 서지 않게.
+#[tokio::test]
+async fn settings_writes_run_off_the_runtime_thread() {
+    let (world, queue, receiver) = queued();
+    let here = std::thread::current().id();
+
+    for (name, args) in [
+        (
+            "settings.set",
+            json!({"key": "theme.default", "value": "light"}),
+        ),
+        ("settings.reset", json!({"key": "theme."})),
+    ] {
+        world.mail.clear();
+        call(&receiver, &queue, &world.mail, name, args)
+            .await
+            .outcome
+            .expect("성공 답장");
+    }
+
+    let threads = world.settings_events.threads();
+    assert_eq!(threads.len(), 2);
+    assert!(threads.iter().all(|id| *id != here), "{threads:?}");
+}
+
+#[tokio::test]
+async fn settings_reset_names_every_covered_key_and_announces_only_the_changed_ones() {
+    let (world, queue, receiver) = queued();
+    for (key, value) in [
+        ("chat.style.fontSize", "15px"),
+        ("chat.style.userPx", "4px"),
+    ] {
+        world.mail.clear();
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "settings.set",
+            json!({"key": key, "value": value}),
+        )
+        .await
+        .outcome
+        .expect("성공 답장");
+    }
+
+    world.mail.clear();
+    let ok = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.reset",
+        json!({"key": "chat.style."}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+
+    assert_eq!(ok["rev"], 3);
+    let reset = ok["reset"].as_array().expect("reset");
+    assert_eq!(reset.len(), 11, "선택자가 덮은 키 전부");
+    assert!(
+        ok.get("changed").is_none(),
+        "버스 답은 {{rev, reset}} 이다: {ok}"
+    );
+    assert_eq!(
+        world.settings_events.changes().last(),
+        Some(&SettingsSnapshot {
+            rev: 3,
+            items: vec![
+                setting("chat.style.userPx", "0.9rem", true),
+                setting("chat.style.fontSize", "13px", true),
+            ],
+        }),
+        "알림은 바뀐 키만 싣는다"
+    );
+    assert_eq!(world.settings_events.theme_pushes(), 0);
+
+    // 이미 다 기본값 — 쓰지도 알리지도 않는다(rev 그대로).
+    world.mail.clear();
+    let again = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.reset",
+        json!({"key": "chat.style."}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+    assert_eq!(again["rev"], 3);
+    assert_eq!(world.settings_events.changes().len(), 3);
+}
+
+#[tokio::test]
+async fn resetting_theme_default_pushes_themes_again() {
+    let (world, queue, receiver) = queued();
+    call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.set",
+        json!({"key": "theme.default", "value": "light"}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+
+    world.mail.clear();
+    let ok = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.reset",
+        json!({"key": "theme.default"}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+
+    assert_eq!(ok, json!({"rev": 2, "reset": ["theme.default"]}));
+    assert_eq!(world.settings_events.theme_pushes(), 2);
+    assert_eq!(global_theme(&world.settings), UiTheme::Dark);
+}
+
+#[tokio::test]
+async fn settings_schema_describes_the_keys() {
+    let (world, queue, receiver) = queued();
+
+    let theme = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.schema",
+        json!({"key": "theme.default"}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+    let row = &theme["items"][0];
+    assert_eq!(row["key"], "theme.default");
+    assert_eq!(row["kind"], "choice");
+    assert_eq!(row["default"], "dark");
+    assert_eq!(row["choices"], json!(["dark", "light", "e-ink"]));
+    assert!(row["min"].is_null() && row["max"].is_null(), "{row}");
+    assert!(row["description"].as_str().is_some_and(|d| !d.is_empty()));
+
+    world.mail.clear();
+    let size = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.schema",
+        json!({"key": "chat.style.fontSize"}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+    assert_eq!(size["items"][0]["kind"], "css-length");
+    assert_eq!(size["items"][0]["min"], "8px, 0.5rem, 0.5em");
+    assert!(size["items"][0]["choices"].is_null());
+
+    world.mail.clear();
+    let all = call(&receiver, &queue, &world.mail, "settings.schema", json!({}))
+        .await
+        .outcome
+        .expect("성공 답장");
+    assert_eq!(all["items"].as_array().expect("items").len(), 12);
+}
+
+/// ★버스 쓰기 → 알림 → 유효 테마 밀기를 한 줄로★ — 운영 어댑터(`TauriSettingsEvents`)와 같은 배선을 창 없이
+/// 세운다: 알림 포트가 같은 [`EffectiveThemes`] 를 불러 창마다 민다.
+#[tokio::test]
+async fn a_bus_theme_default_write_reaches_every_window_without_an_entry() {
+    struct Pushing {
+        themes: Arc<EffectiveThemes>,
+        windows: Arc<RecordingWindows>,
+    }
+
+    impl SettingsEvents for Pushing {
+        fn changed(&self, _change: &SettingsSnapshot) {}
+
+        fn theme_default_changed(&self) {
+            self.themes
+                .push_effective_themes(self.windows.as_ref())
+                .expect("밀기");
+        }
+    }
+
+    let (world, mut ports) = World::build();
+    let windows = Arc::new(RecordingWindows::new(&[
+        "main",
+        "agent-tree",
+        "slot-popup-1",
+    ]));
+    ports.settings_events = Arc::new(Pushing {
+        themes: Arc::new(EffectiveThemes::new(
+            Arc::clone(&world.settings),
+            Box::new(Canned::text(r#"{"windows":{"main":"e-ink"}}"#)),
+        )),
+        windows: Arc::clone(&windows),
+    });
+    let queue = Arc::new(Queued::default());
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::clone(&queue) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+
+    call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "settings.set",
+        json!({"key": "theme.default", "value": "light"}),
+    )
+    .await
+    .outcome
+    .expect("성공 답장");
+
+    assert_eq!(
+        windows.take(),
+        sent(&[
+            ("main", "e-ink"),
+            ("agent-tree", "light"),
+            ("slot-popup-1", "light")
+        ])
+    );
 }
 
 // ── (B) 분할 비율 — split.setRatio · split.list (ADR-0227) ────────────────────
@@ -3027,8 +3584,9 @@ async fn a_dropped_task_still_answers() {
 // ── (F) UI 설정 읽기 — 파일 시스템도 Tauri 도 없이 ──────────────────────────
 //
 // ★여기 있는 이유는 헤더 마지막 절★(이 패키지에서 실제로 도는 타깃이 `tests/` 뿐이다). 재는 것은 세 층이다:
-// 순수 변환(`parse_settings`) · 그 위의 기본값 접기(`load_settings` + 주입 seam) · 창별 배달
-// (`deliver_per_window` + 배달 자리를 클로저로 받는 seam).
+// 순수 변환(`parse_settings`) · 그 위의 접기(`load_settings` + 주입 seam) · 창별 배달
+// (`deliver_per_window` + 배달 자리를 클로저로 받는 seam). 이 파일에는 전역 칸이 없다 — 전역 값은 호출자가
+// 넘긴다(운영 = 설정 `theme.default` · 아래 (T)).
 //
 // ## ★안 재는 것 — 로그 레벨(알려진 갭)★
 // `NotFound`=debug · 그 밖의 읽기 실패=warn · 파싱 실패=error · 성공=debug 가 **실제로 그 레벨로 나가는지**는
@@ -3075,14 +3633,16 @@ impl SettingsSource for Canned {
     }
 }
 
-/// 창을 안 대는 단언들이 재는 것 = **전역 한 칸**. 창별 해소는 아래 자기 단언들이 따로 잰다.
-fn global(source: &dyn SettingsSource) -> LoadedTheme {
-    load_settings(source).global()
+/// 창 항목 하나짜리 원문 — 그 값이 창 `main` 의 테마 자리에 들어간다(전역 칸은 파일에 없다).
+fn one_window(value: &str) -> String {
+    format!(r#"{{"windows":{{"main":"{value}"}}}}"#)
 }
 
-/// 원문에서 전역 테마만 — 창별 항목을 안 보는 단언들의 축약.
-fn theme_only(text: &str) -> Result<UiTheme, String> {
-    parse_settings(text).map(|parsed| parsed.settings.global())
+/// 창 항목 하나의 반려 사유 — 테마 값이 로그 문구로 어떻게 옮겨지나를 재는 단언들의 축약.
+fn refusal_for(value: &str) -> String {
+    let parsed = parse_settings(&one_window(value)).expect("파일 자체는 멀쩡하다");
+    assert_eq!(parsed.refused_total, 1, "{value} 를 통과시켰다");
+    parsed.refused.join(" · ")
 }
 
 /// 세 값이 다 살아 있어야 한다 — e-ink 를 dark/light 로 접으면 그 테마의 의도(색 무력화)가 사라진다(ADR-0062).
@@ -3093,72 +3653,119 @@ fn every_theme_name_round_trips() {
         ("light", UiTheme::Light),
         ("e-ink", UiTheme::EInk),
     ] {
-        let text = format!("{{\"theme\":\"{raw}\"}}");
-        assert_eq!(theme_only(&text), Ok(expected), "{raw}");
+        let loaded = load_settings(&Canned::text(&one_window(raw)));
         assert_eq!(
-            global(&Canned::text(&text)),
+            loaded.for_window("main", UiTheme::Dark),
             LoadedTheme {
                 theme: expected,
                 source: ThemeSource::File
             },
             "{raw}"
         );
+        assert_eq!(UiTheme::from_wire(raw), Some(expected));
         // 프론트가 `data-theme` 에 박는 철자 = `src/styles/theme.css` 의 셀렉터.
         assert_eq!(expected.as_wire(), raw);
     }
 }
 
-/// 못 읽는 네 모양이 **전부 같은 값**으로 접힌다 — 종류를 가르지 않는 것이 계약이다.
+/// ★설정 표의 선택지와 이 enum 의 철자가 같다★ — 어긋나면 `theme.default` 의 그 값이 화면에서 조용히
+/// [`DEFAULT_THEME`] 로 접힌다(설정 답은 성공인데 화면은 안 바뀐다).
 #[test]
-fn an_unusable_settings_file_falls_back_to_dark() {
-    // ★값도 출처도 같아야 한다★ — 접힌 것은 전부 `Fallback` 이다(호출자가 「내 편집이 먹었나」를 이걸로 안다).
-    let folded = LoadedTheme {
-        theme: DEFAULT_THEME,
-        source: ThemeSource::Fallback,
-    };
-    assert_eq!(global(&Canned::missing()), folded);
-    assert_eq!(global(&Canned::unreadable()), folded);
-    assert_eq!(global(&Canned::text("{ this is not json")), folded);
-    assert_eq!(global(&Canned::text(r#"{"theme":"solarized"}"#)), folded);
-    assert_eq!(DEFAULT_THEME, UiTheme::Dark);
+fn every_theme_default_choice_is_a_ui_theme_spelling() {
+    let settings = ConfigDir::new().service();
+    let schema = settings.schema(Some(THEME_DEFAULT)).expect("표에 있는 키");
+    let choices = schema[0].choices.clone().expect("choice 키");
+    assert_eq!(choices.len(), 3);
+    for choice in &choices {
+        assert!(UiTheme::from_wire(choice).is_some(), "{choice}");
+    }
+    assert_eq!(schema[0].default, DEFAULT_THEME.as_wire());
 }
 
-/// 모양은 JSON 인데 값이 못 쓸 때도 같은 자리로 간다 — 키 부재 · 문자열 아님 · 대소문자 다름.
+/// 못 읽는 다섯 모양이 **전부 같은 자리**로 접힌다 — 창 항목 없음 · `Fallback` · 모든 창이 전역 값.
 #[test]
-fn a_theme_field_that_is_not_a_known_name_is_refused_not_guessed() {
-    for text in [
-        "{}",
-        r#"{"theme":7}"#,
-        r#"{"theme":null}"#,
-        r#"{"theme":"Dark"}"#,
-        r#"{"theme":"e_ink"}"#,
-        r#"{"theme":" dark "}"#,
+fn an_unusable_settings_file_folds_every_window_to_the_global() {
+    for source in [
+        Canned::missing(),
+        Canned::unreadable(),
+        Canned::text("{ this is not json"),
+        Canned::text(r#"[{"windows":{"main":"light"}}]"#),
+        Canned(Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "상한 초과",
+        ))),
     ] {
-        assert!(theme_only(text).is_err(), "{text} 를 통과시켰다");
+        let loaded = load_settings(&source);
+        assert_eq!(loaded.source(), ThemeSource::Fallback);
+        for window in ["main", "agent-tree", "slot-popup-1"] {
+            assert_eq!(
+                loaded.for_window(window, UiTheme::EInk),
+                LoadedTheme {
+                    theme: UiTheme::EInk,
+                    source: ThemeSource::Fallback
+                },
+                "{window}"
+            );
+        }
+    }
+}
+
+/// ★★파일의 `theme` 칸은 무엇이 들었든 읽지 않는다★★(사용자 결정 U1 · TRD S21-storage §3-5).
+///
+/// 옛 파서는 그 칸이 없거나 못 쓸 값이면 파일 전체를 반려해, **멀쩡한 창 항목까지** 함께 버렸다. 지금 전역 값의
+/// 집은 설정 `theme.default` 이고, 그 칸이 무엇이든 창 항목은 그대로 적용되고 나머지 창은 전역 값을 받는다.
+#[test]
+fn the_files_own_theme_key_is_ignored_whatever_it_holds() {
+    for theme in [
+        None,
+        Some("7"),
+        Some("null"),
+        Some(r#""Dark""#),
+        Some(r#""solarized""#),
+        Some(r#""light""#),
+        Some(r#"{"token":"x"}"#),
+    ] {
+        let text = match theme {
+            None => r#"{"windows":{"main":"e-ink"}}"#.to_string(),
+            Some(value) => format!(r#"{{"theme":{value},"windows":{{"main":"e-ink"}}}}"#),
+        };
+        let parsed = parse_settings(&text).unwrap_or_else(|e| panic!("{text} 를 반려했다: {e}"));
+        assert_eq!(parsed.refused_total, 0, "{text}");
+
+        let loaded = load_settings(&Canned::text(&text));
+        assert_eq!(loaded.source(), ThemeSource::File, "{text}");
         assert_eq!(
-            global(&Canned::text(text)),
-            LoadedTheme {
-                theme: DEFAULT_THEME,
-                source: ThemeSource::Fallback
-            },
-            "{text}"
+            loaded.for_window("main", UiTheme::Dark).theme,
+            UiTheme::EInk,
+            "{text}: 창 항목이 버려졌다"
+        );
+        assert_eq!(
+            loaded.for_window("agent-tree", UiTheme::Dark).theme,
+            UiTheme::Dark,
+            "{text}: 파일의 theme 칸이 전역 값을 덮었다"
         );
     }
 }
 
-/// 같은 원문을 두 번 읽으면 두 번 다 같은 답 — 「부팅과 refresh 가 다른 값을 본다」가 여기서 나오면 안 된다.
+/// 같은 원문을 두 번 읽으면 두 번 다 같은 답 — 「부팅과 밀기가 다른 값을 본다」가 여기서 나오면 안 된다.
 #[test]
 fn reading_the_same_text_twice_gives_the_same_answer() {
     let broken = Canned::text("{oops");
-    assert_eq!(global(&broken), global(&broken));
+    assert_eq!(load_settings(&broken), load_settings(&broken));
 
-    let good = Canned::text(r#"{"theme":"e-ink"}"#);
+    let good = Canned::text(&one_window("e-ink"));
     let from_file = LoadedTheme {
         theme: UiTheme::EInk,
         source: ThemeSource::File,
     };
-    assert_eq!(global(&good), from_file);
-    assert_eq!(global(&good), from_file);
+    assert_eq!(
+        load_settings(&good).for_window("main", UiTheme::Dark),
+        from_file
+    );
+    assert_eq!(
+        load_settings(&good).for_window("main", UiTheme::Dark),
+        from_file
+    );
 }
 
 /// ★모르는 칸을 무시하는 것은 의도다 — 반려로 바꾸지 말 것★(사용자 결정).
@@ -3167,18 +3774,18 @@ fn reading_the_same_text_twice_gives_the_same_answer() {
 /// 빠뜨린 것이 아니다.
 #[test]
 fn unknown_keys_do_not_break_the_keys_we_read() {
-    assert_eq!(
-        theme_only(r#"{"theme":"light","fontSize":13,"whatever":{"a":1}}"#),
-        Ok(UiTheme::Light)
-    );
-    let with_windows = load_settings(&Canned::text(
-        r#"{"theme":"light","windows":{"main":"e-ink"},"fontSize":13}"#,
+    let loaded = load_settings(&Canned::text(
+        r#"{"windows":{"main":"e-ink"},"fontSize":13,"whatever":{"a":1}}"#,
     ));
-    assert_eq!(with_windows.for_window("main").theme, UiTheme::EInk);
+    assert_eq!(loaded.source(), ThemeSource::File);
+    assert_eq!(
+        loaded.for_window("main", UiTheme::Dark).theme,
+        UiTheme::EInk
+    );
 }
 
 /// ★상한을 넘는 원문은 **읽고 나서** 재는 것이 아니라 읽는 양 자체가 끊긴다★ — 밖에서 쓰는 파일이라
-/// 크기가 우리 손에 없고, 통째로 읽으면 기본값 접기·경고가 돌기 전에 프로세스가 죽는다.
+/// 크기가 우리 손에 없고, 통째로 읽으면 접기·경고가 돌기 전에 프로세스가 죽는다.
 #[test]
 fn an_oversized_settings_file_is_refused_instead_of_swallowed() {
     let cap = 32u64;
@@ -3192,18 +3799,6 @@ fn an_oversized_settings_file_is_refused_instead_of_swallowed() {
     let over = vec![b'x'; cap as usize + 1];
     let refused = read_capped(std::io::Cursor::new(over), cap).expect_err("상한 초과는 반려다");
     assert_eq!(refused.kind(), std::io::ErrorKind::InvalidData);
-
-    // 그 반려는 못 읽은 것과 같은 자리로 간다(기본값 + 로그).
-    assert_eq!(
-        global(&Canned(Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "상한 초과"
-        )))),
-        LoadedTheme {
-            theme: DEFAULT_THEME,
-            source: ThemeSource::Fallback
-        }
-    );
 }
 
 /// 내보낸 바이트를 세는 리더 — ★`take` 가 **읽기 자체를** 끊는지 재는 유일한 수단★.
@@ -3241,19 +3836,19 @@ fn the_cap_stops_the_read_rather_than_the_result() {
     assert!(
         read <= cap + 1,
         "상한을 넘겨 {read} 바이트를 읽었다(허용 {}) — 끊지 않으면 원문 전체가 메모리에 올라와 \
-         기본값 접기도 로그도 못 돌고 프로세스가 죽는다",
+         접기도 로그도 못 돌고 프로세스가 죽는다",
         cap + 1
     );
 }
 
 /// ★못 쓰는 값을 로그 문구에 그대로 옮기지 않는다★ — 이 문구는 곧장 로그로 나가고, 파일을 쓰는 것은 밖의
 /// 에이전트라 내용물이 우리 손에 없다. 새면 안 되는 것(자격증명)과 커지면 안 되는 것(상한까지의 덩치,
-/// 창을 열 때마다·refresh 때마다 증폭) 둘 다 막는다.
+/// 창을 열 때마다·밀 때마다 증폭) 둘 다 막는다.
 #[test]
 fn an_unusable_theme_value_is_not_echoed_into_the_message() {
     // ① 덩치 — 원문이 통째로 실리지 않고 길이만 남는다.
     let blob = "A".repeat(4096);
-    let big = theme_only(&format!(r#"{{"theme":"{blob}"}}"#)).expect_err("반려");
+    let big = refusal_for(&blob);
     assert!(!big.contains(&blob), "원문이 그대로 실렸다");
     assert!(big.len() < 200, "문구가 {} 바이트로 불었다", big.len());
     assert!(
@@ -3262,8 +3857,11 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
     );
 
     // ② 문자열이 아닌 값 — **종류만** 싣는다(객체·배열은 통째로 상한 크기다).
-    let obj = theme_only(r#"{"theme":{"token":"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}"#)
-        .expect_err("반려");
+    let obj =
+        parse_settings(r#"{"windows":{"main":{"token":"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAA"}}}"#)
+            .expect("파일 자체는 멀쩡하다")
+            .refused
+            .join(" · ");
     assert!(!obj.contains("sk-proj"), "값이 실렸다: {obj}");
     assert!(obj.contains("object"), "종류가 안 실렸다: {obj}");
 
@@ -3276,7 +3874,7 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
         ("밑줄 섞인 이름", "internal_build_token_9", "internal"),
         ("공백 섞인 문장", "please use dark", "please"),
     ] {
-        let err = theme_only(&format!(r#"{{"theme":"{value}"}}"#)).expect_err("반려");
+        let err = refusal_for(value);
         assert!(
             !err.contains(fragment),
             "{label} 가 로그 문구로 샜다: {err}"
@@ -3285,14 +3883,14 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
 
     // ④ ★게이트를 통과하는 값에도 마스킹이 남아 있다★ — 이 조합(20자 영숫자 = 길이·charset 둘 다 통과,
     //    그런데 키 모양)이 그 겹이 죽어 있지 않다는 증거다.
-    let akia = theme_only(r#"{"theme":"AKIAIOSFODNN7EXAMPLE"}"#).expect_err("반려");
+    let akia = refusal_for("AKIAIOSFODNN7EXAMPLE");
     assert!(!akia.contains("AKIA"), "키가 그대로 실렸다: {akia}");
 
     // ⑤ 그래도 오타 진단은 산다 — 게이트를 통과하는 값은 그대로 보인다.
     //    `Dark` 가 가장 흔한 오타다(`from_wire` 가 대소문자를 가린다) — 게이트에서 대문자를 뺐다면
     //    정작 제일 자주 나는 실수를 못 보여준다.
     for typo in ["Dark", "darkk", "e-inkk", "light2"] {
-        let err = theme_only(&format!(r#"{{"theme":"{typo}"}}"#)).expect_err("반려");
+        let err = refusal_for(typo);
         assert!(err.contains(typo), "오타 {typo} 를 못 보여준다: {err}");
     }
 }
@@ -3305,7 +3903,7 @@ fn an_unusable_theme_value_is_not_echoed_into_the_message() {
 #[test]
 fn a_value_wrapped_around_a_key_pattern_is_gated_not_just_masked() {
     let prefixed = format!("{}sk-proj-{}", "x".repeat(20), "A".repeat(30));
-    let err = theme_only(&format!(r#"{{"theme":"{prefixed}"}}"#)).expect_err("반려");
+    let err = refusal_for(&prefixed);
 
     assert!(
         !err.contains(&"x".repeat(20)),
@@ -3329,58 +3927,57 @@ fn a_non_utf8_settings_file_is_a_read_failure() {
 #[test]
 fn a_window_with_an_entry_gets_it_and_the_rest_take_the_global() {
     let loaded = load_settings(&Canned::text(
-        r#"{"theme":"dark","windows":{"main":"light","slot-popup-1":"e-ink"}}"#,
+        r#"{"windows":{"main":"light","slot-popup-1":"e-ink"}}"#,
     ));
 
     assert_eq!(
-        loaded.for_window("main"),
+        loaded.for_window("main", UiTheme::Dark),
         LoadedTheme {
             theme: UiTheme::Light,
             source: ThemeSource::File
         }
     );
-    assert_eq!(loaded.for_window("slot-popup-1").theme, UiTheme::EInk);
-    assert_eq!(loaded.for_window("agent-tree").theme, UiTheme::Dark);
-    // 명령 답장이 싣는 것은 이 전역 값이다 — 창별 값이 그 자리를 덮으면 답 모양이 창마다 갈린다.
-    assert_eq!(loaded.global().theme, UiTheme::Dark);
-}
-
-/// ★`windows` 칸이 없던 파일이 그대로 돈다★ — 밖의 에이전트가 이미 써 둔 파일이 이 칸 때문에 반려되면
-/// 그 순간 모든 창이 dark 로 접힌다(그 창들은 아무것도 안 바꿨는데).
-#[test]
-fn a_settings_file_without_the_windows_key_behaves_as_before() {
-    let from_file = LoadedTheme {
-        theme: UiTheme::Light,
-        source: ThemeSource::File,
-    };
-
-    let old = load_settings(&Canned::text(r#"{"theme":"light"}"#));
-    assert_eq!(old.global(), from_file);
-    for window in ["main", "agent-tree", "slot-popup-1"] {
-        assert_eq!(old.for_window(window), from_file, "{window}");
-    }
     assert_eq!(
-        parse_settings(r#"{"theme":"light"}"#)
-            .expect("옛 파일도 통과다")
-            .refused_total,
-        0,
-        "칸이 없는 것은 반려가 아니다"
+        loaded.for_window("slot-popup-1", UiTheme::Dark).theme,
+        UiTheme::EInk
     );
-
-    // 빈 지도도 같은 자리다 — 「칸은 있는데 비었다」가 「칸이 없다」와 갈리면 안 된다.
-    let empty = load_settings(&Canned::text(r#"{"theme":"light","windows":{}}"#));
-    assert_eq!(empty.for_window("main"), from_file);
+    assert_eq!(
+        loaded.for_window("agent-tree", UiTheme::Dark).theme,
+        UiTheme::Dark
+    );
+    assert_eq!(
+        loaded.for_window("agent-tree", UiTheme::Light).theme,
+        UiTheme::Light,
+        "항목이 없는 창은 그때의 전역 값을 받는다"
+    );
 }
 
-/// ★못 쓰는 창 항목은 **전역 값**으로 접는다 — dark 로 접지 않는다★.
-///
-/// 파일은 멀쩡하고 그 파일이 이미 「전역은 light」라고 말했다. 거기서 dark 로 가면 그 창은 파일이 적은
-/// 어느 값과도 안 맞아서, 오타 하나가 창 하나를 파일 밖으로 끌어낸다. 전역으로 접으면 결과는 「창별
-/// 덮어쓰기가 안 먹었다」로 끝나고 — 항목이 아예 없는 창과 같은 자리다 — 사유는 로그가 진다.
+/// ★`windows` 칸이 없거나 빈 파일도 멀쩡한 파일이다★ — 창 항목이 없을 뿐이다(`File`, 모든 창이 전역 값).
 #[test]
-fn an_unusable_window_entry_falls_back_to_the_global_theme_not_to_dark() {
-    let text =
-        r#"{"theme":"light","windows":{"main":"solarized","agent-tree":7,"slot-popup-1":"e-ink"}}"#;
+fn a_settings_file_without_window_entries_leaves_every_window_on_the_global() {
+    for text in [r#"{"theme":"light"}"#, r#"{"windows":{}}"#, "{}"] {
+        let loaded = load_settings(&Canned::text(text));
+        assert_eq!(loaded.source(), ThemeSource::File, "{text}");
+        for window in ["main", "agent-tree", "slot-popup-1"] {
+            assert_eq!(
+                loaded.for_window(window, UiTheme::EInk).theme,
+                UiTheme::EInk,
+                "{text} · {window}"
+            );
+        }
+        assert_eq!(
+            parse_settings(text).expect("통과다").refused_total,
+            0,
+            "칸이 없는 것은 반려가 아니다"
+        );
+    }
+}
+
+/// ★못 쓰는 창 항목은 **전역 값**으로 접는다★ — 결과는 「창별 덮어쓰기가 안 먹었다」로 끝나고(항목이 아예 없는
+/// 창과 같은 자리) 옆 항목은 그대로 산다. 사유는 로그가 진다.
+#[test]
+fn an_unusable_window_entry_falls_back_to_the_global_theme() {
+    let text = r#"{"windows":{"main":"solarized","agent-tree":7,"slot-popup-1":"e-ink"}}"#;
     let parsed = parse_settings(text).expect("파일 자체는 멀쩡하다");
     assert_eq!(
         parsed.refused_total, 2,
@@ -3388,60 +3985,47 @@ fn an_unusable_window_entry_falls_back_to_the_global_theme_not_to_dark() {
     );
 
     let loaded = load_settings(&Canned::text(text));
-    assert_eq!(loaded.for_window("main").theme, UiTheme::Light);
-    assert_eq!(loaded.for_window("agent-tree").theme, UiTheme::Light);
     assert_eq!(
-        loaded.for_window("slot-popup-1").theme,
+        loaded.for_window("main", UiTheme::Light).theme,
+        UiTheme::Light
+    );
+    assert_eq!(
+        loaded.for_window("agent-tree", UiTheme::Light).theme,
+        UiTheme::Light
+    );
+    assert_eq!(
+        loaded.for_window("slot-popup-1", UiTheme::Light).theme,
         UiTheme::EInk,
         "옆 항목까지 함께 버리지 않는다"
     );
-    // ★출처 칸은 두 갈래를 유지한다★(ADR-0166 불변식 · ADR-0167 이 넓히지 않기로 했다) — 이 값은 읽힌
-    //   파일에서 왔다. 「내 창 항목이 반려됐다」를 이 칸으로 물으면 세 번째 갈래가 필요해진다.
-    assert_eq!(loaded.for_window("main").source, ThemeSource::File);
+    // ★출처 칸은 두 갈래를 유지한다★(ADR-0166 불변식 · ADR-0167 이 넓히지 않기로 했다) — 파일은 읽혔다.
+    //   「내 창 항목이 반려됐다」를 이 칸으로 물으면 세 번째 갈래가 필요해진다.
+    assert_eq!(
+        loaded.for_window("main", UiTheme::Light).source,
+        ThemeSource::File
+    );
 }
 
 /// `windows` 가 지도가 아니면 그 칸만 버린다 — 파일 전체를 반려하지 않는다(모르는 칸 무시와 같은 이유).
 #[test]
 fn a_windows_key_that_is_not_a_map_does_not_sink_the_file() {
-    let loaded = load_settings(&Canned::text(r#"{"theme":"e-ink","windows":"main"}"#));
+    let loaded = load_settings(&Canned::text(r#"{"windows":"main"}"#));
 
     assert_eq!(
-        loaded.global(),
+        loaded.for_window("main", UiTheme::EInk),
         LoadedTheme {
             theme: UiTheme::EInk,
             source: ThemeSource::File
         }
     );
-    assert_eq!(loaded.for_window("main").theme, UiTheme::EInk);
-}
-
-/// 파일을 못 쓰면 **모든 창**이 같은 자리로 간다 — 창별 항목이 그 접기를 비켜 가면 안 된다.
-///
-/// 마지막 원문이 「전역 칸 없음」이다: 전역이 없으면 창별 항목이 아무리 멀쩡해도 접을 바닥이 없다.
-#[test]
-fn an_unusable_file_folds_every_window_to_the_default() {
-    let folded = LoadedTheme {
-        theme: DEFAULT_THEME,
-        source: ThemeSource::Fallback,
-    };
-
-    for source in [
-        Canned::missing(),
-        Canned::text("{ this is not json"),
-        Canned::text(r#"{"windows":{"main":"light"}}"#),
-    ] {
-        let loaded = load_settings(&source);
-        assert_eq!(loaded.global(), folded);
-        assert_eq!(loaded.for_window("main"), folded);
-    }
 }
 
 /// ★반려 사유는 항목 수만큼 늘지 않는다★ — 상한(64KiB)까지 허용된 파일이면 항목이 수천 개일 수 있고,
-/// 이 파일은 창을 열 때마다·refresh 때마다 다시 읽힌다. 전량을 실으면 그만큼 로그가 증폭된다.
+/// 이 파일은 창을 열 때마다·밀 때마다 다시 읽힌다. 전량을 실으면 그만큼 로그가 증폭된다.
 #[test]
 fn refused_window_entries_are_counted_in_full_but_described_in_bounded_numbers() {
     let entries: Vec<String> = (0..50).map(|i| format!(r#""w{i}":"nope{i}""#)).collect();
-    let text = format!(r#"{{"theme":"dark","windows":{{{}}}}}"#, entries.join(","));
+    let text = format!(r#"{{"windows":{{{}}}}}"#, entries.join(","));
 
     let parsed = parse_settings(&text).expect("파일 자체는 멀쩡하다");
 
@@ -3456,17 +4040,15 @@ fn refused_window_entries_are_counted_in_full_but_described_in_bounded_numbers()
 /// 창 항목도 로그 문구로 새지 않는다 — **이름 칸도 값 칸도 밖의 에이전트가 쓴다**(테마 값과 같은 게이트).
 #[test]
 fn an_unusable_window_entry_is_not_echoed_into_the_message() {
-    let parsed = parse_settings(
-        r#"{"theme":"dark","windows":{"customer-email@example.com":"please use dark"}}"#,
-    )
-    .expect("파일 자체는 멀쩡하다");
+    let parsed = parse_settings(r#"{"windows":{"customer-email@example.com":"please use dark"}}"#)
+        .expect("파일 자체는 멀쩡하다");
     let said = parsed.refused.join(" · ");
     assert!(!said.contains("example.com"), "창 이름이 샜다: {said}");
     assert!(!said.contains("please"), "값이 샜다: {said}");
 
     // 그래도 오타 진단은 산다 — 테마 이름 모양인 것은 그대로 보인다(`Dark` 가 가장 흔한 오타다).
-    let typo = parse_settings(r#"{"theme":"dark","windows":{"slot-popup-1":"Dark"}}"#)
-        .expect("파일 자체는 멀쩡하다");
+    let typo =
+        parse_settings(r#"{"windows":{"slot-popup-1":"Dark"}}"#).expect("파일 자체는 멀쩡하다");
     let said = typo.refused.join(" · ");
     assert!(said.contains("Dark"), "오타를 못 보여준다: {said}");
     assert!(said.contains("slot-popup-1"), "어느 창인지가 없다: {said}");
@@ -3475,9 +4057,7 @@ fn an_unusable_window_entry_is_not_echoed_into_the_message() {
 /// ★창마다 **그 창의 값**이 간다★ — 한 봉투를 전 창에 뿌리면 창별 테마가 성립하지 않는다.
 #[test]
 fn each_window_is_sent_its_own_value() {
-    let loaded = load_settings(&Canned::text(
-        r#"{"theme":"dark","windows":{"main":"light"}}"#,
-    ));
+    let loaded = load_settings(&Canned::text(r#"{"windows":{"main":"light"}}"#));
     let windows = [
         "main".to_string(),
         "agent-tree".to_string(),
@@ -3485,7 +4065,7 @@ fn each_window_is_sent_its_own_value() {
     ];
 
     let mut sent: Vec<(String, String)> = Vec::new();
-    deliver_per_window(&loaded, &windows, |label, payload| {
+    deliver_per_window(&loaded, UiTheme::Dark, &windows, |label, payload| {
         sent.push((label.to_string(), payload.theme));
         Ok(())
     })
@@ -3505,7 +4085,7 @@ fn each_window_is_sent_its_own_value() {
 /// 창 하나가 나머지 창의 갱신을 막으면 화면들이 서로 갈린 채로 남고, 그 답장은 실패라 사유도 안 남는다.
 #[test]
 fn a_window_that_did_not_receive_it_is_not_answered_as_success() {
-    let loaded = load_settings(&Canned::text(r#"{"theme":"dark"}"#));
+    let loaded = load_settings(&Canned::text("{}"));
     let windows = [
         "main".to_string(),
         "agent-tree".to_string(),
@@ -3513,7 +4093,7 @@ fn a_window_that_did_not_receive_it_is_not_answered_as_success() {
     ];
 
     let mut tried: Vec<String> = Vec::new();
-    let outcome = deliver_per_window(&loaded, &windows, |label, _payload| {
+    let outcome = deliver_per_window(&loaded, UiTheme::Dark, &windows, |label, _payload| {
         tried.push(label.to_string());
         if label == "agent-tree" {
             Err("창이 이미 닫혔다".to_string())
@@ -3533,16 +4113,152 @@ fn a_window_that_did_not_receive_it_is_not_answered_as_success() {
 /// 보낼 창이 하나도 없는 것도 실패다 — 「어느 창에도 안 닿았다」가 이 명령의 실패 조건 그 자체다.
 #[test]
 fn a_push_with_no_live_windows_is_a_failure() {
-    let loaded = load_settings(&Canned::text(r#"{"theme":"dark"}"#));
+    let loaded = load_settings(&Canned::text("{}"));
 
     let mut calls = 0usize;
-    let outcome = deliver_per_window(&loaded, &[], |_label, _payload| {
+    let outcome = deliver_per_window(&loaded, UiTheme::Dark, &[], |_label, _payload| {
         calls += 1;
         Ok(())
     });
 
     assert!(outcome.is_err(), "빈 명단에 성공으로 답했다");
     assert_eq!(calls, 0);
+}
+
+// ── (T) 유효 테마 — 창 항목 ?? 설정 `theme.default` (TRD S21-storage §5-6) ─────
+//
+// 설정은 실물(임시 폴더)이고 창 항목 파일은 `Canned`, 창 쪽은 기록하는 가짜다. ★안 재는 것★ — 밀기 락의
+// 직렬화 자체(두 밀기가 실제로 엇갈리는 타이밍은 결정적으로 못 세운다). 재는 것은 그 락이 기대는 성질 —
+// **밀기가 그때의 설정 값을 읽는다**(캐시하지 않는다) — 까지다.
+
+/// 창 명단을 정해 두고 보낸 것을 순서대로 남기는 가짜.
+struct RecordingWindows {
+    labels: Vec<String>,
+    sent: Mutex<Vec<(String, String)>>,
+}
+
+impl RecordingWindows {
+    fn new(labels: &[&str]) -> Self {
+        RecordingWindows {
+            labels: labels.iter().map(|label| label.to_string()).collect(),
+            sent: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 지금까지 보낸 것을 비우며 돌려준다 — `(창, 테마)`.
+    fn take(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.sent.lock().unwrap())
+    }
+}
+
+impl ThemeWindows for RecordingWindows {
+    fn labels(&self) -> Vec<String> {
+        self.labels.clone()
+    }
+
+    fn send(&self, label: &str, payload: UiSettingsPayload) -> Result<(), String> {
+        self.sent
+            .lock()
+            .unwrap()
+            .push((label.to_string(), payload.theme));
+        Ok(())
+    }
+}
+
+fn sent(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(label, theme)| (label.to_string(), theme.to_string()))
+        .collect()
+}
+
+/// ★항목이 없는 창은 **밀 때의** `theme.default` 를 받는다★ — 값을 바꾼 뒤 다시 밀면 그 값이 간다.
+#[test]
+fn every_window_without_an_entry_follows_theme_default() {
+    let config = ConfigDir::new();
+    let settings = config.service();
+    let themes = EffectiveThemes::new(
+        Arc::clone(&settings),
+        Box::new(Canned::text(
+            r#"{"theme":"light","windows":{"main":"e-ink"}}"#,
+        )),
+    );
+    let windows = RecordingWindows::new(&["main", "agent-tree", "slot-popup-1"]);
+
+    let first = themes.push_effective_themes(&windows).expect("밀기");
+    assert_eq!(
+        first,
+        LoadedTheme {
+            theme: UiTheme::Dark,
+            source: ThemeSource::File
+        },
+        "답의 전역 값은 설정의 기본값이다 — 파일의 theme 칸(light)이 아니다"
+    );
+    assert_eq!(
+        windows.take(),
+        sent(&[
+            ("main", "e-ink"),
+            ("agent-tree", "dark"),
+            ("slot-popup-1", "dark")
+        ])
+    );
+
+    settings.set(THEME_DEFAULT, "light").expect("쓰기");
+    let second = themes.push_effective_themes(&windows).expect("밀기");
+    assert_eq!(second.theme, UiTheme::Light);
+    assert_eq!(global_theme(&settings), UiTheme::Light);
+    assert_eq!(
+        windows.take(),
+        sent(&[
+            ("main", "e-ink"),
+            ("agent-tree", "light"),
+            ("slot-popup-1", "light")
+        ])
+    );
+}
+
+/// 부팅 당기기와 밀기가 창마다 같은 값을 낸다 — 한쪽만 다른 출처를 보면 그 창은 부팅과 밀기에서 다른 테마를
+/// 받는다.
+#[test]
+fn a_boot_pull_and_a_push_agree_on_each_window() {
+    let config = ConfigDir::new();
+    let settings = config.service();
+    settings.set(THEME_DEFAULT, "e-ink").expect("쓰기");
+    let themes = EffectiveThemes::new(
+        Arc::clone(&settings),
+        Box::new(Canned::text(r#"{"windows":{"agent-tree":"light"}}"#)),
+    );
+    let windows = RecordingWindows::new(&["main", "agent-tree"]);
+
+    themes.push_effective_themes(&windows).expect("밀기");
+    for (label, theme) in windows.take() {
+        assert_eq!(themes.for_window(&label).theme, theme, "{label}");
+        assert_eq!(themes.for_window(&label).source, ThemeSource::File);
+    }
+}
+
+/// 창 항목 파일을 못 써도 밀기는 성공이다 — 모든 창이 전역 값을 받고 답의 출처가 `Fallback` 이다.
+#[test]
+fn an_unusable_window_file_still_pushes_the_global_to_every_window() {
+    let config = ConfigDir::new();
+    let settings = config.service();
+    settings.set(THEME_DEFAULT, "light").expect("쓰기");
+    let themes = EffectiveThemes::new(Arc::clone(&settings), Box::new(Canned::text("{oops")));
+    let windows = RecordingWindows::new(&["main", "agent-tree"]);
+
+    let answer = themes.push_effective_themes(&windows).expect("밀기");
+
+    assert_eq!(
+        answer,
+        LoadedTheme {
+            theme: UiTheme::Light,
+            source: ThemeSource::Fallback
+        }
+    );
+    assert_eq!(
+        windows.take(),
+        sent(&[("main", "light"), ("agent-tree", "light")])
+    );
 }
 
 // ── (G) 부팅 쓸기 — 죽은 창 항목 지우기 (ADR-0167) ──────────────────────────

@@ -1,5 +1,5 @@
 //! 사용량 판정의 시계 seam — 쿨타임·거절 대기·값 나이는 [`UsageClock::mono`], 리셋 비교·거절
-//! 파일은 [`UsageClock::wall`] 로 잰다(TRD §3 #28). 서비스의 판정은 늘 이 시계로 잰다 — 대기 타이머가 깨운
+//! 파일은 [`UsageClock::wall`] 로 잰다(TRD §3 #28 · ADR-0250). 서비스의 판정은 늘 이 시계로 잰다 — 대기 타이머가 깨운
 //! 시각은 믿지 않는다.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};

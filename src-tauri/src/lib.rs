@@ -1,8 +1,10 @@
 pub mod commands;
 pub mod daemon_client;
+mod fsutil;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;
+pub mod settings;
 pub mod ui_settings;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;
@@ -58,6 +60,22 @@ pub fn run() {
     //   대조: DaemonClient 는 tokio 런타임이 필요해 setup 에 남는다(그쪽 조기 invoke 는 프론트 retry 가 커버).
     builder = builder.manage(crate::layout::LayoutState::new());
 
+    // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
+    // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
+    //   `settings_get` 이 setup 보다 먼저 올 수 있고, 그때 상태가 없으면 그 창은 기본값으로 굳는다.
+    // ★여기서는 읽기만 한다★ — 적재는 파일·폴더를 만들지도 고치지도 않고, 쓰기는 setup 의 `enable_writes`
+    //   뒤에만 열린다. 단일 인스턴스 관문(위 플러그인)은 build 안에서 판정되므로, 여기서 디스크를 바꾸면 곧
+    //   종료될 두 번째 인스턴스도 그것을 바꾼다.
+    let settings = std::sync::Arc::new(crate::settings::SettingsService::load_from_dir(
+        &crate::discovery::DataLayout::resolve().shell_config_dir(),
+    ));
+    // ★셸에 하나★ — 밀기 순서를 지키는 락이 이 안에 있다(사람 경로·LLM 경로가 같은 인스턴스를 본다).
+    let themes = std::sync::Arc::new(crate::ui_settings::EffectiveThemes::new(
+        settings.clone(),
+        Box::new(crate::ui_settings::FileSource::in_data_dir()),
+    ));
+    builder = builder.manage(settings.clone()).manage(themes.clone());
+
     builder
         .setup(move |app| {
             // 데몬과 **다른 파일**(`app-*.log`)에 쓴다 — 한 파일을 두 프로세스가 나눠 쓰면 줄이
@@ -67,7 +85,10 @@ pub fn run() {
             // 데몬과 같은 이유로 자기 로그 위치를 남긴다(daemon `run()` 의 "데이터 폴더 결정"): 1차
             //   폴더를 못 쓰면 이 경로가 `%TEMP%` 아래로 갈릴 수 있어, 반환값 말고는 어디에 쓰고
             //   있는지 아는 수단이 없다.
-            let log_file = logging::init_logging_with_file(&data_dir, logging::LogKind::App);
+            let log_file = logging::init_logging_with_file(
+                &crate::discovery::DataLayout::new(&data_dir).logs_dir(),
+                logging::LogKind::App,
+            );
             tracing::info!(
                 data_dir = %data_dir.display(),
                 log_file = ?log_file,
@@ -82,6 +103,10 @@ pub fn run() {
             //   로그 자리를 잡은 뒤에 부른다 — 무엇을 지웠는지가 이 앱 로그에만 남는다.
             // ADR-0167
             crate::commands::settings::sweep_dead_window_entries(app.handle());
+
+            // 단일 인스턴스 관문을 지난 뒤라 디스크를 바꿔도 된다(빌더 쪽 적재 주석). 로거가 선 뒤라 적재가
+            //   모아 둔 로그(못 쓰는 `settings.json` · 접힌 값)도 여기서 나간다.
+            settings.enable_writes();
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).
@@ -137,6 +162,8 @@ pub fn run() {
                                     router.clone(),
                                     labels.clone(),
                                     client.clone(),
+                                    settings.clone(),
+                                    themes.clone(),
                                 ),
                             ),
                             crate::layout::commands::CATALOG_VERSION,
@@ -245,8 +272,14 @@ pub fn run() {
             // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
             commands::report_window_canvas,
             commands::report_ui_metrics,
-            // 부팅 조회 — 미는 쪽(`ui.refresh`)은 명령 표에 있다(`commands/settings.rs` 「읽는 자리가 둘인 이유」).
+            // 부팅 조회 — 미는 쪽(`ui.refresh` · `theme.default` 쓰기)은 따로 있다(`commands/settings.rs`
+            //   「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,
+            // 셸 설정 — 버스 `settings.*` 와 같은 서비스(ADR-0081 결정 3).
+            commands::settings_get,
+            commands::settings_set,
+            commands::settings_reset,
+            commands::settings_schema,
             // 웹뷰 몫 명령(ADR-0155) — 부팅 보고와 결말 회수 한 쌍(`commands/view_bus.rs`).
             commands::report_view_commands,
             commands::report_command_outcome,
