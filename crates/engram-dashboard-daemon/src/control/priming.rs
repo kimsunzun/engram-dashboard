@@ -230,7 +230,7 @@ pub trait PrimingProvider: Send + Sync + 'static {
 
 /// ★왜 base 를 exe 기준 루트로 받나(ADR-0092, 두 리뷰어 PRIMARY)★: 예전엔 base 를 데몬 프로세스 cwd
 ///   (`from_cwd`)로 삼았다 — 그러나 운영 데몬은 WMI Win32_Process.Create 로 떠 **부모 cwd 를 상속하지
-///   않아**(cwd=System32) 프라이밍이 **조용히 비활성**됐다. 해결 = `default_data_dir` 이 `.engram-data`
+///   않아**(cwd=System32) 프라이밍이 **조용히 비활성**됐다. 해결 = `default_data_dir` 이 `.engram-dev`
 ///   를 anchor 할 때 쓰는 것과 **동일한 exe-walk-up 패턴**(discovery::find_install_root)을 재사용해
 ///   신뢰 가능한 절대 루트를 base 로 삼는다(cwd 불신).
 ///

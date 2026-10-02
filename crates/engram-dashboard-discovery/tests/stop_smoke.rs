@@ -4,7 +4,7 @@
 //! graceful 하게(WS Auth → StopDaemon{force} → 데몬 self-exit) 죽는가.
 //!
 //! ★ENGRAM_DATA_DIR 격리(WMI 경로와 다름)★: 이 테스트는 **std::process::Command 로 직접 spawn**
-//!   하므로 env 가 상속돼 임시 폴더로 완전 격리된다 — 운영 `.engram-data` 를 건드리지 않는다.
+//!   하므로 env 가 상속돼 임시 폴더로 완전 격리된다 — 운영 `.engram-dev` 를 건드리지 않는다.
 //!   (직접 spawn 은 send_stop 왕복 검증 목적상 충분하다 — WMI 의 detached 성질은 send_stop 동작과
 //!   무관.)
 //!
@@ -175,7 +175,8 @@ fn diag_send_with_close_mode(mode: &str) -> bool {
 
     let daemon_pid = wait_alive(&data_dir, Duration::from_secs(15)).expect("alive");
     let info = engram_dashboard_protocol::DaemonInfo::parse(
-        &std::fs::read(data_dir.join("daemon.json")).unwrap(),
+        &std::fs::read(engram_dashboard_discovery::DataLayout::new(&data_dir).daemon_file())
+            .unwrap(),
     )
     .unwrap();
 

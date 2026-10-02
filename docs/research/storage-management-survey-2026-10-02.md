@@ -4,17 +4,21 @@
 
 ## 0. 결정 (2026-10-02 사용자 결정 · 대화)
 
-- **데이터 루트 = 포터블 유지**(릴리스 `<exe>\data\` · 개발 `<워크트리>\.engram-data\`). 설치형(Program Files + AppData)은 성숙 후·보안 필요 시 재론.
-- **폴더 구조 = 컴포넌트 먼저, 종류 다음:** `daemon\{store,run}\` · `shell\{store,run}\`(run 은 생길 때만) · `webview\` · `logs\`. 규칙 = `store\` 는 지키고 `run\` 은 버려도 된다. 토큰 든 파일(`daemon.json` · `mcp-config\`)은 `daemon\run\`.
-  - `daemon\store\` = `agents.json` · `presets.json` · `usage_rejects.json` · `daemon\run\` = `daemon.json` · `mcp-config\` · `usage-probe\`. 기존 파일은 첫 부팅 때 한 번 옮긴다.
+- **데이터 루트 = 포터블 유지**(릴리스 `<exe>\data\` · 개발 `<워크트리>\.engram-dev\`). 설치형(Program Files + AppData)은 성숙 후·보안 필요 시 재론.
+- **개발 데이터 루트 이름 = `.engram-dev`**(옛 `.engram-data` — 2026-10-02 사용자 결정 · ADR-0136 결정 2 번복 · ADR-0264). 관행 = 릴리스 이름 + `-dev`(herdr `herdr-dev` · orca `orca-dev`). `engram` 은 저장소 루트·검색·ignore 에서 겹치지 않게 남기고, 개발 식별자 `com.engram.dashboard.dev` 와도 맞는다. 이름을 바꾸지 않는다 — `.engram-dev` 는 새로 시작한다(아래 「옛 데이터」).
+- **폴더 구조 = 컴포넌트 먼저, 종류 다음:** `daemon\{state,run}\` · `shell\{config,state,run}\`(run 은 생길 때만) · `webview\` · `logs\`. 규칙 = `config\` · `state\` 는 지키고 `run\` 은 버려도 된다. 토큰 든 파일(`daemon.json` · `mcp-config\`)은 `daemon\run\`.
+  - **폴더 이름 = 업계 표준**(2026-10-02 사용자 결정) — systemd `ConfigurationDirectory=` · `StateDirectory=` · `RuntimeDirectory=` · XDG `CONFIG_HOME` · `STATE_HOME` · `RUNTIME_DIR`(https://specifications.freedesktop.org/basedir/latest/ · systemd.exec man page). 가름 기준: **config = 취향**(「어떻게」 — 지우면 기본값으로 돌아간다) · **state = 프로그램이 기억하는 것**(「무엇이 있나 · 어땠나」 — 에이전트 명부는 사용자가 만들었어도 여기다. Docker 의 `/var/lib` 와 같다). 데몬은 아직 config 가 없다(장래 조정값 → `daemon\config\`). 옛 이름 `store` 는 표준 용어가 아니라 버렸다.
+  - `daemon\state\` = `agents.json` · `presets.json` · `usage_rejects.json` · `daemon\run\` = `daemon.json` · `mcp-config\` · `usage-probe\`. ~~기존 파일은 첫 부팅 때 한 번 옮긴다.~~ → 아래 「옛 데이터」로 뒤집혔다.
+- **옛 데이터는 옮기지 않고 버린다**(2026-10-02 사용자 결정 — 「아직 데이터 정립 안 됐으니」 · ADR-0264 결정 5 · 6). 새 코드는 옛 평면 파일(릴리스 `<exe>\data\*`)과 개발 `.engram-data` 를 읽지도 옮기지도 지우지도 않는다. 첫 부팅 이전 · 완료 표지 · 옛 자리 잠금은 없고, 잠금은 `daemon\run\daemon.json` 하나다. 옛/새 바이너리는 파일을 공유하지 않아 간섭하지 않는다(옛 데이터가 새 바이너리에 안 보이는 것은 의도).
 - **웹뷰 데이터를 `webview\` 로**(지금 `%LOCALAPPDATA%\<identifier>` — 포터블 원칙 위반 해소 · 워크트리 간 localStorage 공유 해소).
-- **설정 = `shell\store\settings.json`** — 사람·LLM 이 정하는 값, 기본값에서 바꾼 것만. 키는 이름공간(`theme.default` · `chat.style.*` …). 접근은 범용 명령 넷(`settings.get` · `set` · `reset` · `schema`)뿐 — 스키마에 한 줄 등록으로 설정 추가. LLM 이 `ui-settings.json` 을 직접 고치던 경로를 폐지하고 `prompts/engram-help.md` 의 theme 구획·프라이밍을 함께 고친다. 저장 계층 한 곳만 파일을 안다(나중에 `chat.*` 등을 별도 파일로 떼도 호출부 무수정). 챗 스타일을 localStorage 에서 여기로.
-- **화면 상태 = `shell\store\state.json`**(이름 = Windows Terminal 관행 · `session` 은 에이전트 세션과 충돌해 기피) — 창 → 탭 → 분할 트리 → 슬롯 → `content{kind, agentId / 옵션}`. 창마다 재시작해도 유지되는 id. 버전 봉투 + 모르는 종류 허용(ADR-0060).
+- **설정 = `shell\config\settings.json`** — 사람·LLM 이 정하는 값, 기본값에서 바꾼 것만. 키는 이름공간(`theme.default` · `chat.style.*` …). 접근은 범용 명령 넷(`settings.get` · `set` · `reset` · `schema`)뿐 — 스키마에 한 줄 등록으로 설정 추가. LLM 이 `ui-settings.json` 을 직접 고치던 경로를 폐지하고 `prompts/engram-help.md` 의 theme 구획·프라이밍을 함께 고친다. 저장 계층 한 곳만 파일을 안다(나중에 `chat.*` 등을 별도 파일로 떼도 호출부 무수정). 챗 스타일을 localStorage 에서 여기로.
+- **화면 상태 = `shell\state\state.json`**(이름 = Windows Terminal 관행 · `session` 은 에이전트 세션과 충돌해 기피) — 창 → 탭 → 분할 트리 → 슬롯 → `content{kind, agentId / 옵션}`. 창마다 재시작해도 유지되는 id. 버전 봉투 + 모르는 종류 허용(ADR-0060).
 - **복원 정책 = 항상 복원, 비정상 종료 뒤에만 묻는다**(Chrome 방식) — `cleanExit` 표식 · Windows 종료/로그오프 알림을 정상 종료로 처리.
 - **화면에서 바꾼 테마도 저장**(ADR-0167 의 「화면 변경 미저장」 번복) — 전체 기본 = `settings.json` · **창별 테마 = `state.json` 의 그 창 항목**(창과 수명이 같아 부팅 쓸기 불필요).
-- **테마는 이름으로 참조** — 내장 셋(dark · light · e-ink)은 CSS 유지. 사용자 테마는 나중에 `shell\store\themes\<이름>.json`(`extends` + 바꾼 색). 내장도 JSON 으로 통일할지는 테마 프리셋 착수 때(이번 범위 밖).
-- **슬롯:** 꽂힌 내용 = `state.json` · 슬롯 종류별 공통 설정 = `shell\store\slots\<종류>.json`(필요한 종류만). 대상 에이전트가 없는 슬롯은 배치를 유지하고 「대상 없음」 대기 상태로 복원.
-- **프리셋 시스템은 이번 범위 아님** — 에이전트를 띄울 때 들어가는 정의는 데몬 쪽이라는 원칙만.
+- **테마는 이름으로 참조** — 내장 셋(dark · light · e-ink)은 CSS 유지. 사용자 테마는 나중에 `shell\config\themes\<이름>.json`(`extends` + 바꾼 색). 내장도 JSON 으로 통일할지는 테마 프리셋 착수 때(이번 범위 밖).
+- **슬롯:** 꽂힌 내용 = `state.json` · 슬롯 종류별 공통 설정 = `shell\config\slots\<종류>.json`(필요한 종류만). 대상 에이전트가 없는 슬롯은 배치를 유지하고 「대상 없음」 대기 상태로 복원.
+- **프리셋 시스템은 이번 범위 아님** — 에이전트를 띄울 때 들어가는 정의는 데몬 쪽이라는 원칙만. 기존 `presets.json` 은 자리만 `daemon\state\` 로 정하고(옛 파일은 옮기지 않는다) 새 프리셋 구조는 만들지 않는다(2026-10-02).
+- **로그 = 최상위 `logs\` 유지**(2026-10-02) — 프로세스마다 파일이 따로다. 데몬/클라이언트가 다른 기계로 갈라지면 각 기계의 `logs\` 에 제 종류만 남는다.
 - **범위 밖(별건):** 개발 Vite 포트(1420 고정 · 재사용)를 워크트리끼리 공유하는 문제 · 작업 내용 이력(T-14).
 - **방법:** research medium · 설계-결정 모드. 갈래 3(동종 앱 피어 · Tauri/WebView2 메커니즘 · 설정/상태 분리 패턴) + 현행 인벤토리 1. 메인 grounding(로컬 클론·cargo 레지스트리 소스 대조) + cross-family(codex) 적대 리뷰 1회(판정 BLOCK → 아래 정정 반영).
 - **범위:** 작업 내용 이력(대화·출력 기록)은 제외 — T-14 갈래.

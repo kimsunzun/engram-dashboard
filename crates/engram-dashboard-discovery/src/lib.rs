@@ -18,14 +18,19 @@ use std::time::{Duration, Instant};
 use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, PROTOCOL_VERSION};
 
-const DAEMON_FILE: &str = "daemon.json";
+pub mod layout;
+
+pub use layout::DataLayout;
+
+use layout::DAEMON_FILE;
+
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 // ── data_dir 단일 출처(ADR-0024) ─────────────────────────────────────────────────
 //
 // ★ENGRAM_DATA_DIR override (테스트 격리 탈출구 — 배포 노브 아님)★:
 //   - **유일한 용도 = 통합 테스트의 데이터 격리.** 실프로세스 통합 테스트(daemon `tests/ws_e2e.rs`)가
-//     데몬을 임시 디렉토리로 보내 운영 `<repo>/.engram-data` 오염을 막기 위함이다. 이 env 가 없으면
+//     데몬을 임시 디렉토리로 보내 운영 `<repo>/.engram-dev` 오염을 막기 위함이다. 이 env 가 없으면
 //     테스트 데몬이 운영 폴더에 daemon.json/agents.json 을 쓴다(오염).
 //   - **배포용 경로 커스터마이즈 노브가 아니다.** 배포 단계의 데이터 위치는 실행 폴더 하위로
 //     확정돼 있다(ADR-0134). 이 override 를 "사용자가 데이터 폴더를 바꾸는 수단"으로 쓰지 말 것.
@@ -35,13 +40,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 //     즉 `std::process::Command` 로 데몬을 **직접** 띄우는 ws_e2e.rs 만 격리된다. discovery 의 운영
 //     spawn 경로(WMI Win32_Process.Create)는 자식이 WmiPrvSE 자식이라 **부모 env 를 상속하지 않아**
 //     이 override 가 무시된다(설계 확정 — daemon.json/ACL 외 채널 없음). 그래서 WMI 를 실제로 타는
-//     discovery 의 smoke 테스트(real_wmi_spawn_*)는 env 로 격리하지 못하고, default 경로(`.engram-data`)
+//     discovery 의 smoke 테스트(real_wmi_spawn_*)는 env 로 격리하지 못하고, default 경로(`.engram-dev`)
 //     를 폴링하며 운영 파일은 백업/복원으로 보호한다.
 
-// ADR-0029: debug 분기(walk-up `.engram-data`)와 그 단위테스트에서만 쓰인다 — release
+// ADR-0029: debug 분기(walk-up `.engram-dev`)와 그 단위테스트에서만 쓰인다 — release
 // default_data_dir 은 exe 옆 `data` 만 쓰므로 release 비-test 빌드에선 dead_code.
+// ADR-0264
 #[cfg_attr(not(debug_assertions), allow(dead_code))]
-const LOCAL_DATA_DIR: &str = ".engram-data";
+const LOCAL_DATA_DIR: &str = ".engram-dev";
 
 const DATA_DIR_ENV: &str = "ENGRAM_DATA_DIR";
 
@@ -75,7 +81,7 @@ const WRITE_PROBE_PAYLOAD: &[u8] = b"engram-write-probe";
 /// 우선순위:
 /// 1. **`ENGRAM_DATA_DIR`(설정+non-empty)** → 그 경로 그대로(테스트 격리 탈출구 — 배포 노브 아님).
 /// 2. **디버그(`cfg!(debug_assertions)`)**: current_exe 에서 위로 올라가 repo 루트(`.git` 또는
-///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-data`. 루트 못 찾으면 exe 디렉토리
+///    `Cargo.toml` 의 `[workspace]`)를 찾아 `<root>/.engram-dev`. 루트 못 찾으면 exe 디렉토리
 ///    fallback, 그것도 안 되면 cwd. → 개발 한 곳에서 여러 빌드(app·daemon)가 한 폴더 공유.
 /// 3. **릴리즈(`not(debug_assertions)`)**: **실행 파일 폴더 하위 `data/`**
 ///    ([`release_data_dir`]). 배포판 폴더를 지우면 흔적이 남지 않는다 — 완전 포터블(ADR-0134 결정 1).
@@ -639,7 +645,7 @@ fn status_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> DaemonS
 
 pub fn daemon_status(data_dir: &Path) -> DaemonStatus {
     let reader = FileReader {
-        path: data_dir.join(DAEMON_FILE),
+        path: DataLayout::new(data_dir).daemon_file(),
     };
     status_with(&reader, &RealLiveness)
 }
@@ -663,7 +669,7 @@ fn read_live_with(reader: &dyn DaemonReader, liveness: &dyn PidLiveness) -> Opti
 /// 재조회해 그 주소로 attach 한다. ★spawn 하지 않는다★ — 단지 떠 있으면 따라갈 뿐, 깨우지 않는다.
 pub fn read_live_daemon(data_dir: &Path) -> Option<DaemonInfo> {
     let reader = FileReader {
-        path: data_dir.join(DAEMON_FILE),
+        path: DataLayout::new(data_dir).daemon_file(),
     };
     read_live_with(&reader, &RealLiveness)
 }
@@ -692,7 +698,7 @@ pub trait ProcessKiller {
 pub fn daemon_stop(data_dir: &Path) -> Result<Option<u32>, DiscoveryError> {
     stop_with(
         &FileReader {
-            path: data_dir.join(DAEMON_FILE),
+            path: DataLayout::new(data_dir).daemon_file(),
         },
         &RealLiveness,
         &TaskKiller,
@@ -767,7 +773,7 @@ pub trait StopSender {
 pub fn send_stop(data_dir: &Path) -> Result<StopOutcome, DiscoveryError> {
     stop_with_sender(
         &FileReader {
-            path: data_dir.join(DAEMON_FILE),
+            path: DataLayout::new(data_dir).daemon_file(),
         },
         &RealLiveness,
         &TungsteniteStopSender,
@@ -935,7 +941,7 @@ pub fn ensure_daemon(
     timeout: Duration,
     console: bool,
 ) -> Result<DaemonInfo, DiscoveryError> {
-    let daemon_path = data_dir.join(DAEMON_FILE);
+    let daemon_path = DataLayout::new(data_dir).daemon_file();
 
     let exe_abs = dunce::canonicalize(daemon_exe)
         .map_err(|e| DiscoveryError::ExeNotFound(format!("{}: {e}", daemon_exe.display())))?;
@@ -1345,7 +1351,7 @@ mod tests {
 
     #[test]
     fn data_dir_empty_env_falls_through_to_default() {
-        // 테스트는 항상 debug 빌드라 walk-up `.engram-data` 분기를 탄다.
+        // 테스트는 항상 debug 빌드라 walk-up `.engram-dev` 분기를 탄다.
         let _g = ENV_LOCK.lock().unwrap();
         let prev = std::env::var_os(DATA_DIR_ENV);
         std::env::set_var(DATA_DIR_ENV, "");
@@ -1356,7 +1362,7 @@ mod tests {
         }
         assert!(
             got.ends_with(LOCAL_DATA_DIR),
-            "빈 env 는 기본 분기로 통과 → `.engram-data` 로 끝나야: {got:?}"
+            "빈 env 는 기본 분기로 통과 → `.engram-dev` 로 끝나야: {got:?}"
         );
     }
 
@@ -1371,7 +1377,7 @@ mod tests {
         }
         assert!(
             got.ends_with(LOCAL_DATA_DIR),
-            "debug 는 폴더-로컬 `.engram-data` 로 끝나야: {got:?}"
+            "debug 는 폴더-로컬 `.engram-dev` 로 끝나야: {got:?}"
         );
     }
 
@@ -1654,6 +1660,25 @@ mod tests {
             "빈 파일도 Parse 여야: {empty:?}"
         );
         assert!(matches!(whole, Ok(Some(_))), "완성되면 읽혀야: {whole:?}");
+    }
+
+    #[test]
+    fn public_entry_points_read_the_record_from_the_layout_daemon_file() {
+        let dir = fresh_probe_dir("layout-entry");
+        let layout = DataLayout::new(&dir);
+        layout.ensure_daemon_dirs().expect("폴더");
+        // 자기 프로세스 = 살아 있는 pid. 생성시각 0 = PID 단독 판정.
+        let mut me = info(std::process::id(), PROTOCOL_VERSION);
+        me.start_time = 0;
+        std::fs::write(layout.daemon_file(), serde_json::to_vec(&me).unwrap()).unwrap();
+
+        let status = daemon_status(&dir);
+        let live = read_live_daemon(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(status.alive, "{status:?}");
+        assert_eq!(status.pid, Some(std::process::id()));
+        assert_eq!(live.map(|i| i.pid), Some(std::process::id()));
     }
 
     fn info(pid: u32, version: u32) -> DaemonInfo {
@@ -2724,7 +2749,7 @@ mod tests {
     // ★기존 데몬이 살아있으면 단일 인스턴스 잠금으로 우리 spawn 이 거부돼 검증이 무의미하므로
     //   그 경우 skip(return) 한다.★
     //
-    // 한계(은폐 금지): 이 smoke 는 운영 data_dir(`.engram-data`)을 건드리므로(백업/복원으로 최소화하나
+    // 한계(은폐 금지): 이 smoke 는 운영 data_dir(`.engram-dev`)을 건드리므로(백업/복원으로 최소화하나
     //   완전 격리는 아님) CI 보다는 로컬 수동 검증용이다.
     #[cfg(windows)]
     #[test]
@@ -2736,7 +2761,7 @@ mod tests {
         // WMI-spawn 데몬이 실제로 쓰는 default 경로(env 미상속).
         let data_dir = default_data_dir();
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
-        let daemon_path = data_dir.join(DAEMON_FILE);
+        let daemon_path = DataLayout::new(&data_dir).daemon_file();
 
         let backup = std::fs::read(&daemon_path).ok();
         if let Some(bytes) = &backup {
@@ -2813,7 +2838,7 @@ mod tests {
 
         let data_dir = default_data_dir();
         std::fs::create_dir_all(&data_dir).expect("data_dir 생성");
-        let daemon_path = data_dir.join(DAEMON_FILE);
+        let daemon_path = DataLayout::new(&data_dir).daemon_file();
 
         let backup = std::fs::read(&daemon_path).ok();
         if let Some(bytes) = &backup {

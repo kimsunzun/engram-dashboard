@@ -14,7 +14,7 @@ REM   it is not recorded and the question cannot be answered after the fact.
 REM
 REM ★The log file is NOT this window★ - the app is launched detached and its output goes to a file.
 REM   The launcher prints `LOG=<path>` and `PID=<pid>`; use that path. A NEW file is created per launch.
-REM   The daemon writes its own log under the deployment's data dir (repo-root .engram-data\logs\).
+REM   The daemon writes its own log under the deployment's data dir (repo-root .engram-dev\logs\).
 REM
 REM ★Debug logging is verbose★ - use this while reproducing one specific thing, not as your daily
 REM   launcher. Use rebuild-run-debug.bat otherwise.

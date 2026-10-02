@@ -67,7 +67,10 @@ pub fn run() {
             // 데몬과 같은 이유로 자기 로그 위치를 남긴다(daemon `run()` 의 "데이터 폴더 결정"): 1차
             //   폴더를 못 쓰면 이 경로가 `%TEMP%` 아래로 갈릴 수 있어, 반환값 말고는 어디에 쓰고
             //   있는지 아는 수단이 없다.
-            let log_file = logging::init_logging_with_file(&data_dir, logging::LogKind::App);
+            let log_file = logging::init_logging_with_file(
+                &crate::discovery::DataLayout::new(&data_dir).logs_dir(),
+                logging::LogKind::App,
+            );
             tracing::info!(
                 data_dir = %data_dir.display(),
                 log_file = ?log_file,

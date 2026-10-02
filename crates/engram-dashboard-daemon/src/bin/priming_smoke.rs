@@ -120,7 +120,7 @@ async fn run() -> i32 {
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
         registry.clone(),
         url,
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None,
         priming_provider,
     ));

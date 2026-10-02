@@ -149,4 +149,4 @@ theme 은 전체 기본값이고 windows 는 창 label 마다의 덮어쓰기다
 
 이 명령은 파일을 쓰지 않는다 — 쓰는 것은 부르는 쪽이다. 파일이 없거나 깨져 있어도 오류가 아니라 dark 로 떨어진다.
 
-data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-data 이고, 루트가 없으면 그 폴더의 .engram-data 다.
+data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-dev 이고, 루트가 없으면 그 폴더의 .engram-dev 다.

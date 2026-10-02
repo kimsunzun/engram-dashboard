@@ -1,6 +1,6 @@
 # TRD — 저장 관리 구조: 데이터 배치 · 웹뷰 폴더 · 설정 · 화면 상태 (S21)
 
-> 상태: **초안 3판 · 리뷰 2회 반영 (2026-10-02)** · 코드 무변경. 2판 = 1차 리뷰(설계자 · 파괴자 — 둘 다 FIX) 반영 · 3판 = 2차 리뷰(파괴자 FIX · 설계자 BLOCK — 같은 핵심 결함: 대기분이 디스크 확정 전에 지워진다) 반영 — 대응표 = §14.
+> 상태: **초안 3판 · 리뷰 2회 반영 (2026-10-02)** · 코드 무변경. 2판 = 1차 리뷰(설계자 · 파괴자 — 둘 다 FIX) 반영 · 3판 = 2차 리뷰(파괴자 FIX · 설계자 BLOCK — 같은 핵심 결함: 대기분이 디스크 확정 전에 지워진다) 반영 — 대응표 = §14. **이후 P1 구현 · 코드 리뷰 뒤 사용자 결정(2026-10-02)으로 첫 부팅 이전을 걷었다 — 옛 데이터는 옮기지 않고 버린다(§3-2 · §14-5).**
 >
 > **입력:** PRD 결정 = [`docs/research/storage-management-survey-2026-10-02.md`](../../research/storage-management-survey-2026-10-02.md) 「0. 결정」(구속) · 같은 보고서 §1–§6(근거). **판독 기준** = 브랜치 `v0.3.3/feat/storage` HEAD `d4ff3f7` · Tauri 2.11.3 / tao 0.35.3 / tauri-runtime-wry 2.11.3 / tauri-plugin-single-instance 2.4.2 = 이 PC cargo 레지스트리 소스.
 >
@@ -15,7 +15,7 @@
 | 무엇 | 어디 | 요지 |
 |---|---|---|
 | 경로 계산 | discovery `DataLayout`(신설) | 디렉터리와 둘 이상의 프로세스가 보는 파일(`daemon.json`) 경로의 단일 출처. 데몬·셸·net 은 받은 경로만 쓴다 |
-| 데몬 이전 | 데몬 기동, 새·옛 잠금을 **둘 다** 쥔 뒤 | `store\` 3파일 rename → 완료 표지를 맨 마지막에. 이동 실패 = 재시도 후 기동 중단(빈 명부로 돌지 않는다). `run\` 것은 옛 사본을 지운다 |
+| 옛 데이터 | 없음(걷음 — §3-2) | **옮기지 않고 버린다.** 새 코드는 옛 평면 파일 · `.engram-data` 를 읽지도 옮기지도 지우지도 않는다. 잠금은 `daemon\run\daemon.json` 하나 |
 | 웹뷰 폴더 | 셸 | 정적 창 둘을 Rust 에서 만들고(`create:false` + `from_config`) 모든 창에 같은 `data_directory` + 같은 브라우저 인자. 만들기 전에 쓰기 확인 |
 | 설정 | 셸 `settings` 모듈(신설) | 스키마 표 한 줄 = 설정 하나. 버스 명령 넷 + 같은 서비스를 부르는 Tauri 껍데기. 파일을 아는 것은 저장 계층 하나 |
 | 화면 상태 | 셸 `state` 모듈(신설) | 빌드 전엔 **읽기만**, 파일 변경은 단일 인스턴스 관문 뒤 `setup` 에서. **`state.json` 을 쓰는 것은 기록기 스레드 하나뿐**(종료 쓰기도 그 스레드가 하고 답을 준다). 대기분은 **복원분이 디스크에 확정된 뒤에만** 지운다. 런타임 복원은 조율자 하나가 한 커밋 지점에서 바꾼다 |
@@ -23,21 +23,21 @@
 
 ## 1. 목표 · 범위
 
-- **안(in):** 「0. 결정」의 데이터 배치 · 첫 부팅 이전 · 웹뷰 폴더 이전 · 설정(`settings.json` + 명령 넷 + 챗 스타일 이주 + `ui-settings.json` 폐지 + 도움말·프라이밍) · 화면 상태(`state.json` + 창 신원 + 복원 + 비정상 종료 확인) · 창별 테마의 영속 · 대상 없는 슬롯의 두 상태 표시.
-- **밖(out):** 프리셋 시스템 · 테마 프리셋 · 내장 테마 JSON 통일 · 작업 이력(T-14) · 개발 Vite 포트 공유 · T-22(명부 저장 실패의 성공 보고) · T-33(모르는 백엔드 종류로 명부 전체 손상) — **이전은 `agents.json` 을 파싱하지 않고 rename 만 하므로 둘 다 건드리지 않는다** · 슬롯 종류별 설정의 코드(폴더 자리만 문서로 둔다 — §7) · 설정 화면 · 테마를 고르는 화면 메뉴(§10 F7).
+- **안(in):** 「0. 결정」의 데이터 배치(옛 데이터는 버림 — §3-2) · 웹뷰 폴더 이전 · 설정(`settings.json` + 명령 넷 + 챗 스타일 이주 + `ui-settings.json` 폐지 + 도움말·프라이밍) · 화면 상태(`state.json` + 창 신원 + 복원 + 비정상 종료 확인) · 창별 테마의 영속 · 대상 없는 슬롯의 두 상태 표시.
+- **밖(out):** 프리셋 시스템 · 테마 프리셋 · 내장 테마 JSON 통일 · 작업 이력(T-14) · 개발 Vite 포트 공유 · T-22(명부 저장 실패의 성공 보고) · T-33(모르는 백엔드 종류로 명부 전체 손상) — **새 배치는 `agents.json` 의 자리만 바꾸므로 둘 다 건드리지 않는다** · 슬롯 종류별 설정의 코드(폴더 자리만 문서로 둔다 — §7) · 설정 화면 · 테마를 고르는 화면 메뉴(§10 F7).
 
 ## 2. 폴더 구조와 경로 계산
 
 ### 2-1. 최종 구조
 
 ```
-<root>\              릴리스 = <exe 폴더>\data · 개발 = <워크트리>\.engram-data · 테스트 = ENGRAM_DATA_DIR (현행 규칙 그대로 — discovery/src/lib.rs:84)
-├─ daemon.json       옛 잠금 자리 — 새 데몬이 0바이트로 쥐고만 있다(§3-2 · 옛 바이너리 차단). .gitignore 대상
+<root>\              릴리스 = <exe 폴더>\data · 개발 = <워크트리>\.engram-dev(새로 시작 — 옛 .engram-data 는 건드리지 않는다, §3-2) · 테스트 = ENGRAM_DATA_DIR (현행 규칙 그대로 — discovery/src/lib.rs:84)
 ├─ daemon\
-│  ├─ store\         지킨다: agents.json · presets.json · usage_rejects.json (+ .corrupt-* · .legacy-*) · .migrated-v1(이전 완료 표지)
+│  ├─ state\         지킨다: agents.json · presets.json · usage_rejects.json (+ .corrupt-*)
 │  └─ run\           버려도 된다: daemon.json(잠금+발견·WS 토큰) · mcp-config\(토큰) · usage-probe\
 ├─ shell\
-│  ├─ store\         settings.json · state.json · state.pending.json(비정상 종료 뒤 처리 전까지만) · (장래) slots\<종류>.json
+│  ├─ config\        취향(지우면 기본값): settings.json · (장래) slots\<종류>.json · themes\<이름>.json
+│  ├─ state\         기억: state.json · state.pending.json(비정상 종료 뒤 처리 전까지만)
 │  └─ run\           지금 없음(생길 때만)
 ├─ webview\          WebView2 사용자 데이터 폴더
 └─ logs\             daemon-*.log · app-*.log (위치 현행 그대로)
@@ -46,51 +46,40 @@
 ### 2-2. `DataLayout` — 경로의 단일 출처 [고름]
 
 - **자리 = `engram-dashboard-discovery` 의 새 모듈 `layout`.** 그 crate 가 이미 `default_data_dir` 의 단일 출처이고(ADR-0024 · `lib.rs:84`) 데몬·셸이 둘 다 의존한다. **base 기각** — 폴더 이름은 도메인 지식이라 입주 조건 위반이고 셋째 입주자는 ADR-0175 재심을 부른다. **net 은 discovery 를 의존할 수 없어**(discovery → net) 경로를 인자로 받는다.
-- 모양: `DataLayout::new(root)` · `resolve()`(= `new(default_data_dir())`) · `root()` · `daemon_store_dir()` · `daemon_run_dir()` · `daemon_file()` · `legacy_daemon_file()` · `mcp_config_dir()` · `usage_probe_dir()` · `shell_store_dir()` · `shell_run_dir()` · `webview_dir()` · `logs_dir()` · `ensure_daemon_dirs()` · `legacy()`(이전 전용 — 옛 평면 경로 묶음).
+- 모양: `DataLayout::new(root)` · `resolve()`(= `new(default_data_dir())`) · `root()` · `daemon_state_dir()` · `daemon_run_dir()` · `daemon_file()` · `mcp_config_dir()` · `usage_probe_dir()` · `shell_config_dir()` · `shell_state_dir()` · `shell_run_dir()` · `webview_dir()` · `logs_dir()` · `ensure_daemon_dirs()`. **옛 평면 경로 함수는 두지 않는다**(§3-2).
 - **소유 규칙:** 디렉터리와 **둘 이상의 프로세스가 보는 파일**(`daemon.json` — 데몬이 쓰고 셸·스크립트가 읽는다)은 `DataLayout` 이 계산한다. **한 저장소만 쓰는 파일 이름은 그 저장소가 소유**하고 받은 디렉터리 안에서만 붙인다 — `agents.json`(`agent/src/persistence/mod.rs:22`) · `presets.json`(`presets.rs:19`) · `usage_rejects.json`(`reject_store.rs:20`) · `settings.json`·`state.json`(셸 저장 계층). 이름까지 끌어오면 agent crate 가 discovery 를 의존해야 한다.
 - 바뀌는 시그니처: net `instance::acquire(data_dir)` → `acquire(lock_file: &Path)`(지금 `instance.rs:229` 가 안에서 join) · 데몬 `mcp_config::*(data_dir, …)` → `(mcp_dir, …)`(`mcp_config.rs:48-52,186-187`) · base `logging::init_logging_with_file(data_dir, kind)` → `(logs_dir, kind)`(`logging/mod.rs:87,355`). discovery 공개 함수(`ensure_daemon`·`daemon_status`·`read_live_daemon`·`daemon_stop`·`send_stop`)는 **root 를 그대로 받고** 안에서 `DataLayout` 을 쓴다 — 셸 호출부(`commands/discovery.rs` · `daemon_client/mod.rs` · `tray/`)는 손대지 않는다.
 - **플랫폼 중립:** OS 가름은 지금처럼 `default_data_dir` 안에만 있다. `DataLayout` 은 `Path::join` 뿐이다. `webview_dir()` 은 모든 OS 에서 계산하고 쓰는 쪽(§4)도 `#[cfg]` 없이 넘긴다 — 그 값을 쓰느냐는 Tauri 의 플랫폼 구현 몫이다(`tauri-2.11.3/src/manager/webview.rs:534-545` — Windows·Linux 만 강제).
 
-## 3. 이전(migration)
+## 3. 데몬 기동 · 옛 데이터 · 셸 이주
 
-### 3-1. 데몬 — 누가, 언제
+### 3-1. 데몬 기동 순서
 
-**데몬이 한다.** 명부·프리셋·거절 기록의 유일한 쓰는 쪽이고 잠금을 쥔다. 셸은 데몬 파일을 건드리지 않는다(`discovery/src/lib.rs:454-472` 「클라이언트는 daemon.json 을 지우지 않는다」의 연장).
+셸은 데몬 파일을 건드리지 않는다(`discovery/src/lib.rs:454-472` 「클라이언트는 daemon.json 을 지우지 않는다」의 연장).
 
 `run()` 의 새 순서(지금 `daemon/src/lib.rs:461-659`):
 
 1. `layout = DataLayout::resolve()` → 로그(`layout.logs_dir()`).
 2. `ensure_data_dir_writable(root)` → `layout.ensure_daemon_dirs()`.
-3. **새 잠금** `acquire(layout.daemon_file())` — 현행 세 갈래 그대로(`AlreadyRunning` = 양보 exit 0 · `FileBusy`/`AccessDenied` = exit 1 · `lib.rs:498-532`). ★**먼저 뜬 새 데몬이 아직 레코드를 발행하기 전(잠금 획득 ~ 발행 — 이전이 이 구간에 든다)이면 뒤엣것은 `AlreadyRunning` 이 아니라 `FileBusy` 로 나간다**★ — 진단 읽기가 빈 파일을 보기 때문이고 오늘도 같은 구간이 있다. 그래서 `FileBusy` 로그 문구를 「중복 데몬 아님」에서 **「다른 프로그램, 또는 아직 발행 전인 다른 데몬이 쥐고 있음」**으로 고친다(`daemon/src/lib.rs:512`).
-4. **옛 잠금** `acquire(layout.legacy_daemon_file())` — **같은 원시 기능**을 한 번 더. `Held` = 그 guard 도 프로세스 수명 내내 쥔다(파일을 0바이트로 자른다 — 죽은 옛 데몬의 토큰을 지운다) · `AlreadyRunning{pid}` = 살아 있는 옛 데몬이 이 폴더를 쓰고 있다 → 새 guard 를 놓고 양보 exit 0 · `FileBusy`/`AccessDenied` = 3)과 같은 exit 1. **새 것을 먼저 잡는 이유:** 옛 자리에는 새 데몬이 레코드를 안 쓰므로 거기서 먼저 막히면 「이미 실행 중」을 가릴 근거가 없다 — 새 데몬 둘의 경합이 `FileBusy`(exit 1)로 오진된다.
-5. **store 이전**(§3-3) — 두 잠금을 쥔 뒤라 어떤 데몬과도 겹치지 않는다. 실패 = 기동 중단.
-6. **run 정리** — 옛 `<root>\mcp-config\` · `<root>\usage-probe\` 를 통째로 지운다. 옮기지 않는 이유: 부팅 시점의 mcp-config 는 정의상 죽은 자격증명이고(`daemon/src/lib.rs:582-585` 스윕의 근거와 같다) usage-probe 는 기동 때 쓸리는 임시물이다(`:213-218`). 실패는 warn 하고 계속 — 비밀이 남을 수 있는 자리라 다음 기동이 다시 지운다.
-7. 새 자리 스윕(`mcp_config_dir()` · `usage_probe_dir()`) → 배선(`FileProfileStore::new(layout.daemon_store_dir())` 등 — 지금 `:226-235`).
+3. **잠금 하나** `acquire(layout.daemon_file())` — 현행 세 갈래 그대로(`AlreadyRunning` = 양보 exit 0 · `FileBusy`/`AccessDenied` = exit 1 · `lib.rs:498-532`). ★**먼저 뜬 새 데몬이 아직 레코드를 발행하기 전(잠금 획득 ~ 발행)이면 뒤엣것은 `AlreadyRunning` 이 아니라 `FileBusy` 로 나간다**★ — 진단 읽기가 빈 파일을 보기 때문이고 오늘도 같은 구간이 있다. 그래서 `FileBusy` 로그 문구를 「중복 데몬 아님」에서 **「다른 프로그램, 또는 아직 발행 전인 다른 데몬이 쥐고 있음」**으로 고친다(`daemon/src/lib.rs:512`).
+4. 새 자리 스윕(`mcp_config_dir()` · `usage_probe_dir()`) → 배선(`FileProfileStore::new(layout.daemon_state_dir())` 등 — 지금 `:226-235`).
 
-### 3-2. 옛/새 바이너리가 섞일 때
+### 3-2. 옛 데이터 — 옮기지 않고 버린다 (사용자 결정 2026-10-02 · ADR-0264 결정 5 · 6)
 
-| 조합 | 일어나는 일 | 처리 |
-|---|---|---|
-| 새 셸 + 옛 데몬(실행 중) | 새 경로에 `daemon.json` 없음 | **discovery 읽기가 두 경로를 다 읽고 고르는 순수 함수 `pick(new, legacy, liveness)`** — 우선순위: 살아 있고 버전 맞는 레코드(둘 다면 새 것) › 살아 있는 레코드(→ `VersionMismatch`) › 죽은 레코드 › 둘 다 없음(`Ok(None)` → spawn). ★**한쪽의 파싱 실패·빈 파일·읽기 실패는 다른 쪽의 산 레코드를 가리지 못한다**★ · 산 레코드가 없고 어느 한쪽이라도 못 읽혔으면 「아직 준비 안 됨」(`Err` — 지금 `ensure_with` 가 파싱 실패를 다루는 갈래, `lib.rs:514,553-556`). 각 공개 함수가 만드는 `FileReader` 하나만 고친다(`lib.rs:640-642,664-666,692-695,767-770,938`). **끄기도 같은 읽기라 옛 데몬을 트레이에서 끌 수 있다** — 끈 뒤 뜨는 새 데몬이 이전한다 |
-| 옛 데몬 실행 중에 새 데몬 기동 | §3-1 ④ `AlreadyRunning` | 양보. **이것이 한 폴더에 데몬 둘을 막는 장치다** — 없으면 새 데몬은 새 잠금을 그냥 얻는다 |
-| 새 데몬 실행 중에 옛 데몬 기동(옛 셸이 띄움) | 옛 데몬이 루트 `daemon.json` 을 못 열고(공유 위반) 진단 읽기는 0바이트라 레코드가 없다 → `FileBusy` exit 1 | 옛 바이너리가 **두 순서 모두에서** 막힌다. 옛 셸은 5초 시간 초과 — 하향은 지원 안 함 |
-| 데몬이 없을 때 옛 데몬이 이전된 폴더에서 기동 | 루트에 명부 없음 → 빈 명부로 시작, 루트에 새로 씀 | 지원 안 함. 데이터는 `daemon\store\` 에 그대로이고, 다음 새 데몬이 그 루트 파일을 「낙오」로 보존한다(§3-3) — 절대 이기지 못한다 |
+- **새 코드는 옛 파일을 읽지도 옮기지도 지우지도 않는다.** 대상 = 릴리스 `<exe>\data\` 의 평면 파일(`agents.json` · `presets.json` · `usage_rejects.json` · 루트 `daemon.json` · `mcp-config\` · `usage-probe\`)과 개발 루트 `.engram-data\` 통째. 근거 = 데이터가 아직 정립되지 않았다(사용자 결정).
+- **없는 것:** 첫 부팅 이전 · 완료 표지(`.migrated-v1`) · 옮겨 들이기/보존(`.legacy-*`) · 대소문자 변형 처리 · 옛 루트 `daemon.json` 배제 잠금 · 옛 run 폴더 정리 · discovery 두 자리 읽기(`pick`) · 0바이트 옛 잠금 해석 · `.engram-data` → `.engram-dev` 이름 바꾸기. 개발 루트 `.engram-dev` 는 새로 시작한다.
+- **잠금은 하나**(`daemon\run\daemon.json`). discovery · 스크립트는 새 자리 하나만 읽는다.
+- **옛/새 바이너리:** 상태 · 잠금 · 토큰 파일을 하나도 공유하지 않아 서로 간섭하지 않는다 — 같은 루트에서 함께 돌 수도 있고(각자 자기 명부), 옛 데이터는 새 바이너리에 보이지 않는다(의도). 하향 · 섞어 쓰기는 지원하지 않는다. 같이 쓰는 자리는 최상위 `logs\` 뿐이다.
 
-ADR-0135 「잠금 파일과 접속 파일을 나누지 마라」와 어긋나지 않는다 — 주소를 싣는 잠금은 여전히 하나(`run\daemon.json`)이고, 옛 자리 guard 는 주소 없이 배제만 한다.
+### 3-3. (걷음 — §14-5)
 
-### 3-3. store 이전 규칙 — 실패한 이전 뒤에 생긴 파일이 이기는 길을 없앤다
-
-- **완료 표지 `daemon\store\.migrated-v1`** 를 **모든 이동이 끝난 뒤 맨 마지막에** 원자적으로 쓴다. 옛 파일이 하나도 없는 새 설치도 표지를 쓴다.
-- **표지 없음 = 이전 진행:** 파일마다 — 옛 것만 있으면 `rename` · **옛 것과 새 것이 둘 다 있으면 기동 중단**(exit 1, 두 경로를 로그에 — 표지 없는 새 파일의 출처를 증명할 수 없으므로 어느 쪽도 고르지 않는다) · 옛 `<이름>.corrupt-*` 는 이름 그대로 store 로 · 옛 `<이름>.tmp` 는 지운다.
-- **이동 실패**(제3자 핸들 등) = `acquire` 와 같은 재시도(5회 · 100ms 간격 — `instance.rs` `OPEN_ATTEMPTS`/`OPEN_RETRY_DELAY`) 뒤에도 안 되면 `FileBusy` 급 로그로 exit 1. **빈 store 로 기동하지 않는다** — 그러면 새 자리에 빈 명부가 생겨 옛 명부를 이긴다.
-- **표지 있음 = 이전 끝:** 그 뒤 루트에 다시 생긴 store 파일은 하향 바이너리가 만든 낙오다 → `daemon\store\<이름>.legacy-<ms>` 로 보존 + warn. 새 것을 바꾸지 않는다.
-- **멱등 · 중간 죽음:** 파일 하나의 이동 = 같은 볼륨 안 `rename` 한 번. 파일 사이에 불변식이 없어 일부만 옮겨진 상태도 다음 기동이 이어 간다(표지가 없으므로). 계획(`plan(listing, marker) -> Vec<Action>`)은 순수 함수, 실행은 임시 폴더로 시험한다.
+옛 3판의 「state 이전 규칙」은 §3-2 로 대체됐다.
 
 ### 3-4. `.gitignore` · 스크립트 · 시험 [고름]
 
-- `.gitignore`: `**/data/daemon/run/`(폴더 규칙 — ADR-0136 결정 3 개정, §11) · `**/data/daemon/store/agents.json*` · 옛 줄을 `**/data/daemon.json`(0바이트 옛 잠금도 덮는다) · `**/data/agents.json*` 로. `agents.json*` = `.legacy-*`·`.corrupt-*` 사본도 평문 env 를 싣는다. `.engram-data/`(`:13`)는 그대로.
-- 스크립트: `scripts/engram.mjs:45-66` 후보에 새 경로를 앞에(옛 경로는 뒤에) · `rebuild-run-debug.bat:36` · `rebuild-run-release.bat:44` · `run-release.bat` 포트파일 경로 · `build-release.ps1:151-152` 주석.
-- 시험 경로 갱신: `daemon/tests/ws_e2e.rs:2390,2437,2613` · `daemon/tests/mcp_manager_lifecycle.rs:373` · `discovery/tests/stop_smoke.rs:178` · discovery `real_wmi_spawn_*` 의 운영 `daemon.json` 백업/복원(`discovery/src/lib.rs:2739,2816`) · base `tests/logging_fallback.rs` · `tests/logging_install_race.rs`(로그 인자). **ws_e2e 에 이전 사례를 더한다**(평면 폴더 → 기동 → 명부 보존 · 표지 · 옛 잠금 보유).
+- `.gitignore`: `**/data/daemon/run/`(폴더 규칙 — ADR-0136 결정 3 개정, ADR-0264 결정 7) · `**/data/daemon/state/agents.json*`(`.corrupt-*` 사본도 평문 env 를 싣는다) · 개발 루트 `/.engram-dev/` 통째. **옛 줄(`.engram-data/` · `**/data/daemon.json` · `**/data/agents.json*`)은 남긴다** — 새 코드가 옛 파일을 지우지 않으므로 다른 워크트리 · 옛 배포판에 남은 폴더와 토큰 든 평면 파일이 계속 무시되어야 한다.
+- 스크립트: `scripts/engram.mjs:45-66` 후보를 새 경로 하나로 · `rebuild-run-debug.bat:36` · `rebuild-run-release.bat:44` · `run-release.bat` 포트파일 경로 · `build-release.ps1:151-152` 주석 — 옛 경로 대비 갈래를 두지 않는다.
+- 시험 경로 갱신: `daemon/tests/ws_e2e.rs:2390,2437,2613` · `daemon/tests/mcp_manager_lifecycle.rs:373` · `discovery/tests/stop_smoke.rs:178` · discovery `real_wmi_spawn_*` 의 운영 `daemon.json` 백업/복원(`discovery/src/lib.rs:2739,2816`) · base `tests/logging_fallback.rs` · `tests/logging_install_race.rs`(로그 인자). 이전 사례는 더하지 않는다.
 - CLAUDE.md 「백엔드 모듈 맵」 discovery 줄에 `DataLayout`.
 
 ### 3-5. 셸 — `ui-settings.json` 을 둘로 나눠 은퇴시킨다
@@ -115,7 +104,7 @@ ADR-0135 「잠금 파일과 접속 파일을 나누지 마라」와 어긋나�
 - **옛 폴더(`%LOCALAPPDATA%\com.engram.dashboard[.dev]`)는 지우지 않는다**(§10 F4 · ★명시 확인★) — 같은 식별자의 다른 배포판 사본·워크트리가 쓰고 있을 수 있고 쓰는 중이면 반쯤만 지워진다. 릴리스 노트에 적는다.
 - **잃는 것:** 옛 폴더의 localStorage(오늘 쓰는 키는 챗 스타일 하나 — `rg localStorage src/`) — §3-6 이 먼저 옮긴다.
 
-## 5. 설정 (`shell\store\settings.json`)
+## 5. 설정 (`shell\config\settings.json`)
 
 ### 5-1. 스키마 표 [고름]
 
@@ -195,7 +184,7 @@ SettingDef { key: "chat.style.fontSize",
 - `prompts/engram-help.md` 구획 규칙(`:8`)이 정확히 다섯(root · mail · agent · window · theme)을 요구하고 하나라도 빠지면 파일 전체가 거부된다 → **구획 개명은 파일과 CLI 를 같은 단계에서**: `theme` → `settings`(§10 F14) · `bin/engram.rs` 의 `HELP_TOPIC_THEME`(`:243`)·필수 구획 목록·`:4331` 시험 · `help theme` 별칭 · `root` 목록 줄 · `prompts/agent-priming.md:12`. 새 바이너리 + 옛 파일 = 내장 사본(`:231` `include_str!`)이 나간다.
 - 도움말 본문은 P2c(명령 넷 · 창별은 아직 파일 + `ui.refresh`) → P3c(`restore.*` · 슬롯 정지 상태의 `agent.spawn`) → P3d(`window.setTheme`/`getTheme` · `ui.refresh` 삭제)에서 고친다.
 
-## 6. 화면 상태 (`shell\store\state.json`)
+## 6. 화면 상태 (`shell\state\state.json`)
 
 ### 6-1. 스키마 v1 [고름 — 기존 serde 와 같은 snake_case]
 
@@ -257,6 +246,8 @@ SettingDef { key: "chat.style.fontSize",
 
 모든 행 공통: 남은 `state.json.tmp-*` 를 지운다(지난 기록기가 rename 전에 죽은 흔적).
 
+★**대기분 한 파일(`state.pending.json` 덮음)은 바뀔 예정이다 — 비정상 종료 스냅숏은 덮어쓰지 않고 최근 N 개(예: 3)를 돌려 보관한다(Firefox 식).** 세션 기본값 · 설계 재리뷰 필요 — 이 절 · §6-7 · §8 은 아직 옛 한 파일 모델이다(§14-5)★.
+
 - **빌드 전:** 위 함수로 모델을 만들어 `LayoutState` 로 manage(지금 `lib.rs:59` 자리 — ADR-0102 그대로). 판정에 쓴 파일의 **지문**(`seq` · `saved_at_ms` · 크기)을 계획에 담는다. 진단은 로그가 선 뒤(`lib.rs:70`) 낸다.
 - **`setup`(관문 뒤) 실행기:**
   1. **지문 재확인.** 지금 `state.json` 의 지문이 계획과 다르면(앞 인스턴스가 끝나며 마지막 쓰기를 한 경우 — 단일 인스턴스 플러그인은 앞 인스턴스의 창을 못 찾으면 둘째를 끝내지 않는다, `windows.rs:72-94` 의 `!hwnd.is_null()` 조건) **그 파일을 덮지 않는다** — 새 내용을 `state.pending.json` 으로 보내 사용자에게 묻는다(기본 모양이면 위 표의 기본 모양 규칙).
@@ -301,16 +292,14 @@ SettingDef { key: "chat.style.fontSize",
 
 ## 7. 슬롯 종류별 공통 설정 — 자리만
 
-`shell\store\slots\<종류>.json` 은 **폴더 자리를 이 문서에만 둔다.** 코드·경로 함수·빈 파일 추상화는 만들지 않는다. 첫 `slot.<종류>.*` 키를 표에 올리는 변경이 저장 계층 안에서 그 파일로 가르는 규칙을 함께 넣는다(§5-3 — 호출부 무수정). 슬롯에 꽂힌 내용(`Usage` 의 `show_claude` 등)은 상태다.
+`shell\config\slots\<종류>.json` 은 **폴더 자리를 이 문서에만 둔다.** 코드·경로 함수·빈 파일 추상화는 만들지 않는다. 첫 `slot.<종류>.*` 키를 표에 올리는 변경이 저장 계층 안에서 그 파일로 가르는 규칙을 함께 넣는다(§5-3 — 호출부 무수정). 슬롯에 꽂힌 내용(`Usage` 의 `show_claude` 등)은 상태다.
 
 ## 8. seam · 시험 (ADR-0012)
 
 | 모듈 | 끊는 것 | 하네스 · 새 시험 |
 |---|---|---|
-| `DataLayout` | 없음(순수) | root → 각 경로 · 옛 경로 묶음 |
-| 데몬 이전 | 파일 시스템 = 임시 폴더 · 계획 = 순수 함수 | 표지 없음/있음 × 옛·새 유무 표 · **둘 다 있고 표지 없음 → 중단** · 낙오 보존 · 이동 실패 재시도 후 중단(쥔 핸들로 재현, `#[cfg(windows)]`) · **앞부분만 실행 → 재실행 = 같은 결과** · 표지는 맨 마지막 |
-| 옛 잠금 | net 기존 하네스 | 새 데몬이 두 guard 를 쥔 동안 옛 자리 `acquire` = `FileBusy` · 옛 데몬 레코드가 산 옛 자리 = `AlreadyRunning` · 새 데몬 둘 경합 = 뒤엣것은 파일을 하나도 안 건드리고 끝난다(`AlreadyRunning` 또는 — 앞엣것이 발행 전이면 — `FileBusy` 둘 다 허용 · §3-1 ③) · ws_e2e 평면 폴더 기동 |
-| discovery 읽기 | `pick` 순수 함수 · `DaemonReader`(기존) | 산 쪽 우선 · 둘 다 살면 새 것 · **한쪽 파싱 실패/빈 파일 + 다른 쪽 산 레코드 → 산 레코드** · 둘 다 못 읽음 → 「준비 안 됨」 · 둘 다 없음 → `None` |
+| `DataLayout` | 없음(순수) | root → 각 경로(옛 평면 경로 없음) |
+| 잠금 | net 기존 하네스 | 새 자리 `daemon\run\daemon.json` 획득 · 새 데몬 둘 경합 = 뒤엣것은 파일을 하나도 안 건드리고 끝난다(`AlreadyRunning` 또는 — 앞엣것이 발행 전이면 — `FileBusy` 둘 다 허용 · §3-1 ③) · 옛 루트 파일(평면 `agents.json` · `daemon.json`)이 있어도 읽지도 바꾸지도 않는다 |
 | 설정 | 파일 = `SettingsFiles` 트레이트 · 알림 = 포트 | 종류별 정규화 표(§5-2) · 같은 값 무쓰기 · 기본값이면 키 삭제 · 모르는 키 보존 · 못 읽는 파일 무손상 + 첫 쓰기 `.corrupt` · RMW 가 남의 키 보존 · `rev` 단조 · 명령 표(`src-tauri/tests/layout_commands.rs` 가짜 포트) · `settings_registry.json` 내보내기 |
 | 프론트 설정 | `invoke`/`listen` 모의 | 구독 먼저 · 낡은 `rev` 버림 · 챗 스타일 적용 · 일회 가져오기(성공 시만 지움) · `theme.css` 대조 |
 | 상태 코덱 | 없음(순수) | **`Unknown` 원문 보존 왕복: 적재 → 다른 슬롯 편집 → 재저장 → 원문 JSON 동일** · 그 슬롯에 내용을 넣으면 원문 소멸 · **곁표 슬롯 = 점유(`slot_is_free` · `resolve_spawn_slot` 이 건너뜀) · `foreign_slots` 에 실림** · 버전 초과 · 항목별 건너뛰기 · `from_persisted` 불변식 · `is_default_shape` |
@@ -338,7 +327,7 @@ SettingDef { key: "chat.style.fontSize",
 
 | 단계 | 내용 | 파일(겹침 기준) | 크기 |
 |---|---|---|---|
-| **P1** (L1) 데이터 배치 + 데몬 이전 | §2 · §3-1~3-4 | discovery `src/lib.rs` · `src/layout.rs`(신설) · `tests/stop_smoke.rs` · net `src/instance.rs`(+시험) · base `src/logging/mod.rs` · `tests/logging_fallback.rs` · `tests/logging_install_race.rs` · 데몬 `src/lib.rs` · `src/data_migration.rs`(신설) · `src/control/{mod.rs,mcp_config.rs}` · `src/bin/priming_smoke.rs` · `tests/ws_e2e.rs` · `tests/mcp_manager_lifecycle.rs` · `src-tauri/src/lib.rs`(로그 인자 한 줄) · `.gitignore` · `scripts/{engram.mjs,rebuild-run-debug.bat,rebuild-run-release.bat,run-release.bat,build-release.ps1}` · CLAUDE.md 모듈 맵 | M–L (~900줄) |
+| **P1** (L1) 데이터 배치(옛 데이터 버림) | §2 · §3-1~3-4 | discovery `src/lib.rs` · `src/layout.rs`(신설) · `tests/stop_smoke.rs` · net `src/instance.rs`(+시험) · base `src/logging/mod.rs` · `tests/logging_fallback.rs` · `tests/logging_install_race.rs` · 데몬 `src/lib.rs` · `src/control/{mod.rs,mcp_config.rs}` · `src/bin/priming_smoke.rs` · `tests/ws_e2e.rs` · `tests/mcp_manager_lifecycle.rs` · `src-tauri/src/lib.rs`(로그 인자 한 줄) · `.gitignore` · `scripts/{engram.mjs,rebuild-run-debug.bat,rebuild-run-release.bat,run-release.bat,build-release.ps1}` · CLAUDE.md 모듈 맵 | M (이전 걷음으로 3판 추정 ~900줄보다 작다 — §14-5) |
 | **P2a** (L2) 설정 코어 + 전역 테마 | §5-1~5-4 · §5-6 전역 · §3-5 전역 | `src-tauri/src/settings/{mod,registry,store,migrate}.rs`(신설) · `src-tauri/src/fsutil.rs`(신설) · `ui_settings.rs` · `commands/settings.rs` · `commands/layout.rs`(`command_ports`) · `layout/commands.rs` · `lib.rs` · `src-tauri/tests/layout_commands.rs` · `src-tauri/bindings/*` | L (~1,000) |
 | **P2b** (L2) 프론트 챗 스타일 | §5-5 · §3-6 | `src/api/settingsClient.ts`(신설) · `src/store/chatStyleStore.ts` · `src/main.tsx` · 해당 `*.test.ts` | S–M (~400) |
 | **P2c** (L2) 도움말 · 프라이밍 | §5-7 1차 | `prompts/engram-help.md` · `prompts/agent-priming.md` · 데몬 `src/bin/engram.rs` · CLAUDE.md 「LLM-우선 제어」 갭 줄 | S (~200) |
@@ -350,11 +339,11 @@ SettingDef { key: "chat.style.fontSize",
 
 - **병렬 가능:** P2b ∥ P2c(겹침 0). 나머지는 순차(`lib.rs` · `layout/commands.rs` · `manager.rs` · 도움말 공유).
 - 단계마다 `/review code` → `/qa`(GUI 가 걸리면 full) → 커밋. 착수 전 되돌릴 지점 = 직전 단계 커밋.
-- GUI 확인 핵심: P1 실제 `.engram-data` 사본으로 기동 → 명부 보존 · 표지 · 옛 바이너리 차단 · P2a `settings.set theme.default light` → 모든 창 · 재시작 유지 · P2b `chat.style.fontSize` 즉시 반영 · P3a GUI 없음(시험만) · P3b 바꾸고 1초 뒤 파일 · 트레이 종료 → `clean_exit:true` · 탭·분할·팝아웃·위치 복원 · P3c `taskkill /F` → 띠 · `engram restore.answer` · 슬롯 「정지됨」→ 활성화 · P3d 창별 테마 재시작 유지 · P4 `data\webview\` · 팝아웃 유령 창 없음 · 못 쓰는 폴더 → 대화상자.
+- GUI 확인 핵심: P1 빈 `.engram-dev` 로 기동 → `daemon\state\` · `daemon\run\daemon.json` 생성 · 에이전트 만들고 재시작 → 명부 유지 · 옛 `.engram-data` 가 있어도 손대지 않음 · P2a `settings.set theme.default light` → 모든 창 · 재시작 유지 · P2b `chat.style.fontSize` 즉시 반영 · P3a GUI 없음(시험만) · P3b 바꾸고 1초 뒤 파일 · 트레이 종료 → `clean_exit:true` · 탭·분할·팝아웃·위치 복원 · P3c `taskkill /F` → 띠 · `engram restore.answer` · 슬롯 「정지됨」→ 활성화 · P3d 창별 테마 재시작 유지 · P4 `data\webview\` · 팝아웃 유령 창 없음 · 못 쓰는 폴더 → 대화상자.
 
 ## 10. 구현 갈림길
 
-**리뷰가 사양으로 확정한 것(갈림길 아님):** F2(옛 잠금도 `acquire` 로 쥔다 — §3-1 ④) · F3(이전 실패 = 기동 중단 · 표지 없는 「둘 다 있음」 = 중단 · 표지 뒤 낙오는 보존만 — §3-3) · F10(모르는 내용 = 영속 DTO 전용 — §6-2) · F12(대기분은 띠가 보였을 때만 정상 종료에 지운다 — §6-7) · F16(대상 없음 / 정지됨 두 상태 — §6-8).
+**리뷰가 사양으로 확정한 것(갈림길 아님):** F2 · F3(옛 잠금 · 이전 실패 처리 — **옛 데이터 버림으로 무의미해졌다**, §3-2 · §14-5) · F10(모르는 내용 = 영속 DTO 전용 — §6-2) · F12(대기분은 띠가 보였을 때만 정상 종료에 지운다 — §6-7) · F16(대상 없음 / 정지됨 두 상태 — §6-8).
 
 | # | 갈림길 | 선택지 | 기본값 |
 |---|---|---|---|
@@ -373,7 +362,7 @@ SettingDef { key: "chat.style.fontSize",
 
 ## 11. ADR 후보 (`/adr` 가 채번 — 다음 = 0264 부근)
 
-1. **데이터 폴더를 컴포넌트·종류(store/run)로 가르고 첫 부팅에 옮긴다 · 경로 단일 출처 `DataLayout` · 옛 잠금도 쥔다 · 이전 완료 표지.** 개정 도장: **ADR-0136 결정 3**(파일 이름 규칙 원칙에 `**/data/daemon/run/` 폴더 규칙 하나를 더한다 — 경로가 구체적이라 무관한 폴더를 안 삼킨다) · ADR-0135(주소를 싣는 잠금은 여전히 하나 — 옛 자리 guard 는 배제만). 거부: **설치형(Program Files + AppData)** — 배포가 ZIP 한 덩이·한 사용자이고 설치형의 이유(여러 사용자·쓰기 보호·자동 갱신)가 지금은 해당되지 않으며 워크트리 격리를 환경변수로 따로 지켜야 한다(보고서 §2-4·§2-5) · **평면 유지** — 지킬 것·버릴 것·토큰이 섞인다 · **종류 먼저** — 사용자 결정 · **Tauri 2.12 `appDirectoriesOverride`** — 2.11.3 에 없다 · **복사 후 옛 것 유지** — 하향 바이너리가 낡은 사본으로 지운 에이전트를 되살린다 · **「둘 다 있으면 새 것」** — 실패한 이전 뒤 생긴 빈 명부가 이긴다 · **옛 자리를 지워 보는 방식** — 지운 뒤 옛 데몬이 같은 자리에 새로 만들면 둘이 뜬다 · **경로 정본을 base 에**.
+1. **→ ADR-0264 로 박제.** 아래는 3판 후보 문안이고, 그 뒤 이전을 걷었다(§14-5 — 정본은 ADR-0264). **데이터 폴더를 컴포넌트·종류(config·state/run)로 가르고 첫 부팅에 옮긴다 · 경로 단일 출처 `DataLayout` · 옛 잠금도 쥔다 · 이전 완료 표지.** 개정 도장: **ADR-0136 결정 3**(파일 이름 규칙 원칙에 `**/data/daemon/run/` 폴더 규칙 하나를 더한다 — 경로가 구체적이라 무관한 폴더를 안 삼킨다) · ADR-0135(주소를 싣는 잠금은 여전히 하나 — 옛 자리 guard 는 배제만). 거부: **설치형(Program Files + AppData)** — 배포가 ZIP 한 덩이·한 사용자이고 설치형의 이유(여러 사용자·쓰기 보호·자동 갱신)가 지금은 해당되지 않으며 워크트리 격리를 환경변수로 따로 지켜야 한다(보고서 §2-4·§2-5) · **평면 유지** — 지킬 것·버릴 것·토큰이 섞인다 · **종류 먼저** — 사용자 결정 · **Tauri 2.12 `appDirectoriesOverride`** — 2.11.3 에 없다 · **복사 후 옛 것 유지** — 하향 바이너리가 낡은 사본으로 지운 에이전트를 되살린다 · **「둘 다 있으면 새 것」** — 실패한 이전 뒤 생긴 빈 명부가 이긴다 · **옛 자리를 지워 보는 방식** — 지운 뒤 옛 데몬이 같은 자리에 새로 만들면 둘이 뜬다 · **경로 정본을 base 에**.
 2. **웹뷰 데이터 폴더 = `<root>\webview` · 정적 창을 Rust 에서 · 모든 창이 같은 폴더·같은 환경 옵션(ADR-0054 확장) · 만들기 전 쓰기 확인.** 개정 도장: **ADR-0134 결정 3**(네트워크 공유 폴더 — 당분간 미지원) · ADR-0137 「식별자가 웹뷰 폴더도 정한다」 대가 서술. 거부: 설정 키 `dataDirectory`(상대 경로만) · `appDirectoriesOverride`(업그레이드 선행) · `%LOCALAPPDATA%` 유지(포터블 원칙 위반 · 워크트리 간 localStorage 공유) · 옛 폴더 자동 삭제(F4).
 3. **설정 = 셸 `settings.json` + 범용 명령 넷 + 스키마 한 줄 등록 · 쓰는 쪽은 명령 하나.** 폐기/개정 도장: ADR-0166 결정 1·3·9 · ADR-0167 결정 3·6·7 · ADR-0051 「권위 = 프론트」 · ADR-0169 「남은 갭」 해소. 거부: **값마다 명령**(0169 가 이미 거부) · **파일 직접 편집 + `ui.refresh`**(밖의 편집자와 앱이 한 파일을 다툼 — ADR-0167 이 남긴 갈림길 중 「쓰기를 한 곳으로」를 고른다) · **localStorage** · **데몬 소유**(표시 설정은 셸, 데몬은 에이전트 정의만 — 결정) · **설정과 상태를 한 파일에**(보고서 §2-1 · orca) · **매크로에 임의 JSON**(F1) · **빈 경로 갈래 미리 깔기**(첫 키와 함께).
 4. **화면 상태 = 셸이 쓰는 `state.json` · 영속 창 id(UUID)와 부팅마다 새 label · 항상 복원, 비정상 종료 뒤에만 묻는다 · 창별 테마·위치는 창 항목에 · 대상 없는 슬롯 두 상태.** 폐기/개정 도장: **ADR-0167 결정 1**(표시 상태 = 「데이터 + refresh」 분류 → 상태는 명령으로 쓴다) · **ADR-0167 결정 5**(`theme.set` 류 철거의 구조 근거 「host 창만 지목 가능」은 프론트 선언 명령의 성질이었다 — 셸 선언 `window.setTheme` 은 창을 인자로 지목한다) · ADR-0167 결정 6·7(쓸기 폐지) · ADR-0166 결정 3 · ADR-0060 「영속 도입 시 요건」 이행 · **ADR-0222**(기본 레이아웃 = 복원할 상태가 없을 때만) · **ADR-0149 (A)**(스폰 대기도 「연결 중」 → 「정지됨」 상태). 거부: **레이아웃을 localStorage 에**(LLM-우선 충돌 · 웹뷰 폴더에 묶임) · **`tauri-plugin-window-state`**(창 기하만 · 2.11.3 에선 `app_config_dir` 고정) · **한 파일에 전부** · **지금 SQLite**(T-14) · **창별 테마를 설정 파일에**(창 수명과 떨어져 쓸기가 다시 필요) · **이름 `session.json`**(에이전트 세션과 충돌) · **기본 꺼짐 + 설정으로 켬**(사용자가 Chrome 방식을 골랐다) · **종료 때만 저장**(보고서 §2-7) · **label 을 영속 신원으로**(런타임 수락이 떠 있는 창과 부딪힌다) · **메모리 `SlotContent::Unknown`**(IPC 가 모르는 종류를 받아들이게 되고 바인딩·망라 분기 전부로 퍼진다).
@@ -384,12 +373,12 @@ SettingDef { key: "chat.style.fontSize",
 |---|---|---|
 | R1 | **웹뷰 폴더를 옮긴 뒤의 WebView2 실동작** — 첫 기동 시간 · 한 창이라도 폴더/인자가 어긋날 때 유령 창 여부 · 못 쓰는 폴더에서의 실패 모양 · 데이터 폴더 크기 증가(캐시가 포터블 폴더로 — 압축 복사·`build-release.ps1` clean) | [미검] — P4 GUI |
 | R2 | **로그오프·종료 때 `RunEvent::Exit` 가 실제로 오고 2초 상한 안에 쓰기가 끝나는가**(§6-6 — 소스로만 확인) | [미검] — 수동 로그오프 |
-| R3 | 하향 바이너리: 이 워크트리를 옛 커밋으로 되돌려 띄우면 옛 데몬은 새 데몬이 떠 있는 한 막히고(§3-2), 새 데몬이 없으면 빈 명부로 돈다(데이터는 `daemon\store\`) | 지원 안 함 — 문서화 |
+| R3 | 하향 바이너리: 옛 바이너리는 옛 평면 파일만 보고 새 데몬과 잠금이 달라 함께 뜰 수 있다 — 각자 자기 명부로 돈다(§3-2) | 지원 안 함 — 문서화 |
 | R4 | 강제 종료 시 마지막 1~5초 변경 유실 · 개발 재빌드마다 복원 질문(F15) | 설계상 수용 |
 | R5 | 런타임 수락에서 새 팝아웃 창이 모델보다 먼저 뜨는 틈(§6-7 ②) · DPI 다른 모니터 사이 위치 | [미검] — P3c |
 | R6 | 곁표 무효화 진입점이 하나로 모이는지(§6-2) — 빠지면 사용자가 바꾼 슬롯에 옛 원문이 되살아난다 | P3a 시험이 잡는다 |
 | R7 | Windows 원자 쓰기 = `rename` 교체(`ReplaceFileW` 미사용 · 보고서 §2-7). 못 읽는 파일을 덮지 않으므로 반쪽 파일이 기본값 덮어쓰기로 번지지 않는다 | 수용 |
-| R8 | 이전이 제3자 핸들로 5회 내내 막히면 데몬이 안 뜬다 — 사용자에게는 기존 「데몬 기동 시간 초과」로 보이고 사유는 데몬 로그에만 | 수용(빈 명부보다 낫다) |
+| R8 | (걷음 — 이전이 없다, §14-5) | — |
 | R9 | 설정·창별 테마·복원 답이 **셸이 떠 있을 때만** 명령으로 닿는다 | 「LLM-우선 제어」 갭으로 기록 |
 | R10 | 갓 만든 에이전트가 명부에 오르기 전 슬롯이 잠깐 「정지됨」(§6-8) | 수용 · [미검] 체감 |
 | R11 | 끝나는 중인 앞 인스턴스와의 겹침 — 지문 재확인(§6-5 ①)은 실행기 시점까지만 덮는다. 그 뒤에도 앞 인스턴스의 `Final`(최대 2초)이 남았으면 우리 첫 쓰기와 엇갈릴 수 있다 — 어느 쪽이 이겨도 파일은 온전하고, 앞 세션 내용이 졌을 때 잃는 것은 그 세션의 마지막 몇 초다 | 수용 · [미검] 겹침 실재 여부(플러그인 `windows.rs:72-94` 를 읽은 추론) |
@@ -398,7 +387,7 @@ SettingDef { key: "chat.style.fontSize",
 ## 13. 「0. 결정」과 대조 — 다듬은 것
 
 - **불가능한 항목은 없다.**
-- 「기존 파일은 첫 부팅 때 한 번 옮긴다」 → store 3파일만 옮기고 run 것(`daemon.json` · `mcp-config\` · `usage-probe\`)은 기동마다 새로 만들거나 쓸리므로 옛 사본을 지운다. 옛 `daemon.json` 자리는 지우지 않고 **0바이트로 쥔다**(옛 바이너리 차단).
+- 「기존 파일은 첫 부팅 때 한 번 옮긴다」 → **뒤집혔다(사용자 결정 2026-10-02)** — 옛 데이터는 옮기지 않고 버린다. 새 코드는 옛 파일을 읽지도 지우지도 않는다(§3-2 · §14-5).
 - 「접근은 범용 명령 넷뿐」 → 설정에 대해서는 그대로. **창별 테마는 상태라 `window.setTheme` 이 필요하다**(§5-6).
 - 「화면에서 바꾼 테마도 저장」 → 오늘 화면에 테마 UI 가 없다(ADR-0167 결정 5). 저장되는 것은 명령으로 바꾼 테마이고 화면 UI 는 F7.
 - 「챗 스타일을 localStorage 에서 여기로」 → 권위 이전은 그대로, 값 가져오기는 옛 웹뷰 폴더 안에서만 되고 릴리스에는 가져올 값이 없다(§3-6).
@@ -448,3 +437,29 @@ SettingDef { key: "chat.style.fontSize",
 | 11 경합하는 새 데몬은 발행 전이면 `FileBusy` | §3-1 ③(로그 문구 수정) · §8(두 결과 허용) |
 | 12 유효 테마 밀기의 엇갈림 | §5-6(`push_effective_themes` · 테마 관문 락) · §6-3 락 순서 · §8 |
 | 13 `Moved`/`Resized` 게터는 레이아웃 락 밖 | §6-3 |
+
+### 14-3. 3판 → 구현 (P1 코드 리뷰 · 2026-10-02)
+
+> ★이 절의 이전 관련 항목은 전부 §14-5 가 걷었다 — 기록으로만 남긴다★.
+
+- **§3-3 「표지 뒤 낙오는 보존만」을 뒤집었다** — 표지가 있어도 state 에 그 파일이 없으면 옮겨 들이고, 둘 다 있을 때만 `.legacy-<ms>` 로 보존한다. 근거 = 코드 리뷰 두 리뷰어가 독립 적출(새 배포판을 한 번 띄운 뒤 옛 `data\*` 를 복사해 넣으면 빈 명부로 뜨고 진짜 명부가 백업 이름 아래 숨는다). **사용자 확인 대기**(사용자가 체감하는 동작 — 세션이 데이터 손실을 막는 쪽으로 잠정 채택). 정본 = ADR-0264 결정 7.
+- 이동 실패 재시도는 공유 위반만 · 옛 자리 0바이트 자르기 실패는 기동 중단 · 옛 run 폴더는 우리가 만든 이름만 지운다 — ADR-0264 결정 6 · 7 · 8.
+
+### 14-4. P1 코드 리뷰 뒤 사용자 결정 (2026-10-02)
+
+| 결정 | 반영 자리 |
+|---|---|
+| 폴더 이름 = 업계 표준(systemd `StateDirectory=` · `RuntimeDirectory=` · `ConfigurationDirectory=` · XDG `STATE_HOME` · `RUNTIME_DIR` · `CONFIG_HOME`) — `daemon\store\` → `daemon\state\` · 셸은 `shell\config\`(settings.json · slots\) 와 `shell\state\`(state.json) 로 가른다 · `run\` 그대로. 기준 = config 는 취향(지우면 기본값) · state 는 프로그램이 기억하는 것(에이전트 명부도). 데몬 config 는 아직 없음(장래 `daemon\config\`). 거부 = `store` 유지(표준 용어 아님) | §0 · §2-1 · §3-1 · §3-3 · §3-4 · §5 · §6 · §7 · §11-1 · ADR-0264 결정 2 · 3 |
+| 개발 루트 `.engram-data` → `.engram-dev`(릴리스 이름 + `-dev` 관행 · 개발 식별자 `com.engram.dashboard.dev` 와 맞춤). 첫 부팅에 `.engram-dev` 가 없고 `.engram-data` 가 있으면 이름을 바꾸고 state/run 이전을 잇는다. ADR-0136 결정 2 번복. 거부 = `.engram-data` 유지(디버그 여부를 이름으로 못 앎) · `.data-dev`(흔한 이름이라 검색 · ignore 겹침) | §2-1 · §3-1 ⓪ · §3-4 · §9-2 GUI 확인 · ~~ADR-0264 결정 11~~ → ADR-0264 재작성 뒤 **결정 8** |
+| 기존 `presets.json` 은 자리만 옮긴다 — 새 프리셋 구조 없음 | §1 「밖」 그대로 · ADR-0264 결정 3 |
+| 로그는 최상위 `logs\` 유지(프로세스마다 파일이 따로 · 갈라지면 기계마다 제 종류만) | §2-1 · ADR-0264 결정 2 |
+
+- ~~**미정(구현 몫):** 코드 식별자~~ **해소** — 코드 식별자는 `daemon_state_dir()` · `shell_config_dir()` · `shell_state_dir()` 로 정해졌고 §2-2 · §3-1 을 그 이름으로 고쳤다. 이 절에 있던 다른 두 미정(이름 바꾸기의 실행 주체 · 옛 `.engram-data/` 줄 존치)은 §14-5 가 닫았다 — 이름을 바꾸지 않고, 옛 줄은 남긴다. 위 표 둘째 줄의 「첫 부팅에 이름을 바꾸고 state/run 이전을 잇는다」도 §14-5 로 걷혔다.
+
+### 14-5. 옛 데이터 버림 · P1 단순화 (사용자 결정 2026-10-02)
+
+- **결정:** 「옛 데몬 데이터는 신경 쓰지 마, 날려도 됨, 아직 데이터 정립 안 됐으니」. 새 코드는 옛 평면 파일(릴리스 `<exe>\data\*`)과 개발 `.engram-data` 를 **읽지도 옮기지도 지우지도 않는다**. 이 워크트리의 `.engram-data` 는 사용자가 손으로 지웠다. 정본 = ADR-0264 결정 5 · 6 · 8.
+- **걷은 것:** 첫 부팅 이전 · 완료 표지 `.migrated-v1` · 옮겨 들이기/보존(`.legacy-*`) · 대소문자 변형 규칙 · 옛 루트 `daemon.json` 배제 잠금(잠금은 `daemon\run\daemon.json` 하나) · 옛 run 폴더 정리 · discovery 두 자리 읽기(`pick`)와 0바이트 해석 · 스크립트의 옛 경로 갈래 · `.engram-data` → `.engram-dev` 이름 바꾸기(`.engram-dev` 는 새로 시작) · 데몬 `src/data_migration.rs` · ws_e2e 이전 사례. 옛/새 바이너리는 파일을 공유하지 않으므로 간섭하지 않는다(옛 데이터가 새 바이너리에 안 보이는 것은 의도).
+- **P1 단순화 경위:** P1 은 3판대로 이전까지 구현됐고 코드 리뷰 3회 동안 경계 사례(대소문자 변형 · FAT 이름 바꾸기 · 링크 · 섞인 바이너리의 잠금)가 이어졌다. 그 리뷰 뒤 이 결정으로 P1 을 배치 + 단일 잠금으로 줄인다. 반영 자리 = §0 · §1 · §2-1 · §2-2 · §3-1~3-4 · §8 · §9-2 P1 · §10 · §12 R3 · R8 · §13 · ADR-0264.
+- **유지:** 컴포넌트 먼저의 config/state/run 배치 · systemd/XDG 이름과 가름 기준 · `DataLayout` 단일 출처 · `daemon\run\` 내용 · `.gitignore` 규칙(옛 줄 존치 — §3-4) · `.engram-dev` 이름.
+- **P3 세션 기본값 — 비정상 종료 스냅숏은 덮어쓰지 않는다.** 대기분 한 파일(`state.pending.json` 덮음 — §6-5 · §6-7) 대신 **최근 N 개(예: 3)를 돌려 보관한다(Firefox 식)**. ★세션 기본값 · 설계 재리뷰 필요★ — §6-5 · §6-7 · §8 의 대기분 수명 · `restore.status` 모양 · 삭제 확인 조건을 P3 착수 전에 다시 짠다(이 판에서는 §6-5 에 가리킴만 두었다).

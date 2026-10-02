@@ -730,7 +730,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
     let control: Arc<dyn ControlChannel> = Arc::new(DaemonControlChannel::new(
         registry.clone(),
         url,
-        data_dir.clone(),
+        engram_dashboard_daemon::control::mcp_config::McpDir::new(data_dir.join("mcp-config")),
         None, // send_exe: 파일럿은 handle_send 직접 호출이라 CLI 경로 불요.
         // ADR-0092: 파일럿은 프라이밍 무관(주입 확립은 priming_smoke bin) — Noop 으로 오늘 동작 불변.
         Arc::new(engram_dashboard_daemon::control::priming::NoopPrimingProvider),
