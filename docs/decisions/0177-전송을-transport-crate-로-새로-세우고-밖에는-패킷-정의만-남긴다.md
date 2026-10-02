@@ -1,7 +1,7 @@
 # ADR-0177: 전송을 transport crate 로 새로 세우고 밖에는 패킷 정의만 남긴다
 
-- 상태: 확정 (2026-09-04, 근거: 사용자 결정 + `docs/research/reusable-transport-crate-boundary-2026-09-03.md`(적대 리뷰 BLOCK → 수정 반영, **재판정 미실행**) + 이 세션의 느린-소비자/유실-신호 조사(**보고서 미작성**) + 정적 판독 실측)
-- 관련: CLAUDE.md 「백엔드 모듈 맵」 net 항목 · 「네트워크 행 격리 게이트」 · ADR-0129(net 분리 — 이 결정이 딛는 전제) · ADR-0036(전송 중계 통일 — **개정 필요, 이 ADR 이 하지 않는다**) · ADR-0158(버전 불일치 고지 — **번복 필요, 이 ADR 이 하지 않는다**) · ADR-0130(`frame_port` feature 소속 보류) · ADR-0151(crate 판정 기준) · ADR-0175 결정 6(lib 무게) · ADR-0155(command crate) · ADR-0046(재생 single-flight) · ADR-0163/0164(화신 표식) · `src-tauri/src/daemon_client/connection.rs` · `crates/engram-dashboard-net/src/ws.rs` · step-log S21
+- 상태: 확정 (2026-09-04, 근거: 사용자 결정 + `docs/research/reusable-transport-crate-boundary-2026-09-03.md`(적대 리뷰 BLOCK → 수정 반영, **재판정 미실행**) + 이 세션의 느린-소비자/유실-신호 조사(**보고서 미작성**) + 정적 판독 실측) · 부분 폐기 by ADR-0272 (결정 4의 짝짓기 번호 함수 정본 위치)
+- 관련: CLAUDE.md 「백엔드 모듈 맵」 net 항목 · 「네트워크 행 격리 게이트」 · ADR-0129(net 분리 — 이 결정이 딛는 전제) · ADR-0036(전송 중계 통일 — **개정 필요, 이 ADR 이 하지 않는다**) · ADR-0158(버전 불일치 고지 — **번복 필요, 이 ADR 이 하지 않는다**) · ADR-0130(`frame_port` feature 소속 보류) · ADR-0151(crate 판정 기준) · ADR-0175 결정 6(lib 무게) · ADR-0155(command crate) · ADR-0046(재생 single-flight) · ADR-0163/0164(화신 표식) · `src-tauri/src/daemon_client/connection.rs` · `crates/engram-dashboard-net/src/ws.rs` · step-log S21 · Amended by ADR-0272 (결정 4의 짝짓기 번호 함수 정본 위치)
 
 ## 맥락
 

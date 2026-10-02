@@ -1,7 +1,7 @@
 # ADR-0175: 코어를 agent 와 base 로 가른다
 
-- 상태: 확정 (2026-08-25, 근거: 사용자 결정 + trd full 리뷰 2인) · 부분 폐기 by ADR-0176 (결정 4와 5 보류)
-- 관련: ADR-0151(crate 판정 기준 — §영향의 「덩어리별 판정」 기대와 일부 갈린다, 아래 §거부한 대안) · ADR-0003(코어 격리) · ADR-0155(command crate) · ADR-0046(replay single-flight) · ADR-0174(셸 lib 테스트 하네스) · step-log S21 · Amends ADR-0151 (바닥 crate 구성) · Amended by ADR-0176 (결정 4와 5 보류)
+- 상태: 확정 (2026-08-25, 근거: 사용자 결정 + trd full 리뷰 2인) · 부분 폐기 by ADR-0176 (결정 4와 5 보류) · 부분 폐기 by ADR-0266 (결정 1의 PID 헬퍼 거처와 결정 2의 Job Object 래퍼 거처와 거부한 대안 첫 항목 중 platform 쪽) · 부분 폐기 by ADR-0267 (영향의 의존 그래프 중 command 와 messaging 이 잎이라는 줄) · 부분 폐기 by ADR-0269 (영향의 입주 조건 1번과 세 번째 입주자 되열 조항) · 부분 폐기 by ADR-0270 (영향의 의존 그래프 중 셸이 agent 를 쥐는 줄)
+- 관련: ADR-0151(crate 판정 기준 — §영향의 「덩어리별 판정」 기대와 일부 갈린다, 아래 §거부한 대안) · ADR-0003(코어 격리) · ADR-0155(command crate) · ADR-0046(replay single-flight) · ADR-0174(셸 lib 테스트 하네스) · step-log S21 · Amends ADR-0151 (바닥 crate 구성) · Amended by ADR-0176 (결정 4와 5 보류) · Amended by ADR-0266 (결정 1의 PID 헬퍼 거처와 결정 2의 Job Object 래퍼 거처와 거부한 대안 첫 항목 중 platform 쪽) · Amended by ADR-0267 (영향의 의존 그래프 중 command 와 messaging 이 잎이라는 줄) · Amended by ADR-0269 (영향의 입주 조건 1번과 세 번째 입주자 되열 조항) · Amended by ADR-0270 (영향의 의존 그래프 중 셸이 agent 를 쥐는 줄)
 
 ## 맥락
 

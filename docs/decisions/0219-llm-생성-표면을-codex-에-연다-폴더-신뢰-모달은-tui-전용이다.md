@@ -1,7 +1,7 @@
 # ADR-0219: LLM 생성 표면을 codex 에 연다 — 폴더 신뢰 모달은 TUI 전용이다
 
-- 상태: 확정 (2026-09-22, 근거: codex-cli 0.155.1 실측 — 아래 「근거」)
-- 관련: Amends ADR-0215 (LLM 생성 표면의 codex 차단 조항) · ADR-0187(codex 의 두 통로 중 app-server 확정) · ADR-0194(터미널이냐 JSON 이냐는 백엔드 중립 축) · ADR-0078(출력 모드는 생성 시점 고정) · ADR-0155(선언은 생산자 옆) · CLAUDE.md 「LLM-우선 제어」 · `crates/engram-dashboard-agent/src/commands.rs`(`LLM_BACKEND_POLICY`) · `src-tauri/src/layout/apply.rs`(`gate_backend`) · `src/commands/registry.ts` · `docs/process/S21-codex-backend/trd.md` §6-G · step-log S21
+- 상태: 확정 (2026-09-22, 근거: codex-cli 0.155.1 실측 — 아래 「근거」) · 부분 폐기 by ADR-0270 (결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드)
+- 관련: Amends ADR-0215 (LLM 생성 표면의 codex 차단 조항) · ADR-0187(codex 의 두 통로 중 app-server 확정) · ADR-0194(터미널이냐 JSON 이냐는 백엔드 중립 축) · ADR-0078(출력 모드는 생성 시점 고정) · ADR-0155(선언은 생산자 옆) · CLAUDE.md 「LLM-우선 제어」 · `crates/engram-dashboard-agent/src/commands.rs`(`LLM_BACKEND_POLICY`) · `src-tauri/src/layout/apply.rs`(`gate_backend`) · `src/commands/registry.ts` · `docs/process/S21-codex-backend/trd.md` §6-G · step-log S21 · Amended by ADR-0270 (결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드)
 
 ## 맥락
 
