@@ -1,7 +1,7 @@
 # ADR-0270: 셸은 agent crate 를 의존하지 않는다 데몬 이름 쪽 예약 목록을 걷고 거절은 창으로 알린다
 
 - 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 5 · 작업 단위와 순서) + 코드 대조 2026-10-02 (`d5ac725`))
-- 관련: Amends ADR-0176 (결정 2의 COMMAND_SPECS 간선과 데몬 이름 쪽 예약 필터 유지와 거부한 대안 중 필터만 없앤다의 근거) · Amends ADR-0219 (결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드) · Amends ADR-0175 (영향의 의존 그래프 중 셸이 agent 를 쥐는 줄) · ADR-0176 결정 4 · 5(주인 선언 · 프리셋 복제 — 아래) · ADR-0167 결정 5(웹뷰가 버스에 올리는 명령이 `tab.next` · `slot.empty` 둘로 남았다 — 2026-08-23) · ADR-0231 · ADR-0237(웹뷰의 `agent.cancelQueuedInput` · `agent.interrupt` 는 창 안 전용 쌍둥이) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0155(등록 반려 계약) · ADR-0138(네이티브 팝업은 필요해지면 얹는다) · ADR-0266(OS 분기 자리) · ADR-0269(`normalize_cwd` → base) · `src-tauri/src/view_commands.rs`(`reserved_names` · `report`) · `src/commands/viewCommandBridge.ts`(`offeredCommands`) · `src-tauri/src/layout/apply.rs`(`gate_backend` · 슬롯 스폰) · `src-tauri/src/layout/commands.rs` · `src/commands/agentCommands.ts` · `crates/engram-dashboard-daemon/src/connection_core.rs`(`refuse_names_i_answer`) · `crates/engram-dashboard-agent/src/commands.rs`(`llm_creation_refusal` · `verb_new`) · `src-tauri/tests/layout_apply.rs` · `src-tauri/tests/layout_commands.rs` · step-log S21
+- 관련: Amends ADR-0176 (결정 2의 COMMAND_SPECS 간선과 데몬 이름 쪽 예약 필터 유지와 거부한 대안 중 필터만 없앤다의 근거와 영향의 reserved_names 삭제 금지 경고와 셸 agent 의존 잔존) · Amends ADR-0219 (결정 2의 셸 gate_backend 문과 영향의 셸 거절 팔 가드) · Amends ADR-0175 (영향의 의존 그래프 중 셸이 agent 를 쥐는 줄) · ADR-0176 결정 4 · 5(주인 선언 · 프리셋 복제 — 아래) · ADR-0167 결정 5(웹뷰가 버스에 올리는 명령이 `tab.next` · `slot.empty` 둘로 남았다 — 2026-08-23) · ADR-0231 · ADR-0237(웹뷰의 `agent.cancelQueuedInput` · `agent.interrupt` 는 창 안 전용 쌍둥이) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0155(등록 반려 계약) · ADR-0138(네이티브 팝업은 필요해지면 얹는다) · ADR-0266(OS 분기 자리) · ADR-0269(`normalize_cwd` → base) · `src-tauri/src/view_commands.rs`(`reserved_names` · `report`) · `src/commands/viewCommandBridge.ts`(`offeredCommands`) · `src-tauri/src/layout/apply.rs`(`gate_backend` · 슬롯 스폰) · `src-tauri/src/layout/commands.rs` · `src/commands/agentCommands.ts` · `crates/engram-dashboard-daemon/src/connection_core.rs`(`refuse_names_i_answer`) · `crates/engram-dashboard-agent/src/commands.rs`(`llm_creation_refusal` · `verb_new`) · `src-tauri/tests/layout_apply.rs` · `src-tauri/tests/layout_commands.rs` · step-log S21
 
 ## 맥락
 
@@ -26,7 +26,7 @@
 ## 결정
 
 1. **셸(클라)은 agent crate 를 의존하지 않는다**(사용자 2026-10-02).
-2. **데몬 이름에 대한 벽은 데몬의 등록 거절 하나로 둔다**(사용자 2026-10-02 — 「데몬에 거절만 하면」). 예약 목록 중 agent 의 `COMMAND_SPECS` 를 읽는 절반을 걷는다. CI 대조 스크립트는 두지 않는다. **셸 자기 표에서 뽑는 절반은 남긴다**(메인 판단 2026-10-02) — agent crate 가 필요 없는 셸 자기 선언이다.
+2. **데몬 이름에 대한 벽은 데몬의 등록 거절 하나로 둔다**(사용자 2026-10-02 — 「데몬에 거절만 하면」). 예약 목록 중 agent 의 `COMMAND_SPECS` 를 읽는 절반을 걷는다. CI 대조 스크립트는 두지 않는다. **셸 자기 표에서 뽑는 절반은 남긴다**(메인 판단 2026-10-02) — agent crate 가 필요 없는 셸 자기 선언이고, 그 절반이 막는 셸 · 웹뷰 같은 이름은 데몬 거절이 보지 못한다(아래 「거부한 대안」 둘째 항목 — 코드).
 3. **작업 순서(작업 순서 2-1) — 단위마다 앱이 돌아가는 채로 끊고 임시 우회를 두지 않는다**(사용자 2026-10-02 — 「망가지지 않는 단위로 잘 그룹지어서 작업하라」 · 「임시 땜빵 때우지 말고」):
    1. **슬롯 스폰을 데몬의 `agent.new` 명령 경로로 바꾼다.** 슬롯 스폰은 「검사 → 데몬 스폰 → 배치」 순이라 데몬이 거절해도 레이아웃이 안 바뀐다(`layout/apply.rs` — 스폰은 락 밖 · 배치는 그 뒤 단일 임계구역). 거부 문구는 데몬을 한 번 다녀온다.
    2. **셸의 정책 검사(`gate_backend`)를 지운다.** 1 뒤라야 정책 구멍이 없다.
@@ -36,8 +36,8 @@
 
 ## 거부한 대안
 
-- **웹뷰의 같은 이름(`agent.spawn` · `agent.rename`)을 먼저 없애는 단위를 맨 앞에 둔다.** 처음엔 이 순서였다 — ADR-0176 결정 2 의 「필터만 없애면 앱이 깨진다(자평: 강함)」를 전제로 했기 때문이다. 기각 = 코드 — 그 이름들은 `help` 가 없어 버스에 오르지 않고 오늘 필터가 걸러 내는 이름은 0 이라(위 「맥락」) 단위 3 이 앱을 깨지 않는다. 그 정리는 ADR-0176 결정 5(프리셋 복제)와 식별자 변경 비용(그 ADR 「거부한 대안」 첫 항목 사유 ③)에 걸려 2-1 의 목적(셸 → agent 간선)과 무관한 범위를 끌고 온다(메인 판단). ★ADR-0176 의 그 「강함」 근거는 그날 코드로도 서지 않았다★(위 「맥락」 — `5780dcc` 대조).
-- **예약 목록을 통째로 걷는다(셸 자기 절반까지).** 기각 = 코드(메인 판단) — 그 절반은 agent 를 의존하지 않아 결정 1 의 목적과 무관하다(코드).
+- **웹뷰의 같은 이름(`agent.spawn` · `agent.rename`)을 먼저 없애는 단위를 맨 앞에 둔다.** 처음엔 이 순서였다 — ADR-0176 결정 2 의 「필터만 없애면 앱이 깨진다(자평: 강함)」를 전제로 했기 때문이다. 기각 = 코드 — 그 이름들은 `help` 가 없어 버스에 오르지 않고 오늘 필터가 걸러 내는 이름은 0 이라(위 「맥락」) 단위 3 이 앱을 깨지 않는다. 그 정리는 ADR-0176 결정 5(프리셋 복제)와 식별자 변경 비용(그 ADR 「거부한 대안」 첫 항목 사유 ③)에 걸려 2-1 의 목적(셸 → agent 간선)과 무관한 범위를 끌고 온다(메인 판단). ★ADR-0176 의 그 「강함」 근거는 그날 코드로도 서지 않았다★(위 「맥락」 — `5780dcc` 대조). ★ADR-0175 「근거」의 「`COMMAND_SPECS` 필터가 지금 필요한 이유」(필터를 먼저 없애면 매 부팅 등록이 반려된다)도 같은 전제를 실었다★ — 광고 문 `help` 는 `85aa6ab`(2026-08-23)부터 있었고 ADR-0175(2026-08-25)는 그 뒤라, 그 근거도 그날 코드로 서지 않았다(`85aa6ab` 은 ADR-0175 커밋의 조상이다).
+- **예약 목록을 통째로 걷는다(셸 자기 절반까지).** 기각 = 코드(메인 판단) — 그 절반은 agent 를 의존하지 않아 결정 1 의 목적과 무관하다(코드). ★그리고 그 절반을 대신할 벽이 없다★ — 셸 명령과 웹뷰 명령은 한 주인의 한 패킷으로 등록되고, 데몬의 등록 거절(`refuse_names_i_answer`)은 데몬이 답하는 이름만 본다. 명부는 한 패킷 안의 같은 이름을 오류 없이 하나로 접는다(`crates/engram-dashboard-command/src/roster.rs` 의 `register` — 이름을 키로 한 `BTreeMap` 에 차례로 넣어 뒤가 앞을 덮는다 · 시험 `duplicate_names_in_one_packet_count_once`, `roster.rs:622`). 그래서 웹뷰의 `tab.create` · `slot.close` 에 누가 `help` 를 달면 셸 표의 같은 이름과 말없이 겹치고, 결정 4 의 거절 박스도 뜨지 않는다(코드).
 - **셸 정책 검사를 그냥 지운다(슬롯 스폰 경로를 그대로 둔 채).** 기각 = 코드 — 정책을 보는 곳은 `agent.new` 하나뿐이고 슬롯 스폰은 `SpawnByCwd` 로 그 문을 비켜 가므로, 먼저 지우면 슬롯 스폰에 정책 구멍이 난다.
 - **명령이 자기 주인을 선언하게 해서 필터 · 간선을 한꺼번에 없앤다(ADR-0176 결정 4 의 「진짜 결함」).** 지금 고르지 않는다 = 별개 주제이고 범위가 크다(메인 판단). **기각 근거 자평: 약함**(서술 — 범위를 재지 않았다). 결정 2 가 데몬 절반만 걷으므로 「뺄셈으로 웹뷰 몫을 구한다」는 셸 자기 절반에 남는다 — 그 결함은 그대로 다음 주제다.
 - **CI 대조 스크립트로 충돌을 미리 잡는다.** 기각 = 사용자 결정(「실행해서 안 되면 다시 빌드하면 되니깐」).
@@ -53,9 +53,9 @@
 ## 영향 / 불변식
 
 - **불변식: `src-tauri` 의 매니페스트에 `engram-dashboard-agent` 가 없다**(운영 의존). 「셸 = 데몬 클라이언트」(ADR-0029)가 의존 그래프에서도 보인다. 셸 실행 파일이 agent crate 전체(PTY · Windows 프로세스 관리 · 명령 수집 등)를 안고 가지 않는다. 테스트 전용 의존(셸 → 데몬 dev-dependency)은 별건이다 — 데몬이 agent 를 끌어오므로 `cargo test -p engram-dashboard` 는 여전히 agent 를 컴파일한다(ADR-0175 「남는 무검증」). 셸 시험 둘이 agent 경로를 직접 부른다 — `tests/layout_apply.rs`(`llm_creation_refusal` · `LLM_BACKEND_POLICY`) · `tests/layout_commands.rs`(`COMMAND_SPECS`). 이 둘은 단위 2 · 3 에서 함께 고친다(시험이 agent 를 계속 쓰면 dev-dependency 로 따로 선언해야 한다).
-- **ADR-0176 을 고친다** — 결정 2(「`COMMAND_SPECS` 간선과 예약 이름 필터를 그대로 둔다」)의 데몬 쪽이 이 결정으로 닫힌다. 결정 4(주인 선언)와 결정 5(프리셋 복제)는 그대로 다음 주제다 — 웹뷰의 같은 이름 명령은 남는다. 그 「거부한 대안」 중 「필터만 없앤다」의 근거(「앱이 깨진다 · 강함」)는 서지 않는다(위 「맥락」).
+- **ADR-0176 을 고친다** — 결정 2(「`COMMAND_SPECS` 간선과 예약 이름 필터를 그대로 둔다」)의 데몬 쪽이 이 결정으로 닫힌다. 결정 4(주인 선언)와 결정 5(프리셋 복제)는 그대로 다음 주제다 — 웹뷰의 같은 이름 명령은 남는다. 그 「거부한 대안」 중 「필터만 없앤다」의 근거(「앱이 깨진다 · 강함」)는 서지 않는다(위 「맥락」). ★같은 전제를 실은 그 「영향」 두 줄도 이 결정이 닫는다★ — 「`reserved_names`를 지우지 말 것 — 지우면 매 부팅 등록이 반려된다」(데몬 절반은 결정 3 의 단위 3 이 지운다 · 셸 자기 절반은 남는다) · 「셸의 `engram-dashboard-agent` 의존은 남는다 … 0으로 만드는 게이트를 지금 세우지 않는다」(위 불변식이 그 반대다).
 - **ADR-0219 를 고친다** — 결정 2(정책 표를 보는 셸 `gate_backend` 문)와 영향(「셸 `gate_backend` 의 거절 팔은 … 다음 백엔드를 위한 가드로 남긴다」)이 셸 쪽 문을 잃고, 정책을 보는 문은 데몬 `agent.new` 하나가 된다(그 결정 2 의 다른 문인 프론트 `humanOnly` 게이트는 2026-09-22 에 이미 걷혔다 — `src/commands/agentCommands.ts` 주석). 회귀망 `src-tauri/tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` 를 같은 변경에서 고친다.
-- **ADR-0175 영향의 의존 그래프(`src-tauri → … + 결정 4 가 닫힐 때까지 agent 1심볼`)가 닫힌다** — 그 결정 4 의 목적(간선 소멸)을 이 결정이 접두 없이 이룬다.
+- **ADR-0175 영향의 의존 그래프(`src-tauri → … + 결정 4 가 닫힐 때까지 agent 1심볼`)가 닫힌다** — 그 결정 4 의 목적(간선 소멸)을 이 결정이 접두 없이 이룬다. 그 「근거」의 「`COMMAND_SPECS` 필터가 지금 필요한 이유」(필터를 먼저 없애면 매 부팅 등록이 반려된다)도 서지 않는다(위 「거부한 대안」 첫 항목).
 - **작업은 망가지지 않는 단위로 묶는다**(사용자 2026-10-02) — 결정 3 의 세 단위가 그 모양이다. 단위마다 빌드 · 회귀 초록 · 앱이 돈다.
 - **거절 메시지 박스는 OS 분기를 셸에 들이지 않는다**(결정 4 · 결정 후보 1 의 불변식). 띄우는 실물은 구현 때 고른다.
 - **GUI 실측이 완료 조건이다**(작업 순서 2-1) — 슬롯 스폰 경로 교체 뒤 레이아웃 불변 · 단위 3 뒤 셸 명령 등록(로그의 `ReportOutcome.refused` 로 「오늘 걸러 내는 이름 0」을 실측) · 거절 박스.

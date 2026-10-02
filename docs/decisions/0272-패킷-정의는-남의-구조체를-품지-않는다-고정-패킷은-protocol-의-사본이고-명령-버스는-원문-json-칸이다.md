@@ -1,7 +1,7 @@
 # ADR-0272: 패킷 정의는 남의 구조체를 품지 않는다 고정 패킷은 protocol 의 사본이고 명령 버스는 원문 JSON 칸이다
 
 - 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 8 — 원칙 · 확정 모양) + 답장 짝 맞추기는 메인 판단 + 조사 `docs/research/wire-shared-types-placement-2026-10-02.md`(medium · cross-family 적대 리뷰 FIX → 반영))
-- 관련: Amends ADR-0177 (결정 4의 짝짓기 번호 함수 정본 위치) · ADR-0155(통합 command 버스 — 도장 없음, 아래 영향) · TRD `docs/process/S20-command-bus/trd.md` §3-1 · §5 protocol 행(「protocol → command 의존 0 → 1」의 실제 출처 — 이 결정이 그것을 되돌린다) · ADR-0081 결정 4(단일 `request_id` 왕복 — 그대로) · ADR-0129(wire JSON 모양 보존 전제) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(인증 메시지 → `protocol`) · `crates/engram-dashboard-protocol/src/messages.rs` · `crates/engram-dashboard-protocol/src/ids.rs` · step-log S21
+- 관련: Amends ADR-0177 (결정 4의 짝짓기 번호 함수 정본 위치) · ADR-0155(통합 command 버스 — 도장 없음, 아래 영향) · TRD `docs/process/S20-command-bus/trd.md` §3-1 · §5 protocol 행(「protocol → command 의존 0 → 1」의 실제 출처 — 이 결정이 그것을 되돌린다) · ADR-0081 결정 4(단일 `request_id` 왕복 — 그대로) · ADR-0129(wire JSON 모양 보존 전제) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(인증 메시지 → `protocol`) · `crates/engram-dashboard-protocol/src/messages.rs` · `crates/engram-dashboard-protocol/src/ids.rs` · step-log S21 · Amends ADR-0175 (영향의 의존 그래프 중 protocol 이 command 를 쥐는 줄)
 
 ## 맥락
 
@@ -40,7 +40,7 @@
 
 ## 영향 / 불변식
 
-- **불변식: `protocol` 의 매니페스트에 워크스페이스 crate 가 없다**(작업 순서 3-1 의 「의존 0 게이트」). 고정 패킷 타입은 `protocol` 자기 것이고, 명령 칸은 `RawValue` 다.
+- **불변식: `protocol` 의 매니페스트에 워크스페이스 crate 가 없다**(작업 순서 3-1 의 「의존 0 게이트」). 고정 패킷 타입은 `protocol` 자기 것이고, 명령 칸은 `RawValue` 다. 그래서 ADR-0175 영향의 의존 그래프 중 `protocol → command` 줄이 닫힌다(`protocol` 은 잎이 된다).
 - ★**열린 것 — transport TRD(작업 순서 3) 가 정한다: 주인 표지 `OwnerToken`**★ — 결정 3 의 넷에 없다. `RegisterCommands` · `UpdateCommands` 가 `owner: OwnerToken` 을 command 타입으로 싣는다. 이것이 남으면 `protocol` → command 의존이 안 사라지므로(결정 1 · 위 불변식), `protocol` 사본으로 둘지 원문 칸에 넣을지를 그 TRD 가 고른다.
 - **`protocol/src/ids.rs` 의 `From<command::RequestId> for RequestId` 가 거처를 잃는다** — 그 주석의 사유가 「화살표가 `protocol → command` 한 방향」이다. 어댑터로 옮긴다. 값은 같은 UUID 를 그대로 나른다(ADR-0081 결정 4 — 그대로).
 - **ADR-0177 결정 4 의 「짝짓기 번호를 꺼내는 함수 — 신규가 아니다, `protocol` 에 `command_request_id` · `event_reply_request_id` 로 이미 정본이 있다」가 낡는다** — 정본이 끝자락 어댑터로 옮긴다(결정 4). 「밖(소비자)에 남는다」는 그대로다.

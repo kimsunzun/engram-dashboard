@@ -8,7 +8,7 @@ tracking.md 에서 해소·종결된 항목 중 다른 문서·코드가 번호�
 - **T-40** claude 훅 도중 끊기가 약 300 초 멈춘다 — 해소: 우리 Job 안의 끊기 뒤 훅 잔여물만 끝내고 claude 는 살린다(GUI 실측 G1 11/11 · 사용자 최종 테스트) · 2026-10-01 · ADR-0262(ADR-0257 대체) · `docs/process/S21-chat-ux/trd-t40.md`
 - **T-34** 중단(interrupt) 기능이 반쯤 배선된 채 멈춰 있었다 — 해소: 채팅 칸 Esc → `agent.interrupt` · claude JSON 끊기 줄 · 2026-09-28 · ADR-0237/0238/0245 · 트리 노드 `canInterrupt` 는 읽는 화면 없이 둔다
 - **T-18** branch protection(초록 아니면 머지 금지) — 종결: 도입 안 함(사용자 결정) · 재론 트리거 = 협업자 증가 또는 CI 초록 없이 들어간 변경의 사고 · 도입하면 ADR-0232 를 먼저 다시 연다 · ADR-0131
-- **T-10** discovery crate 통합 — 종결: 안 한다(사용자 결정 2026-08-26) · 데몬도 그 crate 를 의존하고 async 무의존 게이트가 거기 붙으며 `base` 셋째 입주자 문제(ADR-0175)가 걸린다 · 남은 동기(`src/lib.rs` 크기)는 파일 분할로
+- **T-10** discovery crate 통합 — 종결: 안 한다(사용자 결정 2026-08-26) · 데몬도 그 crate 를 의존하고 async 무의존 게이트가 거기 붙으며 `base` 셋째 입주자 문제(ADR-0175)가 걸린다 · 남은 동기(`src/lib.rs` 크기)는 파일 분할로 · 다시 엶: ADR-0271(2026-10-02 — discovery 를 나눠 데몬 · 셸로 · 작업 추적 = T-47 작업 순서 2-2)
 - **T-8** shutdown_all 순차 종료 지연 — 해소: scoped thread 로 병렬 kill · 각 kill 은 `join_pump(5s)` 로 유계라 N×5s 누적 없음 · `crates/engram-dashboard-agent/src/manager.rs` 의 `shutdown_all`
 - **T-7** get_agent_snapshot wire 포맷 — 종결: 문제의 불일치가 사라졌다 — 명령은 남아 있으나(`AgentCommand::GetSnapshot` · `protocolClient.getSnapshot`) live 출력은 이제 base64 없는 바이너리 프레임(protocol codec)으로 가고, `getSnapshot` 은 테스트 밖 호출자가 없다(`rg getSnapshot src -g '!*.test.*'` → 선언·구현뿐 · 2026-10-02)
 - **T-5** monaco TS worker optimizeDeps — 종결: monaco 의존을 걷었다(2026-09-25) · 다시 들이면 `optimizeDeps.exclude` 에 worker 추가 검토

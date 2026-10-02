@@ -17,7 +17,7 @@ CLI 어휘 상수(동사 · 플래그 · 실행 파일 이름 · 상태 낱말)�
 2. **패키지 이름은 `engram-dashboard-` 접두를 지킨다** — CI 의존 상한 게이트가 워크스페이스 멤버를 그 이름 접두로 식별한다. 다른 이름이면 게이트를 그냥 통과한다(ADR-0151 「개명 함정」).
 3. **bin 이름은 `engram` 그대로다** — agent `CLI_EXE_NAME` 과 맞물린다. 바꾸면 우편이 조용히 멈춘다(데몬 `Cargo.toml` 주석 · ADR-0094).
 4. **의존 = agent(명령 어휘) · command(요청 번호) · 설치 위치 규칙.** CLI 어휘는 agent 에 남는다(위 「맥락」).
-5. **설치 위치 규칙(`find_install_root`)은 CLI 쪽에 한 벌 더 둔다**(메모 결정 후보 9) — 결정 후보 6 이 그 규칙을 데몬으로 보내고, CLI 는 데몬 패키지를 떠나므로 데몬 crate 를 의존하지 않는다. **두 벌이 같은 경로를 내는지 재는 시험으로 묶는다** — 데몬 · 셸의 `daemon.json` 자리와 같은 처리다(결정 후보 6 결정 4). 그 시험이 어느 패키지에 사는지는 2-3 착수 때 정한다. 착수 = 작업 순서 2-3(선행 2-2 discovery 나누기).
+5. **설치 위치 규칙(`find_install_root`)은 CLI 쪽에 한 벌 더 둔다**(메모 결정 후보 9) — ADR-0271 결정 2 가 그 규칙을 데몬으로 보내고, CLI 는 데몬 패키지를 떠나므로 데몬 crate 를 의존하지 않는다. **두 벌이 같은 경로를 내는지 재는 시험으로 묶는다** — 데몬 · 셸의 `daemon.json` 자리와 같은 처리다(ADR-0271 결정 4). 그 시험이 어느 패키지에 사는지는 2-3 착수 때 정한다. 착수 = 작업 순서 2-3(선행 2-2 discovery 나누기).
 
 ## 거부한 대안
 
@@ -33,8 +33,9 @@ CLI 어휘 상수(동사 · 플래그 · 실행 파일 이름 · 상태 낱말)�
 ## 영향 / 불변식
 
 - **새 패키지는 게이트를 세 곳(`ci.yml` · CLAUDE.md 「빌드·검증 명령」 · `.claude/skill-bindings/qa.md`)에 등록한다**(ADR-0175 영향). 테스트 명령에 `-- --test-threads=4` 를 붙일지는 그 패키지의 테스트가 실 자식 프로세스를 띄우는지로 가른다(CLAUDE.md 「병렬은 테스트 바이너리마다 걸린다」).
+- ★**의존 최소화는 일부만 얻는다**★ — 떨어지는 것은 데몬 몫(tokio · WebSocket · net · messaging · protocol 등)뿐이다. CLI 가 agent 를 의존하는 한(결정 4) agent 의 운영 의존이 함께 빌드된다 — `portable-pty` · `windows`(Windows 전용 · Job Object · Restart Manager 등) · `ts-rs` · `chrono` · base(→ `tracing-subscriber` · `regex`) 등과 command 를 거친 `inventory`(CLI 는 command 를 직접도 쓴다). 근거 = `crates/engram-dashboard-agent/Cargo.toml` · `crates/engram-dashboard-base/Cargo.toml` 대조(2026-10-02). CLI 어휘 상수를 agent 밖으로 빼면 더 줄지만, 이 결정은 그 어휘를 agent 에 둔다(위 「맥락」).
 - **릴리스 빌드가 CLI 를 데몬 패키지에서 집는다** — `scripts/build-release.ps1` 의 `cargo build --release -p engram-dashboard-daemon --bin engram-dashboard-daemon --bin engram`. 같은 변경에서 새 패키지로 바꾼다(그 스크립트의 기대 exe 목록 `engram.exe` 는 그대로).
 - **작업은 망가지지 않는 단위로 묶는다**(사용자 2026-10-02 — 「망가지지 않는 단위로 잘 그룹지어서 작업하라」). 새 패키지를 세우고 bin 을 옮기는 단위와 릴리스 스크립트를 바꾸는 단위가 같은 커밋에 들어가야 배포 빌드가 끊기지 않는다(위 릴리스 항목).
-- **옛 경로를 가리키는 ADR 이 있다** — ADR-0132 · ADR-0133 · ADR-0161 · ADR-0162 · ADR-0212 가 `crates/engram-dashboard-daemon/src/bin/engram.rs` 를 관련 포인터로 든다. 이 ADR 이후 그 경로는 새 패키지의 같은 파일을 가리킨다.
+- **옛 경로를 가리키는 ADR 이 있다** — `crates/engram-dashboard-daemon/src/bin/engram.rs` 를 관련 포인터 · 본문으로 든다. 명단은 여기 적지 않는다 — **찾는 법 = `rg -l "src/bin/engram.rs" docs/decisions`**(이 ADR 자신도 걸린다). 이 ADR 이후 그 경로는 새 패키지의 같은 파일을 가리킨다.
 - **남은 데몬 경계(별건 · 미결)** — 테스트용 서버 함수(`start_test_server*`, `crates/engram-dashboard-daemon/src/lib.rs`)가 테스트 표시 없이 공개 API 로 나가 있다. 테스트 전용 기능 플래그 뒤로 옮기는 것은 작업 순서 2-4 다. 셸 통합 테스트가 실제 데몬을 띄워 쓰므로 셸 → 데몬 테스트 의존 자체는 남는다.
 - **코드 앵커 = `// ADR-0273`** — 새 패키지 `Cargo.toml` 의 `[[bin]]` 줄.

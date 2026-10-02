@@ -1,7 +1,7 @@
 # ADR-0271: discovery 를 나눠 데몬 몫은 데몬에 셸 몫은 셸에 두고 DataLayout 도 함께 나눈다
 
 - 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 6 · §11 의 ADR-0264 충돌 항목에 대한 답) + 코드 대조 2026-10-02 (`d5ac725`))
-- 관련: Amends ADR-0024 (데이터 위치 구현 줄의 discovery 단일 출처) · Amends ADR-0264 (결정 4의 discovery DataLayout 단일 출처) · `docs/tracking-archive.md` T-10(discovery 통합 — 종결: 안 한다, 사용자 결정 2026-08-26 · 이 결정이 다시 연다) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0134(데이터 루트 위치 — 그대로) · ADR-0135(클라이언트 사전 점검 · 잠금 파일 = 접속 파일) · ADR-0175(의존 그래프의 discovery 줄 · `base` 셋째 입주자) · ADR-0266(WMI 띄우기 → platform) · ADR-0269(`Clock` → base · 입주 규칙) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(net 걷기) · ADR-0273(engram CLI 의 설치 위치 사본) · 메모 §5(애매한 것은 일단 데몬으로) · `crates/engram-dashboard-discovery/src/lib.rs` · `crates/engram-dashboard-discovery/src/layout.rs` · step-log S21
+- 관련: Amends ADR-0024 (데이터 위치 구현 줄의 discovery 단일 출처) · Amends ADR-0264 (결정 4의 discovery DataLayout 단일 출처) · `docs/tracking-archive.md` T-10(discovery 통합 — 종결: 안 한다, 사용자 결정 2026-08-26 · 이 결정이 다시 연다) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0134(데이터 루트 위치 — 그대로) · ADR-0135(클라이언트 사전 점검 · 잠금 파일 = 접속 파일) · ADR-0175(`base` 셋째 입주자) · ADR-0266(WMI 띄우기 → platform) · ADR-0269(`Clock` → base · 입주 규칙) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(net 걷기) · ADR-0273(engram CLI 의 설치 위치 사본) · 메모 §5(애매한 것은 일단 데몬으로) · `crates/engram-dashboard-discovery/src/lib.rs` · `crates/engram-dashboard-discovery/src/layout.rs` · step-log S21 · Amends ADR-0175 (영향의 의존 그래프 중 discovery 가 든 줄)
 
 ## 맥락
 
@@ -47,7 +47,7 @@ T-10(2026-08-26)이 「discovery 를 없애지 않는다」로 종결했다 — 
 
 - **discovery 를 그대로 둔다(T-10 의 결론).** 기각 = 사용자 결정(2026-10-02 — 「지금 당장은 discovery 뽀개고 데몬 셸 각각 두고」) · 새 근거 둘(클라 · 데몬 분리 원칙 · 원격 대비 — 네트워크 방식이면 폴더 규칙은 데몬만 필요하다). T-10 의 종결 사유는 각각 이렇게 된다(코드 대조):
   - 「데몬도 그 crate 를 의존」 — 데몬이 쓰는 것을 데몬 안으로 옮기는 것이 이 결정이다.
-  - 「async 무의존 게이트가 거기 붙는다」(`ci.yml` 의 `Gate: discovery has no async-runtime ingress`) — 그 게이트가 지키던 것은 discovery 를 단독으로 빌드 · 소비할 때 tokio 가 딸려 오지 않는다는 성질이다(discovery `Cargo.toml` 주석). 소비자가 데몬 · 셸뿐이고 둘 다 tokio 를 진다(`src-tauri/Cargo.toml` 의 `tokio`). 나눈 뒤 지킬 대상이 없다.
+  - 「async 무의존 게이트가 거기 붙는다」(`ci.yml` 의 `Gate: discovery has no async-runtime ingress`) — 그 게이트가 지키던 것은 discovery 를 단독으로 빌드 · 소비할 때 tokio 가 딸려 오지 않는다는 성질이다(discovery `Cargo.toml` 주석). 소비자는 데몬 · 셸 · 데몬 패키지 안의 `engram` CLI 셋이다(위 표 — CLI 는 `find_install_root`). 데몬 · 셸은 tokio 를 지고(두 `Cargo.toml` 의 `tokio`), CLI 는 데몬 패키지의 bin 이라 그 패키지의 의존(tokio 포함)과 함께 빌드된다 — ADR-0273 뒤에는 설치 위치를 자기 사본으로 가져(그 결정 5) 이쪽 코드를 아예 쓰지 않는다. 나눈 뒤 지킬 대상이 없다.
   - 「`base` 셋째 입주자 문제」 — ADR-0269 이 답했다(base 는 범용 코드를 목적 모듈로 받는다).
 - **셸이 경로를 얻으려고 데몬 crate 를 의존한다.** 기각 = 클라 · 데몬 분리 원칙(사용자 2026-10-02 — 메모 §4 「셸은 데몬 crate 를 의존하지 않으므로(클라·데몬 분리)」) + 코드: 데몬 crate 는 agent 를 의존하므로 셸이 운영 의존으로 데몬을 들이면 결정 후보 5 가 끊는 셸 → agent 간선이 도로 생긴다.
 - **경로 규칙만 담는 작은 공용 crate 를 세운다.** 기각 = 사용자 원칙(메모 §5 — 「애매한 건 데몬으로 몬 다음에 위에 정리되고 다시 데몬 정리를 하는 방향」 · 자리가 애매한 코드는 crate 를 새로 세우거나 공용으로 두지 않고 일단 데몬 안으로 넣는다).
@@ -60,15 +60,15 @@ T-10(2026-08-26)이 「discovery 를 없애지 않는다」로 종결했다 — 
 
 ## 영향 / 불변식
 
-- **불변식: 셸의 운영 의존에 데몬 crate 가 없다**(클라 · 데몬 분리). 데몬 · 셸이 같은 데이터 루트와 같은 `daemon.json` 자리로 수렴한다는 ADR-0024 의 불변식(「세 exe 가 같은 빌드모드에서 같은 폴더로 수렴」)은 그대로이고, 그 근거가 「출처 하나」에서 「두 벌 + 같은 경로 시험」으로 바뀐다.
+- **불변식: 셸의 운영 의존에 데몬 crate 가 없다**(클라 · 데몬 분리). 데몬 · 셸이 같은 데이터 루트(릴리스 `<exe>\data` — ADR-0134 · ADR-0136 · 개발 `<워크트리>\.engram-dev` — ADR-0264 결정 8 · 시험 `ENGRAM_DATA_DIR`)와 같은 `daemon.json` 자리(`daemon\run\daemon.json` — ADR-0264 결정 6)로 수렴한다는 불변식은 그대로이고, 그 근거가 「출처 하나」에서 「두 벌 + 같은 경로 시험」으로 바뀐다. ★ADR-0024 의 「세 exe 가 같은 빌드모드에서 같은 폴더로 수렴」을 이 불변식의 출처로 들지 않는다★ — 그 세 exe(daemon · embedded · tray-host)와 「디버그 = repo 루트 · 릴리즈 = exe 옆」 수렴은 ADR-0027 이 걷었고, embedded · tray-host 는 ADR-0029 로 사라졌으며, 폴더 이름은 ADR-0134 · ADR-0136 · ADR-0264 결정 8 이 다시 정했다.
 - **ADR-0024 를 고친다** — 「데이터 위치」 구현 줄의 「`engram_dashboard_discovery::default_data_dir()` 단일 출처」가 데몬 정본 + 셸 사본(시험으로 묶음)이 된다. 우선순위(① `ENGRAM_DATA_DIR` > ② 디버그 · ③ 릴리스)와 self-resolve 는 그대로다.
 - **ADR-0264 를 고친다** — 결정 4 의 「경로의 단일 출처 = discovery 의 `DataLayout`」이 데몬 · 셸 각자의 경로 + 사본 둘(루트 · `daemon.json`)이 된다. 「한 저장소만 쓰는 파일 이름은 그 저장소가 소유」 · 「net 은 잠금 파일 경로를 인자로 받는다」 · 「OS 가름은 `default_data_dir` 안에만」은 그대로다. 결정 2 의 배치(폴더 이름 = 디스크 계약)는 바뀌지 않는다.
-- **T-10 을 다시 연다** — `docs/tracking-archive.md` 의 T-10 종결 줄을 이 ADR 로 가리킨다(추적 갱신은 이 결정의 커밋에서 한다).
+- **T-10 을 다시 연다** — `docs/tracking-archive.md` 의 T-10 종결 줄이 이 ADR 을 가리킨다(2026-10-02 갱신). 작업 추적은 T-47(크레이트 경계 리팩터링)의 작업 순서 2-2 다.
 - **`daemon.json` 자리를 따로 아는 곳이 하나 더 있다** — 스크립트 `scripts/engram.mjs`(`PORTFILE_IN_DATA_DIR` — ADR-0264 결정 6). 이 결정이 늘리는 것은 셸 쪽 Rust 사본 하나다.
 - **열린 것 — 2-2 착수 때 정한다(내부 배치):**
   - **`logs\` 자리** — 데몬 · 셸이 둘 다 쓴다(표). 셸 쪽 사본으로 둘지 · 같은 경로 시험에 넣을지.
   - **실행 파일 위치 계산 「두 곳 → 한 곳」의 모양** — 메모는 그 계산을 데몬으로, 데몬 실행 파일 찾기를 셸로 보낸다. 셸은 데몬 crate 를 의존하지 않으므로 데몬 exe 를 찾는 코드는 셸에 남는다 — 한 곳으로 모이는 것이 무엇인지(현재 exe 옆 규칙 · `.exe` 붙이기는 결정 후보 1 의 platform 몫)를 그때 확정한다.
-  - **쓰기 검사 도우미**(`retry_if_vanished` · `probe_write_in`) — 데몬 · 셸 쓰기 가능 확인 둘이 함께 쓴다. 나누면 사본 둘이 되므로 결정 후보 4 의 입주 규칙(「지금 여러 곳에서 쓰이면」)으로 base 에 둘지 본다.
+  - **쓰기 검사 도우미**(`retry_if_vanished` · `probe_write_in`) — 데몬 · 셸 쓰기 가능 확인 둘이 함께 쓴다. 나누면 사본 둘이 되므로 base 에 둘지 본다. ★**판정은 ADR-0269 결정 7 의 입주 규칙(「지금 여러 곳에서 쓰이면」)을 따른다**★ — ADR-0269 는 지금 `retry_if_vanished` 를 「입주시키지 않는 것」에 두었고(discovery 전용 정책), 2-2 의 나누기가 실제로 사본 둘을 만들 때까지 그 제외가 선다.
   - **2-2 와 3-2 사이 `send_stop` 의 자리** — 결정 5 가 transport 단계로 미루므로 2-2 뒤에도 잠시 산다. 셸은 이미 `net` · `protocol` 을 운영 의존으로 진다 — 셸로 그대로 옮겨도 새 의존이 생기지 않는다.
 - **사라지는 게이트 · 낡는 서술:**
   - `ci.yml` 의 `Gate: discovery has no async-runtime ingress` — 대상 crate 가 사라진다.
