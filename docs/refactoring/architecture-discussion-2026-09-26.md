@@ -242,6 +242,28 @@
   - 비용: 바깥 패킷을 풀 때 봉투를 한 번 훑어 검증하고 끝자락에서 한 번 더 푼다(중간 트리는 안 생김) — 명령 패킷은 드물어 무시할 수준. 근거 = `../research/wire-shared-types-placement-2026-10-02.md`.
 - **새로 짤 것:** 「패킷은 풀렸는데 봉투가 깨진」 경우의 처리 · 데몬 중계 경로의 풀기/다시 싸기.
 - **근거 조사:** `../research/wire-shared-types-placement-2026-10-02.md` — rust-analyzer(사본 + `to_proto`/`from_proto`) · Cargo `cargo-util-schemas`(행동 없는 공용 스키마) · JSON-RPC 봉투(불투명 칸)가 이 모양이고, 패킷 crate 가 남의 타입을 품는 모양을 권하는 1차 자료는 없다.
+
+---
+
+## 8. 데몬 경계 · engram CLI
+
+### 사실 (코드 대조 2026-10-02)
+
+- `engram.exe`(에이전트가 자기 터미널에서 부르는 제어 CLI)는 **데몬 패키지의 두 번째 bin 타깃**이다(`crates/engram-dashboard-daemon/Cargo.toml:37-39` · 소스 `src/bin/engram.rs` 비테스트 2,791줄). 데몬 lib 를 한 줄도 쓰지 않는다 — 쓰는 것은 agent 의 명령 어휘 상수(`engram.rs:117-121`) · command 의 요청 번호 · discovery 의 설치 위치 셋뿐. 그런데 같은 패키지라 빌드 때 데몬 의존 전체를 끌고 온다(HTTP 를 손으로 짤 만큼 의존 최소화가 의도였다 — 같은 `Cargo.toml` 주석).
+- CLI 어휘 상수(동사 · 플래그 · 실행 파일 이름 · 상태 낱말)는 agent 자신도 쓴다(`manager.rs` · `commands.rs` · 백엔드) — 「`agent.*` 명령의 어휘」라 agent 소유가 맞다.
+- 셸 테스트가 데몬 패키지를 테스트 전용 의존으로 끌어온다(`src-tauri/Cargo.toml:104`) — 테스트용 서버 함수(`start_test_server*`, `crates/engram-dashboard-daemon/src/lib.rs:915-929`)가 테스트 표시 없이 공개 API 로 나가 있어서다.
+
+### 결정 후보 9 — engram CLI 를 독립 패키지로
+
+**상태: 방향 확정(사용자 2026-10-02 — 「engram 은 독립 패키지로 빼는 게 맞는데 그냥 shell 처럼 하나 분리」) · ADR 미작성.**
+
+- 셸(`src-tauri` → `engram-dashboard.exe`)처럼 **exe 하나를 뽑는 패키지**를 따로 둔다 — 위치 `crates/` 아래, 패키지 이름은 `engram-dashboard-` 접두를 지킨다(CI 의존 상한 게이트가 워크스페이스 멤버를 그 이름 접두로 식별한다 — 다른 이름이면 게이트를 그냥 통과한다). **bin 이름은 `engram` 그대로**(agent `CLI_EXE_NAME` 과 맞물림 — 바꾸면 우편이 조용히 멈춘다).
+- 의존 = agent(명령 어휘) · command(요청 번호) · 설치 위치 규칙. 설치 위치 규칙은 discovery 가 사라지면 데몬으로 가므로(후보 6) CLI 쪽에 한 벌 더 두고 같은 경로를 내는지 시험으로 묶는다(데몬·셸의 `daemon.json` 위치와 같은 처리).
+- 남은 데몬 경계(미결): 테스트용 서버 함수를 테스트 전용 기능 플래그 뒤로 — 셸 통합 테스트가 실제 데몬을 띄워 쓰므로 셸 → 데몬 테스트 의존 자체는 남는다.
+
+## 9. 셸 — 나중 (사용자 2026-10-02)
+
+- 「일단 한 곳에 있다가 나중에 분리할 거니. 플러그인도 돼야 하고 좀 천지개벽이 발생될 거라서」 — 셸은 경계 정리(agent·net·discovery 끊기)만 하고, 안쪽 분리는 플러그인 설계와 함께 따로 다룬다(T-27 과 묶임).
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)
