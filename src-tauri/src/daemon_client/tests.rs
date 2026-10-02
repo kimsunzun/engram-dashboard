@@ -5311,6 +5311,7 @@ use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
 use crate::layout::{
     apply, AgentSpawner, LayoutEvents, LayoutState, ViewSnapshot, WindowHost, WindowTabsPayload,
 };
+use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
 use crate::ui_settings::{LoadedTheme, UiSettingsRefresh};
 
@@ -5355,6 +5356,13 @@ impl UiSettingsRefresh for NoUiSettings {
     }
 }
 
+struct NoSettingsEvents;
+
+impl SettingsEvents for NoSettingsEvents {
+    fn changed(&self, _change: &SettingsSnapshot) {}
+    fn theme_default_changed(&self) {}
+}
+
 // 운영 버스 표와 같은 구독 재동기 어댑터(`OwnedSubs` — 사람 경로의 `RouterSubs` 에 넘긴다)를 끼운 레이아웃 명령 표.
 fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
     make_table(LayoutPorts {
@@ -5368,6 +5376,11 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
         labels: Arc::new(PopupCounter::default()),
         spawner: Arc::new(NoSpawner),
         ui_settings: Arc::new(NoUiSettings),
+        // 쓰기를 안 연다 — 이 시험은 설정을 건드리지 않고, 적재는 없는 폴더를 만들지 않는다.
+        settings: Arc::new(SettingsService::load_from_dir(
+            &std::env::temp_dir().join("engram-dashboard-no-settings"),
+        )),
+        settings_events: Arc::new(NoSettingsEvents),
     })
 }
 

@@ -18,6 +18,7 @@ use uuid::Uuid;
 use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, RequestId};
 
 use crate::commands::popout::{PopupCounter, TauriWindowHost};
+use crate::commands::settings::{TauriSettingsEvents, TauriUiSettings};
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
@@ -25,6 +26,8 @@ use crate::layout::{
     SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
+use crate::settings::SettingsService;
+use crate::ui_settings::EffectiveThemes;
 
 const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 // 프론트는 `label` 이 자기 창과 일치할 때만 반응한다(§7-1).
@@ -186,13 +189,16 @@ impl AgentSpawner for OwnedSpawner {
 /// 레이아웃 명령 표가 쥘 포트 묶음 — 조립부(`lib.rs` setup)가 한 번 만든다.
 ///
 /// ★사람 클릭 경로와 **같은 상태·같은 라우터·같은 발급기**를 받는다★: 다른 인스턴스를 주면 LLM 이 만든 창이
-/// 사람이 보는 목록에 없고 label 이 충돌한다(ADR-0035 레이아웃 권위가 하나라는 것의 실물).
+/// 사람이 보는 목록에 없고 label 이 충돌한다(ADR-0035 레이아웃 권위가 하나라는 것의 실물). 설정 서비스와
+/// 유효 테마도 같다 — 빌더에서 manage 한 그 인스턴스를 받는다(다르면 두 경로가 다른 값·다른 밀기 순서를 본다).
 pub fn command_ports(
     app: AppHandle,
     state: LayoutState,
     router: Arc<OutputRouter>,
     labels: Arc<PopupCounter>,
     client: Arc<DaemonClient>,
+    settings: Arc<SettingsService>,
+    themes: Arc<EffectiveThemes>,
 ) -> crate::layout::commands::LayoutPorts {
     crate::layout::commands::LayoutPorts {
         state,
@@ -204,8 +210,10 @@ pub fn command_ports(
         windows: Arc::new(OwnedWindowHost { app: app.clone() }),
         labels,
         spawner: Arc::new(OwnedSpawner { client }),
-        // 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
-        ui_settings: Arc::new(crate::commands::settings::TauriUiSettings::new(app)),
+        // 아래 셋은 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
+        ui_settings: Arc::new(TauriUiSettings::new(app.clone(), Arc::clone(&themes))),
+        settings,
+        settings_events: Arc::new(TauriSettingsEvents::new(app, themes)),
     }
 }
 

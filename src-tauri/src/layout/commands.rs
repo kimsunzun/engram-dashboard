@@ -4,9 +4,10 @@
 //! 적용 서비스**(`super::apply`)에 떨어진다 — 이 파일은 그 서비스로 가는 **두 번째 껍데기**이지 두 번째
 //! 제어 표면이 아니다(ADR-0081 결정 3 · 「거부한 대안」의 `ViewManager` 직접 호출을 여기서도 하지 않는다).
 //!
-//! ★레이아웃 밖의 셸 명령도 여기 선다★ — `ui.refresh` 는 레이아웃을 안 건드리지만 **셸이 주인인 이름**이라
-//! 이 표에 든다. 두 번째 선언 블록을 만들면 등록 패킷·세대 번호·중복 검사가 표마다 갈린다(매크로 제약도
-//! 「모듈 하나에 블록 하나」다). 그 대신 포트는 자기 것을 따로 든다([`LayoutPorts::ui_settings`]).
+//! ★레이아웃 밖의 셸 명령도 여기 선다★ — `ui.refresh` · `settings.*` 는 레이아웃을 안 건드리지만 **셸이
+//! 주인인 이름**이라 이 표에 든다. 두 번째 선언 블록을 만들면 등록 패킷·세대 번호·중복 검사가 표마다
+//! 갈린다(매크로 제약도 「모듈 하나에 블록 하나」다). 그 대신 포트는 자기 것을 따로 든다
+//! ([`LayoutPorts::ui_settings`] · [`LayoutPorts::settings`] · [`LayoutPorts::settings_events`]).
 //!
 //! 진입점: [`make_table`](fn.make_table.html)(조립) · [`LayoutPorts`](struct.LayoutPorts.html)(주입 seam).
 //!
@@ -19,7 +20,9 @@
 //! - **`get_view` 는 선언에 없다** — 반환이 `ViewSnapshot`(재귀 `LayoutNode`)이고 매크로가 재귀 타입에서
 //!   컴파일 에러로 멈춘다. 그래서 v1 조회는 `tab.list`·`window.list`·`slot.resolveSpatial` 셋이다.
 //!
-//! ## ★적용 실패는 코드 하나로 나간다(`CONFLICT`)★
+//! ## ★적용 실패는 코드 하나로 나간다(`CONFLICT`)★ — 레이아웃 명령만
+//! `settings.*` 는 서비스가 타입드 오류를 내므로 종류대로 옮긴다([`settings_error`]). 아래는 적용 서비스 몫이다.
+//!
 //! 적용 서비스가 실패를 `String` 으로만 주므로 여기서 종류를 가를 재료가 없다. 문구로 코드를 합성하는
 //! 것은 금지다(TRD §4-⑦ — `message` 로 기계 분기하지 않는다. CLI 의 문자열 패턴매칭을 끝내려고 둔 계약이
 //! 바로 그것이다). 그래서 **모든 실패에 참인 코드**를 고른다: `CONFLICT` = 「지금 상태로는 그 요청을 적용할
@@ -43,6 +46,9 @@ use super::{
     AgentSpawner, LabelSource, LayoutEvents, LayoutState, SlotContent, SplitDir, SubscriptionSync,
     WindowHost,
 };
+use crate::settings::{
+    reset_and_notify, set_and_notify, SettingsError, SettingsEvents, SettingsService,
+};
 use crate::ui_settings::UiSettingsRefresh;
 
 // ★이름은 프론트 레지스트리가 **오늘 등록한 id** 를 그대로 쓴다★: `tab.create`·`slot.focus`·`slot.popout`·
@@ -55,6 +61,9 @@ use crate::ui_settings::UiSettingsRefresh;
 //   없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만 만지던 화면 명령 둘은 ADR-0167 이
 //   내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고
 //   레지스트리에 이름을 싣지 않는다 — ADR-0227).
+// ★세대 10 = 셸 설정 명령 넷(`settings.get`·`settings.set`·`settings.reset`·`settings.schema`)이 들고
+//   `ui.refresh` 가 전역 테마를 파일이 아니라 설정 `theme.default` 에서 읽는 세대★(TRD S21-storage §5-4 ·
+//   §5-6) — 답 모양은 그대로고 `theme` 의 출처와 summary 가 바뀌었다.
 // ★세대 9 = `layout.setSlotContent` 가 사용량 슬롯(`content=Usage` + `show_claude`·`show_codex`)을 받는 세대★
 //   (TRD S21 usage-limit-slot §1-7) — 이름은 그대로고 인자 어휘와 칸이 는 세대다.
 // ★세대 8 = 분할 비율 명령 둘(`split.setRatio`·`split.list`)이 든 세대★(ADR-0227).
@@ -73,7 +82,7 @@ use crate::ui_settings::UiSettingsRefresh;
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 9;
+    catalog_version: 10;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -91,10 +100,11 @@ declare_commands! {
         TopBottom,
     }
 
-    /// 적용된 테마가 어디서 왔나 — `File` = 파일에 적힌 그대로, `Fallback` = 못 써서 기본값으로 접힘.
+    /// 창별 테마 파일을 썼나 — `File` = 읽어서 창 항목을 적용했다, `Fallback` = 없거나 못 써서 창 항목 없이
+    /// 접혔다(모든 창이 전역 값).
     ///
-    /// ★`theme` 만으로는 못 가르는 것을 가른다★: 「파일에 dark 라고 적혀 있다」와 「네 값이 반려돼 dark 로
-    /// 접혔다」가 같은 `theme` 을 낸다. 접힌 **사유**(없음·못 읽음·깨짐·모르는 이름·상한 초과)는 여기 안
+    /// ★`theme` 만으로는 못 가르는 것을 가른다★: 창 항목이 반영된 화면과 파일이 통째로 반려돼 모든 창이 전역
+    /// 값인 화면이 같은 `theme` 을 낸다. 접힌 **사유**(없음·못 읽음·깨짐·객체 아님·상한 초과)는 여기 안
     /// 싣는다 — 그건 앱 로그가 지고, 올리면 호출자가 사유별 분기를 짜 그 다섯이 계약이 된다.
     ///
     /// 셸 안쪽 쌍둥이는 `crate::ui_settings::ThemeSource` 다(`SplitDirection`↔`SplitDir` 과 같은 관계 —
@@ -136,6 +146,24 @@ declare_commands! {
         ratio: f64,
         a_slots: Vec<String>,
         b_slots: Vec<String>,
+    }
+
+    /// 셸 설정 한 줄 — value 는 정규 문자열, is_default = 덮어쓴 값이 없어 기본값을 쓰고 있다.
+    struct SettingRow {
+        key: String,
+        value: String,
+        is_default: bool,
+    }
+
+    /// 셸 설정 키 하나의 모양.
+    struct SettingSchemaRow {
+        key: String,
+        kind: String,
+        default: String,
+        choices: Option<Vec<String>>,
+        min: Option<String>,
+        max: Option<String>,
+        description: String,
     }
 
     /// 창에 빈 탭을 하나 더 만들고 활성화한다.
@@ -343,17 +371,17 @@ declare_commands! {
         slot_id: Option<String>,
     } errors [CONFLICT];
 
-    /// 디스크의 UI 설정(`<data_dir>/ui-settings.json`)을 다시 읽어 **창마다** 적용한다 — 지금은 테마 한 칸.
-    /// 파일 모양 = `{"theme":"dark","windows":{"main":"light"}}` — 값은 `dark`·`light`·`e-ink` 셋 중 하나.
-    /// `theme` 는 전역이고 `windows` 는 **창 label 별 덮어쓰기**다(항목이 없는 창은 전역 값을 쓴다. 창
-    /// label = `main`·`agent-tree`·`slot-popup-N`). 창 항목 하나가 못 쓸 값이면 그 창만 전역 값으로 접는다.
+    /// 디스크의 창별 테마 파일(`<data_dir>/ui-settings.json`)을 다시 읽어 **창마다** 적용한다.
+    /// 파일 모양 = `{"windows":{"main":"light"}}` — 값은 `dark`·`light`·`e-ink` 셋 중 하나이고 **창 label 별
+    /// 덮어쓰기**다(창 label = `main`·`agent-tree`·`slot-popup-N`). 항목이 없는 창은 전역 테마를 쓴다.
+    /// ★전역 테마는 이 파일이 아니라 settings.set theme.default 로 바꾼다★ — 파일의 `theme` 키는 읽지 않는다.
+    /// 창 항목 하나가 못 쓸 값이면 그 창만 전역 값으로 접는다.
     /// 모르는 키는 무시한다(뒤에 키가 늘 자리). 파일을 고치는 것은 **호출자**이고 이 명령은 읽기만 한다.
     /// `<data_dir>` = 릴리스는 실행 파일 **폴더 아래 `data/`**(★exe 옆이 아니다★ — ADR-0134 결정 2 가 그
     /// 자리를 기각했다: 배포 파일과 섞이면 새 버전 압축을 덮어쓸 때 사용자 데이터가 함께 날아간다),
     /// 개발 빌드는 저장소 안 `.engram-dev`. 둘 다 `ENGRAM_DATA_DIR` 로 덮을 수 있다.
-    /// 답의 theme 은 **전역** 값이고(창별 값은 각 창이 받는다), source 가 그것이 파일에서 온 것인지
-    /// 접힌 것인지 말한다.
-    /// 파일이 없거나 깨졌으면 오류가 아니라 `{theme:"dark", source:"Fallback"}` 이 돌아온다 — 사유는 앱 로그.
+    /// 답의 theme 은 **전역** 값(theme.default)이고(창별 값은 각 창이 받는다), source 는 창 항목 파일을
+    /// 썼는지(File) 없거나 못 써서 창 항목 없이 접혔는지(Fallback) 말한다 — 접힘은 오류가 아니고 사유는 앱 로그.
     /// ★오류가 되는 자리는 하나뿐이다★ — 알림을 못 보낸 창이 있는 경우(INTERNAL). 어느 창인지는 앱 로그.
     /// ★적용은 값 교체뿐이다★ — 슬롯을 다시 마운트하지 않는다(챗은 컴포넌트 상태라 리마운트 = 대화 영구
     /// 소실, ADR-0149).
@@ -362,6 +390,64 @@ declare_commands! {
     "ui.refresh" => args UiRefreshArgs {}
                  -> ok   UiRefreshOk { theme: String, source: ThemeOrigin }
                  errors [];
+
+    // ADR-0265
+    /// 셸 설정을 읽는다. key = 정확한 키(theme.default) 또는 점으로 끝나는 접두(chat.style.) — 빼면 전부.
+    /// value 는 언제나 정규 문자열이다. is_default = 덮어쓴 값이 없어 기본값을 쓰고 있다.
+    /// rev = 값이 실제로 바뀐 쓰기마다 1 씩 오르는 번호(셸을 띄울 때 0). 맞는 키가 없으면 NOT_FOUND.
+    /// 어떤 키가 있고 무엇을 받는지는 settings.schema.
+    #[effect(Read)]
+    #[since(10)]
+    "settings.get" => args SettingsGetArgs {
+        key: Option<String>,
+    } -> ok SettingsGetOk {
+        rev: u64,
+        items: Vec<SettingRow>,
+    } errors [NOT_FOUND];
+
+    /// 셸 설정 키 하나에 값을 쓴다 — 디스크에 남아 재시작을 넘긴다. 접두는 안 받는다.
+    /// value 는 문자열 하나이고 받는 형식은 settings.schema 의 kind 를 따른다: choice = 선택지 낱말(대소문자
+    /// 무시) · css-length = 수 + 그 키가 받는 단위(px, rem, em — 단위마다 범위가 따로) · css-number = 단위 없는 수.
+    /// 답의 value 는 정규형이다(E-INK → e-ink, 15.0PX → 15px).
+    /// 이미 그 값이면 changed=false 이고 rev · 알림이 없다(파일이 그 값과 다르게 적혀 있으면 파일만
+    /// 바로잡는다). 기본값과 같은 값을 주면 덮어쓰기가 지워진다.
+    /// theme.default 를 바꾸면 창별 테마가 없는 모든 창이 바로 그 테마로 바뀐다.
+    /// 모르는 키 = NOT_FOUND · 형식·범위 위반 = INVALID_ARGUMENT(문구에 기대 형식) · 디스크에 못 썼으면
+    /// INTERNAL(값은 그대로다).
+    #[effect(Write)]
+    #[since(10)]
+    "settings.set" => args SettingsSetArgs {
+        key: String,
+        value: String,
+    } -> ok SettingsSetOk {
+        rev: u64,
+        key: String,
+        value: String,
+        changed: bool,
+    } errors [NOT_FOUND];
+
+    /// 키 하나, 또는 점으로 끝나는 접두가 덮는 키 전부를 기본값으로 되돌린다 — key 는 필수(전체 초기화는 없다).
+    /// 답의 reset = 그 선택자가 덮은 키 전부(호출 뒤 모두 기본값). 이미 다 기본값이면 rev 가 그대로다(파일에
+    /// 남은 그 키들은 지운다). 맞는 키가 없으면 NOT_FOUND.
+    #[effect(Write)]
+    #[since(10)]
+    "settings.reset" => args SettingsResetArgs {
+        key: String,
+    } -> ok SettingsResetOk {
+        rev: u64,
+        reset: Vec<String>,
+    } errors [NOT_FOUND];
+
+    /// 셸 설정 키의 모양 — kind(choice · css-length · css-number) · default · choices(choice 만) ·
+    /// min · max(양 끝 포함 · css-length 는 받는 단위마다 한 값씩 ", " 로 잇는다 — "8px, 0.5rem, 0.5em") ·
+    /// description. key 는 settings.get 과 같다.
+    #[effect(Read)]
+    #[since(10)]
+    "settings.schema" => args SettingsSchemaArgs {
+        key: Option<String>,
+    } -> ok SettingsSchemaOk {
+        items: Vec<SettingSchemaRow>,
+    } errors [NOT_FOUND];
 }
 
 /// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
@@ -370,9 +456,9 @@ declare_commands! {
 /// **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로 바꾼 것이 차이의
 /// 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
 ///
-/// ★이름이 `Layout` 인데 레이아웃 밖 포트가 하나 있다★(`ui_settings`) — 표가 하나라 포트 묶음도 하나다
-/// (사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트는 적용 서비스를 안 거치고 자기
-/// 모듈(`crate::ui_settings`)만 부르므로 위 락 규율과 무관하다.
+/// ★이름이 `Layout` 인데 레이아웃 밖 포트가 셋 있다★(`ui_settings` · `settings` · `settings_events`) — 표가
+/// 하나라 포트 묶음도 하나다(사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트들은 적용
+/// 서비스를 안 거치고 자기 모듈(`crate::ui_settings` · `crate::settings`)만 부르므로 위 락 규율과 무관하다.
 pub struct LayoutPorts {
     pub state: LayoutState,
     pub subs: Arc<dyn SubscriptionSync>,
@@ -381,6 +467,10 @@ pub struct LayoutPorts {
     pub labels: Arc<dyn LabelSource>,
     pub spawner: Arc<dyn AgentSpawner>,
     pub ui_settings: Arc<dyn UiSettingsRefresh>,
+    /// 셸 설정 — 사람 경로(Tauri 설정 command)와 **같은 인스턴스**.
+    pub settings: Arc<SettingsService>,
+    /// 실제로 바뀐 설정 쓰기의 알림(모든 웹뷰 + `theme.default` 면 유효 테마 밀기).
+    pub settings_events: Arc<dyn SettingsEvents>,
 }
 
 /// 셸의 명령 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
@@ -499,8 +589,32 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         "ui.refresh",
         blocking_handler(move |_: UiRefreshArgs| verb_ui_refresh(&p)),
     );
-    // ★유일한 async 핸들러★ — 스폰이 데몬 왕복이라 `blocking_handler` 로 감쌀 수 없다(그 어댑터는 본문이
-    //   첫 poll 에서 끝까지 도는 것을 계약으로 삼는다).
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "settings.get",
+        blocking_handler(move |args: SettingsGetArgs| verb_settings_get(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "settings.set",
+        offloaded_handler(move |args: SettingsSetArgs| verb_settings_set(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "settings.reset",
+        offloaded_handler(move |args: SettingsResetArgs| verb_settings_reset(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "settings.schema",
+        blocking_handler(move |args: SettingsSchemaArgs| verb_settings_schema(&p, args)),
+    );
+    // 스폰이 데몬 왕복이라 `blocking_handler` 로 감쌀 수 없다(그 어댑터는 본문이 첫 poll 에서 끝까지 도는
+    //   것을 계약으로 삼는다).
     plug(
         &mut table,
         "agent.spawnInto",
@@ -518,6 +632,66 @@ fn plug(table: &mut CommandTable, name: &'static str, handler: Arc<dyn CommandHa
     table
         .insert(name, handler)
         .unwrap_or_else(|e| panic!("{name} 를 표에 꽂지 못했다: {e}"));
+}
+
+/// 디스크를 기다리는 동기 본문을 **블로킹 풀**에서 돌리는 핸들러 — 인자 · 반환 직렬화는 `blocking_handler`
+/// 와 같다.
+///
+/// ★`blocking_handler` 로 꽂지 않는 이유★: 그 어댑터는 「폴링하는 쪽이 `spawn_blocking` 뒤에서 부른다」를
+/// 계약으로 삼는데, 이 표의 적용 태스크는 클라이언트 런타임의 async 워커에 그대로 뜬다(`RuntimeSpawner`).
+/// 거기서 `sync_all` 을 기다리면 그 워커에 얹힌 다른 태스크가 함께 선다. `block_in_place` 는 current_thread
+/// 런타임(`#[tokio::test]`)에서 패닉해 쓰지 않는다.
+/// ★답보다 본문이 오래 산다★ — 기다리던 future 가 버려져도(런타임 종료) 본문은 끝까지 돈다. tokio 런타임
+/// 밖에서 폴링되면 그 자리에서 돈다(막을 워커가 없다).
+fn offloaded_handler<A, O, F>(run: F) -> Arc<dyn CommandHandler>
+where
+    F: Fn(A) -> Result<O, CommandError> + Send + Sync + 'static,
+    A: serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + Send + 'static,
+{
+    Arc::new(Offloaded {
+        run: Arc::new(run),
+        _types: std::marker::PhantomData,
+    })
+}
+
+struct Offloaded<F, A, O> {
+    run: Arc<F>,
+    _types: std::marker::PhantomData<fn(A) -> O>,
+}
+
+impl<F, A, O> CommandHandler for Offloaded<F, A, O>
+where
+    F: Fn(A) -> Result<O, CommandError> + Send + Sync + 'static,
+    A: serde::de::DeserializeOwned + Send + 'static,
+    O: serde::Serialize + Send + 'static,
+{
+    fn call(&self, args: serde_json::Value) -> CommandFuture {
+        let run = Arc::clone(&self.run);
+        Box::pin(async move {
+            let parsed: A = serde_json::from_value(args)
+                .map_err(|e| CommandError::invalid_argument(e.to_string()))?;
+            let ok = match tokio::runtime::Handle::try_current() {
+                Ok(runtime) => {
+                    runtime
+                        .spawn_blocking(move || run(parsed))
+                        .await
+                        .map_err(|e| {
+                            // 버스 경로의 패닉 그물(`handler_panicked`)과 같은 문구 — 본문이 블로킹
+                            //   풀에서 터지면 그 그물이 못 보고 여기로 온다.
+                            let what = if e.is_panic() {
+                                "panicked"
+                            } else {
+                                "was cancelled"
+                            };
+                            CommandError::internal(format!("command handler {what}: {e}"))
+                        })??
+                }
+                Err(_) => run(parsed)?,
+            };
+            serde_json::to_value(ok).map_err(|e| CommandError::internal(e.to_string()))
+        })
+    }
 }
 
 // ── 동사 ────────────────────────────────────────────────────────────────────
@@ -838,6 +1012,89 @@ fn verb_ui_refresh(ports: &LayoutPorts) -> Result<UiRefreshOk, CommandError> {
             crate::ui_settings::ThemeSource::Fallback => ThemeOrigin::Fallback,
         },
     })
+}
+
+fn verb_settings_get(
+    ports: &LayoutPorts,
+    args: SettingsGetArgs,
+) -> Result<SettingsGetOk, CommandError> {
+    let key = optional_text("key", args.key.as_deref())?;
+    let snapshot = ports.settings.get(key).map_err(settings_error)?;
+    Ok(SettingsGetOk {
+        rev: snapshot.rev,
+        items: snapshot
+            .items
+            .into_iter()
+            .map(|item| SettingRow {
+                key: item.key,
+                value: item.value,
+                is_default: item.is_default,
+            })
+            .collect(),
+    })
+}
+
+/// 디스크에 쓰고(`sync_all` 까지) `theme.default` 면 창 항목 파일을 읽어 민다 — 그래서 [`offloaded_handler`]
+/// 로 꽂는다([`verb_settings_reset`] 도 같다).
+fn verb_settings_set(
+    ports: &LayoutPorts,
+    args: SettingsSetArgs,
+) -> Result<SettingsSetOk, CommandError> {
+    let key = text("key", &args.key)?;
+    let value = text("value", &args.value)?;
+    let outcome = set_and_notify(&ports.settings, ports.settings_events.as_ref(), key, value)
+        .map_err(settings_error)?;
+    Ok(SettingsSetOk {
+        rev: outcome.rev,
+        key: outcome.key,
+        value: outcome.value,
+        changed: outcome.changed,
+    })
+}
+
+fn verb_settings_reset(
+    ports: &LayoutPorts,
+    args: SettingsResetArgs,
+) -> Result<SettingsResetOk, CommandError> {
+    let key = text("key", &args.key)?;
+    let outcome = reset_and_notify(&ports.settings, ports.settings_events.as_ref(), key)
+        .map_err(settings_error)?;
+    Ok(SettingsResetOk {
+        rev: outcome.rev,
+        reset: outcome.reset,
+    })
+}
+
+fn verb_settings_schema(
+    ports: &LayoutPorts,
+    args: SettingsSchemaArgs,
+) -> Result<SettingsSchemaOk, CommandError> {
+    let key = optional_text("key", args.key.as_deref())?;
+    let items = ports.settings.schema(key).map_err(settings_error)?;
+    Ok(SettingsSchemaOk {
+        items: items
+            .into_iter()
+            .map(|item| SettingSchemaRow {
+                key: item.key,
+                kind: item.kind.to_string(),
+                default: item.default,
+                choices: item.choices,
+                min: item.min,
+                max: item.max,
+                description: item.description,
+            })
+            .collect(),
+    })
+}
+
+/// 설정 서비스의 오류 종류를 같은 이름의 코드로 — 레이아웃 명령의 `CONFLICT` 한 갈래와 달리 서비스가 종류를
+/// 이미 갈라 준다(TRD S21-storage §5-2).
+fn settings_error(error: SettingsError) -> CommandError {
+    match error {
+        SettingsError::NotFound(message) => CommandError::not_found(message),
+        SettingsError::InvalidArgument(message) => CommandError::invalid_argument(message),
+        SettingsError::Internal(message) => CommandError::internal(message),
+    }
 }
 
 /// `agent.spawnInto` 의 핸들러 — ★async 라 [`blocking_handler`] 를 못 쓴다★.
