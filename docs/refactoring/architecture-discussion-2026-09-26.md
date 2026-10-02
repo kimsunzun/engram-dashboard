@@ -290,6 +290,27 @@
 - **단위(단계)마다 push** → CI 초록 → master 머지(머지 커밋 · 체크아웃 없는 통합 절차). push·머지는 매번 사용자 확인.
 - **핸드오프마다 origin 업데이트를 받아 작업 브랜치에 병합**한다.
 - **커밋 뒤 다른 워크트리 동기화는 사용자가 전달**한다(세션이 다른 워크트리를 건드리지 않는다).
+- **작업하며 코드베이스를 훑다 보이는 리팩터링 관련 사항은 그때그때 아래 11절에 적립한다**(사용자 2026-10-02 — 「지나가면서 계속 메모해 놔」). 묻지 않고 적고, 결정이 필요한 것만 묶어 올린다.
+
+---
+
+## 11. 지나가며 본 것 — 정리 후보 적립 (계속 쌓는다)
+
+결정 후보로 아직 안 올린 관측. 단계 작업 중 해당 자리를 지나갈 때 처리하거나 4단계 안건으로 넘긴다.
+
+| 무엇 | 위치 | 처리 시점 |
+|---|---|---|
+| CLAUDE.md 「백엔드 모듈 맵」 agent 항목의 「남은 `platform` 은 Job Object 래퍼 하나뿐」은 낡았다(실제 셋) | `CLAUDE.md` · `crates/engram-dashboard-agent/src/platform/mod.rs:1-2` | 1-3(platform 이전) 때 문장째 고침 |
+| 셸 `Cargo.toml` 주석 「agent 에서 `COMMAND_SPECS` 하나만 남았다」는 낡았다(실제 셋) | `src-tauri/Cargo.toml:62` | 2-1(셸 → agent 끊기) 때 의존째 사라짐 |
+| 데몬이 `tracing-subscriber` 를 선언만 하고 쓰지 않는다 | `crates/engram-dashboard-daemon/Cargo.toml` (CLAUDE.md 「의존성」 절 기록) | 1-2(로그 전환) 때 정리 |
+| agent 가 TS 바인딩을 생성·커밋하는데 프론트가 가져다 쓰는 곳이 0 — 그런데 ts-rs 를 운영 의존으로 안고 있다 | `crates/engram-dashboard-agent/bindings/` | 4단계(agent) — 별칭 import 여부부터 확인 |
+| agent 안 `transport/`(PTY·stdio)와 transport crate(WebSocket) 이름이 같다 | `crates/engram-dashboard-agent/src/transport/` | 4단계 이름 변경 |
+| 실행 파일 위치 계산이 두 곳에 갈림 | `crates/engram-dashboard-daemon/src/lib.rs:96,146` · `crates/engram-dashboard-discovery/src/lib.rs:981` | 2-2(discovery 나누기) |
+| 셸이 command 의 읽기/쓰기 표식·카탈로그 항목을 손으로 복제 | `src-tauri/src/view_commands.rs:107,573-633` | 4단계(command 정리 3·4) |
+| 패킷 `CommandListEntry` 가 명부 항목 `RosterEntry` 와 거의 같다(`available` 은 늘 참) | `crates/engram-dashboard-protocol/src/messages.rs:392` · `crates/engram-dashboard-command/src/roster.rs:10` | 3-1(`protocol` 정리) 때 함께 볼 것 |
+| 입구 인자 검사의 순서 함정(`contains` → `check_args` → `call`) — 입구가 둘이 되면 묶음 함수로 | `crates/engram-dashboard-daemon/src/control/commands.rs:172-182` | 입구가 늘 때 |
+| `Clock` 시간 인터페이스가 네 벌(transport · daemon `command_delivery` · discovery · daemon `usage_service`) | 후보 4 표 | 1-1 |
+| tracking 재편 뒤 T-46 이 「사소한 기능·정리」 절에 들어가 있다 — 다른 워크트리(`wt2`)가 tracking 정리 중 | `docs/tracking.md` | 사용자 결정 대기 |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)
