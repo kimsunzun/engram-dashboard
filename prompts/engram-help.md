@@ -5,7 +5,8 @@
 편집 규칙 — 하나라도 어기면 화면이 깨진다:
 
 - 구획은 레벨 2 제목으로 연다(`## <section-id>`). 줄 전체가 그 꼴이어야 하고, id 는 소문자·점·밑줄만 쓴다. 구획은 그 줄 다음 바이트부터 다음 구획 제목 앞 줄까지이고, 공백도 빈 줄도 그대로 실린다. 이 머리글(첫 구획 위)은 버려지고, 여기 제목이 레벨 1 인 것도 그래서다.
-- 구획은 다섯이고 화면과 일대일이다 — `root` · `mail` · `agent` · `window` · `theme`. 하나라도 빠뜨리면 이 파일이 통째로 거부되고 내장 사본이 대신 나간다. 모르는 구획은 무시한다 — 새 파일을 옛 바이너리가 읽는 것은 정상이기 때문이다.
+- 필수 구획은 다섯이고 화면과 일대일이다 — `root` · `mail` · `agent` · `window` · `settings`. 하나라도 빠뜨리면 이 파일이 통째로 거부되고 내장 사본이 대신 나간다. 모르는 구획은 무시한다 — 새 파일을 옛 바이너리가 읽는 것은 정상이기 때문이다.
+- 구획을 더하는 것은 괜찮다. 이름을 바꿀 때는 옛 이름의 구획을 짧게 남긴다 — 빠지면 옛 바이너리가 새 파일을 거부하고 자기 내장 사본(옛 내용)을 낸다. 맨 끝 `theme` 이 그 자리이고, 새 바이너리는 그 구획을 내지 않는다(`help theme` 은 settings 화면이다).
 - 실행파일 이름을 적지 말고 `{tool}` 이라고 쓴다. 렌더 시점에 치환된다 — 손으로 적은 이름은 실행파일이 개명되는 날 낡고, 에이전트는 배운 대로 쳐서 빗나간다.
 - 터미널에 그대로 찍히는 글이다. 마크다운 강조(별표)를 쓰지 않는다 — 별표가 리터럴로 보인다.
 - 문단은 한 줄로 이어 쓴다. 터미널이 알아서 접는다. 줄을 끊어 두는 것은 들여쓴 표와 블록뿐이고, 그건 정렬이 걸려 있어서다.
@@ -14,10 +15,10 @@
 ## root
 {tool} — 이 팀에서 할 수 있는 것.
 
-  {tool} help mail     우편. 팀원에게 보내고 받는다
-  {tool} help agent    에이전트. 만들고 띄우고 재배치한다
-  {tool} help window   창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*)
-  {tool} help theme    테마
+  {tool} help mail      우편. 팀원에게 보내고 받는다
+  {tool} help agent     에이전트. 만들고 띄우고 재배치한다
+  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*)
+  {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*)
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
 ## mail
@@ -133,20 +134,50 @@ slot_id 는 slot.split 이 돌려준 값이거나, 방향 낱말을 풀어서 �
       그 백엔드의 사용량 한도(5시간 · 주간 · 모델별 주간)와 조회 상태. windows 의 행마다 left_pct 가 남은 양이고 null 은 모른다는 뜻이다
   {tool} usage.refresh --backend <Claude|Codex>
       강제로 다시 조회하고 usage.get 과 같은 행을 돌려준다. 호출 간격 제한은 없다 — 직전 조회가 막 끝났어도 다시 조회하고, 잦으면 상류가 거절할 수 있다(그 거절이 state Rejected 가 아니라 Failed 로만 보일 수도 있다). 조회하지 않고 들고 있던 값을 주는(served = Cached) 것은 상류 거절 기한이 남은 동안뿐이다. 거절 중에 값이 들어와 state 가 Ready 로 보여도 그 기한은 남는다. 조회가 실패하거나 5초 안에 안 끝나도 served = Cached 다(그때는 조회가 나갔다)
-## theme
-{tool} theme — 테마는 명령이 아니라 설정 파일이다. 고치는 것은 파일, 반영하는 것은 명령 하나. 그 명령도 대시보드 창이 떠 있어야 부를 수 있다.
+## settings
+{tool} settings — 셸 설정을 읽고 바꾼다. 바꾼 값은 디스크에 남아 재시작을 넘긴다. 대시보드 창이 떠 있지 않으면 이 계열 전부가 UNKNOWN_COMMAND 다.
 
-파일은 `<data_dir>/ui-settings.json` 이다.
+  {tool} settings.get [--key <키|접두>]
+      값을 읽는다. key 를 빼면 전부. 행마다 key · value · is_default(덮어쓴 값이 없어 기본값을 쓰는 중)
+  {tool} settings.set --key <키> --value <값>
+      키 하나에 쓴다. 이미 그 값이면 changed 가 false 다. 기본값과 같은 값을 주면 덮어쓰기가 지워진다
+  {tool} settings.reset --key <키|접두>
+      기본값으로 되돌린다. key 는 뺄 수 없다 — 전체 초기화는 없다
+  {tool} settings.schema [--key <키|접두>]
+      키마다 kind · default · choices · min · max · description. 어떤 키가 있고 무엇을 받는지는 여기서 본다
 
-  {"theme":"dark","windows":{"main":"light"}}
+key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.style.)다. 키는 두 무리다.
 
-theme 은 전체 기본값이고 windows 는 창 label 마다의 덮어쓰기다. 그 label 은 {tool} window.list 가 준다. 값은 dark · light · e-ink 셋뿐이다. 모르는 키는 무시되고, 창 하나의 값이 잘못되면 그 창만 전체 기본값으로 접힌다.
+  theme.default    창별 테마가 없는 창의 테마. dark · light · e-ink 중 하나이고 기본은 dark. 바꾸면 그 창들이 바로 바뀐다
+  chat.style.*     챗 화면의 글자 크기 · 줄 높이 · 여백 11개. 임시 이름이라 챗 화면을 다시 짜면 바뀌거나 없어진다
 
-고친 뒤 부른다.
+값은 언제나 문자열 하나이고 받는 꼴은 kind 가 정한다. 답은 정규형으로 온다(E-INK → e-ink, 15.0PX → 15px).
+
+  choice        선택지 낱말. 대소문자 무시
+  css-length    수 + 그 키가 받는 단위(px · rem · em). 범위는 단위마다 따로다
+  css-number    단위 없는 수
+
+  {tool} settings.set --key theme.default --value light
+  {tool} settings.set --key chat.style.fontSize --value 15px
+  {tool} settings.reset --key chat.style.
+
+모르는 키는 NOT_FOUND, 꼴이나 범위가 틀리면 INVALID_ARGUMENT 이고 그 문구가 받는 꼴을 말한다.
+
+파일은 `<data_dir>/shell/config/settings.json` 이다. 손으로 고치지 않는다 — 쓰는 길은 위 명령뿐이다(실행 중 편집은 다음 시작까지 반영되지 않는다).
+
+창별 테마는 아직 명령이 아니라 파일 `<data_dir>/ui-settings.json` 의 windows 다. 창 label 마다 값을 적고(label 은 {tool} window.list 가 준다) 고친 뒤 부른다. 값은 dark · light · e-ink(소문자 그대로)다.
+
+  {"windows":{"main":"light"}}
 
   {tool} ui.refresh
-      디스크의 설정을 다시 읽어 창마다 적용한다. 적용된 theme 과 그 출처를 돌려준다
+      그 파일을 다시 읽어 창마다 적용한다. 파일은 쓰지 않는다. 답의 theme 은 창별 값이 아니라 theme.default 다
 
-이 명령은 파일을 쓰지 않는다 — 쓰는 것은 부르는 쪽이다. 파일이 없거나 깨져 있어도 오류가 아니라 dark 로 떨어진다.
+그 파일의 theme 키는 읽지 않는다 — 고쳐도 아무 일도 없고, 전체 테마는 settings.set theme.default 로 바꾼다. 창 하나의 값이 잘못됐거나 파일이 없거나 깨져 있으면 그 창은 theme.default 를 쓴다.
 
 data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-dev 이고, 루트가 없으면 그 폴더의 .engram-dev 다.
+## theme
+{tool} theme — 옛 낱말이다. 지금 화면은 {tool} help settings 이고, 그 화면이 없다고 하면 {tool} commands settings.set 이 인자를 준다.
+
+전체 테마는 {tool} settings.set --key theme.default --value <dark|light|e-ink> 로 바꾼다. `<data_dir>/ui-settings.json` 의 theme 키는 읽지 않아 고쳐도 아무 일도 없다.
+
+창별 테마만 아직 그 파일의 windows 에 창 label 마다 적고(dark · light · e-ink, 소문자 그대로) {tool} ui.refresh 를 부른다.

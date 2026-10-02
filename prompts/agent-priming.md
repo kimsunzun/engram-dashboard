@@ -9,7 +9,7 @@
   engram help mail      우편. 보내기 · 회신 · 배달 조회
   engram help agent     에이전트. 만들기 · 띄우기 · 이름 바꾸기 · 다른 것 밑으로 옮기기
   engram help window    창 열기 · 탭 만들기 · 화면 분할 · 그 자리에 에이전트 배치
-  engram help theme     테마. dark · light · e-ink
+  engram help settings  설정(settings.*). 테마(dark · light · e-ink) · 챗 화면 스타일
 
 명령 실행은 `engram <name> --flag 값` 꼴이고, 이름 전부는 `engram commands` 가 안다.
 

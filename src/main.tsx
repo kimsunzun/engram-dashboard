@@ -28,8 +28,9 @@ themeManager.apply("dark");
 // getState().<액션>()으로 UI를 조작할 수 있다. 프로덕션 빌드(import.meta.env.DEV=false)에선 미노출.
 // ★레이아웃(슬롯/뷰)은 여기 없다★ — 백엔드 권위(ADR-0035)라 그 제어 표면은 command 레지스트리다
 // (window.__engramCmd).
-// ★theme 은 이제 반쯤 셸 소유다★ — 부팅값과 `ui.refresh` 는 디스크(`ui-settings.json`)에서 오고
-// (`theme/uiSettings.ts`), 여기 노출한 핸들로 바꾼 값은 저장되지 않아 다음 refresh 가 덮는다.
+// ★theme 의 권위는 셸이다★ — 전역 값은 셸 설정 `theme.default`(ADR-0265)이고, 창별 덮어쓰기만 P3d 전까지
+// `ui-settings.json` + `ui.refresh` 에서 온다(배달 = `theme/uiSettings.ts`). 여기 노출한 핸들로 바꾼 값은 저장되지
+// 않아 셸의 다음 밀기가 덮는다.
 if (import.meta.env.DEV) {
   (window as unknown as { __engram?: unknown }).__engram = {
     theme: useThemeStore,
