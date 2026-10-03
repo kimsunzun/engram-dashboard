@@ -59,6 +59,7 @@ dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI �
 # 파일 로그 초기화(`logging::init_logging_with_file`)와 `mask_secrets` — ADR-0175 결정 1 로 코어에서
 #   잎 crate 로 이사했다. `agent.spawnInto` 의 친 cwd 철자 고르기(`path::normalize_spelling`)도 여기서
 #   온다(ADR-0270 결정 5 — `normalize_cwd` 는 base 로 · 결정 1 — 셸은 agent 를 의존하지 않는다).
+#   락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다.
 engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
 # ★남은 간선은 둘이다★(ADR-0029 — in-proc 에이전트 호스팅은 없다): `agent::commands::COMMAND_SPECS`
 #   (`view_commands.rs` 의 예약 이름 필터) · `agent::commands::llm_creation_refusal`(`layout/apply.rs` 의

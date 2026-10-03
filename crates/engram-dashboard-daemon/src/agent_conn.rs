@@ -12,13 +12,14 @@
 
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::{
     AgentId, OutputEvent, OutputFrame, OutputPayload, OutputSink, SinkError, SinkId,
 };
 use engram_dashboard_agent::usage::UsageVendorKey;
+use engram_dashboard_base::sync;
 use engram_dashboard_protocol::{
     encode_structured_frame, encode_terminal_frame, placeholder_error_frame, AgentCommand,
     AgentEvent, UsageLimitSnapshot,
@@ -210,7 +211,7 @@ impl ConnUsageOutlet {
 
     fn slot(&self) -> std::sync::MutexGuard<'_, Option<Arc<dyn FrameSink>>> {
         // 칸 안의 일은 사본 뜨기·꺼내기뿐이라 poison 뒤에도 칸은 온전하다.
-        self.frames.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.frames)
     }
 }
 

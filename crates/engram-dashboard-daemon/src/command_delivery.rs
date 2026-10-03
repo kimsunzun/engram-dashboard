@@ -61,7 +61,7 @@
 //! 가짜 연결에는 그 훅이 없으므로, 한쪽만 거두면 나머지 한쪽이 프로세스 수명 내내 남는다.
 //! ★「함께」가 서려면 **첫 줄이 패닉하지 않아야** 한다 — 그것을 지는 것은 두 표의 정리용 잠금이다★:
 //! 명부는 [`CommandRoster::detach`] 안의 `lock_for_cleanup`, 상관 표는
-//! [`CommandDeliveries::lock_for_cleanup`] 이 각각 오염된 잠금을 `into_inner` 로 통과한다. 어느 한쪽을
+//! [`CommandDeliveries::lock_for_cleanup`] 이 각각 오염된 잠금을 되찾아(base `sync::lock`) 통과한다. 어느 한쪽을
 //! 패닉하는 잠금으로 되돌리면 그 줄에서 소멸자가 죽어 **뒷줄이 안 돌고**(그 표가 샌다) 되감기 중이면
 //! 이중 패닉이라 프로세스가 abort 한다. ★단 릴리스에는 오염 자체가 없다★ — `panic = "abort"` 라
 //! 이 규율이 실제로 값을 하는 것은 debug·테스트 빌드다(그 범위 = 두 `lock_for_cleanup` 의 doc).
@@ -96,6 +96,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
 use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
     Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
@@ -1005,10 +1006,7 @@ impl CommandDeliveries {
     /// 지키는 것은 debug·테스트 빌드다). 그 사실을 근거로 걷지 말 것: 그 빌드에서 새는 표가 회귀 시험의
     /// 관측을 그대로 망친다.
     fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Seats> {
-        match self.inner.lock() {
-            Ok(table) => table,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        sync::lock(&self.inner)
     }
 }
 

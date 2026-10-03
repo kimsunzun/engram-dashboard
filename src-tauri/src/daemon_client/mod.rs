@@ -34,9 +34,10 @@ pub mod replay_flight;
 pub mod usage_interest;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, DaemonInfo};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
@@ -85,7 +86,7 @@ pub struct SharedUsageInterest(Arc<Mutex<UsageInterest>>);
 
 impl SharedUsageInterest {
     pub fn lock(&self) -> MutexGuard<'_, UsageInterest> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.0)
     }
 }
 

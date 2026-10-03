@@ -9,7 +9,7 @@
 resolver = "2"
 members = [
     "crates/engram-dashboard-protocol",
-    # ADR-0175 결정 1 · ADR-0269: 바닥 기반층 잎 crate(로깅 · PID 판정 · 범용 도우미 text·time·path). 입주 조건 셋(지금 여러
+    # ADR-0175 결정 1 · ADR-0269: 바닥 기반층 잎 crate(로깅 · PID 판정 · 범용 도우미 text·time·path·sync). 입주 조건 셋(지금 여러
     #   곳에서 쓰이거나 복사돼 있을 것 · 도메인 지식 0 · 입주자끼리 무참조)의 정본은 그 crate lib.rs 헤더다.
     "crates/engram-dashboard-base",
     "crates/engram-dashboard-agent",

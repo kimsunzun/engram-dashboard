@@ -51,6 +51,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_base::sync;
+
 pub use crate::fsutil::{read_capped, write_atomic};
 use crate::settings::{SettingsService, THEME_DEFAULT};
 
@@ -765,7 +767,7 @@ impl EffectiveThemes {
     pub fn push_effective_themes(&self, windows: &dyn ThemeWindows) -> Result<LoadedTheme, String> {
         // 락이 중독돼도(보유 중 패닉) 계속 돈다 — 이 락이 지키는 것은 순서뿐이라 뒤에 깨질 상태가 없다.
         // 여기서 unwrap 하면 한 번의 패닉이 이후 모든 밀기를 영구히 막는다.
-        let _order = self.gate.lock().unwrap_or_else(|e| e.into_inner());
+        let _order = sync::lock(&self.gate);
         let global = global_theme(&self.settings);
         let loaded = load_settings(&*self.source);
         let labels = windows.labels();

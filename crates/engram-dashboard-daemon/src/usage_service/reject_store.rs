@@ -10,10 +10,11 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 
 use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::usage::{UsageAccountKey, UsageKey};
+use engram_dashboard_base::sync;
 use serde::{Deserialize, Serialize};
 
 const SCHEMA_VERSION: u32 = 1;
@@ -251,7 +252,7 @@ impl MemRejectStore {
 
     /// 마지막 `save` 가 받은 항목 그대로(접지 않는다). 한 번도 안 불렸으면 빈 표다(심어 둔 값이 아니다).
     pub fn saved(&self) -> Vec<RejectEntry> {
-        lock(&self.last_saved).clone()
+        sync::lock(&self.last_saved).clone()
     }
 }
 
@@ -263,17 +264,13 @@ impl Default for MemRejectStore {
 
 impl RejectStore for MemRejectStore {
     fn load(&self) -> Vec<RejectEntry> {
-        lock(&self.entries).clone()
+        sync::lock(&self.entries).clone()
     }
 
     fn save(&self, entries: &[RejectEntry]) {
-        *lock(&self.entries) = keep_latest_per_key(entries.iter().cloned());
-        *lock(&self.last_saved) = entries.to_vec();
+        *sync::lock(&self.entries) = keep_latest_per_key(entries.iter().cloned());
+        *sync::lock(&self.last_saved) = entries.to_vec();
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
