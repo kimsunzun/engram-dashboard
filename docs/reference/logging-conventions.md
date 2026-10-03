@@ -7,7 +7,7 @@
 ## 인프라 (요약 — 정본은 코드)
 
 - **진입점은 둘이다.** `logging::init_logging()` = stdout 만 · `logging::init_logging_with_file(logs_dir, kind)` = stdout **+ 파일**(`logs_dir` = 로그 폴더 자체 — 호출자가 discovery `DataLayout::logs_dir()` 로 넘긴다). 둘 다 부팅 1회·멱등이고 **먼저 부른 쪽이 이긴다**. 데몬(`crates/engram-dashboard-daemon/src/lib.rs`)과 앱 셸(`src-tauri/src/lib.rs`)은 후자를 쓴다.
-- `set_log_level(level)` 런타임 토글(`EnvFilter` reload).
+- `set_log_level(level)` 런타임 토글(`EnvFilter` reload). ★**base 밖 호출자가 0 이다 — 실행 중에 바꿀 입구는 아직 없다**★(코드 대조 2026-10-03). 인자는 레벨 낱말뿐 아니라 `EnvFilter` 지시문 전체를 받는다(아래 「그룹」).
 - 기본 레벨 **warn**(릴리스 평상시 거의 무출력 = 기본 OFF). `RUST_LOG` 우선. 디버깅 = `RUST_LOG=debug`. **단 릴리스 데몬에는 `RUST_LOG`가 닿지 않는다**(부모 환경 미상속) — 그래서 파일 sink 가 있다.
 - **파일 sink = `<logs_dir>/<종류>-<UTC>-<pid>.log`**(운영 = `<데이터 폴더>/logs/`)(종류 = `daemon` · `app`). **동기 쓰기**(이벤트 한 줄 = write 한 번), ANSI 없음. ★**비동기 writer(`tracing_appender::non_blocking`)를 도입하지 말 것**★ — 데몬은 `std::process::exit`로 끝나 버퍼에 남은 줄, 즉 **기동 실패 직전의 마지막 줄**이 사라진다. (ADR-0138)
 - **로그 폴더는 호출자가 넘긴다** — 데이터 폴더 해석은 `engram-dashboard-discovery`의 몫인데 그 crate가 로깅이 사는 `base`를 의존하므로, 로깅이 그것을 부르면 고리가 된다(잎 crate 불변식 — ADR-0175 결정 1. 옛 근거였던 「코어 격리」 ADR-0003도 그대로 같은 방향이다). 1차 폴더를 못 쓰면 `%TEMP%/engram-dashboard/logs/`로 물러나고, 둘 다 실패하면 파일 sink 없이 뜬다(그 경우의 주인 = 클라이언트 사전 점검, ADR-0135).
@@ -35,6 +35,18 @@
 - **에러 디테일(`: {e}`)은 메시지 끝 보간 허용**(de-facto) — "보간 금지"는 *식별자·수치*(agent·epoch·pid·conn) 한정이고 `{e}`는 예외.
 - **`[component]` 프리픽스**(`[tray]`/`[layout]`)는 **src-tauri 일부 모듈만** 쓰는 관행, crate 전역 규약 아님. 신규 코드는 프리픽스보다 **필드(`module=`)** 권장(통일은 미결).
 - **span/`#[instrument]` 미사용**(현재 0건, flat event). 도입하면 이 문서 갱신.
+
+## 그룹 — 켜고 끄는 단위 (target)
+
+로그는 감싸지 않는다 — 각 crate 가 `tracing` 을 직접 부르고 거르기는 base 가 설치한 `EnvFilter` 가 한다(ADR-0268). 그룹은 그 필터가 보는 **target** 이다.
+
+- **기본 그룹 = 호출 자리의 모듈 경로**(`tracing` 이 자동으로 붙인다). crate · 모듈 단위로 켜고 끄는 데는 할 일이 없다 — `RUST_LOG=engram_dashboard_net=debug` · `RUST_LOG=warn,engram_dashboard_agent::backend::codex=debug`.
+- **모듈 경계와 다른 묶음이 필요할 때만 `target: "<묶음>"` 을 붙인다** — 여러 모듈 · crate 에 흩어진 로그를 하나로 켜야 하거나, 한 모듈 안에서 그 로그만 따로 켜야 할 때. 이유 없이 붙이지 않는다.
+  - ★**target 을 붙이면 그 로그는 모듈 경로 필터에서 빠진다**★ — `engram_dashboard_agent=debug` 로 crate 를 켜도 `target: "agent_stderr"` 줄은 안 켜진다. 붙인 이름으로 따로 켠다(`agent_stderr=debug`).
+  - 이름 = 소문자 snake_case · crate 접두 없이 「무엇의 묶음인지」(예: `agent_stderr` = 에이전트 프로세스 stderr).
+  - 켜고 끄는 단위가 필요하면 필드(`module=` 등)가 아니라 target 을 쓴다 — 필드는 검색 키이고 기본 지시문이 거르는 축이 아니다.
+- **명단을 여기 적지 않는다** — 찾는 법 = `rg 'target:\s*"' -g '*.rs' crates/ src-tauri/`(2026-10-03 기준 `agent_stderr` 하나 — `agent/src/transport/stdio.rs` · codex transport).
+- **아직 없는 것:** 묶음 어휘(카테고리 체계)와 실행 중 바꾸는 입구(LLM 제어 표면)는 로깅 시스템 설계가 정한다(`docs/refactoring/architecture-discussion-2026-09-26.md` 큰 절 A). 그 전까지 새 target 은 위 규칙대로 필요할 때만 늘린다.
 
 ## 계측 의무 (load-bearing 경로 — 무계측은 결함)
 

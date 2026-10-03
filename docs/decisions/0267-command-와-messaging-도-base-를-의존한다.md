@@ -1,7 +1,7 @@
 # ADR-0267: command 와 messaging 도 base 를 의존한다
 
 - 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-09-26 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 2) + 로그 현황 실측 master `a226f63`)
-- 관련: Amends ADR-0155 (결정 2의 워크스페이스 의존 0) · Amends ADR-0110 (결정 2의 워크스페이스 무의존과 영향의 import 0 게이트) · Amends ADR-0175 (영향의 의존 그래프 중 command 와 messaging 이 잎이라는 줄) · ADR-0151(command 의 존재 이유 = 독립적으로 쓸 수 있고 순환을 막는다 — 그대로) · ADR-0268(로그는 base 경유) · ADR-0269(base 범용 도우미) · `crates/engram-dashboard-base/src/lib.rs`(입주 조건 · 게이트) · `.github/workflows/ci.yml`(messaging · command 의존 상한 · messaging 격리 정규식) · step-log S21
+- 관련: Amends ADR-0155 (결정 2의 워크스페이스 의존 0) · Amends ADR-0110 (결정 2의 워크스페이스 무의존과 영향의 import 0 게이트) · Amends ADR-0175 (영향의 의존 그래프 중 command 와 messaging 이 잎이라는 줄) · ADR-0151(command 의 존재 이유 = 독립적으로 쓸 수 있고 순환을 막는다 — 그대로) · ADR-0268(로그는 각 crate 가 `tracing` 을 직접 부른다 — 2026-10-03 재작성) · ADR-0269(base 범용 도우미) · `crates/engram-dashboard-base/src/lib.rs`(입주 조건 · 게이트) · `.github/workflows/ci.yml`(messaging · command 의존 상한 · messaging 격리 정규식) · step-log S21
 
 ## 맥락
 
@@ -14,11 +14,11 @@
 ## 결정
 
 1. **`command` 와 `messaging` 은 base 를 의존할 수 있다**(사용자 2026-09-26). 두 crate 의 워크스페이스 의존 상한은 「자기 자신」에서 「자기 자신 + base」로 바뀐다. base 밖의 워크스페이스 crate 는 여전히 0 이다.
-2. **얻는 것** — 로그를 base 경유로 찍는다(결정 후보 3) · base 의 범용 도우미(결정 후보 4)를 두 crate 도 쓴다. `command` 의 로그 추가는 리팩터링 때 한다.
+2. **얻는 것** — base 의 범용 도우미(결정 후보 4 · ADR-0269)를 두 crate 도 쓴다. ★로그는 base 를 거치지 않는다★ — 결정 후보 3 이 번복돼(ADR-0268 재작성, 사용자 2026-10-03 「로그 감싸지 마」) 로그는 각 crate 가 `tracing` 을 직접 부른다. `command` 의 로그 추가는 리팩터링 때 하고, 그때 `command` 가 `tracing` 을 직접 의존한다.
 
 ## 거부한 대안
 
-- **「워크스페이스 의존 0」을 그대로 지킨다(ADR-0155 결정 2 · ADR-0110 결정 2).** 기각 = 사용자 결정(「당연히 해야지」). 그 성질 아래서는 두 crate 가 로그를 base 경유로 찍을 수 없고(결정 후보 3 과 충돌) 범용 도우미도 못 쓴다.
+- **「워크스페이스 의존 0」을 그대로 지킨다(ADR-0155 결정 2 · ADR-0110 결정 2).** 기각 = 사용자 결정(「당연히 해야지」). 그 성질 아래서는 두 crate 가 범용 도우미를 못 쓴다. ★옛 사유의 앞절 「로그를 base 경유로 찍을 수 없다(결정 후보 3 과 충돌)」은 ADR-0268 재작성(2026-10-03)으로 힘을 잃었다★ — 로그는 base 없이 `tracing` 으로 찍힌다(위 「맥락」이 이미 적은 대로다).
 
 ## 근거
 
