@@ -97,6 +97,7 @@ pub fn write_atomic_unless(
 /// 는 덮는다. 임시 이름 · 실패 때의 정리(`to` 는 그대로) · rename 의 잠김 재시도는 [`replace_with`].
 ///
 /// `from` 열기도 잠김이면 같은 규칙으로 다시 한다. 끝내 못 열면 임시 파일을 만들기 전에 그 오류다.
+// ADR-0274
 pub fn copy_atomic(from: &Path, to: &Path) -> io::Result<()> {
     // `std::fs::copy` 를 쓰지 않는다 — 원본의 권한까지 옮겨(Windows 읽기 전용 속성 · Unix 권한 비트), 읽기 전용
     //   원본이면 사본도 읽기 전용이 되어 `sync_all` 할 쓰기 핸들을 못 연다.
@@ -119,6 +120,7 @@ pub fn copy_atomic(from: &Path, to: &Path) -> io::Result<()> {
 ///
 /// ★이름이 하나뿐이라 앞서 떠 둔 사본을 덮는다★ — Chromium(`Preferences.bad`) · Firefox(`Invalidprefs.js`)와
 /// 같은 관행이다(TRD §10 F21). 사본이 쌓이지 않으므로 크기 상한을 두지 않는다. 로그는 호출자가 낸다.
+// ADR-0274
 pub fn copy_aside(path: &Path) -> io::Result<PathBuf> {
     let to = sibling(path, ".corrupt")?;
     copy_atomic(path, &to)?;
