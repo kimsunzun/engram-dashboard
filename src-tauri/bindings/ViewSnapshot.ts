@@ -9,6 +9,12 @@ import type { SplitRect } from "./SplitRect";
  */
 export type ViewSnapshot = { view_id: string, layout: LayoutNode, focused_slot_id: string | null, 
 /**
+ * 이 판이 모르는 내용(더 새 판이 저장한 슬롯 종류)을 쥔 슬롯 id, 트리 전위 순. 그 슬롯의 `content` 는
+ * `empty` 로 실리지만 비어 있지 않다 — 빈 슬롯 판정(자동 배치·여는 대상 고르기)은 이 목록의 슬롯을 점유로
+ * 본다. 원문은 셸만 쥔다. 그 슬롯에 내용을 놓거나(`empty` 포함) 슬롯을 닫으면 목록에서 빠진다.
+ */
+foreign_slots: Array<string>, 
+/**
  * ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
  * 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
  * ordinal 순으로 담긴다. 정규화 좌표는 이 필드가 아니라 `slot_rects` 가 싣는다(ADR-0227 — ADR-0068 결정 3 개정).

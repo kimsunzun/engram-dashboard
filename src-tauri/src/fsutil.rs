@@ -1,9 +1,11 @@
 //! 셸이 디스크에 두는 파일들의 공용 읽기·쓰기 — 상한 읽기([`read_capped`] · [`read_file_capped`]) · 원자 쓰기
-//! ([`write_atomic`] · [`write_atomic_unless`]) · 원자 복사([`copy_atomic`] · [`copy_aside`]) · 내용 식별값
-//! ([`fnv1a_64`]).
+//! ([`write_atomic`] · [`write_atomic_unless`]) · 원자 복사([`copy_atomic`] · [`copy_aside`]) · 남은 임시 파일
+//! 쓸기([`sweep_temps`]) · 내용 식별값([`fnv1a_64`]).
 //!
-//! 저장소의 파일 이름·위치·형식은 모른다 — 그건 각 저장소(`ui_settings` · `settings::store`)가 소유한다. 여기서
-//! 정하는 이름은 대상 옆에 붙는 둘뿐이다: 임시 `<이름>.tmp<pid>.<번호>` · 떠 둔 사본 `<이름>.corrupt`.
+//! 저장소의 파일 이름·위치·형식은 모른다 — 그건 각 저장소(`ui_settings` · `settings::store` · `state`)가 소유한다.
+//! 여기서 정하는 이름은 대상 옆에 붙는 둘뿐이다: 임시 `<이름>.tmp<pid>.<번호>` · 떠 둔 사본 `<이름>.corrupt`.
+//! ★그 꼴을 만드는 곳([`temp_path`] · [`copy_aside`])과 읽는 곳([`temp_owner`])이 여기뿐이다★ — 꼴을 바꾸면
+//! 셋을 함께 고친다(시험이 만든 이름을 다시 읽어 맞댄다).
 //!
 //! ★잠김 재시도는 한 규칙이다★ — rename · [`read_file_capped`] 의 열기와 읽기 · [`copy_atomic`] 의 원본 열기가
 //! 같은 판정([`is_lock_contention`])과 같은 한도([`RENAME_RETRIES`] · [`RENAME_PAUSE`])를 쓴다. 복사 도중의
@@ -122,7 +124,7 @@ pub fn copy_atomic(from: &Path, to: &Path) -> io::Result<()> {
 /// 같은 관행이다(TRD §10 F21). 사본이 쌓이지 않으므로 크기 상한을 두지 않는다. 로그는 호출자가 낸다.
 // ADR-0274
 pub fn copy_aside(path: &Path) -> io::Result<PathBuf> {
-    let to = sibling(path, ".corrupt")?;
+    let to = sibling(path, ASIDE_SUFFIX)?;
     copy_atomic(path, &to)?;
     Ok(to)
 }
@@ -194,12 +196,80 @@ fn replace_with(
     outcome
 }
 
+const TEMP_MARK: &str = ".tmp";
+const ASIDE_SUFFIX: &str = ".corrupt";
+
 /// `path` 옆의 임시 이름 `<이름>.tmp<pid>.<번호>` — pid 는 같은 폴더를 보는 다른 프로세스와, 번호(프로세스 안에서
 /// 부를 때마다 하나씩 는다)는 같은 프로세스의 다른 호출과 가른다.
 fn temp_path(path: &Path) -> io::Result<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    sibling(path, &format!(".tmp{}.{n}", std::process::id()))
+    sibling(path, &format!("{TEMP_MARK}{}.{n}", std::process::id()))
+}
+
+/// `file_name` 이 `target` 의 임시 이름([`temp_path`] 꼴)이면 그 pid. pid · 번호는 [`temp_path`] 가 적는 십진
+/// 그대로여야 한다(`+` · 앞자리 0 · 범위 밖은 아니다).
+///
+/// ★번호 없는 `<target>.tmp<pid>`(번호를 더하기 전 — P3a 앞 — 의 꼴)는 임시 이름으로 보지 않는다★ — 지금
+/// 쓸기의 대상인 상태 파일은 그 꼴로 쓰인 적이 없어(상태 쓰기는 번호 꼴과 함께 들어왔다) 그런 이름은 우리 것이라
+/// 단정할 수 없고, 남의 것일 수 있는 파일은 지우지 않는다. 옛 꼴로 쓰인 대상을 쓸게 되면 이 규칙부터 다시 본다.
+fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
+    let rest = file_name.strip_prefix(target)?.strip_prefix(TEMP_MARK)?;
+    let (pid, n) = rest.split_once('.')?;
+    exact_decimal::<u64>(n)?;
+    exact_decimal::<u32>(pid)
+}
+
+fn exact_decimal<T: std::str::FromStr + ToString>(digits: &str) -> Option<T> {
+    digits
+        .parse::<T>()
+        .ok()
+        .filter(|value| value.to_string() == digits)
+}
+
+/// `dir` 에서 `targets`(파일 이름) 각각의 남은 임시 파일 — 원자 쓰기의 `<대상>.tmp<pid>.<번호>` 와 떠 두기의
+/// `<대상>.corrupt.tmp<pid>.<번호>` — 중 pid 가 이 프로세스거나 `is_alive` 가 죽었다고 한 것을 지운다.
+///
+/// - 산 남의 pid 것은 남긴다 — 같은 폴더를 쓰는 다른 프로세스가 지금 쓰는 중일 수 있다.
+/// - ★자기 pid 것도 지운다★ — 같은 대상을 쓰는 중인 호출이 이 프로세스에 없을 때만 부른다.
+///
+/// 돌려주는 값 = 지우려 한 파일과 그 결과(그사이 이미 없어졌으면 성공). 폴더가 없으면 빈 목록이다. `Err` = 폴더를
+/// 못 읽었다. 로그는 호출자가 낸다.
+pub fn sweep_temps(
+    dir: &Path,
+    targets: &[&str],
+    is_alive: impl Fn(u32) -> bool,
+) -> io::Result<Vec<(PathBuf, io::Result<()>)>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let me = std::process::id();
+    let mut swept = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let owner = targets.iter().find_map(|target| {
+            temp_owner(name, target)
+                .or_else(|| temp_owner(name, &format!("{target}{ASIDE_SUFFIX}")))
+        });
+        let Some(pid) = owner else {
+            continue;
+        };
+        if pid != me && is_alive(pid) {
+            continue;
+        }
+        let path = entry.path();
+        let removed = match std::fs::remove_file(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            removed => removed,
+        };
+        swept.push((path, removed));
+    }
+    Ok(swept)
 }
 
 /// `path` 와 같은 폴더의 `<path 이름><suffix>`.
@@ -583,6 +653,106 @@ mod tests {
             let name = temp.file_name().unwrap().to_string_lossy().into_owned();
             assert!(name.starts_with(&prefix), "{name}");
         }
+    }
+
+    // ── 임시 이름 해석 · 쓸기 ──
+
+    #[test]
+    fn the_owner_of_a_made_temp_name_reads_back_as_this_process() {
+        for target in ["state.json", "state.json.corrupt"] {
+            let temp = temp_path(&Path::new("dir").join(target)).unwrap();
+            let name = temp.file_name().unwrap().to_str().unwrap();
+            assert_eq!(temp_owner(name, target), Some(std::process::id()), "{name}");
+        }
+    }
+
+    #[test]
+    fn only_the_exact_numbered_shape_is_a_temp_name() {
+        assert_eq!(temp_owner("state.json.tmp12.3", "state.json"), Some(12));
+        assert_eq!(temp_owner("state.json.tmp12.0", "state.json"), Some(12));
+        for name in [
+            "state.json",
+            "state.json.tmpX",
+            "state.json.tmp12",
+            "state.json.tmp12.",
+            "state.json.tmp.3",
+            "state.json.tmp12.3.4",
+            "state.json.tmp12.x",
+            "state.json.tmp+12.3",
+            "state.json.tmp012.3",
+            "state.json.tmp12.03",
+            "state.json.tmp4294967296.3",
+            "xstate.json.tmp12.3",
+            "state.json.corrupt.tmp12.3",
+            "state.crash.json.tmp12.3",
+        ] {
+            assert_eq!(temp_owner(name, "state.json"), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_sweep_removes_own_and_dead_temps_and_keeps_live_and_unrelated_names() {
+        let dir = temp_dir("sweep");
+        let me = std::process::id();
+        let live = me.wrapping_add(1);
+        let dead = me.wrapping_add(2);
+        let gone = [
+            format!("state.json.tmp{me}.0"),
+            format!("state.json.tmp{dead}.7"),
+            format!("state.json.corrupt.tmp{dead}.1"),
+            format!("state.crash.json.tmp{dead}.2"),
+            format!("state.crash.json.corrupt.tmp{me}.3"),
+        ];
+        let kept = [
+            "state.json".to_string(),
+            format!("state.json.tmp{live}.4"),
+            format!("state.json.corrupt.tmp{live}.5"),
+            "state.json.tmpX".to_string(),
+            format!("state.json.tmp{dead}"),
+            format!("other.json.tmp{dead}.6"),
+            format!("state.json.tmp{dead}.6.bak"),
+        ];
+        for name in gone.iter().chain(&kept) {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let asked = std::cell::RefCell::new(Vec::new());
+
+        let swept = sweep_temps(&dir, &["state.json", "state.crash.json"], |pid| {
+            asked.borrow_mut().push(pid);
+            pid == live
+        })
+        .unwrap();
+
+        let mut removed: Vec<String> = swept
+            .iter()
+            .map(|(path, outcome)| {
+                assert!(outcome.is_ok(), "{path:?}: {outcome:?}");
+                path.file_name().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+        removed.sort();
+        let mut expected_gone = gone.to_vec();
+        expected_gone.sort();
+        assert_eq!(removed, expected_gone);
+        let mut expected_kept = kept.to_vec();
+        expected_kept.sort();
+        assert_eq!(names_in(&dir), expected_kept);
+        assert!(
+            !asked.borrow().contains(&me),
+            "자기 pid 는 살았는지 묻지 않고 지운다"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sweeping_a_missing_folder_is_an_empty_sweep() {
+        let dir = temp_dir("sweep-missing");
+        let swept = sweep_temps(&dir.join("none"), &["state.json"], |_| {
+            panic!("지울 후보가 없으면 묻지 않는다")
+        })
+        .unwrap();
+        assert!(swept.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     // ── 원자 복사 · 떠 두기 ──

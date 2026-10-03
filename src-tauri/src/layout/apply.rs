@@ -37,9 +37,7 @@ use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
-use super::manager::{
-    resolve_spawn_slot, CloseTabOutcome, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
-};
+use super::manager::{CloseTabOutcome, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL};
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
 use super::tree::SplitInfo;
 use super::types::{
@@ -622,11 +620,9 @@ pub async fn spawn_into(
                 .map_err(|e| alive_err(e.to_string()))?,
         };
 
-        let view = mgr
-            .views
-            .get(&view_id)
-            .ok_or_else(|| alive_err(format!("view {view_id} 없음")))?;
-        let target_slot = resolve_spawn_slot(view, slot).map_err(|e| alive_err(e.to_string()))?;
+        let target_slot = mgr
+            .resolve_spawn_slot(view_id, slot)
+            .map_err(|e| alive_err(e.to_string()))?;
 
         // 배정(점유 검사는 위 resolve 가 이미 함 — assign 은 빈 슬롯 확정 후에만 닿음).
         mgr.assign_agent(view_id, target_slot, agent_id.clone())

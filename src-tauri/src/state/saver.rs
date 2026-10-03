@@ -746,12 +746,12 @@ mod tests {
                 id,
                 kind: WindowKind::Tree,
                 theme: None,
-                bounds: Bounds {
+                bounds: Some(Bounds {
                     x: 0.0,
                     y: 0.0,
                     w: 800.0,
                     h: 600.0,
-                },
+                }),
                 maximized: false,
             }])
         }

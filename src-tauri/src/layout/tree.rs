@@ -4,7 +4,8 @@
 //! 이 모듈은 `LayoutNode` 만 알고 Tauri/AppState/락 을 모른다 → `#[cfg(test)]` 로 단독 회귀 단언.
 //!
 //! ★불변식★
-//! - assign: 대상 Slot 의 content(SlotContent) 만 교체(트리 구조 불변, ADR-0060).
+//! - 내용 쓰기는 [`set_in_tree`] 하나다 — 대상 Slot 의 content(SlotContent) 만 교체(트리 구조 불변, ADR-0060).
+//!   `ViewManager` 는 그것을 자기 쓰기 문 하나로만 부른다(모르는 내용 곁표 — `manager.rs` 머리).
 
 use uuid::Uuid;
 
@@ -62,8 +63,9 @@ pub fn first_slot_id(node: &LayoutNode) -> Uuid {
     }
 }
 
-// spawn_into 의 slot=None 정책(첫 빈 슬롯 배치, USER DECISION 2b)의 코어 — first_slot_id 가 점유 여부를
-// 안 보는 것과 달리 이건 빈 슬롯만 고른다. // ADR-0059
+// first_slot_id 가 점유 여부를 안 보는 것과 달리 이건 빈 슬롯만 고른다. ★자동 배치에 쓰지 말 것★ — 트리만 봐서
+// 모르는 내용을 쥔 슬롯(메모리에선 `Empty`)을 비었다고 답한다. 자동 배치는 `ViewManager::resolve_spawn_slot` ·
+// `slot_is_free` 를 거친다(TRD S21-storage §6-2). // ADR-0059
 pub fn first_empty_slot_id(node: &LayoutNode) -> Option<Uuid> {
     match node {
         LayoutNode::Slot { id, content } => {
@@ -233,34 +235,7 @@ pub fn close_in_tree(node: &mut LayoutNode, slot_id: Uuid) -> bool {
 }
 
 // slot_id 없으면 no-op(false).
-// ★덮어쓰기 시맨틱 유지(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 resolve_spawn_slot 층).
-pub fn assign_in_tree(node: &mut LayoutNode, slot_id: Uuid, agent: Option<String>) -> bool {
-    match node {
-        LayoutNode::Slot { id, content } => {
-            if *id == slot_id {
-                *content = match agent {
-                    Some(agent_id) => SlotContent::Agent { agent_id },
-                    None => SlotContent::Empty,
-                };
-                true
-            } else {
-                false
-            }
-        }
-        LayoutNode::Split { a, b, .. } => {
-            // a 를 먼저 만지고, 거기서 처리됐으면 b 는 안 봄(전역 고유). agent 소유권 분기 처리.
-            if contains_slot(a, slot_id) {
-                assign_in_tree(a, slot_id, agent)
-            } else {
-                assign_in_tree(b, slot_id, agent)
-            }
-        }
-    }
-}
-
-// assign_in_tree 의 미러이나 Option<String> agent 래핑 없이 SlotContent 를 직접 받는다 —
-// 비-에이전트 콘텐츠(AgentList/PresetPalette)를 슬롯에 배치하는 배치 경로(ADR-0063 set_slot_content).
-// ★덮어쓰기 시맨틱★: 점유 슬롯이어도 무조건 교체(assign_in_tree 와 동형).
+// ★덮어쓰기 시맨틱(ADR-0058)★: 점유 슬롯이어도 무조건 교체(점유 방어는 `ViewManager::resolve_spawn_slot` 층).
 pub fn set_in_tree(node: &mut LayoutNode, slot_id: Uuid, content: SlotContent) -> bool {
     match node {
         LayoutNode::Slot { id, content: c } => {
@@ -521,53 +496,6 @@ mod tests {
         assert_eq!(node, before, "트리 불변");
     }
 
-    // ── assign ───────────────────────────────────────────────────────────────
-
-    #[test]
-    fn assign_sets_agent_ref() {
-        let (mut node, id) = single_slot();
-        assert!(assign_in_tree(&mut node, id, Some("agent-7".into())));
-        assert_eq!(find_slot(&node, id).unwrap().agent_id(), Some("agent-7"));
-    }
-
-    #[test]
-    fn assign_in_split_targets_correct_slot() {
-        let (mut node, id) = single_slot();
-        let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
-        assert!(assign_in_tree(&mut node, new_id, Some("agent-b".into())));
-        assert_eq!(
-            find_slot(&node, new_id).unwrap().agent_id(),
-            Some("agent-b")
-        );
-        assert!(find_slot(&node, id).unwrap().is_empty());
-    }
-
-    #[test]
-    fn assign_can_clear_agent() {
-        let id = Uuid::new_v4();
-        let mut node = agent_slot(id, "agent-x");
-        // ADR-0060: agent=None 은 SlotContent::Empty 로 해제.
-        assert!(assign_in_tree(&mut node, id, None));
-        assert!(find_slot(&node, id).unwrap().is_empty());
-    }
-
-    #[test]
-    fn assign_overwrites_occupied_slot() {
-        // ★ADR-0058 덮어쓰기 시맨틱 유지★: 점유 슬롯에 재배정하면 무조건 교체(점유 방어는 상위 층).
-        let id = Uuid::new_v4();
-        let mut node = agent_slot(id, "old");
-        assert!(assign_in_tree(&mut node, id, Some("new".into())));
-        assert_eq!(find_slot(&node, id).unwrap().agent_id(), Some("new"));
-    }
-
-    #[test]
-    fn assign_missing_slot_is_noop() {
-        let (mut node, _id) = single_slot();
-        let before = node.clone();
-        assert!(!assign_in_tree(&mut node, Uuid::new_v4(), Some("x".into())));
-        assert_eq!(node, before);
-    }
-
     // ── set_in_tree (제네릭 콘텐츠 교체 — ADR-0063 set_slot_content) ─────────────────
 
     #[test]
@@ -747,7 +675,7 @@ mod tests {
     fn first_empty_slot_id_skips_occupied_leftmost() {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
-        assert!(assign_in_tree(&mut node, id, Some("occupied".into())));
+        assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
         assert_eq!(
             first_empty_slot_id(&node),
             Some(new_id),
@@ -759,8 +687,8 @@ mod tests {
     fn first_empty_slot_id_all_occupied_is_none() {
         let (mut node, id) = single_slot();
         let new_id = split_in_tree(&mut node, id, SplitDir::LeftRight).unwrap();
-        assert!(assign_in_tree(&mut node, id, Some("x".into())));
-        assert!(assign_in_tree(&mut node, new_id, Some("y".into())));
+        assert!(set_in_tree(&mut node, id, SlotContent::AgentList));
+        assert!(set_in_tree(&mut node, new_id, SlotContent::PresetPalette));
         assert_eq!(first_empty_slot_id(&node), None, "전부 점유 → None");
     }
 }

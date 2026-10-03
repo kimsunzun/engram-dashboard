@@ -8,8 +8,9 @@
 //! - **그 창만 건너뛴다** — 모르는 `kind` · 못 읽는 창 칸(탭 칸 포함).
 //! - **그 탭만 건너뛴다** — 못 읽는 탭(모르는 노드 종류 · 객체가 아닌 슬롯 내용 등).
 //!
-//! 창의 `theme` 이 모르는 값이면 창은 살리고 그 칸만 `None`(전역 테마)으로 접는다. 건너뛰고 접은 것은
-//! [`DecodeWarning`] 으로 돌려준다 — 로그는 부르는 쪽이 낸다.
+//! 창의 `theme` 이 모르는 값이면 창은 살리고 그 칸만 `None`(전역 테마)으로 접는다. `bounds` 가 없거나 `null` 이면
+//! `None`(자리를 본 적 없는 창)이다 — 경고가 아니다. 건너뛰고 접은 것은 [`DecodeWarning`] 으로 돌려준다 — 로그는
+//! 부르는 쪽이 낸다.
 
 use std::fmt;
 use std::io;
@@ -204,7 +205,10 @@ struct WindowHead {
     id: String,
     #[serde(default)]
     theme: Value,
-    bounds: Bounds,
+    // 없음 · `null` = `None`. 객체가 아니거나 칸이 수가 아니면(유한하지 않은 실수는 `null` 로 나간다) 그 창의 읽기
+    // 실패다 — 이 판의 쓰기는 그런 값을 내지 않는다(`WindowBounds` 가 유한한 값만 쥔다).
+    #[serde(default)]
+    bounds: Option<Bounds>,
     maximized: bool,
 }
 
@@ -403,14 +407,14 @@ mod tests {
                         tabs: vec![first, second],
                     }),
                     theme: Some(UiTheme::Light),
-                    bounds: bounds(),
+                    bounds: Some(bounds()),
                     maximized: true,
                 },
                 WindowEntry {
                     id: "agent-tree".to_string(),
                     kind: WindowKind::Tree,
                     theme: Some(UiTheme::EInk),
-                    bounds: bounds(),
+                    bounds: Some(bounds()),
                     maximized: false,
                 },
                 WindowEntry {
@@ -420,7 +424,7 @@ mod tests {
                         tabs: vec![popout],
                     }),
                     theme: None,
-                    bounds: bounds(),
+                    bounds: Some(bounds()),
                     maximized: false,
                 },
             ],
@@ -615,14 +619,14 @@ mod tests {
     fn an_unreadable_window_is_skipped() {
         let mut no_kind = window("w-0", "tree");
         no_kind.as_object_mut().unwrap().remove("kind");
-        let mut no_bounds = window("w-1", "tree");
-        no_bounds.as_object_mut().unwrap().remove("bounds");
+        let mut no_maximized = window("w-1", "tree");
+        no_maximized.as_object_mut().unwrap().remove("maximized");
         let mut bad_active = tabbed("w-2", "popout", vec![tab_json(json!({ "type": "empty" }))]);
         bad_active["active_tab"] = json!("not-a-uuid");
         let no_tabs = window("w-3", "main");
         let doc = file(vec![
             no_kind,
-            no_bounds,
+            no_maximized,
             bad_active,
             no_tabs,
             json!("not a window"),
@@ -683,6 +687,52 @@ mod tests {
                 raw: "\"sepia\"".to_string(),
             }]
         );
+    }
+
+    #[test]
+    fn missing_or_null_bounds_read_as_no_place() {
+        let mut missing = window("w-0", "tree");
+        missing.as_object_mut().unwrap().remove("bounds");
+        let mut null = window("w-1", "tree");
+        null["bounds"] = Value::Null;
+        // 유한하지 않은 실수는 직렬화에서 `null` 이 된다 — 칸 하나가 `null` 인 자리는 못 읽는 창이다.
+        let mut holed = window("w-2", "tree");
+        holed["bounds"] = json!({ "x": null, "y": 0, "w": 800, "h": 600 });
+        let kept = window("w-3", "tree");
+        let (state, warnings) = decode_value(&file(vec![missing, null, holed, kept]));
+        let places: Vec<(&str, Option<Bounds>)> = state
+            .windows
+            .iter()
+            .map(|w| (w.id.as_str(), w.bounds))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("w-0", None),
+                ("w-1", None),
+                (
+                    "w-3",
+                    Some(Bounds {
+                        x: 0.0,
+                        y: 0.0,
+                        w: 800.0,
+                        h: 600.0
+                    })
+                )
+            ]
+        );
+        assert_eq!(skipped_windows(&warnings), [2]);
+    }
+
+    #[test]
+    fn a_window_without_a_place_writes_null_and_round_trips() {
+        let mut state = full_state();
+        state.windows[0].bounds = None;
+        let doc = json_of(&state);
+        assert_eq!(doc["windows"][0]["bounds"], Value::Null);
+        let (back, warnings) = decode_value(&doc);
+        assert_eq!(warnings, vec![]);
+        assert_eq!(back, state);
     }
 
     // ── 통째로 못 쓰는 파일 ──
@@ -833,7 +883,7 @@ mod tests {
                     tabs: vec![only],
                 }),
                 theme: None,
-                bounds: bounds(),
+                bounds: Some(bounds()),
                 maximized: false,
             }],
         }

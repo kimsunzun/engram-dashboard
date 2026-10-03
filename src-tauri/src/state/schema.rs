@@ -48,7 +48,8 @@ pub struct WindowEntry {
     /// `None` = 전역 테마를 따른다(파일에는 `null`).
     #[serde(serialize_with = "theme_wire")]
     pub theme: Option<UiTheme>,
-    pub bounds: Bounds,
+    /// `None` = 이 창의 보통 자리를 본 적이 없다(파일에는 `null`) — 복원은 기본 자리로 연다.
+    pub bounds: Option<Bounds>,
     pub maximized: bool,
 }
 
