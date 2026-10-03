@@ -2,7 +2,13 @@
 name = "engram-dashboard-base"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 바닥 기반층 — tracing 전역 초기화·파일 로그(logging) · PID liveness·프로세스 시작시각·자식 PID 열거(platform) · 범용 도우미(text · time · path · sync). 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 · ADR-0269 결정 7)."
+description = "Engram Dashboard 바닥 기반층 — tracing 전역 초기화·파일 로그(logging) · PID liveness·프로세스 시작시각·자식 PID 열거(platform) · 범용 도우미(text · time · path · sync) · 시험 대기(testing — test-support 기능 뒤). 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 · ADR-0269 결정 7)."
+
+# ★test-support (ADR-0275 결정 5)★: 시험 도우미 모듈(`testing`)을 연다. 기본 OFF — 소비 crate 는
+#   dev-dependency 에서만 켠다(선례 = `engram-dashboard-command` · `engram-dashboard-transport` 의 같은 이름).
+#   데몬 · 셸 운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다(CLAUDE.md 「빌드·검증 명령」).
+[features]
+test-support = []
 
 # ★워크스페이스 crate 를 여기 적지 않는다★ — 입주 조건 ②(도메인 지식 0)의 실물이 이 빈 자리다.
 #   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).

@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use uuid::Uuid;
 
@@ -25,6 +25,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, ControlEndpoint, InputOrigin,
     NoopControlChannel, ProvisionError, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
 
 #[derive(Clone)]
 struct CountingSink {
@@ -48,17 +49,6 @@ impl StatusSink for CountingSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {
         self.list_updates.fetch_add(1, Ordering::SeqCst);
     }
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
 }
 
 fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>) {

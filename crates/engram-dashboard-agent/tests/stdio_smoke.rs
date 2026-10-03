@@ -21,6 +21,7 @@ use engram_dashboard_agent::types::{
     OutputPayload, OutputSink, SinkError, SinkId, StatusSink,
 };
 use engram_dashboard_agent::usage::{UsageObservation, UsageSource, UsageVendorKey, WindowObs};
+use engram_dashboard_base::testing::wait_until;
 
 // ── RecordingSink: (seq, bytes) 바이트 + 구조화 이벤트 태그 누적 ─────────────────────
 #[derive(Clone)]
@@ -130,17 +131,6 @@ impl StatusSink for RecordingStatusSink {
     fn usage_observed(&self, obs: UsageObservation) {
         self.usage.lock().unwrap().push(obs);
     }
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
 }
 
 fn spec(program: &str, args: &[&str]) -> CommandSpec {

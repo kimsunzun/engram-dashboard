@@ -2322,6 +2322,7 @@ mod real_process {
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
 
+    use engram_dashboard_base::testing::wait_until;
     use engram_dashboard_discovery::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
 
@@ -2401,17 +2402,6 @@ mod real_process {
         None
     }
 
-    fn poll_until(deadline: std::time::Duration, mut pred: impl FnMut() -> bool) -> bool {
-        let end = std::time::Instant::now() + deadline;
-        while std::time::Instant::now() < end {
-            if pred() {
-                return true;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
-        pred()
-    }
-
     fn kill_daemon(child: &mut Child) {
         let _ = child.kill();
         let _ = child.wait();
@@ -2468,7 +2458,7 @@ mod real_process {
 
         // 복원은 3s 조기종료 윈도가 있어 넉넉히 대기한다.
         let mut child_set: Vec<u32> = Vec::new();
-        let appeared = poll_until(std::time::Duration::from_secs(20), || {
+        let appeared = wait_until(std::time::Duration::from_secs(20), || {
             child_set = child_pids(daemon_pid);
             !child_set.is_empty()
         });
@@ -2494,7 +2484,7 @@ mod real_process {
         let _ = daemon.wait();
 
         // 자식 PID 들이 동반 사망하는지 폴링(Job 정리는 즉시는 아닐 수 있어 여유).
-        let all_dead = poll_until(std::time::Duration::from_secs(15), || {
+        let all_dead = wait_until(std::time::Duration::from_secs(15), || {
             live_children
                 .iter()
                 .all(|&(p, ct)| !pid_alive_with_start_time(p, ct))
@@ -2542,7 +2532,7 @@ mod real_process {
         };
 
         let mut daemon_b = spawn_daemon_in(&data_dir);
-        let exited_fast = poll_until(std::time::Duration::from_secs(3), || {
+        let exited_fast = wait_until(std::time::Duration::from_secs(3), || {
             matches!(daemon_b.try_wait(), Ok(Some(_)))
         });
 
@@ -2620,7 +2610,7 @@ mod real_process {
         let mut daemon = spawn_daemon_iso(&ctx);
 
         let mut latest: Option<DaemonInfo> = None;
-        let overwritten = poll_until(std::time::Duration::from_secs(15), || {
+        let overwritten = wait_until(std::time::Duration::from_secs(15), || {
             latest = poll_daemon_json(&data_dir, std::time::Duration::from_millis(100));
             matches!(&latest, Some(i) if i.pid != dead_pid)
         });

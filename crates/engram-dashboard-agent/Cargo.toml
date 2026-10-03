@@ -41,6 +41,8 @@ chrono = { version = "0.4", default-features = false }
 #   기능 요청이 dev 그래프에만 있어 운영 바이너리엔 유니피케이션되지 않는다.
 [dev-dependencies]
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
+# 같은 계열(feature-only 재선언) — 통합 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`).
+engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-support"] }
 
 # 소비자는 셋이다 — `platform::windows` 의 Job Object 래퍼(멤버 명단 · 붙들기 · 가입 알림 포함 — ADR-0262)·스레드 깨우기와
 #   `platform::file_holders` 의 홀더 조회

@@ -642,7 +642,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|platform|text|time|path|sync)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|platform|text|time|path|sync|testing)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -650,6 +650,48 @@ jobs:
             0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
+
+      # ADR-0269 결정 5 · ADR-0275 결정 5: base 의 시험 기능 `test-support`(`testing` 모듈과 그 뒤의 시험 도우미를 연다)는
+      #   소비 crate 의 `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의
+      #   기능은 운영 빌드로 합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다.
+      #   운영 바이너리를 내는 둘(데몬 · 셸)의 정상 · build 그래프를 해석된 그래프로 읽는다(매니페스트 grep 이 아니다).
+      # ★셋째 검사(agent dev 그래프 → 1줄 이상)를 지우지 말 것★: 기능 이름이 바뀌면 0 기대 둘은 매치할 낱말을
+      #   잃고 조용히 통과한다 — 짝이 그 눈먼 통과를 빨갛게 만든다(transport lib.rs 헤더 게이트 ⑤ 와 같은 근거).
+      # ★한계★: 해석된 그래프를 읽을 뿐이라 `--all-targets` 를 한 호출로 짓는 빌드의 기능 합집합은 못 본다
+      #   (daemon `Cargo.toml` 「운영 빌드 주의」 — 배포 바이너리를 그렇게 짓지 않는 것이 규칙이다).
+      - name: 'Gate: base test-support stays out of release graphs (daemon · shell = 0, agent dev >= 1)'
+        shell: bash
+        run: |
+          for pkg in engram-dashboard-daemon engram-dashboard; do
+            set +e
+            tree=$(cargo tree --locked -p "$pkg" -e normal,build,features -i engram-dashboard-base --target all)
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p $pkg exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+            set +e
+            hits=$(printf '%s\n' "$tree" | rg 'feature "test-support"')
+            rgrc=$?
+            set -e
+            case "$rgrc" in
+              1) echo "PASS — $pkg normal graph: 0 matches" ;;
+              0) echo "FAIL — $pkg 운영 그래프에 base test-support 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+              *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+            esac
+          done
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-agent -e normal,dev,features -i engram-dashboard-base --target all)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard-agent exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'engram-dashboard-base feature "test-support"')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "agent dev graph: $n match(es)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 둘이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          echo "PASS"
 
       # ADR-0175 결정 3 이 `replay_flight` 를 코어에서 셸 패키지 안으로 옮기며, 그 파일 헤더가 내세우던
       #   순수성 주장(소켓·tokio·Tauri·protocol 의존 0)이 **어느 게이트의 스캔 범위에도 안 들어가게 됐다**

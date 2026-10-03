@@ -96,6 +96,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputFrame, OutputPayload,
     OutputSink, SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
 
 // ── 질문표 ───────────────────────────────────────────────────────────────────
 
@@ -698,17 +699,6 @@ struct NoopStatusSink;
 impl StatusSink for NoopStatusSink {
     fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
-}
-
-fn wait_until<F: FnMut() -> bool>(timeout: Duration, mut cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
 }
 
 // ── 운영 argv — 이 파일이 적지 않고 백엔드에게 받아 온다 ─────────────────────
