@@ -102,8 +102,9 @@ pub struct SlotPx {
     pub content: RectF64,
 }
 
-/// 창의 마지막 보통(최소화도 최대화도 아닌) 자리 — 논리 좌표. `x`·`y` = 바깥 위치(`outer_position`), `w`·`h` =
-/// 안쪽 크기(`inner_size`) — 복원은 같은 짝으로 놓는다(TRD S21-storage §6-3).
+/// 창의 마지막 보통(최소화도 최대화도 아닌) 자리. `x`·`y` = 물리 픽셀 바깥 위치(`outer_position` 그대로 — 정수
+/// 값), `w`·`h` = 논리 안쪽 크기(`inner_size` 를 그 창의 배율로 나눈 값) — 복원은 같은 짝으로 놓는다(TRD
+/// S21-storage §6-3 · 위치를 논리로 두지 않는 이유 = `state::placement` 머리).
 ///
 /// 네 값은 언제나 유한하고 크기(`w` · `h`)는 0 보다 크다 — [`Self::new`] 만 만든다. 유한하지 않은 실수는 JSON 에
 /// `null` 로 나가고, 크기 0 인 창은 복원해도 보이지 않는다.
@@ -163,30 +164,43 @@ pub struct WindowAttrs {
     pub theme: Option<UiTheme>,
     /// `None` = 이 창의 보통 자리를 아직 못 봤다.
     pub bounds: Option<WindowBounds>,
-    /// 복원은 `bounds` 로 놓은 뒤 최대화한다(사용자 결정 F8).
+    /// 복원은 `bounds` 로 놓은 뒤 최대화한다(사용자 결정 F8). 트리 창은 언제나 `false` 다(`state::tree_attrs` 머리).
     pub maximized: bool,
 }
 
 impl WindowAttrs {
-    /// 게터 한 벌을 적는다 — 바뀌었으면 `true`.
+    /// 게터 한 벌을 적는다 — 바뀌었으면 `true`. `memo` = 이 창의 바로 앞 읽기 기억([`PlacementMemo`]).
     ///
     /// - 최소화 중이면 아무것도 바꾸지 않는다 — 최소화를 풀면 그 앞 상태(최대화 여부 포함)로 돌아가므로, 그 앞
     ///   값이 다음 복원이 세울 상태다.
-    /// - 최대화면 그 표식만 세운다 — `bounds` 는 최대화 전 보통 자리로 남는다(F8).
+    /// - 최대화면 그 표식만 세운다 — `bounds` 는 최대화 전 보통 자리로 남는다(F8). ★단 바로 앞 읽기가 보통으로
+    ///   적은 자리가 지금 읽은 자리와 같으면 그 읽기를 되돌린다★ — 사용자가 최대화하면 tao 가 `Moved` 를 최대화
+    ///   표식이 서기 전에 내서(tao 0.35 `platform_impl/windows/event_loop.rs` — `WM_WINDOWPOSCHANGED` 에서 `Moved`,
+    ///   그 뒤 `WM_SIZE` 가 표식을 세운다) 최대화된 사각형이 보통 자리로 한 번 적힌다. tauri-plugin-window-state 가
+    ///   `Moved` 마다 앞 위치를 `prev_x` · `prev_y` 로 밀어 두고 최대화면 그것으로 놓는 것과 같은 생각이다
+    ///   (tauri-apps/plugins-workspace `3d8a3c877b` 의 `plugins/window-state/src/lib.rs` L492-493 · L213-222).
+    ///   ★「같은 자리」 조건을 빼지 말 것★ — tao 의 `maximize` 는 표식을 먼저 세워 잘못 적힌 읽기가 없으므로, 조건
+    ///   없이 되돌리면 그 앞의 진짜 보통 읽기(부팅 복원이 입힌 크기 등)를 버린다.
     /// - 보통이면 표식을 내리고 `bounds` 를 적는다(`None` 이면 앞 값을 둔다).
-    pub(crate) fn observe(&mut self, seen: WindowPlacement) -> bool {
+    pub(crate) fn observe(&mut self, seen: WindowPlacement, memo: &mut PlacementMemo) -> bool {
         let before = *self;
         let WindowPlacement {
             minimized,
             maximized,
             bounds,
         } = seen;
+        let last = memo.last.take();
         if !minimized {
             self.maximized = maximized;
-            if !maximized {
-                if let Some(bounds) = bounds {
-                    self.bounds = Some(bounds);
+            if maximized {
+                if let (Some((written, prior)), Some(now)) = (last, bounds) {
+                    if written == now {
+                        self.bounds = prior;
+                    }
                 }
+            } else if let Some(bounds) = bounds {
+                memo.last = Some((bounds, self.bounds));
+                self.bounds = Some(bounds);
             }
         }
         *self != before
@@ -198,6 +212,13 @@ impl WindowAttrs {
         self.theme = theme;
         changed
     }
+}
+
+/// 창 하나의 바로 앞 읽기 기억 — 그 읽기가 보통 자리를 적었으면 (적은 자리, 그 앞 자리). 쓰는 곳은
+/// [`WindowAttrs::observe`] 뿐이고 다음 읽기가 늘 지운다. 영속하지 않는다 — 창 항목 · 트리 칸과 같이 산다.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlacementMemo {
+    last: Option<(WindowBounds, Option<WindowBounds>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -216,6 +237,7 @@ pub struct WindowTabs {
     // ADR-0167
     pub window_id: String,
     pub attrs: WindowAttrs,
+    pub(crate) placement_memo: PlacementMemo,
 }
 
 impl WindowTabs {
@@ -228,6 +250,7 @@ impl WindowTabs {
             metrics: None,
             window_id,
             attrs,
+            placement_memo: PlacementMemo::default(),
         }
     }
 
@@ -1048,7 +1071,14 @@ impl ViewManager {
         label: &str,
         seen: WindowPlacement,
     ) -> Result<(), LayoutError> {
-        self.update_attrs(label, |attrs| attrs.observe(seen))
+        let window = self
+            .windows
+            .get_mut(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        if window.attrs.observe(seen, &mut window.placement_memo) {
+            self.attrs_rev += 1;
+        }
+        Ok(())
     }
 
     fn update_attrs(
@@ -2661,6 +2691,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(attrs(&mgr).bounds, Some(bounds(300.0)));
+    }
+
+    fn reading(maximized: bool, x: f64) -> WindowPlacement {
+        WindowPlacement {
+            minimized: false,
+            maximized,
+            bounds: Some(bounds(x)),
+        }
+    }
+
+    #[test]
+    fn a_user_maximize_reported_first_as_a_normal_move_keeps_the_normal_rect() {
+        let mut mgr = ViewManager::new();
+        let state = |m: &ViewManager| {
+            let attrs = m.window_attrs(MAIN_WINDOW_LABEL).unwrap();
+            (attrs.bounds, attrs.maximized)
+        };
+        // 보통 A(80) → 최대화: `Moved` 가 최대화된 사각형(-8)을 표식 없이 → `Resized` 가 같은 사각형을 표식과 함께.
+        for seen in [
+            reading(false, 80.0),
+            reading(false, -8.0),
+            reading(true, -8.0),
+        ] {
+            mgr.observe_window_placement(MAIN_WINDOW_LABEL, seen)
+                .unwrap();
+        }
+        assert_eq!(state(&mgr), (Some(bounds(80.0)), true));
+        // 한 번만 되돌린다.
+        mgr.observe_window_placement(MAIN_WINDOW_LABEL, reading(true, -8.0))
+            .unwrap();
+        assert_eq!(state(&mgr), (Some(bounds(80.0)), true));
+
+        // 최대화 풀기: `Moved` 는 아직 표식이 선 채 → `Resized` 가 표식 없이 A 로.
+        for seen in [reading(true, 80.0), reading(false, 80.0)] {
+            mgr.observe_window_placement(MAIN_WINDOW_LABEL, seen)
+                .unwrap();
+        }
+        assert_eq!(state(&mgr), (Some(bounds(80.0)), false));
+    }
+
+    #[test]
+    fn a_maximize_that_sets_the_flag_first_keeps_the_last_normal_reading() {
+        let mut mgr = ViewManager::new();
+        // 빌더가 만든 자리(20) → 복원이 입힌 자리(80) → tao `maximize`(표식이 먼저 서 잘못 적힌 읽기가 없다).
+        for seen in [
+            reading(false, 20.0),
+            reading(false, 80.0),
+            reading(true, -8.0),
+            reading(true, -8.0),
+        ] {
+            mgr.observe_window_placement(MAIN_WINDOW_LABEL, seen)
+                .unwrap();
+        }
+        let attrs = mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap();
+        assert_eq!((attrs.bounds, attrs.maximized), (Some(bounds(80.0)), true));
+    }
+
+    #[test]
+    fn a_window_whose_first_reading_is_the_maximized_rect_has_no_normal_rect() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        for seen in [reading(false, -8.0), reading(true, -8.0)] {
+            mgr.observe_window_placement("slot-popup-1", seen).unwrap();
+        }
+        let attrs = mgr.window_attrs("slot-popup-1").unwrap();
+        assert_eq!((attrs.bounds, attrs.maximized), (None, true));
     }
 
     #[test]

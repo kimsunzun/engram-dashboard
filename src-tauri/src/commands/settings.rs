@@ -157,6 +157,11 @@ pub fn sweep_dead_window_entries(app: &AppHandle) {
     });
 }
 
+/// 모든 창에 유효 테마를 한 번 민다 — 부팅 단계 ⑧(TRD S21-storage §6-5 · §5-6). 실패는 밀기가 로그로 남긴다.
+pub(crate) fn push_themes(app: &AppHandle, themes: &EffectiveThemes) {
+    let _ = themes.push_effective_themes(&TauriThemeWindows { app });
+}
+
 /// 테마 밀기의 창 쪽 — 살아 있는 웹뷰 명단과 창 하나로의 `emit_to`.
 struct TauriThemeWindows<'a> {
     app: &'a AppHandle,

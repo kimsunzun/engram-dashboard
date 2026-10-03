@@ -90,9 +90,10 @@ pub trait LayoutEvents: Send + Sync {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload);
 }
 
-/// OS 창 호스트 포트. ★셋 다 락 밖에서만 불린다 — 락 안으로 옮기면 그 자리에서 교착이다★.
+/// OS 창 호스트 포트. ★넷 다 락 밖에서만 불린다 — 락 안으로 옮기면 그 자리에서 교착이다★.
 ///
 /// - `open`: 창 빌드가 이벤트 루프·락을 요구한다.
+/// - `record_placement`: 구현이 창 게터(OS 호출)를 부른 뒤 같은 ViewManager 락을 잡아 적는다.
 /// - `close`: 구현이 OS 창을 destroy 하면 그 창의 `Destroyed` 이벤트 처리기가 **같은 ViewManager 락**을
 ///   다시 잡는다(`popout::destroy_window` → `Destroyed` → `cleanup_popup_window` → `state.0.lock()`).
 ///   워커 스레드가 가드를 쥔 채 부르면 destroy 는 이벤트 루프를 기다리고 이벤트 루프는 그 가드를
@@ -119,6 +120,9 @@ pub trait WindowHost: Send + Sync {
     fn open(&self, label: &str) -> Result<(), String>;
     fn close(&self, label: &str);
     fn is_open(&self, label: &str) -> bool;
+    /// `open` 으로 연 창이 모델에 든 뒤 한 번 — 그 창의 첫 자리를 모델에 적는다. 한 번도 끌지 않은 창도 다음
+    /// 부팅에 그 자리로 연다(TRD S21-storage §6-3). 기본 = 아무것도 안 한다.
+    fn record_placement(&self, _label: &str) {}
 }
 
 /// 새 창 label 발급 포트. ★단조★ — 닫힌 label 을 재사용하면 그 label 의 창을 다시 만들 수 없다.
@@ -235,6 +239,7 @@ pub fn create_window(
         subs.resync(&mgr);
         return Err(e);
     }
+    host.record_placement(&label);
 
     tracing::info!(label = %label, "빈 새 창 생성 완료(create_window)");
     Ok(label)
@@ -766,6 +771,9 @@ pub fn move_slot_to_window(
         (src_tabs, tgt_tabs, src_layout)
     }; // ← 락 드롭
 
+    if is_new_window {
+        host.record_placement(&target_label);
+    }
     if let Some(snap) = src_layout {
         events.layout_updated(&snap);
     }

@@ -18,7 +18,7 @@ use super::core::{self, IconState};
 use super::TrayIcons;
 use crate::commands::popout::is_popup_label;
 use crate::daemon_client::DaemonClient;
-use crate::layout::LayoutState;
+use crate::layout::{LayoutState, MAIN_WINDOW_LABEL};
 
 // 트레이 아이콘 id(빌더에 부여, tray_by_id 로 재조회). 단일 트레이라 고정 문자열.
 pub const TRAY_ID: &str = "engram-main-tray";
@@ -69,6 +69,9 @@ pub fn show_main_ui(app: &AppHandle) {
                 return false;
             };
             let _ = w.show();
+            if label == MAIN_WINDOW_LABEL {
+                crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
+            }
             let _ = w.unminimize();
             let _ = w.set_focus();
             true

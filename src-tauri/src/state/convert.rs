@@ -92,6 +92,7 @@ fn tabbed_entry(
         metrics: _,
         window_id,
         attrs,
+        placement_memo: _,
     } = window;
     let tabs = tabs
         .iter()

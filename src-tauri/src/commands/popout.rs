@@ -16,7 +16,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 use uuid::Uuid;
 
 use crate::commands::layout::{RouterSubs, TauriEvents};
@@ -73,7 +76,7 @@ pub(crate) struct TauriWindowHost<'a> {
 
 impl WindowHost for TauriWindowHost<'_> {
     fn open(&self, label: &str) -> Result<(), String> {
-        build_runtime_window(self.app, label)
+        build_runtime_window(self.app, label, None).map(drop)
     }
 
     fn close(&self, label: &str) {
@@ -82,6 +85,12 @@ impl WindowHost for TauriWindowHost<'_> {
 
     fn is_open(&self, label: &str) -> bool {
         self.app.get_webview_window(label).is_some()
+    }
+
+    fn record_placement(&self, label: &str) {
+        if let Some(window) = self.app.get_webview_window(label) {
+            crate::state::placement::record(&window.as_ref().window());
+        }
     }
 }
 
@@ -108,15 +117,25 @@ fn cascade_position(label: &str) -> (f64, f64) {
 
 // WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). config 창과 동일한
 // WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054).
-fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
-    let (x, y) = cascade_position(label);
+//
+// `at` = 빌더에 줄 첫 자리 — `None` 이면 label 순번의 계단 자리 · 기본 크기. 저장된 자리를 정확히 놓는 것은 부르는
+//   쪽(`state::placement`)이 만든 뒤에 한다: tao 는 빌더의 논리 위치를 모니터를 열거 순으로 훑어 처음 들어맞는 것의
+//   배율로 풀어(tao 0.35 `platform_impl/windows/window.rs` `init`), 배율이 다른 모니터가 섞이면 다른 모니터에 뜰 수 있다.
+pub(crate) fn build_runtime_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+) -> Result<WebviewWindow, String> {
+    let ((x, y), (w, h)) = match at {
+        Some((at, size)) => ((at.x, at.y), (size.width, size.height)),
+        None => (cascade_position(label), (720.0, 500.0)),
+    };
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
         .title(format!("Engram — {label}"))
-        .inner_size(720.0, 500.0)
+        .inner_size(w, h)
         .position(x, y)
         .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
         .build()
-        .map(|_| ())
         .map_err(|e| format!("런타임 창 생성 실패: {e}"))
 }
 

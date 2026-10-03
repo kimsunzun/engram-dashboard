@@ -85,11 +85,13 @@ fn acquire_with(
         }
     };
     let start = now();
+    // 한 번이라도 막혔을 때만 「기다려 잡았다」를 적는다 — 두 시각의 차는 거의 늘 0 이 아니다.
+    let mut contended = false;
     loop {
         match file.try_lock() {
             Ok(()) => {
                 let waited = now().saturating_duration_since(start);
-                if !waited.is_zero() {
+                if contended {
                     tracing::info!(
                         module = "state",
                         waited_ms = waited.as_millis() as u64,
@@ -99,6 +101,7 @@ fn acquire_with(
                 return Some(StateLock { file, path });
             }
             Err(TryLockError::WouldBlock) => {
+                contended = true;
                 let waited = now().saturating_duration_since(start);
                 if waited >= wait {
                     tracing::warn!(

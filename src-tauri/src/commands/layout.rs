@@ -164,6 +164,10 @@ impl WindowHost for OwnedWindowHost {
     fn is_open(&self, label: &str) -> bool {
         TauriWindowHost { app: &self.app }.is_open(label)
     }
+
+    fn record_placement(&self, label: &str) {
+        TauriWindowHost { app: &self.app }.record_placement(label);
+    }
 }
 
 struct OwnedSpawner {

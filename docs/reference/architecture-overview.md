@@ -93,7 +93,7 @@ flowchart TD
 | 에이전트 간 메시지(보관함·회신 장부·주소록) | 데몬 메시징 커널 `MessagingService` (S18) | **인메모리** — 데몬 재시작 시 소실(영속화 없음, ADR-0103) |
 | 데몬 발견 정보(포트·토큰) | `daemon.json` — 발견 파일 **겸 단일 인스턴스 잠금 파일**(ADR-0135) | 휘발(매 기동 재발행) · 위치는 릴리스에서 실행 폴더 하위 `engram-data`(ADR-0134/0136) |
 | replay 진도·dedup·gen | **프론트 뷰(viewId)** | Rust 출력 행은 무상태 |
-| 레이아웃(창·탭·슬롯) | 셸 `src-tauri` `layout::ViewManager` | 데몬은 View를 모른다 · **디스크 영속 없음**(인메모리 — 클라 재시작 시 초기화), ADR-0035/0057 |
+| 레이아웃(창·탭·슬롯) | 셸 `src-tauri` `layout::ViewManager` | 데몬은 View를 모른다 · **디스크 영속 = 셸 `shell\state\state.json`**(창 위치·크기·최대화 포함 — 정상 종료 뒤 부팅은 묻지 않고 복원한다 · 정본 = [TRD S21-storage §6](../process/S21-storage/trd.md)), ADR-0035/0057 |
 | 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = P3d 전까지 디스크 `ui-settings.json` (읽기 주인 = 셸) | 셸이 창마다 유효 값(창별 ?? 전역)을 민다 — `theme.default` 쓰기(`settings.set`·`settings.reset`)와 `ui.refresh`(창별 파일을 다시 읽는다)가 밀기를 부른다 · 파일의 `theme` 키는 읽지 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167 |
 | 챗 렌더 스타일(간격·폰트) | 셸 `settings.json` `chat.style.*` | 권위 = 셸 설정 · `chatStyleStore`는 `settings:changed`를 CSS 변수에 칠하는 적용자(저장 안 함), ADR-0265 |
 

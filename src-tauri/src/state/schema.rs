@@ -70,7 +70,8 @@ pub struct TabStrip {
     pub tabs: Vec<TabEntry>,
 }
 
-/// 마지막 보통(최소화도 최대화도 아닌) 위치 · 크기 — 논리 좌표(TRD §6-3).
+/// 마지막 보통(최소화도 최대화도 아닌) 위치 · 크기 — `x` · `y` = 물리 픽셀 바깥 위치, `w` · `h` = 그 창의 배율로
+/// 나눈 논리 안쪽 크기(TRD §6-3).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Bounds {
     pub x: f64,

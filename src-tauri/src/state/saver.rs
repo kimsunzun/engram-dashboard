@@ -36,7 +36,7 @@ pub const MAX_DELAY: Duration = Duration::from_secs(5);
 /// 3초 — §6-5 ①)가 이보다 길어야 한다★ — 짧으면 새 인스턴스가 앞 인스턴스의 정상 종료 쓰기를 기다리지 않는다.
 pub const REPLY_DEADLINE: Duration = Duration::from_secs(2);
 
-/// 스냅숏 원천 — 운영은 `ViewManager` 와 트리 창 칸이다(P3b 가 잇는다). 기록기 스레드에서 불린다.
+/// 스냅숏 원천 — 운영은 `ViewManager` 와 트리 창 칸이다([`super::boot_plugin::LiveSource`]). 기록기 스레드에서 불린다.
 ///
 /// - ★패닉하지 않는다★ — 릴리스는 `panic = "abort"`(워크스페이스 `Cargo.toml`)라 이 스레드의 패닉이 앱을
 ///   통째로 죽인다. 독 든 락은 `PoisonError::into_inner` 로 되살리거나 [`Self::snapshot`] 이 `Err` 를 돌려준다.
@@ -101,7 +101,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// 운영 파일 — 경로는 부르는 쪽이 정한다(배치는 P3b).
+/// 운영 파일 — 경로는 부르는 쪽이 정한다(배치 = [`super::boot_plugin`]).
 pub struct Fs {
     state: PathBuf,
     crash_copy: PathBuf,
@@ -164,6 +164,8 @@ impl SaverHandle {
     ///
     /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager` · 트리 칸)을 쥐지 않는다★ — 쥐면 기록기가 그
     /// 락에서 마감까지 서 있어 답이 `TimedOut` 이 된다.
+    // TODO(P3c1): 복원 답(§6-7)이 부른다 — 그때 이 허용을 걷는다.
+    #[allow(dead_code)]
     pub fn resolve(&self, hash: String, deadline: Duration) -> RequestOutcome {
         match self.send(|reply| Request::Resolve { hash, reply }) {
             Some(answer) => wait(answer, deadline),
