@@ -142,12 +142,7 @@ impl DaemonControlChannel {
     fn gen_token() -> Option<String> {
         let mut buf = [0u8; 32];
         getrandom::getrandom(&mut buf).ok()?;
-        let mut s = String::with_capacity(64);
-        for b in buf {
-            use std::fmt::Write as _;
-            let _ = write!(s, "{b:02x}");
-        }
-        Some(s)
+        Some(engram_dashboard_base::text::hex_lower(&buf))
     }
 }
 

@@ -1056,10 +1056,7 @@ impl OutputCore {
             // ★자르는 위치를 **문자 경계**로 밀어 올린다★: 바이트로 그냥 자르면 멀티바이트 문자를
             //   쪼개 `String` 불변식이 깨지고 `drain` 이 panic 한다 — claude 진단에 한글·이모지가
             //   섞이면 실제로 걸린다.
-            let mut cut = buf.len() - DIAGNOSTIC_CAP_BYTES;
-            while cut < buf.len() && !buf.is_char_boundary(cut) {
-                cut += 1;
-            }
+            let cut = buf.ceil_char_boundary(buf.len() - DIAGNOSTIC_CAP_BYTES);
             buf.drain(..cut);
         }
     }
@@ -1146,6 +1143,20 @@ mod diagnostic_tests {
             tail.contains("No conversation found"),
             "앞에서부터 버리므로 **최신** 줄이 증거로 남아야 한다"
         );
+    }
+
+    /// 자르는 자리가 글자 한가운데면 **다음** 경계로 올라간다 — 상한을 넘기지 않으면서 가장 적게 버린다.
+    ///
+    /// 위 시험은 자르는 자리가 어디 떨어지는지 정하지 않는다. 여기서는 자를 바이트 수를 2 로 박아
+    /// `'가'`(0..3) 의 한가운데에 떨군다: 내려가면(0) 상한을 넘기고, 2 에서 그냥 자르면 `drain` 이 panic 한다.
+    #[test]
+    fn a_cut_inside_a_character_moves_up_to_the_next_boundary() {
+        let core = core();
+        core.push_diagnostic("가");
+        let filler = "a".repeat(DIAGNOSTIC_CAP_BYTES - 3);
+        core.push_diagnostic(&filler);
+        // "가\n" 4 + filler + "\n" = 상한 + 2 → 자를 자리 2.
+        assert_eq!(core.diagnostic_tail(), format!("\n{filler}\n"));
     }
 }
 

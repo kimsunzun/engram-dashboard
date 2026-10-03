@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use engram_dashboard_base::path::normalize_spelling;
 use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode,
 };
@@ -1103,7 +1104,12 @@ fn register(
     name: Option<String>,
     command: AgentCommand,
 ) -> Result<AgentProfile, CommandError> {
-    let cwd = &normalize_cwd(cwd);
+    // ★친 철자를 여기서 고른다★: 이 칸을 채우는 것은 사람·LLM 이고 Windows 경로는 `C:\work\thing` 으로
+    //   친다. 셸에서 온 값은 공백 때문에 `"…"` 로 감싸인 채 그대로 실려 오기도 한다. 둘 다 여기서 안
+    //   흡수하면 「폴더 이름이 통째로 이상한」 에이전트가 명부에 앉고, 그것을 지우는 동사가 없다(ADR-0122).
+    //   철자만 고를 뿐 실재 판정은 여전히 뒤(spawn 의 `dunce::canonicalize`)에 있다. 안이 빈 따옴표 짝을
+    //   안 벗기는 규칙이 앞의 빈 값 검문(`reject_blanks`)을 지킨다.
+    let cwd = &normalize_spelling(cwd);
     let mut profile =
         AgentProfile::new(cwd.to_string(), command, PathBuf::from(cwd), vec![], false);
     profile.display_name = name;
@@ -1127,29 +1133,6 @@ fn register(
         ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
     })
-}
-
-/// 손으로 친 작업 폴더의 **철자만** 고른다 — 감싼 따옴표 한 겹을 벗기고 `\` 를 `/` 로 옮긴다.
-///
-/// ★실재 확인이 아니다★ — 없는 폴더를 고쳐 주지 않고, 상대경로도 그대로 둔다. 실재 판정은 여전히 뒤에
-/// 있다(spawn 의 `dunce::canonicalize`).
-/// ★왜 필요한가★: 이 칸을 채우는 것은 사람·LLM 이고 Windows 경로는 `C:\work\thing` 으로 친다. 셸에서
-/// 온 값은 공백 때문에 `"…"` 로 감싸인 채 그대로 실려 오기도 한다. 둘 다 여기서 안 흡수하면 「폴더 이름이
-/// 통째로 이상한」 에이전트가 명부에 앉고, 그것을 지우는 동사가 없다(ADR-0122).
-/// ★따옴표는 **안이 빈 경우 벗기지 않는다**★ — 벗기면 비어 있지 않던 값이 빈 값이 되어, 이 함수 앞에
-/// 서 있는 빈 값 검문(`reject_blanks`)을 지난 뒤에 폴더가 사라진다.
-/// ★한 겹만 벗긴다★ — 두 겹은 호출자가 실수로 두 번 감쌌다는 뜻이고, 그것까지 조용히 삼키면 어느 쪽이
-/// 진짜 경로인지 우리가 추측하게 된다.
-pub fn normalize_cwd(raw: &str) -> String {
-    let unquoted = match raw.chars().next() {
-        Some(quote @ ('"' | '\'')) => raw
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-            .filter(|inner| !inner.is_empty())
-            .unwrap_or(raw),
-        _ => raw,
-    };
-    unquoted.replace('\\', "/")
 }
 
 fn verb_rename(
@@ -2085,30 +2068,6 @@ mod tests {
             serde_json::to_value(AgentBackend::Codex).expect("직렬화"),
             json!("Codex")
         );
-    }
-
-    #[test]
-    fn normalize_cwd_strips_one_quote_pair_and_turns_backslashes_around() {
-        for (raw, want) in [
-            (r"C:\work\thing", "C:/work/thing"),
-            (r#""C:\work\thing""#, "C:/work/thing"),
-            ("'C:/work/thing'", "C:/work/thing"),
-            ("C:/work/thing", "C:/work/thing"),
-            (r"\\server\share\thing", "//server/share/thing"),
-        ] {
-            assert_eq!(normalize_cwd(raw), want, "{raw}");
-        }
-    }
-
-    /// ★안 벗기는 셋★ — 짝이 안 맞는 따옴표(경로의 일부일 수 있다) · 안이 빈 짝(벗기면 빈 폴더가 된다) ·
-    /// 두 겹(어느 쪽이 진짜인지 우리가 추측하게 된다).
-    #[test]
-    fn normalize_cwd_leaves_quotes_it_cannot_safely_strip() {
-        assert_eq!(normalize_cwd(r#""C:/work/thing"#), r#""C:/work/thing"#);
-        assert_eq!(normalize_cwd(r#"'C:/work/thing""#), r#"'C:/work/thing""#);
-        assert_eq!(normalize_cwd(r#""""#), r#""""#);
-        assert_eq!(normalize_cwd(r#""#), r#""#);
-        assert_eq!(normalize_cwd(r#"""C:/work/thing"""#), r#""C:/work/thing""#);
     }
 
     /// 등록 공통부를 지나는 두 문(`agent.new` · `agent.spawn --cwd`)이 같은 철자를 명부에 앉힌다.

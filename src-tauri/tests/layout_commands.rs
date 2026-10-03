@@ -2118,7 +2118,7 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
 }
 
 /// ★이 문은 `agent.new` 의 등록 공통부를 안 지난다★ — 그래서 같은 철자 규칙을 여기서 따로 잰다.
-/// 백엔드 낱말은 wire enum 의 역직렬화가(`AgentBackendKind`), cwd 는 `normalize_cwd` 가 흡수한다.
+/// 백엔드 낱말은 wire enum 의 역직렬화가(`AgentBackendKind`), cwd 는 base `normalize_spelling` 이 흡수한다.
 #[tokio::test]
 async fn spawn_into_absorbs_the_spelling_a_person_would_type() {
     for (word, want) in [

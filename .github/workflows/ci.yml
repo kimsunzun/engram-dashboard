@@ -632,7 +632,8 @@ jobs:
       # ADR-0175 결정 1 의 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽. ①②와 달리 이 조건에는
       #   기계 검증이 없었다 — ②는 위 상한 게이트가, ①은 사람이 본다.
       # ★왜 지켜야 하나★: 입주자가 서로 엮이면 그건 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든
-      #   소비자에게 딸려 간다 — crate 헤더가 이름 붙인 `bevy_core` 실패의 시작점이 정확히 여기다.
+      #   소비자에게 딸려 간다 — ADR-0151 「거부한 대안」 E 의 `bevy_core` 선례(ADR-0269 「거부한 대안」 1 이
+      #   다시 잰다)가 실패한 시작점이 정확히 여기다.
       # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
       #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
       # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
@@ -641,7 +642,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|platform|text|time|path)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in

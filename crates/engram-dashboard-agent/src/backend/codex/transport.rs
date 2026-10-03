@@ -2426,7 +2426,7 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
 ///
 /// ★`catch_unwind` 가 실제로 사는 값을 부풀리지 말 것 — 「기록이 터져도 안전하다」가 아니다★.
 /// 이 포트 아래의 호출 그래프에는 **우리 코드가 만드는 패닉원이 없다**(해독은 `Result` 로 돌아오고,
-/// `now_millis` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장소는 IO 오류를
+/// base `now_epoch_ms` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장소는 IO 오류를
 /// 자기 안에서 삼킨다). 닿을 수 있는 것은 **poison 가드**(`expect`)들이고 — 레지스트리 맵 락과, 쓰기가
 /// 실제로 일어날 때 그 아래에서 잡히는 저장소 락, 서로 다른 모듈에 하나씩 — 어느 쪽이든 서려면 **먼저
 /// 다른 패닉이 그 락을 오염시켜 놓았어야** 한다. 그러니 이 봉쇄가 사는 것은 딱 하나다:
