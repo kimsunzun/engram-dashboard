@@ -1,7 +1,7 @@
 # ADR-0265: 설정은 셸 settings.json 하나에 두고 범용 명령 넷으로만 쓴다
 
-- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/research/storage-management-survey-2026-10-02.md` 「0. 결정」) + 사용자 결정 U1 · U2 (TRD §14-7) + TRD `docs/process/S21-storage/trd.md` §3-5 · §5 · §11-3 + P2a 구현 코드 리뷰(마무리 중)) · 부분 폐기 by ADR-0269 (결정 4의 손상 사본 규칙) · 부분 폐기 by ADR-0266 (결정 4의 원자적 쓰기 함수 자리)
-- 관련: Amends ADR-0166 (결정 1과 3과 9) · Amends ADR-0167 (결정 3과 6과 7) · Amends ADR-0051 (권위 프론트 전용과 영속 localStorage 조항) · Amends ADR-0169 (결정 1의 ui.refresh 경로와 받아들인 대가와 chatStyleStore 불변식) · ADR-0264(데이터 배치 — `shell\config\` 는 취향) · ADR-0081 결정 3(두 껍데기, 서비스 하나) · ADR-0102(웹뷰 첫 invoke 전 manage) · ADR-0035(프론트 전용 예외 목록) · TRD `docs/process/S21-storage/trd.md` · 조사 `docs/research/storage-management-survey-2026-10-02.md` · `src-tauri/src/settings/` · step-log S21 · Amended by ADR-0269 (결정 4의 손상 사본 규칙) · Amended by ADR-0266 (결정 4의 원자적 쓰기 함수 자리)
+- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/research/storage-management-survey-2026-10-02.md` 「0. 결정」) + 사용자 결정 U1 · U2 (TRD §14-7) + TRD `docs/process/S21-storage/trd.md` §3-5 · §5 · §11-3 + P2a 구현 코드 리뷰(마무리 중)) · 부분 폐기 by ADR-0269 (결정 4의 손상 사본 함수 자리) · 부분 폐기 by ADR-0266 (결정 4의 원자적 쓰기 함수 자리)
+- 관련: Amends ADR-0166 (결정 1과 3과 9) · Amends ADR-0167 (결정 3과 6과 7) · Amends ADR-0051 (권위 프론트 전용과 영속 localStorage 조항) · Amends ADR-0169 (결정 1의 ui.refresh 경로와 받아들인 대가와 chatStyleStore 불변식) · ADR-0264(데이터 배치 — `shell\config\` 는 취향) · ADR-0081 결정 3(두 껍데기, 서비스 하나) · ADR-0102(웹뷰 첫 invoke 전 manage) · ADR-0035(프론트 전용 예외 목록) · TRD `docs/process/S21-storage/trd.md` · 조사 `docs/research/storage-management-survey-2026-10-02.md` · `src-tauri/src/settings/` · step-log S21 · Amended by ADR-0269 (결정 4의 손상 사본 함수 자리) · Amended by ADR-0266 (결정 4의 원자적 쓰기 함수 자리)
 
 ## 맥락
 
