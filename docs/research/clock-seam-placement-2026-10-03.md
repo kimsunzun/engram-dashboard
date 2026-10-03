@@ -1,6 +1,6 @@
 # 시간 seam(`Clock`)을 한 곳에 모으나 — 피어 서베이
 
-- **상태:** medium · 설계-결정 모드 · 2026-10-03 · 적대 리뷰 BLOCK → 결론 정정(아래) · 결정 대기(ADR-0269 결정 3 — 리뷰 F2)
+- **상태:** medium · 설계-결정 모드 · 2026-10-03 · 적대 리뷰 BLOCK → 결론 정정(아래) · 결정: ADR-0269 결정 3(메인 판단 2026-10-03)
 - **방법:** 수집자 1(피어 코드 · `gh api` 원문 + 문서) → 메인 grounding(zed · Materialize · quinn 원문 대조) → cross-family 적대 리뷰 1회.
 - **확신도 범례:** 확실(독립 교차확증) · 가능성 높음(단일 출처 grounding) · 불확실(미검증).
 
@@ -24,7 +24,7 @@ ADR-0269 결정 3 은 「시간은 공용이면 무조건 합친다」(사용자
 | 데몬 `command_delivery` `Clock` | `now()` | zed `Clock` · quanta | base `time` 의 「지금 읽기」로 |
 | discovery `Clock` | `now()` + 막는 `sleep` | Firecracker(부분) | 「지금 읽기」만 base 로 · 막는 sleep 은 discovery 에 남긴다 |
 | transport `Clock` | `now()` + 비동기 `sleep`(tokio) | quinn `Runtime`(런타임 추상) · 나머지 피어는 런타임이 쥔다 | 「지금 읽기」만 base 로 · 비동기 sleep 은 transport 에 남긴다(base 가 tokio 를 끌지 않게) |
-| 데몬 `UsageClock` | `mono()` + `wall()` | zed `Clock`(mono + wall) | 「지금 읽기」(단조) + 벽시계 밀리초(`now_epoch_ms`)로 표현 |
+| 데몬 `UsageClock` | `mono()` + `wall()` | zed `Clock`(mono + wall) | 「지금 읽기」(단조) + 벽시계 밀리초(`now_epoch_ms`)로 표현 — ★ADR-0269 결정 3 은 이것을 지금 합치지 않는다(계약 차이 — 아래 「`UsageClock` 은 같은 계약이 아니다」)★ |
 
 **함의(적대 리뷰 뒤 정정):** 피어 증거는 「어디까지 합치나」의 보편 경계를 세우지 못한다 — 갈라 둔 피어도 묶어 둔 피어도 있다. 「지금 읽기만 base · 기다리기는 쓰는 쪽」은 **피어에서 도출한 결론이 아니라 설계 선택**이고, 그렇게 가려면 아래 넷을 먼저 정해야 한다(적대 리뷰 · 코드 대조):
 

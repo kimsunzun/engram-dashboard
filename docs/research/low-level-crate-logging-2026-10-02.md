@@ -6,7 +6,7 @@
 
 ## 왜 조사했나
 
-ADR-0266(OS 의존 코드 → `platform` crate, 워크스페이스 의존 0)과 ADR-0268(로그는 base 입구로만)이 부딪힌다. `platform` 으로 옮길 `RmSession` 의 `Drop` 이 실패를 경고 로그로 남긴다(`crates/engram-dashboard-agent/src/platform/file_holders.rs` 의 `impl Drop for RmSession` — 「돌려보낼 곳이 없으므로 남기는 것은 로그뿐」). 로그 하나 때문에 `platform` 이 base 전체를 의존하는 것은 말이 안 된다(사용자 2026-10-02). 그리고 base 로 보낼 원자적 쓰기(`src-tauri/src/fsutil.rs`)가 Windows 전용 재시도를 품어 base → platform 을 요구한다 — 둘이 함께면 순환이다.
+ADR-0266(OS 의존 코드 → `platform` crate, 워크스페이스 의존 0)과 ADR-0268 첫 판(`ebfdafc` — 푸시 전 재작성)의 「로그는 base 입구로만」이 부딪힌다. `platform` 으로 옮길 `RmSession` 의 `Drop` 이 실패를 경고 로그로 남긴다(`crates/engram-dashboard-agent/src/platform/file_holders.rs` 의 `impl Drop for RmSession` — 「돌려보낼 곳이 없으므로 남기는 것은 로그뿐」). 로그 하나 때문에 `platform` 이 base 전체를 의존하는 것은 말이 안 된다(사용자 2026-10-02). 그리고 base 로 보낼 원자적 쓰기(`src-tauri/src/fsutil.rs`)가 Windows 전용 재시도를 품어 base → platform 을 요구한다 — 둘이 함께면 순환이다.
 
 ## 발견
 
@@ -36,17 +36,17 @@ base 는 `tracing-subscriber` 기본 기능으로 `try_init()` 한다(`crates/en
 
 ### 5. 매크로로 감싸면 호출 자리 정보가 남는다 (가능성 높음)
 
-`macro_rules!` 재수출·래퍼는 `module_path!()` · `file!()` · `line!()` 이 **호출 자리에서** 전개돼 호출자의 모듈 · 파일 · 줄이 남는다(근거 = `log` 의 `macros.rs` 가 `$crate` 경유 `module_path!()` 를 쓴다 · std `module_path!` 문서). 함수 래퍼는 래퍼 쪽 모듈이 찍힌다(`#[track_caller]` 는 파일 · 줄만 — 표준 의미론, 전용 출처 없음). 이것은 ADR-0268 결정 3(매크로 입구)의 근거이고, 「작은 로그 crate 가 매크로를 재수출」하는 갈래가 호출 자리 필터(`EnvFilter`)를 잃지 않는다는 뜻이다.
+`macro_rules!` 재수출·래퍼는 `module_path!()` · `file!()` · `line!()` 이 **호출 자리에서** 전개돼 호출자의 모듈 · 파일 · 줄이 남는다(근거 = `log` 의 `macros.rs` 가 `$crate` 경유 `module_path!()` 를 쓴다 · std `module_path!` 문서). 함수 래퍼는 래퍼 쪽 모듈이 찍힌다(`#[track_caller]` 는 파일 · 줄만 — 표준 의미론, 전용 출처 없음). 이것은 ADR-0268 첫 판(`ebfdafc` — 푸시 전 재작성)의 결정 3(매크로 입구) 근거이고, 「작은 로그 crate 가 매크로를 재수출」하는 갈래가 호출 자리 필터(`EnvFilter`)를 잃지 않는다는 뜻이다.
 
 ## 우리 제약과의 적합도
 
-제약: ADR-0268(로그는 base 입구로만 — 「나중에 컨트롤이 안 된다」) · ADR-0266(`platform` 워크스페이스 의존 0) · ADR-0269(base 는 OS 를 모르는 범용 도우미) · 사용자 「로그 때문에 base 전체를 끄는 건 말이 안 된다」 · 리뷰 F3(원자적 쓰기의 Windows 재시도).
+제약: ADR-0268 첫 판(`ebfdafc` — 푸시 전 재작성)의 「로그는 base 입구로만」(「나중에 컨트롤이 안 된다」) · ADR-0266(`platform` 워크스페이스 의존 0) · ADR-0269(base 는 OS 를 모르는 범용 도우미) · 사용자 「로그 때문에 base 전체를 끄는 건 말이 안 된다」 · 리뷰 F3(원자적 쓰기의 Windows 재시도).
 
-| 갈래 | 피어 선례 | ADR-0268 | ADR-0266 의존 0 | 원자적 쓰기 순환(F3) |
+| 갈래 | 피어 선례 | ADR-0268 첫 판(`ebfdafc` — 푸시 전 재작성) | ADR-0266 의존 0 | 원자적 쓰기 순환(F3) |
 |---|---|---|---|---|
 | **A. platform 은 로그를 안 찍는다** — 실패는 `Result`, 정리는 명시 `close()/end() -> Result` + 조용한 `Drop`(C-DTOR-FAIL). 로그는 부르는 쪽(agent 등)이 base 로 찍는다 | std · filedescriptor · paths · home(가장 낮은 층의 일반형) · 공식 지침 | 지킨다(platform 에 로그 없음) | 지킨다 | 풀린다 — platform 이 맨 아래, base → platform 허용(base 가 Windows 판정만 platform 에 묻는다) |
-|  ↳ A 의 조건 | | | | 명시 `end()` 가 **성공 · 조기 오류 경로 모두**에서 불려야 한다 — `holders_of` 는 중간 `?` 반환이 여럿이라(`file_holders.rs:63` 부근) 조용한 `Drop` 만으로는 그 경로의 `RmEndSession` 실패가 안 보인다. Restart Manager 는 사용자 세션당 열린 세션 수가 제한된다(MS `RmStartSession` 문서 — 적대 리뷰 인용 · 메인 미대조, 가능성 높음) |
-| **B. 작은 로그 전용 crate** — ADR-0268 의 입구 매크로를 base 에서 떼어 잎 crate 로, base · platform 이 그것만 의존 | rustc_log(불확실) · zed zlog 은 구현 crate 라 다르다 | **깬다(글자대로)** — ADR-0268 은 입구를 **base** 에 두고 `tracing` 직접 의존을 base 만 허용한다. 입구가 한 곳이라는 취지는 지키지만 ADR-0268 개정이 필요하다(적대 리뷰) | 깬다(로그 crate 1개 의존) — 단 그 crate 는 facade 하나뿐 | 풀린다 — 로그 crate 가 맨 아래, platform → 로그, base → platform/로그 |
+|  ↳ A 의 조건 | | | | 명시 `end()` 가 **성공 · 조기 오류 경로 모두**에서 불려야 한다 — `holders_of` 는 세션을 연 뒤(`file_holders.rs:63`) 출구가 넷이라(`return Err` 둘 · 루프 안의 이른 `return Ok` 하나 · 끝의 수렴 실패 `Err`) 조용한 `Drop` 만으로는 그 경로의 `RmEndSession` 실패가 안 보인다. Restart Manager 는 사용자 세션당 열린 세션 수가 제한된다(MS `RmStartSession` 문서 — 적대 리뷰 인용 · 메인 미대조, 가능성 높음) |
+| **B. 작은 로그 전용 crate** — ADR-0268 첫 판의 입구 매크로를 base 에서 떼어 잎 crate 로, base · platform 이 그것만 의존 | rustc_log(불확실) · zed zlog 은 구현 crate 라 다르다 | **깬다(글자대로)** — ADR-0268 첫 판(`ebfdafc` — 푸시 전 재작성)은 입구를 **base** 에 두고 `tracing` 직접 의존을 base 만 허용한다. 입구가 한 곳이라는 취지는 지키지만 그 판의 개정이 필요하다(적대 리뷰) | 깬다(로그 crate 1개 의존) — 단 그 crate 는 facade 하나뿐 | 풀린다 — 로그 crate 가 맨 아래, platform → 로그, base → platform/로그 |
 | **C. platform 만 facade 직접 의존 예외** | 피어 주류(portable-pty · alacritty 등) | 예외 하나(게이트에 이름 박기) | **지킨다** — ADR-0266 은 워크스페이스 crate 의존 0 이고 게이트도 `engram-dashboard` 접두만 센다(적대 리뷰 정정) | 풀린다 — A 와 같은 방향 |
 | (거부) platform → base | — | 지킨다 | 깬다 + base 전체를 끈다 | 순환(base → platform 과 함께 못 산다) |
 
@@ -58,7 +58,7 @@ base 는 `tracing-subscriber` 기본 기능으로 `try_init()` 한다(`crates/en
 ## 적대 리뷰
 
 cross-family(codex · effort high · web_search) 1회 → **FIX**. 반영:
-- 갈래 B 가 ADR-0268 을 「지킨다」는 판정은 틀렸다 — 글자대로는 깬다(개정 필요). 표 정정.
+- 갈래 B 가 ADR-0268 첫 판(`ebfdafc` — 푸시 전 재작성)을 「지킨다」는 판정은 틀렸다 — 글자대로는 깬다(개정 필요). 표 정정.
 - 갈래 C 가 ADR-0266 을 「깬다」는 판정은 틀렸다 — 서드파티 facade 는 워크스페이스 의존 0 을 안 깬다. 표 정정.
 - 갈래 A 는 조기 오류 경로까지 명시 `end()` 가 덮어야 실패가 보인다 — 조건 줄 추가.
 - zed `zlog` 쓰임새 정정(높은 crate 는 운영 의존) · std `File::sync_all` 분류 정정 · `LogTracer` 경로 추가(§4-1) · 훅 거부를 공백으로 강등.

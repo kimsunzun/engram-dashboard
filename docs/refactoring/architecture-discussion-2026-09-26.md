@@ -18,7 +18,7 @@
   - **데몬 중복 방지·발견** — 데몬이 `daemon.json` 에 자기 PID·시작 시각을 적고(`crates/engram-dashboard-daemon/src/lib.rs:698`), 뒤에 온 쪽이 그 둘로 살아 있는 데몬인지 죽고 남은 파일인지 가른다(`crates/engram-dashboard-net/src/portfile.rs:86` · `crates/engram-dashboard-discovery/src/lib.rs:1037`).
   - **codex 세션 id 회수** — 잠금 파일 주인이 살아 있나(`crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs:279`), 에이전트 PID 아래 프로세스 트리, 파일을 연 프로세스 대조.
 - **Windows 밖은 자리채움이다** — PID 가 0 만 아니면 살아 있다고 답한다(`crates/engram-dashboard-base/src/platform.rs:201-228`).
-- **설계 의도 = 어느 crate 든 쓸 수 있는 잎.** 단 지금은 `command`·`messaging` 이 자기 게이트(워크스페이스 의존 0)에 막혀 base 도 못 쓴다 → 아래 후보 2 가 푼다.
+- **설계 의도 = 어느 crate 든 쓸 수 있는 잎.** 단 지금은 `command`·`messaging` 이 자기 게이트(워크스페이스 의존 0)에 막혀 base 도 못 쓴다 → ~~아래 후보 2 가 푼다~~ ★후보 2 철회(사용자 2026-10-03) — 필요해질 때만 연결한다 · ADR-0267★.
 - **agent 에도 `platform` 모듈이 따로 있다** — Job Object 래퍼 · 파일을 연 프로세스 찾기(`file_holders`) · 프로세스 트리(`process_tree`)의 셋이다(`crates/engram-dashboard-agent/src/platform/mod.rs:1-2`). CLAUDE.md 「백엔드 모듈 맵」 agent 항목의 「남은 `platform`은 Job Object 래퍼 하나뿐」은 낡은 서술이다(아래 후보 1 이 착지하면 그 문장째 바뀐다).
 
 ### 결정 후보 1 — OS 의존 코드를 독립 `platform` crate 로 분리
@@ -56,7 +56,7 @@
 | UTF-8 경계 자르기 | 글자를 쪼개지 않고 N 바이트로 자름 | `transport/src/ws.rs:147` · `daemon/src/experiment/record.rs:178` · agent `output_core.rs:716`(앞을 자르는 변형) | 들어간다 · 5줄짜리라 값어치는 작다 |
 | 경로 표기 정리(`normalize_cwd`) | 감싼 따옴표 한 쌍 제거 · `\`→`/`. 파일시스템을 안 봄 | `agent/src/commands.rs:763` → 셸이 가져다 씀 | 들어갈 수 있다 · 계약이 「사람·LLM 이 친 cwd」로 적혀 있어 **범용 이름으로 바꿔서** 옮겨야 한다 |
 | 현재 시각(epoch ms) | 벽시계 밀리초 | agent 안에 세 벌(`profile.rs:20` · `persistence/mod.rs` · `persistence/presets.rs`) | 범용 · agent 안에서 하나로 합치기만 해도 된다 |
-| XML 이스케이프 | `&`·`<`·`>`·따옴표 치환 | `messaging/src/envelope.rs:126,135` | 범용(함수 자체엔 우편 지식 없음) · 소비자 하나. `messaging` 이 base 를 쓰려면 아래 후보 2(게이트 완화)가 먼저다 |
+| XML 이스케이프 | `&`·`<`·`>`·따옴표 치환 | `messaging/src/envelope.rs:126,135` | 범용(함수 자체엔 우편 지식 없음) · 소비자 하나. ~~`messaging` 이 base 를 쓰려면 아래 후보 2(게이트 완화)가 먼저다~~ ★→ 지금 옮기지 않는다 — 후보 2 철회, messaging 은 base 가 필요해질 때만 의존한다(ADR-0267)★ |
 | 바이트 → hex 문자열 | 소문자 hex 인코딩 루프 | daemon 세 곳(`experiment/record.rs:189` · `lib.rs:65` · `control/mod.rs:141`) | 인코딩 루프만 범용 · 토큰 생성기 자체는 공유 금지(ADR-0086) · `sha256_hex` 는 `sha2` 를 끌고 오므로 제외 |
 | 글자 수 자르기(`clip`·`truncate`) | 앞 N 글자만 | agent codex `decoder.rs` · `transport.rs`, daemon 인라인 두 곳 | **안 된다** — agent 쪽은 비밀값 가리기를 거쳐서만 부르도록 테스트가 막는 의도된 비공개다. base 로 빼면 그 문이 뚫린다 |
 | 데이터 폴더 찾기(`default_data_dir`) | `ENGRAM_DATA_DIR` · `.engram-data` · 릴리즈 배치로 폴더 결정 | `discovery/src/lib.rs:84` | **안 된다** — Engram 고유 지식(ADR-0134)이라 discovery 몫 |
@@ -68,6 +68,8 @@
 - **곁 사실:** `transport` crate 는 아직 소비자가 0 이다(자기 테스트만 쓴다 — 매니페스트·소스 대조).
 
 ### 결정 후보 4 — base 에 범용 헬퍼 네 모듈을 들인다
+
+**정정(2026-10-03) — 아래 원안은 기록으로 남긴다:** ① 원자적 쓰기(`write_atomic`)는 base `file` 이 아니라 platform 으로 간다(ADR-0266 결정 8 — Windows 전용 rename 재시도를 품는다) ② `Clock` 은 「같은 모양」이 아니다 — 네 벌의 모양이 다르고, 합치는 모양은 ADR-0269 결정 3 이다(지금 읽기만 base · 기다리기는 쓰는 쪽 자기 트레이트 · `UsageClock` 은 보류 — 1-1 때 깔끔히 맞으면 합치고 안 맞으면 그때 사용자에게 묻는다, 사용자 2026-10-03) ③ 락 오염 복구 줄의 「(후보 3 과 같은 결)」이 가리키는 후보 3 은 번복됐다(ADR-0268 — 감싸지 않는다). 그 경고 로그는 `tracing::warn!` 을 직접 부른다(ADR-0269 결정 4) ④ messaging 의 XML 이스케이프와 command 하네스(`testing.rs`)의 락 오염 복구 3곳은 옮기지 않는다 — 후보 2 철회(ADR-0267 · ADR-0269 영향).
 
 **상태: 입주 확정(사용자 2026-09-26 — 「파일 텍스트 시간 경로 등 다 옮겨. 딱 적당하네」) · 제공 방식은 메인 제안 · ADR-0269.**
 
@@ -95,6 +97,8 @@
 - **나중(사용자 2026-09-26):** 새 범용 헬퍼가 생기면 메인 세션이 알아서 base 로 옮기도록 CLAUDE.md(또는 다른 자리)의 아키텍처 서술을 갱신해 유도한다.
 
 ### 결정 후보 2 — `command`·`messaging` 도 base 를 쓴다
+
+**철회(사용자 2026-10-03 — 「필요할 때만 연결하면 되지」) → ADR-0267 재작성: 지금은 워크스페이스 의존 0 을 유지하고, base 도우미가 실제로 필요해질 때 그 변경이 필요를 적고 연결한다. 아래 원안은 기록으로 남긴다.**
 
 **상태: 방향 확정(사용자 2026-09-26 — 「커맨드·메시지는 로깅 안 함? 당연히 해야지」) · ADR-0267.**
 
@@ -273,11 +277,11 @@
 
 **원칙:** 아래에서 위로(바닥을 먼저) · 단계마다 빌드 초록 · 넓게 건드리는 작업은 혼자 · transport 는 맨 뒤 별도 단계.
 
-- **0. ADR** — 후보 1~9 박제 → ADR-0266~0273 작성(2026-10-02 · 후보 7 은 transport TRD 때로 미룸). 뒤집히는 것: ADR-0175 결정 1(platform 독립 crate 거부 · 입주 조건 ①) · ADR-0218 결정 11 · ADR-0155/0110 「워크스페이스 의존 0」 · ADR-0219 두 입구 서술 · ADR-0024 데이터 위치 공유 + T-10 종결 · ADR-0155 결정 3(봉투를 `protocol` 에 싣기).
+- **0. ADR** — 후보 1~9 박제 → ADR-0266~0273 작성(2026-10-02 · 후보 7 은 transport TRD 때로 미룸). 뒤집히는 것: ADR-0175 결정 1(platform 독립 crate 거부 · 입주 조건 ①) · ADR-0218 결정 11 · ~~ADR-0155/0110 「워크스페이스 의존 0」~~(후보 2 철회로 뒤집지 않는다 · ADR-0267 재작성 2026-10-03) · ADR-0219 두 입구 서술 · ADR-0024 데이터 위치 공유 + T-10 종결 · ADR-0155 결정 3(봉투를 `protocol` 에 싣기).
 - **1. 바닥**
-  - 1-1 base 공용 함수 + 교체(후보 4) · command·messaging 게이트 완화(후보 2) — ★원자적 쓰기는 여기서 빠진다★(Windows 전용 rename 재시도를 품어 platform 으로 간다 → 1-3 · 메인 판단 2026-10-03 · ADR-0266/0269). 손상 사본 치우기는 1-1 그대로.
+  - 1-1 base 공용 함수 + 교체(후보 4) — ~~command·messaging 게이트 완화(후보 2)~~ 빠졌다(후보 2 철회 — 필요해질 때만 연결한다 · 사용자 2026-10-03 · ADR-0267) · ★원자적 쓰기는 여기서 빠진다★(Windows 전용 rename 재시도를 품어 platform 으로 간다 → 1-3 · 메인 판단 2026-10-03 · ADR-0266/0269). 손상 사본 치우기 통일은 1-1 그대로 — ★단 storage P3 착지 뒤★(아래 진행 방식). 나머지(text · time · path · sync · testing)는 먼저 간다.
   - 1-2 → 비워 둔다(옛 로그 전환 — 사이드 작업으로 뺐다가 2026-10-03 에 없어졌다 · ADR-0268. 옛 기록이 1-2 를 가리킨다).
-  - 1-3 platform crate(후보 1) — Job Object 를 「프로세스 그룹」 핸들로 · 원자적 쓰기 여러 벌의 동작을 하나로 정해 옮김 · **kill 인과 불변식이 걸려 full QA**.
+  - 1-3 platform crate(후보 1) — Job Object 를 「프로세스 그룹」 핸들로 · 원자적 쓰기 여러 벌의 동작을 하나로 정해 옮김(★storage P3 착지 뒤 — 나머지 platform 이전은 먼저 간다★) · **kill 인과 불변식이 걸려 full QA**.
 - **2. 클라·데몬 떼기**
   - 2-1 셸 → agent 끊기(후보 5) — 선행 1-1 · **① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수** · ③ 등록 거절 메시지 박스 · GUI 실측.
   - 2-2 discovery 나누기(후보 6, 정지 명령 클라이언트 제외) — 선행 1-3 · 데몬 기동 실측.
@@ -294,6 +298,8 @@
 - **핸드오프마다 origin 업데이트를 받아 작업 브랜치에 병합**한다.
 - **커밋 뒤 다른 워크트리 동기화는 사용자가 전달**한다(세션이 다른 워크트리를 건드리지 않는다).
 - **작업하며 코드베이스를 훑다 보이는 리팩터링 관련 사항은 그때그때 아래 11절에 적립한다**(사용자 2026-10-02 — 「지나가면서 계속 메모해 놔」). 묻지 않고 적고, 결정이 필요한 것만 묶어 올린다.
+- **1단계는 TRD 로 시작한다**(사용자 2026-10-03) — 착수 = 다음 세션. 구현 갈림길(하나로 합칠 원자적 쓰기 동작 · 시계 트레이트 세부 등)은 선택지로 사용자에게 올린다.
+- **파일 도우미 통일은 storage P3 가 master 에 착지한 뒤에 한다**(사용자 2026-10-03 「알아서」 → 메인이 권고안 적용) — 원자적 쓰기 `write_atomic`(→ platform · 1-3)과 손상 사본 치우기 `set_aside_corrupt` 통일(1-1)이 해당한다. 사유 = 다른 워크트리(wt1)의 storage P3(셸 화면 상태 `shell\state\state.json` · `../process/S21-storage/trd.md`)가 셸 `src-tauri/src/fsutil.rs` · 설정 저장소(`src-tauri/src/settings/`) 자리에 파일 쓰기 코드를 더한다. 1단계의 나머지(text · time · path · sync · testing 도우미 · `write_atomic` 을 뺀 platform 이전)는 먼저 간다.
 
 ---
 
@@ -313,7 +319,7 @@
 | 패킷 `CommandListEntry` 가 명부 항목 `RosterEntry` 와 거의 같다(`available` 은 늘 참) | `crates/engram-dashboard-protocol/src/messages.rs:392` · `crates/engram-dashboard-command/src/roster.rs:10` | 3-1(`protocol` 정리) 때 함께 볼 것 |
 | 입구 인자 검사의 순서 함정(`contains` → `check_args` → `call`) — 입구가 둘이 되면 묶음 함수로 | `crates/engram-dashboard-daemon/src/control/commands.rs:172-182` | 입구가 늘 때 |
 | `Clock` 시간 인터페이스가 네 벌(transport · daemon `command_delivery` · discovery · daemon `usage_service`) | 후보 4 표 | 1-1 |
-| ★**후보 6 과 부딪힐 수 있다 — 2-2 착수 전에 사용자와 다시 본다**★: master 의 저장 구조 개편(ADR-0264, 2026-10-02)이 데이터 루트를 컴포넌트별(`daemon\{state,run}` · `shell\{config,state}` · `webview\` · `logs\`)로 나누고 그 경로의 **단일 출처 `DataLayout` 을 discovery 에 새로 두었다**. 후보 6(「discovery 를 뽀개 경로 규칙은 데몬으로, 셸은 각자」)과 「셸·데몬 경로를 한 곳에서 계산」이 갈린다 | `crates/engram-dashboard-discovery/src/layout.rs` · ADR-0264 | 2-2 전 사용자 결정 |
+| ~~★**후보 6 과 부딪힐 수 있다 — 2-2 착수 전에 사용자와 다시 본다**★~~ **→ 풀림: 사용자 2026-10-02 — `DataLayout` 도 쪼갠다 → ADR-0271 결정 4.** 원 서술: master 의 저장 구조 개편(ADR-0264, 2026-10-02)이 데이터 루트를 컴포넌트별(`daemon\{state,run}` · `shell\{config,state}` · `webview\` · `logs\`)로 나누고 그 경로의 **단일 출처 `DataLayout` 을 discovery 에 새로 두었다**. 후보 6(「discovery 를 뽀개 경로 규칙은 데몬으로, 셸은 각자」)과 「셸·데몬 경로를 한 곳에서 계산」이 갈린다 | `crates/engram-dashboard-discovery/src/layout.rs` · ADR-0264 | ~~2-2 전 사용자 결정~~ 풀림(ADR-0271 결정 4) |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)

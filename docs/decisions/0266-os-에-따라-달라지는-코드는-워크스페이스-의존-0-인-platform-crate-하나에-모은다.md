@@ -1,7 +1,7 @@
 # ADR-0266: OS 에 따라 달라지는 코드는 워크스페이스 의존 0 인 platform crate 하나에 모은다
 
-- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-09-26 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 1) + 인터페이스 모양 · 「프로세스 그룹」 핸들 · 게이트 꼴은 메인 판단(사용자 위임) + 사용자 결정 2026-10-03 (platform 의 `tracing` 직접 의존 — 결정 9) + 원자적 쓰기 거처는 메인 판단 2026-10-03 (결정 8) + 현황 실측 master `a226f63` · 재실측 `d5ac725`)
-- 관련: Amends ADR-0175 (결정 1의 PID 헬퍼 거처와 결정 2의 Job Object 래퍼 거처와 거부한 대안 첫 항목 중 platform 쪽) · Amends ADR-0218 (결정 11의 플랫폼 질의 거처) · Amends ADR-0230 (결정 1의 OS 분기 자리를 crate 하나로 좁힘) · ADR-0262(`ProcessGroup` 중립 손잡이 · `platform/windows.rs` 잎 — 통째로 옮길 대상) · ADR-0151(crate 판정 기준) · ADR-0175 결정 6(lib 무게) · ADR-0004(백엔드 지식 격리) · ADR-0001(kill 인과) · ADR-0269(base 의 셋째 입주자 되열 조건에 답한다 · 원자적 쓰기는 base `file` 에서 빠져 여기로 — 결정 8) · ADR-0268(로그는 각 crate 가 `tracing` 을 직접 부른다 — 결정 9) · `src-tauri/src/fsutil.rs`(`write_atomic`) · `crates/engram-dashboard-base/src/platform.rs` · `crates/engram-dashboard-agent/src/platform/` · `crates/engram-dashboard-discovery/src/lib.rs`(`wmi_spawn` · `wmi_create_raw`) · `docs/refactoring/architecture-discussion-2026-09-26.md` §1 · step-log S21
+- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-09-26 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 1) + 인터페이스 모양 · 「프로세스 그룹」 핸들 · 게이트 꼴은 메인 판단(사용자 위임) + 사용자 결정 2026-10-02 (로그 때문에 base 를 끌지 않는다 — 「거부한 대안」 둘째 항목) + 사용자 결정 2026-10-03 (platform 의 `tracing` 직접 의존 — 결정 9) + 원자적 쓰기 거처는 메인 판단 2026-10-03 (결정 8) + 현황 실측 master `a226f63` · 재실측 `d5ac725`)
+- 관련: Amends ADR-0175 (결정 1의 PID 헬퍼 거처와 결정 2의 Job Object 래퍼 거처와 거부한 대안 첫 항목 중 platform 쪽) · Amends ADR-0218 (결정 11의 플랫폼 질의 거처) · Amends ADR-0230 (결정 1의 OS 분기 자리를 crate 하나로 좁힘) · ADR-0262(`ProcessGroup` 중립 손잡이 · `platform/windows.rs` 잎 — 통째로 옮길 대상) · ADR-0151(crate 판정 기준) · ADR-0175 결정 6(lib 무게) · ADR-0004(백엔드 지식 격리) · ADR-0001(kill 인과) · ADR-0269(base 의 셋째 입주자 되열 조건에 답한다 · 원자적 쓰기는 base `file` 에서 빠져 여기로 — 결정 8) · ADR-0268(로그는 각 crate 가 `tracing` 을 직접 부른다 — 결정 9) · `src-tauri/src/fsutil.rs`(`write_atomic`) · `crates/engram-dashboard-base/src/platform.rs` · `crates/engram-dashboard-agent/src/platform/` · `crates/engram-dashboard-discovery/src/lib.rs`(`wmi_spawn` · `wmi_create_raw`) · `docs/refactoring/architecture-discussion-2026-09-26.md` §1 · step-log S21 · Amends ADR-0265 (결정 4의 원자적 쓰기 함수 자리)
 
 ## 맥락
 
@@ -37,13 +37,14 @@ PTY 자체는 `portable-pty` 가 이미 감춘다.
 ## 거부한 대안
 
 - **소비자 수로 거처를 정한다(현행 — ADR-0175 결정 2 · ADR-0218 결정 11).** 기각 = 사용자 결정(「애초에 초반부터 잡고 갔어야 됐어」 · 「플랫폼적인 건 다 감추고」). 현황은 OS 코드가 여러 crate 에 갈려 있고 부르는 쪽에 `#[cfg(windows)]` 핸들이 샌 모양이다(위 「맥락」 표 — 코드). ★ADR-0175 가 이 대안의 반대편(platform 독립 crate)을 기각할 때 든 근거도 사용자 판단이었다(그 ADR 자평: 약함)★ — 이번 결정은 같은 축의 사용자 판단을 뒤집은 것이다.
-- **platform 이 로그를 찍으려고 base 를 의존한다.** 기각 = 사용자 결정(2026-10-03 — 「로그 때문에 Base 전체를 그렇게 포함시키는게 말이 안 됨」). 로그는 facade(`tracing`) 하나로 찍힌다(결정 9 · ADR-0268).
-- **platform 은 로그를 안 찍는다 — 실패는 결과값으로, 정리는 명시 `end() -> Result` + 조용한 `Drop`**(Rust API Guidelines C-DTOR-FAIL · std · wezterm `filedescriptor` 같은 가장 낮은 핸들 층의 형 — `docs/research/low-level-crate-logging-2026-10-02.md` 갈래 A). 기각 = 사용자 결정(2026-10-03 — 「로그 감싸지 마」로 facade 직접 의존이 열려 결정 9 가 섰다) + 그 형의 대가: `holders_of` 처럼 중간 `?` 반환이 여럿인 함수는 모든 경로에서 `end()` 를 불러야 실패가 보인다(코드 — `file_holders.rs` 의 `holders_of`). 한 층 위 OS 래퍼(portable-pty · alacritty · cargo `FileLock`)는 facade 로 찍는다(같은 보고서 §1 · §3).
+- **platform 이 로그를 찍으려고 base 를 의존한다.** 기각 = 사용자 결정(2026-10-02 — 「로그 때문에 Base 전체를 그렇게 포함시키는게 말이 안 됨」). 로그는 facade(`tracing`) 하나로 찍힌다(결정 9 · ADR-0268).
+- **platform 은 로그를 안 찍는다 — 실패는 결과값으로, 정리는 명시 `end() -> Result` + 조용한 `Drop`**(Rust API Guidelines C-DTOR-FAIL · std · wezterm `filedescriptor` 같은 가장 낮은 핸들 층의 형 — `docs/research/low-level-crate-logging-2026-10-02.md` 갈래 A). 기각 = 사용자 결정(2026-10-03 — 「로그 감싸지 마」로 facade 직접 의존이 열려 결정 9 가 섰다) + 그 형의 대가: `holders_of` 처럼 세션을 연 뒤 출구가 여럿인 함수(`return Err` 둘 · 루프 안의 이른 `return Ok` 하나 · 끝의 수렴 실패 `Err` — 넷)는 모든 경로에서 `end()` 를 불러야 실패가 보인다(코드 — `file_holders.rs` 의 `holders_of`). 한 층 위 OS 래퍼(portable-pty · alacritty · cargo `FileLock`)는 facade 로 찍는다(같은 보고서 §1 · §3).
 - **트레이트 객체로 OS 를 고른다(런타임 분기).** 기각 = OS 는 실행 중에 안 바뀌어 런타임 분기가 얻는 게 없다(메인 판단). **기각 근거 자평: 약함**(서술).
 
 ## 근거
 
 - **사용자 결정 2026-09-26** — 위 「맥락」 인용 셋. logging 잔류도 같은 날(「base 의 역할 = 어디서든 쓰는 잎」).
+- **사용자 결정 2026-10-02** — 「로그 때문에 Base 전체를 그렇게 포함시키는게 말이 안 됨」(「거부한 대안」 둘째 항목).
 - **사용자 결정 2026-10-03** — platform 의 `tracing` 직접 의존(결정 9). 근거 조사 = `docs/research/low-level-crate-logging-2026-10-02.md`(낮은 crate 가 facade 를 직접 의존하는 피어 관행 · 서드파티 facade 는 워크스페이스 의존 0 을 깨지 않는다 — 그 보고서 「우리 제약과의 적합도」 갈래 C).
 - **현황 실측(master `a226f63`)** — 「맥락」 표. 셸(`src-tauri/src`)에는 그 시점 OS 분기가 없었다.
 - ★**재실측(2026-10-02 · `d5ac725`) — 위 표보다 넓다**★(`rg -l 'cfg!?\(windows\)|cfg\(not\(windows\)\)' crates src-tauri/src` 뒤 각 파일의 `#[cfg(test)]` 시작 줄로 운영 분기와 테스트 분기를 갈랐다):

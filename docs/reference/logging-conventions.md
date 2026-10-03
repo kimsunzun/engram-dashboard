@@ -44,8 +44,9 @@
 - **모듈 경계와 다른 묶음이 필요할 때만 `target: "<묶음>"` 을 붙인다** — 여러 모듈 · crate 에 흩어진 로그를 하나로 켜야 하거나, 한 모듈 안에서 그 로그만 따로 켜야 할 때. 이유 없이 붙이지 않는다.
   - ★**target 을 붙이면 그 로그는 모듈 경로 필터에서 빠진다**★ — `engram_dashboard_agent=debug` 로 crate 를 켜도 `target: "agent_stderr"` 줄은 안 켜진다. 붙인 이름으로 따로 켠다(`agent_stderr=debug`).
   - 이름 = 소문자 snake_case · crate 접두 없이 「무엇의 묶음인지」(예: `agent_stderr` = 에이전트 프로세스 stderr).
-  - 켜고 끄는 단위가 필요하면 필드(`module=` 등)가 아니라 target 을 쓴다 — 필드는 검색 키이고 기본 지시문이 거르는 축이 아니다.
-- **명단을 여기 적지 않는다** — 찾는 법 = `rg 'target:\s*"' -g '*.rs' crates/ src-tauri/`(2026-10-03 기준 `agent_stderr` 하나 — `agent/src/transport/stdio.rs` · codex transport).
+  - ★**그룹 이름끼리 접두가 되지 않게 한다**★ — `EnvFilter` 는 target 을 문자열 접두로 맞춘다(tracing-subscriber 0.3 `filter/env/directive.rs` — `starts_with`). `mail=debug` 는 `mail_retry` 도 켠다.
+  - 켜고 끄는 단위로는 필드(`module=` 등)가 아니라 target 을 쓴다. 이름만 쓴 필드 지시문(`[{field}]`)도 그 필드를 단 사건을 거른다 — 값 맞추기(`[{field=값}]`)만 span 전용이다. 그래도 target 을 쓰는 것은 지시문이 짧고 모듈 기본값과 같은 축이어서다.
+- **명단을 여기 적지 않는다** — 찾는 법 = `rg -U 'target:\s*"' -g '*.rs' crates/ src-tauri/`(`-U` = 줄바꿈된 표기도 잡는다).
 - **아직 없는 것:** 묶음 어휘(카테고리 체계)와 실행 중 바꾸는 입구(LLM 제어 표면)는 로깅 시스템 설계가 정한다(`docs/refactoring/architecture-discussion-2026-09-26.md` 큰 절 A). 그 전까지 새 target 은 위 규칙대로 필요할 때만 늘린다.
 
 ## 계측 의무 (load-bearing 경로 — 무계측은 결함)
