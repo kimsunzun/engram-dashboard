@@ -28,11 +28,12 @@ use std::process::{Child, ChildStderr, ChildStdin, Command, Stdio};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use engram_dashboard_base::logging::mask_secrets;
+use engram_dashboard_base::sync;
 
 use super::{ExitInfo, ProbeChild, ProbeCommand, ProbeError, ProbeSpawner};
 
@@ -349,7 +350,11 @@ impl LookupGate {
     }
 
     fn release(&self, target: &str) {
-        lock(&self.0).remove(&target.to_ascii_lowercase());
+        // base `sync` 를 쓰지 않는다 — 1-3 U5 가 찾기 명단을 platform 으로 옮기고 platform 은 base 를 모른다(ADR-0266).
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&target.to_ascii_lowercase());
     }
 }
 
@@ -633,10 +638,6 @@ struct StderrTail {
     total_lines: u64,
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 // ── 스레드 몸체 ──────────────────────────────────────────────────────────────────
 
 fn pump_stdin(mut stdin: ChildStdin, lines: Receiver<Vec<u8>>, acks: Sender<io::Result<()>>) {
@@ -693,7 +694,7 @@ fn drain_stderr(stderr: ChildStderr, tail: Arc<Mutex<StderrTail>>) {
             return;
         }
         let line = tail_line(&raw, end == LineEnd::Cut);
-        let mut kept = lock(&tail);
+        let mut kept = sync::lock(&tail);
         kept.total_lines += 1;
         if line.is_empty() {
             continue;
@@ -982,7 +983,11 @@ impl ProbeChild for OsProbeChild {
     }
 
     fn stderr_tail(&self) -> Vec<String> {
-        lock(&self.stderr_tail).lines.iter().cloned().collect()
+        sync::lock(&self.stderr_tail)
+            .lines
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -999,7 +1004,7 @@ impl Drop for OsProbeChild {
                 "사용량 조회 프로세스가 kill 뒤 대기 상한 안에 끝나지 않았다 — 임시 폴더가 남을 수 있다"
             );
         }
-        let stderr_lines = lock(&self.stderr_tail).total_lines;
+        let stderr_lines = sync::lock(&self.stderr_tail).total_lines;
         tracing::debug!(pid, stderr_lines, "사용량 조회 프로세스 정리");
     }
 }

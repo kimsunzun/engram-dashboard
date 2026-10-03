@@ -16,7 +16,9 @@
 // ADR-0231
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
+
+use engram_dashboard_base::sync;
 
 use crate::types::{DeliveredCopy, DropCause, QueuedInputEvent};
 
@@ -402,7 +404,7 @@ impl QueuedInputs {
     /// ★crate 밖에 열지 않는다(`reduce` 도 같다)★ — 가드로 환원기에 닿으면 replay 락 밖에서 명부를 바꿀 수
     /// 있어 「명부 = 링 접두의 환원값」이 깨진다. 밖에서는 [`Self::snapshot`] 으로 읽는다.
     pub(crate) fn lock(&self) -> MutexGuard<'_, Registry> {
-        self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.registry)
     }
 
     /// 목록 행과 그 행이 환원한 마지막 목록 사건의 seq 를 **한 락 아래** 함께 읽는다 — 행 = 링 접두

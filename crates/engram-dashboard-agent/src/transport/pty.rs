@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engram_dashboard_base::sync;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::output_core::OutputCore;
@@ -258,10 +259,7 @@ impl AgentTransport for PtyTransport {
                     return;
                 }
                 let exited = {
-                    let mut child = match watcher_child.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
+                    let mut child = sync::lock(&watcher_child);
                     matches!(child.try_wait(), Ok(Some(_)))
                 };
                 if exited {
@@ -292,8 +290,8 @@ impl AgentTransport for PtyTransport {
             //   재-panic 이 된다.
             // ★이 목록은 캡처가 바뀔 때 **함께** 고친다★ — 낡은 목록은 위 poison 범위 논증을 검증할 수
             //   없는 문장으로 만든다.
-            // ★Mutex poison 범위(정확히)★: 아래 reason 산출의 child.lock()만 poison-tolerant
-            //   (into_inner)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
+            // ★Mutex poison 범위(정확히)★: 아래 reason 산출의 child 락만 poison-tolerant
+            //   (`sync::lock`)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
             //   다른 agent로 전파되지 않는다.
             //   단 panic이 pump_core.emit() 내부(replay/subscribers lock 보유 중)에서 터지면 그
             //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 이후 그 agent에 새 구독/조회가
@@ -327,10 +325,7 @@ impl AgentTransport for PtyTransport {
                 // 주: kill 경로는 shutdown의 child.kill()+wait()가 이미 reap했을 수 있어 None일 수 있다
                 //     — 그땐 shutdown=true라 Killed로 가므로 code 미사용, 무해.
                 let code = {
-                    let mut child = match child.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
+                    let mut child = sync::lock(&child);
                     match child.try_wait() {
                         Ok(Some(status)) => Some(status.exit_code() as i32),
                         _ => None,

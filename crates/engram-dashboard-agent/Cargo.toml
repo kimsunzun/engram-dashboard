@@ -22,6 +22,7 @@ engram-dashboard-command = { path = "../engram-dashboard-command" }
 #   — 옛 `crate::logging`·PID 헬퍼가 잎 crate 로 이사했다(ADR-0175 결정 1). 뒤엣것은 codex 세션 id
 #   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2). 범용 도우미
 #   `path::normalize_spelling`(친 cwd) · `time::now_epoch_ms`(프로필 시각 · 손상 사본 이름)도 여기서 온다(ADR-0269).
+#   락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다.
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

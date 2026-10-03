@@ -11,8 +11,10 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, AtomicU8, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use engram_dashboard_base::sync;
 
 use crate::backend::InputEncoder;
 use crate::output_core::{CancelRequest, OutputCore};
@@ -280,10 +282,7 @@ impl AgentSession {
     ///   `OutputSink::send` 가 막히지 않는다는 계약이 그것을 받친다(ADR-0006 의 예외).
     // ADR-0231
     fn write_user_classified(&self, bytes: &[u8]) -> Result<WriteOutcome, PtyError> {
-        let _order = self
-            .input_order
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _order = sync::lock(&self.input_order);
         let ack = self.delivery_ack.state();
         if ack == DeliveryAckState::Unavailable || !self.core.classified_input_busy() {
             return self.write_now(bytes, None);
@@ -563,10 +562,7 @@ impl AgentSession {
         match self.mid_turn {
             MidTurnPolicy::None => Err(CancelError::NotFound),
             MidTurnPolicy::SessionClassified { cancel_line } => {
-                let _order = self
-                    .input_order
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
+                let _order = sync::lock(&self.input_order);
                 match self.core.emit_cancel_request(id) {
                     CancelRequest::NotListed => return Err(CancelError::NotFound),
                     CancelRequest::AlreadyCancelling => return Ok(CancelOutcome::Requested),

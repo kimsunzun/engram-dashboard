@@ -25,8 +25,10 @@ use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use engram_dashboard_base::sync;
 
 use crate::platform::process_group::{
     Births, MemberKill, Pinned, PortEvent, ProcessFacts, ProcessGroup, RetiringSignal, GROUP_GONE,
@@ -399,7 +401,7 @@ impl Recorder {
     }
 
     fn lock(&self) -> MutexGuard<'_, RecInner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.inner)
     }
 
     /// 새 기록을 켜고 그 번호(`0` 아님)를 준다 — 넘침 표시를 내리고, 앞 기록에 남아 있던 것을 꺼내 돌려준다(받은
@@ -1659,6 +1661,7 @@ impl<G: Group> fmt::Debug for GateCell<G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // 쓰기는 자물쇠를 놓은 뒤다 — 포매터가 곧바로 파일 · 콘솔에 쓸 수 있다. 기다리지도 않는다: 자물쇠를 쥔 채
         // 이것을 찍는 결함이 생겨도 제 자신을 기다려 멈추지 않게.
+        // ADR-0275: base `sync` 를 쓰지 않는다 — 그쪽은 기다리는 `lock` 뿐이다. 오염 갈래만 여기서 되찾는다.
         let seen = match self.state.try_lock() {
             Ok(state) => Some(Seen::of(&state)),
             Err(TryLockError::Poisoned(state)) => Some(Seen::of(&state.into_inner())),
@@ -1710,7 +1713,7 @@ impl<G: Group> GateCell<G> {
     }
 
     fn lock(&self) -> MutexGuard<'_, GateState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.state)
     }
 
     #[cfg(test)]
@@ -3425,7 +3428,7 @@ mod birth_tests {
 
     use std::collections::HashMap;
     use std::sync::mpsc::Sender;
-    use std::sync::Weak;
+    use std::sync::{PoisonError, Weak};
     use std::thread::{self, JoinHandle};
 
     use tracing::Level;
@@ -4276,7 +4279,7 @@ mod test_support {
 
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU8, AtomicUsize};
-    use std::sync::Weak;
+    use std::sync::{PoisonError, Weak};
 
     use tracing::Level;
 
