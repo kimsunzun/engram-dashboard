@@ -5,6 +5,7 @@ pub mod layout;
 pub mod output_channel;
 pub mod output_router;
 pub mod settings;
+mod state;
 pub mod ui_settings;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;

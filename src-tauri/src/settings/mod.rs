@@ -6,8 +6,7 @@
 //!   (로거보다 먼저 돈다). 쓰기와 적재 로그는 [`SettingsService::enable_writes`] 뒤에만 나간다(셸 `setup` 이
 //!   로거를 세운 뒤 부른다 — 빌드 전 적재가 디스크를 바꾸지 않게).
 //! - **락 셋 — 순서 = 쓰기 직렬화(`io`) → 알림 순서(`announce`) → 상태(`state`)**:
-//!   - `io` = 쓰기끼리 줄 세우는 락. 읽고-고치고-쓰기와 `sync_all` 동안 쥔다. 디스크 손잡이와 그 디스크에
-//!     이 프로세스가 떠 둔 사본의 기억([`Io`])을 함께 지킨다.
+//!   - `io` = 쓰기끼리 줄 세우는 락 — 디스크 손잡이를 쥔다. 읽고-고치고-쓰기와 `sync_all` 동안 쥔다.
 //!   - `state` = 메모리 값 · `rev` 의 짧은 락. **잎이다** — 쥔 채 다른 락 · IO · emit 을 하지 않는다. 읽기
 //!     (`get` · `effective` · 테마 밀기)는 이것만 잡으므로 진행 중인 쓰기의 `sync_all` 을 기다리지 않는다.
 //!   - `announce` = 확정(`rev` 발급)과 그 알림을 한 덩이로 묶는다 — 알림 순서 = `rev` 순서. 알림 중에 쥔 락은
@@ -131,17 +130,11 @@ pub struct SettingsSchema {
 // ADR-0265
 pub struct SettingsService {
     /// 쓰기 직렬화 + 디스크 — 락 순서는 모듈 헤더.
-    io: Mutex<Io>,
+    io: Mutex<Box<dyn SettingsFiles>>,
     announce: Mutex<()>,
     state: Mutex<State>,
     /// 로그에 실을 파일 출처 — 적재 때 한 번 받는다.
     origin: String,
-}
-
-struct Io {
-    files: Box<dyn SettingsFiles>,
-    /// 이 프로세스가 마지막으로 떠 둔 못 쓰는 원본 — 같은 원본을 두 번 뜨지 않게([`store::write`]).
-    copied: Option<store::CopiedAside>,
 }
 
 struct State {
@@ -224,10 +217,7 @@ impl SettingsService {
         let (overrides, load_notes) = store::load(&*files);
         let origin = files.origin();
         Self {
-            io: Mutex::new(Io {
-                files,
-                copied: None,
-            }),
+            io: Mutex::new(files),
             announce: Mutex::new(()),
             state: Mutex::new(State {
                 overrides,
@@ -301,19 +291,19 @@ impl SettingsService {
             .map_err(|e| SettingsError::InvalidArgument(format!("{}: {e}", def.key)))?;
         let stored = (value != def.default).then(|| value.clone());
 
-        let mut io = self.lock_io();
+        let io = self.lock_io();
         let memory_changed = {
             let state = self.lock_state();
             state.ensure_writable()?;
             state.effective(def) != value
         };
-        let document = store::read_document(&*io.files);
+        let document = store::read_document(&**io);
         if needs_write(
             &document,
             |doc| doc.differs(def.key, stored.as_deref()),
             memory_changed,
         ) {
-            self.persist(&mut io, document, &[(def.key, stored.clone())])?;
+            self.persist(&**io, document, &[(def.key, stored.clone())])?;
             if !memory_changed {
                 tracing::info!(
                     module = "settings",
@@ -363,7 +353,7 @@ impl SettingsService {
     ) -> Result<ResetOutcome, SettingsError> {
         let defs = select(Some(key))?;
 
-        let mut io = self.lock_io();
+        let io = self.lock_io();
         let changed: Vec<&'static SettingDef> = {
             let state = self.lock_state();
             state.ensure_writable()?;
@@ -372,7 +362,7 @@ impl SettingsService {
                 .filter(|def| state.overrides.contains_key(def.key))
                 .collect()
         };
-        let document = store::read_document(&*io.files);
+        let document = store::read_document(&**io);
         let disk_differs = |doc: &store::Document| {
             defs.iter()
                 .map(|def| doc.differs(def.key, None))
@@ -380,7 +370,7 @@ impl SettingsService {
         };
         if needs_write(&document, disk_differs, !changed.is_empty()) {
             let removals: Vec<_> = defs.iter().map(|def| (def.key, None)).collect();
-            self.persist(&mut io, document, &removals)?;
+            self.persist(&**io, document, &removals)?;
             if changed.is_empty() {
                 tracing::info!(
                     module = "settings",
@@ -453,14 +443,12 @@ impl SettingsService {
     /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로 `Internal`.
     fn persist(
         &self,
-        io: &mut Io,
+        files: &dyn SettingsFiles,
         document: std::io::Result<store::Document>,
         changes: &[(&'static str, Option<String>)],
     ) -> Result<(), SettingsError> {
         let memory = self.lock_state().overrides.clone();
-        let written = document.and_then(|document| {
-            store::write(&*io.files, &mut io.copied, document, &memory, changes)
-        });
+        let written = document.and_then(|document| store::write(files, document, &memory, changes));
         written.map_err(|e| {
             tracing::warn!(
                 module = "settings",
@@ -474,7 +462,7 @@ impl SettingsService {
 
     // 셋 다 중독돼도 계속 돈다 — 메모리는 파일 쓰기가 성공한 뒤에만 바뀌므로 패닉한 쓰기가 반쯤 바꾼 상태를
     //   남기지 않고, `io` · `announce` 는 순서만 지킨다.
-    fn lock_io(&self) -> MutexGuard<'_, Io> {
+    fn lock_io(&self) -> MutexGuard<'_, Box<dyn SettingsFiles>> {
         self.io.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
