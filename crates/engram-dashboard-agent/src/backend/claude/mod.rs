@@ -38,9 +38,10 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use engram_dashboard_base::time::SystemClock;
 use uuid::Uuid;
 
-use leftover::{Cleaner, GateCell, LogTag, SystemClock};
+use leftover::{Cleaner, GateCell, LogTag};
 
 use crate::backend::{
     console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,

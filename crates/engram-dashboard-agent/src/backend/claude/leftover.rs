@@ -29,6 +29,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use engram_dashboard_base::sync;
+use engram_dashboard_base::time::{Clock, SystemClock};
 
 use crate::platform::process_group::{
     Births, MemberKill, Pinned, PortEvent, ProcessFacts, ProcessGroup, RetiringSignal, GROUP_GONE,
@@ -951,22 +952,17 @@ const WORKER_THREAD: &str = "engram-claude-leftover";
 const LISTENER_THREAD: &str = "engram-claude-births";
 
 /// 정리기가 읽는 단조 시계 · 기다림 · 스레드 기동 — 실물 = [`SystemClock`]. 일꾼과 듣는 스레드가 이것으로 뜬다.
+///
+/// ★[`now`](Clock::now) 는 문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다.
 // ADR-0262
-pub(super) trait LeftoverClock: Send + Sync {
-    /// ★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다.
-    fn mono_now(&self) -> Instant;
+// ADR-0275
+pub(super) trait LeftoverClock: Clock {
     fn sleep(&self, d: Duration);
     /// `body` 를 `name` 스레드로 띄운다. join 하는 이는 없다. `Err` = `body` 는 버려졌고 돌지 않았다.
     fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
 
-pub(super) struct SystemClock;
-
 impl LeftoverClock for SystemClock {
-    fn mono_now(&self) -> Instant {
-        Instant::now()
-    }
-
     fn sleep(&self, d: Duration) {
         std::thread::sleep(d);
     }
@@ -1737,7 +1733,7 @@ impl<G: Group> GateCell<G> {
         };
         let begun = {
             let mut state = self.lock();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.begin_interrupt(now)
         };
         let mark = match begun {
@@ -1782,7 +1778,7 @@ impl<G: Group> GateCell<G> {
         let settled = {
             let mut state = self.lock();
             let active = cleaner.recorder.active();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.settle_interrupt(mark, rec, active, snap, now)
         };
         opener.holds_opening = false;
@@ -1856,16 +1852,16 @@ impl<G: Group> GateCell<G> {
         let Some(cleaner) = self.cleaner.as_ref() else {
             return;
         };
-        let began = cleaner.clock.mono_now();
+        let began = cleaner.clock.now();
         let listed = write_list(&*cleaner.group);
-        let w_us = micros(cleaner.clock.mono_now().saturating_duration_since(began));
+        let w_us = micros(cleaner.clock.now().saturating_duration_since(began));
         let (w, unlisted) = match listed {
             Ok(w) => (Some(w), None),
             Err(e) => (None, Some(e)),
         };
         let Noted { back, note, spawn } = {
             let mut state = self.lock();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.note_written(gen, w, now)
         };
         drop(back);
@@ -1957,7 +1953,7 @@ impl<G: Group> GateCell<G> {
     fn end_pass(&self, cleaner: &Cleaner<G>, gen: u64, killed: bool) {
         let released = {
             let mut state = self.lock();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.finish_pass(gen, killed, now)
         };
         self.release(released);
@@ -2012,7 +2008,7 @@ impl<G: Group> Drop for WorkerGuard<'_, G> {
 fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> bool {
     let step = {
         let mut state = cell.lock();
-        let now = cleaner.clock.mono_now();
+        let now = cleaner.clock.now();
         state.next_step(now, cleaner.retiring.is_set())
     };
     match step {
@@ -2167,7 +2163,7 @@ fn run_pass<G: Group>(
     cell.end_pass(cleaner, ticket.gen, killed);
     let waited = cleaner
         .clock
-        .mono_now()
+        .now()
         .saturating_duration_since(ticket.first_mono);
     log_pass(cleaner, &report, waited);
     drop(ticket);
@@ -2228,11 +2224,11 @@ fn kill_rounds<G: Group>(
             // ADR-0262
             let committed = {
                 let mut state = cell.lock();
-                let now = cleaner.clock.mono_now();
+                let now = cleaner.clock.now();
                 match state.commit_check(ticket.gen, now, cleaner.retiring.is_set()) {
                     Commit::Go => {
                         let raw = birth.pin.terminate_raw();
-                        let took = cleaner.clock.mono_now().saturating_duration_since(now);
+                        let took = cleaner.clock.now().saturating_duration_since(now);
                         if raw.is_ok() {
                             state.note_kill(ticket.gen);
                         }
@@ -2357,13 +2353,12 @@ fn confirm(clock: &dyn LeftoverClock, killed: &[&Birth]) -> usize {
     if killed.is_empty() {
         return 0;
     }
-    let deadline = clock.mono_now().checked_add(KILL_CONFIRM);
+    let deadline = clock.now().checked_add(KILL_CONFIRM);
     killed
         .iter()
         .filter(|birth| {
-            let left = deadline.map_or(Duration::ZERO, |d| {
-                d.saturating_duration_since(clock.mono_now())
-            });
+            let left =
+                deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(clock.now()));
             matches!(birth.pin.wait_exit(left), Ok(true))
         })
         .count()
@@ -4664,11 +4659,13 @@ mod gate_tests {
         }
     }
 
-    impl LeftoverClock for FakeClock {
-        fn mono_now(&self) -> Instant {
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
             self.base + Duration::from_nanos(self.nanos.load(Ordering::SeqCst))
         }
+    }
 
+    impl LeftoverClock for FakeClock {
         fn sleep(&self, d: Duration) {
             self.sleeps.lock().unwrap().push(d);
             if self.panic_in_sleep.load(Ordering::SeqCst) {
@@ -5011,7 +5008,7 @@ mod gate_tests {
         fn pass(&self) -> PassReport {
             let step = {
                 let mut state = self.cell.lock();
-                state.next_step(self.clock.mono_now(), self.cleaner.retiring.is_set())
+                state.next_step(self.clock.now(), self.cleaner.retiring.is_set())
             };
             let Step::Pass(ticket) = step else {
                 panic!("판이 서야 한다");
@@ -5655,7 +5652,7 @@ mod gate_tests {
         }
         rig.clock.advance(N);
 
-        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+        let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판이 서야 한다");
         };
@@ -5961,7 +5958,7 @@ mod gate_tests {
         let out = rig.esc_with_check();
         rig.write(out);
         rig.clock.advance(N);
-        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+        let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판");
         };
@@ -5999,7 +5996,7 @@ mod gate_tests {
         failed.listing(Some(vec![ROOT]));
         failed.write(out);
         failed.clock.advance(N);
-        let step = failed.cell.lock().next_step(failed.clock.mono_now(), false);
+        let step = failed.cell.lock().next_step(failed.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판");
         };
@@ -6018,7 +6015,7 @@ mod gate_tests {
         let out = rig.esc_with_check();
         rig.write(out);
         rig.clock.advance(N);
-        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+        let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판");
         };
@@ -6513,7 +6510,7 @@ mod gate_tests {
                     18..=20 => rig.clock.advance(ms(rng.below(4_000))),
                     21..=26 => {
                         if rig.worker() {
-                            let now = rig.clock.mono_now();
+                            let now = rig.clock.now();
                             let due = rig.state(|st| {
                                 st.episode.as_ref().is_some_and(|ep| {
                                     ep.phase == Phase::Waiting
@@ -6586,11 +6583,13 @@ mod real_tests {
         workers: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
     }
 
-    impl LeftoverClock for SkipClock {
-        fn mono_now(&self) -> Instant {
+    impl Clock for SkipClock {
+        fn now(&self) -> Instant {
             Instant::now() + Duration::from_nanos(self.skipped_ns.load(Ordering::SeqCst))
         }
+    }
 
+    impl LeftoverClock for SkipClock {
         fn sleep(&self, d: Duration) {
             let ns = u64::try_from(d.as_nanos()).expect("시험 잠");
             self.skipped_ns.fetch_add(ns, Ordering::SeqCst);

@@ -26,6 +26,8 @@ pub trait Clock: Send + Sync {
 }
 
 /// 운영 시계 — [`Instant::now`].
+///
+/// ★자물쇠도 기다림도 없다★ — 다른 자물쇠를 쥔 채 시계를 읽는 자리에도 그대로 꽂히게 한다.
 pub struct SystemClock;
 
 impl Clock for SystemClock {
