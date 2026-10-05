@@ -4400,7 +4400,7 @@ mod tests {
     /// 떨어지고, 그 거절은 **물어본 연결이 아니라 결말을 보낸 연결**에게 간다.
     #[test]
     fn a_command_whose_owner_never_answers_is_timed_out_exactly_once() {
-        let clock = crate::command_delivery::tests::ManualClock::new();
+        let clock = Arc::new(engram_dashboard_base::time::ManualClock::new());
         let deliveries = crate::command_delivery::tests::deliveries_with(clock.clone());
         let mut seen = None;
         capture_logs(|| {

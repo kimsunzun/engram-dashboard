@@ -47,7 +47,7 @@
 ### T-47. 크레이트 경계 리팩터링 — 아키텍처 논의에서 나온 결정 후보 1~9
 - **상태:** 경계 논의 완료(2026-10-02) · ADR 작성 완료(ADR-0266~0273, 2026-10-02/03 — 후보 7 은 transport TRD 로 미룸 · 후보 3 은 번복: 감싸지 않는다, ADR-0268 · 후보 2 는 철회: 필요해질 때만 연결한다, ADR-0267) · 1단계 TRD 완료(1-1 base 도우미 · 1-3 platform crate, 2026-10-03~04 — 갈림길은 사용자 위임 2026-10-04 「알아서 진행해」 → 권고안 채택, ADR-0275) · 순서 = 0단계 ADR 끝 → 1단계 바닥 → 2단계 클라·데몬 떼기 → 3단계 transport → 4단계 안쪽 정리.
 - **결정 후보:** 1 OS 의존 코드 → `platform` crate · 2 command·messaging 도 base 사용(철회 — 필요해질 때만, ADR-0267) · 3 로그는 base 경유만(번복 — 감싸지 않는다, ADR-0268) · 4 base 공용 함수 모듈 · 5 셸 → agent 끊기 · 6 discovery 를 데몬·셸로 · 7 transport 부착 뒤 net 걷기(transport TRD 로 미룸) · 8 패킷은 남의 구조체를 품지 않음(명령 칸만 `RawValue`) · 9 engram CLI 독립 패키지.
-- **다음:** 1-1 구현 = U1 부터(`process/S21-crate-boundaries/trd-1-1-base-helpers.md` §6-1 착수 체크리스트) · 1-3 은 1-1 머지 뒤. 사용자 확인 대상 = ADR-0275 의 D3 이 ADR-0262 「통째로 옮길 수 있게」(사용자 2026-09-29)의 모양을 일부 바꾼 것(상수 하나가 인자로 나간다). ★파일 도우미 통일(원자적 쓰기 → platform 1-3 · 손상 사본 치우기 1-1)은 storage P3(셸 화면 상태)가 master 에 착지한 뒤★ — 나머지 1단계는 먼저 간다(순서 정본 = 메모 10절).
+- **다음:** 1-1 구현 = U1 부터(`process/S21-crate-boundaries/trd-1-1-base-helpers.md` §6-1 착수 체크리스트) · 1-3 은 1-1 머지 뒤. ADR-0275 의 D3 · 결정 12 는 사용자 확인 완료(2026-10-05). ★파일 도우미 통일(원자적 쓰기 → platform 1-3 · 손상 사본 치우기 1-1)은 storage P3(셸 화면 상태)가 master 에 착지한 뒤★ — 나머지 1단계는 먼저 간다(순서 정본 = 메모 10절).
 - **정본(베끼지 않는다):** `refactoring/architecture-discussion-2026-09-26.md` — 사실 · 결정 · 작업 순서 · 진행 방식 · 지나가며 본 정리 후보(11절). 근거 조사 = `research/wire-shared-types-placement-2026-10-02.md`. 1단계 TRD = `process/S21-crate-boundaries/trd-1-1-base-helpers.md` · `process/S21-crate-boundaries/trd-1-3-platform-crate.md`(그 결정 = ADR-0275).
 
 ### T-44. 채팅에서 승인 받기 — codex 승인 질문을 지금은 자동 거절한다

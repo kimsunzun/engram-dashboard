@@ -190,7 +190,7 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging", features 
 #   (`engram_dashboard_command::testing::block_on`)로 핸들러 future 를 돌린다. dev 그래프에만 있으므로
 #   운영 daemon 바이너리엔 유니피케이션되지 않는다.
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
-# 같은 계열(feature-only 재선언) — 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`).
+# 같은 계열(feature-only 재선언) — 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`) · 시험 시계 `time::ManualClock`(command_delivery · connection_core 시험).
 engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-support"] }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }

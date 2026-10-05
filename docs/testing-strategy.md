@@ -40,7 +40,7 @@
 - 실행: `cargo test -p engram-dashboard-protocol`.
 
 ### base (`crates/engram-dashboard-base`) — 2026-08-25 신설(ADR-0175 결정 1)
-- **① 단위**: `src/` 내 `#[cfg(test)]`(`logging` = 로그 파일명 규약·보존 정리·머리글·마스킹 · `platform` = PID 생존 판정·creation time 대조·자식 PID 열거 · `text` = 소문자 hex · `time` = epoch ms 단위 · `path` = 친 경로 철자 고르기 · `sync` = 락 오염 되찾기 — 오염 표시 유지 · `testing` = 시험 대기의 마감 뒤 한 번 · 폴링). `testing` 은 기능 `test-support` 뒤지만 `cfg(test)` 로도 열려 이 crate 자기 시험에는 기능 인자가 필요 없다. `logging` · `platform` 은 `agent` 에서 그대로 옮겨 온 것들이고, `path` 의 시험 둘도 `agent` 의 `normalize_cwd` 시험을 옮겨 온 것이다(ADR-0269 · ADR-0275).
+- **① 단위**: `src/` 내 `#[cfg(test)]`(`logging` = 로그 파일명 규약·보존 정리·머리글·마스킹 · `platform` = PID 생존 판정·creation time 대조·자식 PID 열거 · `text` = 소문자 hex · `time` = epoch ms 단위 · 시계 seam(`SystemClock` · `ManualClock`) · `path` = 친 경로 철자 고르기 · `sync` = 락 오염 되찾기 — 오염 표시 유지 · `testing` = 시험 대기의 마감 뒤 한 번 · 폴링). `testing` 과 `time::ManualClock` 은 기능 `test-support` 뒤지만 `cfg(test)` 로도 열려 이 crate 자기 시험에는 기능 인자가 필요 없다. `logging` · `platform` 은 `agent` 에서 그대로 옮겨 온 것들이고, `path` 의 시험 둘도 `agent` 의 `normalize_cwd` 시험을 옮겨 온 것이다(ADR-0269 · ADR-0275).
 - **② 격리 통합**: `tests/logging_fallback.rs`·`tests/logging_install_race.rs`. **각각 파일 하나 = 테스트 하나**인 것이 의도다 — 전역 subscriber 는 프로세스당 한 번뿐이라 설치 경합을 재려면 그 프로세스를 통째로 소유해야 한다(각 파일 헤더가 정본).
 - **격리 하네스 = crate 경계 그 자체**: 워크스페이스 crate 를 하나도 의존하지 않는 잎이라 에이전트 런타임·Tauri·wire 계약 없이 단독으로 돈다.
 - 실행: `cargo test -p engram-dashboard-base -- --test-threads=4` — `platform` 의 자식 PID 테스트가 실 `cmd.exe` 를 띄운다(플래그 판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」).
