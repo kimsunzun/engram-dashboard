@@ -14,6 +14,7 @@ use crate::types::{InputEvent, OutputEvent, PtyError, TransportCaps, TurnInput, 
 
 pub mod api;
 pub mod input_queue;
+pub(crate) mod process_group;
 pub mod pty;
 pub mod stdio;
 

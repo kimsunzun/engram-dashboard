@@ -31,10 +31,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
 
-use crate::platform::process_group::{
+use crate::transport::input_queue::OnWritten;
+use crate::transport::process_group::{
     Births, MemberKill, Pinned, PortEvent, ProcessFacts, ProcessGroup, RetiringSignal, GROUP_GONE,
 };
-use crate::transport::input_queue::OnWritten;
 use crate::transport::stdio::InterruptOut;
 use crate::types::AgentId;
 
@@ -932,6 +932,12 @@ fn micros(d: Duration) -> u64 {
 // ADR-0257
 // ADR-0262
 pub(super) const INTERRUPT_LEFTOVER_GRACE: Duration = Duration::from_secs(3);
+
+/// 이 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 이 정리가 끝낸 것을 알아본다. 통로
+/// `shutdown()` 의 무리 통째 끝내기(1)와 겹치지 않게 골랐다.
+// ADR-0262
+// ADR-0275
+const LEFTOVER_EXIT_CODE: u32 = 0x7440;
 
 /// 스냅숏이 붙드는 멤버 수의 상한 — 명단이 이보다 길면 그 에피소드는 `Failed(too_many)` 다.
 pub(super) const PIN_MAX: usize = 256;
@@ -2227,7 +2233,7 @@ fn kill_rounds<G: Group>(
                 let now = cleaner.clock.now();
                 match state.commit_check(ticket.gen, now, cleaner.retiring.is_set()) {
                     Commit::Go => {
-                        let raw = birth.pin.terminate_raw();
+                        let raw = birth.pin.terminate_raw(LEFTOVER_EXIT_CODE);
                         let took = cleaner.clock.now().saturating_duration_since(now);
                         if raw.is_ok() {
                             state.note_kill(ticket.gen);
@@ -4216,15 +4222,14 @@ mod birth_tests {
     #[cfg(windows)]
     #[test]
     fn a_birth_in_the_job_is_recorded_with_its_facts_through_the_real_port() {
-        use crate::platform::process_group::tests::{
-            new_group, open_gate, spawn_gated_cmd, wait_until,
-        };
+        use crate::transport::process_group::tests::new_group;
+        use engram_dashboard_platform::testing::{open_gate, spawn_gated_cmd, wait_until};
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
-        job.assign(x.id()).expect("Job 편입");
+        job.adopt(x.id()).expect("Job 편입");
         let recorder = Arc::new(Recorder::new());
         let watch = BirthWatch::new();
         assert_eq!(
@@ -4494,10 +4499,14 @@ mod test_support {
             &self.facts
         }
 
-        fn terminate_raw(&self) -> io::Result<()> {
+        /// 정리가 고른 종료 코드가 아니면 실패로 답한다 — 끝냈다고 단언하는 시험이 빨개진다.
+        fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
             self.probe.note(self.pid, PinCall::Terminate);
             let cost = *self.probe.terminate_cost.lock().unwrap();
             self.probe.spend(cost);
+            if exit_code != LEFTOVER_EXIT_CODE {
+                return Err(io::Error::other(format!("종료 코드 {exit_code:#x}")));
+            }
             match self.kill {
                 Kill::Refuse => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
                 Kill::Exit => {
@@ -6568,9 +6577,8 @@ mod real_tests {
     use std::collections::BTreeMap;
     use std::io::Write;
 
-    use crate::platform::process_group::tests::{
-        is_ping, new_group, open_gate, spawn_gated_cmd, wait_until,
-    };
+    use crate::transport::process_group::tests::new_group;
+    use engram_dashboard_platform::testing::{is_ping, open_gate, spawn_gated_cmd, wait_until};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const LINE: &[u8] = b"{\"type\":\"control_request\"}\n";
@@ -6684,7 +6692,7 @@ mod real_tests {
             r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
             CREATE_NO_WINDOW,
         );
-        job.assign(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("Job 편입");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);
@@ -6728,7 +6736,7 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.assign(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("Job 편입");
         open_gate(&mut r);
         wait_until("명단의 ping", || {
             group
@@ -6753,7 +6761,7 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.assign(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("Job 편입");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);

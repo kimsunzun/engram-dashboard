@@ -440,20 +440,20 @@ fn is_remote(path: &Path) -> bool {
 /// 자식과 그 자손 전부를 한 번에 끊는 손잡이.
 #[cfg(windows)]
 struct ProcessTree {
-    job: crate::platform::JobObjectHandle,
+    job: engram_dashboard_platform::group::GroupOwner,
 }
 
 #[cfg(windows)]
 impl ProcessTree {
     fn attach(child: &Child) -> io::Result<Self> {
-        let job = crate::platform::JobObjectHandle::new()?;
-        job.assign(child.id())?;
+        let job = engram_dashboard_platform::group::GroupOwner::new()?;
+        job.adopt(child.id())?;
         Ok(Self { job })
     }
 
     /// 멈춘 채 띄운 자식([`configure_os`])을 깨운다 — Job 에 넣은 **뒤에** 부른다.
     fn start(&self, child: &Child) -> io::Result<()> {
-        crate::platform::resume_suspended_process(child.id())
+        engram_dashboard_platform::group::resume_suspended_process(child.id())
     }
 
     fn kill(&self, child: &mut Child) {
@@ -1391,7 +1391,7 @@ mod tests {
         let cmd = shell("set /p L=& echo got:!L!", "", root.path());
         let mut child = OsProbeChild::spawn(&cmd, far()).expect("기동");
         assert!(
-            crate::platform::resume_suspended_process(child.pid()).is_err(),
+            engram_dashboard_platform::group::resume_suspended_process(child.pid()).is_err(),
             "기동이 깨운 뒤에도 멈춘 스레드가 남았다"
         );
         child.write_line("hello", far()).expect("쓰기");
@@ -1413,7 +1413,7 @@ mod tests {
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .expect("기동");
-        let result = crate::platform::resume_suspended_process(running.id());
+        let result = engram_dashboard_platform::group::resume_suspended_process(running.id());
         let _ = running.kill();
         let _ = running.wait();
         assert!(result.is_err(), "멈추지 않은 프로세스를 깨웠다고 했다");

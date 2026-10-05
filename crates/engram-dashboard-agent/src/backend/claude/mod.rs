@@ -6347,7 +6347,7 @@ mod tests {
     /// 바꾼 모양. 포트를 못 써 에피소드의 스냅숏은 실패로 서지만 에피소드는 선다. 시험은 쓰기 확인을 부르지 않으므로
     /// 일꾼도 듣는 스레드도 뜨지 않는다.
     fn cleaned_decoder() -> (ClaudeStreamDecoder, InterruptLine, Arc<GateCell>) {
-        use crate::platform::process_group::{ProcessGroup, RetiringSignal};
+        use crate::transport::process_group::{ProcessGroup, RetiringSignal};
         let retiring = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let group = ProcessGroup::detached(RetiringSignal::of(&retiring));
         let cleaner = Cleaner::new(

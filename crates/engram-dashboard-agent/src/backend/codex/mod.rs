@@ -167,7 +167,7 @@ fn thread_open(
 /// ★편입은 spawn **뒤**라 그 사이 창은 그 보장 밖이다★ — 그 창에서 태어난 자손은 Job 에 안 들어간다.
 /// 에이전트 통로 셋(`pty`·`stdio`·codex 통로)이 전부 띄운 뒤에 넣는 모양이고 기존 teardown 테스트는 정착
 /// 상태만 재므로, 이 창은 **재 본 적이 없다**. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회
-/// 실행기다 — 멈춘 채 띄워 Job 에 넣은 뒤 깨운다(`usage::process` + `platform::resume_suspended_process`).
+/// 실행기다 — 멈춘 채 띄워 Job 에 넣은 뒤 깨운다(`usage::process` + OS 층 `group::resume_suspended_process`).
 const CODEX_PROGRAM: &str = "codex";
 
 /// 「그 스레드의 기록이 없다」를 뜻하는 상대 문구(소문자 비교). ★실측된 응답에서 그대로 딴다★ —

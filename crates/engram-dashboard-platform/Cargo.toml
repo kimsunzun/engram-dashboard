@@ -4,6 +4,14 @@ version = "0.1.0"
 edition = "2021"
 description = "Engram Dashboard OS 층 — OS 에 따라 달라지는 운영 코드를 한 곳에 모은다. 워크스페이스 crate 의존 0(base 도 아니다), 도메인 지식 0. 불변식 · 격리 게이트는 lib.rs 헤더가 정본(ADR-0266 · ADR-0275)."
 
+# ★test-support (ADR-0275 결정 5 · 13)★: 실프로세스 시험 도우미(`testing`)와 주인이 처음부터 없는 손잡이
+#   (`group::GroupRef::gone`)를 연다. 기본 OFF — 소비 crate 는
+#   dev-dependency 에서만 켠다(선례 = `engram-dashboard-command` · `engram-dashboard-base` 의 같은 이름). 데몬 · 셸
+#   운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다. ★이 crate 의 cargo 기능은 이것 하나뿐이다★ — windows
+#   바인딩을 기능별로 쪼개지 않는다(아래 `windows` 주석).
+[features]
+test-support = []
+
 # ★워크스페이스 crate 를 여기 적지 않는다 — base 도 아니다★(ADR-0266 「거부한 대안」 둘째 · ADR-0268).
 #   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).
 [dependencies]
@@ -11,12 +19,22 @@ description = "Engram Dashboard OS 층 — OS 에 따라 달라지는 운영 코
 #   Manager 세션 닫기. facade 뿐이라 base 를 끌지 않는다.
 tracing = "0.1"
 
-# Foundation = `process`(CloseHandle·FILETIME)와 `file_holders`(Win32 오류 코드)가 함께 쓴다 · Threading =
-#   OpenProcess/GetProcessTimes/GetExitCodeProcess · ToolHelp = process_parent_table 의 프로세스 표(child_pids 가
-#   그 위에 선다) — 이 둘은 `process` 몫.
+# Foundation = `process`(CloseHandle·FILETIME) · `file_holders`(Win32 오류 코드) · `group` 이 함께 쓴다 ·
+#   Threading = OpenProcess/GetProcessTimes/GetExitCodeProcess · `group` 의 TerminateProcess/WaitForSingleObject/
+#   ResumeThread · `spawn` 의 CREATE_NO_WINDOW · ToolHelp = process_parent_table 의 프로세스 표(child_pids 가 그
+#   위에 선다)와 `group` 의 스레드 스냅숏(멈춘 채 띄운 자식의 첫 스레드를 찾는다 — std 가 그 핸들을 내주지 않는다).
 # `Win32_System_RestartManager` = `file_holders` 몫 — 「이 파일을 누가 열고 있나」를 묻는
 #   `RmStartSession`/`RmRegisterResources`/`RmGetList`/`RmEndSession` 넷이 그 feature 뒤에 있다.
 #   codex 세션 id 회수가 그 답 위에 선다(ADR-0218 결정 1).
+# `Win32_System_JobObjects` = `group` 의 Job Object(ADR-0262).
+# ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
+#   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
+#   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.
+# `Win32_System_IO` = `group` 의 Job 가입 알림을 받는 완료 포트(`CreateIoCompletionPort` ·
+#   `GetQueuedCompletionStatus`) 몫 — 멤버가 새로 든 것을 듣는 공개 수단이 그것뿐이다.
+# `Wdk_System_Threading` = `NtQueryInformationProcess` 몫 — `group` 이 붙든 핸들로 부모 PID 와 명령줄을 읽는다.
+#   ★`Win32_System_Kernel` · `Win32_System_SystemServices` 는 켜지 않는다★ — 그 결과 구조체와 알림 번호 상수만
+#   쓰려고 켤 일이라 `group/windows.rs` 가 `repr(C)` 와 상수로 대신한다.
 # ★기능별 cargo feature 로 쪼개지 않는다★ — 이 의존 하나에 쓰는 바인딩 feature 의 합집합을 켠다(ADR-0275
 #   결정 13). 모듈을 옮겨 올 때 그 모듈이 쓰는 feature 를 여기 더한다.
 [target.'cfg(windows)'.dependencies]
@@ -25,6 +43,10 @@ windows = { version = "0.58", features = [
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_RestartManager",
+    "Win32_System_JobObjects",
+    "Win32_Security",
+    "Win32_System_IO",
+    "Wdk_System_Threading",
 ] }
 
 # `file_holders` 시험이 임시 파일 이름을 겹치지 않게 뽑는다 — 운영 그래프에는 안 든다.

@@ -7,10 +7,18 @@
 //! 이 불변식의 기계 게이트는 TRD 1-3 U8 에서 선다 — 그 전까지는 리뷰가 지키고, 다른 crate 에 남은 운영
 //! OS 분기는 이전 대상이다. 시한부 예외는 하나 — `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15).
 //!
-//! 지금 입주자는 넷이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
-//! 자식 PID 열거 · 한 뿌리 아래 신원 목록) · [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
-//! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) · [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수
-//! 이름 비교). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
+//! 지금 입주자는 여섯이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 자식 PID 열거 · 한 뿌리 아래 신원 목록) · [`group`](프로세스 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 ·
+//! 가입 알림 포트 — Windows Job Object · 멈춘 채 띄운 프로세스 깨우기) · [`file_holders`](이 파일을 지금 연
+//! 프로세스 — Restart Manager) · [`spawn`](창 없이 띄우기) · [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로
+//! 감싸기) · [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수 이름 비교). 모듈 헤더와 공개 함수 문서가 그
+//! 책임의 정본이다.
+//!
+//! ★`testing`(실프로세스 시험 도우미)과 `group::GroupRef::gone`(주인이 처음부터 없는 손잡이)은 cargo 기능
+//! `test-support` 뒤다★(TRD 1-3 §3-8 · 이름은 base 의 ADR-0275 결정 5 와 같다) — 선언이
+//! `#[cfg(any(test, feature = "test-support"))]` 라 이 crate 자기 시험과 그 기능을 dev 의존으로 켠 소비자 시험만
+//! 본다. 그 기능이 데몬 · 셸의 운영 의존 그래프에 없다는 것은 CI 게이트 ③ 이 잰다(0줄 기대와 짝인 1줄
+//! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `/qa` 바인딩이다. 이 crate 의 cargo 기능은 그것 하나뿐이다(ADR-0275 결정 13).
 //!
 //! ## 들이는 규칙
 //!
@@ -42,7 +50,7 @@
 //!   런타임 반입을 CI 게이트(「discovery has no async-runtime ingress」)로 막고 있어, 이 crate 를 부르는
 //!   순간 여기 든 런타임이 그 게이트를 빨갛게 만든다.
 //!
-//! ## 격리 게이트(불변) — 둘이고, 각각 다른 축이다
+//! ## 격리 게이트(불변) — ①② 는 각각 다른 축이다(시험 기능 누수 게이트 ③ 은 위 `testing` 단락)
 //!
 //! **① 워크스페이스 의존 상한**(위 「의존」 첫 항의 벽):
 //! `cargo tree -p engram-dashboard-platform --depth 1 --prefix none -e normal,dev,build --target all`
@@ -73,5 +81,9 @@
 // ADR-0275
 pub mod env;
 pub mod file_holders;
+pub mod group;
 pub mod process;
 pub mod shell;
+pub mod spawn;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
