@@ -54,19 +54,28 @@ use engram_dashboard_lib::daemon_client::inbound::{
 };
 use engram_dashboard_lib::layout::apply;
 use engram_dashboard_lib::layout::commands::{
-    make_table, LayoutPorts, SettingsGetArgs, SettingsResetArgs, SettingsSchemaArgs,
-    SettingsSetArgs, SlotPopoutArgs, SplitListArgs, SplitSetRatioArgs, UiRefreshArgs,
-    WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
+    make_table, LayoutPorts, RestoreAnswerArgs, RestoreStatusArgs, SettingsGetArgs,
+    SettingsResetArgs, SettingsSchemaArgs, SettingsSetArgs, SlotPopoutArgs, SplitListArgs,
+    SplitSetRatioArgs, UiRefreshArgs, WindowListArgs, CATALOG_VERSION, COMMAND_SPECS,
 };
 use engram_dashboard_lib::layout::geometry::Insets;
 use engram_dashboard_lib::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
-    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost,
-    WindowTabsPayload, MAIN_WINDOW_LABEL,
+    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowAttrs,
+    WindowBounds, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::settings::{
     SettingItem, SettingsEvents, SettingsService, SettingsSnapshot, THEME_DEFAULT,
 };
+use engram_dashboard_lib::state::boot_plugin::StateSession;
+use engram_dashboard_lib::state::convert::to_persisted;
+use engram_dashboard_lib::state::placement::{Landing, MonitorArea};
+use engram_dashboard_lib::state::restore::{
+    CrashCopy, CrashCopyStatus, RestoreCoordinator, RestorePorts, RestoreService, RestoreWindows,
+    SubscriptionSource,
+};
+use engram_dashboard_lib::state::schema::{StateFile, STATE_VERSION};
+use engram_dashboard_lib::state::tree_attrs::TreeAttrs;
 use engram_dashboard_lib::ui_settings::{
     deliver_per_window, global_theme, load_settings, parse_settings, read_capped,
     sweep_dead_windows, write_atomic, EffectiveThemes, LoadedTheme, SettingsSource, SweepOutcome,
@@ -404,6 +413,10 @@ struct World {
     _config: ConfigDir,
     mail: Mailbox,
     spawn_requests: mpsc::UnboundedReceiver<SpawnRequest>,
+    /// 표가 쥔 조율자의 복원 서비스 — 시험이 부팅 단계 ⑥ 을 흉내 낸다(`set_boot`).
+    restore_service: Arc<RestoreService>,
+    /// 표가 쥔 것과 같은 조율자 — 시험이 셸 setup 끝처럼 포트를 꽂는다.
+    restore: Arc<RestoreCoordinator>,
 }
 
 impl World {
@@ -415,17 +428,29 @@ impl World {
         let settings = config.service();
         let settings_events = Arc::new(FakeSettingsEvents::default());
         let (tx, spawn_requests) = mpsc::unbounded_channel();
+        // 실물 발급기 — label 단조성은 닫힌 label 재-build 를 막는 계약이라 가짜로 대체하지 않는다. 복원 조율자도
+        //   같은 것을 쓴다(운영 조립과 같다 — 새 팝아웃 label 이 떠 있는 창과 겹치지 않는다).
+        let labels = Arc::new(PopupCounter::default());
+        let restore_service = Arc::new(RestoreService::new());
+        let restore = Arc::new(RestoreCoordinator::new(
+            Arc::clone(&restore_service),
+            state.clone(),
+            Arc::new(TreeAttrs::default()),
+            // 기록기가 없다 — 답은 곧바로 `durable:false` 다(가드 아래 셸과 같다).
+            Arc::new(StateSession::default()),
+            labels.clone(),
+        ));
         let ports = LayoutPorts {
             state: state.clone(),
             subs: Arc::new(Subs),
             events: Arc::new(Events),
             windows: Arc::clone(&windows) as Arc<dyn WindowHost>,
-            // 실물 발급기 — label 단조성은 닫힌 label 재-build 를 막는 계약이라 가짜로 대체하지 않는다.
-            labels: Arc::new(PopupCounter::default()),
+            labels,
             spawner: Arc::new(DaemonSpawner { requests: tx }),
             ui_settings: Arc::clone(&ui) as Arc<dyn UiSettingsRefresh>,
             settings: Arc::clone(&settings),
             settings_events: Arc::clone(&settings_events) as Arc<dyn SettingsEvents>,
+            restore: Arc::clone(&restore),
         };
         (
             World {
@@ -437,6 +462,8 @@ impl World {
                 _config: config,
                 mail: Mailbox::default(),
                 spawn_requests,
+                restore_service,
+                restore,
             },
             ports,
         )
@@ -538,6 +565,8 @@ fn the_table_holds_exactly_the_declared_commands() {
         vec![
             "agent.spawnInto",
             "layout.setSlotContent",
+            "restore.answer",
+            "restore.status",
             "settings.get",
             "settings.reset",
             "settings.schema",
@@ -576,8 +605,9 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   (`split.setRatio`·`split.list` — ADR-0227). 세대 9 는 `layout.setSlotContent` 의 **어휘와 칸**이
     //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7). 세대 10 은
     //   이름이 넷 늘고(`settings.*`) `ui.refresh` 답의 `theme` 출처가 설정으로 바뀐 세대다(TRD S21-storage §5-4).
-    assert_eq!(CATALOG_VERSION, 10);
-    assert_eq!(COMMAND_SPECS.len(), 23);
+    //   세대 11 은 이름이 둘 는 세대다(`restore.*` — TRD S21-storage §6-7).
+    assert_eq!(CATALOG_VERSION, 11);
+    assert_eq!(COMMAND_SPECS.len(), 25);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
         2,
@@ -598,6 +628,8 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     ] {
         assert_eq!(since, 10);
     }
+    assert_eq!(RestoreStatusArgs::SPEC.since, 11);
+    assert_eq!(RestoreAnswerArgs::SPEC.since, 11);
 }
 
 #[test]
@@ -1627,6 +1659,318 @@ async fn a_bus_theme_default_write_reaches_every_window_without_an_entry() {
             ("agent-tree", "light"),
             ("slot-popup-1", "light")
         ])
+    );
+}
+
+// ── (B) 크래시 사본 — restore.status · restore.answer (TRD S21-storage §6-7) ──────────
+//
+// 조율자는 실물이고(포트만 가짜) 표가 쥔 **그 인스턴스**를 시험이 함께 쥔다. 재는 것 = 봉투가 그 조율자에 닿나 ·
+// 답 모양 · 조율자의 오류 종류가 `CONFLICT` · `INTERNAL` 로 나가나 · 막는 수락 본문이 런타임 스레드 밖에서 도나.
+// 수락의 화면 교체 순서 · 되돌림은 조율자 옆 단위 시험(`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
+
+/// 복원 수락의 창 포트 대역 — 모든 창이 보이고 만들기는 늘 성공한다. 숨긴 채 만든 창과 본문이 돈 스레드만 남긴다.
+#[derive(Default)]
+struct RestoreScreen {
+    opened: Mutex<Vec<String>>,
+    threads: Mutex<Vec<std::thread::ThreadId>>,
+}
+
+impl RestoreWindows for RestoreScreen {
+    fn app_has_focus(&self) -> bool {
+        false
+    }
+
+    fn monitors(&self) -> Vec<MonitorArea> {
+        self.threads
+            .lock()
+            .unwrap()
+            .push(std::thread::current().id());
+        vec![MonitorArea {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+            scale: 1.0,
+        }]
+    }
+
+    fn open_hidden(
+        &self,
+        label: &str,
+        _at: Option<(WindowBounds, Landing)>,
+        _maximized: bool,
+    ) -> Result<(), String> {
+        self.opened.lock().unwrap().push(label.to_string());
+        Ok(())
+    }
+
+    fn visibility(&self, _label: &str) -> Option<bool> {
+        Some(true)
+    }
+
+    fn place_main(&self, _at: Option<(WindowBounds, Landing)>, _maximized: bool) {}
+
+    fn place(&self, _label: &str, _bounds: WindowBounds, _at: Landing) {}
+
+    fn set_shown(&self, _label: &str, _shown: bool) {}
+
+    fn record_placement(&self, _label: &str) {}
+
+    fn focus(&self, _label: &str) {}
+
+    fn destroy(&self, _label: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+/// 데몬 클라이언트가 없는 셸 — 구독 재계산을 건너뛴다.
+struct NoSubscriptions;
+
+impl SubscriptionSource for NoSubscriptions {
+    fn current(&self) -> Option<Arc<dyn SubscriptionSync>> {
+        None
+    }
+}
+
+impl World {
+    /// 셸 setup 끝처럼 조율자에 포트를 꽂는다.
+    fn attach_restore_ports(&self) -> Arc<RestoreScreen> {
+        let screen = Arc::new(RestoreScreen::default());
+        self.restore.attach(RestorePorts {
+            windows: Arc::clone(&screen) as Arc<dyn RestoreWindows>,
+            events: Arc::new(Events),
+            subs: Arc::new(NoSubscriptions),
+        });
+        screen
+    }
+
+    /// 부팅 단계 ⑥ — 앞 실행의 화면(main 탭 「지난 탭」 + 빈 팝아웃 `popouts` 개)을 답하지 않은 사본으로 세운다.
+    fn crash_copy_awaits(&self, popouts: usize) {
+        let mut previous = ViewManager::new();
+        let main_view = previous.windows[MAIN_WINDOW_LABEL].active;
+        previous
+            .rename_tab(main_view, "지난 탭".to_string())
+            .expect("탭 이름");
+        for n in 0..popouts {
+            previous
+                .create_window(&format!("slot-popup-{}", 90 + n))
+                .expect("팝아웃");
+        }
+        self.restore_service.set_boot(Some(CrashCopy {
+            text: "{}".to_string(),
+            hash: "h".to_string(),
+            file: StateFile {
+                version: STATE_VERSION,
+                saved_at_ms: 1_700_000_000_000,
+                clean_exit: false,
+                resolved_crash_copy: None,
+                windows: to_persisted(&previous, WindowAttrs::default()),
+            },
+            durable: false,
+        }));
+    }
+
+    fn main_tab_name(&self) -> String {
+        let mgr = self.state.0.lock().unwrap();
+        mgr.views[&mgr.windows[MAIN_WINDOW_LABEL].active]
+            .name
+            .clone()
+    }
+}
+
+#[tokio::test]
+async fn restore_status_reports_the_crash_copy_shape() {
+    let (world, queue, receiver) = queued();
+
+    let none = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+        .await
+        .outcome
+        .expect("성공 답장");
+    assert_eq!(
+        none,
+        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null}),
+        "물을 사본이 없으면 뒤 셋은 null"
+    );
+
+    world.crash_copy_awaits(2);
+    world.mail.clear();
+    let awaiting = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+        .await
+        .outcome
+        .expect("성공 답장");
+    assert_eq!(
+        awaiting,
+        json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3}),
+        "창 수 = main + 팝아웃(트리 창은 세지 않는다)"
+    );
+}
+
+#[tokio::test]
+async fn restore_answer_conflicts_while_not_awaiting_or_while_another_answer_runs() {
+    let (world, queue, receiver) = queued();
+    world.attach_restore_ports();
+
+    let no_copy = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "restore.answer",
+            json!({"accept": true}),
+        )
+        .await,
+    );
+    assert_eq!(no_copy.code(), ErrorCode::Conflict, "사본이 없다");
+
+    world.crash_copy_awaits(0);
+    let held = world.restore_service.begin_answer().expect("답할 수 있다");
+    world.mail.clear();
+    let in_flight = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "restore.answer",
+            json!({"accept": false}),
+        )
+        .await,
+    );
+    assert_eq!(
+        in_flight.code(),
+        ErrorCode::Conflict,
+        "다른 답이 처리 중이다"
+    );
+    drop(held);
+
+    world.mail.clear();
+    let rejected = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "restore.answer",
+        json!({"accept": false}),
+    )
+    .await
+    .outcome
+    .expect("거절은 답이다");
+    assert_eq!(
+        rejected,
+        json!({"restored_windows": 0, "durable": false}),
+        "거절은 화면을 안 바꾸고 · 기록기가 없으면 디스크에 안 붙는다"
+    );
+
+    world.mail.clear();
+    let again = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "restore.answer",
+            json!({"accept": true}),
+        )
+        .await,
+    );
+    assert_eq!(again.code(), ErrorCode::Conflict, "이미 답했다");
+    assert_ne!(
+        again.message(),
+        no_copy.message(),
+        "사본 없음과 이미 답함을 문구가 가른다(사람이 읽는다)"
+    );
+    assert_eq!(world.restore.status().crash_copy, CrashCopyStatus::Answered);
+}
+
+#[tokio::test]
+async fn an_accept_before_the_shell_attaches_its_ports_is_internal_and_can_be_retried() {
+    let (world, queue, receiver) = queued();
+    world.crash_copy_awaits(0);
+
+    let early = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "restore.answer",
+            json!({"accept": true}),
+        )
+        .await,
+    );
+    assert_eq!(early.code(), ErrorCode::Internal);
+    assert_eq!(
+        early.retry(),
+        engram_dashboard_command::RetryMode::Never,
+        "지시는 싣지 않는다 — 데몬이 중계하며 전부 never 로 내린다(ADR-0159)"
+    );
+    assert!(
+        early.message().contains("answer again"),
+        "다시 답하라는 안내는 문구가 나른다: {}",
+        early.message()
+    );
+    assert_eq!(
+        world.restore.status().crash_copy,
+        CrashCopyStatus::Awaiting,
+        "아무것도 안 바뀌었다 — 다시 답할 수 있다"
+    );
+
+    world.attach_restore_ports();
+    world.mail.clear();
+    let retried = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "restore.answer",
+        json!({"accept": true}),
+    )
+    .await
+    .outcome
+    .expect("포트가 선 뒤 다시 답하면 된다");
+    assert_eq!(retried, json!({"restored_windows": 1, "durable": false}));
+}
+
+/// ★표가 쥔 조율자가 사람 경로와 **같은 인스턴스**다★ — 수락은 모델을 사본 화면으로 바꾸고, 막는 본문은 적용
+/// 태스크를 폴링하는 런타임 스레드가 아니라 블로킹 풀에서 돈다.
+#[tokio::test]
+async fn restore_accept_swaps_the_screen_through_the_shared_coordinator_off_the_runtime_thread() {
+    let (world, queue, receiver) = queued();
+    let screen = world.attach_restore_ports();
+    world.crash_copy_awaits(1);
+    let here = std::thread::current().id();
+
+    let accepted = call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "restore.answer",
+        json!({"accept": true}),
+    )
+    .await
+    .outcome
+    .expect("수락");
+
+    assert_eq!(accepted, json!({"restored_windows": 2, "durable": false}));
+    assert_eq!(world.main_tab_name(), "지난 탭");
+    let opened = screen.opened.lock().unwrap().clone();
+    assert_eq!(opened, ["slot-popup-1"], "새 팝아웃은 공유 발급기의 label");
+    let mut windows = world.state.0.lock().unwrap().list_windows();
+    windows.sort();
+    assert_eq!(windows, [MAIN_WINDOW_LABEL, "slot-popup-1"]);
+    assert_eq!(world.restore.status().crash_copy, CrashCopyStatus::Answered);
+    let threads = screen.threads.lock().unwrap().clone();
+    assert_eq!(threads.len(), 1);
+    assert!(threads.iter().all(|id| *id != here), "{threads:?}");
+}
+
+#[tokio::test]
+async fn restore_answer_needs_the_accept_flag() {
+    let (world, queue, receiver) = queued();
+    world.crash_copy_awaits(0);
+
+    let missing = error_of(call(&receiver, &queue, &world.mail, "restore.answer", json!({})).await);
+
+    assert_eq!(missing.code(), ErrorCode::InvalidArgument);
+    assert_eq!(
+        world.restore.status().crash_copy,
+        CrashCopyStatus::Awaiting,
+        "인자 검문에서 멈춘다"
     );
 }
 

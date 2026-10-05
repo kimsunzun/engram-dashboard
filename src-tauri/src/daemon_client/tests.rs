@@ -5381,6 +5381,14 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
             &std::env::temp_dir().join("engram-dashboard-no-settings"),
         )),
         settings_events: Arc::new(NoSettingsEvents),
+        // 포트를 꽂지 않은 조율자 — 이 시험은 복원에 답하지 않는다.
+        restore: Arc::new(crate::state::restore::RestoreCoordinator::new(
+            Arc::new(crate::state::restore::RestoreService::new()),
+            state.clone(),
+            Arc::default(),
+            Arc::default(),
+            Arc::new(PopupCounter::default()),
+        )),
     })
 }
 

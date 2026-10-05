@@ -126,6 +126,25 @@ pub(crate) fn build_runtime_window(
     label: &str,
     at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
 ) -> Result<WebviewWindow, String> {
+    build_window(app, label, at, true)
+}
+
+/// [`build_runtime_window`] 와 같되 숨긴 채 만든다 — 보이기는 부르는 쪽 몫이다(런타임 복원 수락이 모델에 넣은
+/// 뒤 보인다 — TRD S21-storage §6-7 ② ④).
+pub(crate) fn build_hidden_runtime_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+) -> Result<WebviewWindow, String> {
+    build_window(app, label, at, false)
+}
+
+fn build_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+    visible: bool,
+) -> Result<WebviewWindow, String> {
     let ((x, y), (w, h)) = match at {
         Some((at, size)) => ((at.x, at.y), (size.width, size.height)),
         None => (cascade_position(label), (720.0, 500.0)),
@@ -134,6 +153,7 @@ pub(crate) fn build_runtime_window(
         .title(format!("Engram — {label}"))
         .inner_size(w, h)
         .position(x, y)
+        .visible(visible)
         .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
         .build()
         .map_err(|e| format!("런타임 창 생성 실패: {e}"))
@@ -143,12 +163,20 @@ pub(crate) fn build_runtime_window(
 // ★창 닫힘 = 백엔드 단일 소스(§5-2/G2)★: 프론트로 별도 view:closed 를 안 쏜다(이중 발화·재진입 방지).
 // registry 는 여기선 안 건드린다(Destroyed→cleanup 이 정리) — 그래서 인자로도 안 받는다(F5).
 pub fn destroy_window(app: &AppHandle, label: &str) {
-    if let Some(w) = app.get_webview_window(label) {
-        if let Err(e) = w.destroy() {
-            tracing::warn!(label, "destroy_window 실패(창 이미 닫힘일 수 있음): {e}");
+    if let Err(e) = try_destroy_window(app, label) {
+        tracing::warn!(label, "destroy_window 실패(창 이미 닫힘일 수 있음): {e}");
+    }
+}
+
+/// [`destroy_window`] 와 같되 실패를 돌려준다 — 거두기를 다시 해 보거나 남은 창을 알려야 하는 쪽(런타임 복원 수락)이
+/// 쓴다. OS 창이 없으면 `Ok`.
+pub(crate) fn try_destroy_window(app: &AppHandle, label: &str) -> Result<(), String> {
+    match app.get_webview_window(label) {
+        Some(w) => w.destroy().map_err(|e| e.to_string()),
+        None => {
+            tracing::debug!(label, "destroy_window: OS 창 없음(이미 닫힘) — no-op");
+            Ok(())
         }
-    } else {
-        tracing::debug!(label, "destroy_window: OS 창 없음(이미 닫힘) — no-op");
     }
 }
 

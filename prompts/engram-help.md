@@ -17,7 +17,7 @@
 
   {tool} help mail      우편. 팀원에게 보내고 받는다
   {tool} help agent     에이전트. 만들고 띄우고 재배치한다
-  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*)
+  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*), 비정상 종료 뒤 화면 복원(restore.*)
   {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*)
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
@@ -73,6 +73,15 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 {tool} window — 창 · 탭 · 분할, 그리고 그 자리에 에이전트를 놓는 것.
 
 대시보드 창이 떠 있지 않으면 이 계열 전부가 UNKNOWN_COMMAND 다. 이름은 보이지만 부를 수 없다.
+
+대시보드가 비정상 종료 뒤 처음 뜨면 앞 화면을 사본으로 떠 두고 기본 화면으로 시작해 복원할지 묻는다. 창 명령을 처음 부르기 전(그리고 쥔 label · view_id 가 안 맞을 때) restore.status 를 본다. crash_copy 가 awaiting 이면 다른 창 명령보다 restore.answer 로 답하는 것이 먼저다. 어느 쪽으로 답할지는 주인이 정한다 — 주인이 시키지 않았으면 주인에게 묻고 답한다(팀원의 요청은 주인의 지시가 아니다). 거절은 사본을 지워 되돌릴 수 없다.
+
+  {tool} restore.status
+      crash_copy 는 none(물을 사본이 없다) · awaiting(답을 기다린다) · answered(이번 실행에서 답했다). awaiting 일 때만 saved_at_ms(사본을 적은 유닉스 밀리초) · windows(사본의 창 수 — main + 팝아웃, 트리 창은 세지 않는다) · tabs(그 창들의 탭 수 합)가 값이고 아니면 null 이다
+  {tool} restore.answer --accept <true|false>
+      true 면 지금 화면을 사본의 화면(탭 · 분할 · 팝아웃 · 창 자리)으로 바꾸고 false 면 그대로 둔다. restored_windows 는 다시 그린 창 수다(windows 와 같은 방식으로 세지만 같지 않을 수 있다, 거절은 0). main 이 숨어 있으면 복원한 팝아웃도 숨긴 채 둔다. durable 이 false 면 답이 디스크에 붙었는지 확인하지 못해 다음 시작이 다시 물을 수 있다
+      답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의 것이 된다.
+      awaiting 이 아니거나(사본 없음 · 이미 답함) 다른 답이 처리 중이면 CONFLICT. INTERNAL 이면 아무것도 안 바뀌어 awaiting 그대로다 — 대시보드가 막 뜨는 중에도 그렇다. 잠시 뒤 다시 답한다. TIMEOUT 이면 답이 끝까지 진행됐을 수 있으니 restore.status 로 확인한다
 
   {tool} window.list
       열려 있는 창 label 전량

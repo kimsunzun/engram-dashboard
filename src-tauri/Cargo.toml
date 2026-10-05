@@ -98,6 +98,13 @@ serde_json = "1"
 # OutputRouter 핫패스 lock-free snapshot (spike §2 FIX-F6). 데몬에 없으므로 최신 1.x 안정 버전.
 arc-swap = "1"
 
+# 런타임 복원 수락이 끝에 main 에 포커스를 줄지 가른다 — 우리 프로세스가 전경 창을 쥐었나
+#   (`GetForegroundWindow` · `GetWindowThreadProcessId` — `state::placement` 의 `foreground_is_ours`). 창의 포커스
+#   게터는 Windows 에서 웹뷰가 키보드 포커스를 쥔 동안 `false` 라 쓰지 않는다(그 함수 주석). 버전은 agent · base 와
+#   같다 — 새 패키지가 아니라 간선 하나다.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 # T2(S14 모듈①) 격리 하네스: 실 데몬 없이 DaemonClient 핸드셰이크를 검증한다. daemon crate 의
 #   start_test_server(in-process WS 서버)를 재사용해 connect→Auth→Hello→connected 를 실제 서버로 단언.

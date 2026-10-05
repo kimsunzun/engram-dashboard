@@ -1,29 +1,35 @@
-//! 화면 상태의 실행 수명 — 부팅 단계 플러그인(TRD S21-storage §6-5 ⓪–⑥) · 기록기 시작(⑦) · 정상 종료(§6-6). 셋이
-//! 나눠 쥐는 칸이 [`StateSession`] 이고, 기록기의 스냅숏 원천이 [`LiveSource`] 다.
+//! 화면 상태의 실행 수명 — 부팅 단계 플러그인(TRD S21-storage §6-5 ⓪–⑥) · 기록기 시작(⑦) · 답을 디스크에 붙이기
+//! (§6-7 ⑤) · 정상 종료(§6-6). 넷이 나눠 쥐는 칸이 [`StateSession`] 이고, 기록기의 스냅숏 원천이 [`LiveSource`] 다.
 //!
 //! - ★플러그인([`init`])은 단일 인스턴스 플러그인 바로 뒤에 등록한다★ — 플러그인 setup 은 `build()` 안에서 등록
 //!   순서대로 돌고 단일 인스턴스 플러그인이 거기서 둘째 인스턴스를 끝낸다(§6-5 사실 ① · ③). 그 뒤라야 디스크를
 //!   바꿔도 되고, 설정 창(main · agent-tree)은 그보다 늦게 만들어지므로 창이 처음 당기는 모델이 판정한 모델이다.
 //! - ★setup 은 `Err` 를 돌려주지 않는다★ — `Err` 면 빌드가 멈춰 앱이 아예 안 뜬다(N7 · D8). 실패는 log 하고 계속한다.
+//! - ★복원 서비스 상태는 ⑥ 한 곳에서 정한다(I5)★ — 창이 아직 없으므로 모든 창의 첫 `restore_status` 당기기가 정해진
+//!   값을 본다. 사용자 setup 에서 정하면 Tauri 가 그 앞에서 만든 설정 창이 먼저 `none` 을 볼 수 있다(§6-5 사실 ③).
 //! - ★셸 실행 잠금은 [`StateSession::shutdown`] 이 명시적으로 놓는다★ — 이벤트 루프는 끝나면 곧장
 //!   `process::exit` 한다(tao `platform_impl/windows/event_loop.rs` `run`). managed state 도 이 칸도 drop 되지 않아,
 //!   기대면 잠금은 OS 가 핸들을 거둘 때에야 풀리고 기다리는 새 인스턴스가 그만큼 더 막힌다(`lock.rs` 의 `Drop`).
 
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use engram_dashboard_base::logging;
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
-use tauri::Runtime;
+use tauri::{AppHandle, Emitter, Runtime};
 
-use super::boot::{self, BootModel, FsBootFiles, CRASH_COPY_FILE, STATE_FILE};
+use super::boot::{self, BootModel, BootPlan, FsBootFiles, CRASH_COPY_FILE, STATE_FILE};
 use super::convert::{to_persisted, RestoreWarning, StateRevision};
 use super::lock::{self, StateLock};
-use super::saver::{self, Clock, RequestOutcome, SaveOutcome, SaverHandle, SystemClock};
+use super::restore::{
+    CrashCopy, CrashCopyStatus, RestoreNotifier, RestoreService, EVT_RESTORE_CHANGED,
+};
+use super::saver::{self, Clock, CloseFlag, RequestOutcome, SaveOutcome, SaverHandle, SystemClock};
 use super::schema::WindowEntry;
 use super::tree_attrs::TreeAttrs;
 use crate::discovery::DataLayout;
-use crate::layout::{LabelSource, LayoutState, ViewManager, WindowAttrs};
+use crate::layout::{LabelSource, LayoutState, ViewManager, WindowAttrs, MAIN_WINDOW_LABEL};
 
 const PLUGIN_NAME: &str = "engram-state-boot";
 
@@ -34,15 +40,41 @@ pub struct Boot {
     /// 복원하는 팝아웃의 label — 런타임 팝아웃과 같은 발급기여야 label 이 겹치지 않는다(§6-3).
     pub labels: Arc<dyn LabelSource>,
     pub session: Arc<StateSession>,
+    /// ⑥ 이 상태를 정한다. 알림은 플러그인 setup 이 부팅 단계 앞에 꽂는다 — ⑥ 의 결정부터 알린다.
+    pub restore: Arc<RestoreService>,
 }
 
 pub fn init<R: Runtime>(boot: Boot) -> TauriPlugin<R> {
     PluginBuilder::new(PLUGIN_NAME)
-        .setup(move |_app, _api| {
+        .setup(move |app, _api| {
+            boot.restore
+                .set_notifier(Arc::new(TauriRestoreNotifier { app: app.clone() }));
             boot.run();
             Ok(())
         })
         .build()
+}
+
+/// 복원 상태가 바뀌면 main 창에 [`EVT_RESTORE_CHANGED`] 를 낸다. ⑥ 에는 창이 없어 받는 쪽이 없다 — 창은 첫
+/// `restore_status` 당기기로 정해진 값을 본다(I5).
+struct TauriRestoreNotifier<R: Runtime> {
+    app: AppHandle<R>,
+}
+
+impl<R: Runtime> RestoreNotifier for TauriRestoreNotifier<R> {
+    fn changed(&self, status: CrashCopyStatus) {
+        if let Err(e) = self
+            .app
+            .emit_to(MAIN_WINDOW_LABEL, EVT_RESTORE_CHANGED, status)
+        {
+            tracing::warn!(
+                module = "state",
+                ?status,
+                error = %e,
+                "복원 상태 변경을 main 창에 알리지 못했다"
+            );
+        }
+    }
 }
 
 impl Boot {
@@ -58,11 +90,11 @@ impl Boot {
             log_file = ?log_file,
             "앱 로그 파일 결정"
         );
-        self.restore(&paths.shell_run_dir(), &paths.shell_state_dir());
+        self.run_steps(&paths.shell_run_dir(), &paths.shell_state_dir());
     }
 
     /// 부팅 단계 ①–⑥. 기록기는 띄우지 않는다 — 띄울 재료를 [`StateSession`] 에 맡기고 ⑦ 이 꺼낸다.
-    fn restore(&self, run_dir: &Path, state_dir: &Path) {
+    fn run_steps(&self, run_dir: &Path, state_dir: &Path) {
         self.session.hold_lock(lock::acquire(run_dir));
 
         let files = FsBootFiles::in_dir(state_dir);
@@ -94,23 +126,42 @@ impl Boot {
             StateRevision::of(&layout, tree_rev)
         };
 
-        let saver = plan.guard.is_none().then(|| PendingSaver {
+        let BootPlan {
+            model,
+            crash_copy,
+            carry_resolved,
+            guard,
+            ..
+        } = plan;
+        // 가드면 기록기가 없어 답이 디스크에 붙지 않는다 — 가드 ⅱ 의 원천은 판정이 실은 메모리의 원문이다(L2).
+        let durable = guard.is_none();
+        let ask = crash_copy.is_some();
+        self.restore.set_boot(crash_copy.map(|copy| CrashCopy {
+            text: copy.text,
+            hash: copy.hash,
+            file: copy.file,
+            durable,
+        }));
+
+        let saver = durable.then(|| PendingSaver {
             source: LiveSource::new(self.layout.clone(), self.tree.clone()),
             files: saver::Fs::new(state_dir.join(STATE_FILE), state_dir.join(CRASH_COPY_FILE)),
             revision,
+            carry_resolved,
         });
         tracing::info!(
             module = "state",
-            restore = matches!(plan.model, BootModel::Restore(_)),
+            restore = matches!(model, BootModel::Restore(_)),
+            ask,
             marker = ?marker,
             saver = saver.is_some(),
-            "부팅 단계 — 모델을 채웠다"
+            "부팅 단계 — 모델 · 복원 상태를 정했다"
         );
         self.session.cell().saver_start = saver;
     }
 }
 
-fn report_restore_warning(warning: &RestoreWarning) {
+pub(super) fn report_restore_warning(warning: &RestoreWarning) {
     match warning {
         RestoreWarning::Internal(_) => {
             tracing::error!(module = "state", %warning, "화면 상태 복원")
@@ -119,10 +170,14 @@ fn report_restore_warning(warning: &RestoreWarning) {
     }
 }
 
-/// 부팅 단계 · 사용자 setup · `RunEvent::Exit` 가 나눠 쥐는 칸. 락은 잎이다 — 쥔 채 다른 락을 잡거나 기다리지 않는다.
+/// 부팅 단계 · 사용자 setup · `RunEvent::Exit` 가 나눠 쥐는 칸. 락은 잎이다 — 쥔 채 다른 락을 잡거나 기다리지 않는다
+/// (`settled` 의 기다림은 칸 락을 놓고 선다).
 #[derive(Default)]
 pub struct StateSession {
     cell: Mutex<SessionCell>,
+    /// 띄우는 중(`starting`)이 끝나면(실음 · 못 띄움 · 종료) 깨운다 — 답이 그 끝을 기다린다
+    /// ([`StateSession::resolve_crash_copy`]).
+    settled: Condvar,
 }
 
 #[derive(Default)]
@@ -131,6 +186,10 @@ struct SessionCell {
     /// 부팅 단계 ⑥ 이 세우고 ⑦([`StateSession::start_saver`])이 꺼낸다. `None` = 가드(N3 — 이 실행은 저장하지
     /// 않는다) · 이미 꺼냈다.
     saver_start: Option<PendingSaver>,
+    /// 재료를 꺼낸 뒤 칸에 싣기 전까지의 기록기 닫힘 표지 — 그 사이 [`StateSession::shutdown`] 은 셸 실행 잠금을
+    /// 놓기 전에 이것을 세운다. 안 세우면 실리지 않은 기록기가 잠금을 놓은 뒤에 써서, 그사이 관문을 지난 새
+    /// 인스턴스의 파일을 덮는다.
+    starting: Option<CloseFlag>,
     saver: Option<SaverHandle>,
     /// [`StateSession::shutdown`] 가 이미 돌았다.
     closed: bool,
@@ -141,11 +200,32 @@ struct PendingSaver {
     files: saver::Fs,
     /// 실행 표식(⑤)이 담은 모델의 변경 번호.
     revision: StateRevision,
+    /// 실행 표식(⑤)이 실은 답한 사본의 해시 — 기록기가 이어 싣고 다시 지운다.
+    carry_resolved: Option<String>,
+}
+
+// [`StateSession::published_saver`] 의 답.
+enum Published {
+    Ready(SaverHandle),
+    /// 가드 · 못 띄움 · 이미 끝남.
+    Absent,
+    /// 다른 스레드가 띄우는 중인 채 마감이 지났다.
+    StillStarting,
+}
+
+/// [`StateSession::resolve_crash_copy`] 의 답.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveResult {
+    /// 그 해시를 실은 `state.json` 이 마감 안에 발행됐다 — 사본 지우기의 성패는 담지 않는다.
+    Durable,
+    /// 디스크에 붙지 않았다 — 기록기 없음(가드 · 못 띄움 · 이미 끝남 · 띄우는 다른 스레드가 마감 안에 싣지
+    /// 못함) · 쓰기 실패 · 닫힘 · 마감 초과.
+    NotDurable,
 }
 
 impl StateSession {
     fn cell(&self) -> MutexGuard<'_, SessionCell> {
-        // 칸이 `Option` 셋과 깃발 하나뿐이라 반쯤 바뀐 상태가 없다 — 종료 경로가 잠금을 놓지 못하는 것이 더 나쁘다.
+        // 칸이 `Option` 넷과 깃발 하나뿐이라 반쯤 바뀐 상태가 없다 — 종료 경로가 잠금을 놓지 못하는 것이 더 나쁘다.
         self.cell.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -153,25 +233,145 @@ impl StateSession {
         self.cell().lock = lock;
     }
 
-    /// 부팅 단계 ⑦ — 가드였거나 이미 띄웠으면 아무것도 하지 않는다.
+    /// 부팅 단계 ⑦ — 가드였거나 이미 띄웠으면(⑦ 전에 온 답이 먼저 띄운 경우 포함 —
+    /// [`Self::resolve_crash_copy`]) 아무것도 하지 않는다.
     pub fn start_saver(&self) {
-        let Some(pending) = self.cell().saver_start.take() else {
+        let Some((pending, closed)) = self.take_pending() else {
             return;
         };
-        // TODO(P3c1): 부팅이 못 지운 답한 사본의 해시(`carry_resolved`)를 넘긴다.
         match saver::spawn(
             pending.source,
             pending.files,
             SystemClock,
             pending.revision,
-            None,
+            pending.carry_resolved,
+            closed,
         ) {
-            Ok(handle) => self.cell().saver = Some(handle),
-            Err(e) => tracing::error!(
+            Ok(handle) => self.publish_saver(handle),
+            Err(e) => {
+                self.end_start(|_| {});
+                tracing::error!(
+                    module = "state",
+                    error = %e,
+                    "기록기 스레드를 띄우지 못했다 — 이 실행은 화면 상태를 더 저장하지 않는다"
+                );
+            }
+        }
+    }
+
+    // 띄울 재료를 꺼내고 그 기록기의 닫힘 표지를 칸에 「띄우는 중」으로 세운다 — 꺼낸 쪽은 반드시
+    // [`Self::publish_saver`] 나 [`Self::end_start`] 로 끝맺는다(안 끝맺으면 답이 마감까지 기다린다).
+    fn take_pending(&self) -> Option<(PendingSaver, CloseFlag)> {
+        let mut cell = self.cell();
+        let pending = cell.saver_start.take()?;
+        let closed = CloseFlag::default();
+        cell.starting = Some(closed.clone());
+        Some((pending, closed))
+    }
+
+    // 「띄우는 중」을 거두고 기다리는 답을 깨운다 — `then` 은 칸 락 안에서 돈다(칸 대입만 할 것).
+    fn end_start<T>(&self, then: impl FnOnce(&mut SessionCell) -> T) -> T {
+        let out = {
+            let mut cell = self.cell();
+            cell.starting = None;
+            then(&mut cell)
+        };
+        self.settled.notify_all();
+        out
+    }
+
+    // 띄운 기록기를 칸에 싣는다 — 띄우는 동안(락 밖) [`Self::shutdown`] 이 돌았으면 싣지 않는다(그 기록기는 종료가
+    // 이미 닫았다 — `starting`).
+    fn publish_saver(&self, handle: SaverHandle) {
+        let published = self.end_start(|cell| {
+            if cell.closed {
+                false
+            } else {
+                cell.saver = Some(handle.clone());
+                true
+            }
+        });
+        if !published {
+            handle.close();
+            tracing::info!(
                 module = "state",
-                error = %e,
-                "기록기 스레드를 띄우지 못했다 — 이 실행은 화면 상태를 더 저장하지 않는다"
-            ),
+                "기록기를 띄우는 사이 종료가 돌아 그 기록기를 닫는다 — 아무것도 쓰지 않는다"
+            );
+        }
+    }
+
+    /// 답한 사본의 해시를 기록기에 넘기고(`Resolve`) 마감([`saver::REPLY_DEADLINE`])까지 기다린다(TRD §6-7 ⑤).
+    ///
+    /// ★기록기가 아직 없으면 먼저 ⑦([`Self::start_saver`])을 부른다★ — 설정 창은 사용자 setup 보다 먼저 만들어져
+    /// (§6-5 사실 ③) 그 창의 invoke 가 ⑦ 전에 올 수 있다. 부르지 않으면 곧 뜰 기록기를 두고 답이 `NotDurable` 이
+    /// 된다. 가드 · 이미 띄움 · 종료 뒤면 그 부름은 아무것도 하지 않는다.
+    ///
+    /// ★다른 스레드(⑦ · 다른 답)가 띄우는 중이면 싣거나 실패할 때까지 기다린다★ — 그 기다림과 `Resolve` 답 기다림이
+    /// 같은 마감 하나를 나눠 쓴다. 안 기다리면 그 순간엔 기록기가 없는 것으로 보여 답이 디스크에 붙지 않는다.
+    ///
+    /// ★아무 락도 쥐지 않고 기다린다 — 부르는 쪽도 레이아웃 · 트리 칸 락을 쥔 채 부르지 않는다★: 기록기는
+    /// 스냅숏을 뜨려고 그 락을 잡는다(`saver::SnapshotSource`). 쥐면 답이 늘 마감을 넘긴다.
+    pub fn resolve_crash_copy(&self, hash: String) -> ResolveResult {
+        self.resolve_within(hash, saver::REPLY_DEADLINE)
+    }
+
+    fn resolve_within(&self, hash: String, deadline: Duration) -> ResolveResult {
+        let until = Instant::now() + deadline;
+        let started = self.cell().saver.is_some();
+        if !started {
+            self.start_saver();
+        }
+        let saver = match self.published_saver(until) {
+            Published::Ready(saver) => saver,
+            Published::Absent => {
+                tracing::info!(
+                    module = "state",
+                    hash = %hash,
+                    "기록기가 없어 답을 디스크에 붙이지 않는다"
+                );
+                return ResolveResult::NotDurable;
+            }
+            Published::StillStarting => {
+                tracing::warn!(
+                    module = "state",
+                    hash = %hash,
+                    "기록기가 마감 안에 뜨지 않아 답을 디스크에 붙이지 않는다"
+                );
+                return ResolveResult::NotDurable;
+            }
+        };
+        let left = until.saturating_duration_since(Instant::now());
+        match saver.resolve(hash.clone(), left) {
+            RequestOutcome::Done(SaveOutcome::Written) => ResolveResult::Durable,
+            outcome => {
+                tracing::warn!(
+                    module = "state",
+                    hash = %hash,
+                    ?outcome,
+                    "답을 마감 안에 디스크에 붙이지 못했다"
+                );
+                ResolveResult::NotDurable
+            }
+        }
+    }
+
+    // 띄우는 중이면 그 끝(실음 · 못 띄움 · 종료)을 `until` 까지 기다려 실린 기록기를 돌려준다. 칸 락은 기다리는
+    // 동안 놓인다 — 띄우는 쪽이 실으려면 그 락을 잡아야 한다. 로그는 부르는 쪽이 남긴다(갈래마다 한 줄).
+    fn published_saver(&self, until: Instant) -> Published {
+        let mut cell = self.cell();
+        while cell.starting.is_some() && !cell.closed {
+            let left = until.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Published::StillStarting;
+            }
+            cell = self
+                .settled
+                .wait_timeout(cell, left)
+                .map_or_else(|poisoned| poisoned.into_inner().0, |(cell, _)| cell);
+        }
+        match cell.saver.clone() {
+            Some(saver) => Published::Ready(saver),
+            None => Published::Absent,
         }
     }
 
@@ -187,8 +387,14 @@ impl StateSession {
                 return;
             }
             cell.saver_start = None;
+            // 잠금을 놓기 전에 — 띄우는 중인 기록기는 아직 실리지 않아 아래 `Final` 이 닿지 않는다(칸 머리
+            //   `starting`).
+            if let Some(starting) = cell.starting.take() {
+                starting.close();
+            }
             (cell.saver.take(), cell.lock.take())
         };
+        self.settled.notify_all();
         match saver.map(|saver| saver.finish(saver::REPLY_DEADLINE)) {
             Some(RequestOutcome::Done(SaveOutcome::Written)) => {
                 tracing::info!(module = "state", "정상 종료를 적었다")
@@ -248,9 +454,13 @@ mod tests {
 
     use super::*;
     use crate::commands::popout::PopupCounter;
-    use crate::layout::MAIN_WINDOW_LABEL;
+    use crate::layout::{LayoutEvents, ViewSnapshot, WindowBounds, WindowTabsPayload};
     use crate::state::codec;
     use crate::state::lock::LOCK_FILE;
+    use crate::state::placement::{Landing, MonitorArea};
+    use crate::state::restore::{
+        RestoreCoordinator, RestorePorts, RestoreWindows, SubscriptionSource,
+    };
     use crate::state::saver::SnapshotSource;
     use crate::state::schema::{StateFile, STATE_VERSION};
     use crate::ui_settings::UiTheme;
@@ -302,8 +512,46 @@ mod tests {
             tree: tree.clone(),
             labels: Arc::new(PopupCounter::default()),
             session: session.clone(),
+            restore: Arc::new(RestoreService::new()),
         };
         (boot, session)
+    }
+
+    #[derive(Default)]
+    struct Notices(Mutex<Vec<CrashCopyStatus>>);
+
+    impl RestoreNotifier for Notices {
+        fn changed(&self, status: CrashCopyStatus) {
+            self.0.lock().unwrap().push(status);
+        }
+    }
+
+    impl Notices {
+        fn seen(&self) -> Vec<CrashCopyStatus> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    fn listen(boot: &Boot) -> Arc<Notices> {
+        let notices = Arc::new(Notices::default());
+        boot.restore.set_notifier(notices.clone());
+        notices
+    }
+
+    /// 탭 이름 하나를 바꾼 화면 — 앞 실행이 남긴 `state.json` 원문과 그 탭.
+    fn previous_run(clean_exit: bool, resolved: Option<String>) -> (String, uuid::Uuid) {
+        let mut previous = ViewManager::new();
+        let view = previous.windows[MAIN_WINDOW_LABEL].active;
+        previous.rename_tab(view, "지난 탭".into()).unwrap();
+        let text = codec::encode(&StateFile {
+            version: STATE_VERSION,
+            saved_at_ms: 1,
+            clean_exit,
+            resolved_crash_copy: resolved,
+            windows: to_persisted(&previous, WindowAttrs::default()),
+        })
+        .unwrap();
+        (text, view)
     }
 
     // ── 스냅숏 원천 ──
@@ -400,8 +648,14 @@ mod tests {
         let layout = LayoutState::new();
         let tree = Arc::new(TreeAttrs::default());
         let (boot, session) = boot(&layout, &tree);
-        boot.restore(&run_dir, &state_dir);
+        let notices = listen(&boot);
+        boot.run_steps(&run_dir, &state_dir);
 
+        assert_eq!(
+            notices.seen(),
+            [CrashCopyStatus::None],
+            "⑥ 이 한 번 정한다(I5)"
+        );
         {
             let mgr = layout.0.lock().unwrap();
             assert_eq!(mgr.views[&saved_tab].name, "지난 탭");
@@ -431,7 +685,7 @@ mod tests {
         let layout = LayoutState::new();
         let tree = Arc::new(TreeAttrs::default());
         let (boot, _session) = boot(&layout, &tree);
-        boot.restore(&run_dir, &state_dir);
+        boot.run_steps(&run_dir, &state_dir);
 
         let marker = read_state(&state_dir);
         assert!(!marker.clean_exit);
@@ -451,8 +705,9 @@ mod tests {
         let layout = LayoutState::new();
         let tree = Arc::new(TreeAttrs::default());
         let (boot, session) = boot(&layout, &tree);
-        boot.restore(&run_dir, &state_dir);
+        boot.run_steps(&run_dir, &state_dir);
 
+        assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::None);
         assert!(session.cell().saver_start.is_none(), "기록기 재료가 없다");
         assert!(
             state_dir.join(STATE_FILE).is_dir(),
@@ -469,6 +724,191 @@ mod tests {
         assert!(state_dir.join(STATE_FILE).is_dir());
     }
 
+    // ── 크래시 사본 · 복원 서비스(⑥) · 답을 디스크에 붙이기 ──
+
+    #[test]
+    fn an_unclean_previous_run_becomes_the_crash_copy_and_awaits_an_answer() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, saved_tab) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+
+        let layout = LayoutState::new();
+        let tree = Arc::new(TreeAttrs::default());
+        let (boot, session) = boot(&layout, &tree);
+        let notices = listen(&boot);
+        boot.run_steps(&run_dir, &state_dir);
+
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join(CRASH_COPY_FILE)).unwrap(),
+            raw,
+            "사본 = 앞 실행의 state.json 원문"
+        );
+        assert_eq!(
+            notices.seen(),
+            [CrashCopyStatus::Awaiting],
+            "⑥ 이 한 번 정한다(I5)"
+        );
+        assert_eq!(
+            boot.restore.status().windows,
+            Some(1),
+            "main 만 — 트리 창은 세지 않는다"
+        );
+        assert!(
+            !layout.0.lock().unwrap().views.contains_key(&saved_tab),
+            "묻는 동안은 기본 화면"
+        );
+        assert!(!read_state(&state_dir).clean_exit, "실행 표식");
+        {
+            let ticket = boot.restore.begin_answer().unwrap();
+            assert!(ticket.copy().durable, "기록기가 뜬다");
+            assert_eq!(ticket.copy().text, raw);
+        }
+
+        session.start_saver();
+        let hash = codec::crash_copy_hash(&raw);
+        assert_eq!(
+            session.resolve_crash_copy(hash.clone()),
+            ResolveResult::Durable
+        );
+        assert!(
+            !state_dir.join(CRASH_COPY_FILE).exists(),
+            "답을 디스크에 붙인 뒤 사본을 지운다"
+        );
+        assert_eq!(read_state(&state_dir).resolved_crash_copy, Some(hash));
+        session.shutdown();
+        assert!(lock_is_free(&run_dir));
+    }
+
+    #[test]
+    fn an_unanswered_copy_survives_a_clean_exit_and_is_asked_again() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+        {
+            let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+            boot.run_steps(&run_dir, &state_dir);
+            session.start_saver();
+            session.shutdown();
+        }
+        assert!(read_state(&state_dir).clean_exit);
+
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join(CRASH_COPY_FILE)).unwrap(),
+            raw,
+            "정상 종료는 사본을 지우지 않는다(D6)"
+        );
+        assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::Awaiting);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_crash_copy_that_cannot_be_read_guards_the_run_and_asks_from_memory() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+        // 폴더는 「없음」도 「못 쓸 파일」도 아닌 읽기 IO 실패다(I3) — 덮어도 되는지 모른다.
+        std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
+
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+
+        {
+            let ticket = boot.restore.begin_answer().expect("가드 ⅱ 여도 묻는다");
+            assert!(!ticket.copy().durable, "기록기가 없다");
+            assert_eq!(
+                ticket.copy().text,
+                raw,
+                "복원 원천 = 메모리의 state.json 원문(L2)"
+            );
+        }
+        assert!(
+            session.cell().saver_start.is_none(),
+            "가드 — 기록기 재료가 없다"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
+            raw,
+            "디스크의 state.json 바이트 그대로"
+        );
+        session.start_saver();
+        assert_eq!(
+            session.resolve_crash_copy(codec::crash_copy_hash(&raw)),
+            ResolveResult::NotDurable
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_answered_hash_rides_the_marker_and_the_saver_when_the_copy_cannot_be_read() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(true, Some("h".into()));
+        std::fs::write(state_dir.join(STATE_FILE), raw).unwrap();
+        std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
+
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+
+        assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::None);
+        assert_eq!(read_state(&state_dir).resolved_crash_copy, Some("h".into()));
+        assert_eq!(
+            session
+                .cell()
+                .saver_start
+                .as_ref()
+                .and_then(|pending| pending.carry_resolved.clone()),
+            Some("h".into())
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_answer_before_the_saver_step_starts_the_saver_and_sticks_to_disk() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+        assert!(session.cell().saver.is_none(), "⑦ 전");
+
+        let hash = codec::crash_copy_hash(&raw);
+        assert_eq!(
+            session.resolve_crash_copy(hash.clone()),
+            ResolveResult::Durable
+        );
+        assert!(!state_dir.join(CRASH_COPY_FILE).exists());
+        assert_eq!(read_state(&state_dir).resolved_crash_copy, Some(hash));
+        assert!(
+            session.cell().saver_start.is_none(),
+            "⑦ 의 재료를 답이 썼다"
+        );
+
+        session.start_saver();
+        session.shutdown();
+        assert!(
+            read_state(&state_dir).clean_exit,
+            "답이 띄운 기록기가 정상 종료를 적는다"
+        );
+        assert!(lock_is_free(&run_dir));
+    }
+
+    #[test]
+    fn resolving_without_a_saver_is_not_durable() {
+        let session = StateSession::default();
+        assert_eq!(
+            session.resolve_crash_copy("h".into()),
+            ResolveResult::NotDurable
+        );
+    }
+
     #[test]
     fn shutdown_without_a_saver_still_releases_the_lock() {
         let run_dir = temp_dir("run");
@@ -476,6 +916,253 @@ mod tests {
         session.hold_lock(lock::acquire(&run_dir));
         assert!(!lock_is_free(&run_dir));
 
+        session.shutdown();
+        assert!(lock_is_free(&run_dir));
+    }
+
+    #[test]
+    fn a_saver_started_while_shutdown_ran_is_closed_instead_of_published() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+        let marker = std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap();
+
+        // `start_saver` 의 틈을 손으로 벌린다 — 재료를 꺼내 락 밖에서 띄우는 사이 종료가 돈다.
+        let handle = spawn_pending(&session);
+        let witness = handle.clone();
+        session.shutdown();
+        assert!(lock_is_free(&run_dir), "종료가 잠금을 놓았다");
+        // 싣기 전에 본다 — 잠금이 풀린 지금 이미 닫혀 있어야 한다(종료가 잠금보다 먼저 세웠다).
+        assert_eq!(
+            witness.resolve(codec::crash_copy_hash(&raw), saver::REPLY_DEADLINE),
+            RequestOutcome::Done(SaveOutcome::Skipped),
+            "잠금을 놓은 뒤 실리지 않은 기록기가 쓰지 않는다"
+        );
+        session.publish_saver(handle);
+
+        assert!(session.cell().saver.is_none(), "닫힌 세션에 싣지 않는다");
+        assert!(session.cell().starting.is_none());
+        assert_eq!(
+            session.resolve_crash_copy(codec::crash_copy_hash(&raw)),
+            ResolveResult::NotDurable
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
+            marker,
+            "종료 뒤 state.json 은 그대로"
+        );
+        assert!(state_dir.join(CRASH_COPY_FILE).exists(), "사본도 그대로");
+    }
+
+    /// `start_saver` 의 앞 절반 — 재료를 꺼내 「띄우는 중」을 세우고 띄운다(싣지 않는다).
+    fn spawn_pending(session: &StateSession) -> SaverHandle {
+        let (pending, closed) = session.take_pending().expect("기록기 재료");
+        saver::spawn(
+            pending.source,
+            pending.files,
+            SystemClock,
+            pending.revision,
+            pending.carry_resolved,
+            closed,
+        )
+        .expect("기록기 스레드")
+    }
+
+    /// 크래시 사본이 있는 부팅을 ⑥ 까지 돌린다 — 그 세션 · 잠금 폴더 · 상태 폴더 · 사본 해시.
+    fn booted_with_copy() -> (Arc<StateSession>, PathBuf, PathBuf, String) {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+        (session, run_dir, state_dir, codec::crash_copy_hash(&raw))
+    }
+
+    #[test]
+    fn a_shutdown_between_taking_the_materials_and_spawning_closes_the_saver_first() {
+        let (session, run_dir, state_dir, hash) = booted_with_copy();
+        let marker = std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap();
+
+        let (pending, closed) = session.take_pending().expect("기록기 재료");
+        session.shutdown();
+        assert!(lock_is_free(&run_dir));
+        let handle = saver::spawn(
+            pending.source,
+            pending.files,
+            SystemClock,
+            pending.revision,
+            pending.carry_resolved,
+            closed,
+        )
+        .expect("기록기 스레드");
+
+        assert_eq!(
+            handle.resolve(hash, saver::REPLY_DEADLINE),
+            RequestOutcome::Done(SaveOutcome::Skipped),
+            "잠금을 놓은 뒤에 뜬 기록기는 처음부터 닫혀 있다"
+        );
+        session.publish_saver(handle);
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
+            marker
+        );
+    }
+
+    #[test]
+    fn an_answer_while_another_thread_starts_the_saver_waits_for_it_and_sticks_to_disk() {
+        let (session, run_dir, state_dir, hash) = booted_with_copy();
+        let handle = spawn_pending(&session);
+
+        let answer = {
+            let session = session.clone();
+            let hash = hash.clone();
+            std::thread::spawn(move || session.resolve_crash_copy(hash))
+        };
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !answer.is_finished(),
+            "띄우는 중이면 기록기가 없다고 끝내지 않고 기다린다"
+        );
+        session.publish_saver(handle);
+
+        assert_eq!(answer.join().unwrap(), ResolveResult::Durable);
+        assert_eq!(read_state(&state_dir).resolved_crash_copy, Some(hash));
+        session.shutdown();
+        assert!(lock_is_free(&run_dir));
+    }
+
+    #[test]
+    fn an_answer_gives_up_at_the_deadline_on_a_saver_that_never_lands() {
+        let (session, _run_dir, _state_dir, hash) = booted_with_copy();
+        let handle = spawn_pending(&session);
+
+        let started = Instant::now();
+        assert_eq!(
+            session.resolve_within(hash, Duration::from_millis(100)),
+            ResolveResult::NotDurable
+        );
+        assert!(started.elapsed() >= Duration::from_millis(100));
+
+        session.publish_saver(handle);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_shutdown_wakes_an_answer_waiting_on_the_saver_start() {
+        let (session, _run_dir, _state_dir, hash) = booted_with_copy();
+        let handle = spawn_pending(&session);
+
+        let answer = {
+            let session = session.clone();
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                (session.resolve_crash_copy(hash), started.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        session.shutdown();
+
+        let (result, waited) = answer.join().unwrap();
+        assert_eq!(result, ResolveResult::NotDurable);
+        assert!(waited < saver::REPLY_DEADLINE, "마감까지 서 있지 않는다");
+        session.publish_saver(handle);
+    }
+
+    // ── 복원 조율자 — 부팅 단계부터 답이 디스크에 붙기까지 ──
+
+    struct NoWindows;
+
+    impl RestoreWindows for NoWindows {
+        fn app_has_focus(&self) -> bool {
+            false
+        }
+        fn monitors(&self) -> Vec<MonitorArea> {
+            Vec::new()
+        }
+        fn open_hidden(
+            &self,
+            _label: &str,
+            _at: Option<(WindowBounds, Landing)>,
+            _maximized: bool,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        fn visibility(&self, _label: &str) -> Option<bool> {
+            Some(true)
+        }
+        fn place_main(&self, _at: Option<(WindowBounds, Landing)>, _maximized: bool) {}
+        fn place(&self, _label: &str, _bounds: WindowBounds, _at: Landing) {}
+        fn set_shown(&self, _label: &str, _shown: bool) {}
+        fn record_placement(&self, _label: &str) {}
+        fn focus(&self, _label: &str) {}
+        fn destroy(&self, _label: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    struct NoSubscriptions;
+
+    impl SubscriptionSource for NoSubscriptions {
+        fn current(&self) -> Option<Arc<dyn crate::layout::SubscriptionSync>> {
+            None
+        }
+    }
+
+    struct NoEvents;
+
+    impl LayoutEvents for NoEvents {
+        fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
+        fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+    }
+
+    #[test]
+    fn an_accepted_crash_copy_is_restored_and_sticks_to_disk() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, saved_tab) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+
+        let layout = LayoutState::new();
+        let tree = Arc::new(TreeAttrs::default());
+        let (boot, session) = boot(&layout, &tree);
+        let coordinator = RestoreCoordinator::new(
+            boot.restore.clone(),
+            layout.clone(),
+            tree.clone(),
+            session.clone(),
+            boot.labels.clone(),
+        );
+        coordinator.attach(RestorePorts {
+            windows: Arc::new(NoWindows),
+            events: Arc::new(NoEvents),
+            subs: Arc::new(NoSubscriptions),
+        });
+        boot.run_steps(&run_dir, &state_dir);
+        session.start_saver();
+
+        let reply = coordinator.answer(true).expect("수락");
+
+        assert!(reply.durable, "답을 실은 쓰기가 마감 안에 발행됐다");
+        assert_eq!(reply.restored_windows, 1);
+        assert!(
+            layout.0.lock().unwrap().views.contains_key(&saved_tab),
+            "사본의 화면"
+        );
+        assert!(!state_dir.join(CRASH_COPY_FILE).exists(), "사본을 지운다");
+        let written = read_state(&state_dir);
+        assert_eq!(
+            written.resolved_crash_copy,
+            Some(codec::crash_copy_hash(&raw))
+        );
+        assert_eq!(
+            written.windows,
+            to_persisted(&layout.0.lock().unwrap(), tree.attrs()),
+            "답을 붙인 쓰기가 수락한 화면을 담는다"
+        );
         session.shutdown();
         assert!(lock_is_free(&run_dir));
     }

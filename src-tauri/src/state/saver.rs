@@ -164,8 +164,6 @@ impl SaverHandle {
     ///
     /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager` · 트리 칸)을 쥐지 않는다★ — 쥐면 기록기가 그
     /// 락에서 마감까지 서 있어 답이 `TimedOut` 이 된다.
-    // TODO(P3c1): 복원 답(§6-7)이 부른다 — 그때 이 허용을 걷는다.
-    #[allow(dead_code)]
     pub fn resolve(&self, hash: String, deadline: Duration) -> RequestOutcome {
         match self.send(|reply| Request::Resolve { hash, reply }) {
             Some(answer) => wait(answer, deadline),
@@ -195,12 +193,29 @@ impl SaverHandle {
         outcome
     }
 
+    /// 닫힘을 세운다 — 그 뒤 기록기는 발행하지 않는다(쓰기 · `Resolve` · `Final` 모두 `Skipped`). 스레드는 손잡이가
+    /// 모두 사라질 때 끝난다.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+    }
+
     fn send(
         &self,
         request: impl FnOnce(Sender<SaveOutcome>) -> Request,
     ) -> Option<Receiver<SaveOutcome>> {
         let (reply, answer) = mpsc::channel();
         self.requests.send(request(reply)).ok().map(|()| answer)
+    }
+}
+
+/// 기록기의 닫힘 표지 — [`spawn`] 앞에 만들어 띄우는 쪽과 나눠 쥔다. 세우면 그 기록기는 발행하지 않는다
+/// ([`SaverHandle::close`] 와 같은 표지). 띄우는 동안 손잡이가 아직 없는 쪽(종료)도 이것으로 닫을 수 있다.
+#[derive(Clone, Default)]
+pub struct CloseFlag(Arc<AtomicBool>);
+
+impl CloseFlag {
+    pub fn close(&self) {
+        self.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -214,7 +229,7 @@ fn wait(answer: Receiver<SaveOutcome>, deadline: Duration) -> RequestOutcome {
 
 /// 기록기 스레드를 띄운다. `boot_revision` = 부팅 첫 쓰기(§6-5 ⑤)가 담은 변경 번호 — 그 뒤 바뀐 것을 첫 주기가
 /// 싣는다. `carry_resolved` = 부팅이 못 지운 답한 사본의 해시 — 첫 쓰기가 이미 실었으므로 다음 성공 쓰기 뒤
-/// 지우기를 다시 해 본다.
+/// 지우기를 다시 해 본다. `closed` = 이 기록기의 닫힘 표지 — 띄우기 전에 서 있으면 처음부터 발행하지 않는다.
 ///
 /// `Err` = 스레드를 못 띄웠다.
 pub fn spawn<S, F, C>(
@@ -223,6 +238,7 @@ pub fn spawn<S, F, C>(
     clock: C,
     boot_revision: S::Revision,
     carry_resolved: Option<String>,
+    closed: CloseFlag,
 ) -> io::Result<SaverHandle>
 where
     S: SnapshotSource,
@@ -233,7 +249,7 @@ where
         source,
         files,
         clock,
-        Arc::new(AtomicBool::new(false)),
+        closed.0,
         boot_revision,
         carry_resolved,
     );

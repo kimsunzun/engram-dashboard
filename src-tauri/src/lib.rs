@@ -5,7 +5,7 @@ pub mod layout;
 pub mod output_channel;
 pub mod output_router;
 pub mod settings;
-mod state;
+pub mod state;
 pub mod ui_settings;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;
@@ -32,6 +32,15 @@ pub fn run() {
     let tree_attrs = std::sync::Arc::new(crate::state::tree_attrs::TreeAttrs::default());
     let labels = std::sync::Arc::new(crate::commands::popout::PopupCounter::default());
     let state_session = std::sync::Arc::new(crate::state::boot_plugin::StateSession::default());
+    let restore = std::sync::Arc::new(crate::state::restore::RestoreService::new());
+    // 크래시 사본에 답하는 단일 경로(TRD S21-storage §6-7) — 사람(Tauri 껍데기)과 LLM(버스)이 같은 인스턴스를 본다.
+    let restore_coordinator = std::sync::Arc::new(crate::state::restore::RestoreCoordinator::new(
+        restore.clone(),
+        layout.clone(),
+        tree_attrs.clone(),
+        state_session.clone(),
+        labels.clone(),
+    ));
 
     let mut builder = tauri::Builder::default();
     // single-instance 플러그인은 가장 먼저 등록(플러그인 규약). ADR-0029: 앱은 데몬 클라 전역 단일 —
@@ -51,6 +60,7 @@ pub fn run() {
             tree: tree_attrs.clone(),
             labels: labels.clone(),
             session: state_session.clone(),
+            restore: restore.clone(),
         },
     ));
     builder = builder.plugin(tauri_plugin_opener::init());
@@ -79,6 +89,14 @@ pub fn run() {
     builder = builder.manage(layout);
     builder = builder.manage(tree_attrs).manage(labels.clone());
     builder = builder.manage(crate::state::placement::DeferredMaximize::default());
+    // 복원 상태도 같은 이유다(ADR-0102) — 창의 첫 `restore_status` 당기기가 부팅 단계 ⑥ 이 정한 값을 본다(TRD
+    //   S21-storage §6-5 ⑥ · I5).
+    builder = builder.manage(restore);
+    // 조율자도 같은 이유로 여기서 manage 한다(ADR-0102). 창 포트 · 알림 · 구독 원천은 `AppHandle` 이 있어야
+    //   서므로 setup 끝에 꽂는다 — 그 전의 수락은 `INTERNAL`(사본 그대로 · 다시 답할 수 있다)이고 거절은 포트 없이
+    //   선다(`RestoreCoordinator` 문서). 데몬 클라이언트는 구독 원천이 커밋 때마다 찾는다.
+    let setup_restore = restore_coordinator.clone();
+    builder = builder.manage(restore_coordinator);
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
@@ -171,6 +189,7 @@ pub fn run() {
                                     client.clone(),
                                     settings.clone(),
                                     themes.clone(),
+                                    setup_restore.clone(),
                                 ),
                             ),
                             crate::layout::commands::CATALOG_VERSION,
@@ -216,6 +235,21 @@ pub fn run() {
                     }
                 }
             }
+            // ── 복원 조율자 포트(TRD S21-storage §6-7) ──────────────────────────────────────────
+            // ★⑨ · ⑩ 뒤에 꽂는다★ — ⑨(`open_restored_popouts`)는 모델의 팝아웃마다 창을 만드는 부팅 전용 길이라,
+            //   그보다 먼저 수락이 커밋되면 수락이 이미 만든 창의 label 로 다시 만들려다 실패해 그 팝아웃을 모델에서
+            //   지우고 OS 창은 고아로 남긴다(`state::placement` 의 그 함수 문서).
+            setup_restore.attach(crate::state::restore::RestorePorts {
+                windows: std::sync::Arc::new(crate::state::placement::TauriRestoreWindows::new(
+                    app.handle().clone(),
+                )),
+                events: std::sync::Arc::new(crate::commands::layout::OwnedEvents {
+                    app: app.handle().clone(),
+                }),
+                subs: std::sync::Arc::new(crate::commands::layout::AppSubscriptions {
+                    app: app.handle().clone(),
+                }),
+            });
             // TODO(T6/connect): 부팅 시 DaemonClient.ensure()/connect() 호출로 자동 연결 수립.
             if let Err(e) = tray::build_tray(app) {
                 tracing::warn!("트레이 생성 실패(앱은 계속): {e}");
@@ -253,6 +287,7 @@ pub fn run() {
                     let label = window.label().to_string();
                     if crate::commands::popout::is_popup_label(&label) {
                         let app = window.app_handle();
+                        crate::state::placement::forget_deferred_maximize(app, &label);
                         // 하나라도 없으면(초기화 실패 극단 케이스) 조용히 스킵(정리 불가여도 앱은 계속).
                         if let (Some(state), Some(router), Some(registry), Some(client)) = (
                             app.try_state::<crate::layout::LayoutState>(),
@@ -320,6 +355,9 @@ pub fn run() {
             commands::settings_set,
             commands::settings_reset,
             commands::settings_schema,
+            // 크래시 사본 — 버스 `restore.*` 와 같은 조율자(TRD S21-storage §6-7).
+            commands::restore_status,
+            commands::restore_answer,
             // 웹뷰 몫 명령(ADR-0155) — 부팅 보고와 결말 회수 한 쌍(`commands/view_bus.rs`).
             commands::report_view_commands,
             commands::report_command_outcome,

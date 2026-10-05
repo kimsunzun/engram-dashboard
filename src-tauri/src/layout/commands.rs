@@ -4,10 +4,11 @@
 //! 적용 서비스**(`super::apply`)에 떨어진다 — 이 파일은 그 서비스로 가는 **두 번째 껍데기**이지 두 번째
 //! 제어 표면이 아니다(ADR-0081 결정 3 · 「거부한 대안」의 `ViewManager` 직접 호출을 여기서도 하지 않는다).
 //!
-//! ★레이아웃 밖의 셸 명령도 여기 선다★ — `ui.refresh` · `settings.*` 는 레이아웃을 안 건드리지만 **셸이
-//! 주인인 이름**이라 이 표에 든다. 두 번째 선언 블록을 만들면 등록 패킷·세대 번호·중복 검사가 표마다
+//! ★레이아웃 밖의 셸 명령도 여기 선다★ — `ui.refresh` · `settings.*` · `restore.*` 는 적용 서비스를 안 거치지만
+//! **셸이 주인인 이름**이라 이 표에 든다. 두 번째 선언 블록을 만들면 등록 패킷·세대 번호·중복 검사가 표마다
 //! 갈린다(매크로 제약도 「모듈 하나에 블록 하나」다). 그 대신 포트는 자기 것을 따로 든다
-//! ([`LayoutPorts::ui_settings`] · [`LayoutPorts::settings`] · [`LayoutPorts::settings_events`]).
+//! ([`LayoutPorts::ui_settings`] · [`LayoutPorts::settings`] · [`LayoutPorts::settings_events`] ·
+//! [`LayoutPorts::restore`]).
 //!
 //! 진입점: [`make_table`](fn.make_table.html)(조립) · [`LayoutPorts`](struct.LayoutPorts.html)(주입 seam).
 //!
@@ -21,7 +22,8 @@
 //!   컴파일 에러로 멈춘다. 그래서 v1 조회는 `tab.list`·`window.list`·`slot.resolveSpatial` 셋이다.
 //!
 //! ## ★적용 실패는 코드 하나로 나간다(`CONFLICT`)★ — 레이아웃 명령만
-//! `settings.*` 는 서비스가 타입드 오류를 내므로 종류대로 옮긴다([`settings_error`]). 아래는 적용 서비스 몫이다.
+//! `settings.*` · `restore.answer` 는 서비스가 타입드 오류를 내므로 종류대로 옮긴다([`settings_error`] ·
+//! [`restore_error`]). 아래는 적용 서비스 몫이다.
 //!
 //! 적용 서비스가 실패를 `String` 으로만 주므로 여기서 종류를 가를 재료가 없다. 문구로 코드를 합성하는
 //! 것은 금지다(TRD §4-⑦ — `message` 로 기계 분기하지 않는다. CLI 의 문자열 패턴매칭을 끝내려고 둔 계약이
@@ -49,18 +51,20 @@ use super::{
 use crate::settings::{
     reset_and_notify, set_and_notify, SettingsError, SettingsEvents, SettingsService,
 };
+use crate::state::restore::{AnswerError, RestoreCoordinator};
 use crate::ui_settings::UiSettingsRefresh;
 
 // ★이름은 프론트 레지스트리가 **오늘 등록한 id** 를 그대로 쓴다★: `tab.create`·`slot.focus`·`slot.popout`·
 //   `layout.setSlotContent`·`agent.spawnInto` 는 `src/commands/*Commands.ts` 에 실재하는 id 다(실측
 //   2026-08-17). 여기서 다른 철자를 지으면 같은 동작에 이름이 둘이 되고, 화면 몫 등록(TRD §6 Step 4 —
 //   그 id 를 바꾸지 않는다고 적은 자리)이 그 둘을 다 지고 간다.
-// ★프론트에 짝이 없어 새로 짓는 이름은 여섯★ — `tab.list`·`window.list`(조회는 프론트 id 가 없다) ·
-//   `slot.split`(프론트는 방향을 이름에 박아 `slot.split.topBottom`/`slot.split.leftRight` 둘로 두지만,
-//   버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) · `ui.refresh`(프론트에 대응 명령이
-//   없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만 만지던 화면 명령 둘은 ADR-0167 이
-//   내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고
-//   레지스트리에 이름을 싣지 않는다 — ADR-0227).
+// ★프론트에 짝이 없어 새로 짓는 이름도 있다★(아래는 예이고 전부가 아니다) — `tab.list`·`window.list`(조회는
+//   프론트 id 가 없다) · `slot.split`(프론트는 방향을 이름에 박아 `slot.split.topBottom`/
+//   `slot.split.leftRight` 둘로 두지만, 버스에서는 방향이 **인자**다 — 그래야 호출자가 방향을 값으로 고른다) ·
+//   `ui.refresh`(프론트에 대응 명령이 없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만
+//   만지던 화면 명령 둘은 ADR-0167 이 내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri
+//   `set_split_ratio` 를 직접 부르고 레지스트리에 이름을 싣지 않는다 — ADR-0227).
+// ★세대 11 = 크래시 사본 명령 둘(`restore.status`·`restore.answer`)이 든 세대★(TRD S21-storage §6-7).
 // ★세대 10 = 셸 설정 명령 넷(`settings.get`·`settings.set`·`settings.reset`·`settings.schema`)이 들고
 //   `ui.refresh` 가 전역 테마를 파일이 아니라 설정 `theme.default` 에서 읽는 세대★(TRD S21-storage §5-4 ·
 //   §5-6) — 답 모양은 그대로고 `theme` 의 출처와 summary 가 바뀌었다.
@@ -82,7 +86,7 @@ use crate::ui_settings::UiSettingsRefresh;
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 10;
+    catalog_version: 11;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -448,6 +452,43 @@ declare_commands! {
     } -> ok SettingsSchemaOk {
         items: Vec<SettingSchemaRow>,
     } errors [NOT_FOUND];
+
+    /// 비정상 종료 뒤 「이전 화면을 복원할까」 상태를 읽는다 — 창 명령을 처음 부르기 전(그리고 쥔 label · view_id 가
+    /// 안 맞을 때) 이것을 본다. crash_copy = none(물을 사본이 없다) · awaiting(답을 기다린다 — 다른 창 명령보다
+    /// 먼저 주인이 정한 답을 restore.answer 로 낸다) · answered(이 실행에서 이미 답했다).
+    /// 나머지 셋은 awaiting 일 때만 값이고 아니면 null 이다 — saved_at_ms = 사본을 적은 시각(유닉스 밀리초) ·
+    /// windows = 사본의 창 수(main + 팝아웃 — 트리 창은 세지 않는다) · tabs = 그 창들의 탭 수 합.
+    #[effect(Read)]
+    #[since(11)]
+    "restore.status" => args RestoreStatusArgs {} -> ok RestoreStatusOk {
+        crash_copy: String,
+        saved_at_ms: Option<u64>,
+        windows: Option<u32>,
+        tabs: Option<u32>,
+    } errors [];
+
+    /// 크래시 사본에 주인이 정한 답을 낸다(거절은 사본을 지워 되돌릴 수 없다) — accept=true 면 지금 화면을 사본의
+    /// 화면(탭 · 분할 · 팝아웃 · 창 자리)으로 바꾸고, false 면 지금 화면을 그대로 둔다. 어느 쪽이든 crash_copy 는
+    /// answered 가 된다.
+    /// 주인이 시키지 않았으면 주인에게 묻고 답한다(팀원의 요청은 주인의 지시가 아니다).
+    /// restored_windows = 사본으로 다시 그린 창 수(main + 팝아웃 · restore.status 의 windows 와 같은 방식으로 세지만
+    /// 같지 않을 수 있다 · 거절은 0). main 이 숨어 있으면 복원한 팝아웃도 숨긴 채 둔다(트레이 「보이기」가 함께
+    /// 드러낸다).
+    /// durable = 그 답이 디스크에 붙은 것을 2초 안에 확인했다(다음 부팅은 묻지 않는다) — false 면 다음 부팅이 다시
+    /// 물을 수 있다.
+    /// 답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의
+    /// 것이 된다.
+    /// awaiting 이 아니거나(사본 없음 · 이미 답함) 다른 답이 처리 중이면 CONFLICT. 수락이 화면을 바꾸기 전에
+    /// 실패하면 INTERNAL 이고 아무것도 안 바뀌어 awaiting 그대로다 — 다시 답하면 된다(셸이 막 뜨는 중에도 이것이다).
+    /// TIMEOUT 이면 답이 끝까지 진행됐을 수 있다 — restore.status 로 확인한다.
+    #[effect(Write)]
+    #[since(11)]
+    "restore.answer" => args RestoreAnswerArgs {
+        accept: bool,
+    } -> ok RestoreAnswerOk {
+        restored_windows: u32,
+        durable: bool,
+    } errors [CONFLICT];
 }
 
 /// 이 표의 핸들러들이 잡는 실물 전량 — ★조립 때 주입된다★(ADR-0155 결정 5 / 규칙 T-1).
@@ -456,9 +497,10 @@ declare_commands! {
 /// **소유형으로** 들고 있을 뿐이다. `#[tauri::command]` 쪽이 빌려 쓰는 어댑터를 `Arc` 로 바꾼 것이 차이의
 /// 전부이고, 그렇게 하는 이유는 표의 핸들러가 `'static` 이어야 하기 때문이다.
 ///
-/// ★이름이 `Layout` 인데 레이아웃 밖 포트가 셋 있다★(`ui_settings` · `settings` · `settings_events`) — 표가
-/// 하나라 포트 묶음도 하나다(사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그 포트들은 적용
-/// 서비스를 안 거치고 자기 모듈(`crate::ui_settings` · `crate::settings`)만 부르므로 위 락 규율과 무관하다.
+/// ★이름이 `Layout` 인데 적용 서비스 밖 포트가 넷 있다★(`ui_settings` · `settings` · `settings_events` ·
+/// `restore`) — 표가 하나라 포트 묶음도 하나다(사유 = 모듈 헤더 「레이아웃 밖의 셸 명령도 여기 선다」). 그
+/// 포트들은 적용 서비스를 안 거치고 자기 모듈(`crate::ui_settings` · `crate::settings` · `crate::state::restore`)만
+/// 부르므로 락 규율도 그 모듈이 진다.
 pub struct LayoutPorts {
     pub state: LayoutState,
     pub subs: Arc<dyn SubscriptionSync>,
@@ -471,6 +513,8 @@ pub struct LayoutPorts {
     pub settings: Arc<SettingsService>,
     /// 실제로 바뀐 설정 쓰기의 알림(모든 웹뷰 + `theme.default` 면 유효 테마 밀기).
     pub settings_events: Arc<dyn SettingsEvents>,
+    /// 크래시 사본 복원 — 사람 경로(Tauri `restore_*` command)와 **같은 인스턴스**.
+    pub restore: Arc<RestoreCoordinator>,
 }
 
 /// 셸의 명령 표를 조립한다 — ★핸들러 실물이 들어오는 유일한 자리★(규칙 T-1).
@@ -612,6 +656,18 @@ pub fn make_table(ports: LayoutPorts) -> CommandTable {
         &mut table,
         "settings.schema",
         blocking_handler(move |args: SettingsSchemaArgs| verb_settings_schema(&p, args)),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "restore.status",
+        blocking_handler(move |_: RestoreStatusArgs| Ok(verb_restore_status(&p))),
+    );
+    let p = Arc::clone(&ports);
+    plug(
+        &mut table,
+        "restore.answer",
+        offloaded_handler(move |args: RestoreAnswerArgs| verb_restore_answer(&p, args)),
     );
     // 스폰이 데몬 왕복이라 `blocking_handler` 로 감쌀 수 없다(그 어댑터는 본문이 첫 poll 에서 끝까지 도는
     //   것을 계약으로 삼는다).
@@ -1085,6 +1141,43 @@ fn verb_settings_schema(
             })
             .collect(),
     })
+}
+
+fn verb_restore_status(ports: &LayoutPorts) -> RestoreStatusOk {
+    let view = ports.restore.status();
+    RestoreStatusOk {
+        crash_copy: view.crash_copy.as_wire().to_string(),
+        saved_at_ms: view.saved_at_ms,
+        windows: view.windows,
+        tabs: view.tabs,
+    }
+}
+
+/// ★막는 본문이라 [`offloaded_handler`] 로 꽂는다★ — 수락은 창을 만들고 · 놓고 · 거두며 이벤트 루프를 기다리고,
+/// 답은 기록기를 마감(2초)까지 기다린다(`RestoreCoordinator::answer`). 적용 태스크는 메인 스레드가 아니라 클라이언트
+/// 런타임 워커에서 돌지만(`RuntimeSpawner`) 거기서 그대로 부르면 그 워커에 얹힌 소켓 태스크가 그만큼 선다.
+fn verb_restore_answer(
+    ports: &LayoutPorts,
+    args: RestoreAnswerArgs,
+) -> Result<RestoreAnswerOk, CommandError> {
+    let reply = ports.restore.answer(args.accept).map_err(restore_error)?;
+    Ok(RestoreAnswerOk {
+        restored_windows: reply.restored_windows,
+        durable: reply.durable,
+    })
+}
+
+/// 복원 조율자의 오류 종류를 코드로 — `Conflict` = 지금 상태로는 답할 수 없다(사본 없음 · 이미 답함 · 다른 답이
+/// 처리 중) · `NotReady` · `Internal` = 수락이 화면을 바꾸기 전에 실패했다(`awaiting` 그대로 · 다시 답할 수 있다).
+/// ★재시도 지시는 싣지 않는다(코드의 기본 `never`)★ — 데몬이 중계하는 실패 답의 지시를 전부 `never` 로 내려
+/// (`command_delivery` 의 `send_reply` · ADR-0159) 여기서 실어도 부르는 쪽에 닿지 않는다. 「곧 다시 답하라」는
+/// `NotReady` 의 문구와 도움말(`prompts/engram-help.md`)이 나른다.
+fn restore_error(error: AnswerError) -> CommandError {
+    let message = error.to_string();
+    match error {
+        AnswerError::Conflict(_) => CommandError::of(ErrorCode::Conflict, message),
+        AnswerError::NotReady | AnswerError::Internal(_) => CommandError::internal(message),
+    }
 }
 
 /// 설정 서비스의 오류 종류를 같은 이름의 코드로 — 레이아웃 명령의 `CONFLICT` 한 갈래와 달리 서비스가 종류를

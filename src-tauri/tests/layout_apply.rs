@@ -453,6 +453,38 @@ fn create_window_rolls_back_model_when_open_fails() {
     );
 }
 
+/// ★창을 만드는 사이 모델에서 그 창이 지워지면 만든 OS 창을 거둔다★ — 지운 쪽(창 닫기 · 크래시 사본 수락의 화면
+/// 교체)의 OS 창 거두기는 아직 등록 전인 창을 못 찾고 지나간다. 다시 보지 않으면 모델에 없는 OS 창이 남는다.
+#[test]
+fn create_window_closes_the_os_window_when_the_model_dropped_it_during_the_build() {
+    let w = World::new();
+    *w.host.during_open.lock().unwrap() = Some(Box::new(|state: &LayoutState| {
+        state
+            .0
+            .lock()
+            .unwrap()
+            .close_window("slot-popup-1")
+            .expect("만드는 중인 창이 모델에 있다");
+    }));
+
+    let err = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap_err();
+
+    assert!(err.contains("slot-popup-1"), "err={err}");
+    assert_eq!(&*w.host.opened.lock().unwrap(), &["slot-popup-1"]);
+    assert_eq!(
+        &*w.host.closed.lock().unwrap(),
+        &["slot-popup-1"],
+        "만든 OS 창을 거둔다"
+    );
+    assert!(
+        w.host.placed.lock().unwrap().is_empty(),
+        "모델에 없는 창의 자리는 적지 않는다"
+    );
+    assert!(!apply::list_windows(&w.state)
+        .unwrap()
+        .contains(&"slot-popup-1".to_string()));
+}
+
 // ★실 `PopupCounter` 를 통과시킨다★: prefix 는 capabilities/popup.json 의 glob 과 짝이고(다른 label 이면
 // Destroyed 정리 게이트가 스킵돼 라우팅·구독·Channel 이 샌다), 단조성은 닫힌 label 재-build 에러를 막는다.
 // 이 계약의 단위 테스트는 `popout.rs` 안에 따로 있지만 이 단언은 그대로 둔다 — ★**서비스 경유로 재는 것은

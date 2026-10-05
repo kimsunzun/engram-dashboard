@@ -12,7 +12,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use tauri::{AppHandle, Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 use uuid::Uuid;
 
 use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, RequestId};
@@ -27,6 +27,7 @@ use crate::layout::{
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
+use crate::state::restore::RestoreCoordinator;
 use crate::ui_settings::EffectiveThemes;
 
 const EVT_LAYOUT_UPDATED: &str = "layout:updated";
@@ -118,8 +119,8 @@ impl AgentSpawner for DaemonSpawner<'_> {
 // 없고, 그렇다고 emit·창 빌드·스폰 로직을 두 번 적으면 사람 경로와 LLM 경로가 다시 갈린다(ADR-0081 결정 3
 // 이 없애려던 그 2 코드 경로). 그래서 소유형은 자기 것을 빌려 위 구현에 그대로 넘긴다 — 로직은 한 벌이다.
 
-struct OwnedEvents {
-    app: AppHandle,
+pub(crate) struct OwnedEvents {
+    pub(crate) app: AppHandle,
 }
 
 impl LayoutEvents for OwnedEvents {
@@ -145,6 +146,23 @@ impl SubscriptionSync for OwnedSubs {
             client: &self.client,
         }
         .resync(mgr);
+    }
+}
+
+// 복원 조율자의 구독 원천 — 쓸 때마다 라우터 · 데몬 클라이언트를 `AppHandle` 에서 찾는다(창 소멸 정리가 사건마다
+//   찾는 것과 같다). 조율자 포트는 셸 setup 에서 한 번 꽂히므로, 그때 찾아 쥐면 늦게 등록된 클라이언트를 놓친다.
+pub(crate) struct AppSubscriptions {
+    pub(crate) app: AppHandle,
+}
+
+impl crate::state::restore::SubscriptionSource for AppSubscriptions {
+    fn current(&self) -> Option<Arc<dyn SubscriptionSync>> {
+        let router = self.app.try_state::<Arc<OutputRouter>>()?;
+        let client = self.app.try_state::<Arc<DaemonClient>>()?;
+        Some(Arc::new(OwnedSubs {
+            router: router.inner().clone(),
+            client: client.inner().clone(),
+        }))
     }
 }
 
@@ -194,7 +212,9 @@ impl AgentSpawner for OwnedSpawner {
 ///
 /// ★사람 클릭 경로와 **같은 상태·같은 라우터·같은 발급기**를 받는다★: 다른 인스턴스를 주면 LLM 이 만든 창이
 /// 사람이 보는 목록에 없고 label 이 충돌한다(ADR-0035 레이아웃 권위가 하나라는 것의 실물). 설정 서비스와
-/// 유효 테마도 같다 — 빌더에서 manage 한 그 인스턴스를 받는다(다르면 두 경로가 다른 값·다른 밀기 순서를 본다).
+/// 유효 테마 · 복원 조율자도 같다 — 빌더에서 manage 한 그 인스턴스를 받는다(다르면 두 경로가 다른 값·다른 밀기
+/// 순서·다른 처리 중 표지를 본다).
+#[allow(clippy::too_many_arguments)]
 pub fn command_ports(
     app: AppHandle,
     state: LayoutState,
@@ -203,6 +223,7 @@ pub fn command_ports(
     client: Arc<DaemonClient>,
     settings: Arc<SettingsService>,
     themes: Arc<EffectiveThemes>,
+    restore: Arc<RestoreCoordinator>,
 ) -> crate::layout::commands::LayoutPorts {
     crate::layout::commands::LayoutPorts {
         state,
@@ -218,6 +239,7 @@ pub fn command_ports(
         ui_settings: Arc::new(TauriUiSettings::new(app.clone(), Arc::clone(&themes))),
         settings,
         settings_events: Arc::new(TauriSettingsEvents::new(app, themes)),
+        restore,
     }
 }
 

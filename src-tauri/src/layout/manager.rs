@@ -32,7 +32,7 @@
 //! `close_slot` 이 곁표(`unknown_content`) 항목을 거둔다. `tree::set_in_tree` 를 직접 부르거나 `views` 에서 직접
 //! 지우면 사용자가 바꾼 슬롯에 옛 원문이 저장으로 되살아난다(§12 R6). 빈/점유 판정은 `slot_is_free` 하나다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 use uuid::Uuid;
@@ -1038,6 +1038,81 @@ impl ViewManager {
             .insert(label.to_string(), WindowTabs::new_popout(view));
         self.bump_version();
         Ok(())
+    }
+
+    // ── 런타임 복원 수락(TRD S21-storage §6-7 ③) ─────────────────────────────
+
+    /// 창 묶음을 `restored`(`from_persisted` 의 결과)로 갈아끼운다 — main 은 탭 · 활성 · 속성만 바꾸고(측정값 ·
+    /// 영속 id 는 남는다), 옛 팝아웃은 항목째 지우고, `restored` 의 팝아웃을 그 곁표 원문과 함께 들인다. 돌려주는
+    /// 것 = 지운 옛 팝아웃 label(정렬) — 그 OS 창은 부르는 쪽이 락 밖에서 거둔다.
+    ///
+    /// - `version` · `attrs_rev` 는 지금 값에서 하나씩 오른다 — `restored` 의 번호는 버린다. 기록기는 같은지만 보므로
+    ///   되감긴 번호가 마지막으로 본 값과 같아지면 그 사이의 변경을 놓친다.
+    /// - owner 없는 View(창 만들기 중인 `prepare_detached_view` 의 임시 View)는 그대로 둔다 — 그 일의 phase C 가
+    ///   붙이거나 거둔다.
+    /// - `Err` 면 아무것도 바뀌지 않았다: `restored` 에 main 이 없다 · 팝아웃 label 이 지금 모델의 창과 겹친다 ·
+    ///   View id 가 남는 View 와 겹친다.
+    pub(crate) fn adopt_restored(
+        &mut self,
+        restored: ViewManager,
+    ) -> Result<Vec<WindowLabel>, LayoutError> {
+        let ViewManager {
+            views,
+            view_owner,
+            mut windows,
+            version: _,
+            attrs_rev: _,
+            unknown_content,
+        } = restored;
+        let main = windows
+            .remove(MAIN_WINDOW_LABEL)
+            .ok_or_else(|| LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.to_string()))?;
+        if !self.windows.contains_key(MAIN_WINDOW_LABEL) {
+            return Err(LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.to_string()));
+        }
+        if let Some(label) = windows.keys().find(|l| self.windows.contains_key(*l)) {
+            return Err(LayoutError::WindowNotFound(label.clone()));
+        }
+        let owned: HashSet<ViewId> = self
+            .windows
+            .values()
+            .flat_map(|w| w.tabs.iter().copied())
+            .collect();
+        if let Some(&view) = views
+            .keys()
+            .find(|v| self.views.contains_key(*v) && !owned.contains(*v))
+        {
+            return Err(LayoutError::ViewNotFound(view));
+        }
+
+        for view in owned {
+            self.remove_view(view);
+        }
+        let mut removed: Vec<WindowLabel> = self
+            .windows
+            .keys()
+            .filter(|l| l.as_str() != MAIN_WINDOW_LABEL)
+            .cloned()
+            .collect();
+        removed.sort();
+        for label in &removed {
+            self.windows.remove(label);
+        }
+        let live = self
+            .windows
+            .get_mut(MAIN_WINDOW_LABEL)
+            .expect("위에서 확인했다");
+        live.tabs = main.tabs;
+        live.active = main.active;
+        live.attrs = main.attrs;
+        live.placement_memo = PlacementMemo::default();
+        self.views.extend(views);
+        self.view_owner.extend(view_owner);
+        self.unknown_content.extend(unknown_content);
+        self.windows.extend(windows);
+        self.bump_version();
+        self.attrs_rev += 1;
+        Ok(removed)
     }
 
     // ── 창 속성(TRD S21-storage §6-3) ───────────────────────────────────────
@@ -2910,6 +2985,141 @@ mod tests {
         for (name, main, popouts) in cases {
             assert!(ViewManager::from_restored(main, popouts).is_err(), "{name}");
         }
+    }
+
+    // ── adopt_restored (TRD S21-storage §6-7 ③) ─────────────────────────────
+
+    fn fingerprint(mgr: &ViewManager) -> (u64, u64, Vec<WindowLabel>, Vec<ViewId>) {
+        let mut labels = mgr.list_windows();
+        labels.sort();
+        let mut views: Vec<ViewId> = mgr.views.keys().copied().collect();
+        views.sort();
+        (mgr.version, mgr.attrs_rev(), labels, views)
+    }
+
+    fn restored_with_popout(label: &str) -> (ViewManager, View, View, View) {
+        let (a, b, p) = (view_named("a"), view_named("b"), view_named("p"));
+        let mgr = ViewManager::from_restored(
+            restored(vec![a.clone(), b.clone()], Some(b.id)),
+            vec![(
+                label.into(),
+                "4b7f6a7e-0d5e-4f5a-9b0e-6a8f0c2d1e3f".into(),
+                restored(vec![p.clone()], Some(p.id)),
+            )],
+        )
+        .unwrap();
+        (mgr, a, b, p)
+    }
+
+    #[test]
+    fn adopt_restored_swaps_the_windows_bumps_both_counters_once_and_moves_the_side_table() {
+        let mut mgr = ViewManager::new();
+        let old_main = main_active(&mgr);
+        let old_popout = mgr.create_window("slot-popup-1").unwrap();
+        let old_slot = first_slot_of(&mgr, old_popout);
+        mgr.set_unknown_content(old_popout, old_slot, raw("old"))
+            .unwrap();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 800, 600).unwrap();
+        mgr.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
+            .unwrap();
+        let (version, attrs_rev) = (mgr.version, mgr.attrs_rev());
+
+        let (mut fresh, a, b, p) = restored_with_popout("slot-popup-2");
+        let p_slot = first_slot_of(&fresh, p.id);
+        fresh
+            .set_unknown_content(p.id, p_slot, raw("future"))
+            .unwrap();
+
+        let removed = mgr.adopt_restored(fresh).unwrap();
+
+        assert_eq!(removed, ["slot-popup-1"]);
+        assert_invariants(&mgr);
+        assert_eq!(
+            (mgr.version, mgr.attrs_rev()),
+            (version + 1, attrs_rev + 1),
+            "지금 번호에서 하나씩 — 되감지 않는다"
+        );
+        let main = window(&mgr, MAIN_WINDOW_LABEL);
+        assert_eq!((main.tabs, main.active), (vec![a.id, b.id], b.id));
+        assert_eq!(main.attrs, restored(vec![], None).attrs);
+        assert_eq!(main.window_id, "main");
+        assert_eq!(
+            main.canvas,
+            Some(CanvasPx { w: 800, h: 600 }),
+            "측정값은 남는다"
+        );
+        let popout = window(&mgr, "slot-popup-2");
+        assert_eq!(
+            (popout.tabs, popout.window_id.as_str()),
+            (vec![p.id], "4b7f6a7e-0d5e-4f5a-9b0e-6a8f0c2d1e3f")
+        );
+        assert!(!mgr.views.contains_key(&old_main));
+        assert!(!mgr.views.contains_key(&old_popout));
+        assert_eq!(
+            mgr.unknown_content(old_popout, old_slot),
+            None,
+            "옛 곁표는 거둔다"
+        );
+        assert_eq!(
+            mgr.unknown_content(p.id, p_slot),
+            Some(&raw("future")),
+            "새 곁표는 View 와 함께 온다"
+        );
+        assert_eq!(mgr.snapshot(p.id).unwrap().foreign_slots, [p_slot]);
+    }
+
+    #[test]
+    fn adopt_restored_refuses_a_collision_or_a_missing_main_and_changes_nothing() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        let src = main_active(&mgr);
+        let src_slot = first_slot_of(&mgr, src);
+        let (tmp, _) = mgr
+            .prepare_detached_view(src, src_slot, "옮기는 중".into())
+            .unwrap();
+        let before = fingerprint(&mgr);
+
+        let (live_label, ..) = restored_with_popout("slot-popup-1");
+        assert_eq!(
+            mgr.adopt_restored(live_label).unwrap_err(),
+            LayoutError::WindowNotFound("slot-popup-1".into()),
+            "떠 있는 창의 label"
+        );
+
+        let (mut no_main, ..) = restored_with_popout("slot-popup-2");
+        no_main.windows.remove(MAIN_WINDOW_LABEL);
+        assert_eq!(
+            mgr.adopt_restored(no_main).unwrap_err(),
+            LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.into())
+        );
+
+        let mut clash = view_named("clash");
+        clash.id = tmp;
+        let clash = ViewManager::from_restored(restored(vec![clash], Some(tmp)), vec![]).unwrap();
+        assert_eq!(
+            mgr.adopt_restored(clash).unwrap_err(),
+            LayoutError::ViewNotFound(tmp),
+            "남는 View(owner 없는 임시 View)와 겹친다"
+        );
+
+        assert_eq!(fingerprint(&mgr), before);
+    }
+
+    #[test]
+    fn adopt_restored_leaves_an_ownerless_detached_view_to_its_move() {
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let src_slot = first_slot_of(&mgr, src);
+        let (tmp, _) = mgr
+            .prepare_detached_view(src, src_slot, "옮기는 중".into())
+            .unwrap();
+
+        let (fresh, ..) = restored_with_popout("slot-popup-2");
+        mgr.adopt_restored(fresh).unwrap();
+
+        assert!(mgr.views.contains_key(&tmp));
+        mgr.attach_view_as_new_window("slot-popup-3", tmp).unwrap();
+        assert_invariants(&mgr);
     }
 
     // ── 측정 보고 · slot_px (ADR-0227) ───────────────────────────────────────

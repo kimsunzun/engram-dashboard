@@ -9,7 +9,14 @@
 //! `WindowEntry` · `WindowKind` · `TabStrip`)은 직렬화만 derive 하고, 읽기는 그쪽이 조각마다 한다.
 //!
 //! ★칸 더하기 규칙★ — 빠져도 읽히는 선택 칸을 더하는 것은 `version` 을 올리지 않는다. 옛 빌드가 다시 저장하면
-//! 그 칸은 사라진다(내림은 지원하지 않는다 — TRD §12 R3). 잃으면 안 되는 변경이면 `version` 을 올린다.
+//! 그 칸은 사라진다(내림은 지원하지 않는다 — TRD §12 R3). 잃으면 안 되는 변경이면 `version` 을 올린다 — ★단 앞
+//! 버전을 읽는 리더와 함께만 올린다★: 코덱은 `version == STATE_VERSION` 인 파일만 받아(`codec::decode`) 리더 없이
+//! 올리면 새 빌드가 앞 버전 파일을 상태 파일 아님으로 접어 저장된 화면 전체를 잃는다(TRD §6-1).
+//!
+//! ★이름 바꾸기 규칙★ — 영속 모양이 따르는 serde 이름(칸 · 변형 — 여기 타입과 그대로 재사용하는 `SplitDir` ·
+//! `SlotContent`)을 바꾸면 읽는 쪽에 옛 이름을 `#[serde(alias = "옛 이름")]` 로 남긴다(옛 이름 탭은 건너뛰고 ·
+//! 모르는 내용이 되고 · `#[serde(default)]` 칸은 말없이 기본값으로 돌아간다). ★꼬리표 키 자체(`tag = "type"` 의
+//! `type`)는 alias 가 덮지 않는다★ — 바꾸지 않거나, 두 키를 다 읽는 리더와 함께 바꾼다(TRD §6-1).
 
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
