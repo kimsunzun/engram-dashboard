@@ -20,7 +20,10 @@ test-harness = []
 engram-dashboard-command = { path = "../engram-dashboard-command" }
 # `transport::stdio` 의 `mask_secrets` 와 `platform::{process_creation_time, pid_alive_with_start_time}`
 #   — 옛 `crate::logging`·PID 헬퍼가 잎 crate 로 이사했다(ADR-0175 결정 1). 뒤엣것은 codex 세션 id
-#   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2).
+#   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2). 범용 도우미
+#   `path::normalize_spelling`(친 cwd) · `time::now_epoch_ms`(프로필 시각 · 손상 사본 이름)도 여기서 온다(ADR-0269).
+#   락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다. 잔여물 정리 시계 `LeftoverClock` 의 상위
+#   트레이트 `time::Clock` 과 운영 구현 `time::SystemClock`(ADR-0275 결정 6)도 여기서 온다.
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -39,6 +42,8 @@ chrono = { version = "0.4", default-features = false }
 #   기능 요청이 dev 그래프에만 있어 운영 바이너리엔 유니피케이션되지 않는다.
 [dev-dependencies]
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
+# 같은 계열(feature-only 재선언) — 통합 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`).
+engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-support"] }
 
 # 소비자는 셋이다 — `platform::windows` 의 Job Object 래퍼(멤버 명단 · 붙들기 · 가입 알림 포함 — ADR-0262)·스레드 깨우기와
 #   `platform::file_holders` 의 홀더 조회

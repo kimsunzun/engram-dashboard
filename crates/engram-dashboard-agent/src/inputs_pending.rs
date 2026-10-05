@@ -13,6 +13,8 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use engram_dashboard_base::sync;
+
 use crate::types::AgentId;
 
 /// 대기 목록 표 — `AgentManager` 가 하나 소유한다.
@@ -42,9 +44,7 @@ impl InputsPendingTable {
 
     /// poison 내성 — 매니저 전역 표라 한 홀더의 패닉이 전 에이전트로 번지지 않게 한다(`turn` 과 같은 판단).
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Entry>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        sync::lock(&self.entries)
     }
 
     /// 이 화신이 이 id 의 자리를 차지한다 — 있던 항목을 무조건 갈아치우고 "목록 빔" 으로 시작한다.

@@ -8,8 +8,8 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use engram_dashboard_base::time::now_epoch_ms;
 use serde::{Deserialize, Serialize};
 
 use crate::profile::{AgentProfile, ProfileStore};
@@ -21,13 +21,6 @@ pub use presets::FilePresetStore;
 const SCHEMA_VERSION: u32 = 1;
 const FILE_NAME: &str = "agents.json";
 const TMP_NAME: &str = "agents.json.tmp";
-
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 /// 디스크 표현.
 #[derive(Serialize, Deserialize)]
@@ -86,7 +79,7 @@ impl FileProfileStore {
     fn preserve_corrupt(&self, path: &Path) {
         let backup = self
             .dir
-            .join(format!("{FILE_NAME}.corrupt-{}", now_millis()));
+            .join(format!("{FILE_NAME}.corrupt-{}", now_epoch_ms()));
         match fs::rename(path, &backup) {
             Ok(()) => tracing::warn!("손상된 agents.json을 {:?}로 보존", backup),
             Err(e) => tracing::error!("corrupt 파일 보존 실패: {e}"),

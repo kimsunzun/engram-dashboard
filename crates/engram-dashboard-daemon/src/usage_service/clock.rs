@@ -1,7 +1,12 @@
 //! 사용량 판정의 시계 seam — 쿨타임·거절 대기·값 나이는 [`UsageClock::mono`], 리셋 비교·거절
 //! 파일은 [`UsageClock::wall`] 로 잰다(TRD §3 #28 · ADR-0250). 서비스의 판정은 늘 이 시계로 잰다 — 대기 타이머가 깨운
 //! 시각은 믿지 않는다.
+//!
+//! ★base `time::Clock` 과 합치지 않는다★(ADR-0275 결정 7) — `mono` 는 기점부터의 `Duration` 이라 책의
+//! 시간 타입으로 그대로 흐르고 `Duration::MAX` · `ZERO` 끝값을 시험이 잰다. `wall` 은 부호 있는 epoch 초다.
+//! `Instant` 를 돌려주는 지금 읽기로는 둘 다 담기지 않는다.
 
+// ADR-0275
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// ★구현은 서비스·명부·책을 다시 부르지 않는다★ — 서비스는 책 락을 쥔 채(구독 교체의 첫 한 장에서는 명부 →

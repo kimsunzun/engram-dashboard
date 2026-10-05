@@ -12,6 +12,8 @@ dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI �
 # liveness 판정(pid_alive_with_start_time) 공유 — net portfile 의 stale 판정과 동일 로직(DRY).
 #   ★ADR-0175 결정 1 로 이 자리가 `agent` 에서 바닥 crate 로 바뀌었다 — 그 한 함수 때문에 에이전트
 #   런타임 전체(portable-pty·Job Object)를 지던 것이 끝났다. 되돌리지 말 것.
+# 폴링 시계 `Clock` 의 상위 트레이트 `time::Clock`(지금 읽기)과 운영 구현 `time::SystemClock` 도 여기서 온다
+#   (ADR-0275 · ADR-0269 결정 3-2). ★liveness 판정이 base 밖으로 옮겨 가도 이 의존은 남는다★.
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 # daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }

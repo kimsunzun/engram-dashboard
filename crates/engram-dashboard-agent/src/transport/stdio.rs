@@ -24,6 +24,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::logging::mask_secrets;
+use engram_dashboard_base::sync;
 
 use crate::output_core::OutputCore;
 use crate::transport::input_queue::{self, InputQueue, OnWritten};
@@ -191,7 +192,7 @@ impl StdioTransport {
 fn write_stdin(stdin: &Mutex<Option<ChildStdin>>, bytes: &[u8]) -> std::io::Result<()> {
     // ★블로킹 `write_all` 을 이 락 아래서 하는 유일한 자리다★ — `shutdown()` 이 `try_lock` 을 쓰는
     //   근거(그 함수의 순서 불변식)가 여기를 가리킨다.
-    let mut guard = stdin.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = sync::lock(stdin);
     let stdin = guard.as_mut().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::BrokenPipe, "stdin 이 이미 닫혔다")
     })?;
@@ -311,11 +312,8 @@ impl AgentTransport for StdioTransport {
         let pump_core = core.clone();
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
-        // Mutex lock 실패(poison)여도 into_inner 로 회수(패닉 회피) — 시작 경로라 실질 경합 없음.
-        let mut decoder = match self.decoder.lock() {
-            Ok(mut g) => g.take(),
-            Err(poisoned) => poisoned.into_inner().take(),
-        };
+        // Mutex lock 실패(poison)여도 되찾는다(패닉 회피) — 시작 경로라 실질 경합 없음.
+        let mut decoder = sync::lock(&self.decoder).take();
 
         let writer_stop = WriterStop(self.input.clone());
 
@@ -375,10 +373,7 @@ impl AgentTransport for StdioTransport {
 
                 // shutdown=true 면 아래서 code 미사용(Killed)이라, 값이 뭐든 무해.
                 let code = {
-                    let mut child = match child.lock() {
-                        Ok(g) => g,
-                        Err(poisoned) => poisoned.into_inner(),
-                    };
+                    let mut child = sync::lock(&child);
                     match child.try_wait() {
                         Ok(Some(status)) => status.code(),
                         _ => None,

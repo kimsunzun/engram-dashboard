@@ -126,6 +126,7 @@ impl<'a> MakeWriter<'a> for FileSink {
 
     fn make_writer(&'a self) -> Self::Writer {
         match self.0.get() {
+            // 같은 crate 의 `sync` 입주자를 부르지 않는다 — 입주자끼리 무참조(lib.rs 게이트 ③ · ADR-0275).
             Some(m) => FileSinkWriter::Live(m.lock().unwrap_or_else(|e| e.into_inner())),
             None => FileSinkWriter::Void,
         }

@@ -37,6 +37,7 @@ type RegistryMap = HashMap<WindowLabel, tauri::ipc::Channel<tauri::ipc::Response
 
 // ADR-0231: poison 을 되찾되 poisoning 한 번에 warn 한 번 — `clear_poison` 으로 다음 호출이 같은 경고를
 //   되풀이하지 않게 한다(모듈 헤더). 두 스레드가 같은 순간 poison 을 보면 경고가 둘일 수 있다 — 무해.
+// ADR-0275: base `sync` 를 쓰지 않는다 — 그쪽은 독을 걷지 않는다. 독을 걷는 이 자기 도우미가 ADR-0231 의 계약이다.
 fn lock_registry(registry: &WindowChannelRegistry) -> MutexGuard<'_, RegistryMap> {
     registry.lock().unwrap_or_else(|e| {
         tracing::warn!("출력 Channel 명부 락이 poisoned — 되찾아 계속 쓴다");

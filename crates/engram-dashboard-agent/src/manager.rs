@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
+
 use crate::backend;
 use crate::failure::AgentFailureKind;
 use crate::inputs_pending::InputsPendingTable;
@@ -546,9 +548,7 @@ fn session_id_sink(
                 return;
             }
         };
-        let mut seen = expected
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = sync::lock(&expected);
         let written = profiles.commit_session_id(id, incarnation, *seen, sid);
         if written {
             *seen = Some(sid);
@@ -1056,9 +1056,7 @@ impl AgentManager {
     /// 다른 스레드의 패닉이 남길 수 있는 불일치 데이터가 애초에 없다. `expect` 로 두면 무관한 패닉 한 번이
     /// 생성·개명·스폰을 데몬 재시작까지 영구히 막는다(순수 downside).
     fn lock_name_allocation(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.name_allocation
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        sync::lock(&self.name_allocation)
     }
 
     /// ★이름 결정표(ADR-0120 유일성 · ADR-0123 번호 규칙) — 게이트 보유 중에만 부른다★.

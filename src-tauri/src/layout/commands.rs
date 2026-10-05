@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 
-use engram_dashboard_agent::commands::normalize_cwd;
+use engram_dashboard_base::path::normalize_spelling;
 use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandError, CommandFuture, CommandHandler, CommandTable,
     ErrorCode,
@@ -1124,7 +1124,7 @@ async fn verb_spawn_into(
     let window = text("window", &args.window)?;
     // ★`agent.new`·`agent.spawn --cwd` 와 **같은 철자 규칙**을 받는다★ — 이 문은 그 셋의 공통 등록부
     //   (`agent::commands::register`)를 안 지나므로, 여기서 안 부르면 같은 낱말이 문마다 다르게 읽힌다.
-    let cwd = normalize_cwd(text("cwd", &args.cwd)?);
+    let cwd = normalize_spelling(text("cwd", &args.cwd)?);
     let tab = args
         .view_id
         .as_deref()

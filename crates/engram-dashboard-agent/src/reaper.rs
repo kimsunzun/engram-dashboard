@@ -22,6 +22,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
+use engram_dashboard_base::sync;
+
 use crate::profile::ProfileRegistry;
 use crate::session::AgentSession;
 use crate::types::{AgentId, AgentInfo, ControlChannel, Disposition, ReapMsg, StatusSink};
@@ -47,12 +49,9 @@ impl ReaperDeps {
         // 1. write lock 구간 = epoch 검증 + remove 만(ADR-0006). Arc clone 후 즉시 해제.
         //    ★poison-tolerant★: 다른 스레드(pump 등)가 sessions lock 보유 중 panic 해 lock 이
         //    poison 돼도 reaper 는 계속 reap 해야 한다(좀비 방지). 데이터는 HashMap 일 뿐 불변식이
-        //    깨진 게 아니므로 into_inner 로 가드를 회수해 진행한다(catch_unwind 와 이중 안전).
+        //    깨진 게 아니므로 가드를 되찾아 진행한다(catch_unwind 와 이중 안전).
         let removed = {
-            let mut sessions = self
-                .sessions
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut sessions = sync::write(&self.sessions);
             match sessions.get(&msg.id) {
                 Some(s) if s.epoch == msg.epoch => sessions.remove(&msg.id),
                 _ => return,
@@ -151,9 +150,7 @@ fn list_agents(
 ) -> Vec<AgentInfo> {
     let snapshot: Vec<Arc<AgentSession>> = {
         // poison-tolerant(reap_one 1과 동일 이유): 통지용 스냅샷이라 가드 회수로 진행한다.
-        let guard = sessions
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = sync::read(sessions);
         guard.values().cloned().collect()
     };
     snapshot.iter().map(|s| session_info(s, profiles)).collect()

@@ -73,12 +73,7 @@ fn resolve_data_dir() -> PathBuf {
 pub fn generate_token() -> Result<String, getrandom::Error> {
     let mut buf = [0u8; 32];
     getrandom::getrandom(&mut buf)?;
-    let mut s = String::with_capacity(64);
-    for b in buf {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    Ok(s)
+    Ok(engram_dashboard_base::text::hex_lower(&buf))
 }
 
 // ── 제어 평면 CLI 위치 탐색 (ADR-0086 스텝 2 · F1) ─────────────────────────────────

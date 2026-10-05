@@ -40,15 +40,16 @@
 - 실행: `cargo test -p engram-dashboard-protocol`.
 
 ### base (`crates/engram-dashboard-base`) — 2026-08-25 신설(ADR-0175 결정 1)
-- **① 단위**: `src/` 내 `#[cfg(test)]`(`logging` = 로그 파일명 규약·보존 정리·머리글·마스킹 · `platform` = PID 생존 판정·creation time 대조·자식 PID 열거). `agent` 에서 그대로 옮겨 온 것들이다.
+- **① 단위**: `src/` 내 `#[cfg(test)]`(`logging` = 로그 파일명 규약·보존 정리·머리글·마스킹 · `platform` = PID 생존 판정·creation time 대조·자식 PID 열거 · `text` = 소문자 hex · `time` = epoch ms 단위 · 시계 seam(`SystemClock` · `ManualClock`) · `path` = 친 경로 철자 고르기 · `sync` = 락 오염 되찾기 — 오염 표시 유지 · `testing` = 시험 대기의 마감 뒤 한 번 · 폴링). `testing` 과 `time::ManualClock` 은 기능 `test-support` 뒤지만 `cfg(test)` 로도 열려 이 crate 자기 시험에는 기능 인자가 필요 없다. `logging` · `platform` 은 `agent` 에서 그대로 옮겨 온 것들이고, `path` 의 시험 둘도 `agent` 의 `normalize_cwd` 시험을 옮겨 온 것이다(ADR-0269 · ADR-0275).
 - **② 격리 통합**: `tests/logging_fallback.rs`·`tests/logging_install_race.rs`. **각각 파일 하나 = 테스트 하나**인 것이 의도다 — 전역 subscriber 는 프로세스당 한 번뿐이라 설치 경합을 재려면 그 프로세스를 통째로 소유해야 한다(각 파일 헤더가 정본).
 - **격리 하네스 = crate 경계 그 자체**: 워크스페이스 crate 를 하나도 의존하지 않는 잎이라 에이전트 런타임·Tauri·wire 계약 없이 단독으로 돈다.
 - 실행: `cargo test -p engram-dashboard-base -- --test-threads=4` — `platform` 의 자식 PID 테스트가 실 `cmd.exe` 를 띄운다(플래그 판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」).
 - 격리 게이트 3종(실명령·기대값 정본 = `/qa` 바인딩):
   - ① 의존 상한 `cargo tree -p engram-dashboard-base --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 1줄(자기 자신). 입주 조건 ②(도메인 지식 0)의 벽.
   - ② `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0줄. ADR-0003 의 짝 — ①이 못 덮는 축이다. ①은 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 세므로 서드파티 `tauri` 가 그대로 통과하고, 이 crate 는 headless 데몬·`net`·`discovery` 에 링크되므로 여기서 Tauri 를 부르면 창도 webview 도 없는 셋이 함께 전송 방식에 묶인다. **`logging`·`platform` 이 `agent` 에서 이리로 오면서 agent 게이트의 스캔 범위를 벗어났다 — 이 줄이 그 자리를 받는다.**
-  - ③ `rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/` → 0줄. 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽 — 엮이면 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든 소비자에게 딸려 간다(`bevy_core` 실패의 시작점). ★`crate::` 단독으로 넓히지 말 것★ — 평범한 Rust 라 게이트가 아니라 잡음이 된다.
+  - ③ `rg "(crate|super)::(logging|platform|text|time|path|sync|testing)" crates/engram-dashboard-base/src/` → 0줄. 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽 — 엮이면 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든 소비자에게 딸려 간다(`bevy_core` 실패의 시작점). ★`crate::` 단독으로 넓히지 말 것★ — 평범한 Rust 라 게이트가 아니라 잡음이 된다.
   - **워크스페이스 crate 이름을 훑는 소스 정규식 짝은 없다** — 이 crate 는 남을 안 부르는 것이 불변식이라 부르는 이름의 알파벳을 관리할 대상이 없다(메시징과 갈리는 지점).
+  - base 시험 기능(`test-support`)이 운영 그래프에 안 실리는지 보는 게이트(ADR-0269 결정 5 · ADR-0275 결정 5) — 실명령 · 기대값 정본 = `/qa` 바인딩.
 
 ### agent (`crates/engram-dashboard-agent` — 2026-08-25 개명 전 이름 `engram-dashboard-core`, ADR-0175)
 - **① 단위**: `src/` 내 `#[test]`(OutputCore seq/replay/finalize, session, transport, backend, persistence 등). ★로깅·PID liveness 단위는 여기 없다 — `base` 로 이사했다(ADR-0175 결정 1)★.
@@ -135,7 +136,7 @@ cargo test -p engram-dashboard --test lib_unit  # 같은 패키지의 단위 스
 # ★`-- --test-threads=4` 는 crate 마다 갈린다★ — 실 자식 프로세스를 띄우는 crate 에만 붙는다(base·agent·daemon).
 #   판정 규칙·근거의 정본 = CLAUDE.md 「빌드·검증 명령」. 여기서 붙고 안 붙고를 새로 판정하지 말 것.
 cargo test -p engram-dashboard-protocol     # 단위+golden+ts_export
-cargo test -p engram-dashboard-base -- --test-threads=4    # 바닥 crate 단위 + 로깅 통합 2종 — 워크스페이스 crate 무의존, ADR-0175 결정 1 (platform 의 자식 PID 테스트가 실 cmd.exe 를 띄운다)
+cargo test -p engram-dashboard-base -- --test-threads=4    # 바닥 crate 단위(logging·platform·text·time·path·sync·testing) + 로깅 통합 2종 — 워크스페이스 crate 무의존, ADR-0175 결정 1 (platform 의 자식 PID 테스트가 실 cmd.exe 를 띄운다)
 cargo test -p engram-dashboard-agent -- --test-threads=4   # 단위+통합(headless/transport_smoke/session_smoke, 실 PTY)
 cargo test -p engram-dashboard-command      # 명령 버스 도구 단위 — 워크스페이스 crate 무의존, ADR-0155
 cargo test -p engram-dashboard-messaging    # 메시징 커널 단위 — 워크스페이스 crate 무의존, ADR-0110
@@ -152,7 +153,7 @@ npm test                                    # 로직 단위 게이트 (vitest ru
 rg "^\s*use tauri" crates/engram-dashboard-agent/src/      # → 0줄 (import 라인 앵커 — 자기 인용 주석 오탐 방지)
 rg "engram_dashboard_protocol" crates/engram-dashboard-agent/src/   # → 0줄
 rg "^\s*use tauri" crates/engram-dashboard-base/src/       # → 0줄 (같은 ADR-0003 불변식의 짝 — 위 §1 base 절)
-rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/   # → 0줄 (입주 조건 ③)
+rg "(crate|super)::(logging|platform|text|time|path|sync|testing)" crates/engram-dashboard-base/src/   # → 0줄 (입주 조건 ③)
 
 # ③ 실앱/시각 (CDP — 보안 소프트웨어 탐지 대상, 최소 사용)
 # 실명령 정본 = /qa 바인딩 §full (여기 베끼지 않는다).

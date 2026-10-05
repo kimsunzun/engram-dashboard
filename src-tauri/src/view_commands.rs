@@ -35,6 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engram_dashboard_base::sync;
 use engram_dashboard_command::{
     CommandDecl, CommandEnvelope, CommandError, CommandReply, ErrorCode, OwnerLookup, OwnerToken,
     RequestId,
@@ -400,14 +401,14 @@ impl ViewCommandBridge {
     /// (다음 호출이 잡는다) 이미 사라진 label 은 지워도 무해하다. 회복이 한 박자 늦는 것이 계약이다.
     fn prune_dead(&self) {
         let labels: Vec<String> = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = sync::lock(&self.state);
             state.reports.keys().cloned().collect()
         };
         let dead: Vec<String> = labels
             .into_iter()
             .filter(|label| !self.dispatch.is_alive(label))
             .collect();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = sync::lock(&self.state);
         state.forget(&dead);
         state.repick(&self.hidden);
     }
@@ -452,7 +453,7 @@ impl ViewCommandBridge {
 
         // 생존 조회는 **락 밖에서** 먼저 돈다(사유 = `prune_dead`) — 그래야 아래 한 락 안이 순수해진다.
         self.prune_dead();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = sync::lock(&self.state);
         let previous = state.advertised();
         state.reports.insert(label.to_string(), next);
         // ★보고를 넣은 **뒤에** 다시 고른다★ — 방금 뜬 창이 죽은 host 를 이어받을 수 있어야 한다.
@@ -524,7 +525,7 @@ impl ViewCommandBridge {
         let parsed = uuid::Uuid::parse_str(request_id.trim())
             .map(RequestId)
             .map_err(|_| format!("request_id 가 UUID 가 아니다: {request_id:?}"))?;
-        let mut waiting = self.pending.seats.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = sync::lock(&self.pending.seats);
         let Some(slot) = waiting.get(&parsed) else {
             return Err(format!(
                 "기다리는 왕복이 없다(이미 답했거나 마감을 넘겼다): {parsed}"
@@ -549,7 +550,7 @@ impl ViewCommandBridge {
     /// 어느 하나만 옛 host 를 보는 순간 광고와 실행이 갈린다.
     fn live_host(&self) -> Option<(String, Shapes)> {
         self.prune_dead();
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = sync::lock(&self.state);
         let label = state.host.clone()?;
         Some((label, state.advertised()))
     }
@@ -755,7 +756,7 @@ impl PendingSlot {
         target: &str,
         answer: oneshot::Sender<Result<serde_json::Value, CommandError>>,
     ) -> Option<Self> {
-        let mut waiting = pending.seats.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = sync::lock(&pending.seats);
         match waiting.entry(request_id) {
             Entry::Occupied(_) => None,
             Entry::Vacant(vacancy) => {
@@ -787,7 +788,7 @@ impl Drop for PendingSlot {
     /// 한쪽이 바뀌면 조용히 무너진다(그 변경이 이 파일을 건드릴 이유도 없다). 신원 비교는 그 논증 자체를
     /// 필요 없게 만든다.
     fn drop(&mut self) {
-        let mut waiting = self.pending.seats.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = sync::lock(&self.pending.seats);
         if waiting
             .get(&self.request_id)
             .is_some_and(|held| held.seat == self.seat)

@@ -13,7 +13,7 @@
 //! `DaemonInfo.token` 은 로그에 절대 출력하지 않는다(로컬 IPC 파일에만 흐름).
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use engram_dashboard_net::auth::AuthFrame;
 use engram_dashboard_protocol::{AgentCommand, DaemonInfo, RequestId, PROTOCOL_VERSION};
@@ -428,8 +428,9 @@ pub trait Spawner {
     fn spawn(&self, exe: &Path) -> Result<(), DiscoveryError>;
 }
 
-pub trait Clock {
-    fn now(&self) -> Instant;
+/// 폴링의 시계 — 지금 읽기는 base 시계에서 받고 **스레드를 재우는** 잠을 더한다(이 crate 는 동기다).
+// ADR-0275
+pub trait Clock: engram_dashboard_base::time::Clock {
     fn sleep(&self, dur: Duration);
 }
 
@@ -951,7 +952,7 @@ pub fn ensure_daemon(
     };
     let spawner = WmiSpawner { console };
     let liveness = RealLiveness;
-    let clock = RealClock;
+    let clock = engram_dashboard_base::time::SystemClock;
     // ADR-0134 결정 4: 데몬을 띄우기 **전에** 우리 쪽에서 데이터 폴더를 확인한다. 못 쓰는 폴더면
     // 데몬은 뜨자마자 죽고 클라이언트에는 원인 없는 연결 시간 초과만 남으므로, 여기서 원인을 붙여
     // 기존 실패 경로(command Err / DaemonClient Err)로 그대로 올린다.
@@ -1044,12 +1045,7 @@ impl PidLiveness for RealLiveness {
     }
 }
 
-struct RealClock;
-
-impl Clock for RealClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
+impl Clock for engram_dashboard_base::time::SystemClock {
     fn sleep(&self, dur: Duration) {
         std::thread::sleep(dur);
     }
@@ -1327,6 +1323,9 @@ fn wmi_spawn(_exe: &Path, _console: bool) -> Result<(), DiscoveryError> {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::Instant;
 
     // ── data_dir resolver ─────────────────────────────────────────────────────────────
 
@@ -1739,26 +1738,30 @@ mod tests {
         }
     }
 
+    /// ★base `ManualClock` 을 품지 않는다★ — 품으려면 이 crate 의 dev 의존에 base 시험 기능을 새로 켜야
+    /// 한다(TRD S21 경계 1-1 §3-3).
     struct FakeClock {
-        now: RefCell<Instant>,
-        slept: Cell<usize>,
+        now: Mutex<Instant>,
+        slept: AtomicUsize,
     }
     impl FakeClock {
         fn new() -> Self {
             Self {
-                now: RefCell::new(Instant::now()),
-                slept: Cell::new(0),
+                now: Mutex::new(Instant::now()),
+                slept: AtomicUsize::new(0),
             }
         }
     }
-    impl Clock for FakeClock {
+    impl engram_dashboard_base::time::Clock for FakeClock {
         fn now(&self) -> Instant {
-            *self.now.borrow()
+            *self.now.lock().unwrap()
         }
+    }
+    impl Clock for FakeClock {
         fn sleep(&self, dur: Duration) {
             // 실제로 자지 않아 폴링 timeout 이 즉시 도달한다.
-            self.slept.set(self.slept.get() + 1);
-            *self.now.borrow_mut() += dur;
+            self.slept.fetch_add(1, Ordering::SeqCst);
+            *self.now.lock().unwrap() += dur;
         }
     }
 

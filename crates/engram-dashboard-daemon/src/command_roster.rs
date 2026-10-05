@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_base::sync;
 use engram_dashboard_command::{
     CommandDecl, CommandError, ErrorCode, OwnerLookup, OwnerLookupSource, OwnerToken, Roster,
     RosterEntry,
@@ -398,10 +399,7 @@ impl CommandRoster {
     /// `panic = "abort"` 라 오염이 아예 생기지 않는다. 그래도 두는 이유는 debug·테스트 빌드에서 그 갈래가
     /// 실재하고, 거기서 새는 표가 그대로 회귀 시험의 관측을 망치기 때문이다.
     fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Shared> {
-        match self.inner.lock() {
-            Ok(shared) => shared,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        sync::lock(&self.inner)
     }
 }
 

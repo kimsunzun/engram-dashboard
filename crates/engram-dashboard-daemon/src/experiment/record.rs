@@ -10,6 +10,7 @@
 //! - **필러 원문 미기록**(ADR-0090 d2): turn 레코드는 body 를 담지 않고 sha256 + len 만.
 // ADR-0090
 
+use engram_dashboard_base::text::hex_lower;
 use serde::{Deserialize, Serialize};
 
 use super::probe::ProbeScores;
@@ -179,21 +180,11 @@ pub fn cap_response(s: &str) -> String {
     if s.len() <= RESPONSE_CAP_BYTES {
         return s.to_string();
     }
-    let mut end = RESPONSE_CAP_BYTES;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    s[..end].to_string()
+    s[..s.floor_char_boundary(RESPONSE_CAP_BYTES)].to_string()
 }
 
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
-    let mut s = String::with_capacity(64);
-    for b in digest {
-        use std::fmt::Write as _;
-        let _ = write!(s, "{b:02x}");
-    }
-    s
+    hex_lower(&Sha256::digest(data))
 }
 
 /// 실측 스키마(claude 2.1.170): `{"type":"system","subtype":"init",...,"model":"claude-...",...}`.
@@ -450,6 +441,16 @@ mod tests {
         let capped = cap_response(&s);
         assert!(capped.len() <= RESPONSE_CAP_BYTES);
         assert!(std::str::from_utf8(capped.as_bytes()).is_ok());
+    }
+
+    /// 상한이 글자 한가운데면 **아래** 경계에서 자른다 — 넘기지 않으면서 가장 많이 남긴다.
+    /// 4096 은 3 의 배수가 아니라 `'가'`(3 바이트) 열에서 상한이 글자 한가운데 떨어진다.
+    #[test]
+    fn cap_response_cuts_at_the_last_boundary_below_the_cap() {
+        let s = "가".repeat(RESPONSE_CAP_BYTES);
+        let capped = cap_response(&s);
+        assert_eq!(capped.len(), RESPONSE_CAP_BYTES / 3 * 3);
+        assert!(s.starts_with(&capped));
     }
 
     #[test]

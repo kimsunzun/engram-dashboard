@@ -18,6 +18,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, OutputFrame, OutputPayload, OutputSink,
     SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 
@@ -80,17 +81,6 @@ impl StatusSink for RecordingStatusSink {
         self.statuses.lock().unwrap().push(status);
     }
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
 }
 
 #[test]

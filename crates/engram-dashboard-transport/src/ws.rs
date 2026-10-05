@@ -148,11 +148,7 @@ fn clamp_close_reason(reason: &str) -> &str {
     if reason.len() <= MAX_CLOSE_REASON_BYTES {
         return reason;
     }
-    let mut end = MAX_CLOSE_REASON_BYTES;
-    while end > 0 && !reason.is_char_boundary(end) {
-        end -= 1;
-    }
-    &reason[..end]
+    &reason[..reason.floor_char_boundary(MAX_CLOSE_REASON_BYTES)]
 }
 
 /// 통로 한 끝에 필요한 바탕 성질. `MaybeTlsStream<TcpStream>`(거는 쪽)과 `TcpStream`(받는 쪽)이 둘 다
