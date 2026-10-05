@@ -19,11 +19,14 @@ use engram_dashboard_base::logging;
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Emitter, Runtime};
 
-use super::boot::{self, BootModel, BootPlan, FsBootFiles, CRASH_COPY_FILE, STATE_FILE};
+use super::boot::{
+    self, BootModel, BootPlan, FsBootFiles, Guard, StateAside, CRASH_COPY_FILE, STATE_FILE,
+};
 use super::convert::{to_persisted, RestoreWarning, StateRevision};
 use super::lock::{self, StateLock};
 use super::restore::{
-    CrashCopy, CrashCopyStatus, RestoreNotifier, RestoreService, EVT_RESTORE_CHANGED,
+    CrashCopy, CrashCopyStatus, RestoreNotifier, RestoreService, StateFileStatus,
+    EVT_RESTORE_CHANGED,
 };
 use super::saver::{self, Clock, CloseFlag, RequestOutcome, SaveOutcome, SaverHandle, SystemClock};
 use super::schema::WindowEntry;
@@ -126,6 +129,7 @@ impl Boot {
             StateRevision::of(&layout, tree_rev)
         };
 
+        let state_file = state_file_status(&plan);
         let BootPlan {
             model,
             crash_copy,
@@ -136,12 +140,15 @@ impl Boot {
         // 가드면 기록기가 없어 답이 디스크에 붙지 않는다 — 가드 ⅱ 의 원천은 판정이 실은 메모리의 원문이다(L2).
         let durable = guard.is_none();
         let ask = crash_copy.is_some();
-        self.restore.set_boot(crash_copy.map(|copy| CrashCopy {
-            text: copy.text,
-            hash: copy.hash,
-            file: copy.file,
-            durable,
-        }));
+        self.restore.set_boot(
+            crash_copy.map(|copy| CrashCopy {
+                text: copy.text,
+                hash: copy.hash,
+                file: copy.file,
+                durable,
+            }),
+            state_file,
+        );
 
         let saver = durable.then(|| PendingSaver {
             source: LiveSource::new(self.layout.clone(), self.tree.clone()),
@@ -153,11 +160,24 @@ impl Boot {
             module = "state",
             restore = matches!(model, BootModel::Restore(_)),
             ask,
+            state_file = state_file.as_wire(),
             marker = ?marker,
             saver = saver.is_some(),
             "부팅 단계 — 모델 · 복원 상태를 정했다"
         );
         self.session.cell().saver_start = saver;
+    }
+}
+
+// TRD S21-storage §6-5 — 판정(③)과 동작(④)이 끝난 계획에서 읽는다.
+fn state_file_status(plan: &BootPlan) -> StateFileStatus {
+    if matches!(plan.guard, Some(Guard::StateUnreadable(_))) {
+        return StateFileStatus::Unreadable;
+    }
+    match plan.state_aside {
+        Some(StateAside::CopiedAside) => StateFileStatus::CorruptCopiedAside,
+        Some(StateAside::NotCopied) => StateFileStatus::CorruptNotCopied,
+        None => StateFileStatus::Ok,
     }
 }
 
@@ -687,6 +707,11 @@ mod tests {
         let (boot, _session) = boot(&layout, &tree);
         boot.run_steps(&run_dir, &state_dir);
 
+        assert_eq!(
+            boot.restore.status().state_file,
+            StateFileStatus::Ok,
+            "없는 파일은 ok"
+        );
         let marker = read_state(&state_dir);
         assert!(!marker.clean_exit);
         assert_eq!(
@@ -708,6 +733,11 @@ mod tests {
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::None);
+        assert_eq!(
+            boot.restore.status().state_file,
+            StateFileStatus::Unreadable,
+            "가드 ⅰ — 사본이 없어도 ⑥ 이 정한다"
+        );
         assert!(session.cell().saver_start.is_none(), "기록기 재료가 없다");
         assert!(
             state_dir.join(STATE_FILE).is_dir(),
@@ -722,6 +752,86 @@ mod tests {
         session.shutdown();
         assert!(lock_is_free(&run_dir), "가드여도 종료가 잠금을 놓는다");
         assert!(state_dir.join(STATE_FILE).is_dir());
+    }
+
+    #[test]
+    fn an_unusable_state_file_kept_aside_is_reported_from_the_first_status() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        std::fs::write(state_dir.join(STATE_FILE), "{broken").unwrap();
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let notices = listen(&boot);
+        boot.run_steps(&run_dir, &state_dir);
+
+        assert_eq!(
+            boot.restore.status().state_file,
+            StateFileStatus::CorruptCopiedAside
+        );
+        assert_eq!(
+            notices.seen(),
+            [CrashCopyStatus::None],
+            "사본이 없어도 ⑥ 이 정한다"
+        );
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join("state.json.corrupt")).unwrap(),
+            "{broken"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_unusable_state_file_that_could_not_be_kept_aside_is_reported_as_such() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        std::fs::write(state_dir.join(STATE_FILE), "{broken").unwrap();
+        // 떠 둘 자리에 비지 않은 폴더가 있다 — 파일로 갈아끼우는 rename 이 실패한다.
+        let blocker = state_dir.join("state.json.corrupt");
+        std::fs::create_dir(&blocker).unwrap();
+        std::fs::write(blocker.join("x"), "x").unwrap();
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+
+        assert_eq!(
+            boot.restore.status().state_file,
+            StateFileStatus::CorruptNotCopied
+        );
+        assert!(
+            !read_state(&state_dir).clean_exit,
+            "실행 표식이 원본을 갈아끼웠다(D8)"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn the_state_file_status_reads_the_state_file_only() {
+        let plan = |guard: Option<Guard>, state_aside: Option<StateAside>| BootPlan {
+            model: BootModel::Default,
+            actions: Vec::new(),
+            crash_copy: None,
+            carry_resolved: None,
+            guard,
+            state_aside,
+        };
+        let unreadable = || Some(Guard::StateUnreadable("잠김".into()));
+        let not_written = || Some(Guard::CrashCopyNotWritten("새 판의 사본".into()));
+        for (guard, aside, expected) in [
+            (None, None, StateFileStatus::Ok),
+            (unreadable(), None, StateFileStatus::Unreadable),
+            (not_written(), None, StateFileStatus::Ok),
+            (
+                None,
+                Some(StateAside::CopiedAside),
+                StateFileStatus::CorruptCopiedAside,
+            ),
+            (
+                None,
+                Some(StateAside::NotCopied),
+                StateFileStatus::CorruptNotCopied,
+            ),
+        ] {
+            let label = format!("{guard:?} · {aside:?}");
+            assert_eq!(state_file_status(&plan(guard, aside)), expected, "{label}");
+        }
     }
 
     // ── 크래시 사본 · 복원 서비스(⑥) · 답을 디스크에 붙이기 ──
@@ -753,6 +863,11 @@ mod tests {
             boot.restore.status().windows,
             Some(1),
             "main 만 — 트리 창은 세지 않는다"
+        );
+        assert_eq!(
+            boot.restore.status().durable,
+            Some(true),
+            "가드가 아니다 — 이 실행이 저장한다"
         );
         assert!(
             !layout.0.lock().unwrap().views.contains_key(&saved_tab),
@@ -818,6 +933,17 @@ mod tests {
         let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
         boot.run_steps(&run_dir, &state_dir);
 
+        let status = boot.restore.status();
+        assert_eq!(
+            status.durable,
+            Some(false),
+            "가드 ⅱ — 이 실행은 저장하지 않는다"
+        );
+        assert_eq!(
+            status.state_file,
+            StateFileStatus::Ok,
+            "가드 ⅱ 는 state_file 에 싣지 않는다"
+        );
         {
             let ticket = boot.restore.begin_answer().expect("가드 ⅱ 여도 묻는다");
             assert!(!ticket.copy().durable, "기록기가 없다");
@@ -841,6 +967,25 @@ mod tests {
             session.resolve_crash_copy(codec::crash_copy_hash(&raw)),
             ResolveResult::NotDurable
         );
+        session.shutdown();
+    }
+
+    #[test]
+    fn an_unreadable_state_file_with_an_unanswered_copy_asks_without_durability() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(CRASH_COPY_FILE), &raw).unwrap();
+        // 폴더는 「없음」도 「못 쓸 파일」도 아닌 읽기 IO 실패다(I3) — 가드 ⅰ.
+        std::fs::create_dir(state_dir.join(STATE_FILE)).unwrap();
+
+        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        boot.run_steps(&run_dir, &state_dir);
+
+        let status = boot.restore.status();
+        assert_eq!(status.crash_copy, CrashCopyStatus::Awaiting);
+        assert_eq!(status.durable, Some(false));
+        assert_eq!(status.state_file, StateFileStatus::Unreadable);
         session.shutdown();
     }
 

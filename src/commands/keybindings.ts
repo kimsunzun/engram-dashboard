@@ -56,12 +56,23 @@ const BINDINGS: Record<string, string> = {
   'ctrl+tab': 'tab.next',
 }
 
+let paused = false
+
+/**
+ * 이 창의 단축키 발화를 멈추거나 다시 켠다. 주인 = main 의 복원 모달 — 떠 있는 동안 `true`, 닫히면 `false`.
+ * 모달이 마우스만 막으면 단축키가 그 아래 화면을 바꾼다(TRD S21-storage §6-7 N4). 창마다 따로다(이 모듈은 웹뷰마다 하나).
+ */
+export function setKeybindingsPaused(next: boolean): void {
+  paused = next
+}
+
 /**
  * import 시점이 아니라 명시 호출로 리스너를 건다(배선·정리 제어 가능).
  * 반환 = disposer(리스너 제거). HMR/언마운트에서 호출해 중복 누적을 막는다.
  */
 export function installKeybindings(): () => void {
   const onKeyDown = (e: KeyboardEvent): void => {
+    if (paused) return
     // ★포커스 가드 먼저★(위 불변식).
     if (isEditableTarget(e.target)) return
 

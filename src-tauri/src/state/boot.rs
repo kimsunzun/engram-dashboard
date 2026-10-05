@@ -6,8 +6,8 @@
 //!   못했을지 모르는 크래시 화면을 잃는다.
 //! - ★답하지 않은 크래시 사본은 덮지도 지우지도 않는다(D2-6)★ — 이 판이 못 쓰는 새 판의 사본도(N6). 부팅이 사본을
 //!   지우는 것은 못 쓸 사본(떠 둔 뒤)과 답한 사본(다시 읽어 해시가 같을 때만 — N1)뿐이다.
-//! - ④ 의 결과(사본을 못 떠 서는 가드 · 못 지운 답한 사본의 해시)는 ④ 가 계획에 접어 넣고, ⑤([`write_run_marker`])
-//!   · ⑥ · 기록기가 그 계획을 읽는다 — 그래서 가드 로그는 ④ 뒤에 낸다.
+//! - ④ 의 결과(사본을 못 떠 서는 가드 · 못 지운 답한 사본의 해시 · 못 쓸 `state.json` 을 떠 두었나)는 ④ 가 계획에
+//!   접어 넣고, ⑤([`write_run_marker`]) · ⑥ · 기록기가 그 계획을 읽는다 — 그래서 가드 로그는 ④ 뒤에 낸다.
 
 use std::fmt;
 use std::io;
@@ -234,6 +234,14 @@ pub enum Guard {
     CrashCopyNotWritten(String),
 }
 
+/// [`BootAction::CopyAsideState`] 의 결과.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateAside {
+    CopiedAside,
+    /// 원본은 실행 표식 쓰기(⑤)가 백업 없이 갈아끼운다(D8).
+    NotCopied,
+}
+
 #[derive(Clone, PartialEq)]
 pub struct BootPlan {
     pub model: BootModel,
@@ -245,6 +253,8 @@ pub struct BootPlan {
     pub carry_resolved: Option<String>,
     /// 판정(③)이나 동작(④)이 세운다 — ⑤ 는 ④ 뒤의 값을 본다.
     pub guard: Option<Guard>,
+    /// `Some` = `state.json` 이 못 쓸 파일이었다 — 떠 두기의 결과다. 동작(④)이 세운다(판정 뒤엔 아직 `None`).
+    pub state_aside: Option<StateAside>,
 }
 
 // 복원할 모델(원문 ≤4 MiB 만큼의 탭 트리)을 통째로 찍지 않는다 — 창 수만.
@@ -268,6 +278,7 @@ impl fmt::Debug for BootPlan {
             .field("crash_copy", &self.crash_copy)
             .field("carry_resolved", &self.carry_resolved)
             .field("guard", &self.guard)
+            .field("state_aside", &self.state_aside)
             .finish()
     }
 }
@@ -320,6 +331,7 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
         crash_copy: None,
         carry_resolved: None,
         guard: None,
+        state_aside: None,
     };
     // I3 는 파일마다 가른다 — 읽기 IO 실패한 파일만 떠 두지도 덮지도 지우지도 않고, 다른 파일의 동작은 그 파일의
     //   읽기만 본다. 둘을 묶으면 사본을 못 읽은 부팅이 못 쓸 `state.json` 을 떠 두지 않은 채 ⑤ 로 덮는다.
@@ -537,25 +549,35 @@ fn report_decode_warning(file: &str, warning: &DecodeWarning) {
     }
 }
 
-/// 부팅 단계 ④ — 동작의 결과 중 ⑤ · ⑥ · 기록기가 알아야 할 것(가드 ⅱ · 이어 실을 해시)은 `plan` 에 접어 넣는다.
+/// 부팅 단계 ④ — 동작의 결과 중 ⑤ · ⑥ · 기록기가 알아야 할 것(가드 ⅱ · 이어 실을 해시 · `state.json` 떠 두기)은
+/// `plan` 에 접어 넣는다.
 fn run_actions(files: &impl BootFiles, plan: &mut BootPlan) {
     let mut crash_copy_kept_aside = true;
     let replaces_crash_copy = plan.actions.contains(&BootAction::WriteCrashCopy);
     // 복사본을 돈다 — 동작마다 `plan` 의 다른 칸을 고칠 수 있어야 한다.
     for action in plan.actions.clone() {
         match action {
-            BootAction::CopyAsideState => match files.copy_aside_state() {
-                Ok(to) => tracing::info!(
-                    module = "state",
-                    to = %to.display(),
-                    "못 쓰는 state.json 을 떠 뒀다"
-                ),
-                Err(e) => tracing::error!(
-                    module = "state",
-                    error = %e,
-                    "못 쓰는 state.json 을 떠 두지 못했다 — 진행한다: 실행 표식 쓰기가 하나뿐인 원본을 덮는다(D8)"
-                ),
-            },
+            BootAction::CopyAsideState => {
+                let aside = match files.copy_aside_state() {
+                    Ok(to) => {
+                        tracing::info!(
+                            module = "state",
+                            to = %to.display(),
+                            "못 쓰는 state.json 을 떠 뒀다"
+                        );
+                        StateAside::CopiedAside
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            module = "state",
+                            error = %e,
+                            "못 쓰는 state.json 을 떠 두지 못했다 — 진행한다: 실행 표식 쓰기가 하나뿐인 원본을 덮는다(D8)"
+                        );
+                        StateAside::NotCopied
+                    }
+                };
+                plan.state_aside = Some(aside);
+            }
             BootAction::CopyAsideCrashCopy => match files.copy_aside_crash_copy() {
                 Ok(to) => tracing::info!(
                     module = "state",
@@ -835,6 +857,7 @@ mod tests {
             crash_copy: None,
             carry_resolved: None,
             guard: None,
+            state_aside: None,
         }
     }
 
@@ -1075,6 +1098,11 @@ mod tests {
                 row.name
             );
             assert_eq!(guard_kind(&plan.guard), row.guard, "{} — 가드", row.name);
+            assert_eq!(
+                plan.state_aside, None,
+                "{} — 떠 두기 결과는 ④ 가 세운다",
+                row.name
+            );
         }
     }
 
@@ -1283,6 +1311,7 @@ mod tests {
 
         assert_eq!(plan.model, BootModel::Default);
         assert_eq!(plan.guard, None);
+        assert_eq!(plan.state_aside, Some(StateAside::CopiedAside));
         assert_eq!(files.calls(), ["sweep", "read", "read_crash", "copy_aside"]);
     }
 
@@ -1296,6 +1325,7 @@ mod tests {
         let plan = prepare(&files);
 
         assert_eq!(plan.guard, None, "떠 두기 실패는 가드가 아니다(D8)");
+        assert_eq!(plan.state_aside, Some(StateAside::NotCopied));
         assert_eq!(
             write_run_marker(&files, &plan, vec![tree_window()], 7),
             MarkerOutcome::Written
@@ -1313,6 +1343,10 @@ mod tests {
         let plan = prepare(&files);
 
         assert!(matches!(plan.guard, Some(Guard::StateUnreadable(_))));
+        assert_eq!(
+            plan.state_aside, None,
+            "못 쓸 사본을 떠 둔 것은 state.json 의 떠 두기가 아니다"
+        );
         assert_eq!(
             write_run_marker(&files, &plan, vec![tree_window()], 7),
             MarkerOutcome::Guarded
@@ -1434,6 +1468,7 @@ mod tests {
             let marker = write_run_marker(&files, &plan, vec![tree_window()], 9);
 
             assert_eq!(plan.guard, None, "{state}");
+            assert_eq!(plan.state_aside, Some(StateAside::CopiedAside), "{state}");
             assert_eq!(marker, MarkerOutcome::Written, "{state}");
             assert_eq!(
                 files.call_names(),
@@ -1513,10 +1548,73 @@ mod tests {
 
         assert_eq!(plan.guard, None);
         assert_eq!(
+            plan.state_aside, None,
+            "사본의 떠 두기 실패는 state.json 의 것이 아니다"
+        );
+        assert_eq!(
             files.calls(),
             ["sweep", "read", "read_crash", "copy_aside_crash"],
             "둘 곳이 없는 원본은 지우지 않는다"
         );
+    }
+
+    // ── state.json 떠 두기 결과 — 사본 쪽 떠 두기와 섞지 않는다 ──
+
+    #[test]
+    fn the_state_aside_records_only_the_state_file_copy() {
+        // (state 떠 두기 실패, 사본 떠 두기 실패) → 기대
+        for (state_fails, crash_fails, expected) in [
+            (false, false, StateAside::CopiedAside),
+            (false, true, StateAside::CopiedAside),
+            (true, false, StateAside::NotCopied),
+            (true, true, StateAside::NotCopied),
+        ] {
+            let files = FakeFiles {
+                copy_aside_fails: state_fails,
+                crash_copy_aside_fails: crash_fails,
+                ..FakeFiles::reading_both(Ok("{".into()), vec![Ok("{".into())])
+            };
+
+            let plan = prepare(&files);
+
+            assert_eq!(
+                plan.state_aside,
+                Some(expected),
+                "state 실패 {state_fails} · 사본 실패 {crash_fails}"
+            );
+            assert_eq!(plan.guard, None);
+        }
+    }
+
+    #[test]
+    fn an_unusable_state_with_an_unanswered_copy_records_the_aside_and_still_asks() {
+        for (fails, expected) in [
+            (false, StateAside::CopiedAside),
+            (true, StateAside::NotCopied),
+        ] {
+            let files = FakeFiles {
+                copy_aside_fails: fails,
+                ..FakeFiles::reading_both(Ok("{".into()), vec![Ok(crash_text())])
+            };
+
+            let plan = prepare(&files);
+
+            assert_eq!(plan.state_aside, Some(expected), "실패 {fails}");
+            assert_eq!(plan.crash_copy, Some(awaiting_of(crash_file())));
+            assert_eq!(plan.guard, None);
+        }
+    }
+
+    #[test]
+    fn a_usable_or_missing_state_records_no_aside() {
+        for state in [
+            Ok(text_of(&state_file(true))),
+            Ok(text_of(&state_file(false))),
+            Err(io::ErrorKind::NotFound.into()),
+        ] {
+            let plan = prepare(&FakeFiles::reading(state));
+            assert_eq!(plan.state_aside, None);
+        }
     }
 
     #[test]
@@ -1764,6 +1862,7 @@ mod tests {
         let plan = prepare(&files);
         write_run_marker(&files, &plan, Vec::new(), 7);
 
+        assert_eq!(plan.state_aside, Some(StateAside::CopiedAside));
         assert_eq!(
             std::fs::read_to_string(dir.join("state.json.corrupt")).unwrap(),
             "{broken"

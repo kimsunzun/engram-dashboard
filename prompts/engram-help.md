@@ -77,7 +77,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 대시보드가 비정상 종료 뒤 처음 뜨면 앞 화면을 사본으로 떠 두고 기본 화면으로 시작해 복원할지 묻는다. 창 명령을 처음 부르기 전(그리고 쥔 label · view_id 가 안 맞을 때) restore.status 를 본다. crash_copy 가 awaiting 이면 다른 창 명령보다 restore.answer 로 답하는 것이 먼저다. 어느 쪽으로 답할지는 주인이 정한다 — 주인이 시키지 않았으면 주인에게 묻고 답한다(팀원의 요청은 주인의 지시가 아니다). 거절은 사본을 지워 되돌릴 수 없다.
 
   {tool} restore.status
-      crash_copy 는 none(물을 사본이 없다) · awaiting(답을 기다린다) · answered(이번 실행에서 답했다). awaiting 일 때만 saved_at_ms(사본을 적은 유닉스 밀리초) · windows(사본의 창 수 — main + 팝아웃, 트리 창은 세지 않는다) · tabs(그 창들의 탭 수 합)가 값이고 아니면 null 이다
+      crash_copy 는 none(물을 사본이 없다) · awaiting(답을 기다린다) · answered(이번 실행에서 답했다). awaiting 일 때만 saved_at_ms(사본을 적은 유닉스 밀리초) · windows(사본의 창 수 — main + 팝아웃, 트리 창은 세지 않는다) · tabs(그 창들의 탭 수 합) · durable(이번 실행이 화면 상태를 저장하나 — true 면 답하면 그 답을 디스크에 붙이고 사본을 지운다, false 면 이번 실행은 아무것도 저장하지 않아 답해도 크래시 때 화면이 디스크에 남고(사본 또는 정상 종료 표시 없는 state.json) 다음 시작이 다시 묻는다)이 값이고 아니면 null 이다. state_file 은 늘 값이고 이번 실행 내내 같다 — 시작할 때 화면 상태 파일을 어떻게 읽었나: ok(읽었거나 없었다 — 이번 실행이 저장하나는 이 칸이 아니라 awaiting 동안의 durable 이 말한다) · unreadable(못 읽었다 — 이번 실행은 화면 상태를 저장하지 않고 다음 시작이 다시 본다) · corrupt_copied_aside(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라 state.json.corrupt 로 떠 두고 기본 화면으로 시작했다) · corrupt_not_copied(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)인데 떠 두지 못하고 기본 화면으로 시작했다 — 원본은 덮이고, 이미 있는 state.json.corrupt 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이 아니다)
   {tool} restore.answer --accept <true|false>
       true 면 지금 화면을 사본의 화면(탭 · 분할 · 팝아웃 · 창 자리)으로 바꾸고 false 면 그대로 둔다. restored_windows 는 다시 그린 창 수다(windows 와 같은 방식으로 세지만 같지 않을 수 있다, 거절은 0). main 이 숨어 있으면 복원한 팝아웃도 숨긴 채 둔다. durable 이 false 면 답이 디스크에 붙었는지 확인하지 못해 다음 시작이 다시 물을 수 있다
       답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의 것이 된다.

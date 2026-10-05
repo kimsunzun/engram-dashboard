@@ -72,7 +72,7 @@ use engram_dashboard_lib::state::convert::to_persisted;
 use engram_dashboard_lib::state::placement::{Landing, MonitorArea};
 use engram_dashboard_lib::state::restore::{
     CrashCopy, CrashCopyStatus, RestoreCoordinator, RestorePorts, RestoreService, RestoreWindows,
-    SubscriptionSource,
+    StateFileStatus, SubscriptionSource,
 };
 use engram_dashboard_lib::state::schema::{StateFile, STATE_VERSION};
 use engram_dashboard_lib::state::tree_attrs::TreeAttrs;
@@ -605,8 +605,9 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   (`split.setRatio`·`split.list` — ADR-0227). 세대 9 는 `layout.setSlotContent` 의 **어휘와 칸**이
     //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7). 세대 10 은
     //   이름이 넷 늘고(`settings.*`) `ui.refresh` 답의 `theme` 출처가 설정으로 바뀐 세대다(TRD S21-storage §5-4).
-    //   세대 11 은 이름이 둘 는 세대다(`restore.*` — TRD S21-storage §6-7).
-    assert_eq!(CATALOG_VERSION, 11);
+    //   세대 11 은 이름이 둘 는 세대다(`restore.*` — TRD S21-storage §6-7). 세대 12 는 `restore.status` 의
+    //   **답 모양**이 바뀐 세대다(`state_file` — TRD S21-storage §6-5).
+    assert_eq!(CATALOG_VERSION, 12);
     assert_eq!(COMMAND_SPECS.len(), 25);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -1746,6 +1747,10 @@ impl World {
 
     /// 부팅 단계 ⑥ — 앞 실행의 화면(main 탭 「지난 탭」 + 빈 팝아웃 `popouts` 개)을 답하지 않은 사본으로 세운다.
     fn crash_copy_awaits(&self, popouts: usize) {
+        self.crash_copy_awaits_with(popouts, false, StateFileStatus::Ok);
+    }
+
+    fn crash_copy_awaits_with(&self, popouts: usize, durable: bool, state_file: StateFileStatus) {
         let mut previous = ViewManager::new();
         let main_view = previous.windows[MAIN_WINDOW_LABEL].active;
         previous
@@ -1756,18 +1761,21 @@ impl World {
                 .create_window(&format!("slot-popup-{}", 90 + n))
                 .expect("팝아웃");
         }
-        self.restore_service.set_boot(Some(CrashCopy {
-            text: "{}".to_string(),
-            hash: "h".to_string(),
-            file: StateFile {
-                version: STATE_VERSION,
-                saved_at_ms: 1_700_000_000_000,
-                clean_exit: false,
-                resolved_crash_copy: None,
-                windows: to_persisted(&previous, WindowAttrs::default()),
-            },
-            durable: false,
-        }));
+        self.restore_service.set_boot(
+            Some(CrashCopy {
+                text: "{}".to_string(),
+                hash: "h".to_string(),
+                file: StateFile {
+                    version: STATE_VERSION,
+                    saved_at_ms: 1_700_000_000_000,
+                    clean_exit: false,
+                    resolved_crash_copy: None,
+                    windows: to_persisted(&previous, WindowAttrs::default()),
+                },
+                durable,
+            }),
+            state_file,
+        );
     }
 
     fn main_tab_name(&self) -> String {
@@ -1788,8 +1796,8 @@ async fn restore_status_reports_the_crash_copy_shape() {
         .expect("성공 답장");
     assert_eq!(
         none,
-        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null}),
-        "물을 사본이 없으면 뒤 셋은 null"
+        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "state_file": "ok"}),
+        "물을 사본이 없으면 사본의 셋은 null"
     );
 
     world.crash_copy_awaits(2);
@@ -1800,9 +1808,76 @@ async fn restore_status_reports_the_crash_copy_shape() {
         .expect("성공 답장");
     assert_eq!(
         awaiting,
-        json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3}),
+        json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3, "durable": false, "state_file": "ok"}),
         "창 수 = main + 팝아웃(트리 창은 세지 않는다)"
     );
+}
+
+#[tokio::test]
+async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
+    let (world, queue, receiver) = queued();
+
+    world
+        .restore_service
+        .set_boot(None, StateFileStatus::Unreadable);
+    let unreadable = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+        .await
+        .outcome
+        .expect("성공 답장");
+    assert_eq!(
+        unreadable,
+        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "state_file": "unreadable"}),
+        "사본이 없어도 state_file 은 값이다"
+    );
+
+    for (state_file, wire) in [
+        (StateFileStatus::CorruptCopiedAside, "corrupt_copied_aside"),
+        (StateFileStatus::CorruptNotCopied, "corrupt_not_copied"),
+    ] {
+        world.crash_copy_awaits_with(0, false, state_file);
+        world.mail.clear();
+        let reply = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+            .await
+            .outcome
+            .expect("성공 답장");
+        assert_eq!(reply["crash_copy"], json!("awaiting"));
+        assert_eq!(reply["state_file"], json!(wire));
+    }
+}
+
+#[tokio::test]
+async fn restore_status_carries_durable_only_while_awaiting() {
+    let (world, queue, receiver) = queued();
+
+    for durable in [true, false] {
+        world.crash_copy_awaits_with(0, durable, StateFileStatus::Ok);
+        world.mail.clear();
+        let awaiting = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+            .await
+            .outcome
+            .expect("성공 답장");
+        assert_eq!(awaiting["crash_copy"], json!("awaiting"));
+        assert_eq!(awaiting["durable"], json!(durable), "사본의 값");
+    }
+
+    world.mail.clear();
+    call(
+        &receiver,
+        &queue,
+        &world.mail,
+        "restore.answer",
+        json!({"accept": false}),
+    )
+    .await
+    .outcome
+    .expect("거절 답장");
+    world.mail.clear();
+    let answered = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+        .await
+        .outcome
+        .expect("성공 답장");
+    assert_eq!(answered["crash_copy"], json!("answered"));
+    assert_eq!(answered["durable"], json!(null), "awaiting 밖은 null");
 }
 
 #[tokio::test]

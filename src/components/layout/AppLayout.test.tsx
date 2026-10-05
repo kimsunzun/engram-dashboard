@@ -10,20 +10,25 @@ vi.mock('./WindowLayout', () => ({
 }))
 
 import AppLayout from './AppLayout'
+import { createRestoreClient } from '../../api/restoreClient'
+import { fakeRestoreIpc, view } from '../../api/testing/fakeRestoreIpc'
 import { MAIN_WINDOW_LABEL } from '../../store/viewStore'
+
+// 복원 상태는 묻지 않는 실행(`none` · `ok`) — 모달 · 알림 배선은 RestoreModal.test 몫이다.
+const idleRestore = () => createRestoreClient(fakeRestoreIpc(view('none')).ipc)
 
 afterEach(cleanup)
 
 describe('AppLayout — 슬롯화된 셸(ADR-0063)', () => {
   it('main 창 WindowLayout 을 label="main" 으로 마운트한다', () => {
-    render(<AppLayout />)
+    render(<AppLayout restore={idleRestore()} />)
     const wl = screen.getByTestId('window-layout')
     expect(wl).toBeTruthy()
     expect(wl.getAttribute('data-label')).toBe(MAIN_WINDOW_LABEL)
   })
 
   it('옛 고정 크롬(Sidebar/DiffPanel/StatusBar) 잔재가 없다', () => {
-    render(<AppLayout />)
+    render(<AppLayout restore={idleRestore()} />)
     expect(screen.queryByText('Agent Tree')).toBeNull() // 옛 Sidebar 헤더
     expect(screen.queryByText('Ready')).toBeNull() // 옛 StatusBar
     expect(screen.queryByText('Accept')).toBeNull() // 옛 DiffPanel
