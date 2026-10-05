@@ -26,6 +26,9 @@ engram-dashboard-command = { path = "../engram-dashboard-command" }
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 # OS 층(ADR-0266) — `process::{process_creation_time, pid_alive_with_start_time}` 등 PID 헬퍼. codex 세션 id
 #   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2).
+#   CLI 스폰마다 지나는 콘솔 감싸기(`shell::console_command` — claude · codex 의 스폰과 사용량 조회) ·
+#   홈 디렉터리(`env::home_dir` — claude 설정 폴더 · codex 홈) · 환경변수 이름 비교(`env::env_key_eq` — CLI
+#   입구의 PATH 주입)도 여기서 온다(ADR-0230). 시험은 기본 셸(`shell::default_shell`)도 쓴다.
 engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

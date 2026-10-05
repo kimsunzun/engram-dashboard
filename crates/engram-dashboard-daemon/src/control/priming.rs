@@ -244,7 +244,7 @@ const REL_MCP_PRIMARY: &str = "prompts/agent-priming.md";
 const ENV_OVERRIDE: &str = "ENGRAM_PRIMING_FILE";
 
 /// ★cmd.exe 부패 위험 문자(ADR-0092, Codex #1+#5)★: Windows 에서 claude 인자는 `console_command`
-///   (agent/backend/mod.rs)가 `cmd.exe /c claude …` 로 감싸 실행한다 — 이 경로가 `%VAR%` 를 **따옴표
+///   (platform crate 의 `shell`)가 `cmd.exe /c claude …` 로 감싸 실행한다 — 이 경로가 `%VAR%` 를 **따옴표
 ///   안에서도** 확장하고, `& ^ | < >` 를 셸 메타로 해석해 인자를 부패시킨다. 프라이밍 경로에 이 문자가
 ///   있으면 claude 가 엉뚱한/잘린 경로를 받으므로 아예 주입하지 않는다(None).
 ///   ★PRE-EXISTING·별도 follow-up(scope, ADR-0092)★: `console_command` 자체의 cmd.exe 이스케이프 결함은

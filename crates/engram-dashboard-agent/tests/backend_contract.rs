@@ -724,9 +724,9 @@ fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
 /// ★이 함수가 이 파일이 「운영을 잰다」고 말할 수 있는 유일한 근거다★. 인자를 이 파일에 적어 두면 그
 ///   문자열이 운영과 갈리는 날 시험대는 **다른 것**을 재면서 초록이고, 그 어긋남을 잡는 게이트가 아무 데도
 ///   없다(실제로 그랬다 — 헤더의 그 문단). 여기서 받아 오면 갈릴 자리가 애초에 없다.
-/// ★덤 — 콘솔 래핑을 손으로 복제하던 자리도 함께 사라졌다★: `console_command`(`src/backend/mod.rs`)는
-///   `pub(crate)` 라 통합 테스트에서 못 부르는데, 그 래핑은 `build_spec` 이 **안에서** 이미 적용해
-///   `CommandSpec.program`/`args` 로 돌려준다. 그래서 이 파일은 그 래핑을 알 필요가 없다.
+/// ★덤 — 콘솔 래핑을 손으로 복제하던 자리도 함께 사라졌다★: 그 래핑(platform crate 의
+///   `shell::console_command`)은 `build_spec` 이 **안에서** 이미 적용해 `CommandSpec.program`/`args` 로
+///   돌려준다. 그래서 이 파일은 그 래핑을 알 필요가 없다.
 fn production_spec(
     row: &BackendRow,
     cwd: &Path,

@@ -52,7 +52,7 @@
   - base 시험 기능(`test-support`)이 운영 그래프에 안 실리는지 보는 게이트(ADR-0269 결정 5 · ADR-0275 결정 5) — 실명령 · 기대값 정본 = `/qa` 바인딩.
 
 ### platform (`crates/engram-dashboard-platform`) — 2026-10-05 신설(ADR-0266 · ADR-0275)
-- **① 단위**: `src/` 내 `#[cfg(test)]`(`process` = PID liveness · 시작시각의 세 갈래(앎 · 사라짐 · 못 읽음) · `OpenProcess` 오류 코드 분류 · 프로세스 표 · 자식 PID). base 의 `platform` 모듈에서 시험째 옮겨 온 것이다(실측 2026-10-05 = 13건).
+- **① 단위**: `src/` 내 `#[cfg(test)]`(`process` = PID liveness · 시작시각의 세 갈래(앎 · 사라짐 · 못 읽음) · `OpenProcess` 오류 코드 분류 · 프로세스 표 · 자식 PID · `shell` = CLI 감싸기(인자 그대로) · `env` = 실행 파일 이름 · 환경변수 이름 비교). `process` 는 base 의 `platform` 모듈에서 시험째 옮겨 온 것이고(13건), `shell` · `env` 의 셋은 규칙을 agent · daemon · discovery 에서 옮겨 올 때 새로 쓴 것이다 — 옮겨 온 쪽에는 그 규칙만 재는 시험이 없었다(실측 2026-10-05 = 16건).
 - **격리 하네스 = crate 경계 그 자체**: 워크스페이스 crate 를 하나도 의존하지 않는 잎이라(base 도 아니다) 단독으로 돈다.
 - 실행: `cargo test -p engram-dashboard-platform -- --test-threads=4` — `process` 의 시험 셋(자식 PID · 프로세스 표 · 끝난 PID)이 실 `cmd.exe` 를 띄워 플래그가 붙는다(판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」).
 - 격리 게이트 2종(실명령 · 기대값 · 근거 정본 = 그 crate `src/lib.rs` 헤더):

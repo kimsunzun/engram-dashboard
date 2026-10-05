@@ -101,11 +101,7 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 fn locate_send_exe() -> Option<PathBuf> {
     // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
     //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
-    let file_name = if cfg!(windows) {
-        format!("{CLI_EXE_NAME}.exe")
-    } else {
-        CLI_EXE_NAME.to_string()
-    };
+    let file_name = engram_dashboard_platform::env::exe_file_name(CLI_EXE_NAME);
     if let Ok(daemon_exe) = std::env::current_exe() {
         if let Some(dir) = daemon_exe.parent() {
             let send_exe = dir.join(&file_name);

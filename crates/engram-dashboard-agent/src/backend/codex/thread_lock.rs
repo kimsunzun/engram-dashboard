@@ -55,8 +55,8 @@ pub(crate) trait LockHolderProbe {
     /// 자식이 아니다.
     ///
     /// ★왜 나무인가 — 우리가 쥔 PID 는 codex 가 아니다★: Windows 에서 스폰은 `cmd.exe /c codex …`
-    ///   한 겹을 지나므로([`crate::backend::console_command`]) 통로가 돌려준 PID 는 **그 래퍼**다.
-    ///   락을 쥔 것은 그 아래의 `codex.exe` 자신이다(ADR-0218 「근거」 — 홀더는 래퍼도 자식도 아닌
+    ///   한 겹을 지나므로([`engram_dashboard_platform::shell::console_command`]) 통로가 돌려준 PID 는
+    ///   **그 래퍼**다. 락을 쥔 것은 그 아래의 `codex.exe` 자신이다(ADR-0218 「근거」 — 홀더는 래퍼도 자식도 아닌
     ///   codex.exe 였다). ★래퍼 PID 하나만 대조하면 일치가 **영영** 안 나고 증상은 오류가 아니라
     ///   침묵이다★ — 스레드가 에이전트 수명 내내 빈손으로 돈다(실측 2026-09-21: `cmd.exe /c …` →
     ///   래퍼 38240 · 그 아래 4816,19468).
@@ -214,7 +214,10 @@ fn thread_id_from_lock_name(path: &Path) -> Option<Uuid> {
 }
 
 fn codex_home() -> Option<PathBuf> {
-    codex_home_from(std::env::var_os(CODEX_HOME_ENV), user_home())
+    codex_home_from(
+        std::env::var_os(CODEX_HOME_ENV),
+        engram_dashboard_platform::env::home_dir(),
+    )
 }
 
 /// [`codex_home`] 의 규칙만 — env 를 건드리지 않고 재려고 갈라 뒀다.
@@ -225,16 +228,6 @@ fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -
         }
     }
     user_home.map(|home| home.join(CODEX_HOME_SUBDIR))
-}
-
-#[cfg(windows)]
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// 첫 스캔까지의 대기. ★0 이 아닌 것이 의도다★ — 실측된 스폰→락 생성 지연의 최솟값이 0.735 초라
@@ -476,8 +469,8 @@ mod tests {
     use std::collections::HashMap;
 
     // ★가짜 나무는 **운영에서 실제로 나오는 모양**이다 — 이것이 평평하면 시험 전체가 거짓이 된다★:
-    //   우리가 쥐는 PID 는 `cmd.exe` 래퍼이고(`crate::backend::console_command`) 락을 쥐는 것은 그 아래
-    //   `codex.exe` 다. 홀더를 래퍼 PID 로 심어 두면 「래퍼만 대조하는」 구현도 초록이 된다 — 실제로 그렇게
+    //   우리가 쥐는 PID 는 `cmd.exe` 래퍼이고(`engram_dashboard_platform::shell::console_command`) 락을
+    //   쥐는 것은 그 아래 `codex.exe` 다. 홀더를 래퍼 PID 로 심어 두면 「래퍼만 대조하는」 구현도 초록이 된다 — 실제로 그렇게
     //   심어 뒀다가 회수가 영영 안 되는 구현을 통과시켰다(적출 2026-09-21).
     const WRAPPER_PID: u32 = 4242;
     const WRAPPER_START: u64 = 134_344_468_098_866_343;

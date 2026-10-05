@@ -59,6 +59,7 @@ pub(crate) use usage_probe::CODEX_USAGE_PROBE;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use engram_dashboard_platform::shell::console_command;
 use uuid::Uuid;
 
 use self::decoder::CodexAppServerDecoder;
@@ -67,8 +68,8 @@ use self::protocol::{
 };
 use self::transport::CodexAppServerTransport;
 use crate::backend::{
-    console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
-    SpawnParts, TransportShape, TurnClassifier,
+    inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink, SpawnParts,
+    TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};

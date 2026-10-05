@@ -985,22 +985,18 @@ pub fn ensure_daemon(
 /// 데몬 exe 경로 탐색. 우선 current_exe 와 같은 디렉토리(배포 시 동거),
 /// 없으면 개발용 target/debug fallback. 못 찾으면 ExeNotFound.
 pub fn locate_daemon_exe() -> Result<PathBuf, DiscoveryError> {
-    const EXE: &str = if cfg!(windows) {
-        "engram-dashboard-daemon.exe"
-    } else {
-        "engram-dashboard-daemon"
-    };
+    let exe = engram_dashboard_platform::env::exe_file_name("engram-dashboard-daemon");
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(cur) = std::env::current_exe() {
         if let Some(dir) = cur.parent() {
-            candidates.push(dir.join(EXE));
+            candidates.push(dir.join(&exe));
         }
     }
     // 워크스페이스 빌드면 target/debug 가 공유라 위 후보로 충분하나, 안전하게 한 번 더.
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("target").join("debug").join(EXE));
-        candidates.push(cwd.join("..").join("target").join("debug").join(EXE));
+        candidates.push(cwd.join("target").join("debug").join(&exe));
+        candidates.push(cwd.join("..").join("target").join("debug").join(&exe));
     }
 
     locate_in(&candidates)

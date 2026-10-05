@@ -179,7 +179,7 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
     let profile = AgentProfile::new(
         "reaper-kill".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),
@@ -233,7 +233,7 @@ fn shutdown_all_keeps_profiles_for_boot_restore() {
     let profile = AgentProfile::new(
         "reaper-shutdown".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),

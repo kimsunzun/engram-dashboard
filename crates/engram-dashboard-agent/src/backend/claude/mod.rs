@@ -39,13 +39,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use engram_dashboard_base::time::SystemClock;
+use engram_dashboard_platform::shell::console_command;
 use uuid::Uuid;
 
 use leftover::{Cleaner, GateCell, LogTag};
 
 use crate::backend::{
-    console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
-    SpawnParts, TransportShape, TurnClassifier,
+    inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink, SpawnParts,
+    TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -1814,7 +1815,7 @@ pub(super) fn config_dir() -> Option<PathBuf> {
             return Some(PathBuf::from(dir));
         }
     }
-    claude_home().map(|h| h.join(".claude"))
+    engram_dashboard_platform::env::home_dir().map(|h| h.join(".claude"))
 }
 
 /// `<config dir>/projects/<slug>/<sid>.jsonl` 경로. home 을 못 찾으면 None.
@@ -1825,15 +1826,6 @@ fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
             .join(project_slug(cwd))
             .join(format!("{sid}.jsonl")),
     )
-}
-
-#[cfg(windows)]
-fn claude_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
-}
-#[cfg(not(windows))]
-fn claude_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// ADR-0079: transcript 원문(라인 NDJSON) → 과거 `OutputEvent` 목록. **순수 함수(외부 의존 0)** — 실

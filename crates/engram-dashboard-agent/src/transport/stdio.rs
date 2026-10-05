@@ -102,8 +102,8 @@ impl StdioTransport {
         structured: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
     ) -> Result<(StdioTransport, Option<u32>), PtyError> {
-        // Windows shim(claude.cmd) 처리는 backend/console_command가 이미 `cmd.exe /c claude …`로
-        //   감싼 spec을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
+        // Windows shim(claude.cmd) 처리는 backend 가 이미 platform `console_command` 로 감싼 spec
+        //   (`cmd.exe /c claude …`)을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
         let mut cmd = Command::new(&spec.program);
         cmd.args(&spec.args);
         cmd.current_dir(&spec.cwd);

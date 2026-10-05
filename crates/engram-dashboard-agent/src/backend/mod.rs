@@ -37,27 +37,6 @@ use crate::types::{
 };
 use crate::usage::UsageProbe;
 
-/// **왜 필요한가:** Windows에서 `claude`는 확장자 없는 npm shim이라, ConPTY가 쓰는 CreateProcessW가
-/// 직접 못 띄운다(error 193 — PATHEXT/셸 해석을 안 함). `cmd.exe /c <prog> …`로 감싸면 cmd가
-/// `<prog>.cmd` shim을 해석해 실제 프로세스를 띄운다. `cmd /c`는 대상이 종료되면 함께 종료되므로
-/// "PTY 자식 = 에이전트" 수명이 유지된다(JobObject가 트리 통째 kill). 비Windows는 그대로 직접 실행.
-///
-/// shim이 아닌 일반 실행파일(Shell의 cmd.exe 등)에는 적용하지 않는다 — CLI 백엔드 전용.
-pub(crate) fn console_command(program: &str, args: Vec<String>) -> (String, Vec<String>) {
-    #[cfg(windows)]
-    {
-        let mut wrapped = Vec::with_capacity(args.len() + 2);
-        wrapped.push("/c".to_string());
-        wrapped.push(program.to_string());
-        wrapped.extend(args);
-        ("cmd.exe".to_string(), wrapped)
-    }
-    #[cfg(not(windows))]
-    {
-        (program.to_string(), args)
-    }
-}
-
 // ── CLI 입구 주입(백엔드 공용) ────────────────────────────────────────────────
 
 /// ADR-0086 스텝 2(CLI 입구): 스폰 env 에 CLI 크레덴셜 + 제어 평면 CLI(`CLI_EXE_NAME`) 형제 디렉토리
@@ -134,13 +113,7 @@ pub(crate) fn inject_cli_entrance(env: &mut Vec<(String, String)>, endpoint: &Co
         //   (adversarial 리뷰 must-fix). 구성: `send_exe_parent + separator + base` — 형제 디렉토리가
         //   **맨 앞**(shadowing 방어), 프로필/데몬 PATH 는 **tail 로 생존**.
         if let Some(parent) = send_exe.parent() {
-            let is_path_key = |k: &str| {
-                if cfg!(windows) {
-                    k.eq_ignore_ascii_case("PATH")
-                } else {
-                    k == "PATH"
-                }
-            };
+            let is_path_key = |k: &str| engram_dashboard_platform::env::env_key_eq(k, "PATH");
             let winner_idx = env.iter().rposition(|(k, _)| is_path_key(k));
             let base_os = winner_idx
                 .map(|i| std::ffi::OsString::from(env[i].1.clone()))
