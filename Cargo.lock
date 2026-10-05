@@ -1124,6 +1124,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-dashboard-platform"
+version = "0.1.0"
+
+[[package]]
 name = "engram-dashboard-protocol"
 version = "0.1.0"
 dependencies = [

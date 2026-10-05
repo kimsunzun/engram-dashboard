@@ -321,6 +321,10 @@
 | 입구 인자 검사의 순서 함정(`contains` → `check_args` → `call`) — 입구가 둘이 되면 묶음 함수로 | `crates/engram-dashboard-daemon/src/control/commands.rs:172-182` | 입구가 늘 때 |
 | `Clock` 시간 인터페이스가 네 벌(transport · daemon `command_delivery` · discovery · daemon `usage_service`) | 후보 4 표 | 1-1 |
 | ~~★**후보 6 과 부딪힐 수 있다 — 2-2 착수 전에 사용자와 다시 본다**★~~ **→ 풀림: 사용자 2026-10-02 — `DataLayout` 도 쪼갠다 → ADR-0271 결정 4.** 원 서술: master 의 저장 구조 개편(ADR-0264, 2026-10-02)이 데이터 루트를 컴포넌트별(`daemon\{state,run}` · `shell\{config,state}` · `webview\` · `logs\`)로 나누고 그 경로의 **단일 출처 `DataLayout` 을 discovery 에 새로 두었다**. 후보 6(「discovery 를 뽀개 경로 규칙은 데몬으로, 셸은 각자」)과 「셸·데몬 경로를 한 곳에서 계산」이 갈린다 | `crates/engram-dashboard-discovery/src/layout.rs` · ADR-0264 | ~~2-2 전 사용자 결정~~ 풀림(ADR-0271 결정 4) |
+| `use tauri` 격리 게이트(agent · base · transport · platform)의 `^\s*use tauri` 앵커는 `pub use tauri::…` · `use ::tauri::…` 를 못 잡는다 — 해석된 의존 그래프에서 tauri 부재를 재는 게이트(`cargo tree -i tauri`)로 넓힐지 · 출처 = 1-3 U0 codex 리뷰(2026-10-05) | `.github/workflows/ci.yml` 의 그 게이트 넷 · CLAUDE.md 「빌드·검증 명령」 · `.claude/skill-bindings/qa.md` 4 · 4b · 4e | 미정(메인 판단) |
+| transport 헤더 게이트 ① 의 「이 crate 의 패키지 이름에서 그 접두를 떼면 게이트가 조용히 눈을 감는다」는 틀렸다 — 자기 이름을 바꾸면 `cargo tree -p` 가 죽거나 자기 줄이 접두를 잃어 그 게이트는 빨개진다. 실제 구멍은 접두 없는 멤버를 의존하는 것과, 이 crate 가 접두를 떼면 **남의** 상한 게이트가 이 crate 로 가는 간선을 못 보는 것이다(platform 헤더의 같은 문장은 1-3 U0 리뷰(2026-10-05)에서 고쳤다) | `crates/engram-dashboard-transport/src/lib.rs:39-40` | 3단계(transport) 때 그 헤더를 지나며 |
+| 메시징 이름 게이트 정규식에 `net` · `transport` 가 없다 — 「새 워크스페이스 crate 가 생기면 더한다」가 그 둘 때 지켜지지 않았다(messaging 소스에 두 이름 0건 — 더해도 초록 · 실측 2026-10-05) | `.github/workflows/ci.yml` 메시징 이름 게이트 · CLAUDE.md · `.claude/skill-bindings/qa.md` · `docs/testing-strategy.md:64` · `docs/reference/architecture-overview.md:492` | 다음에 그 게이트를 손볼 때(사본 다섯을 한 번에) |
+| `.claude/skill-bindings/qa.md` 에 transport 격리 게이트가 하나도 없다 — CI 만 잰다(그 파일 머리말 「CI에 있는데 여기 없는 게이트를 발견하면 그건 드리프트다 — 이 파일을 채운다」와 어긋난다) | `.claude/skill-bindings/qa.md` · `crates/engram-dashboard-transport/src/lib.rs` 「격리 게이트」 | 3단계(transport) 전 |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)

@@ -1,5 +1,6 @@
 # Cargo workspace 루트 (S12 phase 1). 정적 링크.
-# 멤버 10: protocol(경계 계약) · base(바닥 기반층 — 로깅·PID 판정·범용 도우미, 잎 crate, ADR-0175 · ADR-0269) ·
+# 멤버 11: protocol(경계 계약) · base(바닥 기반층 — 로깅·PID 판정·범용 도우미, 잎 crate, ADR-0175 · ADR-0269) ·
+#   platform(OS 층 — OS 에 따라 달라지는 운영 코드, 워크스페이스 crate 의존 0, ADR-0266 · ADR-0275) ·
 #   agent(에이전트 코어, Tauri import 0 — 옛 core, ADR-0175) · command(명령 버스 도구 — 워크스페이스
 #   crate 의존 0·명령 0개, ADR-0155) · discovery(데몬 발견) · messaging(메시징 커널 — 워크스페이스 crate
 #   무의존, ADR-0110) · net(네트워크 행 — WS·프레임 포트·단일 인스턴스·portfile, ADR-0129) ·
@@ -12,6 +13,9 @@ members = [
     # ADR-0175 결정 1 · ADR-0269: 바닥 기반층 잎 crate(로깅 · PID 판정 · 범용 도우미 text·time·path·sync · 시험 대기 testing). 입주 조건 셋(지금 여러
     #   곳에서 쓰이거나 복사돼 있을 것 · 도메인 지식 0 · 입주자끼리 무참조)의 정본은 그 crate lib.rs 헤더다.
     "crates/engram-dashboard-base",
+    # ADR-0266 · ADR-0275: OS 층 잎 crate(OS 에 따라 달라지는 운영 코드 — 워크스페이스 crate 의존 0, base 도
+    #   의존하지 않는다). 불변식 · 격리 게이트의 정본은 그 crate lib.rs 헤더다.
+    "crates/engram-dashboard-platform",
     "crates/engram-dashboard-agent",
     # ADR-0155: 명령 버스 도구 lib(봉투·오류·선언 매크로·표·라우팅). 선언은 생산자 옆에 살고 이 crate 는
     #   도구만 담는다 — 여기에 명령이 하나라도 생기면 중앙 카탈로그가 다른 문으로 돌아온다.

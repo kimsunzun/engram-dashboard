@@ -61,7 +61,7 @@
 - **① 단위**: `src/` 내 단위테스트(mailbox 파킹·TTL, ledger 이력/회신 계약, groups 해석, envelope 렌더·이스케이프, service 3분기/flush/sweep, busy 게이트 상태머신). 전부 clock injection(주입 `now`)이라 실시간 sleep 0.
 - **격리 하네스 = crate 경계 그 자체**: 이 crate 는 워크스페이스 crate 무의존(ADR-0110 결정 2)이라 `AgentManager`·PTY·Tauri 없이 단독으로 돈다 — 외부 의존은 포트 trait(`DeliveryPort`·`ControlPlanePort`·`TurnFacts`·`IdleNotifier`·`FlushTrigger`)의 fake 로만 들어온다.
 - 실행: `cargo test -p engram-dashboard-messaging`.
-- 격리 게이트 2종(실명령·기대값 정본 = `/qa` 바인딩): ① 소스 참조 `rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/` → 0. ★괄호 안 이름은 손으로 박은 알파벳이라 **새 워크스페이스 crate가 생기면 여기 더해야 보인다**★ — 그 구멍이 ②를 부른 계기다. ② 직접 워크스페이스 의존 상한 `cargo tree`(→ 정확히 1줄 = 자기 자신). 텍스트가 아니라 **해석된 의존 그래프**를 읽어, 정규식이 못 보는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 덮는다. net 게이트 3과 같은 계기다.
+- 격리 게이트 2종(실명령·기대값 정본 = `/qa` 바인딩): ① 소스 참조 `rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command|platform)" crates/engram-dashboard-messaging/src/` → 0. ★괄호 안 이름은 손으로 박은 알파벳이라 **새 워크스페이스 crate가 생기면 여기 더해야 보인다**★ — 그 구멍이 ②를 부른 계기다. ② 직접 워크스페이스 의존 상한 `cargo tree`(→ 정확히 1줄 = 자기 자신). 텍스트가 아니라 **해석된 의존 그래프**를 읽어, 정규식이 못 보는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 덮는다. net 게이트 3과 같은 계기다.
 - **호스트 어댑터는 daemon 쪽 테스트**: 배달·턴 사실 조회 어댑터(`messaging_host::ManagerDeliveryPort`·`ManagerTurnFacts`)는 daemon crate 단위 테스트가 덮는다. 출력 이벤트→턴 신호 분류는 백엔드 지식이라 코어 `backend/` seam 뒤로 내려갔고(`AgentBackend::turn_classifier`, ADR-0127) agent crate 테스트가 덮는다.
 
 ### net (`crates/engram-dashboard-net`) — 2026-08-05 신설(ADR-0129 슬라이스 1)
@@ -133,7 +133,7 @@
 cargo test --workspace -- --test-threads=4   # 전 멤버 회귀 — 2026-08-24부터 셸 패키지(`engram-dashboard`)도 든다(옛 --exclude 는 걷혔다: 0xc0000139 즉사는 ADR-0174 로, 알려진 실패는 전부 고쳐지며 사라졌다). 루트 bare cargo test 금지는 그대로. 이 플래그는 로컬 전용이며 빼지 말 것 — 규칙 정본 = CLAUDE.md 「빌드·검증 명령」
 cargo test -p engram-dashboard --test <이름>  # 같은 패키지의 타깃을 하나씩 — 위 회귀와 겹치지만 실패한 스위트를 이름으로 짚고 타깃 부재를 실패로 만든다(목록·근거는 위 §1 src-tauri 절)
 cargo test -p engram-dashboard --test lib_unit  # 같은 패키지의 단위 스위트(판정 = 실패 0 · 건수 정본 = CLAUDE.md 「빌드·검증 명령」). ★--lib·--all-targets 로 부르지 말 것 — 그쪽은 아직 0xc0000139 로 즉사한다(설명 정본 = src-tauri/Cargo.toml 주석)★
-# ★`-- --test-threads=4` 는 crate 마다 갈린다★ — 실 자식 프로세스를 띄우는 crate 에만 붙는다(base·agent·daemon).
+# ★`-- --test-threads=4` 는 crate 마다 갈린다★ — 실 자식 프로세스를 띄우는 crate 에만 붙는다(base·agent·daemon·platform — platform 은 그런 시험이 따라오므로 미리 붙는다, ADR-0266 「영향」).
 #   판정 규칙·근거의 정본 = CLAUDE.md 「빌드·검증 명령」. 여기서 붙고 안 붙고를 새로 판정하지 말 것.
 cargo test -p engram-dashboard-protocol     # 단위+golden+ts_export
 cargo test -p engram-dashboard-base -- --test-threads=4    # 바닥 crate 단위(logging·platform·text·time·path·sync·testing) + 로깅 통합 2종 — 워크스페이스 crate 무의존, ADR-0175 결정 1 (platform 의 자식 PID 테스트가 실 cmd.exe 를 띄운다)

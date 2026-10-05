@@ -1,0 +1,9 @@
+[package]
+name = "engram-dashboard-platform"
+version = "0.1.0"
+edition = "2021"
+description = "Engram Dashboard OS 층 — OS 에 따라 달라지는 운영 코드를 한 곳에 모은다. 워크스페이스 crate 의존 0(base 도 아니다), 도메인 지식 0. 불변식 · 격리 게이트는 lib.rs 헤더가 정본(ADR-0266 · ADR-0275)."
+
+# ★워크스페이스 crate 를 여기 적지 않는다 — base 도 아니다★(ADR-0266 「거부한 대안」 둘째 · ADR-0268).
+#   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).
+[dependencies]

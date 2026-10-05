@@ -264,7 +264,7 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard --test lib_unit
 
-      # 아래 5개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
+      # 아래 6개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
 
@@ -276,6 +276,12 @@ jobs:
       - name: cargo test -p engram-dashboard-base
         shell: bash
         run: cargo test --locked -p engram-dashboard-base
+
+      # ADR-0266: OS 층 crate(`platform`). 워크스페이스 crate 의존 0(base 도 아니다)이 불변식이라 이 crate 도
+      #   위와 같은 단독 기립 축으로 확인한다 — 불변식 · 게이트의 정본은 그 crate lib.rs 헤더다.
+      - name: cargo test -p engram-dashboard-platform
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-platform
 
       - name: cargo test -p engram-dashboard-agent
         shell: bash
@@ -509,14 +515,14 @@ jobs:
           esac
 
       # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   ADR-0175 가 `base` 를 더했다 — 같은 이유로 알파벳에 넣는다. ★새 워크스페이스 crate 가 생길
-      #   때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래
-      #   상한 게이트가 그 구멍을 덮는다).
+      #   ADR-0175 의 `base` · ADR-0266 의 `platform` 도 같은 이유로 알파벳에 넣는다. ★새 워크스페이스
+      #   crate 가 생길 때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰
+      #   구멍이고, 아래 상한 게이트가 그 구멍을 덮는다).
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command|platform)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -692,6 +698,49 @@ jobs:
           echo "agent dev graph: $n match(es)"
           if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 둘이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
+
+      # ADR-0266 「영향」: OS 층 crate(`platform`)의 격리 게이트 둘. 기대값 · 근거 · 「지우지 말 것」의 정본은
+      #   `crates/engram-dashboard-platform/src/lib.rs` 헤더의 「격리 게이트」 절이고 여기는 부르기만 한다.
+      # ★둘이 각각 다른 축이라 하나로 줄이지 말 것★ — ①은 워크스페이스 멤버만 세므로 서드파티 `tauri` 를
+      #   그냥 통과시킨다(그 축이 ②).
+      # 형태 · 플래그는 messaging · command · base · transport 상한 게이트와 같다. ①에 경로 사전점검이 없는
+      #   까닭도 transport 게이트 1 과 같다 — 패키지가 사라지거나 개명하면 `cargo tree -p` 가 0 이 아닌
+      #   종료코드로 죽어 첫 분기가 잡는다.
+      - name: 'platform gate 1: direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-platform --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
+
+      # ★`test -d` 를 지우지 말 것★ — crate 를 옮기거나 개명하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이
+      #   조용히 사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다 — transport 게이트 2 와 같다).
+      - name: 'platform gate 2: no `use tauri` in the platform crate'
+        shell: bash
+        run: |
+          set +e
+          d=crates/engram-dashboard-platform/src
+          if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+          hits=$(rg "^\s*use tauri" "$d/")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
 
       # ADR-0175 결정 3 이 `replay_flight` 를 코어에서 셸 패키지 안으로 옮기며, 그 파일 헤더가 내세우던
       #   순수성 주장(소켓·tokio·Tauri·protocol 의존 0)이 **어느 게이트의 스캔 범위에도 안 들어가게 됐다**
