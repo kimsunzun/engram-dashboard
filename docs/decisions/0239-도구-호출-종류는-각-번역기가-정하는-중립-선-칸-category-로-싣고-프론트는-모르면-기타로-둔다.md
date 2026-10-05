@@ -44,5 +44,6 @@
 - **생성물** — `crates/engram-dashboard-protocol/bindings/ToolCategory.ts` · `StructuredEvent.ts` 는 `cargo test -p engram-dashboard-protocol` 이 굽고 CI sync 게이트가 주인이다 — 손으로 쓰지 않는다. 프론트는 한동안 같은 아홉 낱말의 지역 리터럴 합을 쓰고, B4 · B5 · FE-2 가 모두 커밋된 뒤 한 커밋(I1)이 생성물 import 로 바꾼다(TRD §7).
 - **벤더 도구 이름 표류** — claude 가 도구 이름을 바꾸면 `Other` 로 떨어진다. 묶음은 그대로 서고 요약 문구만 「기타」가 된다(TRD §9).
 - **펼침 상태는 인메모리** — 웹뷰 새로고침에 초기화된다(레이아웃과 같은 수준 — CLAUDE.md 「LLM-우선 제어」). 재구독·replay 는 지우지 않는다.
+  > 주석 2026-10-04(결정 무변경): 「레이아웃과 같은 수준」은 더는 맞지 않는다 — 레이아웃은 저장 관리 P3b3(`f9db35a`)부터 `shell\state\state.json` 에 영속된다. 펼침은 여전히 인메모리이고 남기지 않는다(TRD `docs/process/S21-storage/trd.md` §6-0 「남기지 않는 것」 — 사용자 결정 2026-10-02).
 - **행 종류 ↔ 레일(ADR-0051)** — 레일을 행 목록으로 계산하고 묶음 안에 레일 행을 두지 않는다. 어기면 레일 계산과 DOM 이 한 몸에서 갈린다.
 - `OutputChunk::ToolCall`(`messages.rs:907` — S14 스냅숏 잔재)은 건드리지 않는다.
