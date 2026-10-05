@@ -57,12 +57,15 @@
 //! 게이트를 손보면 **편집 후 비자기일치 성질을 다시 실측할 것**:
 //!   · **게이트 1 — 소스 참조**(`src/` 범위):
 //!     `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` → **0줄**
-//!   · **게이트 2 — 두 조각이다**(`src/` 범위). 2a 는 이 crate 가 쓰는 platform 심볼 둘을 개수로 못 박고,
-//!     2b 는 그 헬퍼의 원래 자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시 채워지지 않는지 잰다:
+//!   · **게이트 2 — 두 조각이다**(`src/` 범위). 2a 는 이 crate 가 쓰는 platform 심볼 다섯을 개수로 못 박고,
+//!     2b 는 그중 liveness 헬퍼의 원래 자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시 채워지지
+//!     않는지 잰다:
 //!     · **2a — platform 심볼 allowlist**:
 //!     `rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/`
-//!     `| sort -u` → **정확히 2줄**, 둘 다 `process::` 아래 프로세스 liveness 헬퍼
-//!     (`pid_alive_with_start_time` · `current_process_start_time` — portfile 의 stale 판정 전용).
+//!     `| sort -u` → **정확히 5줄** — `process::` 아래 프로세스 liveness 헬퍼 둘
+//!     (`pid_alive_with_start_time` · `current_process_start_time` — portfile 의 stale 판정 전용)과
+//!     `fs::` 아래 공유 제한 열기 하나와 그 실패 분류 둘(`open_deny_write` · `is_sharing_violation` ·
+//!     `is_access_denied` — 셋 다 instance 의 단일 인스턴스 가드 전용).
 //!     ★부를 때 완전경로나 낱개 `use` 로 쓸 것★ — 중괄호 묶음 `use`(`…::process::{a, b}`)는 `rg -o` 가
 //!     묶음 앞 접두 한 줄만 잡아 수가 어긋난다.
 //!     · **2b — 에이전트 런타임 재유입 금지**:
@@ -78,7 +81,7 @@
 //!     ★2b 가 사는 값어치를 부풀리지 말 것★: 살아 있는 벽은 게이트 3 이다 — net 은 의존을 선언하지 않고는
 //!     에이전트 심볼을 부를 수조차 없어 그쪽이 먼저 빨개진다. 2b 가 맡는 것은 **주석·테스트 헬퍼로 어휘가
 //!     먼저 새는 것**과, 게이트가 제 이름값(`0줄`)대로 도는 것이다.
-//!     ★그래도 2b 를 **지우지 말 것**★: 그것만 떼면 2a 의 2 기대가 홀로 남는데, 2a 는 platform 심볼만
+//!     ★그래도 2b 를 **지우지 말 것**★: 그것만 떼면 2a 의 5 기대가 홀로 남는데, 2a 는 platform 심볼만
 //!     세므로 그 곁에 에이전트 어휘가 새로 붙어도 통과한다. 짝으로 서야 벽이다.
 //!     ★기대값을 **파일 이름**으로 두지 말 것★: "`portfile.rs` 만" 은 그 파일 **안에** 에이전트 어휘
 //!     import 를 새로 넣어도 여전히 참이라 게이트가 통과한다. 불변식은 파일 단위가 아니라 **심볼 단위**다
@@ -87,8 +90,8 @@
 //!     `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all`
 //!     `--all-features | rg "^engram-dashboard" | sort -u`
 //!     → **정확히 3줄** = 자기 자신 · `engram-dashboard-platform` · `engram-dashboard-protocol`.
-//!     ★줄이려 들지 말 것★ — `platform` 자리는 portfile 의 liveness 헬퍼(게이트 2a)를 받는 간선이고,
-//!     `protocol` 자리는 `DaemonInfo` 파일 포맷 계약이다(Cargo.toml 의 의존 주석).
+//!     ★줄이려 들지 말 것★ — `platform` 자리는 portfile 의 liveness 헬퍼와 instance 의 공유 제한 열기
+//!     (게이트 2a)를 받는 간선이고, `protocol` 자리는 `DaemonInfo` 파일 포맷 계약이다(Cargo.toml 의 의존 주석).
 //!     ★이 게이트가 닫는 것(딱 이만큼)★: **선언된 직접 워크스페이스 의존**이 매니페스트 문법에 관계없이
 //!     드러난다 — rename · `[dependencies.<이름>]` 테이블 형 · 들여쓴 선언 · `[build-dependencies]` ·
 //!     비활성 target(`cfg(unix)`) · `optional` 6형태를 **주입→관측→원복으로 실측**해 전부 잡는 것을 확인했다.

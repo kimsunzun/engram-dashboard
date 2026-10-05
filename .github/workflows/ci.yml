@@ -917,14 +917,14 @@ jobs:
 
       # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
       # 매치 유무가 아니라 정확한 줄 수를 단언한다(넘어도 모자라도 실패).
-      # ★이 게이트는 **두 스텝**이다★ — 2a 는 net 이 쓰는 platform 심볼 둘(portfile 의 liveness 헬퍼)을
-      #   개수로 못 박고, 2b 는 그 헬퍼의 원래 자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시
-      #   채워지지 않는지 잰다.
+      # ★이 게이트는 **두 스텝**이다★ — 2a 는 net 이 쓰는 platform 심볼 다섯(portfile 의 liveness 헬퍼 둘 ·
+      #   공유 제한 열기 하나와 그 실패 분류 둘(셋 다 instance))을 개수로 못 박고, 2b 는 그 liveness 헬퍼의 원래
+      #   자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시 채워지지 않는지 잰다.
       #   ★2b 를 「죽은 게이트」로 보고 지우지 말 것★: 그것만 떼면 net 이 에이전트 런타임을 다시 무는
       #   회귀를 아무도 안 보게 된다 — 2a 는 platform 심볼만 세므로 그 곁에 에이전트 어휘가 붙어도
       #   통과한다. 0 기대가 홀로 서면 안 깨지는 벽이지만, 2a 와 **짝으로** 서면 살아 있는 벽이다.
       #   기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더의 게이트 2 절.
-      - name: 'net gate 2a: platform symbol allowlist — exactly 2'
+      - name: 'net gate 2a: platform symbol allowlist — exactly 5'
         shell: bash
         run: |
           set +e
@@ -940,7 +940,7 @@ jobs:
           fi
           echo "found $n symbol(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 2 ]; then echo "FAIL — expected exactly 2"; exit 1; fi
+          if [ "$n" -ne 5 ]; then echo "FAIL — expected exactly 5"; exit 1; fi
           echo "PASS"
 
       # 2a 의 짝. 여긴 매치 유무로 판정한다(게이트 1·4 와 같은 규칙) — 한 줄이라도 나오면 net 이

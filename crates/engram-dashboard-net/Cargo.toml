@@ -68,7 +68,8 @@ server = [
 #   그 모양이 `src/auth.rs` 로 옮겨오며 사라졌다. 남은 ①은 어휘가 아니라 **파일 포맷 계약**이라
 #   `net → protocol` 은 **영구**다(`portfile.rs` 가 `DaemonInfo` 를 re-export 한다) — 지우려 들지 말 것.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol", optional = true }
-# `portfile` 의 stale 판정 전용 — `process::` 의 프로세스 liveness 헬퍼(에이전트 어휘 아님)다.
+# OS 층 둘이 쓴다 — `portfile` 의 stale 판정(`process::` 의 프로세스 liveness 헬퍼)과 `instance` 의 단일
+#   인스턴스 가드(`fs::` 의 공유 제한 열기와 그 실패 분류). 둘 다 에이전트 어휘가 아니다.
 #   **허용 심볼의 정본은 lib.rs 헤더의 게이트 2**이고, 그 게이트가 심볼 목록 자체를 기대값으로 못 박는다
 #   (파일 단위가 아니라 심볼 단위 — 여기서 목록을 다시 세지 말고 그 게이트를 볼 것). daemon·tauri 양쪽이
 #   같은 liveness 로직을 보게 하는 DRY — discovery crate 가 같은 crate 를 의존하는 것과 같은 이유
@@ -124,12 +125,10 @@ tracing = { version = "0.1", optional = true }
 [dev-dependencies]
 serde_json = "1"
 
-# ★Win32 크레이트 의존 0(의도)★: `instance` 의 단일 인스턴스 배제는 std 만으로 짠다 —
-#   `std::os::windows::fs::OpenOptionsExt::share_mode` 하나면 된다(그대로 `CreateFileW` 의 dwShareMode 로
-#   내려가 같은 커널 동작을 unsafe 없이 얻는다).
+# ★Win32 크레이트 의존 0(의도)★: OS 호출은 platform crate 가 한다 — `instance` 의 공유 제한 열기(`fs::`)도
+#   `portfile` 의 pid liveness(`process::`)도 거기 있다(위 platform 의존 주석 · ADR-0266).
 #   ★구간 잠금(`std::fs::File::try_lock`)을 되살리지 말 것★: MS 문서상 배타 구간 잠금은 다른 프로세스의
 #   **읽기까지** 거부하는데, 이 파일은 클라이언트가 읽어야 하는 접속 파일을 겸한다(ADR-0135). 그래서
 #   `LockFileEx` 를 부르려고 `windows` 를 되살릴 이유도 함께 사라졌다.
 #   ★공유 모드를 넓히지 말 것★ — 쓰기·삭제 공유는 각각 배제와 파일 보호를 무너뜨린다
 #   (`src/instance.rs` 헤더의 ★되살리지 마라★ 두 절).
-#   ★pid liveness 도 여기 없다★: 그건 platform crate 의 `process::` 헬퍼가 한다(위 platform 의존 주석).

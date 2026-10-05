@@ -50,6 +50,6 @@ windows = { version = "0.58", features = [
     "Wdk_System_Threading",
 ] }
 
-# `file_holders` 시험이 임시 파일 이름을 겹치지 않게 뽑는다 — 운영 그래프에는 안 든다.
+# `file_holders` · `fs` 시험이 임시 파일 이름을 겹치지 않게 뽑는다 — 운영 그래프에는 안 든다.
 [dev-dependencies]
 uuid = { version = "1.8", features = ["v4"] }

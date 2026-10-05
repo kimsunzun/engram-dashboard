@@ -7,9 +7,10 @@
 //! 이 불변식의 기계 게이트는 TRD 1-3 U8 에서 선다 — 그 전까지는 리뷰가 지키고, 다른 crate 에 남은 운영
 //! OS 분기는 이전 대상이다. 시한부 예외는 하나 — `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15).
 //!
-//! 지금 입주자는 여섯이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 지금 입주자는 일곱이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
 //! 자식 PID 열거 · 한 뿌리 아래 신원 목록) · [`group`](프로세스 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 ·
 //! 가입 알림 포트 — Windows Job Object) · [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
+//! [`fs`](남의 쓰기를 막은 채 여는 열기 · 그 실패의 분류 — 공유 위반 · 접근 거부) ·
 //! [`spawn`](창 없이 띄우기 · 트리 뿌리로 띄우기와 그 트리 kill 손잡이 — Windows = 멈춘 채 띄워 무리에 넣은 뒤
 //! 깨우기 · 실패한 셸의 「프로그램 없음」 판정) · [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
 //! [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수 이름 비교). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
@@ -32,8 +33,8 @@
 //! 3. **Windows 밖 갈래는 자리채움이다**(ADR-0266 결정 7). 이 crate 가 다른 OS 구현을 새로 만들지 않는다 —
 //!    옮겨 올 때 있던 갈래(빈 답이든 `bash` · `HOME` 같은 한 줄이든)가 한 자리에 모여 보일 뿐이다. ★`#[cfg]`
 //!    로 가른 그 갈래는 여기서도 컴파일 검증을 받지 않는다★ — 개발 · CI 가 Windows 뿐이다(ADR-0230 현황).
-//!    `cfg!(windows)` 로 가른 갈래(`env::env_key_eq`)는 양쪽 다 타입 검사를 받지만 그 밖의 OS 에서 돌려 본
-//!    적은 없다.
+//!    `cfg!(windows)` 로 가른 갈래(`env::env_key_eq` · `fs` 의 실패 분류 둘)는 양쪽 다 타입 검사를 받지만 그
+//!    밖의 OS 에서 돌려 본 적은 없다.
 //! 4. **로그는 결과를 돌려줄 길이 없는 경로(`Drop`)에서만 찍는다**(TRD 1-3 §3-7 —
 //!    `docs/process/S21-crate-boundaries/trd-1-3-platform-crate.md`). 나머지 실패는 값으로 돌려주고 부르는
 //!    쪽이 자기 문구로 찍는다 — 도메인 낱말을 이 crate 의 로그로 가져오지 않는다(규칙 1). 찍을 때는
@@ -81,6 +82,7 @@
 // ADR-0275
 pub mod env;
 pub mod file_holders;
+pub mod fs;
 pub mod group;
 pub mod process;
 pub mod shell;

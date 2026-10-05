@@ -10,7 +10,7 @@
 //! 물러난다. 작업 관리자 외에 탈출구가 없는 상태였다. ★다시 두 파일로 쪼개지 마라★ — 합쳐 두면 그
 //! 상태 자체를 만들 수 없다.
 //!
-//! ## 공유 모드 = 읽기만 허용(`FILE_SHARE_READ` = 1)
+//! ## 공유 모드 = 읽기만 허용(`FILE_SHARE_READ` = 1 — platform 의 `fs::open_deny_write`)
 //!
 //! 실측(2026-08-14, 공유 모드 조합 프로브 · 리뷰어 독립 재실측):
 //! - 두 번째 데몬의 읽기+쓰기 열기 → `ERROR_SHARING_VIOLATION`(32). **배제는 이것이 전부다.**
@@ -36,11 +36,11 @@
 //! ★구간 잠금(`try_lock`)을 되살리지 마라★: MS 문서상 배타 구간 잠금은 다른 프로세스의 **읽기까지**
 //! 거부하고 std 의 API 는 파일 **전체**를 잠근다. 클라이언트가 이 파일을 못 읽으면 합친 의미가 없다.
 //!
-//! ★비-Windows 에서는 [`acquire`] 가 **아예 거부한다**(`Unsupported`)★: `share_mode` 는 Windows 전용이고
-//! 대체 기전을 두지 않았다 — 데몬 자체가 Windows 전용이다(WMI spawn·Job Object·taskkill). ★"아무것도
-//! 보장하지 않는 guard" 를 돌려주지 마라(되살리지 마라)★: 그러면 한 폴더에 데몬 둘이 다 성공하고 뒤에
-//! 뜬 쪽이 앞선 쪽의 endpoint 를 조용히 덮어쓴다 — 산문으로만 적어 두면 테스트가 공허하게 통과한다.
-//! 그래서 공유 의미를 단언하는 테스트 모듈 **전체**가 `#[cfg(windows)]` 다.
+//! ★비-Windows 에서는 [`acquire`] 가 **아예 거부한다**(`Unsupported`)★: 공유 제한 열기(`open_deny_write`)가
+//! Windows 밖에서는 열지 않고 `Unsupported` 를 내며, 대체 기전을 두지 않았다 — 데몬 자체가 Windows 전용이다
+//! (WMI spawn·Job Object·taskkill). ★"아무것도 보장하지 않는 guard" 를 돌려주지 마라(되살리지 마라)★:
+//! 그러면 한 폴더에 데몬 둘이 다 성공하고 뒤에 뜬 쪽이 앞선 쪽의 endpoint 를 조용히 덮어쓴다 — 산문으로만
+//! 적어 두면 테스트가 공허하게 통과한다. 그래서 공유 의미를 단언하는 테스트 모듈 **전체**가 `#[cfg(windows)]` 다.
 //!
 //! ★제3자의 제한적 열기와 진짜 중복을 구분한다(ADR-0135 §영향)★: 백신·인덱서·백업이 좁은 공유로
 //! 잠깐 열어도 우리 열기는 똑같이 32로 실패한다(실측). 그래서 짧게 재시도하고, 그래도 안 되면 파일을
@@ -70,10 +70,15 @@
 //! handle 타이머가 만료될 때까지 서버가 열림을 유지한다. 즉 낡은 항목 판정은 필요 없지만 "죽자마자
 //! 곧바로 재기동된다"고 단정하지도 말 것.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io;
 use std::path::Path;
 use std::time::Duration;
+
+// 낱개 `use` 여야 한다 — 묶음 `use` 는 net 게이트 2a(lib.rs 헤더)가 심볼을 못 센다.
+use engram_dashboard_platform::fs::is_access_denied;
+use engram_dashboard_platform::fs::is_sharing_violation;
+use engram_dashboard_platform::fs::open_deny_write;
 
 use crate::portfile::{self, DaemonInfo, DAEMON_FILE};
 
@@ -159,25 +164,6 @@ impl std::fmt::Display for AcquireError {
 
 impl std::error::Error for AcquireError {}
 
-/// 소유 목적으로 연다 — 읽기+쓰기, 없으면 생성, 공유는 **읽기만**(모듈 헤더 참조).
-///
-/// ★`truncate` 를 걸지 마라★: 여는 순간 남의 유효한 레코드를 지운다. 우리가 이기면 [`InstanceGuard::publish`]
-/// 가 덮어쓰고, 지면 파일에 손대지 않는 것이 맞다.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn open_owned(path: &Path) -> io::Result<File> {
-    let mut opts = OpenOptions::new();
-    opts.read(true).write(true).create(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // FILE_SHARE_READ 단독. 여기에 WRITE 나 DELETE 를 더하면 배제가 사라진다 — 헤더의
-        //   두 ★되살리지 마라★가 이 상수 하나에 걸려 있다.
-        const SHARE_READ_ONLY: u32 = 1;
-        opts.share_mode(SHARE_READ_ONLY);
-    }
-    opts.open(path)
-}
-
 /// 열기가 계속 막힐 때 **왜** 막히는지만 본다 — 살아 있는 데몬의 레코드가 있으면 그 pid.
 ///
 /// ★진단이지 신원 판정이 아니다★: 여기서 무엇이 보이든 소유는 이미 "핸들을 못 얻었다"로 결정돼 있고,
@@ -194,7 +180,6 @@ fn open_owned(path: &Path) -> io::Result<File> {
 /// ★잔여 2 — 반대 방향의 오진은 못 막는다★: 제3자가 붙들고 있는데 파일에 남은 옛 레코드의 pid 가
 /// 마침 살아 있으면(다른 폴더 데몬의 레코드를 복사해 왔거나 pid+생성시각이 우연히 맞는 경우)
 /// "이미 실행 중"으로 읽고 조용히 exit 0 한다. 진단 읽기로는 원리적으로 가를 수 없다.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn live_owner(path: &Path) -> Option<u32> {
     let info = portfile::read(path)?;
     if portfile::is_stale(&info) {
@@ -213,27 +198,26 @@ fn live_owner(path: &Path) -> Option<u32> {
 /// 중복을 선언하지 말 것. 열기는 제3자 핸들·권한 등 데몬과 무관한 이유로도 실패하고, 그걸 중복으로
 /// 읽으면 데몬이 원인을 남기지 않고 종료한다(원인 없는 연결 시간 초과 = ADR-0134 결정 4가 없애려는 그 증상).
 // ADR-0135
-#[cfg(windows)]
 pub fn acquire(lock_file: &Path) -> Result<Acquired, AcquireError> {
     acquire_with(lock_file, OPEN_ATTEMPTS, OPEN_RETRY_DELAY)
 }
 
-/// ★guard 를 흉내내지 않는다(모듈 헤더)★: 배제할 수단이 없는 플랫폼에서 `Held` 를 돌려주면 데몬 둘이
-/// 다 뜨고 뒤엣것이 앞엣것의 endpoint 를 덮어쓴다. 호출자가 기동을 멈추게 실패로 알린다.
-#[cfg(not(windows))]
-pub fn acquire(_lock_file: &Path) -> Result<Acquired, AcquireError> {
-    Err(AcquireError::Unsupported)
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
 fn acquire_with(path: &Path, attempts: u32, delay: Duration) -> Result<Acquired, AcquireError> {
     let mut tried = 0;
     let mut cleared_readonly = false;
     loop {
         tried += 1;
-        match open_owned(path) {
+        // ★자르지 않는 열기여야 한다★: 자르면 여는 순간 남의 유효한 레코드를 지운다. 우리가 이기면
+        //   `InstanceGuard::publish` 가 덮어쓰고, 지면 파일에 손대지 않는 것이 맞다.
+        match open_deny_write(path) {
             Ok(file) => return Ok(Acquired::Held(InstanceGuard { file })),
-            Err(e) if e.raw_os_error() == Some(ACCESS_DENIED) => {
+            // ★guard 를 흉내내지 않는다(모듈 헤더)★: 배제할 수단이 없는 OS 에서 `Held` 를 돌려주면 데몬
+            //   둘이 다 뜨고 뒤엣것이 앞엣것의 endpoint 를 덮어쓴다. 호출자가 기동을 멈추게 실패로 알린다.
+            //   OS 오류 코드가 붙은 `Unsupported` 는 OS 가 열기를 시도하다 낸 것이라 아래 `Io` 로 보낸다.
+            Err(e) if e.kind() == io::ErrorKind::Unsupported && e.raw_os_error().is_none() => {
+                return Err(AcquireError::Unsupported);
+            }
+            Err(e) if is_access_denied(&e) => {
                 // ★읽기 전용 **속성**은 걷어내고 한 번 더 해 본다(load-bearing — 없으면 영구 교착)★:
                 //   속성 설정은 공유 중재를 우회해 **우리가 쥔 동안에도** 성공하고(실측), 그 뒤
                 //   재시작하면 쓰기 열기가 32가 아니라 5로 막힌다 — 재시도 대상이 아니라 첫 시도에
@@ -255,7 +239,7 @@ fn acquire_with(path: &Path, attempts: u32, delay: Duration) -> Result<Acquired,
                 // ★공유 위반만 재시도한다★: 그것만이 "잠깐 뒤엔 될 수도 있는" 실패다. 폴더 부재 같은
                 //   실패는 기다려도 달라지지 않고, 그걸 FileBusy 로 보고하면 원인을 "다른 프로그램 탓"
                 //   으로 잘못 지목한다.
-                if e.raw_os_error() != Some(SHARING_VIOLATION) {
+                if !is_sharing_violation(&e) {
                     return Err(AcquireError::Io(e));
                 }
                 // ★마지막 시도 뒤에는 자지 않는다★: 그 대기는 아무것도 벌지 못하고 사용자가
@@ -268,7 +252,7 @@ fn acquire_with(path: &Path, attempts: u32, delay: Duration) -> Result<Acquired,
                     //   FileBusy 를 내면 **지금은 잡을 수 있는** 폴더를 두고 데몬이 물러난다.
                     //   ★이 성공 갈래는 테스트가 없다(알려진 미검증)★ — 방해 핸들이 정확히 이 두 줄
                     //   사이에 닫히게 만들 결정적 수단이 없다. 실패 갈래는 busy 테스트가 덮는다.
-                    return match open_owned(path) {
+                    return match open_deny_write(path) {
                         Ok(file) => Ok(Acquired::Held(InstanceGuard { file })),
                         Err(_) => Err(AcquireError::FileBusy {
                             attempts: tried,
@@ -286,7 +270,6 @@ fn acquire_with(path: &Path, attempts: u32, delay: Duration) -> Result<Acquired,
 ///
 /// ★ACL 은 손대지 않는다★: 권한 편집은 사용자 정책을 바꾸는 일이라 데몬이 할 일이 아니다. 이 함수는
 /// 우리 자신의 런타임 파일에 붙은 **속성 하나**만 되돌린다.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn clear_readonly_attr(path: &Path) -> bool {
     let Ok(md) = std::fs::metadata(path) else {
         return false;
@@ -298,22 +281,6 @@ fn clear_readonly_attr(path: &Path) -> bool {
     perms.set_readonly(false);
     std::fs::set_permissions(path, perms).is_ok()
 }
-
-/// `ERROR_SHARING_VIOLATION`. std 는 이 코드를 `Uncategorized` 로 분류해 `ErrorKind` 로는 못 가른다
-/// (실측 2026-08-14) — 재시도 여부를 정하려면 raw 코드를 봐야 한다.
-///
-/// ★이 상수만으로 중복을 판정하지 말 것★: 여기서의 쓰임은 "기다리면 풀릴 수도 있나"뿐이다.
-#[cfg(windows)]
-const SHARING_VIOLATION: i32 = 32;
-#[cfg(not(windows))]
-const SHARING_VIOLATION: i32 = i32::MIN;
-
-/// `ERROR_ACCESS_DENIED`. 읽기 전용 **속성**이 붙은 파일을 쓰기로 열 때 오는 코드다(실측 —
-/// `PermissionDenied` 로 분류되긴 하지만 32와 갈라야 해서 raw 로 본다).
-#[cfg(windows)]
-const ACCESS_DENIED: i32 = 5;
-#[cfg(not(windows))]
-const ACCESS_DENIED: i32 = i32::MIN + 1;
 
 /// ★비-Windows 에서 유일하게 단언할 것★: guard 를 흉내내지 않는다는 것.
 #[cfg(all(test, not(windows)))]
@@ -558,7 +525,7 @@ mod tests {
         std::fs::set_permissions(&path, perms).expect("읽기 전용 속성 부여");
         // 전제 확인 — 이 속성이 실제로 쓰기 열기를 막는다(막지 못하면 이 테스트는 아무것도 증명 못 한다).
         assert!(
-            super::open_owned(&path).is_err(),
+            super::open_deny_write(&path).is_err(),
             "읽기 전용 속성이 쓰기 열기를 막아야 이 테스트가 의미 있다"
         );
 
