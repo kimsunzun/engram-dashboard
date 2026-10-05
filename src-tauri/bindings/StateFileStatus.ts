@@ -6,8 +6,7 @@
  * `"corrupt_copied_aside"` · `"corrupt_not_copied"`.
  *
  * - `Ok` = 읽었거나 파일이 없었다. 사본을 못 떠 이 실행이 저장하지 않는 경우(가드 ⅱ)도 이 값이다 — 이 칸은
- *   `state.json` 읽기만 싣는다. 이 실행이 저장하나는 이 칸이 아니라 사본을 묻는 동안의
- *   [`RestoreStatusView::durable`] 이 말한다.
+ *   `state.json` 읽기만 싣는다. 이 실행이 저장하나는 이 칸이 아니라 [`RestoreStatusView::saves`] 가 말한다.
  * - `Unreadable` = 읽기 자체가 실패했다(잠김 재시도 뒤 · 권한 — 가드 ⅰ). 파일은 그대로 두고, 이 실행은 화면 상태를
  *   하나도 저장하지 않으며, 다음 부팅이 다시 판정한다.
  * - `CorruptCopiedAside` = 못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라

@@ -39,7 +39,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use engram_dashboard_command::{
     blocking_handler, duplicate_command_names, lint_spec, spec_of, CommandEnvelope, CommandError,
     CommandFuture, CommandHandler, CommandReply, CommandTable, ErrorCode, InboundCommands,
-    OwnerToken, ReplySink, RequestId, TableError,
+    OwnerToken, ReplySink, RequestId, Roster, TableError,
 };
 use engram_dashboard_protocol::{
     command_request_id, event_reply_request_id, AgentCommand, AgentEvent,
@@ -606,8 +606,9 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   는 세대다(`content=Usage` + `show_claude`·`show_codex` — TRD S21 usage-limit-slot §1-7). 세대 10 은
     //   이름이 넷 늘고(`settings.*`) `ui.refresh` 답의 `theme` 출처가 설정으로 바뀐 세대다(TRD S21-storage §5-4).
     //   세대 11 은 이름이 둘 는 세대다(`restore.*` — TRD S21-storage §6-7). 세대 12 는 `restore.status` 의
-    //   **답 모양**이 바뀐 세대다(`state_file` — TRD S21-storage §6-5).
-    assert_eq!(CATALOG_VERSION, 12);
+    //   **답 모양**이 바뀐 세대다(`state_file` — TRD S21-storage §6-5). 세대 13 도 그 답 모양이다(`saves` — 같은
+    //   절 · 사용자 결정 2026-10-06).
+    assert_eq!(CATALOG_VERSION, 13);
     assert_eq!(COMMAND_SPECS.len(), 25);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -631,6 +632,23 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     }
     assert_eq!(RestoreStatusArgs::SPEC.since, 11);
     assert_eq!(RestoreAnswerArgs::SPEC.since, 11);
+}
+
+/// ★등록 패킷의 `help` 하나가 명부 상한을 넘으면 데몬이 패킷을 통째로 거절한다★(`Roster::register` — 한 이름도
+/// 넣지 않는다) — 그러면 셸의 명령 전부가 `UNKNOWN_COMMAND` 다. 요약(선언의 doc 주석)이 자라는 쪽은 셸이고 상한은
+/// 데몬에만 있어, 여기서 재지 않으면 실제로 붙어 봐야 드러난다. 재는 것은 등록이 싣는 문자열 그대로다(`decls`).
+#[test]
+fn every_registered_declaration_fits_the_roster_help_cap() {
+    let (_world, ports) = World::build();
+    for decl in make_table(ports).decls() {
+        assert!(
+            decl.help.len() <= Roster::MAX_HELP_BYTES,
+            "{}: help {} 바이트 > 상한 {}",
+            decl.name,
+            decl.help.len(),
+            Roster::MAX_HELP_BYTES
+        );
+    }
 }
 
 #[test]
@@ -1750,7 +1768,7 @@ impl World {
         self.crash_copy_awaits_with(popouts, false, StateFileStatus::Ok);
     }
 
-    fn crash_copy_awaits_with(&self, popouts: usize, durable: bool, state_file: StateFileStatus) {
+    fn crash_copy_awaits_with(&self, popouts: usize, saves: bool, state_file: StateFileStatus) {
         let mut previous = ViewManager::new();
         let main_view = previous.windows[MAIN_WINDOW_LABEL].active;
         previous
@@ -1772,9 +1790,9 @@ impl World {
                     resolved_crash_copy: None,
                     windows: to_persisted(&previous, WindowAttrs::default()),
                 },
-                durable,
             }),
             state_file,
+            saves,
         );
     }
 
@@ -1796,7 +1814,7 @@ async fn restore_status_reports_the_crash_copy_shape() {
         .expect("성공 답장");
     assert_eq!(
         none,
-        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "state_file": "ok"}),
+        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "saves": true, "state_file": "ok"}),
         "물을 사본이 없으면 사본의 셋은 null"
     );
 
@@ -1808,7 +1826,7 @@ async fn restore_status_reports_the_crash_copy_shape() {
         .expect("성공 답장");
     assert_eq!(
         awaiting,
-        json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3, "durable": false, "state_file": "ok"}),
+        json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3, "durable": false, "saves": false, "state_file": "ok"}),
         "창 수 = main + 팝아웃(트리 창은 세지 않는다)"
     );
 }
@@ -1819,14 +1837,14 @@ async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
 
     world
         .restore_service
-        .set_boot(None, StateFileStatus::Unreadable);
+        .set_boot(None, StateFileStatus::Unreadable, false);
     let unreadable = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
         .await
         .outcome
         .expect("성공 답장");
     assert_eq!(
         unreadable,
-        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "state_file": "unreadable"}),
+        json!({"crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "saves": false, "state_file": "unreadable"}),
         "사본이 없어도 state_file 은 값이다"
     );
 
@@ -1834,7 +1852,7 @@ async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
         (StateFileStatus::CorruptCopiedAside, "corrupt_copied_aside"),
         (StateFileStatus::CorruptNotCopied, "corrupt_not_copied"),
     ] {
-        world.crash_copy_awaits_with(0, false, state_file);
+        world.crash_copy_awaits_with(0, true, state_file);
         world.mail.clear();
         let reply = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
             .await
@@ -1846,38 +1864,57 @@ async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
 }
 
 #[tokio::test]
-async fn restore_status_carries_durable_only_while_awaiting() {
-    let (world, queue, receiver) = queued();
+async fn restore_status_carries_saves_always_and_durable_only_while_awaiting() {
+    for saves in [true, false] {
+        let (world, queue, receiver) = queued();
 
-    for durable in [true, false] {
-        world.crash_copy_awaits_with(0, durable, StateFileStatus::Ok);
+        world
+            .restore_service
+            .set_boot(None, StateFileStatus::Ok, saves);
+        let none = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+            .await
+            .outcome
+            .expect("성공 답장");
+        assert_eq!(none["saves"], json!(saves), "사본이 없어도 값 — {saves}");
+        assert_eq!(none["durable"], json!(null));
+
+        world.crash_copy_awaits_with(0, saves, StateFileStatus::Ok);
         world.mail.clear();
         let awaiting = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
             .await
             .outcome
             .expect("성공 답장");
         assert_eq!(awaiting["crash_copy"], json!("awaiting"));
-        assert_eq!(awaiting["durable"], json!(durable), "사본의 값");
-    }
+        assert_eq!(awaiting["saves"], json!(saves));
+        assert_eq!(
+            awaiting["durable"], awaiting["saves"],
+            "묻는 동안 둘은 같다 — {saves}"
+        );
 
-    world.mail.clear();
-    call(
-        &receiver,
-        &queue,
-        &world.mail,
-        "restore.answer",
-        json!({"accept": false}),
-    )
-    .await
-    .outcome
-    .expect("거절 답장");
-    world.mail.clear();
-    let answered = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+        world.mail.clear();
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "restore.answer",
+            json!({"accept": false}),
+        )
         .await
         .outcome
-        .expect("성공 답장");
-    assert_eq!(answered["crash_copy"], json!("answered"));
-    assert_eq!(answered["durable"], json!(null), "awaiting 밖은 null");
+        .expect("거절 답장");
+        world.mail.clear();
+        let answered = call(&receiver, &queue, &world.mail, "restore.status", json!({}))
+            .await
+            .outcome
+            .expect("성공 답장");
+        assert_eq!(answered["crash_copy"], json!("answered"));
+        assert_eq!(answered["durable"], json!(null), "awaiting 밖은 null");
+        assert_eq!(
+            answered["saves"],
+            json!(saves),
+            "답한 뒤에도 그 실행의 값 — {saves}"
+        );
+    }
 }
 
 #[tokio::test]

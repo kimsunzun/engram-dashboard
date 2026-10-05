@@ -11,7 +11,7 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 
-import type { RestoreStatusView } from '../../api/restoreClient'
+import type { RestoreView } from '../../api/restoreClient'
 import { setKeybindingsPaused } from '../../commands/keybindings'
 import { t } from '../../i18n'
 
@@ -39,7 +39,7 @@ const BUTTON =
 
 interface Props {
   /** `crash_copy === 'awaiting'` 인 상태. */
-  status: RestoreStatusView
+  status: RestoreView
   /** 답을 내고 상태를 다시 당긴 뒤 풀린다 — 실패는 reject(`RestoreClient.answer`). */
   onAnswer: (accept: boolean) => Promise<unknown>
 }

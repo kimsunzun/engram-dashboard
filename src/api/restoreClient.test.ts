@@ -141,14 +141,68 @@ describe('restoreClient — 알림', () => {
     expect(client.status()?.durable).toBeNull()
   })
 
-  it('모양이 계약과 다른 답은 버린다', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const f = fakeRestoreIpc({ ...view('awaiting'), crash_copy: 'Awaiting' as never })
+  it('saves 를 싣고, 답한 뒤에도 그대로다', async () => {
+    const f = fakeRestoreIpc(view('awaiting', { saves: false }))
     const client = createRestoreClient(f.ipc)
     client.install()
     await flush()
-    expect(client.status()).toBeNull()
-    expect(warn).toHaveBeenCalled()
+    expect(client.status()?.saves).toBe(false)
+
+    await client.answer(false)
+    expect(client.status()?.crash_copy).toBe('answered')
+    expect(client.status()?.saves).toBe(false)
+  })
+
+  // 셸과 프론트의 판이 어긋난 경우 — 짐을 버리면 묻는 모달까지 안 뜬다.
+  it.each([
+    ['없어도', undefined],
+    ['null 이어도', null],
+    ['불리언이 아니어도', 'false'],
+  ])('saves 가 %s 첫 짐을 버리지 않는다 — saves 만 모른다(undefined)로 두고 경고는 한 번', async (_label, saves) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { saves: _omit, ...withoutSaves } = view('awaiting')
+    const f = fakeRestoreIpc((saves === undefined ? withoutSaves : { ...withoutSaves, saves }) as never)
+    const client = createRestoreClient(f.ipc)
+    client.install()
+    await flush()
+    expect(client.status()?.crash_copy).toBe('awaiting')
+    expect(client.status()?.tabs).toBe(5)
+    expect(client.status()?.saves).toBeUndefined()
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    f.push('awaiting')
+    await flush()
+    expect(f.statusCalls()).toBe(2)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('state_file 이 모르는 값이어도 첫 짐을 버리지 않는다 — state_file 만 undefined, 경고는 한 번', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const f = fakeRestoreIpc({ ...view('awaiting'), state_file: 'from_a_newer_shell' as never })
+    const client = createRestoreClient(f.ipc)
+    client.install()
+    await flush()
+    expect(client.status()?.crash_copy).toBe('awaiting')
+    expect(client.status()?.state_file).toBeUndefined()
+    expect(client.status()?.saves).toBe(true)
+    expect(warn).toHaveBeenCalledTimes(1)
+
+    f.push('awaiting')
+    await flush()
+    expect(f.statusCalls()).toBe(2)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('알림 두 칸이 다 어긋나면 한 경고에 둘을 함께 남긴다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const { saves: _omit, ...withoutSaves } = view('none')
+    const f = fakeRestoreIpc({ ...withoutSaves, state_file: 7 } as never)
+    const client = createRestoreClient(f.ipc)
+    client.install()
+    await flush()
+    expect(client.status()?.crash_copy).toBe('none')
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0][0])).toContain('saves · state_file')
   })
 })
 
@@ -281,6 +335,32 @@ describe('restoreClient — 부팅 당기기는 받을 때까지 놓지 않는�
     expect(f.statusCalls()).toBe(1)
     expect(client.status()?.crash_copy).toBe('awaiting')
     expect(log.error).toHaveBeenCalledTimes(1)
+  })
+
+  it('crash_copy 를 못 읽은 짐은 실패한 당기기다 — 간격마다 다시 당기고, 맞는 짐을 받으면 멈춘다', async () => {
+    vi.useFakeTimers()
+    const log = quietConsole()
+    const f = fakeRestoreIpc({ ...view('awaiting'), crash_copy: 'Awaiting' as never })
+    const client = createRestoreClient(f.ipc)
+    client.install()
+
+    await vi.advanceTimersByTimeAsync(0)
+    expect(f.statusCalls()).toBe(1)
+    expect(client.status()).toBeNull()
+    expect(log.error).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(BOOT_REPULL_INTERVAL_MS * 2)
+    expect(f.statusCalls()).toBe(3)
+    expect(client.status()).toBeNull()
+    expect(log.error).toHaveBeenCalledTimes(1)
+
+    f.server.view = view('awaiting')
+    await vi.advanceTimersByTimeAsync(BOOT_REPULL_INTERVAL_MS)
+    expect(f.statusCalls()).toBe(4)
+    expect(client.status()?.crash_copy).toBe('awaiting')
+
+    await vi.advanceTimersByTimeAsync(BOOT_REPULL_INTERVAL_MS * 5)
+    expect(f.statusCalls()).toBe(4)
   })
 
   it('알림이 부른 당기기가 먼저 받으면 루프는 거기서 멈춘다', async () => {

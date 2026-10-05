@@ -29,12 +29,15 @@ export function view(
   over: Partial<RestoreStatusView> = {},
 ): RestoreStatusView {
   const awaiting = crash_copy === 'awaiting'
+  const saves = over.saves ?? true
   return {
     crash_copy,
     saved_at_ms: awaiting ? 1_759_640_000_000 : null,
     windows: awaiting ? 2 : null,
     tabs: awaiting ? 5 : null,
-    durable: awaiting ? true : null,
+    // 셸 계약 — 묻는 동안은 `saves` 와 같다(`RestoreStatusView.ts`). 시험이 `durable` 을 따로 주면 그것이 이긴다.
+    durable: awaiting ? saves : null,
+    saves,
     state_file: 'ok' as StateFileStatus,
     ...over,
   }
@@ -54,10 +57,10 @@ export function fakeRestoreIpc(initial: RestoreStatusView) {
   /** 켜면 `listen` 이 거절한다. */
   let failListen = false
   const answerArgs: boolean[] = []
-  /** `restore_answer` 의 동작 — 기본 = 받아서 `answered` 로 바꾸고 성공. */
+  /** `restore_answer` 의 동작 — 기본 = 받아서 `answered` 로 바꾸고 성공. `saves` · `state_file` 은 답해도 그대로다. */
   let onAnswer: (accept: boolean) => Promise<AnswerReply> = async accept => {
-    server.view = view('answered', { state_file: server.view.state_file })
-    return { restored_windows: accept ? 1 : 0, durable: true }
+    server.view = view('answered', { saves: server.view.saves, state_file: server.view.state_file })
+    return { restored_windows: accept ? 1 : 0, durable: server.view.saves }
   }
 
   const ipc: RestoreIpc = {

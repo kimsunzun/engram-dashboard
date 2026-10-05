@@ -61,8 +61,7 @@ impl CrashCopyStatus {
 /// `"corrupt_copied_aside"` · `"corrupt_not_copied"`.
 ///
 /// - `Ok` = 읽었거나 파일이 없었다. 사본을 못 떠 이 실행이 저장하지 않는 경우(가드 ⅱ)도 이 값이다 — 이 칸은
-///   `state.json` 읽기만 싣는다. 이 실행이 저장하나는 이 칸이 아니라 사본을 묻는 동안의
-///   [`RestoreStatusView::durable`] 이 말한다.
+///   `state.json` 읽기만 싣는다. 이 실행이 저장하나는 이 칸이 아니라 [`RestoreStatusView::saves`] 가 말한다.
 /// - `Unreadable` = 읽기 자체가 실패했다(잠김 재시도 뒤 · 권한 — 가드 ⅰ). 파일은 그대로 두고, 이 실행은 화면 상태를
 ///   하나도 저장하지 않으며, 다음 부팅이 다시 판정한다.
 /// - `CorruptCopiedAside` = 못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라
@@ -103,8 +102,6 @@ pub struct CrashCopy {
     pub hash: String,
     /// `text` 를 읽은 것.
     pub file: StateFile,
-    /// `false` = 이 실행은 가드라 기록기가 없다 — 답이 디스크에 붙지 않는다(`durable:false`).
-    pub durable: bool,
 }
 
 // 사본 원문(≤4 MiB)을 찍지 않는다 — 길이와 해시만.
@@ -114,13 +111,13 @@ impl fmt::Debug for CrashCopy {
             .field("text_len", &self.text.len())
             .field("hash", &self.hash)
             .field("windows", &self.file.windows.len())
-            .field("durable", &self.durable)
             .finish()
     }
 }
 
 /// `restore_status` · `restore.status` 의 답. `saved_at_ms` · `windows` · `tabs` · `durable` 은 `Awaiting` 일 때만
-/// 값이고 그 밖은 `null` 이다(사본의 값). `state_file` 은 늘 값이다.
+/// 값이고 그 밖은 `null` 이다. `saves` · `state_file` 은 크래시 사본과 무관하게 늘 값이고, 부팅 단계 ⑥ 이 정한 뒤
+/// 그 실행 내내 바뀌지 않는다(답해도 · 되돌려도).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, TS)]
 #[ts(export)]
 pub struct RestoreStatusView {
@@ -134,11 +131,15 @@ pub struct RestoreStatusView {
     pub windows: Option<u32>,
     /// 사본의 모든 창의 탭 수 합.
     pub tabs: Option<u32>,
-    /// 이 실행이 화면 상태를 저장하나(부팅이 가드가 아니었다) — `true` = 답(수락 · 거절)을 디스크에 붙이고 사본을
-    /// 지운다. `false` = 이 실행은 아무것도 저장하지 않는다(가드 ⅰ · ⅱ) — 답해도 크래시 때 화면이 디스크에 남아(사본
-    /// 또는 정상 종료 표시 없는 `state.json`) 다음 부팅이 다시 묻는다. 그 답이 실제로 디스크에 붙었는지는
-    /// [`AnswerReply::durable`] 이 말한다.
+    /// 묻는 동안의 [`Self::saves`] 와 같은 값이다 — `true` = 가드가 아니다: 답(수락 · 거절)을 디스크에 붙이고 사본을
+    /// 지우려 한다(성공은 보장하지 않는다 — 실제로 붙었는지는 [`AnswerReply::durable`] 이 말한다). `false` = 가드다:
+    /// 답해도 크래시 때 화면이 디스크에 남아(사본 또는 정상 종료 표시 없는 `state.json`) 다음 부팅이 다시 묻는다.
     pub durable: Option<bool>,
+    /// 이 실행이 화면 상태를 저장하나 — 부팅 가드(TRD §6-5 ③)로 정한다. `true` = 가드가 아니다: 기록기를 띄우려
+    /// 한다(띄우기 · 쓰기 성공은 보장하지 않는다 — ⑦ 에서 기록기를 못 띄운 실행도 `true` 다). `false` = 가드다: 이
+    /// 실행은 화면 상태를 하나도 저장하지 않고 다음 부팅이 다시 판정한다 — 가드 ⅰ(`state_file` 이 `Unreadable`) ·
+    /// 가드 ⅱ(떠야 할 크래시 사본을 못 떴다 — `state_file` 은 `Ok` 다).
+    pub saves: bool,
     pub state_file: StateFileStatus,
 }
 
@@ -212,18 +213,17 @@ pub struct RestoreService {
     cell: Arc<Mutex<Cell>>,
 }
 
-#[derive(Default)]
 struct Cell {
     phase: Phase,
     /// [`RestoreService::set_boot`] 마다 오른다 — 앞 세대의 표지가 지금 상태를 바꾸지 못하게.
     generation: u64,
     notifier: Option<Arc<dyn RestoreNotifier>>,
     state_file: StateFileStatus,
+    /// 묻는 동안의 `durable` 도 이 칸을 싣는다 — 둘이 갈라질 자리를 두지 않는다.
+    saves: bool,
 }
 
-#[derive(Default)]
 enum Phase {
-    #[default]
     None,
     Awaiting {
         copy: Arc<CrashCopy>,
@@ -314,10 +314,17 @@ impl Default for RestoreService {
 }
 
 impl RestoreService {
-    /// 상태 `None` · `state_file` `Ok` · 알림 없음.
+    /// 상태 `None` · `state_file` `Ok` · `saves` `true` · 알림 없음 — 부팅 단계 ⑥ 전의 값은 알릴 것이 없는 쪽이다
+    /// (창은 ⑥ 뒤에 생겨 이 값을 보지 못한다 — I5).
     pub fn new() -> Self {
         Self {
-            cell: Arc::new(Mutex::new(Cell::default())),
+            cell: Arc::new(Mutex::new(Cell {
+                phase: Phase::None,
+                generation: 0,
+                notifier: None,
+                state_file: StateFileStatus::Ok,
+                saves: true,
+            })),
         }
     }
 
@@ -325,14 +332,16 @@ impl RestoreService {
         lock(&self.cell).notifier = Some(notifier);
     }
 
-    /// 부팅 단계 ⑥ 에서만 부른다(I5) — `copy` 가 `None` = 물을 사본이 없다. 처리 중이던 표지는 무효가 된다.
-    pub fn set_boot(&self, copy: Option<CrashCopy>, state_file: StateFileStatus) {
-        let fields = copy.as_ref().map(|copy| (copy.hash.clone(), copy.durable));
+    /// 부팅 단계 ⑥ 에서만 부른다(I5) — `copy` 가 `None` = 물을 사본이 없다 · `saves` = 이 실행이 화면 상태를 저장하나
+    /// (가드가 아니다 — [`RestoreStatusView::saves`]). 처리 중이던 표지는 무효가 된다.
+    pub fn set_boot(&self, copy: Option<CrashCopy>, state_file: StateFileStatus, saves: bool) {
+        let hash = copy.as_ref().map(|copy| copy.hash.clone());
         let (again, status, notifier) = {
             let mut cell = lock(&self.cell);
             let again = cell.generation > 0;
             cell.generation += 1;
             cell.state_file = state_file;
+            cell.saves = saves;
             cell.phase = match copy {
                 Some(copy) => Phase::Awaiting {
                     copy: Arc::new(copy),
@@ -348,11 +357,11 @@ impl RestoreService {
                 "복원 상태를 부팅 단계 밖에서 다시 정했다 — 처리 중이던 답은 무효가 된다"
             );
         }
-        match fields {
-            Some((hash, durable)) => tracing::info!(
+        match hash {
+            Some(hash) => tracing::info!(
                 module = "state",
                 hash = %hash,
-                durable,
+                saves,
                 "답하지 않은 크래시 사본이 있다 — 복원할지 묻는다"
             ),
             None => tracing::info!(module = "state", "물을 크래시 사본이 없다"),
@@ -361,13 +370,13 @@ impl RestoreService {
     }
 
     pub fn status(&self) -> RestoreStatusView {
-        let (status, copy, state_file) = {
+        let (status, copy, state_file, saves) = {
             let cell = lock(&self.cell);
             let copy = match &cell.phase {
                 Phase::Awaiting { copy, .. } => Some(Arc::clone(copy)),
                 _ => None,
             };
-            (cell.phase.status(), copy, cell.state_file)
+            (cell.phase.status(), copy, cell.state_file, cell.saves)
         };
         let Some(copy) = copy else {
             return RestoreStatusView {
@@ -376,6 +385,7 @@ impl RestoreService {
                 windows: None,
                 tabs: None,
                 durable: None,
+                saves,
                 state_file,
             };
         };
@@ -393,7 +403,8 @@ impl RestoreService {
             saved_at_ms: Some(copy.file.saved_at_ms),
             windows: Some(count(strips.len())),
             tabs: Some(count(strips.iter().sum())),
-            durable: Some(copy.durable),
+            durable: Some(saves),
+            saves,
             state_file,
         }
     }
@@ -1032,7 +1043,6 @@ mod tests {
                     window("p-1", WindowKind::Popout(strip(1))),
                 ],
             },
-            durable: true,
         }
     }
 
@@ -1051,6 +1061,7 @@ mod tests {
             windows: None,
             tabs: None,
             durable: None,
+            saves: true,
             state_file: StateFileStatus::Ok,
         }
     }
@@ -1070,7 +1081,7 @@ mod tests {
     #[test]
     fn the_boot_without_a_copy_settles_none_and_notifies() {
         let (service, recorder) = service();
-        service.set_boot(None, StateFileStatus::Ok);
+        service.set_boot(None, StateFileStatus::Ok, true);
         assert_eq!(service.status(), idle(CrashCopyStatus::None));
         assert_eq!(recorder.seen(), [CrashCopyStatus::None]);
     }
@@ -1078,7 +1089,7 @@ mod tests {
     #[test]
     fn the_boot_with_a_copy_awaits_and_the_view_counts_the_copy() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
         assert_eq!(
             service.status(),
             RestoreStatusView {
@@ -1087,6 +1098,7 @@ mod tests {
                 windows: Some(2),
                 tabs: Some(3),
                 durable: Some(true),
+                saves: true,
                 state_file: StateFileStatus::Ok,
             }
         );
@@ -1094,42 +1106,75 @@ mod tests {
     }
 
     #[test]
-    fn durable_is_the_awaiting_copys_and_null_outside_awaiting() {
-        for durable in [true, false] {
+    fn durable_is_saves_while_awaiting_and_null_outside_awaiting() {
+        for saves in [true, false] {
             let (service, _recorder) = service();
-            assert_eq!(service.status().durable, None, "none — {durable}");
+            assert_eq!(service.status().durable, None, "none — {saves}");
 
-            service.set_boot(
-                Some(CrashCopy {
-                    durable,
-                    ..crash_copy("h")
-                }),
-                StateFileStatus::Ok,
-            );
-            assert_eq!(
-                service.status().durable,
-                Some(durable),
-                "awaiting — 사본의 값"
-            );
+            service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, saves);
+            assert_eq!(service.status().durable, Some(saves), "awaiting — {saves}");
 
             let ticket = service.begin_answer().unwrap();
             assert_eq!(
                 service.status().durable,
-                Some(durable),
-                "처리 중에도 awaiting — {durable}"
+                Some(saves),
+                "처리 중에도 awaiting — {saves}"
             );
             service.finish_answer(ticket, AnswerEnd::Answered);
-            assert_eq!(service.status().durable, None, "answered — {durable}");
+            assert_eq!(service.status().durable, None, "answered — {saves}");
+        }
+    }
+
+    #[test]
+    fn saves_is_on_every_view_of_the_run_and_survives_the_answer() {
+        for saves in [true, false] {
+            let (none, _recorder) = service();
+            none.set_boot(None, StateFileStatus::Ok, saves);
+            assert_eq!(
+                none.status(),
+                RestoreStatusView {
+                    saves,
+                    ..idle(CrashCopyStatus::None)
+                },
+                "물을 사본이 없어도 선다 — {saves}"
+            );
+
+            let (service, _recorder) = service();
+            service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, saves);
+            let awaiting = service.status();
+            assert_eq!(awaiting.saves, saves, "awaiting — {saves}");
+            assert_eq!(
+                awaiting.durable,
+                Some(awaiting.saves),
+                "묻는 동안 둘은 같다 — {saves}"
+            );
+
+            let ticket = service.begin_answer().unwrap();
+            assert_eq!(service.status().saves, saves, "처리 중 — {saves}");
+            service.finish_answer(ticket, AnswerEnd::RolledBack);
+            assert_eq!(service.status().saves, saves, "되돌린 뒤 — {saves}");
+
+            let ticket = service.begin_answer().unwrap();
+            service.finish_answer(ticket, AnswerEnd::Answered);
+            assert_eq!(
+                service.status(),
+                RestoreStatusView {
+                    saves,
+                    ..idle(CrashCopyStatus::Answered)
+                },
+                "답한 뒤에도 그 실행의 값 그대로 — {saves}"
+            );
         }
     }
 
     #[test]
     fn the_boot_sets_the_state_file_status_for_every_view_of_the_run() {
         let (unread, recorder) = service();
-        unread.set_boot(None, StateFileStatus::Unreadable);
+        unread.set_boot(None, StateFileStatus::Unreadable, false);
         assert_eq!(
             unread.status(),
             RestoreStatusView {
+                saves: false,
                 state_file: StateFileStatus::Unreadable,
                 ..idle(CrashCopyStatus::None)
             },
@@ -1143,7 +1188,11 @@ mod tests {
 
         // 못 쓸 state.json × 답 없는 사본 — 떠 두고 묻는다(§6-5 표).
         let (service, _corrupt_recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::CorruptCopiedAside);
+        service.set_boot(
+            Some(crash_copy("h")),
+            StateFileStatus::CorruptCopiedAside,
+            true,
+        );
         assert_eq!(
             service.status().state_file,
             StateFileStatus::CorruptCopiedAside
@@ -1163,7 +1212,7 @@ mod tests {
     #[test]
     fn an_answer_moves_to_answered_notifies_and_refuses_a_second_answer() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
         let ticket = service.begin_answer().expect("답할 수 있다");
         assert_eq!(ticket.copy().hash, "h");
@@ -1184,7 +1233,7 @@ mod tests {
     #[test]
     fn a_second_answer_while_one_is_in_flight_conflicts() {
         let (service, _recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
         let _ticket = service.begin_answer().unwrap();
         assert_eq!(
@@ -1201,7 +1250,7 @@ mod tests {
     #[test]
     fn a_rolled_back_answer_stays_awaiting_notifies_it_and_can_be_answered_again() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
         let ticket = service.begin_answer().unwrap();
         service.finish_answer(ticket, AnswerEnd::RolledBack);
@@ -1218,7 +1267,7 @@ mod tests {
     #[test]
     fn dropping_a_ticket_rolls_back() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
         drop(service.begin_answer().unwrap());
 
@@ -1233,7 +1282,7 @@ mod tests {
     #[test]
     fn a_ticket_unwound_by_a_panic_rolls_back() {
         let (service, _recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _ticket = service.begin_answer().unwrap();
@@ -1247,10 +1296,10 @@ mod tests {
     #[test]
     fn a_ticket_from_before_a_second_boot_setting_changes_nothing() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("옛")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("옛")), StateFileStatus::Ok, true);
         let stale = service.begin_answer().unwrap();
 
-        service.set_boot(Some(crash_copy("새")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("새")), StateFileStatus::Ok, true);
         service.finish_answer(stale, AnswerEnd::Answered);
 
         assert_eq!(service.status().crash_copy, CrashCopyStatus::Awaiting);
@@ -1266,7 +1315,7 @@ mod tests {
     #[test]
     fn the_notifier_is_called_with_no_lock_held() {
         let (service, recorder) = service();
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
         let ticket = service.begin_answer().unwrap();
         service.finish_answer(ticket, AnswerEnd::RolledBack);
         drop(service.begin_answer().unwrap());
@@ -1300,7 +1349,7 @@ mod tests {
         ));
         service.set_notifier(notifier.clone());
 
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok);
+        service.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, true);
 
         assert_eq!(
             notifier.1.lock().unwrap()[0].crash_copy,
@@ -1362,12 +1411,26 @@ mod tests {
         let (service, _recorder) = service();
         assert_eq!(
             serde_json::to_value(service.status()).unwrap(),
-            serde_json::json!({ "crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "state_file": "ok" })
+            serde_json::json!({ "crash_copy": "none", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "saves": true, "state_file": "ok" })
         );
-        service.set_boot(Some(crash_copy("h")), StateFileStatus::CorruptNotCopied);
+        service.set_boot(
+            Some(crash_copy("h")),
+            StateFileStatus::CorruptNotCopied,
+            true,
+        );
         assert_eq!(
             serde_json::to_value(service.status()).unwrap(),
-            serde_json::json!({ "crash_copy": "awaiting", "saved_at_ms": 1234, "windows": 2, "tabs": 3, "durable": true, "state_file": "corrupt_not_copied" })
+            serde_json::json!({ "crash_copy": "awaiting", "saved_at_ms": 1234, "windows": 2, "tabs": 3, "durable": true, "saves": true, "state_file": "corrupt_not_copied" })
+        );
+
+        // 가드 ⅱ 의 답한 뒤 — 이 실행이 저장하지 않는다는 사실이 `saves` 하나로 남는다.
+        let guarded = RestoreService::new();
+        guarded.set_boot(Some(crash_copy("h")), StateFileStatus::Ok, false);
+        let ticket = guarded.begin_answer().unwrap();
+        guarded.finish_answer(ticket, AnswerEnd::Answered);
+        assert_eq!(
+            serde_json::to_value(guarded.status()).unwrap(),
+            serde_json::json!({ "crash_copy": "answered", "saved_at_ms": null, "windows": null, "tabs": null, "durable": null, "saves": false, "state_file": "ok" })
         );
         assert_eq!(
             serde_json::to_value(AnswerReply {
@@ -1469,7 +1532,6 @@ mod tests {
                 resolved_crash_copy: None,
                 windows,
             },
-            durable: true,
         }
     }
 
@@ -1828,7 +1890,7 @@ mod tests {
         let tree_rev = rig.tree.rev();
         let (windows, saved_tree) = previous_screen(1, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
         let reply = rig.coordinator.answer(true).expect("수락");
 
@@ -1945,7 +2007,7 @@ mod tests {
             .push(MAIN_WINDOW_LABEL.into());
         let (windows, _) = previous_screen(2, true);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
         let reply = rig.coordinator.answer(true).expect("수락");
 
@@ -2016,7 +2078,7 @@ mod tests {
         let tree_rev = rig.tree.rev();
         let (windows, _) = previous_screen(1, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         rig.windows.gone.lock().unwrap().push("slot-popup-2".into());
 
         let reply = rig.coordinator.answer(true).expect("수락은 커밋됐다");
@@ -2048,7 +2110,7 @@ mod tests {
         rig.register_subs();
         let (windows, _) = previous_screen(0, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
         rig.coordinator.answer(true).expect("수락");
 
@@ -2083,7 +2145,7 @@ mod tests {
             }
             let (windows, _) = previous_screen(1, false);
             rig.service
-                .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+                .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
             rig.coordinator.answer(true).expect("수락");
 
@@ -2127,7 +2189,7 @@ mod tests {
         rig.attach();
         let (windows, _) = previous_screen(2, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
         *rig.windows.fail_open.lock().unwrap() = Some("slot-popup-2".into());
 
@@ -2168,7 +2230,7 @@ mod tests {
         rig.attach();
         let (windows, _) = previous_screen(2, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         *rig.windows.fail_open.lock().unwrap() = Some("slot-popup-2".into());
         *rig.windows.fail_destroy.lock().unwrap() = Some("slot-popup-1".into());
 
@@ -2193,7 +2255,7 @@ mod tests {
         rig.attach();
         let (windows, _) = previous_screen(1, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let (version, views) = {
             let mgr = rig.layout.0.lock().unwrap();
             (mgr.version, mgr.views.len())
@@ -2246,7 +2308,7 @@ mod tests {
         rig.live_popout();
         let (windows, _) = previous_screen(1, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
 
         let err = rig.coordinator.answer(true).unwrap_err();
@@ -2263,7 +2325,7 @@ mod tests {
         let rig = Rig::new(None);
         let (windows, _) = previous_screen(0, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
 
         assert!(matches!(
@@ -2290,7 +2352,7 @@ mod tests {
         rig.live_popout();
         let (windows, _) = previous_screen(1, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
 
         let reply = rig.coordinator.answer(false).expect("거절");
@@ -2325,7 +2387,7 @@ mod tests {
 
         let (windows, _) = previous_screen(0, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let held = rig.service.begin_answer().unwrap();
         for accept in [true, false] {
             assert!(matches!(
@@ -2343,7 +2405,7 @@ mod tests {
         let rig = Rig::new(None);
         let (windows, _) = previous_screen(1, false);
         rig.service
-            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok);
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         assert_eq!(rig.coordinator.status(), rig.service.status());
     }
 }

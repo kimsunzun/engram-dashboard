@@ -41,7 +41,8 @@ export default function ConnectionNotice() {
   return (
     <div
       role="alert"
-      className="flex shrink-0 items-start gap-3 border-b border-destructive/40 bg-destructive/15 px-4 py-2 text-sm text-foreground"
+      className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-4 py-2 text-sm text-foreground"
+      style={{ borderLeft: '3px solid var(--status-danger)' }}
     >
       <div className="min-w-0 flex-1">
         <span className="font-semibold">데몬에 연결하지 못했습니다.</span>{' '}

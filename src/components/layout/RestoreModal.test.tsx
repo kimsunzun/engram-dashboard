@@ -81,6 +81,44 @@ describe('RestoreModal — 덮고 막는다', () => {
     expect(layer().contains(dialog())).toBe(false)
   })
 
+  it('알림 층도 잠기는 층 안이고, 모달은 그 밖 · 그 위(z-50 > 40)다', async () => {
+    const { layer, container } = mount(view('awaiting', { saves: false }))
+    await settle()
+    const notices = screen.getByTestId('notice-overlay')
+    expect(layer().hasAttribute('inert')).toBe(true)
+    expect(layer().contains(notices)).toBe(true)
+    expect(notices.contains(screen.getByRole('status'))).toBe(true)
+    expect(getComputedStyle(notices).zIndex).toBe('40')
+    const overlay = container.querySelector('[data-restore-overlay]') as HTMLElement
+    expect(layer().contains(overlay)).toBe(false)
+    expect(overlay.className).toMatch(/\bz-50\b/)
+  })
+
+  it('saves 칸이 없는 짐(셸과 판이 어긋남)이어도 모달이 뜬다 — 가드 ⅱ 알림은 없다', async () => {
+    const { saves: _omit, ...withoutSaves } = view('awaiting')
+    mount(withoutSaves as RestoreStatusView)
+    await settle()
+    expect(dialog()).not.toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+
+    fireEvent.click(rejectBtn())
+    await settle()
+    expect(dialog()).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('state_file 이 모르는 값인 짐(셸과 판이 어긋남)이어도 모달이 뜬다 — 알림은 없다', async () => {
+    mount({ ...view('awaiting', { saves: false }), state_file: 'from_a_newer_shell' as never })
+    await settle()
+    expect(dialog()).not.toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+
+    fireEvent.click(acceptBtn())
+    await settle()
+    expect(dialog()).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it('awaiting 이 아니면 덮는 층도 inert 도 없다', async () => {
     const { layer, container } = mount(view('none'))
     await settle()
@@ -371,5 +409,31 @@ describe('AppLayout — 상태 파일 알림', () => {
     mount(view('none', { state_file: 'corrupt_copied_aside' }))
     await settle()
     expect(screen.getByRole('status').textContent).toContain('state.json.corrupt')
+  })
+
+  // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(사용자 결정 2026-10-06).
+  it.each([
+    ['수락', () => acceptBtn()],
+    ['거절', () => rejectBtn()],
+  ])('가드 ⅱ(saves:false · ok) 알림은 %s으로 모달이 닫힌 뒤에도 남는다', async (_label, button) => {
+    mount(view('awaiting', { saves: false }))
+    await settle()
+    expect(dialog()).not.toBeNull()
+
+    fireEvent.click(button())
+    await settle()
+    expect(dialog()).toBeNull()
+    const notice = screen.getByRole('status')
+    expect(notice.textContent).toContain(t('restore.stateFileNotSaving'))
+    expect(notice.getAttribute('data-state-file')).toBe('ok')
+  })
+
+  it('저장하는 실행(saves:true · ok)은 답한 뒤에도 알림이 없다', async () => {
+    mount(view('awaiting'))
+    await settle()
+    fireEvent.click(acceptBtn())
+    await settle()
+    expect(dialog()).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
   })
 })

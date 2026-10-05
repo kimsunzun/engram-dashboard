@@ -20,6 +20,15 @@ import { retryAsync, RetryCancelledError } from '../util/retryInvoke'
 
 export type { AnswerReply, CrashCopyStatus, RestoreStatusView, StateFileStatus }
 
+/**
+ * 이 창이 쥐는 복원 상태 — 셸의 `RestoreStatusView` 에서 알림만 쓰는 두 칸(`saves` · `state_file`)이 느슨하다.
+ * `undefined` = 짐에 그 칸이 없었거나 모르는 값이었다(셸과 프론트의 판이 어긋남) — 그 칸이 말하는 것을 모른다.
+ */
+export type RestoreView = Omit<RestoreStatusView, 'saves' | 'state_file'> & {
+  saves: boolean | undefined
+  state_file: StateFileStatus | undefined
+}
+
 export const EVT_RESTORE_CHANGED = 'restore:changed'
 export const CMD_RESTORE_STATUS = 'restore_status'
 export const CMD_RESTORE_ANSWER = 'restore_answer'
@@ -35,7 +44,7 @@ export interface RestoreIpc {
 
 export interface RestoreClient {
   /** 마지막으로 받은 상태 — 아직 한 번도 못 받았으면 `null`. 바뀌지 않는 동안 같은 객체를 돌려준다. */
-  status(): RestoreStatusView | null
+  status(): RestoreView | null
   /** 상태가 바뀔 때마다 부른다. 반환 = 구독 해제(`useSyncExternalStore` 모양). */
   subscribe(listener: () => void): () => void
   /**
@@ -55,12 +64,14 @@ const STATE_FILE: readonly string[] = [
   'corrupt_not_copied',
 ] satisfies StateFileStatus[]
 
-/** 짐 모양이 계약과 다르면 `null` — 모르는 값으로 main 을 막거나 엉뚱한 알림을 띄우지 않게 하는 그물이다. */
-function viewOf(raw: unknown): RestoreStatusView | null {
+/**
+ * `crash_copy` 를 못 읽으면 `null` — 모르는 값으로 main 을 막지 않게 하는 그물이다. 알림만 쓰는 두 칸은 못 읽어도
+ * `undefined` 로 두고 짐을 살린다 — 버리면 묻는 모달까지 안 뜬다. 잃는 것은 그 알림 하나다.
+ */
+function viewOf(raw: unknown): RestoreView | null {
   if (raw === null || typeof raw !== 'object') return null
   const v = raw as Record<string, unknown>
   if (typeof v.crash_copy !== 'string' || !CRASH_COPY.includes(v.crash_copy)) return null
-  if (typeof v.state_file !== 'string' || !STATE_FILE.includes(v.state_file)) return null
   const num = (x: unknown): number | null => (typeof x === 'number' ? x : null)
   return {
     crash_copy: v.crash_copy as CrashCopyStatus,
@@ -68,12 +79,18 @@ function viewOf(raw: unknown): RestoreStatusView | null {
     windows: num(v.windows),
     tabs: num(v.tabs),
     durable: typeof v.durable === 'boolean' ? v.durable : null,
-    state_file: v.state_file as StateFileStatus,
+    // 모른다를 `undefined` 로 두는 것은 대신 칠 값이 없어서다 — `true` 는 저장한다고 단정하고 `false` 는 거짓 알림을 띄운다.
+    saves: typeof v.saves === 'boolean' ? v.saves : undefined,
+    state_file:
+      typeof v.state_file === 'string' && STATE_FILE.includes(v.state_file)
+        ? (v.state_file as StateFileStatus)
+        : undefined,
   }
 }
 
 export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
-  let current: RestoreStatusView | null = null
+  let current: RestoreView | null = null
+  const warned = new Set<'saves' | 'state_file'>()
   let issued = 0
   let applied = 0
   const listeners = new Set<() => void>()
@@ -99,9 +116,14 @@ export function createRestoreClient(ipc: RestoreIpc): RestoreClient {
     //   옛 상태다. 도착 순서로 칠하면 이미 닫힌 모달이 옛 `awaiting` 으로 되살아난다.
     if (seq < applied) return
     const view = viewOf(raw)
-    if (!view) {
-      console.warn(`[restore] ${CMD_RESTORE_STATUS}: 모양이 계약과 다르다 — 버린다`, raw)
-      return
+    // ★못 읽은 짐은 실패한 당기기로 친다 — 말없이 버리지 말 것★: 버리면 부팅 당기기가 받은 것처럼 끝나 다시 당기지
+    //   않고, 셸이 묻고 있어도 모달이 영영 안 뜬다. 던지면 부팅 다시 당기기가 맞는 짐을 받을 때까지 돈다.
+    if (!view) throw new Error(`${CMD_RESTORE_STATUS}: 모양이 계약과 다르다 — ${JSON.stringify(raw)}`)
+    // 알림마다 다시 당기므로 판이 어긋난 동안 매번 같은 짐이 온다 — 칸마다 한 번만 남긴다.
+    const unknown = (['saves', 'state_file'] as const).filter(k => view[k] === undefined && !warned.has(k))
+    if (unknown.length > 0) {
+      for (const k of unknown) warned.add(k)
+      console.warn(`[restore] ${CMD_RESTORE_STATUS}: ${unknown.join(' · ')} 칸이 없거나 모르는 값이다 — 그 알림 없이 쓴다`, raw)
     }
     applied = seq
     current = view

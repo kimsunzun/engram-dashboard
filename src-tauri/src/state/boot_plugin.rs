@@ -137,20 +137,21 @@ impl Boot {
             guard,
             ..
         } = plan;
-        // 가드면 기록기가 없어 답이 디스크에 붙지 않는다 — 가드 ⅱ 의 원천은 판정이 실은 메모리의 원문이다(L2).
-        let durable = guard.is_none();
+        // 가드 계약(§6-5 ③) — 이번 실행이 저장한다 ≡ 가드가 아니다. 가드면 기록기가 없어 답이 디스크에 붙지 않는다 —
+        //   가드 ⅱ 의 원천은 판정이 실은 메모리의 원문이다(L2).
+        let saves = guard.is_none();
         let ask = crash_copy.is_some();
         self.restore.set_boot(
             crash_copy.map(|copy| CrashCopy {
                 text: copy.text,
                 hash: copy.hash,
                 file: copy.file,
-                durable,
             }),
             state_file,
+            saves,
         );
 
-        let saver = durable.then(|| PendingSaver {
+        let saver = saves.then(|| PendingSaver {
             source: LiveSource::new(self.layout.clone(), self.tree.clone()),
             files: saver::Fs::new(state_dir.join(STATE_FILE), state_dir.join(CRASH_COPY_FILE)),
             revision,
@@ -479,7 +480,8 @@ mod tests {
     use crate::state::lock::LOCK_FILE;
     use crate::state::placement::{Landing, MonitorArea};
     use crate::state::restore::{
-        RestoreCoordinator, RestorePorts, RestoreWindows, SubscriptionSource,
+        AnswerEnd, RestoreCoordinator, RestorePorts, RestoreStatusView, RestoreWindows,
+        SubscriptionSource,
     };
     use crate::state::saver::SnapshotSource;
     use crate::state::schema::{StateFile, STATE_VERSION};
@@ -712,6 +714,7 @@ mod tests {
             StateFileStatus::Ok,
             "없는 파일은 ok"
         );
+        assert!(boot.restore.status().saves, "가드가 아니다 — 저장한다");
         let marker = read_state(&state_dir);
         assert!(!marker.clean_exit);
         assert_eq!(
@@ -738,6 +741,7 @@ mod tests {
             StateFileStatus::Unreadable,
             "가드 ⅰ — 사본이 없어도 ⑥ 이 정한다"
         );
+        assert!(!boot.restore.status().saves, "가드 ⅰ — 저장하지 않는다");
         assert!(session.cell().saver_start.is_none(), "기록기 재료가 없다");
         assert!(
             state_dir.join(STATE_FILE).is_dir(),
@@ -767,6 +771,10 @@ mod tests {
             boot.restore.status().state_file,
             StateFileStatus::CorruptCopiedAside
         );
+        assert!(
+            boot.restore.status().saves,
+            "못 쓸 파일은 가드가 아니다 — 저장한다"
+        );
         assert_eq!(
             notices.seen(),
             [CrashCopyStatus::None],
@@ -794,6 +802,10 @@ mod tests {
         assert_eq!(
             boot.restore.status().state_file,
             StateFileStatus::CorruptNotCopied
+        );
+        assert!(
+            boot.restore.status().saves,
+            "떠 두기 실패도 가드가 아니다(D8)"
         );
         assert!(
             !read_state(&state_dir).clean_exit,
@@ -864,11 +876,9 @@ mod tests {
             Some(1),
             "main 만 — 트리 창은 세지 않는다"
         );
-        assert_eq!(
-            boot.restore.status().durable,
-            Some(true),
-            "가드가 아니다 — 이 실행이 저장한다"
-        );
+        let status = boot.restore.status();
+        assert!(status.saves, "가드가 아니다 — 이 실행이 저장한다");
+        assert_eq!(status.durable, Some(true), "묻는 동안은 saves 와 같다");
         assert!(
             !layout.0.lock().unwrap().views.contains_key(&saved_tab),
             "묻는 동안은 기본 화면"
@@ -876,7 +886,6 @@ mod tests {
         assert!(!read_state(&state_dir).clean_exit, "실행 표식");
         {
             let ticket = boot.restore.begin_answer().unwrap();
-            assert!(ticket.copy().durable, "기록기가 뜬다");
             assert_eq!(ticket.copy().text, raw);
         }
 
@@ -934,11 +943,8 @@ mod tests {
         boot.run_steps(&run_dir, &state_dir);
 
         let status = boot.restore.status();
-        assert_eq!(
-            status.durable,
-            Some(false),
-            "가드 ⅱ — 이 실행은 저장하지 않는다"
-        );
+        assert!(!status.saves, "가드 ⅱ — 이 실행은 저장하지 않는다");
+        assert_eq!(status.durable, Some(false), "묻는 동안은 saves 와 같다");
         assert_eq!(
             status.state_file,
             StateFileStatus::Ok,
@@ -946,7 +952,6 @@ mod tests {
         );
         {
             let ticket = boot.restore.begin_answer().expect("가드 ⅱ 여도 묻는다");
-            assert!(!ticket.copy().durable, "기록기가 없다");
             assert_eq!(
                 ticket.copy().text,
                 raw,
@@ -970,6 +975,46 @@ mod tests {
         session.shutdown();
     }
 
+    // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(사용자 결정 2026-10-06).
+    #[test]
+    fn a_run_that_could_not_write_the_crash_copy_still_says_so_after_the_answer() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let (raw, _) = previous_run(false, None);
+        std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
+        std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
+
+        let layout = LayoutState::new();
+        let tree = Arc::new(TreeAttrs::default());
+        let (boot, session) = boot(&layout, &tree);
+        let coordinator = RestoreCoordinator::new(
+            boot.restore.clone(),
+            layout,
+            tree,
+            session.clone(),
+            boot.labels.clone(),
+        );
+        boot.run_steps(&run_dir, &state_dir);
+        session.start_saver();
+
+        let reply = coordinator.answer(false).expect("거절");
+
+        assert!(!reply.durable, "기록기가 없다");
+        assert_eq!(
+            boot.restore.status(),
+            RestoreStatusView {
+                crash_copy: CrashCopyStatus::Answered,
+                saved_at_ms: None,
+                windows: None,
+                tabs: None,
+                durable: None,
+                saves: false,
+                state_file: StateFileStatus::Ok,
+            }
+        );
+        session.shutdown();
+    }
+
     #[test]
     fn an_unreadable_state_file_with_an_unanswered_copy_asks_without_durability() {
         let run_dir = temp_dir("run");
@@ -984,8 +1029,15 @@ mod tests {
 
         let status = boot.restore.status();
         assert_eq!(status.crash_copy, CrashCopyStatus::Awaiting);
+        assert!(!status.saves);
         assert_eq!(status.durable, Some(false));
         assert_eq!(status.state_file, StateFileStatus::Unreadable);
+
+        let ticket = boot.restore.begin_answer().unwrap();
+        boot.restore.finish_answer(ticket, AnswerEnd::Answered);
+        let answered = boot.restore.status();
+        assert!(!answered.saves, "답한 뒤에도 그대로");
+        assert_eq!(answered.state_file, StateFileStatus::Unreadable);
         session.shutdown();
     }
 

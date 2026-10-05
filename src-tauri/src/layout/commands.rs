@@ -64,6 +64,8 @@ use crate::ui_settings::UiSettingsRefresh;
 //   `ui.refresh`(프론트에 대응 명령이 없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만
 //   만지던 화면 명령 둘은 ADR-0167 이 내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri
 //   `set_split_ratio` 를 직접 부르고 레지스트리에 이름을 싣지 않는다 — ADR-0227).
+// ★세대 13 = `restore.status` 의 답에 `saves` 가 붙은 세대★(TRD S21-storage §6-5 — 사용자 결정 2026-10-06) — 이름은
+//   그대로고 답 모양이 바뀌었다.
 // ★세대 12 = `restore.status` 의 답에 `durable` · `state_file` 이 붙은 세대★(TRD S21-storage §6-5 · §6-7) — 이름은
 //   그대로고 답 모양이 바뀌었다.
 // ★세대 11 = 크래시 사본 명령 둘(`restore.status`·`restore.answer`)이 든 세대★(TRD S21-storage §6-7).
@@ -88,7 +90,7 @@ use crate::ui_settings::UiSettingsRefresh;
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 12;
+    catalog_version: 13;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -459,16 +461,17 @@ declare_commands! {
     /// 안 맞을 때) 이것을 본다. crash_copy = none(물을 사본이 없다) · awaiting(답을 기다린다 — 다른 창 명령보다
     /// 먼저 주인이 정한 답을 restore.answer 로 낸다) · answered(이 실행에서 이미 답했다).
     /// 다음 넷은 awaiting 일 때만 값이고 아니면 null 이다 — saved_at_ms = 사본을 적은 시각(유닉스 밀리초) ·
-    /// windows = 사본의 창 수(main + 팝아웃 — 트리 창은 세지 않는다) · tabs = 그 창들의 탭 수 합 · durable = 이번
-    /// 실행이 화면 상태를 저장하나(true = 답하면 그 답을 디스크에 붙이고 사본을 지운다 · false = 이번 실행은 아무것도
-    /// 저장하지 않아 답해도 크래시 때 화면이 디스크에 남고(사본 또는 정상 종료 표시 없는 state.json) 다음 시작이 다시
-    /// 묻는다 — 답이 실제로 붙었는지는 restore.answer 의 durable).
-    /// state_file = 이번 실행이 시작할 때 화면 상태 파일(state.json)을 어떻게 읽었나 — crash_copy 와 무관하게 늘
-    /// 값이고 이번 실행 내내 같다: ok(읽었거나 없었다 — 이번 실행이 저장하나는 이 칸이 아니라 awaiting 동안의
-    /// durable 이 말한다) · unreadable(못 읽었다 — 이번 실행은 화면 상태를 저장하지 않고 파일은 그대로 두며 다음
-    /// 시작이 다시 본다) · corrupt_copied_aside(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라
-    /// state.json.corrupt 로 떠 두고 기본 화면으로 시작했다) · corrupt_not_copied(못 쓰는 파일(손상 · 이 판이 못 읽는
-    /// 새 판 · 상한 초과 · UTF-8 아님)인데 떠 두지 못하고 기본 화면으로 시작했다 — 원본은 백업 없이 덮이고, 이미 있는
+    /// windows = 사본의 창 수(main + 팝아웃 — 트리 창은 세지 않는다) · tabs = 그 창들의 탭 수 합 · durable = 그동안의
+    /// saves 와 같은 값(true 면 답을 디스크에 붙이고 사본을 지우려 한다 — 실제로 붙었는지는 restore.answer 의 durable ·
+    /// false 면 답해도 크래시 때 화면이 디스크에 남아 다음 시작이 다시 묻는다).
+    /// 다음 둘은 crash_copy 와 무관하게 늘 값이고 이번 실행 내내 같다(답한 뒤에도).
+    /// saves = 이번 실행이 화면 상태를 저장하나 — true = 가드가 아니다: 기록기를 띄우려 한다(띄우기 · 쓰기 성공은
+    /// 보장하지 않는다) · false = 가드다: 화면 상태를 하나도 저장하지 않고 다음 시작이 다시 판정한다(state_file 이
+    /// unreadable 이거나, ok 인데 떠야 할 크래시 사본을 못 떴다).
+    /// state_file = 시작할 때 state.json 을 어떻게 읽었나: ok(읽었거나 없었다 — 저장하나는 saves 가 말한다) ·
+    /// unreadable(못 읽었다 — 파일은 그대로 두고 saves 도 false) · corrupt_copied_aside · corrupt_not_copied(못 쓰는
+    /// 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라 기본 화면으로 시작했다 — corrupt_copied_aside 는
+    /// state.json.corrupt 로 떠 두었고 corrupt_not_copied 는 떠 두지 못해 원본이 백업 없이 덮인다. 이미 있는
     /// state.json.corrupt 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이 아니다).
     #[effect(Read)]
     #[since(11)]
@@ -478,6 +481,7 @@ declare_commands! {
         windows: Option<u32>,
         tabs: Option<u32>,
         durable: Option<bool>,
+        saves: bool,
         state_file: String,
     } errors [];
 
@@ -1165,6 +1169,7 @@ fn verb_restore_status(ports: &LayoutPorts) -> RestoreStatusOk {
         windows: view.windows,
         tabs: view.tabs,
         durable: view.durable,
+        saves: view.saves,
         state_file: view.state_file.as_wire().to_string(),
     }
 }
