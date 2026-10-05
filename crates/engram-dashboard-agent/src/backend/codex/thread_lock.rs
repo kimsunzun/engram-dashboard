@@ -2,9 +2,9 @@
 //! 곧 그 자식의 스레드 id 다(ADR-0218 결정 1).
 //!
 //! ★이 파일이 쥐는 codex 지식은 둘뿐★ — 락 디렉터리의 위치([`lock_dir`])와 파일 이름이 곧 id 라는 것.
-//! 「이 파일을 누가 쥐고 있나」와 「이 PID 아래 무엇이 살아 있나」는 도메인 지식이 0 이라
-//! [`crate::platform::file_holders`]·[`crate::platform::process_tree`] 가 답한다
-//! (ADR-0004 · ADR-0218 결정 11). ★**파일 내용은 읽지 않는다**★ — 0바이트이고, 읽기 시작하면 벤더
+//! 「이 파일을 누가 쥐고 있나」와 「이 PID 아래 무엇이 살아 있나」는 도메인 지식이 0 이라 OS 층 crate 의
+//! [`engram_dashboard_platform::file_holders`]·[`engram_dashboard_platform::process::subtree`] 가 답한다
+//! (ADR-0004 · ADR-0218 결정 11 · ADR-0266). ★**파일 내용은 읽지 않는다**★ — 0바이트이고, 읽기 시작하면 벤더
 //! 저장 포맷 의존이 된다(ADR-0203).
 //!
 //! 진입점 둘 — [`plan_capture`](이 spawn 에서 회수를 돌릴지와 그 재료를 고른다)와
@@ -20,11 +20,11 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use engram_dashboard_platform::file_holders::{self, Holder};
+use engram_dashboard_platform::process::{self, ProcessIdentity};
 use uuid::Uuid;
 
 use crate::backend::SessionIdSink;
-use crate::platform::file_holders::{self, Holder};
-use crate::platform::process_tree::{self, ProcessIdentity};
 
 /// codex 홈 아래 writer 락이 사는 폴더 이름.
 ///
@@ -62,8 +62,23 @@ pub(crate) trait LockHolderProbe {
     ///   래퍼 38240 · 그 아래 4816,19468).
     /// ★바퀴마다 다시 푼다 — 한 번 떠 둔 명단을 재사용하지 말 것★: shim 이 codex 를 늦게 띄우고
     ///   codex 가 또 도구를 띄우므로 나무는 시간에 따라 자란다. 굳혀 두면 늦게 뜬 codex 를 못 본다.
+    /// ★나무 규칙이 이 회수에서 막는 것과 받아들인 잔여★ — 규칙(뿌리 신원 확인 · 부모보다 먼저 태어난
+    ///   항목 버리기)과 그 규칙이 못 거르는 경우 ①②③ 의 사실 정본은 [`process::subtree`] 의 doc 이다.
+    ///   여기는 그것이 codex 회수에 무엇을 뜻하나만 적는다.
+    ///   - **순서 규칙이 막는 실제 시퀀스:** 사용자가 손으로 띄운 `codex.exe` 가 고아가 되어 기록된 ppid
+    ///     `P` 를 그대로 달고 남고, Windows 가 `P` 를 우리 래퍼에 **재사용**한다. 규칙이 없으면 그 남이
+    ///     우리 자식으로 열거되고, 그 남은 자기 락의 홀더와 자기 신원이 당연히 맞으므로 **우리 codex 가
+    ///     락을 만들기 전 0.7~21 초 동안 유일한 후보**가 된다 — `Ambiguous` 도 안 뜨고 남의 스레드를 우리
+    ///     손잡이에 적는다(ADR-0218 「영향/불변식」이 이름 붙인 그 조용한 고장).
+    ///   - ★**잔여 ①②③ 은 받아들인다(다시 논쟁하지 말 것 — 2026-09-21 결정)**★. ① 열거와 시작시각 읽기
+    ///     사이의 PID 재사용은 원자적으로 고칠 수단이 없고 창이 마이크로초 단위다. ② 같은 눈금은 막으면 정상
+    ///     자식을 잃는다. ③ 명시 부모 지정이 **실제 오검출**이 되려면 그 남이 우리 `CODEX_HOME` 아래
+    ///     `<uuid>.lock` 까지 쥐고 있어야 한다 — 흔한 경로(재사용된 ppid 의 고아)를 닫은 것으로 규칙의
+    ///     값어치는 그대로다.
+    ///   - 나무 열거가 실패해 덜 돌려준 것도 오류로 받지 않는다 — 「후보 아님」과 다르게 처리할 방법이 없고
+    ///     다음 바퀴에 다시 묻는다.
     fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
-        process_tree::subtree(root_pid, root_start_time)
+        process::subtree(root_pid, root_start_time)
     }
 
     /// `dir` 바로 아래의 **정규 파일** 경로 전부(이름 판정은 [`scan_for_child`] 몫). 못 읽으면 빈
@@ -84,7 +99,7 @@ pub(crate) trait LockHolderProbe {
     }
 }
 
-/// 운영에서 쓰는 구현 — [`crate::platform::file_holders`] 에 묻고, 물음 자체가 실패하면 빈 목록으로
+/// 운영에서 쓰는 구현 — [`engram_dashboard_platform::file_holders`] 에 묻고, 물음 자체가 실패하면 빈 목록으로
 /// 접는다(그 접기의 사유는 [`LockHolderProbe::holders`] 의 계약).
 pub(crate) struct RestartManagerProbe;
 
@@ -523,7 +538,7 @@ mod tests {
         fn holders(&self, path: &Path) -> Vec<Holder> {
             self.holders.get(path).cloned().unwrap_or_default()
         }
-        /// 뿌리의 신원이 안 맞으면 나무가 없다 — 실물 `process_tree::subtree` 와 같은 규칙.
+        /// 뿌리의 신원이 안 맞으면 나무가 없다 — 실물 `process::subtree` 와 같은 규칙.
         fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
             if root_pid != WRAPPER_PID || root_start_time != WRAPPER_START {
                 return Vec::new();

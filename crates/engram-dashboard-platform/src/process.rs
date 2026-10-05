@@ -1,5 +1,5 @@
 //! PID liveness · 프로세스 시작시각(creation time) 조회와 그 결과의 세 갈래(앎 · 사라짐 · 못 읽음) ·
-//! 프로세스 표(pid, ppid) 한 장 · 자식 PID 열거.
+//! 프로세스 표(pid, ppid) 한 장 · 자식 PID 열거 · 한 뿌리 아래 살아 있는 프로세스의 신원 목록([`subtree`]).
 //!
 //! "그 PID 가 아직 그 프로세스인가" 를 판정하는 곳이 여러 crate 에 있다 — 예: `net`(portfile 의 stale
 //! 판정) · `discovery`(데몬 발견) · `daemon`(daemon.json 에 자기 시작시각 기록) · `agent`(codex 자식의
@@ -251,6 +251,108 @@ fn list_ended(hr: i32) -> bool {
     hr == HRESULT_FROM_ERROR_NO_MORE_FILES
 }
 
+// ── 뿌리 아래 신원 목록 ──────────────────────────────────────────────────────────
+
+/// 한 프로세스의 신원 — [`subtree`] 가 돌려주는 한 뿌리 아래의 프로세스 하나.
+///
+/// ★두 칸은 **함께** 대조하라고 있다★ — PID 는 OS 가 재사용하므로 PID 단독 일치는 남의 프로세스를
+/// 그 프로세스로 본다(ADR-0218 결정 2). 그래서 이 타입에는 `pid` 만 꺼내 쓰는 헬퍼를 두지 않는다.
+/// 모양이 같은 [`crate::file_holders::Holder`] 는 「한 파일을 연 프로세스」라 뜻이 다르다 — 합치지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    /// 프로세스 생성 FILETIME — [`process_creation_time`] 이 돌려주는 값과 같은 척도다.
+    pub start_time: u64,
+}
+
+/// `root` 와 그 아래 **살아 있는** 후손 전부의 신원.
+///
+/// - ★`root` 의 시작시각이 `root_start_time` 과 다르면 **빈 목록**이다★ — 그 PID 는 더는 호출자가 아는
+///   그 프로세스가 아니다(죽었거나 재사용됐다). 뿌리의 신원을 확인하지 않고 걸으면 남의 프로세스 나무를
+///   그 뿌리의 나무로 돌려주게 된다.
+/// - **후손의 시작시각은 지금 읽어 채운다** — 미리 아는 값이 없기 때문이다. 그래서 돌려준 신원은 언제나
+///   「이 순간 그 PID 인 프로세스」의 것이고, 열거와 대조 사이에 PID 가 재사용돼도 시작시각이 갈라서
+///   걸러진다.
+/// - ★**부모보다 먼저 태어난 항목은 후손이 아니다 — 버린다**★. 이것이 이 함수의 유일한 **의미** 규칙이다.
+///   [`child_pids`] 의 ppid 는 부모가 죽은 뒤에도 그대로 남는다(그 doc 의 단서). 그래서 어떤 프로세스를 낳은
+///   부모가 죽고 그 PID 가 뿌리나 그 후손에게 재사용되면, 남겨진 고아가 재사용된 PID 의 자식으로 열거된다.
+///   그 고아는 재사용 **이전**에 — 곧 지금 그 PID 를 쥔 프로세스보다 **먼저** — 태어났으므로 이 비교가 그
+///   경로를 전부 거른다. 뿌리 자신이 죽고 번호가 또 넘어간 경우는 첫 항목(뿌리 신원 확인)이 막는다.
+///   ★같은 시각(`==`)은 통과시킨다★ — FILETIME 눈금 하나 안에서 뜬 부모·자식이 실재할 수 있고, 거기서
+///   막으면 정상 자식을 잃는다. 막는 것은 **먼저 태어난** 것뿐이다.
+/// - ★**이 규칙이 못 거르는 경우가 셋 있다 — 「닫혀 있다」고 읽지 말 것**★(받아들일지는 호출자가 정한다):
+///   1. **열거와 시작시각 읽기 사이의 PID 재사용** — `child_pids` 가 준 번호의 주인이 읽기 전에 죽고
+///      번호가 넘어가면, 읽는 시작시각은 새 주인의 것이다. 열거와 조회가 별개 syscall 이라 원자적으로
+///      고칠 수단이 없다(창은 마이크로초 단위).
+///   2. **같은 눈금(`==`)** — 위에서 통과시킨 그것.
+///   3. **명시 부모 지정** — Windows 는 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` 로 부모를 박아 프로세스를
+///      만들 수 있다. 그렇게 태어난 남은 뿌리보다 **뒤**에 태어나고도 뿌리의 PID 를 ppid 로 달 수 있어
+///      이 비교를 지난다.
+/// - 시작시각을 못 읽는 항목은 **빼고, 그 아래로 내려가지도 않는다** — 신원의 절반이 없으면 대조가 PID
+///   단독으로 내려앉고, 그 항목을 부모로 쓰면 위 순서 규칙을 적용할 기준이 없어 그 가지 전체가 무검증이 된다.
+/// - `root_start_time` 이 0(미상)이면 빈 목록이다. 같은 사유.
+/// - **best-effort**: 열거가 실패하면 그만큼 덜 돌려주고 오류는 올리지 않는다 — 짧은 목록은 「그 아래에는
+///   없다」의 확증이 아니다.
+/// - ★깊이 제한을 두지 않는다 — 대신 **이미 본 신원을 다시 안 내려간다**★. ppid 는 OS 가 즉시 갱신하지
+///   않아 순환처럼 보이는 모양이 나올 수 있고, 그때 방문 표시가 없으면 이 함수가 안 끝난다.
+///   ★표시의 키는 PID 가 아니라 **신원**이다★ — PID 로만 표시하면 재사용된 PID 가 「이미 봤다」로 건너뛰어,
+///   같은 번호를 쓰는 **다른** 프로세스가 통째로 안 보인다.
+pub fn subtree(root: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
+    if root == 0 || root_start_time == 0 {
+        return Vec::new();
+    }
+    if process_creation_time(root) != Some(root_start_time) {
+        return Vec::new();
+    }
+
+    walk(
+        ProcessIdentity {
+            pid: root,
+            start_time: root_start_time,
+        },
+        &|pid| {
+            child_pids(pid)
+                .into_iter()
+                .filter_map(|child| {
+                    process_creation_time(child).map(|start_time| ProcessIdentity {
+                        pid: child,
+                        start_time,
+                    })
+                })
+                .collect()
+        },
+    )
+}
+
+/// [`subtree`] 의 **규칙만** — OS 는 `children` 뒤에 있다(ADR-0012). 규칙 둘(부모보다 먼저 태어난 것은
+/// 버린다 · 이미 본 **신원**은 다시 안 내려간다)의 사유 정본은 [`subtree`] 의 doc 이고 여기 되풀어
+/// 적지 않는다.
+///
+/// `children` 은 **신원을 못 읽은 항목을 이미 걸러서** 준다 — 그 거르기가 이 규칙 밖인 것은, 신원 없는
+/// 항목에는 적용할 순서 기준 자체가 없기 때문이다.
+fn walk(
+    root: ProcessIdentity,
+    children: &dyn Fn(u32) -> Vec<ProcessIdentity>,
+) -> Vec<ProcessIdentity> {
+    let mut out = vec![root];
+    let mut visited = vec![root];
+    let mut frontier = vec![root];
+    while let Some(parent) = frontier.pop() {
+        for child in children(parent.pid) {
+            if child.start_time < parent.start_time {
+                continue;
+            }
+            if visited.contains(&child) {
+                continue;
+            }
+            visited.push(child);
+            frontier.push(child);
+            out.push(child);
+        }
+    }
+    out
+}
+
 // ── non-windows stub ─────────────────────────────────────────────────────────────
 
 #[cfg(not(windows))]
@@ -460,5 +562,163 @@ mod tests {
     fn win32_from_hresult_extracts_low_word() {
         assert_eq!(win32_from_hresult(0x8007_0057u32 as i32), 87); // INVALID_PARAMETER
         assert_eq!(win32_from_hresult(0x8007_0005u32 as i32), 5); // ACCESS_DENIED
+    }
+
+    // ── 뿌리 아래 신원 목록(subtree) ─────────────────────────────────────────────────
+
+    const ROOT: ProcessIdentity = ProcessIdentity {
+        pid: 4242,
+        start_time: 1_000,
+    };
+
+    fn id(pid: u32, start_time: u64) -> ProcessIdentity {
+        ProcessIdentity { pid, start_time }
+    }
+
+    /// 부모 PID → 그 아래 신원들. 표에 없으면 자식 없음.
+    fn table(rows: &[(u32, Vec<ProcessIdentity>)]) -> impl Fn(u32) -> Vec<ProcessIdentity> + '_ {
+        move |pid| {
+            rows.iter()
+                .find(|(parent, _)| *parent == pid)
+                .map(|(_, kids)| kids.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    // ── 순서 규칙(G1) ────────────────────────────────────────────────────────────
+
+    /// ★이 항목이 지키는 것 = 「남의 고아가 재사용된 PID 를 타고 나무에 들어오지 않는다」★.
+    /// 그 고아는 지금 그 PID 를 쥔 부모보다 **먼저** 떠 있었으므로 시작시각이 앞선다 — 그것이 유일한
+    /// 구분 표식이다.
+    #[test]
+    fn a_child_that_predates_its_parent_is_not_ours() {
+        let stranger = id(777, ROOT.start_time - 1);
+        let got = walk(ROOT, &table(&[(ROOT.pid, vec![stranger])]));
+        assert_eq!(
+            got,
+            vec![ROOT],
+            "부모보다 먼저 태어난 항목이 들어왔다: {got:?}"
+        );
+    }
+
+    /// 그 남 아래 매달린 것까지 통째로 안 들어온다 — 가지째 끊는다.
+    #[test]
+    fn nothing_under_a_predating_child_gets_in_either() {
+        let stranger = id(777, ROOT.start_time - 1);
+        let grandchild = id(778, ROOT.start_time + 5);
+        let got = walk(
+            ROOT,
+            &table(&[(ROOT.pid, vec![stranger]), (stranger.pid, vec![grandchild])]),
+        );
+        assert_eq!(got, vec![ROOT], "끊긴 가지 아래가 새 들어왔다: {got:?}");
+    }
+
+    /// 같은 눈금에 뜬 자식은 정상이다 — 막는 것은 **먼저** 태어난 것뿐이다.
+    #[test]
+    fn a_child_born_on_the_same_tick_is_ours() {
+        let twin = id(4816, ROOT.start_time);
+        let got = walk(ROOT, &table(&[(ROOT.pid, vec![twin])]));
+        assert_eq!(got, vec![ROOT, twin]);
+    }
+
+    #[test]
+    fn the_walk_reaches_grandchildren() {
+        let child = id(4816, ROOT.start_time + 1);
+        let grandchild = id(19_468, ROOT.start_time + 2);
+        let got = walk(
+            ROOT,
+            &table(&[(ROOT.pid, vec![child]), (child.pid, vec![grandchild])]),
+        );
+        assert_eq!(got, vec![ROOT, child, grandchild]);
+    }
+
+    // ── 방문 표시(G2) ────────────────────────────────────────────────────────────
+
+    /// ★표시가 PID 키면 재사용된 번호가 「이미 봤다」로 건너뛰어 **다른** 프로세스가 통째로 사라진다★.
+    #[test]
+    fn a_recycled_pid_is_a_different_process_not_a_repeat() {
+        let first = id(4816, ROOT.start_time + 1);
+        let recycled = id(4816, ROOT.start_time + 9);
+        let got = walk(
+            ROOT,
+            &table(&[(ROOT.pid, vec![first]), (first.pid, vec![recycled])]),
+        );
+        assert!(
+            got.contains(&recycled),
+            "같은 번호의 다른 프로세스가 표시에 먹혔다: {got:?}"
+        );
+    }
+
+    /// stale ppid 가 순환처럼 보여도 끝난다 — 같은 신원을 두 번 안 내려간다.
+    #[test]
+    fn a_cycle_shaped_table_terminates() {
+        let a = id(10, ROOT.start_time + 1);
+        let b = id(11, ROOT.start_time + 1);
+        let got = walk(
+            ROOT,
+            &table(&[(ROOT.pid, vec![a]), (a.pid, vec![b]), (b.pid, vec![a, b])]),
+        );
+        assert_eq!(got.len(), 3, "{got:?}");
+    }
+
+    #[test]
+    fn an_unknown_root_has_no_subtree() {
+        assert!(subtree(0, 1).is_empty());
+        assert!(
+            subtree(std::process::id(), 0).is_empty(),
+            "시작시각 미상이면 남는 것이 PID 단독 대조다"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_wrong_start_time_disowns_the_root() {
+        let me = std::process::id();
+        let start = process_creation_time(me).expect("자기 creation time 조회 가능");
+        assert!(
+            subtree(me, start.wrapping_add(1)).is_empty(),
+            "시작시각이 어긋난 PID 를 그 뿌리로 봤다"
+        );
+    }
+
+    /// 뿌리 자신뿐 아니라 **후손이 목록에 들어오는 것**을 실물 나무(`cmd.exe` → `ping`)로 잰다 — 손자가
+    /// 안 잡히면 뿌리 하나만 대조하는 것과 같아진다.
+    #[cfg(windows)]
+    #[test]
+    fn the_subtree_reaches_past_the_root() {
+        let mut child = std::process::Command::new("cmd.exe")
+            .args(["/c", "ping", "-n", "4", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cmd.exe 기동");
+        let root = child.id();
+        let start = process_creation_time(root).expect("자식 creation time 조회 가능");
+
+        // 손자(`ping`)가 뜰 때까지 짧게 기다린다 — cmd 가 먼저 뜨고 그다음에 띄운다.
+        let mut found = Vec::new();
+        for _ in 0..40 {
+            found = subtree(root, start);
+            if found.len() > 1 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert!(
+            found.iter().any(|p| p.pid == root),
+            "뿌리 자신이 목록에 없다: {found:?}"
+        );
+        assert!(
+            found.len() > 1,
+            "후손이 하나도 안 잡혔다 — 뿌리 PID 만 돌려준 셈이다: {found:?}"
+        );
+        assert!(
+            found.iter().all(|p| p.start_time != 0),
+            "신원의 절반이 빈 항목이 섞였다: {found:?}"
+        );
     }
 }

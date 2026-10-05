@@ -7,9 +7,10 @@
 //! 이 불변식의 기계 게이트는 TRD 1-3 U8 에서 선다 — 그 전까지는 리뷰가 지키고, 다른 crate 에 남은 운영
 //! OS 분기는 이전 대상이다. 시한부 예외는 하나 — `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15).
 //!
-//! 지금 입주자는 셋이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
-//! 자식 PID 열거) · [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) · [`env`](홈 디렉터리 · 실행 파일
-//! 이름 · 환경변수 이름 비교). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
+//! 지금 입주자는 넷이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 자식 PID 열거 · 한 뿌리 아래 신원 목록) · [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
+//! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) · [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수
+//! 이름 비교). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
 //!
 //! ## 들이는 규칙
 //!
@@ -36,8 +37,7 @@
 //!   ①이 그 벽이다 — 컴파일러는 잎 성질을 강제하지 않는다.
 //! - **운영 의존의 서드파티는 `windows`(Windows 대상만)와 `tracing` facade 만 들인다**(TRD 1-3 §0 ①) —
 //!   시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩 feature 의 합집합을 켜고, 기능별 cargo
-//!   feature 로 쪼개지 않는다(ADR-0275 결정 13). 지금 든 것은 `windows` 하나다 — `tracing` 은 그것으로
-//!   찍을 `Drop` 경로가 아직 여기 없어 들이지 않았다(규칙 4).
+//!   feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 `Drop` 경로가 찍는 데만 쓴다.
 //! - ★**async 런타임(`tokio` 등)을 들이지 않는다**★ — 동기 crate 도 OS 층을 부른다. discovery 는 async
 //!   런타임 반입을 CI 게이트(「discovery has no async-runtime ingress」)로 막고 있어, 이 crate 를 부르는
 //!   순간 여기 든 런타임이 그 게이트를 빨갛게 만든다.
@@ -72,5 +72,6 @@
 // ADR-0266
 // ADR-0275
 pub mod env;
+pub mod file_holders;
 pub mod process;
 pub mod shell;

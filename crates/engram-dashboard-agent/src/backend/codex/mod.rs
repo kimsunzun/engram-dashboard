@@ -3773,14 +3773,14 @@ mod terminal_capture_wiring {
     /// ★파일 존재(`exists()`)로 재지 말 것 — 그러면 시험이 **헛되이 초록**이 된다★: 도우미가
     ///   파일을 만들고 곧바로 끝나 버려도 파일은 남으므로, 「홀더가 서 있다」를 한 번도 세우지
     ///   않은 채 「회수가 안 돌았다」가 통과한다. 죽은 락과 산 락은 홀더 조회로만 갈린다(그 갈림은
-    ///   `platform::file_holders` 의 시험이 실물로 잰다).
+    ///   platform crate `file_holders` 의 시험이 실물로 잰다).
     /// ★재는 수단이 시험 대상과 겹치는 것은 의도다★ — 여기서 쓰는 것은 홀더 조회 **하나**뿐이고,
     ///   판정(누가 우리 것인가 · 이름이 id 인가 · 어디에 적나)은 전부 안 쓴다. 그래서 이 전제가
     ///   서더라도 본 단언은 여전히 독립적으로 깨질 수 있다.
     fn wait_for_live_holder(lock_path: &std::path::Path) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
-            let held = crate::platform::file_holders::holders_of(lock_path)
+            let held = engram_dashboard_platform::file_holders::holders_of(lock_path)
                 .map(|holders| !holders.is_empty())
                 .unwrap_or(false);
             if held {

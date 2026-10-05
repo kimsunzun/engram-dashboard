@@ -1,13 +1,14 @@
 //! 「이 파일을 지금 어느 프로세스가 열고 있나」를 OS 에 묻는다.
 //!
-//! ★무엇을 찾으려고 묻는지는 이 파일이 모른다(ADR-0004)★ — 받는 것은 경로 하나이고 돌려주는 것은
-//! 홀더 목록뿐이다. 도메인 지식이 0 이라 여기 있고, 소비자가 하나뿐이라 바닥 crate 로는 안 내려간다
-//! (ADR-0175 입주 조건 ① · ADR-0218 결정 11).
+//! ★무엇을 찾으려고 묻는지는 이 파일이 모른다(ADR-0266 결정 3)★ — 받는 것은 경로 하나이고 돌려주는 것은
+//! 홀더 목록뿐이다.
 //!
 //! 묻는 수단은 **Windows Restart Manager** 이고 다른 OS 에는 이 질문을 할 수단을 두지 않았다 —
 //! 거기서는 항상 빈 목록이라 이 위에 선 판정은 오검출 대신 「못 받음」에 머문다(ADR-0218 결정 10).
 //!
 //! 진입점 = [`holders_of`]. 실패는 값으로 돌려준다(panic 없음).
+
+// ADR-0266
 
 use std::io;
 use std::path::Path;
@@ -25,17 +26,18 @@ use windows::Win32::System::RestartManager::{
 /// 한 파일을 열고 있는 프로세스 하나.
 ///
 /// ★두 칸은 **함께** 대조하라고 있다★ — PID 는 OS 가 재사용하므로 PID 단독 일치는 남의 프로세스를
-/// 우리 것으로 본다(ADR-0218 결정 2).
+/// 그 프로세스로 본다(ADR-0218 결정 2).
+/// 모양이 같은 [`crate::process::ProcessIdentity`] 는 「한 뿌리 아래의 프로세스」라 뜻이 다르다 — 합치지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Holder {
-    pub(crate) pid: u32,
+pub struct Holder {
+    pub pid: u32,
     /// 프로세스 생성 FILETIME(1601-01-01 UTC 부터 100나노초 간격 수)의 high/low 32비트를 합친 값 —
-    /// 같은 PID 에 대해 [`engram_dashboard_platform::process::process_creation_time`] 이 돌려주는 값과
-    /// 같다(ADR-0218 「근거」의 실측이고, 이 파일의 테스트가 그 동일성을 잰다).
+    /// 같은 PID 에 대해 [`crate::process::process_creation_time`] 이 돌려주는 값과 같다(ADR-0218 「근거」의
+    /// 실측이고, 이 파일의 테스트가 그 동일성을 잰다).
     ///
     /// Restart Manager 가 이 칸을 못 채워 0 을 주는 항목이 있는지는 미검이다 — 그런 항목은 대조에서
     /// 그냥 떨어진다(대조 상대의 시작시각은 0 이 아니므로).
-    pub(crate) start_time: u64,
+    pub start_time: u64,
 }
 
 /// `path` 를 열고 있는 프로세스 전부.
@@ -48,7 +50,7 @@ pub(crate) struct Holder {
 /// - ★전체 경로로 준다★ — 실측·문서가 다룬 것이 전체 경로뿐이고, 상대 경로를 Restart Manager 가 무엇에
 ///   상대로 푸는지는 미검이다. 어긋나면 증상은 오류가 아니라 「홀더 0」이다.
 #[cfg(windows)]
-pub(crate) fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
+pub fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
     use std::os::windows::ffi::OsStrExt;
 
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
@@ -100,7 +102,7 @@ pub(crate) fn holders_of(path: &Path) -> io::Result<Vec<Holder>> {
 /// non-windows: 물을 수단이 없어 **항상 빈 목록**이다 — 「아무도 안 쥐고 있다」와 같은 모양으로
 /// 내려간다(ADR-0218 결정 10).
 #[cfg(not(windows))]
-pub(crate) fn holders_of(_path: &Path) -> io::Result<Vec<Holder>> {
+pub fn holders_of(_path: &Path) -> io::Result<Vec<Holder>> {
     Ok(Vec::new())
 }
 
@@ -132,9 +134,9 @@ impl RmSession {
 
 #[cfg(windows)]
 impl Drop for RmSession {
-    /// ★실패를 삼키지 않는다 — 닫히지 않은 세션은 폴링을 거듭할수록 쌓인다★. `Drop` 이라
-    /// 돌려보낼 곳이 없으므로 남기는 것은 로그뿐이고, 그 로그가 「회수가 조용히 무거워지고
-    /// 있다」를 볼 수 있는 유일한 자리다.
+    /// ★실패를 삼키지 않는다 — 닫히지 않은 세션은 [`holders_of`] 를 부를 때마다 하나씩 남는다★(되풀어
+    /// 부르는 호출자일수록 많이 쌓인다). `Drop` 이라 돌려보낼 곳이 없으므로 남기는 것은 로그뿐이고, 그
+    /// 로그가 세션이 새고 있다는 것을 볼 수 있는 유일한 자리다.
     fn drop(&mut self) {
         // SAFETY: start() 가 성공으로 돌려준 핸들을 한 번만 닫는다.
         let rc = unsafe { RmEndSession(self.handle) };
@@ -168,7 +170,7 @@ mod tests {
     use super::*;
 
     /// 자기 자신이 연 파일을 물어, PID 와 시작시각이 **둘 다** 우리 것으로 오는지 잰다. 시작시각의
-    /// 기준값은 OS 층 crate(platform)의 헬퍼에서 받는다 — 두 경로가 같은 시계를 읽는다는 것이 ADR-0218 결정 2 의
+    /// 기준값은 같은 crate 의 `process` 헬퍼에서 받는다 — 두 경로가 같은 시계를 읽는다는 것이 ADR-0218 결정 2 의
     /// 전제이고, 여기가 그 전제를 지키는 자리다.
     #[cfg(windows)]
     #[test]
@@ -187,8 +189,8 @@ mod tests {
             .iter()
             .find(|h| h.pid == me)
             .unwrap_or_else(|| panic!("자기 PID({me}) 가 홀더로 나와야 — 받은 목록 {holders:?}"));
-        let expected = engram_dashboard_platform::process::process_creation_time(me)
-            .expect("자기 creation time 조회 가능");
+        let expected =
+            crate::process::process_creation_time(me).expect("자기 creation time 조회 가능");
         assert_eq!(
             mine.start_time, expected,
             "RM 의 ProcessStartTime 과 GetProcessTimes 의 creation time 이 같아야"

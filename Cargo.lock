@@ -1129,6 +1129,8 @@ dependencies = [
 name = "engram-dashboard-platform"
 version = "0.1.0"
 dependencies = [
+ "tracing",
+ "uuid",
  "windows 0.58.0",
 ]
 

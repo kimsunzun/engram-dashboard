@@ -7,9 +7,16 @@ description = "Engram Dashboard OS 층 — OS 에 따라 달라지는 운영 코
 # ★워크스페이스 crate 를 여기 적지 않는다 — base 도 아니다★(ADR-0266 「거부한 대안」 둘째 · ADR-0268).
 #   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).
 [dependencies]
+# 돌려줄 곳이 없는 실패(`Drop`)만 직접 찍는다(ADR-0266 결정 9 · ADR-0268) — 예: `file_holders` 의 Restart
+#   Manager 세션 닫기. facade 뿐이라 base 를 끌지 않는다.
+tracing = "0.1"
 
-# Foundation = CloseHandle·FILETIME · Threading = OpenProcess/GetProcessTimes/GetExitCodeProcess ·
-#   ToolHelp = process_parent_table 의 프로세스 표(child_pids 가 그 위에 선다) — 셋 다 `process` 몫.
+# Foundation = `process`(CloseHandle·FILETIME)와 `file_holders`(Win32 오류 코드)가 함께 쓴다 · Threading =
+#   OpenProcess/GetProcessTimes/GetExitCodeProcess · ToolHelp = process_parent_table 의 프로세스 표(child_pids 가
+#   그 위에 선다) — 이 둘은 `process` 몫.
+# `Win32_System_RestartManager` = `file_holders` 몫 — 「이 파일을 누가 열고 있나」를 묻는
+#   `RmStartSession`/`RmRegisterResources`/`RmGetList`/`RmEndSession` 넷이 그 feature 뒤에 있다.
+#   codex 세션 id 회수가 그 답 위에 선다(ADR-0218 결정 1).
 # ★기능별 cargo feature 로 쪼개지 않는다★ — 이 의존 하나에 쓰는 바인딩 feature 의 합집합을 켠다(ADR-0275
 #   결정 13). 모듈을 옮겨 올 때 그 모듈이 쓰는 feature 를 여기 더한다.
 [target.'cfg(windows)'.dependencies]
@@ -17,4 +24,9 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_RestartManager",
 ] }
+
+# `file_holders` 시험이 임시 파일 이름을 겹치지 않게 뽑는다 — 운영 그래프에는 안 든다.
+[dev-dependencies]
+uuid = { version = "1.8", features = ["v4"] }

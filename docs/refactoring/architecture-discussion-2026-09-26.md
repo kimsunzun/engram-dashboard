@@ -326,6 +326,7 @@
 | 메시징 이름 게이트 정규식에 `net` · `transport` 가 없다 — 「새 워크스페이스 crate 가 생기면 더한다」가 그 둘 때 지켜지지 않았다(messaging 소스에 두 이름 0건 — 더해도 초록 · 실측 2026-10-05) | `.github/workflows/ci.yml` 메시징 이름 게이트 · CLAUDE.md · `.claude/skill-bindings/qa.md` · `docs/testing-strategy.md:64` · `docs/reference/architecture-overview.md:492` | 다음에 그 게이트를 손볼 때(사본 다섯을 한 번에) |
 | `.claude/skill-bindings/qa.md` 에 transport 격리 게이트가 하나도 없다 — CI 만 잰다(그 파일 머리말 「CI에 있는데 여기 없는 게이트를 발견하면 그건 드리프트다 — 이 파일을 채운다」와 어긋난다) | `.claude/skill-bindings/qa.md` · `crates/engram-dashboard-transport/src/lib.rs` 「격리 게이트」 | 3단계(transport) 전 |
 | 운영 코드에 OS 를 가리지 않고 늘 대소문자를 접는 환경변수 이름 비교가 둘 있다 — codex 락 폴더의 `CODEX_HOME` 찾기 · claude 스폰의 `MAX_THINKING_TOKENS` 찾기. platform `env::env_key_eq` 와 같은 OS 규칙(환경변수 이름의 대소문자)인데 POSIX 에서의 뜻이 다르다(그 함수는 POSIX 에서 정확히 같아야 같다). `cfg` 가 없어 TRD 1-3 §2 의 `cfg` 정규식에도 계획된 §4-4 `cfg` 게이트에도 안 걸린다. `transport/pty.rs` 의 `TERM` · `COLORTERM` 기본값 찾기는 모든 OS 에서 접는 것이 의도라(그 자리 주석 — ADR-0049) 뺀다 · 출처 = 1-3 U2 리뷰(2026-10-05) | `crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs`(`child_lock_dir`) · `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(`build_spec` 의 `MAX_THINKING_TOKENS_KEY`) | 1-3 U8 재고(OS 분기 명단) 후보 |
+| platform `process::child_pids` 의 doc 「★왜 필요한가★」가 쓰임을 실프로세스 격리 시험 하나로만 정당화한다 — 운영 코드(`process::subtree` — codex 세션 id 회수)도 그것을 부른다. 그 문단을 운영 쓰임까지 담게 고쳐 쓴다 · 출처 = 1-3 U4 리뷰(2026-10-06) | `crates/engram-dashboard-platform/src/process.rs`(`child_pids`) | 다음에 그 함수를 지날 때 |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)
