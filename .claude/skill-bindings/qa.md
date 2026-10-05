@@ -202,12 +202,23 @@ node scripts/cdp.mjs info                   # 페이지 목록 확인
 node scripts/cdp.mjs eval "<js>"            # 앱 안 JS·실제 invoke 호출 (spawn/write/interrupt/kill 등 IPC 검증)
 node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로 확인
 ```
+- ★**기동 뒤 · 실측 전 — 복원 모달이 떠 있는지 먼저 본다(TRD S21-storage P3c2 · F15 대가)**★ — 이 게이트의 teardown 은 강제 종료(아래 `taskkill /F`)라, 같은 데이터 폴더로 다시 띄우면 그 기동은 비정상 종료 뒤로 읽혀 main 이 「복원할까요?」 모달로 막힌다. 개발 빌드도 예외 없이 늘 묻는다(사용자 결정 2026-10-02 · TRD `docs/process/S21-storage/trd.md` §10 F15). 그래서 위 2) 뒤 3) 앞에 상태를 당긴다:
+  ```bash
+  node scripts/cdp.mjs eval "window.__TAURI__.core.invoke('restore_status')"                       # crash_copy 가 'awaiting' 인가
+  node scripts/cdp.mjs eval "window.__TAURI__.core.invoke('restore_answer', { accept: true })"    # QA 가 띄운 스크래치 데이터 폴더 · awaiting · 복원 동작을 재는 게 아닐 때만
+  ```
+  - `crash_copy == 'awaiting'` 이면 **데이터 폴더로 가른다:**
+    - **QA 가 띄운 스크래치 데이터 폴더**(아래 「실 에이전트를 띄우는 실측은 데이터 폴더를 갈라 격리한다」의 `ENGRAM_DATA_DIR`)이고 **이번 QA 가 복원 동작 자체를 재는 것이 아니면** 수락으로 답한 뒤 진행한다 — 실측은 기본 화면이 아니라 크래시 전 화면(창 · 탭 · 팝아웃)이 복원된 채 시작한다. 복원 동작을 재는 QA 면 답을 건너뛴다. 수락인 까닭 = 답하는 순간 파괴하지 않는다(크래시 화면을 되살린다) · 거절은 저장된 화면을 그 자리에서 되돌릴 수 없게 지운다.
+    - ★**QA 가 띄운 스크래치 폴더가 아니면(워크트리의 기본 개발 데이터 폴더 `.engram-dev` 포함 — 어느 폴더든) 답하지 않는다 — 멈추고 주인에게 묻는다**★ — 거기 사본은 사용자의 크래시 화면일 수 있고, 어느 쪽으로 답할지는 주인이 정한다(시키지 않았으면 묻고 답한다 — 답 정책 · 사용자 결정 2026-10-05 · TRD §6-7 모달 항목). 그래서 다시 띄워 가며 재는 GUI 게이트는 처음부터 스크래치 데이터 폴더(데몬 먼저)로 띄워야 묻지 않고 끝까지 돈다.
+  - ★**`restore_answer` 가 거절(reject)되면 종류를 가르지 않는다**★ — Tauri 쪽은 맨 문자열로 거절한다(버스의 `INTERNAL` 같은 코드가 없다 · `src-tauri/src/commands/state.rs`). `restore_status` 를 다시 당긴다: 여전히 `awaiting` 이면 잠시 뒤 다시 답한다(셸이 아직 뜨는 중이거나 커밋이 실패했다 — 둘 다 `awaiting` 그대로 · TRD §6-7 「오류」) · `answered` 면 다른 답(버스 등)이 이겼다.
+  - ★**teardown 을 `quit_app`(트레이 「완전 종료」)으로 바꾸는 갈래는 고르지 않았다**★ — 그 함수는 끝내기 전에 discovery `send_stop` 으로 **데몬까지 멈춘다**(`src-tauri/src/tray/actions.rs` 의 `quit_app`). 아래 「데몬은 위 `/T`에 안 걸린다」의 규칙(실측 시작 전부터 떠 있던 데몬 = 불가침)과 부딪힌다. 그래서 teardown 은 강제 종료 그대로이고 그 대가를 이 단계가 치른다.
 - **★띄우는 exe 경로도 하드코딩하지 말 것★** — `target/debug`는 기본값일 뿐이라 `CARGO_TARGET_DIR`·`.cargo/config.toml`의 `build.target-dir`이 산출물을 딴 데로 돌린다. 그러면 옛 경로에 **남아 있는 낡은 exe**가 존재 검사를 통과해 그걸 띄우고, 이번 변경이 안 담긴 바이너리로 실측하고도 통과로 오판한다. 0)이 `cargo metadata`로 실측한 경로를 `$CLIENT_EXE`로 물려주므로 그대로 쓴다(`\$env:` 이스케이프는 Git Bash가 `$env`를 자기 변수로 먹는 것을 막는 것 — 값은 PowerShell이 환경에서 직접 읽으므로 경로에 작은따옴표가 있어도 안전하다).
 - **★클라이언트 셸을 생 `cargo build -p engram-dashboard`로 짓지 말 것(ADR-0137)★** — 그 명령은 Tauri CLI를 지나지 않아 dev 오버레이(`src-tauri/tauri.dev.conf.json`)가 안 먹고 **release identifier가 찍힌다.** `TAURI_CONFIG`는 `cargo:rerun-if-env-changed`라 *변수를 빼는 것만으로도 재빌드가 돌아* 멀쩡하던 exe를 되돌려 놓는다(실측). 그러면 릴리즈 앱이 떠 있는 동안 실측 대상이 **창도 없이 즉시 죽어** 게이트가 앱 결함으로 오판한다. `scripts/build-client-shell.mjs`가 주입과 산출물 대조를 함께 하며 **런처·이 게이트가 같은 구현을 쓴다**(위 "런처를 쓰지 말 것"은 그대로 유효 — 저건 dev 서버 자식 때문이고, 이 스크립트는 앱을 띄우지 않는다).
 - **★1420을 남이 잡고 있으면 디버그 경로를 쓰지 않는다 — 릴리스로 간다★(실측 2026-08-17):** 디버그 빌드는 화면을 품지 않고 1420에서 받아오는데 그 포트는 **먼저 잡은 워크트리 것**이다. 남의 vite를 재사용하면 **남의 화면을 측정하고 통과로 오판한다** — 앱은 정상으로 보이므로 눈치챌 단서가 없다. 위 0)의 명령줄 출력에 **지금 워크트리 경로가 아닌 다른 경로**가 보이면(예: `...engram-dashboard-wt2\...\vite.js`) 그 vite를 쓰지 말고, 사용자에게 그 프로세스를 알리고 릴리스 경로로 전환한다(릴리스 exe는 화면을 품어 포트가 필요 없다). **남의 vite를 죽이지 않는다** — 그 워크트리에서 다른 작업이 돌고 있을 수 있다.
 - **★릴리스로 갈 땐 순수 `cargo build --release`가 아니다★(실측 2026-08-18):** 그렇게 만든 exe는 여전히 `localhost:1420`을 로드해 **같은 함정에 그대로 빠진다.** 화면을 품은 exe는 `npm run tauri build -- --no-bundle`이 만든다(근거·경고 = `scripts/build-release.ps1` 헤더). 띄운 뒤 앱 안에서 URL을 확인해 `http://tauri.localhost/`인지 본다 — `localhost:1420`이면 잘못된 빌드를 측정하는 것이다.
 - **★`-Command`를 `-File`로 바꾸지 말 것★** — `-File`은 뒤 인자를 전부 문자열 리터럴로 넘겨 `'A=B','C=D'`가 **한 값 `A=B,C=D`로 뭉개진다.** 그러면 포트 인자가 오염돼 **9223이 안 열리는데 스크립트는 PID를 정상 반환**한다 — 게이트가 조용히 죽는 경로다(실측 2026-08-17). 경로에 `\`를 쓰는 것도 금지 — Git Bash가 먹어서 `exe not found`가 난다. 슬래시로 쓴다.
 - **★환경변수는 상속되지 않는다★** — 새 프로세스를 WMI(`Win32_Process.Create`)가 만들어서 호출자 환경을 물려받지 않는다 — 현재 셸의 `$env:...`가 안 넘어간다(`-EnvVars` 가 앱에 닿는 길은 래퍼 `.bat` 의 `set` 줄뿐이다 — `scripts/launch-detached.ps1` 의 래퍼 주석). 디버그 포트·`RUST_LOG`는 반드시 `-EnvVars`로 넘긴다. 빠뜨리면 포트가 안 열려 "왜 9223이 안 뜨지"로 헤맨다.
+- ★**`launch-detached.ps1` 은 exe 인자를 넘기지 못한다(`--hidden` 등)**★ — 래퍼 `.bat` 의 앱 줄이 exe 경로와 출력 돌리기뿐이라(그 스크립트의 `$appLine`) 인자 칸이 없다. P3c2 QA 의 `--hidden` 기동(TRD S21-storage §9-2 P3c2 행 G5)은 스크래치에 둔 그 스크립트의 사본으로 넘겼다 — 알려진 갭이고 스크립트는 아직 고치지 않았다.
 - ★**실 에이전트를 띄우는 실측은 데이터 폴더를 갈라 격리한다 — 데몬을 앱보다 먼저 띄운다**★(이전 세션 실측 2026-09-28~29). 워크트리의 디버그 기본 데이터 폴더의 명부(`.engram-dev/daemon/state/agents.json`)에는 실 cwd 를 가진 `autoRestore:true` 프로필이 있을 수 있고, 앱이 WMI 로 띄우는 데몬은 `ENGRAM_DATA_DIR` 를 상속하지 않는다(코드 파생 — `crates/engram-dashboard-discovery/src/lib.rs` 머리의 override 주석). 그래서:
   1. 클라이언트 셸과 데몬을 둘 다 분리 실행으로 짓는다(데몬 빌드는 위 0) 의 「조건부」 경고 그대로) — `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Command "node scripts/build-client-shell.mjs" -WorkDir "<워크스페이스 루트>" -LogFile "<로그경로>.log"` · 같은 꼴로 `-Command "cargo build -p engram-dashboard-daemon"`(`-Command` · `-WorkDir` · `-LogFile` 셋 다 필수 — 위 「분리 실행」). ★이 경로에서는 `$CLIENT_EXE` 를 로그에서 잡는다★ — 앞 로그의 `__EXIT=0` 바로 앞 줄이 exe 절대 경로다(그 스크립트는 성공하면 stdout 에 경로 한 줄만 쓰고 진행·에러는 stderr, 래퍼가 그 뒤에 마커를 붙인다 — 코드 파생 · `scripts/build-client-shell.mjs` 머리 · `scripts/run-detached.ps1`). 그 줄로 `export CLIENT_EXE=…` 한다.
   2. **데몬을 먼저** 띄운다 — `powershell -NoProfile -Command "& './scripts/launch-detached.ps1' -Exe '<$CLIENT_EXE 와 같은 폴더의 engram-dashboard-daemon.exe>' -EnvVars 'ENGRAM_DATA_DIR=<scratch>/data','RUST_LOG=info'"` (위 bash 블록의 기동 줄 1) 과 같은 `-Command` 꼴 — `-File` 이면 `-EnvVars` 가 한 값으로 뭉개진다 · 위 불릿).
@@ -232,7 +243,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 
 #### 실측 조리법 — 위 3)에서 무엇을 어떤 채널로 관측하나
 
-> 위 「스샷보다 `eval` 텍스트」 불릿의 **실행 세부**다(그 판정을 되풀이하지 않는다). 아래 A–D 네 갈래를 워커마다 다시 알아냈다 — 2026-08-21 한 세션에서 둘이 **독립적으로** 같은 것을 발굴했고 한쪽은 그 발굴을 "이번에 가장 비쌌던 작업"(도구 호출 84회)으로 지목했다.
+> 위 「스샷보다 `eval` 텍스트」 불릿의 **실행 세부**다(그 판정을 되풀이하지 않는다). 아래 갈래들을 워커마다 다시 알아냈다 — 2026-08-21 한 세션에서 둘이 **독립적으로** 같은 것을 발굴했고 한쪽은 그 발굴을 "이번에 가장 비쌌던 작업"(도구 호출 84회)으로 지목했다.
 > ★**검증 표시가 항목마다 붙어 있다 — 이 절을 쓴 세션은 앱을 띄우지 않았다.**★ `코드 파생`(파일:줄이 근거) · `이전 세션 실측`(날짜) · `미검증`(아무도 돌려 본 기록이 없다) 셋으로 갈린다. 미검증 항목이 틀리면 그 자리를 고치고 표시를 올릴 것.
 
 **A. cdp.mjs가 하는 일은 셋뿐이고, 영역 지정 캡처는 없다** (코드 파생)
@@ -290,6 +301,19 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - **신뢰 입력이 필요한 곳은 CDP `Input.*` 로 넣는다.** 휠·기본 스크롤은 브라우저 기본 동작이라 신뢰 입력이어야 일어난다 — 신뢰되지 않은 이벤트는 기본 동작을 일으키지 않는다(웹 플랫폼 규칙) · 페이지 안에서 만든 합성 휠 이벤트로는 뷰포트가 움직이지 않았다(이전 세션 관찰). ★키는 미검증 — 이전 세션 관찰, 조건 불명★: 합성 키 이벤트도 안 들었다고 적혔지만 Esc 끊기 경로(`RichSlot` 의 `onKeyDownCapture` → `slot/interruptKey.ts` 의 `isInterruptEscape`)는 `isTrusted` 를 보지 않는다(코드 파생) — 규칙으로 읽지 말 것. `cdp.mjs` 는 `Input.*` 를 노출하지 않으므로(위 A) 드라이버를 따로 짠다 — 지난 실측의 드라이버는 세션 스크래치에 있었고 커밋되지 않았다.
 - **claude — 보낸 직후(약 0.5 초 안)에는 끊지 않는다**(여유는 경험칙이다). 보낸 지 약 0.2 초에 끊은 한 번이 300 초 뒤에야 멈췄다 — 사용자 전역 `UserPromptSubmit` 훅이 취소된 뒤에도 끝까지 돌았다(1회 관측). 대시보드의 claude 는 사용자 `~/.claude` 훅을 물려받는다.
 - **codex — 승인 거절 시험의 쓰기 대상은 `%TEMP%` 밖에 둔다.** workspace-write 샌드박스의 codex 는 `%TEMP%` 에 승인 없이 쓴다 — 거기를 겨누면 거절할 승인 요청이 서지 않는다.
+
+**F. 버스 명령을 `engram` CLI 로 부를 때 — 일회용 에이전트의 토큰을 빌린다** (이전 세션 실측 2026-10-06 — P3c2 QA G6 · 변수 · 경로는 코드 파생)
+- ★**`engram` CLI 는 engram 이 띄운 에이전트 안에서만 돈다**★ — `ENGRAM_TOKEN`(Bearer 토큰) · `ENGRAM_CONTROL_URL`(데몬 제어 base URL) 둘을 읽고 없으면 `NO_TOKEN` · `NO_CONTROL_URL` 로 끝난다(`crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `read_credentials`). 그 토큰은 데몬이 띄운 에이전트에게만 발급된다. 그래서 QA 가 버스 명령(예: `engram restore.answer --accept true`)을 재려면 에이전트 하나를 띄워 그 토큰을 빌린다:
+  1. 터미널 모드 claude 에이전트를 **프롬프트 없이** 띄운다 — 위 B 의 `createClaudeProfile('<name>','<격리 cwd>',[],[],false,'Terminal')` → `spawnProfile('<id>', false).then(a => a.epoch)`(답 `AgentInfo` 의 `epoch` 가 아래 파일 이름에 든다).
+  2. 그 화신의 파일 = `<데이터 폴더>/daemon/run/mcp-config/<id>-<epoch>.json` — ★`<id>-*.json` 으로 넓혀 집지 않는다★: 같은 폴더에 `<id>-<epoch>.settings.json` 도 생길 수 있다(`crates/engram-dashboard-daemon/src/control/mcp_config.rs`). 칸 = `mcpServers.engram.headers.Authorization`(`Bearer <token>`) · `mcpServers.engram.url`(`http://127.0.0.1:<port>/mcp`). `ENGRAM_CONTROL_URL` 은 그 url 에서 `/mcp` 를 뗀 base 다(에이전트 스폰이 넣는 값과 같은 규칙 — `crates/engram-dashboard-agent/src/backend/claude/mod.rs` 의 CLI 크레덴셜 주입 시험). ★토큰이 든 파일이다 — 값을 명령줄 · 보고서 · 로그에 옮기지 않는다★: 아래처럼 같은 명령 안에서 파일에서 읽는다.
+  3. CLI 를 부른다 — 바이너리는 데몬 패키지의 `[[bin]] engram` 이라 데몬 exe 와 같은 target 폴더에 `engram.exe` 로 있다. `F` 는 절대 경로(`I:/…` 꼴 — node 가 읽는다)로 준다(두 값을 뽑는 부분은 가짜 파일로만 확인했다 · 실 `engram.exe` 와 함께 돈 적은 없다 — 2026-10-06):
+     ```bash
+     F='<데이터 폴더>/daemon/run/mcp-config/<id>-<epoch>.json'
+     ENGRAM_TOKEN="$(node -e "process.stdout.write(require(process.argv[1]).mcpServers.engram.headers.Authorization.replace(/^Bearer /, ''))" "$F")" \
+     ENGRAM_CONTROL_URL="$(node -e "process.stdout.write(require(process.argv[1]).mcpServers.engram.url.replace(/\/mcp$/, ''))" "$F")" \
+       '<target 폴더>/engram.exe' restore.status
+     ```
+  4. 끝나면 그 에이전트를 끄고(`window.__engramCmd.run('agent.kill', { agentId: '<id>' })`) 프로필을 지운다(`window.__ENGRAM_AGENT__.deleteProfile('<id>')` — 위 B).
 
 ## 실패 보고 시 게이트 명칭 (골격 §3에 주입)
 
