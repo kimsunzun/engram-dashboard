@@ -411,7 +411,7 @@ describe('AppLayout — 상태 파일 알림', () => {
     expect(screen.getByRole('status').textContent).toContain('state.json.corrupt')
   })
 
-  // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(사용자 결정 2026-10-06).
+  // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(가드 ⅱ 안내 — ADR-0276).
   it.each([
     ['수락', () => acceptBtn()],
     ['거절', () => rejectBtn()],

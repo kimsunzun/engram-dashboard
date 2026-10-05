@@ -975,7 +975,7 @@ mod tests {
         session.shutdown();
     }
 
-    // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(사용자 결정 2026-10-06).
+    // 가드 ⅱ 는 `state_file` 이 `ok` 라 답한 뒤에 그 사실을 나르는 칸이 `saves` 하나다(가드 ⅱ 안내 — ADR-0276).
     #[test]
     fn a_run_that_could_not_write_the_crash_copy_still_says_so_after_the_answer() {
         let run_dir = temp_dir("run");

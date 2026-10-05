@@ -64,8 +64,8 @@ use crate::ui_settings::UiSettingsRefresh;
 //   `ui.refresh`(프론트에 대응 명령이 없다 — 화면에는 파일을 보는 명령 자체가 없다. 파일을 안 보고 테마만
 //   만지던 화면 명령 둘은 ADR-0167 이 내렸다) · `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri
 //   `set_split_ratio` 를 직접 부르고 레지스트리에 이름을 싣지 않는다 — ADR-0227).
-// ★세대 13 = `restore.status` 의 답에 `saves` 가 붙은 세대★(TRD S21-storage §6-5 — 사용자 결정 2026-10-06) — 이름은
-//   그대로고 답 모양이 바뀌었다.
+// ★세대 13 = `restore.status` 의 답에 `saves` 가 붙은 세대★(TRD S21-storage §6-5 — 가드 ⅱ 안내(ADR-0276)를 나르는
+//   칸이고 칸 자체는 구현 · 세션 판단) — 이름은 그대로고 답 모양이 바뀌었다.
 // ★세대 12 = `restore.status` 의 답에 `durable` · `state_file` 이 붙은 세대★(TRD S21-storage §6-5 · §6-7) — 이름은
 //   그대로고 답 모양이 바뀌었다.
 // ★세대 11 = 크래시 사본 명령 둘(`restore.status`·`restore.answer`)이 든 세대★(TRD S21-storage §6-7).

@@ -607,7 +607,7 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   이름이 넷 늘고(`settings.*`) `ui.refresh` 답의 `theme` 출처가 설정으로 바뀐 세대다(TRD S21-storage §5-4).
     //   세대 11 은 이름이 둘 는 세대다(`restore.*` — TRD S21-storage §6-7). 세대 12 는 `restore.status` 의
     //   **답 모양**이 바뀐 세대다(`state_file` — TRD S21-storage §6-5). 세대 13 도 그 답 모양이다(`saves` — 같은
-    //   절 · 사용자 결정 2026-10-06).
+    //   절 · 가드 ⅱ 안내(ADR-0276)를 나르는 칸 — 칸 자체는 구현 · 세션 판단).
     assert_eq!(CATALOG_VERSION, 13);
     assert_eq!(COMMAND_SPECS.len(), 25);
     assert_eq!(

@@ -42,6 +42,7 @@ export default function AppLayout({ restore = restoreClient }: Props) {
                 판단 — 쌓여도 배치의 2/3 는 보인다). 그림자는 그려진 줄의 모양을 따르는 `drop-shadow` 라 줄이 없으면 안 그린다.
               z 40 = 분할선 · 칸 막(z-20) 위 · 복원 모달(z-50) · 메뉴(1000 이상) 아래. */}
           <div
+            // ADR-0276: 상태 파일 알림은 레이아웃을 밀지 않고 덮는다(거부한 대안 = 미는 흐름 블록).
             data-testid="notice-overlay"
             className="drop-shadow-md"
             style={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 40 }}
