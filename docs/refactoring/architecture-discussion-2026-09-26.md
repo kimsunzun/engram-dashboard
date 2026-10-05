@@ -332,6 +332,10 @@
 | 통로 stdio · pty 는 띄운 뒤 무리에 넣다 실패하면(`GroupOwner::new()?` · `adopt(pid)?`) 띄운 자식이 무리 밖에 남는다 — codex 통로처럼 가드(`ChildGuard`)를 먼저 세우지 않는다(HEAD 부터 같다) · 출처 = 1-3 U3 리뷰(2026-10-06) | `crates/engram-dashboard-agent/src/transport/{stdio.rs, pty.rs}`(`open`) | 4단계(agent) 또는 다음에 그 통로를 지날 때 |
 | `docs/reference/architecture-map-notes.md:390` 의 「base 심볼 allowlist = 정확히 2」는 U1 부터 낡았다(지금 platform 심볼 · 5) — 날짜 박힌 스냅숏 문서 · 출처 = 1-3 U6 리뷰 | `docs/reference/architecture-map-notes.md` | 그 지도를 다시 뽑을 때 |
 | `.claude/skill-bindings/qa.md` 에 실 claude `#[ignore]` 시험을 로컬에서 돌리는 명령이 없다(CI `--skip` 목록을 정본으로 가리키기만) — QA 워커가 명령을 추정했다 · 출처 = 1-3 U3 QA(2026-10-06) | `.claude/skill-bindings/qa.md` | 1-3 U8 또는 다음에 바인딩을 손볼 때 |
+| platform `process::kill_tree` 가 `taskkill` 을 창 숨김 없이 띄운다 — GUI 셸이 데몬 끄기를 부르면 콘솔이 번쩍일 수 있다(U7 은 동작을 그대로 옮겼다 · 옆에 `spawn::hide_console_window` 가 있어 한 줄 거리지만 동작 변경이다) · 출처 = 1-3 U7 리뷰(2026-10-06) | `crates/engram-dashboard-platform/src/process.rs`(`kill_tree`) | 다음에 그 함수를 지날 때(사용자 체감 — 확인 후) |
+| 셸 주석이 「`taskkill /F`」라 적지만 실제 인자는 `/F /T` 다 · 출처 = 1-3 U7 코더 | `src-tauri/src/commands/discovery.rs:161` | 2-2(discovery 나누기) |
+| `docs/reference/architecture-map-notes.md:86` 이 WMI 띄우기 자리를 `discovery/src/lib.rs:932,1105-1153` 로 가리킨다 — 1-3 U7 로 그 코드는 platform `spawn/wmi.rs` 로 갔다(그 전에도 줄이 어긋나 있었다) · 출처 = 1-3 U7 리뷰 | `docs/reference/architecture-map-notes.md` | 그 지도를 다시 뽑을 때 |
+| discovery 의 실 WMI `#[ignore]` 시험 둘은 `cargo test -p engram-dashboard-discovery -- --ignored real_wmi` 로 돌리면 `ExeNotFound` 로 진다 — cargo 가 cwd 를 crate 폴더로 두는데 데몬 exe 찾기가 시험 exe 폴더 · cwd/target/debug 를 본다. 저장소 루트를 cwd 로 그 시험 바이너리를 직접 돌리면 통과한다(실측 2026-10-06 · rv 행렬 None 0 · NEW_CONSOLE 0 · DETACHED 0 · NO_WINDOW 21) · 출처 = 1-3 U7 QA | `crates/engram-dashboard-discovery/src/lib.rs`(`locate_daemon_exe` · 시험 `real_wmi_*`) · `.claude/skill-bindings/qa.md` | 2-2 또는 다음에 그 시험을 돌릴 때(실행법을 바인딩에 적거나 찾기 후보를 넓힌다) |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)
