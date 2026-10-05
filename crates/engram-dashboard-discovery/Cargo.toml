@@ -9,16 +9,17 @@ description = "데몬 발견(discovery) — daemon.json 으로 데몬을 찾고,
 thiserror = "1"   # DiscoveryError
 tracing = "0.1"   # M1 복구 warn 로그
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
-# liveness 판정(pid_alive_with_start_time) 공유 — net portfile 의 stale 판정과 동일 로직(DRY).
-#   ★ADR-0175 결정 1 로 이 자리가 `agent` 에서 바닥 crate 로 바뀌었다 — 그 한 함수 때문에 에이전트
-#   런타임 전체(portable-pty·Job Object)를 지던 것이 끝났다. 되돌리지 말 것.
-# 폴링 시계 `Clock` 의 상위 트레이트 `time::Clock`(지금 읽기)과 운영 구현 `time::SystemClock` 도 여기서 온다
-#   (ADR-0275 · ADR-0269 결정 3-2). ★liveness 판정이 base 밖으로 옮겨 가도 이 의존은 남는다★.
+# 폴링 시계 `Clock` 의 상위 트레이트 `time::Clock`(지금 읽기)과 운영 구현 `time::SystemClock`
+#   (ADR-0275 · ADR-0269 결정 3-2).
 engram-dashboard-base = { path = "../engram-dashboard-base" }
+# liveness 판정(`process::pid_alive_with_start_time`) 공유 — net portfile 의 stale 판정과 동일 로직(DRY).
+#   ★그 한 함수를 `agent` 에서 받지 말 것★ — 에이전트 런타임 전체(portable-pty·Job Object)를 지게 된다
+#   (ADR-0175 결정 1 이 끊은 간선 · 지금 자리 = OS 층 platform crate, ADR-0266).
+engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 # daemon.json 공유 계약(DaemonInfo) + PROTOCOL_VERSION.
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # 핸드셰이크 프레임(`auth::AuthFrame`) — send_stop 의 첫 프레임(ADR-0129 0-4). ★비순환★: 네트워크 lib 의
-#   워크스페이스-로컬 forward 폐포는 {net, base, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
+#   워크스페이스-로컬 forward 폐포는 {command, net, platform, protocol} 이라 이 crate 에 도달하지 않는다(레시피는 그
 #   crate 의 lib.rs 헤더). 슬라이스 1 전이었다면 인증 타입이 daemon 에 있어 daemon→discovery 와 고리를
 #   이뤘을 자리다 — 그래서 0-4 가 슬라이스 1 **뒤**로 밀렸다.
 #   ★feature 를 켜지 말 것(load-bearing)★: 여기서 필요한 것은 `auth::AuthFrame` 하나뿐이고, 그건 net 의

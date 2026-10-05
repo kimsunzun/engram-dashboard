@@ -4,7 +4,7 @@
 //! 신원 목록뿐이다. 도메인 지식이 0 이라 여기 있고, 소비자가 하나뿐이라 바닥 crate 로는 안 내려간다
 //! (ADR-0175 입주 조건 ① · `file_holders` 와 같은 자리·같은 사유).
 //!
-//! ★셈은 `engram_dashboard_base::platform` 의 두 primitive 를 **조립만** 한다★ — 자식 열거와 시작시각
+//! ★셈은 `engram_dashboard_platform::process` 의 두 primitive 를 **조립만** 한다★ — 자식 열거와 시작시각
 //! 조회를 여기서 다시 쓰지 않는다. 이 파일이 더하는 것은 「뿌리의 신원을 먼저 확인하고, 거기서부터
 //! 걸어 내려간다」는 규칙 하나다.
 //!
@@ -17,7 +17,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ProcessIdentity {
     pub(crate) pid: u32,
-    /// 프로세스 생성 FILETIME — `engram_dashboard_base::platform::process_creation_time` 이 돌려주는 값과
+    /// 프로세스 생성 FILETIME — `engram_dashboard_platform::process::process_creation_time` 이 돌려주는 값과
     /// 같은 척도다.
     pub(crate) start_time: u64,
 }
@@ -36,7 +36,7 @@ pub(crate) struct ProcessIdentity {
 ///   `child_pids(P)` 가 그 남을 우리 자식으로 돌려주고, 그 남은 자기 락의 홀더와 자기 신원이 당연히
 ///   맞으므로 **우리 codex 가 락을 만들기 전 0.7~21 초 동안 유일한 후보**가 된다 — `Ambiguous` 도 안 뜨고
 ///   남의 스레드를 우리 손잡이에 적는다(ADR-0218 「영향/불변식」이 이름 붙인 그 조용한 고장).
-///   ★`base` 의 `child_pids` 가 자기 doc 에서 이미 경고하는 것이 이것이다★ — 부모가 죽으면 ppid 가
+///   ★`platform` crate 의 `child_pids` 가 자기 doc 에서 이미 경고하는 것이 이것이다★ — 부모가 죽으면 ppid 가
 ///   stale 이라 「살아 있는 부모의 직계 자식」 용도로만 믿으라고 적혀 있다. 이 규칙이 그 단서를 강제한다.
 ///   ★같은 시각(`==`)은 통과시킨다★ — FILETIME 눈금 하나 안에서 뜬 부모·자식이 실재할 수 있고, 거기서
 ///   막으면 정상 자식을 잃는다. 막는 것은 **먼저 태어난** 것뿐이다.
@@ -68,7 +68,7 @@ pub(crate) struct ProcessIdentity {
 ///   ★표시의 키는 PID 가 아니라 **신원**이다★ — PID 로만 표시하면 재사용된 PID 가 「이미 봤다」로 건너뛰어,
 ///   같은 번호를 쓰는 **다른** 프로세스가 통째로 안 보인다.
 pub(crate) fn subtree(root: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
-    use engram_dashboard_base::platform::{child_pids, process_creation_time};
+    use engram_dashboard_platform::process::{child_pids, process_creation_time};
 
     if root == 0 || root_start_time == 0 {
         return Vec::new();
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn a_wrong_start_time_disowns_the_root() {
         let me = std::process::id();
-        let start = engram_dashboard_base::platform::process_creation_time(me)
+        let start = engram_dashboard_platform::process::process_creation_time(me)
             .expect("자기 creation time 조회 가능");
         assert!(
             subtree(me, start.wrapping_add(1)).is_empty(),
@@ -265,7 +265,7 @@ mod tests {
             .spawn()
             .expect("cmd.exe 기동");
         let root = child.id();
-        let start = engram_dashboard_base::platform::process_creation_time(root)
+        let start = engram_dashboard_platform::process::process_creation_time(root)
             .expect("자식 creation time 조회 가능");
 
         // 손자(`ping`)가 뜰 때까지 짧게 기다린다 — cmd 가 먼저 뜨고 그다음에 띄운다.

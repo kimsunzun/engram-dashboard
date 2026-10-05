@@ -1104,7 +1104,8 @@ impl AgentBackend for CodexBackend {
             //   (조건의 정본 = 그 doc) 이 자리가 하는 일은 자식의 신원 두 칸과 **우리 쪽** 기본
             //   락 폴더를 건네는 것뿐이다 — 자식이 다른 홈을 받았으면 그쪽이 이긴다.
             // ADR-0218
-            let child_start = pid.and_then(engram_dashboard_base::platform::process_creation_time);
+            let child_start =
+                pid.and_then(engram_dashboard_platform::process::process_creation_time);
             // ★게이트가 보는 사실 = 「이어받기 argv 가 실제로 나갔나」★ — 손잡이의 **존재**가
             //   아니다. 실을 수 없는 값이면 위 `build_spec` 이 새 대화 argv 를 냈고, 그 화신은
             //   회수 대상이다. 두 자리가 같은 술어([`resume_argument`])를 본다.

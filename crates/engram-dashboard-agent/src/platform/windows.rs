@@ -14,7 +14,7 @@
 //! 이 파일은 platform 전용이라 windows crate import는 허용되지만, tauri import는 0개여야 한다.
 //! ★`windows` crate 와 표준 라이브러리 말고는 쓰지 않는다★ — 결과 · 사실 · 알림 타입도 여기 두고 중립
 //! 손잡이(`process_group`)가 제 타입으로 옮겨 감싼다. 그래야 이 파일을 별도 플랫폼 모듈로 통째 옮길 수 있다(사용자
-//! 결정 2026-09-29). 시험만 바닥 crate(`engram_dashboard_base`)의 시작 시각 조회를 빌린다.
+//! 결정 2026-09-29). 시험만 OS 층 crate(`engram_dashboard_platform`)의 시작 시각 조회를 빌린다.
 
 use std::io;
 use std::sync::Arc;
@@ -717,7 +717,7 @@ pub(crate) mod tests {
     use std::process::{Child, Command, Stdio};
     use std::time::Instant;
 
-    use engram_dashboard_base::platform::{process_start, ProcessStart};
+    use engram_dashboard_platform::process::{process_start, ProcessStart};
 
     use super::*;
 

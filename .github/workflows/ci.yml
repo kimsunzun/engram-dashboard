@@ -268,17 +268,19 @@ jobs:
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
 
-      # ADR-0175 결정 1: 바닥 crate(`base` — 로깅 + PID 판정). 워크스페이스 crate 의존 0 이 존재 이유라
-      # 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 의 `platform` 스위트가 실 `cmd.exe` 를 띄우긴
-      #   하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그 플래그가 겨냥하는
-      #   조건이 러너에 없다). 로컬 명령에는 붙는다.
+      # ADR-0175 결정 1: 바닥 crate(`base` — 범용 도우미 · 로깅, ADR-0269). 워크스페이스 crate 의존 0 이 존재
+      # 이유라 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 엔 자식 프로세스를 띄우는 시험이 없다(실 `cmd.exe` 를
+      #   띄우던 PID 헬퍼 시험은 헬퍼와 함께 아래 `platform` 으로 나갔다 — ADR-0266). 로컬 명령에도 안 붙는다.
       - name: cargo test -p engram-dashboard-base
         shell: bash
         run: cargo test --locked -p engram-dashboard-base
 
       # ADR-0266: OS 층 crate(`platform`). 워크스페이스 crate 의존 0(base 도 아니다)이 불변식이라 이 crate 도
       #   위와 같은 단독 기립 축으로 확인한다 — 불변식 · 게이트의 정본은 그 crate lib.rs 헤더다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — `process` 의 시험(`child_pids_finds_spawned_child` 등)이 실
+      #   `cmd.exe` 를 띄우긴 하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그
+      #   플래그가 겨냥하는 조건이 러너에 없다). 로컬 명령에는 붙는다.
       - name: cargo test -p engram-dashboard-platform
         shell: bash
         run: cargo test --locked -p engram-dashboard-platform
@@ -614,14 +616,14 @@ jobs:
           echo "PASS"
 
       # ADR-0003 의 격리 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 다.
-      #   `base` 는 headless 데몬 · `net` · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
-      #   webview 도 없는 그 셋이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
+      #   `base` 는 headless 데몬 · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
+      #   webview 도 없는 그 둘이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
       # ★"잎 crate 라 안전하다" 로 이 스텝을 지우지 말 것★: 잎 성질은 **워크스페이스 crate** 축의 말이고,
       #   바로 위 상한 게이트도 `rg "^engram-dashboard"` 로 워크스페이스 멤버만 센다. 서드파티인 `tauri` 는
       #   그 게이트를 그대로 통과한다 — 두 게이트는 서로 다른 축이다.
-      # ADR-0175 결정 1 이 `logging`·`platform` 을 이리로 옮기면서 그 둘이 agent 게이트의 스캔 범위
-      #   (`crates/engram-dashboard-agent/src/`)를 벗어났다. 이 스텝이 없으면 그 두 모듈은 어느 게이트도
-      #   안 보는 상태가 된다 — `logging::init_logging_with_file` 이 "이벤트 하나만 쏘면 편한" 대표 자리다.
+      # base 입주자는 agent 게이트의 스캔 범위(`crates/engram-dashboard-agent/src/`) 밖에 산다(ADR-0175
+      #   결정 1). 이 스텝이 없으면 어느 게이트도 그 입주자를 안 본다 — `logging::init_logging_with_file` 이
+      #   "이벤트 하나만 쏘면 편한" 대표 자리다.
       - name: 'Gate: base crate isolation — no `use tauri` in the base crate'
         shell: bash
         run: |
@@ -648,7 +650,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|platform|text|time|path|sync|testing)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -867,17 +869,18 @@ jobs:
 
       # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
       # 매치 유무가 아니라 정확한 줄 수를 단언한다(넘어도 모자라도 실패).
-      # ★ADR-0175 결정 1 로 이 게이트가 **두 스텝**이 됐다★ — PID 헬퍼가 `agent` 에서 잎 crate `base` 로
-      #   이사했으므로 기대값 2 가 crate 이름을 갈아타고 옮겨 갔다. **총량은 그대로 2 다.**
+      # ★이 게이트는 **두 스텝**이다★ — 2a 는 net 이 쓰는 platform 심볼 둘(portfile 의 liveness 헬퍼)을
+      #   개수로 못 박고, 2b 는 그 헬퍼의 원래 자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시
+      #   채워지지 않는지 잰다.
       #   ★2b 를 「죽은 게이트」로 보고 지우지 말 것★: 그것만 떼면 net 이 에이전트 런타임을 다시 무는
-      #   회귀를 아무도 안 보게 된다. 0 기대가 홀로 서면 안 깨지는 벽이지만, 2a 의 2 기대와 **짝으로**
-      #   서면 "심볼이 사라진 게 아니라 옮겨 갔다" 를 단언하는 살아 있는 벽이다.
+      #   회귀를 아무도 안 보게 된다 — 2a 는 platform 심볼만 세므로 그 곁에 에이전트 어휘가 붙어도
+      #   통과한다. 0 기대가 홀로 서면 안 깨지는 벽이지만, 2a 와 **짝으로** 서면 살아 있는 벽이다.
       #   기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더의 게이트 2 절.
-      - name: 'net gate 2a: base symbol allowlist — exactly 2'
+      - name: 'net gate 2a: platform symbol allowlist — exactly 2'
         shell: bash
         run: |
           set +e
-          raw=$(rg -o --no-filename "engram_dashboard_base::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
+          raw=$(rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
           rc=$?
           set -e
           if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi

@@ -1,9 +1,8 @@
 //! # engram-dashboard-base — 바닥 기반층, 잎 crate (도메인 지식 0)
 //!
 //! 의존 그래프의 바닥 기반층이다 — 범용 도우미와 기반 인프라를 **목적 이름의 모듈**로 갈라 담는다
-//! (ADR-0269 결정 1 · 9). 지금 입주자는 일곱이다: [`logging`](tracing 전역 초기화 + 프로세스 실행 1회분
-//! 파일 로그) · [`platform`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 · 자식 PID
-//! 열거) · [`text`](바이트 → 소문자 hex) · [`time`](벽시계 epoch 밀리초 · 「지금 읽기」 시계 seam) ·
+//! (ADR-0269 결정 1 · 9). 지금 입주자는 여섯이다: [`logging`](tracing 전역 초기화 + 프로세스 실행 1회분
+//! 파일 로그) · [`text`](바이트 → 소문자 hex) · [`time`](벽시계 epoch 밀리초 · 「지금 읽기」 시계 seam) ·
 //! [`path`](사람이 친 경로의 철자 고르기) · [`sync`](락 오염 되찾기 — 경고 없이, 오염 표시 유지) ·
 //! `testing`(시험 대기 — 조건이 설 때까지 폴링). 각 모듈(헤더와 공개 함수 문서)이 그 책임의 정본이다.
 //!
@@ -20,6 +19,10 @@
 //!    워크스페이스 crate 를 하나도 의존하지 않는다(아래 게이트가 그 벽이다).
 //! 3. **이 crate 안에서 서로를 참조하지 않을 것.** 입주자끼리 엮이면 그건 한 덩어리이고, 한 덩어리를
 //!    바닥에 두면 그 덩어리 전체가 모든 소비자에게 딸려 간다 — 이 crate 를 만든 이유가 사라진다.
+//!
+//! ★OS 에 따라 달라지는 **운영** 코드는 셋을 다 채워도 여기가 아니다★ — OS 층 crate
+//! `engram-dashboard-platform` 몫이다(ADR-0266 결정 2 · 4). 그래서 이 crate 는 `windows` 를 의존하지
+//! 않는다. 시험의 OS 분기(`#[cfg(windows)]` 시험)는 이 규칙 밖이다(ADR-0266 「근거」).
 //!
 //! ★**목적별 작은 crate 로 쪼개지 않고 이름도 base 그대로 둔다**★(ADR-0269 결정 1) — 안에서 목적 이름의
 //! 모듈로 가른다. 바닥에 있고 서로 엮인 데가 적어 나중에 쪼개도 품이 적다는 판단이고, 그 「엮인 데가
@@ -40,12 +43,12 @@
 //! ★①이 이 축을 덮는다고 읽지 말 것★ — ①은 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 세므로
 //! 서드파티인 `tauri` 는 그대로 통과한다. 두 게이트는 겹치지 않는다.
 //! ★"잎 crate 라 안전하다" 도 아니다★ — ADR-0003 의 불변식이 걸리는 축은 crate 이름도 잎 성질도 아니라
-//! **어느 바이너리에 링크되나** 이고, 이 crate 는 headless 데몬 · `net` · `discovery` 에 링크된다. 창도
-//! webview 도 없는 셋이 한꺼번에 전송 방식에 묶인다는 뜻이다. `logging` 의 초기화 함수가 "이벤트 하나만
+//! **어느 바이너리에 링크되나** 이고, 이 crate 는 headless 데몬 · `discovery` 에 링크된다. 창도
+//! webview 도 없는 둘이 한꺼번에 전송 방식에 묶인다는 뜻이다. `logging` 의 초기화 함수가 "이벤트 하나만
 //! 쏘면 편한" 대표 자리다. 패턴이 import 라인 앵커인 것은 이 헤더가 자기 자신에 걸리지 않게 하기 위해서다.
 //!
 //! **③ 입주자끼리 서로 참조하지 않는다**(입주 조건 ③의 벽):
-//! `rg "(crate|super)::(logging|platform|text|time|path|sync|testing)" crates/engram-dashboard-base/src/` → **0줄**.
+//! `rg "(crate|super)::(logging|text|time|path|sync|testing)" crates/engram-dashboard-base/src/` → **0줄**.
 //! ★`crate::` 단독으로 넓히지 말 것★ — 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 대가로 모듈
 //! **이름**을 손으로 박으므로 **입주자가 늘면 여기 이름을 더해야 보인다**(messaging 정규식과 같은 종류의
 //! 구멍이고, ①이 그 구멍을 덮지 않는다 — ①은 crate 밖만 본다).
@@ -66,7 +69,6 @@
 // ADR-0269
 pub mod logging;
 pub mod path;
-pub mod platform;
 pub mod sync;
 // ADR-0275
 #[cfg(any(test, feature = "test-support"))]

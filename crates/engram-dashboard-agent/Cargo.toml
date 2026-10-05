@@ -14,17 +14,19 @@ description = "Engram Dashboard 에이전트 코어 — AgentManager·OutputCore
 test-harness = []
 
 [dependencies]
-# ★워크스페이스 의존은 이 둘뿐이고, **protocol 을 여기 추가하지 말 것**★ — `agent.*` 를 선언하려면 도구가
-#   필요한데 그것을 protocol 에서 받으면 코어가 wire 타입까지 보게 된다. 도구 crate 가 그 유입을 막는다.
-#   (ADR-0155)
+# ★워크스페이스 의존은 아래 셋(command · base · platform)뿐이고, **protocol 을 여기 추가하지 말 것**★ —
+#   `agent.*` 를 선언하려면 도구가 필요한데 그것을 protocol 에서 받으면 코어가 wire 타입까지 보게 된다.
+#   도구 crate 가 그 유입을 막는다. (ADR-0155)
 engram-dashboard-command = { path = "../engram-dashboard-command" }
-# `transport::stdio` 의 `mask_secrets` 와 `platform::{process_creation_time, pid_alive_with_start_time}`
-#   — 옛 `crate::logging`·PID 헬퍼가 잎 crate 로 이사했다(ADR-0175 결정 1). 뒤엣것은 codex 세션 id
-#   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2). 범용 도우미
-#   `path::normalize_spelling`(친 cwd) · `time::now_epoch_ms`(프로필 시각 · 손상 사본 이름)도 여기서 온다(ADR-0269).
+# `transport::stdio` 의 `mask_secrets` — 옛 `crate::logging` 이 잎 crate 로 이사했다(ADR-0175 결정 1).
+#   범용 도우미 `path::normalize_spelling`(친 cwd) · `time::now_epoch_ms`(프로필 시각 · 손상 사본 이름)도
+#   여기서 온다(ADR-0269).
 #   락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다. 잔여물 정리 시계 `LeftoverClock` 의 상위
 #   트레이트 `time::Clock` 과 운영 구현 `time::SystemClock`(ADR-0275 결정 6)도 여기서 온다.
 engram-dashboard-base = { path = "../engram-dashboard-base" }
+# OS 층(ADR-0266) — `process::{process_creation_time, pid_alive_with_start_time}` 등 PID 헬퍼. codex 세션 id
+#   회수가 자식 신원을 PID+시작시각으로 판정하는 데 쓴다(ADR-0218 결정 2).
+engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8.1"
@@ -47,7 +49,7 @@ engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-s
 
 # 소비자는 셋이다 — `platform::windows` 의 Job Object 래퍼(멤버 명단 · 붙들기 · 가입 알림 포함 — ADR-0262)·스레드 깨우기와
 #   `platform::file_holders` 의 홀더 조회
-# (PID 헬퍼는 base 로 갔다 — ADR-0175 결정 1).
+# (PID 헬퍼는 platform crate 의 `process` 에 있다 — ADR-0266).
 # `Win32_System_RestartManager` = 그 홀더 조회 몫 — 「이 파일을 누가 열고 있나」를 묻는
 #   `RmStartSession`/`RmRegisterResources`/`RmGetList`/`RmEndSession` 넷이 그 feature 뒤에 있다.
 #   codex 세션 id 회수가 그 답 위에 선다(ADR-0218 결정 1·11).
@@ -56,7 +58,7 @@ engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-s
 # `Win32_System_Diagnostics_ToolHelp` = 사용량 조회(`usage::process`)가 멈춘 채 띄운 자식을 Job 에 넣은 뒤
 #   깨우는 몫 — std 가 첫 스레드 핸들을 내주지 않아 스레드 스냅숏(`CreateToolhelp32Snapshot`·`Thread32First`/
 #   `Thread32Next`)으로 그 스레드를 찾는다(`platform::windows::resume_suspended_process`). 같은 판의 `windows`
-#   에 기능 하나를 켤 뿐이라 잠금 파일에 새 패키지가 들지 않는다(base 는 이미 이 기능을 켠다).
+#   에 기능 하나를 켤 뿐이라 잠금 파일에 새 패키지가 들지 않는다(platform crate 는 이미 이 기능을 켠다).
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
 #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
 #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다.

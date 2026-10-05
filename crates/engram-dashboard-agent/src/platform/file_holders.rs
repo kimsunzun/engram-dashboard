@@ -30,7 +30,7 @@ use windows::Win32::System::RestartManager::{
 pub(crate) struct Holder {
     pub(crate) pid: u32,
     /// 프로세스 생성 FILETIME(1601-01-01 UTC 부터 100나노초 간격 수)의 high/low 32비트를 합친 값 —
-    /// 같은 PID 에 대해 [`engram_dashboard_base::platform::process_creation_time`] 이 돌려주는 값과
+    /// 같은 PID 에 대해 [`engram_dashboard_platform::process::process_creation_time`] 이 돌려주는 값과
     /// 같다(ADR-0218 「근거」의 실측이고, 이 파일의 테스트가 그 동일성을 잰다).
     ///
     /// Restart Manager 가 이 칸을 못 채워 0 을 주는 항목이 있는지는 미검이다 — 그런 항목은 대조에서
@@ -168,7 +168,7 @@ mod tests {
     use super::*;
 
     /// 자기 자신이 연 파일을 물어, PID 와 시작시각이 **둘 다** 우리 것으로 오는지 잰다. 시작시각의
-    /// 기준값은 바닥 crate 의 헬퍼에서 받는다 — 두 경로가 같은 시계를 읽는다는 것이 ADR-0218 결정 2 의
+    /// 기준값은 OS 층 crate(platform)의 헬퍼에서 받는다 — 두 경로가 같은 시계를 읽는다는 것이 ADR-0218 결정 2 의
     /// 전제이고, 여기가 그 전제를 지키는 자리다.
     #[cfg(windows)]
     #[test]
@@ -187,7 +187,7 @@ mod tests {
             .iter()
             .find(|h| h.pid == me)
             .unwrap_or_else(|| panic!("자기 PID({me}) 가 홀더로 나와야 — 받은 목록 {holders:?}"));
-        let expected = engram_dashboard_base::platform::process_creation_time(me)
+        let expected = engram_dashboard_platform::process::process_creation_time(me)
             .expect("자기 creation time 조회 가능");
         assert_eq!(
             mine.start_time, expected,

@@ -6338,12 +6338,12 @@ mod tests {
     fn shutdown_is_idempotent_and_leaves_no_child_behind() {
         let (t, pid) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
         let pid = pid.expect("pid");
-        assert!(engram_dashboard_base::platform::pid_alive(pid));
+        assert!(engram_dashboard_platform::process::pid_alive(pid));
         t.shutdown();
         t.shutdown();
         t.shutdown();
         assert!(
-            !engram_dashboard_base::platform::pid_alive(pid),
+            !engram_dashboard_platform::process::pid_alive(pid),
             "shutdown 뒤에도 자식이 살아 있다"
         );
         assert!(
@@ -6409,10 +6409,10 @@ mod tests {
             .stderr(Stdio::piped());
         let child = cmd.spawn().expect("spawn");
         let pid = child.id();
-        assert!(engram_dashboard_base::platform::pid_alive(pid));
+        assert!(engram_dashboard_platform::process::pid_alive(pid));
         drop(ChildGuard(Some(child)));
         assert!(
-            !engram_dashboard_base::platform::pid_alive(pid),
+            !engram_dashboard_platform::process::pid_alive(pid),
             "조기 반환 경로에서 자식이 샜다"
         );
     }

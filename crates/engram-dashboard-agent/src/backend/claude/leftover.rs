@@ -6669,7 +6669,7 @@ mod real_tests {
     /// R 이 Job 에 든 뒤에 태어나기도 해서(실측), 기다리지 않으면 쓰기 명단 뒤의 산 탄생(부모 R 산다)으로 끼어든다.
     fn console_host_born(r: &std::process::Child) {
         wait_until("R 의 콘솔 호스트", || {
-            (!engram_dashboard_base::platform::child_pids(r.id()).is_empty()).then_some(())
+            (!engram_dashboard_platform::process::child_pids(r.id()).is_empty()).then_some(())
         });
     }
 

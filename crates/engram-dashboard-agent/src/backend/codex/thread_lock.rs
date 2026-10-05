@@ -276,7 +276,7 @@ struct ChildClock {
 
 impl CaptureClock for ChildClock {
     fn child_alive(&self) -> bool {
-        engram_dashboard_base::platform::pid_alive_with_start_time(self.pid, self.start_time)
+        engram_dashboard_platform::process::pid_alive_with_start_time(self.pid, self.start_time)
     }
 
     fn sleep(&self, delay: Duration) {
@@ -1233,7 +1233,7 @@ mod tests {
         let file = std::fs::File::create(dir.join(format!("{ID_A}.lock"))).expect("쥔 락");
 
         let me = std::process::id();
-        let start = engram_dashboard_base::platform::process_creation_time(me)
+        let start = engram_dashboard_platform::process::process_creation_time(me)
             .expect("자기 creation time 조회 가능");
         let outcome = scan_for_child(&dir, me, start, &RestartManagerProbe);
 

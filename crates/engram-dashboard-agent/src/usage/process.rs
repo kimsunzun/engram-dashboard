@@ -1359,7 +1359,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn drop_kills_the_whole_tree() {
-        use engram_dashboard_base::platform::{child_pids, pid_alive};
+        use engram_dashboard_platform::process::{child_pids, pid_alive};
 
         let root = TempRoot::new("probe-tree");
         let child = OsProbeChild::spawn(&ignores_stdin(root.path()), far()).expect("기동");

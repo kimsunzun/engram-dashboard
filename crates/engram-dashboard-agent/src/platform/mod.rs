@@ -3,11 +3,12 @@
 //! 멤버 붙들기(사실 · 끝내기) · 가입 알림 · 물러남 표시) · 「이 파일을 지금 누가 열고 있나」([`file_holders`]) ·
 //! 「이 PID 아래 무엇이 살아 있나」([`process_tree`]).
 //!
-//! PID liveness 헬퍼는 여기 없다 — 소비자가 이 crate 밖에 셋이라 `engram-dashboard-base` 의
-//! `platform` 으로 이사했다(ADR-0175 결정 1). ★여기 있는 넷은 그 조건을 못 채운다★ — 소비자가 전부 이
-//! crate 안이다: Job Object 래퍼는 `transport::pty`·`transport::stdio`·`backend::codex::transport`·
-//! `usage::process`(깨우기 헬퍼는 `usage::process` 하나), `file_holders` 와 `process_tree` 는 codex 세션 id
-//! 회수(ADR-0218 결정 11), `process_group` 은 claude 끊기 뒤 잔여물 정리다(ADR-0262).
+//! PID liveness 헬퍼는 여기 없다 — OS 층 crate `engram-dashboard-platform` 의 `process` 에 있다(ADR-0266).
+//! 소비자가 이 crate 밖에도 셋이라 여기 두면 그 셋이 에이전트 런타임 전체를 진다(ADR-0175 결정 1).
+//! 여기 있는 넷은 소비자가 전부 이 crate 안이다: Job Object 래퍼는 `transport::pty`·`transport::stdio`·
+//! `backend::codex::transport`·`usage::process`(깨우기 헬퍼는 `usage::process` 하나), `file_holders` 와
+//! `process_tree` 는 codex 세션 id 회수(ADR-0218 결정 11), `process_group` 은 claude 끊기 뒤 잔여물
+//! 정리다(ADR-0262).
 //!
 //! ★Job Object 래퍼 말고는 crate 밖으로 안 나간다★ — 소비자가 전부 이 crate 안이다.
 

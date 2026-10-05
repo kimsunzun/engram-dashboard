@@ -754,7 +754,7 @@ pub async fn run() -> Result<(), i32> {
     let expected_token = Arc::new(token.clone());
 
     // 8) daemon.json 기록.
-    let start_time = engram_dashboard_base::platform::current_process_start_time().unwrap_or(0);
+    let start_time = engram_dashboard_platform::process::current_process_start_time().unwrap_or(0);
     let info = engram_dashboard_net::portfile::DaemonInfo {
         pid: std::process::id(),
         host: "127.0.0.1".to_string(),

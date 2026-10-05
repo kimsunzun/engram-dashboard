@@ -1418,7 +1418,7 @@ fn descendants(root: u32) -> Vec<u32> {
     let mut out: Vec<u32> = Vec::new();
     let mut frontier = vec![root];
     while let Some(p) = frontier.pop() {
-        for c in engram_dashboard_base::platform::child_pids(p) {
+        for c in engram_dashboard_platform::process::child_pids(p) {
             if !out.contains(&c) {
                 out.push(c);
                 frontier.push(c);
@@ -1429,7 +1429,7 @@ fn descendants(root: u32) -> Vec<u32> {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    engram_dashboard_base::platform::pid_alive(pid)
+    engram_dashboard_platform::process::pid_alive(pid)
 }
 
 /// `known` 과 `root` 중 아직 살아 있는 것 전부 — ★살아 있는 것 아래를 다시 훑어★ 앞선 열거 **뒤에** 생긴
