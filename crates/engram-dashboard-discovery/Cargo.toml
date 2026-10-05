@@ -13,7 +13,9 @@ dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI �
 #   (ADR-0275 · ADR-0269 결정 3-2).
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 # liveness 판정(`process::pid_alive_with_start_time`) 공유 — net portfile 의 stale 판정과 동일 로직(DRY).
-#   데몬 exe 의 파일 이름(`env::exe_file_name` — `locate_daemon_exe`)도 여기서 온다.
+#   데몬 exe 의 파일 이름(`env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기(`spawn::spawn_outside_job`
+#   — WMI) · 끄기 fallback 의 트리 끄기(`process::kill_tree`)도 여기서 온다 — 이 crate 는 `windows` 를 직접
+#   의존하지 않는다(ADR-0266).
 #   ★이 OS 헬퍼들을 `agent` 를 거쳐 받지 말 것★ — 에이전트 런타임 전체(portable-pty·Job Object)를 지게 된다
 #   (ADR-0175 결정 1 이 끊은 간선 · 지금 자리 = OS 층 platform crate, ADR-0266).
 engram-dashboard-platform = { path = "../engram-dashboard-platform" }
@@ -52,14 +54,7 @@ tungstenite = "0.26"
 # tests/stop_smoke.rs(graceful StopDaemon WS 왕복 #[ignore] 통합)의 임시 data_dir 격리용.
 [dev-dependencies]
 tempfile = "3"
-
-# WMI Win32_Process.Create(부모 Job 미상속 spawn) + COM 초기화. windows 전용.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_System_Threading",
-    "Win32_Foundation",
-    "Win32_System_Com",
-    "Win32_System_Wmi",
-    "Win32_System_Rpc",
-    "Win32_System_Variant",
-] }
+# feature-only 재선언 — WMI 플래그 진단 시험(`real_wmi_spawn_flag_matrix` · `#[ignore]`)이 거절 코드를 오류로
+#   올리지 않는 원시 호출(`spawn::wmi_create_raw`)을 쓴다. 기능 요청이 dev 그래프에만 있어 운영 바이너리엔
+#   합쳐지지 않는다(platform 시험 기능 운영 그래프 게이트가 잰다).
+engram-dashboard-platform = { path = "../engram-dashboard-platform", features = ["test-support"] }

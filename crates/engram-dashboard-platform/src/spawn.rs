@@ -1,5 +1,5 @@
 //! 자식 프로세스를 띄울 때의 OS 설정 — 창 없이 띄우기 · 트리 뿌리로 띄우기와 그 트리를 한 번에 끊는 손잡이 ·
-//! 실패한 셸의 「프로그램 없음」 판정.
+//! 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기(WMI).
 // ADR-0230
 // ADR-0266
 
@@ -10,6 +10,7 @@ use std::time::Instant;
 
 #[cfg(windows)]
 mod cmd_lookup;
+mod wmi;
 
 /// 콘솔 창 없이 띄운다 — Windows = `CREATE_NO_WINDOW`, 그 밖의 OS = 무동작. 창 없는 프로세스(데몬)가 콘솔 앱을
 /// 그냥 띄우면 Windows 가 새 콘솔 창을 연다.
@@ -269,6 +270,53 @@ pub enum TargetLookup {
     Busy,
     /// 모른다 — 찾기 스레드를 띄우지 못했다(그 OS 오류의 문구).
     NoThread(String),
+}
+
+/// [`spawn_outside_job`] 의 실패.
+#[derive(Debug)]
+pub enum DetachedSpawnError {
+    /// `Win32_Process.Create` 가 띄우지 않았다 — `rv` = 그 `ReturnValue`(0 이 아닌 값 · 예: 9 = 경로 없음 ·
+    /// 21 = 잘못된 인자). 답 객체나 그 값을 못 얻었으면 `u32::MAX` 다.
+    Refused { rv: u32 },
+    /// 그 밖의 실패 — COM 초기화 · WMI 호출의 실패는 종류 `Other`(문구에 그 HRESULT 가 든다) · Windows 밖 =
+    /// `Unsupported`(이 수단이 없다).
+    Io(io::Error),
+}
+
+/// `exe` 를 이 프로세스가 든 Job 밖에서 띄운다 — Windows = WMI `Win32_Process.Create`. 띄운 프로세스의 부모가 이
+/// 프로세스가 아니라 WMI 제공자(WmiPrvSE)라, 이 프로세스의 Job(`KILL_ON_JOB_CLOSE` 포함)을 물려받지 않는다(실측 —
+/// spike #1). 띄웠는지만 돌려준다 — pid 도, 뜬 프로세스를 기다리는 일도 없다.
+///
+/// - 명령줄 = 따옴표로 감싼 `exe` 하나 — 인자를 넘기지 않는다. 환경변수는 이 수단으로 넘길 수 없다.
+/// - `exe` 는 절대경로여야 한다 — 상대경로면 `Refused { rv: 9 }`(Path not found).
+/// - `console` = 참이면 새 콘솔 창과 함께 띄운다(`CREATE_NEW_CONSOLE`) · 거짓이면 생성 플래그를 넘기지 않는다.
+///   ★거짓이어도 창이 안 뜬다는 보장은 아니다★ — 콘솔 서브시스템 exe 는 이렇게 띄워도 콘솔 창이 뜨고, windows
+///   서브시스템 exe 는 안 뜬다(실측 2026-06-19). 창 없이 띄우기는 exe 의 서브시스템으로만 된다.
+/// - 부르는 스레드에 COM 을 다중 스레드 아파트로 초기화하고 돌아오기 전에 해제한다. 이미 다른 아파트 모드로
+///   초기화된 스레드면 그 아파트로 부르고 해제하지 않는다.
+///
+/// Windows 밖 = `Io` 의 `Unsupported`.
+// ADR-0021
+// ADR-0271
+pub fn spawn_outside_job(exe: &Path, console: bool) -> Result<(), DetachedSpawnError> {
+    // ★`CREATE_NO_WINDOW`(0x0800_0000)를 넘기지 말 것★ — WMI 가 `rv` 21(Invalid Parameter)로 거절한다(실측
+    //   2026-06-17 · discovery 의 `real_wmi_spawn_flag_matrix`). CreateProcess 직접 호출용 플래그라 WMI Create 의
+    //   허용 집합 밖이다. `CREATE_NEW_CONSOLE` 은 받는다.
+    const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
+    let create_flags = console.then_some(CREATE_NEW_CONSOLE);
+    match wmi::create(exe, create_flags)? {
+        0 => Ok(()),
+        rv => Err(DetachedSpawnError::Refused { rv }),
+    }
+}
+
+/// [`spawn_outside_job`] 의 원시 호출 — `ReturnValue` 를 오류로 올리지 않고 그대로 돌려준다. `create_flags` =
+/// `None` 이면 시작 정보를 넘기지 않고, `Some` 이면 `Win32_ProcessStartup.CreateFlags` 로 넘긴다. 어느 생성
+/// 플래그를 WMI 가 거절하나를 재는 진단 시험 몫이다. `Err(Refused)` = 필요한 WMI 객체가 비어 띄우기 전에 멈췄다
+/// (`rv` = `u32::MAX`).
+#[cfg(any(test, feature = "test-support"))]
+pub fn wmi_create_raw(exe: &Path, create_flags: Option<i32>) -> Result<u32, DetachedSpawnError> {
+    wmi::create(exe, create_flags)
 }
 
 #[cfg(test)]

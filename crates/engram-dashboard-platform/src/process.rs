@@ -1,5 +1,6 @@
 //! PID liveness · 프로세스 시작시각(creation time) 조회와 그 결과의 세 갈래(앎 · 사라짐 · 못 읽음) ·
-//! 프로세스 표(pid, ppid) 한 장 · 자식 PID 열거 · 한 뿌리 아래 살아 있는 프로세스의 신원 목록([`subtree`]).
+//! 프로세스 표(pid, ppid) 한 장 · 자식 PID 열거 · 한 뿌리 아래 살아 있는 프로세스의 신원 목록([`subtree`]) ·
+//! 한 프로세스 트리 끄기([`kill_tree`]).
 //!
 //! "그 PID 가 아직 그 프로세스인가" 를 판정하는 곳이 여러 crate 에 있다 — 예: `net`(portfile 의 stale
 //! 판정) · `discovery`(데몬 발견) · `daemon`(daemon.json 에 자기 시작시각 기록) · `agent`(codex 자식의
@@ -351,6 +352,33 @@ fn walk(
         }
     }
     out
+}
+
+/// `pid` 와 그 자손 전부를 강제로 끝낸다 — Windows = `taskkill /PID <pid> /F /T`. 끝내기를 맡기기만 하고 기다리지
+/// 않는다. taskkill 의 종료 코드는 보지 않는다 — 이미 끝난 프로세스에도 0 이 아닌 코드(128)로 답한다. 그래서
+/// `Ok` 는 「끝났다」가 아니라 「taskkill 을 돌렸다」다.
+///
+/// `Err` = taskkill 을 띄우지 못했다(종류 `Other` · 문구에 그 사유가 든다). Windows 밖 = `Unsupported` — 이
+/// 수단이 없다. ★Windows 에서는 `Unsupported` 가 나오지 않는다★ — 부르는 쪽이 그 종류 하나로 「이 OS 에서는 못
+/// 한다」를 가른다.
+// ADR-0266
+pub fn kill_tree(pid: u32) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        use std::process::{Command, Stdio};
+        Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(drop)
+            .map_err(|e| std::io::Error::other(format!("taskkill 실행 실패: {e}")))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        Err(std::io::ErrorKind::Unsupported.into())
+    }
 }
 
 // ── non-windows stub ─────────────────────────────────────────────────────────────

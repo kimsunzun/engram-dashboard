@@ -167,7 +167,7 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   cargo tree --locked -p engram-dashboard-agent  -e normal,dev,features -i engram-dashboard-base --target all | rg 'engram-dashboard-base feature "test-support"' # → 1줄 이상 PASS (짝)
   ```
   ★**셋째 줄(짝)을 빼지 말 것**★ — 기능 이름이 바뀌면 앞 둘은 매치할 낱말을 잃고 0줄로 눈먼 PASS 가 된다. 판정은 앞 둘이 매치 유무(0줄), 셋째가 줄 수(1 이상)다. ★**`cargo tree` 의 종료코드가 0 이 아니면 그 줄은 FAIL 이다**★(CI 스텝의 rc 검사와 같다) — 파이프 끝의 `rg` 만 보면 `cargo tree` 가 죽어도 0줄로 읽혀 앞 둘이 눈먼 PASS 가 된다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
-- **platform 시험 기능 운영 그래프 게이트(TRD 1-3 §3-8 · §4-2 ③ — standard에서 항상, daemon · 셸 운영 그래프에서 platform 에 닿는 crate(platform · agent · discovery · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** platform 의 `test-support`(`testing` 모듈 — 실프로세스 시험 도우미 · `group::GroupRef::gone`을 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다. 셸은 platform 을 직접 의존하지 않고 전이로만 닿는다.
+- **platform 시험 기능 운영 그래프 게이트(TRD 1-3 §3-8 · §4-2 ③ — standard에서 항상, daemon · 셸 운영 그래프에서 platform 에 닿는 crate(platform · agent · discovery · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** platform 의 `test-support`(`testing` 모듈 — 실프로세스 시험 도우미 · `group::GroupRef::gone` · WMI 띄우기의 원시 호출 `spawn::wmi_create_raw`를 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다. 셸은 platform 을 직접 의존하지 않고 전이로만 닿는다.
   ```bash
   cargo tree --locked -p engram-dashboard-daemon -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS
   cargo tree --locked -p engram-dashboard        -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS (셸)
@@ -242,7 +242,7 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - 변경이 닿은 동작을 실제로 한 번 통과시켜 본다(예: spawn → 출력 도착 → kill → 상태 전이). **이게 통과해야 동작 확인 = 완료**.
 - **teardown — 자기가 띄운 건 자기가 치운다(실발동 2026-07-10):** 1)에서 받은 **PID**로 종료한다 — `MSYS_NO_PATHCONV=1 taskkill /PID <기록한PID> /T /F`(Git Bash면 접두 필수 — 안 붙이면 `/PID`가 경로로 변환된다). **`/T`가 잡는 것 = 앱 + 그 WebView2 렌더러 자식들**뿐이다(옛 "런처 트리" 모델이 아니다 — 분리 실행엔 런처 부모가 없다). 앱을 감싼 임시 `cmd`는 자식이 아니라 **부모**라 `/T`가 안 건드리고, 앱이 끝나면 스스로 빠진다.
 - **★dev 서버(vite)도 `/T`에 안 걸린다 — 데몬과 같은 소유권 규칙으로 따로 치운다★(누락 적출 2026-08-18):** vite는 앱과 무관한 별도 프로세스라 **앱을 닫아도 1420을 계속 잡고 있다.** 위 0)에서 **자기가 띄웠으면** 자기가 끈다(그 `npm run dev` 잡의 pid). **실측 시작 전부터 떠 있던 것은 불가침** — 사람이나 다른 워크트리 세션 것일 수 있다. 남기면 다음 실측이 그걸 재사용해 남의 화면을 측정한다(위 「1420을 남이 잡고 있으면」).
-- **★데몬은 위 `/T`에 안 걸린다 — 따로 판단한다★** — 앱이 데몬을 WMI(`Win32_Process.Create`)로 띄워 부모가 `WmiPrvSE.exe`가 되기 때문이다(근거 = `crates/engram-dashboard-discovery/src/lib.rs` `wmi_spawn` 주석 · 실측 2026-08-17). 처리는 **소유권으로 갈린다:**
+- **★데몬은 위 `/T`에 안 걸린다 — 따로 판단한다★** — 앱이 데몬을 WMI(`Win32_Process.Create`)로 띄워 부모가 `WmiPrvSE.exe`가 되기 때문이다(근거 = `crates/engram-dashboard-platform/src/spawn.rs` `spawn_outside_job` 주석 · 실측 2026-08-17). 처리는 **소유권으로 갈린다:**
   - **실측 시작 전부터 떠 있던 데몬 = 불가침.** 죽이지 않는다(persist 모델·타 에이전트 호스팅 가능 — 에이전트는 데몬의 자식이라 죽이면 진행 중인 작업이 날아간다). 그래서 **기동 전에 데몬 유무를 기록해 둔다**(위 "잔여 프로세스 확인"과 같은 단계).
   - **이번 실측이 띄운 데몬 = 자기가 치운다.** 남기면 그 배포판의 데몬 exe가 잠겨 **다음 재빌드가 하드 실패한다**(`scripts/build-release.ps1`이 "앱과 데몬을 완전히 종료한 뒤 다시 실행하세요"로 멈춘다). 죽이기 전 `ExecutablePath`가 이번에 띄운 배포판(`target/debug/` 또는 `target/release/`) 것인지 **반드시 확인한다** — 이미지 이름만 보고 죽이면 남의 배포판 데몬을 죽인다(ADR-0139).
 - **비-Windows에선 cdp 불가** → standard까지가 한계 + "동작 미확인" 정직 보고(골격 §4).

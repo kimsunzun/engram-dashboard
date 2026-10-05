@@ -4,20 +4,22 @@
 //! 여부 하나로 판정한다 — 소비자 수가 아니다(결정 2). 부르는 쪽은 이 crate 의 함수와 핸들 타입만 부르고,
 //! OS 분기(`#[cfg(windows)]` · `cfg!(windows)` · `#[cfg(unix)]` 따위)는 이 crate 안에만 둔다. 시험 · 시험
 //! 하네스 bin · `examples/` 의 OS 분기는 그쪽에 남는다 — 운영 빌드에 들어가지 않는다(ADR-0266 「근거」).
-//! 이 불변식의 기계 게이트는 TRD 1-3 U8 에서 선다 — 그 전까지는 리뷰가 지키고, 다른 crate 에 남은 운영
-//! OS 분기는 이전 대상이다. 시한부 예외는 하나 — `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15).
+//! 이 불변식의 기계 게이트는 TRD 1-3 U8 에서 선다 — 그 전까지는 리뷰가 지킨다. 다른 crate 에 남은 운영 OS
+//! 분기는 시한부 예외 하나뿐이다 — `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15).
 //!
 //! 지금 입주자는 일곱이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
-//! 자식 PID 열거 · 한 뿌리 아래 신원 목록) · [`group`](프로세스 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 ·
-//! 가입 알림 포트 — Windows Job Object) · [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
+//! 자식 PID 열거 · 한 뿌리 아래 신원 목록 · 한 프로세스 트리 끄기 — Windows `taskkill`) · [`group`](프로세스
+//! 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 · 가입 알림 포트 — Windows Job Object) ·
+//! [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
 //! [`fs`](남의 쓰기를 막은 채 여는 열기 · 그 실패의 분류 — 공유 위반 · 접근 거부) ·
 //! [`spawn`](창 없이 띄우기 · 트리 뿌리로 띄우기와 그 트리 kill 손잡이 — Windows = 멈춘 채 띄워 무리에 넣은 뒤
-//! 깨우기 · 실패한 셸의 「프로그램 없음」 판정) · [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
+//! 깨우기 · 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기 — Windows = WMI) ·
+//! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
 //! [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수 이름 비교). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
 //!
-//! ★`testing`(실프로세스 시험 도우미)과 `group::GroupRef::gone`(주인이 처음부터 없는 손잡이)은 cargo 기능
-//! `test-support` 뒤다★(TRD 1-3 §3-8 · 이름은 base 의 ADR-0275 결정 5 와 같다) — 선언이
-//! `#[cfg(any(test, feature = "test-support"))]` 라 이 crate 자기 시험과 그 기능을 dev 의존으로 켠 소비자 시험만
+//! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
+//! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
+//! (TRD 1-3 §3-8 · 이름은 base 의 ADR-0275 결정 5 와 같다) — 선언이 `#[cfg(any(test, feature = "test-support"))]` 라 이 crate 자기 시험과 그 기능을 dev 의존으로 켠 소비자 시험만
 //! 본다. 그 기능이 데몬 · 셸의 운영 의존 그래프에 없다는 것은 CI 게이트 ③ 이 잰다(0줄 기대와 짝인 1줄
 //! 이상 기대) — 아래 격리 게이트 ①② 와 별개인 시험 기능 누수 게이트이고, 명령 · 기대값의 정본은 `/qa` 바인딩이다. 이 crate 의 cargo 기능은 그것 하나뿐이다(ADR-0275 결정 13).
 //!
