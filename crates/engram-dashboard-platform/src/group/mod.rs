@@ -27,7 +27,7 @@ mod windows;
 #[cfg(all(windows, any(test, feature = "test-support")))]
 pub(crate) use self::windows::image_path;
 #[cfg(windows)]
-pub use self::windows::resume_suspended_process;
+pub(crate) use self::windows::resume_suspended_process;
 
 /// 주인이 이미 사라져 무리가 없을 때 [`GroupRef::watch_births`] · [`GroupRef::unwatch_births`] 가 돌려주는 `Err`
 /// 종류 — OS 실패가 아니라서 부르는 쪽이 가를 수 있게 따로 둔다. 포트 만들기 · 붙이기 · 떼기의 OS 실패는 이
@@ -66,8 +66,8 @@ impl GroupOwner {
 
     /// 그 번호의 프로세스를 무리에 넣는다.
     ///
-    /// ★띄운 뒤에 넣으면 넣기 전에 그것이 띄운 자식은 무리 밖에 남는다★ — 닫는 법 = 멈춘 채 띄워 넣은 뒤
-    /// `resume_suspended_process` 로 깨운다.
+    /// ★띄운 뒤에 넣으면 넣기 전에 그것이 띄운 자식은 무리 밖에 남는다★ — 닫는 법 = 멈춘 채 띄워 넣은 뒤 깨운다
+    /// ([`crate::spawn::prepare_tree_root`] · [`crate::spawn::TreeRoot`]).
     pub fn adopt(&self, pid: u32) -> io::Result<()> {
         #[cfg(windows)]
         {

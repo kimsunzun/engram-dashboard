@@ -8,9 +8,10 @@
 //! 쪽이 준다(ADR-0275 결정 12).
 //!
 //! ★Job 은 그 안에 든 **뒤에** 만들어진 프로세스에만 물려진다★ — 이미 뜬 프로세스를 [`JobObjectHandle::assign`]
-//!   으로 넣으면, 넣기 전에 그것이 띄운 자식은 Job 밖에 남아 트리 kill 을 빠져나간다. agent 의 사용량
-//!   조회(`usage::process`)는 멈춘 채(`CREATE_SUSPENDED`) 띄워 넣은 뒤 깨워 그 틈을 닫았다. ★agent 의 에이전트
-//!   통로(`transport::pty`·`transport::stdio`·codex 통로)는 띄운 뒤에 넣으므로 그 틈을 그대로 안고 있다★.
+//!   으로 넣으면, 넣기 전에 그것이 띄운 자식은 Job 밖에 남아 트리 kill 을 빠져나간다. 트리 뿌리(agent 사용량 조회가
+//!   쓴다)는 `spawn::prepare_tree_root` 로 멈춘 채(`CREATE_SUSPENDED`) 띄우고 `spawn::TreeRoot` 가 넣은 뒤 깨워 그
+//!   틈을 닫았다. ★agent 의 에이전트 통로(`transport::pty`·`transport::stdio`·codex 통로)는 띄운 뒤에 넣으므로 그
+//!   틈을 그대로 안고 있다★.
 //!
 //! 호출 순서/플래그는 Phase 0 spike(agent `examples/spike.rs`)에서 Windows 실측 검증한 것과 동일하다.
 //! ★`windows` crate 와 표준 라이브러리 말고는 쓰지 않는다★ — 결과 · 사실 · 알림 타입도 여기 두고 겉이 제 공개
@@ -173,7 +174,7 @@ impl JobObjectHandle {
     }
 
     /// ★띄운 뒤에 넣으면 넣기 전에 그것이 띄운 자식은 Job 밖에 남는다★(에이전트 통로 셋의 틈) — 닫는 선례 =
-    /// 멈춘 채 띄워 넣은 뒤 [`resume_suspended_process`] 로 깨우는 agent 의 `usage::process`.
+    /// `spawn::prepare_tree_root` 로 멈춘 채 띄우고 `spawn::TreeRoot` 가 넣은 뒤 [`resume_suspended_process`] 로 깨운다.
     pub(crate) fn assign(&self, process_id: u32) -> io::Result<()> {
         // SAFETY: OpenProcess — AssignProcessToJobObject 가 요구하는 최소 권한
         // (SET_QUOTA|TERMINATE)만 연다.

@@ -93,7 +93,8 @@
 //!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
 //!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
 //!     같은 모양이다. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회 실행기다 — 멈춘 채 띄워
-//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + OS 층 `group::resume_suspended_process`).
+//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + OS 층 `spawn::prepare_tree_root` ·
+//!     `spawn::TreeRoot`).
 //!   - **핸드셰이크가 실패하면 [`writer_loop`] 이 우리 쪽 stdin 을 놓는다 — 갈래를 가리지 않는다.**
 //!     ★한때 여기 「자식·리더·라이터는 그대로 남고 매니저가 거둘 때까지 상주한다」로 적혀 있었다. 그것은
 //!     낡은 서술을 넘어 **거짓이었다 — 아무도 그 세션을 거두지 않는다**★: 수거를 여는 것은 pump 의

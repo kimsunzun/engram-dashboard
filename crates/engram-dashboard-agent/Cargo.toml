@@ -29,9 +29,10 @@ engram-dashboard-base = { path = "../engram-dashboard-base" }
 #   (`file_holders::holders_of`)와 우리 프로세스 나무(`process::subtree`)도 여기서 온다(ADR-0218 결정 1).
 #   CLI 스폰마다 지나는 콘솔 감싸기(`shell::console_command` — claude · codex 의 스폰과 사용량 조회) ·
 #   홈 디렉터리(`env::home_dir` — claude 설정 폴더 · codex 홈) · 환경변수 이름 비교(`env::env_key_eq` — CLI
-#   입구의 PATH 주입)도 여기서 온다(ADR-0230). 통로 셋 · 사용량 조회가 띄운 프로세스 무리의 주인
-#   (`group::GroupOwner`)과 잔여물 정리가 받는 약한 손잡이(`group::GroupRef` — `transport::process_group` 이
-#   감싼다) · 창 없이 띄우기(`spawn::hide_console_window`)도 여기서 온다(ADR-0275). 시험은 기본 셸
+#   입구의 PATH 주입)도 여기서 온다(ADR-0230). 통로 셋이 띄운 프로세스 무리의 주인(`group::GroupOwner`)과
+#   잔여물 정리가 받는 약한 손잡이(`group::GroupRef` — `transport::process_group` 이 감싼다) · 창 없이 띄우기
+#   (`spawn::hide_console_window`) · 사용량 조회의 트리 뿌리와 그 kill 손잡이 · 「프로그램 없음」 판정
+#   (`spawn::{prepare_tree_root, TreeRoot, MissingProgramCheck}`)도 여기서 온다(ADR-0275). 시험은 기본 셸
 #   (`shell::default_shell`)도 쓴다.
 engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 serde = { version = "1", features = ["derive"] }
@@ -53,14 +54,14 @@ chrono = { version = "0.4", default-features = false }
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 # 같은 계열(feature-only 재선언) — 통합 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`).
 engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-support"] }
-# 같은 계열 — claude 잔여물 정리의 실프로세스 시험 도우미(`engram_dashboard_platform::testing`)와 무리가 이미
-#   사라진 손잡이(`group::GroupRef::gone` — `transport::process_group` 의 시험 생성자가 쓴다).
+# 같은 계열 — claude 잔여물 정리 · 사용량 조회의 실프로세스 시험 도우미(`engram_dashboard_platform::testing`)와
+#   무리가 이미 사라진 손잡이(`group::GroupRef::gone` — `transport::process_group` 의 시험 생성자가 쓴다).
 engram-dashboard-platform = { path = "../engram-dashboard-platform", features = ["test-support"] }
 
 # ★운영 의존에는 `windows` 가 없다★ — Job Object 래퍼 · 잔여물 정리의 멤버 붙들기 · 멈춘 채 띄운 자식 깨우기는
-#   OS 층 crate 의 `group` 이 갖고, 그 바인딩 feature 도 그쪽 매니페스트가 켠다(ADR-0266 · ADR-0275). 여기 남은
-#   소비자는 `examples/spike*.rs` 둘뿐이다 — Job Object 를 직접 부르는 Phase 0 스파이크이고, `cargo test` 가 예제를
-#   컴파일하므로 dev 의존으로 둔다.
+#   OS 층 crate 의 `group` · `spawn` 이 갖고, 그 바인딩 feature 도 그쪽 매니페스트가 켠다(ADR-0266 · ADR-0275).
+#   여기 남은 소비자는 `examples/spike*.rs` 둘뿐이다 — Job Object 를 직접 부르는 Phase 0 스파이크이고, `cargo test`
+#   가 예제를 컴파일하므로 dev 의존으로 둔다.
 # ★`Win32_Security` 를 빼지 말 것★ — `CreateJobObjectW` 의 첫 인자가 `Option<*const SECURITY_ATTRIBUTES>`
 #   라 windows 0.58 은 그 함수 정의 자체에 `#[cfg(feature = "Win32_Security")]` 를 달아 두는데
 #   (`Win32/System/JobObjects/mod.rs` 실측), `Win32_System_JobObjects` 는 그것을 함의하지 않는다. 같은 판을
