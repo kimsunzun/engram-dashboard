@@ -113,7 +113,7 @@
 
 **설계(제안):**
 
-- **자리** = `MISSING_BACKEND` 판정(`connection_core.rs:1466-1469`) 바로 뒤 · `CoreProfile::new`(`:1470`) 앞. ★프로필을 만들기 전이어야 한다★ — 뒤에 두면 거절된 즉석 프로필이 명부 · 디스크에 남는다(위 「바로잡은 사실」의 사슬).
+- **자리** = `MISSING_BACKEND` 판정(`connection_core.rs:1466-1469`) 바로 뒤 · `CoreProfile::new`(`:1470`) 앞. ★경계는 `manager.spawn_agent`(`:1483`) 다 — 그보다 먼저여야 한다★ — 즉석 프로필은 그 안에서 명부에 오르고 디스크에 쓰이므로(위 「바로잡은 사실」의 사슬) 뒤에 두면 거절된 즉석 프로필이 남는다. `CoreProfile::new` 는 메모리 값만 만든다 — 그 앞에 둔 것은 배치 선택이다.
 - **정책 seam = `ConnectionCore` 의 칸 하나**(가안 `llm_policy: fn(&str) -> Option<&'static str>`) — `ConnectionCore::new`(`:1096-1107`)가 `llm_creation_refusal` 로 채운다. 시험은 `#[cfg(test)]` 빌더(가안 `with_llm_policy`)로 닫는 가짜를 꽂는다 — 운영 생성자 시그니처는 그대로라 호출자(`agent_conn.rs:587` · 시험 조립 `connection_core.rs:2751`)를 안 건드린다. 구조체 리터럴은 `new` 안 한 곳(`:1108-1119`)뿐이다. ★구조체 doc(`:1067-1071`)은 「이 struct 는 연결마다 새로 만들어지고 필드는 전 연결이 공유하는 핸들의 clone 이다 — 공유 핸들이 아닌 값을 넣으면 연결마다 별개인 상태가 생긴다」를 경고한다★ — 새 칸은 상태 없는 순수 함수 포인터라 연결마다 달라질 상태가 없다. 그 사실을 칸 doc 에 적고 구조체 doc 의 경고에 예외 한 줄을 단다(U1). 오늘 표가 아무것도 안 닫아 실물 입력으로는 거절 갈래에 닿을 수 없어서 seam 이 필요하다(ADR-0012). 판정 · 문구는 순수 도우미 하나(가안 `by_cwd_refusal(kind, policy) -> Option<String>`)가 진다. `spawn_command_by_cwd` 와 그 시험(`:4934`)은 건드리지 않는다.
 - **낱말** = wire enum 직렬화(serde — `#[serde(rename_all = "lowercase")]`, `protocol/src/domain.rs:209-215`)로 얻는다. 손으로 적지 않는다(셸 시험 `wire_word` 와 같은 수법 — `tests/layout_apply.rs:1369`). 표 비교는 대소문자를 무시한다(`commands.rs:675-680`).
 - **문구** = 지금 셸 문구의 틀 그대로 — 「`backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함.`」(`apply.rs:568-570`). ★다른 것은 `{word}` 의 대소문자 하나다★ — 셸은 친 철자를 다듬어(`trim`) 그대로 실었고(`Codex` 도 통과한다 — protocol 역직렬화가 대소문자를 무시한다, `domain.rs:235-245`), 데몬은 enum 을 직렬화해 늘 lowercase(`codex`)를 싣는다. 오탈자 문구(「를 모른다」)와는 그대로 갈린다.
@@ -240,10 +240,10 @@ cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --al
   - ㉠ `every_wire_backend_declares_an_llm_policy` — protocol wire 어휘 × agent 표(셸 ① 이사 · `wire_slot` 식 완전 `match`).
   - ㉡ **dispatch 수준 거절 시험**(리뷰 F2 — 본보기 = `spawn_by_cwd_without_a_backend_is_refused`, `connection_core.rs:4822-4847`) — `test_core()`(`:2628`)에 닫는 가짜 정책을 꽂고 `SpawnByCwd{backend: Some(Codex)}` 를 dispatch → 답이 **정확히 하나** `Error{request_id: Some(req)}` · `core.manager.agent_snapshots()`(`manager.rs:892`) · `list_agents()` 둘 다 빔 · 문구에 사유가 있고 「를 모른다」가 없고 `MISSING_BACKEND` 와 다르다.
   - ㉢ 운영 기본값 = 실 정책 — `ConnectionCore::new` 로 만든 코어의 정책이 wire 낱말마다 **그리고 표 밖 낱말 하나(`"no-such-backend"`)에** `llm_creation_refusal` 과 같은 답을 낸다. wire 낱말은 오늘 전부 `None` 이라 「늘 연다」 가짜를 못 잡는다 — 표 밖 낱말이 `Some(NO_POLICY_DECLARED …)`(fail-closed — `commands.rs:666` · `:675-680`)로 같아야 비로소 잡힌다. 상수는 비공개라 이름으로 부르지 않고 `llm_creation_refusal("no-such-backend")` 의 값과 견준다.
-  - ㉣ (선택) 호출 자리 소스 순서 — 운영 구획(`connection_core.rs:2533` 의 `"mod tests {"` 자르기 선례)의 `SpawnByCwd` 갈래에서 정책 호출이 `CoreProfile::new(` 보다 앞. ㉡ 이 거절 시 프로필 · 명부가 비어 있음을 이미 재므로 순서는 ㉡ 이 잡는다 — ㉣ 은 값싼 보강일 뿐이다.
+  - ㉣ (선택) 호출 자리 소스 순서 — 두지 않는다 — 경계는 `spawn_agent` 이고 ㉡ 이 잰다. `CoreProfile::new` 와의 순서는 배치일 뿐이다.
 - **게이트:** `cargo fmt --check` · `cargo test -p engram-dashboard-daemon -- --test-threads=4` · `cargo test -p engram-dashboard-agent -- --test-threads=4`(주석만 바뀌어도 doc 링크 확인) · CI.
 - **critical 이 아닌 이유:** 스폰 **앞**에 판정 하나를 더할 뿐이고 kill 인과 · finalize · 락 순서 · replay 어느 불변식도 지나지 않는다. 오늘 정책이 아무것도 안 닫아 런타임 동작이 같다(열린 갈래 = 지금 코드 그대로). 그래서 GUI 도 필요 없다 — 열린 갈래의 실 스폰은 CI `case40` 이 잰다.
-- **위험:** 판정을 `CoreProfile::new` 뒤에 두면 거절된 즉석 프로필이 디스크에 남는다(㉡ 이 잡는다) · seam 의 운영 배선이 빠지면 벽이 열린다(㉢) · 문구를 바꾸면 버스 호출자가 받는 글이 달라진다(낱말 대소문자 말고는 지금 셸 문구 그대로) · 사람 경로도 표를 본다(감수한 대가 · 오늘 영향 0 — §2-1).
+- **위험:** 판정을 `manager.spawn_agent` 뒤에 두면 거절된 즉석 프로필이 명부 · 디스크에 남는다(㉡ 이 잡는다 — `CoreProfile::new` 와 `spawn_agent` 사이로 옮기는 것은 메모리 값뿐이라 해가 없고 ㉡ 도 안 잡는다) · seam 의 운영 배선이 빠지면 벽이 열린다(㉢) · 문구를 바꾸면 버스 호출자가 받는 글이 달라진다(낱말 대소문자 말고는 지금 셸 문구 그대로) · 사람 경로도 표를 본다(감수한 대가 · 오늘 영향 0 — §2-1).
 
 ### 3-3. U2 — 셸 끊기
 
