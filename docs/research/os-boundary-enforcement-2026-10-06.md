@@ -1,6 +1,6 @@
 # OS 의존 코드 경계를 기계로 지키는 관행 — Rust 피어 서베이 (2026-10-06)
 
-- **상태:** 조사 완료 · 적대 리뷰(codex BLOCK) 반영 · 결정 대기 — 1-3 U8 게이트 마무리 방식(사용자)
+- **상태:** 조사 완료 · 적대 리뷰(codex BLOCK) 반영 · 결정 완료(사용자 2026-10-06 — 결과 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ④~⑥ · 「하지 않는 것」) · 정정 2건(2026-10-06 — 결론 3 의 `std::os` 금지 관행 · §4 의 `cfg_if!`)
 - **방법:** `/research` medium · 설계-결정 모드. 수집 세 갈래(직접 피어 = 소스 읽기 워커 · 의존 단위 · lint/교차 타깃 = 문서형 워커) → 메인 grounding → codex 적대 리뷰(BLOCK — 8건) → 본문 정정.
 - **확신도 범례:** 확실 = 1차 자료 직접 대조 + 독립 확증 · 가능성 높음 = 1차 자료 대조(단일) 또는 코드 읽기 추론 · 불확실 = 요약 · 기억 기반 · 모름 = 확인 못 함.
 - **맥락:** engram 1-3 U8 이 「platform 밖 OS `cfg` 파일 명단 고정」 게이트(ci.yml `platform gate 4` — PCRE2 문법 정규식)를 세웠고, 적대 리뷰가 4라운드째 드문 꼴의 누락을 짚어 루프 상한에 닿았다. 원칙 = CLAUDE.md 「플랫폼 중립」 · ADR-0230 · ADR-0266.
@@ -10,7 +10,8 @@
 1. **「`cfg` 가 어디 있나」를 CI 로 재는 성숙 프로젝트로 찾은 것은 rustc 하나뿐이고, 그것도 텍스트 스캐너다**(찾은 범위 안에서 — 피어 검색은 전수가 아니다 · 아래 「쟁점 · 한계」). rustc tidy `pal` 은 `library/` 의 `.rs` 에서 `cfg(` · `cfg!(` 를 문자열로 찾아 괄호를 맞추고, 그 텍스트에 OS 낱말이 **부분 문자열로** 들어 있으면 잡으며, 경로 부분 문자열 예외 목록으로 허용한다(가능성 높음 — 소스 대조). `cfg_attr` 와 앞선 doc 주석 뒤의 `cfg` 를 놓치는 것을 알고도(코드 읽기 — 가능성 높음) 필수 게이트로 돈다. → **우리 게이트 ④ 는 비교한 항목에서 그보다 넓게 잡는다**(`cfg_attr` · 여러 줄 · 깊은 중첩 · 문자열 속 괄호 — U8 결함 주입 44건 실측). 「업계 최고 선례도 알려진 빈틈을 두고 돈다」는 것이 드문 꼴 추적을 멈춰도 되는 근거다.
 2. **나머지 성숙 프로젝트는 위치 검사 대신** ① 물리적 분리(std `sys/` · mio `src/sys/` · zed 의 OS별 crate 를 타깃 조건 의존으로) ② 다른 타깃으로 `cargo check`(mio · tokio) ③ 리뷰 · 관례를 쓴다(가능성 높음). ★**②는 위치를 강제하지 않는다**★ — 거짓 갈래의 `cfg` 는 그 타깃 컴파일에서 아예 빠지므로, platform 밖의 Windows 전용 분기는 Windows 검사도 Linux 검사도 통과한다(Rust Reference — conditional compilation). ②가 잡는 것은 **조건 없이 쓴 OS 전용 코드**와 다른 OS 에서 안 서는 코드다.
 3. **API 경로 · crate 를 막을 땐 해석기 기반 도구를 쓴다**: clippy `disallowed-methods`/`disallowed-types`(deno 가 crate 마다 정해진 금지 항목을 갖췄는지 메타 검사로 강제) · cargo-deny `[bans]` `wrappers`. clippy 는 `#[cfg]` 속성의 **위치**를 막지 못한다(가능성 높음 — 그런 lint 를 찾지 못했고 반증 없음).
-4. **그래서 층이 셋이다 — 서로 대신하지 않는다:** 위치 = 게이트 ④(+ 리뷰) · 의존 = OS API crate 를 platform 만 끌어오게(그래프 검사) · 이식성 = 다른 OS 타깃 `cargo check`(조건 없이 쓴 `use std::os::windows` 같은 것 — CI 가 Windows 뿐이라 지금은 통과한다). 뒤의 둘이 지금 없다.
+   - ★**정정(2026-10-06): `std::os` 금지는 관행이 아니다**★ — 조사한 피어 중 이 도구로 `std::os` 경로를 막는 곳은 **0** 이다. deno 가 막는 것은 파일 시스템 함수 · `std::env::var` 이고 `std::os` 가 아니다. 위 결론이 `std::os` 금지 관행처럼 읽혔고, 메인도 처음에 그렇게 과장해 전했다. 아래 적합도 표의 clippy · Dylint 줄의 `std::os` 도 「할 수 있다」는 뜻이지 피어 선례가 아니다.
+4. **그래서 층이 셋이다 — 서로 대신하지 않는다:** 위치 = 게이트 ④(+ 리뷰) · 의존 = OS API crate 를 platform 만 끌어오게(그래프 검사) · 이식성 = 다른 OS 타깃 `cargo check`(조건 없이 쓴 `use std::os::windows` 같은 것 — CI 가 Windows 뿐이라 지금은 통과한다). 뒤의 둘이 지금 없다(★갱신 2026-10-06: 의존 층은 platform 헤더 게이트 ⑤ 로 세웠다 — 지금 없는 것은 이식성 층(교차 타깃 check) 하나다★).
 
 ## 갈래별 발견
 
@@ -41,7 +42,7 @@
 
 ### 4. 텍스트 스캐너가 따로 다뤄야 하는 꼴 (리뷰어 보충)
 
-- **`cfg_select!`**(Rust Reference 수록) — 술어를 `cfg(…)` 철자 없이 쓴다. **`cfg_aliases`**(build script 로 `#[cfg(linux)]` 같은 별칭을 만든다) · `cfg_if!` 도 같은 부류다. engram 에는 셋 다 0건이다(실측 2026-10-06 — `rg "cfg_if!|cfg_select!|cfg_aliases"` 0). 들어오면 게이트 ④ 가 못 본다 — 헤더 한계에 적어 둘 거리.
+- **`cfg_select!`**(Rust Reference 수록) — 술어를 `cfg(…)` 철자 없이 쓴다. **`cfg_aliases`**(build script 로 `#[cfg(linux)]` 같은 별칭을 만든다) · `cfg_if!` 도 같은 부류다(★정정 2026-10-06: `cfg_if!` 는 아니다 — 안에 `#[cfg(…)]` 철자를 그대로 써서 게이트 ④ 가 문다(실측). 못 무는 것은 `cfg_select!` · `cfg_aliases` 쪽이다★). engram 에는 셋 다 0건이다(실측 2026-10-06 — `rg "cfg_if!|cfg_select!|cfg_aliases"` 0). 그중 `cfg_select!` · `cfg_aliases` 는 들어오면 게이트 ④ 가 못 본다 — 헤더 한계에 적어 둘 거리(적었다 — platform 헤더 게이트 ④ 「한계」).
 - **`unexpected_cfgs`**(rustc check-cfg) 는 `cfg` 이름 · 값을 검사할 뿐 위치를 강제하지 않는다.
 
 ## engram 제약 적합도
@@ -53,7 +54,7 @@
 | 지금 게이트 ④(PCRE2 문법 정규식 · 명단 33) | 위치 | 새 파일의 OS `cfg` | 비교 항목에서 rustc tidy 이상 · 드문 꼴 몇 개 · `cfg_select!`/별칭은 못 봄 | 0(완성) | ○ |
 | 그래프 검사(`cargo tree --target all` 또는 `cargo metadata`)로 OS API crate(`windows` · `windows-sys` · `libc` · `nix`) 운영 의존 = 멤버 중 platform 만 | 의존 | 다른 멤버가 OS crate 를 끌어오는 것 | 해석된 그래프 · 빈틈 = 멤버 식별 방식 | 낮음(기존 게이트 꼴) | ○ |
 | 교차 타깃 `cargo check`(Linux · macOS 타깃 · 셸 제외 · `--all-targets --all-features`) | 이식성 | 조건 없이 쓴 OS 전용 코드 · 다른 OS 에서 안 서는 코드 | 컴파일러 | 중간(build script 실측 · CI 시간) | ○ (별도 단위 · 실측 먼저) |
-| clippy `disallowed-*` | API | OS 전용 표준 API 호출 · 단일 항목 `use` · `std::env::var` | 해석기 기반 | 중간(CI 에 clippy 신설 · 기존 경고 정리) | △ |
+| clippy `disallowed-*` | API | OS 전용 표준 API 호출 · 단일 항목 `use` · `std::env::var`(`std::os` 금지에 쓴 피어 0 — 정정 2026-10-06) | 해석기 기반 | 중간(CI 에 clippy 신설 · 기존 경고 정리) | △ |
 | cargo-deny `wrappers` | 의존 | 그래프 전체의 직접 의존자 | 그래프 · 서드파티까지 | 중간(도구 · 서드파티 명단 유지) | ✕ |
 | Dylint 커스텀 lint | 위치 · API | `cfg` 위치 · `std::os` 경로 | 컴파일러 수준 | 큼(nightly 고정 · `rustc_private` · 타깃별 실행) | ✕ |
 | 정규식 게이트의 드문 꼴 추적 지속 | 위치 | 드문 `cfg` 꼴 | 수렴 안 함(리뷰 4라운드 실측) | 라운드당 코더 수십만 토큰 | ✕ |

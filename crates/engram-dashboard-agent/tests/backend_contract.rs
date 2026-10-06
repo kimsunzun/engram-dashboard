@@ -4,8 +4,8 @@
 //! 질문 함수들은 그대로다 — 파일이 느는 구조가 아니다.
 //!
 //! **레인이 둘이다.**
-//! - 비-ignore 1건([`declaration_table_is_filled_for_every_backend`]) — 프로세스를 하나도 안 띄우고
-//!   선언 열만 대조한다. 기본 회귀·CI 에서 그대로 돈다.
+//! - 비-ignore 다섯([`declaration_table_is_filled_for_every_backend`]과 통로 선언 대조 넷) — 프로세스를
+//!   하나도 안 띄우고 선언만 대조한다. 기본 회귀·CI 에서 그대로 돈다.
 //! - 나머지 전부 `#[ignore]` — 실 CLI 를 띄운다. `-- --ignored` 로 부를 때만 돈다.
 //!
 //! ★비-ignore 항목이 있는 이유 = `#[ignore]` 의 대가★: `#[ignore]` 스위트는 통째로 증발해도 초록이다.
