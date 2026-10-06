@@ -1986,11 +1986,21 @@ async fn c2_busy_recipient_parks_then_batch_flushes_on_turn_end() {
     }
 
     // ── 3) 턴 종료(MessageDone) → idle 트리거 → 일괄 flush ─────────────────────────────
-    feed(OutputEvent::MessageDone {
-        turn_id: None,
-        message_id: None,
-    });
-    assert!(!busy.is_busy(b_id, 0), "MessageDone → idle");
+    // ★한가 단언은 수신자 stdin 을 붙든 채 한다(flaky 회귀 — CI 2026-10-06)★: MessageDone 의 도어벨이 다른
+    //   스레드에서 flush 를 띄우고, 그 첫 주입의 입력 시점 유저 에코(`Structured`)를 claude 분류기가 진행으로
+    //   세어 수신자는 곧바로 다시 턴 중이 된다 — 의도된 동작이다(주입 = 새 턴 · `drain_queue` 의 mid-batch
+    //   재검사 금지 문단). 그래서 도어벨 뒤에 한가를 묻는 것은 flush 와의 경주이고, 그 한가는 기다려서 볼
+    //   수 있는 상태도 아니다(다음 MessageDone 이나 턴 상한 fail-open 전에는 되돌아오지 않는다).
+    //   seam 의 기록 락을 쥐면 flush 는 `send_input` 에서 선다 — 세션은 에코를 `send_input` 성공 **뒤에**
+    //   내므로(`AgentSession::write_now`) 이 구간의 바쁨 판정은 MessageDone 하나만 반영한다.
+    {
+        let _stdin = captured.lock().unwrap();
+        feed(OutputEvent::MessageDone {
+            turn_id: None,
+            message_id: None,
+        });
+        assert!(!busy.is_busy(b_id, 0), "MessageDone → idle");
+    }
     let flushed = wait_until(Duration::from_secs(10), || {
         obs_seam::all_written(&captured).len() == 2
     });

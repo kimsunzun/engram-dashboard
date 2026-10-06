@@ -4258,8 +4258,10 @@ mod birth_tests {
 
         job.terminate(1).expect("Job 끝내기");
         let _ = x.wait();
-        drop(job);
+        // 기록은 Job 을 놓기 **전에** 켠다 — 듣는 스레드는 무리가 사라진 것을 본 때 켜져 있던 기록만 끈다. 놓은 뒤에
+        // 켜면 그 사이 깬 스레드는 켜진 기록 없이 끝날 수 있어, 뒤에 켠 기록을 끌 쪽이 없다.
         let (after, _) = recorder.start();
+        drop(job);
         wait_until("무리가 사라져 듣는 스레드가 끈 기록", || {
             (recorder.active() != after).then_some(())
         });
