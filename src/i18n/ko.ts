@@ -44,9 +44,8 @@ export const ko = {
     domModeToggle: 'DOM 모드 전환',
     renderFailed: '이 슬롯을 표시하지 못했습니다 — 우클릭 메뉴로 비우거나 닫을 수 있습니다',
     scrollToBottom: '맨 아래로',
-    // TRD S21-storage §6-2: 더 새 판이 저장한 슬롯 종류 — 원문은 셸이 쥐고, 다른 내용을 놓으면 사라진다.
-    foreignContent: '이 버전이 모르는 내용',
-    foreignContentHint: '더 새 버전에서 저장한 내용입니다 — 다른 내용을 놓으면 사라집니다',
+    // TRD S21-storage §6-2: 이 판이 모르는 슬롯 종류 — 화면엔 아이콘만 그리고 이 문구는 그 이름·툴팁이다.
+    foreignContent: '알 수 없는 내용',
   },
   window: {
     create: '새 창',

@@ -344,8 +344,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(emptyIcons()[0].parentElement).toBe(border)
   })
 
-  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실리지만 비어 있지 않다 — `+` 대신 자리표시를 그린다.
-  it('foreignSlots 의 슬롯 → 「이 버전이 모르는 내용」 자리표시(`+` 없음), 다른 빈 슬롯은 그대로 `+`', () => {
+  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실리지만 비어 있지 않다 — `+` 대신 아이콘 자리표시를 그린다
+  //   (문구·안내 줄·막 없음 — 사용자 결정 2026-10-06).
+  it('foreignSlots 의 슬롯 → 「알 수 없는 내용」 아이콘 자리표시(`+`·문구·막 없음), 다른 빈 슬롯은 그대로 `+`', () => {
     const node = splitNode('p', slotNode('foreign', null), slotNode('plain', null))
     const { slotRects, splitRects } = rectsFor(node)
     render(
@@ -358,12 +359,21 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       />,
     )
     const foreign = borderOf('foreign')
-    expect(foreign.textContent).toContain('이 버전이 모르는 내용')
-    expect(foreign.textContent).toContain('다른 내용을 놓으면 사라집니다')
+    const mark = foreign.querySelector<HTMLElement>(':scope > [data-slot-foreign]')
+    expect(mark).not.toBeNull()
+    expect(mark!.getAttribute('role')).toBe('img')
+    expect(mark!.getAttribute('aria-label')).toBe('알 수 없는 내용')
+    expect(mark!.getAttribute('title')).toBe('알 수 없는 내용')
+    expect(mark!.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true')
+    expect(foreign.textContent).toBe('')
     expect(foreign.querySelector(':scope > svg')).toBeNull()
+    expect(foreign.querySelector('[data-slot-dead]')).toBeNull()
     expect(foreign.style.justifyContent).toBe('center')
     expect(borderOf('plain').querySelector(':scope > svg')).not.toBeNull()
-    expect(borderOf('plain').textContent).not.toContain('이 버전이 모르는 내용')
+    expect(borderOf('plain').querySelector('[data-slot-foreign]')).toBeNull()
+    // 아이콘은 pointer-events 를 끊지 않으므로, 그 위 우클릭도 버블로 틀에 닿아 빈 슬롯 메뉴가 열려야 한다.
+    fireEvent.contextMenu(mark!)
+    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
   })
 
   it('data-slot-id 속성이 node.id 로 설정된다(cdp 검증용 불변식)', () => {

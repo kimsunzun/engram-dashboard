@@ -3,7 +3,7 @@
 //   팝아웃은 새 slot id·새 웹뷰라 새로 마운트된다.
 
 import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { Plus } from 'lucide-react'
+import { FileQuestionMark, Plus } from 'lucide-react'
 
 import type { LayoutNode, SlotRect } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
@@ -322,12 +322,21 @@ const SlotBody = memo(function SlotBody({
           <UsageSlot content={node.content} viewId={targetViewId} slotId={node.id} />
         ) : isForeign ? (
           // TRD S21-storage §6-2: 원문은 셸만 쥔다 — 메뉴는 빈 슬롯 메뉴 그대로이고, 거기서 내용을 놓으면 원문이 사라진다.
-          <>
-            <span>{t('slot.foreignContent')}</span>
-            <span className="px-2 text-center wrap-anywhere" style={{ opacity: 0.7 }}>
-              {t('slot.foreignContentHint')}
-            </span>
-          </>
+          // ADR-0280
+          // ★문구 없이 아이콘 하나, 막 없음(사용자 결정 2026-10-06 · ADR-0280 결정 7)★: 「더 새 판이 저장했다」를 가르지
+          //   않고 안내 줄도 두지 않는다 — 부재 막의 심볼과 같은 결이되, 꺼진 에이전트가 아니라서 흐림은 얹지 않는다.
+          //   뜻은 이름(`aria-label`) · hover 툴팁(`title`) · 자동화 표식(`data-slot-foreign`)으로 남긴다.
+          // pointer-events 를 끊지 않는다(아래 `+` 와 다르다) — `title` 툴팁이 hover 를 받아야 한다. 클릭·우클릭은 버블로
+          //   틀에 닿고, 핸들러·tabIndex 가 없는 `role="img"` 는 ADR-0143 이 막는 상호작용 역할이 아니다.
+          <span
+            data-slot-foreign=""
+            role="img"
+            aria-label={t('slot.foreignContent')}
+            title={t('slot.foreignContent')}
+            className="flex"
+          >
+            <FileQuestionMark className="size-10 text-muted" />
+          </span>
         ) : (
           // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
           //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
