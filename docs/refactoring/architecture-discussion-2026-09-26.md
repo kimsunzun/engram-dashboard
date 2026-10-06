@@ -176,7 +176,7 @@
 - 예약 이름 목록을 걷는다. 벽은 **데몬의 등록 거절 하나**로 둔다. CI 대조 스크립트는 두지 않는다.
 - **단 거절을 클라이언트가 OS 메시지 박스로 띄운다**(사용자 2026-10-02 — 「빵 하고 뜨면서 클라에서 뜨면 유저도 알지」). 띄우는 쪽 = 셸(클라). 플랫폼마다 다른 창이므로 OS 분기는 셸이 아니라 OS 의존 코드 자리(후보 1)나 Tauri 의 대화상자 기능 뒤에 둔다 — 구현 때 고른다. **LLM 통지는 두지 않는다** — 원인은 로그에 남고 에이전트가 로그를 뒤지면 나온다(사용자). 지금의 `warn` 로그 한 줄은 그대로 남긴다.
 - **원칙(사용자 2026-10-02):** 「클라는 데몬이랑 아예 별도의 개념이라서 agent 를 모르는 게 좋음」 — 셸(클라)은 agent crate 를 의존하지 않는다.
-- 백엔드 정책 거름은 데몬에 맡긴다. ★**단 셸 검사를 그냥 지우면 구멍이 난다**★ — 정책 함수를 부르는 곳은 `agent.new` 처리 한 곳뿐이고(`crates/engram-dashboard-agent/src/commands.rs:1077`), 셸의 슬롯 스폰은 그 명령을 거치지 않고 통신 메시지 `SpawnByCwd` 를 바로 보내며(`src-tauri/src/layout/apply.rs:597`) 데몬은 그 경로에서 정책을 안 본다. → **순서: 슬롯 스폰을 데몬의 `agent.new` 명령 경로로 바꾼 뒤 셸 검사를 지운다.** 슬롯 스폰은 「검사 → 데몬 스폰 → 배치」 순이라 데몬이 거절해도 레이아웃이 안 바뀐다(`layout/apply.rs:585-620`). 거부 문구가 데몬을 한 번 다녀오고, `tests/layout_apply.rs` 의 「두 입구가 함께 열리나」 시험과 ADR-0219 의 두 입구 서술을 고친다.
+- 백엔드 정책 거름은 데몬에 맡긴다. ★**단 셸 검사를 그냥 지우면 구멍이 난다**★ — 정책 함수를 부르는 곳은 `agent.new` 처리 한 곳뿐이고(`crates/engram-dashboard-agent/src/commands.rs:1077`), 셸의 슬롯 스폰은 그 명령을 거치지 않고 통신 메시지 `SpawnByCwd` 를 바로 보내며(`src-tauri/src/layout/apply.rs:597`) 데몬은 그 경로에서 정책을 안 본다. → **순서: 슬롯 스폰을 데몬의 `agent.new` 명령 경로로 바꾼 뒤 셸 검사를 지운다.** 슬롯 스폰은 「검사 → 데몬 스폰 → 배치」 순이라 데몬이 거절해도 레이아웃이 안 바뀐다(`layout/apply.rs:585-620`). 거부 문구가 데몬을 한 번 다녀오고, `tests/layout_apply.rs` 의 「두 입구가 함께 열리나」 시험과 ADR-0219 의 두 입구 서술을 고친다. → 경로는 ADR-0279 로 바뀌었다(정책 벽 = 데몬 `SpawnByCwd` 처리부 · 슬롯 스폰 경로 그대로).
 - `normalize_cwd` 는 base 로(후보 4).
 - 얻는 것: 셸 실행 파일이 agent crate 전체(PTY · Windows 프로세스 관리 · 명령 수집 등)를 안고 가지 않는다. 「셸 = 데몬 클라이언트」(ADR-0029)가 의존 그래프에서도 보인다.
 
@@ -286,7 +286,7 @@
   - 1-2 → 비워 둔다(옛 로그 전환 — 사이드 작업으로 뺐다가 2026-10-03 에 없어졌다 · ADR-0268. 옛 기록이 1-2 를 가리킨다).
   - 1-3 platform crate(후보 1) — Job Object 를 「프로세스 그룹」 핸들로 · 원자적 쓰기 여러 벌의 동작을 하나로 정해 옮김(★storage P3 착지 뒤 — 나머지 platform 이전은 먼저 간다★) · **kill 인과 불변식이 걸려 full QA**.
 - **2. 클라·데몬 떼기**
-  - 2-1 셸 → agent 끊기(후보 5) — 선행 1-1 · **① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수** · ③ 등록 거절 메시지 박스 · GUI 실측.
+  - 2-1 셸 → agent 끊기(후보 5) — 선행 1-1 · **① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수** · ③ 등록 거절 메시지 박스 · GUI 실측. → 경로는 ADR-0279 로 바뀌었다(정책 벽 = 데몬 `SpawnByCwd` 처리부 · 슬롯 스폰 경로 그대로).
   - 2-2 discovery 나누기(후보 6, 정지 명령 클라이언트 제외) — 선행 1-3 · 데몬 기동 실측.
   - 2-3 engram CLI 독립 패키지(후보 9) — 선행 2-2.
   - 2-4 테스트용 서버 함수를 테스트 전용 플래그 뒤로.
@@ -339,7 +339,7 @@
 | `docs/reference/architecture-map-notes.md:86` 이 WMI 띄우기 자리를 `discovery/src/lib.rs:932,1105-1153` 로 가리킨다 — 1-3 U7 로 그 코드는 platform `spawn/wmi.rs` 로 갔다(그 전에도 줄이 어긋나 있었다) · 출처 = 1-3 U7 리뷰 | `docs/reference/architecture-map-notes.md` | 그 지도를 다시 뽑을 때 |
 | discovery 의 실 WMI `#[ignore]` 시험 둘은 `cargo test -p engram-dashboard-discovery -- --ignored real_wmi` 로 돌리면 `ExeNotFound` 로 진다 — cargo 가 cwd 를 crate 폴더로 두는데 데몬 exe 찾기가 시험 exe 폴더 · cwd/target/debug 를 본다. 저장소 루트를 cwd 로 그 시험 바이너리를 직접 돌리면 통과한다(실측 2026-10-06 · rv 행렬 None 0 · NEW_CONSOLE 0 · DETACHED 0 · NO_WINDOW 21) · 출처 = 1-3 U7 QA | `crates/engram-dashboard-discovery/src/lib.rs`(`locate_daemon_exe` · 시험 `real_wmi_*`) · `.claude/skill-bindings/qa.md` | 2-2 또는 다음에 그 시험을 돌릴 때(실행법을 바인딩에 적거나 찾기 후보를 넓힌다) |
 | CLAUDE.md 「백엔드 모듈 맵」에 `engram-dashboard-transport` crate 항목이 없다 — 워크스페이스 멤버이고 CI 격리 게이트(`ci.yml` 의 `transport gate 1`~`4d`)와 qa 블록도 있는데 맵에만 이름이 없다(`rg engram-dashboard-transport CLAUDE.md` → 0줄 · 실측 2026-10-06) · 출처 = 2-1 조사(2026-10-06) | `CLAUDE.md` 「백엔드 모듈 맵」 · `crates/engram-dashboard-transport/src/lib.rs`(헤더 — 항목이 가리킬 정본) | 미처리 — 다음에 그 맵을 손볼 때(늦어도 3단계 transport) |
-| 프론트 레지스트리의 `agentlist.createCodex`(형제 `createCodexJson`)는 `humanOnly` 가 걷힌 뒤(2026-09-22) LLM 이 `__engramCmd` 로 부를 수 있고, 그 `CreateProfile` 경로는 LLM 백엔드 정책(`LLM_BACKEND_POLICY`)을 안 본다 — 2-1 의 데몬 벽은 `SpawnByCwd` 만 덮는다. 오늘 영향 0(표가 아무 낱말도 안 닫는다). 따로, agent 쪽 「정책을 묻는 문 셋」 중 ③(`humanOnly`) 서술은 `humanOnly` 가 2026-09-22 에 걷혔기 때문에 낡았다(우회 경로 때문이 아니다) · 출처 = 2-1 TRD 작성(2026-10-06 · `../process/S21-crate-boundaries/trd-2-1-shell-agent-cut.md` §8 O5) | `src/commands/agentCommands.ts`(`agentlist.createCodex` · 머리 주석 `:41`) · `crates/engram-dashboard-agent/src/commands.rs:600-614`(「문 ③」) | 미처리 — 경로는 정책 표가 한 낱말이라도 닫기 전에 본다 · 「문 ③」 글은 2-1 U1 이 그 주석을 지날 때 |
+| 프론트 레지스트리의 `agentlist.createCodex`(형제 `createCodexJson`)는 `humanOnly` 가 걷힌 뒤(2026-09-22) LLM 이 `__engramCmd` 로 부를 수 있고, 그 `CreateProfile` 경로는 LLM 백엔드 정책(`LLM_BACKEND_POLICY`)을 안 본다 — 2-1 의 데몬 벽은 `SpawnByCwd` 만 덮는다. 오늘 영향 0(표가 아무 낱말도 안 닫는다). ~~따로, agent 쪽 「정책을 묻는 문 셋」 중 ③(`humanOnly`) 서술은 `humanOnly` 가 2026-09-22 에 걷혔기 때문에 낡았다(우회 경로 때문이 아니다)~~ **→ 「문 ③」 글은 처리 2-1 U1 `8b48386`**: 문 목록을 `agent.new` · 데몬 `SpawnByCwd` · 셸 `gate_backend`(U2 가 걷는다)로 고쳐 쓰고 `humanOnly` 는 표를 보는 문이 아니라고 적었다 — `CreateProfile` 우회 자체는 미처리 · 출처 = 2-1 TRD 작성(2026-10-06 · `../process/S21-crate-boundaries/trd-2-1-shell-agent-cut.md` §8 O5) | `src/commands/agentCommands.ts`(`agentlist.createCodex` · 머리 주석 `:41`) · `crates/engram-dashboard-agent/src/commands.rs:600-614`(「문 ③」) | 미처리 — 경로는 정책 표가 한 낱말이라도 닫기 전에 본다 · ~~「문 ③」 글은 2-1 U1 이 그 주석을 지날 때~~ 처리됨(`8b48386`) |
 ---
 
 ## 큰 절 — 나중에 따로 다룬다 (지금은 모으기만)

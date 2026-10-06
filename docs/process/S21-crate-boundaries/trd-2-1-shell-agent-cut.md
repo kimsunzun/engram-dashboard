@@ -2,21 +2,21 @@
 
 > 상태: **4판(2026-10-06) — `/review trd` 2라운드(codex PASS · doc-aware FIX) 반영.** 코드는 아직 한 줄도 바뀌지 않았다.
 > **결정 출처:** 사용자 위임(2026-10-06 「알아서 해 … 단계 착수」) → 메인 결정. D1~D7 · §8 의 O1~O5 처리 · 3판의 리뷰 반영(F1 의 「감수한 대가」 포함)이 여기서 온다. 그 밖에 D4 의 「LLM 통지 없음」 · 「warn 로그 유지」는 ADR-0270 결정 4 의 사용자 결정(2026-10-02)이다.
-> **개정(2026-10-06, 4판 — 리뷰 2라운드):** ① U3 에 슬롯 계약 주석 두 자리(`connection.rs:61-64` · `:183`)와 `:971` 앵커를 넣었다(N1 · §2-4 · §3-1) ② U3 안 순서 — `:971` 을 맨 뒤에 뒤집는다(N2 · §3-4) ③ U1 시험 ㉢ 에 표 밖 낱말(N3 · §3-2) ④ `layout_commands` 바이너리는 데몬을 **부른다**(`:3033`) — 사실을 바로잡고 「전」 측정을 U2 ① 앞으로(N4 · §2-5 · §3-3 · §9) ⑤ `send_command` 글 불변 시험을 바이트 대조로(N5 · §3-4) ⑥ 표 doc 에 「`refusal` 을 `Some` 으로 바꾸기 전에 ADR-NNNN 재론」(F1 잔여 · §2-1) ⑦ 새 칸이 드는 구조체 · 생성자 자리(잔 지적 · §2-1 · §2-4 · §3-1).
+> **개정(2026-10-06, 4판 — 리뷰 2라운드):** ① U3 에 슬롯 계약 주석 두 자리(`connection.rs:61-64` · `:183`)와 `:971` 앵커를 넣었다(N1 · §2-4 · §3-1) ② U3 안 순서 — `:971` 을 맨 뒤에 뒤집는다(N2 · §3-4) ③ U1 시험 ㉢ 에 표 밖 낱말(N3 · §3-2) ④ `layout_commands` 바이너리는 데몬을 **부른다**(`:3033`) — 사실을 바로잡고 「전」 측정을 U2 ① 앞으로(N4 · §2-5 · §3-3 · §9) ⑤ `send_command` 글 불변 시험을 바이트 대조로(N5 · §3-4) ⑥ 표 doc 에 「`refusal` 을 `Some` 으로 바꾸기 전에 ADR-0279 재론」(F1 잔여 · §2-1) ⑦ 새 칸이 드는 구조체 · 생성자 자리(잔 지적 · §2-1 · §2-4 · §3-1).
 > **개정(2026-10-06, 3판 — 리뷰 1라운드):** ① D4 의 데몬 거절 판정을 문자열 코드 가르기에서 **답 경계의 출처 타입**으로 바꿨다 — 모르는 · 새 데몬 코드도 박스가 뜬다(codex C1 · §2-4 · §3-4 · §7 3) ② D1 의 문은 호출자를 가리지 않는다 — 사람 경로가 「LLM 제어 표면」 정책을 보는 것을 「감수한 대가」로 적고 재론 계기를 달았다 · agent 주석을 사실대로 고치는 일을 U1 에 넣었다(F1 · §2-1 · §7 1) ③ 거절 갈래의 dispatch 수준 시험 — `ConnectionCore` 에 정책 seam(F2 · §2-1 · §3-2) ④ 거부 (a) 에서 철자 사유를 걷었다(F3 · §1-5 · §2-1) ⑤ §7 1 에 ADR-0270 「영향」의 「정책을 보는 문은 데몬 `agent.new` 하나」를 더했다(F4) ⑥ 단위 파일 목록 · 문서 후속 보강(F5 · F6 · §2-5 · §3-1 · §6) ⑦ 잔 지적 넷(문구 대소문자 · 메모 §11 인과 · U1 주석이 커밋마다 참 · 로컬 문구 목록은 C1 로 걷힘).
 > **개정(2026-10-06, 2판):** ① D1 거부 사유에서 「슬롯 즉석 에이전트가 영속 프로필이 된다」를 지웠다(§2-1 끝 「바로잡은 사실」 · §8 O1) ② `SpawnByCwd` 가 명부 상한에 닿는다로 바로잡았다(§1-5 · §8 O2) ③ D4 트리거를 데몬이 낸 거절 전부로 넓혔다(§8 O3) ④ O5 를 메모 §11 한 줄로 넘겼다.
-> ★**착수 전제 — D1 은 ADR-0270 결정 3.1 의 부분 개정이다 → 새 ADR(ADR-NNNN(예정) · §7)을 U1 착수 전에 박는다**★(CLAUDE.md 「설계 결정 기록」 — 굵은 결정은 결정 즉시).
+> ★**착수 전제 — D1 은 ADR-0270 결정 3.1 의 부분 개정이다 → 새 ADR(ADR-0279 · §7)을 U1 착수 전에 박는다**★(CLAUDE.md 「설계 결정 기록」 — 굵은 결정은 결정 즉시).
 > **범위 = 작업 순서 2-1 전부**(`docs/refactoring/architecture-discussion-2026-09-26.md` §3 결정 후보 5 · §10 2-1) — 슬롯 스폰의 백엔드 정책 벽을 데몬에 세우고, 셸의 정책 검사와 예약 목록의 데몬 절반을 걷어 셸의 agent 운영 의존을 지우고, 등록 거절을 OS 메시지 박스로 알린다.
 > **배치 근거:** `docs/README.md` 「새 내용을 어디에 넣나」의 「새 기능 **설계 착수** → `process/SN-name/`」. 같은 단계의 형제(1-1 · 1-3 TRD)가 이 폴더에 있다.
 > **표기:** 「실측」 = 기준 커밋 `cf693f4`(master — 브랜치 `v0.3.3/refactor/crate-boundaries` 의 HEAD `a65ffa7` 와 코드가 같다. 차이는 `docs/decisions/` 두 파일뿐)에서 잰 것과 그 명령 · 「결정(메인 2026-10-06)」 = 위 「결정 출처」의 것 · 「ADR」 = 확정 ADR 본문 · 「제안」 = 이 TRD 의 안(새 이름은 전부 가안).
-> 앵커: **ADR-0270**(이 단계의 헌장 — 결정 3.1 을 ADR-NNNN(예정)이 부분 개정) · ADR-0219(정책 표와 그것을 보는 문 · 결정 5 claude 고정 문) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0172(즉석 생성은 「마지막 실패」를 쓰지 않는다) · ADR-0155(등록 반려 계약) · ADR-0012(seam · 단독 하네스) · ADR-0006(락 밖 외부 호출) · ADR-0175(셸 dev 그래프의 agent) · step-log S21.
+> 앵커: **ADR-0270**(이 단계의 헌장 — 결정 3.1 을 ADR-0279가 부분 개정) · ADR-0219(정책 표와 그것을 보는 문 · 결정 5 claude 고정 문) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0172(즉석 생성은 「마지막 실패」를 쓰지 않는다) · ADR-0155(등록 반려 계약) · ADR-0012(seam · 단독 하네스) · ADR-0006(락 밖 외부 호출) · ADR-0175(셸 dev 그래프의 agent) · step-log S21.
 
 ---
 
 ## 0. 결론 (먼저)
 
 ```
-① 정책 벽 = 데몬. 데몬의 SpawnByCwd 처리부가 프로필을 만들기 전에 agent 의 llm_creation_refusal 을 부른다(D1).
+① 정책 벽 = 데몬. 데몬의 SpawnByCwd 처리부가 스폰(`spawn_agent`) 전에 agent 의 llm_creation_refusal 을 부른다(D1).
      슬롯 스폰 경로 · 왕복 수 · 배치 순서는 그대로다. 셸 agent.spawnInto 와 프론트의 SpawnByCwd 두 경로가 함께 덮인다.
      그 문은 호출자를 가리지 않는다 — 사람 경로도 같은 표를 본다(감수한 대가 · 오늘 영향 0).
 ② 셸은 낱말 오탈자 그물(parse_backend)만 남기고, 예약 목록은 셸 자기 표 절반만 남기고, agent 의존을 지운다(D2 · D3).
@@ -102,12 +102,12 @@
 
 ### 2-1. D1 — 정책 벽은 데몬 `SpawnByCwd` 처리부
 
-- **고른 것:** 데몬이 `SpawnByCwd` 를 받으면 프로필을 만들기 전에 정책(운영 = agent `llm_creation_refusal`)을 부르고, 거절이면 `Error` 로 답한다 — 셸이 이미 그대로 띄우는 오류 경로다(§1-2).
+- **고른 것:** 데몬이 `SpawnByCwd` 를 받으면 스폰(`spawn_agent`) 전에 정책(운영 = agent `llm_creation_refusal`)을 부르고, 거절이면 `Error` 로 답한다 — 셸이 이미 그대로 띄우는 오류 경로다(§1-2).
 - **이유:** ADR-0270 의 뜻(정책 벽은 데몬)을 지키면서 슬롯 동작 · 왕복 수 · 배치 순서가 그대로다. 프론트가 직접 보내는 `SpawnByCwd` 두 경로(`slotContentCommands.ts:80` · `agentCommands.ts:104`)도 함께 덮는다. 셸이 처음으로 버스 호출(`AgentCommand::Command`)을 내는 생산자가 되지 않는다(셸 Rust 에 그 생산자 0 — 조사 · `messages.rs:645` 주석).
 - **거부:**
   - (a) 슬롯 스폰을 `agent.new` + `agent.spawn {target}` 으로 — `agent.new` 는 등록만 해(잠든 상태) 왕복이 둘이고, 둘째가 실패하면 잠든 고아가 남고, 셸은 agent 의 인자 타입(`AgentNewArgs`)을 못 쓰므로 인자 JSON 을 손으로 지어야 하고, 프론트의 `SpawnByCwd` 슬롯 경로는 여전히 정책을 비켜 간다.
   - (b) 만들고 띄우기를 한 번에 하는 새 데몬 동사 — D1 보다 얻는 것 없이 표면만 는다.
-- **ADR:** ADR-0270 결정 3.1 부분 개정 → ADR-NNNN(예정) §7.
+- **ADR:** ADR-0270 결정 3.1 부분 개정 → ADR-0279 §7.
 - ★**감수한 대가 — 이 문은 호출자를 가리지 않는다**★(메인 결정 2026-10-06 · 리뷰 F1): 정책 이름은 「LLM 제어 표면」이지만 데몬 `SpawnByCwd` 는 누가 보냈는지 모른다. 그래서 2-1 뒤 **사람 경로도 같은 표를 본다** — 새로 닿는 것은 claude 고정 두 문(`slot.createAgentHere` · 프론트 `agent.spawn` — 뒤의 것은 ADR-0219 결정 5 의 「일부러 claude 에 못박은」 문)이고, 프론트 `agent.spawnInto` 는 **새 노출이 아니다**(셸 문이 이미 호출자를 가리지 않고 표를 본다 — §1-2). 그 결과 같은 이름의 두 문이 갈린다 — 프론트 `agent.spawn` 은 표를 보고 agent 버스 `agent.spawn`(`create_and_start`)은 안 본다. **오늘 영향 0** — 표가 아무것도 안 닫고 claude 가 열려 있다. ★**재론 계기: 어느 백엔드든 LLM 에게 닫히거나 선언이 빠지는(`NO_POLICY_DECLARED`) 날 — 그때 스폰 패킷에 호출자 축을 더한다.**★
 - ★**바로잡은 사실 — 「영속 프로필이 되느냐」는 (a) 와 D1 을 가르는 축이 아니다. 거부 사유로 다시 꺼내지 말 것**★(메인 결정 2026-10-06 · §8 O1): 지금 `SpawnByCwd` 도 즉석 프로필을 명부에 올리고 디스크에 쓴다 — `spawn_agent` → `register_for_spawn` → `upsert_preserving_hierarchy`(`agent/src/manager.rs:1161`) → `store.save`(`agent/src/profile.rs:387-395`) · protocol doc `messages.rs:113-115` 「spawn 경로가 그 프로필을 registry 에 등록·persist 한다」. 두 경로 모두 `auto_restore = false` 다(`connection_core.rs:1470-1476` · agent `commands.rs:1114`). 철자도 사유가 아니다(§1-5).
 
@@ -119,14 +119,14 @@
 - **문구** = 지금 셸 문구의 틀 그대로 — 「`backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함.`」(`apply.rs:568-570`). ★다른 것은 `{word}` 의 대소문자 하나다★ — 셸은 친 철자를 다듬어(`trim`) 그대로 실었고(`Codex` 도 통과한다 — protocol 역직렬화가 대소문자를 무시한다, `domain.rs:235-245`), 데몬은 enum 을 직렬화해 늘 lowercase(`codex`)를 싣는다. 오탈자 문구(「를 모른다」)와는 그대로 갈린다.
 - **「마지막 실패」를 쓰지 않는다** — 활성화도 즉석 생성도 일어나지 않았다(ADR-0172 결정 1 · 4 — 안 한 일에는 기록할 실패가 없다).
 - **와이어 · 카탈로그** — `PROTOCOL_VERSION` · 셸 `CATALOG_VERSION` 그대로(패킷 모양도 오늘 동작도 안 바뀐다).
-- **앵커** `// ADR-0270` · `// ADR-NNNN`.
-- **agent 주석을 사실대로(U1 · 커밋마다 참이게):** ① 정책 구획 머리(`commands.rs:593` 「LLM 제어 표면의 백엔드 생성 정책」 · `:600-614` 「LLM 제어 표면이 셋」) · 표 doc(`:629` 「LLM 제어 표면이 어느 백엔드를 만들 수 있나」) · 판정 함수 doc(`:668-673` 「사람이 쓰는 문에서는 그대로 만들어진다 · 막는 것은 사람이 아닌 호출자뿐」)에 **데몬 `SpawnByCwd` 문은 호출자를 가리지 않고 이 판정을 적용한다**(사람 경로도 막힌다 — 위 「감수한 대가」)를 적는다. ★표 doc(`:629`)에는 한 줄을 더한다 — 「어느 줄의 `refusal` 을 `Some` 으로 바꾸거나 선언 없는 낱말을 들이기 전에 ADR-NNNN 을 다시 연다 — 데몬 `SpawnByCwd` 문이 사람 경로도 막는다」★(재론 계기를 그 편집이 일어나는 자리에 둔다). ② 「문」 목록은 U1 커밋에서 **데몬 `SpawnByCwd` 문을 더하고 셸 `gate_backend` 문은 「2-1 U2 가 걷는다 — 그때까지 데몬 문보다 먼저 같은 표를 본다」로 남긴다** — U1 시점에 셸 문이 아직 살아 있으므로. U2 커밋이 그 줄을 지운다. ③(걷힌 `humanOnly`)은 U1 에서 사실대로 고친다. `:1073-1077` 「형제 문의 자리」도 같은 규칙.
+- **앵커** `// ADR-0270` · `// ADR-0279`.
+- **agent 주석을 사실대로(U1 · 커밋마다 참이게):** ① 정책 구획 머리(`commands.rs:593` 「LLM 제어 표면의 백엔드 생성 정책」 · `:600-614` 「LLM 제어 표면이 셋」) · 표 doc(`:629` 「LLM 제어 표면이 어느 백엔드를 만들 수 있나」) · 판정 함수 doc(`:668-673` 「사람이 쓰는 문에서는 그대로 만들어진다 · 막는 것은 사람이 아닌 호출자뿐」)에 **데몬 `SpawnByCwd` 문은 호출자를 가리지 않고 이 판정을 적용한다**(사람 경로도 막힌다 — 위 「감수한 대가」)를 적는다. ★표 doc(`:629`)에는 한 줄을 더한다 — 「어느 줄의 `refusal` 을 `Some` 으로 바꾸거나 선언 없는 낱말을 들이기 전에 ADR-0279 를 다시 연다 — 데몬 `SpawnByCwd` 문이 사람 경로도 막는다」★(재론 계기를 그 편집이 일어나는 자리에 둔다). ② 「문」 목록은 U1 커밋에서 **데몬 `SpawnByCwd` 문을 더하고 셸 `gate_backend` 문은 「2-1 U2 가 걷는다 — 그때까지 데몬 문보다 먼저 같은 표를 본다」로 남긴다** — U1 시점에 셸 문이 아직 살아 있으므로. U2 커밋이 그 줄을 지운다. ③(걷힌 `humanOnly`)은 U1 에서 사실대로 고친다. `:1073-1077` 「형제 문의 자리」도 같은 규칙.
 
 ### 2-2. D2 — 셸은 낱말 그물만
 
 - `gate_backend`(`apply.rs:558-572`) 삭제 · 0) 단계(`:586-589`)가 `parse_backend` 를 직접 부른다 · import(`:36`) 삭제. `parse_backend` 는 protocol enum 에만 묻는다(agent 불필요).
 - **거절 문구가 데몬을 한 번 다녀온다** — 거절은 1) 단계의 `?`(`:598`)에서 돌아와 2) 배치에 닿지 않는다 → 레이아웃 불변(§1-2). 탭/슬롯 가드(`:590-596`)는 여전히 스폰 전이다.
-- 머리 주석(`:531-556`)의 「두 축」 서술을 「셸 = 오탈자 그물 · 정책 = 데몬(ADR-NNNN)」으로 고친다. 「두 거절을 한 문구로 뭉치지 말 것」은 그대로 산다(데몬 문구 ≠ 그물 문구).
+- 머리 주석(`:531-556`)의 「두 축」 서술을 「셸 = 오탈자 그물 · 정책 = 데몬(ADR-0279)」으로 고친다. 「두 거절을 한 문구로 뭉치지 말 것」은 그대로 산다(데몬 문구 ≠ 그물 문구).
 - 버스 오류 코드 그대로 — 지금의 정책 거절도 2-1 뒤의 데몬 거절도 `not_applied` → `CONFLICT`(§1-2).
 
 ### 2-3. D3 — 예약 목록: 셸 표 절반은 남긴다 (코드로 판단)
@@ -144,7 +144,7 @@
 **출처를 답 경계에서 타입으로 남긴다(리뷰 C1 — 문자열 코드 가르기를 걷었다):**
 
 - **바뀌는 자리 = 셋, 그 밖의 호출자는 그대로:**
-  1. `connection.rs:971` — 데몬의 짝 답을 접지 않고 그대로 슬롯에 넣는다(`Ok(ev)` — `Error` 도 `Ok(AgentEvent::Error{..})` 로). 그러면 대기 슬롯(`CommandReply` = `oneshot::Sender<Result<AgentEvent, String>>` — `:65`, **타입은 그대로**)의 `Err` 에는 **셸 로컬 실패만** 남는다 — §1-3 의 로컬 송신 자리 일곱(`:677` · `:702` · `:1343` · `:1361` · `:1377` · `:1535` · `:1799`)은 손대지 않는다. ★그 계약을 적은 주석 두 자리를 함께 고친다★ — `CommandReply` doc(`:61-64` — 지금 「`Err(msg)` = 데몬 Error 또는 연결 끊김」)과 `SendCommand` doc(`:183` — 「send/끊김 실패 시 Err」)에 「**데몬 답을 슬롯에 넣는 자리는 `:971` 하나이고 `Error` 도 `Ok` 로 넣는다 · 슬롯의 `Err` 는 셸 로컬 실패뿐이다 · `Error` 를 `Err` 로 접지 말 것 — 접으면 거절 박스가 조용히 죽는다**」를 적는다. `:971` 에는 `// ADR-NNNN` 앵커를 단다.
+  1. `connection.rs:971` — 데몬의 짝 답을 접지 않고 그대로 슬롯에 넣는다(`Ok(ev)` — `Error` 도 `Ok(AgentEvent::Error{..})` 로). 그러면 대기 슬롯(`CommandReply` = `oneshot::Sender<Result<AgentEvent, String>>` — `:65`, **타입은 그대로**)의 `Err` 에는 **셸 로컬 실패만** 남는다 — §1-3 의 로컬 송신 자리 일곱(`:677` · `:702` · `:1343` · `:1361` · `:1377` · `:1535` · `:1799`)은 손대지 않는다. ★그 계약을 적은 주석 두 자리를 함께 고친다★ — `CommandReply` doc(`:61-64` — 지금 「`Err(msg)` = 데몬 Error 또는 연결 끊김」)과 `SendCommand` doc(`:183` — 「send/끊김 실패 시 Err」)에 「**데몬 답을 슬롯에 넣는 자리는 `:971` 하나이고 `Error` 도 `Ok` 로 넣는다 · 슬롯의 `Err` 는 셸 로컬 실패뿐이다 · `Error` 를 `Err` 로 접지 말 것 — 접으면 거절 박스가 조용히 죽는다**」를 적는다. `:971` 에는 `// ADR-0279` 앵커를 단다.
   2. `protocol_state.rs:29-37` `reply_outcome(ev)` → 슬롯 결과를 출처 타입으로 바꾸는 함수 하나(가안 `classify_reply(Result<AgentEvent, String>) -> Result<AgentEvent, CommandFailure>`) · `enum CommandFailure { Daemon { message: String }, Local(String) }`(가안) · `Display` = 지금과 같은 글(`Daemon` = 데몬 문구 원문 · `Local` = 로컬 문구). 판정: `Ok(Error{message,..})` → `Daemon` · 그 밖의 `Ok(ev)` → `Ok(ev)` · `Err(s)` → `Local(s)`. **문자열을 읽지 않는다** — 코드 접두가 있든 없든 모르는 코드든 데몬이 답했으면 `Daemon` 이다.
   3. `DaemonClient` 에 출처를 지키는 형제 하나(가안 `send_command_with_origin(cmd) -> Result<AgentEvent, CommandFailure>` — `mod.rs:804-831` 의 본문을 옮기고, 미연결 · 채널 끊김 · 답 유실 · request_id 없음(`:806`)은 `Local`) · 기존 `send_command` 는 그것을 불러 `CommandFailure` 를 `String` 으로 바꾼다(`to_string`). ★기존 호출자(`commands/agent.rs` 의 여섯 · `commands/layout.rs:100` · 시험)가 받는 글은 바이트 단위로 같다★ — 지금도 데몬 `Error` 는 `Err(message)` 로, 로컬 실패는 그 상수 글로 왔다.
 - **두 자리:** 등록 결말 태스크(`connection.rs:1961-1976`)는 `outcome_rx` 의 결과를 같은 함수로 가른다 — `Daemon` → warn(지금 라벨 그대로) + 박스 · `Local` → warn(같은 라벨 — §8 O4) 만 · `Ok` → info. 차분 자리(`view_bus.rs:94-100`)는 `send_command_with_origin` 을 불러 같은 규칙.
@@ -215,7 +215,7 @@ cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --al
 
 - `src-tauri/Cargo.toml:64-71` — 주석과 의존 줄 삭제(「뒤 단계에서 닫힌다」는 2-1 이 닫는다).
 - `src-tauri/Cargo.toml:79-82` net 주석 「forward 폐포는 {net, agent, protocol} … 셋 다 이미 이 셸의 의존이다」 → 「기본 feature(이 셸이 쓰는 조합)로는 워크스페이스 의존 0 · `server` 를 켜면 {platform, protocol}」(§1-4 실측).
-- ADR-0219 의 「문」 · 「재는 자리 셋」 서술은 본문을 고치지 않는다 — ADR-NNNN 이 링크로 진다(`/adr link` · §7).
+- ADR-0219 의 「문」 · 「재는 자리 셋」 서술은 본문을 고치지 않는다 — ADR-0279 가 링크로 진다(`/adr link` · §7).
 
 ---
 
@@ -229,7 +229,7 @@ cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --al
 |---|---|---|---|
 | **U1** | D1 + 데몬 시험(D5 ① · ③ 닫힌 팔) | daemon `src/connection_core.rs`(정책 seam 칸과 그 doc · 구조체 doc `:1067-1071` 예외 한 줄 · `new` 리터럴 `:1108-1119` · 처리부 · 도우미 · 시험) · agent `src/commands.rs`(주석만 — `:593` · `:600-614` · `:629` · `:668-673` · `:1073-1077`) | `/implement standard` · `/review code full` · `/qa standard` |
 | **U2** | D2 · D3 · D5(② · 셸 고쳐 쓰기 · 중복 이름 시험 doc) · D6 · D7 · agent 의존 삭제 | agent `src/commands.rs`(시험 · `:600-614` 의 셸 문 줄 삭제) · 셸 `src/layout/apply.rs` · `src/view_commands.rs` · `tests/layout_apply.rs` · `tests/layout_commands.rs`(`:629-634` 포함) · `Cargo.toml` · 루트 `Cargo.lock` · 프론트 `src/commands/agentCommands.ts:46-51`(주석 — 「형제 문 둘」 · 「재는 자리 = `layout_apply.rs`」) · `docs/reference/structure/agent-backend.md`(`:98` · `:107` · `:209` · `:217`) · `docs/reference/structure/agent-backend.html`(`:605` · `:616` — `.md` 의 짝) · `ci.yml` · `qa.md` · `CLAUDE.md` · `docs/testing-strategy.md` | `/implement standard` · `/review code full`(+ doc 렌즈 — load-bearing 문서) · `/qa full`(GUI) |
-| **U3** | D4 + GUI 실측 | 셸 `src/daemon_client/{protocol_state.rs(`reply_outcome` → 출처 분류 · 그 시험 `:433-450`), connection.rs(`:971` + `// ADR-NNNN` · 슬롯 계약 주석 `:61-64` · `:183` · 결말 태스크 `:1961-1976`), mod.rs(`send_command` `:804-831` · 형제 · `DaemonClient` 칸 하나 + 리터럴 넷 `:246` · `:281` · `:307` · `:337`), refusal.rs(새), events.rs(머리 `:3-8`), tests.rs}` · `src/commands/view_bus.rs` | `/implement standard` · `/review code full` · `/qa full`(GUI) |
+| **U3** | D4 + GUI 실측 | 셸 `src/daemon_client/{protocol_state.rs(`reply_outcome` → 출처 분류 · 그 시험 `:433-450`), connection.rs(`:971` + `// ADR-0279` · 슬롯 계약 주석 `:61-64` · `:183` · 결말 태스크 `:1961-1976`), mod.rs(`send_command` `:804-831` · 형제 · `DaemonClient` 칸 하나 + 리터럴 넷 `:246` · `:281` · `:307` · `:337`), refusal.rs(새), events.rs(머리 `:3-8`), tests.rs}` · `src/commands/view_bus.rs` | `/implement standard` · `/review code full` · `/qa full`(GUI) |
 
 **순서 U1 → U2 → U3.** U1 이 U2 보다 앞이어야 한다 — 거꾸로면 셸 검사를 지운 순간 슬롯 스폰에 정책 구멍이 난다(ADR-0270 「거부한 대안」 셋째). U3 의 코드는 U2 와 무관하지만 GUI 실측의 트리거(§5-2)가 D3(셸이 데몬 이름을 거르지 않음)에 기대므로 U2 뒤다. 파일 겹침은 agent `commands.rs`(U1 주석 · U2 시험과 셸 문 줄)뿐이다 — 그래도 **한 코더씩 직렬**을 권한다(U2 의 Cargo.lock · CLAUDE.md 를 U3 이 다시 만질 수 있다).
 
@@ -287,9 +287,9 @@ cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --al
 
 ### 3-6. U1 착수 체크리스트
 
-0. **전제 둘.** ① ADR-NNNN(예정)을 박는다(§7 — 채번 · 링크 · 도장 = `/adr`). ② 되돌릴 지점 — 이 TRD 를 로컬 커밋해 출발점을 만든다(코드 트리 = `cf693f4`).
+0. **전제 둘.** ① ADR-0279를 박는다(§7 — 채번 · 링크 · 도장 = `/adr`). ② 되돌릴 지점 — 이 TRD 를 로컬 커밋해 출발점을 만든다(코드 트리 = `cf693f4`).
 1. **출발 수치** — §3-5 명령을 돌려 결과 줄 · 통과 · 실패 · 무시를 적는다(터미널이 죽으면 `scripts/run-detached.ps1` — qa 바인딩 「분리 실행」).
-2. **손댈 파일(정확히):** daemon `src/connection_core.rs` — import 한 줄(`:24` 옆 · `llm_creation_refusal`) · 구조체 칸 하나(`:1072-1092`)와 그 doc · 구조체 doc(`:1067-1071`)의 「공유 핸들만」 경고에 예외 한 줄(상태 없는 순수 함수 포인터) · `new` 의 채움(리터럴 `:1108-1119` — 유일) · `#[cfg(test)]` 빌더 · 도우미(`spawn_command_by_cwd` `:654-661` 옆 · `// ADR-0270` · `// ADR-NNNN`) · 처리부(`:1466-1469` 와 `:1470` 사이) · 시험(§3-2 ㉠~㉢ · 선택 ㉣ — `spawn_by_cwd_without_a_backend_is_refused` `:4822` 옆) · agent `src/commands.rs` 주석(`:593` · `:600-614` · `:629` · `:668-673` · `:1073-1077` — §2-1 「agent 주석」 규칙). 구조 문서 · 프론트 주석은 U2 다.
+2. **손댈 파일(정확히):** daemon `src/connection_core.rs` — import 한 줄(`:24` 옆 · `llm_creation_refusal`) · 구조체 칸 하나(`:1072-1092`)와 그 doc · 구조체 doc(`:1067-1071`)의 「공유 핸들만」 경고에 예외 한 줄(상태 없는 순수 함수 포인터) · `new` 의 채움(리터럴 `:1108-1119` — 유일) · `#[cfg(test)]` 빌더 · 도우미(`spawn_command_by_cwd` `:654-661` 옆 · `// ADR-0270` · `// ADR-0279`) · 처리부(`:1466-1469` 와 `:1470` 사이) · 시험(§3-2 ㉠~㉢ · 선택 ㉣ — `spawn_by_cwd_without_a_backend_is_refused` `:4822` 옆) · agent `src/commands.rs` 주석(`:593` · `:600-614` · `:629` · `:668-673` · `:1073-1077` — §2-1 「agent 주석」 규칙). 구조 문서 · 프론트 주석은 U2 다.
 3. **순서:** 구조체 칸 + `new` 채움(아무도 안 씀 · 빌드 초록) → 도우미 + 시험 ㉠ · ㉢ → 처리부 한 줄 + ㉡(+ ㉣) → agent 주석.
 4. **게이트 · 수치:** §3-2 게이트 → §3-5 대조(기대 = 결과 줄 그대로 · 통과 + 셋 또는 넷).
 5. `/review code full` → `/qa standard` → 게이트 초록 뒤 커밋(`S21: <타입>(daemon): …` — 스텝 번호는 step-log 를 잇는다 · 끝에 Co-Authored-By 트레일러).
@@ -349,14 +349,14 @@ cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --al
 2. **`.claude/skill-bindings/qa.md`** — standard 의 새 항목(D6 · 판정 규칙 · `-i` 함정 · dev 제외 사유)(U2).
 3. **`docs/testing-strategy.md`** §1 src-tauri 절 — 게이트 한 줄(정본 = qa)(U2).
 4. **`docs/reference/structure/agent-backend.md`**(`:98` · `:107` · `:209` · `:217`) **와 그 짝 `agent-backend.html`**(`:605` · `:616`) — 정책 문 목록(셸 `gate_backend` → 데몬 `SpawnByCwd` · 호출자를 안 가린다)(U2 · 같은 커밋).
-5. **코드 주석** — agent `commands.rs:593` · `:600-614` · `:629`(+ 「`refusal` 을 `Some` 으로 바꾸기 전에 ADR-NNNN 재론」) · `:668-673` · `:1073-1077`(U1 — 셸 문 줄은 U2 가 지운다) · daemon `connection_core.rs:1067-1071` 구조체 doc(U1) · 셸 `daemon_client/connection.rs:61-64` · `:183` 슬롯 계약 · `:971` 앵커(U3) · 셸 `apply.rs:531-556` · `view_commands.rs:8-15` · `:196-203` · `tests/layout_apply.rs:1308-1313` · `tests/layout_commands.rs:629-630` · `src-tauri/Cargo.toml:64-71` · `:79-82` · 프론트 `src/commands/agentCommands.ts:46-51`(U2) · 셸 `daemon_client/events.rs:3-8` 머리(형제 포트 `refusal.rs` 한 줄 — U3).
-6. **메모 `docs/refactoring/architecture-discussion-2026-09-26.md`** — §3 결정 후보 5 의 「순서: 슬롯 스폰을 데몬의 `agent.new` 명령 경로로 바꾼 뒤」 · §10 2-1 의 「① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수」는 ADR-NNNN 이 서면 낡는다(오케스트레이터) · §11 둘째 줄(셸 `Cargo.toml` 주석) 처리 표시(U2 뒤).
+5. **코드 주석** — agent `commands.rs:593` · `:600-614` · `:629`(+ 「`refusal` 을 `Some` 으로 바꾸기 전에 ADR-0279 재론」) · `:668-673` · `:1073-1077`(U1 — 셸 문 줄은 U2 가 지운다) · daemon `connection_core.rs:1067-1071` 구조체 doc(U1) · 셸 `daemon_client/connection.rs:61-64` · `:183` 슬롯 계약 · `:971` 앵커(U3) · 셸 `apply.rs:531-556` · `view_commands.rs:8-15` · `:196-203` · `tests/layout_apply.rs:1308-1313` · `tests/layout_commands.rs:629-630` · `src-tauri/Cargo.toml:64-71` · `:79-82` · 프론트 `src/commands/agentCommands.ts:46-51`(U2) · 셸 `daemon_client/events.rs:3-8` 머리(형제 포트 `refusal.rs` 한 줄 — U3).
+6. **메모 `docs/refactoring/architecture-discussion-2026-09-26.md`** — §3 결정 후보 5 의 「순서: 슬롯 스폰을 데몬의 `agent.new` 명령 경로로 바꾼 뒤」 · §10 2-1 의 「① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수」는 ADR-0279 가 서면 낡는다(오케스트레이터) · §11 둘째 줄(셸 `Cargo.toml` 주석) 처리 표시(U2 뒤).
 7. **날짜 박힌 스냅숏** — `docs/reference/architecture-map-notes.md:134` · `:209`(`gate_backend`)는 그 지도를 다시 뽑을 때.
 8. **step-log** — 착지 항목(커밋 · 사용자 결정 · 이 TRD 링크)은 오케스트레이터.
 
 ---
 
-## 7. ADR-NNNN(예정)에 박을 것
+## 7. ADR-0279에 박을 것
 
 > 채번 · `Amends` 링크 · 개정당하는 ADR 의 도장 = `/adr`. 거부한 대안은 메인이 준 것만 옮긴다(CLAUDE.md 「결정 날조 금지」). ★`docs/decisions/` 는 다른 작업이 동시에 쓰는 중이라 이 TRD 는 손대지 않았다★.
 
@@ -377,7 +377,7 @@ cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --al
 
 1판이 올린 일곱 가지다. O1~O5 는 메인이 2026-10-06 에 처리했고(머리말 「결정 출처」), O6 · O7 은 쓴 그대로 받아들여졌다. 3판의 리뷰 반영은 머리말 「개정」이 적는다.
 
-- **O1 — D1 거부 사유 「슬롯 즉석 에이전트가 영속 프로필이 된다」 → 지웠다.** 코드로 서지 않는다. 바로잡은 사실은 §2-1 끝 한 곳에만 적고, ADR-NNNN 근거도 그것을 싣는다(§7 1).
+- **O1 — D1 거부 사유 「슬롯 즉석 에이전트가 영속 프로필이 된다」 → 지웠다.** 코드로 서지 않는다. 바로잡은 사실은 §2-1 끝 한 곳에만 적고, ADR-0279 근거도 그것을 싣는다(§7 1).
 - **O2 — 「`SpawnByCwd` 는 명부 상한에 닿지 않는다」 → 바로잡았다**(§1-5 — `manager.rs:1148-1151`).
 - **O3 — D4 트리거 → 넓혔다.** 데몬이 `Error` 로 답하면 코드와 무관하게 띄우고 셸 로컬 실패만 뺀다. 3판에서 가름을 출처 타입으로 바꿨다(§2-4 · §3-4 · §5-2 4 · 5).
 - **O4 — 등록 자리의 「거절」 warn 이 끊김에도 찍힌다(선재) → 그대로 둔다.** 라벨은 안 고치고, 박스는 warn 팔이 아니라 출처 타입을 따른다(§2-4 · §3-4 수용 기준 ③).

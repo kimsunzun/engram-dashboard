@@ -81,7 +81,8 @@
 //! 라인 앵커인 것은 이 헤더가 자기 자신에 걸리지 않게 하기 위해서다.
 //!
 //! **④ OS 분기는 이 crate 안에만**(맨 위 불변식 · TRD 1-3 §4-4 — 게이트 꼴은 ADR-0266 「영향」이 메인 판단으로
-//! 남겼다): 이 crate 밖에서 OS `cfg` 술어를 쓰는 `.rs` 파일 목록이 고정 명단과 **정확히** 같아야 한다.
+//! 남겼고, ④~⑥ 의 꼴과 거부한 대안은 ADR-0278 이 기록한다): 이 crate 밖에서 OS `cfg` 술어를 쓰는 `.rs`
+//! 파일 목록이 고정 명단과 **정확히** 같아야 한다.
 //! - **어디에 있나** — 정규식(`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`) · 명단(heredoc)은
 //!   `.github/workflows/ci.yml` 의 `platform gate 4` 스텝 하나에만 있다. `/qa` 바인딩 4f 블록은 그 셋을 읽되 대상
 //!   범위 · 짝 · 대조는 자기 안에 따로 되풀어 적고(스텝의 그쪽을 고치면 함께 맞춘다), 같은 항목의 「저장소 전체」
@@ -166,13 +167,14 @@
 //! **하지 않는 것 — macOS 이식 때 다시**(사용자 결정 2026-10-06): 다른 OS 타깃의 `cargo check`(이식성 축 —
 //! 조건 없이 쓴 OS 전용 코드를 잡는다. CI 가 Windows 뿐이라 지금은 그런 코드가 통과한다) · clippy
 //! `disallowed-*` · Dylint 커스텀 lint · cargo-deny. ④~⑥ 은 이것들을 대신하지 않는다. 조사 =
-//! `docs/research/os-boundary-enforcement-2026-10-06.md`.
+//! `docs/research/os-boundary-enforcement-2026-10-06.md` · 결정 = ADR-0278 결정 4.
 //!
 //! ★이 crate 는 생성물을 만들지 않는다★ — serde 도 ts-rs 도 없으므로 `bindings/` 디렉터리가 없다. CI 의
 //! ts-rs sync 게이트 경로 목록에 넣지 말 것.
 
 // ADR-0266
 // ADR-0275
+// ADR-0278
 pub mod env;
 pub mod file_holders;
 pub mod fs;
