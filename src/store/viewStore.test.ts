@@ -278,6 +278,19 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(cached.ratioMax).toBe(0.85)
   })
 
+  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실린다 — 이 칸을 버리면 프론트가 그 슬롯을 빈 칸으로 고른다.
+  it('layout:updated → foreign_slots 를 캐시 항목에 싣고, 다음 스냅샷에서 빠지면 함께 빠진다', async () => {
+    {
+      const { ready } = subscribeViewEvents()
+      await ready
+    }
+    emit('layout:updated', snap({ view_id: 'v1', version: 2, foreign_slots: ['s1'] }))
+    expect(useViewStore.getState().layouts['v1'].foreignSlots).toEqual(['s1'])
+
+    emit('layout:updated', snap({ view_id: 'v1', version: 3, foreign_slots: [] }))
+    expect(useViewStore.getState().layouts['v1'].foreignSlots).toEqual([])
+  })
+
   it('window:tabs-updated → windows[label].{tabs,active,version} 갱신', async () => {
     {
       const { ready } = subscribeViewEvents()

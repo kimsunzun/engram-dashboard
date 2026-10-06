@@ -76,6 +76,11 @@ export interface CachedView {
   /** 셸의 분할 비율 한계(`ViewSnapshot.ratio_min`/`ratio_max`) — 화면이 상수를 따로 두지 않게 스냅샷에서 받는다. */
   ratioMin: number
   ratioMax: number
+  /**
+   * 이 판이 모르는 내용을 쥔 슬롯 id(스냅샷 `foreign_slots` 그대로). 그 슬롯의 `content` 는 `empty` 로 실리지만
+   * 비어 있지 않다 — 빈 슬롯을 고르는 판정은 이 목록의 슬롯을 점유로 본다(셸 `ViewManager::slot_is_free` 와 같은 답).
+   */
+  foreignSlots: string[]
   /** 이 항목을 마지막으로 채택한 전역 version(stale emit 가드 — 같은 view 안에서 단조 비교). */
   version: number
 }
@@ -295,6 +300,7 @@ export const useViewStore = create<ViewState>((set, get) => ({
           splitRects: snap.split_rects,
           ratioMin: snap.ratio_min,
           ratioMax: snap.ratio_max,
+          foreignSlots: snap.foreign_slots,
           version: snap.version,
         },
       },

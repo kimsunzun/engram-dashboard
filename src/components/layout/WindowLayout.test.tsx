@@ -125,7 +125,7 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
   })
 
   // 사각형 배열은 캐시 참조 그대로여야 한다 — 구분선 미리보기가 배열 참조로 새 스냅샷을 알아본다(ADR-0227).
-  it('캐시 항목의 사각형(같은 참조)·비율 한계·version 을 렌더러에 넘긴다', async () => {
+  it('캐시 항목의 사각형(같은 참조)·비율 한계·version·모르는 내용 슬롯을 렌더러에 넘긴다', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => {
       const cached = useViewStore.getState().layouts['v1']
@@ -136,6 +136,7 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
       expect(props!.splitRects).toBe(cached!.splitRects)
       expect(props!.ratioBounds).toEqual({ min: cached!.ratioMin, max: cached!.ratioMax })
       expect(props!.version).toBe(cached!.version)
+      expect(props!.foreignSlots).toBe(cached!.foreignSlots)
     })
   })
 })

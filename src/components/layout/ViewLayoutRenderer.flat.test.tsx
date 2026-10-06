@@ -362,7 +362,8 @@ describe('ViewLayoutRenderer 평평한 루트 — 재마운트 없음', () => {
 
     expectSurvived(['k', 'y'], before, collect())
     expect(Object.is(within(frameOf('k')).getByTestId('terminal-slot'), kept)).toBe(true)
-    expect(within(frameOf('k')).queryByText('에이전트 연결 중…')).toBeNull()
+    // 기억을 잃으면 잎이 부재 막을 직접 그린다 — 막이 잎 바로 아래 있으면 유지된 뷰가 아니다.
+    expect(frameOf('k').querySelector('[data-slot-border] > [data-slot-dead]')).toBeNull()
   })
 })
 

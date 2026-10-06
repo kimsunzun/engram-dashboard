@@ -188,8 +188,8 @@ export default function AgentList() {
 
   // "열기" = 이 에이전트를 main 활성 뷰의 대상 슬롯에 배정(기존 assign 경로 재사용 — AgentTree 와 동일).
   //   agent-tree 창(config)엔 자기 슬롯 캔버스가 없어 currentViewId() 가 main 폴백을 준다(AgentTree 주석 참조).
-  //   ★대상 슬롯 = selectOpenTarget(순수 함수)★: 기본은 포커스 슬롯이지만, 포커스가 제어 슬롯(트리/팔레트)이거나
-  //   focus=null 인 엣지 상태에선 트리/팔레트를 덮어쓰지 않고 첫 빈 슬롯으로 폴백한다(제어 슬롯 포커스 제외 —
+  //   ★대상 슬롯 = selectOpenTarget(순수 함수)★: 기본은 포커스 슬롯이지만, 포커스가 제어 슬롯(트리/팔레트)·모르는
+  //   내용 슬롯이거나 focus=null 인 엣지 상태에선 그것을 덮어쓰지 않고 첫 빈 슬롯으로 폴백한다(제어 슬롯 포커스 제외 —
   //   LayoutLeaf click-to-focus 게이트의 안전망). 빈 슬롯도 없으면 배정 안 함(실패 토스트 — 클로버 금지).
   const openInFocusedSlot = (agentId: string) => {
     if (!beginInFlight(agentId)) return
@@ -201,7 +201,7 @@ export default function AgentList() {
       endInFlight(agentId) // 조기 반환에도 lock 해제(영구 잠금 방지)
       return
     }
-    const slotId = selectOpenTarget(view.layout, view.focusedSlotId)
+    const slotId = selectOpenTarget(view.layout, view.focusedSlotId, view.foreignSlots)
     if (!slotId) {
       setError(agentId, t('agent.openFailedNoEmptySlot'))
       endInFlight(agentId)
