@@ -43,12 +43,14 @@ async function createReservedCodexProfile(outputFormat: AgentOutputFormat) {
 //   때문이다: codex 의 `app-server` 경로는 한 번도 본 적 없는 폴더에 성공으로 답하고 그 폴더를 스스로
 //   신뢰 목록에 적는다. 폴더 신뢰 모달은 TUI 전용 장치였다.
 // ★사유·근거의 정본은 여기가 아니다★ — `engram-dashboard-agent` 의 `commands::LLM_BACKEND_POLICY` 의
-//   codex 줄이고, 형제 문 둘(`agent.new` · `agent.spawnInto`)이 같은 표를 본다. 이 파일에 있던 사본
-//   문자열(`CODEX_HUMAN_ONLY`)은 그 표가 codex 를 열면서 함께 지웠다 — 두 문장을 맞춰 주는 게이트가
-//   없었으므로 남겨 두면 표와 어긋난 채 살아남는다.
+//   codex 줄이고, 그 표를 보는 문은 `agent.new` 와 데몬 `SpawnByCwd` 처리부(`agent.spawnInto` 의 스폰
+//   패킷이 거기로 간다 · ADR-0279) 둘이다. 이 파일에 있던 사본 문자열(`CODEX_HUMAN_ONLY`)은 그 표가
+//   codex 를 열면서 함께 지웠다 — 두 문장을 맞춰 주는 게이트가 없었으므로 남겨 두면 표와 어긋난 채
+//   살아남는다.
 // ★되돌리려거든 여기가 아니라 그 표부터★ — 이 문들을 다시 닫는 편집은 `humanOnly` 를 되살리기 전에
 //   그 표의 codex 줄을 닫아야 한다(안 그러면 같은 백엔드를 `agent.new` 로는 만들고 이 문으로는 못
-//   만드는 어긋남이 생기고, 그것을 재는 자리가 `agentCommands.test.ts` 와 `layout_apply.rs` 다).
+//   만드는 어긋남이 생기고, 그것을 재는 자리가 `agentCommands.test.ts` 와 agent `commands.rs` · 데몬
+//   `connection_core.rs` 의 정책 시험이다).
 
 // ★ADR-0078★: AgentOutputFormat 경계 검증기 — 컴파일타임 union 은 런타임 방어가 안 되므로 유효값
 //   allowlist 로 좁힌다. 미지정(undefined/null)이면 'StreamJson' 기본(back-compat). 지정됐지만 두 유효값이

@@ -597,7 +597,7 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 // 뒤집혀(app-server 통로엔 그 모달이 없다) 거절이 걷혔다 — 그 번복의 정본이 ADR-0219 다. 옛 좌표를
 // 근거로 이 표를 도로 닫지 말 것: 그 자리는 ADR-0219 「거부한 대안」이 (b) 로 이미 재고했다.
 //
-// ★정책의 집은 여기 하나다★ — 이 판정을 묻는 문이 셋이고 서로 다른 crate 에 산다:
+// ★정책의 집은 여기 하나다★ — 이 판정을 묻는 문이 둘이고 서로 다른 crate 에 산다:
 //   ① `agent.new`(이 파일) — 선언 어휘 `AgentBackend` 가 어휘 자체로 좁혀 서고, 그 위에 이 표가 한 겹
 //      더 선다(어휘를 넓히면서 정책을 안 넓히는 편집을 런타임에서 멈춘다 — 그 팔은 오늘 안 닿는다).
 //   ② 데몬 `SpawnByCwd` 처리부(`engram-dashboard-daemon` 의 `connection_core.rs`) — 스폰 패킷의 wire
@@ -606,19 +606,19 @@ pub const NEW_AGENT_OUTPUT_FORMAT: CoreAgentOutputFormat = CoreAgentOutputFormat
 //      ★이 문은 호출자를 가리지 않는다 — 이름은 「LLM 제어 표면」이어도 사람 경로도 이 표를 본다★
 //      (데몬은 패킷을 누가 보냈는지 모른다 · ADR-0279 「감수한 대가」 · 오늘 영향 0 — 표가 아무것도 안
 //      닫는다).
-//   ③ 셸 `agent.spawnInto` 의 `gate_backend`(`src-tauri/src/layout/apply.rs`) — 같은 표를 ② 보다 먼저
-//      본다. 경계 리팩터링 2-1 의 U2 가 이 문을 걷는다 — 그 뒤 셸에는 오탈자 그물만 남는다(ADR-0279).
+// ★셸은 문이 아니다★ — 셸 `agent.spawnInto` 는 오탈자 그물(`parse_backend` — wire enum 에 묻는다)만 지고
+// 이 표를 보지 않는다. 셸은 이 crate 를 의존하지 않는다(ADR-0270 결정 1).
 // ★표를 안 보는 생성 경로도 있다 — 문을 셀 때 빠뜨리지 말 것★(세지 못한 문은 표를 한 번도 안 보고 열려
 // 있게 된다): agent 버스 `agent.spawn`(claude 고정 — 그 동사의 주석) · 데몬 `CreateProfile`(프론트의 예약
 // 노드 생성 문 — `agentlist.createCodex` 등 — 이 그리로 간다). 프론트 command 레지스트리(`humanOnly`)는
 // 이 표를 보는 문이 아니다 — codex 문의 `humanOnly` 는 2026-09-22 에 걷혔다.
 // 문마다 각자 목록을 들면 「한 문으로는 만드는데 다른 문으로는 못 만드는 백엔드」가 생긴다. 어긋남을 재는
-// 자리 = ①은 `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(이 파일) · ②는 데몬
+// 자리 = ①은 `tests::new_creates_exactly_what_the_llm_backend_policy_opens` ·
+// `tests::new_advertises_exactly_the_backends_the_llm_policy_opens`(이 파일) · ②는 데몬
 // `connection_core.rs` 의 `every_wire_backend_declares_an_llm_policy` ·
-// `the_production_core_asks_the_agent_backend_policy` · `spawn_by_cwd_refuses_a_backend_the_policy_closes` ·
-// ③은 `src-tauri/tests/layout_apply.rs::every_creation_door_reads_one_backend_policy`.
+// `the_production_core_asks_the_agent_backend_policy` · `spawn_by_cwd_refuses_a_backend_the_policy_closes`.
 //
-// ★왜 타입이 아니라 낱말로 묻나★ — ②·③이 들고 오는 타입은 wire enum `protocol::AgentBackendKind` 인데 이
+// ★왜 타입이 아니라 낱말로 묻나★ — ②가 들고 오는 타입은 wire enum `protocol::AgentBackendKind` 인데 이
 // crate 는 protocol 을 의존하지 않는다(그 금지의 정본 = 이 crate `Cargo.toml` 의 `[dependencies]` 주석).
 // 두 crate 가 공유할 수 있는 것은 낱말뿐이고, 철자가 갈리는 것은 ② 의 첫 시험이 잡는다.
 
@@ -1086,10 +1086,9 @@ fn verb_new(
     //   넓히는 것」이고, 그 편집이 오면 팔이 그날 살아난다. 그 사실을 시험이 잰다 =
     //   `tests::new_creates_exactly_what_the_llm_backend_policy_opens`(어휘를 넓히고 표를 안 열면
     //   빨개진다). 형제 문의 자리 = 데몬 `SpawnByCwd` 처리부(`connection_core.rs` — 호출자를 안 가린다 ·
-    //   ADR-0279) · 셸 `layout::apply::gate_backend`(경계 리팩터링 2-1 의 U2 가 걷는다 — 그때까지 데몬
-    //   문보다 먼저 같은 표를 본다). ★**둘 다 오늘은 정책으로 아무것도 안 막는다**★(2026-09-22 ·
-    //   ADR-0219 — wire 어휘가 claude·codex 둘뿐인데 표가 둘 다 열었다) — `gate_backend` 에 남는 거절은
-    //   정책이 아니라 `parse_backend` 의 오탈자 그물이다. 프론트 `commands/registry.ts` 는 형제 문이
+    //   ADR-0279). ★**오늘은 그 문도 정책으로 아무것도 안 막는다**★(2026-09-22 · ADR-0219 — wire 어휘가
+    //   claude·codex 둘뿐인데 표가 둘 다 열었다). 셸 `agent.spawnInto` 는 문이 아니다 — 거기 남는 거절은
+    //   정책이 아니라 `parse_backend` 의 오탈자 그물이다(ADR-0270). 프론트 `commands/registry.ts` 는 형제 문이
     //   아니다 — codex 문의 `humanOnly` 사유 문자열이 그날 지워졌다. ★한때 이 자리에 「셸은 런타임
     //   거절이 오늘도 닿는다」고 적혀 있었는데 표가 열린 뒤로 거짓이다.★
     if let Some(reason) = llm_creation_refusal(&word) {
@@ -2368,6 +2367,28 @@ mod tests {
         assert_eq!(NEW_AGENT_OUTPUT_FORMAT, CoreAgentOutputFormat::StreamJson);
     }
 
+    /// `agent.new` 선언이 광고한 그 칸의 값 목록 — **호출자가 실제로 보는 목록**이다. 시험이 이것을 손으로
+    /// 적으면 세 번째 목록이 되어, 재려던 갈림을 자기가 만든다.
+    fn advertised(field: &str) -> Vec<String> {
+        let schema: serde_json::Value =
+            serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
+        // ★두 모양을 다 읽는다★ — 필수 칸은 `{"enum":[…]}` 로 바로 펴지고 생략 가능한 칸은
+        //   `{"anyOf":[{"enum":[…]},…]}` 로 한 겹 감싸인다. 한 모양만 읽으면 그 칸이 필수↔선택을
+        //   오갈 때 순회가 **빈 목록**이 되어 조용히 아무것도 안 잰다(호출부의 `is_empty` 단언이
+        //   마지막 방어지만, 여기서 안 접으면 그 단언이 매번 터진다).
+        let property = &schema["properties"][field];
+        let branches = match property.get("anyOf") {
+            Some(any_of) => any_of.as_array().expect("anyOf 는 배열").clone(),
+            None => vec![property.clone()],
+        };
+        branches
+            .iter()
+            .filter_map(|branch| branch.get("enum"))
+            .flat_map(|values| values.as_array().expect("enum 배열").clone())
+            .map(|value| value.as_str().expect("문자열").to_string())
+            .collect()
+    }
+
     /// ★선언 어휘와 코어 어휘를 **컴파일러가** 묶는 자리★ — 산문으로만 묶으면 코어에 변형이 하나 늘 때
     /// 선언 쪽이 조용히 좁은 채로 남고, 그 낱말은 입구에서 `INVALID_ARGUMENT` 로 반려된다(에러도 로그도
     /// 없는 기능 부재라 아무도 알아채지 못한다).
@@ -2380,27 +2401,6 @@ mod tests {
     /// 늘면 `match` 가 깨지고 → 선언에 변형을 더하게 되고 → 그 변형이 광고에 들어가 → 이 순회가 덮는다.
     #[test]
     fn the_declared_vocabularies_are_pinned_to_the_core_ones() {
-        /// 선언이 광고한 그 칸의 값 목록 — 이 시험의 순회 대상이자 **호출자가 실제로 보는 목록**이다.
-        fn advertised(field: &str) -> Vec<String> {
-            let schema: serde_json::Value =
-                serde_json::from_str(AgentNewArgs::SPEC.args_schema).expect("args 스키마");
-            // ★두 모양을 다 읽는다★ — 필수 칸은 `{"enum":[…]}` 로 바로 펴지고 생략 가능한 칸은
-            //   `{"anyOf":[{"enum":[…]},…]}` 로 한 겹 감싸인다. 한 모양만 읽으면 그 칸이 필수↔선택을
-            //   오갈 때 순회가 **빈 목록**이 되어 조용히 아무것도 안 잰다(호출부의 `is_empty` 단언이
-            //   마지막 방어지만, 여기서 안 접으면 그 단언이 매번 터진다).
-            let property = &schema["properties"][field];
-            let branches = match property.get("anyOf") {
-                Some(any_of) => any_of.as_array().expect("anyOf 는 배열").clone(),
-                None => vec![property.clone()],
-            };
-            branches
-                .iter()
-                .filter_map(|branch| branch.get("enum"))
-                .flat_map(|values| values.as_array().expect("enum 배열").clone())
-                .map(|value| value.as_str().expect("문자열").to_string())
-                .collect()
-        }
-
         // ── 출력 형식: 선언 변형 ↔ 코어 변형이 일대일이고 wire 표기까지 같다 ──
         fn declared_output_format(core: CoreAgentOutputFormat) -> AgentOutputFormat {
             match core {
@@ -2658,6 +2658,36 @@ mod tests {
                 }
             );
         }
+    }
+
+    /// ★`agent.new` 가 **광고하는** backend 낱말 == 정책 표가 여는 집합★ — 철자는 대소문자만 다르다
+    /// (선언 어휘 `Claude` · 표 `claude`).
+    ///
+    /// `new_creates_exactly_what_the_llm_backend_policy_opens` 는 **표의 줄**을 훑으므로 광고에만 있는
+    /// 낱말을 못 본다 — 어휘에 변형을 더하고 표에 줄을 안 더하면 그 낱말은 광고되는데
+    /// [`NO_POLICY_DECLARED`] 로 닫혀, 호출자는 고를 수 있다고 들은 값을 반려받는다. 이 시험이 그 방향을
+    /// 잡는다.
+    #[test]
+    fn new_advertises_exactly_the_backends_the_llm_policy_opens() {
+        let mut opened: Vec<String> = LLM_BACKEND_POLICY
+            .iter()
+            .filter(|policy| policy.refusal.is_none())
+            .map(|policy| policy.word.to_ascii_lowercase())
+            .collect();
+        let mut advertised: Vec<String> = advertised("backend")
+            .iter()
+            .map(|word| word.to_ascii_lowercase())
+            .collect();
+        assert!(
+            !advertised.is_empty(),
+            "광고가 비면 이 시험이 무장 해제된다"
+        );
+        opened.sort();
+        advertised.sort();
+        assert_eq!(
+            advertised, opened,
+            "`agent.new` 의 `AgentBackend` 어휘와 `LLM_BACKEND_POLICY` 가 여는 집합이 갈렸다"
+        );
     }
 
     #[test]

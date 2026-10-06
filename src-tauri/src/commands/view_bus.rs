@@ -50,7 +50,7 @@ pub async fn report_view_commands(
         tracing::info!(
             window = %label,
             names = ?outcome.refused,
-            "웹뷰 명령 일부를 등록에서 뺐다(셸·데몬이 답하는 이름이거나 설명·표식이 없다)"
+            "웹뷰 명령 일부를 등록에서 뺐다(셸이 답하는 이름이거나 설명·표식이 없다)"
         );
     }
     if !outcome.changed() {

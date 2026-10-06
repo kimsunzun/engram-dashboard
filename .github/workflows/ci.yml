@@ -792,6 +792,39 @@ jobs:
           if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 둘이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
           echo "PASS"
 
+      # ADR-0270 「영향」 불변식 「셸(`src-tauri`)은 agent crate 를 운영 의존하지 않는다」의 기계 벽(TRD 2-1 D6).
+      #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-agent` 가 0 줄이어야 PASS(짝: 데몬의 같은
+      #   그래프에 1 줄 이상). 해석된 그래프를 읽는다 — 매니페스트 grep 이 아니라서 다른 의존이 agent 를 끌어오는
+      #   전이 경로까지 잡는다. ★판정 함수(`shell_agent_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4i 블록이 이것을
+      #   읽어 그대로 부른다.
+      # ★`cargo tree -i engram-dashboard-agent` 로 바꾸지 말 것★ — 대상이 그래프에 없으면 rc=101 로 죽어 「없다」가
+      #   FAIL 로 읽힌다(실측 — TRD 2-1 §1-4). 그래서 그래프 전체를 찍고 줄을 찾는다.
+      # ★`-e` 에 `dev` 를 넣지 말 것★ — 셸 → (dev) 데몬 → agent 는 일부러 남아 있다(셸 통합 시험이 데몬을 쓴다 ·
+      #   작업 순서 2-4). 넣으면 그 간선으로 늘 빨갛다.
+      # ★짝(데몬 → 1 줄 이상)을 지우지 말 것★ — agent 를 개명하거나 접두를 바꾸거나 패턴에 오타가 나면 0 기대 줄이
+      #   매치할 이름을 잃고 눈먼 채 통과한다. 셸 패키지를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
+      # ★`^…␣` 앵커(뒤 공백)를 빼지 말 것★ — 빼면 같은 접두의 다른 이름이 걸린다(discovery async 반입 게이트와 같다).
+      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4i 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
+      - name: 'shell gate 1: no agent crate in the shell release graph (shell = 0, daemon >= 1)'
+        shell: bash
+        run: |
+          shell_agent_gate() {
+            local tree hits n rc
+            tree=$(cargo tree --locked -p engram-dashboard -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard errored"; return 1; }
+            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-agent ') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            if [ -n "$hits" ]; then echo "FAIL — 셸 운영 그래프(normal · build)에 agent 가 있다(ADR-0270 — 셸은 agent 를 의존하지 않는다):"; printf '%s\n' "$hits"; return 1; fi
+            echo "shell normal/build graph: 0 agent line(s)"
+            tree=$(cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard-daemon errored"; return 1; }
+            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-agent ') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            if [ -z "$hits" ]; then echo "FAIL — 짝: 데몬 운영 그래프에서도 agent 0 줄 — crate 이름이 바뀌었나 · 패턴이 망가졌나(그러면 위 0 기대가 눈먼 채 통과한다)"; return 1; fi
+            n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]')
+            echo "daemon normal/build graph: $n agent line(s)"
+            echo "PASS — 셸 운영 그래프에 agent 없음(짝: 데몬 $n 줄)"
+          }
+          shell_agent_gate
+
       # ADR-0266 불변식 「운영 OS 분기는 platform crate 안에만」 — platform 밖에서 OS cfg 술어를 쓰는 `.rs` 파일 목록이
       #   아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상). ★명단(heredoc) · 정규식
       #   (`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4f 블록이 이 셋을 읽는다.
