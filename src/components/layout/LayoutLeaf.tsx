@@ -222,6 +222,7 @@ const SlotBody = memo(function SlotBody({
   //   뷰를 내리면 보존하려던 대화가 그 자리에서 영구 소실된다(데몬 ring 도 이미 없다).
   const keepDeadView = agent == null && kept != null && (presence === 'reserved' || !profilesLoaded)
   // ADR-0149
+  // ADR-0280
   const agentSlot: AgentSlotState | null =
     slotAgentId == null
       ? null
@@ -354,6 +355,7 @@ const SlotBody = memo(function SlotBody({
         //   40%지만, 그 거부는 실물 대조 없이 내린 것이라 이번 실측 결정이 우선한다. 되돌리려면 이 줄만
         //   올리면 된다. 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
         //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 트리/프리셋 제외).
+        // ADR-0280
         // ★링 색은 슬롯 상태에 따라 달라지면 안 된다(사용자 결정 2026-10-06)★ — 그래서 링은 부재 막(z-20, 잎이
         //   그리든 슬롯 컴포넌트가 그리든) 위에 서서 막이 링을 흐리게 덮지 않는다. 전제 둘: 이 요소 아래 막의 조상
         //   중 z-index 가 20 을 넘는 것이 없고, 링이 이 요소의 마지막 자식이다 — 그러면 z 가 같아 트리 순서상

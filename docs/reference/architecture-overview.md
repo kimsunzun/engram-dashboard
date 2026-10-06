@@ -563,9 +563,10 @@ flowchart TD
   CAP -->|"rich"| RS["RichSlot · NDJSON·마크다운 (tag=1)"]
   CAP -->|"dom"| DS["DomSlot · pre, ANSI 제거 (CDP 관측)"]
   RS --> STV["StructuredTextView · chat/(ChatRow·Markdown·ThoughtRow·WaitRow)"]
-  TS -.-> VEIL2["SlotUnavailableVeil · 세 슬롯 공용 (ADR-0165)"]
+  TS -.-> VEIL2["SlotUnavailableVeil · 공용 막 — 세 슬롯 + 잎, 넷이 그린다 (ADR-0165 · ADR-0280)"]
   RS -.-> VEIL2
   DS -.-> VEIL2
+  SB -.->|"기억 없는 예약 슬롯 — 슬롯 컴포넌트를 띄우지 않을 때만 (ADR-0280)"| VEIL2
   AL0 --> NOV["NoticeOverlay · 알림을 레이아웃 위에 덮는 층 — 세 창 공용 (ADR-0276/0277)"]
   PO --> NOV
   TP --> NOV
@@ -650,33 +651,42 @@ stateDiagram-v2
 
 ### 슬롯 렌더 분기
 
-**렌더러 선택보다 앞서는 갈래가 둘이다** — caps가 아직 안 왔나, 에이전트가 명부에서 수거됐나. 그 둘을 지난 뒤에야 override·capability로 렌더러를 고른다(출력 종류를 가정하지 않는다).
+**렌더러 선택보다 앞서는 갈래가 있다** — 에이전트가 명부에 있나(= caps(AgentInfo) 도착), 없으면 이 잎이 그 에이전트를 마운트한 기억이 있나 · 명부와 프로필 목록을 둘 다 받았나 · 프로필이 있나. 명부에 있을 때만 override·capability로 렌더러를 고르고(출력 종류를 가정하지 않는다), 기억으로 뷰를 지킬 때는 기억한 모드를 그대로 쓴다(`renderAs = mode ?? kept?.mode` — 부재 구간엔 override 도 무효). 판정의 정본 = `LayoutLeaf.tsx` 의 ADR-0149 블록 · 표시 = TRD S21-storage §6-8 · ADR-0280.
 
 ```mermaid
 flowchart TD
   SB["SlotBody · LayoutLeaf 안, 슬롯당 1개 (ADR-0227)"]
-  CAPS{"caps(AgentInfo) 도착?"}
-  PH["미도착 → 「연결 중」 플레이스홀더<br/>구체 렌더러를 먼저 띄우면 스왑 전 바이트가 유실된다 (ADR-0041)"]
-  KEPT{"에이전트가 명부에서 사라짐?"}
-  KEEP["기억한 마지막 모드로 뷰 유지 (ADR-0148 → 0149/0165가 개정)<br/>데몬 ring 은 이미 없다 — 내리면 그 대화는 영구 소실"]
-  MODE{"renderAs = renderModeOverride[slotId] ?? (capabilities.output.structured ? 'rich' : 'terminal')"}
+  CAPS{"에이전트가 명부에 있나? (= caps 도착)"}
+  KEPT{"이 잎에 마운트 기억이 있고, 프로필이 있거나 아직 프로필 목록을 못 받았나?"}
+  KEEP["뷰 유지 — renderAs = 기억한 마지막 모드 (ADR-0148 → 0149/0165가 개정)<br/>에이전트가 없어 caps · override 로 모드를 다시 고르지 않는다<br/>데몬 ring 은 이미 없다 — 내리면 그 대화는 영구 소실"]
+  LISTS{"명부·프로필 목록을 둘 다 받았나?"}
+  PH["못 받음 → 「연결 중」 플레이스홀더 — 이 경우에만 (ADR-0280)<br/>구체 렌더러를 먼저 띄우면 스왑 전 바이트가 유실된다 (ADR-0041)"]
+  PROF{"프로필이 있나?"}
+  LVEIL["있음(실행 중 아님 · 기억 없음) → 잎이 부재 막을 그린다 — 단추 없음<br/>슬롯 컴포넌트를 띄우지 않을 때만이라 다른 막과 겹치지 않는다 (ADR-0280)"]
+  NOTGT["없음(트리에서 삭제) → 「대상 없음」 문구 · 에이전트 슬롯 메뉴 그대로 (ADR-0280)"]
+  MODE{"renderAs = 명부에 있으면 renderModeOverride[slotId] ?? (capabilities.output.structured ? 'rich' : 'terminal') · 뷰 유지면 기억한 모드"}
   TS["'terminal' → TerminalSlot : tag=0만 받아 xterm.write"]
   RS["'rich' → RichSlot : tag=1 → StructuredTextView (칩+마크다운+턴 구분선)"]
   DS["'dom' → DomSlot : ANSI 벗겨 &lt;pre&gt; (CDP innerText 관측용 — LLM 제어, CLAUDE.md 「LLM-우선 제어」)"]
-  VEIL["SlotUnavailableVeil · 세 슬롯 공용 막 (흐림·심볼·입력차단, ADR-0165)"]
+  VEIL["SlotUnavailableVeil · 공용 막 — 세 슬롯 + 잎, 넷이 그린다 (흐림·심볼·입력차단, ADR-0165 · ADR-0280)"]
   NOTE["구독 effect deps = [viewId, agentId] — 화신 표식(epoch) 제외, ADR-0164 · reset() 선행 · seq dedup · tag 게이트"]
 
   SB --> CAPS
-  CAPS -->|"미도착"| PH
-  CAPS -->|"도착"| MODE
-  CAPS -->|"수거됨"| KEPT
-  KEPT --> KEEP --> MODE
+  CAPS -->|"있음"| MODE
+  CAPS -->|"없음"| KEPT
+  KEPT -->|"예"| KEEP --> MODE
+  KEPT -->|"아니오"| LISTS
+  LISTS -->|"아니오"| PH
+  LISTS -->|"예"| PROF
+  PROF -->|"있음"| LVEIL
+  PROF -->|"없음"| NOTGT
   MODE -->|"'terminal'"| TS
   MODE -->|"'rich'"| RS
   MODE -->|"'dom'"| DS
   TS -.-> VEIL
   RS -.-> VEIL
   DS -.-> VEIL
+  LVEIL -.-> VEIL
   MODE -.-> NOTE
 ```
 

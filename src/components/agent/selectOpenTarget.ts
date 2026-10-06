@@ -22,6 +22,7 @@ function findSlotById(node: LayoutNode, slotId: string): Extract<LayoutNode, { t
 
 // 셸 `ViewManager::slot_is_free` 와 같은 답 — 모르는 내용 슬롯은 `empty` 로 실려도 점유다(TRD S21-storage §6-2).
 // ADR-0059
+// ADR-0280
 function firstEmptySlotId(node: LayoutNode, foreign: ReadonlySet<string>): string | null {
   if (node.type === 'slot') return node.content.type === 'empty' && !foreign.has(node.id) ? node.id : null
   return firstEmptySlotId(node.a, foreign) ?? firstEmptySlotId(node.b, foreign)
