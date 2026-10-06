@@ -566,7 +566,11 @@ flowchart TD
   TS -.-> VEIL2["SlotUnavailableVeil · 세 슬롯 공용 (ADR-0165)"]
   RS -.-> VEIL2
   DS -.-> VEIL2
-  AL0 --> CN["ConnectionNotice · 데몬 연결 상태 띠"]
+  AL0 --> NOV["NoticeOverlay · 알림을 레이아웃 위에 덮는 층 — 세 창 공용 (ADR-0276/0277)"]
+  PO --> NOV
+  TP --> NOV
+  NOV --> CN["ConnectionNotice · 데몬 연결 상태 띠"]
+  NOV -->|"main 만"| SFN["StateFileNotice · 상태 파일 안내"]
   SB -->|"content=agent_list"| ALa["AgentList · react-arborist (드래그 재부모화)"]
   SB -->|"content=preset_palette"| PP["PresetPalette"]
   SB -->|"content=empty"| EMPTY["Plus 아이콘 · 순수 그림 (pointer-events 끊음 — ADR-0143, 좌클릭 조항은 0144가 개정)"]
