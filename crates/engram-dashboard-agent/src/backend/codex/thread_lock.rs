@@ -20,6 +20,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use engram_dashboard_platform::env::env_key_eq;
 use engram_dashboard_platform::file_holders::{self, Holder};
 use engram_dashboard_platform::process::{self, ProcessIdentity};
 use uuid::Uuid;
@@ -356,7 +357,7 @@ pub(crate) fn plan_capture(
 ///
 /// ★**마지막** 항목을 고른다★ — 스폰 env 는 목록이고 같은 키가 두 번 실릴 수 있는데, 통로가 그 목록을
 ///   순서대로 `cmd.env` 에 밀어 넣으므로 자식이 실제로 받는 것은 뒤엣것이다.
-/// ★키 대조가 대소문자 무시인 것도 그 자리를 따른다★ — Windows 환경변수 이름은 대소문자를 안 가린다.
+/// ★키 대조는 OS 의 환경변수 이름 규칙([`env_key_eq`])을 따른다★ — Windows 에서는 대소문자를 안 가린다.
 /// ★빈 값은 「안 걸었다」로 본다★ — [`codex_home_from`] 이 우리 쪽 env 를 그렇게 읽으므로 같은 규칙을 쓴다.
 /// ★알려진 구멍 — 상대 경로★: 그런 값은 나중에 **우리** cwd 기준으로 풀리는데 자식은 자기 cwd 로
 ///   풀 테니 둘이 갈릴 수 있다. 증상은 오검출이 아니라 「계속 빈손」이다 — 후보 판정은 그대로 자식의
@@ -368,7 +369,7 @@ fn child_lock_dir(
     let overridden = child_env
         .iter()
         .rev()
-        .find(|(key, _)| key.eq_ignore_ascii_case(CODEX_HOME_ENV))
+        .find(|(key, _)| env_key_eq(key, CODEX_HOME_ENV))
         .map(|(_, value)| value.as_str())
         .filter(|value| !value.is_empty());
     match overridden {
@@ -1195,18 +1196,27 @@ mod tests {
     }
 
     #[test]
-    fn the_childs_env_is_matched_case_insensitively_and_last_one_wins() {
+    fn the_childs_env_key_follows_the_os_rule_and_last_one_wins() {
         let made = plan(
-            &[("CODEX_HOME", "D:/first"), ("codex_home", "D:/second")],
+            &[
+                ("CODEX_HOME", "D:/first"),
+                ("CODEX_HOME", "D:/second"),
+                ("codex_home", "D:/third"),
+            ],
             false,
             Some(WRAPPER_PID),
             Some(WRAPPER_START),
         )
         .expect("fresh 는 돈다");
+        let expected = if env_key_eq("codex_home", CODEX_HOME_ENV) {
+            "D:/third"
+        } else {
+            "D:/second"
+        };
         assert_eq!(
             made.lock_dir,
-            lock_dir_under(Path::new("D:/second")),
-            "통로가 순서대로 env 를 밀어 넣으므로 자식이 받는 것은 뒤엣것이다"
+            lock_dir_under(Path::new(expected)),
+            "통로가 순서대로 env 를 밀어 넣으므로 자식이 받는 것은 같은 키로 보는 것 중 뒤엣것이다"
         );
     }
 

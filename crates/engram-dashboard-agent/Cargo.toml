@@ -29,7 +29,8 @@ engram-dashboard-base = { path = "../engram-dashboard-base" }
 #   (`file_holders::holders_of`)와 우리 프로세스 나무(`process::subtree`)도 여기서 온다(ADR-0218 결정 1).
 #   CLI 스폰마다 지나는 콘솔 감싸기(`shell::console_command` — claude · codex 의 스폰과 사용량 조회) ·
 #   홈 디렉터리(`env::home_dir` — claude 설정 폴더 · codex 홈) · 환경변수 이름 비교(`env::env_key_eq` — CLI
-#   입구의 PATH 주입)도 여기서 온다(ADR-0230). 통로 셋이 띄운 프로세스 무리의 주인(`group::GroupOwner`)과
+#   입구의 PATH 주입 · codex 락 폴더의 `CODEX_HOME` 찾기 · claude 스폰의 `MAX_THINKING_TOKENS` 찾기)도 여기서
+#   온다(ADR-0230). 통로 셋이 띄운 프로세스 무리의 주인(`group::GroupOwner`)과
 #   잔여물 정리가 받는 약한 손잡이(`group::GroupRef` — `transport::process_group` 이 감싼다) · 창 없이 띄우기
 #   (`spawn::hide_console_window`) · 사용량 조회의 트리 뿌리와 그 kill 손잡이 · 「프로그램 없음」 판정
 #   (`spawn::{prepare_tree_root, TreeRoot, MissingProgramCheck}`)도 여기서 온다(ADR-0275). 시험은 기본 셸

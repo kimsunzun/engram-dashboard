@@ -366,11 +366,12 @@ pub fn kill_tree(pid: u32) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         use std::process::{Command, Stdio};
-        Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
+        let mut cmd = Command::new("taskkill");
+        cmd.args(["/PID", &pid.to_string(), "/F", "/T"])
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
+            .stderr(Stdio::null());
+        crate::spawn::hide_console_window(&mut cmd);
+        cmd.status()
             .map(drop)
             .map_err(|e| std::io::Error::other(format!("taskkill 실행 실패: {e}")))
     }
