@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_agent::manager::{default_shell, AgentManager};
+use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
@@ -20,6 +20,7 @@ use engram_dashboard_agent::types::{
     StatusSink,
 };
 use engram_dashboard_base::testing::wait_until;
+use engram_dashboard_platform::shell::default_shell;
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 

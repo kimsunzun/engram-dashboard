@@ -8,7 +8,7 @@
 //! ★찍는 것은 가린 요약뿐이다★ — 창 수치·리셋 시각·plan·모델 이름·줄의 모양(키와 타입). env 값·토큰·문자열
 //!   값은 찍지 않는다. 예외 = 로그아웃 시험의 상류 문구(빈 설정 폴더라 계정 정보가 없다 — 토큰 모양·경로는 가린다).
 //! ★파일을 OS 로 막지 않는다★ — 조회 명령의 OS 분기는 조회기 안에 있다. 줍기 모양 수집(`…_passive_parser`)만
-//!   조회기 밖에서 CLI 를 띄우므로 같은 분기를 [`cli`] 한 함수에 둔다.
+//!   조회기 밖에서 CLI 를 띄우므로 운영과 같은 감싸기([`console_command`])를 그대로 부른다.
 // ADR-0230
 
 use std::fs;
@@ -25,6 +25,7 @@ use engram_dashboard_agent::usage::{
     ExitInfo, OsProbeSpawner, ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure,
     ProbeSpawner, ScratchDir, UsageObservation, UsageProbe, UsageSource, WindowObs, KILL_WAIT,
 };
+use engram_dashboard_platform::shell::console_command;
 
 /// 조회 한 번이 돌아와야 하는 상한 = 시한 + 자식 drop 의 종료 대기([`UsageProbe::query`] 계약) + 여유.
 const RETURN_SLACK: Duration = Duration::from_secs(3);
@@ -653,18 +654,6 @@ impl Drop for RecordingChild {
 
 // ── 줍기 모양 수집용 실 턴 ─────────────────────────────────────────────────────────
 
-/// 조회기 밖에서 CLI 를 띄울 때의 명령 모양 — 운영의 `console_command` 와 같은 규칙이다(Windows 의 `claude`·`codex`
-/// 는 확장자 없는 npm shim 이라 `cmd.exe` 가 해석해야 뜬다).
-fn cli(program: &str, args: Vec<String>) -> (String, Vec<String>) {
-    if cfg!(windows) {
-        let mut wrapped = vec!["/c".to_owned(), program.to_owned()];
-        wrapped.extend(args);
-        ("cmd.exe".to_owned(), wrapped)
-    } else {
-        (program.to_owned(), args)
-    }
-}
-
 /// 데몬 env 에서 조회기가 벗기는 것과 같은 규칙 — `CLAUDE` 로 시작하는 키 중 기본 로그인 둘이 아닌 것.
 /// 부모가 claude 세션이면 그 세션의 표식 env 가 자식 CLI 의 동작을 바꾼다.
 fn claude_env_to_strip() -> Vec<String> {
@@ -708,7 +697,7 @@ fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, P
     // `--mcp-config` 는 값을 여럿 받는 플래그라 맨 끝에 둔다(조회기의 같은 자리 주석).
     args.push("--mcp-config".to_owned());
     args.push(path(&mcp));
-    let (program, args) = cli("claude", args);
+    let (program, args) = console_command("claude", args);
     let mut child = OsProbeSpawner.spawn(
         &ProbeCommand {
             program,
@@ -737,7 +726,8 @@ fn claude_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, P
 /// ★스레드의 작업 폴더 = 저장소 루트★ — 처음 보는 폴더면 codex 가 그 폴더를 자기 설정 파일에 신뢰로 적는다
 /// (`commands.rs` 의 codex 정책 주석 — 실측 0.155.1). 매번 새 임시 폴더를 쓰면 사용자 설정에 지워진 경로가 쌓인다.
 fn codex_turn_lines(scratch: &Path, deadline: Instant) -> Result<Vec<String>, ProbeError> {
-    let (program, args) = cli("codex", vec!["app-server".to_owned(), "--stdio".to_owned()]);
+    let (program, args) =
+        console_command("codex", vec!["app-server".to_owned(), "--stdio".to_owned()]);
     let mut child = OsProbeSpawner.spawn(
         &ProbeCommand {
             program,

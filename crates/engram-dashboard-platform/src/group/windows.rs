@@ -1,20 +1,22 @@
-//! Windows Job Object 래퍼 + 멈춘 채 띄운 프로세스를 깨우는 도구([`resume_suspended_process`]).
+//! Windows Job Object 래퍼 + 멈춘 채 띄운 프로세스를 깨우는 도구([`resume_suspended_process`]) — 겉
+//! (`group`)의 Windows 갈래.
 //!
 //! 자식 프로세스를 Job에 묶어, 우리가 명시적으로 죽이거나(TerminateJobObject)
 //! 호스트 프로세스가 크래시될 때(KILL_ON_JOB_CLOSE) 손자 프로세스까지 함께 정리한다.
 //! 멤버 하나씩 다루는 조각(명단 · 붙들기와 사실 · 끝내기)과 Job 가입 알림 포트도 여기다 — 무엇을 끝낼지는
-//! 모르고, 고르는 쪽이 준 번호가 이 Job 의 멤버인지만 확인해 붙든다(ADR-0262).
+//! 모르고, 고르는 쪽이 준 번호가 이 Job 의 멤버인지만 확인해 붙든다(ADR-0262). 끝낼 때 줄 종료 코드도 부르는
+//! 쪽이 준다(ADR-0275 결정 12).
 //!
 //! ★Job 은 그 안에 든 **뒤에** 만들어진 프로세스에만 물려진다★ — 이미 뜬 프로세스를 [`JobObjectHandle::assign`]
-//!   으로 넣으면, 넣기 전에 그것이 띄운 자식은 Job 밖에 남아 트리 kill 을 빠져나간다. 사용량 조회(`usage::process`)
-//!   는 멈춘 채(`CREATE_SUSPENDED`) 띄워 넣은 뒤 깨워 그 틈을 닫았다. ★에이전트 통로(`transport::pty`·
-//!   `transport::stdio`·codex 통로)는 띄운 뒤에 넣으므로 그 틈을 그대로 안고 있다★.
+//!   으로 넣으면, 넣기 전에 그것이 띄운 자식은 Job 밖에 남아 트리 kill 을 빠져나간다. 트리 뿌리(agent 사용량 조회가
+//!   쓴다)는 `spawn::prepare_tree_root` 로 멈춘 채(`CREATE_SUSPENDED`) 띄우고 `spawn::TreeRoot` 가 넣은 뒤 깨워 그
+//!   틈을 닫았다. ★agent 의 에이전트 통로(`transport::pty`·`transport::stdio`·codex 통로)는 띄운 뒤에 넣으므로 그
+//!   틈을 그대로 안고 있다★.
 //!
-//! 호출 순서/플래그는 Phase 0 spike(examples/spike.rs)에서 Windows 실측 검증한 것과 동일하다.
-//! 이 파일은 platform 전용이라 windows crate import는 허용되지만, tauri import는 0개여야 한다.
-//! ★`windows` crate 와 표준 라이브러리 말고는 쓰지 않는다★ — 결과 · 사실 · 알림 타입도 여기 두고 중립
-//! 손잡이(`process_group`)가 제 타입으로 옮겨 감싼다. 그래야 이 파일을 별도 플랫폼 모듈로 통째 옮길 수 있다(사용자
-//! 결정 2026-09-29). 시험만 바닥 crate(`engram_dashboard_base`)의 시작 시각 조회를 빌린다.
+//! 호출 순서/플래그는 Phase 0 spike(agent `examples/spike.rs`)에서 Windows 실측 검증한 것과 동일하다.
+//! ★`windows` crate 와 표준 라이브러리 말고는 쓰지 않는다★ — 결과 · 사실 · 알림 타입도 여기 두고 겉이 제 공개
+//! 타입으로 옮겨 싣는다(ADR-0262 「[구현] 고른 것」 — 사용자 결정 2026-09-29). 시험만 같은 crate 의 `process` ·
+//! `testing` 을 빌린다.
 
 use std::io;
 use std::sync::Arc;
@@ -47,11 +49,6 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::System::IO::{CreateIoCompletionPort, GetQueuedCompletionStatus, OVERLAPPED};
 
-/// 끊기 뒤 잔여물 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 그 정리가 끝낸 것을 알아본다.
-/// `shutdown()` 의 Job 통째 끝내기(1)와 겹치지 않게 골랐다.
-// ADR-0262
-pub(crate) const LEFTOVER_EXIT_CODE: u32 = 0x7440;
-
 /// 운영에서 명단을 처음 물을 때의 칸 수. 모자라면 늘린다.
 const MEMBER_LIST_INITIAL: usize = 64;
 /// 명단 되묻기 상한 — 묻는 사이 멤버가 계속 늘어 완전한 명단을 못 받으면 여기서 멈춘다(닫힌 실패).
@@ -81,8 +78,8 @@ struct PROCESS_BASIC_INFORMATION {
     inherited_from_unique_process_id: usize,
 }
 
-/// [`JobObjectHandle::pin_member`] 가 붙든 핸들로 한 번 읽은 사실. 칸의 뜻 · 못 읽은 칸의 값은 중립 손잡이의 사실
-/// 타입과 같다 — 이 파일이 중립 손잡이를 부르지 않으려 제 모양을 따로 둔다(모듈 헤더).
+/// [`JobObjectHandle::pin_member`] 가 붙든 핸들로 한 번 읽은 사실. 칸의 뜻 · 못 읽은 칸의 값은 겉의 공개 사실
+/// 타입과 같다 — 이 파일이 겉을 부르지 않으려 제 모양을 따로 둔다(모듈 헤더).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct MemberFacts {
     pub ppid: u32,
@@ -91,7 +88,7 @@ pub(crate) struct MemberFacts {
     pub cmdline: String,
 }
 
-/// [`BirthPort::next`] 의 답 — 뜻은 중립 손잡이의 알림 타입과 같다(따로 두는 이유도 [`MemberFacts`] 와 같다).
+/// [`BirthPort::next`] 의 답 — 뜻은 겉의 공개 알림 타입과 같다(따로 두는 이유도 [`MemberFacts`] 와 같다).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortOutcome {
     Joined(u32),
@@ -137,7 +134,7 @@ pub(crate) enum MemberOutcome {
     Gone,
 }
 
-pub struct JobObjectHandle {
+pub(crate) struct JobObjectHandle {
     handle: HANDLE,
 }
 
@@ -148,7 +145,7 @@ unsafe impl Send for JobObjectHandle {}
 unsafe impl Sync for JobObjectHandle {}
 
 impl JobObjectHandle {
-    pub fn new() -> io::Result<Self> {
+    pub(crate) fn new() -> io::Result<Self> {
         // SAFETY: CreateJobObjectW — 인자 모두 None(보안 속성·이름 없는 익명 Job).
         let handle = unsafe { CreateJobObjectW(None, None) }.map_err(win_err)?;
 
@@ -177,8 +174,8 @@ impl JobObjectHandle {
     }
 
     /// ★띄운 뒤에 넣으면 넣기 전에 그것이 띄운 자식은 Job 밖에 남는다★(에이전트 통로 셋의 틈) — 닫는 선례 =
-    /// 멈춘 채 띄워 넣은 뒤 [`resume_suspended_process`] 로 깨우는 `usage::process`.
-    pub fn assign(&self, process_id: u32) -> io::Result<()> {
+    /// `spawn::prepare_tree_root` 로 멈춘 채 띄우고 `spawn::TreeRoot` 가 넣은 뒤 [`resume_suspended_process`] 로 깨운다.
+    pub(crate) fn assign(&self, process_id: u32) -> io::Result<()> {
         // SAFETY: OpenProcess — AssignProcessToJobObject 가 요구하는 최소 권한
         // (SET_QUOTA|TERMINATE)만 연다.
         let process =
@@ -197,7 +194,7 @@ impl JobObjectHandle {
         result.map_err(win_err)
     }
 
-    pub fn terminate(&self, exit_code: u32) -> io::Result<()> {
+    pub(crate) fn terminate(&self, exit_code: u32) -> io::Result<()> {
         // SAFETY: TerminateJobObject — 유효한 Job 핸들. Job에 편입된 모든 프로세스를
         // 지정 exit code로 강제 종료한다.
         unsafe { TerminateJobObject(self.handle, exit_code) }.map_err(win_err)
@@ -205,7 +202,7 @@ impl JobObjectHandle {
 
     /// Job 안에서 아직 끝나지 않은 프로세스 수. `terminate` 는 종료를 시작만 하고 돌아오므로, 「트리가 다
     /// 끝났다」를 기다리는 쪽이 이것으로 확인한다.
-    pub fn active_processes(&self) -> io::Result<u32> {
+    pub(crate) fn active_processes(&self) -> io::Result<u32> {
         let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
         // SAFETY: QueryInformationJobObject — 유효한 Job 핸들에 클래스(BasicAccounting)와 맞는 스택
         // 구조체 포인터와 정확한 크기를 넘긴다. 반환 길이는 받지 않는다(None).
@@ -399,11 +396,11 @@ impl PinnedMember {
         &self.facts
     }
 
-    /// 붙든 그 핸들로 [`LEFTOVER_EXIT_CODE`] 를 주는 `TerminateProcess` **호출 하나만** 한다. 비동기 — 대상이
-    /// 끝나기를 기다리지 않는다. 날것 결과만 돌려주며 가르기는 [`Self::classify`] 가 한다(자물쇠 안에서 부를 수
-    /// 있게 좁혔다). `kill = false` 로 붙든 것은 늘 `Err` 다.
-    pub(crate) fn terminate_raw(&self) -> io::Result<()> {
-        terminate_handle(self.handle, LEFTOVER_EXIT_CODE)
+    /// 붙든 그 핸들로 `exit_code` 를 주는 `TerminateProcess` **호출 하나만** 한다. 비동기 — 대상이 끝나기를
+    /// 기다리지 않는다. 날것 결과만 돌려주며 가르기는 [`Self::classify`] 가 한다(자물쇠 안에서 부를 수 있게
+    /// 좁혔다). `kill = false` 로 붙든 것은 늘 `Err` 다.
+    pub(crate) fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
+        terminate_handle(self.handle, exit_code)
     }
 
     /// [`Self::terminate_raw`] 의 날것 결과를 가른다. 실패여도 그 사이 스스로 끝났으면 `Gone` 이다. 핸들은 닫지
@@ -546,7 +543,7 @@ fn creation_time(handle: HANDLE) -> Option<u64> {
     Some(((creation.dwHighDateTime as u64) << 32) | (creation.dwLowDateTime as u64))
 }
 
-fn image_path(handle: HANDLE) -> Option<String> {
+pub(crate) fn image_path(handle: HANDLE) -> Option<String> {
     let mut buf = vec![0u16; IMAGE_PATH_CHARS];
     let mut len = IMAGE_PATH_CHARS as u32;
     // SAFETY: 유효 핸들 + 길이를 알려 준 쓰기 가능 버퍼 + 스택 입출력 길이.
@@ -709,65 +706,22 @@ fn win_err(e: windows::core::Error) -> io::Error {
     io::Error::other(e)
 }
 
-// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md). 실프로세스
-// 도우미는 중립 손잡이의 시험도 가져다 쓴다 — 이 파일이 그쪽을 부르지 않게 도우미를 여기 둔다.
+// 실프로세스 시험 — 시험마다 넷 이하(콘솔 호스트 포함): 몰아 띄우면 개발 PC 터미널이 죽는다(CLAUDE.md).
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use std::io::Write;
-    use std::process::{Child, Command, Stdio};
+    use std::process::{Command, Stdio};
     use std::time::Instant;
 
-    use engram_dashboard_base::platform::{process_start, ProcessStart};
+    use windows::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
+
+    use crate::process::{process_start, ProcessStart};
+    use crate::testing::{is_ping, open_gate, spawn_gated_cmd, wait_until};
 
     use super::*;
 
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-
-    /// `cmd.exe /d /c <line>` — 단 stdin 에서 한 줄을 받을 때까지 `line` 을 시작하지 않는다. 그 사이에 Job 에
-    /// 넣으면 `line` 이 띄우는 것은 전부 Job 안에서 태어난다. [`open_gate`] 가 그 한 줄을 준다.
-    pub(crate) fn spawn_gated_cmd(line: &str, flags: u32) -> Child {
-        use std::os::windows::process::CommandExt;
-        Command::new("cmd.exe")
-            .raw_arg(format!("/d /c set /p _= & {line}"))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(flags)
-            .spawn()
-            .expect("cmd.exe 기동")
-    }
-
-    pub(crate) fn open_gate(child: &mut Child) {
-        let mut stdin = child.stdin.take().expect("stdin 파이프");
-        let _ = stdin.write_all(b"go\r\n");
-    }
-
-    pub(crate) fn wait_until<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            if let Some(found) = probe() {
-                return found;
-            }
-            assert!(Instant::now() < deadline, "10 초 안에 {what} 를 못 봤다");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    }
-
-    /// 그 번호의 실행 파일이 `ping.exe` 인가. 못 열면 `false`.
-    pub(crate) fn is_ping(pid: u32) -> bool {
-        // SAFETY: 조회 권한만 연다.
-        let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
-        else {
-            return false;
-        };
-        let image = image_path(handle);
-        // SAFETY: 방금 연 핸들을 한 번 닫는다.
-        unsafe {
-            let _ = CloseHandle(handle);
-        }
-        image.is_some_and(|p| p.to_ascii_lowercase().ends_with("\\ping.exe"))
-    }
+    /// 시험이 고른 끝내기 종료 코드 — Job 통째 끝내기(1)와 다르기만 하면 된다.
+    const EXIT_CODE: u32 = 0x7E57;
 
     /// `want` 에 맞는 알림이 올 때까지 꺼낸다(10 초) — 그 앞의 알림은 버린다.
     fn next_matching(
@@ -817,7 +771,7 @@ pub(crate) mod tests {
             "없는 번호를 붙들었다"
         );
 
-        let mut x = spawn_gated_cmd("rem t40-facts", CREATE_NO_WINDOW);
+        let mut x = spawn_gated_cmd("rem t40-facts", CREATE_NO_WINDOW.0);
         job.assign(x.id()).expect("Job 편입");
 
         let watcher = job
@@ -840,7 +794,7 @@ pub(crate) mod tests {
         );
         assert!(!watcher.exited().expect("끝났나"));
 
-        let refused = watcher.terminate_raw();
+        let refused = watcher.terminate_raw(EXIT_CODE);
         assert!(refused.is_err(), "끝내기 권한 없이 끝냈다");
         assert!(
             watcher.classify(refused).is_err(),
@@ -852,7 +806,7 @@ pub(crate) mod tests {
             .pin_member(x.id(), true)
             .expect("붙들기")
             .expect("우리 멤버");
-        let raw = killer.terminate_raw();
+        let raw = killer.terminate_raw(EXIT_CODE);
         assert_eq!(
             killer.classify(raw).expect("끝내기"),
             MemberOutcome::Terminated
@@ -865,7 +819,7 @@ pub(crate) mod tests {
         );
         assert!(watcher.exited().expect("끝났나"));
         let status = x.wait().expect("종료");
-        assert_eq!(status.code(), Some(LEFTOVER_EXIT_CODE as i32));
+        assert_eq!(status.code(), Some(EXIT_CODE as i32));
     }
 
     /// ⑦-가 `start` 가 실패하면 Job 은 포트에 붙지 않는다 — 원래 멤버의 되알림도, 그 뒤 Job 안에서 태어난 것도
@@ -873,7 +827,7 @@ pub(crate) mod tests {
     #[test]
     fn a_failed_start_leaves_the_job_unwatched() {
         let job = JobObjectHandle::new().expect("Job 생성");
-        let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
+        let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW.0);
         job.assign(x.id()).expect("Job 편입");
 
         let mut held = None;
@@ -911,7 +865,7 @@ pub(crate) mod tests {
         // 문이 둘이다 — 첫 줄에 첫 ping, 둘째 줄에 둘째 ping. 둘째 문은 뗀 뒤에 연다.
         let mut x = spawn_gated_cmd(
             "ping -n 30 127.0.0.1 & set /p _= & ping -n 30 127.0.0.1",
-            CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW.0,
         );
         let root = x.id();
         job.assign(root).expect("Job 편입");
@@ -943,7 +897,7 @@ pub(crate) mod tests {
         // 끝내기 전에 비운다 — 아래 `Other` 는 끝내기 뒤에 온 것이 되고, 그때 남은 멤버는 기다리는 X 뿐이라 ping 의
         // 끝남 말고 올 자리가 없다.
         drain(&port);
-        let raw = ping.terminate_raw();
+        let raw = ping.terminate_raw(EXIT_CODE);
         assert_eq!(
             ping.classify(raw).expect("끝내기"),
             MemberOutcome::Terminated
@@ -977,6 +931,32 @@ pub(crate) mod tests {
         job.terminate(1).expect("Job 끝내기");
         drop(gate);
         let _ = x.wait();
+    }
+
+    /// ① 첫 칸 하나로 물어도 늘려 되물어 전부 나온다.
+    #[test]
+    fn a_one_slot_first_ask_still_lists_every_member() {
+        let job = JobObjectHandle::new().expect("Job 생성");
+        let mut root = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW.0);
+        job.assign(root.id()).expect("Job 편입");
+        open_gate(&mut root);
+
+        let mut full = wait_until("cmd 와 ping", || {
+            let pids = job.member_pids().ok()?;
+            pids.iter().any(|&pid| is_ping(pid)).then_some(pids)
+        });
+        let mut grown = job.member_pids_with_capacity(1).expect("늘려 되묻기");
+        full.sort_unstable();
+        grown.sort_unstable();
+        assert!(
+            grown.len() >= 2,
+            "멤버가 둘 이상이어야 늘리기를 지난다: {grown:?}"
+        );
+        assert!(grown.contains(&root.id()), "뿌리가 빠졌다: {grown:?}");
+        assert_eq!(grown, full);
+
+        let _ = root.kill();
+        let _ = root.wait();
     }
 
     /// ⑧ MSYS 명령줄의 세 모양 — 훅 사본 판정이 기댄다(TRD t40 §3-0): 껍데기가 exec 한 스크립트는 제 명령줄을
@@ -1016,7 +996,7 @@ pub(crate) mod tests {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .creation_flags(DETACHED_PROCESS)
+            .creation_flags(DETACHED_PROCESS.0)
             .spawn()
             .expect("bash 기동");
         let root = shell.id();

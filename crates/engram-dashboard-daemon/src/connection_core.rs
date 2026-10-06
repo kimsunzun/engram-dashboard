@@ -24,9 +24,6 @@ use std::sync::{Arc, Mutex};
 use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
-// 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
-#[cfg(test)]
-use engram_dashboard_agent::manager::default_shell;
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
 use engram_dashboard_agent::queued_input::{ListedRow, ListedState, QueuedListing};
@@ -34,6 +31,9 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, CancelError, InputOrigin,
     OutputSink, PtyError, ReplayKind, SinkId, SubscribeReply,
 };
+// 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
+#[cfg(test)]
+use engram_dashboard_platform::shell::default_shell;
 
 use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;

@@ -142,7 +142,7 @@ $launch = 'cmd.exe /c ""' + $bat + '" > "' + $LogFile + '" 2>&1"'
 #   검토했다 버린 대안(최소화를 유지 — 사용자 결정 2026-09-25): SW_HIDE 는 작업 표시줄 단추가 없어 탈락했고,
 #   숨김으로 띄운 뒤 다른 프로세스에서 `ShowWindow(7)` 을 거는 길은 컴파일된 도우미가 필요해 고르지 않았다.
 #   ★`CreateFlags` 에 CREATE_NO_WINDOW(0x08000000)를 넣지 말 것★ — WMI 가 ReturnValue 21 로 거부한다
-#   (실측 정본 = `crates/engram-dashboard-discovery/src/lib.rs` `wmi_spawn` 주석 · `real_wmi_spawn_flag_matrix`).
+#   (실측 정본 = `crates/engram-dashboard-platform/src/spawn.rs` `spawn_outside_job` 주석 · discovery 의 `real_wmi_spawn_flag_matrix`).
 $startup = ([WMIClass]"\\.\root\cimv2:Win32_ProcessStartup").CreateInstance()
 $startup.ShowWindow = 7
 # ★CREATE_BREAKAWAY_FROM_JOB(0x01000000)을 빼지 말 것★ — Microsoft 문서(`Win32_Process.Create` Remarks):

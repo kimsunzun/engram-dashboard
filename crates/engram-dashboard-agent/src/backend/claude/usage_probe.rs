@@ -18,12 +18,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use chrono::DateTime;
+use engram_dashboard_platform::shell::console_command;
 use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use super::usage::USAGE_VENDOR;
 use super::CLAUDE_PROGRAM;
-use crate::backend::console_command;
 use crate::usage::{
     display_text, finish_after_answer, has_word, resets_at_from_epoch_secs, used_pct_from_percent,
     ProbeChild, ProbeCommand, ProbeEnv, ProbeError, ProbeFailure, ScopedWindowObs, ScratchDir,

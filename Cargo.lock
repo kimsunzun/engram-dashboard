@@ -1024,6 +1024,7 @@ dependencies = [
  "dunce",
  "engram-dashboard-base",
  "engram-dashboard-command",
+ "engram-dashboard-platform",
  "portable-pty",
  "serde",
  "serde_json",
@@ -1041,7 +1042,6 @@ dependencies = [
  "regex",
  "tracing",
  "tracing-subscriber",
- "windows 0.58.0",
 ]
 
 [[package]]
@@ -1066,6 +1066,7 @@ dependencies = [
  "engram-dashboard-discovery",
  "engram-dashboard-messaging",
  "engram-dashboard-net",
+ "engram-dashboard-platform",
  "engram-dashboard-protocol",
  "futures-util",
  "getrandom 0.2.17",
@@ -1092,13 +1093,13 @@ dependencies = [
  "dunce",
  "engram-dashboard-base",
  "engram-dashboard-net",
+ "engram-dashboard-platform",
  "engram-dashboard-protocol",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tracing",
  "tungstenite",
- "windows 0.58.0",
 ]
 
 [[package]]
@@ -1113,7 +1114,7 @@ dependencies = [
 name = "engram-dashboard-net"
 version = "0.1.0"
 dependencies = [
- "engram-dashboard-base",
+ "engram-dashboard-platform",
  "engram-dashboard-protocol",
  "futures-util",
  "serde",
@@ -1121,6 +1122,15 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+]
+
+[[package]]
+name = "engram-dashboard-platform"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "uuid",
+ "windows 0.58.0",
 ]
 
 [[package]]

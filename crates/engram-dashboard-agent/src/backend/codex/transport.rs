@@ -93,7 +93,8 @@
 //!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
 //!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
 //!     같은 모양이다. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회 실행기다 — 멈춘 채 띄워
-//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + `platform::resume_suspended_process`).
+//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + OS 층 `spawn::prepare_tree_root` ·
+//!     `spawn::TreeRoot`).
 //!   - **핸드셰이크가 실패하면 [`writer_loop`] 이 우리 쪽 stdin 을 놓는다 — 갈래를 가리지 않는다.**
 //!     ★한때 여기 「자식·리더·라이터는 그대로 남고 매니저가 거둘 때까지 상주한다」로 적혀 있었다. 그것은
 //!     낡은 서술을 넘어 **거짓이었다 — 아무도 그 세션을 거두지 않는다**★: 수거를 여는 것은 pump 의
@@ -158,6 +159,8 @@ use std::time::{Duration, Instant};
 
 use engram_dashboard_base::logging::mask_secrets;
 use engram_dashboard_base::sync;
+use engram_dashboard_platform::group::GroupOwner;
+use engram_dashboard_platform::spawn::hide_console_window;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -180,9 +183,6 @@ use crate::types::{
     OutputCaps, OutputEvent, PtyError, QueuedInputEvent, TerminalReason, ToolOutcome,
     TransportCaps, TurnInput, TurnOutcome, Withdraw,
 };
-
-#[cfg(windows)]
-use crate::platform::JobObjectHandle;
 
 // ── 상수 ──────────────────────────────────────────────────────────────────────
 //
@@ -1393,8 +1393,10 @@ pub(crate) struct CodexAppServerTransport {
     /// 이 통로가 나르는 출력이 구조화 스트림인가. ★주입값이다(ADR-0044/0030/0191)★ — 통로는 자기가
     /// 무엇을 나르는지 모르고, 아는 쪽은 이 모드를 고른 backend 다.
     structured: bool,
-    #[cfg(windows)]
-    job_handle: Arc<JobObjectHandle>,
+    /// 이 통로가 띄운 프로세스 무리의 주인 — 하나뿐이고 약한 손잡이도 내주지 않는다. ★마지막 칸으로 둔다★ — 칸은
+    /// 선언 순서로 버려지므로 통로가 버려질 때 무리가 닫히는 때가 이 자리로 정해진다. 앞당겨도 되는지는 재 보지
+    /// 않았고, 이 배치를 지키는 시험은 없다.
+    group: GroupOwner,
 }
 
 /// spawn 뒤 실패 경로에서 자식을 확실히 거두는 가드.
@@ -1443,12 +1445,7 @@ impl CodexAppServerTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        hide_console_window(&mut cmd);
 
         let child = cmd
             .spawn()
@@ -1462,14 +1459,10 @@ impl CodexAppServerTransport {
         let stdout = child_ref.stdout.take();
         let stderr = child_ref.stderr.take();
 
-        #[cfg(windows)]
-        let job_handle = {
-            let job = JobObjectHandle::new()?;
-            if let Some(pid) = child_pid {
-                job.assign(pid)?;
-            }
-            Arc::new(job)
-        };
+        let group = GroupOwner::new()?;
+        if let Some(pid) = child_pid {
+            group.adopt(pid)?;
+        }
 
         let transport = CodexAppServerTransport {
             child: Arc::new(Mutex::new(guard.into_inner())),
@@ -1492,8 +1485,7 @@ impl CodexAppServerTransport {
             link_sink: Mutex::new(link_sink),
             writer_handle: Mutex::new(None),
             structured,
-            #[cfg(windows)]
-            job_handle,
+            group,
         };
 
         Ok((transport, child_pid))
@@ -4199,6 +4191,7 @@ impl AgentTransport for CodexAppServerTransport {
     ///   풀리고 락이 해제된다.
     /// ※stdin 을 닫는 것만으로도 상대가 스스로 exit 하는 것은 실측됐지만(턴이 없는 상태에서 41–51ms),
     ///   그 관측은 위 순서 불변을 바꾸지 않는다 — 락을 못 잡으면 닫는 자리까지 가지도 못한다.
+    // ADR-0001
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
 
@@ -4217,11 +4210,9 @@ impl AgentTransport for CodexAppServerTransport {
             let _ = child.wait();
         }
 
-        // 손자(cmd shim 아래 codex, 그리고 codex 가 thread/start 에서 띄운 MCP 자식들)까지 함께 끝난다.
-        #[cfg(windows)]
-        {
-            let _ = self.job_handle.terminate(1);
-        }
+        // 손자(cmd shim 아래 codex, 그리고 codex 가 thread/start 에서 띄운 MCP 자식들)까지 함께 끝난다. 무리가 없는
+        //   OS 에서는 무동작이다.
+        let _ = self.group.terminate(1);
 
         // try_lock 을 못 얻으면(아직 write_all 이 안 풀린 찰나) skip — 미정리 ChildStdin 은 drop 시 OS 가
         //   회수한다. ★블로킹 lock 금지★.
@@ -6338,12 +6329,12 @@ mod tests {
     fn shutdown_is_idempotent_and_leaves_no_child_behind() {
         let (t, pid) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
         let pid = pid.expect("pid");
-        assert!(engram_dashboard_base::platform::pid_alive(pid));
+        assert!(engram_dashboard_platform::process::pid_alive(pid));
         t.shutdown();
         t.shutdown();
         t.shutdown();
         assert!(
-            !engram_dashboard_base::platform::pid_alive(pid),
+            !engram_dashboard_platform::process::pid_alive(pid),
             "shutdown 뒤에도 자식이 살아 있다"
         );
         assert!(
@@ -6409,10 +6400,10 @@ mod tests {
             .stderr(Stdio::piped());
         let child = cmd.spawn().expect("spawn");
         let pid = child.id();
-        assert!(engram_dashboard_base::platform::pid_alive(pid));
+        assert!(engram_dashboard_platform::process::pid_alive(pid));
         drop(ChildGuard(Some(child)));
         assert!(
-            !engram_dashboard_base::platform::pid_alive(pid),
+            !engram_dashboard_platform::process::pid_alive(pid),
             "조기 반환 경로에서 자식이 샜다"
         );
     }
@@ -6616,7 +6607,7 @@ mod tests {
     /// ★가드는 spawn 뒤 **첫 실패 가능 단계보다 먼저** 서 있어야 한다★ — 그 아래로 내려가면 그 사이의
     /// `?` 가 이미 도는 자식을 남긴 채 돌아가고, 그 자식은 아직 어느 Job 에도 안 들어가 아무도 닿을 수 없다.
     ///
-    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`JobObjectHandle::new` 를 실패시키는
+    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`GroupOwner::new` 를 실패시키는
     /// seam 이 없다). 위 `Drop` 항목은 가드가 도는 것만 재고 어디에 서 있는지는 못 본다.
     #[test]
     fn the_child_guard_is_armed_before_the_first_fallible_step_after_spawn() {
@@ -6629,7 +6620,7 @@ mod tests {
         let armed = open_body
             .find("ChildGuard(Some(child))")
             .expect("가드 무장 지점");
-        for step in ["JobObjectHandle::new()?", "job.assign(pid)?"] {
+        for step in ["GroupOwner::new()?", "group.adopt(pid)?"] {
             let at = open_body
                 .find(step)
                 .unwrap_or_else(|| panic!("`{step}` 가 open 안에 없다 — 이 항목의 전제가 낡았다"));

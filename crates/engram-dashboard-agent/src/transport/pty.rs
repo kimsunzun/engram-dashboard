@@ -1,6 +1,6 @@
 //! PtyTransport — 콘솔 백엔드(claude/codex/gemini 공용) AgentTransport 구현.
 //!
-//! tauri import 0. unsafe 0(platform/windows.rs 제외).
+//! tauri import 0. unsafe 0.
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use engram_dashboard_base::sync;
+use engram_dashboard_platform::group::GroupOwner;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 use crate::output_core::OutputCore;
@@ -18,9 +19,6 @@ use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps,
 };
-
-#[cfg(windows)]
-use crate::platform::JobObjectHandle;
 
 /// 소유권 분할(fable 저수준 취합 §2): child는 Arc<Mutex>로 pump(try_wait)와 shutdown(kill+wait)이
 /// 공유한다. shutdown flag도 Arc — shutdown이 set(Release), pump 종료부가 read(Acquire).
@@ -57,8 +55,10 @@ pub struct PtyTransport {
     /// ★쓰기는 `Release`★ — 읽는 쪽은 `Acquire` 로 받아야 「입력을 받아들였다」와 그것을 관측하는 쪽
     ///   사이에 순서가 선다. `Relaxed` 로 두면 그 주장이 우연한 장벽에 기대게 된다.
     input_seen: Arc<AtomicBool>,
-    #[cfg(windows)]
-    job_handle: JobObjectHandle,
+    /// 이 통로가 띄운 프로세스 무리의 주인. ★마지막 칸으로 둔다★ — 칸은 선언 순서로 버려지므로 통로가 버려질 때
+    /// 무리가 닫히는(남은 멤버를 OS 가 끝내는) 때가 이 자리로 정해진다. 앞당겨도 되는지는 재 보지 않았고, 이 배치를
+    /// 지키는 시험은 없다.
+    group: GroupOwner,
 }
 
 impl PtyTransport {
@@ -89,14 +89,10 @@ impl PtyTransport {
 
         let child_pid = child.process_id();
 
-        #[cfg(windows)]
-        let job_handle = {
-            let job = JobObjectHandle::new()?;
-            if let Some(pid) = child_pid {
-                job.assign(pid)?;
-            }
-            job
-        };
+        let group = GroupOwner::new()?;
+        if let Some(pid) = child_pid {
+            group.adopt(pid)?;
+        }
 
         // ★master를 적재하기 전에 reader/writer를 먼저 확보★.
         let reader = pair
@@ -116,8 +112,7 @@ impl PtyTransport {
             shutdown: Arc::new(AtomicBool::new(false)),
             reader: Mutex::new(Some(reader)),
             input_seen: Arc::new(AtomicBool::new(false)),
-            #[cfg(windows)]
-            job_handle,
+            group,
         };
 
         Ok((transport, child_pid))
@@ -403,6 +398,7 @@ impl AgentTransport for PtyTransport {
     }
 
     /// 자원 폐쇄 1~5단계는 **절대순서**다.
+    // ADR-0001
     fn shutdown(&self) {
         // 1. shutdown 신호 — pump가 종료 시 Killed로 전이하도록.
         self.shutdown.store(true, Ordering::Release);
@@ -419,11 +415,8 @@ impl AgentTransport for PtyTransport {
             let _ = child.wait();
         }
 
-        // 4. Windows: Job 전체 종료 → 손자 프로세스까지 → ConPTY slave 핸들 해제.
-        #[cfg(windows)]
-        {
-            let _ = self.job_handle.terminate(1);
-        }
+        // 4. 무리 전체 종료 → 손자 프로세스까지 → ConPTY slave 핸들 해제. 무리가 없는 OS 에서는 무동작이다.
+        let _ = self.group.terminate(1);
 
         // 5. master.take() → drop → ClosePseudoConsole → reader EOF — 인과의 핵심.
         let _ = self.master.lock().expect("master poisoned").take();

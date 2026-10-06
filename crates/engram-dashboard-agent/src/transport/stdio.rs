@@ -15,7 +15,7 @@
 //!   자식(및 자식 트리)이 write 핸들을 모두 닫으면 read가 EOF(Ok(0))로 깬다** — 자연 종료든
 //!   kill이든 동일하게 pump가 깨므로 별도 watcher가 없다(그만큼 단순).
 //!
-//! tauri import 0. unsafe 0(platform/windows.rs 제외).
+//! tauri import 0. unsafe 0.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
@@ -25,18 +25,17 @@ use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::logging::mask_secrets;
 use engram_dashboard_base::sync;
+use engram_dashboard_platform::group::GroupOwner;
+use engram_dashboard_platform::spawn::hide_console_window;
 
 use crate::output_core::OutputCore;
 use crate::transport::input_queue::{self, InputQueue, OnWritten};
+use crate::transport::process_group::{ProcessGroup, RetiringSignal};
 use crate::transport::{AgentTransport, OutputDecoder};
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
     TerminalReason, TransportCaps,
 };
-
-use crate::platform::process_group::ProcessGroup;
-#[cfg(windows)]
-use crate::platform::{process_group::RetiringSignal, JobObjectHandle};
 
 /// 끊기 줄 함수가 주는 것 — stdin 에 쓸 줄 한 벌과, 그 줄이 실제로 파이프로 나간 뒤 라이터가 부를 것(계약 =
 /// [`OnWritten`] — 나가지 못하면 불리지 않고 버려진다). 통로는 둘 다 입력 큐로 넘기기만 한다.
@@ -84,10 +83,10 @@ pub struct StdioTransport {
     /// 능력도 거짓이다.
     // ADR-0238
     interrupt: Option<InterruptLine>,
-    /// `Arc` 인 것은 [`Self::process_group`] 이 약한 손잡이를 내주려는 것이다 — 강한 참조는 여기 하나뿐이라
-    /// 통로가 사라지면 Job 핸들도 닫힌다(`KILL_ON_JOB_CLOSE`).
-    #[cfg(windows)]
-    job_handle: Arc<JobObjectHandle>,
+    /// 이 통로가 띄운 프로세스 무리의 주인 — 하나뿐이고 밖으로는 [`Self::process_group`] 의 약한 손잡이만 내주므로,
+    /// 통로가 사라지면 무리도 닫힌다(`KILL_ON_JOB_CLOSE`). ★마지막 칸으로 둔다★ — 칸은 선언 순서로 버려지므로 그
+    /// 닫히는 때가 이 자리로 정해진다. 앞당겨도 되는지는 재 보지 않았고, 이 배치를 지키는 시험은 없다.
+    group: GroupOwner,
 }
 
 impl StdioTransport {
@@ -102,8 +101,8 @@ impl StdioTransport {
         structured: bool,
         decoder: Option<Box<dyn OutputDecoder>>,
     ) -> Result<(StdioTransport, Option<u32>), PtyError> {
-        // Windows shim(claude.cmd) 처리는 backend/console_command가 이미 `cmd.exe /c claude …`로
-        //   감싼 spec을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
+        // Windows shim(claude.cmd) 처리는 backend 가 이미 platform `console_command` 로 감싼 spec
+        //   (`cmd.exe /c claude …`)을 준다(PtyTransport와 동일 경로) — 여기선 그 program/args를 그대로 실행한다.
         let mut cmd = Command::new(&spec.program);
         cmd.args(&spec.args);
         cmd.current_dir(&spec.cwd);
@@ -115,14 +114,8 @@ impl StdioTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        // Windows: 헤드리스 백그라운드 프로세스라 콘솔 창이 튀지 않게 CREATE_NO_WINDOW.
-        //   (데몬은 창 없는 프로세스일 수 있어 cmd.exe shim이 콘솔을 새로 띄우는 깜빡임을 막는다.)
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        // 헤드리스 백그라운드 프로세스다 — 데몬은 창 없는 프로세스일 수 있어 cmd.exe shim 이 콘솔을 새로 띄운다.
+        hide_console_window(&mut cmd);
 
         let mut child = cmd
             .spawn()
@@ -134,14 +127,10 @@ impl StdioTransport {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        #[cfg(windows)]
-        let job_handle = {
-            let job = JobObjectHandle::new()?;
-            if let Some(pid) = child_pid {
-                job.assign(pid)?;
-            }
-            Arc::new(job)
-        };
+        let group = GroupOwner::new()?;
+        if let Some(pid) = child_pid {
+            group.adopt(pid)?;
+        }
 
         let transport = StdioTransport {
             child: Arc::new(Mutex::new(child)),
@@ -154,8 +143,7 @@ impl StdioTransport {
             structured,
             decoder: Mutex::new(decoder),
             interrupt: None,
-            #[cfg(windows)]
-            job_handle,
+            group,
         };
 
         Ok((transport, child_pid))
@@ -165,17 +153,9 @@ impl StdioTransport {
     /// 무엇에 쓰이는지 모른다(ADR-0044 「바보 파이프」). `None` = 이 OS 에서는 무리를 묶는 수단이 없다(Windows 밖).
     // ADR-0262
     pub(crate) fn process_group(&self) -> Option<ProcessGroup> {
-        #[cfg(windows)]
-        {
-            Some(ProcessGroup::new(
-                Arc::downgrade(&self.job_handle),
-                RetiringSignal::of(&self.retiring),
-            ))
-        }
-        #[cfg(not(windows))]
-        {
-            None
-        }
+        self.group
+            .downgrade()
+            .map(|group| ProcessGroup::new(group, RetiringSignal::of(&self.retiring)))
     }
 
     /// 끊기 줄 함수를 꽂는다 — 꽂으면 능력 `control.interrupt` 가 참이 된다(「지금 턴이 있다」가 아니라 「끊을 수 있는
@@ -458,6 +438,7 @@ impl AgentTransport for StdioTransport {
     ///   terminate 를 먼저** 한다: 자식을 죽이면 파이프가 깨져 블록된 write_all 이 에러로 풀리고
     ///   락이 해제된다. 그 뒤에야 try_lock 으로 stdin 을 best-effort 정리한다(blocking lock 절대 금지).
     /// ※graceful-exit-via-stdin-close 는 필요 없다 — 어차피 여기서 kill 하므로.
+    // ADR-0001
     fn shutdown(&self) {
         // 0. 물러남 표시를 무엇보다 먼저 — `begin_retire` 를 거치지 않는 끝내기 길도 있어서, 표시를 보는 쪽이 아래
         //    종료와 겹치는 창을 여기서도 가장 좁게 둔다. 아래 순서 불변식은 건드리지 않는다(원자 쓰기 하나다).
@@ -479,12 +460,9 @@ impl AgentTransport for StdioTransport {
             let _ = child.wait();
         }
 
-        // 3. Windows: Job 전체 종료 → 손자(cmd 아래 claude)까지. 비Windows는 child.kill이 직접
-        //    자식(claude, shim 없음)을 죽여 write 핸들이 닫힌다.
-        #[cfg(windows)]
-        {
-            let _ = self.job_handle.terminate(1);
-        }
+        // 3. 무리 전체 종료 → 손자(cmd 아래 claude)까지. 무리가 없는 OS(Windows 밖)에서는 무동작이고, child.kill 이
+        //    직접 자식(claude, shim 없음)을 죽여 write 핸들이 닫힌다.
+        let _ = self.group.terminate(1);
 
         // 4. try_lock 을 못 얻으면(아직 write_all 이 안 풀린 찰나) 그냥 skip. 미정리 ChildStdin 은
         //    transport drop 시 OS 가 회수하므로 누수 없음(kill 로 이미 파이프는 끊겼다).

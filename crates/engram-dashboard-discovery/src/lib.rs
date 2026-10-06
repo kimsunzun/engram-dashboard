@@ -9,6 +9,9 @@
 //! WMI spawn·실제 sleep 없이 전 분기를 단위 테스트할 수 있다. 실제 spawn(WMI) 통합은
 //! `#[ignore]` 테스트로 남긴다.
 //!
+//! trait 의 실물 구현(PID 판정 · WMI 띄우기 · 프로세스 트리 끄기)은 OS 층 crate `platform` 의 함수를 부를 뿐이다 —
+//! 이 crate 의 운영 코드에는 OS 분기가 없다(ADR-0266).
+//!
 //! ## 보안
 //! `DaemonInfo.token` 은 로그에 절대 출력하지 않는다(로컬 IPC 파일에만 흐름).
 
@@ -911,24 +914,17 @@ impl StopSender for TungsteniteStopSender {
 
 struct TaskKiller;
 
+// ADR-0266
 impl ProcessKiller for TaskKiller {
-    #[cfg(windows)]
     fn kill(&self, pid: u32) -> Result<(), DiscoveryError> {
-        // /T 로 자식 트리도 정리(데몬 Job 안전망과 중복이나 무해).
-        let status = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F", "/T"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map_err(|e| DiscoveryError::Io(format!("taskkill 실행 실패: {e}")))?;
-        // taskkill 은 "이미 종료됨"(exit 128)도 있으므로 종료 코드를 판정하지 않는다.
-        let _ = status;
-        Ok(())
-    }
-
-    #[cfg(not(windows))]
-    fn kill(&self, _pid: u32) -> Result<(), DiscoveryError> {
-        Err(DiscoveryError::Io("daemon_stop 은 Windows 전용".into()))
+        // 자식 트리까지 끈다 — 데몬 Job 안전망과 겹치나 무해하다.
+        engram_dashboard_platform::process::kill_tree(pid).map_err(|e| {
+            DiscoveryError::Io(if e.kind() == std::io::ErrorKind::Unsupported {
+                "daemon_stop 은 Windows 전용".into()
+            } else {
+                e.to_string()
+            })
+        })
     }
 }
 
@@ -985,22 +981,18 @@ pub fn ensure_daemon(
 /// 데몬 exe 경로 탐색. 우선 current_exe 와 같은 디렉토리(배포 시 동거),
 /// 없으면 개발용 target/debug fallback. 못 찾으면 ExeNotFound.
 pub fn locate_daemon_exe() -> Result<PathBuf, DiscoveryError> {
-    const EXE: &str = if cfg!(windows) {
-        "engram-dashboard-daemon.exe"
-    } else {
-        "engram-dashboard-daemon"
-    };
+    let exe = engram_dashboard_platform::env::exe_file_name("engram-dashboard-daemon");
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     if let Ok(cur) = std::env::current_exe() {
         if let Some(dir) = cur.parent() {
-            candidates.push(dir.join(EXE));
+            candidates.push(dir.join(&exe));
         }
     }
     // 워크스페이스 빌드면 target/debug 가 공유라 위 후보로 충분하나, 안전하게 한 번 더.
     if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("target").join("debug").join(EXE));
-        candidates.push(cwd.join("..").join("target").join("debug").join(EXE));
+        candidates.push(cwd.join("target").join("debug").join(&exe));
+        candidates.push(cwd.join("..").join("target").join("debug").join(&exe));
     }
 
     locate_in(&candidates)
@@ -1041,7 +1033,7 @@ struct RealLiveness;
 
 impl PidLiveness for RealLiveness {
     fn is_dead(&self, pid: u32, start_time: u64) -> bool {
-        !engram_dashboard_base::platform::pid_alive_with_start_time(pid, start_time)
+        !engram_dashboard_platform::process::pid_alive_with_start_time(pid, start_time)
     }
 }
 
@@ -1051,270 +1043,31 @@ impl Clock for engram_dashboard_base::time::SystemClock {
     }
 }
 
-// ── COM 초기화 RAII 가드(C1) ─────────────────────────────────────────────────────
-//
-// ★왜 가드인가★: wmi_spawn 은 `?` 조기반환이 많다. CoInitializeEx 성공 시 모든 탈출 경로에서
-// CoUninitialize 를 정확히 1회 호출해야 COM 초기화/해제 짝이 맞는다. 수동으로 각 return 앞에
-// 넣으면 누락 위험 — RAII(Drop)로 원천 차단한다.
+// ── 데몬 띄우기(real) ──────────────────────────────────────────────────────────────
 
-#[derive(Debug, PartialEq, Eq)]
-enum ComInit {
-    /// 우리가 초기화에 성공(S_OK/S_FALSE) → Uninitialize 책임 있음.
-    Initialized,
-    /// 이미 다른 apartment(STA)로 초기화돼 있음(RPC_E_CHANGED_MODE) → 우리가 init 안 함.
-    /// WMI 호출은 기존 apartment 로 진행하되 Uninitialize 는 하지 않는다.
-    AlreadyOtherMode,
-    /// 그 외 HRESULT 실패 → 진행 불가.
-    Failed(i32),
-}
-
-fn classify_com_init(hr: i32) -> ComInit {
-    const S_OK: i32 = 0;
-    const S_FALSE: i32 = 1;
-    const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
-    match hr {
-        S_OK | S_FALSE => ComInit::Initialized,
-        RPC_E_CHANGED_MODE => ComInit::AlreadyOtherMode,
-        other => ComInit::Failed(other),
-    }
-}
-
-#[cfg(windows)]
-struct ComGuard {
-    needs_uninit: bool,
-}
-
-#[cfg(windows)]
-impl Drop for ComGuard {
-    fn drop(&mut self) {
-        if self.needs_uninit {
-            use windows::Win32::System::Com::CoUninitialize;
-            // SAFETY: 우리가 CoInitializeEx 로 성공 초기화한 스레드에서 정확히 1회 해제한다.
-            // AlreadyOtherMode 경로는 needs_uninit=false 라 여기 진입하지 않는다.
-            unsafe { CoUninitialize() };
-        }
-    }
-}
-
-// ── WMI spawn(real) ─────────────────────────────────────────────────────────────
-
+/// 데몬을 셸이 든 Job 밖에서 띄운다(platform `spawn::spawn_outside_job` — WMI). ★왜 Job 밖인가★: 셸(Tauri)이
+/// `KILL_ON_JOB_CLOSE` Job 안에 있어도 데몬은 살아남아야 한다. 그 수단은 환경변수를 넘기지 못하므로 토큰은
+/// daemon.json(ACL)으로만 흐르고(설계 확정), pid · 포트도 그 파일 폴링으로 회수한다. 받는 exe 는 절대경로다
+/// ([`ensure_daemon`] 이 canonicalize 한다).
+// ADR-0021
+// ADR-0266
 struct WmiSpawner {
-    /// true=별도 콘솔 창(CREATE_NEW_CONSOLE, 디버그 로그 가시화), false=CreateFlags 미전달(기본).
+    /// 참 = 새 콘솔 창과 함께 띄운다(디버그 로그를 보려고) · 거짓 = 기본. ★거짓이어도 디버그 데몬은 콘솔 창이
+    /// 뜬다★ — 디버그 빌드는 콘솔 앱이고, 창을 없애는 것은 릴리즈의 `windows_subsystem` 뿐이다.
     console: bool,
 }
 
 impl Spawner for WmiSpawner {
     fn spawn(&self, exe: &Path) -> Result<(), DiscoveryError> {
-        wmi_spawn(exe, self.console)
-    }
-}
-
-/// WMI Win32_Process.Create 로 exe 를 spawn.
-///
-/// ★왜 WMI★: WMI 로 띄운 프로세스는 호출자가 아니라 WmiPrvSE 가 부모가 되어 **부모 Job 을
-/// 상속하지 않는다**(spike #1 검증). 그래서 Tauri 가 KILL_ON_JOB_CLOSE Job 안에 있어도
-/// 데몬이 살아남는다. 또한 WMI Create 는 **환경변수 주입 불가** — 토큰은 daemon.json(ACL)으로만
-/// 흐른다(설계 확정). 그래서 여기선 CommandLine 만 넘긴다.
-///
-/// ★절대경로 필수★: 상대경로면 RV=9(Path not found). 호출자가 dunce::canonicalize 로 절대화한
-/// exe 를 받는다.
-#[cfg(windows)]
-fn wmi_spawn(exe: &Path, console: bool) -> Result<(), DiscoveryError> {
-    // ADR-0021 §C(개정): CreateFlags 로 콘솔 창 가시성 제어(Win32_ProcessStartup.CreateFlags).
-    //
-    // ★실측 확정(2026-06-17, real_wmi_spawn_flag_matrix)★: WMI Win32_Process.Create 는
-    //   CREATE_NO_WINDOW(0x08000000) 을 받으면 ReturnValue=21(Invalid Parameter) 로 거부한다
-    //   (알려진 WMI quirk — CREATE_NO_WINDOW 는 CreateProcess 직접 호출용이며 WMI Create 의
-    //   허용 플래그 집합 밖이다). 그래서 windowless 기본은 **CreateFlags 를 아예 안 넘긴다**:
-    //     - windowless(console=false) → ProcessStartupInformation 자체 생략(create_flags=None). RV=0.
-    //       ★주의(2026-06-19 실측 정정)★: 콘솔 창 노출 여부는 여기 플래그가 아니라 **데몬 exe 의
-    //       서브시스템**에 달렸다. 데몬은 디버그=콘솔 앱(`windows_subsystem` 미설정) → WMI-spawn 시
-    //       콘솔 창이 **뜬다**(로그용, 의도) / 릴리즈=windows 앱(`#![cfg_attr(not(debug_assertions),
-    //       windows_subsystem="windows")]`) → 콘솔 창 **없음**. 옛 주석은 "WmiPrvSE 자식이라 콘솔이
-    //       애초에 안 뜬다"고 단정했으나 콘솔 앱에선 거짓이었다 — windowless 는 WMI 플래그가 아니라
-    //       데몬 서브시스템으로만 달성된다(CREATE_NO_WINDOW 는 위 RV=21 로 막혀 WMI 로는 불가).
-    //     - console=true → CREATE_NEW_CONSOLE(0x10): 허용 플래그라 RV=0, 별도 콘솔 창과 함께 뜬다.
-    const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
-    let create_flags: Option<i32> = if console {
-        Some(CREATE_NEW_CONSOLE)
-    } else {
-        None
-    };
-
-    let rv = wmi_create_raw(exe, create_flags)?;
-    if rv != 0 {
-        return Err(DiscoveryError::SpawnFailed { rv });
-    }
-    Ok(())
-}
-
-/// RV!=0 을 에러로 승격하지 않는다 — flag-matrix 실측 테스트가 RV 자체를 비교하기 위함.
-///
-/// `create_flags`:
-///   - `None`         → ProcessStartupInformation 자체를 안 넘김(windowless 기본).
-///   - `Some(flags)`  → Win32_ProcessStartup{ CreateFlags=flags } 임베디드 오브젝트로 전달.
-#[cfg(windows)]
-fn wmi_create_raw(exe: &Path, create_flags: Option<i32>) -> Result<u32, DiscoveryError> {
-    // Interface trait — startup_inst.cast::<IUnknown>() 에 필요(임베디드 오브젝트를 VARIANT 로 박기).
-    use windows::core::{Interface, BSTR, VARIANT};
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CoSetProxyBlanket, CLSCTX_INPROC_SERVER,
-        COINIT_MULTITHREADED, EOAC_NONE, RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
-    };
-    use windows::Win32::System::Rpc::{RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE};
-    use windows::Win32::System::Wmi::{
-        IWbemClassObject, IWbemLocator, IWbemServices, WbemLocator, WBEM_FLAG_CONNECT_USE_MAX_WAIT,
-    };
-
-    // 인자 없음 — 데몬은 인자 불필요.
-    let exe_str = exe.to_string_lossy();
-    let command_line = format!("\"{exe_str}\"");
-
-    // SAFETY 블록: COM/WMI 호출 시퀀스. spike #1 의 PowerShell Invoke-CimMethod 와 동일한
-    // Win32_Process.Create 를 COM 직접 호출로 수행한다.
-    unsafe {
-        // SAFETY: CoInitializeEx 는 스레드 단위 COM 초기화. 반환 HRESULT 로 짝맞춤(아래 가드).
-        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let _com_guard = match classify_com_init(hr.0) {
-            ComInit::Initialized => ComGuard { needs_uninit: true },
-            ComInit::AlreadyOtherMode => ComGuard {
-                needs_uninit: false,
-            },
-            ComInit::Failed(code) => {
-                return Err(DiscoveryError::Io(format!(
-                    "CoInitializeEx 실패 HRESULT {:#010x}",
-                    code as u32
-                )));
+        use engram_dashboard_platform::spawn::{spawn_outside_job, DetachedSpawnError};
+        spawn_outside_job(exe, self.console).map_err(|e| match e {
+            DetachedSpawnError::Refused { rv } => DiscoveryError::SpawnFailed { rv },
+            DetachedSpawnError::Io(e) if e.kind() == std::io::ErrorKind::Unsupported => {
+                DiscoveryError::Io("WMI spawn 은 Windows 전용".into())
             }
-        };
-
-        let locator: IWbemLocator =
-            CoCreateInstance(&WbemLocator, None, CLSCTX_INPROC_SERVER).map_err(wmi_err)?;
-        let services: IWbemServices = locator
-            .ConnectServer(
-                &BSTR::from("ROOT\\CIMV2"),
-                &BSTR::new(),
-                &BSTR::new(),
-                &BSTR::new(),
-                WBEM_FLAG_CONNECT_USE_MAX_WAIT.0,
-                &BSTR::new(),
-                None,
-            )
-            .map_err(wmi_err)?;
-
-        // 로컬 WMI 호출에 필요한 impersonation 레벨.
-        CoSetProxyBlanket(
-            &services,
-            RPC_C_AUTHN_WINNT,
-            RPC_C_AUTHZ_NONE,
-            None,
-            RPC_C_AUTHN_LEVEL_CALL,
-            RPC_C_IMP_LEVEL_IMPERSONATE,
-            None,
-            EOAC_NONE,
-        )
-        .map_err(wmi_err)?;
-
-        let class_name = BSTR::from("Win32_Process");
-        let mut class_obj: Option<IWbemClassObject> = None;
-        services
-            .GetObject(
-                &class_name,
-                Default::default(),
-                None,
-                Some(&mut class_obj),
-                None,
-            )
-            .map_err(wmi_err)?;
-        let class_obj = class_obj.ok_or(DiscoveryError::SpawnFailed { rv: u32::MAX })?;
-
-        let method_name = BSTR::from("Create");
-        let mut in_sig: Option<IWbemClassObject> = None;
-        class_obj
-            .GetMethod(&method_name, 0, &mut in_sig, std::ptr::null_mut())
-            .map_err(wmi_err)?;
-        let in_sig = in_sig.ok_or(DiscoveryError::SpawnFailed { rv: u32::MAX })?;
-        let in_inst = in_sig.SpawnInstance(0).map_err(wmi_err)?;
-
-        let cl_value = VARIANT::from(BSTR::from(command_line.as_str()));
-        in_inst
-            .Put(&BSTR::from("CommandLine"), 0, &cl_value, 0)
-            .map_err(wmi_err)?;
-
-        if let Some(create_flags) = create_flags {
-            let startup_class_name = BSTR::from("Win32_ProcessStartup");
-            let mut startup_class: Option<IWbemClassObject> = None;
-            services
-                .GetObject(
-                    &startup_class_name,
-                    Default::default(),
-                    None,
-                    Some(&mut startup_class),
-                    None,
-                )
-                .map_err(wmi_err)?;
-            let startup_class =
-                startup_class.ok_or(DiscoveryError::SpawnFailed { rv: u32::MAX })?;
-            let startup_inst = startup_class.SpawnInstance(0).map_err(wmi_err)?;
-            // CreateFlags 는 VT_I4(부호 있는 32-bit).
-            let flags_value = VARIANT::from(create_flags);
-            startup_inst
-                .Put(&BSTR::from("CreateFlags"), 0, &flags_value, 0)
-                .map_err(wmi_err)?;
-            let startup_unknown: windows::core::IUnknown = startup_inst.cast().map_err(wmi_err)?;
-            let startup_value = VARIANT::from(startup_unknown);
-            in_inst
-                .Put(
-                    &BSTR::from("ProcessStartupInformation"),
-                    0,
-                    &startup_value,
-                    0,
-                )
-                .map_err(wmi_err)?;
-        }
-
-        let mut out: Option<IWbemClassObject> = None;
-        services
-            .ExecMethod(
-                &class_name,
-                &method_name,
-                Default::default(),
-                None,
-                &in_inst,
-                Some(&mut out),
-                None,
-            )
-            .map_err(wmi_err)?;
-
-        // 토큰/pid 는 daemon.json 폴링으로 회수하므로 여기선 RV 만 본다.
-        let rv = match out {
-            Some(out) => read_u32_prop(&out, "ReturnValue").unwrap_or(u32::MAX),
-            None => u32::MAX,
-        };
-        Ok(rv)
+            DetachedSpawnError::Io(e) => DiscoveryError::Io(e.to_string()),
+        })
     }
-}
-
-#[cfg(windows)]
-unsafe fn read_u32_prop(
-    obj: &windows::Win32::System::Wmi::IWbemClassObject,
-    name: &str,
-) -> Option<u32> {
-    use windows::core::{BSTR, VARIANT};
-    let mut value = VARIANT::default();
-    obj.Get(&BSTR::from(name), 0, &mut value, None, None).ok()?;
-    // ReturnValue 는 VT_I4 — windows-core 의 TryFrom<&VARIANT> for u32 가 변환 처리.
-    u32::try_from(&value).ok()
-}
-
-#[cfg(windows)]
-fn wmi_err(e: windows::core::Error) -> DiscoveryError {
-    DiscoveryError::Io(format!("WMI HRESULT {:#010x}", e.code().0 as u32))
-}
-
-#[cfg(not(windows))]
-fn wmi_spawn(_exe: &Path, _console: bool) -> Result<(), DiscoveryError> {
-    Err(DiscoveryError::Io("WMI spawn 은 Windows 전용".into()))
 }
 
 // ── 테스트 ───────────────────────────────────────────────────────────────────────
@@ -2303,35 +2056,6 @@ mod tests {
         assert!(matches!(err, DiscoveryError::Timeout(_)), "{err:?}");
     }
 
-    // ── C1: classify_com_init 매핑(실제 CoInitialize 없이 순수 검증) ────────────────
-
-    #[test]
-    fn classify_com_init_maps_hresults() {
-        const S_OK: i32 = 0;
-        const S_FALSE: i32 = 1;
-        const RPC_E_CHANGED_MODE: i32 = 0x8001_0106u32 as i32;
-        assert_eq!(classify_com_init(S_OK), ComInit::Initialized);
-        assert_eq!(classify_com_init(S_FALSE), ComInit::Initialized);
-        assert_eq!(
-            classify_com_init(RPC_E_CHANGED_MODE),
-            ComInit::AlreadyOtherMode
-        );
-        let e_fail = 0x8000_4005u32 as i32; // E_FAIL 류 임의 실패
-        assert_eq!(classify_com_init(e_fail), ComInit::Failed(e_fail));
-    }
-
-    #[test]
-    fn com_init_needs_uninit_only_when_we_initialized() {
-        let needs = |hr: i32| match classify_com_init(hr) {
-            ComInit::Initialized => true,
-            ComInit::AlreadyOtherMode => false,
-            ComInit::Failed(_) => false, // 실패면 가드 자체를 안 만듦
-        };
-        assert!(needs(0), "S_OK → uninit");
-        assert!(needs(1), "S_FALSE → uninit");
-        assert!(!needs(0x8001_0106u32 as i32), "CHANGED_MODE → no uninit");
-    }
-
     // ── ADR-0021: daemon_status / daemon_stop (attach-only, spawn 0) ───────────────────
 
     struct CountingKiller {
@@ -2782,7 +2506,9 @@ mod tests {
         // 데몬도 stale 이면 덮어쓰지만 명확히 비우고 간다.
         let _ = std::fs::remove_file(&daemon_path);
 
-        wmi_spawn(&exe_abs, false).expect("WMI Win32_Process.Create 성공(RV=0, windowless)");
+        WmiSpawner { console: false }
+            .spawn(&exe_abs)
+            .expect("WMI Win32_Process.Create 성공(RV=0, windowless)");
 
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut spawned: Option<DaemonInfo> = None;
@@ -2858,7 +2584,8 @@ mod tests {
 
         let run_case = |label: &str, flags: Option<i32>| -> u32 {
             let _ = std::fs::remove_file(&daemon_path);
-            let rv = wmi_create_raw(&exe_abs, flags).expect("WMI create 호출 자체는 성공해야");
+            let rv = engram_dashboard_platform::spawn::wmi_create_raw(&exe_abs, flags)
+                .expect("WMI create 호출 자체는 성공해야");
             eprintln!("[flag-matrix] {label}: ReturnValue={rv}");
             if rv == 0 {
                 let deadline = Instant::now() + Duration::from_secs(8);

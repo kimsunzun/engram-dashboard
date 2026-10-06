@@ -1134,7 +1134,7 @@ mod tests {
             let mut p = AgentProfile::new(
                 base.to_string(),
                 AgentCommand::Shell {
-                    program: engram_dashboard_agent::manager::default_shell().to_string(),
+                    program: engram_dashboard_platform::shell::default_shell().to_string(),
                     args: vec![],
                 },
                 std::env::temp_dir(),

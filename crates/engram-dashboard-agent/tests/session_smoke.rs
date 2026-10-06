@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use engram_dashboard_agent::backend::{AgentBackend, ShellBackend};
-use engram_dashboard_agent::manager::default_shell;
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_agent::session::AgentSession;
 use engram_dashboard_agent::transport::pty::PtyTransport;
@@ -19,6 +18,7 @@ use engram_dashboard_agent::types::{
     SinkError, SinkId, StatusSink,
 };
 use engram_dashboard_base::testing::wait_until;
+use engram_dashboard_platform::shell::default_shell;
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 

@@ -77,10 +77,14 @@ required-features = ["test-harness"]
 
 [dependencies]
 engram-dashboard-agent = { path = "../engram-dashboard-agent" }
-# ADR-0175 결정 1: 파일 로그 초기화(`logging`) + daemon.json 에 박을 자기 시작시각(`platform`).
+# ADR-0175 결정 1: 파일 로그 초기화(`logging`).
 #   agent 를 타고 이미 링크돼 있었으므로 새 짐이 아니다 — 직접 간선만 는다. 토큰 · 해시의 hex 표기
 #   (`text::hex_lower` — ADR-0269)와 락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다.
 engram-dashboard-base = { path = "../engram-dashboard-base" }
+# ADR-0266: OS 층 — daemon.json 에 박을 자기 시작시각(`process::current_process_start_time`)과 제어 평면 CLI
+#   형제 exe 의 파일 이름(`env::exe_file_name` — `locate_send_exe`). 시험은 기본 셸(`shell::default_shell`)도
+#   쓴다. agent 를 타고 이미 링크돼 있으므로 새 짐이 아니다 — 직접 간선만 는다.
+engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
 # data_dir 단일 출처(ADR-0024) — embedded·daemon 이 같은 default_data_dir() 을 보게(순환 없음).
 engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
@@ -151,7 +155,7 @@ http = "1"
 
 # ★ADR-0129 슬라이스 1 — `windows` 직접 의존을 제거했다★: 이 crate 의 유일한 소비자가 단일 인스턴스
 #   가드(`instance.rs`)였고 그게 네트워크 crate 로 갔다. 지금 이 crate 의 `windows::` 사용은
-#   **0**이다(pid liveness 는 base 의 `platform::` 몫이다 — 옛 주석의 "pid liveness(OpenProcess)"
+#   **0**이다(pid liveness 는 platform crate 의 `process::` 몫이다 — 옛 주석의 "pid liveness(OpenProcess)"
 #   는 이 crate 에서 참인 적이 없다). ★`#[cfg(windows)]`·`windows_subsystem` 은 crate 사용이 **아니다**★ —
 #   토큰만 보고 "아직 쓰네" 로 되돌리지 말 것. Job Object 등으로 Win32 를 다시 직접 쓸 일이 생기면 그때
 #   근거와 함께 새로 넣는다(agent 와 같은 0.58 핀).

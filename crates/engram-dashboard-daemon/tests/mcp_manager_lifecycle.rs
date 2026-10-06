@@ -233,7 +233,7 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
     let profile = AgentProfile::new(
         "shell-succeeds".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),
@@ -321,7 +321,7 @@ async fn kill_revokes_token_before_pump_join() {
     let profile = AgentProfile::new(
         "kill-revoke".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),

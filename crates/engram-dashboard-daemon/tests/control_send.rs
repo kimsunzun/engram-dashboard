@@ -329,7 +329,7 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     let mut profile = AgentProfile::new(
         "sheller".to_string(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         std::path::PathBuf::from("."),

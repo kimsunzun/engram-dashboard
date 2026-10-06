@@ -16,6 +16,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use engram_dashboard_platform::shell::console_command;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -26,7 +27,6 @@ use super::protocol::{
 };
 use super::usage::{names_default_bucket, windows_by_duration, DEFAULT_LIMIT_ID, USAGE_VENDOR};
 use super::{APP_SERVER_STDIO_FLAG, APP_SERVER_SUBCOMMAND, CODEX_PROGRAM};
-use crate::backend::console_command;
 use crate::usage::{
     display_text, finish_after_answer, has_word, ProbeChild, ProbeCommand, ProbeEnv, ProbeError,
     ProbeFailure, ScopedWindowObs, ScratchDir, UpstreamText, UsageDetail, UsageObservation,

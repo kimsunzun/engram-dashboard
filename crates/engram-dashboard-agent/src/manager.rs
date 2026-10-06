@@ -76,15 +76,6 @@ pub(crate) const LINK_RESOLUTION_BACKSTOP: Duration = Duration::from_secs(15);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
 
-#[cfg(windows)]
-pub fn default_shell() -> &'static str {
-    "cmd.exe"
-}
-#[cfg(not(windows))]
-pub fn default_shell() -> &'static str {
-    "bash"
-}
-
 /// spawn 요청 하나의 결말. ★"띄웠다" 와 "할 일이 없었다" 를 **호출자가 구분할 수 있어야 한다**★ —
 /// 그래야 등록·epoch·기록 같은 뒷정리를 자기가 만들지 않은 세션에 하지 않는다.
 ///
@@ -4955,7 +4946,7 @@ mod tests {
         let mut p = AgentProfile::new(
             "raw".into(),
             crate::profile::AgentCommand::Shell {
-                program: default_shell().to_string(),
+                program: engram_dashboard_platform::shell::default_shell().to_string(),
                 args: vec![],
             },
             std::path::PathBuf::from(cwd),
