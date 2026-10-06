@@ -30,6 +30,14 @@ describe('StateFileNotice', () => {
     expect(screen.getByRole('status').textContent).toContain(text)
   })
 
+  // 덮는 층의 줄 계약(`NoticeOverlay` doc) — `wrap-anywhere` 를 잃으면 긴 문구가 ✕ 를 화면 밖으로 민다.
+  it('줄은 불투명 바탕이고 글 칸은 아무 데서나 줄을 바꾼다', () => {
+    render(<StateFileNotice stateFile="unreadable" saves={false} />)
+    const row = screen.getByRole('status')
+    expect(row.className).toMatch(/\bbg-elevated\b/)
+    expect(row.firstElementChild?.className).toMatch(/\bwrap-anywhere\b/)
+  })
+
   it('unreadable 문구는 파일 이름과 「이번 실행은 저장하지 않는다」를 싣는다', () => {
     render(<StateFileNotice stateFile="unreadable" saves={false} />)
     const text = screen.getByRole('status').textContent ?? ''

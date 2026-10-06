@@ -4,7 +4,7 @@
 // 세션 판단(사용자 위임).
 //
 // ADR-0276: 이 알림은 레이아웃을 덮는다 · 가드 ⅱ 도 같은 종류로 띄운다.
-// ★스스로 자리를 잡지 않는다★ — 레이아웃을 덮는 층은 `AppLayout` 이 깐다.
+// ★스스로 자리를 잡지 않는다★ — 레이아웃을 덮는 층(`NoticeOverlay`)은 `AppLayout` 이 깐다.
 // ★닫으면 이 실행 동안 다시 안 뜬다★ — 두 값(`state_file` · `saves`)은 부팅 단계 ⑥ 이 정하고 답해도 바뀌지 않는다
 // (`src-tauri/bindings/RestoreStatusView.ts`).
 
