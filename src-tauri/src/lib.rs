@@ -41,6 +41,9 @@ pub fn run() {
     builder = builder.plugin(tauri_plugin_opener::init());
     // 네이티브 폴더 선택 다이얼로그(프리셋 경로 추가) — 프론트 PresetPalette 우클릭 "추가"가
     //   open({directory:true}) 로 호출한다. 권한은 default.json 의 dialog:allow-open 으로 최소 부여.
+    // ★폴더 선택만의 플러그인이 아니다★ — 명령 거절 박스(`daemon_client/refusal.rs`)가 Rust API 로 쓴다(권한
+    //   불필요 — IPC 를 안 거친다). 그 `dialog()` 는 이 등록이 없으면 패닉하므로, 폴더 선택을 걷더라도 이 줄은
+    //   걷지 말 것.
     builder = builder.plugin(tauri_plugin_dialog::init());
 
     // ★플러그인 등록 ≠ 활성화★: 기본 OFF, set_autostart command/트레이 토글로만 enable(레지스트리 Run 기록).

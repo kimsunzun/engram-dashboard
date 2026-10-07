@@ -16,6 +16,8 @@ use std::sync::Arc;
 use engram_dashboard_protocol::{AgentCommand, RequestId};
 use tauri::{AppHandle, Manager, State, Window};
 
+use crate::daemon_client::protocol_state::CommandFailure;
+use crate::daemon_client::refusal::RefusalSite;
 use crate::daemon_client::DaemonClient;
 use crate::view_commands::{ViewCommandBridge, ViewCommandDecl};
 use engram_dashboard_command::{CommandError, ErrorCode};
@@ -37,15 +39,25 @@ pub async fn report_view_commands(
     commands: Vec<ViewCommandDecl>,
 ) -> Result<(), String> {
     let label = window.label().to_string();
+    let mut refused_by_daemon = None;
     // ★상태 변경과 그 차분 송신을 **다리가 한 문 안에서** 돌린다★ — 여기서 따로 부르면 두 창의 보고가
     //   서로를 앞질러 데몬이 옛 이름을 쥔 채 남는다(사유 = `ViewCommandBridge` 의 `outbound`).
     let outcome = bridge
         .report_and_push(&label, commands, |added, removed| {
             let label = label.clone();
             let app = app.clone();
-            async move { push_delta(&app, &label, added, removed).await }
+            let refused_by_daemon = &mut refused_by_daemon;
+            async move { *refused_by_daemon = push_delta(&app, &label, added, removed).await }
         })
         .await;
+    // ADR-0006: 박스는 그 문(`outbound` 자물쇠)을 놓은 뒤에 부른다.
+    if let Some(message) = refused_by_daemon {
+        if let Some(client) = app.try_state::<Arc<DaemonClient>>() {
+            client
+                .refusal_alerts()
+                .surface(RefusalSite::Update, &message);
+        }
+    }
     if !outcome.refused.is_empty() {
         tracing::info!(
             window = %label,
@@ -60,12 +72,13 @@ pub async fn report_view_commands(
 }
 
 /// 바뀐 몫만 데몬 명부에 얹는다 — ★부르는 자리는 위 한 곳뿐이다★(순서 문 안).
+/// 데몬이 `Error` 로 거절했으면 그 문구를 돌려준다 — 박스는 부르는 쪽이 문을 놓은 뒤 띄운다.
 async fn push_delta(
     app: &AppHandle,
     label: &str,
     added: Vec<engram_dashboard_command::CommandDecl>,
     removed: Vec<String>,
-) {
+) -> Option<String> {
     tracing::info!(
         window = %label,
         added = added.len(),
@@ -78,7 +91,7 @@ async fn push_delta(
         .try_state::<Arc<DaemonClient>>()
         .map(|c| c.inner().clone())
     else {
-        return;
+        return None;
     };
     let cmd = AgentCommand::UpdateCommands {
         // ★데몬은 이 칸을 쓰지 않는다★ — 명부 주인은 그 패킷이 온 연결에서 파생된다. 등록 패킷과 **같은
@@ -88,15 +101,32 @@ async fn push_delta(
         removed,
         request_id: RequestId::new(),
     };
-    // ★답장을 기다리되 실패를 위로 올리지 않는다★: 보고 자체는 성공했고(다리에 들었다) 여기 실패는
-    //   「이 연결에서는 아직 안 보인다」일 뿐이라 다음 재연결이 전량 등록으로 해소한다. 다만 조용히
-    //   넘기지는 않는다 — 등록이 안 서면 화면 명령이 안 불리는데 그 원인이 어디에도 안 남는다.
-    match client.send_command(cmd).await {
-        Ok(_) => tracing::info!(window = %label, "웹뷰 명령 차분 등록 완료"),
-        Err(e) => tracing::warn!(
-            window = %label,
-            "웹뷰 명령 차분 등록 실패(다음 재연결의 전량 등록이 해소한다): {e}"
-        ),
+    // ★답장을 기다리되 실패를 위로 올리지 않는다★: 보고 자체는 성공했다(다리에 들었다). 셸 로컬 실패는
+    //   「이 연결에서는 아직 안 보인다」일 뿐이라 다음 재연결의 전량 등록이 그 목록을 다시 보낸다(재시도). 그
+    //   등록마저 거절되면 등록 자리가 warn 을 남기고 거절 박스를 띄운다. 데몬 거절은 다르다 —
+    //   다리가 거절된 이름을 되돌리지 않고 쥐므로 선언이 그대로면 다음 전량 등록도 거절될 수 있어, 데몬 문구를
+    //   돌려 거절 박스로 올린다(ADR-0281). 어느 쪽이든 warn 을 남긴다 — 등록이 안 서면 화면 명령이 안
+    //   불리는데 그 원인이 어디에도 안 남는다.
+    match client.send_command_with_origin(cmd).await {
+        Ok(_) => {
+            tracing::info!(window = %label, "웹뷰 명령 차분 등록 완료");
+            None
+        }
+        Err(CommandFailure::Daemon { message }) => {
+            tracing::warn!(
+                window = %label,
+                "웹뷰 명령 차분 등록 거절(셸이 그 이름을 쥔 채라 선언을 고치지 않으면 다음 재연결의 전량 등록도 거절될 수 있다): {message}"
+            );
+            Some(message)
+        }
+        // 박스 없음 — 박스는 데몬 출처만 띄운다(ADR-0281).
+        Err(CommandFailure::Local(message)) => {
+            tracing::warn!(
+                window = %label,
+                "웹뷰 명령 차분 등록 실패(다음 재연결의 전량 등록이 해소한다): {message}"
+            );
+            None
+        }
     }
 }
 
