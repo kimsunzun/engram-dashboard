@@ -69,6 +69,8 @@ pub fn show_main_ui(app: &AppHandle) {
                 return false;
             };
             let _ = w.show();
+            // 숨은 동안 미뤄 둔 최대화(main · 복원한 팝아웃)를 보인 직후에 입힌다.
+            crate::state::placement::apply_deferred_maximize(&w.as_ref().window());
             let _ = w.unminimize();
             let _ = w.set_focus();
             true
@@ -134,7 +136,7 @@ impl UsageVisibility for NoUsageVisibility {
     fn set_visible(&self, _label: &str, _visible: bool) {}
 }
 
-fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn UsageVisibility)) {
+pub(crate) fn with_usage_visibility(app: &AppHandle, run: impl FnOnce(&dyn UsageVisibility)) {
     match (
         app.try_state::<LayoutState>(),
         app.try_state::<Arc<DaemonClient>>(),

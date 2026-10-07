@@ -36,9 +36,7 @@ use std::pin::Pin;
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
-use super::manager::{
-    resolve_spawn_slot, CloseTabOutcome, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
-};
+use super::manager::{CloseTabOutcome, ViewManager, WindowTabsSnapshot, MAIN_WINDOW_LABEL};
 use super::spatial::{resolve_spatial as resolve_spatial_token, SpatialToken};
 use super::tree::SplitInfo;
 use super::types::{
@@ -91,9 +89,10 @@ pub trait LayoutEvents: Send + Sync {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload);
 }
 
-/// OS 창 호스트 포트. ★셋 다 락 밖에서만 불린다 — 락 안으로 옮기면 그 자리에서 교착이다★.
+/// OS 창 호스트 포트. ★넷 다 락 밖에서만 불린다 — 락 안으로 옮기면 그 자리에서 교착이다★.
 ///
 /// - `open`: 창 빌드가 이벤트 루프·락을 요구한다.
+/// - `record_placement`: 구현이 창 게터(OS 호출)를 부른 뒤 같은 ViewManager 락을 잡아 적는다.
 /// - `close`: 구현이 OS 창을 destroy 하면 그 창의 `Destroyed` 이벤트 처리기가 **같은 ViewManager 락**을
 ///   다시 잡는다(`popout::destroy_window` → `Destroyed` → `cleanup_popup_window` → `state.0.lock()`).
 ///   워커 스레드가 가드를 쥔 채 부르면 destroy 는 이벤트 루프를 기다리고 이벤트 루프는 그 가드를
@@ -120,6 +119,9 @@ pub trait WindowHost: Send + Sync {
     fn open(&self, label: &str) -> Result<(), String>;
     fn close(&self, label: &str);
     fn is_open(&self, label: &str) -> bool;
+    /// `open` 으로 연 창이 모델에 든 뒤 한 번 — 그 창의 첫 자리를 모델에 적는다. 한 번도 끌지 않은 창도 다음
+    /// 부팅에 그 자리로 연다(TRD S21-storage §6-3). 기본 = 아무것도 안 한다.
+    fn record_placement(&self, _label: &str) {}
 }
 
 /// 새 창 label 발급 포트. ★단조★ — 닫힌 label 을 재사용하면 그 label 의 창을 다시 만들 수 없다.
@@ -236,6 +238,21 @@ pub fn create_window(
         subs.resync(&mgr);
         return Err(e);
     }
+    // 창을 만드는 동안 락이 풀려 있었다 — 그 사이 모델에서 그 창을 지운 쪽(창 닫기 · 크래시 사본 수락의 화면
+    //   교체 — `ViewManager::adopt_restored`)의 OS 창 거두기는 아직 등록 전인 이 창을 못 찾고 지나갔을 수 있다.
+    //   여기서 안 거두면 모델에 없는 OS 창이 남는다(옮기기 phase C 의 재검증과 같은 틈). 읽기만 하므로 독이 들어도 본다.
+    let kept = state
+        .0
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .windows
+        .contains_key(&label);
+    if !kept {
+        host.close(&label);
+        tracing::warn!(label = %label, "create_window: 창을 만드는 사이 모델에서 지워져 그 OS 창을 거둔다");
+        return Err(format!("창을 만드는 사이 모델에서 지워졌다: {label}"));
+    }
+    host.record_placement(&label);
 
     tracing::info!(label = %label, "빈 새 창 생성 완료(create_window)");
     Ok(label)
@@ -607,11 +624,9 @@ pub async fn spawn_into(
                 .map_err(|e| alive_err(e.to_string()))?,
         };
 
-        let view = mgr
-            .views
-            .get(&view_id)
-            .ok_or_else(|| alive_err(format!("view {view_id} 없음")))?;
-        let target_slot = resolve_spawn_slot(view, slot).map_err(|e| alive_err(e.to_string()))?;
+        let target_slot = mgr
+            .resolve_spawn_slot(view_id, slot)
+            .map_err(|e| alive_err(e.to_string()))?;
 
         // 배정(점유 검사는 위 resolve 가 이미 함 — assign 은 빈 슬롯 확정 후에만 닿음).
         mgr.assign_agent(view_id, target_slot, agent_id.clone())
@@ -755,6 +770,9 @@ pub fn move_slot_to_window(
         (src_tabs, tgt_tabs, src_layout)
     }; // ← 락 드롭
 
+    if is_new_window {
+        host.record_placement(&target_label);
+    }
     if let Some(snap) = src_layout {
         events.layout_updated(&snap);
     }

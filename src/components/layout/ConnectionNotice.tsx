@@ -7,9 +7,14 @@
 // ★새 제어 표면이 아니다★: 기존 연결 상태 표면(agentClient)을 **읽기만** 한다 — window 전역 핸들을
 //   늘리지 않고 명령도 보내지 않는다(§5 LLM-우선 제어 — 제어 표면은 agentClient 하나).
 //
-// ★덮지 않는다(load-bearing)★: 이전 판은 `absolute top-0 z-50` 오버레이라 TabBar 를 가리고 그 클릭을
-//   먹었다 — 탭 전환·생성·닫기가 막히고, 이유가 안 지워지는 상태와 겹치면 영구히 막힌다. 그래서
-//   **일반 흐름 블록**으로 두고 호출부가 세로 스택으로 배치한다. 닫기 버튼은 그 위의 마지막 안전장치다.
+// ★스스로 자리를 잡지 않는다★ — 호출부가 레이아웃을 밀지 않고 덮는 층(`NoticeOverlay`)에 얹는다(ADR-0277 — ADR-0180
+//   개정: 레이아웃은 고정이고, TabBar 를 가려도 ✕ 로 닫으면 된다).
+// ★✕ 와 닫힘 기억이 load-bearing 이다★ — 띠가 덮은 자리(TabBar 등)는 클릭을 못 받는다.
+//   - ✕ 가 없으면 이유가 안 지워지는 동안 탭 전환·생성·닫기가 영구히 막힌다.
+//   - 닫힘 기억이 없으면 ✕ 가 무력하다 — 상태 표면은 이유가 그대로여도 전송 상태가 바뀔 때마다 통지하므로
+//     (`ProtocolClient` 의 상태 구독) 같은 이유가 곧 다시 그려진다. 기억하는 것은 닫은 이유 문자열 하나라 다른 이유는
+//     그것과 달라서 뜨고, 기억을 푸는 것은 이유가 지워질 때(`null`)뿐이다 — A 를 닫고 B 가 뜬 뒤 A 가 다시 와도
+//     안 뜬다(아래 상태 · 구독 주석).
 //
 // ★상시 크롬이 아니다(ADR-0063)★: 이유가 있을 때만 그린다. 없으면 null 이라 DOM 이 비고, ADR-0063 이
 //   없앤 상시 StatusBar 를 되살리는 것이 아니다.
@@ -41,9 +46,11 @@ export default function ConnectionNotice() {
   return (
     <div
       role="alert"
-      className="flex shrink-0 items-start gap-3 border-b border-destructive/40 bg-destructive/15 px-4 py-2 text-sm text-foreground"
+      className="flex shrink-0 items-start gap-3 border-b border-border bg-elevated px-4 py-2 text-sm text-foreground"
+      style={{ borderLeft: '3px solid var(--status-danger)' }}
     >
-      <div className="min-w-0 flex-1">
+      {/* `wrap-anywhere` = 덮는 층의 요구(`NoticeOverlay` 의 doc) — 이유는 긴 경로를 싣는다. */}
+      <div className="min-w-0 flex-1 wrap-anywhere">
         <span className="font-semibold">데몬에 연결하지 못했습니다.</span>{' '}
         <span className="opacity-90">{reason}</span>
       </div>

@@ -291,6 +291,7 @@ function TabCanvas({ viewId }: { viewId: string }) {
       splitRects={cached.splitRects}
       ratioBounds={{ min: cached.ratioMin, max: cached.ratioMax }}
       version={cached.version}
+      foreignSlots={cached.foreignSlots}
     />
   )
 }

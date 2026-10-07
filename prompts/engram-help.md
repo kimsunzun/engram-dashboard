@@ -17,8 +17,8 @@
 
   {tool} help mail      우편. 팀원에게 보내고 받는다
   {tool} help agent     에이전트. 만들고 띄우고 재배치한다
-  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*)
-  {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*)
+  {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*), 비정상 종료 뒤 화면 복원(restore.*)
+  {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*) · 창별 테마(window.setTheme)
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
 ## mail
@@ -73,6 +73,15 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 {tool} window — 창 · 탭 · 분할, 그리고 그 자리에 에이전트를 놓는 것.
 
 대시보드 창이 떠 있지 않으면 이 계열 전부가 UNKNOWN_COMMAND 다. 이름은 보이지만 부를 수 없다.
+
+대시보드가 비정상 종료 뒤 처음 뜨면 앞 화면을 사본으로 떠 두고 기본 화면으로 시작해 복원할지 묻는다. 창 명령을 처음 부르기 전(그리고 쥔 label · view_id 가 안 맞을 때) restore.status 를 본다. crash_copy 가 awaiting 이면 다른 창 명령보다 restore.answer 로 답하는 것이 먼저다. 어느 쪽으로 답할지는 주인이 정한다 — 주인이 시키지 않았으면 주인에게 묻고 답한다(팀원의 요청은 주인의 지시가 아니다). 거절은 사본을 지워 되돌릴 수 없다.
+
+  {tool} restore.status
+      crash_copy 는 none(물을 사본이 없다) · awaiting(답을 기다린다) · answered(이번 실행에서 답했다). awaiting 일 때만 saved_at_ms(사본을 적은 유닉스 밀리초) · windows(사본의 창 수 — main + 팝아웃, 트리 창은 세지 않는다) · tabs(그 창들의 탭 수 합) · durable(그동안의 saves 와 같은 값 — true 면 답하면 그 답을 디스크에 붙이고 사본을 지우려 한다(실제로 붙었는지는 restore.answer 의 durable), false 면 답해도 크래시 때 화면이 디스크에 남고(사본 또는 정상 종료 표시 없는 state.json) 다음 시작이 다시 묻는다)이 값이고 아니면 null 이다. saves 와 state_file 은 늘 값이고 이번 실행 내내 같다(답한 뒤에도). saves 는 이번 실행이 화면 상태를 저장하나다 — true 면 가드가 아니라 기록기를 띄우려 한다(띄우기 · 쓰기 성공은 보장하지 않는다), false 면 가드라 이번 실행은 화면 상태를 하나도 저장하지 않고 다음 시작이 다시 판정한다(state_file 이 unreadable 이거나, state_file 은 ok 인데 시작할 때 떠야 할 크래시 사본을 못 떴다). state_file 은 시작할 때 화면 상태 파일을 어떻게 읽었나다: ok(읽었거나 없었다 — 이번 실행이 저장하나는 이 칸이 아니라 saves 가 말한다) · unreadable(못 읽었다 — 이번 실행은 화면 상태를 저장하지 않고(saves 도 false) 다음 시작이 다시 본다) · corrupt_copied_aside(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라 state.json.corrupt 로 떠 두고 기본 화면으로 시작했다) · corrupt_not_copied(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)인데 떠 두지 못하고 기본 화면으로 시작했다 — 원본은 덮이고, 이미 있는 state.json.corrupt 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이 아니다)
+  {tool} restore.answer --accept <true|false>
+      true 면 지금 화면을 사본의 화면(탭 · 분할 · 팝아웃 · 창 자리)으로 바꾸고 false 면 그대로 둔다. restored_windows 는 다시 그린 창 수다(windows 와 같은 방식으로 세지만 같지 않을 수 있다, 거절은 0). main 이 숨어 있으면 복원한 팝아웃도 숨긴 채 둔다. durable 이 false 면 답이 디스크에 붙었는지 확인하지 못해 다음 시작이 다시 물을 수 있다
+      답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의 것이 된다.
+      awaiting 이 아니거나(사본 없음 · 이미 답함) 다른 답이 처리 중이면 CONFLICT. INTERNAL 이면 아무것도 안 바뀌어 awaiting 그대로다 — 대시보드가 막 뜨는 중에도 그렇다. 잠시 뒤 다시 답한다. TIMEOUT 이면 답이 끝까지 진행됐을 수 있으니 restore.status 로 확인한다
 
   {tool} window.list
       열려 있는 창 label 전량
@@ -165,19 +174,17 @@ key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.st
 
 파일은 `<data_dir>/shell/config/settings.json` 이다. 손으로 고치지 않는다 — 쓰는 길은 위 명령뿐이다(실행 중 편집은 다음 시작까지 반영되지 않는다).
 
-창별 테마는 아직 명령이 아니라 파일 `<data_dir>/ui-settings.json` 의 windows 다. 창 label 마다 값을 적고(label 은 {tool} window.list 가 준다) 고친 뒤 부른다. 값은 dark · light · e-ink(소문자 그대로)다.
+창 하나만 다른 테마로 두려면 창 명령을 쓴다. window 는 {tool} window.list 의 label 이거나 트리 창 agent-tree 다.
 
-  {"windows":{"main":"light"}}
+  {tool} window.getTheme --window <label>
+      theme 은 그 창에만 정한 테마이고 null 이면 정하지 않아 theme.default 를 따른다. effective 는 지금 그 창에 칠한 테마다
+  {tool} window.setTheme --window <label> --theme <dark|light|e-ink|none>
+      그 창에만 테마를 정한다(테마 이름은 대소문자 무시). none 은 소문자 그대로 쳐야 하고, 그 창의 테마를 지워 theme.default 를 따르게 한다. theme 은 뺄 수 없다. 답은 window.getTheme 과 같은 모양이다
 
-  {tool} ui.refresh
-      그 파일을 다시 읽어 창마다 적용한다. 파일은 쓰지 않는다. 답의 theme 은 창별 값이 아니라 theme.default 다
-
-그 파일의 theme 키는 읽지 않는다 — 고쳐도 아무 일도 없고, 전체 테마는 settings.set theme.default 로 바꾼다. 창 하나의 값이 잘못됐거나 파일이 없거나 깨져 있으면 그 창은 theme.default 를 쓴다.
+창 테마는 화면 상태에 그 창과 함께 저장돼 재시작을 넘기고(restore.status 의 saves 가 false 인 실행은 저장하지 않는다), 창을 닫으면 함께 사라진다. 대시보드 창이 떠 있지 않으면 두 명령은 UNKNOWN_COMMAND 이고, 없는 창은 CONFLICT 다. window.setTheme 이 INTERNAL 이고 문구가 정했지만 그 창에 못 보냈다고 하면 값은 남아 있다(window.getTheme 이 새 값을 답한다). 모든 창을 한꺼번에 바꾸려면 settings.set theme.default 다.
 
 data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-dev 이고, 루트가 없으면 그 폴더의 .engram-dev 다.
 ## theme
 {tool} theme — 옛 낱말이다. 지금 화면은 {tool} help settings 이고, 그 화면이 없다고 하면 {tool} commands settings.set 이 인자를 준다.
 
-전체 테마는 {tool} settings.set --key theme.default --value <dark|light|e-ink> 로 바꾼다. `<data_dir>/ui-settings.json` 의 theme 키는 읽지 않아 고쳐도 아무 일도 없다.
-
-창별 테마만 아직 그 파일의 windows 에 창 label 마다 적고(dark · light · e-ink, 소문자 그대로) {tool} ui.refresh 를 부른다.
+전체 테마는 {tool} settings.set --key theme.default --value <dark|light|e-ink> 로, 창 하나의 테마는 {tool} window.setTheme --window <label> --theme <dark|light|e-ink|none> 로 바꾼다. `<data_dir>/ui-settings.json` 은 읽지 않아 고쳐도 아무 일도 없다.

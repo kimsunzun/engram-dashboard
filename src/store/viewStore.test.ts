@@ -57,6 +57,7 @@ function snap(overrides: Partial<ViewSnapshot> = {}): ViewSnapshot {
     view_id: 'v1',
     layout: { type: 'slot', id: 's1', content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: 's1',
+    foreign_slots: [],
     slot_spatial: [], // ADR-0068: 공간 파생(이 테스트는 안 씀 — 빈 배열로 타입 충족)
     slot_rects: [{ slot_id: 's1', x0: 0, y0: 0, x1: 1, y1: 1 }], // ADR-0227
     split_rects: [],
@@ -275,6 +276,19 @@ describe('viewStore emit 수신 → 상태 갱신', () => {
     expect(cached.splitRects).toEqual(splitRects)
     expect(cached.ratioMin).toBe(0.15)
     expect(cached.ratioMax).toBe(0.85)
+  })
+
+  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실린다 — 이 칸을 버리면 프론트가 그 슬롯을 빈 칸으로 고른다.
+  it('layout:updated → foreign_slots 를 캐시 항목에 싣고, 다음 스냅샷에서 빠지면 함께 빠진다', async () => {
+    {
+      const { ready } = subscribeViewEvents()
+      await ready
+    }
+    emit('layout:updated', snap({ view_id: 'v1', version: 2, foreign_slots: ['s1'] }))
+    expect(useViewStore.getState().layouts['v1'].foreignSlots).toEqual(['s1'])
+
+    emit('layout:updated', snap({ view_id: 'v1', version: 3, foreign_slots: [] }))
+    expect(useViewStore.getState().layouts['v1'].foreignSlots).toEqual([])
   })
 
   it('window:tabs-updated → windows[label].{tabs,active,version} 갱신', async () => {

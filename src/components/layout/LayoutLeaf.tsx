@@ -3,7 +3,7 @@
 //   팝아웃은 새 slot id·새 웹뷰라 새로 마운트된다.
 
 import { memo, useCallback, useEffect, useRef, useState, type CSSProperties } from 'react'
-import { Plus } from 'lucide-react'
+import { FileQuestionMark, Plus } from 'lucide-react'
 
 import type { LayoutNode, SlotRect } from '../../api/layoutTypes'
 import { useCurrentViewId, useViewStore } from '../../store/viewStore'
@@ -18,6 +18,7 @@ import { isContentSlot } from '../agent/selectOpenTarget'
 import { agentPresence } from '../agent/mergeTreeNodes'
 import SlotContextMenu from '../slot/SlotContextMenu'
 import { SlotErrorBoundary } from '../slot/SlotErrorBoundary'
+import { SlotUnavailableVeil } from '../slot/SlotUnavailableVeil'
 import { buildSlotMenu } from '../../commands/slotMenu'
 import { defaultRenderMode, type RenderMode } from '../slot/renderMode'
 import { t } from '../../i18n'
@@ -25,6 +26,8 @@ import { reportUiMetrics } from './uiMetricsReport'
 
 type SlotNode = Extract<LayoutNode, { type: 'slot' }>
 type MenuAnchor = { x: number; y: number }
+/** 에이전트 슬롯의 표시 — 판정은 SlotBody 의 ADR-0149 블록. `view` = 구체 렌더러(살아 있거나 기억으로 지키는 뷰). */
+type AgentSlotState = 'view' | 'connecting' | 'stopped' | 'noTarget'
 
 // memo: 구분선 미리보기 중 사각형이 안 바뀐 잎은 틀도 다시 그리지 않는다 — 재사상(`remapRects`)이 그 사각형 객체를
 //   그대로 돌려준다. 사각형이 바뀐 잎도 다시 그리는 것은 틀뿐이다(아래 SlotBody). 스토어 구독은 memo 와 무관하게
@@ -35,12 +38,15 @@ function LayoutLeaf({
   node,
   rect,
   focusedSlotId,
+  isForeign,
   viewIdOverride,
 }: {
   node: SlotNode
   /** 셸이 계산한 이 칸의 사각형(뷰 기준 정규화) — 미리보기 재사상이 입혀졌을 수 있다. */
   rect: SlotRect
   focusedSlotId: string | null
+  /** 이 슬롯이 스냅샷 `foreign_slots` 에 있다 — 이 판이 모르는 내용을 쥐어 `empty` 로 실렸지만 비어 있지 않다. */
+  isForeign: boolean
   viewIdOverride?: string | null
 }) {
   // ★우클릭 슬롯 메뉴 상태(§5)★: 잎은 슬롯 하나당 하나라 여기 useState 는 그 슬롯 전용 메뉴 좌표다.
@@ -100,6 +106,7 @@ function LayoutLeaf({
       <SlotBody
         node={node}
         isFocused={node.id === focusedSlotId}
+        isForeign={isForeign}
         targetViewId={targetViewId}
         contextMenu={contextMenu}
         onCloseMenu={closeMenu}
@@ -113,12 +120,14 @@ function LayoutLeaf({
 const SlotBody = memo(function SlotBody({
   node,
   isFocused,
+  isForeign,
   targetViewId,
   contextMenu,
   onCloseMenu,
 }: {
   node: SlotNode
   isFocused: boolean
+  isForeign: boolean
   targetViewId: string | null
   contextMenu: MenuAnchor | null
   onCloseMenu: () => void
@@ -139,7 +148,8 @@ const SlotBody = memo(function SlotBody({
   //   그래서 이 기억은 편의가 아니라 데이터 보존 수단이다.
   //   ★agentId 로 키잉하고 어긋나면 버린다★: 슬롯에 다른 에이전트를 배정하면 이 기억은 죽는다(아래 effect).
   //   무시만 하고 남겨 두면 그 에이전트를 다시 배정할 때 기억이 되살아나, 이미 언마운트된 빈 뷰를 흐림
-  //   상태로 띄우고 수거된 에이전트로 구독까지 건다(ADR-0149 가 "빈 화면을 흐리게 하면 오독된다"고 거부한 상태).
+  //   상태로 다시 마운트하고 수거된 에이전트로 구독까지 건다(기억 없는 정지 슬롯은 슬롯 컴포넌트를 띄우지 않고
+  //   막만 그린다 — 아래 판정).
   //   ★담는 것은 렌더 모드 하나뿐이다(ADR-0149 결정 5)★ — 회차 번호(epoch)는 여기도 슬롯 prop 에도 없다.
   //   슬롯의 재구독 트리거에서 화신을 뺐기 때문이다(비우기는 구독의 onReset 단독 — 각 슬롯 주석).
   //   ★알려진 한계★: 부재 구간에는 mode 유도가 없어 setRenderMode/clearRenderMode 가 조용히 무효다(호출은
@@ -179,7 +189,7 @@ const SlotBody = memo(function SlotBody({
   //   델타((window,agent) 키)에서 단 1회만 발화하고, 컴포넌트 스왑(TerminalSlot→RichSlot)엔 재발화하지
   //   않는다. 그래서 caps 미도착 상태에서 TerminalSlot 을 먼저 띄웠다가 caps 도착 후 RichSlot 으로 갈아끼면,
   //   스왑된 RichSlot 이 빈 채로 마운트돼 스왑 전 바이트가 영구 유실된다. 대신 caps(=AgentInfo) 도착 전엔
-  //   중립 플레이스홀더만 두고(아래 '에이전트 연결 중…'), 첫 구체 렌더러를 caps 확정 후 마운트해 assign
+  //   중립 플레이스홀더만 두고(아래 연결 중·부재 막·대상 없음), 첫 구체 렌더러를 caps 확정 후 마운트해 assign
   //   시점 replay 를 온전히 받게 한다. (터미널 에이전트는 보통 assign 전에 AgentInfo 가 오므로 이 플레이스
   //   홀더는 일시적 엣지 상태다 — 터미널 replay 경로는 종전과 동일.)
   // 구조화 출력(NDJSON) = 라이브 RichSlot, 아니면 TerminalSlot(xterm) 분기 근거(ADR-0002/0044).
@@ -192,22 +202,43 @@ const SlotBody = memo(function SlotBody({
       : null
   const renderAs = mode ?? kept?.mode
   const presence = slotAgentId != null ? agentPresence(slotAgentId, agents, profiles) : 'unknown'
-  // ★ADR-0148 상태 판정 — 축은 "기억 유무"다★
+  // ★ADR-0149 상태 판정 — 뷰를 지킬지의 축은 "기억 유무", 표시는 TRD S21-storage §6-8 의 표다★
   //   에이전트 있음                → 현행대로(caps 로 렌더러 결정)
-  //   프로필 있음 + 기억 없음      → 「연결 중」. 스폰 대기(예약 노드 활성화)·부팅 대기가 여기 든다 —
-  //                                  아직 한 번도 뜬 적 없는 슬롯이라 보존할 것도, 죽었다고 알릴 것도 없다.
-  //   프로필 있음 + 기억 있음      → 뷰 유지(= 이 분기). 흐림·심볼·입력차단은 슬롯 컴포넌트가 담당.
-  //   프로필 없음                  → 「연결된 에이전트가 없습니다」(단 목록을 받은 뒤에만)
+  //   기억 있음 + 부재             → 뷰 유지(= keepDeadView). 흐림·심볼·입력차단은 슬롯 컴포넌트가 담당.
+  //   명부·프로필 목록 미수신      → 「연결 중」 — ★이 경우에만★. 목록이 오면 반드시 아래 둘 중 하나로 넘어간다.
+  //   프로필 있음 + 기억 없음      → 빈 슬롯 위에 부재 막(`SlotUnavailableVeil` — 흐림 + 심볼, 문구·단추 없음).
+  //                                  끊기거나 죽은 슬롯과 같은 모습이고, 트리에서 활성화해 명부에 오르면 평소 화면으로
+  //                                  바뀐다. ★ADR-0149 가 「삭제도 흐림으로 통일」을 거부한 사유 「빈 화면 흐림은
+  //                                  오독된다」만, 이 기억 없음 경우에 한해 사용자 결정 2026-10-06 으로 뒤집었다★ —
+  //                                  삭제(「대상 없음」)는 문구 그대로다(슬롯에서 활성화하는 UX 는 이 단계 밖).
+  //                                  잎은 슬롯 컴포넌트를 띄우지 않을 때만 막을 그려 덮는 내용도, 슬롯별 판정의 중복도
+  //                                  없다 — 막을 레이아웃 래퍼로 올리자는 안의 ADR-0149 거부는 그대로 선다. ADR-0149 (A) 의 「스폰
+  //                                  대기도 연결 중」도 이것으로 대체된다 — 갓 활성화한 에이전트가 명부에 오르기 전 잠깐
+  //                                  막이 보인다(수용).
+  //   프로필 없음                  → 「대상 없음」. 배정은 그대로 두고 메뉴도 에이전트 슬롯 메뉴 그대로다(「비우기」·
+  //                                  「에이전트 모니터링」으로 다른 내용을 놓는다 — 사용자 결정 2026-10-06).
   // ★"프로필이 없다"는 판정은 목록을 받은 뒤에만 신뢰한다★: refreshProfiles 는 재시도 없는 단발 pull 이라
   //   실패·지연이 실제로 가능하고, 그 구간에 presence 는 'unknown' 으로 보인다. 기억이 있는데 그걸로
   //   뷰를 내리면 보존하려던 대화가 그 자리에서 영구 소실된다(데몬 ring 도 이미 없다).
   const keepDeadView = agent == null && kept != null && (presence === 'reserved' || !profilesLoaded)
+  // ADR-0149
+  // ADR-0280
+  const agentSlot: AgentSlotState | null =
+    slotAgentId == null
+      ? null
+      : capsReady || keepDeadView
+        ? 'view'
+        : !agentsLoaded || !profilesLoaded
+          ? 'connecting'
+          : presence === 'reserved'
+            ? 'stopped'
+            : 'noTarget'
   // preset_palette·agent_list·usage variant 도 슬롯을 100% 채우는 실 렌더러라 hasContent=true(중앙정렬
   //   플레이스홀더 스타일이 이들 레이아웃을 깨지 않게, ADR-0060/0061/0062).
   const isPresetPalette = node.content.type === 'preset_palette'
   const isAgentList = node.content.type === 'agent_list'
   const isUsage = node.content.type === 'usage'
-  const hasContent = capsReady || keepDeadView || isPresetPalette || isAgentList || isUsage
+  const hasContent = agentSlot === 'view' || isPresetPalette || isAgentList || isUsage
   return (
     <div
       ref={borderRef}
@@ -247,19 +278,17 @@ const SlotBody = memo(function SlotBody({
         resetKey={`${node.id}:${node.content.type}:${slotAgentId ?? ''}:${renderAs ?? ''}`}
       >
         {node.content.type === 'agent' ? (
-          agent == null && !keepDeadView ? (
-            presence === 'reserved' || !agentsLoaded || !profilesLoaded ? (
-              // 프로필은 있는데 아직 뜬 적 없다(스폰 대기·부팅 대기) 또는 목록 자체를 아직 못 받았다 —
-              //   둘 다 "곧 온다" 라서 같은 문구다. ★목록 미수신을 「없습니다」로 새게 두면 안 된다★:
-              //   refreshProfiles 는 재시도 없는 단발 pull 이라 실패·지연이 실제로 가능하고, 그때 대화를
-              //   보존 중인 뷰가 조기 언마운트된다(profilesLoaded 가 그 방어선).
-              <span>{t('agent.connecting')}</span>
-            ) : (
-              // 프로필도 없다(트리에서 삭제) — 배정 자체가 유효하지 않은 슬롯.
-              // ★보존 중이던 대화가 여기서 사라지는 건 의도다★: 프로필 삭제는 사용자의 명시적 정리 동작이고,
-              //   ADR-0149 가 그 경우의 표시를 문구로 정했다(뷰 유지 대상이 아니다).
-              <span>{t('agent.noneConnected')}</span>
-            )
+          agentSlot === 'connecting' ? (
+            <span>{t('agent.connecting')}</span>
+          ) : agentSlot === 'stopped' ? (
+            // 슬롯 컴포넌트를 띄우지 않는다 — 기억 없는(이 잎이 지금 그 에이전트의 마운트 기억을 쥐고 있지 않은 —
+            //   마운트한 적이 없거나 재배정 때 기억을 버린) 슬롯이라 구독할 대상도 지킬 내용도 없다. 재시작·복원 뒤, 팝아웃·slot id 재마운트, A→B→A 재배정이 모두 여기로 온다.
+            <SlotUnavailableVeil />
+          ) : agentSlot === 'noTarget' ? (
+            // 프로필도 없다(트리에서 삭제) — 배정 자체가 유효하지 않은 슬롯.
+            // ★보존 중이던 대화가 여기서 사라지는 건 의도다★: 프로필 삭제는 사용자의 명시적 정리 동작이고,
+            //   ADR-0149 가 그 경우의 표시를 문구로 정했다(뷰 유지 대상이 아니다).
+            <span>{t('agent.noTarget')}</span>
           ) : (
             (() => {
               // ★viewId = node.id(slot id, ADR-0046)★: 슬롯이 자기 slot id 로 구독한다 — 같은 agentId 두
@@ -291,6 +320,23 @@ const SlotBody = memo(function SlotBody({
         ) : node.content.type === 'usage' ? (
           // 값은 usageStore 미러에서만 읽는다 — 조회 수요는 셸이 이 슬롯 내용(show_*)으로 계산한다(TRD §1-7).
           <UsageSlot content={node.content} viewId={targetViewId} slotId={node.id} />
+        ) : isForeign ? (
+          // TRD S21-storage §6-2: 원문은 셸만 쥔다 — 메뉴는 빈 슬롯 메뉴 그대로이고, 거기서 내용을 놓으면 원문이 사라진다.
+          // ADR-0280
+          // ★문구 없이 아이콘 하나, 막 없음(사용자 결정 2026-10-06 · ADR-0280 결정 7)★: 「더 새 판이 저장했다」를 가르지
+          //   않고 안내 줄도 두지 않는다 — 부재 막의 심볼과 같은 결이되, 꺼진 에이전트가 아니라서 흐림은 얹지 않는다.
+          //   뜻은 이름(`aria-label`) · hover 툴팁(`title`) · 자동화 표식(`data-slot-foreign`)으로 남긴다.
+          // pointer-events 를 끊지 않는다(아래 `+` 와 다르다) — `title` 툴팁이 hover 를 받아야 한다. 클릭·우클릭은 버블로
+          //   틀에 닿고, 핸들러·tabIndex 가 없는 `role="img"` 는 ADR-0143 이 막는 상호작용 역할이 아니다.
+          <span
+            data-slot-foreign=""
+            role="img"
+            aria-label={t('slot.foreignContent')}
+            title={t('slot.foreignContent')}
+            className="flex"
+          >
+            <FileQuestionMark className="size-10 text-muted" />
+          </span>
         ) : (
           // ★순수 그림(ADR-0143)★: 표적은 슬롯 컨테이너다. 아이콘에 핸들러·tabIndex·role 을 되붙이면 컨테이너
           //   좌클릭과 겹쳐 메뉴가 두 번 열리고, 키보드로 못 빠져나오는 메뉴에 닿는 경로가 되살아난다.
@@ -318,13 +364,23 @@ const SlotBody = memo(function SlotBody({
         //   40%지만, 그 거부는 실물 대조 없이 내린 것이라 이번 실측 결정이 우선한다. 되돌리려면 이 줄만
         //   올리면 된다. 세 테마 모두 color-mix 자동 적응. 제어 슬롯(트리/프리셋)은
         //   애초 focusSlot 제외(isContentSlot 게이트)라 isFocused=false → 링 없음(요구: 트리/프리셋 제외).
+        // ADR-0280
+        // ★링 색은 슬롯 상태에 따라 달라지면 안 된다(사용자 결정 2026-10-06)★ — 그래서 링은 부재 막(z-20, 잎이
+        //   그리든 슬롯 컴포넌트가 그리든) 위에 서서 막이 링을 흐리게 덮지 않는다. 전제 둘: 이 요소 아래 막의 조상
+        //   중 z-index 가 20 을 넘는 것이 없고, 링이 이 요소의 마지막 자식이다 — 그러면 z 가 같아 트리 순서상
+        //   나중인 링이 위다(그 이상 올릴 필요 없다). 연결 안내(z 40)·메뉴(1000 이상) 아래다.
+        // ★남은 차이(사용자 수용 2026-10-06 — 어색해 보이면 다시 연다)★: 링은 반투명(accent 40% 혼합)이라 보이는
+        //   색은 여전히 바탕을 따른다 — 터미널 슬롯은 고정된 어두운 바탕이라 light·e-ink 테마에서 살아 있는 터미널의
+        //   링과 막 덮인 슬롯의 링이 다르게 보인다.
+        // pointer-events 를 끊어 클릭·메뉴는 슬롯에 그대로 닿는다.
         <div
+          data-slot-focus-ring=""
           style={{
             position: 'absolute',
             inset: 0,
             pointerEvents: 'none',
             boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent)',
-            zIndex: 10,
+            zIndex: 20,
           }}
         />
       )}

@@ -3,6 +3,8 @@
 - 상태: 확정 (2026-07-09, 근거: 스테이지 5 커밋 88134e2 + /review code full 폐쇄 PASS)
 - 관련: TRD `docs/process/B-wezterm-tabs/TRD.md` §6 G9(spawn_into 슬롯 정책) · `src-tauri/src/layout/manager.rs:498-532`(resolve_spawn_slot·SpawnSlotError) · `src-tauri/src/layout/tree.rs:52`(first_empty_slot_id) · ADR-0057(탭 소유 모델) · step-log Phase 2 스테이지 5
 
+> ★**아래 「관련」 · 「결정」 · 「영향 / 불변식」이 적은 함수 자리는 낡았다**★(주석 2026-10-04, 결정 무변경 — 「결정」이 이름 붙인 `tree::first_empty_slot_id` 는 이제 자동 배치에 쓰이지 않는다 · 아래 ②). 저장 관리 P3b1(`5a2cf7f` · TRD `docs/process/S21-storage/trd.md` §6-2)이 셋을 바꿨다. ① `resolve_spawn_slot` 은 `ViewManager` 메서드가 됐다(`ViewManager::resolve_spawn_slot(view_id, slot)` — `src-tauri/src/layout/manager.rs`) — 여전히 스폰 · 락 · emit 을 모르는 정책 판정이다. ② 빈/점유 판정은 `ViewManager::slot_is_free` 하나다 — **빈 = `SlotContent::Empty` ∧ 모르는 내용 곁표(`unknown_content`)에 그 슬롯 항목이 없음.** 더 새 판이 저장한 모르는 슬롯 내용은 메모리에서 `Empty` 로 서지만 점유로 친다 — 자동 배치가 그 원문을 덮지 않게. `slot=None` 의 전위 순회 첫 빈 슬롯 · `NoEmptySlot` · `SlotOccupied` 규칙은 그대로이고 「빈」의 판정만 좁아졌다. `tree::first_empty_slot_id` 는 트리만 봐서 곁표 슬롯을 비었다고 답하므로 자동 배치에 쓰지 않는다(그 함수 주석). ③ `tree::assign_in_tree` 는 걷었다 — 트리의 내용 쓰기는 `tree::set_in_tree` 하나이고 `ViewManager` 는 그것을 자기 쓰기 문 `write_slot_content` 로만 부른다. **`assign_agent` 의 덮어쓰기 시맨틱은 그대로다** — 점유 방어는 여전히 `resolve_spawn_slot` 층에서만 한다.
+
 ## 맥락
 `spawn_into`에서 `slot`을 지정하지 않으면 대상 탭의 어느 슬롯에 에이전트를 배정할지 정해야 한다. TRD §6 G9는 "대상 탭의 **빈 root 슬롯**"이라 적었는데, 이 문구가 두 해석으로 갈린다: (a) root(최상위/좌측) 슬롯 한 칸만 보고 그게 점유면 실패 — 새로 만든 탭(빈 슬롯 1개)엔 맞지만 split된 탭에선 좌측이 차 있으면 우측이 비어도 실패, (b) 트리를 훑어 첫 번째 빈 슬롯을 찾음. G9는 코더 추측을 막으려 넣은 항목인데 이 지점이 여전히 모호했다.
 

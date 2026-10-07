@@ -36,14 +36,15 @@ vi.mock('../../store/eventBus', () => ({ refreshProfiles: refreshProfilesMock })
 // viewStore 는 assignAgent(열기 경로)만 참조 — getState 로 접근하므로 실제 store 를 얕게 stub.
 //   assignAgent 는 hoisted 한 곳에 두고 getState/셀렉터가 동일 인스턴스를 반환하게 한다(호출 검증용).
 const assignAgentMock = vi.hoisted(() => vi.fn(async () => undefined))
-// selectView 는 CachedView({layout, focusedSlotId})를 반환한다 — openInFocusedSlot 이 selectOpenTarget
-//   (layout, focusedSlotId)로 대상 슬롯을 고른다. 기본은 포커스 슬롯('slot-1')을 empty 콘텐츠 슬롯으로 둬
-//   기본 경로(포커스 슬롯 배정)가 성립하게 한다. 제어 슬롯/빈 슬롯 없음 엣지는 안전망 스위트가
-//   selectViewMock 반환을 갈아끼워 검증한다(hoisted 라 per-test 로 변경 가능).
+// selectView 는 CachedView({layout, focusedSlotId, foreignSlots})를 반환한다 — openInFocusedSlot 이
+//   selectOpenTarget(layout, focusedSlotId, foreignSlots)로 대상 슬롯을 고른다. 기본은 포커스 슬롯('slot-1')을
+//   empty 콘텐츠 슬롯으로 둬 기본 경로(포커스 슬롯 배정)가 성립하게 한다. 제어 슬롯/빈 슬롯 없음 엣지는 안전망
+//   스위트가 selectViewMock 반환을 갈아끼워 검증한다(hoisted 라 per-test 로 변경 가능).
 const selectViewMock = vi.hoisted(() =>
-  vi.fn<() => { layout: LayoutNode; focusedSlotId: string | null } | null>(() => ({
+  vi.fn<() => { layout: LayoutNode; focusedSlotId: string | null; foreignSlots: string[] } | null>(() => ({
     layout: { type: 'slot', id: 'slot-1', content: { type: 'empty' } },
     focusedSlotId: 'slot-1',
+    foreignSlots: [],
   })),
 )
 const currentViewIdMock = vi.hoisted(() => vi.fn(() => 'main-view' as string | null))
@@ -111,6 +112,7 @@ beforeEach(() => {
   selectViewMock.mockReturnValue({
     layout: { type: 'slot', id: 'slot-1', content: { type: 'empty' } },
     focusedSlotId: 'slot-1',
+    foreignSlots: [],
   })
   currentViewIdMock.mockReset()
   currentViewIdMock.mockReturnValue('main-view')
@@ -691,6 +693,24 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
         b: { type: 'slot', id: 'empty', content: { type: 'empty' } },
       },
       focusedSlotId: 'tree',
+      foreignSlots: [],
+    })
+    useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
+    render(<AgentList />)
+    openRow('a1')
+    expect(assignAgentMock).toHaveBeenCalledWith('main-view', 'empty', 'a1')
+  })
+
+  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실린다 — 캐시의 foreignSlots 를 넘기지 않으면 그 원문을 덮는다.
+  it('포커스가 모르는 내용 슬롯 + 빈 슬롯 존재 → 그 슬롯 대신 빈 슬롯으로 assignAgent', () => {
+    selectViewMock.mockReturnValue({
+      layout: {
+        type: 'split', id: 'root', dir: 'left_right', ratio: 0.5,
+        a: { type: 'slot', id: 'foreign', content: { type: 'empty' } },
+        b: { type: 'slot', id: 'empty', content: { type: 'empty' } },
+      },
+      focusedSlotId: 'foreign',
+      foreignSlots: ['foreign'],
     })
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)
@@ -706,6 +726,7 @@ describe('열기 안전망 — 제어 슬롯 포커스 제외(selectOpenTarget)'
         b: { type: 'slot', id: 'busy', content: { type: 'agent', agent_id: 'other' } },
       },
       focusedSlotId: 'palette',
+      foreignSlots: [],
     })
     useAgentStore.setState({ agents: [agent('a1', 'C:/w')] })
     render(<AgentList />)

@@ -28,6 +28,15 @@ fn temp_dir(tag: &str) -> std::path::PathBuf {
     ))
 }
 
+fn names_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
 #[test]
 fn the_service_is_send_and_sync() {
     fn assert_send_sync<T: Send + Sync>() {}
@@ -50,7 +59,7 @@ fn loading_never_touches_the_disk() {
         let disk = files.disk();
         assert_eq!(disk.text, before);
         assert_eq!(disk.writes, 0);
-        assert!(disk.copies.is_empty());
+        assert_eq!(disk.copies, 0);
     }
 }
 
@@ -79,7 +88,7 @@ fn writes_are_refused_until_enabled() {
     {
         let disk = files.disk();
         assert_eq!(disk.writes, 0);
-        assert!(disk.copies.is_empty(), "관문 전엔 떠 두지도 않는다");
+        assert_eq!(disk.copies, 0, "관문 전엔 떠 두지도 않는다");
     }
     assert_eq!(svc.get(None).unwrap().rev, 0);
 
@@ -214,14 +223,17 @@ fn an_unusable_file_is_untouched_until_the_first_write_then_copied_aside() {
     assert_eq!(files.text().as_deref(), Some("{not json"));
 
     svc.set("theme.default", "light").unwrap();
-    assert_eq!(files.disk().copies, vec![Some("{not json".to_string())]);
+    assert_eq!(files.disk().corrupt.as_deref(), Some("{not json"));
     assert_eq!(
         files.json(),
         serde_json::json!({"$version": 1, "theme.default": "light"})
     );
 
+    // 다음 쓰기는 멀쩡한 파일 위다 — 다시 뜨면 하나뿐인 사본이 새 파일로 덮인다.
     svc.set("chat.style.userPy", "9px").unwrap();
-    assert_eq!(files.disk().copies.len(), 1, "떠 두는 것은 한 번뿐");
+    let disk = files.disk();
+    assert_eq!(disk.copies, 1);
+    assert_eq!(disk.corrupt.as_deref(), Some("{not json"));
 }
 
 #[test]
@@ -584,7 +596,9 @@ fn real_disk_corrupt_file_is_kept_on_load_and_copied_aside_on_first_write() {
     let dir = temp_dir("corrupt");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
+    let copy = dir.join("settings.json.corrupt");
     std::fs::write(&path, b"\xff\xfe not utf-8").unwrap();
+    std::fs::write(&copy, b"earlier copy").unwrap();
 
     let svc = SettingsService::load_from_dir(&dir);
     assert_eq!(value_of(&svc, "theme.default"), "dark");
@@ -592,25 +606,15 @@ fn real_disk_corrupt_file_is_kept_on_load_and_copied_aside_on_first_write() {
 
     svc.enable_writes();
     svc.set("theme.default", "e-ink").unwrap();
-    let corrupt: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| {
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .starts_with("settings.json.corrupt-")
-        })
-        .collect();
-    assert_eq!(corrupt.len(), 1, "{corrupt:?}");
-    let suffix = corrupt[0].file_name().unwrap().to_string_lossy()
-        ["settings.json.corrupt-".len()..]
-        .to_string();
-    assert!(
-        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()),
-        "{suffix}"
+    assert_eq!(
+        names_in(&dir),
+        vec!["settings.json", "settings.json.corrupt"]
     );
-    assert_eq!(std::fs::read(&corrupt[0]).unwrap(), b"\xff\xfe not utf-8");
+    assert_eq!(
+        std::fs::read(&copy).unwrap(),
+        b"\xff\xfe not utf-8",
+        "앞서 떠 둔 사본은 덮인다"
+    );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
             .unwrap(),
@@ -643,21 +647,25 @@ fn real_disk_oversized_file_counts_as_unusable() {
 }
 
 #[test]
-fn real_disk_broken_file_over_a_mebibyte_is_replaced_without_a_copy() {
+fn real_disk_large_broken_file_is_copied_aside_whole() {
     let dir = temp_dir("huge");
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("settings.json");
-    std::fs::write(&path, vec![b'x'; 1024 * 1024 + 1]).unwrap();
+    let broken = vec![b'x'; 2 * 1024 * 1024];
+    std::fs::write(&path, &broken).unwrap();
 
     let svc = SettingsService::load_from_dir(&dir);
     svc.enable_writes();
     svc.set("theme.default", "light").unwrap();
 
-    let names: Vec<String> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(names, vec!["settings.json".to_string()]);
+    assert_eq!(
+        names_in(&dir),
+        vec!["settings.json", "settings.json.corrupt"]
+    );
+    assert_eq!(
+        std::fs::read(dir.join("settings.json.corrupt")).unwrap(),
+        broken
+    );
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
             .unwrap(),
@@ -693,7 +701,7 @@ fn a_write_over_a_file_broken_by_hand_keeps_the_values_memory_shows() {
 
     svc.set("chat.style.fontSize", "15px").unwrap();
 
-    assert_eq!(files.disk().copies, vec![Some("{broken".to_string())]);
+    assert_eq!(files.disk().corrupt.as_deref(), Some("{broken"));
     assert_eq!(
         files.json(),
         serde_json::json!({
@@ -714,7 +722,7 @@ fn a_reset_over_a_broken_file_keeps_the_other_values_memory_shows() {
     let out = svc.reset("theme.").unwrap();
 
     assert_eq!(out.rev, 1);
-    assert_eq!(files.disk().copies.len(), 1);
+    assert_eq!(files.disk().copies, 1);
     assert_eq!(
         files.json(),
         serde_json::json!({"$version": 1, "chat.style.userPy": "9px"})
@@ -729,7 +737,7 @@ fn a_write_after_the_file_was_deleted_keeps_the_values_memory_shows() {
 
     svc.set("chat.style.fontSize", "15px").unwrap();
 
-    assert!(files.disk().copies.is_empty());
+    assert_eq!(files.disk().copies, 0);
     assert_eq!(
         files.json(),
         serde_json::json!({
@@ -754,14 +762,14 @@ fn the_file_is_never_absent_when_the_replace_fails_after_the_copy() {
 
     let disk = files.disk();
     assert_eq!(disk.text.as_deref(), Some("{broken"));
-    assert_eq!(disk.copies, vec![Some("{broken".to_string())]);
+    assert_eq!(disk.corrupt.as_deref(), Some("{broken"));
     drop(disk);
     assert_eq!(value_of(&svc, "theme.default"), "dark");
     assert_eq!(svc.get(None).unwrap().rev, 0);
 }
 
 #[test]
-fn a_replace_that_keeps_failing_copies_the_broken_file_only_once() {
+fn a_replace_that_keeps_failing_keeps_one_copy_of_the_broken_file() {
     let files = MemFiles::with_text("{broken");
     let svc = service(&files);
     files.disk().fail_write = true;
@@ -772,41 +780,19 @@ fn a_replace_that_keeps_failing_copies_the_broken_file_only_once() {
             Err(SettingsError::Internal(_))
         ));
     }
-    assert_eq!(files.disk().copies, vec![Some("{broken".to_string())]);
+    assert_eq!(files.disk().corrupt.as_deref(), Some("{broken"));
 
     files.disk().fail_write = false;
     svc.set("theme.default", "light").unwrap();
+    svc.set("chat.style.userPy", "9px").unwrap();
     assert_eq!(
-        files.disk().copies.len(),
-        1,
-        "갈아끼우기가 끝내 성공해도 다시 뜨지 않는다"
+        files.disk().corrupt.as_deref(),
+        Some("{broken"),
+        "갈아끼운 뒤의 쓰기가 사본을 새 파일로 덮지 않는다"
     );
     assert_eq!(
         files.json(),
-        serde_json::json!({"$version": 1, "theme.default": "light"})
-    );
-}
-
-#[test]
-fn a_broken_file_too_big_to_keep_is_replaced_without_a_copy() {
-    let files = MemFiles::default();
-    {
-        let mut disk = files.disk();
-        disk.unusable = true;
-        disk.text = Some(String::new());
-        disk.size = Some(2 * 1024 * 1024);
-    }
-    let svc = service(&files);
-
-    svc.set("theme.default", "light").unwrap();
-
-    let disk = files.disk();
-    assert!(disk.copies.is_empty(), "{:?}", disk.copies);
-    assert_eq!(disk.writes, 1);
-    drop(disk);
-    assert_eq!(
-        files.json(),
-        serde_json::json!({"$version": 1, "theme.default": "light"})
+        serde_json::json!({"$version": 1, "theme.default": "light", "chat.style.userPy": "9px"})
     );
 }
 
@@ -940,7 +926,7 @@ fn an_unusable_file_is_not_rewritten_for_a_no_op() {
 
     let disk = files.disk();
     assert_eq!(disk.writes, 0);
-    assert!(disk.copies.is_empty());
+    assert_eq!(disk.copies, 0);
     assert_eq!(disk.text.as_deref(), Some("{broken"));
 }
 
@@ -965,16 +951,8 @@ impl SettingsFiles for GatedFiles {
         self.inner.write_atomic(text)
     }
 
-    fn stamp(&self) -> io::Result<store::SourceStamp> {
-        self.inner.stamp()
-    }
-
-    fn copy_aside(&self) -> io::Result<store::CopyOutcome> {
+    fn copy_aside(&self) -> io::Result<std::path::PathBuf> {
         self.inner.copy_aside()
-    }
-
-    fn matches_copy(&self, copy: &std::path::Path) -> io::Result<bool> {
-        self.inner.matches_copy(copy)
     }
 
     fn origin(&self) -> String {
@@ -1278,42 +1256,27 @@ fn an_unusable_file_is_reported_as_an_error_once_writes_are_enabled() {
 }
 
 #[test]
-fn a_broken_file_lost_to_the_copy_bound_is_logged_as_an_error_with_its_size() {
-    let limit = store::COPY_ASIDE_MAX;
-    // (원문, 표식 크기) — 표식으로 먼저 걸리는 것 · 표식은 작게 봤는데 뜨는 도중 걸리는 것.
-    let cases = [
-        (String::new(), Some(2 * 1024 * 1024)),
-        (format!("{{{}", "x".repeat(limit as usize)), Some(7)),
-    ];
-    for (text, size) in cases {
-        let files = MemFiles::with_text(&text);
-        files.disk().size = size;
-        let svc = service(&files);
-        let captured = Captured::default();
+fn a_copied_aside_file_is_logged_as_a_warning_with_where_it_went() {
+    let files = MemFiles::with_text("{broken");
+    let svc = service(&files);
+    let captured = Captured::default();
 
-        tracing::subscriber::with_default(captured.clone(), || {
-            svc.set("theme.default", "light").unwrap();
-        });
+    tracing::subscriber::with_default(captured.clone(), || {
+        svc.set("theme.default", "light").unwrap();
+    });
 
-        assert!(files.disk().copies.is_empty());
-        let lines = captured.lines();
-        let errors: Vec<&Line> = lines
-            .iter()
-            .filter(|line| line.level == tracing::Level::ERROR)
-            .collect();
-        assert_eq!(errors.len(), 1, "{lines:?}");
-        let expected_bytes = size.filter(|&s| s > limit).unwrap_or(text.len() as u64);
-        assert_eq!(
-            field(errors[0], "bytes"),
-            Some(expected_bytes.to_string().as_str())
-        );
-        assert_eq!(field(errors[0], "limit"), Some(limit.to_string().as_str()));
-        assert!(
-            !errors[0].message.contains(&limit.to_string()),
-            "수치는 필드로만: {}",
-            errors[0].message
-        );
-    }
+    let lines = captured.lines();
+    let warns: Vec<&Line> = lines
+        .iter()
+        .filter(|line| line.level == tracing::Level::WARN)
+        .collect();
+    assert_eq!(warns.len(), 1, "{lines:?}");
+    assert_eq!(field(warns[0], "copied_to"), Some("memory.corrupt"));
+    assert_eq!(field(warns[0], "source"), Some("memory"));
+    assert!(
+        !lines.iter().any(|line| line.level == tracing::Level::ERROR),
+        "{lines:?}"
+    );
 }
 
 // ── 격리 — 이 모듈은 Tauri 도 async 런타임도 모른다(그래서 앱 없이 시험이 돈다) ──

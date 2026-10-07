@@ -56,10 +56,28 @@ describe('ConnectionNotice', () => {
     expect(alert.textContent).toContain('쓰기 가능한 위치')
   })
 
+  // 덮는 층의 줄 계약(`NoticeOverlay` doc) — `wrap-anywhere` 를 잃으면 긴 이유가 ✕ 를 화면 밖으로 민다.
+  it('줄은 불투명 바탕이고 글 칸은 아무 데서나 줄을 바꾼다', () => {
+    render(<ConnectionNotice />)
+    emit('폴더 문제')
+    const alert = screen.getByRole('alert')
+    expect(alert.className).toMatch(/\bbg-elevated\b/)
+    expect(alert.firstElementChild?.className).toMatch(/\bwrap-anywhere\b/)
+  })
+
   it('닫으면 사라진다', () => {
     render(<ConnectionNotice />)
     emit('폴더 문제')
     fireEvent.click(screen.getByLabelText('알림 닫기'))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  // 띠는 덮는 층에 얹힌다 — 같은 이유의 다음 통지가 띠를 되살리면 ✕ 가 무력해 가린 자리가 다시 막힌다.
+  it('닫은 뒤 같은 이유로 다시 통지돼도 뜨지 않는다', () => {
+    render(<ConnectionNotice />)
+    emit('폴더 문제')
+    fireEvent.click(screen.getByLabelText('알림 닫기'))
+    emit('폴더 문제')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 

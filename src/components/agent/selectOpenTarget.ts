@@ -20,15 +20,27 @@ function findSlotById(node: LayoutNode, slotId: string): Extract<LayoutNode, { t
   return findSlotById(node.a, slotId) ?? findSlotById(node.b, slotId)
 }
 
-function firstEmptySlotId(node: LayoutNode): string | null {
-  if (node.type === 'slot') return node.content.type === 'empty' ? node.id : null
-  return firstEmptySlotId(node.a) ?? firstEmptySlotId(node.b)
+// 셸 `ViewManager::slot_is_free` 와 같은 답 — 모르는 내용 슬롯은 `empty` 로 실려도 점유다(TRD S21-storage §6-2).
+// ADR-0059
+// ADR-0280
+function firstEmptySlotId(node: LayoutNode, foreign: ReadonlySet<string>): string | null {
+  if (node.type === 'slot') return node.content.type === 'empty' && !foreign.has(node.id) ? node.id : null
+  return firstEmptySlotId(node.a, foreign) ?? firstEmptySlotId(node.b, foreign)
 }
 
-export function selectOpenTarget(layout: LayoutNode, focusedSlotId: string | null): string | null {
-  if (focusedSlotId != null) {
+/**
+ * `foreignSlots` = 캐시의 `foreignSlots`. 자동 선택(열기)은 그 슬롯을 포커스여도 절대 고르지 않는다 —
+ * 원문은 내용을 명시적으로 놓거나 슬롯을 닫거나 그 탭을 닫을 때만 사라진다(TRD S21-storage §6-2).
+ */
+export function selectOpenTarget(
+  layout: LayoutNode,
+  focusedSlotId: string | null,
+  foreignSlots: readonly string[],
+): string | null {
+  const foreign = new Set(foreignSlots)
+  if (focusedSlotId != null && !foreign.has(focusedSlotId)) {
     const focused = findSlotById(layout, focusedSlotId)
     if (focused != null && isContentSlot(focused.content)) return focused.id
   }
-  return firstEmptySlotId(layout)
+  return firstEmptySlotId(layout, foreign)
 }

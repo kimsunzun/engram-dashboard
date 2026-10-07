@@ -83,10 +83,15 @@ engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 #   직접 지고 있다(아래 T1 블록). 그래도 안 켜는 이유는 **의도 표시**다: 나중에 이 셸이 async 를 걷어내도
 #   net 간선이 그것을 되돌려 놓지 않는다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석.
 engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
-# 데몬 찾기 · 띄우기 · 끄기(`crate::discovery`)의 OS 일 — PID 생존 판정(`process::pid_alive_with_start_time`) · 데몬
-#   exe 의 경로 · 파일 이름(`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기
-#   (`spawn::spawn_outside_job` — WMI) · 끄기 fallback 의 트리 끄기(`process::kill_tree`). 이 셸은 `windows` 를 직접
-#   의존하지 않는다(ADR-0266).
+# ADR-0266: OS 층 — 이 셸의 OS 일은 전부 여기서 온다.
+#   데몬 찾기 · 띄우기 · 끄기(`crate::discovery`) — PID 생존 판정(`process::pid_alive_with_start_time`) · 데몬 exe 의
+#   경로 · 파일 이름(`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기
+#   (`spawn::spawn_outside_job` — WMI) · 끄기 fallback 의 트리 끄기(`process::kill_tree`).
+#   화면 상태(`crate::state`) — 상태 폴더 임시 파일 쓸기의 주인 생존 판정(`process::pid_alive` — `state::boot` 의
+#   `sweep_temps`) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
+#   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
+#   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은 platform 하나에만 둔다(CI `platform gate 5`).
+#   ★운영 의존에서 `test-support` 를 켜지 않는다★(CI `platform gate 3` — 시험 기능은 아래 dev 재선언에서만).
 engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
 # 동기 WS 클라이언트 — graceful 데몬 끄기(`daemon_client::stop` 의 일방 발사)만 쓴다. 3-2(transport 셸 부착)가 그
 #   클라이언트를 다시 쓰며 걷는다(ADR-0271 결정 5). 새 패키지가 아니다 — 아래 `tokio-tungstenite` 가 같은 판을 이미 문다.

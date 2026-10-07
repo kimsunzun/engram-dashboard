@@ -142,6 +142,7 @@ struct Host {
     fail_open: bool,
     opened: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
+    placed: Mutex<Vec<String>>,
     during_open: Mutex<Option<DuringOpen>>,
 }
 
@@ -152,6 +153,7 @@ impl Host {
             fail_open,
             opened: Mutex::new(Vec::new()),
             closed: Mutex::new(Vec::new()),
+            placed: Mutex::new(Vec::new()),
             during_open: Mutex::new(None),
         }
     }
@@ -173,6 +175,16 @@ impl WindowHost for Host {
     fn close(&self, label: &str) {
         self.probe.assert_outside("WindowHost::close");
         self.closed.lock().unwrap().push(label.to_string());
+    }
+
+    // ★모델에 든 뒤여야 한다★ — 운영 구현은 그 label 의 모델 항목에 자리를 적으므로, 먼저 불리면 첫 자리가 버려진다.
+    fn record_placement(&self, label: &str) {
+        self.probe.assert_outside("WindowHost::record_placement");
+        assert!(
+            self.probe.0 .0.lock().unwrap().windows.contains_key(label),
+            "record_placement({label}) 는 창이 모델에 든 뒤에 불려야 한다"
+        );
+        self.placed.lock().unwrap().push(label.to_string());
     }
 
     // ★main 을 특례로 참이라 답한다★ — 정적 config 창이라 이 가짜가 연 적이 없는데, 실 앱에서는 항상 떠
@@ -407,6 +419,11 @@ fn create_window_registers_model_and_opens_os_window() {
     let label = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap();
 
     assert_eq!(&*w.host.opened.lock().unwrap(), &[label.clone()]);
+    assert_eq!(
+        &*w.host.placed.lock().unwrap(),
+        &[label.clone()],
+        "첫 자리 기록 1회"
+    );
     assert!(apply::list_windows(&w.state).unwrap().contains(&label));
     assert_eq!(
         apply::list_tabs(&w.state, &label).unwrap().tabs.len(),
@@ -429,6 +446,42 @@ fn create_window_rolls_back_model_when_open_fails() {
         "빌드 실패 시 모델 롤백 — 유령 창 금지"
     );
     assert_eq!(w.resyncs(), 2, "생성·롤백 각 1회");
+    assert!(
+        w.host.placed.lock().unwrap().is_empty(),
+        "못 연 창은 적지 않는다"
+    );
+}
+
+/// ★창을 만드는 사이 모델에서 그 창이 지워지면 만든 OS 창을 거둔다★ — 지운 쪽(창 닫기 · 크래시 사본 수락의 화면
+/// 교체)의 OS 창 거두기는 아직 등록 전인 창을 못 찾고 지나간다. 다시 보지 않으면 모델에 없는 OS 창이 남는다.
+#[test]
+fn create_window_closes_the_os_window_when_the_model_dropped_it_during_the_build() {
+    let w = World::new();
+    *w.host.during_open.lock().unwrap() = Some(Box::new(|state: &LayoutState| {
+        state
+            .0
+            .lock()
+            .unwrap()
+            .close_window("slot-popup-1")
+            .expect("만드는 중인 창이 모델에 있다");
+    }));
+
+    let err = apply::create_window(&w.state, &w.subs, &w.host, &w.labels).unwrap_err();
+
+    assert!(err.contains("slot-popup-1"), "err={err}");
+    assert_eq!(&*w.host.opened.lock().unwrap(), &["slot-popup-1"]);
+    assert_eq!(
+        &*w.host.closed.lock().unwrap(),
+        &["slot-popup-1"],
+        "만든 OS 창을 거둔다"
+    );
+    assert!(
+        w.host.placed.lock().unwrap().is_empty(),
+        "모델에 없는 창의 자리는 적지 않는다"
+    );
+    assert!(!apply::list_windows(&w.state)
+        .unwrap()
+        .contains(&"slot-popup-1".to_string()));
 }
 
 // ★실 `PopupCounter` 를 통과시킨다★: prefix 는 capabilities/popup.json 의 glob 과 짝이고(다른 label 이면
@@ -940,6 +993,11 @@ fn move_slot_to_window_detaches_content_into_a_new_window() {
     .unwrap();
 
     assert_eq!(&*w.host.opened.lock().unwrap(), &[moved.window.clone()]);
+    assert_eq!(
+        &*w.host.placed.lock().unwrap(),
+        &[moved.window.clone()],
+        "새 창은 모델에 든 뒤 첫 자리를 적는다"
+    );
     assert!(!w.slots(view).contains(&slot), "원본 슬롯은 닫힌다(MOVE)");
     let landed = apply::list_tabs(&w.state, &moved.window).unwrap();
     assert_eq!(landed.active, moved.tab, "새 탭이 그 창의 활성 탭이다");
@@ -1006,6 +1064,7 @@ fn move_slot_to_window_into_an_existing_window_adds_a_tab() {
     let w = World::new();
     let target = w.popup();
     let tabs_before = apply::list_tabs(&w.state, &target).unwrap().tabs.len();
+    let placed_before = w.host.placed.lock().unwrap().len();
     let (view, slot, _) = w.view_with_filled_slot();
 
     let moved = apply::move_slot_to_window(
@@ -1021,6 +1080,11 @@ fn move_slot_to_window_into_an_existing_window_adds_a_tab() {
     .unwrap();
 
     assert_eq!(moved.window, target, "새 창을 열지 않는다");
+    assert_eq!(
+        w.host.placed.lock().unwrap().len(),
+        placed_before,
+        "이미 있는 창의 자리는 사건이 적는다"
+    );
     let tabs = apply::list_tabs(&w.state, &target).unwrap();
     assert_eq!(tabs.tabs.len(), tabs_before + 1);
     assert_eq!(tabs.active, moved.tab);
@@ -1154,6 +1218,10 @@ fn move_slot_to_window_rolls_back_when_the_window_cannot_be_built() {
     .unwrap_err();
 
     assert!(err.contains("창 생성 실패"), "err={err}");
+    assert!(
+        w.host.placed.lock().unwrap().is_empty(),
+        "못 연 창은 적지 않는다"
+    );
     assert_eq!(
         w.view_count(),
         views_before,

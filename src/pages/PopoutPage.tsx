@@ -20,6 +20,7 @@
 import { useState } from 'react'
 
 import ConnectionNotice from '../components/layout/ConnectionNotice'
+import NoticeOverlay from '../components/layout/NoticeOverlay'
 import WindowLayout from '../components/layout/WindowLayout'
 // ★단일 출처★: 이 창 label 파싱은 viewStore 의 공유 헬퍼를 쓴다(WindowLayout·useCurrentViewId·
 //   SlotContextMenu 가 같은 판정을 공유 — §5 제어 표면 일관).
@@ -31,7 +32,6 @@ export default function PopoutPage() {
   const [label] = useState<string>(readWindowLabelFromHash)
 
   return (
-    // 알림은 모든 창에 나온다 — 부팅은 창마다 돌고 실패 이유도 창마다 도착한다(ADR-0134).
     <div
       style={{
         width: '100vw',
@@ -41,8 +41,12 @@ export default function PopoutPage() {
         flexDirection: 'column',
       }}
     >
-      <ConnectionNotice />
-      <div style={{ flex: 1, minHeight: 0 }}>
+      <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+        {/* 알림은 모든 창에 나온다 — 부팅은 창마다 돌고 실패 이유도 창마다 도착한다(ADR-0134). 레이아웃을 밀지 않고
+              덮는다(ADR-0277 — ADR-0180 개정). */}
+        <NoticeOverlay>
+          <ConnectionNotice />
+        </NoticeOverlay>
         <WindowLayout label={label} />
       </div>
     </div>
