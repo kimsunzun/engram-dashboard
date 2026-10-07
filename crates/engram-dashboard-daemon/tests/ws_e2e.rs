@@ -2323,7 +2323,7 @@ mod real_process {
     use std::process::{Child, Command};
 
     use engram_dashboard_base::testing::wait_until;
-    use engram_dashboard_discovery::DataLayout;
+    use engram_dashboard_daemon::data_dir::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
 
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");

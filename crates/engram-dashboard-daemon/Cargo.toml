@@ -79,7 +79,8 @@ required-features = ["test-harness"]
 engram-dashboard-agent = { path = "../engram-dashboard-agent" }
 # ADR-0175 결정 1: 파일 로그 초기화(`logging`).
 #   agent 를 타고 이미 링크돼 있었으므로 새 짐이 아니다 — 직접 간선만 는다. 토큰 · 해시의 hex 표기
-#   (`text::hex_lower` — ADR-0269)와 락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다.
+#   (`text::hex_lower` — ADR-0269)와 락 오염 되찾기(`sync::lock` 등 — ADR-0275), 데이터 폴더 쓰기 확인의
+#   쓰기 프로브(`writable` — `data_dir`, ADR-0282)도 여기서 온다.
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 # ADR-0266: OS 층 — daemon.json 에 박을 자기 시작시각(`process::current_process_start_time`)과 제어 평면 CLI
 #   형제 exe 의 경로(`env::sibling_exe` — `locate_send_exe` · 하네스 `roundtrip-smoke` · ADR-0282)와 못 찾았을 때
@@ -87,8 +88,6 @@ engram-dashboard-base = { path = "../engram-dashboard-base" }
 #   셸(`shell::default_shell`)도 쓴다. agent 를 타고 이미 링크돼 있으므로 새 짐이 아니다 — 직접 간선만 는다.
 engram-dashboard-platform = { path = "../engram-dashboard-platform" }
 engram-dashboard-protocol = { path = "../engram-dashboard-protocol" }
-# data_dir 단일 출처(ADR-0024) — embedded·daemon 이 같은 default_data_dir() 을 보게(순환 없음).
-engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
 # ADR-0110: 메시징 커널(lib). 이 crate 는 워크스페이스 crate 무의존 — 접합은 전부 포트 trait 이고
 #   실물 어댑터는 데몬 `src/messaging_host.rs` 가 소유한다.
 engram-dashboard-messaging = { path = "../engram-dashboard-messaging" }
@@ -197,6 +196,10 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging", features 
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 # 같은 계열(feature-only 재선언) — 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`) · 시험 시계 `time::ManualClock`(command_delivery · connection_core 시험).
 engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-support"] }
+# 다리 시험 하나만 쓴다 — 데이터 폴더 규칙의 정본(`data_dir`)과 셸이 아직 쓰는 discovery 사본이 같은 폴더를
+#   내는지 잰다. 운영 코드는 이 crate 를 부르지 않는다. crate 를 지울 때 이 줄과 그 시험을 함께 지운다
+#   (ADR-0271 결정 1).
+engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # happy-path handshake(initialize + tools/list + tools/call)는 rmcp 클라이언트 role 로 정직하게 검증.

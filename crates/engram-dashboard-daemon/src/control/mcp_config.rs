@@ -39,7 +39,7 @@ use engram_dashboard_agent::types::AgentId;
 // ADR-0209
 pub use engram_dashboard_agent::types::MCP_SERVER_NAME;
 
-/// 스폰 부착 파일 폴더 **자체**(데이터 폴더가 아니다) — 운영 = discovery `DataLayout::mcp_config_dir`
+/// 스폰 부착 파일 폴더 **자체**(데이터 폴더가 아니다) — 운영 = `data_dir::DataLayout::mcp_config_dir`
 /// (데몬 `run` 아래). 이 모듈의 파일은 전부 이 안에 바로 놓이고, [`sweep_stale_configs`] 는 이 안의 파일을
 /// **전부** 지운다.
 ///

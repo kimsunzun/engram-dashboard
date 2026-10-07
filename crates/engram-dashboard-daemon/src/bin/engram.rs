@@ -334,7 +334,8 @@ fn required_section_ids() -> Vec<String> {
 ///   불리므로 cwd 는 아무 관계가 없고, 릴리즈에는 repo 가 아예 없다. 릴리즈에서 이 앵커는 exe 폴더로
 ///   떨어지고 거기 `prompts/` 가 함께 배송된다(ADR-0100).
 fn help_file_path() -> Option<std::path::PathBuf> {
-    let root = engram_dashboard_discovery::find_install_root()?;
+    // ADR-0273: 이 CLI 가 데몬 lib 를 부르는 유일한 줄 — 설치 위치 규칙의 CLI 쪽 사본(결정 5)이 서면 그것으로 바꾼다.
+    let root = engram_dashboard_daemon::data_dir::find_install_root()?;
     root.is_absolute().then(|| root.join(REL_HELP_FILE))
 }
 

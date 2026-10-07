@@ -14,6 +14,7 @@ pub mod command_delivery;
 pub mod command_roster;
 pub mod connection_core;
 pub mod control;
+pub mod data_dir;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 #[cfg(test)]
@@ -34,13 +35,13 @@ use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::CLI_EXE_NAME;
 use engram_dashboard_base::logging;
-use engram_dashboard_discovery::DataLayout;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use connection_core::MultiViewState;
+use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
 use engram_dashboard_net::frame_port::FrameFanout;
 use engram_dashboard_net::ws::ConnRegistry;
@@ -60,13 +61,13 @@ pub use engram_dashboard_net::ws::KeepaliveConfig;
 //   그대로 보인다) — 경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
 
 // ★경로를 여기서 조립하지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
-//   성립한다(ADR-0135). 경로는 `DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
+//   성립한다(ADR-0135). 경로는 `data_dir::DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
 use engram_dashboard_net::portfile::DAEMON_FILE;
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
 fn resolve_data_dir() -> PathBuf {
-    engram_dashboard_discovery::default_data_dir()
+    data_dir::default_data_dir()
 }
 
 /// 보안: 반환값은 로그에 찍지 말 것(daemon.json 에만 기록).
@@ -463,8 +464,8 @@ pub async fn run() -> Result<(), i32> {
     //    막히므로, `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(base `logging` 머리말).
     //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
     //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
-    if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
-        // e 안에 폴더 경로와 조치가 이미 들어 있다(DiscoveryError::DataDirUnwritable).
+    if let Err(e) = ensure_data_dir_writable(&data_dir) {
+        // e 안에 폴더 경로와 조치가 이미 들어 있다(`data_dir::DataDirUnwritable`).
         tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");
         return Err(1);
     }
@@ -1108,42 +1109,4 @@ mod tests {
         let b = generate_token().unwrap();
         assert_ne!(a, b);
     }
-
-    #[test]
-    fn resolve_data_dir_delegates_to_discovery_local_dir() {
-        let _g = ENV_LOCK.lock().unwrap();
-        // override 가 새어 들어오면(다른 테스트 leak) 기본 경로 단언이 깨진다 — 명시 제거.
-        let prev = std::env::var_os("ENGRAM_DATA_DIR");
-        std::env::remove_var("ENGRAM_DATA_DIR");
-        let dir = resolve_data_dir();
-        let delegated = engram_dashboard_discovery::default_data_dir();
-        if let Some(v) = &prev {
-            std::env::set_var("ENGRAM_DATA_DIR", v);
-        }
-        assert!(
-            dir.ends_with(".engram-dev"),
-            "디버그(override 없음)에서 `.engram-dev` 로 끝나야(app 과 동일 폴더): {dir:?}"
-        );
-        assert_eq!(
-            dir, delegated,
-            "resolve_data_dir 은 discovery::default_data_dir 와 동일해야"
-        );
-    }
-
-    #[test]
-    fn resolve_data_dir_honors_env_override() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os("ENGRAM_DATA_DIR");
-        let want = std::env::temp_dir().join("engram-daemon-resolve-override-test");
-        std::env::set_var("ENGRAM_DATA_DIR", &want);
-        let got = resolve_data_dir();
-        match &prev {
-            Some(v) => std::env::set_var("ENGRAM_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAM_DATA_DIR"),
-        }
-        assert_eq!(got, want, "ENGRAM_DATA_DIR set 시 그 경로로 격리돼야");
-    }
-
-    /// ENGRAM_DATA_DIR 은 프로세스 전역 env — set/remove 하는 테스트끼리 직렬화한다(병렬 짓밟음 방지).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }
