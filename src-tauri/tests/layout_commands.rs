@@ -626,8 +626,12 @@ fn every_declaration_carries_a_usable_json_shape() {
     }
 }
 
-/// ★이 바이너리에 링크된 **전 crate** 를 본다★ — 셸이 `agent.*` 계열에 이름을 더하므로(`agent.spawnInto`)
-/// 코어 선언과 겹치는 순간 어느 주인이 이기는지 알 수 없어진다.
+/// ★재는 범위 = 이 바이너리에 **링크된** crate 의 선언끼리다★ — 링커 수집(`duplicate_command_names`)은
+/// 링크된 선언 객체만 본다. 셸이 `agent.*` 계열에 이름을 더하므로(`agent.spawnInto`) agent 선언과 겹치면
+/// 어느 주인이 이기는지 알 수 없어지는데, 셸 lib 은 agent 를 의존하지 않는다. agent 선언이 여기 보이는
+/// 것은 데몬 dev 의존을 타고 온 결과다(이 파일이 데몬 상수를 읽는다 · 실측 2026-10-06 — `spec_of("agent.new")`
+/// 가 `Some`). 그 경로가 끊기면 이 시험은 그 겹침을 말없이 못 본다.
+/// 셸 · 데몬 이름 겹침의 벽은 데몬의 등록 반려다(ADR-0270 결정 2).
 #[test]
 fn no_two_declarations_claim_the_same_name() {
     assert_eq!(duplicate_command_names(), Vec::<&str>::new());
@@ -2672,53 +2676,58 @@ fn with_view(bridge: Arc<ViewCommandBridge>) -> (World, Arc<InboundReceiver>) {
     (world, receiver)
 }
 
-/// ★데몬이 답하는 이름이 하나라도 실리면 **패킷 전체**가 반려된다★ — 그러면 셸의 17개 이름이 그 하나
-/// 때문에 함께 명부에 못 올라 LLM 이 창·탭·슬롯을 통째로 못 만진다(데몬 `refuse_names_i_answer` — 겹친
-/// 이름만 빼 주지 않는다).
+/// ★셸 표 이름은 표에서 온 한 번만 실리고, 데몬이 답하는 이름은 셸이 거르지 않는다★(ADR-0270 결정 2).
 ///
-/// 웹뷰 레지스트리에는 실제로 `agent.spawn`·`agent.rename` 이 있다(`src/commands/agentCommands.ts`) —
-/// 그래서 이 필터가 없으면 그 사고가 **오늘 바로** 난다. ★이 테스트가 데몬의 반려 계약을 안 건드리는
-/// 근거다★: 셸이 스스로 안 싣는다.
-/// ★기대값을 손으로 적지 않는다★ — 코어 선언 전량을 훑으므로 데몬 어휘가 늘면 이 그물도 함께 자란다.
+/// 웹뷰가 셸 표 이름 전량 · 자기 몫(`tab.next`) · 데몬이 답하는 꼴의 이름(`agent.spawn`)을 통째로 보고한
+/// 가정 상황이다(오늘 웹뷰는 `help` 를 단 것만 보고한다 — 그래서 이 상황은 누가 그 이름에 `help` 를 단 날이다).
+/// - 셸 표 이름은 예약이라 웹뷰 몫에서 빠지고 패킷에는 표에서 온 **한 번**만 실린다 — 명부는 한 패킷 안 같은
+///   이름을 오류 없이 접으므로, 두 번 실리면 어느 주인이 이기는지가 말없이 갈린다.
+/// - 데몬이 답하는 이름은 실린다 — 그 벽은 데몬의 등록 반려다(셸은 agent crate 를 의존하지 않아 그 어휘를
+///   모른다). 반려 쪽 단언 = 데몬 `connection_core.rs` 의
+///   `registering_a_name_this_daemon_answers_is_refused_as_a_conflict`.
+///
+/// ★셸 표 쪽 기대값을 손으로 적지 않는다★ — 셸 선언 전량을 훑으므로 셸 어휘가 늘면 이 그물도 함께 자란다.
 #[tokio::test]
-async fn the_registration_packet_never_carries_a_name_the_daemon_answers_itself() {
+async fn the_registration_packet_carries_shell_names_once_and_leaves_daemon_names_to_the_daemon() {
+    // 데몬이 답하는 꼴의 이름 — 셸은 그 어휘를 모르므로 문자열로만 댄다.
+    const DAEMON_NAME: &str = "agent.spawn";
     let (bridge, _seen) = recording_bridge(Duration::from_secs(1));
-    let daemon_answers: Vec<&str> = engram_dashboard_agent::commands::COMMAND_SPECS
-        .iter()
-        .map(|spec| spec.name)
-        .collect();
+    let shell_names: BTreeSet<&str> = COMMAND_SPECS.iter().map(|spec| spec.name).collect();
     assert!(
-        daemon_answers.contains(&"agent.spawn"),
-        "이 테스트의 전제 — 데몬이 agent.spawn 을 답한다"
+        !shell_names.contains(DAEMON_NAME),
+        "이 시험의 전제 — 셸 표는 {DAEMON_NAME} 를 선언하지 않는다"
     );
 
-    // 웹뷰가 자기 id 를 통째로 보고한 상황(오늘 프론트 레지스트리에 실재하는 이름들이다).
-    let reported: Vec<ViewCommandDecl> = daemon_answers
+    let reported: Vec<ViewCommandDecl> = shell_names
         .iter()
         .map(|name| view_decl(name))
-        .chain([view_decl("tab.next")])
+        .chain([view_decl("tab.next"), view_decl(DAEMON_NAME)])
         .collect();
     let outcome = bridge.report(MAIN_WINDOW_LABEL, reported);
-    for name in &daemon_answers {
-        assert!(
-            outcome.refused.iter().any(|r| r == name),
-            "{name} 은 빠졌다고 말해야 한다"
-        );
-    }
+    let refused: BTreeSet<&str> = outcome.refused.iter().map(String::as_str).collect();
+    assert_eq!(
+        refused, shell_names,
+        "웹뷰 몫에서 빠지는 것은 셸 표 이름 전부이고 그것뿐이다"
+    );
 
     let (_world, receiver) = with_view(Arc::clone(&bridge));
     let Some(AgentCommand::RegisterCommands { decls, .. }) = registration_command(&receiver) else {
         panic!("얹을 이름이 있으면 등록 패킷이 나온다");
     };
-    let names: BTreeSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
-    for name in &daemon_answers {
+    for name in &shell_names {
+        let carried: Vec<_> = decls.iter().filter(|d| d.name == *name).collect();
+        assert_eq!(carried.len(), 1, "{name}: 셸 표 이름은 한 번만 실린다");
         assert!(
-            !names.contains(name),
-            "데몬이 답하는 '{name}' 가 실렸다 — 이 패킷은 통째로 반려된다"
+            !carried[0].help.contains(&view_decl(name).help.summary),
+            "{name}: 실린 것은 셸 표의 선언이어야 한다 — 웹뷰가 보고한 설명이 실렸다"
         );
     }
+    let names: BTreeSet<&str> = decls.iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains("tab.next"), "웹뷰 몫은 실린다");
-    assert!(names.contains("tab.create"), "셸 몫도 그대로 실린다");
+    assert!(
+        names.contains(DAEMON_NAME),
+        "데몬이 답하는 이름은 셸이 거르지 않는다 — 벽은 데몬의 등록 반려다"
+    );
     for decl in &decls {
         assert!(
             !decl.help.trim().is_empty(),

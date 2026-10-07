@@ -127,7 +127,7 @@ cargo test  -p engram-dashboard-agent -- --test-threads=4      # 영향 crate �
 ```
 - **`-- --test-threads=4`는 crate마다 갈린다** — 실 자식 프로세스를 띄우는 crate에만 붙는다(`agent`·`daemon`·`platform`). 인메모리 단위 테스트뿐인 crate(`base`·`command`·`protocol`·`messaging`·`net`)엔 안 붙는다 — `base` 는 프로세스를 띄우던 PID 헬퍼 시험이 `platform` 으로 나가며 이쪽으로 왔다(ADR-0266). **판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」**.
 - **★좁혀 돌릴 때도 분리 실행이다★** — 위 「분리 실행」 절은 quick에도 그대로 걸린다. 한 crate짜리 명령이라고 셸에서 직접 돌리지 않는다(좁혀 돌려도 컴파일 로그는 길다 — 이유는 크래시 회피가 아니라 **출력 처리**이고 근거는 그 절).
-- **에이전트 crate(`engram-dashboard-agent`)가 닿으면 격리 게이트도 포함**(quick이어도 — 명령·판정은 아래 standard 4번): quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다. **바닥 crate(`engram-dashboard-base`)가 닿을 때도 같다** — 그쪽 짝은 standard 4b·4c번. **OS 층 crate(`engram-dashboard-platform`)가 닿을 때도 같다** — 그쪽 짝은 standard 4e번과 아래 의존 상한 게이트의 platform 줄, 그리고 platform 시험 기능 운영 그래프 게이트. **어느 crate 든 `.rs` 의 OS `cfg` 술어(목록 = platform `src/lib.rs` 헤더 게이트 ④)를 더하거나 걷거나 그런 파일을 옮기면 standard 4f 블록도 필수다**(quick이어도 — 명단 밖 새 파일이 CI 에서야 빨개진다). **어느 멤버든 `Cargo.toml` 의 의존을 더하거나 바꾸면 4g 블록**, **`.rs` 에 `std::os::windows` · `std::os::unix` 를 더하거나 걷거나 그런 파일을 옮기면 4h 블록도 필수다**(같은 이유). **셸의 `src-tauri/src/daemon_client/replay_flight.rs`가 닿을 때도 같다** — 그쪽 짝은 standard 4d번이고, 거기선 컴파일러가 아무것도 막아 주지 않아 그 게이트가 유일한 벽이다.
+- **에이전트 crate(`engram-dashboard-agent`)가 닿으면 격리 게이트도 포함**(quick이어도 — 명령·판정은 아래 standard 4번): quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다. **바닥 crate(`engram-dashboard-base`)가 닿을 때도 같다** — 그쪽 짝은 standard 4b·4c번. **OS 층 crate(`engram-dashboard-platform`)가 닿을 때도 같다** — 그쪽 짝은 standard 4e번과 아래 의존 상한 게이트의 platform 줄, 그리고 platform 시험 기능 운영 그래프 게이트. **어느 crate 든 `.rs` 의 OS `cfg` 술어(목록 = platform `src/lib.rs` 헤더 게이트 ④)를 더하거나 걷거나 그런 파일을 옮기면 standard 4f 블록도 필수다**(quick이어도 — 명단 밖 새 파일이 CI 에서야 빨개진다). **어느 멤버든 `Cargo.toml` 의 의존을 더하거나 바꾸면 4g · 4i 블록**, **`.rs` 에 `std::os::windows` · `std::os::unix` 를 더하거나 걷거나 그런 파일을 옮기면 4h 블록도 필수다**(같은 이유). **셸의 `src-tauri/src/daemon_client/replay_flight.rs`가 닿을 때도 같다** — 그쪽 짝은 standard 4d번이고, 거기선 컴파일러가 아무것도 막아 주지 않아 그 게이트가 유일한 벽이다.
 - 프론트가 닿았으면(quick 범위라도) 프론트 게이트(위 확정 절차): `npm test` + `npx tsc --noEmit`.
 
 ### standard (기본) — workspace 전회귀 + 격리 + 프론트
@@ -154,10 +154,11 @@ rg "^\s*use tauri" crates/engram-dashboard-platform/src/   # 4e) OS 층 crate �
 # 4f) OS 분기 불변식 게이트 — 여러 줄이라 아래 「4f」 항목 안의 블록으로 돌린다
 # 4g) OS crate 의존 게이트 — 아래 「4g」 항목 안의 블록으로 돌린다
 # 4h) std::os 경로 게이트 — 아래 「4h」 항목 안의 블록으로 돌린다
+# 4i) 셸 → agent 운영 의존 게이트 — 아래 「4i」 항목 안의 블록으로 돌린다
 npx tsc --noEmit                            # 5) 프론트 타입체크 (package.json에 typecheck 스크립트 없음)
 npm test                                    # 6) 프론트 테스트 (vitest run)
 ```
-- **★위 블록의 빌드·테스트 줄(1·2·2b~2f·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4-pre~4e 의 `test -d`/`test -f`·`rg` 와 4f~4h 블록은 대상 밖 — 출력이 몇 줄뿐인 단발 조회라 그 절의 판정 규칙이 감싸지 않는다). 근거·실측은 그 절이 갖는다.
+- **★위 블록의 빌드·테스트 줄(1·2·2b~2f·3·5·6)은 전부 「분리 실행」 절을 거쳐 돈다★**(4-pre~4e 의 `test -d`/`test -f`·`rg` 와 4f~4i 블록은 대상 밖 — 출력이 몇 줄뿐인 단발 조회라 그 절의 판정 규칙이 감싸지 않는다). 근거·실측은 그 절이 갖는다.
 - **★2b~2f의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — ★**여기 적혀 있던 사유 둘은 이제 둘 다 죽었다(2026-08-24) — 되살려 인용하지 말 것**★: 옛 사유①("죽는 lib 타깃(`0xc0000139`)을 도로 끌어온다")은 ADR-0174 로 해소됐고(그 타깃은 이제 `lib_unit`으로 돈다), 옛 사유②("`lib_unit`의 알려진 실패가 뭉친 스텝을 통째로 빨갛게 만들어 통합 스위트의 판정이 그 안에 묻힌다")는 그 실패가 전부 고쳐지며 사라졌다. **살아 있는 사유는 둘이다:** ① **★`--lib`·`--all-targets`는 여전히 즉사한다★**(`[lib] test = false`는 *기본 선택*에서만 빼므로 명시로 부르면 manifest 없는 내장 타깃이 골라진다 — 실측 2026-08-24. ★`-p` 단독·`--tests`는 이 축이 아니다★ — 그 둘은 기본 선택을 따라 내장 타깃을 안 골라 즉사하지 않는다. 넓히면 안 되는 이유는 아래 ② 하나다). ② 넓히면 다섯 타깃이 **한 스텝에 뭉쳐** 돌아 **어느 타깃에서 난 실패인지가 판정에서 섞인다** — 아래 「실패 보고 시 게이트 명칭」이 `test(어느 테스트)`를 요구하는데, 줄이 갈려 있으면 그게 공짜로 나온다.
   - ★**그리고 이 다섯 줄 자체를 지우지도 말 것 — 단 그 사유도 절반이 갈렸다(2026-08-24)**★. 옛 사유는 "`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않으므로 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다"였고 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21) — `cargo build`가 테스트 타깃을 안 굽는 것은 지금도 참이지만 **2번은 이제 이 패키지를 함께 돈다**(제외 해제). 그러니 "빠지면 안 보인다"는 더 이상 참이 아니다. 살아 있는 사유는 위 ②와, ★**`--test <이름>`은 타깃이 사라지면 실패한다**★는 것이다 — 2번은 이 축을 구조적으로 못 잡는다(사라진 타깃은 실패가 아니라 **침묵**이라 스위트가 통째로 증발한 채 초록으로 남는다). **`[[test]] lib_unit` 선언을 지키는 것이 정확히 2f 다.** 타깃이 늘면 여기에도 줄을 늘린다 — **2f가 그렇게 늘어난 줄이다**(정정 2026-08-24).
 - 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(그 crate가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13). ★**그 판정 규칙이 만드는 함정 = 경로가 사라지면 매치도 0이라 통과로 읽힌다**★ — 그래서 4-pre·4b-pre·4e-pre 로 경로 존재를 먼저 본다(CI 는 rg 종료코드 2를 따로 갈라 이 갈래를 막지만 여기엔 그 분기가 없었다. crate 개명 ADR-0175 때 실제로 노출된 구멍이다).
@@ -218,6 +219,23 @@ npm test                                    # 6) 프론트 테스트 (vitest run
     [ -n "$std_os_re" ] && declare -F std_os_gate >/dev/null || fail "정규식 · 함수가 서지 않았다"
     list=$(awk '/<<.STD_OS_FILES./{f=1;next} /^[[:space:]]*STD_OS_FILES$/{f=0} f' "$ci") || fail "명단 추출"
     std_os_gate "$list" || exit 1
+    )
+    ```
+  - **4i(셸 → agent 운영 의존 게이트)도 ADR-0003 축이 아니다** — ADR-0270 「영향」 불변식 「셸(`src-tauri`)은 agent crate 를 운영 의존하지 않는다」의 기계 벽이다(TRD 2-1 D6). 셸(`engram-dashboard`)의 **정상 · build** 그래프에 `engram-dashboard-agent` 가 0줄이고, 짝으로 데몬의 같은 그래프에 1줄 이상이어야 한다. 아래 블록을 Git Bash 에 통째로 붙여 돌린다(`cargo tree` 줄이라 「분리 실행」으로 감싸지 않는다). **마지막 줄이 `PASS` 여야 한다.** 판정 함수(`shell_agent_gate` — 두 그래프 · 짝 · `cargo tree` 종료코드 검사 전부)를 `ci.yml` 의 `shell gate 1` 스텝에서 읽어 그대로 부른다(여기 베끼지 않는다 — 찾지 못하면 FAIL). 4f 와 같이 checkout 의 셸을 `eval` 한다. 근거 · 한계의 정본 = 그 스텝 주석.
+    - ★**`cargo tree -i engram-dashboard-agent` 로 바꾸지 말 것**★ — 대상이 그래프에 없으면 rc=101 로 죽어 「없다」가 FAIL 로 읽힌다. 그래서 그래프 전체를 찍고 `^engram-dashboard-agent ` 줄을 찾는다(뒤 공백까지가 앵커다 — 빼면 같은 접두의 다른 이름이 걸린다).
+    - ★**dev 를 일부러 뺀다**★ — 셸 → (dev) 데몬 → agent 는 작업 순서 2-4 까지 남는다(셸 통합 시험이 데몬을 쓴다). 그래서 `cargo test -p engram-dashboard` 는 여전히 agent 를 컴파일한다 — 이 게이트가 지키는 것은 릴리스 그래프다.
+    - ★**짝을 지우지 말 것**★ — agent 개명 · 접두 변경 · 패턴 오타면 0 기대 줄이 눈먼 채 통과한다. 셸 패키지를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다(눈먼 통과가 아니다).
+    ```bash
+    (
+    set +e; set -o pipefail
+    ci=.github/workflows/ci.yml
+    fail() { echo "FAIL — $*"; exit 1; }
+    nf=$(grep -cE '^[[:space:]]*shell_agent_gate\(\) \{$' "$ci")
+    [ "$nf" = 1 ] || fail "ci.yml 에서 못 찾았다(함수 $nf)"
+    src=$(awk '/^[[:space:]]*shell_agent_gate\(\) \{$/{f=1} f{print} f&&/^[[:space:]]*\}$/{exit}' "$ci") || fail "함수 읽기"
+    eval "$src"
+    declare -F shell_agent_gate >/dev/null || fail "함수가 서지 않았다"
+    shell_agent_gate || exit 1
     )
     ```
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.

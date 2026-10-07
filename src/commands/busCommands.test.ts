@@ -8,8 +8,9 @@
 // ★help 를 전 command 에 강제하지 않는 이유(사용자 결정)★: 증명용 몇 개만 올리고 나머지는 이연이다.
 // 그래서 `help` 는 선택 칸으로 두고, 대신 **어느 것이 그 칸을 갖는지**를 여기서 못 박는다.
 //
-// ★셸·데몬이 답하는 이름과의 충돌은 여기서 안 잰다★ — 그 판정은 Rust 한 곳에 산다
-// (`src-tauri/src/view_commands.rs` 의 `reserved_names`, 하네스는 `tests/layout_commands.rs`).
+// ★셸·데몬이 답하는 이름과의 충돌은 여기서 안 잰다★ — 셸 표 이름은 Rust 한 곳에서 거르고
+// (`src-tauri/src/view_commands.rs` 의 `reserved_names`, 하네스는 `tests/layout_commands.rs`), 데몬이 답하는
+// 이름의 벽은 데몬의 등록 반려다(ADR-0270 결정 2).
 
 import { describe, expect, it, vi } from 'vitest'
 

@@ -2,7 +2,7 @@
 //
 // ★셸의 예약 이름 필터는 여기서 재지 않는다★ — 그 판정은 Rust 쪽에 한 번만 산다
 // (`src-tauri/src/view_commands.rs` 의 `reserved_names`, 하네스는 `tests/layout_commands.rs`). 여기 사본을
-// 두면 두 목록이 갈리고, 갈린 쪽을 믿는 순간 등록 패킷 하나가 통째로 반려된다.
+// 두면 두 목록이 갈린다. 데몬이 답하는 이름은 그 필터도 거르지 않는다 — 벽은 데몬의 등록 반려다(ADR-0270 결정 2).
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
