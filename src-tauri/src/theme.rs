@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(control.get(POPUP).unwrap(), written);
     }
 
-    /// ★못 보낸 창이 하나라도 있으면 성공이 아니다★(ADR-0166 결정 6). 그리고 거기서 멈추지도 않는다.
+    /// ★못 보낸 창이 하나라도 있으면 밀기는 성공이 아니다★ — 명령의 답은 이 값으로 `ThemeControl::set` 이 가른다(ADR-0166 결정 6 개정). 그리고 거기서 멈추지도 않는다.
     #[test]
     fn a_window_that_did_not_receive_it_fails_the_push_after_every_window_was_tried() {
         let rig = rig("refuse");

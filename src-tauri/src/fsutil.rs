@@ -69,7 +69,7 @@ pub enum WriteOutcome {
 
 /// 임시 파일에 쓰고 **rename 으로 갈아끼운다** — 쓰다 죽어도 반쪽 파일이 안 남는다. 임시 이름 · 실패 때의
 /// 정리 · 잠김 재시도는 [`replace_with`].
-// ADR-0167
+// ADR-0265 결정 4: 설정 쓰기는 원자적이다(임시 파일 → sync_all → rename).
 pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
     write_atomic_unless(path, text, || false).map(drop)
 }
@@ -162,7 +162,7 @@ pub fn fnv1a_hex(bytes: &[u8]) -> String {
 /// 이 그렇게 실패한다. 그래서 최악에 그만큼(약 100 ms) 더 걸린다. 그보다 오래 쥐면 그대로 실패한다.
 ///
 /// `rename` · `pause` 는 시험의 이음매다 — 운영은 `std::fs::rename` · [`RENAME_PAUSE`] 잠.
-// ADR-0167
+// ADR-0265 결정 4: rename 이 잠김이면 짧게 다시 한다.
 fn replace_with(
     path: &Path,
     stage: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
