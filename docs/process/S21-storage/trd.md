@@ -188,7 +188,7 @@ SettingDef { key: "chat.style.fontSize",
 - **바꾼 테마가 저장된다(ADR-0167 「화면 변경 미저장」 번복):** 전역 = `settings.set theme.default <값>` · 창별 = 셸 명령 **`window.setTheme {window, theme}`**(`theme:null` = 덮어쓰기 해제 — 매크로 `Option<Option<T>>`, `macros.rs:43`) · **`window.getTheme {window}`** → `{theme, effective}`. 창별 값은 그 창의 모델 항목에 들어가 **창과 같이 죽는다**(§6-3) — 부팅 쓸기가 필요 없어진다.
 - **창별 테마가 「설정 명령 넷」 밖의 다섯째 길인 이유:** 그 값은 설정이 아니라 상태이고(결정), 상태 파일은 기계가 통째로 다시 쓰므로 손 편집 경로가 될 수 없다.
 - **`window.setTheme` 의 배달 실패와 답(사용자 결정 2026-10-07):** **지목한 창이 테마를 못 받았을 때만** 오류다 — 문구는 그 창의 실패를 자세히 싣고 나머지 실패는 수로 접는다. 다른 창만 못 받았으면 성공이고 warn 로그만 남는다. 이 동작은 사용자가 정했고(2026-10-07), 그 결과는 **ADR-0166 결정 6(알림이 못 나가면 성공으로 답하지 않는다)의 개정**으로 박혔다 — 결정 6 은 `window.setTheme` 에서는 지목한 창에만 걸린다(`theme.default` 쓰기에 걸지는 열려 있다 — TRD §5-6)(개정 도장 형식 = 사용자 선택 2026-10-07 · 새 ADR 없음). 구현(`theme.rs` 의 `ThemeControl::set` · `ThemeError::Undelivered` — 사용자 결정으로 적지 않는 구현 사양): 그 오류 = `INTERNAL`(「정했지만 그 창에 못 보냈다」 — 쓴 값은 되돌리지 않아 `window.getTheme` 이 새 값을 답한다) · 지목한 창이 살아 있는 웹뷰가 아니면 성공(뜰 때 당겨 간다 — ADR-0166 「알려진 잔여」의 「구독자 0 에 닿아도 성공」과 같은 성질) · 모르는 창 = `CONFLICT` · 못 쓸 테마 = `INVALID_ARGUMENT`(테마 이름은 대소문자 무시 · CLI 의 해제 낱말 `none` 은 소문자만) · 배달 실패 로그는 창 셋을 넘으면 수로 접는다(`Undelivered` · `FailedWindow`).
-  - **열린 것(결정 아님):** ADR-0166 결정 6 을 `settings.set` · `settings.reset` 의 `theme.default` 에도 걸지 — 지금 그 길은 배달이 실패해도 성공으로 답한다(버스 · Tauri 둘 다). 정하지 않았다(§14-19).
+  - **닫힘 — 사용자 결정 2026-10-08:** ADR-0166 결정 6 을 `settings.set` · `settings.reset` 의 `theme.default` 에도 걸지 — 지금 그 길은 배달이 실패해도 성공으로 답한다(버스 · Tauri 둘 다). → **걸지 않는다 — 성공 답 유지.** 값은 파일에 남고 못 받은 창은 다음 갱신 · 재기동에 맞춰진다 · 배달 실패는 그 순간 닫히는 중이거나 죽은 창뿐이라 드물다 · 특정 창을 지목하지 않은 전역 쓰기라 `window.setTheme` 의 「다른 창만 못 받으면 성공」과 같은 모양(§14-19). 코드 변경 없음.
 - **오늘 화면에는 테마를 바꾸는 UI 가 없다**(ADR-0167 결정 5 · `themeManager.apply` 호출부 = `main.tsx` · `uiSettings.ts` 뿐 — P3d 작업 트리 기준 `main.tsx:24` · `uiSettings.ts:93,128` · TRD 초안 `c93e664` 기준 = `main.tsx:20` · `uiSettings.ts:95,130`). ★P3d 에도 두지 않는다 — 명령만(사용자 결정 2026-10-06 · §10 F7 = (a))★.
 
 ### 5-7. 파일 편집 경로 폐지 · `ui.refresh` · 도움말
@@ -1038,7 +1038,7 @@ P3c2(복원 모달 · 키 바인딩 멈춤 · 상태 파일 안내 · `restore.s
 
 **열린 것(결정 아님)**
 
-- ADR-0166 결정 6(알림이 못 나가면 성공으로 답하지 않는다)을 `settings.set` · `settings.reset` 의 `theme.default` 에도 걸지 — 지금 그 길은 배달이 실패해도 성공으로 답한다(버스 · Tauri 둘 다). 정하지 않았다.
+- ADR-0166 결정 6(알림이 못 나가면 성공으로 답하지 않는다)을 `settings.set` · `settings.reset` 의 `theme.default` 에도 걸지 — 지금 그 길은 배달이 실패해도 성공으로 답한다(버스 · Tauri 둘 다). → **닫힘(사용자 결정 2026-10-08): 걸지 않는다 — 성공 답 유지**(§5-6).
 
 ### 14-20. P3e 뺌 — 슬롯 보기 모드는 영속하지 않는다 (사용자 결정 2026-10-07)
 
