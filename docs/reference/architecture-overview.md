@@ -72,7 +72,7 @@ flowchart TD
   A1 -.->|"eg_send (MCP/HTTP · Bearer 토큰)<br/>= 에이전트 A→B 메시지"| CTL
   CLI["engram.exe (제어 평면 CLI — mail·agent 계열 + 전체 이름 표면)"] -.->|"HTTP · Bearer 토큰"| CTL
 
-  BOOT["부팅 시: 앱이 daemon.json(발견 겸 잠금 파일) 읽어 데몬 발견 → 없으면 spawn (discovery crate)"]
+  BOOT["부팅 시: 앱이 daemon.json(발견 겸 잠금 파일) 읽어 데몬 발견 → 없으면 spawn (셸 discovery 모듈)"]
 ```
 
 결정: 출력 무버퍼 중계·데몬 단일 주인 = ADR-0029 / ADR-0046 · 제어 엔드포인트 = ADR-0086 · 메시징 커널 = ADR-0103 / ADR-0110 · 명령 하행·대상 지목 = ADR-0154/0155.
@@ -97,7 +97,7 @@ flowchart TD
 | 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = P3d 전까지 디스크 `ui-settings.json` (읽기 주인 = 셸) | 셸이 창마다 유효 값(창별 ?? 전역)을 민다 — `theme.default` 쓰기(`settings.set`·`settings.reset`)와 `ui.refresh`(창별 파일을 다시 읽는다)가 밀기를 부른다 · 파일의 `theme` 키는 읽지 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167 |
 | 챗 렌더 스타일(간격·폰트) | 셸 `settings.json` `chat.style.*` | 권위 = 셸 설정 · `chatStyleStore`는 `settings:changed`를 CSS 변수에 칠하는 적용자(저장 안 함), ADR-0265 |
 
-결정: 미러 제거 = ADR-0046 · 레이아웃 권위 = ADR-0035/0057 · UI 설정 파일 = ADR-0166 · 창별 테마 = ADR-0167 · data_dir 단일결정 = discovery `default_data_dir`(위치 결정은 ADR-0134/0136이 정본 — 0024의 데이터 위치 조항은 폐기) · 시체 보존 = ADR-0083 · 제어 토큰 = ADR-0086 · 메시징 인메모리 = ADR-0103.
+결정: 미러 제거 = ADR-0046 · 레이아웃 권위 = ADR-0035/0057 · UI 설정 파일 = ADR-0166 · 창별 테마 = ADR-0167 · data_dir 결정 = 데몬 `data_dir::default_data_dir`(셸은 사본 — 같은 경로 시험이 묶는다, ADR-0271 · 위치 결정은 ADR-0134/0136이 정본 — 0024의 데이터 위치 조항은 폐기) · 시체 보존 = ADR-0083 · 제어 토큰 = ADR-0086 · 메시징 인메모리 = ADR-0103.
 
 ## 읽기 경로 — 뭘 고치러 왔나
 
@@ -169,33 +169,35 @@ flowchart TD
 
 ```mermaid
 flowchart BT
+  base["base [lib]<br/>바닥 기반층 잎 — 범용 도우미 · 로깅(도메인 지식 0)<br/>워크스페이스 crate 의존 0 · 불변식 정본 = 그 crate lib.rs 헤더(ADR-0175 · ADR-0269)"]
+  platform["platform [lib]<br/>OS 층 잎 — OS 에 따라 달라지는 운영 코드(프로세스 · 무리 · 띄우기 · 셸 · 환경)<br/>워크스페이스 crate 의존 0(base 도 아니다) · 불변식 정본 = 그 crate lib.rs 헤더(ADR-0266 · ADR-0275)"]
+  transport["transport [lib]<br/>재사용 전송 lib — 아직 어느 crate 도 의존하지 않는다<br/>워크스페이스 crate 의존 0 · 격리 게이트 정본 = 그 crate lib.rs 헤더(ADR-0177)"]
   command["command [lib]<br/>명령 버스 ★도구★ — 봉투·오류 어휘·선언 매크로·표·라우팅(명령 0개)<br/>워크스페이스 crate 의존 0 · 불변식 정본 = 그 crate lib.rs 헤더(ADR-0155)"]
   protocol["protocol [lib]<br/>앱↔데몬 공용 언어(명령·이벤트 타입 + 프레임 codec + ts-rs)"]
   agent["agent [lib]<br/>에이전트 엔진(tauri import 0 · protocol 무의존 — wire 타입을 모른다)<br/>seam: transport/backend/sink/control · agent.* 명령 선언(commands.rs)"]
-  discovery["discovery [lib]<br/>데몬 찾기/띄우기 + default_data_dir 단일결정"]
   messaging["messaging [lib]<br/>메시징 커널(보관함·장부·그룹·봉투·발송·busy 게이트)<br/>워크스페이스 crate 무의존 — 접합은 포트 trait 뿐(ADR-0110)"]
   net["net [lib]<br/>네트워크 행(WS 서버·Origin·토큰 핸드셰이크·연결 수명·단일 writer·keepalive<br/>팬아웃 레지스트리 · 프레임 포트 계약 · 단일인스턴스 · 포트파일)<br/>경계·격리 게이트의 정본 = 그 crate lib.rs 헤더(ADR-0129)"]
-  daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host) · 명령 배달·명부(command_delivery/roster)<br/>· bin: engram-dashboard-daemon / engram"]
+  daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host) · 명령 배달·명부(command_delivery/roster)<br/>데이터 폴더 규칙 · 데몬 쪽 배치(data_dir — 셸은 사본, ADR-0271)<br/>· bin: engram-dashboard-daemon / engram"]
 
   protocol -->|"의존"| command
   agent -->|"의존"| command
+  agent -->|"의존"| base
+  agent -->|"의존"| platform
   net -->|"의존(server feature)"| protocol
-  net -->|"의존(server feature)"| agent
-  discovery -->|"의존"| protocol
-  discovery -->|"의존"| agent
-  discovery -->|"의존"| net
+  net -->|"의존(server feature)"| platform
   daemon -->|"의존"| agent
+  daemon -->|"의존"| base
+  daemon -->|"의존"| platform
   daemon -->|"의존"| protocol
   daemon -->|"의존"| command
   daemon -->|"의존"| net
-  daemon -->|"의존"| discovery
   daemon -->|"의존"| messaging
 ```
 
 - **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **agent에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정). 이후 명령 버스(ADR-0155)가 둘을 더 들였다 — `inventory`(선언 링커 수집. S20 Step 1의 **유일한 신규 서드파티 crate**이고 `agent`를 타고 릴리즈 바이너리에 링크된다)와, `agent`의 **production** 의존이 된 `ts-rs`(선언 매크로가 인자·반환 struct에 `TS` derive를 단다 — 코어가 TS 생성 도구를 운영 그래프에 안고 있다는 뜻이다).
 - **command(2026-08-14 · ADR-0155)** 는 명령 버스 **도구**만 담고 명령은 0개다 — 어휘는 생산자 옆에서 선언한다(`agent` = `agent.*`, `src-tauri` = `window/tab/slot`). **화살표는 들어오는 쪽 한 방향뿐**이고, 그중 `agent → command`가 **코어의 첫 워크스페이스 의존**이다(그래도 `agent → protocol`은 여전히 없다 — 도구 crate가 그 유입을 막는 것이 이 분리의 요점). 워크스페이스 의존 0·명령 0개는 CI 의존 상한 게이트가 지키고, 불변식 정본은 그 crate `src/lib.rs` 헤더다.
 - **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(agent 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
-- **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 범위와 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3의 이동 대상이었으나 **ADR-0130 으로 보류** — 옮기지 않는다). 격리 게이트와 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다. 그 뒤 0-4가 핸드셰이크 프레임을 이 crate 소유(`auth::AuthFrame`)로 옮기면서 `discovery → net` 간선이 생겼다 — **기본 feature(비어 있음)로만 쓴다**(`server`를 켜면 동기 crate인 discovery가 async 런타임을 진다).
+- **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 범위와 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3의 이동 대상이었으나 **ADR-0130 으로 보류** — 옮기지 않는다). 격리 게이트와 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다. 그 뒤 0-4가 핸드셰이크 프레임을 이 crate 소유(`auth::AuthFrame`)로 옮겼다 — 프레임 모양만 필요한 소비자(지금 셸)는 **기본 feature(비어 있음)로만 쓴다**(`server`를 켜면 async 런타임이 딸려 온다). 기본 feature 에 async 런타임이 없다는 것은 CI `platform gate 7` 이 net 자신으로 잰다.
 - **daemon(2026-08-05 · ADR-0130)** 은 응용 층(연결 코어 · 연결 어댑터 · 상태 팬아웃 · 메시징 호스트 · 제어 평면)과 조립을 **한 crate 로 유지**한다. ADR-0129 는 이 crate 를 다시 "에이전트 시스템 lib + 얇은 조립 바이너리" 로 가르려 했으나 **그 결정 2·3 은 보류됐다** — 재사용 목적은 net 분리로 달성·측정됐고(측정치와 재확인 명령 = ADR-0130 §근거 ①), 나머지 두 덩어리엔 따로 쓸 소비자가 없으며, 벽 없이도 production 의존 그래프가 이미 단방향이다. **재개 조건은 ADR-0130 §영향**(그 조건이 관측되기 전까지 이 crate 를 더 쪼개지 않는다). 한편 **데몬 살림의 *구현*은 이 crate 에 없다** — 단일 인스턴스 가드와 portfile 은 net 이 소유하고, 여기 남은 것은 그것들을 부르는 순서다(`run()`).
 
 ### agent 클래스 구조 (소유 관계)
@@ -489,7 +491,7 @@ flowchart TD
 - **백엔드 지식의 자리:** "어떤 출력 이벤트가 턴 진행이고 어떤 게 턴 종료인가"는 claude stream-json 지식이라 커널이 아니라 **코어의 `backend/` seam 뒤**가 안다(`AgentBackend::turn_classifier` — ADR-0004와 같은 결, ADR-0127 결정 2). 데몬 어댑터는 얇게, 정책은 커널에 — busy 불변식을 어댑터에서 재구현하지 않는다.
 - **턴 관측을 정리하는 자리는 둘뿐이다** — `OutputCore::emit`의 finalize 재확인과 `OutputCore::finish`의 `turn.table.forget`. `emit` 안에서 그 갱신은 **replay-push와 fanout 사이**에 놓이고 그 순서가 load-bearing이다. ★세 번째 호출자를 늘리면 인과가 갈라진다★(ADR-0127).
 - **빠뜨리면 우편이 막힌다.** 턴 도중 죽은 에이전트가 "진행 중"으로 남으면 그 앞 배달이 도어벨마다 접히고, **30분 상한(`BUSY_MAX_TURN`)이 fail-open으로 풀 때까지** 아무것도 못 나간다 — 그 뒤엔 TTL 만료다. 그래서 상한은 최적화가 아니라 **마지막 안전 밸브**이고, 풀 때도 **공용 관측 표는 건드리지 않는다**(`TurnFacts`는 읽기 전용 — ADR-0127 결정 4).
-- **격리 게이트는 둘이다.** ① 소스 참조: `rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command|platform)" crates/engram-dashboard-messaging/src/` → 0줄. ② 의존 상한: `cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 1줄(자기 자신). ①은 **소스 텍스트**만 봐서 따옴표·`[build-dependencies]`·rename에 뚫리고, 알파벳을 손으로 박아 둬 **새 crate는 누가 이름을 더할 때까지 안 보인다** — ②가 해석된 의존 그래프로 그 구멍을 덮는다(`command` 추가가 ②를 세운 계기다). 외부 의존도 `uuid`·`tracing` 둘로 고정돼 있다.
+- **격리 게이트는 둘이다.** ① 소스 참조: `rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|net|transport)" crates/engram-dashboard-messaging/src/` → 0줄. ② 의존 상한: `cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u` → 정확히 1줄(자기 자신). ①은 **소스 텍스트**만 봐서 따옴표·`[build-dependencies]`·rename에 뚫리고, 알파벳을 손으로 박아 둬 **새 crate는 누가 이름을 더할 때까지 안 보인다** — ②가 해석된 의존 그래프로 그 구멍을 덮는다(`command` 추가가 ②를 세운 계기다). 외부 의존도 `uuid`·`tracing` 둘로 고정돼 있다.
 - **부수 이득:** `cargo test -p engram-dashboard-messaging` 하나로 claude 바이너리·실 PTY 없이 3분기·flush·sweep·계약을 결정적으로 단언한다 — 가짜 포트를 끼우고, `mailbox`·`ledger`·`groups`는 로직 안에서 현재 시각을 직접 읽지 않고 시계를 **인자로 주입**받는다(그 세 모듈의 순수성 불변식). `busy`도 **시계를 읽지 않는다** — 상한 비교는 `now`를 인자로 받는 sweep 안에서만 하고 조회(`is_busy`)는 그 판정 장부를 볼 뿐이다. 그래서 판정 시점이 sweep 주기에 고정돼 **관측 가능한 동작이 결정적이다**.
 - **동시성 축은 둘이다**(ADR-0142). 호스트의 배달 레인은 **도어벨 AgentId**로 갈라 서로 다른 키를 병렬로 돌리고(처리량 축 — 정합성 보장은 하지 않는다), 커널은 **해석된 대상 세션 id**(`in_flight_targets`)로 같은 세션 배제를 진다. 분할 키가 실제 주입 대상이 아니기 때문이다 — 산 에이전트 개명 + 그 빈 이름 인계로 **두 이름 큐가 한 세션에 수렴**할 수 있고, 이름 키 가드는 그 축을 구조적으로 못 본다.
 

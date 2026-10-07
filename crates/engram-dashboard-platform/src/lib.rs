@@ -52,12 +52,11 @@
 //! - **운영 의존의 서드파티는 `windows`(Windows 대상만)와 `tracing` facade 만 들인다**(TRD 1-3 §0 ①) —
 //!   시험 전용 dev 의존은 이 규칙 밖이다. `windows` 는 의존 하나에 쓰는 바인딩 feature 의 합집합을 켜고, 기능별 cargo
 //!   feature 로 쪼개지 않는다(ADR-0275 결정 13). `tracing` 은 규칙 4 의 `Drop` 경로가 찍는 데만 쓴다.
-//! - ★**async 런타임(`tokio` 등)을 들이지 않는다**★ — 동기 crate 도 OS 층을 부른다. discovery 는 async
-//!   런타임 반입을 CI 게이트(「discovery has no async-runtime ingress」)로 막고 있어, 이 crate 를 부르는
-//!   순간 여기 든 런타임이 그 게이트를 빨갛게 만든다.
+//! - ★**async 런타임(`tokio` 등)을 들이지 않는다**★ — 동기 crate 도 OS 층을 부른다(지금 agent). 여기 든
+//!   런타임은 그 동기 소비자로 조용히 번지고, 아래 게이트 ⑦ 이 그것을 빨갛게 만든다.
 //!
 //! ## 격리 게이트(불변) — ①② 는 각각 다른 축이다(시험 기능 누수 게이트 ③ 은 위 `testing` 단락 · 불변식
-//! 게이트 ④~⑥ 은 맨 아래)
+//! 게이트 ④~⑥ 과 async 반입 게이트 ⑦ 은 맨 아래)
 //!
 //! **① 워크스페이스 의존 상한**(위 「의존」 첫 항의 벽):
 //! `cargo tree -p engram-dashboard-platform --depth 1 --prefix none -e normal,dev,build --target all`
@@ -164,6 +163,24 @@
 //!     모듈(`std::os::linux` · `std::os::macos` · `std::os::fd` 따위)은 못 본다.
 //!   - 블록 주석 · 문자열 안의 그 경로는 걸린다(오탐 — 안전한 쪽). 같은 줄에서 그 경로 앞 문자열에 `//` 가
 //!     있으면 놓친다.
+//!
+//! **⑦ 동기 crate 로의 async 런타임 반입 0**(위 「의존」 셋째 항의 벽 · ADR-0282): 정상 그래프(`cargo tree
+//! --locked -e normal --prefix none --target all`)에서 `^(tokio|mio|tokio-tungstenite|futures-util) ` 에 맞는 줄을
+//! 센다.
+//! - **어디에 있나** — 명령 · 판정의 정본은 `.github/workflows/ci.yml` 의 `platform gate 7` 스텝이다. `/qa`
+//!   바인딩 「CI와의 분담」 블록이 세 명령과 패턴을 로컬용으로 싣고 이 헤더도 패턴을 적으므로, 패턴을 고치면
+//!   셋을 함께 고친다.
+//! - **대상 셋** — ① agent → 0줄: tokio 없는 동기 crate 이면서 이 crate · base · command 를 운영 의존으로 진다.
+//!   이 crate 에 든 런타임이 실제로 번질 자리가 여기라 이 crate 단독이 아니라 agent 를 잰다(agent 가 다른 경로로
+//!   들이는 런타임도 함께 잡힌다). ② net 기본 feature → 0줄: feature 0개 소비자에게 async 런타임이 딸려오는 것
+//!   — 실제로 한 번 터진 회귀이고 net 의 `default = []` 결정을 부른 원인이다(net `Cargo.toml` `[features]` 주석).
+//! - **짝** — net `--features server` → 1줄 이상(`server` 가 tokio · tokio-tungstenite · futures-util 을 켠다).
+//!   패턴이 깨지거나 `cargo tree` 출력 꼴이 바뀌면 0 기대 둘이 눈먼 채 통과한다.
+//! - ★**패턴의 `^…␣` 앵커(뒤 공백 포함)를 빼지 말 것**★ — `--prefix none` 이라 crate 이름이 줄 맨 앞에 와서
+//!   앵커가 정확하다. 떼면 agent 쪽이 `termios`(portable-pty 경유)를 물어 0 기대가 깨진다(실측).
+//! - ★**한계**★ — 정상 그래프만 본다(dev · build 의존의 런타임은 세지 않는다). 대상 밖의 동기 crate 가 새로
+//!   생기면 그 crate 를 대상에 더할지는 그때 정한다. 이름 목록 밖의 async 런타임(`async-std` · `smol` 따위)은
+//!   못 본다.
 //!
 //! **하지 않는 것 — macOS 이식 때 다시**(사용자 결정 2026-10-06): 다른 OS 타깃의 `cargo check`(이식성 축 —
 //! 조건 없이 쓴 OS 전용 코드를 잡는다. CI 가 Windows 뿐이라 지금은 그런 코드가 통과한다) · clippy

@@ -1,7 +1,7 @@
 //! 데이터 폴더 — 루트 찾기 · 폴더를 만드는 쓰기 확인 · 설치 위치 · 데몬 쪽 배치([`DataLayout`]).
 //!
 //! ★루트 규칙과 `daemon.json` · `logs\` 자리의 정본이 여기다★ — 셸은 데몬 crate 를 운영 의존하지 않으므로 그
-//! 셋의 사본을 따로 갖고, 두 벌이 같은 경로를 내는지는 시험이 묶는다(ADR-0271 결정 4). 규칙을 고치면 셸 사본도
+//! 셋의 사본을 따로 갖고, 두 벌이 같은 경로를 내는지는 시험이 묶는다(ADR-0271 결정 4 · ADR-0282 결정 3). 규칙을 고치면 셸 사본도
 //! 같은 변경에서 고친다 — 갈리면 셸이 데몬이 쓰지 않는 폴더에서 `daemon.json` 을 찾는다.
 //!
 //! ★OS 가름은 [`default_data_dir`] 안에만 있다★ — 배치는 `Path::join` 뿐이다(CLAUDE.md 「플랫폼 중립」).
@@ -327,75 +327,6 @@ mod tests {
             exe_dir.join("data"),
             "릴리스 데이터 폴더는 exe 폴더 하위 data(`engram-` 접두사 없음 — 상수 주석 참조)"
         );
-    }
-
-    // ── discovery 사본과의 다리(ADR-0271 결정 1) ──────────────────────────────────────
-    // 두 벌(이 정본 · 아직 남은 discovery crate)을 묶는다. 다리는 discovery crate 를 지울 때 함께
-    // 지우고, 남는 확인은 셸 사본의 같은-경로 시험이다. 시험은 늘 debug 로 돌아 루트 규칙의
-    // release(`not(debug_assertions)`) 분기는 비교하지 못한다 — release 1회 실측이 덮는다
-    // (`docs/process/S21-crate-boundaries/trd-2-2-discovery-split.md` §5-3).
-    // ADR-0282
-
-    /// env 이름을 상수가 아니라 리터럴로 쓴다 — 데몬 상수의 철자가 틀리면 두 벌이 갈려 여기서 잡힌다.
-    fn both_data_dirs_with_env(val: Option<&std::ffi::OsStr>) -> (PathBuf, PathBuf) {
-        let prev = std::env::var_os("ENGRAM_DATA_DIR");
-        match val {
-            Some(v) => std::env::set_var("ENGRAM_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAM_DATA_DIR"),
-        }
-        let dir = crate::resolve_data_dir();
-        let copy = engram_dashboard_discovery::default_data_dir();
-        match &prev {
-            Some(v) => std::env::set_var("ENGRAM_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAM_DATA_DIR"),
-        }
-        (dir, copy)
-    }
-
-    // ADR-0282
-    #[test]
-    fn resolve_data_dir_matches_the_discovery_copy() {
-        let _g = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (dir, copy) = both_data_dirs_with_env(None);
-        assert!(
-            dir.ends_with(".engram-dev"),
-            "디버그(override 없음)에서 `.engram-dev` 로 끝나야(app 과 동일 폴더): {dir:?}"
-        );
-        assert_eq!(dir, copy, "env 미설정: 두 벌이 같은 폴더여야");
-
-        let tmp = std::env::temp_dir().join("engram-daemon-bridge-override-test");
-        let (dir, copy) = both_data_dirs_with_env(Some(tmp.as_os_str()));
-        assert_eq!(dir, tmp, "env 설정: 데몬이 그 경로 그대로여야");
-        assert_eq!(dir, copy, "env 설정: 두 벌이 같은 폴더여야");
-
-        let (dir, copy) = both_data_dirs_with_env(Some(std::ffi::OsStr::new("")));
-        assert_eq!(dir, copy, "env 빈 값: 두 벌이 같은 폴더여야");
-    }
-
-    // ADR-0282
-    #[test]
-    fn release_rule_install_root_and_layout_match_the_discovery_copy() {
-        let exe_dir = Path::new("C:\\portable\\engram");
-        assert_eq!(
-            release_data_dir(exe_dir),
-            engram_dashboard_discovery::release_data_dir(exe_dir)
-        );
-        assert_eq!(
-            find_install_root(),
-            engram_dashboard_discovery::find_install_root()
-        );
-
-        let root = PathBuf::from("R");
-        let ours = DataLayout::new(&root);
-        let theirs = engram_dashboard_discovery::DataLayout::new(&root);
-        assert_eq!(ours.daemon_state_dir(), theirs.daemon_state_dir());
-        assert_eq!(ours.daemon_run_dir(), theirs.daemon_run_dir());
-        assert_eq!(ours.daemon_file(), theirs.daemon_file());
-        assert_eq!(ours.mcp_config_dir(), theirs.mcp_config_dir());
-        assert_eq!(ours.usage_probe_dir(), theirs.usage_probe_dir());
-        assert_eq!(ours.logs_dir(), theirs.logs_dir());
     }
 
     #[test]

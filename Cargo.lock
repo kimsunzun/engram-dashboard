@@ -1064,7 +1064,6 @@ dependencies = [
  "engram-dashboard-base",
  "engram-dashboard-command",
  "engram-dashboard-daemon",
- "engram-dashboard-discovery",
  "engram-dashboard-messaging",
  "engram-dashboard-net",
  "engram-dashboard-platform",
@@ -1085,22 +1084,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
-]
-
-[[package]]
-name = "engram-dashboard-discovery"
-version = "0.1.0"
-dependencies = [
- "dunce",
- "engram-dashboard-base",
- "engram-dashboard-net",
- "engram-dashboard-platform",
- "engram-dashboard-protocol",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tracing",
- "tungstenite",
 ]
 
 [[package]]

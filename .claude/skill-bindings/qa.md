@@ -76,8 +76,12 @@
   #   (`-- export_bindings_`)는 걷혔다. 로컬에선 2번(워크스페이스 회귀)과 2f 가 각각 한 번씩 굽는다)
   git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
   git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
-  # discovery async 반입 → `^(tokio|mio|tokio-tungstenite|futures-util) ` 매치 0줄이어야 PASS
-  cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all
+  # platform 게이트 ⑦ async 반입 — 셋 다 `| rg -i "^(tokio|mio|tokio-tungstenite|futures-util) "` 로 센다
+  #   (뒤 공백 포함 앵커를 빼지 말 것 — 빼면 agent 쪽이 `termios` 를 문다). `cargo tree` 가 0 이 아닌 코드로 끝나면
+  #   그 줄은 FAIL 이다(0줄로 읽혀 눈먼 PASS 가 된다). 판정 정본 = ci.yml `platform gate 7` 스텝
+  cargo tree --locked -p engram-dashboard-agent -e normal --prefix none --target all                    # → 0줄 PASS
+  cargo tree --locked -p engram-dashboard-net -e normal --prefix none --target all                      # 기본 feature → 0줄 PASS
+  cargo tree --locked -p engram-dashboard-net --features server -e normal --prefix none --target all    # 짝 → 1줄 이상 PASS(0줄이면 패턴이 눈멀었다)
   ```
   ★**`git add -N`(intent-to-add)를 빼지 말 것**★ — `git diff`는 **untracked 파일을 보지 않는다.** 처음 생성되는 `.ts`는 비교 대상 자체가 없어 매치 없이 조용히 통과했다(`SlotContent.ts` 사건 — `docs/process/S20-command-bus/trd.md` §5). intent-to-add로 세 디렉터리를 **내용 없이** 인덱스에 올려 두면 신규 파일도 "전체가 추가된 diff"로 잡힌다 — 빈 blob 등록일 뿐이라 이후 커밋 내용에는 영향이 없다. ★**`-f`도 빼지 말 것**★ — `git add`는 무시된 경로를 조용히 건너뛰므로, 어느 crate의 `.gitignore`에 `bindings/`·`*.ts` 같은 넓은 줄이 생기면 생성물이 인덱스에 안 올라가 **게이트가 소리 없이 해제된다**(지금은 세 디렉터리 다 무시 대상이 아니다). ★**경로를 줄이지 말 것**★ — 선언이 crate마다로 흩어져 생성 지점이 셋이고, 새 생성 지점이 생기면 이 목록도 함께 늘어난다.
 
@@ -152,7 +156,7 @@ cargo fmt --check                           # 3) 포맷 게이트 (검사형 —
 test -d crates/engram-dashboard-agent/src || { echo "FAIL — 게이트 경로 부재(crate가 개명·이사했나)"; false; }   # 4-pre) ★경로 존재 확인 — 없는 경로면 아래 rg가 0줄을 뱉어 PASS로 읽힌다★ ★`; false` 를 지우지 말 것★ — echo 만 두면 종료코드가 늘 0 이라, 출력을 안 읽고 종료코드만 보는 소비자에겐 이 FAIL이 PASS로 보인다
 rg "^\s*use tauri" crates/engram-dashboard-agent/src/   # 4) 코어 격리 게이트 → 0줄이어야 PASS (ADR-0003)
 test -d crates/engram-dashboard-base/src || { echo "FAIL — 게이트 경로 부재(crate가 개명·이사했나)"; false; }   # 4b-pre) 4-pre와 같은 이유·같은 형태 — ★`; false` 를 지우지 말 것★
-rg "^\s*use tauri" crates/engram-dashboard-base/src/   # 4b) 바닥 crate 격리 게이트 → 0줄이어야 PASS (ADR-0003). ★"잎 crate라 안전하다"로 지우지 말 것★ — 잎 성질은 워크스페이스 crate 축의 말이고 서드파티 `tauri`는 의존 상한 게이트를 그냥 통과한다. `base`는 headless 데몬·discovery에 링크되므로 여기서 Tauri를 부르면 그 둘이 전송 방식에 묶인다
+rg "^\s*use tauri" crates/engram-dashboard-base/src/   # 4b) 바닥 crate 격리 게이트 → 0줄이어야 PASS (ADR-0003). ★"잎 crate라 안전하다"로 지우지 말 것★ — 잎 성질은 워크스페이스 crate 축의 말이고 서드파티 `tauri`는 의존 상한 게이트를 그냥 통과한다. `base`는 headless 데몬에 링크되므로 여기서 Tauri를 부르면 그 바이너리가 전송 방식에 묶인다
 rg "(crate|super)::(logging|text|time|path|sync|testing|writable)" crates/engram-dashboard-base/src/   # 4c) 입주 조건 ③(입주자끼리 서로 참조하지 않을 것, ADR-0175 결정 1) → 0줄이어야 PASS. ★`crate::` 단독으로 넓히지 말 것★ — 그건 평범한 Rust라 게이트가 아니라 잡음이 된다. 입주자가 늘면 괄호 안 모듈 이름을 더하고, 나가면 뺀다
 test -f src-tauri/src/daemon_client/replay_flight.rs || { echo "FAIL — 게이트 경로 부재(파일이 또 이사했나)"; false; }   # 4d-pre) 4-pre와 같은 이유·같은 형태 — ★`; false` 를 지우지 말 것★. ★`-d` 가 아니라 `-f` 다★ — 대상이 디렉터리가 아니라 파일 한 장이다
 rg "^(?:[^/]|/[^/])*?\b(tauri|tokio|engram_dashboard_[a-z_]+|std::net)::" src-tauri/src/daemon_client/replay_flight.rs   # 4d) `replay_flight` 순수성 게이트(ADR-0175 결정 3) → 0줄이어야 PASS. ★4·4b와 달리 컴파일러 backstop이 없다★ — `agent`·`base`는 `tauri`를 의존조차 안 해 위반이 컴파일 에러로 먼저 죽지만, 셸 패키지는 `tauri`·`tokio`·`protocol`을 전부 의존해 위반이 그냥 컴파일된다. 그래서 `use` 라인 앵커로는 인라인 완전경로(`tokio::spawn(…)`) 한 줄에 뚫려, 접두 `^(?:[^/]|/[^/])*?`(=「아직 `//`를 안 만났다」)로 **주석 밖**을 잡는다
@@ -169,7 +173,7 @@ npm test                                    # 6) 프론트 테스트 (vitest run
 - **★2b~2g의 `--test`를 `-p` 단독이나 `--tests`로 넓히지 말 것★** — ★**여기 적혀 있던 사유 둘은 이제 둘 다 죽었다(2026-08-24) — 되살려 인용하지 말 것**★: 옛 사유①("죽는 lib 타깃(`0xc0000139`)을 도로 끌어온다")은 ADR-0174 로 해소됐고(그 타깃은 이제 `lib_unit`으로 돈다), 옛 사유②("`lib_unit`의 알려진 실패가 뭉친 스텝을 통째로 빨갛게 만들어 통합 스위트의 판정이 그 안에 묻힌다")는 그 실패가 전부 고쳐지며 사라졌다. **살아 있는 사유는 둘이다:** ① **★`--lib`·`--all-targets`는 여전히 즉사한다★**(`[lib] test = false`는 *기본 선택*에서만 빼므로 명시로 부르면 manifest 없는 내장 타깃이 골라진다 — 실측 2026-08-24. ★`-p` 단독·`--tests`는 이 축이 아니다★ — 그 둘은 기본 선택을 따라 내장 타깃을 안 골라 즉사하지 않는다. 넓히면 안 되는 이유는 아래 ② 하나다). ② 넓히면 여섯 타깃이 **한 스텝에 뭉쳐** 돌아 **어느 타깃에서 난 실패인지가 판정에서 섞인다** — 아래 「실패 보고 시 게이트 명칭」이 `test(어느 테스트)`를 요구하는데, 줄이 갈려 있으면 그게 공짜로 나온다.
   - ★**그리고 이 여섯 줄 자체를 지우지도 말 것 — 단 그 사유도 절반이 갈렸다(2026-08-24)**★. 옛 사유는 "`cargo build`·2번 어느 쪽도 이 타깃들을 컴파일하지 않으므로 이 줄들이 빠지면 그 스위트가 깨진 것조차 안 보인다"였고 — **2d·2e가 이 목록에 없던 동안 실제로 그랬다**(정정 2026-08-21) — `cargo build`가 테스트 타깃을 안 굽는 것은 지금도 참이지만 **2번은 이제 이 패키지를 함께 돈다**(제외 해제). 그러니 "빠지면 안 보인다"는 더 이상 참이 아니다. 살아 있는 사유는 위 ②와, ★**`--test <이름>`은 타깃이 사라지면 실패한다**★는 것이다 — 2번은 이 축을 구조적으로 못 잡는다(사라진 타깃은 실패가 아니라 **침묵**이라 스위트가 통째로 증발한 채 초록으로 남는다). **`[[test]] lib_unit` 선언을 지키는 것이 정확히 2f 다.** 타깃이 늘면 여기에도 줄을 늘린다 — **2f가 그렇게 늘어난 줄이다**(정정 2026-08-24).
 - 격리 게이트(`rg "^\s*use tauri" ...`)는 **출력이 0줄일 때만 PASS** — 한 줄이라도 나오면 FAIL(그 crate가 Tauri를 import = 격리 위반). 종료코드가 아니라 *매치 유무*로 판정한다. 패턴은 import 라인 앵커(`^\s*`) — 게이트 규칙을 자기 인용한 문서 주석(`//!`)이 오탐되는 것 방지(실측 2026-07-13). ★**그 판정 규칙이 만드는 함정 = 경로가 사라지면 매치도 0이라 통과로 읽힌다**★ — 그래서 4-pre·4b-pre·4e-pre 로 경로 존재를 먼저 본다(CI 는 rg 종료코드 2를 따로 갈라 이 갈래를 막지만 여기엔 그 분기가 없었다. crate 개명 ADR-0175 때 실제로 노출된 구멍이다).
-  - ★**대상 crate 는 셋이다(4번 `agent` · 4b번 `base` · 4e번 `platform`) — 하나만 돌리지 말 것**★. ADR-0003 의 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나**이고, ADR-0175 결정 1 이 `logging`·`platform` 을 `base` 로 옮기면서 그 두 모듈이 4번의 스캔 범위 밖으로 나갔다. `base` 는 headless 데몬·`discovery` 에 링크되므로 그쪽 구멍이 더 넓다. OS 층 crate `platform`(ADR-0266)도 같은 축의 별도 crate 라 4e번이 따로 본다 — PID 헬퍼(옛 base `platform` 모듈)가 이리로 다시 나왔다.
+  - ★**대상 crate 는 셋이다(4번 `agent` · 4b번 `base` · 4e번 `platform`) — 하나만 돌리지 말 것**★. ADR-0003 의 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나**이고, ADR-0175 결정 1 이 `logging`·`platform` 을 `base` 로 옮기면서 그 두 모듈이 4번의 스캔 범위 밖으로 나갔다. `base` 도 headless 데몬에 링크된다. OS 층 crate `platform`(ADR-0266)도 같은 축의 별도 crate 라 4e번이 따로 본다 — PID 헬퍼(옛 base `platform` 모듈)가 이리로 다시 나왔다.
   - **4c 는 tauri 축이 아니다** — `base` 의 입주 조건 ③(입주자끼리 서로 참조하지 않을 것) 전용이고, 판정 규칙만 위 둘과 같다(0줄 PASS). 근거·한계는 `crates/engram-dashboard-base/src/lib.rs` 헤더가 정본.
   - **4d 도 ADR-0003 축이 아니다** — `replay_flight` 파일 한 장의 순수성(ADR-0175 결정 3) 전용이고, 판정 규칙만 같다(0줄 PASS). ★**아래 「코어 격리 불변식」 절에 이 줄을 접어 넣지 말 것**★ — 그 절의 정본은 ADR-0003 이고 그 범위는 crate 인데, 이 파일은 설계상 Tauri 로 가득한 셸 패키지 안에 산다. 반대로 **4d 의 스캔 범위를 `src-tauri/src/` 전체로 넓히지도 말 것** — 그 순간 첫 `use tauri` 에 걸려 무의미하게 빨개진다. ★4·4b 와 결정적으로 다른 점★: 그 둘은 컴파일러가 진짜 벽이고 grep 은 조기 신호지만(그 crate 들은 `tauri` 를 의존조차 안 한다), 셸 패키지는 `tauri`·`tokio`·`protocol` 을 전부 의존해 **이 정규식이 유일한 벽이다.** 근거·한계는 그 파일 헤더와 `ci.yml` 의 같은 스텝 주석이 정본.
   - **4f(OS 분기 불변식 게이트)도 ADR-0003 축이 아니다** — ADR-0266 불변식 「운영 OS 분기는 platform crate 안에만」 전용이고, 판정은 명단 대조다. 아래 블록을 Git Bash 에 통째로 붙여 돌린다(「분리 실행」으로 감싸지 않는다 — `rg` 줄이다). **마지막 줄이 `PASS` 여야 한다.** 정규식 · 파일 찾기 함수(`os_cfg_files`) · 명단을 `ci.yml` 의 `platform gate 4` 스텝에서 읽어 그대로 쓴다(그 셋은 베끼지 않는다 — 찾지 못하면 FAIL). ★**대상 범위 · 짝 · 대조는 이 블록이 따로 되풀어 적는다**★ — 그 스텝의 그쪽을 고치면 여기도 맞춘다. rg 에 PCRE2 가 있어야 한다. ★블록은 checkout 의 `ci.yml` 에서 읽은 셸을 `eval` 한다 — 믿는 로컬 checkout 에서만 돌린다★. matcher · 짝 · 범위 · 한계 · 명단 고치는 법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ④.
@@ -246,7 +250,7 @@ npm test                                    # 6) 프론트 테스트 (vitest run
     )
     ```
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
-- **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command|platform)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더한다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다).
+- **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|net|transport)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더하고, 빼는 것은 지운 crate 뿐이다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다).
 - **의존 상한 게이트 4종 — standard에서 항상 돌린다**(해당 crate가 닿으면 quick에서도 필수). 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 **해석된 의존 그래프**로 덮는다:
   ```bash
   cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0110 무의존 불변식
@@ -255,14 +259,14 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   cargo tree -p engram-dashboard-platform  --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0266 OS 층 crate(base 도 의존하지 않는다 — ADR-0268)
   ```
   줄 수로 판정한다(매치 유무가 아니다). **플래그를 줄이지 말 것** — net 게이트 3과 같은 이유로 그만큼 형태가 샌다. ★**정규식 게이트의 가장 큰 구멍이 이것을 부른 계기다**★ — 정규식은 crate 이름 알파벳을 손으로 박아 두므로 **새 crate는 누가 그 알파벳에 이름을 더할 때까지 아예 안 보인다**. ★**넷 다에 공통으로 남는 구멍**★ — 전부 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별하므로, 다른 이름을 단 멤버는 그냥 통과한다. 거꾸로 넷 중 하나가 접두를 떼면 자기 게이트는 빨개지지만 남의 게이트가 그 crate 로 가는 간선을 못 본다. **`base`·`platform`엔 소스 정규식 짝이 없다**(있는 것은 이 상한 게이트 하나뿐) — 그 crate들은 *남을 안 부르는 것*이 불변식이라 부르는 이름의 알파벳을 관리할 대상이 없다. command crate가 워크스페이스 의존 0을 지키는 것은 **벽**이지 그 crate가 존재하는 *이유*는 아니다(이유 = 독립적으로 쓸 수 있고 순환을 막는다 — CLAUDE.md 「백엔드 모듈 맵」 command 항목 · ADR-0151 결정 4).
-- **base 시험 기능 운영 그래프 게이트(ADR-0269 결정 5 · ADR-0275 결정 5 — standard에서 항상, daemon · 셸 운영 그래프에 든 crate(base · agent · discovery · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** base 의 `test-support`(`testing` 모듈과 `time::ManualClock` 을 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다.
+- **base 시험 기능 운영 그래프 게이트(ADR-0269 결정 5 · ADR-0275 결정 5 — standard에서 항상, daemon · 셸 운영 그래프에 든 crate(base · agent · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** base 의 `test-support`(`testing` 모듈과 `time::ManualClock` 을 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다.
   ```bash
   cargo tree --locked -p engram-dashboard-daemon -e normal,build,features -i engram-dashboard-base --target all | rg 'feature "test-support"'      # → 0줄 PASS
   cargo tree --locked -p engram-dashboard        -e normal,build,features -i engram-dashboard-base --target all | rg 'feature "test-support"'      # → 0줄 PASS (셸)
   cargo tree --locked -p engram-dashboard-agent  -e normal,dev,features -i engram-dashboard-base --target all | rg 'engram-dashboard-base feature "test-support"' # → 1줄 이상 PASS (짝)
   ```
   ★**셋째 줄(짝)을 빼지 말 것**★ — 기능 이름이 바뀌면 앞 둘은 매치할 낱말을 잃고 0줄로 눈먼 PASS 가 된다. 판정은 앞 둘이 매치 유무(0줄), 셋째가 줄 수(1 이상)다. ★**`cargo tree` 의 종료코드가 0 이 아니면 그 줄은 FAIL 이다**★(CI 스텝의 rc 검사와 같다) — 파이프 끝의 `rg` 만 보면 `cargo tree` 가 죽어도 0줄로 읽혀 앞 둘이 눈먼 PASS 가 된다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
-- **platform 시험 기능 운영 그래프 게이트(TRD 1-3 §3-8 · §4-2 ③ — standard에서 항상, daemon · 셸 운영 그래프에서 platform 에 닿는 crate(platform · agent · discovery · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** platform 의 `test-support`(`testing` 모듈 — 실프로세스 시험 도우미 · `group::GroupRef::gone` · WMI 띄우기의 원시 호출 `spawn::wmi_create_raw`를 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다. 셸은 platform 을 운영 의존으로 직접 지고(데몬 찾기 · 띄우기 · 끄기 — `discovery` 모듈) 그 기능은 dev 줄에서만 켠다.
+- **platform 시험 기능 운영 그래프 게이트(TRD 1-3 §3-8 · §4-2 ③ — standard에서 항상, daemon · 셸 운영 그래프에서 platform 에 닿는 crate(platform · agent · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** platform 의 `test-support`(`testing` 모듈 — 실프로세스 시험 도우미 · `group::GroupRef::gone` · WMI 띄우기의 원시 호출 `spawn::wmi_create_raw`를 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다. 셸은 platform 을 운영 의존으로 직접 지고(데몬 찾기 · 띄우기 · 끄기 — `discovery` 모듈) 그 기능은 dev 줄에서만 켠다.
   ```bash
   cargo tree --locked -p engram-dashboard-daemon -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS
   cargo tree --locked -p engram-dashboard        -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS (셸)
@@ -271,7 +275,7 @@ npm test                                    # 6) 프론트 테스트 (vitest run
   판정 · 짝을 빼지 말 것 · `cargo tree` 종료코드 규칙은 위 base 게이트와 같다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
 - **네트워크 행 격리 게이트(ADR-0129 — net crate가 닿으면 필수, quick이어도):** 아래를 **전부** 돌린다. 기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더이고, 기대값을 늘리기 전에 그 헤더와 그 crate `Cargo.toml`의 의존 상한 규칙을 먼저 읽는다.
   ```bash
-  rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/          # 게이트1 소스 참조 → 0줄 PASS
+  rg "engram_dashboard_(daemon|messaging)" crates/engram-dashboard-net/src/          # 게이트1 소스 참조 → 0줄 PASS
   rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/ | sort -u    # 게이트2a① → 정확히 이 다섯 줄 PASS: engram_dashboard_platform:: 뒤 fs::is_access_denied · fs::is_sharing_violation · fs::open_deny_write · process::current_process_start_time · process::pid_alive_with_start_time
   rg '^(?:[^/]|/[^/])*?\bengram_dashboard_platform(?:[^:]|:[^:]|::[^A-Za-z0-9_]|:{0,2}$)' crates/engram-dashboard-net/src/   # 게이트2a② 심볼 꼴이 아닌 부름 → 0줄 PASS
   rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/                                            # 게이트2b 에이전트 런타임 재유입 → 0줄 PASS (2a와 짝 — 하나만 남기지 말 것)
@@ -432,7 +436,7 @@ flaky/타이밍/perf 실패를 상수·임계값·재시도 튜닝으로 통과�
 **Tauri import 0 을 지는 crate 중 이 바인딩이 재는 것은 셋이다.** 하나만 돌리면 일부만 지킨다:
 
 - 에이전트 런타임 crate(`engram-dashboard-agent` — 2026-08-25 개명 전 이름은 `engram-dashboard-core`, ADR-0175) — `rg "^\s*use tauri" crates/engram-dashboard-agent/src/` → 0줄.
-- 바닥 crate(`engram-dashboard-base`, ADR-0175 결정 1) — `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0줄. ★**잎 crate 라는 성질이 이 축을 덮지 않는다**★: 잎 성질은 워크스페이스 crate 축의 말이고, 그것을 지키는 의존 상한 게이트는 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 센다 — 서드파티인 `tauri` 는 그냥 통과한다. 그리고 이 crate 는 headless 데몬·`discovery` 에 링크되므로, 여기서 Tauri 를 부르면 창도 webview 도 없는 둘이 한꺼번에 전송 방식에 묶인다.
+- 바닥 crate(`engram-dashboard-base`, ADR-0175 결정 1) — `rg "^\s*use tauri" crates/engram-dashboard-base/src/` → 0줄. ★**잎 crate 라는 성질이 이 축을 덮지 않는다**★: 잎 성질은 워크스페이스 crate 축의 말이고, 그것을 지키는 의존 상한 게이트는 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 센다 — 서드파티인 `tauri` 는 그냥 통과한다. 그리고 이 crate 는 headless 데몬에 링크되므로, 여기서 Tauri 를 부르면 창도 webview 도 없는 그 바이너리가 전송 방식에 묶인다.
 - OS 층 crate(`engram-dashboard-platform`, ADR-0266) — `rg "^\s*use tauri" crates/engram-dashboard-platform/src/` → 0줄. 같은 축이다 — OS 층은 headless 데몬까지 모든 바이너리의 바닥에 깔리는 자리다(근거 정본 = 그 crate `src/lib.rs` 헤더).
 
 이게 깨지면 그 crate 가 전송 방식에 묶인 것 = 회귀. (근거·거부 대안은 ADR-0003.) ★**경로가 없어도 rg 는 매치 0을 뱉는다**★ — 돌리기 전에 `test -d crates/engram-dashboard-agent/src`·`test -d crates/engram-dashboard-base/src`·`test -d crates/engram-dashboard-platform/src` 로 경로 존재를 먼저 확인한다(위 standard 4-pre·4b-pre·4e-pre). ★**여기 `test -d` 에 4-pre 의 `|| { echo …; false; }` 를 베끼지 않는다 — 그 비대칭은 의도다**★: 붙여 쓸 명령의 정본은 4-pre 한 곳이고(사본이 둘이면 약한 쪽이 돌아간다), 맨 `test -d` 는 그 자체로 fail-close 다(경로 부재 시 종료코드 1 — 실측). 4-pre 가 `; false` 를 다는 것은 그쪽이 `|| echo` 로 사유를 찍기 때문이다 — **echo 의 성공이 종료코드를 0 으로 덮는다.**

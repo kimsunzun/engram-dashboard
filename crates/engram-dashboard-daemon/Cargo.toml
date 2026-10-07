@@ -196,10 +196,6 @@ engram-dashboard-messaging = { path = "../engram-dashboard-messaging", features 
 engram-dashboard-command = { path = "../engram-dashboard-command", features = ["test-support"] }
 # 같은 계열(feature-only 재선언) — 시험의 조건 대기(`engram_dashboard_base::testing::wait_until`) · 시험 시계 `time::ManualClock`(command_delivery · connection_core 시험).
 engram-dashboard-base = { path = "../engram-dashboard-base", features = ["test-support"] }
-# 다리 시험 하나만 쓴다 — 데이터 폴더 규칙의 정본(`data_dir`)과 아직 남은 discovery 사본이 같은 폴더를
-#   내는지 잰다. 운영 코드는 이 crate 를 부르지 않는다. crate 를 지울 때 이 줄과 그 시험을 함께 지운다
-#   (ADR-0271 결정 1).
-engram-dashboard-discovery = { path = "../engram-dashboard-discovery" }
 # 401 검증(무/오/stale 토큰)용 raw HTTP — rustls 로 platform-verifier 부담 없이(로컬 평문 http) 가볍게.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 # happy-path handshake(initialize + tools/list + tools/call)는 rmcp 클라이언트 role 로 정직하게 검증.

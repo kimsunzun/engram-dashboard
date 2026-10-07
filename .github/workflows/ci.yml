@@ -519,14 +519,14 @@ jobs:
           esac
 
       # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   ADR-0175 의 `base` · ADR-0266 의 `platform` 도 같은 이유로 알파벳에 넣는다. ★새 워크스페이스
-      #   crate 가 생길 때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰
-      #   구멍이고, 아래 상한 게이트가 그 구멍을 덮는다).
+      #   ADR-0175 의 `base` · ADR-0266 의 `platform` · ADR-0129 의 `net` · ADR-0177 의 `transport` 도 같은 이유로
+      #   알파벳에 넣는다. ★새 워크스페이스 crate 가 생길 때마다 여기 이름을 더하고, 지운 crate 는 뺀다★(손으로
+      #   박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래 상한 게이트가 그 구멍을 덮는다).
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command|platform)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|net|transport)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -618,8 +618,8 @@ jobs:
           echo "PASS"
 
       # ADR-0003 의 격리 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 다.
-      #   `base` 는 headless 데몬 · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
-      #   webview 도 없는 그 둘이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
+      #   `base` 는 headless 데몬에 링크되므로, 여기서 Tauri 를 부르는 순간 창도 webview 도 없는 그
+      #   바이너리가 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
       # ★"잎 crate 라 안전하다" 로 이 스텝을 지우지 말 것★: 잎 성질은 **워크스페이스 crate** 축의 말이고,
       #   바로 위 상한 게이트도 `rg "^engram-dashboard"` 로 워크스페이스 멤버만 센다. 서드파티인 `tauri` 는
       #   그 게이트를 그대로 통과한다 — 두 게이트는 서로 다른 축이다.
@@ -748,7 +748,7 @@ jobs:
           esac
 
       # TRD 1-3 §3-8 · §4-2 ③(ADR-0266 「영향」 · base 시험 기능 스텝(ADR-0275 결정 5)과 같은 축): platform 의 시험 기능
-      #   `test-support`(`testing` 모듈 · `group::GroupRef::gone` · `spawn::wmi_create_raw` — 시험 도우미를 부르는 쪽 시험에 연다)는 소비 crate(agent · discovery · 셸)의
+      #   `test-support`(`testing` 모듈 · `group::GroupRef::gone` · `spawn::wmi_create_raw` — 시험 도우미를 부르는 쪽 시험에 연다)는 소비 crate(agent · 셸)의
       #   `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의 기능은 운영 빌드로
       #   합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다. 운영 바이너리를
       #   내는 둘(데몬 · 셸)의 정상 · build 그래프를 해석된 그래프로 읽는다(매니페스트 grep 이 아니다). 셸은
@@ -805,7 +805,7 @@ jobs:
       #   작업 순서 2-4). 넣으면 그 간선으로 늘 빨갛다.
       # ★짝(데몬 → 1 줄 이상)을 지우지 말 것★ — agent 를 개명하거나 접두를 바꾸거나 패턴에 오타가 나면 0 기대 줄이
       #   매치할 이름을 잃고 눈먼 채 통과한다. 셸 패키지를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
-      # ★`^…␣` 앵커(뒤 공백)를 빼지 말 것★ — 빼면 같은 접두의 다른 이름이 걸린다(discovery async 반입 게이트와 같다).
+      # ★`^…␣` 앵커(뒤 공백)를 빼지 말 것★ — 빼면 같은 접두의 다른 이름이 걸린다(platform 게이트 ⑦ 과 같다).
       # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4i 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
       - name: 'shell gate 1: no agent crate in the shell release graph (shell = 0, daemon >= 1)'
         shell: bash
@@ -869,7 +869,6 @@ jobs:
           crates/engram-dashboard-agent/src/usage/scratch.rs
           crates/engram-dashboard-base/src/logging/mod.rs
           crates/engram-dashboard-daemon/src/messaging_host.rs
-          crates/engram-dashboard-discovery/src/lib.rs
           crates/engram-dashboard-net/src/instance.rs
           crates/engram-dashboard-net/src/portfile.rs
           src-tauri/src/discovery/tests.rs
@@ -882,7 +881,6 @@ jobs:
           crates/engram-dashboard-agent/tests/stdio_smoke.rs
           crates/engram-dashboard-agent/tests/submit_delivery_boundary.rs
           crates/engram-dashboard-daemon/tests/ws_e2e.rs
-          crates/engram-dashboard-discovery/tests/stop_smoke.rs
           src-tauri/tests/stop_smoke.rs
           # 시험 하네스 bin · 예제
           crates/engram-dashboard-daemon/src/bin/roundtrip_smoke.rs
@@ -1088,11 +1086,11 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      - name: 'net gate 1: source refs — no daemon/messaging/discovery'
+      - name: 'net gate 1: source refs — no daemon/messaging'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/)
+          hits=$(rg "engram_dashboard_(daemon|messaging)" crates/engram-dashboard-net/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -1192,28 +1190,42 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # net 게이트 5 가 못 잡는 축을 맡는다: feature 0개 소비자에게 async 런타임이 **조용히** 딸려오는 것.
-      # 게이트 5 는 컴파일 여부만 보는데, 조용히 딸려온 의존은 컴파일을 깨지 않는다.
-      # 실제로 한 번 터진 회귀이고 net 의 `default = []` 결정을 부른 원인이다.
-      # ★`^…␣` 앵커(뒤 공백 포함)를 빼지 말 것★: 맨 부분문자열로 적으면 ter(mio)s 와 tungstenite 가
+      # platform 게이트 ⑦ — 동기 crate 에 async 런타임이 **조용히** 딸려오는 것을 잡는다(net 게이트 5 는 컴파일
+      #   여부만 보는데, 조용히 딸려온 의존은 컴파일을 깨지 않는다). 셋 다 정상 그래프(`-e normal`)를 읽는다:
+      #   1. agent → 0줄 — tokio 없는 동기 crate 이면서 base · command · platform 을 운영 의존으로 지므로 셋이 이 한
+      #      줄로 함께 덮인다.
+      #   2. net(기본 feature) → 0줄 — feature 0개 소비자에게 async 런타임이 딸려오는 것. 실제로 한 번 터진 회귀이고
+      #      net 의 `default = []` 결정을 부른 원인이다.
+      #   3. 짝: net `--features server` → 1줄 이상(ADR-0278 꼴) — `server` 가 tokio · tokio-tungstenite · futures-util
+      #      을 켠다.
+      #   대상 · 범위 · 한계의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ⑦.
+      # ★`^…␣` 앵커(뒤 공백 포함)를 빼지 말 것★: 맨 부분문자열로 적으면 ter(mio)s 가
       #   걸려 기대값이 0 이 아니게 되고, 그러면 사람이 매번 판정해야 한다(= 게이트가 죽는다).
-      - name: 'Gate: discovery has no async-runtime ingress'
+      # ★짝을 지우지 말 것★ — 패턴이 깨지거나 `cargo tree` 출력 꼴이 바뀌면 0 기대 둘이 매치할 줄을 잃고 눈먼 채
+      #   통과한다. 짝이 그 눈먼 통과를 빨갛게 만든다. 대상 crate 를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
+      # ADR-0282
+      - name: 'platform gate 7: no async-runtime ingress (agent · net default = 0, net server >= 1)'
         shell: bash
         run: |
-          set +e
-          tree=$(cargo tree --locked -p engram-dashboard-discovery -e normal --prefix none --target all)
-          rc=$?
-          set -e
-          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
-          set +e
-          hits=$(printf '%s\n' "$tree" | rg -i "^(tokio|mio|tokio-tungstenite|futures-util) ")
-          rgrc=$?
-          set -e
-          case "$rgrc" in
-            1) echo "PASS — 0 matches" ;;
-            0) echo "FAIL — async runtime leaked into discovery:"; printf '%s\n' "$hits"; exit 1 ;;
-            *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
-          esac
+          # $1 = 기대(zero = 0줄 · some = 1줄 이상) · 나머지 = `cargo tree` 의 대상 인자.
+          async_ingress() {
+            local want=$1 tree hits n rc=0
+            shift
+            echo "== cargo tree $* (expect $want)"
+            tree=$(cargo tree --locked "$@" -e normal --prefix none --target all) || rc=$?
+            if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; return 1; fi
+            hits=$(printf '%s\n' "$tree" | rg -i "^(tokio|mio|tokio-tungstenite|futures-util) ") || rc=$?
+            case "$want:$rc" in
+              zero:1) echo "PASS — 0 matches" ;;
+              zero:0) echo "FAIL — async runtime leaked:"; printf '%s\n' "$hits"; return 1 ;;
+              some:0) n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); echo "PASS — $n matches"; printf '%s\n' "$hits" ;;
+              some:1) echo "FAIL — 짝: 0 matches — 패턴이나 cargo tree 출력 꼴이 망가졌나(그러면 0 기대 줄이 눈먼다)"; return 1 ;;
+              *) echo "FAIL — rg errored (exit $rc)"; return 1 ;;
+            esac
+          }
+          async_ingress zero -p engram-dashboard-agent
+          async_ingress zero -p engram-dashboard-net
+          async_ingress some -p engram-dashboard-net --features server
 
   # ── 프론트 ───────────────────────────────────────────────────────────────────
   frontend:
@@ -1359,7 +1371,7 @@ jobs:
       #      packages[""].version 이라는 사본이 하나 더 있지만 따로 안 본다 — npm 이 둘을 항상 같이 쓰므로
       #      현실의 drift 는 "lock 을 아예 갱신 안 함"이고 그건 루트 단언이 그대로 잡는다.
       # ── 일부러 뺀 것 ──
-      #   - 라이브러리 crate(agent·command·discovery·messaging·net·protocol)의 crate 버전: 단독 배송물이 없는
+      #   - 라이브러리 crate(agent·base·command·messaging·net·platform·protocol·transport)의 crate 버전: 단독 배송물이 없는
       #     내부 semver. 정적 링크돼 사용자에게 보이지 않는다. 첫 비-0.1.0 태그부터 제품 버전과 갈리는데
       #     그건 의도된 결과다.
       #   - PROTOCOL_VERSION(protocol crate, 현재 3): wire 계약 버전이라 릴리즈가 아니라 계약이 바뀔 때
