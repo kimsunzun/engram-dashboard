@@ -93,11 +93,12 @@ flowchart TD
 | 에이전트 간 메시지(보관함·회신 장부·주소록) | 데몬 메시징 커널 `MessagingService` (S18) | **인메모리** — 데몬 재시작 시 소실(영속화 없음, ADR-0103) |
 | 데몬 발견 정보(포트·토큰) | `daemon.json` — 발견 파일 **겸 단일 인스턴스 잠금 파일**(ADR-0135) | 휘발(매 기동 재발행) · 위치는 릴리스에서 실행 폴더 하위 `engram-data`(ADR-0134/0136) |
 | replay 진도·dedup·gen | **프론트 뷰(viewId)** | Rust 출력 행은 무상태 |
-| 레이아웃(창·탭·슬롯) | 셸 `src-tauri` `layout::ViewManager` | 데몬은 View를 모른다 · **디스크 영속 없음**(인메모리 — 클라 재시작 시 초기화), ADR-0035/0057 |
-| 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = P3d 전까지 디스크 `ui-settings.json` (읽기 주인 = 셸) | 셸이 창마다 유효 값(창별 ?? 전역)을 민다 — `theme.default` 쓰기(`settings.set`·`settings.reset`)와 `ui.refresh`(창별 파일을 다시 읽는다)가 밀기를 부른다 · 파일의 `theme` 키는 읽지 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167 |
+| 레이아웃(창·탭·슬롯) | 셸 `src-tauri` `layout::ViewManager` | 데몬은 View를 모른다 · **디스크 영속 = 셸 `shell\state\state.json`**(창 위치·크기·최대화 포함 — 정상 종료 뒤 부팅은 묻지 않고 복원한다 · 정본 = [TRD S21-storage §6](../process/S21-storage/trd.md)), ADR-0035/0057 |
+| 크래시 사본 · 「복원할까요?」 상태 | 셸 `state::restore::RestoreService`(상태 `none`/`awaiting`/`answered` + 처리 중인 답 하나) · 답 = 복원 조율자 `RestoreCoordinator` 하나 | 사본 파일 = `shell\state\state.crash.json`(비정상 종료 뒤 부팅이 뜨고 답만 푼다) · 상태는 부팅 단계가 한 곳에서 정하고 바뀌면 `restore:changed` 를 main 에 낸다 · 사람(invoke `restore_answer`)과 LLM(버스 `restore.answer`)이 같은 조율자 인스턴스를 부른다 · 정본 = [TRD S21-storage §6-5 · §6-7](../process/S21-storage/trd.md) — ADR 은 아직 없다(P3c1 착지 `064b61c` · 사람 경로 = main 창 안 모달 — P3c2 착지 `7b742fb`: 프론트 상태 창구 `src/api/restoreClient.ts` 가 `settingsClient.ts` 처럼 invoke · listen 을 직접 건다 · 같은 상태가 부팅의 `state.json` 읽기 결과 `state_file` 도 싣는다) |
+| 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = 셸 화면 상태의 창 항목(레이아웃 창 = `ViewManager` 의 `WindowAttrs::theme` · 트리 창 = `TreeAttrs` — `state.json` 에 영속 · 창과 같이 죽는다 · ADR-0265 결정 7) | 셸이 창마다 유효 값(창별 ?? 전역)을 한 자리(`src-tauri/src/theme.rs` 의 `EffectiveThemes`)에서 계산해 민다 — 창별 쓰기(버스 `window.setTheme` · 조회 `window.getTheme`) · `theme.default` 쓰기(`settings.set`·`settings.reset`) · 부팅의 창 복원 뒤 · 런타임 복원 수락이 밀기를 부른다 · 옛 `ui-settings.json` 은 P3d 부터 읽지도 쓰지도 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167(그 파일 · `ui.refresh` 경로는 ADR-0265 가 부분 폐기) |
 | 챗 렌더 스타일(간격·폰트) | 셸 `settings.json` `chat.style.*` | 권위 = 셸 설정 · `chatStyleStore`는 `settings:changed`를 CSS 변수에 칠하는 적용자(저장 안 함), ADR-0265 |
 
-결정: 미러 제거 = ADR-0046 · 레이아웃 권위 = ADR-0035/0057 · UI 설정 파일 = ADR-0166 · 창별 테마 = ADR-0167 · data_dir 단일결정 = discovery `default_data_dir`(위치 결정은 ADR-0134/0136이 정본 — 0024의 데이터 위치 조항은 폐기) · 시체 보존 = ADR-0083 · 제어 토큰 = ADR-0086 · 메시징 인메모리 = ADR-0103.
+결정: 미러 제거 = ADR-0046 · 레이아웃 권위 = ADR-0035/0057 · 설정 = ADR-0265(옛 UI 설정 파일 = ADR-0166) · 창별 테마 = ADR-0265 결정 7(옛 설정 파일 경로 = ADR-0167) · data_dir 단일결정 = discovery `default_data_dir`(위치 결정은 ADR-0134/0136이 정본 — 0024의 데이터 위치 조항은 폐기) · 시체 보존 = ADR-0083 · 제어 토큰 = ADR-0086 · 메시징 인메모리 = ADR-0103.
 
 ## 읽기 경로 — 뭘 고치러 왔나
 
@@ -562,10 +563,15 @@ flowchart TD
   CAP -->|"rich"| RS["RichSlot · NDJSON·마크다운 (tag=1)"]
   CAP -->|"dom"| DS["DomSlot · pre, ANSI 제거 (CDP 관측)"]
   RS --> STV["StructuredTextView · chat/(ChatRow·Markdown·ThoughtRow·WaitRow)"]
-  TS -.-> VEIL2["SlotUnavailableVeil · 세 슬롯 공용 (ADR-0165)"]
+  TS -.-> VEIL2["SlotUnavailableVeil · 공용 막 — 세 슬롯 + 잎, 넷이 그린다 (ADR-0165 · ADR-0280)"]
   RS -.-> VEIL2
   DS -.-> VEIL2
-  AL0 --> CN["ConnectionNotice · 데몬 연결 상태 띠"]
+  SB -.->|"기억 없는 예약 슬롯 — 슬롯 컴포넌트를 띄우지 않을 때만 (ADR-0280)"| VEIL2
+  AL0 --> NOV["NoticeOverlay · 알림을 레이아웃 위에 덮는 층 — 세 창 공용 (ADR-0276/0277)"]
+  PO --> NOV
+  TP --> NOV
+  NOV --> CN["ConnectionNotice · 데몬 연결 상태 띠"]
+  NOV -->|"main 만"| SFN["StateFileNotice · 상태 파일 안내"]
   SB -->|"content=agent_list"| ALa["AgentList · react-arborist (드래그 재부모화)"]
   SB -->|"content=preset_palette"| PP["PresetPalette"]
   SB -->|"content=empty"| EMPTY["Plus 아이콘 · 순수 그림 (pointer-events 끊음 — ADR-0143, 좌클릭 조항은 0144가 개정)"]
@@ -575,13 +581,13 @@ flowchart TD
 - **렌더러 선택:** 1차 축은 `renderModeOverride`고(있으면 caps를 아예 안 본다), 없을 때만 `agent.capabilities.output.structured`로 `RichSlot`/`TerminalSlot`을 가른다. `renderModeOverride`로 terminal·rich·dom 셋 중 무엇이든 강제 가능(프론트 전용 — wire는 이 개념을 모른다). (ADR-0044, 통로 무정제 조항은 0045가 폐기)
 - **구독 키 = viewId(슬롯 id)**, agentId 아님 — 같은 에이전트를 두 슬롯에 띄우면 독립 진도 2개. (ADR-0046)
 - **구독 수명:** `eventBus`는 `agentClient`의 **추상 구독**만 소유한다. 백엔드가 권위인 표면은 Tauri `listen`을 직접 걸되 **거는 쪽이 자기 disposer를 진다**. ★등록 주체를 세지 말 것★ — 늘어난다. 찾는 법 = `rg "from '@tauri-apps/api/event'" src/`.
-- **권위는 백엔드** — 스토어는 거울, 낙관적 갱신 금지. 프론트 전용 예외 = `renderModeOverride` · `monitoringPickerStore`(ADR-0067). ★`themeStore`는 예외가 아니라 **반쯤 셸 소유**★ — 전역 값은 셸 설정 `theme.default`(ADR-0265)가, 창별 덮어쓰기만 P3d 전까지 디스크(`ui-settings.json`)와 `ui.refresh`가 정하고, 프론트에서 바꾼 값은 저장되지 않아 셸의 다음 밀기가 덮는다. (ADR-0035, 탭 소유 모델은 ADR-0057)
+- **권위는 백엔드** — 스토어는 거울, 낙관적 갱신 금지. 프론트 전용 예외 = `renderModeOverride` · `monitoringPickerStore`(ADR-0067). ★`themeStore`는 예외가 아니라 **반쯤 셸 소유**★ — 전역 값은 셸 설정 `theme.default`(ADR-0265)가, 창별 덮어쓰기는 셸 화면 상태의 창 항목(버스 `window.setTheme` — ADR-0265 결정 7)이 정하고, 프론트에서 바꾼 값은 저장되지 않아 셸의 다음 밀기가 덮는다. (ADR-0035, 탭 소유 모델은 ADR-0057)
 
 결정: 제어표면 단일(agentClient) = ADR-0011 · carrier 고정 = ADR-0036 · 렌더 분기 = ADR-0044 · 뷰 직결 replay = ADR-0046(단 재연결 계기 조항은 ADR-0164가 폐기 — 계기는 권위 명부) · 레이아웃 권위 = ADR-0035(탭 소유 모델은 ADR-0057로 갱신).
 
 ### src-tauri = 출력 무상태 라우터 (단, 레이아웃은 여기가 권위다)
 
-**미러 버퍼·per-view 커서는 전부 제거됐다 — 단 그것은 출력 중계 행 한 줄의 이야기다.** Rust는 프레임 헤더만 보고 창별 Channel로 중계한다. 반면 **레이아웃·뷰·탭·슬롯·포커스는 셸이 권위로 소유한다**(`layout::ViewManager`, ADR-0035/0057) — UI 설정(`ui-settings.json`)·트레이·창별 command 버스도 같다. "무상태"는 출력 경로에만 붙는 수식어지 셸 전체의 성질이 아니다.
+**미러 버퍼·per-view 커서는 전부 제거됐다 — 단 그것은 출력 중계 행 한 줄의 이야기다.** Rust는 프레임 헤더만 보고 창별 Channel로 중계한다. 반면 **레이아웃·뷰·탭·슬롯·포커스는 셸이 권위로 소유한다**(`layout::ViewManager`, ADR-0035/0057) — 설정(`shell\config\settings.json` — ADR-0265)·창별 테마·트레이·창별 command 버스도 같다. "무상태"는 출력 경로에만 붙는 수식어지 셸 전체의 성질이 아니다.
 
 ```mermaid
 flowchart TD
@@ -645,33 +651,42 @@ stateDiagram-v2
 
 ### 슬롯 렌더 분기
 
-**렌더러 선택보다 앞서는 갈래가 둘이다** — caps가 아직 안 왔나, 에이전트가 명부에서 수거됐나. 그 둘을 지난 뒤에야 override·capability로 렌더러를 고른다(출력 종류를 가정하지 않는다).
+**렌더러 선택보다 앞서는 갈래가 있다** — 에이전트가 명부에 있나(= caps(AgentInfo) 도착), 없으면 이 잎이 그 에이전트를 마운트한 기억이 있나 · 명부와 프로필 목록을 둘 다 받았나 · 프로필이 있나. 명부에 있을 때만 override·capability로 렌더러를 고르고(출력 종류를 가정하지 않는다), 기억으로 뷰를 지킬 때는 기억한 모드를 그대로 쓴다(`renderAs = mode ?? kept?.mode` — 부재 구간엔 override 도 무효). 판정의 정본 = `LayoutLeaf.tsx` 의 ADR-0149 블록 · 표시 = TRD S21-storage §6-8 · ADR-0280.
 
 ```mermaid
 flowchart TD
   SB["SlotBody · LayoutLeaf 안, 슬롯당 1개 (ADR-0227)"]
-  CAPS{"caps(AgentInfo) 도착?"}
-  PH["미도착 → 「연결 중」 플레이스홀더<br/>구체 렌더러를 먼저 띄우면 스왑 전 바이트가 유실된다 (ADR-0041)"]
-  KEPT{"에이전트가 명부에서 사라짐?"}
-  KEEP["기억한 마지막 모드로 뷰 유지 (ADR-0148 → 0149/0165가 개정)<br/>데몬 ring 은 이미 없다 — 내리면 그 대화는 영구 소실"]
-  MODE{"renderAs = renderModeOverride[slotId] ?? (capabilities.output.structured ? 'rich' : 'terminal')"}
+  CAPS{"에이전트가 명부에 있나? (= caps 도착)"}
+  KEPT{"이 잎에 마운트 기억이 있고, 프로필이 있거나 아직 프로필 목록을 못 받았나?"}
+  KEEP["뷰 유지 — renderAs = 기억한 마지막 모드 (ADR-0148 → 0149/0165가 개정)<br/>에이전트가 없어 caps · override 로 모드를 다시 고르지 않는다<br/>데몬 ring 은 이미 없다 — 내리면 그 대화는 영구 소실"]
+  LISTS{"명부·프로필 목록을 둘 다 받았나?"}
+  PH["못 받음 → 「연결 중」 플레이스홀더 — 이 경우에만 (ADR-0280)<br/>구체 렌더러를 먼저 띄우면 스왑 전 바이트가 유실된다 (ADR-0041)"]
+  PROF{"프로필이 있나?"}
+  LVEIL["있음(실행 중 아님 · 기억 없음) → 잎이 부재 막을 그린다 — 단추 없음<br/>슬롯 컴포넌트를 띄우지 않을 때만이라 다른 막과 겹치지 않는다 (ADR-0280)"]
+  NOTGT["없음(트리에서 삭제) → 「대상 없음」 문구 · 에이전트 슬롯 메뉴 그대로 (ADR-0280)"]
+  MODE{"renderAs = 명부에 있으면 renderModeOverride[slotId] ?? (capabilities.output.structured ? 'rich' : 'terminal') · 뷰 유지면 기억한 모드"}
   TS["'terminal' → TerminalSlot : tag=0만 받아 xterm.write"]
   RS["'rich' → RichSlot : tag=1 → StructuredTextView (칩+마크다운+턴 구분선)"]
   DS["'dom' → DomSlot : ANSI 벗겨 &lt;pre&gt; (CDP innerText 관측용 — LLM 제어, CLAUDE.md 「LLM-우선 제어」)"]
-  VEIL["SlotUnavailableVeil · 세 슬롯 공용 막 (흐림·심볼·입력차단, ADR-0165)"]
+  VEIL["SlotUnavailableVeil · 공용 막 — 세 슬롯 + 잎, 넷이 그린다 (흐림·심볼·입력차단, ADR-0165 · ADR-0280)"]
   NOTE["구독 effect deps = [viewId, agentId] — 화신 표식(epoch) 제외, ADR-0164 · reset() 선행 · seq dedup · tag 게이트"]
 
   SB --> CAPS
-  CAPS -->|"미도착"| PH
-  CAPS -->|"도착"| MODE
-  CAPS -->|"수거됨"| KEPT
-  KEPT --> KEEP --> MODE
+  CAPS -->|"있음"| MODE
+  CAPS -->|"없음"| KEPT
+  KEPT -->|"예"| KEEP --> MODE
+  KEPT -->|"아니오"| LISTS
+  LISTS -->|"아니오"| PH
+  LISTS -->|"예"| PROF
+  PROF -->|"있음"| LVEIL
+  PROF -->|"없음"| NOTGT
   MODE -->|"'terminal'"| TS
   MODE -->|"'rich'"| RS
   MODE -->|"'dom'"| DS
   TS -.-> VEIL
   RS -.-> VEIL
   DS -.-> VEIL
+  LVEIL -.-> VEIL
   MODE -.-> NOTE
 ```
 

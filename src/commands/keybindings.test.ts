@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { __resetRegistryForTest, register } from './registry'
-import { comboOf, installKeybindings, isEditableTarget } from './keybindings'
+import { comboOf, installKeybindings, isEditableTarget, setKeybindingsPaused } from './keybindings'
 import { useThemeStore } from '../store/themeStore'
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -150,6 +150,7 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
   afterEach(() => {
     dispose?.()
     dispose = null
+    setKeybindingsPaused(false)
     document.body.innerHTML = ''
     vi.restoreAllMocks()
   })
@@ -235,6 +236,30 @@ describe('installKeybindings (설치된 리스너 배선/생명주기)', () => {
     withSpecContentEditable(editable)
     fireCtrlTab(editable)
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  // ── 복원 모달이 떠 있는 동안 멈춤(TRD S21-storage §6-7 N4) ──
+  it('멈춘 동안에는 발화하지 않고 preventDefault 도 안 한다', () => {
+    const spy = vi.fn()
+    register({ id: 'tab.next', title: 'next', run: spy })
+    dispose = installKeybindings()
+
+    setKeybindingsPaused(true)
+    const e = fireCtrlTab(document.body)
+    expect(spy).not.toHaveBeenCalled()
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('다시 켜면 발화한다', () => {
+    const spy = vi.fn()
+    register({ id: 'tab.next', title: 'next', run: spy })
+    dispose = installKeybindings()
+
+    setKeybindingsPaused(true)
+    fireCtrlTab(document.body)
+    setKeybindingsPaused(false)
+    fireCtrlTab(document.body)
+    expect(spy).toHaveBeenCalledTimes(1)
   })
 
   it('disposer 호출 후엔 더 이상 발화하지 않는다', () => {

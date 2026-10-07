@@ -17,6 +17,7 @@ type SlotNode = Extract<LayoutNode, { type: 'slot' }>
 
 const NO_SLOT_RECTS: SlotRect[] = []
 const NO_SPLIT_RECTS: SplitRect[] = []
+const NO_FOREIGN_SLOTS: readonly string[] = []
 
 // 코드 단위 비교 — 로캘과 무관하게 결정적이다.
 const byId = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
@@ -57,6 +58,7 @@ export default function ViewLayoutRenderer({
   splitRects,
   ratioBounds,
   version,
+  foreignSlots = NO_FOREIGN_SLOTS,
 }: {
   node: LayoutNode
   focusedSlotId: string | null
@@ -76,6 +78,8 @@ export default function ViewLayoutRenderer({
   ratioBounds?: { min: number; max: number }
   /** 캐시 version — 구분선 미리보기가 확정 스냅샷을 알아보는 기준. */
   version?: number
+  /** 캐시 `foreignSlots` — 이 판이 모르는 내용을 쥔 슬롯. 없으면 그런 슬롯이 없다. */
+  foreignSlots?: readonly string[]
 }) {
   // 잎의 메뉴·포커스와 같은 View 좌표다(LayoutLeaf 의 targetViewId 와 같은 식).
   const currentViewId = useCurrentViewId()
@@ -83,6 +87,7 @@ export default function ViewLayoutRenderer({
   const rootRef = useRef<HTMLDivElement>(null)
 
   const tree = useMemo(() => collectTree(node, { slots: new Map(), splits: new Set() }), [node])
+  const foreign = useMemo(() => new Set(foreignSlots), [foreignSlots])
   const slotNodes = tree.slots
   const rootSlotId = node.type === 'slot' ? node.id : null
   const fullBox = useMemo<SlotRect[]>(
@@ -144,6 +149,7 @@ export default function ViewLayoutRenderer({
             node={leaf}
             rect={r}
             focusedSlotId={focusedSlotId}
+            isForeign={foreign.has(r.slot_id)}
             viewIdOverride={viewIdOverride}
           />
         )

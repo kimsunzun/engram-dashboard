@@ -60,6 +60,7 @@ function slotSnap(viewId: string, version: number): ViewSnapshot {
     view_id: viewId,
     layout: { type: 'slot', id: `s-${viewId}`, content: { type: 'empty' } }, // ADR-0060
     focused_slot_id: `s-${viewId}`,
+    foreign_slots: [],
     slot_spatial: [], // ADR-0068: 공간 파생(이 테스트는 안 씀 — 빈 배열로 타입 충족)
     slot_rects: [], // ADR-0227: 셸 기하(이 테스트는 안 씀)
     split_rects: [],
@@ -124,7 +125,7 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
   })
 
   // 사각형 배열은 캐시 참조 그대로여야 한다 — 구분선 미리보기가 배열 참조로 새 스냅샷을 알아본다(ADR-0227).
-  it('캐시 항목의 사각형(같은 참조)·비율 한계·version 을 렌더러에 넘긴다', async () => {
+  it('캐시 항목의 사각형(같은 참조)·비율 한계·version·모르는 내용 슬롯을 렌더러에 넘긴다', async () => {
     render(<WindowLayout label="main" />)
     await waitFor(() => {
       const cached = useViewStore.getState().layouts['v1']
@@ -135,6 +136,7 @@ describe('WindowLayout — 초기 pull + keep-alive 캔버스', () => {
       expect(props!.splitRects).toBe(cached!.splitRects)
       expect(props!.ratioBounds).toEqual({ min: cached!.ratioMin, max: cached!.ratioMax })
       expect(props!.version).toBe(cached!.version)
+      expect(props!.foreignSlots).toBe(cached!.foreignSlots)
     })
   })
 })

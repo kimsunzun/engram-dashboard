@@ -9,7 +9,7 @@
 //! `src-tauri/src/fsutil.rs` 의 `cfg!(windows)`(ADR-0275 결정 15). `cfg` 없이 런타임에 OS 규칙을 쓰는 자리는
 //! 이 셈에 들지 않는다(④ 의 한계).
 //!
-//! 지금 입주자는 일곱이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
+//! 지금 입주자는 여덟이다 — [`process`](PID liveness · 프로세스 시작시각과 그 세 갈래 판정 · 프로세스 표 ·
 //! 자식 PID 열거 · 한 뿌리 아래 신원 목록 · 한 프로세스 트리 끄기 — Windows `taskkill`) · [`group`](프로세스
 //! 무리의 강한 주인 · 약한 손잡이 · 붙든 멤버 · 가입 알림 포트 — Windows Job Object) ·
 //! [`file_holders`](이 파일을 지금 연 프로세스 — Restart Manager) ·
@@ -17,7 +17,9 @@
 //! [`spawn`](창 없이 띄우기 · 트리 뿌리로 띄우기와 그 트리 kill 손잡이 — Windows = 멈춘 채 띄워 무리에 넣은 뒤
 //! 깨우기 · 실패한 셸의 「프로그램 없음」 판정 · 이 프로세스의 Job 밖에서 띄우기 — Windows = WMI) ·
 //! [`shell`](대화형 기본 셸 · CLI 를 콘솔 셸로 감싸기) ·
-//! [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수 이름 비교). 모듈 헤더와 공개 함수 문서가 그 책임의 정본이다.
+//! [`env`](홈 디렉터리 · 실행 파일 이름 · 환경변수 이름 비교) ·
+//! [`window`](전경 창이 이 프로세스의 것인가 — Windows `GetForegroundWindow`). 모듈 헤더와 공개 함수 문서가 그
+//! 책임의 정본이다.
 //!
 //! ★`testing`(실프로세스 시험 도우미) · `group::GroupRef::gone`(주인이 처음부터 없는 손잡이) ·
 //! `spawn::wmi_create_raw`(WMI 띄우기의 원시 호출 — 진단 시험 몫)는 cargo 기능 `test-support` 뒤다★
@@ -184,3 +186,4 @@ pub mod shell;
 pub mod spawn;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+pub mod window;

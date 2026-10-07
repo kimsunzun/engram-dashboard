@@ -42,6 +42,8 @@ tracing = "0.1"
 #   WMI 의 `IWbemLocator` · `IWbemServices` · `IWbemClassObject` · 인증 상수 `RPC_C_AUTHN_WINNT` · `RPC_C_AUTHZ_NONE`.
 #   ★`Win32_System_Variant` 는 켜지 않는다★ — 그 코드가 쓰는 `VARIANT` 는 windows-core 의 것이고, 0.58 의 Wmi
 #   바인딩은 그 feature 를 요구하지 않는다(이 crate 단독 빌드로 확인).
+# `Win32_UI_WindowsAndMessaging` = `window` 몫 — 전경 창과 그 창을 만든 스레드의 PID(`GetForegroundWindow` ·
+#   `GetWindowThreadProcessId`). 셸이 런타임 복원 수락 끝에 main 에 포커스를 줄지 가른다.
 # ★기능별 cargo feature 로 쪼개지 않는다★ — 이 의존 하나에 쓰는 바인딩 feature 의 합집합을 켠다(ADR-0275
 #   결정 13). 모듈을 옮겨 올 때 그 모듈이 쓰는 feature 를 여기 더한다.
 [target.'cfg(windows)'.dependencies]
@@ -57,6 +59,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Com",
     "Win32_System_Wmi",
     "Win32_System_Rpc",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 # `file_holders` · `fs` 시험이 임시 파일 이름을 겹치지 않게 뽑는다 — 운영 그래프에는 안 든다.

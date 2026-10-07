@@ -131,6 +131,11 @@ pub struct ViewSnapshot {
     pub layout: LayoutNode,
     #[ts(type = "string | null")]
     pub focused_slot_id: Option<Uuid>,
+    /// 이 판이 모르는 내용(더 새 판이 저장한 슬롯 종류)을 쥔 슬롯 id, 트리 전위 순. 그 슬롯의 `content` 는
+    /// `empty` 로 실리지만 비어 있지 않다 — 빈 슬롯 판정(자동 배치·여는 대상 고르기)은 이 목록의 슬롯을 점유로
+    /// 본다. 원문은 셸만 쥔다. 그 슬롯에 내용을 놓거나(`empty` 포함) 슬롯을 닫으면 목록에서 빠진다.
+    #[ts(type = "Array<string>")]
+    pub foreign_slots: Vec<Uuid>,
     /// ★슬롯 공간 타깃 파생(ADR-0068)★: 각 말단 슬롯의 방향 이웃(up/down/left/right) + 순서(ordinal).
     /// 논리 도면(split 방향·ratio)에서 산출한다 — 픽셀·getBoundingClientRect 무관(백엔드 권위 ADR-0035).
     /// ordinal 순으로 담긴다. 정규화 좌표는 이 필드가 아니라 `slot_rects` 가 싣는다(ADR-0227 — ADR-0068 결정 3 개정).
@@ -166,8 +171,7 @@ pub struct ViewSnapshot {
 /// 명령 버스 `split.setRatio` 의 `outcome` 과 철자가 같다.
 // ★여기에 `#[serde(rename_all)]` 을 달지 말 것★ — 버스 선언 매크로는 rename 을 못 달아 variant 이름이 그대로
 // wire 값이 된다. 여기만 바꾸면 같은 결말을 두 표면이 다른 철자로 말한다(버스 쪽 쌍둥이 = `commands::RatioOutcome` ·
-// `ThemeSource`↔`ThemeOrigin` 과 같은 규칙 · 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의
-// `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
+// 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의 `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
 // ADR-0227
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]

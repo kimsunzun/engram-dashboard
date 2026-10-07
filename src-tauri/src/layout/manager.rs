@@ -26,9 +26,15 @@
 //!    은 금지(`MainNotClosable` 로 거부) — 마지막 탭 close 는 빈 탭 강제로만 떨어진다.
 //! 5. **에이전트 참조 다중 허용:** 같은 `agent_id` 가 서로 다른 두 View 슬롯에 배정 가능(두 창이 같은
 //!    에이전트 봄, 진도 독립·ADR-0046). "한 View 두 창"(불변식 2 금지)과 다른 얘기.
+//!
+//! ## ★모르는 슬롯 내용 곁표(TRD S21-storage §6-2)★
+//! 슬롯 내용 쓰기는 `write_slot_content` 하나로만, 뷰 지우기는 `remove_view` 하나로만 한다 — 그 둘과
+//! `close_slot` 이 곁표(`unknown_content`) 항목을 거둔다. `tree::set_in_tree` 를 직접 부르거나 `views` 에서 직접
+//! 지우면 사용자가 바꾼 슬롯에 옛 원문이 저장으로 되살아난다(§12 R6). 빈/점유 판정은 `slot_is_free` 하나다.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::geometry::{self, PxRect, RectF64, SlotRect};
@@ -36,6 +42,7 @@ use super::tree;
 use super::types::{
     LayoutNode, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics, View, ViewMeta, ViewSnapshot,
 };
+use crate::theme::UiTheme;
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 
@@ -95,6 +102,125 @@ pub struct SlotPx {
     pub content: RectF64,
 }
 
+/// 창의 마지막 보통(최소화도 최대화도 아닌) 자리. `x`·`y` = 물리 픽셀 바깥 위치(`outer_position` 그대로 — 정수
+/// 값), `w`·`h` = 논리 안쪽 크기(`inner_size` 를 그 창의 배율로 나눈 값) — 복원은 같은 짝으로 놓는다(TRD
+/// S21-storage §6-3 · 위치를 논리로 두지 않는 이유 = `state::placement` 머리).
+///
+/// 네 값은 언제나 유한하고 크기(`w` · `h`)는 0 보다 크다 — [`Self::new`] 만 만든다. 유한하지 않은 실수는 JSON 에
+/// `null` 로 나가고, 크기 0 인 창은 복원해도 보이지 않는다.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowBounds {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl WindowBounds {
+    /// 하나라도 유한하지 않거나(NaN · ±∞) `w` · `h` 가 0 이하면 `None`.
+    pub fn new(x: f64, y: f64, w: f64, h: f64) -> Option<Self> {
+        let finite = [x, y, w, h].iter().all(|v| v.is_finite());
+        (finite && w > 0.0 && h > 0.0).then_some(WindowBounds { x, y, w, h })
+    }
+
+    pub fn x(self) -> f64 {
+        self.x
+    }
+
+    pub fn y(self) -> f64 {
+        self.y
+    }
+
+    pub fn w(self) -> f64 {
+        self.w
+    }
+
+    pub fn h(self) -> f64 {
+        self.h
+    }
+}
+
+/// 창 게터로 읽은 한 벌(`is_minimized` · `is_maximized` · 자리). ★`ViewManager` · 트리 칸 락을 잡기 전에 전부
+/// 읽는다★ — 레이아웃 락 보유 중 OS 호출 금지(TRD S21-storage §6-3 · `apply.rs` 머리 「락 규율」).
+///
+/// `bounds` = 그때 읽은 자리 — 못 읽었으면(게터 실패 · [`WindowBounds::new`] 거절) `None`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowPlacement {
+    pub minimized: bool,
+    pub maximized: bool,
+    pub bounds: Option<WindowBounds>,
+}
+
+/// 창 하나의 화면 속성 — 창 항목과 같이 살고 같이 죽는다. label 을 키로 창 밖에 두면 재시작 뒤 같은 label 의
+/// 다른 창에 조용히 적용된다(ADR-0167 「근거」).
+///
+/// 레이아웃 창은 `WindowTabs::attrs`, 트리 창은 `state::tree_attrs` 가 든다. 바꾸는 길은 그 둘의 setter 뿐이다 —
+/// 거기서 변경 번호가 오른다(레이아웃 `version` 이 아니라 `ViewManager::attrs_rev` — 창을 끌 때마다 레이아웃
+/// 번호가 튀지 않게).
+// ADR-0265
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct WindowAttrs {
+    /// `None` = 전역 테마(설정 `theme.default`)를 따른다.
+    pub theme: Option<UiTheme>,
+    /// `None` = 이 창의 보통 자리를 아직 못 봤다.
+    pub bounds: Option<WindowBounds>,
+    /// 복원은 `bounds` 로 놓은 뒤 최대화한다(사용자 결정 F8). 트리 창은 언제나 `false` 다(`state::tree_attrs` 머리).
+    pub maximized: bool,
+}
+
+impl WindowAttrs {
+    /// 게터 한 벌을 적는다 — 바뀌었으면 `true`. `memo` = 이 창의 바로 앞 읽기 기억([`PlacementMemo`]).
+    ///
+    /// - 최소화 중이면 아무것도 바꾸지 않는다 — 최소화를 풀면 그 앞 상태(최대화 여부 포함)로 돌아가므로, 그 앞
+    ///   값이 다음 복원이 세울 상태다.
+    /// - 최대화면 그 표식만 세운다 — `bounds` 는 최대화 전 보통 자리로 남는다(F8). ★단 바로 앞 읽기가 보통으로
+    ///   적은 자리가 지금 읽은 자리와 같으면 그 읽기를 되돌린다★ — 사용자가 최대화하면 tao 가 `Moved` 를 최대화
+    ///   표식이 서기 전에 내서(tao 0.35 `platform_impl/windows/event_loop.rs` — `WM_WINDOWPOSCHANGED` 에서 `Moved`,
+    ///   그 뒤 `WM_SIZE` 가 표식을 세운다) 최대화된 사각형이 보통 자리로 한 번 적힌다. tauri-plugin-window-state 가
+    ///   `Moved` 마다 앞 위치를 `prev_x` · `prev_y` 로 밀어 두고 최대화면 그것으로 놓는 것과 같은 생각이다
+    ///   (tauri-apps/plugins-workspace `3d8a3c877b` 의 `plugins/window-state/src/lib.rs` L492-493 · L213-222).
+    ///   ★「같은 자리」 조건을 빼지 말 것★ — tao 의 `maximize` 는 표식을 먼저 세워 잘못 적힌 읽기가 없으므로, 조건
+    ///   없이 되돌리면 그 앞의 진짜 보통 읽기(부팅 복원이 입힌 크기 등)를 버린다.
+    /// - 보통이면 표식을 내리고 `bounds` 를 적는다(`None` 이면 앞 값을 둔다).
+    pub(crate) fn observe(&mut self, seen: WindowPlacement, memo: &mut PlacementMemo) -> bool {
+        let before = *self;
+        let WindowPlacement {
+            minimized,
+            maximized,
+            bounds,
+        } = seen;
+        let last = memo.last.take();
+        if !minimized {
+            self.maximized = maximized;
+            if maximized {
+                if let (Some((written, prior)), Some(now)) = (last, bounds) {
+                    if written == now {
+                        self.bounds = prior;
+                    }
+                }
+            } else if let Some(bounds) = bounds {
+                memo.last = Some((bounds, self.bounds));
+                self.bounds = Some(bounds);
+            }
+        }
+        *self != before
+    }
+
+    /// 바뀌었으면 `true`.
+    pub(crate) fn set_theme(&mut self, theme: Option<UiTheme>) -> bool {
+        let changed = self.theme != theme;
+        self.theme = theme;
+        changed
+    }
+}
+
+/// 창 하나의 바로 앞 읽기 기억 — 그 읽기가 보통 자리를 적었으면 (적은 자리, 그 앞 자리). 쓰는 곳은
+/// [`WindowAttrs::observe`] 뿐이고 다음 읽기가 늘 지운다. 영속하지 않는다 — 창 항목 · 트리 칸과 같이 산다.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct PlacementMemo {
+    last: Option<(WindowBounds, Option<WindowBounds>)>,
+}
+
 #[derive(Debug, Clone)]
 pub struct WindowTabs {
     // 탭 순서(좌→우).
@@ -105,18 +231,47 @@ pub struct WindowTabs {
     pub canvas: Option<CanvasPx>,
     // ADR-0227
     pub metrics: Option<UiMetrics>,
+    /// 영속 신원 — main 은 `main`, 팝아웃은 그 창 항목이 처음 생길 때 뽑은 UUID(하이픈 소문자). 저장 · 복원은 이
+    /// 값을 쓴다. 런타임 label(맵 키)은 한 부팅 안에서만의 신원이다 — 팝아웃 label 은 실행마다 1 부터 다시
+    /// 센다(TRD S21-storage §6-3).
+    // ADR-0167
+    pub window_id: String,
+    pub attrs: WindowAttrs,
+    pub(crate) placement_memo: PlacementMemo,
 }
 
 impl WindowTabs {
     // 새 창 엔트리는 전부 여기서 만든다 — 측정값은 그 창 웹뷰가 보고할 때까지 비어 있어야 한다.
-    fn first_tab(view: ViewId) -> Self {
+    fn new(window_id: String, attrs: WindowAttrs, tabs: Vec<ViewId>, active: ViewId) -> Self {
         WindowTabs {
-            tabs: vec![view],
-            active: view,
+            tabs,
+            active,
             canvas: None,
             metrics: None,
+            window_id,
+            attrs,
+            placement_memo: PlacementMemo::default(),
         }
     }
+
+    fn new_popout(view: ViewId) -> Self {
+        Self::new(
+            Uuid::new_v4().to_string(),
+            WindowAttrs::default(),
+            vec![view],
+            view,
+        )
+    }
+}
+
+/// 영속에서 되살린 창 하나 — 메모리 모양. 영속 모양의 해석 · 수리는 `state::convert` 가 끝낸 뒤 넘긴다.
+#[derive(Debug, Clone)]
+pub(crate) struct RestoredWindow {
+    pub attrs: WindowAttrs,
+    /// 탭 순서 그대로.
+    pub tabs: Vec<View>,
+    /// `tabs` 가 있으면 그 안의 하나여야 한다.
+    pub active: Option<ViewId>,
 }
 
 // 창별 탭 조회 결과(list_tabs 반환 / window:tabs-updated 페이로드 원천). ADR-0057.
@@ -135,6 +290,14 @@ pub struct ViewManager {
     pub windows: HashMap<WindowLabel, WindowTabs>,
     // 변경마다 +1(get_view race 용 — 팝업 pull↔listen 윈도). 0 부터 시작, 첫 변경에서 1.
     pub version: u64,
+    // 창 속성(`WindowTabs::attrs`)이 바뀔 때마다 +1 — `version` 은 올리지 않는다. 기록기는 둘을 같은지만 본다
+    // (TRD S21-storage §6-4) — ★되돌리거나 초기화하지 않는다★: 마지막으로 본 값과 다시 같아지면 그 사이의 변경을
+    // 못 본다.
+    attrs_rev: u64,
+    // 이 판이 모르는 슬롯 내용의 원문(뷰 → 슬롯 → JSON 객체). 그 슬롯의 메모리 내용은 `Empty` 이고 항목이 있는
+    // 동안 「점유」다. 프론트로 나가지 않는다 — 스냅숏은 슬롯 id 만 싣는다(`foreign_slots`). 뷰로 먼저 가르는
+    // 이유: 탭이 다른 창으로 옮겨도 그대로 따라가고, 뷰를 지울 때 한 번에 거둔다.
+    unknown_content: HashMap<ViewId, HashMap<Uuid, Map<String, Value>>>,
 }
 
 impl Default for ViewManager {
@@ -152,12 +315,101 @@ impl ViewManager {
             view_owner: HashMap::new(),
             windows: HashMap::new(),
             version: 0,
+            attrs_rev: 0,
+            unknown_content: HashMap::new(),
         };
         let v0 = mgr.make_view("View 1".to_string());
         mgr.view_owner.insert(v0, MAIN_WINDOW_LABEL.to_string());
-        mgr.windows
-            .insert(MAIN_WINDOW_LABEL.to_string(), WindowTabs::first_tab(v0));
+        mgr.windows.insert(
+            MAIN_WINDOW_LABEL.to_string(),
+            WindowTabs::new(
+                MAIN_WINDOW_LABEL.to_string(),
+                WindowAttrs::default(),
+                vec![v0],
+                v0,
+            ),
+        );
         mgr
+    }
+
+    /// 되살린 창들로 새 모델을 세운다 — `version` · `attrs_rev` 는 0, 곁표는 비었다(모르는 내용은 부르는 쪽이
+    /// `set_unknown_content` 로 세운다). 각 View 의 포커스는 트리 첫 슬롯으로 고친다(`fixup_focus` 와 같은 규칙).
+    ///
+    /// main 의 탭이 없으면 빈 탭 하나(`View 1`)를 세운다(불변식 4). 그 밖에 불변식 1–4 를 세울 수 없는 입력은 `Err`
+    /// 이고 아무것도 만들지 않는다 — 탭 없는 팝아웃 · 탭 밖이거나 없는 활성 탭 · 겹친 View id · `main` 이거나 겹친
+    /// 팝아웃 label. 팝아웃 항목 = (label, 영속 id, 창).
+    pub(crate) fn from_restored(
+        main: RestoredWindow,
+        popouts: Vec<(WindowLabel, String, RestoredWindow)>,
+    ) -> Result<Self, String> {
+        let mut mgr = Self {
+            views: HashMap::new(),
+            view_owner: HashMap::new(),
+            windows: HashMap::new(),
+            version: 0,
+            attrs_rev: 0,
+            unknown_content: HashMap::new(),
+        };
+        let RestoredWindow {
+            attrs,
+            tabs,
+            active,
+        } = main;
+        let main_window = if tabs.is_empty() {
+            let v0 = mgr.make_view("View 1".to_string());
+            mgr.view_owner.insert(v0, MAIN_WINDOW_LABEL.to_string());
+            WindowTabs::new(MAIN_WINDOW_LABEL.to_string(), attrs, vec![v0], v0)
+        } else {
+            let (tabs, active) = mgr.adopt_tabs(MAIN_WINDOW_LABEL, tabs, active)?;
+            WindowTabs::new(MAIN_WINDOW_LABEL.to_string(), attrs, tabs, active)
+        };
+        mgr.windows
+            .insert(MAIN_WINDOW_LABEL.to_string(), main_window);
+
+        for (label, window_id, restored) in popouts {
+            if mgr.windows.contains_key(&label) {
+                return Err(format!("팝아웃 label {label} 이 겹친다"));
+            }
+            let RestoredWindow {
+                attrs,
+                tabs,
+                active,
+            } = restored;
+            if tabs.is_empty() {
+                return Err(format!("팝아웃 {window_id} 에 탭이 없다"));
+            }
+            let (tabs, active) = mgr.adopt_tabs(&label, tabs, active)?;
+            mgr.windows
+                .insert(label, WindowTabs::new(window_id, attrs, tabs, active));
+        }
+        Ok(mgr)
+    }
+
+    // 창 `label` 의 탭을 들인다 — 소유 쌍(불변식 1·2)과 활성 검사(불변식 3). 돌려주는 것 = (탭 순서, 활성 탭).
+    fn adopt_tabs(
+        &mut self,
+        label: &str,
+        tabs: Vec<View>,
+        active: Option<ViewId>,
+    ) -> Result<(Vec<ViewId>, ViewId), String> {
+        let ids: Vec<ViewId> = tabs.iter().map(|v| v.id).collect();
+        let active = match active {
+            Some(active) if ids.contains(&active) => active,
+            _ => {
+                return Err(format!(
+                    "창 {label} 의 활성 탭 {active:?} 이 탭 목록 밖이다"
+                ))
+            }
+        };
+        for mut view in tabs {
+            if self.views.contains_key(&view.id) {
+                return Err(format!("View {} 가 겹친다", view.id));
+            }
+            Self::fixup_focus(&mut view);
+            self.view_owner.insert(view.id, label.to_string());
+            self.views.insert(view.id, view);
+        }
+        Ok((ids, active))
     }
 
     // ── 조회 ───────────────────────────────────────────────────────────────
@@ -200,6 +452,7 @@ impl ViewManager {
             view_id: v.id,
             layout: v.layout.clone(),
             focused_slot_id: v.focused_slot_id,
+            foreign_slots: self.foreign_slots(v),
             slot_spatial: super::spatial::compute_spatial(&v.layout),
             slot_rects: geo.slots,
             split_rects: geo.splits,
@@ -218,6 +471,73 @@ impl ViewManager {
         tree::find_slot(&v.layout, slot_id)
             .map(|content| content.agent_id().map(str::to_string))
             .ok_or(LayoutError::SlotNotFound(slot_id))
+    }
+
+    /// 자동 배치가 이 슬롯에 내용을 놓아도 되는가 — 비었고(`SlotContent::Empty`) 모르는 내용도 쥐지 않았다.
+    /// 없는 view·slot 은 `Err`. ADR-0059 의 빈/점유 판정은 이 하나로 낸다 — `SlotContent::is_empty` 만 보면
+    /// 모르는 내용을 쥔 슬롯을 덮는다(TRD S21-storage §6-2).
+    pub fn slot_is_free(&self, view_id: ViewId, slot_id: Uuid) -> Result<bool, LayoutError> {
+        let v = self
+            .views
+            .get(&view_id)
+            .ok_or(LayoutError::ViewNotFound(view_id))?;
+        self.free_in(v, slot_id)
+            .ok_or(LayoutError::SlotNotFound(slot_id))
+    }
+
+    // 없는 slot 은 None.
+    fn free_in(&self, view: &View, slot_id: Uuid) -> Option<bool> {
+        let content = tree::find_slot(&view.layout, slot_id)?;
+        Some(content.is_empty() && self.unknown_content(view.id, slot_id).is_none())
+    }
+
+    /// 슬롯 `slot_id` 가 쥔 모르는 내용의 원문 — 없으면 `None`(모르는 내용이 아니거나 없는 view·slot). 저장은 이
+    /// 값이 있는 슬롯을 메모리 내용(`Empty`) 대신 이 원문으로 적는다.
+    pub(crate) fn unknown_content(
+        &self,
+        view_id: ViewId,
+        slot_id: Uuid,
+    ) -> Option<&Map<String, Value>> {
+        self.unknown_content.get(&view_id)?.get(&slot_id)
+    }
+
+    // 트리 전위 순 — 표 순회 순서(HashMap)를 스냅숏에 새지 않게 트리를 따라 거른다.
+    fn foreign_slots(&self, view: &View) -> Vec<Uuid> {
+        match self.unknown_content.get(&view.id) {
+            None => Vec::new(),
+            Some(slots) => tree::slot_ids(&view.layout)
+                .into_iter()
+                .filter(|s| slots.contains_key(s))
+                .collect(),
+        }
+    }
+
+    /// `spawn_into`(D-7) 의 슬롯 해소(TRD §6 G9) — 스폰·락·emit 은 command 레이어가 하고 여기는 정책 판정만
+    /// 한다. 배정 자체는 `assign_agent` 가 한다.
+    /// - `slot=None`(USER DECISION 2b): 트리를 전위 순회(좌측 우선)해 **첫 번째 빈 슬롯**(`slot_is_free`)을
+    ///   고른다. 하나도 없으면 `NoEmptySlot` — 자동 split·덮어쓰기 안 함.
+    /// - `slot=Some(s)`: 비었으면 `s` · 점유(모르는 내용 포함)면 `SlotOccupied` · 트리에 없으면 `SlotNotFound`.
+    // ADR-0059
+    pub fn resolve_spawn_slot(
+        &self,
+        view_id: ViewId,
+        slot: Option<Uuid>,
+    ) -> Result<Uuid, SpawnSlotError> {
+        let v = self
+            .views
+            .get(&view_id)
+            .ok_or(SpawnSlotError::ViewNotFound(view_id))?;
+        match slot {
+            Some(target) => match self.free_in(v, target) {
+                Some(true) => Ok(target),
+                Some(false) => Err(SpawnSlotError::SlotOccupied(target)),
+                None => Err(SpawnSlotError::SlotNotFound(target)),
+            },
+            None => tree::slot_ids(&v.layout)
+                .into_iter()
+                .find(|&s| self.free_in(v, s) == Some(true))
+                .ok_or(SpawnSlotError::NoEmptySlot),
+        }
     }
 
     // 없으면 None(고아 View — 정상 경로엔 없음).
@@ -247,6 +567,44 @@ impl ViewManager {
     }
 
     // ── 내부 헬퍼 ───────────────────────────────────────────────────────────
+
+    // 슬롯 내용 쓰기의 유일한 문 — 모르는 내용 항목을 지운다(무엇을 쓰든, `Empty` 여도). version 은 호출자가 올린다.
+    fn write_slot_content(
+        &mut self,
+        view_id: ViewId,
+        slot_id: Uuid,
+        content: SlotContent,
+    ) -> Result<(), LayoutError> {
+        let v = self.view_mut(view_id)?;
+        if !tree::set_in_tree(&mut v.layout, slot_id, content) {
+            return Err(LayoutError::SlotNotFound(slot_id));
+        }
+        self.forget_unknown(view_id, slot_id);
+        Ok(())
+    }
+
+    fn remember_unknown(&mut self, view_id: ViewId, slot_id: Uuid, raw: Map<String, Value>) {
+        self.unknown_content
+            .entry(view_id)
+            .or_default()
+            .insert(slot_id, raw);
+    }
+
+    fn forget_unknown(&mut self, view_id: ViewId, slot_id: Uuid) {
+        if let Some(slots) = self.unknown_content.get_mut(&view_id) {
+            slots.remove(&slot_id);
+            if slots.is_empty() {
+                self.unknown_content.remove(&view_id);
+            }
+        }
+    }
+
+    // 뷰를 지우는 유일한 자리. 창 탭 목록(`windows[*].tabs`)은 호출자가 맞춘다(불변식 1).
+    fn remove_view(&mut self, view: ViewId) {
+        self.views.remove(&view);
+        self.view_owner.remove(&view);
+        self.unknown_content.remove(&view);
+    }
 
     // 소유/창 배정은 호출자.
     fn make_view(&mut self, name: String) -> ViewId {
@@ -293,7 +651,7 @@ impl ViewManager {
         let id = self.make_view("View 1".to_string());
         self.view_owner.insert(id, label.to_string());
         self.windows
-            .insert(label.to_string(), WindowTabs::first_tab(id));
+            .insert(label.to_string(), WindowTabs::new_popout(id));
         self.bump_version();
         Ok(id)
     }
@@ -326,8 +684,7 @@ impl ViewManager {
         let was_active = wt.active == view;
 
         // View 1개 드롭(불변식 1 쌍 갱신). // ADR-0057
-        self.views.remove(&view);
-        self.view_owner.remove(&view);
+        self.remove_view(view);
         let wt = self.windows.get_mut(label).expect("존재 확인됨");
         wt.tabs.remove(pos);
 
@@ -371,8 +728,7 @@ impl ViewManager {
         // 이 창의 모든 탭 View 를 드롭(불변식 1 쌍 갱신 — tabs 전부 순회). // ADR-0057
         let dropped = wt.tabs.clone();
         for vid in &wt.tabs {
-            self.views.remove(vid);
-            self.view_owner.remove(vid);
+            self.remove_view(*vid);
         }
         self.bump_version();
         Ok(dropped)
@@ -545,21 +901,20 @@ impl ViewManager {
             return Err(LayoutError::SlotNotFound(slot_id));
         }
         Self::fixup_focus(v);
+        self.forget_unknown(view_id, slot_id);
         self.bump_version();
         Ok(())
     }
 
     // view 안 slot_id 슬롯에 agent_id(참조 문자열) 배정. ★데몬에 실재 검증 안 함(ADR-0035/0006).
+    // ★덮어쓰기 시맨틱★: 점유 슬롯도 무조건 교체 — 점유 방어는 `resolve_spawn_slot` 층(ADR-0059).
     pub fn assign_agent(
         &mut self,
         view_id: Uuid,
         slot_id: Uuid,
         agent_id: String,
     ) -> Result<(), LayoutError> {
-        let v = self.view_mut(view_id)?;
-        if !tree::assign_in_tree(&mut v.layout, slot_id, Some(agent_id)) {
-            return Err(LayoutError::SlotNotFound(slot_id));
-        }
+        self.write_slot_content(view_id, slot_id, SlotContent::Agent { agent_id })?;
         self.bump_version();
         Ok(())
     }
@@ -574,10 +929,22 @@ impl ViewManager {
         slot_id: Uuid,
         content: SlotContent,
     ) -> Result<(), LayoutError> {
-        let v = self.view_mut(view_id)?;
-        if !tree::set_in_tree(&mut v.layout, slot_id, content) {
-            return Err(LayoutError::SlotNotFound(slot_id));
-        }
+        self.write_slot_content(view_id, slot_id, content)?;
+        self.bump_version();
+        Ok(())
+    }
+
+    /// 슬롯 `slot_id` 를 이 판이 모르는 내용 `raw` 를 쥔 슬롯으로 세운다 — 메모리 내용은 `Empty` 로 쓰고 원문은
+    /// 곁표에 둔다. 복원(영속 DTO 의 `PersistedContent::Unknown`)이 부르는 문이다 — IPC·버스 명령은 여기 닿지
+    /// 않는다(모르는 종류는 역직렬화에서 거절된다 — TRD S21-storage §6-2). 없는 view·slot 은 `Err` · 무변경.
+    pub(crate) fn set_unknown_content(
+        &mut self,
+        view_id: ViewId,
+        slot_id: Uuid,
+        raw: Map<String, Value>,
+    ) -> Result<(), LayoutError> {
+        self.write_slot_content(view_id, slot_id, SlotContent::Empty)?;
+        self.remember_unknown(view_id, slot_id, raw);
         self.bump_version();
         Ok(())
     }
@@ -602,6 +969,8 @@ impl ViewManager {
     // 콘텐츠 일반에 적용). 반환한 SlotContent 로 호출자가 agent 구독 마이그레이션(still-ours close 가드)이
     // 필요한지(= Agent 인지)를 판별한다.
     // ★빈 슬롯(Empty)도 옮긴다 — 거절을 되살리지 말 것(사용자 결정)★: 결과는 빈 칸 하나짜리 새 탭이다.
+    // 모르는 내용을 쥔 슬롯이면 원문도 새 슬롯으로 따라간다 — 옮기기는 교체가 아니다. 소스 쪽 항목은 phase C 의
+    // `close_slot` 이 거둔다.
     // ADR-0064
     // ADR-0228
     pub fn prepare_detached_view(
@@ -611,15 +980,16 @@ impl ViewManager {
         name: String,
     ) -> Result<(ViewId, SlotContent), LayoutError> {
         let content = self.slot_content(src_view, src_slot)?;
+        let carried = self.unknown_content(src_view, src_slot).cloned();
         let id = self.make_view(name);
         let slot = {
             let v = self.views.get(&id).expect("방금 만든 View");
             tree::first_slot_id(&v.layout)
         };
-        // view_owner 미배정. 그래서 배치는 tree 직접.
-        // ADR-0064: assign_in_tree(agent 전용) 대신 set_in_tree(제네릭)로 콘텐츠 종류 전체를 옮긴다.
-        if let Some(v) = self.views.get_mut(&id) {
-            let _ = tree::set_in_tree(&mut v.layout, slot, content.clone());
+        // ADR-0064: 에이전트 전용 배정이 아니라 제네릭 쓰기로 콘텐츠 종류 전체를 옮긴다.
+        let _ = self.write_slot_content(id, slot, content.clone());
+        if let Some(raw) = carried {
+            self.remember_unknown(id, slot, raw);
         }
         self.bump_version();
         Ok((id, content))
@@ -627,8 +997,7 @@ impl ViewManager {
 
     // ★phase A 롤백★: prepare_detached_view 로 만든 임시 View 를 제거(창 삽입 전이라 tabs 갱신 불필요).
     pub fn drop_detached_view(&mut self, view: ViewId) {
-        self.views.remove(&view);
-        self.view_owner.remove(&view); // 안전(정상 경로엔 owner 없음).
+        self.remove_view(view);
         self.bump_version();
     }
 
@@ -666,8 +1035,139 @@ impl ViewManager {
         }
         self.view_owner.insert(view, label.to_string());
         self.windows
-            .insert(label.to_string(), WindowTabs::first_tab(view));
+            .insert(label.to_string(), WindowTabs::new_popout(view));
         self.bump_version();
+        Ok(())
+    }
+
+    // ── 런타임 복원 수락(TRD S21-storage §6-7 ③) ─────────────────────────────
+
+    /// 창 묶음을 `restored`(`from_persisted` 의 결과)로 갈아끼운다 — main 은 탭 · 활성 · 속성만 바꾸고(측정값 ·
+    /// 영속 id 는 남는다), 옛 팝아웃은 항목째 지우고, `restored` 의 팝아웃을 그 곁표 원문과 함께 들인다. 돌려주는
+    /// 것 = 지운 옛 팝아웃 label(정렬) — 그 OS 창은 부르는 쪽이 락 밖에서 거둔다.
+    ///
+    /// - `version` · `attrs_rev` 는 지금 값에서 하나씩 오른다 — `restored` 의 번호는 버린다. 기록기는 같은지만 보므로
+    ///   되감긴 번호가 마지막으로 본 값과 같아지면 그 사이의 변경을 놓친다.
+    /// - owner 없는 View(창 만들기 중인 `prepare_detached_view` 의 임시 View)는 그대로 둔다 — 그 일의 phase C 가
+    ///   붙이거나 거둔다.
+    /// - `Err` 면 아무것도 바뀌지 않았다: `restored` 에 main 이 없다 · 팝아웃 label 이 지금 모델의 창과 겹친다 ·
+    ///   View id 가 남는 View 와 겹친다.
+    pub(crate) fn adopt_restored(
+        &mut self,
+        restored: ViewManager,
+    ) -> Result<Vec<WindowLabel>, LayoutError> {
+        let ViewManager {
+            views,
+            view_owner,
+            mut windows,
+            version: _,
+            attrs_rev: _,
+            unknown_content,
+        } = restored;
+        let main = windows
+            .remove(MAIN_WINDOW_LABEL)
+            .ok_or_else(|| LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.to_string()))?;
+        if !self.windows.contains_key(MAIN_WINDOW_LABEL) {
+            return Err(LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.to_string()));
+        }
+        if let Some(label) = windows.keys().find(|l| self.windows.contains_key(*l)) {
+            return Err(LayoutError::WindowNotFound(label.clone()));
+        }
+        let owned: HashSet<ViewId> = self
+            .windows
+            .values()
+            .flat_map(|w| w.tabs.iter().copied())
+            .collect();
+        if let Some(&view) = views
+            .keys()
+            .find(|v| self.views.contains_key(*v) && !owned.contains(*v))
+        {
+            return Err(LayoutError::ViewNotFound(view));
+        }
+
+        for view in owned {
+            self.remove_view(view);
+        }
+        let mut removed: Vec<WindowLabel> = self
+            .windows
+            .keys()
+            .filter(|l| l.as_str() != MAIN_WINDOW_LABEL)
+            .cloned()
+            .collect();
+        removed.sort();
+        for label in &removed {
+            self.windows.remove(label);
+        }
+        let live = self
+            .windows
+            .get_mut(MAIN_WINDOW_LABEL)
+            .expect("위에서 확인했다");
+        live.tabs = main.tabs;
+        live.active = main.active;
+        live.attrs = main.attrs;
+        live.placement_memo = PlacementMemo::default();
+        self.views.extend(views);
+        self.view_owner.extend(view_owner);
+        self.unknown_content.extend(unknown_content);
+        self.windows.extend(windows);
+        self.bump_version();
+        self.attrs_rev += 1;
+        Ok(removed)
+    }
+
+    // ── 창 속성(TRD S21-storage §6-3) ───────────────────────────────────────
+    //
+    // ★version 이 아니라 attrs_rev 를 올린다★ — 바뀌었을 때만. 값은 부르는 쪽이 락 밖에서 읽어 넘긴다(OS 호출 0).
+    // 트리 창(`agent-tree`)은 이 모델 밖이라 `WindowNotFound` — 그 창은 `state::tree_attrs` 로 간다.
+
+    pub fn window_attrs(&self, label: &str) -> Result<WindowAttrs, LayoutError> {
+        self.windows
+            .get(label)
+            .map(|w| w.attrs)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))
+    }
+
+    pub fn attrs_rev(&self) -> u64 {
+        self.attrs_rev
+    }
+
+    /// `None` = 창별 테마를 지운다(전역 테마를 따른다).
+    pub fn set_window_theme(
+        &mut self,
+        label: &str,
+        theme: Option<UiTheme>,
+    ) -> Result<(), LayoutError> {
+        self.update_attrs(label, |attrs| attrs.set_theme(theme))
+    }
+
+    /// `Moved` · `Resized` 때 읽은 게터 한 벌을 적는다 — 규칙은 [`WindowAttrs::observe`].
+    pub fn observe_window_placement(
+        &mut self,
+        label: &str,
+        seen: WindowPlacement,
+    ) -> Result<(), LayoutError> {
+        let window = self
+            .windows
+            .get_mut(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        if window.attrs.observe(seen, &mut window.placement_memo) {
+            self.attrs_rev += 1;
+        }
+        Ok(())
+    }
+
+    fn update_attrs(
+        &mut self,
+        label: &str,
+        change: impl FnOnce(&mut WindowAttrs) -> bool,
+    ) -> Result<(), LayoutError> {
+        let window = self
+            .windows
+            .get_mut(label)
+            .ok_or_else(|| LayoutError::WindowNotFound(label.to_string()))?;
+        if change(&mut window.attrs) {
+            self.attrs_rev += 1;
+        }
         Ok(())
     }
 
@@ -782,28 +1282,8 @@ pub enum SpawnSlotError {
     // USER DECISION 2b — 자동 split/덮어쓰기 안 함. // ADR-0059
     #[error("이 탭에 빈 슬롯 없음(slot 미지정 — split_slot 으로 빈 슬롯을 만들거나 다른 탭 사용)")]
     NoEmptySlot,
-}
-
-// ★spawn_into 슬롯 해소(TRD §6 G9)★.
-// - `slot=None`(USER DECISION 2b): 트리를 전위 순회(좌측 우선)해 **첫 번째 빈 슬롯**을 타깃한다. 빈 슬롯이
-//   하나도 없으면 `NoEmptySlot`(자동 split·덮어쓰기 안 함). ★2b 이전(leftmost-only)과 다름★ — split 된
-//   탭에서 좌측이 점유돼도 다른 빈 슬롯이 있으면 거기로 간다.
-//
-// ★왜 순수 함수로 분리했나★: 스폰(데몬 async)·락·emit 은 command 레이어가 다루고, 여기 "정책 판정"만 떼어
-//   Tauri 무링크 throwaway-mount 로 회귀 단언한다(ADR-0012 격리). 배정 자체는 assign_agent 가 한다.
-pub fn resolve_spawn_slot(view: &View, slot: Option<Uuid>) -> Result<Uuid, SpawnSlotError> {
-    match slot {
-        Some(target) => match tree::find_slot(&view.layout, target) {
-            Some(SlotContent::Empty) => Ok(target),
-            // ADR-0060: Agent 외 콘텐츠(AgentList/PresetPalette/Usage)도 슬롯을 점유 중 — 스폰 덮어쓰기 금지.
-            Some(SlotContent::Agent { .. })
-            | Some(SlotContent::AgentList)
-            | Some(SlotContent::PresetPalette)
-            | Some(SlotContent::Usage { .. }) => Err(SpawnSlotError::SlotOccupied(target)),
-            None => Err(SpawnSlotError::SlotNotFound(target)),
-        },
-        None => tree::first_empty_slot_id(&view.layout).ok_or(SpawnSlotError::NoEmptySlot),
-    }
+    #[error("view {0} 없음")]
+    ViewNotFound(Uuid),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -871,6 +1351,36 @@ mod tests {
                 .unwrap_or(false),
             "불변식4: main 최소 1탭"
         );
+        for (vid, slots) in &mgr.unknown_content {
+            let v = mgr
+                .views
+                .get(vid)
+                .unwrap_or_else(|| panic!("곁표가 없는 View {vid} 를 가리킴"));
+            assert!(!slots.is_empty(), "곁표: View {vid} 의 빈 칸 남음");
+            for sid in slots.keys() {
+                assert_eq!(
+                    tree::find_slot(&v.layout, *sid),
+                    Some(&SlotContent::Empty),
+                    "곁표: View {vid} 의 슬롯 {sid} 가 없거나 메모리 내용이 Empty 가 아님"
+                );
+            }
+        }
+    }
+
+    fn raw(kind: &str) -> Map<String, Value> {
+        serde_json::json!({ "type": kind, "from": "a newer build" })
+            .as_object()
+            .unwrap()
+            .clone()
+    }
+
+    // main 활성 탭의 root 를 모르는 내용 슬롯으로 세운다.
+    fn foreign_root(mgr: &mut ViewManager) -> (ViewId, Uuid) {
+        let v = main_active(mgr);
+        let s = first_slot_of(mgr, v);
+        mgr.set_unknown_content(v, s, raw("from_the_future"))
+            .unwrap();
+        (v, s)
     }
 
     #[test]
@@ -1638,9 +2148,8 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, None).unwrap(),
+            mgr.resolve_spawn_slot(v, None).unwrap(),
             root,
             "slot=None → 빈 root 슬롯"
         );
@@ -1654,9 +2163,8 @@ mod tests {
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
         mgr.assign_agent(v, root, "existing".into()).unwrap();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, None),
+            mgr.resolve_spawn_slot(v, None),
             Err(SpawnSlotError::NoEmptySlot)
         );
     }
@@ -1669,9 +2177,8 @@ mod tests {
         let root = first_slot_of(&mgr, v);
         let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
         mgr.assign_agent(v, root, "occupied".into()).unwrap();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, None).unwrap(),
+            mgr.resolve_spawn_slot(v, None).unwrap(),
             right,
             "slot=None → 점유 좌측 건너뛰고 첫 빈 슬롯(우측)"
         );
@@ -1686,9 +2193,8 @@ mod tests {
         let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
         mgr.assign_agent(v, root, "a".into()).unwrap();
         mgr.assign_agent(v, right, "b".into()).unwrap();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, None),
+            mgr.resolve_spawn_slot(v, None),
             Err(SpawnSlotError::NoEmptySlot)
         );
     }
@@ -1699,18 +2205,14 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
-        let view = mgr.views.get(&v).unwrap();
-        assert_eq!(resolve_spawn_slot(view, None).unwrap(), root);
+        assert_eq!(mgr.resolve_spawn_slot(v, None).unwrap(), root);
     }
 
     #[test]
     fn resolve_then_assign_holds_invariants() {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        let target = {
-            let view = mgr.views.get(&v).unwrap();
-            resolve_spawn_slot(view, None).unwrap()
-        };
+        let target = mgr.resolve_spawn_slot(v, None).unwrap();
         mgr.assign_agent(v, target, "spawned-agent".into()).unwrap();
         assert_eq!(
             mgr.slot_agent(v, target).unwrap().as_deref(),
@@ -1742,9 +2244,8 @@ mod tests {
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
         let new_slot = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, Some(new_slot)).unwrap(),
+            mgr.resolve_spawn_slot(v, Some(new_slot)).unwrap(),
             new_slot,
             "slot=Some+빈 → 그 슬롯"
         );
@@ -1757,9 +2258,8 @@ mod tests {
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let root = first_slot_of(&mgr, v);
         mgr.assign_agent(v, root, "existing".into()).unwrap();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, Some(root)),
+            mgr.resolve_spawn_slot(v, Some(root)),
             Err(SpawnSlotError::SlotOccupied(root))
         );
     }
@@ -1778,13 +2278,12 @@ mod tests {
             },
         )
         .unwrap();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, Some(root)),
+            mgr.resolve_spawn_slot(v, Some(root)),
             Err(SpawnSlotError::SlotOccupied(root))
         );
         assert_eq!(
-            resolve_spawn_slot(view, None),
+            mgr.resolve_spawn_slot(v, None),
             Err(SpawnSlotError::NoEmptySlot)
         );
     }
@@ -1794,11 +2293,833 @@ mod tests {
         let mut mgr = ViewManager::new();
         let v = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
         let bogus = Uuid::new_v4();
-        let view = mgr.views.get(&v).unwrap();
         assert_eq!(
-            resolve_spawn_slot(view, Some(bogus)),
+            mgr.resolve_spawn_slot(v, Some(bogus)),
             Err(SpawnSlotError::SlotNotFound(bogus))
         );
+    }
+
+    #[test]
+    fn resolve_on_a_missing_view_is_view_not_found() {
+        let mgr = ViewManager::new();
+        let ghost = Uuid::new_v4();
+        assert_eq!(
+            mgr.resolve_spawn_slot(ghost, None),
+            Err(SpawnSlotError::ViewNotFound(ghost))
+        );
+    }
+
+    // ── 모르는 슬롯 내용 곁표 (TRD S21-storage §6-2 · §12 R6) ────────────────────
+
+    #[test]
+    fn an_unknown_content_slot_reads_empty_but_is_not_free() {
+        let mut mgr = ViewManager::new();
+        let before = mgr.version;
+        let (v, s) = foreign_root(&mut mgr);
+        assert!(mgr.version > before, "곁표에 세우는 것도 변경이다");
+        assert_eq!(mgr.slot_content(v, s).unwrap(), SlotContent::Empty);
+        assert_eq!(mgr.slot_is_free(v, s), Ok(false));
+        assert_eq!(mgr.unknown_content(v, s), Some(&raw("from_the_future")));
+
+        let right = mgr.split_slot(v, s, SplitDir::LeftRight).unwrap();
+        assert_eq!(mgr.slot_is_free(v, right), Ok(true));
+        let ghost = Uuid::new_v4();
+        assert_eq!(
+            mgr.slot_is_free(v, ghost),
+            Err(LayoutError::SlotNotFound(ghost))
+        );
+        assert_eq!(
+            mgr.slot_is_free(ghost, s),
+            Err(LayoutError::ViewNotFound(ghost))
+        );
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn set_unknown_content_writes_empty_over_an_occupied_slot() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let s = first_slot_of(&mgr, v);
+        mgr.assign_agent(v, s, "a".into()).unwrap();
+        mgr.set_unknown_content(v, s, raw("x")).unwrap();
+        assert_eq!(mgr.slot_content(v, s).unwrap(), SlotContent::Empty);
+        assert_eq!(mgr.slot_is_free(v, s), Ok(false));
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn set_unknown_content_on_a_missing_view_or_slot_changes_nothing() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let ghost = Uuid::new_v4();
+        let before = mgr.version;
+        assert_eq!(
+            mgr.set_unknown_content(v, ghost, raw("x")),
+            Err(LayoutError::SlotNotFound(ghost))
+        );
+        assert_eq!(
+            mgr.set_unknown_content(ghost, ghost, raw("x")),
+            Err(LayoutError::ViewNotFound(ghost))
+        );
+        assert_eq!(mgr.version, before);
+        assert!(mgr.unknown_content.is_empty());
+    }
+
+    #[test]
+    fn auto_spawn_skips_an_unknown_content_slot_for_another_empty_one() {
+        let mut mgr = ViewManager::new();
+        let (v, root) = foreign_root(&mut mgr);
+        let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
+        assert_eq!(
+            mgr.unknown_content(v, root),
+            Some(&raw("from_the_future")),
+            "나누기는 원래 슬롯을 a 쪽에 그대로 둔다 — 곁표 항목도 남는다"
+        );
+        assert_eq!(mgr.resolve_spawn_slot(v, None), Ok(right));
+        assert_eq!(
+            mgr.resolve_spawn_slot(v, Some(root)),
+            Err(SpawnSlotError::SlotOccupied(root))
+        );
+        assert_eq!(mgr.resolve_spawn_slot(v, Some(right)), Ok(right));
+    }
+
+    #[test]
+    fn auto_spawn_with_no_free_slot_besides_unknown_content_is_no_empty_slot() {
+        let mut mgr = ViewManager::new();
+        let (v, root) = foreign_root(&mut mgr);
+        assert_eq!(
+            mgr.resolve_spawn_slot(v, None),
+            Err(SpawnSlotError::NoEmptySlot)
+        );
+        let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
+        mgr.assign_agent(v, right, "a".into()).unwrap();
+        assert_eq!(
+            mgr.resolve_spawn_slot(v, None),
+            Err(SpawnSlotError::NoEmptySlot)
+        );
+    }
+
+    #[test]
+    fn every_content_write_clears_the_unknown_entry() {
+        type Write = fn(&mut ViewManager, ViewId, Uuid);
+        let writes: [(&str, Write); 6] = [
+            ("assign_agent", |m, v, s| {
+                m.assign_agent(v, s, "a".into()).unwrap()
+            }),
+            ("set_slot_content(empty)", |m, v, s| {
+                m.set_slot_content(v, s, SlotContent::Empty).unwrap()
+            }),
+            ("set_slot_content(agent)", |m, v, s| {
+                m.set_slot_content(
+                    v,
+                    s,
+                    SlotContent::Agent {
+                        agent_id: "a".into(),
+                    },
+                )
+                .unwrap()
+            }),
+            ("set_slot_content(agent_list)", |m, v, s| {
+                m.set_slot_content(v, s, SlotContent::AgentList).unwrap()
+            }),
+            ("set_slot_content(preset_palette)", |m, v, s| {
+                m.set_slot_content(v, s, SlotContent::PresetPalette)
+                    .unwrap()
+            }),
+            ("set_slot_content(usage)", |m, v, s| {
+                m.set_slot_content(
+                    v,
+                    s,
+                    SlotContent::Usage {
+                        show_claude: true,
+                        show_codex: true,
+                    },
+                )
+                .unwrap()
+            }),
+        ];
+        for (name, write) in writes {
+            let mut mgr = ViewManager::new();
+            let (v, s) = foreign_root(&mut mgr);
+            write(&mut mgr, v, s);
+            assert_eq!(mgr.unknown_content(v, s), None, "{name}");
+            assert!(mgr.snapshot(v).unwrap().foreign_slots.is_empty(), "{name}");
+            assert_invariants(&mgr);
+        }
+
+        let mut mgr = ViewManager::new();
+        let (v, s) = foreign_root(&mut mgr);
+        mgr.set_slot_content(v, s, SlotContent::Empty).unwrap();
+        assert_eq!(
+            mgr.slot_is_free(v, s),
+            Ok(true),
+            "빈 내용을 명시적으로 쓰면 원문을 버리고 빈 슬롯이 된다"
+        );
+    }
+
+    #[test]
+    fn closing_the_slot_clears_the_unknown_entry() {
+        // 형제가 있는 슬롯 — 형제가 승격된다.
+        let mut mgr = ViewManager::new();
+        let (v, root) = foreign_root(&mut mgr);
+        let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
+        mgr.close_slot(v, root).unwrap();
+        assert!(mgr.unknown_content.is_empty());
+        assert!(mgr.snapshot(v).unwrap().foreign_slots.is_empty());
+        assert_eq!(mgr.resolve_spawn_slot(v, None), Ok(right));
+        assert_invariants(&mgr);
+
+        // 하나뿐인 슬롯 — 새 빈 슬롯으로 리셋된다.
+        let mut mgr = ViewManager::new();
+        let (v, root) = foreign_root(&mut mgr);
+        mgr.close_slot(v, root).unwrap();
+        assert!(mgr.unknown_content.is_empty());
+        let fresh = first_slot_of(&mgr, v);
+        assert_eq!(mgr.slot_is_free(v, fresh), Ok(true));
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn closing_a_tab_or_window_drops_its_unknown_entries() {
+        let mut mgr = ViewManager::new();
+        let first = mgr.create_window("slot-popup-1").unwrap();
+        let fs = first_slot_of(&mgr, first);
+        mgr.set_unknown_content(first, fs, raw("x")).unwrap();
+        let second = mgr.create_tab("slot-popup-1", None).unwrap();
+        let ss = first_slot_of(&mgr, second);
+        mgr.set_unknown_content(second, ss, raw("y")).unwrap();
+
+        mgr.close_tab("slot-popup-1", second).unwrap();
+        assert!(!mgr.unknown_content.contains_key(&second));
+        assert_eq!(mgr.unknown_content(first, fs), Some(&raw("x")));
+        mgr.close_window("slot-popup-1").unwrap();
+        assert!(mgr.unknown_content.is_empty());
+
+        // main 의 마지막 탭 — 빈 탭이 강제로 서고 닫힌 탭의 항목은 사라진다.
+        let (v, _) = foreign_root(&mut mgr);
+        mgr.close_tab(MAIN_WINDOW_LABEL, v).unwrap();
+        assert!(mgr.unknown_content.is_empty());
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn snapshot_lists_exactly_the_unknown_content_slots_in_tree_order() {
+        let mut mgr = ViewManager::new();
+        let v = main_active(&mgr);
+        let s1 = first_slot_of(&mgr, v);
+        let s2 = mgr.split_slot(v, s1, SplitDir::LeftRight).unwrap();
+        let s3 = mgr.split_slot(v, s2, SplitDir::TopBottom).unwrap();
+        let s4 = mgr.split_slot(v, s3, SplitDir::LeftRight).unwrap();
+        assert_eq!(tree::slot_ids(&mgr.views[&v].layout), vec![s1, s2, s3, s4]);
+        // 트리 순과 거꾸로 세운다 — 세운 순서가 아니라 트리 순으로 실려야 한다.
+        mgr.set_unknown_content(v, s4, raw("b")).unwrap();
+        mgr.set_unknown_content(v, s1, raw("a")).unwrap();
+        mgr.assign_agent(v, s2, "agent".into()).unwrap();
+
+        assert_eq!(mgr.snapshot(v).unwrap().foreign_slots, vec![s1, s4]);
+        let other = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        assert!(
+            mgr.snapshot(other).unwrap().foreign_slots.is_empty(),
+            "다른 탭에 새지 않는다"
+        );
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn snapshot_after_unrelated_changes_still_lists_the_unknown_slot() {
+        let mut mgr = ViewManager::new();
+        let (v, root) = foreign_root(&mut mgr);
+        let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
+        mgr.assign_agent(v, right, "a".into()).unwrap();
+        mgr.set_focused_slot(v, right).unwrap();
+        mgr.rename_tab(v, "renamed".into()).unwrap();
+        let split = tree::list_splits(&mgr.views[&v].layout)[0].id;
+        mgr.set_split_ratio(v, split, 0.3).unwrap();
+        let other = mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
+        mgr.switch_tab(MAIN_WINDOW_LABEL, v).unwrap();
+        mgr.close_tab(MAIN_WINDOW_LABEL, other).unwrap();
+
+        let snap = mgr.snapshot(v).unwrap();
+        assert_eq!(snap.foreign_slots, vec![root]);
+        assert_eq!(snap.version, mgr.version);
+        assert_eq!(
+            mgr.unknown_content(v, root),
+            Some(&raw("from_the_future")),
+            "원문 그대로"
+        );
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn moving_an_unknown_content_slot_carries_its_raw_content() {
+        let mut mgr = ViewManager::new();
+        let (src, slot) = foreign_root(&mut mgr);
+        let (tmp, content) = mgr
+            .prepare_detached_view(src, slot, "Popup".into())
+            .unwrap();
+        assert_eq!(content, SlotContent::Empty);
+        let tslot = first_slot_of(&mgr, tmp);
+        assert_eq!(
+            mgr.unknown_content(tmp, tslot),
+            Some(&raw("from_the_future"))
+        );
+
+        // phase C — 새 창에 붙이고 소스 슬롯을 닫는다.
+        mgr.attach_view_as_new_window("slot-popup-1", tmp).unwrap();
+        mgr.close_slot(src, slot).unwrap();
+        assert_eq!(mgr.unknown_content(src, slot), None);
+        assert_eq!(mgr.snapshot(tmp).unwrap().foreign_slots, vec![tslot]);
+        assert_eq!(mgr.slot_is_free(tmp, tslot), Ok(false));
+        assert_invariants(&mgr);
+    }
+
+    #[test]
+    fn rolling_back_a_move_drops_only_the_carried_entry() {
+        let mut mgr = ViewManager::new();
+        let (src, slot) = foreign_root(&mut mgr);
+        let (tmp, _content) = mgr
+            .prepare_detached_view(src, slot, "Popup".into())
+            .unwrap();
+        mgr.drop_detached_view(tmp);
+        assert!(!mgr.unknown_content.contains_key(&tmp));
+        assert_eq!(
+            mgr.unknown_content(src, slot),
+            Some(&raw("from_the_future")),
+            "소스는 그대로"
+        );
+        assert_invariants(&mgr);
+    }
+
+    // ── 창 신원 · 창 속성 (TRD S21-storage §6-3) ─────────────────────────────
+
+    fn bounds(x: f64) -> WindowBounds {
+        WindowBounds::new(x, 60.0, 1280.0, 800.0).unwrap()
+    }
+
+    fn normal_at(x: f64) -> WindowPlacement {
+        WindowPlacement {
+            minimized: false,
+            maximized: false,
+            bounds: Some(bounds(x)),
+        }
+    }
+
+    #[test]
+    fn main_is_main_and_each_popout_gets_its_own_uuid() {
+        let mut mgr = ViewManager::new();
+        assert_eq!(window(&mgr, MAIN_WINDOW_LABEL).window_id, "main");
+        mgr.create_window("slot-popup-1").unwrap();
+        let src = main_active(&mgr);
+        let (tmp, _) = mgr
+            .prepare_detached_view(src, first_slot_of(&mgr, src), "P".into())
+            .unwrap();
+        mgr.attach_view_as_new_window("slot-popup-2", tmp).unwrap();
+
+        let first = window(&mgr, "slot-popup-1").window_id;
+        let second = window(&mgr, "slot-popup-2").window_id;
+        for id in [&first, &second] {
+            assert_eq!(
+                Uuid::parse_str(id).unwrap().to_string(),
+                *id,
+                "하이픈 소문자 UUID"
+            );
+        }
+        assert_ne!(first, second);
+
+        mgr.create_tab("slot-popup-1", None).unwrap();
+        assert_eq!(
+            window(&mgr, "slot-popup-1").window_id,
+            first,
+            "탭을 더해도 그대로"
+        );
+    }
+
+    #[test]
+    fn window_bounds_accept_only_finite_values_and_a_positive_size() {
+        assert!(WindowBounds::new(-1920.0, -8.5, 0.5, 1e9).is_some());
+        for (w, h) in [(0.0, 1.0), (1.0, 0.0), (-1.0, 1.0), (1.0, -0.5)] {
+            assert_eq!(WindowBounds::new(0.0, 0.0, w, h), None, "{w}x{h}");
+        }
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(WindowBounds::new(bad, 0.0, 1.0, 1.0), None);
+            assert_eq!(WindowBounds::new(0.0, bad, 1.0, 1.0), None);
+            assert_eq!(WindowBounds::new(0.0, 0.0, bad, 1.0), None);
+            assert_eq!(WindowBounds::new(0.0, 0.0, 1.0, bad), None);
+        }
+        let b = bounds(-1920.0);
+        assert_eq!((b.x(), b.y(), b.w(), b.h()), (-1920.0, 60.0, 1280.0, 800.0));
+    }
+
+    #[test]
+    fn attribute_changes_bump_attrs_rev_and_not_version() {
+        let mut mgr = ViewManager::new();
+        let version = mgr.version;
+        assert_eq!(mgr.attrs_rev(), 0);
+
+        mgr.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
+            .unwrap();
+        assert_eq!(mgr.attrs_rev(), 1);
+        mgr.observe_window_placement(MAIN_WINDOW_LABEL, normal_at(80.0))
+            .unwrap();
+        assert_eq!(mgr.attrs_rev(), 2);
+        assert_eq!(
+            mgr.version, version,
+            "창 속성은 레이아웃 번호를 올리지 않는다"
+        );
+        assert_eq!(
+            mgr.window_attrs(MAIN_WINDOW_LABEL),
+            Ok(WindowAttrs {
+                theme: Some(UiTheme::Light),
+                bounds: Some(bounds(80.0)),
+                maximized: false,
+            })
+        );
+
+        // 같은 값 = 변경 없음 — 번호도 그대로.
+        mgr.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
+            .unwrap();
+        mgr.observe_window_placement(MAIN_WINDOW_LABEL, normal_at(80.0))
+            .unwrap();
+        assert_eq!(mgr.attrs_rev(), 2);
+
+        mgr.set_window_theme(MAIN_WINDOW_LABEL, None).unwrap();
+        assert_eq!(mgr.attrs_rev(), 3);
+        assert_eq!(mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap().theme, None);
+        assert_eq!(mgr.version, version);
+    }
+
+    #[test]
+    fn attribute_setters_on_an_unknown_window_change_nothing() {
+        let mut mgr = ViewManager::new();
+        for label in ["agent-tree", "slot-popup-9"] {
+            assert_eq!(
+                mgr.set_window_theme(label, Some(UiTheme::Dark)),
+                Err(LayoutError::WindowNotFound(label.into()))
+            );
+            assert_eq!(
+                mgr.observe_window_placement(label, normal_at(0.0)),
+                Err(LayoutError::WindowNotFound(label.into()))
+            );
+            assert_eq!(
+                mgr.window_attrs(label),
+                Err(LayoutError::WindowNotFound(label.into()))
+            );
+        }
+        assert_eq!((mgr.attrs_rev(), mgr.version), (0, 0));
+    }
+
+    #[test]
+    fn placement_records_bounds_only_in_the_normal_state() {
+        let mut mgr = ViewManager::new();
+        let attrs = |m: &ViewManager| m.window_attrs(MAIN_WINDOW_LABEL).unwrap();
+        mgr.observe_window_placement(MAIN_WINDOW_LABEL, normal_at(80.0))
+            .unwrap();
+
+        // 최대화 — 표식만, 자리는 최대화 전 보통 자리 그대로.
+        mgr.observe_window_placement(
+            MAIN_WINDOW_LABEL,
+            WindowPlacement {
+                minimized: false,
+                maximized: true,
+                bounds: Some(bounds(-8.0)),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (attrs(&mgr).bounds, attrs(&mgr).maximized),
+            (Some(bounds(80.0)), true)
+        );
+
+        // 최소화 — 아무것도 바꾸지 않는다(최대화에서 최소화해도 다음 복원은 최대화).
+        let rev = mgr.attrs_rev();
+        mgr.observe_window_placement(
+            MAIN_WINDOW_LABEL,
+            WindowPlacement {
+                minimized: true,
+                maximized: false,
+                bounds: Some(bounds(-32000.0)),
+            },
+        )
+        .unwrap();
+        assert_eq!(mgr.attrs_rev(), rev);
+        assert_eq!(
+            (attrs(&mgr).bounds, attrs(&mgr).maximized),
+            (Some(bounds(80.0)), true)
+        );
+
+        // 보통으로 돌아옴 — 표식을 내리고 새 자리를 적는다.
+        mgr.observe_window_placement(MAIN_WINDOW_LABEL, normal_at(300.0))
+            .unwrap();
+        assert_eq!(
+            (attrs(&mgr).bounds, attrs(&mgr).maximized),
+            (Some(bounds(300.0)), false)
+        );
+
+        // 보통인데 자리를 못 읽음 — 앞 자리를 둔다.
+        mgr.observe_window_placement(
+            MAIN_WINDOW_LABEL,
+            WindowPlacement {
+                minimized: false,
+                maximized: false,
+                bounds: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(attrs(&mgr).bounds, Some(bounds(300.0)));
+    }
+
+    fn reading(maximized: bool, x: f64) -> WindowPlacement {
+        WindowPlacement {
+            minimized: false,
+            maximized,
+            bounds: Some(bounds(x)),
+        }
+    }
+
+    #[test]
+    fn a_user_maximize_reported_first_as_a_normal_move_keeps_the_normal_rect() {
+        let mut mgr = ViewManager::new();
+        let state = |m: &ViewManager| {
+            let attrs = m.window_attrs(MAIN_WINDOW_LABEL).unwrap();
+            (attrs.bounds, attrs.maximized)
+        };
+        // 보통 A(80) → 최대화: `Moved` 가 최대화된 사각형(-8)을 표식 없이 → `Resized` 가 같은 사각형을 표식과 함께.
+        for seen in [
+            reading(false, 80.0),
+            reading(false, -8.0),
+            reading(true, -8.0),
+        ] {
+            mgr.observe_window_placement(MAIN_WINDOW_LABEL, seen)
+                .unwrap();
+        }
+        assert_eq!(state(&mgr), (Some(bounds(80.0)), true));
+        // 한 번만 되돌린다.
+        mgr.observe_window_placement(MAIN_WINDOW_LABEL, reading(true, -8.0))
+            .unwrap();
+        assert_eq!(state(&mgr), (Some(bounds(80.0)), true));
+
+        // 최대화 풀기: `Moved` 는 아직 표식이 선 채 → `Resized` 가 표식 없이 A 로.
+        for seen in [reading(true, 80.0), reading(false, 80.0)] {
+            mgr.observe_window_placement(MAIN_WINDOW_LABEL, seen)
+                .unwrap();
+        }
+        assert_eq!(state(&mgr), (Some(bounds(80.0)), false));
+    }
+
+    #[test]
+    fn a_maximize_that_sets_the_flag_first_keeps_the_last_normal_reading() {
+        let mut mgr = ViewManager::new();
+        // 빌더가 만든 자리(20) → 복원이 입힌 자리(80) → tao `maximize`(표식이 먼저 서 잘못 적힌 읽기가 없다).
+        for seen in [
+            reading(false, 20.0),
+            reading(false, 80.0),
+            reading(true, -8.0),
+            reading(true, -8.0),
+        ] {
+            mgr.observe_window_placement(MAIN_WINDOW_LABEL, seen)
+                .unwrap();
+        }
+        let attrs = mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap();
+        assert_eq!((attrs.bounds, attrs.maximized), (Some(bounds(80.0)), true));
+    }
+
+    #[test]
+    fn a_window_whose_first_reading_is_the_maximized_rect_has_no_normal_rect() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        for seen in [reading(false, -8.0), reading(true, -8.0)] {
+            mgr.observe_window_placement("slot-popup-1", seen).unwrap();
+        }
+        let attrs = mgr.window_attrs("slot-popup-1").unwrap();
+        assert_eq!((attrs.bounds, attrs.maximized), (None, true));
+    }
+
+    #[test]
+    fn attributes_are_per_window_and_die_with_the_window() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        mgr.set_window_theme("slot-popup-1", Some(UiTheme::EInk))
+            .unwrap();
+        assert_eq!(mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap().theme, None);
+        mgr.close_window("slot-popup-1").unwrap();
+        mgr.create_window("slot-popup-1").unwrap();
+        assert_eq!(
+            mgr.window_attrs("slot-popup-1"),
+            Ok(WindowAttrs::default()),
+            "같은 label 의 새 창은 옛 창의 속성을 받지 않는다(ADR-0167)"
+        );
+    }
+
+    // ── from_restored ───────────────────────────────────────────────────────
+
+    fn view_named(name: &str) -> View {
+        let layout = LayoutNode::new_empty_slot();
+        View {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            focused_slot_id: Some(tree::first_slot_id(&layout)),
+            layout,
+        }
+    }
+
+    fn restored(tabs: Vec<View>, active: Option<ViewId>) -> RestoredWindow {
+        RestoredWindow {
+            attrs: WindowAttrs {
+                theme: Some(UiTheme::Dark),
+                bounds: Some(bounds(1.0)),
+                maximized: true,
+            },
+            tabs,
+            active,
+        }
+    }
+
+    #[test]
+    fn from_restored_rebuilds_ownership_and_keeps_order_attrs_and_ids() {
+        let (a, b, p) = (view_named("a"), view_named("b"), view_named("p"));
+        let popout_id = Uuid::new_v4().to_string();
+        let mgr = ViewManager::from_restored(
+            restored(vec![a.clone(), b.clone()], Some(b.id)),
+            vec![(
+                "slot-popup-1".into(),
+                popout_id.clone(),
+                restored(vec![p.clone()], Some(p.id)),
+            )],
+        )
+        .unwrap();
+        assert_invariants(&mgr);
+        let main = window(&mgr, MAIN_WINDOW_LABEL);
+        assert_eq!((main.tabs, main.active), (vec![a.id, b.id], b.id));
+        assert_eq!(main.window_id, "main");
+        assert_eq!(main.attrs, restored(vec![], None).attrs);
+        assert_eq!((main.canvas, main.metrics), (None, None));
+        let popout = window(&mgr, "slot-popup-1");
+        assert_eq!((popout.tabs, popout.window_id), (vec![p.id], popout_id));
+        assert_eq!(mgr.views[&a.id], a);
+        assert_eq!((mgr.version, mgr.attrs_rev()), (0, 0));
+    }
+
+    #[test]
+    fn from_restored_gives_an_empty_main_one_blank_tab_and_fixes_focus() {
+        let mgr = ViewManager::from_restored(restored(vec![], None), vec![]).unwrap();
+        assert_invariants(&mgr);
+        let main = window(&mgr, MAIN_WINDOW_LABEL);
+        assert_eq!(main.tabs.len(), 1);
+        assert_eq!(mgr.views[&main.active].name, "View 1");
+        assert_eq!(main.attrs, restored(vec![], None).attrs, "속성은 살린다");
+
+        let mut lost = view_named("lost");
+        lost.focused_slot_id = Some(Uuid::new_v4());
+        let mut none = view_named("none");
+        none.focused_slot_id = None;
+        let mgr = ViewManager::from_restored(
+            restored(vec![lost.clone(), none.clone()], Some(lost.id)),
+            vec![],
+        )
+        .unwrap();
+        for v in [&lost, &none] {
+            assert_eq!(
+                mgr.views[&v.id].focused_slot_id,
+                Some(tree::first_slot_id(&v.layout))
+            );
+        }
+    }
+
+    #[test]
+    fn from_restored_refuses_what_it_cannot_make_consistent() {
+        let a = view_named("a");
+        let p = view_named("p");
+        let popout = |tabs: Vec<View>, active| {
+            vec![(
+                "slot-popup-1".to_string(),
+                Uuid::new_v4().to_string(),
+                restored(tabs, active),
+            )]
+        };
+        let main = || restored(vec![a.clone()], Some(a.id));
+        let cases = [
+            ("탭 없는 팝아웃", main(), popout(vec![], None)),
+            ("활성 없음", restored(vec![a.clone()], None), vec![]),
+            ("탭 밖 활성", restored(vec![a.clone()], Some(p.id)), vec![]),
+            (
+                "팝아웃 탭 밖 활성",
+                main(),
+                popout(vec![p.clone()], Some(a.id)),
+            ),
+            ("겹친 View", main(), popout(vec![a.clone()], Some(a.id))),
+            (
+                "한 창 안 겹친 View",
+                restored(vec![a.clone(), a.clone()], Some(a.id)),
+                vec![],
+            ),
+            (
+                "main label 의 팝아웃",
+                main(),
+                vec![(
+                    MAIN_WINDOW_LABEL.to_string(),
+                    Uuid::new_v4().to_string(),
+                    restored(vec![p.clone()], Some(p.id)),
+                )],
+            ),
+            (
+                "겹친 팝아웃 label",
+                main(),
+                vec![
+                    (
+                        "x".to_string(),
+                        "1".to_string(),
+                        restored(vec![p.clone()], Some(p.id)),
+                    ),
+                    {
+                        let q = view_named("q");
+                        let q_id = q.id;
+                        (
+                            "x".to_string(),
+                            "2".to_string(),
+                            restored(vec![q], Some(q_id)),
+                        )
+                    },
+                ],
+            ),
+        ];
+        for (name, main, popouts) in cases {
+            assert!(ViewManager::from_restored(main, popouts).is_err(), "{name}");
+        }
+    }
+
+    // ── adopt_restored (TRD S21-storage §6-7 ③) ─────────────────────────────
+
+    fn fingerprint(mgr: &ViewManager) -> (u64, u64, Vec<WindowLabel>, Vec<ViewId>) {
+        let mut labels = mgr.list_windows();
+        labels.sort();
+        let mut views: Vec<ViewId> = mgr.views.keys().copied().collect();
+        views.sort();
+        (mgr.version, mgr.attrs_rev(), labels, views)
+    }
+
+    fn restored_with_popout(label: &str) -> (ViewManager, View, View, View) {
+        let (a, b, p) = (view_named("a"), view_named("b"), view_named("p"));
+        let mgr = ViewManager::from_restored(
+            restored(vec![a.clone(), b.clone()], Some(b.id)),
+            vec![(
+                label.into(),
+                "4b7f6a7e-0d5e-4f5a-9b0e-6a8f0c2d1e3f".into(),
+                restored(vec![p.clone()], Some(p.id)),
+            )],
+        )
+        .unwrap();
+        (mgr, a, b, p)
+    }
+
+    #[test]
+    fn adopt_restored_swaps_the_windows_bumps_both_counters_once_and_moves_the_side_table() {
+        let mut mgr = ViewManager::new();
+        let old_main = main_active(&mgr);
+        let old_popout = mgr.create_window("slot-popup-1").unwrap();
+        let old_slot = first_slot_of(&mgr, old_popout);
+        mgr.set_unknown_content(old_popout, old_slot, raw("old"))
+            .unwrap();
+        mgr.set_window_canvas(MAIN_WINDOW_LABEL, 800, 600).unwrap();
+        mgr.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
+            .unwrap();
+        let (version, attrs_rev) = (mgr.version, mgr.attrs_rev());
+
+        let (mut fresh, a, b, p) = restored_with_popout("slot-popup-2");
+        let p_slot = first_slot_of(&fresh, p.id);
+        fresh
+            .set_unknown_content(p.id, p_slot, raw("future"))
+            .unwrap();
+
+        let removed = mgr.adopt_restored(fresh).unwrap();
+
+        assert_eq!(removed, ["slot-popup-1"]);
+        assert_invariants(&mgr);
+        assert_eq!(
+            (mgr.version, mgr.attrs_rev()),
+            (version + 1, attrs_rev + 1),
+            "지금 번호에서 하나씩 — 되감지 않는다"
+        );
+        let main = window(&mgr, MAIN_WINDOW_LABEL);
+        assert_eq!((main.tabs, main.active), (vec![a.id, b.id], b.id));
+        assert_eq!(main.attrs, restored(vec![], None).attrs);
+        assert_eq!(main.window_id, "main");
+        assert_eq!(
+            main.canvas,
+            Some(CanvasPx { w: 800, h: 600 }),
+            "측정값은 남는다"
+        );
+        let popout = window(&mgr, "slot-popup-2");
+        assert_eq!(
+            (popout.tabs, popout.window_id.as_str()),
+            (vec![p.id], "4b7f6a7e-0d5e-4f5a-9b0e-6a8f0c2d1e3f")
+        );
+        assert!(!mgr.views.contains_key(&old_main));
+        assert!(!mgr.views.contains_key(&old_popout));
+        assert_eq!(
+            mgr.unknown_content(old_popout, old_slot),
+            None,
+            "옛 곁표는 거둔다"
+        );
+        assert_eq!(
+            mgr.unknown_content(p.id, p_slot),
+            Some(&raw("future")),
+            "새 곁표는 View 와 함께 온다"
+        );
+        assert_eq!(mgr.snapshot(p.id).unwrap().foreign_slots, [p_slot]);
+    }
+
+    #[test]
+    fn adopt_restored_refuses_a_collision_or_a_missing_main_and_changes_nothing() {
+        let mut mgr = ViewManager::new();
+        mgr.create_window("slot-popup-1").unwrap();
+        let src = main_active(&mgr);
+        let src_slot = first_slot_of(&mgr, src);
+        let (tmp, _) = mgr
+            .prepare_detached_view(src, src_slot, "옮기는 중".into())
+            .unwrap();
+        let before = fingerprint(&mgr);
+
+        let (live_label, ..) = restored_with_popout("slot-popup-1");
+        assert_eq!(
+            mgr.adopt_restored(live_label).unwrap_err(),
+            LayoutError::WindowNotFound("slot-popup-1".into()),
+            "떠 있는 창의 label"
+        );
+
+        let (mut no_main, ..) = restored_with_popout("slot-popup-2");
+        no_main.windows.remove(MAIN_WINDOW_LABEL);
+        assert_eq!(
+            mgr.adopt_restored(no_main).unwrap_err(),
+            LayoutError::WindowNotFound(MAIN_WINDOW_LABEL.into())
+        );
+
+        let mut clash = view_named("clash");
+        clash.id = tmp;
+        let clash = ViewManager::from_restored(restored(vec![clash], Some(tmp)), vec![]).unwrap();
+        assert_eq!(
+            mgr.adopt_restored(clash).unwrap_err(),
+            LayoutError::ViewNotFound(tmp),
+            "남는 View(owner 없는 임시 View)와 겹친다"
+        );
+
+        assert_eq!(fingerprint(&mgr), before);
+    }
+
+    #[test]
+    fn adopt_restored_leaves_an_ownerless_detached_view_to_its_move() {
+        let mut mgr = ViewManager::new();
+        let src = main_active(&mgr);
+        let src_slot = first_slot_of(&mgr, src);
+        let (tmp, _) = mgr
+            .prepare_detached_view(src, src_slot, "옮기는 중".into())
+            .unwrap();
+
+        let (fresh, ..) = restored_with_popout("slot-popup-2");
+        mgr.adopt_restored(fresh).unwrap();
+
+        assert!(mgr.views.contains_key(&tmp));
+        mgr.attach_view_as_new_window("slot-popup-3", tmp).unwrap();
+        assert_invariants(&mgr);
     }
 
     // ── 측정 보고 · slot_px (ADR-0227) ───────────────────────────────────────

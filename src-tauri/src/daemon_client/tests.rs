@@ -5333,8 +5333,8 @@ use crate::layout::{
     apply, AgentSpawner, LayoutEvents, LayoutState, ViewSnapshot, WindowHost, WindowTabsPayload,
 };
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
+use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
 use crate::tray::actions::{for_each_ui_window, LayoutUsageVisibility, UsageVisibility};
-use crate::ui_settings::{LoadedTheme, UiSettingsRefresh};
 
 const POPUP: &str = "slot-popup-7";
 
@@ -5369,11 +5369,14 @@ impl AgentSpawner for NoSpawner {
     }
 }
 
-struct NoUiSettings;
+struct NoThemeWindows;
 
-impl UiSettingsRefresh for NoUiSettings {
-    fn refresh(&self) -> Result<LoadedTheme, String> {
-        Err("이 시험에는 UI 설정이 없다".to_string())
+impl ThemeWindows for NoThemeWindows {
+    fn labels(&self) -> Vec<String> {
+        Vec::new()
+    }
+    fn send(&self, _label: &str, _payload: UiSettingsPayload) -> Result<(), String> {
+        Err("이 시험에는 웹뷰 창이 없다".to_string())
     }
 }
 
@@ -5386,6 +5389,18 @@ impl SettingsEvents for NoSettingsEvents {
 
 // 운영 버스 표와 같은 구독 재동기 어댑터(`OwnedSubs` — 사람 경로의 `RouterSubs` 에 넘긴다)를 끼운 레이아웃 명령 표.
 fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
+    // 쓰기를 안 연다 — 이 시험은 설정을 건드리지 않고, 적재는 없는 폴더를 만들지 않는다.
+    let settings = Arc::new(SettingsService::load_from_dir(
+        &std::env::temp_dir().join("engram-dashboard-no-settings"),
+    ));
+    let themes = ThemeControl::new(
+        Arc::new(EffectiveThemes::new(
+            Arc::clone(&settings),
+            state.clone(),
+            Arc::default(),
+        )),
+        Arc::new(NoThemeWindows),
+    );
     make_table(LayoutPorts {
         state: state.clone(),
         subs: Arc::new(OwnedSubs {
@@ -5396,12 +5411,17 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
         windows: Arc::new(NoWindows),
         labels: Arc::new(PopupCounter::default()),
         spawner: Arc::new(NoSpawner),
-        ui_settings: Arc::new(NoUiSettings),
-        // 쓰기를 안 연다 — 이 시험은 설정을 건드리지 않고, 적재는 없는 폴더를 만들지 않는다.
-        settings: Arc::new(SettingsService::load_from_dir(
-            &std::env::temp_dir().join("engram-dashboard-no-settings"),
-        )),
+        themes,
+        settings,
         settings_events: Arc::new(NoSettingsEvents),
+        // 포트를 꽂지 않은 조율자 — 이 시험은 복원에 답하지 않는다.
+        restore: Arc::new(crate::state::restore::RestoreCoordinator::new(
+            Arc::new(crate::state::restore::RestoreService::new()),
+            state.clone(),
+            Arc::default(),
+            Arc::default(),
+            Arc::new(PopupCounter::default()),
+        )),
     })
 }
 

@@ -16,7 +16,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, State, WebviewUrl, WebviewWindow,
+    WebviewWindowBuilder,
+};
 use uuid::Uuid;
 
 use crate::commands::layout::{RouterSubs, TauriEvents};
@@ -73,7 +76,7 @@ pub(crate) struct TauriWindowHost<'a> {
 
 impl WindowHost for TauriWindowHost<'_> {
     fn open(&self, label: &str) -> Result<(), String> {
-        build_runtime_window(self.app, label)
+        build_runtime_window(self.app, label, None).map(drop)
     }
 
     fn close(&self, label: &str) {
@@ -82,6 +85,12 @@ impl WindowHost for TauriWindowHost<'_> {
 
     fn is_open(&self, label: &str) -> bool {
         self.app.get_webview_window(label).is_some()
+    }
+
+    fn record_placement(&self, label: &str) {
+        if let Some(window) = self.app.get_webview_window(label) {
+            crate::state::placement::record(&window.as_ref().window());
+        }
     }
 }
 
@@ -108,15 +117,45 @@ fn cascade_position(label: &str) -> (f64, f64) {
 
 // WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). config 창과 동일한
 // WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054).
-fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
-    let (x, y) = cascade_position(label);
+//
+// `at` = 빌더에 줄 첫 자리 — `None` 이면 label 순번의 계단 자리 · 기본 크기. 저장된 자리를 정확히 놓는 것은 부르는
+//   쪽(`state::placement`)이 만든 뒤에 한다: tao 는 빌더의 논리 위치를 모니터를 열거 순으로 훑어 처음 들어맞는 것의
+//   배율로 풀어(tao 0.35 `platform_impl/windows/window.rs` `init`), 배율이 다른 모니터가 섞이면 다른 모니터에 뜰 수 있다.
+pub(crate) fn build_runtime_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+) -> Result<WebviewWindow, String> {
+    build_window(app, label, at, true)
+}
+
+/// [`build_runtime_window`] 와 같되 숨긴 채 만든다 — 보이기는 부르는 쪽 몫이다(런타임 복원 수락이 모델에 넣은
+/// 뒤 보인다 — TRD S21-storage §6-7 ② ④).
+pub(crate) fn build_hidden_runtime_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+) -> Result<WebviewWindow, String> {
+    build_window(app, label, at, false)
+}
+
+fn build_window(
+    app: &AppHandle,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+    visible: bool,
+) -> Result<WebviewWindow, String> {
+    let ((x, y), (w, h)) = match at {
+        Some((at, size)) => ((at.x, at.y), (size.width, size.height)),
+        None => (cascade_position(label), (720.0, 500.0)),
+    };
     WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
         .title(format!("Engram — {label}"))
-        .inner_size(720.0, 500.0)
+        .inner_size(w, h)
         .position(x, y)
+        .visible(visible)
         .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
         .build()
-        .map(|_| ())
         .map_err(|e| format!("런타임 창 생성 실패: {e}"))
 }
 
@@ -124,12 +163,20 @@ fn build_runtime_window(app: &AppHandle, label: &str) -> Result<(), String> {
 // ★창 닫힘 = 백엔드 단일 소스(§5-2/G2)★: 프론트로 별도 view:closed 를 안 쏜다(이중 발화·재진입 방지).
 // registry 는 여기선 안 건드린다(Destroyed→cleanup 이 정리) — 그래서 인자로도 안 받는다(F5).
 pub fn destroy_window(app: &AppHandle, label: &str) {
-    if let Some(w) = app.get_webview_window(label) {
-        if let Err(e) = w.destroy() {
-            tracing::warn!(label, "destroy_window 실패(창 이미 닫힘일 수 있음): {e}");
+    if let Err(e) = try_destroy_window(app, label) {
+        tracing::warn!(label, "destroy_window 실패(창 이미 닫힘일 수 있음): {e}");
+    }
+}
+
+/// [`destroy_window`] 와 같되 실패를 돌려준다 — 거두기를 다시 해 보거나 남은 창을 알려야 하는 쪽(런타임 복원 수락)이
+/// 쓴다. OS 창이 없으면 `Ok`.
+pub(crate) fn try_destroy_window(app: &AppHandle, label: &str) -> Result<(), String> {
+    match app.get_webview_window(label) {
+        Some(w) => w.destroy().map_err(|e| e.to_string()),
+        None => {
+            tracing::debug!(label, "destroy_window: OS 창 없음(이미 닫힘) — no-op");
+            Ok(())
         }
-    } else {
-        tracing::debug!(label, "destroy_window: OS 창 없음(이미 닫힘) — no-op");
     }
 }
 

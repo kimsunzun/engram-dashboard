@@ -35,6 +35,7 @@ function snap(version: number, p: { a?: number; cAt?: number; withC?: boolean } 
     view_id: VIEW,
     layout: { type: 'slot', id: 's1', content: { type: 'empty' } },
     focused_slot_id: null,
+    foreign_slots: [],
     slot_spatial: [],
     slot_rects: [
       { slot_id: 's1', x0: 0, y0: 0, x1: a, y1: 1 },
@@ -67,6 +68,7 @@ function snapV2(version: number, at = 0.5): ViewSnapshot {
     view_id: VIEW2,
     layout: { type: 'slot', id: 'w1', content: { type: 'empty' } },
     focused_slot_id: null,
+    foreign_slots: [],
     slot_spatial: [],
     slot_rects: [
       { slot_id: 'w1', x0: 0, y0: 0, x1: at, y1: 1 },

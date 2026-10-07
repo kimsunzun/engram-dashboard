@@ -197,6 +197,14 @@ function borderOf(slotId: string): HTMLElement {
   return el
 }
 
+/**
+ * 잎이 직접 그린 부재 막(`SlotUnavailableVeil`) — 테두리 요소 직속만 본다. 슬롯 컴포넌트(여기선 stub)가 제 안에 그리는
+ * 막과 가르려고 직속으로 좁힌다.
+ */
+function leafVeil(slotId: string): HTMLElement | null {
+  return borderOf(slotId).querySelector<HTMLElement>(':scope > [data-slot-dead="1"]')
+}
+
 /** 틀에 실린 사각형 사용자 속성 넷(숫자). 빈 값을 0 으로 읽어 헛되이 맞지 않게, 없으면 던진다. */
 function frameRect(slotId: string): { x0: number; y0: number; x1: number; y1: number } {
   const s = frameOf(slotId).style
@@ -336,6 +344,38 @@ describe('ViewLayoutRenderer — slot 분기', () => {
     expect(emptyIcons()[0].parentElement).toBe(border)
   })
 
+  // TRD S21-storage §6-2: 모르는 내용 슬롯은 `empty` 로 실리지만 비어 있지 않다 — `+` 대신 아이콘 자리표시를 그린다
+  //   (문구·안내 줄·막 없음 — 사용자 결정 2026-10-06).
+  it('foreignSlots 의 슬롯 → 「알 수 없는 내용」 아이콘 자리표시(`+`·문구·막 없음), 다른 빈 슬롯은 그대로 `+`', () => {
+    const node = splitNode('p', slotNode('foreign', null), slotNode('plain', null))
+    const { slotRects, splitRects } = rectsFor(node)
+    render(
+      <ViewLayoutRenderer
+        node={node}
+        focusedSlotId={null}
+        slotRects={slotRects}
+        splitRects={splitRects}
+        foreignSlots={['foreign']}
+      />,
+    )
+    const foreign = borderOf('foreign')
+    const mark = foreign.querySelector<HTMLElement>(':scope > [data-slot-foreign]')
+    expect(mark).not.toBeNull()
+    expect(mark!.getAttribute('role')).toBe('img')
+    expect(mark!.getAttribute('aria-label')).toBe('알 수 없는 내용')
+    expect(mark!.getAttribute('title')).toBe('알 수 없는 내용')
+    expect(mark!.querySelector('svg')?.getAttribute('aria-hidden')).toBe('true')
+    expect(foreign.textContent).toBe('')
+    expect(foreign.querySelector(':scope > svg')).toBeNull()
+    expect(foreign.querySelector('[data-slot-dead]')).toBeNull()
+    expect(foreign.style.justifyContent).toBe('center')
+    expect(borderOf('plain').querySelector(':scope > svg')).not.toBeNull()
+    expect(borderOf('plain').querySelector('[data-slot-foreign]')).toBeNull()
+    // 아이콘은 pointer-events 를 끊지 않으므로, 그 위 우클릭도 버블로 틀에 닿아 빈 슬롯 메뉴가 열려야 한다.
+    fireEvent.contextMenu(mark!)
+    expect(screen.getByText('새 콘텐츠')).toBeTruthy()
+  })
+
   it('data-slot-id 속성이 node.id 로 설정된다(cdp 검증용 불변식)', () => {
     const id = 'test-slot-uuid'
     render(<ViewLayoutRenderer node={slotNode(id, null)} focusedSlotId={null} />)
@@ -382,22 +422,47 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       return render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
     }
 
-    it('프로필 있음 + 마운트 기억 없음 → 「에이전트 연결 중…」(스폰 대기·부팅 대기가 여기)', () => {
-      // 예약 노드를 활성화한 직후가 이 상태다: 프로필은 이미 있고 에이전트는 아직 없다.
+    // TRD S21-storage §6-8 · 사용자 결정 2026-10-06: ADR-0149 (A) 의 「스폰 대기도 연결 중」을 대체한다 — 목록을 받은
+    //   뒤엔 무기한 「연결 중」이 없고, 끊기거나 죽은 슬롯과 같은 부재 막을 그린다(문구·단추 없음).
+    it('프로필 있음 + 마운트 기억 없음 → 부재 막(문구·단추 없음, 「연결 중」 아님)', () => {
+      // 트레이 종료 뒤 복원 직후가 이 상태다: 프로필은 있고 데몬은 그 에이전트를 띄우지 않았다.
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = true
       agentStoreState.profiles = [profile(GONE)]
       render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
 
-      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
-      expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
+      const veil = leafVeil('s1')
+      expect(veil).not.toBeNull()
+      expect(veil!.textContent).toBe('')
+      expect(screen.queryByRole('button')).toBeNull()
+      expect(borderOf('s1').textContent).toBe('')
+      expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
+      expect(screen.queryByText('대상 없음')).toBeNull()
       // 아직 뜬 적 없는 슬롯이라 죽은 에이전트로 구독을 걸지 않는다.
       expect(screen.queryByTestId('rich-slot')).toBeNull()
       expect(screen.queryByTestId('terminal-slot')).toBeNull()
     })
 
-    it('명부·프로필 목록 자체를 못 받은 구간도 「에이전트 연결 중…」(「없습니다」로 새지 않는다)', () => {
-      // profilesLoaded=false = refreshProfiles 미도착·실패. 여기서 「없습니다」로 새면 대화를 보존 중인
+    // 사용자 결정 2026-10-06: 포커스 링 색은 슬롯 상태로 달라지지 않는다 — 링이 막 위에 선다. jsdom 은 칠하지 않으므로
+    //   쌓임 규칙의 입력(같은 z · 트리 순서)만 잰다. 실제 색은 GUI QA 몫이다.
+    it('포커스된 기억 없는 슬롯: 포커스 링이 잎의 부재 막보다 위에 선다', () => {
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = true
+      agentStoreState.profiles = [profile(GONE)]
+      render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId="s1" />)
+
+      const veil = leafVeil('s1')
+      const ring = borderOf('s1').querySelector<HTMLElement>(':scope > [data-slot-focus-ring]')
+      expect(veil).not.toBeNull()
+      expect(ring).not.toBeNull()
+      expect(veil!.className.split(' ')).toContain('z-20')
+      expect(Number(ring!.style.zIndex)).toBe(20)
+      expect(borderOf('s1').lastElementChild).toBe(ring)
+      expect(ring!.style.pointerEvents).toBe('none')
+    })
+
+    it('명부·프로필 목록 자체를 못 받은 구간도 「에이전트 연결 중…」(「대상 없음」으로 새지 않는다)', () => {
+      // profilesLoaded=false = refreshProfiles 미도착·실패. 여기서 「대상 없음」으로 새면 대화를 보존 중인
       //   뷰가 조기 언마운트된다.
       agentStoreState.agentsLoaded = true
       agentStoreState.profilesLoaded = false
@@ -405,7 +470,45 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
 
       expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
-      expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
+      expect(screen.queryByText('대상 없음')).toBeNull()
+    })
+
+    it('프로필 목록은 받았어도 명부를 못 받았으면 「에이전트 연결 중…」(부재 막으로 새지 않는다)', () => {
+      // 명부 미수신이면 agents=[] 라 실행 중인 에이전트도 reserved 로 보인다.
+      agentStoreState.agentsLoaded = false
+      agentStoreState.profilesLoaded = true
+      agentStoreState.profiles = [profile(GONE)]
+      render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(leafVeil('s1')).toBeNull()
+    })
+
+    it('목록이 도착하면 「연결 중」에서 부재 막으로 넘어간다', () => {
+      agentStoreState.profiles = [profile(GONE)]
+      const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(leafVeil('s1')).toBeNull()
+
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = true
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
+      expect(leafVeil('s1')).not.toBeNull()
+    })
+
+    // 트리에서 활성화하면 명부에 오르고, 그 순간 슬롯이 평소 화면으로 붙는다(슬롯은 활성화를 부르지 않는다).
+    it('부재 막 → 그 에이전트가 명부에 오르면 평소 화면(막 없음)', () => {
+      agentStoreState.agentsLoaded = true
+      agentStoreState.profilesLoaded = true
+      agentStoreState.profiles = [profile(GONE)]
+      const { rerender } = render(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      expect(leafVeil('s1')).not.toBeNull()
+
+      seedAgents(agentInfo(GONE, false))
+      rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
+      expect(screen.getByTestId('terminal-slot').getAttribute('data-agent-id')).toBe(GONE)
+      expect(leafVeil('s1')).toBeNull()
     })
 
     // ★F1 회귀★: 종료 순간 슬롯 prop 이 흔들리면 재마운트가 돌아 보존하려던 대화가 그 자리에서 지워진다
@@ -424,7 +527,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       const after = screen.getByTestId('rich-slot')
       expect(Object.is(before, after)).toBe(true) // 재마운트되지 않았다 = 대화 보존
       expect(screen.queryByText('에이전트 연결 중…')).toBeNull()
-      expect(screen.queryByText('연결된 에이전트가 없습니다')).toBeNull()
+      expect(screen.queryByText('대상 없음')).toBeNull()
+      // 기억 있는 부재는 잎의 부재 막이 아니다 — 뷰를 지키는 ADR-0149 (B) 그대로다(막은 슬롯 컴포넌트가 그린다).
+      expect(leafVeil('s1')).toBeNull()
     })
 
     it('터미널 모드도 같다 — 노드 유지', () => {
@@ -462,7 +567,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
 
       expect(screen.queryByTestId('rich-slot')).toBeNull()
       expect(screen.queryByTestId('terminal-slot')).toBeNull()
-      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(leafVeil('s1')).not.toBeNull()
     })
 
     // ★G1 회귀★: 프로필 목록을 못 받은 채(단발 pull 실패·지연) 종료되면 presence 는 'unknown' 이다.
@@ -504,7 +609,7 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       // 다시 A 배정 — 되살릴 대화가 없으므로 빈 뷰를 띄우지 않는다.
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
       expect(screen.queryByTestId('rich-slot')).toBeNull()
-      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(leafVeil('s1')).not.toBeNull()
     })
 
     // ★잎 key = slot id(ADR-0227)★: 같은 자리에 다른 slot id 가 오면 잎을 새로 짓는다. 기억이 s2 로 넘어가면
@@ -518,10 +623,10 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       rerender(<ViewLayoutRenderer node={slotNode('s2', GONE)} focusedSlotId={null} />)
 
       expect(screen.queryByTestId('rich-slot')).toBeNull()
-      expect(screen.getByText('에이전트 연결 중…')).toBeTruthy()
+      expect(leafVeil('s2')).not.toBeNull()
     })
 
-    it('프로필 없음 → 「연결된 에이전트가 없습니다」(보존 중이던 뷰도 여기서 내려간다 — 의도)', () => {
+    it('프로필 없음 → 「대상 없음」(보존 중이던 뷰도 여기서 내려간다 — 의도)', () => {
       const { rerender } = mountAlive(true, 3)
       expect(screen.getByTestId('rich-slot')).toBeTruthy()
 
@@ -530,8 +635,9 @@ describe('ViewLayoutRenderer — slot 분기', () => {
       agentStoreState.profiles = []
       rerender(<ViewLayoutRenderer node={slotNode('s1', GONE)} focusedSlotId={null} />)
 
-      expect(screen.getByText('연결된 에이전트가 없습니다')).toBeTruthy()
+      expect(screen.getByText('대상 없음')).toBeTruthy()
       expect(screen.queryByTestId('rich-slot')).toBeNull()
+      expect(leafVeil('s1')).toBeNull()
     })
   })
 
@@ -1098,6 +1204,40 @@ describe('ViewLayoutRenderer — 우클릭 컨텍스트 메뉴(§5 단일 제어
   it('빈 슬롯 메뉴엔 "에이전트 종료"가 없다(agent 전용 콘텐츠 항목)', () => {
     openMenu('slot-empty-x', null)
     expect(screen.queryByText('에이전트 종료')).toBeNull()
+  })
+
+  // ── TRD S21-storage §6-8: 「대상 없음」·부재 막 슬롯 = 배정 유지 + 에이전트 슬롯 메뉴 그대로(사용자 결정 2026-10-06) ──
+  it('「대상 없음」 슬롯 우클릭 → 에이전트 슬롯 메뉴 그대로 — 「비우기」로 그 슬롯을 비운다', () => {
+    agentStoreState.agentsLoaded = true
+    agentStoreState.profilesLoaded = true
+    openMenu('slot-NT', 'deleted-agent')
+    expect(screen.getByText('대상 없음')).toBeTruthy()
+    expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
+    expect(screen.getByText('에이전트 종료')).toBeTruthy()
+    expect(screen.queryByText('새 콘텐츠')).toBeNull()
+    fireEvent.click(screen.getByText('비우기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-NT', { type: 'empty' })
+  })
+
+  it('부재 막 슬롯(프로필 있음 · 실행 중 아님) 메뉴도 에이전트 슬롯 메뉴 그대로다(「비우기」 있음)', () => {
+    agentStoreState.agentsLoaded = true
+    agentStoreState.profilesLoaded = true
+    agentStoreState.profiles = [{ id: 'stopped-x', name: 'stopped-x', cwd: '/tmp', display_name: null, parent_id: null, created_at: 0, epoch: 1 }]
+    openMenu('slot-ST', 'stopped-x')
+    expect(leafVeil('slot-ST')).not.toBeNull()
+    expect(screen.getByText('에이전트 종료')).toBeTruthy()
+    expect(screen.getByText('비우기')).toBeTruthy()
+    expect(screen.queryByText('새 콘텐츠')).toBeNull()
+  })
+
+  // TRD S21-storage §6-2: 모르는 내용 슬롯도 빈 슬롯 메뉴로 다른 내용을 **명시적으로** 놓을 수 있다(원문 버림은 셸 몫).
+  it('모르는 내용 슬롯 우클릭 → 빈 슬롯 메뉴 → 채움이 그 슬롯에 놓인다', () => {
+    render(<ViewLayoutRenderer node={slotNode('slot-F', null)} focusedSlotId={null} foreignSlots={['slot-F']} />)
+    fireEvent.contextMenu(frameOf('slot-F'))
+    expect(screen.getByText('에이전트 모니터링')).toBeTruthy()
+    openNewContentFlyout()
+    fireEvent.click(screen.getByText('프리셋 팔레트 열기'))
+    expect(setSlotContentSpy).toHaveBeenCalledWith(ACTIVE_VIEW, 'slot-F', { type: 'preset_palette' })
   })
 
   // ── ★"팝업으로 분리" = 공통(ADR-0064)★: 빈 슬롯 포함 콘텐츠 종류와 무관하게 뜨고(ADR-0228) (viewId, slotId)로 move. ──

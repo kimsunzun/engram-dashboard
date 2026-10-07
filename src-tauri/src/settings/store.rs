@@ -5,13 +5,12 @@
 //! - **적재([`load`])는 파일을 만들지도 고치지도 않는다** — 셸 빌드 전에 돈다(TRD §5-3 서비스 수명). 로거도
 //!   그 전이라 적재는 로그를 내지 않고 [`LoadNote`] 로 모은다 — 서비스가 로거가 선 뒤에 낸다.
 //! - **쓰기([`write`])는 읽고-고치고-쓰기다** — 호출자가 읽은 문서([`read_document`])에서 받은 키만 바꾼다.
-//!   앱 밖에서 고친 다른 키와 모르는 키가 그대로 남는다. 서비스의 쓰기 직렬화 락 아래서만 부른다(같은
-//!   프로세스의 임시 이름이 겹친다 — [`crate::fsutil::write_atomic`]).
+//!   앱 밖에서 고친 다른 키와 모르는 키가 그대로 남는다. 서비스의 쓰기 직렬화 락 아래서만 부른다 — 두
+//!   쓰기의 읽고-고치고-쓰기가 겹치면 나중 쓰기가 먼저 쓰기의 변경을 지운다.
 //! - **통째로 못 쓰는 파일**(JSON 아님 · 객체 아님 · 상한 초과 · UTF-8 아님 · 모르는 `$version`)은 적재가
-//!   기본값으로 접고 손대지 않는다. 그 위에 쓰는 첫 쓰기가 원본을 `settings.json.corrupt-<unix ms>` 로 **떠 둔
-//!   뒤** 그 자리를 원자적으로 갈아끼운다 — 파일이 없는 순간이 없다. 새 파일은 메모리의 값에서 다시 짓는다.
-//!   ★안 뜨고 갈아끼우는 원본이 둘이다★ — [`COPY_ASIDE_MAX`] 를 넘는 것과 이 프로세스가 이미 떠 둔 사본이
-//!   그 바이트 그대로 남아 있는 것([`set_aside`]).
+//!   기본값으로 접고 손대지 않는다. 그 위에 쓰는 첫 쓰기가 원본을 `settings.json.corrupt` 로 **떠 둔 뒤** 그
+//!   자리를 원자적으로 갈아끼운다 — 파일이 없는 순간이 없다. 새 파일은 메모리의 값에서 다시 짓는다. 사본은
+//!   하나뿐이다([`SettingsFiles::copy_aside`]). 떠 두기가 실패하면 그 쓰기도 실패하고 원본은 그대로다.
 //!   ★읽기 자체의 IO 실패는 그 무리가 아니다★ — 잠깐 잠긴 멀쩡한 파일을 덮지 않도록 그때 쓰기는 실패한다.
 //! - **아는 키의 못 쓸 값**은 기본값으로 접는다 — 파일에서는 그 키를 쓰거나 되돌릴 때까지 그대로다.
 // ADR-0265
@@ -19,7 +18,6 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use serde_json::{Map, Value};
 
@@ -31,12 +29,6 @@ const VERSION: u64 = 1;
 /// 사람이 손으로 늘려도 여기까진 정상인 선 — 실제 크기는 1 KiB 안팎이다. ★쓰기도 이 선을 넘지 않는다★ —
 /// 넘는 원문을 쓰면 다음 적재가 그 파일 전체를 못 쓴다고 접는다.
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
-/// 같은 밀리초에 떠 둔 사본끼리 이름이 겹칠 때 뒤에 붙여 볼 번호 수.
-const MAX_CORRUPT_NAMES: u32 = 100;
-/// 이보다 큰 못 쓰는 원본은 옆에 떠 두지 않고 바로 갈아끼운다 — 읽기 상한([`MAX_SETTINGS_BYTES`])의 16배다.
-/// 그만한 파일은 사람이 손으로 늘린 설정 파일이 아니라 엉뚱한 것이 그 이름을 차지한 것이라 남길 값이 없고,
-/// 떠 두면 그 크기가 데이터 폴더에 그대로 쌓인다.
-pub(super) const COPY_ASIDE_MAX: u64 = 1024 * 1024;
 
 /// 파일 원문을 가져온 결과.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,18 +49,9 @@ pub trait SettingsFiles: Send {
     fn read(&self) -> io::Result<RawFile>;
     /// 원자적으로 통째로 갈아끼운다. 폴더가 없으면 만든다.
     fn write_atomic(&self, text: &str) -> io::Result<()>;
-    /// 지금 파일의 표식. 파일이 없으면 `NotFound`.
-    fn stamp(&self) -> io::Result<SourceStamp>;
-    /// 지금 파일을 옆 이름(`.corrupt-<unix ms>`, 겹치면 `-<n>` 을 덧붙인다)으로 **떠 둔다** — 원본은 그 자리에
-    /// 그대로 둔다. ★앞서 떠 둔 사본을 덮지 않는다★.
-    ///
-    /// ★[`COPY_ASIDE_MAX`] 는 뜨는 도중에 지킨다★ — 표식을 잰 뒤 커졌거나 바뀐 원본도 그 선에서 멈추고, 그때는
-    /// 반쯤 뜬 사본을 치운 뒤 [`CopyOutcome::OverBound`]. 치우지 못하면 `Err`(잘린 사본이 온전한 사본처럼 남은
-    /// 채 원본까지 갈아끼우지 않게).
-    fn copy_aside(&self) -> io::Result<CopyOutcome>;
-    /// `copy`(앞서 [`copy_aside`](Self::copy_aside) 가 돌려준 자리)에 사본이 아직 있고 지금 파일과 바이트가
-    /// 같은가. 사본이 없거나 어느 쪽이든 [`COPY_ASIDE_MAX`] 를 넘으면 `Ok(false)` · `Err` = 그 밖의 읽기 실패.
-    fn matches_copy(&self, copy: &Path) -> io::Result<bool>;
+    /// 지금 파일을 옆 이름(`<이름>.corrupt`)에 **떠 두고** 그 자리를 돌려준다 — 원본은 그 자리에 그대로 둔다.
+    /// ★앞서 떠 둔 사본을 덮는다★(이름이 하나뿐 — [`crate::fsutil::copy_aside`]). `Err` 면 앞선 사본도 그대로다.
+    fn copy_aside(&self) -> io::Result<PathBuf>;
     /// 로그에 실을 출처(경로).
     fn origin(&self) -> String;
 }
@@ -110,220 +93,13 @@ impl SettingsFiles for FsSettingsFiles {
         crate::fsutil::write_atomic(&self.path, text)
     }
 
-    fn stamp(&self) -> io::Result<SourceStamp> {
-        let meta = std::fs::metadata(&self.path)?;
-        Ok(SourceStamp {
-            len: meta.len(),
-            modified: meta.modified().ok(),
-        })
-    }
-
-    fn copy_aside(&self) -> io::Result<CopyOutcome> {
-        let ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        copy_aside_at(&self.path, ms)
-    }
-
-    fn matches_copy(&self, copy: &Path) -> io::Result<bool> {
-        same_bytes(&self.path, copy)
+    fn copy_aside(&self) -> io::Result<PathBuf> {
+        crate::fsutil::copy_aside(&self.path)
     }
 
     fn origin(&self) -> String {
         self.path.display().to_string()
     }
-}
-
-/// [`SettingsFiles::copy_aside`] 의 결과.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CopyOutcome {
-    /// 떠 뒀다 — 사본의 자리.
-    Copied(PathBuf),
-    /// 뜨는 도중 [`COPY_ASIDE_MAX`] 를 넘어 사본을 치웠다. `bytes` = 그 순간 원본 크기(못 재면 읽은 양 — 하한).
-    OverBound { bytes: u64 },
-}
-
-/// [`SettingsFiles::copy_aside`] 의 실물 — 시각을 인자로 받아 이름 겹침을 시험할 수 있다.
-///
-/// ★새 이름은 `create_new` 로 연다★ — 「있나 보고 쓴다」는 그 사이 다른 프로세스가 같은 이름을 만들면 덮는다.
-/// 사본은 `sync_all` 까지 한다: 호출자가 곧 원본 자리를 갈아끼우므로, 사본이 디스크에 없으면 그 내용이 남는
-/// 곳이 없다. 실패하면 반쯤 쓴 사본을 치운다.
-pub(super) fn copy_aside_at(path: &Path, ms: u128) -> io::Result<CopyOutcome> {
-    use std::io::{Read, Write};
-
-    let mut source = std::fs::File::open(path)?;
-    for n in 0..MAX_CORRUPT_NAMES {
-        let mut name = path.as_os_str().to_os_string();
-        name.push(format!(".corrupt-{ms}"));
-        if n > 0 {
-            name.push(format!("-{n}"));
-        }
-        let target = PathBuf::from(name);
-        let mut copy = match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)
-        {
-            Ok(copy) => copy,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e),
-        };
-        // 상한 + 1 = 「넘었나」를 알 수 있는 최소치. 넘었어도 읽는 양은 여기서 멈춘다.
-        let mut limited = Read::by_ref(&mut source).take(COPY_ASIDE_MAX + 1);
-        let copied = io::copy(&mut limited, &mut copy).and_then(|n| {
-            if n > COPY_ASIDE_MAX {
-                return Ok(false);
-            }
-            copy.flush()?;
-            copy.sync_all()?;
-            Ok(true)
-        });
-        drop(copy);
-        return match copied {
-            Ok(true) => Ok(CopyOutcome::Copied(target)),
-            Ok(false) => {
-                std::fs::remove_file(&target)?;
-                let bytes = source
-                    .metadata()
-                    .map_or(COPY_ASIDE_MAX + 1, |meta| meta.len());
-                Ok(CopyOutcome::OverBound { bytes })
-            }
-            Err(e) => {
-                // 반쯤 뜬 사본이 남으면 온전한 사본처럼 보이므로 못 치운 사실은 남긴다.
-                if let Err(clean) = std::fs::remove_file(&target) {
-                    tracing::warn!(
-                        module = "settings",
-                        copied_to = %target.display(),
-                        "반쯤 뜬 사본을 치우지 못했다: {clean}"
-                    );
-                }
-                Err(e)
-            }
-        };
-    }
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("떠 둘 이름이 남지 않았다(`.corrupt-{ms}` 와 그 번호 {MAX_CORRUPT_NAMES}개)"),
-    ))
-}
-
-/// [`SettingsFiles::matches_copy`] 의 실물.
-pub(super) fn same_bytes(source: &Path, copy: &Path) -> io::Result<bool> {
-    let copy = match std::fs::File::open(copy) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    let Some(copied) = read_within_copy_bound(copy)? else {
-        return Ok(false);
-    };
-    let Some(current) = read_within_copy_bound(std::fs::File::open(source)?)? else {
-        return Ok(false);
-    };
-    Ok(copied == current)
-}
-
-/// `None` = [`COPY_ASIDE_MAX`] 를 넘는다 — 그 선 + 1 바이트까지만 읽는다.
-fn read_within_copy_bound(file: std::fs::File) -> io::Result<Option<Vec<u8>>> {
-    use std::io::Read;
-
-    let mut bytes = Vec::new();
-    file.take(COPY_ASIDE_MAX + 1).read_to_end(&mut bytes)?;
-    Ok((bytes.len() as u64 <= COPY_ASIDE_MAX).then_some(bytes))
-}
-
-/// 떠 둔 원본을 다시 알아볼 표식 — 크기(바이트) · 수정 시각.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SourceStamp {
-    pub len: u64,
-    /// `None` = 수정 시각을 못 읽었다 — 그 원본은 다시 알아보지 않는다([`SourceStamp::same_source`]).
-    pub modified: Option<SystemTime>,
-}
-
-impl SourceStamp {
-    /// 같은 원본으로 볼까 — 수정 시각을 모르면 아니다(크기만 같은 다른 파일을 안 뜨고 덮게 된다).
-    fn same_source(&self, other: &SourceStamp) -> bool {
-        self.modified.is_some() && self == other
-    }
-}
-
-/// 이 프로세스가 마지막으로 떠 둔 원본 — 서비스가 쓰기 직렬화 락 아래 들고 있고 [`write`] 만 읽고 고친다.
-pub(super) struct CopiedAside {
-    /// 뜨기 직전에 잰 원본 표식 — 뜨는 사이 원본이 바뀌었을 수 있어 그것만으로는 같은 원본이라 못 한다.
-    stamp: SourceStamp,
-    to: PathBuf,
-}
-
-/// 갈아끼우기 전에 못 쓰는 원본을 옆에 떠 둔다. `Err` = 표식이나 사본을 못 얻었다(쓰기도 거기서 멈춘다).
-///
-/// ★안 뜨는 원본이 둘이다★ — [`COPY_ASIDE_MAX`] 를 넘는 것(표식으로 먼저 보고, 뜨는 도중에도 다시 지킨다),
-/// 그리고 `copied` 의 사본이 그 자리에 남아 있고 지금 원본과 바이트가 같은 것. 뒤의 것은 앞선 갈아끼우기가
-/// 실패해 같은 원본 위에 다시 쓰는 경우다 — 안 막으면 실패할 때마다 같은 사본이 하나씩 는다. ★표식이 같다는
-/// 것만으로 건너뛰지 않는다★ — 크기 · 수정 시각이 같은 다른 원본을 안 뜨고 덮게 된다. 표식은 바이트를 읽을지
-/// 가르는 값싼 거름이다.
-fn set_aside(
-    files: &dyn SettingsFiles,
-    copied: &mut Option<CopiedAside>,
-    reason: &str,
-) -> io::Result<()> {
-    let stamp = files.stamp()?;
-    if stamp.len > COPY_ASIDE_MAX {
-        replaced_without_copy(files, stamp.len, reason);
-        return Ok(());
-    }
-    if let Some(earlier) = copied
-        .as_ref()
-        .filter(|earlier| earlier.stamp.same_source(&stamp))
-    {
-        match files.matches_copy(&earlier.to) {
-            Ok(true) => {
-                tracing::warn!(
-                    module = "settings",
-                    source = %files.origin(),
-                    copied_to = %earlier.to.display(),
-                    "못 쓰는 설정 파일은 앞서 떠 뒀다 — 다시 뜨지 않고 그 자리에 새로 쓴다: {reason}"
-                );
-                return Ok(());
-            }
-            Ok(false) => tracing::debug!(
-                module = "settings",
-                source = %files.origin(),
-                copied_to = %earlier.to.display(),
-                "앞서 떠 둔 사본이 없거나 지금 원본과 달라 다시 뜬다"
-            ),
-            Err(e) => tracing::debug!(
-                module = "settings",
-                source = %files.origin(),
-                copied_to = %earlier.to.display(),
-                "앞서 떠 둔 사본과 대조하지 못해 다시 뜬다: {e}"
-            ),
-        }
-    }
-    match files.copy_aside()? {
-        CopyOutcome::Copied(to) => {
-            tracing::warn!(
-                module = "settings",
-                source = %files.origin(),
-                copied_to = %to.display(),
-                "못 쓰는 설정 파일을 옆에 떠 두고 그 자리에 새로 쓴다: {reason}"
-            );
-            *copied = Some(CopiedAside { stamp, to });
-        }
-        CopyOutcome::OverBound { bytes } => replaced_without_copy(files, bytes, reason),
-    }
-    Ok(())
-}
-
-/// 원문을 어디에도 남기지 않고 갈아끼우게 됐다 — 그 내용은 영영 잃으므로 error 다.
-fn replaced_without_copy(files: &dyn SettingsFiles, bytes: u64, reason: &str) {
-    tracing::error!(
-        module = "settings",
-        source = %files.origin(),
-        bytes,
-        limit = COPY_ASIDE_MAX,
-        "못 쓰는 설정 파일이 떠 둘 상한을 넘어 떠 두지 않고 그 자리에 새로 쓴다 — 원문은 남지 않는다: {reason}"
-    );
 }
 
 /// 원문을 문서로 본 결과.
@@ -415,7 +191,7 @@ impl LoadNote {
             LoadNote::Unusable(reason) => tracing::error!(
                 module = "settings",
                 source = %origin,
-                "설정 파일을 통째로 못 써 기본값으로 둔다(첫 쓰기가 새로 쓴다 — 떠 둘 상한 안이면 옆에 떠 둔 뒤): {reason}"
+                "설정 파일을 통째로 못 써 기본값으로 둔다(첫 쓰기가 옆에 떠 둔 뒤 새로 쓴다): {reason}"
             ),
             LoadNote::ReadFailed(error) => tracing::warn!(
                 module = "settings",
@@ -487,14 +263,14 @@ pub(super) fn load(files: &dyn SettingsFiles) -> (Overrides, Vec<LoadNote>) {
 ///
 /// `document` = 이 쓰기 직전에 [`read_document`] 로 읽은 것. 파일이 없거나 통째로 못 쓰면 새 파일을 `memory`
 /// (지금 유효한 덮어쓰기 전부)에서 짓는다 — 안 그러면 쓰기 한 번이 화면에 아직 보이는 다른 값을 디스크에서
-/// 지운다. 통째로 못 쓰는 파일은 갈아끼우기 전에 옆에 떠 둔다([`set_aside`] — `copied` 를 읽고 고친다).
+/// 지운다. 통째로 못 쓰는 파일은 갈아끼우기 전에 옆에 떠 둔다([`SettingsFiles::copy_aside`]).
 ///
-/// `Err` 면 파일은 그대로다(떠 둔 사본은 남을 수 있다). 지은 원문이 읽기 상한을 넘으면 쓰지 않고 `Err`.
+/// `Err` 면 파일은 그대로다. ★떠 두기 뒤의 실패면 앞서 떠 둔 사본은 이미 이 원본으로 덮였다★(사본 이름이
+/// 하나뿐). 지은 원문이 읽기 상한을 넘으면 떠 두지도 쓰지도 않고 `Err`.
 /// ★한 호출 = 한 파일(TRD §5-2)★ — 키가 여러 파일로 갈리게 되면 여기서 걸치는 묶음을 거절한다.
 // ADR-0265
 pub(super) fn write(
     files: &dyn SettingsFiles,
-    copied: &mut Option<CopiedAside>,
     document: Document,
     memory: &Overrides,
     changes: &[(&'static str, Option<String>)],
@@ -531,7 +307,13 @@ pub(super) fn write(
         ));
     }
     if let Some(reason) = unusable {
-        set_aside(files, copied, &reason)?;
+        let to = files.copy_aside()?;
+        tracing::warn!(
+            module = "settings",
+            source = %files.origin(),
+            copied_to = %to.display(),
+            "못 쓰는 설정 파일을 옆에 떠 두고(앞선 사본이 있었으면 덮었다) 그 자리에 새로 쓴다: {reason}"
+        );
     }
     files.write_atomic(&text)
 }
@@ -540,10 +322,10 @@ pub(super) fn write(
 #[cfg(test)]
 pub(super) mod fake {
     use std::io;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex, MutexGuard};
 
-    use super::{CopyOutcome, RawFile, SettingsFiles, SourceStamp, COPY_ASIDE_MAX};
+    use super::{RawFile, SettingsFiles};
 
     #[derive(Default)]
     pub struct Disk {
@@ -554,15 +336,11 @@ pub(super) mod fake {
         pub fail_read: bool,
         pub fail_write: bool,
         pub fail_copy: bool,
-        /// [`SettingsFiles::stamp`] 가 낼 크기 — `None` = 원문 길이.
-        pub size: Option<u64>,
-        /// 수정 시각 흉내(초). `write_atomic` 이 올린다 — 밖의 편집을 흉내 내는 시험은 손으로 올린다.
-        pub modified: u64,
         pub writes: usize,
-        /// 떠 둔 사본의 원문(뜬 순서). 사본의 자리 = `memory.corrupt-<번호>`.
-        pub copies: Vec<Option<String>>,
-        /// 밖에서 지운 사본의 번호 — [`SettingsFiles::matches_copy`] 가 없는 사본으로 본다.
-        pub lost_copies: Vec<usize>,
+        /// 떠 둔 사본 자리(`memory.corrupt` — 하나뿐이라 뜰 때마다 덮인다)의 원문. `None` = 사본 없음.
+        pub corrupt: Option<String>,
+        /// 떠 둔 횟수.
+        pub copies: usize,
     }
 
     #[derive(Clone, Default)]
@@ -613,56 +391,21 @@ pub(super) mod fake {
             }
             disk.text = Some(text.to_string());
             disk.unusable = false;
-            disk.size = None;
-            disk.modified += 1;
             disk.writes += 1;
             Ok(())
         }
 
-        fn stamp(&self) -> io::Result<SourceStamp> {
-            let disk = self.disk();
-            let len = match (&disk.text, disk.size) {
-                (_, Some(size)) => size,
-                (Some(text), None) => text.len() as u64,
-                (None, None) => return Err(io::Error::from(io::ErrorKind::NotFound)),
-            };
-            Ok(SourceStamp {
-                len,
-                modified: Some(
-                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(disk.modified),
-                ),
-            })
-        }
-
-        fn copy_aside(&self) -> io::Result<CopyOutcome> {
+        fn copy_aside(&self) -> io::Result<PathBuf> {
             let mut disk = self.disk();
             if disk.fail_copy {
                 return Err(io::Error::other("가짜 사본 실패"));
             }
-            // 뜨는 도중의 상한은 표식(`size`)이 아니라 실제 원문 길이로 가른다 — 둘을 어긋나게 두면 표식을 잰 뒤
-            // 커진 원본이 된다.
-            let len = disk.text.as_ref().map_or(0, |text| text.len() as u64);
-            if len > COPY_ASIDE_MAX {
-                return Ok(CopyOutcome::OverBound { bytes: len });
-            }
-            let index = disk.copies.len();
-            let copy = disk.text.clone();
-            disk.copies.push(copy);
-            Ok(CopyOutcome::Copied(PathBuf::from(format!(
-                "memory.corrupt-{index}"
-            ))))
-        }
-
-        fn matches_copy(&self, copy: &Path) -> io::Result<bool> {
-            let disk = self.disk();
-            let index = copy
-                .to_str()
-                .and_then(|name| name.strip_prefix("memory.corrupt-"))
-                .and_then(|n| n.parse::<usize>().ok());
-            Ok(match index {
-                Some(i) if !disk.lost_copies.contains(&i) => disk.copies.get(i) == Some(&disk.text),
-                _ => false,
-            })
+            let Some(text) = disk.text.clone() else {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            };
+            disk.corrupt = Some(text);
+            disk.copies += 1;
+            Ok(PathBuf::from("memory.corrupt"))
         }
 
         fn origin(&self) -> String {
@@ -682,7 +425,7 @@ mod tests {
 
     fn write_doc(files: &MemFiles, changes: &[(&'static str, Option<String>)]) -> io::Result<()> {
         let document = read_document(files)?;
-        write(files, &mut None, document, &Overrides::new(), changes)
+        write(files, document, &Overrides::new(), changes)
     }
 
     // ── 적재 ──
@@ -781,12 +524,12 @@ mod tests {
             let disk = files.disk();
             assert_eq!(disk.text.as_deref(), Some(text), "{text}");
             assert_eq!(disk.writes, 0);
-            assert!(disk.copies.is_empty(), "적재는 떠 두지 않는다: {text}");
+            assert_eq!(disk.copies, 0, "적재는 떠 두지 않는다: {text}");
         }
         let files = MemFiles::default();
         files.disk().unusable = true;
         assert!(overrides_of(&files).is_empty());
-        assert!(files.disk().copies.is_empty());
+        assert_eq!(files.disk().copies, 0);
     }
 
     #[test]
@@ -902,7 +645,6 @@ mod tests {
         let document = read_document(&files).unwrap();
         write(
             &files,
-            &mut None,
             document,
             &memory,
             &[("theme.default", Some("light".into()))],
@@ -925,13 +667,12 @@ mod tests {
         let document = read_document(&files).unwrap();
         write(
             &files,
-            &mut None,
             document,
             &memory,
             &[("theme.default", Some("light".into()))],
         )
         .unwrap();
-        assert_eq!(files.disk().copies, vec![Some("{broken".to_string())]);
+        assert_eq!(files.disk().corrupt.as_deref(), Some("{broken"));
         assert_eq!(
             files.json(),
             serde_json::json!({"$version": 1, "theme.default": "light", "chat.style.userPy": "9px"})
@@ -944,7 +685,6 @@ mod tests {
         let memory = Overrides::from([("chat.style.userPy", "9px".to_string())]);
         write(
             &files,
-            &mut None,
             Document::Missing,
             &memory,
             &[("theme.default", Some("light".into()))],
@@ -954,10 +694,7 @@ mod tests {
             files.json(),
             serde_json::json!({"$version": 1, "theme.default": "light", "chat.style.userPy": "9px"})
         );
-        assert!(
-            files.disk().copies.is_empty(),
-            "없는 파일은 떠 둘 것이 없다"
-        );
+        assert_eq!(files.disk().copies, 0, "없는 파일은 떠 둘 것이 없다");
     }
 
     #[test]
@@ -980,139 +717,27 @@ mod tests {
             Some("{broken"),
             "파일이 없는 순간이 없다"
         );
-        assert_eq!(disk.copies, vec![Some("{broken".to_string())]);
+        assert_eq!(disk.corrupt.as_deref(), Some("{broken"));
     }
 
     #[test]
-    fn an_unusable_file_over_the_copy_bound_is_replaced_without_a_copy() {
-        let files = MemFiles::with_text("{broken");
-        files.disk().size = Some(COPY_ASIDE_MAX + 1);
-        write_doc(&files, &[("theme.default", Some("light".into()))]).unwrap();
-        let disk = files.disk();
-        assert!(disk.copies.is_empty(), "{:?}", disk.copies);
-        assert_eq!(disk.writes, 1);
-        drop(disk);
-        assert_eq!(
-            files.json(),
-            serde_json::json!({"$version": 1, "theme.default": "light"})
-        );
-    }
-
-    #[test]
-    fn an_unusable_file_at_the_copy_bound_is_still_copied() {
-        let files = MemFiles::with_text("{broken");
-        files.disk().size = Some(COPY_ASIDE_MAX);
-        write_doc(&files, &[("theme.default", Some("light".into()))]).unwrap();
-        assert_eq!(files.disk().copies, vec![Some("{broken".to_string())]);
-    }
-
-    #[test]
-    fn the_same_source_is_copied_once_but_a_changed_one_again() {
+    fn every_write_over_a_still_broken_file_copies_it_onto_the_one_name() {
         let files = MemFiles::with_text("{broken");
         files.disk().fail_write = true;
-        let mut copied = None;
-        let mut attempt = || {
-            let document = read_document(&files).unwrap();
-            write(
-                &files,
-                &mut copied,
-                document,
-                &Overrides::new(),
-                &[("theme.default", Some("light".into()))],
-            )
-        };
-        attempt().unwrap_err();
-        attempt().unwrap_err();
-        assert_eq!(files.disk().copies.len(), 1, "같은 원본은 한 번만 뜬다");
+        let attempt = || write_doc(&files, &[("theme.default", Some("light".into()))]);
 
-        // 밖에서 다시 고쳤다 — 크기가 같아도 수정 시각이 다르면 다른 원본이다.
+        attempt().unwrap_err();
+        attempt().unwrap_err();
         {
-            let mut disk = files.disk();
-            disk.text = Some("{BROKEN".to_string());
-            disk.modified += 1;
+            let disk = files.disk();
+            assert_eq!(disk.copies, 2);
+            assert_eq!(disk.corrupt.as_deref(), Some("{broken"));
         }
-        attempt().unwrap_err();
-        assert_eq!(
-            files.disk().copies,
-            vec![Some("{broken".to_string()), Some("{BROKEN".to_string())]
-        );
-    }
 
-    /// 갈아끼우기가 실패하는 디스크에 같은 쓰기를 한 번 시도한다 — `copied` 는 시도끼리 이어진다.
-    fn failing_attempt(files: &MemFiles, copied: &mut Option<CopiedAside>) {
-        let document = read_document(files).unwrap();
-        write(
-            files,
-            copied,
-            document,
-            &Overrides::new(),
-            &[("theme.default", Some("light".into()))],
-        )
-        .unwrap_err();
-    }
-
-    #[test]
-    fn a_same_stamped_source_with_other_bytes_is_copied_again() {
-        let files = MemFiles::with_text("{broken");
-        files.disk().fail_write = true;
-        let mut copied = None;
-        failing_attempt(&files, &mut copied);
-
-        // 크기도 수정 시각도 그대로인 다른 원본.
+        // 밖에서 다른 못 쓰는 원문으로 고쳤다 — 앞서 떠 둔 사본은 덮인다(TRD §10 F21).
         files.disk().text = Some("{BROKEN".to_string());
-        failing_attempt(&files, &mut copied);
-
-        assert_eq!(
-            files.disk().copies,
-            vec![Some("{broken".to_string()), Some("{BROKEN".to_string())]
-        );
-    }
-
-    #[test]
-    fn a_same_stamped_source_whose_earlier_copy_is_gone_is_copied_again() {
-        let files = MemFiles::with_text("{broken");
-        files.disk().fail_write = true;
-        let mut copied = None;
-        failing_attempt(&files, &mut copied);
-
-        files.disk().lost_copies.push(0);
-        failing_attempt(&files, &mut copied);
-
-        assert_eq!(
-            files.disk().copies,
-            vec![Some("{broken".to_string()), Some("{broken".to_string())]
-        );
-    }
-
-    #[test]
-    fn a_source_grown_past_the_copy_bound_after_its_stamp_is_replaced_without_a_copy() {
-        let grown = format!("{{{}", "x".repeat(COPY_ASIDE_MAX as usize));
-        let files = MemFiles::with_text(&grown);
-        files.disk().size = Some(7);
-        write_doc(&files, &[("theme.default", Some("light".into()))]).unwrap();
-        let disk = files.disk();
-        assert!(disk.copies.is_empty(), "{}", disk.copies.len());
-        assert_eq!(disk.writes, 1);
-        drop(disk);
-        assert_eq!(
-            files.json(),
-            serde_json::json!({"$version": 1, "theme.default": "light"})
-        );
-    }
-
-    #[test]
-    fn a_source_without_a_modified_time_is_never_taken_for_an_earlier_copy() {
-        let stamp = SourceStamp {
-            len: 7,
-            modified: None,
-        };
-        assert!(!stamp.same_source(&stamp));
-        let dated = SourceStamp {
-            modified: Some(std::time::UNIX_EPOCH),
-            ..stamp
-        };
-        assert!(dated.same_source(&dated));
-        assert!(!dated.same_source(&SourceStamp { len: 8, ..dated }));
+        attempt().unwrap_err();
+        assert_eq!(files.disk().corrupt.as_deref(), Some("{BROKEN"));
     }
 
     #[test]
@@ -1126,201 +751,5 @@ mod tests {
         let disk = files.disk();
         assert_eq!(disk.text.as_deref(), Some(original.as_str()));
         assert_eq!(disk.writes, 0);
-    }
-
-    // ── 실제 디스크 ──
-
-    #[test]
-    fn the_real_stamp_reports_size_and_modified_time() {
-        let dir = std::env::temp_dir().join(format!(
-            "engram-settings-stamp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let files = FsSettingsFiles::in_dir(&dir);
-        assert_eq!(files.stamp().unwrap_err().kind(), io::ErrorKind::NotFound);
-
-        std::fs::write(dir.join(SETTINGS_FILE), b"{broken").unwrap();
-        let stamp = files.stamp().unwrap();
-        assert_eq!(stamp.len, 7);
-        assert!(stamp.modified.is_some());
-        assert!(stamp.same_source(&files.stamp().unwrap()));
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn copy_aside_never_overwrites_an_earlier_copy() {
-        let dir = std::env::temp_dir().join(format!(
-            "engram-settings-copy-aside-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join(SETTINGS_FILE);
-        std::fs::write(&path, b"{broken").unwrap();
-        let earlier = dir.join("settings.json.corrupt-123");
-        std::fs::write(&earlier, b"earlier").unwrap();
-
-        let copied = |outcome: CopyOutcome| match outcome {
-            CopyOutcome::Copied(to) => to,
-            other => panic!("{other:?}"),
-        };
-        let first = copied(copy_aside_at(&path, 123).unwrap());
-        let second = copied(copy_aside_at(&path, 123).unwrap());
-
-        assert_eq!(first, dir.join("settings.json.corrupt-123-1"));
-        assert_eq!(second, dir.join("settings.json.corrupt-123-2"));
-        assert_eq!(std::fs::read(&earlier).unwrap(), b"earlier");
-        assert_eq!(std::fs::read(&first).unwrap(), b"{broken");
-        assert_eq!(std::fs::read(&second).unwrap(), b"{broken");
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            b"{broken",
-            "원본은 그 자리에"
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    fn temp_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "engram-settings-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("시계")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn names_in(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = std::fs::read_dir(dir)
-            .unwrap()
-            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        names
-    }
-
-    #[test]
-    fn copy_aside_stops_at_the_bound_and_leaves_no_partial_copy() {
-        let dir = temp_dir("copy-bound");
-        let path = dir.join(SETTINGS_FILE);
-
-        let over = vec![b'x'; COPY_ASIDE_MAX as usize + 1];
-        std::fs::write(&path, &over).unwrap();
-        assert_eq!(
-            copy_aside_at(&path, 7).unwrap(),
-            CopyOutcome::OverBound {
-                bytes: COPY_ASIDE_MAX + 1
-            }
-        );
-        assert_eq!(names_in(&dir), vec![SETTINGS_FILE.to_string()]);
-        assert_eq!(std::fs::read(&path).unwrap(), over, "원본은 그 자리에");
-
-        let at = vec![b'y'; COPY_ASIDE_MAX as usize];
-        std::fs::write(&path, &at).unwrap();
-        let CopyOutcome::Copied(to) = copy_aside_at(&path, 7).unwrap() else {
-            panic!("상한과 같은 원본은 뜬다");
-        };
-        assert_eq!(std::fs::read(&to).unwrap(), at);
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// 표식은 작은 원본을 보고, 뜨는 순간엔 커져 있는 디스크.
-    struct StaleStamp(FsSettingsFiles);
-
-    impl SettingsFiles for StaleStamp {
-        fn read(&self) -> io::Result<RawFile> {
-            self.0.read()
-        }
-
-        fn write_atomic(&self, text: &str) -> io::Result<()> {
-            self.0.write_atomic(text)
-        }
-
-        fn stamp(&self) -> io::Result<SourceStamp> {
-            Ok(SourceStamp {
-                len: 7,
-                modified: Some(std::time::UNIX_EPOCH),
-            })
-        }
-
-        fn copy_aside(&self) -> io::Result<CopyOutcome> {
-            self.0.copy_aside()
-        }
-
-        fn matches_copy(&self, copy: &Path) -> io::Result<bool> {
-            self.0.matches_copy(copy)
-        }
-
-        fn origin(&self) -> String {
-            self.0.origin()
-        }
-    }
-
-    #[test]
-    fn a_real_source_grown_after_its_stamp_is_replaced_and_no_copy_is_left() {
-        let dir = temp_dir("grown");
-        std::fs::write(
-            dir.join(SETTINGS_FILE),
-            vec![b'x'; COPY_ASIDE_MAX as usize + 1],
-        )
-        .unwrap();
-        let files = StaleStamp(FsSettingsFiles::in_dir(&dir));
-        let mut copied = None;
-
-        write(
-            &files,
-            &mut copied,
-            Document::Unusable("가짜".to_string()),
-            &Overrides::new(),
-            &[("theme.default", Some("light".into()))],
-        )
-        .unwrap();
-
-        assert!(copied.is_none());
-        assert_eq!(names_in(&dir), vec![SETTINGS_FILE.to_string()]);
-        assert_eq!(
-            serde_json::from_slice::<Value>(&std::fs::read(dir.join(SETTINGS_FILE)).unwrap())
-                .unwrap(),
-            serde_json::json!({"$version": 1, "theme.default": "light"})
-        );
-
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    #[test]
-    fn same_bytes_needs_the_copy_in_place_with_the_same_bytes() {
-        let dir = temp_dir("same-bytes");
-        let path = dir.join(SETTINGS_FILE);
-        let copy = dir.join("settings.json.corrupt-1");
-        std::fs::write(&path, b"{broken").unwrap();
-        std::fs::write(&copy, b"{broken").unwrap();
-        assert!(same_bytes(&path, &copy).unwrap());
-
-        std::fs::write(&copy, b"{BROKEN").unwrap();
-        assert!(!same_bytes(&path, &copy).unwrap(), "바이트가 다르다");
-
-        std::fs::remove_file(&copy).unwrap();
-        assert!(!same_bytes(&path, &copy).unwrap(), "사본이 없다");
-
-        let over = vec![b'x'; COPY_ASIDE_MAX as usize + 1];
-        std::fs::write(&path, &over).unwrap();
-        std::fs::write(&copy, &over).unwrap();
-        assert!(!same_bytes(&path, &copy).unwrap(), "상한을 넘으면 다르다");
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

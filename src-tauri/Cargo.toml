@@ -85,6 +85,13 @@ engram-dashboard-discovery = { path = "../crates/engram-dashboard-discovery" }
 #   직접 지고 있다(위 T1 블록). 그래도 안 켜는 이유는 **의도 표시**다: 나중에 이 셸이 async 를 걷어내도
 #   net 간선이 그것을 되돌려 놓지 않는다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석.
 engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
+# ADR-0266: OS 층 — 상태 폴더 임시 파일 쓸기의 주인 생존 판정(`process::pid_alive` — `state::boot` 의 `sweep_temps` ·
+#   옛 `base::platform` 에서 옮겨 왔다) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
+#   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
+#   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은
+#   platform 하나에만 둔다(CI `platform gate 5`). 새 패키지가 아니다 — discovery 를 타고 이미 이 셸의 운영 그래프에
+#   있었다(직접 간선만 는다). ★`test-support` 를 켜지 않는다★(CI `platform gate 3`).
+engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
 tauri-plugin-autostart = "2"
 
 # T1(S14 모듈①): DaemonClient(비동기 WS 클라이언트) + OutputRouter(arc-swap) 신설을 위해

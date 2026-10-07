@@ -44,6 +44,8 @@ export const ko = {
     domModeToggle: 'DOM 모드 전환',
     renderFailed: '이 슬롯을 표시하지 못했습니다 — 우클릭 메뉴로 비우거나 닫을 수 있습니다',
     scrollToBottom: '맨 아래로',
+    // TRD S21-storage §6-2: 이 판이 모르는 슬롯 종류 — 화면엔 아이콘만 그리고 이 문구는 그 이름·툴팁이다.
+    foreignContent: '알 수 없는 내용',
   },
   window: {
     create: '새 창',
@@ -65,10 +67,10 @@ export const ko = {
     spawnInto: '스폰 + 배치',
     kill: '에이전트 종료',
     monitor: '에이전트 모니터링',
-    connecting: '에이전트 연결 중…', // caps 미도착 슬롯의 중립 플레이스홀더.
-    // ADR-0148: 명부를 받았는데 그 id 의 프로필도 없는 슬롯(트리에서 삭제됨). 위 connecting 과 구분한다 —
+    connecting: '에이전트 연결 중…', // 명부·프로필 목록을 아직 못 받은 슬롯 — 이 경우에만 쓴다(TRD S21-storage §6-8).
+    // TRD S21-storage §6-8: 목록을 받았는데 그 id 의 프로필이 없는 슬롯(트리에서 삭제됨). connecting 과 구분한다 —
     // 그쪽은 "곧 온다", 이쪽은 "올 것이 없다".
-    noneConnected: '연결된 에이전트가 없습니다',
+    noTarget: '대상 없음',
     monitoringLabel: '에이전트 모니터링 — 이 슬롯에 실행중 에이전트 배정',
     monitoringSearch: '에이전트 검색 (이름·경로)',
     noCandidates: '검색 결과 없음', // 실행중은 있으나 검색 미스.
@@ -237,6 +239,43 @@ export const ko = {
     //   되면 그 결과도 이 문구를 쓴다.
     toolRefusedReason: '대시보드가 승인 요청을 처리하지 않아 실행되지 않음',
     toolDeclinedReason: '실행되지 않음',
+  },
+  /**
+   * 비정상 종료 뒤 「복원할까요?」 모달과 상태 파일 알림(TRD S21-storage §6-7). 문장이 주장하는 것은 셸의 계약
+   * (`src-tauri/bindings/CrashCopyStatus.ts` · `RestoreStatusView.ts` · `StateFileStatus.ts` 의 doc)에 기댄다 — 그쪽이
+   * 바뀌면 여기를 함께 고친다.
+   */
+  restore: {
+    title: '이전 화면을 복원할까요?',
+    intro: '정상적으로 종료되지 않은 실행의 화면이 저장되어 있습니다.',
+    savedAt: '저장 시각',
+    windows: '창',
+    tabs: '탭',
+    count: '{count}개',
+    accept: '이전 화면 복원',
+    reject: '새로 시작',
+    rejectWarning: '「새로 시작」을 고르면 저장된 이전 화면을 지웁니다. 되돌릴 수 없습니다.',
+    // `durable:false` — 이 실행은 아무것도 저장하지 않아 거절이 사본을 지우지 못한다. 원인은 둘이라(`state.json` 을
+    //   못 읽음 · 사본을 못 뜸) 파일 이름을 대지 않는다.
+    rejectWarningNotSaving:
+      '이번 실행은 화면 상태를 저장하지 않습니다. 「새로 시작」을 골라도 저장된 이전 화면은 그대로 남고, 다음 실행 때 다시 묻습니다.',
+    working: '처리 중…',
+    // 오류 종류를 가르지 않는다 — 셸의 오류 문자열은 종류를 싣는 계약이 아니다.
+    answerFailed: '답을 처리하지 못했습니다. 잠시 뒤 다시 시도해 주세요.',
+    stateFileUnreadable:
+      '화면 상태 파일(state.json)을 읽지 못해 기본 화면으로 시작했습니다. 이번 실행에서는 화면 상태를 저장하지 않으며, 다음 실행 때 다시 읽습니다.',
+    // 「못 쓰는 파일」은 손상만이 아니다 — 새 판의 형식 · 크기 상한 초과 등도 든다. 원인을 하나로 단정하지 않는다.
+    stateFileCorruptCopiedAside:
+      '화면 상태 파일(state.json)이 사용할 수 없는 상태(손상 · 다른 버전의 형식 등)라 기본 화면으로 시작했습니다. 원래 파일 내용은 같은 폴더의 state.json.corrupt 에 남겨 두었습니다.',
+    // ★이 경우의 `.corrupt` 를 이번 실행의 백업으로 말하지 말 것★ — 그 이름의 파일은 앞선 실행이 떠 둔 것이다.
+    stateFileCorruptNotCopied:
+      '화면 상태 파일(state.json)이 사용할 수 없는 상태(손상 · 다른 버전의 형식 등)라 기본 화면으로 시작했습니다. 원래 파일은 따로 보관하지 못했습니다. 같은 폴더에 state.json.corrupt 가 있다면 이전 실행에서 남긴 것이며, 이번 파일의 백업이 아닙니다.',
+    // 가드 ⅱ(`saves:false` · `state_file:'ok'`). 원인이 여럿이라(쓰기 실패 · 사본을 못 읽음 · 새 판의 사본이 그 자리에
+    //   있음) 하나로 단정하지 않는다. 「다시 묻는다」 = 이 실행이 `state.json` 을 건드리지 않아 정상 종료 표시가 없는
+    //   채로 남고, 다음 부팅이 그것을 다시 판정한다.
+    stateFileNotSaving:
+      '정상적으로 종료되지 않은 이전 실행의 화면을 따로 보관하지 못해 이번 실행에서는 화면 상태를 저장하지 않습니다. 다음 실행 때 다시 묻습니다.',
+    dismissNotice: '화면 상태 알림 닫기',
   },
   /** 네이티브 OS 다이얼로그 제목 — webview 밖 사용자 노출 텍스트. */
   dialog: {
