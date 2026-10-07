@@ -18,7 +18,7 @@ use uuid::Uuid;
 use engram_dashboard_protocol::{AgentBackendKind, AgentCommand, AgentEvent, RequestId};
 
 use crate::commands::popout::{PopupCounter, TauriWindowHost};
-use crate::commands::settings::{TauriSettingsEvents, TauriUiSettings};
+use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
@@ -28,7 +28,7 @@ use crate::layout::{
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
 use crate::state::restore::RestoreCoordinator;
-use crate::ui_settings::EffectiveThemes;
+use crate::theme::ThemeControl;
 
 const EVT_LAYOUT_UPDATED: &str = "layout:updated";
 // 프론트는 `label` 이 자기 창과 일치할 때만 반응한다(§7-1).
@@ -222,7 +222,7 @@ pub fn command_ports(
     labels: Arc<PopupCounter>,
     client: Arc<DaemonClient>,
     settings: Arc<SettingsService>,
-    themes: Arc<EffectiveThemes>,
+    themes: ThemeControl,
     restore: Arc<RestoreCoordinator>,
 ) -> crate::layout::commands::LayoutPorts {
     crate::layout::commands::LayoutPorts {
@@ -235,8 +235,8 @@ pub fn command_ports(
         windows: Arc::new(OwnedWindowHost { app: app.clone() }),
         labels,
         spawner: Arc::new(OwnedSpawner { client }),
-        // 아래 셋은 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
-        ui_settings: Arc::new(TauriUiSettings::new(app.clone(), Arc::clone(&themes))),
+        // 아래 넷은 레이아웃 포트가 아니다 — 표가 하나라 여기 함께 실린다(`layout::commands` 헤더).
+        themes: themes.clone(),
         settings,
         settings_events: Arc::new(TauriSettingsEvents::new(app, themes)),
         restore,

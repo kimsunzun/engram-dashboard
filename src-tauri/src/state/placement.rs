@@ -21,7 +21,7 @@ use super::convert::TREE_WINDOW_ID;
 use super::restore::RestoreWindows;
 use super::tree_attrs::TreeAttrs;
 use crate::layout::{LayoutState, WindowAttrs, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL};
-use crate::ui_settings::EffectiveThemes;
+use crate::theme::ThemeControl;
 
 /// 모니터 하나 — OS 가 알려 준 물리 픽셀 사각형과 그 배율.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -147,6 +147,19 @@ pub fn open_restored_popouts(
     failed
 }
 
+/// 부팅 단계 ⑨ 의 끝 — 복원한 팝아웃 창을 열고([`open_restored_popouts`] — 돌려주는 값도 그것) **그 뒤에** 모든
+/// 창의 유효 테마를 한 번 민다(§5-6). 연 뒤라 새 팝아웃도 받는 창 명단에 들고, 못 연 팝아웃은 모델에서 빠진 뒤다.
+/// ★부르는 쪽은 아무 락도 쥐지 않는다★.
+fn open_popouts_then_push_themes(
+    layout: &LayoutState,
+    open: impl FnMut(&str, WindowAttrs) -> Result<(), String>,
+    themes: &ThemeControl,
+) -> Vec<String> {
+    let failed = open_restored_popouts(layout, open);
+    themes.push();
+    failed
+}
+
 /// 저장된 최대화를 그 창이 처음 보일 때로 미룬 창의 label 들.
 ///
 /// - 세우는 쪽 = main 에 자리 · 최대화를 입히는 길(부팅 ⑧ [`restore_windows`] · 런타임 복원 수락
@@ -230,7 +243,7 @@ pub fn restore_windows(
     app: &AppHandle,
     layout: &LayoutState,
     tree: &TreeAttrs,
-    themes: &EffectiveThemes,
+    themes: &ThemeControl,
 ) {
     let monitors = monitors(app);
     // 두 칸은 락마다 따로 짧게 읽는다(겹쳐 잡지 않는다 — §6-3).
@@ -261,10 +274,11 @@ pub fn restore_windows(
     if let Some(window) = app.get_webview_window(TREE_WINDOW_ID) {
         place_saved(&window.as_ref().window(), tree.attrs().bounds, &monitors);
     }
-    open_restored_popouts(layout, |label, attrs| {
-        open_popout(app, label, attrs, &monitors)
-    });
-    crate::commands::settings::push_themes(app, themes);
+    open_popouts_then_push_themes(
+        layout,
+        |label, attrs| open_popout(app, label, attrs, &monitors),
+        themes,
+    );
 }
 
 /// 복원한 팝아웃 창 하나를 연다 — 저장된 자리(어느 모니터에도 안 걸치면 label 의 기본 자리) · 최대화 · 첫 자리
@@ -753,6 +767,8 @@ pub fn record(window: &Window) {
 mod tests {
     use super::*;
     use crate::layout::ViewManager;
+    use crate::settings::SettingsService;
+    use crate::theme::{EffectiveThemes, ThemeWindows, UiSettingsPayload, UiTheme, DEFAULT_THEME};
 
     fn monitor(x: i32, y: i32, w: u32, h: u32, scale: f64) -> MonitorArea {
         MonitorArea { x, y, w, h, scale }
@@ -985,6 +1001,78 @@ mod tests {
             panic!("열 팝아웃이 없다: {label}");
         });
         assert!(removed.is_empty());
+    }
+
+    /// 살아 있는 웹뷰 명단(`live`)과 보낸 것 — 시험의 `open` 이 연 팝아웃을 명단에 올린다.
+    #[derive(Default)]
+    struct Screen {
+        live: Mutex<Vec<String>>,
+        sent: Mutex<Vec<(String, String)>>,
+    }
+
+    impl ThemeWindows for Screen {
+        fn labels(&self) -> Vec<String> {
+            self.live.lock().unwrap().clone()
+        }
+
+        fn send(&self, label: &str, payload: UiSettingsPayload) -> Result<(), String> {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((label.to_string(), payload.theme));
+            Ok(())
+        }
+    }
+
+    /// ★부팅 복원은 창마다 그 창의 유효 테마를 민다★ — 자기 테마가 있는 창(main · 트리 창 · 팝아웃)은 그 값, 없는
+    /// 팝아웃은 전역 값. 팝아웃은 연 뒤에 밀어 받는 창 명단에 든다.
+    #[test]
+    fn boot_restore_pushes_each_window_its_effective_theme_after_opening_popouts() {
+        let layout = layout_with_popouts(&["slot-popup-1", "slot-popup-2"]);
+        {
+            let mut mgr = layout.0.lock().unwrap();
+            mgr.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
+                .unwrap();
+            mgr.set_window_theme("slot-popup-1", Some(UiTheme::EInk))
+                .unwrap();
+        }
+        let tree = Arc::new(TreeAttrs::default());
+        tree.set_theme(Some(UiTheme::Light));
+        let screen = Arc::new(Screen::default());
+        screen
+            .live
+            .lock()
+            .unwrap()
+            .extend([MAIN_WINDOW_LABEL.to_string(), TREE_WINDOW_ID.to_string()]);
+        // 쓰기를 안 연 설정 — 전역 테마는 기본값이고, 적재는 없는 폴더를 만들지 않는다.
+        let settings = Arc::new(SettingsService::load_from_dir(
+            &std::env::temp_dir().join("engram-placement-no-settings"),
+        ));
+        let themes = ThemeControl::new(
+            Arc::new(EffectiveThemes::new(settings, layout.clone(), tree)),
+            screen.clone(),
+        );
+
+        let removed = open_popouts_then_push_themes(
+            &layout,
+            |label, _| {
+                screen.live.lock().unwrap().push(label.to_string());
+                Ok(())
+            },
+            &themes,
+        );
+
+        assert!(removed.is_empty());
+        let expected: Vec<(String, String)> = [
+            (MAIN_WINDOW_LABEL, "light"),
+            (TREE_WINDOW_ID, "light"),
+            ("slot-popup-1", "e-ink"),
+            ("slot-popup-2", DEFAULT_THEME.as_wire()),
+        ]
+        .iter()
+        .map(|(label, theme)| (label.to_string(), theme.to_string()))
+        .collect();
+        assert_eq!(*screen.sent.lock().unwrap(), expected);
     }
 
     // ── 미룬 최대화 ──

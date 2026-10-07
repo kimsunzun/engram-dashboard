@@ -485,7 +485,7 @@ mod tests {
     };
     use crate::state::saver::SnapshotSource;
     use crate::state::schema::{StateFile, STATE_VERSION};
-    use crate::ui_settings::UiTheme;
+    use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload, UiTheme};
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1309,6 +1309,17 @@ mod tests {
         }
     }
 
+    struct NoThemeWindows;
+
+    impl ThemeWindows for NoThemeWindows {
+        fn labels(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn send(&self, _label: &str, _payload: UiSettingsPayload) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
     struct NoEvents;
 
     impl LayoutEvents for NoEvents {
@@ -1337,6 +1348,17 @@ mod tests {
             windows: Arc::new(NoWindows),
             events: Arc::new(NoEvents),
             subs: Arc::new(NoSubscriptions),
+            // 쓰기를 안 연 설정 — 적재는 없는 폴더를 만들지 않는다.
+            themes: ThemeControl::new(
+                Arc::new(EffectiveThemes::new(
+                    Arc::new(crate::settings::SettingsService::load_from_dir(
+                        &state_dir.join("no-settings"),
+                    )),
+                    layout.clone(),
+                    tree.clone(),
+                )),
+                Arc::new(NoThemeWindows),
+            ),
         });
         boot.run_steps(&run_dir, &state_dir);
         session.start_saver();

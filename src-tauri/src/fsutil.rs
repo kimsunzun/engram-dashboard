@@ -2,7 +2,7 @@
 //! ([`write_atomic`] · [`write_atomic_unless`]) · 원자 복사([`copy_atomic`] · [`copy_aside`]) · 남은 임시 파일
 //! 쓸기([`sweep_temps`]) · 내용 식별값([`fnv1a_64`]).
 //!
-//! 저장소의 파일 이름·위치·형식은 모른다 — 그건 각 저장소(`ui_settings` · `settings::store` · `state`)가 소유한다.
+//! 저장소의 파일 이름·위치·형식은 모른다 — 그건 각 저장소(`settings::store` · `state`)가 소유한다.
 //! 여기서 정하는 이름은 대상 옆에 붙는 둘뿐이다: 임시 `<이름>.tmp<pid>.<번호>` · 떠 둔 사본 `<이름>.corrupt`.
 //! ★그 꼴을 만드는 곳([`temp_path`] · [`copy_aside`])과 읽는 곳([`temp_owner`])이 여기뿐이다★ — 꼴을 바꾸면
 //! 셋을 함께 고친다(시험이 만든 이름을 다시 읽어 맞댄다).
@@ -530,6 +530,61 @@ mod tests {
             io::ErrorKind::NotFound
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn exactly_the_cap_is_read_and_one_byte_more_is_refused() {
+        let cap = 32u64;
+        assert!(
+            read_capped(io::Cursor::new(vec![b'x'; cap as usize]), cap).is_ok(),
+            "상한 자체는 통과다"
+        );
+        let over = read_capped(io::Cursor::new(vec![b'x'; cap as usize + 1]), cap)
+            .expect_err("상한 초과는 반려다");
+        assert_eq!(over.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// 내보낸 바이트를 세는 원본 — 결과만 보면 「다 읽고 나서 반려」와 「끊어 읽고 반려」가 똑같이
+    /// `InvalidData` 라 구분이 안 된다.
+    struct Counting<'a, R> {
+        inner: R,
+        produced: &'a Cell<u64>,
+    }
+
+    impl<R: io::Read> io::Read for Counting<'_, R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.produced.set(self.produced.get() + n as u64);
+            Ok(n)
+        }
+    }
+
+    /// ★상한이 결과가 아니라 **읽는 양**을 끊는다★ — [`read_capped`] 가 존재하는 이유 그 자체다.
+    #[test]
+    fn the_cap_stops_the_read_rather_than_the_result() {
+        let cap = 16u64;
+        let produced = Cell::new(0u64);
+        let reader = Counting {
+            inner: io::Cursor::new(vec![b'x'; 1024 * 1024]),
+            produced: &produced,
+        };
+
+        let refused = read_capped(reader, cap).expect_err("상한 초과는 반려다");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
+
+        let read = produced.get();
+        assert!(
+            read <= cap + 1,
+            "상한을 넘겨 {read} 바이트를 읽었다(허용 {}) — 끊지 않으면 원문 전체가 메모리에 올라온다",
+            cap + 1
+        );
+    }
+
+    #[test]
+    fn non_utf8_content_is_invalid_data_like_an_oversized_one() {
+        let refused = read_capped(io::Cursor::new(vec![0xff, 0xfe, 0x00]), 64)
+            .expect_err("UTF-8 아님은 반려다");
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidData);
     }
 
     // ── 원자 쓰기 ──

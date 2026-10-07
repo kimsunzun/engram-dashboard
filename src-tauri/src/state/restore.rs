@@ -24,6 +24,7 @@ use crate::layout::{
     LabelSource, LayoutEvents, LayoutState, SubscriptionSync, ViewManager, ViewSnapshot,
     WindowAttrs, WindowBounds, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
+use crate::theme::ThemeControl;
 
 /// 복원 상태가 바뀌면 main 창에 내는 사건 — 실을 것 = [`CrashCopyStatus`].
 pub const EVT_RESTORE_CHANGED: &str = "restore:changed";
@@ -548,19 +549,21 @@ pub trait SubscriptionSource: Send + Sync {
     fn current(&self) -> Option<Arc<dyn SubscriptionSync>>;
 }
 
-/// 조율자가 셸이 선 뒤에 받는 포트 — 창 포트 · 알림 · 구독 원천 모두 `AppHandle` 이 있어야 선다.
+/// 조율자가 셸이 선 뒤에 받는 포트 — 창 포트 · 알림 · 구독 원천 · 테마 밀기 모두 `AppHandle` 이 있어야 선다.
 pub struct RestorePorts {
     pub windows: Arc<dyn RestoreWindows>,
     pub events: Arc<dyn LayoutEvents>,
     pub subs: Arc<dyn SubscriptionSource>,
+    /// 셸에 하나인 그 유효 테마 — 조율자와 같은 모델 · 트리 칸을 본다.
+    pub themes: ThemeControl,
 }
 
 /// 런타임 복원 수락 · 거절의 단일 경로(TRD §6-7 ①–⑤) — 사람(Tauri 껍데기)과 LLM(버스 `restore.answer`)이 같은
 /// 인스턴스를 부른다.
 ///
 /// - ★커밋 지점은 하나다(③ · `ViewManager` 락 하나 안)★ — 그 앞(① 준비 · ② 숨은 창 만들기)의 실패는 만든 창을
-///   거두고 `awaiting` 으로 되돌리고, 그 뒤(④ 알림 · 자리 · 보이기 · 사라진 팝아웃 지우기 · 옛 팝아웃 거두기)의
-///   실패는 로그만 남긴다.
+///   거두고 `awaiting` 으로 되돌리고, 그 뒤(④ 테마 밀기 · 알림 · 자리 · 보이기 · 사라진 팝아웃 지우기 · 옛 팝아웃
+///   거두기)의 실패는 로그만 남긴다.
 /// - ★복원한 팝아웃은 main 의 보임을 따른다(ADR-0229)★ — 숨은 main 곁에 팝아웃만 뜨지 않게 숨긴 채 두고, 트레이
 ///   「보이기」가 함께 드러낸다. 사본의 최대화는 그 창이 처음 보일 때 입힌다([`RestoreWindows::open_hidden`]).
 /// - ★락 순서★: 서비스 칸 · 세션 칸은 잎이고 `ViewManager` 락과 트리 칸 락은 겹쳐 잡지 않는다 — 트리 칸은 ③ 이
@@ -711,6 +714,10 @@ impl RestoreCoordinator {
         // 레이아웃 락을 놓은 뒤 · ④ 앞(§6-3 — 두 락을 겹쳐 잡지 않는다). ④ 의 트리 창 자리 입히기가 낳는
         //   `Moved` 기록이 이 값 위에 적혀야 한다.
         self.tree.set(tree);
+        // 사본의 창 테마가 모델 · 트리 칸에 들었다 — 떠 있는 main · 트리 창과, 커밋 전(모델에 들기 전)에 첫 값을 당긴
+        //   새 팝아웃이 그 값을 받게 민다. 보이기(④) 앞이라 새 팝아웃이 옛 값으로 비치지 않는다(TRD S21-storage §6-7).
+        // ADR-0265
+        ports.themes.push();
 
         let kept = self.after_commit(ports, committed, main, tree, &popouts, &desktop);
         Ok(count(1 + kept))
@@ -1446,8 +1453,9 @@ mod tests {
 
     use crate::commands::popout::PopupCounter;
     use crate::layout::{tree, WindowPlacement};
+    use crate::settings::SettingsService;
     use crate::state::convert::to_persisted;
-    use crate::ui_settings::UiTheme;
+    use crate::theme::{EffectiveThemes, ThemeWindows, UiSettingsPayload, UiTheme};
 
     const PRIMARY: MonitorArea = MonitorArea {
         x: 0,
@@ -1748,6 +1756,34 @@ mod tests {
         }
     }
 
+    /// 테마 밀기의 창 쪽 — 살아 있는 웹뷰 = 모델의 창 + 트리 창. 보낸 것과 보낼 때 레이아웃 락이 비었는지 적는다.
+    struct ThemeScreen {
+        layout: LayoutState,
+        sent: Mutex<Vec<(String, String)>>,
+        lock_was_free: Mutex<Vec<bool>>,
+    }
+
+    impl ThemeWindows for ThemeScreen {
+        fn labels(&self) -> Vec<String> {
+            let mut labels = self.layout.0.lock().unwrap().list_windows();
+            labels.sort();
+            labels.push(TREE_WINDOW_ID.to_string());
+            labels
+        }
+
+        fn send(&self, label: &str, payload: UiSettingsPayload) -> Result<(), String> {
+            self.lock_was_free
+                .lock()
+                .unwrap()
+                .push(self.layout.0.try_lock().is_ok());
+            self.sent
+                .lock()
+                .unwrap()
+                .push((label.to_string(), payload.theme));
+            Ok(())
+        }
+    }
+
     /// 구독 원천 — 비어 있으면 데몬 클라이언트가 아직 없는 셸이다. 찾을 때 락이 비었는지 적는다.
     struct SubsSlot {
         layout: LayoutState,
@@ -1776,6 +1812,8 @@ mod tests {
         events: Arc<FakeEvents>,
         subs: Arc<FakeSubs>,
         slot: Arc<SubsSlot>,
+        theme_screen: Arc<ThemeScreen>,
+        themes: ThemeControl,
     }
 
     impl Rig {
@@ -1811,6 +1849,19 @@ mod tests {
                 subs: Mutex::default(),
                 lookups_with_lock_free: Mutex::default(),
             });
+            let theme_screen = Arc::new(ThemeScreen {
+                layout: layout.clone(),
+                sent: Mutex::default(),
+                lock_was_free: Mutex::default(),
+            });
+            // 쓰기를 안 연 설정 — 전역 테마는 기본값(dark)이고, 적재는 없는 폴더를 만들지 않는다.
+            let settings = Arc::new(SettingsService::load_from_dir(
+                &std::env::temp_dir().join("engram-restore-no-settings"),
+            ));
+            let themes = ThemeControl::new(
+                Arc::new(EffectiveThemes::new(settings, layout.clone(), tree.clone())),
+                theme_screen.clone(),
+            );
             Rig {
                 coordinator,
                 service,
@@ -1822,6 +1873,8 @@ mod tests {
                 events,
                 subs,
                 slot,
+                theme_screen,
+                themes,
             }
         }
 
@@ -1836,6 +1889,7 @@ mod tests {
                 windows: self.windows.clone(),
                 events: self.events.clone(),
                 subs: self.slot.clone(),
+                themes: self.themes.clone(),
             });
         }
 
@@ -1994,6 +2048,69 @@ mod tests {
                 CrashCopyStatus::Answered
             )))
         ));
+    }
+
+    /// ★수락은 사본의 창 테마를 민다★ — main · 트리 창은 이미 떠 있고, 새 팝아웃은 모델에 들기 전에 첫 값을 당겼을 수
+    /// 있다(그때는 전역 값). 보이기 앞에 · 레이아웃 락 밖에서 민다.
+    #[test]
+    fn an_accept_pushes_the_copys_window_themes() {
+        let rig = Rig::new(None);
+        rig.attach();
+        let mut prev = ViewManager::new();
+        prev.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Light))
+            .unwrap();
+        prev.create_window("slot-popup-70").unwrap();
+        prev.set_window_theme("slot-popup-70", Some(UiTheme::EInk))
+            .unwrap();
+        prev.create_window("slot-popup-71").unwrap();
+        let tree = WindowAttrs {
+            theme: Some(UiTheme::EInk),
+            ..WindowAttrs::default()
+        };
+        rig.service.set_boot(
+            Some(copy_of(to_persisted(&prev, tree))),
+            StateFileStatus::Ok,
+            true,
+        );
+
+        rig.coordinator.answer(true).expect("수락");
+
+        let mut sent = rig.theme_screen.sent.lock().unwrap().clone();
+        sent.sort();
+        let mut themes: Vec<String> = sent.iter().map(|(_, theme)| theme.clone()).collect();
+        themes.sort();
+        assert_eq!(sent.len(), 4, "main · 트리 · 새 팝아웃 둘: {sent:?}");
+        assert!(sent.contains(&(MAIN_WINDOW_LABEL.to_string(), "light".to_string())));
+        assert!(sent.contains(&(TREE_WINDOW_ID.to_string(), "e-ink".to_string())));
+        assert_eq!(
+            themes,
+            ["dark", "e-ink", "e-ink", "light"],
+            "새 팝아웃 하나는 사본의 테마, 하나는 전역 값: {sent:?}"
+        );
+        assert!(
+            rig.theme_screen
+                .lock_was_free
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|free| *free),
+            "레이아웃 락 밖에서 민다"
+        );
+    }
+
+    /// 수락 전에 실패하면 화면이 그대로라 밀 것이 없다.
+    #[test]
+    fn a_failed_accept_pushes_no_theme() {
+        let rig = Rig::new(None);
+        rig.attach();
+        let (windows, _) = previous_screen(1, false);
+        rig.service
+            .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
+        *rig.windows.fail_open.lock().unwrap() = Some("slot-popup-1".to_string());
+
+        assert!(rig.coordinator.answer(true).is_err());
+
+        assert!(rig.theme_screen.sent.lock().unwrap().is_empty());
     }
 
     #[test]

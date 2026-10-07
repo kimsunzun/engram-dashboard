@@ -6,7 +6,7 @@ pub mod output_channel;
 pub mod output_router;
 pub mod settings;
 pub mod state;
-pub mod ui_settings;
+pub mod theme;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;
 // 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
@@ -107,10 +107,12 @@ pub fn run() {
     let settings = std::sync::Arc::new(crate::settings::SettingsService::load_from_dir(
         &crate::discovery::DataLayout::resolve().shell_config_dir(),
     ));
-    // ★셸에 하나★ — 밀기 순서를 지키는 락이 이 안에 있다(사람 경로·LLM 경로가 같은 인스턴스를 본다).
-    let themes = std::sync::Arc::new(crate::ui_settings::EffectiveThemes::new(
+    // ★셸에 하나★ — 밀기 순서를 지키는 락이 이 안에 있다(사람 경로·LLM 경로가 같은 인스턴스를 본다). 창 테마는 위
+    //   화면 상태 모델 · 트리 칸에서 읽는다(TRD S21-storage §5-6).
+    let themes = std::sync::Arc::new(crate::theme::EffectiveThemes::new(
         settings.clone(),
-        Box::new(crate::ui_settings::FileSource::in_data_dir()),
+        setup_layout.clone(),
+        setup_tree.clone(),
     ));
     builder = builder.manage(settings.clone()).manage(themes.clone());
 
@@ -122,19 +124,13 @@ pub fn run() {
             // ── 부팅 단계 ⑦: 기록기 시작(가드면 띄우지 않는다 — §6-5 ③) ─────────────────────
             state_session.start_saver();
 
-            // ── 죽은 창의 테마 항목 쓸기 ─────────────────────────────────────────────────
-            // ★부팅에서만 돈다 — `ui.refresh` 로 옮기지 말 것★. **이 순간 팝아웃 창이 하나도 없고**(복원한
-            //   팝아웃도 아직 창이 없다) 그 label 은 이 실행에서 새로 받은 것이라(§6-3), 지금 파일에 있는
-            //   비-선언 label 은 생사를 물을 것도 없이 정의상 전부 죽은 것이다. 여기에 생존 확인을 덧대면
-            //   아직 만들어지는 중인 창의 항목을 지우는 경합이 되살아난다(사유·불변식 전문 =
-            //   `ui_settings::sweep_dead_windows`). 로그 자리를 잡은 뒤에 부른다 — 무엇을 지웠는지가 이 앱
-            //   로그에만 남는다.
-            // ADR-0167
-            crate::commands::settings::sweep_dead_window_entries(app.handle());
-
             // 단일 인스턴스 관문을 지난 뒤라 디스크를 바꿔도 된다(빌더 쪽 적재 주석). 로거가 선 뒤라 적재가
             //   모아 둔 로그(못 쓰는 `settings.json` · 접힌 값)도 여기서 나간다.
             settings.enable_writes();
+
+            // 창 테마 손잡이 — 명령 표 · 부팅 밀기 · 복원 조율자가 같은 것을 쥔다(TRD S21-storage §5-6).
+            let theme_control =
+                crate::commands::settings::theme_control(app.handle().clone(), themes.clone());
 
             // ── ADR-0026 2단계: 네이티브 트레이 배선 ─────────────────────────────────────
             // ADR-0029: 앱은 항상 트레이를 갖는 daemon 클라이언트라 무조건 호출(모드 게이트 없음).
@@ -188,7 +184,7 @@ pub fn run() {
                                     labels.clone(),
                                     client.clone(),
                                     settings.clone(),
-                                    themes.clone(),
+                                    theme_control.clone(),
                                     setup_restore.clone(),
                                 ),
                             ),
@@ -209,13 +205,12 @@ pub fn run() {
             }
 
             // ── 부팅 단계 ⑧ ⑨: main · 트리 창 자리 · 복원한 팝아웃 창 · 테마 한 번(TRD S21-storage §6-5) ──
-            // 설정 창은 이미 있다(사용자 setup). 팝아웃 창은 위 쓸기 뒤에 연다 — 그 쓸기의 전제가 「이 순간 팝아웃
-            //   창이 하나도 없다」다. `--hidden` 이면 아래 숨기기가 이 창들도 숨긴다(사용자 결정 F13).
+            // 설정 창은 이미 있다(사용자 setup). `--hidden` 이면 아래 숨기기가 이 창들도 숨긴다(사용자 결정 F13).
             crate::state::placement::restore_windows(
                 app.handle(),
                 &setup_layout,
                 &setup_tree,
-                &themes,
+                &theme_control,
             );
 
             // ── 부팅 단계 ⑩: 파생 표(라우터 · 사용량 관심)를 마지막 창 묶음으로 한 번 다시 계산한다 ──
@@ -249,6 +244,7 @@ pub fn run() {
                 subs: std::sync::Arc::new(crate::commands::layout::AppSubscriptions {
                     app: app.handle().clone(),
                 }),
+                themes: theme_control,
             });
             // TODO(T6/connect): 부팅 시 DaemonClient.ensure()/connect() 호출로 자동 연결 수립.
             if let Err(e) = tray::build_tray(app) {
@@ -347,8 +343,8 @@ pub fn run() {
             // 측정 보고(웹뷰 → 셸) — 버스 명령이 아니다(ADR-0227).
             commands::report_window_canvas,
             commands::report_ui_metrics,
-            // 부팅 조회 — 미는 쪽(`ui.refresh` · `theme.default` 쓰기)은 따로 있다(`commands/settings.rs`
-            //   「창별 테마를 읽는 자리가 둘인 이유」).
+            // 부팅 조회 — 미는 쪽(`window.setTheme` · `theme.default` 쓰기 · 부팅 · 복원 수락)은 따로 있다
+            //   (`commands/settings.rs` 「창별 테마를 읽는 자리가 둘인 이유」).
             commands::get_ui_settings,
             // 셸 설정 — 버스 `settings.*` 와 같은 서비스(ADR-0081 결정 3).
             commands::settings_get,

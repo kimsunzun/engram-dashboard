@@ -2146,7 +2146,7 @@ impl DeclaredArg {
     ///   보내므로 두 입구가 갈리기도 한다.
     /// ★필수 칸에는 경쟁하는 뜻이 없다★: 옵션 칸에서 "값 없음" 은 이미 **플래그를 빼는 것**으로 표현되므로
     ///   그 낱말은 평범한 문자열로 남아야 하고, 필수 칸은 뺄 수 없으니 null 을 말할 다른 방법이 없다.
-    ///   `agent.move --parent`(필수 + nullable)가 이 규칙을 만든 자리이고, 오늘 여기 드는 유일한 칸이다.
+    ///   `agent.move --parent`(필수 + nullable)가 이 규칙을 만든 자리다(`window.setTheme --theme` 도 같은 모양).
     fn takes_null_word(&self) -> bool {
         self.nullable && self.required
     }

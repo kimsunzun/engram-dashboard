@@ -18,7 +18,7 @@
   {tool} help mail      우편. 팀원에게 보내고 받는다
   {tool} help agent     에이전트. 만들고 띄우고 재배치한다
   {tool} help window    창 · 탭 · 분할, 그 자리에 에이전트 배치, 사용량 한도(usage.*), 비정상 종료 뒤 화면 복원(restore.*)
-  {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*)
+  {tool} help settings  설정. 테마 · 챗 화면 스타일(settings.*) · 창별 테마(window.setTheme)
 
 명령 실행 = `{tool} <name> --flag 값`. 이름 전부는 `{tool} commands`, 한 명령의 인자와 반환은 `{tool} commands <name>`.
 ## mail
@@ -174,19 +174,17 @@ key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.st
 
 파일은 `<data_dir>/shell/config/settings.json` 이다. 손으로 고치지 않는다 — 쓰는 길은 위 명령뿐이다(실행 중 편집은 다음 시작까지 반영되지 않는다).
 
-창별 테마는 아직 명령이 아니라 파일 `<data_dir>/ui-settings.json` 의 windows 다. 창 label 마다 값을 적고(label 은 {tool} window.list 가 준다) 고친 뒤 부른다. 값은 dark · light · e-ink(소문자 그대로)다.
+창 하나만 다른 테마로 두려면 창 명령을 쓴다. window 는 {tool} window.list 의 label 이거나 트리 창 agent-tree 다.
 
-  {"windows":{"main":"light"}}
+  {tool} window.getTheme --window <label>
+      theme 은 그 창에만 정한 테마이고 null 이면 정하지 않아 theme.default 를 따른다. effective 는 지금 그 창에 칠한 테마다
+  {tool} window.setTheme --window <label> --theme <dark|light|e-ink|none>
+      그 창에만 테마를 정한다(테마 이름은 대소문자 무시). none 은 소문자 그대로 쳐야 하고, 그 창의 테마를 지워 theme.default 를 따르게 한다. theme 은 뺄 수 없다. 답은 window.getTheme 과 같은 모양이다
 
-  {tool} ui.refresh
-      그 파일을 다시 읽어 창마다 적용한다. 파일은 쓰지 않는다. 답의 theme 은 창별 값이 아니라 theme.default 다
-
-그 파일의 theme 키는 읽지 않는다 — 고쳐도 아무 일도 없고, 전체 테마는 settings.set theme.default 로 바꾼다. 창 하나의 값이 잘못됐거나 파일이 없거나 깨져 있으면 그 창은 theme.default 를 쓴다.
+창 테마는 화면 상태에 그 창과 함께 저장돼 재시작을 넘기고(restore.status 의 saves 가 false 인 실행은 저장하지 않는다), 창을 닫으면 함께 사라진다. 대시보드 창이 떠 있지 않으면 두 명령은 UNKNOWN_COMMAND 이고, 없는 창은 CONFLICT 다. window.setTheme 이 INTERNAL 이고 문구가 정했지만 그 창에 못 보냈다고 하면 값은 남아 있다(window.getTheme 이 새 값을 답한다). 모든 창을 한꺼번에 바꾸려면 settings.set theme.default 다.
 
 data_dir 은 env 에 ENGRAM_DATA_DIR 가 비어 있지 않으면 그 경로다. 아니면 {tool} 실행파일(에이전트라면 env 의 ENGRAM_CLI_EXE)이 있는 폴더에서 정해진다 — 배포본(릴리스 빌드)은 그 폴더 아래 data/, 디버그 빌드(target\debug 등)는 거기서 위로 올라가 처음 나오는 저장소 루트(.git 이 있거나 Cargo.toml 에 [workspace] 가 있는 폴더)의 .engram-dev 이고, 루트가 없으면 그 폴더의 .engram-dev 다.
 ## theme
 {tool} theme — 옛 낱말이다. 지금 화면은 {tool} help settings 이고, 그 화면이 없다고 하면 {tool} commands settings.set 이 인자를 준다.
 
-전체 테마는 {tool} settings.set --key theme.default --value <dark|light|e-ink> 로 바꾼다. `<data_dir>/ui-settings.json` 의 theme 키는 읽지 않아 고쳐도 아무 일도 없다.
-
-창별 테마만 아직 그 파일의 windows 에 창 label 마다 적고(dark · light · e-ink, 소문자 그대로) {tool} ui.refresh 를 부른다.
+전체 테마는 {tool} settings.set --key theme.default --value <dark|light|e-ink> 로, 창 하나의 테마는 {tool} window.setTheme --window <label> --theme <dark|light|e-ink|none> 로 바꾼다. `<data_dir>/ui-settings.json` 은 읽지 않아 고쳐도 아무 일도 없다.

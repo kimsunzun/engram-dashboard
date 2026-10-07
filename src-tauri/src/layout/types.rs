@@ -171,8 +171,7 @@ pub struct ViewSnapshot {
 /// 명령 버스 `split.setRatio` 의 `outcome` 과 철자가 같다.
 // ★여기에 `#[serde(rename_all)]` 을 달지 말 것★ — 버스 선언 매크로는 rename 을 못 달아 variant 이름이 그대로
 // wire 값이 된다. 여기만 바꾸면 같은 결말을 두 표면이 다른 철자로 말한다(버스 쪽 쌍둥이 = `commands::RatioOutcome` ·
-// `ThemeSource`↔`ThemeOrigin` 과 같은 규칙 · 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의
-// `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
+// 철자를 맞대는 테스트 = `tests/layout_commands.rs` 의 `both_surfaces_spell_the_split_ratio_outcome_the_same_way`).
 // ADR-0227
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
 #[ts(export)]

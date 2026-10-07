@@ -13,7 +13,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use crate::layout::{PlacementMemo, WindowAttrs, WindowPlacement};
-use crate::ui_settings::UiTheme;
+use crate::theme::UiTheme;
 
 #[derive(Default)]
 pub struct TreeAttrs {
@@ -51,8 +51,6 @@ impl TreeAttrs {
     }
 
     /// `None` = 창별 테마를 지운다(전역 테마를 따른다).
-    // TODO(P3d): `window.setTheme` 이 부른다 — 그때 이 허용을 걷는다.
-    #[allow(dead_code)]
     pub fn set_theme(&self, theme: Option<UiTheme>) {
         self.update(|attrs| attrs.set_theme(theme));
     }
@@ -87,7 +85,7 @@ impl TreeAttrs {
 mod tests {
     use super::TreeAttrs;
     use crate::layout::{WindowAttrs, WindowBounds, WindowPlacement};
-    use crate::ui_settings::UiTheme;
+    use crate::theme::UiTheme;
 
     fn bounds(x: f64) -> WindowBounds {
         WindowBounds::new(x, 20.0, 280.0, 600.0).unwrap()

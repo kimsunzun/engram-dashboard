@@ -1,4 +1,4 @@
-// uiSettings — 디스크 값이 `data-theme` 까지 닿는가 + ★그 적용이 트리를 다시 마운트하지 않는가★.
+// uiSettings — 셸이 준 테마가 `data-theme` 까지 닿는가 + ★그 적용이 트리를 다시 마운트하지 않는가★.
 //
 // 뒤쪽이 이 스위트의 존재 이유다(ADR-0149): 슬롯이 다시 마운트되면 챗은 컴포넌트 상태라 대화가 영구 소실된다.
 //
@@ -122,7 +122,7 @@ afterEach(() => {
 })
 
 describe('installUiSettings — 부팅 조회', () => {
-  it('파일 값이 data-theme 까지 간다', async () => {
+  it('셸이 준 값이 data-theme 까지 간다', async () => {
     invokeMock.mockImplementation(async () => ({ theme: 'light' }))
     render(<Host />)
     await settle()
@@ -163,7 +163,7 @@ describe('installUiSettings — 부팅 조회', () => {
   })
 })
 
-describe('installUiSettings — ui.refresh 푸시', () => {
+describe('installUiSettings — 셸 테마 푸시', () => {
   // ★셸은 창마다 **그 창의 값**을 보낸다★(ADR-0167). 기본 등록(`Any`)은 필터와 무관하게 전부 깨어나므로
   //   타깃을 안 걸면 이 창이 남의 창 값까지 받아 마지막에 온 것을 칠한다 — 창별 테마가 그 자리에서 무너진다.
   it('자기 창 label 로 구독한다', async () => {
@@ -237,8 +237,8 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
   it('구독 등록이 끝나기 전에는 부팅 조회를 내지 않는다', async () => {
     const gate = deferred()
     listenGate = gate
-    let fileTheme = 'light'
-    invokeMock.mockImplementation(async () => ({ theme: fileTheme }))
+    let shellTheme = 'light'
+    invokeMock.mockImplementation(async () => ({ theme: shellTheme }))
 
     render(<Host />)
     await settle()
@@ -246,8 +246,8 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
     expect(listeners.size).toBe(0)
     expect(invokeMock).not.toHaveBeenCalled()
 
-    // 이 틈에 밖의 에이전트가 파일을 고치고 ui.refresh 를 돌렸다 — 리스너가 없어 알림은 이 창에 안 닿는다.
-    fileTheme = 'e-ink'
+    // 이 틈에 밖의 에이전트가 window.setTheme 을 불렀다 — 리스너가 없어 알림은 이 창에 안 닿는다.
+    shellTheme = 'e-ink'
 
     await act(async () => {
       gate.open()
@@ -259,7 +259,7 @@ describe('installUiSettings — 등록과 조회의 순서', () => {
     expect(themeAttr()).toBe('e-ink')
   })
 
-  // ★한 번 거절당하고 끝나면 그 창은 영구히 ui.refresh 를 못 받는다★ — 그런데 부팅 값은 멀쩡히 칠해져
+  // ★한 번 거절당하고 끝나면 그 창은 영구히 테마 밀기를 못 받는다★ — 그런데 부팅 값은 멀쩡히 칠해져
   //   화면은 건강해 보인다(무신호 불일치). 그래서 등록에 유계 재시도를 건다.
   it('구독 등록이 한 번 거절당해도 재시도해서 결국 붙는다', async () => {
     listenMock.mockImplementationOnce(async () => {

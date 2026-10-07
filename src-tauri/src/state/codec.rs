@@ -22,7 +22,7 @@ use uuid::Uuid;
 use super::schema::{
     Bounds, StateFile, TabEntry, TabStrip, WindowEntry, WindowKind, STATE_VERSION,
 };
-use crate::ui_settings::UiTheme;
+use crate::theme::UiTheme;
 
 /// 읽기 상한이자 쓰기 상한 — 넘는 글을 쓰면 다음 부팅이 그 파일 전체를 못 쓴다고 접는다(I4). 부르는 쪽은 이
 /// 값으로 `fsutil::read_file_capped` 한다.
@@ -337,7 +337,7 @@ mod tests {
         Bounds, PersistedContent, PersistedNode, StateFile, TabEntry, TabStrip, WindowEntry,
         WindowKind, STATE_VERSION,
     };
-    use crate::ui_settings::UiTheme;
+    use crate::theme::UiTheme;
 
     fn bounds() -> Bounds {
         Bounds {

@@ -20,7 +20,7 @@ use crate::layout::{
     tree, LabelSource, LayoutNode, SlotContent, View, ViewManager, WindowAttrs, WindowBounds,
     MAIN_WINDOW_LABEL,
 };
-use crate::ui_settings::UiTheme;
+use crate::theme::UiTheme;
 
 /// 트리 창의 영속 id — label 과 같다(설정 창 · `tauri.conf.json`). main 도 label 이 곧 영속 id 다.
 pub const TREE_WINDOW_ID: &str = "agent-tree";
@@ -704,7 +704,7 @@ mod tests {
         Bounds, PersistedContent, PersistedNode, StateFile, TabEntry, TabStrip, WindowEntry,
         WindowKind, STATE_VERSION,
     };
-    use crate::ui_settings::UiTheme;
+    use crate::theme::UiTheme;
 
     #[derive(Default)]
     struct Labels(AtomicU64);

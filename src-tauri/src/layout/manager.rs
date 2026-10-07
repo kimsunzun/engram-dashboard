@@ -42,7 +42,7 @@ use super::tree;
 use super::types::{
     LayoutNode, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics, View, ViewMeta, ViewSnapshot,
 };
-use crate::ui_settings::UiTheme;
+use crate::theme::UiTheme;
 
 pub const MAIN_WINDOW_LABEL: &str = "main";
 

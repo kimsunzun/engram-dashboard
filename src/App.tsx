@@ -20,8 +20,8 @@ import { installNativeScrollActivity } from './components/ui/nativeScrollActivit
 import { RootErrorBoundary } from './components/ui/RootErrorBoundary'
 
 function App() {
-  // 테마는 셸이 정한다 — 전역 값 = 셸 설정 `theme.default`(ADR-0265), 창별 덮어쓰기만 P3d 전까지 `ui-settings.json`
-  // + `ui.refresh`. 붙는 시점은 부팅 조회가 돌아온 뒤라, 그 전까지는 main.tsx 가
+  // 테마는 셸이 정한다 — 창 테마(`window.setTheme`) ?? 셸 설정 `theme.default`(ADR-0265). 붙는 시점은
+  // 부팅 조회가 돌아온 뒤라, 그 전까지는 main.tsx 가
   // 첫 페인트 전에 박아 둔 dark 가 보인다(색 토큰 미정의 구간을 없애는 그 한 줄 — 사유는 그 파일).
   // ★값만 갈아끼운다 — 리마운트 없음(ADR-0149)★.
   useEffect(() => installUiSettings(), [])

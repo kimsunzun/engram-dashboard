@@ -24,7 +24,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::layout::{SlotContent, SplitDir};
-use crate::ui_settings::UiTheme;
+use crate::theme::UiTheme;
 
 /// 이 셸이 읽고 쓰는 형식 번호 — 이보다 큰 파일은 통째로 못 쓴다([`super::codec::Unusable::NewerVersion`]).
 pub const STATE_VERSION: u32 = 1;
