@@ -182,7 +182,7 @@ pub(crate) fn for_each_ui_window<'a>(
 pub fn quit_app(app: &AppHandle) {
     // 데몬 graceful 일방 발사(결과 무시).
     let data_dir = crate::discovery::default_data_dir();
-    match crate::discovery::send_stop(&data_dir) {
+    match crate::daemon_client::stop::send_stop(&data_dir) {
         Ok(outcome) => tracing::info!(
             ?outcome,
             "[tray] quit_app: 데몬 graceful stop 발사(best-effort)"

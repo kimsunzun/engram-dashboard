@@ -29,7 +29,7 @@ use crate::discovery::{self, locate_daemon_exe};
 // 동시에 나면 직렬화 밖이라 다중 spawn 이 날 수 있다. **그래도 정합성은 데몬의 단일 인스턴스 잠금
 // (데이터 폴더 안 daemon.json 을 붙잡는 것, net instance.rs — ADR-0134/0135)이 최종 1개를 보장**한다 — 이 락은
 // 정합성 수단이 아니라 부팅 다중-WebView 동시 ensure 의 콘솔 깜빡임(UX)을 없애는 보강이다. 트레이
-// 경로까지 묶으려면 락을 ensure_daemon(discovery crate)으로 내리거나 트레이를 command 경유로 — 실익
+// 경로까지 묶으려면 락을 ensure_daemon(`crate::discovery`)으로 내리거나 트레이를 command 경유로 — 실익
 // (트레이 켜기는 단발 사용자 클릭이라 부팅 race 와 시점 분리) 대비 비용이 커 현재는 그 잠금에 위임.
 fn ensure_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -158,7 +158,7 @@ pub fn daemon_connection_state(
     .to_string()
 }
 
-// 데몬 종료 fallback(§5). daemon.json 의 pid 를 taskkill /F.
+// 데몬 종료 fallback(§5). daemon.json 의 pid 를 자식 트리째 강제로 끈다(`/F /T` — platform `process::kill_tree`).
 //
 // ★graceful 우선★: 연결을 쥔 프론트는 먼저 StopDaemon AgentCommand(graceful, 자식 정리 후 자진
 // 종료)를 보내야 한다. 이 command 는 연결이 없거나 graceful 이 안 먹을 때의 fallback 이다.

@@ -7,9 +7,10 @@
 //! **둘이 같은 파일 하나**를 다룬다: 가드가 붙잡는 파일이 곧 클라이언트가 읽는 접속 파일이다).
 //! 모듈별 책임은 각 파일 헤더가 정본이다.
 //! ★그 전부가 `server` feature 뒤에 있고 **기본은 비어 있다**★: 켜지 않으면 남는 것은 `auth` 하나 —
-//! **핸드셰이크 프레임 모양만 필요한 소비자**(`discovery` · `src-tauri`)가 async 런타임을 지지 않게
-//! 하는 경계다. 서버 행을 쓰는 쪽이 `features = ["server"]` 로 명시해 켠다(데몬 crate). 어떤 의존이 그
-//! 뒤로 들어갔는지·왜 기본을 비웠는지·이득의 범위가 어디까지인지는 **Cargo.toml 의 `[features]` 주석이
+//! **핸드셰이크 프레임 모양만 필요한 소비자**(지금 `src-tauri`)가 async 런타임을 지지 않게 하는
+//! 경계다(기본 feature 에 async 런타임이 없다는 것은 CI `platform gate 7` 이 잰다). 서버 행을 쓰는
+//! 쪽이 `features = ["server"]` 로 명시해 켠다(데몬 crate). 어떤 의존이 그 뒤로 들어갔는지·왜 기본을
+//! 비웠는지·이득의 범위가 어디까지인지는 **Cargo.toml 의 `[features]` 주석이
 //! 정본**이다(여기서 목록을 다시 세지 말 것).
 //! ★accept **loop 자체**는 아직 여기 없다★: `run_accept_loop` 은 데몬 조립부에 남아 수락과 에이전트
 //! 행 조립을 겸한다 — 슬라이스 3(얇은 조립 바이너리)에서 이 crate 로 올 예정이었으나 **그 슬라이스는
@@ -28,26 +29,27 @@
 //! 그 하나를 뺀 나머지는 규칙 그대로다: 프레임의 의미 해석·인코딩·디스패치는 위층(에이전트 시스템)이
 //! 소유하고, 이 crate 는 `frame_port` 계약을 통해서만 그것과 만난다.
 //!
-//! ★버전 상수 자체는 protocol 에 남는다★ — daemon.json 의 `DaemonInfo` 계약이기도 해서 discovery 가
-//! portfile 로 읽는다. 여기로 끌고 오지 말 것(그건 인증과 무관한 별개 계약이다).
+//! ★버전 상수 자체는 protocol 에 남는다★ — daemon.json 의 `DaemonInfo` 계약이기도 해서 셸 `discovery`
+//! 모듈이 그 파일로 읽는다. 여기로 끌고 오지 말 것(그건 인증과 무관한 별개 계약이다).
 //!
 //! ★왜 이 crate 였나 — 순환 때문★: 슬라이스 1 **전에는** 네트워크 행이 데몬 crate 안에 있었으므로
 //! 인증 타입도 `daemon` 에 놓였을 것이고, 인증 프레임을 각자 만드는 `discovery`·`src-tauri` 때문에
 //! `discovery → daemon` 이 필요해져 기존 `daemon → discovery`(경로 헬퍼)와 **순환**을 이뤘다. 네트워크
 //! 행이 자기 crate 로 떨어져 `discovery → 이 crate` 가 비순환이 된 것이 0-4 를 푼 열쇠다(실제로 0-4 가
-//! `discovery → 이 crate` · `engram-dashboard → 이 crate` 두 간선을 새로 놨다).
+//! `discovery → 이 crate` · `engram-dashboard → 이 crate` 두 간선을 새로 놨다). 지금 이 crate 를 부르는
+//! 쪽은 데몬 · 셸이다.
 //! ★확인 레시피 — **워크스페이스-로컬 forward 폐포**를 볼 것★:
 //!   `cargo tree -p engram-dashboard-net -e normal --target all --all-features --prefix none`
 //!   `| rg "^engram-dashboard" | sort -u`
 //!   → 자기 자신 + `command` + `platform` + `protocol`(`command` 는 `protocol` 을 거쳐 온다). 목록에
-//!   `discovery` 가 없다 = **이 crate 는 discovery 에 도달하지 않는다**. 그래서 `discovery → 이 crate` 를
+//!   소비자(데몬 · 셸)가 없다 = **이 crate 는 소비자에 도달하지 않는다**. 그래서 `소비자 → 이 crate` 를
 //!   더해도 닫히는 고리가 없다.
 //!   ★`--target all --all-features` 를 빼지 말 것★: 호스트 target 만 보면 `cfg(unix)` 같은 **비활성 target**
 //!   의존과 **optional** 의존이 출력에서 사라진다(실측). 외부 crate 까지 다 찍히면 수백 줄이라 워크스페이스
 //!   것만 걸러 본다. `platform`(ADR-0266) · `command`(ADR-0155) 는 워크스페이스 crate 를 하나도 의존하지
 //!   않는 잎이라 그 아래로 폐포가 더 자라지 않는다.
 //!   ★`--invert` 를 쓰지 말 것(unsound)★: invert 는 이 crate 의 **조상**을 나열하는데, 순환 성립 조건은
-//!   `이 crate →* discovery` 이므로 순환이 있는 세계에서도 invert 출력은 **바이트 동일**하다 — 즉 그
+//!   `이 crate →* 소비자` 이므로 순환이 있는 세계에서도 invert 출력은 **바이트 동일**하다 — 즉 그
 //!   명령으로는 순환 유무를 구별할 수 없다.
 //!
 //! ★격리 게이트(컴파일러가 먼저 잡고 grep 이 주석·테스트 헬퍼로 새는 경로를 잡는다 — ADR-0110 과 같은
@@ -56,7 +58,7 @@
 //! 2026-07-13). 게이트 3 은 파일을 읽지 않고 해석된 의존 그래프를 보므로 그 문제가 아예 없다.
 //! 게이트를 손보면 **편집 후 비자기일치 성질을 다시 실측할 것**:
 //!   · **게이트 1 — 소스 참조**(`src/` 범위):
-//!     `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` → **0줄**
+//!     `rg "engram_dashboard_(daemon|messaging)" crates/engram-dashboard-net/src/` → **0줄**
 //!   · **게이트 2 — 두 조각이다**(`src/` 범위). 2a 는 이 crate 가 쓰는 platform 심볼 다섯을 이름으로 못 박고,
 //!     2b 는 그중 liveness 헬퍼의 원래 자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시 채워지지
 //!     않는지 잰다:

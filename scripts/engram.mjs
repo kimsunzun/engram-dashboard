@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 //   읽는다. ★JSON.parse 를 맨몸으로 부르지 마라★ — 데몬이 멀쩡한데 SyntaxError 로 죽는다.
 //   열기 실패(제3자가 좁은 공유로 잠깐 여는 경우)도 같은 취급이다.
 const PORTFILE_READ_ATTEMPTS = 10   // 총 대기 상한 ≈ 500ms — 데몬 발행은 ms 단위라 넉넉하다.
-const PORTFILE_READ_DELAY_MS = 50   // discovery 폴링 주기와 같은 값.
+const PORTFILE_READ_DELAY_MS = 50   // 셸 discovery 모듈의 폴링 주기와 같은 값.
 
 function sleepSync(ms) { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms) }
 
@@ -40,7 +40,8 @@ function readPortfile(p, attempts = PORTFILE_READ_ATTEMPTS) {
   return null
 }
 
-// 데이터 폴더 안의 portfile 자리(정본 = discovery `DataLayout::daemon_file` — ADR-0264).
+// 데이터 폴더 안의 portfile 자리(정본 = 데몬 `data_dir::DataLayout::daemon_file` — ADR-0264 · ADR-0271).
+//   ★이 줄은 시험이 묶지 않는 손 사본이다★ — 셸 사본과 달리 같은 경로 시험이 없어, 정본을 고치면 여기도 손으로 고친다.
 const PORTFILE_IN_DATA_DIR = path.join('daemon', 'run', 'daemon.json')
 
 function findPortfile() {
@@ -60,7 +61,7 @@ function findPortfile() {
     if (parent === dir) break
     dir = parent
   }
-  // release: <exe 폴더>/data (ADR-0134 · discovery::default_data_dir).
+  // release: <exe 폴더>/data (ADR-0134 · 데몬 data_dir::default_data_dir).
   //   릴리스 exe 는 repo 밖에도 풀릴 수 있으므로 repo 기준 후보(target/release)와 cwd 기준 후보를 함께 둔다.
   try {
     const scriptDir = path.dirname(fileURLToPath(import.meta.url)) // <repo>/scripts

@@ -1,10 +1,11 @@
 //! # engram-dashboard-base — 바닥 기반층, 잎 crate (도메인 지식 0)
 //!
 //! 의존 그래프의 바닥 기반층이다 — 범용 도우미와 기반 인프라를 **목적 이름의 모듈**로 갈라 담는다
-//! (ADR-0269 결정 1 · 9). 지금 입주자는 여섯이다: [`logging`](tracing 전역 초기화 + 프로세스 실행 1회분
+//! (ADR-0269 결정 1 · 9). 지금 입주자는 일곱이다: [`logging`](tracing 전역 초기화 + 프로세스 실행 1회분
 //! 파일 로그) · [`text`](바이트 → 소문자 hex) · [`time`](벽시계 epoch 밀리초 · 「지금 읽기」 시계 seam) ·
 //! [`path`](사람이 친 경로의 철자 고르기) · [`sync`](락 오염 되찾기 — 경고 없이, 오염 표시 유지) ·
-//! `testing`(시험 대기 — 조건이 설 때까지 폴링). 각 모듈(헤더와 공개 함수 문서)이 그 책임의 정본이다.
+//! `testing`(시험 대기 — 조건이 설 때까지 폴링) · [`writable`](폴더에 실제로 쓸 수 있나 — 쓰기 프로브 ·
+//! 검사 도중 사라진 폴더의 재시도 한 번). 각 모듈(헤더와 공개 함수 문서)이 그 책임의 정본이다.
 //!
 //! ★`testing` 과 `time` 의 가짜 시계는 cargo 기능 `test-support` 뒤다★(ADR-0275 결정 5) — 이 crate
 //! 자기 시험(`cfg(test)`)과 그 기능을 dev 의존으로 켠 소비자 시험만 본다. 그 기능이 데몬 · 셸의 운영 의존
@@ -43,12 +44,12 @@
 //! ★①이 이 축을 덮는다고 읽지 말 것★ — ①은 `rg "^engram-dashboard"` 로 **워크스페이스 멤버만** 세므로
 //! 서드파티인 `tauri` 는 그대로 통과한다. 두 게이트는 겹치지 않는다.
 //! ★"잎 crate 라 안전하다" 도 아니다★ — ADR-0003 의 불변식이 걸리는 축은 crate 이름도 잎 성질도 아니라
-//! **어느 바이너리에 링크되나** 이고, 이 crate 는 headless 데몬 · `discovery` 에 링크된다. 창도
-//! webview 도 없는 둘이 한꺼번에 전송 방식에 묶인다는 뜻이다. `logging` 의 초기화 함수가 "이벤트 하나만
+//! **어느 바이너리에 링크되나** 이고, 이 crate 는 headless 데몬에 링크된다. 창도 webview 도 없는 그
+//! 바이너리가 전송 방식에 묶인다는 뜻이다. `logging` 의 초기화 함수가 "이벤트 하나만
 //! 쏘면 편한" 대표 자리다. 패턴이 import 라인 앵커인 것은 이 헤더가 자기 자신에 걸리지 않게 하기 위해서다.
 //!
 //! **③ 입주자끼리 서로 참조하지 않는다**(입주 조건 ③의 벽):
-//! `rg "(crate|super)::(logging|text|time|path|sync|testing)" crates/engram-dashboard-base/src/` → **0줄**.
+//! `rg "(crate|super)::(logging|text|time|path|sync|testing|writable)" crates/engram-dashboard-base/src/` → **0줄**.
 //! ★`crate::` 단독으로 넓히지 말 것★ — 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 대가로 모듈
 //! **이름**을 손으로 박으므로 **입주자가 늘면 여기 이름을 더해야 보인다**(messaging 정규식과 같은 종류의
 //! 구멍이고, ①이 그 구멍을 덮지 않는다 — ①은 crate 밖만 본다).
@@ -75,3 +76,4 @@ pub mod sync;
 pub mod testing;
 pub mod text;
 pub mod time;
+pub mod writable;

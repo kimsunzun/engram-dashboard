@@ -900,15 +900,7 @@ fn repo_root_from_manifest() -> PathBuf {
 }
 
 fn sibling_send_exe() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let name = if cfg!(windows) {
-        format!("{CLI_EXE_NAME}.exe")
-    } else {
-        CLI_EXE_NAME.to_string()
-    };
-    let cand = dir.join(name);
-    cand.is_file().then_some(cand)
+    engram_dashboard_platform::env::sibling_exe(CLI_EXE_NAME).filter(|cand| cand.is_file())
 }
 
 fn is_agent_alive(manager: &Arc<AgentManager>, id: AgentId) -> bool {

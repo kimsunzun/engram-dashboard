@@ -3,9 +3,9 @@
 //! 한 프로세스 트리 끄기([`kill_tree`]).
 //!
 //! "그 PID 가 아직 그 프로세스인가" 를 판정하는 곳이 여러 crate 에 있다 — 예: `net`(portfile 의 stale
-//! 판정) · `discovery`(데몬 발견) · `daemon`(daemon.json 에 자기 시작시각 기록) · `agent`(codex 자식의
-//! 신원 판정). 모두 판정 로직을 사본으로 갖지 않고 이 모듈을 본다 — 부르는 곳의 정본은
-//! `rg "engram_dashboard_platform::process" crates`. ★에이전트 런타임 안으로 되돌리지 말 것★ — 에이전트
+//! 판정) · 셸(`discovery` 모듈의 데몬 발견) · `daemon`(daemon.json 에 자기 시작시각 기록) · `agent`(codex
+//! 자식의 신원 판정). 모두 판정 로직을 사본으로 갖지 않고 이 모듈을 본다 — 부르는 곳의 정본은
+//! `rg "engram_dashboard_platform::process" crates src-tauri`. ★에이전트 런타임 안으로 되돌리지 말 것★ — 에이전트
 //! 밖의 소비자가 이 함수들 때문에 런타임 전체를 의존하게 된다(ADR-0175 §맥락이 잰 그 상태).
 //!
 //! ★왜 creation time 까지 보나★: PID 는 OS 가 재사용한다. 데몬이 죽고 같은 PID 를 다른

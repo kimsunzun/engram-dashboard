@@ -9,7 +9,7 @@
 //! `#[serde(tag=…)]` 류 재정의가 **없다**. 그래서 프레임은 정확히
 //!   `{"Auth":{"token":"…","protocol_version":N}}`
 //! 이고, 이건 옮겨오기 전 정의가 내던 바이트와 같다. 이 crate 밖에서 이 모양을 그대로 만드는 발신자 —
-//! 트레이 stop 경로(`discovery`) · 데몬 클라이언트 셸(`daemon_client/connection.rs`) · 프론트
+//! 트레이 stop 경로(셸 `daemon_client/stop.rs`) · 데몬 클라이언트 셸(`daemon_client/connection.rs`) · 프론트
 //! `wsTransport` · `scripts/engram.mjs`.
 //! ★뒤의 둘은 **손조립 JS 라 컴파일러가 못 잡는다**★: 둘 다 타입 없이 객체 리터럴로 프레임을 짓고,
 //! `scripts/engram.mjs` 쪽은 테스트가 덮지 않는데도 실행되는 경로다(`run-dashboard-release.bat` ·

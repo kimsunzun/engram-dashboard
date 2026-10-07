@@ -1,7 +1,7 @@
 # ADR-0283: 웹뷰 데이터 폴더 = `<root>\webview` · 정적 창을 setup 에서 · 모든 창이 같은 환경(ADR-0054 확장) · 못 쓰면 기본 폴더로 물러난다 · main 생성 실패는 종료
 
 - 상태: 확정 (2026-10-08, 근거: TRD `docs/process/S21-storage/trd.md` §4 · §6-5 ⑧ · §10 M4 · §11-2 + 사용자 결정 2026-10-07 (M4 (c) — 못 쓰면 기본 자리로 물러나 진행 · 대화상자 없음 / main 을 못 만들면 앱을 끝낸다) + P4 구현 `11f8787` · `/review code full` PASS · `/qa full` PASS(GUI 실측 — TRD §14-21))
-- 관련: ADR-0264(데이터 배치 — 그 결정이 `<root>\webview\` 를 자리로만 두고 옮기는 일을 이 결정에 넘겼다) · ADR-0134 결정 4(데이터 루트를 못 쓰면 명확히 실패 — 웹뷰 폴더의 물러남은 그 경로가 창에 사유를 띄울 수 있게 한다, 아래 「근거」) · ADR-0135 · ADR-0102(빌더 manage — ★그 맥락의 「웹뷰가 setup 전에 invoke 한다」는 정적 창에 더는 서지 않는다 · 결정은 그대로 옳다(그 ADR 관련줄)★) · ADR-0225(트리 전용 창 걷기 — 이 결정이 더한 트리 몫 코드도 그때 함께 걷는다, 아래 「영향」) · ADR-0271(`DataLayout` 을 데몬 몫 · 셸 몫으로 나눈다 — `webview_dir()` 의 자리가 옮겨 갈 수 있다) · TRD `docs/process/S21-storage/trd.md` §4 · §6-5 · §14-21 · `src-tauri/src/webview_env.rs` · `src-tauri/src/state/placement.rs`(`restore_windows` · `build_static` · `confirm_created`) · `src-tauri/src/lib.rs`(setup ⑧ · `RunEvent::Exit` 의 종료 코드) · `src-tauri/tauri.conf.json` · step-log S21 · Amends ADR-0054 (상수 자리와 config 사본과 3중 동기 지점, 불변식이 덮는 환경 옵션 범위) · Amends ADR-0137 (영향의 WebView2 데이터 폴더 대가 서술)
+- 관련: ADR-0264(데이터 배치 — 그 결정이 `<root>\webview\` 를 자리로만 두고 옮기는 일을 이 결정에 넘겼다) · ADR-0134 결정 4(데이터 루트를 못 쓰면 명확히 실패 — 웹뷰 폴더의 물러남은 그 경로가 창에 사유를 띄울 수 있게 한다, 아래 「근거」) · ADR-0135 · ADR-0102(빌더 manage — ★그 맥락의 「웹뷰가 setup 전에 invoke 한다」는 정적 창에 더는 서지 않는다 · 결정은 그대로 옳다(그 ADR 관련줄)★) · ADR-0225(트리 전용 창 걷기 — 이 결정이 더한 트리 몫 코드도 그때 함께 걷는다, 아래 「영향」) · ADR-0271(`DataLayout` 을 데몬 몫 · 셸 몫으로 나눈다 — `webview_dir()` 은 셸 몫 `src-tauri/src/discovery/layout.rs` 로 갔다 · ADR-0282) · TRD `docs/process/S21-storage/trd.md` §4 · §6-5 · §14-21 · `src-tauri/src/webview_env.rs` · `src-tauri/src/state/placement.rs`(`restore_windows` · `build_static` · `confirm_created`) · `src-tauri/src/lib.rs`(setup ⑧ · `RunEvent::Exit` 의 종료 코드) · `src-tauri/tauri.conf.json` · step-log S21 · Amends ADR-0054 (상수 자리와 config 사본과 3중 동기 지점, 불변식이 덮는 환경 옵션 범위) · Amends ADR-0137 (영향의 WebView2 데이터 폴더 대가 서술)
 
 ## 맥락
 
@@ -13,7 +13,7 @@
 
 ## 결정
 
-1. **웹뷰 데이터 폴더 = `<root>\webview`**(`DataLayout::webview_dir()`). 절대 경로로 바꾼 뒤 확인하고 같은 값을 넘긴다 — 데이터 루트는 `ENGRAM_DATA_DIR` 로 상대 경로일 수 있다.
+1. **웹뷰 데이터 폴더 = `<root>\webview`**(셸 `DataLayout::webview_dir()` — `src-tauri/src/discovery/layout.rs`). 절대 경로로 바꾼 뒤 확인하고 같은 값을 넘긴다 — 데이터 루트는 `ENGRAM_DATA_DIR` 로 상대 경로일 수 있다.
 2. **정적 창은 셸이 setup 에서 만든다.** `tauri.conf.json` 의 두 창은 선언만 두고 `"create": false` 라 Tauri 가 만들지 않는다. 부팅 setup ⑧(상태 부팅의 실행 표식 ⑤ 뒤 — TRD §6-5 I6)이 `WebviewWindowBuilder::from_config` 로 만들고 저장된 자리 · 크기 · 최대화를 만들 때 입힌다. `--hidden` 부팅이면 main 을 처음부터 숨긴 채 만든다. 숨긴 채 만드는 창은 포커스를 받지 않는다(`focused(false)`).
 3. **모든 창이 같은 환경 — ADR-0054 확장.** 창을 만드는 모든 코드(정적 창 · 런타임 팝아웃)는 마무리 함수 하나 `WebviewEnv::finish`(`src-tauri/src/webview_env.rs`)를 지나고, 그 값은 셸에 하나인 인스턴스에서 나온다. 마무리가 붙이는 것 = 데이터 폴더(정했을 때) · 브라우저 인자 · 브라우저 확장 끔 · 스크롤바 모양 기본 — wry 가 WebView2 환경에 싣는 넷이다. 브라우저 인자의 정본은 Rust 상수 `WEBVIEW2_BROWSER_ARGS` 하나이고 설정은 그 값을 싣지 않는다(`additionalBrowserArgs` 를 걷었다).
 4. **못 쓰면 기본 폴더로 물러난다(사용자 결정 2026-10-07 — M4 (c)).** 창을 만들기 전에 쓰기 확인을 **프로세스당 한 번** 하고 모든 창이 그 답을 받는다. 못 쓰면 데이터 폴더를 넘기지 않아 Tauri 기본 자리(`%LOCALAPPDATA%\<identifier>`)로 진행하고 warn 로그를 남긴다(사유만 — 경로는 로그 칸). 대화상자는 없다.

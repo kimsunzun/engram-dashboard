@@ -2323,7 +2323,7 @@ mod real_process {
     use std::process::{Child, Command};
 
     use engram_dashboard_base::testing::wait_until;
-    use engram_dashboard_discovery::DataLayout;
+    use engram_dashboard_daemon::data_dir::DataLayout;
     use engram_dashboard_protocol::DaemonInfo;
 
     const DAEMON_EXE: &str = env!("CARGO_BIN_EXE_engram-dashboard-daemon");
@@ -2573,7 +2573,7 @@ mod real_process {
 
     // ── case3: stale daemon.json → 데몬이 stale 감지 후 자기 정보로 덮어쓰기 ────────────────
     //
-    // src-tauri 의 ensure_daemon(WMI spawn) 경로는 별도 테스트(discovery::real_wmi_spawn_smoke)로
+    // src-tauri 의 ensure_daemon(WMI spawn) 경로는 별도 테스트(셸 discovery::tests::real_wmi_spawn_smoke)로
     //   분리해 채운다(daemon crate 에서 src-tauri 함수 호출 불가).
     #[tokio::test]
     #[ignore = "실프로세스 + 파일 discovery 필요 — `-- --ignored` 로 실행(Windows 전용)"]

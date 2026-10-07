@@ -1,6 +1,6 @@
 //! 격리 하네스 — graceful StopDaemon WS 왕복(실프로세스) end-to-end smoke.
 //!
-//! 검증 대상: `discovery::send_stop(data_dir)` 을 **실제로** 부르면 살아있는 데몬이
+//! 검증 대상: `daemon_client::stop::send_stop(data_dir)` 을 **실제로** 부르면 살아있는 데몬이
 //! graceful 하게(WS Auth → StopDaemon{force} → 데몬 self-exit) 죽는가.
 //!
 //! ★ENGRAM_DATA_DIR 격리(WMI 경로와 다름)★: 이 테스트는 **std::process::Command 로 직접 spawn**
@@ -8,7 +8,7 @@
 //!   (직접 spawn 은 send_stop 왕복 검증 목적상 충분하다 — WMI 의 detached 성질은 send_stop 동작과
 //!   무관.)
 //!
-//! 실행: `cargo test -p engram-dashboard-discovery --test stop_smoke -- --ignored`
+//! 실행: `cargo test -p engram-dashboard --test stop_smoke -- --ignored --test-threads=1`
 //!   (기본 `cargo test` 에선 #[ignore] 로 빠진다 — 데몬 exe + 실프로세스 필요. 검증 자산이라 보존.)
 
 #![cfg(windows)]
@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 
 use std::path::PathBuf;
 
-use engram_dashboard_discovery::{daemon_status, send_stop, StopOutcome};
+use engram_dashboard_lib::daemon_client::stop::{send_stop, StopOutcome};
+use engram_dashboard_lib::discovery::daemon_status;
 
-/// discovery::locate_daemon_exe 는 current_exe(deps/) / cwd 기준이라 통합 테스트 실행
-/// 디렉토리(crate 폴더)에선 워크스페이스 target 을 못 짚는다(테스트 한정 — 운영 경로는
-/// locate_daemon_exe 그대로).
+/// discovery::locate_daemon_exe 의 후보는 current_exe 옆(시험 exe 는 deps/) · cwd 기준이라 시험에서는
+/// cargo 가 시험을 어느 폴더에서 돌리나에 기댄다(테스트 한정 — 운영 경로는 locate_daemon_exe 그대로).
 fn daemon_exe_path() -> PathBuf {
     // 이 테스트 바이너리가 target/<profile>/deps/ 에 있으니 그 두 단계 위가 <profile> 폴더.
     let mut p = std::env::current_exe().expect("current_exe");
@@ -175,7 +175,7 @@ fn diag_send_with_close_mode(mode: &str) -> bool {
 
     let daemon_pid = wait_alive(&data_dir, Duration::from_secs(15)).expect("alive");
     let info = engram_dashboard_protocol::DaemonInfo::parse(
-        &std::fs::read(engram_dashboard_discovery::DataLayout::new(&data_dir).daemon_file())
+        &std::fs::read(engram_dashboard_lib::discovery::DataLayout::new(&data_dir).daemon_file())
             .unwrap(),
     )
     .unwrap();
