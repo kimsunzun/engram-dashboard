@@ -1,5 +1,6 @@
 //! 창 자리 — `Moved` · `Resized` 를 모델에 적고([`record`]), 저장된 자리를 창에 입힌다([`restore_windows`] — 부팅
-//! 단계 ⑧ ⑨ · TRD S21-storage §6-3 · §6-5 · 런타임 복원 수락의 창 포트 [`TauriRestoreWindows`] — §6-7 ② ④).
+//! 단계 ⑧ ⑨ 가 정적 창(main · 트리)을 그 자리로 만든다 · TRD S21-storage §4 · §6-3 · §6-5 · 런타임 복원 수락의 창 포트
+//! [`TauriRestoreWindows`] — §6-7 ② ④).
 //!
 //! - ★위치 = 물리 바깥 위치(`outer_position` 그대로), 크기 = 창의 배율로 나눈 논리 안쪽 크기★. 논리 위치는 배율이
 //!   다른 모니터가 섞이면 한 값이 두 모니터를 가리켜(100% 오른쪽에 150% — 논리 x 1280..1920 띠) 창이 다른
@@ -15,13 +16,17 @@
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, Window};
+use tauri::{
+    AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
+    WebviewWindowBuilder, Window,
+};
 
 use super::convert::TREE_WINDOW_ID;
 use super::restore::RestoreWindows;
 use super::tree_attrs::TreeAttrs;
 use crate::layout::{LayoutState, WindowAttrs, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL};
 use crate::theme::ThemeControl;
+use crate::webview_env::WebviewEnv;
 
 /// 모니터 하나 — OS 가 알려 준 물리 픽셀 사각형과 그 배율.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -173,9 +178,9 @@ fn open_popouts_then_push_themes(
 /// - 서 있는 동안은 그 창의 자리를 적지 않는다([`record`]) — 숨은 동안 오는 `Moved` · `Resized` 는 복원이 입힌 보통
 ///   자리를 「최대화 아님」으로 읽어, 적으면 모델의 최대화 표식이 내려간다(보이기 전에 끝내면 다음 부팅이 최대화를
 ///   잃는다).
-/// - 부팅에서는 main 이 설정대로 보인 채 만들어지고 숨기기는 setup 끝이라(`lib.rs`) 숨어 있지 않아 최대화를 못
-///   입혔을 때만 남는다 — main 을 숨긴 채 만들 때(TRD S21-storage §4 「덤」) 보일 때까지 남는다. 런타임 복원 수락은
-///   숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤 LLM 의 답)에 보일 때까지 남는다.
+/// - 부팅은 `--hidden` 이면 main 을 숨긴 채 만들어([`restore_windows`]) 보일 때까지 남고, 아니면 보인 채 만들어
+///   최대화를 못 입혔을 때만 남는다. 런타임 복원 수락은 숨은 main(트레이 숨기기 · `--hidden` 부팅 뒤 LLM 의 답)에
+///   보일 때까지 남는다.
 /// - 락은 잎이다 — 쥔 채 창 호출 · 로그 · 다른 락을 하지 않는다.
 #[derive(Debug, Default)]
 pub struct DeferredMaximize(Mutex<BTreeSet<String>>);
@@ -233,18 +238,28 @@ impl DeferredMaximize {
 
 // ── Tauri 쪽 — 창이 있어야 돌아 GUI 실측 몫이다 ──────────────────────────────
 
-/// 부팅 단계 ⑧ ⑨ — main · 트리 창에 저장된 자리를 입히고(숨은 main 의 최대화는 보일 때로 미룬다 —
-/// [`DeferredMaximize`]), 복원한 팝아웃 창을 열고(못 열면 모델에서 지운다), 모든 창의 유효 테마를 한 번
+/// 부팅 단계 ⑧ ⑨ — 설정이 선언한 정적 창(main · 트리)을 저장된 자리로 만들고(숨은 main 의 최대화는 보일 때로
+/// 미룬다 — [`DeferredMaximize`]), 복원한 팝아웃 창을 열고(못 열면 모델에서 지운다), 모든 창의 유효 테마를 한 번
 /// 민다(§5-6). ★부르는 쪽은 아무 락도 쥐지 않는다★. 뒤따르는 구독 재계산(⑩)은 부르는 쪽 몫이다 — 이 함수가 끝난
 /// 모델이 마지막 창 묶음이다.
 ///
-/// ★부팅 전용이다★ — 팝아웃을 [`open_restored_popouts`] 로 연다(그 전제 · 런타임에 부르면 생기는 일은 거기).
-pub fn restore_windows(
+/// - ★실행 표식(⑤) 뒤에 부른다(I6)★ — 창을 만들다 앱이 죽어도 다음 부팅이 비정상으로 읽는다. 사용자 setup 은 부팅
+///   단계 플러그인보다 늘 뒤라 setup 안이면 선다.
+/// - `boot_hidden` = `--hidden` 부팅 — main 을 처음부터 숨긴 채 만든다. 팝아웃은 그래도 보인 채 열고 부르는 쪽의
+///   숨기기가 main 과 함께 숨긴다(사용자 결정 F13).
+/// - `Err` = main 을 못 만들었다 — 그 자리에서 멈추고(트리 · 팝아웃 · 테마 밀기 없음) 부르는 쪽이 앱을 끝낸다(사용자
+///   결정 2026-10-07). 트리 창을 못 만든 것은 log 하고 계속한다.
+///
+/// ★부팅 전용이다★ — 정적 창도 팝아웃도 아직 없다는 것이 전제다(런타임에 부르면 생기는 일은
+/// [`open_restored_popouts`]).
+pub(crate) fn restore_windows(
     app: &AppHandle,
+    env: &WebviewEnv,
+    boot_hidden: bool,
     layout: &LayoutState,
     tree: &TreeAttrs,
     themes: &ThemeControl,
-) {
+) -> Result<(), MainWindowFailed> {
     let monitors = monitors(app);
     // 두 칸은 락마다 따로 짧게 읽는다(겹쳐 잡지 않는다 — §6-3).
     let main = match layout.0.lock() {
@@ -257,28 +272,181 @@ pub fn restore_windows(
             None
         }
     };
-    match (main, app.get_webview_window(MAIN_WINDOW_LABEL)) {
-        (Some(attrs), Some(window)) => {
-            let at = attrs.bounds.and_then(|bounds| {
-                land(MAIN_WINDOW_LABEL, bounds, &monitors, Fallback::StayPut).map(|at| (bounds, at))
-            });
-            place_main(app, &window.as_ref().window(), at, attrs.maximized);
-        }
-        (Some(_), None) => tracing::debug!(
-            module = "state",
-            "main 창이 없어 저장된 자리를 입히지 않는다"
-        ),
-        (None, _) => {}
-    }
-    // 트리 창은 자리만 입힌다 — 최대화를 싣지 않는다(`state::tree_attrs` 머리).
-    if let Some(window) = app.get_webview_window(TREE_WINDOW_ID) {
-        place_saved(&window.as_ref().window(), tree.attrs().bounds, &monitors);
-    }
-    open_popouts_then_push_themes(
+    open_boot_windows(
+        static_windows(main, tree.attrs(), &monitors, boot_hidden),
+        |window| open_static(app, env, window),
         layout,
         |label, attrs| open_popout(app, label, attrs, &monitors),
         themes,
-    );
+    )
+    .map(drop)
+}
+
+/// main 창을 못 만들었다 — 앱을 끝낼 사유다([`restore_windows`]).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct MainWindowFailed;
+
+/// 부팅 ⑧ 이 만드는 정적 창 하나 — 설정의 선언(TRD S21-storage §4)에 얹는 저장된 속성. `at` = 저장된 보통 자리와 그
+/// 자리가 갈 모니터(`None` = 설정의 자리 · 크기로 연다).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StaticWindow {
+    /// 못 만들면 앱을 끝낸다(사용자 결정 2026-10-07). `hide` = 설정이 보이는 창이어도 숨긴 채 만든다(`--hidden`).
+    Main {
+        at: Option<(WindowBounds, Landing)>,
+        maximized: bool,
+        hide: bool,
+    },
+    /// 자리만 싣는다 — 최대화도 보임도 복원하지 않는다(`state::tree_attrs` 머리 · F9). 못 만들면 log 하고 계속한다.
+    Tree { at: Option<(WindowBounds, Landing)> },
+}
+
+impl StaticWindow {
+    fn label(&self) -> &'static str {
+        match self {
+            StaticWindow::Main { .. } => MAIN_WINDOW_LABEL,
+            StaticWindow::Tree { .. } => TREE_WINDOW_ID,
+        }
+    }
+}
+
+/// 부팅 ⑧ 이 만드는 정적 창 — 만드는 차례대로. `main` = 모델의 main 칸(`None` = 못 읽었다 — 설정대로 연다) ·
+/// `boot_hidden` = `--hidden` 부팅. 어느 모니터에도 안 걸치는 자리는 버린다([`land`]).
+fn static_windows(
+    main: Option<WindowAttrs>,
+    tree: WindowAttrs,
+    monitors: &[MonitorArea],
+    boot_hidden: bool,
+) -> [StaticWindow; 2] {
+    let saved = |label: &str, bounds: Option<WindowBounds>| {
+        bounds.and_then(|bounds| {
+            land(label, bounds, monitors, Fallback::DefaultPlace).map(|at| (bounds, at))
+        })
+    };
+    let main = main.unwrap_or_default();
+    [
+        StaticWindow::Main {
+            at: saved(MAIN_WINDOW_LABEL, main.bounds),
+            maximized: main.maximized,
+            hide: boot_hidden,
+        },
+        StaticWindow::Tree {
+            at: saved(TREE_WINDOW_ID, tree.bounds),
+        },
+    ]
+}
+
+/// 부팅 ⑧ ⑨ 의 차례 — 정적 창을 차례대로 만들고(`open_static` — `Err` = 못 만들었다) **그 뒤에** 팝아웃을 열고 테마를
+/// 민다([`open_popouts_then_push_themes`] — `Ok` 의 값도 그것). 정적 창이 먼저라 그 창들도 받는 창 명단에 든다.
+/// main 을 못 만들면 그 자리에서 `Err` 로 멈추고, 트리 창을 못 만든 것은 log 하고 계속한다.
+fn open_boot_windows(
+    statics: [StaticWindow; 2],
+    mut open_static: impl FnMut(StaticWindow) -> Result<(), String>,
+    layout: &LayoutState,
+    open_popout: impl FnMut(&str, WindowAttrs) -> Result<(), String>,
+    themes: &ThemeControl,
+) -> Result<Vec<String>, MainWindowFailed> {
+    for window in statics {
+        let Err(e) = open_static(window) else {
+            continue;
+        };
+        if let StaticWindow::Main { .. } = window {
+            tracing::error!(
+                module = "state",
+                label = window.label(),
+                error = %e,
+                "main 창을 만들지 못해 앱을 끝낸다"
+            );
+            return Err(MainWindowFailed);
+        }
+        tracing::error!(
+            module = "state",
+            label = window.label(),
+            error = %e,
+            "설정 창을 만들지 못했다 — 그 창 없이 계속한다"
+        );
+    }
+    Ok(open_popouts_then_push_themes(layout, open_popout, themes))
+}
+
+// 정적 창 하나를 만들고 저장된 자리를 입힌다. main 은 런타임 복원 수락과 같은 길([`place_main`] — 숨은 main 의 최대화를
+//   미룬다)이다.
+fn open_static(app: &AppHandle, env: &WebviewEnv, window: StaticWindow) -> Result<(), String> {
+    match window {
+        StaticWindow::Main {
+            at,
+            maximized,
+            hide,
+        } => {
+            let built = build_static(app, env, window.label(), at.map(first_place), hide)?;
+            place_main(app, &built.as_ref().window(), at, maximized);
+        }
+        StaticWindow::Tree { at } => {
+            let built = build_static(app, env, window.label(), at.map(first_place), false)?;
+            if let Some((bounds, at)) = at {
+                place(&built.as_ref().window(), bounds, at);
+            }
+        }
+    }
+    Ok(())
+}
+
+// 설정의 선언으로 창을 만든다 — `at` = 빌더에 줄 첫 자리(정확한 자리는 부르는 쪽이 만든 뒤 놓는다 — 팝아웃과 같은 까닭 ·
+//   `build_runtime_window` 의 `at`). 웹뷰 환경은 공통 마무리가 붙인다 — 건너뛴 창은 다른 창과 환경이 갈린다.
+// ADR-0054
+fn build_static(
+    app: &AppHandle,
+    env: &WebviewEnv,
+    label: &str,
+    at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
+    hide: bool,
+) -> Result<WebviewWindow, String> {
+    let config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|config| config.label == label)
+        .ok_or_else(|| "설정에 그 창의 선언이 없다".to_owned())?;
+    let mut builder = WebviewWindowBuilder::from_config(app, config).map_err(|e| e.to_string())?;
+    if let Some((position, size)) = at {
+        builder = builder
+            .position(position.x, position.y)
+            .inner_size(size.width, size.height);
+    }
+    // 숨긴 채 만드는 창은 포커스를 받지 않는다 — 숨은 트리 창이 만들어진 직후 보이는 main 의 전경을 가져갔다(QA 관측
+    //   2026-10-07 — 보이는 부팅 3/3). wry 0.55.1 은 `focused` 인 웹뷰를 만들자마자 `MoveFocus` 로 키보드 포커스를 그 안에
+    //   넣는다(`webview2/mod.rs` 의 만들기 끝) — 그것이 원인이라는 것은 소스 독해다 [미검 — GUI]. 보일 때는 창의
+    //   `WM_SETFOCUS` 가 웹뷰로 포커스를 넘긴다(같은 파일의 부모 창 서브클래스). tao 0.35.3 은 이 창의 첫 보이기를 활성화
+    //   없이(`SW_SHOWNOACTIVATE`) 한다 — 트레이 보이기는 그 뒤 `set_focus` 로 앞에 둔다.
+    if hide || !config.visible {
+        builder = builder.focused(false);
+    }
+    if hide {
+        builder = builder.visible(false);
+    }
+    let built = env.finish(builder).build().map_err(|e| e.to_string())?;
+    confirm_created(built.is_visible().map_err(|e| e.to_string()), || {
+        tauri::webview_version().map_err(|e| e.to_string())
+    })?;
+    Ok(built)
+}
+
+// `build()` 가 `Ok` 여도 런타임이 창을 못 만들었을 수 있다 — tauri-runtime-wry 2.11.3 은 메인 스레드의 창 만들기 실패(WebView
+//   런타임 없음 — `create_webview` 의 `WebviewRuntimeNotInstalled` 포함)를 log 만 하고(`Message::CreateWindow` 처리) Tauri 는
+//   그 창을 돌려준다(QA 실측 2026-10-07 — `WEBVIEW2_BROWSER_EXECUTABLE_FOLDER` 로 런타임을 가렸을 때). 그 창은 런타임 창 표에
+//   없어 게터의 답 채널이 닫힌다 — `answer` = 만든 창의 게터 한 번. 사유에는 런타임이 「설치됨」을 정할 때 쓰는 것과 같은
+//   조회(`webview_version`)의 답을 붙인다.
+fn confirm_created(
+    answer: Result<bool, String>,
+    webview_version: impl FnOnce() -> Result<String, String>,
+) -> Result<(), String> {
+    let Err(e) = answer else {
+        return Ok(());
+    };
+    Err(match webview_version() {
+        Err(runtime) => format!("WebView 런타임을 찾지 못해 창이 만들어지지 않았다: {runtime}"),
+        Ok(_) => format!("창이 만들어지지 않았다 — 런타임이 그 창을 모른다: {e}"),
+    })
 }
 
 /// 복원한 팝아웃 창 하나를 연다 — 저장된 자리(어느 모니터에도 안 걸치면 label 의 기본 자리) · 최대화 · 첫 자리
@@ -313,21 +481,12 @@ fn first_place((bounds, at): (WindowBounds, Landing)) -> (LogicalPosition<f64>, 
     )
 }
 
-/// 이미 있는 창에 저장된 보통 자리를 입힌다. 없거나 어느 모니터에도 안 걸치는 자리면 창은 지금 자리에 남는다.
-fn place_saved(window: &Window, bounds: Option<WindowBounds>, monitors: &[MonitorArea]) {
-    if let Some(bounds) = bounds {
-        if let Some(at) = land(window.label(), bounds, monitors, Fallback::StayPut) {
-            place(window, bounds, at);
-        }
-    }
-}
-
 /// 저장된 자리를 버리면 창이 어디로 가나 — [`land`] 의 로그 문구만 가른다.
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Fallback {
-    /// 새로 여는 팝아웃 — label 의 기본 자리로 연다.
+    /// 새로 여는 창 — 기본 자리로 연다(팝아웃 = label 의 계단 자리 · 부팅의 정적 창 = 설정의 자리).
     DefaultPlace,
-    /// 이미 있는 창(main · 트리) — 지금 자리에 남는다.
+    /// 이미 있는 창(런타임 복원 수락의 main · 트리) — 지금 자리에 남는다.
     StayPut,
 }
 
@@ -1056,6 +1215,262 @@ mod tests {
         .map(|(label, theme)| (label.to_string(), theme.to_string()))
         .collect();
         assert_eq!(*screen.sent.lock().unwrap(), expected);
+    }
+
+    // ── ⑧ 정적 창 ──
+
+    fn attrs(bounds: Option<WindowBounds>, maximized: bool) -> WindowAttrs {
+        WindowAttrs {
+            bounds,
+            maximized,
+            ..WindowAttrs::default()
+        }
+    }
+
+    #[test]
+    fn static_windows_open_at_their_saved_places() {
+        let main = rect(1700.0, 100.0, 400.0, 300.0);
+        let tree = rect(80.0, 60.0, 280.0, 600.0);
+        let statics = static_windows(
+            Some(attrs(Some(main), true)),
+            // 트리 칸의 최대화는 싣지 않는다(F9) — 정적 창 모양에 그 칸이 없다.
+            attrs(Some(tree), true),
+            &[PRIMARY, RIGHT],
+            false,
+        );
+        assert_eq!(
+            statics,
+            [
+                StaticWindow::Main {
+                    at: landing(1700, 100, 1.5).map(|at| (main, at)),
+                    maximized: true,
+                    hide: false,
+                },
+                StaticWindow::Tree {
+                    at: landing(80, 60, 1.0).map(|at| (tree, at)),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_static_window_saved_off_every_monitor_opens_at_the_config_place() {
+        let off = rect(-3000.0, 100.0, 800.0, 600.0);
+        let statics = static_windows(
+            Some(attrs(Some(off), false)),
+            attrs(Some(off), false),
+            &[PRIMARY],
+            false,
+        );
+        assert_eq!(
+            statics,
+            [
+                StaticWindow::Main {
+                    at: None,
+                    maximized: false,
+                    hide: false,
+                },
+                StaticWindow::Tree { at: None },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unread_main_opens_as_the_config_declares() {
+        let [main, _] = static_windows(None, WindowAttrs::default(), &[PRIMARY], false);
+        assert_eq!(
+            main,
+            StaticWindow::Main {
+                at: None,
+                maximized: false,
+                hide: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_hidden_boot_creates_main_hidden_with_its_maximize() {
+        let saved = Some(attrs(Some(rect(80.0, 60.0, 1280.0, 800.0)), true));
+        let [main, _] = static_windows(saved, WindowAttrs::default(), &[PRIMARY], true);
+        assert!(
+            matches!(
+                main,
+                StaticWindow::Main {
+                    hide: true,
+                    maximized: true,
+                    ..
+                }
+            ),
+            "숨긴 채 만든다(보였다 숨지 않는다) · 최대화는 그대로 싣는다(숨은 main 에는 보일 때로 미룬다)"
+        );
+        let [main, _] = static_windows(saved, WindowAttrs::default(), &[PRIMARY], false);
+        assert!(matches!(main, StaticWindow::Main { hide: false, .. }));
+    }
+
+    // 설정이 선언한 창은 Tauri 가 만들지 않고 부팅 ⑧ 이 만든다 — 만들게 두면 웹뷰 마무리를 건너뛰고(ADR-0054) ⑧ 의 같은
+    //   label 만들기가 실패한다. 선언만 하고 ⑧ 이 모르는 창은 아무도 만들지 않는다.
+    #[test]
+    fn every_config_window_is_left_to_the_boot_and_the_boot_knows_them_all() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let declared: Vec<tauri::utils::config::WindowConfig> = conf["app"]["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|window| serde_json::from_value(window.clone()).unwrap())
+            .collect();
+        for window in &declared {
+            assert!(
+                !window.create,
+                "창 {} 의 \"create\" 가 false 가 아니다",
+                window.label
+            );
+        }
+        let declared: Vec<&str> = declared
+            .iter()
+            .map(|window| window.label.as_str())
+            .collect();
+        let created =
+            static_windows(None, WindowAttrs::default(), &[], false).map(|window| window.label());
+        assert_eq!(declared, created);
+    }
+
+    /// 부팅 ⑧ ⑨ 시험대 — 팝아웃 `popouts` 를 든 모델 · 살아 있는 웹뷰 명단 · 그 명단으로 미는 테마.
+    fn boot_rig(popouts: &[&str]) -> (LayoutState, Arc<Screen>, ThemeControl) {
+        let layout = layout_with_popouts(popouts);
+        let screen = Arc::new(Screen::default());
+        let settings = Arc::new(SettingsService::load_from_dir(
+            &std::env::temp_dir().join("engram-placement-no-settings"),
+        ));
+        let themes = ThemeControl::new(
+            Arc::new(EffectiveThemes::new(
+                settings,
+                layout.clone(),
+                Arc::new(TreeAttrs::default()),
+            )),
+            screen.clone(),
+        );
+        (layout, screen, themes)
+    }
+
+    fn statics() -> [StaticWindow; 2] {
+        static_windows(None, WindowAttrs::default(), &[], false)
+    }
+
+    fn pushed(screen: &Screen) -> Vec<String> {
+        screen
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(label, _)| label.clone())
+            .collect()
+    }
+
+    /// ★정적 창이 팝아웃 · 테마 밀기보다 먼저다★ — 그래야 그 창들도 부팅 테마를 받는다.
+    #[test]
+    fn boot_opens_static_windows_before_popouts_and_pushes_themes_to_all() {
+        let (layout, screen, themes) = boot_rig(&["slot-popup-1"]);
+
+        let removed = open_boot_windows(
+            statics(),
+            |window| {
+                screen.live.lock().unwrap().push(window.label().to_string());
+                Ok(())
+            },
+            &layout,
+            |label, _| {
+                screen.live.lock().unwrap().push(label.to_string());
+                Ok(())
+            },
+            &themes,
+        );
+
+        assert_eq!(removed, Ok(Vec::new()));
+        assert_eq!(
+            *screen.live.lock().unwrap(),
+            [MAIN_WINDOW_LABEL, TREE_WINDOW_ID, "slot-popup-1"],
+            "정적 창을 먼저 만든다"
+        );
+        assert_eq!(
+            pushed(&screen),
+            [MAIN_WINDOW_LABEL, TREE_WINDOW_ID, "slot-popup-1"]
+        );
+    }
+
+    /// main 을 못 만들면 앱을 끝낸다(사용자 결정 2026-10-07) — 그 자리에서 멈춰 곧 끝날 앱에 창을 더 만들지 않는다.
+    #[test]
+    fn a_main_that_fails_to_open_stops_the_boot() {
+        let (layout, screen, themes) = boot_rig(&["slot-popup-1"]);
+        let mut tried = Vec::new();
+
+        let outcome = open_boot_windows(
+            statics(),
+            |window| {
+                tried.push(window.label());
+                Err("창 생성 실패(시험)".into())
+            },
+            &layout,
+            |label, _| panic!("팝아웃을 열지 않는다: {label}"),
+            &themes,
+        );
+
+        assert_eq!(outcome, Err(MainWindowFailed));
+        assert_eq!(tried, [MAIN_WINDOW_LABEL], "트리 창도 만들지 않는다");
+        assert!(pushed(&screen).is_empty(), "테마를 밀지 않는다");
+    }
+
+    #[test]
+    fn a_tree_window_that_fails_to_open_does_not_stop_the_boot() {
+        let (layout, screen, themes) = boot_rig(&["slot-popup-1"]);
+
+        let outcome = open_boot_windows(
+            statics(),
+            |window| match window {
+                StaticWindow::Main { .. } => {
+                    screen.live.lock().unwrap().push(window.label().to_string());
+                    Ok(())
+                }
+                StaticWindow::Tree { .. } => Err("창 생성 실패(시험)".into()),
+            },
+            &layout,
+            |label, _| {
+                screen.live.lock().unwrap().push(label.to_string());
+                Ok(())
+            },
+            &themes,
+        );
+
+        assert_eq!(outcome, Ok(Vec::new()));
+        assert_eq!(pushed(&screen), [MAIN_WINDOW_LABEL, "slot-popup-1"]);
+    }
+
+    // ── 만든 창 확인 ──
+
+    #[test]
+    fn a_window_that_answers_its_getter_was_created() {
+        assert_eq!(
+            confirm_created(Ok(false), || panic!("런타임을 다시 묻지 않는다")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_window_the_runtime_does_not_know_was_not_created() {
+        let missing = || Err("failed to receive message from webview".to_owned());
+
+        let without_runtime =
+            confirm_created(missing(), || Err("런타임 없음(시험)".into())).unwrap_err();
+        assert!(
+            without_runtime.contains("런타임 없음(시험)"),
+            "{without_runtime}"
+        );
+
+        let with_runtime = confirm_created(missing(), || Ok("141.0".into())).unwrap_err();
+        assert!(
+            with_runtime.contains("failed to receive message"),
+            "{with_runtime}"
+        );
     }
 
     // ── 미룬 최대화 ──
