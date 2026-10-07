@@ -26,20 +26,13 @@ use crate::commands::layout::{RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
 use crate::layout::{apply, LabelSource, LayoutState, SlotMove, WindowHost, MAIN_WINDOW_LABEL};
 use crate::output_router::OutputRouter;
+use crate::webview_env::WebviewEnv;
 
 // 팝업/런타임 창 label prefix. capabilities/popup.json·usage-links.json 의 `"slot-popup-*"` glob 과 짝(변경 시
 // 함께 동기).
 // ★의미 확장(ADR-0057/G8)★: "팝업" → "런타임 창"(create_window 포함). prefix 값은 불변(Destroyed 정리
 // 게이트 is_popup_label 재사용 — 다른 label 이면 cleanup 스킵 → 라우팅/구독/Channel 누수).
 const POPUP_LABEL_PREFIX: &str = "slot-popup-";
-
-// ★WebView2 환경 옵션 SSOT — tauri.conf.json 의 `additionalBrowserArgs` 와 문자-단위로 동일해야 한다★.
-// 근거(실측 확인 — ghost windows 버그): 같은 user-data 폴더를 공유하는 모든 WebView 창은 **동일한**
-// WebView2 환경 옵션(additionalBrowserArgs)을 써야 한다. config 창(main·agent-tree)은 이 인자를 주는데
-// 런타임 WebviewWindowBuilder 가 안 주면 환경 옵션 불일치 → 같은 user-data 폴더의 런타임 WebView2 환경
-// 생성이 조용히 실패(build() 는 Ok·창 등록됨·HWND 없음 = 유령 창)한다. 결정·불변식 정본 = ADR-0054.
-const WEBVIEW2_BROWSER_ARGS: &str =
-    "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required";
 
 // 팝업/런타임 창 label 발급용 단조 카운터. app-level 공유(app.manage). ★재사용 금지 불변식★: fetch_add
 // 로 단조 증가만 하고 창을 닫아도 되돌리지 않는다(닫힌 label 재-build 에러 회피).
@@ -115,8 +108,8 @@ fn cascade_position(label: &str) -> (f64, f64) {
     (140.0 + step * 72.0, 110.0 + step * 60.0)
 }
 
-// WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). config 창과 동일한
-// WebView2 환경 옵션 필수(ghost windows 버그, ADR-0054).
+// WebviewWindowBuilder 로 런타임 창을 빌드(★락 밖에서만 호출 — 데드락 회피★). 웹뷰 환경은 공통 마무리
+// (`WebviewEnv::finish`)가 붙인다 — 빠뜨리면 유령 창(ADR-0054).
 //
 // `at` = 빌더에 줄 첫 자리 — `None` 이면 label 순번의 계단 자리 · 기본 크기. 저장된 자리를 정확히 놓는 것은 부르는
 //   쪽(`state::placement`)이 만든 뒤에 한다: tao 는 빌더의 논리 위치를 모니터를 열거 순으로 훑어 처음 들어맞는 것의
@@ -149,14 +142,19 @@ fn build_window(
         Some((at, size)) => ((at.x, at.y), (size.width, size.height)),
         None => (cascade_position(label), (720.0, 500.0)),
     };
-    WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
-        .title(format!("Engram — {label}"))
-        .inner_size(w, h)
-        .position(x, y)
-        .visible(visible)
-        .additional_browser_args(WEBVIEW2_BROWSER_ARGS)
-        .build()
-        .map_err(|e| format!("런타임 창 생성 실패: {e}"))
+    // 웹뷰 환경 없이 만들지 않는다 — 마무리를 건너뛴 창은 다른 창과 환경이 갈린다(ADR-0054).
+    let env = app
+        .try_state::<Arc<WebviewEnv>>()
+        .ok_or_else(|| "런타임 창 생성 실패: 웹뷰 환경이 등록돼 있지 않다".to_owned())?;
+    env.finish(
+        WebviewWindowBuilder::new(app, label, WebviewUrl::App(window_url(label).into()))
+            .title(format!("Engram — {label}"))
+            .inner_size(w, h)
+            .position(x, y)
+            .visible(visible),
+    )
+    .build()
+    .map_err(|e| format!("런타임 창 생성 실패: {e}"))
 }
 
 // Destroyed 이벤트 → lib.rs Destroyed arm → cleanup_popup_window 가 잔여 정리.
