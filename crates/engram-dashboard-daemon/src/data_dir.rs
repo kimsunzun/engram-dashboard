@@ -330,7 +330,7 @@ mod tests {
     }
 
     // ── discovery 사본과의 다리(ADR-0271 결정 1) ──────────────────────────────────────
-    // 두 벌(이 정본 · 셸이 아직 쓰는 discovery crate)을 묶는다. 다리는 discovery crate 를 지울 때 함께
+    // 두 벌(이 정본 · 아직 남은 discovery crate)을 묶는다. 다리는 discovery crate 를 지울 때 함께
     // 지우고, 남는 확인은 셸 사본의 같은-경로 시험이다. 시험은 늘 debug 로 돌아 루트 규칙의
     // release(`not(debug_assertions)`) 분기는 비교하지 못한다 — release 1회 실측이 덮는다
     // (`docs/process/S21-crate-boundaries/trd-2-2-discovery-split.md` §5-3).

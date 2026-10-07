@@ -82,8 +82,8 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 // ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
 // 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
 // **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
-// **형제**에서 절대경로를 찾아(그 규칙 = platform `env::sibling_exe` 한 곳 — discovery `locate_daemon_exe`(셸이
-// 부른다)의 첫 후보도 같은 함수다 · 배포 시 세 exe 동거),
+// **형제**에서 절대경로를 찾아(그 규칙 = platform `env::sibling_exe` 한 곳 — 셸 `discovery` 모듈의
+// `locate_daemon_exe` 첫 후보도 같은 함수다 · 배포 시 세 exe 동거),
 // provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
 // **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
 // 경로가 아니다.

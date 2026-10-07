@@ -237,7 +237,7 @@ pub struct FileSource {
 impl FileSource {
     /// 데몬·셸이 공유하는 데이터 폴더 안(ADR-0024/0029 — `default_data_dir`).
     pub fn in_data_dir() -> Self {
-        Self::at(engram_dashboard_discovery::default_data_dir().join(UI_SETTINGS_FILE))
+        Self::at(crate::discovery::default_data_dir().join(UI_SETTINGS_FILE))
     }
 
     pub fn at(path: PathBuf) -> Self {

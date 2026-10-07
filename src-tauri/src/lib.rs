@@ -1,17 +1,15 @@
 pub mod commands;
 pub mod daemon_client;
+pub mod discovery;
 mod fsutil;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;
 pub mod settings;
+mod tray;
 pub mod ui_settings;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;
-// 순수 discovery 로직은 engram-dashboard-discovery crate (tray-host 와 공유).
-// 호출부(commands/discovery.rs)가 crate::discovery 경로를 그대로 쓰도록 re-export 만 남긴다.
-pub use engram_dashboard_discovery as discovery;
-mod tray;
 
 // ADR-0029: embedded(in-process 호스팅) 제거 → daemon-only. 앱(src-tauri)은 데몬의 상주 클라이언트
 // 셸이다(창/트레이/로컬 제어 command + 데몬 discovery). 에이전트는 데몬이 호스팅한다.

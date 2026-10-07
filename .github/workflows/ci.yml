@@ -178,6 +178,8 @@ jobs:
 
       # 아래 다섯 스텝 = 셸 패키지(`engram-dashboard`)의 테스트 타깃을 **하나씩** 집는다 —
       #   통합 4종(`src-tauri/tests/`) + 단위 스위트 1종(`lib_unit` = `[[test]] path = "src/lib.rs"`).
+      #   ★`src-tauri/tests/stop_smoke.rs` 에는 스텝을 세우지 않는다★ — 시험 셋이 전부 `#[ignore]` 라 여기서 돌
+      #   것이 없고, 컴파일은 위 워크스페이스 회귀가 덮는다(실행은 로컬 실 데몬 레인 — `/qa` 바인딩).
       # ★2026-08-24: 이제 이 스위트들의 유일한 실행 경로가 아니다★ — 위 워크스페이스 회귀가 이 패키지를
       #   함께 돈다(제외 해제 · 겹침을 남긴 사유의 정본 = 그 스텝 주석). 이 다섯 줄이 남아 있는 값어치는
       #   둘이다: ① 실패가 **어느 스위트**에서 났는지를 스텝 이름이 짚는다(「실패 보고 시 게이트 명칭」).
@@ -746,12 +748,12 @@ jobs:
           esac
 
       # TRD 1-3 §3-8 · §4-2 ③(ADR-0266 「영향」 · base 시험 기능 스텝(ADR-0275 결정 5)과 같은 축): platform 의 시험 기능
-      #   `test-support`(`testing` 모듈 · `group::GroupRef::gone` · `spawn::wmi_create_raw` — 시험 도우미를 부르는 쪽 시험에 연다)는 소비 crate(agent · discovery)의
+      #   `test-support`(`testing` 모듈 · `group::GroupRef::gone` · `spawn::wmi_create_raw` — 시험 도우미를 부르는 쪽 시험에 연다)는 소비 crate(agent · discovery · 셸)의
       #   `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의 기능은 운영 빌드로
       #   합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다. 운영 바이너리를
       #   내는 둘(데몬 · 셸)의 정상 · build 그래프를 해석된 그래프로 읽는다(매니페스트 grep 이 아니다). 셸은
-      #   platform 을 직접 의존하지 않고 전이로만 닿는다 — 데몬을 dev-dependency 로 물지만 `-e` 에 `dev` 가 없어
-      #   그 간선은 세지 않는다.
+      #   platform 을 운영 의존으로 직접 지고(데몬 찾기 · 띄우기 · 끄기) 그 기능은 dev 줄에서만 켠다 — 데몬도
+      #   dev-dependency 로 물지만 `-e` 에 `dev` 가 없어 dev 간선은 세지 않는다.
       # ★꼴은 TRD 1-3 §4-2 의 명령이 아니라 착지한 base 스텝을 따른다★ — `-e` 의 `build` 와 짝의 crate 이름
       #   한정은 base 게이트가 리뷰 지적으로 더한 것이다(5fb25ab — build 의존을 못 봤다). 낡은 쪽은 TRD 다.
       # ★셋째 검사(agent dev 그래프 → 1줄 이상)를 지우지 말 것★: 기능 이름이 바뀌면 0 기대 둘은 매치할 낱말을
@@ -870,6 +872,7 @@ jobs:
           crates/engram-dashboard-discovery/src/lib.rs
           crates/engram-dashboard-net/src/instance.rs
           crates/engram-dashboard-net/src/portfile.rs
+          src-tauri/src/discovery/tests.rs
           # 통합 시험(`tests/`)
           crates/engram-dashboard-agent/tests/activation.rs
           crates/engram-dashboard-agent/tests/backend_contract.rs
@@ -880,6 +883,7 @@ jobs:
           crates/engram-dashboard-agent/tests/submit_delivery_boundary.rs
           crates/engram-dashboard-daemon/tests/ws_e2e.rs
           crates/engram-dashboard-discovery/tests/stop_smoke.rs
+          src-tauri/tests/stop_smoke.rs
           # 시험 하네스 bin · 예제
           crates/engram-dashboard-daemon/src/bin/roundtrip_smoke.rs
           crates/engram-dashboard-daemon/src/bin/saturation_pilot.rs

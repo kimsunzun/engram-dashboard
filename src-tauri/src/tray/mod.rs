@@ -25,7 +25,7 @@ use tauri_plugin_autostart::ManagerExt;
 use actions::{AutostartCheck, TRAY_ID};
 use core::{IconState, MenuAction};
 
-use crate::discovery::StopOutcome;
+use crate::daemon_client::stop::StopOutcome;
 
 // 컬러(데몬 alive)·회색(dead) 트레이 아이콘 두 벌. setup 에서 1회 생성해 manage(state).
 //
@@ -214,7 +214,7 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
                 }
                 Err(e) => tracing::warn!("[tray] daemon exe 탐색 실패: {e}"),
             },
-            DaemonOp::Stop => match crate::discovery::send_stop(&data_dir) {
+            DaemonOp::Stop => match crate::daemon_client::stop::send_stop(&data_dir) {
                 Ok(outcome) => {
                     tracing::info!(?outcome, "[tray] 데몬 graceful stop 발사");
                     // ★끄기 후 아이콘 확정은 StopOutcome 으로 분기(load-bearing — S13/M-1 race 방지)★:
@@ -237,11 +237,11 @@ fn spawn_daemon_action(app: &AppHandle, op: DaemonOp) {
     });
 }
 
-// [`StopOutcome`] → 끄기 후 아이콘 상태(impure 층 — discovery 타입 의존).
+// [`StopOutcome`] → 끄기 후 아이콘 상태(impure 층 — `daemon_client::stop` 타입 의존).
 //
-// ★core 가 아니라 여기 있는 이유(load-bearing)★: StopOutcome 은 discovery 의 타입이라 core.rs
-// (tauri/discovery import 0, IconState 만 안다)에 넣으면 순수성이 깨진다. 그래서 이 매핑만 impure
-// 층에 둔다.
+// ★core 가 아니라 여기 있는 이유(load-bearing)★: StopOutcome 은 WS 로 데몬을 끄는 `daemon_client::stop` 의
+// 타입이라 core.rs(tauri/discovery import 0, IconState 만 안다)에 넣으면 순수성이 깨진다. 그래서 이 매핑만
+// impure 층에 둔다.
 // - `DaemonClosed`(연결 닫힘=꺼짐 확정) → `Some(Inactive)`: 회색 확정(끄기 경로는 force_daemon_down
 //   이 이 확정 위에 death-window 억제창까지 세팅 — M-1 race 방지).
 // - `Timeout | NoTarget`(불확실/끌 데몬 없음) → `None`: 호출자가 기존 probe 폴백(refresh)을 탄다.
