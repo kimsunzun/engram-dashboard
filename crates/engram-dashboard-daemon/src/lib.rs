@@ -14,6 +14,7 @@ pub mod command_delivery;
 pub mod command_roster;
 pub mod connection_core;
 pub mod control;
+pub mod data_dir;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
 #[cfg(test)]
@@ -34,13 +35,13 @@ use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::CLI_EXE_NAME;
 use engram_dashboard_base::logging;
-use engram_dashboard_discovery::DataLayout;
 use engram_dashboard_protocol::PROTOCOL_VERSION;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 
 use connection_core::MultiViewState;
+use data_dir::{ensure_data_dir_writable, DataLayout};
 use engram_dashboard_agent::usage::{OsProbeSpawner, ProbeSpawner, UsageProbe};
 use engram_dashboard_net::frame_port::FrameFanout;
 use engram_dashboard_net::ws::ConnRegistry;
@@ -60,13 +61,13 @@ pub use engram_dashboard_net::ws::KeepaliveConfig;
 //   그대로 보인다) — 경계가 각 사용 지점에서 보이게 두는 슬라이스 1 의 원칙 그대로다(step-log S18.21).
 
 // ★경로를 여기서 조립하지 마라★: 데몬이 **붙잡는** 파일과 **쓰는** 파일이 같아야 단일 인스턴스가
-//   성립한다(ADR-0135). 경로는 `DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
+//   성립한다(ADR-0135). 경로는 `data_dir::DataLayout` 하나가 내고, 쓰기는 붙잡은 guard 로만 한다. 이 이름은 로그 문구용이다.
 use engram_dashboard_net::portfile::DAEMON_FILE;
 
 // ── data dir / 토큰 ──────────────────────────────────────────────────────────────
 
 fn resolve_data_dir() -> PathBuf {
-    engram_dashboard_discovery::default_data_dir()
+    data_dir::default_data_dir()
 }
 
 /// 보안: 반환값은 로그에 찍지 말 것(daemon.json 에만 기록).
@@ -81,7 +82,8 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 // ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
 // 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
 // **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
-// **형제**에서 절대경로를 찾아(locate_daemon_exe 와 대칭 — 배포 시 세 exe 동거),
+// **형제**에서 절대경로를 찾아(그 규칙 = platform `env::sibling_exe` 한 곳 — 셸 `discovery` 모듈의
+// `locate_daemon_exe` 첫 후보도 같은 함수다 · 배포 시 세 exe 동거),
 // provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
 // **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
 // 경로가 아니다.
@@ -101,18 +103,14 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 fn locate_send_exe() -> Option<PathBuf> {
     // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
     //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
-    let file_name = engram_dashboard_platform::env::exe_file_name(CLI_EXE_NAME);
-    if let Ok(daemon_exe) = std::env::current_exe() {
-        if let Some(dir) = daemon_exe.parent() {
-            let send_exe = dir.join(&file_name);
-            if send_exe.is_file() {
-                tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
-                return Some(send_exe);
-            }
+    if let Some(send_exe) = engram_dashboard_platform::env::sibling_exe(CLI_EXE_NAME) {
+        if send_exe.is_file() {
+            tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
+            return Some(send_exe);
         }
     }
     tracing::warn!(
-        name = %file_name,
+        name = %engram_dashboard_platform::env::exe_file_name(CLI_EXE_NAME),
         "제어 평면 CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
     );
     None
@@ -466,8 +464,8 @@ pub async fn run() -> Result<(), i32> {
     //    막히므로, `%TEMP%` 아래로 물러난 sink 가 이 줄을 받는다(base `logging` 머리말).
     //    그 폴백까지 실패하면 남는 곳이 없고, 그 경우의 주인은 클라이언트의 spawn 전 사전
     //    점검이다(ADR-0135) — 데몬은 사용자에게 보일 화면이 없다.
-    if let Err(e) = engram_dashboard_discovery::ensure_data_dir_writable(&data_dir) {
-        // e 안에 폴더 경로와 조치가 이미 들어 있다(DiscoveryError::DataDirUnwritable).
+    if let Err(e) = ensure_data_dir_writable(&data_dir) {
+        // e 안에 폴더 경로와 조치가 이미 들어 있다(`data_dir::DataDirUnwritable`).
         tracing::error!("데이터 폴더를 준비하지 못해 데몬을 시작할 수 없음: {e}");
         return Err(1);
     }
@@ -1111,42 +1109,4 @@ mod tests {
         let b = generate_token().unwrap();
         assert_ne!(a, b);
     }
-
-    #[test]
-    fn resolve_data_dir_delegates_to_discovery_local_dir() {
-        let _g = ENV_LOCK.lock().unwrap();
-        // override 가 새어 들어오면(다른 테스트 leak) 기본 경로 단언이 깨진다 — 명시 제거.
-        let prev = std::env::var_os("ENGRAM_DATA_DIR");
-        std::env::remove_var("ENGRAM_DATA_DIR");
-        let dir = resolve_data_dir();
-        let delegated = engram_dashboard_discovery::default_data_dir();
-        if let Some(v) = &prev {
-            std::env::set_var("ENGRAM_DATA_DIR", v);
-        }
-        assert!(
-            dir.ends_with(".engram-dev"),
-            "디버그(override 없음)에서 `.engram-dev` 로 끝나야(app 과 동일 폴더): {dir:?}"
-        );
-        assert_eq!(
-            dir, delegated,
-            "resolve_data_dir 은 discovery::default_data_dir 와 동일해야"
-        );
-    }
-
-    #[test]
-    fn resolve_data_dir_honors_env_override() {
-        let _g = ENV_LOCK.lock().unwrap();
-        let prev = std::env::var_os("ENGRAM_DATA_DIR");
-        let want = std::env::temp_dir().join("engram-daemon-resolve-override-test");
-        std::env::set_var("ENGRAM_DATA_DIR", &want);
-        let got = resolve_data_dir();
-        match &prev {
-            Some(v) => std::env::set_var("ENGRAM_DATA_DIR", v),
-            None => std::env::remove_var("ENGRAM_DATA_DIR"),
-        }
-        assert_eq!(got, want, "ENGRAM_DATA_DIR set 시 그 경로로 격리돼야");
-    }
-
-    /// ENGRAM_DATA_DIR 은 프로세스 전역 env — set/remove 하는 테스트끼리 직렬화한다(병렬 짓밟음 방지).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 }

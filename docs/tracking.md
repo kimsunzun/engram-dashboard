@@ -9,7 +9,7 @@
 | ID | 제목(짧게) | 구역 | 상태 |
 |---|---|---|---|
 | T-49 | 꺼진 에이전트의 슬롯 쪽 활성화 · 완전한 이어받기 | 메인 | 보류 — 저장 작업 뒤 |
-| T-47 | 크레이트 경계 리팩터링(아키텍처 논의) | 메인 | 1-1 base 도우미 착지(U1~U6) · 다음 = 1-1 머지 → 1-3 |
+| T-47 | 크레이트 경계 리팩터링(아키텍처 논의) | 메인 | 2-2 discovery 나누기 착지(U1~U4) · 다음 = 2-2 머지 → 2-3 |
 | T-44 | 채팅 안 승인(codex) | 메인 | 보류 — 다음 과제 |
 | T-42 | 단축키 시스템 | 메인 | 보류 |
 | T-36 | 반영 전 재입력 공용 처리 | 메인 | 후속 주제 |
@@ -21,6 +21,7 @@
 | T-11 | child별 권한 스코프(R7) | 메인 | 보류 — 원격 단계 |
 | T-9 | claude 프로세스 풀링 | 메인 | 보류 |
 | T-6 | cwd 워크스페이스 검증 | 메인 | 보류 — 운영 단계 |
+| T-52 | graceful 데몬 끄기 결과가 `Timeout` | 버그 | 미착수 · 원인 미규명(커밋 가름만) · 3단계 자리 추정 |
 | T-45 | 스폰 이름 중복 · codex 가 claude 로 보임 | 버그 | 보류 — id 전환과 묶음 |
 | T-39 | 실패·거절된 사용량 값 흐리게 | 버그 | 보류 — 사용량 작업과 묶음 |
 | T-28 | 갓 스폰된 수신자가 편지 미제출 | 버그 | 원인 규명 · 미착수 |
@@ -55,9 +56,9 @@
 - **근거:** ADR-0280(거부한 대안 「정지됨」 + 「활성화」 단추) · `docs/process/S21-storage/trd.md` §6-8 · §14-18
 
 ### T-47. 크레이트 경계 리팩터링 — 아키텍처 논의에서 나온 결정 후보 1~9
-- **상태:** 경계 논의 완료(2026-10-02) · ADR 작성 완료(ADR-0266~0273, 2026-10-02/03 — 후보 7 은 transport TRD 로 미룸 · 후보 3 은 번복: 감싸지 않는다, ADR-0268 · 후보 2 는 철회: 필요해질 때만 연결한다, ADR-0267) · 1단계 TRD 완료(1-1 base 도우미 · 1-3 platform crate, 2026-10-03~04 — 갈림길은 사용자 위임 2026-10-04 「알아서 진행해」 → 권고안 채택, ADR-0275) · 순서 = 0단계 ADR 끝 → 1단계 바닥 → 2단계 클라·데몬 떼기 → 3단계 transport → 4단계 안쪽 정리.
+- **상태:** 경계 논의 완료(2026-10-02) · ADR 작성 완료(ADR-0266~0273, 2026-10-02/03 — 후보 7 은 transport TRD 로 미룸 · 후보 3 은 번복: 감싸지 않는다, ADR-0268 · 후보 2 는 철회: 필요해질 때만 연결한다, ADR-0267) · 1단계 TRD 완료(1-1 base 도우미 · 1-3 platform crate, 2026-10-03~04 — 갈림길은 사용자 위임 2026-10-04 「알아서 진행해」 → 권고안 채택, ADR-0275) · 착지 = 1-1 base 도우미 · 1-3 platform crate · 2-1 셸 → agent 끊기 · 2-2 discovery 나누기(2026-10-04~07 — 각 step-log 항목 · 2-2 세부 = ADR-0282) · 순서 = 0단계 ADR 끝 → 1단계 바닥 → 2단계 클라·데몬 떼기 → 3단계 transport → 4단계 안쪽 정리.
 - **결정 후보:** 1 OS 의존 코드 → `platform` crate · 2 command·messaging 도 base 사용(철회 — 필요해질 때만, ADR-0267) · 3 로그는 base 경유만(번복 — 감싸지 않는다, ADR-0268) · 4 base 공용 함수 모듈 · 5 셸 → agent 끊기 · 6 discovery 를 데몬·셸로 · 7 transport 부착 뒤 net 걷기(transport TRD 로 미룸) · 8 패킷은 남의 구조체를 품지 않음(명령 칸만 `RawValue`) · 9 engram CLI 독립 패키지.
-- **다음:** 1-1 구현 완료(U1~U6 · 2026-10-05) → push · 머지(사용자 확인) → 1-3(`process/S21-crate-boundaries/trd-1-3-platform-crate.md`). ADR-0275 의 D3 · 결정 12 는 사용자 확인 완료(2026-10-05). ★파일 도우미 통일(원자적 쓰기 → platform 1-3 · 손상 사본 치우기 1-1)은 storage P3(셸 화면 상태)가 master 에 착지한 뒤★ — 나머지 1단계는 먼저 간다(순서 정본 = 메모 10절).
+- **다음:** 2-2 구현 완료(U1~U4 · 2026-10-07) → 2-2 master 머지(사용자 확인) → 2-3 engram CLI 독립 패키지(메모 10절). ★파일 도우미 통일(원자적 쓰기 → platform 1-3 · 손상 사본 치우기 1-1)은 storage P3(셸 화면 상태)가 master 에 착지한 뒤★ — 나머지 1단계는 먼저 간다(순서 정본 = 메모 10절).
 - **정본(베끼지 않는다):** `refactoring/architecture-discussion-2026-09-26.md` — 사실 · 결정 · 작업 순서 · 진행 방식 · 지나가며 본 정리 후보(11절). 근거 조사 = `research/wire-shared-types-placement-2026-10-02.md`. 1단계 TRD = `process/S21-crate-boundaries/trd-1-1-base-helpers.md` · `process/S21-crate-boundaries/trd-1-3-platform-crate.md`(그 결정 = ADR-0275).
 
 ### T-44. 채팅에서 승인 받기 — codex 승인 질문을 지금은 자동 거절한다
@@ -129,6 +130,14 @@
 - **재도입:** 운영 단계에서 허용 cwd 정책(예: Engram 워크스페이스 하위만) 결정 후 manager.spawn_agent 또는 command 층에서 검증.
 
 ## 버그
+
+### T-52. graceful 데몬 끄기(`send_stop`)의 결과가 `DaemonClosed` 대신 `Timeout` 이다 — 데몬은 실제로 내려간다
+- **상태:** 미착수(2026-10-07 발견 — 경계 리팩터링 2-2 U3 의 실 레인 · GUI 실측). 원인은 찾지 않았다. 2-2 에서 고치지 않았다 — 「데몬 수신 루프를 건드려야 해 3단계(transport) 자리」는 추정이다(가름이 수신 루프 커밋을 가리킬 뿐이고, 고칠 자리가 클라이언트 `stop.rs` 일 수도 있다).
+- **문제:** 트레이 「데몬 끄기」 · `quit_app` 이 부르는 `send_stop`(`src-tauri/src/daemon_client/stop.rs`)이 `Timeout` 을 돌려준다. 기대 = `DaemonClosed`(데몬이 연결을 닫는 꺼짐 확정 신호 — `src-tauri/tests/stop_smoke.rs` 의 `send_stop_makes_real_daemon_self_exit` 가 이것을 단언하고, 지금 이 시험이 진다). GUI `quit_app` 로그의 `outcome` 도 `Timeout` 이었다. 데몬 프로세스는 실제로 내려간다.
+- **가름(실측):** `e3e42de` 통과 · `73ecdb8`(ADR-0206 — 수신 루프가 명령을 붙들지 않게 · 2026-09-18) 실패 · `367a154`(2-2 착수 전) 실패 → 2-2 무관.
+- **영향(코드 읽기 · 미검):** ① 트레이 「데몬 끄기」는 `Timeout` 을 불확실로 보고 꺼짐 확정 경로(`force_daemon_down` — 회색 확정 + 억제창)를 건너뛰어 생존 probe(`refresh_tray_icon`)로 돌아간다(`src-tauri/src/tray/mod.rs` 의 끄기 분기 · `icon_state_for_stop_outcome`). 그 probe 경로가 `StopOutcome` 이 생긴 이유인 race 자리다 — 데몬이 죽기 직전 수 ms 동안 살아 보여 아이콘이 컬러로 고착된다(step-log 의 `71f3e00` 항목). ② `quit_app` 은 `app.exit` 전에 `send_stop` 을 동기로 부른다(`src-tauri/src/tray/actions.rs`). 코드상 `Timeout` 은 두 갈래다 — 읽기 시한 `STOP_WS_TIMEOUT`(3초 — `stop.rs` · IO `WouldBlock`/`TimedOut`)이 다 차거나, IO 가 아닌 WS 오류(`Err(_)` 갈래 — 예: 닫기 핸드셰이크 없는 끊김 같은 프로토콜 오류)에서 곧바로 — 시한 아닌 IO 오류는 `DaemonClosed` 다. QA 실측은 3초 대기가 아니라 이른 반환이었다(끊김이 같은 밀리초 · 시험 한 번 약 1.2초). 어느 갈래인지는 미검.
+- **다음:** 원인을 찾는다 — `73ecdb8` 이 바꾼 데몬 수신 루프와 클라이언트 `stop.rs` 의 drain read 양쪽.
+- **근거:** 커밋 `b42e139` · `d2f9822` 본문 · step-log 2-2 항목
 
 ### T-45. 에이전트가 에이전트를 스폰할 때 같은 이름이 통과한다 · codex 로 띄운 쪽이 메인 화면에서 claude 로 보인다
 - **상태:** 보류(사용자 결정 2026-09-28 — 이름 → 내부 id 전환 때 같이 묶는다 · T-29 가 그중 우편함 조각). 옛 번호 = T-39(`v0.3.3/feat/chat-ux` 브랜치 기록에서 이 주제를 가리키는 「T-39」).

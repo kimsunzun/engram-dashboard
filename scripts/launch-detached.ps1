@@ -131,7 +131,7 @@ try {
   #   ★0(SW_HIDE)으로 바꾸지 말 것★ — 작업 표시줄 단추를 남기는 것이 요구다(사용자 결정 2026-09-25).
   #   전경 창이 없을 때 7 이 전경을 가져가는 예외와 검토했다 버린 대안 = `run-detached.ps1` 의 ShowWindow=7 주석.
   #   ★`CreateFlags` 에 CREATE_NO_WINDOW(0x08000000)를 넣지 말 것★ — WMI 가 ReturnValue 21 로 거부한다
-  #   (실측 정본 = `crates/engram-dashboard-platform/src/spawn.rs` `spawn_outside_job` 주석 · discovery 의 `real_wmi_spawn_flag_matrix`).
+  #   (실측 정본 = `crates/engram-dashboard-platform/src/spawn.rs` `spawn_outside_job` 주석 · 셸 `src-tauri/src/discovery/tests.rs` 의 `real_wmi_spawn_flag_matrix`).
   #   미검증: 새 프로세스는 호출자의 토큰·세션을 따른다고 본다 — 대화형 데스크톱 밖(SSH 등)에서 부르면 창이 안
   #   보일 수 있고, 승격된 셸에서 부르면 앱도 승격된 채 뜬다.
   $startup = ([WMIClass]"\\.\root\cimv2:Win32_ProcessStartup").CreateInstance()

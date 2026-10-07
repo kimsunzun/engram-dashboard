@@ -300,7 +300,7 @@ pub enum DetachedSpawnError {
 // ADR-0271
 pub fn spawn_outside_job(exe: &Path, console: bool) -> Result<(), DetachedSpawnError> {
     // ★`CREATE_NO_WINDOW`(0x0800_0000)를 넘기지 말 것★ — WMI 가 `rv` 21(Invalid Parameter)로 거절한다(실측
-    //   2026-06-17 · discovery 의 `real_wmi_spawn_flag_matrix`). CreateProcess 직접 호출용 플래그라 WMI Create 의
+    //   2026-06-17 · 셸 `discovery` 시험의 `real_wmi_spawn_flag_matrix`). CreateProcess 직접 호출용 플래그라 WMI Create 의
     //   허용 집합 밖이다. `CREATE_NEW_CONSOLE` 은 받는다.
     const CREATE_NEW_CONSOLE: i32 = 0x0000_0010;
     let create_flags = console.then_some(CREATE_NEW_CONSOLE);

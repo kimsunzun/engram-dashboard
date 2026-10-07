@@ -1,7 +1,7 @@
 # ADR-0271: discovery 를 나눠 데몬 몫은 데몬에 셸 몫은 셸에 두고 DataLayout 도 함께 나눈다
 
-- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 6 · §11 의 ADR-0264 충돌 항목에 대한 답) + 코드 대조 2026-10-02 (`d5ac725`))
-- 관련: Amends ADR-0024 (데이터 위치 구현 줄의 discovery 단일 출처) · Amends ADR-0264 (결정 4의 discovery DataLayout 단일 출처) · `docs/tracking-archive.md` T-10(discovery 통합 — 종결: 안 한다, 사용자 결정 2026-08-26 · 이 결정이 다시 연다) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0134(데이터 루트 위치 — 그대로) · ADR-0135(클라이언트 사전 점검 · 잠금 파일 = 접속 파일) · ADR-0175(`base` 셋째 입주자) · ADR-0266(WMI 띄우기 → platform) · ADR-0269(`Clock` → base · 입주 규칙) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(net 걷기) · ADR-0273(engram CLI 의 설치 위치 사본) · 메모 §5(애매한 것은 일단 데몬으로) · `crates/engram-dashboard-discovery/src/lib.rs` · `crates/engram-dashboard-discovery/src/layout.rs` · step-log S21 · Amends ADR-0175 (영향의 의존 그래프 중 discovery 가 든 줄)
+- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 6 · §11 의 ADR-0264 충돌 항목에 대한 답) + 코드 대조 2026-10-02 (`d5ac725`)) · 부분 폐기 by ADR-0282 (결정 2의 실행 파일 위치 계산 자리)
+- 관련: Amends ADR-0024 (데이터 위치 구현 줄의 discovery 단일 출처) · Amends ADR-0264 (결정 4의 discovery DataLayout 단일 출처) · `docs/tracking-archive.md` T-10(discovery 통합 — 종결: 안 한다, 사용자 결정 2026-08-26 · 이 결정이 다시 연다) · ADR-0029(셸 = 데몬 클라이언트) · ADR-0134(데이터 루트 위치 — 그대로) · ADR-0135(클라이언트 사전 점검 · 잠금 파일 = 접속 파일) · ADR-0175(`base` 셋째 입주자) · ADR-0266(WMI 띄우기 → platform) · ADR-0269(`Clock` → base · 입주 규칙) · ADR-0270(클라는 agent 를 모른다) · 결정 후보 7(transport TRD 때 박는다)(net 걷기) · ADR-0273(engram CLI 의 설치 위치 사본) · 메모 §5(애매한 것은 일단 데몬으로) · `crates/engram-dashboard-discovery/src/lib.rs` · `crates/engram-dashboard-discovery/src/layout.rs` · step-log S21 · Amends ADR-0175 (영향의 의존 그래프 중 discovery 가 든 줄) · Amended by ADR-0282 (결정 2의 실행 파일 위치 계산 자리)
 
 ## 맥락
 

@@ -231,7 +231,7 @@ pub trait PrimingProvider: Send + Sync + 'static {
 /// ★왜 base 를 exe 기준 루트로 받나(ADR-0092, 두 리뷰어 PRIMARY)★: 예전엔 base 를 데몬 프로세스 cwd
 ///   (`from_cwd`)로 삼았다 — 그러나 운영 데몬은 WMI Win32_Process.Create 로 떠 **부모 cwd 를 상속하지
 ///   않아**(cwd=System32) 프라이밍이 **조용히 비활성**됐다. 해결 = `default_data_dir` 이 `.engram-dev`
-///   를 anchor 할 때 쓰는 것과 **동일한 exe-walk-up 패턴**(discovery::find_install_root)을 재사용해
+///   를 anchor 할 때 쓰는 것과 **동일한 exe-walk-up 패턴**(`data_dir::find_install_root`)을 재사용해
 ///   신뢰 가능한 절대 루트를 base 로 삼는다(cwd 불신).
 ///
 /// ★왜 base 주입(new)인가★: 루트 해석을 이 모듈이 직접 하지 않고 생성 시 base 를 받는다 — 테스트가
@@ -272,8 +272,7 @@ impl FilePrimingProvider {
     /// 루트를 못 얻으면(current_exe 실패 등) base 를 `.`(상대)로 둔다 — 그 경우 absolutize 가 절대화에
     ///   실패해 None 을 산출한다(상대경로 절대 미주입).
     pub fn from_install_root() -> Self {
-        let base =
-            engram_dashboard_discovery::find_install_root().unwrap_or_else(|| PathBuf::from("."));
+        let base = crate::data_dir::find_install_root().unwrap_or_else(|| PathBuf::from("."));
         Self::new(base)
     }
 

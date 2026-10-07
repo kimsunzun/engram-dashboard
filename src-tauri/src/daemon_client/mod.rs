@@ -31,6 +31,8 @@ pub mod protocol_state;
 pub(crate) mod refusal;
 // ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri 의존 0).
 pub mod replay_flight;
+// ADR-0271: graceful 데몬 끄기(StopDaemon 일방 발사) — 3-2 가 다시 쓸 때까지의 임시 거처.
+pub mod stop;
 // 사용량 관심(레이아웃 → 데몬 구독 집합) + 구독 대조·캐시 상태기(순수 — TRD S21 usage-limit-slot §1-7).
 pub mod usage_interest;
 
@@ -98,9 +100,9 @@ impl SharedUsageInterest {
 // 데몬 발견 경계(seam). connect 경로는 spawn 가능(`ensure_spawn`), ensure 경로는 no-spawn
 // (`read_live`)만 — ADR-0021 분리를 이 trait 의 **서로 다른 메서드**로 못박는다.
 //
-// ★왜 trait 인가★: 실제 구현은 discovery crate(WMI spawn·파일 IO·실시간)에 닿아 단위 테스트가
+// ★왜 trait 인가★: 실제 구현은 `crate::discovery`(WMI spawn·파일 IO·실시간)에 닿아 단위 테스트가
 // 실 데몬을 띄워야 한다. seam 으로 끊어 테스트가 "spawn 호출 0회"(ensure no-spawn 불변)와
-// "주어진 host/port 반환"을 실 WMI 없이 단언한다(discovery crate 의 DaemonReader/Spawner 주입 동형).
+// "주어진 host/port 반환"을 실 WMI 없이 단언한다(`crate::discovery` 의 DaemonReader/Spawner 주입 동형).
 pub trait DaemonDiscovery: Send + Sync + 'static {
     // 명시 연결(connect) 경로. 살아있는 데몬을 찾고, 없으면 **spawn** 해서 접속 정보를 돌려준다.
     // wsTransport 의 `invoke('discover_daemon')` 대응(spawn 유발 = 데몬이 살아날 수 있음).
@@ -112,7 +114,7 @@ pub trait DaemonDiscovery: Send + Sync + 'static {
     fn read_live(&self) -> Option<DaemonInfo>;
 }
 
-// 운영 DaemonDiscovery — discovery crate 에 위임. connect=ensure_daemon(spawn 가능),
+// 운영 DaemonDiscovery — `crate::discovery` 에 위임. connect=ensure_daemon(spawn 가능),
 // ensure=read_live_daemon(no-spawn).
 //
 // ★blocking 주의★: ensure_daemon 은 폴링·sleep·WMI 동기 호출을 포함한다. 호출자(연결 task)는
@@ -121,16 +123,15 @@ pub struct RealDiscovery;
 
 impl DaemonDiscovery for RealDiscovery {
     fn ensure_spawn(&self, timeout: Duration) -> Result<DaemonInfo, String> {
-        let data_dir: PathBuf = engram_dashboard_discovery::default_data_dir();
+        let data_dir: PathBuf = crate::discovery::default_data_dir();
         // console=false: windowless spawn(콘솔 가시화는 daemon_start command 전용).
-        let exe = engram_dashboard_discovery::locate_daemon_exe().map_err(|e| e.to_string())?;
-        engram_dashboard_discovery::ensure_daemon(&data_dir, &exe, timeout, false)
-            .map_err(|e| e.to_string())
+        let exe = crate::discovery::locate_daemon_exe().map_err(|e| e.to_string())?;
+        crate::discovery::ensure_daemon(&data_dir, &exe, timeout, false).map_err(|e| e.to_string())
     }
 
     fn read_live(&self) -> Option<DaemonInfo> {
-        let data_dir: PathBuf = engram_dashboard_discovery::default_data_dir();
-        engram_dashboard_discovery::read_live_daemon(&data_dir)
+        let data_dir: PathBuf = crate::discovery::default_data_dir();
+        crate::discovery::read_live_daemon(&data_dir)
     }
 }
 

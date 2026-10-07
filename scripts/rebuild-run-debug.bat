@@ -25,7 +25,7 @@ REM   in-progress agent work in other deployments (agents are CHILDREN of the da
 REM   hypothetical). dev and release now carry separate Tauri identifiers (src-tauri\tauri.dev.conf.json)
 REM   specifically so they can run SIMULTANEOUSLY, which makes this the normal case, not an edge case.
 REM   The daemon that owns this dev deployment records its pid in the portfile below (repo-root
-REM   `.engram-dev\daemon\run\daemon.json` - discovery's debug-build default_data_dir + DataLayout,
+REM   `.engram-dev\daemon\run\daemon.json` - the daemon data_dir module's debug-build default_data_dir + DataLayout,
 REM   NOT target\release\data).
 REM   We kill that pid only after tasklist confirms it is STILL an engram-dashboard-daemon.exe AND its
 REM   executable path matches THIS deployment's own daemon binary (target\debug\) - pids get recycled,

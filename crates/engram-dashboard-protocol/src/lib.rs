@@ -82,8 +82,8 @@ pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 /// 떠 있던 데몬에 그대로 붙는다). 그래서 위 두 조합은 개발 중에 일상적으로 만들어진다. 「출시 전이라
 /// 지켜 줄 상대가 없다」로 이 bump 를 건너뛰려던 판단이 틀렸던 지점이 여기다.
 /// bump 가 둘 다 시끄럽게 만든다: auth 의 version check(`net` 의 `ws.rs`) + discovery 의
-/// version-mismatch 거부(`discovery` 의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
-/// 거부/재기동**한다. 그 강제를 재는 자리 = discovery 의
+/// version-mismatch 거부(셸 `discovery` 모듈의 `check_acceptable`)가 짝이 안 맞는 데몬을 **재사용하지 않고
+/// 거부/재기동**한다. 그 강제를 재는 자리 = 셸 `discovery` 시험의
 /// `version_mismatch_live_daemon_errors_without_spawn`.
 ///
 /// v5: codex 출력 모드가 wire 를 건넌다 — [`AgentSpawnCommand::Codex`] 에 `output_format` 칸 신설 +
@@ -101,7 +101,7 @@ pub use placeholder::{placeholder_error_frame, PLACEHOLDER_ERROR_MESSAGE};
 ///     bump 를 강제하는 것은 앞 항목 하나다.
 /// ★bump 가 만드는 차이★: discovery 의 `check_acceptable` 이 `daemon.json` 의 버전을 보고 짝이 안
 /// 맞는 **살아있는 데몬을 재사용하지 않는다** — 위 「구데몬 + 신셸」 조합이 악수를 지나기 전에 끊긴다.
-/// 그 강제를 재는 자리는 v4 항목과 같다(discovery 의 `version_mismatch_live_daemon_errors_without_spawn`).
+/// 그 강제를 재는 자리는 v4 항목과 같다(셸 `discovery` 시험의 `version_mismatch_live_daemon_errors_without_spawn`).
 /// (사용자 결정 2026-09-13)
 ///
 /// v6: 대기 입력 목록 — `AgentCommand::ListQueuedInputs`·`AgentCommand::CancelQueuedInput` 추가 + 전용
