@@ -1,7 +1,7 @@
 # ADR-0025: UI 부팅 1회 데몬 ensure 유지 — ADR-0024 C3("UI ensure 금지") 폐기
 
 - 상태: 확정 (2026-06-18, dashboard7 세션 — 사용자 결정)
-- 관련: ADR-0024(C3 폐기 대상)·ADR-0023(토폴로지)·ADR-0021(on-demand·무재시작)·CLAUDE.md §5 · `src/api/clientFactory.ts`(bootstrapDaemonIfNeeded)·`src/App.tsx`
+- 관련: ADR-0024(C3 폐기 대상)·ADR-0023(토폴로지)·ADR-0021(on-demand·무재시작)·CLAUDE.md §5 · `src/api/clientFactory.ts`(bootstrapDaemonIfNeeded)·`src/App.tsx` · Amends ADR-0024 (C3 UI ensure 금지)
 - 범위: daemon 모드에서 "UI가 데몬을 켜도 되나"의 결정. ADR-0024의 C3만 번복한다(C1·C2·C4·데이터 위치는 유효).
 
 ## 맥락

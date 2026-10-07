@@ -38,13 +38,16 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use engram_dashboard_base::time::SystemClock;
+use engram_dashboard_platform::env::env_key_eq;
+use engram_dashboard_platform::shell::console_command;
 use uuid::Uuid;
 
-use leftover::{Cleaner, GateCell, LogTag, SystemClock};
+use leftover::{Cleaner, GateCell, LogTag};
 
 use crate::backend::{
-    console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
-    SpawnParts, TransportShape, TurnClassifier,
+    inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink, SpawnParts,
+    TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -229,14 +232,15 @@ impl AgentBackend for ClaudeBackend {
                         // ★프로필 우선(explicit-skip)★: 프로필이 같은 키를 이미 넣었으면 건너뛴다. env 는
                         //   (k,v) Vec 이고 transport 가 순서대로 cmd.env 해서 뒤가 이기지만, 병합 순서에
                         //   기대지 않고 결정적으로 프로필이 이기게 한다.
-                        //   ★대소문자 무시★: Windows 환경변수는 대소문자를 구분하지 않으므로 프로필의
-                        //   `max_thinking_tokens` 도 같은 키로 인식해 중복 주입을 막는다.
+                        //   ★키 대조는 OS 의 환경변수 이름 규칙(`env_key_eq`)을 따른다★: Windows 에서는
+                        //   대소문자를 안 가리므로 프로필의 `max_thinking_tokens` 도 같은 키로 인식해 중복
+                        //   주입을 막는다.
                         //   ★프로필 내 중복 키 정규화는 범위 밖★: 표준 last-wins env 의미론을 그대로 따른다
                         //   (한 키만 특별 처리하면 일관성이 깨진다).
                         const MAX_THINKING_TOKENS_KEY: &str = "MAX_THINKING_TOKENS";
                         if !env
                             .iter()
-                            .any(|(k, _)| k.eq_ignore_ascii_case(MAX_THINKING_TOKENS_KEY))
+                            .any(|(k, _)| env_key_eq(k, MAX_THINKING_TOKENS_KEY))
                         {
                             env.push((MAX_THINKING_TOKENS_KEY.to_string(), "8000".to_string()));
                         }
@@ -1813,7 +1817,7 @@ pub(super) fn config_dir() -> Option<PathBuf> {
             return Some(PathBuf::from(dir));
         }
     }
-    claude_home().map(|h| h.join(".claude"))
+    engram_dashboard_platform::env::home_dir().map(|h| h.join(".claude"))
 }
 
 /// `<config dir>/projects/<slug>/<sid>.jsonl` 경로. home 을 못 찾으면 None.
@@ -1824,15 +1828,6 @@ fn transcript_path(cwd: &std::path::Path, sid: Uuid) -> Option<PathBuf> {
             .join(project_slug(cwd))
             .join(format!("{sid}.jsonl")),
     )
-}
-
-#[cfg(windows)]
-fn claude_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
-}
-#[cfg(not(windows))]
-fn claude_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// ADR-0079: transcript 원문(라인 NDJSON) → 과거 `OutputEvent` 목록. **순수 함수(외부 의존 0)** — 실
@@ -3332,7 +3327,7 @@ mod tests {
     }
 
     #[test]
-    fn json_mode_profile_lowercase_key_skips_injection() {
+    fn json_mode_profile_lowercase_key_follows_the_os_key_rule() {
         let env = vec![("max_thinking_tokens".to_string(), "1234".to_string())];
         let s = ClaudeBackend.build_spec(
             &json(vec![]),
@@ -3349,10 +3344,14 @@ mod tests {
             .filter(|(k, _)| k.eq_ignore_ascii_case("MAX_THINKING_TOKENS"))
             .map(|(_, v)| v.as_str())
             .collect();
+        let expected = if env_key_eq("max_thinking_tokens", "MAX_THINKING_TOKENS") {
+            vec!["1234"]
+        } else {
+            vec!["1234", "8000"]
+        };
         assert_eq!(
-            vals,
-            vec!["1234"],
-            "소문자 프로필 키도 중복 주입 방지 — 정확히 1개(값은 프로필 원본 1234)"
+            vals, expected,
+            "같은 키로 보는 OS(Windows)에서는 소문자 프로필 키도 중복 주입 방지 — 값은 프로필 원본 1234 하나"
         );
     }
 
@@ -6354,7 +6353,7 @@ mod tests {
     /// 바꾼 모양. 포트를 못 써 에피소드의 스냅숏은 실패로 서지만 에피소드는 선다. 시험은 쓰기 확인을 부르지 않으므로
     /// 일꾼도 듣는 스레드도 뜨지 않는다.
     fn cleaned_decoder() -> (ClaudeStreamDecoder, InterruptLine, Arc<GateCell>) {
-        use crate::platform::process_group::{ProcessGroup, RetiringSignal};
+        use crate::transport::process_group::{ProcessGroup, RetiringSignal};
         let retiring = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let group = ProcessGroup::detached(RetiringSignal::of(&retiring));
         let cleaner = Cleaner::new(

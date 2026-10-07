@@ -382,7 +382,7 @@ flowchart LR
             <td>argv 의 <code>-a on-request</code> — 묻는 상대가 화면의 사람이다</td>
             <td>없음 — 항상 Fresh</td>
             <td>명단에서 제외</td>
-            <td><span class="tag shut">사람만</span></td>
+            <td><span class="tag open">열림</span></td>
           </tr>
           <tr>
             <td><code>codex</code> (app-server)</td>
@@ -392,7 +392,7 @@ flowchart LR
             <td><span class="tag shut">거절</span> <code>METHOD_NOT_FOUND</code></td>
             <td>없음 — 배선 상태이지 영구 속성이 아니다</td>
             <td><span class="tag later">여전히 제외</span> 사유가 갈렸다</td>
-            <td><span class="tag shut">사람만</span></td>
+            <td><span class="tag open">열림</span></td>
           </tr>
           <tr>
             <td><code>gemini</code> <span class="tag later">미배선</span></td>
@@ -594,26 +594,25 @@ flowchart TD
   <!-- 11 -->
   <section class="slide">
     <div class="kicker"><span class="n">11</span><span>닫힌 문</span></div>
-    <h2>사람 경로는 게이트를 지나지 않고, LLM 경로만 사유를 실은 오류로 반려된다</h2>
+    <h2>정책 표 한 장 — 그 표를 보는 문은 둘(agent.new · 데몬 SpawnByCwd)이고, 사람 메뉴(CreateProfile)는 표를 안 본다</h2>
     <figure>
       <div class="figure-body">
 <pre class="mermaid">
 flowchart TD
   P["LLM_BACKEND_POLICY — 표에 없으면 반려(fail-closed)"]
-  H["사람 — 빈 곳 우클릭 메뉴"] -->|"runAsHuman — 게이트를 지나지 않는다"| OK["통과 → 프로필 생성"]
-  L["LLM · 명령 버스"] -->|"프론트 레지스트리 registry.run"| D1["문 1 — humanOnly · 호출자 축으로 반려"]
-  L -->|"셸 agent.spawnInto"| D2["문 2 — 받은 낱말을 정책에 물어 반려 · 런타임 거절이 실제로 닿는 유일한 문"]
-  L -->|"코어 agent.new"| D3["문 3 — 선언 어휘에 없으면 역직렬화가 먼저 반려"]
-  L -->|"agent.spawn — cwd 즉시 스폰"| D4["문이 아니다 — 낱말을 받는 칸이 아예 없어 정책이 볼 것도 없다"]
+  L["LLM · 명령 버스"] -->|"셸 agent.spawnInto → 스폰 패킷 SpawnByCwd"| D1["문 1 — 데몬 SpawnByCwd 처리부가 받은 낱말을 정책에 물어 반려 · 호출자를 안 가린다"]
+  L -->|"코어 agent.new"| D2["문 2 — backend 는 필수 인자 · 선언 어휘에 없으면 역직렬화가 먼저 반려"]
+  R["프론트 레지스트리 — 사람 메뉴(runAsHuman)와 LLM(registry.run)이 같은 등록물 · humanOnly 는 걷혀 문이 아니다"] -->|"slot.createAgentHere · agent.spawn — claude 고정 스폰 패킷"| D1
+  R -->|"agentlist.create* — 예약 노드 생성"| CP["데몬 CreateProfile — 표를 안 본다"]
+  P --- D1
   P --- D2
-  P --- D3
   X["backend 칸을 비운 스폰 패킷"] -->|"기본값 없음"| ERR["데몬 거절 — MISSING_BACKEND"]
 </pre>
       </div>
-      <figcaption>문 하나는 낱말로 닫을 수 없다 — 프론트 레지스트리는 <b>사람 클릭과 LLM 호출이 같은 등록물</b>이라, 낱말로 닫으면 사람 길까지 함께 닫힌다. 그래서 그 문만 <b>호출자 축</b>으로 갈랐다.</figcaption>
+      <figcaption>데몬 <code>SpawnByCwd</code> 문은 <b>호출자를 가리지 않는다</b> — 패킷을 누가 보냈는지 모르므로 사람이 부른 claude 고정 스폰도 같은 표를 본다(ADR-0279 「감수한 대가」 · 오늘 영향 0 — 표가 아무것도 안 닫는다). 프론트 레지스트리를 호출자 축으로 가르던 <code>humanOnly</code> 는 2026-09-22 에 걷혀(ADR-0219) <b>문이 아니다</b>.</figcaption>
     </figure>
-    <p><b>「못 고른다」와 「골라도 정책이 닫는다」는 다른 축이다</b> — 뭉개면 어느 문을 열 때 무엇을 손대야 하는지가 사라진다. codex 가 LLM 표면에서만 닫힌 사유는 <b>첫 실행의 신뢰 확인 모달</b>이고(사람이 아닌 호출자는 못 지난다 — 키를 넣어도 안 먹는다, <b>실측 2026-09-07</b>), <b>여는 시점 = Phase 2</b>(ADR-0185 가 요구사항을 세는 그 backlog), 곧 그 모달 처리가 정해질 때다. 사람이 만드는 문은 그대로 열려 있다.</p>
-    <div class="anchor">crates/engram-dashboard-agent/src/commands.rs(LLM_BACKEND_POLICY · llm_creation_refusal) · src-tauri/src/layout/apply.rs(parse_backend · gate_backend) · src/commands/registry.ts(humanOnly · run vs runAsHuman)</div>
+    <p><b>「못 고른다」와 「골라도 정책이 닫는다」는 다른 축이다</b> — 뭉개면 어느 문을 열 때 무엇을 손대야 하는지가 사라진다. <b>codex 는 2026-09-22 에 LLM 표면에서도 열렸다(ADR-0219)</b> — 「첫 실행의 신뢰 확인 모달을 사람이 아닌 호출자가 못 지난다 · 여는 시점 = Phase 2」는 그날 죽은 서술이다. 실측(codex-cli 0.155.1)에서 <code>app-server</code> 통로는 한 번도 본 적 없는 폴더에 <code>thread/start</code> 를 성공으로 돌려주고 그 폴더를 자기 <code>config.toml</code> 에 스스로 신뢰로 적는다 — <b>폴더 신뢰 모달은 TUI 전용 장치</b>였다. <b>오늘 이 정책 표는 아무 낱말도 안 닫는다.</b></p>
+    <div class="anchor">crates/engram-dashboard-agent/src/commands.rs(LLM_BACKEND_POLICY · llm_creation_refusal) · src-tauri/src/layout/apply.rs(parse_backend — 셸은 오탈자 그물만 진다) · src/commands/registry.ts(humanOnly · run vs runAsHuman) · crates/engram-dashboard-daemon/src/connection_core.rs(MISSING_BACKEND · by_cwd_refusal · llm_policy — 정책 벽 = ADR-0279)</div>
   </section>
 
   <!-- 12 -->

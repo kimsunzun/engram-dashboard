@@ -106,7 +106,10 @@ impl AgentSpawner for DaemonSpawner<'_> {
                 .await?;
             match reply {
                 AgentEvent::Spawned { agent, .. } => Ok(agent.id.to_string()),
-                AgentEvent::Error { message, .. } => Err(format!("spawn 실패: {message}")),
+                // ADR-0279: 데몬 거절 문구(정책 거절 포함)는 접두 없이 그대로 간다. 오늘은 `send_command` 가
+                //   `Error` 를 먼저 `Err(message)` 로 접어(문구 원문 그대로 — 출처를 지키는 형제 =
+                //   `send_command_with_origin` · ADR-0281) 이 팔에 안 닿지만, 그 접기가 바뀌면 여기로 온다.
+                AgentEvent::Error { message, .. } => Err(message),
                 other => Err(format!("spawn 응답 예상 밖(Spawned 기대): {other:?}")),
             }
         })

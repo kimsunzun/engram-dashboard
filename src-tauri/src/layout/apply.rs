@@ -33,7 +33,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
@@ -545,11 +544,11 @@ pub fn set_usage_slot(
 // 않는다**(하드 롤백 없음). 에이전트는 데몬에 살아 있고 목록 조회로 재부착 가능하다 — 스폰 뒤 모든
 // early-return 은 `alive_err` 로 생존 agent id 를 박아 invisible 에이전트를 막는다(락 획득 실패 포함).
 //
-// ## ★backend — 두 축으로 막는다: 모르는 낱말 · 이 표면이 안 만드는 백엔드★
+// ## ★backend — 셸은 모르는 낱말만 막는다(오탈자 그물)★
 // 데몬 스폰 wire 에 backend 칸이 생겼으므로(`SpawnByCwd.backend`) 요청은 이제 **데몬까지 흐른다**. 그래서
 // **wire 가 아는 낱말이라는 이유만으로** 거부할 근거는 죽었다 — 예전의 전량 거부는 「고를 칸이 wire 에
-// 없다」 위에 서 있었다(ADR-0058 폐기 대상). 남는 거절은 둘이고 근거가 서로 다르다(모르는 낱말 · 아래 정책).
-// ★그래도 게이트를 통째로 걷지 않는다★: 오탈자(`codx`)를 그냥 흘리면 데몬이 그것을 모르는 낱말로 거절할
+// 없다」 위에 서 있었다(ADR-0058 폐기 대상). 셸에 남는 거절은 모르는 낱말 하나다(정책 축은 아래 — 데몬).
+// ★그래도 그물을 통째로 걷지 않는다★: 오탈자(`codx`)를 그냥 흘리면 데몬이 그것을 모르는 낱말로 거절할
 // 때 **스폰 왕복 한 번을 낭비한 뒤**에야 알려지고, 옛 데몬을 만나면 그 칸째 무시돼 조용히 다른 백엔드가
 // 뜬다. ADR-0058 이 지키려던 성질(호출자가 원한 것과 다른 에이전트를 조용히 받지 않는다)은 살아 있고,
 // 폐기되는 것은 그 성질을 지키던 수단(전량 거부)뿐이다.
@@ -559,33 +558,19 @@ pub fn set_usage_slot(
 // ★미지정은 여기서 안 막는다★ — 부재의 거절은 데몬이 지고(어느 칸을 채우라는 문구까지 데몬이 낸다),
 // 셸이 그것을 흉내 내면 같은 규칙이 두 곳에 살게 된다.
 //
-// ## ★그 그물 뒤에 축이 하나 더 있다 — 아는 낱말이어도 이 표면이 지금 만드나★
-// 위 그물이 「그런 백엔드가 있나」를 묻는다면 아래 게이트는 「**사람이 아닌 호출자**가 그것을 만들어도
-// 되나」를 묻는다. ★**오늘 그 정책은 아무 낱말도 안 닫는다**★(2026-09-22 · ADR-0219 — codex 의 거절이
-// 걷혔고 wire 어휘는 claude·codex 둘뿐이다). 그래서 이 문에서 실제로 닿는 거절은 위 오탈자 그물 하나다.
-// ★그래도 두 축을 뭉치지 말 것★ — 정책 축은 다음 백엔드가 올 때 되살아나고(선언 없음 = 닫힘), 두 거절을
-// 한 문구로 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.
+// ## ★정책 축(아는 낱말이어도 지금 만드나)은 셸에 없다 — 데몬 `SpawnByCwd` 처리부가 진다★
+// 백엔드 생성 정책(agent 의 `LLM_BACKEND_POLICY`)은 데몬이 스폰 전에 묻는다(ADR-0279). 그 거절은 아래 1)
+// 스폰 단계의 `?` 로 돌아와 2) 배치에 닿지 않는다 — 레이아웃이 안 바뀐다. 문구는 데몬 것이 접두 없이 간다.
+// ★정책 검사를 여기 되살리지 말 것★ — 그러려면 셸이 agent crate 를 다시 의존해야 한다(ADR-0270 결정 1 ·
+// CI 게이트 `shell gate 1`).
+// ★두 거절을 한 문구로 뭉치지 말 것★ — 데몬의 정책 거절은 「아는 낱말이지만 … 만들지 않는다」, 이 그물은
+// 「를 모른다」다. 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.
 /// 오탈자 그물 — ★어휘를 손으로 적지 않는다★. 판정도 「무엇이 통하는가」 문구도 wire enum 자신에게서
 /// 나오므로(serde 의 unknown-variant 오류가 기대 낱말을 나열한다) 여기와 데몬이 갈릴 수 없다.
+// ADR-0270 · ADR-0279
 fn parse_backend(word: &str) -> Result<AgentBackendKind, String> {
     serde_json::from_value::<AgentBackendKind>(serde_json::Value::String(word.to_string()))
         .map_err(|e| format!("backend '{word}' 를 모른다({e}). 스폰 안 함."))
-}
-
-/// 오탈자 그물 + LLM 표면 정책. ★판정은 여기 없다★ — 정본은
-/// [`engram_dashboard_agent::commands::llm_creation_refusal`] 한 곳이고 `agent.new` 도 같은 표를 본다
-/// (ADR-0219 — 그 표가 codex 를 연 결정. 옛 좌표 「사용자 결정 2026-09-07 · TRD S21 §6-G」는 그 ADR 이
-/// 번복했으므로 근거로 인용하지 말 것). 두 문이 함께 열리는지를 재는 자리 =
-/// `tests/layout_apply.rs::every_creation_door_reads_one_backend_policy` (그 시험의 doc 이 문 셋과
-/// 각 문을 재는 스위트를 나눠 적는다 — 이 파일이 지는 것은 그중 ②다).
-fn gate_backend(word: &str) -> Result<AgentBackendKind, String> {
-    let kind = parse_backend(word)?;
-    match llm_creation_refusal(word) {
-        None => Ok(kind),
-        Some(reason) => Err(format!(
-            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함."
-        )),
-    }
 }
 
 pub async fn spawn_into(
@@ -602,7 +587,7 @@ pub async fn spawn_into(
     // ── 0) 스폰 전 검증(에이전트 생성 이전이라 alive_err 불필요 — 아직 아무것도 안 죽음) ──────────────
     let backend = match backend.as_deref().map(str::trim).filter(|b| !b.is_empty()) {
         None => None,
-        Some(word) => Some(gate_backend(word)?),
+        Some(word) => Some(parse_backend(word)?),
     };
     if tab.is_none() && slot.is_some() {
         return Err(

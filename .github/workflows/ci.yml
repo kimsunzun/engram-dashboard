@@ -264,18 +264,26 @@ jobs:
         shell: bash
         run: cargo test --locked -p engram-dashboard --test lib_unit
 
-      # 아래 5개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
+      # 아래 6개는 워크스페이스 회귀와 테스트 집합이 겹치지만, 검증 대상이 다르다 —
       # "이 crate 가 단독 feature 집합으로도 선다"는 격리 하네스 주장(ADR-0012)을 지킨다.
       # feature 합집합은 cargo 호출 1회 단위라 `--workspace` 는 이 축을 볼 수 없다.
 
-      # ADR-0175 결정 1: 바닥 crate(`base` — 로깅 + PID 판정). 워크스페이스 crate 의존 0 이 존재 이유라
-      # 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
-      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 의 `platform` 스위트가 실 `cmd.exe` 를 띄우긴
-      #   하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그 플래그가 겨냥하는
-      #   조건이 러너에 없다). 로컬 명령에는 붙는다.
+      # ADR-0175 결정 1: 바닥 crate(`base` — 범용 도우미 · 로깅, ADR-0269). 워크스페이스 crate 의존 0 이 존재
+      # 이유라 이 crate 도 위와 같은 단독 기립 축으로 확인한다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — 이 crate 엔 자식 프로세스를 띄우는 시험이 없다(실 `cmd.exe` 를
+      #   띄우던 PID 헬퍼 시험은 헬퍼와 함께 아래 `platform` 으로 나갔다 — ADR-0266). 로컬 명령에도 안 붙는다.
       - name: cargo test -p engram-dashboard-base
         shell: bash
         run: cargo test --locked -p engram-dashboard-base
+
+      # ADR-0266: OS 층 crate(`platform`). 워크스페이스 crate 의존 0(base 도 아니다)이 불변식이라 이 crate 도
+      #   위와 같은 단독 기립 축으로 확인한다 — 불변식 · 게이트의 정본은 그 crate lib.rs 헤더다.
+      # `-- --test-threads=4` 는 붙이지 않는다 — `process` 의 시험(`child_pids_finds_spawned_child` 등)이 실
+      #   `cmd.exe` 를 띄우긴 하지만 CI 는 그 플래그를 아예 쓰지 않는다(CLAUDE.md 「빌드·검증 명령」 — 그
+      #   플래그가 겨냥하는 조건이 러너에 없다). 로컬 명령에는 붙는다.
+      - name: cargo test -p engram-dashboard-platform
+        shell: bash
+        run: cargo test --locked -p engram-dashboard-platform
 
       - name: cargo test -p engram-dashboard-agent
         shell: bash
@@ -509,14 +517,14 @@ jobs:
           esac
 
       # ADR-0134: 신규 crate 이름(`command`)이 알파벳에 없으면 메시징이 도구 crate 를 써도 안 잡힌다.
-      #   ADR-0175 가 `base` 를 더했다 — 같은 이유로 알파벳에 넣는다. ★새 워크스페이스 crate 가 생길
-      #   때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰 구멍이고, 아래
-      #   상한 게이트가 그 구멍을 덮는다).
+      #   ADR-0175 의 `base` · ADR-0266 의 `platform` 도 같은 이유로 알파벳에 넣는다. ★새 워크스페이스
+      #   crate 가 생길 때마다 여기 이름을 더해야 보인다★(손으로 박은 알파벳이 이 정규식의 가장 큰
+      #   구멍이고, 아래 상한 게이트가 그 구멍을 덮는다).
       - name: 'Gate: messaging kernel isolation — no workspace crate refs'
         shell: bash
         run: |
           set +e
-          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command)" crates/engram-dashboard-messaging/src/)
+          hits=$(rg "engram_dashboard_(agent|base|daemon|protocol|discovery|command|platform)" crates/engram-dashboard-messaging/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -608,14 +616,14 @@ jobs:
           echo "PASS"
 
       # ADR-0003 의 격리 불변식이 걸리는 축은 crate 이름이 아니라 **어느 바이너리에 링크되나** 다.
-      #   `base` 는 headless 데몬 · `net` · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
-      #   webview 도 없는 그 셋이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
+      #   `base` 는 headless 데몬 · `discovery` 에 링크되므로, 여기서 Tauri 를 부르는 순간 창도
+      #   webview 도 없는 그 둘이 전송 방식에 묶인다 — ADR-0003 이 막으려던 바로 그 실패다.
       # ★"잎 crate 라 안전하다" 로 이 스텝을 지우지 말 것★: 잎 성질은 **워크스페이스 crate** 축의 말이고,
       #   바로 위 상한 게이트도 `rg "^engram-dashboard"` 로 워크스페이스 멤버만 센다. 서드파티인 `tauri` 는
       #   그 게이트를 그대로 통과한다 — 두 게이트는 서로 다른 축이다.
-      # ADR-0175 결정 1 이 `logging`·`platform` 을 이리로 옮기면서 그 둘이 agent 게이트의 스캔 범위
-      #   (`crates/engram-dashboard-agent/src/`)를 벗어났다. 이 스텝이 없으면 그 두 모듈은 어느 게이트도
-      #   안 보는 상태가 된다 — `logging::init_logging_with_file` 이 "이벤트 하나만 쏘면 편한" 대표 자리다.
+      # base 입주자는 agent 게이트의 스캔 범위(`crates/engram-dashboard-agent/src/`) 밖에 산다(ADR-0175
+      #   결정 1). 이 스텝이 없으면 어느 게이트도 그 입주자를 안 본다 — `logging::init_logging_with_file` 이
+      #   "이벤트 하나만 쏘면 편한" 대표 자리다.
       - name: 'Gate: base crate isolation — no `use tauri` in the base crate'
         shell: bash
         run: |
@@ -632,7 +640,8 @@ jobs:
       # ADR-0175 결정 1 의 입주 조건 ③(입주자끼리 서로 참조하지 않을 것)의 벽. ①②와 달리 이 조건에는
       #   기계 검증이 없었다 — ②는 위 상한 게이트가, ①은 사람이 본다.
       # ★왜 지켜야 하나★: 입주자가 서로 엮이면 그건 한 덩어리이고, 한 덩어리를 바닥에 두면 그 전체가 모든
-      #   소비자에게 딸려 간다 — crate 헤더가 이름 붙인 `bevy_core` 실패의 시작점이 정확히 여기다.
+      #   소비자에게 딸려 간다 — ADR-0151 「거부한 대안」 E 의 `bevy_core` 선례(ADR-0269 「거부한 대안」 1 이
+      #   다시 잰다)가 실패한 시작점이 정확히 여기다.
       # ★`crate::` 단독으로 넓히지 말 것★: 그건 평범한 Rust 라 게이트가 아니라 잡음이 된다. 모듈 **이름**을
       #   박아 두는 대가로 입주자가 늘면 여기 이름을 더해야 한다(메시징 정규식과 같은 종류의 구멍).
       # ★알려진 한계★: `logging` 이 나중에 하위 모듈을 가지면 그 안의 `crate::logging::…` 자기 참조가
@@ -641,7 +650,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|platform)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -649,6 +658,321 @@ jobs:
             0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
+
+      # ADR-0269 결정 5 · ADR-0275 결정 5: base 의 시험 기능 `test-support`(`testing` 모듈과 그 뒤의 시험 도우미를 연다)는
+      #   소비 crate 의 `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의
+      #   기능은 운영 빌드로 합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다.
+      #   운영 바이너리를 내는 둘(데몬 · 셸)의 정상 · build 그래프를 해석된 그래프로 읽는다(매니페스트 grep 이 아니다).
+      # ★셋째 검사(agent dev 그래프 → 1줄 이상)를 지우지 말 것★: 기능 이름이 바뀌면 0 기대 둘은 매치할 낱말을
+      #   잃고 조용히 통과한다 — 짝이 그 눈먼 통과를 빨갛게 만든다(transport lib.rs 헤더 게이트 ⑤ 와 같은 근거).
+      # ★한계★: 해석된 그래프를 읽을 뿐이라 `--all-targets` 를 한 호출로 짓는 빌드의 기능 합집합은 못 본다
+      #   (daemon `Cargo.toml` 「운영 빌드 주의」 — 배포 바이너리를 그렇게 짓지 않는 것이 규칙이다).
+      - name: 'Gate: base test-support stays out of release graphs (daemon · shell = 0, agent dev >= 1)'
+        shell: bash
+        run: |
+          for pkg in engram-dashboard-daemon engram-dashboard; do
+            set +e
+            tree=$(cargo tree --locked -p "$pkg" -e normal,build,features -i engram-dashboard-base --target all)
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p $pkg exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+            set +e
+            hits=$(printf '%s\n' "$tree" | rg 'feature "test-support"')
+            rgrc=$?
+            set -e
+            case "$rgrc" in
+              1) echo "PASS — $pkg normal graph: 0 matches" ;;
+              0) echo "FAIL — $pkg 운영 그래프에 base test-support 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+              *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+            esac
+          done
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-agent -e normal,dev,features -i engram-dashboard-base --target all)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard-agent exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'engram-dashboard-base feature "test-support"')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "agent dev graph: $n match(es)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 둘이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          echo "PASS"
+
+      # ADR-0266 「영향」: OS 층 crate(`platform`)의 격리 게이트 ① · ②. 기대값 · 근거 · 「지우지 말 것」의 정본은
+      #   `crates/engram-dashboard-platform/src/lib.rs` 헤더의 「격리 게이트」 절이고 여기는 부르기만 한다.
+      #   (③ 시험 기능 누수 게이트는 그 아래 스텝이 따로 진다.)
+      # ★①②가 각각 다른 축이라 하나로 줄이지 말 것★ — ①은 워크스페이스 멤버만 세므로 서드파티 `tauri` 를
+      #   그냥 통과시킨다(그 축이 ②).
+      # 형태 · 플래그는 messaging · command · base · transport 상한 게이트와 같다. ①에 경로 사전점검이 없는
+      #   까닭도 transport 게이트 1 과 같다 — 패키지가 사라지거나 개명하면 `cargo tree -p` 가 0 이 아닌
+      #   종료코드로 죽어 첫 분기가 잡는다.
+      - name: 'platform gate 1: direct workspace deps ceiling (exactly 1 = self)'
+        shell: bash
+        run: |
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-platform --depth 1 --prefix none -e normal,dev,build --target all --all-features)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          out=$(printf '%s\n' "$tree" | rg "^engram-dashboard" | sort -u)
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$out" ]; then n=0; else n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]'); fi
+          echo "found $n direct workspace dep(s):"
+          printf '%s\n' "$out"
+          if [ "$n" -ne 1 ]; then echo "FAIL — expected exactly 1(자기 자신) — 워크스페이스 crate 의존이 반입됐다"; exit 1; fi
+          echo "PASS"
+
+      # ★`test -d` 를 지우지 말 것★ — crate 를 옮기거나 개명하면 rg 는 매치 0 을 뱉고 0 = PASS 라 벽이
+      #   조용히 사라진다(rc=2 갈래도 같은 것을 잡지만 사유를 못 찍는다 — transport 게이트 2 와 같다).
+      - name: 'platform gate 2: no `use tauri` in the platform crate'
+        shell: bash
+        run: |
+          set +e
+          d=crates/engram-dashboard-platform/src
+          if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+          hits=$(rg "^\s*use tauri" "$d/")
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 0 matches" ;;
+            0) echo "FAIL — expected 0 matches, found:"; printf '%s\n' "$hits"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
+
+      # TRD 1-3 §3-8 · §4-2 ③(ADR-0266 「영향」 · base 시험 기능 스텝(ADR-0275 결정 5)과 같은 축): platform 의 시험 기능
+      #   `test-support`(`testing` 모듈 · `group::GroupRef::gone` · `spawn::wmi_create_raw` — 시험 도우미를 부르는 쪽 시험에 연다)는 소비 crate(agent · discovery)의
+      #   `[dev-dependencies]` 에서만 켠다. 워크스페이스가 `resolver = "2"` 라 dev 그래프의 기능은 운영 빌드로
+      #   합쳐지지 않는다 — 이 스텝은 누가 `[dependencies]` 쪽에 그 기능을 켜는 것을 잡는다. 운영 바이너리를
+      #   내는 둘(데몬 · 셸)의 정상 · build 그래프를 해석된 그래프로 읽는다(매니페스트 grep 이 아니다). 셸은
+      #   platform 을 직접 의존하지 않고 전이로만 닿는다 — 데몬을 dev-dependency 로 물지만 `-e` 에 `dev` 가 없어
+      #   그 간선은 세지 않는다.
+      # ★꼴은 TRD 1-3 §4-2 의 명령이 아니라 착지한 base 스텝을 따른다★ — `-e` 의 `build` 와 짝의 crate 이름
+      #   한정은 base 게이트가 리뷰 지적으로 더한 것이다(5fb25ab — build 의존을 못 봤다). 낡은 쪽은 TRD 다.
+      # ★셋째 검사(agent dev 그래프 → 1줄 이상)를 지우지 말 것★: 기능 이름이 바뀌면 0 기대 둘은 매치할 낱말을
+      #   잃고 조용히 통과한다 — 짝이 그 눈먼 통과를 빨갛게 만든다(base 시험 기능 스텝과 같은 근거).
+      # ★한계★: base 시험 기능 스텝과 같다 — 해석된 그래프를 읽을 뿐이라 `--all-targets` 를 한 호출로 짓는
+      #   빌드의 기능 합집합은 못 본다(daemon `Cargo.toml` 「운영 빌드 주의」).
+      - name: 'platform gate 3: test-support stays out of release graphs (daemon · shell = 0, agent dev >= 1)'
+        shell: bash
+        run: |
+          for pkg in engram-dashboard-daemon engram-dashboard; do
+            set +e
+            tree=$(cargo tree --locked -p "$pkg" -e normal,build,features -i engram-dashboard-platform --target all)
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p $pkg exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+            set +e
+            hits=$(printf '%s\n' "$tree" | rg 'feature "test-support"')
+            rgrc=$?
+            set -e
+            case "$rgrc" in
+              1) echo "PASS — $pkg normal graph: 0 matches" ;;
+              0) echo "FAIL — $pkg 운영 그래프에 platform test-support 가 켜졌다:"; printf '%s\n' "$tree"; exit 1 ;;
+              *) echo "FAIL — rg errored (exit $rgrc)"; exit 1 ;;
+            esac
+          done
+          set +e
+          tree=$(cargo tree --locked -p engram-dashboard-agent -e normal,dev,features -i engram-dashboard-platform --target all)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then echo "FAIL — cargo tree -p engram-dashboard-agent exited $rc"; printf '%s\n' "$tree"; exit 1; fi
+          set +e
+          hits=$(printf '%s\n' "$tree" | rg 'engram-dashboard-platform feature "test-support"')
+          rgrc=$?
+          set -e
+          if [ "$rgrc" -gt 1 ]; then echo "FAIL — rg errored (exit $rgrc)"; exit 1; fi
+          if [ -z "$hits" ]; then n=0; else n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]'); fi
+          echo "agent dev graph: $n match(es)"
+          if [ "$n" -lt 1 ]; then echo "FAIL — expected >= 1 — 기능 이름이 바뀌었나(그러면 위 0 기대 둘이 눈먼 채 통과한다)"; printf '%s\n' "$tree"; exit 1; fi
+          echo "PASS"
+
+      # ADR-0270 「영향」 불변식 「셸(`src-tauri`)은 agent crate 를 운영 의존하지 않는다」의 기계 벽(TRD 2-1 D6).
+      #   셸(`engram-dashboard`)의 정상 · build 그래프에 `engram-dashboard-agent` 가 0 줄이어야 PASS(짝: 데몬의 같은
+      #   그래프에 1 줄 이상). 해석된 그래프를 읽는다 — 매니페스트 grep 이 아니라서 다른 의존이 agent 를 끌어오는
+      #   전이 경로까지 잡는다. ★판정 함수(`shell_agent_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4i 블록이 이것을
+      #   읽어 그대로 부른다.
+      # ★`cargo tree -i engram-dashboard-agent` 로 바꾸지 말 것★ — 대상이 그래프에 없으면 rc=101 로 죽어 「없다」가
+      #   FAIL 로 읽힌다(실측 — TRD 2-1 §1-4). 그래서 그래프 전체를 찍고 줄을 찾는다.
+      # ★`-e` 에 `dev` 를 넣지 말 것★ — 셸 → (dev) 데몬 → agent 는 일부러 남아 있다(셸 통합 시험이 데몬을 쓴다 ·
+      #   작업 순서 2-4). 넣으면 그 간선으로 늘 빨갛다.
+      # ★짝(데몬 → 1 줄 이상)을 지우지 말 것★ — agent 를 개명하거나 접두를 바꾸거나 패턴에 오타가 나면 0 기대 줄이
+      #   매치할 이름을 잃고 눈먼 채 통과한다. 셸 패키지를 개명하면 `cargo tree -p` 가 죽어 FAIL 이다.
+      # ★`^…␣` 앵커(뒤 공백)를 빼지 말 것★ — 빼면 같은 접두의 다른 이름이 걸린다(discovery async 반입 게이트와 같다).
+      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4i 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
+      - name: 'shell gate 1: no agent crate in the shell release graph (shell = 0, daemon >= 1)'
+        shell: bash
+        run: |
+          shell_agent_gate() {
+            local tree hits n rc
+            tree=$(cargo tree --locked -p engram-dashboard -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard errored"; return 1; }
+            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-agent ') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            if [ -n "$hits" ]; then echo "FAIL — 셸 운영 그래프(normal · build)에 agent 가 있다(ADR-0270 — 셸은 agent 를 의존하지 않는다):"; printf '%s\n' "$hits"; return 1; fi
+            echo "shell normal/build graph: 0 agent line(s)"
+            tree=$(cargo tree --locked -p engram-dashboard-daemon -e normal,build --target all --all-features --prefix none) || { echo "FAIL — cargo tree -p engram-dashboard-daemon errored"; return 1; }
+            rc=0; hits=$(printf '%s\n' "$tree" | rg '^engram-dashboard-agent ') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            if [ -z "$hits" ]; then echo "FAIL — 짝: 데몬 운영 그래프에서도 agent 0 줄 — crate 이름이 바뀌었나 · 패턴이 망가졌나(그러면 위 0 기대가 눈먼 채 통과한다)"; return 1; fi
+            n=$(printf '%s\n' "$hits" | wc -l | tr -d '[:space:]')
+            echo "daemon normal/build graph: $n agent line(s)"
+            echo "PASS — 셸 운영 그래프에 agent 없음(짝: 데몬 $n 줄)"
+          }
+          shell_agent_gate
+
+      # ADR-0266 불변식 「운영 OS 분기는 platform crate 안에만」 — platform 밖에서 OS cfg 술어를 쓰는 `.rs` 파일 목록이
+      #   아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상). ★명단(heredoc) · 정규식
+      #   (`os_cfg_re`) · 파일 찾기 함수(`os_cfg_files`)는 여기 하나에만 둔다★ — `/qa` 바인딩 4f 블록이 이 셋을 읽는다.
+      #   ★대상 범위 · 짝 · 대조는 4f 블록이 따로 되풀어 적는다★ — 이 스텝의 그쪽을 고치면 4f 블록도 맞춘다.
+      #   matcher · 짝 · 범위 · 한계 · 명단을 고치는 법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ④.
+      - name: 'platform gate 4: OS cfg outside platform — exactly the fixed file list'
+        shell: bash
+        run: |
+          os_cfg_re='(?(DEFINE)(?<CMT>//[^\n]*+|/\*(?s:.)*?\*/)(?<STR>[bc]?"(?:[^"\\]|\\(?s:.))*+")(?<RAW>[bc]?r(?<rh>#*+)"(?s:.)*?"\k<rh>)(?<ID>[A-Za-z_][A-Za-z0-9_]*+(?![#"]))(?<OS>\b(?:windows|unix)\b|\btarget_(?:os|family|env|vendor)(?:\s++|(?&CMT))*+=)(?<ATOM>(?&CMT)|(?&STR)|(?&RAW)|(?&ID)|[^()"/A-Za-z_]|/(?![/*]))(?<NOS>(?&CMT)|(?&STR)|(?&RAW)|(?!(?&OS))(?&ID)|[^()"/A-Za-z_]|/(?![/*]))(?<P>\((?:(?&ATOM)|(?&P))*+\))(?<Q>\((?:(?&NOS)|(?!(?&Q))(?&P))*+(?:(?&OS)|(?&Q))))(?://[^\n]*+|/\*(?s:.)*?\*/|\b[bc]?r(?<h>#*)"(?s:.)*?"\k<h>|"(?:[^"\\]|\\(?s:.))*+"|\x27(?:[^\x27\\\n]|\\[^\n]|\\x[0-9a-fA-F]{2}|\\u\{[0-9a-fA-F]{1,6}\})\x27)(*SKIP)(*FAIL)|\b(?:cfg!?|cfg_attr)\s*(?=(?&P))(?&Q)'
+          if ! rg --pcre2-version; then echo "FAIL — 이 rg 에는 PCRE2 가 없다(게이트 ④ 의 matcher 가 그것에 기댄다)"; exit 1; fi
+          for d in crates src-tauri crates/engram-dashboard-platform/src; do
+            if [ ! -d "$d" ]; then echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; exit 1; fi
+          done
+          # 인자 = rg 경로 · glob. 출력 = OS cfg 술어를 쓰는 파일(정렬). rg 가 2 이상으로 죽으면 2 를 돌려준다.
+          os_cfg_files() {
+            local out rc=0
+            out=$(rg -P -U -l --color never "$os_cfg_re" "$@") || rc=$?
+            [ "$rc" -le 1 ] || return 2
+            # Windows 의 rg 가 찍는 `\` 를 `/` 로 — `\134`(8진)인 것은 에이전트 셸 도구가 `\\` 를 `\` 로 접기 때문이다.
+            printf '%s\n' "$out" | tr '\134' '/' | sed '/^$/d' | LC_ALL=C sort -u
+          }
+          own=$(os_cfg_files crates/engram-dashboard-platform/src -g '*.rs') || { echo "FAIL — rg errored"; exit 1; }
+          if [ -z "$own" ]; then echo "FAIL — 같은 matcher 가 platform 안에서 0 파일을 문다 — 정규식이 망가졌나(그러면 아래 대조가 눈먼다)"; exit 1; fi
+          actual=$(os_cfg_files crates src-tauri -g '*.rs' -g '!crates/engram-dashboard-platform/**') || { echo "FAIL — rg errored"; exit 1; }
+          expected=$(sed -e 's/[[:space:]]*#.*$//' -e '/^[[:space:]]*$/d' <<'OS_CFG_FILES' | LC_ALL=C sort
+          # 시험 분기뿐
+          crates/engram-dashboard-agent/src/backend/claude/leftover.rs
+          crates/engram-dashboard-agent/src/backend/claude/mod.rs
+          crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
+          crates/engram-dashboard-agent/src/backend/codex/mod.rs
+          crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs
+          crates/engram-dashboard-agent/src/backend/codex/transport.rs
+          crates/engram-dashboard-agent/src/backend/mod.rs
+          crates/engram-dashboard-agent/src/manager.rs
+          crates/engram-dashboard-agent/src/session.rs
+          crates/engram-dashboard-agent/src/transport/process_group.rs
+          crates/engram-dashboard-agent/src/transport/pty.rs
+          crates/engram-dashboard-agent/src/transport/stdio.rs
+          crates/engram-dashboard-agent/src/usage/process.rs
+          crates/engram-dashboard-agent/src/usage/scratch.rs
+          crates/engram-dashboard-base/src/logging/mod.rs
+          crates/engram-dashboard-daemon/src/messaging_host.rs
+          crates/engram-dashboard-discovery/src/lib.rs
+          crates/engram-dashboard-net/src/instance.rs
+          crates/engram-dashboard-net/src/portfile.rs
+          # 통합 시험(`tests/`)
+          crates/engram-dashboard-agent/tests/activation.rs
+          crates/engram-dashboard-agent/tests/backend_contract.rs
+          crates/engram-dashboard-agent/tests/canonical_name_wiring.rs
+          crates/engram-dashboard-agent/tests/reaper.rs
+          crates/engram-dashboard-agent/tests/stdio_physical_pipe.rs
+          crates/engram-dashboard-agent/tests/stdio_smoke.rs
+          crates/engram-dashboard-agent/tests/submit_delivery_boundary.rs
+          crates/engram-dashboard-daemon/tests/ws_e2e.rs
+          crates/engram-dashboard-discovery/tests/stop_smoke.rs
+          # 시험 하네스 bin · 예제
+          crates/engram-dashboard-daemon/src/bin/roundtrip_smoke.rs
+          crates/engram-dashboard-daemon/src/bin/saturation_pilot.rs
+          crates/engram-dashboard-agent/examples/spike.rs
+          crates/engram-dashboard-agent/examples/spike_breakaway.rs
+          # 시한부 운영 예외(ADR-0275 결정 15)
+          src-tauri/src/fsutil.rs
+          OS_CFG_FILES
+          )
+          if [ "$actual" = "$expected" ]; then
+            n=$(printf '%s\n' "$actual" | wc -l | tr -d '[:space:]')
+            echo "PASS — platform 밖 OS cfg 파일 $n 개가 명단과 같다"
+            exit 0
+          fi
+          echo "FAIL — platform 밖 OS cfg 파일이 명단과 다르다"
+          echo "명단 밖인데 걸린 파일(운영 분기면 platform 으로 옮긴다 · 시험 · 하네스면 명단에 더한다):"
+          LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+          echo "명단에 있는데 안 걸린 파일(분기를 걷었거나 옮겼다 — 명단에서 뺀다):"
+          LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+          exit 1
+
+      # ADR-0266 불변식의 의존 축 — 워크스페이스 멤버 중 아래 OS crate 를 **운영 의존**(normal · build · 대상 OS 무관)으로
+      #   **직접** 가진 것이 platform 하나여야 PASS(짝: platform 이 1 개 이상 가진다). dev 의존은 세지 않는다.
+      #   ★목록(`os_dep_re` — 손으로 적은 명시 목록) · 판정 함수(`os_dep_gate`)는 여기 하나에만 둔다★ — `/qa` 바인딩
+      #   4g 블록이 이 둘을 읽어 그 함수를 그대로 부른다. 짝 · 범위 · 한계의 정본 = `crates/engram-dashboard-platform/src/lib.rs`
+      #   헤더 게이트 ⑤.
+      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4g 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
+      - name: 'platform gate 5: OS crates as direct normal/build deps — platform only'
+        shell: bash
+        run: |
+          os_dep_re='^(windows|windows-sys|winapi|libc|nix|rustix|objc2.*|objc|cocoa|core-foundation|core-graphics|security-framework|mach2)$'
+          os_dep_gate() {
+            local tree hits own bad
+            tree=$(cargo tree --locked --workspace --no-dedupe --depth 1 --prefix depth -e normal,build --target all --all-features) || { echo "FAIL — cargo tree errored"; return 1; }
+            hits=$(printf '%s\n' "$tree" | awk -v re="$os_dep_re" '/^0/ { m = substr($1, 2); next } /^1/ && substr($1, 2) ~ re { print m " -> " substr($1, 2) }' | LC_ALL=C sort -u)
+            own=$(printf '%s\n' "$hits" | awk '$1 == "engram-dashboard-platform"')
+            bad=$(printf '%s\n' "$hits" | awk 'NF && $1 != "engram-dashboard-platform"')
+            printf 'found:\n%s\n' "$hits"
+            if [ -z "$own" ]; then echo "FAIL — 짝: platform 에서 0 개 — 목록 정규식이나 cargo tree 출력 꼴이 망가졌나(그러면 아래 판정이 눈먼다)"; return 1; fi
+            if [ -n "$bad" ]; then echo "FAIL — platform 밖 멤버가 OS crate 를 운영 의존으로 직접 가진다(그 OS 호출을 platform 으로 옮긴다):"; printf '%s\n' "$bad"; return 1; fi
+            echo "PASS — OS crate 운영 직접 의존은 platform 에만"
+          }
+          os_dep_gate
+
+      # ADR-0266 불변식의 표준 라이브러리 축 — platform 밖에서 `std::os::windows` · `std::os::unix` 를 `//` 주석 밖에 쓰는
+      #   `.rs` 파일 목록이 아래 명단과 정확히 같아야 PASS(짝: 같은 matcher 가 platform 안에서는 1 파일 이상).
+      #   ★정규식(`std_os_re`) · 판정 함수(`std_os_gate` — 대상 범위 · 짝 · 대조 · 메시지 전부) · 명단(heredoc)은 여기
+      #   하나에만 둔다★ — `/qa` 바인딩 4h 블록이 이 셋을 읽어 그 함수를 그대로 부른다. 짝 · 범위 · 한계 · 명단을 고치는
+      #   법의 정본 = `crates/engram-dashboard-platform/src/lib.rs` 헤더 게이트 ⑥.
+      # ★함수 본문에 `}` 한 글자뿐인 줄을 두지 말 것★ — 4h 블록은 함수 머리부터 첫 그런 줄까지를 함수로 읽는다.
+      - name: 'platform gate 6: std::os::windows/unix outside platform — exactly the fixed file list'
+        shell: bash
+        run: |
+          std_os_re='^(?:[^/]|/[^/])*?\bstd::os::(?:windows|unix)\b'
+          # 인자 = 명단 원문(`#` 주석 · 빈 줄 · 들여쓰기를 받는다 — 4h 블록은 ci.yml 원문 그대로 넘긴다).
+          #   `\134` 는 게이트 ④ 의 `os_cfg_files` 와 같은 이유다.
+          std_os_gate() {
+            local d own actual expected n rc=0
+            for d in crates src-tauri crates/engram-dashboard-platform/src; do
+              [ -d "$d" ] || { echo "FAIL — 게이트 대상 디렉터리가 없다: $d (개명했나·이사했나)"; return 1; }
+            done
+            expected=$(printf '%s\n' "$1" | sed -e 's/[[:space:]]*#.*$//' -e 's/^[[:space:]]*//' -e '/^$/d' | LC_ALL=C sort)
+            own=$(rg -l --color never "$std_os_re" crates/engram-dashboard-platform/src -g '*.rs') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            [ -n "$own" ] || { echo "FAIL — 짝: 같은 matcher 가 platform 안에서 0 파일을 문다 — 정규식이 망가졌나(그러면 아래 대조가 눈먼다)"; return 1; }
+            rc=0
+            actual=$(rg -l --color never "$std_os_re" crates src-tauri -g '*.rs' -g '!crates/engram-dashboard-platform/**') || rc=$?
+            [ "$rc" -le 1 ] || { echo "FAIL — rg errored (exit $rc)"; return 1; }
+            actual=$(printf '%s\n' "$actual" | tr '\134' '/' | sed '/^$/d' | LC_ALL=C sort -u)
+            if [ "$actual" = "$expected" ]; then
+              n=$(printf '%s\n' "$actual" | wc -l | tr -d '[:space:]')
+              echo "PASS — platform 밖 std::os 파일 $n 개가 명단과 같다"
+              return 0
+            fi
+            echo "FAIL — platform 밖 std::os 파일이 명단과 다르다"
+            echo "명단 밖인데 걸린 파일(운영 코드면 platform 으로 옮긴다 · 시험 · 예제면 명단에 더한다):"
+            LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+            echo "명단에 있는데 안 걸린 파일(쓰임을 걷었거나 옮겼다 — 명단에서 뺀다):"
+            LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual")
+            return 1
+          }
+          list=$(cat <<'STD_OS_FILES'
+          # 시험 분기뿐(`#[cfg(test)]` 모듈 안)
+          crates/engram-dashboard-agent/src/backend/claude/usage_probe.rs
+          crates/engram-dashboard-agent/src/usage/process.rs
+          crates/engram-dashboard-agent/src/usage/scratch.rs
+          crates/engram-dashboard-base/src/logging/mod.rs
+          crates/engram-dashboard-net/src/instance.rs
+          # 예제
+          crates/engram-dashboard-agent/examples/spike_breakaway.rs
+          STD_OS_FILES
+          )
+          std_os_gate "$list"
 
       # ADR-0175 결정 3 이 `replay_flight` 를 코어에서 셸 패키지 안으로 옮기며, 그 파일 헤더가 내세우던
       #   순수성 주장(소켓·tokio·Tauri·protocol 의존 0)이 **어느 게이트의 스캔 범위에도 안 들어가게 됐다**
@@ -773,45 +1097,45 @@ jobs:
             *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
           esac
 
-      # 기대값이 파일이 아니라 **심볼** 인 게이트다 — 허용된 파일 안에 새 import 를 넣어도 걸린다.
-      # 매치 유무가 아니라 정확한 줄 수를 단언한다(넘어도 모자라도 실패).
-      # ★ADR-0175 결정 1 로 이 게이트가 **두 스텝**이 됐다★ — PID 헬퍼가 `agent` 에서 잎 crate `base` 로
-      #   이사했으므로 기대값 2 가 crate 이름을 갈아타고 옮겨 갔다. **총량은 그대로 2 다.**
-      #   ★2b 를 「죽은 게이트」로 보고 지우지 말 것★: 그것만 떼면 net 이 에이전트 런타임을 다시 무는
-      #   회귀를 아무도 안 보게 된다. 0 기대가 홀로 서면 안 깨지는 벽이지만, 2a 의 2 기대와 **짝으로**
-      #   서면 "심볼이 사라진 게 아니라 옮겨 갔다" 를 단언하는 살아 있는 벽이다.
-      #   기대값·근거의 정본은 `crates/engram-dashboard-net/src/lib.rs` 헤더의 게이트 2 절.
-      - name: 'net gate 2a: base symbol allowlist — exactly 2'
+      # net gate 2a — platform 심볼 allowlist(심볼 단위): ① 뽑은 심볼 목록 = 아래 다섯 이름(정확히) ② crate 이름을
+      #   심볼 꼴이 아닌 모양으로 부르는 줄 0. 2b 와 짝이다(하나만 남기지 말 것). 근거 · 한계의 정본 =
+      #   `crates/engram-dashboard-net/src/lib.rs` 헤더 게이트 2.
+      - name: 'net gate 2a: platform symbol allowlist — exactly these 5 names, no hidden import forms'
         shell: bash
         run: |
           set +e
-          raw=$(rg -o --no-filename "engram_dashboard_base::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
+          raw=$(rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/)
           rc=$?
           set -e
           if [ "$rc" -gt 1 ]; then echo "FAIL — rg errored (exit $rc)"; exit 1; fi
-          if [ -z "$raw" ]; then
-            out=""; n=0
-          else
-            out=$(printf '%s\n' "$raw" | sort -u)
-            n=$(printf '%s\n' "$out" | wc -l | tr -d '[:space:]')
-          fi
-          echo "found $n symbol(s):"
+          out=$(printf '%s\n' "$raw" | sed '/^$/d' | LC_ALL=C sort -u)
+          expected=$(LC_ALL=C sort <<'NET_PLATFORM_SYMBOLS'
+          engram_dashboard_platform::fs::is_access_denied
+          engram_dashboard_platform::fs::is_sharing_violation
+          engram_dashboard_platform::fs::open_deny_write
+          engram_dashboard_platform::process::current_process_start_time
+          engram_dashboard_platform::process::pid_alive_with_start_time
+          NET_PLATFORM_SYMBOLS
+          )
+          echo "found symbol(s):"
           printf '%s\n' "$out"
-          if [ "$n" -ne 2 ]; then echo "FAIL — expected exactly 2"; exit 1; fi
-          echo "PASS"
+          if [ "$out" != "$expected" ]; then
+            echo "FAIL — expected exactly these 5:"
+            printf '%s\n' "$expected"
+            exit 1
+          fi
+          set +e
+          hidden=$(rg -n '^(?:[^/]|/[^/])*?\bengram_dashboard_platform(?:[^:]|:[^:]|::[^A-Za-z0-9_]|:{0,2}$)' crates/engram-dashboard-net/src/)
+          rc=$?
+          set -e
+          case "$rc" in
+            1) echo "PASS — 5 names, 0 hidden import forms" ;;
+            0) echo "FAIL — platform 을 심볼 꼴이 아닌 모양(별칭 · 중괄호 · glob · 끊긴 경로)으로 부른다:"; printf '%s\n' "$hidden"; exit 1 ;;
+            *) echo "FAIL — rg errored (exit $rc)"; exit 1 ;;
+          esac
 
-      # 2a 의 짝. 여긴 매치 유무로 판정한다(게이트 1·4 와 같은 규칙) — 한 줄이라도 나오면 net 이
-      # 에이전트 런타임을 다시 문 것이다.
-      # ★패턴이 **맨 crate 이름**인 것은 의도다★: 0 기대 게이트는 심볼 모양을 요구할 이유가 없고, 심볼
-      #   꼬리를 붙인 옛 형태(`::[A-Za-z0-9_:]+`)는 `::` 뒤가 문자클래스 밖이면 안 물어 **가장 흔한 두
-      #   형태를 놓쳤다** — 중괄호 전개(`use …::{platform::pid_alive, …}`)와 별칭(`use … as ag;`)이 그대로
-      #   빠져나갔다(실측). 이름만 보면 셋 다 걸린다.
-      # ★괄호는 오타가 아니다 — 게이트 4 와 같은 자기일치 방어다★: 맨 이름으로 적으면 이 게이트를 설명하는
-      #   net crate 헤더가 자기 자신에 걸려 영원히 통과하지 못한다. 옛 패턴은 `::` 뒤에 `[` 가 오는 **우연**
-      #   덕에만 자기일치를 면했고, 헤더에 예시 심볼을 하나 적는 순간 죽는 방어였다.
-      # ★이 게이트가 사는 값어치를 부풀리지 말 것★: 살아 있는 벽은 게이트 3(직접 의존 상한 = 정확히 3)이다
-      #   — net 은 의존을 선언하지 않고는 에이전트 심볼을 부를 수조차 없어 그쪽이 먼저 빨개진다. 2b 가 맡는
-      #   것은 **주석·테스트 헬퍼로 어휘가 먼저 새는 것**과, 게이트가 제 이름값(`0 matches`)대로 도는 것이다.
+      # net gate 2b — 에이전트 런타임 재유입 0줄(2a 의 짝). 패턴의 괄호 · 맨 crate 이름 · 값어치의 정본 =
+      #   `crates/engram-dashboard-net/src/lib.rs` 헤더 게이트 2b.
       - name: 'net gate 2b: no agent runtime symbols — 0 matches'
         shell: bash
         run: |

@@ -93,7 +93,8 @@
 //!     breakaway 가 막혀 있어(`BREAKAWAY_OK`·`SILENT_BREAKAWAY_OK` 둘 다 안 켠다) 트리가 통째로 내려가지만,
 //!     그 창에서 태어난 자손은 그 보장 밖이다. ★이 창은 이 통로만의 것이 아니다★ — `pty.rs`·`stdio.rs` 가
 //!     같은 모양이다. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회 실행기다 — 멈춘 채 띄워
-//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + `platform::resume_suspended_process`).
+//!     Job 에 넣은 뒤 깨워 그 창을 닫았다(`usage::process` + OS 층 `spawn::prepare_tree_root` ·
+//!     `spawn::TreeRoot`).
 //!   - **핸드셰이크가 실패하면 [`writer_loop`] 이 우리 쪽 stdin 을 놓는다 — 갈래를 가리지 않는다.**
 //!     ★한때 여기 「자식·리더·라이터는 그대로 남고 매니저가 거둘 때까지 상주한다」로 적혀 있었다. 그것은
 //!     낡은 서술을 넘어 **거짓이었다 — 아무도 그 세션을 거두지 않는다**★: 수거를 여는 것은 pump 의
@@ -157,6 +158,9 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_base::logging::mask_secrets;
+use engram_dashboard_base::sync;
+use engram_dashboard_platform::group::GroupOwner;
+use engram_dashboard_platform::spawn::hide_console_window;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -179,9 +183,6 @@ use crate::types::{
     OutputCaps, OutputEvent, PtyError, QueuedInputEvent, TerminalReason, ToolOutcome,
     TransportCaps, TurnInput, TurnOutcome, Withdraw,
 };
-
-#[cfg(windows)]
-use crate::platform::JobObjectHandle;
 
 // ── 상수 ──────────────────────────────────────────────────────────────────────
 //
@@ -496,7 +497,7 @@ fn publish_hand_over(core: &OutputCore, state: &SharedState, id: &str) {
     loop {
         let sent = {
             let (lock, _) = &**state;
-            let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let s = sync::lock(lock);
             s.pending
                 .iter()
                 .find(|p| {
@@ -1109,10 +1110,10 @@ struct Announcer {
 // ADR-0231
 // ADR-0234
 fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
-    let _order = announcer.order.lock().unwrap_or_else(|p| p.into_inner());
+    let _order = sync::lock(&announcer.order);
     let batch: Vec<(String, String, bool)> = {
         let (lock, _) = &**state;
-        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let s = sync::lock(lock);
         if s.floor != Floor::Above {
             return;
         }
@@ -1141,7 +1142,7 @@ fn announce(core: &OutputCore, state: &SharedState, announcer: &Announcer) {
     }
     let dead = {
         let (lock, cv) = &**state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         let mut dead = Vec::new();
         for id in ids {
             let Some(pos) = s.pending.iter().position(|p| p.id.as_deref() == Some(&id)) else {
@@ -1173,7 +1174,7 @@ fn settle_floor(core: &OutputCore, state: &SharedState, announcer: &Announcer, f
     debug_assert_ne!(floor, Floor::Pending, "판정은 둘 중 하나다");
     {
         let (lock, cv) = &**state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         if floor == Floor::Above {
             s.floor = Floor::Above;
             announcer.ack.set_available();
@@ -1295,7 +1296,7 @@ impl Pending {
         method: &'static str,
         deadline: Instant,
     ) -> bool {
-        let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = sync::lock(&self.entries);
         // ★락을 쥔 채 읽는다★ — 밖에서 읽으면 그 사이에 닫힌 표에 대기표가 들어간다.
         if self.closed.load(Ordering::Acquire) {
             return false;
@@ -1313,7 +1314,7 @@ impl Pending {
 
     /// 닫고 남은 것을 전부 돌려준다 — 이후 [`Pending::register`] 는 전부 실패한다.
     fn close(&self) -> Vec<PendingEntry> {
-        let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = sync::lock(&self.entries);
         self.closed.store(true, Ordering::Release);
         g.drain().map(|(_, e)| e).collect()
     }
@@ -1325,17 +1326,17 @@ impl Pending {
             RequestId::Num(n) => *n,
             RequestId::Str(_) => return None,
         };
-        let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = sync::lock(&self.entries);
         g.remove(&key)
     }
 
     fn forget(&self, id: i64) {
-        let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = sync::lock(&self.entries);
         g.remove(&id);
     }
 
     fn expired(&self, now: Instant) -> Vec<PendingEntry> {
-        let mut g = self.entries.lock().unwrap_or_else(|p| p.into_inner());
+        let mut g = sync::lock(&self.entries);
         let ids: Vec<i64> = g
             .iter()
             .filter(|(_, e)| e.deadline <= now)
@@ -1392,8 +1393,10 @@ pub(crate) struct CodexAppServerTransport {
     /// 이 통로가 나르는 출력이 구조화 스트림인가. ★주입값이다(ADR-0044/0030/0191)★ — 통로는 자기가
     /// 무엇을 나르는지 모르고, 아는 쪽은 이 모드를 고른 backend 다.
     structured: bool,
-    #[cfg(windows)]
-    job_handle: Arc<JobObjectHandle>,
+    /// 이 통로가 띄운 프로세스 무리의 주인 — 하나뿐이고 약한 손잡이도 내주지 않는다. ★마지막 칸으로 둔다★ — 칸은
+    /// 선언 순서로 버려지므로 통로가 버려질 때 무리가 닫히는 때가 이 자리로 정해진다. 앞당겨도 되는지는 재 보지
+    /// 않았고, 이 배치를 지키는 시험은 없다.
+    group: GroupOwner,
 }
 
 /// spawn 뒤 실패 경로에서 자식을 확실히 거두는 가드.
@@ -1442,12 +1445,7 @@ impl CodexAppServerTransport {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
+        hide_console_window(&mut cmd);
 
         let child = cmd
             .spawn()
@@ -1461,14 +1459,10 @@ impl CodexAppServerTransport {
         let stdout = child_ref.stdout.take();
         let stderr = child_ref.stderr.take();
 
-        #[cfg(windows)]
-        let job_handle = {
-            let job = JobObjectHandle::new()?;
-            if let Some(pid) = child_pid {
-                job.assign(pid)?;
-            }
-            Arc::new(job)
-        };
+        let group = GroupOwner::new()?;
+        if let Some(pid) = child_pid {
+            group.adopt(pid)?;
+        }
 
         let transport = CodexAppServerTransport {
             child: Arc::new(Mutex::new(guard.into_inner())),
@@ -1491,8 +1485,7 @@ impl CodexAppServerTransport {
             link_sink: Mutex::new(link_sink),
             writer_handle: Mutex::new(None),
             structured,
-            #[cfg(windows)]
-            job_handle,
+            group,
         };
 
         Ok((transport, child_pid))
@@ -1552,7 +1545,7 @@ fn sanitize(s: &str, limit: usize) -> String {
 // ── 라이터 쪽 ─────────────────────────────────────────────────────────────────
 
 fn write_line(stdin: &Mutex<Option<ChildStdin>>, line: &str) -> Result<(), PtyError> {
-    let mut guard = stdin.lock().unwrap_or_else(|p| p.into_inner());
+    let mut guard = sync::lock(stdin);
     let w = guard
         .as_mut()
         .ok_or_else(|| PtyError::WriteFailed("stdin closed".into()))?;
@@ -1569,7 +1562,7 @@ fn write_line(stdin: &Mutex<Option<ChildStdin>>, line: &str) -> Result<(), PtyEr
 fn drain_one_control_line(stdin: &Mutex<Option<ChildStdin>>, state: &SharedState) -> bool {
     let line = {
         let (lock, _) = &**state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         s.outbox.pop_front()
     };
     match line {
@@ -1997,7 +1990,7 @@ fn collect_history(
 // ADR-0201
 fn open_gate(state: &SharedState, thread_id: String) -> Result<(), String> {
     let (lock, cv) = &**state;
-    let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut s = sync::lock(lock);
     if let Link::Down(reason) = &s.link {
         return Err(reason.clone());
     }
@@ -2172,7 +2165,7 @@ fn take_steer_locked(s: &mut State, next_id: &AtomicI64) -> Option<Steer> {
 
 fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
     let (lock, cv) = &**state;
-    let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut s = sync::lock(lock);
     loop {
         if s.closed {
             return None;
@@ -2188,9 +2181,7 @@ fn next_job(state: &SharedState, next_id: &AtomicI64) -> Option<Job> {
         if let Some(steer) = take_steer_locked(&mut s, next_id) {
             return Some(Job::Steer(steer));
         }
-        let (guard, timeout) = cv
-            .wait_timeout(s, SWEEP_INTERVAL)
-            .unwrap_or_else(|p| p.into_inner());
+        let (guard, timeout) = sync::wait_timeout(cv, s, SWEEP_INTERVAL);
         s = guard;
         if timeout.timed_out() {
             return Some(Job::Sweep);
@@ -2227,7 +2218,7 @@ fn end_turn_if(
 ) -> bool {
     let ended = {
         let (lock, cv) = &**state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         match &s.turn {
             TurnState::Active { seq: cur, turn_id } if *cur == seq => {
                 let turn_id = turn_id.clone();
@@ -2345,7 +2336,7 @@ fn steer_write_failed(
     pending.forget(steer.request);
     let held = {
         let (lock, cv) = &**state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         let held = s.hold_refused_steer(&steer.item, steer.gen);
         cv.notify_all();
         held
@@ -2426,7 +2417,7 @@ fn sweep_deadlines(state: &SharedState, pending: &Pending, core: &OutputCore) {
 ///
 /// ★`catch_unwind` 가 실제로 사는 값을 부풀리지 말 것 — 「기록이 터져도 안전하다」가 아니다★.
 /// 이 포트 아래의 호출 그래프에는 **우리 코드가 만드는 패닉원이 없다**(해독은 `Result` 로 돌아오고,
-/// `now_millis` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장소는 IO 오류를
+/// base `now_epoch_ms` 는 `unwrap_or(0)` 이며, `normalize_hierarchy` 는 인덱싱을 안 하고, 저장소는 IO 오류를
 /// 자기 안에서 삼킨다). 닿을 수 있는 것은 **poison 가드**(`expect`)들이고 — 레지스트리 맵 락과, 쓰기가
 /// 실제로 일어날 때 그 아래에서 잡히는 저장소 락, 서로 다른 모듈에 하나씩 — 어느 쪽이든 서려면 **먼저
 /// 다른 패닉이 그 락을 오염시켜 놓았어야** 한다. 그러니 이 봉쇄가 사는 것은 딱 하나다:
@@ -2458,7 +2449,7 @@ fn record_session_id(
     //   리더의 거절 경로가 쥐고 있을 수 있다). 하나만 보면 그 구간이 통째로 새는데, 둘을 OR 하면 공짜로 닫힌다.
     let already_ended = shutdown.load(Ordering::Acquire) || {
         let (lock, _) = &**state;
-        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let s = sync::lock(lock);
         s.closed
     };
     if already_ended {
@@ -2635,7 +2626,7 @@ fn writer_loop(
             tracing::warn!("{}: {reason}", failure.headline());
             let dropped = {
                 let (lock, _) = &*state;
-                let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+                let mut s = sync::lock(lock);
                 s.link = Link::Down(reason.clone());
                 let n = s.pending.len();
                 s.pending.clear();
@@ -2748,11 +2739,7 @@ fn writer_loop(
             //   `start` 를 더하는 순간 무해가 깨진다).
             //   운영 구획의 그 개수는 [`tests::the_production_blocking_stdin_locks_are_counted`] 가 지킨다 —
             //   셋째가 생기면 위 판정을 다시 해야 하므로 조용히 늘지 않게 막는다.
-            let had_stdin = stdin
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take()
-                .is_some();
+            let had_stdin = sync::lock(&stdin).take().is_some();
             tracing::warn!(
                 had_stdin,
                 while_recording = *while_recording,
@@ -2969,7 +2956,7 @@ impl Drop for ReaderExit {
     fn drop(&mut self) {
         let discarded = {
             let (lock, cv) = &*self.state;
-            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = sync::lock(lock);
             // 진행 중이던 턴은 결말을 모른다 — ★로그 한 줄이 전부다★. 이 사실을 상태로 남기면 그것을 지울
             //   세 번째 호출자가 필요해지고(ADR-0127 결정 5), 다음 화신은 이 화신의 통로를 이어받지 않는다
             //   (ADR-0192)라 읽을 소비자도 없다.
@@ -3173,7 +3160,7 @@ impl Reader {
         );
         let dropped = {
             let (lock, cv) = &*self.state;
-            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = sync::lock(lock);
             if s.closed {
                 return;
             }
@@ -3251,7 +3238,7 @@ impl Reader {
         let mut drops = Disposal::default();
         let (result, log) = {
             let (lock, cv) = &*self.state;
-            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = sync::lock(lock);
             // ★모르는 threadId 는 오류가 아니다★ — 알림이 그 스레드의 id 를 알려 줄 응답보다 먼저
             //   도착하는 경우가 실측됐다. 우리 id 를 아직 모르면 그 축으로는 거르지 않는다.
             let foreign_thread = match (s.thread_id.as_deref(), incoming_thread) {
@@ -3331,7 +3318,7 @@ impl Reader {
     // ADR-0113
     fn claims_our_turn(&self, params: Option<&Value>) -> bool {
         let (lock, _) = &*self.state;
-        let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let s = sync::lock(lock);
         if let (Some(mine), Some(theirs)) = (
             s.thread_id.as_deref(),
             params
@@ -3396,7 +3383,7 @@ impl Reader {
                     Ok(r) => {
                         let released = {
                             let (lock, cv) = &*self.state;
-                            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+                            let mut s = sync::lock(lock);
                             // ★표식이 안 맞으면 이 답이 연 턴은 이미 끝났다★ — 그 id 를 지금 턴의 칸에
                             //   적으면 그 뒤의 interrupt 가 엉뚱한 턴을 겨눈다.
                             match &mut s.turn {
@@ -3521,7 +3508,7 @@ impl Reader {
                 };
                 let (held, trace) = {
                     let (lock, cv) = &*self.state;
-                    let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut s = sync::lock(lock);
                     // ADR-0231: 거절 계측 줄 — 그 턴이 아직 돌면 그 턴 id 를 싣는다.
                     let trace = SteerTrace::enabled().then(|| {
                         let turn = match &s.turn {
@@ -3586,7 +3573,7 @@ impl Reader {
         let mut traces = Vec::new();
         let idle = {
             let (lock, cv) = &*self.state;
-            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = sync::lock(lock);
             let idle = matches!(s.turn, TurnState::Idle);
             for id in ids {
                 let Some(item) = s.take_delivered(id) else {
@@ -3642,7 +3629,7 @@ impl Reader {
         let item_id = item.and_then(|i| i.get("id")).and_then(|v| v.as_str());
 
         let (lock, cv) = &*self.state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         if let (Some(mine), Some(theirs)) = (s.thread_id.as_deref(), incoming_thread) {
             if mine != theirs {
                 return None;
@@ -3712,7 +3699,7 @@ impl Reader {
         let incoming_thread = params.get("threadId").and_then(|v| v.as_str());
         let foreign = {
             let (lock, _) = &*self.state;
-            let s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let s = sync::lock(lock);
             matches!(
                 (s.thread_id.as_deref(), incoming_thread),
                 (Some(mine), Some(theirs)) if mine != theirs
@@ -3886,7 +3873,7 @@ fn reader_loop(
         let deadline = Instant::now() + CHILD_REAP_GRACE;
         loop {
             let reaped = {
-                let mut c = child.lock().unwrap_or_else(|p| p.into_inner());
+                let mut c = sync::lock(&child);
                 match c.try_wait() {
                     Ok(Some(status)) => Some(status.code()),
                     _ => None,
@@ -3918,7 +3905,7 @@ fn accept_input(
     origin: InputOrigin,
 ) -> Result<bool, PtyError> {
     let (lock, cv) = &**state;
-    let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let mut s = sync::lock(lock);
     if s.closed {
         return Err(PtyError::WriteFailed(
             "codex app-server: 통로가 닫혔다".into(),
@@ -3946,7 +3933,7 @@ fn accept_input(
 fn withdraw_item(state: &SharedState, core: Option<&OutputCore>, id: &str) -> Withdraw {
     let (answer, ops) = {
         let (lock, cv) = &**state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         let Some(pos) = s.pending.iter().position(|p| p.id.as_deref() == Some(id)) else {
             return Withdraw::NotHeld;
         };
@@ -3996,7 +3983,7 @@ impl AgentTransport for CodexAppServerTransport {
     fn start(&self, core: Arc<OutputCore>) {
         let agent_id = core.id();
 
-        let stdout = match self.stdout.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        let stdout = match sync::lock(&self.stdout).take() {
             Some(s) => s,
             None => return,
         };
@@ -4006,7 +3993,7 @@ impl AgentTransport for CodexAppServerTransport {
         // ── stderr drain ──
         // 비우지 않으면 자식이 stderr 버퍼 full 로 블록한다. 이 스트림에는 상대의 진단 텍스트가
         //   오므로(실측 0.154.0 — 오류는 stdout 이 아니라 이쪽으로 갔다) 활성화 실패의 유일한 증거다.
-        if let Some(stderr) = self.stderr.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        if let Some(stderr) = sync::lock(&self.stderr).take() {
             let diag_core = core.clone();
             let spawn_result = std::thread::Builder::new()
                 .name("engram-codex-stderr".into())
@@ -4033,12 +4020,7 @@ impl AgentTransport for CodexAppServerTransport {
         // ★아무도 join 하지 않는다★ — `core` 는 pump 핸들을 하나만 들고(그 자리를 넓히는 것은 코어
         //   변경이다), `shutdown()` 안에서 기다리는 것은 계약 위반이다. 이 스레드는 kill 이 파이프를
         //   깨면 블록된 write 가 풀리고 닫힘 표식을 보아 스스로 끝난다.
-        if let Some(params) = self
-            .open_params
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take()
-        {
+        if let Some(params) = sync::lock(&self.open_params).take() {
             let stdin = self.stdin.clone();
             let state = self.state.clone();
             let pending = self.pending.clone();
@@ -4047,11 +4029,7 @@ impl AgentTransport for CodexAppServerTransport {
             let writer_core = core.clone();
             let announcer = self.announcer.clone();
             let sink = self.sid_sink.clone();
-            let link = self
-                .link_sink
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take();
+            let link = sync::lock(&self.link_sink).take();
             let spawn_result = std::thread::Builder::new()
                 .name("engram-codex-writer".into())
                 .spawn(move || {
@@ -4070,13 +4048,13 @@ impl AgentTransport for CodexAppServerTransport {
                 });
             match spawn_result {
                 Ok(handle) => {
-                    *self.writer_handle.lock().unwrap_or_else(|p| p.into_inner()) = Some(handle);
+                    *sync::lock(&self.writer_handle) = Some(handle);
                 }
                 Err(e) => {
                     // 라이터가 없으면 핸드셰이크도 입력도 영영 안 나간다 — 조용히 두지 않는다.
                     tracing::warn!(agent = %agent_id, "codex writer 스레드 기동 실패: {e}");
                     let (lock, cv) = &*self.state;
-                    let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut s = sync::lock(lock);
                     s.link = Link::Down(format!("writer 스레드 기동 실패: {e}"));
                     cv.notify_all();
                 }
@@ -4087,11 +4065,7 @@ impl AgentTransport for CodexAppServerTransport {
         let (done_tx, done_rx) = mpsc::channel();
         let reader = Reader {
             core: core.clone(),
-            decoder: self
-                .decoder
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .take(),
+            decoder: sync::lock(&self.decoder).take(),
             state: self.state.clone(),
             pending: self.pending.clone(),
             first_turn: self.first_turn_sink.clone(),
@@ -4168,7 +4142,7 @@ impl AgentTransport for CodexAppServerTransport {
     ///   오지 않는다(실측 0.154.0: 해독 못 한 봉투에는 답이 없다).
     fn interrupt(&self) -> Result<(), PtyError> {
         let (lock, cv) = &*self.state;
-        let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut s = sync::lock(lock);
         let (thread_id, turn_id) = match (&s.thread_id, &s.turn) {
             (
                 Some(t),
@@ -4217,6 +4191,7 @@ impl AgentTransport for CodexAppServerTransport {
     ///   풀리고 락이 해제된다.
     /// ※stdin 을 닫는 것만으로도 상대가 스스로 exit 하는 것은 실측됐지만(턴이 없는 상태에서 41–51ms),
     ///   그 관측은 위 순서 불변을 바꾸지 않는다 — 락을 못 잡으면 닫는 자리까지 가지도 못한다.
+    // ADR-0001
     fn shutdown(&self) {
         self.shutdown.store(true, Ordering::Release);
 
@@ -4224,22 +4199,20 @@ impl AgentTransport for CodexAppServerTransport {
         //   (쓰기 전에 놓는다) 이 단계는 매달릴 수 없다. 아직 못 나간 큐는 여기서 사라진다.
         {
             let (lock, cv) = &*self.state;
-            let mut s = lock.lock().unwrap_or_else(|p| p.into_inner());
+            let mut s = sync::lock(lock);
             s.closed = true;
             cv.notify_all();
         }
 
         {
-            let mut child = self.child.lock().unwrap_or_else(|p| p.into_inner());
+            let mut child = sync::lock(&self.child);
             let _ = child.kill();
             let _ = child.wait();
         }
 
-        // 손자(cmd shim 아래 codex, 그리고 codex 가 thread/start 에서 띄운 MCP 자식들)까지 함께 끝난다.
-        #[cfg(windows)]
-        {
-            let _ = self.job_handle.terminate(1);
-        }
+        // 손자(cmd shim 아래 codex, 그리고 codex 가 thread/start 에서 띄운 MCP 자식들)까지 함께 끝난다. 무리가 없는
+        //   OS 에서는 무동작이다.
+        let _ = self.group.terminate(1);
 
         // try_lock 을 못 얻으면(아직 write_all 이 안 풀린 찰나) skip — 미정리 ChildStdin 은 drop 시 OS 가
         //   회수한다. ★블로킹 lock 금지★.
@@ -6356,12 +6329,12 @@ mod tests {
     fn shutdown_is_idempotent_and_leaves_no_child_behind() {
         let (t, pid) = open_probe(&["/c", "ping", "-n", "30", "127.0.0.1"]);
         let pid = pid.expect("pid");
-        assert!(engram_dashboard_base::platform::pid_alive(pid));
+        assert!(engram_dashboard_platform::process::pid_alive(pid));
         t.shutdown();
         t.shutdown();
         t.shutdown();
         assert!(
-            !engram_dashboard_base::platform::pid_alive(pid),
+            !engram_dashboard_platform::process::pid_alive(pid),
             "shutdown 뒤에도 자식이 살아 있다"
         );
         assert!(
@@ -6427,10 +6400,10 @@ mod tests {
             .stderr(Stdio::piped());
         let child = cmd.spawn().expect("spawn");
         let pid = child.id();
-        assert!(engram_dashboard_base::platform::pid_alive(pid));
+        assert!(engram_dashboard_platform::process::pid_alive(pid));
         drop(ChildGuard(Some(child)));
         assert!(
-            !engram_dashboard_base::platform::pid_alive(pid),
+            !engram_dashboard_platform::process::pid_alive(pid),
             "조기 반환 경로에서 자식이 샜다"
         );
     }
@@ -6634,7 +6607,7 @@ mod tests {
     /// ★가드는 spawn 뒤 **첫 실패 가능 단계보다 먼저** 서 있어야 한다★ — 그 아래로 내려가면 그 사이의
     /// `?` 가 이미 도는 자식을 남긴 채 돌아가고, 그 자식은 아직 어느 Job 에도 안 들어가 아무도 닿을 수 없다.
     ///
-    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`JobObjectHandle::new` 를 실패시키는
+    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`GroupOwner::new` 를 실패시키는
     /// seam 이 없다). 위 `Drop` 항목은 가드가 도는 것만 재고 어디에 서 있는지는 못 본다.
     #[test]
     fn the_child_guard_is_armed_before_the_first_fallible_step_after_spawn() {
@@ -6647,7 +6620,7 @@ mod tests {
         let armed = open_body
             .find("ChildGuard(Some(child))")
             .expect("가드 무장 지점");
-        for step in ["JobObjectHandle::new()?", "job.assign(pid)?"] {
+        for step in ["GroupOwner::new()?", "group.adopt(pid)?"] {
             let at = open_body
                 .find(step)
                 .unwrap_or_else(|| panic!("`{step}` 가 open 안에 없다 — 이 항목의 전제가 낡았다"));
@@ -7334,45 +7307,120 @@ mod tests {
     ///
     /// ★이 항목은 자리를 못 박지 않고 개수만 본다★ — 위치를 박으면 줄이 밀릴 때마다 낡는다. 늘었으면
     /// 새 자리가 어느 스레드에서 불리는지 **직접 판정한 뒤** 이 숫자를 고친다(숫자만 올리지 말 것).
-    /// ★`try_lock` 은 안 센다★ — [`AgentTransport::shutdown`] 의 그 자리는 기다리지 않으므로 이 위험에
-    /// 애초에 안 든다. ★주석 줄도 안 센다★ — 이 파일은 본문에서 `stdin.lock()` 을 인용한다.
+    /// 세는 규칙은 [`count_blocking_stdin_locks`] 가 갖는다. ★주석 줄은 안 센다★ — 이 파일은 본문에서
+    /// `stdin.lock()` 을 인용한다(줄 끝에 붙은 주석은 안 걸러져 넘게 셀 수 있다 — 그 방향은 빨강이라 괜찮다).
     /// ★시험 구획은 범위 밖이다★ — 그쪽은 일부러 락을 붙드는 항목을 갖는다
     /// ([`tests::shutdown_completes_even_if_a_write_blocks_on_a_full_pipe`]). 그 항목이 무해한 이유는
     /// [`AgentTransport::start`] 를 부르지 않아 라이터 스레드 자체가 안 뜬다는 것이고, `start` 를 더하는
     /// 순간 무해가 깨진다.
     #[test]
     fn the_production_blocking_stdin_locks_are_counted() {
-        /// `stdin` 뒤에 공백을 건너뛰고 `.lock()` 이 오는 자리 — 여러 줄로 쪼개 쓴 형태도 같이 잡는다.
-        fn blocking_acquisitions(src: &str) -> usize {
-            let mut found = 0;
-            let mut from = 0;
-            while let Some(rel) = src[from..].find("stdin") {
-                let after = from + rel + "stdin".len();
-                let rest = src[after..].trim_start();
-                if rest.starts_with(".lock()") {
-                    found += 1;
-                }
-                from = after;
-            }
-            found
-        }
-
         let src = include_str!("transport.rs");
         let production = src.split("mod tests {").next().expect("운영 구획");
         let code: String = production
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
-            .join(
-                "
-",
-            );
+            .join("\n");
 
         assert_eq!(
-            blocking_acquisitions(&code),
+            count_blocking_stdin_locks(&code),
             2,
             "운영 구획의 블로킹 stdin 락 취득 수가 달라졌다 — `write_line` 과 `writer_loop` 의              **핸드셰이크 실패 갈래**(기록 실패만이 아니라 왕복 실패·거절도 같은 자리를 지난다) 둘이              전부여야 한다. 늘었다면 그 새 자리가 어느 스레드에서 불리는지 먼저 판정할 것: 라이터가              `write_all` 에 매달린 동안 그 락을 블로킹으로 기다리는 자리가 생기면 데드락이다"
         );
+    }
+
+    /// 블로킹 stdin 락 취득 자리를 센다 — 두 꼴을 함께 센다.
+    ///
+    /// ① `stdin` 뒤에 공백(줄바꿈 포함)을 건너뛰고 `.lock()` 이 오는 자리.
+    /// ② 앞 글자가 식별자 글자(`_` · 영숫자)가 아닌 `lock(` 의 인자에 `stdin` 이 든 자리 — `sync::lock(` ·
+    ///    완전경로 · `use` 뒤의 맨 `lock(` · `Mutex::lock(` 을 다 잡는다. 인자 = 괄호 짝까지이고, 짝이 안
+    ///    맞으면 그 줄과 다음 두 줄이다. 오늘 운영의 두 자리는 ② 꼴이다(ADR-0275).
+    ///
+    /// 안 세는 것 = `try_lock(` 처럼 식별자에 붙은 `lock(`(기다리지 않아 이 위험에 안 든다 —
+    /// [`AgentTransport::shutdown`] 의 자리) · 인자가 빈 `.lock()`(① 몫이라 두 번 세지 않는다).
+    /// ★한 꼴만 세지 말 것★ — 다른 꼴로 쓴 셋째 자리가 개수에 안 잡혀 초록으로 지나간다. ①로 되돌아와도
+    /// 블로킹이다. ★넘게 세는 쪽으로 기운 것은 의도다★ — `stdin_buf` 처럼 이름에 `stdin` 이 든 무관한
+    /// 인자도 센다. 넘게 세면 빨강이 판정을 부르지만, 덜 세면 셋째 자리가 초록으로 지나간다.
+    /// ★못 잡는 꼴이 남아 있다★ — 수신자가 `stdin` 으로 끝나지 않는 메서드 사슬(`stdin.as_ref().lock()` ·
+    /// `(*stdin).lock()`)은 ①도 ②도 안 걸린다.
+    fn count_blocking_stdin_locks(src: &str) -> usize {
+        let mut found = 0;
+        let mut from = 0;
+        while let Some(rel) = src[from..].find("stdin") {
+            let after = from + rel + "stdin".len();
+            if src[after..].trim_start().starts_with(".lock()") {
+                found += 1;
+            }
+            from = after;
+        }
+        for (at, call) in src.match_indices("lock(") {
+            let glued = src[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c == '_' || c.is_alphanumeric());
+            if !glued && lock_argument(&src[at + call.len()..]).contains("stdin") {
+                found += 1;
+            }
+        }
+        found
+    }
+
+    /// `rest` = `lock(` 바로 뒤. 짝 닫는 괄호 앞까지를 돌려주고, 짝이 없으면 그 줄과 다음 두 줄을 돌려준다.
+    fn lock_argument(rest: &str) -> &str {
+        let mut depth = 1usize;
+        for (i, b) in rest.bytes().enumerate() {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &rest[..i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        let end = rest
+            .match_indices('\n')
+            .nth(2)
+            .map_or(rest.len(), |(i, _)| i);
+        &rest[..end]
+    }
+
+    /// [`count_blocking_stdin_locks`] 가 리뷰에서 재현된 거짓 통과 꼴을 하나씩 세는지 잰다.
+    #[test]
+    fn blocking_stdin_lock_counter_catches_every_shape() {
+        let cases: &[(&str, usize)] = &[
+            // ── 오늘 운영의 두 자리 ──
+            ("let mut guard = sync::lock(stdin);", 1),
+            ("let had_stdin = sync::lock(&stdin).take().is_some();", 1),
+            // ── 옛 ② 판정이 놓친 꼴 ──
+            ("let g = sync::lock(stdin.as_ref());", 1),
+            ("let g = sync::lock(\n    &self.stdin,\n);", 1),
+            (
+                "use engram_dashboard_base::sync::lock;\nlet g = lock(&self.stdin);",
+                1,
+            ),
+            ("let g = Mutex::lock(&self.stdin);", 1),
+            (
+                "let g = engram_dashboard_base::sync::lock(&*self.stdin);",
+                1,
+            ),
+            // ── ① 꼴 — ②가 두 번 세지 않는다 ──
+            ("let g = stdin.lock();", 1),
+            ("let g = stdin\n  .lock();", 1),
+            // ── 안 세는 꼴 ──
+            ("if let Ok(g) = stdin.try_lock() {}", 0),
+            ("let g = sync::lock(&self.stdout);", 0),
+        ];
+        for (snippet, want) in cases {
+            assert_eq!(
+                count_blocking_stdin_locks(snippet),
+                *want,
+                "이 꼴의 개수가 틀렸다: {snippet:?}"
+            );
+        }
     }
 
     // ── 목록 방출 · 하한 판정 · 에코 대조 · ✕ (ADR-0231) ──────────────────────

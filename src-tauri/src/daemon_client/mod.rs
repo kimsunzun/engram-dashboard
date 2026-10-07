@@ -28,15 +28,17 @@ mod frame_relay;
 pub mod inbound;
 mod lifecycle;
 pub mod protocol_state;
+pub(crate) mod refusal;
 // ADR-0046 M1: single-flight replay 채번/펜스 상태기계 + replay 경계 마커 인코딩(순수 — 소켓/Tauri 의존 0).
 pub mod replay_flight;
 // 사용량 관심(레이아웃 → 데몬 구독 집합) + 구독 대조·캐시 상태기(순수 — TRD S21 usage-limit-slot §1-7).
 pub mod usage_interest;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
 use engram_dashboard_protocol::{AgentCommand, AgentEvent, AgentId, DaemonInfo};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
@@ -48,6 +50,10 @@ use events::{ConnectionStateEvent, DaemonEvents, TauriEmitter};
 use events::NoDaemonEvents;
 use inbound::InboundSlot;
 use lifecycle::Lifecycle;
+use refusal::{RefusalAlerts, TauriRefusalBox};
+// 박스를 버리는 조립도 하네스 전용이다(`refusal::NoRefusalNotice` doc).
+#[cfg(test)]
+use refusal::{NoRefusalNotice, RefusalNotice};
 use usage_interest::{InterestAction, UsageInterest};
 
 use crate::layout::ViewManager;
@@ -85,7 +91,7 @@ pub struct SharedUsageInterest(Arc<Mutex<UsageInterest>>);
 
 impl SharedUsageInterest {
     pub fn lock(&self) -> MutexGuard<'_, UsageInterest> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.0)
     }
 }
 
@@ -174,6 +180,11 @@ pub struct DaemonClient {
     /// ★`Option` 이 아닌 것이 요점이다★ — 비어 있을 수 있는 emit 경로는 곧 "emit 을 못 하니 연결도 안
     /// 띄운다"는 단락으로 자라고, 그 단락이 실제로 이 모듈 단위 스위트 전체를 죽였었다(↓ `start_connection`).
     events: Arc<dyn DaemonEvents>,
+    /// 명령 등록 · 차분 거절 박스의 거르개(ADR-0281). 운영 = `refusal::TauriRefusalBox`, 하네스 =
+    /// `refusal::NoRefusalNotice`(기록하려면 [`Self::with_refusal_notice`]).
+    /// ★클라이언트가 쥐고 연결 task 마다 clone 해 넘긴다 — 연결마다 새로 만들지 말 것★: 되풀이 억제의 수명이
+    /// 셸 프로세스라(`RefusalAlerts` doc) 연결마다 만들면 재연결이 같은 거절을 받을 때마다 박스가 다시 뜬다.
+    refusals: Arc<RefusalAlerts>,
     // 현재 연결 상태 빠른 읽기(watch). 여러 구독자가 락 없이 현재값을 본다. 송신은 항상 lifecycle
     // 락 아래서만(가드된 전이) — 그래야 "세대 체크 + watch send" 가 원자적이다. 이 rx 는 borrow 만.
     state_rx: watch::Receiver<ConnectionState>,
@@ -256,8 +267,17 @@ impl DaemonClient {
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
             events,
+            refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             usage: SharedUsageInterest::default(),
         }
+    }
+
+    /// 거절 박스 포트를 갈아 끼운다 — ★연결 전에 부른다★(연결 task 는 그때 쥔 거르개를 끝까지 쓴다).
+    /// 기록형 대역(`refusal::RecordingRefusals`)으로 박스 결정을 실 소켓 왕복 위에서 단언하는 자리다.
+    #[cfg(test)]
+    pub(crate) fn with_refusal_notice(mut self, port: Arc<dyn RefusalNotice>) -> Self {
+        self.refusals = Arc::new(RefusalAlerts::new(port));
+        self
     }
 
     // 실 discovery + `NoDaemonEvents`. ★emit 없는 조립이라는 것이 `new` 와 같다★ — 운영 셸은 이걸 부르지
@@ -288,6 +308,7 @@ impl DaemonClient {
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
             events: Arc::new(NoDaemonEvents),
+            refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             usage: SharedUsageInterest::default(),
         }
     }
@@ -314,6 +335,7 @@ impl DaemonClient {
             registry: WindowChannelRegistry::default(),
             inbound: Arc::new(InboundSlot::new()),
             events: Arc::new(NoDaemonEvents),
+            refusals: Arc::new(RefusalAlerts::new(Arc::new(NoRefusalNotice))),
             usage: SharedUsageInterest::default(),
         }
     }
@@ -346,6 +368,7 @@ impl DaemonClient {
             router,
             registry,
             inbound: Arc::new(InboundSlot::new()),
+            refusals: Arc::new(RefusalAlerts::new(Arc::new(TauriRefusalBox(app.clone())))),
             // ★T7c★: broadcast 이벤트를 전 webview 에 push 하는 emit 경로(실물 어댑터).
             events: Arc::new(TauriEmitter(app)),
             usage: SharedUsageInterest::default(),
@@ -393,6 +416,11 @@ impl DaemonClient {
     /// 부른다 — 결과 처리(넛지 · 줄임 타이머)가 거기 한 벌이다. 락 차례는 [`SharedUsageInterest`] doc.
     pub fn usage_interest(&self) -> &SharedUsageInterest {
         &self.usage
+    }
+
+    /// 연결 task 의 등록 자리와 **같은** 거르개 — 차분 자리(`commands::view_bus`)가 쓴다.
+    pub(crate) fn refusal_alerts(&self) -> &RefusalAlerts {
+        &self.refusals
     }
 
     // 명시 연결 진입점(ADR-0021 §1) = wsTransport `start()` 대응.
@@ -571,6 +599,7 @@ impl DaemonClient {
             self.router.clone(),
             self.registry.clone(),
             self.events.clone(),
+            self.refusals.clone(),
             self.inbound.clone(),
             self.usage.clone(),
         ));
@@ -758,11 +787,21 @@ impl DaemonClient {
 
     // ── T6a: invoke 명령 request/reply 평면(spawn/kill/interrupt/write/resize/…) ─────────
     // side-effect 명령을 연결 task 로 보내고 데몬 reply(request_id 매칭)를 await 한다.
-    //
-    // ★계약(request_id)★: `cmd` 는 **호출자가 request_id 를 이미 박은** 명령이다(commands/agent.rs 의
-    // 빌더가 `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency
-    // (재시도 시 같은 키)와 정합한다 — send_command 가 임의로 채우면 호출자가 키를 모른다.
-    //
+    /// [`Self::send_command_with_origin`] 의 실패를 글로만 돌려주는 형제 — 계약·흐름·잔여는 그쪽에 적는다.
+    pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
+        self.send_command_with_origin(cmd)
+            .await
+            .map_err(|failure| failure.to_string())
+    }
+
+    /// [`Self::send_command`] 와 같은 왕복이되 실패의 **출처**를 타입으로 남긴다 — 데몬이 `Error` 로 답했나
+    /// (`CommandFailure::Daemon`), 셸 쪽에서 끝났나(`CommandFailure::Local`)를 문구를 읽지 않고 가려야 하는
+    /// 호출자가 쓴다(ADR-0281). 글은 형제와 바이트 단위로 같다(`CommandFailure` 의 `Display`).
+    /// 이 함수 안의 실패(request_id 없음 · 미연결 · 채널 끊김 · 답 유실)는 전부 `Local` 이다.
+    ///
+    /// ★호출 전제 — `cmd` 에 request_id 를 호출자가 이미 박는다★(commands/agent.rs 의 빌더가
+    /// `RequestId::new()` 로 채운다). 그래야 reply 매칭 키가 호출자에게도 알려져 idempotency(재시도 시 같은
+    /// 키)와 정합한다 — 이 왕복이 임의로 채우면 호출자가 키를 모른다.
     // ★흐름★: (1) 현재 cmd_tx clone + 소켓 표식(없으면 not-connected Err) (2) oneshot 생성
     // (3) `SendCommand` enqueue (4) reply await. 연결 task 가 reply 를 resolve(Ok/Err)하거나, 끊김 시
     // drain 으로 Err 를 보낸다(no-hang). cmd_tx send 실패(채널 full/닫힘)·oneshot drop(연결 task
@@ -790,23 +829,31 @@ impl DaemonClient {
     // 매달리고 → `close()` 가 lifecycle 의 송신단을 놓아도 EOF 가 안 오고 → 옛 `main_loop` 와 소켓이
     // 살아남는다.
     // ★그 잠금을 푸는 마감시각은 **이미 있다 — 다만 한 호출자에만 있다**★: `commands::agent` 의
-    // `forward_daemon_command` 가 이 호출을 30s `tokio::time::timeout` 으로 감싼다(같은 hang 을 겨냥해
+    // `forward_daemon_command` 가 이 왕복([`Self::send_command`] 입구)을 30s `tokio::time::timeout` 으로 감싼다(같은 hang 을 겨냥해
     // 들어온 것이다). 시한이 지나면 이 future 가 drop 되고 그 안의 clone 도 함께 죽어 EOF 가 복구되므로
     // `close()` 가 태스크를 거둔다. 그 경로가 프론트 명령 전부가 지나는 길이라, 운영에서 이 잠금은 30s 로
-    // 유계다. ★남은 것은 그 래핑이 없는 나머지 호출자들이다★ — `commands::agent` 의 맨 `.await` 다섯과
-    // `commands::layout` · `commands::view_bus` 각 하나. 즉 할 일은 마감시각을 **설계**하는 것이 아니라
-    // 이미 증명된 래핑을 그 일곱에 **넓히는** 것이다(또는 이 왕복 자체에 마감시각을 얹어 호출자마다
-    // 되풀이하지 않는 것 — ADR-0088 계열).
+    // 유계다. ★남은 것은 그 래핑이 없는 나머지 호출자들이다★ — 두 입구 어느 쪽을 부르든 같은 clone 을
+    // 쥐므로 함께 센다: [`Self::send_command`] 를 맨 `.await` 로 부르는 `commands::agent` 의 다섯 ·
+    // `commands::layout` 의 하나, 이 함수를 직접 부르는 `commands::view_bus` 의 하나. 즉 할 일은
+    // 마감시각을 **설계**하는 것이 아니라 이미 증명된 래핑을 그 일곱에 **넓히는** 것이다(또는 이 왕복
+    // 자체에 마감시각을 얹어 호출자마다 되풀이하지 않는 것 — ADR-0088 계열).
     // ★이 모양은 ADR-0195 가 만든 것이 아니다★ — 이 변경은 반환을 `(Sender, 표식)` 쌍으로 바꿨을 뿐
     // clone 의 수명은 그대로다(변경 전 `let Some(cmd_tx) = …` 도 같은 자리에서 같은 범위였다). 그래서
     // 여기서 고치지 않는다.
-    pub async fn send_command(&self, cmd: AgentCommand) -> Result<AgentEvent, String> {
+    pub async fn send_command_with_origin(
+        &self,
+        cmd: AgentCommand,
+    ) -> Result<AgentEvent, protocol_state::CommandFailure> {
+        use protocol_state::CommandFailure::Local;
+
         if protocol_state::command_request_id(&cmd).is_none() {
-            return Err("send_command: request_id 없는 명령은 reply 를 기대할 수 없다".to_string());
+            return Err(Local(
+                "send_command: request_id 없는 명령은 reply 를 기대할 수 없다".to_string(),
+            ));
         }
         // 지금 명령을 받을 소켓이 있으면 그 채널과 표식을 함께 얻는다(없으면 연결 안 됨/끊김).
         let Some((cmd_tx, socket)) = self.lifecycle.current_cmd_tx() else {
-            return Err(NOT_CONNECTED.to_string());
+            return Err(Local(NOT_CONNECTED.to_string()));
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         // 연결 task 로 enqueue. send 실패 = 채널 닫힘(연결 task 종료) → not-connected 취급.
@@ -819,13 +866,13 @@ impl DaemonClient {
             .await
             .is_err()
         {
-            return Err(CHANNEL_GONE.to_string());
+            return Err(Local(CHANNEL_GONE.to_string()));
         }
         // reply 대기. 연결 task 가 resolve(Ok/Err) 하거나 끊김 drain 으로 Err. oneshot 송신단이 reply
         //   없이 drop(연결 task 사망 등) 되면 RecvError → not-connected 취급.
         match reply_rx.await {
-            Ok(result) => result,
-            Err(_) => Err(REPLY_LOST.to_string()),
+            Ok(slot) => protocol_state::classify_reply(slot),
+            Err(_) => Err(Local(REPLY_LOST.to_string())),
         }
     }
 

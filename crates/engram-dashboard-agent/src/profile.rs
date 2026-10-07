@@ -9,20 +9,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+use engram_dashboard_base::time::now_epoch_ms;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::failure::AgentFailureKind;
 use crate::types::AgentId;
-
-fn now_millis() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
-}
 
 // ── 중립 실행 명령 ─────────────────────────────────────────────────────────────
 
@@ -241,7 +234,7 @@ impl AgentProfile {
         env: Vec<(String, String)>,
         auto_restore: bool,
     ) -> Self {
-        let now = now_millis();
+        let now = now_epoch_ms();
         Self {
             id: Uuid::new_v4(),
             name,
@@ -816,7 +809,7 @@ fn replace_session_id(
     }
     retire_session_id(p);
     p.backend_session_id = Some(new_sid);
-    p.last_active = now_millis();
+    p.last_active = now_epoch_ms();
     true
 }
 

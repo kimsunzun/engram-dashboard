@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engram 아키텍처 지도</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #16181c; --fg: #e6e4df; --muted: #9a9ea6; --line: #3a3d44;
+  --card: #1e2126; --chip: #2a2d33; --crate: #1f2c44; --crate-line: #4f6d9f;
+  --accent: #fb8a4c; --accent-soft: #3a2418; --empty: #555961;
+  --heat1: #2a2420; --heat2: #45291b; --heat3: #6a381d; --heat4: #93461c;
+  --d-agent: #3987e5; --d-comm: #d95926; --d-mail: #199e70; --d-cmd: #c98500;
+  --d-screen: #d55181; --d-render: #008300; --d-life: #9085e9; --d-auth: #e66767; --d-etc: #6b6f76;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.65 "Pretendard", "Malgun Gothic", system-ui, sans-serif;
+}
+main { max-width: 1120px; margin: 0 auto; padding: 24px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; }
+h2 { font-size: 21px; margin: 40px 0 8px; padding-top: 8px; border-top: 1px solid var(--line); }
+h3 { font-size: 17px; margin: 28px 0 6px; }
+p { margin: 6px 0; }
+code, .mono { font-family: "Cascadia Code", Consolas, monospace; font-size: 0.9em; }
+a { color: inherit; }
+.stamp { color: var(--muted); font-size: 13px; }
+.lead { margin-top: 12px; }
+nav.toc { margin: 16px 0 0; padding: 12px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; font-size: 14px; }
+nav.toc ol { margin: 4px 0 0; padding-left: 22px; }
+nav.toc .todo { color: var(--muted); }
+figure { margin: 12px 0; }
+figure svg { width: 100%; height: auto; max-width: 1000px; display: block; color: var(--fg); }
+figcaption { color: var(--muted); font-size: 13.5px; margin-top: 6px; }
+.scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.map { border-collapse: collapse; width: 100%; min-width: 900px; font-size: 13.5px; }
+table.map th, table.map td { border: 1px solid var(--line); padding: 8px; vertical-align: top; text-align: left; }
+table.map thead th { background: var(--card); font-size: 13px; }
+table.map thead th small { display: block; color: var(--muted); font-weight: normal; }
+table.map tbody th { width: 150px; background: var(--card); }
+table.map tbody th small { display: block; color: var(--muted); font-weight: normal; font-size: 12px; line-height: 1.4; margin-top: 2px; }
+td.empty { color: var(--empty); text-align: center; vertical-align: middle; }
+td.floor { color: var(--muted); }
+.c { display: inline-block; margin: 2px 2px 2px 0; padding: 1px 6px; border-radius: 4px; background: var(--chip); font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; line-height: 1.6; }
+.c.crate { background: var(--crate); outline: 1px solid var(--crate-line); font-weight: 600; }
+.c.hot { background: var(--accent-soft); outline: 1px solid var(--accent); }
+.note { display: block; color: var(--muted); font-size: 12px; line-height: 1.4; margin-top: 2px; }
+a.b { display: inline-block; min-width: 18px; text-align: center; margin-left: 2px; color: var(--accent); font-weight: 700; text-decoration: none; }
+.legend { color: var(--muted); font-size: 13px; margin: 6px 0 0; }
+ol.obs { padding-left: 0; list-style: none; }
+ol.obs li { margin: 10px 0; padding-left: 30px; position: relative; }
+ol.obs li .n { position: absolute; left: 0; top: 0; color: var(--accent); font-weight: 700; }
+.draft { margin-top: 12px; padding: 10px 14px; border-left: 3px solid var(--accent); background: var(--card); font-size: 14px; }
+footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+.srcnote { margin-top: 18px; color: var(--muted); font-size: 13px; }
+table.dep { border-collapse: collapse; width: 100%; min-width: 640px; font-size: 13.5px; margin-top: 10px; }
+table.dep th, table.dep td { border: 1px solid var(--line); padding: 7px 8px; text-align: center; vertical-align: middle; }
+table.dep thead th { background: var(--card); font-size: 12.5px; }
+table.dep tbody th { background: var(--card); text-align: left; white-space: nowrap; }
+table.dep td small { display: block; color: var(--muted); font-size: 11px; font-weight: normal; }
+table.dep td.self { color: var(--empty); }
+table.dep td.h1 { background: var(--heat1); }
+table.dep td.h2 { background: var(--heat2); }
+table.dep td.h3 { background: var(--heat3); font-weight: 700; }
+table.dep td.h4 { background: var(--heat4); font-weight: 700; }
+table.dom { border-collapse: collapse; width: 100%; min-width: 720px; font-size: 13.5px; }
+table.dom th, table.dom td { border: 1px solid var(--line); padding: 7px 9px; text-align: left; vertical-align: top; }
+table.dom thead th { background: var(--card); font-size: 12.5px; }
+table.dom tbody th { background: var(--card); white-space: nowrap; }
+table.dom td:nth-child(3) { white-space: nowrap; }
+table.dom td.hot { background: var(--accent-soft); }
+i.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 7px; vertical-align: 0; }
+details.tv { margin: 6px 0 0; font-size: 13.5px; }
+details.tv summary { cursor: pointer; color: var(--muted); }
+table.dep th.grp { background: var(--bg); text-align: left; font-size: 12.5px; color: var(--muted); }
+@media (max-width: 600px) { h1 { font-size: 22px; } body { font-size: 14.5px; } }
+</style>
+</head>
+<body>
+<main>
+
+<h1>Engram 아키텍처 지도</h1>
+<p class="stamp">기준 = master <code>a226f63</code> · 2026-09-26 · 범위 = 1장(프로세스) · 2장(도메인과 관계)</p>
+<p class="lead">큰 그림에서 작은 것으로 내려가며 봅니다. 세부 자료는 AI용 원자료(<a href="architecture-map-notes.md"><code>architecture-map-notes.md</code></a>)의 같은 장으로 가는 링크가 있습니다.</p>
+
+<nav class="toc" aria-label="목차">
+  <strong>장</strong>
+  <ol>
+    <li><a href="#ch1">프로세스와 통신선</a></li>
+    <li><a href="#ch2">도메인과 관계</a></li>
+  </ol>
+</nav>
+
+<h2 id="ch1">1장 · 프로세스와 통신선</h2>
+<p>실제로 따로 도는 프로그램과, 그 사이를 무엇이 오가는지입니다.</p>
+
+<figure>
+<svg viewBox="0 0 1050 320" role="img" aria-label="화면, 셸, 데몬, 에이전트 CLI, engram.exe 사이의 통신선. 셸과 데몬 사이 WebSocket이 transport가 들어갈 자리이고, 데몬과 에이전트 CLI 사이 주 통로는 양방향이다.">
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+    <marker id="ahA" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" style="fill: var(--accent)"/>
+    </marker>
+  </defs>
+
+  <!-- 화면 -->
+  <rect x="10" y="90" width="170" height="110" rx="8" style="fill: var(--card)" stroke="currentColor"/>
+  <text x="95" y="130" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">화면</text>
+  <text x="95" y="152" text-anchor="middle" font-size="12" fill="currentColor">WebView 창 3개</text>
+  <text x="95" y="170" text-anchor="middle" font-size="12" style="fill: var(--muted)">React (src/)</text>
+
+  <!-- 셸 -->
+  <rect x="300" y="90" width="180" height="110" rx="8" style="fill: var(--card)" stroke="currentColor"/>
+  <text x="390" y="130" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">셸</text>
+  <text x="390" y="152" text-anchor="middle" font-size="11" font-family="Consolas, monospace" fill="currentColor">engram-dashboard.exe</text>
+  <text x="390" y="172" text-anchor="middle" font-size="12" style="fill: var(--muted)">Tauri · 창·레이아웃 정본</text>
+
+  <!-- 데몬 -->
+  <rect x="600" y="50" width="190" height="250" rx="8" style="fill: var(--card)" stroke="currentColor"/>
+  <text x="695" y="88" text-anchor="middle" font-size="15" font-weight="700" fill="currentColor">데몬</text>
+  <text x="695" y="108" text-anchor="middle" font-size="10.5" font-family="Consolas, monospace" fill="currentColor">engram-dashboard-daemon.exe</text>
+  <text x="695" y="148" text-anchor="middle" font-size="12" fill="currentColor">에이전트를 소유·실행</text>
+  <text x="695" y="188" text-anchor="middle" font-size="11" style="fill: var(--muted)">소켓 A · 셸용 WebSocket</text>
+  <text x="695" y="206" text-anchor="middle" font-size="11" style="fill: var(--muted)">소켓 B · 에이전트용 HTTP</text>
+  <text x="695" y="276" text-anchor="middle" font-size="10.5" style="fill: var(--muted)">디스크: daemon.json · agents.json</text>
+
+  <!-- 에이전트 CLI -->
+  <rect x="900" y="50" width="140" height="120" rx="8" style="fill: var(--card)" stroke="currentColor"/>
+  <text x="970" y="92" text-anchor="middle" font-size="14" font-weight="700" fill="currentColor">에이전트 CLI</text>
+  <text x="970" y="114" text-anchor="middle" font-size="12" fill="currentColor">claude · codex</text>
+  <text x="970" y="131" text-anchor="middle" font-size="12" fill="currentColor">shell (여러 개)</text>
+
+  <!-- engram.exe -->
+  <rect x="900" y="215" width="140" height="85" rx="8" style="fill: var(--card)" stroke="currentColor"/>
+  <text x="970" y="252" text-anchor="middle" font-size="13" font-weight="700" font-family="Consolas, monospace" fill="currentColor">engram.exe</text>
+  <text x="970" y="274" text-anchor="middle" font-size="12" style="fill: var(--muted)">제어용 CLI</text>
+
+  <!-- 화면 ↔ 셸 -->
+  <line x1="180" y1="145" x2="300" y2="145" stroke="currentColor" stroke-width="1.5" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text x="240" y="136" text-anchor="middle" font-size="12" fill="currentColor">Tauri IPC</text>
+  <text x="240" y="163" text-anchor="middle" font-size="11" style="fill: var(--muted)">명령·이벤트·출력</text>
+
+  <!-- 셸 ↔ 데몬 WS (transport 자리) -->
+  <line x1="480" y1="125" x2="600" y2="125" style="stroke: var(--accent)" stroke-width="2.5" marker-start="url(#ahA)" marker-end="url(#ahA)"/>
+  <text x="540" y="100" text-anchor="middle" font-size="11" font-weight="700" style="fill: var(--accent)">transport 자리</text>
+  <text x="540" y="116" text-anchor="middle" font-size="12" style="fill: var(--accent)">WebSocket</text>
+
+  <!-- 셸 → 데몬 기동 -->
+  <line x1="480" y1="175" x2="600" y2="175" stroke="currentColor" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#ah)"/>
+  <text x="540" y="193" text-anchor="middle" font-size="11" style="fill: var(--muted)">띄우기 (WMI)</text>
+  <text x="540" y="208" text-anchor="middle" font-size="11" style="fill: var(--muted)">daemon.json 읽기</text>
+
+  <!-- 데몬 ↔ 에이전트 CLI 주 통로 -->
+  <line x1="790" y1="88" x2="900" y2="88" stroke="currentColor" stroke-width="3" marker-start="url(#ah)" marker-end="url(#ah)"/>
+  <text x="845" y="74" text-anchor="middle" font-size="11" font-weight="700" fill="currentColor">주 통로 (양방향)</text>
+  <text x="845" y="106" text-anchor="middle" font-size="10.5" style="fill: var(--muted)">PTY · stdio JSON</text>
+
+  <!-- 에이전트 CLI → 데몬 MCP -->
+  <line x1="900" y1="150" x2="790" y2="150" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+  <text x="845" y="142" text-anchor="middle" font-size="11" fill="currentColor">MCP</text>
+  <text x="845" y="166" text-anchor="middle" font-size="10.5" style="fill: var(--muted)">에이전트가 먼저 부름</text>
+
+  <!-- 에이전트 CLI → engram.exe -->
+  <line x1="970" y1="170" x2="970" y2="215" stroke="currentColor" stroke-width="1.5" marker-end="url(#ah)"/>
+  <text x="978" y="197" font-size="11" fill="currentColor">실행</text>
+
+  <!-- engram.exe → 데몬 -->
+  <line x1="900" y1="255" x2="790" y2="255" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ah)"/>
+  <text x="845" y="247" text-anchor="middle" font-size="11" fill="currentColor">HTTP /control</text>
+  <text x="845" y="271" text-anchor="middle" font-size="10.5" style="fill: var(--muted)">MCP와 같은 입구</text>
+</svg>
+<figcaption>색 선(셸↔데몬 WebSocket)이 transport가 들어갈 자리입니다. 굵은 선은 데몬↔에이전트 CLI의 주 통로로, 입력이 들어가고 출력이 나오는 양방향입니다. 형태는 백엔드마다 다릅니다(터미널 PTY · claude의 줄 단위 JSON · codex의 JSON-RPC). 하지만 역할은 같습니다. 점선 둘은 에이전트가 먼저 데몬을 부를 때(우편·제어 동사) 쓰는 입구입니다. MCP와 <code>engram.exe</code> 중 어느 쪽으로 오든 데몬 안에서 같은 처리기로 모입니다. 화면은 셸 안의 WebView지만 코드(React)와 통신 방식이 달라 따로 그렸습니다.</figcaption>
+</figure>
+
+<h2 id="ch2">2장 · 도메인과 관계</h2>
+<p>기능 기준으로 나눈 도메인 아홉 개와, 서로 무엇을 위해 쓰는지입니다. 위쪽이 아래쪽을 가져다 씁니다.</p>
+<figure>
+<svg viewBox="0 0 1000 560" role="img" aria-label="도메인 아홉 개의 관계. 화면·렌더링·커맨드가 위, 에이전트·우편이 가운데, 통신·인증·데몬 수명이 아래에 있고, 위가 아래를 가져다 쓴다.">
+  <defs>
+    <marker id="ah4" viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+    </marker>
+  </defs>
+  <g stroke="currentColor" stroke-width="1.8" fill="none">
+    <line x1="425" y1="90" x2="245" y2="90" marker-end="url(#ah4)"/>
+    <line x1="755" y1="90" x2="575" y2="90" marker-end="url(#ah4)"/>
+    <line x1="755" y1="117" x2="405" y2="243" marker-start="url(#ah4)" marker-end="url(#ah4)"/>
+    <line x1="473.5" y1="118" x2="356.5" y2="242" marker-end="url(#ah4)"/>
+    <line x1="655" y1="270" x2="405" y2="270" marker-end="url(#ah4)"/>
+    <line x1="681.7" y1="298" x2="468.3" y2="422" marker-end="url(#ah4)"/>
+    <line x1="170" y1="118" x2="170" y2="422" marker-end="url(#ah4)"/>
+    <line x1="305.1" y1="298" x2="194.9" y2="422" marker-end="url(#ah4)"/>
+    <line x1="245" y1="450" x2="345" y2="450" marker-end="url(#ah4)"/>
+    <path d="M170,478 C170,548 720,548 720,478" marker-end="url(#ah4)"/>
+  </g>
+  <g font-size="12" fill="currentColor" style="paint-order: stroke; stroke: var(--bg); stroke-width: 4px">
+    <text x="335" y="80" text-anchor="middle">슬롯 안을 그리게 함</text>
+    <text x="665" y="80" text-anchor="middle">창·탭·슬롯 명령</text>
+    <text x="618" y="148">agent.* 명령 (양쪽)</text>
+    <text x="404" y="178" text-anchor="end">슬롯에 에이전트 띄우기</text>
+    <text x="530" y="260" text-anchor="middle">받는 쪽에 배달</text>
+    <text x="590" y="374">보낸 이 확인</text>
+    <text x="180" y="200">출력 구독</text>
+    <text x="262" y="368">출력·상태 전송</text>
+    <text x="295" y="440" text-anchor="middle">접속 토큰 확인</text>
+    <text x="445" y="518" text-anchor="middle">데몬 위치·토큰 읽기</text>
+  </g>
+  <text x="830" y="44" text-anchor="middle" font-size="11.5" style="fill: var(--muted)">↓ LLM · 메뉴 · engram CLI가 부름</text>
+  <g font-size="14" font-weight="700" fill="currentColor" text-anchor="middle">
+    <rect x="95" y="62" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-render)" stroke-width="2.5"/><text x="170" y="95">렌더링</text>
+    <rect x="425" y="62" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-screen)" stroke-width="2.5"/><text x="500" y="95">화면</text>
+    <rect x="755" y="62" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-cmd)" stroke-width="2.5"/><text x="830" y="95">커맨드</text>
+    <rect x="255" y="242" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-agent)" stroke-width="2.5"/><text x="330" y="275">에이전트</text>
+    <rect x="655" y="242" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-mail)" stroke-width="2.5"/><text x="730" y="275">우편</text>
+    <rect x="95" y="422" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-comm)" stroke-width="2.5"/><text x="170" y="455">통신</text>
+    <rect x="345" y="422" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-auth)" stroke-width="2.5"/><text x="420" y="455">인증</text>
+    <rect x="645" y="422" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-life)" stroke-width="2.5"/><text x="720" y="455">데몬 수명</text>
+    <rect x="835" y="422" width="150" height="56" rx="8" style="fill: var(--card); stroke: var(--d-etc)" stroke-width="1.5" stroke-dasharray="5 4"/><text x="910" y="447">바닥</text>
+  </g>
+  <text x="910" y="467" text-anchor="middle" font-size="11.5" style="fill: var(--muted)">모두가 씀</text>
+</svg>
+<figcaption>화살표는 가져다 쓰는 방향입니다. 프로세스 사이를 오가는 요청은 모두 통신을 타지만, 그 선을 전부 그리면 알아볼 수 없어서 대표 선만 그렸습니다. 에이전트↔커맨드만 양쪽입니다. 커맨드가 에이전트 기능을 실행하고, 에이전트는 자기 명령을 커맨드 도구로 선언합니다.</figcaption>
+</figure>
+
+<div class="scroll">
+<table class="dom">
+  <thead><tr><th>도메인</th><th>무엇</th><th>주로 어디</th></tr></thead>
+  <tbody>
+    <tr><th><i class="sw" style="background: var(--d-render)"></i>렌더링</th><td>터미널 · 채팅 · 트리 그리기</td><td>화면(프론트)</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-screen)"></i>화면</th><td>창 · 탭 · 슬롯, 어느 창에 어느 출력을 보낼지</td><td>셸 + 프론트</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-cmd)"></i>커맨드</th><td>LLM · 메뉴 · CLI가 같이 쓰는 명령 버스</td><td>모든 프로세스</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-agent)"></i>에이전트</th><td>CLI를 띄우고 입출력 · 상태 · 수명 · 저장을 관리(claude/codex별 지식 포함)</td><td>데몬</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-mail)"></i>우편</th><td>에이전트끼리 주고받는 메시지</td><td>데몬</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-comm)"></i>통신</th><td>프로세스 사이 배관(WebSocket · IPC · HTTP)</td><td>모든 프로세스</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-auth)"></i>인증</th><td>접속 토큰 · 에이전트 신원</td><td>데몬</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-life)"></i>데몬 수명</th><td>데몬 찾기 · 띄우기 · 끄기, <code>daemon.json</code></td><td>셸 + 데몬</td></tr>
+    <tr><th><i class="sw" style="background: var(--d-etc)"></i>바닥</th><td>로그 · 플랫폼 도우미</td><td>모두</td></tr>
+  </tbody>
+</table>
+</div>
+<p class="srcnote">세부(모듈별 구성 · 분리·합치기 후보 · 의존 숫자) → <a href="architecture-map-notes.md"><code>architecture-map-notes.md</code></a> 2·3장</p>
+
+<footer>
+  <p>갱신 규칙(임시): AI용 노트를 고치면 같은 장의 이 HTML도 같은 턴에 고칩니다.</p>
+</footer>
+
+</main>
+</body>
+</html>

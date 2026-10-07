@@ -24,6 +24,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, OutputEvent, OutputFrame, OutputPayload,
     OutputSink, SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
 
 use engram_dashboard_daemon::control::mcp_server::{
     start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
@@ -71,17 +72,6 @@ impl OutputSink for EventCapture {
     fn sink_id(&self) -> SinkId {
         self.id
     }
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    cond()
 }
 
 /// ★건너뛰지 않고 실패한다★: cargo 는 test 의 stdout 을 삼켜 skip 해도 통과 요약엔 "ok" 만 남는다 —
@@ -339,7 +329,7 @@ async fn control_send_shell_recipient_is_not_a_mail_recipient() {
     let mut profile = AgentProfile::new(
         "sheller".to_string(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         std::path::PathBuf::from("."),

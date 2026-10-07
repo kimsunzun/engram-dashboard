@@ -61,7 +61,7 @@
 //! 가짜 연결에는 그 훅이 없으므로, 한쪽만 거두면 나머지 한쪽이 프로세스 수명 내내 남는다.
 //! ★「함께」가 서려면 **첫 줄이 패닉하지 않아야** 한다 — 그것을 지는 것은 두 표의 정리용 잠금이다★:
 //! 명부는 [`CommandRoster::detach`] 안의 `lock_for_cleanup`, 상관 표는
-//! [`CommandDeliveries::lock_for_cleanup`] 이 각각 오염된 잠금을 `into_inner` 로 통과한다. 어느 한쪽을
+//! [`CommandDeliveries::lock_for_cleanup`] 이 각각 오염된 잠금을 되찾아(base `sync::lock`) 통과한다. 어느 한쪽을
 //! 패닉하는 잠금으로 되돌리면 그 줄에서 소멸자가 죽어 **뒷줄이 안 돌고**(그 표가 샌다) 되감기 중이면
 //! 이중 패닉이라 프로세스가 abort 한다. ★단 릴리스에는 오염 자체가 없다★ — `panic = "abort"` 라
 //! 이 규율이 실제로 값을 하는 것은 debug·테스트 빌드다(그 범위 = 두 `lock_for_cleanup` 의 doc).
@@ -96,6 +96,8 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
+use engram_dashboard_base::time::{Clock, SystemClock};
 use engram_dashboard_command::{
     route, CommandDecl, CommandEnvelope, CommandError, CommandLink, CommandReply, CommandTable,
     Effect, ErrorCode, OwnerToken, RequestId, RetryMode,
@@ -167,24 +169,6 @@ const _: () = assert!(
     fits_caller_silence_window(CommandDeliveries::DEFAULT_DEADLINE),
     "명령 마감 + 수거 주기 + 여유가 CLI 의 침묵 한도를 넘는다 — 답장이 나가기 전에 호출자가 끊는다"
 );
-
-/// 시계 seam — 마감 판정이 실시간에 묶이지 않게 한다.
-///
-/// ★주입인 이유★: 마감 초과는 **시각이 지났는가** 하나로 갈리는데, 그것을 `Instant::now()` 로 직접 읽으면
-/// 그 갈래를 재는 시험이 실시간 대기를 써야 한다(느리고, 부하가 걸린 러너에서 뒤집힌다). 구현을 밖에서
-/// 꽂으면 시험이 시각을 **손으로 밀어** 결정적으로 판정한다(ADR-0012).
-pub trait Clock: Send + Sync {
-    fn now(&self) -> Instant;
-}
-
-/// 운영 시계.
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-}
 
 /// 진행 중인 왕복 하나 — **원 연결**과 **마감시각**, 그리고 답장을 받아 갈 자리.
 ///
@@ -366,6 +350,9 @@ enum Seat {
 #[derive(Clone)]
 pub struct CommandDeliveries {
     inner: Arc<Mutex<Seats>>,
+    /// ★주입인 이유★: 마감 초과는 **시각이 지났는가** 하나로 갈리는데, 그것을 `Instant::now()` 로 직접
+    /// 읽으면 그 갈래를 재는 시험이 실시간 대기를 써야 한다(느리고, 부하가 걸린 러너에서 뒤집힌다). 밖에서
+    /// 꽂으면 시험이 시각을 **손으로 밀어** 결정적으로 판정한다(ADR-0012).
     clock: Arc<dyn Clock>,
     deadline: Duration,
     max_local: usize,
@@ -1005,10 +992,7 @@ impl CommandDeliveries {
     /// 지키는 것은 debug·테스트 빌드다). 그 사실을 근거로 걷지 말 것: 그 빌드에서 새는 표가 회귀 시험의
     /// 관측을 그대로 망친다.
     fn lock_for_cleanup(&self) -> std::sync::MutexGuard<'_, Seats> {
-        match self.inner.lock() {
-            Ok(table) => table,
-            Err(poisoned) => poisoned.into_inner(),
-        }
+        sync::lock(&self.inner)
     }
 }
 
@@ -2416,30 +2400,11 @@ impl FrameSink for ReplyCatcher {
 pub(crate) mod tests {
     use super::*;
     use crate::test_doubles::FakeFrameSink;
+    use engram_dashboard_base::time::ManualClock;
     use engram_dashboard_command::{CommandDecl, OwnerToken};
     use engram_dashboard_net::frame_port::FrameSink;
     use serde_json::json;
     use tokio::sync::mpsc;
-
-    /// 손으로 미는 시계 — 마감 갈래를 실시간 대기 없이 결정적으로 재게 한다.
-    pub(crate) struct ManualClock(Mutex<Instant>);
-
-    impl ManualClock {
-        pub(crate) fn new() -> Arc<Self> {
-            Arc::new(Self(Mutex::new(Instant::now())))
-        }
-
-        pub(crate) fn advance(&self, by: Duration) {
-            let mut now = self.0.lock().expect("manual clock poisoned");
-            *now += by;
-        }
-    }
-
-    impl Clock for ManualClock {
-        fn now(&self) -> Instant {
-            *self.0.lock().expect("manual clock poisoned")
-        }
-    }
 
     /// ★운영 마감을 그대로 쓴다 — 하네스가 자기 값을 고르지 않는다★: 예전에는 여기서 10초를 넣었고, 그
     /// 값은 `fits_caller_silence_window` 가 금하는 관계라 **전 스위트가 그 관계를 어긴 채** 돌았다. 시각을
@@ -2690,7 +2655,7 @@ pub(crate) mod tests {
     async fn a_name_my_own_table_holds_is_answered_here_and_never_reaches_the_roster() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "agent.list");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let local = Arc::new(FakeLocal::answering(
             "agent.list",
             Ok(json!({ "agents": [] })),
@@ -2742,7 +2707,7 @@ pub(crate) mod tests {
 
         super::deliver(
             roster.clone(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.list", &OwnerToken::new("x")),
@@ -2769,7 +2734,7 @@ pub(crate) mod tests {
     fn a_local_table_that_claims_a_name_but_answers_nothing_is_surfaced() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "agent.list");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let empty_handed = Arc::new(FakeLocal::empty_handed("agent.list"));
 
         let logged = capture_loud(async {
@@ -2819,7 +2784,7 @@ pub(crate) mod tests {
 
         super::deliver(
             roster.clone(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.rename", &OwnerToken::new("x")),
@@ -2849,7 +2814,7 @@ pub(crate) mod tests {
         let _logged = capture_loud(async {
             let roster = CommandRoster::new();
             let mut caller_inbox = attach_caller(&roster, 2);
-            let clock = ManualClock::new();
+            let clock = Arc::new(ManualClock::new());
             let deliveries = deliveries_with(clock.clone());
             let (local, open, mut entered) = parked_local("agent.new");
 
@@ -2898,7 +2863,7 @@ pub(crate) mod tests {
     async fn a_wire_outcome_cannot_answer_a_command_this_daemon_answers_itself() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let (local, open, mut entered) = parked_local("agent.new");
         let env = envelope("agent.new", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
@@ -2949,7 +2914,7 @@ pub(crate) mod tests {
         let _logged = capture_loud(async {
             let roster = CommandRoster::new();
             let mut caller_inbox = attach_caller(&roster, 2);
-            let clock = ManualClock::new();
+            let clock = Arc::new(ManualClock::new());
             let deliveries = deliveries_with(clock.clone());
             let (local, open, mut entered) = parked_local("agent.new");
             let env = envelope("agent.new", &OwnerToken::new("whatever"));
@@ -3026,7 +2991,7 @@ pub(crate) mod tests {
         let _logged = capture_loud(async {
             let roster = CommandRoster::new();
             let mut caller_inbox = attach_caller(&roster, 2);
-            let clock = ManualClock::new();
+            let clock = Arc::new(ManualClock::new());
             let deliveries = deliveries_with(clock.clone());
             let (local, open, mut entered) = parked_local("agent.new");
             let env = envelope("agent.new", &OwnerToken::new("whatever"));
@@ -3104,7 +3069,7 @@ pub(crate) mod tests {
     async fn cleanup_leaves_a_retained_seat_for_the_reconnecting_caller() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone());
         let local = Arc::new(FakeLocal::answering("agent.new", Ok(json!({ "ok": true }))));
 
@@ -3141,7 +3106,7 @@ pub(crate) mod tests {
     async fn retention_is_bounded_by_count_not_only_by_time() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let local = Arc::new(FakeLocal::answering(
             "agent.rename",
             Ok(json!({ "ok": true })),
@@ -3176,7 +3141,7 @@ pub(crate) mod tests {
     async fn a_rejected_local_command_does_not_hold_its_request_id() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let rejecting = Arc::new(FakeLocal::answering(
             "agent.new",
             Err(CommandError::invalid_argument("not an argument: 'cwdd'")),
@@ -3241,7 +3206,7 @@ pub(crate) mod tests {
     async fn a_failure_that_may_have_applied_still_holds_its_request_id() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let unsure = Arc::new(FakeLocal::answering(
             "agent.new",
             Err(no_retry(
@@ -3274,7 +3239,7 @@ pub(crate) mod tests {
     async fn a_read_command_does_not_hold_its_request_id() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let reading = Arc::new(FakeLocal {
             effect: Effect::Read,
             ..FakeLocal::answering("agent.list", Ok(json!({ "agents": [] })))
@@ -3305,7 +3270,7 @@ pub(crate) mod tests {
     fn a_body_that_finishes_after_its_deadline_is_recorded_not_dropped() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone());
         let (local, open, mut entered) = parked_local("agent.new");
 
@@ -3337,7 +3302,7 @@ pub(crate) mod tests {
     fn a_body_that_dies_after_its_deadline_is_logged_too() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone());
         let (local, open, mut entered) = parked_dying_local("agent.new");
 
@@ -3383,7 +3348,7 @@ pub(crate) mod tests {
     fn stage_one_refuses_to_queue_past_its_ceiling() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new()).with_local_limit(1);
+        let deliveries = deliveries_with(Arc::new(ManualClock::new())).with_local_limit(1);
         let (local, open, mut entered) = parked_local("agent.new");
 
         let logged = capture_loud(async {
@@ -3476,7 +3441,7 @@ pub(crate) mod tests {
     fn a_local_body_that_dies_without_answering_is_logged_not_swallowed() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
 
         let logged = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
             capture_loud(async {
@@ -3519,7 +3484,7 @@ pub(crate) mod tests {
     fn the_ceiling_signal_repeats_on_a_clock_not_on_every_refusal() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone()).with_local_limit(1);
         let (local, open, mut entered) = parked_local("agent.new");
 
@@ -3581,7 +3546,7 @@ pub(crate) mod tests {
     fn the_late_success_log_keeps_the_datum_it_exists_for() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone());
         let (local, open, mut entered) = parked_local("agent.new");
         // 이름순으로 `agent_id` **앞에** 오는 칸이 붙어도 살아남아야 한다.
@@ -3638,7 +3603,7 @@ pub(crate) mod tests {
 
         super::deliver(
             roster.clone(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(Arc::clone(&local)),
             2,
             envelope("agent.new", &OwnerToken::new("whatever")),
@@ -3664,7 +3629,7 @@ pub(crate) mod tests {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
         let mut bystander_inbox = attach_caller(&roster, 3);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         // ★목적지 칸은 부르는 쪽이 아무 값이나 적어 온다★ — 지목은 데몬 몫이다(ADR-0154).
         let env = envelope("tab.create", &OwnerToken::new("whatever-the-caller-thinks"));
         let request_id = env.request_id;
@@ -3721,7 +3686,7 @@ pub(crate) mod tests {
     async fn a_command_nobody_owns_is_answered_unknown_command() {
         let roster = CommandRoster::new();
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("theme.set", &OwnerToken::new("nobody"));
         let request_id = env.request_id;
 
@@ -3751,7 +3716,7 @@ pub(crate) mod tests {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
         roster.overwrite_stored_owner(1, OwnerToken::new("someone-else"));
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
@@ -3785,7 +3750,7 @@ pub(crate) mod tests {
     /// `complete` 는 빈손을 받는다.
     #[tokio::test]
     async fn a_deadline_answers_once_and_a_late_outcome_cannot_answer_again() {
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
         let deliveries = deliveries_with(clock.clone());
@@ -3838,7 +3803,7 @@ pub(crate) mod tests {
     async fn a_caller_that_disconnects_takes_its_pending_round_trips_with_it() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let _caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let other = envelope("tab.create", &OwnerToken::new("whatever"));
 
         let round_trip = tokio::spawn(deliver(roster.clone(), deliveries.clone(), 2, other));
@@ -3860,7 +3825,7 @@ pub(crate) mod tests {
     async fn another_connections_cleanup_does_not_touch_my_round_trip() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
@@ -3907,7 +3872,7 @@ pub(crate) mod tests {
             .expect("등록");
         drop(owner_sink); // 이제 명부가 유일한 강참조다.
         let _caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
@@ -3948,7 +3913,7 @@ pub(crate) mod tests {
     async fn a_repeat_of_an_inflight_request_id_from_the_same_caller_yields_exactly_one_reply() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let first = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = first.request_id;
         let again = CommandEnvelope {
@@ -4003,7 +3968,7 @@ pub(crate) mod tests {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut first_inbox = attach_caller(&roster, 2);
         let mut second_inbox = attach_caller(&roster, 3);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let mine = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = mine.request_id;
         let theirs = CommandEnvelope {
@@ -4064,7 +4029,7 @@ pub(crate) mod tests {
     async fn a_reply_from_another_routing_stage_cannot_bypass_an_inflight_seat() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let first = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = first.request_id;
         let again = CommandEnvelope {
@@ -4120,7 +4085,7 @@ pub(crate) mod tests {
     async fn a_repeat_arriving_before_the_reply_is_sent_does_not_forward_again() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let first = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = first.request_id;
         let again = CommandEnvelope {
@@ -4169,7 +4134,7 @@ pub(crate) mod tests {
     async fn a_different_command_under_an_inflight_request_id_is_refused_not_folded() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let first = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = first.request_id;
         // 같은 키, 다른 이름 — 부르는 쪽이 id 를 재사용한 **딴 조작**이다.
@@ -4237,7 +4202,7 @@ pub(crate) mod tests {
     /// 새 답」 순으로 도착할 수 있다는 뜻이고, 그것이 이 설계에서 정상이다.
     #[tokio::test]
     async fn a_retry_after_the_deadline_is_not_absorbed_by_the_unswept_seat() {
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
         let deliveries = deliveries_with(clock.clone());
@@ -4305,7 +4270,7 @@ pub(crate) mod tests {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let _first_inbox = attach_caller(&roster, 2);
         let mut second_inbox = attach_caller(&roster, 3);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let mine = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = mine.request_id;
         let after_reconnect = CommandEnvelope {
@@ -4359,7 +4324,7 @@ pub(crate) mod tests {
     async fn a_command_arriving_after_shutdown_is_answered_instead_of_hanging() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
@@ -4408,7 +4373,7 @@ pub(crate) mod tests {
         caller_sink
             .try_send(Frame::Text("occupied".into()))
             .expect("한 칸은 비어 있다");
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
@@ -4448,7 +4413,7 @@ pub(crate) mod tests {
     async fn a_command_from_a_caller_that_already_left_is_never_forwarded() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let _caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
 
         // 아직 한 번도 폴링되지 않은 배달.
@@ -4495,7 +4460,7 @@ pub(crate) mod tests {
     async fn shutdown_answers_every_outstanding_round_trip_and_stops_the_sweeper() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let (stop, stopped) = watch::channel(false);
         let sweeper = deliveries.spawn_sweeper(stopped);
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
@@ -4535,7 +4500,7 @@ pub(crate) mod tests {
     /// 비울 것이 없으면 조용하고, 두 번 비워도 답장이 두 번 나가지 않는다.
     #[test]
     fn draining_twice_answers_each_seat_once() {
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let Seat::Opened { rx: _rx, .. } =
             deliveries.open(request_id, 1, "tab.create", &json!({}), false)
@@ -4554,7 +4519,7 @@ pub(crate) mod tests {
     /// 마감을 볼 눈이 없다 — 그 왕복은 답장 0장으로 프로세스가 죽을 때까지 매달린다.
     #[test]
     fn a_drained_table_refuses_new_round_trips() {
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         assert_eq!(deliveries.drain(), 0);
 
         assert!(
@@ -4576,7 +4541,7 @@ pub(crate) mod tests {
     /// 합치면 그 요청은 실행도 답장도 없이 남의 결과를 받는다**(근거 = [`Seat`]).
     #[test]
     fn a_second_open_of_the_same_request_id_splits_on_payload_then_on_who_asked() {
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let args = json!({ "window": "main" });
         let Seat::Opened { rx: _first, .. } =
@@ -4628,7 +4593,7 @@ pub(crate) mod tests {
     /// 보낸다 — 같은 조작이 두 번 적용되고 같은 키의 프레임도 둘이 된다.
     #[test]
     fn a_seat_stays_claimed_until_its_reply_has_been_sent() {
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
         let args = json!({});
         let Seat::Opened { rx: _rx, token } =
@@ -4665,7 +4630,7 @@ pub(crate) mod tests {
     /// 경로다. 키로 지우면 그 새 왕복이 이유 없이 답을 잃는다.
     #[test]
     fn a_late_release_cannot_evict_the_next_round_trip_under_the_same_id() {
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let deliveries = deliveries_with(clock.clone());
         let request_id = RequestId::new();
         let args = json!({});
@@ -4713,7 +4678,7 @@ pub(crate) mod tests {
     async fn an_error_relayed_from_the_owner_keeps_its_vocabulary_and_loses_only_its_retry_hint() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let mut caller_inbox = attach_caller(&roster, 2);
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
         let env = envelope("tab.create", &OwnerToken::new("whatever"));
         let request_id = env.request_id;
 
@@ -4800,7 +4765,7 @@ pub(crate) mod tests {
     /// 아무도 안 물은 결말은 붙을 자리가 없다.
     #[test]
     fn an_outcome_for_an_unknown_request_id_finds_no_seat() {
-        let deliveries = deliveries_with(ManualClock::new());
+        let deliveries = deliveries_with(Arc::new(ManualClock::new()));
 
         assert_eq!(
             deliveries.complete(CommandReply::ok(RequestId::new(), json!({}))),
@@ -4857,7 +4822,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_control_door_hands_the_envelope_over_and_brings_the_answer_back() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
-        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let (bus, _sweeper) = bus_with(roster, Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
 
         let call = invoking(&bus, request_id, "tab.create");
@@ -4890,7 +4855,7 @@ pub(crate) mod tests {
     /// 않는다(완결 조건 2 의 배달 쪽 절반. 제어 라우트가 명부 조회로 먼저 거르는 쪽은 `control::catalog`).
     #[tokio::test]
     async fn a_name_with_no_owner_comes_back_as_an_unknown_command() {
-        let (bus, _sweeper) = bus_with(CommandRoster::new(), ManualClock::new());
+        let (bus, _sweeper) = bus_with(CommandRoster::new(), Arc::new(ManualClock::new()));
 
         let reply = answered(invoking(&bus, RequestId::new(), "nope.nope")).await;
 
@@ -4905,7 +4870,7 @@ pub(crate) mod tests {
     /// 마감을 쓴다는 뜻이다. 시계를 손으로 밀어 그 갈래만 결정적으로 태운다.
     #[tokio::test]
     async fn a_control_call_that_passes_its_deadline_answers_timeout() {
-        let clock = ManualClock::new();
+        let clock = Arc::new(ManualClock::new());
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
         let (bus, _sweeper) = bus_with(roster, clock.clone());
 
@@ -4926,7 +4891,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_repeat_of_the_same_request_id_does_not_send_a_second_envelope() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
-        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let (bus, _sweeper) = bus_with(roster, Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
 
         let first = invoking(&bus, request_id, "tab.create");
@@ -4967,7 +4932,7 @@ pub(crate) mod tests {
         ));
         let (bus, _sweeper) = CommandBus::new(
             CommandRoster::new(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(Arc::clone(&local)),
         );
 
@@ -5021,7 +4986,7 @@ pub(crate) mod tests {
 
         let (bus, _sweeper) = CommandBus::new(
             CommandRoster::new(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(Arc::clone(&local)),
         );
         let _ = answered(invoking(&bus, RequestId::new(), "agent.new")).await;
@@ -5051,7 +5016,7 @@ pub(crate) mod tests {
     async fn a_second_sweeper_over_a_live_seat_table_cannot_be_assembled() {
         let (bus, _sweeper) = CommandBus::new(
             CommandRoster::new(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(NoLocalCommands),
         );
 
@@ -5080,7 +5045,7 @@ pub(crate) mod tests {
     async fn a_refused_second_sweeper_leaves_the_shared_table_usable() {
         let (bus, _sweeper) = CommandBus::new(
             CommandRoster::new(),
-            deliveries_with(ManualClock::new()),
+            deliveries_with(Arc::new(ManualClock::new())),
             Arc::new(NoLocalCommands),
         );
         let shared = bus.deliveries().clone();
@@ -5109,7 +5074,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_relayed_call_past_the_ceiling_is_refused_without_taking_anything() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
-        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let (bus, _sweeper) = bus_with(roster, Arc::new(ManualClock::new()));
         bus.relayed_counter()
             .store(MAX_RELAYED_IN_FLIGHT, Ordering::SeqCst);
 
@@ -5133,7 +5098,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn the_relay_ceiling_is_given_back_when_the_round_trip_ends() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
-        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let (bus, _sweeper) = bus_with(roster, Arc::new(ManualClock::new()));
         let request_id = RequestId::new();
 
         let call = invoking(&bus, request_id, "tab.create");
@@ -5169,7 +5134,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_cancelled_control_call_leaves_no_seat_or_pseudo_connection_behind() {
         let (roster, mut owner_inbox) = roster_with_owner(1, "tab.create");
-        let (bus, _sweeper) = bus_with(roster, ManualClock::new());
+        let (bus, _sweeper) = bus_with(roster, Arc::new(ManualClock::new()));
 
         // 답하지 않는 주인에게 걸어 둔 채로 그 future 를 버린다 = 호출자가 끊긴 것과 같은 인과다.
         let call = invoking(&bus, RequestId::new(), "tab.create");

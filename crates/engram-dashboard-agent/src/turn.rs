@@ -43,6 +43,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use engram_dashboard_base::sync;
+
 use crate::types::AgentId;
 
 /// 출력 이벤트에서 읽어낸 턴 신호 — 표가 아는 어휘 전부.
@@ -141,9 +143,7 @@ impl TurnObservations {
     ///   불변식이 깨진 게 아니므로 가드를 회수해 계속 돈다. (release 는 panic=abort 라 이 내성이 실제로
     ///   의미 있는 건 debug/테스트 빌드다.)
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Entry>> {
-        self.entries
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        sync::lock(&self.entries)
     }
 
     /// 이 화신이 이 id 의 자리를 차지한다 — 있던 항목이 무엇이든 **무조건** 갈아치운다.

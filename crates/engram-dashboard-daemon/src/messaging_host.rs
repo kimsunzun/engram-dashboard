@@ -1092,6 +1092,8 @@ mod tests {
         use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry};
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
         use engram_dashboard_agent::types::{AgentInfo, AgentStatus, StatusSink};
+        #[cfg(windows)]
+        use engram_dashboard_base::testing::wait_until;
         use engram_dashboard_messaging::service::DeliveryPort;
         use std::time::Duration;
 
@@ -1132,7 +1134,7 @@ mod tests {
             let mut p = AgentProfile::new(
                 base.to_string(),
                 AgentCommand::Shell {
-                    program: engram_dashboard_agent::manager::default_shell().to_string(),
+                    program: engram_dashboard_platform::shell::default_shell().to_string(),
                     args: vec![],
                 },
                 std::env::temp_dir(),
@@ -1147,17 +1149,6 @@ mod tests {
         #[cfg(windows)]
         fn shell(name: &str) -> AgentProfile {
             profile(name, name)
-        }
-
-        #[cfg(windows)]
-        fn wait_until<F: Fn() -> bool>(cond: F) -> bool {
-            for _ in 0..150 {
-                if cond() {
-                    return true;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            cond()
         }
 
         /// ★셸은 편지를 읽는 주체가 아니다(사용자 결정 2026-08-17)★ — 셸에 도착한 봉투는 읽히는 게
@@ -1180,7 +1171,7 @@ mod tests {
                 .expect("shell spawn")
                 .into_started()
                 .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
-            assert!(wait_until(|| manager
+            assert!(wait_until(Duration::from_secs(3), || manager
                 .list_agents()
                 .iter()
                 .any(|a| a.id == info.id)));
@@ -1259,7 +1250,7 @@ mod tests {
                 .expect("shell spawn")
                 .into_started()
                 .expect("이 호출은 실제로 띄운다(중복 요청 아님)");
-            assert!(wait_until(|| manager
+            assert!(wait_until(Duration::from_secs(3), || manager
                 .list_agents()
                 .iter()
                 .any(|a| a.id == info.id)));

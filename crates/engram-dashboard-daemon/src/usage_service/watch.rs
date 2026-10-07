@@ -15,9 +15,10 @@
 // ADR-0006
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use engram_dashboard_agent::usage::UsageVendorKey;
+use engram_dashboard_base::sync;
 use engram_dashboard_net::frame_port::ConnId;
 use engram_dashboard_protocol::UsageLimitSnapshot;
 
@@ -202,7 +203,7 @@ impl UsageWatch {
         // poison 을 견딘다 — 이 명부는 pump 스레드의 발행 경로에 있다. 락 안의 변경은 넣기·빼기·집합 한 번
         //   바꾸기뿐이라 칸은 늘 온전하다: `first_sheets` 가 패닉하면 새 집합이 선 채 그 첫 한 장만 안 나간다
         //   (다음 revision 발행이 닿는다). 릴리즈는 `panic = "abort"` 라 debug·시험에서만 서는 갈래다.
-        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.entries)
     }
 }
 

@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
@@ -15,6 +15,7 @@ use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, ControlChannelNeeds, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
 
 /// MCP 가능 스폰이 넘기는 축 셋 — 이 파일들은 채널 물리(토큰·config 파일)만 재므로 운영이 그 값을
 /// 어디서 읽는지는 관심사 밖이다(그 판정을 재는 자리 = `mail_gate.rs`).
@@ -59,17 +60,6 @@ fn hold_for_the_process(sweeper: engram_dashboard_daemon::command_delivery::BusS
         .lock()
         .expect("relay sweepers poisoned")
         .push(sweeper);
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    cond()
 }
 
 async fn make_manager_with_control(
@@ -243,7 +233,7 @@ async fn shell_spawn_succeeds_with_failing_control_channel() {
     let profile = AgentProfile::new(
         "shell-succeeds".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),
@@ -331,7 +321,7 @@ async fn kill_revokes_token_before_pump_join() {
     let profile = AgentProfile::new(
         "kill-revoke".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),

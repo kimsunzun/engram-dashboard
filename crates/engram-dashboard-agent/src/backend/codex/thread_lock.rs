@@ -2,9 +2,9 @@
 //! 곧 그 자식의 스레드 id 다(ADR-0218 결정 1).
 //!
 //! ★이 파일이 쥐는 codex 지식은 둘뿐★ — 락 디렉터리의 위치([`lock_dir`])와 파일 이름이 곧 id 라는 것.
-//! 「이 파일을 누가 쥐고 있나」와 「이 PID 아래 무엇이 살아 있나」는 도메인 지식이 0 이라
-//! [`crate::platform::file_holders`]·[`crate::platform::process_tree`] 가 답한다
-//! (ADR-0004 · ADR-0218 결정 11). ★**파일 내용은 읽지 않는다**★ — 0바이트이고, 읽기 시작하면 벤더
+//! 「이 파일을 누가 쥐고 있나」와 「이 PID 아래 무엇이 살아 있나」는 도메인 지식이 0 이라 OS 층 crate 의
+//! [`engram_dashboard_platform::file_holders`]·[`engram_dashboard_platform::process::subtree`] 가 답한다
+//! (ADR-0004 · ADR-0218 결정 11 · ADR-0266). ★**파일 내용은 읽지 않는다**★ — 0바이트이고, 읽기 시작하면 벤더
 //! 저장 포맷 의존이 된다(ADR-0203).
 //!
 //! 진입점 둘 — [`plan_capture`](이 spawn 에서 회수를 돌릴지와 그 재료를 고른다)와
@@ -20,11 +20,12 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use engram_dashboard_platform::env::env_key_eq;
+use engram_dashboard_platform::file_holders::{self, Holder};
+use engram_dashboard_platform::process::{self, ProcessIdentity};
 use uuid::Uuid;
 
 use crate::backend::SessionIdSink;
-use crate::platform::file_holders::{self, Holder};
-use crate::platform::process_tree::{self, ProcessIdentity};
 
 /// codex 홈 아래 writer 락이 사는 폴더 이름.
 ///
@@ -55,15 +56,30 @@ pub(crate) trait LockHolderProbe {
     /// 자식이 아니다.
     ///
     /// ★왜 나무인가 — 우리가 쥔 PID 는 codex 가 아니다★: Windows 에서 스폰은 `cmd.exe /c codex …`
-    ///   한 겹을 지나므로([`crate::backend::console_command`]) 통로가 돌려준 PID 는 **그 래퍼**다.
-    ///   락을 쥔 것은 그 아래의 `codex.exe` 자신이다(ADR-0218 「근거」 — 홀더는 래퍼도 자식도 아닌
+    ///   한 겹을 지나므로([`engram_dashboard_platform::shell::console_command`]) 통로가 돌려준 PID 는
+    ///   **그 래퍼**다. 락을 쥔 것은 그 아래의 `codex.exe` 자신이다(ADR-0218 「근거」 — 홀더는 래퍼도 자식도 아닌
     ///   codex.exe 였다). ★래퍼 PID 하나만 대조하면 일치가 **영영** 안 나고 증상은 오류가 아니라
     ///   침묵이다★ — 스레드가 에이전트 수명 내내 빈손으로 돈다(실측 2026-09-21: `cmd.exe /c …` →
     ///   래퍼 38240 · 그 아래 4816,19468).
     /// ★바퀴마다 다시 푼다 — 한 번 떠 둔 명단을 재사용하지 말 것★: shim 이 codex 를 늦게 띄우고
     ///   codex 가 또 도구를 띄우므로 나무는 시간에 따라 자란다. 굳혀 두면 늦게 뜬 codex 를 못 본다.
+    /// ★나무 규칙이 이 회수에서 막는 것과 받아들인 잔여★ — 규칙(뿌리 신원 확인 · 부모보다 먼저 태어난
+    ///   항목 버리기)과 그 규칙이 못 거르는 경우 ①②③ 의 사실 정본은 [`process::subtree`] 의 doc 이다.
+    ///   여기는 그것이 codex 회수에 무엇을 뜻하나만 적는다.
+    ///   - **순서 규칙이 막는 실제 시퀀스:** 사용자가 손으로 띄운 `codex.exe` 가 고아가 되어 기록된 ppid
+    ///     `P` 를 그대로 달고 남고, Windows 가 `P` 를 우리 래퍼에 **재사용**한다. 규칙이 없으면 그 남이
+    ///     우리 자식으로 열거되고, 그 남은 자기 락의 홀더와 자기 신원이 당연히 맞으므로 **우리 codex 가
+    ///     락을 만들기 전 0.7~21 초 동안 유일한 후보**가 된다 — `Ambiguous` 도 안 뜨고 남의 스레드를 우리
+    ///     손잡이에 적는다(ADR-0218 「영향/불변식」이 이름 붙인 그 조용한 고장).
+    ///   - ★**잔여 ①②③ 은 받아들인다(다시 논쟁하지 말 것 — 2026-09-21 결정)**★. ① 열거와 시작시각 읽기
+    ///     사이의 PID 재사용은 원자적으로 고칠 수단이 없고 창이 마이크로초 단위다. ② 같은 눈금은 막으면 정상
+    ///     자식을 잃는다. ③ 명시 부모 지정이 **실제 오검출**이 되려면 그 남이 우리 `CODEX_HOME` 아래
+    ///     `<uuid>.lock` 까지 쥐고 있어야 한다 — 흔한 경로(재사용된 ppid 의 고아)를 닫은 것으로 규칙의
+    ///     값어치는 그대로다.
+    ///   - 나무 열거가 실패해 덜 돌려준 것도 오류로 받지 않는다 — 「후보 아님」과 다르게 처리할 방법이 없고
+    ///     다음 바퀴에 다시 묻는다.
     fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
-        process_tree::subtree(root_pid, root_start_time)
+        process::subtree(root_pid, root_start_time)
     }
 
     /// `dir` 바로 아래의 **정규 파일** 경로 전부(이름 판정은 [`scan_for_child`] 몫). 못 읽으면 빈
@@ -84,7 +100,7 @@ pub(crate) trait LockHolderProbe {
     }
 }
 
-/// 운영에서 쓰는 구현 — [`crate::platform::file_holders`] 에 묻고, 물음 자체가 실패하면 빈 목록으로
+/// 운영에서 쓰는 구현 — [`engram_dashboard_platform::file_holders`] 에 묻고, 물음 자체가 실패하면 빈 목록으로
 /// 접는다(그 접기의 사유는 [`LockHolderProbe::holders`] 의 계약).
 pub(crate) struct RestartManagerProbe;
 
@@ -214,7 +230,10 @@ fn thread_id_from_lock_name(path: &Path) -> Option<Uuid> {
 }
 
 fn codex_home() -> Option<PathBuf> {
-    codex_home_from(std::env::var_os(CODEX_HOME_ENV), user_home())
+    codex_home_from(
+        std::env::var_os(CODEX_HOME_ENV),
+        engram_dashboard_platform::env::home_dir(),
+    )
 }
 
 /// [`codex_home`] 의 규칙만 — env 를 건드리지 않고 재려고 갈라 뒀다.
@@ -225,16 +244,6 @@ fn codex_home_from(override_var: Option<OsString>, user_home: Option<PathBuf>) -
         }
     }
     user_home.map(|home| home.join(CODEX_HOME_SUBDIR))
-}
-
-#[cfg(windows)]
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE").map(PathBuf::from)
-}
-
-#[cfg(not(windows))]
-fn user_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from)
 }
 
 /// 첫 스캔까지의 대기. ★0 이 아닌 것이 의도다★ — 실측된 스폰→락 생성 지연의 최솟값이 0.735 초라
@@ -276,7 +285,7 @@ struct ChildClock {
 
 impl CaptureClock for ChildClock {
     fn child_alive(&self) -> bool {
-        engram_dashboard_base::platform::pid_alive_with_start_time(self.pid, self.start_time)
+        engram_dashboard_platform::process::pid_alive_with_start_time(self.pid, self.start_time)
     }
 
     fn sleep(&self, delay: Duration) {
@@ -348,7 +357,7 @@ pub(crate) fn plan_capture(
 ///
 /// ★**마지막** 항목을 고른다★ — 스폰 env 는 목록이고 같은 키가 두 번 실릴 수 있는데, 통로가 그 목록을
 ///   순서대로 `cmd.env` 에 밀어 넣으므로 자식이 실제로 받는 것은 뒤엣것이다.
-/// ★키 대조가 대소문자 무시인 것도 그 자리를 따른다★ — Windows 환경변수 이름은 대소문자를 안 가린다.
+/// ★키 대조는 OS 의 환경변수 이름 규칙([`env_key_eq`])을 따른다★ — Windows 에서는 대소문자를 안 가린다.
 /// ★빈 값은 「안 걸었다」로 본다★ — [`codex_home_from`] 이 우리 쪽 env 를 그렇게 읽으므로 같은 규칙을 쓴다.
 /// ★알려진 구멍 — 상대 경로★: 그런 값은 나중에 **우리** cwd 기준으로 풀리는데 자식은 자기 cwd 로
 ///   풀 테니 둘이 갈릴 수 있다. 증상은 오검출이 아니라 「계속 빈손」이다 — 후보 판정은 그대로 자식의
@@ -360,7 +369,7 @@ fn child_lock_dir(
     let overridden = child_env
         .iter()
         .rev()
-        .find(|(key, _)| key.eq_ignore_ascii_case(CODEX_HOME_ENV))
+        .find(|(key, _)| env_key_eq(key, CODEX_HOME_ENV))
         .map(|(_, value)| value.as_str())
         .filter(|value| !value.is_empty());
     match overridden {
@@ -476,8 +485,8 @@ mod tests {
     use std::collections::HashMap;
 
     // ★가짜 나무는 **운영에서 실제로 나오는 모양**이다 — 이것이 평평하면 시험 전체가 거짓이 된다★:
-    //   우리가 쥐는 PID 는 `cmd.exe` 래퍼이고(`crate::backend::console_command`) 락을 쥐는 것은 그 아래
-    //   `codex.exe` 다. 홀더를 래퍼 PID 로 심어 두면 「래퍼만 대조하는」 구현도 초록이 된다 — 실제로 그렇게
+    //   우리가 쥐는 PID 는 `cmd.exe` 래퍼이고(`engram_dashboard_platform::shell::console_command`) 락을
+    //   쥐는 것은 그 아래 `codex.exe` 다. 홀더를 래퍼 PID 로 심어 두면 「래퍼만 대조하는」 구현도 초록이 된다 — 실제로 그렇게
     //   심어 뒀다가 회수가 영영 안 되는 구현을 통과시켰다(적출 2026-09-21).
     const WRAPPER_PID: u32 = 4242;
     const WRAPPER_START: u64 = 134_344_468_098_866_343;
@@ -530,7 +539,7 @@ mod tests {
         fn holders(&self, path: &Path) -> Vec<Holder> {
             self.holders.get(path).cloned().unwrap_or_default()
         }
-        /// 뿌리의 신원이 안 맞으면 나무가 없다 — 실물 `process_tree::subtree` 와 같은 규칙.
+        /// 뿌리의 신원이 안 맞으면 나무가 없다 — 실물 `process::subtree` 와 같은 규칙.
         fn our_processes(&self, root_pid: u32, root_start_time: u64) -> Vec<ProcessIdentity> {
             if root_pid != WRAPPER_PID || root_start_time != WRAPPER_START {
                 return Vec::new();
@@ -1187,18 +1196,27 @@ mod tests {
     }
 
     #[test]
-    fn the_childs_env_is_matched_case_insensitively_and_last_one_wins() {
+    fn the_childs_env_key_follows_the_os_rule_and_last_one_wins() {
         let made = plan(
-            &[("CODEX_HOME", "D:/first"), ("codex_home", "D:/second")],
+            &[
+                ("CODEX_HOME", "D:/first"),
+                ("CODEX_HOME", "D:/second"),
+                ("codex_home", "D:/third"),
+            ],
             false,
             Some(WRAPPER_PID),
             Some(WRAPPER_START),
         )
         .expect("fresh 는 돈다");
+        let expected = if env_key_eq("codex_home", CODEX_HOME_ENV) {
+            "D:/third"
+        } else {
+            "D:/second"
+        };
         assert_eq!(
             made.lock_dir,
-            lock_dir_under(Path::new("D:/second")),
-            "통로가 순서대로 env 를 밀어 넣으므로 자식이 받는 것은 뒤엣것이다"
+            lock_dir_under(Path::new(expected)),
+            "통로가 순서대로 env 를 밀어 넣으므로 자식이 받는 것은 같은 키로 보는 것 중 뒤엣것이다"
         );
     }
 
@@ -1233,7 +1251,7 @@ mod tests {
         let file = std::fs::File::create(dir.join(format!("{ID_A}.lock"))).expect("쥔 락");
 
         let me = std::process::id();
-        let start = engram_dashboard_base::platform::process_creation_time(me)
+        let start = engram_dashboard_platform::process::process_creation_time(me)
             .expect("자기 creation time 조회 가능");
         let outcome = scan_for_child(&dir, me, start, &RestartManagerProbe);
 

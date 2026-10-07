@@ -17,6 +17,7 @@
 //! (`codec.rs`·`messages.rs`). 그대로 재사용한다(로컬 재정의 안 함). `request_id` 는 `RequestId(Uuid)`.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use engram_dashboard_protocol::{AgentEvent, RequestId};
 
@@ -26,13 +27,42 @@ use engram_dashboard_protocol::{AgentEvent, RequestId};
 // 이 모듈 호출부(`protocol_state::command_request_id` 등)와 아래 tests 를 그대로 둔다.
 pub use engram_dashboard_protocol::{command_request_id, event_reply_request_id};
 
-/// reply 이벤트가 성공(Ok)인지 실패(Err)인지 가른다(oneshot resolve). `Error{message}` 만
-/// Err(message), 나머지 전용 reply 는 Ok(event). 호출자가 take_pending 으로 꺼낸 oneshot 에 이 결과를
-/// 넣는다.
-pub fn reply_outcome(ev: AgentEvent) -> Result<AgentEvent, String> {
-    match ev {
-        AgentEvent::Error { message, .. } => Err(message),
-        other => Ok(other),
+/// 셸이 보낸 명령이 성공 답으로 끝나지 못했을 때 **누가 실패를 말했나** — 데몬의 답인가, 셸 쪽 사정인가.
+///
+/// - `Daemon` = 데몬이 그 명령에 `Error` 로 답했다 — 코드 접두가 있든 없든, 셸이 아는 코드든 아니든.
+/// - `Local` = 데몬의 답 없이 셸 쪽에서 끝났다(미연결 · 미전송 · 송신 실패 · 끊김으로 결과 불명 · 답 유실 ·
+///   승계 등 — 문구는 자리마다 다르다). ★「적용되지 않았다」가 아니다★ — 결과 불명
+///   (`connection::SENT_OUTCOME_UNKNOWN`)처럼 데몬이 이미 실행했을 수 있는 갈래가 섞여 있다.
+///
+/// `Display` 는 담은 글을 꾸밈 없이 그대로 낸다 — `DaemonClient::send_command` 가 이것으로 `String` 을 만들므로,
+/// 출처를 안 보는 호출자는 데몬 문구 원문 · 로컬 문구를 바이트 그대로 받는다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandFailure {
+    Daemon { message: String },
+    Local(String),
+}
+
+impl fmt::Display for CommandFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CommandFailure::Daemon { message } | CommandFailure::Local(message) => {
+                f.write_str(message)
+            }
+        }
+    }
+}
+
+/// 대기 슬롯의 결말(`connection::CommandReply`)을 출처 타입으로 가른다(ADR-0281).
+///
+/// `Ok(Error{..})` → `Daemon` · 그 밖의 `Ok` → 그대로 · `Err` → `Local`. 슬롯의 `Err` 가 셸 로컬 실패뿐인
+/// 것은 슬롯 계약이다(`connection::CommandReply` doc).
+/// ★문구를 읽지 않는다★ — 출처는 「데몬이 답했나」가 정한다. 코드 접두가 없든 셸이 모르는 코드든 데몬이
+/// 답했으면 `Daemon` 이다(코드 추가는 허용된 확장 — `engram_dashboard_command::ErrorCode` doc).
+pub fn classify_reply(slot: Result<AgentEvent, String>) -> Result<AgentEvent, CommandFailure> {
+    match slot {
+        Ok(AgentEvent::Error { message, .. }) => Err(CommandFailure::Daemon { message }),
+        Ok(other) => Ok(other),
+        Err(local) => Err(CommandFailure::Local(local)),
     }
 }
 
@@ -430,22 +460,40 @@ mod tests {
         );
     }
 
-    // reply_outcome: Error 만 Err(message), 나머지 전용 reply 는 Ok(event).
+    // classify_reply: 데몬이 답한 Error 는 문구와 무관하게 Daemon · 슬롯의 Err 는 Local · 그 밖은 Ok.
+    //   ★모르는 코드와 접두 없는 글이 이 시험의 몫이다★ — 문구로 가르는 분류는 아는 코드 둘만으로도 초록이다.
     #[test]
-    fn reply_outcome_splits_ok_and_err() {
+    fn classify_reply_keeps_origin_without_reading_text() {
         let r = RequestId::new();
-        // Ack → Ok.
-        match reply_outcome(AgentEvent::Ack { request_id: r }) {
-            Ok(AgentEvent::Ack { .. }) => {}
-            other => panic!("Ack 은 Ok 여야: {other:?}"),
+        for message in [
+            "CONFLICT: …",
+            "INVALID_ARGUMENT: …",
+            "BRAND_NEW_CODE: …",
+            "접두 없는 글",
+        ] {
+            let classified = classify_reply(Ok(AgentEvent::Error {
+                request_id: Some(r),
+                message: message.into(),
+            }));
+            match classified {
+                Err(failure @ CommandFailure::Daemon { .. }) => {
+                    assert_eq!(failure.to_string(), message, "Display = 데몬 문구 원문")
+                }
+                other => panic!("데몬 Error 는 Daemon 이어야 — {message:?}: {other:?}"),
+            }
         }
-        // Error → Err(message).
-        match reply_outcome(AgentEvent::Error {
-            request_id: Some(r),
-            message: "boom".into(),
-        }) {
-            Err(m) => assert_eq!(m, "boom"),
-            other => panic!("Error 는 Err(message) 여야: {other:?}"),
+
+        let local = crate::daemon_client::connection::SENT_OUTCOME_UNKNOWN;
+        match classify_reply(Err(local.to_string())) {
+            Err(failure @ CommandFailure::Local(_)) => {
+                assert_eq!(failure.to_string(), local, "Display = 로컬 문구 그대로")
+            }
+            other => panic!("슬롯 Err 는 Local 이어야: {other:?}"),
+        }
+
+        match classify_reply(Ok(AgentEvent::Ack { request_id: r })) {
+            Ok(AgentEvent::Ack { request_id }) => assert_eq!(request_id, r),
+            other => panic!("Ack 은 Ok 그대로여야: {other:?}"),
         }
     }
 }

@@ -2,7 +2,14 @@
 name = "engram-dashboard-base"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 바닥 인프라 — tracing 전역 초기화·파일 로그(logging)와 PID liveness·프로세스 시작시각·자식 PID 열거(platform). 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 결정 1)."
+description = "Engram Dashboard 바닥 기반층 — tracing 전역 초기화·파일 로그(logging) · 범용 도우미(text · time — epoch 밀리초와 「지금 읽기」 시계 seam · path · sync) · 시험 대기(testing)와 가짜 시계(time::ManualClock) — 시험 둘은 test-support 기능 뒤. 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 · ADR-0269 결정 7)."
+
+# ★test-support (ADR-0275 결정 5)★: 시험 도우미 모듈(`testing`)과 손으로 미는 시계(`time` 안
+#   `ManualClock`)를 연다. 기본 OFF — 소비 crate 는 dev-dependency 에서만 켠다(선례 =
+#   `engram-dashboard-command` · `engram-dashboard-transport` 의 같은 이름).
+#   데몬 · 셸 운영 그래프에 이 기능이 없다는 것은 CI 게이트가 잰다(CLAUDE.md 「빌드·검증 명령」).
+[features]
+test-support = []
 
 # ★워크스페이스 crate 를 여기 적지 않는다★ — 입주 조건 ②(도메인 지식 0)의 실물이 이 빈 자리다.
 #   기계 강제 = lib.rs 헤더의 의존 상한 게이트(해석된 의존 그래프를 읽는다).
@@ -12,13 +19,5 @@ regex = "1.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Foundation = CloseHandle·FILETIME · Threading = OpenProcess/GetProcessTimes/GetExitCodeProcess ·
-#   ToolHelp = process_parent_table 의 프로세스 표(child_pids 가 그 위에 선다).
-# ★Job Object 쪽 feature(`Win32_System_JobObjects`·`Win32_Security`)는 여기 없다★ — 그 래퍼는 소비자가
-#   agent 안뿐이라 거기 남았다(ADR-0175 결정 2). 이쪽으로 끌어오면 입주 조건 ①(소비자 둘 이상)이 깨진다.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_System_Threading",
-    "Win32_System_Diagnostics_ToolHelp",
-] }
+# ★`windows` 의존을 되살리지 말 것★ — OS 에 따라 달라지는 운영 코드는 base 가 아니라 OS 층 crate
+#   `engram-dashboard-platform` 으로 간다(ADR-0266 결정 2 · 4 · 입주 경계 = lib.rs 헤더).

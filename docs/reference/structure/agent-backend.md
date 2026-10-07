@@ -84,27 +84,27 @@ flowchart LR
 
 **앵커** — 우선순위 정본 = **ADR-0078** + `src/store/viewStore.ts` 의 `renderModeOverride` 필드 JSDoc · 실물 판정 지점 = `src/components/layout/LayoutLeaf.tsx` 의 `SlotBody`(`renderModeOverride[node.id] ?? defaultRenderMode(agent)`) · 모드 어휘 = `src/components/slot/renderMode.ts`(`RENDER_MODES`) · `src/api/types.ts`
 
-## 닫힌 문 — 사람은 통과, LLM 은 정책이 닫는다
+## 닫힌 문 — 정책 표 한 장, 그 표를 보는 문 둘
 
-에이전트를 만드는 입구가 여럿이라, 「어느 백엔드를 만들 수 있나」를 입구마다 따로 적으면 반드시 어긋난다. 그래서 **정책은 표 한 장**이고 입구 셋이 그 표를 함께 본다. 표에 이름이 없는 백엔드는 열린 게 아니라 **막힌 것**이다(fail-closed) — 새 백엔드가 정책을 안 적고 조용히 열려 버리는 사고를 막는 쪽으로 기본값을 잡았다.
+에이전트를 만드는 입구가 여럿이라, 「어느 백엔드를 만들 수 있나」를 입구마다 따로 적으면 반드시 어긋난다. 그래서 **정책은 표 한 장**(`LLM_BACKEND_POLICY`)이다. 표에 이름이 없는 백엔드는 열린 게 아니라 **막힌 것**이다(fail-closed) — 새 백엔드가 정책을 안 적고 조용히 열려 버리는 사고를 막는 쪽으로 기본값을 잡았다.
 
-문 하나는 낱말로 닫을 수 없다. 프론트 레지스트리에 오른 항목은 **사람 클릭과 LLM 호출이 같은 등록물**이라, 낱말로 닫으면 사람 길까지 함께 닫힌다. 그래서 그 문만 **호출자 축**으로 갈랐다 — 사람 경로는 게이트를 지나지 않고, LLM 경로만 사유를 실은 오류로 반려된다.
+그 표를 보는 문은 **둘**이다 — 데몬 `SpawnByCwd` 처리부와 코어 `agent.new`(ADR-0279). ★**데몬 문은 호출자를 가리지 않는다**★ — 패킷을 누가 보냈는지 모르므로, 표 이름은 「LLM 제어 표면」이어도 사람이 부른 claude 고정 스폰(`slot.createAgentHere` · 프론트 `agent.spawn`)도 같은 표를 본다(ADR-0279 「감수한 대가」 · 오늘 영향 0 — 표가 아무것도 안 닫는다). 반대로 **사람 메뉴의 예약 노드 생성(`agentlist.create*` → 데몬 `CreateProfile`)과 agent 버스 `agent.spawn`(claude 고정)은 표를 안 본다.** 프론트 레지스트리는 사람 클릭과 LLM 호출이 같은 등록물이고, 그 둘을 호출자 축으로 가르던 `humanOnly` 게이트는 2026-09-22 에 걷혔다(ADR-0219) — 지금은 문이 아니다.
 
 ```mermaid
 flowchart TD
   P["LLM_BACKEND_POLICY — 표에 없으면 반려(fail-closed)"]
-  H["사람 — 빈 곳 우클릭 메뉴"] -->|"runAsHuman — 게이트를 지나지 않는다"| OK["통과 → 프로필 생성"]
-  L["LLM · 명령 버스"] -->|"프론트 레지스트리 registry.run"| D1["문 1 — humanOnly · 호출자 축으로 반려"]
-  L -->|"셸 agent.spawnInto"| D2["문 2 — 받은 낱말을 정책에 물어 반려"]
-  L -->|"코어 agent.new"| D3["문 3 — backend 는 필수 인자 · 선언 어휘에 없으면 역직렬화가 먼저 반려"]
+  L["LLM · 명령 버스"] -->|"셸 agent.spawnInto → 스폰 패킷 SpawnByCwd"| D1["문 1 — 데몬 SpawnByCwd 처리부가 받은 낱말을 정책에 물어 반려 · 호출자를 안 가린다"]
+  L -->|"코어 agent.new"| D2["문 2 — backend 는 필수 인자 · 선언 어휘에 없으면 역직렬화가 먼저 반려"]
+  R["프론트 레지스트리 — 사람 메뉴(runAsHuman)와 LLM(registry.run)이 같은 등록물 · humanOnly 는 걷혀 문이 아니다"] -->|"slot.createAgentHere · agent.spawn — claude 고정 스폰 패킷"| D1
+  R -->|"agentlist.create* — 예약 노드 생성"| CP["데몬 CreateProfile — 표를 안 본다"]
+  P --- D1
   P --- D2
-  P --- D3
   X["backend 칸을 비운 스폰 패킷"] -->|"기본값 없음"| ERR["데몬 거절 — MISSING_BACKEND"]
 ```
 
 반려 문구에는 **사유와 여는 시점을 항상 함께 적는다** — 코드가 그렇게 못 박아 뒀다(`LlmBackendPolicy.refusal` 의 doc). 반년 뒤 그 거절을 만난 사람이 무엇을 기다리는지 문구 하나로 알아야 한다는 뜻이다. 그리고 「모르는 낱말」과 「아는데 이 표면이 안 만든다」는 다른 축이라 한 문구로 뭉치지 않는다 — 뭉치면 호출자가 있지도 않은 오탈자를 고치려 든다.
 
-**앵커** — `crates/engram-dashboard-agent/src/commands.rs`(LLM_BACKEND_POLICY · llm_creation_refusal · NO_POLICY_DECLARED) · `src-tauri/src/layout/apply.rs`(parse_backend · gate_backend) · `src/commands/registry.ts`(`humanOnly` 칸 doc · run vs runAsHuman) · `crates/engram-dashboard-daemon/src/connection_core.rs`(MISSING_BACKEND)
+**앵커** — `crates/engram-dashboard-agent/src/commands.rs`(LLM_BACKEND_POLICY · llm_creation_refusal · NO_POLICY_DECLARED) · `src-tauri/src/layout/apply.rs`(parse_backend — 셸은 오탈자 그물만 진다) · `src/commands/registry.ts`(`humanOnly` 칸 doc · run vs runAsHuman) · `crates/engram-dashboard-daemon/src/connection_core.rs`(MISSING_BACKEND · by_cwd_refusal · llm_policy — 정책 벽 = ADR-0279)
 
 ---
 
@@ -130,7 +130,7 @@ Windows 에서 한 겹 더 씌우는 이유는 PATH 에 있는 그 이름이 실
 
 ★**안 고친 한계 — `%VAR%` 확장**★ — `cmd.exe` 는 따옴표 안에서도 `%NAME%` 을 환경변수로 편다. 폴더 이름에 `%` 로 감싼 낱말이 실제로 들어 있으면 CLI 는 **다른 폴더**를 받는다. 고치려면 claude 와 공용인 조립 지점을 건드려야 하고 틀리면 모든 스폰이 죽는다 — 사유와 필요한 실측은 코드 주석이 정본이다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `MCP_SERVER_OVERRIDE_PREFIX` · `mcp_attachment`(`-c mcp_servers.engram={…}` 한 값을 조립하는 유일한 자리 · 결과 타입 `McpAttachment`) · `DEVELOPER_INSTRUCTIONS_KEY` · `backend/codex/thread_lock.rs`(락 홀더 판정 + 폴링) · `src/platform/file_holders.rs`(Restart Manager 질의) · `src/platform/process_tree.rs`(우리 프로세스 나무) · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-agent/src/backend/mod.rs`(console_command)
+**앵커** — `crates/engram-dashboard-agent/src/backend/claude/mod.rs`(CLAUDE_PROGRAM · build_spec) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(CODEX_PROGRAM · CD_FLAG · SANDBOX_FLAG · APPROVAL_FLAG · RESUME_SUBCOMMAND · CONFIG_OVERRIDE_FLAG · `MCP_SERVER_OVERRIDE_PREFIX` · `mcp_attachment`(`-c mcp_servers.engram={…}` 한 값을 조립하는 유일한 자리 · 결과 타입 `McpAttachment`) · `DEVELOPER_INSTRUCTIONS_KEY` · `backend/codex/thread_lock.rs`(락 홀더 판정 + 폴링) · 조립 지점 `%VAR%` 주석 · argv 단위 테스트) · `crates/engram-dashboard-agent/src/backend/gemini/mod.rs`(GEMINI_PROGRAM · best-guess 주석) · `crates/engram-dashboard-platform/src/shell.rs`(console_command) · `crates/engram-dashboard-platform/src/file_holders.rs`(Restart Manager 질의) · `crates/engram-dashboard-platform/src/process.rs`(`subtree` — 우리 프로세스 나무)
 
 ★**`mcp_server_override` 는 앵커로 쓰지 말 것 — 그런 심볼은 없다**★(실측 2026-09-21 · 저장소 전체 검색에서 정의 0 건). 여기 그 이름이 적혀 있었고 가리킬 대상이 없었다. 실물은 접두 상수와 조립 함수로 갈려 있어 **위 두 이름이 정본**이다. ★같은 이름이 `backend/codex/mod.rs` 의 rustdoc 링크 두 곳에 아직 살아 있다★ — 그쪽은 코드라 여기서 안 고쳤다(끊어진 intra-doc 링크).
 
@@ -142,7 +142,7 @@ codex 는 세션 id 를 스스로 발급하고 터미널 모드에는 그것을 
 
 - **판정은 PID 와 프로세스 시작시각이 둘 다 맞아야 한다.** PID 는 재사용되므로 PID 단독 일치는 남의 스레드를 우리 손잡이에 적는다 — 그 고장은 조용하고 다음 재개가 남의 대화를 연다.
 - ★**후손은 부모보다 먼저 태어날 수 없다 — 먼저 태어난 것은 버린다**★. 이게 없으면 남이 우리 나무에 들어온다: 사용자가 손으로 띄운 `codex.exe` 가 고아가 되어 기록된 ppid `P` 를 그대로 달고 남고, Windows 가 `P` 를 우리 래퍼에 재사용하면 프로세스 열거가 그 남을 우리 자식으로 돌려준다. 그 남은 자기 락의 홀더와 자기 신원이 당연히 맞으므로, **우리 codex 가 락을 만들기 전 구간에 유일한 후보**가 되어 모호 판정조차 안 뜨고 채택된다. (같은 눈금에 뜬 자식은 통과시킨다 — 막는 것은 먼저 태어난 것뿐이다.)
-  - ★**이 규칙은 「전수」가 아니다 — 받아들인 잔여 셋이 코드에 박혀 있다(다시 논쟁하지 말 것 · 2026-09-21 결정)**★. ① **열거와 시작시각 읽기 사이의 PID 재사용** — 열거가 준 번호의 주인이 우리가 읽기 전에 죽어 번호가 넘어가면, 우리가 읽는 시작시각은 **새 주인의 것**이다. 열거와 조회가 별개 syscall 이라 원자적으로 고칠 수단이 없고 창은 마이크로초 단위다. ② **같은 눈금(`==`)** — 바로 위에서 통과시킨 그것. ③ **명시 부모 지정** — Windows 는 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` 로 부모를 박아 프로세스를 만들 수 있어, 그렇게 태어난 남은 우리 뿌리보다 **뒤**에 태어나고도 우리 뿌리의 PID 를 ppid 로 달아 이 비교를 지난다. ★그래도 규칙의 값어치는 그대로다★ — 흔한 경로(그것을 낳은 프로세스가 쥐고 있던 번호가 죽은 뒤 우리 뿌리에 재사용되는 경우)는 전부 닫히고, ③ 이 **실제 오검출**이 되려면 그 남이 우리 `CODEX_HOME` 아래 `<uuid>.lock` 까지 쥐고 있어야 한다. 정본 = `platform/process_tree.rs` 의 `subtree` doc.
+  - ★**이 규칙은 「전수」가 아니다 — 받아들인 잔여 셋이 코드에 박혀 있다(다시 논쟁하지 말 것 · 2026-09-21 결정)**★. ① **열거와 시작시각 읽기 사이의 PID 재사용** — 열거가 준 번호의 주인이 우리가 읽기 전에 죽어 번호가 넘어가면, 우리가 읽는 시작시각은 **새 주인의 것**이다. 열거와 조회가 별개 syscall 이라 원자적으로 고칠 수단이 없고 창은 마이크로초 단위다. ② **같은 눈금(`==`)** — 바로 위에서 통과시킨 그것. ③ **명시 부모 지정** — Windows 는 `PROC_THREAD_ATTRIBUTE_PARENT_PROCESS` 로 부모를 박아 프로세스를 만들 수 있어, 그렇게 태어난 남은 우리 뿌리보다 **뒤**에 태어나고도 우리 뿌리의 PID 를 ppid 로 달아 이 비교를 지난다. ★그래도 규칙의 값어치는 그대로다★ — 흔한 경로(그것을 낳은 프로세스가 쥐고 있던 번호가 죽은 뒤 우리 뿌리에 재사용되는 경우)는 전부 닫히고, ③ 이 **실제 오검출**이 되려면 그 남이 우리 `CODEX_HOME` 아래 `<uuid>.lock` 까지 쥐고 있어야 한다. 정본 = `crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs` 의 `LockHolderProbe::our_processes` doc(잔여 셋의 OS 사실 자체는 `crates/engram-dashboard-platform/src/process.rs` 의 `subtree` doc).
 - **세는 것은 락 파일이 아니라 「맞은 홀더」다.** 한 락을 우리 프로세스 둘이 함께 쥐고 있으면 그 락이 누구 것인지가 아직 안 좁혀진 상태다 — 파일만 세면 그 상태가 채택으로 통과한다. 대가는 핸들을 물려받은 자식이 있는 동안 채택이 미뤄지는 것이고, 폴링이 멈추지 않으므로 그 자식이 끝나면 다음 바퀴에 잡는다(핸들 상속이 실제로 일어나는지는 미측정).
   - ★**이 줄은 닫힌 결정이 아니라 보류다 — 코드도 그렇게 적혀 있다**★. 반론 = 「둘 다 **우리** 프로세스면 그 락은 우리 것이 맞으니 채택이 옳다」이고, 그러면 셈 단위가 다시 파일로 돌아간다. **뒤집으려면 핸들 상속이 실재하는지를 먼저 재고 ADR-0218 결정 3 을 그 측정 위에서 다시 열 것** — 여기서 조용히 갈아치우지 말 것.
 - **파일 이름은 정규형 uuid(하이픈 36자)만 받는다.** 하이픈 없는 32자·중괄호·`urn:uuid:` 까지 받아 주면 우리가 만들지 않은 파일 하나가 후보 수를 늘려 판정을 모호로 뒤집고 회수가 통째로 멈춘다. 대소문자는 안 가린다.
@@ -156,7 +156,7 @@ codex 는 세션 id 를 스스로 발급하고 터미널 모드에는 그것을 
 
 ★**회수한 값을 되쓸 때의 가드**★ — `codex resume <값>` 은 **틀려도 실패하지 않는다**: 스레드 id 로 못 읽는 문자열을 받으면 그것을 **세션 이름**으로 재해석해 조용히 새 세션을 만들고 종료 코드 `0` 으로 끝나며 턴이 과금된다(실측 2026-09-21). 즉 잘못된 값의 대가가 「오류」가 아니라 「사용자가 이어받았다고 믿는 새 대화」다. 그래서 실을 수 없는 손잡이면 하위 명령 자체를 안 낸다(새 대화 argv 로 떨어지고 그 퇴행은 활성화 입구가 신고한다). ★claude 와 합치지 말 것★ — 그쪽 `--resume` 는 모르는 값에 정직하게 실패하므로 이 가드가 필요 없고, 공용 자리로 올리면 한 백엔드의 상류 버그가 전원의 조립 규칙이 된다.
 
-**앵커** — `crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs` · `crates/engram-dashboard-agent/src/platform/file_holders.rs`(Restart Manager 질의) · `crates/engram-dashboard-agent/src/platform/process_tree.rs`(우리 프로세스 나무) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(`open_spawn` 터미널 갈래 + `terminal_capture_wiring` 실 프로세스 배선 시험)
+**앵커** — `crates/engram-dashboard-agent/src/backend/codex/thread_lock.rs` · `crates/engram-dashboard-platform/src/file_holders.rs`(Restart Manager 질의) · `crates/engram-dashboard-platform/src/process.rs`(`subtree` — 우리 프로세스 나무) · `crates/engram-dashboard-agent/src/backend/codex/mod.rs`(`open_spawn` 터미널 갈래 + `terminal_capture_wiring` 실 프로세스 배선 시험)
 
 ## capability 선언
 
@@ -204,9 +204,9 @@ codex 는 세션 id 를 스스로 발급하고 터미널 모드에는 그것을 
 | 창구 | 어디 | `claude` | `codex` | `gemini` (미배선) |
 |---|---|---|---|---|
 | 사람 메뉴 — claude 계열 셋(`agentlist.createAgent`·`createTerminal`·`createJson`) | `src/commands/agentCommands.ts` | 만든다 — `createReservedProfile` → `createClaudeProfile` 로 claude 가 코드에 박혀 있다 | **못 고른다**(그 낱말을 받는 칸이 없다) | 항목 없음 |
-| 사람 메뉴 — codex 항목 둘(`agentlist.createCodex`·`createCodexJson` — 대화형 TUI / 상주 JSON 서버) | 같음 | — | 만든다 — **사람 클릭만** | 항목 없음 |
+| 사람 메뉴 — codex 항목 둘(`agentlist.createCodex`·`createCodexJson` — 대화형 TUI / 상주 JSON 서버) | 같음 | — | 만든다(LLM 도 `registry.run` 으로 — 아래 행) | 항목 없음 |
 | LLM · 프론트 레지스트리(`registry.run`) | `src/commands/registry.ts` | 위 셋 그대로 통과 | 통과 — `humanOnly` 는 2026-09-22 에 걷혔다(ADR-0219) | — |
-| LLM · 셸 `agent.spawnInto` | `src-tauri/src/layout/apply.rs` | 통과 | 통과 — 낱말을 **받아서** `gate_backend` 로 가고 정책이 그것을 연다 | wire enum 에 낱말이 없어 `parse_backend` 가 먼저 반려 |
+| LLM · 셸 `agent.spawnInto` | `src-tauri/src/layout/apply.rs` → 데몬 `connection_core.rs` | 통과 | 통과 — 셸은 낱말을 **받아서** 오탈자 그물(`parse_backend`)만 지나 스폰 패킷에 싣고, 데몬 `SpawnByCwd` 처리부가 정책에 물어 연다(ADR-0279) | wire enum 에 낱말이 없어 `parse_backend` 가 먼저 반려 |
 | LLM · 코어 `agent.new` | `crates/engram-dashboard-agent/src/commands.rs` | 통과 — `backend` 는 **필수 인자**(미지정 반려) | 통과 — 선언 어휘 `AgentBackend` 에 `Codex` 가 있고 정책도 열려 있다 | 같음 |
 | LLM · `agent.spawn`(cwd 즉시 스폰) | `src/commands/agentCommands.ts` | `'claude'` 가 코드에 박혀 있다 | **못 고른다** | **못 고른다** |
 
@@ -214,7 +214,7 @@ codex 는 세션 id 를 스스로 발급하고 터미널 모드에는 그것을 
 
 ★**codex 는 2026-09-22 에 LLM 표면에서도 열렸다(ADR-0219)**★ — ~~codex 는 처음 보는 폴더에서 자기 신뢰 확인 모달을 띄우는데 사람이 아닌 호출자는 그 모달을 못 지난다. 여는 시점 = Phase 2~~ 는 그날 죽은 서술이다. 실측(codex-cli 0.155.1)에서 `app-server` 통로는 **한 번도 본 적 없는 폴더**에 `thread/start` 를 약 338 ms 만에 성공으로 돌려주고(오류 없음 · 인바운드 신뢰 요청 없음) 그 폴더를 자기 `config.toml` 에 `trust_level = "trusted"` 로 스스로 적는다. **폴더 신뢰 모달은 TUI 전용 장치**였고, 그 모드에서는 모달이 화면에 보여 사람이 답한다. 사유·여는 시점의 정본은 여전히 코드(`commands::LLM_BACKEND_POLICY`)이고 번복의 정본은 ADR-0219 다.
 
-**오늘 이 정책 표는 아무 낱말도 안 닫는다.** 그래서 `agent.new` 의 정책 팔도 셸 `gate_backend` 의 정책 팔도 발화하지 않는다 — 닿지 않는 **사유**가 갈렸을 뿐이다(전에는 선언 어휘가 표보다 좁아서, 지금은 어휘와 표가 여는 집합이 같고 표가 아무것도 안 닫아서). ★그래도 지우지 말 것★ — 그 팔이 막는 편집은 「어휘를 넓히면서 정책 표는 안 넓히는 것」이고, 그 조합이 오는 날 유일한 런타임 방어가 된다. 표 자체도 남는다: 「선언 없음 = 닫힘」(`NO_POLICY_DECLARED`)이 다음 백엔드를 fail-closed 로 받는다.
+**오늘 이 정책 표는 아무 낱말도 안 닫는다.** 그래서 `agent.new` 의 정책 팔도 데몬 `SpawnByCwd` 처리부의 정책 팔도 발화하지 않는다 — 닿지 않는 **사유**가 갈렸을 뿐이다(전에는 선언 어휘가 표보다 좁아서, 지금은 어휘와 표가 여는 집합이 같고 표가 아무것도 안 닫아서). ★그래도 지우지 말 것★ — 그 팔이 막는 편집은 「어휘를 넓히면서 정책 표는 안 넓히는 것」이고, 그 조합이 오는 날 유일한 런타임 방어가 된다. 표 자체도 남는다: 「선언 없음 = 닫힘」(`NO_POLICY_DECLARED`)이 다음 백엔드를 fail-closed 로 받는다.
 
 **앵커** — (A) 「닫힌 문」의 앵커와 같다 + `src/commands/agentCommands.ts`(`agent.spawn` 의 하드코딩 주석). ★한때 여기 있던 `CODEX_HUMAN_ONLY` 앵커는 지웠다 — 그 상수는 2026-09-22 에 삭제됐다(그 이름으로 찾지 말 것).★
 

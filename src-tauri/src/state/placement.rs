@@ -618,31 +618,14 @@ impl RestoreWindows for TauriRestoreWindows {
 //   웹뷰로 넘겨(`MoveFocus`) 창은 곧바로 `WM_KILLFOCUS` 를 받고, tao 0.35.3 의 그 값(`is_active && is_focused`)은
 //   웹뷰가 키보드 포커스를 쥔 동안 `false` 다. tauri-runtime-wry 2.11.3 도 그래서 창의 포커스 사건을 tao 가 아니라
 //   웹뷰의 GotFocus · LostFocus 에서 만든다. [미검증 — 소스 독해. GUI 실측 몫]
-// 그 밖의 OS 는 그 게터를 그대로 쓴다. [미검증 — 그 갈래는 Windows 빌드 · CI 에서 컴파일되지 않는다]
+// 그 밖의 OS 는 그 게터를 그대로 쓴다 — OS 층이 답할 수단이 없다고(`None`) 할 때다. [미검증 — 그 갈래는 Windows
+//   에서 돌지 않는다] OS 분기는 OS 층 crate 에 있다(ADR-0266 — 셸에 `#[cfg(windows)]` 를 두지 않는다).
 fn foreground_is_ours(app: &AppHandle) -> bool {
-    #[cfg(windows)]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetForegroundWindow, GetWindowThreadProcessId,
-        };
-        let _ = app;
-        let mut pid = 0u32;
-        // SAFETY: 인자 없는 조회 하나와, 살아 있는 지역 변수에 PID 를 쓰는 조회 하나다. 전경 창이 없거나 그 사이
-        //   사라졌으면 PID 가 0 으로 남는다.
-        unsafe {
-            let foreground = GetForegroundWindow();
-            if !foreground.is_invalid() {
-                GetWindowThreadProcessId(foreground, Some(&mut pid));
-            }
-        }
-        pid != 0 && pid == std::process::id()
-    }
-    #[cfg(not(windows))]
-    {
+    engram_dashboard_platform::window::foreground_is_current_process().unwrap_or_else(|| {
         app.webview_windows()
             .values()
             .any(|window| matches!(window.is_focused(), Ok(true)))
-    }
+    })
 }
 
 fn monitors(app: &AppHandle) -> Vec<MonitorArea> {

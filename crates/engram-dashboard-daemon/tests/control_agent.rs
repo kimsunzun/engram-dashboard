@@ -403,7 +403,7 @@ fn seed_shell_agent(manager: &Arc<AgentManager>, name: &str) -> AgentId {
     let mut profile = AgentProfile::new(
         name.to_string(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         cwd,
@@ -821,7 +821,7 @@ async fn a_duplicate_name_is_refused_rather_than_guessed() {
         let mut p = AgentProfile::new(
             "twin".to_string(),
             AgentCommand::Shell {
-                program: engram_dashboard_agent::manager::default_shell().to_string(),
+                program: engram_dashboard_platform::shell::default_shell().to_string(),
                 args: vec![],
             },
             std::env::temp_dir(),
@@ -1136,7 +1136,7 @@ async fn creating_agents_stops_at_the_runaway_ceiling() {
         let mut p = AgentProfile::new(
             format!("filler-{i}"),
             AgentCommand::Shell {
-                program: engram_dashboard_agent::manager::default_shell().to_string(),
+                program: engram_dashboard_platform::shell::default_shell().to_string(),
                 args: vec![],
             },
             std::env::temp_dir(),

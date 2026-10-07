@@ -29,6 +29,8 @@ use std::collections::VecDeque;
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
+
 use crate::types::{AgentId, PtyError};
 
 /// 덩이 하나가 **실제로 OS 로 나간 뒤** 라이터가 부를 것.
@@ -38,7 +40,7 @@ use crate::types::{AgentId, PtyError};
 /// - 안 불리는 때 = 큐가 받지 않았다(`Err`) · 꺼내기 전에 큐가 닫혔다 · 쓰기가 실패했다. 셋 다 부르지 않고 버린다(drop).
 /// - ★꺼낸 뒤에 큐가 닫혀도 그 쓰기가 성공하면 불린다★ — 그래서 이 부름은 큐를 닫는 쪽(통로의 끝내기
 ///   `shutdown()` · 스트림 끝)과 겹칠 수 있다. 물러난 뒤에 하면 안 되는 일이면 이 안에서 물러남 표시
-///   (`crate::platform::process_group::RetiringSignal`)를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
+///   (`crate::transport::process_group::RetiringSignal`)를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
 /// - ★panic 하지 않게 짠다★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라,
 ///   릴리스에서는 이 안의 panic 이 프로세스를 죽인다. 라이터가 두른 `catch_unwind`(잡아 `error` 로 남기고 다음 덩이를
 ///   계속 쓴다 — 큐를 닫지 않는다)는 unwind 빌드(개발·시험)에서만 서는 안전망이다.
@@ -135,7 +137,7 @@ impl InputQueue {
         bytes: Vec<u8>,
         on_written: Option<OnWritten>,
     ) -> Result<(), PtyError> {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = sync::lock(&self.inner);
         if let Some(reason) = &inner.closed {
             return Err(PtyError::WriteFailed(reason.clone()));
         }
@@ -165,7 +167,7 @@ impl InputQueue {
     /// ★꺼내도 [`Inner::bytes`] 는 **줄지 않는다**★ — 꺼낸 덩이는 아직 나간 것이 아니다. 그 회계를
     ///   푸는 것은 [`mark_written`](Self::mark_written) 하나뿐이고, 근거는 그 필드 doc.
     pub(crate) fn pop(&self) -> Option<(Vec<u8>, Option<OnWritten>)> {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = sync::lock(&self.inner);
         loop {
             if inner.closed.is_some() {
                 return None;
@@ -173,10 +175,7 @@ impl InputQueue {
             if let Some(chunk) = inner.pending.pop_front() {
                 return Some(chunk);
             }
-            let (guard, _timed_out) = self
-                .wake
-                .wait_timeout(inner, WAKE_BACKSTOP)
-                .unwrap_or_else(|p| p.into_inner());
+            let (guard, _timed_out) = sync::wait_timeout(&self.wake, inner, WAKE_BACKSTOP);
             inner = guard;
         }
     }
@@ -191,7 +190,7 @@ impl InputQueue {
     ///   덮으면 진단이 「에이전트를 종료했다」로 뭉개진다.
     pub(crate) fn close(&self, reason: &str) {
         let abandoned = {
-            let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+            let mut inner = sync::lock(&self.inner);
             if inner.closed.is_none() {
                 inner.closed = Some(reason.to_string());
             }
@@ -208,7 +207,7 @@ impl InputQueue {
     /// ★`len` 은 그 덩이의 바이트 수★ — 여기가 [`Inner::bytes`] 회계를 푸는 **유일한** 자리다.
     ///   닫힘이 먼저 0 으로 되돌렸을 수 있으므로 `saturating_sub` 로 뺀다(그 경우 이미 0 이 맞다).
     fn mark_written(&self, len: usize) {
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = sync::lock(&self.inner);
         inner.bytes = inner.bytes.saturating_sub(len);
         inner.written_seq += 1;
         // 대기자([`wait_drained`])를 깨운다. `pop` 도 같은 조건변수에서 자지만 그쪽은 루프라 무해하다.
@@ -229,7 +228,7 @@ impl InputQueue {
     ///   부르는 쪽의 몫이고, 호출부가 그 사실을 적는다.
     pub(crate) fn wait_drained(&self, timeout: Duration) -> Result<(), PtyError> {
         let deadline = Instant::now() + timeout;
-        let mut inner = self.inner.lock().unwrap_or_else(|p| p.into_inner());
+        let mut inner = sync::lock(&self.inner);
         let target = inner.pushed_seq;
         loop {
             if inner.written_seq >= target {
@@ -249,10 +248,7 @@ impl InputQueue {
                     target - inner.written_seq
                 )));
             }
-            let (guard, _timed_out) = self
-                .wake
-                .wait_timeout(inner, deadline - now)
-                .unwrap_or_else(|p| p.into_inner());
+            let (guard, _timed_out) = sync::wait_timeout(&self.wake, inner, deadline - now);
             inner = guard;
         }
     }

@@ -33,13 +33,14 @@ use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_agent::usage::{
     ProbeEnv, ProbeError, ProbeFailure, ProbeSpawner, UsageAccountKey, UsageKey, UsageObservation,
     UsageProbe, UsageVendorKey,
 };
+use engram_dashboard_base::sync;
 use engram_dashboard_net::frame_port::ConnId;
 use engram_dashboard_protocol::UsageLimitSnapshot;
 
@@ -566,10 +567,7 @@ impl UsageService {
     /// 거절 기한을 전량 저장한다 — `save_lock` 안에서 책을 다시 떠 쓴다(§1-4 「거절 저장」). 파일 I/O 는 책 락 밖이다.
     /// 저장소는 실패하지 않는다(쓰기 실패는 저장소가 warn 하고 계속).
     fn save_rejects(&self) {
-        let _serial = self
-            .save_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _serial = sync::lock(&self.save_lock);
         let entries = {
             let desk = self.desk();
             let now = self.now();
@@ -603,7 +601,7 @@ impl UsageService {
     fn desk(&self) -> MutexGuard<'_, Desk> {
         // poison 을 견딘다 — 여기서 패닉하면 부른 pump 스레드가 죽는다. 책의 메서드는 패닉하지 않으므로 poison 은
         //   debug·시험에서만 선다(릴리즈는 `panic = "abort"`).
-        self.desk.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.desk)
     }
 }
 
@@ -645,7 +643,7 @@ impl Drop for ProbeGuard {
 }
 
 fn take_guard(slot: &Mutex<Option<ProbeGuard>>) -> Option<ProbeGuard> {
-    slot.lock().unwrap_or_else(PoisonError::into_inner).take()
+    sync::lock(slot).take()
 }
 
 /// 벤더의 기본 계정 칸 — 계정 낱말은 지금 늘 기본값이다(`UsageAccountKey`).
@@ -670,6 +668,7 @@ mod tests {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
     use std::sync::mpsc::TryRecvError;
+    use std::sync::PoisonError;
     use std::sync::{Barrier, OnceLock};
 
     const H: i64 = 3_600;

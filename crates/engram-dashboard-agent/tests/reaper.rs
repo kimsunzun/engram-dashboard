@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use uuid::Uuid;
 
@@ -23,6 +23,7 @@ use engram_dashboard_agent::transport::api::ApiTransport;
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ReapMsg, StatusSink, TerminalReason, TerminationIntent,
 };
+use engram_dashboard_base::testing::wait_until;
 
 #[derive(Clone)]
 struct CountingSink {
@@ -49,17 +50,6 @@ impl StatusSink for CountingSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {
         self.list_updates.fetch_add(1, Ordering::SeqCst);
     }
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-    cond()
 }
 
 fn make_manager(tag: &str) -> (AgentManager, CountingSink, Arc<ProfileRegistry>) {
@@ -189,7 +179,7 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
     let profile = AgentProfile::new(
         "reaper-kill".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),
@@ -243,7 +233,7 @@ fn shutdown_all_keeps_profiles_for_boot_restore() {
     let profile = AgentProfile::new(
         "reaper-shutdown".into(),
         AgentCommand::Shell {
-            program: engram_dashboard_agent::manager::default_shell().to_string(),
+            program: engram_dashboard_platform::shell::default_shell().to_string(),
             args: vec![],
         },
         PathBuf::from("."),

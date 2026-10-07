@@ -18,7 +18,6 @@ pub mod manager;
 // ADR-0101
 pub mod name;
 pub mod output_core;
-pub mod platform;
 pub mod preset;
 pub mod profile;
 // ADR-0231

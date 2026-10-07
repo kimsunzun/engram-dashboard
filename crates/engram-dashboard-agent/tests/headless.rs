@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_agent::manager::{default_shell, AgentManager};
+use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::persistence::{FilePresetStore, FileProfileStore};
 use engram_dashboard_agent::preset::PresetRegistry;
 use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, SpawnMode};
@@ -19,6 +19,8 @@ use engram_dashboard_agent::types::{
     InputOrigin, OutputFrame, OutputPayload, OutputSink, ProvisionError, SinkError, SinkId,
     StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
+use engram_dashboard_platform::shell::default_shell;
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 
@@ -73,18 +75,6 @@ impl StatusSink for RecordingSink {
     }
 
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
-}
-
-/// 실 PTY 출력은 비동기라 고정 sleep 대신 조건 폴링으로 기다린다.
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
 }
 
 // ── FIX 6: 제어 채널 provision 레이스 가드 — 같은 id 동시 spawn 이 서로를 짓밟지 않는다 ──────────

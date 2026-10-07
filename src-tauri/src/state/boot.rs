@@ -106,7 +106,7 @@ impl BootFiles for FsBootFiles {
         crate::fsutil::sweep_temps(
             &self.dir,
             &[STATE_FILE, CRASH_COPY_FILE],
-            engram_dashboard_base::platform::pid_alive,
+            engram_dashboard_platform::process::pid_alive,
         )
     }
 }

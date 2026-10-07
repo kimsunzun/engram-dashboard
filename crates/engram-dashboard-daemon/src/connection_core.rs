@@ -24,9 +24,6 @@ use std::sync::{Arc, Mutex};
 use engram_dashboard_agent::commands::NEW_AGENT_OUTPUT_FORMAT;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::RenameOutcome as CoreRenameOutcome;
-// 셸 스폰은 이제 테스트 픽스처에만 남는다 — 운영 기본 백엔드가 claude 로 바뀌었다(`SpawnByCwd` arm).
-#[cfg(test)]
-use engram_dashboard_agent::manager::default_shell;
 use engram_dashboard_agent::profile::RestoreReport as CoreRestoreReport;
 use engram_dashboard_agent::profile::SpawnMode;
 use engram_dashboard_agent::queued_input::{ListedRow, ListedState, QueuedListing};
@@ -34,8 +31,13 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo as CoreAgentInfo, AgentStatus as CoreStatus, CancelError, InputOrigin,
     OutputSink, PtyError, ReplayKind, SinkId, SubscribeReply,
 };
+// 셸 스폰은 테스트 픽스처에만 남는다 — 운영 `SpawnByCwd` 에는 기본 백엔드가 없다(칸이 비면
+// `MISSING_BACKEND` 로 거절한다).
+#[cfg(test)]
+use engram_dashboard_platform::shell::default_shell;
 
 use engram_dashboard_agent::backend::usage_probe_for;
+use engram_dashboard_agent::commands::llm_creation_refusal;
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_agent::preset::Preset as CorePreset;
 use engram_dashboard_agent::profile::{
@@ -677,6 +679,37 @@ fn spawn_command_by_cwd(backend: Option<WireBackendKind>) -> Option<CoreSpawnCom
     spawn_command_for(Some(kind), vec![], output_format)
 }
 
+/// 백엔드 생성 정책의 꼴 — 낱말 하나를 받아 `None` = 만든다, `Some(사유)` = 안 만든다.
+type BackendPolicyFn = fn(&str) -> Option<&'static str>;
+
+/// wire 백엔드의 낱말 — 정책 표에 물으려면 낱말이 필요하다(agent 는 protocol 을 의존하지 않아 둘이 공유할
+/// 수 있는 것은 낱말뿐이다). 손으로 적지 않고 enum 직렬화에서 받는다(늘 lowercase). 직렬화가 실패하면 빈
+/// 낱말이 되어 운영 정책이 닫는다(fail-closed).
+fn wire_backend_word(kind: WireBackendKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
+/// `SpawnByCwd` 의 백엔드를 정책이 막으면 그 거절 문구 — `None` = 만든다.
+///
+/// ★문구는 혼자 서야 한다★ — 데몬 `Error` 의 글은 접두 없이 버스 호출자까지 그대로 간다(셸
+/// `agent.spawnInto` 는 그것을 `CONFLICT` 로 싣는다). 앞부분은 `agent.new` 의 정책 거절(agent `verb_new`)
+/// 틀을 그대로 쓰고 끝에 「스폰 안 함.」을 붙인다. 그 형제와 다른 점 셋 — 이쪽 낱말은 wire 직렬화라 늘
+/// lowercase(그쪽은 선언 어휘 `Claude`), 이쪽엔 그 꼬리가 있고 그쪽엔 없다, 그쪽 코드는
+/// `INVALID_ARGUMENT` 고 이쪽은 셸이 `CONFLICT` 로 싣는다. 오탈자 그물의 「를 모른다」와는 갈린다 — 뭉치면
+/// 호출자가 있지도 않은 오탈자를 고치려 든다.
+// ADR-0279
+fn by_cwd_refusal(kind: WireBackendKind, policy: BackendPolicyFn) -> Option<String> {
+    let word = wire_backend_word(kind);
+    policy(&word).map(|reason| {
+        format!(
+            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — {reason} 스폰 안 함."
+        )
+    })
+}
+
 fn output_format_to_wire(f: CoreAgentOutputFormat) -> WireAgentOutputFormat {
     match f {
         CoreAgentOutputFormat::Terminal => WireAgentOutputFormat::Terminal,
@@ -1065,10 +1098,11 @@ fn kind_to_action(kind: ReplayKind) -> SubscribeAction {
 // ── ConnectionCore ────────────────────────────────────────────────────────────────
 
 /// ★이 struct 는 **연결마다 새로 만들어진다**(`agent_conn::AgentConnections::handler_for`)★. 서버 전체에
-/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — 필드 전부가 그렇다.
+/// 하나인 것은 그 공장이고, 여기 든 **필드들이** 전 연결이 공유하는 핸들의 clone 이다 — `llm_policy` 하나만
+/// 빼고 필드 전부가 그렇다(그 칸은 상태 없는 함수 포인터다 — 그 칸 doc).
 /// ★그래서 새 필드를 넣을 때 반드시 확인할 것★: 공유 핸들이 아닌 값을 여기 넣으면 "서버 전체 1개" 로
-/// 읽히는 자리에 조용히 **연결마다 별개**인 상태가 생긴다. 연결 고유 상태의 자리는 `ConnectionSession`
-/// (dispatch 에 주입)이다.
+/// 읽히는 자리에 조용히 **연결마다 별개**인 상태가 생긴다. 예외는 `llm_policy` 처럼 **상태가 없는** 값뿐이다.
+/// 연결 고유 상태의 자리는 `ConnectionSession`(dispatch 에 주입)이다.
 pub struct ConnectionCore {
     manager: Arc<AgentManager>,
     multiview: MultiViewState,
@@ -1089,6 +1123,13 @@ pub struct ConnectionCore {
     locals: Arc<dyn LocalCommands>,
     usage: Arc<UsageService>,
     shutdown_tx: watch::Sender<bool>,
+    /// `SpawnByCwd` 처리부가 `spawn_agent` 전에 묻는 백엔드 생성 정책. 운영은 늘 agent
+    /// `commands::llm_creation_refusal` 이고 [`ConnectionCore::new`] 가 채운다 — 시험만 닫는 가짜로 갈아
+    /// 꽂는다(오늘 운영 표는 아무것도 안 닫아 실물 입력으로는 거절 갈래에 못 닿는다 · ADR-0012).
+    /// ★공유 핸들이 아닌데도 여기 앉을 수 있다★ — 상태 없는 순수 함수 포인터라 연결마다 새로 채워도 갈릴
+    /// 상태가 없다.
+    // ADR-0279
+    llm_policy: BackendPolicyFn,
 }
 
 impl ConnectionCore {
@@ -1116,7 +1157,14 @@ impl ConnectionCore {
             locals,
             usage,
             shutdown_tx,
+            llm_policy: llm_creation_refusal,
         }
+    }
+
+    #[cfg(test)]
+    fn with_llm_policy(mut self, policy: BackendPolicyFn) -> Self {
+        self.llm_policy = policy;
+        self
     }
 
     pub fn usage(&self) -> &UsageService {
@@ -1467,6 +1515,18 @@ impl ConnectionCore {
                     reply(sink, request_id, Err(MISSING_BACKEND.to_string()));
                     return DispatchFlow::Continue;
                 };
+                // ★정책은 `spawn_agent` 보다 먼저 본다★ — 이 갈래의 즉석 프로필은 `spawn_agent` 가 명부에 올리고
+                //   디스크에 쓰므로, 판정을 그 뒤로 미루면 거절된 프로필이 남는다. `CoreProfile::new` 앞에 둔 것은
+                //   배치일 뿐이다(메모리 값만 만든다). 이 문은 호출자를 가리지 않는다 —
+                //   사람 경로도 같은 표를 본다(ADR-0279 「감수한 대가」). 거절은 「마지막 실패」를 쓰지 않는다 —
+                //   활성화도 즉석 생성도 일어나지 않았다(ADR-0172).
+                // ADR-0270 · ADR-0279
+                if let Some(message) =
+                    backend.and_then(|kind| by_cwd_refusal(kind, self.llm_policy))
+                {
+                    reply(sink, request_id, Err(message));
+                    return DispatchFlow::Continue;
+                }
                 let profile = CoreProfile::new(
                     cwd.clone(),
                     command,
@@ -4400,7 +4460,7 @@ mod tests {
     /// 떨어지고, 그 거절은 **물어본 연결이 아니라 결말을 보낸 연결**에게 간다.
     #[test]
     fn a_command_whose_owner_never_answers_is_timed_out_exactly_once() {
-        let clock = crate::command_delivery::tests::ManualClock::new();
+        let clock = Arc::new(engram_dashboard_base::time::ManualClock::new());
         let deliveries = crate::command_delivery::tests::deliveries_with(clock.clone());
         let mut seen = None;
         capture_logs(|| {
@@ -4818,16 +4878,37 @@ mod tests {
         );
     }
 
+    /// 실재하지 않는 폴더 — 거절 갈래를 재는 시험의 cwd. 거절 갈래는 cwd 를 안 쓰고, 회귀로 열린 갈래에
+    /// 들어가도 실 claude·codex 를 띄우는 대신 OS 오류로 끝나게 하려는 것이다(그 OS 오류 경로는 미검).
+    fn missing_cwd() -> String {
+        std::env::temp_dir()
+            .join(format!("engram-no-such-dir-{}", uuid::Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    /// 빈 칸은 정책에 묻지 않고 [`MISSING_BACKEND`] 그대로 거절된다 — 모든 낱말을 닫으면서 불린 횟수를 세는
+    /// 가짜를 꽂아 **정책 호출 0 회**와 답 문구를 잰다. 빈 칸에도 정책을 묻게 되면 어느 칸을 채우라는 문구가
+    /// 정책 거절에 가려진다.
     #[tokio::test]
     async fn spawn_by_cwd_without_a_backend_is_refused() {
+        thread_local! {
+            // 정책 칸이 `fn` 포인터라 횟수를 갈무리할 수 없어 여기 둔다(형제 시험의 `CLOSED` 와 같은 이유).
+            static CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        }
+        fn counts_and_closes_everything(_: &str) -> Option<&'static str> {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+            Some("시험이 모든 낱말을 닫았다.")
+        }
         let (core, _rx) = test_core();
+        let core = core.with_llm_policy(counts_and_closes_everything);
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
         let session = ConnectionSession::new(1);
         let req = rid();
         core.dispatch(
             AgentCommand::SpawnByCwd {
-                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                cwd: missing_cwd(),
                 backend: None,
                 request_id: req,
             },
@@ -4836,14 +4917,155 @@ mod tests {
         )
         .await;
         match mock.events().as_slice() {
-            [AgentEvent::Error { request_id, .. }] => assert_eq!(*request_id, Some(req)),
+            [AgentEvent::Error {
+                request_id,
+                message,
+            }] => {
+                assert_eq!(*request_id, Some(req));
+                assert_eq!(message.as_str(), MISSING_BACKEND);
+            }
             other => panic!("Error 기대: {other:?}"),
         }
+        assert_eq!(CALLS.with(std::cell::Cell::get), 0, "빈 칸에 정책을 물었다");
         assert_eq!(
             core.manager.list_agents().len(),
             0,
             "거절은 스폰하지 않는다"
         );
+        // 세는 쪽이 실제로 센다 — 이것이 없으면 위 0 회는 늘지 않는 계수기로도 초록이다.
+        assert!((core.llm_policy)("claude").is_some());
+        assert_eq!(CALLS.with(std::cell::Cell::get), 1);
+    }
+
+    /// wire 백엔드 전량과 그 낱말 — 낱말은 데몬이 정책에 묻는 그 함수([`wire_backend_word`])에서 받는다.
+    /// ★손으로 채우지만 변형이 늘면 `slot` 의 `match` 가 컴파일 에러로 이 자리를 가리킨다★ — 그때 배열에도
+    /// 그 변형을 넣을 것. 배열만 빠뜨리는 편집은 아래 단언이 못 잡는다(슬롯 수도 같은 배열에서 나온다).
+    fn every_wire_backend() -> Vec<(WireBackendKind, String)> {
+        const ALL: [WireBackendKind; 2] = [WireBackendKind::Claude, WireBackendKind::Codex];
+        fn slot(kind: WireBackendKind) -> usize {
+            match kind {
+                WireBackendKind::Claude => 0,
+                WireBackendKind::Codex => 1,
+            }
+        }
+        let mut seen = [false; ALL.len()];
+        let backends = ALL
+            .into_iter()
+            .map(|kind| {
+                seen[slot(kind)] = true;
+                (kind, wire_backend_word(kind))
+            })
+            .collect();
+        assert!(seen.iter().all(|s| *s), "슬롯이 빈 채 지나갔다: {seen:?}");
+        backends
+    }
+
+    /// wire 백엔드 전량이 정책 표에 **선언돼** 있다. 빠진 낱말은 fail-closed 로 닫히지만 그건 「아직 안
+    /// 정했다」이지 「닫기로 정했다」가 아니다 — 둘을 구별하지 않으면 표가 조용히 낡는다.
+    /// ★여기서 재는 이유★: 정책 표는 agent 에, wire 어휘는 protocol 에 살고 agent 는 protocol 을 의존하지
+    /// 않는다 — 둘을 다 보는 문이 이 처리부다.
+    #[test]
+    fn every_wire_backend_declares_an_llm_policy() {
+        use engram_dashboard_agent::commands::LLM_BACKEND_POLICY;
+        for (_, word) in every_wire_backend() {
+            assert!(
+                LLM_BACKEND_POLICY
+                    .iter()
+                    .any(|policy| policy.word.eq_ignore_ascii_case(&word)),
+                "wire 백엔드 '{word}' 에 정책이 선언되지 않았다"
+            );
+        }
+    }
+
+    /// ★운영 조립이 실 정책을 꽂는다★ — 배선이 빠지면 벽이 소리 없이 열린다(ADR-0279).
+    /// ★표 밖 낱말을 함께 대는 것이 이 시험의 핵심이다★: 오늘 표는 wire 낱말을 전부 열어(`None`) 그 낱말들로는
+    /// 「늘 연다」 가짜와 실 정책이 구별되지 않는다. 표 밖 낱말은 실 정책이 fail-closed 로 닫으므로(`Some`)
+    /// 거기서 비로소 갈린다.
+    #[test]
+    fn the_production_core_asks_the_agent_backend_policy() {
+        use engram_dashboard_agent::commands::llm_creation_refusal;
+        let (core, _rx) = test_core();
+        let outside = "no-such-backend";
+        assert!(
+            llm_creation_refusal(outside).is_some(),
+            "표 밖 낱말이 닫혀 있어야 이 시험이 「늘 연다」 가짜를 잡는다"
+        );
+        let mut words: Vec<String> = every_wire_backend()
+            .into_iter()
+            .map(|(_, word)| word)
+            .collect();
+        words.push(outside.to_string());
+        for word in &words {
+            assert_eq!(
+                (core.llm_policy)(word),
+                llm_creation_refusal(word),
+                "'{word}'"
+            );
+        }
+    }
+
+    /// ★정책이 닫은 백엔드는 프로필도 명부도 스폰도 없이 거절된다★ — 판정이 `spawn_agent` 보다 먼저여야
+    /// 한다는 불변식(ADR-0279)을 dispatch 수준에서 잰다. 오늘 운영 표는 아무것도 안 닫아 실물 입력으로는
+    /// 이 갈래에 못 닿으므로 닫는 가짜를 꽂는다(ADR-0012).
+    /// ★wire 백엔드마다, 그 낱말 하나만 닫는 가짜로 돈다★ — 한 백엔드로만 재면 「그 백엔드만 정책에
+    /// 묻는다」는 회귀가 초록으로 지나가고, 전부 닫는 가짜로 재면 처리부가 엉뚱한 낱말을 물어도 초록이다.
+    #[tokio::test]
+    async fn spawn_by_cwd_refuses_a_backend_the_policy_closes() {
+        thread_local! {
+            // 가짜가 닫을 낱말 — 정책 칸이 `fn` 포인터라 값을 갈무리할 수 없어 여기 둔다. `#[tokio::test]` 는
+            // 현재 스레드 런타임이고 처리부는 정책을 dispatch 안에서 동기로 부른다.
+            static CLOSED: std::cell::RefCell<String> = std::cell::RefCell::new(String::new());
+        }
+        fn closes_the_chosen_word(word: &str) -> Option<&'static str> {
+            CLOSED.with(|closed| (*closed.borrow() == word).then_some("시험이 닫은 백엔드다."))
+        }
+        for (kind, word) in every_wire_backend() {
+            CLOSED.with(|closed| *closed.borrow_mut() = word.clone());
+            let (core, _rx) = test_core();
+            let core = core.with_llm_policy(closes_the_chosen_word);
+            let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+            let mock = MockOutboundSink::new(tx);
+            let session = ConnectionSession::new(1);
+            let req = rid();
+            core.dispatch(
+                AgentCommand::SpawnByCwd {
+                    cwd: missing_cwd(),
+                    backend: Some(kind),
+                    request_id: req,
+                },
+                &session,
+                &mock,
+            )
+            .await;
+            match mock.events().as_slice() {
+                [AgentEvent::Error {
+                    request_id,
+                    message,
+                }] => {
+                    assert_eq!(*request_id, Some(req), "{word}");
+                    assert!(
+                        !message.contains("를 모른다"),
+                        "오탈자 그물의 문구와 갈려야 한다: {message}"
+                    );
+                    // 버스 호출자가 받는 글 그대로다 — 데몬 문구는 접두 없이 간다.
+                    assert_eq!(
+                        message.as_str(),
+                        format!(
+                            "backend '{word}' 는 아는 낱말이지만 이 표면으로는 지금 만들지 않는다 — 시험이 닫은 백엔드다. 스폰 안 함."
+                        )
+                    );
+                }
+                other => panic!("{word}: Error 하나 기대: {other:?}"),
+            }
+            assert!(
+                core.manager.agent_snapshots().is_empty(),
+                "{word}: 거절은 프로필을 등록하지 않는다"
+            );
+            assert!(
+                core.manager.list_agents().is_empty(),
+                "{word}: 거절은 스폰하지 않는다"
+            );
+        }
     }
 
     /// 고른 낱말이 **디스크에 앉는 실행 명령**까지 간다 — 이 사슬이 끊기면 codex 를 골라도 claude 가 뜬다.

@@ -5,14 +5,16 @@
 //! `run(id, args)` 하나다(ADR-0055). 이 모듈이 더하는 것은 그 입구로 가는 **바깥 경로**뿐이고, 새 전역
 //! 핸들도 두 번째 레지스트리도 만들지 않는다(CLAUDE.md 「LLM-우선 제어」).
 //!
-//! ## ★예약 이름 — 이 필터가 등록 패킷을 지킨다★
-//! 데몬은 **자기가 답하는 이름**이 하나라도 실린 등록 패킷을 통째로 반려한다
-//! (`engram-dashboard-daemon` 의 `refuse_names_i_answer` — 겹친 이름만 빼 주지 않는다). 그런데 웹뷰
-//! 레지스트리에는 `agent.spawn`·`agent.rename` 처럼 데몬이 답하는 것과 **철자가 같은 id** 가 있고,
-//! `tab.create`·`slot.close` 처럼 셸 자기 표가 먼저 답하는 id 도 있다. 걸러내지 않으면 셸의 이름 17 개가
-//! 그 한 이름 때문에 **함께** 명부에 못 오른다 — 그러면 LLM 이 창·탭·슬롯을 통째로 못 만진다.
-//! 그래서 [`reserved_names`] 가 **선언에서** 그 두 집합을 뽑아 보고 시점에 뺀다(손 목록 금지 — 어휘가
-//! 늘면 목록이 조용히 뒤처진다).
+//! ## ★예약 이름 — 셸 표 이름만 거른다 · 데몬 이름의 벽은 데몬이다★
+//! 웹뷰 레지스트리에는 `tab.create`·`slot.close` 처럼 셸 자기 표가 먼저 답하는 것과 **철자가 같은 id** 가
+//! 있다. 셸 표 선언과 웹뷰 선언은 한 등록 패킷으로 가고 명부는 한 패킷 안 같은 이름을 오류 없이 하나로
+//! 접으므로, 누가 그 id 에 `help` 를 달면 두 주인이 말없이 겹친다. 그래서 [`reserved_names`] 가 **셸 표
+//! 선언에서** 그 집합을 뽑아 보고 시점에 뺀다(손 목록 금지 — 어휘가 늘면 목록이 조용히 뒤처진다).
+//! ★데몬이 답하는 이름(`agent.spawn`·`agent.rename` 등 — 웹뷰 레지스트리에 같은 철자가 있다)은 여기서
+//! 거르지 않는다(ADR-0270 결정 2)★ — 데몬이 그런 이름이 하나라도 실린 등록 패킷을 통째로 반려한다
+//! (`engram-dashboard-daemon` 의 `refuse_names_i_answer`). 그러면 이 셸의 명령이 0 개가 되고 원인 선언을
+//! 고쳐 다시 빌드할 때까지 재연결마다 같은 반려가 온다. 그 반려는 재연결마다 셸 warn 로그에 남고, OS 오류
+//! 창은 같은 (자리, 문구) 에 대해 프로세스당 한 번만 뜬다(`RefusalAlerts` · ADR-0270 결정 4 · ADR-0281).
 //!
 //! ## ★배달 대상이 창 하나인 이유★
 //! 이벤트를 전 창에 뿌리면 같은 명령이 창 수만큼 실행되고 답장도 그만큼 온다(한 `request_id` 에 답장
@@ -35,6 +37,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engram_dashboard_base::sync;
 use engram_dashboard_command::{
     CommandDecl, CommandEnvelope, CommandError, CommandReply, ErrorCode, OwnerLookup, OwnerToken,
     RequestId,
@@ -192,18 +195,19 @@ impl ViewDispatch for TauriViewDispatch {
 
 // ── 예약 이름 ────────────────────────────────────────────────────────────────
 
-/// 웹뷰가 가져갈 수 없는 이름 = 데몬이 답하는 것 + 셸이 답하는 것.
+/// 웹뷰가 가져갈 수 없는 이름 = 셸 자기 표가 답하는 것.
 ///
-/// ★손 목록이 아니라 **선언에서** 뽑는다★ — 어느 쪽 어휘가 늘어도 이 그물이 함께 자란다. 손으로 적으면
-/// 그 목록만 뒤처지고, 뒤처진 순간 등록 패킷 하나가 통째로 반려된다(모듈 헤더).
-/// ★셸 쪽은 **선언**을 센다(표에 꽂힌 것이 아니라)★ — 안전한 방향이다: 선언만 있고 안 꽂힌 이름을
-/// 웹뷰가 가져가면 나중에 그것을 꽂는 순간 배달이 조용히 셸로 옮겨간다(`route` 는 표를 먼저 본다).
-/// ★데몬 어휘를 **전부** 덮지는 못한다(알려진 한계)★ — 데몬 crate 가 자기 이름을 선언하면(TRD §6 Step 2
-/// 의 `mail.*`) 셸은 그것을 컴파일에 안 들여 못 본다. 그때의 방어선은 데몬의 반려 하나뿐이다.
+/// ★손 목록이 아니라 **선언에서** 뽑는다★ — 셸 표 어휘가 늘어도 이 그물이 함께 자란다.
+/// ★**선언**을 센다(표에 꽂힌 것이 아니라)★ — 안전한 방향이다: 선언만 있고 안 꽂힌 이름을 웹뷰가 가져가면
+/// 나중에 그것을 꽂는 순간 배달이 조용히 셸로 옮겨간다(`route` 는 표를 먼저 본다).
+/// ★데몬이 답하는 이름은 담지 않는다★ — 그 벽은 데몬의 등록 반려다(모듈 헤더). 셸은 agent crate 를
+/// 의존하지 않아 그 선언을 볼 수도 없다(ADR-0270 결정 1).
+/// ★이 그물을 걷지 말 것★ — 데몬 반려는 데몬이 답하는 이름만 보고, 명부는 한 패킷 안 같은 이름을 오류 없이
+/// 접는다(command `roster.rs` 의 `register`). 셸 · 웹뷰 같은 이름을 막는 것은 이것 하나다.
+// ADR-0270
 pub fn reserved_names() -> BTreeSet<String> {
-    engram_dashboard_agent::commands::COMMAND_SPECS
+    crate::layout::commands::COMMAND_SPECS
         .iter()
-        .chain(crate::layout::commands::COMMAND_SPECS.iter())
         .map(|spec| spec.name.to_string())
         .collect()
 }
@@ -400,14 +404,14 @@ impl ViewCommandBridge {
     /// (다음 호출이 잡는다) 이미 사라진 label 은 지워도 무해하다. 회복이 한 박자 늦는 것이 계약이다.
     fn prune_dead(&self) {
         let labels: Vec<String> = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = sync::lock(&self.state);
             state.reports.keys().cloned().collect()
         };
         let dead: Vec<String> = labels
             .into_iter()
             .filter(|label| !self.dispatch.is_alive(label))
             .collect();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = sync::lock(&self.state);
         state.forget(&dead);
         state.repick(&self.hidden);
     }
@@ -452,7 +456,7 @@ impl ViewCommandBridge {
 
         // 생존 조회는 **락 밖에서** 먼저 돈다(사유 = `prune_dead`) — 그래야 아래 한 락 안이 순수해진다.
         self.prune_dead();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = sync::lock(&self.state);
         let previous = state.advertised();
         state.reports.insert(label.to_string(), next);
         // ★보고를 넣은 **뒤에** 다시 고른다★ — 방금 뜬 창이 죽은 host 를 이어받을 수 있어야 한다.
@@ -524,7 +528,7 @@ impl ViewCommandBridge {
         let parsed = uuid::Uuid::parse_str(request_id.trim())
             .map(RequestId)
             .map_err(|_| format!("request_id 가 UUID 가 아니다: {request_id:?}"))?;
-        let mut waiting = self.pending.seats.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = sync::lock(&self.pending.seats);
         let Some(slot) = waiting.get(&parsed) else {
             return Err(format!(
                 "기다리는 왕복이 없다(이미 답했거나 마감을 넘겼다): {parsed}"
@@ -549,7 +553,7 @@ impl ViewCommandBridge {
     /// 어느 하나만 옛 host 를 보는 순간 광고와 실행이 갈린다.
     fn live_host(&self) -> Option<(String, Shapes)> {
         self.prune_dead();
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = sync::lock(&self.state);
         let label = state.host.clone()?;
         Some((label, state.advertised()))
     }
@@ -755,7 +759,7 @@ impl PendingSlot {
         target: &str,
         answer: oneshot::Sender<Result<serde_json::Value, CommandError>>,
     ) -> Option<Self> {
-        let mut waiting = pending.seats.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = sync::lock(&pending.seats);
         match waiting.entry(request_id) {
             Entry::Occupied(_) => None,
             Entry::Vacant(vacancy) => {
@@ -787,7 +791,7 @@ impl Drop for PendingSlot {
     /// 한쪽이 바뀌면 조용히 무너진다(그 변경이 이 파일을 건드릴 이유도 없다). 신원 비교는 그 논증 자체를
     /// 필요 없게 만든다.
     fn drop(&mut self) {
-        let mut waiting = self.pending.seats.lock().unwrap_or_else(|e| e.into_inner());
+        let mut waiting = sync::lock(&self.pending.seats);
         if waiting
             .get(&self.request_id)
             .is_some_and(|held| held.seat == self.seat)

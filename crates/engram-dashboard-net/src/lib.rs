@@ -39,12 +39,13 @@
 //! ★확인 레시피 — **워크스페이스-로컬 forward 폐포**를 볼 것★:
 //!   `cargo tree -p engram-dashboard-net -e normal --target all --all-features --prefix none`
 //!   `| rg "^engram-dashboard" | sort -u`
-//!   → 자기 자신 + `base` + `protocol`. 목록에 `discovery` 가 없다 = **이 crate 는 discovery 에 도달하지
-//!   않는다**. 그래서 `discovery → 이 crate` 를 더해도 닫히는 고리가 없다.
+//!   → 자기 자신 + `command` + `platform` + `protocol`(`command` 는 `protocol` 을 거쳐 온다). 목록에
+//!   `discovery` 가 없다 = **이 crate 는 discovery 에 도달하지 않는다**. 그래서 `discovery → 이 crate` 를
+//!   더해도 닫히는 고리가 없다.
 //!   ★`--target all --all-features` 를 빼지 말 것★: 호스트 target 만 보면 `cfg(unix)` 같은 **비활성 target**
 //!   의존과 **optional** 의존이 출력에서 사라진다(실측). 외부 crate 까지 다 찍히면 수백 줄이라 워크스페이스
-//!   것만 걸러 본다. `base` 는 워크스페이스 crate 를 하나도 의존하지 않는 잎이라(ADR-0175) 그 아래로
-//!   폐포가 더 자라지 않는다.
+//!   것만 걸러 본다. `platform`(ADR-0266) · `command`(ADR-0155) 는 워크스페이스 crate 를 하나도 의존하지
+//!   않는 잎이라 그 아래로 폐포가 더 자라지 않는다.
 //!   ★`--invert` 를 쓰지 말 것(unsound)★: invert 는 이 crate 의 **조상**을 나열하는데, 순환 성립 조건은
 //!   `이 crate →* discovery` 이므로 순환이 있는 세계에서도 invert 출력은 **바이트 동일**하다 — 즉 그
 //!   명령으로는 순환 유무를 구별할 수 없다.
@@ -56,12 +57,28 @@
 //! 게이트를 손보면 **편집 후 비자기일치 성질을 다시 실측할 것**:
 //!   · **게이트 1 — 소스 참조**(`src/` 범위):
 //!     `rg "engram_dashboard_(daemon|messaging|discovery)" crates/engram-dashboard-net/src/` → **0줄**
-//!   · **게이트 2 — 두 조각이다**(`src/` 범위). ADR-0175 결정 1 이 liveness 헬퍼를 잎 crate 로 옮기면서
-//!     기대값이 한 crate 이름에서 다른 crate 이름으로 **자리를 옮겼다** — 총량은 그대로 2 다:
-//!     · **2a — base 심볼 allowlist**:
-//!     `rg -o --no-filename "engram_dashboard_base::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/`
-//!     `| sort -u` → **정확히 2줄**, 둘 다 `platform::` 아래 프로세스 liveness 헬퍼
-//!     (`pid_alive_with_start_time` · `current_process_start_time` — portfile 의 stale 판정 전용).
+//!   · **게이트 2 — 두 조각이다**(`src/` 범위). 2a 는 이 crate 가 쓰는 platform 심볼 다섯을 이름으로 못 박고,
+//!     2b 는 그중 liveness 헬퍼의 원래 자리(에이전트 런타임 — ADR-0175 결정 1 이 끊었다)가 다시 채워지지
+//!     않는지 잰다:
+//!     · **2a — platform 심볼 allowlist(검사 둘)**:
+//!     ① `rg -o --no-filename "engram_dashboard_platform::[A-Za-z0-9_:]+" crates/engram-dashboard-net/src/`
+//!     `| sort -u` → **정확히 이 다섯 줄**(개수가 아니라 이름을 대조한다) — `process::` 아래 프로세스
+//!     liveness 헬퍼 둘(`pid_alive_with_start_time` · `current_process_start_time` — portfile 의 stale 판정
+//!     전용)과 `fs::` 아래 공유 제한 열기 하나와 그 실패 분류 둘(`open_deny_write` · `is_sharing_violation` ·
+//!     `is_access_denied` — 셋 다 instance 의 단일 인스턴스 가드 전용). 개수만 세면 심볼을 바꿔 끼워도
+//!     다섯이면 통과하고 모듈 import(`use …::fs;`) 한 줄이 그 모듈 전부를 덮는다 — 이름 대조에서는 둘 다
+//!     목록 밖 이름으로 드러난다.
+//!     ② `rg '^(?:[^/]|/[^/])*?\bengram_dashboard_platform(?:[^:]|:[^:]|::[^A-Za-z0-9_]|:{0,2}$)'`
+//!     `crates/engram-dashboard-net/src/` → **0줄** — crate 이름 뒤에 `::이름글자` 가 오지 않는 부름.
+//!     ①의 정규식은 그런 부름을 **0 매치로 놓친다** — 별칭(`… as p`) · 중괄호(`…::{fs::x}`) · glob(`…::*`) ·
+//!     줄 끝에서 끊긴 경로. 접두 `(?:[^/]|/[^/])*?` = 「이 줄에서 아직 `//` 를 안 만났다」 — 이 헤더의
+//!     인용은 안 문다.
+//!     ★그래서 부를 때 완전경로나 낱개 `use` 로 쓸 것★ — 묶음 `use`(`…::process::{a, b}`)는 ①에
+//!     `…::process::` 한 줄로 찍혀 목록 밖 이름이 되고, 별칭은 ②가 문다.
+//!     ★한계★: 매니페스트에서 의존 이름을 바꾸면(`package = "engram-dashboard-platform"` 으로 다른 이름을
+//!     달면) 소스에 이 crate 이름이 안 나타나 ①② 가 다 눈먼다. ★게이트 3 도 그 뒤를 받치지 않는다★ — 해석된
+//!     그래프는 바뀐 이름 아래 같은 패키지를 찍어 허용된 간선 그대로 초록이다. 그때 이 간선으로 무엇을
+//!     부르는지(심볼 범위)는 지키는 게이트가 없다 — 리뷰 몫이다.
 //!     · **2b — 에이전트 런타임 재유입 금지**:
 //!     `rg "engram_dashboard_(a)gent" crates/engram-dashboard-net/src/` → **0줄**
 //!     (이 crate 는 에이전트 런타임을 의존으로도 모른다)
@@ -71,26 +88,28 @@
 //!     ★그 대신 자기일치 방어를 **명시**로 진다★: 이름만 물게 되면 이 헤더가 게이트에 자기 자신을 물리므로
 //!     게이트 4 와 같은 `_(첫 글자)` 괄호 형태를 쓴다. 꼬리가 있던 옛 형태는 `::` 뒤에 `[` 가 오는 **우연**
 //!     덕에만 자기일치를 면했고, 여기 예시 심볼을 하나 적는 순간 죽는 방어였다 — 그래서 우연을 규칙으로
-//!     바꿨다. 2a 는 아직 그 우연 위에 서 있다(꼬리가 문자클래스라 필요하다 — 개수를 세는 게이트다).
+//!     바꿨다. 2a ① 은 아직 그 우연 위에 서 있다(꼬리가 문자클래스라 필요하다 — 심볼 이름을 뽑는 게이트다) —
+//!     이 헤더에 목록 밖 심볼을 완전경로로 적으면 ①이 그것을 목록 밖 이름으로 문다. 2a ② 는 우연이 아니라
+//!     접두 `(?:[^/]|/[^/])*?` 로 주석을 건너뛴다.
 //!     ★2b 가 사는 값어치를 부풀리지 말 것★: 살아 있는 벽은 게이트 3 이다 — net 은 의존을 선언하지 않고는
 //!     에이전트 심볼을 부를 수조차 없어 그쪽이 먼저 빨개진다. 2b 가 맡는 것은 **주석·테스트 헬퍼로 어휘가
 //!     먼저 새는 것**과, 게이트가 제 이름값(`0줄`)대로 도는 것이다.
-//!     ★그래도 2b 를 **지우지 말 것**★: 그것만 떼면 base 쪽 2 기대가 홀로 남아 "심볼이 사라진 게 아니라
-//!     옮겨 갔다" 를 아무도 단언하지 않는다. 짝으로 서야 벽이다.
+//!     ★그래도 2b 를 **지우지 말 것**★: 그것만 떼면 2a 의 다섯 이름 기대가 홀로 남는데, 2a 는 platform
+//!     이름만 보므로 그 곁에 에이전트 어휘가 새로 붙어도 통과한다. 짝으로 서야 벽이다.
 //!     ★기대값을 **파일 이름**으로 두지 말 것★: "`portfile.rs` 만" 은 그 파일 **안에** 에이전트 어휘
 //!     import 를 새로 넣어도 여전히 참이라 게이트가 통과한다. 불변식은 파일 단위가 아니라 **심볼 단위**다
 //!     (ADR-0129 — 격리는 crate 단위가 아니라 타입 단위).
 //!   · **게이트 3 — 직접 워크스페이스 의존 상한**(해석된 의존 그래프 범위):
 //!     `cargo tree -p engram-dashboard-net --depth 1 --prefix none -e normal,dev,build --target all`
 //!     `--all-features | rg "^engram-dashboard" | sort -u`
-//!     → **정확히 3줄** = 자기 자신 · `engram-dashboard-base` · `engram-dashboard-protocol`.
-//!     ★ADR-0175 결정 1 뒤에도 기대값은 3 그대로다★ — 둘째 자리가 `agent` 에서 `base` 로 갈렸을 뿐
-//!     개수는 안 변했다. 줄이려 들지 말 것.
+//!     → **정확히 3줄** = 자기 자신 · `engram-dashboard-platform` · `engram-dashboard-protocol`.
+//!     ★줄이려 들지 말 것★ — `platform` 자리는 portfile 의 liveness 헬퍼와 instance 의 공유 제한 열기
+//!     (게이트 2a)를 받는 간선이고, `protocol` 자리는 `DaemonInfo` 파일 포맷 계약이다(Cargo.toml 의 의존 주석).
 //!     ★이 게이트가 닫는 것(딱 이만큼)★: **선언된 직접 워크스페이스 의존**이 매니페스트 문법에 관계없이
 //!     드러난다 — rename · `[dependencies.<이름>]` 테이블 형 · 들여쓴 선언 · `[build-dependencies]` ·
 //!     비활성 target(`cfg(unix)`) · `optional` 6형태를 **주입→관측→원복으로 실측**해 전부 잡는 것을 확인했다.
-//!     ★닫지 **않는** 것★: 허용된 간선(protocol·base) **안에서** 어떤 심볼을 쓰는지는 보지 않는다 —
-//!     base 쪽은 게이트 2가 묶고, protocol 쪽은 게이트 4가 **두 이름만** 못 박는다. 즉 protocol 심볼
+//!     ★닫지 **않는** 것★: 허용된 간선(protocol·platform) **안에서** 어떤 심볼을 쓰는지는 보지 않는다 —
+//!     platform 쪽은 게이트 2가 묶고, protocol 쪽은 게이트 4가 **두 이름만** 못 박는다. 즉 protocol 심볼
 //!     **일반**의 allowlist 는 여전히 없다(알려진 공백 — ADR-0129 §영향/불변식의 2026-08-05 note 안
 //!     ★알려진 공백★ 절, 의도적 유보. 그 ADR 에 "Note A" 라는 라벨은 없다). 게이트 4를
 //!     그 일반 allowlist 로 키우지 말 것 — 그건 별도 결정이다(0-4 범위 밖).

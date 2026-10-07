@@ -2265,7 +2265,8 @@ async fn reconnect_close_after_auth_send_self_closes_socket() {
 //   테스트들이 쓴다).
 
 // `cond` 가 참이 될 때까지 실시간으로 짧게 폴링한다. 전역 상한(`limit`) 안에 충족되면 true,
-// 안 되면 false(상한 도달 = hang 대신 호출부의 단언 실패로 귀결). multi_thread 전용.
+// 안 되면 false(상한 도달 = hang 대신 호출부의 단언 실패로 귀결). 실시간 런타임 전용(시계를 멈춘 런타임은
+// `advance_until`).
 async fn poll_until_realtime(limit: Duration, mut cond: impl FnMut() -> bool) -> bool {
     tokio::time::timeout(limit, async {
         loop {
@@ -2533,11 +2534,31 @@ async fn send_command_resolves_err_on_matching_error() {
     let result = tokio::time::timeout(Duration::from_secs(5), client.send_command(spawn_cmd()))
         .await
         .expect("send_command 가 bound 내 반환(hang 없음)");
-    assert!(
-        matches!(&result, Err(m) if m.contains("거부")),
-        "Error reply 는 Err(message) 로 resolve: {result:?}"
+    // ★바이트 대조★ — 데몬 문구가 접두 · 꾸밈 없이 원문 그대로 와야 한다(`contains` 로는 그것을 못 잰다).
+    assert_eq!(
+        result.as_ref().err().map(String::as_str),
+        Some("데몬측 거부(테스트)"),
+        "Error reply 는 Err(데몬 문구 원문) 로 resolve: {result:?}"
     );
+    client.close();
 
+    // 같은 답을 출처 입구로 받으면 `Daemon` 이어야 한다 — 글만 보는 위 대조는 그 입구 안에서 `Local` 로
+    //   잘못 접혀도 같은 글이라 초록이다. 목 서버가 명령 한 건만 받으므로 서버 · 클라를 새로 띄운다.
+    let port = spawn_reply_mock_server(ReplyBehavior::ErrorEcho).await;
+    let client = connected_client_to(port, "t6a-err-origin").await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.send_command_with_origin(spawn_cmd()),
+    )
+    .await
+    .expect("send_command_with_origin 이 bound 내 반환(hang 없음)");
+    assert_eq!(
+        result.as_ref().err(),
+        Some(&super::protocol_state::CommandFailure::Daemon {
+            message: "데몬측 거부(테스트)".to_string(),
+        }),
+        "데몬 Error 답은 출처 입구에서 Daemon 으로 와야 한다: {result:?}"
+    );
     client.close();
 }
 
@@ -5791,4 +5812,172 @@ async fn moving_a_usage_slot_to_a_new_window_sends_nothing() {
     );
     assert_eq!(outcome.labels, [moved.window], "방송은 새 창으로");
     assert_eq!(outcome.resend, None);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════════
+// 등록 거절 박스(TRD 2-1 §3-4 ㉢ · ADR-0281) — 데몬이 이 셸의 전량 등록에 `Error` 로 답하면 코드와 무관하게 박스
+// 결정이 한 번 서고, 같은 문구의 재연결 거절은 눌리며, 답 전에 끊긴 셸 로컬 실패에는 서지 않는다.
+// ★실 소켓 왕복이어야 하는 이유★: 데몬 답을 슬롯에 넣는 자리(`connection::CommandReply` doc)에서 `Error` 를 다시
+//   `Err` 로 접는 회귀는 분류 단위 시험(`protocol_state`)이 못 본다 — 그 접기가 돌면 이 절의 시험은 표지를 못 받아
+//   시한으로 빨개진다.
+// ★「그 사이 아무것도 안 떴다」를 벽시계 없이 잰다 — current_thread 런타임이라서다★: 한 연결의 결말 태스크는 답
+//   (또는 끊김의 pending drain)이 깨우는 순간, 연결 태스크가 다음에 양보하기 전에 실행 대기열에 든다. 다음 연결의
+//   결말 태스크는 새 핸드셰이크가 끝까지 돈 뒤에야 생긴다 — 그러니 순서는 대기열에 든 차례(FIFO) 그대로이고
+//   재연결 백오프 길이와 무관하다. 그래서 마지막 연결이 낸 표지 문구가 기록에 닿은 것이 「앞 연결들의 결말이 다
+//   처리됐다」의 양성 신호다. multi_thread 로 바꾸면 이 보장이 사라진다.
+// ══════════════════════════════════════════════════════════════════════════════════
+
+use super::refusal::{RecordingRefusals, RefusalSite};
+
+const CONFLICT_REFUSAL: &str = "CONFLICT: answered by this daemon itself, so they cannot be registered: agent.rename — pick different names; this packet was not applied";
+const LAST_REFUSAL: &str = "INVALID_ARGUMENT: 표지 — 마지막 연결의 거절(시험)";
+
+// 연결마다 등록 패킷에 어떻게 답하나 — 각본의 n번째 칸이 n번째 연결 몫이다.
+#[derive(Clone, Copy)]
+enum RegisterReply {
+    // `Error` 로 답하고 연결을 쥐고 있는다.
+    Refuse(&'static str),
+    // `Error` 로 답한 뒤 끊는다 — 같은 소켓 줄이라 클라는 답을 끊김보다 먼저 읽는다.
+    RefuseThenDrop(&'static str),
+    // 답 없이 끊는다 — 클라의 끊김 drain 이 그 슬롯에 셸 로컬 실패(`SENT_OUTCOME_UNKNOWN`)를 넣는다.
+    DropBeforeReply,
+}
+
+async fn spawn_register_reply_server(script: Vec<RegisterReply>) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        for plan in script {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let Ok(mut ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
+                let _ = ws.next().await; // Auth 소비
+                let hello = serde_json::to_string(&AgentEvent::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    daemon_version: "test".into(),
+                    capabilities: None,
+                })
+                .unwrap();
+                let _ = ws.send(Message::Text(hello.into())).await;
+                let request_id = loop {
+                    match ws.next().await {
+                        Some(Ok(Message::Text(t))) => {
+                            if let Ok(AgentCommand::RegisterCommands { request_id, .. }) =
+                                serde_json::from_str::<AgentCommand>(&t)
+                            {
+                                break request_id;
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        _ => return,
+                    }
+                };
+                let refusal = |message: &str| {
+                    let ev = AgentEvent::Error {
+                        request_id: Some(request_id),
+                        message: message.into(),
+                    };
+                    Message::Text(serde_json::to_string(&ev).unwrap().into())
+                };
+                match plan {
+                    RegisterReply::Refuse(message) => {
+                        let _ = ws.send(refusal(message)).await;
+                        while let Some(Ok(_)) = ws.next().await {}
+                    }
+                    RegisterReply::RefuseThenDrop(message) => {
+                        let _ = ws.send(refusal(message)).await;
+                        let _ = ws.close(None).await;
+                    }
+                    RegisterReply::DropBeforeReply => {
+                        let _ = ws.close(None).await;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+// 각본대로 답하는 서버에 붙어, 마지막 연결의 거절 문구가 박스 기록에 닿을 때까지 기다린 뒤 기록 전부를 돌려준다.
+// 마지막 칸은 `Refuse` 여야 한다 — 그 문구가 양성 신호다(절 머리).
+async fn refusal_boxes_after(script: Vec<RegisterReply>) -> Vec<(RefusalSite, String)> {
+    let Some(&RegisterReply::Refuse(last)) = script.last() else {
+        panic!("각본의 마지막 칸은 Refuse 여야 한다 — 그 문구가 기다림을 끝낸다");
+    };
+    let port = spawn_register_reply_server(script).await;
+    let info = info_for(port, "register-refusal");
+    let disco = Arc::new(MockDiscovery::new(Some(info.clone()), Ok(info)));
+    let boxes = Arc::new(RecordingRefusals::new());
+    let client =
+        Arc::new(DaemonClient::new(Handle::current(), disco).with_refusal_notice(boxes.clone()));
+    let state = LayoutState::new();
+    client.inbound.set(Arc::new(InboundReceiver::new(
+        bus_table(&state, &client),
+        Arc::new(RuntimeSpawner(Handle::current())),
+        CATALOG_VERSION,
+    )));
+    client.connect().await.expect("connect → connected");
+    let reached = poll_until_realtime(Duration::from_secs(10), || {
+        boxes.shown().iter().any(|(_, message)| message == last)
+    })
+    .await;
+    client.close();
+    assert!(
+        reached,
+        "마지막 연결의 거절이 10초 안에 박스 기록에 안 닿았다: {:?}",
+        boxes.shown()
+    );
+    boxes.shown()
+}
+
+#[tokio::test]
+async fn a_conflict_refusal_shows_one_box_and_the_same_refusal_after_a_reconnect_shows_none() {
+    let shown = refusal_boxes_after(vec![
+        RegisterReply::RefuseThenDrop(CONFLICT_REFUSAL),
+        RegisterReply::RefuseThenDrop(CONFLICT_REFUSAL),
+        RegisterReply::Refuse(LAST_REFUSAL),
+    ])
+    .await;
+    assert_eq!(
+        shown,
+        vec![
+            (RefusalSite::Register, CONFLICT_REFUSAL.to_owned()),
+            (RefusalSite::Register, LAST_REFUSAL.to_owned()),
+        ],
+        "같은 (자리, 문구)는 재연결 뒤에도 한 번"
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_argument_refusal_shows_one_box() {
+    const TOO_LONG: &str = "INVALID_ARGUMENT: a command name may be at most 128 bytes (got 129)";
+    let shown = refusal_boxes_after(vec![RegisterReply::Refuse(TOO_LONG)]).await;
+    assert_eq!(shown, vec![(RefusalSite::Register, TOO_LONG.to_owned())]);
+}
+
+// 셸이 모르는 코드도 데몬이 답했으면 띄운다 — 코드 추가는 허용된 확장이다(`engram_dashboard_command::ErrorCode` doc).
+#[tokio::test]
+async fn an_unknown_code_refusal_shows_one_box() {
+    const UNKNOWN: &str = "BRAND_NEW_CODE: a refusal this shell has never heard of";
+    let shown = refusal_boxes_after(vec![RegisterReply::Refuse(UNKNOWN)]).await;
+    assert_eq!(shown, vec![(RefusalSite::Register, UNKNOWN.to_owned())]);
+}
+
+// 답 전에 끊긴 등록은 셸 로컬 실패다 — warn 은 남지만 박스는 없다. 표지는 재연결 뒤의 거절이다.
+#[tokio::test]
+async fn a_drop_before_the_reply_shows_no_box() {
+    let shown = refusal_boxes_after(vec![
+        RegisterReply::DropBeforeReply,
+        RegisterReply::Refuse(LAST_REFUSAL),
+    ])
+    .await;
+    assert_eq!(
+        shown,
+        vec![(RefusalSite::Register, LAST_REFUSAL.to_owned())],
+        "끊김의 결과 불명(SENT_OUTCOME_UNKNOWN)이 박스를 띄웠다"
+    );
 }

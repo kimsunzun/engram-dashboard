@@ -4,8 +4,8 @@
 //! 질문 함수들은 그대로다 — 파일이 느는 구조가 아니다.
 //!
 //! **레인이 둘이다.**
-//! - 비-ignore 1건([`declaration_table_is_filled_for_every_backend`]) — 프로세스를 하나도 안 띄우고
-//!   선언 열만 대조한다. 기본 회귀·CI 에서 그대로 돈다.
+//! - 비-ignore 다섯([`declaration_table_is_filled_for_every_backend`]과 통로 선언 대조 넷) — 프로세스를
+//!   하나도 안 띄우고 선언만 대조한다. 기본 회귀·CI 에서 그대로 돈다.
 //! - 나머지 전부 `#[ignore]` — 실 CLI 를 띄운다. `-- --ignored` 로 부를 때만 돈다.
 //!
 //! ★비-ignore 항목이 있는 이유 = `#[ignore]` 의 대가★: `#[ignore]` 스위트는 통째로 증발해도 초록이다.
@@ -96,6 +96,7 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputFrame, OutputPayload,
     OutputSink, SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
 
 // ── 질문표 ───────────────────────────────────────────────────────────────────
 
@@ -700,17 +701,6 @@ impl StatusSink for NoopStatusSink {
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
 }
 
-fn wait_until<F: FnMut() -> bool>(timeout: Duration, mut cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
-}
-
 // ── 운영 argv — 이 파일이 적지 않고 백엔드에게 받아 온다 ─────────────────────
 
 /// `sample` 에 **호출자 패스스루 인자**를 얹은 명령. 그 인자가 argv 의 어디에 붙는지는 백엔드가 정한다 —
@@ -734,9 +724,9 @@ fn with_extra(sample: &AgentCommand, extra: &[&str]) -> AgentCommand {
 /// ★이 함수가 이 파일이 「운영을 잰다」고 말할 수 있는 유일한 근거다★. 인자를 이 파일에 적어 두면 그
 ///   문자열이 운영과 갈리는 날 시험대는 **다른 것**을 재면서 초록이고, 그 어긋남을 잡는 게이트가 아무 데도
 ///   없다(실제로 그랬다 — 헤더의 그 문단). 여기서 받아 오면 갈릴 자리가 애초에 없다.
-/// ★덤 — 콘솔 래핑을 손으로 복제하던 자리도 함께 사라졌다★: `console_command`(`src/backend/mod.rs`)는
-///   `pub(crate)` 라 통합 테스트에서 못 부르는데, 그 래핑은 `build_spec` 이 **안에서** 이미 적용해
-///   `CommandSpec.program`/`args` 로 돌려준다. 그래서 이 파일은 그 래핑을 알 필요가 없다.
+/// ★덤 — 콘솔 래핑을 손으로 복제하던 자리도 함께 사라졌다★: 그 래핑(platform crate 의
+///   `shell::console_command`)은 `build_spec` 이 **안에서** 이미 적용해 `CommandSpec.program`/`args` 로
+///   돌려준다. 그래서 이 파일은 그 래핑을 알 필요가 없다.
 fn production_spec(
     row: &BackendRow,
     cwd: &Path,
@@ -1428,7 +1418,7 @@ fn descendants(root: u32) -> Vec<u32> {
     let mut out: Vec<u32> = Vec::new();
     let mut frontier = vec![root];
     while let Some(p) = frontier.pop() {
-        for c in engram_dashboard_base::platform::child_pids(p) {
+        for c in engram_dashboard_platform::process::child_pids(p) {
             if !out.contains(&c) {
                 out.push(c);
                 frontier.push(c);
@@ -1439,7 +1429,7 @@ fn descendants(root: u32) -> Vec<u32> {
 }
 
 fn pid_alive(pid: u32) -> bool {
-    engram_dashboard_base::platform::pid_alive(pid)
+    engram_dashboard_platform::process::pid_alive(pid)
 }
 
 /// `known` 과 `root` 중 아직 살아 있는 것 전부 — ★살아 있는 것 아래를 다시 훑어★ 앞선 열거 **뒤에** 생긴

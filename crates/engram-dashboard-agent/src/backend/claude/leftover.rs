@@ -25,13 +25,16 @@ use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::platform::process_group::{
+use engram_dashboard_base::sync;
+use engram_dashboard_base::time::{Clock, SystemClock};
+
+use crate::transport::input_queue::OnWritten;
+use crate::transport::process_group::{
     Births, MemberKill, Pinned, PortEvent, ProcessFacts, ProcessGroup, RetiringSignal, GROUP_GONE,
 };
-use crate::transport::input_queue::OnWritten;
 use crate::transport::stdio::InterruptOut;
 use crate::types::AgentId;
 
@@ -399,7 +402,7 @@ impl Recorder {
     }
 
     fn lock(&self) -> MutexGuard<'_, RecInner> {
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.inner)
     }
 
     /// 새 기록을 켜고 그 번호(`0` 아님)를 준다 — 넘침 표시를 내리고, 앞 기록에 남아 있던 것을 꺼내 돌려준다(받은
@@ -930,6 +933,12 @@ fn micros(d: Duration) -> u64 {
 // ADR-0262
 pub(super) const INTERRUPT_LEFTOVER_GRACE: Duration = Duration::from_secs(3);
 
+/// 이 정리가 끝낸 프로세스의 종료 코드 — 사후 조사에서 종료 코드만으로 이 정리가 끝낸 것을 알아본다. 통로
+/// `shutdown()` 의 무리 통째 끝내기(1)와 겹치지 않게 골랐다.
+// ADR-0262
+// ADR-0275
+const LEFTOVER_EXIT_CODE: u32 = 0x7440;
+
 /// 스냅숏이 붙드는 멤버 수의 상한 — 명단이 이보다 길면 그 에피소드는 `Failed(too_many)` 다.
 pub(super) const PIN_MAX: usize = 256;
 
@@ -949,22 +958,17 @@ const WORKER_THREAD: &str = "engram-claude-leftover";
 const LISTENER_THREAD: &str = "engram-claude-births";
 
 /// 정리기가 읽는 단조 시계 · 기다림 · 스레드 기동 — 실물 = [`SystemClock`]. 일꾼과 듣는 스레드가 이것으로 뜬다.
+///
+/// ★[`now`](Clock::now) 는 문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다.
 // ADR-0262
-pub(super) trait LeftoverClock: Send + Sync {
-    /// ★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다.
-    fn mono_now(&self) -> Instant;
+// ADR-0275
+pub(super) trait LeftoverClock: Clock {
     fn sleep(&self, d: Duration);
     /// `body` 를 `name` 스레드로 띄운다. join 하는 이는 없다. `Err` = `body` 는 버려졌고 돌지 않았다.
     fn spawn(&self, name: &str, body: Box<dyn FnOnce() + Send>) -> io::Result<()>;
 }
 
-pub(super) struct SystemClock;
-
 impl LeftoverClock for SystemClock {
-    fn mono_now(&self) -> Instant {
-        Instant::now()
-    }
-
     fn sleep(&self, d: Duration) {
         std::thread::sleep(d);
     }
@@ -1659,6 +1663,7 @@ impl<G: Group> fmt::Debug for GateCell<G> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // 쓰기는 자물쇠를 놓은 뒤다 — 포매터가 곧바로 파일 · 콘솔에 쓸 수 있다. 기다리지도 않는다: 자물쇠를 쥔 채
         // 이것을 찍는 결함이 생겨도 제 자신을 기다려 멈추지 않게.
+        // ADR-0275: base `sync` 를 쓰지 않는다 — 그쪽은 기다리는 `lock` 뿐이다. 오염 갈래만 여기서 되찾는다.
         let seen = match self.state.try_lock() {
             Ok(state) => Some(Seen::of(&state)),
             Err(TryLockError::Poisoned(state)) => Some(Seen::of(&state.into_inner())),
@@ -1710,7 +1715,7 @@ impl<G: Group> GateCell<G> {
     }
 
     fn lock(&self) -> MutexGuard<'_, GateState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.state)
     }
 
     #[cfg(test)]
@@ -1734,7 +1739,7 @@ impl<G: Group> GateCell<G> {
         };
         let begun = {
             let mut state = self.lock();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.begin_interrupt(now)
         };
         let mark = match begun {
@@ -1779,7 +1784,7 @@ impl<G: Group> GateCell<G> {
         let settled = {
             let mut state = self.lock();
             let active = cleaner.recorder.active();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.settle_interrupt(mark, rec, active, snap, now)
         };
         opener.holds_opening = false;
@@ -1853,16 +1858,16 @@ impl<G: Group> GateCell<G> {
         let Some(cleaner) = self.cleaner.as_ref() else {
             return;
         };
-        let began = cleaner.clock.mono_now();
+        let began = cleaner.clock.now();
         let listed = write_list(&*cleaner.group);
-        let w_us = micros(cleaner.clock.mono_now().saturating_duration_since(began));
+        let w_us = micros(cleaner.clock.now().saturating_duration_since(began));
         let (w, unlisted) = match listed {
             Ok(w) => (Some(w), None),
             Err(e) => (None, Some(e)),
         };
         let Noted { back, note, spawn } = {
             let mut state = self.lock();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.note_written(gen, w, now)
         };
         drop(back);
@@ -1954,7 +1959,7 @@ impl<G: Group> GateCell<G> {
     fn end_pass(&self, cleaner: &Cleaner<G>, gen: u64, killed: bool) {
         let released = {
             let mut state = self.lock();
-            let now = cleaner.clock.mono_now();
+            let now = cleaner.clock.now();
             state.finish_pass(gen, killed, now)
         };
         self.release(released);
@@ -2009,7 +2014,7 @@ impl<G: Group> Drop for WorkerGuard<'_, G> {
 fn worker_turn<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) -> bool {
     let step = {
         let mut state = cell.lock();
-        let now = cleaner.clock.mono_now();
+        let now = cleaner.clock.now();
         state.next_step(now, cleaner.retiring.is_set())
     };
     match step {
@@ -2164,7 +2169,7 @@ fn run_pass<G: Group>(
     cell.end_pass(cleaner, ticket.gen, killed);
     let waited = cleaner
         .clock
-        .mono_now()
+        .now()
         .saturating_duration_since(ticket.first_mono);
     log_pass(cleaner, &report, waited);
     drop(ticket);
@@ -2225,11 +2230,11 @@ fn kill_rounds<G: Group>(
             // ADR-0262
             let committed = {
                 let mut state = cell.lock();
-                let now = cleaner.clock.mono_now();
+                let now = cleaner.clock.now();
                 match state.commit_check(ticket.gen, now, cleaner.retiring.is_set()) {
                     Commit::Go => {
-                        let raw = birth.pin.terminate_raw();
-                        let took = cleaner.clock.mono_now().saturating_duration_since(now);
+                        let raw = birth.pin.terminate_raw(LEFTOVER_EXIT_CODE);
+                        let took = cleaner.clock.now().saturating_duration_since(now);
                         if raw.is_ok() {
                             state.note_kill(ticket.gen);
                         }
@@ -2354,13 +2359,12 @@ fn confirm(clock: &dyn LeftoverClock, killed: &[&Birth]) -> usize {
     if killed.is_empty() {
         return 0;
     }
-    let deadline = clock.mono_now().checked_add(KILL_CONFIRM);
+    let deadline = clock.now().checked_add(KILL_CONFIRM);
     killed
         .iter()
         .filter(|birth| {
-            let left = deadline.map_or(Duration::ZERO, |d| {
-                d.saturating_duration_since(clock.mono_now())
-            });
+            let left =
+                deadline.map_or(Duration::ZERO, |d| d.saturating_duration_since(clock.now()));
             matches!(birth.pin.wait_exit(left), Ok(true))
         })
         .count()
@@ -3425,7 +3429,7 @@ mod birth_tests {
 
     use std::collections::HashMap;
     use std::sync::mpsc::Sender;
-    use std::sync::Weak;
+    use std::sync::{PoisonError, Weak};
     use std::thread::{self, JoinHandle};
 
     use tracing::Level;
@@ -4218,15 +4222,14 @@ mod birth_tests {
     #[cfg(windows)]
     #[test]
     fn a_birth_in_the_job_is_recorded_with_its_facts_through_the_real_port() {
-        use crate::platform::process_group::tests::{
-            new_group, open_gate, spawn_gated_cmd, wait_until,
-        };
+        use crate::transport::process_group::tests::new_group;
+        use engram_dashboard_platform::testing::{open_gate, spawn_gated_cmd, wait_until};
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut x = spawn_gated_cmd("ping -n 30 127.0.0.1", CREATE_NO_WINDOW);
-        job.assign(x.id()).expect("Job 편입");
+        job.adopt(x.id()).expect("Job 편입");
         let recorder = Arc::new(Recorder::new());
         let watch = BirthWatch::new();
         assert_eq!(
@@ -4278,7 +4281,7 @@ mod test_support {
 
     use std::collections::BTreeMap;
     use std::sync::atomic::{AtomicU8, AtomicUsize};
-    use std::sync::Weak;
+    use std::sync::{PoisonError, Weak};
 
     use tracing::Level;
 
@@ -4498,10 +4501,14 @@ mod test_support {
             &self.facts
         }
 
-        fn terminate_raw(&self) -> io::Result<()> {
+        /// 정리가 고른 종료 코드가 아니면 실패로 답한다 — 끝냈다고 단언하는 시험이 빨개진다.
+        fn terminate_raw(&self, exit_code: u32) -> io::Result<()> {
             self.probe.note(self.pid, PinCall::Terminate);
             let cost = *self.probe.terminate_cost.lock().unwrap();
             self.probe.spend(cost);
+            if exit_code != LEFTOVER_EXIT_CODE {
+                return Err(io::Error::other(format!("종료 코드 {exit_code:#x}")));
+            }
             match self.kill {
                 Kill::Refuse => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
                 Kill::Exit => {
@@ -4663,11 +4670,13 @@ mod gate_tests {
         }
     }
 
-    impl LeftoverClock for FakeClock {
-        fn mono_now(&self) -> Instant {
+    impl Clock for FakeClock {
+        fn now(&self) -> Instant {
             self.base + Duration::from_nanos(self.nanos.load(Ordering::SeqCst))
         }
+    }
 
+    impl LeftoverClock for FakeClock {
         fn sleep(&self, d: Duration) {
             self.sleeps.lock().unwrap().push(d);
             if self.panic_in_sleep.load(Ordering::SeqCst) {
@@ -5010,7 +5019,7 @@ mod gate_tests {
         fn pass(&self) -> PassReport {
             let step = {
                 let mut state = self.cell.lock();
-                state.next_step(self.clock.mono_now(), self.cleaner.retiring.is_set())
+                state.next_step(self.clock.now(), self.cleaner.retiring.is_set())
             };
             let Step::Pass(ticket) = step else {
                 panic!("판이 서야 한다");
@@ -5654,7 +5663,7 @@ mod gate_tests {
         }
         rig.clock.advance(N);
 
-        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+        let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판이 서야 한다");
         };
@@ -5960,7 +5969,7 @@ mod gate_tests {
         let out = rig.esc_with_check();
         rig.write(out);
         rig.clock.advance(N);
-        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+        let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판");
         };
@@ -5998,7 +6007,7 @@ mod gate_tests {
         failed.listing(Some(vec![ROOT]));
         failed.write(out);
         failed.clock.advance(N);
-        let step = failed.cell.lock().next_step(failed.clock.mono_now(), false);
+        let step = failed.cell.lock().next_step(failed.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판");
         };
@@ -6017,7 +6026,7 @@ mod gate_tests {
         let out = rig.esc_with_check();
         rig.write(out);
         rig.clock.advance(N);
-        let step = rig.cell.lock().next_step(rig.clock.mono_now(), false);
+        let step = rig.cell.lock().next_step(rig.clock.now(), false);
         let Step::Pass(ticket) = step else {
             panic!("판");
         };
@@ -6512,7 +6521,7 @@ mod gate_tests {
                     18..=20 => rig.clock.advance(ms(rng.below(4_000))),
                     21..=26 => {
                         if rig.worker() {
-                            let now = rig.clock.mono_now();
+                            let now = rig.clock.now();
                             let due = rig.state(|st| {
                                 st.episode.as_ref().is_some_and(|ep| {
                                     ep.phase == Phase::Waiting
@@ -6570,9 +6579,8 @@ mod real_tests {
     use std::collections::BTreeMap;
     use std::io::Write;
 
-    use crate::platform::process_group::tests::{
-        is_ping, new_group, open_gate, spawn_gated_cmd, wait_until,
-    };
+    use crate::transport::process_group::tests::new_group;
+    use engram_dashboard_platform::testing::{is_ping, open_gate, spawn_gated_cmd, wait_until};
 
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const LINE: &[u8] = b"{\"type\":\"control_request\"}\n";
@@ -6585,11 +6593,13 @@ mod real_tests {
         workers: Mutex<Vec<Box<dyn FnOnce() + Send>>>,
     }
 
-    impl LeftoverClock for SkipClock {
-        fn mono_now(&self) -> Instant {
+    impl Clock for SkipClock {
+        fn now(&self) -> Instant {
             Instant::now() + Duration::from_nanos(self.skipped_ns.load(Ordering::SeqCst))
         }
+    }
 
+    impl LeftoverClock for SkipClock {
         fn sleep(&self, d: Duration) {
             let ns = u64::try_from(d.as_nanos()).expect("시험 잠");
             self.skipped_ns.fetch_add(ns, Ordering::SeqCst);
@@ -6669,7 +6679,7 @@ mod real_tests {
     /// R 이 Job 에 든 뒤에 태어나기도 해서(실측), 기다리지 않으면 쓰기 명단 뒤의 산 탄생(부모 R 산다)으로 끼어든다.
     fn console_host_born(r: &std::process::Child) {
         wait_until("R 의 콘솔 호스트", || {
-            (!engram_dashboard_base::platform::child_pids(r.id()).is_empty()).then_some(())
+            (!engram_dashboard_platform::process::child_pids(r.id()).is_empty()).then_some(())
         });
     }
 
@@ -6684,7 +6694,7 @@ mod real_tests {
             r#"cmd /d /c "start "" /b ping -n 30 127.0.0.1 >nul & set /p _=" & set /p _="#,
             CREATE_NO_WINDOW,
         );
-        job.assign(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("Job 편입");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);
@@ -6728,7 +6738,7 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.assign(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("Job 편입");
         open_gate(&mut r);
         wait_until("명단의 ping", || {
             group
@@ -6753,7 +6763,7 @@ mod real_tests {
         let (job, group) = new_group();
         let group = Arc::new(group);
         let mut r = spawn_gated_cmd("ping -n 30 127.0.0.1 >nul", CREATE_NO_WINDOW);
-        job.assign(r.id()).expect("Job 편입");
+        job.adopt(r.id()).expect("Job 편입");
         console_host_born(&r);
         let (clock, cleaner, cell) = cleaner_for(&group, r.id());
         let rec = interrupt_and_write(&cell, &cleaner, &clock);

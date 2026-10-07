@@ -7,7 +7,11 @@
 //! [`crate::machine`](future 가 하나도 없는 순수 층)에는 적용할 데가 없다 ② 전송도 갈아끼우기로 한
 //! 마당에 시간을 tokio 에 묶으면 그 둘이 도로 붙는다 ③ `test-util` 은 dev 전용이라 소비자 하네스에서
 //! 켜지지 않을 수 있다. **단 실소켓 테스트에서는 `pause()` 가 더 싸므로 금지하지 않는다.**
+//!
+//! ★base `time::Clock` 과 아직 합치지 않았다★ — 3단계(transport 부착)에서 이 트레이트를 그것의 하위
+//! 트레이트로 만든다. 그때까지 이 crate 는 base 를 의존하지 않는다(ADR-0275 결정 3).
 
+// ADR-0275
 use std::future::Future;
 use std::time::{Duration, Instant};
 
@@ -15,7 +19,7 @@ use futures_util::future::{BoxFuture, Either};
 
 /// 지금 몇 시인가와 얼마나 기다리나.
 ///
-/// 선례는 `daemon` 의 `command_delivery::Clock`(`now()` 하나)이고 **이 crate 는 거기에 `sleep` 을
+/// 지금 읽기만 있는 형제는 base 의 `time::Clock`(`now()` 하나)이고 **이 crate 는 거기에 `sleep` 을
 /// 더한다** — 백오프·keepalive·쓰기 시한은 *기다림*이 필요한데 `now()` 만으로는 그것을 못 만든다.
 pub trait Clock: Send + Sync + 'static {
     fn now(&self) -> Instant;

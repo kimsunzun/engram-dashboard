@@ -59,6 +59,7 @@ pub(crate) use usage_probe::CODEX_USAGE_PROBE;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use engram_dashboard_platform::shell::console_command;
 use uuid::Uuid;
 
 use self::decoder::CodexAppServerDecoder;
@@ -67,8 +68,8 @@ use self::protocol::{
 };
 use self::transport::CodexAppServerTransport;
 use crate::backend::{
-    console_command, inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink,
-    SpawnParts, TransportShape, TurnClassifier,
+    inject_cli_entrance, AgentBackend, FirstTurnSink, InputEncoder, SessionIdSink, SpawnParts,
+    TransportShape, TurnClassifier,
 };
 use crate::failure::AgentFailureKind;
 use crate::profile::{AgentCommand, AgentOutputFormat, SpawnMode};
@@ -166,7 +167,8 @@ fn thread_open(
 /// ★편입은 spawn **뒤**라 그 사이 창은 그 보장 밖이다★ — 그 창에서 태어난 자손은 Job 에 안 들어간다.
 /// 에이전트 통로 셋(`pty`·`stdio`·codex 통로)이 전부 띄운 뒤에 넣는 모양이고 기존 teardown 테스트는 정착
 /// 상태만 재므로, 이 창은 **재 본 적이 없다**. 고치는 것은 세 통로를 함께 건드리는 별건이고, 선례는 사용량 조회
-/// 실행기다 — 멈춘 채 띄워 Job 에 넣은 뒤 깨운다(`usage::process` + `platform::resume_suspended_process`).
+/// 실행기다 — 멈춘 채 띄워 Job 에 넣은 뒤 깨운다(`usage::process` + OS 층 `spawn::prepare_tree_root` ·
+/// `spawn::TreeRoot`).
 const CODEX_PROGRAM: &str = "codex";
 
 /// 「그 스레드의 기록이 없다」를 뜻하는 상대 문구(소문자 비교). ★실측된 응답에서 그대로 딴다★ —
@@ -1104,7 +1106,8 @@ impl AgentBackend for CodexBackend {
             //   (조건의 정본 = 그 doc) 이 자리가 하는 일은 자식의 신원 두 칸과 **우리 쪽** 기본
             //   락 폴더를 건네는 것뿐이다 — 자식이 다른 홈을 받았으면 그쪽이 이긴다.
             // ADR-0218
-            let child_start = pid.and_then(engram_dashboard_base::platform::process_creation_time);
+            let child_start =
+                pid.and_then(engram_dashboard_platform::process::process_creation_time);
             // ★게이트가 보는 사실 = 「이어받기 argv 가 실제로 나갔나」★ — 손잡이의 **존재**가
             //   아니다. 실을 수 없는 값이면 위 `build_spec` 이 새 대화 argv 를 냈고, 그 화신은
             //   회수 대상이다. 두 자리가 같은 술어([`resume_argument`])를 본다.
@@ -3771,14 +3774,14 @@ mod terminal_capture_wiring {
     /// ★파일 존재(`exists()`)로 재지 말 것 — 그러면 시험이 **헛되이 초록**이 된다★: 도우미가
     ///   파일을 만들고 곧바로 끝나 버려도 파일은 남으므로, 「홀더가 서 있다」를 한 번도 세우지
     ///   않은 채 「회수가 안 돌았다」가 통과한다. 죽은 락과 산 락은 홀더 조회로만 갈린다(그 갈림은
-    ///   `platform::file_holders` 의 시험이 실물로 잰다).
+    ///   platform crate `file_holders` 의 시험이 실물로 잰다).
     /// ★재는 수단이 시험 대상과 겹치는 것은 의도다★ — 여기서 쓰는 것은 홀더 조회 **하나**뿐이고,
     ///   판정(누가 우리 것인가 · 이름이 id 인가 · 어디에 적나)은 전부 안 쓴다. 그래서 이 전제가
     ///   서더라도 본 단언은 여전히 독립적으로 깨질 수 있다.
     fn wait_for_live_holder(lock_path: &std::path::Path) -> bool {
         let deadline = Instant::now() + Duration::from_secs(30);
         while Instant::now() < deadline {
-            let held = crate::platform::file_holders::holders_of(lock_path)
+            let held = engram_dashboard_platform::file_holders::holders_of(lock_path)
                 .map(|holders| !holders.is_empty())
                 .unwrap_or(false);
             if held {

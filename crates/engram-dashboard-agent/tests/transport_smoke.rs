@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use engram_dashboard_agent::manager::default_shell;
 use engram_dashboard_agent::output_core::{OutputCore, TurnWiring};
 use engram_dashboard_agent::transport::pty::PtyTransport;
 use engram_dashboard_agent::transport::AgentTransport;
@@ -16,6 +15,8 @@ use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, CommandSpec, InputEvent, OutputFrame, OutputPayload,
     OutputSink, SinkError, SinkId, StatusSink,
 };
+use engram_dashboard_base::testing::wait_until;
+use engram_dashboard_platform::shell::default_shell;
 
 // ── RecordingSink ────────────────────────────────────────────────────────────
 
@@ -60,17 +61,6 @@ struct NoopStatusSink;
 impl StatusSink for NoopStatusSink {
     fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
     fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
-}
-
-fn wait_until<F: Fn() -> bool>(timeout: Duration, cond: F) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if cond() {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    cond()
 }
 
 #[test]

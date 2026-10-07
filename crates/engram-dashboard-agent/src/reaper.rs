@@ -22,6 +22,8 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, RwLock};
 use std::thread::JoinHandle;
 
+use engram_dashboard_base::sync;
+
 use crate::profile::ProfileRegistry;
 use crate::session::AgentSession;
 use crate::types::{AgentId, AgentInfo, ControlChannel, Disposition, ReapMsg, StatusSink};
@@ -47,12 +49,9 @@ impl ReaperDeps {
         // 1. write lock 구간 = epoch 검증 + remove 만(ADR-0006). Arc clone 후 즉시 해제.
         //    ★poison-tolerant★: 다른 스레드(pump 등)가 sessions lock 보유 중 panic 해 lock 이
         //    poison 돼도 reaper 는 계속 reap 해야 한다(좀비 방지). 데이터는 HashMap 일 뿐 불변식이
-        //    깨진 게 아니므로 into_inner 로 가드를 회수해 진행한다(catch_unwind 와 이중 안전).
+        //    깨진 게 아니므로 가드를 되찾아 진행한다(catch_unwind 와 이중 안전).
         let removed = {
-            let mut sessions = self
-                .sessions
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut sessions = sync::write(&self.sessions);
             match sessions.get(&msg.id) {
                 Some(s) if s.epoch == msg.epoch => sessions.remove(&msg.id),
                 _ => return,
@@ -66,8 +65,8 @@ impl ReaperDeps {
         // Arc<AgentSession> 폐기. ★"마지막" 참조라고 단정하지 않는다★: 이어받기 실패 관측
         //   (`AgentManager::early_activation_verdict`)은 조기종료 창 동안 같은 Arc 를 들고 있으므로, 그
         //   경로에선 실제 해제가 **그 관측자의 다음 폴링까지**(현 100ms 간격) 밀린다. 무해하다 —
-        //   terminal 전이는 pump 단독이고(ADR-0005) `JobObjectHandle::drop` 은 마지막 참조가 사라질 때
-        //   그대로 돈다. 즉 자식 프로세스는 이미 죽어 있고 미뤄지는 것은 핸들 회수뿐이다.
+        //   terminal 전이는 pump 단독이고(ADR-0005) 통로가 쥔 무리 주인(`GroupOwner`)의 drop 은 마지막
+        //   참조가 사라질 때 그대로 돈다. 즉 자식 프로세스는 이미 죽어 있고 미뤄지는 것은 핸들 회수뿐이다.
         drop(removed);
 
         // 2.5. ★여기가 모든 terminal 의 단일 수렴점★ — 크래시·EOF·정상 exit·유저 kill 어떤 경로든
@@ -151,9 +150,7 @@ fn list_agents(
 ) -> Vec<AgentInfo> {
     let snapshot: Vec<Arc<AgentSession>> = {
         // poison-tolerant(reap_one 1과 동일 이유): 통지용 스냅샷이라 가드 회수로 진행한다.
-        let guard = sessions
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let guard = sync::read(sessions);
         guard.values().cloned().collect()
     };
     snapshot.iter().map(|s| session_info(s, profiles)).collect()

@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::sync;
+
 use crate::backend;
 use crate::failure::AgentFailureKind;
 use crate::inputs_pending::InputsPendingTable;
@@ -73,15 +75,6 @@ const EARLY_EXIT_WINDOW: Duration = Duration::from_secs(3);
 pub(crate) const LINK_RESOLUTION_BACKSTOP: Duration = Duration::from_secs(15);
 /// 복원 시 에이전트 간 spawn 간격(동시 폭주 방지 stagger).
 const RESTORE_STAGGER: Duration = Duration::from_millis(200);
-
-#[cfg(windows)]
-pub fn default_shell() -> &'static str {
-    "cmd.exe"
-}
-#[cfg(not(windows))]
-pub fn default_shell() -> &'static str {
-    "bash"
-}
 
 /// spawn 요청 하나의 결말. ★"띄웠다" 와 "할 일이 없었다" 를 **호출자가 구분할 수 있어야 한다**★ —
 /// 그래야 등록·epoch·기록 같은 뒷정리를 자기가 만들지 않은 세션에 하지 않는다.
@@ -546,9 +539,7 @@ fn session_id_sink(
                 return;
             }
         };
-        let mut seen = expected
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = sync::lock(&expected);
         let written = profiles.commit_session_id(id, incarnation, *seen, sid);
         if written {
             *seen = Some(sid);
@@ -1056,9 +1047,7 @@ impl AgentManager {
     /// 다른 스레드의 패닉이 남길 수 있는 불일치 데이터가 애초에 없다. `expect` 로 두면 무관한 패닉 한 번이
     /// 생성·개명·스폰을 데몬 재시작까지 영구히 막는다(순수 downside).
     fn lock_name_allocation(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.name_allocation
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        sync::lock(&self.name_allocation)
     }
 
     /// ★이름 결정표(ADR-0120 유일성 · ADR-0123 번호 규칙) — 게이트 보유 중에만 부른다★.
@@ -4957,7 +4946,7 @@ mod tests {
         let mut p = AgentProfile::new(
             "raw".into(),
             crate::profile::AgentCommand::Shell {
-                program: default_shell().to_string(),
+                program: engram_dashboard_platform::shell::default_shell().to_string(),
                 args: vec![],
             },
             std::path::PathBuf::from(cwd),

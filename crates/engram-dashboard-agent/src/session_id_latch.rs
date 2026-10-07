@@ -24,8 +24,8 @@
 //!   `래치 → 포트의 expected 칸 → profiles → store write_lock` 단방향 — 래치를 잡는 호출자는 다른 락을 쥐지
 //!   않은 채로 부른다.
 //! - ★`catch_unwind` 를 두지 않는다★: 릴리스는 `panic = "abort"` 라 아무것도 잡지 않는 죽은 코드다. unwind
-//!   빌드(개발·시험)에서 포트가 패닉하면 뮤텍스에 독이 들고, 뒤이은 호출은 독을 걷어 내고(`into_inner`)
-//!   `committed` 를 보고 통과한다 — 포트를 다시 부르지 않는다.
+//!   빌드(개발·시험)에서 포트가 패닉하면 뮤텍스에 독이 들고, 뒤이은 호출은 독 든 가드를 그대로 되찾아
+//!   (`sync::lock`) `committed` 를 보고 통과한다 — 포트를 다시 부르지 않는다.
 //!
 //! backend·transport·profile 을 모른다 — uuid 해석과 「이 화신이 시작 때 본 값」 추적은 commit 포트 안
 //! (조립점) 몫이다.
@@ -33,6 +33,8 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use engram_dashboard_base::sync;
 
 use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::types::AgentId;
@@ -145,9 +147,7 @@ impl SessionIdLatch {
     }
 
     fn lock_state(&self) -> MutexGuard<'_, LatchState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        sync::lock(&self.state)
     }
 }
 

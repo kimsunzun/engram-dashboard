@@ -45,7 +45,8 @@ use super::events::{ConnectionStateEvent, DaemonEvents};
 use super::frame_relay::{self, FrameRelay};
 use super::inbound::{InboundReceiver, InboundSlot};
 use super::lifecycle::{Lifecycle, ReconnectVerdict};
-use super::protocol_state::{self, PendingMap, SubState};
+use super::protocol_state::{self, CommandFailure, PendingMap, SubState};
+use super::refusal::{RefusalAlerts, RefusalSite};
 use super::replay_flight::{self, RefusalOutcome, ReplayFlightSet, Resolution};
 use super::{ConnectionState, DaemonDiscovery, SharedUsageInterest};
 use crate::output_channel::{self, WindowChannelRegistry};
@@ -59,9 +60,19 @@ const REPLAY_DEADLINE: Duration = Duration::from_secs(10);
 // deadline sweep 주기 — main_loop select! 의 tick 간격. 이 granularity 로 만료된 in-flight 를 훑는다.
 const REPLAY_DEADLINE_TICK: Duration = Duration::from_secs(1);
 
-// SendCommand 의 reply 채널 타입(T6a). `Ok(event)` = 데몬이 매칭 reply(Ack/Spawned/Created/
-// SubscribeAck/AgentList/…)를 보냄, `Err(msg)` = 데몬 Error 또는 연결 끊김(drain). 호출자
-// (`DaemonClient::send_command`)가 이 oneshot 의 수신단을 await 한다.
+/// SendCommand 의 대기 슬롯(T6a) — request_id 로 짝지은 데몬 답, 또는 셸 로컬 실패를 호출자에게 나른다.
+///
+/// - `Ok(event)` = 데몬의 짝 답 **전부**(Ack/Spawned/Created/AgentList/…) — 데몬 `Error` 도
+///   `Ok(AgentEvent::Error{..})` 로 온다.
+/// - `Err(msg)` = **셸 로컬 실패뿐**이다(끊김 drain · 미전송 · request_id 없음 · 송신 · 직렬화 실패 · 승계 —
+///   문구는 그 자리마다 다르다).
+///
+/// ★데몬 답을 슬롯에 넣는 자리는 `main_loop` 의 짝 맞추기 한 곳이고, 거기서 `Error` 도 `Ok` 로 넣는다
+/// (ADR-0281)★. ★`Error` 를 `Err` 로 접지 말 것★ — 접으면 출처 분류(`protocol_state::classify_reply`)가
+/// 데몬 거절을 셸 로컬 실패로 읽어 거절 박스(ADR-0270 결정 4)가 오류 없이 조용히 죽는다. 「`Err` 는 로컬뿐」은
+/// 타입이 아니라 이 배치가 지킨다.
+/// 수신단은 `DaemonClient::send_command_with_origin` 과 등록 결말 태스크([`register_own_commands`])가
+/// await 해 `classify_reply` 로 가른다.
 pub type CommandReply = oneshot::Sender<Result<AgentEvent, String>>;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -180,7 +191,9 @@ pub enum ConnectionCommand {
     // 요청/응답 명령(T6a). `cmd` 의 request_id 로 reply 를 매칭한다. main_loop 가:
     //   1) reply 를 PendingMap[request_id] 에 넣고 → 2) cmd 를 JSON 으로 sink.send.
     //   ⟳(`RefreshUsageLimits`)만 1) 앞에 사용량 구독 한 장을 쓴다([`send_request`]).
-    // 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 으로 resolve. send/끊김 실패 시 Err.
+    // 데몬 reply(request_id echo) 도착 시 take_pending → oneshot 에 `Ok(ev)` 그대로 — 데몬 `Error` 도 `Ok` 다.
+    //   이 슬롯의 `Err` 는 send/끊김 같은 셸 로컬 실패뿐이다 — `Error` 를 `Err` 로 접지 말 것(접으면 거절 박스가
+    //   조용히 죽는다 — 사유 = [`CommandReply`] doc · ADR-0281).
     SendCommand {
         cmd: AgentCommand,
         reply: CommandReply,
@@ -264,6 +277,8 @@ pub(crate) async fn run_connection(
     //   Text arm 의 broadcast(request_id 없는 AgentListUpdated/StatusChanged/…)를 전 webview 에 push 한다.
     //   실물은 `events::TauriEmitter`, 창 없는 조립은 `events::NoDaemonEvents`(버림).
     events: Arc<dyn DaemonEvents>,
+    // 등록 거절 박스의 거르개 — `DaemonClient` 가 쥔 것을 그대로 받는다(사유 = 그 칸 doc).
+    refusals: Arc<RefusalAlerts>,
     // ADR-0155 결정 4: 데몬이 배달한 명령의 입구. 늦게 채워지므로 슬롯으로 받는다(`inbound::InboundSlot` doc).
     inbound: Arc<InboundSlot>,
     usage: SharedUsageInterest,
@@ -359,6 +374,7 @@ pub(crate) async fn run_connection(
         router,
         registry,
         events,
+        refusals,
         inbound,
         usage,
     )
@@ -613,6 +629,7 @@ async fn connected_lifetime(
     router: Arc<OutputRouter>,
     registry: WindowChannelRegistry,
     events: Arc<dyn DaemonEvents>,
+    refusals: Arc<RefusalAlerts>,
     inbound: Arc<InboundSlot>,
     usage: SharedUsageInterest,
 ) {
@@ -646,6 +663,7 @@ async fn connected_lifetime(
             &router,
             &registry,
             events.as_ref(),
+            &refusals,
             &inbound,
             &usage,
         )
@@ -926,6 +944,7 @@ async fn main_loop(
     router: &Arc<OutputRouter>,
     registry: &WindowChannelRegistry,
     events: &dyn DaemonEvents,
+    refusals: &Arc<RefusalAlerts>,
     inbound: &Arc<InboundSlot>,
     usage: &SharedUsageInterest,
 ) -> LoopExit {
@@ -940,7 +959,7 @@ async fn main_loop(
     //   이다(protocol `RegisterCommands` doc 이 그 짝을 적고 있다).
     //   ★재전송이 쌓이지 않고 덮이는 것은 데몬 명부의 이름 단위 last-wins 에 달려 있다(ADR-0150 결정 3 의 제거
     //   + 등록 인수인계)★ — 오늘은 재연결이 새 연결 id 를 받아 옛 등록이 끊길 때 지워진다.
-    register_own_commands(&mut sink, pending, my_gen, inbound).await;
+    register_own_commands(&mut sink, pending, my_gen, inbound, refusals).await;
     // 모르는 tag 경고의 짝 기록 — 이 소켓 수명 동안만(재연결 뒤엔 다시 한 번 warn 한다).
     let mut unknown_tags = frame_relay::UnknownTagLog::default();
     // 루프 종료 사유를 한 곳에서 로깅하려고 break 로 사유를 끌어올린다(핫패스 frame 수신 본문엔
@@ -968,7 +987,9 @@ async fn main_loop(
                                         //   모르는 request_id(take_pending=None)면 무시(편승/중복 reply 방어).
                                         if let Some(reply) = protocol_state::take_pending(pending, &rid)
                                         {
-                                            let _ = reply.send(protocol_state::reply_outcome(ev));
+                                            // ADR-0281: 데몬 답은 접지 않고 그대로 넣는다 — `Error` 도 `Ok` 로
+                                            //   (슬롯 계약 = [`CommandReply`] doc).
+                                            let _ = reply.send(Ok(ev));
                                         } else {
                                             // ★짝 없는 답장은 여기가 유일한 흔적이다★ — 아래 emit_broadcast 는
                                             //   request_id 있는 이벤트를 아예 못 본다(이 가지가 먼저 삼킨다).
@@ -1919,13 +1940,15 @@ pub fn registration_command(receiver: &InboundReceiver) -> Option<AgentCommand> 
 // 자기 명령 이름을 데몬 명부에 얹는다(TRD §3-7 조항 1). 부르는 자리·재전송 근거는 호출부 주석.
 //
 // ★결말을 여기서 await 하지 않는다★: 그 답장(Ack/Error)을 stream 에서 꺼내는 것이 **이 루프 자신**이라,
-// 여기서 기다리면 그 자리에서 교착이다. 그래서 pending 슬롯만 걸어 두고 별도 태스크가 결말을 로그로 남긴다 —
-// 등록은 relay 전체의 선행 조건이라 조용히 실패하면 안 된다(데몬도 자기 쪽 거절을 warn 으로 남긴다).
+// 여기서 기다리면 그 자리에서 교착이다. 그래서 pending 슬롯만 걸어 두고 별도 태스크가 결말을 로그로 남기고
+// 데몬 거절이면 박스를 띄운다(`refusals`) — 등록은 relay 전체의 선행 조건이라 조용히 실패하면 안 된다(데몬도
+// 자기 쪽 거절을 warn 으로 남긴다).
 async fn register_own_commands(
     sink: &mut futures_util::stream::SplitSink<Ws, Message>,
     pending: &mut PendingMap<CommandReply>,
     my_gen: u64,
     inbound: &Arc<InboundSlot>,
+    refusals: &Arc<RefusalAlerts>,
 ) {
     let Some(receiver) = inbound.get() else {
         tracing::debug!(generation = my_gen, "명령 표 미설치 — 등록할 이름이 없다");
@@ -1958,19 +1981,30 @@ async fn register_own_commands(
         let _ = protocol_state::take_pending(pending, &request_id);
         return;
     }
+    let refusals = Arc::clone(refusals);
     tokio::spawn(async move {
-        match outcome_rx.await {
+        match outcome_rx.await.map(protocol_state::classify_reply) {
             Ok(Ok(_)) => tracing::info!(names = count, "셸 명령 등록 완료"),
             // ★거절은 이 연결에서 재시도하지 않는다 — 다음 재연결까지 이름이 **없는 채로** 남는다(알려진 한계)★.
             //   그 사이 데몬이 배달할 수 있는 이 셸의 명령은 0이므로 LLM 이 창·탭·슬롯을 못 만진다. 재시도를 안
             //   붙인 이유는 **재시도를 깨울 것이 이 루프에 없어서**다: 백오프 타이머를 넣으려면 select 에 네
             //   번째 arm 과 재시도 정책(간격·상한·거절 종류별 분기 — 명부 상한은 남이 끊기면 풀리지만 스키마
             //   거절은 코드가 바뀔 때까지 영구다)이 필요하고, 그 둘은 이 자리에서 정할 결정이 아니다.
-            Ok(Err(e)) => tracing::warn!(
+            Ok(Err(CommandFailure::Daemon { message })) => {
+                tracing::warn!(
+                    names = count,
+                    "셸 명령 등록 거절 — 다음 재연결까지 이 셸의 명령은 데몬 명부에 없다: {message}"
+                );
+                refusals.surface(RefusalSite::Register, &message);
+            }
+            // 셸 로컬 실패도 같은 「거절」 라벨로 남긴다 — 데몬이 거절한 것은 아니다(TRD 2-1 §8 O4). 답 전에
+            //   끊기면 여기로 온다 — 끊김의 pending drain 이 슬롯에 `SENT_OUTCOME_UNKNOWN` 을 넣는다.
+            //   박스는 없다 — 박스는 이 warn 팔이 아니라 데몬 출처를 따른다(ADR-0281).
+            Ok(Err(CommandFailure::Local(message))) => tracing::warn!(
                 names = count,
-                "셸 명령 등록 거절 — 다음 재연결까지 이 셸의 명령은 데몬 명부에 없다: {e}"
+                "셸 명령 등록 거절 — 다음 재연결까지 이 셸의 명령은 데몬 명부에 없다: {message}"
             ),
-            // 연결이 먼저 끊겼다(pending drain) — 재연결이 다시 보낸다.
+            // 슬롯이 답 없이 떨어졌다 — 연결 태스크가 pending drain 을 지나지 않고 끝났다.
             Err(_) => tracing::debug!("셸 명령 등록 결말 미도착(연결 종료)"),
         }
     });

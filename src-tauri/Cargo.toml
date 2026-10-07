@@ -57,14 +57,15 @@ tracing = "0.1"
 thiserror = "1"   # discovery::DiscoveryError
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
 # 파일 로그 초기화(`logging::init_logging_with_file`)와 `mask_secrets` — ADR-0175 결정 1 로 코어에서
-#   잎 crate 로 이사했다.
+#   잎 crate 로 이사했다. `agent.spawnInto` 의 친 cwd 철자 고르기(`path::normalize_spelling`)도 여기서
+#   온다(ADR-0270 결정 5 — `normalize_cwd` 는 base 로 · 결정 1 — 셸은 agent 를 의존하지 않는다).
+#   락 오염 되찾기(`sync::lock` 등 — ADR-0275)도 여기서 온다.
 engram-dashboard-base = { path = "../crates/engram-dashboard-base" }
-# ★남은 것은 `agent::commands::COMMAND_SPECS` 하나뿐이다★(ADR-0029 — in-proc 에이전트 호스팅은 없다).
-#   이 간선은 방치가 아니라 **같은 브랜치의 뒤 단계**에서 닫힌다: 웹뷰가 답하는 명령에 `ui.` 접두를
-#   붙여 이름 충돌을 없앤 뒤(ADR-0175 결정 5) 그 상수를 읽는 필터를 지운다(결정 4). 그때까지 남긴다.
-#   ★그래도 이 패키지의 테스트 빌드는 `agent` 를 계속 컴파일한다★ — 아래 dev-dependencies 의 `daemon`
-#   이 전량 물고 온다. 결정 4 가 닫히면 이득은 릴리스 빌드 쪽이다(ADR-0175 §남는 무검증/미측정).
-engram-dashboard-agent = { path = "../crates/engram-dashboard-agent" }
+# ★`engram-dashboard-agent` 를 여기 되살리지 말 것★ — 셸은 agent crate 를 의존하지 않는다(ADR-0270 결정 1 ·
+#   ADR-0029). 백엔드 정책은 데몬 `SpawnByCwd` 처리부가(ADR-0279), 데몬 이름의 벽은 데몬 등록 반려가 진다.
+#   벽 = CI `shell gate 1`(이 패키지의 normal · build 그래프에 agent 0 줄).
+#   ★그래도 이 패키지의 테스트 빌드는 `agent` 를 컴파일한다★ — 아래 dev-dependencies 의 `daemon` 이 물고
+#   온다(작업 순서 2-4 까지). 이득은 릴리스 빌드 쪽이다.
 # ADR-0155: 이 셸이 `window`/`tab`/`slot` 을 **선언**하는 주인이라 선언 매크로·표·봉투·배달이 필요하다.
 #   ★새 서드파티가 아니다★ — 이 crate 는 워크스페이스 의존 0 이고, 여기 적기 전에도 agent 를 타고 이미
 #   이 셸의 의존 그래프에 링크돼 있었다(직접 간선만 는다).
@@ -75,8 +76,8 @@ engram-dashboard-protocol = { path = "../crates/engram-dashboard-protocol" }
 engram-dashboard-discovery = { path = "../crates/engram-dashboard-discovery" }
 # ADR-0129 0-4: 데몬 WS 핸드셰이크 프레임(`auth::AuthFrame`) — 이 셸이 첫 프레임으로 보낸다(daemon_client
 #   재연결 경로). ★에이전트 호스팅이 아니다★(ADR-0029 불변) — 네트워크 lib 은 WS 살림만 담고
-#   `AgentManager` 를 모른다. 그 crate 의 워크스페이스-로컬 forward 폐포는 {net, agent, protocol} 이라
-#   여기서 지는 짐이 늘지 않는다(셋 다 이미 이 셸의 의존이다).
+#   `AgentManager` 를 모른다. 이 셸이 쓰는 조합(기본 feature)으로는 워크스페이스 의존이 0 이다(`server` 를
+#   켜면 {platform, protocol} — net `Cargo.toml` `[features]`).
 #   ★feature 를 켜지 않는다 — 쓰는 건 `auth::AuthFrame` 뿐이다★(`rg engram_dashboard_net src/` →
 #   daemon_client/connection.rs · daemon_client/tests.rs, 둘 다 그 타입 하나). net 의 기본 feature
 #   는 비어 있어 그 타입만 나오고, WS **서버** 행은 여기서 안 쓰므로 `server` 를 적지 않는다.
@@ -84,6 +85,13 @@ engram-dashboard-discovery = { path = "../crates/engram-dashboard-discovery" }
 #   직접 지고 있다(위 T1 블록). 그래도 안 켜는 이유는 **의도 표시**다: 나중에 이 셸이 async 를 걷어내도
 #   net 간선이 그것을 되돌려 놓지 않는다. 기본을 비워 둔 근거는 net `Cargo.toml` 의 `[features]` 주석.
 engram-dashboard-net = { path = "../crates/engram-dashboard-net" }
+# ADR-0266: OS 층 — 상태 폴더 임시 파일 쓸기의 주인 생존 판정(`process::pid_alive` — `state::boot` 의 `sweep_temps` ·
+#   옛 `base::platform` 에서 옮겨 왔다) · 런타임 복원 수락 끝에 main 에 포커스를 줄지 가르는 전경 창 판정
+#   (`window::foreground_is_current_process` — `state::placement` 의 `foreground_is_ours`).
+#   ★`windows` 를 이 셸에 직접 되살리지 말 것★ — OS crate 운영 의존은
+#   platform 하나에만 둔다(CI `platform gate 5`). 새 패키지가 아니다 — discovery 를 타고 이미 이 셸의 운영 그래프에
+#   있었다(직접 간선만 는다). ★`test-support` 를 켜지 않는다★(CI `platform gate 3`).
+engram-dashboard-platform = { path = "../crates/engram-dashboard-platform" }
 tauri-plugin-autostart = "2"
 
 # T1(S14 모듈①): DaemonClient(비동기 WS 클라이언트) + OutputRouter(arc-swap) 신설을 위해
@@ -97,13 +105,6 @@ futures-util = "0.3"
 serde_json = "1"
 # OutputRouter 핫패스 lock-free snapshot (spike §2 FIX-F6). 데몬에 없으므로 최신 1.x 안정 버전.
 arc-swap = "1"
-
-# 런타임 복원 수락이 끝에 main 에 포커스를 줄지 가른다 — 우리 프로세스가 전경 창을 쥐었나
-#   (`GetForegroundWindow` · `GetWindowThreadProcessId` — `state::placement` 의 `foreground_is_ours`). 창의 포커스
-#   게터는 Windows 에서 웹뷰가 키보드 포커스를 쥔 동안 `false` 라 쓰지 않는다(그 함수 주석). 버전은 agent · base 와
-#   같다 — 새 패키지가 아니라 간선 하나다.
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 # T2(S14 모듈①) 격리 하네스: 실 데몬 없이 DaemonClient 핸드셰이크를 검증한다. daemon crate 의
