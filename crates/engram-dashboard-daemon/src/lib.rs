@@ -81,7 +81,8 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 // ★왜 형제 exe 를 찾아야 하나★: **MCP 를 못 쓰는 백엔드**의 에이전트가 다른 에이전트에게 메시지를
 // 보내려면 그 CLI(파일명 = `CLI_EXE_NAME` + 플랫폼 확장자)를 shell 로 불러야 하는데, 이 바이너리는
 // **PATH 에 없다**(데몬과 함께 배포되는 내부 도구라 bare 이름으로는 shell 이 못 찾는다). 그래서 데몬이 자기 exe 폴더의
-// **형제**에서 절대경로를 찾아(locate_daemon_exe 와 대칭 — 배포 시 세 exe 동거),
+// **형제**에서 절대경로를 찾아(그 규칙 = platform `env::sibling_exe` 한 곳 — discovery `locate_daemon_exe`(셸이
+// 부른다)의 첫 후보도 같은 함수다 · 배포 시 세 exe 동거),
 // provision 이 그 경로를 ControlEndpoint.send_exe 로 실어 보낸다. backend 는 control endpoint 가 있는 스폰
 // **전부**에 그걸 ENGRAM_CLI_EXE·PATH 로 주입한다 — 제어 동사가 전원 개방이라(ADR-0132 결정 5) 우편만 쓰는
 // 경로가 아니다.
@@ -101,18 +102,14 @@ pub fn generate_token() -> Result<String, getrandom::Error> {
 fn locate_send_exe() -> Option<PathBuf> {
     // 파일명은 상수에서 파생한다 — 여기 이름을 따로 적으면 배포된 실행파일과 갈릴 수 있고, 갈리면
     //   CLI 입구가 조용히 비활성된다(경고 로그 한 줄 외엔 증상이 없다).
-    let file_name = engram_dashboard_platform::env::exe_file_name(CLI_EXE_NAME);
-    if let Ok(daemon_exe) = std::env::current_exe() {
-        if let Some(dir) = daemon_exe.parent() {
-            let send_exe = dir.join(&file_name);
-            if send_exe.is_file() {
-                tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
-                return Some(send_exe);
-            }
+    if let Some(send_exe) = engram_dashboard_platform::env::sibling_exe(CLI_EXE_NAME) {
+        if send_exe.is_file() {
+            tracing::info!(path = %send_exe.display(), "제어 평면 CLI 위치 확정(ADR-0086 F1)");
+            return Some(send_exe);
         }
     }
     tracing::warn!(
-        name = %file_name,
+        name = %engram_dashboard_platform::env::exe_file_name(CLI_EXE_NAME),
         "제어 평면 CLI 형제 exe 를 못 찾음 — CLI 입구 비활성(MCP 입구는 정상, ADR-0086 F1)"
     );
     None

@@ -189,7 +189,7 @@
 - **원래 이유(ADR-0024):** 데몬이 데이터 폴더의 `daemon.json` 에 포트·토큰·PID 를 적고 클라이언트가 같은 파일을 읽어 접속·인증한다 → 양쪽이 **같은 폴더 규칙**을 써야 해서 그 규칙(`default_data_dir`)을 공용 crate 에 두었고, 클라이언트 쪽 데몬 찾기·띄우기·끄기를 함께 넣었다.
 - **실제로 양쪽이 다 쓰는 것은 `default_data_dir` 하나뿐이다.** 쓰기 가능 확인 · 설치 위치는 데몬(+ 데몬 crate 안의 `engram` CLI)만, 찾기·띄우기·상태·정지·실행 파일 찾기는 셸만 쓴다.
 - **안에 작은 데몬 클라이언트가 있다** — `send_stop` 이 WebSocket 접속·인증·정지 명령을 직접 한다. discovery 가 `net`(인증 메시지)과 `protocol` 명령 메시지를 아는 이유가 전부 이것이다.
-- 실행 파일 위치 계산이 두 곳에 갈려 있다 — 데몬(`daemon/src/lib.rs:96,146`) · discovery(`lib.rs:981`).
+- 실행 파일 위치 계산이 두 곳에 갈려 있다 — 데몬(`daemon/src/lib.rs:96,146`) · discovery(`lib.rs:981`). **→ 실측 정정(TRD 2-2 §1-3): 세 곳** — 데몬 `locate_send_exe` · discovery `locate_daemon_exe` · 하네스 `roundtrip_smoke.rs` `sibling_send_exe`. 옛 줄 둘은 낡았다. **처리 2-2 U1**: 셋이 platform `env::sibling_exe` 한 곳을 부른다(ADR-0282).
 - T-10(2026-08-26)에서 「discovery 를 없애지 않는다」로 종결한 적이 있다. 아래 후보 6 은 **새 근거**(클라·데몬 분리 원칙 · 원격 대비)로 그것을 다시 연다.
 
 ### 결정 후보 6 — discovery 를 뽀개 데몬·셸에 각각 둔다
@@ -318,7 +318,7 @@
 | 데몬이 `tracing-subscriber` 를 선언만 하고 쓰지 않는다 | `crates/engram-dashboard-daemon/Cargo.toml` (CLAUDE.md 「의존성」 절 기록) | 4단계(데몬 정리) |
 | agent 가 TS 바인딩을 생성·커밋하는데 프론트가 가져다 쓰는 곳이 0 — 그런데 ts-rs 를 운영 의존으로 안고 있다 | `crates/engram-dashboard-agent/bindings/` | 4단계(agent) — 별칭 import 여부부터 확인 |
 | agent 안 `transport/`(PTY·stdio)와 transport crate(WebSocket) 이름이 같다 | `crates/engram-dashboard-agent/src/transport/` | 4단계 이름 변경 |
-| 실행 파일 위치 계산이 두 곳에 갈림 | `crates/engram-dashboard-daemon/src/lib.rs:96,146` · `crates/engram-dashboard-discovery/src/lib.rs:981` | 2-2(discovery 나누기) |
+| ~~실행 파일 위치 계산이 두 곳에 갈림~~ **→ 처리 2-2 U1**: 실제로는 세 곳이었다 — 셋 다 platform `env::sibling_exe` 를 부른다(ADR-0282) | ~~`crates/engram-dashboard-daemon/src/lib.rs:96,146` · `crates/engram-dashboard-discovery/src/lib.rs:981`~~ 실제 = 데몬 `src/lib.rs` `locate_send_exe` · discovery `src/lib.rs` `locate_daemon_exe` · 데몬 `src/bin/roundtrip_smoke.rs` `sibling_send_exe` | ~~2-2(discovery 나누기)~~ 처리됨 |
 | 셸이 command 의 읽기/쓰기 표식·카탈로그 항목을 손으로 복제 | `src-tauri/src/view_commands.rs:107,573-633` | 4단계(command 정리 3·4) |
 | 패킷 `CommandListEntry` 가 명부 항목 `RosterEntry` 와 거의 같다(`available` 은 늘 참) | `crates/engram-dashboard-protocol/src/messages.rs:392` · `crates/engram-dashboard-command/src/roster.rs:10` | 3-1(`protocol` 정리) 때 함께 볼 것 |
 | 입구 인자 검사의 순서 함정(`contains` → `check_args` → `call`) — 입구가 둘이 되면 묶음 함수로 | `crates/engram-dashboard-daemon/src/control/commands.rs:172-182` | 입구가 늘 때 |

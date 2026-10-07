@@ -650,7 +650,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in

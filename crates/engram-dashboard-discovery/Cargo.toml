@@ -10,10 +10,10 @@ thiserror = "1"   # DiscoveryError
 tracing = "0.1"   # M1 복구 warn 로그
 dunce = "1"       # daemon exe 절대경로(canonicalize, UNC 회피) — WMI 는 상대경로면 RV=9
 # 폴링 시계 `Clock` 의 상위 트레이트 `time::Clock`(지금 읽기)과 운영 구현 `time::SystemClock`
-#   (ADR-0275 · ADR-0269 결정 3-2).
+#   (ADR-0275 · ADR-0269 결정 3-2) · 데이터 폴더 쓰기 확인 둘의 쓰기 프로브(`writable` — ADR-0282).
 engram-dashboard-base = { path = "../engram-dashboard-base" }
 # liveness 판정(`process::pid_alive_with_start_time`) 공유 — net portfile 의 stale 판정과 동일 로직(DRY).
-#   데몬 exe 의 파일 이름(`env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기(`spawn::spawn_outside_job`
+#   데몬 exe 의 경로 · 파일 이름(`env::sibling_exe` · `env::exe_file_name` — `locate_daemon_exe`) · Job 밖에서 띄우기(`spawn::spawn_outside_job`
 #   — WMI) · 끄기 fallback 의 트리 끄기(`process::kill_tree`)도 여기서 온다 — 이 crate 는 `windows` 를 직접
 #   의존하지 않는다(ADR-0266).
 #   ★이 OS 헬퍼들을 `agent` 를 거쳐 받지 말 것★ — 에이전트 런타임 전체(portable-pty·Job Object)를 지게 된다
