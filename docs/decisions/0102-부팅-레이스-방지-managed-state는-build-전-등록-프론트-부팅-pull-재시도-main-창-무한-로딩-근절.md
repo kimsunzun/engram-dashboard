@@ -1,7 +1,7 @@
 # ADR-0102: 부팅 레이스 방지 — managed state는 build 전 등록 + 프론트 부팅 pull 재시도 (main 창 무한 로딩 근절)
 
 - 상태: 확정 (2026-07-23, 근거: 부팅 순서 조사 + 사용자 결정)
-- 관련: ADR-0057(레이아웃/창 상태) · ADR-0100(release 패키징 — 이 fix 반영 위해 release/ 재빌드) · `src-tauri/src/lib.rs`(manage 위치) · `src/components/layout/WindowLayout.tsx`·`src/store/viewStore.ts`(부팅 pull) · `src/store/eventBus.ts`
+- 관련: ADR-0057(레이아웃/창 상태) · ADR-0100(release 패키징 — 이 fix 반영 위해 release/ 재빌드) · `src-tauri/src/lib.rs`(manage 위치) · `src/components/layout/WindowLayout.tsx`·`src/store/viewStore.ts`(부팅 pull) · `src/store/eventBus.ts` · ADR-0283(2026-10-08 — ★맥락 · 영향의 전제 「webview 가 setup 전에 invoke 할 수 있다」는 정적 창(main · agent-tree)에 더는 서지 않는다★: 두 창도 `"create": false` 로 두고 사용자 setup 의 부팅 단계 ⑧ 이 만들어, 창이 생기는 첫 순간이 setup 안이다. ★결정 1(빌더 manage)은 그대로 옳다★ — setup 안으로 옮기면 창을 만드는 ⑧ 보다 앞인지를 손으로 지켜야 하고, 빌더에 두면 setup 안의 순서와 무관하게 어느 창보다 먼저 있다(`lib.rs` 의 `// ADR-0102` 주석). 영향의 「setup() 안으로 되돌리면 이 레이스가 재발한다」는 그 손 순서를 어길 때의 말로 읽는다. 결정의 개정이 아니라 전제의 갱신이다)
 
 ## 맥락
 release exe 실행 시 main 창이 프론트 로딩 플레이스홀더("창 로딩 중… (label: main)")에 **영구 고착**하는 현상. 진단 결과:

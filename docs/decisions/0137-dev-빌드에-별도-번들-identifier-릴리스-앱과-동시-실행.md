@@ -1,7 +1,7 @@
 # ADR-0137: dev 빌드에 별도 번들 identifier — 릴리스 앱과 동시 실행
 
-- 상태: 확정 (2026-08-16, 근거: 실측 + 플러그인 소스 확인 2.4.2/2.4.3)
-- 관련: ADR-0134(단일 인스턴스 스코프) · ADR-0135(잠금 파일 = 연결키) · `src-tauri/tauri.dev.conf.json` · `scripts/tauri-cli.mjs` · step-log S21
+- 상태: 확정 (2026-08-16, 근거: 실측 + 플러그인 소스 확인 2.4.2/2.4.3) · 부분 폐기 by ADR-0283 (영향의 WebView2 데이터 폴더 대가 서술)
+- 관련: ADR-0134(단일 인스턴스 스코프) · ADR-0135(잠금 파일 = 연결키) · `src-tauri/tauri.dev.conf.json` · `scripts/tauri-cli.mjs` · step-log S21 · Amended by ADR-0283 (영향의 WebView2 데이터 폴더 대가 서술)
 
 ## 맥락
 
@@ -31,6 +31,7 @@
 ## 영향 / 불변식
 
 - **identifier는 WebView2 데이터 폴더도 정한다** → dev 빌드의 저장된 웹 상태가 **한 번 초기화**된다(의도된 대가). 데몬 데이터 폴더는 identifier와 무관해 그대로다.
+  - ★(2026-10-08 개정 표시 — ADR-0283) 지금은 그렇지 않다★ — WebView2 데이터 폴더는 데이터 루트 아래 `webview\` 이고(dev = `.engram-dev\webview`) identifier 와 무관하다. 그 폴더에 쓸 수 없는 실행만 identifier 의 Tauri 기본 자리(`%LOCALAPPDATA%\<identifier>`)로 물러난다.
 - **identifier를 키로 삼는 OS 통합(딥링크·알림·파일 연결)이 dev와 release를 다른 앱으로 취급한다** — 이것이 이 결정의 목적이다.
 - **★잔여 미해결(의도적)★:** 서로 다른 폴더에 푼 **릴리스 배포판 둘**은 여전히 같은 identifier를 공유해 서로를 막는다. 이 결정은 dev↔release 축만 연다.
 - **`build`에 오버레이가 새면 배포 정체성이 조용히 바뀐다** — `scripts/tauri-cli.mjs`의 서브커맨드 판정과 `--` 경계 판정이 그 벽이다. CI의 `build-release.ps1`도 이 래퍼를 지나간다.
