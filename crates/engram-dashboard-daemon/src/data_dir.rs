@@ -45,7 +45,7 @@ const LOCAL_DATA_DIR: &str = ".engram-dev";
 const RELEASE_DATA_DIR: &str = "data";
 
 const DAEMON_DIR: &str = "daemon";
-/// 프로그램이 쓰고 다음 실행에 다시 읽는 것(명부·프리셋·거절 기록).
+/// 프로그램이 쓰고 다음 실행에 다시 읽는 것(명부·프리셋).
 const STATE_DIR: &str = "state";
 /// 버려도 되는 것(잠금+접속 파일 · 토큰을 담은 스폰 부착 파일 · 임시 폴더).
 const RUN_DIR: &str = "run";
@@ -199,9 +199,8 @@ fn is_workspace_root(dir: &Path) -> bool {
 ///
 /// ★셸 폴더(`shell\…` · `webview\`)는 여기 없다★ — 셸이 자기 배치로 갖는다(ADR-0271 결정 4).
 ///
-/// ★한 저장소만 쓰는 파일 이름은 여기 두지 않는다★: `agents.json` · `presets.json` ·
-/// `usage_rejects.json` 은 각 저장소가 소유하고 받은 디렉터리 안에서만 붙인다. 이름까지 여기 두면 그
-/// 저장소(agent crate)가 데몬을 알아야 한다.
+/// ★한 저장소만 쓰는 파일 이름은 여기 두지 않는다★: `agents.json` · `presets.json` 은 각 저장소가 소유하고
+/// 받은 디렉터리 안에서만 붙인다. 이름까지 여기 두면 그 저장소(agent crate)가 데몬을 알아야 한다.
 // ADR-0264
 // ADR-0271
 #[derive(Debug, Clone, PartialEq, Eq)]
