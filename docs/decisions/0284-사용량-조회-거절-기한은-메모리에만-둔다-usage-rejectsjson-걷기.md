@@ -1,6 +1,6 @@
 # ADR-0284: 사용량 조회 거절 기한은 메모리에만 둔다 (usage_rejects.json 걷기)
 
-- 상태: 확정 (2026-10-08, 근거: 사용자 결정) · **구현 전**
+- 상태: 확정 (2026-10-08, 근거: 사용자 결정 + 구현 `9ab1523`(2026-10-08 · `/review code light` PASS(재수정 1회) · `/qa quick` PASS — 사용자 지시로 light · 수치 · 항목 = step-log))
 - 관련: Amends ADR-0264 (결정 1 의 거절 기록 파일) · PRD `docs/process/S21-usage-limit-slot/prd.md` R24 · R29 · TRD `docs/process/S21-usage-limit-slot/trd.md` §3 #30 · 「거절 저장(R29)」 절 · TRD `docs/process/S21-storage/trd.md` §2-1 · 조사 `docs/research/usage-reject-persistence-2026-10-08.md` · `crates/engram-dashboard-daemon/src/usage_service/reject_store.rs`
 
 ## 맥락
