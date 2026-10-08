@@ -15,10 +15,10 @@
 #       갱신하지 않았는데도). manifest 를 고칠 땐 산출 디렉토리를 함께 확인할 것.
 #     - 데몬은 프라이밍 prompts/agent-priming.md 를 find_install_root(=릴리즈에선 exe 폴더) 기준
 #       상대해석한다(ADR-0092). 릴리즈 폴더엔 .git·[workspace] 마커가 없으므로 install_root = exe 디렉토리.
-#     - engram.exe 는 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 읽는다
-#       (ADR-0092 계열 외부화). ★이 파일이 빠져도 help 는 죽지 않는다★ — 바이너리에 include_str! 사본이
-#       있어 내용은 그대로 나가고 stderr 에 사유 한 줄만 붙는다. 그래서 부재가 조용하고, 아래 tripwire 가
-#       그 침묵을 대신 잡는다(배송된 폴더의 본문이 낡은 사본으로 조용히 갈리는 것이 이 게이트의 표적).
+#     - 데몬은 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 요청마다 읽어 /control/help
+#       로 낸다(ADR-0092 계열 외부화 · ADR-0284 — engram.exe 는 화면을 데몬에 청할 뿐 이 파일을 읽지 않는다).
+#       ★사본은 없다★ — 이 파일이 빠진 배포판은 모든 help 호출이 반려(INTERNAL)로 답한다. 아래 tripwire 는
+#       그 실패가 배포 뒤 에이전트 앞이 아니라 배포 전에 나게 하는 장치다.
 #   따라서 manifest(이 스크립트의 EXPECTED_*)가 곧 "무엇을 배송하는가"의 단일 출처다. manifest 를 바꾸면
 #   위 동거 불변식이 깨지지 않는지 반드시 재검토한다. tauri.conf.json 은 건드리지 않는다(정식 번들은 유예).
 #

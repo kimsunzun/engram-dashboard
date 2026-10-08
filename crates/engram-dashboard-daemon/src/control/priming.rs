@@ -702,7 +702,7 @@ mod tests {
 
     // ★C3 회신 계약(ADR-0103 결정 2/3)의 pin 은 여기 없다 — 되살리지 말 것★: 프라이밍은 봉투 문법을
     //   더 이상 싣지 않는다(포인터로 줄었다). 계약은 두 표면으로 갈려 각자의 파일이 지킨다 —
-    //   봉투 인식(`type="request"` · `<notice>` · 받은 id 로 회신)은 `bin/engram.rs` 의
+    //   봉투 인식(`type="request"` · `<notice>` · 받은 id 로 회신)은 `control/help.rs` 의
     //   `the_mail_screen_teaches_the_reply_contract` 가, 툴 인자 표기(snake_case `reply_to`·`reply_by`)는
     //   `control/mcp_server.rs` 의 **입력 스키마** pin 이 본다(설명문이 아니다 — ADR-0220 결정 3 으로
     //   인자 계약의 집이 스키마로 옮겼다). ★프라이밍은 이제 행동 규칙도 지지 않는다★ — 그 네 줄과 에스컬레이션 pin 은

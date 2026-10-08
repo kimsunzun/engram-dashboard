@@ -348,7 +348,7 @@ async fn run_accept_loop(
     messaging_slot: Arc<control::mcp_server::MessagingSlot>,
     // 명령 버스(ADR-0155/0156/0160) — 명부·자리 표·1단계 표를 묶은 **그 한 부**. 여기서 만들지 않는
     //   이유는 제어 평면의 두 라우트(발견·호출)가 같은 부를 쓰기 때문이다
-    //   (`control::mcp_server::start_mcp_server`). 안에서 만들면 그 라우트들은 자기 사본을 보게 되고,
+    //   (`control::mcp_server::start_mcp_server_with_help`). 안에서 만들면 그 라우트들은 자기 사본을 보게 되고,
     //   증상은 에러도 로그도 없이 발견이 클라이언트가 얹은 이름을 안 보여 주고 중계가 남의 자리 표를
     //   쓰는 것이다.
     bus: command_delivery::CommandBus,
@@ -615,12 +615,15 @@ pub async fn run() -> Result<(), i32> {
     let (control, mut mcp_server_handle): (
         Arc<dyn engram_dashboard_agent::types::ControlChannel>,
         Option<control::mcp_server::McpServerHandle>,
-    ) = match control::mcp_server::start_mcp_server(
+    ) = match control::mcp_server::start_mcp_server_with_help(
         control_registry.clone(),
         manager_slot.clone(),
         messaging_slot.clone(),
         command_table_slot.clone(),
         command_bus.clone(),
+        // ADR-0284: help 본문 원천은 아래 프라이밍과 같은 앵커(설치 위치)다 — 원천을 여기서 짓는 것은
+        //   서버가 안에서 짓지 않게 하려는 것이다(시험이 알려진 본문을 넣는다).
+        control::help::HelpSource::from_install_root(),
     )
     .await
     {

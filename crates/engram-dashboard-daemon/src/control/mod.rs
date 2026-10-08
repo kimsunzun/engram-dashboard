@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod catalog;
 pub mod commands;
+pub mod help;
 pub mod ingress;
 pub mod mcp_config;
 pub mod mcp_server;

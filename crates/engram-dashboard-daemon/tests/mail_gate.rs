@@ -22,9 +22,10 @@ use engram_dashboard_agent::types::{
 };
 use engram_dashboard_daemon::command_delivery::{BusSweeper, CommandBus};
 use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
+use engram_dashboard_daemon::control::help::HelpSource;
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
-    RosterBroadcastSlot,
+    start_mcp_server_with_help, start_mcp_server_without_help, CommandTableSlot, ManagerSlot,
+    McpServerHandle, MessagingSlot, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
@@ -76,6 +77,37 @@ struct Fixture {
     /// 그래서 아래 `a_relayed_name_still_reaches_its_owner_through_this_fixture` 가 함께 있어야 한다.
     _relay_sweeper: BusSweeper,
     _handle: McpServerHandle,
+    /// 서버에 주입한 help 본문 폴더([`KNOWN_HELP`]) — 픽스처가 끝나면 지운다.
+    help_dir: std::path::PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.help_dir);
+    }
+}
+
+/// 픽스처가 서버에 주입하는 help 본문 — 구획 다섯이 다 있어 원천이 받아들인다. 머리글은 첫 구획 앞이라
+/// 버려진다.
+///
+/// ★저장소 본문 파일을 쓰지 않는다★: 화면 글이 바뀔 때마다 이 파일의 기대값이 따라 바뀌면 게이트 시험이
+///   글 편집에 매인다. 알려진 본문이면 「어느 자격증명이든 이 화면을 글자 그대로 받는다」를 바로 단언할 수
+///   있다.
+const KNOWN_HELP: &str = "# 시험용 머리글 — 버려진다\n\
+## root\n{tool} 목차 화면\n\
+## mail\n{tool} mail 화면\n\
+## agent\n{tool} agent 화면\n\
+## window\n{tool} window 화면\n\
+## settings\n{tool} settings 화면\n";
+
+/// [`KNOWN_HELP`] 를 릴리스 모양(`<폴더>\prompts\engram-help.md`)으로 둔 폴더.
+fn known_help_dir(tag: &str) -> std::path::PathBuf {
+    let dir =
+        std::env::temp_dir().join(format!("engram-mail-gate-help-{tag}-{}", AgentId::new_v4()));
+    let prompts = dir.join("prompts");
+    std::fs::create_dir_all(&prompts).expect("prompts 폴더");
+    std::fs::write(prompts.join("engram-help.md"), KNOWN_HELP).expect("help 본문");
+    dir
 }
 
 /// 얹은 이름을 **실제로 답하는** 주인 — 대시보드가 창·탭·슬롯 명령에 대해 하는 그 일이다.
@@ -176,13 +208,16 @@ async fn fixture(tag: &str) -> Fixture {
             ),
         ),
     );
-    let handle = start_mcp_server(
+    let help_dir = known_help_dir(tag);
+    let handle = start_mcp_server_with_help(
         registry.clone(),
         manager_slot.clone(),
         // ★비워 둔다★: 우편 핸들러가 503 을 내야 "게이트를 통과했다" 가 거절과 구별된다.
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
         relay_bus.clone(),
+        // ADR-0284: 운영 조립과 같은 주입판에 알려진 본문 — 시험 exe 의 자리와 무관하게 화면이 정해진다.
+        HelpSource::new(help_dir.clone()),
     )
     .await
     .unwrap_or_else(|e| panic!("start mcp server({tag}): {e}"));
@@ -232,6 +267,7 @@ async fn fixture(tag: &str) -> Fixture {
         bus: relay_bus,
         _relay_sweeper: relay_sweeper,
         _handle: handle,
+        help_dir,
     }
 }
 
@@ -322,6 +358,45 @@ async fn the_same_credential_passes_on_the_catalog_routes() {
         assert!(!is_mail_rejection(status, &text));
         let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
         assert!(v.get("agents").is_some(), "명부 응답이어야: {text}");
+    }
+}
+
+/// ★help 화면도 제어 평면이다★ — 우편이 막힌 자격증명도 우편 화면을 읽어야 그 채널의 계약을 배우고,
+///   화면은 누가 묻든 같다(ADR-0220 결정 4). 라우트를 우편으로 분류하는 회귀는 막힌 자격증명에게 거절을
+///   돌려주고, 호출자로 화면을 고르는 회귀는 두 자격증명의 화면을 가른다.
+/// ★"거절이 아니다" 만 보지 않는다★: 주입한 본문의 **그 화면**이 글자 그대로 오는지 본다 — 라우트가
+///   빠지거나 원천이 서버까지 안 닿으면 여기서 갈린다.
+// ADR-0284
+#[tokio::test]
+async fn both_credentials_read_the_same_help_screen() {
+    use engram_dashboard_agent::types::{
+        CLI_EXE_NAME, CLI_GROUP_MAIL, CLI_HELP_ROUTE, CLI_HELP_SCREEN_KEY, CLI_HELP_TOPIC_KEY,
+    };
+    let f = fixture("help").await;
+    for token in [&f.mcp_token, &f.cli_token] {
+        for (word, want) in [
+            (None, format!("{CLI_EXE_NAME} 목차 화면\n")),
+            (
+                Some(CLI_GROUP_MAIL),
+                format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} 화면\n"),
+            ),
+        ] {
+            let (status, text) = f
+                .post(
+                    token,
+                    CLI_HELP_ROUTE,
+                    serde_json::json!({ CLI_HELP_TOPIC_KEY: word }),
+                )
+                .await;
+            assert_eq!(status, 200, "help 는 통과({word:?}): {text}");
+            assert!(!is_mail_rejection(status, &text), "{word:?}: {text}");
+            let v: serde_json::Value = serde_json::from_str(&text).expect("JSON 응답");
+            assert_eq!(
+                v[CLI_HELP_SCREEN_KEY].as_str(),
+                Some(want.as_str()),
+                "주입한 본문의 화면이 글자 그대로 와야({word:?}): {text}"
+            );
+        }
     }
 }
 
@@ -433,7 +508,7 @@ async fn a_credential_minted_by_the_real_provision_path_is_refused_end_to_end() 
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),
@@ -509,7 +584,7 @@ async fn a_backend_outside_the_mail_plane_gets_control_but_no_mail() {
     let manager_slot = Arc::new(ManagerSlot::new());
     let (relay_bus, _sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),

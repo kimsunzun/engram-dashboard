@@ -88,6 +88,14 @@ pub(super) const CONTROL_COMMANDS_PATH: &str = "/control/commands";
 ///   않는다는 것이 이 라우트를 더하며 지킨 유일한 하드 제약이다.
 const CONTROL_CALL_PATH: &str = "/control/call";
 
+/// CLI help 화면 입구 — `engram help [낱말]` 이 화면 낱말 하나를 실어 POST 하고 데몬이 화면을 낸다
+/// (`control::help`). ★경로를 여기 다시 적지 않는다★ — CLI 와 이 서버가 agent 상수 한 벌을 본다(형제
+/// 다섯은 아직 손으로 맞춘다).
+/// ★우편이 막힌 자격증명도 닿는다★ — 우편 화면을 읽는 것은 우편이 아니고, 화면은 누구에게나 같다
+///   (`ControlRoute::is_mail`).
+// ADR-0284
+const CONTROL_HELP_PATH: &str = engram_dashboard_agent::types::CLI_HELP_ROUTE;
+
 /// 제어 평면 경로의 네임스페이스 접두 — **분류를 빠뜨린 경로를 fail-closed 로 접는 기준**이다.
 ///
 /// ★비교는 **경로 세그먼트 경계**로 한다(맨 `starts_with` 금지)★: 문자열 접두만 보면 `/controlfoo`·
@@ -98,7 +106,7 @@ const CONTROL_PATH_PREFIX: &str = "/control";
 
 /// 데몬이 여는 CLI 평문 라우트 전량(`/mcp` nest 는 rmcp 소유라 여기 없다).
 ///
-/// ★라우터 조립과 우편 분류의 **단일 명단**이다★: `start_mcp_server` 가 이 명단을 돌며 라우트를 얹는다.
+/// ★라우터 조립과 우편 분류의 **단일 명단**이다★: `start_mcp_server_with_help` 가 이 명단을 돌며 라우트를 얹는다.
 ///   명단에 들어온 라우트는 아래 `is_mail` 의 exhaustive match 가 **컴파일 단계에서** 분류를 강제한다.
 /// ★명단 밖 제어 경로는 우편으로 접힌다(`mail_gated_path`)★ — 순회 뒤에 `.route()` 를 손으로 덧붙이는
 ///   실수를 컴파일러가 막지는 못하지만, 그렇게 생긴 경로는 **분류 누락이 곧 거절**이 되어 조용히 열리지
@@ -112,15 +120,17 @@ enum ControlRoute {
     Agent,
     Commands,
     Call,
+    Help,
 }
 
 impl ControlRoute {
-    const ALL: [ControlRoute; 5] = [
+    const ALL: [ControlRoute; 6] = [
         Self::Send,
         Self::Messages,
         Self::Agent,
         Self::Commands,
         Self::Call,
+        Self::Help,
     ];
 
     const fn path(self) -> &'static str {
@@ -130,6 +140,7 @@ impl ControlRoute {
             Self::Agent => CONTROL_AGENT_PATH,
             Self::Commands => CONTROL_COMMANDS_PATH,
             Self::Call => CONTROL_CALL_PATH,
+            Self::Help => CONTROL_HELP_PATH,
         }
     }
 
@@ -153,6 +164,10 @@ impl ControlRoute {
             // 제어 평면 — 발견과 호출은 우편이 아니다. 편지를 못 쓰는 자격증명도 무엇을 부를 수 있는지
             //   알아야 하고, 부를 수 있어야 한다(ADR-0132 결정 5 — 제어는 전원 개방).
             Self::Agent | Self::Commands | Self::Call => false,
+            // 화면을 읽는 것은 우편이 아니다 — 우편이 막힌 자격증명도 우편 화면을 읽어야 그 채널의
+            //   계약을 배운다(ADR-0220 결정 4 — 화면은 누구에게나 같다).
+            // ADR-0284
+            Self::Help => false,
         }
     }
 
@@ -1213,6 +1228,31 @@ async fn control_call_handler(
     Json(result.into_json()).into_response()
 }
 
+// ── CLI help 화면 입구(/control/help) ───────────────────────────────────────────────
+
+/// help 화면 — 성공·반려 모두 200 + JSON이고, 답 자체가 없는 경우만 500 이다(그 갈래의 범위는
+/// [`internal_error`] 주석). 바디 계약 · 실패 정책은 `control::help` 가 진다.
+///
+/// ★신원은 존재만 요구한다★: 화면은 누가 묻든 같아서 신원을 화면 선택에 쓰지 않는다. 토큰 없는 호출이
+///   여기 닿으면 안 되기 때문에 방어적 401 만 둔다(형제 `control_agent_handler` 와 같다).
+/// ★`spawn_blocking` 안에서 읽는다★: 원천은 요청마다 본문 파일을 읽으므로(캐시 없음) async 워커에서
+///   읽으면 그 디스크 대기 동안 같은 워커에 얹힌 다른 요청이 묶인다.
+// ADR-0284
+async fn control_help_handler(
+    axum::extract::State(help): axum::extract::State<Arc<super::help::HelpSource>>,
+    identity: Option<axum::Extension<BoundIdentity>>,
+    body: axum::body::Bytes,
+) -> Response {
+    if identity.is_none() {
+        return unauthorized();
+    }
+    let Ok(result) = tokio::task::spawn_blocking(move || help.answer(&body)).await else {
+        tracing::error!(entrance = "cli", "help 화면 태스크 실패(패닉)");
+        return internal_error();
+    };
+    Json(result.into_json()).into_response()
+}
+
 /// 500 응답(빈 body) — blocking 태스크가 패닉해 **답 자체가 없는** 경우.
 ///
 /// ★릴리스에서는 이 갈래에 닿지 못한다(알려진 범위)★: 워크스페이스 `[profile.release]` 가
@@ -1234,12 +1274,36 @@ fn service_unavailable() -> Response {
         .expect("valid 503 response")
 }
 
+/// help 원천 없이 띄우는 판 — `/control/help` 가 모든 요청에 `INTERNAL`(`help source not configured on this
+/// server`)로 답하고 기동 때 warn 한 줄을 남긴다. 인자 뜻은 [`start_mcp_server_with_help`] 와 같다.
+///
+/// ★help 를 부르지 않는 시험 · 하네스용이다 — 운영 조립(`lib.rs`)이 이 판을 부르면 help 가 늘 반려다★.
+///   이름이 「help 없음」을 말하게 둔 것은 그런 호출이 리뷰에서 눈에 띄게 하려는 것이다.
+// ADR-0284
+pub async fn start_mcp_server_without_help(
+    registry: Arc<ControlRegistry>,
+    manager: Arc<ManagerSlot>,
+    messaging: Arc<MessagingSlot>,
+    commands: Arc<CommandTableSlot>,
+    bus: crate::command_delivery::CommandBus,
+) -> std::io::Result<McpServerHandle> {
+    start_mcp_server_with_help(
+        registry,
+        manager,
+        messaging,
+        commands,
+        bus,
+        super::help::HelpSource::not_configured(),
+    )
+    .await
+}
+
 /// registry 는 auth 미들웨어(검증)와 provision(발급)이 공유하는 **동일 Arc** 여야 한다.
 ///
 /// ★로컬 전용 + DNS rebinding 방어★: bind 는 127.0.0.1:0(OS 할당 포트). StreamableHttpServerConfig 는
 ///   기본 allowed_hosts=[localhost,127.0.0.1,::1] 로 로컬 Host 만 허용(rmcp 기본). stateful_mode=true(기본)
 ///   라 세션이 Mcp-Session-Id 로 유지된다.
-pub async fn start_mcp_server(
+pub async fn start_mcp_server_with_help(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
     messaging: Arc<MessagingSlot>,
@@ -1252,6 +1316,10 @@ pub async fn start_mcp_server(
     //   배달이 여기서 나오므로 조립부가 **수락 루프가 드는 그 한 부**를 넘겨야 한다 — 새로 만들어 넘기면
     //   발견은 영원히 데몬 자기 이름만 내고 중계는 자기만의 자리 표를 쓴다(ADR-0160).
     bus: crate::command_delivery::CommandBus,
+    // ★help 원천은 조립부가 짓는다★ — 서버가 안에서 설치 위치로 지으면 시험이 알려진 본문을 넣을 수
+    //   없고, 화면이 시험 exe 의 자리 · `CARGO_TARGET_DIR` 에 매인다.
+    // ADR-0284
+    help: super::help::HelpSource,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr: SocketAddr = listener.local_addr()?;
@@ -1296,6 +1364,8 @@ pub async fn start_mcp_server(
         bus,
     };
     let agent_state = ControlAgentState { commands };
+    help.log_startup();
+    let help = Arc::new(help);
     // ★명단(`ControlRoute::ALL`)을 돌며 얹는다 — 빌더 체인으로 되돌리지 말 것★: 새 라우트가 명단에
     //   들어와야 서빙이 되고, 들어오면 `is_mail` 의 exhaustive match 가 우편 분류를 컴파일 단계에서
     //   강제한다(ADR-0133). 체인은 그 강제를 우회한다.
@@ -1321,6 +1391,10 @@ pub async fn start_mcp_server(
             ControlRoute::Call => app.route(
                 route.path(),
                 axum::routing::post(control_call_handler).with_state(catalog_state.clone()),
+            ),
+            ControlRoute::Help => app.route(
+                route.path(),
+                axum::routing::post(control_help_handler).with_state(help.clone()),
             ),
         };
     }
@@ -1372,6 +1446,7 @@ mod tests {
             ControlRoute::Agent => false,
             ControlRoute::Commands => false,
             ControlRoute::Call => false,
+            ControlRoute::Help => false,
         }
     }
 
@@ -1391,7 +1466,7 @@ mod tests {
             );
         }
         // 라우터는 이 명단을 돌며 조립된다 — 길이가 줄면 라우트가 조용히 사라진 것이다.
-        assert_eq!(ControlRoute::ALL.len(), 5);
+        assert_eq!(ControlRoute::ALL.len(), 6);
         assert_eq!(
             ControlRoute::ALL.iter().filter(|r| r.is_mail()).count(),
             2,
@@ -1431,7 +1506,12 @@ mod tests {
             );
         }
         // 명단에 있는 라우트는 자기 분류를 그대로 따른다(접기가 분류를 덮어쓰지 않는다).
-        for open in [CONTROL_AGENT_PATH, CONTROL_COMMANDS_PATH, CONTROL_CALL_PATH] {
+        for open in [
+            CONTROL_AGENT_PATH,
+            CONTROL_COMMANDS_PATH,
+            CONTROL_CALL_PATH,
+            CONTROL_HELP_PATH,
+        ] {
             assert!(!mail_gated_path(open), "제어 평면은 전원 개방: {open}");
         }
         for route in ControlRoute::ALL {
@@ -1633,7 +1713,7 @@ mod tests {
     ///   그 침묵을 잡는 곳이 여기 하나다.
     ///
     /// ★회신 계약의 **툴 인자 표기**(snake_case)도 여기서 본다(ADR-0103 결정 2/3)★: 봉투 인식
-    ///   (`<notice>` 포함)은 CLI 쪽 `help mail recv` 화면이 지고(`bin/engram.rs`), 이쪽은 자기 입구의
+    ///   (`<notice>` 포함)은 `engram help mail` 화면이 지고(`control/help.rs`), 이쪽은 자기 입구의
     ///   인자 철자만 진다. 한 계약을 표면별로 갈라 두는 것이 ADR-0126 결정 1 의 모양이다.
     ///
     /// ★아래 두 단언은 옛 지시서에만 있다가 이 표면으로 되살린 것이다 — 지우지 말 것★:
@@ -1694,7 +1774,7 @@ mod tests {
         }
         // ★위 ① (`pending` 에서 상대 상태를 추론하지 말고 조회하라)은 `help mail` 화면으로 옮겼다★ —
         //   ADR-0211 결정 2 는 그대로 유효하고 옮긴 것은 표면이지 계약이 아니다. 그 자리의 고정은
-        //   `bin/engram.rs` 의 `the_mail_screen_teaches_the_reply_contract` 가 진다. 여기서는 그 화면을
+        //   `control/help.rs` 의 `the_mail_screen_teaches_the_reply_contract` 가 진다. 여기서는 그 화면을
         //   **가리키고 있는가**만 본다 — 포인터가 끊기면 인자 밖 계약 전체가 갈 곳을 잃는다.
         assert!(
             desc.contains("engram help mail"),
@@ -1731,7 +1811,7 @@ mod tests {
         let reg = Arc::new(ControlRegistry::new());
         // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
         let (relay_bus, _relay_sweeper) = crate::command_delivery::CommandBus::without_commands();
-        let handle = start_mcp_server(
+        let handle = start_mcp_server_without_help(
             reg,
             empty_slot(),
             empty_messaging_slot(),
@@ -1754,7 +1834,7 @@ mod tests {
         let reg = Arc::new(ControlRegistry::new());
         // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
         let (relay_bus, _relay_sweeper) = crate::command_delivery::CommandBus::without_commands();
-        let handle = start_mcp_server(
+        let handle = start_mcp_server_without_help(
             reg,
             empty_slot(),
             empty_messaging_slot(),

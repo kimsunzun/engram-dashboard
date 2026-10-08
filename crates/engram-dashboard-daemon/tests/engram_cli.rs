@@ -4,6 +4,9 @@
 //! (env 읽기·TCP·프로세스 종료코드 포함).
 //!
 //! ★claude 불요·결정적★: 스텁은 std 만 쓰고 고정 응답을 내므로 claude/데몬 없이 항상 같은 결과다.
+//! ★help 도 스텁 앞에서 잰다★: 화면은 데몬이 내므로(`/control/help`) 여기서 재는 것은 CLI 몫 — 요청 줄 ·
+//!   바디 글자 · 받은 화면을 그대로 찍기 · 실패 길 — 이고, 화면 내용은 데몬 시험(`control::help` ·
+//!   `tests/mail_gate.rs`)이 잰다.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -551,44 +554,88 @@ fn engram_agent_argument_errors_never_touch_the_network() {
             "hint 에 실행 가능한 help 명령이 하나도 없다({args:?}): {stdout}"
         );
         for suggested in suggestions {
-            let argv: Vec<&str> = suggested.split_whitespace().skip(1).collect();
-            let (out, code) = run_cli_without_credentials(&argv);
-            assert_eq!(
-                code, 0,
-                "hint 가 제안한 명령이 실제로 돌아야({args:?}): `{suggested}` → {out}"
-            );
+            assert_suggested_help_runs(&suggested, &format!("{args:?}"));
         }
     }
 }
 
 #[test]
 fn engram_agent_help_is_discoverable_the_same_way_as_the_mail_group() {
-    let (root, code) = run_cli_without_credentials(&["help"]);
-    assert_eq!(code, 0);
-    assert!(root.contains("agent"), "계열 목록에 agent: {root}");
-
-    let (canonical, code) = run_cli_without_credentials(&["help", "agent"]);
-    assert_eq!(code, 0, "계열 help 는 성공 종료: {canonical}");
-    for token in [
-        "list", "spawn", "new", "rename", "move", "--cwd", "--name", "--parent",
+    for args in [
+        vec!["help", "agent"],
+        vec!["agent", "--help"],
+        vec!["agent", "-h"],
     ] {
-        assert!(
-            canonical.contains(token),
-            "{token} 이 계열 help 에: {canonical}"
+        let (out, code, requests) = run_help_against_stub(&args, "engram agent - stub screen");
+        assert_eq!(code, 0, "계열 help 는 성공 종료({args:?}): {out}");
+        assert_eq!(
+            out, "engram agent - stub screen\n",
+            "받은 화면을 그대로 찍는다({args:?})"
         );
-    }
-    for alias in [vec!["agent", "--help"], vec!["agent", "-h"]] {
-        let (out, code) = run_cli_without_credentials(&alias);
-        assert_eq!(code, 0);
-        assert_eq!(out, canonical, "계열 help 화면이 같아야: {alias:?}");
+        assert_help_request(&requests, r#"{"topic":"agent"}"#);
     }
 }
 
-// ── ADR-0132: 계열 표면 — help 와 인자 오류(둘 다 네트워크를 타지 않는다) ──────────────────────
+// ── ADR-0132: 계열 표면 — help 와 인자 오류 ──────────────────────────────────────────────────
 
-/// ★목적지 = 아무도 리스닝할 수 없는 포트 0★: 이 구획의 케이스가 전부 인자 파싱 단계에서 끝난다는
-///   주장을 URL 로 못박는다. 하나라도 POST 를 시도하면 연결 실패 JSON(CONNECT_FAILED)이 나와 단언이 깨진다.
+/// ★목적지 = 아무도 리스닝할 수 없는 포트 0★: 인자 오류 케이스가 네트워크 전에 끝난다는 주장을 URL 로
+///   못박는다. 하나라도 POST 를 시도하면 연결 실패 JSON(CONNECT_FAILED)이 나와 단언이 깨진다. 데몬에 못 닿는
+///   실패를 일부러 낼 때도 같은 목적지를 쓴다.
 const UNREACHABLE_URL: &str = "http://127.0.0.1:0";
+
+/// help 라우트의 요청 줄 — ★글자로 적는다★: 공유 상수(`CLI_HELP_ROUTE`)로 적으면 그 상수가 바뀌어도 이
+///   단언은 따라 움직여 아무것도 못 잡는다.
+const HELP_REQUEST_LINE: &str = "POST /control/help HTTP/1.1\r\n";
+
+/// help 라우트 성공 봉투 — 데몬이 렌더한 화면 하나를 싣는다.
+fn screen_response(screen: &str) -> &'static str {
+    ok_response(&serde_json::json!({ "screen": screen }).to_string())
+}
+
+/// help 호출 하나를 화면 스텁 앞에서 돌린다 — (stdout, exit code, 스텁이 받은 요청들).
+fn run_help_against_stub(args: &[&str], screen: &str) -> (String, i32, Vec<String>) {
+    let (host, port, stub) = spawn_scripted_stub(vec![screen_response(screen)]);
+    let (stdout, code) = run_cli(&format!("http://{host}:{port}"), args, None);
+    let requests = stub.join().expect("stub join");
+    (stdout, code, requests)
+}
+
+/// 요청이 정확히 하나이고, help 라우트로 그 바디를 **글자 그대로** 실었나.
+fn assert_help_request(requests: &[String], body: &str) {
+    assert_eq!(requests.len(), 1, "help 는 왕복 하나: {requests:?}");
+    let request = &requests[0];
+    assert!(
+        request.starts_with(HELP_REQUEST_LINE),
+        "help 라우트로 가야: {request}"
+    );
+    assert_eq!(
+        request.split_once("\r\n\r\n").map(|(_, b)| b),
+        Some(body),
+        "요청 바디는 글자 그대로: {request}"
+    );
+}
+
+/// ★hint 가 제안한 help 명령이 실제로 도는지★: 형태가 맞아 help 요청 하나로 나가고(화면은 스텁이 낸다)
+///   exit 0 이어야 한다 — 시키는 대로 한 호출자가 같은 벽에 다시 부딪히면 안 된다. 그 낱말이 실제 화면인지는
+///   데몬 몫이다(`control::help`).
+fn assert_suggested_help_runs(suggested: &str, context: &str) {
+    let argv: Vec<&str> = suggested.split_whitespace().skip(1).collect();
+    let (out, code, requests) = run_help_against_stub(&argv, "stub screen");
+    assert_eq!(
+        code, 0,
+        "hint 가 제안한 명령이 실제로 돌아야({context}): `{suggested}` → {out}"
+    );
+    assert_eq!(
+        requests.len(),
+        1,
+        "`{suggested}` 는 help 요청 하나: {requests:?}"
+    );
+    assert!(
+        requests[0].starts_with(HELP_REQUEST_LINE),
+        "`{suggested}` 는 help 라우트로 가야: {}",
+        requests[0]
+    );
+}
 
 /// ★배송되는 파일 이름 ↔ 상수(`CLI_EXE_NAME`) 대조★ — 이 방향은 다른 어떤 테스트도 못 본다: 프라이밍
 ///   pin 은 프라이밍을 **상수와** 대조하고(둘이 함께 움직이면 통과), 아래 프로세스 테스트들은 바이너리를
@@ -615,44 +662,44 @@ fn the_built_binary_file_name_matches_the_shared_constant() {
     );
 }
 
+/// ★help 는 낱말 하나를 데몬에 싣고 받은 화면을 그대로 찍는다★ — 화면 내용(계열 목록 · 계열 화면)은 데몬이
+///   렌더하고 데몬 시험이 잰다. 여기서 재는 것은 CLI 몫: 요청 줄 · 바디 글자 · 화면을 다듬지 않고 줄바꿈 하나만
+///   붙여 찍기 · 형태 오류는 왕복 없이 끊기.
 #[test]
-fn engram_help_lists_groups_and_group_help_documents_its_verbs() {
-    let (stdout, code) = run_cli(UNREACHABLE_URL, &["help"], None);
-    assert_eq!(code, 0, "help 는 성공 종료: {stdout}");
-    assert!(stdout.contains("mail"), "계열 목록에 mail: {stdout}");
-    assert!(
-        stdout.contains("help"),
-        "계열 help 로 안내하는 줄이 있어야: {stdout}"
-    );
-
-    // 인자 0 = help 와 같은 화면(에이전트가 이름만 쳐도 표면을 본다).
-    let (bare, bare_code) = run_cli(UNREACHABLE_URL, &[], None);
-    assert_eq!(bare_code, 0, "인자 없는 호출도 성공 종료: {bare}");
-    assert_eq!(bare, stdout, "인자 없음 = help 와 같은 출력");
-
-    // 계열 낱말 넷이 각각 자기 화면을 낸다 — 최상위 목록이 가리킨 곳에 실제로 화면이 있어야 한다.
-    for group in ["mail", "agent", "window", "settings"] {
-        assert!(
-            stdout.contains(&format!("{CLI_EXE_NAME} help {group}")),
-            "최상위 목록이 {group} 을 가리켜야: {stdout}"
+fn engram_help_carries_one_word_and_prints_the_screen_it_gets() {
+    // 인자 0 = help = 목차(에이전트가 이름만 쳐도 표면을 본다).
+    let root = "engram - stub root\n\n  engram help mail      x\n";
+    for args in [vec!["help"], vec![]] {
+        let (stdout, code, requests) = run_help_against_stub(&args, root);
+        assert_eq!(code, 0, "help 는 성공 종료({args:?}): {stdout}");
+        assert_eq!(
+            stdout,
+            format!("{root}\n"),
+            "받은 화면 + 줄바꿈 하나({args:?})"
         );
-        let (screen, code) = run_cli(UNREACHABLE_URL, &["help", group], None);
-        assert_eq!(code, 0, "계열 help 는 성공 종료({group}): {screen}");
-        assert!(
-            screen.starts_with(&format!("{CLI_EXE_NAME} {group} ")),
-            "화면 머리가 자기 계열이어야({group}): {screen}"
-        );
-        assert_ne!(screen, stdout, "{group} 화면이 최상위와 같다");
+        assert_help_request(&requests, r#"{"topic":null}"#);
     }
-    // 계열 밑으로 한 칸 더 들어가는 자리는 없다 — 인자 오류로 끊고 계열 목록을 되돌려 준다.
+
+    for group in ["mail", "agent", "window", "settings"] {
+        let (screen, code, requests) = run_help_against_stub(&["help", group], "stub screen");
+        assert_eq!(code, 0, "계열 help 는 성공 종료({group}): {screen}");
+        assert_eq!(screen, "stub screen\n", "{group}");
+        assert_help_request(&requests, &format!(r#"{{"topic":"{group}"}}"#));
+    }
+
+    // 계열 밑으로 한 칸 더 들어가는 자리는 없다 — 왕복 없이 인자 오류로 끊고 목록을 보는 길로 안내한다.
     let (deeper, code) = run_cli(UNREACHABLE_URL, &["help", "mail", "send"], None);
     assert_eq!(code, 1, "계열 다음 칸은 인자 오류: {deeper}");
-    for group in ["mail", "agent", "window", "settings"] {
-        assert!(
-            deeper.contains(group),
-            "반려가 계열 목록을 되돌려 줘야: {deeper}"
-        );
-    }
+    let v: serde_json::Value =
+        serde_json::from_str(deeper.trim()).unwrap_or_else(|e| panic!("stdout json: {e}"));
+    assert_eq!(v["code"], "BAD_ARGS", "{deeper}");
+    assert!(
+        v["hint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(&format!("`{CLI_EXE_NAME} help`")),
+        "반려가 목록을 보는 길로 안내해야: {deeper}"
+    );
 }
 
 /// ENGRAM_TOKEN·ENGRAM_CONTROL_URL 을 **주지 않고** 돌린다 — 상속된 값까지 지워 "스폰 밖" 을 재현한다.
@@ -669,13 +716,26 @@ fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
     )
 }
 
-/// ★help 의 설계 속성 pin: 크레덴셜 검사보다 **먼저** 답한다★ — 이게 깨지면 아직 스폰되지 않은(또는 env 가
-///   비어 있는) 에이전트가 표면을 배울 방법이 사라져 "발견" 이 성립하지 않는다. 같은 실행에서 우편 동사는
-///   `NO_TOKEN` 으로 끝나는 것까지 함께 본다 — 그래야 "env 검사가 실제로 있고, help 만 그 앞에 있다" 가
-///   증명된다(둘 다 0 이면 검사 자체가 사라진 것이고, 이 테스트만으론 못 가른다).
-/// ★평문 pin★: exit 0 + JSON 봉투(`{"status":…}`)로 바꿔도 substring 단언은 통과한다 — 형태를 직접 못박는다.
+/// ★help 는 다른 명령과 같은 길로 실패한다(ADR-0284)★ — 자격증명이 없으면 `mail pending` 과, 데몬에 못 닿으면
+///   `agent list` 와 **바이트까지 같은** 봉투 · exit 1 이다. help 만 다른 길(폴백 · 사본 · 다른 코드 · 다른
+///   채널)로 가면 같은 상태가 명령마다 다르게 보인다.
+/// ★대조군을 같은 실행에서 뜬다★: 기대 출력을 글자로 박으면 문구를 고칠 때마다 이 시험도 고쳐야 하고, 그러다
+///   help 쪽만 다른 문구가 되어도 못 잡는다.
+// ADR-0284
 #[test]
-fn engram_help_answers_before_any_credential_check_and_prints_plain_text() {
+fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemon() {
+    let (no_token, code) = run_cli_without_credentials(&["mail", "pending"]);
+    assert_eq!(code, 1, "크레덴셜 없는 우편 동사는 실패: {no_token}");
+    let v: serde_json::Value = serde_json::from_str(no_token.trim())
+        .unwrap_or_else(|e| panic!("stdout json: {e} — {no_token}"));
+    assert_eq!(v["code"], "NO_TOKEN", "{no_token}");
+
+    let (unreached, code) = run_cli(UNREACHABLE_URL, &["agent", "list"], None);
+    assert_eq!(code, 1, "데몬 불통은 실패: {unreached}");
+    let v: serde_json::Value = serde_json::from_str(unreached.trim())
+        .unwrap_or_else(|e| panic!("stdout json: {e} — {unreached}"));
+    assert_eq!(v["code"], "CONNECT_FAILED", "{unreached}");
+
     for args in [
         vec!["help"],
         vec![],
@@ -692,73 +752,72 @@ fn engram_help_answers_before_any_credential_check_and_prints_plain_text() {
     ] {
         let (stdout, code) = run_cli_without_credentials(&args);
         assert_eq!(
-            code, 0,
-            "크레덴셜 없이도 help 는 성공해야({args:?}): {stdout}"
+            (stdout.as_str(), code),
+            (no_token.as_str(), 1),
+            "크레덴셜 없는 help 는 다른 명령과 같은 봉투({args:?})"
         );
-        assert!(!stdout.trim().is_empty(), "help 본문이 비었다({args:?})");
-        assert!(
-            !stdout.trim_start().starts_with('{'),
-            "help 는 JSON 봉투가 아니라 평문이어야({args:?}): {stdout}"
-        );
-        assert!(
-            serde_json::from_str::<serde_json::Value>(stdout.trim()).is_err(),
-            "help stdout 이 JSON 으로 파싱되면 안 된다({args:?}): {stdout}"
-        );
-        assert!(
-            stdout.contains(CLI_EXE_NAME),
-            "사용법이 실행파일 이름을 그대로 보여야({args:?}): {stdout}"
+        let (stdout, code) = run_cli(UNREACHABLE_URL, &args, None);
+        assert_eq!(
+            (stdout.as_str(), code),
+            (unreached.as_str(), 1),
+            "데몬에 못 닿은 help 는 다른 명령과 같은 봉투({args:?})"
         );
     }
-
-    // 대조군 — 같은 조건에서 우편 동사는 env 검사에 걸린다(= 검사가 실재하고 help 만 그 앞에 있다).
-    let (stdout, code) = run_cli_without_credentials(&["mail", "pending"]);
-    assert_eq!(code, 1, "크레덴셜 없는 우편 동사는 실패: {stdout}");
-    let v: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("stdout json: {e} — {stdout}"));
-    assert_eq!(v["code"], "NO_TOKEN", "{stdout}");
 }
 
-/// `engram mail --help` = `engram help mail`(같은 화면). 두 철자가 갈리면 LLM 이 배운 대로 쳤을 때
+/// `engram mail --help` = `engram help mail`(같은 요청). 두 철자가 다른 요청을 보내면 LLM 이 배운 대로 쳤을 때
 /// 화면이 달라진다.
 #[test]
 fn conventional_help_spellings_render_the_same_screens() {
-    let (canonical_root, _) = run_cli_without_credentials(&["help"]);
-    for alias in [vec!["--help"], vec!["-h"], vec![]] {
-        let (out, code) = run_cli_without_credentials(&alias);
-        assert_eq!(code, 0);
-        assert_eq!(out, canonical_root, "계열 목록 화면이 같아야: {alias:?}");
-    }
     // ★`<계열> --help` 철자를 갖는 것은 파서가 계열로 받는 둘뿐이다★: `window`·`settings` 는 데몬 쪽
-    //   `<계열> <동사>` 입구가 없어 `engram help <낱말>` 로만 닿는다.
-    let mut screens = vec![canonical_root.clone()];
-    for group in ["mail", "agent"] {
-        let (canonical, code) = run_cli_without_credentials(&["help", group]);
-        assert_eq!(code, 0, "{group}: {canonical}");
-        for alias in [vec![group, "--help"], vec![group, "-h"]] {
-            let (out, code) = run_cli_without_credentials(&alias);
-            assert_eq!(code, 0);
-            assert_eq!(out, canonical, "계열 help 화면이 같아야: {alias:?}");
+    //   `<계열> <동사>` 입구가 없어 `engram help <낱말>` 로만 닿는다. 옛 낱말 `theme` 도 낱말 그대로 실린다
+    //   (settings 화면으로 푸는 것은 데몬이다).
+    for (spellings, body) in [
+        (
+            vec![vec!["help"], vec!["--help"], vec!["-h"], vec![]],
+            r#"{"topic":null}"#,
+        ),
+        (
+            vec![
+                vec!["help", "mail"],
+                vec!["--help", "mail"],
+                vec!["-h", "mail"],
+                vec!["mail", "--help"],
+                vec!["mail", "-h"],
+            ],
+            r#"{"topic":"mail"}"#,
+        ),
+        (
+            vec![
+                vec!["help", "agent"],
+                vec!["--help", "agent"],
+                vec!["agent", "--help"],
+                vec!["agent", "-h"],
+            ],
+            r#"{"topic":"agent"}"#,
+        ),
+        (vec![vec!["help", "window"]], r#"{"topic":"window"}"#),
+        (vec![vec!["help", "settings"]], r#"{"topic":"settings"}"#),
+        (vec![vec!["help", "theme"]], r#"{"topic":"theme"}"#),
+    ] {
+        for args in spellings {
+            let (out, code, requests) = run_help_against_stub(&args, "stub screen");
+            assert_eq!(code, 0, "{args:?}: {out}");
+            assert_eq!(out, "stub screen\n", "{args:?}");
+            assert_help_request(&requests, body);
         }
-        screens.push(canonical);
     }
-    for group in ["window", "settings"] {
-        let (canonical, code) = run_cli_without_credentials(&["help", group]);
-        assert_eq!(code, 0, "{group}: {canonical}");
-        screens.push(canonical);
-    }
-    // 옛 낱말 `theme` 은 개명 전 프라이밍이 가르친 철자라 settings 화면을 그대로 낸다.
-    let (settings, _) = run_cli_without_credentials(&["help", "settings"]);
-    let (old_word, code) = run_cli_without_credentials(&["help", "theme"]);
-    assert_eq!(code, 0, "theme: {old_word}");
-    assert_eq!(old_word, settings, "`help theme` 은 settings 화면이어야");
-    for (i, a) in screens.iter().enumerate() {
-        for b in &screens[i + 1..] {
-            assert_ne!(a, b, "다섯 화면은 서로 달라야");
-        }
-    }
-    // 모르는 계열은 오류로 남는다 — 최상위로 조용히 되돌아가면 오타가 성공으로 읽힌다.
-    let (out, code) = run_cli_without_credentials(&["help", "inbox"]);
+
+    // 모르는 낱말은 데몬이 반려한다 — 그 body 를 그대로 찍고 exit 1(최상위로 조용히 되돌아가면 오타가 성공으로
+    //   읽힌다).
+    let refusal =
+        r#"{"status":"error","code":"INVALID_ARGUMENT","hint":"unknown help topic: inbox"}"#;
+    let (host, port, stub) = spawn_scripted_stub(vec![ok_response(refusal)]);
+    let (out, code) = run_cli(&format!("http://{host}:{port}"), &["help", "inbox"], None);
+    let requests = stub.join().expect("stub join");
     assert_eq!(code, 1, "모르는 계열은 실패: {out}");
+    assert_eq!(out, format!("{refusal}\n"), "데몬의 반려가 그대로 흘러야");
+    assert_help_request(&requests, r#"{"topic":"inbox"}"#);
 }
 
 #[test]
@@ -766,20 +825,19 @@ fn engram_unknown_group_and_bare_flags_are_argument_errors_without_touching_the_
     // 옛 표기(계열 없는 플래그·동사)를 그대로 치면 발송으로 흐르지 않고 인자 오류로 끝난다.
     for args in [
         vec!["wat"],
-        vec!["help", "wat"],
         vec!["--to", "bob", "--body", "hi"],
         vec!["pending"],
         vec!["status", "m-1"],
         // help 토큰이 값 자리에 온 경우 — `status <id> --help` 는 예전에 `--help` 를 메시지 id 로
         //   **조회**해 실제 왕복을 했다. 이 목록에 있다는 것 자체가 "네트워크를 안 탄다" 는 주장이다
-        //   (포트 0). 하위 주제 **바로 다음 칸**은 반대로 화면이다 — 위 철자 테스트가 그쪽을 잰다.
+        //   (포트 0). 계열 **바로 다음 칸**은 반대로 화면이다 — 위 철자 테스트가 그쪽을 잰다.
         vec!["mail", "status", "m-7f3k9q2d", "--help"],
         vec!["mail", "status", "m-7f3k9q2d", "-h"],
         vec!["help", "mail", "inbox"],
         // help + 잔여 인자 — exit 0 으로 삼키면 편지가 성공 코드와 함께 사라진다.
         vec!["mail", "--help", "--to", "bob", "--body", "hi"],
         vec!["--help", "mail", "--to", "bob"],
-        // help 뒤에 또 help 토큰 — 예전엔 exit 0 으로 root help 를 냈다(규칙 위반).
+        // help 뒤에 또 help 토큰 — 화면 낱말이 아니다(형태 규칙 — 왕복하지 않는다).
         vec!["help", "--help"],
         vec!["--help", "help"],
         // hint 가 자기 자신을 무효한 명령으로 되받던 자리.
@@ -812,12 +870,7 @@ fn engram_unknown_group_and_bare_flags_are_argument_errors_without_touching_the_
             "hint 에 실행 가능한 help 명령이 하나도 없다({args:?}): {stdout}"
         );
         for suggested in suggestions {
-            let argv: Vec<&str> = suggested.split_whitespace().skip(1).collect();
-            let (out, code) = run_cli_without_credentials(&argv);
-            assert_eq!(
-                code, 0,
-                "hint 가 제안한 명령이 실제로 돌아야({args:?}): `{suggested}` → {out}"
-            );
+            assert_suggested_help_runs(&suggested, &format!("{args:?}"));
         }
     }
 }
@@ -1627,25 +1680,18 @@ fn engram_catalog_and_call_argument_errors_never_touch_the_network() {
     }
 }
 
-/// ★static help 는 데몬 없이 답한다 — 그 성질은 새 표면이 생겨도 그대로다★: 새로 생긴 것은 **가리키는 한
-///   줄**뿐이고, 그 화면이 데몬을 부르기 시작하면 크레덴셜 없는 프로세스는 표면을 배울 방법을 잃는다.
+/// ★help 는 발견 목록을 받지 않는다 — 목차 화면은 `engram commands` 를 가리키기만 한다★: help 가 목록까지
+///   받으면 화면 하나에 왕복이 둘이 되고, 목록의 실패가 help 의 실패로 보인다. 대본에 화면 하나만 두므로 두
+///   번째 왕복을 하면 그 연결이 실패해 exit 0 이 깨진다.
 #[test]
 fn the_static_help_points_at_the_catalog_without_fetching_it() {
-    let (root, code) = run_cli_without_credentials(&["help"]);
-    assert_eq!(code, 0, "크레덴셜 없이도 성공: {root}");
+    let (root, code, requests) = run_help_against_stub(&["help"], "stub root");
+    assert_eq!(code, 0, "{root}");
+    assert_help_request(&requests, r#"{"topic":null}"#);
     assert!(
-        root.contains(&format!("{CLI_EXE_NAME} commands")),
-        "root help 가 발견 표면을 가리켜야: {root}"
+        requests.iter().all(|r| !r.contains("/control/commands")),
+        "help 는 목록 라우트를 안 부른다: {requests:?}"
     );
-    assert!(
-        serde_json::from_str::<serde_json::Value>(root.trim()).is_err(),
-        "help 는 평문이어야: {root}"
-    );
-    // 대조군 — 같은 조건에서 발견 동사 자체는 크레덴셜 검사에 걸린다(= help 만 그 앞에 있다).
-    let (out, code) = run_cli_without_credentials(&["commands"]);
-    assert_eq!(code, 1, "크레덴셜 없는 발견은 실패: {out}");
-    let v: serde_json::Value = serde_json::from_str(out.trim()).expect("stdout json");
-    assert_eq!(v["code"], "NO_TOKEN", "{out}");
 }
 
 /// 발견 목록은 **데몬이 보낸 행**만 낸다 — 계열 이름이 화면에 나오는 자리는 그 행뿐이어야 한다.
@@ -1688,68 +1734,43 @@ fn the_catalog_surface_renders_only_the_rows_the_daemon_sent() {
 
 // ── ADR-0133: 우편은 데몬이 거절한다 — CLI 는 화면도 실행도 막지 않는다 ─────────────────────
 
-/// 크레덴셜을 **주지 않고** 돌린다 — 여기 케이스는 파싱·렌더 단계에서 끝난다.
-fn run_cli_bare(args: &[&str]) -> (String, i32) {
-    let out = Command::new(env!("CARGO_BIN_EXE_engram"))
-        .args(args)
-        .env_remove("ENGRAM_TOKEN")
-        .env_remove("ENGRAM_CONTROL_URL")
-        .output()
-        .expect("spawn engram CLI");
-    (
-        String::from_utf8_lossy(&out.stdout).to_string(),
-        out.status.code().unwrap_or(-1),
-    )
-}
-
-/// ★우편 화면은 환경이 무엇을 싣고 있든 열린다★ — 스폰 env 로 화면을 고르던 표식은 제거됐고(사용자
-///   결정 2026-09-23), 그것을 되살리면 **에이전트 자신이 지울 수 있는 값**이 다시 화면을 정하게 된다.
+/// ★우편 화면 요청은 환경이 무엇을 싣고 있든 같다★ — 스폰 env 로 화면을 고르던 표식(`ENGRAM_MAIL`)은
+///   제거됐고(사용자 결정 2026-09-23), 그것을 되살리면 **에이전트 자신이 지울 수 있는 값**이 다시 화면을 정하게
+///   된다. CLI 가 싣는 것은 낱말 하나뿐이어야 한다 — 화면이 호출자와 무관하게 같다는 것은 데몬 통합 시험
+///   (`tests/mail_gate.rs`)이 잰다.
 ///
-/// ★두 조건을 나란히 재는 것이 요점이다★: 크레덴셜이 없는 사람 셸과 스폰된 에이전트가 **같은** 화면을
-///   받아야 한다. 한쪽만 재면 환경에 매인 분기가 되살아나도 초록이다.
+/// ★두 조건을 나란히 재는 것이 요점이다★: 표식이 없는 env 와 옛 표식을 실은 env 가 **같은** 요청을 보내야
+///   한다. 한쪽만 재면 환경에 매인 분기가 되살아나도 초록이다.
 // ADR-0133
 #[test]
 fn the_mail_screen_opens_whatever_the_environment_carries() {
-    let spawned = |args: &[&str]| -> (String, i32) {
-        let out = Command::new(env!("CARGO_BIN_EXE_engram"))
-            .args(args)
-            .env("ENGRAM_TOKEN", "test-token")
-            .env("ENGRAM_CONTROL_URL", UNREACHABLE_URL)
-            .output()
-            .expect("spawn engram CLI");
-        (
-            String::from_utf8_lossy(&out.stdout).to_string(),
-            out.status.code().unwrap_or(-1),
-        )
-    };
-    for (label, run) in [
-        (
-            "크레덴셜 없음",
-            &run_cli_bare as &dyn Fn(&[&str]) -> (String, i32),
-        ),
-        ("스폰 크레덴셜", &spawned),
-    ] {
+    let screen = format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} - stub screen");
+    for (label, marker) in [("표식 없음", None), ("옛 우편 표식", Some("0"))] {
         for args in [
             vec!["help", CLI_GROUP_MAIL],
             vec![CLI_GROUP_MAIL, "--help"],
             vec![CLI_GROUP_MAIL, "-h"],
         ] {
-            let (screen, code) = run(&args);
+            let (host, port, stub) = spawn_scripted_stub(vec![screen_response(&screen)]);
+            let mut cli = Command::new(env!("CARGO_BIN_EXE_engram"));
+            cli.args(&args)
+                .env("ENGRAM_TOKEN", "test-token")
+                .env("ENGRAM_CONTROL_URL", format!("http://{host}:{port}"));
+            match marker {
+                Some(value) => cli.env("ENGRAM_MAIL", value),
+                None => cli.env_remove("ENGRAM_MAIL"),
+            };
+            let out = cli.output().expect("spawn engram CLI");
+            let requests = stub.join().expect("stub join");
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             assert_eq!(
-                code, 0,
-                "{label}: 우편 화면은 성공 종료({args:?}): {screen}"
+                out.status.code().unwrap_or(-1),
+                0,
+                "{label}: 우편 화면은 성공 종료({args:?}): {stdout}"
             );
-            assert!(
-                screen.starts_with(&format!("{CLI_EXE_NAME} {CLI_GROUP_MAIL} ")),
-                "{label}: 화면 머리가 우편 계열이어야({args:?}): {screen}"
-            );
+            assert_eq!(stdout, format!("{screen}\n"), "{label}: {args:?}");
+            assert_help_request(&requests, r#"{"topic":"mail"}"#);
         }
-        let (root, code) = run(&["help"]);
-        assert_eq!(code, 0, "{label}: help 는 성공 종료: {root}");
-        assert!(
-            root.contains(&format!("{CLI_EXE_NAME} help {CLI_GROUP_MAIL}")),
-            "{label}: 최상위 목록이 우편 화면을 가리켜야: {root}"
-        );
     }
 }
 
@@ -1781,4 +1802,76 @@ fn a_mail_verb_the_daemon_refuses_still_posts_and_surfaces_the_refusal() {
         stdout.contains("MAIL_NOT_ALLOWED"),
         "거절 사유가 그대로 흘러야: {stdout}"
     );
+}
+
+// ── ADR-0284: 데몬을 부르는 명령의 공통 실패 길 ──────────────────────────────────────────────
+
+/// ★자격증명 없는 `--body-stdin` 은 stdin 을 기다리지 않고 실패한다★ — stdin 을 자격증명보다 먼저 읽으면
+///   열린 채 닫히지 않는 stdin(에이전트 셸 · 파이프)에 매달려 실패하지 못하고, 공통 실패 길에 닿지도 못한다.
+///   stdin 을 열어 둔 채 쓰지도 닫지도 않고 띄워, 시한 안에 `NO_TOKEN` 으로 끝나는지 본다.
+// ADR-0284
+#[test]
+fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_engram"))
+        .args(["mail", "send", "--to", "bob", "--body-stdin"])
+        .env_remove("ENGRAM_TOKEN")
+        .env_remove("ENGRAM_CONTROL_URL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn engram CLI");
+    // 손잡이를 끝까지 쥐고 있어야 상대가 EOF 를 못 본다 — 그래야 「열린 채 닫히지 않는 stdin」이 재현된다.
+    let held_stdin = child.stdin.take().expect("stdin piped");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exited = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(_) => break true,
+            None if Instant::now() >= deadline => break false,
+            None => thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    if !exited {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("자격증명 없는 --body-stdin 이 5초 안에 끝나지 않았다 — stdin 을 자격증명보다 먼저 읽고 있다");
+    }
+    let out = child.wait_with_output().expect("collect engram CLI output");
+    drop(held_stdin);
+
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(out.status.code().unwrap_or(-1), 1, "{stdout}");
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout json: {e} — {stdout}"));
+    assert_eq!(v["code"], "NO_TOKEN", "{stdout}");
+}
+
+/// ★데몬이 그 라우트를 모르면(404 — 이 CLI 와 다른 빌드의 데몬) help 도 다른 명령도 같은 `PROTOCOL_MISMATCH`
+///   봉투 · exit 1 이다★ — 데몬의 404 는 body 가 비어 있어, 그것을 빈 줄로 흘리면 호출자는 아무것도 못 배운다.
+// ADR-0284
+#[test]
+fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {
+    let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    for args in [vec!["help"], vec!["agent", "list"]] {
+        let (host, port, stub) = spawn_scripted_stub(vec![not_found]);
+        let (stdout, code) = run_cli(&format!("http://{host}:{port}"), &args, None);
+        let requests = stub.join().expect("stub join");
+        assert_eq!(requests.len(), 1, "왕복은 하나({args:?}): {requests:?}");
+        assert_eq!(code, 1, "판 어긋남은 실패({args:?}): {stdout}");
+        let v: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("stdout json({args:?}): {e} — {stdout}"));
+        assert_eq!(v["status"], "error", "{stdout}");
+        assert_eq!(v["code"], "PROTOCOL_MISMATCH", "{args:?}: {stdout}");
+        // 어느 라우트를 모르는지 밝혀야 한다 — 실제로 친 경로를 요청 줄에서 꺼내 견준다.
+        let requested = requests[0].split_whitespace().nth(1).unwrap_or_default();
+        assert!(
+            requested.starts_with("/control/")
+                && v["hint"].as_str().unwrap_or_default().contains(requested),
+            "hint 가 친 라우트({requested})를 밝혀야({args:?}): {stdout}"
+        );
+    }
 }

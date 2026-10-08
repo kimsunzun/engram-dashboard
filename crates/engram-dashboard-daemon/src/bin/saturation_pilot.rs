@@ -31,7 +31,8 @@ use engram_dashboard_agent::types::{
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, RosterBroadcastSlot,
+    start_mcp_server_without_help, CommandTableSlot, ManagerSlot, McpServerHandle,
+    RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::{BoundIdentity, ControlRegistry};
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -715,7 +716,7 @@ async fn wire(tag: &str) -> Result<Wiring, String> {
             ),
         ),
     );
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),

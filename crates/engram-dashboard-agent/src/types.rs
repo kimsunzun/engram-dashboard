@@ -590,6 +590,22 @@ pub const CLI_AGENT_VERBS: [&str; 5] = ["list", "spawn", "new", "rename", "move"
 // ADR-0132
 pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
 
+/// help 화면 라우트 — CLI 가 무-세션 POST 하고 데몬이 화면을 낸다.
+///
+/// ★바디 = `{"topic": null | "<낱말>"}` · 성공 응답 = `{"screen": "<화면>"}`(키 이름 = 아래 두 상수)★.
+///   `topic` 은 필수이고(null = 목차 화면) 다른 키가 있으면 데몬이 `INVALID_ARGUMENT` 로 반려한다 — 키
+///   철자가 갈린 CLI 가 조용히 목차를 받지 않게. 반려는 형제 제어 라우트와 같은 `{"status":"error",…}`
+///   봉투다.
+/// ★경로 · 키를 양쪽이 이 한 벌로 본다★ — 리터럴을 다시 적으면 한쪽만 고친 편집이 404 나 키 반려로만
+///   드러난다. 형제 제어 라우트 다섯(`/control/send` 등)은 아직 CLI 와 데몬이 손으로 맞춘다
+///   (`mcp_server.rs` 의 `CONTROL_HELP_PATH` doc · 공유 상수로 옮기는 것은 후속 — TRD S21 2-3 §8 O15).
+// ADR-0284
+pub const CLI_HELP_ROUTE: &str = "/control/help";
+/// [`CLI_HELP_ROUTE`] 요청 바디의 화면 낱말 키.
+pub const CLI_HELP_TOPIC_KEY: &str = "topic";
+/// [`CLI_HELP_ROUTE`] 성공 응답의 화면 본문 키.
+pub const CLI_HELP_SCREEN_KEY: &str = "screen";
+
 /// 제어 응답이 싣는 **에이전트 상태 축**(살아 있음·잠듦·없음)의 wire 표기.
 ///
 /// ★왜 agent 에 있나★: 이 문자열의 생산자(`agent::commands` 의 표)와 소비자(CLI 의 응답 판정기)가 **다른

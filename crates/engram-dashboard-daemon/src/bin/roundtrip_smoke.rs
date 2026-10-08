@@ -94,7 +94,7 @@ use engram_dashboard_agent::types::{
 
 use engram_dashboard_daemon::control::ingress::{handle_send, ControlCommand, SendContract};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
+    start_mcp_server_with_help, CommandTableSlot, ManagerSlot, MessagingSlot, RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::priming::{
     mentions_mail_cli_surface, FilePrimingProvider, PrimingProvider,
@@ -366,12 +366,15 @@ async fn run() -> i32 {
             ),
         ),
     );
-    let handle = match start_mcp_server(
+    let handle = match start_mcp_server_with_help(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
         command_slot.clone(),
         relay_bus,
+        // ADR-0284: 실 primed 에이전트는 프라이밍이 가르친 대로 `engram help` 를 칠 수 있다 — 원천이
+        //   없으면 그 help 가 반려돼 측정이 오염된다. 운영 조립과 같은 앵커를 쓴다.
+        engram_dashboard_daemon::control::help::HelpSource::from_install_root(),
     )
     .await
     {

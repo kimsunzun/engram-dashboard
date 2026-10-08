@@ -12,15 +12,19 @@
 //!   PATH 해석이 그 한 이름에 정렬돼야 하기 때문이다(ADR-0094).
 //!
 //! ★발견은 help 로만★(ADR-0132 결정 4 — MCP 가 툴 스키마를 스스로 드러내는 것의 CLI 대응): 인자 없는
-//!   호출과 `engram help`(`--help`·`-h` 동일)가 계열 목록을, `engram help <계열>`(= `engram <계열> --help`)
+//!   호출과 `engram help`(`--help`·`-h` 동일)가 계열 목록을, `engram help <낱말>`(= `engram <계열> --help`)
 //!   이 그 계열 사용법을 낸다. help 는 stdout **평문**이고 exit 0 이다 — 읽는 쪽이 LLM 이라 파싱이 아니라
 //!   독해 대상이다. 모르는 계열·동사는 다른 인자 오류와 같은 반려 JSON(exit 1)으로 끝난다.
-//! ★화면은 다섯이고 그 아래는 없다★: `engram help` 와 계열 낱말 넷(`mail`·`agent`·`window`·`settings`)이
-//!   전부다(옛 낱말 `theme` 은 `settings` 화면에 닿는 별칭이다). 계열 다음 칸에 또 낱말이 오면 화면이
-//!   아니라 인자 오류이고, 그 반려가 계열 목록을 되돌려 준다. `window`·`settings` 는 `<계열> <동사>` 입구가
-//!   없어 `engram help <낱말>` 로만 닿는다(그 둘의 명령은 전체 이름으로 부른다 — 아래 세 번째 표면).
-//! ★help 는 크레덴셜·데몬 없이 답한다★: env 검사보다 **먼저** 처리한다 — 표면을 배우는 자리가 "이미
-//!   스폰돼 있어야" 하면 발견이 아니다.
+//! ★help 화면은 데몬이 낸다(agent `CLI_HELP_ROUTE`)★: 이 CLI 는 낱말 하나를 **검사하지 않고** 실어 보내고
+//!   받은 화면을 찍는다. 화면 낱말 어휘(별칭 포함)와 본문 파일은 데몬 `control::help` 하나에만 있다 — 여기
+//!   사본을 두면 낱말 목록이 두 벌이 되고, 모르는 낱말의 반려도 데몬이 한다. CLI 가 보는 것은 형태뿐이다:
+//!   help 는 단독 호출일 때만 help 고, `help` 다음 칸의 help 토큰이나 `-` 로 시작하는 낱말은 화면 낱말이
+//!   아니라 인자 오류다(왕복 없이). `<계열> --help` 철자는 파서가 계열로 받는 `mail`·`agent` 뿐이고, 그 밖의
+//!   화면은 `engram help <낱말>` 로만 닿는다(그 화면의 명령은 전체 이름으로 부른다 — 아래 세 번째 표면).
+//! ★help 도 다른 명령과 같은 길로 실패한다★: 자격증명이 없거나 · 데몬에 못 닿거나 · 데몬이 그 라우트를
+//!   모르면 데몬을 부르는 다른 명령과 같은 봉투 · exit 1 이다. 데몬 없이 답하는 폴백도 바이너리에 구운
+//!   사본도 두지 않는다 — 그 상태에서는 다른 모든 명령이 실패해 help 만 살아도 할 수 있는 것이 없고,
+//!   사본은 본문이 깨졌다는 사실을 낡은 화면으로 감춘다(ADR-0284).
 //!
 //! ★우편 계열을 여기서 막지 않는다★: 말이 되는 우편 호출은 그대로 데몬으로 나가고, 거절은 데몬이
 //!   자격증명으로 한다(ADR-0133 결정 3). 여기서 미리 끊으면 그 거절이 관측되지 않는다.
@@ -68,22 +72,28 @@
 //!
 //! ★동작★: 환경변수 `ENGRAM_TOKEN`(Bearer 토큰) + `ENGRAM_CONTROL_URL`(데몬 제어 base URL)을 읽어
 //!   `<base>/control/<route>` 로 JSON 을 POST 한다(Authorization: Bearer <token>). 응답 body 를 stdout 에
-//!   **그대로** 찍는다.
+//!   **그대로** 찍는다. 순서 = 형태 파싱 → 자격증명 → (`--body-stdin` 이면) stdin → 요청.
 //! ★stdout 이 JSON 이라는 보장은 없다(파서를 이 가정 위에 쓰지 말 것)★: 비-2xx 응답도 body 를 그대로
 //!   흘린다 — 401 은 빈 줄, 프록시가 끼면 HTML 이 나올 수 있다. **일부러** 그렇게 둔다: 반려 body 엔
 //!   발신 에이전트가 파싱해 자기교정할 교정 JSON 이 실려 있을 수 있어, 우리가 형태로 걸러 버리면 그
-//!   정보가 사라진다. 이 CLI 가 **스스로** 내는 반려(BAD_ARGS·NO_TOKEN·UNKNOWN_COMMAND·전송 실패)만 항상
-//!   봉투 JSON 이고, help 와 `commands` 화면은 평문이다. 기계 판정은 stdout 형태가 아니라 **exit code** 로
-//!   한다.
-//! ★`commands` 두 화면만 데몬 body 를 다시 쓴다★: 목록·상세는 발견용 **읽을 화면**이라 렌더된 평문이
-//!   나가고, 원문 JSON 은 나가지 않는다(그 원문이 필요하면 라우트를 직접 치면 된다). 반대로 **실패했을
-//!   때는** 받은 body 를 그대로 흘린다 — 교정 정보가 거기 있다. 호출(`engram <이름> …`)은 처음부터 끝까지
-//!   기존 규율 그대로다(데몬 응답 원문).
+//!   정보가 사라진다. 이 CLI 가 **스스로** 내는 반려(BAD_ARGS·NO_TOKEN·UNKNOWN_COMMAND·전송 실패·
+//!   PROTOCOL_MISMATCH)만 항상 봉투 JSON 이고, help 와 `commands` 화면은 평문이다. 기계 판정은 stdout
+//!   형태가 아니라 **exit code** 로 한다.
+//! ★데몬에 못 닿은 실패는 어느 명령이든 한 길이다(`fail_unreached`)★: 연결·쓰기·읽기·침묵 한도·절단과
+//!   데몬이 그 라우트를 모르는 404 가 같은 함수로 찍힌다(stdout 봉투 + exit 1). 404 는 `PROTOCOL_MISMATCH`
+//!   다 — 이 CLI 의 요청에 데몬이 404 를 내는 것은 자기 명단에 없는 경로뿐이고 body 도 비어 있으므로,
+//!   그것은 이 CLI 와 다른 빌드의 데몬이라는 뜻이고 body 로 배울 것이 없다. 그래서 `post_json` 이 404 를
+//!   전송 실패로 접어, 비-2xx 를 따로 보는 판정기들은 404 를 만나지 않는다.
+//! ★화면 셋만 데몬 body 를 다시 쓴다★: help(봉투의 `screen` 한 칸)와 `commands` 목록·상세는 **읽을
+//!   화면**이라 평문이 나가고, 원문 JSON 은 나가지 않는다(그 원문이 필요하면 라우트를 직접 치면 된다).
+//!   반대로 **실패했을 때는** 받은 body 를 그대로 흘린다 — 교정 정보가 거기 있다. 호출(`engram <이름> …`)은
+//!   처음부터 끝까지 기존 규율 그대로다(데몬 응답 원문).
 //!
 //! ★exit code 3분법★: **0** = 접수/조회 성공 · **1** = 실패(반려 `{status:"error",code,hint}`·연결/env
 //!   오류·비-2xx·비-JSON) · **2** = 2xx 인데 응답 shape 이 깨짐(데몬/프록시 결함 — 재시도 대상이 아니라
 //!   보고 대상, stderr 에 사유 한 줄). 발송 판정 정본 = `exit_code_for_response`, 조회(`status`·`pending`) 판정
-//!   정본 = `exit_code_for_query_response`(성공 shape 이 동사마다 달라 "에러가 아니면 성공" 규칙을 쓴다).
+//!   정본 = `exit_code_for_query_response`(성공 shape 이 동사마다 달라 "에러가 아니면 성공" 규칙을 쓴다),
+//!   help 판정 정본 = `exit_code_for_help_response`(문자열 `screen` 을 실은 2xx 만 0 이다).
 //! ★세 번째 표면도 **같은 3분법**을 쓴다★: `commands`(목록·상세)는 렌더에 성공하면 0 · 목록을 못 받았거나
 //!   (전송 실패·비-2xx·반려·비-JSON) 이름이 표에 없으면 1 · 2xx 인데 **봉투**가 `{commands:[…]}` 가 아니면 2.
 //!   ★행 하나가 깨진 것은 2 가 아니다★ — 그 행만 버리고 목록은 선다(버린 수는 stderr).
@@ -116,8 +126,9 @@ use std::time::Duration;
 
 use engram_dashboard_agent::types::{
     AGENT_STATE_LIVE, AGENT_STATE_SLEEPING, CLI_AGENT_FLAGS, CLI_AGENT_VERBS,
-    CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_MAIL_FLAGS,
-    CLI_MAIL_VERBS, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
+    CLI_CONTROL_READ_TIMEOUT_SECS, CLI_EXE_NAME, CLI_GROUP_AGENT, CLI_GROUP_MAIL, CLI_HELP_ROUTE,
+    CLI_HELP_SCREEN_KEY, CLI_HELP_TOPIC_KEY, CLI_MAIL_FLAGS, CLI_MAIL_VERBS,
+    RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
 };
 
 /// 제어 소켓의 **침묵 한도**(로컬 데몬이라 짧게) — 데몬이 죽었으면 빨리 실패해 에이전트가 재시도/보고하게 한다.
@@ -183,213 +194,6 @@ fn new_request_id() -> String {
 ///   먼저 알아챘다고 다른 낱말을 쓰면, 호출자는 어느 층이 답했는지에 따라 분기를 두 벌 써야 한다.
 const ERR_UNKNOWN_COMMAND: &str = "UNKNOWN_COMMAND";
 
-/// help 템플릿의 실행파일 이름 자리. 출력 직전 `CLI_EXE_NAME` 으로 치환한다 — help 는 에이전트가 표면을
-/// 배우는 유일한 자리라, 여기 적힌 이름이 실제 실행파일과 갈리면 배운 대로 쳐도 명령을 못 찾는다.
-const HELP_TOOL_SLOT: &str = "{tool}";
-
-// ── help 화면 본문 = 외부 파일(ADR-0092 계열 외부화) ──────────────────────────────────────
-//
-// ★왜 바이너리 밖인가★: 이 화면은 에이전트가 표면을 배우는 유일한 자리라 문구가 계속 손질된다. 고치는 데
-//   재빌드가 필요하면 그 문구는 사실상 코드이고, 같은 내용을 프라이밍에서 외부 MD 로 뺀 결정(ADR-0092)과
-//   어긋난다.
-// ★프라이밍과 **같지 않은 반쪽이 있다**★: 그쪽 모듈은 경로만 다루고 내용은 claude 가 읽지만, 여기서는
-//   읽는 것도 이 프로세스다(화면을 우리가 찍는다). 그래서 재사용하는 것은 ADR-0092 의 **경로 해석
-//   모양**(install-root 앵커 · env override · 절대경로)이지 "내용을 안 읽는다" 쪽이 아니다.
-// ★늘어난 의존은 로컬 파일 읽기 하나뿐이다★ — 데몬도 크레덴셜도 부르지 않는다(ADR-0132 조각 ①: 표면을
-//   배우는 자리가 "이미 스폰돼 있어야" 하면 발견이 아니다).
-// ADR-0092
-// ADR-0132
-// ADR-0133
-
-/// 화면 본문의 고정 상대경로 — 프라이밍과 같은 `prompts/` 폴더에 산다. ADR-0100 이 그 폴더를 exe 옆으로
-/// 통째 배송하고 manifest tripwire 가 부족·여분을 둘 다 잡으므로, 새 폴더를 만들면 그 두 장치를 한 벌 더
-/// 지어야 한다.
-const REL_HELP_FILE: &str = "prompts/engram-help.md";
-
-/// 운영자·하네스가 본문을 갈아끼우는 자리 — 프라이밍의 `ENGRAM_PRIMING_FILE` 과 같은 계약이다.
-///
-/// ★실패해도 고정 파일로 폴백하지 않는다(프라이밍과 같은 규율)★: 명시 지정을 조용히 다른 파일로
-///   갈아치우면 무엇을 읽었는지 알 수 없다. 내장 사본으로 내려가고 사유는 stderr 에 적는다.
-const ENV_HELP_FILE: &str = "ENGRAM_HELP_FILE";
-
-/// 구획 표시 줄의 앞. ★**줄 전체**가 표시여야 한다★ — substring 으로 보면 형식을 설명하는 산문 한 줄이
-/// 구획을 끊는다(그 파일의 머리글이 실제로 그런 문장을 싣는다).
-///
-/// ★HTML 주석이 아니라 마크다운 제목인 것은 의도다★: 주석 꼴은 마크다운 뷰어가 **통째로 감춰서**, 파일을
-///   고치는 사람에게 구획 경계가 하나도 안 보였다(실발생 — 7KB 가 구분선 없는 산문으로 읽혔다). 제목이면
-///   뷰어 목차에 구획 id 가 그대로 뜬다. 렌더 결과는 같다 — 표시 줄은 어느 꼴이든 화면에 안 실린다.
-///   머리글 제목은 레벨 1(`# `)이라 이 레벨 2 패턴에 안 걸린다.
-const SECTION_OPEN: &str = "## ";
-
-/// 바이너리에 박힌 사본 — 외부 파일을 못 쓸 때만 나간다.
-///
-/// ★지우지 말 것(load-bearing)★: `engram help` 는 실패할 수 없는 자리다. 아무것도 못 내면 에이전트는
-///   「그런 표면이 없다」로 결론짓고, 요란하게 죽어도 결과는 같다 — 표면을 배우러 온 프로세스가 못 배운
-///   채 끝난다. 그래서 **낡았을지언정 옳은 화면**을 내고 사유는 stdout 이 아니라 stderr 로만 알린다.
-/// ★손으로 베낀 사본이 아니다★: `include_str!` 라 파일과 바이트가 같고, cargo 가 그 파일을 의존으로
-///   추적해 고치면 다시 굽는다 — 둘이 갈릴 경로가 없다.
-const HELP_EMBEDDED: &str = include_str!("../../../../prompts/engram-help.md");
-
-/// 최상위 화면의 구획 id. 나머지 넷은 계열 낱말 그대로라 따로 상수를 두지 않는다
-/// ([`HelpTopic::section_id`]).
-const SECTION_ROOT: &str = "root";
-
-/// 계열 상수(`CLI_GROUP_*`)가 없는 두 화면의 낱말.
-///
-/// ★데몬 쪽에 같은 어휘가 없는 것이 이유다★: 창·설정은 `window.list`·`settings.get` 처럼 **전체 이름**으로만
-///   불리고 `<계열> <동사>` 입구가 없다. 그래서 이 둘은 `engram help <낱말>` 의 낱말로만 존재하고, 공유
-///   상수에 올리면 파서가 받지도 않는 계열이 계열 목록에 생긴다.
-const HELP_TOPIC_WINDOW: &str = "window";
-const HELP_TOPIC_SETTINGS: &str = "settings";
-
-/// 화면의 옛 낱말 → 지금 화면. `help <낱말>` 만 받고, 계열 목록·반려 문구에는 싣지 않는다.
-///
-/// ★걷지 말 것★: 개명(TRD S21-storage §10 F14) 전에 띄웠거나 이어받은 에이전트는 옛 프라이밍
-///   (`engram help theme`)을 컨텍스트에 들고 있다 — 그 낱말이 반려되면 설정 화면을 못 찾는다.
-/// ★본문 파일의 `theme` 구획을 내지 않는다★: 그 구획은 `theme` 을 필수로 요구하는 옛 바이너리가 새 파일을
-///   받아들이게 남긴 짧은 포인터다. 별칭이 그것을 내면 읽는 쪽이 한 번 더 불러야 설정 화면에 닿는다.
-const HELP_TOPIC_ALIASES: &[(&str, HelpTopic)] = &[("theme", HelpTopic::Settings)];
-
-/// 화면 본문 한 장(구획 id → 본문).
-///
-/// ★반쪽 로드가 없다★: 구획이 하나라도 빠지면 이 표는 통째로 버려지고 내장 사본이 선다 — 반쪽 화면은
-///   낡은 화면보다 나쁘다(빠진 자리가 무엇이었는지 읽는 쪽이 알 길이 없다).
-struct HelpText {
-    sections: Vec<(String, String)>,
-    /// 폴백 경고가 사람에게 보여 줄 출처.
-    origin: String,
-}
-
-impl HelpText {
-    /// ★본문 = 표시 줄 다음 바이트부터 다음 표시 줄 앞까지, **그대로**★: 들여쓰기·빈 줄·끝 줄바꿈이 곧
-    ///   화면 서식이라 어느 것도 다듬지 않는다. 첫 표시 앞의 글은 버린다(파일 머리글 자리).
-    /// ★CRLF 만은 접는다★: `core.autocrlf` 때문에 체크아웃된 파일의 줄끝이 기계마다 갈리는데, 이 화면은
-    ///   바이트가 곧 계약이다(내장 사본과 파일이 같아야 하고, 이 자리에 있던 컴파일 상수는 LF 였다).
-    ///   여기서 접어 두면 어느 체크아웃에서도 같은 화면이 나간다.
-    fn parse(src: &str, origin: &str) -> Self {
-        let mut sections: Vec<(String, String)> = Vec::new();
-        let mut current: Option<(String, String)> = None;
-        for line in src.split_inclusive('\n') {
-            match section_marker(line) {
-                Some(id) => {
-                    sections.extend(current.take());
-                    current = Some((id.to_string(), String::new()));
-                }
-                None => {
-                    if let Some((_, body)) = current.as_mut() {
-                        body.push_str(&line.replace("\r\n", "\n"));
-                    }
-                }
-            }
-        }
-        sections.extend(current.take());
-        Self {
-            sections,
-            origin: origin.to_string(),
-        }
-    }
-
-    /// ★빠진 구획도 **무언가는** 낸다★: 로더가 완전한 표만 고르므로 실제로는 안 걸리지만, 그 보장이
-    ///   깨져도 화면이 조용히 비지 않게 자리와 id 를 남긴다 — 빈 출력은 표면 부재로 읽힌다.
-    fn section(&self, id: &str) -> String {
-        self.sections
-            .iter()
-            .find(|(k, _)| k == id)
-            .map(|(_, v)| v.clone())
-            .unwrap_or_else(|| format!("(help section `{id}` missing from {})\n", self.origin))
-    }
-
-    /// 화면 조립이 요구하는 구획 중 이 표가 못 채우는 것 전량.
-    fn missing(&self) -> Vec<String> {
-        required_section_ids()
-            .into_iter()
-            .filter(|id| !self.sections.iter().any(|(k, _)| k == id))
-            .collect()
-    }
-}
-
-/// 표시 줄이면 그 구획 id. 줄 전체가 표시여야 하고(양끝 공백 허용) id 에는 공백이 없다.
-fn section_marker(line: &str) -> Option<&str> {
-    let inner = line.trim().strip_prefix(SECTION_OPEN)?.trim();
-    // 구획 id 는 점으로 이은 소문자 낱말뿐이다. 이 검사가 없으면 본문의 평범한 제목 한 줄이 구획을 끊는다.
-    let is_id = !inner.is_empty()
-        && !inner.contains(char::is_whitespace)
-        && inner
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_');
-    is_id.then_some(inner)
-}
-
-/// 화면이 요구하는 구획 전량 = 화면 전량. 화면 하나가 구획 하나라 파생이 없다.
-fn required_section_ids() -> Vec<String> {
-    HelpTopic::ALL
-        .iter()
-        .map(|t| t.section_id().to_string())
-        .collect()
-}
-
-/// 고정 경로 — 프라이밍(`FilePrimingProvider::from_install_root`)과 **같은 앵커**를 쓴다.
-///
-/// ★cwd 도 repo 상대경로도 쓰지 않는다(ADR-0092 가 실측한 것)★: 이 CLI 는 에이전트의 작업 폴더에서
-///   불리므로 cwd 는 아무 관계가 없고, 릴리즈에는 repo 가 아예 없다. 릴리즈에서 이 앵커는 exe 폴더로
-///   떨어지고 거기 `prompts/` 가 함께 배송된다(ADR-0100).
-fn help_file_path() -> Option<std::path::PathBuf> {
-    // ADR-0273: 이 CLI 가 데몬 lib 를 부르는 유일한 줄 — 설치 위치 규칙의 CLI 쪽 사본(결정 5)이 서면 그것으로 바꾼다.
-    let root = engram_dashboard_daemon::data_dir::find_install_root()?;
-    root.is_absolute().then(|| root.join(REL_HELP_FILE))
-}
-
-/// ★stdout 을 건드리지 않는다★: 이 줄이 화면에 섞이면 읽는 쪽(LLM)이 그것을 표면의 일부로 읽고, 파이프로
-/// 받는 쪽은 화면이 오염된다. 종료코드도 0 그대로다 — 낡은 화면은 실패가 아니다.
-fn warn_help_fallback(reason: &str) {
-    eprintln!("[{CLI_EXE_NAME}] help 본문 외부 파일을 쓰지 못해 내장 사본으로 답한다 — {reason}");
-}
-
-fn load_help_text() -> HelpText {
-    let override_path = std::env::var_os(ENV_HELP_FILE)
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from);
-    match override_path.or_else(help_file_path) {
-        Some(p) => {
-            let shown = p.display().to_string();
-            match std::fs::read_to_string(&p) {
-                Ok(src) => {
-                    let text = HelpText::parse(&src, &shown);
-                    let missing = text.missing();
-                    if missing.is_empty() {
-                        return text;
-                    }
-                    warn_help_fallback(&format!(
-                        "{shown}: 구획 누락({}) — 반쪽 화면 대신 사본으로 간다",
-                        missing.join(", ")
-                    ));
-                }
-                Err(e) => warn_help_fallback(&format!("{shown}: {e}")),
-            }
-        }
-        None => warn_help_fallback("설치 루트를 못 잡아 본문 경로를 짓지 못함"),
-    }
-    HelpText::parse(HELP_EMBEDDED, "내장 사본")
-}
-
-/// 프로세스당 한 번 해석한다 — 실제 호출은 화면 하나를 찍고 끝나지만 테스트는 여러 장을 그린다.
-fn help_text() -> &'static HelpText {
-    static CELL: std::sync::OnceLock<HelpText> = std::sync::OnceLock::new();
-    CELL.get_or_init(load_help_text)
-}
-
-/// 화면 하나 = 구획 하나 + 실행파일 이름 치환.
-fn render_help(topic: HelpTopic) -> String {
-    render_help_from(help_text(), topic)
-}
-
-/// 고르기를 표에서 떼어 둔 자리 — 테스트가 깨진 표·빈 표를 먹여 그려 볼 수 있게 한다(본문을 밖으로
-/// 내보낸 뒤 "파일이 깨졌을 때" 를 재는 유일한 길이다).
-fn render_help_from(text: &HelpText, topic: HelpTopic) -> String {
-    text.section(topic.section_id())
-        .replace(HELP_TOOL_SLOT, CLI_EXE_NAME)
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = run(&args);
@@ -404,27 +208,6 @@ fn run(args: &[String]) -> i32 {
             return 1;
         }
     };
-    // help 는 크레덴셜도 데몬도 없이 답한다 — 표면을 배우는 자리가 "먼저 스폰돼 있어야" 하면 발견이 아니다.
-    let plan = match parsed {
-        ParsedCommand::Help(topic) => {
-            println!("{}", render_help(topic));
-            return 0;
-        }
-        // 발견·호출은 stdin 도 본문도 없다 — 크레덴셜 뒤에서 자기 흐름을 탄다.
-        ParsedCommand::Catalog(c) => Plan::Catalog(c),
-        ParsedCommand::Invoke(i) => Plan::Invoke(i),
-        // 제어 동사는 stdin 을 읽지 않으므로 materialize 단계가 없다(본문이라는 개념이 없다).
-        ParsedCommand::Agent(a) => Plan::Legacy(Command::Agent(a)),
-        // 파싱이 성공한 **뒤**에 나는 인자 오류(빈 stdin 등)도 네트워크 전에 끝난다 — 이 파일의 규율.
-        ParsedCommand::Mail(m) => match materialize_body(m, read_stdin_to_string) {
-            Ok(c) => Plan::Legacy(c),
-            Err(msg) => {
-                print_error("BAD_ARGS", &msg);
-                return 1;
-            }
-        },
-    };
-
     let (token, base) = match read_credentials() {
         Ok(pair) => pair,
         Err((code, hint)) => {
@@ -433,23 +216,22 @@ fn run(args: &[String]) -> i32 {
         }
     };
 
-    match plan {
-        Plan::Legacy(command) => run_legacy(&base, &token, command),
-        Plan::Catalog(request) => run_catalog(&base, &token, &request),
-        Plan::Invoke(invoke) => run_invoke(&base, &token, invoke),
+    match parsed {
+        ParsedCommand::Help(topic) => run_help(&base, &token, topic.as_deref()),
+        ParsedCommand::Catalog(request) => run_catalog(&base, &token, &request),
+        ParsedCommand::Invoke(invoke) => run_invoke(&base, &token, invoke),
+        ParsedCommand::Agent(a) => run_legacy(&base, &token, Command::Agent(a)),
+        // ★stdin 은 자격증명 뒤에 읽는다★ — 앞에서 읽으면 자격증명 없는 호출이 닫히지 않는 stdin(에이전트
+        //   셸·열어 둔 파이프)에 매달려 실패하지 못한다. 본문 형태 오류(빈 stdin 등)는 여전히 네트워크 전이다.
+        // ADR-0284
+        ParsedCommand::Mail(m) => match materialize_body(m, read_stdin_to_string) {
+            Ok(command) => run_legacy(&base, &token, command),
+            Err(msg) => {
+                print_error("BAD_ARGS", &msg);
+                EXIT_FAILED
+            }
+        },
     }
-}
-
-/// 파싱이 끝난 뒤 남는 갈래 — **크레덴셜 뒤에서** 무엇을 도는가.
-///
-/// ★`Command`(옛 세 계열)를 감싸기만 하는 변형이 있는 이유★: 새 두 표면은 요청이 하나가 아니라
-///   「스키마를 받고 → 그걸로 인자를 옮기고 → 부른다」라서 라우트 하나 + 판정기 하나로 접히지 않는다.
-///   옛 흐름을 그 모양에 맞춰 늘리는 대신 갈래를 갈라 둔다.
-#[derive(Debug)]
-enum Plan {
-    Legacy(Command),
-    Catalog(ParsedCatalog),
-    Invoke(ParsedInvoke),
 }
 
 /// 크레덴셜 두 개. 없으면 `(코드, 문구)` — 찍는 것은 호출자 몫이다(이 함수가 순수해야 갈래마다 같은 문구가
@@ -490,11 +272,93 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
                 Command::Agent(a) => exit_code_for_agent_response(a, resp.status, &resp.body),
             }
         }
-        Err(e) => {
-            print_error(e.code(), &e.to_string());
-            1
-        }
+        Err(e) => fail_unreached(&e),
     }
+}
+
+/// help 화면 하나를 데몬에 청해 찍는다. 낱말은 검사하지 않고 싣는다 — 어휘는 데몬 것이다.
+// ADR-0284
+fn run_help(base: &str, token: &str, topic: Option<&str>) -> i32 {
+    match post_json(base, CLI_HELP_ROUTE, token, &help_request_body(topic)) {
+        Ok(resp) => {
+            let verdict = exit_code_for_help_response(resp.status, &resp.body);
+            println!("{}", verdict.stdout);
+            if let Some(reason) = &verdict.stderr {
+                eprintln!("{reason}");
+            }
+            verdict.exit
+        }
+        Err(e) => fail_unreached(&e),
+    }
+}
+
+fn help_request_body(topic: Option<&str>) -> String {
+    serde_json::json!({ CLI_HELP_TOPIC_KEY: topic }).to_string()
+}
+
+/// help 응답 하나가 무엇이 되나 — 찍을 것 · 진단 · exit code.
+#[derive(Debug, PartialEq, Eq)]
+struct HelpVerdict {
+    /// stdout 에 한 줄로 찍는다(`println!`) — 성공이면 화면, 아니면 받은 body 그대로.
+    stdout: String,
+    /// stderr 진단 한 줄 — 형태가 깨진 2xx 일 때만.
+    stderr: Option<String>,
+    exit: i32,
+}
+
+/// (HTTP status, body) → [`HelpVerdict`]. 다른 판정기와 같은 3분법이다: 문자열 `screen` 을 실은 2xx 만 0 ·
+/// 데몬의 반려(모르는 낱말 · 본문 파일 문제)와 비-2xx · 비-JSON 은 body 그대로 1 · 그 밖의 2xx JSON 은 body +
+/// stderr 사유 2.
+///
+/// ★화면을 다듬지 않는다(trim 등)★: 데몬이 렌더한 바이트가 곧 화면이다.
+/// ★`status:"error"` 를 `screen` 보다 먼저 거른다★: 둘이 함께 실린 응답을 성공으로 읽으면 반려가 성공 코드와
+///   함께 사라진다(조회 판정기와 같은 규율).
+fn exit_code_for_help_response(status: u16, resp_body: &str) -> HelpVerdict {
+    let verdict = |exit: i32, stderr: Option<String>| HelpVerdict {
+        stdout: resp_body.to_string(),
+        stderr,
+        exit,
+    };
+    if !(200..300).contains(&status) {
+        return verdict(EXIT_FAILED, None);
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(resp_body) else {
+        return verdict(EXIT_FAILED, None);
+    };
+    if is_validated_error_shape(&v) {
+        return verdict(EXIT_FAILED, None);
+    }
+    if v.get("status").and_then(|s| s.as_str()) == Some("error") {
+        return verdict(
+            EXIT_MALFORMED_SUCCESS,
+            Some(format!(
+                "{CLI_EXE_NAME}: malformed error response — 'status' is \"error\" but 'code' is missing or not a non-empty string, so this rejection cannot be acted on"
+            )),
+        );
+    }
+    match v.get(CLI_HELP_SCREEN_KEY).and_then(|s| s.as_str()) {
+        Some(screen) => HelpVerdict {
+            stdout: screen.to_string(),
+            stderr: None,
+            exit: 0,
+        },
+        None => verdict(
+            EXIT_MALFORMED_SUCCESS,
+            Some(format!(
+                "{CLI_EXE_NAME}: malformed help response — expected a JSON object with a string '{CLI_HELP_SCREEN_KEY}'"
+            )),
+        ),
+    }
+}
+
+/// 데몬에 못 닿은 실패를 찍는다 — 데몬을 부르는 모든 명령이 이 한 함수를 쓴다(stdout 봉투 + exit 1).
+///
+/// ★호출자가 이 두 줄을 손으로 다시 적지 않게 하는 것이 요점이다★: 자리마다 적으면 새 명령 하나가 다른
+///   코드나 다른 채널로 실패해, 같은 상태(데몬 없음 · 판 어긋남)가 명령마다 다르게 보인다.
+// ADR-0284
+fn fail_unreached(e: &SendError) -> i32 {
+    print_error(e.code(), &e.to_string());
+    EXIT_FAILED
 }
 
 /// 전송 계층 실패 분류(M1) — exit code 는 항상 1 이지만 **에러 코드**는 원인별로 갈라 stdout JSON 에 싣는다.
@@ -504,6 +368,9 @@ enum SendError {
     Connect(String),
     /// Content-Length 가 있는데 수신 body 가 그보다 짧음(절단). received/expected 바이트 수 동봉.
     Incomplete { received: usize, expected: usize },
+    /// 데몬이 이 라우트를 모른다(404) — 이 CLI 와 다른 빌드의 데몬이다. 재시도로 바뀌지 않는다.
+    // ADR-0284
+    NoRoute { route: String },
 }
 
 impl SendError {
@@ -511,6 +378,10 @@ impl SendError {
         match self {
             SendError::Connect(_) => "CONNECT_FAILED",
             SendError::Incomplete { .. } => "INCOMPLETE_RESPONSE",
+            // ★`UNKNOWN_COMMAND` 를 쓰지 않는다★: 그건 「표에 그 이름이 없다(오타)」의 코드라, 같으면 호출자가
+            //   멀쩡한 이름을 고치기 시작한다. 데몬 어휘(command `ErrorCode`)의 같은 뜻 낱말을 빌린다 —
+            //   `UNKNOWN_COMMAND` 를 빌린 것과 같은 규율.
+            SendError::NoRoute { .. } => "PROTOCOL_MISMATCH",
         }
     }
 }
@@ -522,6 +393,10 @@ impl std::fmt::Display for SendError {
             SendError::Incomplete { received, expected } => write!(
                 f,
                 "response body truncated: received {received} bytes but Content-Length declared {expected}"
+            ),
+            SendError::NoRoute { route } => write!(
+                f,
+                "the daemon does not serve {route} — it is likely a different build than this {CLI_EXE_NAME} (version mismatch); report this to the owner, retrying will not change it"
             ),
         }
     }
@@ -546,69 +421,10 @@ enum BodySource {
     Stdin,
 }
 
-/// 어느 help 화면인가. 완성된 문자열이 아니라 **주제**를 나르는 이유는 파서를 순수하게 두기 위해서다 —
-/// 화면 본문은 프로세스당 한 번 해석되는 표에서 오고, 파서가 그 표를 만지면 인자 조합 단위 테스트가
-/// 파일 I/O 에 매인다.
-///
-/// ★화면 하나 = 구획 하나 = 낱말 하나다(`Root` 만 낱말이 없다)★: 조각을 이어 붙이던 옛 모양은 한 화면이
-///   여러 구획에 흩어져, 본문을 고치는 사람이 어느 조각이 어느 화면에 실리는지 파일만 보고는 몰랐다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HelpTopic {
-    Root,
-    Mail,
-    Agent,
-    Window,
-    Settings,
-}
-
-impl HelpTopic {
-    /// 화면 전량 — 요구 구획 목록도 반려 문구의 계열 목록도 여기서 나온다. 화면을 더하면서 어느 한쪽을
-    /// 빠뜨리는 드리프트가 성립하지 않는다.
-    const ALL: &'static [HelpTopic] = &[
-        HelpTopic::Root,
-        HelpTopic::Mail,
-        HelpTopic::Agent,
-        HelpTopic::Window,
-        HelpTopic::Settings,
-    ];
-
-    fn section_id(self) -> &'static str {
-        match self {
-            HelpTopic::Root => SECTION_ROOT,
-            HelpTopic::Mail => CLI_GROUP_MAIL,
-            HelpTopic::Agent => CLI_GROUP_AGENT,
-            HelpTopic::Window => HELP_TOPIC_WINDOW,
-            HelpTopic::Settings => HELP_TOPIC_SETTINGS,
-        }
-    }
-
-    /// `help <낱말>` 이 받는 낱말. `Root` 는 없다 — 맨 `help` 가 그 자리다.
-    fn group_word(self) -> Option<&'static str> {
-        match self {
-            HelpTopic::Root => None,
-            other => Some(other.section_id()),
-        }
-    }
-
-    fn from_group_word(word: &str) -> Option<HelpTopic> {
-        HelpTopic::ALL
-            .iter()
-            .copied()
-            .find(|t| t.group_word() == Some(word))
-            .or_else(|| {
-                HELP_TOPIC_ALIASES
-                    .iter()
-                    .find(|(alias, _)| *alias == word)
-                    .map(|&(_, topic)| topic)
-            })
-    }
-}
-
-/// 파싱 결과의 최상위 갈래. help 를 우편 동사와 **타입으로** 갈라 두면 네트워크·크레덴셜 경로가 help 를
-/// 영영 만나지 않는다(그 경로에 "help 면 건너뛴다" 분기를 둘 필요가 없다).
 #[derive(Debug)]
 enum ParsedCommand {
-    Help(HelpTopic),
+    /// 화면 낱말 — `None` 이 목차다. ★검사하지 않은 채 싣는다★: 낱말 어휘는 데몬 것이다(헤더).
+    Help(Option<String>),
     Mail(ParsedMail),
     Agent(ParsedAgent),
     Catalog(ParsedCatalog),
@@ -750,7 +566,7 @@ fn build_agent_body(agent: &ParsedAgent) -> serde_json::Value {
 ///   `reply_by` 다 — 변환은 `Command::request_body` 한 곳에서만 한다.
 fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
     let Some(first) = args.first().map(|s| s.as_str()) else {
-        return Ok(ParsedCommand::Help(HelpTopic::Root));
+        return Ok(ParsedCommand::Help(None));
     };
     match first {
         t if is_help_token(t) => parse_help_topic(&args[1..]),
@@ -759,7 +575,7 @@ fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
             let rest = &args[1..];
             if rest.first().is_some_and(|a| is_help_token(a)) {
                 reject_help_with_extra_args(rest)?;
-                return Ok(ParsedCommand::Help(HelpTopic::Mail));
+                return Ok(ParsedCommand::Help(Some(CLI_GROUP_MAIL.to_string())));
             }
             parse_mail(rest).map(ParsedCommand::Mail)
         }
@@ -767,7 +583,7 @@ fn parse_command(args: &[String]) -> Result<ParsedCommand, String> {
             let rest = &args[1..];
             if rest.first().is_some_and(|a| is_help_token(a)) {
                 reject_help_with_extra_args(rest)?;
-                return Ok(ParsedCommand::Help(HelpTopic::Agent));
+                return Ok(ParsedCommand::Help(Some(CLI_GROUP_AGENT.to_string())));
             }
             parse_agent(rest).map(ParsedCommand::Agent)
         }
@@ -878,33 +694,35 @@ fn is_help_token(arg: &str) -> bool {
 /// ★help 호출에 인자가 더 붙으면 성공(0)으로 삼키지 않는다★: `engram mail --help --to bob --body hi` 를
 ///   help 로 처리하면 보내려던 편지가 사라지고 **exit 0** 이라 호출자는 성공으로 읽는다 — 값 자리에서 막은
 ///   것과 같은 조용한 유실이 계열 자리에서 나는 것뿐이다. 그래서 help 는 **단독 호출**일 때만 help 다.
+/// ★반려 문구에 화면 낱말 목록을 싣지 않는다★: 목록은 데몬 어휘라, 여기 적으면 두 벌이 되고 데몬 쪽만
+///   고친 날 이 문구가 없는 낱말을 가르친다. 맨 `help` 가 그 목록을 낸다.
 fn reject_help_with_extra_args(args: &[String]) -> Result<(), String> {
     if args.len() > 1 {
-        let words: Vec<&str> = HelpTopic::ALL
-            .iter()
-            .filter_map(|t| t.group_word())
-            .collect();
         return Err(format!(
-            "help takes no further arguments: {} — run `{CLI_EXE_NAME} help` on its own, name one group ({}), or run the command you meant",
-            args[1],
-            words.join(" | ")
+            "help takes no further arguments: {} — run `{CLI_EXE_NAME} help` on its own to list the groups, or run the command you meant",
+            args[1]
         ));
     }
     Ok(())
 }
 
+/// `help [낱말]` — 낱말이 화면에 있는지는 보지 않는다(데몬이 반려한다). 형태만 본다.
+///
+/// ★help 토큰과 `-` 로 시작하는 낱말은 화면 낱말이 아니다(인자 오류 · 왕복 없음)★: 어휘 검사가 데몬으로 간
+///   뒤 이 규칙이 없으면 `help --help` 가 「`--help` 라는 화면」을 물으러 인증된 왕복을 한다. 화면 낱말은
+///   대시로 시작하지 않는다 — `parse_catalog` 의 명령 이름과 같은 판단이다.
+// ADR-0284
 fn parse_help_topic(rest: &[String]) -> Result<ParsedCommand, String> {
-    let Some(word) = rest.first().map(|s| s.as_str()) else {
-        return Ok(ParsedCommand::Help(HelpTopic::Root));
+    let Some(word) = rest.first() else {
+        return Ok(ParsedCommand::Help(None));
     };
     reject_help_with_extra_args(rest)?;
-    match HelpTopic::from_group_word(word) {
-        Some(topic) => Ok(ParsedCommand::Help(topic)),
-        // help 뒤에 또 help 토큰이 오는 것은 계열 이름이 아니다 — 규칙("help 는 단독 호출") 그대로 반려한다.
-        None => Err(format!(
-            "unknown help topic: {word} — run `{CLI_EXE_NAME} help` to list groups, or `{CLI_EXE_NAME} help {CLI_GROUP_MAIL}`"
-        )),
+    if is_help_token(word) || word.starts_with('-') {
+        return Err(format!(
+            "`{word}` is not a help topic — a topic is a group name, not a flag or another help word; run `{CLI_EXE_NAME} help` on its own to list the groups"
+        ));
     }
+    Ok(ParsedCommand::Help(Some(word.clone())))
 }
 
 fn parse_mail(rest: &[String]) -> Result<ParsedMail, String> {
@@ -1757,9 +1575,9 @@ fn fetch_catalog(base: &str, token: &str, for_command: Option<&str>) -> Result<C
     let resp = match post_json(base, ROUTE_COMMANDS, token, "{}") {
         Ok(r) => r,
         Err(e) => {
-            print_error(e.code(), &e.to_string());
+            let code = fail_unreached(&e);
             note_catalog_failure(for_command);
-            return Err(EXIT_FAILED);
+            return Err(code);
         }
     };
     if !(200..300).contains(&resp.status) {
@@ -1894,10 +1712,7 @@ fn run_invoke(base: &str, token: &str, invoke: ParsedInvoke) -> i32 {
                 &resp.body,
             )
         }
-        Err(e) => {
-            print_error(e.code(), &e.to_string());
-            EXIT_FAILED
-        }
+        Err(e) => fail_unreached(&e),
     }
 }
 
@@ -2669,7 +2484,16 @@ fn post_json(
     stream
         .read_to_end(&mut raw)
         .map_err(|e| SendError::Connect(format!("read failed: {e}")))?;
-    parse_response(&raw)
+    let resp = parse_response(&raw)?;
+    // 404 = 데몬이 이 라우트를 모른다(판 어긋남) — 판정기가 아니라 전송 실패 길로 보낸다(헤더 「데몬에 못
+    //   닿은 실패」).
+    // ADR-0284
+    if resp.status == 404 {
+        return Err(SendError::NoRoute {
+            route: route.to_string(),
+        });
+    }
+    Ok(resp)
 }
 
 /// raw HTTP 응답 바이트 → (status, body). 최소하지만 **정확한** HTTP/1.1 응답 파서(F4):
@@ -3964,8 +3788,9 @@ mod tests {
                 "help 가 약속한 필드가 빠졌다: {missing}"
             );
         }
-        // help 화면이 실제로 그 다섯을 약속하는지까지 여기서 묶는다(한쪽만 바뀌는 것을 막는다).
-        let help = render_help(HelpTopic::Agent);
+        // help 화면이 실제로 그 다섯을 약속하는지까지 여기서 묶는다(한쪽만 바뀌는 것을 막는다). 화면은 데몬이
+        //   렌더하므로 배포되는 본문 파일의 원문과 견준다.
+        let help = help_file_section(CLI_GROUP_AGENT);
         for promised in ["id", "name", "state", "cwd", "parent"] {
             assert!(help.contains(promised), "{promised} 가 help 에: {help}");
         }
@@ -4033,58 +3858,68 @@ mod tests {
         assert_eq!(body["name"], "-weird");
     }
 
+    /// 파싱이 help 갈래로 가면 실어 보낼 낱말을 돌려준다(아니면 패닉).
+    fn help_word(args: &[&str]) -> Option<String> {
+        match parse_command(&argv(args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
+            ParsedCommand::Help(word) => word,
+            other => panic!("help 여야({args:?}): {other:?}"),
+        }
+    }
+
+    /// ★help 다음 칸의 help 토큰 · 대시 낱말은 화면 낱말이 아니라 인자 오류다(한 칸짜리도)★ — 화면 낱말
+    ///   검사가 데몬으로 간 뒤 이 형태 규칙이 없으면 `help --help` 가 `--help` 라는 화면을 물으러 왕복한다.
     #[test]
     fn a_help_token_is_not_a_help_topic() {
         for args in [
             vec!["help", "--help"],
             vec!["--help", "help"],
             vec!["help", "-h"],
+            vec!["-h", "help"],
+            vec!["help", "help"],
+            vec!["help", "--to"],
+            vec!["help", "-x"],
             vec!["mail", "--help", "-h"],
         ] {
+            let Err(err) = parse_command(&argv(&args)) else {
+                panic!("help 는 단독 호출일 때만 help 고 낱말은 플래그가 아니다: {args:?}");
+            };
             assert!(
-                parse_command(&argv(&args)).is_err(),
-                "help 는 단독 호출일 때만 help 다: {args:?}"
+                err.contains(&format!("`{CLI_EXE_NAME} help`")),
+                "목록을 보는 길로 안내해야({args:?}): {err}"
             );
         }
     }
 
     #[test]
     fn unknown_group_and_unknown_verb_point_at_help() {
-        for args in [vec!["wat"], vec!["mail", "wat"], vec!["help", "wat"]] {
+        for args in [vec!["wat"], vec!["mail", "wat"]] {
             let err = parse_command(&argv(&args)).expect_err("모르는 이름은 인자 오류");
             assert!(err.contains("help"), "반려 사유가 help 로 안내해야: {err}");
         }
+        // ★모르는 화면 낱말은 여기서 판정하지 않는다★ — 그대로 싣고 반려(`INVALID_ARGUMENT`)는 데몬이 한다
+        //   (`control::help` 의 요청 해석 시험).
+        assert_eq!(help_word(&["help", "wat"]).as_deref(), Some("wat"));
     }
 
     #[test]
-    fn help_lists_groups_and_each_group_documents_its_verbs() {
-        for args in [vec![], vec!["help"]] {
-            match parse_command(&argv(&args)).expect("help 는 성공") {
-                ParsedCommand::Help(t) => {
-                    assert_eq!(t, HelpTopic::Root, "인자 없음·help = 계열 목록")
-                }
-                other => panic!("help 여야: {other:?}"),
-            }
+    fn help_spellings_carry_their_group_word_and_values_stay_values() {
+        for args in [vec![], vec!["help"], vec!["--help"], vec!["-h"]] {
+            assert_eq!(help_word(&args), None, "인자 없음·help = 목차({args:?})");
         }
-        match parse_command(&argv(&["help", "mail"])).expect("help mail") {
-            ParsedCommand::Help(t) => assert_eq!(t, HelpTopic::Mail),
-            other => panic!("help 여야: {other:?}"),
+        // 관례 철자 — 발견 입구가 가장 흔한 표기에서 실패하면 안 된다. 제어 계열도 같은 규칙을 따른다(계열이
+        //   늘 때 이 규칙이 계열마다 갈리면 안 된다).
+        for group in [CLI_GROUP_MAIL, CLI_GROUP_AGENT] {
+            for args in [
+                vec!["help", group],
+                vec!["--help", group],
+                vec![group, "--help"],
+                vec![group, "-h"],
+            ] {
+                assert_eq!(help_word(&args).as_deref(), Some(group), "{args:?}");
+            }
         }
         assert!(parse_command(&argv(&["help", "mail", "extra"])).is_err());
 
-        // 관례 철자 — 발견 입구가 가장 흔한 표기에서 실패하면 안 된다.
-        for (args, want) in [
-            (vec!["--help"], HelpTopic::Root),
-            (vec!["-h"], HelpTopic::Root),
-            (vec!["--help", "mail"], HelpTopic::Mail),
-            (vec!["mail", "--help"], HelpTopic::Mail),
-            (vec!["mail", "-h"], HelpTopic::Mail),
-        ] {
-            match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
-                ParsedCommand::Help(t) => assert_eq!(t, want, "{args:?}"),
-                other => panic!("help 여야({args:?}): {other:?}"),
-            }
-        }
         // ★값 자리의 help 토큰은 값이다★ — 발송이 조용히 help 로 새면 편지가 사라진다.
         let (route, body) = wire(&["mail", "send", "--to", "bob", "--body", "-h"]);
         assert_eq!(route, "/control/send");
@@ -4093,8 +3928,8 @@ mod tests {
         assert_eq!(body["to"], "-h", "수신자 값도 가로채지 않는다");
 
         // ★값을 이미 받은 뒤의 help 토큰은 인자 오류다 — 네트워크를 타면 안 된다★: 그대로 실어 보내면
-        //   `--help` 가 메시지 id 로 조회된다(실제로 왕복해 MESSAGE_NOT_FOUND 로 끝났다). 하위 주제
-        //   **바로 다음 칸**은 반대로 화면이다(`every_mail_subtopic_is_reachable_by_both_spellings`).
+        //   `--help` 가 메시지 id 로 조회된다(실제로 왕복해 MESSAGE_NOT_FOUND 로 끝났다). 계열 **바로
+        //   다음 칸**(`mail --help`)은 반대로 화면이다(위 관례 철자).
         for args in [
             vec!["mail", "status", "m-7f3k9q2d", "--help"],
             vec!["mail", "status", "m-7f3k9q2d", "-h"],
@@ -4122,95 +3957,23 @@ mod tests {
                 "help 에 붙은 잔여 인자는 오류여야: {args:?}"
             );
         }
-
-        // 제어 계열도 같은 발견 규칙을 따른다(계열이 늘 때 이 규칙이 계열마다 갈리면 안 된다).
-        for args in [
-            vec!["help", CLI_GROUP_AGENT],
-            vec![CLI_GROUP_AGENT, "--help"],
-            vec![CLI_GROUP_AGENT, "-h"],
-            vec!["--help", CLI_GROUP_AGENT],
-        ] {
-            match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
-                ParsedCommand::Help(t) => assert_eq!(t, HelpTopic::Agent, "{args:?}"),
-                other => panic!("help 여야({args:?}): {other:?}"),
-            }
-        }
-
-        let root = render_help(HelpTopic::Root);
-        let mail = render_help(HelpTopic::Mail);
-        let agent = render_help(HelpTopic::Agent);
-        assert!(root.contains(CLI_GROUP_AGENT), "계열 목록에 agent: {root}");
-        for verb in CLI_AGENT_VERBS {
-            assert!(agent.contains(verb), "{verb} 동사가 help 에: {agent}");
-        }
-        for flag in CLI_AGENT_FLAGS {
-            assert!(agent.contains(flag), "{flag} 가 help 에: {agent}");
-        }
-        // 표면에 없는 동사를 help 가 가르치면 LLM 이 없는 명령을 시도한다(ADR-0122 미해소분).
-        for absent in ["kill", " rm ", "delete"] {
-            assert!(
-                !agent.contains(absent),
-                "표면에 없는 동사가 help 에 있다({absent}): {agent}"
-            );
-        }
-        for text in [&root, &mail, &agent] {
-            assert!(
-                !text.contains(HELP_TOOL_SLOT),
-                "치환 안 된 자리가 남으면 안 된다: {text}"
-            );
-            assert!(text.contains(CLI_EXE_NAME), "실행파일 이름이 상수에서 와야");
-        }
-        assert!(root.contains(CLI_GROUP_MAIL), "계열 목록에 mail: {root}");
     }
 
-    /// ★계열 낱말 넷이 각자 자기 화면에 닿는다★ — 한 낱말이 다른 화면으로 배선되면 파싱 단언만으론 안
-    ///   보인다(둘 다 `Help` 로 성공한다). 그래서 **그려 본 뒤 서로 다른지**까지 본다.
+    /// ★`help <낱말>` 은 친 낱말을 그대로 싣는다★ — 한 낱말이 다른 낱말로 배선되면 데몬은 다른 화면을 낸다.
+    ///   화면 넷이 서로 다르고 목차와 다르다는 것은 데몬 쪽 같은 이름의 반쪽(`control::help`)이 잰다.
     #[test]
-    fn each_group_word_renders_its_own_screen() {
-        let mut seen: Vec<(HelpTopic, String)> = Vec::new();
-        for topic in HelpTopic::ALL {
-            let Some(word) = topic.group_word() else {
-                continue;
-            };
-            match parse_command(&argv(&["help", word])).unwrap_or_else(|e| panic!("{word}: {e}")) {
-                ParsedCommand::Help(t) => {
-                    assert_eq!(t, *topic, "`help {word}` 가 다른 화면에 닿았다")
-                }
-                other => panic!("help 여야({word}): {other:?}"),
-            }
-            let screen = render_help(*topic);
-            assert!(
-                screen.starts_with(&format!("{CLI_EXE_NAME} {word} ")),
-                "화면 머리가 자기 계열이어야({word}): {screen}"
-            );
-            seen.push((*topic, screen));
-        }
-        assert_eq!(seen.len(), 4, "계열 낱말은 넷이다: {seen:?}");
-        let root = render_help(HelpTopic::Root);
-        for (topic, screen) in &seen {
-            assert_ne!(*screen, root, "{topic:?} 가 최상위 화면과 같다");
-            assert_eq!(
-                seen.iter().filter(|(_, s)| s == screen).count(),
-                1,
-                "{topic:?} 와 같은 본문을 내는 화면이 또 있다"
-            );
+    fn each_group_word_is_carried_as_typed() {
+        for word in [CLI_GROUP_MAIL, CLI_GROUP_AGENT, "window", "settings"] {
+            assert_eq!(help_word(&["help", word]).as_deref(), Some(word));
         }
     }
 
+    /// 옛 낱말 `theme` 도 다른 낱말처럼 그대로 싣는다 — 별칭 풀이는 데몬이 한다. 단독 호출 규칙은 낱말을
+    /// 가리지 않는다.
     #[test]
-    fn the_old_theme_word_reaches_the_settings_screen() {
+    fn the_old_theme_word_is_carried_like_any_other_word() {
         for args in [vec!["help", "theme"], vec!["--help", "theme"]] {
-            match parse_command(&argv(&args)).unwrap_or_else(|e| panic!("{args:?}: {e}")) {
-                ParsedCommand::Help(t) => assert_eq!(t, HelpTopic::Settings, "{args:?}"),
-                other => panic!("help 여야({args:?}): {other:?}"),
-            }
-        }
-        // 별칭이 계열 낱말과 같으면 계열 쪽이 먼저 잡혀 별칭은 죽은 줄이 된다.
-        for (alias, _) in HELP_TOPIC_ALIASES {
-            assert!(
-                HelpTopic::ALL.iter().all(|t| t.group_word() != Some(alias)),
-                "별칭 `{alias}` 가 계열 낱말과 겹친다"
-            );
+            assert_eq!(help_word(&args).as_deref(), Some("theme"), "{args:?}");
         }
         assert!(
             parse_command(&argv(&["help", "theme", "extra"])).is_err(),
@@ -4218,122 +3981,95 @@ mod tests {
         );
     }
 
-    /// ★개명 전 바이너리가 요구하던 구획 전량이 본문 파일에 남아 있다★ — 하나라도 빠지면 그 바이너리는 새
-    ///   파일을 통째로 거부하고, 제 내장 사본(파일의 `theme` 키를 고치라는 옛 안내)을 낸다. 이 바이너리는 그
-    ///   여분 구획을 모르는 구획으로 무시하고, `theme` 낱말은 별칭으로 settings 화면을 낸다.
+    /// ★help 요청 바디는 글자 그대로 이것이다★ — 데몬은 `topic` 이 없거나 다른 키가 있으면 반려하므로 이 글자가
+    ///   갈리면 화면 대신 반려가 온다. 응답 판정은 다른 판정기와 같은 3분법이다.
     #[test]
-    fn the_help_file_still_satisfies_the_pre_rename_binary_and_this_one_ignores_the_extra() {
-        let text = HelpText::parse(HELP_EMBEDDED, "내장 사본");
-        for id in ["root", "mail", "agent", "window", "theme"] {
-            assert!(
-                text.sections.iter().any(|(k, _)| k == id),
-                "개명 전 바이너리가 요구하는 구획 `{id}` 가 없다"
+    fn help_sends_a_literal_body_and_judges_the_reply_like_every_other_route() {
+        assert_eq!(help_request_body(None), r#"{"topic":null}"#);
+        assert_eq!(help_request_body(Some("mail")), r#"{"topic":"mail"}"#);
+
+        // 2xx + 문자열 화면 = 그 화면 그대로(다듬지 않는다) · 0.
+        assert_eq!(
+            exit_code_for_help_response(200, r#"{"screen":"engram mail - x\n  y\n"}"#),
+            HelpVerdict {
+                stdout: "engram mail - x\n  y\n".to_string(),
+                stderr: None,
+                exit: 0,
+            }
+        );
+
+        // 데몬의 반려(모르는 낱말 · 본문 파일 문제) · 비-2xx · 비-JSON = body 그대로 · 1.
+        for (status, body) in [
+            (
+                200,
+                r#"{"status":"error","code":"INVALID_ARGUMENT","hint":"unknown help topic: wat"}"#,
+            ),
+            (
+                200,
+                r#"{"status":"error","code":"INTERNAL","hint":"help text unavailable","screen":"x"}"#,
+            ),
+            (401, ""),
+            (503, r#"{"screen":"x"}"#),
+            (200, "not json"),
+        ] {
+            assert_eq!(
+                exit_code_for_help_response(status, body),
+                HelpVerdict {
+                    stdout: body.to_string(),
+                    stderr: None,
+                    exit: EXIT_FAILED,
+                },
+                "{status} {body}"
             );
         }
-        assert!(text.missing().is_empty(), "여분 구획이 로드를 깨면 안 된다");
-        let compat = text.section("theme");
-        let settings = render_help_from(&text, HelpTopic::Settings);
-        assert!(
-            settings.starts_with(&format!("{CLI_EXE_NAME} {HELP_TOPIC_SETTINGS} ")),
-            "별칭 대상은 settings 구획이어야: {settings}"
-        );
-        assert_ne!(
-            settings,
-            compat.replace(HELP_TOOL_SLOT, CLI_EXE_NAME),
-            "`help theme` 이 옛 바이너리용 포인터 구획을 내면 안 된다"
-        );
+
+        // 2xx JSON 인데 화면도 검증된 반려도 아니다 = body 그대로 + stderr 사유 · 2.
+        for body in [
+            r#"{}"#,
+            r#"{"screen":7}"#,
+            r#"{"status":"error","screen":"x"}"#,
+            r#"["screen"]"#,
+            "null",
+        ] {
+            let verdict = exit_code_for_help_response(200, body);
+            assert_eq!(verdict.exit, EXIT_MALFORMED_SUCCESS, "{body}");
+            assert_eq!(verdict.stdout, body);
+            assert!(
+                verdict.stderr.is_some(),
+                "보고 대상은 사유를 남긴다: {body}"
+            );
+        }
     }
 
-    // ── 회신 계약 · 프라이밍 다리 ─────────────────────────────────────────────────────
+    // ── 프라이밍 다리 · help 본문 원문 ────────────────────────────────────────────────────
 
-    /// ★옮겨 온 pin(`control/priming.rs::production_priming_files_teach_the_reply_contract`)★: 예전엔
-    ///   프라이밍 파일이 봉투 문법을 싣는지 봤다. 그 문법이 이 화면으로 내려오면서(프라이밍은 포인터로
-    ///   줄었다) pin 도 따라왔다 — 표면을 소유한 파일이 그 표면을 지킨다.
-    ///
-    /// ★무엇이 걸려 있나★: 데몬은 `type="request"` 봉투를 내보내고 기한 초과 시 **발신자에게**
-    ///   `<notice>` 를 쏘는데, **회신 자체는 LLM 준수(soft)** 다(ADR-0103 결정 2/3). 이 화면이 회신 규칙을
-    ///   안 가르치면 엄격 매칭(받은 id 필수)이 구조적으로 회신을 못 받아 계약이 반쪽이 된다.
-    ///
-    /// ★철자는 이 입구의 것으로 본다(ADR-0126 결정 1)★: 회신 대상을 지목하는 낱말은 도착한 봉투의 것
-    ///   (`in-reply-to`)이고, 같은 계약의 툴 인자 표기(snake_case `reply_to`·`reply_by`)는
-    ///   `control/mcp_server.rs::the_send_message_entry_teaches_its_own_call` 이 진다. 한쪽 철자를 다른
-    ///   화면에 끌어오면 폐지한 우회 교육이 되살아난다.
-    // ADR-0103
-    // ADR-0126
-    #[test]
-    fn the_mail_screen_teaches_the_reply_contract() {
-        let screen = render_help(HelpTopic::Mail);
-        assert!(
-            screen.contains("type=\"request\""),
-            "request 봉투를 알아보게 가르쳐야: {screen}"
-        );
-        assert!(
-            screen.contains("<notice>"),
-            "notice 는 회신 대상이 아님을 가르쳐야(데몬 전용 태그, from 없음): {screen}"
-        );
-        assert!(
-            screen.contains("in-reply-to"),
-            "받은 id 로 온 답을 알아보게 가르쳐야: {screen}"
-        );
-        assert!(
-            screen.contains("reply-by"),
-            "기한이 무엇인지 가르쳐야(발신자의 기한이지 수신자의 것이 아니다): {screen}"
-        );
-        // ★`mcp_server.rs` 의 `the_send_message_entry_teaches_its_own_call` 에서 옮겨 온 고정 —
-        //   지우지 말 것★: 「`pending` 을 원인 하나로 읽지 말고 조회하라」(ADR-0211 결정 2)는 도구
-        //   설명문이 지던 것인데, 그 설명문에서 인자 밖 계약을 걷어내며 이 화면이 유일한 집이 됐다.
-        //   두 자리 다 비면 그 금지를 가르치는 표면이 하나도 안 남는다.
-        assert!(
-            screen.contains("pending") && screen.contains("eg_messages"),
-            "pending 으로 상대 상태를 단정하지 말고 eg_messages 로 조회하라고 가르쳐야: {screen}"
-        );
-    }
-
-    /// ★프라이밍의 포인터와 이 화면이 같은 이름을 가리키는가★: 프라이밍은 계약을 싣지 않고 **`engram
-    ///   help <계열>` 을 쳐라**는 네 줄로 줄었다 — 그 네 줄이 곧 에이전트가 표면을 만나는 유일한 다리다.
-    ///   입구 이름을 갈거나(`help` → 다른 낱말) 프라이밍에서 그 줄을 빼면 에이전트는 **아무 오류도 없이**
-    ///   표면을 영영 못 찾는다(양쪽 다 자기 파일 안에서는 멀쩡하다). 그 침묵을 잡는 곳이 여기다.
-    ///
-    /// ★파싱만으로는 부족하다★: 명령이 받아들여져도 화면이 비거나 치환이 안 된 자리(`{tool}`)가 남으면
-    ///   가리킨 곳에 아무것도 없는 것과 같다 — 그래서 실제로 **그려 보고** 그 화면이 서는지까지 본다.
+    /// ★프라이밍의 `engram help <낱말>` 줄이 이 파서에서 help 요청이 되는가★: 프라이밍은 그 줄들로만 표면을
+    ///   가리킨다 — 입구 이름을 갈거나(`help` → 다른 낱말) 낱말 자리 규칙이 바뀌면 에이전트는 **아무 오류도
+    ///   없이** 표면을 못 찾는다(양쪽 다 자기 파일 안에서는 멀쩡하다). 그 낱말이 실제 화면으로 서는지는
+    ///   데몬 쪽 반쪽(`control::help` 의 같은 다리 시험)이 잰다.
     // ADR-0092
     #[test]
-    fn the_priming_pointer_names_help_entries_that_actually_render() {
+    fn the_priming_pointer_lines_parse_as_help_requests() {
         let priming = std::fs::read_to_string(help_repo_root().join("prompts/agent-priming.md"))
             .expect("프라이밍 파일 존재");
-        let pointer = format!("{CLI_EXE_NAME} help");
+        let pointer = format!("{CLI_EXE_NAME} help ");
+        assert_eq!(help_word(&["help"]), None, "맨 `help` 는 목차에 닿아야");
+        let words: Vec<&str> = priming
+            .match_indices(&pointer)
+            .filter_map(|(at, p)| priming[at + p.len()..].split_whitespace().next())
+            .collect();
         assert!(
-            priming.contains(&pointer),
-            "프라이밍이 `{pointer}` 를 가리켜야(이 줄이 빠지면 에이전트는 표면을 못 찾는다)"
+            !words.is_empty(),
+            "프라이밍이 `{pointer}<낱말>` 을 가리켜야(이 줄이 빠지면 에이전트는 표면을 못 찾는다)"
         );
-
-        match parse_command(&argv(&["help"])).expect("`help` 는 파싱돼야") {
-            ParsedCommand::Help(HelpTopic::Root) => {}
-            other => panic!("`{pointer}` 는 최상위 help 화면에 닿아야: {other:?}"),
-        }
-
-        for topic in HelpTopic::ALL {
-            let screen = render_help(*topic);
-            assert!(!screen.trim().is_empty(), "화면이 비어 있다({topic:?})");
-            assert!(
-                !screen.contains(HELP_TOOL_SLOT),
-                "치환 안 된 자리가 남으면 안 된다({topic:?}): {screen}"
+        for word in words {
+            assert_eq!(
+                help_word(&["help", word]).as_deref(),
+                Some(word),
+                "프라이밍 줄 `{pointer}{word}`"
             );
-            let Some(word) = topic.group_word() else {
-                continue;
-            };
-            assert!(
-                priming.contains(&format!("{pointer} {word}")),
-                "프라이밍이 `{pointer} {word}` 를 가리켜야"
-            );
-            match parse_command(&argv(&["help", word])).unwrap_or_else(|e| panic!("{word}: {e}")) {
-                ParsedCommand::Help(t) => assert_eq!(t, *topic, "{word}"),
-                other => panic!("help 여야({word}): {other:?}"),
-            }
         }
     }
-
-    // ── ADR-0092 계열: 화면 본문이 바이너리 밖에 산다 ──────────────────────────────────
 
     /// 이 파일의 테스트는 언제나 컴파일타임 소스 트리 안에서 도므로 MANIFEST_DIR 이 신뢰 가능하다.
     fn help_repo_root() -> std::path::PathBuf {
@@ -4344,177 +4080,24 @@ mod tests {
             .to_path_buf()
     }
 
-    /// ★내장 사본이 완전하지 않으면 폴백이 폴백이 아니다★: 외부 파일을 못 쓰는 순간 화면이 반쪽으로
-    ///   나가고, 그건 `engram help` 가 실패할 수 없다는 성질(ADR-0132 조각 ①)의 실질적 파기다.
-    ///   구획 id 를 주제 토큰에서 파생하면서 옛 전역 match 의 컴파일 강제가 사라졌으므로, 그 자리를
-    ///   이 단언이 진다 — 하위 주제를 늘리고 본문 파일에 구획을 안 더하면 여기서 빨개진다.
-    // ADR-0092
-    #[test]
-    fn the_embedded_copy_carries_every_section_the_screens_need() {
-        let text = HelpText::parse(HELP_EMBEDDED, "내장 사본");
-        assert!(
-            text.missing().is_empty(),
-            "내장 사본에 빠진 구획: {:?}",
-            text.missing()
-        );
+    /// 배포되는 help 본문 파일에서 구획 하나의 **원문**(`## <id>` 다음 줄부터 다음 `## ` 줄 앞까지 · 치환 전).
+    ///
+    /// ★렌더하지 않는다★: 화면 렌더는 데몬 것이라 여기서 다시 짜면 파서가 두 벌이 된다. CLI 쪽 사실과 화면
+    ///   글을 한 시험에 묶는 데는 원문 대조로 충분하다.
+    fn help_file_section(id: &str) -> String {
+        let text = std::fs::read_to_string(help_repo_root().join("prompts/engram-help.md"))
+            .expect("help 본문 파일 존재")
+            .replace("\r\n", "\n");
+        let head = format!("\n## {id}\n");
+        let start = text
+            .find(&head)
+            .unwrap_or_else(|| panic!("help 본문에 구획 `{id}` 이 없다"))
+            + head.len();
+        let rest = &text[start..];
+        let end = rest.find("\n## ").map_or(rest.len(), |i| i + 1);
+        rest[..end].to_string()
     }
 
-    /// ★두 경로가 **같은 파일**을 가리키는지★: 런타임은 `REL_HELP_FILE` 로 읽고 폴백은 `include_str!`
-    ///   로 굽는다 — 파일을 옮기며 한쪽만 고치면 배포본은 새 파일을, 바이너리는 옛 사본을 들고 돈다.
-    ///   그 어긋남은 둘 다 자기 안에서는 멀쩡해 보이므로 다른 어느 게이트도 못 잡는다.
-    #[test]
-    fn the_runtime_path_and_the_embedded_copy_name_the_same_file() {
-        let on_disk = std::fs::read_to_string(help_repo_root().join(REL_HELP_FILE))
-            .expect("본문 파일이 REL_HELP_FILE 자리에 있어야");
-        assert_eq!(
-            on_disk.replace("\r\n", "\n"),
-            HELP_EMBEDDED.replace("\r\n", "\n"),
-            "`include_str!` 가 굽는 파일과 런타임이 읽는 파일이 갈렸다"
-        );
-    }
-
-    /// 고정 경로 해석은 프라이밍과 같은 앵커(exe walk-up)를 쓴다 — cwd 도 repo 상대경로도 아니다.
-    #[test]
-    fn the_fixed_help_path_resolves_absolute_to_a_real_file() {
-        let p = help_file_path().expect("current_exe 가 있으면 경로는 산출된다");
-        assert!(p.is_absolute(), "절대경로여야: {p:?}");
-        assert!(
-            p.ends_with("prompts/engram-help.md") || p.ends_with("prompts\\engram-help.md"),
-            "고정 상대경로로 끝나야: {p:?}"
-        );
-        assert!(p.is_file(), "소스 트리에서 실제 파일을 가리켜야: {p:?}");
-    }
-
-    /// ★반쪽 로드 금지★: 구획 하나가 빠진 파일은 통째로 버려진다. 반쪽 화면은 낡은 화면보다 나쁘다 —
-    ///   읽는 쪽에는 빠진 자리가 그냥 없는 표면으로 보인다.
-    #[test]
-    fn a_help_file_missing_one_section_is_rejected_whole() {
-        let full = HELP_EMBEDDED.replace("\r\n", "\n");
-        let marker = format!("{SECTION_OPEN}{HELP_TOPIC_SETTINGS}");
-        assert!(full.contains(&marker), "표시 줄 표기가 바뀌었다: {marker}");
-        let crippled = full.replace(&marker, "<!-- 그냥 주석 -->");
-        let text = HelpText::parse(&crippled, "crippled");
-        assert_eq!(
-            text.missing(),
-            vec![HELP_TOPIC_SETTINGS.to_string()],
-            "빠진 구획을 정확히 지목해야"
-        );
-    }
-
-    /// ★외부 파일이 통째로 없어도 모든 화면이 선다★: 폴백으로 내려가는 것이 곧 이 성질이다.
-    #[test]
-    fn every_screen_still_renders_from_the_embedded_copy_alone() {
-        let text = HelpText::parse(HELP_EMBEDDED, "내장 사본");
-        for topic in HelpTopic::ALL {
-            let screen = render_help_from(&text, *topic);
-            assert!(!screen.trim().is_empty(), "빈 화면({topic:?})");
-            assert!(
-                !screen.contains(HELP_TOOL_SLOT),
-                "치환 안 된 자리({topic:?}): {screen}"
-            );
-            assert!(
-                screen.contains(CLI_EXE_NAME),
-                "실행파일 이름이 없다: {screen}"
-            );
-        }
-    }
-
-    /// ★최후의 바닥 — 표가 통째로 비어도 화면은 비지 않는다★: 빈 출력은 읽는 쪽에게 「그런 표면이
-    ///   없다」로 읽히므로, 그 경우에도 무엇이 빠졌는지 이름을 남긴다. 로더가 완전한 표만 고르므로
-    ///   운영에서는 안 걸리지만, 그 보장이 깨지는 날 조용히 사라지지 않게 박아 둔다.
-    #[test]
-    fn a_screen_never_renders_empty_even_with_no_sections_at_all() {
-        let empty = HelpText::parse("", "아무것도 없음");
-        assert_eq!(empty.missing().len(), required_section_ids().len());
-        for topic in HelpTopic::ALL {
-            let screen = render_help_from(&empty, *topic);
-            assert!(!screen.trim().is_empty(), "빈 화면({topic:?})");
-            assert!(
-                screen.contains("missing from") && screen.contains("아무것도 없음"),
-                "무엇이 어디서 빠졌는지 남겨야({topic:?}): {screen}"
-            );
-        }
-    }
-
-    /// ★표시는 **줄 전체**여야 한다★: 그렇지 않으면 형식을 설명하는 산문 한 줄이 구획을 끊는다 —
-    ///   본문 파일의 머리글이 실제로 그런 문장을 싣고 있고, 그 글은 첫 표시 앞이라 버려져야 한다.
-    #[test]
-    fn a_section_marker_must_be_a_whole_line() {
-        let src = format!(
-            "머리글: 표시는 `{SECTION_OPEN}<id>` 꼴이다.\n\
-             {SECTION_OPEN}one\n\
-             body one\n\
-             여기서도 {SECTION_OPEN}two 를 설명만 한다\n"
-        );
-        let text = HelpText::parse(&src, "fixture");
-        assert_eq!(
-            text.sections.len(),
-            1,
-            "산문 속 표기가 구획을 끊었다: {:?}",
-            text.sections
-        );
-        assert_eq!(
-            text.section("one"),
-            format!("body one\n여기서도 {SECTION_OPEN}two 를 설명만 한다\n")
-        );
-    }
-
-    /// ★본문은 공백까지 그대로다(들여쓰기·빈 줄·끝 줄바꿈이 곧 화면 서식)★ — 단 CRLF 만은 접는다:
-    ///   `core.autocrlf` 때문에 체크아웃된 줄끝이 기계마다 갈리는데 이 화면은 바이트가 곧 계약이다.
-    #[test]
-    fn section_bodies_keep_their_whitespace_but_fold_crlf() {
-        let text = HelpText::parse("## s\r\n\r\n  indented\r\ntail\r\n", "f");
-        assert_eq!(text.section("s"), "\n  indented\ntail\n");
-        let no_trailing_newline = HelpText::parse("## s\nlast", "f");
-        assert_eq!(no_trailing_newline.section("s"), "last");
-    }
-
-    /// ★env override 는 고정 파일을 이기고, 실패해도 **고정 파일로 되돌아가지 않는다**★(프라이밍과 같은
-    ///   규율 — 명시 지정을 조용히 다른 파일로 갈아치우면 무엇을 읽었는지 알 수 없다). 두 경로의 본문이
-    ///   같아서 내용으로는 못 가르므로 출처(`origin`)로 가른다.
-    // ADR-0092
-    #[test]
-    fn the_env_override_wins_and_its_failure_falls_back_to_the_embedded_copy() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var_os(ENV_HELP_FILE);
-
-        let dir = std::env::temp_dir().join(format!("engram-help-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let custom = dir.join("custom-help.md");
-        let landmark = "이 팀에서 할 수 있는 것";
-        assert!(
-            HELP_EMBEDDED.contains(landmark),
-            "최상위 화면의 표지가 바뀌었다"
-        );
-        std::fs::write(
-            &custom,
-            HELP_EMBEDDED.replace(landmark, "이 팀에서 할 수 있는 것(custom)"),
-        )
-        .unwrap();
-
-        std::env::set_var(ENV_HELP_FILE, &custom);
-        let loaded = load_help_text();
-        assert!(loaded.missing().is_empty());
-        assert!(
-            render_help_from(&loaded, HelpTopic::Root).contains("(custom)"),
-            "override 파일이 이겨야"
-        );
-
-        std::env::set_var(ENV_HELP_FILE, dir.join("does-not-exist.md"));
-        let fell_back = load_help_text();
-        assert_eq!(
-            fell_back.origin, "내장 사본",
-            "override 실패는 고정 파일이 아니라 내장 사본으로 간다"
-        );
-        assert!(fell_back.missing().is_empty());
-
-        match previous {
-            Some(v) => std::env::set_var(ENV_HELP_FILE, v),
-            None => std::env::remove_var(ENV_HELP_FILE),
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
     // ── ADR-0133: 우편은 데몬이 거절한다 — CLI 는 막지 않는다 ─────────────────────────
 
     /// ★강제는 데몬 하나뿐이다(ADR-0133 §영향)★: 말이 되는 우편 호출은 **그대로 조립돼 나간다** —
@@ -4998,13 +4581,14 @@ mod tests {
         assert!(rendered.contains("(none)"), "{rendered}");
     }
 
-    /// ★정적 help 는 데몬을 부르지 않는다 — 가리키기만 한다★. 그 한 줄이 실제 동사 철자와 갈리면 배운 대로
-    ///   친 호출자가 "모르는 계열" 을 받는다.
+    /// ★목차 화면은 발견 동사를 가리키기만 한다(목록을 싣지 않는다)★. 그 한 줄이 실제 동사 철자와 갈리면 배운
+    ///   대로 친 호출자가 "모르는 계열" 을 받는다. 화면은 데몬이 렌더하므로 본문 파일 원문(치환 전 `{tool}`
+    ///   자리)과 견준다.
     #[test]
     fn the_static_help_points_at_the_catalog_verb_by_its_real_spelling() {
-        let root = render_help(HelpTopic::Root);
+        let root = help_file_section("root");
         assert!(
-            root.contains(&format!("{CLI_EXE_NAME} {CLI_VERB_COMMANDS}")),
+            root.contains(&format!("{{tool}} {CLI_VERB_COMMANDS}")),
             "{root}"
         );
     }
