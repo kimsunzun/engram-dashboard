@@ -131,8 +131,9 @@ if (-not (Test-Path (Join-Path $ProjectRoot 'dist\index.html'))) {
 #    — tauri build 는 이들을 빌드하지 않으므로 별도 컴파일한다.
 #   **명시 --bin** 으로만 빌드(측정 전용 bin(saturation-pilot/priming-smoke/roundtrip-smoke)은
 #    required-features=test-harness 로 이미 릴리즈 그래프에서 제외되지만, 명시 --bin 으로 유입 가능성 봉쇄).
-#   ★--all-targets 금지★: daemon crate 의 self-dev-dependency(test-harness) 유니피케이션으로 yield-seam hook
-#    이 운영 바이너리에 박힐 수 있다(Cargo.toml 경고). 아래 명령은 --all-targets 를 쓰지 않는다.
+#   ★--all-targets 금지★: daemon crate 의 self-dev-dependency(test-harness · test-support) 유니피케이션으로
+#    yield-seam hook 이 운영 바이너리에 박힐 수 있고, 그 호출의 데몬 lib 은 in-process 테스트 서버까지 품고
+#    지어진다(Cargo.toml 경고 · ADR-0286). 아래 명령은 --all-targets 를 쓰지 않는다.
 #   ★두 호출을 한 Invoke-Step 블록에 넣지 말 것★: Invoke-Step 은 블록이 끝난 뒤 $LASTEXITCODE 를 한 번만
 #    본다 — 앞 호출의 실패를 뒤 호출의 성공이 덮고, 아래 존재 검사는 이전 빌드가 남긴 낡은 exe 를 받아들인다.
 #    한 cargo 호출(-p 둘)로 합치지도 않는다 — 배송하는 engram.exe 는 CLI 패키지 자기 그래프(`-p engram-dashboard-cli`
