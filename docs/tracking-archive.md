@@ -2,6 +2,8 @@
 
 tracking.md 에서 해소·종결된 항목 중 다른 문서·코드가 번호로 가리키는 것만 한 줄씩 둔다. 전문 = git 이력(간소화 전 = `git show 8671e5c:docs/tracking.md`).
 
+- **T-50** 덮는 층의 「줄 바깥 빈 영역」 — 종결: 층 높이 = 그려진 알림 줄만큼을 사용자가 확정했다(줄 밖의 클릭은 그 아래로 간다 · 상한 값 1/3 은 여전히 세션 판단) · 2026-10-08 · ADR-0287 결정 2 · ADR-0276 · ADR-0277 · `docs/process/S21-storage/trd.md` §14-16 · §14-18
+- **T-48** 다른 연결 사건도 덮는 층에 넣을지 — 종결: 넣는다 — 팝업 아닌 알림(띠)은 전부 덮는 층에 쌓는다(일시적 끊김 · 재시도 중 · 유실 알림 · 명령 하나 실패 포함 · 띠별 세부는 transport crate 부착 TRD 몫) · 2026-10-08 · ADR-0287 결정 1 · ADR-0277 · `docs/process/S21-storage/trd.md` §14-17 · §14-18
 - **T-46** 실 claude 의존 테스트 6건 — CI 커버리지 0 — 해소: CI 0 을 받아들이고(ci.yml `--skip` 그대로) 로컬은 관측 실패를 통과가 아니라 실패로 낸다 · 예외 = `c1_park_then_spawn_auto_delivers` 는 `#[ignore]`(입력을 주지 않아 핵심 단언이 매번 건너뛰어졌다 — 그 축은 `c2_busy_recipient_parks_*` 가 덮는다) · claude 부재는 스폰 가드가 못 잡고 뒤의 단언이 실패한다 · `ENGRAM_TEST_REQUIRE_CLAUDE` 스위치 폐지 · 2026-10-02 · `crates/engram-dashboard-daemon/tests/control_send.rs` 머리말 · `.github/workflows/ci.yml` 의 같은 주석 · 옛 번호 = T-16
 - **T-24** `ENGRAM_EXE` 미사용 주입 — 해소: 데몬 부팅의 주입을 걷었다(리포 밖 소비자 없음 — 사용자 확인) · 2026-10-02 · step-log 이 번호로 가리킨다 · 형제 `locate_send_exe`(`ENGRAM_CLI_EXE`)는 그대로
 - **T-38** 사용량 한도 슬롯 ADR 열 건 코드 앵커 — 해소: 0246–0251·0253–0256 앵커 추가 · 2026-10-02 · step-log 이 번호로 가리킨다 · `v0.3.3/feat/chat-ux` 기록의 「T-38」은 다른 주제다(= T-44)
