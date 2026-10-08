@@ -31,7 +31,6 @@ pub fn run() {
 
     // ── 화면 상태(TRD S21-storage §6) — 부팅 단계 플러그인 · 사용자 setup · 종료가 같은 인스턴스를 본다 ──
     let layout = crate::layout::LayoutState::new();
-    let tree_attrs = std::sync::Arc::new(crate::state::tree_attrs::TreeAttrs::default());
     let labels = std::sync::Arc::new(crate::commands::popout::PopupCounter::default());
     let state_session = std::sync::Arc::new(crate::state::boot_plugin::StateSession::default());
     let restore = std::sync::Arc::new(crate::state::restore::RestoreService::new());
@@ -39,7 +38,6 @@ pub fn run() {
     let restore_coordinator = std::sync::Arc::new(crate::state::restore::RestoreCoordinator::new(
         restore.clone(),
         layout.clone(),
-        tree_attrs.clone(),
         state_session.clone(),
         labels.clone(),
     ));
@@ -59,7 +57,6 @@ pub fn run() {
     builder = builder.plugin(crate::state::boot_plugin::init(
         crate::state::boot_plugin::Boot {
             layout: layout.clone(),
-            tree: tree_attrs.clone(),
             labels: labels.clone(),
             session: state_session.clone(),
             restore: restore.clone(),
@@ -91,9 +88,8 @@ pub fn run() {
     //   대조: DaemonClient 는 tokio 런타임이 필요해 setup 에 남는다(창을 만드는 ⑧ 보다 앞에서 등록한다).
     //   그 안의 모델은 부팅 단계 플러그인이 창보다 먼저 판정한 모델로 갈아끼운다(TRD S21-storage §6-5 ⑥).
     let setup_layout = layout.clone();
-    let setup_tree = tree_attrs.clone();
     builder = builder.manage(layout);
-    builder = builder.manage(tree_attrs).manage(labels.clone());
+    builder = builder.manage(labels.clone());
     builder = builder.manage(crate::state::placement::DeferredMaximize::default());
     // 복원 상태도 같은 이유다(ADR-0102) — 창의 첫 `restore_status` 당기기가 부팅 단계 ⑥ 이 정한 값을 본다(TRD
     //   S21-storage §6-5 ⑥ · I5).
@@ -114,11 +110,10 @@ pub fn run() {
         &crate::discovery::DataLayout::resolve().shell_config_dir(),
     ));
     // ★셸에 하나★ — 밀기 순서를 지키는 락이 이 안에 있다(사람 경로·LLM 경로가 같은 인스턴스를 본다). 창 테마는 위
-    //   화면 상태 모델 · 트리 칸에서 읽는다(TRD S21-storage §5-6).
+    //   화면 상태 모델에서 읽는다(TRD S21-storage §5-6).
     let themes = std::sync::Arc::new(crate::theme::EffectiveThemes::new(
         settings.clone(),
         setup_layout.clone(),
-        setup_tree.clone(),
     ));
     builder = builder.manage(settings.clone()).manage(themes.clone());
 
@@ -170,8 +165,6 @@ pub fn run() {
             //   싣는다), 부팅 보고를 받는 invoke 핸들러도 같은 실물을 봐야 한다. 같은 Arc 를 양쪽에 준다.
             let view_commands = std::sync::Arc::new(crate::view_commands::ViewCommandBridge::new(
                 std::sync::Arc::new(crate::view_commands::TauriViewDispatch(app.handle().clone())),
-                // 설정이 숨긴 창(오늘 = agent-tree)은 마지막 수단 목적지에서 뺀다 — 사유는 그 함수 doc.
-                crate::view_commands::hidden_window_labels(app.handle()),
             ));
             app.manage(view_commands.clone());
 
@@ -223,7 +216,7 @@ pub fn run() {
                 }
             }
 
-            // ── 부팅 단계 ⑧ ⑨: 정적 창(main · 트리)을 저장된 자리로 만들기 · 복원한 팝아웃 창 · 테마 한 번 ──
+            // ── 부팅 단계 ⑧ ⑨: 정적 창(main)을 저장된 자리로 만들기 · 복원한 팝아웃 창 · 테마 한 번 ──
             // (TRD S21-storage §4 · §6-5) 여기서 첫 창이 생긴다(설정의 `"create": false`). `--hidden` 이면 main 은
             //   숨긴 채 만들고, 팝아웃은 아래 숨기기가 숨긴다(사용자 결정 F13).
             if crate::state::placement::restore_windows(
@@ -231,11 +224,11 @@ pub fn run() {
                 &setup_webview_env,
                 hidden,
                 &setup_layout,
-                &setup_tree,
                 &theme_control,
             )
             .is_err()
             {
+                // ADR-0283
                 // main 을 못 만들면 앱을 끝낸다(사용자 결정 2026-10-07) — 패닉이 아니라 종료 요청이라 종료 사건
                 //   (`RunEvent::Exit` — 아래 `run`)이 기록기 `Final` 과 셸 실행 잠금 놓기를 하고, 세운 표지로 종료
                 //   코드를 정한다. 요청은 이 setup 이 돌아간 뒤 이벤트 루프가 처리하므로 setup 을 여기서 끝낸다 — 남은
@@ -307,9 +300,9 @@ pub fn run() {
                     }
                 }
                 // ★팝업 창 Destroyed 정리(수명/누수 임계)★: 팝업이 실제로 소멸하면(정상 close 또는 프로그램
-                //   destroy), main/agent-tree 는 대상 아님(main 은 위에서 hide 만 하니 애초에 Destroyed 안
-                //   남, agent-tree 도 팝업 prefix 아님). 강제 프로세스 kill 은 모든 state 를 통째로 죽여
-                //   이 경로가 안 타지만(수용) 정상 close·프로그램 destroy 는 여기서 확실히 정리한다.
+                //   destroy), main 은 대상 아님(위에서 hide 만 하니 애초에 Destroyed 안 남). 강제 프로세스 kill 은
+                //   모든 state 를 통째로 죽여 이 경로가 안 타지만(수용) 정상 close·프로그램 destroy 는 여기서 확실히
+                //   정리한다.
                 //   (ADR-0046: 일반 라우팅 메커니즘 정리.)
                 tauri::WindowEvent::Destroyed => {
                     let label = window.label().to_string();

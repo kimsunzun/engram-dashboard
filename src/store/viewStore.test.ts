@@ -609,7 +609,7 @@ describe('renderModeOverride 오버라이드 + 생명주기 정리(§5)', () => 
 })
 
 // ★창 판정(§3-3/§3-4, G7)★: readWindowLabelFromHash·currentViewId 가 이 웹뷰가 어느 창인지, 그 창의 active
-// 탭이 무엇인지 URL + windows 상태로 판정한다. 팝업(?window=)·main·agent-tree(main 폴백)을 커버.
+// 탭이 무엇인지 URL + windows 상태로 판정한다. 팝업(?window=)·main·모르는 라우트(main 폴백)를 커버.
 describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-0057)', () => {
   const origHash2 = window.location.hash
   afterEach(() => {
@@ -626,8 +626,8 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     expect(readWindowLabelFromHash()).toBe(MAIN_WINDOW_LABEL)
   })
 
-  it('readWindowLabelFromHash: agent-tree hash(#/tree)면 main 폴백(모델 밖 config 창 특례, §3-4)', () => {
-    window.location.hash = '#/tree'
+  it('readWindowLabelFromHash: 모르는 라우트(#/unknown)면 main 폴백', () => {
+    window.location.hash = '#/unknown'
     expect(readWindowLabelFromHash()).toBe(MAIN_WINDOW_LABEL)
   })
 
@@ -653,8 +653,8 @@ describe('readWindowLabelFromHash + currentViewId (창 컨텍스트 해소, ADR-
     expect(currentViewId()).toBe('p1')
   })
 
-  it('currentViewId: agent-tree(#/tree)면 windows["main"].active 폴백(§3-4/G7)', () => {
-    window.location.hash = '#/tree'
+  it('currentViewId: 모르는 라우트(#/unknown)면 windows["main"].active 폴백', () => {
+    window.location.hash = '#/unknown'
     useViewStore.setState({ windows: { main: { tabs: [{ id: 'vmain', name: 'main' }], active: 'vmain', version: 1 } } })
     expect(currentViewId()).toBe('vmain')
   })

@@ -5394,11 +5394,7 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
         &std::env::temp_dir().join("engram-dashboard-no-settings"),
     ));
     let themes = ThemeControl::new(
-        Arc::new(EffectiveThemes::new(
-            Arc::clone(&settings),
-            state.clone(),
-            Arc::default(),
-        )),
+        Arc::new(EffectiveThemes::new(Arc::clone(&settings), state.clone())),
         Arc::new(NoThemeWindows),
     );
     make_table(LayoutPorts {
@@ -5418,7 +5414,6 @@ fn bus_table(state: &LayoutState, client: &Arc<DaemonClient>) -> CommandTable {
         restore: Arc::new(crate::state::restore::RestoreCoordinator::new(
             Arc::new(crate::state::restore::RestoreService::new()),
             state.clone(),
-            Arc::default(),
             Arc::default(),
             Arc::new(PopupCounter::default()),
         )),

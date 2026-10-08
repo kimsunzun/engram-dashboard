@@ -71,8 +71,8 @@ pub fn icon_state_for(alive: bool) -> IconState {
 
 // ── 보이기·숨기기 대상 창(순수) ──────────────────────────────────────────────────────
 
-// 트레이 보이기·숨기기가 다룰 창 = 팝아웃 전부(번호 오름차순) 뒤에 메인. 그 밖의 창은 뺀다 — 늘 숨어
-// 있어야 하는 정적 창 `agent-tree` 가 여기 걸리면 화면에 떠 버린다(ADR-0225 가 걷을 예정).
+// 트레이 보이기·숨기기가 다룰 창 = 팝아웃 전부(번호 오름차순) 뒤에 메인. 그 밖의 창은 뺀다 — 사람에게 보이려고
+// 만든 창이 아닌 것을 트레이가 띄우지 않게.
 // ★메인이 마지막인 것이 계약이다★: 호출자가 받은 순서대로 창을 펼치고 포커스를 주는데 그 셋이 모두 창을
 //   활성화한다(tao 0.35 Windows = `SW_SHOW` · `SW_RESTORE` · `SetForegroundWindow`) — 메인 뒤에 다룬
 //   팝아웃이 있으면 포커스를 그쪽이 가져간다. 같은 이유로 번호가 가장 큰 팝아웃이 메인 바로 아래에 온다.
@@ -237,14 +237,14 @@ mod tests {
     }
 
     #[test]
-    fn ui_windows_excludes_agent_tree_and_unknown_windows() {
-        let labels = ["agent-tree", "main", "slot-popup-7", "devtools", "Main"];
+    fn ui_windows_excludes_unknown_windows() {
+        let labels = ["main", "slot-popup-7", "devtools", "Main"];
         assert_eq!(ui_windows(labels, is_popup_label), ["slot-popup-7", "main"]);
     }
 
     #[test]
     fn ui_windows_without_main_returns_popouts_only() {
-        let labels = ["agent-tree", "slot-popup-3"];
+        let labels = ["devtools", "slot-popup-3"];
         assert_eq!(ui_windows(labels, is_popup_label), ["slot-popup-3"]);
     }
 
@@ -303,7 +303,7 @@ mod tests {
     fn ui_windows_main_only_and_empty() {
         assert_eq!(ui_windows(["main"], is_popup_label), ["main"]);
         assert!(ui_windows([], is_popup_label).is_empty());
-        assert!(ui_windows(["agent-tree"], is_popup_label).is_empty());
+        assert!(ui_windows(["devtools"], is_popup_label).is_empty());
     }
 
     #[test]

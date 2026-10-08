@@ -36,7 +36,7 @@ pub const MAX_DELAY: Duration = Duration::from_secs(5);
 /// 3초 — §6-5 ①)가 이보다 길어야 한다★ — 짧으면 새 인스턴스가 앞 인스턴스의 정상 종료 쓰기를 기다리지 않는다.
 pub const REPLY_DEADLINE: Duration = Duration::from_secs(2);
 
-/// 스냅숏 원천 — 운영은 `ViewManager` 와 트리 창 칸이다([`super::boot_plugin::LiveSource`]). 기록기 스레드에서 불린다.
+/// 스냅숏 원천 — 운영은 `ViewManager` 다([`super::boot_plugin::LiveSource`]). 기록기 스레드에서 불린다.
 ///
 /// - ★패닉하지 않는다★ — 릴리스는 `panic = "abort"`(워크스페이스 `Cargo.toml`)라 이 스레드의 패닉이 앱을
 ///   통째로 죽인다. 독 든 락은 `PoisonError::into_inner` 로 되살리거나 [`Self::snapshot`] 이 `Err` 를 돌려준다.
@@ -162,7 +162,7 @@ impl SaverHandle {
     /// 답한 크래시 사본의 해시를 디스크에 붙인다(TRD §6-7 ⑤). `Done(Written)` = 그 해시를 실은 `state.json` 이
     /// 발행됐다 — 사본 지우기의 성패는 담지 않는다.
     ///
-    /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager` · 트리 칸)을 쥐지 않는다★ — 쥐면 기록기가 그
+    /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager`)을 쥐지 않는다★ — 쥐면 기록기가 그
     /// 락에서 마감까지 서 있어 답이 `TimedOut` 이 된다.
     pub fn resolve(&self, hash: String, deadline: Duration) -> RequestOutcome {
         match self.send(|reply| Request::Resolve { hash, reply }) {
@@ -175,7 +175,7 @@ impl SaverHandle {
     /// 않는다★. 그 뒤 기록기는 발행하지 않는다 — 단 닫힘을 세우기 직전에 rename 을 지난 쓰기는 이미 발행됐다
     /// (그 내용은 이 `Final` 이거나 더 이른 `clean_exit:false` 다 — §12 R12).
     ///
-    /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager` · 트리 칸)을 쥐지 않는다★ — 쥐면 `Final` 이 늘
+    /// ★기다리는 동안 [`SnapshotSource`] 가 잡을 락(`ViewManager`)을 쥐지 않는다★ — 쥐면 `Final` 이 늘
     /// 마감을 넘겨 모든 정상 종료가 비정상 종료로 읽힌다.
     pub fn finish(&self, deadline: Duration) -> RequestOutcome {
         let outcome = match self.send(|reply| Request::Final { reply }) {
@@ -722,7 +722,7 @@ impl<S: SnapshotSource, F: StateFiles, C: Clock> Saver<S, F, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::schema::{Bounds, WindowKind};
+    use crate::state::schema::{Bounds, TabStrip, WindowKind};
     use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::sync::Mutex;
 
@@ -762,7 +762,10 @@ mod tests {
             };
             Ok(vec![WindowEntry {
                 id,
-                kind: WindowKind::Tree,
+                kind: WindowKind::Popout(TabStrip {
+                    active_tab: uuid::Uuid::nil(),
+                    tabs: Vec::new(),
+                }),
                 theme: None,
                 bounds: Some(Bounds {
                     x: 0.0,

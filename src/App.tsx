@@ -2,7 +2,6 @@ import { useEffect } from 'react'
 import { HashRouter, Routes, Route } from 'react-router-dom'
 import { installUiSettings } from './theme/uiSettings'
 import AppLayout from './components/layout/AppLayout'
-import TreePage from './pages/TreePage'
 import PopoutPage from './pages/PopoutPage'
 import { initEventBus, refreshProfiles, refreshPresets } from './store/eventBus'
 import { agentClient, bootstrapDaemonIfNeeded } from './api/clientFactory'
@@ -67,7 +66,6 @@ function App() {
         <div style={{ height: '100vh' }}>
           <Routes>
             <Route path="/" element={<AppLayout />} />
-            <Route path="/tree" element={<TreePage />} />
             {/* 런타임 창(팝업 분리·빈 창 생성) — ?window=<label> 의 탭 가진 창(ADR-0057). */}
             <Route path="/popup" element={<PopoutPage />} />
           </Routes>

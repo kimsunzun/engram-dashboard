@@ -196,7 +196,6 @@ struct Head {
 #[serde(rename_all = "snake_case")]
 enum KindTag {
     Main,
-    Tree,
     Popout,
 }
 
@@ -251,24 +250,20 @@ fn decode_window(
             return None;
         }
     };
-    let with_tabs: Option<fn(TabStrip) -> WindowKind> = match kind {
-        KindTag::Tree => None,
-        KindTag::Main => Some(WindowKind::Main),
-        KindTag::Popout => Some(WindowKind::Popout),
+    let wrap: fn(TabStrip) -> WindowKind = match kind {
+        KindTag::Main => WindowKind::Main,
+        KindTag::Popout => WindowKind::Popout,
     };
-    let kind = match with_tabs {
-        None => WindowKind::Tree,
-        Some(wrap) => match decode_strip(&head.id, raw, warnings) {
-            Ok(strip) => wrap(strip),
-            Err(reason) => {
-                warnings.push(DecodeWarning::WindowSkipped {
-                    index,
-                    id: Some(head.id),
-                    reason,
-                });
-                return None;
-            }
-        },
+    let kind = match decode_strip(&head.id, raw, warnings) {
+        Ok(strip) => wrap(strip),
+        Err(reason) => {
+            warnings.push(DecodeWarning::WindowSkipped {
+                index,
+                id: Some(head.id),
+                reason,
+            });
+            return None;
+        }
     };
     let theme = match &head.theme {
         Value::Null => None,
@@ -411,13 +406,6 @@ mod tests {
                     maximized: true,
                 },
                 WindowEntry {
-                    id: "agent-tree".to_string(),
-                    kind: WindowKind::Tree,
-                    theme: Some(UiTheme::EInk),
-                    bounds: Some(bounds()),
-                    maximized: false,
-                },
-                WindowEntry {
                     id: Uuid::new_v4().to_string(),
                     kind: WindowKind::Popout(TabStrip {
                         active_tab: popout.id,
@@ -458,6 +446,11 @@ mod tests {
         window["active_tab"] = json!(Uuid::new_v4());
         window["tabs"] = Value::Array(tabs);
         window
+    }
+
+    /// 읽히는 창 — 빈 탭 하나를 든 팝아웃(코덱은 팝아웃 id 가 UUID 인지 보지 않는다).
+    fn readable(id: &str) -> Value {
+        tabbed(id, "popout", vec![tab_json(json!({ "type": "empty" }))])
     }
 
     fn tab_json(content: Value) -> Value {
@@ -527,12 +520,7 @@ mod tests {
         assert_eq!(main["tabs"][0]["layout"]["type"], "split");
         assert_eq!(main["tabs"][0]["layout"]["dir"], "left_right");
 
-        let tree = doc["windows"][1].as_object().unwrap();
-        assert_eq!(tree["kind"], "tree");
-        assert_eq!(tree["theme"], "e-ink");
-        assert!(!tree.contains_key("tabs") && !tree.contains_key("active_tab"));
-
-        let popout = &doc["windows"][2];
+        let popout = &doc["windows"][1];
         assert_eq!(popout["kind"], "popout");
         assert_eq!(popout["theme"], Value::Null);
     }
@@ -604,22 +592,44 @@ mod tests {
                 "popout",
                 vec![tab_json(json!({ "type": "agent_list" }))],
             ),
-            window("agent-tree", "tree"),
         ]);
         let (state, warnings) = decode_value(&doc);
         let ids: Vec<&str> = state.windows.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, ["main", popout.as_str(), "agent-tree"]);
+        assert_eq!(ids, ["main", popout.as_str()]);
         assert!(matches!(
             warnings.as_slice(),
             [DecodeWarning::WindowSkipped { index: 1, id: Some(id), .. }] if id == "dock-1"
         ));
     }
 
+    /// ADR-0225: 걷어 낸 트리 전용 창의 옛 항목(`kind: "tree"`)은 모르는 창 종류로 건너뛰고 나머지는 그대로 읽는다 —
+    /// 옛 파일 하나 때문에 저장된 화면을 잃지 않는다.
+    #[test]
+    fn a_retired_tree_window_entry_is_skipped_and_the_rest_is_kept() {
+        let mut tree = window("agent-tree", "tree");
+        tree["theme"] = json!("e-ink");
+        let doc = file(vec![
+            tabbed("main", "main", vec![tab_json(json!({ "type": "empty" }))]),
+            tree,
+        ]);
+        let (state, warnings) = decode_value(&doc);
+        let ids: Vec<&str> = state.windows.iter().map(|w| w.id.as_str()).collect();
+        assert_eq!(ids, ["main"]);
+        assert!(
+            matches!(
+                warnings.as_slice(),
+                [DecodeWarning::WindowSkipped { index: 1, id: Some(id), reason }]
+                    if id == "agent-tree" && reason.contains("모르는 창 종류")
+            ),
+            "{warnings:?}"
+        );
+    }
+
     #[test]
     fn an_unreadable_window_is_skipped() {
-        let mut no_kind = window("w-0", "tree");
+        let mut no_kind = readable("w-0");
         no_kind.as_object_mut().unwrap().remove("kind");
-        let mut no_maximized = window("w-1", "tree");
+        let mut no_maximized = readable("w-1");
         no_maximized.as_object_mut().unwrap().remove("maximized");
         let mut bad_active = tabbed("w-2", "popout", vec![tab_json(json!({ "type": "empty" }))]);
         bad_active["active_tab"] = json!("not-a-uuid");
@@ -630,11 +640,11 @@ mod tests {
             bad_active,
             no_tabs,
             json!("not a window"),
-            window("agent-tree", "tree"),
+            readable("w-5"),
         ]);
         let (state, warnings) = decode_value(&doc);
         let ids: Vec<&str> = state.windows.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, ["agent-tree"]);
+        assert_eq!(ids, ["w-5"]);
         assert_eq!(skipped_windows(&warnings), [0, 1, 2, 3, 4]);
     }
 
@@ -671,11 +681,11 @@ mod tests {
 
     #[test]
     fn an_unknown_theme_keeps_the_window_and_drops_the_theme() {
-        let mut odd = window("agent-tree", "tree");
+        let mut odd = readable("w-0");
         odd["theme"] = json!("sepia");
-        let mut missing = window("w-1", "tree");
+        let mut missing = readable("w-1");
         missing.as_object_mut().unwrap().remove("theme");
-        let mut set = window("w-2", "tree");
+        let mut set = readable("w-2");
         set["theme"] = json!("dark");
         let (state, warnings) = decode_value(&file(vec![odd, missing, set]));
         let themes: Vec<Option<UiTheme>> = state.windows.iter().map(|w| w.theme).collect();
@@ -683,7 +693,7 @@ mod tests {
         assert_eq!(
             warnings,
             vec![DecodeWarning::ThemeDropped {
-                window_id: "agent-tree".to_string(),
+                window_id: "w-0".to_string(),
                 raw: "\"sepia\"".to_string(),
             }]
         );
@@ -691,14 +701,14 @@ mod tests {
 
     #[test]
     fn missing_or_null_bounds_read_as_no_place() {
-        let mut missing = window("w-0", "tree");
+        let mut missing = readable("w-0");
         missing.as_object_mut().unwrap().remove("bounds");
-        let mut null = window("w-1", "tree");
+        let mut null = readable("w-1");
         null["bounds"] = Value::Null;
         // 유한하지 않은 실수는 직렬화에서 `null` 이 된다 — 칸 하나가 `null` 인 자리는 못 읽는 창이다.
-        let mut holed = window("w-2", "tree");
+        let mut holed = readable("w-2");
         holed["bounds"] = json!({ "x": null, "y": 0, "w": 800, "h": 600 });
-        let kept = window("w-3", "tree");
+        let kept = readable("w-3");
         let (state, warnings) = decode_value(&file(vec![missing, null, holed, kept]));
         let places: Vec<(&str, Option<Bounds>)> = state
             .windows
@@ -759,7 +769,7 @@ mod tests {
 
     #[test]
     fn an_integer_valued_float_version_reads_as_that_integer() {
-        let mut doc = file(vec![window("agent-tree", "tree")]);
+        let mut doc = file(vec![readable("w-0")]);
         doc["version"] = json!(1.0);
         assert!(doc.to_string().contains("\"version\":1.0"));
         let (state, warnings) = decode_value(&doc);

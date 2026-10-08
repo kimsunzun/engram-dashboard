@@ -1,7 +1,7 @@
 //
 // ★main·팝업 통일 경로(D-2 "동일 코드경로")★: main 창(AppLayout 이 크롬으로 감쌈)과 팝업 창(PopoutPage
 // 이 얇게 감쌈)이 둘 다 이걸 마운트한다(각자 자기 label). 옛 "AppLayout=전역 active 렌더 vs
-// PopoutPage=고정 뷰 렌더" 갈라짐(D-2 위반)을 제거한다. agent-tree 는 이 경로 밖(TreePage 를 그대로 그림).
+// PopoutPage=고정 뷰 렌더" 갈라짐(D-2 위반)을 제거한다.
 //
 // ★keep-alive(ADR-0056)★: windows[label].tabs 를 *전부* 마운트하고 활성 탭만 표시한다(숨은 탭
 // display:none — xterm 인스턴스·버퍼 유지, 전환 즉시·무손실). WebglAddon 좌석은 보이는 슬롯만

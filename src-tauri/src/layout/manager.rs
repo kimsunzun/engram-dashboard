@@ -15,8 +15,6 @@
 //! - `view_owner` — View → 소유 창(★유니크 소유 강제★, 캐시된 역인덱스).
 //! - `windows`    — 창 → 탭 목록(`tabs: Vec<ViewId>`) + 그 창의 활성 탭(`active`).
 //!
-//! `agent-tree` 창은 이 모델 **밖**(config 창, /tree 렌더 — `windows` 에 키 없음, TRD §3-2).
-//!
 //! ### 불변식(★load-bearing — `// ADR-0057` 앵커로 박음★)
 //! 1. **양방향 일관성:** `view_owner[v] == L` ⟺ `windows[L].tabs.contains(v)`. 갱신은 항상 쌍으로.
 //! 2. **유니크 소유:** 모든 `v ∈ views` 는 `view_owner` 에 정확히 1개 엔트리(한 View 는 두 창 금지).
@@ -140,8 +138,8 @@ impl WindowBounds {
     }
 }
 
-/// 창 게터로 읽은 한 벌(`is_minimized` · `is_maximized` · 자리). ★`ViewManager` · 트리 칸 락을 잡기 전에 전부
-/// 읽는다★ — 레이아웃 락 보유 중 OS 호출 금지(TRD S21-storage §6-3 · `apply.rs` 머리 「락 규율」).
+/// 창 게터로 읽은 한 벌(`is_minimized` · `is_maximized` · 자리). ★`ViewManager` 락을 잡기 전에 전부 읽는다★ —
+/// 레이아웃 락 보유 중 OS 호출 금지(TRD S21-storage §6-3 · `apply.rs` 머리 「락 규율」).
 ///
 /// `bounds` = 그때 읽은 자리 — 못 읽었으면(게터 실패 · [`WindowBounds::new`] 거절) `None`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -154,9 +152,8 @@ pub struct WindowPlacement {
 /// 창 하나의 화면 속성 — 창 항목과 같이 살고 같이 죽는다. label 을 키로 창 밖에 두면 재시작 뒤 같은 label 의
 /// 다른 창에 조용히 적용된다(ADR-0167 「근거」).
 ///
-/// 레이아웃 창은 `WindowTabs::attrs`, 트리 창은 `state::tree_attrs` 가 든다. 바꾸는 길은 그 둘의 setter 뿐이다 —
-/// 거기서 변경 번호가 오른다(레이아웃 `version` 이 아니라 `ViewManager::attrs_rev` — 창을 끌 때마다 레이아웃
-/// 번호가 튀지 않게).
+/// `WindowTabs::attrs` 가 든다. 바꾸는 길은 `ViewManager` 의 setter 뿐이다 — 거기서 변경 번호가 오른다(레이아웃
+/// `version` 이 아니라 `ViewManager::attrs_rev` — 창을 끌 때마다 레이아웃 번호가 튀지 않게).
 // ADR-0265
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct WindowAttrs {
@@ -164,7 +161,7 @@ pub struct WindowAttrs {
     pub theme: Option<UiTheme>,
     /// `None` = 이 창의 보통 자리를 아직 못 봤다.
     pub bounds: Option<WindowBounds>,
-    /// 복원은 `bounds` 로 놓은 뒤 최대화한다(사용자 결정 F8). 트리 창은 언제나 `false` 다(`state::tree_attrs` 머리).
+    /// 복원은 `bounds` 로 놓은 뒤 최대화한다(사용자 결정 F8).
     pub maximized: bool,
 }
 
@@ -215,9 +212,9 @@ impl WindowAttrs {
 }
 
 /// 창 하나의 바로 앞 읽기 기억 — 그 읽기가 보통 자리를 적었으면 (적은 자리, 그 앞 자리). 쓰는 곳은
-/// [`WindowAttrs::observe`] 뿐이고 다음 읽기가 늘 지운다. 영속하지 않는다 — 창 항목 · 트리 칸과 같이 산다.
+/// [`WindowAttrs::observe`] 뿐이고 다음 읽기가 늘 지운다. 영속하지 않는다 — 창 항목과 같이 산다.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct PlacementMemo {
+pub(crate) struct PlacementMemo {
     last: Option<(WindowBounds, Option<WindowBounds>)>,
 }
 
@@ -1118,7 +1115,6 @@ impl ViewManager {
     // ── 창 속성(TRD S21-storage §6-3) ───────────────────────────────────────
     //
     // ★version 이 아니라 attrs_rev 를 올린다★ — 바뀌었을 때만. 값은 부르는 쪽이 락 밖에서 읽어 넘긴다(OS 호출 0).
-    // 트리 창(`agent-tree`)은 이 모델 밖이라 `WindowNotFound` — 그 창은 `state::tree_attrs` 로 간다.
 
     pub fn window_attrs(&self, label: &str) -> Result<WindowAttrs, LayoutError> {
         self.windows
@@ -1392,7 +1388,7 @@ mod tests {
         assert_eq!(wt.active, wt.tabs[0]);
         assert_eq!(mgr.view_owner.get(&wt.tabs[0]).unwrap(), MAIN_WINDOW_LABEL);
         assert_eq!(mgr.version, 0);
-        assert!(!mgr.windows.contains_key("agent-tree"));
+        assert_eq!(mgr.windows.len(), 1);
         assert_invariants(&mgr);
     }
 
@@ -2691,7 +2687,7 @@ mod tests {
     #[test]
     fn attribute_setters_on_an_unknown_window_change_nothing() {
         let mut mgr = ViewManager::new();
-        for label in ["agent-tree", "slot-popup-9"] {
+        for label in ["no-such", "slot-popup-9"] {
             assert_eq!(
                 mgr.set_window_theme(label, Some(UiTheme::Dark)),
                 Err(LayoutError::WindowNotFound(label.into()))
@@ -3325,11 +3321,6 @@ mod tests {
         assert_eq!(
             mgr.set_ui_metrics("no-such", one_px_border()),
             Err(LayoutError::WindowNotFound("no-such".into()))
-        );
-        // agent-tree 창은 탭 모델 밖이라 보고할 자리가 없다.
-        assert_eq!(
-            mgr.set_window_canvas("agent-tree", 100, 100),
-            Err(LayoutError::WindowNotFound("agent-tree".into()))
         );
     }
 

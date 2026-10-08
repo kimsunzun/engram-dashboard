@@ -772,7 +772,7 @@ describe('TauriTransport 사용량', () => {
     const seen: Array<[number, number]> = []
     c.onUsageLimitsUpdated((s, e) => seen.push([s.revision, e]))
     await t.init()
-    emit('usage-limits-updated', { labels: ['agent-tree'], socket_epoch: 9, snapshot: snap('claude', 5) })
+    emit('usage-limits-updated', { labels: ['popup-9'], socket_epoch: 9, snapshot: snap('claude', 5) })
     emit('usage-limits-updated', { labels: ['main'], socket_epoch: 9, snapshot: snap('claude', 6) })
     expect(seen).toEqual([[6, 9]])
   })
