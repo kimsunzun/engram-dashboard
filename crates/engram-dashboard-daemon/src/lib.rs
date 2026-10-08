@@ -48,7 +48,6 @@ use engram_dashboard_net::ws::ConnRegistry;
 use status_fanout::DaemonStatusSink;
 use usage_service::clock::OsUsageClock;
 use usage_service::observe::UsageObserveSink;
-use usage_service::reject_store::{FileRejectStore, RejectStore};
 use usage_service::{OsProbeThreads, ProbeThreads, UsageParts, UsageService};
 
 // ADR-0129 슬라이스 1: 네트워크 행이 소유한 타입인데 **이 crate 의 공개 시그니처에 나타나므로**
@@ -209,7 +208,7 @@ fn build_daemon_wiring(
 ) -> DaemonWiring {
     let state_dir = layout.daemon_state_dir();
     let profile_store = Arc::new(FileProfileStore::new(state_dir.clone()));
-    let preset_store = Arc::new(FilePresetStore::new(state_dir.clone()));
+    let preset_store = Arc::new(FilePresetStore::new(state_dir));
     let scratch_root = layout.usage_probe_dir();
     // ★이 쓸기의 안전은 시점에 기댄다★ — 인스턴스 잠금을 쥔 **뒤**(다른 데몬이 같은 폴더에서 조회 중일 수
     //   없다)이고 스케줄러·조회가 하나도 뜨기 **전**(제 조회의 폴더를 지우지 않는다)이다. 잠금 앞이나
@@ -219,7 +218,6 @@ fn build_daemon_wiring(
         profile_store,
         preset_store,
         UsageInputs {
-            rejects: Arc::new(FileRejectStore::new(&state_dir)),
             probes: engram_dashboard_agent::backend::usage_probes().to_vec(),
             spawner: Arc::new(OsProbeSpawner),
             threads: Arc::new(OsProbeThreads),
@@ -234,7 +232,6 @@ fn build_daemon_wiring(
 /// 사용량 서비스가 조립 밖에서 받는 부품 — 운영은 실물([`build_daemon_wiring`]), 테스트 서버는 조회기 0개.
 /// 시계와 인코더는 둘 다 실물이라 여기 없다.
 struct UsageInputs {
-    rejects: Arc<dyn RejectStore>,
     probes: Vec<&'static dyn UsageProbe>,
     spawner: Arc<dyn ProbeSpawner>,
     threads: Arc<dyn ProbeThreads>,
@@ -289,30 +286,26 @@ fn build_daemon_wiring_with_store(
     }
 }
 
-/// 사용량 서비스를 세운다 — 저장된 거절 기한을 **연결을 받기 전에** 되살리고 스케줄러 스레드를 띄운다.
+/// 사용량 서비스를 세우고 스케줄러 스레드를 띄운다.
 ///
 /// ★스케줄러를 못 띄워도 데몬은 뜬다★ — 요청(⟳)·줍기·구독 교체는 그대로 돌고, 멈추는 것은 시간이 이끄는 일(자동
 ///   조회 · 기한이 차서 나가는 발행)뿐이다. 스레드는 서비스를 약하게만 쥐어 서비스가 drop 되면 스스로 끝난다 —
 ///   그래서 소유는 `manager` 의 status sink 사슬과 연결 계층이 진다.
 fn build_usage_service(inputs: UsageInputs) -> Arc<UsageService> {
     let UsageInputs {
-        rejects,
         probes,
         spawner,
         threads,
         scratch_root,
     } = inputs;
-    let saved = rejects.load();
     let (usage, wakes) = UsageService::new(UsageParts {
         probes,
         spawner,
         scratch_root,
         threads,
-        rejects,
         clock: Arc::new(OsUsageClock::new()),
         encoder: Arc::new(agent_conn::UsageEventEncoder),
     });
-    usage.restore_rejects(&saved);
     match usage_service::schedule::spawn_scheduler(&usage, wakes) {
         Ok(_) => tracing::info!(thread = "usage-scheduler", "사용량 스케줄러 스레드 시작"),
         Err(e) => tracing::warn!(
@@ -917,7 +910,6 @@ async fn start_test_server_inner(
         store,
         preset_store,
         UsageInputs {
-            rejects: Arc::new(usage_service::reject_store::MemRejectStore::new()),
             probes: Vec::new(),
             spawner: Arc::new(OsProbeSpawner),
             threads: Arc::new(OsProbeThreads),

@@ -4,10 +4,10 @@
 //! `engram_dashboard_agent::backend::usage_probes()`)에서 받는다. 벤더 match·벤더 리터럴이 이 모듈에 생기면
 //! 「백엔드 확장」 위반이다.
 //!
-//! [`UsageService`] 가 책([`book::UsageBook`])·구독 명부([`watch::UsageWatch`])·시계·인코더·조회기·거절
-//! 저장소·스케줄러 깨우기 송신단을 쥐고 줍기 적용·구독 교체·요청·조회 구동·발행을 몬다(TRD §1-4).
-//! ★락 순서 = 명부 → 책 · `save_lock` → 책 · 책은 잎이다★ — 책을 쥔 채 명부·출구·인코더·깨우기·합류자 깨우기·
-//!   조회 스레드 기동·파일 쓰기를 하지 않는다. 명부와 `save_lock` 을 함께 쥐는 경로는 없다.
+//! [`UsageService`] 가 책([`book::UsageBook`])·구독 명부([`watch::UsageWatch`])·시계·인코더·조회기·스케줄러
+//! 깨우기 송신단을 쥐고 줍기 적용·구독 교체·요청·조회 구동·발행을 몬다(TRD §1-4).
+//! ★락 순서 = 명부 → 책 · 책은 잎이다★ — 책을 쥔 채 명부·출구·인코더·깨우기·합류자 깨우기·조회 스레드 기동을
+//!   하지 않는다.
 //! ★발행은 「적용 먼저, 대상 열거 나중」이다★ — 책 락을 놓은 **뒤** 명부에서 대상을 뜨고, 어느 락도 없이
 //!   나른다([`watch::deliver`]). 구독 교체의 「등록 먼저, 스냅숏 나중」과 짝을 이뤄 겹친 교체·발행이 그 연결에
 //!   책의 값 이상을 닿게 한다(TRD §3 #57).
@@ -25,7 +25,6 @@ pub mod clock;
 #[cfg(test)]
 pub(crate) mod fakes;
 pub mod observe;
-pub mod reject_store;
 pub mod schedule;
 pub mod watch;
 
@@ -46,7 +45,6 @@ use engram_dashboard_protocol::UsageLimitSnapshot;
 
 use book::{Coalesce, Judgment, Now, RequestKind, TickPlan, UsageBook};
 use clock::UsageClock;
-use reject_store::{RejectEntry, RejectStore};
 use watch::{deliver, Replaced, UsageEncoder, UsageOutlet, UsageWatch};
 
 /// 요청이 조회 끝을 기다리는 상한(§3 #16) — 버스 마감 7초·셸 답장 상한 30초 아래. 넘으면 캐시 + `in_flight`
@@ -101,8 +99,6 @@ pub struct UsageParts {
     /// 조회마다 임시 폴더를 만들 부모 폴더([`ProbeEnv::scratch_root`]) — 데몬 전용 폴더.
     pub scratch_root: PathBuf,
     pub threads: Arc<dyn ProbeThreads>,
-    /// 조회 끝이 거절 기한을 바꿀 때마다 전량 저장한다. 읽기(복원)는 조립이 한다([`UsageService::restore_rejects`]).
-    pub rejects: Arc<dyn RejectStore>,
     pub clock: Arc<dyn UsageClock>,
     pub encoder: Arc<dyn UsageEncoder>,
 }
@@ -128,7 +124,7 @@ struct Runs {
 /// 데몬마다 하나.
 ///
 /// ★기다리는 것은 요청 둘([`UsageService::request`]·[`UsageService::request_blocking`])뿐이다★ — 나머지는 전부
-///   논블록이다: 잡는 락은 책·명부의 짧은 메모리 구간(과 조회 끝의 거절 저장 `save_lock`)뿐이고, 보내기는 출구의
+///   논블록이다: 잡는 락은 책·명부의 짧은 메모리 구간뿐이고, 보내기는 출구의
 ///   `try_send` · 깨우기는 채널 `try_send` · 조회는 분리 스레드다. 그래서 pump 스레드(줍기)와 연결 태스크(구독
 ///   교체)에서 곧장 부른다.
 pub struct UsageService {
@@ -139,9 +135,6 @@ pub struct UsageService {
     spawner: Arc<dyn ProbeSpawner>,
     scratch_root: PathBuf,
     threads: Arc<dyn ProbeThreads>,
-    rejects: Arc<dyn RejectStore>,
-    /// 거절 저장을 한 줄로 세운다 — 이 안에서 책을 다시 떠 쓰므로 늦게 뜬 목록이 먼저 뜬 목록에 덮이지 않는다.
-    save_lock: Mutex<()>,
     /// 칸마다 끝난 조회 수 — async 합류자가 기다린다. 값은 [`Runs::finished`] 를 따라가고 줄지 않는다.
     finished: HashMap<UsageKey, tokio::sync::watch::Sender<u64>>,
     clock: Arc<dyn UsageClock>,
@@ -174,7 +167,6 @@ impl UsageService {
             spawner,
             scratch_root,
             threads,
-            rejects,
             clock,
             encoder,
         } = parts;
@@ -197,8 +189,6 @@ impl UsageService {
             spawner,
             scratch_root,
             threads,
-            rejects,
-            save_lock: Mutex::new(()),
             finished,
             clock,
             encoder,
@@ -207,22 +197,6 @@ impl UsageService {
             me: me.clone(),
         });
         (service, wakes)
-    }
-
-    /// 저장된 거절 기한을 되살린다 — 조립이 연결을 받기 전에 한 번 부른다. 불러온 수와 되살린 수를 info 로 남기고
-    /// 되살린 수를 돌려준다. 되살린 칸의 발행은 빚으로 남는다 — 구독되면 스케줄러가 낸다.
-    pub fn restore_rejects(&self, entries: &[RejectEntry]) -> usize {
-        let restored = {
-            let mut desk = self.desk();
-            let now = self.now();
-            desk.book.restore_rejects(entries, now)
-        };
-        tracing::info!(
-            loaded = entries.len(),
-            restored,
-            "저장된 사용량 거절 기한을 되살렸다"
-        );
-        restored
     }
 
     /// 줍기 관측 한 건 — pump 스레드가 그 자리에서 부른다(쌓지 않는다). 바뀐 것이 없으면 발행도 깨우기도 없다.
@@ -519,27 +493,22 @@ impl UsageService {
     }
 
     /// 조회 하나를 닫는다 — [`ProbeGuard`] 만 부른다(§1-4 「조회 끝」). 책 락 안에서 결과 적용 · 끝 번호 · 한 장 ·
-    /// 합류자 꺼냄 → 락 밖에서 발행 → 스케줄러 깨우기 → 합류자 깨우기 → (거절 기한이 바뀌었으면) 저장. 발행은 바뀐
-    /// 것이 없어도 한다(`in_flight` 가 풀렸다). 저장이 맨 뒤라 파일 I/O 가 답을 늦추지 않는다.
+    /// 합류자 꺼냄 → 락 밖에서 발행 → 스케줄러 깨우기 → 합류자 깨우기. 발행은 바뀐 것이 없어도 한다(`in_flight` 가
+    /// 풀렸다).
     fn finish_probe(&self, key: &UsageKey, outcome: Result<UsageObservation, ProbeFailure>) {
         let ok = outcome.is_ok();
-        let (applied, sheet, finished, joiners) = {
+        let (sheet, finished, joiners) = {
             let mut guard = self.desk();
             let desk = &mut *guard;
             let now = self.now();
-            let applied = desk.book.finish_probe(key, outcome, now);
+            desk.book.finish_probe(key, outcome, now);
             let sheet = desk.book.broadcast_sheet(key, now);
             let runs = desk.runs.entry(key.clone()).or_default();
             runs.finished = runs.finished.saturating_add(1);
             if ok {
                 runs.last_ok = runs.finished;
             }
-            (
-                applied,
-                sheet,
-                runs.finished,
-                std::mem::take(&mut runs.blocking),
-            )
+            (sheet, runs.finished, std::mem::take(&mut runs.blocking))
         };
         if let Some(sheet) = &sheet {
             self.publish(key.vendor, sheet);
@@ -559,21 +528,6 @@ impl UsageService {
             // 용량 1 에 한 번만 보낸다 — 실패 = 기다리던 요청이 이미 떠났다.
             let _ = joiner.try_send(());
         }
-        if applied.reject_changed {
-            self.save_rejects();
-        }
-    }
-
-    /// 거절 기한을 전량 저장한다 — `save_lock` 안에서 책을 다시 떠 쓴다(§1-4 「거절 저장」). 파일 I/O 는 책 락 밖이다.
-    /// 저장소는 실패하지 않는다(쓰기 실패는 저장소가 warn 하고 계속).
-    fn save_rejects(&self) {
-        let _serial = sync::lock(&self.save_lock);
-        let entries = {
-            let desk = self.desk();
-            let now = self.now();
-            desk.book.reject_entries(now)
-        };
-        self.rejects.save(&entries);
     }
 
     /// 빚을 갚은 한 장을 그 벤더의 지금 구독자 전부에게 나른다. ★어느 락도 쥐지 않은 채 부른다★.
@@ -778,28 +732,6 @@ mod tests {
         }
     }
 
-    /// 저장마다 받은 목록을 적는다.
-    #[derive(Default)]
-    struct SavingStore {
-        saves: Mutex<Vec<Vec<RejectEntry>>>,
-    }
-
-    impl SavingStore {
-        fn saves(&self) -> Vec<Vec<RejectEntry>> {
-            self.saves.lock().unwrap().clone()
-        }
-    }
-
-    impl RejectStore for SavingStore {
-        fn load(&self) -> Vec<RejectEntry> {
-            Vec::new()
-        }
-
-        fn save(&self, entries: &[RejectEntry]) {
-            self.saves.lock().unwrap().push(entries.to_vec());
-        }
-    }
-
     pub(super) struct Rig {
         pub(super) service: Arc<UsageService>,
         pub(super) wakes: Receiver<()>,
@@ -807,7 +739,6 @@ mod tests {
         probes: Vec<&'static FakeProbe>,
         scripts: Vec<mpsc::Sender<Scripted>>,
         threads: Arc<TestThreads>,
-        store: Arc<SavingStore>,
     }
 
     /// 칸 = 실 조회기 앞에서부터 `count` 개(키·정책만 빌린 가짜).
@@ -827,7 +758,6 @@ mod tests {
             .unzip();
         let encoder = Arc::new(Counting::default());
         let threads = Arc::new(TestThreads::default());
-        let store = Arc::new(SavingStore::default());
         let (service, wakes) = UsageService::build(
             UsageParts {
                 probes: probes
@@ -837,7 +767,6 @@ mod tests {
                 spawner: Arc::new(NoChildren),
                 scratch_root: std::env::temp_dir(),
                 threads: threads.clone(),
-                rejects: store.clone(),
                 clock,
                 encoder: encoder.clone(),
             },
@@ -850,7 +779,6 @@ mod tests {
             probes,
             scripts,
             threads,
-            store,
         }
     }
 
@@ -1366,36 +1294,6 @@ mod tests {
         );
     }
 
-    // ── 거절 복원 ──
-
-    #[test]
-    fn restored_rejects_are_counted_and_the_cell_reads_rejected() {
-        let (rig, _clock) = rig();
-        let entries = [
-            RejectEntry {
-                key: key(0),
-                until_epoch_s: T0 + 600,
-            },
-            RejectEntry {
-                key: key(1),
-                until_epoch_s: T0 - 1,
-            },
-        ];
-        assert_eq!(
-            rig.service.restore_rejects(&entries),
-            1,
-            "지난 항목은 버린다"
-        );
-        let now = rig.service.now();
-        let sheet = rig
-            .service
-            .desk()
-            .book
-            .snapshot(&key(0), now)
-            .expect("아는 키");
-        assert!(matches!(sheet.state, UsageVendorState::Rejected { .. }));
-    }
-
     // ── 요청·조회 ──
 
     /// 기다림 상한을 재는 시험의 요청 기다림.
@@ -1616,52 +1514,18 @@ mod tests {
     }
 
     #[test]
-    fn a_rejection_is_saved_once_and_a_result_that_leaves_the_list_alone_saves_nothing() {
+    fn a_refresh_during_a_rejection_answers_from_the_cache_without_a_probe_seen_or_hidden() {
         let (rig, _clock) = rig();
-        let run = |scripted: Scripted| {
-            let before = ended(&rig);
-            assert!(rig.service.desk().book.begin_probe(&key(0)));
-            rig.service.start_probe(key(0));
-            rig.answer(0, scripted);
-            wait_until("조회 끝", || ended(&rig) == before + 1);
-        };
-        let limited = || {
+        assert!(rig.service.desk().book.begin_probe(&key(0)));
+        rig.service.start_probe(key(0));
+        rig.answer(
+            0,
             Scripted::Answer(Err(ProbeError::RateLimited {
                 retry_after: Some(Duration::from_secs(600)),
             }
-            .into()))
-        };
-
-        run(limited());
-        assert_eq!(
-            rig.store.saves(),
-            [vec![RejectEntry {
-                key: key(0),
-                until_epoch_s: T0 + 600,
-            }]]
+            .into())),
         );
-
-        run(limited());
-        run(Scripted::Answer(Err(ProbeError::Timeout.into())));
-        assert_eq!(
-            rig.store.saves().len(),
-            1,
-            "목록이 그대로면 다시 쓰지 않는다"
-        );
-
-        run(ok(active(0, 20.0)));
-        let saved = rig.store.saves();
-        assert_eq!(saved.len(), 2, "성공이 거절 기한을 지웠다");
-        assert!(saved[1].is_empty());
-    }
-
-    #[test]
-    fn a_refresh_during_a_rejection_answers_from_the_cache_without_a_probe_seen_or_hidden() {
-        let (rig, _clock) = rig();
-        rig.service.restore_rejects(&[RejectEntry {
-            key: key(0),
-            until_epoch_s: T0 + 600,
-        }]);
+        wait_until("거절로 끝난 조회", || ended(&rig) == 1);
 
         let seen = rig
             .service
@@ -1687,8 +1551,8 @@ mod tests {
         assert_eq!(pct(&hidden.snapshot), Some(40.0));
         assert_eq!(
             rig.threads.counts.spawned.load(Ordering::SeqCst),
-            0,
-            "조회가 안 나갔다"
+            1,
+            "거절한 조회 뒤로 조회가 안 나갔다"
         );
     }
 
