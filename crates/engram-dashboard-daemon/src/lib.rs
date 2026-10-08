@@ -2,7 +2,8 @@
 //!
 //! `main.rs`(데몬 진입점)와 격리 하네스(`tests/ws_e2e.rs`)가 **같은 기동 흐름**을 공유하도록
 //! 서버 조립·accept loop 를 여기로 모았다. main 은 `run()` 한 줄만 부르고, 테스트는
-//! `start_test_server()` 로 in-process 서버를 띄워 WS 클라이언트로 검증한다.
+//! `start_test_server()`(기능 `test-support` 뒤 — 운영 빌드에는 없다)로 in-process 서버를 띄워 WS 클라이언트로
+//! 검증한다.
 //!
 //! ★이 crate 의 범위(ADR-0130)★ — 응용 층 + 조립. **데몬 살림의 *구현*은 여기 없다**: 단일 인스턴스
 //! 가드와 portfile 의 실물은 슬라이스 1 로 `engram-dashboard-net` 이 가져갔다. 여기 남은 건 그것들을
@@ -53,7 +54,12 @@ use usage_service::{OsProbeThreads, ProbeThreads, UsageParts, UsageService};
 // ADR-0129 슬라이스 1: 네트워크 행이 소유한 타입인데 **이 crate 의 공개 시그니처에 나타나므로**
 //   재수출한다(`start_test_server_with_keepalive` — `tests/ws_e2e.rs` 가 부른다). 표준 Rust API
 //   재수출 패턴이고, **모듈 통째 재수출이 아니다** — 옛 `crate::ws::` 경로를 되살리는 것은 금지다.
+//   그 시그니처가 기능 `test-support` 뒤에 있으므로 재수출도 그 뒤다(ADR-0286). 기능이 꺼지면 accept loop 가 쓰는
+//   비공개 import 만 남는다.
+#[cfg(feature = "test-support")]
 pub use engram_dashboard_net::ws::KeepaliveConfig;
+#[cfg(not(feature = "test-support"))]
+use engram_dashboard_net::ws::KeepaliveConfig;
 // ADR-0129 0-4: 핸드셰이크 프레임(`auth::AuthFrame`)은 **재수출하지 않는다** — 이 crate 의 공개
 //   시그니처에 나타나지 않으므로 위 재수출의 사유가 성립하지 않고, 한 타입에 import 경로가 둘이 생긴다.
 //   `tests/ws_e2e.rs` 는 네트워크 crate 를 직접 부른다(그 crate 는 여기 normal 의존이라 테스트 타깃에서
@@ -831,12 +837,18 @@ pub async fn run() -> Result<(), i32> {
 }
 
 // ── 테스트용 서버 기동 헬퍼 ───────────────────────────────────────────────────────
+// 이 구획의 항목은 전부 기능 `test-support` 뒤에 둔다(운영 빌드에 싣지 않는다) — 새 항목도 같은 cfg 를 단다.
+//   빠뜨리면 기능 없는 빌드에서 쓰이지 않는 코드 경고가 나거나 테스트 비계가 다시 공개 API 로 나간다.
+// ADR-0286
 
 /// in-process 로 뜬 테스트 서버 핸들. 좀비 PTY 를 남기지 않으려면 테스트가 끝에서 반드시
 /// `shutdown().await` 를 부른다 — drop 은 accept loop 만 끝내고 자식 정리를 하지 않는다.
 ///
 /// 단일 인스턴스 가드·daemon.json 은 ★의도적으로 생략★(실프로세스 전용 관심사). 그 경로는
 /// `tests/ws_e2e.rs` 의 #[ignore]/harness 가 실제 .exe 로 검증한다.
+///
+/// 기능 `test-support` 를 켠 빌드에만 있다 — 다른 패키지의 시험은 데몬 dev 의존에 그 기능을 켠다.
+#[cfg(feature = "test-support")]
 pub struct TestServerHandle {
     pub port: u16,
     pub token: String,
@@ -846,6 +858,7 @@ pub struct TestServerHandle {
     flush_worker: messaging_host::FlushWorkerHandles,
 }
 
+#[cfg(feature = "test-support")]
 impl TestServerHandle {
     /// 서버를 graceful 하게 내린다. **전 에이전트 kill → flush worker 종료** 순서가 load-bearing 이며
     /// (근거 = run() 종료 주석), 좀비 PTY 방지를 위해 shutdown_all 까지 동기 대기한다.
@@ -858,6 +871,7 @@ impl TestServerHandle {
     }
 }
 
+#[cfg(feature = "test-support")]
 pub async fn start_test_server() -> std::io::Result<TestServerHandle> {
     let store: Arc<dyn ProfileStore> = Arc::new(MemProfileStore::default());
     start_test_server_with_store(store).await
@@ -865,6 +879,7 @@ pub async fn start_test_server() -> std::io::Result<TestServerHandle> {
 
 /// keepalive 주입형 — keepalive(half-open 감지) 동작을 검증하는 테스트가 짧은 ping/idle 값을 끼운다
 /// (운영 기본값이면 그 테스트가 수십 초 걸린다).
+#[cfg(feature = "test-support")]
 pub async fn start_test_server_with_keepalive(
     keepalive: KeepaliveConfig,
 ) -> std::io::Result<TestServerHandle> {
@@ -873,12 +888,14 @@ pub async fn start_test_server_with_keepalive(
 }
 
 /// store 주입형 — 복원·persist 동작을 검증하고 싶은 테스트가 store 를 직접 끼운다.
+#[cfg(feature = "test-support")]
 pub async fn start_test_server_with_store(
     store: Arc<dyn ProfileStore>,
 ) -> std::io::Result<TestServerHandle> {
     start_test_server_inner(store, KeepaliveConfig::default()).await
 }
 
+#[cfg(feature = "test-support")]
 async fn start_test_server_inner(
     store: Arc<dyn ProfileStore>,
     keepalive: KeepaliveConfig,
@@ -1003,11 +1020,13 @@ async fn start_test_server_inner(
 }
 
 /// 운영의 `FileProfileStore` 를 대신해 테스트 격리(디스크/Embedded 비오염)를 만든다.
+#[cfg(feature = "test-support")]
 #[derive(Default)]
 struct MemProfileStore {
     saved: std::sync::Mutex<Vec<engram_dashboard_agent::profile::AgentProfile>>,
 }
 
+#[cfg(feature = "test-support")]
 impl ProfileStore for MemProfileStore {
     fn save(&self, profiles: &[engram_dashboard_agent::profile::AgentProfile]) {
         *self.saved.lock().expect("mem store poisoned") = profiles.to_vec();
@@ -1018,11 +1037,13 @@ impl ProfileStore for MemProfileStore {
 }
 
 /// `MemProfileStore` 의 프리셋판 — 운영의 `FilePresetStore` 를 대신한다.
+#[cfg(feature = "test-support")]
 #[derive(Default)]
 struct MemPresetStore {
     saved: std::sync::Mutex<Vec<engram_dashboard_agent::preset::Preset>>,
 }
 
+#[cfg(feature = "test-support")]
 impl PresetStore for MemPresetStore {
     fn save(&self, presets: &[engram_dashboard_agent::preset::Preset]) {
         *self.saved.lock().expect("mem preset store poisoned") = presets.to_vec();
