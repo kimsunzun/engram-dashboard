@@ -11,12 +11,16 @@ pub mod theme;
 mod tray;
 // ADR-0155: 웹뷰가 주인인 명령의 셸쪽 다리(등록 대리 + 2단 배달의 마지막 홉).
 pub mod view_commands;
+mod webview_env;
 
 // ADR-0029: embedded(in-process 호스팅) 제거 → daemon-only. 앱(src-tauri)은 데몬의 상주 클라이언트
 // 셸이다(창/트레이/로컬 제어 command + 데몬 discovery). 에이전트는 데몬이 호스팅한다.
 // 그래서 옛 in-proc 배선(AgentManager/ConnectionCore/embedded
 // carrier/AppState/TauriStatusSink/모드 시스템)은 전부 제거됐다.
 use tauri::Manager;
+
+/// main 창을 못 만든 시작(setup ⑧)의 프로세스 종료 코드.
+const STARTUP_FAILED_EXIT_CODE: i32 = 1;
 
 // ── run() ────────────────────────────────────────────────────────────────────
 
@@ -77,13 +81,14 @@ pub fn run() {
     ));
 
     // ADR-0102: ★LayoutState 는 반드시 pre-build(빌더)에서 manage 한다★ — setup() 이 아니라 여기서.
-    //   부팅 레이스: 웹뷰는 builder.build() *도중* JS 를 로드해 setup() 실행 전에 invoke('list_tabs',
-    //   {window:"main"}) 를 쏠 수 있다. 그 상태 등록이 setup() 안에 있으면(과거 배치) command 가 미등록
-    //   managed state 를 만나 Err 로 떨어지고, main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭
-    //   변형 시에만 발화) 로딩 플레이스홀더에 영구 고착된다. LayoutState::new() 는 결정적(app handle·런타임
-    //   불필요 — ViewManager::new() 가 기본 View 1개를 동기 생성)이라 빌더에서 등록 가능 → 웹뷰 첫 invoke
-    //   전에 상태가 반드시 존재해 레이스가 구조적으로 불가능. ★setup 으로 되돌리지 말 것★(레이스 재발).
-    //   대조: DaemonClient 는 tokio 런타임이 필요해 setup 에 남는다(그쪽 조기 invoke 는 프론트 retry 가 커버).
+    //   창의 웹뷰는 만들어지자마자 JS 를 로드해 invoke('list_tabs', {window:"main"}) 를 쏜다. 그때 상태가
+    //   미등록이면 command 가 Err 로 떨어지고, main 은 이벤트 복구 경로가 없어(window:tabs-updated 는 탭
+    //   변형 시에만 발화) 로딩 플레이스홀더에 영구 고착된다 — 상태 등록이 setup() 안이고 설정 창을 Tauri 가
+    //   setup() 앞에서 만들던 배치에서 실제로 난 고착이다. 정적 창은 이제 setup() 안(부팅 단계 ⑧)에서 만들지만,
+    //   빌더에서 등록하면 setup() 안의 순서와 무관하게 어느 창보다 먼저 상태가 있다. LayoutState::new() 는
+    //   결정적(app handle·런타임 불필요 — ViewManager::new() 가 기본 View 1개를 동기 생성)이라 빌더에서 등록
+    //   가능. ★setup 으로 옮기지 말 것★ — 옮기면 창을 만드는 자리보다 앞인지를 손으로 지켜야 한다.
+    //   대조: DaemonClient 는 tokio 런타임이 필요해 setup 에 남는다(창을 만드는 ⑧ 보다 앞에서 등록한다).
     //   그 안의 모델은 부팅 단계 플러그인이 창보다 먼저 판정한 모델로 갈아끼운다(TRD S21-storage §6-5 ⑥).
     let setup_layout = layout.clone();
     let setup_tree = tree_attrs.clone();
@@ -101,7 +106,7 @@ pub fn run() {
 
     // ── 셸 설정 + 유효 테마(TRD S21-storage §5-3 · §5-6) ─────────────────────────────
     // ★위 LayoutState 와 같은 이유로 빌더에서 manage 한다(ADR-0102)★ — 웹뷰의 첫 `get_ui_settings` ·
-    //   `settings_get` 이 setup 보다 먼저 올 수 있고, 그때 상태가 없으면 그 창은 기본값으로 굳는다.
+    //   `settings_get` 때 상태가 없으면 그 창은 기본값으로 굳는다.
     // ★여기서는 읽기만 한다★ — 적재는 파일·폴더를 만들지도 고치지도 않고, 쓰기는 setup 의 `enable_writes`
     //   뒤에만 열린다. 단일 인스턴스 관문(위 플러그인)은 build 안에서 판정되므로, 여기서 디스크를 바꾸면 곧
     //   종료될 두 번째 인스턴스도 그것을 바꾼다.
@@ -117,10 +122,23 @@ pub fn run() {
     ));
     builder = builder.manage(settings.clone()).manage(themes.clone());
 
+    // ── 웹뷰 환경(TRD S21-storage §4) — 창을 만드는 코드가 전부 이 인스턴스에서 폴더 · 인자를 받는다 ──
+    // ★빌더에서 manage 한다(위 LayoutState 와 같은 까닭 — ADR-0102)★ — 팝아웃을 만드는 invoke 보다 먼저 있어야 한다.
+    let webview_env = std::sync::Arc::new(crate::webview_env::WebviewEnv::resolve());
+    let setup_webview_env = webview_env.clone();
+    builder = builder.manage(webview_env);
+
     let exit_session = state_session.clone();
+    // 시작이 실패했다는 표지 — setup ⑧ 이 세우고 종료 사건이 읽는다(아래 `run`).
+    let startup_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let setup_startup_failed = startup_failed.clone();
     builder
         .setup(move |app| {
             // 로그는 부팅 단계 플러그인이 이미 열었다(TRD S21-storage §6-5 ⓪).
+
+            // ── 웹뷰 폴더 결정(TRD S21-storage §4 · M4) — 창을 만드는 어느 자리보다 앞 ─────────────────
+            // 단일 인스턴스 관문 뒤라 쓰기 확인(프로브)을 해도 된다.
+            setup_webview_env.chosen_dir();
 
             // ── 부팅 단계 ⑦: 기록기 시작(가드면 띄우지 않는다 — §6-5 ③) ─────────────────────
             state_session.start_saver();
@@ -205,14 +223,27 @@ pub fn run() {
                 }
             }
 
-            // ── 부팅 단계 ⑧ ⑨: main · 트리 창 자리 · 복원한 팝아웃 창 · 테마 한 번(TRD S21-storage §6-5) ──
-            // 설정 창은 이미 있다(사용자 setup). `--hidden` 이면 아래 숨기기가 이 창들도 숨긴다(사용자 결정 F13).
-            crate::state::placement::restore_windows(
+            // ── 부팅 단계 ⑧ ⑨: 정적 창(main · 트리)을 저장된 자리로 만들기 · 복원한 팝아웃 창 · 테마 한 번 ──
+            // (TRD S21-storage §4 · §6-5) 여기서 첫 창이 생긴다(설정의 `"create": false`). `--hidden` 이면 main 은
+            //   숨긴 채 만들고, 팝아웃은 아래 숨기기가 숨긴다(사용자 결정 F13).
+            if crate::state::placement::restore_windows(
                 app.handle(),
+                &setup_webview_env,
+                hidden,
                 &setup_layout,
                 &setup_tree,
                 &theme_control,
-            );
+            )
+            .is_err()
+            {
+                // main 을 못 만들면 앱을 끝낸다(사용자 결정 2026-10-07) — 패닉이 아니라 종료 요청이라 종료 사건
+                //   (`RunEvent::Exit` — 아래 `run`)이 기록기 `Final` 과 셸 실행 잠금 놓기를 하고, 세운 표지로 종료
+                //   코드를 정한다. 요청은 이 setup 이 돌아간 뒤 이벤트 루프가 처리하므로 setup 을 여기서 끝낸다 — 남은
+                //   단계(⑩ · 복원 포트 · 트레이)는 곧 끝날 앱에 소용없다.
+                setup_startup_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+                app.handle().exit(STARTUP_FAILED_EXIT_CODE);
+                return Ok(());
+            }
 
             // ── 부팅 단계 ⑩: 파생 표(라우터 · 사용량 관심)를 마지막 창 묶음으로 한 번 다시 계산한다 ──
             // 부팅 단계 플러그인은 이 클라이언트보다 먼저 돌아 부를 수 없었고, ⑨ 가 못 연 팝아웃을 모델에서 지운
@@ -255,8 +286,8 @@ pub fn run() {
             // build_tray 가 초기 아이콘을 확정한 뒤 변화만 push 한다(첫 관측은 push 안 함).
             tray::spawn_daemon_observer(&app.handle().clone());
 
-            // ★한계(주석 명시)★: main 창 conf 기본 visible=true 라 창이 잠깐 떴다 숨어 깜빡일 수 있다.
-            // 일단 수용 — 깜빡임 제거(conf visible:false + 비-hidden 시 show)는 후속으로 이연.
+            // `--hidden` — main 은 숨긴 채 만들었다(⑧). 여기서는 ⑨ 가 보인 채 연 팝아웃을 숨기고(F13) 숨긴 창을
+            //   사용량 관심에서 뺀다 — 숨기기 경로는 하나다(ADR-0229).
             if hidden {
                 crate::tray::actions::hide_main_ui(app.handle());
             }
@@ -371,11 +402,19 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         // ADR-0029: 앱은 in-proc 에이전트를 호스팅하지 않으므로 종료 때 거둘 manager 가 없다(데몬이 자기 에이전트
-        // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기뿐이다(TRD
-        // S21-storage §6-6) — 트레이 「완전 종료」(`app.exit(0)`)도 이 사건을 낸다.
+        // graceful 을 담당). 여기서 하는 일은 화면 상태의 정상 종료 쓰기와 셸 실행 잠금 놓기(TRD S21-storage §6-6),
+        // 그리고 시작이 실패했으면 종료 코드 정하기다 — 트레이 「완전 종료」(`app.exit(0)`)도 이 사건을 낸다.
         .run(move |_handle, event| {
             if let tauri::RunEvent::Exit = event {
                 exit_session.shutdown();
+                // 종료 요청의 코드는 프로세스 종료 코드로 나가지 않는다 — tauri-runtime-wry 2.11.3 은 요청을
+                //   `ControlFlow::Exit`(tao 0.35 = 코드 0)로 끝낸다. 그래서 여기서 직접 끝낸다. 플러그인의 종료 처리
+                //   (단일 인스턴스 뮤텍스 놓기)는 이 콜백보다 먼저 돌았고, 건너뛰는 것은 이 뒤 Tauri 의
+                //   `cleanup_before_exit`(트레이 아이콘 지우기 · 창 숨기기) 하나다 — 이 길은 트레이를 만들기 전에 setup 을
+                //   끝내고 main 도 없어 지울 것이 없다(tauri 2.11.3 `app.rs` 의 `make_run_event_loop_callback`).
+                if startup_failed.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::process::exit(STARTUP_FAILED_EXIT_CODE);
+                }
             }
         });
 }

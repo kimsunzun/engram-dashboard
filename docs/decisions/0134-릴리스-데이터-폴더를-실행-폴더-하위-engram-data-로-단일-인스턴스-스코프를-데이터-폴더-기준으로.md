@@ -1,7 +1,7 @@
 # ADR-0134: 릴리스 데이터 폴더를 실행 폴더 하위 engram-data 로 + 단일 인스턴스 스코프를 데이터 폴더 기준으로
 
 - 상태: 확정 (2026-08-13, 사용자 결정 — 릴리스 배포판을 완전 포터블로) · 부분 폐기 by ADR-0135 (연결키 파일을 잠금 파일에 통합) · 부분 폐기 by ADR-0136 (릴리스 데이터 폴더 이름)
-- 관련: Amends ADR-0029 (단일 인스턴스 스코프와 릴리스 데이터 폴더 위치 대체) · ADR-0027(모드별 인스턴스/데이터 — 폴더-로컬 아이디어의 출처, ADR-0029가 전체 폐기) · ADR-0100(릴리즈 패키징 포터블 폴더 · co-location 불변식) · ADR-0024(데몬 데이터 위치 — 데이터위치 조항은 0027이 이미 폐기) · ADR-0129(net crate — 단일 인스턴스 가드 소유) · `crates/engram-dashboard-discovery/src/lib.rs`(`default_data_dir`) · `crates/engram-dashboard-net/src/instance.rs`(named mutex) · Amends ADR-0100 (런타임 데이터 위치를 실행 폴더 하위로 대체) · Amended by ADR-0135 (연결키 파일을 잠금 파일에 통합) · Amended by ADR-0136 (릴리스 데이터 폴더 이름)
+- 관련: Amends ADR-0029 (단일 인스턴스 스코프와 릴리스 데이터 폴더 위치 대체) · ADR-0027(모드별 인스턴스/데이터 — 폴더-로컬 아이디어의 출처, ADR-0029가 전체 폐기) · ADR-0100(릴리즈 패키징 포터블 폴더 · co-location 불변식) · ADR-0024(데몬 데이터 위치 — 데이터위치 조항은 0027이 이미 폐기) · ADR-0129(net crate — 단일 인스턴스 가드 소유) · `crates/engram-dashboard-discovery/src/lib.rs`(`default_data_dir`) · `crates/engram-dashboard-net/src/instance.rs`(named mutex) · Amends ADR-0100 (런타임 데이터 위치를 실행 폴더 하위로 대체) · Amended by ADR-0135 (연결키 파일을 잠금 파일에 통합) · Amended by ADR-0136 (릴리스 데이터 폴더 이름) · ADR-0283(2026-10-08 — 참조만, 개정 아님: 클라이언트 웹뷰 하위 폴더 `<root>\webview` 에 쓸 수 없으면 Tauri 기본 자리로 물러난다. 결정 4 「폴백하지 않고 명확히 실패」는 데이터 폴더 · 데몬의 규칙이라 그 물러남은 위반이 아니다(세션 해석 — ADR-0283 관련줄과 같은 근거) — 데이터 폴더 전체를 못 쓰면 결정 4 의 경로가 창에 사유를 띄운다. 결정 3 의 공유 폴더도 웹뷰 폴더와 무관하다)
 
 ## 맥락
 

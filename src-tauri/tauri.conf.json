@@ -14,22 +14,22 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Engram Dashboard",
         "width": 1280,
         "height": 800,
-        "dragDropEnabled": false,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
+        "dragDropEnabled": false
       },
       {
         "label": "agent-tree",
+        "create": false,
         "url": "index.html#/tree",
         "visible": false,
         "width": 280,
         "height": 600,
         "decorations": true,
         "title": "Agent Tree",
-        "dragDropEnabled": false,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI --autoplay-policy=no-user-gesture-required"
+        "dragDropEnabled": false
       }
     ],
     "security": {
