@@ -1,0 +1,26 @@
+[package]
+name = "engram-dashboard-cli"
+version = "0.3.2"
+edition = "2021"
+description = "Engram Dashboard 제어 평면 CLI(engram.exe) — 스폰된 에이전트가 데몬 제어 라우트에 손조립 HTTP 로 붙는 인증 + 배송 클라이언트. bin 전용(ADR-0273 · ADR-0285)."
+
+# ADR-0273
+# ADR-0086 스텝 2 · ADR-0132: 제어 평면 CLI. 스폰된 에이전트가 셸로 부르는 최소 클라이언트 —
+# env(ENGRAM_TOKEN/ENGRAM_CONTROL_URL)를 읽어 데몬 제어 라우트로 POST 한다. 의존성 최소화(std TcpStream
+# 손조립 HTTP). ★bin 이름 = agent 의 `CLI_EXE_NAME`★ — grant·프라이밍·PATH 해석이 이 이름에 정렬된다
+# (ADR-0094). 여기서 이름을 바꾸면 그 상수도 함께 바꿔야 하고, 어긋나면 우편이 조용히 멈춘다.
+# 경로는 `src/bin/engram.rs` 그대로 둔다 — ADR 들이 이 파일을 그 경로로 가리키고, ADR-0273 「영향」이 그 경로를
+# 이 패키지의 같은 파일로 읽게 정했다. lib 타깃은 두지 않는다 — 부를 소비자가 없고, 세우면 파일 하나짜리
+# lib 이 된다(ADR-0175 결정 6).
+[[bin]]
+name = "engram"
+path = "src/bin/engram.rs"
+
+# ★데몬 패키지를 의존하지 않는다★ — 의존하면 데몬 그래프(tokio · axum · rmcp · net …)가 engram.exe 빌드에
+#   딸려 와 이 패키지가 따로 선 이유가 사라진다(ADR-0273).
+[dependencies]
+# agent `types.rs` 의 CLI 어휘 · help 계약 상수(ADR-0273 「맥락」 · ADR-0285). 대가로 agent 의 운영 의존이 함께
+#   빌드된다(ADR-0273 「영향」 — 어휘를 agent 밖으로 빼면 줄지만 그 결정은 어휘를 agent 에 둔다).
+engram-dashboard-agent = { path = "../engram-dashboard-agent" }
+engram-dashboard-command = { path = "../engram-dashboard-command" }
+serde_json = "1"

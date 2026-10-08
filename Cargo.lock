@@ -1046,6 +1046,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-dashboard-cli"
+version = "0.3.2"
+dependencies = [
+ "engram-dashboard-agent",
+ "engram-dashboard-command",
+ "serde_json",
+]
+
+[[package]]
 name = "engram-dashboard-command"
 version = "0.1.0"
 dependencies = [

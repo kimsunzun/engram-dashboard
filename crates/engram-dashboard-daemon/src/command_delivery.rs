@@ -1231,7 +1231,7 @@ impl LocalCommands for NoLocalCommands {
 ///    (`mcp_server::control_agent_handler`) 이 셈을 안 본다. 두 입구가 공유하는 자리
 ///    (`control::commands::call_daemon_command`)에 옮기면 **판정이 풀 작업 안에서** 나므로, 지키려던 자원을
 ///    이미 집은 뒤에 거절하게 된다 — 입장 통제는 자원을 잡기 **전**이어야 해서 그 seam 은 이 정책의 집이
-///    될 수 없다. 제대로 공유하려면 조립 시점에 만든 입장 통제 객체를 `start_mcp_server` 와
+///    될 수 없다. 제대로 공유하려면 조립 시점에 만든 입장 통제 객체를 `start_mcp_server_with_help` 와
 ///    `run_accept_loop` 양쪽에 넘겨야 하고, 그건 이번 범위 밖이다. ★그러니 HTTP 표면의 풀 적재는 여전히
 ///    무계다★ — 이 상수가 그것까지 막는다고 읽지 말 것.
 const MAX_LOCAL_IN_FLIGHT: usize = 64;

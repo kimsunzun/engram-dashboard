@@ -1,7 +1,7 @@
 # ADR-0232: 문서 경로만 바뀐 push와 PR은 CI를 띄우지 않는다 — 트리거 단 경로 필터 제외 목록
 
-- 상태: 확정 (2026-09-26, 근거: 사용자 결정 + 적대 리뷰 1라운드)
-- 관련: `docs/research/ci-docs-skip-conventions-2026-09-26.md`(성숙 OSS 서베이 — 결정 뒤에 했다) · `.github/workflows/ci.yml` 의 `on.push.paths`(목록 정본) · 같은 파일 `on.pull_request.paths`(같은 목록) · `src/util/launcherWiring.test.ts`(되살린 파일을 읽는 테스트) · `docs/tracking.md` T-18(branch protection — 도입 안 함) · CLAUDE.md 「CI — push하면 자동으로 돈다」·「브랜치·커밋」(머지 규칙 예외) · `.claude/skill-bindings/qa.md` 「CI와의 분담」 · Amends ADR-0131 (결정 2 매 push 범위에서 문서 경로만 바뀐 push와 PR 제외)
+- 상태: 확정 (2026-09-26, 근거: 사용자 결정 + 적대 리뷰 1라운드) · 부분 폐기 by ADR-0285 (md 일괄 제외 기각의 include_str 근거)
+- 관련: `docs/research/ci-docs-skip-conventions-2026-09-26.md`(성숙 OSS 서베이 — 결정 뒤에 했다) · `.github/workflows/ci.yml` 의 `on.push.paths`(목록 정본) · 같은 파일 `on.pull_request.paths`(같은 목록) · `src/util/launcherWiring.test.ts`(되살린 파일을 읽는 테스트) · `docs/tracking.md` T-18(branch protection — 도입 안 함) · CLAUDE.md 「CI — push하면 자동으로 돈다」·「브랜치·커밋」(머지 규칙 예외) · `.claude/skill-bindings/qa.md` 「CI와의 분담」 · Amends ADR-0131 (결정 2 매 push 범위에서 문서 경로만 바뀐 push와 PR 제외) · Amended by ADR-0285 (md 일괄 제외 기각의 include_str 근거)
 
 ## 맥락
 

@@ -19,7 +19,7 @@ fn mcp_needs() -> ControlChannelNeeds {
     }
 }
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot,
+    start_mcp_server_without_help, CommandTableSlot, ManagerSlot, MessagingSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 
@@ -168,7 +168,7 @@ async fn missing_unknown_stale_tokens_are_rejected_before_session() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -219,7 +219,7 @@ async fn valid_token_initializes_binds_session_and_ping_returns_identity() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -274,7 +274,7 @@ async fn get_and_delete_without_token_are_rejected() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry,
         empty_slot(),
         empty_messaging_slot(),
@@ -311,7 +311,7 @@ async fn cross_token_session_takeover_is_rejected() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -351,7 +351,7 @@ async fn revoked_mid_session_request_is_rejected() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -394,7 +394,7 @@ async fn epoch_rotation_revokes_old_token_and_config_file() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -461,7 +461,7 @@ async fn orphaned_session_attach_is_rejected() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -502,7 +502,7 @@ async fn unknown_session_id_is_rejected_not_forwarded() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry,
         empty_slot(),
         empty_messaging_slot(),
@@ -531,7 +531,7 @@ async fn malformed_session_id_header_is_rejected_with_400() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry,
         empty_slot(),
         empty_messaging_slot(),
@@ -574,7 +574,7 @@ async fn session_ops_without_session_id_are_rejected_with_400() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry,
         empty_slot(),
         empty_messaging_slot(),
@@ -608,7 +608,7 @@ async fn post_initialize_without_session_id_still_reaches_inner() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),
@@ -647,7 +647,7 @@ async fn oversize_body_is_rejected_with_413() {
     // ★수거기를 들고 있어야 한다★ — 떨어뜨리면 그 자리에서 자리 표가 닫혀 그 뒤 왕복이 전부 반려된다.
     let (relay_bus, _relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         empty_slot(),
         empty_messaging_slot(),

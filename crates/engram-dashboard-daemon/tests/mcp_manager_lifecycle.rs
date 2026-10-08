@@ -32,7 +32,7 @@ fn mcp_needs() -> ControlChannelNeeds {
 
 use engram_dashboard_daemon::control::mcp_config;
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, MessagingSlot,
+    start_mcp_server_without_help, CommandTableSlot, ManagerSlot, MessagingSlot,
 };
 use engram_dashboard_daemon::control::priming::NoopPrimingProvider;
 use engram_dashboard_daemon::control::registry::ControlRegistry;
@@ -76,7 +76,7 @@ async fn make_manager_with_control(
     let (relay_bus, relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     hold_for_the_process(relay_sweeper);
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),
@@ -116,7 +116,7 @@ async fn make_manager_with_control_channel(
     let (relay_bus, relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     hold_for_the_process(relay_sweeper);
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         Arc::new(ManagerSlot::new()),
         Arc::new(MessagingSlot::new()),

@@ -1,11 +1,12 @@
 # Cargo workspace 루트 (S12 phase 1). 정적 링크.
-# 멤버 10: protocol(경계 계약) · base(바닥 기반층 — 로깅·범용 도우미, 잎 crate, ADR-0175 · ADR-0269) ·
+# 멤버 11: protocol(경계 계약) · base(바닥 기반층 — 로깅·범용 도우미, 잎 crate, ADR-0175 · ADR-0269) ·
 #   platform(OS 층 — OS 에 따라 달라지는 운영 코드, 워크스페이스 crate 의존 0, ADR-0266 · ADR-0275) ·
 #   agent(에이전트 코어, Tauri import 0 — 옛 core, ADR-0175) · command(명령 버스 도구 — 워크스페이스
 #   crate 의존 0·명령 0개, ADR-0155) · messaging(메시징 커널 — 워크스페이스 crate
 #   무의존, ADR-0110) · net(네트워크 행 — WS·프레임 포트·단일 인스턴스·portfile, ADR-0129) ·
 #   transport(재사용 전송 lib — 워크스페이스 crate 의존 0, ADR-0177) ·
-#   daemon(에이전트 호스트 + 조립실) · src-tauri(데몬 클라이언트 셸).
+#   daemon(에이전트 호스트 + 조립실) · cli(제어 평면 CLI engram.exe — bin 전용, ADR-0273) ·
+#   src-tauri(데몬 클라이언트 셸).
 [workspace]
 resolver = "2"
 members = [
@@ -30,6 +31,8 @@ members = [
     #   stream)의 tokio 0줄 게이트를 포함해 격리 게이트의 정본은 그 crate lib.rs 헤더다.
     "crates/engram-dashboard-transport",
     "crates/engram-dashboard-daemon",
+    # ADR-0273: 제어 평면 CLI(engram.exe)를 뽑는 bin 전용 패키지 — 데몬 패키지를 의존하지 않는다.
+    "crates/engram-dashboard-cli",
     "src-tauri",
 ]
 

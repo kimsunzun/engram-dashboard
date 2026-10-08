@@ -1,12 +1,15 @@
 @echo off
-REM Release build + run. Builds the RELEASE client shell AND the daemon binary (both required),
+REM Release build + run. Builds the RELEASE client shell AND the daemon + CLI binaries (all required),
 REM kills THIS deployment's stale daemon so the freshly built one is used, then launches the exe.
 REM
-REM ★WHY build the daemon separately (do not remove): `npm run tauri build` compiles ONLY the client
-REM   shell (engram-dashboard.exe). engram-dashboard-daemon is a separate workspace member and only a
-REM   dev-dependency of src-tauri, so `tauri build` does NOT produce it. locate_daemon_exe() looks for
-REM   the daemon RIGHT NEXT TO the app exe (current_exe().parent()), so BOTH must land in target\release\.
-REM   Without this the release app cannot spawn the daemon (ExeNotFound) and hosts no agents.
+REM ★WHY build the daemon and the CLI separately (do not remove): `npm run tauri build` compiles ONLY the
+REM   client shell (engram-dashboard.exe). engram-dashboard-daemon is a separate workspace member and only a
+REM   dev-dependency of src-tauri, and engram-dashboard-cli (engram.exe, the control-plane CLI) is not a
+REM   dependency of it at all, so `tauri build` produces neither. locate_daemon_exe() looks for the daemon
+REM   RIGHT NEXT TO the app exe (current_exe().parent()), so it must land in target\release\ too.
+REM   Without the daemon the release app cannot spawn it (ExeNotFound) and hosts no agents. The daemon in
+REM   turn takes engram.exe from its own folder, so skipping the CLI leaves agents an OLD engram.exe (or
+REM   none) with no build error.
 REM
 REM Release data dir = data\ NEXT TO the app exe, i.e. target\release\data; the portfile is
 REM   data\daemon\run\daemon.json (ADR-0134; NOT the dev .engram-dev, and no longer %APPDATA%).
@@ -107,9 +110,17 @@ echo [release] Building client shell (release, --no-bundle for speed)...
 call npm run tauri build -- --no-bundle
 if errorlevel 1 ( echo [release] TAURI BUILD FAILED - not launching. & pause & exit /b 1 )
 
+REM ★Two cargo invocations, the CLI on its own (do not merge)★: this writes target\release\, the folder
+REM   scripts\build-release.ps1 packages, and a merged `-p daemon -p cli` build and a CLI-only build write the
+REM   SAME unhashed target\release\engram.exe (measured 2026-10-08). Whether a later CLI-only build that cargo
+REM   judges fresh rewrites that file is unverified, so - like the release script - never put a merged build
+REM   there. Each call has its own errorlevel check so a daemon failure is not hidden by a CLI success.
 echo [release] Building daemon binary (release, lands next to the app exe)...
 cargo build --release -p engram-dashboard-daemon
 if errorlevel 1 ( echo [release] DAEMON BUILD FAILED - not launching. & pause & exit /b 1 )
+echo [release] Building CLI binary (release, lands next to the daemon exe)...
+cargo build --release -p engram-dashboard-cli
+if errorlevel 1 ( echo [release] CLI BUILD FAILED - not launching. & pause & exit /b 1 )
 
 REM ★Launched detached (scripts\launch-detached.ps1) - do NOT go back to `start` (do not remove)★:
 REM   launched from a terminal, the app becomes a DESCENDANT of that terminal and its output travels

@@ -1,7 +1,7 @@
 # ADR-0212: engram help 본문을 외부 파일로 빼되 내장 사본을 폴백으로 남긴다
 
-- 상태: 확정 (2026-09-19, 근거: 사용자 결정 + 빌드 없이 반영·바이트 동일 렌더 실측) · 부분 폐기 by ADR-0220 (파일명과 구획 표시 꼴)
-- 관련: ADR-0211(계약이 도움말로 이사한 라운드) · ADR-0092(내용은 외부 MD) · ADR-0100(릴리스 매니페스트) · `prompts/engram-cli-help.md` · `crates/engram-dashboard-daemon/src/bin/engram.rs` · Amended by ADR-0220 (파일명과 구획 표시 꼴)
+- 상태: 확정 (2026-09-19, 근거: 사용자 결정 + 빌드 없이 반영·바이트 동일 렌더 실측) · 부분 폐기 by ADR-0220 (파일명과 구획 표시 꼴) · 부분 폐기 by ADR-0285 (결정 3과 4 및 거부한 대안 셋과 영향의 잃은 보증)
+- 관련: ADR-0211(계약이 도움말로 이사한 라운드) · ADR-0092(내용은 외부 MD) · ADR-0100(릴리스 매니페스트) · `prompts/engram-cli-help.md` · `crates/engram-dashboard-daemon/src/bin/engram.rs` · Amended by ADR-0220 (파일명과 구획 표시 꼴) · Amended by ADR-0285 (결정 3과 4 및 거부한 대안 셋과 영향의 잃은 보증)
 
 ## 맥락
 

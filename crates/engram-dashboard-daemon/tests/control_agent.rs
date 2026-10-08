@@ -22,7 +22,7 @@ use engram_dashboard_daemon::command_roster::CommandRoster;
 use engram_dashboard_daemon::control::agent::RosterBroadcast;
 use engram_dashboard_daemon::control::commands::{make_daemon_table, NoInputLeases, NoUsageLimits};
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
+    start_mcp_server_without_help, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
     RosterBroadcastSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
@@ -340,7 +340,7 @@ async fn fixture_with_table(tag: &str, with_table: bool) -> Fixture {
             ),
         ),
     );
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         manager_slot.clone(),
         Arc::new(MessagingSlot::new()),

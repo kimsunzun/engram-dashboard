@@ -1,7 +1,7 @@
 # ADR-0282: 2-2 discovery 나누기의 세부 — 실행 파일 위치는 platform 한 곳, 쓰기 프로브는 base, 셸 사본은 같은 경로 시험으로 묶는다
 
-- 상태: 확정 (2026-10-07, 근거: 사용자 위임 2026-10-07 아래의 메인 결정 · 2-2 착지 2026-10-07 (U1 `a0ec7f4` · U2 `3c9bf33` · U3 `b42e139` · U4 `d2f9822`) · 정본 설계 = `docs/process/S21-crate-boundaries/trd-2-2-discovery-split.md` §7)
-- 관련: ADR-0269(결정 7 입주 조건 — 아래 결정 2) · Amends ADR-0271 (결정 2의 실행 파일 위치 계산 자리) · ADR-0273(engram CLI → 데몬 lib 임시 간선 — 아래 「영향」)
+- 상태: 확정 (2026-10-07, 근거: 사용자 위임 2026-10-07 아래의 메인 결정 · 2-2 착지 2026-10-07 (U1 `a0ec7f4` · U2 `3c9bf33` · U3 `b42e139` · U4 `d2f9822`) · 정본 설계 = `docs/process/S21-crate-boundaries/trd-2-2-discovery-split.md` §7) · 부분 폐기 by ADR-0285 (영향의 CLI 임시 간선 항목)
+- 관련: ADR-0269(결정 7 입주 조건 — 아래 결정 2) · Amends ADR-0271 (결정 2의 실행 파일 위치 계산 자리) · ADR-0273(engram CLI → 데몬 lib 임시 간선 — 아래 「영향」) · Amended by ADR-0285 (영향의 CLI 임시 간선 항목)
 
 ## 맥락
 

@@ -9,7 +9,7 @@
 | 런처 | 하는 일 |
 |---|---|
 | `scripts\run-debug.bat` | 클라이언트만 빌드 + dev 서버 확인 + 실행 |
-| `scripts\rebuild-run-debug.bat` | 데몬까지 재빌드(백엔드 수정 후) + 실행 |
+| `scripts\rebuild-run-debug.bat` | 데몬 · CLI 까지 재빌드(백엔드 수정 후) + 실행 |
 | `scripts\rebuild-run-debug-log.bat` | 위와 같되 앱·데몬을 `debug` 로그로 실행 |
 | `scripts\run-release.bat` | 이미 빌드된 릴리즈 실행 |
 | `scripts\rebuild-run-release.bat` | 릴리즈 새로 빌드 + 실행 |

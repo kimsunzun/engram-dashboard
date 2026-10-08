@@ -8,17 +8,19 @@
 #     - 데몬은 형제 engram.exe(제어 평면 CLI)를 locate_send_exe(current_exe().parent())로 찾는다(ADR-0086 F1).
 #       ★그 파일명의 정본은 agent 의 CLI_EXE_NAME★ — 아래 manifest 는 그 값을 손으로 복사한 것이다.
 #       어긋남은 보통 요란하게 깨진다: [[bin]] 개명이면 아래 빌드 단계의 --bin 인자가 실패하고, 상수만
-#       어긋나면 CI 의 배송-파일명 가드 테스트(daemon tests/engram_cli.rs)가 빨개진다.
+#       어긋나면 CI 의 배송-파일명 가드 테스트(crates/engram-dashboard-cli/tests/engram_cli.rs)가 빨개진다.
 #       ★단 하나 조용한 구멍이 있다 — cargo 산출 디렉토리의 stale 파일★: 이 스크립트는 target/release 를
 #       청소하지 않으므로, 옛 이름의 exe 가 남아 있는 상태에서 아래 manifest 만 그 옛 이름으로 고치면
 #       존재 검사도 tripwire 도 통과하고 **그 stale 바이너리가 그대로 패키징된다**(빌드가 그 파일을
 #       갱신하지 않았는데도). manifest 를 고칠 땐 산출 디렉토리를 함께 확인할 것.
-#     - 데몬은 프라이밍 prompts/agent-priming.md 를 find_install_root(=릴리즈에선 exe 폴더) 기준
-#       상대해석한다(ADR-0092). 릴리즈 폴더엔 .git·[workspace] 마커가 없으므로 install_root = exe 디렉토리.
-#     - engram.exe 는 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 읽는다
-#       (ADR-0092 계열 외부화). ★이 파일이 빠져도 help 는 죽지 않는다★ — 바이너리에 include_str! 사본이
-#       있어 내용은 그대로 나가고 stderr 에 사유 한 줄만 붙는다. 그래서 부재가 조용하고, 아래 tripwire 가
-#       그 침묵을 대신 잡는다(배송된 폴더의 본문이 낡은 사본으로 조용히 갈리는 것이 이 게이트의 표적).
+#     - 데몬은 프라이밍 prompts/agent-priming.md 를 find_install_root 기준으로 상대해석한다(ADR-0092).
+#       그 규칙은 빌드 모드와 무관하게 exe 의 조상에서 .git·[workspace] 마커를 찾는다 — 체크아웃 밖에
+#       조립한 릴리즈 폴더면 마커가 없어 install_root = exe 디렉토리이고, launch\빌드.bat 의 launch\release
+#       처럼 체크아웃 안이면 그 체크아웃 루트라 배포 폴더가 아니라 저장소의 prompts/ 를 읽는다.
+#     - 데몬은 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 요청마다 읽어 /control/help
+#       로 낸다(ADR-0092 계열 외부화 · ADR-0285 — engram.exe 는 화면을 데몬에 청할 뿐 이 파일을 읽지 않는다).
+#       ★사본은 없다★ — 이 파일이 빠진 배포판은 모든 help 호출이 반려(INTERNAL)로 답한다. 아래 tripwire 는
+#       그 실패가 배포 뒤 에이전트 앞이 아니라 배포 전에 나게 하는 장치다.
 #   따라서 manifest(이 스크립트의 EXPECTED_*)가 곧 "무엇을 배송하는가"의 단일 출처다. manifest 를 바꾸면
 #   위 동거 불변식이 깨지지 않는지 반드시 재검토한다. tauri.conf.json 은 건드리지 않는다(정식 번들은 유예).
 #
@@ -125,14 +127,25 @@ if (-not (Test-Path (Join-Path $ProjectRoot 'dist\index.html'))) {
 }
 
 # ── (a) 릴리즈 바이너리: 데몬 + CLI ─────────────────────────────────────────────────────────
-#   데몬+CLI 는 UI 앱과 **별개 crate 의 두 [[bin]]** — tauri build 는 이들을 빌드하지 않으므로 별도 컴파일한다.
+#   데몬과 CLI 는 UI 앱과 별개인 **패키지 둘**(engram-dashboard-daemon · engram-dashboard-cli — ADR-0273)
+#    — tauri build 는 이들을 빌드하지 않으므로 별도 컴파일한다.
 #   **명시 --bin** 으로만 빌드(측정 전용 bin(saturation-pilot/priming-smoke/roundtrip-smoke)은
 #    required-features=test-harness 로 이미 릴리즈 그래프에서 제외되지만, 명시 --bin 으로 유입 가능성 봉쇄).
 #   ★--all-targets 금지★: daemon crate 의 self-dev-dependency(test-harness) 유니피케이션으로 yield-seam hook
 #    이 운영 바이너리에 박힐 수 있다(Cargo.toml 경고). 아래 명령은 --all-targets 를 쓰지 않는다.
-Invoke-Step 'cargo build daemon + cli (engram-dashboard-daemon)' {
+#   ★두 호출을 한 Invoke-Step 블록에 넣지 말 것★: Invoke-Step 은 블록이 끝난 뒤 $LASTEXITCODE 를 한 번만
+#    본다 — 앞 호출의 실패를 뒤 호출의 성공이 덮고, 아래 존재 검사는 이전 빌드가 남긴 낡은 exe 를 받아들인다.
+#    한 cargo 호출(-p 둘)로 합치지도 않는다 — 배송하는 engram.exe 는 CLI 패키지 자기 그래프(`-p engram-dashboard-cli`
+#    단독 시험이 재는 그것)로 지어야 하는데, 한 호출이면 기능이 합쳐져 데몬의 기능 집합으로 지어진다. 두 빌드는
+#    해시 없는 같은 산출 파일(target\release\engram.exe)을 쓴다 — 그래서 이 스크립트가 묶는 target\release 를 쓰는
+#    rebuild-run-release.bat 도 같은 꼴로 가르고, 묶이지 않는 target\debug 만 쓰는 rebuild-run-debug.bat 은 한 호출이다.
+Invoke-Step 'cargo build daemon (engram-dashboard-daemon)' {
     & cargo build --release --manifest-path (Join-Path $ProjectRoot 'Cargo.toml') `
-        -p engram-dashboard-daemon --bin engram-dashboard-daemon --bin engram
+        -p engram-dashboard-daemon --bin engram-dashboard-daemon
+}
+Invoke-Step 'cargo build cli (engram-dashboard-cli)' {
+    & cargo build --release --manifest-path (Join-Path $ProjectRoot 'Cargo.toml') `
+        -p engram-dashboard-cli --bin engram
 }
 
 # ── 산출 exe 위치 확정(가정 금지 — 실제 파일 존재 확인) ───────────────────────────────────

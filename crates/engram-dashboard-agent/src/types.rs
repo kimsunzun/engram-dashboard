@@ -471,7 +471,7 @@ pub struct CommandSpec {
 /// ★어디서도 다시 타이핑하지 말 것★: 이름이 한 자리라도 갈라지면 에이전트는 PATH 에 없거나 grant 에
 ///   안 걸린 명령을 부르고, 우편은 에러 없이 **조용히 멈춘다**(ADR-0099 실측: 7건 중 6건 미발신).
 /// ★지금 CI 가 잡는 것 / 못 잡는 것★: grant 문자열·PATH 해석 이름은 이 상수에서 파생돼 따로 어긋날 수
-///   없고, **배송 파일명 ↔ 상수**(daemon `tests/engram_cli.rs`)와 **프라이밍 ↔ 상수**(daemon
+///   없고, **배송 파일명 ↔ 상수**(`engram-dashboard-cli/tests/engram_cli.rs`)와 **프라이밍 ↔ 상수**(daemon
 ///   `control/priming.rs` pin)는 claude 없이 도는 테스트라 CI 가 본다. CI 밖에 남는 축은 **에이전트가 실제로
 ///   그 이름을 해석해 실행하는지**다 — 실 claude 스폰 테스트가 러너에 claude 가 없어 제외되기 때문이고,
 ///   그건 로컬 실측으로만 확인된다.
@@ -555,7 +555,7 @@ pub const CLI_MAIL_VERBS: [&str; 3] = ["send", "status", "pending"];
 /// 파서가 인식하는 집합이자, 프라이밍 판정자가 "CLI 표면이 적혀 있나" 를 보는 어휘다. MCP 입구는 같은
 /// 개념을 snake_case JSON 필드(`reply_to`)로 받으므로 **표기 축이 두 입구를 가른다**.
 /// ★파서의 match arm 과 이 목록이 갈리면★ 값 자리 방어(플래그를 값으로 삼키는 사고)와 프라이밍 판정이
-///   새 플래그를 못 본다 — daemon `bin/engram.rs` 의 드리프트 테스트가 그 어긋남을 잡는다.
+///   새 플래그를 못 본다 — `engram-dashboard-cli/src/bin/engram.rs` 의 드리프트 테스트가 그 어긋남을 잡는다.
 // ADR-0132
 pub const CLI_MAIL_FLAGS: [&str; 6] = [
     "--to",
@@ -589,6 +589,22 @@ pub const CLI_AGENT_VERBS: [&str; 5] = ["list", "spawn", "new", "rename", "move"
 /// 안 되기 때문이다).
 // ADR-0132
 pub const CLI_AGENT_FLAGS: [&str; 3] = ["--cwd", "--name", "--parent"];
+
+/// help 화면 라우트 — CLI 가 무-세션 POST 하고 데몬이 화면을 낸다.
+///
+/// ★바디 = `{"topic": null | "<낱말>"}` · 성공 응답 = `{"screen": "<화면>"}`(키 이름 = 아래 두 상수)★.
+///   `topic` 은 필수이고(null = 목차 화면) 다른 키가 있으면 데몬이 `INVALID_ARGUMENT` 로 반려한다 — 키
+///   철자가 갈린 CLI 가 조용히 목차를 받지 않게. 반려는 형제 제어 라우트와 같은 `{"status":"error",…}`
+///   봉투다.
+/// ★경로 · 키를 양쪽이 이 한 벌로 본다★ — 리터럴을 다시 적으면 한쪽만 고친 편집이 404 나 키 반려로만
+///   드러난다. 형제 제어 라우트 다섯(`/control/send` 등)은 아직 CLI 와 데몬이 손으로 맞춘다
+///   (`mcp_server.rs` 의 `CONTROL_HELP_PATH` doc · 공유 상수로 옮기는 것은 후속 — TRD S21 2-3 §8 O15).
+// ADR-0285
+pub const CLI_HELP_ROUTE: &str = "/control/help";
+/// [`CLI_HELP_ROUTE`] 요청 바디의 화면 낱말 키.
+pub const CLI_HELP_TOPIC_KEY: &str = "topic";
+/// [`CLI_HELP_ROUTE`] 성공 응답의 화면 본문 키.
+pub const CLI_HELP_SCREEN_KEY: &str = "screen";
 
 /// 제어 응답이 싣는 **에이전트 상태 축**(살아 있음·잠듦·없음)의 wire 표기.
 ///

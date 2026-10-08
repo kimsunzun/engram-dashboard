@@ -27,7 +27,7 @@ use engram_dashboard_agent::types::{
 use engram_dashboard_base::testing::wait_until;
 
 use engram_dashboard_daemon::control::mcp_server::{
-    start_mcp_server, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
+    start_mcp_server_without_help, CommandTableSlot, ManagerSlot, McpServerHandle, MessagingSlot,
 };
 use engram_dashboard_daemon::control::registry::ControlRegistry;
 use engram_dashboard_daemon::control::DaemonControlChannel;
@@ -104,7 +104,7 @@ async fn wire(
     let (relay_bus, relay_sweeper) =
         engram_dashboard_daemon::command_delivery::CommandBus::without_commands();
     hold_for_the_process(relay_sweeper);
-    let handle = start_mcp_server(
+    let handle = start_mcp_server_without_help(
         registry.clone(),
         slot.clone(),
         messaging_slot.clone(),
