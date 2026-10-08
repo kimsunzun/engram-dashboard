@@ -10,7 +10,7 @@
 //!   끝·[`UsageBook::plan_tick`]·발행 한 장([`UsageBook::broadcast_sheet`]·[`UsageBook::coalesce_passive`])은 스스로
 //!   부른다.
 //! ★빚 — revision 이 오르면 그 칸은 구독자 전부에게 한 번 발행할 빚을 진다★(줍기 값의 바뀜 = 합칠 수 있는 빚 ·
-//!   그 밖(래치·거절 끝 — 줍기 적용 안에서 선 것도 · 조회 시작·끝 · 복원) = 곧바로 갚을 빚). ★빚을 갚는 것은 구독자
+//!   그 밖(래치·거절 끝 — 줍기 적용 안에서 선 것도 · 조회 시작·끝) = 곧바로 갚을 빚). ★빚을 갚는 것은 구독자
 //!   전부에게 가는 발행뿐이다★ — [`UsageBook::broadcast_sheet`] · [`Coalesce::PublishNow`] · [`TickPlan::publish`]
 //!   가 갚음과 한 장 뜨기를 한 호출에서 한다(락을 다시 잡아 갚으면 그 사이 선 빚이 안 실린 채 지워진다). 구독 추가의
 //!   첫 한 장(`eval_time` + `snapshot`)은 그 연결에만 가므로 갚지 않는다 — 깨운 스케줄러가 전부에게 낸다(새 연결엔
@@ -30,8 +30,6 @@ use engram_dashboard_protocol::{
 use serde::de::value::{Error as ValueError, StrDeserializer};
 use serde::de::IntoDeserializer;
 use serde::Deserialize;
-
-use super::reject_store::RejectEntry;
 
 /// 거절 대기 — 상류가 쓸 만한 대기를 안 줬을 때(없음·0)(D4).
 pub const REJECT_FALLBACK: Duration = Duration::from_secs(5 * 60);
@@ -61,13 +59,6 @@ pub struct Now {
 pub struct PassiveApplied {
     pub changed: bool,
     pub next_auto_changed: bool,
-}
-
-/// [`UsageBook::finish_probe`] 의 결과. `reject_changed` = 거절 기한이 새로 섰거나 바뀌었거나 지워졌다(조회
-/// 성공) — 부르는 쪽이 거절 기한을 저장한다.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct FinishApplied {
-    pub reject_changed: bool,
 }
 
 /// 요청 종류(§1-4 요청 표). `Refresh` = ⟳ — 쿨타임을 무시하되 거절은 못 넘는다(D11).
@@ -225,11 +216,10 @@ impl UsageBook {
         key: &UsageKey,
         result: Result<UsageObservation, ProbeFailure>,
         now: Now,
-    ) -> FinishApplied {
+    ) {
         let Some(cell) = self.cell_mut(key) else {
-            return FinishApplied::default();
+            return;
         };
-        let reject_before = cell.reject_until;
         match result {
             Ok(obs) => cell.apply_success(&obs, now),
             Err(failure) => cell.apply_failure(failure, now.mono),
@@ -241,9 +231,6 @@ impl UsageBook {
         // 상류가 이미 지난 리셋을 줬으면 받은 자리에서 만료로 보인다 — 어차피 오르는 revision 에 싣는다.
         cell.eval_time(now);
         cell.bump();
-        FinishApplied {
-            reject_changed: cell.reject_until != reject_before,
-        }
     }
 
     /// 시각만 흘러 생기는 바뀜을 칸에 새긴다 — 만료 래치(R32: `resets_at <= now.wall` 인 창마다 한 번) · 거절 끝
@@ -296,52 +283,6 @@ impl UsageBook {
             }
         };
         Some(judgment)
-    }
-
-    /// 저장된 거절 기한을 되살린다 — 조립 때 새 책에 한 번(§1-4 「거절 저장」). `until_epoch_s > now.wall` 인
-    /// 항목만, 남은 시간 = `min(until − wall, REJECT_MAX)` 를 `now.mono` 에 더한다 — 넘치면 그 항목만 버리고 warn.
-    /// 되살린 칸 = `Rejected` + 분류 낱말만 든 detail(파일은 분류·원문을 싣지 않는다) · revision +1. 책에 없는
-    /// 키는 버리고 warn. 같은 키가 둘이면 더 늦은 기한이 남는다. 돌려주는 값 = 되살린 항목 수.
-    pub fn restore_rejects(&mut self, entries: &[RejectEntry], now: Now) -> usize {
-        let mut restored = 0;
-        for entry in entries {
-            if entry.until_epoch_s <= now.wall {
-                continue;
-            }
-            let vendor = entry.key.vendor.as_str();
-            let Some(cell) = self.cell_mut(&entry.key) else {
-                tracing::warn!(vendor, "저장된 거절 기한의 칸이 책에 없다 — 버린다");
-                continue;
-            };
-            let remaining =
-                Duration::from_secs(entry.until_epoch_s.abs_diff(now.wall)).min(REJECT_MAX);
-            let Some(until) = now.mono.checked_add(remaining) else {
-                tracing::warn!(vendor, "저장된 거절 기한이 단조 시계에서 넘친다 — 버린다");
-                continue;
-            };
-            cell.reject_until = Some(cell.reject_until.map_or(until, |kept| kept.max(until)));
-            cell.state =
-                CellState::Rejected(kind_only(&ProbeError::RateLimited { retry_after: None }));
-            cell.bump();
-            restored += 1;
-        }
-        restored
-    }
-
-    /// 저장할 거절 기한 — `reject_until > now.mono` 인 칸마다 하나(지난 것은 안 싣는다). `until_epoch_s = now.wall +
-    /// 남은 초의 올림`(포화) — 올림이라 되살린 기한이 원래보다 이르지 않다.
-    pub fn reject_entries(&self, now: Now) -> Vec<RejectEntry> {
-        self.cells
-            .iter()
-            .filter_map(|cell| {
-                let until = cell.reject_until.filter(|&until| until > now.mono)?;
-                let remaining = i64::try_from(ceil_secs(until - now.mono)).unwrap_or(i64::MAX);
-                Some(RejectEntry {
-                    key: cell.key.clone(),
-                    until_epoch_s: now.wall.saturating_add(remaining),
-                })
-            })
-            .collect()
     }
 
     /// 줍기가 칸을 바꾼 뒤(`PassiveApplied.changed`) 같은 `now` 로 부른다 — 줍기만 합친다(§3 #60). 곧바로 갚을
@@ -442,6 +383,8 @@ struct Cell {
     /// D12 — 두 창에 새 `used_pct` 가 다 실려 쿨타임 기점이 다시 선 `mono`.
     fresh_reset: Option<Duration>,
     /// ★상태와 따로 산다★ — 값이 와서 `Ready` 로 보여도 이 기한 전에는 자동 조회도 ⟳ 도 안 나간다(R24).
+    /// ★메모리에만 둔다★ — 데몬 재시작 너머로 들고 가지 않아 재시작한 데몬은 거절 기한 없이 시작한다.
+    // ADR-0284
     reject_until: Option<Duration>,
     /// D12 — 지금 기준점 뒤로 `used_pct` 가 실려 온 창(§3 #4 — 리셋만 온 창은 안 센다).
     fresh_five_hour: bool,
@@ -557,6 +500,7 @@ impl Cell {
                 let due = reference.saturating_add(self.policy.cooldown);
                 self.reject_until.map_or(due, |until| due.max(until))
             }
+            // 거절은 조회 끝에서만 서므로 기준점 없이 오지 않는다 — 와도 거절 끝 전에 조회하지 않게 둔 방어다.
             None => self.reject_until.unwrap_or(now.mono),
         }
     }
@@ -1033,9 +977,13 @@ mod tests {
         b.finish_probe(&key(i), Ok(o), now);
     }
 
-    fn fail(b: &mut UsageBook, i: usize, failure: ProbeFailure, now: Now) -> FinishApplied {
+    fn fail(b: &mut UsageBook, i: usize, failure: ProbeFailure, now: Now) {
         assert!(b.begin_probe(&key(i)));
-        b.finish_probe(&key(i), Err(failure), now)
+        b.finish_probe(&key(i), Err(failure), now);
+    }
+
+    fn reject_until(b: &UsageBook, i: usize) -> Option<Duration> {
+        b.cell(&key(i)).expect("아는 키").reject_until
     }
 
     fn snap(b: &UsageBook, i: usize, now: Now) -> UsageLimitSnapshot {
@@ -1588,59 +1536,47 @@ mod tests {
             );
         }
 
-        // 끝난 거절(`Failed` 로 새겨진 뒤) · 되살린 거절도 같다.
+        // 끝난 거절(`Failed` 로 새겨진 뒤)도 같다.
         let mut b = seeded();
         fail(&mut b, 0, rate_limited(Some(secs(90))), at(200, T0));
         assert!(b.eval_time(&key(0), at(290, T0)));
         assert_eq!(tag(&snap(&b, 0, at(290, T0)).state), "Failed");
         b.apply_passive(&passive(0, None, w(None, Some(T0 + 100 * H))), at(300, T0));
         assert_eq!(snap(&b, 0, at(300, T0)).state, UsageVendorState::Ready);
-
-        let mut b = book();
-        b.restore_rejects(&[entry(0, T0 + 90)], at(10, T0));
-        b.apply_passive(&passive(0, w(Some(5.0), None), None), at(20, T0));
-        assert_eq!(snap(&b, 0, at(20, T0)).state, UsageVendorState::Ready);
     }
 
     #[test]
     fn a_value_during_a_rejection_shows_ready_but_keeps_the_deadline() {
-        for restored in [false, true] {
-            let mut b = settled();
-            if restored {
-                b.restore_rejects(&[entry(0, T0 + 190)], at(10, T0));
-            } else {
-                fail(&mut b, 0, rate_limited(Some(secs(90))), at(110, T0));
-            }
-            let until = secs(200);
-            let saved = b.reject_entries(at(150, T0));
-            assert_eq!(saved, vec![entry(0, T0 + 50)], "restored {restored}");
-            b.apply_passive(&passive(0, w(Some(41.0), None), None), at(150, T0));
-            assert_eq!(snap(&b, 0, at(150, T0)).state, UsageVendorState::Ready);
+        let mut b = settled();
+        fail(&mut b, 0, rate_limited(Some(secs(90))), at(110, T0));
+        let until = secs(200);
+        assert_eq!(reject_until(&b, 0), Some(until));
+        b.apply_passive(&passive(0, w(Some(41.0), None), None), at(150, T0));
+        assert_eq!(snap(&b, 0, at(150, T0)).state, UsageVendorState::Ready);
 
-            // 기한은 그대로 산다 — 저장도 · ⟳ 거절도 · 다음 자동 기한도.
-            assert_eq!(b.reject_entries(at(150, T0)), saved, "restored {restored}");
-            let before_end = Now {
-                mono: until - Duration::from_millis(1),
-                wall: T0,
-            };
-            assert_eq!(
-                judge(&mut b, 0, RequestKind::Refresh, before_end),
-                Judgment::Rejected
-            );
-            assert!(b.next_auto(&key(0), before_end) >= Some(until));
-            assert!(tick(&mut b, &[0], before_end).start.is_empty());
+        // 기한은 그대로 산다 — ⟳ 거절도 · 다음 자동 기한도.
+        assert_eq!(reject_until(&b, 0), Some(until));
+        let before_end = Now {
+            mono: until - Duration::from_millis(1),
+            wall: T0,
+        };
+        assert_eq!(
+            judge(&mut b, 0, RequestKind::Refresh, before_end),
+            Judgment::Rejected
+        );
+        assert!(b.next_auto(&key(0), before_end) >= Some(until));
+        assert!(tick(&mut b, &[0], before_end).start.is_empty());
 
-            // 거절 끝은 `Ready` 를 조회 실패로 되돌리지 않는다 — 새길 것도 발행할 것도 없다.
-            let end = Now {
-                mono: until,
-                wall: T0,
-            };
-            let rev = b.revision(&key(0));
-            assert!(!b.eval_time(&key(0), end), "restored {restored}");
-            assert_eq!(b.revision(&key(0)), rev);
-            assert_eq!(snap(&b, 0, end).state, UsageVendorState::Ready);
-            assert_eq!(judge(&mut b, 0, RequestKind::Refresh, end), Judgment::Start);
-        }
+        // 거절 끝은 `Ready` 를 조회 실패로 되돌리지 않는다 — 새길 것도 발행할 것도 없다.
+        let end = Now {
+            mono: until,
+            wall: T0,
+        };
+        let rev = b.revision(&key(0));
+        assert!(!b.eval_time(&key(0), end));
+        assert_eq!(b.revision(&key(0)), rev);
+        assert_eq!(snap(&b, 0, end).state, UsageVendorState::Ready);
+        assert_eq!(judge(&mut b, 0, RequestKind::Refresh, end), Judgment::Start);
     }
 
     #[test]
@@ -1772,13 +1708,17 @@ mod tests {
         ];
         for (retry_after, expected) in cases {
             let mut b = book();
-            let applied = fail(
+            fail(
                 &mut b,
                 0,
                 ProbeError::RateLimited { retry_after }.into(),
                 at(100, T0),
             );
-            assert!(applied.reject_changed, "{retry_after:?}");
+            assert_eq!(
+                reject_until(&b, 0),
+                Some(secs(100) + expected),
+                "{retry_after:?}"
+            );
             let s = snap(&b, 0, at(100, T0));
             assert!(
                 matches!(s.state, UsageVendorState::Rejected { retry_in_secs, .. } if retry_in_secs == expected.as_secs()),
@@ -1791,16 +1731,11 @@ mod tests {
             );
         }
 
-        // 같은 기한이 다시 서면 저장할 것이 없다 · 거절이 아닌 실패는 기한을 안 건드린다.
+        // 거절이 아닌 실패는 기한을 안 건드린다.
         let mut b = book();
-        let rate_limited = || {
-            ProbeFailure::from(ProbeError::RateLimited {
-                retry_after: Some(secs(90)),
-            })
-        };
-        assert!(fail(&mut b, 0, rate_limited(), at(100, T0)).reject_changed);
-        assert!(!fail(&mut b, 0, rate_limited(), at(100, T0)).reject_changed);
-        assert!(!fail(&mut b, 0, ProbeError::Timeout.into(), at(300, T0)).reject_changed);
+        fail(&mut b, 0, rate_limited(Some(secs(90))), at(100, T0));
+        fail(&mut b, 0, ProbeError::Timeout.into(), at(150, T0));
+        assert_eq!(reject_until(&b, 0), Some(secs(190)));
     }
 
     // ── 래치(R32·§3 #29) ──
@@ -2008,13 +1943,10 @@ mod tests {
         assert_eq!(b.snapshot(&stranger, at(0, T0)), None);
         assert!(!b.begin_probe(&stranger));
         assert!(!b.eval_time(&stranger, at(0, T0)));
-        assert_eq!(
-            b.finish_probe(
-                &stranger,
-                Err(ProbeError::RateLimited { retry_after: None }.into()),
-                at(0, T0)
-            ),
-            FinishApplied::default()
+        b.finish_probe(
+            &stranger,
+            Err(ProbeError::RateLimited { retry_after: None }.into()),
+            at(0, T0),
         );
         let mut o = passive(0, w(Some(1.0), None), None);
         o.vendor = stranger.vendor;
@@ -2250,8 +2182,8 @@ mod tests {
         let mut unavailable = active(0, None, None);
         unavailable.limits_unavailable = Some(rich_detail());
         assert!(b.begin_probe(&key(0)));
-        let applied = b.finish_probe(&key(0), Ok(unavailable), at(200, T0));
-        assert!(applied.reject_changed, "지운 기한도 저장할 바뀜이다");
+        b.finish_probe(&key(0), Ok(unavailable), at(200, T0));
+        assert_eq!(reject_until(&b, 0), None);
         assert_eq!(
             b.next_auto(&key(0), at(200, T0)),
             Some(secs(200) + cooldown(0))
@@ -2447,17 +2379,6 @@ mod tests {
 
     fn rate_limited(retry_after: Option<Duration>) -> ProbeFailure {
         ProbeError::RateLimited { retry_after }.into()
-    }
-
-    fn restored_detail() -> UsageStateDetail {
-        wire_detail(&kind_only(&ProbeError::RateLimited { retry_after: None }))
-    }
-
-    fn entry(i: usize, until_epoch_s: i64) -> RejectEntry {
-        RejectEntry {
-            key: key(i),
-            until_epoch_s,
-        }
     }
 
     /// 스케줄러 한 번 + 불변식: 잠 ∈ (0, 상한] · 같은 순간 다시 돌면 할 일이 없다(0 초 잠 되풀이 없음).
@@ -2716,180 +2637,6 @@ mod tests {
         assert_eq!(b.judge(&stranger, RequestKind::Get, at(0, T0)), None);
     }
 
-    // ── 거절 복원(§1-4 「거절 저장」) ──
-
-    #[test]
-    fn restore_keeps_only_future_rejects_and_clamps_them() {
-        let mut b = book();
-        assert_eq!(
-            b.restore_rejects(&[entry(0, T0 - 1), entry(1, T0)], at(10, T0)),
-            0
-        );
-        assert_eq!(
-            (b.revision(&key(0)), b.revision(&key(1))),
-            (Some(0), Some(0))
-        );
-        assert_eq!(snap(&b, 0, at(10, T0)).state, UsageVendorState::Ready);
-
-        let mut b = book();
-        let entries = [entry(0, T0 + 90), entry(1, T0 + 100 * 24 * H)];
-        assert_eq!(b.restore_rejects(&entries, at(10, T0)), 2);
-        assert_eq!(b.next_auto(&key(0), at(10, T0)), Some(secs(100)));
-        assert_eq!(
-            b.next_auto(&key(1), at(10, T0)),
-            Some(secs(10) + REJECT_MAX)
-        );
-        assert_eq!(b.revision(&key(0)), Some(1));
-        assert_eq!(
-            snap(&b, 0, at(10, T0)).state,
-            UsageVendorState::Rejected {
-                retry_in_secs: 90,
-                detail: Some(restored_detail()),
-            }
-        );
-    }
-
-    #[test]
-    fn restore_drops_what_it_cannot_place_without_panicking() {
-        let mut b = book();
-        let edge = Now {
-            mono: Duration::MAX - secs(10),
-            wall: T0,
-        };
-        let (restored, loud) =
-            capture_loud(|| b.restore_rejects(&[entry(0, T0 + 100), entry(1, T0 + 5)], edge));
-        assert_eq!(restored, 1);
-        assert_eq!(loud.len(), 1, "넘친 항목만: {loud:?}");
-        assert_eq!(b.revision(&key(0)), Some(0));
-        assert_eq!(b.next_auto(&key(1), edge), Some(edge.mono + secs(5)));
-
-        let stranger = RejectEntry {
-            key: UsageKey {
-                vendor: UsageVendorKey::new("no-such-vendor"),
-                account: UsageAccountKey::default(),
-            },
-            until_epoch_s: T0 + 100,
-        };
-        let (restored, loud) = capture_loud(|| b.restore_rejects(&[stranger], at(10, T0)));
-        assert_eq!(restored, 0);
-        assert_eq!(loud.len(), 1, "{loud:?}");
-
-        // 두 끝의 차도 넘치지 않는다.
-        let mut b = book();
-        assert_eq!(b.restore_rejects(&[entry(0, i64::MAX)], at(0, i64::MIN)), 1);
-        assert_eq!(b.next_auto(&key(0), at(0, i64::MIN)), Some(REJECT_MAX));
-    }
-
-    #[test]
-    fn a_restored_rejection_waits_for_its_end_and_keeps_its_detail() {
-        let mut b = book();
-        b.restore_rejects(&[entry(0, T0 + 90)], at(10, T0));
-        let right_after = at(10, T0);
-        assert_eq!(
-            judge(&mut b, 0, RequestKind::Refresh, right_after),
-            Judgment::Rejected
-        );
-        assert_eq!(
-            judge(&mut b, 0, RequestKind::Get, right_after),
-            Judgment::Cached
-        );
-        let plan = tick(&mut b, &[0, 1], right_after);
-        assert_eq!(plan.start, vec![key(1)], "되살린 칸만 막힌다");
-
-        // 기준점이 없으니 기한 = 거절 끝.
-        assert_eq!(b.next_auto(&key(0), right_after), Some(secs(100)));
-        assert_eq!(
-            judge(&mut b, 0, RequestKind::Get, at(99, T0)),
-            Judgment::Cached
-        );
-        let end = at(100, T0);
-        assert!(b.eval_time(&key(0), end));
-        assert_eq!(
-            snap(&b, 0, end).state,
-            UsageVendorState::Failed {
-                next_attempt_in_secs: 0,
-                detail: Some(restored_detail()),
-            }
-        );
-        assert_eq!(judge(&mut b, 0, RequestKind::Get, end), Judgment::Start);
-    }
-
-    #[test]
-    fn a_restored_rejection_end_folds_and_starts_in_one_tick() {
-        let mut b = book();
-        b.restore_rejects(&[entry(0, T0 + 30)], at(10, T0));
-        assert_eq!(tick(&mut b, &[0], at(10, T0)).sleep, secs(30));
-        let plan = tick(&mut b, &[0], at(40, T0));
-        assert_eq!(plan.start, vec![key(0)]);
-        assert_eq!(
-            plan.publish,
-            vec![(key(0), snap(&b, 0, at(40, T0)))],
-            "한 장"
-        );
-        assert_eq!(plan.publish[0].1.revision, 3, "복원 · 거절 끝 · 조회 시작");
-    }
-
-    #[test]
-    fn restoring_the_same_key_twice_keeps_the_later_deadline() {
-        for entries in [
-            [entry(0, T0 + 90), entry(0, T0 + 300)],
-            [entry(0, T0 + 300), entry(0, T0 + 90)],
-        ] {
-            let mut b = book();
-            b.restore_rejects(&entries, at(10, T0));
-            assert_eq!(
-                b.next_auto(&key(0), at(10, T0)),
-                Some(secs(310)),
-                "{entries:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn reject_entries_carry_only_future_deadlines_rounded_up() {
-        let mut b = book();
-        fail(&mut b, 0, rate_limited(Some(secs(90))), at(100, T0));
-        assert_eq!(
-            b.reject_entries(at_ms(100_500, T0 + 7)),
-            vec![entry(0, T0 + 97)],
-            "89.5초 → 90초"
-        );
-        assert_eq!(b.reject_entries(at_ms(189_999, T0)), vec![entry(0, T0 + 1)]);
-        assert!(b.reject_entries(at(190, T0)).is_empty(), "지난 기한");
-
-        succeed(&mut b, 0, active(0, w(Some(1.0), None), None), at(120, T0));
-        assert!(b.reject_entries(at(120, T0)).is_empty(), "성공이 지웠다");
-
-        let mut b = book();
-        b.restore_rejects(&[entry(0, i64::MAX)], at(0, T0));
-        assert_eq!(
-            b.reject_entries(at(0, i64::MAX)),
-            vec![entry(0, i64::MAX)],
-            "포화"
-        );
-    }
-
-    #[test]
-    fn reject_entries_and_restore_round_trip() {
-        let mut first = book();
-        fail(&mut first, 0, rate_limited(Some(secs(90))), at(100, T0));
-        fail(&mut first, 1, rate_limited(Some(REJECT_MAX)), at(100, T0));
-        let saved = first.reject_entries(at(100, T0));
-        assert_eq!(saved.len(), 2);
-
-        let mut second = book();
-        assert_eq!(second.restore_rejects(&saved, at(5, T0)), 2);
-        assert_eq!(second.reject_entries(at(5, T0)), saved);
-        assert_eq!(
-            judge(&mut second, 0, RequestKind::Refresh, at(94, T0)),
-            Judgment::Rejected
-        );
-        assert_eq!(
-            judge(&mut second, 0, RequestKind::Refresh, at(95, T0)),
-            Judgment::Start
-        );
-    }
-
     // ── 줍기 합침(§3 #60) ──
 
     /// 5시간 창 % 만 바꾸는 줍기 + 합침 — D12 초기화가 안 서게 한 창만 싣는다.
@@ -3116,13 +2863,6 @@ mod tests {
         // 갚은 빚은 다시 안 나간다.
         b.broadcast_sheet(&key(0), at(41, T0));
         assert!(tick(&mut b, &[0], at(41, T0)).publish.is_empty());
-
-        // 복원도 빚을 진다.
-        let mut b = book();
-        b.restore_rejects(&[entry(1, T0 + 90)], at(10, T0));
-        let plan = tick(&mut b, &[1], at(10, T0));
-        assert!(plan.start.is_empty());
-        assert_eq!(plan.publish, vec![(key(1), snap(&b, 1, at(10, T0)))]);
     }
 
     #[test]
@@ -3325,6 +3065,45 @@ mod tests {
     }
 
     #[test]
+    fn a_rejection_longer_than_the_cooldown_folds_and_starts_in_one_tick() {
+        let mut b = settled();
+        let wait = cooldown(0) + secs(600);
+        fail(&mut b, 0, rate_limited(Some(wait)), at(100, T0));
+        let until = secs(100) + wait;
+        assert_eq!(
+            b.next_auto(&key(0), at(100, T0)),
+            Some(until),
+            "시험 전제: 자동 기한 = 거절 끝"
+        );
+        tick(&mut b, &[0], at(100, T0));
+
+        let before_end = Now {
+            mono: until - Duration::from_millis(1),
+            wall: T0,
+        };
+        assert_eq!(
+            tick(&mut b, &[0], before_end),
+            TickPlan {
+                sleep: Duration::from_millis(1),
+                ..TickPlan::default()
+            }
+        );
+
+        let end = Now {
+            mono: until,
+            wall: T0,
+        };
+        let rev = b.revision(&key(0)).expect("아는 키");
+        let plan = tick(&mut b, &[0], end);
+        assert_eq!(plan.start, vec![key(0)]);
+        assert_eq!(plan.publish, vec![(key(0), snap(&b, 0, end))], "한 장");
+        assert_eq!(b.revision(&key(0)), Some(rev + 2), "거절 끝 · 조회 시작");
+        assert_eq!(tag(&plan.publish[0].1.state), "Failed");
+        assert!(plan.publish[0].1.in_flight);
+        assert_eq!(b.in_flight(&key(0)), Some(true));
+    }
+
+    #[test]
     fn no_subscribed_vendor_means_no_probe_and_the_longest_sleep() {
         assert_eq!(
             TickPlan::default().sleep,
@@ -3411,9 +3190,6 @@ mod tests {
             b.coalesce_passive(&key(0), edge);
             fail(&mut b, 1, rate_limited(Some(REJECT_MAX)), edge);
             tick(&mut b, &[0, 1], edge);
-            b.restore_rejects(&[entry(0, T0 + 10)], edge);
-            tick(&mut b, &[0, 1], edge);
-            b.reject_entries(edge);
             judge(&mut b, 0, RequestKind::Refresh, edge);
             judge(&mut b, 1, RequestKind::Get, edge);
         }

@@ -97,7 +97,6 @@ mod tests {
     use super::*;
     use crate::usage_service::book::RequestKind;
     use crate::usage_service::clock::{ManualUsageClock, UsageClock};
-    use crate::usage_service::reject_store::RejectEntry;
     use crate::usage_service::tests::{
         active, answered, bus_request, far_reset, five, frames, key, last_pct, ok, pct, rig,
         rig_with, set, wait_until, Rig, T0,
@@ -105,8 +104,7 @@ mod tests {
     use crate::usage_service::watch::tests::recording;
     use crate::usage_service::watch::{UsageFrame, UsageOutlet};
     use crate::usage_service::UsageServed;
-    use engram_dashboard_agent::usage::UsageObservation;
-    use engram_dashboard_protocol::UsageVendorState;
+    use engram_dashboard_agent::usage::{ProbeError, UsageObservation};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{mpsc, Mutex};
 
@@ -137,10 +135,20 @@ mod tests {
     fn a_tick_without_subscribers_starts_nothing_publishes_nothing_and_sleeps_the_cap() {
         let (rig, _clock) = rig();
         let idle = rig.subscriber(1, &[]);
-        rig.service.restore_rejects(&[RejectEntry {
-            key: key(1),
-            until_epoch_s: T0 + 30,
-        }]);
+        {
+            // 빚을 남긴 칸 — 거절로 끝난 조회를 발행 없이 새긴다.
+            let now = rig.service.now();
+            let mut desk = rig.service.desk();
+            assert!(desk.book.begin_probe(&key(1)));
+            desk.book.finish_probe(
+                &key(1),
+                Err(ProbeError::RateLimited {
+                    retry_after: Some(Duration::from_secs(30)),
+                }
+                .into()),
+                now,
+            );
+        }
 
         assert_eq!(tick(&rig.service).sleep, SCHEDULE_MAX_SLEEP);
         assert!(
@@ -258,40 +266,6 @@ mod tests {
             .is_some_and(|w| w.expired));
         tick(&rig.service);
         assert_eq!(log.count(), 1, "래치 한 장은 한 번");
-    }
-
-    #[test]
-    fn a_restored_rejection_goes_out_on_the_first_tick_and_holds_the_probe_until_it_ends() {
-        let (rig, clock) = rig();
-        rig.service.restore_rejects(&[RejectEntry {
-            key: key(0),
-            until_epoch_s: T0 + 40,
-        }]);
-        let log = rig.subscriber(1, &[0]);
-
-        assert_eq!(
-            tick(&rig.service).sleep,
-            Duration::from_secs(40),
-            "거절 끝까지"
-        );
-        let got = frames(&log);
-        assert_eq!(got.len(), 1, "되살린 칸의 빚을 tick 이 갚는다");
-        assert!(matches!(
-            got[0].snapshot.state,
-            UsageVendorState::Rejected { .. }
-        ));
-        assert!(!rig.in_flight(0), "거절 중 — 조회 없음");
-
-        clock.advance_both(Duration::from_secs(40));
-        tick(&rig.service);
-        assert!(rig.in_flight(0), "기준점 없는 칸의 기한 = 거절 끝");
-        let got = frames(&log);
-        assert_eq!(got.len(), 2, "거절 끝과 조회 시작이 한 장");
-        assert!(got[1].snapshot.in_flight);
-        assert!(!matches!(
-            got[1].snapshot.state,
-            UsageVendorState::Rejected { .. }
-        ));
     }
 
     #[test]

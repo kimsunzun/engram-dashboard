@@ -427,8 +427,8 @@
         <text class="ts" x="40" y="430">decorator — 관측을 창별로 쪼갬</text>
 
         <rect class="bx" x="684" y="384" width="292" height="58" rx="8"/>
-        <text class="tt" x="700" y="408"><tspan class="m">usage_rejects.json</tspan></text>
-        <text class="ts" x="700" y="430">거절 종료 시각만 · 조립 때 먼저 읽음</text>
+        <text class="tt" x="700" y="408" text-decoration="line-through"><tspan class="m">usage_rejects.json</tspan></text>
+        <text class="ts" x="700" y="430">ADR-0284 로 걷음(2026-10-08) — 거절 기한은 메모리에만</text>
 
         <path class="l-pass" d="M164 384V353" marker-end="url(#mk-pass)"/>
         <path class="l-store" d="M830 352V381" marker-start="url(#mk-store)" marker-end="url(#mk-store)"/>
@@ -628,7 +628,7 @@
           <li><span class="scope">agent·protocol</span> 중립 타입 · wire 도메인 타입 · <code>usage_observed</code> 훅(기본 no-op)</li>
           <li><span class="scope">agent</span> Claude·Codex 줍기 해석 · <code>take_usage</code> · pump drain · <code>UsageGate</code></li>
           <li><span class="scope">agent</span> 조회 seam · <code>OsProbeSpawner</code> · Claude A · Codex · 등록부 — <b>완료 = 실 Windows 스모크</b></li>
-          <li><span class="scope">daemon</span> <code>UsageService</code> — 책 · 시계 · 거절 저장 · 대기 맵 · 판정 · 합류 · 완료 가드</li>
+          <li><span class="scope">daemon</span> <code>UsageService</code> — 책 · 시계 · <s>거절 저장</s>(ADR-0284 로 걷음 — 2026-10-08) · 대기 맵 · 판정 · 합류 · 완료 가드</li>
           <li><span class="scope">protocol·daemon</span> wire 요청(Detached) · <code>PROTOCOL_VERSION</code> · 조립 · 버스 <code>usage.*</code> — <b>완료 = 실 데몬 <code>usage.get</code> 이 행을 돌려줌</b></li>
           <li><span class="scope">shell</span> Usage 슬롯 콘텐츠 · <code>setSlotContent</code> show_* · 링크 권한</li>
           <li><span class="scope">front</span> 요청·답 · <code>usageStore</code> · 폴러 · <code>UsageSlot</code> · 팝업 · 메뉴 · 색 · 문구</li>

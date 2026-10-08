@@ -36,7 +36,7 @@
 ```
 <root>\              릴리스 = <exe 폴더>\data · 개발 = <워크트리>\.engram-dev(새로 시작 — 옛 .engram-data 는 건드리지 않는다, §3-2) · 테스트 = ENGRAM_DATA_DIR (현행 규칙 그대로 — discovery/src/lib.rs:84)
 ├─ daemon\
-│  ├─ state\         지킨다: agents.json · presets.json · usage_rejects.json (+ .corrupt-*)
+│  ├─ state\         지킨다: agents.json · presets.json (+ .corrupt-*) — usage_rejects.json 은 ADR-0284 로 걷음(2026-10-08 · 옛 파일은 읽지도 지우지도 않는다)
 │  └─ run\           버려도 된다: daemon.json(잠금+발견·WS 토큰) · mcp-config\(토큰) · usage-probe\
 ├─ shell\
 │  ├─ config\        취향(지우면 기본값): settings.json · (장래) slots\<종류>.json · themes\<이름>.json (+ .corrupt)
@@ -50,7 +50,7 @@
 
 - **자리 = `engram-dashboard-discovery` 의 새 모듈 `layout`.** 그 crate 가 이미 `default_data_dir` 의 단일 출처이고(ADR-0024 · `lib.rs:84`) 데몬·셸이 둘 다 의존한다. **base 기각** — 폴더 이름은 도메인 지식이라 입주 조건 위반이고 셋째 입주자는 ADR-0175 재심을 부른다. **net 은 discovery 를 의존할 수 없어**(discovery → net) 경로를 인자로 받는다.
 - 모양: `DataLayout::new(root)` · `resolve()`(= `new(default_data_dir())`) · `root()` · `daemon_state_dir()` · `daemon_run_dir()` · `daemon_file()` · `mcp_config_dir()` · `usage_probe_dir()` · `shell_config_dir()` · `shell_state_dir()` · `shell_run_dir()` · `webview_dir()` · `logs_dir()` · `ensure_daemon_dirs()`. **옛 평면 경로 함수는 두지 않는다**(§3-2).
-- **소유 규칙:** 디렉터리와 **둘 이상의 프로세스가 보는 파일**(`daemon.json` — 데몬이 쓰고 셸·스크립트가 읽는다)은 `DataLayout` 이 계산한다. **한 저장소만 쓰는 파일 이름은 그 저장소가 소유**하고 받은 디렉터리 안에서만 붙인다 — `agents.json`(`agent/src/persistence/mod.rs:22`) · `presets.json`(`presets.rs:19`) · `usage_rejects.json`(`reject_store.rs:20`) · `settings.json`·`state.json`(셸 저장 계층). 이름까지 끌어오면 agent crate 가 discovery 를 의존해야 한다.
+- **소유 규칙:** 디렉터리와 **둘 이상의 프로세스가 보는 파일**(`daemon.json` — 데몬이 쓰고 셸·스크립트가 읽는다)은 `DataLayout` 이 계산한다. **한 저장소만 쓰는 파일 이름은 그 저장소가 소유**하고 받은 디렉터리 안에서만 붙인다 — `agents.json`(`agent/src/persistence/mod.rs:22`) · `presets.json`(`presets.rs:19`) · ~~`usage_rejects.json`(`reject_store.rs:20`)~~(ADR-0284 로 걷음 — 2026-10-08) · `settings.json`·`state.json`(셸 저장 계층). 이름까지 끌어오면 agent crate 가 discovery 를 의존해야 한다.
 - 바뀌는 시그니처: net `instance::acquire(data_dir)` → `acquire(lock_file: &Path)`(지금 `instance.rs:229` 가 안에서 join) · 데몬 `mcp_config::*(data_dir, …)` → `(mcp_dir, …)`(`mcp_config.rs:48-52,186-187`) · base `logging::init_logging_with_file(data_dir, kind)` → `(logs_dir, kind)`(`logging/mod.rs:87,355`). discovery 공개 함수(`ensure_daemon`·`daemon_status`·`read_live_daemon`·`daemon_stop`·`send_stop`)는 **root 를 그대로 받고** 안에서 `DataLayout` 을 쓴다 — 셸 호출부(`commands/discovery.rs` · `daemon_client/mod.rs` · `tray/`)는 손대지 않는다.
 - **플랫폼 중립:** OS 가름은 지금처럼 `default_data_dir` 안에만 있다. `DataLayout` 은 `Path::join` 뿐이다. `webview_dir()` 은 모든 OS 에서 계산하고 쓰는 쪽(§4)도 `#[cfg]` 없이 넘긴다 — 그 값을 쓰느냐는 Tauri 의 플랫폼 구현 몫이다(`tauri-2.11.3/src/manager/webview.rs:534-545` — Windows·Linux 만 강제).
 

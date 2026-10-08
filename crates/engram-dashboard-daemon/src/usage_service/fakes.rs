@@ -12,7 +12,6 @@ use engram_dashboard_agent::usage::{
 };
 
 use super::clock::{OsUsageClock, UsageClock};
-use super::reject_store::MemRejectStore;
 use super::{OsProbeThreads, UsageParts, UsageService};
 
 /// 자식을 띄우지 않는 스포너 — 불리면 실패다.
@@ -120,7 +119,6 @@ fn parts(probes: Vec<&'static dyn UsageProbe>, clock: Arc<dyn UsageClock>) -> Us
         spawner: Arc::new(NoChildren),
         scratch_root: std::env::temp_dir(),
         threads: Arc::new(OsProbeThreads),
-        rejects: Arc::new(MemRejectStore::new()),
         clock,
         encoder: Arc::new(crate::agent_conn::UsageEventEncoder),
     }
