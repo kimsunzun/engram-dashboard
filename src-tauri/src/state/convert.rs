@@ -1,4 +1,4 @@
-//! 화면 상태의 메모리 모양(`ViewManager` · 트리 칸) ↔ 영속 모양(`schema::WindowEntry`) — TRD S21-storage §6-2 ·
+//! 화면 상태의 메모리 모양(`ViewManager`) ↔ 영속 모양(`schema::WindowEntry`) — TRD S21-storage §6-2 ·
 //! §6-3. 진입점 = [`to_persisted`](기록기 · 부팅 실행 표식) · [`ViewManager::from_persisted`](부팅 · 런타임 수락) ·
 //! [`StateRevision`](기록기의 변경 번호).
 //!
@@ -22,50 +22,37 @@ use crate::layout::{
 };
 use crate::theme::UiTheme;
 
-/// 트리 창의 영속 id — label 과 같다(설정 창 · `tauri.conf.json`). main 도 label 이 곧 영속 id 다.
-pub const TREE_WINDOW_ID: &str = "agent-tree";
-
-/// 기록기의 변경 번호 — 레이아웃 `version` · 창 속성 `attrs_rev` · 트리 칸 번호. 기록기는 같은지만 본다(§6-4).
-///
-/// 두 락을 겹쳐 잡지 않는다(§6-3) — 레이아웃 쪽은 그 락 안에서 읽고 트리 번호는 따로 읽어 넘긴다. 둘 사이에
-/// 원자성은 필요 없다 — 칸마다 같은지만 보고, 번호는 변경과 같은 임계구역에서 오른다.
+/// 기록기의 변경 번호 — 레이아웃 `version` · 창 속성 `attrs_rev`. 기록기는 같은지만 본다(§6-4). 레이아웃 락 안에서
+/// 읽는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StateRevision {
     pub layout: u64,
     pub attrs: u64,
-    pub tree: u64,
 }
 
 impl StateRevision {
-    pub fn of(layout: &ViewManager, tree_rev: u64) -> Self {
+    pub fn of(layout: &ViewManager) -> Self {
         StateRevision {
             layout: layout.version,
             attrs: layout.attrs_rev(),
-            tree: tree_rev,
         }
     }
 }
 
 // ── 메모리 → 영속 ───────────────────────────────────────────────────────────
 
-/// 창 전부 — main · 트리 · 팝아웃(영속 id 순) 순서. 부르는 쪽은 `ViewManager` 락 안에서 부르고, 트리 칸은 그 락을
-/// 잡기 전에 읽어 값으로 넘긴다(두 락을 겹쳐 잡지 않는다 — §6-3).
+/// 창 전부 — main · 팝아웃(영속 id 순) 순서. 부르는 쪽은 `ViewManager` 락 안에서 부른다.
 ///
 /// - 모르는 내용 슬롯(곁표 항목이 있고 메모리 내용이 `Empty`)은 원문으로 적는다 — 새 판이 쓴 슬롯이 이 판의 저장으로
 ///   지워지지 않는다(ADR-0060).
 /// - 화면 실측값(`canvas` · `metrics`)은 싣지 않는다(§6-1).
 /// - 자리를 본 적 없는 창(만들 때부터 최대화 · 첫 `Moved` 전)도 `bounds: null` 로 적는다 — ★자리 때문에 창을 빼지
 ///   않는다★: main 이면 그 탭이 다음 부팅에 사라진다.
-pub fn to_persisted(layout: &ViewManager, tree: WindowAttrs) -> Vec<WindowEntry> {
+pub fn to_persisted(layout: &ViewManager) -> Vec<WindowEntry> {
     let mut entries = Vec::new();
     if let Some(main) = layout.windows.get(MAIN_WINDOW_LABEL) {
         entries.push(tabbed_entry(layout, main, WindowKind::Main));
     }
-    entries.push(window_entry(
-        TREE_WINDOW_ID.to_string(),
-        WindowKind::Tree,
-        tree,
-    ));
     let mut popouts: Vec<&WindowTabs> = layout
         .windows
         .iter()
@@ -197,7 +184,6 @@ fn persisted_content(
 /// [`ViewManager::from_persisted`] 의 결과.
 pub struct Restored {
     pub layout: ViewManager,
-    pub tree: WindowAttrs,
     /// 고치거나 건너뛴 것 — 로그는 부르는 쪽이 낸다.
     pub warnings: Vec<RestoreWarning>,
 }
@@ -206,7 +192,7 @@ pub struct Restored {
 /// 건너뛴 창은 아무 id 도(창 · 탭 · 노드) 쥐지 않고, 건너뛴 이유만 남긴다(자리 · 비율 · 모르는 내용은 알리지 않는다).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RestoreWarning {
-    /// id 가 그 종류의 것이 아니다 — main = `main`, 트리 = `agent-tree`, 팝아웃 = UUID.
+    /// id 가 그 종류의 것이 아니다 — main = `main`, 팝아웃 = UUID.
     IdKindMismatch {
         id: String,
         kind: &'static str,
@@ -330,7 +316,7 @@ impl fmt::Display for RestoreWarning {
 }
 
 impl ViewManager {
-    /// 영속 창 묶음(`codec::decode` 결과의 `windows`)으로 새 모델과 트리 칸을 세운다 — 순수하다(파일 · 창 · 락 0 ·
+    /// 영속 창 묶음(`codec::decode` 결과의 `windows`)으로 새 모델을 세운다 — 순수하다(파일 · 창 · 락 0 ·
     /// 실패 없음). 코덱은 모양 검사를 하지 않으므로 불변식 1–4 와 창 묶음의 모양을 여기서 다시 세운다(고치는 규칙 =
     /// [`RestoreWarning`]). 팝아웃마다 `labels` 에서 새 label 을 받는다 — 영속 id 는 그대로, label 은 이 부팅만의
     /// 것이다(§6-3).
@@ -342,7 +328,6 @@ impl ViewManager {
     /// - 곁표(모르는 내용)를 View 와 함께 옮긴다 — View 만 옮기면 그 슬롯이 빈 칸으로 저장돼 원문이 사라진다. 옛
     ///   View 는 `remove_view` 로 지운다(그 곁표 항목을 함께 거둔다).
     /// - main 항목은 탭 · 속성만 바꾼다 — 통째로 바꾸면 측정값(`canvas` · `metrics`)을 웹뷰가 다시 보고할 때까지 잃는다.
-    /// - 트리 칸은 `TreeAttrs::set` 으로 갈아끼운다(번호를 올린다).
     pub(crate) fn from_persisted(windows: Vec<WindowEntry>, labels: &dyn LabelSource) -> Restored {
         let mut restorer = Restorer::default();
         for entry in windows {
@@ -356,7 +341,6 @@ impl ViewManager {
 struct Restorer {
     warnings: Vec<RestoreWarning>,
     main: Option<Pending>,
-    tree: Option<WindowAttrs>,
     popouts: Vec<(WindowLabel, String, Pending)>,
     popout_ids: HashSet<Uuid>,
     views: HashSet<Uuid>,
@@ -400,15 +384,6 @@ impl Restorer {
                 let attrs = self.attrs(&id, theme, bounds, maximized);
                 self.main = Some(self.commit(attrs, staged));
             }
-            WindowKind::Tree => {
-                if id != TREE_WINDOW_ID {
-                    return self.mismatch(id, "tree");
-                }
-                if self.tree.is_some() {
-                    return self.warn(RestoreWarning::DuplicateWindow { id });
-                }
-                self.tree = Some(self.attrs(&id, theme, bounds, maximized));
-            }
             WindowKind::Popout(strip) => {
                 let Ok(uuid) = Uuid::parse_str(&id) else {
                     return self.mismatch(id, "popout");
@@ -427,7 +402,7 @@ impl Restorer {
                     return self.warn(RestoreWarning::PopoutWithoutTabs { id });
                 }
                 let label = labels.next_label();
-                let taken = [MAIN_WINDOW_LABEL, TREE_WINDOW_ID].contains(&label.as_str())
+                let taken = label == MAIN_WINDOW_LABEL
                     || self.popouts.iter().any(|(used, _, _)| *used == label);
                 if taken {
                     return self.warn(RestoreWarning::LabelTaken { id, label });
@@ -570,7 +545,6 @@ impl Restorer {
         let Restorer {
             mut warnings,
             main,
-            tree,
             popouts,
             popout_ids: _,
             views: _,
@@ -595,14 +569,12 @@ impl Restorer {
                 (label, id, pending.window)
             })
             .collect();
-        let tree = tree.unwrap_or_default();
         let mut layout = match ViewManager::from_restored(main.window, popouts) {
             Ok(layout) => layout,
             Err(reason) => {
                 warnings.push(RestoreWarning::Internal(reason));
                 return Restored {
                     layout: ViewManager::new(),
-                    tree,
                     warnings,
                 };
             }
@@ -612,11 +584,7 @@ impl Restorer {
                 warnings.push(RestoreWarning::Internal(e.to_string()));
             }
         }
-        Restored {
-            layout,
-            tree,
-            warnings,
-        }
+        Restored { layout, warnings }
     }
 }
 
@@ -694,7 +662,7 @@ mod tests {
     use serde_json::{json, Map, Value};
     use uuid::Uuid;
 
-    use super::{to_persisted, RestoreWarning, Restored, StateRevision, TREE_WINDOW_ID};
+    use super::{to_persisted, RestoreWarning, Restored, StateRevision};
     use crate::layout::{
         tree, LabelSource, SlotContent, SplitDir, ViewManager, WindowAttrs, WindowBounds,
         WindowPlacement, MAIN_WINDOW_LABEL,
@@ -768,8 +736,8 @@ mod tests {
         tree::first_slot_id(&mgr.views[&view].layout)
     }
 
-    /// main 두 탭(분할 · 모든 내용 종류 · 모르는 내용 · 바꾼 비율 · 이름) + 팝아웃 둘 + 창 속성 전부 + 트리 칸.
-    fn rich() -> (ViewManager, WindowAttrs) {
+    /// main 두 탭(분할 · 모든 내용 종류 · 모르는 내용 · 바꾼 비율 · 이름) + 팝아웃 둘 + 창 속성 전부.
+    fn rich() -> ViewManager {
         let mut mgr = ViewManager::new();
         let first = main_active(&mgr);
         let root = first_slot(&mgr, first);
@@ -815,13 +783,7 @@ mod tests {
             .unwrap();
         mgr.create_tab("slot-popup-8", None).unwrap();
         place(&mut mgr, "slot-popup-8", 200.5, false);
-
-        let tree = WindowAttrs {
-            theme: Some(UiTheme::Dark),
-            bounds: Some(bounds_at(5.0)),
-            maximized: false,
-        };
-        (mgr, tree)
+        mgr
     }
 
     fn content_of(node: &PersistedNode, slot: Uuid) -> Option<&PersistedContent> {
@@ -844,8 +806,8 @@ mod tests {
 
     #[test]
     fn memory_to_disk_to_memory_round_trips() {
-        let (mgr, tree_attrs) = rich();
-        let written = to_persisted(&mgr, tree_attrs);
+        let mgr = rich();
+        let written = to_persisted(&mgr);
         let text = codec::encode(&StateFile {
             version: STATE_VERSION,
             saved_at_ms: 1,
@@ -864,8 +826,7 @@ mod tests {
             .warnings
             .iter()
             .all(|w| matches!(w, RestoreWarning::UnknownContent { .. })));
-        assert_eq!(back.tree, tree_attrs);
-        assert_eq!(to_persisted(&back.layout, back.tree), written);
+        assert_eq!(to_persisted(&back.layout), written);
 
         let restored = &back.layout;
         assert_eq!(restored.views.len(), mgr.views.len());
@@ -905,9 +866,9 @@ mod tests {
     // ── 메모리 → 영속 ──
 
     #[test]
-    fn windows_are_written_main_then_tree_then_popouts_by_id() {
-        let (mgr, tree_attrs) = rich();
-        let written = to_persisted(&mgr, tree_attrs);
+    fn windows_are_written_main_then_popouts_by_id() {
+        let mgr = rich();
+        let written = to_persisted(&mgr);
         let mut popout_ids: Vec<&str> = mgr
             .windows
             .iter()
@@ -916,8 +877,8 @@ mod tests {
             .collect();
         popout_ids.sort_unstable();
         let ids: Vec<&str> = written.iter().map(|w| w.id.as_str()).collect();
-        assert_eq!(ids, ["main", TREE_WINDOW_ID, popout_ids[0], popout_ids[1]]);
-        assert!(matches!(written[1].kind, WindowKind::Tree));
+        assert_eq!(ids, ["main", popout_ids[0], popout_ids[1]]);
+        assert!(matches!(written[1].kind, WindowKind::Popout(_)));
         assert!(matches!(written[2].kind, WindowKind::Popout(_)));
         assert_eq!(
             (written[0].theme, written[0].maximized),
@@ -948,7 +909,7 @@ mod tests {
         mgr.set_unknown_content(v, root, raw("x")).unwrap();
         let right = mgr.split_slot(v, root, SplitDir::LeftRight).unwrap();
         let content = |mgr: &ViewManager, slot| {
-            let written = to_persisted(mgr, WindowAttrs::default());
+            let written = to_persisted(mgr);
             content_of(&main_strip(&written).tabs[0].layout, slot)
                 .cloned()
                 .unwrap()
@@ -994,13 +955,8 @@ mod tests {
             },
         )
         .unwrap();
-        let tree_without_place = WindowAttrs {
-            theme: Some(UiTheme::Dark),
-            bounds: None,
-            maximized: false,
-        };
-        let written = to_persisted(&mgr, tree_without_place);
-        assert_eq!(written.len(), 3);
+        let written = to_persisted(&mgr);
+        assert_eq!(written.len(), 2);
         assert!(written.iter().all(|w| w.bounds.is_none()));
         assert!(written[0].maximized, "최대화만 본 main");
 
@@ -1016,14 +972,13 @@ mod tests {
         assert_eq!(decode_warnings, vec![]);
         let back = ViewManager::from_persisted(decoded.windows, &Labels::default());
         assert_eq!(back.warnings, vec![]);
-        assert_eq!(back.tree, tree_without_place);
         assert_eq!(
             main_tab_ids(&back.layout),
             mgr.windows[MAIN_WINDOW_LABEL].tabs,
             "자리를 몰라도 main 의 탭을 잃지 않는다"
         );
         assert_eq!(back.layout.views[&v], mgr.views[&v]);
-        assert_eq!(to_persisted(&back.layout, back.tree), written);
+        assert_eq!(to_persisted(&back.layout), written);
     }
 
     // ── 영속 → 메모리: 고치기 ──
@@ -1088,18 +1043,11 @@ mod tests {
     #[test]
     fn a_window_whose_id_does_not_fit_its_kind_is_skipped() {
         let kept = empty_tab();
-        let mut tree = entry(TREE_WINDOW_ID, WindowKind::Tree);
-        tree.theme = Some(UiTheme::Light);
-        let stray = Uuid::new_v4().to_string();
         let back = restore(vec![
-            entry("main", WindowKind::Tree),
             popout_entry("main", vec![empty_tab()]),
-            popout_entry(TREE_WINDOW_ID, vec![empty_tab()]),
             popout_entry("slot-popup-1", vec![empty_tab()]),
             entry("x", WindowKind::Main(strip(vec![empty_tab()]))),
-            entry(&stray, WindowKind::Tree),
             main_entry(vec![kept.clone()]),
-            tree,
         ]);
         let mismatched: Vec<(&str, &str)> = back
             .warnings
@@ -1112,17 +1060,13 @@ mod tests {
         assert_eq!(
             mismatched,
             [
-                ("main", "tree"),
                 ("main", "popout"),
-                (TREE_WINDOW_ID, "popout"),
                 ("slot-popup-1", "popout"),
-                ("x", "main"),
-                (stray.as_str(), "tree"),
+                ("x", "main")
             ]
         );
         assert_eq!(back.layout.windows.len(), 1);
         assert_eq!(main_tab_ids(&back.layout), [kept.id]);
-        assert_eq!(back.tree.theme, Some(UiTheme::Light), "제자리 트리 항목");
     }
 
     #[test]
@@ -1130,17 +1074,11 @@ mod tests {
         let popout = Uuid::new_v4();
         let m1 = empty_tab();
         let p1 = empty_tab();
-        let mut tree1 = entry(TREE_WINDOW_ID, WindowKind::Tree);
-        tree1.theme = Some(UiTheme::EInk);
-        let mut tree2 = entry(TREE_WINDOW_ID, WindowKind::Tree);
-        tree2.theme = Some(UiTheme::Dark);
         let back = restore(vec![
             main_entry(vec![m1.clone()]),
             popout_entry(&popout.to_string(), vec![p1.clone()]),
-            tree1,
             main_entry(vec![empty_tab()]),
             popout_entry(&popout.to_string().to_uppercase(), vec![empty_tab()]),
-            tree2,
         ]);
         assert_eq!(
             back.warnings,
@@ -1149,15 +1087,11 @@ mod tests {
                 RestoreWarning::DuplicateWindow {
                     id: popout.to_string()
                 },
-                RestoreWarning::DuplicateWindow {
-                    id: TREE_WINDOW_ID.into()
-                },
             ]
         );
         assert_eq!(main_tab_ids(&back.layout), [m1.id]);
         assert_eq!(back.layout.windows["slot-popup-1"].tabs, [p1.id]);
         assert_eq!(back.layout.windows.len(), 2);
-        assert_eq!(back.tree.theme, Some(UiTheme::EInk));
     }
 
     #[test]
@@ -1244,7 +1178,7 @@ mod tests {
     #[test]
     fn a_main_without_tabs_gets_one_blank_tab() {
         // 항목이 없다.
-        let back = restore(vec![entry(TREE_WINDOW_ID, WindowKind::Tree)]);
+        let back = restore(vec![]);
         assert_eq!(back.warnings, vec![RestoreWarning::MainWithoutTabs]);
         assert_eq!(main_tab_ids(&back.layout).len(), 1);
         assert_eq!(back.layout.windows[MAIN_WINDOW_LABEL].window_id, "main");
@@ -1319,11 +1253,9 @@ mod tests {
         );
         assert_eq!(back.layout.windows["slot-popup-1"].window_id, first);
 
-        for reserved in [MAIN_WINDOW_LABEL, TREE_WINDOW_ID] {
-            let back = ViewManager::from_persisted(windows(), &Fixed(reserved));
-            assert_eq!(back.warnings.len(), 2, "{reserved}");
-            assert_eq!(back.layout.windows.len(), 1, "{reserved}");
-        }
+        let back = ViewManager::from_persisted(windows(), &Fixed(MAIN_WINDOW_LABEL));
+        assert_eq!(back.warnings.len(), 2);
+        assert_eq!(back.layout.windows.len(), 1);
     }
 
     #[test]
@@ -1483,23 +1415,22 @@ mod tests {
         });
         main.theme = Some(UiTheme::Dark);
         main.maximized = true;
-        let mut tree = entry(TREE_WINDOW_ID, WindowKind::Tree);
-        tree.bounds = Some(Bounds {
+        let mut nowhere = popout_entry(&Uuid::new_v4().to_string(), vec![empty_tab()]);
+        nowhere.bounds = None;
+        let flat_id = Uuid::new_v4().to_string();
+        let mut flat = popout_entry(&flat_id, vec![empty_tab()]);
+        flat.bounds = Some(Bounds {
             h: 0.0,
             ..dto_bounds()
         });
-        let mut nowhere = popout_entry(&Uuid::new_v4().to_string(), vec![empty_tab()]);
-        nowhere.bounds = None;
-        let back = restore(vec![main, tree, nowhere]);
+        let back = restore(vec![main, nowhere, flat]);
         assert_eq!(
             back.warnings,
             vec![
                 RestoreWarning::BoundsDropped {
                     window_id: "main".into()
                 },
-                RestoreWarning::BoundsDropped {
-                    window_id: TREE_WINDOW_ID.into()
-                },
+                RestoreWarning::BoundsDropped { window_id: flat_id },
             ],
             "자리가 없는 것은 경고가 아니다"
         );
@@ -1515,7 +1446,10 @@ mod tests {
                 maximized: true,
             })
         );
-        assert_eq!(back.tree.bounds, None);
+        assert_eq!(
+            back.layout.window_attrs("slot-popup-2").unwrap().bounds,
+            None
+        );
     }
 
     #[test]
@@ -1561,18 +1495,17 @@ mod tests {
     // ── 변경 번호 ──
 
     #[test]
-    fn the_revision_moves_with_each_of_its_three_parts() {
+    fn the_revision_moves_with_each_of_its_parts() {
         let mut mgr = ViewManager::new();
-        let start = StateRevision::of(&mgr, 0);
+        let start = StateRevision::of(&mgr);
         mgr.set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Dark))
             .unwrap();
-        let after_attrs = StateRevision::of(&mgr, 0);
+        let after_attrs = StateRevision::of(&mgr);
         assert_ne!(after_attrs, start);
         assert_eq!(after_attrs.layout, start.layout);
         mgr.create_tab(MAIN_WINDOW_LABEL, None).unwrap();
-        let after_layout = StateRevision::of(&mgr, 0);
+        let after_layout = StateRevision::of(&mgr);
         assert_ne!(after_layout, after_attrs);
         assert_eq!(after_layout.attrs, after_attrs.attrs);
-        assert_ne!(StateRevision::of(&mgr, 1), after_layout);
     }
 }

@@ -3,7 +3,7 @@
 //!
 //! - ★플러그인([`init`])은 단일 인스턴스 플러그인 바로 뒤에 등록한다★ — 플러그인 setup 은 `build()` 안에서 등록
 //!   순서대로 돌고 단일 인스턴스 플러그인이 거기서 둘째 인스턴스를 끝낸다(§6-5 사실 ① · ③). 그 뒤라야 디스크를
-//!   바꿔도 되고, 설정 창(main · agent-tree)은 그보다 늦게 만들어지므로 창이 처음 당기는 모델이 판정한 모델이다.
+//!   바꿔도 되고, 설정 창(main)은 그보다 늦게 만들어지므로 창이 처음 당기는 모델이 판정한 모델이다.
 //! - ★setup 은 `Err` 를 돌려주지 않는다★ — `Err` 면 빌드가 멈춰 앱이 아예 안 뜬다(N7 · D8). 실패는 log 하고 계속한다.
 //! - ★복원 서비스 상태는 ⑥ 한 곳에서 정한다(I5)★ — 창이 아직 없으므로 모든 창의 첫 `restore_status` 당기기가 정해진
 //!   값을 본다. 사용자 setup 에서 정하면 창을 만드는 자리(⑧ — `state::placement::restore_windows`)보다 앞인지를 손으로
@@ -31,16 +31,14 @@ use super::restore::{
 };
 use super::saver::{self, Clock, CloseFlag, RequestOutcome, SaveOutcome, SaverHandle, SystemClock};
 use super::schema::WindowEntry;
-use super::tree_attrs::TreeAttrs;
 use crate::discovery::DataLayout;
-use crate::layout::{LabelSource, LayoutState, ViewManager, WindowAttrs, MAIN_WINDOW_LABEL};
+use crate::layout::{LabelSource, LayoutState, ViewManager, MAIN_WINDOW_LABEL};
 
 const PLUGIN_NAME: &str = "engram-state-boot";
 
 /// 부팅 단계가 채우는 것 — 빌더에서 manage 하는 것과 같은 인스턴스를 넘긴다(ADR-0102 — 첫 invoke 전에 있다).
 pub struct Boot {
     pub layout: LayoutState,
-    pub tree: Arc<TreeAttrs>,
     /// 복원하는 팝아웃의 label — 런타임 팝아웃과 같은 발급기여야 label 이 겹치지 않는다(§6-3).
     pub labels: Arc<dyn LabelSource>,
     pub session: Arc<StateSession>,
@@ -104,30 +102,23 @@ impl Boot {
         let files = FsBootFiles::in_dir(state_dir);
         let plan = boot::prepare(&files);
 
-        let (model, tree) = match &plan.model {
-            BootModel::Default => (ViewManager::new(), WindowAttrs::default()),
+        let model = match &plan.model {
+            BootModel::Default => ViewManager::new(),
             BootModel::Restore(file) => {
                 let restored =
                     ViewManager::from_persisted(file.windows.clone(), self.labels.as_ref());
                 restored.warnings.iter().for_each(report_restore_warning);
-                (restored.layout, restored.tree)
+                restored.layout
             }
         };
-        let marker = boot::write_run_marker(
-            &files,
-            &plan,
-            to_persisted(&model, tree),
-            SystemClock.wall_ms(),
-        );
+        let marker =
+            boot::write_run_marker(&files, &plan, to_persisted(&model), SystemClock.wall_ms());
 
-        // 트리 칸과 레이아웃 락을 겹쳐 잡지 않는다(§6-3).
-        self.tree.set(tree);
-        let tree_rev = self.tree.rev();
         let revision = {
             // 이 락을 부팅 단계보다 먼저 잡는 쪽이 없어 독이 들 수 없다 — 들었어도 모델을 통째로 갈아끼운다.
             let mut layout = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
             *layout = model;
-            StateRevision::of(&layout, tree_rev)
+            StateRevision::of(&layout)
         };
 
         let state_file = state_file_status(&plan);
@@ -153,7 +144,7 @@ impl Boot {
         );
 
         let saver = saves.then(|| PendingSaver {
-            source: LiveSource::new(self.layout.clone(), self.tree.clone()),
+            source: LiveSource::new(self.layout.clone()),
             files: saver::Fs::new(state_dir.join(STATE_FILE), state_dir.join(CRASH_COPY_FILE)),
             revision,
             carry_resolved,
@@ -331,7 +322,7 @@ impl StateSession {
     /// ★다른 스레드(⑦ · 다른 답)가 띄우는 중이면 싣거나 실패할 때까지 기다린다★ — 그 기다림과 `Resolve` 답 기다림이
     /// 같은 마감 하나를 나눠 쓴다. 안 기다리면 그 순간엔 기록기가 없는 것으로 보여 답이 디스크에 붙지 않는다.
     ///
-    /// ★아무 락도 쥐지 않고 기다린다 — 부르는 쪽도 레이아웃 · 트리 칸 락을 쥔 채 부르지 않는다★: 기록기는
+    /// ★아무 락도 쥐지 않고 기다린다 — 부르는 쪽도 레이아웃 락을 쥔 채 부르지 않는다★: 기록기는
     /// 스냅숏을 뜨려고 그 락을 잡는다(`saver::SnapshotSource`). 쥐면 답이 늘 마감을 넘긴다.
     pub fn resolve_crash_copy(&self, hash: String) -> ResolveResult {
         self.resolve_within(hash, saver::REPLY_DEADLINE)
@@ -400,8 +391,8 @@ impl StateSession {
     /// `RunEvent::Exit` — 정상 종료 쓰기(`Final`)를 마감([`saver::REPLY_DEADLINE`])까지 기다린 뒤 셸 실행 잠금을
     /// 놓는다(§6-6). 기록기가 없으면(가드 · 못 띄움) 잠금만 놓는다(N7). 두 번째 부름은 아무것도 하지 않는다.
     ///
-    /// ★메인 스레드에서 불린다 — 아무 락도 쥐지 않고 기다린다★: 기록기는 스냅숏을 뜨려고 레이아웃 · 트리 칸 락을
-    /// 잡는다(`saver::SnapshotSource`).
+    /// ★메인 스레드에서 불린다 — 아무 락도 쥐지 않고 기다린다★: 기록기는 스냅숏을 뜨려고 레이아웃 락을 잡는다
+    /// (`saver::SnapshotSource`).
     pub fn shutdown(&self) {
         let (saver, lock) = {
             let mut cell = self.cell();
@@ -434,16 +425,14 @@ impl StateSession {
     }
 }
 
-/// 기록기의 스냅숏 원천 — 레이아웃 모델과 트리 창 칸. 둘을 겹쳐 잡지 않는다 — 트리 칸을 먼저 읽고 놓은 뒤 레이아웃
-/// 락을 잡는다(§6-3). 창 게터는 부르지 않는다(위치 · 크기는 모델에 적힌 값을 읽는다).
+/// 기록기의 스냅숏 원천 — 레이아웃 모델. 창 게터는 부르지 않는다(위치 · 크기는 모델에 적힌 값을 읽는다).
 pub struct LiveSource {
     layout: LayoutState,
-    tree: Arc<TreeAttrs>,
 }
 
 impl LiveSource {
-    pub fn new(layout: LayoutState, tree: Arc<TreeAttrs>) -> Self {
-        Self { layout, tree }
+    pub fn new(layout: LayoutState) -> Self {
+        Self { layout }
     }
 }
 
@@ -451,21 +440,19 @@ impl saver::SnapshotSource for LiveSource {
     type Revision = StateRevision;
 
     fn revision(&self) -> StateRevision {
-        let tree = self.tree.rev();
         // 번호 읽기는 반쯤 바뀐 모델에도 해롭지 않다 — 독 든 모델을 쓰지 않는 것은 `snapshot` 이 한다.
         let layout = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
-        StateRevision::of(&layout, tree)
+        StateRevision::of(&layout)
     }
 
     fn snapshot(&self) -> Result<Vec<WindowEntry>, String> {
-        let tree = self.tree.attrs();
         // 독 든 모델은 쓰지 않는다 — 패닉한 변경이 반쯤 남았을 수 있고, 쓰면 다음 부팅이 그 모양을 복원한다.
         let layout = self
             .layout
             .0
             .lock()
             .map_err(|_| "레이아웃 락에 독이 들었다".to_string())?;
-        Ok(to_persisted(&layout, tree))
+        Ok(to_persisted(&layout))
     }
 }
 
@@ -501,10 +488,9 @@ mod tests {
         dir
     }
 
-    fn source() -> (LiveSource, LayoutState, Arc<TreeAttrs>) {
+    fn source() -> (LiveSource, LayoutState) {
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        (LiveSource::new(layout.clone(), tree.clone()), layout, tree)
+        (LiveSource::new(layout.clone()), layout)
     }
 
     fn main_view(layout: &LayoutState) -> uuid::Uuid {
@@ -528,11 +514,10 @@ mod tests {
         free
     }
 
-    fn boot(layout: &LayoutState, tree: &Arc<TreeAttrs>) -> (Boot, Arc<StateSession>) {
+    fn boot(layout: &LayoutState) -> (Boot, Arc<StateSession>) {
         let session = Arc::new(StateSession::default());
         let boot = Boot {
             layout: layout.clone(),
-            tree: tree.clone(),
             labels: Arc::new(PopupCounter::default()),
             session: session.clone(),
             restore: Arc::new(RestoreService::new()),
@@ -571,7 +556,7 @@ mod tests {
             saved_at_ms: 1,
             clean_exit,
             resolved_crash_copy: resolved,
-            windows: to_persisted(&previous, WindowAttrs::default()),
+            windows: to_persisted(&previous),
         })
         .unwrap();
         (text, view)
@@ -580,8 +565,8 @@ mod tests {
     // ── 스냅숏 원천 ──
 
     #[test]
-    fn revision_moves_with_layout_attrs_and_tree() {
-        let (source, layout, tree) = source();
+    fn revision_moves_with_layout_and_attrs() {
+        let (source, layout) = source();
         let start = source.revision();
         assert_eq!(source.revision(), start, "바뀐 것이 없으면 같다");
 
@@ -604,16 +589,11 @@ mod tests {
         let after_attrs = source.revision();
         assert_ne!(after_attrs.attrs, after_layout.attrs);
         assert_eq!(after_attrs.layout, after_layout.layout);
-
-        tree.set_theme(Some(UiTheme::Dark));
-        let after_tree = source.revision();
-        assert_ne!(after_tree.tree, after_attrs.tree);
-        assert_eq!(after_tree.attrs, after_attrs.attrs);
     }
 
     #[test]
-    fn snapshot_carries_the_model_and_the_tree_cell() {
-        let (source, layout, tree) = source();
+    fn snapshot_carries_the_model() {
+        let (source, layout) = source();
         let view = main_view(&layout);
         layout
             .0
@@ -621,16 +601,21 @@ mod tests {
             .unwrap()
             .rename_tab(view, "저장할 탭".into())
             .unwrap();
-        tree.set_theme(Some(UiTheme::EInk));
+        layout
+            .0
+            .lock()
+            .unwrap()
+            .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::EInk))
+            .unwrap();
 
         let windows = source.snapshot().expect("스냅숏");
-        let expected = to_persisted(&layout.0.lock().unwrap(), tree.attrs());
+        let expected = to_persisted(&layout.0.lock().unwrap());
         assert_eq!(windows, expected);
     }
 
     #[test]
     fn a_poisoned_layout_lock_fails_the_snapshot_without_panicking() {
-        let (source, layout, _tree) = source();
+        let (source, layout) = source();
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = layout.0.lock().unwrap();
             panic!("독");
@@ -652,16 +637,15 @@ mod tests {
             let view = previous.windows[MAIN_WINDOW_LABEL].active;
             previous.rename_tab(view, "지난 탭".into()).unwrap();
             previous.create_window("slot-popup-7").unwrap();
-            let tree = WindowAttrs {
-                theme: Some(UiTheme::Dark),
-                ..WindowAttrs::default()
-            };
+            previous
+                .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::Dark))
+                .unwrap();
             let text = codec::encode(&StateFile {
                 version: STATE_VERSION,
                 saved_at_ms: 1,
                 clean_exit: true,
                 resolved_crash_copy: None,
-                windows: to_persisted(&previous, tree),
+                windows: to_persisted(&previous),
             })
             .unwrap();
             std::fs::write(state_dir.join(STATE_FILE), text).unwrap();
@@ -669,8 +653,7 @@ mod tests {
         };
 
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        let (boot, session) = boot(&layout, &tree);
+        let (boot, session) = boot(&layout);
         let notices = listen(&boot);
         boot.run_steps(&run_dir, &state_dir);
 
@@ -687,11 +670,14 @@ mod tests {
                 mgr.windows.contains_key("slot-popup-1"),
                 "팝아웃은 이 실행의 발급기에서 새 label 을 받는다"
             );
+            assert_eq!(
+                mgr.window_attrs(MAIN_WINDOW_LABEL).unwrap().theme,
+                Some(UiTheme::Dark)
+            );
         }
-        assert_eq!(tree.attrs().theme, Some(UiTheme::Dark));
         let marker = read_state(&state_dir);
         assert!(!marker.clean_exit, "실행 표식");
-        assert_eq!(marker.windows.len(), 3, "main · 트리 · 팝아웃");
+        assert_eq!(marker.windows.len(), 2, "main · 팝아웃");
         assert!(!lock_is_free(&run_dir), "잠금은 종료까지 쥔다");
 
         session.start_saver();
@@ -706,8 +692,7 @@ mod tests {
         let run_dir = temp_dir("run");
         let state_dir = temp_dir("state").join("absent");
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        let (boot, _session) = boot(&layout, &tree);
+        let (boot, _session) = boot(&layout);
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(
@@ -720,7 +705,7 @@ mod tests {
         assert!(!marker.clean_exit);
         assert_eq!(
             marker.windows,
-            to_persisted(&layout.0.lock().unwrap(), tree.attrs()),
+            to_persisted(&layout.0.lock().unwrap()),
             "표식이 담은 것이 메모리 모델이다"
         );
     }
@@ -732,8 +717,7 @@ mod tests {
         // 폴더는 「없음」도 「못 쓸 파일」도 아닌 읽기 IO 실패다(I3) — 가드.
         std::fs::create_dir(state_dir.join(STATE_FILE)).unwrap();
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        let (boot, session) = boot(&layout, &tree);
+        let (boot, session) = boot(&layout);
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::None);
@@ -764,7 +748,7 @@ mod tests {
         let run_dir = temp_dir("run");
         let state_dir = temp_dir("state");
         std::fs::write(state_dir.join(STATE_FILE), "{broken").unwrap();
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         let notices = listen(&boot);
         boot.run_steps(&run_dir, &state_dir);
 
@@ -797,7 +781,7 @@ mod tests {
         let blocker = state_dir.join("state.json.corrupt");
         std::fs::create_dir(&blocker).unwrap();
         std::fs::write(blocker.join("x"), "x").unwrap();
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(
@@ -857,8 +841,7 @@ mod tests {
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
 
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        let (boot, session) = boot(&layout, &tree);
+        let (boot, session) = boot(&layout);
         let notices = listen(&boot);
         boot.run_steps(&run_dir, &state_dir);
 
@@ -872,11 +855,7 @@ mod tests {
             [CrashCopyStatus::Awaiting],
             "⑥ 이 한 번 정한다(I5)"
         );
-        assert_eq!(
-            boot.restore.status().windows,
-            Some(1),
-            "main 만 — 트리 창은 세지 않는다"
-        );
+        assert_eq!(boot.restore.status().windows, Some(1), "main 만");
         let status = boot.restore.status();
         assert!(status.saves, "가드가 아니다 — 이 실행이 저장한다");
         assert_eq!(status.durable, Some(true), "묻는 동안은 saves 와 같다");
@@ -912,14 +891,14 @@ mod tests {
         let (raw, _) = previous_run(false, None);
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
         {
-            let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+            let (boot, session) = boot(&LayoutState::new());
             boot.run_steps(&run_dir, &state_dir);
             session.start_saver();
             session.shutdown();
         }
         assert!(read_state(&state_dir).clean_exit);
 
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(
@@ -940,7 +919,7 @@ mod tests {
         // 폴더는 「없음」도 「못 쓸 파일」도 아닌 읽기 IO 실패다(I3) — 덮어도 되는지 모른다.
         std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
 
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
 
         let status = boot.restore.status();
@@ -986,12 +965,10 @@ mod tests {
         std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
 
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        let (boot, session) = boot(&layout, &tree);
+        let (boot, session) = boot(&layout);
         let coordinator = RestoreCoordinator::new(
             boot.restore.clone(),
             layout,
-            tree,
             session.clone(),
             boot.labels.clone(),
         );
@@ -1025,7 +1002,7 @@ mod tests {
         // 폴더는 「없음」도 「못 쓸 파일」도 아닌 읽기 IO 실패다(I3) — 가드 ⅰ.
         std::fs::create_dir(state_dir.join(STATE_FILE)).unwrap();
 
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
 
         let status = boot.restore.status();
@@ -1050,7 +1027,7 @@ mod tests {
         std::fs::write(state_dir.join(STATE_FILE), raw).unwrap();
         std::fs::create_dir(state_dir.join(CRASH_COPY_FILE)).unwrap();
 
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
 
         assert_eq!(boot.restore.status().crash_copy, CrashCopyStatus::None);
@@ -1073,7 +1050,7 @@ mod tests {
         let (raw, _) = previous_run(false, None);
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
 
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
         assert!(session.cell().saver.is_none(), "⑦ 전");
 
@@ -1124,7 +1101,7 @@ mod tests {
         let state_dir = temp_dir("state");
         let (raw, _) = previous_run(false, None);
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
         let marker = std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap();
 
@@ -1175,7 +1152,7 @@ mod tests {
         let state_dir = temp_dir("state");
         let (raw, _) = previous_run(false, None);
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
-        let (boot, session) = boot(&LayoutState::new(), &Arc::new(TreeAttrs::default()));
+        let (boot, session) = boot(&LayoutState::new());
         boot.run_steps(&run_dir, &state_dir);
         (session, run_dir, state_dir, codec::crash_copy_hash(&raw))
     }
@@ -1293,7 +1270,6 @@ mod tests {
             Some(true)
         }
         fn place_main(&self, _at: Option<(WindowBounds, Landing)>, _maximized: bool) {}
-        fn place(&self, _label: &str, _bounds: WindowBounds, _at: Landing) {}
         fn set_shown(&self, _label: &str, _shown: bool) {}
         fn record_placement(&self, _label: &str) {}
         fn focus(&self, _label: &str) {}
@@ -1336,12 +1312,10 @@ mod tests {
         std::fs::write(state_dir.join(STATE_FILE), &raw).unwrap();
 
         let layout = LayoutState::new();
-        let tree = Arc::new(TreeAttrs::default());
-        let (boot, session) = boot(&layout, &tree);
+        let (boot, session) = boot(&layout);
         let coordinator = RestoreCoordinator::new(
             boot.restore.clone(),
             layout.clone(),
-            tree.clone(),
             session.clone(),
             boot.labels.clone(),
         );
@@ -1356,7 +1330,6 @@ mod tests {
                         &state_dir.join("no-settings"),
                     )),
                     layout.clone(),
-                    tree.clone(),
                 )),
                 Arc::new(NoThemeWindows),
             ),
@@ -1380,7 +1353,7 @@ mod tests {
         );
         assert_eq!(
             written.windows,
-            to_persisted(&layout.0.lock().unwrap(), tree.attrs()),
+            to_persisted(&layout.0.lock().unwrap()),
             "답을 붙인 쓰기가 수락한 화면을 담는다"
         );
         session.shutdown();

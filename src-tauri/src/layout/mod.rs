@@ -14,9 +14,8 @@ pub use apply::{
     WindowTabsPayload,
 };
 pub use manager::{
-    CanvasPx, CloseTabOutcome, LayoutError, PlacementMemo, SlotPx, SpawnSlotError,
-    SplitRatioResult, ViewManager, WindowAttrs, WindowBounds, WindowPlacement, WindowTabsSnapshot,
-    MAIN_WINDOW_LABEL,
+    CanvasPx, CloseTabOutcome, LayoutError, SlotPx, SpawnSlotError, SplitRatioResult, ViewManager,
+    WindowAttrs, WindowBounds, WindowPlacement, WindowTabsSnapshot, MAIN_WINDOW_LABEL,
 };
 pub use spatial::{compute_spatial, resolve_spatial, Neighbors, SlotSpatial, SpatialToken};
 pub use types::{

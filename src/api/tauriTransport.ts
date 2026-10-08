@@ -264,7 +264,7 @@ export class TauriTransport implements Transport {
         }),
       )
       // 셸은 전 웹뷰에 emit 하고 대상은 payload 의 `labels`(사용량 슬롯이 있는 창)로 고른다 — 자기 label 이
-      //   안 들면 버린다. ★label 은 Tauri 가 준다★(해시 라우트에서 유추하면 트리 창이 `main` 으로 읽힌다).
+      //   안 들면 버린다. ★label 은 Tauri 가 준다★(해시 라우트에서 유추하면 `#/popup?window=` 밖의 창은 전부 `main` 으로 읽힌다).
       //   `socketEpoch` 는 셸이 곁들인 칸이라 데몬 wire(`subscribed` 는 셸이 대조에만 쓰고 싣지 않는다)와
       //   섞이지 않게 camelCase 다.
       registered.push(

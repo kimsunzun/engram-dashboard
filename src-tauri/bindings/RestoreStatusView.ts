@@ -13,8 +13,7 @@ export type RestoreStatusView = { crash_copy: CrashCopyStatus,
  */
 saved_at_ms: number | null, 
 /**
- * 사본의 레이아웃 창 수 — main + 팝아웃. 트리 창은 세지 않는다(탭이 없고 수락이 자리만 입힌다 —
- * [`AnswerReply::restored_windows`] 와 같은 셈).
+ * 사본의 창 수 — main + 팝아웃([`AnswerReply::restored_windows`] 와 같은 셈).
  */
 windows: number | null, 
 /**

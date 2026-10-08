@@ -2,7 +2,7 @@
 //!
 //! - ★같은 데이터 폴더의 창은 환경 옵션이 같아야 한다★ — 어긴 창은 `build()` 가 `Ok` 인데 OS 창이 안 생긴다
 //!   (ADR-0054 의 유령 창). 그래서 창을 만드는 코드는 전부 [`WebviewEnv::finish`] 를 지나고, 그 값은 셸에 하나인
-//!   인스턴스에서 나온다. 설정이 선언한 창(main · agent-tree)도 예외가 아니다 — Tauri 가 만들지 않게 두고
+//!   인스턴스에서 나온다. 설정이 선언한 창(main)도 예외가 아니다 — Tauri 가 만들지 않게 두고
 //!   (`tauri.conf.json` 의 `"create": false`) 부팅 단계 ⑧ 이 `from_config` 로 만들어 이 마무리에 넘긴다
 //!   (`state::placement`).
 //! - ★환경 옵션 넷(폴더 · 브라우저 인자 · 확장 · 스크롤바 모양)을 마무리가 정한다★ — wry 0.55.1 `webview2` 의
@@ -103,6 +103,7 @@ fn choose(dir: &Path, check: impl FnOnce(&Path) -> Result<(), String>) -> Option
             Some(dir)
         }
         Err(reason) => {
+            // ADR-0283
             tracing::warn!(
                 module = "webview_env",
                 dir = %dir.display(),

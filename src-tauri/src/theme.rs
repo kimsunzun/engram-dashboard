@@ -1,14 +1,13 @@
 //! 창 테마 — 값([`UiTheme`]) · 전역 테마([`global_theme`] — 설정 `theme.default`) · **창마다의 유효 테마**
 //! ([`EffectiveThemes`]) · 창마다 배달([`deliver_per_window`]) · 읽기·쓰기·밀기 손잡이([`ThemeControl`]).
 //!
-//! - **창 테마의 집은 화면 상태 모델이다** — 레이아웃 창은 `ViewManager` 의 창 항목(`WindowAttrs::theme`), 트리
-//!   창(`agent-tree`)은 [`TreeAttrs`]. 창과 같이 살고 같이 죽으며 기록기가 `state.json` 에 싣는다(TRD
-//!   S21-storage §6-3).
+//! - **창 테마의 집은 화면 상태 모델이다** — `ViewManager` 의 창 항목(`WindowAttrs::theme`). 창과 같이 살고 같이
+//!   죽으며 기록기가 `state.json` 에 싣는다(TRD S21-storage §6-3).
 //! - ★유효 값은 [`EffectiveThemes`] 한 자리에서만 계산한다★ — 부팅 당기기(`get_ui_settings`) · 밀기
 //!   (`ui:settings-updated`) · `window.getTheme` 이 같은 출처를 본다. 한쪽만 다른 출처를 보면 그 창은 부팅과 밀기에서
 //!   다른 테마를 받는다.
-//! - ★락 순서 = 테마 관문 › {설정 상태 락 · `ViewManager` 락 · 트리 칸 락}★ — 관문만 바깥이고 나머지 셋은 하나씩
-//!   짧게 잡고 놓는다(겹쳐 잡지 않는다 — TRD §6-3). 테마를 바꾸는 쪽은 저장을 끝내고 모든 락을 놓은 뒤 밀기를 부른다.
+//! - ★락 순서 = 테마 관문 › {설정 상태 락 · `ViewManager` 락}★ — 관문만 바깥이고 나머지 둘은 하나씩 짧게 잡고
+//!   놓는다(겹쳐 잡지 않는다 — TRD §6-3). 테마를 바꾸는 쪽은 저장을 끝내고 모든 락을 놓은 뒤 밀기를 부른다.
 //! - 보내는 자리는 호출자가 넣는다([`ThemeWindows`]) — Tauri 를 이 모듈에 들이지 않는다.
 // ADR-0265
 
@@ -20,8 +19,6 @@ use engram_dashboard_base::sync;
 
 use crate::layout::LayoutState;
 use crate::settings::{SettingsService, THEME_DEFAULT};
-use crate::state::convert::TREE_WINDOW_ID;
-use crate::state::tree_attrs::TreeAttrs;
 
 /// 설정 `theme.default` 의 값이 [`UiTheme`] 로 안 읽힐 때 쓰는 값 — 표의 선택지와 [`UiTheme::as_wire`] 철자가
 /// 같으면 닿지 않는다(이 모듈의 시험이 둘을 맞댄다).
@@ -93,8 +90,8 @@ impl WindowTheme {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ThemeError {
-    /// 레이아웃 모델에도 없고 트리 창도 아니다.
-    #[error("window 없음: {0} — 창 label 은 window.list 가 주고, 트리 창은 agent-tree 다")]
+    /// 레이아웃 모델에 없다.
+    #[error("window 없음: {0} — 창 label 은 window.list 가 준다")]
     UnknownWindow(String),
     /// 쓰기만 낸다 — 읽기는 독 든 모델에서도 테마 값 하나를 읽는다(반쯤 바뀐 모델에도 해롭지 않다).
     #[error("레이아웃 락에 독이 들어 창 테마를 못 썼다")]
@@ -239,24 +236,22 @@ where
 }
 
 /// 창마다 **유효 테마 = 그 창의 테마 ?? 설정 `theme.default`** 를 계산하는 단일 자리(TRD S21-storage §5-6) — 창
-/// 테마를 쓰는 길도 여기 하나다(트리 창 = [`TreeAttrs`] · 그 밖 = `ViewManager`).
+/// 테마를 쓰는 길도 여기 하나다.
 ///
 /// ★셸에 하나만 둔다★ — 밀기 순서를 지키는 관문 락이 이 안에 있어서, 인스턴스가 둘이면 두 밀기가 서로를 못 본다.
-/// 설정 · 모델 · 트리 칸도 셸에 하나인 그 인스턴스여야 한다 — 다른 모델을 주면 쓰기와 밀기가 다른 창 테마를 본다.
+/// 설정 · 모델도 셸에 하나인 그 인스턴스여야 한다 — 다른 모델을 주면 쓰기와 밀기가 다른 창 테마를 본다.
 pub struct EffectiveThemes {
     settings: Arc<SettingsService>,
     layout: LayoutState,
-    tree: Arc<TreeAttrs>,
     /// ★읽기부터 알림까지를 한 덩이로 묶는다★ — 사유는 [`Self::push_effective_themes`].
     gate: Mutex<()>,
 }
 
 impl EffectiveThemes {
-    pub fn new(settings: Arc<SettingsService>, layout: LayoutState, tree: Arc<TreeAttrs>) -> Self {
+    pub fn new(settings: Arc<SettingsService>, layout: LayoutState) -> Self {
         Self {
             settings,
             layout,
-            tree,
             gate: Mutex::new(()),
         }
     }
@@ -278,19 +273,18 @@ impl EffectiveThemes {
     }
 
     /// 창 하나의 테마를 쓴다 — `None` = 그 창의 테마를 지운다(전역을 따른다). ★밀지 않는다★ — 미는 것은
-    /// [`ThemeControl::set`]. 레이아웃 창은 `version` 이 아니라 `attrs_rev` 가 오른다(바뀌었을 때만).
+    /// [`ThemeControl::set`]. `version` 이 아니라 `attrs_rev` 가 오른다(바뀌었을 때만).
     pub fn set_window_theme(
         &self,
         window: &str,
         theme: Option<UiTheme>,
     ) -> Result<WindowTheme, ThemeError> {
-        if window == TREE_WINDOW_ID {
-            self.tree.set_theme(theme);
-        } else {
-            let mut mgr = self.layout.0.lock().map_err(|_| ThemeError::Poisoned)?;
-            mgr.set_window_theme(window, theme)
-                .map_err(|_| ThemeError::UnknownWindow(window.to_string()))?;
-        }
+        self.layout
+            .0
+            .lock()
+            .map_err(|_| ThemeError::Poisoned)?
+            .set_window_theme(window, theme)
+            .map_err(|_| ThemeError::UnknownWindow(window.to_string()))?;
         Ok(WindowTheme::resolve(theme, global_theme(&self.settings)))
     }
 
@@ -302,8 +296,8 @@ impl EffectiveThemes {
     /// 락으로 직렬화한다 — 마지막 알림 = 마지막 읽기. 쓰는 쪽은 저장을 **끝낸 뒤** 이 함수를 부르므로, 마지막 밀기는
     /// 마지막 쓰기를 본다.
     ///
-    /// ★관문 아래에서 설정 상태 락 · 창 명단 · 트리 칸 락 · `ViewManager` 락을 하나씩 짧게 잡고 놓은 뒤 보낸다★ —
-    /// 셋 중 어느 것도 겹쳐 잡지 않고, 보낼 때는 관문만 쥔다. 부르는 쪽은 아무 락도 쥐지 않는다.
+    /// ★관문 아래에서 설정 상태 락 · 창 명단 · `ViewManager` 락을 하나씩 짧게 잡고 놓은 뒤 보낸다★ — 셋 중 어느
+    /// 것도 겹쳐 잡지 않고, 보낼 때는 관문만 쥔다. 부르는 쪽은 아무 락도 쥐지 않는다.
     // ADR-0265
     pub fn push_effective_themes(&self, windows: &dyn ThemeWindows) -> Result<(), Undelivered> {
         // 락이 중독돼도(보유 중 패닉) 계속 돈다 — 이 락이 지키는 것은 순서뿐이라 뒤에 깨질 상태가 없다.
@@ -311,7 +305,6 @@ impl EffectiveThemes {
         let _order = sync::lock(&self.gate);
         let global = global_theme(&self.settings);
         let labels = windows.labels();
-        let tree = self.tree.attrs().theme;
         let model: HashMap<&str, Option<UiTheme>> = {
             let mgr = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
             labels
@@ -325,11 +318,7 @@ impl EffectiveThemes {
         let targets: Vec<(String, UiTheme)> = labels
             .iter()
             .map(|label| {
-                let own = if label == TREE_WINDOW_ID {
-                    tree
-                } else {
-                    model.get(label.as_str()).copied().flatten()
-                };
+                let own = model.get(label.as_str()).copied().flatten();
                 (label.clone(), WindowTheme::resolve(own, global).effective)
             })
             .collect();
@@ -346,9 +335,6 @@ impl EffectiveThemes {
     // 읽기는 독 든 모델에서도 한다 — 테마 값 하나라 반쯤 바뀐 모델에도 해롭지 않다(`state::boot_plugin` 의
     //   `LiveSource::revision` 과 같은 판단).
     fn own_theme(&self, window: &str) -> Result<Option<UiTheme>, ThemeError> {
-        if window == TREE_WINDOW_ID {
-            return Ok(self.tree.attrs().theme);
-        }
         let mgr = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
         mgr.window_attrs(window)
             .map(|attrs| attrs.theme)
@@ -413,6 +399,8 @@ mod tests {
     use crate::layout::MAIN_WINDOW_LABEL;
 
     const POPUP: &str = "slot-popup-1";
+    /// 웹뷰는 살아 있지만 모델에는 아직 없는 창(막 만들어지는 팝아웃).
+    const UNMODELED: &str = "slot-popup-2";
     /// [`Recording`] 이 받지 못하는 창에 주는 사유.
     const CLOSED: &str = "창이 이미 닫혔다";
 
@@ -498,7 +486,6 @@ mod tests {
         _config: Config,
         settings: Arc<SettingsService>,
         layout: LayoutState,
-        tree: Arc<TreeAttrs>,
         themes: EffectiveThemes,
     }
 
@@ -508,13 +495,11 @@ mod tests {
         let settings = config.service();
         let layout = LayoutState::new();
         layout.0.lock().unwrap().create_window(POPUP).unwrap();
-        let tree = Arc::new(TreeAttrs::default());
-        let themes = EffectiveThemes::new(settings.clone(), layout.clone(), tree.clone());
+        let themes = EffectiveThemes::new(settings.clone(), layout.clone());
         Rig {
             _config: config,
             settings,
             layout,
-            tree,
             themes,
         }
     }
@@ -607,27 +592,14 @@ mod tests {
         assert_eq!(rig.themes.window_theme(POPUP), Ok(cleared));
     }
 
-    /// 트리 창은 레이아웃 모델 밖이다 — 그 창의 값은 트리 칸에, 나머지는 `ViewManager` 의 창 항목에 들고 번호도 각자의
-    /// 것이 오른다(레이아웃 `version` 은 그대로).
+    /// 창 테마는 `ViewManager` 의 창 항목에 들고 창 속성 번호만 오른다(레이아웃 `version` 은 그대로).
     #[test]
-    fn the_tree_window_writes_the_tree_cell_and_the_others_write_the_model() {
+    fn a_window_theme_writes_the_model_and_bumps_only_the_attrs_revision() {
         let rig = rig("route");
         let (version, attrs_rev) = {
             let mgr = rig.layout.0.lock().unwrap();
             (mgr.version, mgr.attrs_rev())
         };
-        let tree_rev = rig.tree.rev();
-
-        rig.themes
-            .set_window_theme(TREE_WINDOW_ID, Some(UiTheme::Light))
-            .unwrap();
-        assert_eq!(rig.tree.attrs().theme, Some(UiTheme::Light));
-        assert_eq!(rig.tree.rev(), tree_rev + 1);
-        assert_eq!(
-            rig.layout.0.lock().unwrap().attrs_rev(),
-            attrs_rev,
-            "트리 창 쓰기가 레이아웃 창 속성 번호를 올렸다"
-        );
 
         rig.themes
             .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::EInk))
@@ -641,8 +613,6 @@ mod tests {
             assert_eq!(mgr.attrs_rev(), attrs_rev + 1);
             assert_eq!(mgr.version, version, "창 테마는 레이아웃 번호를 안 올린다");
         }
-        assert_eq!(rig.tree.attrs().theme, Some(UiTheme::Light));
-        assert_eq!(rig.tree.rev(), tree_rev + 1);
     }
 
     #[test]
@@ -671,10 +641,10 @@ mod tests {
             .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::EInk))
             .unwrap();
         rig.themes
-            .set_window_theme(TREE_WINDOW_ID, Some(UiTheme::Dark))
+            .set_window_theme(POPUP, Some(UiTheme::Dark))
             .unwrap();
-        // 모델에 없는 창(막 만들어지는 팝아웃)은 전역 값을 받는다.
-        let windows = Recording::new(&[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP, "slot-popup-2"]);
+        // 모델에 없는 창은 전역 값을 받는다.
+        let windows = Recording::new(&[MAIN_WINDOW_LABEL, POPUP, UNMODELED]);
 
         rig.themes.push_effective_themes(&windows).expect("밀기");
 
@@ -682,9 +652,8 @@ mod tests {
             windows.take(),
             sent(&[
                 (MAIN_WINDOW_LABEL, "e-ink"),
-                (TREE_WINDOW_ID, "dark"),
-                (POPUP, "light"),
-                ("slot-popup-2", "light"),
+                (POPUP, "dark"),
+                (UNMODELED, "light"),
             ])
         );
     }
@@ -697,14 +666,14 @@ mod tests {
         rig.themes
             .set_window_theme(MAIN_WINDOW_LABEL, Some(UiTheme::EInk))
             .unwrap();
-        let windows = Recording::new(&[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP]);
+        let windows = Recording::new(&[MAIN_WINDOW_LABEL, POPUP, UNMODELED]);
         rig.themes.push_effective_themes(&windows).expect("밀기");
         assert_eq!(
             windows.take(),
             sent(&[
                 (MAIN_WINDOW_LABEL, "e-ink"),
-                (TREE_WINDOW_ID, "dark"),
-                (POPUP, "dark")
+                (POPUP, "dark"),
+                (UNMODELED, "dark")
             ])
         );
 
@@ -715,8 +684,8 @@ mod tests {
             windows.take(),
             sent(&[
                 (MAIN_WINDOW_LABEL, "e-ink"),
-                (TREE_WINDOW_ID, "light"),
-                (POPUP, "light")
+                (POPUP, "light"),
+                (UNMODELED, "light")
             ])
         );
     }
@@ -728,9 +697,9 @@ mod tests {
         let rig = rig("agree");
         rig.settings.set(THEME_DEFAULT, "e-ink").unwrap();
         rig.themes
-            .set_window_theme(TREE_WINDOW_ID, Some(UiTheme::Light))
+            .set_window_theme(POPUP, Some(UiTheme::Light))
             .unwrap();
-        let windows = Recording::new(&[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP]);
+        let windows = Recording::new(&[MAIN_WINDOW_LABEL, POPUP, UNMODELED]);
 
         rig.themes.push_effective_themes(&windows).expect("밀기");
         for (label, theme) in windows.take() {
@@ -760,10 +729,7 @@ mod tests {
     #[test]
     fn a_window_that_did_not_receive_it_fails_the_push_after_every_window_was_tried() {
         let rig = rig("refuse");
-        let windows = Recording::refusing(
-            &[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP],
-            &[TREE_WINDOW_ID],
-        );
+        let windows = Recording::refusing(&[MAIN_WINDOW_LABEL, POPUP, UNMODELED], &[POPUP]);
 
         let refused = rig
             .themes
@@ -775,7 +741,7 @@ mod tests {
             Undelivered::Refused {
                 tried: 3,
                 failed: vec![FailedWindow {
-                    label: TREE_WINDOW_ID.to_string(),
+                    label: POPUP.to_string(),
                     reason: CLOSED.to_string(),
                 }],
             }
@@ -825,7 +791,7 @@ mod tests {
     fn a_write_the_target_window_did_not_receive_is_an_error_but_stays_written() {
         let rig = rig("target");
         let windows = Arc::new(Recording::refusing(
-            &[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP],
+            &[MAIN_WINDOW_LABEL, POPUP, UNMODELED],
             &[POPUP],
         ));
         let control = ThemeControl::new(Arc::new(rig.themes), windows.clone());
@@ -856,8 +822,8 @@ mod tests {
     fn a_write_only_other_windows_did_not_receive_is_a_success() {
         let rig = rig("others");
         let windows = Arc::new(Recording::refusing(
-            &[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP],
-            &[MAIN_WINDOW_LABEL, TREE_WINDOW_ID],
+            &[MAIN_WINDOW_LABEL, POPUP, UNMODELED],
+            &[MAIN_WINDOW_LABEL, UNMODELED],
         ));
         let control = ThemeControl::new(Arc::new(rig.themes), windows.clone());
 
@@ -878,17 +844,17 @@ mod tests {
     fn an_undelivered_write_names_its_window_and_counts_the_others() {
         let rig = rig("message");
         let windows = Arc::new(Recording::refusing(
-            &[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP],
-            &[MAIN_WINDOW_LABEL, TREE_WINDOW_ID, POPUP],
+            &[MAIN_WINDOW_LABEL, POPUP, UNMODELED],
+            &[MAIN_WINDOW_LABEL, POPUP, UNMODELED],
         ));
         let control = ThemeControl::new(Arc::new(rig.themes), windows);
 
         let message = control
-            .set(TREE_WINDOW_ID, Some(UiTheme::Light))
+            .set(POPUP, Some(UiTheme::Light))
             .expect_err("그 창이 못 받았다")
             .to_string();
 
-        assert!(message.starts_with(TREE_WINDOW_ID), "{message}");
+        assert!(message.starts_with(POPUP), "{message}");
         assert!(message.contains(CLOSED), "{message}");
         assert!(message.ends_with("다른 창 2개도 못 받았다"), "{message}");
     }
@@ -903,7 +869,7 @@ mod tests {
 
         impl ThemeWindows for Probe {
             fn labels(&self) -> Vec<String> {
-                vec![MAIN_WINDOW_LABEL.to_string(), TREE_WINDOW_ID.to_string()]
+                vec![MAIN_WINDOW_LABEL.to_string(), POPUP.to_string()]
             }
 
             fn send(&self, _label: &str, _payload: UiSettingsPayload) -> Result<(), String> {

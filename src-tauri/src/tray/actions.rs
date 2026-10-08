@@ -332,9 +332,9 @@ mod tests {
         }
     }
 
-    const WINDOWS: [&str; 4] = ["main", "slot-popup-2", "agent-tree", "slot-popup-1"];
+    const WINDOWS: [&str; 4] = ["main", "slot-popup-2", "devtools", "slot-popup-1"];
 
-    // 보이기는 창마다 관심을 먼저 고치고 OS 를 부른다. 다루지 않는 창(`agent-tree`)은 관심에도 안 알린다.
+    // 보이기는 창마다 관심을 먼저 고치고 OS 를 부른다. 다루지 않는 창(`devtools`)은 관심에도 안 알린다.
     #[test]
     fn showing_tells_the_usage_interest_before_each_os_call() {
         let log = Log::default();

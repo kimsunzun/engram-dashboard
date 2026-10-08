@@ -57,8 +57,8 @@ use engram_dashboard_lib::layout::commands::{
 use engram_dashboard_lib::layout::geometry::Insets;
 use engram_dashboard_lib::layout::{
     tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
-    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowAttrs,
-    WindowBounds, WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowBounds,
+    WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::settings::{
     SettingItem, SettingsEvents, SettingsService, SettingsSnapshot, THEME_DEFAULT,
@@ -71,7 +71,6 @@ use engram_dashboard_lib::state::restore::{
     StateFileStatus, SubscriptionSource,
 };
 use engram_dashboard_lib::state::schema::{StateFile, STATE_VERSION};
-use engram_dashboard_lib::state::tree_attrs::TreeAttrs;
 use engram_dashboard_lib::theme::{
     global_theme, EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload, UiTheme,
     DEFAULT_THEME,
@@ -199,6 +198,10 @@ impl ThemeWindows for RecordingWindows {
 
 /// [`RecordingWindows`] 가 받지 못하는 창에 주는 사유.
 const WINDOW_GONE: &str = "창이 이미 닫혔다";
+
+/// 웹뷰는 떠 있지만 레이아웃 모델에는 아직 없는 팝아웃 — 밀기는 이 창에 전역 값을 보낸다. 하네스의 발급기가 닿지
+/// 않는 번호라 `window.create` 가 만든 창과 겹치지 않는다.
+const UNMODELED_POPOUT_LABEL: &str = "slot-popup-99";
 
 fn sent(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
     pairs
@@ -397,9 +400,7 @@ fn envelope(name: &str, args: serde_json::Value, request_id: RequestId) -> Comma
 struct World {
     state: LayoutState,
     windows: Arc<Windows>,
-    /// 표 · 복원 조율자가 쥔 것과 같은 트리 칸.
-    tree: Arc<TreeAttrs>,
-    /// 표가 쥔 것과 같은 테마 손잡이 — 창 쪽은 `theme_windows`(main · 트리 창).
+    /// 표가 쥔 것과 같은 테마 손잡이 — 창 쪽은 `theme_windows`(main · 모델 밖 팝아웃).
     themes: ThemeControl,
     theme_windows: Arc<RecordingWindows>,
     /// 표가 쥔 것과 같은 서비스 — 시험이 명령 밖에서 값을 확인한다.
@@ -419,19 +420,14 @@ impl World {
     fn build() -> (World, LayoutPorts) {
         let state = LayoutState::new();
         let windows = Arc::new(Windows::default());
-        let tree = Arc::new(TreeAttrs::default());
         let config = ConfigDir::new();
         let settings = config.service();
         let theme_windows = Arc::new(RecordingWindows::new(&[
             MAIN_WINDOW_LABEL,
-            TREE_WINDOW_LABEL,
+            UNMODELED_POPOUT_LABEL,
         ]));
         let themes = ThemeControl::new(
-            Arc::new(EffectiveThemes::new(
-                Arc::clone(&settings),
-                state.clone(),
-                Arc::clone(&tree),
-            )),
+            Arc::new(EffectiveThemes::new(Arc::clone(&settings), state.clone())),
             Arc::clone(&theme_windows) as Arc<dyn ThemeWindows>,
         );
         let settings_events = Arc::new(FakeSettingsEvents::default());
@@ -443,7 +439,6 @@ impl World {
         let restore = Arc::new(RestoreCoordinator::new(
             Arc::clone(&restore_service),
             state.clone(),
-            Arc::clone(&tree),
             // 기록기가 없다 — 답은 곧바로 `durable:false` 다(가드 아래 셸과 같다).
             Arc::new(StateSession::default()),
             labels.clone(),
@@ -464,7 +459,6 @@ impl World {
             World {
                 state,
                 windows,
-                tree,
                 themes,
                 theme_windows,
                 settings,
@@ -620,7 +614,9 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   **답 모양**이 바뀐 세대다(`state_file` — TRD S21-storage §6-5). 세대 13 도 그 답 모양이다(`saves` — 같은
     //   절 · 가드 ⅱ 안내(ADR-0276)를 나르는 칸 — 칸 자체는 구현 · 세션 판단). 세대 14 는 이름이 둘 늘고
     //   (`window.setTheme`·`window.getTheme`) 하나가 빠진 세대다(`ui.refresh` — TRD S21-storage §5-6 · §5-7).
-    assert_eq!(CATALOG_VERSION, 14);
+    //   세대 15 는 그 둘의 `window` 칸이 받는 **어휘**가 준 세대다(`agent-tree` — ADR-0225 · summary 는
+    //   `window.getTheme` · `restore.status` 것만 바뀌었다).
+    assert_eq!(CATALOG_VERSION, 15);
     assert_eq!(COMMAND_SPECS.len(), 26);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -1103,9 +1099,9 @@ async fn popout_of_a_missing_slot_is_refused_without_opening_a_window() {
 
 // ── (B) 창 테마 — window.getTheme · window.setTheme (TRD S21-storage §5-6) ──────────────
 //
-// 유효 테마 · 설정 · 모델 · 트리 칸은 실물이고(설정 = 임시 폴더) 창 쪽만 기록하는 가짜다. 재는 것 = 봉투가 표가
-// 쥔 **그 손잡이**에 닿나 · 답 모양 · null 해제 · 오류 코드 · 쓰기 뒤 밀기. 유효 값 계산 · 트리/레이아웃 갈래는
-// `theme` 옆 단위 시험(`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
+// 유효 테마 · 설정 · 모델은 실물이고(설정 = 임시 폴더) 창 쪽만 기록하는 가짜다. 재는 것 = 봉투가 표가 쥔 **그
+// 손잡이**에 닿나 · 답 모양 · null 해제 · 오류 코드 · 쓰기 뒤 밀기. 유효 값 계산은 `theme` 옆 단위 시험
+// (`--test lib_unit`)이 잰다 — 여기서 다시 재지 않는다.
 
 #[tokio::test]
 async fn window_get_theme_answers_the_own_and_the_effective_theme() {
@@ -1129,7 +1125,7 @@ async fn window_get_theme_answers_the_own_and_the_effective_theme() {
     );
 }
 
-/// 트리 창 쓰기가 트리 칸에 들고, 쓴 뒤 모든 창을 다시 민다 — 자기 테마가 없는 창은 그때의 `theme.default`.
+/// 창 쓰기가 그 창의 모델 항목에 들고, 쓴 뒤 모든 창을 다시 민다 — 자기 테마가 없는 창은 그때의 `theme.default`.
 #[tokio::test]
 async fn window_set_theme_writes_the_window_and_pushes_every_window() {
     let (world, queue, receiver) = queued();
@@ -1140,17 +1136,30 @@ async fn window_set_theme_writes_the_window_and_pushes_every_window() {
         &queue,
         &world.mail,
         "window.setTheme",
-        json!({ "window": TREE_WINDOW_LABEL, "theme": "e-ink" }),
+        json!({ "window": MAIN_WINDOW_LABEL, "theme": "e-ink" }),
     )
     .await
     .outcome
     .expect("성공 답장");
 
     assert_eq!(ok, json!({ "theme": "e-ink", "effective": "e-ink" }));
-    assert_eq!(world.tree.attrs().theme, Some(UiTheme::EInk));
+    assert_eq!(
+        world
+            .state
+            .0
+            .lock()
+            .unwrap()
+            .window_attrs(MAIN_WINDOW_LABEL)
+            .unwrap()
+            .theme,
+        Some(UiTheme::EInk)
+    );
     assert_eq!(
         world.theme_windows.take(),
-        sent(&[(MAIN_WINDOW_LABEL, "light"), (TREE_WINDOW_LABEL, "e-ink")])
+        sent(&[
+            (MAIN_WINDOW_LABEL, "e-ink"),
+            (UNMODELED_POPOUT_LABEL, "light")
+        ])
     );
 
     world.mail.clear();
@@ -1159,7 +1168,7 @@ async fn window_set_theme_writes_the_window_and_pushes_every_window() {
         &queue,
         &world.mail,
         "window.getTheme",
-        json!({ "window": TREE_WINDOW_LABEL }),
+        json!({ "window": MAIN_WINDOW_LABEL }),
     )
     .await
     .outcome
@@ -1216,7 +1225,10 @@ async fn window_set_theme_null_clears_the_windows_own_theme() {
     );
     assert_eq!(
         world.theme_windows.take(),
-        sent(&[(MAIN_WINDOW_LABEL, "dark"), (TREE_WINDOW_LABEL, "dark")])
+        sent(&[
+            (MAIN_WINDOW_LABEL, "dark"),
+            (UNMODELED_POPOUT_LABEL, "dark")
+        ])
     );
 }
 
@@ -1303,12 +1315,35 @@ async fn an_unknown_window_is_a_conflict_for_both_theme_commands() {
     assert!(world.theme_windows.take().is_empty());
 }
 
+/// ADR-0225: 트리 전용 창(`agent-tree`)은 걷혔다 — 그 label 도 다른 모르는 창과 같은 `CONFLICT` 이고, 쓰기는 아무
+/// 창도 만들지 않고 밀지도 않는다.
+#[tokio::test]
+async fn the_retired_tree_window_label_is_an_unknown_window_for_both_theme_commands() {
+    let (world, queue, receiver) = queued();
+    let retired = "agent-tree";
+
+    for (name, args) in [
+        ("window.getTheme", json!({ "window": retired })),
+        (
+            "window.setTheme",
+            json!({ "window": retired, "theme": "light" }),
+        ),
+    ] {
+        world.mail.clear();
+        let err = error_of(call(&receiver, &queue, &world.mail, name, args).await);
+        assert_eq!(err.code(), ErrorCode::Conflict, "{name}");
+        assert!(err.message().contains(retired), "{name}: {}", err.message());
+    }
+    assert!(world.state.0.lock().unwrap().window_attrs(retired).is_err());
+    assert!(world.theme_windows.take().is_empty());
+}
+
 /// ★그 창이 못 받았으면 성공이 아니다★(ADR-0166 결정 6) — `INTERNAL` 이고 문구가 그 창과 사유를 말한다. 쓴 값은
 /// 남아 `window.getTheme` 이 새 값을 답한다.
 #[tokio::test]
 async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written() {
     let (world, queue, receiver) = queued();
-    world.theme_windows.refuse(TREE_WINDOW_LABEL);
+    world.theme_windows.refuse(MAIN_WINDOW_LABEL);
 
     let err = error_of(
         call(
@@ -1316,14 +1351,14 @@ async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written
             &queue,
             &world.mail,
             "window.setTheme",
-            json!({ "window": TREE_WINDOW_LABEL, "theme": "light" }),
+            json!({ "window": MAIN_WINDOW_LABEL, "theme": "light" }),
         )
         .await,
     );
 
     assert_eq!(err.code(), ErrorCode::Internal);
     assert!(
-        err.message().contains(TREE_WINDOW_LABEL) && err.message().contains(WINDOW_GONE),
+        err.message().contains(MAIN_WINDOW_LABEL) && err.message().contains(WINDOW_GONE),
         "{}",
         err.message()
     );
@@ -1335,7 +1370,7 @@ async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written
         &queue,
         &world.mail,
         "window.getTheme",
-        json!({ "window": TREE_WINDOW_LABEL }),
+        json!({ "window": MAIN_WINDOW_LABEL }),
     )
     .await
     .outcome
@@ -1347,14 +1382,14 @@ async fn a_theme_the_target_window_did_not_receive_is_internal_and_stays_written
 #[tokio::test]
 async fn a_theme_only_another_window_did_not_receive_is_a_success() {
     let (world, queue, receiver) = queued();
-    world.theme_windows.refuse(MAIN_WINDOW_LABEL);
+    world.theme_windows.refuse(UNMODELED_POPOUT_LABEL);
 
     let ok = call(
         &receiver,
         &queue,
         &world.mail,
         "window.setTheme",
-        json!({ "window": TREE_WINDOW_LABEL, "theme": "light" }),
+        json!({ "window": MAIN_WINDOW_LABEL, "theme": "light" }),
     )
     .await
     .outcome
@@ -1861,7 +1896,10 @@ async fn a_bus_theme_default_write_reaches_every_window_without_its_own_theme() 
 
     assert_eq!(
         world.theme_windows.take(),
-        sent(&[(MAIN_WINDOW_LABEL, "e-ink"), (TREE_WINDOW_LABEL, "light")])
+        sent(&[
+            (MAIN_WINDOW_LABEL, "e-ink"),
+            (UNMODELED_POPOUT_LABEL, "light")
+        ])
     );
 }
 
@@ -1912,8 +1950,6 @@ impl RestoreWindows for RestoreScreen {
     }
 
     fn place_main(&self, _at: Option<(WindowBounds, Landing)>, _maximized: bool) {}
-
-    fn place(&self, _label: &str, _bounds: WindowBounds, _at: Landing) {}
 
     fn set_shown(&self, _label: &str, _shown: bool) {}
 
@@ -1973,7 +2009,7 @@ impl World {
                     saved_at_ms: 1_700_000_000_000,
                     clean_exit: false,
                     resolved_crash_copy: None,
-                    windows: to_persisted(&previous, WindowAttrs::default()),
+                    windows: to_persisted(&previous),
                 },
             }),
             state_file,
@@ -2012,7 +2048,7 @@ async fn restore_status_reports_the_crash_copy_shape() {
     assert_eq!(
         awaiting,
         json!({"crash_copy": "awaiting", "saved_at_ms": 1_700_000_000_000_u64, "windows": 3, "tabs": 3, "durable": false, "saves": false, "state_file": "ok"}),
-        "창 수 = main + 팝아웃(트리 창은 세지 않는다)"
+        "창 수 = main + 팝아웃"
     );
 }
 
@@ -3267,15 +3303,9 @@ fn recording_bridge_with_windows(
         // ★실 예약 집합을 쓴다★ — 손으로 이름을 적으면 이 테스트가 재는 것이 「내가 적은 목록」이 되고,
         //   어휘가 늘어도 아무 신호가 안 난다.
         reserved_names(),
-        // 설정이 숨긴 창 — 운영에서는 `hidden_window_labels` 가 `tauri.conf.json` 에서 뽑는다(오늘 이 하나).
-        [TREE_WINDOW_LABEL.to_string()],
     ));
     (bridge, rx, dispatch)
 }
-
-/// 설정이 `visible: false` 로 선언한 창(`src-tauri/tauri.conf.json`) — ★사전순으로 `slot-popup-N` 보다
-/// **앞선다**★. 마지막 수단이 그냥 첫 생존자를 고르면 이 창이 목적지가 된다.
-const TREE_WINDOW_LABEL: &str = "agent-tree";
 
 impl RecordingDispatch {
     fn close(&self, label: &str) {
@@ -3419,77 +3449,6 @@ async fn a_closed_host_hands_the_destination_to_a_live_reporter() {
     windows.close("popup-2");
     assert_eq!(bridge.host(), None);
     assert!(bridge.declarations().is_empty());
-}
-
-/// ★★사람이 못 보는 창은 마지막 수단 목적지가 될 수 없다★★
-///
-/// 사전순 첫 생존자를 그냥 고르면 `agent-tree` 가 모든 `slot-popup-N` 보다 앞선다 — 그 창은 설정이
-/// `visible: false` 라, `tab.next` 이 **성공을 답하면서** 아무도 안 보는 창을 칠한다. 호출자에게는
-/// 「적용됐다」인데 화면은 그대로다.
-///
-/// ★이 규칙이 지키는 것은 「올바른 목적지」가 아니라 **최악의 모양**이다★: main 우선 규칙이 기대는 전제
-/// (숨은 main 이 웹뷰 표에 남는다)는 GUI 로 확인하지 못했다(권한 설정이 `hide()`·`close()` 를 막는다 —
-/// 2026-08-23). 그 전제가 틀려도 여기서 나오는 답은 「host 없음 = 지금 부를 수 없음」이지 「안 보이는 곳에
-/// 조용히 적용됨」이 아니다.
-#[tokio::test]
-async fn the_last_resort_host_is_never_a_window_the_user_cannot_see() {
-    let (bridge, mut seen, windows) = recording_bridge_with_windows(Duration::from_secs(5));
-
-    // ★위 상수가 진짜 설정과 같은지 먼저 본다★ — 운영은 `hidden_window_labels` 로 설정에서 뽑으므로,
-    //   설정이 바뀌면 이 하네스가 재는 것이 실물과 갈린다(그때 이 줄이 먼저 걸린다).
-    let conf: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string("tauri.conf.json").expect("셸 설정"))
-            .expect("설정은 JSON");
-    let declared_hidden: Vec<&str> = conf["app"]["windows"]
-        .as_array()
-        .expect("창 목록")
-        .iter()
-        .filter(|window| window["visible"] == serde_json::Value::Bool(false))
-        .map(|window| window["label"].as_str().expect("label"))
-        .collect();
-    assert_eq!(
-        declared_hidden,
-        vec![TREE_WINDOW_LABEL],
-        "설정이 숨긴 창 목록이 바뀌었다 — 하네스 상수를 함께 고칠 것"
-    );
-
-    // main 은 보고에 실패했다고 친다 — 남은 후보는 숨은 트리 창과 팝아웃뿐이다.
-    bridge.report(TREE_WINDOW_LABEL, vec![view_decl("tab.next")]);
-    assert!(
-        TREE_WINDOW_LABEL < "slot-popup-1",
-        "이 테스트의 전제 — 트리 label 이 팝아웃보다 사전순 앞이다"
-    );
-    assert_eq!(
-        bridge.host(),
-        None,
-        "보이는 후보가 없으면 목적지가 없다 — 숨은 창을 고르지 않는다"
-    );
-    assert!(
-        bridge.declarations().is_empty(),
-        "목적지가 없으면 광고도 없다 — 못 부를 이름을 명부에 올리지 않는다"
-    );
-
-    // 팝아웃이 뜨면 그쪽이 목적지다(사전순으로는 뒤지만 사람이 볼 수 있다).
-    bridge.report("slot-popup-1", vec![view_decl("tab.next")]);
-    assert_eq!(bridge.host().as_deref(), Some("slot-popup-1"));
-
-    let (_world, receiver) = with_view(Arc::clone(&bridge));
-    let mail = Mailbox::default();
-    let request_id = RequestId::new();
-    receiver.accept(
-        envelope("tab.next", json!({ "window": "main" }), request_id),
-        mail.deliver(),
-    );
-    let (target, _request) = seen.recv().await.expect("보이는 창으로 내려간다");
-    assert_eq!(target, "slot-popup-1", "숨은 창에는 안 보낸다");
-
-    // 그 팝아웃이 닫히면 다시 목적지가 없다 — 숨은 창으로 **떨어지지 않는다**.
-    windows.close("slot-popup-1");
-    assert_eq!(bridge.host(), None);
-
-    // main 은 이 규칙 밖이다 — `--hidden` 부팅에서 숨어 있어도 사용자가 트레이로 여는 그 창이다.
-    bridge.report(MAIN_WINDOW_LABEL, vec![view_decl("tab.next")]);
-    assert_eq!(bridge.host().as_deref(), Some(MAIN_WINDOW_LABEL));
 }
 
 /// ★광고하는 명단과 봉투를 받는 창은 **같은 창에서 나온다**★ — 갈리면 데몬이 B 를 광고하는 동안 A 가
@@ -3708,7 +3667,7 @@ async fn a_duplicate_request_id_is_refused_instead_of_displacing_the_live_waiter
     // 같은 번호로 다시 — 아직 첫 왕복이 돌고 있다.
     let second = Mailbox::default();
     receiver.accept(
-        envelope("tab.next", json!({ "window": "agent-tree" }), request_id),
+        envelope("tab.next", json!({ "window": "slot-popup-1" }), request_id),
         second.deliver(),
     );
     second.settle(1).await;
@@ -3992,7 +3951,7 @@ async fn a_webview_name_is_unknown_until_a_window_reports_it() {
     );
 }
 
-/// ★같은 목록을 다시 보고하면 차분이 없다★ — 창마다 이 App 이 떠서 전부 보고하므로(main·트리·팝아웃)
+/// ★같은 목록을 다시 보고하면 차분이 없다★ — 창마다 이 App 이 떠서 전부 보고하므로(main·팝아웃)
 /// 보고마다 차분을 내면 뜻 없는 왕복이 창 수만큼 는다.
 /// ★목적지는 main 이 이긴다★ — 팝아웃이 목적지를 가져가면 그 창이 닫히는 순간 웹뷰 명령 전체가 죽는다.
 #[tokio::test]
@@ -4040,7 +3999,7 @@ async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
         "window".to_string(),
         ViewArgSchema {
             ty: Some("string".to_string()),
-            allowed: Some(vec!["main".to_string(), "agent-tree".to_string()]),
+            allowed: Some(vec!["main".to_string(), "slot-popup-1".to_string()]),
             description: Some("대상 창 label".to_string()),
         },
     );
@@ -4066,7 +4025,7 @@ async fn a_reported_shape_becomes_a_catalog_item_in_the_same_dialect() {
     assert_eq!(item["args"]["properties"]["window"]["type"], "string");
     assert_eq!(
         item["args"]["properties"]["window"]["enum"][1],
-        "agent-tree"
+        "slot-popup-1"
     );
     assert_eq!(item["args"]["required"], json!(["window"]));
     // 카탈로그 항목의 칸 이름은 Rust 쪽과 같아야 한다 — 그 목록을 여기서 못 박는다.
