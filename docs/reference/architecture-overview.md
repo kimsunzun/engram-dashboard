@@ -166,7 +166,7 @@ flowchart TD
 
 ### crate 계층 (의존 아래→위)
 
-**실행 산출 = `engram-dashboard-daemon.exe` + `engram`(제어 평면 CLI bin)** — 나머지는 그것들이 쓰는 라이브러리다. `engram`의 표면은 셋이다: 닫힌 계열 **`mail`**(우편 — `send`·`status`·`pending`)과 **`agent`**(에이전트 제어 — `list`·`spawn`·`new`·`rename`·`move`. 짝이 되는 MCP 툴이 **없다**. 제어를 CLI로만 내는 것이 ADR-0132), 그리고 **전체 이름**(`<계열>.<동사>`, 예 `agent.new` — 데몬이 런타임에 내려 주는 표를 그대로 친다. 그래서 계열 파서를 안 고쳐도 새 명령·새 인자가 즉시 도달한다. 발견은 `engram commands` — ADR-0155/0156). 계열 이름엔 점이 없고 명령 이름엔 늘 있어 분기가 모호하지 않다. `mail` 계열의 **노출은 조건부**다 — 스폰 때 심은 표식이 도움말에서만 가리고 동사 자체는 그대로 데몬에 나간다(거절을 관측 가능하게 만드는 것이 데몬 몫 — ADR-0133). (앱 exe는 src-tauri crate 산출 — 그래서 우리 실행파일은 앱·데몬·engram 3개. 데몬 crate는 `test-harness` feature 뒤에 하네스 bin을 더 갖지만 배포물이 아니다.)
+**실행 산출 = `engram-dashboard-daemon.exe`(daemon 패키지) + `engram`(제어 평면 CLI bin — cli 패키지 `engram-dashboard-cli`, ADR-0273 · ADR-0285)** — 나머지는 그것들이 쓰는 라이브러리다. `engram`의 표면은 셋이다: 닫힌 계열 **`mail`**(우편 — `send`·`status`·`pending`)과 **`agent`**(에이전트 제어 — `list`·`spawn`·`new`·`rename`·`move`. 짝이 되는 MCP 툴이 **없다**. 제어를 CLI로만 내는 것이 ADR-0132), 그리고 **전체 이름**(`<계열>.<동사>`, 예 `agent.new` — 데몬이 런타임에 내려 주는 표를 그대로 친다. 그래서 계열 파서를 안 고쳐도 새 명령·새 인자가 즉시 도달한다. 발견은 `engram commands` — ADR-0155/0156). 계열 이름엔 점이 없고 명령 이름엔 늘 있어 분기가 모호하지 않다. 도움말 화면은 **데몬이 낸다**(`/control/help` — CLI 는 낱말을 실어 보내고 받은 화면을 찍을 뿐이다 · ADR-0285). 화면은 호출자와 무관하게 같다(ADR-0220 결정 4) — 우편이 막힌 자격증명의 `mail` 동사도 그대로 데몬에 나가고 거절은 데몬이 한다(ADR-0133). (앱 exe는 src-tauri crate 산출 — 그래서 우리 실행파일은 앱·데몬·engram 3개. 데몬 crate는 `test-harness` feature 뒤에 하네스 bin을 더 갖지만 배포물이 아니다.)
 
 ```mermaid
 flowchart BT
@@ -178,7 +178,8 @@ flowchart BT
   agent["agent [lib]<br/>에이전트 엔진(tauri import 0 · protocol 무의존 — wire 타입을 모른다)<br/>seam: transport/backend/sink/control · agent.* 명령 선언(commands.rs)"]
   messaging["messaging [lib]<br/>메시징 커널(보관함·장부·그룹·봉투·발송·busy 게이트)<br/>워크스페이스 crate 무의존 — 접합은 포트 trait 뿐(ADR-0110)"]
   net["net [lib]<br/>네트워크 행(WS 서버·Origin·토큰 핸드셰이크·연결 수명·단일 writer·keepalive<br/>팬아웃 레지스트리 · 프레임 포트 계약 · 단일인스턴스 · 포트파일)<br/>경계·격리 게이트의 정본 = 그 crate lib.rs 헤더(ADR-0129)"]
-  daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host) · 명령 배달·명부(command_delivery/roster)<br/>데이터 폴더 규칙 · 데몬 쪽 배치(data_dir — 셸은 사본, ADR-0271)<br/>· bin: engram-dashboard-daemon / engram"]
+  daemon["daemon [lib+exe]<br/>응용 층 + 조립 — 여기서 더 쪼개지 않는다(ADR-0130 보류)<br/>AgentManager 소유 · 소켓 수락 루프 · 네트워크 행 조립 · MCP 제어 서버(S17)<br/>메시징 호스트 어댑터/조립실(messaging_host) · 명령 배달·명부(command_delivery/roster)<br/>데이터 폴더 규칙 · 데몬 쪽 배치(data_dir — 셸은 사본, ADR-0271)<br/>help 화면을 낸다(control/help — /control/help, ADR-0285)<br/>· bin: engram-dashboard-daemon"]
+  cli["cli [bin]<br/>제어 평면 CLI engram.exe — 인증 + 배송(손조립 HTTP)<br/>데몬 패키지 · tokio 를 의존하지 않는다 · bin 전용(ADR-0273 · ADR-0285)"]
 
   protocol -->|"의존"| command
   agent -->|"의존"| command
@@ -193,9 +194,11 @@ flowchart BT
   daemon -->|"의존"| command
   daemon -->|"의존"| net
   daemon -->|"의존"| messaging
+  cli -->|"의존"| agent
+  cli -->|"의존"| command
 ```
 
-- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **agent에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram` bin)** 으로 들어갔다. 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정). 이후 명령 버스(ADR-0155)가 둘을 더 들였다 — `inventory`(선언 링커 수집. S20 Step 1의 **유일한 신규 서드파티 crate**이고 `agent`를 타고 릴리즈 바이너리에 링크된다)와, `agent`의 **production** 의존이 된 `ts-rs`(선언 매크로가 인자·반환 struct에 `TS` derive를 단다 — 코어가 TS 생성 도구를 운영 그래프에 안고 있다는 뜻이다).
+- **멤버 목록의 정본은 루트 `Cargo.toml`의 `[workspace] members`** (위 그래프는 lib 계층과 데몬 · CLI 만 그린 것 — 앱 exe를 내는 src-tauri는 여기 없다). S17 제어 채널은 새 crate가 아니라 **agent에 seam(`ControlChannel`) 정의 + daemon에 구현(MCP 서버·토큰 레지스트리·`engram` bin)** 으로 들어갔다(`engram` bin 은 그 뒤 cli 패키지로 나갔다 — ADR-0273). 새 의존성 = `rmcp`(공식 Rust MCP SDK) + `axum`(daemon 한정). 이후 명령 버스(ADR-0155)가 둘을 더 들였다 — `inventory`(선언 링커 수집. S20 Step 1의 **유일한 신규 서드파티 crate**이고 `agent`를 타고 릴리즈 바이너리에 링크된다)와, `agent`의 **production** 의존이 된 `ts-rs`(선언 매크로가 인자·반환 struct에 `TS` derive를 단다 — 코어가 TS 생성 도구를 운영 그래프에 안고 있다는 뜻이다).
 - **command(2026-08-14 · ADR-0155)** 는 명령 버스 **도구**만 담고 명령은 0개다 — 어휘는 생산자 옆에서 선언한다(`agent` = `agent.*`, `src-tauri` = `window/tab/slot`). **화살표는 들어오는 쪽 한 방향뿐**이고, 그중 `agent → command`가 **코어의 첫 워크스페이스 의존**이다(그래도 `agent → protocol`은 여전히 없다 — 도구 crate가 그 유입을 막는 것이 이 분리의 요점). 워크스페이스 의존 0·명령 0개는 CI 의존 상한 게이트가 지키고, 불변식 정본은 그 crate `src/lib.rs` 헤더다.
 - **messaging(2026-07-28 · ADR-0110)** 은 위 그래프에서 나가는 화살표가 없다 — 워크스페이스의 어느 crate 도 의존하지 않는다(agent 조차, 컴파일러 강제 벽). 데몬만 그쪽으로 의존하고, `AgentManager`·`OutputSink`·`ControlRegistry` 를 커널 포트에 꽂는 어댑터는 데몬 `messaging_host.rs` 가 소유한다. 안에서 무슨 정책이 도는지는 [에이전트 간 메시징](#에이전트-간-메시징-브로커--s18).
 - **net(2026-08-05 · ADR-0129 슬라이스 1)** 은 데몬 crate `src/` 에서 로직·모듈명·타입명 무변경으로 **그대로 이사**한 네트워크 행이다. 프레임에 실린 것이 명령인지 출력인지 메시징인지를 **타입으로도** 모르고 위층과는 `frame_port` 계약으로만 만난다 — 그 무지의 범위와 근거는 `crates/engram-dashboard-net/src/lib.rs` 헤더에 있다. **소켓 수락 루프 자체는 아직 데몬 조립부**(`run_accept_loop`)라 경계가 "소켓 수락 **뒤**" 다(ADR-0129 슬라이스 3의 이동 대상이었으나 **ADR-0130 으로 보류** — 옮기지 않는다). 격리 게이트와 의존 상한 **규칙**(열거가 아니라 규칙)도 같은 헤더와 그 crate `Cargo.toml` 이 정본이다. 그 뒤 0-4가 핸드셰이크 프레임을 이 crate 소유(`auth::AuthFrame`)로 옮겼다 — 프레임 모양만 필요한 소비자(지금 셸)는 **기본 feature(비어 있음)로만 쓴다**(`server`를 켜면 async 런타임이 딸려 온다). 기본 feature 에 async 런타임이 없다는 것은 CI `platform gate 7` 이 net 자신으로 잰다.
@@ -381,7 +384,7 @@ flowchart TD
   DELIV -.->|"세 분기 공통 — 결과를 동기 반환"| ACK
 ```
 
-- **입구는 원문을 나르고, 계약은 데몬이 만든다.** MCP 툴과 CLI(`engram mail` — 별도 exe라 HTTP로 붙는다)는 요청을 **그대로** 넘기고, `ControlCommand` 조립과 **의미 검증·정규화**(수신자 · 회신 계약 인자 · 멤버명 분해·트림)는 데몬 공유 핸들러 한 곳에서만 한다. 그래서 두 입구의 응답 JSON이 바이트 동일하고, 그 아래는 어느 입구로 들어왔는지 모른다(entrance-agnostic — ADR-0109). 입구별 인자 표면의 정본은 `crates/engram-dashboard-daemon/src/bin/engram.rs` 헤더다. **CLI는 계열이 둘이다** — `mail`(우편)과 `agent`(제어). agent 계열엔 **짝이 되는 MCP 툴을 의도적으로 두지 않았다**(제어는 빈도가 낮아 상주 연결이 아깝다 — ADR-0132).
+- **입구는 원문을 나르고, 계약은 데몬이 만든다.** MCP 툴과 CLI(`engram mail` — 별도 exe라 HTTP로 붙는다)는 요청을 **그대로** 넘기고, `ControlCommand` 조립과 **의미 검증·정규화**(수신자 · 회신 계약 인자 · 멤버명 분해·트림)는 데몬 공유 핸들러 한 곳에서만 한다. 그래서 두 입구의 응답 JSON이 바이트 동일하고, 그 아래는 어느 입구로 들어왔는지 모른다(entrance-agnostic — ADR-0109). 입구별 인자 표면의 정본은 `crates/engram-dashboard-cli/src/bin/engram.rs` 헤더다. **CLI는 계열이 둘이다** — `mail`(우편)과 `agent`(제어). agent 계열엔 **짝이 되는 MCP 툴을 의도적으로 두지 않았다**(제어는 빈도가 낮아 상주 연결이 아깝다 — ADR-0132).
 - **노출 표면 = 메시징 2툴(`eg_send` 발송 · `eg_messages` 상태·미결 조회) + 진단 `engram_ping`.** 그룹 관리 툴은 사용자 정의 그룹과 함께 폐지됐다(ADR-0111 결정 4) — CLI에도 `group` 동사가 없고 회귀 가드 테스트가 부활을 막는다. 이름이 닮은 Claude Code 내장 `SendMessage` 툴은 메시징 스폰에서 deny로 막는다(오발 방지 — ADR-0106).
 - **스폰 때 입구를 깔아 준다:** 에이전트별 `mcp-config`와 `--settings` 조각(전역 차단 설정을 세션 한정으로 우회 — 인라인 JSON이 아니라 **파일 경로**)을 만들어 주고, **프라이밍**이 "너는 팀의 한 명이고, 네 턴의 글은 동료에게 안 간다 — 닿는 법은 `engram help mail` 이 알려 준다"를 시스템 프롬프트에 얹는다(ADR-0092 · 0099는 0126/0128이 부분 폐기 · 0109는 0111이 부분 폐기). ★**그 문서는 계약을 산문으로 베끼지 않는다**★ — 2026-09-19에 포인터 한 장으로 줄였다(그 전엔 `send_message` 툴 설명과 같은 계약을 두 벌로 끌고 있었다). 툴 인자의 정본은 각 인자에 붙은 스키마 설명이고, 회신 계약·응답 행을 읽는 법은 `engram help mail` 이다.
 - ★**한 에이전트에게 열리는 입구는 하나다**★ — 스폰 시 capability로만 갈리고 **런타임 폴백이 없다**(ADR-0126이 우회 교육을 폐지, ADR-0128이 물리 배선까지 등호로 묶었다). 안 깐 입구는 거절 응답에서도 **대안 채널을 알리지 않는다**(ADR-0133). 위 다이어그램의 두 화살표는 한 에이전트가 아니라 **두 스폰 모드**다.

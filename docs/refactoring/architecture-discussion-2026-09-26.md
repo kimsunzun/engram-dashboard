@@ -258,7 +258,7 @@
 
 ### 사실 (코드 대조 2026-10-02)
 
-- `engram.exe`(에이전트가 자기 터미널에서 부르는 제어 CLI)는 **데몬 패키지의 두 번째 bin 타깃**이다(`crates/engram-dashboard-daemon/Cargo.toml:37-39` · 소스 `src/bin/engram.rs` 비테스트 2,791줄). 데몬 lib 를 한 줄도 쓰지 않는다 — 쓰는 것은 agent 의 명령 어휘 상수(`engram.rs:117-121`) · command 의 요청 번호 · discovery 의 설치 위치 셋뿐. 그런데 같은 패키지라 빌드 때 데몬 의존 전체를 끌고 온다(HTTP 를 손으로 짤 만큼 의존 최소화가 의도였다 — 같은 `Cargo.toml` 주석).
+- `engram.exe`(에이전트가 자기 터미널에서 부르는 제어 CLI)는 **데몬 패키지의 두 번째 bin 타깃**이다(`crates/engram-dashboard-daemon/Cargo.toml:37-39` · 소스 `src/bin/engram.rs` 비테스트 2,791줄). 데몬 lib 를 한 줄도 쓰지 않는다 — 쓰는 것은 agent 의 명령 어휘 상수(`engram.rs:117-121`) · command 의 요청 번호 · discovery 의 설치 위치 셋뿐. 그런데 같은 패키지라 빌드 때 데몬 의존 전체를 끌고 온다(HTTP 를 손으로 짤 만큼 의존 최소화가 의도였다 — 같은 `Cargo.toml` 주석). **→ 처리 2-3(2026-10-08)**: 독립 패키지 `crates/engram-dashboard-cli` 로 옮겼다(U2 `58c80a3` · 의존 = agent · command · serde_json). 그 사이 2-2 U2 가 설치 위치를 데몬 lib 로 옮겨 CLI 가 데몬 lib 를 한 줄(help 본문 경로) 불렀고, 2-3 U1(`2de9756`)이 help 를 데몬으로 옮기며(`/control/help`) 그 줄째 걷었다 — 아래 후보 9 의 「설치 위치 규칙 한 벌 더」는 대상이 없어졌다(ADR-0285 · step-log).
 - CLI 어휘 상수(동사 · 플래그 · 실행 파일 이름 · 상태 낱말)는 agent 자신도 쓴다(`manager.rs` · `commands.rs` · 백엔드) — 「`agent.*` 명령의 어휘」라 agent 소유가 맞다.
 - 셸 테스트가 데몬 패키지를 테스트 전용 의존으로 끌어온다(`src-tauri/Cargo.toml:104`) — 테스트용 서버 함수(`start_test_server*`, `crates/engram-dashboard-daemon/src/lib.rs:915-929`)가 테스트 표시 없이 공개 API 로 나가 있어서다.
 
@@ -288,7 +288,7 @@
 - **2. 클라·데몬 떼기**
   - 2-1 셸 → agent 끊기(후보 5) — 선행 1-1 · **① 슬롯 스폰을 `agent.new` 경로로 → ② 셸 검사 제거 순서 엄수** · ③ 등록 거절 메시지 박스 · GUI 실측. → 경로는 ADR-0279 로 바뀌었다(정책 벽 = 데몬 `SpawnByCwd` 처리부 · 슬롯 스폰 경로 그대로). **→ 착지 2026-10-07**(U1 `8b48386` · U2 `16f81be` · U3 `7222b90` — 거절 박스 = ADR-0281 · step-log).
   - 2-2 discovery 나누기(후보 6, 정지 명령 클라이언트 제외) — 선행 1-3 · 데몬 기동 실측. **→ 착지 2026-10-07**(U1 `a0ec7f4` · U2 `3c9bf33` · U3 `b42e139` · U4 `d2f9822` — crate 삭제 · 정지 명령 클라이언트는 3-2 까지 셸 `daemon_client/stop.rs` 임시 거처 · 세부 = ADR-0282 · step-log).
-  - 2-3 engram CLI 독립 패키지(후보 9) — 선행 2-2.
+  - 2-3 engram CLI 독립 패키지(후보 9) — 선행 2-2. **→ 착지 2026-10-08**(U1 `2de9756` — help 를 데몬이 낸다(`/control/help`) · CLI 공통 실패 길 · U2 `58c80a3` — 패키지 `engram-dashboard-cli` · U3 — 게이트 · 문서 · 세부 = ADR-0285 · step-log).
   - 2-4 테스트용 서버 함수를 테스트 전용 플래그 뒤로.
 - **3. transport**(별도 TRD · 별도 브랜치) — 3-1 `protocol` 정리(후보 8 · 인증 메시지 이전 · 의존 0 게이트) · 3-2 셸 부착(어댑터 · 정지 명령 클라이언트 · 접속 정보 인터페이스) · 3-3 데몬 부착 + net 걷기(후보 7).
 - **4. 안쪽 정리** — 데몬 구조 문제 · command 작은 정리 넷 · agent `transport/` 이름 변경 · agent 쪼갤지. 셸 안쪽은 플러그인과 함께.

@@ -76,10 +76,11 @@
   #   (`-- export_bindings_`)는 걷혔다. 로컬에선 2번(워크스페이스 회귀)과 2f 가 각각 한 번씩 굽는다)
   git add -N -f -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
   git diff --exit-code -- crates/engram-dashboard-protocol/bindings/ crates/engram-dashboard-agent/bindings/ src-tauri/bindings/
-  # platform 게이트 ⑦ async 반입 — 셋 다 `| rg -i "^(tokio|mio|tokio-tungstenite|futures-util) "` 로 센다
+  # platform 게이트 ⑦ async 반입 — 넷 다 `| rg -i "^(tokio|mio|tokio-tungstenite|futures-util) "` 로 센다
   #   (뒤 공백 포함 앵커를 빼지 말 것 — 빼면 agent 쪽이 `termios` 를 문다). `cargo tree` 가 0 이 아닌 코드로 끝나면
   #   그 줄은 FAIL 이다(0줄로 읽혀 눈먼 PASS 가 된다). 판정 정본 = ci.yml `platform gate 7` 스텝
   cargo tree --locked -p engram-dashboard-agent -e normal --prefix none --target all                    # → 0줄 PASS
+  cargo tree --locked -p engram-dashboard-cli -e normal --prefix none --target all                      # → 0줄 PASS (CLI)
   cargo tree --locked -p engram-dashboard-net -e normal --prefix none --target all                      # 기본 feature → 0줄 PASS
   cargo tree --locked -p engram-dashboard-net --features server -e normal --prefix none --target all    # 짝 → 1줄 이상 PASS(0줄이면 패턴이 눈멀었다)
   ```
@@ -135,7 +136,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-detached.ps1 -Co
 cargo build -p engram-dashboard-agent                          # 빌드
 cargo test  -p engram-dashboard-agent -- --test-threads=4      # 영향 crate 테스트
 ```
-- **`-- --test-threads=4`는 crate마다 갈린다** — 실 자식 프로세스를 띄우는 crate에만 붙는다(`agent`·`daemon`·`platform`). 인메모리 단위 테스트뿐인 crate(`base`·`command`·`protocol`·`messaging`·`net`)엔 안 붙는다 — `base` 는 프로세스를 띄우던 PID 헬퍼 시험이 `platform` 으로 나가며 이쪽으로 왔다(ADR-0266). **판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」**.
+- **`-- --test-threads=4`는 crate마다 갈린다** — 실 자식 프로세스를 띄우는 crate에만 붙는다(`agent`·`daemon`·`platform`·`cli`). 인메모리 단위 테스트뿐인 crate(`base`·`command`·`protocol`·`messaging`·`net`)엔 안 붙는다 — `base` 는 프로세스를 띄우던 PID 헬퍼 시험이 `platform` 으로 나가며 이쪽으로 왔다(ADR-0266). **판정 규칙의 정본 = CLAUDE.md 「빌드·검증 명령」**.
 - **★좁혀 돌릴 때도 분리 실행이다★** — 위 「분리 실행」 절은 quick에도 그대로 걸린다. 한 crate짜리 명령이라고 셸에서 직접 돌리지 않는다(좁혀 돌려도 컴파일 로그는 길다 — 이유는 크래시 회피가 아니라 **출력 처리**이고 근거는 그 절).
 - **에이전트 crate(`engram-dashboard-agent`)가 닿으면 격리 게이트도 포함**(quick이어도 — 명령·판정은 아래 standard 4번): quick의 `cargo test -p`만으론 Tauri import 회귀를 못 잡아 false PASS가 난다. **바닥 crate(`engram-dashboard-base`)가 닿을 때도 같다** — 그쪽 짝은 standard 4b·4c번. **OS 층 crate(`engram-dashboard-platform`)가 닿을 때도 같다** — 그쪽 짝은 standard 4e번과 아래 의존 상한 게이트의 platform 줄, 그리고 platform 시험 기능 운영 그래프 게이트. **어느 crate 든 `.rs` 의 OS `cfg` 술어(목록 = platform `src/lib.rs` 헤더 게이트 ④)를 더하거나 걷거나 그런 파일을 옮기면 standard 4f 블록도 필수다**(quick이어도 — 명단 밖 새 파일이 CI 에서야 빨개진다). **어느 멤버든 `Cargo.toml` 의 의존을 더하거나 바꾸면 4g · 4i 블록**, **`.rs` 에 `std::os::windows` · `std::os::unix` 를 더하거나 걷거나 그런 파일을 옮기면 4h 블록도 필수다**(같은 이유). **셸의 `src-tauri/src/daemon_client/replay_flight.rs`가 닿을 때도 같다** — 그쪽 짝은 standard 4d번이고, 거기선 컴파일러가 아무것도 막아 주지 않아 그 게이트가 유일한 벽이다.
 - 프론트가 닿았으면(quick 범위라도) 프론트 게이트(위 확정 절차): `npm test` + `npx tsc --noEmit`.
@@ -250,26 +251,29 @@ npm test                                    # 6) 프론트 테스트 (vitest run
     )
     ```
 - 멤버별로 좁혀 돌릴 땐 `cargo test -p <멤버>`.
-- **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|net|transport)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더하고, 빼는 것은 지운 crate 뿐이다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다).
-- **의존 상한 게이트 4종 — standard에서 항상 돌린다**(해당 crate가 닿으면 quick에서도 필수). 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 **해석된 의존 그래프**로 덮는다:
+- **메시징 커널 격리 게이트(ADR-0110 — messaging crate가 닿으면 필수):** `rg "engram_dashboard_(agent|base|daemon|protocol|command|platform|net|transport)" crates/engram-dashboard-messaging/src/` → 0줄 PASS. 이 crate는 워크스페이스 crate 무의존이 불변식이라 위반은 컴파일 에러로 먼저 잡히지만, 주석·테스트 헬퍼 이름으로 새는 경로는 grep이 잡는다. ★**괄호 안 이름 목록을 줄이지 말 것 — 새 워크스페이스 crate가 생기면 여기에 더하고, 빼는 것은 지운 crate 뿐이다**★(`command` 누락 상태로 한동안 돌았다 — CI 쪽에만 있어 로컬이 더 약했다). 단 lib 타깃이 없는 bin 전용 멤버(`engram-dashboard-cli`)는 더하지 않는다 — 부를 수 있는 crate 가 아니다(ADR-0285). 그런 멤버에 lib 를 세우는 날 여기 이름을 더한다.
+- **의존 상한 게이트 5종 — standard에서 항상 돌린다**(해당 crate가 닿으면 quick에서도 필수). 위 정규식이 **소스 텍스트**만 봐서 못 잡는 형태(따옴표 종류·`[build-dependencies]`·rename·비활성 target·`optional`)를 **해석된 의존 그래프**로 덮는다:
   ```bash
   cargo tree -p engram-dashboard-messaging --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0110 무의존 불변식
   cargo tree -p engram-dashboard-command   --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0155 도구 crate 무의존
   cargo tree -p engram-dashboard-base      --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0175 결정 1 잎 crate(입주 조건 ② 도메인 지식 0)
   cargo tree -p engram-dashboard-platform  --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 정확히 1줄(자기 자신) PASS — ADR-0266 OS 층 crate(base 도 의존하지 않는다 — ADR-0268)
+  cargo tree -p engram-dashboard-cli       --depth 1 --prefix none -e normal,dev,build --target all --all-features | rg "^engram-dashboard" | sort -u   # → 첫 칸이 정확히 engram-dashboard-agent · engram-dashboard-cli · engram-dashboard-command PASS — 이름 집합으로 판정(CI `cli gate 1` · ADR-0285 — 데몬 0)
   ```
-  줄 수로 판정한다(매치 유무가 아니다). **플래그를 줄이지 말 것** — net 게이트 3과 같은 이유로 그만큼 형태가 샌다. ★**정규식 게이트의 가장 큰 구멍이 이것을 부른 계기다**★ — 정규식은 crate 이름 알파벳을 손으로 박아 두므로 **새 crate는 누가 그 알파벳에 이름을 더할 때까지 아예 안 보인다**. ★**넷 다에 공통으로 남는 구멍**★ — 전부 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별하므로, 다른 이름을 단 멤버는 그냥 통과한다. 거꾸로 넷 중 하나가 접두를 떼면 자기 게이트는 빨개지지만 남의 게이트가 그 crate 로 가는 간선을 못 본다. **`base`·`platform`엔 소스 정규식 짝이 없다**(있는 것은 이 상한 게이트 하나뿐) — 그 crate들은 *남을 안 부르는 것*이 불변식이라 부르는 이름의 알파벳을 관리할 대상이 없다. command crate가 워크스페이스 의존 0을 지키는 것은 **벽**이지 그 crate가 존재하는 *이유*는 아니다(이유 = 독립적으로 쓸 수 있고 순환을 막는다 — CLAUDE.md 「백엔드 모듈 맵」 command 항목 · ADR-0151 결정 4).
-- **base 시험 기능 운영 그래프 게이트(ADR-0269 결정 5 · ADR-0275 결정 5 — standard에서 항상, daemon · 셸 운영 그래프에 든 crate(base · agent · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** base 의 `test-support`(`testing` 모듈과 `time::ManualClock` 을 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다.
+  줄 수로 판정한다(매치 유무가 아니다) — ★cli 줄만 이름 집합이다★: 그 패키지가 따로 선 요점은 데몬 0 인데, 줄 수만 세면 command 자리에 데몬이 들어와도 셋이라 못 본다. **플래그를 줄이지 말 것** — net 게이트 3과 같은 이유로 그만큼 형태가 샌다. ★**정규식 게이트의 가장 큰 구멍이 이것을 부른 계기다**★ — 정규식은 crate 이름 알파벳을 손으로 박아 두므로 **새 crate는 누가 그 알파벳에 이름을 더할 때까지 아예 안 보인다**. ★**다섯 다에 공통으로 남는 구멍**★ — 전부 워크스페이스 멤버를 `engram-dashboard` **이름 접두**로 식별하므로, 다른 이름을 단 멤버는 그냥 통과한다. 거꾸로 다섯 중 하나가 접두를 떼면 자기 게이트는 빨개지지만 남의 게이트가 그 crate 로 가는 간선을 못 본다. **`base`·`platform`엔 소스 정규식 짝이 없다**(있는 것은 이 상한 게이트 하나뿐) — 그 crate들은 *남을 안 부르는 것*이 불변식이라 부르는 이름의 알파벳을 관리할 대상이 없다. command crate가 워크스페이스 의존 0을 지키는 것은 **벽**이지 그 crate가 존재하는 *이유*는 아니다(이유 = 독립적으로 쓸 수 있고 순환을 막는다 — CLAUDE.md 「백엔드 모듈 맵」 command 항목 · ADR-0151 결정 4).
+- **base 시험 기능 운영 그래프 게이트(ADR-0269 결정 5 · ADR-0275 결정 5 — standard에서 항상, daemon · 셸 · CLI 운영 그래프에 든 crate(base · agent · net · daemon · 셸 · cli)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** base 의 `test-support`(`testing` 모듈과 `time::ManualClock` 을 연다)가 데몬·셸·CLI 의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다.
   ```bash
   cargo tree --locked -p engram-dashboard-daemon -e normal,build,features -i engram-dashboard-base --target all | rg 'feature "test-support"'      # → 0줄 PASS
   cargo tree --locked -p engram-dashboard        -e normal,build,features -i engram-dashboard-base --target all | rg 'feature "test-support"'      # → 0줄 PASS (셸)
+  cargo tree --locked -p engram-dashboard-cli    -e normal,build,features -i engram-dashboard-base --target all | rg 'feature "test-support"'      # → 0줄 PASS (CLI)
   cargo tree --locked -p engram-dashboard-agent  -e normal,dev,features -i engram-dashboard-base --target all | rg 'engram-dashboard-base feature "test-support"' # → 1줄 이상 PASS (짝)
   ```
-  ★**셋째 줄(짝)을 빼지 말 것**★ — 기능 이름이 바뀌면 앞 둘은 매치할 낱말을 잃고 0줄로 눈먼 PASS 가 된다. 판정은 앞 둘이 매치 유무(0줄), 셋째가 줄 수(1 이상)다. ★**`cargo tree` 의 종료코드가 0 이 아니면 그 줄은 FAIL 이다**★(CI 스텝의 rc 검사와 같다) — 파이프 끝의 `rg` 만 보면 `cargo tree` 가 죽어도 0줄로 읽혀 앞 둘이 눈먼 PASS 가 된다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
-- **platform 시험 기능 운영 그래프 게이트(TRD 1-3 §3-8 · §4-2 ③ — standard에서 항상, daemon · 셸 운영 그래프에서 platform 에 닿는 crate(platform · agent · net · daemon · 셸)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** platform 의 `test-support`(`testing` 모듈 — 실프로세스 시험 도우미 · `group::GroupRef::gone` · WMI 띄우기의 원시 호출 `spawn::wmi_create_raw`를 연다)가 데몬·셸의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다. 셸은 platform 을 운영 의존으로 직접 지고(데몬 찾기 · 띄우기 · 끄기 — `discovery` 모듈 · 화면 상태의 앞 창 판정 `window` · 임시 파일 주인 생존 판정 — `state` 모듈) 그 기능은 dev 줄에서만 켠다 — 그 간선도 이 게이트가 잰다.
+  ★**넷째 줄(짝)을 빼지 말 것**★ — 기능 이름이 바뀌면 앞 셋은 매치할 낱말을 잃고 0줄로 눈먼 PASS 가 된다. 판정은 앞 셋이 매치 유무(0줄), 넷째가 줄 수(1 이상)다. ★**`cargo tree` 의 종료코드가 0 이 아니면 그 줄은 FAIL 이다**★(CI 스텝의 rc 검사와 같다) — 파이프 끝의 `rg` 만 보면 `cargo tree` 가 죽어도 0줄로 읽혀 앞 셋이 눈먼 PASS 가 된다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
+- **platform 시험 기능 운영 그래프 게이트(TRD 1-3 §3-8 · §4-2 ③ — standard에서 항상, daemon · 셸 · CLI 운영 그래프에서 platform 에 닿는 crate(platform · agent · net · daemon · 셸 · cli)의 `Cargo.toml` 이나 루트 `Cargo.toml` 이 닿으면 quick에서도 필수):** platform 의 `test-support`(`testing` 모듈 — 실프로세스 시험 도우미 · `group::GroupRef::gone` · WMI 띄우기의 원시 호출 `spawn::wmi_create_raw`를 연다)가 데몬·셸·CLI 의 **정상 · build** 그래프에 없음을 해석된 그래프로 잰다. 셸은 platform 을 운영 의존으로 직접 지고(데몬 찾기 · 띄우기 · 끄기 — `discovery` 모듈 · 화면 상태의 앞 창 판정 `window` · 임시 파일 주인 생존 판정 — `state` 모듈) 그 기능은 dev 줄에서만 켠다 — 그 간선도 이 게이트가 잰다.
   ```bash
   cargo tree --locked -p engram-dashboard-daemon -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS
   cargo tree --locked -p engram-dashboard        -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS (셸)
+  cargo tree --locked -p engram-dashboard-cli    -e normal,build,features -i engram-dashboard-platform --target all | rg 'feature "test-support"'      # → 0줄 PASS (CLI)
   cargo tree --locked -p engram-dashboard-agent  -e normal,dev,features -i engram-dashboard-platform --target all | rg 'engram-dashboard-platform feature "test-support"' # → 1줄 이상 PASS (짝)
   ```
   판정 · 짝을 빼지 말 것 · `cargo tree` 종료코드 규칙은 위 base 게이트와 같다. 근거·한계의 정본 = `ci.yml` 의 같은 스텝 주석.
@@ -439,10 +443,10 @@ node scripts/cdp.mjs shot out.png           # 필요시 스크린샷 → Read로
 - **codex — 승인 거절 시험의 쓰기 대상은 `%TEMP%` 밖에 둔다.** workspace-write 샌드박스의 codex 는 `%TEMP%` 에 승인 없이 쓴다 — 거기를 겨누면 거절할 승인 요청이 서지 않는다.
 
 **F. 버스 명령을 `engram` CLI 로 부를 때 — 일회용 에이전트의 토큰을 빌린다** (이전 세션 실측 2026-10-06 — P3c2 QA G6 · 변수 · 경로는 코드 파생)
-- ★**`engram` CLI 는 engram 이 띄운 에이전트 안에서만 돈다**★ — `ENGRAM_TOKEN`(Bearer 토큰) · `ENGRAM_CONTROL_URL`(데몬 제어 base URL) 둘을 읽고 없으면 `NO_TOKEN` · `NO_CONTROL_URL` 로 끝난다(`crates/engram-dashboard-daemon/src/bin/engram.rs` 의 `read_credentials`). 그 토큰은 데몬이 띄운 에이전트에게만 발급된다. 그래서 QA 가 버스 명령(예: `engram restore.answer --accept true`)을 재려면 에이전트 하나를 띄워 그 토큰을 빌린다:
+- ★**`engram` CLI 는 engram 이 띄운 에이전트 안에서만 돈다**★ — `ENGRAM_TOKEN`(Bearer 토큰) · `ENGRAM_CONTROL_URL`(데몬 제어 base URL) 둘을 읽고 없으면 `NO_TOKEN` · `NO_CONTROL_URL` 로 끝난다(`crates/engram-dashboard-cli/src/bin/engram.rs` 의 `read_credentials`). 그 토큰은 데몬이 띄운 에이전트에게만 발급된다. 그래서 QA 가 버스 명령(예: `engram restore.answer --accept true`)을 재려면 에이전트 하나를 띄워 그 토큰을 빌린다:
   1. 터미널 모드 claude 에이전트를 **프롬프트 없이** 띄운다 — 위 B 의 `createClaudeProfile('<name>','<격리 cwd>',[],[],false,'Terminal')` → `spawnProfile('<id>', false).then(a => a.epoch)`(답 `AgentInfo` 의 `epoch` 가 아래 파일 이름에 든다).
   2. 그 화신의 파일 = `<데이터 폴더>/daemon/run/mcp-config/<id>-<epoch>.json` — ★`<id>-*.json` 으로 넓혀 집지 않는다★: 같은 폴더에 `<id>-<epoch>.settings.json` 도 생길 수 있다(`crates/engram-dashboard-daemon/src/control/mcp_config.rs`). 칸 = `mcpServers.engram.headers.Authorization`(`Bearer <token>`) · `mcpServers.engram.url`(`http://127.0.0.1:<port>/mcp`). `ENGRAM_CONTROL_URL` 은 그 url 에서 `/mcp` 를 뗀 base 다(에이전트 스폰이 넣는 값과 같은 규칙 — `crates/engram-dashboard-agent/src/backend/claude/mod.rs` 의 CLI 크레덴셜 주입 시험). ★토큰이 든 파일이다 — 값을 명령줄 · 보고서 · 로그에 옮기지 않는다★: 아래처럼 같은 명령 안에서 파일에서 읽는다.
-  3. CLI 를 부른다 — 바이너리는 데몬 패키지의 `[[bin]] engram` 이라 데몬 exe 와 같은 target 폴더에 `engram.exe` 로 있다. `F` 는 절대 경로(`I:/…` 꼴 — node 가 읽는다)로 준다(두 값을 뽑는 부분은 가짜 파일로만 확인했다 · 실 `engram.exe` 와 함께 돈 적은 없다 — 2026-10-06):
+  3. CLI 를 부른다 — 바이너리는 CLI 패키지(`engram-dashboard-cli`)의 `[[bin]] engram` — 워크스페이스가 target 폴더 하나를 나눠 써 데몬 exe 옆에 `engram.exe` 로 있다. `F` 는 절대 경로(`I:/…` 꼴 — node 가 읽는다)로 준다(두 값을 뽑는 부분은 가짜 파일로만 확인했다 · 실 `engram.exe` 와 함께 돈 적은 없다 — 2026-10-06):
      ```bash
      F='<데이터 폴더>/daemon/run/mcp-config/<id>-<epoch>.json'
      ENGRAM_TOKEN="$(node -e "process.stdout.write(require(process.argv[1]).mcpServers.engram.headers.Authorization.replace(/^Bearer /, ''))" "$F")" \

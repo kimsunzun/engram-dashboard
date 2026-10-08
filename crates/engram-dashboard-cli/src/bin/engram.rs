@@ -24,7 +24,7 @@
 //! ★help 도 다른 명령과 같은 길로 실패한다★: 자격증명이 없거나 · 데몬에 못 닿거나 · 데몬이 그 라우트를
 //!   모르면 데몬을 부르는 다른 명령과 같은 봉투 · exit 1 이다. 데몬 없이 답하는 폴백도 바이너리에 구운
 //!   사본도 두지 않는다 — 그 상태에서는 다른 모든 명령이 실패해 help 만 살아도 할 수 있는 것이 없고,
-//!   사본은 본문이 깨졌다는 사실을 낡은 화면으로 감춘다(ADR-0284).
+//!   사본은 본문이 깨졌다는 사실을 낡은 화면으로 감춘다(ADR-0285).
 //!
 //! ★우편 계열을 여기서 막지 않는다★: 말이 되는 우편 호출은 그대로 데몬으로 나가고, 거절은 데몬이
 //!   자격증명으로 한다(ADR-0133 결정 3). 여기서 미리 끊으면 그 거절이 관측되지 않는다.
@@ -223,7 +223,7 @@ fn run(args: &[String]) -> i32 {
         ParsedCommand::Agent(a) => run_legacy(&base, &token, Command::Agent(a)),
         // ★stdin 은 자격증명 뒤에 읽는다★ — 앞에서 읽으면 자격증명 없는 호출이 닫히지 않는 stdin(에이전트
         //   셸·열어 둔 파이프)에 매달려 실패하지 못한다. 본문 형태 오류(빈 stdin 등)는 여전히 네트워크 전이다.
-        // ADR-0284
+        // ADR-0285
         ParsedCommand::Mail(m) => match materialize_body(m, read_stdin_to_string) {
             Ok(command) => run_legacy(&base, &token, command),
             Err(msg) => {
@@ -277,7 +277,7 @@ fn run_legacy(base: &str, token: &str, command: Command) -> i32 {
 }
 
 /// help 화면 하나를 데몬에 청해 찍는다. 낱말은 검사하지 않고 싣는다 — 어휘는 데몬 것이다.
-// ADR-0284
+// ADR-0285
 fn run_help(base: &str, token: &str, topic: Option<&str>) -> i32 {
     match post_json(base, CLI_HELP_ROUTE, token, &help_request_body(topic)) {
         Ok(resp) => {
@@ -355,7 +355,7 @@ fn exit_code_for_help_response(status: u16, resp_body: &str) -> HelpVerdict {
 ///
 /// ★호출자가 이 두 줄을 손으로 다시 적지 않게 하는 것이 요점이다★: 자리마다 적으면 새 명령 하나가 다른
 ///   코드나 다른 채널로 실패해, 같은 상태(데몬 없음 · 판 어긋남)가 명령마다 다르게 보인다.
-// ADR-0284
+// ADR-0285
 fn fail_unreached(e: &SendError) -> i32 {
     print_error(e.code(), &e.to_string());
     EXIT_FAILED
@@ -369,7 +369,7 @@ enum SendError {
     /// Content-Length 가 있는데 수신 body 가 그보다 짧음(절단). received/expected 바이트 수 동봉.
     Incomplete { received: usize, expected: usize },
     /// 데몬이 이 라우트를 모른다(404) — 이 CLI 와 다른 빌드의 데몬이다. 재시도로 바뀌지 않는다.
-    // ADR-0284
+    // ADR-0285
     NoRoute { route: String },
 }
 
@@ -711,7 +711,7 @@ fn reject_help_with_extra_args(args: &[String]) -> Result<(), String> {
 /// ★help 토큰과 `-` 로 시작하는 낱말은 화면 낱말이 아니다(인자 오류 · 왕복 없음)★: 어휘 검사가 데몬으로 간
 ///   뒤 이 규칙이 없으면 `help --help` 가 「`--help` 라는 화면」을 물으러 인증된 왕복을 한다. 화면 낱말은
 ///   대시로 시작하지 않는다 — `parse_catalog` 의 명령 이름과 같은 판단이다.
-// ADR-0284
+// ADR-0285
 fn parse_help_topic(rest: &[String]) -> Result<ParsedCommand, String> {
     let Some(word) = rest.first() else {
         return Ok(ParsedCommand::Help(None));
@@ -2487,7 +2487,7 @@ fn post_json(
     let resp = parse_response(&raw)?;
     // 404 = 데몬이 이 라우트를 모른다(판 어긋남) — 판정기가 아니라 전송 실패 길로 보낸다(헤더 「데몬에 못
     //   닿은 실패」).
-    // ADR-0284
+    // ADR-0285
     if resp.status == 404 {
         return Err(SendError::NoRoute {
             route: route.to_string(),

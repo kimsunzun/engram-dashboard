@@ -23,7 +23,7 @@
 // ADR-0156
 // ADR-0212
 // ADR-0220
-// ADR-0284
+// ADR-0285
 
 use std::path::PathBuf;
 
@@ -230,7 +230,7 @@ fn render_help_from(text: &HelpText, topic: HelpTopic) -> String {
 /// ★base 를 받는 이유★: 시험이 알려진 본문을 담은 폴더를 넘겨 시험 exe 의 자리 · `CARGO_TARGET_DIR` 와
 ///   무관하게 화면을 잰다. 서버 안에서 설치 위치로 짓지 않는 것도 그래서다.
 // ADR-0092
-// ADR-0284
+// ADR-0285
 pub struct HelpSource {
     anchor: Anchor,
 }
@@ -403,7 +403,7 @@ impl std::fmt::Display for Unavailable {
 ///   ADR-0157 은 빌드 경계를 건너는 배선의 규칙인데, CLI 와 데몬은 한 빌드로 배송되므로(ADR-0100) 이
 ///   라우트에는 그 경계가 없다. 판정은 [`HelpRequest`] 의 역직렬화가 한다.
 // ADR-0157
-// ADR-0284
+// ADR-0285
 fn parse_request(body: &[u8]) -> Result<HelpTopic, ControlQueryResult> {
     let HelpRequest { topic } = serde_json::from_slice(body).map_err(|e| {
         malformed_request(&format!("is malformed ({})", preview(&e.to_string())), body)
@@ -443,7 +443,7 @@ impl<'de> serde::Deserialize<'de> for HelpRequest {
     ///   - 파생 구현은 **JSON 배열**도 필드 순서열로 읽어 `["mail"]` 이 화면이 된다(`catalog::CallRequest`
     ///     가 밟은 함정과 같다). `deserialize_map` 만 받으므로 객체 아닌 바디는 반려다.
     ///   - 파생 구현에서 `Option` 칸은 키가 없어도 `None` 으로 채워져, 키 철자가 틀린 바디가 목차로 답한다.
-    // ADR-0284
+    // ADR-0285
     fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         const FIELDS: &[&str] = &[CLI_HELP_TOPIC_KEY];
         struct Visitor;

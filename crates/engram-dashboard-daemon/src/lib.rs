@@ -621,7 +621,7 @@ pub async fn run() -> Result<(), i32> {
         messaging_slot.clone(),
         command_table_slot.clone(),
         command_bus.clone(),
-        // ADR-0284: help 본문 원천은 아래 프라이밍과 같은 앵커(설치 위치)다 — 원천을 여기서 짓는 것은
+        // ADR-0285: help 본문 원천은 아래 프라이밍과 같은 앵커(설치 위치)다 — 원천을 여기서 짓는 것은
         //   서버가 안에서 짓지 않게 하려는 것이다(시험이 알려진 본문을 넣는다).
         control::help::HelpSource::from_install_root(),
     )

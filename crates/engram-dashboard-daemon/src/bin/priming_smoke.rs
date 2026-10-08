@@ -101,7 +101,7 @@ async fn run() -> i32 {
         messaging_slot.clone(),
         command_slot.clone(),
         relay_bus,
-        // ADR-0284: 실 primed 에이전트는 프라이밍이 가르친 대로 `engram help` 를 칠 수 있다 — 원천이
+        // ADR-0285: 실 primed 에이전트는 프라이밍이 가르친 대로 `engram help` 를 칠 수 있다 — 원천이
         //   없으면 그 help 가 반려돼 측정이 오염된다. 운영 조립과 같은 앵커를 쓴다.
         engram_dashboard_daemon::control::help::HelpSource::from_install_root(),
     )

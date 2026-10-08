@@ -716,12 +716,12 @@ fn run_cli_without_credentials(args: &[&str]) -> (String, i32) {
     )
 }
 
-/// ★help 는 다른 명령과 같은 길로 실패한다(ADR-0284)★ — 자격증명이 없으면 `mail pending` 과, 데몬에 못 닿으면
+/// ★help 는 다른 명령과 같은 길로 실패한다(ADR-0285)★ — 자격증명이 없으면 `mail pending` 과, 데몬에 못 닿으면
 ///   `agent list` 와 **바이트까지 같은** 봉투 · exit 1 이다. help 만 다른 길(폴백 · 사본 · 다른 코드 · 다른
 ///   채널)로 가면 같은 상태가 명령마다 다르게 보인다.
 /// ★대조군을 같은 실행에서 뜬다★: 기대 출력을 글자로 박으면 문구를 고칠 때마다 이 시험도 고쳐야 하고, 그러다
 ///   help 쪽만 다른 문구가 되어도 못 잡는다.
-// ADR-0284
+// ADR-0285
 #[test]
 fn help_fails_the_same_way_as_every_other_command_without_credentials_or_a_daemon() {
     let (no_token, code) = run_cli_without_credentials(&["mail", "pending"]);
@@ -1804,12 +1804,12 @@ fn a_mail_verb_the_daemon_refuses_still_posts_and_surfaces_the_refusal() {
     );
 }
 
-// ── ADR-0284: 데몬을 부르는 명령의 공통 실패 길 ──────────────────────────────────────────────
+// ── ADR-0285: 데몬을 부르는 명령의 공통 실패 길 ──────────────────────────────────────────────
 
 /// ★자격증명 없는 `--body-stdin` 은 stdin 을 기다리지 않고 실패한다★ — stdin 을 자격증명보다 먼저 읽으면
 ///   열린 채 닫히지 않는 stdin(에이전트 셸 · 파이프)에 매달려 실패하지 못하고, 공통 실패 길에 닿지도 못한다.
 ///   stdin 을 열어 둔 채 쓰지도 닫지도 않고 띄워, 시한 안에 `NO_TOKEN` 으로 끝나는지 본다.
-// ADR-0284
+// ADR-0285
 #[test]
 fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
     use std::process::Stdio;
@@ -1852,7 +1852,7 @@ fn a_body_stdin_send_without_credentials_fails_without_waiting_for_stdin() {
 
 /// ★데몬이 그 라우트를 모르면(404 — 이 CLI 와 다른 빌드의 데몬) help 도 다른 명령도 같은 `PROTOCOL_MISMATCH`
 ///   봉투 · exit 1 이다★ — 데몬의 404 는 body 가 비어 있어, 그것을 빈 줄로 흘리면 호출자는 아무것도 못 배운다.
-// ADR-0284
+// ADR-0285
 #[test]
 fn a_daemon_that_does_not_serve_the_route_is_reported_as_a_version_mismatch() {
     let not_found = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";

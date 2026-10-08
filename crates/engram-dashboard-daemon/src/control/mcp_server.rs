@@ -93,7 +93,7 @@ const CONTROL_CALL_PATH: &str = "/control/call";
 /// 다섯은 아직 손으로 맞춘다).
 /// ★우편이 막힌 자격증명도 닿는다★ — 우편 화면을 읽는 것은 우편이 아니고, 화면은 누구에게나 같다
 ///   (`ControlRoute::is_mail`).
-// ADR-0284
+// ADR-0285
 const CONTROL_HELP_PATH: &str = engram_dashboard_agent::types::CLI_HELP_ROUTE;
 
 /// 제어 평면 경로의 네임스페이스 접두 — **분류를 빠뜨린 경로를 fail-closed 로 접는 기준**이다.
@@ -166,7 +166,7 @@ impl ControlRoute {
             Self::Agent | Self::Commands | Self::Call => false,
             // 화면을 읽는 것은 우편이 아니다 — 우편이 막힌 자격증명도 우편 화면을 읽어야 그 채널의
             //   계약을 배운다(ADR-0220 결정 4 — 화면은 누구에게나 같다).
-            // ADR-0284
+            // ADR-0285
             Self::Help => false,
         }
     }
@@ -220,7 +220,7 @@ const MAIL_NOT_ALLOWED_HINT: &str =
 /// 다 읽어도** 알 수 없는 이름까지 포함하므로, 「오늘은 그런 이름이 없다」는 근거가 될 수 없다.
 /// ★계열 구분자는 명령 이름 규약(`<계열>.<동사>`)의 것이다★ — 계열이 `mail` 이면 우편이다. 접두 비교로
 /// 쓰지 말 것: `mailbox.x` 는 우편 계열이 아닌데 접두로는 걸린다. 그 규약의 정본은 명령 표이고 이 글자를
-/// 공유 상수로 올리지 않은 이유는 CLI 도 자기 것을 따로 들고 있어서다(`bin/engram.rs`) — 셋째 사본을
+/// 공유 상수로 올리지 않은 이유는 CLI 도 자기 것을 따로 들고 있어서다(`engram-dashboard-cli/src/bin/engram.rs`) — 셋째 사본을
 /// 만들기 전에 그 상수를 어디 둘지가 먼저 정해져야 한다.
 /// ★오늘 이 판정이 참이 되는 이름은 하나도 없다(실측)★ — 데몬 표는 `agent.*` 뿐이고 대시보드가 얹는
 /// 이름에도 `mail.*` 이 없다. 그래서 이것은 구멍을 막는 것이 아니라 **난간**이다: `mail.*` 이 어느 쪽으로
@@ -1237,7 +1237,7 @@ async fn control_call_handler(
 ///   여기 닿으면 안 되기 때문에 방어적 401 만 둔다(형제 `control_agent_handler` 와 같다).
 /// ★`spawn_blocking` 안에서 읽는다★: 원천은 요청마다 본문 파일을 읽으므로(캐시 없음) async 워커에서
 ///   읽으면 그 디스크 대기 동안 같은 워커에 얹힌 다른 요청이 묶인다.
-// ADR-0284
+// ADR-0285
 async fn control_help_handler(
     axum::extract::State(help): axum::extract::State<Arc<super::help::HelpSource>>,
     identity: Option<axum::Extension<BoundIdentity>>,
@@ -1279,7 +1279,7 @@ fn service_unavailable() -> Response {
 ///
 /// ★help 를 부르지 않는 시험 · 하네스용이다 — 운영 조립(`lib.rs`)이 이 판을 부르면 help 가 늘 반려다★.
 ///   이름이 「help 없음」을 말하게 둔 것은 그런 호출이 리뷰에서 눈에 띄게 하려는 것이다.
-// ADR-0284
+// ADR-0285
 pub async fn start_mcp_server_without_help(
     registry: Arc<ControlRegistry>,
     manager: Arc<ManagerSlot>,
@@ -1318,7 +1318,7 @@ pub async fn start_mcp_server_with_help(
     bus: crate::command_delivery::CommandBus,
     // ★help 원천은 조립부가 짓는다★ — 서버가 안에서 설치 위치로 지으면 시험이 알려진 본문을 넣을 수
     //   없고, 화면이 시험 exe 의 자리 · `CARGO_TARGET_DIR` 에 매인다.
-    // ADR-0284
+    // ADR-0285
     help: super::help::HelpSource,
 ) -> std::io::Result<McpServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;

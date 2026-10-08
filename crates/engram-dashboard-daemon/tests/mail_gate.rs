@@ -216,7 +216,7 @@ async fn fixture(tag: &str) -> Fixture {
         Arc::new(MessagingSlot::new()),
         command_slot.clone(),
         relay_bus.clone(),
-        // ADR-0284: 운영 조립과 같은 주입판에 알려진 본문 — 시험 exe 의 자리와 무관하게 화면이 정해진다.
+        // ADR-0285: 운영 조립과 같은 주입판에 알려진 본문 — 시험 exe 의 자리와 무관하게 화면이 정해진다.
         HelpSource::new(help_dir.clone()),
     )
     .await
@@ -366,7 +366,7 @@ async fn the_same_credential_passes_on_the_catalog_routes() {
 ///   돌려주고, 호출자로 화면을 고르는 회귀는 두 자격증명의 화면을 가른다.
 /// ★"거절이 아니다" 만 보지 않는다★: 주입한 본문의 **그 화면**이 글자 그대로 오는지 본다 — 라우트가
 ///   빠지거나 원천이 서버까지 안 닿으면 여기서 갈린다.
-// ADR-0284
+// ADR-0285
 #[tokio::test]
 async fn both_credentials_read_the_same_help_screen() {
     use engram_dashboard_agent::types::{

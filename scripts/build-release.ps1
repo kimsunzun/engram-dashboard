@@ -18,7 +18,7 @@
 #       조립한 릴리즈 폴더면 마커가 없어 install_root = exe 디렉토리이고, launch\빌드.bat 의 launch\release
 #       처럼 체크아웃 안이면 그 체크아웃 루트라 배포 폴더가 아니라 저장소의 prompts/ 를 읽는다.
 #     - 데몬은 `engram help` 화면 본문 prompts/engram-help.md 를 **같은 앵커**로 요청마다 읽어 /control/help
-#       로 낸다(ADR-0092 계열 외부화 · ADR-0284 — engram.exe 는 화면을 데몬에 청할 뿐 이 파일을 읽지 않는다).
+#       로 낸다(ADR-0092 계열 외부화 · ADR-0285 — engram.exe 는 화면을 데몬에 청할 뿐 이 파일을 읽지 않는다).
 #       ★사본은 없다★ — 이 파일이 빠진 배포판은 모든 help 호출이 반려(INTERNAL)로 답한다. 아래 tripwire 는
 #       그 실패가 배포 뒤 에이전트 앞이 아니라 배포 전에 나게 하는 장치다.
 #   따라서 manifest(이 스크립트의 EXPECTED_*)가 곧 "무엇을 배송하는가"의 단일 출처다. manifest 를 바꾸면

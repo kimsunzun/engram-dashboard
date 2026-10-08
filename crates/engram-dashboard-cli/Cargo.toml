@@ -2,7 +2,7 @@
 name = "engram-dashboard-cli"
 version = "0.3.2"
 edition = "2021"
-description = "Engram Dashboard 제어 평면 CLI(engram.exe) — 스폰된 에이전트가 데몬 제어 라우트에 손조립 HTTP 로 붙는 인증 + 배송 클라이언트. bin 전용(ADR-0273 · ADR-0284)."
+description = "Engram Dashboard 제어 평면 CLI(engram.exe) — 스폰된 에이전트가 데몬 제어 라우트에 손조립 HTTP 로 붙는 인증 + 배송 클라이언트. bin 전용(ADR-0273 · ADR-0285)."
 
 # ADR-0273
 # ADR-0086 스텝 2 · ADR-0132: 제어 평면 CLI. 스폰된 에이전트가 셸로 부르는 최소 클라이언트 —
@@ -19,7 +19,7 @@ path = "src/bin/engram.rs"
 # ★데몬 패키지를 의존하지 않는다★ — 의존하면 데몬 그래프(tokio · axum · rmcp · net …)가 engram.exe 빌드에
 #   딸려 와 이 패키지가 따로 선 이유가 사라진다(ADR-0273).
 [dependencies]
-# agent `types.rs` 의 CLI 어휘 · help 계약 상수(ADR-0273 「맥락」 · ADR-0284). 대가로 agent 의 운영 의존이 함께
+# agent `types.rs` 의 CLI 어휘 · help 계약 상수(ADR-0273 「맥락」 · ADR-0285). 대가로 agent 의 운영 의존이 함께
 #   빌드된다(ADR-0273 「영향」 — 어휘를 agent 밖으로 빼면 줄지만 그 결정은 어휘를 agent 에 둔다).
 engram-dashboard-agent = { path = "../engram-dashboard-agent" }
 engram-dashboard-command = { path = "../engram-dashboard-command" }

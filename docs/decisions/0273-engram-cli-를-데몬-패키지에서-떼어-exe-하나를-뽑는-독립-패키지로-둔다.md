@@ -1,7 +1,7 @@
 # ADR-0273: engram CLI 를 데몬 패키지에서 떼어 exe 하나를 뽑는 독립 패키지로 둔다
 
-- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 9) + 코드 대조 2026-10-02)
-- 관련: ADR-0132(제어 평면 CLI = 단일 실행 파일 `engram` — 패키지 자리는 정하지 않았다) · ADR-0094(bare-name grant · PATH 주입 — 실행 파일 이름 정렬) · ADR-0151(crate 판정 기준 · 「개명 함정」 이름 접두) · ADR-0175 결정 6(lib 무게 — 이 패키지는 bin 이다) · ADR-0271(discovery 나누기 — 설치 위치 규칙이 데몬으로 간다) · `crates/engram-dashboard-daemon/Cargo.toml`(`[[bin]] engram`) · `crates/engram-dashboard-daemon/src/bin/engram.rs` · `crates/engram-dashboard-agent/src/types.rs`(`CLI_EXE_NAME` 등 CLI 어휘) · step-log S21
+- 상태: 확정 (2026-10-02, 근거: 사용자 결정 2026-10-02 (`docs/refactoring/architecture-discussion-2026-09-26.md` 결정 후보 9) + 코드 대조 2026-10-02) · 부분 폐기 by ADR-0285 (결정 4의 설치 위치 규칙과 결정 5)
+- 관련: ADR-0132(제어 평면 CLI = 단일 실행 파일 `engram` — 패키지 자리는 정하지 않았다) · ADR-0094(bare-name grant · PATH 주입 — 실행 파일 이름 정렬) · ADR-0151(crate 판정 기준 · 「개명 함정」 이름 접두) · ADR-0175 결정 6(lib 무게 — 이 패키지는 bin 이다) · ADR-0271(discovery 나누기 — 설치 위치 규칙이 데몬으로 간다) · `crates/engram-dashboard-daemon/Cargo.toml`(`[[bin]] engram`) · `crates/engram-dashboard-daemon/src/bin/engram.rs` · `crates/engram-dashboard-agent/src/types.rs`(`CLI_EXE_NAME` 등 CLI 어휘) · step-log S21 · Amended by ADR-0285 (결정 4의 설치 위치 규칙과 결정 5)
 
 ## 맥락
 
