@@ -89,8 +89,11 @@ pause
 exit /b 1
 :dev_daemon_kill_done
 
-echo [clean] Rebuilding backend daemon (first change may take ~15-30s)...
-cargo build -p engram-dashboard-daemon
+REM ★-p engram-dashboard-cli (do not remove)★: engram.exe, the control-plane CLI every agent runs, is its
+REM   own package (ADR-0273). Building only the daemon leaves the OLD engram.exe next to it, and the daemon
+REM   hands that stale binary to every agent without a warning (it only warns when the file is missing).
+echo [clean] Rebuilding backend daemon + CLI (first change may take ~15-30s)...
+cargo build -p engram-dashboard-daemon -p engram-dashboard-cli
 if errorlevel 1 (
   echo [clean] BUILD FAILED - see errors above. Not launching.
   pause

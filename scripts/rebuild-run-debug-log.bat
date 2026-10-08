@@ -1,7 +1,7 @@
 @echo off
 REM Engram Dashboard - debug launcher WITH tracing on (double-click).
 REM
-REM Same as rebuild-run-debug.bat in every respect (stale-daemon cleanup, daemon rebuild, client shell
+REM Same as rebuild-run-debug.bat in every respect (stale-daemon cleanup, daemon + CLI rebuild, client shell
 REM build, vite, detached launch) - it just turns logging up. This file is deliberately a one-line
 REM wrapper rather than a copy: the daemon-kill guards in that script are safety-critical (they refuse
 REM to kill a pid whose image name or executable path is not THIS deployment's daemon), and a second

@@ -60,10 +60,10 @@
 //! `[delivery-census]` 는 축 필터 없이 캡처된 전체 배달 레코드를 도착 순서로 덤프한다.
 //!
 //! ## 실행(오케스트레이터가 런타임에 돌린다 — 이 파일은 빌드/컴파일만)
-//! 제어 평면 CLI 바이너리는 **먼저** 빌드해야 한다 — `cargo run` 은 dep bin 을 안 만들고, 하네스는 자기
-//! exe 형제에서 `engram`(Win: `.exe`) 를 찾으므로 같은 profile/target 이어야 co-locate 된다.
+//! 제어 평면 CLI 바이너리는 **먼저** 빌드해야 한다 — `cargo run` 은 다른 패키지(`engram-dashboard-cli`)의 bin 을
+//! 안 만들고, 하네스는 자기 exe 형제에서 `engram`(Win: `.exe`) 를 찾으므로 같은 profile/target 이어야 co-locate 된다.
 //! ```text
-//! cargo build -p engram-dashboard-daemon --features test-harness --bin engram
+//! cargo build -p engram-dashboard-cli
 //! cargo run   -p engram-dashboard-daemon --features test-harness --bin roundtrip-smoke -- <flags>
 //! ```
 //! ## 핵심 불변식
@@ -424,7 +424,7 @@ async fn run() -> i32 {
             let _ = std::fs::remove_dir_all(d);
         }
         return setup_skip(
-            "--disallow-mcp: 제어 평면 CLI 형제 바이너리가 없어 SETUP-SKIP. ※주의(ADR-0133) — 이 모드는 스폰을 MCP 가능 그대로 두므로 바이너리를 빌드하면 명령은 실행되지만 **그 요청을 데몬이 거절한다**(MCP 가능 자격증명의 CLI 우편 입구는 닫혀 있다). 게다가 auto 권한 모드에선 grant 가 NO-OP 이라 에이전트는 그대로 MCP 로 보낸다(실측 6/6). 즉 빌드는 이 스킵을 넘기기 위한 절차일 뿐 CLI 라우팅을 만들지 못한다 — 그것을 할 모드는 없다. 스킵을 넘기려면: `cargo build -p engram-dashboard-daemon --features test-harness --bin engram`",
+            "--disallow-mcp: 제어 평면 CLI 형제 바이너리가 없어 SETUP-SKIP. ※주의(ADR-0133) — 이 모드는 스폰을 MCP 가능 그대로 두므로 바이너리를 빌드하면 명령은 실행되지만 **그 요청을 데몬이 거절한다**(MCP 가능 자격증명의 CLI 우편 입구는 닫혀 있다). 게다가 auto 권한 모드에선 grant 가 NO-OP 이라 에이전트는 그대로 MCP 로 보낸다(실측 6/6). 즉 빌드는 이 스킵을 넘기기 위한 절차일 뿐 CLI 라우팅을 만들지 못한다 — 그것을 할 모드는 없다. 스킵을 넘기려면: `cargo build -p engram-dashboard-cli`",
         );
     }
     let priming_provider: Arc<dyn PrimingProvider> = Arc::new(FilePrimingProvider::new(repo_root));

@@ -30,14 +30,6 @@ test-harness = [
 name = "engram-dashboard-daemon"
 path = "src/main.rs"
 
-# ADR-0086 스텝 2 · ADR-0132: 제어 평면 CLI. 스폰된 에이전트가 셸로 부르는 최소 클라이언트 —
-# env(ENGRAM_TOKEN/ENGRAM_CONTROL_URL)를 읽어 데몬 제어 라우트로 POST 한다. 의존성 최소화(std TcpStream
-# 손조립 HTTP). ★bin 이름 = agent 의 `CLI_EXE_NAME`★ — grant·프라이밍·PATH 해석이 이 이름에 정렬된다
-# (ADR-0094). 여기서 이름을 바꾸면 그 상수도 함께 바꿔야 하고, 어긋나면 우편이 조용히 멈춘다.
-[[bin]]
-name = "engram"
-path = "src/bin/engram.rs"
-
 # ★ADR-0090 Stage 2 파일럿 실험 드라이버★: 실 claude 를 스폰해 컨텍스트 포화·주입·프로브를 실측하고
 #   JSONL 로 영속하는 실험 전용 bin. required-features 로 **운영/릴리즈 빌드가 절대 컴파일하지 않게**
 #   막는다 — 실험 코드가 릴리즈 아티팩트에 유입되면 ADR-0090 위반(위 [dev-dependencies] 의 --all-targets
