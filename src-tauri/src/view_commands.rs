@@ -259,7 +259,7 @@ impl Registered {
         }
     }
 
-    /// 목적지를 다시 고른다 — ★main 우선 · 살아 있는 host 유지 · 마지막 수단은 **보이는** 창★.
+    /// 목적지를 다시 고른다 — ★main 우선 · 살아 있는 host 유지 · 마지막 수단은 사전순 첫 보고자★.
     ///
     /// **왜 다시 고르나:** host 를 한 번 정하고 끝내면 그 창이 닫힌 뒤 회복 경로가 없다. 실제 경로 —
     /// main 의 단발 보고가 실패하고(그 invoke 는 재시도가 없다) 팝아웃이 host 가 된 뒤 그 팝아웃이 닫히면,
@@ -270,20 +270,13 @@ impl Registered {
     /// (`lib.rs` 의 `CloseRequested`) 수명이 앱과 같다.
     /// - ★**그 전제는 아직 실측되지 않았다**★: 「숨은 main 이 웹뷰 표에 남는가」를 확인하려면 자동화
     ///   하네스가 창을 숨겨 봐야 하는데 이 앱의 권한 설정이 `hide()`·`close()` 를 막아 GUI 로 못 닿았다
-    ///   (2026-08-23). 아래 「보이는 창만」 규칙이 그 전제가 틀렸을 때의 **최악을 바꾼다** — 「아무도 안
-    ///   보는 창에 조용히 그린다」가 아니라 「host 없음」이 된다.
+    ///   (2026-08-23).
     ///
-    /// **왜 마지막 수단에서 숨은 창을 빼나:** 사전순 첫 생존자를 그냥 고르면 `agent-tree` 가 모든
-    /// `slot-popup-N` 보다 앞선다 — 그 창은 설정이 `visible: false` 라 사람이 못 본다. 그러면 `tab.next`
-    /// 는 **성공을 답하면서** 아무도 안 보는 창의 탭을 넘긴다(호출자는 자기 지시가 먹힌 줄 안다).
-    /// - ★main 은 이 규칙 **밖**이다★ — `--hidden` 부팅에서 숨어 있어도 main 이 목적지다. 그 창은 트레이로
-    ///   언제든 다시 보이고(사용자가 여는 그 창이다) 사람이 「메인 창」으로 인지하는 대상이라, 숨김이
-    ///   **상태**이지 성질이 아니다. `agent-tree` 는 반대로 설정이 숨김이다.
-    /// - ★판정 재료는 손 목록이 아니라 **앱 설정**이다★([`hidden_window_labels`]) — 설정이 숨긴 창이 더
-    ///   늘어도 이 규칙이 함께 자란다.
-    /// - 남는 후보가 전부 숨은 창이면 **host 는 없다** — 그 이름들은 광고에서 내려가고 `UNKNOWN_COMMAND`
-    ///   가 된다. 「보이지 않는 곳에 적용됨」보다 「지금 부를 수 없음」이 호출자에게 참인 답이다.
-    fn repick(&mut self, hidden: &BTreeSet<String>) {
+    /// **왜 마지막 수단이 보임을 묻지 않나:** 설정이 숨긴 정적 창이 없다(ADR-0225). 그런 창을 다시 들이면 사전순
+    /// 첫 생존자 고르기가 그 창을 목적지로 삼을 수 있다 — 그러면 `tab.next` 는 **성공을 답하면서** 아무도 안 보는
+    /// 창의 탭을 넘긴다. 그때 거르더라도 `--hidden` 부팅의 main 은 빼면 안 된다(트레이로 여는 그 창이라 숨김이
+    /// 상태이지 성질이 아니다).
+    fn repick(&mut self) {
         let keep = self
             .host
             .as_deref()
@@ -294,12 +287,9 @@ impl Registered {
         self.host = match self.reports.contains_key(MAIN_WINDOW_LABEL) {
             true => Some(MAIN_WINDOW_LABEL.to_string()),
             // 살아 있는 host 를 이유 없이 갈아치우지 않는다 — 자리를 옮기는 것은 죽었을 때뿐이다.
-            false => keep.map(str::to_string).or_else(|| {
-                self.reports
-                    .keys()
-                    .find(|label| !hidden.contains(*label))
-                    .cloned()
-            }),
+            false => keep
+                .map(str::to_string)
+                .or_else(|| self.reports.keys().next().cloned()),
         };
     }
 
@@ -313,28 +303,10 @@ impl Registered {
     }
 }
 
-/// 앱 설정이 **숨김으로 선언한** 창 label 전량(`tauri.conf.json` 의 `visible: false`).
-///
-/// ★런타임 가시성이 아니라 **선언**을 읽는다★: `hide()` 로 숨은 창은 사용자가 다시 열 수 있는 상태지만,
-/// 설정이 숨긴 창은 애초에 사람에게 보일 자리가 아니다(오늘 그것은 `agent-tree` 하나다). 런타임 상태를
-/// 물으면 `--hidden` 부팅의 main 까지 걸려, 트레이로 여는 그 창이 목적지에서 빠진다.
-/// 런타임에 만드는 창(팝아웃)은 설정에 없으므로 여기 안 든다 — 그것이 맞다(사람이 연 창이다).
-pub fn hidden_window_labels(app: &AppHandle) -> BTreeSet<String> {
-    app.config()
-        .app
-        .windows
-        .iter()
-        .filter(|window| !window.visible)
-        .map(|window| window.label.clone())
-        .collect()
-}
-
 /// 웹뷰 몫 등록·배달·상관을 한자리에서 쥔다.
 pub struct ViewCommandBridge {
     dispatch: Arc<dyn ViewDispatch>,
     reserved: BTreeSet<String>,
-    /// 설정이 숨긴 창 — 마지막 수단 목적지에서 뺀다(사유 = [`Registered::repick`]).
-    hidden: BTreeSet<String>,
     deadline: Duration,
     state: Mutex<Registered>,
     /// 보고 하나의 **상태 변경과 그 차분 송신**을 한 덩이로 묶는 문(FIX: 두 보고의 뒤집힘).
@@ -369,23 +341,19 @@ struct Pending {
 }
 
 impl ViewCommandBridge {
-    /// `hidden` = 설정이 숨긴 창 label([`hidden_window_labels`]).
-    pub fn new(dispatch: Arc<dyn ViewDispatch>, hidden: BTreeSet<String>) -> Self {
-        Self::with_reserved(dispatch, VIEW_REPLY_DEADLINE, reserved_names(), hidden)
+    pub fn new(dispatch: Arc<dyn ViewDispatch>) -> Self {
+        Self::with_reserved(dispatch, VIEW_REPLY_DEADLINE, reserved_names())
     }
 
-    /// 하네스용 — 예약 집합·마감·숨은 창을 직접 준다. ★운영에서는 [`reserved_names`]·
-    /// [`hidden_window_labels`] 를 쓸 것★(손 목록은 뒤처진다).
+    /// 하네스용 — 예약 집합·마감을 직접 준다. ★운영에서는 [`reserved_names`] 를 쓸 것★(손 목록은 뒤처진다).
     pub fn with_reserved(
         dispatch: Arc<dyn ViewDispatch>,
         deadline: Duration,
         reserved: impl IntoIterator<Item = String>,
-        hidden: impl IntoIterator<Item = String>,
     ) -> Self {
         ViewCommandBridge {
             dispatch,
             reserved: reserved.into_iter().collect(),
-            hidden: hidden.into_iter().collect(),
             deadline,
             state: Mutex::new(Registered::default()),
             outbound: tokio::sync::Mutex::new(()),
@@ -413,7 +381,7 @@ impl ViewCommandBridge {
             .collect();
         let mut state = sync::lock(&self.state);
         state.forget(&dead);
-        state.repick(&self.hidden);
+        state.repick();
     }
 
     /// 창 하나가 부팅에 자기 목록을 알린다 — **그 창의 전량**이다(차분이 아니다).
@@ -460,7 +428,7 @@ impl ViewCommandBridge {
         let previous = state.advertised();
         state.reports.insert(label.to_string(), next);
         // ★보고를 넣은 **뒤에** 다시 고른다★ — 방금 뜬 창이 죽은 host 를 이어받을 수 있어야 한다.
-        state.repick(&self.hidden);
+        state.repick();
         let current = state.advertised();
         drop(state);
 

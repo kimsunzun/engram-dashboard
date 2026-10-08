@@ -95,7 +95,7 @@ flowchart TD
 | replay 진도·dedup·gen | **프론트 뷰(viewId)** | Rust 출력 행은 무상태 |
 | 레이아웃(창·탭·슬롯) | 셸 `src-tauri` `layout::ViewManager` | 데몬은 View를 모른다 · **디스크 영속 = 셸 `shell\state\state.json`**(창 위치·크기·최대화 포함 — 정상 종료 뒤 부팅은 묻지 않고 복원한다 · 정본 = [TRD S21-storage §6](../process/S21-storage/trd.md)), ADR-0035/0057 |
 | 크래시 사본 · 「복원할까요?」 상태 | 셸 `state::restore::RestoreService`(상태 `none`/`awaiting`/`answered` + 처리 중인 답 하나) · 답 = 복원 조율자 `RestoreCoordinator` 하나 | 사본 파일 = `shell\state\state.crash.json`(비정상 종료 뒤 부팅이 뜨고 답만 푼다) · 상태는 부팅 단계가 한 곳에서 정하고 바뀌면 `restore:changed` 를 main 에 낸다 · 사람(invoke `restore_answer`)과 LLM(버스 `restore.answer`)이 같은 조율자 인스턴스를 부른다 · 정본 = [TRD S21-storage §6-5 · §6-7](../process/S21-storage/trd.md) — ADR 은 아직 없다(P3c1 착지 `064b61c` · 사람 경로 = main 창 안 모달 — P3c2 착지 `7b742fb`: 프론트 상태 창구 `src/api/restoreClient.ts` 가 `settingsClient.ts` 처럼 invoke · listen 을 직접 건다 · 같은 상태가 부팅의 `state.json` 읽기 결과 `state_file` 도 싣는다) |
-| 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = 셸 화면 상태의 창 항목(레이아웃 창 = `ViewManager` 의 `WindowAttrs::theme` · 트리 창 = `TreeAttrs` — `state.json` 에 영속 · 창과 같이 죽는다 · ADR-0265 결정 7) | 셸이 창마다 유효 값(창별 ?? 전역)을 한 자리(`src-tauri/src/theme.rs` 의 `EffectiveThemes`)에서 계산해 민다 — 창별 쓰기(버스 `window.setTheme` · 조회 `window.getTheme`) · `theme.default` 쓰기(`settings.set`·`settings.reset`) · 부팅의 창 복원 뒤 · 런타임 복원 수락이 밀기를 부른다 · 옛 `ui-settings.json` 은 P3d 부터 읽지도 쓰지도 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167(그 파일 · `ui.refresh` 경로는 ADR-0265 가 부분 폐기) |
+| 테마 | 전역 = 셸 `settings.json` `theme.default`(ADR-0265) · 창별 = 셸 화면 상태의 창 항목(`ViewManager` 의 `WindowAttrs::theme` — `state.json` 에 영속 · 창과 같이 죽는다 · ADR-0265 결정 7) | 셸이 창마다 유효 값(창별 ?? 전역)을 한 자리(`src-tauri/src/theme.rs` 의 `EffectiveThemes`)에서 계산해 민다 — 창별 쓰기(버스 `window.setTheme` · 조회 `window.getTheme`) · `theme.default` 쓰기(`settings.set`·`settings.reset`) · 부팅의 창 복원 뒤 · 런타임 복원 수락이 밀기를 부른다 · 옛 `ui-settings.json` 은 P3d 부터 읽지도 쓰지도 않는다 · 프론트 Zustand는 화면 반영 미러(저장 안 함), ADR-0166/0167(그 파일 · `ui.refresh` 경로는 ADR-0265 가 부분 폐기) |
 | 챗 렌더 스타일(간격·폰트) | 셸 `settings.json` `chat.style.*` | 권위 = 셸 설정 · `chatStyleStore`는 `settings:changed`를 CSS 변수에 칠하는 적용자(저장 안 함), ADR-0265 |
 
 결정: 미러 제거 = ADR-0046 · 레이아웃 권위 = ADR-0035/0057 · 설정 = ADR-0265(옛 UI 설정 파일 = ADR-0166) · 창별 테마 = ADR-0265 결정 7(옛 설정 파일 경로 = ADR-0167) · data_dir 결정 = 데몬 `data_dir::default_data_dir`(셸은 사본 — 같은 경로 시험이 묶는다, ADR-0271 · 위치 결정은 ADR-0134/0136이 정본 — 0024의 데이터 위치 조항은 폐기) · 시체 보존 = ADR-0083 · 제어 토큰 = ADR-0086 · 메시징 인메모리 = ADR-0103.
@@ -516,7 +516,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  WV["웹뷰 · WebView2 창<br/>main(정적) · agent-tree(정적·hidden) · popout(런타임 생성, ADR-0057)<br/>창마다 독립 웹뷰 컨텍스트 — 모듈 스토어·ProtocolClient·TauriTransport 각자<br/>단 데몬 연결은 셸에 하나뿐(ADR-0036)"]
+  WV["웹뷰 · WebView2 창<br/>main(정적) · popout(런타임 생성, ADR-0057) — 숨은 agent-tree 창은 ADR-0225 로 걷었다<br/>창마다 독립 웹뷰 컨텍스트 — 모듈 스토어·ProtocolClient·TauriTransport 각자<br/>단 데몬 연결은 셸에 하나뿐(ADR-0036)"]
   UI["① UI 레이어 · components·pages<br/>WindowLayout → ViewLayoutRenderer → slot 렌더러 · 제어 UI<br/>순수 I/O: 렌더링 + 입력 캡처"]
   CMD["② 커맨드 층 · commands<br/>registry · dispatch · contributions · keybindings · slotMenu<br/>사람 클릭 = 키바인딩 = 슬롯 메뉴 = LLM 이 같은 id 로 들어온다 (ADR-0055/0064)"]
   BR["viewCommandBridge — 이 창의 command 를 셸에 등록 · 셸 봉투를 같은 registry 로 (ADR-0155)"]
@@ -548,7 +548,6 @@ flowchart TD
 flowchart TD
   App["App · HashRouter"]
   App -->|"/"| AL0["AppLayout · main 창"]
-  App -->|"/tree"| TP["TreePage · AgentList 전체화면"]
   App -->|"/popup"| PO["PopoutPage · 런타임 팝아웃 (ADR-0057)"]
 
   AL0 --> WLnode["WindowLayout · 창당 1개"]
@@ -569,9 +568,8 @@ flowchart TD
   RS -.-> VEIL2
   DS -.-> VEIL2
   SB -.->|"기억 없는 예약 슬롯 — 슬롯 컴포넌트를 띄우지 않을 때만 (ADR-0280)"| VEIL2
-  AL0 --> NOV["NoticeOverlay · 알림을 레이아웃 위에 덮는 층 — 세 창 공용 (ADR-0276/0277)"]
+  AL0 --> NOV["NoticeOverlay · 알림을 레이아웃 위에 덮는 층 — main · 팝아웃 공용 (ADR-0276/0277)"]
   PO --> NOV
-  TP --> NOV
   NOV --> CN["ConnectionNotice · 데몬 연결 상태 띠"]
   NOV -->|"main 만"| SFN["StateFileNotice · 상태 파일 안내"]
   SB -->|"content=agent_list"| ALa["AgentList · react-arborist (드래그 재부모화)"]

@@ -5,8 +5,7 @@
  */
 export type AnswerReply = { 
 /**
- * 사본 화면으로 다시 그린 레이아웃 창 수 — main + 모델에 남은 새 팝아웃(화면을 바꾸기 전에 닫힌 창은 빠진다).
- * 트리 창은 세지 않는다(자리만 입힌다 — [`RestoreStatusView::windows`] 와 같은 셈) · 거절은 `0`.
+ * 사본 화면으로 다시 그린 창 수 — main + 모델에 남은 새 팝아웃(화면을 바꾸기 전에 닫힌 창은 빠진다) · 거절은 `0`.
  */
 restored_windows: number, 
 /**

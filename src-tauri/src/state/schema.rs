@@ -43,7 +43,7 @@ pub struct StateFile {
     pub windows: Vec<WindowEntry>,
 }
 
-/// 창 하나. `id` = 영속 신원 — `main` · `agent-tree` 고정, 팝아웃은 창이 처음 생길 때 뽑은 UUID 다. runtime
+/// 창 하나. `id` = 영속 신원 — `main` 고정, 팝아웃은 창이 처음 생길 때 뽑은 UUID 다. runtime
 /// label 이 아니다(TRD §6-3).
 ///
 /// 같은 `id` 의 중복 · main 부재 같은 모양 검사는 여기서 하지 않는다 — 복원 쪽(`from_persisted`)이 다시 세운다.
@@ -60,13 +60,12 @@ pub struct WindowEntry {
     pub maximized: bool,
 }
 
-/// 파일에서는 `"kind"` 문자열과 탭 칸(`active_tab` · `tabs`)이 창 항목에 평평하게 놓인다. 트리 창은 탭 칸이
-/// 없다(레이아웃 모델 밖 — TRD §6-3).
+/// 파일에서는 `"kind"` 문자열과 탭 칸(`active_tab` · `tabs`)이 창 항목에 평평하게 놓인다. 이 판이 모르는 `kind`
+/// (ADR-0225 가 걷은 트리 창의 `"tree"` 포함)는 읽기가 그 창만 건너뛴다(`codec`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WindowKind {
     Main(TabStrip),
-    Tree,
     Popout(TabStrip),
 }
 

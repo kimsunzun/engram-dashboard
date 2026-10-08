@@ -764,7 +764,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use super::*;
-    use crate::state::schema::{Bounds, WindowKind};
+    use crate::state::schema::{Bounds, TabStrip, WindowKind};
 
     fn state_file(clean_exit: bool) -> StateFile {
         StateFile {
@@ -772,7 +772,7 @@ mod tests {
             saved_at_ms: 42,
             clean_exit,
             resolved_crash_copy: None,
-            windows: vec![tree_window()],
+            windows: vec![a_window()],
         }
     }
 
@@ -783,10 +783,13 @@ mod tests {
         }
     }
 
-    fn tree_window() -> WindowEntry {
+    fn a_window() -> WindowEntry {
         WindowEntry {
-            id: "agent-tree".into(),
-            kind: WindowKind::Tree,
+            id: "main".into(),
+            kind: WindowKind::Main(TabStrip {
+                active_tab: uuid::Uuid::nil(),
+                tabs: Vec::new(),
+            }),
             theme: None,
             bounds: Some(Bounds {
                 x: 10.0,
@@ -1327,7 +1330,7 @@ mod tests {
         assert_eq!(plan.guard, None, "떠 두기 실패는 가드가 아니다(D8)");
         assert_eq!(plan.state_aside, Some(StateAside::NotCopied));
         assert_eq!(
-            write_run_marker(&files, &plan, vec![tree_window()], 7),
+            write_run_marker(&files, &plan, vec![a_window()], 7),
             MarkerOutcome::Written
         );
         assert_eq!(files.written().len(), 1);
@@ -1348,7 +1351,7 @@ mod tests {
             "못 쓸 사본을 떠 둔 것은 state.json 의 떠 두기가 아니다"
         );
         assert_eq!(
-            write_run_marker(&files, &plan, vec![tree_window()], 7),
+            write_run_marker(&files, &plan, vec![a_window()], 7),
             MarkerOutcome::Guarded
         );
         assert_eq!(
@@ -1395,7 +1398,7 @@ mod tests {
         let files = FakeFiles::reading(Ok(raw.clone()));
 
         let plan = prepare(&files);
-        let marker = write_run_marker(&files, &plan, vec![tree_window()], 9);
+        let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
 
         assert_eq!(plan.model, BootModel::Default);
         assert_eq!(plan.guard, None);
@@ -1432,7 +1435,7 @@ mod tests {
             "복원 원천 = 메모리의 state.json 원문(L2)"
         );
         assert_eq!(
-            write_run_marker(&files, &plan, vec![tree_window()], 9),
+            write_run_marker(&files, &plan, vec![a_window()], 9),
             MarkerOutcome::Guarded
         );
         assert!(files.written().is_empty(), "디스크의 state.json 그대로");
@@ -1450,7 +1453,7 @@ mod tests {
         assert!(matches!(plan.guard, Some(Guard::CrashCopyNotWritten(_))));
         assert_eq!(plan.crash_copy, Some(awaiting_of(state_file(false))));
         assert_eq!(
-            write_run_marker(&files, &plan, vec![tree_window()], 9),
+            write_run_marker(&files, &plan, vec![a_window()], 9),
             MarkerOutcome::Guarded
         );
         assert_eq!(files.calls(), ["sweep", "read", "read_crash"]);
@@ -1465,7 +1468,7 @@ mod tests {
             );
 
             let plan = prepare(&files);
-            let marker = write_run_marker(&files, &plan, vec![tree_window()], 9);
+            let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
 
             assert_eq!(plan.guard, None, "{state}");
             assert_eq!(plan.state_aside, Some(StateAside::CopiedAside), "{state}");
@@ -1486,7 +1489,7 @@ mod tests {
             FakeFiles::reading_both(Ok(text_of(&state_file(false))), vec![Ok(crash_text())]);
 
         let plan = prepare(&files);
-        let marker = write_run_marker(&files, &plan, vec![tree_window()], 9);
+        let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
 
         assert_eq!(plan.crash_copy, Some(awaiting_of(crash_file())));
         assert!(files.crash_written().is_empty(), "사본을 덮지 않는다(D2-6)");
@@ -1652,7 +1655,7 @@ mod tests {
         let files = answered_boot(vec![Ok(crash_text()), Ok(crash_text())]);
 
         let plan = prepare(&files);
-        write_run_marker(&files, &plan, vec![tree_window()], 9);
+        write_run_marker(&files, &plan, vec![a_window()], 9);
 
         assert_eq!(
             files.call_names(),
@@ -1716,7 +1719,7 @@ mod tests {
         };
 
         let plan = prepare(&files);
-        let marker = write_run_marker(&files, &plan, vec![tree_window()], 9);
+        let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
 
         assert_eq!(plan.carry_resolved, Some(crash_hash()));
         assert_eq!(plan.guard, None, "못 지운 것은 가드가 아니다");
@@ -1747,7 +1750,7 @@ mod tests {
         let files = FakeFiles::reading_both(Ok(text_of(&state)), vec![Ok(crash_text())]);
 
         let plan = prepare(&files);
-        write_run_marker(&files, &plan, vec![tree_window()], 9);
+        write_run_marker(&files, &plan, vec![a_window()], 9);
 
         assert_eq!(
             files.call_names(),
@@ -1767,7 +1770,7 @@ mod tests {
         let outcome = write_run_marker(
             &files,
             &quiet(BootModel::Restore(state_file(true))),
-            vec![tree_window()],
+            vec![a_window()],
             7,
         );
 
@@ -1782,7 +1785,7 @@ mod tests {
                 saved_at_ms: 7,
                 clean_exit: false,
                 resolved_crash_copy: None,
-                windows: vec![tree_window()],
+                windows: vec![a_window()],
             }
         );
     }

@@ -13,7 +13,6 @@
 // 미러하고(window:tabs-updated 소비), 렌더는 "이 웹뷰 창의 active 탭"(useCurrentViewId)이 정한다.
 //   - main = windows["main"].active
 //   - 팝업 = ?window=<label> 의 windows[label].active
-//   - agent-tree = windows["main"].active 폴백(모델 밖 config 창 — §3-4/G7 특례)
 //
 // ★view_id 별 캐시 모델★(핵심 불변식): layout 을 view_id → {layout,focus,기하,version} 캐시로 보유한다.
 // 왜 캐시인가:
@@ -43,7 +42,7 @@ import type {
 import { isRenderMode, type RenderMode } from '../components/slot/renderMode'
 import { retryAsync } from '../util/retryInvoke'
 
-/** 메인 창 label(백엔드 MAIN_WINDOW_LABEL 미러). agent-tree 폴백·기본 대상. */
+/** 메인 창 label(백엔드 MAIN_WINDOW_LABEL 미러). 창 판정 폴백·기본 대상. */
 export const MAIN_WINDOW_LABEL = 'main'
 
 /** 사용량 슬롯에 쓸 표시 칸 — 빠진 칸은 셸이 그 슬롯의 지금 값으로 지킨다(`setUsageSlot`). */
@@ -333,7 +332,7 @@ export function selectView(state: ViewState, viewId: string | null): CachedView 
 // ── 이 웹뷰가 어느 창인지 판정(§3-3/§3-4, G7) ────────────────────────────────────────────────
 /**
  * 이 웹뷰 창의 label 을 URL 해시로 판정한다. 팝업 라우트(`#/popup?window=<label>`)면 그 label,
- * 그 외(메인 `#/`·트리 `#/tree`)면 `"main"`.
+ * 그 외 hash 면 `"main"`.
  *
  * ★왜 URL 인가★: 팝업 출력 Channel 은 getCurrentWindow().label() 로 구독하지만(agent.rs), 프론트가
  * 자기 활성 탭을 알려면 창 label → windows[label].active 경로가 필요하다. label 은 URL(`?window=`)이
@@ -356,7 +355,6 @@ export function readWindowLabelFromHash(): string {
  * ★이 웹뷰 창의 현재 active 탭 view id(§3-4, G7).★ 창별 상태에서 파생한다:
  *   - main = windows["main"].active
  *   - 팝업 = ?window=<label> 의 windows[label].active
- *   - agent-tree = URL 이 `#/tree` 라 위 판정이 main 폴백 → windows["main"].active(모델 밖 config 창 특례)
  * 못 구하면 null(그 창의 탭 상태가 아직 안 도착 — 부팅 직후 pull 전).
  *
  * 사람 클릭(SlotContextMenu)·LLM command 가 같은 이 판정을 공유해 "자기 창 active 탭"으로 동작한다 —

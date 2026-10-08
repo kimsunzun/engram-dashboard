@@ -4,7 +4,7 @@
 //! 상태는 부팅 단계 ⑥ 이 한 곳에서 정하고([`RestoreService::set_boot`] · I5), 답은 조율자의
 //! [`RestoreCoordinator::answer`] 하나로 간다(사람 · LLM 같은 핸들).
 //!
-//! - ★서비스 락은 잎이다★ — 쥔 채 알림 · 로그 · 기록기 기다리기 · 다른 락(`ViewManager` · 트리 칸)을 하지 않는다.
+//! - ★서비스 락은 잎이다★ — 쥔 채 알림 · 로그 · 기록기 기다리기 · 다른 락(`ViewManager`)을 하지 않는다.
 //!   알림([`RestoreNotifier`])은 락을 놓은 뒤 부른다.
 //! - ★표지를 끝맺지 않고 버리면 `RolledBack` 과 같다★(패닉으로 풀린 경우 포함) — 처리 중 표지가 걸린 채 남으면
 //!   뒤의 답이 모두 `InFlight` 를 받아 그 실행에서는 영영 답할 수 없다.
@@ -15,10 +15,9 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 use ts_rs::TS;
 
 use super::boot_plugin::{report_restore_warning, ResolveResult, StateSession};
-use super::convert::{RestoreWarning, Restored, TREE_WINDOW_ID};
+use super::convert::{RestoreWarning, Restored};
 use super::placement::{land, Fallback, Landing, MonitorArea};
 use super::schema::{StateFile, WindowKind};
-use super::tree_attrs::TreeAttrs;
 use crate::layout::manager::WindowLabel;
 use crate::layout::{
     LabelSource, LayoutEvents, LayoutState, SubscriptionSync, ViewManager, ViewSnapshot,
@@ -127,8 +126,7 @@ pub struct RestoreStatusView {
     // ts-rs 의 u64 기본 매핑은 bigint 이나 serde_json 은 number 로 싣는다.
     #[ts(type = "number | null")]
     pub saved_at_ms: Option<u64>,
-    /// 사본의 레이아웃 창 수 — main + 팝아웃. 트리 창은 세지 않는다(탭이 없고 수락이 자리만 입힌다 —
-    /// [`AnswerReply::restored_windows`] 와 같은 셈).
+    /// 사본의 창 수 — main + 팝아웃([`AnswerReply::restored_windows`] 와 같은 셈).
     pub windows: Option<u32>,
     /// 사본의 모든 창의 탭 수 합.
     pub tabs: Option<u32>,
@@ -394,9 +392,8 @@ impl RestoreService {
             .file
             .windows
             .iter()
-            .filter_map(|window| match &window.kind {
-                WindowKind::Main(strip) | WindowKind::Popout(strip) => Some(strip.tabs.len()),
-                WindowKind::Tree => None,
+            .map(|window| match &window.kind {
+                WindowKind::Main(strip) | WindowKind::Popout(strip) => strip.tabs.len(),
             })
             .collect();
         RestoreStatusView {
@@ -449,8 +446,7 @@ fn count(n: usize) -> u32 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, TS)]
 #[ts(export)]
 pub struct AnswerReply {
-    /// 사본 화면으로 다시 그린 레이아웃 창 수 — main + 모델에 남은 새 팝아웃(화면을 바꾸기 전에 닫힌 창은 빠진다).
-    /// 트리 창은 세지 않는다(자리만 입힌다 — [`RestoreStatusView::windows`] 와 같은 셈) · 거절은 `0`.
+    /// 사본 화면으로 다시 그린 창 수 — main + 모델에 남은 새 팝아웃(화면을 바꾸기 전에 닫힌 창은 빠진다) · 거절은 `0`.
     pub restored_windows: u32,
     /// 마감 안에 그 답을 실은 `state.json` 이 발행됐다. `false` = 마감 안에 디스크에 붙었다고 확인하지 못했다 —
     /// 다음 부팅이 다시 물을 수 있다. 기록기가 없으면(가드) 반드시 다시 묻고, 쓰기 실패 · 마감 초과면 기록기가 그
@@ -528,8 +524,6 @@ pub trait RestoreWindows: Send + Sync {
     /// 보이는 main 도 같은 미룸을 세운 채 입히고 입혀졌을 때만 거둔다 — ★못 입혔으면 남아★ 그동안 main 의 자리를 적지
     /// 않고([`Self::record_placement`] 포함) 다음 보이기가 다시 입힌다.
     fn place_main(&self, at: Option<(WindowBounds, Landing)>, maximized: bool);
-    /// 이미 있는 창(트리)에 보통 자리를 입힌다. 창이 없으면 아무것도 안 한다.
-    fn place(&self, label: &str, bounds: WindowBounds, at: Landing);
     /// 보이거나(`true`) 숨기고 사용량 관심에 그 보임을 알린다 — 트레이 보이기 · 숨기기와 같은 차례다(ADR-0229 ·
     /// `tray::actions::for_each_ui_window`). 보일 때 미뤄 둔 최대화가 있으면 입힌다. 창이 없으면 아무것도 안 한다.
     fn set_shown(&self, label: &str, shown: bool);
@@ -554,7 +548,7 @@ pub struct RestorePorts {
     pub windows: Arc<dyn RestoreWindows>,
     pub events: Arc<dyn LayoutEvents>,
     pub subs: Arc<dyn SubscriptionSource>,
-    /// 셸에 하나인 그 유효 테마 — 조율자와 같은 모델 · 트리 칸을 본다.
+    /// 셸에 하나인 그 유효 테마 — 조율자와 같은 모델을 본다.
     pub themes: ThemeControl,
 }
 
@@ -566,14 +560,12 @@ pub struct RestorePorts {
 ///   거두기)의 실패는 로그만 남긴다.
 /// - ★복원한 팝아웃은 main 의 보임을 따른다(ADR-0229)★ — 숨은 main 곁에 팝아웃만 뜨지 않게 숨긴 채 두고, 트레이
 ///   「보이기」가 함께 드러낸다. 사본의 최대화는 그 창이 처음 보일 때 입힌다([`RestoreWindows::open_hidden`]).
-/// - ★락 순서★: 서비스 칸 · 세션 칸은 잎이고 `ViewManager` 락과 트리 칸 락은 겹쳐 잡지 않는다 — 트리 칸은 ③ 이
-///   레이아웃 락을 놓은 바로 뒤에 갈아끼운다. 창 포트 · 알림 · 기록기 기다리기는 어느 락도 쥐지 않고 한다.
+/// - ★락 순서★: 서비스 칸 · 세션 칸은 잎이다. 창 포트 · 알림 · 기록기 기다리기는 어느 락도 쥐지 않고 한다.
 /// - 포트([`RestorePorts`])는 빌더에서 만든 뒤 셸 setup 끝에 [`Self::attach`] 로 받는다 — 그 전의 수락은
 ///   [`AnswerError::NotReady`](`awaiting` 그대로 · 다시 답할 수 있다)이고 거절은 포트 없이 선다.
 pub struct RestoreCoordinator {
     service: Arc<RestoreService>,
     layout: LayoutState,
-    tree: Arc<TreeAttrs>,
     session: Arc<StateSession>,
     /// 런타임 팝아웃과 같은 발급기 — 새 label 이 떠 있는 창과 겹치지 않는다(§6-3).
     labels: Arc<dyn LabelSource>,
@@ -583,7 +575,6 @@ pub struct RestoreCoordinator {
 // ① 의 결과 — 아직 아무것도 바꾸지 않았다.
 struct Prepared {
     layout: ViewManager,
-    tree: WindowAttrs,
     main: WindowAttrs,
     // 새 팝아웃(label 발급 순) — 그 창의 사본 속성.
     popouts: Vec<(WindowLabel, WindowAttrs)>,
@@ -606,14 +597,12 @@ impl RestoreCoordinator {
     pub fn new(
         service: Arc<RestoreService>,
         layout: LayoutState,
-        tree: Arc<TreeAttrs>,
         session: Arc<StateSession>,
         labels: Arc<dyn LabelSource>,
     ) -> Self {
         Self {
             service,
             layout,
-            tree,
             session,
             labels,
             ports: OnceLock::new(),
@@ -700,7 +689,6 @@ impl RestoreCoordinator {
 
         let Prepared {
             layout,
-            tree,
             main,
             popouts,
         } = prepared;
@@ -711,25 +699,19 @@ impl RestoreCoordinator {
                 return Err(reason);
             }
         };
-        // 레이아웃 락을 놓은 뒤 · ④ 앞(§6-3 — 두 락을 겹쳐 잡지 않는다). ④ 의 트리 창 자리 입히기가 낳는
-        //   `Moved` 기록이 이 값 위에 적혀야 한다.
-        self.tree.set(tree);
-        // 사본의 창 테마가 모델 · 트리 칸에 들었다 — 떠 있는 main · 트리 창과, 커밋 전(모델에 들기 전)에 첫 값을 당긴
-        //   새 팝아웃이 그 값을 받게 민다. 보이기(④) 앞이라 새 팝아웃이 옛 값으로 비치지 않는다(TRD S21-storage §6-7).
+        // 사본의 창 테마가 모델에 들었다 — 떠 있는 main 과, 커밋 전(모델에 들기 전)에 첫 값을 당긴 새 팝아웃이 그 값을
+        //   받게 민다. 보이기(④) 앞이라 새 팝아웃이 옛 값으로 비치지 않는다(TRD S21-storage §6-7).
         // ADR-0265
         ports.themes.push();
 
-        let kept = self.after_commit(ports, committed, main, tree, &popouts, &desktop);
+        let kept = self.after_commit(ports, committed, main, &popouts, &desktop);
         Ok(count(1 + kept))
     }
 
     // ① — 부수효과 없음(발급기 번호만 쓴다 — 단조라 버려도 된다).
     fn prepare(&self, copy: &CrashCopy) -> Result<Prepared, String> {
-        let Restored {
-            layout,
-            tree,
-            warnings,
-        } = ViewManager::from_persisted(copy.file.windows.clone(), self.labels.as_ref());
+        let Restored { layout, warnings } =
+            ViewManager::from_persisted(copy.file.windows.clone(), self.labels.as_ref());
         warnings.iter().for_each(report_restore_warning);
         if let Some(RestoreWarning::Internal(reason)) = warnings
             .iter()
@@ -762,7 +744,6 @@ impl RestoreCoordinator {
         }
         Ok(Prepared {
             layout,
-            tree,
             main,
             popouts,
         })
@@ -818,7 +799,6 @@ impl RestoreCoordinator {
         ports: &RestorePorts,
         committed: Committed,
         main: WindowAttrs,
-        tree: WindowAttrs,
         popouts: &[(WindowLabel, WindowAttrs)],
         desktop: &Desktop,
     ) -> usize {
@@ -840,16 +820,9 @@ impl RestoreCoordinator {
             land(MAIN_WINDOW_LABEL, bounds, monitors, Fallback::StayPut).map(|at| (bounds, at))
         });
         windows.place_main(main_at, main.maximized);
-        // 트리 창은 자리만 — 최대화를 싣지 않는다(`state::tree_attrs` 머리).
-        if let Some(bounds) = tree.bounds {
-            if let Some(at) = land(TREE_WINDOW_ID, bounds, monitors, Fallback::StayPut) {
-                windows.place(TREE_WINDOW_ID, bounds, at);
-            }
-        }
-        // 사본의 자리를 버렸거나 못 입혔으면 모델 · 트리 칸이 창이 간 적 없는 자리를 쥔다 — 지금 자리로 맞춘다. main 의
-        //   최대화를 못 입혔으면 main 은 적히지 않는다(미룸이 남는다 — `place_main`).
+        // 사본의 자리를 버렸거나 못 입혔으면 모델이 창이 간 적 없는 자리를 쥔다 — 지금 자리로 맞춘다. main 의 최대화를
+        //   못 입혔으면 main 은 적히지 않는다(미룸이 남는다 — `place_main`).
         windows.record_placement(MAIN_WINDOW_LABEL);
-        windows.record_placement(TREE_WINDOW_ID);
 
         let main_shown = windows.visibility(MAIN_WINDOW_LABEL) != Some(false);
         let mut vanished = Vec::new();
@@ -1046,7 +1019,6 @@ mod tests {
                 resolved_crash_copy: None,
                 windows: vec![
                     window("main", WindowKind::Main(strip(2))),
-                    window("agent-tree", WindowKind::Tree),
                     window("p-1", WindowKind::Popout(strip(1))),
                 ],
             },
@@ -1489,8 +1461,8 @@ mod tests {
     }
 
     /// 앞 실행의 화면 — main 탭 「지난 탭」(모니터 위 자리 · `main_maximized`) · 팝아웃 `popouts` 개(첫째 = 모르는
-    /// 내용 슬롯 · 어느 모니터에도 안 걸치는 자리 · 최대화) · 트리 칸(테마 · 자리).
-    fn previous_screen(popouts: usize, main_maximized: bool) -> (Vec<WindowEntry>, WindowAttrs) {
+    /// 내용 슬롯 · 어느 모니터에도 안 걸치는 자리 · 최대화).
+    fn previous_screen(popouts: usize, main_maximized: bool) -> Vec<WindowEntry> {
         let mut prev = ViewManager::new();
         let main_view = prev.windows[MAIN_WINDOW_LABEL].active;
         prev.rename_tab(main_view, "지난 탭".into()).unwrap();
@@ -1521,12 +1493,7 @@ mod tests {
                     .unwrap();
             }
         }
-        let tree = WindowAttrs {
-            theme: Some(UiTheme::Dark),
-            bounds: Some(rect(10.0, 10.0, 300.0, 700.0)),
-            maximized: false,
-        };
-        (to_persisted(&prev, tree), tree)
+        to_persisted(&prev)
     }
 
     fn copy_of(windows: Vec<WindowEntry>) -> CrashCopy {
@@ -1670,10 +1637,6 @@ mod tests {
             ));
         }
 
-        fn place(&self, label: &str, _bounds: WindowBounds, _at: Landing) {
-            self.note(format!("place {label}"));
-        }
-
         fn set_shown(&self, label: &str, shown: bool) {
             let verb = if shown { "show" } else { "hide" };
             self.note(format!("{verb} {label} in_model={}", self.in_model(label)));
@@ -1708,20 +1671,19 @@ mod tests {
         }
     }
 
-    /// 알림 — 첫 알림 순간의 트리 번호와 락 상태를 함께 적는다.
+    /// 알림 — 첫 알림 순간에 레이아웃 락이 비었는지 적는다.
     struct FakeEvents {
         layout: LayoutState,
-        tree: Arc<TreeAttrs>,
         layouts: Mutex<Vec<Uuid>>,
         tabs: Mutex<Vec<(String, u64)>>,
-        first_seen: Mutex<Option<(u64, bool)>>,
+        first_seen: Mutex<Option<bool>>,
     }
 
     impl FakeEvents {
         fn note(&self) {
             let mut first = self.first_seen.lock().unwrap();
             if first.is_none() {
-                *first = Some((self.tree.rev(), self.layout.0.try_lock().is_ok()));
+                *first = Some(self.layout.0.try_lock().is_ok());
             }
         }
     }
@@ -1741,22 +1703,19 @@ mod tests {
         }
     }
 
-    /// 구독 재계산 — 레이아웃 락 안에서 불린다. 그 순간의 모델 번호와 트리 번호를 적는다.
+    /// 구독 재계산 — 레이아웃 락 안에서 불린다. 그 순간의 모델 번호를 적는다.
+    #[derive(Default)]
     struct FakeSubs {
-        tree: Arc<TreeAttrs>,
-        seen: Mutex<Vec<(u64, u64)>>,
+        seen: Mutex<Vec<u64>>,
     }
 
     impl SubscriptionSync for FakeSubs {
         fn resync(&self, mgr: &ViewManager) {
-            self.seen
-                .lock()
-                .unwrap()
-                .push((mgr.version, self.tree.rev()));
+            self.seen.lock().unwrap().push(mgr.version);
         }
     }
 
-    /// 테마 밀기의 창 쪽 — 살아 있는 웹뷰 = 모델의 창 + 트리 창. 보낸 것과 보낼 때 레이아웃 락이 비었는지 적는다.
+    /// 테마 밀기의 창 쪽 — 살아 있는 웹뷰 = 모델의 창. 보낸 것과 보낼 때 레이아웃 락이 비었는지 적는다.
     struct ThemeScreen {
         layout: LayoutState,
         sent: Mutex<Vec<(String, String)>>,
@@ -1767,7 +1726,6 @@ mod tests {
         fn labels(&self) -> Vec<String> {
             let mut labels = self.layout.0.lock().unwrap().list_windows();
             labels.sort();
-            labels.push(TREE_WINDOW_ID.to_string());
             labels
         }
 
@@ -1806,7 +1764,6 @@ mod tests {
         service: Arc<RestoreService>,
         notices: Arc<Recorder>,
         layout: LayoutState,
-        tree: Arc<TreeAttrs>,
         labels: Arc<PopupCounter>,
         windows: Arc<FakeWindows>,
         events: Arc<FakeEvents>,
@@ -1823,27 +1780,21 @@ mod tests {
             let notices = Arc::new(Recorder::default());
             service.set_notifier(notices.clone());
             let layout = LayoutState::new();
-            let tree = Arc::new(TreeAttrs::default());
             let shared = Arc::new(PopupCounter::default());
             let coordinator = RestoreCoordinator::new(
                 service.clone(),
                 layout.clone(),
-                tree.clone(),
                 Arc::new(StateSession::default()),
                 labels.unwrap_or_else(|| shared.clone()),
             );
             let windows = Arc::new(FakeWindows::new(&layout));
             let events = Arc::new(FakeEvents {
                 layout: layout.clone(),
-                tree: tree.clone(),
                 layouts: Mutex::default(),
                 tabs: Mutex::default(),
                 first_seen: Mutex::default(),
             });
-            let subs = Arc::new(FakeSubs {
-                tree: tree.clone(),
-                seen: Mutex::default(),
-            });
+            let subs = Arc::new(FakeSubs::default());
             let slot = Arc::new(SubsSlot {
                 layout: layout.clone(),
                 subs: Mutex::default(),
@@ -1859,7 +1810,7 @@ mod tests {
                 &std::env::temp_dir().join("engram-restore-no-settings"),
             ));
             let themes = ThemeControl::new(
-                Arc::new(EffectiveThemes::new(settings, layout.clone(), tree.clone())),
+                Arc::new(EffectiveThemes::new(settings, layout.clone())),
                 theme_screen.clone(),
             );
             Rig {
@@ -1867,7 +1818,6 @@ mod tests {
                 service,
                 notices,
                 layout,
-                tree,
                 labels: shared,
                 windows,
                 events,
@@ -1941,8 +1891,7 @@ mod tests {
             let mgr = rig.layout.0.lock().unwrap();
             (mgr.version, mgr.attrs_rev())
         };
-        let tree_rev = rig.tree.rev();
-        let (windows, saved_tree) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
@@ -1983,8 +1932,6 @@ mod tests {
                 "모르는 내용 원문이 View 와 함께 온다"
             );
         }
-        assert_eq!(rig.tree.attrs(), saved_tree);
-        assert_eq!(rig.tree.rev(), tree_rev + 1);
 
         assert_eq!(
             rig.windows.calls(),
@@ -1994,9 +1941,7 @@ mod tests {
                 "defer_maximize slot-popup-2 in_model=false",
                 "open_hidden slot-popup-2 at=false in_model=false",
                 "place_main at=true maximized=false",
-                "place agent-tree",
                 "record main",
-                "record agent-tree",
                 "visible? main",
                 "visible? slot-popup-2",
                 "show slot-popup-2 in_model=true",
@@ -2015,13 +1960,13 @@ mod tests {
         );
         assert_eq!(
             *rig.subs.seen.lock().unwrap(),
-            [(version + 1, tree_rev)],
-            "재계산은 커밋과 같은 임계구역 — 그때 트리 칸은 아직 옛 것(두 락을 겹치지 않는다)"
+            [version + 1],
+            "재계산은 커밋과 같은 임계구역"
         );
         assert_eq!(
             *rig.events.first_seen.lock().unwrap(),
-            Some((tree_rev + 1, true)),
-            "알림은 락 밖 · 트리 칸을 갈아끼운 뒤"
+            Some(true),
+            "알림은 락 밖"
         );
         let tabs = rig.events.tabs.lock().unwrap().clone();
         assert_eq!(
@@ -2050,8 +1995,8 @@ mod tests {
         ));
     }
 
-    /// ★수락은 사본의 창 테마를 민다★ — main · 트리 창은 이미 떠 있고, 새 팝아웃은 모델에 들기 전에 첫 값을 당겼을 수
-    /// 있다(그때는 전역 값). 보이기 앞에 · 레이아웃 락 밖에서 민다.
+    /// ★수락은 사본의 창 테마를 민다★ — main 은 이미 떠 있고, 새 팝아웃은 모델에 들기 전에 첫 값을 당겼을 수 있다
+    /// (그때는 전역 값). 보이기 앞에 · 레이아웃 락 밖에서 민다.
     #[test]
     fn an_accept_pushes_the_copys_window_themes() {
         let rig = Rig::new(None);
@@ -2063,12 +2008,8 @@ mod tests {
         prev.set_window_theme("slot-popup-70", Some(UiTheme::EInk))
             .unwrap();
         prev.create_window("slot-popup-71").unwrap();
-        let tree = WindowAttrs {
-            theme: Some(UiTheme::EInk),
-            ..WindowAttrs::default()
-        };
         rig.service.set_boot(
-            Some(copy_of(to_persisted(&prev, tree))),
+            Some(copy_of(to_persisted(&prev))),
             StateFileStatus::Ok,
             true,
         );
@@ -2079,12 +2020,11 @@ mod tests {
         sent.sort();
         let mut themes: Vec<String> = sent.iter().map(|(_, theme)| theme.clone()).collect();
         themes.sort();
-        assert_eq!(sent.len(), 4, "main · 트리 · 새 팝아웃 둘: {sent:?}");
+        assert_eq!(sent.len(), 3, "main · 새 팝아웃 둘: {sent:?}");
         assert!(sent.contains(&(MAIN_WINDOW_LABEL.to_string(), "light".to_string())));
-        assert!(sent.contains(&(TREE_WINDOW_ID.to_string(), "e-ink".to_string())));
         assert_eq!(
             themes,
-            ["dark", "e-ink", "e-ink", "light"],
+            ["dark", "e-ink", "light"],
             "새 팝아웃 하나는 사본의 테마, 하나는 전역 값: {sent:?}"
         );
         assert!(
@@ -2103,7 +2043,7 @@ mod tests {
     fn a_failed_accept_pushes_no_theme() {
         let rig = Rig::new(None);
         rig.attach();
-        let (windows, _) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         *rig.windows.fail_open.lock().unwrap() = Some("slot-popup-1".to_string());
@@ -2122,7 +2062,7 @@ mod tests {
             .lock()
             .unwrap()
             .push(MAIN_WINDOW_LABEL.into());
-        let (windows, _) = previous_screen(2, true);
+        let windows = previous_screen(2, true);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
@@ -2154,9 +2094,7 @@ mod tests {
         expected.extend(
             [
                 "place_main at=true maximized=true",
-                "place agent-tree",
                 "record main",
-                "record agent-tree",
                 "visible? main",
             ]
             .map(String::from),
@@ -2192,8 +2130,7 @@ mod tests {
         rig.attach();
         rig.live_popout();
         let version = rig.layout.0.lock().unwrap().version;
-        let tree_rev = rig.tree.rev();
-        let (windows, _) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         rig.windows.gone.lock().unwrap().push("slot-popup-2".into());
@@ -2213,7 +2150,7 @@ mod tests {
         );
         assert_eq!(
             *rig.subs.seen.lock().unwrap(),
-            [(version + 1, tree_rev), (version + 2, tree_rev + 1)],
+            [version + 1, version + 2],
             "지운 뒤 같은 락 안에서 다시 재계산한다"
         );
         assert!(rig.ports_called_with_the_lock_free());
@@ -2225,7 +2162,7 @@ mod tests {
         let rig = Rig::new(None);
         rig.attach_without_subs();
         rig.register_subs();
-        let (windows, _) = previous_screen(0, false);
+        let windows = previous_screen(0, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
@@ -2260,7 +2197,7 @@ mod tests {
                 // 보인 팝아웃도 다른 앱에게서 앞자리를 못 가져왔다(가짜의 보이기가 내리는 `background` 를 덮는다).
                 *rig.windows.focus_samples.lock().unwrap() = vec![true, false];
             }
-            let (windows, _) = previous_screen(1, false);
+            let windows = previous_screen(1, false);
             rig.service
                 .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
 
@@ -2304,7 +2241,7 @@ mod tests {
     fn a_window_that_fails_to_open_undoes_the_ones_made_and_leaves_the_answer_open() {
         let rig = Rig::new(None);
         rig.attach();
-        let (windows, _) = previous_screen(2, false);
+        let windows = previous_screen(2, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
@@ -2324,7 +2261,6 @@ mod tests {
             ]
         );
         assert_eq!(rig.fingerprint(), before, "모델은 그대로");
-        assert_eq!(rig.tree.rev(), 0, "트리 칸도 그대로");
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(
@@ -2345,7 +2281,7 @@ mod tests {
     fn a_hidden_window_that_will_not_be_destroyed_is_tried_once_more_and_the_answer_stays_open() {
         let rig = Rig::new(None);
         rig.attach();
-        let (windows, _) = previous_screen(2, false);
+        let windows = previous_screen(2, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         *rig.windows.fail_open.lock().unwrap() = Some("slot-popup-2".into());
@@ -2370,7 +2306,7 @@ mod tests {
     fn a_commit_the_model_refuses_destroys_the_hidden_windows_and_leaves_the_answer_open() {
         let rig = Rig::new(None);
         rig.attach();
-        let (windows, _) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let (version, views) = {
@@ -2406,7 +2342,6 @@ mod tests {
                 "main 은 사본으로 안 바뀌었다"
             );
         }
-        assert_eq!(rig.tree.rev(), 0);
         assert!(rig.subs.seen.lock().unwrap().is_empty(), "커밋 전에 멈췄다");
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
@@ -2423,7 +2358,7 @@ mod tests {
         let rig = Rig::new(Some(Arc::new(PopupCounter::default())));
         rig.attach();
         rig.live_popout();
-        let (windows, _) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
@@ -2440,7 +2375,7 @@ mod tests {
     #[test]
     fn an_accept_before_the_ports_are_attached_is_refused_but_a_reject_is_not() {
         let rig = Rig::new(None);
-        let (windows, _) = previous_screen(0, false);
+        let windows = previous_screen(0, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
@@ -2467,7 +2402,7 @@ mod tests {
         let rig = Rig::new(None);
         rig.attach();
         rig.live_popout();
-        let (windows, _) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let before = rig.fingerprint();
@@ -2482,7 +2417,6 @@ mod tests {
             }
         );
         assert_eq!(rig.fingerprint(), before);
-        assert_eq!(rig.tree.rev(), 0);
         assert!(rig.windows.calls().is_empty());
         assert!(rig.events.tabs.lock().unwrap().is_empty());
         assert_eq!(
@@ -2502,7 +2436,7 @@ mod tests {
             )))
         ));
 
-        let (windows, _) = previous_screen(0, false);
+        let windows = previous_screen(0, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         let held = rig.service.begin_answer().unwrap();
@@ -2520,7 +2454,7 @@ mod tests {
     #[test]
     fn the_coordinator_status_is_the_service_status() {
         let rig = Rig::new(None);
-        let (windows, _) = previous_screen(1, false);
+        let windows = previous_screen(1, false);
         rig.service
             .set_boot(Some(copy_of(windows)), StateFileStatus::Ok, true);
         assert_eq!(rig.coordinator.status(), rig.service.status());

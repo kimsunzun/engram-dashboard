@@ -64,6 +64,9 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 15 = 창 테마 명령 둘(`window.getTheme`·`window.setTheme`)이 `agent-tree` 를 받지 않는 세대★(ADR-0225 —
+//   그 label 도 모르는 창이다) — 이름도 타입도 그대로고 둘의 `window` 칸이 받는 어휘가 줄었다. summary 가 바뀐 것은
+//   `window.getTheme`(`agent-tree` 를 적던 유일한 summary)과 `restore.status`(트리 창 문구가 빠졌다)다.
 // ★세대 14 = 창 테마 명령 둘(`window.setTheme`·`window.getTheme`)이 들고 `ui.refresh` 가 빠진 세대★(TRD
 //   S21-storage §5-6 · §5-7).
 // ★세대 13 = `restore.status` 의 답에 `saves` 가 붙은 세대★(TRD S21-storage §6-5 — 가드 ⅱ 안내(ADR-0276)를 나르는
@@ -92,7 +95,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 14;
+    catalog_version: 15;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -230,7 +233,7 @@ declare_commands! {
                   errors [CONFLICT];
 
     // ADR-0265
-    /// 창 하나의 테마를 읽는다. window = window.list 의 label 또는 트리 창 agent-tree.
+    /// 창 하나의 테마를 읽는다. window = window.list 의 label.
     /// theme = 그 창에만 정한 테마(dark · light · e-ink) — null 이면 정하지 않아 전역 테마(settings 의
     /// theme.default)를 따른다. effective = 지금 그 창에 칠하는 테마(theme 가 null 이면 theme.default).
     /// 없는 창 = CONFLICT.
@@ -462,7 +465,7 @@ declare_commands! {
     /// 안 맞을 때) 이것을 본다. crash_copy = none(물을 사본이 없다) · awaiting(답을 기다린다 — 다른 창 명령보다
     /// 먼저 주인이 정한 답을 restore.answer 로 낸다) · answered(이 실행에서 이미 답했다).
     /// 다음 넷은 awaiting 일 때만 값이고 아니면 null 이다 — saved_at_ms = 사본을 적은 시각(유닉스 밀리초) ·
-    /// windows = 사본의 창 수(main + 팝아웃 — 트리 창은 세지 않는다) · tabs = 그 창들의 탭 수 합 · durable = 그동안의
+    /// windows = 사본의 창 수(main + 팝아웃) · tabs = 그 창들의 탭 수 합 · durable = 그동안의
     /// saves 와 같은 값(true 면 답을 디스크에 붙이고 사본을 지우려 한다 — 실제로 붙었는지는 restore.answer 의 durable ·
     /// false 면 답해도 크래시 때 화면이 디스크에 남아 다음 시작이 다시 묻는다).
     /// 다음 둘은 crash_copy 와 무관하게 늘 값이고 이번 실행 내내 같다(답한 뒤에도).

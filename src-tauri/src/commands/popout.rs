@@ -87,7 +87,7 @@ impl WindowHost for TauriWindowHost<'_> {
     }
 }
 
-// lib.rs Destroyed arm 이 main/agent-tree 와 구분하는 데 쓴다.
+// lib.rs Destroyed arm 이 main 과 구분하는 데 쓴다.
 pub fn is_popup_label(label: &str) -> bool {
     label.starts_with(POPUP_LABEL_PREFIX)
 }
@@ -296,7 +296,7 @@ mod tests {
         assert!(is_popup_label("slot-popup-1"));
         assert!(is_popup_label("slot-popup-42"));
         assert!(!is_popup_label("main"));
-        assert!(!is_popup_label("agent-tree"));
+        assert!(!is_popup_label("x-slot-popup-1"));
     }
 
     #[test]
