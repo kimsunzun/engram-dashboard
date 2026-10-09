@@ -25,11 +25,12 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::file::{self, WriteOutcome};
 use engram_dashboard_base::time::{now_epoch_ms, Clock, SystemClock};
 
 use super::codec::{self, EncodeError, STATE_READ_CAP};
 use super::schema::{StateFile, WindowEntry, STATE_VERSION};
-use crate::fsutil::WriteOutcome;
+use crate::file_hooks::OS_HOOKS;
 
 pub const POLL_INTERVAL: Duration = Duration::from_millis(500);
 pub const QUIET: Duration = Duration::from_secs(1);
@@ -71,11 +72,11 @@ pub trait SnapshotSource: Send + 'static {
 /// 기록기가 만지는 두 파일 — 운영은 [`Fs`].
 pub trait StateFiles: Send + 'static {
     /// `state.json` 을 원자적으로 갈아끼운다 — `skip` 을 rename 앞마다 물어 서 있으면 발행하지 않고
-    /// [`WriteOutcome::Skipped`](`crate::fsutil::write_atomic_unless` 와 같은 계약).
+    /// [`WriteOutcome::Skipped`](`file::write_atomic_unless` 와 같은 계약).
     fn write_state(&self, text: &str, skip: &dyn Fn() -> bool) -> io::Result<WriteOutcome>;
 
     /// 크래시 사본의 원문 — 없으면 `NotFound`, 상한 초과 · UTF-8 아님은 `InvalidData`
-    /// (`crate::fsutil::read_file_capped` 와 같은 계약).
+    /// (`file::read_file_capped` 와 같은 계약).
     fn read_crash_copy(&self) -> io::Result<String>;
 
     /// 없으면 `NotFound`.
@@ -110,11 +111,11 @@ impl Fs {
 
 impl StateFiles for Fs {
     fn write_state(&self, text: &str, skip: &dyn Fn() -> bool) -> io::Result<WriteOutcome> {
-        crate::fsutil::write_atomic_unless(&self.state, text, skip)
+        file::write_atomic_unless(&self.state, text.as_bytes(), OS_HOOKS, skip)
     }
 
     fn read_crash_copy(&self) -> io::Result<String> {
-        crate::fsutil::read_file_capped(&self.crash_copy, STATE_READ_CAP)
+        file::read_file_capped(&self.crash_copy, STATE_READ_CAP, OS_HOOKS)
     }
 
     // 잠김 재시도를 하지 않는다 — 못 지우면 해결 칸이 남아 뒤의 성공 쓰기마다 다시 지운다.

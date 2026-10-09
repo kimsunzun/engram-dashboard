@@ -1,5 +1,5 @@
 //! `state.json` 의 글 ↔ [`StateFile`] — 읽기 관용과 쓰기 상한(크기 · 중첩 — TRD S21-storage §6-2 · §6-4 I4).
-//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 `fsutil` 로 한다.
+//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 base `file` 로 한다.
 //!
 //! 읽기는 세 층으로 접는다:
 //! - **통째로 못 쓴다**([`Unusable`]) — JSON 이 아니다 · 머리(`version` · `saved_at_ms` · `clean_exit` ·
@@ -25,7 +25,7 @@ use super::schema::{
 use crate::theme::UiTheme;
 
 /// 읽기 상한이자 쓰기 상한 — 넘는 글을 쓰면 다음 부팅이 그 파일 전체를 못 쓴다고 접는다(I4). 부르는 쪽은 이
-/// 값으로 `fsutil::read_file_capped` 한다.
+/// 값으로 `engram_dashboard_base::file::read_file_capped` 한다.
 pub const STATE_READ_CAP: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -169,7 +169,7 @@ fn version_number(raw: &Value) -> Option<u64> {
     })
 }
 
-/// `fsutil::read_file_capped` 의 오류 중 파일 내용이 못 쓸 것인 경우 — 상한 초과 · UTF-8 아님(`InvalidData`).
+/// `engram_dashboard_base::file::read_file_capped` 의 오류 중 파일 내용이 못 쓸 것인 경우 — 상한 초과 · UTF-8 아님(`InvalidData`).
 ///
 /// `None` = 내용이 아니라 읽기 자체가 실패했다(없음 · 잠김 · 권한). ★못 쓸 파일과 섞지 않는다★ — 잠깐 잠긴
 /// 멀쩡한 파일을 떠 두거나 덮지 않는다(TRD §6-2 I3).
@@ -180,7 +180,22 @@ pub fn unusable_read(err: &io::Error) -> Option<Unusable> {
 /// 크래시 사본의 신원 — [`StateFile::resolved_crash_copy`] 에 싣는 값. 읽은 원문 바이트 그대로를 잰다 — 부팅과
 /// 기록기가 모두 이 함수로 재야 같은 사본을 같다고 본다.
 pub fn crash_copy_hash(text: &str) -> String {
-    crate::fsutil::fnv1a_hex(text.as_bytes())
+    fnv1a_hex(text.as_bytes())
+}
+
+/// 64비트 FNV-1a — 같은 바이트면 빌드 · 실행이 달라도 같은 값이다(std `DefaultHasher` 는 그것을 약속하지
+/// 않는다). 같은 내용인가를 가리는 용도이지 보안용이 아니다 — 일부러 맞춘 충돌은 못 막는다.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes.iter().fold(OFFSET_BASIS, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+    })
+}
+
+/// [`fnv1a_64`] 를 소문자 16진 16자리로 — 앞자리 0 을 채워 길이가 늘 같다.
+fn fnv1a_hex(bytes: &[u8]) -> String {
+    format!("{:016x}", fnv1a_64(bytes))
 }
 
 #[derive(Deserialize)]
@@ -324,8 +339,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        crash_copy_hash, decode, encode, unusable_read, DecodeWarning, EncodeError, Unusable,
-        STATE_READ_CAP,
+        crash_copy_hash, decode, encode, fnv1a_64, fnv1a_hex, unusable_read, DecodeWarning,
+        EncodeError, Unusable, STATE_READ_CAP,
     };
     use crate::layout::{SlotContent, SplitDir};
     use crate::state::schema::{
@@ -540,11 +555,18 @@ mod tests {
     #[test]
     fn crash_copy_hash_is_the_fnv1a_of_the_raw_text() {
         let text = "\u{feff}{\"version\":1}\r\n";
-        assert_eq!(
-            crash_copy_hash(text),
-            crate::fsutil::fnv1a_hex(text.as_bytes())
-        );
+        assert_eq!(crash_copy_hash(text), fnv1a_hex(text.as_bytes()));
         assert_ne!(crash_copy_hash(text), crash_copy_hash(&text[3..]));
+    }
+
+    #[test]
+    fn fnv1a_matches_the_published_vectors() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
+        assert_eq!(fnv1a_hex(b""), "cbf29ce484222325");
+        assert_eq!(fnv1a_hex(b"a"), "af63dc4c8601ec8c");
+        assert_eq!(fnv1a_hex(b"foobar"), "85944171f73967e8");
     }
 
     // ── 모르는 슬롯 내용(ADR-0060) ──
@@ -828,12 +850,13 @@ mod tests {
 
     #[test]
     fn only_invalid_data_read_errors_are_unusable() {
-        let over = crate::fsutil::read_capped(&b"0123456789"[..], 4).unwrap_err();
+        let over = engram_dashboard_base::file::read_capped(&b"0123456789"[..], 4).unwrap_err();
         assert!(matches!(
             unusable_read(&over),
             Some(Unusable::Unreadable(_))
         ));
-        let not_utf8 = crate::fsutil::read_capped(&[0xff, 0xfe, 0x00][..], 16).unwrap_err();
+        let not_utf8 =
+            engram_dashboard_base::file::read_capped(&[0xff, 0xfe, 0x00][..], 16).unwrap_err();
         assert!(matches!(
             unusable_read(&not_utf8),
             Some(Unusable::Unreadable(_))

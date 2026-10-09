@@ -1,7 +1,7 @@
 pub mod commands;
 pub mod daemon_client;
 pub mod discovery;
-mod fsutil;
+mod file_hooks;
 pub mod layout;
 pub mod output_channel;
 pub mod output_router;

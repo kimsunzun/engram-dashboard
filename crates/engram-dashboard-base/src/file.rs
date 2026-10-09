@@ -1,30 +1,70 @@
-//! 셸이 디스크에 두는 파일들의 공용 읽기·쓰기 — 상한 읽기([`read_capped`] · [`read_file_capped`]) · 원자 쓰기
+//! 데이터 파일의 공용 읽기 · 쓰기 — 상한 읽기([`read_capped`] · [`read_file_capped`]) · 원자 쓰기
 //! ([`write_atomic`] · [`write_atomic_unless`]) · 원자 복사([`copy_atomic`] · [`copy_aside`]) · 남은 임시 파일
-//! 쓸기([`sweep_temps`]) · 내용 식별값([`fnv1a_64`]).
+//! 쓸기([`sweep_temps`]).
 //!
-//! 저장소의 파일 이름·위치·형식은 모른다 — 그건 각 저장소(`settings::store` · `state`)가 소유한다.
-//! 여기서 정하는 이름은 대상 옆에 붙는 둘뿐이다: 임시 `<이름>.tmp<pid>.<번호>` · 떠 둔 사본 `<이름>.corrupt`.
-//! ★그 꼴을 만드는 곳([`temp_path`] · [`copy_aside`])과 읽는 곳([`temp_owner`])이 여기뿐이다★ — 꼴을 바꾸면
-//! 셋을 함께 고친다(시험이 만든 이름을 다시 읽어 맞댄다).
+//! 파일 이름 · 자리 · 형식은 모른다 — 그건 각 주인(저장소)이 소유한다. 여기서 정하는 이름은 대상 옆에 붙는
+//! 둘뿐이다: 임시 `<이름>.tmp<pid>.<번호>` · 떠 둔 사본 `<이름>.corrupt`. ★그 꼴을 만드는 곳(`temp_path` ·
+//! [`copy_aside`])과 읽는 곳(`temp_owner`)이 여기뿐이다★ — 꼴을 바꾸면 셋을 함께 고친다(시험이 만든 이름을 다시
+//! 읽어 맞댄다).
 //!
-//! ★잠김 재시도는 한 규칙이다★ — rename · [`read_file_capped`] 의 열기와 읽기 · [`copy_atomic`] 의 원본 열기가
-//! 같은 판정(platform [`is_busy`](engram_dashboard_platform::fs::is_busy))과 같은 한도([`LOCK_RETRY`])로
-//! [`retry_denied`] 를 지난다. 복사 도중의 읽기 실패는 다시 하지 않는다.
+//! ★OS 에 따라 갈리는 몫은 부르는 쪽이 [`OsHooks`] 로 넘긴다★ — 이 crate 는 OS 층 crate 를 부르지 못한다(입주
+//! 조건 ②). 잠김 재시도는 한 길이다: rename · [`read_file_capped`] 의 열기와 읽기 · [`copy_atomic`] 의 원본 열기가
+//! 모두 [`OsHooks::retry`] 를 지난다. 복사 도중의 읽기 실패는 다시 하지 않는다.
+//!
+//! 로그를 내지 않는다 — 값을 돌려주고 부르는 쪽이 자기 문구로 찍는다.
+// ADR-0291
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use engram_dashboard_platform::fs::{retry_busy_with, Retry};
+/// OS 에 따라 갈리는 둘 — 부르는 쪽이 OS 층 crate(`engram-dashboard-platform` 의 `fs`)의 것을 이어 넘긴다. 운영
+/// 값은 crate 마다 상수다(예산이 다른 읽기를 가진 주인은 둘 — ADR-0291 R14).
+///
+/// fn 포인터인 것은 운영 값을 `const` 로 두기 위해서다 — 상태를 쥔 시험 가짜(시도 세기 · 잠김 주입 · 자지 않기)는
+/// 이것으로 넘기지 않는다.
+// ADR-0291
+#[derive(Clone, Copy)]
+pub struct OsHooks {
+    /// 잠깐 쥐어진 파일의 다시 하기 — `attempt` 를 잠김이 풀리거나 예산이 다할 때까지 부르고 마지막 결과를
+    /// 돌려준다. 성공과 잠김 아닌 오류는 바로 돌려준다(없는 파일 `NotFound` · 못 쓸 내용 `InvalidData` 는 다시
+    /// 하지 않는다). 운영 = `fs::retry_busy`(예산 = [`BUSY_RETRIES`] · [`BUSY_PAUSE`] — 주인이 따로 둔 긴 적재 예산은 예외 · R14).
+    pub retry: fn(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>,
+    /// 폴더 안 이름 바꾸기(rename)를 디스크에 영속시키는 폴더 동기화 — 운영 = `fs::sync_dir`.
+    // 아직 부르지 않는다 — 원자 쓰기의 rename 뒤 폴더 동기화(ADR-0291 R10)를 다는 단위가 부른다.
+    pub sync_dir: fn(&Path) -> io::Result<()>,
+}
+
+/// 데이터 파일의 잠김 예산 — 첫 시도 뒤 다시 하는 횟수와 그 사이 기다림. 운영 [`OsHooks::retry`] 가 이 값을 쓴다(주인이 따로 둔 긴 적재 예산은 예외 · ADR-0291 R14).
+/// 최악에 약 100 ms 더 걸리고, 그보다 오래 쥐면 그대로 실패한다.
+// ADR-0265 결정 4: rename 이 잠김이면 짧게 다시 한다.
+// ADR-0291: 어느 실패가 잠김인지와 다시 하기 고리는 OS 층 정책 하나 — 여기는 예산만 쥔다.
+pub const BUSY_RETRIES: u32 = 5;
+pub const BUSY_PAUSE: Duration = Duration::from_millis(20);
+
+/// [`OsHooks::retry`] 의 클로저 꼴 — 공개 함수는 운영 fn 포인터를 이 꼴로 풀어 넘기고, 이 모듈의 시험은 상태를
+/// 쥔 가짜를 넘긴다.
+type RetryHook<'a> = &'a mut dyn FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()>;
+
+/// `attempt` 를 `retry` 에 태워 그 값을 꺼낸다 — 훅은 값 타입을 모르므로 값은 여기서 따로 받는다. 훅이 `Ok` 를
+/// 돌려줬는데 값이 없으면(시도를 한 번도 안 불렀다) 패닉하지 않고 `ErrorKind::Other` 다.
+fn retrying<T>(retry: RetryHook, mut attempt: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut value = None;
+    retry(&mut || {
+        value = Some(attempt()?);
+        Ok(())
+    })?;
+    value.ok_or_else(|| io::Error::other("다시 하기가 시도를 한 번도 부르지 않았다"))
+}
 
 /// ★상한까지만 읽는다 — 읽고 나서 재지 않는다★.
 ///
-/// 먼저 통째로 읽어 길이를 재면 상한 검사가 도착하기 전에 메모리가 먼저 바닥난다(밖의 에이전트가 쓰는
+/// 먼저 통째로 읽어 길이를 재면 상한 검사가 도착하기 전에 메모리가 먼저 바닥난다(밖의 에이전트 · 사람이 쓰는
 /// 파일이라 크기가 우리 손에 없다). 그러면 기본값 접기도 경고도 못 돌고 프로세스가 죽는다.
 ///
-/// 상한 초과와 UTF-8 아님은 **둘 다 `ErrorKind::InvalidData`** 다 — 둘 다 원문을 못 가져온 것이다.
-/// 그 밖의 종류는 읽기 자체의 IO 실패이고, 둘을 가르는 호출자가 있다(`settings::store` — 내용이 못 쓸
-/// 것이면 첫 쓰기에 옆으로 치우고, IO 실패면 손대지 않는다).
+/// 상한 초과와 UTF-8 아님은 **둘 다 `ErrorKind::InvalidData`** 다 — 둘 다 원문을 못 가져온 것이다. 그 밖의 종류는
+/// 읽기 자체의 IO 실패이고, 둘을 가르는 호출자가 있다 — 내용이 못 쓸 것이면 옆으로 떠 두고, IO 실패면 손대지
+/// 않는다. 잠김 재시도는 없다 — 파일을 여는 쪽이 필요하면 [`read_file_capped`] 를 쓴다.
 pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
     use std::io::Read;
 
@@ -40,22 +80,23 @@ pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
     String::from_utf8(buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
 }
 
-/// 파일을 열어 [`read_capped`] 로 읽는다 — 열기나 읽기가 잠김으로 실패하면 rename 과 같은 규칙으로 다시 한다
-/// ([`replace_with`]). 백신 · 색인기가 파일을 잠깐 쥐면 읽기도 그렇게 실패한다.
+/// 파일을 열어 [`read_capped`] 로 읽는다 — 열기나 읽기가 잠김으로 실패하면 [`OsHooks::retry`] 로 새로 열어 다시
+/// 한다. 백신 · 색인기가 파일을 잠깐 쥐면 읽기도 그렇게 실패한다.
 ///
 /// 그 밖의 오류는 다시 하지 않고 바로 돌려준다 — 없는 파일 = `NotFound` · 상한 초과 · UTF-8 아님 =
-/// `InvalidData`. ★잠김이 한도를 넘으면 그 잠김 오류 그대로다★ — `InvalidData`(못 쓰는 내용)와 섞이지 않는다.
-pub fn read_file_capped(path: &Path, cap: u64) -> io::Result<String> {
-    read_capped_retrying(|| std::fs::File::open(path), cap, std::thread::sleep)
+/// `InvalidData`. ★잠김이 예산을 넘으면 그 잠김 오류 그대로다★ — `InvalidData`(못 쓰는 내용)와 섞이지 않는다.
+pub fn read_file_capped(path: &Path, cap: u64, os: OsHooks) -> io::Result<String> {
+    read_file_capped_with(|| std::fs::File::open(path), cap, &mut |attempt| {
+        (os.retry)(attempt)
+    })
 }
 
-/// [`read_file_capped`] 의 실물 — 열기 · 기다리기를 받아 시험이 실제 잠김 없이 돈다.
-fn read_capped_retrying<R: io::Read>(
+fn read_file_capped_with<R: io::Read>(
     mut open: impl FnMut() -> io::Result<R>,
     cap: u64,
-    pause: impl FnMut(Duration),
+    retry: RetryHook,
 ) -> io::Result<String> {
-    retry_denied(|| read_capped(open()?, cap), pause)
+    retrying(retry, || read_capped(open()?, cap))
 }
 
 /// [`write_atomic_unless`] 의 결과.
@@ -66,11 +107,14 @@ pub enum WriteOutcome {
     Skipped,
 }
 
-/// 임시 파일에 쓰고 **rename 으로 갈아끼운다** — 쓰다 죽어도 반쪽 파일이 안 남는다. 임시 이름 · 실패 때의
-/// 정리 · 잠김 재시도는 [`replace_with`].
+/// 같은 폴더의 임시 파일에 쓰고 **rename 으로 갈아끼운다** — 쓰다 죽어도 반쪽 파일이 안 남는다. 실패하면 임시
+/// 파일을 치우고 대상은 그대로다. rename 이 잠김이면 [`OsHooks::retry`] 로 다시 한다.
+///
+/// 같은 경로를 동시에 쓰는 호출끼리는 나중에 rename 한 쪽이 남는다 — 어느 쪽이 나중인지는 정하지 않는다. 순서가
+/// 중요하면 호출자가 직렬화한다.
 // ADR-0265 결정 4: 설정 쓰기는 원자적이다(임시 파일 → sync_all → rename).
-pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
-    write_atomic_unless(path, text, || false).map(drop)
+pub fn write_atomic(path: &Path, bytes: &[u8], os: OsHooks) -> io::Result<()> {
+    write_atomic_unless(path, bytes, os, || false).map(drop)
 }
 
 /// [`write_atomic`] 에 「rename 직전에 물을 것」을 더한 것 — `skip` 을 **첫 rename 앞과 잠김 재시도의 rename
@@ -80,35 +124,50 @@ pub fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
 /// 않다.
 pub fn write_atomic_unless(
     path: &Path,
-    text: &str,
+    bytes: &[u8],
+    os: OsHooks,
     skip: impl Fn() -> bool,
+) -> io::Result<WriteOutcome> {
+    write_atomic_with(path, bytes, &mut |attempt| (os.retry)(attempt), &skip)
+}
+
+fn write_atomic_with(
+    path: &Path,
+    bytes: &[u8],
+    retry: RetryHook,
+    skip: &dyn Fn() -> bool,
 ) -> io::Result<WriteOutcome> {
     use std::io::Write;
 
     replace_with(
         path,
-        |file| file.write_all(text.as_bytes()),
+        |file| file.write_all(bytes),
         skip,
         |from, to| std::fs::rename(from, to),
-        std::thread::sleep,
+        retry,
     )
 }
 
 /// `from` 을 `to` 에 원자적으로 복사한다 — 흘려 쓰므로 통째로 메모리에 올리지 않고 크기 상한도 없다. 있던 `to`
-/// 는 덮는다. 임시 이름 · 실패 때의 정리(`to` 는 그대로) · rename 의 잠김 재시도는 [`replace_with`].
+/// 는 덮는다. 실패하면 임시 파일을 치우고 `to` 는 그대로다.
 ///
-/// `from` 열기도 잠김이면 같은 규칙으로 다시 한다. 끝내 못 열면 임시 파일을 만들기 전에 그 오류다.
+/// `from` 열기와 rename 이 잠김이면 [`OsHooks::retry`] 로 다시 한다. 끝내 못 열면 임시 파일을 만들기 전에 그
+/// 오류다.
 // ADR-0274
-pub fn copy_atomic(from: &Path, to: &Path) -> io::Result<()> {
+pub fn copy_atomic(from: &Path, to: &Path, os: OsHooks) -> io::Result<()> {
+    copy_atomic_with(from, to, &mut |attempt| (os.retry)(attempt))
+}
+
+fn copy_atomic_with(from: &Path, to: &Path, retry: RetryHook) -> io::Result<()> {
     // `std::fs::copy` 를 쓰지 않는다 — 원본의 권한까지 옮겨(Windows 읽기 전용 속성 · Unix 권한 비트), 읽기 전용
     //   원본이면 사본도 읽기 전용이 되어 `sync_all` 할 쓰기 핸들을 못 연다.
-    let mut source = retry_denied(|| std::fs::File::open(from), std::thread::sleep)?;
+    let mut source = retrying(&mut *retry, || std::fs::File::open(from))?;
     replace_with(
         to,
         |file| io::copy(&mut source, file).map(drop),
         || false,
         |from, to| std::fs::rename(from, to),
-        std::thread::sleep,
+        retry,
     )
     .map(drop)
 }
@@ -117,54 +176,35 @@ pub fn copy_atomic(from: &Path, to: &Path) -> io::Result<()> {
 /// 돌려주는 값 = 사본의 자리. `Err` 면 앞서 떠 둔 사본도 그대로다.
 ///
 /// ★이름이 하나뿐이라 앞서 떠 둔 사본을 덮는다★ — Chromium(`Preferences.bad`) · Firefox(`Invalidprefs.js`)와
-/// 같은 관행이다(TRD §10 F21). 사본이 쌓이지 않으므로 크기 상한을 두지 않는다. 로그는 호출자가 낸다.
+/// 같은 관행이다(TRD S21-storage §10 F21). 사본이 쌓이지 않으므로 크기 상한을 두지 않는다.
 // ADR-0274
-pub fn copy_aside(path: &Path) -> io::Result<PathBuf> {
+pub fn copy_aside(path: &Path, os: OsHooks) -> io::Result<PathBuf> {
     let to = sibling(path, ASIDE_SUFFIX)?;
-    copy_atomic(path, &to)?;
+    copy_atomic(path, &to, os)?;
     Ok(to)
-}
-
-/// 64비트 FNV-1a — 같은 바이트면 빌드 · 실행이 달라도 같은 값이다(std `DefaultHasher` 는 그것을 약속하지
-/// 않는다). 같은 내용인가를 가리는 용도이지 보안용이 아니다 — 일부러 맞춘 충돌은 못 막는다.
-pub fn fnv1a_64(bytes: &[u8]) -> u64 {
-    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
-    bytes.iter().fold(OFFSET_BASIS, |hash, &byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(PRIME)
-    })
-}
-
-/// [`fnv1a_64`] 를 소문자 16진 16자리로 — 앞자리 0 을 채워 길이가 늘 같다.
-pub fn fnv1a_hex(bytes: &[u8]) -> String {
-    format!("{:016x}", fnv1a_64(bytes))
 }
 
 /// 같은 폴더의 임시 파일을 `stage` 로 채우고 `sync_all` 한 뒤 **rename 으로 `path` 를 갈아끼운다**. `skip` 은
 /// rename 마다 그 앞에서 묻는다([`write_atomic_unless`]).
 ///
-/// ★임시 파일은 같은 폴더에 만든다★ — rename 이 갈아끼우기로 도는 것은 같은 볼륨 안에서다. 이름은
-/// [`temp_path`] — 두 호출이 임시 이름을 나눠 쓰면 뒤의 생성이 앞의 임시 파일을 비우고, 앞의 rename 이 그
-/// 반쪽을 `Ok` 로 갈아끼운다.
+/// ★임시 파일은 같은 폴더에 만든다★ — rename 이 갈아끼우기로 도는 것은 같은 볼륨 안에서다. 이름은 `temp_path` —
+/// 두 호출이 임시 이름을 나눠 쓰면 뒤의 생성이 앞의 임시 파일을 비우고, 앞의 rename 이 그 반쪽을 `Ok` 로
+/// 갈아끼운다.
 ///
-/// 같은 경로를 동시에 쓰는 호출끼리는 나중에 rename 한 쪽이 남는다 — 어느 쪽이 나중인지는 정하지 않는다.
-/// 순서가 중요하면 호출자가 직렬화한다.
+/// `Written` 이 아니면(실패 · 건너뜀) 임시 파일을 치우고 `path` 를 그대로 둔다 — 안 치우면 데이터 폴더에 쓰레기가
+/// 쌓인다.
 ///
-/// `Written` 이 아니면(실패 · 건너뜀) 임시 파일을 치우고 `path` 를 그대로 둔다 — 안 치우면 데이터 폴더에
-/// 쓰레기가 쌓인다.
+/// ★rename 이 잠김으로 실패하면 `retry` 로 다시 한다★ — 백신 · 색인기가 대상 파일을 잠깐 쥐면 Windows 의 rename 이
+/// 그렇게 실패한다.
 ///
-/// ★rename 이 잠김으로 실패하면 잠깐 기다렸다 다시 한다([`retry_denied`] — 예산 [`LOCK_RETRY`])★ — 백신 ·
-/// 색인기가 대상 파일을 잠깐 쥐면 Windows 의 rename 이 그렇게 실패한다. 그래서 최악에 그만큼(약 100 ms) 더
-/// 걸린다. 그보다 오래 쥐면 그대로 실패한다.
-///
-/// `rename` · `pause` 는 시험의 이음매다 — 운영은 `std::fs::rename` · `std::thread::sleep`.
+/// `rename` · `retry` 는 시험의 이음매다 — 운영은 `std::fs::rename` · 부르는 쪽의 [`OsHooks::retry`].
 // ADR-0265 결정 4: rename 이 잠김이면 짧게 다시 한다.
 fn replace_with(
     path: &Path,
     stage: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
     skip: impl Fn() -> bool,
     mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
-    pause: impl FnMut(Duration),
+    retry: RetryHook,
 ) -> io::Result<WriteOutcome> {
     let tmp = temp_path(path)?;
 
@@ -176,15 +216,12 @@ fn replace_with(
         file.sync_all()
     })();
     let outcome = staged.and_then(|()| {
-        retry_denied(
-            || {
-                if skip() {
-                    return Ok(WriteOutcome::Skipped);
-                }
-                rename(&tmp, path).map(|()| WriteOutcome::Written)
-            },
-            pause,
-        )
+        retrying(retry, || {
+            if skip() {
+                return Ok(WriteOutcome::Skipped);
+            }
+            rename(&tmp, path).map(|()| WriteOutcome::Written)
+        })
     });
     if !matches!(outcome, Ok(WriteOutcome::Written)) {
         let _ = std::fs::remove_file(&tmp);
@@ -203,12 +240,12 @@ fn temp_path(path: &Path) -> io::Result<PathBuf> {
     sibling(path, &format!("{TEMP_MARK}{}.{n}", std::process::id()))
 }
 
-/// `file_name` 이 `target` 의 임시 이름([`temp_path`] 꼴)이면 그 pid. pid · 번호는 [`temp_path`] 가 적는 십진
+/// `file_name` 이 `target` 의 임시 이름(`temp_path` 꼴)이면 그 pid. pid · 번호는 `temp_path` 가 적는 십진
 /// 그대로여야 한다(`+` · 앞자리 0 · 범위 밖은 아니다).
 ///
-/// ★번호 없는 `<target>.tmp<pid>`(번호를 더하기 전 — P3a 앞 — 의 꼴)는 임시 이름으로 보지 않는다★ — 지금
-/// 쓸기의 대상인 상태 파일은 그 꼴로 쓰인 적이 없어(상태 쓰기는 번호 꼴과 함께 들어왔다) 그런 이름은 우리 것이라
-/// 단정할 수 없고, 남의 것일 수 있는 파일은 지우지 않는다. 옛 꼴로 쓰인 대상을 쓸게 되면 이 규칙부터 다시 본다.
+/// ★번호 없는 `<target>.tmp<pid>`(번호를 더하기 전의 꼴)는 임시 이름으로 보지 않는다★ — 지금 쓸기의 대상인
+/// 파일은 그 꼴로 쓰인 적이 없어 그런 이름은 우리 것이라 단정할 수 없고, 남의 것일 수 있는 파일은 지우지 않는다.
+/// 옛 꼴로 쓰인 대상을 쓸게 되면 이 규칙부터 다시 본다.
 fn temp_owner(file_name: &str, target: &str) -> Option<u32> {
     let rest = file_name.strip_prefix(target)?.strip_prefix(TEMP_MARK)?;
     let (pid, n) = rest.split_once('.')?;
@@ -230,7 +267,7 @@ fn exact_decimal<T: std::str::FromStr + ToString>(digits: &str) -> Option<T> {
 /// - ★자기 pid 것도 지운다★ — 같은 대상을 쓰는 중인 호출이 이 프로세스에 없을 때만 부른다.
 ///
 /// 돌려주는 값 = 지우려 한 파일과 그 결과(그사이 이미 없어졌으면 성공). 폴더가 없으면 빈 목록이다. `Err` = 폴더를
-/// 못 읽었다. 로그는 호출자가 낸다.
+/// 못 읽었다.
 pub fn sweep_temps(
     dir: &Path,
     targets: &[&str],
@@ -285,19 +322,6 @@ fn sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-const LOCK_RETRY: Retry = Retry {
-    retries: 5,
-    pause: Duration::from_millis(20),
-};
-
-// ADR-0291: 어느 실패가 잠김인지와 다시 하기 고리는 platform `fs` 정책 하나 — 여기는 예산만 쥔다.
-fn retry_denied<T>(
-    attempt: impl FnMut() -> io::Result<T>,
-    pause: impl FnMut(Duration),
-) -> io::Result<T> {
-    retry_busy_with(LOCK_RETRY, attempt, pause)
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
@@ -305,13 +329,42 @@ mod tests {
 
     use super::*;
 
+    /// 다시 하지 않는 훅 — 실제 파일 시험은 잠김을 만나지 않는다. 상태가 없어 fn 포인터로 선다.
+    const ONCE: OsHooks = OsHooks {
+        retry: |attempt| attempt(),
+        sync_dir: |_| Ok(()),
+    };
+
+    /// 운영 다시 하기의 모양을 흉내 낸 가짜 — 잠김(여기서는 `PermissionDenied`)이면 [`BUSY_RETRIES`] 번까지 다시
+    /// 하되, 자지 않고 기다림만 `pauses` 에 센다. 어느 오류가 잠김인지는 운영에선 넘긴 훅(OS 층)의 몫이라, 이
+    /// 모듈의 시험이 재는 것은 그 오류가 훅까지 그대로 가는가다.
+    fn counting_retry(
+        pauses: &mut u32,
+    ) -> impl FnMut(&mut dyn FnMut() -> io::Result<()>) -> io::Result<()> + '_ {
+        move |attempt: &mut dyn FnMut() -> io::Result<()>| {
+            let mut retries = 0;
+            loop {
+                match attempt() {
+                    Err(e)
+                        if e.kind() == io::ErrorKind::PermissionDenied
+                            && retries < BUSY_RETRIES =>
+                    {
+                        retries += 1;
+                        *pauses += 1;
+                    }
+                    outcome => return outcome,
+                }
+            }
+        }
+    }
+
     fn denied() -> io::Error {
         io::Error::from(io::ErrorKind::PermissionDenied)
     }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "engram-fsutil-{tag}-{}-{}",
+            "engram-base-file-{tag}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -337,7 +390,7 @@ mod tests {
     fn a_locked_open_is_retried_until_it_clears() {
         let mut failures = 2;
         let mut pauses = 0;
-        let text = read_capped_retrying(
+        let text = read_file_capped_with(
             || {
                 if failures > 0 {
                     failures -= 1;
@@ -347,7 +400,7 @@ mod tests {
                 }
             },
             8,
-            |_| pauses += 1,
+            &mut counting_retry(&mut pauses),
         )
         .unwrap();
         assert_eq!((text.as_str(), pauses), ("hi", 2));
@@ -366,7 +419,7 @@ mod tests {
     fn a_read_locked_mid_way_is_retried_from_a_fresh_open() {
         let mut opens = 0;
         let mut pauses = 0;
-        let text = read_capped_retrying(
+        let text = read_file_capped_with(
             || -> io::Result<Box<dyn io::Read>> {
                 opens += 1;
                 Ok(if opens == 1 {
@@ -376,7 +429,7 @@ mod tests {
                 })
             },
             8,
-            |_| pauses += 1,
+            &mut counting_retry(&mut pauses),
         )
         .unwrap();
         assert_eq!((text.as_str(), opens, pauses), ("hi", 2, 1));
@@ -385,23 +438,25 @@ mod tests {
     #[test]
     fn a_missing_file_and_unusable_content_are_not_retried() {
         let mut opens = 0;
-        let missing = read_capped_retrying(
+        let mut pauses = 0;
+        let missing = read_file_capped_with(
             || -> io::Result<io::Cursor<Vec<u8>>> {
                 opens += 1;
                 Err(io::Error::from(io::ErrorKind::NotFound))
             },
             8,
-            |_| panic!("기다리지 않는다"),
+            &mut counting_retry(&mut pauses),
         );
         assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(opens, 1);
+        assert_eq!((opens, pauses), (1, 0));
 
-        let over = read_capped_retrying(
+        let over = read_file_capped_with(
             || Ok(io::Cursor::new(b"12345".to_vec())),
             4,
-            |_| panic!("기다리지 않는다"),
+            &mut counting_retry(&mut pauses),
         );
         assert_eq!(over.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(pauses, 0);
     }
 
     #[test]
@@ -409,9 +464,9 @@ mod tests {
         let dir = temp_dir("read");
         let path = dir.join("state.json");
         std::fs::write(&path, "{}").unwrap();
-        assert_eq!(read_file_capped(&path, 8).unwrap(), "{}");
+        assert_eq!(read_file_capped(&path, 8, ONCE).unwrap(), "{}");
         assert_eq!(
-            read_file_capped(&dir.join("none.json"), 8)
+            read_file_capped(&dir.join("none.json"), 8, ONCE)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::NotFound
@@ -482,7 +537,7 @@ mod tests {
         let path = dir.join("state.json");
         std::fs::write(&path, "old").unwrap();
 
-        let outcome = write_atomic_unless(&path, "new", || false).unwrap();
+        let outcome = write_atomic_unless(&path, b"new", ONCE, || false).unwrap();
 
         assert_eq!(outcome, WriteOutcome::Written);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
@@ -497,7 +552,7 @@ mod tests {
         std::fs::write(&path, "old").unwrap();
         let asked = Cell::new(0);
 
-        let outcome = write_atomic_unless(&path, "new", || {
+        let outcome = write_atomic_unless(&path, b"new", ONCE, || {
             asked.set(asked.get() + 1);
             true
         })
@@ -531,7 +586,7 @@ mod tests {
                 renames += 1;
                 Err(denied())
             },
-            |_| pauses += 1,
+            &mut counting_retry(&mut pauses),
         )
         .unwrap();
 
@@ -547,16 +602,18 @@ mod tests {
         let dir = temp_dir("rename-fail");
         let path = dir.join("state.json");
         std::fs::write(&path, "old").unwrap();
+        let mut pauses = 0;
 
         let outcome = replace_with(
             &path,
             |file| file.write_all(b"new"),
             || false,
             |_, _| Err(io::Error::other("가짜 rename 실패")),
-            |_| panic!("잠김이 아니면 기다리지 않는다"),
+            &mut counting_retry(&mut pauses),
         );
 
         assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Other);
+        assert_eq!(pauses, 0, "잠김이 아니면 기다리지 않는다");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old");
         assert_eq!(names_in(&dir), vec!["state.json".to_string()]);
         std::fs::remove_dir_all(&dir).ok();
@@ -573,7 +630,7 @@ mod tests {
             |_| Err(io::Error::other("가짜 쓰기 실패")),
             || panic!("채우기가 실패하면 묻지 않는다"),
             |_, _| panic!("채우기가 실패하면 rename 하지 않는다"),
-            |_| {},
+            &mut |_| panic!("채우기가 실패하면 다시 하기에 들지 않는다"),
         );
 
         assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Other);
@@ -707,7 +764,7 @@ mod tests {
         std::fs::write(&from, "from").unwrap();
         std::fs::write(&to, "earlier").unwrap();
 
-        copy_atomic(&from, &to).unwrap();
+        copy_atomic(&from, &to, ONCE).unwrap();
 
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "from");
         assert_eq!(std::fs::read_to_string(&from).unwrap(), "from");
@@ -724,7 +781,7 @@ mod tests {
         let to = dir.join("b.json");
         std::fs::write(&to, "earlier").unwrap();
 
-        let err = copy_atomic(&dir.join("none.json"), &to).unwrap_err();
+        let err = copy_atomic(&dir.join("none.json"), &to, ONCE).unwrap_err();
 
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
         assert_eq!(std::fs::read_to_string(&to).unwrap(), "earlier");
@@ -740,7 +797,7 @@ mod tests {
         std::fs::write(&path, "{broken").unwrap();
         std::fs::write(&fixed, "earlier").unwrap();
 
-        assert_eq!(copy_aside(&path).unwrap(), fixed);
+        assert_eq!(copy_aside(&path, ONCE).unwrap(), fixed);
         assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "{broken");
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
@@ -749,7 +806,7 @@ mod tests {
         );
 
         std::fs::write(&path, "{BROKEN").unwrap();
-        assert_eq!(copy_aside(&path).unwrap(), fixed);
+        assert_eq!(copy_aside(&path, ONCE).unwrap(), fixed);
         assert_eq!(std::fs::read_to_string(&fixed).unwrap(), "{BROKEN");
         assert_eq!(
             names_in(&dir),
@@ -773,7 +830,7 @@ mod tests {
         };
         set_read_only(&path, true);
 
-        let copied = copy_aside(&path);
+        let copied = copy_aside(&path, ONCE);
 
         set_read_only(&path, false);
         let to = copied.unwrap();
@@ -784,17 +841,5 @@ mod tests {
             .open(&to)
             .expect("사본은 쓸 수 있다 — 다음 떠 두기가 덮는다");
         std::fs::remove_dir_all(&dir).ok();
-    }
-
-    // ── FNV-1a ──
-
-    #[test]
-    fn fnv1a_matches_the_published_vectors() {
-        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
-        assert_eq!(fnv1a_hex(b""), "cbf29ce484222325");
-        assert_eq!(fnv1a_hex(b"a"), "af63dc4c8601ec8c");
-        assert_eq!(fnv1a_hex(b"foobar"), "85944171f73967e8");
     }
 }

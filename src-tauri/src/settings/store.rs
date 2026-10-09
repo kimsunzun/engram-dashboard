@@ -19,9 +19,11 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use engram_dashboard_base::file;
 use serde_json::{Map, Value};
 
 use super::registry::{self, SETTINGS};
+use crate::file_hooks::OS_HOOKS;
 
 const SETTINGS_FILE: &str = "settings.json";
 const VERSION_KEY: &str = "$version";
@@ -50,7 +52,7 @@ pub trait SettingsFiles: Send {
     /// 원자적으로 통째로 갈아끼운다. 폴더가 없으면 만든다.
     fn write_atomic(&self, text: &str) -> io::Result<()>;
     /// 지금 파일을 옆 이름(`<이름>.corrupt`)에 **떠 두고** 그 자리를 돌려준다 — 원본은 그 자리에 그대로 둔다.
-    /// ★앞서 떠 둔 사본을 덮는다★(이름이 하나뿐 — [`crate::fsutil::copy_aside`]). `Err` 면 앞선 사본도 그대로다.
+    /// ★앞서 떠 둔 사본을 덮는다★(이름이 하나뿐 — [`file::copy_aside`]). `Err` 면 앞선 사본도 그대로다.
     fn copy_aside(&self) -> io::Result<PathBuf>;
     /// 로그에 실을 출처(경로).
     fn origin(&self) -> String;
@@ -71,12 +73,12 @@ impl FsSettingsFiles {
 
 impl SettingsFiles for FsSettingsFiles {
     fn read(&self) -> io::Result<RawFile> {
-        let file = match std::fs::File::open(&self.path) {
-            Ok(file) => file,
+        let opened = match std::fs::File::open(&self.path) {
+            Ok(opened) => opened,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RawFile::Missing),
             Err(e) => return Err(e),
         };
-        match crate::fsutil::read_capped(file, MAX_SETTINGS_BYTES) {
+        match file::read_capped(opened, MAX_SETTINGS_BYTES) {
             Ok(text) => Ok(RawFile::Text(text)),
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
                 Ok(RawFile::Unusable(e.to_string()))
@@ -90,11 +92,11 @@ impl SettingsFiles for FsSettingsFiles {
             // 셸 config 폴더는 아무도 미리 만들지 않는다 — 적재가 만들면 안 되므로 첫 쓰기가 만든다.
             std::fs::create_dir_all(dir)?;
         }
-        crate::fsutil::write_atomic(&self.path, text)
+        file::write_atomic(&self.path, text.as_bytes(), OS_HOOKS)
     }
 
     fn copy_aside(&self) -> io::Result<PathBuf> {
-        crate::fsutil::copy_aside(&self.path)
+        file::copy_aside(&self.path, OS_HOOKS)
     }
 
     fn origin(&self) -> String {

@@ -13,19 +13,22 @@ use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use engram_dashboard_base::file;
+
 use super::codec::{self, DecodeWarning, Unusable, STATE_READ_CAP};
 use super::schema::{StateFile, WindowEntry, STATE_VERSION};
+use crate::file_hooks::OS_HOOKS;
 
 pub const STATE_FILE: &str = "state.json";
 pub const CRASH_COPY_FILE: &str = "state.crash.json";
 
 /// 부팅 단계가 만지는 파일 — 운영은 [`FsBootFiles`].
 pub trait BootFiles {
-    /// `state.json` 원문 — `crate::fsutil::read_file_capped` 와 같은 계약(없으면 `NotFound` · 상한 초과 · UTF-8
+    /// `state.json` 원문 — `file::read_file_capped` 와 같은 계약(없으면 `NotFound` · 상한 초과 · UTF-8
     /// 아님은 `InvalidData` · 잠김은 재시도 뒤의 그 오류).
     fn read_state(&self) -> io::Result<String>;
 
-    /// `state.json` 을 `state.json.corrupt` 로 떠 둔다 — 돌려주는 값 = 사본 자리(`crate::fsutil::copy_aside`).
+    /// `state.json` 을 `state.json.corrupt` 로 떠 둔다 — 돌려주는 값 = 사본 자리(`file::copy_aside`).
     fn copy_aside_state(&self) -> io::Result<PathBuf>;
 
     /// `state.json` 을 원자적으로 갈아끼운다 — 폴더가 없으면 만든다.
@@ -43,7 +46,7 @@ pub trait BootFiles {
     /// `state.crash.json` 을 `state.crash.json.corrupt` 로 떠 둔다 — [`Self::copy_aside_state`] 와 같은 계약.
     fn copy_aside_crash_copy(&self) -> io::Result<PathBuf>;
 
-    /// 상태 파일들의 남은 임시 파일을 치운다 — `crate::fsutil::sweep_temps` 와 같은 계약.
+    /// 상태 파일들의 남은 임시 파일을 치운다 — `file::sweep_temps` 와 같은 계약.
     fn sweep_temps(&self) -> io::Result<Vec<(PathBuf, io::Result<()>)>>;
 }
 
@@ -70,26 +73,26 @@ impl FsBootFiles {
 
 impl BootFiles for FsBootFiles {
     fn read_state(&self) -> io::Result<String> {
-        crate::fsutil::read_file_capped(&self.state(), STATE_READ_CAP)
+        file::read_file_capped(&self.state(), STATE_READ_CAP, OS_HOOKS)
     }
 
     fn copy_aside_state(&self) -> io::Result<PathBuf> {
-        crate::fsutil::copy_aside(&self.state())
+        file::copy_aside(&self.state(), OS_HOOKS)
     }
 
     fn write_state(&self, text: &str) -> io::Result<()> {
         // 셸 state 폴더는 아무도 미리 만들지 않는다 — 첫 부팅의 첫 쓰기가 만든다. 기록기는 만들지 않는다.
         std::fs::create_dir_all(&self.dir)?;
-        crate::fsutil::write_atomic(&self.state(), text)
+        file::write_atomic(&self.state(), text.as_bytes(), OS_HOOKS)
     }
 
     fn read_crash_copy(&self) -> io::Result<String> {
-        crate::fsutil::read_file_capped(&self.crash_copy(), STATE_READ_CAP)
+        file::read_file_capped(&self.crash_copy(), STATE_READ_CAP, OS_HOOKS)
     }
 
     fn write_crash_copy(&self, text: &str) -> io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
-        crate::fsutil::write_atomic(&self.crash_copy(), text)
+        file::write_atomic(&self.crash_copy(), text.as_bytes(), OS_HOOKS)
     }
 
     // 잠김 재시도를 하지 않는다 — 못 지운 답한 사본은 기록기가 해시를 이어 받아 다시 지우고, 못 쓸 사본은 다음
@@ -99,11 +102,11 @@ impl BootFiles for FsBootFiles {
     }
 
     fn copy_aside_crash_copy(&self) -> io::Result<PathBuf> {
-        crate::fsutil::copy_aside(&self.crash_copy())
+        file::copy_aside(&self.crash_copy(), OS_HOOKS)
     }
 
     fn sweep_temps(&self) -> io::Result<Vec<(PathBuf, io::Result<()>)>> {
-        crate::fsutil::sweep_temps(
+        file::sweep_temps(
             &self.dir,
             &[STATE_FILE, CRASH_COPY_FILE],
             engram_dashboard_platform::process::pid_alive,
