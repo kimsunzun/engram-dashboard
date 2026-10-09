@@ -2742,3 +2742,6 @@
   - **조사** — `docs/research/panic-policy-peers-2026-10-08.md`(/research medium · 갈래 셋 · codex 적대 리뷰 FIX 8 반영).
   - **검증** — `/review doc light`(FIX 8 → 7 반영 · 1 = unwind 범위는 TRD 사용자 결정으로 열어 둠).
   - **다음** — 구현은 경계 리팩터링 A 뒤 · transport 논의 전(세션 계획). TRD 에서 정할 것 = 단계 경계 · 락 오염 정책 · 1 · 2 고지 모양 · unwind 범위(셸 포함 여부 — 사용자 결정) · abort 전제 결정 · 주석 재감사(ADR 「영향」).
+- **[✅ 결정 2026-10-10 · 브랜치 `v0.3.3/feat/panic-policy` · 구현 미착수] S21 — ADR-0289: 공유 상태에서 난 패닉도 데몬을 살려 두고 강한 경고를 띄우며 경고 중에는 저장을 멈춘다(ADR-0288 결정 3 개정)** — 메인이 「피어는 다 종료한다」로 잘못 보고했다(herdr · atuin · helix 는 설계 없이 계속 돈다 — 문서 리뷰가 되살림). 사용자가 바로잡은 그림을 듣고 다시 정했다. 결정 = **ADR-0289**(번호 선점 `de68c23`) — 여기 베끼지 않는다.
+  - **조사** — `docs/research/stop-writes-after-internal-error-2026-10-10.md`(light — 저장 멈춤의 관행).
+  - **다음** — 구현 순서 = unwind 전환 + 강한 경고 + 저장 멈춤 먼저 · ADR-0288 결정 1 · 2 의 나머지는 나중.
