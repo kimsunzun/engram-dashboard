@@ -938,8 +938,6 @@ jobs:
           crates/engram-dashboard-daemon/src/bin/saturation_pilot.rs
           crates/engram-dashboard-agent/examples/spike.rs
           crates/engram-dashboard-agent/examples/spike_breakaway.rs
-          # 시한부 운영 예외(ADR-0275 결정 15)
-          src-tauri/src/fsutil.rs
           OS_CFG_FILES
           )
           if [ "$actual" = "$expected" ]; then

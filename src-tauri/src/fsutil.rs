@@ -8,11 +8,14 @@
 //! 셋을 함께 고친다(시험이 만든 이름을 다시 읽어 맞댄다).
 //!
 //! ★잠김 재시도는 한 규칙이다★ — rename · [`read_file_capped`] 의 열기와 읽기 · [`copy_atomic`] 의 원본 열기가
-//! 같은 판정([`is_lock_contention`])과 같은 한도([`RENAME_RETRIES`] · [`RENAME_PAUSE`])를 쓴다. 복사 도중의
-//! 읽기 실패는 다시 하지 않는다.
+//! 같은 판정(platform [`is_busy`](engram_dashboard_platform::fs::is_busy))과 같은 한도([`LOCK_RETRY`])로
+//! [`retry_denied`] 를 지난다. 복사 도중의 읽기 실패는 다시 하지 않는다.
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use engram_dashboard_platform::fs::{retry_busy_with, Retry};
 
 /// ★상한까지만 읽는다 — 읽고 나서 재지 않는다★.
 ///
@@ -43,18 +46,14 @@ pub fn read_capped(source: impl io::Read, cap: u64) -> io::Result<String> {
 /// 그 밖의 오류는 다시 하지 않고 바로 돌려준다 — 없는 파일 = `NotFound` · 상한 초과 · UTF-8 아님 =
 /// `InvalidData`. ★잠김이 한도를 넘으면 그 잠김 오류 그대로다★ — `InvalidData`(못 쓰는 내용)와 섞이지 않는다.
 pub fn read_file_capped(path: &Path, cap: u64) -> io::Result<String> {
-    read_capped_retrying(
-        || std::fs::File::open(path),
-        cap,
-        || std::thread::sleep(RENAME_PAUSE),
-    )
+    read_capped_retrying(|| std::fs::File::open(path), cap, std::thread::sleep)
 }
 
 /// [`read_file_capped`] 의 실물 — 열기 · 기다리기를 받아 시험이 실제 잠김 없이 돈다.
 fn read_capped_retrying<R: io::Read>(
     mut open: impl FnMut() -> io::Result<R>,
     cap: u64,
-    pause: impl FnMut(),
+    pause: impl FnMut(Duration),
 ) -> io::Result<String> {
     retry_denied(|| read_capped(open()?, cap), pause)
 }
@@ -91,7 +90,7 @@ pub fn write_atomic_unless(
         |file| file.write_all(text.as_bytes()),
         skip,
         |from, to| std::fs::rename(from, to),
-        || std::thread::sleep(RENAME_PAUSE),
+        std::thread::sleep,
     )
 }
 
@@ -103,16 +102,13 @@ pub fn write_atomic_unless(
 pub fn copy_atomic(from: &Path, to: &Path) -> io::Result<()> {
     // `std::fs::copy` 를 쓰지 않는다 — 원본의 권한까지 옮겨(Windows 읽기 전용 속성 · Unix 권한 비트), 읽기 전용
     //   원본이면 사본도 읽기 전용이 되어 `sync_all` 할 쓰기 핸들을 못 연다.
-    let mut source = retry_denied(
-        || std::fs::File::open(from),
-        || std::thread::sleep(RENAME_PAUSE),
-    )?;
+    let mut source = retry_denied(|| std::fs::File::open(from), std::thread::sleep)?;
     replace_with(
         to,
         |file| io::copy(&mut source, file).map(drop),
         || false,
         |from, to| std::fs::rename(from, to),
-        || std::thread::sleep(RENAME_PAUSE),
+        std::thread::sleep,
     )
     .map(drop)
 }
@@ -157,18 +153,18 @@ pub fn fnv1a_hex(bytes: &[u8]) -> String {
 /// `Written` 이 아니면(실패 · 건너뜀) 임시 파일을 치우고 `path` 를 그대로 둔다 — 안 치우면 데이터 폴더에
 /// 쓰레기가 쌓인다.
 ///
-/// ★rename 이 잠김으로 실패하면 잠깐 기다렸다 다시 한다(최대 [`RENAME_RETRIES`]번 · [`RENAME_PAUSE`] 간격 —
-/// 어느 오류가 잠김인지는 [`is_lock_contention`])★ — 백신 · 색인기가 대상 파일을 잠깐 쥐면 Windows 의 rename
-/// 이 그렇게 실패한다. 그래서 최악에 그만큼(약 100 ms) 더 걸린다. 그보다 오래 쥐면 그대로 실패한다.
+/// ★rename 이 잠김으로 실패하면 잠깐 기다렸다 다시 한다([`retry_denied`] — 예산 [`LOCK_RETRY`])★ — 백신 ·
+/// 색인기가 대상 파일을 잠깐 쥐면 Windows 의 rename 이 그렇게 실패한다. 그래서 최악에 그만큼(약 100 ms) 더
+/// 걸린다. 그보다 오래 쥐면 그대로 실패한다.
 ///
-/// `rename` · `pause` 는 시험의 이음매다 — 운영은 `std::fs::rename` · [`RENAME_PAUSE`] 잠.
+/// `rename` · `pause` 는 시험의 이음매다 — 운영은 `std::fs::rename` · `std::thread::sleep`.
 // ADR-0265 결정 4: rename 이 잠김이면 짧게 다시 한다.
 fn replace_with(
     path: &Path,
     stage: impl FnOnce(&mut std::fs::File) -> io::Result<()>,
     skip: impl Fn() -> bool,
     mut rename: impl FnMut(&Path, &Path) -> io::Result<()>,
-    pause: impl FnMut(),
+    pause: impl FnMut(Duration),
 ) -> io::Result<WriteOutcome> {
     let tmp = temp_path(path)?;
 
@@ -289,35 +285,17 @@ fn sibling(path: &Path, suffix: &str) -> io::Result<PathBuf> {
     Ok(dir.join(name))
 }
 
-const RENAME_RETRIES: u32 = 5;
-const RENAME_PAUSE: std::time::Duration = std::time::Duration::from_millis(20);
+const LOCK_RETRY: Retry = Retry {
+    retries: 5,
+    pause: Duration::from_millis(20),
+};
 
-/// `attempt` 를 한 번 하고, 잠김([`is_lock_contention`])이면 `pause` 뒤 [`RENAME_RETRIES`]번까지 다시 한다.
-/// 다른 오류는 바로 돌려준다.
+// ADR-0291: 어느 실패가 잠김인지와 다시 하기 고리는 platform `fs` 정책 하나 — 여기는 예산만 쥔다.
 fn retry_denied<T>(
-    mut attempt: impl FnMut() -> io::Result<T>,
-    mut pause: impl FnMut(),
+    attempt: impl FnMut() -> io::Result<T>,
+    pause: impl FnMut(Duration),
 ) -> io::Result<T> {
-    let mut retries = 0;
-    loop {
-        match attempt() {
-            Err(e) if is_lock_contention(&e) && retries < RENAME_RETRIES => {
-                retries += 1;
-                pause();
-            }
-            outcome => return outcome,
-        }
-    }
-}
-
-/// 다른 프로세스가 파일을 잠깐 쥐어서 난 실패인가 — `PermissionDenied`(Windows 에선 `ERROR_ACCESS_DENIED`
-/// = 5), 그리고 Windows 에서만 `ERROR_SHARING_VIOLATION`(32) · `ERROR_LOCK_VIOLATION`(33).
-///
-/// ★32 · 33 은 종류로 못 잡는다★ — Rust std 는 5 만 `PermissionDenied` 로 옮기고 그 둘은 이름 없는 종류로
-/// 남긴다. 그래서 OS 코드로 본다. 다른 OS 에서 그 번호는 다른 오류다(Linux 32 = `EPIPE`).
-fn is_lock_contention(e: &io::Error) -> bool {
-    e.kind() == io::ErrorKind::PermissionDenied
-        || (cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33)))
+    retry_busy_with(LOCK_RETRY, attempt, pause)
 }
 
 #[cfg(test)]
@@ -353,97 +331,6 @@ mod tests {
         names
     }
 
-    // ── 잠김 재시도 ──
-
-    #[test]
-    fn a_brief_denial_is_retried_until_it_clears() {
-        let mut failures = 2;
-        let mut pauses = 0;
-        let outcome = retry_denied(
-            || {
-                if failures > 0 {
-                    failures -= 1;
-                    Err(denied())
-                } else {
-                    Ok(())
-                }
-            },
-            || pauses += 1,
-        );
-        outcome.unwrap();
-        assert_eq!(pauses, 2);
-    }
-
-    #[test]
-    fn a_lasting_denial_gives_up_after_the_bound() {
-        let mut attempts = 0;
-        let mut pauses = 0;
-        let outcome = retry_denied(
-            || -> io::Result<()> {
-                attempts += 1;
-                Err(denied())
-            },
-            || pauses += 1,
-        );
-        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
-        assert_eq!((attempts, pauses), (RENAME_RETRIES + 1, RENAME_RETRIES));
-    }
-
-    #[test]
-    fn windows_sharing_and_lock_violations_are_retried_too() {
-        for code in [32, 33] {
-            let mut failures = 2;
-            let mut pauses = 0;
-            let outcome = retry_denied(
-                || {
-                    if failures > 0 {
-                        failures -= 1;
-                        Err(io::Error::from_raw_os_error(code))
-                    } else {
-                        Ok(())
-                    }
-                },
-                || pauses += 1,
-            );
-            if cfg!(windows) {
-                outcome.unwrap();
-                assert_eq!(pauses, 2, "{code}");
-            } else {
-                assert_eq!(outcome.unwrap_err().raw_os_error(), Some(code));
-                assert_eq!(pauses, 0, "{code}: 다른 OS 에선 잠김이 아니다");
-            }
-        }
-    }
-
-    #[test]
-    fn a_lasting_sharing_violation_gives_up_after_the_same_bound() {
-        let mut attempts = 0;
-        let outcome = retry_denied(
-            || -> io::Result<()> {
-                attempts += 1;
-                Err(io::Error::from_raw_os_error(32))
-            },
-            || {},
-        );
-        assert_eq!(outcome.unwrap_err().raw_os_error(), Some(32));
-        let expected = if cfg!(windows) { RENAME_RETRIES + 1 } else { 1 };
-        assert_eq!(attempts, expected);
-    }
-
-    #[test]
-    fn other_errors_are_not_retried() {
-        let mut attempts = 0;
-        let outcome = retry_denied(
-            || -> io::Result<()> {
-                attempts += 1;
-                Err(io::Error::from(io::ErrorKind::NotFound))
-            },
-            || panic!("기다리지 않는다"),
-        );
-        assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::NotFound);
-        assert_eq!(attempts, 1);
-    }
-
     // ── 상한 읽기 ──
 
     #[test]
@@ -460,7 +347,7 @@ mod tests {
                 }
             },
             8,
-            || pauses += 1,
+            |_| pauses += 1,
         )
         .unwrap();
         assert_eq!((text.as_str(), pauses), ("hi", 2));
@@ -489,7 +376,7 @@ mod tests {
                 })
             },
             8,
-            || pauses += 1,
+            |_| pauses += 1,
         )
         .unwrap();
         assert_eq!((text.as_str(), opens, pauses), ("hi", 2, 1));
@@ -504,7 +391,7 @@ mod tests {
                 Err(io::Error::from(io::ErrorKind::NotFound))
             },
             8,
-            || panic!("기다리지 않는다"),
+            |_| panic!("기다리지 않는다"),
         );
         assert_eq!(missing.unwrap_err().kind(), io::ErrorKind::NotFound);
         assert_eq!(opens, 1);
@@ -512,7 +399,7 @@ mod tests {
         let over = read_capped_retrying(
             || Ok(io::Cursor::new(b"12345".to_vec())),
             4,
-            || panic!("기다리지 않는다"),
+            |_| panic!("기다리지 않는다"),
         );
         assert_eq!(over.unwrap_err().kind(), io::ErrorKind::InvalidData);
     }
@@ -644,7 +531,7 @@ mod tests {
                 renames += 1;
                 Err(denied())
             },
-            || pauses += 1,
+            |_| pauses += 1,
         )
         .unwrap();
 
@@ -666,7 +553,7 @@ mod tests {
             |file| file.write_all(b"new"),
             || false,
             |_, _| Err(io::Error::other("가짜 rename 실패")),
-            || panic!("잠김이 아니면 기다리지 않는다"),
+            |_| panic!("잠김이 아니면 기다리지 않는다"),
         );
 
         assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Other);
@@ -686,7 +573,7 @@ mod tests {
             |_| Err(io::Error::other("가짜 쓰기 실패")),
             || panic!("채우기가 실패하면 묻지 않는다"),
             |_, _| panic!("채우기가 실패하면 rename 하지 않는다"),
-            || {},
+            |_| {},
         );
 
         assert_eq!(outcome.unwrap_err().kind(), io::ErrorKind::Other);
