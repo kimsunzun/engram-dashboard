@@ -1,7 +1,7 @@
 # ADR-0071: persistence registry mutate 락 규율 — store.save를 map 락 보유 중 실행 (동시 rename stale-snapshot race fix)
 
-- 상태: 확정 (2026-07-12, 근거: cross-family(Codex) 적출 → fix → 재검증 PASS · 동시성 회귀 테스트)
-- 관련: ADR-0006(락 순서 — **별개 도메인**) · ADR-0070(§5 rename 노출이 동시성 창을 염) · ADR-0061 · `crates/engram-dashboard-core/src/agent/preset.rs`(`PresetRegistry::mutate`) · `.../agent/profile.rs`(`ProfileRegistry::mutate`·`mutate_if`·`observe_session_id`) · step-log
+- 상태: 확정 (2026-07-12, 근거: cross-family(Codex) 적출 → fix → 재검증 PASS · 동시성 회귀 테스트) · 부분 폐기 by ADR-0291 (락 순서 잎 write_lock 과 mutate 의 적용 저장 커밋 순서)
+- 관련: ADR-0006(락 순서 — **별개 도메인**) · ADR-0070(§5 rename 노출이 동시성 창을 염) · ADR-0061 · `crates/engram-dashboard-core/src/agent/preset.rs`(`PresetRegistry::mutate`) · `.../agent/profile.rs`(`ProfileRegistry::mutate`·`mutate_if`·`observe_session_id`) · step-log · Amended by ADR-0291 (락 순서 잎 write_lock 과 mutate 의 적용 저장 커밋 순서)
 
 ## 맥락
 
