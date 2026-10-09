@@ -25,8 +25,9 @@ mod registry;
 mod store;
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
+use engram_dashboard_base::sync;
 use ts_rs::TS;
 
 use registry::SettingDef;
@@ -463,15 +464,15 @@ impl SettingsService {
     // 셋 다 중독돼도 계속 돈다 — 메모리는 파일 쓰기가 성공한 뒤에만 바뀌므로 패닉한 쓰기가 반쯤 바꾼 상태를
     //   남기지 않고, `io` · `announce` 는 순서만 지킨다.
     fn lock_io(&self) -> MutexGuard<'_, Box<dyn SettingsFiles>> {
-        self.io.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.io)
     }
 
     fn lock_announce(&self) -> MutexGuard<'_, ()> {
-        self.announce.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.announce)
     }
 
     fn lock_state(&self) -> MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.state)
     }
 }
 

@@ -33,6 +33,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use engram_dashboard_base::sync;
 use engram_dashboard_protocol::AgentBackendKind;
 use uuid::Uuid;
 
@@ -241,12 +242,7 @@ pub fn create_window(
     // 창을 만드는 동안 락이 풀려 있었다 — 그 사이 모델에서 그 창을 지운 쪽(창 닫기 · 크래시 사본 수락의 화면
     //   교체 — `ViewManager::adopt_restored`)의 OS 창 거두기는 아직 등록 전인 이 창을 못 찾고 지나갔을 수 있다.
     //   여기서 안 거두면 모델에 없는 OS 창이 남는다(옮기기 phase C 의 재검증과 같은 틈). 읽기만 하므로 독이 들어도 본다.
-    let kept = state
-        .0
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .windows
-        .contains_key(&label);
+    let kept = sync::lock(&state.0).windows.contains_key(&label);
     if !kept {
         host.close(&label);
         tracing::warn!(label = %label, "create_window: 창을 만드는 사이 모델에서 지워져 그 OS 창을 거둔다");

@@ -23,7 +23,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
+
+use engram_dashboard_base::time::{now_epoch_ms, Clock, SystemClock};
 
 use super::codec::{self, EncodeError, STATE_READ_CAP};
 use super::schema::{StateFile, WindowEntry, STATE_VERSION};
@@ -39,7 +41,7 @@ pub const REPLY_DEADLINE: Duration = Duration::from_secs(2);
 /// 스냅숏 원천 — 운영은 `ViewManager` 다([`super::boot_plugin::LiveSource`]). 기록기 스레드에서 불린다.
 ///
 /// - ★패닉하지 않는다★ — 릴리스는 `panic = "abort"`(워크스페이스 `Cargo.toml`)라 이 스레드의 패닉이 앱을
-///   통째로 죽인다. 독 든 락은 `PoisonError::into_inner` 로 되살리거나 [`Self::snapshot`] 이 `Err` 를 돌려준다.
+///   통째로 죽인다. 독 든 락은 되살리거나(`engram_dashboard_base::sync`) [`Self::snapshot`] 이 `Err` 를 돌려준다.
 /// - ★[`SaverHandle::finish`] · [`SaverHandle::resolve`] 를 부른 스레드를 기다리지 않는다★ — 그 스레드는 답을
 ///   기다리며 서 있다. 그 스레드가 쥔 락을 잡으려 들면 기록기가 마감까지 서 있게 되고, `finish` 면 정상 종료가
 ///   매번 마감을 넘겨 모든 정상 종료가 비정상 종료로 읽힌다.
@@ -80,24 +82,17 @@ pub trait StateFiles: Send + 'static {
     fn remove_crash_copy(&self) -> io::Result<()>;
 }
 
-pub trait Clock: Send + 'static {
-    /// 디바운스만 잰다.
-    fn now(&self) -> Instant;
+/// 기록기의 시계 — 지금 읽기([`Clock::now`])는 디바운스만 재고, 스냅숏의 `saved_at_ms` 를 더한다. 실물 =
+/// [`SystemClock`].
+// ADR-0275 · ADR-0291
+pub trait SaverClock: Clock + 'static {
     /// 스냅숏의 `saved_at_ms` — 유닉스 시각 ms.
     fn wall_ms(&self) -> u64;
 }
 
-pub struct SystemClock;
-
-impl Clock for SystemClock {
-    fn now(&self) -> Instant {
-        Instant::now()
-    }
-
+impl SaverClock for SystemClock {
     fn wall_ms(&self) -> u64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_millis() as u64)
+        u64::try_from(now_epoch_ms()).unwrap_or(0)
     }
 }
 
@@ -243,7 +238,7 @@ pub fn spawn<S, F, C>(
 where
     S: SnapshotSource,
     F: StateFiles,
-    C: Clock,
+    C: SaverClock,
 {
     let saver = Saver::new(
         source,
@@ -263,7 +258,7 @@ fn start<S, F, C>(
 where
     S: SnapshotSource,
     F: StateFiles,
-    C: Clock,
+    C: SaverClock,
 {
     let (requests, inbox) = mpsc::channel();
     let handle = SaverHandle {
@@ -290,7 +285,7 @@ fn run<S, F, C>(mut saver: Saver<S, F, C>, inbox: Receiver<Request>, poll: Durat
 where
     S: SnapshotSource,
     F: StateFiles,
-    C: Clock,
+    C: SaverClock,
 {
     let _panic_note = PanicNote;
     tracing::info!(module = "state", "기록기 시작");
@@ -441,7 +436,7 @@ impl<K: Copy + PartialEq> Streak<K> {
     }
 }
 
-struct Saver<S: SnapshotSource, F: StateFiles, C: Clock> {
+struct Saver<S: SnapshotSource, F: StateFiles, C: SaverClock> {
     source: S,
     files: F,
     clock: C,
@@ -456,7 +451,7 @@ struct Saver<S: SnapshotSource, F: StateFiles, C: Clock> {
     copy_failures: Streak<CopyFailure>,
 }
 
-impl<S: SnapshotSource, F: StateFiles, C: Clock> Saver<S, F, C> {
+impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
     fn new(
         source: S,
         files: F,
@@ -725,6 +720,7 @@ mod tests {
     use crate::state::schema::{Bounds, TabStrip, WindowKind};
     use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     const COPY: &str = "{\"version\":1}\n";
 
@@ -891,7 +887,9 @@ mod tests {
         fn now(&self) -> Instant {
             self.base + *self.elapsed.lock().unwrap()
         }
+    }
 
+    impl SaverClock for FakeClock {
         fn wall_ms(&self) -> u64 {
             1_759_400_000_000 + self.elapsed.lock().unwrap().as_millis() as u64
         }

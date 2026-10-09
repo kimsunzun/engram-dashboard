@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use engram_dashboard_base::sync;
 
@@ -306,7 +306,7 @@ impl EffectiveThemes {
         let global = global_theme(&self.settings);
         let labels = windows.labels();
         let model: HashMap<&str, Option<UiTheme>> = {
-            let mgr = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let mgr = sync::lock(&self.layout.0);
             labels
                 .iter()
                 .filter_map(|label| {
@@ -335,7 +335,7 @@ impl EffectiveThemes {
     // 읽기는 독 든 모델에서도 한다 — 테마 값 하나라 반쯤 바뀐 모델에도 해롭지 않다(`state::boot_plugin` 의
     //   `LiveSource::revision` 과 같은 판단).
     fn own_theme(&self, window: &str) -> Result<Option<UiTheme>, ThemeError> {
-        let mgr = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let mgr = sync::lock(&self.layout.0);
         mgr.window_attrs(window)
             .map(|attrs| attrs.theme)
             .map_err(|_| ThemeError::UnknownWindow(window.to_string()))

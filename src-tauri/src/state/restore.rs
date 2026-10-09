@@ -10,8 +10,9 @@
 //!   뒤의 답이 모두 `InFlight` 를 받아 그 실행에서는 영영 답할 수 없다.
 
 use std::fmt;
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
+use engram_dashboard_base::sync;
 use ts_rs::TS;
 
 use super::boot_plugin::{report_restore_warning, ResolveResult, StateSession};
@@ -243,7 +244,7 @@ impl Phase {
 
 fn lock(cell: &Mutex<Cell>) -> MutexGuard<'_, Cell> {
     // 락 안에서는 칸 대입만 한다 — 패닉으로 반쯤 바뀐 상태가 없다. 표지 되돌리기가 `Drop` 에서도 돌아야 한다.
-    cell.lock().unwrap_or_else(PoisonError::into_inner)
+    sync::lock(cell)
 }
 
 fn notify(notifier: Option<Arc<dyn RestoreNotifier>>, status: CrashCopyStatus) {

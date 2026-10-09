@@ -13,10 +13,11 @@
 //!   기대면 잠금은 OS 가 핸들을 거둘 때에야 풀리고 기다리는 새 인스턴스가 그만큼 더 막힌다(`lock.rs` 의 `Drop`).
 
 use std::path::Path;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use engram_dashboard_base::logging;
+use engram_dashboard_base::time::SystemClock;
+use engram_dashboard_base::{logging, sync};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
 use tauri::{AppHandle, Emitter, Runtime};
 
@@ -29,7 +30,7 @@ use super::restore::{
     CrashCopy, CrashCopyStatus, RestoreNotifier, RestoreService, StateFileStatus,
     EVT_RESTORE_CHANGED,
 };
-use super::saver::{self, Clock, CloseFlag, RequestOutcome, SaveOutcome, SaverHandle, SystemClock};
+use super::saver::{self, CloseFlag, RequestOutcome, SaveOutcome, SaverClock, SaverHandle};
 use super::schema::WindowEntry;
 use crate::discovery::DataLayout;
 use crate::layout::{LabelSource, LayoutState, ViewManager, MAIN_WINDOW_LABEL};
@@ -116,7 +117,7 @@ impl Boot {
 
         let revision = {
             // 이 락을 부팅 단계보다 먼저 잡는 쪽이 없어 독이 들 수 없다 — 들었어도 모델을 통째로 갈아끼운다.
-            let mut layout = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut layout = sync::lock(&self.layout.0);
             *layout = model;
             StateRevision::of(&layout)
         };
@@ -239,7 +240,7 @@ pub enum ResolveResult {
 impl StateSession {
     fn cell(&self) -> MutexGuard<'_, SessionCell> {
         // 칸이 `Option` 넷과 깃발 하나뿐이라 반쯤 바뀐 상태가 없다 — 종료 경로가 잠금을 놓지 못하는 것이 더 나쁘다.
-        self.cell.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.cell)
     }
 
     fn hold_lock(&self, lock: Option<StateLock>) {
@@ -377,10 +378,7 @@ impl StateSession {
             if left.is_zero() {
                 return Published::StillStarting;
             }
-            cell = self
-                .settled
-                .wait_timeout(cell, left)
-                .map_or_else(|poisoned| poisoned.into_inner().0, |(cell, _)| cell);
+            cell = sync::wait_timeout(&self.settled, cell, left).0;
         }
         match cell.saver.clone() {
             Some(saver) => Published::Ready(saver),
@@ -441,7 +439,7 @@ impl saver::SnapshotSource for LiveSource {
 
     fn revision(&self) -> StateRevision {
         // 번호 읽기는 반쯤 바뀐 모델에도 해롭지 않다 — 독 든 모델을 쓰지 않는 것은 `snapshot` 이 한다.
-        let layout = self.layout.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let layout = sync::lock(&self.layout.0);
         StateRevision::of(&layout)
     }
 
