@@ -2738,3 +2738,7 @@
   - **같이 닫은 것(변경 없음 · ADR 없음)** — WS 토큰: 사용자 「WS 토큰이 매번 갱신되는거면 그대로둬」 · 코드로 확인 — 데몬이 부팅마다 32바이트 난수 토큰을 새로 만든다(`crates/engram-dashboard-daemon/src/lib.rs` 부팅 단계 4) · `daemon.json` 은 종료 뒤에도 전처럼 남는다.
   - **문서 맞춤** — ADR-0276 · ADR-0277 · ADR-0180 에 닫힘 표시(2026-10-08) · TRD S21-storage §6-5 ③ 구현 · §14-16 · §14-17 · §14-18 에 닫힘 표시(T-49 는 그대로) · `docs/tracking.md` 에서 T-48 · T-50 을 빼고 `docs/tracking-archive.md` 에 한 줄씩 · `src/components/layout/NoticeOverlay.tsx` 머리 주석(「새 알림을 얹으려면 결정이 따로 필요하다」를 걷고 `// ADR-0287` 앵커) · 덤 = `src/components/layout/AppLayout.tsx` 머리 주석의 낡은 「트리 · 팝아웃까지」(ADR-0225 뒤)를 고쳤다.
   - **검증** — `/review doc light`(FIX → 반영) · 프론트 `npx tsc --noEmit` · `npm test` 2018 통과 · 주석만 바꾼 두 파일은 컴파일된 JS 가 바꾸기 전과 같다(esbuild 변환 대조) · GUI 실측 안 함(동작 변경 0 이라 정보량 0 — 세션 판단).
+- **[✅ 결정 2026-10-10 · 브랜치 `v0.3.3/feat/panic-policy` · 구현 미착수] S21 — ADR-0288: 패닉은 요청 하나와 에이전트 하나에 가두고 공유 상태에서 나면 정상 종료한다** — 경계 리팩터링 A 범위 정리 중 「락 오염 때 패닉할지 복구할지」를 정하려다 그 위의 질문(패닉이 나면 앱이 어떻게 행동하나)이 먼저 올라왔다. 결정 = **ADR-0288**(번호 선점 `4884143`) — 여기 베끼지 않는다.
+  - **조사** — `docs/research/panic-policy-peers-2026-10-08.md`(/research medium · 갈래 셋 · codex 적대 리뷰 FIX 8 반영).
+  - **검증** — `/review doc light`(FIX 8 → 7 반영 · 1 = unwind 범위는 TRD 사용자 결정으로 열어 둠).
+  - **다음** — 구현은 경계 리팩터링 A 뒤 · transport 논의 전(세션 계획). TRD 에서 정할 것 = 단계 경계 · 락 오염 정책 · 1 · 2 고지 모양 · unwind 범위(셸 포함 여부 — 사용자 결정) · abort 전제 결정 · 주석 재감사(ADR 「영향」).
