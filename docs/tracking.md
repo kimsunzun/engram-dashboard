@@ -36,6 +36,8 @@
 | T-32 | 명부 방송 직렬화 없음 | 버그 | 미착수 · T-16 선결 |
 | T-33 | `agents.json` 새 kind 하위호환 | 버그 | 트리거 충족 추정 · 사용자 판단 대기 |
 | T-19 | 우편 CLI 빈 응답 = 성공 | 버그 | 보류 |
+| T-53 | 띄우기 — 무리에 넣기 전에 뜬 손자 | 버그 | 미착수 · 이론상 경로 |
+| T-54 | 상시 `taskkill /T` 호출자 넷 | 버그 | 미착수 · 선재 위험 |
 | T-51 | 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) | 사소한 기능·정리 | 보류 — 필요해질 때 |
 | T-50 | 덮는 층의 「줄 바깥 빈 영역」 | 사소한 기능·정리 | 보류 — 저장 작업 뒤 |
 | T-48 | 다른 연결 사건도 덮는 층에 | 사소한 기능·정리 | 보류 — 저장 작업 뒤 |
@@ -227,6 +229,21 @@
 - **문제:** `exit_code_for_query_response` 가 2xx JSON 객체면 무조건 0 으로 본다 — 데몬이 `mail status m-1` 에 `200 {}` 를 주면 CLI 는 성공으로 끝난다. 발송 판정(`exit_code_for_response`)은 성공 shape 를 실제로 검증하는데 조회 판정만 그 대칭이 없다.
 - **다음:** 조회 성공 shape 를 정의(`mail status` · `mail pending` 이 서로 다른 모양이라 갈라야 한다)한 뒤 판정에 반영. 정본 = spec §6 의 응답 shape 절(§6 의 CLI 인자 블록만 ADR-0132 로 폐기).
 - **근거:** ADR-0132 슬라이스 ① 리뷰(2026-08-11)
+
+### T-53. 띄우기에서 무리에 넣기 전에 뜬 손자는 무리 밖에 남는다
+- **상태:** 미착수 · 이론상 경로(그 경합을 얼마나 자주 지는지 재지 않았다 — 넣기는 띄운 직후 µs 안이고 `cmd.exe` 가 CLI 를 띄우기까지는 그보다 길다). 크레이트 경계 A 범위 밖(메인 결정 2026-10-10 — TRD A §8-3).
+- **문제:** 통로 셋(stdio · pty · codex)은 자식을 깨운 채 띄운 뒤 곧바로 무리(Windows Job)에 넣는다(`crates/engram-dashboard-agent/src/transport/spawn.rs`). Windows 의 claude · codex 는 `cmd.exe /c <CLI>` 로 떠 실제 CLI 가 손자라, 넣기 전에 `cmd.exe` 가 이미 띄운 손자는 무리 밖에 남는다(platform `group` 의 `adopt` doc). 성공 경로에서는 통로를 닫아도(`KILL_ON_JOB_CLOSE`) 안 끝나고, 띄우기 실패 경로에서도 안 끝난다 — 넣은 뒤의 실패는 무리가 후손을 끝내지만 넣기 전에 뜬 후손은 무리 밖이고, 가드(`ChildGuard`)는 직속 자식만 끈다(번호로 후손을 찾아 끄지 않는다 — ADR-0291 결정 13 의 U7 개정 · 잠정). 무리 넣기 자체가 실패한 경우도 같다.
+- **다음:** 처방 = 멈춘 채 띄우기(platform `spawn::prepare_tree_root` · `TreeRoot` — 사용량 조회의 선례) — stdio · codex 만 된다. portable-pty(pty 통로)엔 멈춘 채 띄우는 길이 없어 따로 정한다. 성공 경로를 바꾸는 일이라 PRD/TRD 부터.
+- **근거:** `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md` §3-7 · §8-3 · ADR-0291 결정 13 · 「거부한 대안」 (g) · 메모 `docs/refactoring/architecture-discussion-2026-09-26.md:336`
+
+### T-54. 상시 `taskkill /T` 호출자가 재사용된 부모 번호 아래 남의 프로세스를 끌 수 있다
+- **상태:** 미착수 · 선재 위험(이론상 경로 — 일어난 것을 본 적은 없다). 크레이트 경계 A U7 리뷰가 띄우기 실패 가드에서 같은 위험을 짚어 가드는 바꿨고(ADR-0291 결정 13 의 U7 개정 — 가드는 이제 번호로 후손을 끄지 않는다), 아래 호출자들은 범위 밖이라 그대로 두었다(메인 결정(위임) 2026-10-10).
+- **문제:** `taskkill /T` 는 부모 번호(WMI `ParentProcessId`)만으로 나무를 엮고 시작시각을 보지 않는다. 죽은 부모의 번호를 그대로 단 프로세스가 흔하다(이 PC 실측 2026-10-10 · U7 리뷰어 — 읽기 전용 조사). 끄는 뿌리가 그런 죽은 부모의 번호를 다시 받았으면 그 고아들(예: `explorer.exe` 와 그 나무)까지 끈다. 뿌리 번호 자신을 먼저 대조해도 `/T` 가 엮는 후손은 대조하지 않는다. 상시로 `/T` 를 쓰는 자리(2026-10-10 셈 · 일회성 스크립트와 `/T` 없는 `scripts/rebuild-run-*.bat` 은 뺐다):
+  - 운영: 셸의 데몬 끄기 fallback — `src-tauri/src/discovery/mod.rs:498` 의 `TaskKiller` 가 platform `process::kill_tree`(`taskkill /PID <pid> /F /T`)를 부른다(설명 = `src-tauri/src/commands/discovery.rs:161`). 데몬 번호 자신은 daemon.json 의 시작시각으로 먼저 가른다(`stop_with`).
+  - QA: GUI 실측 teardown — `.claude/skill-bindings/qa.md:373` 의 `taskkill /PID <기록한PID> /T /F`(띄운 앱 + 그 WebView2 렌더러).
+  - 시험: `src-tauri/tests/stop_smoke.rs:75-76`(`force_kill` — 실 데몬 시험의 RAII 정리) · `crates/engram-dashboard-agent/tests/backend_contract.rs:895-898`(`kill_tree` — 실 CLI 계약 시험의 shim 사슬 정리 · 부르는 자리 `:857`).
+- **다음:** 처방 후보 = `/T` 없이 뿌리만 끄고 후손은 Job 에 맡기기(데몬은 에이전트를 `KILL_ON_JOB_CLOSE` Job 으로 담는다 — `discovery/mod.rs:497` 그 자리 주석 「데몬 Job 안전망과 겹치나 무해하다」 · 이 항목이 그 「무해」를 의심한다 · 시험은 띄운 것을 자기 Job 에 담는다). ★번호 스냅숏을 찍고 후손마다 시작시각을 다시 대조해 끄는 길은 처방이 아니다★ — 찍은 뒤 다시 읽기 전에 번호가 넘어가면 같은 위험이다(ADR-0291 「거부한 대안」 (g)). 어느 쪽이든 동작 변경이라 별 슬라이스.
+- **근거:** ADR-0291 결정 13 · 「거부한 대안」 (g) · `crates/engram-dashboard-platform/src/process.rs`(`kill_tree`) · `src-tauri/src/commands/discovery.rs:161`
 
 ## 사소한 기능·정리
 

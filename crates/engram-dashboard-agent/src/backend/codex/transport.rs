@@ -151,8 +151,8 @@
 //! tauri import 0.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{Read, Write};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -160,7 +160,6 @@ use std::time::{Duration, Instant};
 use engram_dashboard_base::logging::mask_secrets;
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
-use engram_dashboard_platform::spawn::hide_console_window;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -177,6 +176,7 @@ use super::protocol::{
 };
 use crate::backend::{FirstTurnSink, SessionIdSink};
 use crate::output_core::{estimate_cost_bytes, OutputCore, REPLAY_MAX_BYTES, REPLAY_MAX_EVENTS};
+use crate::transport::spawn::{drain_stderr, spawn_piped, PipedChild};
 use crate::transport::{AgentTransport, LinkResolution, LinkSink, OutputDecoder};
 use crate::types::{
     AgentId, CommandSpec, ControlCaps, DeliveryAck, DropCause, InputCaps, InputEvent, InputOrigin,
@@ -1399,27 +1399,6 @@ pub(crate) struct CodexAppServerTransport {
     group: GroupOwner,
 }
 
-/// spawn 뒤 실패 경로에서 자식을 확실히 거두는 가드.
-///
-/// ★왜 필요한가★: `Child` 는 drop 으로 자식을 죽이지 않는다. spawn 뒤의 `?` 하나가 **이미 돌고 있는**
-/// 자식을 남긴 채 돌아가면, 그 자식은 아직 Job 에 들어가지도 않아 나중에 아무도 닿을 수 없다.
-struct ChildGuard(Option<Child>);
-
-impl ChildGuard {
-    fn into_inner(mut self) -> Child {
-        self.0.take().expect("ChildGuard 는 한 번만 회수된다")
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(mut child) = self.0.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-    }
-}
-
 impl CodexAppServerTransport {
     /// **pump 는 아직 안 띄운다**(`start` 에서). `child_pid` 를 함께 돌려준다.
     ///
@@ -1435,37 +1414,17 @@ impl CodexAppServerTransport {
         sid_sink: Option<SessionIdSink>,
         link_sink: Option<LinkSink>,
     ) -> Result<(CodexAppServerTransport, Option<u32>), PtyError> {
-        let mut cmd = Command::new(&spec.program);
-        cmd.args(&spec.args);
-        cmd.current_dir(&spec.cwd);
-        for (k, v) in &spec.env {
-            cmd.env(k, v);
-        }
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        hide_console_window(&mut cmd);
-
-        let child = cmd
-            .spawn()
-            .map_err(|e| PtyError::SpawnFailed(format!("codex app-server spawn: {e}")))?;
-
-        // ★여기부터 모든 조기 반환은 자식을 거두고 나간다★ — 가드가 그것을 진다.
-        let mut guard = ChildGuard(Some(child));
-        let child_ref = guard.0.as_mut().expect("방금 담았다");
-        let child_pid = Some(child_ref.id());
-        let stdin = child_ref.stdin.take();
-        let stdout = child_ref.stdout.take();
-        let stderr = child_ref.stderr.take();
-
-        let group = GroupOwner::new()?;
-        if let Some(pid) = child_pid {
-            group.adopt(pid)?;
-        }
+        let PipedChild {
+            child,
+            stdin,
+            stdout,
+            stderr,
+            group,
+        } = spawn_piped(spec, "codex app-server")?;
+        let child_pid = Some(child.id());
 
         let transport = CodexAppServerTransport {
-            child: Arc::new(Mutex::new(guard.into_inner())),
+            child: Arc::new(Mutex::new(child)),
             stdin: Arc::new(Mutex::new(stdin)),
             stdout: Mutex::new(stdout),
             stderr: Mutex::new(stderr),
@@ -3991,29 +3950,10 @@ impl AgentTransport for CodexAppServerTransport {
         let _ = self.core.set(core.clone());
 
         // ── stderr drain ──
-        // 비우지 않으면 자식이 stderr 버퍼 full 로 블록한다. 이 스트림에는 상대의 진단 텍스트가
-        //   오므로(실측 0.154.0 — 오류는 stdout 이 아니라 이쪽으로 갔다) 활성화 실패의 유일한 증거다.
+        // 이 스트림에는 상대의 진단 텍스트가 오므로(실측 0.154.0 — 오류는 stdout 이 아니라 이쪽으로 갔다) 활성화
+        //   실패의 유일한 증거다.
         if let Some(stderr) = sync::lock(&self.stderr).take() {
-            let diag_core = core.clone();
-            let spawn_result = std::thread::Builder::new()
-                .name("engram-codex-stderr".into())
-                .spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        match line {
-                            Ok(l) if !l.is_empty() => {
-                                let masked = mask_secrets(&l);
-                                diag_core.push_diagnostic(&masked);
-                                tracing::debug!(target: "agent_stderr", agent = %agent_id, "{}", masked)
-                            }
-                            Ok(_) => {}
-                            Err(_) => break,
-                        }
-                    }
-                });
-            if let Err(e) = spawn_result {
-                tracing::warn!(agent = %agent_id, "codex stderr drain 스레드 기동 실패: {e}");
-            }
+            drain_stderr(stderr, &core, "engram-codex-stderr", "codex");
         }
 
         // ── 라이터 ──
@@ -6384,30 +6324,6 @@ mod tests {
         );
     }
 
-    /// ★spawn 뒤 실패 경로에서 자식이 남으면 아무도 닿을 수 없다★ — `Child` 는 drop 으로 죽이지 않는다.
-    ///
-    /// ★이 항목이 덮는 것과 안 덮는 것★: 재는 것은 **가드 자체의 `Drop` 이 자식을 거둔다**는 것뿐이고,
-    /// **가드가 [`CodexAppServerTransport::open`] 안에서 충분히 이른 자리에 서 있는가**는 아니다. 그
-    /// 배치는 아래 [`the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`] 이 소스에서
-    /// 잰다 — 가드를 Job 생성·편입 `?` 아래로 내리면 그쪽이 빨개진다.
-    #[cfg(windows)]
-    #[test]
-    fn the_child_guard_reaps_the_child_on_an_early_return() {
-        let mut cmd = Command::new("cmd.exe");
-        cmd.args(["/c", "ping", "-n", "30", "127.0.0.1"]);
-        cmd.stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let child = cmd.spawn().expect("spawn");
-        let pid = child.id();
-        assert!(engram_dashboard_platform::process::pid_alive(pid));
-        drop(ChildGuard(Some(child)));
-        assert!(
-            !engram_dashboard_platform::process::pid_alive(pid),
-            "조기 반환 경로에서 자식이 샜다"
-        );
-    }
-
     /// ★상대가 스스로 끝나도 라이터 스레드가 끝나야 한다★ — 안 끝나면 그 스레드가 core·stdin·대기표의
     /// `Arc` 를 든 채 남아 세션 하나치 메모리가 함께 남는다. `shutdown()` 은 이 경로에서 불리지 않는다
     /// (reaper 는 세션을 명부에서 뺄 뿐이다).
@@ -6604,33 +6520,6 @@ mod tests {
         );
     }
 
-    /// ★가드는 spawn 뒤 **첫 실패 가능 단계보다 먼저** 서 있어야 한다★ — 그 아래로 내려가면 그 사이의
-    /// `?` 가 이미 도는 자식을 남긴 채 돌아가고, 그 자식은 아직 어느 Job 에도 안 들어가 아무도 닿을 수 없다.
-    ///
-    /// 소스에서 재는 이유 = 그 배치는 **실패를 주입할 수 없는 자리**다(`GroupOwner::new` 를 실패시키는
-    /// seam 이 없다). 위 `Drop` 항목은 가드가 도는 것만 재고 어디에 서 있는지는 못 본다.
-    #[test]
-    fn the_child_guard_is_armed_before_the_first_fallible_step_after_spawn() {
-        let src = include_str!("transport.rs");
-        let production = src.split("mod tests {").next().expect("운영 구획");
-        let open_body = production
-            .split("pub(crate) fn open(")
-            .nth(1)
-            .expect("open 본문");
-        let armed = open_body
-            .find("ChildGuard(Some(child))")
-            .expect("가드 무장 지점");
-        for step in ["GroupOwner::new()?", "group.adopt(pid)?"] {
-            let at = open_body
-                .find(step)
-                .unwrap_or_else(|| panic!("`{step}` 가 open 안에 없다 — 이 항목의 전제가 낡았다"));
-            assert!(
-                armed < at,
-                "가드가 `{step}` 보다 뒤에 선다 — 그 사이의 실패가 자식을 남긴다"
-            );
-        }
-    }
-
     /// ★기록 호출은 게이트가 열리기 **전에** 나와야 한다★ — 이것이 한 동사 포트의 존재 근거다
     /// ([`crate::backend::SessionIdSink`]: 「적혔나」를 되묻는 둘째 동사가 없는 이유가 이 순서다).
     /// 뒤집히면 기록되기 전에 그 세션으로 턴이 나가고, 포트는 **아무것도 보장하지 않는 통보**가 된다.
@@ -6639,7 +6528,7 @@ mod tests {
     /// 이 항목이 지키려는 바로 그 한 동사 계약을 깨야 한다. 게이트의 반대쪽 절반(「`Ready` 여야 턴이
     /// 나간다」)은 [`tests::nothing_is_sent_before_the_link_is_ready_even_when_the_thread_id_is_known`]
     /// 이 실제로 돌려서 잰다 — 둘이 합쳐 「기록 → 게이트 → 전송」 순서를 덮는다.
-    /// 선례·같은 사유 = [`tests::the_child_guard_is_armed_before_the_first_fallible_step_after_spawn`].
+    /// 선례·같은 사유 = `crate::transport::spawn` 시험의 `the_guard_is_armed_and_the_child_adopted_first_after_spawn`.
     /// ★이 항목이 핀하는 것은 「게이트 전에 포트에 **건넸다**」까지다(ADR-0226)★ — 포트 뒤는 첫 제출
     ///   래치라, 영속은 제출에 매인다. 「첫 턴 전에 영속」은 래치 단위 시험(진행 중 commit 뒤에 줄 서기) ·
     ///   세션의 제출 세기 순서 시험 · 조립점의 배선 구조 시험(`manager` 의

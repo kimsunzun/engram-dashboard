@@ -14,6 +14,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 
 use crate::output_core::OutputCore;
 use crate::transport::input_queue::{self, InputQueue};
+use crate::transport::spawn::{new_group_with, ChildGuard};
 use crate::transport::AgentTransport;
 use crate::types::{
     CommandSpec, ControlCaps, InputCaps, InputEvent, OutputCaps, OutputEvent, PtyError,
@@ -83,16 +84,14 @@ impl PtyTransport {
             .slave
             .spawn_command(cmd)
             .map_err(|e| PtyError::SpawnFailed(format!("spawn: {e}")))?;
+        let guard = ChildGuard::new(child);
+        // ★띄운 뒤 첫 실패 가능 걸음 = 무리 넣기 · 가드를 무리보다 먼저 선언한다★ — 아래 걸음이 실패하면 지역 변수가
+        //   선언 역순(무리 → 가드)으로 버려진다. 사유 = `new_group_with` doc.
+        let child_pid = guard.pid();
+        let group = new_group_with(child_pid)?;
 
         // slave는 spawn 후 불필요 — drop으로 FD 누수 방지(닫혀야 ConPTY EOF도 정상).
         drop(pair.slave);
-
-        let child_pid = child.process_id();
-
-        let group = GroupOwner::new()?;
-        if let Some(pid) = child_pid {
-            group.adopt(pid)?;
-        }
 
         // ★master를 적재하기 전에 reader/writer를 먼저 확보★.
         let reader = pair
@@ -108,7 +107,7 @@ impl PtyTransport {
             master: Arc::new(Mutex::new(Some(pair.master))),
             writer: Mutex::new(Some(writer)),
             input: Arc::new(InputQueue::new()),
-            child: Arc::new(Mutex::new(child)),
+            child: Arc::new(Mutex::new(guard.into_inner())),
             shutdown: Arc::new(AtomicBool::new(false)),
             reader: Mutex::new(Some(reader)),
             input_seen: Arc::new(AtomicBool::new(false)),

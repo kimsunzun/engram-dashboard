@@ -915,6 +915,7 @@ jobs:
           crates/engram-dashboard-agent/src/session.rs
           crates/engram-dashboard-agent/src/transport/process_group.rs
           crates/engram-dashboard-agent/src/transport/pty.rs
+          crates/engram-dashboard-agent/src/transport/spawn.rs
           crates/engram-dashboard-agent/src/transport/stdio.rs
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
