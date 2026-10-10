@@ -133,7 +133,7 @@ pub struct AgentProfile {
 
     /// 트리 계층의 부모 프로필 id. `Some(pid)` → 이 프로필은
     /// pid 의 자식(트리에서 pid 밑에 들여쓰기), `None` → 최상위(루트). **1단 중첩만 허용**: 자식은 다시
-    /// 부모가 될 수 없고(cycle 방지 단순화), 부모는 반드시 루트여야 한다 — 검증은 `ProfileRegistry::reparent`.
+    /// 부모가 될 수 없고(cycle 방지 단순화), 부모는 반드시 루트여야 한다 — 검증은 `ProfileRegistry::try_reparent`.
     /// `#[serde(default)]` 라 이 필드 없는 옛 agents.json 은 `None`(루트)으로 흡수(마이그레이션 불필요).
     // ADR-0072
     #[serde(default)]
@@ -543,6 +543,12 @@ impl ProfileRegistry {
         self.lock().dirty
     }
 
+    /// 저장소의 지금 상태 — 명부 락을 잡지 않는다(저장소 상태 칸은 락 순서의 끝이다).
+    // ADR-0291 R17 (D6)
+    pub fn store_status(&self) -> StoreStatus {
+        self.store.status()
+    }
+
     pub fn list(&self) -> Vec<AgentProfile> {
         self.lock().map.values().cloned().collect()
     }
@@ -560,13 +566,19 @@ impl ProfileRegistry {
             .collect()
     }
 
-    pub fn upsert(&self, profile: AgentProfile) {
+    /// 명부에 넣거나 통째로 바꾼다 — 내부 입구(저장의 어떤 `Err` 에도 커밋 + dirty). ★운영 경로에는 부르는 쪽이
+    ///   없다★ — 시험과 하네스 seam(`AgentManager::seed_agent_bypassing_uniqueness`)이 명부를 심을 때만 쓴다. 운영의
+    ///   등록은 [`ProfileRegistry::try_upsert`] 다.
+    // ADR-0291 R17
+    #[cfg(any(test, feature = "test-harness"))]
+    pub(crate) fn upsert(&self, profile: AgentProfile) {
         self.mutate(|m| {
             m.insert(profile.id, profile);
         });
     }
 
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::upsert`] 와 같고 저장이 성공해야 커밋한다.
+    /// 명부에 넣거나 통째로 바꾼다 — 부르는 쪽 있는 입구: 사본에 적용해 저장이 성공해야 커밋한다.
+    // ADR-0291 R17
     pub fn try_upsert(&self, profile: AgentProfile) -> Result<(), StoreError> {
         self.try_mutate(|m| {
             m.insert(profile.id, profile);
@@ -679,26 +691,22 @@ impl ProfileRegistry {
     /// 삭제 대상을 부모로 가리키던 자식들의 `parent_id` 를 **같은 임계구역에서** `None` 으로 푼다 —
     /// 존재하지 않는 부모를 가리키는 고아 참조(dangling parent)를 남기지 않는다(트리 렌더·복원 불변식).
     /// cascade 삭제가 아니라 승격이라 자식 데이터는 보존된다(사용자 결정 — 실수로 그룹 전체 소실 방지).
+    ///
+    /// 부르는 쪽 있는 입구다 — 사본에 적용해 저장이 성공해야 커밋한다. 없는 id 도 저장을 시도한다.
     // ADR-0072
-    pub fn remove(&self, id: AgentId) {
-        self.mutate(|m| remove_promoting_children(m, id));
-    }
-
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::remove`] 와 같고 저장이 성공해야 커밋한다.
+    // ADR-0291 R17
     pub fn try_remove(&self, id: AgentId) -> Result<(), StoreError> {
         self.try_mutate(|m| remove_promoting_children(m, id))
     }
 
     /// 표시명 override 설정/해제(ADR-0061 리치화 — 트리 rename). `Some(name)` → override 저장, `None` →
     /// 해제(cwd basename 파생 복귀). 존재하면 변경 후 persist·true, 없는 id 면 no-op·false.
-    /// ★정규화는 저장 게이트(`AgentManager::rename_agent`) 책임★: 양끝 공백 제거와 "공백만 남으면 override
+    /// ★정규화는 저장 게이트(`AgentManager::try_rename_agent`) 책임★: 양끝 공백 제거와 "공백만 남으면 override
     /// 없음" 판정은 이름 유일성 판정 **전에** 거기서 끝난다(`normalize_display_name`) — 여기서 또 깎으면
     /// 판정이 본 값과 저장되는 값이 갈린다. 여기엔 이미 정규화된 값 또는 명시적 None 만 온다.
-    pub fn rename(&self, id: AgentId, display_name: Option<String>) -> bool {
-        self.update_with(id, |p| p.display_name = display_name)
-    }
-
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::rename`] 과 같고 저장이 성공해야 커밋한다.
+    ///
+    /// 부르는 쪽 있는 입구다 — 사본에 적용해 저장이 성공해야 커밋한다.
+    // ADR-0291 R17
     pub fn try_rename(
         &self,
         id: AgentId,
@@ -708,8 +716,8 @@ impl ProfileRegistry {
     }
 
     /// 트리 부모 지정/해제(ADR-0072 — 계층 reparent). `Some(pid)` → child_id 를 pid 의 자식으로,
-    /// `None` → 루트로 승격. 검증 전부를 **한 임계구역(mutate)** 안에서 하고 성공 시에만 persist·true,
-    /// 위반이면 no-op·false(rename/update_with 와 동형 bool 반환).
+    /// `None` → 루트로 승격. 검증 전부를 **한 임계구역(try_mutate)** 안에서 하고 성공 시에만 persist·true,
+    /// 위반이면 no-op·false(try_rename/try_update_with 와 동형 bool 반환).
     ///
     /// **1단 중첩 규칙(cycle 방지):**
     /// - child 가 존재해야 한다(없으면 false).
@@ -720,12 +728,10 @@ impl ProfileRegistry {
     ///
     /// ★검증을 lock 안에서★: 존재/부모여부 판정과 쓰기가 한 임계구역이라, 동시 reparent/delete 와
     /// TOCTOU(검사-후-변경 사이 상태 변동)로 cycle·고아가 새는 창을 닫는다(ADR-0071 락 규율 경유).
+    ///
+    /// 부르는 쪽 있는 입구다 — 사본에 적용해 저장이 성공해야 커밋한다. 규칙 위반(`Ok(false)`)도 저장을 시도한다.
     // ADR-0072
-    pub fn reparent(&self, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
-        self.mutate(|m| reparent_one_level(m, child_id, parent_id))
-    }
-
-    /// 부르는 쪽 있는 입구 — [`ProfileRegistry::reparent`] 와 같고 저장이 성공해야 커밋한다.
+    // ADR-0291 R17
     pub fn try_reparent(
         &self,
         child_id: AgentId,
@@ -952,7 +958,7 @@ fn remove_promoting_children(m: &mut ProfileMap, id: AgentId) {
     }
 }
 
-/// 규칙 = [`ProfileRegistry::reparent`] doc.
+/// 규칙 = [`ProfileRegistry::try_reparent`] doc.
 fn reparent_one_level(m: &mut ProfileMap, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
     if !m.contains_key(&child_id) {
         return false;
@@ -1570,7 +1576,7 @@ mod tests {
             "새 프로필의 기본값이 0 이라 첫 발급만은 0 을 피한다(그 뒤 발급엔 이 보장이 없다)"
         );
 
-        reg.remove(id);
+        reg.try_remove(id).expect("저장 성공");
         assert_eq!(
             reg.epoch_for_spawn(id),
             None,
@@ -1759,7 +1765,9 @@ mod tests {
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        assert!(reg.rename(id, Some("내 에이전트".to_string())));
+        assert!(reg
+            .try_rename(id, Some("내 에이전트".to_string()))
+            .expect("저장 성공"));
         assert_eq!(
             reg.get(id).unwrap().display_name,
             Some("내 에이전트".to_string())
@@ -1776,15 +1784,18 @@ mod tests {
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        reg.rename(id, Some("x".to_string()));
-        assert!(reg.rename(id, None));
+        reg.try_rename(id, Some("x".to_string()))
+            .expect("저장 성공");
+        assert!(reg.try_rename(id, None).expect("저장 성공"));
         assert_eq!(reg.get(id).unwrap().display_name, None);
     }
 
     #[test]
     fn rename_missing_is_noop_false() {
         let reg = ProfileRegistry::new(Arc::new(MemStore::default()));
-        assert!(!reg.rename(Uuid::new_v4(), Some("y".to_string())));
+        assert!(!reg
+            .try_rename(Uuid::new_v4(), Some("y".to_string()))
+            .expect("저장 성공"));
     }
 
     // ── 트리 계층 reparent(ADR-0072) ────────────────────────────────────────────
@@ -1799,7 +1810,7 @@ mod tests {
         reg.upsert(parent);
         reg.upsert(child);
 
-        assert!(reg.reparent(cid, Some(pid)));
+        assert!(reg.try_reparent(cid, Some(pid)).expect("저장 성공"));
         assert_eq!(reg.get(cid).unwrap().parent_id, Some(pid));
         let disk = store.load();
         let persisted_child = disk.iter().find(|p| p.id == cid).unwrap();
@@ -1814,8 +1825,8 @@ mod tests {
         let (pid, cid) = (parent.id, child.id);
         reg.upsert(parent);
         reg.upsert(child);
-        reg.reparent(cid, Some(pid));
-        assert!(reg.reparent(cid, None));
+        reg.try_reparent(cid, Some(pid)).expect("저장 성공");
+        assert!(reg.try_reparent(cid, None).expect("저장 성공"));
         assert_eq!(reg.get(cid).unwrap().parent_id, None);
     }
 
@@ -1825,7 +1836,10 @@ mod tests {
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        assert!(!reg.reparent(id, Some(id)), "self-parent 는 거부");
+        assert!(
+            !reg.try_reparent(id, Some(id)).expect("저장 성공"),
+            "self-parent 는 거부"
+        );
         assert_eq!(reg.get(id).unwrap().parent_id, None);
     }
 
@@ -1836,7 +1850,8 @@ mod tests {
         let cid = child.id;
         reg.upsert(child);
         assert!(
-            !reg.reparent(cid, Some(Uuid::new_v4())),
+            !reg.try_reparent(cid, Some(Uuid::new_v4()))
+                .expect("저장 성공"),
             "없는 부모 지정은 거부"
         );
         assert_eq!(reg.get(cid).unwrap().parent_id, None);
@@ -1849,7 +1864,8 @@ mod tests {
         let pid = parent.id;
         reg.upsert(parent);
         assert!(
-            !reg.reparent(Uuid::new_v4(), Some(pid)),
+            !reg.try_reparent(Uuid::new_v4(), Some(pid))
+                .expect("저장 성공"),
             "없는 child 는 거부"
         );
     }
@@ -1864,9 +1880,9 @@ mod tests {
         reg.upsert(a);
         reg.upsert(b);
         reg.upsert(c);
-        assert!(reg.reparent(bid, Some(aid)));
+        assert!(reg.try_reparent(bid, Some(aid)).expect("저장 성공"));
         assert!(
-            !reg.reparent(aid, Some(cid)),
+            !reg.try_reparent(aid, Some(cid)).expect("저장 성공"),
             "자식을 가진 노드는 자식이 될 수 없음(1단)"
         );
         assert_eq!(reg.get(aid).unwrap().parent_id, None);
@@ -1882,9 +1898,9 @@ mod tests {
         reg.upsert(a);
         reg.upsert(b);
         reg.upsert(c);
-        assert!(reg.reparent(bid, Some(aid)));
+        assert!(reg.try_reparent(bid, Some(aid)).expect("저장 성공"));
         assert!(
-            !reg.reparent(cid, Some(bid)),
+            !reg.try_reparent(cid, Some(bid)).expect("저장 성공"),
             "부모가 부모를 가진 경우 자식 지정 거부(1단)"
         );
         assert_eq!(reg.get(cid).unwrap().parent_id, None);
@@ -1901,10 +1917,10 @@ mod tests {
         reg.upsert(a);
         reg.upsert(b);
         reg.upsert(c);
-        reg.reparent(bid, Some(aid));
-        reg.reparent(cid, Some(aid));
+        reg.try_reparent(bid, Some(aid)).expect("저장 성공");
+        reg.try_reparent(cid, Some(aid)).expect("저장 성공");
 
-        reg.remove(aid);
+        reg.try_remove(aid).expect("저장 성공");
         assert!(reg.get(aid).is_none());
         assert_eq!(reg.get(bid).unwrap().parent_id, None, "b 는 루트 승격");
         assert_eq!(reg.get(cid).unwrap().parent_id, None, "c 는 루트 승격");
@@ -1939,7 +1955,8 @@ mod tests {
             "로드 직후엔 cycle 잔존"
         );
 
-        reg.rename(aid, Some("touch".into()));
+        reg.try_rename(aid, Some("touch".into()))
+            .expect("저장 성공");
 
         assert_eq!(reg.get(aid).unwrap().parent_id, None, "cycle 참여 A→루트");
         assert_eq!(reg.get(bid).unwrap().parent_id, None, "cycle 참여 B→루트");
@@ -1985,9 +2002,9 @@ mod tests {
         let (pid, cid) = (parent.id, child.id);
         reg.upsert(parent);
         reg.upsert(child);
-        assert!(reg.reparent(cid, Some(pid)));
-        reg.rename(cid, Some("x".into()));
-        reg.rename(pid, Some("y".into()));
+        assert!(reg.try_reparent(cid, Some(pid)).expect("저장 성공"));
+        reg.try_rename(cid, Some("x".into())).expect("저장 성공");
+        reg.try_rename(pid, Some("y".into())).expect("저장 성공");
         assert_eq!(
             reg.get(cid).unwrap().parent_id,
             Some(pid),
@@ -2012,10 +2029,10 @@ mod tests {
             let r1 = reg.clone();
             let r2 = reg.clone();
             let h1 = thread::spawn(move || {
-                r1.reparent(cid, Some(pid));
+                r1.try_reparent(cid, Some(pid)).expect("저장 성공");
             });
             let h2 = thread::spawn(move || {
-                r2.remove(pid);
+                r2.try_remove(pid).expect("저장 성공");
             });
             h1.join().unwrap();
             h2.join().unwrap();
@@ -2053,8 +2070,8 @@ mod tests {
         assert_eq!(stale_snapshot.display_name, None);
 
         // 그 사이 다른 연결이 reparent + rename 을 커밋.
-        assert!(reg.reparent(cid, Some(rid)));
-        assert!(reg.rename(cid, Some("live".into())));
+        assert!(reg.try_reparent(cid, Some(rid)).expect("저장 성공"));
+        assert!(reg.try_rename(cid, Some("live".into())).expect("저장 성공"));
 
         reg.upsert_preserving_hierarchy(stale_snapshot);
         let after = reg.get(cid).unwrap();
@@ -2089,7 +2106,7 @@ mod tests {
             "있는 id 를 갱신하지 못했다 — 이 동사의 정상 갈래가 죽었다"
         );
 
-        reg.remove(id);
+        reg.try_remove(id).expect("저장 성공");
         assert!(
             !reg.update_preserving_hierarchy(snapshot),
             "지워진 프로필에 spawn 등록이 값을 다시 넣었다"
@@ -2187,7 +2204,7 @@ mod tests {
                     let child = sample();
                     let cid = child.id;
                     r.upsert(child);
-                    r.reparent(cid, Some(root_id));
+                    r.try_reparent(cid, Some(root_id)).expect("저장 성공");
                 }
             }));
         }
@@ -2215,7 +2232,8 @@ mod tests {
         let p = sample();
         let id = p.id;
         reg.upsert(p);
-        reg.rename(id, Some("final".to_string()));
+        reg.try_rename(id, Some("final".to_string()))
+            .expect("저장 성공");
         let disk = store.load();
         let mem = reg.list();
         assert_eq!(disk.len(), mem.len());
@@ -2241,7 +2259,8 @@ mod tests {
                     let p = sample();
                     let id = p.id;
                     r.upsert(p);
-                    r.rename(id, Some(format!("t{t}-{i}")));
+                    r.try_rename(id, Some(format!("t{t}-{i}")))
+                        .expect("저장 성공");
                 }
             }));
         }
@@ -2486,7 +2505,9 @@ mod tests {
 
         // 누가 쓸 만한 파일로 되돌려 거절이 풀렸다.
         std::fs::write(&path, r#"{"schema_version":1,"profiles":[]}"#).unwrap();
-        assert!(reg.rename(id, Some("다음 변경".into())));
+        assert!(reg
+            .try_rename(id, Some("다음 변경".into()))
+            .expect("저장 성공"));
         assert!(!reg.is_dirty());
         let on_disk = FileProfileStore::new(dir.clone()).load();
         let saved = on_disk.iter().find(|p| p.id == id).expect("명부가 실렸다");

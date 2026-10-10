@@ -49,6 +49,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.list
       살아 있는 것과 잠든 것 전부. id, name, state(live|sleeping), cwd, parent.
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
+      store 는 명부 파일 둘(agents = agents.json · presets = presets.json)의 상태다. 각각 state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
 
   {tool} agent.new --backend <claude|codex> --cwd <폴더> [--name <이름>]
       만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 만들 때 고르며 바꾸는 명령은 없다.
@@ -61,6 +62,8 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 
   {tool} agent.move --target <이름|id> --parent <이름|none>
       다른 에이전트 밑으로 넣는다. none 이면 최상위로 되돌린다.
+
+  명부를 바꾸는 명령(agent.new · agent.spawn · agent.rename · agent.move)은 agents 저장소가 그 변경을 받지 않으면(ReadOnly · Refusing) CONFLICT 로 돌아오고 명부는 그대로다 — 그 파일이 그대로면 다시 해도 같다. 저장 쓰기 자체가 실패하면 INTERNAL 이고 역시 명부는 그대로다. 단 agent.spawn --cwd 가 만든 뒤 띄우기에서 막히면 만든 에이전트는 남는다(문구가 그 이름으로 다시 띄우라고 알려 준다). ReadOnly 는 그 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다. Refusing 은 파일이 다시 쓸 만해지면(고쳐지거나 잠김이 풀리면) 다음 변경이 받아들여 풀린다 — 다시 띄울 필요가 없다.
 
   {tool} agent.listQueuedInputs --target <이름|id>
       턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록. 각 항목의 id, text, state(queued|unconfirmed|cancelling).

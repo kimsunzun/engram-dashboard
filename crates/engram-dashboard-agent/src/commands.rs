@@ -27,7 +27,7 @@ use crate::preset::PresetId;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
-use crate::profile::{AgentCommand, AgentProfile, SpawnMode, StoreError};
+use crate::profile::{AgentCommand, AgentProfile, Refusal, SpawnMode, StoreError, StoreStatus};
 use crate::types::{
     AgentId, AgentStatus, CancelError, CancelOutcome, PtyError, AGENT_STATE_LIVE,
     AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
@@ -48,7 +48,9 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    catalog_version: 6;
+    // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
+    //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
+    catalog_version: 7;
 
     /// 명부의 한 행.
     struct AgentRow {
@@ -57,6 +59,42 @@ declare_commands! {
         state: String,
         cwd: String,
         parent: Option<String>,
+    }
+
+    // ── 명부 저장소 상태(`agent.list` 의 `store` — ADR-0291 R17 · D6) ─────────────────────────────────────
+    // ★매크로 enum 은 문자열 열거뿐이라 저장소 상태(까닭을 든 태그 enum `profile::StoreStatus`)를 단어 + 선택 칸으로
+    //   편다★ — 사용량 행과 같은 꼴이다.
+
+    /// 저장소 파일 하나의 상태 — `Writable`(쓸 수 있다) | `ReadOnly`(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가
+    /// 비어 있고 이 실행 내내 바꾸는 요청은 전부 `CONFLICT` 다. 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다) |
+    /// `Refusing`(마지막 저장이 거절됐다 — 다음 변경이 다시 판정하고, 받아들이면 풀린다. 그 사이 파일이 고쳐졌으면
+    /// 이 값은 낡았다).
+    enum StoreStateWord {
+        Writable,
+        ReadOnly,
+        Refusing,
+    }
+
+    /// 저장소가 받지 않는 까닭 — `Newer`(이 데몬보다 새 판이 쓴 파일) | `Unreadable`(파일을 못 읽었다 — 잠김 ·
+    /// 권한 등).
+    enum StoreRefusalWord {
+        Newer,
+        Unreadable,
+    }
+
+    /// 저장소 파일 하나의 상태 행.
+    struct StoreStatusRow {
+        state: StoreStateWord,
+        /// `ReadOnly` · `Refusing` 의 까닭 — `Writable` 이면 `null`.
+        reason: Option<StoreRefusalWord>,
+        /// `Newer` 일 때 그 파일이 적은 판 번호 — 그 밖은 `null`.
+        file_version: Option<u64>,
+    }
+
+    /// 명부 저장소 둘 — `agents`(agents.json · 에이전트 명부) · `presets`(presets.json · 경로 북마크).
+    struct RosterStoreRow {
+        agents: StoreStatusRow,
+        presets: StoreStatusRow,
     }
 
     /// 새 에이전트를 돌릴 백엔드 — ★오늘 받는 값은 `Claude` 와 `Codex` 둘이다★(2026-09-22 에 codex 가
@@ -169,11 +207,11 @@ declare_commands! {
     // errors 에는 **이 명령 고유의** 코드만 적는다 — 인자 반려(INVALID_ARGUMENT)와 내부 실패(INTERNAL)는
     //   표가 내는 것이라 `CommandSpec::advertised_errors` 가 자동으로 얹는다.
 
-    /// 명부 전량 — 이름·생사·작업 폴더·부모.
+    /// 명부 전량 — 이름·생사·작업 폴더·부모 — 와 명부 저장소 둘의 상태(`store`).
     #[effect(Read)]
     #[since(1)]
     "agent.list" => args AgentListArgs {}
-                 -> ok   AgentListOk { agents: Vec<AgentRow> }
+                 -> ok   AgentListOk { agents: Vec<AgentRow>, store: RosterStoreRow }
                  errors [];
 
     /// 에이전트를 띄운다(잠든 것 깨우기 포함).
@@ -387,6 +425,14 @@ pub struct AgentRosterRow {
     pub live: Option<AgentStatus>,
 }
 
+/// 명부 저장소 둘의 지금 상태 — `agent.list` 가 [`RosterStoreRow`] 로 편다.
+// ADR-0291 R17 (D6)
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RosterStoreStatus {
+    pub agents: StoreStatus,
+    pub presets: StoreStatus,
+}
+
 /// 띄우기 결과 — 이 표가 보는 세 칸.
 pub struct StartedAgent {
     pub id: AgentId,
@@ -405,6 +451,9 @@ pub struct StartedAgent {
 // ADR-0012
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
+    /// 명부 저장소 둘(agents · presets)의 지금 상태.
+    // ADR-0291 R17 (D6)
+    fn store_status(&self) -> RosterStoreStatus;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
     /// ★명부를 바꾸는 셋(`create_agent` · `rename_agent` · `reparent_agent`)은 부르는 쪽 있는 변경이다★ — 저장소가
     ///   그 변경을 받지 않으면 명부를 그대로 두고 [`PtyError::Store`] 다(매니저의 `try_` 판 · ADR-0291 R17).
@@ -531,6 +580,13 @@ impl AgentCommandHost for AgentManager {
                 live: entry.live.map(|info| info.status),
             })
             .collect()
+    }
+
+    fn store_status(&self) -> RosterStoreStatus {
+        RosterStoreStatus {
+            agents: self.agents_store_status(),
+            presets: self.presets().store_status(),
+        }
     }
 
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
@@ -914,7 +970,36 @@ fn verb_list(host: &dyn AgentCommandHost) -> Result<AgentListOk, CommandError> {
             parent: row.parent.map(|p| p.to_string()),
         })
         .collect();
-    Ok(AgentListOk { agents })
+    // 명부 한 장과 같은 순간의 값은 아니다 — 저장소 상태는 마지막 저장 시도 기준이라 원래 그 정도로만 맞는다.
+    let store = host.store_status();
+    Ok(AgentListOk {
+        agents,
+        store: RosterStoreRow {
+            agents: store_status_row(store.agents),
+            presets: store_status_row(store.presets),
+        },
+    })
+}
+
+/// 저장소 상태(까닭을 든 태그 enum)를 단어 + 선택 칸으로 편다.
+// ADR-0291 R17 (D6)
+fn store_status_row(status: StoreStatus) -> StoreStatusRow {
+    let (state, refusal) = match status {
+        StoreStatus::Writable => (StoreStateWord::Writable, None),
+        StoreStatus::ReadOnly(refusal) => (StoreStateWord::ReadOnly, Some(refusal)),
+        StoreStatus::Refusing(refusal) => (StoreStateWord::Refusing, Some(refusal)),
+    };
+    StoreStatusRow {
+        state,
+        reason: refusal.map(|refusal| match refusal {
+            Refusal::Newer { .. } => StoreRefusalWord::Newer,
+            Refusal::Unreadable => StoreRefusalWord::Unreadable,
+        }),
+        file_version: match refusal {
+            Some(Refusal::Newer { found }) => Some(found),
+            _ => None,
+        },
+    }
 }
 
 fn verb_spawn(
@@ -1303,7 +1388,7 @@ fn verb_move(
     if !moved {
         // ★`false` 하나로는 사유를 모른다★: 방금 해석한 대상이 그 사이 사라졌을 수도 있고(NOT_FOUND),
         //   트리 구조가 거부했을 수도 있다(CONFLICT). 둘은 호출자가 할 일이 다르므로 명부를 다시 보고
-        //   가른다 — 사유 목록은 `ProfileRegistry::reparent` 의 거부 조건과 한 줄씩 대응한다.
+        //   가른다 — 사유 목록은 `ProfileRegistry::try_reparent` 의 거부 조건과 한 줄씩 대응한다.
         // ★사라진 쪽의 이름을 댄다★: 둘 중 어느 쪽이 없어졌든 자식 이름을 대면, 부모만 사라진 경우에
         //   호출자는 **멀쩡히 있는** 에이전트를 없다고 듣고 엉뚱한 데를 뒤진다.
         let roster = host.roster();
@@ -1650,6 +1735,9 @@ mod tests {
         /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
         // ADR-0291 R17
         store_refuses: Mutex<bool>,
+        /// `agent.list` 가 싣는 저장소 상태 — 기본은 둘 다 쓸 수 있음.
+        // ADR-0291 R17 (D6)
+        store_status: Mutex<RosterStoreStatus>,
         /// reparent 호출 **안에서** 명부에서 지울 대상 — 「그 사이 사라졌다」를 재현한다(자식이든 부모든).
         /// ★적용 성패와 무관하게 지운다★: 실패 뒤 사라짐은 사유 분기를, 성공 뒤 사라짐은 응답 이름의
         /// fallback 을 태운다 — 한쪽에만 걸면 다른 쪽 코드에 어떤 테스트도 못 닿는다.
@@ -1814,6 +1902,10 @@ mod tests {
                     live: r.live.clone(),
                 })
                 .collect()
+        }
+
+        fn store_status(&self) -> RosterStoreStatus {
+            *self.store_status.lock().unwrap()
         }
 
         fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
@@ -1993,6 +2085,114 @@ mod tests {
         assert_eq!(agents[0]["state"], "live");
         assert_eq!(agents[1]["state"], "sleeping");
         assert_eq!(agents[0]["parent"], serde_json::Value::Null);
+    }
+
+    /// ★저장소 상태 셋이 까닭과 함께 `agent.list` 에 실린다(D6)★ — `Refusing` 이 없으면 실행 중 거절은 `Writable` 로
+    ///   보이는데 바꾸는 요청은 `CONFLICT` 로 돌아와, 호출자가 그 오류를 설명할 상태를 못 본다.
+    // ADR-0291 R17 (D6)
+    #[test]
+    fn list_reports_each_store_status_with_its_reason() {
+        let host = FakeHost::new();
+        let (table, _notify) = wiring(&host);
+        let writable = json!({ "state": "Writable", "reason": null, "file_version": null });
+
+        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+        assert_eq!(
+            out["store"],
+            json!({ "agents": writable, "presets": writable })
+        );
+
+        for (status, expected_agents, expected_presets) in [
+            (
+                RosterStoreStatus {
+                    agents: StoreStatus::ReadOnly(Refusal::Newer { found: 3 }),
+                    presets: StoreStatus::Refusing(Refusal::Unreadable),
+                },
+                json!({ "state": "ReadOnly", "reason": "Newer", "file_version": 3 }),
+                json!({ "state": "Refusing", "reason": "Unreadable", "file_version": null }),
+            ),
+            (
+                RosterStoreStatus {
+                    agents: StoreStatus::Refusing(Refusal::Newer { found: 4 }),
+                    presets: StoreStatus::ReadOnly(Refusal::Unreadable),
+                },
+                json!({ "state": "Refusing", "reason": "Newer", "file_version": 4 }),
+                json!({ "state": "ReadOnly", "reason": "Unreadable", "file_version": null }),
+            ),
+        ] {
+            *host.store_status.lock().unwrap() = status;
+            let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+            assert_eq!(out["store"]["agents"], expected_agents, "{status:?}");
+            assert_eq!(out["store"]["presets"], expected_presets, "{status:?}");
+        }
+    }
+
+    /// ★실 매니저가 두 저장소의 상태를 각자 자리에 싣는다(D6)★ — 가짜 매니저는 심은 칸을 돌려줄 뿐이라, 매니저 쪽
+    ///   구현이 둘을 뒤바꾸거나 한쪽을 늘 `Writable` 로 두는 것은 실물로만 잡힌다.
+    // ADR-0291 R17 (D6)
+    #[test]
+    fn a_real_manager_reports_each_store_in_its_own_slot() {
+        use crate::preset::{Preset, PresetRegistry, PresetStore};
+        use crate::profile::{ProfileRegistry, ProfileStore};
+        use crate::session_tracker::{SessionTracker, TrackerConfig};
+        use crate::types::{AgentInfo, StatusSink};
+
+        struct NoStatus;
+        impl StatusSink for NoStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+        struct NewerAgents;
+        impl ProfileStore for NewerAgents {
+            fn save(&self, _profiles: &[AgentProfile]) -> Result<(), StoreError> {
+                Err(StoreError::ReadOnly(Refusal::Newer { found: 9 }))
+            }
+            fn load(&self) -> Vec<AgentProfile> {
+                vec![]
+            }
+            fn status(&self) -> StoreStatus {
+                StoreStatus::ReadOnly(Refusal::Newer { found: 9 })
+            }
+        }
+        struct RefusingPresets;
+        impl PresetStore for RefusingPresets {
+            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+                Err(StoreError::ReadOnly(Refusal::Unreadable))
+            }
+            fn load(&self) -> Vec<Preset> {
+                vec![]
+            }
+            fn status(&self) -> StoreStatus {
+                StoreStatus::Refusing(Refusal::Unreadable)
+            }
+        }
+
+        let manager = Arc::new(AgentManager::new(
+            Arc::new(NoStatus),
+            Arc::new(ProfileRegistry::new(Arc::new(NewerAgents))),
+            Arc::new(PresetRegistry::new(Arc::new(RefusingPresets))),
+            Arc::new(SessionTracker::new(
+                TrackerConfig {
+                    enabled: false,
+                    poll_interval: std::time::Duration::from_secs(1),
+                },
+                Arc::new(|_, _| {}),
+            )),
+        ));
+        let table = make_table(
+            manager as Arc<dyn AgentCommandHost>,
+            Arc::new(FakeNotify::default()) as Arc<dyn RosterChanged>,
+            Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+        );
+
+        let out = call(&table, "agent.list", json!({})).expect("조회 성공");
+        assert_eq!(
+            out["store"],
+            json!({
+                "agents": { "state": "ReadOnly", "reason": "Newer", "file_version": 9 },
+                "presets": { "state": "Refusing", "reason": "Unreadable", "file_version": null },
+            })
+        );
     }
 
     #[test]
@@ -2643,6 +2843,9 @@ mod tests {
         impl AgentCommandHost for RefuseOnStart {
             fn roster(&self) -> Vec<AgentRosterRow> {
                 self.0.roster()
+            }
+            fn store_status(&self) -> RosterStoreStatus {
+                self.0.store_status()
             }
             fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
                 self.0.agent_snapshot(id)

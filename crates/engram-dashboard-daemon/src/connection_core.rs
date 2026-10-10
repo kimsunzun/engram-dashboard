@@ -3060,7 +3060,7 @@ mod tests {
             vec![],
             false,
         );
-        let created = core.manager.create_agent(profile).expect("등록");
+        let created = core.manager.try_create_agent(profile).expect("등록");
         let before = fanout.texts().len();
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
@@ -3110,7 +3110,7 @@ mod tests {
         );
         // 이어받을 수 없는 명령에 sid 가 남아 있는 상태 — 손으로 고친 `agents.json` 이 오늘 만든다.
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
-        let created = core.manager.create_agent(profile).expect("등록");
+        let created = core.manager.try_create_agent(profile).expect("등록");
         assert!(
             core.manager
                 .agent_snapshot(created.id)
@@ -3163,7 +3163,7 @@ mod tests {
             false,
         );
         profile.backend_session_id = Some(uuid::Uuid::new_v4());
-        let created = core.manager.create_agent(profile).expect("등록");
+        let created = core.manager.try_create_agent(profile).expect("등록");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -3634,7 +3634,7 @@ mod tests {
             false,
         );
         let cid = child.id;
-        core.manager.create_agent(child).expect("등록 성공");
+        core.manager.try_create_agent(child).expect("등록 성공");
 
         let (tx, _rx2) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
         let mock = MockOutboundSink::new(tx);
@@ -5972,9 +5972,11 @@ mod tests {
             p.display_name = Some("sleepy".into());
             p
         };
-        core.manager.create_agent(boss.clone()).expect("등록 성공");
         core.manager
-            .create_agent(sleepy.clone())
+            .try_create_agent(boss.clone())
+            .expect("등록 성공");
+        core.manager
+            .try_create_agent(sleepy.clone())
             .expect("등록 성공");
 
         // (2) ★개명(RenameProfile)★

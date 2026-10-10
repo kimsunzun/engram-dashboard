@@ -1192,7 +1192,7 @@ mod tests {
 
             // ★실제로 뚫렸던 구멍★: `DeleteProfile` 은 산 세션을 죽이지 않는다. 판정을 프로필에서 뽑으면
             //   여기서 "모름" 이 되어 셸이 명단으로 되돌아온다 — 판정 근거가 세션에 있어야 이 단언이 산다.
-            manager.delete_agent(info.id);
+            manager.try_delete_agent(info.id).expect("저장 성공");
             assert!(
                 !port.live_agents().iter().any(|a| a.id == info.id),
                 "프로필이 사라져도 산 셸은 여전히 배달 명단 밖이어야"
@@ -1219,7 +1219,7 @@ mod tests {
         fn two_dormant_profiles_sharing_a_name_are_both_reported() {
             let manager = manager("dormant-dup");
             let port = ManagerDeliveryPort::new(manager.clone());
-            // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`create_agent`)는 명부 전역 이름 유일성을
+            // ★하네스 seam 으로 심는다(ADR-0120)★: 정상 경로(`try_create_agent`)는 명부 전역 이름 유일성을
             //   강제해 동명 2건을 **만들 수 없다**. 유일성이 데이터 전체에 적용되기 전(기존 agents.json)엔
             //   이 상태가 실재할 수 있다.
             manager.seed_agent_bypassing_uniqueness(profile("raw-twin-a", "twin"));

@@ -524,7 +524,7 @@ fn spawn_shell_agent(handle: &TestServerHandle) -> Uuid {
 }
 
 /// WS `Spawn{profile_id}` dispatch 경로를 타려면 manager 의 레지스트리에 알려진 프로필이 있어야 한다.
-/// ★운영 회귀 0★: 등록은 manager 의 공개 API(`create_agent` — 명부 단일 입구, ADR-0119)만 사용 —
+/// ★운영 회귀 0★: 등록은 manager 의 공개 API(`try_create_agent` — 명부 단일 입구, ADR-0119)만 사용 —
 ///   start_test_server/run() 배선을 건드리지 않는다(프로필 주입 인자 추가 불필요). 운영 `CreateProfile`
 ///   경로도 **같은 동사**를 쓰므로 이름 유일성 강제(ADR-0120)를 함께 탄다.
 fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
@@ -546,7 +546,7 @@ fn register_shell_profile(handle: &TestServerHandle) -> Uuid {
         false, // auto_restore=false(복원 대상 아님)
     );
     let id = profile.id;
-    handle.manager.create_agent(profile).expect("등록 성공");
+    handle.manager.try_create_agent(profile).expect("등록 성공");
     id
 }
 

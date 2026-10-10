@@ -86,20 +86,11 @@ impl PresetRegistry {
         }
     }
 
-    /// 변경 클로저를 실행하고 **lock 을 풀기 전에** 현재 맵을 save 한다 — 커밋과 영속화가 한
-    /// 임계구역이라 persisted == observed 가 보장된다(근거 = struct 락 규율, ADR-0071).
-    fn mutate<R>(&self, f: impl FnOnce(&mut HashMap<PresetId, Preset>) -> R) -> R {
-        let mut guard = self.presets.lock().expect("presets poisoned");
-        let result = f(&mut guard);
-        let snapshot: Vec<Preset> = guard.values().cloned().collect();
-        // 저장이 실패해도 메모리 변경은 남는다 — 다음 저장이 맵 전체를 다시 쓴다. 실패 로그는 저장소가 낸다.
-        if let Err(error) = self.store.save(&snapshot) {
-            tracing::debug!(%error, "프리셋 저장 실패 — 메모리 변경은 남긴다");
-        }
-        result
-    }
-
-    /// 부르는 쪽 있는 변경의 공통 경로 — 사본에 적용하고, 저장이 성공해야 커밋한다.
+    /// 변경의 공통 경로 — 사본에 적용하고, **lock 을 풀기 전에** 그 사본을 save 해 성공해야 커밋한다. 커밋과
+    /// 영속화가 한 임계구역이라 persisted == observed 가 보장된다(근거 = struct 락 규율, ADR-0071).
+    /// ★프리셋 변경은 전부 부르는 쪽이 있다(WS 프리셋 셋)★ — 저장 `Err` 에도 메모리에 적용하는 내부 입구가 없고,
+    ///   그래서 dirty 도 없다.
+    // ADR-0291 R17
     fn try_mutate<R>(
         &self,
         f: impl FnOnce(&mut HashMap<PresetId, Preset>) -> R,
@@ -113,6 +104,12 @@ impl PresetRegistry {
         Ok(result)
     }
 
+    /// 저장소의 지금 상태 — 프리셋 락을 잡지 않는다(저장소 상태 칸은 락 순서의 끝이다).
+    // ADR-0291 R17 (D6)
+    pub fn store_status(&self) -> StoreStatus {
+        self.store.status()
+    }
+
     /// 전체 프리셋 스냅샷(읽기 — persist 없음).
     pub fn list(&self) -> Vec<Preset> {
         self.presets
@@ -123,17 +120,7 @@ impl PresetRegistry {
             .collect()
     }
 
-    /// 새 uuid 발급 + cwd 정규화(`dunce::canonicalize` — 실패하면 입력 그대로 보존). 변경 즉시 persist.
-    pub fn create(&self, cwd: PathBuf) -> Preset {
-        let preset = new_preset(cwd);
-        let created = preset.clone();
-        self.mutate(|m| {
-            m.insert(preset.id, preset);
-        });
-        created
-    }
-
-    /// 부르는 쪽 있는 입구 — [`PresetRegistry::create`] 와 같고 저장이 성공해야 커밋한다.
+    /// 새 uuid 발급 + cwd 정규화(`dunce::canonicalize` — 실패하면 입력 그대로 보존). 저장이 성공해야 커밋한다.
     pub fn try_create(&self, cwd: PathBuf) -> Result<Preset, StoreError> {
         let preset = new_preset(cwd);
         let created = preset.clone();
@@ -143,15 +130,8 @@ impl PresetRegistry {
         Ok(created)
     }
 
-    /// 프리셋 삭제(없는 id 면 no-op). 변경 즉시 persist. ★프리셋 삭제 ≠ 에이전트 종료★(ADR-0061):
-    /// 그 프리셋으로 이미 스폰된 에이전트는 여기서 건드리지 않는다(수명 분리).
-    pub fn remove(&self, id: PresetId) {
-        self.mutate(|m| {
-            m.remove(&id);
-        });
-    }
-
-    /// 부르는 쪽 있는 입구 — [`PresetRegistry::remove`] 와 같고 저장이 성공해야 커밋한다.
+    /// 프리셋 삭제(없는 id 면 맵은 그대로 — 저장은 시도한다). 저장이 성공해야 커밋한다. ★프리셋 삭제 ≠ 에이전트
+    /// 종료★(ADR-0061): 그 프리셋으로 이미 스폰된 에이전트는 여기서 건드리지 않는다(수명 분리).
     pub fn try_remove(&self, id: PresetId) -> Result<(), StoreError> {
         self.try_mutate(|m| {
             m.remove(&id);
@@ -159,14 +139,10 @@ impl PresetRegistry {
     }
 
     /// 프리셋 표시명 override 설정/해제(ADR-0061 리치화). `Some(name)` → override 저장, `None` → 해제
-    /// (cwd basename 파생으로 복귀). 존재하면 변경 후 persist·true, 없는 id 면 no-op·false.
+    /// (cwd basename 파생으로 복귀). 존재하면 `true`, 없는 id 면 맵은 그대로 `false`(저장은 시도한다). 저장이
+    /// 성공해야 커밋한다.
     /// ★정규화는 호출자(프론트) 책임★: trim·빈 문자열 거부·미변경 스킵은 프론트가 확정 직전에 처리한다
     /// (TabBar rename 과 동형) — 여기엔 이미 유효 값 또는 명시적 None 만 온다.
-    pub fn rename(&self, id: PresetId, name: Option<String>) -> bool {
-        self.mutate(|m| rename_present(m, id, name))
-    }
-
-    /// 부르는 쪽 있는 입구 — [`PresetRegistry::rename`] 과 같고 저장이 성공해야 커밋한다.
     pub fn try_rename(&self, id: PresetId, name: Option<String>) -> Result<bool, StoreError> {
         self.try_mutate(|m| rename_present(m, id, name))
     }
@@ -221,7 +197,7 @@ mod tests {
     fn create_mints_uuid_and_persists() {
         let store = Arc::new(MemStore::default());
         let reg = PresetRegistry::new(store.clone());
-        let p = reg.create(PathBuf::from("."));
+        let p = reg.try_create(PathBuf::from(".")).expect("저장 성공");
         assert_eq!(reg.list().len(), 1);
         assert_eq!(store.load().len(), 1);
         assert_eq!(store.load()[0].id, p.id);
@@ -230,8 +206,8 @@ mod tests {
     #[test]
     fn create_two_have_distinct_ids() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
-        let a = reg.create(PathBuf::from("."));
-        let b = reg.create(PathBuf::from("."));
+        let a = reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        let b = reg.try_create(PathBuf::from(".")).expect("저장 성공");
         assert_ne!(a.id, b.id, "각 create 는 새 uuid 를 발급해야 함");
         assert_eq!(reg.list().len(), 2);
     }
@@ -240,8 +216,8 @@ mod tests {
     fn remove_deletes_and_persists() {
         let store = Arc::new(MemStore::default());
         let reg = PresetRegistry::new(store.clone());
-        let p = reg.create(PathBuf::from("."));
-        reg.remove(p.id);
+        let p = reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        reg.try_remove(p.id).expect("저장 성공");
         assert!(reg.list().is_empty());
         assert!(store.load().is_empty(), "삭제도 즉시 persist");
     }
@@ -249,8 +225,8 @@ mod tests {
     #[test]
     fn remove_missing_is_noop() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
-        reg.create(PathBuf::from("."));
-        reg.remove(Uuid::new_v4());
+        reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        reg.try_remove(Uuid::new_v4()).expect("저장 성공");
         assert_eq!(reg.list().len(), 1, "없는 id 삭제는 no-op");
     }
 
@@ -259,7 +235,7 @@ mod tests {
         let store = Arc::new(MemStore::default());
         {
             let reg = PresetRegistry::new(store.clone());
-            reg.create(PathBuf::from("."));
+            reg.try_create(PathBuf::from(".")).expect("저장 성공");
         }
         let reg2 = PresetRegistry::new(store.clone());
         assert_eq!(reg2.list().len(), 1);
@@ -270,7 +246,7 @@ mod tests {
     #[test]
     fn create_starts_with_no_name_override() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
-        let p = reg.create(PathBuf::from("."));
+        let p = reg.try_create(PathBuf::from(".")).expect("저장 성공");
         assert_eq!(reg.list()[0].name, None);
         assert_eq!(p.name, None);
     }
@@ -279,8 +255,10 @@ mod tests {
     fn rename_sets_and_persists_name() {
         let store = Arc::new(MemStore::default());
         let reg = PresetRegistry::new(store.clone());
-        let p = reg.create(PathBuf::from("."));
-        assert!(reg.rename(p.id, Some("내 프리셋".to_string())));
+        let p = reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        assert!(reg
+            .try_rename(p.id, Some("내 프리셋".to_string()))
+            .expect("저장 성공"));
         assert_eq!(reg.list()[0].name, Some("내 프리셋".to_string()));
         assert_eq!(store.load()[0].name, Some("내 프리셋".to_string()));
     }
@@ -288,17 +266,20 @@ mod tests {
     #[test]
     fn rename_none_clears_override() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
-        let p = reg.create(PathBuf::from("."));
-        reg.rename(p.id, Some("x".to_string()));
-        assert!(reg.rename(p.id, None));
+        let p = reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        reg.try_rename(p.id, Some("x".to_string()))
+            .expect("저장 성공");
+        assert!(reg.try_rename(p.id, None).expect("저장 성공"));
         assert_eq!(reg.list()[0].name, None);
     }
 
     #[test]
     fn rename_missing_is_noop_false() {
         let reg = PresetRegistry::new(Arc::new(MemStore::default()));
-        reg.create(PathBuf::from("."));
-        assert!(!reg.rename(Uuid::new_v4(), Some("y".to_string())));
+        reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        assert!(!reg
+            .try_rename(Uuid::new_v4(), Some("y".to_string()))
+            .expect("저장 성공"));
         assert_eq!(reg.list()[0].name, None);
     }
 
@@ -309,8 +290,9 @@ mod tests {
     fn save_writes_current_map_not_stale_snapshot() {
         let store = Arc::new(MemStore::default());
         let reg = PresetRegistry::new(store.clone());
-        let p = reg.create(PathBuf::from("."));
-        reg.rename(p.id, Some("final".to_string()));
+        let p = reg.try_create(PathBuf::from(".")).expect("저장 성공");
+        reg.try_rename(p.id, Some("final".to_string()))
+            .expect("저장 성공");
         let disk = store.load();
         let mem = reg.list();
         assert_eq!(disk.len(), mem.len());
@@ -333,8 +315,9 @@ mod tests {
             let r = reg.clone();
             handles.push(thread::spawn(move || {
                 for i in 0..50 {
-                    let p = r.create(PathBuf::from("."));
-                    r.rename(p.id, Some(format!("t{t}-{i}")));
+                    let p = r.try_create(PathBuf::from(".")).expect("저장 성공");
+                    r.try_rename(p.id, Some(format!("t{t}-{i}")))
+                        .expect("저장 성공");
                 }
             }));
         }

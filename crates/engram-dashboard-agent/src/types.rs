@@ -436,7 +436,7 @@ pub struct ReapMsg {
 /// 종료 분류 결과(ADR-0019 §decide). reap_one 이 lock 밖에서 ProfileRegistry 에 적용한다.
 /// ★삭제 처분이 없는 건 의도다(ADR-0083)★ — reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않는다.
 /// 프로필 삭제는 명시적 사용자 명령(AgentCommand::DeleteProfile / Tauri delete_profile)이
-/// ProfileRegistry::remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
+/// ProfileRegistry::try_remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// 모든 런타임 종료(유저 kill·정상 exit·크래시·EOF·signal) → 프로필 유지 + auto_restore=false
@@ -578,7 +578,7 @@ pub const CLI_GROUP_AGENT: &str = "agent";
 /// 제어 계열의 동사 전량 — `engram agent <동사>`.
 ///
 /// ★`kill`·`rm` 이 없는 것은 미구현이 아니라 **보류된 결정**이다★: 트리에서 지우는 것이 에이전트의 생을
-///   끝내는가(ADR-0122)가 아직 코드와 어긋나 있어(현 `delete_agent` 는 프로필만 지우고 프로세스를 남긴다)
+///   끝내는가(ADR-0122)가 아직 코드와 어긋나 있어(현 `try_delete_agent` 는 프로필만 지우고 프로세스를 남긴다)
 ///   그 둘을 여기 얹으면 새 입구로 그 불일치가 노출된다. 그 결정이 서기 전에는 이 목록에 넣지 말 것.
 // ADR-0132
 // ADR-0122

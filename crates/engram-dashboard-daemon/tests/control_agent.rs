@@ -416,7 +416,7 @@ fn seed_shell_agent(manager: &Arc<AgentManager>, name: &str) -> AgentId {
         false,
     );
     profile.display_name = Some(name.to_string());
-    manager.create_agent(profile).expect("등록 성공").id
+    manager.try_create_agent(profile).expect("등록 성공").id
 }
 
 fn agents_in(list: &serde_json::Value) -> Vec<(String, String)> {
