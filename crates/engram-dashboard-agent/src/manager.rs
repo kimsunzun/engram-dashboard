@@ -408,6 +408,18 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
     ))
 }
 
+/// 띄우기가 프로세스를 내기 전에 `Err` 로 끝났을 때 「마지막 실패」에 적을 종류.
+///
+/// ★저장 `Err` 는 `SpawnFailed` 가 아니라 「그 밖」이다★ — 띄우기 전 명부 변경을 저장소가 받지 않아 프로세스를
+///   열려고 한 적이 없다. `SpawnFailed`(실행파일 부재 · 권한 등)로 적으면 화면 · LLM 이 실행 환경을 의심한다.
+// ADR-0291 R17
+fn spawn_error_kind(e: &PtyError) -> AgentFailureKind {
+    match e {
+        PtyError::Store(_) => AgentFailureKind::Other,
+        _ => AgentFailureKind::SpawnFailed,
+    }
+}
+
 /// 레지스트리의 어느 변경 입구로 바꾸나 — 그 변경을 부른 쪽이 정한다. 아래 동사들은 그 입구의 레지스트리
 /// 동사로 보낼 뿐이고, `Internal` 갈래는 `Err` 를 내지 않는다(저장 실패도 커밋 + dirty).
 ///
@@ -420,8 +432,8 @@ enum Entry {
     /// 부르는 쪽 있는 변경(버스 · WS · 그 둘이 부른 띄우기) — 저장이 `Err` 면 메모리를 그대로 두고 오류.
     Caller,
     /// 부르는 쪽 없는 변경(부팅 복원) — 저장의 어떤 `Err` 에도 메모리에 적용 + dirty. 되돌릴 요청이 없고,
-    /// 순간 잠김 하나가 복원을 막지 않게 한다. 버스 · WS 가 아직 부르는 옛 판(`create_agent` · `rename_agent`)도
-    /// 이 입구를 탄다 — 옛 판의 의미(저장 `Err` 에도 메모리 적용)가 바로 이것이라서다.
+    /// 순간 잠김 하나가 복원을 막지 않게 한다. 옛 판(`create_agent` · `rename_agent` — 운영 표면은 부르지 않고
+    /// 시험만 남았다)도 이 입구를 탄다 — 옛 판의 의미(저장 `Err` 에도 메모리 적용)가 바로 이것이라서다.
     Internal,
 }
 
@@ -975,8 +987,8 @@ impl AgentManager {
         self.profiles.get(id).and_then(|p| p.backend_session_id)
     }
 
-    /// 옛 판 — 저장이 `Err` 여도 메모리에 등록한다(로그 · dirty). 버스 · WS 가
-    /// [`AgentManager::try_create_agent`] 로 옮겨 가면 이 판을 걷는다.
+    /// 옛 판 — 저장이 `Err` 여도 메모리에 등록한다(로그 · dirty). 운영 표면(버스 · WS)은
+    /// [`AgentManager::try_create_agent`] 를 부른다 — 남은 호출은 시험뿐이고, 이 판을 걷을 때 함께 옮긴다.
     // ADR-0291 (E4)
     pub fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
         self.create_agent_via(profile, Entry::Internal)
@@ -1028,8 +1040,8 @@ impl AgentManager {
         Ok(profile)
     }
 
-    /// 에이전트 삭제(트리 "지우기") — 옛 판: 저장이 `Err` 여도 메모리에서 지운다(로그 · dirty). 버스 · WS 가
-    /// [`AgentManager::try_delete_agent`] 로 옮겨 가면 이 판을 걷는다.
+    /// 에이전트 삭제(트리 "지우기") — 옛 판: 저장이 `Err` 여도 메모리에서 지운다(로그 · dirty). 운영 표면(WS)은
+    /// [`AgentManager::try_delete_agent`] 를 부른다 — 남은 호출은 시험뿐이고, 이 판을 걷을 때 함께 옮긴다.
     pub fn delete_agent(&self, id: AgentId) {
         self.profiles.remove(id);
     }
@@ -1041,8 +1053,8 @@ impl AgentManager {
         self.profiles.try_remove(id).map_err(PtyError::Store)
     }
 
-    /// 옛 판 — 저장이 `Err` 여도 메모리의 이름을 바꾼다(로그 · dirty). 버스 · WS 가
-    /// [`AgentManager::try_rename_agent`] 로 옮겨 가면 이 판을 걷는다.
+    /// 옛 판 — 저장이 `Err` 여도 메모리의 이름을 바꾼다(로그 · dirty). 운영 표면(버스 · WS)은
+    /// [`AgentManager::try_rename_agent`] 를 부른다 — 남은 호출은 시험뿐이고, 이 판을 걷을 때 함께 옮긴다.
     // ADR-0291 (E4)
     pub fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome {
         match self.rename_agent_via(id, display_name, Entry::Internal) {
@@ -1161,8 +1173,9 @@ impl AgentManager {
         Ok(outcome)
     }
 
-    /// 트리 계층 이동(부모 지정/해제) — 옛 판: 저장이 `Err` 여도 메모리의 계층을 바꾼다(로그 · dirty). 버스 ·
-    /// WS 가 [`AgentManager::try_reparent_agent`] 로 옮겨 가면 이 판을 걷는다.
+    /// 트리 계층 이동(부모 지정/해제) — 옛 판: 저장이 `Err` 여도 메모리의 계층을 바꾼다(로그 · dirty). 운영
+    /// 표면(버스 · WS)은 [`AgentManager::try_reparent_agent`] 를 부른다 — 남은 호출은 시험뿐이고, 이 판을 걷을 때
+    /// 함께 옮긴다.
     pub fn reparent_agent(&self, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
         self.profiles.reparent(child_id, parent_id)
     }
@@ -1181,7 +1194,8 @@ impl AgentManager {
     }
 
     /// 부팅 자동 복원 대상 토글 — 없는 id 면 false. 옛 판: 저장이 `Err` 여도 메모리에 적용한다(로그 · dirty).
-    /// 버스 · WS 가 [`AgentManager::try_set_agent_auto_restore`] 로 옮겨 가면 이 판을 걷는다.
+    /// 운영 표면(WS)은 [`AgentManager::try_set_agent_auto_restore`] 를 부른다 — 남은 호출은 시험뿐이고, 이 판을
+    /// 걷을 때 함께 옮긴다.
     pub fn set_agent_auto_restore(&self, id: AgentId, auto_restore: bool) -> bool {
         self.profiles
             .update_with(id, |p| p.auto_restore = auto_restore)
@@ -1930,7 +1944,7 @@ impl AgentManager {
             }
             Ok(SpawnOutcome::Moot(_)) => {}
             // 화신이 없으므로 비교할 세대가 없다(`set_last_failure` 계약의 `None` 갈래).
-            Err(_) => self.note_activation_result(id, None, Some(AgentFailureKind::SpawnFailed)),
+            Err(e) => self.note_activation_result(id, None, Some(spawn_error_kind(e))),
         }
     }
 
@@ -2362,19 +2376,22 @@ impl AgentManager {
         let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Resume, entry);
         let (outcome, watch) = match attempt {
             Err(e) => {
-                let reason = format!("resume spawn 실패: {e}");
                 // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
                 //   제어 LLM 이 읽는다" 의 화면·API 쪽 실물이다(로그는 사람만 읽는다).
-                self.note_activation_result(profile.id, None, Some(AgentFailureKind::SpawnFailed));
+                self.note_activation_result(profile.id, None, Some(spawn_error_kind(&e)));
+                // ★저장 `Err` 는 아래 경고를 내지 않는다★ — 프로세스를 열기 전에 멈춰 종점(시체)이 없고, 그 오류를
+                //   호출자 오류로 바꾸는 표면(버스 · WS)이 한 줄 남긴다. 여기서도 내면 한 요청에 두 줄이다.
+                // ADR-0291 R17
+                if let PtyError::Store(store) = e {
+                    return Err(store);
+                }
+                let reason = format!("resume spawn 실패: {e}");
                 tracing::warn!(
                     agent = %profile.id,
                     %reason,
                     "ADR-0082: resume 실패 → 종점(시체), fresh-fallback 없음"
                 );
-                return match e {
-                    PtyError::Store(store) => Err(store),
-                    _ => Ok((RestoreOutcome::Failed { reason }, None)),
-                };
+                return Ok((RestoreOutcome::Failed { reason }, None));
             }
             Ok(pair) => pair,
         };
@@ -7029,8 +7046,8 @@ mod tests {
         assert!(manager.agent_snapshot(lead.id).is_none());
     }
 
-    /// ★옛 판은 U5a 그대로다(E4)★ — 저장이 `Err` 여도 메모리에 적용하고 dirty 를 세운다. 버스 · WS 가 아직 옛
-    ///   판을 부르는 동안 답과 메모리가 어긋나지 않는 근거다. 옛 판을 걷을 때 이 항목도 함께 걷는다.
+    /// ★옛 판은 U5a 그대로다(E4)★ — 저장이 `Err` 여도 메모리에 적용하고 dirty 를 세운다. 옛 판을 부르는 쪽(시험)의
+    ///   답과 메모리가 어긋나지 않는 근거다. 옛 판을 걷을 때 이 항목도 함께 걷는다.
     #[test]
     fn the_old_verbs_still_apply_in_memory_when_the_store_does_not_save() {
         for failure in FAILURES {
@@ -7285,12 +7302,44 @@ mod tests {
                     manager
                         .agent_snapshot(profile.id)
                         .and_then(|p| p.last_failure),
-                    Some(AgentFailureKind::SpawnFailed),
-                    "{failure:?} · 손잡이 {stored:?}: 원형으로 돌려주기 전에 실패를 기록한다(E2)"
+                    Some(AgentFailureKind::Other),
+                    "{failure:?} · 손잡이 {stored:?}: 원형으로 돌려주기 전에 실패를 기록한다(E2) — 띄우기 \
+                     실패가 아니라 「그 밖」으로"
                 );
                 assert!(!manager.profiles.is_dirty(), "{failure:?}");
                 let _ = std::fs::remove_dir(&profile.cwd);
             }
+        }
+    }
+
+    /// ★새 대화 활성화의 저장 `Err` 도 「그 밖」으로 적는다★ — 프로세스를 열려고 한 적이 없으니 `SpawnFailed`
+    ///   (실행파일 · 권한)가 아니다. 띄우기는 등록(①)에서 멈추므로 프로세스를 띄우지 않는다.
+    // ADR-0291 R17
+    #[test]
+    fn a_fresh_activation_the_store_refuses_records_other_not_spawn_failed() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let profile = claude_profile_that_cannot_launch();
+            manager.profiles.upsert(profile.clone());
+            store.set(failure);
+
+            let err = manager
+                .activate_profile(&profile, SpawnMode::Fresh)
+                .expect_err("부르는 쪽 입구는 저장 실패로 멈춘다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert_eq!(
+                manager
+                    .agent_snapshot(profile.id)
+                    .and_then(|p| p.last_failure),
+                Some(AgentFailureKind::Other),
+                "{failure:?}"
+            );
+            assert!(
+                manager.list_agents().is_empty(),
+                "{failure:?}: 띄우지 않았다"
+            );
+            let _ = std::fs::remove_dir(&profile.cwd);
         }
     }
 

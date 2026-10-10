@@ -1309,18 +1309,21 @@ type LocalJoin = Result<
 ///
 /// - **`Read` 는 놓는다** — 다시 돌아도 상태가 안 바뀌고, 붙들면 흔한 조회가 그 번호를 막는다.
 /// - **놓는 실패 셋 = `INVALID_ARGUMENT`·`NOT_FOUND`·`CONFLICT`.** 오늘 다섯 동사에서 이 셋은 전부 명부를
-///   건드리기 **전**의 반려다(빈 값 · 지목 실패 · 구조 거부 — agent 쪽 `a_rejection_from_the_mutating_verbs_
-///   leaves_the_roster_untouched` 가 그 사실을 못박는다). 이 셋을 놓아야 오타를 고쳐 같은 번호로 다시 보낸
-///   호출자가 「돌지도 않은 명령」을 `ALREADY_APPLIED` 로 돌려받지 않는다.
+///   건드리기 **전**의 반려다(빈 값 · 지목 실패 · 구조 거부 · 저장소의 판정 거절 — agent 쪽
+///   `a_rejection_from_the_mutating_verbs_leaves_the_roster_untouched` 가 그 사실을 못박는다). 이 셋을 놓아야
+///   오타를 고쳐 같은 번호로 다시 보낸 호출자가 「돌지도 않은 명령」을 `ALREADY_APPLIED` 로 돌려받지 않는다.
+///   ★예외 하나 — 깨우기(`agent.spawn` 의 `target`)의 판정 거절★: 그 항목을 같은 값으로 다시 적는 등록이 저장된
+///   뒤에 거절될 수 있다(ADR-0291 §3-9 부분 성공) — 재시도가 같은 결과라 놓아도 된다. 만들고 띄우기의 띄우기
+///   거절은 만든 에이전트가 남으므로 `CONFLICT` 가 아니라 `INTERNAL` 로 나온다(agent `create_and_start`).
 /// - **나머지는 전부 붙든다** — `INTERNAL`·`OUTCOME_UNKNOWN` 이 여기 든다. 특히 후자는 「일부가 이미
 ///   적용됐을 수 있다」를 **문구로 명시하는** 코드다(`control::commands::drive_to_completion`).
 /// - **빈손은 놓는다** — 표가 아무것도 안 돌렸다는 것이 확실하다([`fold_local`] 이 그것을 `INTERNAL` 답장으로
 ///   접지만, 판정은 답장이 아니라 표의 결말을 본다).
 /// - **죽음은 붙든다** — 어디까지 갔는지 모른다.
 ///
-/// ★알려진 과보유 하나 — `agent.new` 의 `INTERNAL`★: 그 동사의 유일한 변경 호출(`register`)이 저장 실패를
-/// 통째로 `internal(...)` 로 접으므로(agent `register` 의 catch-all), 그것은 사실 **손대기 전** 실패다.
-/// 그런데 이 판정은 코드만 보고 붙들므로, 저장이 실패한 호출자가 창 안에 다시 보내면 **에이전트가 없는
+/// ★알려진 과보유 하나 — 저장 쓰기 실패의 `INTERNAL`★: 명부를 바꾸는 동사는 저장이 성공해야 커밋하므로 저장소가
+/// 쓰지 못한 실패는 사실 **손대기 전** 실패인데, 코드가 `INTERNAL` 이다(agent `store_error_code` — 판정 거절만
+/// `CONFLICT`). 그런데 이 판정은 코드만 보고 붙들므로, 저장이 실패한 호출자가 창 안에 다시 보내면 **바뀌지 않은
 /// 상태**를 두고 `ALREADY_APPLIED` 를 받는다. 위 비대칭에 따라 감수한다 — 새 번호로 다시 보내면 통한다.
 /// ★진짜 해법은 이 함수가 아니다★: 포트에 「무엇을 적용했나」를 말하는 칸이 없어(결말은 `Ok`/`Err` 뿐)
 /// 동사별 진실을 볼 수단이 없다. [`LocalCommands::run`] 이 그 신호를 싣게 되면 이 근사는 사라진다.

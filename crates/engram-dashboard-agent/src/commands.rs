@@ -22,11 +22,12 @@ use engram_dashboard_command::{
 };
 
 use crate::manager::{AgentManager, RenameOutcome};
+use crate::persistence::AGENTS_FILE;
 use crate::preset::PresetId;
 use crate::queued_input::{ListedState, QueuedListing};
 // 코어 enum과 아래 동명 선언 어휘를 구분하는 별칭.
 use crate::profile::AgentOutputFormat as CoreAgentOutputFormat;
-use crate::profile::{AgentCommand, AgentProfile, SpawnMode};
+use crate::profile::{AgentCommand, AgentProfile, SpawnMode, StoreError};
 use crate::types::{
     AgentId, AgentStatus, CancelError, CancelOutcome, PtyError, AGENT_STATE_LIVE,
     AGENT_STATE_SLEEPING, RENAME_OUTCOME_RENAMED, RENAME_OUTCOME_UNCHANGED,
@@ -405,16 +406,22 @@ pub struct StartedAgent {
 pub trait AgentCommandHost: Send + Sync {
     fn roster(&self) -> Vec<AgentRosterRow>;
     fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile>;
+    /// ★명부를 바꾸는 셋(`create_agent` · `rename_agent` · `reparent_agent`)은 부르는 쪽 있는 변경이다★ — 저장소가
+    ///   그 변경을 받지 않으면 명부를 그대로 두고 [`PtyError::Store`] 다(매니저의 `try_` 판 · ADR-0291 R17).
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError>;
     fn activate_profile(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<StartedAgent, PtyError>;
-    fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome;
-    /// ★`false` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::reparent`).
+    fn rename_agent(
+        &self,
+        id: AgentId,
+        display_name: Option<String>,
+    ) -> Result<RenameOutcome, PtyError>;
+    /// ★`Ok(false)` 는 사유를 말해 주지 않는다★ — 매니저가 bool 하나만 준다(`ProfileRegistry::try_reparent`).
     /// 부재와 구조 충돌은 핸들러가 **명부 재조회로** 가른다(`verb_move`).
-    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> bool;
+    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError>;
     /// 등록된 경로 북마크(프리셋, ADR-0061) 하나의 작업 폴더.
     ///
     /// ★지목은 **id 정확 일치**뿐이다★ — 이름으로는 못 찾는다(프리셋 이름은 유일하지 않다). 없는 id 와
@@ -530,8 +537,9 @@ impl AgentCommandHost for AgentManager {
         AgentManager::agent_snapshot(self, id)
     }
 
+    // ADR-0291 R17
     fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
-        AgentManager::create_agent(self, profile)
+        AgentManager::try_create_agent(self, profile)
     }
 
     fn activate_profile(
@@ -546,12 +554,16 @@ impl AgentCommandHost for AgentManager {
         })
     }
 
-    fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome {
-        AgentManager::rename_agent(self, id, display_name)
+    fn rename_agent(
+        &self,
+        id: AgentId,
+        display_name: Option<String>,
+    ) -> Result<RenameOutcome, PtyError> {
+        AgentManager::try_rename_agent(self, id, display_name)
     }
 
-    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> bool {
-        AgentManager::reparent_agent(self, child, parent)
+    fn reparent_agent(&self, child: AgentId, parent: Option<AgentId>) -> Result<bool, PtyError> {
+        AgentManager::try_reparent_agent(self, child, parent)
     }
 
     fn preset_cwd(&self, id: &str) -> Option<String> {
@@ -973,9 +985,21 @@ fn wake_existing(
         SpawnMode::Fresh
     };
     let started = host.activate_profile(&profile, mode);
+    // ★실패 때도 알린다 — 저장 거절이어도★: 활성화 실패는 그 항목의 「마지막 실패」를 적는다(ADR-0172 ·
+    //   ADR-0291 E2 — 「변경 뒤 부수효과는 `Ok` 일 때만」에서 이 통지는 뺐다).
     notify.roster_changed();
-    let started = started
-        .map_err(|e| CommandError::internal(format!("could not start agent '{token}': {e}")))?;
+    let started = started.map_err(|e| match e {
+        PtyError::Store(error) => store_error(
+            "start",
+            store_error_code(&error),
+            format!(
+                "could not start agent '{token}': {}",
+                store_error_reason(AGENTS_FILE, &error)
+            ),
+            &error,
+        ),
+        other => CommandError::internal(format!("could not start agent '{token}': {other}")),
+    })?;
     Ok(started_payload(started, false))
 }
 
@@ -1013,11 +1037,27 @@ fn create_and_start(
             // ★회복 경로를 문구가 나른다★: 만들어진 에이전트는 명부에 남아 있으므로 호출자가 할 일은
             //   「다시 만들기」가 아니라 **그 이름으로 다시 띄우기**다. 안 적으면 같은 cwd 로 또 만들어
             //   이름이 하나씩 늘어난다.
-            CommandError::internal(format!(
-                "agent '{}' ({}) was created but did not start: {e} — it is registered and asleep, so start it again by that name instead of creating another",
-                stored.canonical_name_when_live(),
-                stored.id
-            ))
+            let created_but = |reason: String| {
+                format!(
+                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name instead of creating another",
+                    stored.canonical_name_when_live(),
+                    stored.id
+                )
+            };
+            match e {
+                // ★저장 거절이어도 `CONFLICT` 로 싣지 않는다 — 이 갈래는 이미 에이전트를 만들었다★: 데몬은
+                //   `CONFLICT` 를 「아무것도 적용 안 된 반려」로 읽어 그 요청 번호를 놓는다(daemon
+                //   `command_delivery::retains_the_id`). 놓으면 같은 번호의 재시도가 또 만들어 지울 수 없는
+                //   중복이 남는다(ADR-0122) — `INTERNAL` 이라야 번호를 붙든다.
+                // ADR-0291 R17
+                PtyError::Store(error) => store_error(
+                    "start",
+                    ErrorCode::Internal,
+                    created_but(store_error_reason(AGENTS_FILE, &error)),
+                    &error,
+                ),
+                other => CommandError::internal(created_but(other.to_string())),
+            }
         })?;
     Ok(started_payload(started, true))
 }
@@ -1148,6 +1188,15 @@ fn register(
             ErrorCode::Conflict,
             format!("could not register a new agent: {reason}"),
         ),
+        PtyError::Store(error) => store_error(
+            "register",
+            store_error_code(&error),
+            format!(
+                "could not register a new agent: {} — nothing was registered",
+                store_error_reason(AGENTS_FILE, &error)
+            ),
+            &error,
+        ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
     })
 }
@@ -1163,9 +1212,24 @@ fn verb_rename(
         ("name", Some(name), Blank::NeedsValue),
     ])?;
     let id = resolve(host, token)?.id;
+    // ★저장소가 받지 않은 개명은 통지 없이 오류다★ — 이름은 그대로라 알릴 변화가 없다(ADR-0291 D3).
+    let outcome = host
+        .rename_agent(id, Some(name.to_string()))
+        .map_err(|e| match e {
+            PtyError::Store(error) => store_error(
+                "rename",
+                store_error_code(&error),
+                format!(
+                    "could not rename '{token}': {} — the name was left as it is",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+                &error,
+            ),
+            other => CommandError::internal(format!("could not rename '{token}': {other}")),
+        })?;
     // ★네 결말을 뭉개지 않는다★: 확정된 이름 · 이미 그 계열을 쥐어 무변경 · 부재 · 이름 공간 소진.
     //   앞 둘은 성공이지만 다른 사실이라 outcome 으로 갈라 싣는다.
-    match host.rename_agent(id, Some(name.to_string())) {
+    match outcome {
         RenameOutcome::Renamed(committed) => {
             notify.roster_changed();
             Ok(AgentRenameOk {
@@ -1223,7 +1287,20 @@ fn verb_move(
         None => None,
         Some(p) => Some(resolve(host, p)?.id),
     };
-    if !host.reparent_agent(child.id, parent) {
+    // ★저장소가 받지 않은 이동은 통지 없이 오류다★ — 계층은 그대로라 알릴 변화가 없다(ADR-0291 D3).
+    let moved = host.reparent_agent(child.id, parent).map_err(|e| match e {
+        PtyError::Store(error) => store_error(
+            "move",
+            store_error_code(&error),
+            format!(
+                "could not move '{token}': {} — it was left where it was",
+                store_error_reason(AGENTS_FILE, &error)
+            ),
+            &error,
+        ),
+        other => CommandError::internal(format!("could not move '{token}': {other}")),
+    })?;
+    if !moved {
         // ★`false` 하나로는 사유를 모른다★: 방금 해석한 대상이 그 사이 사라졌을 수도 있고(NOT_FOUND),
         //   트리 구조가 거부했을 수도 있다(CONFLICT). 둘은 호출자가 할 일이 다르므로 명부를 다시 보고
         //   가른다 — 사유 목록은 `ProfileRegistry::reparent` 의 거부 조건과 한 줄씩 대응한다.
@@ -1364,6 +1441,45 @@ fn verb_interrupt(
             "could not interrupt '{name}': {other}"
         ))),
     }
+}
+
+/// 저장소(프로필 · 프리셋)가 받지 않은 부르는 쪽 변경의 오류 코드 — 판정 거절(새 판이 쓴 파일 · 못 읽는 파일) =
+/// `CONFLICT`(지금 상태로는 적용할 수 없다 — 그 파일이 바뀌기 전에는 다시 해도 같다) · 쓰기 실패 = `INTERNAL`. 셸
+/// 설정(`settings.set`)과 같은 나눔이고, 버스와 WS(daemon `connection_core`)가 이 하나를 쓴다.
+/// ★둘 다 명부는 그대로다★ — 부르는 쪽 있는 변경은 저장이 성공해야 커밋한다(레지스트리 · 매니저의 `try_` 판). 그래서
+///   `CONFLICT` 는 데몬이 「아무것도 적용 안 된 반려」로 읽는 그 뜻 그대로다(daemon
+///   `command_delivery::retains_the_id`).
+// ADR-0291 R17
+pub fn store_error_code(error: &StoreError) -> ErrorCode {
+    match error {
+        StoreError::ReadOnly(_) => ErrorCode::Conflict,
+        StoreError::Io(_) => ErrorCode::Internal,
+    }
+}
+
+/// 호출자 문구에 싣는 사유 — 어느 파일(`file`)이 왜 받지 않았나(저장소의 말 그대로).
+// ADR-0291 R17
+pub fn store_error_reason(file: &str, error: &StoreError) -> String {
+    format!("{file} ({error})")
+}
+
+/// 저장소가 받지 않은 변경을 호출자 오류로 바꾼다 — ★거절을 남기는 한 줄이 여기 하나다★(이 표면에서 그 요청이
+/// 오류가 되는 자리). 저장소의 로그는 파일 쪽 사실(무엇이 막았나)이고 이 줄은 요청 쪽 사실(어느 요청이 막혔나)이다.
+/// `action` = 무엇을 하려다 막혔나. 호출자가 친 값(이름 · 경로)은 로그에 싣지 않는다.
+// ADR-0291 R17
+fn store_error(
+    action: &'static str,
+    code: ErrorCode,
+    message: String,
+    error: &StoreError,
+) -> CommandError {
+    tracing::warn!(
+        action,
+        file = AGENTS_FILE,
+        %error,
+        "저장소가 받지 않아 이 요청을 오류로 돌려준다(명령 버스)"
+    );
+    CommandError::of(code, message)
 }
 
 /// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
@@ -1531,6 +1647,9 @@ mod tests {
         reparent_ok: Mutex<bool>,
         start_fails: Mutex<bool>,
         create_fails: Mutex<Option<PtyError>>,
+        /// 켜져 있으면 명부를 바꾸는 셋과 활성화가 저장 거절(새 판이 쓴 파일)로 돌아온다 — 명부는 그대로다.
+        // ADR-0291 R17
+        store_refuses: Mutex<bool>,
         /// reparent 호출 **안에서** 명부에서 지울 대상 — 「그 사이 사라졌다」를 재현한다(자식이든 부모든).
         /// ★적용 성패와 무관하게 지운다★: 실패 뒤 사라짐은 사유 분기를, 성공 뒤 사라짐은 응답 이름의
         /// fallback 을 태운다 — 한쪽에만 걸면 다른 쪽 코드에 어떤 테스트도 못 닿는다.
@@ -1605,6 +1724,16 @@ mod tests {
                 reparent_ok: Mutex::new(true),
                 ..Self::default()
             })
+        }
+
+        /// 저장 거절이 켜져 있으면 매니저의 `try_` 판처럼 명부를 건드리기 전에 돌아온다.
+        fn refuse_if_set(&self) -> Result<(), PtyError> {
+            if *self.store_refuses.lock().unwrap() {
+                return Err(PtyError::Store(StoreError::ReadOnly(
+                    crate::profile::Refusal::Newer { found: 2 },
+                )));
+            }
+            Ok(())
         }
 
         fn with_agent(self: &Arc<Self>, name: &str, live: bool, resumable: bool) -> AgentId {
@@ -1695,6 +1824,7 @@ mod tests {
             if let Some(failure) = self.create_fails.lock().unwrap().take() {
                 return Err(failure);
             }
+            self.refuse_if_set()?;
             let id = profile.id;
             let name = profile.canonical_name_when_live();
             self.profiles.lock().unwrap().insert(id, profile.clone());
@@ -1716,6 +1846,7 @@ mod tests {
             if *self.start_fails.lock().unwrap() {
                 return Err(PtyError::SpawnFailed("fake".to_string()));
             }
+            self.refuse_if_set()?;
             let resumed = matches!(mode, SpawnMode::Resume);
             self.started.lock().unwrap().push((profile.id, resumed));
             let status = self
@@ -1731,15 +1862,26 @@ mod tests {
             })
         }
 
-        fn rename_agent(&self, _id: AgentId, display_name: Option<String>) -> RenameOutcome {
-            self.rename_result
+        fn rename_agent(
+            &self,
+            _id: AgentId,
+            display_name: Option<String>,
+        ) -> Result<RenameOutcome, PtyError> {
+            self.refuse_if_set()?;
+            Ok(self
+                .rename_result
                 .lock()
                 .unwrap()
                 .take()
-                .unwrap_or_else(|| RenameOutcome::Renamed(display_name.unwrap_or_default()))
+                .unwrap_or_else(|| RenameOutcome::Renamed(display_name.unwrap_or_default())))
         }
 
-        fn reparent_agent(&self, child: AgentId, _parent: Option<AgentId>) -> bool {
+        fn reparent_agent(
+            &self,
+            child: AgentId,
+            _parent: Option<AgentId>,
+        ) -> Result<bool, PtyError> {
+            self.refuse_if_set()?;
             let ok = *self.reparent_ok.lock().unwrap();
             // ★적용 성패와 무관하게 사라진다★: 성공 **뒤** 사라지는 창이 응답 이름의 fallback 을 태우는
             //   유일한 경로다. 실패 쪽에만 걸면 그 fallback 은 어떤 테스트로도 못 닿는다.
@@ -1754,7 +1896,7 @@ mod tests {
                     }
                 }
             }
-            ok
+            Ok(ok)
         }
 
         fn preset_cwd(&self, id: &str) -> Option<String> {
@@ -2123,9 +2265,25 @@ mod tests {
                 PtyError::SpawnFailed("disk on fire".to_string()),
                 ErrorCode::Internal,
             ),
+            // ADR-0291 R17 — 판정 거절은 `CONFLICT`(그 파일이 바뀌기 전에는 다시 해도 같다) · 쓰기 실패는 `INTERNAL`.
+            (
+                PtyError::Store(StoreError::ReadOnly(crate::profile::Refusal::Newer {
+                    found: 2,
+                })),
+                ErrorCode::Conflict,
+            ),
+            (
+                PtyError::Store(StoreError::ReadOnly(crate::profile::Refusal::Unreadable)),
+                ErrorCode::Conflict,
+            ),
+            (
+                PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
+                ErrorCode::Internal,
+            ),
         ];
 
         for (failure, expected) in cases {
+            let from_store = matches!(failure, PtyError::Store(_));
             let host = FakeHost::new();
             *host.create_fails.lock().unwrap() = Some(failure);
             let (table, notify) = wiring(&host);
@@ -2142,6 +2300,15 @@ mod tests {
                 0,
                 "실패했으면 명부는 안 바뀌었다"
             );
+            if from_store {
+                // 어느 파일이 왜 받지 않았나를 문구가 댄다 — 호출자가 고칠 자리를 찾게.
+                assert!(
+                    err.message().contains("agents.json")
+                        && err.message().contains("nothing was registered"),
+                    "{}",
+                    err.message()
+                );
+            }
         }
     }
 
@@ -2354,7 +2521,332 @@ mod tests {
             );
             assert_eq!(snapshot(), before, "{name}: 반려가 명부를 바꿨다 — {args}");
         }
+        // ★저장소가 받지 않은 변경도 같다★ — 매니저의 `try_` 판은 저장이 성공해야 커밋하므로 `CONFLICT` 가 「손대기
+        //   전」이라는 데몬의 전제가 그대로 선다.
+        // ADR-0291 R17
+        *host.store_refuses.lock().unwrap() = true;
+        for (name, args) in [
+            (
+                "agent.new",
+                json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
+            ),
+            ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+            ("agent.move", json!({ "target": "alpha", "parent": "lead" })),
+        ] {
+            let err = call(&table, name, args.clone()).expect_err("저장 거절이어야: {name} {args}");
+            assert_eq!(err.code(), ErrorCode::Conflict, "{name}: {args}");
+            assert_eq!(
+                snapshot(),
+                before,
+                "{name}: 저장 거절이 명부를 바꿨다 — {args}"
+            );
+        }
         assert_eq!(*notify.calls.lock().unwrap(), 0, "반려는 통지하지 않는다");
+    }
+
+    /// ★저장소가 받지 않은 개명 · 이동은 `CONFLICT` 이고 통지가 없다★ — 이름 · 계층이 그대로라 알릴 변화가 없다.
+    ///   개명이 `Renamed` 로 답하면 호출자는 바뀐 이름으로 다음 명령을 친다.
+    // ADR-0291 R17 (D3)
+    #[test]
+    fn a_rename_or_move_the_store_refuses_is_a_conflict_that_announces_nothing() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        host.with_agent("lead", false, false);
+        *host.store_refuses.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.rename",
+            json!({ "target": "alpha", "name": "beta" }),
+        )
+        .expect_err("개명은 저장 거절로 돌아온다 — Renamed 가 아니다");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("agents.json")
+                && err.message().contains("the name was left as it is"),
+            "{}",
+            err.message()
+        );
+
+        let err = call(
+            &table,
+            "agent.move",
+            json!({ "target": "alpha", "parent": "lead" }),
+        )
+        .expect_err("이동은 저장 거절로 돌아온다");
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(err.message().contains("agents.json"), "{}", err.message());
+
+        assert_eq!(*notify.calls.lock().unwrap(), 0, "바뀐 것이 없다");
+    }
+
+    /// ★깨우기는 저장 거절이어도 명부를 알린다(E2)★ — 활성화 실패가 그 항목의 「마지막 실패」를 적고, 그 축은
+    ///   명부 통지로만 화면에 닿는다(ADR-0172). 코드는 `CONFLICT` 다.
+    // ADR-0291 R17 (E2)
+    #[test]
+    fn a_wake_the_store_refuses_is_a_conflict_that_still_announces_the_roster() {
+        let host = FakeHost::new();
+        host.with_agent("alpha", false, false);
+        *host.store_refuses.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        let err = call(&table, "agent.spawn", json!({ "target": "alpha" }))
+            .expect_err("깨우기는 저장 거절로 돌아온다");
+
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("could not start agent 'alpha'")
+                && err.message().contains("agents.json"),
+            "{}",
+            err.message()
+        );
+        assert!(host.started.lock().unwrap().is_empty(), "뜬 것이 없다");
+        assert_eq!(*notify.calls.lock().unwrap(), 1);
+    }
+
+    /// ★만들고 띄우기의 만들기가 거절되면 띄우기에 닿지 않는다(§3-9 ⓐ)★ — 명부 그대로 · 띄우기 시도 0 · 통지 0.
+    ///   다시 해도 중복이 생기지 않는다(만들기도 거절된다).
+    // ADR-0291 R17
+    #[test]
+    fn a_create_and_start_whose_create_the_store_refuses_starts_nothing_and_announces_nothing() {
+        let host = FakeHost::new();
+        *host.store_refuses.lock().unwrap() = true;
+        let (table, notify) = wiring(&host);
+
+        let err = call(
+            &table,
+            "agent.spawn",
+            json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+        )
+        .expect_err("만들기가 저장 거절로 돌아온다");
+
+        assert_eq!(err.code(), ErrorCode::Conflict);
+        assert!(
+            err.message().contains("nothing was registered"),
+            "{}",
+            err.message()
+        );
+        assert!(host.rows.lock().unwrap().is_empty(), "명부 그대로");
+        assert!(host.started.lock().unwrap().is_empty(), "띄우기 시도 0");
+        assert_eq!(*notify.calls.lock().unwrap(), 0);
+    }
+
+    /// ★만든 뒤 띄우기를 저장소가 거절해도 `INTERNAL` 이다(§3-9 ⓑ)★ — 이미 만든 에이전트가 남으므로 데몬이
+    ///   「손대기 전 반려」(`CONFLICT`)로 읽어 요청 번호를 놓으면 같은 번호의 재시도가 또 만든다. 문구는 회복 길
+    ///   (그 이름으로 다시 띄우기)을 그대로 나르고 저장소의 사유를 함께 싣는다.
+    // ADR-0291 R17
+    #[test]
+    fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
+        // 만들기는 저장되고 띄우기의 등록에서 거절된다 — 그 사이에 파일이 새 판이 된 모양.
+        struct RefuseOnStart(Arc<FakeHost>);
+        impl AgentCommandHost for RefuseOnStart {
+            fn roster(&self) -> Vec<AgentRosterRow> {
+                self.0.roster()
+            }
+            fn agent_snapshot(&self, id: AgentId) -> Option<AgentProfile> {
+                self.0.agent_snapshot(id)
+            }
+            fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+                let stored = self.0.create_agent(profile)?;
+                *self.0.store_refuses.lock().unwrap() = true;
+                Ok(stored)
+            }
+            fn activate_profile(
+                &self,
+                profile: &AgentProfile,
+                mode: SpawnMode,
+            ) -> Result<StartedAgent, PtyError> {
+                self.0.activate_profile(profile, mode)
+            }
+            fn rename_agent(
+                &self,
+                id: AgentId,
+                display_name: Option<String>,
+            ) -> Result<RenameOutcome, PtyError> {
+                self.0.rename_agent(id, display_name)
+            }
+            fn reparent_agent(
+                &self,
+                child: AgentId,
+                parent: Option<AgentId>,
+            ) -> Result<bool, PtyError> {
+                self.0.reparent_agent(child, parent)
+            }
+            fn preset_cwd(&self, id: &str) -> Option<String> {
+                self.0.preset_cwd(id)
+            }
+            fn list_queued_inputs(&self, id: AgentId) -> Option<QueuedListing> {
+                self.0.list_queued_inputs(id)
+            }
+            fn cancel_queued_input(
+                &self,
+                id: AgentId,
+                input_id: &str,
+            ) -> Result<CancelOutcome, CancelError> {
+                self.0.cancel_queued_input(id, input_id)
+            }
+            fn interrupt_agent(&self, id: AgentId) -> Result<(), PtyError> {
+                self.0.interrupt_agent(id)
+            }
+        }
+        let host = FakeHost::new();
+        let notify = Arc::new(FakeNotify::default());
+        let table = make_table(
+            Arc::new(RefuseOnStart(Arc::clone(&host))) as Arc<dyn AgentCommandHost>,
+            Arc::clone(&notify) as Arc<dyn RosterChanged>,
+            Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+        );
+
+        let err = call(
+            &table,
+            "agent.spawn",
+            json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+        )
+        .expect_err("띄우기가 저장 거절로 돌아온다");
+
+        assert_eq!(err.code(), ErrorCode::Internal);
+        assert!(
+            err.message().contains("was created but did not start")
+                && err.message().contains("agents.json")
+                && err.message().contains("start it again by that name"),
+            "{}",
+            err.message()
+        );
+        assert_eq!(host.rows.lock().unwrap().len(), 1, "만든 에이전트는 남는다");
+        assert!(host.started.lock().unwrap().is_empty());
+        assert_eq!(
+            *notify.calls.lock().unwrap(),
+            2,
+            "만든 뒤 · 활성화 뒤(E2) — 지금 계약 그대로"
+        );
+    }
+
+    /// ★실 매니저 · 받지 않는 저장소로 버스를 지난다★ — 가짜 매니저는 `try_` 판을 흉내 낼 뿐이라, 표가 정말 매니저의
+    ///   부르는 쪽 입구를 부르는지(옛 판이면 메모리에 서고 `Ok` 다)는 실물로만 잰다. 판정 거절 = `CONFLICT` · 쓰기
+    ///   실패 = `INTERNAL` 이고, 어느 쪽이든 명부 그대로 · 뜬 것 없음 · 통지는 깨우기의 활성화 뒤 하나뿐이다(E2).
+    /// ★프로세스를 띄우지 않는다★ — 띄우기는 등록(①)에서 멈춘다. 회귀해 지나쳐도 없는 프로그램을 부르는 셸이라
+    ///   실패로 끝난다.
+    // ADR-0291 R17 (D3 · E2)
+    #[test]
+    fn a_real_manager_behind_the_bus_changes_nothing_while_its_store_does_not_save() {
+        use crate::preset::{Preset, PresetRegistry, PresetStore};
+        use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
+        use crate::profile::ProfileRegistry;
+        use crate::session_tracker::{SessionTracker, TrackerConfig};
+        use crate::types::{AgentInfo, StatusSink};
+
+        struct NoStatus;
+        impl StatusSink for NoStatus {
+            fn status_changed(&self, _id: AgentId, _s: AgentStatus, _e: u32) {}
+            fn agent_list_updated(&self, _a: Vec<AgentInfo>) {}
+        }
+        struct NoPresets;
+        impl PresetStore for NoPresets {
+            fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+                Ok(())
+            }
+            fn load(&self) -> Vec<Preset> {
+                vec![]
+            }
+        }
+
+        for failure in FAILURES {
+            let expected = match failure {
+                Outcome::FailsIo => ErrorCode::Internal,
+                _ => ErrorCode::Conflict,
+            };
+            let store = ScriptedStore::new();
+            let manager = Arc::new(AgentManager::new(
+                Arc::new(NoStatus),
+                Arc::new(ProfileRegistry::new(store.clone())),
+                Arc::new(PresetRegistry::new(Arc::new(NoPresets))),
+                Arc::new(SessionTracker::new(
+                    TrackerConfig {
+                        enabled: false,
+                        poll_interval: std::time::Duration::from_secs(1),
+                    },
+                    Arc::new(|_, _| {}),
+                )),
+            ));
+            let program = format!("engram-not-a-real-program-{}.exe", uuid::Uuid::new_v4());
+            let shell = |name: &str| {
+                let cwd = format!("C:/bus-store/{name}");
+                let mut profile = AgentProfile::new(
+                    cwd.clone(),
+                    AgentCommand::Shell {
+                        program: program.clone(),
+                        args: vec![],
+                    },
+                    PathBuf::from(cwd),
+                    vec![],
+                    false,
+                );
+                profile.display_name = Some(name.to_string());
+                profile
+            };
+            let alpha = manager
+                .try_create_agent(shell("alpha"))
+                .expect("저장되면 등록");
+            manager
+                .try_create_agent(shell("lead"))
+                .expect("저장되면 등록");
+            let roster = |m: &AgentManager| -> Vec<(AgentId, Option<String>, Option<AgentId>)> {
+                let mut rows: Vec<_> = m
+                    .agent_snapshots()
+                    .into_iter()
+                    .map(|p| (p.id, p.display_name, p.parent_id))
+                    .collect();
+                rows.sort();
+                rows
+            };
+            let before = roster(&manager);
+            store.set(failure);
+            let notify = Arc::new(FakeNotify::default());
+            let table = make_table(
+                manager.clone() as Arc<dyn AgentCommandHost>,
+                Arc::clone(&notify) as Arc<dyn RosterChanged>,
+                Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            );
+
+            for (name, args) in [
+                (
+                    "agent.new",
+                    json!({ "cwd": "C:/bus-store/delta", "backend": "Claude" }),
+                ),
+                ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+                ("agent.move", json!({ "target": "alpha", "parent": "lead" })),
+                ("agent.spawn", json!({ "cwd": "C:/bus-store/gamma" })),
+                ("agent.spawn", json!({ "target": "alpha" })),
+            ] {
+                let err = call(&table, name, args.clone())
+                    .expect_err("저장소가 받지 않으면 오류다: {name} {args}");
+                assert_eq!(err.code(), expected, "{failure:?} · {name} {args}");
+                assert!(
+                    err.message().contains("agents.json"),
+                    "{failure:?} · {name}: {}",
+                    err.message()
+                );
+            }
+
+            assert_eq!(roster(&manager), before, "{failure:?}: 명부 그대로");
+            assert!(
+                manager.list_agents().is_empty(),
+                "{failure:?}: 뜬 것이 없다"
+            );
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                1,
+                "{failure:?}: 깨우기의 활성화 뒤 통지(E2) 하나뿐"
+            );
+            assert_eq!(
+                manager
+                    .agent_snapshot(alpha.id)
+                    .and_then(|p| p.last_failure),
+                Some(crate::failure::AgentFailureKind::Other),
+                "{failure:?}: 띄우기 실패가 아니라 「그 밖」으로 적는다"
+            );
+        }
     }
 
     /// ★[`NEW_AGENT_OUTPUT_FORMAT`] 의 **값 자체**를 글자로 못 박는다★ — 이 상수를 읽는 자리는 전부

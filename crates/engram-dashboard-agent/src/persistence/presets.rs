@@ -12,8 +12,11 @@ use super::{list_shape, FileKind, FileStore};
 use crate::preset::{Preset, PresetStore};
 use crate::profile::{StoreError, StoreStatus};
 
+/// 프리셋 저장소의 파일 이름 — 저장 거절 · 실패를 호출자에게 알리는 문구가 이 이름을 댄다.
+pub const PRESETS_FILE: &str = "presets.json";
+
 const PRESETS: FileKind = FileKind {
-    name: "presets.json",
+    name: PRESETS_FILE,
     legacy_tmp: "presets.json.tmp",
     list_key: "presets",
     spec: file::Spec {

@@ -34,10 +34,13 @@ use serde_json::{Map, Value};
 use crate::profile::{AgentProfile, ProfileStore, Refusal, StoreError, StoreStatus};
 
 pub mod presets;
-pub use presets::FilePresetStore;
+pub use presets::{FilePresetStore, PRESETS_FILE};
+
+/// 프로필 저장소의 파일 이름 — 저장 거절 · 실패를 호출자에게 알리는 문구가 이 이름을 댄다.
+pub const AGENTS_FILE: &str = "agents.json";
 
 const PROFILES: FileKind = FileKind {
-    name: "agents.json",
+    name: AGENTS_FILE,
     legacy_tmp: "agents.json.tmp",
     list_key: "profiles",
     spec: file::Spec {
