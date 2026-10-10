@@ -65,6 +65,11 @@ pub trait PresetStore: Send + Sync + 'static {
 /// registry 로 재진입하지 않는다 → 락 순서는 `presets → 저장소 상태 칸` 단방향, 순환 없음. presets lock 은 세션
 /// (sessions/core/status) 락 도메인과도 분리라 ADR-0006 순서에 얽히지 않는다. lock 보유 중 IO 의 크기는
 /// ProfileRegistry 와 같다(저장 직전 재판정 · 최악 = 그 파일이 잠긴 동안의 다시 하기 — ADR-0291 · D4).
+///
+/// `try_` 로 시작하는 동사 = 부르는 쪽 있는 변경 — 사본에 적용 → 저장 → 성공일 때만 커밋하고, `Err` 면 메모리를
+/// 그대로 두고 돌려준다(근거 = `ProfileRegistry` doc). ★부르는 쪽 없는 변경은 프리셋에 없다 — 그래서
+/// `ProfileRegistry` 의 dirty 칸도 여기엔 두지 않는다★.
+// ADR-0291 R17
 pub struct PresetRegistry {
     presets: Mutex<HashMap<PresetId, Preset>>,
     store: Arc<dyn PresetStore>,
@@ -94,6 +99,20 @@ impl PresetRegistry {
         result
     }
 
+    /// 부르는 쪽 있는 변경의 공통 경로 — 사본에 적용하고, 저장이 성공해야 커밋한다.
+    fn try_mutate<R>(
+        &self,
+        f: impl FnOnce(&mut HashMap<PresetId, Preset>) -> R,
+    ) -> Result<R, StoreError> {
+        let mut guard = self.presets.lock().expect("presets poisoned");
+        let mut draft = guard.clone();
+        let result = f(&mut draft);
+        let snapshot: Vec<Preset> = draft.values().cloned().collect();
+        self.store.save(&snapshot)?;
+        *guard = draft;
+        Ok(result)
+    }
+
     /// 전체 프리셋 스냅샷(읽기 — persist 없음).
     pub fn list(&self) -> Vec<Preset> {
         self.presets
@@ -106,19 +125,22 @@ impl PresetRegistry {
 
     /// 새 uuid 발급 + cwd 정규화(`dunce::canonicalize` — 실패하면 입력 그대로 보존). 변경 즉시 persist.
     pub fn create(&self, cwd: PathBuf) -> Preset {
-        // ★정규화 이유★: 같은 폴더를 다른 표기(대소문자·상대경로·UNC)로 등록하면 프론트 basename
-        //   파생·중복 판정이 흔들린다 — 저장 전 canonicalize 로 표기를 고정한다(profile spawn 과 동일 정책).
-        let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
-        let preset = Preset {
-            id: Uuid::new_v4(),
-            cwd,
-            name: None,
-        };
+        let preset = new_preset(cwd);
         let created = preset.clone();
         self.mutate(|m| {
             m.insert(preset.id, preset);
         });
         created
+    }
+
+    /// 부르는 쪽 있는 입구 — [`PresetRegistry::create`] 와 같고 저장이 성공해야 커밋한다.
+    pub fn try_create(&self, cwd: PathBuf) -> Result<Preset, StoreError> {
+        let preset = new_preset(cwd);
+        let created = preset.clone();
+        self.try_mutate(|m| {
+            m.insert(preset.id, preset);
+        })?;
+        Ok(created)
     }
 
     /// 프리셋 삭제(없는 id 면 no-op). 변경 즉시 persist. ★프리셋 삭제 ≠ 에이전트 종료★(ADR-0061):
@@ -129,18 +151,45 @@ impl PresetRegistry {
         });
     }
 
+    /// 부르는 쪽 있는 입구 — [`PresetRegistry::remove`] 와 같고 저장이 성공해야 커밋한다.
+    pub fn try_remove(&self, id: PresetId) -> Result<(), StoreError> {
+        self.try_mutate(|m| {
+            m.remove(&id);
+        })
+    }
+
     /// 프리셋 표시명 override 설정/해제(ADR-0061 리치화). `Some(name)` → override 저장, `None` → 해제
     /// (cwd basename 파생으로 복귀). 존재하면 변경 후 persist·true, 없는 id 면 no-op·false.
     /// ★정규화는 호출자(프론트) 책임★: trim·빈 문자열 거부·미변경 스킵은 프론트가 확정 직전에 처리한다
     /// (TabBar rename 과 동형) — 여기엔 이미 유효 값 또는 명시적 None 만 온다.
     pub fn rename(&self, id: PresetId, name: Option<String>) -> bool {
-        self.mutate(|m| match m.get_mut(&id) {
-            Some(p) => {
-                p.name = name;
-                true
-            }
-            None => false,
-        })
+        self.mutate(|m| rename_present(m, id, name))
+    }
+
+    /// 부르는 쪽 있는 입구 — [`PresetRegistry::rename`] 과 같고 저장이 성공해야 커밋한다.
+    pub fn try_rename(&self, id: PresetId, name: Option<String>) -> Result<bool, StoreError> {
+        self.try_mutate(|m| rename_present(m, id, name))
+    }
+}
+
+fn new_preset(cwd: PathBuf) -> Preset {
+    // ★정규화 이유★: 같은 폴더를 다른 표기(대소문자·상대경로·UNC)로 등록하면 프론트 basename
+    //   파생·중복 판정이 흔들린다 — 저장 전 canonicalize 로 표기를 고정한다(profile spawn 과 동일 정책).
+    let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
+    Preset {
+        id: Uuid::new_v4(),
+        cwd,
+        name: None,
+    }
+}
+
+fn rename_present(m: &mut HashMap<PresetId, Preset>, id: PresetId, name: Option<String>) -> bool {
+    match m.get_mut(&id) {
+        Some(p) => {
+            p.name = name;
+            true
+        }
+        None => false,
     }
 }
 
@@ -152,9 +201,14 @@ mod tests {
     #[derive(Default)]
     struct MemStore {
         saved: Mutex<Vec<Preset>>,
+        /// 켜져 있으면 저장을 재판정 거절로 돌려준다(아무것도 남기지 않는다).
+        refusing: std::sync::atomic::AtomicBool,
     }
     impl PresetStore for MemStore {
         fn save(&self, presets: &[Preset]) -> Result<(), StoreError> {
+            if self.refusing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(StoreError::ReadOnly(crate::profile::Refusal::Unreadable));
+            }
             *self.saved.lock().unwrap() = presets.to_vec();
             Ok(())
         }
@@ -306,6 +360,41 @@ mod tests {
             disk_sorted, mem_sorted,
             "동시 mutation 후 디스크 == 최신 인메모리 (persisted == observed)"
         );
+    }
+
+    // ── 부르는 쪽 있는 입구(ADR-0291 R17) ─────────────────────────────────────────
+
+    #[test]
+    fn a_caller_change_that_fails_to_save_leaves_presets_as_they_were() {
+        let store = Arc::new(MemStore::default());
+        let reg = PresetRegistry::new(store.clone());
+        let kept = reg.try_create(PathBuf::from(".")).unwrap();
+        assert_eq!(store.load(), vec![kept.clone()]);
+
+        store
+            .refusing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(matches!(
+            reg.try_create(PathBuf::from(".")),
+            Err(StoreError::ReadOnly(_))
+        ));
+        assert!(reg.try_rename(kept.id, Some("x".to_string())).is_err());
+        assert!(reg.try_remove(kept.id).is_err());
+        assert_eq!(
+            reg.list(),
+            vec![kept.clone()],
+            "만들기 · 이름 바꾸기 · 지우기가 하나도 커밋되지 않았다"
+        );
+
+        store
+            .refusing
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(reg.try_rename(kept.id, Some("x".to_string())).unwrap());
+        assert!(!reg.try_rename(Uuid::new_v4(), None).unwrap());
+        assert_eq!(store.load()[0].name.as_deref(), Some("x"));
+        reg.try_remove(kept.id).unwrap();
+        assert!(reg.list().is_empty());
+        assert!(store.load().is_empty());
     }
 
     /// 픽스처 = `name` 필드가 없던 옛 presets.json(하위호환).
