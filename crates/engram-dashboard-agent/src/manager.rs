@@ -1826,7 +1826,10 @@ impl AgentManager {
             };
         }
 
-        let (outcome, spawned) = self.resume_no_fallback(profile, Entry::Caller);
+        // 저장 `Err` 는 원형 그대로 돌려준다 — Fresh 갈래의 `?` 와 같은 답이 되게(ADR-0291 R17).
+        let (outcome, spawned) = self
+            .resume_no_fallback(profile, Entry::Caller)
+            .map_err(PtyError::Store)?;
         match outcome {
             // 성립·실패 양쪽 다 `resume_no_fallback` 안에서 이미 기록됐다(그 자리가 무엇이 일어났는지
             //   아는 유일한 곳). 여기서 또 쓰면 지움 지점이 둘이 된다.
@@ -2274,7 +2277,13 @@ impl AgentManager {
             };
         }
 
-        self.resume_no_fallback(profile, Entry::Internal).0
+        match self.resume_no_fallback(profile, Entry::Internal) {
+            Ok((outcome, _)) => outcome,
+            // 내부 입구는 저장 `Err` 를 내지 않는다 — 오면 복원 보고 문구로 접는다(방어).
+            Err(store) => RestoreOutcome::Failed {
+                reason: format!("resume spawn 실패: {}", PtyError::Store(store)),
+            },
+        }
     }
 
     /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
@@ -2301,13 +2310,17 @@ impl AgentManager {
     /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
     /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
     /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
+    /// ★`Err` = 띄우기 전 명부 변경의 저장이 `Err` 라 띄우지 않았다(부르는 쪽 입구에서만 난다)★ — 다른 띄우기
+    ///   실패처럼 `RestoreOutcome::Failed` 문구로 접지 말 것: 접으면 `activate_profile` 이 `PtyError::Store` 를
+    ///   돌려주지 못해 버스가 저장 거절을 다른 실패와 못 가른다. 실패 기록 · 로그는 접을 때와 같이 남긴다.
     // ADR-0082
     // ADR-0172
+    // ADR-0291 R17
     fn resume_no_fallback(
         &self,
         profile: &AgentProfile,
         entry: Entry,
-    ) -> (RestoreOutcome, Option<AgentInfo>) {
+    ) -> Result<(RestoreOutcome, Option<AgentInfo>), StoreError> {
         // ★이어받을 손잡이가 없는 이어받기 요청은 **새 대화로 연다** — 고름이 아니라 사용자 결정 D1 의
         //   귀결이다(「저장된 id 가 있다 ⟺ 이어받을 대화가 있다 · id 없음 → Fresh」)★.
         //   ★그 조합에 실제로 들어오는 것은 WS `SpawnProfile` 의 `resume: true` 명시 요청이다★ — 그
@@ -2335,13 +2348,14 @@ impl AgentManager {
             );
             // 기록은 새 대화 경로 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다.
             return match self.spawn_fresh_settled(profile, entry) {
-                Ok(outcome) => (RestoreOutcome::Started, outcome.into_info()),
-                Err(e) => (
+                Ok(outcome) => Ok((RestoreOutcome::Started, outcome.into_info())),
+                Err(PtyError::Store(store)) => Err(store),
+                Err(e) => Ok((
                     RestoreOutcome::Failed {
                         reason: format!("새 대화 spawn 실패: {e}"),
                     },
                     None,
-                ),
+                )),
             };
         }
 
@@ -2357,7 +2371,10 @@ impl AgentManager {
                     %reason,
                     "ADR-0082: resume 실패 → 종점(시체), fresh-fallback 없음"
                 );
-                return (RestoreOutcome::Failed { reason }, None);
+                return match e {
+                    PtyError::Store(store) => Err(store),
+                    _ => Ok((RestoreOutcome::Failed { reason }, None)),
+                };
             }
             Ok(pair) => pair,
         };
@@ -2371,7 +2388,7 @@ impl AgentManager {
                     agent = %profile.id,
                     "resume: 이미 떠 있거나 뜨는 중 — 이 요청은 할 일이 없다(moot)"
                 );
-                return (RestoreOutcome::Resumed, info);
+                return Ok((RestoreOutcome::Resumed, info));
             }
             SpawnOutcome::Started(info) => info,
         };
@@ -2401,7 +2418,7 @@ impl AgentManager {
                 LINK_RESOLUTION_BACKSTOP,
             ),
         };
-        match verdict {
+        Ok(match verdict {
             EarlyVerdict::Terminal { status, evidence } => {
                 let reason = format!("resume 조기 종료({status:?})");
                 // ★사용자가 끊은 것은 활성화 실패가 아니다 — 기록하지 않는다★: 창 안에서 kill 이 오면
@@ -2517,7 +2534,7 @@ impl AgentManager {
                 self.note_activation_result(profile.id, Some(spawned.epoch), None);
                 (RestoreOutcome::Resumed, Some(spawned))
             }
-        }
+        })
     }
 
     /// 활성화가 **실패로 확정된** 세션을 끝낸다 — 프로세스가 아직 살아 있을 때만 의미가 있다.
@@ -4592,11 +4609,11 @@ mod tests {
         // ★두 입구가 **같은 동사**에 **다른 입구 값**을 넘긴다(ADR-0291 E3)★ — 입구별 띄우기 사본이 생기면
         //   ADR-0082 · ADR-0201 · ADR-0202 가 막은 「입구마다 판정이 갈려 하나가 뒤처진다」가 돌아온다.
         assert!(
-            activate.contains("self.resume_no_fallback(profile, Entry::Caller)"),
+            activate.contains(".resume_no_fallback(profile, Entry::Caller)"),
             "수동 활성화의 이어받기 갈래가 부르는 쪽 입구를 안 싣는다: {activate}"
         );
         assert!(
-            restore.contains("self.resume_no_fallback(profile, Entry::Internal)"),
+            restore.contains(".resume_no_fallback(profile, Entry::Internal)"),
             "부팅 복원의 이어받기 갈래가 내부 입구를 안 싣는다: {restore}"
         );
         let spawn_agent =
@@ -6863,80 +6880,7 @@ mod tests {
 
     // ── 저장 거절 · 실패 — 레지스트리 입구 둘(ADR-0291 R17 · D2 · E1 · E3 · E4 · D8) ─────────────
 
-    #[derive(Clone, Copy, Debug)]
-    enum Outcome {
-        Saves,
-        FailsIo,
-        Refuses(crate::profile::Refusal),
-    }
-
-    /// 쓰기 IO 실패 · 재판정 거절 둘 — 입구 처리는 `StoreError` 의 변형을 가르지 않는다.
-    const FAILURES: [Outcome; 3] = [
-        Outcome::FailsIo,
-        Outcome::Refuses(crate::profile::Refusal::Unreadable),
-        Outcome::Refuses(crate::profile::Refusal::Newer { found: 2 }),
-    ];
-
-    /// 저장 결과를 시험이 정하는 프로필 저장소 — 줄 세운 결과부터 한 번씩 쓰고 다 쓰면 `then` 이다. 성공한
-    /// 저장만 `disk` 에 남는다.
-    struct ScriptedStore {
-        queue: Mutex<std::collections::VecDeque<Outcome>>,
-        then: Mutex<Outcome>,
-        disk: Mutex<Vec<AgentProfile>>,
-        attempts: std::sync::atomic::AtomicUsize,
-    }
-
-    impl ScriptedStore {
-        fn new() -> Arc<Self> {
-            Arc::new(Self {
-                queue: Mutex::default(),
-                then: Mutex::new(Outcome::Saves),
-                disk: Mutex::default(),
-                attempts: Default::default(),
-            })
-        }
-
-        fn script(&self, queued: &[Outcome], then: Outcome) {
-            *self.queue.lock().unwrap() = queued.iter().copied().collect();
-            *self.then.lock().unwrap() = then;
-        }
-
-        fn set(&self, outcome: Outcome) {
-            self.script(&[], outcome);
-        }
-
-        fn disk(&self, id: AgentId) -> Option<AgentProfile> {
-            self.disk
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|p| p.id == id)
-                .cloned()
-        }
-
-        fn attempts(&self) -> usize {
-            self.attempts.load(Ordering::SeqCst)
-        }
-    }
-
-    impl crate::profile::ProfileStore for ScriptedStore {
-        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
-            self.attempts.fetch_add(1, Ordering::SeqCst);
-            let queued = self.queue.lock().unwrap().pop_front();
-            match queued.unwrap_or_else(|| *self.then.lock().unwrap()) {
-                Outcome::Saves => {
-                    *self.disk.lock().unwrap() = profiles.to_vec();
-                    Ok(())
-                }
-                Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("디스크 가득"))),
-                Outcome::Refuses(refusal) => Err(StoreError::ReadOnly(refusal)),
-            }
-        }
-
-        fn load(&self) -> Vec<AgentProfile> {
-            self.disk.lock().unwrap().clone()
-        }
-    }
+    use crate::profile::scripted_store::{Outcome, ScriptedStore, FAILURES};
 
     fn scripted_manager() -> (AgentManager, Arc<ScriptedStore>) {
         let store = ScriptedStore::new();
@@ -7280,25 +7224,85 @@ mod tests {
         }
     }
 
+    /// claude 백엔드 그대로라 세션 id 비우기 · 이어받기 갈래가 도는 프로필 — 단 프로세스 열기가 실패한다: 작업
+    /// 폴더와 자식 PATH 가 같은 빈 폴더다. 회귀해서 저장 `Err` 를 지나쳐도 실 claude 가 뜨지 않고, 그 결말은 저장
+    /// 오류가 아니라서 첫 단언이 잡는다. 부른 쪽이 끝에 그 폴더(`cwd`)를 지운다.
+    /// ★프로그램 이름이 아니라 PATH 로 막는다★ — backend 가 `cmd.exe /c claude` 로 고정한다. 자식 PATH 가 빈
+    ///   폴더면 CreateProcessW 가 `cmd.exe` 부터 못 찾아 실패한다(실측 — os error 2, 뜬 프로세스 0). 터미널(PTY)
+    ///   통로만 그렇다 — 출력 형식을 JSON 으로 바꾸면 std `Command` 가 System32 를 뒤져 `cmd.exe` 는 뜬다(claude 는
+    ///   여전히 못 찾는다).
+    /// ★폴더는 실재해야 한다★ — 없는 작업 폴더는 portable-pty 가 홈 폴더로 바꿔 띄운다(실측: 없는 폴더만으로는 실
+    ///   claude 가 떴다).
+    fn claude_profile_that_cannot_launch() -> AgentProfile {
+        let dir = std::env::temp_dir().join(format!("engram-no-claude-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).expect("빈 폴더 만들기");
+        let path = dir.to_string_lossy().to_string();
+        AgentProfile::new(
+            "raw".into(),
+            AgentCommand::Claude {
+                extra_args: vec![],
+                output_format: crate::profile::AgentOutputFormat::Terminal,
+            },
+            dir,
+            vec![("PATH".into(), path)],
+            false,
+        )
+    }
+
+    /// ★이어받기 활성화도 저장 `Err` 를 원형으로 돌려준다(부르는 쪽 입구)★ — 복원 보고 문구로 접혀
+    ///   `PtyError::SpawnFailed` 가 되면 버스가 저장 거절을 다른 실패와 못 가른다. 손잡이가 있는 이어받기와 손잡이
+    ///   없는 이어받기 요청(새 대화 갈래) 둘 다 본다. 띄우기는 등록(①)에서 멈추므로 프로세스를 띄우지 않는다.
+    #[test]
+    fn a_resume_activation_returns_the_store_error_unflattened() {
+        for failure in FAILURES {
+            for stored in [Some(Uuid::new_v4()), None] {
+                let (manager, store) = scripted_manager();
+                let mut profile = claude_profile_that_cannot_launch();
+                profile.backend_session_id = stored;
+                manager.profiles.upsert(profile.clone());
+                store.set(failure);
+
+                let err = manager
+                    .activate_profile(&profile, SpawnMode::Resume)
+                    .expect_err("부르는 쪽 입구는 저장 실패로 멈춘다");
+
+                assert!(
+                    matches!(err, PtyError::Store(_)),
+                    "{failure:?} · 손잡이 {stored:?}: {err}"
+                );
+                assert!(
+                    manager.list_agents().is_empty(),
+                    "{failure:?} · 손잡이 {stored:?}: 띄우지 않았다"
+                );
+                assert_eq!(
+                    manager
+                        .agent_snapshot(profile.id)
+                        .and_then(|p| p.backend_session_id),
+                    stored,
+                    "{failure:?}: 메모리 명부 그대로"
+                );
+                assert_eq!(
+                    manager
+                        .agent_snapshot(profile.id)
+                        .and_then(|p| p.last_failure),
+                    Some(AgentFailureKind::SpawnFailed),
+                    "{failure:?} · 손잡이 {stored:?}: 원형으로 돌려주기 전에 실패를 기록한다(E2)"
+                );
+                assert!(!manager.profiles.is_dirty(), "{failure:?}");
+                let _ = std::fs::remove_dir(&profile.cwd);
+            }
+        }
+    }
+
     /// ★부르는 쪽 입구의 부분 성공은 되돌리지 않는다(D8)★ — 등록(①)이 저장된 뒤 세션 id 비우기(③)의 저장이
-    ///   `Err` 면 등록은 남고 칸에는 옛 손잡이가 남으며 띄우지 않는다.
-    /// ★프로세스를 띄우지 않는 항목이다★ — 띄우기는 ③ 에서 멈춘다. 회귀해서 ③ 을 지나치면 claude 를 실제로
-    ///   띄우려 하고, 그 결말은 저장 오류가 아니라서 첫 단언이 잡는다.
+    ///   `Err` 면 등록은 남고 칸에는 옛 손잡이가 남으며 띄우지 않는다. 띄우기는 ③ 에서 멈추므로 프로세스를
+    ///   띄우지 않는다.
     #[test]
     fn a_caller_spawn_whose_release_save_fails_keeps_the_registration_and_the_old_handle() {
         for failure in FAILURES {
             let (manager, store) = scripted_manager();
             let old = Uuid::new_v4();
-            let mut profile = AgentProfile::new(
-                "raw".into(),
-                AgentCommand::Claude {
-                    extra_args: vec![],
-                    output_format: crate::profile::AgentOutputFormat::Terminal,
-                },
-                std::env::temp_dir(),
-                vec![],
-                false,
-            );
+            let mut profile = claude_profile_that_cannot_launch();
             profile.display_name = Some("d8".into());
             profile.backend_session_id = Some(old);
             store.script(&[Outcome::Saves], failure);
@@ -7336,6 +7340,7 @@ mod tests {
                 Some(old),
                 "{failure:?}: 등록은 저장됐다"
             );
+            let _ = std::fs::remove_dir(&profile.cwd);
         }
     }
 }

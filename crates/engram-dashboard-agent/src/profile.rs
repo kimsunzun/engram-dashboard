@@ -471,6 +471,8 @@ impl ProfileRegistry {
     }
 
     /// `mutate` 의 조건부 변형 — 클로저가 `true`(실제 변경 있음)를 반환하거나 dirty 일 때만 save 한다.
+    /// ★dirty 동안에는 변경 없는 호출도 profiles 락을 쥔 채 디스크 IO(재판정 읽기 + 쓰기)를 한다★ — 밀린 변경을
+    /// 싣는 대가다(ADR-0291 D4 의 락 안 시간이 그만큼 잦아진다).
     fn mutate_if(&self, f: impl FnOnce(&mut ProfileMap) -> bool) -> bool {
         let mut guard = self.lock();
         let changed = f(&mut guard.map);
@@ -507,6 +509,7 @@ impl ProfileRegistry {
     }
 
     /// `try_mutate` 의 조건부 변형 — 클로저가 `false` 면 이 요청은 바꾼 것이 없어 `Ok(false)` 다.
+    /// ★dirty 동안에는 그 변경 없는 요청도 profiles 락을 쥔 채 밀린 변경을 저장한다(디스크 IO)★ — `mutate_if` 와 같다.
     fn try_mutate_if(&self, f: impl FnOnce(&mut ProfileMap) -> bool) -> Result<bool, StoreError> {
         let mut guard = self.lock();
         let mut draft = guard.map.clone();
@@ -1038,6 +1041,111 @@ fn serialize_zero_placeholder<S: serde::Serializer>(_tag: &u32, s: S) -> Result<
 fn random_incarnation_tag() -> u32 {
     let b = Uuid::new_v4().into_bytes();
     u32::from_be_bytes([b[0], b[1], b[2], b[3]])
+}
+
+/// 저장 결과를 시험이 정하는 프로필 저장소 — 레지스트리 · 매니저 시험이 함께 쓴다.
+#[cfg(test)]
+pub(crate) mod scripted_store {
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use super::{AgentId, AgentProfile, ProfileStore, Refusal, StoreError};
+
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Outcome {
+        Saves,
+        FailsIo,
+        Refuses(Refusal),
+    }
+
+    /// 쓰기 IO 실패 · 재판정 거절 둘 — 입구 처리는 `StoreError` 의 변형을 가르지 않는다.
+    pub(crate) const FAILURES: [Outcome; 3] = [
+        Outcome::FailsIo,
+        Outcome::Refuses(Refusal::Unreadable),
+        Outcome::Refuses(Refusal::Newer { found: 2 }),
+    ];
+
+    /// 줄 세운 결과부터 한 번씩 쓰고 다 쓰면 `then` 이다(`cycle` 이면 쓴 결과를 줄 끝에 다시 세워 끝없이 돈다).
+    /// 성공한 저장만 `disk` 에 남는다.
+    pub(crate) struct ScriptedStore {
+        queue: Mutex<VecDeque<Outcome>>,
+        repeat: AtomicBool,
+        then: Mutex<Outcome>,
+        disk: Mutex<Vec<AgentProfile>>,
+        attempts: AtomicUsize,
+    }
+
+    impl ScriptedStore {
+        pub(crate) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                queue: Mutex::default(),
+                repeat: AtomicBool::new(false),
+                then: Mutex::new(Outcome::Saves),
+                disk: Mutex::default(),
+                attempts: AtomicUsize::default(),
+            })
+        }
+
+        pub(crate) fn script(&self, queued: &[Outcome], then: Outcome) {
+            *self.queue.lock().unwrap() = queued.iter().copied().collect();
+            self.repeat.store(false, Ordering::SeqCst);
+            *self.then.lock().unwrap() = then;
+        }
+
+        pub(crate) fn cycle(&self, outcomes: &[Outcome]) {
+            self.script(outcomes, Outcome::Saves);
+            self.repeat.store(true, Ordering::SeqCst);
+        }
+
+        pub(crate) fn set(&self, outcome: Outcome) {
+            self.script(&[], outcome);
+        }
+
+        pub(crate) fn disk(&self, id: AgentId) -> Option<AgentProfile> {
+            self.disk
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+        }
+
+        /// 마지막으로 성공한 저장 전체.
+        pub(crate) fn disk_all(&self) -> Vec<AgentProfile> {
+            self.disk.lock().unwrap().clone()
+        }
+
+        pub(crate) fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ProfileStore for ScriptedStore {
+        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let queued = {
+                let mut queue = self.queue.lock().unwrap();
+                let next = queue.pop_front();
+                if let Some(outcome) = next.filter(|_| self.repeat.load(Ordering::SeqCst)) {
+                    queue.push_back(outcome);
+                }
+                next
+            };
+            match queued.unwrap_or_else(|| *self.then.lock().unwrap()) {
+                Outcome::Saves => {
+                    *self.disk.lock().unwrap() = profiles.to_vec();
+                    Ok(())
+                }
+                Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("디스크 가득"))),
+                Outcome::Refuses(refusal) => Err(StoreError::ReadOnly(refusal)),
+            }
+        }
+
+        fn load(&self) -> Vec<AgentProfile> {
+            self.disk.lock().unwrap().clone()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2304,68 +2412,11 @@ mod tests {
 
     // ── 변경 입구 둘 · dirty(ADR-0291 R17 · D2 · E1) ─────────────────────────────
 
-    #[derive(Clone, Copy, Debug)]
-    enum Outcome {
-        Saves,
-        FailsIo,
-        Refuses(Refusal),
-    }
-
-    const FAILURES: [Outcome; 3] = [
-        Outcome::FailsIo,
-        Outcome::Refuses(Refusal::Unreadable),
-        Outcome::Refuses(Refusal::Newer { found: 2 }),
-    ];
-
-    /// 저장 결과를 시험이 정하는 저장소 — 성공한 저장만 `disk` 에 남는다.
-    struct ScriptedStore {
-        outcome: Mutex<Outcome>,
-        disk: Mutex<Vec<AgentProfile>>,
-        attempts: std::sync::atomic::AtomicUsize,
-    }
-
-    impl ScriptedStore {
-        fn set(&self, outcome: Outcome) {
-            *self.outcome.lock().unwrap() = outcome;
-        }
-        fn disk(&self, id: AgentId) -> Option<AgentProfile> {
-            self.disk
-                .lock()
-                .unwrap()
-                .iter()
-                .find(|p| p.id == id)
-                .cloned()
-        }
-        fn attempts(&self) -> usize {
-            self.attempts.load(std::sync::atomic::Ordering::SeqCst)
-        }
-    }
-
-    impl ProfileStore for ScriptedStore {
-        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
-            self.attempts
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            match *self.outcome.lock().unwrap() {
-                Outcome::Saves => {
-                    *self.disk.lock().unwrap() = profiles.to_vec();
-                    Ok(())
-                }
-                Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("디스크 가득"))),
-                Outcome::Refuses(refusal) => Err(StoreError::ReadOnly(refusal)),
-            }
-        }
-        fn load(&self) -> Vec<AgentProfile> {
-            self.disk.lock().unwrap().clone()
-        }
-    }
+    use super::scripted_store::{Outcome, ScriptedStore, FAILURES};
 
     /// 프로필 하나를 저장해 둔 레지스트리.
     fn scripted() -> (ProfileRegistry, Arc<ScriptedStore>, AgentId) {
-        let store = Arc::new(ScriptedStore {
-            outcome: Mutex::new(Outcome::Saves),
-            disk: Mutex::default(),
-            attempts: Default::default(),
-        });
+        let store = ScriptedStore::new();
         let reg = ProfileRegistry::new(store.clone());
         let p = sample();
         let id = p.id;
@@ -2373,7 +2424,7 @@ mod tests {
         (reg, store, id)
     }
 
-    /// `mutate` 길(reaper 의 내리기)과 `mutate_if` 길(첫 제출 래치) 둘 다 본다.
+    /// `mutate` 길(reaper 의 내리기)과 `mutate_if` 길(첫 제출 래치 · 부팅 복원의 세션 id 비우기) 둘 다 본다.
     #[test]
     fn an_internal_change_commits_and_marks_dirty_on_any_save_error() {
         for failure in FAILURES {
@@ -2396,6 +2447,15 @@ mod tests {
                 "버리면 래치의 세션 id 가 사라진다 — {failure:?}"
             );
             assert!(reg.is_dirty(), "{failure:?}");
+
+            assert_eq!(reg.release_session_id(id), Some(true), "{failure:?}");
+            let mem = reg.get(id).unwrap();
+            assert_eq!(
+                mem.backend_session_id, None,
+                "버리면 부팅 복원의 Fresh 가 앞 대화의 손잡이를 쥔 채 뜬다 — {failure:?}"
+            );
+            assert_eq!(mem.old_session_ids.last(), Some(&sid), "{failure:?}");
+            assert!(reg.is_dirty(), "{failure:?}");
         }
     }
 
@@ -2403,8 +2463,10 @@ mod tests {
     fn a_refused_internal_change_leaves_the_file_alone_and_rides_the_first_save_after() {
         use crate::persistence::FileProfileStore;
 
-        let dir = std::env::temp_dir().join("engram-profile-test-dirty-refused");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = std::env::temp_dir().join(format!(
+            "engram-profile-test-dirty-refused-{}",
+            Uuid::new_v4()
+        ));
         let path = dir.join("agents.json");
         let reg = ProfileRegistry::new(Arc::new(FileProfileStore::new(dir.clone())));
         let p = sample();
@@ -2605,5 +2667,126 @@ mod tests {
         let fresh_id = fresh.id;
         reg.try_upsert_preserving_hierarchy(fresh).unwrap();
         assert!(store.disk(fresh_id).is_some());
+    }
+
+    /// ★부르는 쪽 변경은 사본을 뜬 그 락을 쥔 채 저장 · 커밋한다 — 결정적으로 본다★: 사본 위에서 도는 클로저
+    ///   안에서 내부 변경을 다른 스레드로 시작시킨다. 한 락 안이면 내부 변경은 그 커밋 뒤로 밀려 남고, 사본을 락
+    ///   밖에서 뜨는 꼴로 회귀하면 내부 변경이 먼저 커밋된 뒤 옛 사본에 덮여 사라진다.
+    #[test]
+    fn a_caller_change_copies_saves_and_commits_under_one_lock() {
+        let (reg, _store, id) = scripted();
+        let other = sample();
+        let other_id = other.id;
+        reg.upsert(other);
+        let reg = &reg;
+
+        std::thread::scope(|s| {
+            let (go, wait) = std::sync::mpsc::channel::<()>();
+            let internal = s.spawn(move || {
+                wait.recv().unwrap();
+                reg.update_with(other_id, |p| p.auto_restore = false)
+            });
+            assert!(reg
+                .try_update_with(id, |p| {
+                    go.send(()).unwrap();
+                    // 한 락 안이면 내부 변경은 이 동안 락을 기다린다 — 락 밖이면 이 사이에 커밋된다.
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    p.display_name = Some("부르는 쪽".into());
+                })
+                .unwrap());
+            assert!(internal.join().unwrap());
+        });
+
+        assert!(
+            !reg.get(other_id).unwrap().auto_restore,
+            "내부 변경이 부르는 쪽의 옛 사본에 덮였다"
+        );
+        assert_eq!(
+            reg.get(id).unwrap().display_name.as_deref(),
+            Some("부르는 쪽")
+        );
+    }
+
+    /// ★두 입구가 겹쳐도 내부 변경은 하나도 안 빠지고, dirty 가 아니면 디스크 = 메모리다★ — 부르는 쪽 입구의
+    ///   사본 뜨기 → 저장 → 커밋이 한 락 안이어야 성립한다. 사본을 락 밖에서 뜨면 그 사이 커밋된 내부 변경을
+    ///   뒤이은 부르는 쪽 커밋이 옛 사본으로 덮는다. 저장 결과를 성공 · 실패로 번갈아 내 두 입구의 갈래를 섞는다.
+    /// ★확률적 회귀망이다★ — 겹침을 강제하지 못하므로 그 꼴로 회귀해도 매번 빨개지지는 않는다(사본을 락 밖에서
+    ///   뜨는 꼴을 실측 5회 중 2회 잡았다). 결정적인 짝 = `a_caller_change_copies_saves_and_commits_under_one_lock`.
+    #[test]
+    fn racing_caller_and_internal_changes_never_lose_an_internal_commit() {
+        const ROUNDS: usize = 200;
+        let store = ScriptedStore::new();
+        let reg = ProfileRegistry::new(store.clone());
+        let lead = sample();
+        let helper = sample();
+        let (lead_id, helper_id) = (lead.id, helper.id);
+        reg.upsert(lead);
+        reg.upsert(helper);
+        let targets: Vec<AgentId> = (0..ROUNDS)
+            .map(|_| {
+                let p = sample();
+                let id = p.id;
+                reg.upsert(p);
+                id
+            })
+            .collect();
+        store.cycle(&[
+            Outcome::Saves,
+            Outcome::FailsIo,
+            Outcome::Saves,
+            Outcome::Refuses(Refusal::Unreadable),
+        ]);
+
+        // 부르는 쪽 스레드는 내부 쪽이 끝날 때까지 쉬지 않고 돈다 — 겹치는 구간이 내부 변경 전부를 덮게.
+        let internal_done = std::sync::atomic::AtomicBool::new(false);
+        let start = std::sync::Barrier::new(2);
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                start.wait();
+                for &id in &targets {
+                    assert!(reg.update_with(id, |p| p.auto_restore = false));
+                    std::thread::yield_now();
+                }
+                internal_done.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            s.spawn(|| {
+                start.wait();
+                let mut i = 0usize;
+                while !internal_done.load(std::sync::atomic::Ordering::SeqCst) {
+                    let _ = reg.try_rename(helper_id, Some(format!("n{i}")));
+                    let parent = (i % 2 == 0).then_some(lead_id);
+                    let _ = reg.try_reparent(helper_id, parent);
+                    i += 1;
+                }
+            });
+        });
+
+        let lost: Vec<AgentId> = targets
+            .iter()
+            .copied()
+            .filter(|&id| reg.get(id).unwrap().auto_restore)
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "내부 변경 {}건이 메모리에서 사라졌다 — 부르는 쪽 커밋이 옛 사본으로 덮었다",
+            lost.len()
+        );
+
+        let as_json = |mut profiles: Vec<AgentProfile>| {
+            profiles.sort_by_key(|p| p.id);
+            serde_json::to_value(profiles).unwrap()
+        };
+        if !reg.is_dirty() {
+            assert_eq!(as_json(store.disk_all()), as_json(reg.list()));
+        }
+        // 밀린 변경은 다음 성공 저장이 싣는다 — 변경 없는 내부 쓰기로 한 번 더 저장시킨다.
+        store.set(Outcome::Saves);
+        assert_eq!(reg.release_session_id(lead_id), Some(false));
+        assert!(!reg.is_dirty());
+        assert_eq!(
+            as_json(store.disk_all()),
+            as_json(reg.list()),
+            "dirty 가 아니면 마지막 저장 = 메모리"
+        );
     }
 }
