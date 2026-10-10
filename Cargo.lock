@@ -1041,6 +1041,7 @@ name = "engram-dashboard-base"
 version = "0.1.0"
 dependencies = [
  "regex",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

@@ -2,7 +2,7 @@
 name = "engram-dashboard-base"
 version = "0.1.0"
 edition = "2021"
-description = "Engram Dashboard 바닥 기반층 — 데이터 파일 상한 읽기·원자 쓰기·손상 사본·임시 쓸기(file — OS 몫은 부르는 쪽이 넘긴다) · tracing 전역 초기화·파일 로그(logging) · 범용 도우미(text · time — epoch 밀리초와 「지금 읽기」 시계 seam · path · sync · writable — 폴더 쓰기 프로브) · 시험 대기(testing)와 가짜 시계(time::ManualClock) — 시험 둘은 test-support 기능 뒤. 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 · ADR-0269 결정 7)."
+description = "Engram Dashboard 바닥 기반층 — 데이터 파일 읽기 판정(버전·손상)·쓰기 판정·상한 읽기·원자 쓰기·손상 사본·임시 쓸기(file — OS 몫은 부르는 쪽이 넘긴다) · tracing 전역 초기화·파일 로그(logging) · 범용 도우미(text · time — epoch 밀리초와 「지금 읽기」 시계 seam · path · sync · writable — 폴더 쓰기 프로브) · 시험 대기(testing)와 가짜 시계(time::ManualClock) — 시험 둘은 test-support 기능 뒤. 잎 crate: 워크스페이스 crate 의존 0, 도메인 지식 0. 입주 조건은 lib.rs 헤더가 정본(ADR-0175 · ADR-0269 결정 7)."
 
 # ★test-support (ADR-0275 결정 5)★: 시험 도우미 모듈(`testing`)과 손으로 미는 시계(`time` 안
 #   `ManualClock`)를 연다. 기본 OFF — 소비 crate 는 dev-dependency 에서만 켠다(선례 =
@@ -16,6 +16,9 @@ test-support = []
 [dependencies]
 # logging 의 `mask_secrets` 가 무는 Bearer/API 키 패턴.
 regex = "1.11"
+# ADR-0291 결정 3: file 의 읽기 판정이 JSON 문서(버전 키 · 주인 모양 검사에 넘길 객체)를 본다. 구조체 ↔ JSON
+#   직렬화(serde derive)는 여전히 각 주인 몫이라 serde 를 직접 의존하지 않는다.
+serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 

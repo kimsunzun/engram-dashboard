@@ -38,6 +38,8 @@
 | T-19 | 우편 CLI 빈 응답 = 성공 | 버그 | 보류 |
 | T-53 | 띄우기 — 무리에 넣기 전에 뜬 손자 | 버그 | 미착수 · 이론상 경로 |
 | T-54 | 상시 `taskkill /T` 호출자 넷 | 버그 | 미착수 · 선재 위험 |
+| T-55 | 원자 쓰기의 폴더 동기화 실패를 무시하고 「썼다」로 보고 | 이식 | 미착수 · Windows 해당 없음 |
+| T-56 | codex 터미널 실 CLI 계약 시험 5건 실패 | 버그 | 미착수 · 선재 · 원인 미규명 |
 | T-51 | 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) | 사소한 기능·정리 | 보류 — 필요해질 때 |
 | T-50 | 덮는 층의 「줄 바깥 빈 영역」 | 사소한 기능·정리 | 보류 — 저장 작업 뒤 |
 | T-48 | 다른 연결 사건도 덮는 층에 | 사소한 기능·정리 | 보류 — 저장 작업 뒤 |
@@ -244,6 +246,17 @@
   - 시험: `src-tauri/tests/stop_smoke.rs:75-76`(`force_kill` — 실 데몬 시험의 RAII 정리) · `crates/engram-dashboard-agent/tests/backend_contract.rs:895-898`(`kill_tree` — 실 CLI 계약 시험의 shim 사슬 정리 · 부르는 자리 `:857`).
 - **다음:** 처방 후보 = `/T` 없이 뿌리만 끄고 후손은 Job 에 맡기기(데몬은 에이전트를 `KILL_ON_JOB_CLOSE` Job 으로 담는다 — `discovery/mod.rs:497` 그 자리 주석 「데몬 Job 안전망과 겹치나 무해하다」 · 이 항목이 그 「무해」를 의심한다 · 시험은 띄운 것을 자기 Job 에 담는다). ★번호 스냅숏을 찍고 후손마다 시작시각을 다시 대조해 끄는 길은 처방이 아니다★ — 찍은 뒤 다시 읽기 전에 번호가 넘어가면 같은 위험이다(ADR-0291 「거부한 대안」 (g)). 어느 쪽이든 동작 변경이라 별 슬라이스.
 - **근거:** ADR-0291 결정 13 · 「거부한 대안」 (g) · `crates/engram-dashboard-platform/src/process.rs`(`kill_tree`) · `src-tauri/src/commands/discovery.rs:161`
+### T-55. 원자 쓰기가 폴더 동기화 실패를 무시하고 「썼다」로 보고한다 — macOS · Linux 이식 때
+- **상태:** 미착수 · Windows 에선 해당 없음(폴더 동기화가 무동작 — platform `fs::sync_dir`). 크레이트 경계 A U3 리뷰(codex)가 짚었고 사용자 결정(2026-10-10)으로 지금은 기록만.
+- **문제:** base `file` 의 원자 쓰기는 이름 바꾸기 뒤 폴더 동기화(ADR-0291 R10)를 부르되 결과를 버리고 `Written` 을 돌려준다. POSIX 에서 그 동기화가 실패한 채 정전이 나면 이름 바꾸기가 사라질 수 있는데, 부르는 쪽(예: 셸 상태 기록기)은 이미 저장이 끝난 줄 알고 복원용 사본을 지우는 등 다음 일을 한다.
+- **다음:** 이식 때 동기화 실패를 별도 결과(또는 오류)로 올리고, 부르는 쪽이 그때 복원 상태를 지우지 않게 한다.
+- **근거:** `crates/engram-dashboard-base/src/file.rs`(이름 바꾸기 도우미) · TRD A §3-5 R10 · ADR-0291
+
+### T-56. codex 터미널(PTY) 실 CLI 계약 시험 5건이 실패한다 — 화면이 `model: loading` 에서 멈춘다
+- **상태:** 미착수 · 선재(크레이트 경계 A U7 의 QA full 이 찾았고 HEAD `bfd96dbc` 에서도 같은 증상 — 2026-10-10) · 원인 미규명.
+- **문제:** `cargo test -p engram-dashboard-agent --test backend_contract -- --ignored` 의 codex 터미널 행 q4 · q5 · q8 · q11 · q12 가 실패한다. 화면이 `model: loading … directory: loading` 에서 넘어가지 않아 시작 모달 · 컴포저(`Ask Codex to do anything`)가 안 선다(하나씩 돌려도 같다). 화면 첫머리에 codex 경고 「could not create PATH aliases: Refusing to create helper binaries under temporary dir …」가 있다 — 시험의 sandbox 홈이 %TEMP% 아래라 그럴 수 있다(추정 · codex-cli 0.156.1).
+- **다음:** sandbox 홈을 %TEMP% 밖에 두고 다시 재 본다 · 안 되면 codex 판 · 로그인 상태를 가른다.
+- **근거:** `crates/engram-dashboard-agent/tests/backend_contract.rs`(q4 `:1262` · q11 `:2165` 근처)
 
 ## 사소한 기능·정리
 
