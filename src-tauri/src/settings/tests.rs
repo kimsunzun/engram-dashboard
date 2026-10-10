@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use super::store::fake::MemFiles;
-use super::store::RawFile;
 use super::*;
 
 fn service(files: &MemFiles) -> SettingsService {
@@ -909,10 +908,11 @@ fn an_unreadable_file_falls_back_to_memory_for_the_write_decision() {
     assert!(svc.reset("chat.style.").unwrap().changed.is_empty());
     assert_eq!(files.disk().writes, 0);
 
-    assert!(matches!(
-        svc.set("theme.default", "e-ink"),
-        Err(SettingsError::Internal(_))
-    ));
+    let err = svc.set("theme.default", "e-ink").unwrap_err();
+    assert!(
+        matches!(&err, SettingsError::Internal(message) if message.contains("못 읽어") && !message.contains("못 썼다")),
+        "읽기 실패를 쓰기 실패로 말하지 않는다: {err:?}"
+    );
     assert_eq!(value_of(&svc, "theme.default"), "light");
 }
 
@@ -930,6 +930,63 @@ fn an_unusable_file_is_not_rewritten_for_a_no_op() {
     assert_eq!(disk.text.as_deref(), Some("{broken"));
 }
 
+// ── 새 판이 쓴 파일(ADR-0291 R2) ──
+
+/// 새 판이 쓴 파일 위의 쓰기는 `Conflict` 이고 덮지도 떠 두지도 않는다 — 메모리 · `rev` · 알림 그대로.
+#[test]
+fn a_newer_version_file_refuses_writes_with_conflict_and_is_left_alone() {
+    let text = r#"{"$version":2,"theme.default":"light"}"#;
+    let files = MemFiles::with_text(text);
+    let svc = service(&files);
+    let heard = Heard::default();
+    assert_eq!(
+        value_of(&svc, "theme.default"),
+        "dark",
+        "새 판은 읽지 않는다"
+    );
+
+    assert!(matches!(
+        set_and_notify(&svc, &heard, "theme.default", "e-ink"),
+        Err(SettingsError::Conflict(_))
+    ));
+    // 유효 값이 안 바뀌는 호출은 파일을 가를 수 없어 쓰지 않는다 — 거절도 아니다.
+    assert!(!svc.set("chat.style.fontSize", "13px").unwrap().changed);
+    assert!(reset_and_notify(&svc, &heard, "chat.style.")
+        .unwrap()
+        .changed
+        .is_empty());
+
+    let disk = files.disk();
+    assert_eq!(disk.text.as_deref(), Some(text));
+    assert_eq!((disk.writes, disk.copies), (0, 0));
+    drop(disk);
+    assert!(heard.order().is_empty(), "{:?}", heard.order());
+    assert_eq!(value_of(&svc, "theme.default"), "dark");
+}
+
+/// 실행 중에 새 판으로 바뀐 파일도 쓰기마다 다시 읽어 거절하고, 치워지면 다음 쓰기가 풀린다(ADR-0291 R16).
+#[test]
+fn a_file_that_turns_newer_while_running_is_refused_until_it_is_replaced() {
+    let files = MemFiles::with_text(r#"{"theme.default":"light"}"#);
+    let svc = service(&files);
+    let newer = r#"{"$version":2}"#;
+    files.disk().text = Some(newer.to_string());
+
+    assert!(matches!(
+        svc.reset("theme."),
+        Err(SettingsError::Conflict(_))
+    ));
+    assert_eq!(value_of(&svc, "theme.default"), "light");
+    assert_eq!(files.text().as_deref(), Some(newer));
+
+    files.disk().text = None;
+    assert!(svc.set("theme.default", "e-ink").unwrap().changed);
+    assert_eq!(
+        files.json(),
+        serde_json::json!({"$version": 1, "theme.default": "e-ink"})
+    );
+}
+
 // ── 락 — 읽기는 쓰기를 기다리지 않고, 알림은 rev 순서로 나간다 ──
 
 /// 쓰기마다 `entered` 로 알리고 `release` 에서 하나를 받을 때까지 멈추는 디스크(송신단이 사라지면 멈추지
@@ -941,7 +998,7 @@ struct GatedFiles {
 }
 
 impl SettingsFiles for GatedFiles {
-    fn read(&self) -> io::Result<RawFile> {
+    fn read(&self) -> io::Result<String> {
         self.inner.read()
     }
 

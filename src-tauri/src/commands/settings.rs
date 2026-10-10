@@ -57,7 +57,8 @@ pub fn get_ui_settings(
 }
 
 /// `settings.get` 의 사람 경로 — `key` = 정확한 키 또는 `.` 으로 끝나는 접두 · 빼면 전부.
-/// 오류 문구는 서비스의 것 그대로다(종류 = 버스 쪽 코드 NOT_FOUND · INVALID_ARGUMENT · INTERNAL).
+/// 오류 문구는 서비스의 것 그대로다(종류 = 버스 쪽 코드 NOT_FOUND · INVALID_ARGUMENT). 쓰기 둘([`settings_set`] ·
+/// [`settings_reset`])도 문구는 그대로이고 종류가 둘 더 있다 — CONFLICT(새 판이 쓴 파일) · INTERNAL.
 #[tauri::command]
 pub fn settings_get(
     settings: State<'_, Arc<SettingsService>>,

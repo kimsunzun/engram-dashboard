@@ -60,6 +60,7 @@ const CRASH_COPY: readonly string[] = ['none', 'awaiting', 'answered'] satisfies
 const STATE_FILE: readonly string[] = [
   'ok',
   'unreadable',
+  'newer',
   'corrupt_copied_aside',
   'corrupt_not_copied',
 ] satisfies StateFileStatus[]

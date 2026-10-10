@@ -16,6 +16,7 @@ use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use engram_dashboard_base::file::Claim;
 use engram_dashboard_base::time::SystemClock;
 use engram_dashboard_base::{logging, sync};
 use tauri::plugin::{Builder as PluginBuilder, TauriPlugin};
@@ -101,7 +102,7 @@ impl Boot {
         self.session.hold_lock(lock::acquire(run_dir));
 
         let files = FsBootFiles::in_dir(state_dir);
-        let plan = boot::prepare(&files);
+        let mut plan = boot::prepare(&files);
 
         let model = match &plan.model {
             BootModel::Default => ViewManager::new(),
@@ -112,8 +113,13 @@ impl Boot {
                 restored.layout
             }
         };
-        let marker =
-            boot::write_run_marker(&files, &plan, to_persisted(&model), SystemClock.wall_ms());
+        let marker = boot::write_run_marker(
+            &files,
+            &mut plan,
+            to_persisted(&model),
+            SystemClock.wall_ms(),
+        );
+        let claim = boot::saver_claim(&plan, marker);
 
         let revision = {
             // 이 락을 부팅 단계보다 먼저 잡는 쪽이 없어 독이 들 수 없다 — 들었어도 모델을 통째로 갈아끼운다.
@@ -149,6 +155,7 @@ impl Boot {
             files: saver::Fs::new(state_dir.join(STATE_FILE), state_dir.join(CRASH_COPY_FILE)),
             revision,
             carry_resolved,
+            claim,
         });
         tracing::info!(
             module = "state",
@@ -163,10 +170,14 @@ impl Boot {
     }
 }
 
-// TRD S21-storage §6-5 — 판정(③)과 동작(④)이 끝난 계획에서 읽는다.
+// TRD S21-storage §6-5 — 판정(③) · 동작(④) · 실행 표식(⑤ — 쓰기 직전 재판정이 거절하면 가드를 싣는다)이 끝난
+//   계획에서 읽는다.
 fn state_file_status(plan: &BootPlan) -> StateFileStatus {
-    if matches!(plan.guard, Some(Guard::StateUnreadable(_))) {
-        return StateFileStatus::Unreadable;
+    match plan.guard {
+        Some(Guard::StateUnreadable(_)) => return StateFileStatus::Unreadable,
+        // ADR-0291 R2
+        Some(Guard::StateNewer { .. }) => return StateFileStatus::Newer,
+        Some(Guard::CrashCopyNotWritten(_)) | None => {}
     }
     match plan.state_aside {
         Some(StateAside::CopiedAside) => StateFileStatus::CorruptCopiedAside,
@@ -216,6 +227,8 @@ struct PendingSaver {
     revision: StateRevision,
     /// 실행 표식(⑤)이 실은 답한 사본의 해시 — 기록기가 이어 싣고 다시 지운다.
     carry_resolved: Option<String>,
+    /// 이 실행이 `state.json` 을 이미 잡았나(`boot::saver_claim`) — 기록기의 저장 직전 재판정 축.
+    claim: Claim,
 }
 
 // [`StateSession::published_saver`] 의 답.
@@ -259,6 +272,7 @@ impl StateSession {
             SystemClock,
             pending.revision,
             pending.carry_resolved,
+            pending.claim,
             closed,
         ) {
             Ok(handle) => self.publish_saver(handle),
@@ -741,6 +755,30 @@ mod tests {
         assert!(state_dir.join(STATE_FILE).is_dir());
     }
 
+    /// ADR-0291 R2: 새 판이 쓴 `state.json` 은 가드다 — `newer` 로 알리고 · 기록기 없이 · 파일 바이트 그대로.
+    #[test]
+    fn a_newer_state_file_is_reported_as_newer_and_left_byte_for_byte() {
+        let run_dir = temp_dir("run");
+        let state_dir = temp_dir("state");
+        let newer = r#"{"version":2,"saved_at_ms":1,"clean_exit":true,"windows":[]}"#;
+        std::fs::write(state_dir.join(STATE_FILE), newer).unwrap();
+        let (boot, session) = boot(&LayoutState::new());
+        boot.run_steps(&run_dir, &state_dir);
+
+        assert_eq!(boot.restore.status().state_file, StateFileStatus::Newer);
+        assert!(!boot.restore.status().saves, "가드 — 저장하지 않는다");
+        assert!(session.cell().saver_start.is_none(), "기록기 재료가 없다");
+        session.shutdown();
+        assert_eq!(
+            std::fs::read_to_string(state_dir.join(STATE_FILE)).unwrap(),
+            newer
+        );
+        assert!(
+            !state_dir.join("state.json.corrupt").exists(),
+            "떠 두지 않는다"
+        );
+    }
+
     #[test]
     fn an_unusable_state_file_kept_aside_is_reported_from_the_first_status() {
         let run_dir = temp_dir("run");
@@ -806,12 +844,18 @@ mod tests {
             carry_resolved: None,
             guard,
             state_aside,
+            claim: Claim::NotYet,
         };
         let unreadable = || Some(Guard::StateUnreadable("잠김".into()));
         let not_written = || Some(Guard::CrashCopyNotWritten("새 판의 사본".into()));
         for (guard, aside, expected) in [
             (None, None, StateFileStatus::Ok),
             (unreadable(), None, StateFileStatus::Unreadable),
+            (
+                Some(Guard::StateNewer { found: 2 }),
+                None,
+                StateFileStatus::Newer,
+            ),
             (not_written(), None, StateFileStatus::Ok),
             (
                 None,
@@ -1139,6 +1183,7 @@ mod tests {
             SystemClock,
             pending.revision,
             pending.carry_resolved,
+            pending.claim,
             closed,
         )
         .expect("기록기 스레드")
@@ -1169,6 +1214,7 @@ mod tests {
             SystemClock,
             pending.revision,
             pending.carry_resolved,
+            pending.claim,
             closed,
         )
         .expect("기록기 스레드");

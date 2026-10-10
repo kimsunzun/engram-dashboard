@@ -29,7 +29,7 @@ durable: boolean | null,
 /**
  * 이 실행이 화면 상태를 저장하나 — 부팅 가드(TRD §6-5 ③)로 정한다. `true` = 가드가 아니다: 기록기를 띄우려
  * 한다(띄우기 · 쓰기 성공은 보장하지 않는다 — ⑦ 에서 기록기를 못 띄운 실행도 `true` 다). `false` = 가드다: 이
- * 실행은 화면 상태를 하나도 저장하지 않고 다음 부팅이 다시 판정한다 — 가드 ⅰ(`state_file` 이 `Unreadable`) ·
- * 가드 ⅱ(떠야 할 크래시 사본을 못 떴다 — `state_file` 은 `Ok` 다).
+ * 실행은 화면 상태를 하나도 저장하지 않고 다음 부팅이 다시 판정한다 — 가드 ⅰ(`state_file` 이 `Unreadable` ·
+ * `Newer`) · 가드 ⅱ(떠야 할 크래시 사본을 못 떴다 — `state_file` 은 `Ok` 다).
  */
 saves: boolean, state_file: StateFileStatus, };

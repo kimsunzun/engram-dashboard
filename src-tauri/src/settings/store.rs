@@ -7,19 +7,23 @@
 //! - **쓰기([`write`])는 읽고-고치고-쓰기다** — 호출자가 읽은 문서([`read_document`])에서 받은 키만 바꾼다.
 //!   앱 밖에서 고친 다른 키와 모르는 키가 그대로 남는다. 서비스의 쓰기 직렬화 락 아래서만 부른다 — 두
 //!   쓰기의 읽고-고치고-쓰기가 겹치면 나중 쓰기가 먼저 쓰기의 변경을 지운다.
-//! - **통째로 못 쓰는 파일**(JSON 아님 · 객체 아님 · 상한 초과 · UTF-8 아님 · 모르는 `$version`)은 적재가
+//! - **읽기 판정 · 덮어도 되나는 base `file` 규칙 하나다** — 이 파일의 몫은 [`SPEC`](버전 키 · 판 · 상한)뿐이다.
+//! - **통째로 못 쓰는 파일**(JSON 아님 · 객체 아님 · 상한 초과 · UTF-8 아님 · `$version` 꼴이 틀림)은 적재가
 //!   기본값으로 접고 손대지 않는다. 그 위에 쓰는 첫 쓰기가 원본을 `settings.json.corrupt` 로 **떠 둔 뒤** 그
 //!   자리를 원자적으로 갈아끼운다 — 파일이 없는 순간이 없다. 새 파일은 메모리의 값에서 다시 짓는다. 사본은
 //!   하나뿐이다([`SettingsFiles::copy_aside`]). 떠 두기가 실패하면 그 쓰기도 실패하고 원본은 그대로다.
 //!   ★읽기 자체의 IO 실패는 그 무리가 아니다★ — 잠깐 잠긴 멀쩡한 파일을 덮지 않도록 그때 쓰기는 실패한다.
+//! - **이 셸보다 새 판이 쓴 파일**(`$version` 이 1 보다 크다)도 적재가 기본값으로 접지만 ★덮지도 떠 두지도
+//!   않는다★ — 그 위의 쓰기는 거절이다([`WriteError::Newer`]). 쓸 때마다 다시 읽으므로 파일이 바뀌면 풀린다.
 //! - **아는 키의 못 쓸 값**은 기본값으로 접는다 — 파일에서는 그 키를 쓰거나 되돌릴 때까지 그대로다.
 // ADR-0265
+// ADR-0291: 버전 없음 = 1 판 · 새 판이 쓴 파일은 덮지 않는다 · 판정은 쓰기마다 다시 한다.
 
 use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use engram_dashboard_base::file;
+use engram_dashboard_base::file::{self, Loaded, Parsed, Refused, WritePolicy};
 use serde_json::{Map, Value};
 
 use super::registry::{self, SETTINGS};
@@ -32,14 +36,14 @@ const VERSION: u64 = 1;
 /// 넘는 원문을 쓰면 다음 적재가 그 파일 전체를 못 쓴다고 접는다.
 const MAX_SETTINGS_BYTES: u64 = 64 * 1024;
 
-/// 파일 원문을 가져온 결과.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RawFile {
-    Missing,
-    Text(String),
-    /// 파일은 있으나 원문이 못 된다(상한 초과 · UTF-8 아님) — 사유 문구. 손상과 같은 무게로 다룬다.
-    Unusable(String),
-}
+/// 설정 파일의 읽기 규칙 — 모양은 따로 보지 않는다(키마다 관용 — 못 쓸 값은 그 키만 기본값).
+// ADR-0291
+const SPEC: file::Spec = file::Spec {
+    version_key: VERSION_KEY,
+    current: VERSION,
+    cap: MAX_SETTINGS_BYTES,
+    shape: file::any_shape,
+};
 
 /// 설정 파일 하나에 대한 IO seam — 시험은 메모리 가짜(`fake::MemFiles`)로 돈다.
 ///
@@ -47,8 +51,10 @@ pub enum RawFile {
 /// 교착이다(읽기는 그 락을 안 잡는다).
 // ADR-0012
 pub trait SettingsFiles: Send {
-    /// `Err` = 읽기 자체의 IO 실패(권한 · 공유 위반 등). 이때 쓰기는 파일을 덮지 않고 실패한다.
-    fn read(&self) -> io::Result<RawFile>;
+    /// 원문 — [`file::read_file_capped`] 와 같은 계약: 없으면 `NotFound` · 상한 초과 · UTF-8 아님은
+    /// `InvalidData`(못 쓰는 파일) · 그 밖은 읽기 자체의 IO 실패(권한 · 잠김 재시도 뒤 등)다. 마지막 것이면 쓰기는
+    /// 파일을 덮지 않고 실패한다.
+    fn read(&self) -> io::Result<String>;
     /// 원자적으로 통째로 갈아끼운다. 폴더가 없으면 만든다.
     fn write_atomic(&self, text: &str) -> io::Result<()>;
     /// 지금 파일을 옆 이름(`<이름>.corrupt`)에 **떠 두고** 그 자리를 돌려준다 — 원본은 그 자리에 그대로 둔다.
@@ -72,26 +78,12 @@ impl FsSettingsFiles {
 }
 
 impl SettingsFiles for FsSettingsFiles {
-    fn read(&self) -> io::Result<RawFile> {
-        let opened = match std::fs::File::open(&self.path) {
-            Ok(opened) => opened,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(RawFile::Missing),
-            Err(e) => return Err(e),
-        };
-        match file::read_capped(opened, MAX_SETTINGS_BYTES) {
-            Ok(text) => Ok(RawFile::Text(text)),
-            Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                Ok(RawFile::Unusable(e.to_string()))
-            }
-            Err(e) => Err(e),
-        }
+    fn read(&self) -> io::Result<String> {
+        file::read_file_capped(&self.path, SPEC.cap, OS_HOOKS)
     }
 
+    // 셸 config 폴더는 아무도 미리 만들지 않는다 — 적재가 만들면 안 되므로 첫 쓰기가 만든다(`file::write_atomic`).
     fn write_atomic(&self, text: &str) -> io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            // 셸 config 폴더는 아무도 미리 만들지 않는다 — 적재가 만들면 안 되므로 첫 쓰기가 만든다.
-            std::fs::create_dir_all(dir)?;
-        }
         file::write_atomic(&self.path, text.as_bytes(), OS_HOOKS)
     }
 
@@ -104,57 +96,30 @@ impl SettingsFiles for FsSettingsFiles {
     }
 }
 
-/// 원문을 문서로 본 결과.
+/// 파일을 한 번 읽어 판정한 것 — base 판정([`file::classify`]) 그대로다.
 #[derive(Debug)]
-pub(super) enum Document {
-    Missing,
-    Usable(Map<String, Value>),
-    /// 통째로 못 쓴다 — 사유 문구.
-    Unusable(String),
-}
+pub(super) struct Document(Loaded);
 
 impl Document {
     /// 파일의 `key` 항목이 목표와 다른가 — 목표 `None` = 그 키가 없어야 한다(기본값) · `Some(v)` = 정규 문자열
-    /// `v` 여야 한다. 철자만 다른 값(`"LIGHT"`)도 다르다. `None` = 가를 수 없다(통째로 못 쓰는 문서).
+    /// `v` 여야 한다. 철자만 다른 값(`"LIGHT"`)도 다르다. `None` = 가를 수 없다(못 읽었거나 통째로 못 쓰는 파일 ·
+    /// 새 판이 쓴 파일).
     pub(super) fn differs(&self, key: &str, target: Option<&str>) -> Option<bool> {
-        match self {
-            Document::Missing => Some(target.is_some()),
-            Document::Usable(map) => Some(match (map.get(key), target) {
+        match &self.0 {
+            Loaded::Missing => Some(target.is_some()),
+            Loaded::Parsed(Parsed::Usable { doc, .. }) => Some(match (doc.get(key), target) {
                 (None, None) => false,
                 (Some(Value::String(found)), Some(target)) => found != target,
                 _ => true,
             }),
-            Document::Unusable(_) => None,
+            Loaded::Parsed(Parsed::Unusable(_) | Parsed::Newer { .. }) | Loaded::Failed(_) => None,
         }
     }
 }
 
-/// 파일을 한 번 읽어 문서로 — `Err` = 읽기 자체의 IO 실패.
-pub(super) fn read_document(files: &dyn SettingsFiles) -> io::Result<Document> {
-    let text = match files.read()? {
-        RawFile::Missing => return Ok(Document::Missing),
-        RawFile::Unusable(reason) => return Ok(Document::Unusable(reason)),
-        RawFile::Text(text) => text,
-    };
-    // 메모장 · PowerShell 이 UTF-8 로 저장하면 BOM 을 붙인다 — 손으로 고친 파일이 그것만으로 못 쓰게 되지 않게.
-    let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-    let map = match serde_json::from_str::<Value>(text) {
-        Ok(Value::Object(map)) => map,
-        Ok(_) => return Ok(Document::Unusable("JSON 객체가 아니다".to_string())),
-        Err(e) => return Ok(Document::Unusable(format!("JSON 이 아니다: {e}"))),
-    };
-    // 없으면 1 로 본다(손으로 쓴 파일) · 다른 값이면 모르는 형식이라 통째로 못 쓴다 — 고쳐 쓰면 그 형식을
-    // 1 로 낮춰 덮게 된다. 떠 둔 사본에는 남는다. `1.0` 은 1 이다(JSON 도구가 수를 실수로 다시 쓰기도 한다).
-    match map.get(VERSION_KEY) {
-        None => {}
-        Some(v) if v.as_f64() == Some(VERSION as f64) => {}
-        Some(_) => {
-            return Ok(Document::Unusable(format!(
-                "모르는 `{VERSION_KEY}` — 이 셸은 {VERSION} 만 안다"
-            )))
-        }
-    }
-    Ok(Document::Usable(map))
+/// 파일을 한 번 읽어 판정한다 — 버전 없음 = 1 판 · `1.0` 도 1 판 · BOM 하나는 무시(base `file::parse`).
+pub(super) fn read_document(files: &dyn SettingsFiles) -> Document {
+    Document(file::classify(files.read(), &SPEC))
 }
 
 /// 기본값과 다른 값(정규형)만 — 키 = 표의 키.
@@ -167,6 +132,10 @@ pub(super) enum LoadNote {
     Missing,
     /// 통째로 못 쓰는 파일 — 사유 문구.
     Unusable(String),
+    /// 이 셸보다 새 판이 쓴 파일 — 그 판.
+    Newer {
+        found: u64,
+    },
     /// 읽기 자체의 IO 실패 — 오류 문구.
     ReadFailed(String),
     /// 아는 키의 못 쓸 값 — 사유 문구([`registry::SettingDef::normalize`] 의 `Err` 는 값을 싣지 않는다).
@@ -195,6 +164,13 @@ impl LoadNote {
                 source = %origin,
                 "설정 파일을 통째로 못 써 기본값으로 둔다(첫 쓰기가 옆에 떠 둔 뒤 새로 쓴다): {reason}"
             ),
+            LoadNote::Newer { found } => tracing::error!(
+                module = "settings",
+                source = %origin,
+                found = *found,
+                current = VERSION,
+                "설정 파일이 이 셸보다 새 판이 쓴 것이라 기본값으로 둔다 — 덮지 않으며 설정 바꾸기는 오류로 돌아간다"
+            ),
             LoadNote::ReadFailed(error) => tracing::warn!(
                 module = "settings",
                 source = %origin,
@@ -220,13 +196,16 @@ impl LoadNote {
 /// 파일 → 기본값과 다른 값 + 남길 로그. ★실패는 전부 기본값으로 접는다★(패닉 · 전파 없음) · 파일을 건드리지
 /// 않는다 · 로그를 내지 않는다(모듈 헤더).
 pub(super) fn load(files: &dyn SettingsFiles) -> (Overrides, Vec<LoadNote>) {
-    let map = match read_document(files) {
-        Ok(Document::Usable(map)) => map,
-        Ok(Document::Missing) => return (Overrides::new(), vec![LoadNote::Missing]),
-        Ok(Document::Unusable(reason)) => {
+    let map = match read_document(files).0 {
+        Loaded::Parsed(Parsed::Usable { doc, .. }) => doc,
+        Loaded::Missing => return (Overrides::new(), vec![LoadNote::Missing]),
+        Loaded::Parsed(Parsed::Unusable(reason)) => {
             return (Overrides::new(), vec![LoadNote::Unusable(reason)])
         }
-        Err(e) => return (Overrides::new(), vec![LoadNote::ReadFailed(e.to_string())]),
+        Loaded::Parsed(Parsed::Newer { found }) => {
+            return (Overrides::new(), vec![LoadNote::Newer { found }])
+        }
+        Loaded::Failed(e) => return (Overrides::new(), vec![LoadNote::ReadFailed(e.to_string())]),
     };
 
     let mut overrides = Overrides::new();
@@ -261,32 +240,61 @@ pub(super) fn load(files: &dyn SettingsFiles) -> (Overrides, Vec<LoadNote>) {
     (overrides, notes)
 }
 
+/// [`write`] 가 그 파일을 쓰지 않은 까닭.
+#[derive(Debug)]
+pub(super) enum WriteError {
+    /// 이 셸보다 새 판이 쓴 파일이다 — 덮지도 떠 두지도 않았다.
+    Newer { found: u64 },
+    /// 지금 파일을 못 읽었다(잠김 예산 뒤 · 권한) — 무엇이 들었는지 몰라 덮지도 떠 두지도 않았다.
+    Unreadable(io::Error),
+    /// 떠 두기나 쓰기가 실패했다 · 지은 원문이 읽기 상한을 넘는다.
+    Io(io::Error),
+}
+
+impl From<io::Error> for WriteError {
+    fn from(error: io::Error) -> Self {
+        WriteError::Io(error)
+    }
+}
+
 /// 받은 키만 바꿔 다시 쓴다 — `Some` = 그 값을 적는다 · `None` = 그 키를 지운다(기본값).
 ///
-/// `document` = 이 쓰기 직전에 [`read_document`] 로 읽은 것. 파일이 없거나 통째로 못 쓰면 새 파일을 `memory`
-/// (지금 유효한 덮어쓰기 전부)에서 짓는다 — 안 그러면 쓰기 한 번이 화면에 아직 보이는 다른 값을 디스크에서
-/// 지운다. 통째로 못 쓰는 파일은 갈아끼우기 전에 옆에 떠 둔다([`SettingsFiles::copy_aside`]).
+/// `document` = 이 쓰기 직전에 [`read_document`] 로 읽은 것 — 덮어도 되나는 그것으로 base 규칙
+/// ([`Loaded::write_policy`])이 정한다. 파일이 없거나 통째로 못 쓰면 새 파일을 `memory`(지금 유효한 덮어쓰기
+/// 전부)에서 짓는다 — 안 그러면 쓰기 한 번이 화면에 아직 보이는 다른 값을 디스크에서 지운다. 통째로 못 쓰는
+/// 파일은 갈아끼우기 전에 옆에 떠 둔다([`SettingsFiles::copy_aside`]). 새 판이 쓴 파일 · 못 읽은 파일은 덮지도
+/// 떠 두지도 않는다.
 ///
 /// `Err` 면 파일은 그대로다. ★떠 두기 뒤의 실패면 앞서 떠 둔 사본은 이미 이 원본으로 덮였다★(사본 이름이
 /// 하나뿐). 지은 원문이 읽기 상한을 넘으면 떠 두지도 쓰지도 않고 `Err`.
 /// ★한 호출 = 한 파일(TRD §5-2)★ — 키가 여러 파일로 갈리게 되면 여기서 걸치는 묶음을 거절한다.
 // ADR-0265
+// ADR-0291 R8 · R16
 pub(super) fn write(
     files: &dyn SettingsFiles,
     document: Document,
     memory: &Overrides,
     changes: &[(&'static str, Option<String>)],
-) -> io::Result<()> {
+) -> Result<(), WriteError> {
+    // 설정은 그 파일을 통째로 덮지 않고 지금 파일 위에 바꾼 키만 얹으므로 늘 이 실행의 것으로 친다.
+    let copy_aside_first = match document.0.write_policy(file::Claim::Adopted) {
+        WritePolicy::Write => false,
+        WritePolicy::CopyAsideFirst => true,
+        WritePolicy::Refuse(Refused::Newer { found }) => return Err(WriteError::Newer { found }),
+        // 거절 — 그 읽기 오류는 아래 `Loaded::Failed` 갈래가 싣고 돌려준다.
+        WritePolicy::Refuse(Refused::ReadFailed) => false,
+    };
     let from_memory = || -> Map<String, Value> {
         memory
             .iter()
             .map(|(key, value)| ((*key).to_string(), Value::String(value.clone())))
             .collect()
     };
-    let (mut map, unusable) = match document {
-        Document::Usable(map) => (map, None),
-        Document::Missing => (from_memory(), None),
-        Document::Unusable(reason) => (from_memory(), Some(reason)),
+    let (mut map, unusable) = match document.0 {
+        Loaded::Parsed(Parsed::Usable { doc, .. }) => (doc, None),
+        Loaded::Failed(e) => return Err(WriteError::Unreadable(e)),
+        Loaded::Missing | Loaded::Parsed(Parsed::Newer { .. }) => (from_memory(), None),
+        Loaded::Parsed(Parsed::Unusable(reason)) => (from_memory(), Some(reason)),
     };
     for (key, value) in changes {
         match value {
@@ -299,25 +307,18 @@ pub(super) fn write(
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
     // 사람이 손으로도 고치는 파일이라 줄 끝을 남긴다.
     text.push('\n');
-    if text.len() as u64 > MAX_SETTINGS_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "쓸 원문({} 바이트)이 읽기 상한 {MAX_SETTINGS_BYTES} 바이트를 넘는다",
-                text.len()
-            ),
-        ));
-    }
-    if let Some(reason) = unusable {
+    file::check_cap(text.len(), &SPEC)?;
+    if copy_aside_first {
         let to = files.copy_aside()?;
         tracing::warn!(
             module = "settings",
             source = %files.origin(),
             copied_to = %to.display(),
-            "못 쓰는 설정 파일을 옆에 떠 두고(앞선 사본이 있었으면 덮었다) 그 자리에 새로 쓴다: {reason}"
+            "못 쓰는 설정 파일을 옆에 떠 두고(앞선 사본이 있었으면 덮었다) 그 자리에 새로 쓴다: {}",
+            unusable.as_deref().unwrap_or_default()
         );
     }
-    files.write_atomic(&text)
+    Ok(files.write_atomic(&text)?)
 }
 
 /// 메모리 가짜 디스크 — 시험이 손잡이를 쥔 채 서비스에 넘긴다.
@@ -327,7 +328,7 @@ pub(super) mod fake {
     use std::path::PathBuf;
     use std::sync::{Arc, Mutex, MutexGuard};
 
-    use super::{RawFile, SettingsFiles};
+    use super::SettingsFiles;
 
     #[derive(Default)]
     pub struct Disk {
@@ -369,7 +370,7 @@ pub(super) mod fake {
     }
 
     impl SettingsFiles for MemFiles {
-        fn read(&self) -> io::Result<RawFile> {
+        fn read(&self) -> io::Result<String> {
             let disk = self.disk();
             if disk.fail_read {
                 return Err(io::Error::new(
@@ -378,12 +379,11 @@ pub(super) mod fake {
                 ));
             }
             if disk.unusable {
-                return Ok(RawFile::Unusable("가짜 상한 초과".to_string()));
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "가짜 상한 초과"));
             }
-            Ok(match &disk.text {
-                Some(text) => RawFile::Text(text.clone()),
-                None => RawFile::Missing,
-            })
+            disk.text
+                .clone()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
         }
 
         fn write_atomic(&self, text: &str) -> io::Result<()> {
@@ -425,8 +425,11 @@ mod tests {
         load(files).0
     }
 
-    fn write_doc(files: &MemFiles, changes: &[(&'static str, Option<String>)]) -> io::Result<()> {
-        let document = read_document(files)?;
+    fn write_doc(
+        files: &MemFiles,
+        changes: &[(&'static str, Option<String>)],
+    ) -> Result<(), WriteError> {
+        let document = read_document(files);
         write(files, document, &Overrides::new(), changes)
     }
 
@@ -512,8 +515,8 @@ mod tests {
             "{not json",
             "[1,2]",
             "\"light\"",
-            r#"{"$version":2,"theme.default":"light"}"#,
             r#"{"$version":"1","theme.default":"light"}"#,
+            r#"{"$version":0,"theme.default":"light"}"#,
             r#"{"$version":1.5,"theme.default":"light"}"#,
         ] {
             let files = MemFiles::with_text(text);
@@ -532,6 +535,35 @@ mod tests {
         files.disk().unusable = true;
         assert!(overrides_of(&files).is_empty());
         assert_eq!(files.disk().copies, 0);
+    }
+
+    /// ADR-0291 R2: 새 판이 쓴 파일은 읽지 않고(기본값) · 적재 로그가 그 판을 싣는다 · 손대지 않는다.
+    #[test]
+    fn a_newer_version_file_loads_as_defaults_and_is_left_alone() {
+        let text = r#"{"$version":2,"theme.default":"light"}"#;
+        let files = MemFiles::with_text(text);
+        let (overrides, notes) = load(&files);
+        assert!(overrides.is_empty());
+        assert_eq!(notes, vec![LoadNote::Newer { found: 2 }]);
+        let disk = files.disk();
+        assert_eq!(disk.text.as_deref(), Some(text));
+        assert_eq!((disk.writes, disk.copies), (0, 0));
+    }
+
+    /// ADR-0291 R2 · R8: 새 판이 쓴 파일 위의 쓰기는 거절이다 — 덮지도 떠 두지도 않는다.
+    #[test]
+    fn a_write_over_a_newer_version_file_is_refused_without_a_copy() {
+        for text in [
+            r#"{"$version":2,"theme.default":"light"}"#,
+            r#"{"$version":7.0}"#,
+        ] {
+            let files = MemFiles::with_text(text);
+            let err = write_doc(&files, &[("theme.default", Some("e-ink".into()))]).unwrap_err();
+            assert!(matches!(err, WriteError::Newer { .. }), "{text}: {err:?}");
+            let disk = files.disk();
+            assert_eq!(disk.text.as_deref(), Some(text), "{text}");
+            assert_eq!((disk.writes, disk.copies), (0, 0), "{text}");
+        }
     }
 
     #[test]
@@ -572,8 +604,8 @@ mod tests {
 
     #[test]
     fn differs_compares_the_raw_entry_with_the_target() {
-        let usable = |text: &str| match read_document(&MemFiles::with_text(text)).unwrap() {
-            doc @ Document::Usable(_) => doc,
+        let usable = |text: &str| match read_document(&MemFiles::with_text(text)) {
+            doc @ Document(Loaded::Parsed(Parsed::Usable { .. })) => doc,
             other => panic!("{other:?}"),
         };
         let doc = usable(r#"{"theme.default":"light","chat.style.fontSize":"bad","n":1}"#);
@@ -589,16 +621,22 @@ mod tests {
             "정규 철자가 아니면 다르다"
         );
         assert_eq!(
-            Document::Missing.differs("theme.default", None),
+            Document(Loaded::Missing).differs("theme.default", None),
             Some(false)
         );
         assert_eq!(
-            Document::Missing.differs("theme.default", Some("light")),
+            Document(Loaded::Missing).differs("theme.default", Some("light")),
             Some(true)
         );
         assert_eq!(
-            Document::Unusable(String::new()).differs("theme.default", None),
+            Document(Loaded::Parsed(Parsed::Unusable(String::new())))
+                .differs("theme.default", None),
             None
+        );
+        assert_eq!(
+            Document(Loaded::Parsed(Parsed::Newer { found: 2 })).differs("theme.default", None),
+            None,
+            "새 판이 쓴 파일은 가를 수 없다"
         );
     }
 
@@ -644,7 +682,7 @@ mod tests {
     fn a_usable_file_is_not_reseeded_from_memory() {
         let files = MemFiles::with_text(r#"{"$version":1}"#);
         let memory = Overrides::from([("chat.style.userPy", "9px".to_string())]);
-        let document = read_document(&files).unwrap();
+        let document = read_document(&files);
         write(
             &files,
             document,
@@ -666,7 +704,7 @@ mod tests {
             ("chat.style.userPy", "9px".to_string()),
             ("theme.default", "e-ink".to_string()),
         ]);
-        let document = read_document(&files).unwrap();
+        let document = read_document(&files);
         write(
             &files,
             document,
@@ -687,7 +725,7 @@ mod tests {
         let memory = Overrides::from([("chat.style.userPy", "9px".to_string())]);
         write(
             &files,
-            Document::Missing,
+            Document(Loaded::Missing),
             &memory,
             &[("theme.default", Some("light".into()))],
         )
@@ -749,7 +787,10 @@ mod tests {
         assert!(original.len() as u64 <= MAX_SETTINGS_BYTES);
         let files = MemFiles::with_text(&original);
         let err = write_doc(&files, &[("theme.default", Some("light".into()))]).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(
+            matches!(&err, WriteError::Io(e) if e.kind() == io::ErrorKind::InvalidData),
+            "{err:?}"
+        );
         let disk = files.disk();
         assert_eq!(disk.text.as_deref(), Some(original.as_str()));
         assert_eq!(disk.writes, 0);

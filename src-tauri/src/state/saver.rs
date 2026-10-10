@@ -7,11 +7,15 @@
 //! - **쓰기 실패 = 로그만**(사용자 결정 D8). 스냅숏 원천 실패 · 디스크 오류면 그 변경을 안 쓴 것으로 남겨
 //!   디바운스가 다시 쓰고, 코덱이 거절한 스냅숏(다음 부팅이 못 읽을 모양)은 다음 변경을 기다린다. 정상 종료
 //!   쓰기(`Final`)는 실패해도 다시 하지 않는다 — 기록기가 그대로 끝난다.
+//! - **쓰기마다 그 직전에 지금 `state.json` 을 다시 판정한다**(base `file` 규칙 — 머리 모양까지). 새 판이 쓴
+//!   파일이면 쓰지 않고 코덱 거절처럼 다음 변경을 기다리고, 못 읽었으면 디스크 오류처럼 디바운스 뒤 다시 판정한다.
+//!   손상된 파일 · 이 실행이 아직 쓰지 않은 동안 놓인 쓸 만한 파일은 `state.json.corrupt` 로 떠 둔 뒤 쓴다 — 떠
+//!   두기가 실패해도 쓴다(D8).
 //! - **해결 칸** = 답한 크래시 사본의 해시. ★기록기가 `Resolve` 를 **꺼낼 때** 선다★ — 보내는 쪽이 세우면 꺼내기
 //!   전에 뜬 스냅숏(답 뒤의 화면을 아직 안 담은 것)이 해시를 싣는다(I8). 선 뒤로 쓰는 스냅숏마다 실리고, 쓰기가
 //!   성공할 때마다 사본을 다시 읽어 해시가 같을 때만 지운다(N1). 지웠거나 · 없거나 · 다른 사본이면 칸을 비운다.
 //! - **닫힘** = [`SaverHandle::finish`] 가 마감을 넘기면 세우는 표지. 선 뒤로는 발행(rename)도 사본 지우기도
-//!   하지 않는다 — 다음 부팅이 직전의 `clean_exit:false` 를 읽고 묻는다.
+//!   떠 두기도 하지 않는다 — 다음 부팅이 직전의 `clean_exit:false` 를 읽고 묻는다.
 //!
 //! 기록기는 락을 쥐지 않는다 — 스냅숏 원천이 자기 락 안에서 복사해 건네고, 직렬화 · 디스크는 그 밖에서 한다
 //! (§6-3).
@@ -25,7 +29,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use engram_dashboard_base::file::{self, WriteOutcome};
+use engram_dashboard_base::file::{self, Claim, Refused, WriteOutcome, WritePolicy};
 use engram_dashboard_base::time::{now_epoch_ms, Clock, SystemClock};
 
 use super::codec::{self, EncodeError, STATE_READ_CAP};
@@ -72,8 +76,15 @@ pub trait SnapshotSource: Send + 'static {
 /// 기록기가 만지는 두 파일 — 운영은 [`Fs`].
 pub trait StateFiles: Send + 'static {
     /// `state.json` 을 원자적으로 갈아끼운다 — `skip` 을 rename 앞마다 물어 서 있으면 발행하지 않고
-    /// [`WriteOutcome::Skipped`](`file::write_atomic_unless` 와 같은 계약).
+    /// [`WriteOutcome::Skipped`](`file::write_atomic_unless` 와 같은 계약). 폴더가 없으면 만든다.
     fn write_state(&self, text: &str, skip: &dyn Fn() -> bool) -> io::Result<WriteOutcome>;
+
+    /// `state.json` 원문 — 저장 직전 재판정의 원천. [`Self::read_crash_copy`] 와 같은 계약.
+    // ADR-0291 R16
+    fn read_state(&self) -> io::Result<String>;
+
+    /// `state.json` 을 `state.json.corrupt` 로 떠 둔다 — 돌려주는 값 = 사본 자리(`file::copy_aside`).
+    fn copy_aside_state(&self) -> io::Result<PathBuf>;
 
     /// 크래시 사본의 원문 — 없으면 `NotFound`, 상한 초과 · UTF-8 아님은 `InvalidData`
     /// (`file::read_file_capped` 와 같은 계약).
@@ -114,6 +125,14 @@ impl StateFiles for Fs {
         file::write_atomic_unless(&self.state, text.as_bytes(), OS_HOOKS, skip)
     }
 
+    fn read_state(&self) -> io::Result<String> {
+        file::read_file_capped(&self.state, STATE_READ_CAP, OS_HOOKS)
+    }
+
+    fn copy_aside_state(&self) -> io::Result<PathBuf> {
+        file::copy_aside(&self.state, OS_HOOKS)
+    }
+
     fn read_crash_copy(&self) -> io::Result<String> {
         file::read_file_capped(&self.crash_copy, STATE_READ_CAP, OS_HOOKS)
     }
@@ -131,8 +150,8 @@ pub enum SaveOutcome {
     Written,
     /// 닫힌 뒤라 발행하지 않았다 — 실패가 아니고 다시 하지 않는다.
     Skipped,
-    /// 스냅숏 원천 실패 · 코덱 거절([`EncodeError`]) · 디스크 오류. 해결 칸은 그대로라 다음 성공 쓰기가
-    /// 싣는다 — 정상 종료 쓰기(`Final`)의 실패 뒤엔 다음 쓰기가 없다.
+    /// 스냅숏 원천 실패 · 코덱 거절([`EncodeError`]) · 저장 직전 재판정의 거절(새 판 · 못 읽음) · 디스크 오류.
+    /// 해결 칸은 그대로라 다음 성공 쓰기가 싣는다 — 정상 종료 쓰기(`Final`)의 실패 뒤엔 다음 쓰기가 없다.
     Failed,
 }
 
@@ -225,7 +244,9 @@ fn wait(answer: Receiver<SaveOutcome>, deadline: Duration) -> RequestOutcome {
 
 /// 기록기 스레드를 띄운다. `boot_revision` = 부팅 첫 쓰기(§6-5 ⑤)가 담은 변경 번호 — 그 뒤 바뀐 것을 첫 주기가
 /// 싣는다. `carry_resolved` = 부팅이 못 지운 답한 사본의 해시 — 첫 쓰기가 이미 실었으므로 다음 성공 쓰기 뒤
-/// 지우기를 다시 해 본다. `closed` = 이 기록기의 닫힘 표지 — 띄우기 전에 서 있으면 처음부터 발행하지 않는다.
+/// 지우기를 다시 해 본다. `claim` = 이 실행이 `state.json` 을 이미 자기 것으로 잡았나(부팅이 정한다 —
+/// `boot::saver_claim`) — `NotYet` 이면 첫 쓰기 전에 그 자리의 쓸 만한 파일을 떠 둔다. `closed` = 이 기록기의
+/// 닫힘 표지 — 띄우기 전에 서 있으면 처음부터 발행하지 않는다.
 ///
 /// `Err` = 스레드를 못 띄웠다.
 pub fn spawn<S, F, C>(
@@ -234,6 +255,7 @@ pub fn spawn<S, F, C>(
     clock: C,
     boot_revision: S::Revision,
     carry_resolved: Option<String>,
+    claim: Claim,
     closed: CloseFlag,
 ) -> io::Result<SaverHandle>
 where
@@ -248,6 +270,7 @@ where
         closed.0,
         boot_revision,
         carry_resolved,
+        claim,
     );
     start(saver, POLL_INTERVAL).map(|(handle, _detached)| handle)
 }
@@ -360,6 +383,12 @@ enum Cause {
 enum Failure {
     Snapshot(String),
     Rejected(EncodeError),
+    /// 저장 직전 재판정의 거절 — 지금 `state.json` 이 이 셸보다 새 판이 쓴 것이다(그 판).
+    Newer {
+        found: u64,
+    },
+    /// 저장 직전 재판정의 거절 — 지금 `state.json` 을 못 읽어 덮어도 되는지 모른다.
+    Unreadable(io::Error),
     Disk(io::Error),
 }
 
@@ -368,6 +397,8 @@ impl Failure {
         match self {
             Failure::Snapshot(_) => FailureKind::Snapshot,
             Failure::Rejected(_) => FailureKind::Rejected,
+            Failure::Newer { .. } => FailureKind::Newer,
+            Failure::Unreadable(_) => FailureKind::Unreadable,
             Failure::Disk(_) => FailureKind::Disk,
         }
     }
@@ -378,6 +409,11 @@ impl fmt::Display for Failure {
         match self {
             Failure::Snapshot(reason) => f.write_str(reason),
             Failure::Rejected(error) => error.fmt(f),
+            Failure::Newer { found } => write!(
+                f,
+                "state.json 이 이 셸보다 새 판(version {found} — 이 셸은 {STATE_VERSION} 까지)이 쓴 것이다"
+            ),
+            Failure::Unreadable(error) => write!(f, "state.json 을 못 읽었다: {error}"),
             Failure::Disk(error) => error.fmt(f),
         }
     }
@@ -387,6 +423,8 @@ impl fmt::Display for Failure {
 enum FailureKind {
     Snapshot,
     Rejected,
+    Newer,
+    Unreadable,
     Disk,
 }
 
@@ -448,8 +486,12 @@ struct Saver<S: SnapshotSource, F: StateFiles, C: SaverClock> {
     pending_since: Option<Instant>,
     last_change_at: Instant,
     resolved: Option<String>,
+    /// 이 실행이 `state.json` 을 이미 자기 것으로 잡았나 — 첫 성공 쓰기 뒤 `Adopted`.
+    claim: Claim,
     write_failures: Streak<FailureKind>,
     copy_failures: Streak<CopyFailure>,
+    /// 떠 두기 실패의 이어짐 — 쓰기는 그래도 하므로 쓰기 실패 줄과 따로 접는다.
+    aside_failures: Streak<()>,
 }
 
 impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
@@ -460,6 +502,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         closed: Arc<AtomicBool>,
         boot_revision: S::Revision,
         carry_resolved: Option<String>,
+        claim: Claim,
     ) -> Self {
         let now = clock.now();
         Self {
@@ -471,8 +514,10 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
             pending_since: None,
             last_change_at: now,
             resolved: carry_resolved,
+            claim,
             write_failures: Streak::default(),
             copy_failures: Streak::default(),
+            aside_failures: Streak::default(),
         }
     }
 
@@ -534,6 +579,10 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 return SaveOutcome::Failed;
             }
         };
+        if let Err(refused) = self.judge_state() {
+            self.failed(cause, refused, revision);
+            return SaveOutcome::Failed;
+        }
         let closed = &self.closed;
         match self
             .files
@@ -547,6 +596,8 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                         "상태 파일 쓰기가 실패 뒤 다시 성공했다"
                     );
                 }
+                // ADR-0291 R15: 쓰기가 한 번 성공하면 떠 두기 실패도 다시 처음부터 센다(다음 실패는 다시 error).
+                self.aside_failures.end();
                 match cause {
                     Cause::Periodic => {
                         tracing::debug!(module = "state", bytes = text.len(), "상태 파일을 썼다")
@@ -560,6 +611,7 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 }
                 self.seen = revision;
                 self.pending_since = None;
+                self.claim = Claim::Adopted;
                 self.drop_answered_copy();
                 SaveOutcome::Written
             }
@@ -578,17 +630,75 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
         }
     }
 
-    /// 다시 쓸 때를 정한다. 스냅숏 · 디스크 실패는 디바운스를 지금부터 다시 재 [`QUIET`] 뒤에 다시 쓴다. 코덱
-    /// 거절은 같은 스냅숏이 또 거절되므로 그 번호를 본 것으로 치고 다음 변경을 기다린다. `Final` 이면 스레드가 곧
-    /// 끝나 어느 쪽도 오지 않는다.
+    /// 쓰기 직전에 지금 `state.json` 을 다시 읽어 판정한다 — 덮어도 되면 `Ok`(떠 둘 것이면 떠 둔 뒤 · 떠 두기가
+    /// 실패해도 `Ok`), 거절이면 그 까닭.
+    ///
+    /// ★적재 때 판정을 들고 있지 않는다★ — 실행 중에 새 판으로 바뀐 파일을 덮지 않고, 첫 쓰기 뒤 우리 파일을
+    /// 쓰기마다 떠 두지도 않는다.
+    // ADR-0291 R8 · R16 (D5 · D14 · E5)
+    fn judge_state(&mut self) -> Result<(), Failure> {
+        let current = file::classify(self.files.read_state(), &codec::STATE_SPEC);
+        match current.write_policy(self.claim) {
+            WritePolicy::Write => Ok(()),
+            WritePolicy::CopyAsideFirst => {
+                // 닫힌 뒤엔 그 쓰기가 발행되지 않으므로 떠 둘 까닭이 없다 — 관문을 지난 새 인스턴스의 파일을
+                //   건드리지 않는다.
+                if !self.is_closed() {
+                    self.copy_state_aside(&current);
+                }
+                Ok(())
+            }
+            WritePolicy::Refuse(Refused::Newer { found }) => Err(Failure::Newer { found }),
+            WritePolicy::Refuse(Refused::ReadFailed) => Err(Failure::Unreadable(match current {
+                file::Loaded::Failed(error) => error,
+                // 판정 표는 읽기 실패에만 이 거절을 낸다.
+                _ => io::Error::other("state.json 을 못 읽었다"),
+            })),
+        }
+    }
+
+    /// 덮기 전에 지금 `state.json` 을 떠 둔다 — 실패해도 그 쓰기는 한다(D8 — 화면 상태는 진행이 먼저다).
+    fn copy_state_aside(&mut self, current: &file::Loaded) {
+        let what = match current {
+            file::Loaded::Parsed(file::Parsed::Usable { .. }) => {
+                "이 실행이 아직 쓰지 않은 동안 놓인 state.json"
+            }
+            _ => "못 쓰는 state.json",
+        };
+        match self.files.copy_aside_state() {
+            Ok(to) => {
+                self.aside_failures.end();
+                tracing::info!(
+                    module = "state",
+                    to = %to.display(),
+                    "{what} 을 덮기 전에 떠 뒀다"
+                );
+            }
+            Err(error) if self.aside_failures.fail(()) => tracing::error!(
+                module = "state",
+                "{what} 을 떠 두지 못했다 — 그래도 쓴다: 하나뿐인 원본을 백업 없이 덮는다(D8): {error}"
+            ),
+            Err(error) => tracing::debug!(
+                module = "state",
+                failures = self.aside_failures.failures(),
+                "{what} 을 또 떠 두지 못했다 — 그래도 쓴다: {error}"
+            ),
+        }
+    }
+
+    /// 다시 쓸 때를 정한다. 스냅숏 · 디스크 실패와 지금 파일을 못 읽은 거절은 디바운스를 지금부터 다시 재
+    /// [`QUIET`] 뒤에 다시 쓴다(그때 다시 판정한다). 코덱 거절과 새 판 거절은 같은 번호로 다시 해도 같으므로 그
+    /// 번호를 본 것으로 치고 다음 변경을 기다린다 — 새 판 파일을 주기마다 다시 읽지 않는다. `Final` 이면 스레드가
+    /// 곧 끝나 어느 쪽도 오지 않는다.
+    // ADR-0291 (D5)
     fn failed(&mut self, cause: Cause, failure: Failure, revision: S::Revision) {
         match failure {
-            Failure::Snapshot(_) | Failure::Disk(_) => {
+            Failure::Snapshot(_) | Failure::Disk(_) | Failure::Unreadable(_) => {
                 let now = self.clock.now();
                 self.pending_since = Some(now);
                 self.last_change_at = now;
             }
-            Failure::Rejected(_) => {
+            Failure::Rejected(_) | Failure::Newer { .. } => {
                 self.seen = revision;
                 self.pending_since = None;
             }
@@ -612,6 +722,16 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 module = "state",
                 ?cause,
                 "상태 스냅숏을 다음 부팅이 못 읽을 모양이라 쓰지 않았다 — 화면이 바뀌어 풀릴 때까지 메모리에만 있다: {failure}"
+            ),
+            Failure::Newer { .. } => tracing::error!(
+                module = "state",
+                ?cause,
+                "덮지 않고 쓰지 않았다 — 화면이 바뀌면 다시 판정한다: {failure}"
+            ),
+            Failure::Unreadable(_) => tracing::error!(
+                module = "state",
+                ?cause,
+                "덮어도 되는지 몰라 쓰지 않았다 — 주기 저장이 다시 판정한다(정상 종료 쓰기면 그대로 끝난다): {failure}"
             ),
             Failure::Disk(_) => tracing::warn!(
                 module = "state",
@@ -658,23 +778,27 @@ impl<S: SnapshotSource, F: StateFiles, C: SaverClock> Saver<S, F, C> {
                 );
                 true
             }
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
-                true
-            }
-            // 답한 사본은 상한 안의 UTF-8 이었다 — 그렇지 않은 사본은 다른 사본이다.
-            Err(error) if codec::unusable_read(&error).is_some() => {
-                tracing::warn!(
-                    module = "state",
-                    hash = %hash,
-                    "크래시 사본이 답한 것과 다르다(못 쓰는 내용) — 지우지 않는다: {error}"
-                );
-                true
-            }
-            Err(error) => {
-                self.copy_failed(CopyFailure::Read, &hash, &error);
-                false
-            }
+            // 읽기 오류의 가름은 base 판정 하나다.
+            Err(error) => match file::classify(Err(error), &codec::STATE_SPEC) {
+                file::Loaded::Missing => {
+                    tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
+                    true
+                }
+                // 답한 사본은 상한 안의 UTF-8 이었다 — 그렇지 않은 사본은 다른 사본이다.
+                file::Loaded::Parsed(parsed) => {
+                    tracing::warn!(
+                        module = "state",
+                        hash = %hash,
+                        parsed = ?parsed,
+                        "크래시 사본이 답한 것과 다르다(못 쓰는 내용) — 지우지 않는다"
+                    );
+                    true
+                }
+                file::Loaded::Failed(error) => {
+                    self.copy_failed(CopyFailure::Read, &hash, &error);
+                    false
+                }
+            },
         };
         if clear {
             self.resolved = None;
@@ -780,6 +904,15 @@ mod tests {
         published: Vec<StateFile>,
         write_calls: usize,
         fail_writes: bool,
+        /// 지금 `state.json` 원문 — 발행하면 그 글이 된다. `None` = 없음.
+        state: Option<String>,
+        /// 서 있으면 `read_state` 가 이 종류로 실패한다.
+        fail_state_read: Option<io::ErrorKind>,
+        state_reads: usize,
+        /// 떠 둔 `state.json.corrupt` 원문 — 하나뿐이라 뜰 때마다 덮인다.
+        state_aside: Option<String>,
+        aside_calls: usize,
+        fail_aside: bool,
         crash_copy: Option<String>,
         fail_read: Option<io::ErrorKind>,
         fail_remove: bool,
@@ -810,6 +943,12 @@ mod tests {
             self.disk.lock().unwrap()
         }
 
+        /// (`state.json` 읽기, `write_state` 호출, 떠 두기 호출) 수.
+        fn counts(&self) -> (usize, usize, usize) {
+            let disk = self.disk();
+            (disk.state_reads, disk.write_calls, disk.aside_calls)
+        }
+
         /// 다음 `write_state` 하나를 rename 앞에서 세운다 — 돌려받은 수신자로 들어섰음을 보고, 송신자로 푼다.
         fn arm_gate(&self) -> (Receiver<()>, Sender<()>) {
             let (entered, entered_rx) = mpsc::channel();
@@ -836,10 +975,35 @@ mod tests {
             }
             let (state, _) = codec::decode(text).expect("기록기가 쓴 글은 다시 읽힌다");
             disk.published.push(state);
+            disk.state = Some(text.to_owned());
             if let Some(closed) = &disk.close_after_publish {
                 closed.store(true, Ordering::SeqCst);
             }
             Ok(WriteOutcome::Written)
+        }
+
+        fn read_state(&self) -> io::Result<String> {
+            let mut disk = self.disk();
+            disk.state_reads += 1;
+            if let Some(kind) = disk.fail_state_read {
+                return Err(io::Error::from(kind));
+            }
+            disk.state
+                .clone()
+                .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
+        }
+
+        fn copy_aside_state(&self) -> io::Result<PathBuf> {
+            let mut disk = self.disk();
+            disk.aside_calls += 1;
+            if disk.fail_aside {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            let Some(text) = disk.state.clone() else {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            };
+            disk.state_aside = Some(text);
+            Ok(PathBuf::from("state.json.corrupt"))
         }
 
         fn read_crash_copy(&self) -> io::Result<String> {
@@ -904,6 +1068,10 @@ mod tests {
     }
 
     fn rig(files: FakeFiles, carry_resolved: Option<String>) -> Rig {
+        rig_claiming(files, carry_resolved, Claim::Adopted)
+    }
+
+    fn rig_claiming(files: FakeFiles, carry_resolved: Option<String>, claim: Claim) -> Rig {
         let source = FakeSource::default();
         let clock = FakeClock::new();
         let saver = Saver::new(
@@ -913,6 +1081,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             0,
             carry_resolved,
+            claim,
         );
         Rig {
             saver,
@@ -1104,6 +1273,171 @@ mod tests {
         rig.change_and_settle();
         assert_eq!(rig.saver.write_failures.current, None);
         assert_eq!(rig.published().len(), 1);
+    }
+
+    // ── 저장 직전 재판정(ADR-0291 R16) ──
+
+    const NEWER: &str = r#"{"version":2,"saved_at_ms":1,"clean_exit":false,"windows":[]}"#;
+
+    fn a_usable_file() -> String {
+        codec::encode(&StateFile {
+            version: STATE_VERSION,
+            saved_at_ms: 3,
+            clean_exit: true,
+            resolved_crash_copy: None,
+            windows: Vec::new(),
+        })
+        .unwrap()
+    }
+
+    /// D5: 새 판 거절은 코덱 거절처럼 다음 변경까지 기다린다 — 같은 번호로는 그 파일을 다시 읽지 않는다.
+    #[test]
+    fn a_newer_state_file_is_never_overwritten_and_is_judged_again_only_on_a_change() {
+        let mut rig = rig(FakeFiles::default(), None);
+        rig.files.disk().state = Some(NEWER.to_owned());
+        rig.change_and_settle();
+        assert_eq!(rig.files.counts(), (1, 0, 0));
+
+        rig.ticks(20);
+        assert_eq!(
+            rig.files.counts(),
+            (1, 0, 0),
+            "같은 변경 번호로는 다시 읽지 않는다"
+        );
+
+        rig.change_and_settle();
+        assert_eq!(rig.files.counts(), (2, 0, 0));
+        assert_eq!(rig.saver.save(Cause::Final), SaveOutcome::Failed);
+        assert_eq!(rig.files.disk().state.as_deref(), Some(NEWER));
+
+        rig.files.disk().state = None;
+        rig.change_and_settle();
+        assert_eq!(
+            rig.published().len(),
+            1,
+            "새 판 파일이 치워지면 다음 변경이 쓴다"
+        );
+    }
+
+    /// D5: 못 읽은 거절은 디스크 오류처럼 디바운스 뒤 다시 판정한다 — 잠김이 풀리면 이어 쓴다.
+    #[test]
+    fn an_unreadable_state_file_is_judged_again_after_the_quiet_period() {
+        let mut rig = rig(FakeFiles::default(), None);
+        rig.files.disk().fail_state_read = Some(io::ErrorKind::PermissionDenied);
+        rig.change_and_settle();
+        assert_eq!(rig.files.counts(), (1, 0, 0));
+        rig.tick();
+        assert_eq!(
+            rig.files.counts(),
+            (1, 0, 0),
+            "실패 뒤 0.5초 — 아직 조용하지 않다"
+        );
+        rig.tick();
+        assert_eq!(rig.files.counts(), (2, 0, 0), "디바운스 뒤 다시 판정한다");
+
+        rig.files.disk().fail_state_read = None;
+        rig.ticks(2);
+        assert_eq!(rig.published().len(), 1);
+        assert_eq!(
+            rig.files.disk().aside_calls,
+            0,
+            "못 읽은 파일은 떠 두지 않는다"
+        );
+    }
+
+    /// D1: 머리를 못 읽는 파일도 버전 문을 지났을 뿐 손상이다 — 떠 둔 뒤 쓴다.
+    #[test]
+    fn a_corrupt_state_file_is_copied_aside_once_before_it_is_replaced() {
+        for broken in ["{broken", r#"{"version":1}"#] {
+            let mut rig = rig(FakeFiles::default(), None);
+            rig.files.disk().state = Some(broken.to_owned());
+            rig.change_and_settle();
+            assert_eq!(
+                rig.files.disk().state_aside.as_deref(),
+                Some(broken),
+                "{broken}"
+            );
+            assert_eq!(rig.published().len(), 1, "{broken}");
+
+            rig.change_and_settle();
+            assert_eq!(
+                rig.files.disk().aside_calls,
+                1,
+                "갈아끼운 뒤엔 우리 파일이라 떠 두지 않는다 — {broken}"
+            );
+            assert_eq!(rig.published().len(), 2, "{broken}");
+        }
+    }
+
+    /// D14: 이 실행이 아직 그 파일을 잡지 않았으면(`NotYet`) 그 자리의 쓸 만한 파일도 덮기 전에 떠 둔다.
+    #[test]
+    fn a_usable_file_is_copied_aside_only_while_the_run_has_not_claimed_it() {
+        let placed = a_usable_file();
+
+        let mut adopted = rig(FakeFiles::default(), None);
+        adopted.files.disk().state = Some(placed.clone());
+        adopted.change_and_settle();
+        assert_eq!(adopted.files.counts(), (1, 1, 0), "잡은 파일은 그냥 쓴다");
+
+        let mut rig = rig_claiming(FakeFiles::default(), None, Claim::NotYet);
+        rig.files.disk().state = Some(placed.clone());
+        rig.change_and_settle();
+        assert_eq!(
+            rig.files.disk().state_aside.as_deref(),
+            Some(placed.as_str())
+        );
+        assert_eq!(rig.published().len(), 1);
+
+        rig.change_and_settle();
+        assert_eq!(
+            rig.files.disk().aside_calls,
+            1,
+            "첫 쓰기 뒤엔 이 실행의 것이다"
+        );
+    }
+
+    /// E5 · D8: 떠 두기가 실패해도 그 쓰기는 발행한다 — 화면 상태는 진행이 먼저다.
+    #[test]
+    fn a_failed_copy_aside_still_publishes_the_write() {
+        let mut rig = rig(FakeFiles::default(), None);
+        {
+            let mut disk = rig.files.disk();
+            disk.state = Some("{broken".to_owned());
+            disk.fail_aside = true;
+        }
+        rig.change_and_settle();
+        let disk = rig.files.disk();
+        assert_eq!((disk.aside_calls, disk.write_calls), (1, 1));
+        assert_eq!(disk.state_aside, None);
+        assert_eq!(disk.published.len(), 1, "떠 두기가 실패해도 쓴다");
+    }
+
+    /// R15: 쓰기가 한 번 성공하면 떠 두기 실패의 이어짐도 끝난다 — 그 뒤의 떠 두기 실패는 새 이어짐의 첫 실패라
+    /// 다시 error 로 남는다.
+    #[test]
+    fn a_successful_write_ends_the_copy_aside_failure_streak() {
+        let mut rig = rig(FakeFiles::default(), None);
+        {
+            let mut disk = rig.files.disk();
+            disk.state = Some("{broken".to_owned());
+            disk.fail_aside = true;
+        }
+        rig.change_and_settle();
+        assert_eq!(rig.published().len(), 1);
+        assert_eq!(rig.saver.aside_failures.current, None, "쓰기가 성공했다");
+
+        {
+            let mut disk = rig.files.disk();
+            disk.state = Some("{broken".to_owned());
+            disk.fail_writes = true;
+        }
+        rig.change_and_settle();
+        assert_eq!(rig.files.disk().aside_calls, 2);
+        assert_eq!(
+            rig.saver.aside_failures.current,
+            Some(((), 1)),
+            "앞 실패를 잇지 않는다 — 제 레벨(error)로 남을 차례였다"
+        );
     }
 
     // ── 해결 칸 ──
@@ -1310,6 +1644,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             0,
             carry_resolved,
+            Claim::Adopted,
         );
         let (handle, thread) = start(saver, poll).unwrap();
         (handle, thread, source, clock)
@@ -1467,5 +1802,26 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 실물 이음매의 재판정 두 연산 + R11(실행 중에 지워진 폴더도 쓰기가 다시 만든다).
+    #[test]
+    fn fs_reads_and_copies_aside_the_real_state_file_and_remakes_a_missing_folder() {
+        let root = temp_dir("fs-state");
+        let dir = root.join("state");
+        let fs = Fs::new(dir.join("state.json"), dir.join("state.crash.json"));
+
+        assert_eq!(fs.read_state().unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            fs.write_state("글", &|| false).unwrap(),
+            WriteOutcome::Written
+        );
+        assert_eq!(fs.read_state().unwrap(), "글");
+        let to = fs.copy_aside_state().unwrap();
+        assert_eq!(to, dir.join("state.json.corrupt"));
+        assert_eq!(std::fs::read_to_string(&to).unwrap(), "글");
+        assert_eq!(fs.read_state().unwrap(), "글", "원본은 그 자리에 남는다");
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

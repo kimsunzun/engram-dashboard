@@ -45,7 +45,13 @@ pub enum SettingsError {
     /// 형식 · 범위 위반(문구에 기대 형식), 또는 정확한 키 자리에 온 접두.
     #[error("{0}")]
     InvalidArgument(String),
-    /// 디스크 쓰기 실패(메모리 · `rev` 불변 · 알림 없음), 또는 [`SettingsService::enable_writes`] 전의 쓰기.
+    /// 이 셸보다 새 판이 쓴 설정 파일이라 덮지 않았다(메모리 · `rev` 불변 · 알림 없음 · 파일 그대로). 그 파일이
+    /// 바뀌기 전에는 다시 해도 같다.
+    // ADR-0291 R2
+    #[error("{0}")]
+    Conflict(String),
+    /// 디스크 쓰기 실패 · 지금 파일을 못 읽었다(메모리 · `rev` 불변 · 알림 없음), 또는
+    /// [`SettingsService::enable_writes`] 전의 쓰기.
     #[error("{0}")]
     Internal(String),
 }
@@ -199,17 +205,14 @@ fn select(selector: Option<&str>) -> Result<Vec<&'static SettingDef>, SettingsEr
     Ok(defs)
 }
 
-/// 파일을 쓸지 — 파일을 읽었으면 파일이 목표와 다른가로, 못 읽었으면(IO 실패 · 통째로 못 쓰는 파일) 유효
-/// 값이 바뀌나로 가른다.
+/// 파일을 쓸지 — 파일을 읽었으면 파일이 목표와 다른가로, 못 읽었으면(IO 실패 · 통째로 못 쓰는 파일 · 새 판이
+/// 쓴 파일) 유효 값이 바뀌나로 가른다.
 fn needs_write(
-    document: &std::io::Result<store::Document>,
+    document: &store::Document,
     disk_differs: impl FnOnce(&store::Document) -> Option<bool>,
     memory_changed: bool,
 ) -> bool {
-    match document {
-        Ok(document) => disk_differs(document).unwrap_or(memory_changed),
-        Err(_) => memory_changed,
-    }
+    disk_differs(document).unwrap_or(memory_changed)
 }
 
 impl SettingsService {
@@ -263,8 +266,8 @@ impl SettingsService {
     ///
     /// ★쓸지는 파일로, `changed` 는 유효 값으로 가른다★ — 파일이 이미 목표대로면(기본값 = 키 없음 · 아니면
     /// 정규 철자) 안 쓴다. 다르면 유효 값이 같아도 쓴다 — 밖에서 고친 값이나 접힌 못 쓸 값을 바로잡는다. 그때
-    /// 답은 `changed: false` 이고 `rev` · 알림은 그대로다. 파일을 못 읽으면(IO 실패 · 통째로 못 쓰는 파일)
-    /// 유효 값이 바뀔 때만 쓴다(IO 실패면 그 쓰기는 `Internal`).
+    /// 답은 `changed: false` 이고 `rev` · 알림은 그대로다. 파일을 못 읽으면(IO 실패 · 통째로 못 쓰는 파일 · 새 판이
+    /// 쓴 파일) 유효 값이 바뀔 때만 쓴다 — IO 실패면 그 쓰기는 `Internal`, 새 판이 쓴 파일이면 덮지 않고 `Conflict`.
     ///
     /// 알림은 내지 않는다 — 셸의 쓰기는 [`set_and_notify`] 로 부른다.
     ///
@@ -441,23 +444,47 @@ impl SettingsService {
         Some(self.lock_state().effective(def).to_string())
     }
 
-    /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로 `Internal`.
+    /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로 `Internal`(새 판이 쓴 파일이면 `Conflict`).
     fn persist(
         &self,
         files: &dyn SettingsFiles,
-        document: std::io::Result<store::Document>,
+        document: store::Document,
         changes: &[(&'static str, Option<String>)],
     ) -> Result<(), SettingsError> {
         let memory = self.lock_state().overrides.clone();
-        let written = document.and_then(|document| store::write(files, document, &memory, changes));
-        written.map_err(|e| {
-            tracing::warn!(
-                module = "settings",
-                source = %self.origin,
-                keys = changes.len(),
-                "설정을 디스크에 못 써 바꾸지 않았다: {e}"
-            );
-            SettingsError::Internal(format!("설정 파일을 못 썼다: {e}"))
+        store::write(files, document, &memory, changes).map_err(|e| match e {
+            store::WriteError::Newer { found } => {
+                tracing::warn!(
+                    module = "settings",
+                    source = %self.origin,
+                    keys = changes.len(),
+                    found,
+                    "설정 파일이 이 셸보다 새 판이 쓴 것이라 덮지 않고 바꾸지 않았다"
+                );
+                SettingsError::Conflict(format!(
+                    "설정 파일이 이 앱보다 새 버전(판 {found})이 쓴 것이라 덮지 않았다 — 값은 그대로다"
+                ))
+            }
+            store::WriteError::Unreadable(e) => {
+                tracing::warn!(
+                    module = "settings",
+                    source = %self.origin,
+                    keys = changes.len(),
+                    "설정 파일을 못 읽어 덮지 않고 바꾸지 않았다: {e}"
+                );
+                SettingsError::Internal(format!(
+                    "설정 파일을 못 읽어 쓰지 않았다 — 값은 그대로다: {e}"
+                ))
+            }
+            store::WriteError::Io(e) => {
+                tracing::warn!(
+                    module = "settings",
+                    source = %self.origin,
+                    keys = changes.len(),
+                    "설정을 디스크에 못 써 바꾸지 않았다: {e}"
+                );
+                SettingsError::Internal(format!("설정 파일을 못 썼다: {e}"))
+            }
         })
     }
 

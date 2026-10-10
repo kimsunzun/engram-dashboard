@@ -64,6 +64,8 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 16 = `restore.status` 의 `state_file` 이 `newer` 를 싣고 `settings.set`·`settings.reset` 이 `CONFLICT` 를
+//   선언한 세대★(ADR-0291 — 새 판이 쓴 파일은 덮지 않는다) — 이름은 그대로고 답 어휘와 오류 선언이 바뀌었다.
 // ★세대 15 = 창 테마 명령 둘(`window.getTheme`·`window.setTheme`)이 `agent-tree` 를 받지 않는 세대★(ADR-0225 —
 //   그 label 도 모르는 창이다) — 이름도 타입도 그대로고 둘의 `window` 칸이 받는 어휘가 줄었다. summary 가 바뀐 것은
 //   `window.getTheme`(`agent-tree` 를 적던 유일한 summary)과 `restore.status`(트리 창 문구가 빠졌다)다.
@@ -95,7 +97,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 15;
+    catalog_version: 16;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -424,8 +426,9 @@ declare_commands! {
     /// 이미 그 값이면 changed=false 이고 rev · 알림이 없다(파일이 그 값과 다르게 적혀 있으면 파일만
     /// 바로잡는다). 기본값과 같은 값을 주면 덮어쓰기가 지워진다.
     /// theme.default 를 바꾸면 창별 테마가 없는 모든 창이 바로 그 테마로 바뀐다.
-    /// 모르는 키 = NOT_FOUND · 형식·범위 위반 = INVALID_ARGUMENT(문구에 기대 형식) · 디스크에 못 썼으면
-    /// INTERNAL(값은 그대로다).
+    /// 모르는 키 = NOT_FOUND · 형식·범위 위반 = INVALID_ARGUMENT(문구에 기대 형식) · 설정 파일이 이 앱보다 새
+    /// 버전이 쓴 것이면 CONFLICT(파일을 덮지 않는다 · 값은 그대로다 — 그 파일이 바뀌기 전에는 다시 해도 같다 · 단
+    /// 유효 값이 바뀌지 않는 호출은 그때도 changed=false 로 성공한다) · 디스크에 못 썼으면 INTERNAL(값은 그대로다).
     #[effect(Write)]
     #[since(10)]
     "settings.set" => args SettingsSetArgs {
@@ -436,11 +439,13 @@ declare_commands! {
         key: String,
         value: String,
         changed: bool,
-    } errors [NOT_FOUND];
+    } errors [NOT_FOUND, CONFLICT];
 
     /// 키 하나, 또는 점으로 끝나는 접두가 덮는 키 전부를 기본값으로 되돌린다 — key 는 필수(전체 초기화는 없다).
     /// 답의 reset = 그 선택자가 덮은 키 전부(호출 뒤 모두 기본값). 이미 다 기본값이면 rev 가 그대로다(파일에
-    /// 남은 그 키들은 지운다). 맞는 키가 없으면 NOT_FOUND.
+    /// 남은 그 키들은 지운다). 맞는 키가 없으면 NOT_FOUND. 설정 파일이 이 앱보다 새 버전이 쓴 것이면 CONFLICT ·
+    /// 디스크에 못 썼으면 INTERNAL 이다(settings.set 과 같다 — 이미 다 기본값인 호출은 새 판 파일이어도 rev 그대로
+    /// 성공한다).
     #[effect(Write)]
     #[since(10)]
     "settings.reset" => args SettingsResetArgs {
@@ -448,7 +453,7 @@ declare_commands! {
     } -> ok SettingsResetOk {
         rev: u64,
         reset: Vec<String>,
-    } errors [NOT_FOUND];
+    } errors [NOT_FOUND, CONFLICT];
 
     /// 셸 설정 키의 모양 — kind(choice · css-length · css-number) · default · choices(choice 만) ·
     /// min · max(양 끝 포함 · css-length 는 받는 단위마다 한 값씩 ", " 로 잇는다 — "8px, 0.5rem, 0.5em") ·
@@ -471,12 +476,13 @@ declare_commands! {
     /// 다음 둘은 crash_copy 와 무관하게 늘 값이고 이번 실행 내내 같다(답한 뒤에도).
     /// saves = 이번 실행이 화면 상태를 저장하나 — true = 가드가 아니다: 기록기를 띄우려 한다(띄우기 · 쓰기 성공은
     /// 보장하지 않는다) · false = 가드다: 화면 상태를 하나도 저장하지 않고 다음 시작이 다시 판정한다(state_file 이
-    /// unreadable 이거나, ok 인데 떠야 할 크래시 사본을 못 떴다).
+    /// unreadable · newer 이거나, ok 인데 떠야 할 크래시 사본을 못 떴다).
     /// state_file = 시작할 때 state.json 을 어떻게 읽었나: ok(읽었거나 없었다 — 저장하나는 saves 가 말한다) ·
-    /// unreadable(못 읽었다 — 파일은 그대로 두고 saves 도 false) · corrupt_copied_aside · corrupt_not_copied(못 쓰는
-    /// 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라 기본 화면으로 시작했다 — corrupt_copied_aside 는
-    /// state.json.corrupt 로 떠 두었고 corrupt_not_copied 는 떠 두지 못해 원본이 백업 없이 덮인다. 이미 있는
-    /// state.json.corrupt 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이 아니다).
+    /// unreadable(못 읽었다 — 파일은 그대로 두고 saves 도 false) · newer(이 앱보다 새 버전이 쓴 파일이라 기본 화면으로
+    /// 시작했다 — 떠 두지도 덮지도 않고 saves 도 false) · corrupt_copied_aside · corrupt_not_copied(못 쓰는 파일(손상 ·
+    /// 상한 초과 · UTF-8 아님)이라 기본 화면으로 시작했다 — corrupt_copied_aside 는 state.json.corrupt 로 떠 두었고
+    /// corrupt_not_copied 는 떠 두지 못해 원본이 백업 없이 덮인다. 이미 있는 state.json.corrupt 는 앞선 시작이 떠
+    /// 둔 것이지 이번 원본의 백업이 아니다).
     #[effect(Read)]
     #[since(11)]
     "restore.status" => args RestoreStatusArgs {} -> ok RestoreStatusOk {
@@ -1253,6 +1259,9 @@ fn settings_error(error: SettingsError) -> CommandError {
     match error {
         SettingsError::NotFound(message) => CommandError::not_found(message),
         SettingsError::InvalidArgument(message) => CommandError::invalid_argument(message),
+        // ADR-0291 R2: 새 판이 쓴 파일이라 덮지 않았다 — 「지금 상태로는 적용할 수 없다」라 다시 해도 그 파일이
+        //   바뀌기 전에는 같다. `INTERNAL` 로 내면 일시 실패처럼 읽힌다.
+        SettingsError::Conflict(message) => CommandError::of(ErrorCode::Conflict, message),
         SettingsError::Internal(message) => CommandError::internal(message),
     }
 }

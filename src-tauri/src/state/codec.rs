@@ -1,10 +1,11 @@
 //! `state.json` 의 글 ↔ [`StateFile`] — 읽기 관용과 쓰기 상한(크기 · 중첩 — TRD S21-storage §6-2 · §6-4 I4).
-//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 base `file` 로 한다.
+//! 파일은 열지 않는다 — 읽기 · 쓰기는 부르는 쪽이 base `file` 로 한다. 통째로 읽을 수 있나는 base `file` 의
+//! 판정 하나다 — 이 모듈의 몫은 [`STATE_SPEC`](버전 키 · 판 · 상한 · 머리 모양 검사)과 창 해석이다.
 //!
 //! 읽기는 세 층으로 접는다:
-//! - **통째로 못 쓴다**([`Unusable`]) — JSON 이 아니다 · 머리(`version` · `saved_at_ms` · `clean_exit` ·
-//!   `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · 이 셸보다 새 `version` 이다. 원문의 상한 초과 ·
-//!   UTF-8 아님도 이쪽이다([`unusable_read`]).
+//! - **통째로 못 쓴다**([`Unusable`]) — 손상(JSON 이 아니다 · 객체가 아니다 · `version` 꼴이 틀리다 · 머리
+//!   (`saved_at_ms` · `clean_exit` · `resolved_crash_copy` · `windows` 배열)를 못 읽는다 · 원문의 상한 초과 ·
+//!   UTF-8 아님) 이거나 이 셸보다 새 `version` 이다. `version` 이 없으면 1 판이다.
 //! - **그 창만 건너뛴다** — 모르는 `kind` · 못 읽는 창 칸(탭 칸 포함).
 //! - **그 탭만 건너뛴다** — 못 읽는 탭(모르는 노드 종류 · 객체가 아닌 슬롯 내용 등).
 //!
@@ -13,10 +14,10 @@
 //! 부르는 쪽이 낸다.
 
 use std::fmt;
-use std::io;
 
+use engram_dashboard_base::file::{self, Parsed};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::schema::{
@@ -28,16 +29,22 @@ use crate::theme::UiTheme;
 /// 값으로 `engram_dashboard_base::file::read_file_capped` 한다.
 pub const STATE_READ_CAP: u64 = 4 * 1024 * 1024;
 
+/// `state.json` · `state.crash.json` 의 읽기 규칙 — 모양 검사는 머리 해석이다(창 하나하나는 관용이라 보지 않는다).
+/// 부팅 판정 · 기록기의 저장 직전 재판정이 같은 정의를 쓴다.
+// ADR-0291 R1~R7
+pub const STATE_SPEC: file::Spec = file::Spec {
+    version_key: "version",
+    current: STATE_VERSION as u64,
+    cap: STATE_READ_CAP,
+    shape: head_shape,
+};
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unusable {
-    /// 상한 초과 · UTF-8 아님 — 원문을 못 가져왔다([`unusable_read`]).
-    #[error("원문을 못 읽는다: {0}")]
-    Unreadable(String),
-    #[error("JSON 이 아니다: {0}")]
-    NotJson(String),
-    /// JSON 이지만 상태 파일의 머리를 못 읽는다.
-    #[error("상태 파일 모양이 아니다: {0}")]
-    NotStateFile(String),
+    /// 손상 — base `file` 판정의 사유 문구 그대로(상한 초과 · UTF-8 아님 · JSON 아님 · 객체 아님 · `version` 꼴 ·
+    /// 머리를 못 읽는다).
+    #[error("{0}")]
+    Corrupt(String),
     #[error("이 셸보다 새 형식이다(version {found} — 이 셸은 {STATE_VERSION} 까지)")]
     NewerVersion { found: u64 },
 }
@@ -94,26 +101,21 @@ impl fmt::Display for DecodeWarning {
     }
 }
 
+/// 원문 하나를 읽는다 — [`decode_parsed`] 에 base 판정(`file::parse` · [`STATE_SPEC`])을 넣은 것.
 pub fn decode(text: &str) -> Result<(StateFile, Vec<DecodeWarning>), Unusable> {
-    // 메모장 · PowerShell 은 UTF-8 로 저장하면 BOM 을 붙인다 — 손으로 고친 파일이 그것만으로 못 쓰게 되지 않게.
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let doc = parse(text).map_err(|e| Unusable::NotJson(e.to_string()))?;
-    if !doc.is_object() {
-        return Err(Unusable::NotStateFile("JSON 객체가 아니다".to_string()));
-    }
-    // 머리보다 먼저 본다 — 새 형식은 머리 모양부터 다를 수 있고, 그때도 「새 형식」으로 알려야 한다.
-    match doc.get("version").and_then(version_number) {
-        Some(found) if found == u64::from(STATE_VERSION) => {}
-        Some(found) if found > u64::from(STATE_VERSION) => {
-            return Err(Unusable::NewerVersion { found })
-        }
-        _ => {
-            return Err(Unusable::NotStateFile(
-                "`version` 이 없거나 이 셸이 쓴 적 없는 값이다".to_string(),
-            ))
-        }
-    }
-    let head = Head::deserialize(doc).map_err(|e| Unusable::NotStateFile(e.to_string()))?;
+    decode_parsed(file::parse(text, &STATE_SPEC))
+}
+
+/// base 판정 하나를 상태 파일로 — 쓸 수 있는 판정이면 창 · 탭을 관용으로 읽는다(모듈 헤더).
+pub fn decode_parsed(parsed: Parsed) -> Result<(StateFile, Vec<DecodeWarning>), Unusable> {
+    let doc = match parsed {
+        Parsed::Usable { doc, .. } => doc,
+        Parsed::Unusable(reason) => return Err(Unusable::Corrupt(reason)),
+        Parsed::Newer { found } => return Err(Unusable::NewerVersion { found }),
+    };
+    // 모양 검사([`head_shape`])를 이미 지난 머리다 — 값을 얻으려고 한 번 더 읽는다.
+    let head = Head::deserialize(Value::Object(doc))
+        .map_err(|e| Unusable::Corrupt(not_a_state_file(&e)))?;
 
     let mut warnings = Vec::new();
     let windows = head
@@ -137,44 +139,32 @@ pub fn encode(state: &StateFile) -> Result<String, EncodeError> {
     let mut text = serde_json::to_string_pretty(state)
         .expect("문자열 키와 실패하지 않는 직렬화기뿐이라 JSON 직렬화가 실패할 수 없다");
     text.push('\n');
-    if text.len() as u64 > STATE_READ_CAP {
+    if file::check_cap(text.len(), &STATE_SPEC).is_err() {
         return Err(EncodeError::TooLarge { len: text.len() });
     }
-    parse(&text).map_err(|e| EncodeError::Unparsable {
-        reason: e.to_string(),
-    })?;
+    // ★다시 읽기는 [`decode`] 와 같은 판정(`file::parse`)으로 한다 — 다른 파서로 바꾸지 말 것★: 중첩 깊이를 재지
+    //   않는 길(`IgnoredAny` 등)로 재면 다시 읽기를 통과한 글을 `decode` 가 못 읽는다.
+    if let Parsed::Unusable(reason) = file::parse(&text, &STATE_SPEC) {
+        return Err(EncodeError::Unparsable { reason });
+    }
     Ok(text)
 }
 
-/// [`decode`] 와 [`encode`] 의 다시 읽기가 함께 쓰는 파서 — 둘이 같은 중첩 상한을 본다.
-// ★`IgnoredAny` 로 바꾸지 말 것 · 상한을 끄지 말 것★ — `IgnoredAny` 로 건너뛰는 경로는 중첩 깊이를 재지 않아,
-//   다시 읽기를 통과한 글을 `decode` 가 못 읽는다. 상한을 끄면 깊은 중첩의 파일이 스택을 넘친다.
-fn parse(text: &str) -> serde_json::Result<Value> {
-    serde_json::from_str(text)
+/// [`STATE_SPEC`] 의 모양 검사 — 머리를 읽을 수 있나. 창 하나하나는 보지 않는다(그 창만 건너뛰는 관용).
+fn head_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> {
+    // 앞 판을 읽는 리더가 없다 — 앞 판 파일을 이 판으로 읽으면 칸 뜻이 어긋난다(`schema` 머리 「칸 더하기 규칙」).
+    if version != u64::from(STATE_VERSION) {
+        return Err(format!(
+            "version {version} 을 읽는 리더가 없다(이 셸은 {STATE_VERSION})"
+        ));
+    }
+    Head::deserialize(doc)
+        .map(drop)
+        .map_err(|e| not_a_state_file(&e))
 }
 
-/// 정수 값인 실수(`1.0`)도 받는다 — JSON 도구가 수를 실수로 다시 쓰기도 한다(설정 파일과 같은 관용). 음수 ·
-/// 소수 · `u64` 범위 밖 · 수가 아닌 값은 `None`.
-fn version_number(raw: &Value) -> Option<u64> {
-    // 2^64 — `u64::MAX as f64` 와 같은 값이라 그 자체는 범위 밖이다. `as u64` 는 범위 밖을 u64::MAX 로 눌러
-    //   없는 「새 형식」을 지어내므로 자르기 전에 거른다.
-    const U64_END: f64 = 18_446_744_073_709_551_616.0;
-    raw.as_u64().or_else(|| {
-        let float = raw.as_f64()?;
-        (0.0..U64_END)
-            .contains(&float)
-            .then_some(float)
-            .filter(|float| float.fract() == 0.0)
-            .map(|float| float as u64)
-    })
-}
-
-/// `engram_dashboard_base::file::read_file_capped` 의 오류 중 파일 내용이 못 쓸 것인 경우 — 상한 초과 · UTF-8 아님(`InvalidData`).
-///
-/// `None` = 내용이 아니라 읽기 자체가 실패했다(없음 · 잠김 · 권한). ★못 쓸 파일과 섞지 않는다★ — 잠깐 잠긴
-/// 멀쩡한 파일을 떠 두거나 덮지 않는다(TRD §6-2 I3).
-pub fn unusable_read(err: &io::Error) -> Option<Unusable> {
-    (err.kind() == io::ErrorKind::InvalidData).then(|| Unusable::Unreadable(err.to_string()))
+fn not_a_state_file(error: &serde_json::Error) -> String {
+    format!("상태 파일 모양이 아니다: {error}")
 }
 
 /// 크래시 사본의 신원 — [`StateFile::resolved_crash_copy`] 에 싣는 값. 읽은 원문 바이트 그대로를 잰다 — 부팅과
@@ -333,14 +323,12 @@ fn decode_strip(
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-
     use serde_json::{json, Value};
     use uuid::Uuid;
 
     use super::{
-        crash_copy_hash, decode, encode, fnv1a_64, fnv1a_hex, unusable_read, DecodeWarning,
-        EncodeError, Unusable, STATE_READ_CAP,
+        crash_copy_hash, decode, encode, fnv1a_64, fnv1a_hex, DecodeWarning, EncodeError, Unusable,
+        STATE_READ_CAP,
     };
     use crate::layout::{SlotContent, SplitDir};
     use crate::state::schema::{
@@ -799,10 +787,27 @@ mod tests {
         assert_eq!(warnings, vec![]);
     }
 
+    /// ADR-0291 R1: `version` 이 없는 파일은 1 판이다.
+    #[test]
+    fn a_missing_version_reads_as_the_first_version() {
+        let mut doc = file(vec![readable("w-0")]);
+        doc.as_object_mut().unwrap().remove("version");
+        let (state, warnings) = decode_value(&doc);
+        assert_eq!((state.version, state.windows.len()), (STATE_VERSION, 1));
+        assert_eq!(warnings, vec![]);
+    }
+
+    fn corrupt_reason(text: &str) -> String {
+        match decode(text) {
+            Err(Unusable::Corrupt(reason)) => reason,
+            other => panic!("손상이어야 한다: {other:?}"),
+        }
+    }
+
     #[test]
     fn not_json_is_unusable() {
-        assert!(matches!(decode("{BROKEN"), Err(Unusable::NotJson(_))));
-        assert!(matches!(decode(""), Err(Unusable::NotJson(_))));
+        assert!(corrupt_reason("{BROKEN").contains("JSON 이 아니다"));
+        assert!(corrupt_reason("").contains("JSON 이 아니다"));
     }
 
     #[test]
@@ -819,7 +824,6 @@ mod tests {
         };
         for doc in [
             json!([1, 2]),
-            without("version"),
             without("saved_at_ms"),
             without("clean_exit"),
             without("windows"),
@@ -833,10 +837,14 @@ mod tests {
             with("resolved_crash_copy", json!(3)),
         ] {
             assert!(
-                matches!(decode(&doc.to_string()), Err(Unusable::NotStateFile(_))),
+                matches!(decode(&doc.to_string()), Err(Unusable::Corrupt(_))),
                 "{doc}"
             );
         }
+        assert!(
+            corrupt_reason(&without("windows").to_string()).contains("상태 파일 모양이 아니다"),
+            "머리를 못 읽는 사유는 모양 검사의 문구다"
+        );
     }
 
     #[test]
@@ -846,28 +854,6 @@ mod tests {
             decode(&format!("\u{feff}{text}")).unwrap(),
             decode(&text).unwrap()
         );
-    }
-
-    #[test]
-    fn only_invalid_data_read_errors_are_unusable() {
-        let over = engram_dashboard_base::file::read_capped(&b"0123456789"[..], 4).unwrap_err();
-        assert!(matches!(
-            unusable_read(&over),
-            Some(Unusable::Unreadable(_))
-        ));
-        let not_utf8 =
-            engram_dashboard_base::file::read_capped(&[0xff, 0xfe, 0x00][..], 16).unwrap_err();
-        assert!(matches!(
-            unusable_read(&not_utf8),
-            Some(Unusable::Unreadable(_))
-        ));
-        for kind in [
-            io::ErrorKind::NotFound,
-            io::ErrorKind::PermissionDenied,
-            io::ErrorKind::Other,
-        ] {
-            assert_eq!(unusable_read(&io::Error::from(kind)), None, "{kind:?}");
-        }
     }
 
     // ── 쓰기 상한 ──
@@ -930,7 +916,7 @@ mod tests {
 
         let too_deep = nested_splits(121);
         let written = serde_json::to_string_pretty(&too_deep).unwrap();
-        assert!(matches!(decode(&written), Err(Unusable::NotJson(_))));
+        assert!(corrupt_reason(&written).contains("JSON 이 아니다"));
         assert!(matches!(
             encode(&too_deep),
             Err(EncodeError::Unparsable { .. })

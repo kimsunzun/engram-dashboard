@@ -59,17 +59,20 @@ impl CrashCopyStatus {
 
 /// `restore.status` 의 `state_file` 칸(TRD §6-5) — 이 실행의 부팅이 `state.json` 을 어떻게 읽었나. 부팅 단계 ⑥ 이
 /// 정하고 그 실행 내내 바뀌지 않으며, 크래시 사본과 무관하게 늘 값이다. wire 철자는 `"ok"` · `"unreadable"` ·
-/// `"corrupt_copied_aside"` · `"corrupt_not_copied"`.
+/// `"newer"` · `"corrupt_copied_aside"` · `"corrupt_not_copied"`.
 ///
 /// - `Ok` = 읽었거나 파일이 없었다. 사본을 못 떠 이 실행이 저장하지 않는 경우(가드 ⅱ)도 이 값이다 — 이 칸은
 ///   `state.json` 읽기만 싣는다. 이 실행이 저장하나는 이 칸이 아니라 [`RestoreStatusView::saves`] 가 말한다.
 /// - `Unreadable` = 읽기 자체가 실패했다(잠김 재시도 뒤 · 권한 — 가드 ⅰ). 파일은 그대로 두고, 이 실행은 화면 상태를
 ///   하나도 저장하지 않으며, 다음 부팅이 다시 판정한다.
-/// - `CorruptCopiedAside` = 못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라
-///   `state.json.corrupt` 로 떠 두고 기본 화면으로 시작했다.
-/// - `CorruptNotCopied` = 못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)인데 떠 두지 못한 채
-///   기본 화면으로 시작했다 — 원본은 백업 없이 덮인다(D8). 이미 있는 `state.json.corrupt` 는 앞선 시작이 떠 둔
-///   것이지 이번 원본의 백업이 아니다.
+/// - `Newer` = 이 셸보다 새 판이 쓴 파일이라 기본 화면으로 시작했다(가드 ⅰ 과 같은 칸). 떠 두지도 덮지도 않고, 이
+///   실행은 화면 상태를 하나도 저장하지 않으며, 다음 부팅이 다시 판정한다.
+/// - `CorruptCopiedAside` = 못 쓰는 파일(손상 · 상한 초과 · UTF-8 아님)이라 `state.json.corrupt` 로 떠 두고 기본
+///   화면으로 시작했다.
+/// - `CorruptNotCopied` = 못 쓰는 파일(손상 · 상한 초과 · UTF-8 아님)인데 떠 두지 못한 채 기본 화면으로 시작했다 —
+///   원본은 백업 없이 덮인다(D8). 이미 있는 `state.json.corrupt` 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이
+///   아니다.
+// ADR-0291 R2: 새 판은 손상 두 값이 아니라 `Newer` 다(떠 두지도 덮지도 않는다).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export)]
@@ -77,6 +80,7 @@ pub enum StateFileStatus {
     #[default]
     Ok,
     Unreadable,
+    Newer,
     CorruptCopiedAside,
     CorruptNotCopied,
 }
@@ -87,6 +91,7 @@ impl StateFileStatus {
         match self {
             StateFileStatus::Ok => "ok",
             StateFileStatus::Unreadable => "unreadable",
+            StateFileStatus::Newer => "newer",
             StateFileStatus::CorruptCopiedAside => "corrupt_copied_aside",
             StateFileStatus::CorruptNotCopied => "corrupt_not_copied",
         }
@@ -137,8 +142,8 @@ pub struct RestoreStatusView {
     pub durable: Option<bool>,
     /// 이 실행이 화면 상태를 저장하나 — 부팅 가드(TRD §6-5 ③)로 정한다. `true` = 가드가 아니다: 기록기를 띄우려
     /// 한다(띄우기 · 쓰기 성공은 보장하지 않는다 — ⑦ 에서 기록기를 못 띄운 실행도 `true` 다). `false` = 가드다: 이
-    /// 실행은 화면 상태를 하나도 저장하지 않고 다음 부팅이 다시 판정한다 — 가드 ⅰ(`state_file` 이 `Unreadable`) ·
-    /// 가드 ⅱ(떠야 할 크래시 사본을 못 떴다 — `state_file` 은 `Ok` 다).
+    /// 실행은 화면 상태를 하나도 저장하지 않고 다음 부팅이 다시 판정한다 — 가드 ⅰ(`state_file` 이 `Unreadable` ·
+    /// `Newer`) · 가드 ⅱ(떠야 할 크래시 사본을 못 떴다 — `state_file` 은 `Ok` 다).
     pub saves: bool,
     pub state_file: StateFileStatus,
 }
@@ -1364,6 +1369,7 @@ mod tests {
         let spell = |status| serde_json::to_string(&status).unwrap();
         assert_eq!(spell(StateFileStatus::Ok), "\"ok\"");
         assert_eq!(spell(StateFileStatus::Unreadable), "\"unreadable\"");
+        assert_eq!(spell(StateFileStatus::Newer), "\"newer\"");
         assert_eq!(
             spell(StateFileStatus::CorruptCopiedAside),
             "\"corrupt_copied_aside\""
@@ -1375,6 +1381,7 @@ mod tests {
         for status in [
             StateFileStatus::Ok,
             StateFileStatus::Unreadable,
+            StateFileStatus::Newer,
             StateFileStatus::CorruptCopiedAside,
             StateFileStatus::CorruptNotCopied,
         ] {

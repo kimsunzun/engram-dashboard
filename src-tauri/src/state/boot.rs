@@ -7,7 +7,8 @@
 //! - ★답하지 않은 크래시 사본은 덮지도 지우지도 않는다(D2-6)★ — 이 판이 못 쓰는 새 판의 사본도(N6). 부팅이 사본을
 //!   지우는 것은 못 쓸 사본(떠 둔 뒤)과 답한 사본(다시 읽어 해시가 같을 때만 — N1)뿐이다.
 //! - ④ 의 결과(사본을 못 떠 서는 가드 · 못 지운 답한 사본의 해시 · 못 쓸 `state.json` 을 떠 두었나)는 ④ 가 계획에
-//!   접어 넣고, ⑤([`write_run_marker`]) · ⑥ · 기록기가 그 계획을 읽는다 — 그래서 가드 로그는 ④ 뒤에 낸다.
+//!   접어 넣고, ⑤([`write_run_marker`]) · ⑥ · 기록기가 그 계획을 읽는다 — 그래서 가드 로그는 ④ 뒤에 낸다. ⑤ 의
+//!   쓰기 직전 재판정이 거절하면 ⑤ 가 같은 칸의 가드를 접어 넣는다(⑥ 은 ⑤ 뒤의 계획을 읽는다).
 
 use std::fmt;
 use std::io;
@@ -80,9 +81,8 @@ impl BootFiles for FsBootFiles {
         file::copy_aside(&self.state(), OS_HOOKS)
     }
 
+    // 셸 state 폴더는 아무도 미리 만들지 않는다 — 쓰는 쪽이 쓸 때 만든다(`file::write_atomic` · 기록기도 같다).
     fn write_state(&self, text: &str) -> io::Result<()> {
-        // 셸 state 폴더는 아무도 미리 만들지 않는다 — 첫 부팅의 첫 쓰기가 만든다. 기록기는 만들지 않는다.
-        std::fs::create_dir_all(&self.dir)?;
         file::write_atomic(&self.state(), text.as_bytes(), OS_HOOKS)
     }
 
@@ -91,7 +91,6 @@ impl BootFiles for FsBootFiles {
     }
 
     fn write_crash_copy(&self, text: &str) -> io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
         file::write_atomic(&self.crash_copy(), text.as_bytes(), OS_HOOKS)
     }
 
@@ -132,21 +131,27 @@ pub enum StateRead {
 }
 
 impl StateRead {
+    /// 읽기 결과 하나(`file::read_file_capped` 의 계약)를 판정한다 — 가름은 base 판정(`file::classify` ·
+    /// [`codec::STATE_SPEC`]) 하나다.
+    // ADR-0291
     pub fn from_read(read: io::Result<String>) -> Self {
-        match read {
-            Ok(text) => match codec::decode(&text) {
-                Ok((file, warnings)) => StateRead::Usable {
-                    file,
-                    text,
-                    warnings,
-                },
-                Err(unusable) => StateRead::Unusable(unusable),
+        // 원문은 사본 뜨기 · 해시 · 수락의 원천이라 쥔 채 판정한다 — `classify(Ok(text))` 가 하는 일이 이 `parse` 다.
+        let (parsed, text) = match read {
+            Ok(text) => (file::parse(&text, &codec::STATE_SPEC), text),
+            Err(e) => match file::classify(Err(e), &codec::STATE_SPEC) {
+                file::Loaded::Missing => return StateRead::Missing,
+                file::Loaded::Failed(e) => return StateRead::IoFailed(e.to_string()),
+                // 읽기 오류에서 나오는 판정은 못 쓸 원문(상한 초과 · UTF-8 아님)뿐이라 원문 칸이 필요 없다.
+                file::Loaded::Parsed(parsed) => (parsed, String::new()),
             },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => StateRead::Missing,
-            Err(e) => match codec::unusable_read(&e) {
-                Some(unusable) => StateRead::Unusable(unusable),
-                None => StateRead::IoFailed(e.to_string()),
+        };
+        match codec::decode_parsed(parsed) {
+            Ok((file, warnings)) => StateRead::Usable {
+                file,
+                text,
+                warnings,
             },
+            Err(unusable) => StateRead::Unusable(unusable),
         }
     }
 }
@@ -211,8 +216,8 @@ impl fmt::Debug for AwaitingCopy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BootAction {
-    /// 못 쓸 `state.json` 을 `state.json.corrupt` 로 떠 둔다(ADR-0274) — 원본은 실행 표식 쓰기(⑤)가 갈아끼운다.
-    /// 실패해도 진행한다(D8).
+    /// 못 쓸 `state.json`(손상 — 새 판 말고)을 `state.json.corrupt` 로 떠 둔다(ADR-0274) — 원본은 실행 표식
+    /// 쓰기(⑤)가 갈아끼운다. 실패해도 진행한다(D8).
     CopyAsideState,
     /// 못 쓸 사본(버전 초과 말고)을 `state.crash.json.corrupt` 로 떠 둔다(ADR-0274). 실패해도 진행한다(D8).
     CopyAsideCrashCopy,
@@ -233,6 +238,9 @@ pub enum BootAction {
 pub enum Guard {
     /// ⅰ `state.json` 을 못 읽었다(IO — 잠김 재시도 뒤). 사유 한 줄.
     StateUnreadable(String),
+    /// ⅰ 과 같은 칸 — `state.json` 이 이 셸보다 새 판이 쓴 것이다(그 판). 떠 두지도 덮지도 지우지도 않는다.
+    // ADR-0291 R2: 떠 두고 덮으면 새 판이 다시 떴을 때 자기 화면 상태를 잃는다(`.corrupt` 는 아무도 읽지 않는다).
+    StateNewer { found: u64 },
     /// ⅱ 떠야 할 사본을 못 떴다 — 쓰기 실패 · 사본 읽기 IO 실패 · 덮으면 안 되는 새 판의 사본(N6). 사유 한 줄.
     CrashCopyNotWritten(String),
 }
@@ -254,10 +262,13 @@ pub struct BootPlan {
     pub crash_copy: Option<AwaitingCopy>,
     /// ⑤ 와 기록기가 이어 실을 답한 사본의 해시 — 그 사본이 디스크에 남아 있을 수 있을 때만 선다(판정 · ④).
     pub carry_resolved: Option<String>,
-    /// 판정(③)이나 동작(④)이 세운다 — ⑤ 는 ④ 뒤의 값을 본다.
+    /// 판정(③)이나 동작(④)이 세운다 — ⑤ 는 ④ 뒤의 값을 보고, 쓰기 직전 재판정이 거절하면 ⑤ 도 세운다.
     pub guard: Option<Guard>,
     /// `Some` = `state.json` 이 못 쓸 파일이었다 — 떠 두기의 결과다. 동작(④)이 세운다(판정 뒤엔 아직 `None`).
     pub state_aside: Option<StateAside>,
+    /// 판정(③)이 읽은 `state.json` 이 쓸 수 있었으면 `Adopted` · 그 밖 `NotYet` — 기록기의 시작 값은
+    /// [`saver_claim`] 이 여기에 ⑤ 의 결과를 얹어 정한다.
+    pub claim: file::Claim,
 }
 
 // 복원할 모델(원문 ≤4 MiB 만큼의 탭 트리)을 통째로 찍지 않는다 — 창 수만.
@@ -282,6 +293,7 @@ impl fmt::Debug for BootPlan {
             .field("carry_resolved", &self.carry_resolved)
             .field("guard", &self.guard)
             .field("state_aside", &self.state_aside)
+            .field("claim", &self.claim)
             .finish()
     }
 }
@@ -335,6 +347,12 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
         carry_resolved: None,
         guard: None,
         state_aside: None,
+        claim: match state {
+            StateRead::Usable { .. } => file::Claim::Adopted,
+            StateRead::Missing | StateRead::IoFailed(_) | StateRead::Unusable(_) => {
+                file::Claim::NotYet
+            }
+        },
     };
     // I3 는 파일마다 가른다 — 읽기 IO 실패한 파일만 떠 두지도 덮지도 지우지도 않고, 다른 파일의 동작은 그 파일의
     //   읽기만 본다. 둘을 묶으면 사본을 못 읽은 부팅이 못 쓸 `state.json` 을 떠 두지 않은 채 ⑤ 로 덮는다.
@@ -347,10 +365,14 @@ pub fn decide_boot(inputs: BootInputs) -> BootPlan {
 
     match &state {
         StateRead::IoFailed(reason) => plan.guard = Some(Guard::StateUnreadable(reason.clone())),
-        // 사본 열과 무관하게 떠 둔다(N6 · 사본을 못 읽었어도 — ⑤ 가 이 원본을 갈아끼운다). 버전 초과(새 판이 쓴
-        //   파일 — 하향)도 떠 둔다(§12 R3).
-        StateRead::Unusable(_) => plan.actions.push(BootAction::CopyAsideState),
-        _ => {}
+        // 새 판이 쓴 파일은 읽기 실패와 같은 칸이다 — 떠 두지도 덮지도 않고 이번 실행은 저장하지 않는다.
+        // ADR-0291 R2
+        StateRead::Unusable(Unusable::NewerVersion { found }) => {
+            plan.guard = Some(Guard::StateNewer { found: *found })
+        }
+        // 사본 열과 무관하게 떠 둔다(N6 · 사본을 못 읽었어도 — ⑤ 가 이 원본을 갈아끼운다).
+        StateRead::Unusable(Unusable::Corrupt(_)) => plan.actions.push(BootAction::CopyAsideState),
+        StateRead::Missing | StateRead::Usable { .. } => {}
     }
 
     let copy = match CopyColumn::of(crash_copy, resolved.as_deref()) {
@@ -476,6 +498,11 @@ fn report_state_read(state: &StateRead) {
             module = "state",
             reason = %reason,
             "state.json 을 읽지 못했다 — 없는 것으로 친다"
+        ),
+        StateRead::Unusable(unusable @ Unusable::NewerVersion { .. }) => tracing::error!(
+            module = "state",
+            reason = %unusable,
+            "state.json 은 이 셸보다 새 판이 쓴 것이다 — 기본 화면으로 시작하고 떠 두지도 덮지도 않는다(이번 실행은 화면 상태를 저장하지 않는다)"
         ),
         StateRead::Unusable(unusable) => tracing::error!(
             module = "state",
@@ -688,29 +715,32 @@ fn remove_answered_copy(files: &impl BootFiles, hash: String) -> Option<String> 
             );
             None
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
-            None
-        }
-        // 답한 사본은 상한 안의 UTF-8 이었다 — 그렇지 않은 사본은 다른 사본이다.
-        Err(e) if codec::unusable_read(&e).is_some() => {
-            tracing::warn!(
-                module = "state",
-                hash = %hash,
-                error = %e,
-                "크래시 사본이 판정 뒤 바뀌었다(못 쓰는 내용) — 지우지 않는다"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::warn!(
-                module = "state",
-                hash = %hash,
-                error = %e,
-                "크래시 사본을 다시 못 읽어 답한 사본인지 모른다 — 해시를 이어 싣고 기록기가 다시 본다"
-            );
-            Some(hash)
-        }
+        // 읽기 오류의 가름은 base 판정 하나다.
+        Err(e) => match file::classify(Err(e), &codec::STATE_SPEC) {
+            file::Loaded::Missing => {
+                tracing::info!(module = "state", hash = %hash, "답한 크래시 사본이 이미 없다");
+                None
+            }
+            // 답한 사본은 상한 안의 UTF-8 이었다 — 그렇지 않은 사본은 다른 사본이다.
+            file::Loaded::Parsed(parsed) => {
+                tracing::warn!(
+                    module = "state",
+                    hash = %hash,
+                    parsed = ?parsed,
+                    "크래시 사본이 판정 뒤 바뀌었다(못 쓰는 내용) — 지우지 않는다"
+                );
+                None
+            }
+            file::Loaded::Failed(e) => {
+                tracing::warn!(
+                    module = "state",
+                    hash = %hash,
+                    error = %e,
+                    "크래시 사본을 다시 못 읽어 답한 사본인지 모른다 — 해시를 이어 싣고 기록기가 다시 본다"
+                );
+                Some(hash)
+            }
+        },
     }
 }
 
@@ -729,9 +759,12 @@ pub enum MarkerOutcome {
 /// ★④ 뒤 · 어느 창보다 먼저 부른다★ — 사본 뜨기(④)가 끝난 뒤라야 원문을 덮어도 되고, 창보다 먼저라야 조용히
 /// 복원한 화면이 창을 만들다 앱을 죽여도 다음 부팅이 비정상 종료로 읽는다(§6-5 ⑤). 실패는 log 만 하고 진행한다 —
 /// 그 실행의 크래시는 정상 종료로 읽힐 수 있다(D8 · §12 R14).
+///
+/// ★쓰기 직전에 지금 `state.json` 을 다시 판정한다★ — 거절(새 판 · 못 읽음)이면 쓰지 않고 ③ 의 가드 ⅰ 과 같은
+/// 가드를 `plan` 에 접어 넣고 `Guarded` 다(그 실행은 저장하지 않고 ⑥ 의 `restore.status` 도 그 가드를 싣는다).
 pub fn write_run_marker(
     files: &impl BootFiles,
-    plan: &BootPlan,
+    plan: &mut BootPlan,
     windows: Vec<WindowEntry>,
     saved_at_ms: u64,
 ) -> MarkerOutcome {
@@ -752,12 +785,85 @@ pub fn write_run_marker(
             return MarkerOutcome::Failed;
         }
     };
+    if let Err(guard) = judge_before_marker(files, plan) {
+        match &guard {
+            Guard::StateNewer { found } => tracing::error!(
+                module = "state",
+                found,
+                "실행 표식을 쓰기 직전의 state.json 이 이 셸보다 새 판이 쓴 것이다 — 덮지 않고 이번 실행은 화면 상태를 저장하지 않는다"
+            ),
+            _ => tracing::warn!(
+                module = "state",
+                guard = ?guard,
+                "실행 표식을 쓰기 직전에 state.json 을 다시 못 읽었다 — 덮지 않고 이번 실행은 화면 상태를 저장하지 않는다"
+            ),
+        }
+        plan.guard = Some(guard);
+        return MarkerOutcome::Guarded;
+    }
     match files.write_state(&text) {
         Ok(()) => MarkerOutcome::Written,
         Err(e) => {
             tracing::warn!(module = "state", error = %e, "실행 표식을 쓰지 못했다");
             MarkerOutcome::Failed
         }
+    }
+}
+
+/// ⑤ 의 저장 직전 재판정 — 덮어도 되면 `Ok`(떠 둘 것이면 떠 둔 뒤 · 떠 두기가 실패해도 `Ok` — D8), 거절이면 ③ 의
+/// 가드 ⅰ 과 같은 칸의 가드.
+// ADR-0291 R16: ③ 의 판정을 들고 쓰지 않는다 — 그 뒤 새 판 · 못 읽는 파일로 바뀐 `state.json` 을 덮지 않는다.
+fn judge_before_marker(files: &impl BootFiles, plan: &BootPlan) -> Result<(), Guard> {
+    let current = file::classify(files.read_state(), &codec::STATE_SPEC);
+    match current.write_policy(plan.claim) {
+        file::WritePolicy::Write => Ok(()),
+        // ④ 가 방금 이 파일을 떠 두었다(또는 떠 두다 실패했다 — D8) — 같은 부팅 순서 안이라 다시 뜨지 않는다.
+        //   그 사이 바뀐 파일은 실행 중 바깥 편집이라 지원하지 않는다(ADR-0291 C1).
+        file::WritePolicy::CopyAsideFirst if plan.state_aside.is_some() => Ok(()),
+        file::WritePolicy::CopyAsideFirst => {
+            copy_state_aside_before_marker(files, &current);
+            Ok(())
+        }
+        file::WritePolicy::Refuse(file::Refused::Newer { found }) => {
+            Err(Guard::StateNewer { found })
+        }
+        file::WritePolicy::Refuse(file::Refused::ReadFailed) => {
+            Err(Guard::StateUnreadable(match current {
+                file::Loaded::Failed(e) => e.to_string(),
+                // 판정 표는 읽기 실패에만 이 거절을 낸다.
+                _ => "state.json 을 못 읽었다".to_string(),
+            }))
+        }
+    }
+}
+
+/// 실패해도 진행한다 — 실행 표식이 하나뿐인 원본을 덮는다(D8 · 기록기의 같은 떠 두기와 같다).
+fn copy_state_aside_before_marker(files: &impl BootFiles, current: &file::Loaded) {
+    let what = match current {
+        file::Loaded::Parsed(file::Parsed::Usable { .. }) => "판정 뒤 놓인 state.json",
+        _ => "판정 뒤 못 쓰게 된 state.json",
+    };
+    match files.copy_aside_state() {
+        Ok(to) => tracing::info!(
+            module = "state",
+            to = %to.display(),
+            "{what} 을 실행 표식으로 덮기 전에 떠 뒀다"
+        ),
+        Err(e) => tracing::error!(
+            module = "state",
+            "{what} 을 떠 두지 못했다 — 진행한다: 실행 표식 쓰기가 하나뿐인 원본을 덮는다(D8): {e}"
+        ),
+    }
+}
+
+/// 기록기가 쥐고 시작할 [`file::Claim`] — 판정(③)이 읽은 `state.json` 이 쓸 수 있었거나 실행 표식(⑤)을 썼으면
+/// `Adopted`. 그 밖(없음 · 손상이었고 ⑤ 도 못 썼다)이면 `NotYet` 이라, 그 사이 놓인 쓸 만한 파일을 기록기의 첫
+/// 쓰기가 덮기 전에 떠 둔다.
+// ADR-0291 R8 (D14)
+pub fn saver_claim(plan: &BootPlan, marker: MarkerOutcome) -> file::Claim {
+    match marker {
+        MarkerOutcome::Written => file::Claim::Adopted,
+        MarkerOutcome::Guarded | MarkerOutcome::Failed => plan.claim,
     }
 }
 
@@ -856,7 +962,12 @@ mod tests {
         })
     }
 
+    /// 아무 동작도 없는 계획 — 복원하는 계획은 쓸 수 있는 `state.json` 에서만 나오므로 `Adopted` 를 싣는다.
     fn quiet(model: BootModel) -> BootPlan {
+        let claim = match model {
+            BootModel::Restore(_) => file::Claim::Adopted,
+            BootModel::Default => file::Claim::NotYet,
+        };
         BootPlan {
             model,
             actions: Vec::new(),
@@ -864,18 +975,21 @@ mod tests {
             carry_resolved: None,
             guard: None,
             state_aside: None,
+            claim,
         }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum GuardKind {
         StateUnreadable,
+        StateNewer,
         CrashCopyNotWritten,
     }
 
     fn guard_kind(guard: &Option<Guard>) -> Option<GuardKind> {
         guard.as_ref().map(|guard| match guard {
             Guard::StateUnreadable(_) => GuardKind::StateUnreadable,
+            Guard::StateNewer { .. } => GuardKind::StateNewer,
             Guard::CrashCopyNotWritten(_) => GuardKind::CrashCopyNotWritten,
         })
     }
@@ -945,7 +1059,7 @@ mod tests {
         use GuardKind::*;
         let crash = || read_of(crash_file());
         let newer = || StateRead::Unusable(Unusable::NewerVersion { found: 2 });
-        let broken = || StateRead::Unusable(Unusable::NotJson("{".into()));
+        let broken = || StateRead::Unusable(Unusable::Corrupt("{".into()));
         let io = || StateRead::IoFailed("잠김".into());
         let missing = || StateRead::Missing;
         let answered = |clean| read_of(answered_state_file(clean, &crash_hash()));
@@ -963,9 +1077,9 @@ mod tests {
             Row::new("답 없는 사본 × 못 쓸 state(N6)", broken(), crash())
                 .does(vec![CopyAsideState])
                 .asks(crash_file()),
-            Row::new("답 없는 사본 × 버전 초과 state", newer(), crash())
-                .does(vec![CopyAsideState])
-                .asks(crash_file()),
+            Row::new("답 없는 사본 × 버전 초과 state(가드 — 떠 두지 않는다)", newer(), crash())
+                .asks(crash_file())
+                .guarded(StateNewer),
             Row::new("답 없는 사본 × state IO 실패(가드 ⅰ)", io(), crash())
                 .asks(crash_file())
                 .guarded(StateUnreadable),
@@ -983,6 +1097,7 @@ mod tests {
             Row::new("버전 초과 사본 × 못 쓸 state", broken(), newer()).does(vec![CopyAsideState]),
             Row::new("버전 초과 사본 × state IO 실패(가드 ⅰ)", io(), newer())
                 .guarded(StateUnreadable),
+            Row::new("버전 초과 사본 × 버전 초과 state(가드)", newer(), newer()).guarded(StateNewer),
             // ── 없음 ──
             Row::new("사본 없음 × state 없음", missing(), missing()),
             Row::new("사본 없음 × clean_exit:true", usable(true), missing())
@@ -998,11 +1113,11 @@ mod tests {
                 .asks(state_file(false)),
             Row::new("사본 없음 × 못 쓸 state", broken(), missing()).does(vec![CopyAsideState]),
             Row::new(
-                "사본 없음 × 버전 초과 state(§12 R3)",
-                StateRead::Unusable(Unusable::NewerVersion { found: 2 }),
+                "사본 없음 × 버전 초과 state(가드 — 떠 두지도 덮지도 않는다 · ADR-0291 R2)",
+                newer(),
                 missing(),
             )
-            .does(vec![CopyAsideState]),
+            .guarded(StateNewer),
             Row::new("사본 없음 × state IO 실패(가드 ⅰ)", io(), missing()).guarded(StateUnreadable),
             // ── 있음 · 답함 → 없음으로 치고 · 해시가 같을 때만 지운다(I2 · N1) ──
             Row::new("답한 사본 × clean_exit:true", answered(true), crash())
@@ -1031,7 +1146,7 @@ mod tests {
             Row::new(
                 "못 쓸 사본(상한 초과) × 못 쓸 state",
                 broken(),
-                StateRead::Unusable(Unusable::Unreadable("상한 초과".into())),
+                StateRead::Unusable(Unusable::Corrupt("상한 초과".into())),
             )
             .does(vec![
                 CopyAsideState,
@@ -1045,6 +1160,13 @@ mod tests {
             )
             .does(vec![CopyAsideCrashCopy, RemoveUnusableCrashCopy])
             .guarded(StateUnreadable),
+            Row::new(
+                "못 쓸 사본 × 버전 초과 state(가드 — 사본 쪽은 사본 읽기만 본다)",
+                newer(),
+                broken(),
+            )
+            .does(vec![CopyAsideCrashCopy, RemoveUnusableCrashCopy])
+            .guarded(StateNewer),
             // ── 사본 읽기 IO 실패 → 없음으로 치고 · 사본 쪽 동작 0(I3 — 파일마다) ──
             Row::new("사본 IO 실패 × state 없음", missing(), io()),
             Row::new("사본 IO 실패 × clean_exit:true", usable(true), io())
@@ -1077,11 +1199,11 @@ mod tests {
             )
             .does(vec![CopyAsideState]),
             Row::new(
-                "사본 IO 실패 × 버전 초과 state(떠 둔다)",
+                "사본 IO 실패 × 버전 초과 state(가드 — 떠 두지 않는다)",
                 newer(),
                 io(),
             )
-            .does(vec![CopyAsideState]),
+            .guarded(StateNewer),
             Row::new("사본 IO 실패 × state IO 실패(가드 ⅰ)", io(), io()).guarded(StateUnreadable),
         ]
     }
@@ -1089,12 +1211,17 @@ mod tests {
     #[test]
     fn the_boot_table_decides_every_row() {
         let rows = rows();
-        assert_eq!(rows.len(), 34, "행 수 — 행을 더하거나 빼면 이 수도 고친다");
+        assert_eq!(rows.len(), 36, "행 수 — 행을 더하거나 빼면 이 수도 고친다");
         for row in rows {
+            let claim = match row.state {
+                StateRead::Usable { .. } => file::Claim::Adopted,
+                _ => file::Claim::NotYet,
+            };
             let plan = decide_boot(BootInputs {
                 state: row.state,
                 crash_copy: row.crash_copy,
             });
+            assert_eq!(plan.claim, claim, "{} — 기록기의 시작 판정 축", row.name);
             assert_eq!(plan.model, row.model, "{} — 모델", row.name);
             assert_eq!(plan.actions, row.actions, "{} — 동작", row.name);
             assert_eq!(plan.crash_copy, row.ask, "{} — 묻나", row.name);
@@ -1113,22 +1240,29 @@ mod tests {
     }
 
     #[test]
-    fn an_unusable_state_file_of_any_kind_is_copied_aside() {
-        for unusable in [
-            Unusable::Unreadable("상한 초과".into()),
-            Unusable::NotJson("{".into()),
-            Unusable::NotStateFile("머리 없음".into()),
-            Unusable::NewerVersion { found: 2 },
-        ] {
+    fn a_corrupt_state_file_of_any_kind_is_copied_aside() {
+        for reason in ["상한 초과", "JSON 이 아니다", "상태 파일 모양이 아니다"] {
             assert_eq!(
-                decide(StateRead::Unusable(unusable.clone())),
+                decide(StateRead::Unusable(Unusable::Corrupt(reason.into()))),
                 BootPlan {
                     actions: vec![BootAction::CopyAsideState],
                     ..quiet(BootModel::Default)
                 },
-                "{unusable:?}"
+                "{reason}"
             );
         }
+    }
+
+    /// ADR-0291 R2: 새 판이 쓴 `state.json` 은 떠 두지 않고 가드다 — 그 판을 싣는다.
+    #[test]
+    fn a_newer_state_file_guards_the_run_and_is_not_copied_aside() {
+        assert_eq!(
+            decide(StateRead::Unusable(Unusable::NewerVersion { found: 2 })),
+            BootPlan {
+                guard: Some(Guard::StateNewer { found: 2 }),
+                ..quiet(BootModel::Default)
+            }
+        );
     }
 
     #[test]
@@ -1147,7 +1281,7 @@ mod tests {
         assert_eq!(from_err(io::ErrorKind::NotFound.into()), StateRead::Missing);
         assert!(matches!(
             from_err(io::Error::new(io::ErrorKind::InvalidData, "상한 초과")),
-            StateRead::Unusable(Unusable::Unreadable(_))
+            StateRead::Unusable(Unusable::Corrupt(_))
         ));
         assert!(matches!(
             from_err(io::ErrorKind::PermissionDenied.into()),
@@ -1163,7 +1297,7 @@ mod tests {
     fn read_text_splits_into_unusable_and_usable() {
         assert!(matches!(
             StateRead::from_read(Ok("{".into())),
-            StateRead::Unusable(Unusable::NotJson(_))
+            StateRead::Unusable(Unusable::Corrupt(_))
         ));
         assert_eq!(
             StateRead::from_read(Ok(newer_text())),
@@ -1249,12 +1383,15 @@ mod tests {
     }
 
     impl BootFiles for FakeFiles {
+        // 디스크처럼 읽어도 남는다 — ③ 의 읽기와 ⑤ 의 재판정이 같은 칸을 보고, 시험은 그 사이에 칸을 바꾼다.
+        //   빈 칸 = 파일 없음.
         fn read_state(&self) -> io::Result<String> {
             self.calls.borrow_mut().push("read".into());
-            self.state
-                .borrow_mut()
-                .take()
-                .expect("부팅은 state.json 을 한 번 읽는다")
+            match &*self.state.borrow() {
+                None => Err(io::ErrorKind::NotFound.into()),
+                Some(Ok(text)) => Ok(text.clone()),
+                Some(Err(e)) => Err(io::Error::new(e.kind(), e.to_string())),
+            }
         }
 
         fn copy_aside_state(&self) -> io::Result<PathBuf> {
@@ -1328,12 +1465,12 @@ mod tests {
             ..FakeFiles::reading(Ok("{".into()))
         };
 
-        let plan = prepare(&files);
+        let mut plan = prepare(&files);
 
         assert_eq!(plan.guard, None, "떠 두기 실패는 가드가 아니다(D8)");
         assert_eq!(plan.state_aside, Some(StateAside::NotCopied));
         assert_eq!(
-            write_run_marker(&files, &plan, vec![a_window()], 7),
+            write_run_marker(&files, &mut plan, vec![a_window()], 7),
             MarkerOutcome::Written
         );
         assert_eq!(files.written().len(), 1);
@@ -1346,7 +1483,7 @@ mod tests {
             vec![Ok("{".into())],
         );
 
-        let plan = prepare(&files);
+        let mut plan = prepare(&files);
 
         assert!(matches!(plan.guard, Some(Guard::StateUnreadable(_))));
         assert_eq!(
@@ -1354,7 +1491,7 @@ mod tests {
             "못 쓸 사본을 떠 둔 것은 state.json 의 떠 두기가 아니다"
         );
         assert_eq!(
-            write_run_marker(&files, &plan, vec![a_window()], 7),
+            write_run_marker(&files, &mut plan, vec![a_window()], 7),
             MarkerOutcome::Guarded
         );
         assert_eq!(
@@ -1400,8 +1537,8 @@ mod tests {
         let raw = text_of(&state_file(false));
         let files = FakeFiles::reading(Ok(raw.clone()));
 
-        let plan = prepare(&files);
-        let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
+        let mut plan = prepare(&files);
+        let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
         assert_eq!(plan.model, BootModel::Default);
         assert_eq!(plan.guard, None);
@@ -1414,7 +1551,14 @@ mod tests {
         assert_eq!(marker, MarkerOutcome::Written);
         assert_eq!(
             files.call_names(),
-            ["sweep", "read", "read_crash", "write_crash", "write"],
+            [
+                "sweep",
+                "read",
+                "read_crash",
+                "write_crash",
+                "read",
+                "write"
+            ],
             "사본 쓰기가 실행 표식보다 먼저"
         );
         let marker = marker_of(&files);
@@ -1429,7 +1573,7 @@ mod tests {
             ..FakeFiles::reading(Ok(text_of(&state_file(false))))
         };
 
-        let plan = prepare(&files);
+        let mut plan = prepare(&files);
 
         assert!(matches!(plan.guard, Some(Guard::CrashCopyNotWritten(_))));
         assert_eq!(
@@ -1438,7 +1582,7 @@ mod tests {
             "복원 원천 = 메모리의 state.json 원문(L2)"
         );
         assert_eq!(
-            write_run_marker(&files, &plan, vec![a_window()], 9),
+            write_run_marker(&files, &mut plan, vec![a_window()], 9),
             MarkerOutcome::Guarded
         );
         assert!(files.written().is_empty(), "디스크의 state.json 그대로");
@@ -1451,12 +1595,12 @@ mod tests {
             vec![Err(io::ErrorKind::PermissionDenied.into())],
         );
 
-        let plan = prepare(&files);
+        let mut plan = prepare(&files);
 
         assert!(matches!(plan.guard, Some(Guard::CrashCopyNotWritten(_))));
         assert_eq!(plan.crash_copy, Some(awaiting_of(state_file(false))));
         assert_eq!(
-            write_run_marker(&files, &plan, vec![a_window()], 9),
+            write_run_marker(&files, &mut plan, vec![a_window()], 9),
             MarkerOutcome::Guarded
         );
         assert_eq!(files.calls(), ["sweep", "read", "read_crash"]);
@@ -1464,24 +1608,129 @@ mod tests {
 
     #[test]
     fn a_crash_copy_read_io_failure_still_keeps_an_unusable_state_aside_before_the_marker() {
-        for state in ["{".to_string(), newer_text()] {
-            let files = FakeFiles::reading_both(
-                Ok(state.clone()),
-                vec![Err(io::ErrorKind::PermissionDenied.into())],
-            );
+        let files = FakeFiles::reading_both(
+            Ok("{".into()),
+            vec![Err(io::ErrorKind::PermissionDenied.into())],
+        );
 
-            let plan = prepare(&files);
-            let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
+        let mut plan = prepare(&files);
+        let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
-            assert_eq!(plan.guard, None, "{state}");
-            assert_eq!(plan.state_aside, Some(StateAside::CopiedAside), "{state}");
-            assert_eq!(marker, MarkerOutcome::Written, "{state}");
+        assert_eq!(plan.guard, None);
+        assert_eq!(plan.state_aside, Some(StateAside::CopiedAside));
+        assert_eq!(marker, MarkerOutcome::Written);
+        assert_eq!(
+            files.call_names(),
+            ["sweep", "read", "read_crash", "copy_aside", "read", "write"],
+            "떠 두기가 실행 표식보다 먼저 · ⑤ 의 재판정은 다시 떠 두지 않는다 · 사본 쪽 동작 0회(I3 는 파일마다)"
+        );
+    }
+
+    /// ADR-0291 R2: 새 판이 쓴 `state.json` 은 떠 두지도 덮지도 않고 이번 실행은 저장하지 않는다 — 사본 쪽은
+    /// 사본 읽기만 본다(I3 는 파일마다).
+    #[test]
+    fn a_newer_state_file_is_left_alone_and_the_run_saves_nothing() {
+        let files = FakeFiles::reading_both(Ok(newer_text()), vec![Ok("{".into())]);
+
+        let mut plan = prepare(&files);
+        let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
+
+        assert_eq!(plan.guard, Some(Guard::StateNewer { found: 2 }));
+        assert_eq!(plan.state_aside, None);
+        assert_eq!(plan.model, BootModel::Default);
+        assert_eq!(marker, MarkerOutcome::Guarded);
+        assert_eq!(
+            files.calls(),
+            [
+                "sweep",
+                "read",
+                "read_crash",
+                "copy_aside_crash",
+                "remove_crash"
+            ],
+            "state.json 은 떠 두기 · 쓰기 0회"
+        );
+    }
+
+    /// ADR-0291 R16: ⑤ 는 ③ 의 판정을 들고 쓰지 않는다 — 그 사이 새 판 · 못 읽는 파일이 되면 떠 두지도 덮지도
+    /// 않고 ③ 의 가드 ⅰ 과 같은 칸의 가드를 계획에 싣는다(이번 실행은 저장하지 않는다).
+    #[test]
+    fn the_marker_never_overwrites_a_state_file_that_turned_newer_or_unreadable() {
+        for (now, guard) in [
+            (Ok(newer_text()), Guard::StateNewer { found: 2 }),
+            (
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "잠김")),
+                Guard::StateUnreadable("잠김".into()),
+            ),
+        ] {
+            let label = format!("{guard:?}");
+            let files = FakeFiles::reading(Ok(text_of(&state_file(true))));
+            let mut plan = prepare(&files);
+            assert_eq!(plan.guard, None, "{label}");
+            *files.state.borrow_mut() = Some(now);
+
+            let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
+
+            assert_eq!(marker, MarkerOutcome::Guarded, "{label}");
+            assert_eq!(plan.guard, Some(guard), "{label}");
             assert_eq!(
-                files.call_names(),
-                ["sweep", "read", "read_crash", "copy_aside", "write"],
-                "떠 두기가 실행 표식보다 먼저 · 사본 쪽 동작 0회(I3 는 파일마다) — {state}"
+                files.calls(),
+                ["sweep", "read", "read_crash", "read"],
+                "떠 두기 · 쓰기 0회 — {label}"
             );
         }
+    }
+
+    /// ADR-0291 R8 · R16: ③ 에 없던 파일이 ⑤ 앞에 놓였으면(손상이든 쓸 만하든 — D14) 떠 둔 뒤 쓴다. 떠 두기가
+    /// 실패해도 쓴다(D8).
+    #[test]
+    fn a_state_file_placed_after_the_decision_is_copied_aside_before_the_marker() {
+        for (placed, aside_fails) in [
+            ("{".to_string(), false),
+            (text_of(&state_file(true)), false),
+            ("{".to_string(), true),
+        ] {
+            let files = FakeFiles {
+                copy_aside_fails: aside_fails,
+                ..FakeFiles::reading(Err(io::ErrorKind::NotFound.into()))
+            };
+            let mut plan = prepare(&files);
+            *files.state.borrow_mut() = Some(Ok(placed.clone()));
+
+            let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
+
+            assert_eq!(marker, MarkerOutcome::Written, "{placed} · {aside_fails}");
+            assert_eq!(plan.guard, None, "{placed} · {aside_fails}");
+            assert_eq!(
+                files.call_names(),
+                ["sweep", "read", "read_crash", "read", "copy_aside", "write"],
+                "{placed} · {aside_fails}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_saver_starts_adopted_when_the_state_was_usable_or_the_marker_went_out() {
+        let usable = decide(usable(true));
+        let missing = decide(StateRead::Missing);
+        assert_eq!(
+            saver_claim(&usable, MarkerOutcome::Failed),
+            file::Claim::Adopted
+        );
+        assert_eq!(
+            saver_claim(&missing, MarkerOutcome::Written),
+            file::Claim::Adopted
+        );
+        assert_eq!(
+            saver_claim(&missing, MarkerOutcome::Failed),
+            file::Claim::NotYet,
+            "없던 파일이고 ⑤ 도 못 썼다 — 그 사이 놓인 파일은 이 실행의 것이 아니다"
+        );
+        let corrupt = decide(StateRead::Unusable(Unusable::Corrupt("{".into())));
+        assert_eq!(
+            saver_claim(&corrupt, MarkerOutcome::Failed),
+            file::Claim::NotYet
+        );
     }
 
     // ── 답 없는 사본 · 버전 초과 사본 ──
@@ -1491,13 +1740,16 @@ mod tests {
         let files =
             FakeFiles::reading_both(Ok(text_of(&state_file(false))), vec![Ok(crash_text())]);
 
-        let plan = prepare(&files);
-        let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
+        let mut plan = prepare(&files);
+        let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
         assert_eq!(plan.crash_copy, Some(awaiting_of(crash_file())));
         assert!(files.crash_written().is_empty(), "사본을 덮지 않는다(D2-6)");
         assert_eq!(marker, MarkerOutcome::Written);
-        assert_eq!(files.call_names(), ["sweep", "read", "read_crash", "write"]);
+        assert_eq!(
+            files.call_names(),
+            ["sweep", "read", "read_crash", "read", "write"]
+        );
     }
 
     #[test]
@@ -1657,8 +1909,8 @@ mod tests {
     fn an_answered_copy_is_removed_after_a_matching_reread_and_nothing_is_carried() {
         let files = answered_boot(vec![Ok(crash_text()), Ok(crash_text())]);
 
-        let plan = prepare(&files);
-        write_run_marker(&files, &plan, vec![a_window()], 9);
+        let mut plan = prepare(&files);
+        write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
         assert_eq!(
             files.call_names(),
@@ -1668,6 +1920,7 @@ mod tests {
                 "read_crash",
                 "read_crash",
                 "remove_crash",
+                "read",
                 "write"
             ]
         );
@@ -1721,8 +1974,8 @@ mod tests {
             ..answered_boot(vec![Ok(crash_text()), Ok(crash_text())])
         };
 
-        let plan = prepare(&files);
-        let marker = write_run_marker(&files, &plan, vec![a_window()], 9);
+        let mut plan = prepare(&files);
+        let marker = write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
         assert_eq!(plan.carry_resolved, Some(crash_hash()));
         assert_eq!(plan.guard, None, "못 지운 것은 가드가 아니다");
@@ -1752,12 +2005,19 @@ mod tests {
         let state = answered_state_file(false, &crash_hash());
         let files = FakeFiles::reading_both(Ok(text_of(&state)), vec![Ok(crash_text())]);
 
-        let plan = prepare(&files);
-        write_run_marker(&files, &plan, vec![a_window()], 9);
+        let mut plan = prepare(&files);
+        write_run_marker(&files, &mut plan, vec![a_window()], 9);
 
         assert_eq!(
             files.call_names(),
-            ["sweep", "read", "read_crash", "write_crash", "write"],
+            [
+                "sweep",
+                "read",
+                "read_crash",
+                "write_crash",
+                "read",
+                "write"
+            ],
             "지우지 않고 새 사본 쓰기가 갈아끼운다"
         );
         assert_eq!(plan.carry_resolved, None);
@@ -1772,7 +2032,7 @@ mod tests {
 
         let outcome = write_run_marker(
             &files,
-            &quiet(BootModel::Restore(state_file(true))),
+            &mut quiet(BootModel::Restore(state_file(true))),
             vec![a_window()],
             7,
         );
@@ -1796,12 +2056,12 @@ mod tests {
     #[test]
     fn the_run_marker_carries_the_hash_to_carry() {
         let files = FakeFiles::default();
-        let plan = BootPlan {
+        let mut plan = BootPlan {
             carry_resolved: Some("h".into()),
             ..quiet(BootModel::Default)
         };
 
-        write_run_marker(&files, &plan, Vec::new(), 7);
+        write_run_marker(&files, &mut plan, Vec::new(), 7);
 
         assert_eq!(marker_of(&files).resolved_crash_copy, Some("h".into()));
     }
@@ -1813,7 +2073,7 @@ mod tests {
             ..FakeFiles::default()
         };
 
-        let outcome = write_run_marker(&files, &quiet(BootModel::Default), Vec::new(), 7);
+        let outcome = write_run_marker(&files, &mut quiet(BootModel::Default), Vec::new(), 7);
 
         assert_eq!(outcome, MarkerOutcome::Failed);
     }
@@ -1846,11 +2106,11 @@ mod tests {
         let dir = root.join("shell").join("state");
         let files = FsBootFiles::in_dir(&dir);
 
-        let plan = prepare(&files);
+        let mut plan = prepare(&files);
 
         assert_eq!(plan, quiet(BootModel::Default));
         assert_eq!(
-            write_run_marker(&files, &plan, Vec::new(), 7),
+            write_run_marker(&files, &mut plan, Vec::new(), 7),
             MarkerOutcome::Written
         );
         let text = std::fs::read_to_string(dir.join(STATE_FILE)).unwrap();
@@ -1865,8 +2125,8 @@ mod tests {
         std::fs::write(dir.join(STATE_FILE), "{broken").unwrap();
         let files = FsBootFiles::in_dir(&dir);
 
-        let plan = prepare(&files);
-        write_run_marker(&files, &plan, Vec::new(), 7);
+        let mut plan = prepare(&files);
+        write_run_marker(&files, &mut plan, Vec::new(), 7);
 
         assert_eq!(plan.state_aside, Some(StateAside::CopiedAside));
         assert_eq!(
@@ -1890,8 +2150,8 @@ mod tests {
         std::fs::write(dir.join(STATE_FILE), &raw).unwrap();
         let files = FsBootFiles::in_dir(&dir);
 
-        let plan = prepare(&files);
-        write_run_marker(&files, &plan, Vec::new(), 7);
+        let mut plan = prepare(&files);
+        write_run_marker(&files, &mut plan, Vec::new(), 7);
 
         assert_eq!(
             std::fs::read_to_string(dir.join(CRASH_COPY_FILE)).unwrap(),
@@ -1951,8 +2211,8 @@ mod tests {
         std::fs::write(dir.join(STATE_FILE), text_of(&state_file(false))).unwrap();
         let files = FsBootFiles::in_dir(&dir);
 
-        let plan = prepare(&files);
-        write_run_marker(&files, &plan, Vec::new(), 7);
+        let mut plan = prepare(&files);
+        write_run_marker(&files, &mut plan, Vec::new(), 7);
 
         assert_eq!(
             std::fs::read_to_string(dir.join(CRASH_COPY_FILE)).unwrap(),
@@ -1964,6 +2224,49 @@ mod tests {
             text_of(&state_file(false)),
             "가드 ⅱ — state.json 그대로"
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_newer_state_file_on_disk_keeps_its_bytes_and_gets_no_corrupt_twin() {
+        let dir = temp_dir("newer-state");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STATE_FILE), newer_text()).unwrap();
+        let files = FsBootFiles::in_dir(&dir);
+
+        let mut plan = prepare(&files);
+        let marker = write_run_marker(&files, &mut plan, Vec::new(), 7);
+
+        assert_eq!(plan.guard, Some(Guard::StateNewer { found: 2 }));
+        assert_eq!(marker, MarkerOutcome::Guarded);
+        assert_eq!(
+            std::fs::read_to_string(dir.join(STATE_FILE)).unwrap(),
+            newer_text()
+        );
+        assert_eq!(names_in(&dir), [STATE_FILE]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// ADR-0291 R16: ③ 뒤 ⑤ 앞에 새 판으로 바뀐 실제 파일도 그 바이트 그대로 남는다.
+    #[test]
+    fn a_state_file_that_turns_newer_before_the_marker_keeps_its_bytes_on_disk() {
+        let dir = temp_dir("newer-before-marker");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(STATE_FILE), text_of(&state_file(true))).unwrap();
+        let files = FsBootFiles::in_dir(&dir);
+
+        let mut plan = prepare(&files);
+        assert_eq!(plan.guard, None);
+        std::fs::write(dir.join(STATE_FILE), newer_text()).unwrap();
+        let marker = write_run_marker(&files, &mut plan, vec![a_window()], 7);
+
+        assert_eq!(marker, MarkerOutcome::Guarded);
+        assert_eq!(plan.guard, Some(Guard::StateNewer { found: 2 }));
+        assert_eq!(
+            std::fs::read_to_string(dir.join(STATE_FILE)).unwrap(),
+            newer_text()
+        );
+        assert_eq!(names_in(&dir), [STATE_FILE]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

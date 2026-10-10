@@ -1,4 +1,4 @@
-// StateFileNotice — `state_file` 네 값 · 가드 ⅱ(`saves:false` · `ok`) · 닫기(사용자 결정 2026-10-05 · 2026-10-06).
+// StateFileNotice — `state_file` 다섯 값 · 가드 ⅱ(`saves:false` · `ok`) · 닫기(사용자 결정 2026-10-05 · 2026-10-06).
 
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -20,9 +20,10 @@ describe('StateFileNotice', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  // 셸 계약의 짝 — unreadable 은 가드 ⅰ 이라 늘 `saves:false` 다.
+  // 셸 계약의 짝 — unreadable · newer 는 가드 ⅰ 이라 늘 `saves:false` 다.
   it.each<[StateFileStatus, boolean, string]>([
     ['unreadable', false, t('restore.stateFileUnreadable')],
+    ['newer', false, t('restore.stateFileNewer')],
     ['corrupt_copied_aside', true, t('restore.stateFileCorruptCopiedAside')],
     ['corrupt_not_copied', true, t('restore.stateFileCorruptNotCopied')],
   ])('%s 면 그 문구를 띄운다', (stateFile, saves, text) => {
@@ -43,6 +44,19 @@ describe('StateFileNotice', () => {
     const text = screen.getByRole('status').textContent ?? ''
     expect(text).toContain('state.json')
     expect(text).toContain('저장하지 않')
+  })
+
+  // ADR-0291: 새 버전이 저장한 파일은 손상 문구가 아니라 따로 — 떠 두지 않으므로 .corrupt 를 말하지 않는다.
+  it('newer 문구는 파일 이름 · 「저장하지 않는다」 · 「그대로 둔다」를 싣고 .corrupt 를 말하지 않는다', () => {
+    render(<StateFileNotice stateFile="newer" saves={false} />)
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+    const text = screen.getByRole('status').textContent ?? ''
+    expect(text).toContain('state.json')
+    expect(text).toContain('새 버전')
+    expect(text).toContain('저장하지 않')
+    expect(text).toContain('그대로 둡니다')
+    expect(text).not.toContain('.corrupt')
+    expect(text).not.toContain(t('restore.stateFileNotSaving'))
   })
 
   it('떠 두지 못한 경우는 .corrupt 를 이번 실행의 백업이 아니라 이전 실행이 남긴 것이라고 말한다', () => {
