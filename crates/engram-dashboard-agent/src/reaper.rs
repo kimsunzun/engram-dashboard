@@ -124,6 +124,9 @@ pub fn decide(msg: &ReapMsg) -> Disposition {
 /// ★lock 순서(ADR-0006)★: 비교를 **update_with 클로저 안**(프로필 락 보유 중)에서 한다 —
 ///   sessions 락은 여기서 절대 잡지 않는다(disposition 은 sessions lock-free 유지). epoch 판정을
 ///   프로필의 in-memory 필드로만 하므로 sessions 맵을 볼 필요가 없다.
+/// ★레지스트리 내부 입구다(`try_` 로 바꾸지 말 것)★ — 저장이 실패 · 거절돼도 메모리에 내리고 dirty 를 세운다.
+///   내리기를 버리면 메모리의 `true` 가 다음 저장에 실려 죽은 에이전트가 다음 부팅 복원에 되살아난다(크래시 루프).
+// ADR-0291 (E1)
 fn apply_disposition(
     profiles: &ProfileRegistry,
     id: AgentId,

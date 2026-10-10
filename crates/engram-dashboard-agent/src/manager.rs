@@ -27,6 +27,7 @@ use crate::output_core::{OutputCore, QueuedWiring, TurnWiring};
 use crate::preset::PresetRegistry;
 use crate::profile::{
     AgentCommand, AgentProfile, ProfileRegistry, RestoreOutcome, RestoreReport, SpawnMode,
+    StoreError,
 };
 use crate::queued_input::{QueuedInputs, QueuedListing};
 use crate::reaper::{self, ReaperCmd, ReaperDeps};
@@ -405,6 +406,83 @@ fn profile_vanished_mid_spawn(id: AgentId, at: &str) -> PtyError {
     PtyError::SpawnFailed(format!(
         "profile {id} vanished mid-spawn at [{at}] (concurrent delete) — spawn aborted"
     ))
+}
+
+/// 레지스트리의 어느 변경 입구로 바꾸나 — 그 변경을 부른 쪽이 정한다. 아래 동사들은 그 입구의 레지스트리
+/// 동사로 보낼 뿐이고, `Internal` 갈래는 `Err` 를 내지 않는다(저장 실패도 커밋 + dirty).
+///
+/// ★띄우기 경로는 이 값 하나를 공유 함수까지 실어 나른다 — 입구별 띄우기 사본을 두지 말 것★: 부팅 복원과
+///   수동 깨우기가 같은 동사를 쓰는 것이 ADR-0082 · ADR-0201 · ADR-0202 가 막은 「입구마다 판정이 갈려 하나가
+///   뒤처진다」를 닫는 장치다.
+// ADR-0291 R17 (E3)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entry {
+    /// 부르는 쪽 있는 변경(버스 · WS · 그 둘이 부른 띄우기) — 저장이 `Err` 면 메모리를 그대로 두고 오류.
+    Caller,
+    /// 부르는 쪽 없는 변경(부팅 복원) — 저장의 어떤 `Err` 에도 메모리에 적용 + dirty. 되돌릴 요청이 없고,
+    /// 순간 잠김 하나가 복원을 막지 않게 한다. 버스 · WS 가 아직 부르는 옛 판(`create_agent` · `rename_agent`)도
+    /// 이 입구를 탄다 — 옛 판의 의미(저장 `Err` 에도 메모리 적용)가 바로 이것이라서다.
+    Internal,
+}
+
+impl Entry {
+    fn upsert(self, profiles: &ProfileRegistry, profile: AgentProfile) -> Result<(), StoreError> {
+        match self {
+            Entry::Caller => profiles.try_upsert(profile),
+            Entry::Internal => {
+                profiles.upsert(profile);
+                Ok(())
+            }
+        }
+    }
+
+    fn rename(
+        self,
+        profiles: &ProfileRegistry,
+        id: AgentId,
+        display_name: Option<String>,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Entry::Caller => profiles.try_rename(id, display_name),
+            Entry::Internal => Ok(profiles.rename(id, display_name)),
+        }
+    }
+
+    fn update_preserving_hierarchy(
+        self,
+        profiles: &ProfileRegistry,
+        profile: AgentProfile,
+    ) -> Result<bool, StoreError> {
+        match self {
+            Entry::Caller => profiles.try_update_preserving_hierarchy(profile),
+            Entry::Internal => Ok(profiles.update_preserving_hierarchy(profile)),
+        }
+    }
+
+    fn upsert_preserving_hierarchy(
+        self,
+        profiles: &ProfileRegistry,
+        profile: AgentProfile,
+    ) -> Result<(), StoreError> {
+        match self {
+            Entry::Caller => profiles.try_upsert_preserving_hierarchy(profile),
+            Entry::Internal => {
+                profiles.upsert_preserving_hierarchy(profile);
+                Ok(())
+            }
+        }
+    }
+
+    fn release_session_id(
+        self,
+        profiles: &ProfileRegistry,
+        id: AgentId,
+    ) -> Result<Option<bool>, StoreError> {
+        match self {
+            Entry::Caller => profiles.try_release_session_id(id),
+            Entry::Internal => Ok(profiles.release_session_id(id)),
+        }
+    }
 }
 
 /// Fresh 스폰이 **저장된 세션 id 를 비우고 시작해야 하나**.
@@ -897,6 +975,19 @@ impl AgentManager {
         self.profiles.get(id).and_then(|p| p.backend_session_id)
     }
 
+    /// 옛 판 — 저장이 `Err` 여도 메모리에 등록한다(로그 · dirty). 버스 · WS 가
+    /// [`AgentManager::try_create_agent`] 로 옮겨 가면 이 판을 걷는다.
+    // ADR-0291 (E4)
+    pub fn create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+        self.create_agent_via(profile, Entry::Internal)
+    }
+
+    /// 부르는 쪽 있는 판 — 저장이 `Err` 면 등록하지 않고 [`PtyError::Store`] 다(메모리 명부 그대로).
+    // ADR-0291 R17 (E4)
+    pub fn try_create_agent(&self, profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+        self.create_agent_via(profile, Entry::Caller)
+    }
+
     /// 에이전트 신규 등록(트리 "만들기"). 등록 전에 명부 전역 이름 유일성을 강제한다(ADR-0120).
     ///
     /// 반환 = **이 호출이 등록한 프로필**(배정된 이름이 반영된 값). 호출자 응답이 그 이름을 담아야 하므로
@@ -908,8 +999,12 @@ impl AgentManager {
     /// ★접미사는 `display_name` 으로 박는다★: canonical 이름은 override 가 없으면 cwd basename 파생이라,
     ///   같은 폴더를 가리키는 둘은 개명 없이도 자동 동명이 된다(ADR-0120 §영향). 그 충돌을 해소할 수 있는
     ///   유일한 저장 자리가 override 다.
-    /// ★Err = 접미사 공간 소진★ — 등록은 일어나지 않는다.
-    pub fn create_agent(&self, mut profile: AgentProfile) -> Result<AgentProfile, PtyError> {
+    /// ★Err = 명부 상한 · 접미사 공간 소진 · (`Entry::Caller` 면) 저장 거절 · 실패★ — 등록은 일어나지 않는다.
+    fn create_agent_via(
+        &self,
+        mut profile: AgentProfile,
+        entry: Entry,
+    ) -> Result<AgentProfile, PtyError> {
         profile.display_name = normalize_display_name(profile.display_name.take());
         // ★파생도 게이트 안에서★: 요청 이름을 정하는 읽기가 게이트 밖에 있으면 관측과 커밋 사이가 아니라
         //   **파생과 관측 사이**에 창이 생긴다(그 사이 남이 같은 이름을 커밋하면 둘 다 자유로 판정한다).
@@ -927,13 +1022,44 @@ impl AgentManager {
                 unreachable!("decide_name(current=None) 은 KeepCurrent 를 낼 수 없다")
             }
         }
-        self.profiles.upsert(profile.clone());
+        entry
+            .upsert(&self.profiles, profile.clone())
+            .map_err(PtyError::Store)?;
         Ok(profile)
     }
 
-    /// 에이전트 삭제(트리 "지우기").
+    /// 에이전트 삭제(트리 "지우기") — 옛 판: 저장이 `Err` 여도 메모리에서 지운다(로그 · dirty). 버스 · WS 가
+    /// [`AgentManager::try_delete_agent`] 로 옮겨 가면 이 판을 걷는다.
     pub fn delete_agent(&self, id: AgentId) {
         self.profiles.remove(id);
+    }
+
+    /// 부르는 쪽 있는 판 — 저장이 `Err` 면 지우지 않고 [`PtyError::Store`] 다. 없는 id 도 저장을 시도하므로
+    /// 거절 상태면 `Err` 다.
+    // ADR-0291 R17 (E4)
+    pub fn try_delete_agent(&self, id: AgentId) -> Result<(), PtyError> {
+        self.profiles.try_remove(id).map_err(PtyError::Store)
+    }
+
+    /// 옛 판 — 저장이 `Err` 여도 메모리의 이름을 바꾼다(로그 · dirty). 버스 · WS 가
+    /// [`AgentManager::try_rename_agent`] 로 옮겨 가면 이 판을 걷는다.
+    // ADR-0291 (E4)
+    pub fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome {
+        match self.rename_agent_via(id, display_name, Entry::Internal) {
+            Ok(outcome) => outcome,
+            Err(e) => unreachable!("내부 입구는 저장 Err 를 돌려주지 않는다: {e}"),
+        }
+    }
+
+    /// 부르는 쪽 있는 판 — 저장이 `Err` 면 이름을 그대로 두고 [`PtyError::Store`] 다. 저장을 시도하지 않는
+    /// 결말(`Unchanged` · `Exhausted` · 조회 단계의 `NotFound`)은 저장소 상태와 무관하게 `Ok` 다.
+    // ADR-0291 R17 (E4)
+    pub fn try_rename_agent(
+        &self,
+        id: AgentId,
+        display_name: Option<String>,
+    ) -> Result<RenameOutcome, PtyError> {
+        self.rename_agent_via(id, display_name, Entry::Caller)
     }
 
     /// 표시명 override set/clear(트리 "이름 변경").
@@ -949,11 +1075,16 @@ impl AgentManager {
     ///   해제도 같은 이유로 영구 불가였다(`C:/shared` 의 `shared(1)` 은 해제 결과가 제 계열이라 늘 걸렸다).
     ///   "비었으면 준다" 는 판정은 명부를 봐야 알 수 있으므로 게이트 안이어야 한다.
     // ADR-0120
-    pub fn rename_agent(&self, id: AgentId, display_name: Option<String>) -> RenameOutcome {
+    fn rename_agent_via(
+        &self,
+        id: AgentId,
+        display_name: Option<String>,
+        entry: Entry,
+    ) -> Result<RenameOutcome, PtyError> {
         let display_name = normalize_display_name(display_name);
         let _gate = self.lock_name_allocation();
         let Some(profile) = self.profiles.get(id) else {
-            return RenameOutcome::NotFound;
+            return Ok(RenameOutcome::NotFound);
         };
         // ★자기 현재 이름은 **명부가 말하는 그 값**이어야 한다★: 산 에이전트의 로스터 이름은 session.cwd
         //   기반이고 프로필 파생은 profile.cwd 기반이라 갈릴 수 있다(`roster()` doc). 따로 파생해 비교하면
@@ -992,13 +1123,16 @@ impl AgentManager {
                 probe.canonical_name_when_live()
             }
         };
-        match self.decide_name_with_roster(&roster, id, &desired, Some(&current)) {
+        let outcome = match self.decide_name_with_roster(&roster, id, &desired, Some(&current)) {
             // ★커밋 결과를 삼키지 않는다★: `get`·`roster()`·`rename` 은 프로필 락을 **각각** 잡으므로 그
             //   사이 다른 연결의 `DeleteProfile` 이 끼면 커밋이 대상을 못 찾고 false 를 낸다. 그걸 성공으로
             //   보고하면 wire 가 없는 에이전트에 Ack + 목록 broadcast 를 낸다(게이트는 이름 배정끼리만
             //   직렬화한다 — 삭제는 이 게이트를 잡지 않는다).
             NameDecision::Free => {
-                if self.profiles.rename(id, display_name) {
+                if entry
+                    .rename(&self.profiles, id, display_name)
+                    .map_err(PtyError::Store)?
+                {
                     RenameOutcome::Renamed(desired)
                 } else {
                     RenameOutcome::NotFound
@@ -1006,7 +1140,10 @@ impl AgentManager {
             }
             NameDecision::KeepCurrent => RenameOutcome::Unchanged(current),
             NameDecision::Suffixed(assigned) => {
-                if self.profiles.rename(id, Some(assigned.clone())) {
+                if entry
+                    .rename(&self.profiles, id, Some(assigned.clone()))
+                    .map_err(PtyError::Store)?
+                {
                     RenameOutcome::Renamed(assigned)
                 } else {
                     RenameOutcome::NotFound
@@ -1020,17 +1157,47 @@ impl AgentManager {
                 );
                 RenameOutcome::Exhausted
             }
-        }
+        };
+        Ok(outcome)
     }
-    /// 트리 계층 이동(부모 지정/해제).
+
+    /// 트리 계층 이동(부모 지정/해제) — 옛 판: 저장이 `Err` 여도 메모리의 계층을 바꾼다(로그 · dirty). 버스 ·
+    /// WS 가 [`AgentManager::try_reparent_agent`] 로 옮겨 가면 이 판을 걷는다.
     pub fn reparent_agent(&self, child_id: AgentId, parent_id: Option<AgentId>) -> bool {
         self.profiles.reparent(child_id, parent_id)
     }
 
-    /// 부팅 자동 복원 대상 토글 — 없는 id 면 false.
+    /// 부르는 쪽 있는 판 — 저장이 `Err` 면 계층을 그대로 두고 [`PtyError::Store`] 다. 규칙 위반(`Ok(false)`)도
+    /// 저장을 시도하므로 거절 상태면 `Err` 다.
+    // ADR-0291 R17 (E4)
+    pub fn try_reparent_agent(
+        &self,
+        child_id: AgentId,
+        parent_id: Option<AgentId>,
+    ) -> Result<bool, PtyError> {
+        self.profiles
+            .try_reparent(child_id, parent_id)
+            .map_err(PtyError::Store)
+    }
+
+    /// 부팅 자동 복원 대상 토글 — 없는 id 면 false. 옛 판: 저장이 `Err` 여도 메모리에 적용한다(로그 · dirty).
+    /// 버스 · WS 가 [`AgentManager::try_set_agent_auto_restore`] 로 옮겨 가면 이 판을 걷는다.
     pub fn set_agent_auto_restore(&self, id: AgentId, auto_restore: bool) -> bool {
         self.profiles
             .update_with(id, |p| p.auto_restore = auto_restore)
+    }
+
+    /// 부르는 쪽 있는 판 — 저장이 `Err` 면 그대로 두고 [`PtyError::Store`] 다. 없는 id(`Ok(false)`)도 저장을
+    /// 시도하므로 거절 상태면 `Err` 다.
+    // ADR-0291 R17 (E4)
+    pub fn try_set_agent_auto_restore(
+        &self,
+        id: AgentId,
+        auto_restore: bool,
+    ) -> Result<bool, PtyError> {
+        self.profiles
+            .try_update_with(id, |p| p.auto_restore = auto_restore)
+            .map_err(PtyError::Store)
     }
 
     /// ★하네스 전용 명부 주입 seam(ADR-0012 — `insert_test_session` 과 동형 게이트)★ — 이름 유일성
@@ -1104,7 +1271,8 @@ impl AgentManager {
         }
     }
 
-    /// spawn 이 프로필을 명부에 등록하는 지점(`spawn_agent` 단독 호출).
+    /// spawn 이 프로필을 명부에 등록하는 지점(`spawn_agent_watching_link` 단독 호출). 레지스트리 입구는
+    /// `entry` 가 고른다.
     ///
     /// ★★유일성은 **신규 등록에만** 건다 — epoch 교체는 개명 대상이 아니다(ADR-0115 §영향 · ADR-0007)★★.
     ///   restart / restore(`restore_all`·`restore_one`) / 재활성화(`activate_profile`) /
@@ -1118,9 +1286,11 @@ impl AgentManager {
     /// ★분기를 두는 또 하나의 이유 = 복원 경로 비용★: 부팅 복원은 에이전트마다 이걸 부르는데, 검사가 돌면
     ///   매번 명부 전체 스캔 + override 없는 잠든 에이전트 수만큼 canonicalize syscall 을 배정 게이트
     ///   안에서 치른다(게이트 필드 주석).
-    /// ★Err = 접미사 공간 소진★ — spawn 이 그 Err 로 중단된다(중복 이름으로 뜨지 않는다).
+    /// ★Err = 명부 상한 · 접미사 공간 소진 · 그 사이 지워짐 · (`Entry::Caller` 면) 저장 거절 · 실패★ — spawn 이
+    ///   그 Err 로 중단된다(중복 이름으로 뜨지 않는다 · 저장 `Err` 면 명부는 그대로다).
     // ADR-0115
-    fn register_for_spawn(&self, profile: &AgentProfile) -> Result<(), PtyError> {
+    // ADR-0291 R17 (E3)
+    fn register_for_spawn(&self, profile: &AgentProfile, entry: Entry) -> Result<(), PtyError> {
         // 기존 id 면 이름 배정 자체가 없으므로 게이트를 잡지 않는다.
         //
         // ★★「있나」와 「쓴다」를 **한 임계구역**에서 한다 — 두 호출로 되돌리지 말 것★★:
@@ -1136,7 +1306,10 @@ impl AgentManager {
         //   조회가 애초에 없어서 아래 신규 등록(ad-hoc spawn) 갈래로 간다. 그 둘을 가르려면 호출자가
         //   「원래 있던 항목이다」를 들고 와야 하는데 그 신호가 `spawn_agent` 시그니처에 없다(미해결).
         if self.profiles.get(profile.id).is_some() {
-            return if self.profiles.update_preserving_hierarchy(profile.clone()) {
+            return if entry
+                .update_preserving_hierarchy(&self.profiles, profile.clone())
+                .map_err(PtyError::Store)?
+            {
                 Ok(())
             } else {
                 Err(profile_vanished_mid_spawn(profile.id, "spawn 등록"))
@@ -1158,8 +1331,9 @@ impl AgentManager {
                 unreachable!("decide_name(current=None) 은 KeepCurrent 를 낼 수 없다")
             }
         }
-        self.profiles.upsert_preserving_hierarchy(fresh);
-        Ok(())
+        entry
+            .upsert_preserving_hierarchy(&self.profiles, fresh)
+            .map_err(PtyError::Store)
     }
 
     // ── spawn ──────────────────────────────────────────────────────────────
@@ -1179,19 +1353,33 @@ impl AgentManager {
     ///   한다」로 그렇게 못박았다). 실제로 이 동사를 직접 부르는 운영 자리는 프로필을 등록하지 않고 즉석
     ///   생성하는 그 갈래뿐이고, **오늘 거기 닿는 codex 는 출력 형식이 터미널이라 연결 축이 없다**
     ///   (근거의 정본 = `backend/codex/transport.rs` 의 같은 구멍 주석).
+    /// ★부르는 쪽 있는 입구다★ — 명부 등록 · 세션 id 비우기의 저장이 `Err` 면 띄우지 않고
+    ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]).
     pub fn spawn_agent(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
     ) -> Result<SpawnOutcome, PtyError> {
-        self.spawn_agent_watching_link(profile, mode)
+        self.spawn_agent_watching_link(profile, mode, Entry::Caller)
             .map(|(o, _)| o)
     }
 
+    /// 띄우기의 공유 본체 — 입구 셋(`spawn_agent` · `activate_profile` · `restore_one`)이 두 동사를 거쳐
+    /// 여기 닿는다.
+    ///
+    /// `entry` = 이 띄우기를 부른 쪽. 프로세스를 열기 전의 명부 변경 셋 중 ① 등록 · ③ Fresh 의 세션 id
+    ///   비우기가 그 입구로 레지스트리를 바꾼다. ② 화신 표식은 메모리만이라 입구와 무관하고, 띄운 뒤의
+    ///   `auto_restore` 올리기(`spawn_session`)는 입구와 무관하게 늘 내부다.
+    /// ★부분 성공은 되돌리지 않는다(`Entry::Caller`)★ — 각 변경이 자기 저장을 가진 독립 변경이다. ① 이
+    ///   저장된 뒤 ③ 의 저장이 `Err` 면 ① 은 남고(명부에 오른 · 갱신된 채 안 뜬 에이전트 — 프로세스 열기
+    ///   실패 뒤와 같은 끝 모양) ② 의 새 표식도 메모리에 남으며(쥔 화신이 없어 무해) 칸에는 옛 손잡이가
+    ///   남는다. 띄우기가 멈췄으므로 어긋날 화신이 없다. ① 이 실패하면 ② · ③ 에 닿지 않는다.
+    // ADR-0291 R17 (E3 · D8)
     fn spawn_agent_watching_link(
         &self,
         profile: &AgentProfile,
         mode: SpawnMode,
+        entry: Entry,
     ) -> Result<(SpawnOutcome, Option<LinkWatch>), PtyError> {
         // ★★예약을 **명부 조회보다 먼저** 잡는다 — 순서를 되돌리지 마라★★: 연결을 선언하는 통로에서는
         //   예약이 spawn 이 끝날 때까지가 아니라 **연결의 결말이 날 때까지** 살아 있다([`LinkWatch`]).
@@ -1231,7 +1419,7 @@ impl AgentManager {
             return Ok((SpawnOutcome::Moot(Some(self.agent_info(&session))), None));
         }
 
-        self.register_for_spawn(profile)?;
+        self.register_for_spawn(profile, entry)?;
 
         // ★화신 표식 확정 — 화신마다 새 값(ADR-0007)★
         //
@@ -1286,8 +1474,9 @@ impl AgentManager {
         //   확정을 통과한 뒤 지워진 경우가 여기로 온다.
         // ADR-0226
         if fresh_spawn_release_session_id(&profile.command, mode) {
-            self.profiles
-                .release_session_id(profile.id)
+            entry
+                .release_session_id(&self.profiles, profile.id)
+                .map_err(PtyError::Store)?
                 .ok_or_else(|| profile_vanished_mid_spawn(profile.id, "세션 id 비우기"))?;
         }
 
@@ -1572,9 +1761,13 @@ impl AgentManager {
     ///   다른 세션에는 영향 없다」로 적혀 있었는데, 그것은 **호출자가 위 계약을 지킬 때만** 참이고
     ///   실제로 WS 둘이 안 지키고 있었다★ — 성질이 아니라 계약으로 적는다.
     ///   ★실패는 이 상한보다 빨리 돌아올 수 있다★ — 진단 스트림이 먼저 말하면 그 자리에서 끊는다.
+    /// ★부르는 쪽 있는 입구다(`Entry::Caller`)★ — 띄우기 전 명부 변경의 저장이 `Err` 면 띄우지 않고
+    ///   [`PtyError::Store`] 다(부분 성공 = [`AgentManager::spawn_agent_watching_link`]). 같은 동사를 부팅
+    ///   복원은 `Entry::Internal` 로 부른다.
     // ADR-0082
     // ADR-0076
     // ADR-0201
+    // ADR-0291 R17 (E3)
     pub fn activate_profile(
         &self,
         profile: &AgentProfile,
@@ -1616,7 +1809,7 @@ impl AgentManager {
         if mode == SpawnMode::Fresh {
             // ★기록은 이 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다★(연결 결말을 본 자리만이
             //   무엇이 일어났는지 안다. Resume 갈래가 `resume_no_fallback` 에 맡기는 것과 같은 규율).
-            let outcome = self.spawn_fresh_settled(profile);
+            let outcome = self.spawn_fresh_settled(profile, Entry::Caller);
             // moot 이면 남이 띄운(띄우는 중인) 세션을 돌려준다. 아직 명부에 없으면 조회로 한 번 더 본다.
             // ★그마저 없을 때의 문구는 "없는 에이전트" 가 아니다★: 프로필은 실재하고 지금 **다른 요청이
             //   띄우는 중**이라 우리가 돌려줄 세션이 없을 뿐이다. `NotFound` 를 그대로 흘리면 원인을
@@ -1633,7 +1826,7 @@ impl AgentManager {
             };
         }
 
-        let (outcome, spawned) = self.resume_no_fallback(profile);
+        let (outcome, spawned) = self.resume_no_fallback(profile, Entry::Caller);
         match outcome {
             // 성립·실패 양쪽 다 `resume_no_fallback` 안에서 이미 기록됐다(그 자리가 무엇이 일어났는지
             //   아는 유일한 곳). 여기서 또 쓰면 지움 지점이 둘이 된다.
@@ -1765,10 +1958,16 @@ impl AgentManager {
     ///   **이어받기** 어휘(「이어받을 대화가 없다」)를 내는데, 새 대화를 여는 이 갈래에서 그 문구는
     ///   거짓이다(이어받으려 한 적이 없다). 없는 어휘를 지어내는 대신 「그 밖」으로 둔다 — 그쪽은
     ///   재시도 가능이라 화면이 항목을 막지도 않는다(`failureKinds.ts`).
+    /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
     // ADR-0201
     // ADR-0202
-    fn spawn_fresh_settled(&self, profile: &AgentProfile) -> Result<SpawnOutcome, PtyError> {
-        let (result, watch) = match self.spawn_agent_watching_link(profile, SpawnMode::Fresh) {
+    fn spawn_fresh_settled(
+        &self,
+        profile: &AgentProfile,
+        entry: Entry,
+    ) -> Result<SpawnOutcome, PtyError> {
+        let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Fresh, entry);
+        let (result, watch) = match attempt {
             Ok((outcome, watch)) => (Ok(outcome), watch),
             Err(e) => (Err(e), None),
         };
@@ -2008,6 +2207,8 @@ impl AgentManager {
         //      순서를 "플립 true → start_pump → (크래시 시) reaper false" 로 고정해 reaper 의
         //      downgrade(false)가 항상 **마지막**이 되게 한다. spawn 은 활성화 행동이므로 여기서만 올린다
         //      (reaper 는 downgrade-only — true 로 올리지 않음).
+        // ★입구와 무관하게 늘 내부 입구다(ADR-0291 E1 · `try_` 로 바꾸지 말 것)★: 프로세스가 이미 떠 있어
+        //   저장 실패로 되돌릴 수 없다. 저장이 `Err` 여도 메모리에 올리고 dirty — 다음 성공 저장이 싣는다.
         self.profiles.update_with(id, |p| p.auto_restore = true);
 
         session.start_pump();
@@ -2047,6 +2248,10 @@ impl AgentManager {
         reports
     }
 
+    /// ★부팅 복원은 내부 입구다(`Entry::Internal`)★ — 결과를 받아 되돌릴 사람 · LLM 요청이 없으므로, 띄우기
+    ///   전 명부 변경의 저장이 어떤 `Err` 로 돌아와도 메모리에 적용 + dirty 하고 띄우기를 이어 간다. 새 판 ·
+    ///   못 읽는 파일 위에 명부를 쓰지 않는 것은 매 저장의 재판정이 지킨다.
+    // ADR-0291 R17 (E1 · E3)
     fn restore_one(&self, profile: &AgentProfile) -> RestoreOutcome {
         // ADR-0185: 이어받기 축 — 저장된 sid 를 **누가 발급했는지는 묻지 않는다**(그 축은 spawn 시점의
         //   `assigns_session_id` 몫). 판정 규칙은 다른 활성화 입구들과 한 몸이라 dispatch 가 갖는다.
@@ -2058,7 +2263,7 @@ impl AgentManager {
             //   부팅 복원에서도 이 갈래로 오고, 거기서 `thread/start` 가 거절되면 아무도 그 결말을 보지
             //   않는 옛 구멍이 **프로필 수만큼** 한꺼번에 선다. 입구마다 판정을 갈라 두면 그중 하나가
             //   반드시 뒤처진다.
-            let outcome = self.spawn_fresh_settled(profile);
+            let outcome = self.spawn_fresh_settled(profile, Entry::Internal);
             return match outcome {
                 // moot(이미 떠 있음)도 결과적으로 "그 항목은 떠 있다" 라 같은 보고로 접는다 — 복원 보고
                 //   어휘에 「할 일 없었음」 칸이 없다(그 칸을 만드는 것은 wire 변경이라 별건).
@@ -2069,7 +2274,7 @@ impl AgentManager {
             };
         }
 
-        self.resume_no_fallback(profile).0
+        self.resume_no_fallback(profile, Entry::Internal).0
     }
 
     /// ★resume 전용 공용 규율(ADR-0082 — 부팅복원·수동활성화 공유, fresh-fallback 폐지)★.
@@ -2095,9 +2300,14 @@ impl AgentManager {
     ///
     /// 반환의 둘째 칸 = 이 시도가 **만들어 낸** 화신(있으면). `activate_profile` 이 성공 판정 뒤 조회가
     /// 실패했을 때 성공을 뒤집지 않으려고 쓴다(그쪽 주석이 그 인과의 정본).
+    /// `entry` 는 받은 그대로 공유 본체에 넘긴다 — 이 동사는 입구를 가르지 않는다.
     // ADR-0082
     // ADR-0172
-    fn resume_no_fallback(&self, profile: &AgentProfile) -> (RestoreOutcome, Option<AgentInfo>) {
+    fn resume_no_fallback(
+        &self,
+        profile: &AgentProfile,
+        entry: Entry,
+    ) -> (RestoreOutcome, Option<AgentInfo>) {
         // ★이어받을 손잡이가 없는 이어받기 요청은 **새 대화로 연다** — 고름이 아니라 사용자 결정 D1 의
         //   귀결이다(「저장된 id 가 있다 ⟺ 이어받을 대화가 있다 · id 없음 → Fresh」)★.
         //   ★그 조합에 실제로 들어오는 것은 WS `SpawnProfile` 의 `resume: true` 명시 요청이다★ — 그
@@ -2124,7 +2334,7 @@ impl AgentManager {
                 "이어받기 요청인데 저장된 손잡이가 없다 — 새 대화를 연다(결말은 `Resumed` 가 아니라 `Started` 로 보고한다)"
             );
             // 기록은 새 대화 경로 안에서 한다 — 여기서 또 쓰면 지움 지점이 둘이 된다.
-            return match self.spawn_fresh_settled(profile) {
+            return match self.spawn_fresh_settled(profile, entry) {
                 Ok(outcome) => (RestoreOutcome::Started, outcome.into_info()),
                 Err(e) => (
                     RestoreOutcome::Failed {
@@ -2135,7 +2345,8 @@ impl AgentManager {
             };
         }
 
-        let (outcome, watch) = match self.spawn_agent_watching_link(profile, SpawnMode::Resume) {
+        let attempt = self.spawn_agent_watching_link(profile, SpawnMode::Resume, entry);
+        let (outcome, watch) = match attempt {
             Err(e) => {
                 let reason = format!("resume spawn 실패: {e}");
                 // ADR-0172: 실패는 시도한 자리에서 기록한다 — 이 기록이 ADR-0082 가 요구한 "원인을 남겨
@@ -4362,8 +4573,8 @@ mod tests {
             .next()
             .expect("다음 함수까지");
         assert!(
-            activate.contains("self.spawn_fresh_settled(profile)"),
-            "수동 활성화의 Fresh 갈래가 판정을 안 도는 동사로 돌아갔다: {activate}"
+            activate.contains("self.spawn_fresh_settled(profile, Entry::Caller)"),
+            "수동 활성화의 Fresh 갈래가 판정을 안 도는 동사로 돌아갔거나 부르는 쪽 입구를 안 싣는다: {activate}"
         );
 
         let restore = production
@@ -4374,9 +4585,68 @@ mod tests {
             .next()
             .expect("다음 함수까지");
         assert!(
-            restore.contains("self.spawn_fresh_settled(profile)"),
-            "부팅 복원의 비-이어받기 갈래가 판정을 안 도는 동사로 돌아갔다: {restore}"
+            restore.contains("self.spawn_fresh_settled(profile, Entry::Internal)"),
+            "부팅 복원의 비-이어받기 갈래가 판정을 안 도는 동사로 돌아갔거나 내부 입구를 안 싣는다: {restore}"
         );
+
+        // ★두 입구가 **같은 동사**에 **다른 입구 값**을 넘긴다(ADR-0291 E3)★ — 입구별 띄우기 사본이 생기면
+        //   ADR-0082 · ADR-0201 · ADR-0202 가 막은 「입구마다 판정이 갈려 하나가 뒤처진다」가 돌아온다.
+        assert!(
+            activate.contains("self.resume_no_fallback(profile, Entry::Caller)"),
+            "수동 활성화의 이어받기 갈래가 부르는 쪽 입구를 안 싣는다: {activate}"
+        );
+        assert!(
+            restore.contains("self.resume_no_fallback(profile, Entry::Internal)"),
+            "부팅 복원의 이어받기 갈래가 내부 입구를 안 싣는다: {restore}"
+        );
+        let spawn_agent =
+            squashed_production_body("pub fn spawn_agent(", "fn spawn_agent_watching_link(");
+        assert!(
+            spawn_agent.contains("self.spawn_agent_watching_link(profile,mode,Entry::Caller)"),
+            "즉석 생성 입구가 부르는 쪽 입구를 안 싣는다: {spawn_agent}"
+        );
+        for (name, body) in [
+            ("activate_profile", activate),
+            ("spawn_agent", spawn_agent.as_str()),
+        ] {
+            assert!(
+                !body.contains("Entry::Internal"),
+                "부르는 쪽 있는 입구 `{name}` 이 내부 입구를 싣는다 — 저장 거절에도 메모리가 바뀐 채 「바꿨다」고 답한다"
+            );
+        }
+        assert_eq!(
+            production.matches("fn spawn_agent_watching_link(").count(),
+            1,
+            "띄우기 공유 본체가 둘 이상이다 — 입구별 사본은 판정을 가른다"
+        );
+        // 두 동사는 받은 값을 그대로 넘기고, 공유 본체는 그 값으로 ① 등록 · ③ 비우기의 입구를 고른다.
+        let fresh = squashed_production_body("fn spawn_fresh_settled(", "fn spawn_session(");
+        assert!(
+            fresh.contains("self.spawn_agent_watching_link(profile,SpawnMode::Fresh,entry)"),
+            "Fresh 동사가 받은 입구를 넘기지 않는다: {fresh}"
+        );
+        let resume =
+            squashed_production_body("fn resume_no_fallback(", "fn tear_down_failed_activation(");
+        for call in [
+            "self.spawn_fresh_settled(profile,entry)",
+            "self.spawn_agent_watching_link(profile,SpawnMode::Resume,entry)",
+        ] {
+            assert!(
+                resume.contains(call),
+                "이어받기 동사가 받은 입구를 넘기지 않는다(`{call}`)"
+            );
+        }
+        let body =
+            squashed_production_body("fn spawn_agent_watching_link(", "pub fn activate_profile(");
+        for call in [
+            "self.register_for_spawn(profile,entry)?;",
+            "entry.release_session_id(&self.profiles,profile.id)",
+        ] {
+            assert!(
+                body.contains(call),
+                "공유 본체가 입구 값으로 레지스트리 입구를 고르지 않는다(`{call}`)"
+            );
+        }
 
         assert_eq!(
             production.matches("self.note_spawn_result(").count(),
@@ -5080,7 +5350,7 @@ mod tests {
 
         // ad-hoc spawn 의 신규 등록 경로도 같은 답 — 이쪽이 뚫려 있으면 "총량" 이 거짓이 된다.
         let err = manager
-            .register_for_spawn(&agent_profile("C:/adhoc", Some("adhoc")))
+            .register_for_spawn(&agent_profile("C:/adhoc", Some("adhoc")), Entry::Caller)
             .expect_err("ad-hoc 신규 등록도 거부");
         assert!(matches!(err, PtyError::RosterFull { .. }), "{err}");
         assert_eq!(
@@ -5091,7 +5361,7 @@ mod tests {
 
         // ★기존 에이전트는 인질이 아니다★: 같은 id 재등록(복원·재spawn)과 개명은 상한에서도 계속 된다.
         manager
-            .register_for_spawn(&last)
+            .register_for_spawn(&last, Entry::Caller)
             .expect("기존 id 재등록은 상한과 무관");
         assert!(
             renamed_ok(manager.rename_agent(last.id, Some("still-renameable".into()))),
@@ -5472,7 +5742,7 @@ mod tests {
 
         let newcomer = agent_profile("C:/x", Some("bob"));
         manager
-            .register_for_spawn(&newcomer)
+            .register_for_spawn(&newcomer, Entry::Caller)
             .expect("신규 등록 성공");
         assert_eq!(
             name_of(&manager, newcomer.id),
@@ -5480,13 +5750,17 @@ mod tests {
             "명부에 없던 id = 신규 등록 → 접미사"
         );
 
-        manager.register_for_spawn(&bob).expect("재등록 성공");
+        manager
+            .register_for_spawn(&bob, Entry::Caller)
+            .expect("재등록 성공");
         assert_eq!(
             name_of(&manager, bob.id),
             "bob",
             "재시작이 이름을 바꾸면 안 된다"
         );
-        manager.register_for_spawn(&newcomer).expect("재등록 성공");
+        manager
+            .register_for_spawn(&newcomer, Entry::Caller)
+            .expect("재등록 성공");
         assert_eq!(
             name_of(&manager, newcomer.id),
             "bob(1)",
@@ -5508,7 +5782,7 @@ mod tests {
         let squatter = create(&manager, "C:/squat", Some("was-here"));
         assert_eq!(squatter.canonical_name_when_live(), "was-here");
         manager
-            .register_for_spawn(&stale_snapshot)
+            .register_for_spawn(&stale_snapshot, Entry::Caller)
             .expect("재등록 성공");
         assert_eq!(
             name_of(&manager, agent.id),
@@ -5636,7 +5910,7 @@ mod tests {
 
         let spawned = agent_profile("C:/z", Some(" erin "));
         manager
-            .register_for_spawn(&spawned)
+            .register_for_spawn(&spawned, Entry::Caller)
             .expect("신규 등록 성공");
         assert_eq!(
             manager.agent_snapshot(spawned.id).unwrap().display_name,
@@ -6284,7 +6558,7 @@ mod tests {
             hits[0]
         };
 
-        let registered = only("self.register_for_spawn(profile)?;");
+        let registered = only("self.register_for_spawn(profile, entry)?;");
         let stamped = only(".epoch_for_spawn(profile.id)");
         // ★앵커는 **명부에서 읽는 그 줄**이다★ — 그 뒤에 `resume_handle_for` 가 Fresh 를 비우는 한
         //   줄이 더 있고(그 함수의 doc 이 사유의 정본), 아래 순서 단언이 재는 것은 「읽기」의 자리다.
@@ -6585,5 +6859,483 @@ mod tests {
 
         manager.kill_agent(first.id).ok();
         manager.kill_agent(second.id).ok();
+    }
+
+    // ── 저장 거절 · 실패 — 레지스트리 입구 둘(ADR-0291 R17 · D2 · E1 · E3 · E4 · D8) ─────────────
+
+    #[derive(Clone, Copy, Debug)]
+    enum Outcome {
+        Saves,
+        FailsIo,
+        Refuses(crate::profile::Refusal),
+    }
+
+    /// 쓰기 IO 실패 · 재판정 거절 둘 — 입구 처리는 `StoreError` 의 변형을 가르지 않는다.
+    const FAILURES: [Outcome; 3] = [
+        Outcome::FailsIo,
+        Outcome::Refuses(crate::profile::Refusal::Unreadable),
+        Outcome::Refuses(crate::profile::Refusal::Newer { found: 2 }),
+    ];
+
+    /// 저장 결과를 시험이 정하는 프로필 저장소 — 줄 세운 결과부터 한 번씩 쓰고 다 쓰면 `then` 이다. 성공한
+    /// 저장만 `disk` 에 남는다.
+    struct ScriptedStore {
+        queue: Mutex<std::collections::VecDeque<Outcome>>,
+        then: Mutex<Outcome>,
+        disk: Mutex<Vec<AgentProfile>>,
+        attempts: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ScriptedStore {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                queue: Mutex::default(),
+                then: Mutex::new(Outcome::Saves),
+                disk: Mutex::default(),
+                attempts: Default::default(),
+            })
+        }
+
+        fn script(&self, queued: &[Outcome], then: Outcome) {
+            *self.queue.lock().unwrap() = queued.iter().copied().collect();
+            *self.then.lock().unwrap() = then;
+        }
+
+        fn set(&self, outcome: Outcome) {
+            self.script(&[], outcome);
+        }
+
+        fn disk(&self, id: AgentId) -> Option<AgentProfile> {
+            self.disk
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    impl crate::profile::ProfileStore for ScriptedStore {
+        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            let queued = self.queue.lock().unwrap().pop_front();
+            match queued.unwrap_or_else(|| *self.then.lock().unwrap()) {
+                Outcome::Saves => {
+                    *self.disk.lock().unwrap() = profiles.to_vec();
+                    Ok(())
+                }
+                Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("디스크 가득"))),
+                Outcome::Refuses(refusal) => Err(StoreError::ReadOnly(refusal)),
+            }
+        }
+
+        fn load(&self) -> Vec<AgentProfile> {
+            self.disk.lock().unwrap().clone()
+        }
+    }
+
+    fn scripted_manager() -> (AgentManager, Arc<ScriptedStore>) {
+        let store = ScriptedStore::new();
+        let profiles = Arc::new(crate::profile::ProfileRegistry::new(store.clone()));
+        let presets = Arc::new(PresetRegistry::new(Arc::new(FilePresetStore::new(
+            std::env::temp_dir().join(format!("engram-store-refusal-preset-{}", Uuid::new_v4())),
+        ))));
+        let tracker = Arc::new(SessionTracker::new(
+            crate::session_tracker::TrackerConfig {
+                enabled: false,
+                poll_interval: Duration::from_secs(1),
+            },
+            Arc::new(|_, _| {}),
+        ));
+        let manager = AgentManager::new(Arc::new(NoopStatus), profiles, presets, tracker);
+        (manager, store)
+    }
+
+    // E4 — 부르는 쪽 있는 판 다섯: 저장 `Err` → `PtyError::Store` · 메모리 명부 그대로 · dirty 안 섬.
+
+    #[test]
+    fn try_create_agent_registers_nothing_when_the_store_does_not_save() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            store.set(failure);
+            let profile = agent_profile("C:/store/create", Some("create"));
+
+            let err = manager
+                .try_create_agent(profile.clone())
+                .expect_err("저장 실패는 오류다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert!(manager.agent_snapshot(profile.id).is_none(), "{failure:?}");
+            assert!(manager.roster().is_empty(), "{failure:?}");
+            assert!(!manager.profiles.is_dirty(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn try_delete_agent_keeps_the_agent_when_the_store_does_not_save() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let agent = create(&manager, "C:/store/delete", Some("delete"));
+            store.set(failure);
+
+            let err = manager
+                .try_delete_agent(agent.id)
+                .expect_err("저장 실패는 오류다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert!(manager.agent_snapshot(agent.id).is_some(), "{failure:?}");
+            assert!(!manager.profiles.is_dirty(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn try_rename_agent_keeps_the_name_when_the_store_does_not_save() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let agent = create(&manager, "C:/store/rename", Some("before"));
+            store.set(failure);
+
+            let err = manager
+                .try_rename_agent(agent.id, Some("after".into()))
+                .expect_err(
+                    "저장 실패는 오류다 — `Renamed` 로 답하면 호출자가 안 된 개명을 됐다고 본다",
+                );
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert_eq!(name_of(&manager, agent.id), "before", "{failure:?}");
+            assert!(!manager.profiles.is_dirty(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn try_reparent_agent_keeps_the_hierarchy_when_the_store_does_not_save() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let lead = create(&manager, "C:/store/lead", Some("lead"));
+            let helper = create(&manager, "C:/store/helper", Some("helper"));
+            store.set(failure);
+
+            let err = manager
+                .try_reparent_agent(helper.id, Some(lead.id))
+                .expect_err("저장 실패는 오류다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert_eq!(
+                manager.agent_snapshot(helper.id).and_then(|p| p.parent_id),
+                None,
+                "{failure:?}"
+            );
+            assert!(!manager.profiles.is_dirty(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn try_set_agent_auto_restore_keeps_the_flag_when_the_store_does_not_save() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let agent = create(&manager, "C:/store/auto", Some("auto"));
+            assert!(!agent.auto_restore, "전제");
+            store.set(failure);
+
+            let err = manager
+                .try_set_agent_auto_restore(agent.id, true)
+                .expect_err("저장 실패는 오류다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert_eq!(
+                manager.agent_snapshot(agent.id).map(|p| p.auto_restore),
+                Some(false),
+                "{failure:?}"
+            );
+            assert!(!manager.profiles.is_dirty(), "{failure:?}");
+        }
+    }
+
+    #[test]
+    fn the_caller_verbs_commit_and_persist_when_the_store_saves() {
+        let (manager, store) = scripted_manager();
+        let lead = manager
+            .try_create_agent(agent_profile("C:/store/ok-lead", Some("lead")))
+            .expect("저장되면 등록");
+        let helper = manager
+            .try_create_agent(agent_profile("C:/store/ok-helper", Some("helper")))
+            .expect("저장되면 등록");
+
+        assert!(matches!(
+            manager.try_rename_agent(helper.id, Some("renamed".into())),
+            Ok(RenameOutcome::Renamed(name)) if name == "renamed"
+        ));
+        assert!(manager
+            .try_reparent_agent(helper.id, Some(lead.id))
+            .expect("저장된다"));
+        assert!(manager
+            .try_set_agent_auto_restore(helper.id, true)
+            .expect("저장된다"));
+        let saved = store.disk(helper.id).expect("디스크에 있다");
+        assert_eq!(saved.display_name.as_deref(), Some("renamed"));
+        assert_eq!(saved.parent_id, Some(lead.id));
+        assert!(saved.auto_restore);
+
+        manager.try_delete_agent(lead.id).expect("저장된다");
+        assert!(store.disk(lead.id).is_none());
+        assert!(manager.agent_snapshot(lead.id).is_none());
+    }
+
+    /// ★옛 판은 U5a 그대로다(E4)★ — 저장이 `Err` 여도 메모리에 적용하고 dirty 를 세운다. 버스 · WS 가 아직 옛
+    ///   판을 부르는 동안 답과 메모리가 어긋나지 않는 근거다. 옛 판을 걷을 때 이 항목도 함께 걷는다.
+    #[test]
+    fn the_old_verbs_still_apply_in_memory_when_the_store_does_not_save() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let lead = create(&manager, "C:/store/old-lead", Some("lead"));
+            store.set(failure);
+
+            let helper = manager
+                .create_agent(agent_profile("C:/store/old-helper", Some("helper")))
+                .expect("옛 판은 저장 실패로 오류를 내지 않는다");
+            assert!(renamed_ok(
+                manager.rename_agent(helper.id, Some("renamed".into()))
+            ));
+            assert!(manager.reparent_agent(helper.id, Some(lead.id)));
+            assert!(manager.set_agent_auto_restore(helper.id, true));
+            manager.delete_agent(lead.id);
+
+            let mem = manager.agent_snapshot(helper.id).expect("메모리에 섰다");
+            assert_eq!(mem.display_name.as_deref(), Some("renamed"), "{failure:?}");
+            assert!(mem.auto_restore, "{failure:?}");
+            assert!(manager.agent_snapshot(lead.id).is_none(), "{failure:?}");
+            assert!(manager.profiles.is_dirty(), "{failure:?}");
+            assert!(
+                store.disk(helper.id).is_none(),
+                "{failure:?}: 디스크에는 닿지 않았다"
+            );
+        }
+    }
+
+    // D2 · E1 — 부르는 쪽 없는 내부 변경(첫 제출 래치).
+
+    /// ★래치의 기록은 저장의 어떤 `Err` 에도 메모리에 서고 dirty 를 세운다★ — 버리면 이 화신의 세션 id 가
+    ///   사라져 다음 활성화가 대화를 잃는다(ADR-0226).
+    #[test]
+    fn the_latch_commit_port_keeps_the_id_in_memory_and_marks_dirty_on_any_save_error() {
+        for failure in FAILURES {
+            let store = ScriptedStore::new();
+            let profiles = Arc::new(crate::profile::ProfileRegistry::new(store.clone()));
+            let p = AgentProfile::new(
+                "raw".into(),
+                codex(crate::profile::AgentOutputFormat::StreamJson),
+                std::path::PathBuf::from("."),
+                vec![],
+                true,
+            );
+            let id = p.id;
+            profiles.upsert(p);
+            let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
+            store.set(failure);
+            let sid = Uuid::new_v4();
+
+            session_id_sink(profiles.clone(), id, epoch, None)(&sid.to_string());
+
+            assert_eq!(
+                profiles.get(id).and_then(|p| p.backend_session_id),
+                Some(sid),
+                "{failure:?}"
+            );
+            assert!(profiles.is_dirty(), "{failure:?}");
+            assert_eq!(
+                store.disk(id).and_then(|p| p.backend_session_id),
+                None,
+                "{failure:?}: 디스크에는 아직 없다"
+            );
+        }
+    }
+
+    /// ★거절 동안 디스크 바이트는 그대로다★ — 실 파일 저장소로 본다: 실행 중에 `agents.json` 이 새 판이 되면
+    ///   래치의 기록은 메모리에만 서고(dirty) 그 파일은 한 바이트도 안 바뀐다.
+    #[test]
+    fn a_refused_latch_commit_leaves_the_agents_file_bytes_alone() {
+        let dir =
+            std::env::temp_dir().join(format!("engram-manager-latch-refused-{}", Uuid::new_v4()));
+        let profiles = Arc::new(crate::profile::ProfileRegistry::new(Arc::new(
+            FileProfileStore::new(dir.clone()),
+        )));
+        let p = AgentProfile::new(
+            "raw".into(),
+            codex(crate::profile::AgentOutputFormat::StreamJson),
+            std::path::PathBuf::from("."),
+            vec![],
+            true,
+        );
+        let id = p.id;
+        profiles.upsert(p);
+        let epoch = profiles.epoch_for_spawn(id).expect("갓 넣은 프로필");
+        let newer = r#"{"schema_version":2,"profiles":[]}"#;
+        std::fs::write(dir.join("agents.json"), newer).expect("새 판 파일 쓰기");
+        let sid = Uuid::new_v4();
+
+        session_id_sink(profiles.clone(), id, epoch, None)(&sid.to_string());
+
+        assert_eq!(
+            profiles.get(id).and_then(|p| p.backend_session_id),
+            Some(sid)
+        );
+        assert!(profiles.is_dirty());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("agents.json")).expect("읽기"),
+            newer,
+            "거절 동안 dirty 명부는 새 판 파일에 닿지 않는다"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // E3 · D8 — 띄우기 경로의 입구 값.
+
+    /// ★같은 동사, 다른 입구 — 부팅 복원은 띄우고 수동 깨우기는 거절한다(E3)★.
+    ///
+    /// 같은 저장 실패 아래에서 부팅 복원은 띄우기 전 명부 변경을 메모리에 적용 + dirty 하고 띄운다(띄운 뒤
+    ///   `auto_restore` 올리기 · reaper 의 내리기도 내부 변경이라 메모리에 선다). 수동 활성화는 같은 변경의
+    ///   저장이 `Err` 라 띄우지 않고 `PtyError::Store` 로 돌아오며, 메모리 명부도 밀린 dirty 도 그대로다.
+    /// ★실 프로세스로 보는 이유★: `Started` 와 띄운 뒤 올리기는 실 spawn 만이 지난다.
+    #[cfg(windows)]
+    #[test]
+    fn boot_restore_starts_through_a_failing_store_while_a_manual_wake_refuses() {
+        for failure in [
+            Outcome::FailsIo,
+            Outcome::Refuses(crate::profile::Refusal::Newer { found: 2 }),
+        ] {
+            let (manager, store) = scripted_manager();
+            let profile = create(
+                &manager,
+                &std::env::temp_dir().to_string_lossy(),
+                Some("restore-e3"),
+            );
+            store.set(failure);
+
+            // 스냅샷이 명부와 다른 칸 하나를 싣는다 — 등록(①)이 적용됐는지를 그 칸으로 본다.
+            let mut restored = profile.clone();
+            restored.name = "restored-snapshot".into();
+            let outcome = manager.restore_one(&restored);
+
+            assert!(
+                matches!(outcome, RestoreOutcome::Started),
+                "{failure:?}: {outcome:?}"
+            );
+            let mem = manager.agent_snapshot(profile.id).expect("명부에 있다");
+            assert_eq!(
+                mem.name, "restored-snapshot",
+                "{failure:?}: 등록이 메모리에 섰다"
+            );
+            assert!(
+                mem.auto_restore,
+                "{failure:?}: 띄운 뒤 올리기가 메모리에 섰다"
+            );
+            assert!(manager.profiles.is_dirty(), "{failure:?}");
+            assert_eq!(
+                store.disk(profile.id).map(|p| p.name),
+                Some(profile.name.clone()),
+                "{failure:?}: 디스크는 그대로다"
+            );
+
+            manager.kill_agent(profile.id).expect("산 세션");
+            let lowered = (0..250).any(|_| {
+                let reaped = manager.list_agents().is_empty()
+                    && manager
+                        .agent_snapshot(profile.id)
+                        .is_some_and(|p| !p.auto_restore);
+                if !reaped {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                reaped
+            });
+            assert!(
+                lowered,
+                "{failure:?}: reaper 의 내리기가 메모리에 서야 한다"
+            );
+            assert!(manager.profiles.is_dirty(), "{failure:?}");
+
+            let mut woken = profile.clone();
+            woken.name = "woken-snapshot".into();
+            let err = manager
+                .activate_profile(&woken, SpawnMode::Fresh)
+                .expect_err("부르는 쪽 입구는 저장 실패로 멈춘다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            assert_eq!(
+                manager.agent_snapshot(profile.id).map(|p| p.name),
+                Some("restored-snapshot".to_string()),
+                "{failure:?}: 메모리 명부 그대로"
+            );
+            assert!(
+                manager.list_agents().is_empty(),
+                "{failure:?}: 띄우지 않았다"
+            );
+            assert!(
+                manager.profiles.is_dirty(),
+                "{failure:?}: 거절된 요청이 밀린 변경을 지우지 않는다"
+            );
+        }
+    }
+
+    /// ★부르는 쪽 입구의 부분 성공은 되돌리지 않는다(D8)★ — 등록(①)이 저장된 뒤 세션 id 비우기(③)의 저장이
+    ///   `Err` 면 등록은 남고 칸에는 옛 손잡이가 남으며 띄우지 않는다.
+    /// ★프로세스를 띄우지 않는 항목이다★ — 띄우기는 ③ 에서 멈춘다. 회귀해서 ③ 을 지나치면 claude 를 실제로
+    ///   띄우려 하고, 그 결말은 저장 오류가 아니라서 첫 단언이 잡는다.
+    #[test]
+    fn a_caller_spawn_whose_release_save_fails_keeps_the_registration_and_the_old_handle() {
+        for failure in FAILURES {
+            let (manager, store) = scripted_manager();
+            let old = Uuid::new_v4();
+            let mut profile = AgentProfile::new(
+                "raw".into(),
+                AgentCommand::Claude {
+                    extra_args: vec![],
+                    output_format: crate::profile::AgentOutputFormat::Terminal,
+                },
+                std::env::temp_dir(),
+                vec![],
+                false,
+            );
+            profile.display_name = Some("d8".into());
+            profile.backend_session_id = Some(old);
+            store.script(&[Outcome::Saves], failure);
+
+            let err = manager
+                .spawn_agent(&profile, SpawnMode::Fresh)
+                .expect_err("세션 id 비우기의 저장 실패로 멈춘다");
+
+            assert!(matches!(err, PtyError::Store(_)), "{failure:?}: {err}");
+            let mem = manager
+                .agent_snapshot(profile.id)
+                .expect("등록은 되돌리지 않는다");
+            assert_eq!(
+                mem.backend_session_id,
+                Some(old),
+                "{failure:?}: 비우기가 적용되지 않아 옛 손잡이가 남는다"
+            );
+            assert!(mem.old_session_ids.is_empty(), "{failure:?}");
+            assert_ne!(
+                mem.epoch, profile.epoch,
+                "{failure:?}: 새 화신 표식은 메모리에 남는다"
+            );
+            assert!(
+                manager.list_agents().is_empty(),
+                "{failure:?}: 띄우지 않았다"
+            );
+            assert!(!manager.profiles.is_dirty(), "{failure:?}");
+            assert_eq!(
+                store.attempts(),
+                2,
+                "{failure:?}: 등록 · 비우기의 저장 둘뿐이다"
+            );
+            assert_eq!(
+                store.disk(profile.id).and_then(|p| p.backend_session_id),
+                Some(old),
+                "{failure:?}: 등록은 저장됐다"
+            );
+        }
     }
 }

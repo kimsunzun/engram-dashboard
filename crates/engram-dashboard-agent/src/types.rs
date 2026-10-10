@@ -1034,6 +1034,17 @@ pub enum PtyError {
     ///   (같은 id 의 화신 교체)은 그대로 통과한다 — 백스톱이 기존 팀을 인질로 잡으면 복구가 불가능해진다.
     #[error("roster is full: {current} agents (ceiling {limit}) — refusing to register another")]
     RosterFull { current: usize, limit: usize },
+    /// ★프로필 저장소가 이 변경의 저장을 거절했거나(`ReadOnly`) 쓰지 못했다(`Io`) — 메모리 명부는 그대로다★.
+    ///
+    /// 레지스트리의 부르는 쪽 있는 입구(`try_` 동사)만 이것을 낸다 — 부르는 쪽 없는 내부 변경은 저장의 어떤
+    ///   `Err` 에도 메모리에 적용하고 dirty 를 세우므로 오류가 되지 않는다.
+    /// ★띄우기 경로는 부분 성공이 있다★: 명부 등록이 저장된 뒤 세션 id 비우기의 저장이 실패하면 등록은 남고
+    ///   (되돌리지 않는다) 띄우기만 멈춘다 — 정본 = `manager` 의 `spawn_agent_watching_link` doc.
+    /// ★전용 변형인 이유★: 버스가 저장 거절을 다른 실패와 다른 코드로 실어야 한다(호출자가 할 일이 다르다) —
+    ///   `RosterFull` 과 같은 까닭으로 문자열이 아니라 변형으로 가른다.
+    // ADR-0291 R17
+    #[error("agent store: {0}")]
+    Store(crate::profile::StoreError),
     // ★중복 spawn 요청을 여기 오류로 되돌리지 마라★: "이미 떠 있다 / 이미 뜨는 중이다" 는 실패가 아니라
     //   **할 일이 없는 요청**이라 `Ok(manager::SpawnOutcome::Moot)` 로 답한다. 오류로 두던 시절엔 소비자
     //   마다 "이 오류는 진짜 실패가 아니다" 목록을 들어야 했고, 그 목록을 세 번 손보는 동안 세 번 다 하나씩
