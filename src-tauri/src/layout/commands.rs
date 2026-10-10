@@ -40,7 +40,7 @@ use uuid::Uuid;
 use engram_dashboard_base::path::normalize_spelling;
 use engram_dashboard_command::{
     blocking_handler, declare_commands, CommandError, CommandFuture, CommandHandler, CommandTable,
-    ErrorCode,
+    ErrorCode, RetryMode,
 };
 
 use super::apply;
@@ -64,6 +64,9 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   `window.setTheme`·`window.getTheme`(화면에는 테마를 바꾸는 UI 가 없다 — TRD S21-storage §10 F7) ·
 //   `split.setRatio`·`split.list`(화면의 구분선 드래그는 Tauri `set_split_ratio` 를 직접 부르고 레지스트리에
 //   이름을 싣지 않는다 — ADR-0227).
+// ★세대 17 = `settings.set`·`settings.reset` 이 설정 파일을 지금 못 읽은 쓰기를 `INTERNAL` 대신 `CONFLICT` 로 답하는
+//   세대★(ADR-0291 R17 · 사용자 결정 2026-10-11 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다) — 이름 · 타입 · 오류
+//   선언은 그대로고 그 답 어휘와 summary 가 바뀌었다.
 // ★세대 16 = `restore.status` 의 `state_file` 이 `newer` 를 싣고 `settings.set`·`settings.reset` 이 `CONFLICT` 를
 //   선언한 세대★(ADR-0291 — 새 판이 쓴 파일은 덮지 않는다) — 이름은 그대로고 답 어휘와 오류 선언이 바뀌었다.
 // ★세대 15 = 창 테마 명령 둘(`window.getTheme`·`window.setTheme`)이 `agent-tree` 를 받지 않는 세대★(ADR-0225 —
@@ -97,7 +100,7 @@ use crate::theme::{ThemeControl, ThemeError, UiTheme, WindowTheme};
 //   ★wire 프로토콜 판(`engram_dashboard_protocol::PROTOCOL_VERSION`)과 다른 번호다★ — 그쪽은 프레임 계약이고
 //   이쪽은 이 crate 의 어휘 세대다. 하나를 올린다고 다른 하나가 따라 올라가지 않는다.
 declare_commands! {
-    catalog_version: 16;
+    catalog_version: 17;
 
     /// 탭 바 한 칸.
     struct TabRow {
@@ -428,7 +431,8 @@ declare_commands! {
     /// theme.default 를 바꾸면 창별 테마가 없는 모든 창이 바로 그 테마로 바뀐다.
     /// 모르는 키 = NOT_FOUND · 형식·범위 위반 = INVALID_ARGUMENT(문구에 기대 형식) · 설정 파일이 이 앱보다 새
     /// 버전이 쓴 것이면 CONFLICT(파일을 덮지 않는다 · 값은 그대로다 — 그 파일이 바뀌기 전에는 다시 해도 같다 · 단
-    /// 유효 값이 바뀌지 않는 호출은 그때도 changed=false 로 성공한다) · 디스크에 못 썼으면 INTERNAL(값은 그대로다).
+    /// 유효 값이 바뀌지 않는 호출은 그때도 changed=false 로 성공한다) · 설정 파일을 지금 못 읽었으면 CONFLICT(값은
+    /// 그대로다 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다) · 디스크에 못 썼으면 INTERNAL(값은 그대로다).
     #[effect(Write)]
     #[since(10)]
     "settings.set" => args SettingsSetArgs {
@@ -444,8 +448,8 @@ declare_commands! {
     /// 키 하나, 또는 점으로 끝나는 접두가 덮는 키 전부를 기본값으로 되돌린다 — key 는 필수(전체 초기화는 없다).
     /// 답의 reset = 그 선택자가 덮은 키 전부(호출 뒤 모두 기본값). 이미 다 기본값이면 rev 가 그대로다(파일에
     /// 남은 그 키들은 지운다). 맞는 키가 없으면 NOT_FOUND. 설정 파일이 이 앱보다 새 버전이 쓴 것이면 CONFLICT ·
-    /// 디스크에 못 썼으면 INTERNAL 이다(settings.set 과 같다 — 이미 다 기본값인 호출은 새 판 파일이어도 rev 그대로
-    /// 성공한다).
+    /// 지금 못 읽었으면 CONFLICT(조금 뒤 다시 하면 대개 된다) · 디스크에 못 썼으면 INTERNAL 이다(settings.set 과
+    /// 같다 — 이미 다 기본값인 호출은 새 판 파일이어도 rev 그대로 성공한다).
     #[effect(Write)]
     #[since(10)]
     "settings.reset" => args SettingsResetArgs {
@@ -1260,8 +1264,15 @@ fn settings_error(error: SettingsError) -> CommandError {
         SettingsError::NotFound(message) => CommandError::not_found(message),
         SettingsError::InvalidArgument(message) => CommandError::invalid_argument(message),
         // ADR-0291 R2: 새 판이 쓴 파일이라 덮지 않았다 — 「지금 상태로는 적용할 수 없다」라 다시 해도 그 파일이
-        //   바뀌기 전에는 같다. `INTERNAL` 로 내면 일시 실패처럼 읽힌다.
+        //   바뀌기 전에는 같다(`never`). `INTERNAL` 로 내면 일시 실패처럼 읽힌다.
         SettingsError::Conflict(message) => CommandError::of(ErrorCode::Conflict, message),
+        // ADR-0291 R17 — 사용자 결정 2026-10-11: 쓸 때마다 다시 읽으므로 이 못 읽음은 늘 실행 중 재판정의 거절이고,
+        //   대개 잠깐 쥔 잠김이라 `CONFLICT` · `after-condition` 이다(데몬 명부 저장소 · agent `store_command_error` 와
+        //   같은 나눔). 오늘 그 지시는 데몬이 중계하며 `never` 로 내리므로(`restore_error` 의 같은 조항) 「조금 뒤
+        //   다시」는 문구와 도움말이 함께 나른다.
+        SettingsError::Unreadable(message) => {
+            CommandError::with_retry(ErrorCode::Conflict, message, RetryMode::AfterCondition)
+        }
         SettingsError::Internal(message) => CommandError::internal(message),
     }
 }
@@ -1318,7 +1329,7 @@ async fn verb_spawn_into(
         cwd,
     )
     .await
-    .map_err(not_applied)?;
+    .map_err(spawn_not_applied)?;
     Ok(AgentSpawnIntoOk { agent_id })
 }
 
@@ -1327,6 +1338,23 @@ async fn verb_spawn_into(
 /// 적용 서비스의 실패 문구를 그대로 실어 나른다(헤더 「적용 실패는 코드 하나로 나간다」).
 fn not_applied(detail: String) -> CommandError {
     CommandError::of(ErrorCode::Conflict, detail)
+}
+
+/// `agent.spawnInto` 의 실패 — 데몬이 `CODE: 문구` 로 답한 실패(저장소 거절 = `CONFLICT` · 저장 쓰기 실패 =
+/// `INTERNAL` — daemon `connection_core` 의 `store_error_text`)는 그 코드를 겉 코드로 쓰고 접두를 뗀다. 재시도 지시는
+/// 그 코드의 기본값이다(WS 문구는 지시를 싣지 않는다).
+/// ★겉에 `CONFLICT` 를 또 씌우지 않는다★ — 코드가 둘(`CONFLICT: INTERNAL: …`)이 되고, 쓰기 실패가 「아무것도 적용
+///   안 된 반려」로 읽힌다. 이 명령이 광고하지 않는 코드나 코드 접두가 없는 문구(배치 실패 · 정책 거절 등)는
+///   [`not_applied`] 다.
+// ADR-0291 R17
+fn spawn_not_applied(detail: String) -> CommandError {
+    let advertised = AgentSpawnIntoArgs::SPEC.advertised_errors();
+    if let Some((prefix, message)) = detail.split_once(": ") {
+        if let Some(code) = ErrorCode::from_wire(prefix).filter(|code| advertised.contains(code)) {
+            return CommandError::of(code, message);
+        }
+    }
+    not_applied(detail)
 }
 
 /// ★공백만 있는 값은 부재로 접지 않고 반려한다★ — 셸에서 미설정 변수가 빈 인자로 펼쳐지는 형태

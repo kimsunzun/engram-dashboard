@@ -910,7 +910,7 @@ fn an_unreadable_file_falls_back_to_memory_for_the_write_decision() {
 
     let err = svc.set("theme.default", "e-ink").unwrap_err();
     assert!(
-        matches!(&err, SettingsError::Internal(message) if message.contains("못 읽어") && !message.contains("못 썼다")),
+        matches!(&err, SettingsError::Unreadable(message) if message.contains("못 읽어") && !message.contains("못 썼다")),
         "읽기 실패를 쓰기 실패로 말하지 않는다: {err:?}"
     );
     assert_eq!(value_of(&svc, "theme.default"), "light");

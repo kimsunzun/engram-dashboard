@@ -50,8 +50,12 @@ pub enum SettingsError {
     // ADR-0291 R2
     #[error("{0}")]
     Conflict(String),
-    /// 디스크 쓰기 실패 · 지금 파일을 못 읽었다(메모리 · `rev` 불변 · 알림 없음), 또는
-    /// [`SettingsService::enable_writes`] 전의 쓰기.
+    /// 쓰기 직전에 지금 파일을 못 읽어 덮지 않았다(메모리 · `rev` 불변 · 알림 없음 · 파일 그대로). 쓸 때마다 다시
+    /// 읽으므로 대개 잠깐 쥔 잠김이고 조금 뒤 다시 하면 된다.
+    // ADR-0291 R17 — 사용자 결정 2026-10-11: 실행 중 재판정의 못 읽음은 일시 거절이다.
+    #[error("{0}")]
+    Unreadable(String),
+    /// 디스크 쓰기 실패(메모리 · `rev` 불변 · 알림 없음), 또는 [`SettingsService::enable_writes`] 전의 쓰기.
     #[error("{0}")]
     Internal(String),
 }
@@ -444,7 +448,8 @@ impl SettingsService {
         Some(self.lock_state().effective(def).to_string())
     }
 
-    /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로 `Internal`(새 판이 쓴 파일이면 `Conflict`).
+    /// `io` 를 쥔 채 부른다 — 실패하면 메모리 · `rev` 그대로다. 새 판이 쓴 파일 = `Conflict` · 지금 파일을 못 읽음 =
+    /// `Unreadable` · 쓰기 실패 = `Internal`.
     fn persist(
         &self,
         files: &dyn SettingsFiles,
@@ -472,8 +477,8 @@ impl SettingsService {
                     keys = changes.len(),
                     "설정 파일을 못 읽어 덮지 않고 바꾸지 않았다: {e}"
                 );
-                SettingsError::Internal(format!(
-                    "설정 파일을 못 읽어 쓰지 않았다 — 값은 그대로다: {e}"
+                SettingsError::Unreadable(format!(
+                    "설정 파일을 지금 못 읽어 쓰지 않았다 — 값은 그대로다. 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다: {e}"
                 ))
             }
             store::WriteError::Io(e) => {

@@ -182,7 +182,8 @@ struct StoreState {
     loaded: bool,
     /// 적재 판정의 거절 — 이 실행 내내 남는다(R17).
     load_refusal: Option<Refusal>,
-    /// 마지막 저장의 재판정 거절 — 쓰기가 성공하면 지운다(D6). 같은 까닭이 이어지면 로그를 낮춘다(R15).
+    /// 마지막 저장의 재판정 거절 — 다음 재판정이 받아들이면 쓰기 전에 지운다(D6 — 그 뒤의 쓰기 실패는 거절이
+    /// 아니다). 같은 까닭이 이어지면 로그를 낮춘다(R15).
     last_refusal: Option<Refusal>,
     /// 첫 적재 전 · 적재가 없음 · 손상이었고 아직 한 번도 안 썼으면 `NotYet`(D14).
     claim: Claim,
@@ -302,8 +303,9 @@ impl FileStore {
         items
     }
 
-    /// 쓰기 직전에 지금 파일을 다시 판정하고 쓴다. 거절이면 쓰지 않고 [`StoreError::ReadOnly`] · 직렬화 · 상한 ·
-    /// 떠 두기 · 쓰기 실패면 [`StoreError::Io`](파일 그대로). 로그는 여기서 낸다.
+    /// 쓰기 직전에 지금 파일을 다시 판정하고 쓴다. 적재 거절이면 [`StoreError::ReadOnly`] · 재판정 거절이면
+    /// [`StoreError::Refused`](쓰지 않는다) · 직렬화 · 상한 · 떠 두기 · 쓰기 실패면 [`StoreError::Io`](파일 그대로).
+    /// 로그는 여기서 낸다.
     // ADR-0291 R8 · R15 · R16 · R17
     fn save(&self, count: usize, payload: &impl Serialize) -> Result<(), StoreError> {
         let name = self.kind.name;
@@ -335,39 +337,47 @@ impl FileStore {
 
         let path = self.path();
         let current = file::load(&path, &self.kind.spec, DATA_HOOKS);
-        match current.write_policy(claim) {
-            WritePolicy::Write => {}
-            WritePolicy::CopyAsideFirst => {
-                let what = match current {
-                    Loaded::Parsed(Parsed::Usable { .. }) => {
-                        "이 실행이 아직 쓰지 않은 동안 놓인 쓸 만한 파일"
-                    }
-                    _ => "손상된 파일",
-                };
-                match file::copy_aside(&path, DATA_HOOKS) {
-                    Ok(to) => tracing::warn!(
-                        file = name,
-                        to = %to.display(),
-                        "{what}을 덮기 전에 떠 뒀다"
-                    ),
-                    Err(error) => return Err(failed(&format!("{what}을 떠 두지 못했다"), error)),
+        let policy = current.write_policy(claim);
+        if let WritePolicy::Refuse(refused) = policy {
+            return Err(self.refused(refused, &current));
+        }
+        // ★재판정이 받아들였으면 거절 표시를 쓰기 전에 푼다★ — 뒤의 떠 두기 · 쓰기 실패는 거절이 아니라 `Io` 라,
+        //   쓰기 성공에서만 풀면 그 실패 동안 `agent.list` 가 이미 풀린 거절(`Refusing`)을 계속 보인다(D6).
+        self.accepted();
+        if policy == WritePolicy::CopyAsideFirst {
+            let what = match current {
+                Loaded::Parsed(Parsed::Usable { .. }) => {
+                    "이 실행이 아직 쓰지 않은 동안 놓인 쓸 만한 파일"
                 }
+                _ => "손상된 파일",
+            };
+            match file::copy_aside(&path, DATA_HOOKS) {
+                Ok(to) => tracing::warn!(
+                    file = name,
+                    to = %to.display(),
+                    "{what}을 덮기 전에 떠 뒀다"
+                ),
+                Err(error) => return Err(failed(&format!("{what}을 떠 두지 못했다"), error)),
             }
-            WritePolicy::Refuse(refused) => return Err(self.refused(refused, &current)),
         }
 
         file::write_atomic(&path, &bytes, DATA_HOOKS)
             .map_err(|e| failed("파일을 쓰지 못했다", e))?;
-        let recovered = {
-            let mut state = sync::lock(&self.state);
-            state.claim = Claim::Adopted;
-            state.last_refusal.take()
-        };
-        if let Some(refusal) = recovered {
-            tracing::info!(file = name, %refusal, "거절 뒤 다시 저장했다");
-        }
+        sync::lock(&self.state).claim = Claim::Adopted;
         tracing::debug!(file = name, count, "저장했다");
         Ok(())
+    }
+
+    /// 재판정이 받아들였다 — 앞선 재판정 거절을 지우고, 있었으면 풀렸다고 한 번 남긴다(R15).
+    fn accepted(&self) {
+        let cleared = sync::lock(&self.state).last_refusal.take();
+        if let Some(refusal) = cleared {
+            tracing::info!(
+                file = self.kind.name,
+                %refusal,
+                "앞서 거절하던 파일을 이번 재판정이 받아들였다 — 이제 쓴다"
+            );
+        }
     }
 
     /// 재판정 거절을 상태 칸에 남기고 로그를 낸다 — 같은 까닭이 이어지는 동안은 debug(R15).
@@ -393,7 +403,7 @@ impl FileStore {
                 "지금 파일을 덮을 수 없다 — 이 저장을 거절한다(다음 저장이 다시 판정한다)"
             );
         }
-        StoreError::ReadOnly(refusal)
+        StoreError::Refused(refusal)
     }
 
     fn status(&self) -> StoreStatus {
@@ -719,7 +729,7 @@ mod tests {
         let refusal = Refusal::Newer { found: 2 };
         assert!(matches!(
             store.save(&[sample()]),
-            Err(StoreError::ReadOnly(r)) if r == refusal
+            Err(StoreError::Refused(r)) if r == refusal
         ));
         assert_eq!(store.status(), StoreStatus::Refusing(refusal));
         assert_eq!(read(&dir, PROFILES.name), newer);
@@ -729,6 +739,35 @@ mod tests {
         store.save(std::slice::from_ref(&p)).unwrap();
         assert_eq!(store.status(), StoreStatus::Writable);
         assert_eq!(FileProfileStore::new(dir.clone()).load()[0].id, p.id);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// ★재판정이 받아들인 뒤의 쓰기 실패는 거절이 아니다★ — 거절 표시는 그 재판정에서 풀리고, `Io` 동안
+    ///   `Refusing` 으로 남지 않는다(D6). 떠 둘 자리에 폴더를 두어 손상 파일의 떠 두기를 실패시킨다.
+    // ADR-0291 R17 (D6)
+    #[test]
+    fn an_io_failure_after_an_accepting_rejudge_does_not_leave_the_store_refusing() {
+        let dir = temp_dir("refusing-then-io");
+        let store = FileProfileStore::new(dir.clone());
+        store.load();
+        store.save(&[sample()]).unwrap();
+
+        put(&dir, PROFILES.name, r#"{"schema_version":2,"profiles":[]}"#);
+        assert!(matches!(
+            store.save(&[sample()]),
+            Err(StoreError::Refused(_))
+        ));
+        assert!(matches!(store.status(), StoreStatus::Refusing(_)));
+
+        put(&dir, PROFILES.name, "{broken");
+        fs::create_dir_all(dir.join(aside_name())).unwrap();
+        assert!(matches!(store.save(&[sample()]), Err(StoreError::Io(_))));
+        assert_eq!(store.status(), StoreStatus::Writable);
+        assert_eq!(read(&dir, PROFILES.name), "{broken", "파일은 그대로다");
+
+        fs::remove_dir(dir.join(aside_name())).unwrap();
+        store.save(&[sample()]).unwrap();
+        assert_eq!(store.status(), StoreStatus::Writable);
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use engram_dashboard_base::path::normalize_spelling;
 use engram_dashboard_command::{
-    blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode,
+    blocking_handler, declare_commands, CommandError, CommandTable, ErrorCode, RetryMode,
 };
 
 use crate::manager::{AgentManager, RenameOutcome};
@@ -37,6 +37,8 @@ use crate::usage::UsageVendorKey;
 // ★성공 응답은 평평하다(사용자 결정 2026-08-13)★: 명령마다 반환을 선언하므로 `{"agent":{…}}` 한 겹을
 //   더 감쌀 이유가 없다.
 declare_commands! {
+    // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
+    //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
     // v6(2026-09-28·29): 이름 셋이 늘었다 — `agent.interrupt`(ADR-0237) · `usage.get`·`usage.refresh`(TRD S21
     //   usage-limit-slot §1-6). 두 갈래가 따로 6 으로 올렸고 v6 은 어느 릴리스(태그)에도 실린 적이 없어 한 판으로 합쳤다.
     // v5(2026-09-26): 이름 둘이 늘었다 — `agent.listQueuedInputs`·`agent.cancelQueuedInput`(ADR-0231).
@@ -48,8 +50,6 @@ declare_commands! {
     // v3(2026-09-08): `agent.new` 의 `backend` 가 **선택 → 필수**가 됐다. 조용한 claude 기본값을 걷은
     //   깨는 변경이라 세대를 올린다(사유 = 그 칸의 doc). 이 번호는 진단용이고 받는 쪽이 거절에 쓰지
     //   않는다(`connection_core` 의 RegisterCommands 갈래).
-    // v7(2026-10-10): `agent.list` 의 답에 칸 `store` 가 늘었다 — 명부 저장소 둘(agents · presets)의 상태(ADR-0291
-    //   R17 · D6). 이름은 그대로이고 답의 모양이 바뀌었다.
     catalog_version: 7;
 
     /// 명부의 한 행.
@@ -66,7 +66,8 @@ declare_commands! {
     //   편다★ — 사용량 행과 같은 꼴이다.
 
     /// 저장소 파일 하나의 상태 — `Writable`(쓸 수 있다) | `ReadOnly`(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가
-    /// 비어 있고 이 실행 내내 바꾸는 요청은 전부 `CONFLICT` 다. 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다) |
+    /// 비어 있고 이 실행 내내 명부를 바꾸는 요청은 `CONFLICT` 다(지목할 항목이 없으면 `NOT_FOUND`). 파일을 고치거나
+    /// 바꾼 뒤 데몬을 다시 띄워야 풀린다) |
     /// `Refusing`(마지막 저장이 거절됐다 — 다음 변경이 다시 판정하고, 받아들이면 풀린다. 그 사이 파일이 고쳐졌으면
     /// 이 값은 낡았다).
     enum StoreStateWord {
@@ -1076,12 +1077,14 @@ fn wake_existing(
     let started = started.map_err(|e| match e {
         PtyError::Store(error) => store_error(
             "start",
-            store_error_code(&error),
-            format!(
-                "could not start agent '{token}': {}",
-                store_error_reason(AGENTS_FILE, &error)
-            ),
             &error,
+            store_command_error(
+                &error,
+                format!(
+                    "could not start agent '{token}': {}",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+            ),
         ),
         other => CommandError::internal(format!("could not start agent '{token}': {other}")),
     })?;
@@ -1124,12 +1127,15 @@ fn create_and_start(
             //   이름이 하나씩 늘어난다.
             let created_but = |reason: String| {
                 format!(
-                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name instead of creating another",
+                    "agent '{}' ({}) was created but did not start: {reason} — it is registered and asleep, so start it again by that name (in a moment) instead of creating another",
                     stored.canonical_name_when_live(),
                     stored.id
                 )
             };
             match e {
+                // ★사유는 까닭만 싣는다([`store_error_cause`]) — 할 일 지시를 붙이지 않는다★: 여기서 「조금 뒤
+                //   다시」는 같은 `--cwd` 로 또 만들라는 말로 읽혀 중복을 낳고, 「다시 해도 소용없다」는 뒤의 「그
+                //   이름으로 다시 띄우라」와 어긋난다. 할 일은 뒤 꼬리 하나가 댄다.
                 // ★저장 거절이어도 `CONFLICT` 로 싣지 않는다 — 이 갈래는 이미 에이전트를 만들었다★: 데몬은
                 //   `CONFLICT` 를 「아무것도 적용 안 된 반려」로 읽어 그 요청 번호를 놓는다(daemon
                 //   `command_delivery::retains_the_id`). 놓으면 같은 번호의 재시도가 또 만들어 지울 수 없는
@@ -1137,9 +1143,8 @@ fn create_and_start(
                 // ADR-0291 R17
                 PtyError::Store(error) => store_error(
                     "start",
-                    ErrorCode::Internal,
-                    created_but(store_error_reason(AGENTS_FILE, &error)),
                     &error,
+                    CommandError::internal(created_but(store_error_cause(AGENTS_FILE, &error))),
                 ),
                 other => CommandError::internal(created_but(other.to_string())),
             }
@@ -1275,12 +1280,14 @@ fn register(
         ),
         PtyError::Store(error) => store_error(
             "register",
-            store_error_code(&error),
-            format!(
-                "could not register a new agent: {} — nothing was registered",
-                store_error_reason(AGENTS_FILE, &error)
-            ),
             &error,
+            store_command_error(
+                &error,
+                format!(
+                    "could not register a new agent: {} — nothing was registered",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+            ),
         ),
         other => CommandError::internal(format!("could not register a new agent: {other}")),
     })
@@ -1303,12 +1310,14 @@ fn verb_rename(
         .map_err(|e| match e {
             PtyError::Store(error) => store_error(
                 "rename",
-                store_error_code(&error),
-                format!(
-                    "could not rename '{token}': {} — the name was left as it is",
-                    store_error_reason(AGENTS_FILE, &error)
-                ),
                 &error,
+                store_command_error(
+                    &error,
+                    format!(
+                        "could not rename '{token}': {} — the name was left as it is",
+                        store_error_reason(AGENTS_FILE, &error)
+                    ),
+                ),
             ),
             other => CommandError::internal(format!("could not rename '{token}': {other}")),
         })?;
@@ -1376,12 +1385,14 @@ fn verb_move(
     let moved = host.reparent_agent(child.id, parent).map_err(|e| match e {
         PtyError::Store(error) => store_error(
             "move",
-            store_error_code(&error),
-            format!(
-                "could not move '{token}': {} — it was left where it was",
-                store_error_reason(AGENTS_FILE, &error)
-            ),
             &error,
+            store_command_error(
+                &error,
+                format!(
+                    "could not move '{token}': {} — it was left where it was",
+                    store_error_reason(AGENTS_FILE, &error)
+                ),
+            ),
         ),
         other => CommandError::internal(format!("could not move '{token}': {other}")),
     })?;
@@ -1528,43 +1539,89 @@ fn verb_interrupt(
     }
 }
 
-/// 저장소(프로필 · 프리셋)가 받지 않은 부르는 쪽 변경의 오류 코드 — 판정 거절(새 판이 쓴 파일 · 못 읽는 파일) =
-/// `CONFLICT`(지금 상태로는 적용할 수 없다 — 그 파일이 바뀌기 전에는 다시 해도 같다) · 쓰기 실패 = `INTERNAL`. 셸
-/// 설정(`settings.set`)과 같은 나눔이고, 버스와 WS(daemon `connection_core`)가 이 하나를 쓴다.
-/// ★둘 다 명부는 그대로다★ — 부르는 쪽 있는 변경은 저장이 성공해야 커밋한다(레지스트리 · 매니저의 `try_` 판). 그래서
+/// 저장소(프로필 · 프리셋)가 받지 않은 부르는 쪽 변경 → 호출자 오류(코드 + 재시도 지시). 버스와 WS(daemon
+/// `connection_core`)가 이 하나를 쓰고, 셸 설정(`settings.set` · `settings.reset`)도 같은 나눔을 따른다(사용자 결정
+/// 2026-10-11):
+/// - 적재 때 거절된 저장소(이 실행 내내 읽기 전용 — 까닭 무관) = `CONFLICT` · `never` — 파일을 고치거나 바꾸고 데몬을
+///   다시 띄워야 풀린다.
+/// - 쓰기 직전 재판정의 거절 — 새 판이 쓴 파일 = `CONFLICT` · `never`(그 파일이 그대로면 다시 해도 같다) · 못 읽음 =
+///   `CONFLICT` · `after-condition`(대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다).
+/// - 쓰기 실패 = `INTERNAL`.
+///
+/// ★셋 다 명부는 그대로다★ — 부르는 쪽 있는 변경은 저장이 성공해야 커밋한다(레지스트리 · 매니저의 `try_` 판). 그래서
 ///   `CONFLICT` 는 데몬이 「아무것도 적용 안 된 반려」로 읽는 그 뜻 그대로다(daemon
 ///   `command_delivery::retains_the_id`).
+/// ★오늘 그 재시도 지시는 부르는 쪽에 닿지 않는다★ — 소켓 버스의 출구가 `never` 로 내리고(daemon
+///   `command_delivery::send_reply` · ADR-0159) 제어 라우트의 답은 그 칸을 싣지 않는다. 그래서 「조금 뒤 다시」는
+///   문구([`store_error_reason`])와 도움말이 함께 나른다.
 // ADR-0291 R17
-pub fn store_error_code(error: &StoreError) -> ErrorCode {
+pub fn store_command_error(error: &StoreError, message: String) -> CommandError {
     match error {
-        StoreError::ReadOnly(_) => ErrorCode::Conflict,
-        StoreError::Io(_) => ErrorCode::Internal,
+        StoreError::Refused(Refusal::Unreadable) => {
+            CommandError::with_retry(ErrorCode::Conflict, message, RetryMode::AfterCondition)
+        }
+        StoreError::ReadOnly(_) | StoreError::Refused(Refusal::Newer { .. }) => {
+            CommandError::of(ErrorCode::Conflict, message)
+        }
+        StoreError::Io(_) => CommandError::internal(message),
     }
 }
 
-/// 호출자 문구에 싣는 사유 — 어느 파일(`file`)이 왜 받지 않았나(저장소의 말 그대로).
+/// 호출자 문구에 싣는 사유 — 어느 파일(`file`)이 왜 받지 않았나와 호출자가 할 일. ★LLM 이 읽는 표면이라 영어다★ —
+/// 저장소 오류의 한국어 `Display` 는 로그 몫이다.
 // ADR-0291 R17
 pub fn store_error_reason(file: &str, error: &StoreError) -> String {
-    format!("{file} ({error})")
+    let cause = store_error_cause(file, error);
+    match error {
+        StoreError::ReadOnly(Refusal::Newer { .. }) => format!(
+            "{cause}; retrying will not help (use the newer build or replace the file, then restart the daemon)"
+        ),
+        StoreError::ReadOnly(Refusal::Unreadable) => format!(
+            "{cause}; retrying will not help (fix or replace the file, then restart the daemon)"
+        ),
+        StoreError::Refused(Refusal::Newer { .. }) => {
+            format!("{cause}; retrying will not help while that file is there")
+        }
+        StoreError::Refused(Refusal::Unreadable) => {
+            format!("{cause}; this is usually a brief lock, so retry in a moment")
+        }
+        StoreError::Io(_) => cause,
+    }
 }
 
-/// 저장소가 받지 않은 변경을 호출자 오류로 바꾼다 — ★거절을 남기는 한 줄이 여기 하나다★(이 표면에서 그 요청이
-/// 오류가 되는 자리). 저장소의 로그는 파일 쪽 사실(무엇이 막았나)이고 이 줄은 요청 쪽 사실(어느 요청이 막혔나)이다.
-/// `action` = 무엇을 하려다 막혔나. 호출자가 친 값(이름 · 경로)은 로그에 싣지 않는다.
+/// 같은 사유에서 까닭만 — 어느 파일(`file`)이 왜 받지 않았나. 할 일 지시가 그 요청에 맞지 않는 자리(이미 만든 뒤의
+/// 띄우기 실패 — 할 일은 그 문구의 꼬리가 댄다)가 쓴다.
 // ADR-0291 R17
-fn store_error(
-    action: &'static str,
-    code: ErrorCode,
-    message: String,
-    error: &StoreError,
-) -> CommandError {
+fn store_error_cause(file: &str, error: &StoreError) -> String {
+    match error {
+        StoreError::ReadOnly(Refusal::Newer { found }) => format!(
+            "{file} was written by a newer build (version {found}) and is read-only for this daemon run"
+        ),
+        StoreError::ReadOnly(Refusal::Unreadable) => format!(
+            "{file} could not be read when the daemon started and is read-only for this run"
+        ),
+        StoreError::Refused(Refusal::Newer { found }) => format!(
+            "{file} was written by a newer build (version {found}) and was not overwritten"
+        ),
+        StoreError::Refused(Refusal::Unreadable) => {
+            format!("{file} could not be read just now and was not overwritten")
+        }
+        StoreError::Io(io) => format!("writing {file} failed: {io}"),
+    }
+}
+
+/// 저장소가 받지 않은 변경의 호출자 오류(`failure`)를 그대로 돌려주며 남긴다 — ★거절을 남기는 한 줄이 여기
+/// 하나다★(이 표면에서 그 요청이 오류가 되는 자리). 저장소의 로그는 파일 쪽 사실(무엇이 막았나)이고 이 줄은 요청 쪽
+/// 사실(어느 요청이 막혔나)이다. `action` = 무엇을 하려다 막혔나. 호출자가 친 값(이름 · 경로)은 로그에 싣지 않는다.
+// ADR-0291 R17
+fn store_error(action: &'static str, error: &StoreError, failure: CommandError) -> CommandError {
     tracing::warn!(
         action,
         file = AGENTS_FILE,
         %error,
         "저장소가 받지 않아 이 요청을 오류로 돌려준다(명령 버스)"
     );
-    CommandError::of(code, message)
+    failure
 }
 
 /// 명부에는 있는데 산 세션이 없다 — 대기 목록은 산 화신만 쥔다.
@@ -2157,7 +2214,7 @@ mod tests {
         struct RefusingPresets;
         impl PresetStore for RefusingPresets {
             fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
-                Err(StoreError::ReadOnly(Refusal::Unreadable))
+                Err(StoreError::Refused(Refusal::Unreadable))
             }
             fn load(&self) -> Vec<Preset> {
                 vec![]
@@ -2449,9 +2506,10 @@ mod tests {
         }
     }
 
-    /// 등록 실패는 사유마다 다른 코드로 나간다 — 호출자가 할 일이 갈리기 때문이다.
+    /// 등록 실패는 사유마다 다른 코드 · 재시도 지시로 나간다 — 호출자가 할 일이 갈리기 때문이다.
     #[test]
     fn registration_failures_map_to_distinct_codes() {
+        use crate::profile::Refusal;
         let cases = [
             (
                 PtyError::RosterFull {
@@ -2459,30 +2517,50 @@ mod tests {
                     limit: 40,
                 },
                 ErrorCode::Conflict,
+                RetryMode::Never,
             ),
-            (PtyError::CwdDenied, ErrorCode::InvalidArgument),
+            (
+                PtyError::CwdDenied,
+                ErrorCode::InvalidArgument,
+                RetryMode::Never,
+            ),
             (
                 PtyError::SpawnFailed("disk on fire".to_string()),
                 ErrorCode::Internal,
+                RetryMode::Never,
             ),
-            // ADR-0291 R17 — 판정 거절은 `CONFLICT`(그 파일이 바뀌기 전에는 다시 해도 같다) · 쓰기 실패는 `INTERNAL`.
+            // ADR-0291 R17 — 거절은 `CONFLICT` 이고 재시도 지시는 어디서 났나 · 까닭이 가른다(사용자 결정
+            //   2026-10-11): 적재 거절 = `never`(데몬을 다시 띄워야 풀린다) · 재판정의 새 판 = `never` · 재판정의 못 읽음
+            //   = `after-condition`(대개 잠깐 쥔 잠김). 쓰기 실패는 `INTERNAL`.
             (
-                PtyError::Store(StoreError::ReadOnly(crate::profile::Refusal::Newer {
-                    found: 2,
-                })),
+                PtyError::Store(StoreError::ReadOnly(Refusal::Newer { found: 2 })),
                 ErrorCode::Conflict,
+                RetryMode::Never,
             ),
             (
-                PtyError::Store(StoreError::ReadOnly(crate::profile::Refusal::Unreadable)),
+                PtyError::Store(StoreError::ReadOnly(Refusal::Unreadable)),
                 ErrorCode::Conflict,
+                RetryMode::Never,
+            ),
+            (
+                PtyError::Store(StoreError::Refused(Refusal::Newer { found: 2 })),
+                ErrorCode::Conflict,
+                RetryMode::Never,
+            ),
+            (
+                PtyError::Store(StoreError::Refused(Refusal::Unreadable)),
+                ErrorCode::Conflict,
+                RetryMode::AfterCondition,
             ),
             (
                 PtyError::Store(StoreError::Io(std::io::Error::other("disk full"))),
                 ErrorCode::Internal,
+                RetryMode::Never,
             ),
         ];
 
-        for (failure, expected) in cases {
+        for (failure, expected, retry) in cases {
+            let label = format!("{failure:?}");
             let from_store = matches!(failure, PtyError::Store(_));
             let host = FakeHost::new();
             *host.create_fails.lock().unwrap() = Some(failure);
@@ -2494,7 +2572,8 @@ mod tests {
                 json!({ "cwd": "C:/work/delta", "backend": "Claude" }),
             )
             .expect_err("등록 실패");
-            assert_eq!(err.code(), expected);
+            assert_eq!(err.code(), expected, "{label}");
+            assert_eq!(err.retry(), retry, "{label}");
             assert_eq!(
                 *notify.calls.lock().unwrap(),
                 0,
@@ -2510,6 +2589,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ★저장소 거절의 사유는 영어로, 할 일까지 댄다★ — LLM 이 읽는 표면이다. 적재 거절은 다시 띄우기를, 재판정의 못
+    ///   읽음은 조금 뒤 다시를 말한다(재시도 지시는 데몬 출구에서 내려가므로 문구가 그 몫을 진다).
+    // ADR-0291 R17
+    #[test]
+    fn store_refusal_reasons_are_english_and_name_the_way_out() {
+        use crate::profile::Refusal;
+        let at_load = store_error_reason("agents.json", &StoreError::ReadOnly(Refusal::Unreadable));
+        assert!(
+            at_load.starts_with("agents.json could not be read")
+                && at_load.contains("restart the daemon"),
+            "{at_load}"
+        );
+        let newer = store_error_reason(
+            "presets.json",
+            &StoreError::Refused(Refusal::Newer { found: 3 }),
+        );
+        assert!(
+            newer.starts_with("presets.json was written by a newer build (version 3)")
+                && newer.contains("retrying will not help"),
+            "{newer}"
+        );
+        let transient =
+            store_error_reason("agents.json", &StoreError::Refused(Refusal::Unreadable));
+        assert!(transient.contains("retry in a moment"), "{transient}");
+        assert_eq!(
+            store_error_reason(
+                "agents.json",
+                &StoreError::Io(std::io::Error::other("disk full"))
+            ),
+            "writing agents.json failed: disk full"
+        );
     }
 
     /// ★대화상자 없이 등록되는 길★ — 프리셋 id 하나로 작업 폴더가 정해진다(ADR-0061 의 경로 북마크).
@@ -2834,12 +2946,13 @@ mod tests {
 
     /// ★만든 뒤 띄우기를 저장소가 거절해도 `INTERNAL` 이다(§3-9 ⓑ)★ — 이미 만든 에이전트가 남으므로 데몬이
     ///   「손대기 전 반려」(`CONFLICT`)로 읽어 요청 번호를 놓으면 같은 번호의 재시도가 또 만든다. 문구는 회복 길
-    ///   (그 이름으로 다시 띄우기)을 그대로 나르고 저장소의 사유를 함께 싣는다.
+    ///   (그 이름으로 다시 띄우기)을 그대로 나르고 저장소의 사유는 까닭만 싣는다 — 「조금 뒤 다시」·「다시 해도
+    ///   소용없다」 같은 할 일 지시가 섞이면 같은 `--cwd` 로 또 만들거나 꼬리와 어긋난다. 거절의 까닭마다 잰다.
     // ADR-0291 R17
     #[test]
     fn a_created_agent_whose_start_the_store_refuses_stays_internal_with_the_recovery_hint() {
-        // 만들기는 저장되고 띄우기의 등록에서 거절된다 — 그 사이에 파일이 새 판이 된 모양.
-        struct RefuseOnStart(Arc<FakeHost>);
+        // 만들기는 저장되고 띄우기의 등록에서 거절된다 — 그 사이에 파일이 바뀐 모양. 둘째 칸이 거절의 까닭을 만든다.
+        struct RefuseOnStart(Arc<FakeHost>, fn() -> StoreError);
         impl AgentCommandHost for RefuseOnStart {
             fn roster(&self) -> Vec<AgentRosterRow> {
                 self.0.roster()
@@ -2860,6 +2973,9 @@ mod tests {
                 profile: &AgentProfile,
                 mode: SpawnMode,
             ) -> Result<StartedAgent, PtyError> {
+                if *self.0.store_refuses.lock().unwrap() {
+                    return Err(PtyError::Store((self.1)()));
+                }
                 self.0.activate_profile(profile, mode)
             }
             fn rename_agent(
@@ -2893,36 +3009,63 @@ mod tests {
                 self.0.interrupt_agent(id)
             }
         }
-        let host = FakeHost::new();
-        let notify = Arc::new(FakeNotify::default());
-        let table = make_table(
-            Arc::new(RefuseOnStart(Arc::clone(&host))) as Arc<dyn AgentCommandHost>,
-            Arc::clone(&notify) as Arc<dyn RosterChanged>,
-            Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
-        );
+        use crate::profile::Refusal;
+        let causes: [(fn() -> StoreError, &str); 3] = [
+            (
+                || StoreError::Refused(Refusal::Unreadable),
+                "agents.json could not be read just now",
+            ),
+            (
+                || StoreError::Refused(Refusal::Newer { found: 2 }),
+                "agents.json was written by a newer build (version 2)",
+            ),
+            (
+                || StoreError::Io(std::io::Error::other("disk full")),
+                "writing agents.json failed: disk full",
+            ),
+        ];
 
-        let err = call(
-            &table,
-            "agent.spawn",
-            json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
-        )
-        .expect_err("띄우기가 저장 거절로 돌아온다");
+        for (refusal, cause) in causes {
+            let host = FakeHost::new();
+            let notify = Arc::new(FakeNotify::default());
+            let table = make_table(
+                Arc::new(RefuseOnStart(Arc::clone(&host), refusal)) as Arc<dyn AgentCommandHost>,
+                Arc::clone(&notify) as Arc<dyn RosterChanged>,
+                Arc::new(FakeUsage::default()) as Arc<dyn UsageCommandHost>,
+            );
 
-        assert_eq!(err.code(), ErrorCode::Internal);
-        assert!(
-            err.message().contains("was created but did not start")
-                && err.message().contains("agents.json")
-                && err.message().contains("start it again by that name"),
-            "{}",
-            err.message()
-        );
-        assert_eq!(host.rows.lock().unwrap().len(), 1, "만든 에이전트는 남는다");
-        assert!(host.started.lock().unwrap().is_empty());
-        assert_eq!(
-            *notify.calls.lock().unwrap(),
-            2,
-            "만든 뒤 · 활성화 뒤(E2) — 지금 계약 그대로"
-        );
+            let err = call(
+                &table,
+                "agent.spawn",
+                json!({ "cwd": "C:/work/gamma", "name": "gamma" }),
+            )
+            .expect_err("띄우기가 저장 거절로 돌아온다");
+
+            let message = err.message();
+            assert_eq!(err.code(), ErrorCode::Internal, "{message}");
+            assert!(
+                message.contains("was created but did not start")
+                    && message.contains(cause)
+                    && message.contains(
+                        "start it again by that name (in a moment) instead of creating another"
+                    ),
+                "{message}"
+            );
+            // 까닭만 — 할 일 지시는 꼬리 하나다.
+            assert!(
+                !message.contains("retry in a moment")
+                    && !message.contains("retrying will not help")
+                    && !message.contains("restart the daemon"),
+                "{message}"
+            );
+            assert_eq!(host.rows.lock().unwrap().len(), 1, "만든 에이전트는 남는다");
+            assert!(host.started.lock().unwrap().is_empty());
+            assert_eq!(
+                *notify.calls.lock().unwrap(),
+                2,
+                "만든 뒤 · 활성화 뒤(E2) — 지금 계약 그대로"
+            );
+        }
     }
 
     /// ★실 매니저 · 받지 않는 저장소로 버스를 지난다★ — 가짜 매니저는 `try_` 판을 흉내 낼 뿐이라, 표가 정말 매니저의

@@ -38,7 +38,7 @@ use engram_dashboard_platform::shell::default_shell;
 
 use engram_dashboard_agent::backend::usage_probe_for;
 use engram_dashboard_agent::commands::llm_creation_refusal;
-use engram_dashboard_agent::commands::{store_error_code, store_error_reason};
+use engram_dashboard_agent::commands::{store_command_error, store_error_reason};
 use engram_dashboard_agent::failure::AgentFailureKind as CoreFailureKind;
 use engram_dashboard_agent::persistence::{AGENTS_FILE, PRESETS_FILE};
 use engram_dashboard_agent::preset::Preset as CorePreset;
@@ -1004,9 +1004,10 @@ fn cancel_error_text(agent_id: AgentId, input_id: &str, e: CancelError) -> Strin
     .to_string()
 }
 
-/// 저장소가 이 요청의 변경을 받지 않았다 → `Error` 문구(`CODE: 문구`). 코드 나눔(판정 거절 = `CONFLICT` · 쓰기
-/// 실패 = `INTERNAL`)은 명령 버스와 같은 것을 쓴다(agent `store_error_code`). `what` = 무엇이 안 됐나 · `file` = 받지
-/// 않은 파일 — 문구가 그 파일과 저장소의 말을 댄다.
+/// 저장소가 이 요청의 변경을 받지 않았다 → `Error` 문구(`CODE: 문구`). 코드 나눔(거절 = `CONFLICT` · 쓰기 실패 =
+/// `INTERNAL`)과 사유 문구는 명령 버스와 같은 것을 쓴다(agent `store_command_error` · `store_error_reason`). WS 문구는
+/// 재시도 지시를 싣지 않으므로 「조금 뒤 다시」는 그 사유 문구가 나른다. `what` = 무엇이 안 됐나 · `file` = 받지 않은
+/// 파일.
 /// ★거절을 남기는 한 줄이 여기 하나다★(WS 에서 그 요청이 오류가 되는 자리) — 저장소의 로그는 파일 쪽 사실(무엇이
 ///   막았나)이고 이 줄은 요청 쪽 사실(어느 요청이 막혔나)이다. 호출자가 보낸 값(이름 · 경로)은 싣지 않는다.
 // ADR-0291 R17
@@ -1024,15 +1025,15 @@ fn store_error_text(
         %error,
         "저장소가 받지 않아 이 요청을 오류로 돌려준다(WS)"
     );
-    CommandError::of(
-        store_error_code(error),
+    store_command_error(
+        error,
         format!("{what}: {}", store_error_reason(file, error)),
     )
     .to_string()
 }
 
 /// 프로필 쪽 요청(매니저의 `try_` 판 · 활성화)의 실패 → `Error` 문구. `agents.json` 의 저장 `Err` 만
-/// [`store_error_text`] 로 — 나머지는 지금 문구 그대로(`PtyError` 의 Display).
+/// [`store_error_text`] 로 — 나머지는 `PtyError` 의 Display 그대로다.
 // ADR-0291 R17
 fn profile_error_text(conn_id: ConnId, verb: &'static str, what: &str, e: PtyError) -> String {
     match e {
@@ -1957,7 +1958,7 @@ impl ConnectionCore {
                 ),
             },
 
-            // 없는 id 도 지금처럼 `Ack` 다(`Ok(false)` — 바꾼 것이 없을 뿐이다).
+            // 없는 id 는 오류가 아니라 `Ack` 다(`Ok(false)` — 바꾼 것이 없을 뿐이다).
             AgentCommand::RenamePreset {
                 preset_id,
                 name,
@@ -2554,6 +2555,7 @@ mod tests {
     use super::*;
     use engram_dashboard_net::frame_port;
     use engram_dashboard_protocol::{CommandListEntry, RequestId};
+    use std::sync::atomic::AtomicU8;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
@@ -2926,15 +2928,21 @@ mod tests {
         test_core_on_stores(deliveries, locals, Arc::default())
     }
 
-    /// 저장소 거절을 켜고 끄는 조립 — 켜면 두 저장소(프로필 · 프리셋)가 새 판 거절로 돌아온다(아무것도 안 남긴다).
-    /// 팬아웃 기록과 그 스위치를 함께 돌려준다.
+    /// [`test_core_refusable`] 의 저장소 스위치 값 — 받음 · 적재 때 거절(새 판) · 쓰기 실패. 어느 쪽이든 실패면
+    /// 아무것도 안 남긴다.
+    const STORE_SAVES: u8 = 0;
+    const STORE_REFUSES: u8 = 1;
+    const STORE_FAILS_IO: u8 = 2;
+
+    /// 저장소 결말을 바꾸는 조립 — 스위치([`STORE_SAVES`] · [`STORE_REFUSES`] · [`STORE_FAILS_IO`])가 두
+    /// 저장소(프로필 · 프리셋)에 함께 걸린다. 팬아웃 기록과 그 스위치를 함께 돌려준다.
     // ADR-0291 R17
     fn test_core_refusable() -> (
         ConnectionCore,
         Arc<crate::test_doubles::RecordingFanout>,
-        Arc<AtomicBool>,
+        Arc<AtomicU8>,
     ) {
-        let refusing = Arc::new(AtomicBool::new(false));
+        let refusing = Arc::new(AtomicU8::new(STORE_SAVES));
         let (core, _rx, fanout) = test_core_on_stores(
             CommandDeliveries::new(),
             &|_, _| Arc::new(crate::command_delivery::NoLocalCommands),
@@ -2943,11 +2951,11 @@ mod tests {
         (core, fanout, refusing)
     }
 
-    /// [`test_core_built`] 의 본체 — `refusing` 이 켜져 있는 동안 두 저장소가 저장을 거절한다.
+    /// [`test_core_built`] 의 본체 — `refusing` 이 [`STORE_SAVES`] 가 아닌 동안 두 저장소가 저장에 실패한다.
     fn test_core_on_stores(
         deliveries: CommandDeliveries,
         locals: &dyn Fn(&Arc<AgentManager>, &MultiViewState) -> Arc<dyn LocalCommands>,
-        refusing: Arc<AtomicBool>,
+        refusing: Arc<AtomicU8>,
     ) -> (
         ConnectionCore,
         watch::Receiver<bool>,
@@ -2957,17 +2965,18 @@ mod tests {
         use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore, Refusal};
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
-        fn refused(switch: &AtomicBool) -> Result<(), StoreError> {
-            if switch.load(Ordering::SeqCst) {
-                return Err(StoreError::ReadOnly(Refusal::Newer { found: 2 }));
+        fn refused(switch: &AtomicU8) -> Result<(), StoreError> {
+            match switch.load(Ordering::SeqCst) {
+                STORE_REFUSES => Err(StoreError::ReadOnly(Refusal::Newer { found: 2 })),
+                STORE_FAILS_IO => Err(StoreError::Io(std::io::Error::other("disk full"))),
+                _ => Ok(()),
             }
-            Ok(())
         }
 
         #[derive(Default)]
         struct MemStore {
             saved: StdMutex<Vec<engram_dashboard_agent::profile::AgentProfile>>,
-            refusing: Arc<AtomicBool>,
+            refusing: Arc<AtomicU8>,
         }
         impl ProfileStore for MemStore {
             fn save(
@@ -2986,7 +2995,7 @@ mod tests {
         #[derive(Default)]
         struct MemPresetStore {
             saved: StdMutex<Vec<engram_dashboard_agent::preset::Preset>>,
-            refusing: Arc<AtomicBool>,
+            refusing: Arc<AtomicU8>,
         }
         impl PresetStore for MemPresetStore {
             fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) -> Result<(), StoreError> {
@@ -6192,7 +6201,7 @@ mod tests {
             "전제: 잠든 프로필 앞으로 파킹된다"
         );
 
-        refusing.store(true, Ordering::SeqCst);
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
         let req = rid();
         core.dispatch(
@@ -6226,7 +6235,7 @@ mod tests {
         assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
 
         // 대조 — 저장되면 같은 요청이 지우고 훅이 그 우편을 정리한다.
-        refusing.store(false, Ordering::SeqCst);
+        refusing.store(STORE_SAVES, Ordering::SeqCst);
         core.dispatch(
             AgentCommand::DeleteProfile {
                 profile_id: sleepy.id,
@@ -6247,7 +6256,7 @@ mod tests {
 
     /// ★저장소가 받지 않은 명부 · 프리셋 변경은 전부 오류로 답하고 브로드캐스트를 내지 않는다(D3)★ — 바뀐 것이
     ///   없다. 문구는 코드(`CONFLICT` — 버스와 같은 나눔)와 받지 않은 파일(`agents.json` · `presets.json`)을 댄다.
-    ///   프리셋 셋은 이 갈래 전에는 저장 결과와 무관하게 `Ack` 였다.
+    ///   프리셋 셋도 저장소가 받아야만 `Ack` 다.
     // ADR-0291 R17 (D3)
     #[tokio::test]
     async fn every_ws_roster_or_preset_change_the_store_refuses_answers_an_error_and_broadcasts_nothing(
@@ -6289,7 +6298,7 @@ mod tests {
             rows
         };
         let (profiles_before, presets_before) = (profiles(), presets());
-        refusing.store(true, Ordering::SeqCst);
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
         let temp = std::env::temp_dir().to_string_lossy().into_owned();
 
@@ -6395,7 +6404,7 @@ mod tests {
         core.manager
             .try_create_agent(profile.clone())
             .expect("저장되면 등록");
-        refusing.store(true, Ordering::SeqCst);
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
         let before = fanout.texts().len();
 
         core.dispatch(
@@ -6427,6 +6436,132 @@ mod tests {
                 .agent_snapshot(profile.id)
                 .and_then(|p| p.last_failure),
             Some(CoreFailureKind::Other)
+        );
+    }
+
+    /// ★WS `Spawn{profile_id}` 도 저장 거절이면 `CONFLICT` 이고 뜬 것이 없다★ — 같은 활성화 입구를 지나므로
+    ///   `SpawnProfile` 과 같은 답 · 같은 알림이어야 한다(한쪽만 다른 코드면 두 WS 문이 갈린다).
+    // ADR-0291 R17 (E2)
+    #[tokio::test]
+    async fn a_ws_spawn_by_profile_id_the_store_refuses_answers_conflict_and_still_announces_the_list(
+    ) {
+        let (core, fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let profile = unlaunchable_profile("fresh-waker");
+        core.manager
+            .try_create_agent(profile.clone())
+            .expect("저장되면 등록");
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::Spawn {
+                profile_id: profile.id,
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("CONFLICT:")
+                    && message.contains("agents.json")
+                    && message.contains("restart the daemon"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert_eq!(
+            fanout.texts().len(),
+            before + 1,
+            "결말과 무관하게 한 번 민다"
+        );
+    }
+
+    /// ★WS `SpawnByCwd` 는 저장 거절이면 `CONFLICT` 이고 등록도 띄우기도 없다★ — 즉석 프로필은 띄우기 전에 등록되고
+    ///   그 등록이 거절된다. 없는 폴더를 cwd 로 주어, 거절이 회귀해 띄우기까지 가도 프로세스가 서지 않게 한다.
+    // ADR-0291 R17
+    #[tokio::test]
+    async fn a_ws_spawn_by_cwd_the_store_refuses_answers_conflict_and_registers_nothing() {
+        let (core, _fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        refusing.store(STORE_REFUSES, Ordering::SeqCst);
+        let missing =
+            std::env::temp_dir().join(format!("engram-no-such-dir-{}", uuid::Uuid::new_v4()));
+
+        core.dispatch(
+            AgentCommand::SpawnByCwd {
+                cwd: missing.to_string_lossy().into_owned(),
+                backend: Some(WireBackendKind::Claude),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("CONFLICT: the agent was not created or started: agents.json"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert!(core.manager.list_agents().is_empty(), "뜬 것이 없다");
+        assert!(
+            core.manager.agent_snapshots().is_empty(),
+            "명부에 오른 것이 없다"
+        );
+    }
+
+    /// ★WS 의 저장 쓰기 실패는 `INTERNAL:` 이다★ — 거절(`CONFLICT`)과 같은 문구 꼴이되 코드가 다르다(버스와 같은 나눔).
+    // ADR-0291 R17
+    #[tokio::test]
+    async fn a_ws_change_whose_store_write_fails_answers_internal() {
+        let (core, fanout, refusing) = test_core_refusable();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<frame_port::Frame>(16);
+        let mock = MockOutboundSink::new(tx);
+        let session = ConnectionSession::new(1);
+        let alpha = unlaunchable_profile("alpha");
+        core.manager
+            .try_create_agent(alpha.clone())
+            .expect("저장되면 등록");
+        refusing.store(STORE_FAILS_IO, Ordering::SeqCst);
+        let before = fanout.texts().len();
+
+        core.dispatch(
+            AgentCommand::RenameProfile {
+                profile_id: alpha.id,
+                name: Some("beta".into()),
+                request_id: rid(),
+            },
+            &session,
+            &mock,
+        )
+        .await;
+
+        match mock.events().as_slice() {
+            [AgentEvent::Error { message, .. }] => assert!(
+                message.starts_with("INTERNAL:")
+                    && message.contains("writing agents.json failed: disk full"),
+                "{message}"
+            ),
+            other => panic!("Error 1건이어야: {other:?}"),
+        }
+        assert_eq!(fanout.texts().len(), before, "브로드캐스트 0");
+        assert_eq!(
+            core.manager
+                .agent_snapshot(alpha.id)
+                .and_then(|p| p.display_name),
+            Some("alpha".to_string()),
+            "이름 그대로"
         );
     }
 

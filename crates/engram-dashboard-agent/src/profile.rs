@@ -320,12 +320,19 @@ impl std::fmt::Display for Refusal {
 }
 
 /// [`ProfileStore::save`] · [`crate::preset::PresetStore::save`] 의 실패.
+///
+/// ★거절은 어디서 났나로 두 변형이다★ — 호출자에게 할 일이 갈린다: 적재 거절은 데몬을 다시 띄워야 풀리고, 재판정
+/// 거절은 다음 저장이 다시 판정한다(못 읽음은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다).
+// ADR-0291 R17
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
-    /// 판정이 이 저장을 거절했다 — 적재 거절(이 실행 내내)인지 이번 저장의 재판정 거절인지는 저장소의
-    /// `status()` 가 가른다.
-    #[error("저장 거절 — {0}")]
+    /// 적재 판정이 거절한 저장소다 — 이 실행 내내 저장하지 않는다(저장소 `status()` 의 [`StoreStatus::ReadOnly`]).
+    #[error("저장 거절(적재 때부터 이 실행 내내) — {0}")]
     ReadOnly(Refusal),
+    /// 이번 저장 직전의 재판정이 거절했다 — 다음 저장이 다시 판정한다(저장소 `status()` 의
+    /// [`StoreStatus::Refusing`]).
+    #[error("저장 거절(쓰기 직전 재판정) — {0}")]
+    Refused(Refusal),
     /// 쓰기(덮기 전 떠 두기 · 쓰기 상한 포함)가 실패했다 — 파일은 그대로다.
     #[error("저장 실패 — {0}")]
     Io(std::io::Error),
@@ -1144,7 +1151,7 @@ pub(crate) mod scripted_store {
                     Ok(())
                 }
                 Outcome::FailsIo => Err(StoreError::Io(std::io::Error::other("디스크 가득"))),
-                Outcome::Refuses(refusal) => Err(StoreError::ReadOnly(refusal)),
+                Outcome::Refuses(refusal) => Err(StoreError::Refused(refusal)),
             }
         }
 
@@ -2567,7 +2574,7 @@ mod tests {
                 matches!(
                     (failure, &err),
                     (Outcome::FailsIo, StoreError::Io(_))
-                        | (Outcome::Refuses(_), StoreError::ReadOnly(_))
+                        | (Outcome::Refuses(_), StoreError::Refused(_))
                 ),
                 "저장소의 `Err` 를 그대로 돌려준다 — {failure:?} → {err}"
             );

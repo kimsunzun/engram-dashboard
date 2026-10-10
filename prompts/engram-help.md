@@ -63,7 +63,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.move --target <이름|id> --parent <이름|none>
       다른 에이전트 밑으로 넣는다. none 이면 최상위로 되돌린다.
 
-  명부를 바꾸는 명령(agent.new · agent.spawn · agent.rename · agent.move)은 agents 저장소가 그 변경을 받지 않으면(ReadOnly · Refusing) CONFLICT 로 돌아오고 명부는 그대로다 — 그 파일이 그대로면 다시 해도 같다. 저장 쓰기 자체가 실패하면 INTERNAL 이고 역시 명부는 그대로다. 단 agent.spawn --cwd 가 만든 뒤 띄우기에서 막히면 만든 에이전트는 남는다(문구가 그 이름으로 다시 띄우라고 알려 준다). ReadOnly 는 그 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다. Refusing 은 파일이 다시 쓸 만해지면(고쳐지거나 잠김이 풀리면) 다음 변경이 받아들여 풀린다 — 다시 띄울 필요가 없다.
+  명부를 바꾸는 명령(agent.new · agent.spawn · agent.rename · agent.move · agent.spawnInto)은 agents 저장소가 그 변경을 받지 않으면 CONFLICT 로 돌아오고 명부는 그대로다. 할 일은 까닭이 가르고 문구가 그것을 말한다 — 데몬이 뜰 때 받지 않은 파일(store 의 ReadOnly)은 다시 해도 소용없고 그 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다. 실행 중에 파일을 못 읽어 받지 않은 것(Refusing · Unreadable)은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다. 실행 중에 새 판이 그 파일을 쓴 것(Refusing · Newer)은 그 파일이 그대로면 다시 해도 같다. 저장 쓰기 자체가 실패하면 INTERNAL 이고 역시 명부는 그대로다. 단 agent.spawn --target 의 깨우기가 막히면 명부는 그대로지만 그 에이전트의 마지막 실패가 적혀 대시보드에 보인다. agent.spawn --cwd 가 만든 뒤 띄우기에서 막히면 코드는 INTERNAL 이고 만든 에이전트는 잠든 채 남는다 — 새로 만들지 말고 문구가 댄 그 이름으로 띄운다. Refusing 은 파일이 다시 쓸 만해지면(고쳐지거나 잠김이 풀리면) 다음 변경이 받아들여 풀린다 — 다시 띄울 필요가 없다.
 
   {tool} agent.listQueuedInputs --target <이름|id>
       턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록. 각 항목의 id, text, state(queued|unconfirmed|cancelling).
@@ -173,7 +173,7 @@ key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.st
   {tool} settings.set --key chat.style.fontSize --value 15px
   {tool} settings.reset --key chat.style.
 
-모르는 키는 NOT_FOUND, 꼴이나 범위가 틀리면 INVALID_ARGUMENT 이고 그 문구가 받는 꼴을 말한다. 설정 파일이 이 대시보드보다 새 버전이 쓴 것이면 settings.set · settings.reset 은 CONFLICT 이고 파일을 덮지 않는다(값은 그대로다 — 그 파일이 바뀌기 전에는 다시 해도 같다). 단 값이 바뀌지 않는 호출(이미 그 값 · 이미 기본값)은 그때도 성공한다(settings.set 은 changed=false).
+모르는 키는 NOT_FOUND, 꼴이나 범위가 틀리면 INVALID_ARGUMENT 이고 그 문구가 받는 꼴을 말한다. 설정 파일이 이 대시보드보다 새 버전이 쓴 것이면 settings.set · settings.reset 은 CONFLICT 이고 파일을 덮지 않는다(값은 그대로다 — 그 파일이 바뀌기 전에는 다시 해도 같다). 설정 파일을 지금 못 읽었을 때도 CONFLICT 이고 값은 그대로다 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다. 단 값이 바뀌지 않는 호출(이미 그 값 · 이미 기본값)은 그때도 성공한다(settings.set 은 changed=false).
 
 파일은 `<data_dir>/shell/config/settings.json` 이다. 손으로 고치지 않는다 — 쓰는 길은 위 명령뿐이다(실행 중 편집은 다음 시작까지 반영되지 않는다).
 

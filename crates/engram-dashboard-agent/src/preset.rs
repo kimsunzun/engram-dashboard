@@ -183,7 +183,7 @@ mod tests {
     impl PresetStore for MemStore {
         fn save(&self, presets: &[Preset]) -> Result<(), StoreError> {
             if self.refusing.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(StoreError::ReadOnly(crate::profile::Refusal::Unreadable));
+                return Err(StoreError::Refused(crate::profile::Refusal::Unreadable));
             }
             *self.saved.lock().unwrap() = presets.to_vec();
             Ok(())
@@ -359,7 +359,7 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         assert!(matches!(
             reg.try_create(PathBuf::from(".")),
-            Err(StoreError::ReadOnly(_))
+            Err(StoreError::Refused(_))
         ));
         assert!(reg.try_rename(kept.id, Some("x".to_string())).is_err());
         assert!(reg.try_remove(kept.id).is_err());
