@@ -98,8 +98,8 @@ pub fn retry_busy<T>(retry: Retry, attempt: impl FnMut() -> io::Result<T>) -> io
     retry_busy_with(retry, attempt, std::thread::sleep)
 }
 
-/// [`retry_busy`] 와 같되 자는 대신 `pause` 를 부른다 — 다시 하기 전마다 `retry.pause` 를 넘긴다. 부르는 쪽
-/// 시험이 실제로 자지 않고 다시 하기를 세는 이음매다.
+/// [`retry_busy`] 와 같되 자는 대신 `pause` 를 부른다 — 다시 하기 전마다 `retry.pause` 를 넘긴다. 시험이
+/// 실제로 자지 않고 다시 하기를 세는 이음매다.
 pub fn retry_busy_with<T>(
     retry: Retry,
     mut attempt: impl FnMut() -> io::Result<T>,

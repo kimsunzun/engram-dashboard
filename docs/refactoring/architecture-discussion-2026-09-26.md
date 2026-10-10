@@ -35,7 +35,7 @@
   | OS 규칙 — `.exe` 붙이기 · 기본 셸 · 홈 디렉터리 · CLI 를 `cmd.exe /c` 로 감싸기 · `PATH` 대소문자 무시 | `discovery/src/lib.rs:981` · `daemon/src/lib.rs:96,146` · `agent/src/manager.rs:75` · `agent/src/backend/claude/mod.rs:1012` · `agent/src/backend/mod.rs:44,136` → 실측 정정 `discovery:987` · `daemon:109` **하나**(CLI — 앱 이름을 가르던 자리는 없었다) · `manager.rs:77` · `claude/mod.rs:1829` · `backend/mod.rs:46-60, 138` |
   | 부르는 쪽에 샌 분기 — Job Object 핸들을 `#[cfg(windows)]` 로 들고 다님 | `agent/src/transport/pty.rs` · `agent/src/transport/stdio.rs` · `agent/src/backend/codex/transport.rs:177` → 실측 정정 `:183` |
 
-  ~~셸(`src-tauri/src`)에는 OS 분기가 없다.~~ → **틀렸다**: 셸 `src-tauri/src/fsutil.rs:107` 에 원자적 쓰기의 운영 분기(`cfg!(windows)`)가 있다 — storage P3 착지 뒤 U-W 가 옮기는 시한부 예외다(ADR-0275 결정 15). PTY 자체는 `portable-pty` 가 이미 감춘다.
+  ~~셸(`src-tauri/src`)에는 OS 분기가 없다.~~ → **틀렸다**: 셸 `src-tauri/src/fsutil.rs:107` 에 원자적 쓰기의 운영 분기(`cfg!(windows)`)가 있다 — storage P3 착지 뒤 U-W 가 옮기는 시한부 예외다(ADR-0275 결정 15). ★→ A U1 이 닫았다(2026-10-10) — 잠김 판정은 platform `fs::is_busy` 로 갔고 `fsutil.rs` 는 U2 에서 base `file` 로 옮겨 사라졌다 · platform 밖 운영 OS 분기 0(ADR-0291)★. PTY 자체는 `portable-pty` 가 이미 감춘다.
 
   ★위 줄 번호 정정은 TRD 1-3 §2-5(실측 `0ef6292`)의 것이고, 표의 자리는 1-3 U0~U7 로 전부 platform 으로 옮겨져 지금은 어느 쪽 번호도 가리키지 않는다★ — 지금 자리 = platform 각 모듈 헤더 · 남은 OS `cfg` 파일 명단 = `ci.yml` 의 `platform gate 4` 스텝(1-3 U8).
 - **남길 것:** 도메인 지식 — 예: claude 설정 폴더는 「홈 디렉터리 찾기」만 옮기고 `.claude` 경로 지식은 backend 에 둔다(CLAUDE.md 「백엔드 확장」). 테스트를 Windows 에서만 돌리는 분기는 테스트 쪽에 남긴다.
@@ -85,7 +85,7 @@
   | `path` | `normalize_spelling(raw)`(감싼 따옴표 한 쌍 제거 · `\`→`/`) | agent `commands.rs:763`(→ 셸) |
 
 - **지킬 것:**
-  - **base 에 무거운 의존을 들이지 않는다** — JSON 직렬화는 호출부에 남기고(base 가 serde 를 안 끌어옴) `file` 은 바이트만 받는다. hex 는 직접 루프(`hex` crate 안 씀). `sha256_hex` 는 `sha2` 때문에 제외.
+  - **base 에 무거운 의존을 들이지 않는다** — JSON 직렬화는 호출부에 남기고(base 가 serde 를 안 끌어옴) `file` 은 바이트만 받는다. ★→ A 에서 바뀌었다: base 가 `serde_json` 을 운영 의존으로 들였다 — `file` 의 읽기 판정이 JSON 문서를 본다 · 구조체 직렬화는 여전히 주인(ADR-0291 결정 3 이 ADR-0269 결정 6 개정)★ hex 는 직접 루프(`hex` crate 안 씀). `sha256_hex` 는 `sha2` 때문에 제외.
   - **입주자끼리 무참조(입주 조건 ③)** — 손상 파일 이름의 시각은 `file` 이 `time` 을 부르지 않고 **인자로 받는다**. CI 의 입주자 상호 참조 게이트(`rg "(crate|super)::(logging|platform)"`)에 새 모듈 이름을 더한다.
   - **오류는 `std::io::Result`** — 자체 오류 타입을 만들지 않는다.
   - `file` 은 세 벌의 동작 차이(임시 파일 이름 · 실패 시 정리 · 폴더 fsync)를 하나로 정한 뒤 옮긴다.
@@ -292,6 +292,8 @@
   - 2-2 discovery 나누기(후보 6, 정지 명령 클라이언트 제외) — 선행 1-3 · 데몬 기동 실측. **→ 착지 2026-10-07**(U1 `a0ec7f4` · U2 `3c9bf33` · U3 `b42e139` · U4 `d2f9822` — crate 삭제 · 정지 명령 클라이언트는 3-2 까지 셸 `daemon_client/stop.rs` 임시 거처 · 세부 = ADR-0282 · step-log).
   - 2-3 engram CLI 독립 패키지(후보 9) — 선행 2-2. **→ 착지 2026-10-08**(U1 `2de9756` — help 를 데몬이 낸다(`/control/help`) · CLI 공통 실패 길 · U2 `58c80a3` — 패키지 `engram-dashboard-cli` · U3 — 게이트 · 문서 · 세부 = ADR-0285 · step-log).
   - 2-4 테스트용 서버 함수를 테스트 전용 플래그 뒤로. **→ 착지 2026-10-08**(세부 = ADR-0286 · step-log).
+- **A. 1단계가 미룬 파일 정리 둘**(원자 쓰기 통일 · 손상 사본 통일 — TRD 1-1 §8 D1~D3 · TRD 1-3 U-W · 덤 = agent 자식 띄우기 세 벌 · 셸 락 오염 복구) **→ 착지 2026-10-10~11**(U1~U8 · U5a · U5b-1 · U5b-2 — 데이터 파일 규칙은 base `file` 하나 · 새 판 파일은 덮지 않음 · agents · presets 저장 거절 = 읽기 전용 모드 · 세부 = ADR-0291 · `../process/S21-crate-boundaries/trd-A-data-file-unification.md` · step-log).
+- **A 다음 순서(2026-10-11)** — ① 패닉 정책 구현(ADR-0288 · ADR-0290 — 브랜치 `v0.3.3/feat/panic-policy`) → ② **우편 주소 = 안쪽 열쇠를 에이전트 id(AgentId)로 · 에이전트가 보고 쓰는 쪽은 이름 그대로**(사용자 요청 2026-10-11 — 구현 목록에 포함 · 현황 조사 = `../../.claude/handoff/attachments/mail-id-survey-2026-10-11.md`: 이름 키 큐 · 이름 바꾸기에 메시징 훅 없음 · 「단일 id 키 안은 검토된 적 없음」) → ③ 아래 3. transport. 순서는 메인 제안이다(사용자 확인 전 — 조사 문서에 적힘). 사용자가 앞서 정한 것은 「패닉 정책을 끝내고 transport 는 새 세션에서」다. 절차 = CLAUDE.md 「개발 스텝」(TRD → 리뷰 → 결정 → 구현).
 - **3. transport**(별도 TRD · 별도 브랜치) — 3-1 `protocol` 정리(후보 8 · 인증 메시지 이전 · 의존 0 게이트) · 3-2 셸 부착(어댑터 · 정지 명령 클라이언트 · 접속 정보 인터페이스) · 3-3 데몬 부착 + net 걷기(후보 7).
 - **4. 안쪽 정리** — 데몬 구조 문제 · command 작은 정리 넷 · agent `transport/` 이름 변경 · agent 쪼갤지. 셸 안쪽은 플러그인과 함께.
 - ~~사이드 작업 — 로그 base 경유 전환(후보 3 · 옛 1-2)~~ — 없어졌다(사용자 2026-10-03 「로그 감싸지 마」 · ADR-0268 재작성).
@@ -305,7 +307,7 @@
 - **작업하며 코드베이스를 훑다 보이는 리팩터링 관련 사항은 그때그때 아래 11절에 적립한다**(사용자 2026-10-02 — 「지나가면서 계속 메모해 놔」). 묻지 않고 적고, 결정이 필요한 것만 묶어 올린다.
 - **1단계는 TRD 로 시작한다**(사용자 2026-10-03) — 착수 = 다음 세션. 구현 갈림길(하나로 합칠 원자적 쓰기 동작 · 시계 트레이트 세부 등)은 선택지로 사용자에게 올린다.
   - **1단계 TRD 완료(2026-10-03~04)** — 1-1 = `../process/S21-crate-boundaries/trd-1-1-base-helpers.md` · 1-3 = `../process/S21-crate-boundaries/trd-1-3-platform-crate.md`. 갈림길은 사용자 위임(2026-10-04 「알아서 진행해」) → 권고안 채택 = ADR-0275. 다음 = 1-1 U1 · 1-3 은 1-1 머지 뒤.
-- **파일 도우미 통일은 storage P3 가 master 에 착지한 뒤에 한다**(사용자 2026-10-03 「알아서」 → 메인이 권고안 적용) — 원자적 쓰기 `write_atomic`(→ platform · 1-3)과 손상 사본 치우기 `set_aside_corrupt` 통일(1-1)이 해당한다. 사유 = 다른 워크트리(wt1)의 storage P3(셸 화면 상태 `shell\state\state.json` · `../process/S21-storage/trd.md`)가 셸 `src-tauri/src/fsutil.rs` · 설정 저장소(`src-tauri/src/settings/`) 자리에 파일 쓰기 코드를 더한다. 1단계의 나머지(text · time · path · sync · testing 도우미 · `write_atomic` 을 뺀 platform 이전)는 먼저 간다.
+- **파일 도우미 통일은 storage P3 가 master 에 착지한 뒤에 한다**(사용자 2026-10-03 「알아서」 → 메인이 권고안 적용) — 원자적 쓰기 `write_atomic`(→ platform · 1-3)과 손상 사본 치우기 `set_aside_corrupt` 통일(1-1)이 해당한다. 사유 = 다른 워크트리(wt1)의 storage P3(셸 화면 상태 `shell\state\state.json` · `../process/S21-storage/trd.md`)가 셸 `src-tauri/src/fsutil.rs` · 설정 저장소(`src-tauri/src/settings/`) 자리에 파일 쓰기 코드를 더한다. 1단계의 나머지(text · time · path · sync · testing 도우미 · `write_atomic` 을 뺀 platform 이전)는 먼저 간다. ★→ TRD A(`../process/S21-crate-boundaries/trd-A-data-file-unification.md`)로 했다(2026-10-10~11 착지) — 거처는 원자 쓰기 · 손상 사본 둘 다 base `file` 이다(platform 아님 · 잠김 판정 · 다시 하기 · 폴더 동기화만 platform `fs` — ADR-0291)★
 
 ---
 

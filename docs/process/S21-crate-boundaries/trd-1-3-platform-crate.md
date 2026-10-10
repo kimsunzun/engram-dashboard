@@ -379,7 +379,7 @@ rg -l "^(?:[^/]|/[^/])*?\b(cfg!?|cfg_attr)\((?:[^)]|\([^()]*\))*?\b(windows|unix
 | **U6** | 단일 인스턴스 열기(N) | platform `fs.rs` · net `{instance.rs, lib.rs 헤더}` · `ci.yml`(net 2a = 5) · CLAUDE.md · `qa.md` · `docs/testing-strategy.md:72` | standard(instance 시험이 Windows 에서 공유 의미를 실물로 잰다) |
 | **U7** | 프로세스 끄기 · WMI 띄우기(D1 · D2) · discovery 의 `windows` 걷기 | platform `{process.rs(kill_tree), spawn.rs + spawn/wmi.rs, Cargo.toml}` · discovery `{lib.rs, Cargo.toml}` | **full** — 앱 실행이 데몬을 WMI 로 띄우고(`ensure_daemon`), 끄기가 `taskkill` 을 탄다. 데몬 기동 실측이 완료 조건(ADR-0271 결정 7 과 같은 잣대) |
 | **U8** | 불변식 게이트(§4-4) · 문서 후속(§6) | `ci.yml` · CLAUDE.md · `qa.md` · base `lib.rs` 헤더 · 메모 §11 | `/qa` 바인딩의 문서 · 설정 범위 + `/review doc`(load-bearing 문서) |
-| U-W (미룸) | 원자적 쓰기 통일 → platform `fs` | 셸 `fsutil.rs`(P3 뒤 모양) · daemon `usage_service/reject_store.rs` · agent `persistence/{mod.rs, presets.rs}` · 셸에 platform 직접 의존 | 트리거 = storage P3 의 master 착지. 「하나로 정할 동작」은 그때 사용자 선택(메모 §10 · ADR-0266 결정 8) |
+| U-W (미룸) | 원자적 쓰기 통일 → platform `fs` | 셸 `fsutil.rs`(P3 뒤 모양) · daemon `usage_service/reject_store.rs` · agent `persistence/{mod.rs, presets.rs}` · 셸에 platform 직접 의존 | 트리거 = storage P3 의 master 착지. 「하나로 정할 동작」은 그때 사용자 선택(메모 §10 · ADR-0266 결정 8) · ★→ TRD A(`trd-A-data-file-unification.md`)가 이어받아 닫았다(2026-10-10~11) — 거처는 platform 이 아니라 base `file`(ADR-0291 결정 1 · 3 이 ADR-0266 결정 8 개정) · platform `fs` 에는 잠김 판정 · 다시 하기 · 폴더 동기화만 · `reject_store.rs` 는 그 전에 ADR-0284 가 걷었다★ |
 
 **순서:** U0 → U1 → U2 → U4 → U3 → U5 → U6 → U7 → U8.
 
@@ -542,7 +542,7 @@ rg -l "^(?:[^/]|/[^/])*?\b(cfg!?|cfg_attr)\((?:[^)]|\([^()]*\))*?\b(windows|unix
 - **agent 예제가 요구하는 최소 `windows` feature** — 미검(`Win32_Security` 포함 여부).
 - **POSIX 갈래는 옮긴 뒤에도 컴파일되지 않는다** — 개발 · CI 가 Windows 뿐이다(ADR-0230 현황). 특히 `TreeRoot` 의 POSIX 갈래는 처음부터 컴파일된 적이 없다.
 - **`feature` 를 안 쪼갤 때의 컴파일 비용** — 미측정 서술(D1 (a) 의 대가). 결정은 이 수치에 기대지 않는다(이유 = 소비자가 사라진다 — §7 D1).
-- **storage P3 착지 시점** — U-W 트리거. P3 이 `fsutil.rs` 에 더한 함수 중 무엇이 「원자적 쓰기」 가족인지는 그때 다시 잰다.
+- **storage P3 착지 시점** — U-W 트리거. P3 이 `fsutil.rs` 에 더한 함수 중 무엇이 「원자적 쓰기」 가족인지는 그때 다시 잰다. ★→ TRD A §2-1 이 쟀고 `fsutil.rs` 는 통째로 base `file` 로 갔다(A U2)★
 - **1-1 형제 TRD 의 base 헤더 최종 글** — 1-1 의 결정 넷(S2 · N1 · C4 · C5)은 이 판에 맞췄다(§5 선행). 다만 1-1 이 이 판과 나란히 고쳐지는 중이라 그 최종 글은 보지 않았다 — U1 의 base 편집은 1-1 머지 뒤의 모양 위에 얹는다.
 - **어댑터의 줄 수(약 100줄)** — 어림이고 재지 않았다(자리는 D3 결정으로 정해졌다 — `agent/src/transport/process_group.rs`).
 - **`LEFTOVER_EXIT_CODE` 의 agent 쪽 자리** — 어댑터의 `impl Pinned` 가 넘길지, 시험 seam 트레이트 `Pinned::terminate_raw` 에 끝 코드 인자를 붙여 leftover 가 넘길지는 U3 이 정한다(지금 트레이트는 인자가 없다 — `process_group.rs:86` · 부르는 곳 `leftover.rs:2231`). platform 으로 옮겨 가는 실프로세스 시험이 지금 그 상수를 단언하므로(`process_group.rs:543 · 804`) platform 쪽에서는 시험 자기 값으로 바꾼다.

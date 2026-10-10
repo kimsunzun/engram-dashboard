@@ -2,6 +2,7 @@
 
 tracking.md 에서 해소·종결된 항목 중 다른 문서·코드가 번호로 가리키는 것만 한 줄씩 둔다. 전문 = git 이력(간소화 전 = `git show 8671e5c:docs/tracking.md`).
 
+- **T-22** 명부 저장이 실패해도 성공으로 보고한다 — 해소: 저장이 `Result` 를 돌려주고 부르는 쪽 있는 변경(버스 · WS)은 저장 거절 = `CONFLICT` · 쓰기 IO 실패 = `INTERNAL` 로 돌아오며 메모리 · 방송은 `Ok` 일 때만이다(내부 변경은 메모리 적용 + dirty) · 2026-10-11 · ADR-0291 결정 6 · 7 · 9 · 크레이트 경계 A U5a · U5b · `docs/research/storage-management-survey-2026-10-02.md` · `docs/process/S21-storage/trd.md:32` 등이 이 번호로 가리킨다(찾는 법 = `rg T-22 docs`) · 실패를 사람 화면에 보이는 것은 T-58
 - **T-46** 실 claude 의존 테스트 6건 — CI 커버리지 0 — 해소: CI 0 을 받아들이고(ci.yml `--skip` 그대로) 로컬은 관측 실패를 통과가 아니라 실패로 낸다 · 예외 = `c1_park_then_spawn_auto_delivers` 는 `#[ignore]`(입력을 주지 않아 핵심 단언이 매번 건너뛰어졌다 — 그 축은 `c2_busy_recipient_parks_*` 가 덮는다) · claude 부재는 스폰 가드가 못 잡고 뒤의 단언이 실패한다 · `ENGRAM_TEST_REQUIRE_CLAUDE` 스위치 폐지 · 2026-10-02 · `crates/engram-dashboard-daemon/tests/control_send.rs` 머리말 · `.github/workflows/ci.yml` 의 같은 주석 · 옛 번호 = T-16
 - **T-24** `ENGRAM_EXE` 미사용 주입 — 해소: 데몬 부팅의 주입을 걷었다(리포 밖 소비자 없음 — 사용자 확인) · 2026-10-02 · step-log 이 번호로 가리킨다 · 형제 `locate_send_exe`(`ENGRAM_CLI_EXE`)는 그대로
 - **T-38** 사용량 한도 슬롯 ADR 열 건 코드 앵커 — 해소: 0246–0251·0253–0256 앵커 추가 · 2026-10-02 · step-log 이 번호로 가리킨다 · `v0.3.3/feat/chat-ux` 기록의 「T-38」은 다른 주제다(= T-44)
