@@ -18,6 +18,7 @@ pub mod control;
 pub mod data_dir;
 #[cfg(feature = "test-harness")]
 pub mod experiment;
+mod file_hooks;
 #[cfg(test)]
 mod log_capture;
 pub mod messaging_host;
