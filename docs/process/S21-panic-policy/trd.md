@@ -1,12 +1,13 @@
 # TRD — 패닉 정책 구현: 가두는 입구 · 훅 종료 · unwind 전환 (S21)
 
-> 상태: **3판(2026-10-11) — 리뷰 2회차(deep · codex BLOCK · 리뷰어 둘 FIX → 잠정 BLOCK) 반영 · 사용자 결정 여섯 묶음 (가)~(바) 대기.** 코드는 한 줄도 바뀌지 않았다. 리뷰 항목별 대조는 §10(3판 §10-1 · 2판 §10-2).
+> 상태: **4판(2026-10-11) — 리뷰 3회차(deep · codex BLOCK · 리뷰어 둘 FIX → 잠정 BLOCK) 반영 · 새 사용자 결정 없음(전부 설계 · 문서 정정) · 사용자 결정 여섯 묶음 (가)~(바) 대기.** 코드는 한 줄도 바뀌지 않았다. 리뷰 항목별 대조는 §10(4판 §10-1 · 3판 §10-2 · 2판 §10-3).
+> **4판 요지:** ① 셸도 훅 설치 직후 **따로 띄우는 감시 스레드**(데몬과 같은 모양 — 깨우기는 `app.exit(101)` 하나만 · tauri `AppHandle::exit` 의 실패 갈래가 부르는 스레드에서 로그 · 락 · `exit` 를 돌아 같은 스레드의 시한은 상한이 아니다) ② 감시의 끝내기 = platform 새 도우미 `process::terminate_self`(가안 — Windows `TerminateProcess`) · 꼬리 · M6 은 `process::exit(101)` 그대로 ③ 훅 순서 = **할당 없는 판정 → (셸) 표지 → 깃발 → 사유 문장 → 로그** · 꼬리는 `exit` 앞에서 사유를 최대 1초(가안) 기다린다 ④ 감시는 `cfg(panic = "unwind")` 빌드만 ⑤ (다) 거절: 제어 HTTP 는 **제어 라우트만**(MCP 는 도구 감싸개만) · WS 입구는 정리 꼴 명령을 거절하지 않는다 ⑥ M21 은 U4 에서 가둠 · 버림만, 사유 기록 · 당김은 U5 ⑦ M22 = 가드 대신 맨 `catch_unwind` → `Dropped` → `resume_unwind` ⑧ Amends 를 ADR 쌍마다 한 줄로(`/adr link` 한계) · ADR-0290 「영향」 셋째 줄 · 결정 3 · 문장 정정 여럿.
 > **3판 요지:** ① 새 사용자 결정 **(바) 패닉 종료의 시한** — 권고 = 감시(데몬 = 훅 설치 때 띄우는 전용 스레드 · 셸 = 깨우기 스레드에 시한 — M19) ② (다) 거절을 **가장 바깥 입구 셋**으로 좁히고, 거절이 ADR-0290 결정 1 · ADR-0288 결정 3 을 일부 되돌린다는 것을 묻는 말에 넣었다 ③ 걸쇠를 주입받는 seam(시험이 프로세스 전역을 뒤집지 않게 — M20) ④ kill 길의 상태 싱크 가둠(M21) · `send_input` 스코프 가드(M22) · `run()` 지역값 drop(M23) ⑤ 셸 훅은 `MAIN_ESCALATED` 를 당기기 **앞**에 · PTY 감시는 사유를 자식 끄기 **앞**에 ⑥ U4 를 U2 **뒤**로(의존).
 > **2판 요지:** ① 락 오염 정책을 메인 결정에서 **사용자 결정 (가)** 로 올렸다 — 1판의 P1 은 codex 통로처럼 일부러 범위 안에서 되찾던 자리를 전부 데몬 재시작으로 바꾼다 ② 1판이 놓친 **「표시 안에서 공유 상태를 여러 걸음에 걸쳐 바꾸는 구간」**(활성화 등록 창의 좀비 세션 등)을 (나)로 ③ 종료를 당긴 뒤 꼬리가 새 명령을 계속 받는 창을 (다)로 ④ net 은 포장 포트를 걷고 **net 자기 루프 = 3층** ⑤ 깨우기는 unpark 를 빼고 폴링으로 · 부팅 · 꼬리 패닉은 `main.rs` 최상위 포착 → `exit(101)` ⑥ U8 을 갈라 의미 재감사(U8a)를 프로필 전환(U7) **앞**으로.
 > **결정 틀(재론하지 않는다):** ADR-0288 · ADR-0290(ADR-0289 는 통째 폐기) + 사용자 결정 2026-10-10 「unwind 범위 = 워크스페이스 전체 + 셸에도 같은 훅」. ★세 ADR 은 브랜치 `origin/v0.3.3/feat/panic-policy` 에 있고 이 브랜치(`v0.3.3/refactor/crate-boundaries`)에는 아직 없다★ — 이 TRD 를 커밋하기 전에 그 브랜치를 들이거나 함께 머지해야 링크가 선다. 구현 ADR 번호 = **ADR-0292**(예약 · 사용자 결정 2026-10-10).
 > **이 TRD 가 대체하는 옛 기록:** TRD `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 프로필의 `panic = "abort"` 를 유지한다」(옛 사용자 결정). 그 절의 **규약**(명령 핸들러는 값으로 실패한다)은 그대로 살고, **프로필 결정과 그 귀결**(「릴리즈에서는 패닉 그물이 서지 않는다 — 그것이 의도다」)만 대체된다(§8-2).
 > **배치 근거:** `docs/README.md` 「새 기능 **설계 착수** → `process/SN-name/`」. 경계 리팩터링(`S21-crate-boundaries/`)과 다른 주제다 — TRD A §0 · §1-3 이 「패닉 대 되찾기 정책 — 별 주제」로 뺐다. 스텝 번호는 `docs/process/step-log.md` 의 마지막 스텝 S21 을 잇는다(새 스텝은 사용자 결정이라 올리지 않는다).
-> **표기:** 「실측」 = 트리 `2c25cdd`(이 브랜치 HEAD — 1판이 잰 `18e11e8` 뒤 코드 변경은 platform `fs.rs` 두 줄뿐이고 이 TRD 는 그 자리를 인용하지 않는다. 2판의 `파일:줄` 은 리뷰가 든 자리까지 다시 쟀다 · 3판이 더한 `파일:줄` 은 `b1abbb9`(`2c25cdd` 뒤 코드 변경 0)에서 쟀다) · 「사용자 결정」 = 사용자가 고를 것(겉으로 보이는 동작) · 「메인 결정(관행)」 = 안 보이는 내부라 메인이 정하고 보고할 것 · 「권고」 = 이 TRD 의 안(채택 전) · 「가안」 = 이름 · 모양 미확정 · 「미검」 = 돌려 보거나 원문과 대조하지 않은 것.
+> **표기:** 「실측」 = 트리 `2c25cdd`(이 브랜치 HEAD — 1판이 잰 `18e11e8` 뒤 코드 변경은 platform `fs.rs` 두 줄뿐이고 이 TRD 는 그 자리를 인용하지 않는다. 2판의 `파일:줄` 은 리뷰가 든 자리까지 다시 쟀다 · 3판이 더한 `파일:줄` 은 `b1abbb9`(`2c25cdd` 뒤 코드 변경 0)에서 · 4판이 더한 것은 `d73aaceb`(코드 변경 0)와 레지스트리의 tauri 2.11.3 원문에서 쟀다) · 「사용자 결정」 = 사용자가 고를 것(겉으로 보이는 동작) · 「메인 결정(관행)」 = 안 보이는 내부라 메인이 정하고 보고할 것 · 「권고」 = 이 TRD 의 안(채택 전) · 「가안」 = 이름 · 모양 미확정 · 「미검」 = 돌려 보거나 원문과 대조하지 않은 것.
 > 앵커: ADR-0288 · ADR-0290 · ADR-0001(kill 2동사) · ADR-0005(terminal 전이는 펌프 단독) · ADR-0006(락 순서) · ADR-0019(reaper 단일 소비자 · `shutting_down`) · ADR-0110(메시징 커널 무의존) · ADR-0127(턴 관측 정리 = 두 지점) · ADR-0129(net 경계) · ADR-0142(메시징 배달 · `in_flight_targets`) · ADR-0159(버스 패닉 답 = `INTERNAL` / `OUTCOME_UNKNOWN`) · ADR-0266 결정 2(platform 은 OS 의존 코드만) · ADR-0269(base 입주 조건) · ADR-0275 결정 1(base `sync` = 경고 없이 되찾기) · 조사 `docs/research/panic-policy-peers-2026-10-08.md` · `docs/research/stop-writes-after-internal-error-2026-10-10.md`(둘 다 패닉 정책 브랜치).
 
 ---
@@ -21,13 +22,14 @@
      동기 contain · 비동기 Contained(poll 마다 깊이 · 가드 안에서 drop) · escalating(구간 안 깊이 0) ·
      is_poison_panic · 종료 걸쇠(SeqCst 깃발 + 첫 사유 + 첫 오염 자리). 「무엇을 종료로 올리나」 정책은 데몬 · 셸 조립부.
 
-③ 훅(데몬 · 셸): 표시 밖이거나 락 오염 패닉이면 사유를 적고 → 깃발을 세우고(락 · unpark 없음) → 로그(재진입 가드).
-     깨우기는 폴링 — 데몬 = accept 루프 select! 의 interval 팔이 깃발을 보고 기존 종료 watch 에 true(StopDaemon 과
-     같은 신호) · 셸 = 깨우기 스레드가 park_timeout 고리로 보고 app.exit.
+③ 훅(데몬 · 셸): 할당 없이 판정(표시 밖이거나 락 오염 패닉인가) → [셸 주 스레드면 표지] → 깃발(락 · unpark 없음)
+     → 첫 사유 문장 → 로그(재진입 가드). 깨우기는 폴링 — 데몬 = accept 루프 select! 의 interval 팔이 깃발을 보고
+     기존 종료 watch 에 true(StopDaemon 과 같은 신호) · 셸 = 깨우기 스레드가 park_timeout 고리로 보고 app.exit.
 
-④ 데몬 끝: 기존 꼬리(shutdown_all → flush → MCP) → 당겨졌으면 process::exit(101) — 런타임 drop 의 무한 대기
-     (blocking 태스크)를 건너뛰는 load-bearing 한 줄. 부팅 · 꼬리 자체의 패닉은 main.rs 최상위 포착 → exit(101).
-     패닉 종료가 시한 안에 안 끝나면 감시가 exit(101) — (바) · 가안 데몬 30초 · 셸 5초.
+④ 데몬 끝: 기존 꼬리(shutdown_all → flush → MCP) → 사유를 최대 1초 기다려 로그 → 당겨졌으면 process::exit(101)
+     — 런타임 drop 의 무한 대기(blocking 태스크)를 건너뛰는 load-bearing 한 줄. 부팅 · 꼬리 자체의 패닉은 main.rs
+     최상위 포착 → exit(101). 패닉 종료가 시한 안에 안 끝나면 훅 설치 직후 띄운 감시 스레드(데몬 · 셸 각 하나)가
+     platform 즉시 끝내기(TerminateProcess · 코드 101)로 끝낸다 — (바) · 가안 데몬 30초 · 셸 5초.
 
 ⑤ 1층 = 데몬 처리기 몸통(WS 처리기 · 명령 태스크 · blocking · 제어 HTTP · MCP 도구 몸통). net 자기 루프 · 연결 수명
      · rmcp · hyper 내부 = 3층(→ 정상 종료). 2층 = (가)의 답. 여러 걸음 공유 변경 구간 = (나)의 답.
@@ -45,9 +47,9 @@
 | 3 | **(다) 종료를 당긴 뒤 새 일** — 꼬리가 도는 몇 초~수십 초 | **새 일 거절**(가장 바깥 입구 셋 — ADR-0290 결정 1 · ADR-0288 결정 3 을 일부 되돌린다) | 없음 |
 | 4 | **(라) 셸 패닉** | **S1a 셸만 끈다 · 셸 안 가둠 없음**(버스 명령 패닉은 `INTERNAL` 답 · 창 닫힘 **둘 다**) | (S1a′ 면 셸에도 컴파일 가드 + 셸 오염 정책) |
 | 5 | **(마) 1 · 2층 고지 모양** | **N1a 오류 답 · 연결 유지 + N2a 지금 표면** | 없음 |
-| 6 | **(바) 패닉 종료가 멎을 때의 시한** — 되감기가 들이는 멎음(지금 abort 엔 없다) | **감시 시한 — 데몬 · 셸 둘 다**(가안 30초 · 5초 → `exit(101)`) | U5 · U6 크기(몇 줄) |
+| 6 | **(바) 패닉 종료가 멎을 때의 시한** — 되감기가 들이는 멎음(지금 abort 엔 없다) | **감시 시한 — 데몬 · 셸 둘 다**(가안 30초 · 5초 → 즉시 끝내기 · 코드 101) | U1(platform 도우미) · U5 · U6 크기(몇 줄) |
 
-**메인 결정(§3-2 — 권고 기본값을 적었다):** 표시 모양 · 집 · 훅 신호(폴링) · 로그 재진입 · 사유 기록 · net(N1) · 메인 future · 종료 코드 · 시험 방아쇠 · 회귀망 · 컴파일 가드 · 크기 · T-52 · 종료 경로 오염 내성 · 스폰 경로 스코프 가드 · `Contained` drop · 관찰자 계약 · 셸 끝내기 절차 · abort 전제 코드 · 감시 시한 모양(M19 — (바)=감시일 때) · 걸쇠 주입 seam · kill 길 상태 싱크 · `send_input` 스코프 가드 · `run()` 지역값 drop.
+**메인 결정(§3-2 — 권고 기본값을 적었다):** 표시 모양 · 집 · 훅 신호(폴링) · 로그 재진입 · 사유 기록 · net(N1) · 메인 future · 종료 코드 · 시험 방아쇠 · 회귀망 · 컴파일 가드 · 크기 · T-52 · 종료 경로 오염 내성 · 스폰 경로 스코프 가드 · `Contained` drop · 관찰자 계약 · 셸 끝내기 절차 · abort 전제 코드 · 감시 시한 모양(M19 — (바)=감시일 때) · 걸쇠 주입 seam · kill 길 상태 싱크 · `send_input` 패닉 포착 · `run()` 지역값 drop.
 
 **지금 하지 않는 것(ADR-0288 이 미룬 장치 그대로):** 종료 시간 제한(StopDaemon 꼬리의 무한 대기 포함 — §4-11. 패닉 종료의 시한만 (바)가 묻는다) · 셸의 사유 고지 · 다음 부팅의 패닉 표시 · 셸 상자 · 셸 자동 재기동 · 에이전트 PTY 를 데몬 밖 프로세스로(거부됨). 그리고 이 TRD 가 미루는 것: 정밀한 「공유 락을 쥔 채 났나」 추적(P3).
 
@@ -201,7 +203,7 @@
 
 - **권고 = P2 + B1′** — 까닭: ① 사용자 방향 「패닉 종료 최소화」(ADR-0288) ② ADR-0288 의 가름이 글자 그대로 「에이전트 하나 대 공유 상태」다 — P2 는 그 가름을 락 단위로 옮긴 것이다 ③ P1 은 2층을 codex 에서 사실상 이름뿐으로 만든다(위 근거). B1′ 은 감시 · stderr 의 결말을 가드 하나로 설계할 수 있어 싸고, codex 라이터는 「통로가 자식을 끈다」 길을 새로 짜야 해서 B2 로 미룬다(트리거 = 로그의 「표시 밖 패닉」 줄에 codex 라이터가 실제로 나올 때).
 - **P2 의 정직한 대가** — 「그 에이전트는 계속 돈다」는 ADR-0288 결정 2(「그 에이전트만 **정리**」)보다 약하다. 정리하려면 B2 식 길이 요청 경로에도 필요하다. 채택하면 ADR-0292 가 이 차이를 적는다(§8-1).
-- **† 모든 안의 공통 대가 — 유령 대기 입력** — `send_input` 이 `emit(Queued)` 를 낸 뒤(`session.rs:303-311`) 가둔 패닉이 나면 `Dropped` 가 안 나가 대기 입력이 유령으로 남는다 → 대기 목록 표(`inputs_pending`)가 그 에이전트를 「바쁨」으로 세우고 그 칸엔 30분 fail-open 이 없다(사용자 결정 N8 · N11) → **그 에이전트로 가는 우편이 ✕ 나 데몬 재시작 때까지 멈춘다.** 원인이 가둔 패닉 자체라 오염 축의 어느 안도 막지 못한다. 설계 가드(`send_input` 스코프 가드 — 되감기 때 replay 길이 쓸 수 있으면 `Dropped` 를 낸다 · §4-7 M22)가 좁히고, 그 길도 못 쓰면 잔여(§4-11)다.
+- **† 모든 안의 공통 대가 — 유령 대기 입력** — `send_input` 이 `emit(Queued)` 를 낸 뒤(`session.rs:303-311`) 가둔 패닉이 나면 `Dropped` 가 안 나가 대기 입력이 유령으로 남는다 → 대기 목록 표(`inputs_pending`)가 그 에이전트를 「바쁨」으로 세우고 그 칸엔 30분 fail-open 이 없다(사용자 결정 N8 · N11) → **그 에이전트로 가는 우편이 ✕ 나 데몬 재시작 때까지 멈춘다.** 원인이 가둔 패닉 자체라 오염 축의 어느 안도 막지 못한다. 설계 포착(`send_input` 을 맨 `catch_unwind` 로 감싸 `Dropped` 를 낸 뒤 다시 풀어 보낸다 · §4-7 M22 · 4판)이 좁히고, 못 찾은 같은 꼴 자리는 잔여(§4-11)다.
 - **묶임** — 이 답이 U2 · U4 의 크기를 정하고(P2 = 기계 치환 ≈ 100곳 · B2 = U4b 생김), (마)의 2층 표면이 B1′ · B2 에서 늘어난다. (나) · (다) · (라) · (바)의 선택지는 바뀌지 않는다.
 
 #### (나) 여러 걸음 공유 변경 구간 — 「에이전트 시작 · 수거 · kill · 연결 붙이기 · 떼기 도중 버그」
@@ -232,11 +234,11 @@
 | 안 | 사용자가 겪는 것 | 비용 |
 |---|---|---|
 | 받아들임 | 그 창의 명령은 평소처럼 처리 · 저장된다 | 0 |
-| **새 일 거절(권고)** | 깃발이 선 뒤 들어온 새 명령 · 조회 · 도구 호출은 오류 답(「daemon is shutting down after an internal error」 — 가안 · 영어 사유 규칙) · 이미 돌던 것은 끝까지 간다 | 작음 — 가장 바깥 입구 셋(아래)에서 깃발 확인 ≈ 20~30줄 + 시험 3(입구마다 하나) |
+| **새 일 거절(권고)** | 깃발이 선 뒤 들어온 새 명령 · 조회 · 도구 호출은 오류 답(「daemon is shutting down after an internal error」 — 가안 · 영어 사유 규칙) · 이미 돌던 것은 끝까지 간다 | 작음 — 가장 바깥 입구 셋(아래)에서 깃발 확인 ≈ 20~30줄 + 시험 5(입구마다 하나 · 거절 안 됨 둘 — 정리 꼴 명령 · MCP 세션 요청 · 4판) |
 
-- ★**거절은 정해진 틀을 일부 되돌린다 — 그래서 사용자 결정이다**★ — ① ADR-0290 결정 1 「저장 멈춤은 하지 않는다(프로세스가 끝나므로)」를 꼬리 창에 한해 되돌린다(새 일 거절 = 그 창의 저장 멈춤) ② ADR-0288 결정 3 「이 단계를 위한 전용 장치는 만들지 않는다」에 패닉 종료에만 쓰는 확인 장치 하나를 더한다. 거절을 고르면 ADR-0292 가 두 ADR 을 Amends 로 적는다(§8-1 · §8-2 — 조건부). 받아들임은 두 ADR 그대로이고, 대가는 위 창이 열린 채 남는 것이다.
-- **거절 범위 = 가장 바깥 입구만** — WS 명령 해석 직후(`on_text` — 옛 명령 · 버스 명령) · 제어 HTTP 의 가장 바깥 axum `Contained` 층(§4-6 — `agents.json` 을 쓰는 `agent.*` 동사도 이 길로 든다) · MCP 도구 감싸개. **안쪽 홉(배달 태스크 → 1단계 blocking 등) · `on_connect` · `on_disconnect` · Close · 정리 걸음에는 두지 않는다** — 이미 받은 일을 가운데서 끊거나 정리를 막는다.
-- **권고 거절** — 종료의 존재 이유(반쯤 바뀐 메모리가 디스크에 실리지 않게)를 지키는 가장 싼 길이다. 위 두 ADR 을 일부 되돌리는 값이 그보다 크다고 보면 받아들임이 맞다. StopDaemon 경로는 건드리지 않는다(그 경로는 `shutdown_all` 을 먼저 끝내고 신호를 보낸다 — 패닉 깃발만 본다).
+- ★**거절은 정해진 틀을 일부 되돌린다 — 그래서 사용자 결정이다**★ — ① ADR-0290 결정 1 「저장 멈춤은 하지 않는다(프로세스가 끝나므로)」를 꼬리 창에 한해 되돌린다(새 일 거절 = 그 창의 저장 멈춤) ② ADR-0288 결정 3 「이 단계를 위한 전용 장치는 만들지 않는다」에 패닉 종료에만 쓰는 확인 장치 하나를 더한다. 거절을 고르면 ADR-0292 가 두 ADR 을 Amends 로 적는다(§8-1 · §8-2 — 조건부 · (바)=감시도 ADR-0288 결정 3 을 건드리므로 그때는 한 줄로 합친다). 받아들임은 두 ADR 그대로이고, 대가는 위 창이 열린 채 남는 것이다.
+- **거절 범위 = 가장 바깥 입구만** — WS 명령 해석 직후(`on_text` — 옛 명령 · 버스 명령 · ★정리 꼴 명령(StopDaemon · 구독 해지 · 뷰포트 놓기 꼴 — 목록은 U3 가 명령 어휘에서 고른다)은 거절하지 않는다★) · 제어 HTTP 의 **제어 라우트만**(`ControlRoute::ALL` — `agents.json` 을 쓰는 `agent.*` 동사도 이 길로 든다 · ★앱 전체가 아니다★: MCP 의 `nest_service`(`mcp_server.rs:1372`)도 같은 `.layer`(`:1401-1407`) 아래라 앱 전체에 두면 rmcp 세션 DELETE · SSE 끊기까지 거절한다 · §4-6) · MCP 도구 감싸개(MCP 의 거절은 여기 한 곳 — N1a 도구 오류 결과). **안쪽 홉(배달 태스크 → 1단계 blocking 등) · `on_connect` · `on_disconnect` · Close · 정리 걸음에는 두지 않는다** — 이미 받은 일을 가운데서 끊거나 정리를 막는다.
+- **권고 거절** — 종료의 존재 이유(반쯤 바뀐 메모리가 디스크에 실리지 않게)를 지키는 가장 싼 길이다. 위 두 ADR 을 일부 되돌리는 값이 그보다 크다고 보면 받아들임이 맞다. StopDaemon 은 WS 입구의 허용 목록이라 깃발 뒤에도 거절되지 않는다(그 경로는 `shutdown_all` 을 먼저 끝내고 신호를 보낸다).
 
 #### (라) 셸 패닉
 
@@ -283,28 +285,28 @@
 | 안 | 사용자가 겪는 것 | 비용 |
 |---|---|---|
 | 미룸 유지 | (1)~(4)가 나면 데몬 · 셸이 사람이 프로세스를 끌 때까지 멎은 채 남는다 — §4-11 에 받는 잔여로 적고 서명받는다 | 0 |
-| 셸 깨우기 시한만 | 셸의 (1) · (2)는 시한 뒤 끝난다(코드 101). 데몬의 (3) · (4)는 남는다 | 작음 |
-| **감시 시한 — 데몬 · 셸 둘 다(권고)** | 깃발이 선 뒤 시한 안에 안 끝나면 그 자리에서 끝난다(코드 101) — 가안 **데몬 30초**(꼬리 = 병렬 `join_pump` 5초 + flush 5초 × 2 + MCP 를 덮는다) · **셸 5초**. 시한 안에 끝나면 지금 설계 그대로 · 시한으로 끝나도 `Final` 은 안 쓴다 · StopDaemon · 트레이 「데몬 끄기」는 건드리지 않는다(깃발이 선 때만 돈다) | 작음 — 데몬 · 셸 각 몇 줄 + 시험 1 |
+| 셸 시한만 | 셸의 (1) · (2)는 시한 뒤 끝난다(코드 101). 데몬의 (3) · (4)는 남는다 | 작음 |
+| **감시 시한 — 데몬 · 셸 둘 다(권고)** | 깃발이 선 뒤 시한 안에 안 끝나면 그 자리에서 끝난다(코드 101) — 가안 **데몬 30초**(꼬리 = 병렬 `join_pump` 5초 + flush 5초 × 2 + MCP 를 덮는다) · **셸 5초**. 시한 안에 끝나면 지금 설계 그대로 · 시한으로 끝나도 `Final` 은 안 쓴다 · 깃발 없는 StopDaemon · 트레이 「데몬 끄기」에는 서지 않는다 — ★단 그 꼬리 도중 깃발이 서면(관찰자가 앞선 오염을 되찾음 · 표시 밖 정리 패닉 · M21) 그 끄기도 30초 상한 · 코드 101 을 받는다(같은 동작 — 깃발이 서면 어느 종료든 같다)★ | 작음 — 데몬 · 셸 각 몇 줄 + platform 도우미 하나 + 시험 1 |
 
-- **모양(권고)** — 깨우기가 깃발을 본 뒤 시한을 기다리고, 아직 살아 있으면 `process::exit(101)`. 셸 = 기존 깨우기 스레드(§4-9). 데몬은 깨우기가 accept 루프의 interval 팔이라 감시 자리는 §4-4 가 정한다(가안 = 따로 띄운 스레드 — 런타임이 로그 락에 함께 막혀도 돈다). 감시는 끄기 전에 로그를 쓰지 않는다 — (1) · (3)의 멎음이 로그 락이다. `exit` 자체가 멎은 스레드에 안 막히는지는 미검.
+- **모양(권고)** — 데몬 · 셸 모두 **훅 설치 직후 따로 띄우는 감시 스레드** 하나가 깃발을 본 뒤 시한을 기다리고, 아직 살아 있으면 platform 즉시 끝내기(가안 `process::terminate_self(101)` — Windows `TerminateProcess` · M19 · §4-4)를 부른다. 깨우기(데몬 = accept 루프 interval 팔 · 셸 = 깨우기 스레드)와 감시는 다른 스레드다 — ★셸 깨우기에 시한을 얹던 3판 모양은 상한이 아니었다★: tauri 2.11.3 `AppHandle::exit`(`app.rs:574-579`)는 `request_exit` 실패 갈래에서 `log::error!`(log → tracing 다리 — `base/src/logging/mod.rs:422` 의 `try_init`) → `cleanup_before_exit()`(`tray.icons.lock().unwrap()` `app.rs:1110`) → `process::exit` 를 **부르는 스레드에서** 돈다. 감시는 로그 · 락을 쓰지 않는다 — (1) · (3)의 멎음이 로그 락이다. `process::exit` 를 쓰지 않는 까닭 = §9-12. 감시는 `cfg(panic = "unwind")` 빌드에서만 띄운다(abort 빌드는 패닉 = 즉사라 할 일이 없다).
 - **권고 감시 시한 둘 다** — 이 TRD 의 원칙 「어느 단위 뒤에 멈춰도 … 배포판 동작이 지금보다 나빠지지 않는다」(§0 ⑥)를 지키는 길이다. 멎음은 지금의 즉사보다 나쁘다 — 즉사는 끝나기라도 하지만 멎은 프로세스는 자리(단일 인스턴스 잠금 · `daemon.json` · 셸 창)를 쥔 채 남는다. 셸만은 데몬 쪽 (3) · (4)를 남긴다.
-- **채택하면** ADR-0292 가 ADR-0288 의 미룬 장치(위 「근거」 · 「영향」 두 줄 — 종료 시간 제한)도 Amends 로 적는다(§8-1 — 조건부). 미룸 유지면 (1)~(4)가 §4-11 의 서명받을 잔여다.
+- **채택하면** ADR-0292 가 ADR-0288 의 미룬 장치(위 「근거」 · 「영향」 두 줄 — 종료 시간 제한)와 **결정 3**(「이 단계를 위한 전용 장치는 만들지 않는다」 — 감시는 정상 종료 단계에 쓰는 전용 장치다)도 Amends 로 적는다(§8-1 — 조건부 · (다)=거절의 결정 3 줄과 한 줄로 합친다). 미룸 유지면 (1)~(4)가 §4-11 의 서명받을 잔여다.
 - **묶임** — 없음. 앞 묶음의 답이 이 선택지를 바꾸지 않는다.
 
 ### 3-2. 메인 결정(관행) — 권고 기본값
 
-> 번호는 1판을 잇는다 — 1판 M2(락 오염 정책)는 사용자 결정 (가)로 올라가 비었고, M14~M18 은 2판에서 · M19~M23 은 3판(리뷰 2회차)에서 새로 섰다.
+> 번호는 1판을 잇는다 — 1판 M2(락 오염 정책)는 사용자 결정 (가)로 올라가 비었고, M14~M18 은 2판에서 · M19~M23 은 3판(리뷰 2회차)에서 새로 섰다. 4판(리뷰 3회차)은 새 번호 없이 M4 · M9 · M18~M23 을 고쳤다.
 
 | id | 거리 | 기본값(권고) · 까닭 |
 |---|---|---|
 | **M1** | 표시 모양 · 집 | **base 새 입주자 `panic`(가안)** — 스레드 지역 깊이(`thread_local!` + `const { Cell::new(0) }` — const 초기화 · Drop 없는 칸은 해체되지 않아 `with` 가 실패하지 않는다. `try_with` 를 써도 무해하나 그 실패 갈래는 죽은 길이다 · 3판 정정) + `contain` · `Contained` · `escalating` · `payload_message` · `is_poison_panic` · 종료 걸쇠. ★**정책 함수(`verdict` — 「오염이면 표시와 무관하게 올린다」)는 base 에 두지 않는다**★ — 제품 정책이라 ADR-0269 입주 조건 ②(도메인 지식 0)와 긴장한다. base 는 원시만, 조립(정책)은 데몬 · 셸이 한다(각 ≈ 15줄 · 사본 둘은 각자 시험). 집 대안 — platform(OS 의존이 아니라 ADR-0266 결정 2 위반) · command(버스 도구 정체성 밖) · crate 마다 사본(입주 조건 ① 이 막으려는 것) |
 | **M3** | 훅 신호 · 깨우기 | **깃발 = `AtomicBool` 하나에 `store(true, SeqCst)` — unpark 없음.** 깨우기 = 폴링: 데몬은 accept 루프 `select!` 에 `interval`(가안 200ms) 팔 하나 — 깃발이면 `shutdown_tx.send(true)`(`AgentConnections` 로 옮기기(`lib.rs:383`) 전에 뜬 사본 — 그 watch 의 운영 구독자는 루프 자신뿐이라 「같은 신호」를 한 길로 두는 몫 · §4-4) + 루프 탈출 · 셸은 깨우기 스레드가 `park_timeout(200ms)` 고리로 깃발을 본다. 까닭: 1판의 「깃발 쓰기 → 대기자 읽기 / 대기자 등록 → 깃발 읽기」는 SeqCst 울타리 없이는 store-buffering 으로 깨움을 잃는다 · `Thread::unpark` 는 OS 호출이라 훅 · 관찰자(임의의 락을 쥔 채 돈다)에서 부르면 leftover 잎 락 불변식(OS 호출 금지 — CLAUDE.md 핵심 불변식)을 깬다 · 깨우기 스레드 기동 실패 · 둘째 대기 · 스레드 죽음 = 「당겼는데 안 끝남」. 거부: watch 를 훅이 직접 `send`(내부 RwLock — 패닉한 스레드가 `watch::Ref` 를 쥐었으면 자기 교착) · tokio `Notify`(셸에 못 씀) |
-| **M4** | 로그 재진입 · 사유 기록 | **L1** — `FileSink::make_writer`(`logging/mod.rs:127` · 잠금 `:130` · 쥔 가드 `FileSinkWriter::Live` `:119`)가 스레드 지역 「파일 쓰는 중」 표지(const `Cell` · `try_with`)를 보고 그 스레드의 재진입 쓰기를 버린다. ★1판의 「잃는 것 = 쓰기 도중 패닉한 그 줄 하나」는 틀렸다 — 잃는 것은 **재진입한 훅 자신의 보고 줄**이다★ → 그래서 **사유를 따로 남긴다**: 훅은 올리는 첫 패닉의 「스레드 · 위치 · 문장」을 걸쇠의 `OnceLock<String>` 에 **깃발보다 먼저** 적고, 데몬 꼬리 · 셸 깨우기가 그것을 로그한다(에이전트 0 이면 꼬리가 빨라 패닉한 스레드가 로그를 쓰기 전에 `exit` 할 수 있다). 오염 관찰자는 `#[track_caller]` 로 받은 `&'static Location` 을 `AtomicPtr` 에 compare_exchange(첫 것만 · 할당 · 락 · 로그 없음)로 적는다. tracing `EnvFilter` 도 내부 `RwLock` 둘을 잡는다(`tracing-subscriber 0.3.23 filter/env/mod.rs:203-204` · 오염은 `try_lock!` 이 삼킨다) — 깃발을 로그보다 먼저 세우는 순서가 그 자리의 교착도 덮는다 |
+| **M4** | 로그 재진입 · 사유 기록 | **L1** — `FileSink::make_writer`(`logging/mod.rs:127` · 잠금 `:130` · 쥔 가드 `FileSinkWriter::Live` `:119`)가 스레드 지역 「파일 쓰는 중」 표지(const `Cell` · `try_with`)를 보고 그 스레드의 재진입 쓰기를 버린다. ★1판의 「잃는 것 = 쓰기 도중 패닉한 그 줄 하나」는 틀렸다 — 잃는 것은 **재진입한 훅 자신의 보고 줄**이다★ → 그래서 **사유를 따로 남긴다**: 훅은 올리는 첫 패닉의 「스레드 · 위치 · 문장」을 걸쇠의 `OnceLock<String>` 에 **깃발 뒤에** 적고(4판 — 판정 · 깃발까지는 훅이 할당하지 않는다 · §4-3), 데몬 꼬리 · 셸 `Exit` 패닉 갈래가 그것을 로그한다. 1회차의 걱정(에이전트 0 이면 꼬리가 빨라 패닉한 스레드가 사유를 적기 전에 `exit` 한다)은 **꼬리가 마지막 `exit` 앞에서 사유 칸을 최대 1초(가안 · 폴링) 기다리는 것**으로 받는다 — 그래도 비면 있는 것만 로그한다(받는 진단 손실). 오염 관찰자는 `#[track_caller]` 로 받은 `&'static Location` 을 `AtomicPtr` 에 compare_exchange(첫 것만 · 할당 · 락 · 로그 없음)로 적는다. tracing `EnvFilter` 도 내부 `RwLock` 둘을 잡는다(`tracing-subscriber 0.3.23 filter/env/mod.rs:203-204` · 오염은 `try_lock!` 이 삼킨다) — 깃발을 로그보다 먼저 세우는 순서가 그 자리의 교착도 덮는다 |
 | **M5** | net | **N1 — net 은 손대지 않는다.** 1층 표시는 데몬 처리기 몸통에만 세우고(`on_connect` · `on_text` · `on_binary` · `on_inbound_saturated` · `on_disconnect`), net 의 하위 태스크 넷 · `handle_connection` · 연결 태스크(`lib.rs:395`)는 **표시 밖(3층 → 정상 종료)**. 까닭: 1판 N3(하위 태스크 포장)은 패닉을 「태스크 끝남」으로 바꾸는데 정리 select 가 dispatch · write 만 기다려(`ws.rs:541-554`) bypass 가 죽으면 연결이 반쯤 산다 · `handle_connection` 몸통 패닉은 하위 태스크를 떼어 내고 `on_disconnect` · `unregister` 를 건너뛴다(§2-4) — 연결 태스크에 표시를 세우면 그 반쪽 상태를 가둬 버린다. 대안(감독 닫기 — 포장이 패닉을 따로 알리고 감독이 그 연결을 닫음 + abort-on-drop 핸들 + select 가 넷 다 기다림)은 net 에 새 구조가 필요하다 — net 자기 루프는 작고 안정된 공유 기반 코드라 그 버그를 재시작으로 둔다. **대가: ADR-0288 결정 1 의 「연결 하나」가 「데몬 처리기 몸통」으로 좁아지고 ADR-0290 영향의 「연결 태스크 표시」를 따르지 않는다 → ADR-0292 가 Amends 로 적는다(§8-1).** net 의존 상한 · 심볼 · 게이트 무변경 |
 | **M6** | 메인 future · 부팅 | **둘 다 잡는다.** ① 데몬 `main.rs` 가 `run()` future 전체를 `futures_util::FutureExt::catch_unwind` 로 감싸 패닉이면 사유 로그 → **async main 안에서** `process::exit(101)` — 부팅 패닉(훅은 섰지만 watch · 꼬리가 아직 없다)과 꼬리 자체의 패닉을 받는다. 지금 abort 는 즉사하지만 unwind 에서 이것이 없으면 `run()` 이 풀려 런타임 drop 이 blocking 태스크를 **시한 없이** 기다린다(§2-1) — 단일 인스턴스 가드와 `daemon.json` 을 쥔 채 남는 데몬 ② accept 루프를 같은 `catch_unwind` 로 감싸(표시 없이 — 훅이 이미 당겼다) 잡히면 꼬리로 간다(정상 종료 경로를 탄다) — ★감싸는 자리는 `run_accept_loop` **안**의 `select!` 고리다★(그래야 루프 뒤 `sweeper.stop()` `lib.rs:438` 이 돈다 · 3판 정정). base 에 따로 타입을 두지 않는다(1판 `CaughtOnly` 걷음) |
 | **M7** | 종료 코드 | **데몬 101 · 셸 101(상수 하나)** — 데몬은 꼬리 끝에서 깃발이면 `Err(101)` → `main.rs` 의 기존 `process::exit`. ★load-bearing★: `Ok` 로 돌아가면 런타임 drop 이 매달릴 수 있는 blocking 태스크(예: 요청이 띄운 1단계 본문 · 활성화 blocking 이 멎은 채 남은 것)를 기다린다 — 패닉 경로는 그 대기를 건너뛴다. ★2판의 예 「오염으로 멎은 kill 스레드」는 틀렸다★ — 그 스레드는 런타임 drop 에 닿기 전에 꼬리 ③ 자체를 멈춘다(`shutdown_all` 의 `thread::scope` `manager.rs:3122-3128` 를 `lib.rs:823` 이 await) → 그 멎음은 (바)의 몫. `Err(101)` 과 `exit` 사이의 `run()` 지역값 drop 은 M23. 소비자는 없다(셸은 PID 로 데몬 생사를 본다) |
 | **M8** | 실프로세스 시험 방아쇠 | `cfg(debug_assertions)` 아래에서만 읽는 환경변수(가안 `ENGRAM_DEBUG_PANIC=unmarked\|contained\|poison\|boot\|hang` — `hang` 은 3판 · 감시(M19) 시한도 같은 조건에서만 짧게 덮어쓴다) — 배포판 표면 0 |
-| **M9** | 요청 경로 회귀망 | 요청 경로 파일(`agent_conn.rs` · `connection_core.rs` · `command_delivery.rs` · `control/mcp_server.rs`)의 시험 밖에 맨 `tokio::spawn(` · `spawn_blocking(` 이 없다는 소스 시험. **허용 목록**(3층 — 일부러 표시 밖) = StopDaemon 의 `spawn_blocking(shutdown_all)`(`connection_core.rs:1543` — 전역 전이라 1층이 아니다 · 그 안 패닉은 어차피 끄는 중) · 명령 자리 수거 태스크(`command_delivery.rs:527`) · MCP serve 태스크(`mcp_server.rs:1411` — ★이 파일에서 남는 맨 spawn 은 이것 하나다★: 처리기 본문 `spawn_blocking` 여섯(`:513` · `:940` · `:1040` · `:1092` · `:1173` · `:1249`)은 `spawn_blocking_contained` 로 옮긴다 — §4-6) |
+| **M9** | 요청 경로 회귀망 | 요청 경로 파일(`agent_conn.rs` · `connection_core.rs` · `command_delivery.rs` · `control/mcp_server.rs`)의 시험 밖에 맨 `tokio::spawn(` · `spawn_blocking(` 이 없다는 소스 시험. **허용 목록**(3층 — 일부러 표시 밖) = StopDaemon 의 `spawn_blocking(shutdown_all)`(`connection_core.rs:1543` — 전역 전이라 1층이 아니다 · 그 안 패닉은 어차피 끄는 중) · 명령 자리 수거 태스크(`command_delivery.rs:537` — 4판 정정 · `:527` 은 함수 머리) · MCP serve 태스크(`mcp_server.rs:1411` — ★이 파일에서 남는 맨 spawn 은 이것 하나다★: 처리기 본문 `spawn_blocking` 여섯(`:513` · `:940` · `:1040` · `:1092` · `:1173` · `:1249`)은 `spawn_blocking_contained` 로 옮긴다 — §4-6) |
 | **M10** | 컴파일 가드 | 데몬 lib · **agent lib**(가두는 자리가 사는 곳 — 1판의 `main.rs` 만으로는 lib 만 abort 로 짓는 길을 못 막는다)에 `#[cfg(not(panic = "unwind"))] compile_error!(…)`. 셸은 (라)=S1a′ 일 때만. CLI 는 두지 않는다 |
 | **M11** | 바이너리 크기 | U7 앞뒤로 세 exe 크기를 재 보고 · 문턱 없음(30% 를 넘으면 사용자에게 — 가안) |
 | **M12** | T-52 · 동시 종료 | **따로 둔다** — 패닉 경로는 `send_stop` 을 지나지 않는다(실프로세스 시험은 `send_stop` 결과를 판정에 안 쓴다). 동시 경합 하나를 기록한다: StopDaemon 의 `shutdown_all` 과 패닉 꼬리의 `shutdown_all` 이 겹치면 둘째 `join_pump` 가 `None` 을 받아(§2-5) 꼬리가 먼저 끝나 `exit(101)` 할 수 있다 — StopDaemon 의 kill 스레드가 도는 중이라 그 답이 사라진다(T-52 와 같은 모양) · 남은 자식은 Job 이 끈다. T-52 항목에 한 줄 |
@@ -313,12 +315,12 @@
 | **M15** | 스폰 경로 스코프 가드 | 활성화 창(`manager.rs:2050-2162`)에서 통로를 펌프에 넘기기 전 패닉 · 오류로 빠지면 `transport.shutdown()` 을 부르는 가드(되감기 중에도 — 그래서 `shutdown` 의 락은 M14 로 되찾기여야 한다. 아니면 이중 패닉 abort). 두 번 불려도 되는지(명부에 이미 올라 `shutdown_all` 도 부르는 경우)는 U4 가 확인한다 |
 | **M16** | `Contained` · axum · rmcp | 패닉한 · 취소된 안쪽 future 는 **깊이 가드 안에서** drop 한다(패닉 뒤 drop 은 `catch_unwind` 로 · 취소 drop 은 `Contained::drop` 에서 — 이미 되감는 중이면 std 가 중첩 패닉을 abort 하므로 그때의 `catch_unwind` 는 무력하다 · 받아들인다). axum 의 `Contained` 층은 **가장 바깥**(마지막 `.layer`)이어야 `bearer_auth` · 본문 크기 제한까지 덮는다. rmcp 도구 처리기는 그 층 밖이라(§2-4) **도구 몸통을 직접 감싼다**. hyper 가 `next.run` 뒤에 poll 하는 스트리밍 · SSE 본문은 표시 밖 → 올린다(§4-11) |
 | **M17** | 관찰자 계약 | base `sync` 의 관찰 갈래는 오염을 보면 등록된 `fn(&'static Location<'static>)` 하나를 부른 뒤 되찾는다 · 등록 = `OnceLock` 한 번(조립부) · 관찰자는 **패닉 · 할당 · 락 · 로그 · 블로킹 금지**(되감기 중 `Drop` 안에서도 불린다) — 실물은 위치 기록(`AtomicPtr` CAS) + 깃발 세우기 둘뿐. `sync` 계약 2 개정 |
-| **M18** | 셸 끝내기 절차 | 「`Final` 생략」은 **`is_pulled()` 로 판정**(훅이 동기로 세운다 — 1판의 「깨우기가 `wait()` 뒤 세우는 표지」는 사용자 끝내기가 먼저 줄 서면 어긋난다) · `RunEvent::Exit` 패닉 갈래 = 실행 잠금 놓기 → `handle.cleanup_before_exit()` → `process::exit(101)`(사용자 콜백이 정리보다 먼저 돌기 때문 — §2-7) · 훅이 **주 스레드**에서 올렸으면 깨우기는 `app.exit` 를 부르지 않는다(주 스레드는 tao 되던지기로 이미 풀려 나간다 — 동시에 부르면 `request_exit` 실패 갈래가 다른 스레드에서 창 · 트레이를 만진다). ★그 표지(`MAIN_ESCALATED`)는 훅이 깃발을 당기기 **앞**에 SeqCst 로 세운다★(3판 — 뒤면 깨우기가 깃발만 보고 표지를 못 본 채 `app.exit` 를 부를 수 있다 · §4-3) |
-| **M19** | 패닉 종료 감시((바)=감시) | **데몬** = 훅 설치(`lib.rs:458`) 직후 띄우는 전용 std 스레드 — `wait_polling(200ms)` 로 깃발을 보고, 본 시각부터 시한(가안 30초)이 지나면 `process::exit(101)` 을 **직접** 부른다. `tracing` · 락을 쓰지 않는다 — 패닉한 스레드가 로그 락을 쥔 채 멎었거나 tokio 런타임이 멎어도 돈다(사유는 이미 걸쇠 `OnceLock` 에 있다 · 그 경우 꼬리 로그 줄을 잃는 것은 받는다). 훅 설치 때 서므로 부팅 중 멎음도 덮는다(§4-11). 기동 실패 = 부팅 실패(`Err(1)` — 감시 없이 돌지 않는다). **셸** = 기존 깨우기 스레드에 시한(가안 5초) — 깃발을 본 뒤 시한이 지나면 `process::exit(101)`(`Final` 안 씀 · `MAIN_ESCALATED` 여도). 시한 · 끝내기 동작은 주입(M20) — 시험은 짧은 시한 + 기록하는 끝내기. 상세 §4-4 · §4-9 |
-| **M20** | 걸쇠 주입 seam(ADR-0012) | 걸쇠 `Escalation` 은 `new()` 로도 만든다. 프로세스 전역 `escalation()` 은 **조립 자리만**(훅 · 관찰자 등록 · 데몬 `run()` · `main.rs` · 셸 `run()`) 부르고, 나머지(1층 도우미 · `ConnectionCore` · accept 루프 · 감시 · 셸 깨우기 · 셸 종료 세션 · 상태 싱크)는 `&'static Escalation` 을 받는다 → 시험은 자기 인스턴스를 쓴다. 관찰자 칸(`sync::set_poison_observer` — 한 번뿐인 `OnceLock`)은 되돌릴 수 없으므로 **등록 상태를 재는 시험은 자기 통합 시험 바이너리**(base `tests/poison_observer.rs` 가안 — 결과 줄 +1)에 두고 lib 단위는 미등록 상태만 잰다. 까닭: 한 방향 전역(깃발 · 관찰자)을 lib 시험들이 함께 쓰면 U1 · U3 · U6 시험이 서로를 뒤집는다 |
-| **M21** | kill 길의 상태 싱크 | 데몬 `DaemonStatusSink`(`status_fanout.rs:37` · 알림 `:47-`)의 `broadcast_text` 를 `contain` 으로 돌리고, 잡히면 걸쇠를 당긴 뒤(공유 팬아웃 패닉 = 3층 규칙 · 오염 패닉이면 훅이 이미 당겼다) 그 알림만 버리고 돌아온다. 까닭: `kill_agent` → `enter_exiting` → 이 싱크 → net `ConnRegistry` 의 `.expect("conn registry poisoned")`(`net/src/ws.rs:212`)가 `session.kill` **앞**에서 돈다 — 그 락 오염이 종료를 당겼다면 kill 스레드가 전부 거기서 패닉해 2동사(ADR-0001)가 하나도 안 돈다. net 무변경(M5) · 상세 §4-5 4 |
-| **M22** | `send_input` 스코프 가드 | 분류 쓰기(`session.rs:284` `write_user_classified`)가 `emit(Queued)`(`:303`) 뒤 `send_input`(`:304`)으로 가는 갈래에 가드 — 되감기로 빠지면 그 id 의 `Dropped{Rejected}` 를 낸다(정상 반환 · 기존 `Err` 갈래는 가드를 끈다). 단 emit 길이 패닉할 수 있으면(오염된 `.expect` 가 남는 (가)=P1 · P1o) 건너뛴다 — `Drop` 안 둘째 패닉은 abort(M16). 상세 §4-7 |
-| **M23** | `run()` 지역값 drop | 패닉(M6 되감기) · `Err(101)` 갈래에서 `run()` 지역값이 `exit` 전에 drop 된다 — `AgentManager::drop`(`manager.rs:3212-3222` — reaper 시한 없는 join `:3219`) · `SessionTracker::drop`(`session_tracker.rs:196-204` — join + `.expect` `:200` · 되감는 중이면 abort). → ① 두 `Drop` 은 `thread::panicking()` 이면 join 을 건너뛰고 `.expect` 를 없앤다 ② 꼬리 끝 `Err(101)` 갈래는 그 전에 관리자 `Arc` 하나를 `mem::forget` 한다(수가 0 이 안 돼 `Drop` 이 안 돈다 · 그 밖의 지역값은 평소대로 drop). agent 가 「당겨졌나」를 읽게 하지 않는다(M20 — 전역은 조립 자리만) · 상세 §4-4 |
+| **M18** | 셸 끝내기 절차 | 「`Final` 생략」은 **`is_pulled()` 로 판정**(훅이 동기로 세운다 — 1판의 「깨우기가 `wait()` 뒤 세우는 표지」는 사용자 끝내기가 먼저 줄 서면 어긋난다) · `RunEvent::Exit` 패닉 갈래 = 실행 잠금 놓기 → `handle.cleanup_before_exit()` → `process::exit(101)`(사용자 콜백이 정리보다 먼저 돌기 때문 — §2-7) · 훅이 **주 스레드**에서 올렸으면 깨우기는 `app.exit` 를 부르지 않는다(주 스레드는 tao 되던지기로 이미 풀려 나간다 — 동시에 부르면 `request_exit` 실패 갈래가 다른 스레드에서 창 · 트레이를 만진다). ★그 표지(`MAIN_ESCALATED`)는 훅이 깃발을 당기기 **앞**에 SeqCst 로 세운다★(3판 — 뒤면 깨우기가 깃발만 보고 표지를 못 본 채 `app.exit` 를 부를 수 있다 · §4-3) · ★깨우기가 하는 일은 `app.exit(101)` 하나뿐이다(4판)★ — 시한은 깨우기에서 걷어 따로 띄운 감시(M19)로 옮겼다. `app.exit` 의 실패 갈래가 깨우기 스레드에서 로그 · 트레이 락 · `exit` 를 돌아 막혀도 끝은 감시가 보장한다 |
+| **M19** | 패닉 종료 감시((바)=감시) | **데몬 · 셸 같은 모양(4판)** — 훅 설치(데몬 `lib.rs:458` · 셸 `run()` 머리) 직후 띄우는 전용 std 스레드 하나 — `wait_polling(200ms)` 로 깃발을 보고, 본 시각부터 시한(가안 데몬 30초 · 셸 5초)이 지나면 **platform 즉시 끝내기**(가안 `engram_dashboard_platform::process::terminate_self(101)` — Windows = `TerminateProcess(GetCurrentProcess(), 101)` · 그 밖 = `_exit` 꼴 · cfg 는 platform 안)를 **직접** 부른다. `tracing` · 락을 쓰지 않는다 — 패닉한 스레드가 로그 락을 쥔 채 멎었거나 tokio 런타임 · 셸 주 스레드가 멎어도 돈다. ★`process::exit` 가 아니다★ — 그 길은 다른 스레드의 `exit` · 로더 락 뒤에 막힐 수 있다(§9-12 · 추론 · 미검). 즉시 끝내기는 DLL 분리 알림 · 로더 락 · atexit · TLS 해체 · std 끝 정리를 건너뛰고, 잃는 것이 없다 — 사유는 걸쇠에 이미 있고(꼬리 로그 줄을 잃는 것은 받는다) · 파일 싱크는 버퍼 없이 쓰고 · 자식은 Job kill-on-close 가 거둔다. 꼬리 · M6 의 정상 끝은 `process::exit(101)` 그대로. **`cfg(panic = "unwind")` 빌드에서만 띄운다**(abort 에선 패닉 = 즉사라 할 일이 없다). 훅 설치 때 서므로 부팅 · 셸 setup 앞 멎음도 덮는다(§4-11). 기동 실패 = 데몬 부팅 실패(`Err(1)` — 감시 없이 돌지 않는다) · 셸 시작 실패. 셸 깨우기는 시한을 갖지 않는다(M18). 시한 · 끝내기 동작은 주입(M20) — 시험은 짧은 시한 + 기록하는 끝내기. 상세 §4-4 · §4-9 |
+| **M20** | 걸쇠 주입 seam(ADR-0012) | 걸쇠 `Escalation` 은 `new()` 로도 만든다. 프로세스 전역 `escalation()` 은 **조립 자리만**(훅 · 관찰자 등록 · 데몬 `run()` · `main.rs` · 셸 `run()`) 부르고, 나머지(1층 도우미 · `ConnectionCore` · accept 루프 · 감시 둘 · 셸 깨우기 · 셸 종료 세션 · 상태 싱크 · **제어 HTTP 의 가장 바깥 층과 제어 라우트 거절 층 · MCP 도구 감싸개**((다)의 `is_pulled()` — 걸쇠는 MCP 서버 상태로 넘긴다 · 4판))는 `&'static Escalation` 을 받는다 → 시험은 자기 인스턴스를 쓴다. ★시험 서버도 받는 쪽이다(4판)★ — `start_test_server`(`TestServerHandle` `lib.rs:853`)는 운영과 같은 `run_accept_loop`(`:995`)를 돌리고 `tests/ws_e2e.rs` · `src-tauri/src/daemon_client/tests.rs` 가 띄운다 → 새던 지역 인스턴스(`Box::leak`)를 넘기고 전역을 쓰지 않는다. 관찰자 칸(`sync::set_poison_observer` — 한 번뿐인 `OnceLock`)은 되돌릴 수 없으므로 **등록 상태를 재는 시험은 자기 통합 시험 바이너리**(base `tests/poison_observer.rs` 가안 — 결과 줄 +1)에 두고 lib 단위는 미등록 상태만 잰다. 까닭: 한 방향 전역(깃발 · 관찰자)을 lib 시험들이 함께 쓰면 U1 · U3 · U6 시험이 서로를 뒤집는다 |
+| **M21** | kill 길의 상태 싱크 | 데몬 `DaemonStatusSink`(`status_fanout.rs:37` · 알림 `:47-`)의 `broadcast_text` 를 `contain` 으로 돌리고, 잡히면 **잡은 문장을 첫 사유로 적고**(4판 — `contain` 안이라 오염 아닌 패닉에는 훅이 아무것도 안 적었다) 걸쇠를 당긴 뒤(공유 팬아웃 패닉 = 3층 규칙 · 오염 패닉이면 훅이 이미 당겼다) 그 알림만 버리고 돌아온다. ★단위가 갈린다(4판)★ — U4 = 가둠 · 버림만 · 사유 기록 · 당김과 생성자의 걸쇠 인자는 U5(깃발을 보는 interval 팔 · 감시가 서는 단위 — U4 뒤 U5 전에 당기면 U3 의 거절만 깨어나 데몬이 끝나지 않은 채 새 일을 막는다). 실제 노출은 오염뿐이다 — `broadcast_text`(`net/src/ws.rs:208-217`)는 `.expect` + `try_send` + `warn!` 이라 패닉 길이 오염된 `.expect` 하나이고, 그때는 훅이 이미 당겼다(명시 당김은 그 밖의 패닉에 대한 덧대기). 까닭: `kill_agent` → `enter_exiting` → 이 싱크 → net `ConnRegistry` 의 `.expect("conn registry poisoned")`(`net/src/ws.rs:212`)가 `session.kill` **앞**에서 돈다 — 그 락 오염이 종료를 당겼다면 kill 스레드가 전부 거기서 패닉해 2동사(ADR-0001)가 하나도 안 돈다. net 무변경(M5) · 상세 §4-5 4 |
+| **M22** | `send_input` 패닉 포착(3판 = 스코프 가드) | 분류 쓰기(`session.rs:284` `write_user_classified`)가 `emit(Queued)`(`:303`) 뒤 `send_input`(`:304`)으로 가는 갈래에서 `send_input` 을 **맨 `std::panic::catch_unwind`** 로 감싼다(4판 — `Drop` 가드를 걷었다). 잡히면 그 id 의 `Dropped{Rejected}` 를 내고(되감는 중이 아니라 abort 갈래가 없다) `resume_unwind` 로 다시 풀어 보낸다(훅을 다시 부르지 않는다). ★`contain` 이 아니다★ — 훅은 패닉 순간 원래 깊이로 이미 판정했다 · `contain` 은 깊이를 올려 그 판정(표시 밖 → 올림)을 바꾼다. emit 이 오염으로 패닉하면 그 패닉이 대신 풀린다(오염 패닉 → 훅이 올린다) — 그래서 3판의 (가)=P1 · P1o 건너뜀과 그 「확인 뒤 행동」 경합이 없어졌다. 기존 `Err` 갈래는 그대로 · 잠금 순서 = `Dropped` 는 `input_order` 아래(문서화된 순서 그대로). 남는 거짓 `Dropped` = §4-11. 상세 §4-7 |
+| **M23** | `run()` 지역값 drop | 패닉(M6 되감기) · `Err(101)` 갈래에서 `run()` 지역값이 `exit` 전에 drop 된다 — `AgentManager::drop`(`manager.rs:3212-3222` — reaper 시한 없는 join `:3219`) · `SessionTracker::drop`(`session_tracker.rs:196-204` — join + `.expect` `:200` · 되감는 중이면 abort). → ① 두 `Drop` 은 `thread::panicking()` 이면 join 을 건너뛰고 `.expect` 를 없앤다 · 같은 꼴 하나 더(4판): `SpawnReservation::drop`(`manager.rs:746-753` — `.expect("spawning set poisoned")`)은 (나)=E 활성화 창의 되감기 중에 돈다 → `sync::lock`(관찰 갈래)으로 바꾼다(U4 · join 이 없어 `panicking()` 판정은 필요 없다) ② 꼬리 끝 `Err(101)` 갈래는 그 전에 관리자 `Arc` 하나를 `mem::forget` 한다(수가 0 이 안 돼 `Drop` 이 안 돈다 · 그 밖의 지역값은 평소대로 drop). agent 가 「당겨졌나」를 읽게 하지 않는다(M20 — 전역은 조립 자리만) · 상세 §4-4 |
 
 ---
 
@@ -350,6 +352,9 @@ pub struct Caught { /* 패닉 문장 */ }    // .message()
 ///   command `route.rs` 의 사본은 command 가 의존 0 이라 남는다).
 pub fn payload_message(payload: &(dyn Any + Send)) -> String;
 
+/// 할당 없는 빌림 — payload 를 &'static str · String 으로 downcast 해 &str 로(그 밖 = None). 훅 판정용(4판 · §4-3).
+pub fn payload_str(payload: &(dyn Any + Send)) -> Option<&str>;
+
 /// std 락 오염 패닉 문장인가(`.expect` / `.unwrap` 의 `PoisonError` Debug 문자열). 도메인 0 원시 — 정책 아님.
 pub fn is_poison_panic(message: &str) -> bool;
 
@@ -359,20 +364,22 @@ impl Escalation {
     pub const fn new() -> Self;                         // 시험 · 조립용 지역 인스턴스(M20)
     pub fn pull(&self);                                 // store(true, SeqCst)
     pub fn is_pulled(&self) -> bool;                    // load(SeqCst)
-    pub fn record_reason(&self, f: impl FnOnce() -> String);   // 첫 것만(OnceLock) — 훅이 pull 앞에
+    pub fn record_reason(&self, f: impl FnOnce() -> String);   // 첫 것만(OnceLock) — 훅은 pull 뒤에(4판) · M21 은 pull 앞에
     pub fn record_site(&self, at: &'static Location<'static>); // 첫 것만(CAS) — 관찰자
     pub fn reason(&self) -> Option<&str>;
+    pub fn wait_reason(&self, up_to: Duration) -> Option<&str>; // 폴링 유계 대기 — 꼬리 · 셸 Exit 갈래(가안 1초 · 4판)
     pub fn site(&self) -> Option<&'static Location<'static>>;
-    pub fn wait_polling(&self, every: Duration);       // park_timeout 고리 — 셸 깨우기 · 데몬 감시 스레드(M19)
+    pub fn wait_polling(&self, every: Duration);       // park_timeout 고리 — 셸 깨우기 · 감시 스레드 둘(M19)
 }
 /// 프로세스 전역 걸쇠 — ★조립 자리(훅 · 관찰자 등록 · run() · main.rs)만 부른다★. 나머지는 &'static Escalation 을 받는다(M20).
+///   즉시 끝내기는 여기 없다 — OS 의존이라 platform `process::terminate_self`(가안 · M19 · §4-4).
 pub fn escalation() -> &'static Escalation;
 ```
 
 - **입주 조건(ADR-0269):** ① 지금 여러 곳에 사본(페이로드 문장 일곱) + 소비자 셋(agent · 데몬 · 셸) ② 도메인 지식 0 — 「오염이면 올린다」 같은 정책은 없다(M1) ③ 다른 입주자를 부르지 않는다 — `sync` 관찰자 · `logging` 재진입 가드와 잇는 것은 **base 밖**(데몬 · 셸 조립부).
 - **base `sync` 개정(U1):** 관찰 갈래 = 지금 이름(`lock` · `read` · `write` · `wait_timeout`)에 `#[track_caller]` + 오염이면 관찰자 호출 뒤 되찾기 · 범위 갈래(가안 `lock_scoped` 등 — (가)=P2) = 지금처럼 말없이 · (가)=P1o 면 범위 갈래 대신 `lock_order(&Mutex<()>)` 하나(타입으로 순서 락에만 묶인다) · `set_poison_observer` 한 번. **기본값 = 관찰**(분류 안 된 자리는 종료 쪽 — 안전한 쪽). 계약 2 = 「로그 · 다른 락 · 밖 호출을 하지 않는다 — 단 등록된 관찰자 하나는 부른다(M17)」 · 계약 3 = unwind 아래 운영도 닿는다.
 - **base `logging` 개정(U1 — M4 L1):** 스레드 지역 「파일 쓰는 중」 표지 — `FileSinkWriter::Live` 가 세우고 drop 이 내린다 · 섰으면 `make_writer` 가 `Void`. 주석 `:110-115` 「알려진 미수정」을 닫는다 — ★닫는 것은 같은 스레드 재진입뿐이다★(다른 스레드가 쥔 tracing 락에 막히는 것은 (바) · §4-11).
-- **걸쇠 주입 seam(M20 · ADR-0012):** 깃발 · 사유 · 자리를 읽고 쓰는 런타임 코드는 전부 `&'static Escalation` 을 인자 · 칸으로 받는다 — 데몬 1층 도우미(§4-6) · `ConnectionCore` · accept 루프 · 감시 스레드(§4-4) · 상태 싱크(M21) · 셸 깨우기 · 종료 세션(§4-9). 전역 `escalation()` 은 조립 자리에서 그 인자로 넘길 때만 부른다. 시험은 `Box::leak(Box::new(Escalation::new()))` 같은 지역 인스턴스로 잰다. 관찰자 칸은 한 번뿐인 전역이라 등록 상태 시험은 자기 통합 시험 바이너리에 둔다(M20 — base `tests/poison_observer.rs` 가안).
+- **걸쇠 주입 seam(M20 · ADR-0012):** 깃발 · 사유 · 자리를 읽고 쓰는 런타임 코드는 전부 `&'static Escalation` 을 인자 · 칸으로 받는다 — 데몬 1층 도우미(§4-6) · `ConnectionCore` · accept 루프 · 감시 스레드 둘(§4-4 · §4-9) · 상태 싱크(M21) · 제어 HTTP 바깥 층 · 거절 층 · MCP 도구 감싸개(MCP 서버 상태로 — 4판) · 셸 깨우기 · 종료 세션(§4-9) · 시험 서버(`start_test_server` — 지역 인스턴스 · 4판). 전역 `escalation()` 은 조립 자리에서 그 인자로 넘길 때만 부른다. 시험은 `Box::leak(Box::new(Escalation::new()))` 같은 지역 인스턴스로 잰다. 관찰자 칸은 한 번뿐인 전역이라 등록 상태 시험은 자기 통합 시험 바이너리에 둔다(M20 — base `tests/poison_observer.rs` 가안).
 
 ### 4-2. 층 경계 표 (권고안)
 
@@ -381,6 +388,7 @@ pub fn escalation() -> &'static Escalation;
 | 1 요청 | WS 처리기 다섯 몸통(`agent_conn.rs` `:282` · `:314` · `:375` · `:405` · `:450` — 수명 처리기 둘의 공유 걸음은 (나)) · 떼어 낸 명령 태스크(`:336`) · 활성화 blocking 둘(`connection_core.rs:1366` · `:1760` — 그 안 등록 창은 (나)) · 버스 배달 태스크(`:2106`) · 1단계 본문 blocking(`command_delivery.rs:1361`) · 제어 HTTP(가장 바깥 axum 층 + blocking 여섯) · MCP 도구 몸통 셋 | `Contained` / `contain` |
 | 2 에이전트 하나 | 펌프 셋 · 라이터 몸통 · 첫 턴 세션 id 기록 · leftover 듣는 차례 · 일꾼 · **PTY 감시 · stderr 배수(B1′)** · 메시징 수신자 배달(`spawn_delivery` — U8a 감사 뒤) | `contain` |
 | 3 공유 · 그 밖 | 전역 루프(reaper 고리 · sweep · 추적 · 사용량 · flush · 수거기) · 데몬 부팅 · 메인 future · net 자기 태스크 · 연결 태스크 · StopDaemon `shutdown_all` · codex 라이터 · thread_lock · 셸 전부((라)=S1a) · 써드파티 내부(rmcp 세션 일꾼 · hyper · 스트리밍 본문) | 없음 → 정상 종료 |
+| 3 — 가둔 뒤 당김(4판) | 상태 싱크 broadcast — `DaemonStatusSink` 의 `broadcast_text`(M21 — kill 길이 끝까지 가게 가두되 공유 팬아웃 패닉이라 당긴다 · 실제 노출은 오염뿐 `net/src/ws.rs:208-217`) | `contain` → 사유 · 당김(U5) |
 | (나) 구간 | 활성화 등록 창 · 요청에서 부른 `kill_agent` 앞 줄 · 연결 수명 처리기(`on_connect` · `on_disconnect`)의 공유 걸음(U3 분류) · (`reap_one` — 아래) | `escalating` — 표시 안이어도 표시 밖 |
 
 reaper 고리 자체의 `catch_unwind`(`reaper.rs:208`)는 남긴다 — 종료가 끝날 때까지 고리를 살려 다른 에이전트의 수거 메시지를 계속 받는다(sweep 과 같은 까닭). 표시는 세우지 않는다 — ★그래서 `reap_one` 은 감쌀 것 없이 이미 표시 밖이다★(깊이 0 · 훅이 올린다). 2판의 「`reap_one` 을 `escalating` 으로」는 무의미한 일이라 걷었다(3판). (나)=R 이면 고리에 2층 표시 + 재시도가 들어 그때 비로소 구간 처리가 필요하다(§3-1 (나) R).
@@ -388,33 +396,36 @@ reaper 고리 자체의 `catch_unwind`(`reaper.rs:208`)는 남긴다 — 종료�
 ### 4-3. 훅 (데몬 · 셸 공통 모양 — 조립부마다 한 벌)
 
 ```
-hook(info):                                     // 패닉한 스레드에서 · 되감기 전에
+hook(info):                                     // 패닉한 스레드에서 · 되감기 전에 (4판 순서)
+  // (a) 할당 없는 판정 — 빌림 · 부분 문자열 확인 · 깊이 읽기만
   contained = base::panic::is_contained()       // const Cell — 늘 읽힌다(M1)
-  msg       = payload_message(info.payload())
-  escalate  = !contained || is_poison_panic(&msg)          // 정책 = 조립부(M1)
+  text      = payload_str(info.payload())       // &str 빌림(None = 문장 없는 payload)
+  escalate  = !contained || text.is_some_and(is_poison_panic)  // 정책 = 조립부(M1)
   if escalate:
-      ESC.record_reason(|| format!("{thread} {location}: {msg}"))   // ① 첫 사유 — 깃발보다 먼저
-      [셸] if 주 스레드: MAIN_ESCALATED.store(true, SeqCst) // ①′ 깃발보다 먼저 — 깨우기가 app.exit 를 건너뛰게(M18)
-      ESC.pull()                                            // ② SeqCst store 하나 — 락 · unpark 없음
-  tracing::error!(thread, location, contained, "스레드 panic: {msg}")  // ③ 락을 잡는다(아래) · 같은 스레드 재진입이면 버려진다(M4 L1)
-  prev(info)                                                // ④ 기본 훅(stderr 잠금)
+      [셸] if 주 스레드: MAIN_ESCALATED.store(true, SeqCst) // (b) 깃발보다 먼저 — 깨우기가 app.exit 를 건너뛰게(M18)
+      ESC.pull()                                            // (c) SeqCst store 하나 — 락 · unpark · 할당 없음
+      ESC.record_reason(|| format!("{thread} {location}: {msg}"))   // (d) 첫 사유 — msg = payload_message(…) · 여기서 처음 할당
+  tracing::error!(thread, location, contained, "스레드 panic: {msg}")  // (e) 락을 잡는다(아래) · 같은 스레드 재진입이면 버려진다(M4 L1)
+  prev(info)                                                // (f) 기본 훅(stderr 잠금)
 ```
 
-- **훅이 잡는 락 — ①~② 만 락이 없다(3판 정정)** — ③ 의 `tracing::error!` 는 tracing 의 reload 층 · `EnvFilter` 내부 `RwLock`(`base/src/logging/mod.rs:404` · M4) · 파일 싱크 Mutex · stdout 잠금을 지나고 ④ 기본 훅은 stderr 를 잠근다. 깃발을 그보다 먼저 세우는 것이 이 순서의 요점이다 — ③ · ④ 가 멎어도 깃발은 섰다. 그 락을 **다른 스레드**가 기다리며 멎는 것(accept 루프 · 꼬리의 로그)은 (바) 감시(M19)가 끝낸다.
+- **순서의 까닭(4판 — T3)** — 3판은 사유 문장을 깃발 **앞**에서 만들었다(할당 · 포맷 — 시한 없는 일이 깃발보다 먼저). 이제 깃발까지는 빌림 · 원자값뿐이고 할당은 (d)부터다. 대가 = 꼬리가 사유보다 먼저 끝날 수 있다(1회차 걱정) → 꼬리가 마지막 `exit` 앞에서 `wait_reason(1초 · 가안)` 으로 기다린 뒤 있는 것을 로그한다(셸 `Exit` 패닉 갈래도 같다 · §4-4 · §4-9). 그래도 비면 받는 진단 손실. 「할당 없음」은 훅 코드의 말이다 — std 가 훅을 부르기 전에 형식 문장을 만드는지는 이 저장소 밖(rust-src 없음 · 미검).
+- **훅이 잡는 락 — (a)~(c) 만 락이 없다** — (d) 는 할당하고, (e) 의 `tracing::error!` 는 tracing 의 reload 층 · `EnvFilter` 내부 `RwLock`(`base/src/logging/mod.rs:404` · M4) · 파일 싱크 Mutex · stdout 잠금을 지나고 (f) 기본 훅은 stderr 를 잠근다. 깃발을 그보다 먼저 세우는 것이 이 순서의 요점이다 — (d)~(f) 가 멎어도 깃발은 섰다. 그 락을 **다른 스레드**가 기다리며 멎는 것(accept 루프 · 꼬리의 로그)은 (바) 감시(M19)가 끝낸다.
 - **`MAIN_ESCALATED` 를 당기기 앞에(D1)** — 깨우기는 깃발을 본 뒤 표지를 읽는다(§4-9). 표지가 깃발 뒤에 서면 깨우기가 그 틈에 「배경 스레드 패닉」으로 읽고 `app.exit` 를 부른다(M18 이 막으려던 경합). 대안 = 원자값 하나에 「주 스레드가 당김 / 그 밖이 당김」 — 같은 효과라 둘 중 무엇이든(U6 가 고른다). ★순서로 못 막는 변형이 하나 남는다★ — 배경 스레드가 먼저 당긴 뒤 주 스레드가 따로 패닉하면 깨우기는 표지 없이 `app.exit` 를 부른다(§4-11).
 - **오염 패닉은 표시와 무관하게 올린다** — (가)=P2 에서도 같다: 범위 락은 범위 갈래로 되찾아 패닉하지 않으므로, 이 규칙에 걸리는 것은 공유 락의 `.expect` 와 아직 분류 안 된 자리뿐이다(종료 쪽 — 안전한 쪽).
-- **조립(`run()`):** 로깅 → 훅 설치(지금 `:458`) + `sync::set_poison_observer(|at| { ESC.record_site(at); ESC.pull() })` → **곧바로 감시 스레드(M19 · §4-4)** — 그 뒤에야 부팅이 이어진다. 부팅 중에 이미 당겨졌으면 accept 루프의 interval 팔이 첫 틱에서 본다(watch 가 훅보다 늦게 생기는 것 — §2-5 — 을 폴링이 흡수한다). ★accept 루프 **앞** 부팅 걸음에서 당겨진 채 멎으면 깃발을 보는 이가 루프뿐이라 깨울 길이 없다★ — 그런 대기는 못 찾았고(리뷰 · 확신도 낮음), 감시가 훅 설치부터 돌아 덮는다(§4-11).
+- **조립(`run()`):** 로깅 → 훅 설치(지금 `:458`) + `sync::set_poison_observer(|at| { ESC.record_site(at); ESC.pull() })` → **곧바로 감시 스레드(M19 · §4-4 — `cfg(panic = "unwind")` 빌드만)** — 그 뒤에야 부팅이 이어진다. 부팅 중에 이미 당겨졌으면 accept 루프의 interval 팔이 첫 틱에서 본다(watch 가 훅보다 늦게 생기는 것 — §2-5 — 을 폴링이 흡수한다). ★accept 루프 **앞** 부팅 걸음에서 당겨진 채 멎으면 깃발을 보는 이가 루프뿐이라 깨울 길이 없다★ — 그런 대기는 못 찾았고(리뷰 · 확신도 낮음), 감시가 훅 설치부터 돌아 덮는다(§4-11).
 - **이중 당김 · 종료 중 패닉** — `pull` 은 멱등이다. 꼬리가 도는 중의 패닉은 로그 · 사유 기록(이미 섰으면 무시)만 남는다.
 - **시험(M20)** — 훅 · 관찰자 등록은 `run()` 에서만 선다(§2-1). 시험은 정책 함수(조립부의 순수 함수 — 걸쇠를 인자로)와 지역 `Escalation` 인스턴스로 잰다 · 관찰자 등록 상태는 자기 통합 시험 바이너리(§4-1).
 
 ### 4-4. 종료 (데몬)
 
 - **깨우기 = accept 루프의 interval 팔**(M3) — 깃발이면 `shutdown_tx.send(true)` → 루프 탈출 → `sweeper.stop()`(`lib.rs:438`) → 꼬리. 보내는 신호는 **`StopDaemon` 이 보내는 그 watch 의 `true`** 다(ADR-0288 결정 3 「기존 정상 종료 경로 · 같은 신호」). ★3판 정정★ — 그 watch 의 운영 구독자는 accept 루프 **하나뿐**이고(2판의 「명령 자리 수거 태스크 등 다른 구독자」는 틀렸다 — 수거기는 루프 뒤 `sweeper.stop()` 으로 멈춘다), `shutdown_tx` 는 `AgentConnections` 로 옮겨진다(`lib.rs:383`) → interval 팔은 그 **앞에서 뜬 사본**으로 보낸다. 보내는 까닭은 「같은 신호」를 한 길로 두는 것이고, 루프는 보내자마자 스스로 빠진다.
-- **꼬리 머리에서 사유를 로그**(깃발이면 「패닉으로 정상 종료 — 사유: … · 오염 감지 자리: …」) — 꼬리 뒤 걸음이 멎어도 사유는 남는다. 단 로그 락 자체가 멎었으면 꼬리는 이 줄에서 멎는다 → 감시(아래)가 끝낸다. 꼬리 끝에서 깃발이면 `Err(101)` → `main.rs` 의 `process::exit`(M7).
-- **감시 스레드(M19 · (바)=감시)** — `run()` 이 훅 설치(`:458`) 직후 띄우는 이름 붙은 std 스레드 하나(가안 `engram-panic-watchdog`): `esc.wait_polling(200ms)` → 본 시각 기록 → 시한(가안 30초 · 주입)까지 `park_timeout` 고리 → 아직 살아 있으면 `process::exit(101)` 을 **직접**. ★`tracing` · 락 · 할당을 쓰지 않는다★ — 패닉한 스레드가 tracing 락을 쥐고 멎었거나 tokio 런타임이 통째로 멎어도 돈다. 사유는 이미 걸쇠의 `OnceLock` 에 있고, 그 경우 꼬리 로그 줄을 잃는 것은 받는다. 정상 경로(꼬리가 시한 안에 `exit(101)`)와 겹쳐도 둘 다 같은 코드다. 기동 실패 = **부팅 실패**(`Err(1)` — 부팅 실패 갈래와 같다 · 감시 없이 돌지 않는다 — 스레드 하나를 못 띄우는 프로세스는 곧 다른 기동에서도 실패한다). 훅 설치 때 서므로 accept 루프 앞 부팅 멎음도 덮는다(§4-3). 주입(M20): 걸쇠 · 시한 · 끝내기 동작(운영 = `process::exit` · 시험 = 채널에 기록) — 시험은 시한 수십 ms 로 「당김 → 시한 뒤 끝내기 한 번」 · 「안 당김 → 안 부름」. 정상 StopDaemon · 트레이 「데몬 끄기」에는 서지 않는다(깃발이 선 때만).
+- **꼬리의 사유 로그**(깃발이면 「패닉으로 정상 종료 — 사유: … · 오염 감지 자리: …」) — 꼬리 머리에서 한 번(사유가 이미 적혔으면 함께 · 꼬리 뒤 걸음이 멎어도 남는다) · ★꼬리 끝 `Err(101)` 앞에서 머리가 사유를 못 찍었으면 `wait_reason(1초 · 가안)` 으로 기다린 뒤 있는 것을 찍는다(4판 — 훅이 사유를 깃발 뒤에 적으므로 · §4-3)★. 단 로그 락 자체가 멎었으면 꼬리는 이 줄에서 멎는다 → 감시(아래)가 끝낸다. 꼬리 끝에서 깃발이면 `Err(101)` → `main.rs` 의 `process::exit`(M7 — 정상 끝은 `process::exit` 그대로).
+- **감시 스레드(M19 · (바)=감시)** — `run()` 이 훅 설치(`:458`) 직후 띄우는 이름 붙은 std 스레드 하나(가안 `engram-panic-watchdog` · ★`cfg(panic = "unwind")` 빌드만 — abort 에선 할 일이 없다★): `esc.wait_polling(200ms)` → 본 시각 기록 → 시한(가안 30초 · 주입)까지 `park_timeout` 고리 → 아직 살아 있으면 platform 즉시 끝내기 `process::terminate_self(101)`(가안) 를 **직접**. ★`tracing` · 락 · 할당을 쓰지 않는다★ — 패닉한 스레드가 tracing 락을 쥐고 멎었거나 tokio 런타임이 통째로 멎어도 돈다. 사유는 이미 걸쇠의 `OnceLock` 에 있고, 그 경우 꼬리 로그 줄을 잃는 것은 받는다. 정상 경로(꼬리가 시한 안에 `exit(101)`)와 겹쳐도 둘 다 같은 코드다. 기동 실패 = **부팅 실패**(`Err(1)` — 부팅 실패 갈래와 같다 · 감시 없이 돌지 않는다 — 스레드 하나를 못 띄우는 프로세스는 곧 다른 기동에서도 실패한다). 훅 설치 때 서므로 accept 루프 앞 부팅 멎음도 덮는다(§4-3). 주입(M20): 걸쇠 · 시한 · 끝내기 동작(운영 = `terminate_self` · 시험 = 채널에 기록) — 시험은 시한 수십 ms 로 「당김 → 시한 뒤 끝내기 한 번」 · 「안 당김 → 안 부름」. 깃발 없는 StopDaemon · 트레이 「데몬 끄기」에는 서지 않는다 — 그 꼬리 도중 깃발이 서면(§3-1 (바)) 그 끄기도 시한 · 101 을 받는다.
+- **platform 즉시 끝내기(가안 `engram_dashboard_platform::process::terminate_self(code: u32) -> !` · 4판 — T2)** — Windows = `TerminateProcess(GetCurrentProcess(), code)`(`Win32_System_Threading` — platform 이 이미 켠 feature · `TerminateProcess` 는 `group/windows.rs:46` 이 이미 쓴다) · 그 밖 = `_exit` 꼴(가안 — `extern "C"` 선언 · std 가 이미 libc 를 링크한다 · 이 저장소엔 non-Windows 빌드가 없어 미검). cfg 는 platform `process.rs` 안에서만 가르고 부르는 쪽(데몬 · 셸 감시)은 cfg 없이 부른다(ADR-0266). 로그 · 할당 · 락 없음. ≈ 10~15줄 · 단위 U1(§7-1 — 소비자 U5 · U6 가 다른 물결이라 둘 다보다 앞선 단위에 둔다). 운영 시험은 U5 실프로세스 ⑥(감시가 끝냄 → 코드 101)이 한다 — 단위 시험은 자기 프로세스를 끝내므로 두지 않는다.
 - **`run()` 지역값(M23)** — 패닉(M6 되감기) · `Err(101)` 갈래 모두 `exit` 앞에서 지역값이 drop 된다. 관리자의 `Drop`(reaper 시한 없는 join `manager.rs:3219`)과 추적기의 `Drop`(join + `.expect` `session_tracker.rs:200` — 되감는 중이면 abort)이 그 사이에 멎거나 죽인다. → 두 `Drop` 은 `thread::panicking()` 이면 join 을 건너뛰고 `.expect` 를 없애며(U4), `Err(101)` 갈래는 반환 전에 관리자 `Arc` 하나를 `mem::forget` 한다(U5). 단일 인스턴스 가드 · `daemon.json` 같은 그 밖의 지역값은 평소대로 drop 된다.
 - **StopDaemon 과 다른 점** — StopDaemon 은 `shutdown_all` 을 먼저 돌리고 답한 뒤 보낸다. 패닉 경로는 답할 상대가 없으니 곧바로 보내고 `shutdown_all` 은 꼬리 ③ 이 돈다. `shutting_down` 을 먼저 세우므로(ADR-0019) reaper 는 프로필을 손대지 않는다 — 다음 부팅은 지금처럼(운영 데몬의 부팅 자동 복원은 꺼져 있다 — `lib.rs:781-787` · 2026-07-09 사용자 결정의 stopgap) 활성화로 이어받는다(첫 제출 뒤 영속된 세션 id — ADR-0226).
-- **(다)=거절** — 가장 바깥 입구 셋(WS 명령 해석 직후 · 제어 HTTP 가장 바깥 층 · MCP 도구 감싸개)만 `is_pulled()` 면 새 일을 오류로 답한다(§4-6). 안쪽 홉 · 연결 수명 · 정리 걸음은 깃발을 보지 않는다.
+- **(다)=거절** — 가장 바깥 입구 셋(WS 명령 해석 직후 — 정리 꼴 명령 제외 · 제어 HTTP 의 제어 라우트 — MCP 경로 제외 · MCP 도구 감싸개 — 4판)만 `is_pulled()` 면 새 일을 오류로 답한다(§4-6). 안쪽 홉 · 연결 수명 · 정리 걸음은 깃발을 보지 않는다.
 - **메인 future · 부팅(M6)** — `main.rs`: `match AssertUnwindSafe(run()).catch_unwind().await { Ok(Ok(())) => {}, Ok(Err(c)) => exit(c), Err(_) => { 사유 로그; exit(101) } }`. accept 루프도 같은 꼴로 감싸 잡히면 꼬리로 — ★감싸는 자리는 `run_accept_loop` **안**의 `select!` 고리★(호출 `lib.rs:794-808` 을 통째로 감싸면 잡힐 때 `sweeper.stop()` `:438` 을 건너뛴다 · 3판 정정).
 
 ### 4-5. 락 오염 ((가)=P2)
@@ -424,43 +435,43 @@ hook(info):                                     // 패닉한 스레드에서 · 
 3. **에이전트 · 연결 소유 락** — 범위 갈래로 되찾고 계속. 옮길 자리(파일 단위): codex `transport.rs`(되찾기 42) · `input_queue.rs` 7 · `stdio.rs` · `pty.rs`(되찾기 · `.expect` 6) · `output_core.rs`(`.expect` 27 — `finish` 의 `replay` `:692` · `enter_exiting` `:803` · 진단 `:1052` 포함) · leftover(`GateCell` 감싸개 · 되감기 Drop) · 래치 · `session.rs` 순서 락 · `agent_conn.rs`(`ConnUsageOutlet` `:212-215` · `on_disconnect` 의 연결 전용 `.expect`). **공유로 남는 것**: 명부(`manager.rs`) · 프로필(`persistence/mod.rs` 7) · 제어 레지스트리 · 추적기 · 메시징 · 사용량.
    - **메인 규칙 — 데이터 없는 순서 락(`Mutex<()>`)은 P2 에서 범위로 되찾는다**(3판) — 순서 락이 지키는 데이터는 자기 락과 오염 정책을 따로 갖는다(오염 정보는 거기 남는다). 그래서 공유인 `name_allocation`(`manager.rs:694`)도 범위다. ★U4 가 명시로 바꾼다 — 기본값 관찰에 두지 않는다★(두면 이름 할당 중 패닉 하나가 몇 분 뒤 남의 활성화로 데몬을 끈다 — §3-1 (가)의 「순서 락 함정」).
 4. **종료 경로를 끝까지(M14)** — §2-5 의 락 자리 전부 되찾기. `thread::scope` 덕에 한 에이전트의 kill 패닉이 남의 kill 을 막지 않는 성질은 그대로 둔다.
-   - **kill 길의 상태 싱크(M21 · 3판)** — `kill_agent` 의 `enter_exiting`(`manager.rs:3069`)이 부르는 운영 status sink 사슬(`lib.rs:327-339` — 바닥 고리 `DaemonStatusSink`)은 net `ConnRegistry::broadcast_text` 의 `.expect("conn registry poisoned")`(`net/src/ws.rs:212`)에 닿고, 이것이 `session.kill` **앞**이다. 그 락 오염이 종료를 당긴 원인이면 kill 스레드마다 여기서 패닉해 2동사가 하나도 안 돈다(자식은 Job 이 닫힐 때까지 산다). → `DaemonStatusSink` 의 `broadcast_text` 호출(`status_fanout.rs:47-`)을 `contain` 으로 돌리고, 잡히면 걸쇠를 당긴 뒤(공유 팬아웃 패닉 = 3층 · 오염이면 훅이 이미 당겼다) 그 알림만 버린다. 펌프 `finish` 의 terminal 알림도 같은 사슬을 지나 함께 덮인다. **net 은 손대지 않는다**(M5). 거부: net 쪽 되찾기(M5) · 종료 경로만 싱크 패닉을 견디게 하기(평시 요청 경로의 같은 패닉은 1층에 갇혀 — 오염이 아니면 — 공유 팬아웃 패닉이 조용히 산다).
+   - **kill 길의 상태 싱크(M21 · 3판)** — `kill_agent` 의 `enter_exiting`(`manager.rs:3069`)이 부르는 운영 status sink 사슬(`lib.rs:327-339` — 바닥 고리 `DaemonStatusSink`)은 net `ConnRegistry::broadcast_text` 의 `.expect("conn registry poisoned")`(`net/src/ws.rs:212`)에 닿고, 이것이 `session.kill` **앞**이다. 그 락 오염이 종료를 당긴 원인이면 kill 스레드마다 여기서 패닉해 2동사가 하나도 안 돈다(자식은 Job 이 닫힐 때까지 산다). → `DaemonStatusSink` 의 `broadcast_text` 호출(`status_fanout.rs:47-`)을 `contain` 으로 돌리고, 잡히면 잡은 문장을 첫 사유로 적고 걸쇠를 당긴 뒤(공유 팬아웃 패닉 = 3층 · 오염이면 훅이 이미 당겼다) 그 알림만 버린다 — 가둠 · 버림은 U4, 사유 · 당김은 U5(M21 · 4판). 펌프 `finish` 의 terminal 알림도 같은 사슬을 지나 함께 덮인다. **net 은 손대지 않는다**(M5). 거부: net 쪽 되찾기(M5) · 종료 경로만 싱크 패닉을 견디게 하기(평시 요청 경로의 같은 패닉은 1층에 갇혀 — 오염이 아니면 — 공유 팬아웃 패닉이 조용히 산다).
 5. **바꾸지 않는 것** — 위 밖의 공유 `.expect` 자리는 그대로다(1 이 덮는다).
 
 ### 4-6. 1층 입구 (데몬)
 
 - **WS 처리기((마)=N1a):** `on_text` 는 명령을 해석한 뒤 처리를 `Contained` 로 감싸고, 잡히면 `command_request_id`(`agent_conn.rs:433` 이 이미 쓰는 것)로 `request_id` 를 실은 `Error` 를 낸 뒤 연결을 계속한다. `on_binary` · `on_inbound_saturated` 는 같은 꼴 · `on_connect` 는 신호가 `BoxFuture<()>`(`net/src/frame_port.rs:164-168`)라 오류로 못 돌려준다 — 잡히면 로그 + 그 연결 큐에 닫기를 넣는다(`on_text` 의 Close 갈래가 쓰는 길 — U3 가 확인) · `on_disconnect` 는 잡히면 로그 · 계속(net 의 `unregister` 가 이어서 돈다). 두 수명 처리기의 공유 걸음은 (나).
 - **떼어 낸 명령 · 배달 태스크 · blocking:** 데몬 도우미 둘(가안 `spawn_contained` · `spawn_blocking_contained` — 새 작은 모듈 가안 `containment.rs`) — 잡히면 그 자리의 기존 `JoinError` 갈래와 같은 오류로 접는다(활성화 = `SpawnFailed` · 1단계 본문 = 기존 로그 갈래). 버스 1단계 본문은 그 안에서 `command::route` 가 다시 잡아 `INTERNAL` 로 답한다(표시는 바깥이 이미 세웠다). 도우미는 깃발을 보지 않는다(안쪽 홉 — 아래 (다)). 걸쇠는 도우미 인자 · `ConnectionCore` 칸으로 받는다(M20 — 전역은 조립 자리만).
-- **제어 HTTP:** axum `middleware::from_fn` 하나가 `next.run(req)` 를 `Contained` 로 감싸 잡히면 500 + 문장 · **마지막 `.layer`(가장 바깥)**. 처리기 본문 `spawn_blocking` 여섯(`mcp_server.rs:513` · `:940` · `:1040` · `:1092` · `:1173` · `:1249`)은 **`spawn_blocking_contained` 로 옮긴다** — blocking 스레드는 깊이가 0 이라 바깥 층의 표시가 닿지 않는다(2판의 「`contain` 으로 감싼다」는 맨 `spawn_blocking(` 을 남겨 M9 소스 시험과 어긋났다 · 3판). 이 파일에서 남는 맨 spawn 은 serve 태스크 `:1411` 하나다(M9). **MCP 도구 셋은 몸통을 직접 감싼다**(rmcp 요청 태스크 안 — §2-4) → 잡히면 도구 오류 결과.
-- **(다)=거절 — 가장 바깥 입구에서만**(§3-1 (다) · 3판): ① WS `on_text` 의 명령 해석 직후(옛 명령 · 버스 명령) ② 제어 HTTP 의 가장 바깥 `Contained` 층(위 — `agents.json` 을 쓰는 `agent.*` 동사도 이 층을 지난다 · 2판은 이 길을 거절 밖에 뒀다) ③ MCP 도구 감싸개. 셋 다 `is_pulled()` 면 실행 없이 오류 답(「daemon is shutting down after an internal error」 — 가안). ★두지 않는 자리★: 안쪽 홉(버스 배달 태스크 → 1단계 blocking · 활성화 blocking · 두 도우미) · `on_connect` · `on_disconnect` · Close · 정리 걸음 — 이미 받은 일을 가운데서 끊거나 정리를 막는다. 2판의 「두 도우미와 WS 처리기 입구」는 안쪽 홉을 끊고 HTTP 를 빠뜨려 걷었다.
+- **제어 HTTP:** axum `middleware::from_fn` 하나가 `next.run(req)` 를 `Contained` 로 감싸 잡히면 500 + 문장 · **마지막 `.layer`(가장 바깥)**. 처리기 본문 `spawn_blocking` 여섯(`mcp_server.rs:513` · `:940` · `:1040` · `:1092` · `:1173` · `:1249`)은 **`spawn_blocking_contained` 로 옮긴다** — blocking 스레드는 깊이가 0 이라 바깥 층의 표시가 닿지 않는다(2판의 「`contain` 으로 감싼다」는 맨 `spawn_blocking(` 을 남겨 M9 소스 시험과 어긋났다 · 3판). 이 파일에서 남는 맨 spawn 은 serve 태스크 `:1411` 하나다(M9). **MCP 도구 셋은 몸통을 직접 감싼다**(rmcp 요청 태스크 안 — §2-4) → 잡히면 도구 오류 결과. 바깥 층 · 거절 층 · 도구 감싸개는 걸쇠를 MCP 서버 상태로 받는다(M20 · 4판).
+- **(다)=거절 — 가장 바깥 입구에서만**(§3-1 (다) · 3판 · 4판 정정): ① WS `on_text` 의 명령 해석 직후(옛 명령 · 버스 명령) — ★정리 꼴 명령은 허용 목록(StopDaemon · 구독 해지 · 뷰포트 놓기 꼴 — U3 가 명령 어휘에서 고른다)★: 「정리 걸음에는 두지 않는다」를 이 입구에서도 참으로 둔다 ② 제어 HTTP 의 **제어 라우트만**(`agents.json` 을 쓰는 `agent.*` 동사도 이 길이다 · 2판은 이 길을 거절 밖에 뒀다) — ★앱 전체 층이 아니다★: `nest_service(MCP_PATH, …)`(`mcp_server.rs:1372`)도 같은 `.layer`(`:1401-1407`) 아래라 거기 두면 rmcp 세션 DELETE · SSE 끊기까지 거절한다. 모양 = 제어 라우트에만 거는 `route_layer` 또는 바깥 층 안의 경로 확인(`ControlRoute::ALL` 경로) — `route_layer` 가 이미 붙은 `nest_service` 까지 덮는지는 미검이라 U3 가 고르고 「MCP 경로는 거절 안 됨」을 시험으로 잰다 ③ MCP 도구 감싸개 — MCP 의 거절은 이 한 곳이고 모양은 N1a 도구 오류 결과. 셋 다 `is_pulled()` 면 실행 없이 오류 답(「daemon is shutting down after an internal error」 — 가안). ★두지 않는 자리★: 안쪽 홉(버스 배달 태스크 → 1단계 blocking · 활성화 blocking · 두 도우미) · `on_connect` · `on_disconnect` · Close · 정리 걸음 — 이미 받은 일을 가운데서 끊거나 정리를 막는다. 2판의 「두 도우미와 WS 처리기 입구」는 안쪽 홉을 끊고 HTTP 를 빠뜨려 걷었다.
 - **net · 연결 태스크:** 손대지 않는다(M5).
 
 ### 4-7. 2층 입구 (에이전트) · 불변식
 
 - 기존 자리의 `catch_unwind(AssertUnwindSafe(…))` 를 `contain(…)` 으로 바꾼다 — 잡은 뒤 결말 코드는 그대로다.
-- **PTY 감시(B1′):** 감시 몸통을 `contain` 으로 감싸고 잡히면 「자연 종료 때 하는 일」을 한다. ★순서가 load-bearing 이다(3판)★ — ① 통로의 실패 사유 칸(가안)에 「pty watcher panicked: …」를 **먼저** 싣는다(칸 락 아래 쓰기 또는 Release store) ② 그다음 자식 끄기(`sync` 범위) ③ master 놓기. 펌프는 EOF 를 본 **뒤** 그 칸을 읽어(같은 락 또는 Acquire) 있으면 `Error(사유)` 로 끝낸다. 거꾸로면 펌프가 EOF 로 먼저 `finish` 해 finalize 1회(ADR-0005)가 `Exited` 로 굳고 사유를 잃는다. 종료 전이는 여전히 펌프 단독(ADR-0005)이고 새 정리 호출자가 아니다(ADR-0127).
+- **PTY 감시(B1′):** 감시 몸통을 `contain` 으로 감싸고 잡히면 「자연 종료 때 하는 일」을 한다. ★순서가 load-bearing 이다(3판)★ — ① 통로의 실패 사유 칸(가안)에 「pty watcher panicked: …」를 **먼저** 싣는다(칸 락 아래 쓰기 또는 Release store) ② 그다음 자식 끄기(`sync` 범위) ③ master 놓기. 펌프는 EOF 를 본 **뒤**, ★`shutdown` · `try_wait` 분류(`pty.rs:321-333`) **앞**에서★(4판 — 뒤면 감시가 자식을 껐으니 `Exited{code}` 로 분류된다) 그 칸을 읽어(같은 락 또는 Acquire) 있으면 `Error(사유)` 로 끝낸다. 거꾸로면 펌프가 EOF 로 먼저 `finish` 해 finalize 1회(ADR-0005)가 `Exited` 로 굳고 사유를 잃는다. 종료 전이는 여전히 펌프 단독(ADR-0005)이고 새 정리 호출자가 아니다(ADR-0127).
 - **stderr 배수(B1′):** 줄마다 `contain`. ★첫 패닉을 잡은 뒤에는 해석을 멈추고 읽어 버리기만 한다★(3판 — 해석 쪽 결함이면 줄마다 다시 패닉해 패닉 · 로그 폭풍이 된다) — 파이프는 계속 비워진다. 진단 락은 (가)=P2 면 범위 갈래다.
-- **`send_input` 스코프 가드(M22 · 3판)** — 유령 대기 입력(§3-1 (가) †)을 좁힌다. 분류 쓰기(`session.rs:284` `write_user_classified`)의 「먼저 emit, 뒤에 send」 갈래(`emit(Queued)` `:303` → `send_input` `:304`)에서 emit 직후 가드를 세우고 send 가 돌아오면 끈다(기존 `Err` 갈래는 스스로 `Dropped` 를 낸다). 되감기로 빠지면 가드가 그 id 의 `Dropped{cause: Rejected}` 를 낸다 → 대기 목록 표가 그 에이전트를 「바쁨」으로 붙들지 않는다. **조건 — emit 길이 패닉하지 않을 때만**: (가)=P2 면 코어 락이 범위 갈래라 늘 쓸 수 있다 · P1 · P1o 면 replay 락이 오염돼 있으면(`is_poisoned()`) 건너뛴다(`Drop` 안 둘째 패닉 = abort · M16) → 그때는 잔여(§4-11). 「먼저 send, 뒤에 emit」 갈래(`:300-301`)는 send 패닉이면 `Queued` 가 안 나가 유령이 없다. 파일 = `session.rs`(U4).
+- **`send_input` 패닉 포착(M22 · 4판 — 3판 스코프 가드를 바꿨다)** — 유령 대기 입력(§3-1 (가) †)을 좁힌다. 분류 쓰기(`session.rs:284` `write_user_classified`)의 「먼저 emit, 뒤에 send」 갈래(`emit(Queued)` `:303` → `send_input` `:304`)에서 `send_input` 을 맨 `std::panic::catch_unwind` 로 감싼다(기존 `Err` 갈래는 그대로 스스로 `Dropped` 를 낸다). 잡히면 그 id 의 `Dropped{cause: Rejected}` 를 내고 `resume_unwind` 로 다시 풀어 보낸다 → 대기 목록 표가 그 에이전트를 「바쁨」으로 붙들지 않고, 패닉은 바깥 입구까지 원래대로 간다. ★`contain` 이 아니다★ — 훅은 패닉 순간 원래 깊이로 이미 판정했고(`resume_unwind` 는 훅을 다시 부르지 않는다), `contain` 은 깊이를 올려 그 판정을 바꾼다. `Dropped` 는 되감는 중이 아니라 catch 갈래에서 내므로 abort 갈래가 없다 — emit 이 오염으로 패닉하면 그 패닉이 대신 풀린다(오염 패닉 → 훅이 올린다). 그래서 3판의 「P1 · P1o 면 `is_poisoned()` 로 건너뛴다」와 그 확인 뒤 행동 경합이 없어졌다 · (가) 어느 안이든 같다. 「먼저 send, 뒤에 emit」 갈래(`:300-301`)는 send 패닉이면 `Queued` 가 안 나가 유령이 없다. 남는 거짓 `Dropped` = §4-11. 파일 = `session.rs`(U4).
 - **finalize 1회(ADR-0005):** 펌프의 `finish` 는 지금처럼 `contain` **밖**에서 한 번 불린다.
 - **정리 호출자 둘(ADR-0127):** 새 호출자를 만들지 않는다. B2 를 고르면 그 스레드는 「통로가 자식을 끄고 실패 사유 칸을 남긴다」까지만 하고 종료 전이는 펌프가 낸다.
 - **kill 인과(ADR-0001):** 정상 종료는 `shutdown_all` → `kill_agent`(`begin_retire` → … → `session.kill`) 그대로다. §4-5 의 되찾기는 같은 줄에서 락 획득 방식만 바꾼다.
-- **락 순서(ADR-0006) · leftover 잎 락:** 훅의 **깃발 당기기까지(사유 · 표지 · 깃발)** 는 락도 OS 호출(unpark)도 없다. 그 뒤 로그 · 기본 훅은 락을 잡는다(tracing reload · `EnvFilter` · 파일 싱크 · stdout · stderr — §4-3 · 2판의 「로그 싱크 말고 아무 락도 안 잡는다」는 틀렸다). 그 락에서 멎어도 깃발은 이미 섰고, 남이 그 락에 막히는 멎음은 (바) 감시가 끝낸다. 관찰자는 원자값 둘뿐이다(M17).
+- **락 순서(ADR-0006) · leftover 잎 락:** 훅의 **깃발 당기기까지(판정 · 표지 · 깃발 — 4판)** 는 락도 OS 호출(unpark)도 할당도 없다. 그 뒤 사유 문장은 할당하고, 로그 · 기본 훅은 락을 잡는다(tracing reload · `EnvFilter` · 파일 싱크 · stdout · stderr — §4-3 · 2판의 「로그 싱크 말고 아무 락도 안 잡는다」는 틀렸다). 그 락에서 멎어도 깃발은 이미 섰고, 남이 그 락에 막히는 멎음은 (바) 감시가 끝낸다. 관찰자는 원자값 둘뿐이다(M17).
 - **등록 순서(ADR-0019):** 손대지 않는다 — (나)의 스코프 가드는 등록 순서를 바꾸지 않고 실패 갈래만 더한다.
 
 ### 4-8. 여러 걸음 공유 변경 구간 ((나)=E)
 
 - 활성화 등록 창(명부 insert 앞 seed · register 부터 `start_pump` 까지) · 요청에서 부른 `kill_agent` 의 앞 줄 · 연결 수명 처리기의 공유 걸음(U3 가 분류)을 `escalating(…)` 으로 감싼다. 패닉하면 훅이 올리고, 패닉은 바깥 입구까지 풀려 그 요청은 기존 오류로 답한다. `reap_one`(`:56-86`)은 감싸지 않는다 — 표시 없는 reaper 고리 안이라 이미 표시 밖이다(§4-2 · 3판).
-- **스코프 가드(M15)** — 활성화 창에서 빠지면(패닉 · 오류) `transport.shutdown()`. ★가드가 쥐는 것은 걸음에 따라 바뀐다(3판)★ — 통로가 `AgentSession` 으로 옮겨지기 전에는 통로를, 옮겨진 뒤에는 그 세션 핸들을 쥐고 같은 `shutdown` 에 닿는다. 펌프에 넘긴 뒤에는 가드를 끈다. 명부에 이미 올랐으면 `shutdown_all` 이 다시 끄므로 `shutdown` 이 두 번 — 그리고 **동시에**(StopDaemon 과 패닉 꼬리 · §9-8) — 불려도 되는지 U4 가 시험으로 확인한다.
+- **스코프 가드(M15)** — 활성화 창에서 빠지면(패닉 · 오류) `transport.shutdown()`. ★가드가 쥐는 것은 걸음에 따라 바뀐다(3판)★ — 통로가 `AgentSession` 으로 옮겨지기 전에는 통로를, 옮겨진 뒤에는 그 세션 핸들을 쥐고 같은 `shutdown` 에 닿는다. 펌프에 넘긴 뒤에는 가드를 끈다. 명부에 이미 올랐으면 `shutdown_all` 이 다시 끄므로 `shutdown` 이 두 번 — 그리고 **동시에**(StopDaemon 과 패닉 꼬리 · §9-8) — 불려도 되는지 U4 가 시험으로 본다 — 두 번은 확인 시험 · 동시는 패닉 · abort · 멎음이 없다는 **연기 시험**(4판 — 자식 락이 두 부름을 줄 세워 seam 없이는 실패할 수 없다 · §9-8).
   - ★되감는 중의 `shutdown` 은 그 안 락이 되찾기여야 한다★ — 지금 `pty.rs` 의 자식 · master `.expect`(`:412` · `:421`)가 오염을 만나면 `Drop` 안 둘째 패닉 = abort. 그 되찾기는 U2(통로 파일 주인)가 하므로 **U4 는 U2 뒤**다(§7-2 · 3판).
   - 가드는 등록을 되돌리지 않는다 — 활성화 창이 올린 턴 관측(`turns`) · 대기 목록 표(`inputs_pending`) 등록은 남는다. E 에서는 곧 종료라 무해하고, (나)=R 이면 되돌림 목록에 든다.
 - 감시 기동 `.expect("spawn pty watcher thread")`(`pty.rs:265`) · 펌프 맨 `thread::spawn`(`:269`)은 버그가 아니라 자원 실패다 — 오류로 바꿔 `start` 를 실패 가능하게 하는 것은 R 쪽 일이라 E 에서는 그대로 둔다(그 패닉도 E 가 정상 종료로 올린다).
 
 ### 4-9. 셸 ((라)=S1a)
 
-- 같은 훅 모양(§4-3)이고 셸은 표시를 세우지 않으므로 **모든 패닉이 당긴다.** 설치 = 셸 `run()` 머리(로깅 뒤) + `sync::set_poison_observer`.
-- 깨우기 스레드는 setup 에서 `AppHandle` 과 걸쇠(M20)를 받아 띄운다: `esc.wait_polling(200ms)` → 본 시각 기록 → `MAIN_ESCALATED` 가 아니면 **`app.exit(101)` 먼저**(3판 · D1) → 시한(가안 5초 · 주입 — M19)까지 `park_timeout` 고리 → 아직 살아 있으면 `process::exit(101)`. 시한 갈래는 `Final` 을 안 쓰고, **`MAIN_ESCALATED` 여도 간다** — 주 스레드 되던지기가 훅 로그 자기교착 · 막힌 주 스레드 · COM `Drop` 에서 멎는 경우((바)의 (1) · (2))가 바로 그것이다. setup 전에 당겨졌으면 첫 확인에서 끝낸다. 기동 실패 = setup 실패(시작 실패 갈래).
-  - ★깨우기는 로그를 쓰지 않는다(3판)★ — 같은 스레드에 시한을 얹었으므로 그 스레드가 로그 락에 막히면 시한도 막힌다(그 멎음이 (바)의 표적이다). 리뷰안(D1)의 「`app.exit` 먼저 · 로그는 뒤」에서 로그를 `RunEvent::Exit` 패닉 갈래(아래)로 옮겼다. 주 스레드 패닉은 `Exit` 사건이 없어 훅의 ③ 줄이 유일한 사유 기록이다(§4-11). 대안 = 데몬처럼 감시 스레드를 따로 두고 깨우기는 로그까지 하는 것 — 스레드 하나가 늘고 그 밖은 같다.
-- `RunEvent::Exit`(`lib.rs:401`): `is_pulled()` 면 사유 로그(이 줄에서 멎으면 깨우기의 시한이 끝낸다) → `Final` 쓰기는 건너뛰고 실행 잠금은 놓은 뒤 `handle.cleanup_before_exit()` → `process::exit(101)`(M18). `exit_session.shutdown()` 에 「`Final` 없이」 갈래가 하나 늘고, 종료 세션은 걸쇠를 인자로 받는다(M20 — 시험이 전역을 안 뒤집게).
+- 같은 훅 모양(§4-3)이고 셸은 표시를 세우지 않으므로 **모든 패닉이 당긴다.** 설치 = 셸 `run()` 머리(로깅 뒤) + `sync::set_poison_observer` + **곧바로 감시 스레드**(M19 · 아래 — `cfg(panic = "unwind")` 빌드만 · 기동 실패 = 셸 시작 실패).
+- 깨우기 스레드는 setup 에서 `AppHandle` 과 걸쇠(M20)를 받아 띄운다: `esc.wait_polling(200ms)` → `MAIN_ESCALATED` 가 아니면 `app.exit(101)` — **그것뿐이다**(4판 · 시한 없음 · 로그 없음). `app.exit` 가 막혀도 상관없다 — 끝은 감시가 보장한다. setup 전에 당겨졌으면 첫 확인에서 부른다. 기동 실패 = setup 실패(시작 실패 갈래).
+  - ★셸 감시는 깨우기와 다른 스레드다(4판 — T1)★ — 3판은 시한을 깨우기에 얹고 「따로 두는 대안은 그 밖은 같다」고 적었으나 틀렸다: tauri 2.11.3 `AppHandle::exit`(`app.rs:574-579`)는 `request_exit` 가 실패하면 `log::error!`(log → tracing 다리 — `base/src/logging/mod.rs:422` 의 `try_init`) → `cleanup_before_exit()`(`tray.icons.lock().unwrap()` `app.rs:1110`) → `process::exit` 를 **부르는 스레드에서** 돈다 — 같은 스레드의 시한은 상한이 아니다. 감시 = 훅 설치 직후 띄우는 std 스레드 — 걸쇠 · 시한(가안 5초)만 받고 `AppHandle` 을 모른다 · 깃발을 본 뒤 시한이 지나면 `terminate_self(101)`(`Final` 안 씀 · **`MAIN_ESCALATED` 여도 간다** — 주 스레드 되던지기가 훅 로그 자기교착 · 막힌 주 스레드 · COM `Drop` 에서 멎는 경우((바)의 (1) · (2))가 바로 그것이다). 훅 설치 때 서므로 setup 앞 멎음도 덮는다. 로그 · 락을 쓰지 않는다. 사유 로그는 `RunEvent::Exit` 패닉 갈래(아래) 하나다 — 주 스레드 패닉은 `Exit` 사건이 없어 훅의 (e) 줄이 유일한 사유 기록이다(§4-11).
+- `RunEvent::Exit`(`lib.rs:401`): `is_pulled()` 면 사유를 `wait_reason(1초 · 가안)` 으로 기다려 로그(4판 — 훅이 사유를 깃발 뒤에 적는다 · 이 줄에서 멎으면 감시가 끝낸다) → `Final` 쓰기는 건너뛰고 실행 잠금은 놓은 뒤 `handle.cleanup_before_exit()` → `process::exit(101)`(M18). `exit_session.shutdown()` 에 「`Final` 없이」 갈래가 하나 늘고, 종료 세션은 걸쇠를 인자로 받는다(M20 — 시험이 전역을 안 뒤집게).
 - **데몬은 건드리지 않는다** — `quit_app` 을 부르지 않는다.
 - 주 스레드 패닉: 훅이 당기고 로그한 뒤 tao 가 되던져 `App::run` 밖으로 풀린다 → 종료 코드 101 · `Exit` 사건 없음 · `Final` 안 쓰임(S1a 와 같은 결말) · `cleanup_before_exit` 없음(트레이 아이콘이 남을 수 있다 — 미검).
 
@@ -474,19 +485,20 @@ hook(info):                                     // 패닉한 스레드에서 · 
 
 - ★**못 찾은 여러 걸음 공유 변경**★ — 1 · 2층 코드가 락 밖에서 공유 상태를 반쯤 바꾸다 난 패닉은 가둬지고 그 상태는 남는다. 이것은 ADR-0288 결정 1 이 받아들인 것이 **아니다**(1판의 오귀속 — 결정 3 은 공유 상태 패닉 = 종료라 적는다). (나)가 찾은 구간만 올리고, 못 찾은 구간은 ADR-0288 결정 3 과의 틈으로 남는다.
 - ★**(가)의 대가**★ — P1: 락을 쥔 2층 패닉 대부분이 재시작 · P2: 요청이 반쯤 바꾼 에이전트 상태로 그 에이전트가 계속 돈다.
-- **정상 종료가 멎는 경우** — 종료 시간 제한은 미룬 장치다(StopDaemon · 트레이 끄기는 (바)와 무관하게 계속 시한 없음). 패닉 경로는 런타임 drop 대기를 `exit(101)` 로 건너뛰지만(M7) 꼬리 안의 기다림은 남는다: `McpServerHandle::shutdown` 의 시한 없는 await(axum graceful 이 붙은 연결을 기다린다 — rmcp 는 자식 토큰으로 세션을 닫는다(`mcp_server.rs:1332`)고 보이나 미검) · `tracker.stop()` join(실제로는 짧다) · **자식 락 아래 `child.wait()`**(`pty.rs:414` · `stdio.rs:396` — kill 뒤에도 자식이 안 끝나면 그 kill 스레드가 멎고, `shutdown_all` 의 `thread::scope`(`manager.rs:3122-3128`)를 기다리는 꼬리 ③(`lib.rs:823`)이 함께 멎는다 · 3판). flush 는 5초 띠 둘로 유한하다. (바)=감시면 패닉 경로의 이 멎음은 감시가 끝낸다(M19).
-- ★**패닉 종료의 멎음**★ — 되감기가 abort 에 없던 멎음을 들인다(셸 훅 로그 자기교착 · 막힌 주 스레드 · 데몬 로그 락 · MCP await · 위 `child.wait()`) — 시한을 둘지 = 사용자 결정 (바)(§3-1). (바)=감시면 남는 것: `process::exit` 자체가 멎은 스레드에 막히는 경우(§9-12 · 미검) · 셸 setup **앞**에서 당겨진 채 멎는 경우(셸 시한은 setup 에서 서는 깨우기 스레드에 얹혀 있다 — 데몬 감시는 훅 설치 때 선다).
+- **정상 종료가 멎는 경우** — 종료 시간 제한은 미룬 장치다(깃발 없는 StopDaemon · 트레이 끄기는 (바)와 무관하게 계속 시한 없음 — 그 꼬리 도중 깃발이 서면 (바)=감시가 덮는다 · 4판). 패닉 경로는 런타임 drop 대기를 `exit(101)` 로 건너뛰지만(M7) 꼬리 안의 기다림은 남는다: `McpServerHandle::shutdown` 의 시한 없는 await(axum graceful 이 붙은 연결을 기다린다 — rmcp 는 자식 토큰으로 세션을 닫는다(`mcp_server.rs:1332`)고 보이나 미검) · `tracker.stop()` join(실제로는 짧다) · **자식 락 아래 `child.wait()`**(`pty.rs:414` · `stdio.rs:396` — kill 뒤에도 자식이 안 끝나면 그 kill 스레드가 멎고, `shutdown_all` 의 `thread::scope`(`manager.rs:3122-3128`)를 기다리는 꼬리 ③(`lib.rs:823`)이 함께 멎는다 · 3판). flush 는 5초 띠 둘로 유한하다. (바)=감시면 패닉 경로의 이 멎음은 감시가 끝낸다(M19).
+- ★**패닉 종료의 멎음**★ — 되감기가 abort 에 없던 멎음을 들인다(셸 훅 로그 자기교착 · 막힌 주 스레드 · 데몬 로그 락 · MCP await · 위 `child.wait()`) — 시한을 둘지 = 사용자 결정 (바)(§3-1). (바)=감시면 4판이 둘을 더 닫았다 — `process::exit` 가 멎은 스레드 · 로더 락에 막히는 경우(감시는 그 길 대신 즉시 끝내기 — §9-12) · 셸 setup **앞**에서 당겨진 채 멎는 경우(셸 감시도 훅 설치 때 선다). 남는 것 = 감시 스레드가 기동에 성공한 뒤 스스로 멎는 경우뿐(로그 · 락 · 할당이 없어 길을 못 찾았다).
 - **팬아웃 seq 구멍** — 출력 코어 `fan_out`(`output_core.rs:351-380`)은 구독자 사본을 돌며 `send` 한다 — 요청 스레드에서 가둔 패닉이 그 고리 가운데서 나면 남은 구독자는 그 seq 를 못 받는다 → 그 뷰는 붙듦 상한까지 멈춘 뒤 전량 replay 로 회복(「replay→live」 불변식의 기존 회복 길).
 - **reaper 의 낡은 목록 줄** — (나)=R 이거나 reaper 를 그대로 가두면 `sessions.remove` 뒤 `agent_list_updated` 전 패닉이 낡은 줄을 남긴다. (나)=E 면 정상 종료로 간다.
 - **동시 종료 경합** — StopDaemon 과 패닉 꼬리가 겹치면 StopDaemon 답이 사라질 수 있다(M12) · 남은 자식은 Job 이 끈다.
 - **net 자기 루프 · 연결 수명 · 써드파티 내부 패닉 = 재시작**(M5) · **스트리밍 · SSE 본문**(hyper 가 `next.run` 뒤에 poll) = 표시 밖 → 재시작.
-- **abort 갈래** — 이중 패닉 · Drop 안 패닉(되감는 중) · FFI 건넘 · WebView2 COM 콜백 패닉(셸 — 미검)은 지금처럼 즉사(Job 이 에이전트 정리). `Contained::drop` 의 `catch_unwind` 는 되감는 중엔 무력하다(M16). 되감는 중 도는 `Drop` 의 `.expect` 는 이 갈래로 간다 — 찾은 것(`SessionTracker::drop`)은 M23 이 걷는다. command `route.rs` 주석의 「핸들러 · 링크 future 는 drop 에서 패닉하면 안 된다」가 계속 유효하다.
+- **abort 갈래** — 이중 패닉 · Drop 안 패닉(되감는 중) · FFI 건넘 · WebView2 COM 콜백 패닉(셸 — 미검)은 지금처럼 즉사(Job 이 에이전트 정리). `Contained::drop` 의 `catch_unwind` 는 되감는 중엔 무력하다(M16). 되감는 중 도는 `Drop` 의 `.expect` 는 이 갈래로 간다 — 찾은 것(`SessionTracker::drop` · `SpawnReservation::drop` `manager.rs:746-753` — (나)=E 활성화 창의 되감기에서 돈다 · 4판)은 M23 이 걷는다. command `route.rs` 주석의 「핸들러 · 링크 future 는 drop 에서 패닉하면 안 된다」가 계속 유효하다.
 - **부팅 중 결정적 패닉의 재기동 고리** — 지금(abort)과 같다(이제 `exit(101)` 로 끝날 뿐).
 - **표시 누락** — 새 spawn 이 표시 없이 들어오면 그 자리 패닉은 재시작이다(안전한 쪽). M9 가 요청 경로 파일에서만 막는다.
-- **훅의 할당 · tracing 락** — 사유 문장은 훅에서 할당한다(std 기본 훅도 한다). tracing 내부(reload · `EnvFilter` `RwLock`)를 쥔 채 난 패닉이면 훅의 로그가 교착할 수 있다. 깃발은 이미 섰지만 ★「다른 스레드가 종료를 탄다 · 로그만 잃는다」는 2판의 틀린 말이다(3판)★ — 그 락을 기다리는 **모든** 로그 호출이 막히므로 accept 루프 · 꼬리의 `info!`(예: `lib.rs:832`)도 멎고, 데몬은 단일 인스턴스 잠금 · `daemon.json` 을 쥔 채 남는다((바)의 (3)). (바)=감시면 감시(로그 안 씀)가 시한 뒤 끝낸다 · 미룸 유지면 서명받을 잔여.
-- **셸 주 스레드 패닉의 사유 기록** — 깨우기가 로그를 안 쓰고(§4-9) `Exit` 사건이 없으므로 훅의 ③ 줄이 유일하다. 그 스레드가 파일 쓰기 도중 패닉했으면 그 줄은 재진입 가드가 버린다(M4 L1) → 사유가 로그에 안 남는다(창은 닫히고 다음 실행이 복원을 묻는다).
+- **훅의 할당 · tracing 락** — 사유 문장은 훅에서 깃발 **뒤에** 할당한다(4판 · std 기본 훅도 할당한다). tracing 내부(reload · `EnvFilter` `RwLock`)를 쥔 채 난 패닉이면 훅의 로그가 교착할 수 있다. 깃발은 이미 섰지만 ★「다른 스레드가 종료를 탄다 · 로그만 잃는다」는 2판의 틀린 말이다(3판)★ — 그 락을 기다리는 **모든** 로그 호출이 막히므로 accept 루프 · 꼬리의 `info!`(예: `lib.rs:832`)도 멎고, 데몬은 단일 인스턴스 잠금 · `daemon.json` 을 쥔 채 남는다((바)의 (3)). (바)=감시면 감시(로그 안 씀)가 시한 뒤 끝낸다 · 미룸 유지면 서명받을 잔여.
+- **셸 주 스레드 패닉의 사유 기록** — 깨우기가 로그를 안 쓰고(§4-9) `Exit` 사건이 없으므로 훅의 (e) 줄이 유일하다. 그 스레드가 파일 쓰기 도중 패닉했으면 그 줄은 재진입 가드가 버린다(M4 L1) → 사유가 로그에 안 남는다(창은 닫히고 다음 실행이 복원을 묻는다).
 - **셸 「배경 먼저 · 주 스레드 나중」 경합(D1 · 순서로 못 막는다)** — 배경 스레드 패닉이 먼저 당기고(표지 없음) 주 스레드가 뒤이어 따로 패닉하면 깨우기는 표지 없이 `app.exit` 를 부른다 — 주 스레드가 이미 풀려 이벤트 루프가 없으면 `request_exit` 실패 갈래가 깨우기 스레드에서 창 · 트레이를 만진다(M18 이 막으려던 경합). 두 패닉이 겹쳐야 하므로 받는다 · 끝은 시한(M19)이 보장한다.
-- **유령 대기 입력의 남은 틈** — `send_input` 가드(M22)는 (가)=P1 · P1o 에서 replay 락이 오염돼 있으면 건너뛰고, 「먼저 emit, 뒤에 일」 꼴의 **못 찾은** 자리는 덮지 않는다 → 그 에이전트로 가는 우편이 ✕ · 재시작까지 멈춘다(§3-1 (가) †).
+- **유령 대기 입력의 남은 틈** — `send_input` 포착(M22)은 「먼저 emit, 뒤에 일」 꼴의 **못 찾은** 자리를 덮지 않는다 → 그 에이전트로 가는 우편이 ✕ · 재시작까지 멈춘다(§3-1 (가) †). (3판의 「P1 · P1o 면 건너뜀」 틈은 4판에서 없어졌다 — M22.)
+- **거짓 `Dropped`(4판 — 받는다)** — 통로가 바이트를 이미 받아 둔 뒤(`pty.rs:360-363`) 같은 `send_input` 안에서 패닉하면 M22 가 `Dropped{Rejected}` 를 내지만 입력은 실제로 나간다 → 벤더 `Delivered` 가 묘비 id 에 오고, 사용자가 다시 보내면 입력이 둘이 된다. 드물다 · 통로 trait 은 바꾸지 않는다.
 - **부팅 대기(확신도 낮음 · 리뷰)** — 깃발을 보는 것은 accept 루프뿐이라 그 **앞** 부팅 걸음이 당겨진 채 멎으면 깨울 길이 없다. 그런 대기는 못 찾았다. (바)=감시면 감시가 훅 설치부터 돌아 덮는다 → 잔여 아님 · 미룸 유지면 이 줄이 남는다.
 - **셸 주 스레드 패닉 뒤 트레이 아이콘** — `cleanup_before_exit` 가 안 돌아 남을 수 있다(마우스를 올리면 사라지는 Windows 동작 — 추론 · 미검).
 
@@ -499,14 +511,14 @@ hook(info):                                     // 패닉한 스레드에서 · 
 | 1 | 버스 명령 · WS 명령 · 제어 HTTP · MCP 도구 처리 중 패닉 | 데몬 즉사 → 에이전트 전부 죽음 | 그 요청만 오류 답(N1a) · 데몬 · 에이전트 계속. **단 공유 락을 쥔 채였고 누가 그 락을 다시 만지면 그때 정상 종료**(P1: 어떤 락이든 · P1o: 순서 락 빼고 어떤 락이든) · 입력 보내기 도중이었으면 그 에이전트로 가는 우편이 ✕ · 재시작까지 멈출 수 있다(유령 대기 입력 — 모든 안 · §3-1 (가) †) |
 | 2 | 에이전트 하나의 코드 패닉(펌프 · 감시 · stderr · 라이터 · 첫 턴 기록 · leftover · 메시지 배달) | 데몬 즉사 | 그 에이전트 `Failed` · 라이터면 입력만 거절 · 나머지 계속. **공유 락을 쥔 채였으면 정상 종료**(P1: 그 에이전트 자기 락이어도 종료 · B1: 감시 · stderr 는 종료) |
 | 3 | 에이전트 시작 · 수거 · kill · 연결 붙이기 · 떼기 도중 패닉((나)) | 데몬 즉사 | 데몬 정상 종료(그 요청은 오류 답) · 시작 도중 스레드를 못 만든 자원 실패도 같다(지금 debug 는 `SpawnFailed` 답) |
-| 4 | 공유 상태 · 표시 밖 · 공유 락 오염 · codex 라이터 · net 루프 패닉 | 데몬 즉사 | 데몬 정상 종료(에이전트 정리 · 화면 「데몬 꺼짐」 · 꼬리 동안 새 명령 · 조회 · 도구 호출은 오류 답(다) · 종료 코드 101) — 다음 데몬 부팅은 지금처럼 자동 복원 안 함 · 활성화로 이어받기 |
+| 4 | 공유 상태 · 표시 밖 · 공유 락 오염 · codex 라이터 · net 루프 패닉 | 데몬 즉사 | 데몬 정상 종료(에이전트 정리 · 화면 「데몬 꺼짐」 · 꼬리 동안 새 명령 · 조회 · 도구 호출은 오류 답(다 — 정리 꼴 명령 빼고) · 종료 코드 101) — 다음 데몬 부팅은 지금처럼 자동 복원 안 함 · 활성화로 이어받기 |
 | 5 | 데몬 부팅 중 패닉 | 즉사 | 곧바로 종료(코드 101 — 꼬리 없음) |
 | 6 | 셸 패닉(버스 명령 처리 포함) | 셸 즉사 · 데몬 산다 | 셸만 닫힘(버스 명령이면 호출자는 `INTERNAL` 답도 받는다) · 데몬 산다 · 다음 실행 = 비정상 종료 복원 물음 |
 | 7 | 이중 패닉 · FFI · WebView2 콜백 | 즉사 | 같다 |
 | 8 | 개발(debug) 빌드 | 표시 없는 패닉 = 그 스레드만 조용히 죽음 | 데몬 · 셸이 정상 종료한다(개발자가 바로 본다) |
 | 9 | 배포 exe 크기 | — | 커진다(미측정 — M11) |
 | 10 | CLI 패닉 | fast-fail 코드 | 종료 코드 101 |
-| 11 | 패닉 뒤 종료가 멎음((바) — 훅 로그 자기교착 · 막힌 주 스레드 · MCP 종료) | 없음(즉사라 멎을 틈이 없다) | 데몬 30초 · 셸 5초 뒤 강제 종료(코드 101 · 가안) — (바)=미룸 유지면 사람이 끌 때까지 멎은 채 남는다 · 셸 시한만이면 데몬 쪽은 남는다 |
+| 11 | 패닉 뒤 종료가 멎음((바) — 훅 로그 자기교착 · 막힌 주 스레드 · MCP 종료) | 없음(즉사라 멎을 틈이 없다) | 데몬 30초 · 셸 5초 뒤 강제 종료(코드 101 · 가안) — 깃발 없는 StopDaemon · 트레이 끄기는 그대로지만 그 꼬리 도중 깃발이 서면(앞선 오염의 관찰 · 정리 중 패닉) 그 끄기도 같은 상한 · 코드 101 · (바)=미룸 유지면 사람이 끌 때까지 멎은 채 남는다 · 셸 시한만이면 데몬 쪽은 남는다 |
 
 ---
 
@@ -515,8 +527,9 @@ hook(info):                                     // 패닉한 스레드에서 · 
 - **새 의존 0** — base `panic` 은 std 만 · 데몬은 이미 axum · tokio · futures-util 을 진다.
 - **base 게이트:** `use tauri` 0 · 의존 상한(자기 자신 1줄) 그대로 · **입주자 무참조 ③ 의 알파벳에 `panic`**(정본 `base/src/lib.rs:54`) — 사본 여섯(`CLAUDE.md:255` · `.github/workflows/ci.yml:668` · `.claude/skill-bindings/qa.md:161` · `docs/testing-strategy.md:50` · `:179` · `base/src/lib.rs:54`) + 입주자 명단 사본(base `lib.rs` 헤더 「여덟」 `:4` · 선언 `:75-84` · CLAUDE.md base 항목 · 루트 `Cargo.toml` 멤버 주석 · `docs/testing-strategy.md` 의 base 단위 목록 · base 시험 줄). ★주석에 `crate::panic` · `super::panic` 철자를 쓰지 않는다(게이트 ③ 이 잡는다)★.
 - **net:** 무변경(M5 N1) — 의존 상한 · 심볼 allowlist · `--all-features` 그대로.
+- **platform(4판 — U1):** 즉시 끝내기 `process::terminate_self` 하나(§4-4). cfg 는 platform `process.rs` 안이라 OS 게이트 명단(④ cfg · ⑥ `std::os` — 둘 다 platform **밖** 명단)은 무변경 · 짝(platform 안 1파일 이상)은 이미 선다 · ⑤ OS crate 운영 의존 무변경 · `windows` feature 추가 없음(`Win32_System_Threading` 이미 켜짐) · 새 의존 0(non-Windows `_exit` 는 `extern "C"` 선언 — 가안) · `use tauri` 0 · 의존 상한(자기 자신 1줄) 그대로. 부르는 쪽(데몬 · 셸)은 이미 platform 을 운영 의존으로 진다.
 - **메시징:** 의존 0 유지 — 관찰자를 못 부르는 것은 U8a 가 문장으로 다룬다(§2-6).
-- **새 게이트:** 컴파일 가드(M10 — 코드 안 · 데몬 lib · agent lib) · 요청 경로 맨 spawn 소스 시험(M9 — 허용 목록 = `connection_core.rs:1543` · `command_delivery.rs:527` · `mcp_server.rs:1411` 셋뿐 · `mcp_server.rs` 의 처리기 blocking 여섯은 도우미로 옮겨 목록에 없다) · U8b 뒤 §2-8 의 넓힌 정규식으로 남은 줄 확인(문서 확인 — CI 아님).
+- **새 게이트:** 컴파일 가드(M10 — 코드 안 · 데몬 lib · agent lib) · 요청 경로 맨 spawn 소스 시험(M9 — 허용 목록 = `connection_core.rs:1543` · `command_delivery.rs:537`(4판 정정) · `mcp_server.rs:1411` 셋뿐 · `mcp_server.rs` 의 처리기 blocking 여섯은 도우미로 옮겨 목록에 없다) · U8b 뒤 §2-8 의 넓힌 정규식으로 남은 줄 확인(문서 확인 — CI 아님).
 - **CI:** 워크플로 변경 = 게이트 ③ 문자열 하나. 릴리스 잡은 프로필을 그대로 따른다. 새 통합 시험 바이너리 둘은 워크스페이스 회귀가 그대로 줍는다(스텝 추가 없음 — 미검).
 - **회귀 결과 줄:** +2(가안) — U1 이 base `tests/poison_observer.rs`(관찰자 등록 상태 — M20)를, U5 가 데몬 `tests/` 에 실프로세스 시험 파일 하나를 더한다. 나머지 단위 0.
 
@@ -530,14 +543,14 @@ hook(info):                                     // 패닉한 스레드에서 · 
 
 | id | 범위 | 건드리는 파일 | 선행 | 크기(어림) | QA |
 |---|---|---|---|---|---|
-| **U1** | base `panic`(§4-1 — `Escalation::new` 포함 · M20) · `sync` 관찰 갈래 · 범위 갈래((가)) · 관찰자 등록 · `logging` 재진입 가드 · 게이트 ③ · 명단 사본 | base `src/panic.rs`(새) · `src/sync.rs` · `src/logging/mod.rs` · `src/lib.rs` · `tests/poison_observer.rs`(새 · 가안 — M20) · base `Cargo.toml` description · 게이트 ③ 사본 다섯 · 명단 사본 | ADR-0292 | 중간(+370 · 시험 ≈ 20 — ★걸쇠 시험은 전부 지역 인스턴스(M20)★: 깊이 증감 · 중첩 · 되감기 뒤 복귀 · `Contained` poll 마다(스레드 옮김 흉내) · 패닉 · 취소 drop 이 깊이 안 · `escalating` 0 과 복귀 · `is_poison_panic` 핀(Mutex `.expect` · `.unwrap` · RwLock) · 걸쇠(SeqCst · 폴링 대기 먼저/나중 · 첫 사유 · 첫 자리) · lib 단위 = 미등록이면 말없음 · 재진입 가드 / `tests/poison_observer.rs` = 관찰 갈래가 호출 위치를 넘김 · 범위 갈래는 안 부름 · 결과 줄 +1) | standard |
+| **U1** | base `panic`(§4-1 — `Escalation::new` · `payload_str` · `wait_reason` 포함 · M20) · `sync` 관찰 갈래 · 범위 갈래((가)) · 관찰자 등록 · `logging` 재진입 가드 · 게이트 ③ · 명단 사본 · **platform 즉시 끝내기 `process::terminate_self`(4판 · §4-4 — 소비자 U5 · U6 가 다른 물결이라 둘보다 앞선 이 단위에 둔다 · platform 파일은 다른 단위와 안 겹친다)** | base `src/panic.rs`(새) · `src/sync.rs` · `src/logging/mod.rs` · `src/lib.rs` · `tests/poison_observer.rs`(새 · 가안 — M20) · base `Cargo.toml` description · 게이트 ③ 사본 다섯 · 명단 사본 · platform `src/process.rs` | ADR-0292 | 중간(+385 — platform ≈ +15 포함 · 시험 ≈ 20(`terminate_self` 는 자기 프로세스를 끝내 단위 시험 없음 — U5 ⑥ 이 잰다) — ★걸쇠 시험은 전부 지역 인스턴스(M20)★: 깊이 증감 · 중첩 · 되감기 뒤 복귀 · `Contained` poll 마다(스레드 옮김 흉내) · 패닉 · 취소 drop 이 깊이 안 · `escalating` 0 과 복귀 · `is_poison_panic` 핀(Mutex `.expect` · `.unwrap` · RwLock) · 걸쇠(SeqCst · 폴링 대기 먼저/나중 · 첫 사유 · 첫 자리) · lib 단위 = 미등록이면 말없음 · 재진입 가드 / `tests/poison_observer.rs` = 관찰 갈래가 호출 위치를 넘김 · 범위 갈래는 안 부름 · 결과 줄 +1) | standard |
 | **U2** | 에이전트 2층(§4-7) · B1′ 감시 가드 + 사유 칸(★사유 먼저 · 자식 끄기 · master 놓기 순 — D2★) · stderr 줄 가둠(★첫 패닉 뒤 읽어 버리기만 — D5★) · 통로 `shutdown` 락 되찾기(M14 — 파일 주인 · U4 의 M15 가드가 이것에 기댄다) · reaper 고리 주석(표시 없음 = 3층 · `reap_one` 은 감싸지 않는다 — §4-2) · 페이로드 사본 여섯 걷기 · (가)=P2 범위 치환(이 파일들) | agent `transport/{pty,stdio,input_queue,spawn}.rs` · `backend/codex/transport.rs` · `backend/claude/leftover.rs` · `session_id_latch.rs` · `reaper.rs` | U1 | 중간(+150/−90 + P2 치환 ≈ 60곳 · 시험 더함: 감시 패닉 → 펌프가 `Error("pty watcher panicked: …")` 로 끝남(`Exited` 로 굳지 않음) · stderr 해석 패닉 뒤 줄은 해석 없이 비워짐 · 패닉 한 번만 로그) · (P1: +130/−90 · B2: U4b 별도). 크면 셋으로 가른다 — `transport/` · codex · claude+래치+reaper(겹침 없음) | standard |
-| **U3** | 데몬 1층(§4-6) · (다) 거절(★가장 바깥 입구 셋만★) · 처리기 blocking 여섯 → `spawn_blocking_contained` · 걸쇠 주입(도우미 인자 · `ConnectionCore` 칸 — M20) · 연결 수명 처리기 분류((나)) · 연결 소유 락 범위 치환(P2) · 맨 spawn 소스 시험(M9) | daemon `agent_conn.rs` · `connection_core.rs` · `command_delivery.rs` · `control/mcp_server.rs` · 새 `containment.rs`(가안) · `lib.rs`(걸쇠를 넘기는 조립 줄만) | U1 | 중간(+230 · 시험(걸쇠는 지역 인스턴스): 패닉 처리기 → 오류 답 + 연결 유지 · blocking 패닉 → 기존 오류 갈래 · HTTP 500(가장 바깥 층 — `bearer_auth` 안 패닉 포함) · 처리기 blocking 패닉 → 500 · MCP 도구 오류 · 깃발 뒤 거절 = 입구마다 하나(WS 명령 · 제어 HTTP `agent.*` · MCP 도구) · 깃발 뒤에도 안쪽 홉(배달 태스크 → 1단계 blocking)과 `on_disconnect` 는 돈다 · 소스 시험(허용 셋 — `mcp_server.rs` 는 `:1411` 하나)) | standard |
-| **U4** | 종료 경로 오염 내성(M14 — 통로 몫 빼고) · kill 길 상태 싱크 가둠(M21) · 활성화 창 `escalating` + 스코프 가드(M15 — 통로 → 세션 핸들) · 요청 kill 앞 줄 `escalating` · `send_input` 스코프 가드(M22) · 관리자 · 추적기 `Drop`(M23 ①) · `name_allocation` 범위로 명시(§4-5 메인 규칙) · 코어 · 세션 범위 치환(P2) | agent `manager.rs` · `session.rs` · `output_core.rs` · `session_tracker.rs` · daemon `control/registry.rs`(`revoke` 등) · `status_fanout.rs` + 그 생성자에 걸쇠 인자(운영 `lib.rs:334` `status_chain` · 시험 모듈 `connection_core.rs:3021` · `agent_conn.rs:922` — U3 파일) | U1 · **U2** · U3(생성자 자리만)(★M15 가드의 되감는 중 `shutdown` 이 U2 의 `pty.rs` 되찾기에 기댄다 — 그 전엔 `.expect` 둘째 패닉 = abort★) | 중간(+190 + P2 치환 ≈ 36곳 · 시험: 명부 락 오염 뒤 `shutdown_all` 이 전부 끄고 돌아온다 · 한 에이전트의 코어 락 오염이 남의 kill 을 안 막는다 · 레지스트리 오염 뒤 `kill_agent` 완주 · 상태 싱크 패닉 뒤에도 `kill_agent` 가 2동사를 끝까지 + 걸쇠가 섬 · 활성화 창 패닉 → 통로 `shutdown` 불림 · 명부에 좀비 없음 · ★`shutdown_all` 둘이 **동시에**(StopDaemon · 패닉 꼬리 흉내) 실 PTY 에이전트의 `transport.shutdown` 을 겹쳐 불러도 패닉 · abort · 멎음 없음(§9-8)★ · `send_input` 이 emit 뒤 패닉 → `Dropped{Rejected}` 하나 · 되감는 중 `Drop` 은 join 안 함 · `name_allocation` 오염 뒤 활성화 계속) | standard |
+| **U3** | 데몬 1층(§4-6) · (다) 거절(★가장 바깥 입구 셋만★) · 처리기 blocking 여섯 → `spawn_blocking_contained` · 걸쇠 주입(도우미 인자 · `ConnectionCore` 칸 — M20) · 연결 수명 처리기 분류((나)) · 연결 소유 락 범위 치환(P2) · 맨 spawn 소스 시험(M9) | daemon `agent_conn.rs` · `connection_core.rs` · `command_delivery.rs` · `control/mcp_server.rs` · 새 `containment.rs`(가안) · `lib.rs`(걸쇠를 넘기는 조립 줄 · 시험 서버 조립 — 지역 인스턴스 · M20) | U1 | 중간(+240 · 시험(걸쇠는 지역 인스턴스): 패닉 처리기 → 오류 답 + 연결 유지 · blocking 패닉 → 기존 오류 갈래 · HTTP 500(가장 바깥 층 — `bearer_auth` 안 패닉 포함) · 처리기 blocking 패닉 → 500 · MCP 도구 오류 · 깃발 뒤 거절 = 입구마다 하나(WS 명령 · 제어 HTTP `agent.*` · MCP 도구) · ★깃발 뒤에도 거절 안 됨(4판): WS 정리 꼴 명령(StopDaemon 등) · MCP 경로의 rmcp 세션 요청(DELETE 등 — 제어 라우트 층 밖)★ · 깃발 뒤에도 안쪽 홉(배달 태스크 → 1단계 blocking)과 `on_disconnect` 는 돈다 · 소스 시험(허용 셋 — `mcp_server.rs` 는 `:1411` 하나)) | standard |
+| **U4** | 종료 경로 오염 내성(M14 — 통로 몫 빼고) · kill 길 상태 싱크 **가둠 · 버림만**(M21 — 사유 · 당김 · 생성자 걸쇠 인자는 U5 · 4판) · 활성화 창 `escalating` + 스코프 가드(M15 — 통로 → 세션 핸들) · 요청 kill 앞 줄 `escalating` · `send_input` 패닉 포착(M22 — 맨 `catch_unwind` · 4판) · 관리자 · 추적기 `Drop`(M23 ①) · `SpawnReservation::drop` → `sync::lock`(M23 ① · 4판) · `name_allocation` 범위로 명시(§4-5 메인 규칙) · 코어 · 세션 범위 치환(P2) | agent `manager.rs` · `session.rs` · `output_core.rs` · `session_tracker.rs` · daemon `control/registry.rs`(`revoke` 등) · `status_fanout.rs`(생성자 서명은 그대로) | U1 · **U2**(★M15 가드의 되감는 중 `shutdown` 이 U2 의 `pty.rs` 되찾기에 기댄다 — 그 전엔 `.expect` 둘째 패닉 = abort★ · 3판의 「U3(생성자 자리)」 의존은 생성자 인자가 U5 로 가며 없어졌다 · 물결 3 그대로) | 중간(+185 + P2 치환 ≈ 36곳 · 시험: 명부 락 오염 뒤 `shutdown_all` 이 전부 끄고 돌아온다 · 한 에이전트의 코어 락 오염이 남의 kill 을 안 막는다 · 레지스트리 오염 뒤 `kill_agent` 완주 · 상태 싱크 패닉 뒤에도 `kill_agent` 가 2동사를 끝까지(걸쇠는 U5) · 활성화 창 패닉 → 통로 `shutdown` 불림 · 명부에 좀비 없음 · `spawning` 집합 오염 뒤 `SpawnReservation` drop 이 abort 없이 · ★겹친 종료의 **연기 시험**(4판 — 패닉 · abort · 멎음 없음만 본다): `shutdown_all` 둘이 동시에(StopDaemon · 패닉 꼬리 흉내) 실 PTY 에이전트의 `transport.shutdown` 을 부른다 — 자식 락이 줄 세워 seam 없이는 실패할 수 없다(§9-8)★ · `send_input` 이 emit 뒤 패닉 → `Dropped{Rejected}` 하나 + 패닉은 다시 풀림(`resume_unwind`) · 되감는 중 `Drop` 은 join 안 함 · `name_allocation` 오염 뒤 활성화 계속) | standard |
 | (U4b) | (가)=넓게일 때만 — codex 라이터 · thread_lock 의 「펌프로 가는 길」 | codex `transport.rs` · `thread_lock.rs` | U2 · U4 | +120~250 | standard + 실프로세스 |
 | **U8a** | 의미 재감사 + 필요한 코드(M13) — K7 · `in_flight_targets`(`FlightSettle` · `Reservation`) · `DeliveryDone` 2층 표시 · 래치(★ADR-0226 0턴 id 불변식 — 래치 commit 뒤 send 전의 가둔 패닉은 0턴 id 를 영속한다 · 리뷰 판단 = commit-먼저 설계가 이미 받는 창과 같은 모양이라 abort 보다 나쁘지 않다 · U8a 가 확인해 적는다★) · codex 라이터 · `lock_for_cleanup` 짝 · 런타임 로그 문장 `:769`. 결과 표 = ADR-0292 「영향」 끝의 날짜 박은 추기 · 이 TRD 부록 — 결정 ③ 의 `DeliveryDone` 줄 판정도 그 추기로 싣는다(말없는 본문 수정 아님 · §8-1) | `leftover.rs` · `session_id_latch.rs` · codex `transport.rs` · daemon `messaging_host.rs` · `command_roster.rs` · `command_delivery.rs` · messaging `service.rs` | U2 · U3 (★파일이 겹친다★) | 중간(감사 + 코드 ≤ 100줄 · 결과에 따라 +α) | standard + `/review code light` |
-| **U5** | 데몬 훅 조립 · 관찰자 등록 · **감시 스레드(M19 — 훅 설치 직후 · 기동 실패 = `Err(1)`)** · 걸쇠 전역은 여기서만 꺼내 넘김(M20) · accept 루프 interval 팔(`shutdown_tx` 사본 — `lib.rs:383` 앞) + 포착(`run_accept_loop` 안 `select!` 고리) · 꼬리 사유 로그 · `Err(101)` 앞 관리자 `Arc` `mem::forget`(M23 ②) · `main.rs` 최상위 포착 · 방아쇠(M8) · 실프로세스 시험 | daemon `lib.rs`(훅 · 감시 · 조립 · 루프 · 꼬리 · 주석 `:455-457`) · `main.rs` · 새 `tests/panic_policy.rs`(가안) | U2 · U3 · U4 (★표시 · 종료 경로가 먼저★) | 중간(+215 — 감시 ≈ +30 포함 · 단위 시험(지역 걸쇠 · 시한 수십 ms · 기록하는 끝내기): 당김 → 시한 뒤 끝내기 한 번 · 안 당김 → 안 부름 · 시험 파일 +1 결과 줄) | **full** — 실프로세스(debug 데몬 exe · 임시 `ENGRAM_DATA_DIR`): ① 표시 밖 패닉 → N초 안에 끝남 · 코드 101 · 로그에 사유 + 「데몬 종료 완료」 ② 가둔 패닉 → N초 뒤에도 살아 `ListAgents` 에 답함 ③ 공유 락 오염(가둔 패닉이 오염 → 다음 접근) → 정상 종료 + 오염 자리 로그 ④ 셸 에이전트 하나를 띄운 뒤 ① → 자식 사라짐 ⑤ 부팅 패닉 → 곧바로 101(매달림 없음) ⑥ 꼬리 멎음 흉내(방아쇠 `hang` 가안 — 꼬리 머리에서 잠듦 · debug 전용 짧은 시한) → 감시가 시한 뒤 101. `send_stop` 결과는 판정에 안 쓴다(M12) |
-| **U6** | 셸 훅((라) — `MAIN_ESCALATED` 를 당기기 앞에 · D1) · 깨우기 스레드(`app.exit` 먼저 · **시한 뒤 `process::exit(101)` — M19** · 로그 안 씀) · `Exit` 패닉 갈래(사유 로그 여기) · `Final` 없는 종료 세션 · 걸쇠 주입(M20) | `src-tauri/src/lib.rs` · `state/` 의 종료 세션 · 새 작은 모듈(가안) · 방아쇠 | U1 | 작음~중간(+155 · `lib_unit` 시험(지역 걸쇠 · 짧은 시한 · `app.exit` · 끝내기 둘 다 주입해 기록): 표지 없음 → `app.exit` 먼저 · 시한 뒤 끝내기 / 표지 있음 → `app.exit` 없이 시한 뒤 끝내기 / 안 당김 → 둘 다 없음) | **full** — GUI: 배경 스레드 패닉 → 창이 닫힘 · 코드 101 · 데몬 PID 생존 · `engram agent list` 그대로 · 트레이 아이콘 사라짐 · 다음 실행에 복원 물음 / 주 스레드 패닉 → tao 되던지기로 코드 101(abort 아님) · 트레이 아이콘 상태 기록 / 버스 명령 패닉 → 창이 닫힘(S1a) |
+| **U5** | 데몬 훅 조립(4판 순서 — 할당 없는 판정 → 깃발 → 사유 · §4-3) · 관찰자 등록 · **감시 스레드(M19 — 훅 설치 직후 · `cfg(panic = "unwind")` 만 · 끝내기 = `terminate_self` · 기동 실패 = `Err(1)`)** · 걸쇠 전역은 여기서만 꺼내 넘김(M20) · accept 루프 interval 팔(`shutdown_tx` 사본 — `lib.rs:383` 앞) + 포착(`run_accept_loop` 안 `select!` 고리) · 꼬리 사유 로그(끝의 `wait_reason` 1초 · 4판) · `Err(101)` 앞 관리자 `Arc` `mem::forget`(M23 ②) · **M21 의 사유 기록 · 당김 + `DaemonStatusSink::new` 걸쇠 인자(부르는 곳 넷 — `lib.rs:334` · `connection_core.rs:3021` · `agent_conn.rs:922` · `status_fanout.rs:90` · 4판)** · `main.rs` 최상위 포착 · 방아쇠(M8) · 실프로세스 시험 | daemon `lib.rs`(훅 · 감시 · 조립 · 루프 · 꼬리 · 주석 `:455-457`) · `main.rs` · `status_fanout.rs` · `connection_core.rs` · `agent_conn.rs`(시험 모듈 생성자 자리만) · 새 `tests/panic_policy.rs`(가안) | U1(platform 도우미) · U2 · U3 · U4 (★표시 · 종료 경로가 먼저★) | 중간(+225 — 감시 ≈ +30 · M21 당김 ≈ +10 포함 · 단위 시험(지역 걸쇠 · 시한 수십 ms · 기록하는 끝내기): 당김 → 시한 뒤 끝내기 한 번 · 안 당김 → 안 부름 · 상태 싱크 패닉 → 잡은 문장이 첫 사유 · 걸쇠가 섬 · 시험 파일 +1 결과 줄) | **full** — 실프로세스(debug 데몬 exe · 임시 `ENGRAM_DATA_DIR`): ① 표시 밖 패닉 → N초 안에 끝남 · 코드 101 · 로그에 사유 + 「데몬 종료 완료」 ② 가둔 패닉 → N초 뒤에도 살아 `ListAgents` 에 답함 ③ 공유 락 오염(가둔 패닉이 오염 → 다음 접근) → 정상 종료 + 오염 자리 로그 ④ 셸 에이전트 하나를 띄운 뒤 ① → 자식 사라짐 ⑤ 부팅 패닉 → 곧바로 101(매달림 없음) ⑥ 꼬리 멎음 흉내(방아쇠 `hang` 가안 — 꼬리 머리에서 잠듦 · debug 전용 짧은 시한) → 감시가 시한 뒤 `terminate_self` 로 101(platform 도우미의 유일한 운영 시험 · 4판). `send_stop` 결과는 판정에 안 쓴다(M12) |
+| **U6** | 셸 훅((라) — 4판 순서 · `MAIN_ESCALATED` 를 당기기 앞에 · D1) · **감시 스레드(M19 — 훅 설치 직후 · 깨우기와 다른 스레드 · `cfg(panic = "unwind")` 만 · 끝내기 = `terminate_self` · 4판)** · 깨우기 스레드(`app.exit(101)` 하나만 · 시한 · 로그 없음) · `Exit` 패닉 갈래(사유 로그 여기 — `wait_reason` 1초) · `Final` 없는 종료 세션 · 걸쇠 주입(M20) | `src-tauri/src/lib.rs` · `state/` 의 종료 세션 · 새 작은 모듈(가안) · 방아쇠 | U1(platform 도우미 포함) | 작음~중간(+175 — 감시 ≈ +25 · `lib_unit` 시험(지역 걸쇠 · 짧은 시한 · `app.exit` · 끝내기 둘 다 주입해 기록): 깨우기 = 표지 없음 → `app.exit` 한 번 / 표지 있음 → `app.exit` 없음 / 안 당김 → 없음 · 감시 = 당김 → 시한 뒤 끝내기 한 번(표지와 무관) / 안 당김 → 없음) | **full** — GUI: 배경 스레드 패닉 → 창이 닫힘 · 코드 101 · 데몬 PID 생존 · `engram agent list` 그대로 · 트레이 아이콘 사라짐 · 다음 실행에 복원 물음 / 주 스레드 패닉 → tao 되던지기로 코드 101(abort 아님) · 트레이 아이콘 상태 기록 / 버스 명령 패닉 → 창이 닫힘(S1a) |
 | **U7** | 프로필 unwind · 컴파일 가드(데몬 lib · agent lib) · 크기 | 루트 `Cargo.toml:41` · 데몬 · agent `lib.rs` | U4 · U5 · U6 · **U8a** | 작음(+15) | **full** — 릴리스 세 exe 빌드 · 크기 앞뒤 기록(M11) · 가드 증명(스크래치 워크트리에서 abort 로 되돌려 빌드 실패 1회) · `scripts/` 런처로 릴리스 기동 · 에이전트 하나 띄우고 끄기 |
 | **U8b** | abort 전제 **문장** 손질(사실 주장 · 사유) · base `sync` 계약 3 문장 | §2-8 넓힌 정규식의 남은 줄(≈ 57 중 앞 단위가 안 고친 것) | U7 | 중간(≈ 50~60줄 · ≈ 30파일 · 의미 변경 0) | standard |
 | **U9** | ADR 도장 · 문서(§8) | §8-2 · §8-3 목록 | U7 | 문서 | `/qa` 문서 범위 + `/review doc`(load-bearing) |
@@ -548,7 +561,7 @@ hook(info):                                     // 패닉한 스레드에서 · 
 물결 0:  ADR-0292(사용자 결정 (가)~(바) 뒤)
 물결 1:  U1
 물결 2:  U2  ∥  U3                 (agent 통로 · backend · reaper  /  daemon 요청 경로)
-물결 3:  U4  ∥  U8a  ∥  U6         (U4 = U2 · U3 뒤 — agent manager · session · core · tracker + daemon registry · status_fanout
+물결 3:  U4  ∥  U8a  ∥  U6         (U4 = U2 뒤 — agent manager · session · core · tracker + daemon registry · status_fanout
                                      /  U8a = U2 · U3 파일 위  /  U6 = 셸 — 셋 안 겹침)
          (U4b — (가)=넓게일 때 U2 · U4 뒤)
 물결 4:  U5                          (U2 · U3 · U4 뒤 — daemon lib · main · tests)
@@ -556,12 +569,12 @@ hook(info):                                     // 패닉한 스레드에서 · 
 물결 6:  U8b  ∥  U9
 ```
 
-다시 잰 근거(2판 변경 반영 · 3판 = U4 를 U2 뒤로 · 감시는 U5 · U6):
+다시 잰 근거(2판 변경 반영 · 3판 = U4 를 U2 뒤로 · 감시는 U5 · U6 · 4판 = M21 당김을 U5 로 · 도우미는 U1):
 
-- **U4 는 U2 뒤(3판)** — 파일 겹침이 아니라 의존이다: U4 의 스코프 가드(M15)는 되감는 중에 `transport.shutdown()` 을 부르는데, U2 가 `pty.rs` 의 자식 · master `.expect`(`:412` · `:421`)를 되찾기로 바꾸기 전에는 그 락이 오염돼 있으면 `Drop` 안 둘째 패닉 = abort 다. U4 의 상태 싱크 생성자(M21)가 U3 파일의 시험 모듈을 건드리므로 U3 뒤이기도 하다(물결 3 이 둘 다 만족한다).
-- **감시(M19)는 U5 · U6 에 든다** — U1~U4 뒤에 멈추면 감시가 없지만 훅도 없으니 당길 깃발이 안 선다(무동작). U5 · U6 뒤엔 debug 에서 감시가 돈다 · 배포판(abort)에선 패닉이 곧 즉사라 감시가 닿을 일이 없다.
+- **U4 는 U2 뒤(3판)** — 파일 겹침이 아니라 의존이다: U4 의 스코프 가드(M15)는 되감는 중에 `transport.shutdown()` 을 부르는데, U2 가 `pty.rs` 의 자식 · master `.expect`(`:412` · `:421`)를 되찾기로 바꾸기 전에는 그 락이 오염돼 있으면 `Drop` 안 둘째 패닉 = abort 다. 3판은 「U4 의 상태 싱크 생성자(M21)가 U3 파일의 시험 모듈을 건드리므로 U3 뒤이기도 하다」고 적었으나 4판에서 그 생성자 인자는 U5 로 갔다(M21) — U4 의 U3 의존은 없어졌고 물결 3 은 그대로다.
+- **감시(M19)는 U5 · U6 에 · 즉시 끝내기 도우미는 U1 에 든다(4판)** — U1 뒤 도우미는 아무도 안 부른다. U1~U4 뒤에 멈추면 감시가 없지만 훅도 없으니 당길 깃발이 안 선다(무동작). U5 · U6 뒤엔 debug 에서 감시가 돈다 · 배포판(abort)에선 감시를 띄우지도 않는다(`cfg(panic = "unwind")` — U7 이 프로필을 바꾸면 함께 선다).
 
-- **U1~U4 뒤에 멈추면** — 표시 · 되찾기 · `escalating` 구간 · 스코프 가드 · 거절 확인만 있고 훅도 관찰자 등록도 없다. 관찰 갈래는 관찰자가 없으면 지금처럼 말없이 되찾고 · `escalating` 은 훅이 없으면 효과가 없고 · 거절 확인은 깃발이 안 서니 무동작이다. debug = 잡던 자리는 같은 결말 · 새로 잡는 자리(WS 처리기 · HTTP · MCP · 감시 · stderr)는 더 나은 결말 · 스코프 가드는 실패 갈래를 덜 나쁘게. 배포판 = abort 그대로.
+- **U1~U4 뒤에 멈추면** — 표시 · 되찾기 · `escalating` 구간 · 스코프 가드 · 거절 확인만 있고 훅도 관찰자 등록도 없다. ★걸쇠를 당기는 코드도 없다(4판 정정 — S1)★: 3판은 U4 에 M21 의 명시 당김을 두었는데, 그러면 U4 뒤 U5 전에 상태 싱크 패닉 하나가 깃발을 세워 U3 의 거절만 깨어난다 — 깃발을 보고 끝낼 interval 팔 · 감시가 아직 없어 데몬이 끝나지 않은 채 새 일을 막는다. 4판은 U4 = 가둠 · 버림만 · 당김은 U5(그 소비자와 함께). 관찰 갈래는 관찰자가 없으면 지금처럼 말없이 되찾고 · `escalating` 은 훅이 없으면 효과가 없고 · 거절 확인은 깃발이 안 서니 무동작이다. debug = 잡던 자리는 같은 결말 · 새로 잡는 자리(WS 처리기 · HTTP · MCP · 감시 · stderr)는 더 나은 결말 · 스코프 가드는 실패 갈래를 덜 나쁘게. 배포판 = abort 그대로.
 - **U8a 뒤** — 감사가 고른 코드는 abort 아래 도달 불가 갈래이거나(배포판 무변화) debug 결말을 바로잡는 것이다. 배포판 = abort 그대로.
 - **U5 · U6 뒤 U7 전에 멈추면** — debug 는 새 정책대로 돈다. 배포판은 여전히 abort — 훅은 abort 직전에 당긴 뒤 같은 즉사를 맞는다 · `main.rs` 의 `catch_unwind` 는 abort 에서 아무것도 안 잡는다. 지금보다 나빠지는 자리가 없다.
 - **U7 을 U4 · U5 · U6 · U8a 보다 먼저 하면 안 된다** — 훅 없는 unwind 배포판은 표시 밖 패닉이 그 스레드만 조용히 죽이는 모양(ADR-0290 이 거부한 것) · 종료 경로 오염 내성 없는 unwind 는 「돌지도 죽지도 않는」 데몬 · 감사 안 한 abort 전제 코드(K7 등)가 배포된다. 컴파일 가드는 U7 에서 함께 든다(먼저 넣으면 abort 프로필에서 빌드가 깨진다).
@@ -575,26 +588,26 @@ hook(info):                                     // 패닉한 스레드에서 · 
 |---|---|---|---|---|---|---|---|
 | U1 | — | — | — | — | — | — | base `sync.rs`(U1 = 계약 2 · 갈래 · U8b = 계약 3 문장) |
 | U2 | | — | 파일 겹침 없음 · **의존**(M15 가드가 `pty.rs` 되찾기에 기댄다) → **U4 는 U2 뒤**(3판) | `leftover.rs` · `session_id_latch.rs` · codex `transport.rs` → **U8a 는 U2 뒤** | — | — | 통로 파일의 남은 문장 |
-| U3 | — | | `DaemonStatusSink` 시험 생성자(`connection_core.rs:3021` · `agent_conn.rs:922`) → **U4 는 U3 뒤**(3판) | `command_delivery.rs` → **U8a 는 U3 뒤** | daemon `lib.rs` 조립 줄(걸쇠 주입 — M20) → U5 는 U3 뒤(이미) | — | 요청 경로 파일의 남은 문장 |
-| U4 | — | — | | — | daemon `lib.rs` `status_chain`(`:334`) 한 줄 → U5 는 U4 뒤(이미) | — | `manager.rs` 문장 |
+| U3 | — | | —(4판 — 상태 싱크 생성자 인자가 U5 로 가 3판의 겹침이 없어졌다) | `command_delivery.rs` → **U8a 는 U3 뒤** | daemon `lib.rs` 조립 줄(걸쇠 주입 — M20) · `DaemonStatusSink` 시험 생성자(`connection_core.rs:3021` · `agent_conn.rs:922` — 4판) → U5 는 U3 뒤(이미) | — | 요청 경로 파일의 남은 문장 |
+| U4 | — | — | | — | `status_fanout.rs`(U4 = 가둠 · U5 = 사유 · 당김 · 생성자 인자 — 4판) → U5 는 U4 뒤(이미) | — | `manager.rs` 문장 |
 | U5 | — | — | — | — | | — | daemon `lib.rs` 의 남은 문장(sweep `:729` 경고 등) |
 
 ### 7-4. 단위 안 순서 (빌드가 서게)
 
-- **U1** ① `panic.rs` 와 시험(아무도 안 부름) ② `sync` 관찰 갈래(등록 0 이면 지금과 같다) + 범위 갈래(새 이름 · 아무도 안 부름) ③ `logging` 재진입 가드 ④ 헤더 · 게이트 ③ · 명단 사본.
+- **U1** ① `panic.rs` 와 시험(아무도 안 부름) ② `sync` 관찰 갈래(등록 0 이면 지금과 같다) + 범위 갈래(새 이름 · 아무도 안 부름) ③ `logging` 재진입 가드 ④ 헤더 · 게이트 ③ · 명단 사본 ⑤ platform `process::terminate_self`(아무도 안 부름 · 4판).
 - **U2** 파일마다 한 걸음(펌프 셋 → 라이터 → 감시 가드 · 사유 칸(사유 먼저) → stderr(첫 패닉 뒤 버리기) → 통로 `shutdown` 락 → codex 기록 → leftover → reaper 고리 주석) · 사본 걷기 · 범위 치환은 그 파일 걸음에서.
 - **U3** ① `containment.rs`(걸쇠 인자 · 아무도 안 부름) ② `ConnectionCore` 걸쇠 칸 + 조립 줄 ③ 처리기 · spawn 자리를 파일 단위로(`mcp_server.rs` blocking 여섯 포함) ④ HTTP 층 · MCP 도구 ⑤ 거절 확인(바깥 입구 셋) ⑥ 소스 시험.
-- **U4** `get_session` → `shutdown_all` → `kill_agent` 앞 줄 → `enter_exiting` · `finish` → 상태 싱크 가둠(M21 — 생성자 인자 · 부르는 곳 셋 한 걸음) → 추적기 → 레지스트리 → 관리자 · 추적기 `Drop`(M23 ①) → `send_input` 가드(M22) → 활성화 창(가드 · `escalating`) → `name_allocation` → 범위 치환 — 걸음마다 선다.
+- **U4** `get_session` → `shutdown_all` → `kill_agent` 앞 줄 → `enter_exiting` · `finish` → 상태 싱크 가둠 · 버림(M21 — 생성자 서명 그대로 · 당김 없음 · 4판) → 추적기 → 레지스트리 → 관리자 · 추적기 `Drop` · `SpawnReservation::drop`(M23 ①) → `send_input` 포착(M22) → 활성화 창(가드 · `escalating`) → `name_allocation` → 범위 치환 — 걸음마다 선다.
 - **U8a** ① 자리마다 「unwind 아래 무엇이 닿나」 표 ② 표가 요구하는 코드(작은 걸음) ③ ADR-0292 「영향」 끝 추기 · 부록에 결과(`DeliveryDone` 줄 판정 포함 — §8-1).
-- **U5** ① 훅 판정을 조립부 순수 함수로(당기기 없음 · 걸쇠 인자) ② 감시 스레드(M19 — 시한 · 끝내기 주입 · 단위 시험) — 훅이 아직 안 당기므로 무동작 ③ 관찰자 등록 + accept 루프 interval 팔 + 꼬리 사유 로그 · 코드 · `mem::forget`(M23 ②) ④ 당기기 켬 ⑤ accept 루프(`run_accept_loop` 안) · `main.rs` 포착 ⑥ 방아쇠 · 실프로세스 시험.
-- **U6** ① 종료 세션의 「`Final` 없이」 갈래(걸쇠 인자) ② 훅(표지 → 깃발 순) · 깨우기 스레드(`app.exit` 먼저 · 시한 끝내기 · 로그 없음) · `Exit` 패닉 갈래(사유 로그) ③ 방아쇠 · 시험.
+- **U5** ① 훅 판정을 조립부 순수 함수로(당기기 없음 · 걸쇠 인자) ② 감시 스레드(M19 — 시한 · 끝내기 주입 · 단위 시험) — 훅이 아직 안 당기므로 무동작 ③ 관찰자 등록 + accept 루프 interval 팔 + 꼬리 사유 로그(`wait_reason`) · 코드 · `mem::forget`(M23 ②) ③′ `DaemonStatusSink::new` 걸쇠 인자(부르는 곳 넷 한 걸음 — `lib.rs:334` · `connection_core.rs:3021` · `agent_conn.rs:922` · `status_fanout.rs:90`) + M21 사유 기록 · 당김(4판) ④ 당기기 켬 ⑤ accept 루프(`run_accept_loop` 안) · `main.rs` 포착 ⑥ 방아쇠 · 실프로세스 시험.
+- **U6** ① 종료 세션의 「`Final` 없이」 갈래(걸쇠 인자) ② 감시 스레드(시한 · 끝내기 주입 · 아직 안 당기므로 무동작 — 4판) ③ 훅(판정 → 표지 → 깃발 → 사유 순) · 깨우기 스레드(`app.exit` 하나 · 시한 · 로그 없음) · `Exit` 패닉 갈래(`wait_reason` 뒤 사유 로그) ④ 방아쇠 · 시험.
 - **U7** ① 크기 기준 재기 ② 프로필 + 가드 한 커밋 ③ 크기 · 릴리스 QA.
 
 ### 7-5. 단위마다 검증
 
 1. **회귀 수 대조** — `cargo test --workspace -- --test-threads=4` 를 단위 앞뒤로 · `test result:` 줄 수와 통과 총계 둘 다. 기준선은 U1 착수 직전에 다시 잰다(이 TRD 는 돌려 보지 않았다). 기대 = 결과 줄은 U1 +1(base `tests/poison_observer.rs` — M20) · U5 +1(가안) · 통과 수는 단위가 선언한다.
-2. **게이트** — 건드린 crate 의 게이트 전부 + `cargo fmt --check` + base 게이트 ③(U1 뒤 알파벳에 `panic`) · `cargo test -p engram-dashboard --test lib_unit`(U6) · 데몬 · agent 는 `--test-threads=4`(실 프로세스 — U4 의 동시 `shutdown_all` 시험이 실 PTY 를 띄운다).
-3. **시험이 지킬 모양(3판)** — ① 걸쇠를 쓰는 시험은 전부 지역 인스턴스(M20) — 프로세스 전역 `escalation()` · 관찰자 칸을 lib 시험이 건드리면 리뷰에서 막는다(한 방향 전역이라 같은 바이너리의 다른 시험을 뒤집는다) ② 관찰자 등록 상태는 base `tests/poison_observer.rs` 하나에서만 ③ 시한 시험(감시 · 셸 깨우기 — M19)은 주입한 시한 수십 ms · 기록하는 끝내기로 — 실 `process::exit` 를 부르는 것은 U5 실프로세스 ⑥ 하나 ④ 동시 종료(U4 · §9-8)는 두 스레드가 `shutdown_all` 을 겹쳐 부르는 꼴로 — 차례로 두 번 부르기만으로는 통과로 치지 않는다.
+2. **게이트** — 건드린 crate 의 게이트 전부 + `cargo fmt --check` + base 게이트 ③(U1 뒤 알파벳에 `panic`) · `cargo test -p engram-dashboard --test lib_unit`(U6) · platform 게이트 넷(`use tauri` · 의존 상한 · ④ · ⑥ — U1 · 4판) · 데몬 · agent · platform 은 `--test-threads=4`(실 프로세스 — U4 의 동시 `shutdown_all` 시험이 실 PTY 를 띄운다).
+3. **시험이 지킬 모양(3판)** — ① 걸쇠를 쓰는 시험은 전부 지역 인스턴스(M20) — 프로세스 전역 `escalation()` · 관찰자 칸을 lib 시험이 건드리면 리뷰에서 막는다(한 방향 전역이라 같은 바이너리의 다른 시험을 뒤집는다) ② 관찰자 등록 상태는 base `tests/poison_observer.rs` 하나에서만 ③ 시한 시험(감시 둘 — M19)은 주입한 시한 수십 ms · 기록하는 끝내기로 — 실 `terminate_self` 를 부르는 것은 U5 실프로세스 ⑥ 하나 ④ 동시 종료(U4 · §9-8)는 두 스레드가 `shutdown_all` 을 겹쳐 부르는 **연기 시험**이다 — 패닉 · abort · 멎음 없음만 본다. 자식 락(`pty.rs:412-414` · `stdio.rs:394-396`)이 두 부름을 줄 세워 seam 없이는 실패할 수 없으므로 §9-8 을 닫는 증명으로 치지 않는다(4판 — 3판의 「차례로는 통과로 치지 않는다」는 걷었다).
 4. **QA 등급** — 표의 등급(`/qa` 바인딩). full 은 앱을 `scripts/` 런처로 띄운다(셸에서 직접 띄우지 않는다).
 
 ---
@@ -604,28 +617,33 @@ hook(info):                                     // 패닉한 스레드에서 · 
 ### 8-1. ADR-0292 (U1 바로 앞 · `/adr new` — 번호는 예약된 0292)
 
 - **제목(가안):** 패닉 정책 구현 — 가두는 입구는 스레드 표시를 세우고 · 표시 밖이나 공유 락 오염 패닉은 훅이 정상 종료를 당기며 · 배포판은 unwind 다
-- **결정(채택된 것만 적는다):** ① 배포판 unwind(워크스페이스 전체 — 사용자 결정 2026-10-10) + 데몬 lib · agent lib 컴파일 가드 ② 표시 = base `panic`(스레드 지역 깊이 · 동기 · poll 단위 비동기 · `escalating`) — 원시만, 정책은 조립부 ③ 층 경계 표((가) 결과 + net 자기 루프 · 연결 수명 = 3층) ④ 락 오염 정책((가) 결과 · 관찰자 계약) ⑤ 여러 걸음 공유 변경 구간((나) 결과) + 스폰 경로 스코프 가드 ⑥ 훅 — 첫 사유 기록 → 깃발(SeqCst · unpark 없음) → 로그(재진입 가드) ⑦ 깨우기 = 폴링(데몬 accept 루프 팔 · 셸 깨우기 스레드) ⑧ 데몬 끝 = 기존 꼬리 + `exit(101)`(load-bearing) · `main.rs` 최상위 포착 ⑨ 당긴 뒤 새 일((다) 결과) ⑩ 셸 동작((라) 결과) ⑪ 고지 모양((마) 결과) ⑫ 패닉 종료의 시한((바) 결과 — 감시면 데몬 전용 스레드 · 셸 깨우기 시한 · 감시는 로그 · 락을 안 쓴다).
+- **결정(채택된 것만 적는다):** ① 배포판 unwind(워크스페이스 전체 — 사용자 결정 2026-10-10) + 데몬 lib · agent lib 컴파일 가드 ② 표시 = base `panic`(스레드 지역 깊이 · 동기 · poll 단위 비동기 · `escalating`) — 원시만, 정책은 조립부 ③ 층 경계 표((가) 결과 + net 자기 루프 · 연결 수명 = 3층) ④ 락 오염 정책((가) 결과 · 관찰자 계약) ⑤ 여러 걸음 공유 변경 구간((나) 결과) + 스폰 경로 스코프 가드 ⑥ 훅 — 할당 없는 판정 → (셸 주 스레드 표지) → 깃발(SeqCst · unpark 없음) → 첫 사유 기록 → 로그(재진입 가드) · 꼬리는 사유를 유계로 기다린다 ⑦ 깨우기 = 폴링(데몬 accept 루프 팔 · 셸 깨우기 스레드) ⑧ 데몬 끝 = 기존 꼬리 + `exit(101)`(load-bearing) · `main.rs` 최상위 포착 ⑨ 당긴 뒤 새 일((다) 결과) ⑩ 셸 동작((라) 결과) ⑪ 고지 모양((마) 결과) ⑫ 패닉 종료의 시한((바) 결과 — 감시면 데몬 · 셸 각 훅 설치 직후 전용 스레드(unwind 빌드만) · 끝내기 = platform 즉시 끝내기 · 감시는 로그 · 락을 안 쓴다).
 - **U8a 이전에 못 정하는 줄 — 적는 법을 미리 박는다(3판):** ADR-0292 는 U1 앞에 쓰이므로 결정 ③ 의 `DeliveryDone`(메시징 수신자 배달 — §2-2) 줄은 「U8a 판정 대기」 표시로 둔다. U8a 의 판정(2층 유지 · 3층으로 · 코드 손질)은 ADR-0292 「영향」 끝에 **날짜 박은 추기**로 싣고 그 줄 표시를 추기 링크로 바꾼다 — 말없는 본문 수정이 아니다. 판정이 결정 ③ 의 배치를 뒤집으면(2층 → 3층) 추기가 아니라 새 ADR(번복 = 새 번호 · `docs/decisions/README.md`). U8a 의 다른 결과(K7 · `in_flight_targets` · 래치 0턴 id 등)도 같은 추기에 든다.
-- **거부한 대안:** 사용자 · 메인이 이 TRD 의 선택지를 고를 때 실제로 버린 것만, 그때 준 까닭으로 적는다 — ★이 TRD 의 「권고하지 않음」을 그대로 옮겨 적지 않는다(결정 날조 금지)★. 메인 결정에서 실제로 버린 것(근거가 이 TRD 에 있다): 깨우기 unpark(store-buffering · 잎 락 불변식 — M3) · watch 직접 송신(M3) · net 하위 태스크 포장(N3 — 반쪽 연결 · M5) · base 정책 함수(ADR-0269 ② — M1) · kill 길 상태 싱크를 net 쪽에서 되찾기(M5 · M21) · agent 가 전역 걸쇠를 읽어 `Drop` join 을 건너뛰기(M20 · M23).
+- **거부한 대안:** 사용자 · 메인이 이 TRD 의 선택지를 고를 때 실제로 버린 것만, 그때 준 까닭으로 적는다 — ★이 TRD 의 「권고하지 않음」을 그대로 옮겨 적지 않는다(결정 날조 금지)★. 메인 결정에서 실제로 버린 것(근거가 이 TRD 에 있다): 깨우기 unpark(store-buffering · 잎 락 불변식 — M3) · watch 직접 송신(M3) · net 하위 태스크 포장(N3 — 반쪽 연결 · M5) · base 정책 함수(ADR-0269 ② — M1) · kill 길 상태 싱크를 net 쪽에서 되찾기(M5 · M21) · agent 가 전역 걸쇠를 읽어 `Drop` join 을 건너뛰기(M20 · M23) · 셸 깨우기 스레드에 시한 얹기(tauri `AppHandle::exit` 실패 갈래가 그 스레드에서 막힌다 — M18 · M19 · 4판) · 감시의 끝내기를 `process::exit` 로(§9-12 · 4판) · `send_input` 의 `Drop` 가드(되감는 중 둘째 패닉 = abort · 오염 확인 뒤 행동 경합 — M22 · 4판).
 - **링크:**
   - Implements ADR-0288 · ADR-0290.
-  - **Amends ADR-0288 (결정 1 범위)** — 「연결 하나」 = 데몬 처리기 몸통 · net 자기 루프 · 연결 수명 코드 = 3층(M5). (나)=E 면 「명령 하나」 안의 여러 걸음 공유 변경 구간도 정상 종료로 간다.
-  - **Amends ADR-0288 (결정 2 범위)** — (가)가 B2 가 아니면 에이전트당 스레드 일부(codex 라이터 · thread_lock · B1 이면 감시 · stderr 도)가 정상 종료로 간다 · (가)=P1 이면 락을 쥔 2층 패닉도 · (가)=P2 면 「그 에이전트만 **정리**」 대신 요청이 반쯤 바꾼 에이전트는 계속 돈다 · (나)=E 면 에이전트 시작 · 수거 · kill 구간이 정상 종료로 간다. (사용자 답에 맞춰 해당 줄만 남긴다.)
-  - **Amends ADR-0290 (영향 — 연결 태스크 표시 · 표시 모양)** — 연결 태스크(`lib.rs:395`)에는 표시를 세우지 않는다(M5) · 「이미 가두던 reaper」는 고리만 살리고 표시를 세우지 않는다 — 그래서 `reap_one` 패닉은 이미 표시 밖으로 올라간다((나)=E · §4-2).
-  - **(조건부 — (다)=거절일 때만) Amends ADR-0290 (결정 1)** — 「저장 멈춤은 하지 않는다(프로세스가 끝나므로)」를 꼬리 창에 한해 되돌린다: 깃발 뒤 가장 바깥 입구 셋이 새 일을 거절한다(= 그 창의 저장 멈춤). 그 결정의 전제가 몰랐던 꼬리 창(§3-1 (다))이 사유다.
-  - **(조건부 — (다)=거절일 때만) Amends ADR-0288 (결정 3)** — 「이 단계를 위한 전용 장치는 만들지 않는다」에 패닉 종료 전용 확인 하나(입구의 `is_pulled()`)를 더한다. 받아들임이면 두 줄 다 빠지고 두 ADR 은 그대로다.
-  - **(조건부 — (바)=감시일 때만) Amends ADR-0288 (「근거」 셋째 줄 · 「영향」 넷째 줄)** — 미룬 장치 「종료 시간 제한」 중 **패닉 종료의 시한만** 든다(감시 — 데몬 30초 · 셸 5초 가안). 「영향」 넷째 줄의 「미룬 시간 제한도 없어 … 시간 제한을 들이는 결정이 아니라」가 패닉 경로에서는 더 맞지 않는다. StopDaemon · 트레이 끄기의 시한과 셸 사유 고지 · 다음 부팅 표시는 계속 미룬다. 미룸 유지면 이 줄이 빠지고 (바)의 멎음 넷이 §4-11 서명 잔여다. 셸 시한만이면 「셸 깨우기 시한만」으로 줄을 좁힌다.
-  - **Amends ADR-0288 (「영향」 다섯째 줄) · ADR-0290 (「영향」 첫 줄) — 사실 정정(3판 · 답과 무관)** — 「다음 부팅이 그 에이전트들을 평소처럼 되살린다」 · 「다음 부팅 복원을 지금처럼 탄다」는 틀렸다: 운영 데몬의 부팅 자동 복원은 꺼져 있다(`daemon/src/lib.rs:781-787` · 2026-07-09 사용자 결정의 stopgap) → 다음 부팅은 되살리지 않고, 사용자가 활성화로 이어받는다(첫 제출 뒤 영속된 세션 id — ADR-0226).
+  - ★**Amends 는 ADR 쌍마다 한 줄로 합쳐 `/adr new` 때 적는다(4판)**★ — `/adr link` 는 같은 두 ADR 사이에 둘째 조항을 더하지 못한다(「already-linked」 멱등 no-op · `~/.claude/skills/adr/feedback.md:151` · 미해결 도구 한계). ADR-0292 는 사용자 결정 (가)~(바) 뒤에 쓰이므로 조건부 몫도 그때 정해져 한 줄에 담긴다. 아래 0288 · 0290 두 줄의 ①~⑤ 가 각 줄의 조항이다(사용자 답에 맞는 것만 남긴다).
+  - **Amends ADR-0288 (한 줄 — 결정 1 · 2 · 3 · 「근거」 셋째 · 「영향」 넷째 · 다섯째 줄)** —
+    ① **결정 1 범위** — 「연결 하나」 = 데몬 처리기 몸통 · net 자기 루프 · 연결 수명 코드 = 3층(M5). (나)=E 면 「명령 하나」 안의 여러 걸음 공유 변경 구간도 정상 종료로 간다.
+    ② **결정 2 범위** — (가)가 B2 가 아니면 에이전트당 스레드 일부(codex 라이터 · thread_lock · B1 이면 감시 · stderr 도)가 정상 종료로 간다 · (가)=P1 이면 락을 쥔 2층 패닉도 · (가)=P2 면 「그 에이전트만 **정리**」 대신 요청이 반쯤 바꾼 에이전트는 계속 돈다 · (나)=E 면 에이전트 시작 · 수거 · kill 구간이 정상 종료로 간다. (사용자 답에 맞춰 해당 줄만 남긴다.)
+    ③ **결정 3(조건부 — (다)=거절 · (바)=감시 중 하나라도)** — 「이 단계를 위한 전용 장치는 만들지 않는다」에 패닉 종료 전용 장치를 더한다: (다)=거절이면 입구의 `is_pulled()` 확인 · (바)=감시면 그 단계(정상 종료)를 끝까지 지키는 감시 스레드(4판 — 3판은 (바)의 Amends 에 결정 3 을 빠뜨렸다). 둘 다 아니면 이 조항이 빠진다.
+    ④ **「근거」 셋째 · 「영향」 넷째 줄(조건부 — (바)=감시)** — 미룬 장치 「종료 시간 제한」 중 **패닉 종료의 시한만** 든다(감시 — 데몬 30초 · 셸 5초 가안). 「영향」 넷째 줄의 「미룬 시간 제한도 없어 … 시간 제한을 들이는 결정이 아니라」가 패닉 경로에서는 더 맞지 않는다. 깃발 없는 StopDaemon · 트레이 끄기의 시한과 셸 사유 고지 · 다음 부팅 표시는 계속 미룬다. 미룸 유지면 이 조항이 빠지고 (바)의 멎음 넷이 §4-11 서명 잔여다. 셸 시한만이면 「셸 시한만」으로 좁힌다.
+    ⑤ **「영향」 다섯째 줄 — 사실 정정(3판 · 답과 무관)** — 「다음 부팅이 그 에이전트들을 평소처럼 되살린다」는 틀렸다: 운영 데몬의 부팅 자동 복원은 꺼져 있다(`daemon/src/lib.rs:781-787` · 2026-07-09 사용자 결정의 stopgap) → 다음 부팅은 되살리지 않고, 사용자가 활성화로 이어받는다(첫 제출 뒤 영속된 세션 id — ADR-0226).
+  - **Amends ADR-0290 (한 줄 — 결정 1 · 「영향」 첫째 · 셋째 · 넷째 줄)** —
+    ① **「영향」 넷째 줄(연결 태스크 표시 · 표시 모양)** — 연결 태스크(`lib.rs:395`)에는 표시를 세우지 않는다(M5) · 「이미 가두던 reaper」는 고리만 살리고 표시를 세우지 않는다 — 그래서 `reap_one` 패닉은 이미 표시 밖으로 올라간다((나)=E · §4-2).
+    ② **「영향」 셋째 줄(4판 · 답과 무관)** — 「unwind 에서도 프로세스가 곧바로 끝나는 자리 = 메인 future 와 그 안의 연결 수락 루프에서 난 패닉 · … 정상 종료를 거치지 않는다」: 연결 수락 루프의 패닉은 M6 ② 가 `run_accept_loop` 안에서 잡아 꼬리(정상 종료)로 보낸다. 메인 future 자체(부팅 · 꼬리)의 패닉은 그 줄대로 정상 종료 없이 `exit(101)` 이다(M6 ①).
+    ③ **「영향」 첫 줄 — 사실 정정(3판 · 답과 무관)** — 「다음 부팅 복원을 지금처럼 탄다」는 틀렸다 — 근거는 위 0288 ⑤ 와 같다.
+    ④ **결정 1(조건부 — (다)=거절)** — 「저장 멈춤은 하지 않는다(프로세스가 끝나므로)」를 꼬리 창에 한해 되돌린다: 깃발 뒤 가장 바깥 입구 셋이 새 일을 거절한다(= 그 창의 저장 멈춤). 그 결정의 전제가 몰랐던 꼬리 창(§3-1 (다))이 사유다. 받아들임이면 이 조항과 0288 ③ 의 (다) 몫이 빠진다.
   - Amends §8-2 의 일곱.
-  - 앵커 `// ADR-0292` = 훅 조립(데몬 · 셸) · `panic` 모듈 머리 · `sync` 관찰 갈래 · 프로필 줄 · 컴파일 가드 둘 · `escalating` 구간 · `main.rs` 포착 · `exit(101)` 줄 · 감시 스레드 · 셸 깨우기의 시한 줄((바)=감시일 때) · (다) 입구 셋((다)=거절일 때).
+  - 앵커 `// ADR-0292` = 훅 조립(데몬 · 셸) · `panic` 모듈 머리 · `sync` 관찰 갈래 · 프로필 줄 · 컴파일 가드 둘 · `escalating` 구간 · `main.rs` 포착 · `exit(101)` 줄 · 감시 스레드 둘 · platform `terminate_self`((바)=감시일 때) · (다) 입구 셋((다)=거절일 때).
 - **TRD S20 §4 ⑨ 대체 표시** — ADR 은 TRD 를 링크로 폐기하지 못하므로 ADR-0292 「맥락」에 「TRD S20 §4 ⑨ 의 프로필 결정을 대체한다(핸들러 규약은 유효)」를 적고, 그 절 머리에 대체 표시를 단다(§8-2).
 
 ### 8-2. 개정 도장 (`/adr link` — 그 전제를 실제로 바꾸는 단위 착지 뒤 · U9)
 
 | 대상 | 무엇이 바뀌나 |
 |---|---|
-| ADR-0288 | 결정 1 · 2 범위(§8-1) · 「영향」 다섯째 줄 「다음 부팅이 되살린다」 → 부팅 자동 복원 꺼짐 · 활성화로 이어받기(사실 정정 · `lib.rs:781-787`) · (다)=거절이면 결정 3 「전용 장치 없음」 · (바)=감시면 「근거」 셋째 · 「영향」 넷째 줄의 미룬 시간 제한(패닉 종료 몫만) |
-| ADR-0290 | 영향 — 연결 태스크 표시 · reaper(§8-1) · 「영향」 첫 줄 「다음 부팅 복원을 지금처럼 탄다」 → 같은 사실 정정 · (다)=거절이면 결정 1 「저장 멈춤은 하지 않는다」(꼬리 창 한정) |
+| ADR-0288 | ★조항 = §8-1 의 합친 한 줄 — `/adr new` 때 건다 · U9 에 같은 쌍의 둘째 `/adr link` 를 하지 않는다(「already-linked」 no-op — 4판)★ — 결정 1 · 2 범위 · 「영향」 다섯째 줄 「다음 부팅이 되살린다」 → 부팅 자동 복원 꺼짐 · 활성화로 이어받기(사실 정정 · `lib.rs:781-787`) · (다)=거절 · (바)=감시면 결정 3 「전용 장치 없음」 · (바)=감시면 「근거」 셋째 · 「영향」 넷째 줄의 미룬 시간 제한(패닉 종료 몫만) |
+| ADR-0290 | ★조항 = §8-1 의 합친 한 줄 — 0288 행과 같다(4판)★ — 「영향」 넷째 줄(연결 태스크 표시 · reaper) · 「영향」 셋째 줄(연결 수락 루프 패닉 → 꼬리 · M6 ② — 4판) · 「영향」 첫 줄 「다음 부팅 복원을 지금처럼 탄다」 → 같은 사실 정정 · (다)=거절이면 결정 1 「저장 멈춤은 하지 않는다」(꼬리 창 한정) |
 | ADR-0142 | 「수용한 잔여(주입 중 언와인딩 → 재기동 신호 누락)는 debug · test 에만」 → U8a 결과에 따라: 배달이 2층으로 가둬지면 배포판에서도 닿는다 · `FlightSettle` 이 오염이면 말없이 건너뛰는 자리의 판정 |
 | ADR-0199 | 「이 갈래는 릴리스에서 도달 불가」 → 닿는다(세션 id 기록 패닉이 2층으로 잡힌다) |
 | ADR-0226 | 래치 `catch_unwind` 기각 사유 「abort 라 죽은 코드」 → 「바깥 입구 표시가 가둔다」(결론 = 여전히 래치에 catch 없음) |
@@ -638,7 +656,7 @@ hook(info):                                     // 패닉한 스레드에서 · 
 ### 8-3. 그 밖 문서
 
 - `.claude/skill-bindings/review.md:20` — 핸들러 규약의 「근거 · 귀결 정본」 포인터를 S20 ⑨ → ADR-0292 로.
-- CLAUDE.md — 「핵심 불변식」에 한 항목(가둠 표시는 1 · 2층 입구만 · 표시 밖 · 공유 락 오염 = 정상 종료 · `escalating` 구간 · 2층은 펌프의 `finish` 로만 끝난다(ADR-0127 과 같은 줄) · 훅의 깃발 당기기까지와 관찰자는 락 · OS 호출 · 로그 없음 · 감시는 락 · 로그 없음 · 걸쇠 전역은 조립 자리만) · 「백엔드 모듈 맵」 base 항목(입주자 아홉 · `sync` 관찰 · 범위 갈래) · 게이트 ③ 줄 · 회귀 수치(U5 뒤).
+- CLAUDE.md — 「핵심 불변식」에 한 항목(가둠 표시는 1 · 2층 입구만 · 표시 밖 · 공유 락 오염 = 정상 종료 · `escalating` 구간 · 2층은 펌프의 `finish` 로만 끝난다(ADR-0127 과 같은 줄) · 훅의 깃발 당기기까지와 관찰자는 락 · OS 호출 · 로그 없음 · 감시는 락 · 로그 없음 · 끝내기는 platform 즉시 끝내기 · 걸쇠 전역은 조립 자리만) · 「백엔드 모듈 맵」 base 항목(입주자 아홉 · `sync` 관찰 · 범위 갈래) · platform 항목(`process` 에 즉시 끝내기 `terminate_self` — 4판) · 게이트 ③ 줄 · 회귀 수치(U5 뒤).
 - `docs/testing-strategy.md` — 게이트 ③ 사본 둘 · base 단위 목록.
 - `docs/tracking.md` — T-52 에 한 줄(M12 — 패닉 종료는 `send_stop` 을 안 탄다 · 동시 종료 경합) · 이 TRD 가 미룬 것 T- 로(P3 · (가)에서 안 고른 B2 갈래 · (나)=R 구간 · 셸 상자 · 재기동 · StopDaemon 꼬리의 무한 대기(MCP · 자식 락 아래 `child.wait()`) · (바)=미룸 유지면 패닉 종료 멎음 넷). ADR-0288 이 미룬 장치(종료 시간 제한 · 셸 사유 고지 · 다음 부팅 패닉 표시)가 이미 T- 로 있는지 확인하고 없으면 연다.
 - `docs/process/step-log.md` — 단위마다 항목 · **이 TRD 를 링크한다(고아 금지)**.
@@ -655,19 +673,48 @@ hook(info):                                     // 패닉한 스레드에서 · 
 5. **K7 · `in_flight_targets` 등 의미 재감사** — U8a 몫이다. 결과가 코드 손질이면 U8a 가 커진다.
 6. **`transport` crate(`crates/engram-dashboard-transport`)의 태스크** — 운영 부착이 진행 중이다. 부착되면 그 태스크도 §4-2 표 기준을 따른다.
 7. **MCP 종료 대기** — rmcp 가 자식 취소 토큰으로 세션 스트림을 닫아 axum graceful 이 유한하게 끝나는지(§4-11) 미검.
-8. **`transport.shutdown()` 두 번 · 동시 부름의 안전** — 스코프 가드와 `shutdown_all` 이 겹칠 때(M15) · ★StopDaemon 의 `shutdown_all` 과 패닉 꼬리의 `shutdown_all` 이 **동시에** 같은 통로의 `shutdown` 을 부를 때(M12 · 3판)★ — 자식 락 아래 `kill` · `wait`(`pty.rs:412-414` · `stdio.rs:394-396`) · 무리 끄기 · master drop 이 두 스레드에서 겹친다. U4 가 동시 시험(§7-1 · §7-5 3 ④)으로 확인한다 — 차례로 두 번은 이 항목을 닫지 못한다.
+8. **`transport.shutdown()` 두 번 · 동시 부름의 안전** — 스코프 가드와 `shutdown_all` 이 겹칠 때(M15) · ★StopDaemon 의 `shutdown_all` 과 패닉 꼬리의 `shutdown_all` 이 **동시에** 같은 통로의 `shutdown` 을 부를 때(M12 · 3판)★ — 자식 락 아래 `kill` · `wait`(`pty.rs:412-414` · `stdio.rs:394-396`) · 무리 끄기 · master drop 이 두 스레드에서 겹친다. U4 의 동시 시험(§7-1 · §7-5 3 ④)은 **연기 시험**이다(4판) — 자식 락(`pty.rs:412-414` · `stdio.rs:394-396`)이 두 부름을 줄 세우므로 seam 없이는 실패할 수 없다. 패닉 · abort · 멎음이 없다는 것만 보고 이 항목을 닫지는 않는다(락 밖 걸음 — 무리 끄기 · master drop — 의 겹침은 미검으로 남는다).
 9. **통로 drop 의 ConPTY 순서** — 지금처럼 `shutdown` 없이 drop 되면 master(ClosePseudoConsole)가 무리보다 먼저 닫히는데, 그때 막히는지 미검. 스코프 가드가 그 길을 없앤다.
 10. **셸 주 스레드 패닉 뒤 트레이 유령 아이콘** — 추론 · 미검(U6 관측).
-11. **(가)~(바)의 사용자 답** — §4 는 권고안 기준이다. 답이 다르면 §4-2 · §4-4(감시) · §4-5 · §4-6 · §4-7 · §4-8 · §4-9(깨우기 시한) · §4-11 · §7-1(U2 · U3 · U4 · U4b · U5 · U6 크기) · §8-1 · §8-2(조건부 Amends)만 바뀐다.
-12. **`process::exit` 가 멎은 스레드에 막히는가** — (바) 감시의 마지막 걸음이다. 기억(미검): std `exit` 는 stdout 정리를 `try_lock` 으로만 하고 OS 끝내기로 간다 · Windows `ExitProcess` 는 DLL 분리 알림을 로더 락 아래 돈다 — 멎은 스레드가 로더 락을 쥐었으면 막힐 수 있다. U5 실프로세스 ⑥ 은 꼬리 멎음만 흉내 내고 이 경우는 못 잰다. 막힘이 관측되면 대안 = platform 의 즉시 끝내기(`TerminateProcess` 꼴 — DLL 알림 없음 · OS 의존이라 platform 몫).
+11. **(가)~(바)의 사용자 답** — §4 는 권고안 기준이다. 답이 다르면 §4-2 · §4-4(감시 · platform 도우미) · §4-5 · §4-6 · §4-7 · §4-8 · §4-9(셸 감시) · §4-11 · §7-1(U2 · U3 · U4 · U4b · U5 · U6 크기) · §8-1 · §8-2(조건부 Amends)만 바뀐다.
+12. **`process::exit` 가 막힐 수 있는가 → 감시는 쓰지 않는다(4판 — T2)** — 3판의 이 항목은 기억에 기댔다(std 정리 방식 · `ExitProcess` 순서) — 걷는다. 4판의 말: std `process::exit` 는 다른 스레드가 이미 도는 `exit` 나 로더 락 뒤에 막힐 수 있다(추론 · 미검 — 이 PC 에 rust-src 가 없어 원문 대조 못 했다). 그래서 감시(M19)는 platform 즉시 끝내기 `terminate_self`(Windows `TerminateProcess(GetCurrentProcess(), 101)` — DLL 분리 알림 · 로더 락 · atexit · TLS 해체 · std 끝 정리를 건너뛴다)를 부른다. 꼬리 · M6 의 정상 끝은 `process::exit(101)` 그대로다 — 그쪽은 멎음이 관측되면 감시가 덮는다. 남는 미검: non-Windows 갈래(`_exit` `extern "C"` 선언 — 이 저장소엔 non-Windows 빌드가 없다) · `TerminateProcess` 가 자기 프로세스에서 돌아오지 않는다는 것은 U5 실프로세스 ⑥ 이 Windows 에서 잰다.
 13. **부팅 대기(확신도 낮음)** — accept 루프 앞 부팅 걸음 중 당겨진 깃발에 막히는 대기는 못 찾았다(리뷰 · 저자 둘 다). (바)=감시면 닫힌다(§4-11).
-14. **셸 깨우기 시한과 tao 되던지기의 겹침** — 시한(5초) 안에 주 스레드 되던지기가 끝나면 tao 의 101 이, 아니면 깨우기의 101 이 먼저다 — 둘 다 같은 코드라 어느 쪽이 이겨도 결말은 같다(`Final` 없음 · `cleanup_before_exit` 없음 — 10).
+14. **셸 감시 시한과 tao 되던지기의 겹침** — 시한(5초) 안에 주 스레드 되던지기가 끝나면 tao 의 101 이, 아니면 감시의 101 이 먼저다 — 둘 다 같은 코드라 어느 쪽이 이겨도 결말은 같다(`Final` 없음 · `cleanup_before_exit` 없음 — 10).
 
 ---
 
 ## 10. 개정 대조
 
-### 10-1. 3판 개정 대조 (리뷰 2회차 → 3판)
+### 10-1. 4판 개정 대조 (리뷰 3회차 → 4판)
+
+> 입력 = 리뷰 3회차 취합(deep · 스냅숏 `d73aaceb` · codex BLOCK · 리뷰어 둘 FIX → 잠정 BLOCK · codex BLOCK 1 은 리뷰어 둘이 따로 확인). 항목은 전부 설계 · 문서 정정이고 새 사용자 결정은 없다(메인 결정). 2회차 항목 중 일부만 닫혔던 셋 — UC(거절 층이 MCP 까지 덮음) · D6(M22 모양) · D9(실패할 수 없는 시험) — 은 아래 G1 · I1 · A6 이 닫는다. 저자가 코드 · 원문과 대조한 것: tauri 2.11.3 `app.rs:574-579` · `:1110` · `command_delivery.rs:537` · `DaemonStatusSink::new` 넷 · `manager.rs:746-753` · `pty.rs:321-333` · ADR-0290 「영향」 셋째 줄 원문(패닉 정책 브랜치).
+
+| 리뷰 항목 | 4판에서 바뀐 것 · 자리 |
+|---|---|
+| T1 — 셸 시한이 깨우기와 같은 스레드라 상한이 아니다(`AppHandle::exit` 실패 갈래 = 로그 · 트레이 락 · `exit` 를 그 스레드에서) · 3판 「그 밖은 같다」 오류 | 셸도 훅 설치 직후 따로 띄우는 감시 · 깨우기 = `app.exit(101)` 하나 — M18 · **M19** · §3-1 (바) 모양 · §4-9 · §4-11(셸 setup 앞 멎음 닫힘) · §7-1 U6(+175) · §7-4 U6 · §9-14 · §8-1 거부한 대안 |
+| T2 — 감시의 끝내기 = platform 즉시 끝내기 · §9-12 기억 서술 정정 | platform `process::terminate_self`(가안) — M19 · §4-1 주석 · **§4-4 새 항목** · §6 platform 게이트 · §7-1 U1(+385 — 소비자 U5 · U6 가 다른 물결이라 U1) · §7-4 U1 ⑤ · §7-5 2 · §8-1 앵커 · §8-3 CLAUDE.md platform 항목 · **§9-12 다시 씀** |
+| T3 — 깃발 앞의 시한 없는 일(할당 · 포맷) vs 1회차 「빠른 꼬리가 사유를 잃음」 | 훅 순서 (a) 할당 없는 판정 → (b) 표지 → (c) 깃발 → (d) 사유 → (e) 로그 — **§4-3 의사코드 다시 씀** · `payload_str` · `wait_reason`(§4-1) · M4 · §0 ③ · ④ · §4-4 꼬리 사유 로그(끝에서 1초) · §4-7 락 순서 · §4-9 `Exit` 갈래(같은 대기 — 저자가 셸에 넓혔다) · §8-1 결정 ⑥ |
+| T4 — 감시는 `cfg(panic = "unwind")` 빌드만 | M19 · §3-1 (바) 모양 · §4-3 조립 · §4-4 · §4-9 · §7-1 U5 · U6 · §7-2 감시 항목 |
+| G1 — 거절 ② 를 앱 전체 층에 두면 MCP `nest_service`(`mcp_server.rs:1372` · 층 `:1401-1407`)의 세션 DELETE · SSE 끊기까지 거절 | 제어 라우트만 · MCP 거절은 도구 감싸개 하나 — §3-1 (다) · §4-4 (다) · **§4-6 거절 ②** · §7-1 U3 시험 |
+| G2 — 거절 ① 이 정리 꼴 명령까지 막는다 | WS 입구 허용 목록(StopDaemon · 구독 해지 · 뷰포트 놓기 꼴) — §3-1 (다) · §4-4 · §4-6 ① · §7-1 U3 시험 |
+| S1 — U4 의 M21 명시 당김이 U4 뒤 U5 전에 거절만 깨운다 | U4 = 가둠 · 버림만 · 사유 · 당김 · 생성자 인자는 U5 — M21 · §4-5 4 · §7-1 U4 · U5(선행 · 파일) · **§7-2 멈춤 항목** · §7-3 · §7-4 U4 · U5 ③′ |
+| S2 — `contain` 안의 비오염 패닉은 훅이 사유를 안 적는다 | M21 이 잡은 문장을 당기기 앞에 첫 사유로 — M21 · §4-1 `record_reason` 주석 · §4-5 4 · §7-1 U5 시험 |
+| S3 — 층 표에 상태 싱크가 없다 · 실제 노출은 오염뿐 | §4-2 새 행 「3 — 가둔 뒤 당김」 · M21(`net/src/ws.rs:208-217`) |
+| I1 — M22 `Drop` 가드의 P1 · P1o 건너뜀 · 확인 뒤 행동 경합 | 맨 `catch_unwind` → `Dropped` → `resume_unwind`(`contain` 아님) — **M22** · **§4-7** · §3-1 (가) † · §4-11 · §7-1 U4 시험 · §7-4 · §8-1 거부한 대안 · §0 메인 결정 목록 |
+| I2 — 통로가 받아 둔 뒤 패닉하면 거짓 `Dropped` | §4-11 새 잔여(통로 trait 무변경) |
+| A1 — (바)=감시의 Amends 에 ADR-0288 결정 3 | §3-1 (바) · §3-1 (다)(합침) · §8-1 0288 ③ · §8-2 |
+| A2 — ADR-0290 「영향」 셋째 줄(메인 future · 연결 수락 루프 패닉 = 정상 종료 없음)을 M6 ② 가 바꾼다 | 원문 확인(패닉 정책 브랜치 · 셋째 줄이 인용과 같다) — §8-1 0290 ② · §8-2 |
+| A3 — `/adr link` 는 같은 쌍에 둘째 조항을 못 더한다(`~/.claude/skills/adr/feedback.md:151`) | §8-1 — 쌍마다 합친 한 줄(0288 ①~⑤ · 0290 ①~④)을 `/adr new` 때 · §8-2 두 행 |
+| A4 — M20 읽는 쪽 목록 · 시험 서버 · `DaemonStatusSink::new` 부르는 곳은 넷 | M20 · §4-1 seam · §4-6 HTTP · §7-1 U3(시험 서버 조립) · U5(넷) · §7-4 U5 ③′ |
+| A5 — M9 앵커 `command_delivery.rs:527` 은 함수 머리 | `:537` — M9 · §6 |
+| A6 — D9 시험은 실패할 수 없다(자식 락이 줄 세움) | 연기 시험으로 이름 바꿈 · 「차례로는 통과로 치지 않는다」 걷음 — §4-8 · §7-1 U4 · §7-5 3 ④ · §9-8 |
+| A7 — `SpawnReservation::drop` 의 `.expect`(`manager.rs:746-753`)가 (나)=E 되감기 중에 돈다 | `sync::lock` 으로(U4) — M23 · §4-11 abort 갈래 · §7-1 U4 · §7-4 |
+| A8 — 「StopDaemon · 트레이 끄기는 건드리지 않는다」는 과장(그 꼬리 도중 깃발이 설 수 있다) | §3-1 (바) 표 · §4-4 감시 · §4-11 정상 종료 멎음 · §5 11행 · §8-1 0288 ④ |
+| A9 — 펌프는 사유 칸을 `shutdown` · `try_wait` 분류(`pty.rs:321-333`) **앞**에서 읽는다 | §4-7 PTY 감시 |
+
+**거부 · 일부 거부한 것(근거):** 없음 — 전부 받아들였다. 저자가 덧붙인 것 둘: ① T3 의 유계 사유 대기를 셸 `RunEvent::Exit` 패닉 갈래에도 적용(같은 1회차 걱정이 셸에도 선다 · §4-9) ② G1 의 모양(`route_layer` · 경로 확인)은 `route_layer` 와 이미 붙은 `nest_service` 의 관계가 미검이라 U3 가 시험으로 고른다(§4-6).
+
+### 10-2. 3판 개정 대조 (리뷰 2회차 → 3판)
 
 > 입력 = 리뷰 2회차 취합(deep · 스냅숏 `c7bf5056` · codex BLOCK · 리뷰어 둘 FIX → 잠정 BLOCK). 1회차 항목 중 일부만 닫혔던 것(셸 종료 순서 · M7 · R-M2 `name_allocation` · R-F6 입구 범위)은 아래 D1 · D7 · D14 · UC 행이 닫는다. 취합의 사실 셋은 저자가 바로잡아 실었다 — 셸 `.lock().map_err` 는 24 가 아니라 28곳 · ADR-0288 의 시간 제한 미룸은 「영향」이 아니라 「근거」 셋째 줄(「영향」 넷째 줄은 그 귀결) · 데몬에는 깨우기 스레드가 없다(깨우기 = accept 루프 interval 팔).
 
@@ -703,7 +750,7 @@ hook(info):                                     // 패닉한 스레드에서 · 
 - **D7 「또는 당겨졌으면 join 을 건너뛴다」** — agent 가 전역 걸쇠를 읽어야 해서(M20 과 어긋남) `thread::panicking()` + `mem::forget` 조합을 골랐다.
 - 그 밖 항목은 전부 받아들였다(위 표).
 
-### 10-2. 2판 개정 대조 (리뷰 1회차 → 2판)
+### 10-3. 2판 개정 대조 (리뷰 1회차 → 2판)
 
 | 리뷰 항목 | 2판에서 바뀐 것 |
 |---|---|
