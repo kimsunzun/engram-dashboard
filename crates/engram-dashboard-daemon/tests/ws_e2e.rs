@@ -2411,7 +2411,7 @@ mod real_process {
     /// ShellBackend 는 program/args 를 그대로 PTY 에 싣는다(shim 래핑 없음) → cmd.exe 가 데몬의
     /// 직계 자식이 되어 child_pids(daemon_pid) 로 식별 가능하다.
     fn write_restorable_shell_agents_json(data_dir: &Path) {
-        // SCHEMA_VERSION == 1 (persistence/mod.rs). 형태 고정(회귀 시 감지).
+        // schema_version == 1 (persistence/mod.rs 의 `PROFILES`). 형태 고정(회귀 시 감지).
         let profile = AgentProfile::new(
             "step7-restore-shell".into(),
             AgentCommand::Shell {

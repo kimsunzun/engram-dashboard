@@ -15,6 +15,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::profile::{StoreError, StoreStatus};
+
 pub type PresetId = Uuid;
 
 // ── 영속 프리셋 ────────────────────────────────────────────────────────────────
@@ -37,10 +39,14 @@ pub struct Preset {
 /// 프리셋 영속화 추상화 — persistence 모듈이 구현한다(FileProfileStore/ProfileStore 미러).
 /// trait 주입으로 headless 테스트 시 in-memory store 를 끼울 수 있다.
 pub trait PresetStore: Send + Sync + 'static {
-    /// 전체 스냅샷을 atomic 하게 저장. 실패는 구현 내부에서 로그만 — 호출자를 막지 않는다.
-    fn save(&self, presets: &[Preset]);
-    /// 부팅 시 1회 로드. 부재·손상 시 빈 목록.
+    /// 전체 스냅샷을 atomic 하게 저장한다. 실패의 로그는 구현이 낸다 — 호출자는 `Err` 로 흐름만 가른다.
+    fn save(&self, presets: &[Preset]) -> Result<(), StoreError>;
+    /// 부팅 시 1회 로드. 없음 · 손상 · 거절이면 빈 목록.
     fn load(&self) -> Vec<Preset>;
+    /// 기본 = 늘 쓸 수 있음(거절하지 않는 저장소).
+    fn status(&self) -> StoreStatus {
+        StoreStatus::Writable
+    }
 }
 
 // ── PresetRegistry ─────────────────────────────────────────────────────────────
@@ -55,10 +61,10 @@ pub trait PresetStore: Send + Sync + 'static {
 /// (persisted ≠ observed 데이터 정합성 결함). §5 로 LLM/오케스트레이터가 rename/create/delete 를
 /// **프로그래밍적으로 동시·연속** 호출하면 사람은 못 여는 이 창을 실제로 친다. 그래서 mutate+save 를
 /// 한 임계구역으로 묶어, 마지막 커밋된 인메모리 상태가 곧 디스크 상태가 되게 한다.
-/// **데드락 없음(ADR-0006 무관):** `store.save` 는 store 내부 leaf mutex(`write_lock`)만 잡고 registry
-/// 로 재진입하지 않는다 → 락 순서는 `presets → write_lock` 단방향, 순환 없음. presets lock 은 세션
-/// (sessions/core/status) 락 도메인과도 분리라 ADR-0006 순서에 얽히지 않는다. 로컬 소형 파일이라
-/// lock 보유 중 IO 비용도 무시 가능.
+/// **데드락 없음(ADR-0006 무관):** `store.save` 는 저장소 상태 칸(잎 락 — 쥔 채 IO 를 하지 않는다)만 잡고
+/// registry 로 재진입하지 않는다 → 락 순서는 `presets → 저장소 상태 칸` 단방향, 순환 없음. presets lock 은 세션
+/// (sessions/core/status) 락 도메인과도 분리라 ADR-0006 순서에 얽히지 않는다. lock 보유 중 IO 의 크기는
+/// ProfileRegistry 와 같다(저장 직전 재판정 · 최악 = 그 파일이 잠긴 동안의 다시 하기 — ADR-0291 · D4).
 pub struct PresetRegistry {
     presets: Mutex<HashMap<PresetId, Preset>>,
     store: Arc<dyn PresetStore>,
@@ -81,7 +87,10 @@ impl PresetRegistry {
         let mut guard = self.presets.lock().expect("presets poisoned");
         let result = f(&mut guard);
         let snapshot: Vec<Preset> = guard.values().cloned().collect();
-        self.store.save(&snapshot);
+        // 저장이 실패해도 메모리 변경은 남는다 — 다음 저장이 맵 전체를 다시 쓴다. 실패 로그는 저장소가 낸다.
+        if let Err(error) = self.store.save(&snapshot) {
+            tracing::debug!(%error, "프리셋 저장 실패 — 메모리 변경은 남긴다");
+        }
         result
     }
 
@@ -145,8 +154,9 @@ mod tests {
         saved: Mutex<Vec<Preset>>,
     }
     impl PresetStore for MemStore {
-        fn save(&self, presets: &[Preset]) {
+        fn save(&self, presets: &[Preset]) -> Result<(), StoreError> {
             *self.saved.lock().unwrap() = presets.to_vec();
+            Ok(())
         }
         fn load(&self) -> Vec<Preset> {
             self.saved.lock().unwrap().clone()

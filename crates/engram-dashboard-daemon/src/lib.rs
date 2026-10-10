@@ -1028,8 +1028,12 @@ struct MemProfileStore {
 
 #[cfg(feature = "test-support")]
 impl ProfileStore for MemProfileStore {
-    fn save(&self, profiles: &[engram_dashboard_agent::profile::AgentProfile]) {
+    fn save(
+        &self,
+        profiles: &[engram_dashboard_agent::profile::AgentProfile],
+    ) -> Result<(), engram_dashboard_agent::profile::StoreError> {
         *self.saved.lock().expect("mem store poisoned") = profiles.to_vec();
+        Ok(())
     }
     fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
         self.saved.lock().expect("mem store poisoned").clone()
@@ -1045,8 +1049,12 @@ struct MemPresetStore {
 
 #[cfg(feature = "test-support")]
 impl PresetStore for MemPresetStore {
-    fn save(&self, presets: &[engram_dashboard_agent::preset::Preset]) {
+    fn save(
+        &self,
+        presets: &[engram_dashboard_agent::preset::Preset],
+    ) -> Result<(), engram_dashboard_agent::profile::StoreError> {
         *self.saved.lock().expect("mem preset store poisoned") = presets.to_vec();
+        Ok(())
     }
     fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
         self.saved

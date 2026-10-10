@@ -512,8 +512,8 @@ fn session_id_to_hand_over(
 ///   거절(debug) · uuid 해독 실패(warn). **받지 못한 결말**은 여기 오지 않고 통로의 핸드셰이크 실패 로그가
 ///   낸다. 받았는데 제출이 없어 보류된 결말은 래치가 낸다.
 /// ★`true` 를 「영속됐다」로 읽지 말 것★ — 그 값이 뜻하는 것은 메모리 명부가 바뀌었다는 것뿐이고, 디스크
-///   쓰기 실패는 저장소가 자기 자리에서 `error!` 로 낸다(`ProfileStore::save` 는 `()` 를 돌려준다).
-/// ★`expected` 칸을 쥔 채 명부를 부른다★ — 락 순서 `래치 → 이 칸 → profiles → store write_lock` 단방향이고,
+///   저장이 실패 · 거절돼도 메모리 변경은 남는다(로그는 저장소가 자기 자리에서 낸다).
+/// ★`expected` 칸을 쥔 채 명부를 부른다★ — 락 순서 `래치 → 이 칸 → profiles → 저장소 상태 칸` 단방향이고,
 ///   이 칸을 잡는 곳은 이 포트 하나뿐이다.
 // ADR-0007
 // ADR-0185
@@ -3071,8 +3071,9 @@ mod tests {
         #[derive(Default)]
         struct MemStore(Mutex<Vec<AgentProfile>>);
         impl crate::profile::ProfileStore for MemStore {
-            fn save(&self, profiles: &[AgentProfile]) {
+            fn save(&self, profiles: &[AgentProfile]) -> Result<(), crate::profile::StoreError> {
                 *self.0.lock().expect("mem store poisoned") = profiles.to_vec();
+                Ok(())
             }
             fn load(&self) -> Vec<AgentProfile> {
                 self.0.lock().expect("mem store poisoned").clone()
@@ -5014,8 +5015,9 @@ mod tests {
         #[derive(Default)]
         struct MemStore(Mutex<Vec<AgentProfile>>);
         impl crate::profile::ProfileStore for MemStore {
-            fn save(&self, profiles: &[AgentProfile]) {
+            fn save(&self, profiles: &[AgentProfile]) -> Result<(), crate::profile::StoreError> {
                 *self.0.lock().expect("mem store poisoned") = profiles.to_vec();
+                Ok(())
             }
             fn load(&self) -> Vec<AgentProfile> {
                 self.0.lock().expect("mem store poisoned").clone()

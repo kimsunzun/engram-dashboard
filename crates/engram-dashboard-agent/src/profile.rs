@@ -174,9 +174,9 @@ pub struct AgentProfile {
     ///   값이 안 실린 옛 `agents.json` 도, 옛 카운터가 실려 있는 `agents.json` 도 그대로 읽힌다
     ///   (읽기를 건너뛰므로 그 값은 무시된다 — 마이그레이션 불요).
     /// ★그런데 쓰기는 건너뛰지 않는다 — 키는 `0` 으로 실어 보낸다★: 앞 릴리스의 구조체는 이 필드를
-    ///   **필수**로 선언했으므로 키가 없는 파일을 읽으면 `missing field` 로 파싱이 깨진다. 그러면
-    ///   persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈 목록을
-    ///   덮어써 프로필·세션 id·트리 부모가 통째로 사라진다(이 빌드를 한 번 돌린 뒤 되돌리기·재설치하는
+    ///   **필수**로 선언했으므로 키가 없는 파일을 읽으면 `missing field` 로 파싱이 깨진다. 그러면 그
+    ///   릴리스의 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈
+    ///   목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다(이 빌드를 한 번 돌린 뒤 되돌리기·재설치하는
     ///   경로에서 실제로 성립한다). `0` 인 이유 = 옛 카운터의 "한 번도 재spawn 안 함" 상태라 옛
     ///   바이너리가 그대로 믿어도 무해하다 — 산 난수를 실어 보내면 그게 카운터 자리에 앉는다.
     /// 프론트 구독 deps 에는 이 값을 넣지 않는다 — 재부착 계기는 화신 표식이 아니라 권위 명부
@@ -300,12 +300,59 @@ impl AgentProfile {
 
 // ── 영속화 추상화 ──────────────────────────────────────────────────────────────
 
+/// 저장소가 판정으로 저장을 거절한 까닭. [`crate::preset::PresetStore`] 도 같은 타입을 쓴다.
+// ADR-0291 R2 · R8
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// 이 빌드보다 새 판(`found`)이 쓴 파일이다 — 읽지도 덮지도 떠 두지도 않는다.
+    Newer { found: u64 },
+    /// 파일을 못 읽었다(잠김 예산 뒤 · 권한 · 그 밖 IO) — 무엇이 들었는지 몰라 덮지 않는다.
+    Unreadable,
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Newer { found } => write!(f, "이 빌드보다 새 판({found})이 쓴 파일"),
+            Refusal::Unreadable => f.write_str("파일을 못 읽음"),
+        }
+    }
+}
+
+/// [`ProfileStore::save`] · [`crate::preset::PresetStore::save`] 의 실패.
+#[derive(Debug, thiserror::Error)]
+pub enum StoreError {
+    /// 판정이 이 저장을 거절했다 — 적재 거절(이 실행 내내)인지 이번 저장의 재판정 거절인지는 저장소의
+    /// `status()` 가 가른다.
+    #[error("저장 거절 — {0}")]
+    ReadOnly(Refusal),
+    /// 쓰기(덮기 전 떠 두기 · 쓰기 상한 포함)가 실패했다 — 파일은 그대로다.
+    #[error("저장 실패 — {0}")]
+    Io(std::io::Error),
+}
+
+/// 저장소의 지금 상태.
+// ADR-0291 R17 (D6)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StoreStatus {
+    #[default]
+    Writable,
+    /// 적재 판정이 거절했다 — 이 실행 내내 저장하지 않는다. 데몬을 다시 띄워야 풀린다.
+    ReadOnly(Refusal),
+    /// 적재는 됐는데 마지막 저장의 재판정이 거절했다 — 다음 저장이 다시 판정하고, 성공하면 풀린다.
+    Refusing(Refusal),
+}
+
 /// persistence 모듈이 구현한다. trait 주입으로 headless 테스트 시 in-memory store를 끼울 수 있다.
 pub trait ProfileStore: Send + Sync + 'static {
-    /// 전체 스냅샷을 atomic하게 저장. 실패는 구현 내부에서 로그만 — 호출자를 막지 않는다.
-    fn save(&self, profiles: &[AgentProfile]);
-    /// 부팅 시 1회 로드. 부재·손상 시 빈 목록.
+    /// 전체 스냅샷을 atomic하게 저장한다. 실패의 로그는 구현이 낸다 — 호출자는 `Err` 로 흐름만 가른다.
+    fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError>;
+    /// 부팅 시 1회 로드. 없음 · 손상 · 거절이면 빈 목록.
     fn load(&self) -> Vec<AgentProfile>;
+    /// 기본 = 늘 쓸 수 있음(거절하지 않는 저장소).
+    fn status(&self) -> StoreStatus {
+        StoreStatus::Writable
+    }
 }
 
 // ── 계층 정규화(ADR-0072) ────────────────────────────────────────────────────────
@@ -361,10 +408,11 @@ fn normalize_hierarchy(map: &mut HashMap<AgentId, AgentProfile>) {
 /// 순서로 인메모리·broadcast 는 최신(B)인데 디스크는 stale(A)로 남아, 재시작 시 옛 값이 로드된다
 /// (persisted ≠ observed). §5 로 LLM/오케스트레이터가 rename/create/delete 를
 /// **프로그래밍적으로 동시·연속** 호출하면 사람은 못 여는 이 창을 실제로 친다.
-/// **데드락 없음(ADR-0006 무관):** `store.save` 는 store 내부 leaf mutex(`write_lock`)만 잡고 registry
-/// 로 재진입하지 않는다 → 락 순서는 `profiles → write_lock` 단방향, 순환 없음. profiles lock 은 세션
-/// (sessions/core/status) 락 도메인과도 분리라 그 순서에 얽히지 않는다. 로컬 소형 파일이라
-/// lock 보유 중 IO 비용도 무시 가능.
+/// **데드락 없음(ADR-0006 무관):** `store.save` 는 저장소 상태 칸(잎 락 — 쥔 채 IO 를 하지 않는다)만 잡고
+/// registry 로 재진입하지 않는다 → 락 순서는 `profiles → 저장소 상태 칸` 단방향, 순환 없음. profiles lock 은
+/// 세션(sessions/core/status) 락 도메인과도 분리라 그 순서에 얽히지 않는다. lock 보유 중 IO 는 보통 작은 파일
+/// 읽기(저장 직전 재판정) 한 번 + 쓰기이고, 그 파일이 잠긴 동안만 다시 하기로 최악 약 0.4 초 길어진다
+/// (ADR-0291 · D4).
 /// ★**「그래도 lock-hold 를 줄이자」는 재론은 ADR-0207 이 닫았다**★ — 그 비용을 *수용*한 자리는
 /// ADR-0071:27 이고(이 주석이 아니다 — 여기는 IO 비용만 말한다), 0207 은 ① 줄일 대상이 측정된 적이
 /// 없고 ② 이 save 가 수명 이벤트에서만 돈다는 근거로 현상 유지를 재확인했다. 되열리는 조건도 거기 있다.
@@ -388,9 +436,8 @@ impl ProfileRegistry {
         let mut guard = self.profiles.lock().expect("profiles poisoned");
         let result = f(&mut guard);
         normalize_hierarchy(&mut guard);
-        let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
         // ADR-0071 · ADR-0207
-        self.store.save(&snapshot);
+        self.persist(&guard);
         result
     }
 
@@ -400,10 +447,17 @@ impl ProfileRegistry {
         let changed = f(&mut guard);
         if changed {
             normalize_hierarchy(&mut guard);
-            let snapshot: Vec<AgentProfile> = guard.values().cloned().collect();
-            self.store.save(&snapshot);
+            self.persist(&guard);
         }
         changed
+    }
+
+    /// 저장이 실패해도 메모리 변경은 남는다 — 다음 저장이 맵 전체를 다시 쓴다. 실패 로그는 저장소가 낸다.
+    fn persist(&self, map: &HashMap<AgentId, AgentProfile>) {
+        let snapshot: Vec<AgentProfile> = map.values().cloned().collect();
+        if let Err(error) = self.store.save(&snapshot) {
+            tracing::debug!(%error, "프로필 저장 실패 — 메모리 변경은 남긴다");
+        }
     }
 
     pub fn list(&self) -> Vec<AgentProfile> {
@@ -660,7 +714,7 @@ impl ProfileRegistry {
     ///   teardown 은 프로필을 안 만진다), **끝나기만 하고 다시 뜨지 않은** 세션의 표식은 산 세션의 것과
     ///   같다. 그 창으로 들어온 관측은 그대로 통과해 죽은 세션의 프로필에 적힌다.
     /// ★`bool` 이 뜻하는 것은 「메모리 맵이 바뀌었다」다 — 「디스크에 남았다」가 아니다★:
-    ///   [`ProfileStore::save`] 는 `()` 를 돌려주고 실패를 자기 안에서 삼킨다.
+    ///   [`ProfileStore::save`] 가 실패 · 거절해도 메모리 변경은 남는다(그 `Err` 는 로그로 끝난다).
     // ADR-0007
     // ADR-0163
     // ADR-0185
@@ -686,7 +740,7 @@ impl ProfileRegistry {
     ///   감시자가 대조 없이 쓴다.
     /// ★「빈 칸에만 쓴다」(ADR-0216 이 기각한 규칙)가 아니다★: `expected` 가 빈 칸이 아니라 시작 때 본
     ///   값이라, 이어받기 화신의 재개가 저장값과 다른 id 를 내면 그대로 교체된다.
-    /// ★`bool` 은 메모리 맵 기준이다★ — 디스크 쓰기 실패는 [`ProfileStore::save`] 가 삼킨다.
+    /// ★`bool` 은 메모리 맵 기준이다★ — [`ProfileStore::save`] 가 실패 · 거절해도 메모리 변경은 남는다.
     // ADR-0226
     // ADR-0216
     // ADR-0217
@@ -847,9 +901,10 @@ mod tests {
         saves: std::sync::atomic::AtomicUsize,
     }
     impl ProfileStore for MemStore {
-        fn save(&self, profiles: &[AgentProfile]) {
+        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
             self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             *self.saved.lock().unwrap() = profiles.to_vec();
+            Ok(())
         }
         fn load(&self) -> Vec<AgentProfile> {
             self.saved.lock().unwrap().clone()
@@ -1602,7 +1657,7 @@ mod tests {
         a.parent_id = Some(bid);
         b.parent_id = Some(aid);
         let store = Arc::new(MemStore::default());
-        store.save(&[a, b]);
+        store.save(&[a, b]).expect("메모리 저장");
         let reg = ProfileRegistry::new(store.clone());
         assert_eq!(
             reg.get(aid).unwrap().parent_id,
@@ -2010,8 +2065,8 @@ mod tests {
 
     /// ★키는 남기고 값만 0 으로 박는다★ — 앞 릴리스로 되돌아간 바이너리의 구조체는 `epoch` 를
     /// **필수** 필드로 선언했으므로, 키가 아예 없는 `agents.json` 은 `missing field` 로 파싱이 깨진다.
-    /// 그러면 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가 그 빈
-    /// 목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다.
+    /// 그러면 그 릴리스의 persistence 가 파일을 `.corrupt-<ts>` 로 치우고 빈 목록으로 시작하고, 다음 save 가
+    /// 그 빈 목록을 덮어써 프로필·세션 id·트리 부모가 통째로 사라진다.
     /// 실어 보내는 값이 **산 표식이 아니라 0** 인 이유: 0 은 옛 카운터의 "한 번도 재spawn 안 함" 상태라
     /// 옛 바이너리가 그대로 믿어도 무해하다 — 난수를 실어 보내면 그게 카운터 자리에 앉는다.
     #[test]

@@ -2762,7 +2762,7 @@ mod tests {
         Arc<crate::test_doubles::RecordingFanout>,
     ) {
         use engram_dashboard_agent::preset::{PresetRegistry, PresetStore};
-        use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore};
+        use engram_dashboard_agent::profile::{ProfileRegistry, ProfileStore, StoreError};
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
         #[derive(Default)]
@@ -2770,8 +2770,12 @@ mod tests {
             saved: StdMutex<Vec<engram_dashboard_agent::profile::AgentProfile>>,
         }
         impl ProfileStore for MemStore {
-            fn save(&self, p: &[engram_dashboard_agent::profile::AgentProfile]) {
+            fn save(
+                &self,
+                p: &[engram_dashboard_agent::profile::AgentProfile],
+            ) -> Result<(), StoreError> {
                 *self.saved.lock().unwrap() = p.to_vec();
+                Ok(())
             }
             fn load(&self) -> Vec<engram_dashboard_agent::profile::AgentProfile> {
                 self.saved.lock().unwrap().clone()
@@ -2783,8 +2787,9 @@ mod tests {
             saved: StdMutex<Vec<engram_dashboard_agent::preset::Preset>>,
         }
         impl PresetStore for MemPresetStore {
-            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) {
+            fn save(&self, p: &[engram_dashboard_agent::preset::Preset]) -> Result<(), StoreError> {
                 *self.saved.lock().unwrap() = p.to_vec();
+                Ok(())
             }
             fn load(&self) -> Vec<engram_dashboard_agent::preset::Preset> {
                 self.saved.lock().unwrap().clone()

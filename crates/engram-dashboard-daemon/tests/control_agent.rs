@@ -10,7 +10,9 @@ use std::time::Duration;
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::manager::MAX_ROSTER_SIZE;
 use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
-use engram_dashboard_agent::profile::{AgentCommand, AgentProfile, ProfileRegistry, ProfileStore};
+use engram_dashboard_agent::profile::{
+    AgentCommand, AgentProfile, ProfileRegistry, ProfileStore, StoreError,
+};
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
     AgentId, AgentInfo, AgentStatus, ControlChannel, NoopControlChannel, StatusSink,
@@ -127,8 +129,9 @@ struct MemProfileStore {
     saved: Mutex<Vec<AgentProfile>>,
 }
 impl ProfileStore for MemProfileStore {
-    fn save(&self, profiles: &[AgentProfile]) {
+    fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
         *self.saved.lock().expect("poisoned") = profiles.to_vec();
+        Ok(())
     }
     fn load(&self) -> Vec<AgentProfile> {
         self.saved.lock().expect("poisoned").clone()
@@ -138,7 +141,9 @@ impl ProfileStore for MemProfileStore {
 #[derive(Default)]
 struct MemPresetStore;
 impl PresetStore for MemPresetStore {
-    fn save(&self, _presets: &[Preset]) {}
+    fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+        Ok(())
+    }
     fn load(&self) -> Vec<Preset> {
         vec![]
     }

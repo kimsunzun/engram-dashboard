@@ -1,127 +1,79 @@
-//! 프리셋 영속화 — `presets.json` atomic 저장/복원. (ADR-0061)
-//!
-//! `persistence::mod`(FileProfileStore)의 프리셋판 — atomic write·버전체크·손상보존 전략을
-//! **그대로 복제**한다(새 전략 발명 금지, ADR-0061 근거: 검증된 프로필 경로 재사용).
-//!
-//! **atomic 보장:** 크래시가 나도 presets.json 은 완전한 옛/새 내용 둘 중 하나다(반쪽 쓰기 없음).
+//! 프리셋 영속화 — `presets.json` 저장소. 규칙 · 구현은 `agents.json` 과 같은 내부 저장소다(모듈 머리 —
+//! [`super`]). 이 파일이 쥐는 것은 파일 이름 · 버전 키 · 상한 · 목록 칸뿐이다. (ADR-0061)
+// ADR-0291
 
-use std::fs::{self, File};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::path::PathBuf;
 
-use engram_dashboard_base::time::now_epoch_ms;
-use serde::{Deserialize, Serialize};
+use engram_dashboard_base::file;
+use serde::Serialize;
+use serde_json::{Map, Value};
 
+use super::{list_shape, FileKind, FileStore};
 use crate::preset::{Preset, PresetStore};
+use crate::profile::{StoreError, StoreStatus};
 
-const SCHEMA_VERSION: u32 = 1;
-const FILE_NAME: &str = "presets.json";
-const TMP_NAME: &str = "presets.json.tmp";
+const PRESETS: FileKind = FileKind {
+    name: "presets.json",
+    legacy_tmp: "presets.json.tmp",
+    list_key: "presets",
+    spec: file::Spec {
+        version_key: "schema_version",
+        current: 1,
+        // ADR-0291 R6: 프로필보다 작은 단위(경로 북마크)라 상한도 작게 — 정상이면 안 닿는 선.
+        cap: 4 * 1024 * 1024,
+        shape: presets_shape,
+    },
+};
 
-/// 디스크 표현.
-#[derive(Serialize, Deserialize)]
-struct PresetFile {
-    schema_version: u32,
-    presets: Vec<Preset>,
+/// 쓰기 쪽 디스크 표현 — 버전 키를 늘 싣는다.
+#[derive(Serialize)]
+struct PresetFile<'a> {
+    schema_version: u64,
+    presets: &'a [Preset],
 }
 
 pub struct FilePresetStore {
-    dir: PathBuf,
-    write_lock: Mutex<()>,
+    inner: FileStore,
 }
 
 impl FilePresetStore {
     pub fn new(dir: PathBuf) -> Self {
         Self {
-            dir,
-            write_lock: Mutex::new(()),
-        }
-    }
-
-    fn path(&self) -> PathBuf {
-        self.dir.join(FILE_NAME)
-    }
-
-    fn write_atomic(&self, presets: &[Preset]) -> io::Result<()> {
-        fs::create_dir_all(&self.dir)?;
-
-        let payload = PresetFile {
-            schema_version: SCHEMA_VERSION,
-            presets: presets.to_vec(),
-        };
-        let json = serde_json::to_vec_pretty(&payload)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-        let tmp = self.dir.join(TMP_NAME);
-        {
-            let mut f = File::create(&tmp)?;
-            f.write_all(&json)?;
-            f.sync_all()?;
-        }
-
-        fs::rename(&tmp, self.path())?;
-
-        if let Ok(dir) = File::open(&self.dir) {
-            let _ = dir.sync_all();
-        }
-        Ok(())
-    }
-
-    fn preserve_corrupt(&self, path: &Path) {
-        let backup = self
-            .dir
-            .join(format!("{FILE_NAME}.corrupt-{}", now_epoch_ms()));
-        match fs::rename(path, &backup) {
-            Ok(()) => tracing::warn!("손상된 presets.json 을 {:?} 로 보존", backup),
-            Err(e) => tracing::error!("corrupt 파일 보존 실패: {e}"),
+            inner: FileStore::new(dir, PRESETS),
         }
     }
 }
 
 impl PresetStore for FilePresetStore {
-    fn save(&self, presets: &[Preset]) {
-        let _guard = self.write_lock.lock().expect("write_lock poisoned");
-        if let Err(e) = self.write_atomic(presets) {
-            tracing::error!("save_presets 실패: {e}");
-        } else {
-            tracing::debug!(count = presets.len(), "프리셋 저장 완료");
-        }
+    fn save(&self, presets: &[Preset]) -> Result<(), StoreError> {
+        self.inner.save(
+            presets.len(),
+            &PresetFile {
+                schema_version: PRESETS.spec.current,
+                presets,
+            },
+        )
     }
 
     fn load(&self) -> Vec<Preset> {
-        let path = self.path();
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
-            Err(e) => {
-                tracing::warn!("presets.json 읽기 실패: {e} — 빈 목록으로 시작");
-                return Vec::new();
-            }
-        };
-
-        match serde_json::from_slice::<PresetFile>(&bytes) {
-            Ok(f) if f.schema_version == SCHEMA_VERSION => f.presets,
-            Ok(f) => {
-                tracing::warn!(
-                    found = f.schema_version,
-                    expected = SCHEMA_VERSION,
-                    "presets.json schema_version 불일치 — 적재 건너뜀(파일 보존)"
-                );
-                Vec::new()
-            }
-            Err(e) => {
-                tracing::error!("presets.json 파싱 실패: {e} — .corrupt 보존 후 빈 목록");
-                self.preserve_corrupt(&path);
-                Vec::new()
-            }
-        }
+        self.inner.load()
     }
+
+    fn status(&self) -> StoreStatus {
+        self.inner.status()
+    }
+}
+
+fn presets_shape(version: u64, doc: &Map<String, Value>) -> Result<(), String> {
+    list_shape::<Preset>(&PRESETS, version, doc)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+    use crate::profile::Refusal;
     use uuid::Uuid;
 
     fn temp_dir(name: &str) -> PathBuf {
@@ -144,7 +96,7 @@ mod tests {
         let store = FilePresetStore::new(dir.clone());
         let p = sample();
         let id = p.id;
-        store.save(&[p]);
+        store.save(&[p]).unwrap();
 
         let loaded = store.load();
         assert_eq!(loaded.len(), 1);
@@ -159,37 +111,63 @@ mod tests {
         assert!(store.load().is_empty());
     }
 
+    fn put(dir: &std::path::Path, text: &str) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join(PRESETS.name), text).unwrap();
+    }
+
+    fn aside(dir: &std::path::Path) -> PathBuf {
+        dir.join(format!("{}.corrupt", PRESETS.name))
+    }
+
     #[test]
-    fn corrupt_is_preserved_and_empty() {
+    fn a_corrupt_file_stays_in_place_until_the_first_save_copies_it_aside() {
         let dir = temp_dir("corrupt");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join(FILE_NAME), b"{ not valid json").unwrap();
+        put(&dir, "{ not valid json");
 
         let store = FilePresetStore::new(dir.clone());
         assert!(store.load().is_empty());
+        assert!(dir.join(PRESETS.name).exists());
+        assert!(!aside(&dir).exists());
 
-        assert!(!dir.join(FILE_NAME).exists());
-        let has_backup = fs::read_dir(&dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .any(|e| e.file_name().to_string_lossy().contains(".corrupt-"));
-        assert!(has_backup, "손상 파일이 .corrupt 로 보존돼야 함");
+        store.save(&[sample()]).unwrap();
+        assert_eq!(fs::read_to_string(aside(&dir)).unwrap(), "{ not valid json");
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn version_mismatch_keeps_file() {
-        let dir = temp_dir("version");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join(FILE_NAME),
-            br#"{"schema_version":999,"presets":[]}"#,
-        )
-        .unwrap();
+    fn a_newer_file_is_neither_read_nor_overwritten() {
+        let dir = temp_dir("newer");
+        let newer = r#"{"schema_version":999,"presets":[]}"#;
+        put(&dir, newer);
 
         let store = FilePresetStore::new(dir.clone());
         assert!(store.load().is_empty());
-        assert!(dir.join(FILE_NAME).exists());
+        let refusal = Refusal::Newer { found: 999 };
+        assert_eq!(store.status(), StoreStatus::ReadOnly(refusal));
+        assert!(matches!(
+            store.save(&[sample()]),
+            Err(StoreError::ReadOnly(r)) if r == refusal
+        ));
+        assert_eq!(fs::read_to_string(dir.join(PRESETS.name)).unwrap(), newer);
+        assert!(!aside(&dir).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_corrupt() {
+        let dir = temp_dir("cap");
+        let padding = " ".repeat(PRESETS.spec.cap as usize);
+        put(
+            &dir,
+            &format!(r#"{{"schema_version":1,"presets":[]{padding}}}"#),
+        );
+
+        let store = FilePresetStore::new(dir.clone());
+        assert!(store.load().is_empty());
+        assert_eq!(store.status(), StoreStatus::Writable);
+        store.save(&[sample()]).unwrap();
+        assert!(aside(&dir).exists());
         let _ = fs::remove_dir_all(&dir);
     }
 }

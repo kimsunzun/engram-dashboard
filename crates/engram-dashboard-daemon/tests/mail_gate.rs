@@ -13,7 +13,7 @@ use engram_dashboard_agent::backend::{accepts_mcp_config, uses_mail, writes_mcp_
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
 use engram_dashboard_agent::profile::{
-    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore,
+    AgentCommand, AgentOutputFormat, AgentProfile, ProfileRegistry, ProfileStore, StoreError,
 };
 use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 use engram_dashboard_agent::types::{
@@ -47,8 +47,9 @@ struct MemProfileStore {
     saved: Mutex<Vec<AgentProfile>>,
 }
 impl ProfileStore for MemProfileStore {
-    fn save(&self, profiles: &[AgentProfile]) {
+    fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
         *self.saved.lock().expect("poisoned") = profiles.to_vec();
+        Ok(())
     }
     fn load(&self) -> Vec<AgentProfile> {
         self.saved.lock().expect("poisoned").clone()
@@ -57,7 +58,9 @@ impl ProfileStore for MemProfileStore {
 
 struct MemPresetStore;
 impl PresetStore for MemPresetStore {
-    fn save(&self, _presets: &[Preset]) {}
+    fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+        Ok(())
+    }
     fn load(&self) -> Vec<Preset> {
         vec![]
     }

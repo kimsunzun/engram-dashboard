@@ -340,7 +340,9 @@ mod tests {
     use std::time::Duration;
 
     use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
-    use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+    use engram_dashboard_agent::profile::{
+        AgentProfile, ProfileRegistry, ProfileStore, StoreError,
+    };
     use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
     use engram_dashboard_agent::types::{
         AgentId, AgentInfo, AgentStatus, StatusSink, CLI_AGENT_VERBS,
@@ -358,8 +360,9 @@ mod tests {
         saved: Mutex<Vec<AgentProfile>>,
     }
     impl ProfileStore for MemProfileStore {
-        fn save(&self, profiles: &[AgentProfile]) {
+        fn save(&self, profiles: &[AgentProfile]) -> Result<(), StoreError> {
             *self.saved.lock().expect("store poisoned") = profiles.to_vec();
+            Ok(())
         }
         fn load(&self) -> Vec<AgentProfile> {
             self.saved.lock().expect("store poisoned").clone()
@@ -368,7 +371,9 @@ mod tests {
 
     struct NoPresets;
     impl PresetStore for NoPresets {
-        fn save(&self, _presets: &[Preset]) {}
+        fn save(&self, _presets: &[Preset]) -> Result<(), StoreError> {
+            Ok(())
+        }
         fn load(&self) -> Vec<Preset> {
             Vec::new()
         }
