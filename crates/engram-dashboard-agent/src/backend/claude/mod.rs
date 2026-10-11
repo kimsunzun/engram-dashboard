@@ -38,6 +38,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
+use engram_dashboard_base::panic::uncontained;
 use engram_dashboard_base::time::SystemClock;
 use engram_dashboard_platform::env::env_key_eq;
 use engram_dashboard_platform::shell::console_command;
@@ -1062,6 +1063,10 @@ pub struct ClaudeStreamDecoder {
     /// 문에 알린 것 — 「어느 사건에 무엇을 몇 번 알리나」를 재는 시험용.
     #[cfg(test)]
     gate_moves: Vec<GateMove>,
+
+    /// 문에 알리는 동안의 가둠 표시(ADR-0292) — 시험용.
+    #[cfg(test)]
+    gate_marks: Vec<bool>,
 }
 
 /// decoder 가 문에 알리는 것 — 진행(닫힘 → 열림) · 새 입력(라이브 `started`) · 턴 끝.
@@ -1197,11 +1202,18 @@ impl ClaudeStreamDecoder {
         let Some(gate) = self.gate.get() else {
             return;
         };
-        match to {
-            GateMove::Open => gate.open_turn(),
-            GateMove::Deliver => gate.deliver(),
-            GateMove::Close => gate.close_turn(),
-        }
+        // ADR-0292 결정 3: 문은 잔여물 정리기와 함께 쓰는 상태이고 그 막은 abort 에 기댄다(ADR-0262 K7) — 펌프의 가둠
+        //   안에서 불려도 표시를 끈다.
+        uncontained(|| {
+            match to {
+                GateMove::Open => gate.open_turn(),
+                GateMove::Deliver => gate.deliver(),
+                GateMove::Close => gate.close_turn(),
+            }
+            #[cfg(test)]
+            self.gate_marks
+                .push(engram_dashboard_base::panic::is_contained());
+        });
         self.gate_open = to != GateMove::Close;
         #[cfg(test)]
         self.gate_moves.push(to);
@@ -6490,6 +6502,27 @@ mod tests {
             vec![Deliver, Close, Deliver, Close, Deliver, Close]
         );
         assert!(!gate.is_open());
+    }
+
+    /// 문 여닫기(열기 · 닫기 · 새 입력)는 가둠 표시 밖에서 돈다 — decoder 는 펌프의 가둠 안에서 불린다.
+    // ADR-0292
+    #[test]
+    fn the_gate_moves_run_outside_the_contain_mark() {
+        use engram_dashboard_base::panic::{contain, is_contained};
+
+        let (mut decoder, _line, _gate) = cleaned_decoder();
+        let after = contain(std::panic::AssertUnwindSafe(|| {
+            decoder.decode(completed_text("m1", "hi").as_bytes());
+            decoder.decode(RESULT_LINE.as_bytes());
+            decoder.decode(SECOND_STARTED.as_bytes());
+            is_contained()
+        }))
+        .expect("panic 없음");
+
+        use GateMove::{Close, Deliver, Open};
+        assert_eq!(decoder.gate_moves, vec![Open, Close, Deliver]);
+        assert_eq!(decoder.gate_marks, vec![false, false, false]);
+        assert!(after, "문에 알린 뒤 펌프의 표시가 되살아나지 않았다");
     }
 
     /// 이어받기 원문은 문에 닿지 않는다 — 진행 · 끊긴 `result` 가 든 턴 하나를 이어받아도 닫힌 문은 닫힌 채, 열린 문과

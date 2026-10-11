@@ -158,6 +158,7 @@ use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use engram_dashboard_base::logging::mask_secrets;
+use engram_dashboard_base::panic::{contain, uncontained, Caught};
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
 use serde::de::DeserializeOwned;
@@ -1468,17 +1469,10 @@ impl CodexAppServerTransport {
 }
 
 /// pump 스레드가 어디서든 panic 하면 그 agent 가 영구 silent 정지하므로 Failed 로 가시화한다.
-fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
+fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            TerminalReason::Error(format!("pump panicked: {msg}"))
-        }
+        Err(caught) => TerminalReason::Error(format!("pump panicked: {caught}")),
     }
 }
 
@@ -2885,7 +2879,7 @@ impl LineSplitter {
 
 /// 리더가 **어떻게 끝나든** 통로를 닫는다 — 정상 EOF 든, `handle_line` 안에서 올라온 panic 이든.
 ///
-/// ★`Drop` 이어야 하는 이유★: `catch_unwind` 는 리더 루프를 **밖에서** 감싸므로, 루프 꼬리에 적어 둔
+/// ★`Drop` 이어야 하는 이유★: `contain` 은 리더 루프를 **밖에서** 감싸므로, 루프 꼬리에 적어 둔
 ///   정리는 unwind 가 그냥 지나간다. 그 경로는 가정이 아니다 — `core.emit` 안에서 구독자가 panic 하거나
 ///   `OutputCore` 의 뮤텍스가 poison 되면(그쪽은 `.expect` 다) 바로 거기로 간다. 그러면 닫힘 표식이 안
 ///   서고 라이터 스레드가 core·stdin·대기표를 든 채 영원히 돈다.
@@ -3668,7 +3662,8 @@ impl Reader {
             return;
         }
         if let Some(sink) = self.first_turn.take() {
-            sink();
+            // ADR-0292 결정 3: 래치 commit 은 여러 에이전트가 쓰는 프로필 표를 고친다 — 펌프의 가둠 안이어도 표시를 끈다.
+            uncontained(|| sink());
         }
     }
 
@@ -4015,7 +4010,8 @@ impl AgentTransport for CodexAppServerTransport {
         let child = self.child.clone();
         let shutdown = self.shutdown.clone();
         let handle = std::thread::spawn(move || {
-            let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // ADR-0292: finish 는 표시 밖이다 — 클로저 안으로 옮기지 말 것(사유 = `transport/pty.rs` 의 같은 자리).
+            let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 reader_loop(stdout, shutdown, reader, child)
             }));
             pump_core.finish(resolve_pump_reason(normal_reason));
@@ -6350,7 +6346,7 @@ mod tests {
         );
     }
 
-    /// ★같은 표식이 리더 **panic** 도 살아남아야 한다★ — `catch_unwind` 는 리더 루프를 밖에서 감싸므로,
+    /// ★같은 표식이 리더 **panic** 도 살아남아야 한다★ — `contain` 은 리더 루프를 밖에서 감싸므로,
     /// 루프 꼬리에 적어 둔 정리는 unwind 가 그냥 지나간다. 그 경로에서 표식이 안 서면 라이터가 core·
     /// stdin·대기표를 든 채 영원히 돌고, 그것이 정상 EOF 항목이 못 보는 나머지 절반이다.
     ///
@@ -6378,6 +6374,26 @@ mod tests {
             "리더가 panic 으로 끝나자 닫힘 표식이 안 섰다"
         );
         await_writer_end(&t, "리더 panic 뒤 라이터 스레드가 안 끝났다");
+        drop(probe);
+    }
+
+    /// 가둔 리더 panic 은 `Failed` 로 접히고 `finish` 는 표시 밖에서 돈다 — 운영 리더 클로저 그대로.
+    // ADR-0292
+    #[cfg(windows)]
+    #[test]
+    fn a_contained_reader_panic_fails_the_agent_and_finish_runs_unmarked() {
+        use crate::transport::pump_marks::{self, Marks};
+
+        let probe = NotificationFile::new("marks");
+        let (t, _) = open_probe_owned(probe.args());
+        *t.decoder.lock().unwrap_or_else(|p| p.into_inner()) = Some(Box::new(EmittingDecoder));
+        let marks = Arc::new(Marks::default());
+        let core = pump_marks::core(&marks);
+        t.start(core.clone());
+        core.join_pump(Duration::from_secs(10));
+
+        pump_marks::assert_contained_body_and_unmarked_finish(&marks);
+        t.shutdown();
         drop(probe);
     }
 
@@ -10079,6 +10095,34 @@ mod tests {
                 .any(|e| matches!(e, OutputEvent::Structured { .. })),
             "되울린 말풍선이 올라가지 않았다"
         );
+    }
+
+    /// 첫 턴 포트는 표시 밖에서 불린다 — 리더는 펌프의 가둠 안에서 돌지만 래치 commit 은 공유 프로필 표를 고친다.
+    // ADR-0292
+    #[test]
+    fn the_first_turn_port_runs_outside_the_contain_mark() {
+        use engram_dashboard_base::panic::is_contained;
+
+        let mut h = harness_with_real_decoder();
+        make_ready(&h.state, "T");
+        activate(&h.state, 1, None);
+        let marks = Arc::new(Mutex::new(Vec::new()));
+        let port: FirstTurnSink = {
+            let marks = marks.clone();
+            Arc::new(move || marks.lock().unwrap().push(is_contained()))
+        };
+        h.reader.first_turn = Some(port);
+
+        let inside = contain(std::panic::AssertUnwindSafe(|| {
+            h.reader.handle_line(
+                anonymous_echo_line(method::ITEM_STARTED, "T", "U1", "codex-1").as_bytes(),
+            );
+            is_contained()
+        }))
+        .expect("panic 없음");
+
+        assert!(inside, "시험 전제 — 포트를 부른 뒤에도 리더는 표시 안이다");
+        assert_eq!(*marks.lock().unwrap(), vec![false]);
     }
 
     // ── 턴 끝에서 쥔 자리로 되돌림 (ADR-0231 · TRD §5-5) ──────────────────────────

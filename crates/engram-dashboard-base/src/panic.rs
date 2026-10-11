@@ -89,7 +89,8 @@ impl fmt::Display for Caught {
 /// `f` 를 표시 안에서 돌리고 그 패닉을 잡는다 — 잡은 패닉 = `Err`.
 ///
 /// 표시는 `f` 가 끝나거나 되감겨 나올 때 들어오기 전 값으로 돌아간다. 사유 줄은 훅이 표시와 무관하게 남기므로
-/// 부르는 쪽은 다시 로그하지 않고 실패 표면(`Failed` · 입력 거절 · `INTERNAL`)만 낸다.
+/// 부르는 쪽은 다시 로그하지 않고 실패 표면(`Failed` · 입력 거절 · `INTERNAL`)만 낸다 — 단 훅 줄에 없는
+/// 귀속(에이전트 id 등)은 남긴다.
 /// 잡은 페이로드는 이 표시가 내려간 뒤 버려진다 — 그 drop 의 패닉은 바깥 표시로 판정된다.
 // ADR-0292
 pub fn contain<T>(f: impl FnOnce() -> T + UnwindSafe) -> Result<T, Caught> {
