@@ -1,44 +1,42 @@
-# 핸드오프: 패닉 정책 방향 전환 — 가두지 못한 패닉 = 즉시 종료 · TRD 를 큰 뭉치로 다시 쓴다
+# 핸드오프: 패닉 정책 구현 진행 중 — TRD 11판 · ADR-0292 확정 · U1 코드 리뷰 중
 
 ## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD = 이 핸드오프 커밋(그 앞 `a722a879`). 패닉 정책 **코드 0줄**. TRD 는 10판까지 갔지만(`docs/process/S21-panic-policy/trd.md` · 1048줄) ★사용자 결정으로 방향이 바뀌어 10판의 큰 부분이 무효다★ — 아래 「사용자 결정」.
-★다음 첫 액션 = 새 방향으로 **짧은 TRD(큰 뭉치 위주)** 를 다시 쓴다 → 남은 결정을 하나씩 묻는다 → ADR-0292 → 구현.★ 10판을 고쳐 쓰지 말고 새로 쓴다(10판은 이력으로만 둔다 — 근거 · 실측 · 코드 포인터를 꺼내 쓰는 원자료).
-★push 안 함★ — 로컬 커밋 9개(`d73aaceb`~`a722a879` + 이 핸드오프)가 origin 보다 앞서 있다. TRD 3~10판은 마지막 리뷰(10라운드)가 한도로 끊겨 미검이라 밀지 않았다. 새 TRD 를 쓰면 10판은 의미가 줄어드니 push 여부는 다음 세션이 판단(문서뿐 — CI 경로 필터 대상).
+브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD `40fa214a`(push 완료) · ★U1 구현은 워킹트리에 미커밋★(아래). 결정 · TRD · ADR 은 전부 끝났고 구현 단위 U1~U5 를 차례로 간다.
+★다음 첫 액션 = U1 코드 리뷰 결과 회수(진행 중이었다 — 세션이 끊겼으면 결과는 사라졌으니 `/review code full` 을 다시 돌린다) → FIX 반영 → `/qa standard` → 로컬 커밋 → U2.★
+사용자 지시(2026-10-12): 「쭉쭉 진행」(자율 모드) · ★단위마다 로컬 커밋, push 는 적당한 때 몰아서(매번 X)★ · master 머지 · 태그는 사용자 확인.
 
-## 사용자 결정 (이 세션 · 2026-10-11~12)
-1. **가두지 못한 패닉은 그냥 즉시 종료한다.** 「복잡하게 할 필요없음」. → 지금 abort 와 같은 결과(사유 로그 → 끝). ★ADR-0288 결정 3(공유 상태 패닉 = 「기존 정상 종료 경로」) · ADR-0290 결정 2(훅이 정상 종료 신호를 당긴다 — 이건 메인 판단이었다)를 바꾼다★ → ADR-0292 가 두 ADR 을 개정한다.
-   - 이걸로 사라지는 것: 감시 스레드 · 패닉 뒤 정상 종료 꼬리 · 사유 대기 · 종료 도우미 · 셸 깨우기/메인 스레드 게시 · Exit 콜백 재확인 · 결정 (바) · (바′) · (라′). 10판 리뷰가 9 라운드 동안 판 구멍은 거의 전부 「정상 종료 꼬리」에서 나왔다.
-2. **구현(과 TRD)은 너무 디테일하게 하지 말고 큰 뭉치 위주로.**
-- 유지되는 것(ADR-0288): 요청 하나 · 에이전트 하나는 가둔다(사용자 방향 「패닉에 의한 종료는 최대한 하지 않는다」). Rust abort 경우는 그냥 죽는다.
+## 확정된 결정 (정본 = `docs/decisions/0292-*.md` · TRD `docs/process/S21-panic-policy/trd.md` 11판 개정 4 + 리뷰 3 라운드 PASS)
+- 가두지 못한 패닉 = 사유 로그 → `std::process::abort`. 정상 종료 꼬리 · 락 오염 정책 없음.
+- 가두는 곳 = 에이전트 펌프 셋(PTY · stdio · codex 리더) + 입력 라이터 drain + **명시 허용 목록** 명령 둘 `agent.list` · `agent.listQueuedInputs`(`usage.get` 은 제외 — 조회를 띄우고 in_flight 를 세운다).
+- 가둠 안 표시 끔(`uncontained`) 자리 넷: codex 첫 턴 sink · `report_usage` · 라이터 `on_written` · claude decoder 문 조작.
+- 불변식: 표시 범위 ⊆ catch 클로저(`finish` 는 표시 밖). 셸 = 훅만. 고지 = 지금 표면(`Failed` · 입력 거절 · `INTERNAL`) + 로그.
+- 펌프 패닉 뒤 CLI = 기존 정리 경로(사용자 결정 A) — U4 에서 펌프 종류별 실프로세스 시험, 실패하면 멈추고 사용자에게(B안 = platform `GroupRef::terminate` + ADR-0199 예외 — 혼자 정하지 말 것).
+- 조사 = `docs/research/panic-practice-peers-2026-10-12.md`(우리 「즉시 종료」는 과민하지 않다 · 넓게 가두기가 복잡도의 원인).
 
-## 새 방향의 큰 뭉치 (메인 정리 — 사용자에게 설명함 · TRD 에서 확정)
-- **가두는 기준(넷 다 맞으면 감쌈)** — ① 일 단위의 맨 바깥 입구 ② 실패를 알릴 길(오류 답 · `Failed`) ③ 그 단위가 만지는 상태가 자기 것뿐 ④ 버린 뒤 나머지 멀쩡. 하나라도 어긋나면 안 감쌈 → 즉시 종료.
-- **뭉치 1 — 입구 가드 + 「가드 안」 표시.** 요청 쪽 = WS 명령 처리기 · 제어 HTTP(axum 레이어 하나) · MCP 도구 감싸개 · 요청이 띄우는 blocking 도우미. 에이전트 쪽 = 출력 펌프 · 쓰기 스레드 · PTY 감시 · stderr 수거의 맨 위 함수. 이미 있는 것: 펌프 `catch_unwind`(`transport/pty.rs` · `stdio.rs` · codex transport) · 버스 명령 `guard_panic`(`command/src/route.rs`) — 지금은 abort 라 무동작. 표시가 필요한 까닭: 훅은 catch 보다 **먼저** 돌므로, 「가드 안」 표시가 없으면 훅이 가드 안 패닉까지 죽인다.
-- **뭉치 2 — 훅.** 표시 꺼진 패닉 = 사유 로그 → 즉시 종료(지금 abort 와 같음 — 종료 방식(abort / `TerminateProcess` / `process::exit`)은 TRD 에서 하나 고름 · 10판 조사로는 `process::exit` 는 ExitProcess 의 DLL 분리에서 멎을 수 있다). 표시 켜진 패닉 = 훅은 조용히(로그는 가드가 잡은 자리에서) — 가드 안 패닉이 로그 락을 쥔 채 났을 때 훅이 자기 자신을 기다리는 교착(`base/src/logging/mod.rs:110` 알려진 미수정) 회피.
-- **뭉치 3 — 락 오염 · 여러 단계 구간.** 가드 안에서 락을 쥔 채 패닉 → 다음에 그 락을 만나면? = 결정 (가). 공유 목록을 여러 단계로 바꾸는 구간(에이전트 시작 등록 → 펌프 띄우기 · 수거 · kill · 연결 붙이기/떼기)은 표시를 꺼서 「즉시 종료」로 보낸다 = 결정 (나)가 사실상 이걸로 닫힘(TRD 에서 확인).
-- **뭉치 4 — abort 전제 코드 점검.** 「배포판은 abort 니 여기서 패닉하면 그냥 죽는다」를 전제로 한 자리(1판 조사 약 57곳 · ADR-0262 K7 claude 잔여물 정리기 등)를 unwind 전환 전에 본다.
-- **뭉치 5 — 배포판 unwind 전환(마지막 · 한 줄).** 그 전 뭉치들은 abort 에서 무영향 → 어느 뭉치 뒤에 멈춰도 배포판은 지금과 같다. 문제가 보이면 그 한 줄만 abort 로 되돌린다.
-- **셸** — 가드 없이 「셸 패닉 = 즉시 종료」가 가장 단순(10판의 S1a 와 같은 결 — TRD 에서 확인).
-- 남는 결정 후보: (가) 오염 정책 · (나) 확인 · (라) 셸 · (마) 고지 모양(오류 답 모양 — 10판 권고 = 오류 답 · 연결 유지 · 지금 표면). 10판 §3-1 의 (가)·(마) 서술은 원자료로 쓸 만하다.
+## 이 세션에 한 것
+- A 단계(데이터 파일 통일)를 master 에 머지 · push(`783a4738` · CI 초록) — 패닉 문서는 안 실음.
+- 패닉 TRD 11판 새로 씀 → 사용자 결정 ②(좁게) · (마) N2a · (사) abort · A안 → `/review trd full` 3 라운드(1 FIX·FIX → 2 PASS·FIX → 3 PASS).
+- master · `origin/v0.3.3/feat/panic-policy`(ADR-0288~0290) 를 이 브랜치로 머지(`909f1684` · `175df7c7`).
+- ADR-0292 박제(0288 · 0290 부분 개정 도장) · `/review doc light` FIX 5 반영(`40fa214a` · 재리뷰 생략 — 도장 · 영향 줄 정정뿐).
+- U1 코더(worker-senior) 완료 — 미커밋 워킹트리:
+  - `crates/engram-dashboard-base/src/panic.rs`(신규 — `contain` · `uncontained` · `is_contained` · `Caught` · `payload_text` · `hook` · `install_hook`(Once · 아무도 안 부름))
+  - `base/src/logging/mod.rs`(스레드 지역 `WRITING` 표지 — 같은 스레드 재진입 줄은 버림)
+  - base `lib.rs` · `Cargo.toml` · CLAUDE.md · `ci.yml` · `.claude/skill-bindings/qa.md` · `docs/testing-strategy.md`(게이트 ③ 정규식에 `panic` · 입주자 아홉)
+  - 코더 실측: base lib 90 통과(+14) · 변이 3건 확인 · build · fmt · 게이트 셋 OK · clippy 미설치.
+  - 코더가 올린 의문: TLS 해체 중 읽힘(불확실) · `install_hook` 이 첫 이전 훅을 영구히 잡음(U3 볼 거리) · command crate 페이로드 사본은 의존 0 이라 통합 불가(TRD §4-3 「사본 일곱 통합」은 일부만).
+  - 낡을 주석 후보(U2~U4 몫): `base/src/sync.rs:10-11` · `command/src/route.rs:17-19` · `daemon/src/lib.rs:452-456` + 데몬 훅 · `agent/src/transport/input_queue.rs:294-296` · `pty.rs:283-297`.
 
-## 이 세션에 한 것 · 검증 상태
-- `/review trd deep` 9 라운드(2~10판 · 리뷰어 = codex blind + worker-reviewer + reviewer-deep). 9 라운드는 셋 다 FIX · BLOCK 없음. 10 라운드는 한도로 셋 다 끊김 → **10판 미검**. 라운드별 집계 = `.claude/handoff/attachments/panic-trd-review-r2~r9-2026-10-11.md`.
-- 사용 토큰(서브에이전트 · 하네스 보고값 합) ≈ 700만 — 리뷰 약 440만 · TRD 수정 워커 약 260만.
+## 검증 상태
+- U1: 코더 자체 실행만(위). `/review code full`(codex blind + worker-reviewer doc-aware) 진행 중이었음 — 결과 미회수. `/qa` 미실행.
+- 재실행: `cargo test -p engram-dashboard-base` · `cargo build` · `cargo fmt --check` · base 게이트(CLAUDE.md 「빌드·검증 명령」 base 줄들).
 
-## do-not / 주의 (다음 세션)
-- ★재리뷰 라운드는 리뷰어를 새로 띄우지 말고 resume 한다★(사용자 지적) — Claude 리뷰어 = SendMessage 로 이어 「지난 지적 닫혔나 + 변경분」만 · codex = `--resume`(codex-call-spec §2 · 한 사이클 한 스레드). 새로 띄운 탓에 라운드마다 1000줄 TRD 와 같은 vendored 소스를 처음부터 다시 읽었다.
-- ★같은 부류의 BLOCK 이 2 라운드 연속이면 사례를 고치지 말고 멈춰 그 부류(여기선 「종료 시한 보장 범위」)를 사용자에게 올린다★ — 이번엔 9 라운드까지 갔고 사용자가 「케이스별로 복잡하게 하는 느낌」으로 멈췄다. 두 항목 모두 `~/.claude/skills/review/feedback.md` 에 미반영으로 적립.
-- TRD 표 칸을 한 줄 수천 자로 쓰지 말고, 같은 사실을 여러 절에 되풀어 적지 말 것 — 판마다 수정 워커가 도구 100회 이상 · 리뷰어 재독 5만 토큰이 들었다. 새 TRD 는 짧게.
-- 이전 핸드오프의 주의 그대로 유효: Git Bash `rg` 없음 → `export PATH="/c/Users/kimsunzun/AppData/Local/OpenAI/Codex/bin/ada252862d154cdd:$PATH"` · 줄끝은 파일마다(`tr -cd '\r'` 로 셈) · `sed -i` 금지 · 실 claude 를 띄우는 시험 금지 · QA 정리에 `taskkill /T` 금지.
-- Git Bash 에서 `node -e` · heredoc 안 역슬래시가 먹힌다 — 정규식 스크립트는 Write 로 파일을 만든 뒤 `node 파일` 로 돌린다.
-- ADR-0288 · 0289 · 0290 · 조사 문서는 아직 `origin/v0.3.3/feat/panic-policy`(문서뿐)에만 있다 — 그 브랜치를 이 브랜치로 머지할지(master 아님)는 ADR-0292 쓸 때 정한다. 다음 ADR 번호 = 0292(로컬 최대 0291 — `/adr` 은 로컬 최대+1 로 채번하고 대상 ADR 이 없으면 쓰기 없이 멈춘다).
+## 남은 단위 (TRD §5)
+U2 가두는 자리(A1~A4 `contain` · 표시 끔 a~d · B1 허용 목록 + 시험 · `command_delivery.rs:1397` 주석) → U3 훅 설치(데몬 · 셸 · 확인 거리 = debug 데몬이 tokio 격리 패닉에 끝남 — `/qa full` · `stop_smoke` 먼저) → U4 확인 · 감사(CLI 정리 실프로세스 시험 · 낡은 주석) → U5 `Cargo.toml:40` 한 줄. U2 agent 몫과 daemon 몫은 파일이 안 겹쳐 나란히 가능.
+
+## do-not / 주의
+- 재리뷰는 리뷰어를 새로 띄우지 말고 resume(Claude = SendMessage · codex = `--resume` + 첫 줄에 「직전에 한 일」 확인).
+- 이전 핸드오프 주의 그대로: Git Bash `rg` 없음(PATH 추가) · 줄끝 파일마다 · `sed -i` 금지 · 실 claude 시험 금지 · `taskkill /T` 금지.
 
 ## 정지 조건
-- 남은 사용자 결정((가) · (나) 확인 · (라) · (마)) — 목록 먼저, 하나씩 묻는다.
-- ADR-0292 전에는 구현에 들어가지 않는다(정석 순서).
-- master 머지 · 태그 · panic-policy 브랜치의 master 머지.
-
-## 참조
-- 10판 TRD(원자료) `docs/process/S21-panic-policy/trd.md` — 쓸 만한 곳: §2 현황 실측 · §3-1 (가)(마) · §4-1 가드 표시 모양 · §4-11 잔여 목록. 종료 꼬리 · 감시 · 셸 종료 경로 서술은 새 방향에서 무효.
-- `git show "origin/v0.3.3/feat/panic-policy:docs/decisions/<0288|0290 …>"` · 같은 브랜치 `docs/research/panic-policy-peers-2026-10-08.md`.
-- 우편 id(사용자 요청 · 패닉 다음 후보) = `.claude/handoff/attachments/mail-id-survey-2026-10-11.md` · `docs/tracking.md` T-29. 순서 「패닉 → 우편 id → transport」는 메인 제안(사용자 확인 전).
+- 리뷰 BLOCK · 리뷰어 정면 대립(자율 모드는 무거운 쪽 잠정 채택 + 기록) · 재수정 상한 초과 · U4 CLI 정리 시험 실패(B안) → 멈추고 사용자에게.
+- master 머지 · 태그.
