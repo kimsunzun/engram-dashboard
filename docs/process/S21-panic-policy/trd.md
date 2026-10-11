@@ -1,6 +1,6 @@
 # TRD — 패닉 정책 구현: 좁은 가둠 · 즉시 종료 훅 · unwind 전환 (S21)
 
-> **상태: 11판 개정 3(2026-10-12 · 리뷰 2 라운드 반영).** 코드 변경 0 · 사용자 결정 전부 끝(§3) · 리뷰 대립 1건 사용자 재판정 대기(§4-2 자식 끄기). 개정 2(리뷰 1) = `usage.get` 을 가둠에서 뺌(허용 목록 둘) · 표시 끔 원시와 그 자리 넷 · 「표시 범위 ⊆ catch 클로저」 불변식 · 펌프 패닉 때 자식 명시 종료 · U3 확인 거리. 개정 3(리뷰 2) = 자식 끄기를 무리 끄기로 못 박음(platform 새 API · U1b) · 허용 목록에 「효과 없음」 조건 · 표시를 끄지 않는 것에 Idle 합침 더함.
+> **상태: 11판 개정 4(2026-10-12 · 사용자 결정 A).** 코드 변경 0 · 사용자 결정 전부 끝(§3). 개정 2(리뷰 1) = `usage.get` 을 가둠에서 뺌(허용 목록 둘) · 표시 끔 원시와 그 자리 넷 · 「표시 범위 ⊆ catch 클로저」 불변식 · U3 확인 거리. 개정 3(리뷰 2) = 허용 목록에 「효과 없음」 조건 · 표시를 끄지 않는 것에 Idle 합침 더함. 개정 4 = 펌프 패닉 때 명시 종료를 걷고 기존 정리 경로 + 시험(사용자 결정 A — §4-2).
 > **이력:** 10판 = `git show a722a879:docs/process/S21-panic-policy/trd.md`(종료 꼬리 · 감시 스레드 · 결정 (다)(바)(바′)(라′) · 컴파일 가드는 새 방향에서 무효) · 11판 초안 = `bedda3f3`((가) 락 오염 · (나) 여러 걸음 구간 · 요청 쪽 입구 R1~R7 — 사용자 결정 ② 로 걷힘).
 > **틀:** ADR-0288 · ADR-0290 + 사용자 결정 2026-10-10 · 2026-10-11~12 · 2026-10-12 ②(§1). ★세 ADR(0288 ~ 0290)은 브랜치 `origin/v0.3.3/feat/panic-policy` 에만 있다★ — 이 TRD 를 커밋하기 전에 그 브랜치를 들여야 링크가 선다. 구현 ADR = ADR-0292(예정).
 > **대체하는 옛 기록:** `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 `panic = "abort"` 유지」. 그 절의 규약(명령 핸들러는 값으로 실패한다)은 산다.
@@ -12,7 +12,7 @@
 
 ```
 ① 가두는 것은 둘뿐이다 — 에이전트 하나만 섬기는 펌프 셋 · 라이터, 그리고 허용 목록의 읽기 명령 둘
-   (agent.list · agent.listQueuedInputs)의 본문. 가둔 패닉 = 그 에이전트 Failed(자식 프로세스 무리는 명시로 끈다) · 그 명령 INTERNAL 답.
+   (agent.list · agent.listQueuedInputs)의 본문. 가둔 패닉 = 그 에이전트 Failed(CLI 는 기존 정리 경로로 끝난다) · 그 명령 INTERNAL 답.
 ② 그 밖의 패닉 = 사유를 로그하고 곧바로 abort — 오늘 배포판과 같은 결과. 가둔 코드 안에서도 여러 에이전트가
    함께 쓰는 상태를 고치는 호출은 표시를 꺼서 같은 길로 보낸다.
 ③ 둘을 가르는 것은 스레드 지역 「표시」 하나이고, 표시는 늘 그것을 잡는 catch 클로저 안에서만 선다.
@@ -46,7 +46,7 @@
 - **이미 있는 가둠:** 펌프 셋(`agent/src/transport/pty.rs:298` · `stdio.rs:241` · `agent/src/backend/codex/transport.rs:4018`) · 라이터(`agent/src/transport/input_queue.rs:288`) · 버스 명령 본문 `guard_panic`(`command/src/route.rs:20` — 모든 blocking 핸들러를 감싼다 `command/src/table.rs:339`). 배포판은 abort 라 지금 하나도 잡지 않는다. 펌프의 끝(`finish`)은 catch **밖**에서 돈다(`pty.rs:342` · `stdio.rs:308` · `codex/transport.rs:4021`).
 - **데몬 명령 본문은 동기로 돈다:** 데몬 자기 명령(`agent.*` · `usage.*`)은 입구가 어디든(버스 1단계 blocking `daemon/src/command_delivery.rs:1361` · `/control/agent` · `/control/call`) `call_daemon_command`(`daemon/src/control/commands.rs:163`)를 지나고, 그 안의 `drive_to_completion`(`:250`)이 future 를 `now_or_never` 로 **부른 스레드에서** 끝낸다 — `guard_panic` 은 그 blocking 스레드에서 동기로 돈다.
 - **`Read` 선언과 실제:** 데몬 `Read` 명령은 셋이다(`agent/src/commands.rs:212` `agent.list` · `:297` `agent.listQueuedInputs` · `:344` `usage.get`). 그러나 `usage.get` 은 조회를 띄운다(`:334-337`) — 사용량 책이 `in_flight` 를 세우고(`daemon/src/usage_service/book.rs:279-282`) 합류자를 붙이고 구독자 전부에게 내고 조회 스레드 · CLI 를 띄운다(`daemon/src/usage_service/mod.rs:341-386`). 효과 값은 이미 「id 를 붙들어 재실행을 막을까」를 가르는 계약이다(`daemon/src/control/commands.rs:286-291`).
-- **Job · 무리:** 무리 주인이 Job 을 `KILL_ON_JOB_CLOSE` 로 만들고(`platform/src/group/windows.rs:153`) 그 핸들의 drop 이 Job 을 닫는다(`:601`). 강한 주인 `GroupOwner` 는 통로가 쥐고(`agent/src/transport/pty.rs:62` · `stdio.rs:88` · `codex/transport.rs:1399`) `Clone` 이 아니다(ADR-0275 결정 11) — 끝내기 `terminate`(`platform/src/group/mod.rs:86`)는 그 주인에만 있고 약한 손잡이 `GroupRef`(`:135-237`)에는 없다. 펌프 셋은 자식 손잡이만 잡는다(`pty.rs:224` · `stdio.rs:229` · `codex/transport.rs:4014`). 그 자식은 뿌리 `cmd /c` 이고 실제 CLI 는 그 아래 자식이다(ADR-0262 K1). reaper 는 세션 `Arc` 를 놓을 뿐이고, 그 주석은 「자식은 이미 죽어 있다」를 전제한다(`agent/src/reaper.rs:65-70`). codex 통로 헤더는 「통로는 아무것도 죽이지 않는다」를 불변식으로 적는다(`codex/transport.rs:118-125` — ADR-0199 의 기각한 대안 「통로가 정상 종료 경로를 직접 구동한다(kill 포함)」).
+- **Job:** 펌프의 자식은 뿌리 `cmd /c` 이고 실제 CLI 는 그 아래다(ADR-0262 K1) — CLI 를 끝내는 것은 Job 이다: 통로가 쥔 무리 주인(`agent/src/transport/pty.rs:62` · `stdio.rs:88` · `codex/transport.rs:1399`)이 Job 을 `KILL_ON_JOB_CLOSE` 로 만들고(`platform/src/group/windows.rs:153`) 그 drop 이 Job 을 닫는다(`:601`). reaper 는 세션 `Arc` 를 놓을 뿐이다(`agent/src/reaper.rs:65-70` — 다른 보유자는 이어받기 판정의 잠깐 ≤ ~100ms).
 - **abort 전제 기록:** 코드 57줄 · 30파일 + ADR 일곱 + TRD 여럿 — 목록과 정규식은 10판 §2-8.
 - **CLI:** 단일 스레드(`cli/src` 에 스레드 · tokio 없음). **종료 코드:** 운영 코드에 프로세스 종료 코드를 판정하는 곳이 없다.
 
@@ -54,12 +54,13 @@
 
 ## 3. 사용자 결정 (2026-10-12 — 전부 끝)
 
-> (가) · (나)는 사용자 결정 ②로 없어졌고, (라) 셸은 ②로 S1(훅만 · 셸 패닉 = 즉시 종료)로 정해졌다(§4-5). 아래 두 묶음은 권고안대로 정했다 — 아래 표 · 절은 그 근거로 남긴다.
+> (가) · (나)는 사용자 결정 ②로 없어졌고, (라) 셸은 ②로 S1(훅만 · 셸 패닉 = 즉시 종료)로 정해졌다(§4-5). (마) · (사)는 권고안대로 정했다 — 아래 표 · 절은 그 근거로 남긴다. 펌프 패닉 때 CLI 끝내기는 리뷰어 대립을 사용자가 정했다(§4-2).
 
 | 묶음 | 결정 | 사용자 말 |
 |---|---|---|
 | (마) 가둔 에이전트 패닉의 고지 모양 | **N2a 지금 표면** — 화면은 `Failed` · 입력 거절 그대로 · 자세한 것은 로그(§4-4 훅은 표시와 무관하게 로그한다) | 「그냥 내부에서 대되 로그는 남겨지는건 맞지?」 |
 | (사) 끝내기 수단 | **`std::process::abort`** | 「추천으로해」 |
+| 펌프 패닉 때 CLI 끝내기 | **A 기존 정리 경로** — 명시 종료 없음 · 시험으로 확인 · 실패하면 B | 「A안」 |
 
 ### (마) 가둔 에이전트 패닉의 고지
 
@@ -99,7 +100,7 @@
 
 | # | 자리 | 단위 | 실패 알림 | 할 일 |
 |---|---|---|---|---|
-| A1 | PTY 펌프(`agent/src/transport/pty.rs:298` · 스레드 `:269`) | 에이전트 하나 | `Failed` | 지금의 `catch_unwind` 를 `contain` 으로 바꾼다 · 패닉 갈래에서 자식을 끈다 |
+| A1 | PTY 펌프(`agent/src/transport/pty.rs:298` · 스레드 `:269`) | 에이전트 하나 | `Failed` | 지금의 `catch_unwind` 를 `contain` 으로 바꾼다 |
 | A2 | stdio 펌프(`agent/src/transport/stdio.rs:241`) | 에이전트 하나 | `Failed` | 같음 |
 | A3 | codex 리더 펌프(`agent/src/backend/codex/transport.rs:4018` · 스레드 `:4017`) | 에이전트 하나 | `Failed` | 같음 |
 | A4 | 라이터 `input_queue::drain`(`agent/src/transport/input_queue.rs:288` — PTY · stdio 라이터 스레드가 부른다 `pty.rs:208` · `stdio.rs:208`) | 그 에이전트의 입력 | 큐 닫힘 · 입력 거절 사유(`:273-279`) | `catch_unwind` → `contain` |
@@ -107,13 +108,7 @@
 
 - **B1 = 이름 허용 목록이지 효과 술어가 아니다.** `usage.get` 은 `Read` 로 선언됐지만 공유 사용량 책을 바꾼다(§2) — 가두면 판정(`Start`) 뒤 패닉이 `in_flight` 를 영영 남긴다. `effect == Read` 로 가르면 앞으로 더해지는 `Read` 명령이 말없이 가둬진다. 목록은 데몬 쪽 상수 하나이고, 시험이 그 목록을 못 박는다(§5 U2). ★목록에 드는 조건 = 본문에 효과가 없을 것★ — 아래 B1 의 얇은 구간 접기가 `INTERNAL`(「확실히 실패」)인 것은 두 본문이 아무것도 바꾸지 않아서다. 본문 뒤 패닉은 일의 일부가 적용됐을 수 있어 `OUTCOME_UNKNOWN` 이라는 것이 1단계의 규칙이다(`daemon/src/command_delivery.rs:1387-1391` · `fold_local` `:1401`). 효과가 있는 명령을 목록에 넣으려면 그 접기부터 다시 정한다.
 - **B1 의 범위:** 표시가 명령 본문을 부르는 한 자리에 서므로 같은 명령이 제어 HTTP(`/control/agent` · `/control/call`)로 와도 본문은 같이 가둬진다. 그 HTTP 처리기 자체 · 다른 명령 · 2단계 전달(`daemon/src/command_delivery.rs:1820` 의 `route`)은 표시 밖이다. 처리기 패닉은 안쪽 `guard_panic` 이 먼저 `INTERNAL` 로 답하고, 그 바깥 얇은 구간(`now_or_never` 기계)의 패닉은 우리 `contain` 이 같은 `INTERNAL` 로 접는다 — 그래서 표시와 잡는 자리 사이에 빈틈이 없다. 이것은 1단계 경로의 셋째 그물이라 `command_delivery.rs:1397` 의 「세 번째 그물을 세우지 않는다」 주석을 U2 에서 고친다.
-- **펌프 패닉 갈래의 자식 끄기(A1~A3) — 무리 끄기로 못 박는다:** 자식 손잡이 kill 만으로는 뿌리 `cmd /c` 만 죽고 CLI 는 산다(§2 · ADR-0262 K1). 그래서
-  - platform `group` 에 약한 손잡이의 끝내기 `GroupRef::terminate`(가안)를 더한다 — 무리를 올린 뒤 `TerminateJobObject` · 주인이 사라졌으면 아무것도 안 함(OS 코드 = platform — ADR-0266). 부르는 동안만 무리를 강하게 쥐는 선례 = `GroupRef::watch_births`(`platform/src/group/mod.rs:202-219`).
-  - 세 통로가 펌프를 띄울 때 `GroupOwner::downgrade`(`group/mod.rs:111` — `None` 이면 무리 끄기를 건너뛴다)로 얻은 `GroupRef` 를 펌프에 넘긴다. agent 어댑터 `ProcessGroup`(`agent/src/transport/process_group.rs:106`)은 쓰지 않는다 — stdio 만 내주고(`stdio.rs:132-135`) 잔여물 정리의 물러남 신호를 함께 싣는 손잡이다. codex(A3)도 같다 — 자식은 `self.child`(`codex/transport.rs:4014`) · 주인은 같은 통로의 `group`(`:1399`).
-  - 패닉 갈래 순서 = `child.kill()` → `GroupRef::terminate` → `finish`(표시 밖). `transport.shutdown()` 은 부르지 않는다 — 그것은 매니저의 kill 동사이고 끝 신호를 아직 안 보낸 이 펌프를 `join_pump` 로 기다리게 된다(ADR-0001).
-  - 두 번 끄기는 해가 없다 — 둘째 `TerminateJobObject` 는 빈 무리라 할 일이 없고, 통로 `shutdown` 의 kill 은 결과를 버리며(`pty.rs:413` · `stdio.rs:395` · `codex/transport.rs:4149` — `let _ = child.kill()`), 끝 전이는 한 번뿐이다(ADR-0005).
-  - ★codex 통로 헤더의 「아무것도 죽이지 않는다」(§2)와 어긋난다★ — 펌프 패닉 갈래 하나만 뺀다는 것을 ADR-0292 가 ADR-0199 에 개정으로 적고, U2 가 그 헤더를 고친다.
-  - ★리뷰어 대립 — blind = 명시 종료 필수 / doc-aware = 마지막 Arc drop 으로 충분(다른 보유자는 ≤100ms 일시). 리뷰 2 라운드 doc-aware = 효과 있는 명시 종료는 platform 새 API 가 있어야만 선다는 것을 보였다 → 그래도 자율 모드 보수 채택 · 사용자 재판정 대기★. 펌프 종류마다 U4 가 「CLI 가 사라지는가」를 잰다.
+- **펌프 패닉 때 CLI 끝내기(A1~A3) — 명시 종료 없음:** 패닉 갈래는 `finish` 만 부른다. CLI 는 기존 길로 끝난다 — `finish` → `Failed` → reaper 가 세션을 뺀다 → 마지막 `Arc` drop → 통로 drop → 무리 주인 drop → `KILL_ON_JOB_CLOSE`(§2). ★리뷰어 대립(blind = 명시 종료 / doc-aware = 기존 정리 경로로 충분) → 사용자 결정 A(2026-10-12): 기존 경로 · 시험으로 확인 · 실패 시 B★. U4 가 펌프 종류마다 잰다. **B(시험이 실패할 때만):** platform `GroupRef::terminate` 를 더해 패닉 갈래에서 무리를 끄고, ADR-0199 의 「통로는 죽이지 않는다」(`codex/transport.rs:118-125`)에서 그 갈래를 뺀다.
 
 **표시 끔(`uncontained`) — 가둔 코드가 부르는 공유 상태 고침:** 그 안 패닉 = 즉시 종료.
 
@@ -179,13 +174,12 @@
 | 단위 | 바뀌는 것 | 배포판(abort) | 검증 |
 |---|---|---|---|
 | U1 원시 | base `panic`(`contain` · `uncontained` · 페이로드 문장 · 훅 몸통 — 아무도 안 부름) · `logging` 재진입 표지 · 게이트 ③ 이름 | 같다 | base 단위 시험 — 깊이 증감 · 중첩 · 되감기 뒤 복귀 · `uncontained` 안 깊이 0 과 복귀 · 훅 판정(끝내기 주입) · 재진입 표지 |
-| U1b 무리 끄기 | platform `GroupRef::terminate`(가안 · §4-2 — 아무도 안 부름) | 같다 | platform 실프로세스 시험 — 산 무리에 부르면 멤버가 끝난다 · 주인이 사라진 뒤엔 `Ok` 이고 아무것도 안 한다 · 두 번 불러도 된다 |
-| U2 가두는 자리 | §4-2 — A1~A4 를 `contain` 으로 · A1~A3 패닉 갈래의 무리 끄기(펌프가 `GroupRef` 를 받는다) · 표시 끔 a~d · B1 + 허용 목록 상수 · `command_delivery.rs:1397` 주석 · codex 헤더(`codex/transport.rs:118-125`) | 같다(catch 가 안 잡고 패닉 갈래에 닿지 않는다) | 기존 펌프 · 라이터 패닉 시험이 그대로 초록 · `finish` 가 표시 없이 도는지 · a~d 안 깊이 0 · **허용 목록 시험**(목록 = 정확히 둘 · 둘 다 표에 있고 `Read` · 두 본문 안에서 표시가 서고 그 밖 명령에선 안 선다) |
+| U2 가두는 자리 | §4-2 — A1~A4 를 `contain` 으로 · 표시 끔 a~d · B1 + 허용 목록 상수 · `command_delivery.rs:1397` 주석 | 같다(catch 가 안 잡고 패닉 갈래에 닿지 않는다) | 기존 펌프 · 라이터 패닉 시험이 그대로 초록 · `finish` 가 표시 없이 도는지 · a~d 안 깊이 0 · **허용 목록 시험**(목록 = 정확히 둘 · 둘 다 표에 있고 `Read` · 두 본문 안에서 표시가 서고 그 밖 명령에선 안 선다) |
 | U3 훅 | 데몬 훅을 base 훅으로 바꾼다 · 셸에 설치 | 같다(로그 → abort) | 자식 프로세스 시험(§6). ★확인 거리★ — debug 데몬은 이때부터 tokio 가 격리하던 패닉에 끝난다: 종료 중 타이머 poll(`daemon/src/usage_service/mod.rs:320-322`) · 연결 태스크의 `debug_assert`(`daemon/src/agent_conn.rs:108`) 등. `/qa full` · `stop_smoke` 가 흔들릴 수 있어 그 둘을 먼저 돌려 본다(시험 서버엔 훅이 없어 단위 시험은 그대로) |
-| U4 확인 · 감사 | §4-6 둘 — 고칠 자리 · 주석 · 로그 문장 | 같다 | 펌프 종류마다(PTY · stdio · codex) 패닉 → 자식 CLI 프로세스가 사라지는지 · 고친 자리마다 되감기 시험 |
+| U4 확인 · 감사 | §4-6 둘 — 고칠 자리 · 주석 · 로그 문장 | 같다 | **CLI 정리 실프로세스 시험** — 펌프 종류마다(PTY · stdio · codex) 가둔 펌프 패닉 뒤 CLI 프로세스 트리 전체(뿌리 `cmd /c` 만이 아니라)가 상한 시간 안에 사라지는지(§4-2 A — 실패하면 B) · 고친 자리마다 되감기 시험 |
 | U5 전환 | `Cargo.toml:40` 한 줄 | **unwind** | release 빌드 + `/qa full`(실 창 · 실 데몬 정상 동작) · 크기 |
 
-- **순서 고정:** U1b 가 U2 보다 앞(platform 파일만 — U1 과 나란히 갈 수 있다) · U2 가 U3 보다 앞(뒤집히면 debug 에서 지금 가둬지던 펌프 패닉이 데몬을 끈다) · U4 가 U5 보다 앞. U2 의 agent 몫 · daemon 몫은 파일이 안 겹쳐 나란히 갈 수 있다.
+- **순서 고정:** U2 가 U3 보다 앞(뒤집히면 debug 에서 지금 가둬지던 펌프 패닉이 데몬을 끈다) · U4 가 U5 보다 앞. U2 의 agent 몫 · daemon 몫은 파일이 안 겹쳐 나란히 갈 수 있다.
 - 어느 단위 뒤에 멈춰도 빌드 · 회귀가 초록이고 배포판은 오늘과 같다(위 「배포판」 칸).
 
 ---
@@ -225,5 +219,5 @@
 
 ## 8. ADR · 문서 후속
 
-- **ADR-0292(예정)** — `/adr supersede --mode partial` 로 ADR-0288 결정 1 · 2(가둠을 좁힌다 — 사용자 결정 ②) · 결정 3 과 ADR-0290 결정 2(가두지 못한 패닉 = 사유 로그 → 즉시 종료 · 정상 종료 경로를 당기지 않는다)를 개정한다. 본문 = 가둠 기준(§4-1) · 가둠 표 · 허용 목록 · 표시 끔 · 펌프 패닉 때 무리 끄기(§4-2) · 표시 불변식 · 훅 모양 · §3 답 둘 · S20 TRD §4 ⑨ 프로필 결정의 대체 · 근거 조사(§1). ADR-0199 에 개정 링크 하나(`/adr link` — 「통로는 죽이지 않는다」에서 펌프 패닉 갈래만 뺀다). 시점 = U1 앞. 전제 = ADR-0288 ~ 0290 이 이 브랜치에 들어와 있을 것.
+- **ADR-0292(예정)** — `/adr supersede --mode partial` 로 ADR-0288 결정 1 · 2(가둠을 좁힌다 — 사용자 결정 ②) · 결정 3 과 ADR-0290 결정 2(가두지 못한 패닉 = 사유 로그 → 즉시 종료 · 정상 종료 경로를 당기지 않는다)를 개정한다. 본문 = 가둠 기준(§4-1) · 가둠 표 · 허용 목록 · 표시 끔 · 펌프 패닉 때 CLI 는 기존 정리 경로(§4-2 — 결정 A · 시험 실패 시 B) · 표시 불변식 · 훅 모양 · §3 답 셋 · S20 TRD §4 ⑨ 프로필 결정의 대체 · 근거 조사(§1). 시점 = U1 앞. 전제 = ADR-0288 ~ 0290 이 이 브랜치에 들어와 있을 것.
 - base `sync` 헤더 계약 3 · CLAUDE.md 「빌드·검증 명령」의 base 게이트 ③ 줄 · step-log 한 줄 — 해당 단위와 같은 변경에서.
