@@ -1,53 +1,44 @@
-# 핸드오프: A(데이터 파일 처리 통일) 끝 · 패닉 정책 TRD 2판 커밋 — 다음 = TRD 2판 재리뷰 → 사용자 결정 다섯 → ADR-0292 → 패닉 구현
+# 핸드오프: 패닉 정책 방향 전환 — 가두지 못한 패닉 = 즉시 종료 · TRD 를 큰 뭉치로 다시 쓴다
 
 ## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD `c7bf5056`(push 됨 · 트리 깨끗 — 이 핸드오프 커밋 제외). TRD A 는 코드(U1~U8 · U5a · U5b-1 · U5b-2)와 문서(U9 `2c25cdd2`)까지 착지. 패닉 정책은 **코드 0줄** — 구현 TRD 2판(초안)만 `docs/process/S21-panic-policy/trd.md`(`c7bf5056`).
-★다음 첫 액션 = 패닉 TRD 2판 `/review trd`(deep 권장 — 1 라운드와 같은 셋: codex Designer(blind) · worker-reviewer Architect-breaker · reviewer-deep 동시성 렌즈) — 1 라운드 집계 = `.claude/handoff/attachments/panic-trd-review-r1-2026-10-11.md`(2판이 다 닫았는지 대조). 그다음 사용자 결정 다섯을 **하나씩** 묻는다(아래).★
-사용자 방침: 「다음 세션에 지시 내리고 자야겠다」 → 사용자 없이 할 수 있는 것과 멈출 것을 아래 정지 조건으로 가른다.
+브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD = 이 핸드오프 커밋(그 앞 `a722a879`). 패닉 정책 **코드 0줄**. TRD 는 10판까지 갔지만(`docs/process/S21-panic-policy/trd.md` · 1048줄) ★사용자 결정으로 방향이 바뀌어 10판의 큰 부분이 무효다★ — 아래 「사용자 결정」.
+★다음 첫 액션 = 새 방향으로 **짧은 TRD(큰 뭉치 위주)** 를 다시 쓴다 → 남은 결정을 하나씩 묻는다 → ADR-0292 → 구현.★ 10판을 고쳐 쓰지 말고 새로 쓴다(10판은 이력으로만 둔다 — 근거 · 실측 · 코드 포인터를 꺼내 쓰는 원자료).
+★push 안 함★ — 로컬 커밋 9개(`d73aaceb`~`a722a879` + 이 핸드오프)가 origin 보다 앞서 있다. TRD 3~10판은 마지막 리뷰(10라운드)가 한도로 끊겨 미검이라 밀지 않았다. 새 TRD 를 쓰면 10판은 의미가 줄어드니 push 여부는 다음 세션이 판단(문서뿐 — CI 경로 필터 대상).
 
-## 순서 (사용자 · 메인)
-- 사용자: A 끝 → 패닉 정책(이 세션은 TRD 까지) → 새 세션 패닉 구현 → transport(3단계). 「정석대로」(TRD → 리뷰 → 사용자 결정 → 구현).
-- 사용자 요청(2026-10-11): **우편 주소 = 에이전트에게는 이름, 내부는 AgentId 로 통일** — 구현 목록에 포함. 조사 = `.claude/handoff/attachments/mail-id-survey-2026-10-11.md`(실제 결함: 잠든 에이전트 앞 파킹 우편이 이름 바꾸기 뒤 갇히거나 그 이름을 가져간 다른 에이전트에게 배달). ★순서 「패닉 → 우편 id → transport」는 메인 제안(사용자 확인 전)★ · tracking T-29.
+## 사용자 결정 (이 세션 · 2026-10-11~12)
+1. **가두지 못한 패닉은 그냥 즉시 종료한다.** 「복잡하게 할 필요없음」. → 지금 abort 와 같은 결과(사유 로그 → 끝). ★ADR-0288 결정 3(공유 상태 패닉 = 「기존 정상 종료 경로」) · ADR-0290 결정 2(훅이 정상 종료 신호를 당긴다 — 이건 메인 판단이었다)를 바꾼다★ → ADR-0292 가 두 ADR 을 개정한다.
+   - 이걸로 사라지는 것: 감시 스레드 · 패닉 뒤 정상 종료 꼬리 · 사유 대기 · 종료 도우미 · 셸 깨우기/메인 스레드 게시 · Exit 콜백 재확인 · 결정 (바) · (바′) · (라′). 10판 리뷰가 9 라운드 동안 판 구멍은 거의 전부 「정상 종료 꼬리」에서 나왔다.
+2. **구현(과 TRD)은 너무 디테일하게 하지 말고 큰 뭉치 위주로.**
+- 유지되는 것(ADR-0288): 요청 하나 · 에이전트 하나는 가둔다(사용자 방향 「패닉에 의한 종료는 최대한 하지 않는다」). Rust abort 경우는 그냥 죽는다.
 
-## 패닉 TRD 2판 — 사용자 결정 다섯 (묻는 순서 · 권고 · 정본 = TRD §0 표 · §3-1)
-1. (a) 오염 정책 + 2층 경계 — 「어떤 버그가 에이전트 하나로 끝나고 어떤 버그가 데몬 재시작인가」. 보수 = P1+B1 · ★권고 = P2+B1′★(공유 락 오염 = 재시작 · 에이전트/연결 하나의 락 오염은 되살려 계속 · PTY 감시 · stderr 배수 추가) · 넓게 = P2+B2(+U4b). 답이 U2/U4 크기와 (e) 고지 면을 바꾼다.
-2. (b) 여러 단계 공유 변경 구간(활성화 등록 · reap_one · kill 전 단계 · on_connect/disconnect) — ★권고 E(종료로 올림)★ vs R(되돌리기).
-3. (c) 종료를 당긴 뒤 새 일 — ★권고 새 일 거절(≈15-20 줄)★ vs 잔여 수락.
-4. (d) 셸 패닉 — ★권고 S1a(셸만 끔 · Final 안 씀 · 셸 안 가두기 없음 → 셸 버스 명령 패닉은 창이 닫힘)★ vs S1a′ · S1b.
-5. (e) 고지 모양 — ★권고 N1a+N2a(오류 답 · 연결 유지 · 지금의 2층 표면)★.
-- 결정 뒤 ADR-0292(Implements ADR-0288 · 0290 · Amends ADR-0288 결정 1 · 2 범위 · Amends ADR-0290 영향 · S20 TRD §4 ⑨ 대체 표시) → 구현.
-- ★ADR-0288 · 0290 · 조사 문서는 아직 `origin/v0.3.3/feat/panic-policy`(문서뿐)에만 있다★ — TRD 링크가 이 브랜치에선 안 풀린다. 그 브랜치를 이 브랜치로 머지할지(master 아님)는 ADR-0292 쓸 때 정한다(master 머지 = 사용자 결정 「안 함」 그대로).
-- 단위(2판 §7): 물결 1 U1 base(+350) → 2 U2 agent · U3 daemon 1층 · U4 manager 등(+P2 치환) → 3 U8a 의미 감사 · U5 데몬 훅/main · U6 셸 → 4 U7 프로필 unwind + 가드 → 5 U8b 문구 · U9 문서. (U4b = (a) 넓게일 때만.) 「어느 단위 뒤에 멈춰도 빌드 초록 · 배포판 지금보다 나쁘지 않음」.
+## 새 방향의 큰 뭉치 (메인 정리 — 사용자에게 설명함 · TRD 에서 확정)
+- **가두는 기준(넷 다 맞으면 감쌈)** — ① 일 단위의 맨 바깥 입구 ② 실패를 알릴 길(오류 답 · `Failed`) ③ 그 단위가 만지는 상태가 자기 것뿐 ④ 버린 뒤 나머지 멀쩡. 하나라도 어긋나면 안 감쌈 → 즉시 종료.
+- **뭉치 1 — 입구 가드 + 「가드 안」 표시.** 요청 쪽 = WS 명령 처리기 · 제어 HTTP(axum 레이어 하나) · MCP 도구 감싸개 · 요청이 띄우는 blocking 도우미. 에이전트 쪽 = 출력 펌프 · 쓰기 스레드 · PTY 감시 · stderr 수거의 맨 위 함수. 이미 있는 것: 펌프 `catch_unwind`(`transport/pty.rs` · `stdio.rs` · codex transport) · 버스 명령 `guard_panic`(`command/src/route.rs`) — 지금은 abort 라 무동작. 표시가 필요한 까닭: 훅은 catch 보다 **먼저** 돌므로, 「가드 안」 표시가 없으면 훅이 가드 안 패닉까지 죽인다.
+- **뭉치 2 — 훅.** 표시 꺼진 패닉 = 사유 로그 → 즉시 종료(지금 abort 와 같음 — 종료 방식(abort / `TerminateProcess` / `process::exit`)은 TRD 에서 하나 고름 · 10판 조사로는 `process::exit` 는 ExitProcess 의 DLL 분리에서 멎을 수 있다). 표시 켜진 패닉 = 훅은 조용히(로그는 가드가 잡은 자리에서) — 가드 안 패닉이 로그 락을 쥔 채 났을 때 훅이 자기 자신을 기다리는 교착(`base/src/logging/mod.rs:110` 알려진 미수정) 회피.
+- **뭉치 3 — 락 오염 · 여러 단계 구간.** 가드 안에서 락을 쥔 채 패닉 → 다음에 그 락을 만나면? = 결정 (가). 공유 목록을 여러 단계로 바꾸는 구간(에이전트 시작 등록 → 펌프 띄우기 · 수거 · kill · 연결 붙이기/떼기)은 표시를 꺼서 「즉시 종료」로 보낸다 = 결정 (나)가 사실상 이걸로 닫힘(TRD 에서 확인).
+- **뭉치 4 — abort 전제 코드 점검.** 「배포판은 abort 니 여기서 패닉하면 그냥 죽는다」를 전제로 한 자리(1판 조사 약 57곳 · ADR-0262 K7 claude 잔여물 정리기 등)를 unwind 전환 전에 본다.
+- **뭉치 5 — 배포판 unwind 전환(마지막 · 한 줄).** 그 전 뭉치들은 abort 에서 무영향 → 어느 뭉치 뒤에 멈춰도 배포판은 지금과 같다. 문제가 보이면 그 한 줄만 abort 로 되돌린다.
+- **셸** — 가드 없이 「셸 패닉 = 즉시 종료」가 가장 단순(10판의 S1a 와 같은 결 — TRD 에서 확인).
+- 남는 결정 후보: (가) 오염 정책 · (나) 확인 · (라) 셸 · (마) 고지 모양(오류 답 모양 — 10판 권고 = 오류 답 · 연결 유지 · 지금 표면). 10판 §3-1 의 (가)·(마) 서술은 원자료로 쓸 만하다.
 
-## A 착지 요약 (이 세션)
-- U5a `cd32e399` · U6 `be82938b` · U5b-1 `419741c1` `714800d7` `424c6da5` · U5b-2 `386e2550` `0cfa3142` `18e11e87` · U9 `2c25cdd2`. 전부 /review(code full~deep) + /qa(standard~full) 통과. 최종 워크스페이스 = 결과 줄 59 · 4336 통과 · 0 실패 · 31 무시 · lib_unit 826 · layout_commands 93.
-- 사용자 결정(2026-10-11): 저장 거절 재시도 안내를 거절 갈래로 나눔 — 적재 때 거절(ReadOnly) = CONFLICT 「다시 해도 같다 · 파일 고치고 데몬 재시작」 · 실행 중 못 읽음(Refused Unreadable) = CONFLICT 「잠깐 잠김 · 조금 뒤 다시」 · 실행 중 새 판 = CONFLICT 「그 파일이 있는 동안 같다」 · IO = INTERNAL · 셸 settings 못 읽음도 같은 규칙(셸 catalog 17). ★데몬 중계가 retry 칸을 Never 로 내리므로 안내는 영어 문구 · 도움말이 나른다★.
-- 메인 결정 「잠정 — 사용자 확인 대기」(ADR-0291 · TRD A 7판에 기록): U5b-1 을 1a/1b 로 가름 · 내부 입구 = 기존 레지스트리 동사(dirty) / 부르는 쪽 = `try_*` · dirty 동안 무변경 쓰기도 저장 · 프리셋은 `try_*` 만(dirty 없음) · 만들고 띄우기 ⓑ = INTERNAL(CONFLICT 면 요청 id 를 풀어 중복 생성) · 저장 거절 활성화 실패 종류 = Other · 거절마다 표면 warn 한 줄 · WS 저장 오류 `CODE: message` · agent.list 상태 낱말 PascalCase(`Writable/ReadOnly/Refusing`) · catalog 7 · U6 판정에 145 안 더함 · D8 부분 성공(등록은 남음 — codex 지적, 설계대로).
-- tracking: T-57(늦은 reap × 활성화 실패 → auto_restore 남음 · 부팅 복원 꺼져 무해) · T-58(메뉴발 · 프리셋 실패가 화면에 안 보임 — 선재 프론트) · T-22 해소(archive) · T-29(우편 id).
+## 이 세션에 한 것 · 검증 상태
+- `/review trd deep` 9 라운드(2~10판 · 리뷰어 = codex blind + worker-reviewer + reviewer-deep). 9 라운드는 셋 다 FIX · BLOCK 없음. 10 라운드는 한도로 셋 다 끊김 → **10판 미검**. 라운드별 집계 = `.claude/handoff/attachments/panic-trd-review-r2~r9-2026-10-11.md`.
+- 사용 토큰(서브에이전트 · 하네스 보고값 합) ≈ 700만 — 리뷰 약 440만 · TRD 수정 워커 약 260만.
 
-## 검증 상태
-- 위 커밋마다 게이트 통과(커밋 본문에 수치). 마지막 코드 커밋 뒤 손댄 것: U9 의 platform `fs.rs` 주석 한 줄(cargo check · fmt 만).
-- 선재: T-52(graceful 데몬 끄기 Timeout — U5b-2 QA 에서 다시 확인) · T-56(codex 실 CLI 계약 시험 — 이번에 안 돌림).
-- 패닉 TRD 2판 = 리뷰 전(1 라운드 지적 반영본). 2판이 「미검」으로 남긴 것: WebView2 COM 콜백을 넘는 패닉(abort 가능) · `PoisonError` Debug 문구(U1 이 고정) · Windows park_timeout · 바이너리 크기 · K7 · in_flight_targets(U8a) · MCP 정상 종료 유한성 · transport.shutdown 두 번 · ConPTY close 블록 · 셸 트레이 잔상 · `codex/thread_lock.rs:398`.
+## do-not / 주의 (다음 세션)
+- ★재리뷰 라운드는 리뷰어를 새로 띄우지 말고 resume 한다★(사용자 지적) — Claude 리뷰어 = SendMessage 로 이어 「지난 지적 닫혔나 + 변경분」만 · codex = `--resume`(codex-call-spec §2 · 한 사이클 한 스레드). 새로 띄운 탓에 라운드마다 1000줄 TRD 와 같은 vendored 소스를 처음부터 다시 읽었다.
+- ★같은 부류의 BLOCK 이 2 라운드 연속이면 사례를 고치지 말고 멈춰 그 부류(여기선 「종료 시한 보장 범위」)를 사용자에게 올린다★ — 이번엔 9 라운드까지 갔고 사용자가 「케이스별로 복잡하게 하는 느낌」으로 멈췄다. 두 항목 모두 `~/.claude/skills/review/feedback.md` 에 미반영으로 적립.
+- TRD 표 칸을 한 줄 수천 자로 쓰지 말고, 같은 사실을 여러 절에 되풀어 적지 말 것 — 판마다 수정 워커가 도구 100회 이상 · 리뷰어 재독 5만 토큰이 들었다. 새 TRD 는 짧게.
+- 이전 핸드오프의 주의 그대로 유효: Git Bash `rg` 없음 → `export PATH="/c/Users/kimsunzun/AppData/Local/OpenAI/Codex/bin/ada252862d154cdd:$PATH"` · 줄끝은 파일마다(`tr -cd '\r'` 로 셈) · `sed -i` 금지 · 실 claude 를 띄우는 시험 금지 · QA 정리에 `taskkill /T` 금지.
+- Git Bash 에서 `node -e` · heredoc 안 역슬래시가 먹힌다 — 정규식 스크립트는 Write 로 파일을 만든 뒤 `node 파일` 로 돌린다.
+- ADR-0288 · 0289 · 0290 · 조사 문서는 아직 `origin/v0.3.3/feat/panic-policy`(문서뿐)에만 있다 — 그 브랜치를 이 브랜치로 머지할지(master 아님)는 ADR-0292 쓸 때 정한다. 다음 ADR 번호 = 0292(로컬 최대 0291 — `/adr` 은 로컬 최대+1 로 채번하고 대상 ADR 이 없으면 쓰기 없이 멈춘다).
 
-## do-not / 주의
-- Git Bash 에 `rg` 없음 → `export PATH="/c/Users/kimsunzun/AppData/Local/OpenAI/Codex/bin/ada252862d154cdd:$PATH"`(모든 워커 지시서). Python = Store 껍데기 → 스크립트 편집은 `node`.
-- 줄끝: 파일마다 다름 → `tr -cd '\r' < f | wc -c` 대 `tr -cd '\n' < f | wc -c` 로 센다(`grep -c $'\r'` 은 Git Bash 에서 틀림). `sed -i` 금지. `cargo fmt` 가 CRLF → LF 로 바꾼다(여러 번 실발생) — 되돌린다.
-- 시험 실행 뒤 bindings EOL 만 바뀐 것 되돌리기: `git update-index -q --refresh; for f in $(git diff --name-only -- src-tauri/bindings crates/engram-dashboard-agent/bindings); do git diff --ignore-cr-at-eol --quiet -- "$f" && git checkout -- "$f"; done`(refresh 가 없으면 여러 번 돌아야 했다).
-- 실 claude 를 띄울 수 있는 시험 금지 — 셸 프로필 · 없는 작업 폴더 · 빈 PATH(`claude_profile_that_cannot_launch()` — `cmd.exe` 조차 못 찾게) · QA 데몬은 PATH 를 System32 로 깎아 띄움(`startd_nopath.ps1`).
-- QA 정리에 `taskkill /T` 금지 — 띄운 PID 만 /F. `-EnvVars` 둘 이상은 ps1 래퍼 필요.
-- 큰 단위는 착수 전에 쪼갠다: 코더 하나가 40만 토큰대를 여러 번 썼다(U5a 409k · U5b-2a 436k · U9 456k). TRD 전체를 읽히지 말고 메인이 줄 조각(slice)을 뽑아 준다(이번에 효과 있었다).
-- 인벤토리 grep 은 파일마다 첫 `#[cfg(test)]` 에서 자른다(시험 구획을 운영으로 센 오류가 조사 · ADR-0290 에 실렸다 — TRD 2판이 바로잡음).
-- 데몬 응답 중계는 retry 칸을 늘 Never 로 내린다(`command_delivery.rs` `send_reply`) — 「다시 해도 됨」을 retry 칸으로 전달한다고 가정하지 말 것.
-- 다음 ADR 번호 = 0292(패닉 구현). `/adr` 스크립트는 로컬 최대로 채번하는데 0288~0290 이 이 브랜치에 없다 — 채번 확인.
-
-## 정지 조건 (사용자 없이 진행할 때)
-- 사용자 결정 다섯(위) — 재리뷰 · 결정 브리핑 준비까지는 혼자, 결정은 묻는다(하나씩 · 목록 먼저).
-- 재리뷰에서 리뷰어 정면 대립 · BLOCK · 설계 방향 재검토.
-- 결정에 기대지 않는 구현도 ADR-0292 전에는 들어가지 않는다(정석 순서 — 구현은 결정 뒤).
+## 정지 조건
+- 남은 사용자 결정((가) · (나) 확인 · (라) · (마)) — 목록 먼저, 하나씩 묻는다.
+- ADR-0292 전에는 구현에 들어가지 않는다(정석 순서).
 - master 머지 · 태그 · panic-policy 브랜치의 master 머지.
 
 ## 참조
-- 패닉: `docs/process/S21-panic-policy/trd.md`(2판) · `.claude/handoff/attachments/panic-trd-review-r1-2026-10-11.md` · `git show origin/v0.3.3/feat/panic-policy:docs/decisions/<0288|0290 …>` · 같은 브랜치 `docs/research/panic-policy-peers-2026-10-08.md`.
-- A: `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md`(7판 · §6-6 착지 표) · ADR-0291.
-- 우편: `.claude/handoff/attachments/mail-id-survey-2026-10-11.md` · `docs/tracking.md` T-29.
+- 10판 TRD(원자료) `docs/process/S21-panic-policy/trd.md` — 쓸 만한 곳: §2 현황 실측 · §3-1 (가)(마) · §4-1 가드 표시 모양 · §4-11 잔여 목록. 종료 꼬리 · 감시 · 셸 종료 경로 서술은 새 방향에서 무효.
+- `git show "origin/v0.3.3/feat/panic-policy:docs/decisions/<0288|0290 …>"` · 같은 브랜치 `docs/research/panic-policy-peers-2026-10-08.md`.
+- 우편 id(사용자 요청 · 패닉 다음 후보) = `.claude/handoff/attachments/mail-id-survey-2026-10-11.md` · `docs/tracking.md` T-29. 순서 「패닉 → 우편 id → transport」는 메인 제안(사용자 확인 전).
