@@ -26,6 +26,12 @@ const STARTUP_FAILED_EXIT_CODE: i32 = 1;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // ★무엇보다 먼저★ — 셸은 아무것도 가두지 않으므로 이 뒤의 모든 패닉이 사유 줄을 남기고 셸을 끝낸다. 파일
+    //   로그는 그 뒤 부팅 플러그인(`state/boot_plugin.rs` ⓪)이 연다 — 그 앞의 패닉은 사유 줄이 파일에 남지 않는다
+    //   (std 기본 훅의 stderr 뿐이고 릴리즈엔 콘솔이 없다).
+    // ADR-0292
+    engram_dashboard_base::panic::install_hook();
+
     // ADR-0029: 부팅 기동(autostart 등록 인자에 --hidden 포함)은 창 없이 트레이만 상주시킨다.
     let hidden = std::env::args().any(|a| a == "--hidden");
 
