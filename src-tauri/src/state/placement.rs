@@ -14,8 +14,9 @@
 //! - 패닉하지 않는다 — 창 사건 처리기에서 불린다(릴리스는 `panic = "abort"`).
 
 use std::collections::BTreeSet;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard};
 
+use engram_dashboard_base::sync;
 use tauri::{
     AppHandle, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewWindow,
     WebviewWindowBuilder, Window,
@@ -186,7 +187,7 @@ pub struct DeferredMaximize(Mutex<BTreeSet<String>>);
 impl DeferredMaximize {
     fn labels(&self) -> MutexGuard<'_, BTreeSet<String>> {
         // 칸이 집합 하나라 반쯤 바뀐 상태가 없다 — 창 사건 처리기에서 불려 패닉하면 안 된다(모듈 머리).
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        sync::lock(&self.0)
     }
 
     fn defer(&self, label: &str) {

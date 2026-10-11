@@ -141,7 +141,7 @@ export interface AgentProfile {
   display_name: string | null
   /**
    * 트리 계층의 부모 프로필 id(ADR-0072). Some(pid) → pid 의 자식(들여쓰기), null → 최상위(루트).
-   * 1단 중첩만 허용(부모는 반드시 루트) — 검증은 백엔드 ProfileRegistry::reparent + 쓰기 경계 정규화.
+   * 1단 중첩만 허용(부모는 반드시 루트) — 검증은 백엔드 ProfileRegistry::try_reparent + 쓰기 경계 정규화.
    * wire `AgentProfile.parent_id` 미러(#[serde(default)] — 옛 agents.json 은 null).
    */
   parent_id: string | null

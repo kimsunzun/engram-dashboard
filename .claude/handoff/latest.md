@@ -1,48 +1,34 @@
-# 핸드오프: 2-3 U1 착지(2de9756 · CI 초록) — 다음 = U2 CLI 패키지 이사(원자)
+# 핸드오프: A(데이터 파일 처리 통일) U1 · U8 · U2 · U7 · U3 · U4 착지 — 다음 = U5a → U6 → U5b-1 → U5b-2 → U9 → 패닉 정책
 
 ## 한 줄 상태 · 다음 첫 액션
-2-3(engram CLI 독립 패키지)의 TRD 4판 확정 → U1(help 를 데몬 `/control/help` 로 · CLI 공통 실패 경로) 커밋 `2de9756` · push · **CI 초록**. 브랜치 `v0.3.3/refactor/crate-boundaries` = origin 동기 · 작업 트리 깨끗.
-★다음 첫 액션 = U2 착수★ — TRD `docs/process/S21-crate-boundaries/trd-2-3-cli-package.md` §3-3(원자 이사 · 한 커밋) · §5-2 · §5-3(릴리스 스크립트 1회 + 릴리스 데몬 단독 기동 = 머지 전 필수). `/implement standard`(코더 = worker-senior) → `/review code full` → `/qa full`. 그 뒤 U3(§3-4 — 게이트 · 문서 · ADR-0284 · qa 바인딩) → master 머지.
+브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD `a7376042`(push 됨 · 트리 깨끗). 착지: U1 `66765fb5` · U8 `fa6cb2f3` · U2 `bfd96dbc` · U7 `4e4fa543` · U3 `caed0f13` · U4 `a7376042`. TRD = `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md`(6판 + U7 개정) · ADR-0291.
+★다음 첫 액션 = U5a(agent 저장소 채택 — agents · presets · 레지스트리는 아직 지금 꼴) 코더 스폰.★ 그다음 U6(작음 · 파일럿 먼저 — TRD §8-2 1) → U5b-1(레지스트리 · manager · reaper · PtyError — 정지 지점 안전) → U5b-2(버스 · WS 표면 · agent catalog 6 → 7 · 도움말) → U9(문서 정리) → 패닉 정책 구현(TRD 부터).
+단위 흐름: 코더 worker-senior → /review code(standard = full: worker-reviewer + codex:codex-rescue · critical = deep: + reviewer-deep 전문 렌즈) → /qa(worker-scout · TRD 행의 QA 칸 강도) → 커밋 · push. 리뷰 2 라운드가 흔하다.
 
-## 사용자 결정 (이번 세션 · 2026-10-08)
-- **CLI = 인증 + 배송만.** `engram help` 를 데몬이 낸다(D10) · 내장 사본 없음 · CLI 에서 설치 위치 규칙이 빠져 옛 D4(A/A′/B) 소멸. 원문 취지: 「CLI 생성 목적이 데몬에게 배송을 못해서 MCP 대신 만든 것」.
-- **데몬에 못 닿음 · 자격증명 없음 = CLI 공통 동작 하나**(D11 — help 전용 처리 없음). 출력 채널은 기존 stdout 봉투 유지(메인 결정 · TRD §2-10).
-- **O3 승인** — qa 바인딩 빌드 명령에 `-p engram-dashboard-cli` 추가 · U3 의 qa 서술 수정도 승인됨.
-- 위임은 이전과 같다(3단계 전까지 메인이 갈림길 결정 · 보고) — 「쭉쭉 진행해」.
-
-## 이번 세션에 한 것
-- TRD: 3판(`02ab36c` — D4 시절 · 리뷰 2라운드) → 4판(`a578259` — 사용자 결정 반영 · 리뷰 FIX 14건 반영) → 확인 리뷰 반영(`14d8f04`). HTML 브리핑(3판 기준 · 낡음)은 scratchpad 에만 있었다.
-- master 흡수: storage L4(`14c275e`) → `40b707a`(충돌 0 · CI 초록).
-- U1 `2de9756`: 데몬 `control/help.rs` 신설(원천 주입 · 요청마다 읽기 · 필수 구획 · 중복/모르는 키 거절) · `ControlRoute::Help`(우편 게이트 밖) · `start_mcp_server_with_help` / `_without_help`(호출자 21 개명) · agent `CLI_HELP_*` 상수 · CLI help 배송 · `fail_unreached` · 404 → `PROTOCOL_MISMATCH` · `--body-stdin` 은 자격증명 뒤. CLI → 데몬 lib 간선 0.
+## 사용자 결정 (2026-10-10)
+- 「딱히 이슈 없으면 쭉 진행」 · 막히면 간단한 건 메인이 정하고 「잠정 — 사용자 확인 대기」. 리뷰어 정면 대립은 사용자에게.
+- 「잠정」 다섯 묶음(ADR-0291 약한 기각 셋 · 결정 13 제자리 개정 · U7 kill 방식 · TRD 리뷰 메인 결정들 · U1 sync_dir → U3)은 브리핑했고 사용자 「잘 모르겠다 — 이슈 없으면 진행」 → 기본안 유지.
+- U3 리뷰 대립(codex BLOCK 2) 사용자 판정: ① 폴더 동기화 실패 무시 → tracking T-55 기록만(macOS 이식 때) ② 소수점 거대 버전 → 무시.
+- 패닉 unwind 범위 = 워크스페이스 전체 + 셸에도 같은 훅 ★패닉 구현 ADR(0292)에 박을 것★. master 머지 · 태그 · panic-policy 머지 = 안 함.
 
 ## 검증 상태
-- **리뷰:** `/review code full` — codex blind FIX 1(중복 키) · Claude doc-aware FIX 3 → 반영 → 둘 다 PASS. (중복 키는 두 리뷰어 판단이 갈렸고 엄격한 쪽을 택해 보고함.)
-- **QA standard(실측):** 워크스페이스 59 줄 · 4259 통과 · 0 실패 · 31 무시(기준 4249 → +10) · 데몬 lib 602 · bin engram 114 · engram_cli 43 · mail_gate 12 · lib_unit 839 · fmt · 격리 게이트 4~4i · tsc · npm 2022 전부 PASS · TRD 수용 기준 ①~⑥ PASS.
-- **QA full(GUI 실측):** help 9종 stdout 바이트 동일 · stderr 빈 · 데몬 로그 help 원천 info(warn 0) · 자격증명 없는 help = `NO_TOKEN` exit 1 · ★codex app-server 에이전트가 샌드박스 안에서 `engram agent list` · `engram help mail` 성공(루프백 막힘 없음)★. 실측은 스크래치 `ENGRAM_DATA_DIR`(`.engram-dev` 에 auto_restore 프로필이 있어 바인딩 규칙대로).
-- **CI:** `2de9756` 초록.
-- **미검:** 비-Windows · 트레이 클릭 · U2 · U3 전부.
+- U4 QA full: 워크스페이스 59 결과 줄 · 4281 통과 · 0 실패 · 31 무시 · 셸 lib_unit 826 · layout_commands 91 · tsc · npm test 2021 · 실 앱: 새 판 state.json(바이트 불변 · 안내 문구 · restore.status newer · saves=false) · 새 판 settings.json(CONFLICT · 불변) · 빈 데이터 폴더 첫 실행(폴더 · 파일 생성).
+- 선재 실패: T-56(codex 터미널 실 CLI 계약 시험 5건) · T-52(graceful 데몬 끄기 Timeout).
+- 수락한 잔여(U4 codex r2 · C1 범위): 부팅 ③~⑤ 수 ms 안 바깥 편집 때 상태 표시 두 건(인코딩 오류 경로가 재판정 전에 돌아감 · 늦은 손상 떠 두기가 state_file 에 안 실림) — U9 에 한 줄 기록 후보.
 
-## 미처리 (사용자 결정 대기 · 기록됨)
-- **qa 바인딩 수정 3건(U3 때 묶어 올린다 · 바인딩 수정 = 사용자 승인):** ① F절(자격증명 빌려 CLI 부르기) `qa.md:445` 「실 engram.exe 와 돈 적 없다」 → 2026-10-08 실측 통과로 ② JSON 에이전트(codex app-server) 출력 읽는 조리법이 없다 — `getSnapshot` 은 `[]` + 데몬 B7 warn · 대신 `layout.setSlotContent` 로 칸 배정 → DOM `innerText` · `chat.toolGroup.setExpanded` · 입력 = `writeStdin` 를 E절에 ③ `createClaudeProfile` 의 name 인자가 명부 이름에 반영 안 됨(cwd basename 이 나옴) — 미조사.
-- 이전부터: ADR-0271 상태줄 도장(손편집 1회 허용 vs adr 스크립트 고침) · qa 바인딩 release 경로 빈칸(옛 핸드오프 목록 — `cargo build --release -p engram-dashboard-daemon` 없음 등) · adr lint 빈 번호 오류.
-- **3단계(transport)에 닿으면 올릴 것 둘(사용자 요청):** ① 큰 작업이라 「기존 상태 복원하고 진행 vs 한꺼번에 진행」 ② 메모 `docs/refactoring/architecture-discussion-2026-09-26.md` §10 의 3단계를 2026-09-08 사용자 확정 순서(셸 경로 스왑 → 멀티 데몬 · 한 클라가 여러 데몬 구독 → net 대체 + 원격 페어링 — `.claude/handoff/history/20260908-000539-transport-crate-master-merge.md:14`)에 맞추는 안 + T-15(로컬 다중 데몬 · 보류). 사용자는 transport 를 맨 마지막(4단계 안쪽 정리 뒤)으로 미룰 수도 있다고 함 — 그때 4단계 항목별 겹침(특히 「데몬 구조 문제」 ↔ 3-3) 조사를 함께 올린다.
+## U5a 지시서에 넣을 것
+- TRD §6-1 U5a 행 · §3-4(모양 검사 = 명부 · 프리셋 칸 역직렬화 — 읽기 쪽은 버전 키를 필수로 두지 말 것 · `persistence/mod.rs:27-30` · `presets.rs:24-27`) · §3-9(저장소 상태 칸 잎 락 · 트레이트 `save -> Result` + `status` · 가짜 16개 — 실제 18 impl, `manager.rs:3073 · 5016` 포함) · D7(적재 읽기 예산 ~1 초 — 운영 `OsHooks` 둘) · 옛 `agents.json.tmp` 직접 지우기 · 락 순서 문장 다섯 자리.
+- serde 오류 문자열이 값을 실을 수 있다(U3 리뷰) — 모양 실패 사유를 어떻게 담을지 U5a 에서 정한다(지금 agent 도 이미 값을 로그한다 — 회귀 아님).
+- base `file` API: `Spec{version_key,current,cap,shape}` · `parse` · `classify` · `load` · `Claim` · `write_policy` · `judge` · `check_cap` · `write_atomic(_unless)` · `copy_atomic` · `copy_aside` · `sweep_temps` · `OsHooks{retry,sync_dir}`(fn 포인터) · 상수 `BUSY_RETRIES`/`BUSY_PAUSE`. 셸 운영 값 = `src-tauri/src/file_hooks.rs`(선례).
 
-## do-not
-- ★U2 의 TRD 수용 grep 은 Git Bash 에서 따옴표 리터럴이 MSYS 경로 변환에 망가져 거짓 0 이 나온다★ — `MSYS_NO_PATHCONV=1` 또는 Grep 도구.
-- 바이트 대조 도구: `scratchpad/u1-baseline/capture-help.sh` 는 자격증명을 지운다(기준용). 「후」는 자격증명을 살린 사본(`u1-qa/gui/capture-help-cred.sh`)으로. 기준 stderr 의 폴백 경고는 기준 exe 를 저장소 밖에서 돌려서 생긴 것 — stdout · exit 만 견주고 「후」 stderr 는 비어야 한다. (scratchpad 는 세션 휘발 — 다음 세션엔 없을 수 있다. 없으면 TRD §3-5 「전」을 U1 이전 커밋에서 다시 뜨지 말고, U2 는 U1 의 출력과 견준다: U1 exe 로 기준을 새로 뜬다.)
-- 코더 지시서: `cargo fmt` → eol 되돌리기(`unix2dos`) → 시험 한 번(순서를 지키면 회귀 1회로 끝난다 — 이번 실측 개선점). CRLF · `sed -i` 금지 · `git ls-files --eol`.
-- 채번: ADR 다음 = **0284**(0283 = storage 의 웹뷰 폴더) — 커밋 직전 원격 전부 재확인(`git -c core.quotepath=off ls-tree --name-only <ref>:docs/decisions`). tracking 최고 = T-52.
-- master 머지 직전 `git merge-tree` 재확인(storage 등 다른 브랜치가 들어올 수 있다).
-- U1 코드의 `// ADR-0284` 앵커 ~20 곳은 ADR 이 아직 없다 — U3 에서 ADR-0284 를 쓰고 ADR-0212 결정 3 · 4 · ADR-0273 결정 5 등 개정 링크(TRD §7)를 /adr 로 단다. master 머지 전 필수.
-- 로컬 ref `refs/wip/u1-partA` · `refs/wip/u1-review` 는 U1 작업 중 스냅숏 — 지워도 된다(`git update-ref -d`).
+## do-not / 주의
+- Git Bash 에 `rg` 없음 → `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\ada252862d154cdd\` 를 PATH 앞에(모든 워커 지시서). `bash` 가 WSL 이면 거짓 FAIL.
+- 줄끝 파일마다 다름 → `git ls-files --eol <경로>` 로 확인 · `sed -i` 금지 · `node -e`. `cargo fmt` 가 CRLF 파일을 LF 로 바꿀 수 있다(U4 실발생).
+- `lib_unit` 실행이 `src-tauri/bindings/*.ts` 전부를 LF 로 다시 쓴다 → 커밋 전 `for f in $(git diff --name-only -- src-tauri/bindings); do git diff --ignore-cr-at-eol --quiet -- "$f" && git checkout -- "$f"; done`.
+- QA GUI 정리에 `taskkill /T` 금지(T-54) — 이번 실행이 띄운 PID 만 /F. 앱은 `quit_app` 으로 닫는 게 깔끔했다.
+- 새 파일은 리뷰 diff 전 `git add -N`. 다음 ADR 번호 = 0292(/adr 스크립트는 로컬 최대로 채번 — 자리채움 우회 필요했다).
+- U9 문서 몫 누적: ADR-0275 결정 2 · 6 → 0291 링크 · 0266 · 0269(결정 6 셋째 줄 포함) · 0274 · 0275 의 fsutil 언급 · S21-storage TRD §6-5 · §12 R3 · :263 · TRD-1-1 :161 · §8 D2 · `docs/reference/structure/session-path-ownership.md` · 메모 :38 · :88 · :308 · CLAUDE.md 수치(워크스페이스 4281 · lib_unit 826) · platform `retry_busy_with` doc · TRD A §3-6 줄 번호 · U4 C1 잔여 한 줄.
 
 ## 정지 조건
-- 3단계(transport) 착수 지점 — 위 두 논의를 올린다.
-- U2 §5-3 릴리스 1회에서 떠 있는 릴리스 앱 · 데몬을 꺼야 할 때.
-- GUI 실측이 기본 `.engram-dev` 의 복원 프롬프트(`awaiting`)를 만날 때(바인딩 답 정책).
-- 리뷰어 정면 대립(BLOCK vs PASS 등) · 리뷰 하드캡(총 재수정 3회) 초과.
-- master 머지 직전 `git merge-tree` 종료코드 ≠ 0.
-
-## 참조
-- TRD `docs/process/S21-crate-boundaries/trd-2-3-cli-package.md`(4판 · §2-9 D10 · §2-10 D11 · §3-3 U2 · §3-4 U3 · §3-6 회귀 수 · §5 실측 · §7 ADR-0284 에 박을 것).
-- U1 코드 앵커: `crates/engram-dashboard-daemon/src/control/help.rs` · `mcp_server.rs`(`ControlRoute::Help`) · `src/bin/engram.rs`(`run_help` · `fail_unreached`).
+- 단위 재수정 하드캡 3 초과 · 리뷰어 정면 대립(설계 방향) · 사용자 눈에 보이는 새 갈림길(U5b 의 화면 표시 · 오류 문구는 관행대로 메인이 정하고 잠정).
+- master 머지 · 태그.

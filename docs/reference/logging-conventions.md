@@ -19,13 +19,13 @@
 
 | 레벨 | 기준 | 실제 예시 |
 |---|---|---|
-| **error!** | **데이터 위험 또는 복구 불가** — 사람이 반드시 봐야 함(격리 복구되더라도) | 파싱 실패→손상 파일 보존(`persistence.rs:140`), 직렬화 실패, panic(`daemon/lib.rs:91`, reaper 격리복구 `reaper.rs:196`), 인스턴스 가드·data_dir 실패 |
-| **warn!** | **비정상이나 안전하게 폴백**(데이터 위험 없음) | resume 실패→fresh fallback(`manager.rs:324`), agents.json **읽기** 실패→빈 목록(`persistence.rs:122`), accept 실패 |
+| **error!** | **데이터 위험 또는 복구 불가** — 사람이 반드시 봐야 함(격리 복구되더라도) | agents.json · presets.json 적재 — 손상 → 빈 목록(첫 저장 직전 떠 둠) · 새 판 · 읽기 실패 → 빈 목록 + 그 실행 내내 읽기 전용(agent `persistence/mod.rs` 의 적재 · ADR-0291), 직렬화 실패, panic(`daemon/lib.rs:91`, reaper 격리복구 `reaper.rs:196`), 인스턴스 가드·data_dir 실패 |
+| **warn!** | **비정상이나 안전하게 폴백**(데이터 위험 없음) | resume 실패→fresh fallback(`manager.rs:324`), 손상 agents.json 을 첫 저장 직전에 `.corrupt` 로 떠 둠(같은 파일의 저장), accept 실패 |
 | **info!** | 정상 수명주기 이벤트(운영자 관심). 기본 warn이라 평상시 안 보이나 켜면 흐름이 보임 | 에이전트 spawn(`manager.rs:169`), 복원 시작/결과, 데몬·스레드 시작/종료, 연결 수립(net crate `ws.rs` 의 `handle_connection`) |
 | **debug!** | 상세 흐름·진단. 디버깅 때만 | WS upgrade/Origin(net crate `ws.rs` 의 `OriginCheck::on_request`), reaper/thread 종료, 사소한 핸들 정리 실패 |
 | **trace!** | 초고빈도 핫패스만. 현재 미사용(0건) | (출력 청크 per-frame 등 — 도입 시 신중) |
 
-읽기 한 줄: **데이터 위험/복구불가(error) → 이상하지만 안전 폴백(warn) → 정상인데 추적 가치(info) → 내부 디테일(debug).** (읽기 실패=warn / 파싱 실패=손상 신호라 error — 분기 예시.)
+읽기 한 줄: **데이터 위험/복구불가(error) → 이상하지만 안전 폴백(warn) → 정상인데 추적 가치(info) → 내부 디테일(debug).** (agents.json 은 손상 · 읽기 실패 둘 다 error — 손상은 명부를 잃는 신호이고 읽기 실패는 그 실행 내내 저장을 막는다 · 그 뒤 떠 두기가 성공하면 warn — 분기 예시.)
 
 ## 형식
 

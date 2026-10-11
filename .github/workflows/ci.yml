@@ -665,7 +665,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -915,6 +915,7 @@ jobs:
           crates/engram-dashboard-agent/src/session.rs
           crates/engram-dashboard-agent/src/transport/process_group.rs
           crates/engram-dashboard-agent/src/transport/pty.rs
+          crates/engram-dashboard-agent/src/transport/spawn.rs
           crates/engram-dashboard-agent/src/transport/stdio.rs
           crates/engram-dashboard-agent/src/usage/process.rs
           crates/engram-dashboard-agent/src/usage/scratch.rs
@@ -938,8 +939,6 @@ jobs:
           crates/engram-dashboard-daemon/src/bin/saturation_pilot.rs
           crates/engram-dashboard-agent/examples/spike.rs
           crates/engram-dashboard-agent/examples/spike_breakaway.rs
-          # 시한부 운영 예외(ADR-0275 결정 15)
-          src-tauri/src/fsutil.rs
           OS_CFG_FILES
           )
           if [ "$actual" = "$expected" ]; then

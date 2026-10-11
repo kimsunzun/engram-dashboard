@@ -895,18 +895,24 @@ mod tests {
         usage: Arc<UsageService>,
     ) -> AgentConnections {
         use engram_dashboard_agent::preset::{Preset, PresetRegistry, PresetStore};
-        use engram_dashboard_agent::profile::{AgentProfile, ProfileRegistry, ProfileStore};
+        use engram_dashboard_agent::profile::{
+            AgentProfile, ProfileRegistry, ProfileStore, StoreError,
+        };
         use engram_dashboard_agent::session_tracker::{SessionTracker, TrackerConfig};
 
         struct NoStore;
         impl ProfileStore for NoStore {
-            fn save(&self, _: &[AgentProfile]) {}
+            fn save(&self, _: &[AgentProfile]) -> Result<(), StoreError> {
+                Ok(())
+            }
             fn load(&self) -> Vec<AgentProfile> {
                 Vec::new()
             }
         }
         impl PresetStore for NoStore {
-            fn save(&self, _: &[Preset]) {}
+            fn save(&self, _: &[Preset]) -> Result<(), StoreError> {
+                Ok(())
+            }
             fn load(&self) -> Vec<Preset> {
                 Vec::new()
             }

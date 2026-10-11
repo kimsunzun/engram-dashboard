@@ -158,7 +158,7 @@
 
 - `LeftoverClock` 은 「지금 읽기」 seam 이다 — ADR-0269 결정 3 이 세지 않은 다섯째. `mono_now` 호출 22곳(`rg -n "mono_now\(" crates/engram-dashboard-agent/src | wc -l`). 그 계약에 「★문 자물쇠 안에서도 부른다★ — 다른 자물쇠를 잡거나 기다리지 않는다」가 박혀 있다(:954) — CLAUDE.md 「핵심 불변식」 락 순서의 잔여물 정리 조항과 같은 것이다. → **결정 C2=(a)** — 상위 트레이트 꼴로 합친다(U6).
 - `CaptureClock` 은 시간을 읽지 않는다 — 합칠 몫이 없다(워커 판단, 질문 아님).
-- **storage 브랜치가 일곱째를 더한다** — `src-tauri/src/state/saver.rs`(`5a2cf7f`) `pub trait Clock: Send + 'static { now() -> Instant; wall_ms() -> u64 }`. `Sync` 가 없다. P3 착지 뒤 단위(§8 D2)의 몫이다.
+- **storage 브랜치가 일곱째를 더한다** — `src-tauri/src/state/saver.rs`(`5a2cf7f`) `pub trait Clock: Send + 'static { now() -> Instant; wall_ms() -> u64 }`. `Sync` 가 없다. P3 착지 뒤 단위(§8 D2)의 몫이다. ★→ TRD A U8 이 base `Clock` 의 하위 트레이트(`SaverClock` — `Send + Sync` 는 base `Clock` 이 진다)로 합쳤다(ADR-0291 결정 14 · `fa6cb2f3`)★
 - **`UsageClock` 은 깔끔히 맞지 않는다**(ADR-0269 결정 3-4 의 조건 — 「안 맞으면 그때 사용자에게 묻는다」):
   - `mono()` 는 `Instant` 가 아니라 **시계가 쥔 기점부터의 `Duration`** 이고, 그 값이 `usage_service/book.rs` 의 도메인 타입으로 흘러간다(`book.rs:54` `pub mono: Duration` · `owes_at(mono)` · `reject_deadline(mono, …)` 등). 시험은 `Duration::MAX` · `Duration::ZERO` 끝값을 쓴다(`book.rs:2133,2756` · `clock.rs:176`) — `Instant` 로는 그 끝값을 만들 수 없다.
   - `wall()` 은 부호 있는 epoch **초**(1970 전 음수 · 양끝 포화)라 `now_epoch_ms()`(ms · 1970 전 0)로 바꿀 수 없다.
@@ -535,9 +535,9 @@ pub fn wait_until(timeout: Duration, cond: impl FnMut() -> bool) -> bool
 
 | id | 무엇 | 사유 · 트리거 |
 |---|---|---|
-| D1 | `file::set_aside_corrupt` 통일(agent `persistence/{mod,presets}.rs` · 셸 `settings/store.rs` `set_aside`) | storage P3 가 그 동작 규칙을 바꿨다(ADR-0274 — 원격 브랜치) · 셸 `fsutil.rs` · `settings/` 에 파일 쓰기를 더한다 → P3 가 master 에 착지한 뒤(메모 §10 진행 방식) |
-| D2 | P3 착지 뒤 쓸어 담기 — 셸 `settings/mod.rs` 복구 3곳 · `settings/store.rs:122` epoch ms(`u128`) · storage 의 `state/saver.rs` `Clock`(`now` + `wall_ms`) · `SystemClock::wall_ms`(`u64`) · `state/` 복구 1곳 | 같은 트리거. saver `Clock` 은 base `Clock` 의 `Send + Sync`(C1=a)에 맞춰 `Sync` 를 더해야 한다 · 셸 `settings/mod.rs` 3곳은 S2=(e) 라 셋 다 옮긴다(`:486` 의 「잎」 규율도 걸리지 않는다) |
-| D3 | `write_atomic` 여러 벌 → platform | ADR-0266 결정 8 · 1-3 · P3 뒤 |
+| D1 | `file::set_aside_corrupt` 통일(agent `persistence/{mod,presets}.rs` · 셸 `settings/store.rs` `set_aside`) | storage P3 가 그 동작 규칙을 바꿨다(ADR-0274 — 원격 브랜치) · 셸 `fsutil.rs` · `settings/` 에 파일 쓰기를 더한다 → P3 가 master 에 착지한 뒤(메모 §10 진행 방식) · ★→ TRD A(`trd-A-data-file-unification.md`)가 닫았다 — base `file::copy_aside`(ADR-0274 규칙을 네 파일에 · ADR-0291 R9 · U2 · U5a)★ |
+| D2 | P3 착지 뒤 쓸어 담기 — 셸 `settings/mod.rs` 복구 3곳 · `settings/store.rs:122` epoch ms(`u128`) · storage 의 `state/saver.rs` `Clock`(`now` + `wall_ms`) · `SystemClock::wall_ms`(`u64`) · `state/` 복구 1곳 | 같은 트리거. saver `Clock` 은 base `Clock` 의 `Send + Sync`(C1=a)에 맞춰 `Sync` 를 더해야 한다 · 셸 `settings/mod.rs` 3곳은 S2=(e) 라 셋 다 옮긴다(`:486` 의 「잎」 규율도 걸리지 않는다) · ★→ TRD A U8 이 닫았다 — 셸 락 오염 복구 12곳을 base `sync` 로 · saver `Clock` 을 base `Clock` 의 하위 트레이트로(ADR-0291 결정 14) · `settings/store.rs:122` epoch ms 는 그 전에 ADR-0274 가 시각 이름을 걷어 없었다(TRD A §2-3)★ |
+| D3 | `write_atomic` 여러 벌 → platform | ADR-0266 결정 8 · 1-3 · P3 뒤 · ★→ TRD A 가 닫았다 — 거처는 platform 이 아니라 base `file::write_atomic`(재시도 · 폴더 동기화는 부르는 쪽이 `OsHooks` 로 넘긴다 · ADR-0291 결정 1 · 3 이 ADR-0266 결정 8 개정)★ |
 | D4 | transport 시계와 transport 의 base 의존(C5=b) — 자르기는 U1 에서 std 로 끝난다 | 3단계(transport 부착) TRD — ADR-0275 #3 |
 | D5 | messaging XML 이스케이프 · command `testing.rs` 복구 3곳 | ADR-0267 — 필요해질 때 연결 |
 | D6 | `UsageClock`(C3=a) | 합칠 계기가 생기면(예: book 의 시간 타입을 다시 볼 때) |

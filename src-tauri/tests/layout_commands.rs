@@ -615,8 +615,11 @@ fn the_catalog_generation_is_pinned_to_the_declaration_set() {
     //   절 · 가드 ⅱ 안내(ADR-0276)를 나르는 칸 — 칸 자체는 구현 · 세션 판단). 세대 14 는 이름이 둘 늘고
     //   (`window.setTheme`·`window.getTheme`) 하나가 빠진 세대다(`ui.refresh` — TRD S21-storage §5-6 · §5-7).
     //   세대 15 는 그 둘의 `window` 칸이 받는 **어휘**가 준 세대다(`agent-tree` — ADR-0225 · summary 는
-    //   `window.getTheme` · `restore.status` 것만 바뀌었다).
-    assert_eq!(CATALOG_VERSION, 15);
+    //   `window.getTheme` · `restore.status` 것만 바뀌었다). 세대 16 은 `restore.status` 의 `state_file` **어휘**가
+    //   늘고(`newer`) `settings.set` · `settings.reset` 의 **오류 선언**에 `CONFLICT` 가 든 세대다(ADR-0291). 세대 17 은
+    //   그 둘이 지금 못 읽은 설정 파일을 `INTERNAL` 대신 `CONFLICT` 로 답하는 **답 어휘**와 summary 가 바뀐 세대다
+    //   (ADR-0291 R17).
+    assert_eq!(CATALOG_VERSION, 17);
     assert_eq!(COMMAND_SPECS.len(), 26);
     assert_eq!(
         SlotPopoutArgs::SPEC.since,
@@ -1685,6 +1688,86 @@ async fn a_write_before_the_shell_opens_writes_is_internal() {
     assert!(!closed.0.exists(), "쓰기 전에 폴더를 만들었다");
 }
 
+/// ADR-0291 R2: 설정 파일이 이 셸보다 새 판이 쓴 것이면 쓰기는 `CONFLICT` 다 — `INTERNAL` 이 아니다(다시 해도
+/// 그 파일이 바뀌기 전에는 같다). 파일 바이트 · 알림 그대로.
+#[tokio::test]
+async fn a_write_over_a_settings_file_from_a_newer_version_is_conflict() {
+    let (world, mut ports) = World::build();
+    let newer = ConfigDir::new();
+    std::fs::create_dir_all(&newer.0).expect("폴더");
+    let text = r#"{"$version":2,"theme.default":"light"}"#;
+    std::fs::write(newer.0.join("settings.json"), text).expect("새 판 파일");
+    ports.settings = newer.service();
+    let queue = Arc::new(Queued::default());
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::clone(&queue) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "settings.set",
+            json!({"key": "theme.default", "value": "e-ink"}),
+        )
+        .await,
+    );
+
+    assert_eq!(err.code(), ErrorCode::Conflict);
+    assert!(world.settings_events.changes().is_empty());
+    assert_eq!(
+        std::fs::read_to_string(newer.0.join("settings.json")).expect("파일"),
+        text,
+        "덮지 않는다"
+    );
+    assert!(
+        !newer.0.join("settings.json.corrupt").exists(),
+        "떠 두지 않는다"
+    );
+}
+
+/// ADR-0291 R17: 쓰기 직전 다시 읽은 설정 파일을 못 읽으면 `CONFLICT` · `after-condition` 이다 — 대개 잠깐 쥔
+/// 잠김이라 조금 뒤 다시 하면 된다(새 판 파일의 `never` 와 갈린다). 값 · 알림 그대로. 못 읽는 자리는 파일 이름에
+/// 폴더를 세워 만든다 — 열기가 늘 실패한다.
+#[tokio::test]
+async fn a_write_over_an_unreadable_settings_file_is_conflict_to_retry_later() {
+    let (world, mut ports) = World::build();
+    let blocked = ConfigDir::new();
+    std::fs::create_dir_all(blocked.0.join("settings.json")).expect("파일 자리의 폴더");
+    ports.settings = blocked.service();
+    let queue = Arc::new(Queued::default());
+    let receiver = InboundReceiver::new(
+        make_table(ports),
+        Arc::clone(&queue) as Arc<dyn TaskSpawner>,
+        CATALOG_VERSION,
+    );
+
+    let err = error_of(
+        call(
+            &receiver,
+            &queue,
+            &world.mail,
+            "settings.set",
+            json!({"key": "theme.default", "value": "e-ink"}),
+        )
+        .await,
+    );
+
+    assert_eq!(err.code(), ErrorCode::Conflict, "{}", err.message());
+    assert_eq!(
+        err.retry(),
+        engram_dashboard_command::RetryMode::AfterCondition
+    );
+    assert!(world.settings_events.changes().is_empty());
+    assert!(
+        blocked.0.join("settings.json").is_dir(),
+        "그 자리를 덮지 않는다"
+    );
+}
+
 /// ★쓰기 본문은 적용 태스크를 폴링하는 런타임 스레드가 아니라 블로킹 풀에서 돈다★ — `sync_all` 을 기다리는
 /// 동안 그 워커에 얹힌 다른 태스크(연결 소켓 포함)가 서지 않게.
 #[tokio::test]
@@ -2070,6 +2153,7 @@ async fn restore_status_carries_the_state_file_status_in_its_wire_spelling() {
     );
 
     for (state_file, wire) in [
+        (StateFileStatus::Newer, "newer"),
         (StateFileStatus::CorruptCopiedAside, "corrupt_copied_aside"),
         (StateFileStatus::CorruptNotCopied, "corrupt_not_copied"),
     ] {
@@ -2792,6 +2876,63 @@ async fn a_composite_command_does_not_wait_on_its_caller() {
     world.mail.settle(1).await;
     let ok = world.mail.only().outcome.expect("배치 성공");
     assert_eq!(ok["agent_id"], "agent-1");
+}
+
+/// ★데몬이 코드를 실어 답한 스폰 실패는 그 코드로 나간다 — `CONFLICT` 를 겹쳐 씌우지 않는다★(ADR-0291 R17).
+/// 저장 쓰기 실패(`INTERNAL:`)가 `CONFLICT` 로 덮이면 「아무것도 적용 안 된 반려」로 읽히고, 문구에 코드가 둘 남는다.
+/// 코드 접두가 없는 문구는 그대로 `CONFLICT` 다.
+#[tokio::test]
+async fn spawn_into_keeps_the_code_the_daemon_answered_with() {
+    for (answered, code, message) in [
+        (
+            "CONFLICT: the agent was not created or started: agents.json could not be read just now",
+            ErrorCode::Conflict,
+            "the agent was not created or started: agents.json could not be read just now",
+        ),
+        (
+            "INTERNAL: the agent was not created or started: writing agents.json failed: disk full",
+            ErrorCode::Internal,
+            "the agent was not created or started: writing agents.json failed: disk full",
+        ),
+        (
+            "backend 칸이 비었다",
+            ErrorCode::Conflict,
+            "backend 칸이 비었다",
+        ),
+    ] {
+        let (mut world, ports) = World::build();
+        let receiver = InboundReceiver::new(
+            make_table(ports),
+            Arc::new(RuntimeSpawner(tokio::runtime::Handle::current())) as Arc<dyn TaskSpawner>,
+            CATALOG_VERSION,
+        );
+        let request_id = RequestId::new();
+        receiver.on_command(
+            envelope(
+                "agent.spawnInto",
+                json!({ "window": MAIN_WINDOW_LABEL, "cwd": "C:/work/engram", "backend": "claude" }),
+                request_id,
+            ),
+            world.mail.sink(request_id),
+        );
+        let (_cwd, _backend, answer) =
+            tokio::time::timeout(Duration::from_secs(5), world.spawn_requests.recv())
+                .await
+                .expect("스폰 요청이 온다")
+                .expect("스폰 요청이 온다");
+        answer
+            .send(Err(answered.to_string()))
+            .expect("스폰 답을 넣는다");
+
+        world.mail.settle(1).await;
+        let err = world
+            .mail
+            .only()
+            .outcome
+            .expect_err("스폰이 실패했다");
+        assert_eq!(err.code(), code, "{answered}");
+        assert_eq!(err.message(), message, "{answered}");
+    }
 }
 
 /// ★이 문은 `agent.new` 의 등록 공통부를 안 지난다★ — 그래서 같은 철자 규칙을 여기서 따로 잰다.

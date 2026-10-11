@@ -190,7 +190,7 @@ fn user_kill_keeps_profile_corpse_with_session_id() {
     let sid = Uuid::new_v4();
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);
-    profiles.upsert(seeded.clone());
+    profiles.try_upsert(seeded.clone()).expect("저장 성공");
 
     let info = manager
         .spawn_agent(&seeded, SpawnMode::Fresh)
@@ -343,7 +343,7 @@ fn epoch_mismatch_does_not_reap_current_session() {
     let mut profile = exit_profile(0);
     profile.id = id;
     profile.auto_restore = true;
-    profiles.upsert(profile);
+    profiles.try_upsert(profile).expect("저장 성공");
 
     let updates_before = sink.list_update_count();
 
@@ -386,7 +386,7 @@ fn duplicate_reap_processes_exactly_once() {
     let mut profile = exit_profile(0);
     profile.id = id;
     profile.auto_restore = true;
-    profiles.upsert(profile);
+    profiles.try_upsert(profile).expect("저장 성공");
 
     let updates_before = sink.list_update_count();
 
@@ -445,7 +445,7 @@ fn stale_disposition_does_not_downgrade_reactivated_live_session() {
     profile.id = id;
     profile.epoch = 1; // 재활성화로 화신 표식이 갈린 상태(reaped_epoch=0 과 불일치).
     profile.auto_restore = true;
-    profiles.upsert(profile);
+    profiles.try_upsert(profile).expect("저장 성공");
 
     // 옛 reap(reaped_epoch=0)이 뒤늦게 도착.
     let stale = ReapMsg {
@@ -477,7 +477,7 @@ fn matching_epoch_disposition_downgrades_as_before() {
     profile.id = id;
     profile.epoch = 0; // 재활성화 없음 → reaped_epoch=0 과 일치.
     profile.auto_restore = true;
-    profiles.upsert(profile);
+    profiles.try_upsert(profile).expect("저장 성공");
 
     let done = ReapMsg {
         id,

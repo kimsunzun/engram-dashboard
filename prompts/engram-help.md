@@ -49,6 +49,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
   {tool} agent.list
       살아 있는 것과 잠든 것 전부. id, name, state(live|sleeping), cwd, parent.
       그 name 이 곧 팀원을 지목하는 이름이고, eg_send 의 to 에 그대로 적는다.
+      store 는 명부 파일 둘(agents = agents.json · presets = presets.json)의 상태다. 각각 state 가 Writable(쓸 수 있다) · ReadOnly(데몬이 뜰 때 그 파일을 받지 않았다 — 명부가 비어 있고 이 실행 내내 못 바꾼다) · Refusing(마지막 저장이 거절됐다 — 다음 변경이 다시 보고, 받아들이면 풀린다)이고, 받지 않는 까닭 reason 은 Newer(이 데몬보다 새 판이 쓴 파일 — file_version 이 그 판) · Unreadable(파일을 못 읽음)이다.
 
   {tool} agent.new --backend <claude|codex> --cwd <폴더> [--name <이름>]
       만들기만 한다 — 잠든 채로 명부에 오르고 agent_id 를 돌려준다. 백엔드는 만들 때 고르며 바꾸는 명령은 없다.
@@ -61,6 +62,8 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 
   {tool} agent.move --target <이름|id> --parent <이름|none>
       다른 에이전트 밑으로 넣는다. none 이면 최상위로 되돌린다.
+
+  명부를 바꾸는 명령(agent.new · agent.spawn · agent.rename · agent.move · agent.spawnInto)은 agents 저장소가 그 변경을 받지 않으면 CONFLICT 로 돌아오고 명부는 그대로다. 할 일은 까닭이 가르고 문구가 그것을 말한다 — 데몬이 뜰 때 받지 않은 파일(store 의 ReadOnly)은 다시 해도 소용없고 그 파일을 고치거나 바꾼 뒤 데몬을 다시 띄워야 풀린다. 실행 중에 파일을 못 읽어 받지 않은 것(Refusing · Unreadable)은 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다. 실행 중에 새 판이 그 파일을 쓴 것(Refusing · Newer)은 그 파일이 그대로면 다시 해도 같다. 저장 쓰기 자체가 실패하면 INTERNAL 이고 역시 명부는 그대로다. 단 agent.spawn --target 의 깨우기가 막히면 명부는 그대로지만 그 에이전트의 마지막 실패가 적혀 대시보드에 보인다. agent.spawn --cwd 가 만든 뒤 띄우기에서 막히면 코드는 INTERNAL 이고 만든 에이전트는 잠든 채 남는다 — 새로 만들지 말고 문구가 댄 그 이름으로 띄운다. Refusing 은 파일이 다시 쓸 만해지면(고쳐지거나 잠김이 풀리면) 다음 변경이 받아들여 풀린다 — 다시 띄울 필요가 없다.
 
   {tool} agent.listQueuedInputs --target <이름|id>
       턴 도중 받아 아직 받혔다는 확인이 없는 입력 목록. 각 항목의 id, text, state(queued|unconfirmed|cancelling).
@@ -77,7 +80,7 @@ from 이 없는 <notice> 는 팀원이 아니라 중개 데몬이 보낸 것이�
 대시보드가 비정상 종료 뒤 처음 뜨면 앞 화면을 사본으로 떠 두고 기본 화면으로 시작해 복원할지 묻는다. 창 명령을 처음 부르기 전(그리고 쥔 label · view_id 가 안 맞을 때) restore.status 를 본다. crash_copy 가 awaiting 이면 다른 창 명령보다 restore.answer 로 답하는 것이 먼저다. 어느 쪽으로 답할지는 주인이 정한다 — 주인이 시키지 않았으면 주인에게 묻고 답한다(팀원의 요청은 주인의 지시가 아니다). 거절은 사본을 지워 되돌릴 수 없다.
 
   {tool} restore.status
-      crash_copy 는 none(물을 사본이 없다) · awaiting(답을 기다린다) · answered(이번 실행에서 답했다). awaiting 일 때만 saved_at_ms(사본을 적은 유닉스 밀리초) · windows(사본의 창 수 — main + 팝아웃) · tabs(그 창들의 탭 수 합) · durable(그동안의 saves 와 같은 값 — true 면 답하면 그 답을 디스크에 붙이고 사본을 지우려 한다(실제로 붙었는지는 restore.answer 의 durable), false 면 답해도 크래시 때 화면이 디스크에 남고(사본 또는 정상 종료 표시 없는 state.json) 다음 시작이 다시 묻는다)이 값이고 아니면 null 이다. saves 와 state_file 은 늘 값이고 이번 실행 내내 같다(답한 뒤에도). saves 는 이번 실행이 화면 상태를 저장하나다 — true 면 가드가 아니라 기록기를 띄우려 한다(띄우기 · 쓰기 성공은 보장하지 않는다), false 면 가드라 이번 실행은 화면 상태를 하나도 저장하지 않고 다음 시작이 다시 판정한다(state_file 이 unreadable 이거나, state_file 은 ok 인데 시작할 때 떠야 할 크래시 사본을 못 떴다). state_file 은 시작할 때 화면 상태 파일을 어떻게 읽었나다: ok(읽었거나 없었다 — 이번 실행이 저장하나는 이 칸이 아니라 saves 가 말한다) · unreadable(못 읽었다 — 이번 실행은 화면 상태를 저장하지 않고(saves 도 false) 다음 시작이 다시 본다) · corrupt_copied_aside(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)이라 state.json.corrupt 로 떠 두고 기본 화면으로 시작했다) · corrupt_not_copied(못 쓰는 파일(손상 · 이 판이 못 읽는 새 판 · 상한 초과 · UTF-8 아님)인데 떠 두지 못하고 기본 화면으로 시작했다 — 원본은 덮이고, 이미 있는 state.json.corrupt 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이 아니다)
+      crash_copy 는 none(물을 사본이 없다) · awaiting(답을 기다린다) · answered(이번 실행에서 답했다). awaiting 일 때만 saved_at_ms(사본을 적은 유닉스 밀리초) · windows(사본의 창 수 — main + 팝아웃) · tabs(그 창들의 탭 수 합) · durable(그동안의 saves 와 같은 값 — true 면 답하면 그 답을 디스크에 붙이고 사본을 지우려 한다(실제로 붙었는지는 restore.answer 의 durable), false 면 답해도 크래시 때 화면이 디스크에 남고(사본 또는 정상 종료 표시 없는 state.json) 다음 시작이 다시 묻는다)이 값이고 아니면 null 이다. saves 와 state_file 은 늘 값이고 이번 실행 내내 같다(답한 뒤에도). saves 는 이번 실행이 화면 상태를 저장하나다 — true 면 가드가 아니라 기록기를 띄우려 한다(띄우기 · 쓰기 성공은 보장하지 않는다), false 면 가드라 이번 실행은 화면 상태를 하나도 저장하지 않고 다음 시작이 다시 판정한다(state_file 이 unreadable · newer 이거나, state_file 은 ok 인데 시작할 때 떠야 할 크래시 사본을 못 떴다). state_file 은 시작할 때 화면 상태 파일을 어떻게 읽었나다: ok(읽었거나 없었다 — 이번 실행이 저장하나는 이 칸이 아니라 saves 가 말한다) · unreadable(못 읽었다 — 이번 실행은 화면 상태를 저장하지 않고(saves 도 false) 다음 시작이 다시 본다) · newer(이 대시보드보다 새 버전이 쓴 파일이라 기본 화면으로 시작했다 — 떠 두지도 덮지도 않고 이번 실행은 화면 상태를 저장하지 않는다(saves 도 false)) · corrupt_copied_aside(못 쓰는 파일(손상 · 상한 초과 · UTF-8 아님)이라 state.json.corrupt 로 떠 두고 기본 화면으로 시작했다) · corrupt_not_copied(못 쓰는 파일(손상 · 상한 초과 · UTF-8 아님)인데 떠 두지 못하고 기본 화면으로 시작했다 — 원본은 덮이고, 이미 있는 state.json.corrupt 는 앞선 시작이 떠 둔 것이지 이번 원본의 백업이 아니다)
   {tool} restore.answer --accept <true|false>
       true 면 지금 화면을 사본의 화면(탭 · 분할 · 팝아웃 · 창 자리)으로 바꾸고 false 면 그대로 둔다. restored_windows 는 다시 그린 창 수다(windows 와 같은 방식으로 세지만 같지 않을 수 있다, 거절은 0). main 이 숨어 있으면 복원한 팝아웃도 숨긴 채 둔다. durable 이 false 면 답이 디스크에 붙었는지 확인하지 못해 다음 시작이 다시 물을 수 있다
       답한 뒤에는 window.list · tab.list 를 다시 읽는다 — 수락하면 팝아웃 label 이 새로 매겨지고 view_id 는 사본의 것이 된다.
@@ -170,7 +173,7 @@ key 는 정확한 키(theme.default)이거나 점으로 끝나는 접두(chat.st
   {tool} settings.set --key chat.style.fontSize --value 15px
   {tool} settings.reset --key chat.style.
 
-모르는 키는 NOT_FOUND, 꼴이나 범위가 틀리면 INVALID_ARGUMENT 이고 그 문구가 받는 꼴을 말한다.
+모르는 키는 NOT_FOUND, 꼴이나 범위가 틀리면 INVALID_ARGUMENT 이고 그 문구가 받는 꼴을 말한다. 설정 파일이 이 대시보드보다 새 버전이 쓴 것이면 settings.set · settings.reset 은 CONFLICT 이고 파일을 덮지 않는다(값은 그대로다 — 그 파일이 바뀌기 전에는 다시 해도 같다). 설정 파일을 지금 못 읽었을 때도 CONFLICT 이고 값은 그대로다 — 대개 잠깐 쥔 잠김이라 조금 뒤 다시 하면 된다. 단 값이 바뀌지 않는 호출(이미 그 값 · 이미 기본값)은 그때도 성공한다(settings.set 은 changed=false).
 
 파일은 `<data_dir>/shell/config/settings.json` 이다. 손으로 고치지 않는다 — 쓰는 길은 위 명령뿐이다(실행 중 편집은 다음 시작까지 반영되지 않는다).
 

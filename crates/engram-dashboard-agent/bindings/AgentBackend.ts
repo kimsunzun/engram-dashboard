@@ -9,9 +9,10 @@
  * 바뀌지 않게).
  * ★변형을 더하는 값어치는 **짝이 이미 있나**가 가른다★: 실행 명령(`AgentCommand`)은
  * `#[serde(tag = "kind")]` 로 **`agents.json` 에 그대로 적히고**, 모르는 kind 를 만난 옛 빌드는 그
- * 파일을 **한 덩이로** 파싱하다 실패해 `.corrupt` 로 밀어내고 **빈 명부로 뜬다**(persistence
- * `FileProfileStore::load`). 그러니 `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은
- * 디스크 호환을 깨는 이주이고, 짝이 **이미 있는** 백엔드를 더하는 것은 이주가 아니다.
+ * 파일을 **한 덩이로** 손상으로 보고 **빈 명부로 뜬다** — 첫 저장이 그 파일을 `.corrupt` 로 떠 두고 덮는다
+ * (persistence `FileProfileStore::load` · 그보다 옛 빌드는 적재 때 `.corrupt-<ms>` 로 옮긴다). 그러니
+ * `AgentCommand` 에 **아직 없는** 백엔드를 여기 더하는 것은 디스크 호환을 깨는 이주이고, 짝이 **이미
+ * 있는** 백엔드를 더하는 것은 이주가 아니다.
  * ★`Codex` 는 후자였다★ — `AgentCommand::Codex { extra_args, output_format }` 는 그 전부터 있었고
  * 사람 메뉴(`agentlist.createCodex`·`createCodexJson`)가 **그 모양 그대로** `agents.json` 에 이미
  * 쓰고 있었다. 이 문을 연 것은 새 kind 도 새 칸도 스키마 상향도 아니다 — ★한때 이 자리에 「codex 를

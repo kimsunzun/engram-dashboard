@@ -436,7 +436,7 @@ pub struct ReapMsg {
 /// 종료 분류 결과(ADR-0019 §decide). reap_one 이 lock 밖에서 ProfileRegistry 에 적용한다.
 /// ★삭제 처분이 없는 건 의도다(ADR-0083)★ — reaper 는 어떤 종료에도 프로필을 자동 삭제하지 않는다.
 /// 프로필 삭제는 명시적 사용자 명령(AgentCommand::DeleteProfile / Tauri delete_profile)이
-/// ProfileRegistry::remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
+/// ProfileRegistry::try_remove 를 직접 호출할 뿐, 이 enum 을 거치지 않는다.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     /// 모든 런타임 종료(유저 kill·정상 exit·크래시·EOF·signal) → 프로필 유지 + auto_restore=false
@@ -578,7 +578,7 @@ pub const CLI_GROUP_AGENT: &str = "agent";
 /// 제어 계열의 동사 전량 — `engram agent <동사>`.
 ///
 /// ★`kill`·`rm` 이 없는 것은 미구현이 아니라 **보류된 결정**이다★: 트리에서 지우는 것이 에이전트의 생을
-///   끝내는가(ADR-0122)가 아직 코드와 어긋나 있어(현 `delete_agent` 는 프로필만 지우고 프로세스를 남긴다)
+///   끝내는가(ADR-0122)가 아직 코드와 어긋나 있어(현 `try_delete_agent` 는 프로필만 지우고 프로세스를 남긴다)
 ///   그 둘을 여기 얹으면 새 입구로 그 불일치가 노출된다. 그 결정이 서기 전에는 이 목록에 넣지 말 것.
 // ADR-0132
 // ADR-0122
@@ -1034,6 +1034,17 @@ pub enum PtyError {
     ///   (같은 id 의 화신 교체)은 그대로 통과한다 — 백스톱이 기존 팀을 인질로 잡으면 복구가 불가능해진다.
     #[error("roster is full: {current} agents (ceiling {limit}) — refusing to register another")]
     RosterFull { current: usize, limit: usize },
+    /// ★프로필 저장소가 이 변경의 저장을 거절했거나(`ReadOnly`) 쓰지 못했다(`Io`) — 메모리 명부는 그대로다★.
+    ///
+    /// 레지스트리의 부르는 쪽 있는 입구(`try_` 동사)만 이것을 낸다 — 부르는 쪽 없는 내부 변경은 저장의 어떤
+    ///   `Err` 에도 메모리에 적용하고 dirty 를 세우므로 오류가 되지 않는다.
+    /// ★띄우기 경로는 부분 성공이 있다★: 명부 등록이 저장된 뒤 세션 id 비우기의 저장이 실패하면 등록은 남고
+    ///   (되돌리지 않는다) 띄우기만 멈춘다 — 정본 = `manager` 의 `spawn_agent_watching_link` doc.
+    /// ★전용 변형인 이유★: 버스가 저장 거절을 다른 실패와 다른 코드로 실어야 한다(호출자가 할 일이 다르다) —
+    ///   `RosterFull` 과 같은 까닭으로 문자열이 아니라 변형으로 가른다.
+    // ADR-0291 R17
+    #[error("agent store: {0}")]
+    Store(crate::profile::StoreError),
     // ★중복 spawn 요청을 여기 오류로 되돌리지 마라★: "이미 떠 있다 / 이미 뜨는 중이다" 는 실패가 아니라
     //   **할 일이 없는 요청**이라 `Ok(manager::SpawnOutcome::Moot)` 로 답한다. 오류로 두던 시절엔 소비자
     //   마다 "이 오류는 진짜 실패가 아니다" 목록을 들어야 했고, 그 목록을 세 번 손보는 동안 세 번 다 하나씩

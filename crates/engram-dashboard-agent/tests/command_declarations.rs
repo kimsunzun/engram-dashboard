@@ -72,7 +72,8 @@ fn the_usage_verbs_are_declared_with_their_effect_and_generation() {
     let refresh = spec_of("usage.refresh").expect("선언");
     assert_eq!(refresh.effect, Effect::Write);
     assert_eq!(refresh.since, 6);
-    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 6);
+    // 지금 세대는 7 이다 — `agent.list` 의 답에 `store` 가 늘었다(ADR-0291 R17 · D6).
+    assert_eq!(engram_dashboard_agent::commands::CATALOG_VERSION, 7);
 }
 
 /// ★입력을 움직이는 명령 목록은 이 crate 의 `Write` 선언만 담는다★ — 없는 이름이나 조회가 끼면 공통 입구의

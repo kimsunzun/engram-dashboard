@@ -193,6 +193,18 @@ describe('restoreClient — 알림', () => {
     expect(warn).toHaveBeenCalledTimes(1)
   })
 
+  // ADR-0291: 셸의 `newer` 는 아는 값이다 — 모르는 값으로 낮추면 그 알림을 잃는다.
+  it('state_file 의 newer 를 그대로 싣고 경고하지 않는다', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const f = fakeRestoreIpc({ ...view('none'), saves: false, state_file: 'newer' })
+    const client = createRestoreClient(f.ipc)
+    client.install()
+    await flush()
+    expect(client.status()?.state_file).toBe('newer')
+    expect(client.status()?.saves).toBe(false)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
   it('알림 두 칸이 다 어긋나면 한 경고에 둘을 함께 남긴다', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const { saves: _omit, ...withoutSaves } = view('none')

@@ -16,6 +16,7 @@ pub mod api;
 pub mod input_queue;
 pub(crate) mod process_group;
 pub mod pty;
+pub(crate) mod spawn;
 pub mod stdio;
 
 /// 출력 바이트 → OutputEvent 정제 seam (backend-agnostic — ADR-0004/0045).

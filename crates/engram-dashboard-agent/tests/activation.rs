@@ -174,7 +174,7 @@ fn activate_resume_early_exit_ends_failed_no_fresh_fallback() {
 
     let (profile, batch, count) = always_early_exit_profile("resume-no-fallback");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let sid_before = profiles.get(id).and_then(|p| p.backend_session_id);
     let old_sids_before = profiles
@@ -236,7 +236,7 @@ fn reactivate_running_agent_leaves_it_alive_epoch_unchanged() {
 
     let (profile, batch, count) = long_lived_profile("reactivate-live");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let first = manager
         .activate_profile(&profile, SpawnMode::Fresh)
@@ -347,7 +347,7 @@ fn spawn_registers_the_incarnation_in_the_turn_table() {
 
     let (profile, batch, count) = long_lived_profile("turn-register");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let info = manager
         .activate_profile(&profile, SpawnMode::Fresh)
@@ -387,7 +387,7 @@ fn reactivate_after_kill_bumps_epoch() {
 
     let (profile, batch, count) = long_lived_profile("reactivate-epoch-bump");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let first = manager
         .activate_profile(&profile, SpawnMode::Fresh)
@@ -463,7 +463,7 @@ fn user_kill_then_reactivate_finds_profile_and_resumes() {
     let mut seeded = profile.clone();
     seeded.backend_session_id = Some(sid);
     seeded.auto_restore = true;
-    profiles.upsert(seeded.clone());
+    profiles.try_upsert(seeded.clone()).expect("저장 성공");
 
     manager
         .activate_profile(&seeded, SpawnMode::Fresh)
@@ -534,7 +534,7 @@ fn resume_early_exit_records_a_typed_last_failure() {
 
     let (profile, batch, count) = always_early_exit_profile("record-early-exit");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
     assert_eq!(
         profiles.get(id).and_then(|p| p.last_failure),
         None,
@@ -574,7 +574,7 @@ fn an_unspawnable_profile_records_a_spawn_failure() {
         false,
     );
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let result = manager.activate_profile(&profile, SpawnMode::Fresh);
     assert!(result.is_err(), "전제: 없는 실행파일은 Err 로 끝난다");
@@ -601,7 +601,7 @@ fn restoring_over_a_live_agent_never_stamps_it_as_failed() {
 
     let (profile, batch, count) = long_lived_profile("restore-over-live");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
     manager
         .activate_profile(&profile, SpawnMode::Fresh)
         .expect("최초 활성화는 성공한다");
@@ -662,7 +662,7 @@ fn a_kill_inside_the_resume_window_is_not_recorded_as_a_failure() {
 
     let (profile, batch, count) = long_lived_profile("kill-in-window");
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let manager = Arc::new(manager);
     let activator = {
@@ -894,7 +894,7 @@ fn a_resume_whose_handle_is_gone_is_refused_before_any_process() {
             vec![],
             false,
         );
-        profiles.upsert(p.clone());
+        profiles.try_upsert(p.clone()).expect("저장 성공");
         let refusal = match manager.spawn_agent(&p, SpawnMode::Resume) {
             Ok(outcome) => {
                 if let Some(info) = outcome.into_started() {
@@ -918,7 +918,7 @@ fn a_resume_whose_handle_is_gone_is_refused_before_any_process() {
     }
 
     let (shell, batch, count) = always_early_exit_profile("handle-gone-shell");
-    profiles.upsert(shell.clone());
+    profiles.try_upsert(shell.clone()).expect("저장 성공");
     let outcome = manager
         .spawn_agent(&shell, SpawnMode::Resume)
         .expect("shell 은 손잡이 없이도 옛 길로 뜬다");
@@ -1030,7 +1030,7 @@ fn d1_a_fresh_claude_persists_its_minted_id_only_after_the_first_submission() {
     let garbage = Uuid::new_v4();
     profile.backend_session_id = Some(garbage);
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     // 1. 쓰레기 id 로 이어받기 — Phase A 에서는 실패로 끝난다.
     let resumed = manager.activate_profile(&profile, SpawnMode::Resume);
@@ -1152,7 +1152,7 @@ fn a_handleless_claude_resume_opens_a_new_conversation_without_persisting() {
     let (fake_dir, args_log) = fake_claude_dir("handleless");
     let (profile, cwd) = claude_on_fake_path("handleless-claude", &fake_dir);
     let id = profile.id;
-    profiles.upsert(profile.clone());
+    profiles.try_upsert(profile.clone()).expect("저장 성공");
 
     let info = manager
         .activate_profile(&profile, SpawnMode::Resume)
