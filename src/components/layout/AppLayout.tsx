@@ -21,8 +21,9 @@ interface Props {
 // ★단일 레이아웃 권위(ADR-0035·0057)★: 메인 캔버스·슬롯 우클릭 메뉴(SlotContextMenu)·트리 배정 모두
 //   viewStore(=백엔드 ViewManager 미러)로 단일화. main·팝업이 같은 WindowLayout 을 마운트해 동일 코드경로(D-2).
 //
-// ★복원 모달 · 상태 파일 알림은 여기서만 단다★ — 이 라우트가 main 이다. `App` 은 창마다 돌아 거기 달면 트리 · 팝아웃까지
-//   막힌다(TRD S21-storage §6-7). 둘은 같은 상태 한 벌(`restoreClient` — 구독 하나 · 당기기 하나)을 읽는다.
+// ★복원 모달 · 상태 파일 알림은 여기서만 단다★ — 이 라우트가 main 이다. `App` 은 창마다 돌아 거기 달면 팝아웃까지
+//   막힌다(TRD S21-storage §6-7 · 트리 창은 ADR-0225 로 걷혔다).
+//   둘은 같은 상태 한 벌(`restoreClient` — 구독 하나 · 당기기 하나)을 읽는다.
 export default function AppLayout({ restore = restoreClient }: Props) {
   useEffect(() => restore.install(), [restore])
   const status = useSyncExternalStore(restore.subscribe, restore.status)
