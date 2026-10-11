@@ -140,8 +140,9 @@ impl TurnObservations {
     /// ★poison 내성(reaper.rs 의 sessions 락과 같은 판단)★: 이건 **매니저 전역** 표라 어느 홀더가
     ///   패닉하면 그 뒤 **모든** 에이전트의 턴 신호 emit 이 연쇄로 재패닉한다 — core 의 에이전트 전용
     ///   락(`expect` 정당화가 "다른 agent 로 전파 안 됨" 인 것들)과 성질이 다르다. 담긴 건 해시맵뿐이라
-    ///   불변식이 깨진 게 아니므로 가드를 회수해 계속 돈다. (release 는 panic=abort 라 이 내성이 실제로
-    ///   의미 있는 건 debug/테스트 빌드다.)
+    ///   불변식이 깨진 게 아니므로 가드를 회수해 계속 돈다. (운영 프로세스에서 이 내성이 받는 것은 가둔
+    ///   단위(pump · 허용 목록 명령 `agent.listQueuedInputs`)가 이 락을 쥔 채 panic 한 경우뿐이다 — 그 밖의
+    ///   홀더 panic 은 훅이 프로세스를 끝낸다 · ADR-0292.)
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<AgentId, Entry>> {
         sync::lock(&self.entries)
     }

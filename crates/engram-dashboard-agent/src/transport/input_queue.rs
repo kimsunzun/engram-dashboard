@@ -42,10 +42,9 @@ use crate::types::{AgentId, PtyError};
 /// - ★꺼낸 뒤에 큐가 닫혀도 그 쓰기가 성공하면 불린다★ — 그래서 이 부름은 큐를 닫는 쪽(통로의 끝내기
 ///   `shutdown()` · 스트림 끝)과 겹칠 수 있다. 물러난 뒤에 하면 안 되는 일이면 이 안에서 물러남 표시
 ///   (`crate::transport::process_group::RetiringSignal`)를 직접 본다 — 큐의 닫힘이 막아 주지 않는다.
-/// - ★panic 하지 않게 짠다★ — 워크스페이스 루트 `Cargo.toml` 의 `[profile.release]` 가 `panic = "abort"` 라,
-///   릴리스에서는 이 안의 panic 이 프로세스를 죽인다. 라이터는 이 부름을 가둠 표시 밖에서 돌리므로(ADR-0292 결정 3)
-///   base 패닉 훅이 걸린 프로세스에서도 같다. 라이터가 두른 안쪽 catch(잡아 `error` 로 남기고 다음 덩이를 계속 쓴다 —
-///   큐를 닫지 않는다)는 그 훅이 없는 unwind 빌드에서만 서는 안전망이다.
+/// - ★panic 하지 않게 짠다★ — 라이터는 이 부름을 가둠 표시 밖에서 돌리므로(ADR-0292 결정 3) 운영 프로세스에서는
+///   이 안의 panic 을 base 패닉 훅이 받아 프로세스를 끝낸다. 라이터가 두른 안쪽 catch(잡아 `error` 로 남기고 다음
+///   덩이를 계속 쓴다 — 큐를 닫지 않는다)는 그 훅이 없는 시험 빌드에서만 서는 안전망이다.
 /// - 라이터 스레드 하나가 뒤 덩이도 쓰므로, 이 안에서 오래 막히면 그만큼 뒤 입력이 늦는다. 이 안에서 큐가 비기를
 ///   기다리면([`InputQueue::wait_drained`]) 자기를 기다린다.
 pub type OnWritten = Box<dyn FnOnce() + Send>;
@@ -277,8 +276,8 @@ impl InputQueue {
 ///   **열린 채** 남아, 이후 `send_input` 이 계속 `Ok` 를 돌려주다가 상한에 닿는 순간부터 **틀린
 ///   사유**(「상한 초과」)로 거절한다 — 진짜 원인은 그 로그 어디에도 없다. 그 사이 바이트는 하나도
 ///   안 나간다. `spawn` 실패 갈래(`pty.rs`·`stdio.rs`)가 이미 고른 규율과 같은 자리다: **라이터가
-///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.** ★단 unwind 빌드에서만 선다★ — 릴리스는
-///   `panic = "abort"`(워크스페이스 루트 `Cargo.toml` 의 `[profile.release]`)라 panic 이 곧 프로세스의 끝이다.
+///   없으면 큐를 닫아 그 순간부터 정직하게 거절한다.** 덩이 뒤 부를 것([`OnWritten`])의 panic 은 이 가둠
+///   밖이다(그 타입 doc · ADR-0292 결정 3).
 /// ★`agent` 는 로그 귀속용★ — 이 경고들은 「받아 둔 뒤 실패한 쓰기」의 **유일한 흔적**이라, 에이전트가
 ///   여럿이면 누구 것인지가 없으면 흔적이 아니다(`docs/reference/logging-conventions.md` 의 형식 규약).
 pub(crate) fn drain(
@@ -780,8 +779,8 @@ mod tests {
         );
     }
 
-    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다. ★unwind 빌드에서만
-    /// 도는 항목이다★ — 릴리스는 `panic = "abort"` 라 이 갈래 자체가 없다.
+    /// 부를 것의 panic 은 그 자리에서 멈춘다 — 큐는 열린 채이고 뒤 덩이도, 그 뒤에 넣은 것도 나간다. ★훅 없는 빌드의
+    /// 갈래다★ — 운영 프로세스에서는 이 panic 이 표시 밖이라 훅이 끝내 이 갈래 자체가 없다(ADR-0292).
     #[cfg(panic = "unwind")]
     #[test]
     fn a_panicking_on_written_does_not_stop_later_chunks() {

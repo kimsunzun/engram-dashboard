@@ -1040,8 +1040,8 @@ async fn control_agent_handler(
         tokio::task::spawn_blocking(move || super::agent::handle_agent(&table, req)).await
     else {
         // JoinError = blocking 태스크 패닉. 답 자체가 없으므로 "항상 200 + JSON" 계약 밖이다 — 500 으로
-        //   갈라 CLI 가 성공으로 오독하지 않게 한다(send 라우트와 같은 규율). ★그 계약이 **debug 에서만**
-        //   성립한다는 것은 `internal_error` 주석이 정본이다★ — 릴리스는 `panic = "abort"` 다.
+        //   갈라 CLI 가 성공으로 오독하지 않게 한다(send 라우트와 같은 규율). ★그 계약이 **훅 없는 시험
+        //   빌드에서만** 성립한다는 것은 `internal_error` 주석이 정본이다★.
         tracing::error!(entrance = "cli", "제어 동사 태스크 실패(패닉)");
         return internal_error();
     };
@@ -1255,10 +1255,11 @@ async fn control_help_handler(
 
 /// 500 응답(빈 body) — blocking 태스크가 패닉해 **답 자체가 없는** 경우.
 ///
-/// ★릴리스에서는 이 갈래에 닿지 못한다(알려진 범위)★: 워크스페이스 `[profile.release]` 가
-///   `panic = "abort"` 라 blocking 태스크의 패닉은 `JoinError` 가 아니라 **프로세스 종료**다. 즉 "패닉 →
-///   500" 은 debug 에서만 성립하는 계약이고, 배포판에서 이 자리가 지키는 것은 없다. 그래도 지우지 않는
-///   이유는 debug·테스트 빌드에서 그 갈래가 실재하고, 없으면 그 빌드에서 답 없는 요청이 매달리기 때문이다.
+/// ★운영 프로세스에서는 이 갈래에 닿지 못한다(알려진 범위)★: blocking 태스크의 가둠 표시 밖 패닉은
+///   `JoinError` 가 아니라 **프로세스 종료**이고(훅), 허용 목록 명령의 가둔 패닉은 `INTERNAL` 답으로 접혀
+///   태스크가 정상으로 끝난다(ADR-0292). 즉 "패닉 → 500" 은 훅 없는 시험 빌드에서만 성립하는 계약이고,
+///   운영에서 이 자리가 지키는 것은 없다. 그래도 지우지 않는 이유는 그 빌드에서 그 갈래가 실재하고, 없으면
+///   그 빌드에서 답 없는 요청이 매달리기 때문이다.
 fn internal_error() -> Response {
     Response::builder()
         .status(StatusCode::INTERNAL_SERVER_ERROR)

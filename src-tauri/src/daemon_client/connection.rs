@@ -137,7 +137,8 @@ pub enum HandshakeError {
     // Error/Close 중 무엇도 안 보내면 wait_for_hello 가 무한 대기하므로(깨울 외부 경로 없음),
     // 상한을 둬 확정적으로 실패로 빠진다. ★Fix A★ — 영구 hang 방지.
     Timeout,
-    // 연결 task 가 ready 신호 전에 사라짐(panic 등).
+    // 연결 task 가 ready 신호 전에 사라짐(stale self-close 등 — panic 은 운영 셸에선 훅이 셸째 끝내 훅 없는
+    //   시험 빌드에서만 여기로 온다 · ADR-0292).
     TaskGone,
 }
 
@@ -1783,8 +1784,9 @@ pub const PENDING_SUPERSEDED: &str = "중복 request_id — 옛 요청 취소";
 /// **봉투를 지은 바깥 호출자**의 것이고(`engram_dashboard_protocol::command_request_id` 가
 /// `envelope.request_id` 를 그대로 이 맵의 키로 넘긴다), 웹뷰가 그 봉투를 `forward_daemon_command`
 /// (`src-tauri/src/commands/agent.rs`)로 실어 보낸다. 즉 유일성은 **통제 못 하는 입력의 성질**이지 우리
-/// 코드의 불변식이 아니다. 겹친 번호로 이 연결 태스크를 죽이면 그 뒤 모든 명령이 「연결 task 가 명령을 받지
-/// 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI 실측 2026-08-18 — 명부 0, 창은 살아 있는 채 단절).
+/// 코드의 불변식이 아니다. 겹친 번호로 패닉하면 운영 셸은 훅이 셸째 끝내고(ADR-0292), 훅 없는 빌드에선 이 연결
+/// 태스크만 죽어 그 뒤 모든 명령이 「연결 task 가 명령을 받지 못함」으로 끊기고 재연결도 없다(디버그 빌드 GUI
+/// 실측 2026-08-18 — 명부 0, 창은 살아 있는 채 단절).
 ///
 /// ## ★겹침의 답은 데몬이 짓는다★
 /// 배달 쪽은 이 겹침을 견디도록 이미 지어져 있다 — `engram_dashboard_daemon::command_delivery` 가 같은 번호의

@@ -445,8 +445,9 @@ pub async fn handle_connection(
 
     // 순서상 여기가 두 task 스폰보다 앞이어야 명령 dispatch 가 인사보다 앞설 수 없다.
     handler.on_connect(conn_id, &frames).await;
-    // ★관측만 하고 흐름은 바꾸지 않는다★: 패닉을 쓰지 않는 이유는 여기서 죽으면 아래 정리 훅과
-    //   레지스트리 해제를 통째로 건너뛴 채 죽은 큐가 fanout 대상으로 남기 때문이다(HEAD 에 없던 종료 경로).
+    // ★관측만 하고 흐름은 바꾸지 않는다★: 패닉을 쓰지 않는 이유는 운영 데몬에선 그것이 프로세스 종료이고
+    //   (훅 — ADR-0292), 훅 없는 빌드에선 여기서 죽으면 아래 정리 훅과 레지스트리 해제를 통째로 건너뛴 채 죽은
+    //   큐가 fanout 대상으로 남기 때문이다(HEAD 에 없던 종료 경로).
     // ★잡히는 범위 = "정확히 가득 찬 채로 on_connect 이 **반환한**" 경계 하나뿐★: 정작 위험한 쪽
     //   (용량을 넘겨 넣어 `send` 가 영구 대기)은 이 줄에 **도달조차 못 한다** — 그 hang 은 어디에도
     //   로그가 남지 않는다(알려진 미로그 구멍 — `ConnectionHandler::on_connect` 계약에 서술).
@@ -811,8 +812,9 @@ async fn dispatch_task(
             Inbound::Binary(payload) => handler.on_binary(conn_id, payload.as_ref(), &frames).await,
         };
         // ★핸들러가 반환한 **뒤**에 뺀다★ — 처리 중인 한 장을 0 으로 세면 예산이 두 배가 된다
-        //   ([`RxBytes`]). 핸들러가 panic 하면 이 줄에 못 오지만, 그때는 이 task 자체가 죽어 연결이
-        //   통째로 정리되므로 새는 예산이 남을 곳이 없다.
+        //   ([`RxBytes`]). 핸들러가 panic 하면 이 줄에 못 오지만, 운영 데몬은 훅이 프로세스째 끝내고
+        //   (ADR-0292) 훅 없는 시험 빌드에선 이 task 자체가 죽어 연결이 통째로 정리되므로 새는 예산이 남을
+        //   곳이 없다.
         rx_bytes.fetch_sub(len, Ordering::AcqRel);
         if flow == ConnFlow::Close {
             tracing::debug!(conn = conn_id, "핸들러가 Close — dispatch_task 종료");
@@ -2205,7 +2207,7 @@ mod tests {
     /// 않는다**★. 새는 경로가 실제로 있다: `handle_subscribe` 가 코어에 sink 를 등록한 **뒤**
     /// `subs.insert` 전에 read_task 가 **패닉**하면(그 사이엔 `.await` 가 없어 취소는 못 끼어들지만
     /// 패닉은 낀다) 그 sink 는 어디에도 기록되지 않은 채 코어에 남아 conn_tx 사본을 붙든다.
-    /// 릴리스는 `panic=abort` 라 프로세스가 죽지만 debug/테스트 빌드에선 도달 가능하다.
+    /// 운영 데몬은 그 패닉을 훅이 되감기 전에 끝내지만 훅 없는 시험 빌드에선 도달 가능하다(ADR-0292).
     /// **결론: 그 갈래의 `abort()` 는 제거 금지** — 위 실측은 "그 경쟁이 안 났을 때 그렇더라" 이지
     /// 불변식이 아니다.
     /// 반대 갈래(이 테스트)는 read_task 가 `next()` 에 파킹돼 스스로 끝나지 않으므로 abort 가 유일한

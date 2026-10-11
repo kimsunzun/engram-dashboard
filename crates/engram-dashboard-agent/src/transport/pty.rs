@@ -282,13 +282,11 @@ impl AgentTransport for PtyTransport {
             //   (`sync::lock`)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
             //   다른 agent로 전파되지 않는다.
             //   단 panic이 pump_core.emit() 내부(replay/subscribers lock 보유 중)에서 터지면 그
-            //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 이후 그 agent에 새 구독/조회가
-            //   오면 subscribe_from/status/snapshot의 .expect("...poisoned")가 재-panic한다. 그러나
-            //   (a) core는 agent 전용이라 다른 agent로 전파 안 되고, (b) 그 재-panic은 연결 task
-            //   (read_task) 안이라 tokio가 그 task만 격리(데몬·타 agent 무사)한다. 또 현재 emit
-            //   경로에는 실제 panic 원이 없다(데몬 출력 sink의 send는 panic 대신 Err 반환). 그래서
-            //   core lock은 의도적으로 fail-fast(expect) 유지 — poison은 "데이터 불일치 가능"의
-            //   신호라 무시(into_inner)보다 그 agent를 죽이는 게 안전하다.
+            //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 다음에 그 락을 잡는
+            //   .expect("...poisoned")가 재-panic한다. 바로 아래 표시 밖 finish 가 replay 를 먼저 잡으므로
+            //   대개 거기서 훅이 데몬을 끝낸다. 현재 emit 경로에는 실제 panic 원이 없다(데몬 출력 sink의
+            //   send는 panic 대신 Err 반환). 그래서 core lock은 의도적으로 fail-fast(expect) 유지 —
+            //   poison은 "데이터 불일치 가능"의 신호라 무시(into_inner)하고 이어 쓰기보다 끝내는 게 안전하다.
             // ADR-0292
             let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 let mut reader = reader;

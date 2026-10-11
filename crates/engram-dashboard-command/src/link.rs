@@ -77,7 +77,8 @@ impl Drop for ReplySink {
             outcome,
         };
         // drop 은 unwind 중에도 돈다 — 여기서 다시 패닉하면 프로세스가 abort 한다.
-        // 릴리즈 프로필은 `panic = "abort"` 라 이 그물은 개발·테스트 빌드에서만 실효가 있다.
+        // 데몬 · 셸은 「가두는 중」 표시 밖의 패닉을 훅이 먼저 끝내므로(ADR-0292) 이 그물은 표시 안에서 drop 될
+        //   때와 훅 없는 시험 빌드에서만 실효가 있다.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| deliver(reply)));
     }
 }

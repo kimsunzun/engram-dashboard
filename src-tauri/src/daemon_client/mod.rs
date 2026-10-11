@@ -481,7 +481,8 @@ impl DaemonClient {
             }
             Err(e) => {
                 tracing::warn!("데몬 discovery join 실패: {e}");
-                // 발화를 짝지어야 하는 사유·가드는 위 분기와 같다(여기선 discovery 가 패닉해 join 이 깨진 경우).
+                // 발화를 짝지어야 하는 사유·가드는 위 분기와 같다(여기선 discovery 의 join 이 깨진 경우 — 그것이
+                //   패닉이면 운영 셸은 훅이 먼저 끝내므로 훅 없는 시험 빌드의 갈래다 · ADR-0292).
                 if self
                     .lifecycle
                     .publish_if_current(my_gen, ConnectionState::Down)
@@ -651,13 +652,15 @@ impl DaemonClient {
             }
             // ready_tx 가 send 없이 drop 됨 = (a) task panic 또는 (b) ★stale self-close★(run_connection
             // 의 generation 가드가 ready 송신을 건너뛰고 빠짐). 둘 다 이 caller 입장에선 핸드셰이크 실패.
+            // (a) 는 운영 셸에선 훅이 먼저 셸을 끝내 훅 없는 시험 빌드에서만 닿는다(ADR-0292).
             // stale 한 경우 더 새 연결이 진행 중이므로 여기서 Down 을 쏘면 안 된다 → 원자 가드로 current 만.
             Err(_) => {
                 // ★레벨을 stale 여부로 가른다★: publish_if_current 가 true(=current 였는데 ready 없이
-                //   task 가 사라짐)면 진짜 이상(panic 추정) → 사람이 봐야 함(warn). false(=stale)면 더 새
-                //   연결이 세대를 올려 publish_if_current 가 Down 을 삼킨 경우다 — stale 한 이 task 가 ready
-                //   없이 사라진 원인은 run_connection 의 가드 self-close *또는* stale task 의 panic 둘 다일 수
-                //   있으나(둘 다 false 분기로 귀결), 어느 쪽이든 이미 superseded 라 진단용 debug 로 충분하다.
+                //   task 가 사라짐)면 진짜 이상(훅 없는 빌드면 panic 추정 — 위 (a)) → 사람이 봐야 함(warn).
+                //   false(=stale)면 더 새 연결이 세대를 올려 publish_if_current 가 Down 을 삼킨 경우다 —
+                //   stale 한 이 task 가 ready 없이 사라진 원인은 run_connection 의 가드 self-close *또는* stale
+                //   task 의 panic 둘 다일 수 있으나(둘 다 false 분기로 귀결), 어느 쪽이든 이미 superseded 라
+                //   진단용 debug 로 충분하다.
                 //   Down 이 stale 이면 삼켜진다(clobber 방지 — connection.rs 의 main_loop 종료 Down 가드와 동형).
                 // ★발화가 붙는 쪽은 true 분기뿐이고, 그것이 이 분기의 갈림과 정확히 겹친다★: false(=stale)는
                 //   `run_connection` 의 가드 self-close 가 대부분이고 그때 화면의 주인은 더 새 세대다 — 그쪽이
@@ -671,7 +674,7 @@ impl DaemonClient {
                     self.events.connection_state(ConnectionStateEvent::Down);
                     tracing::warn!(
                         generation = my_gen,
-                        "연결 task 가 ready 신호 전 사라짐(current 연결 — panic 추정)"
+                        "연결 task 가 ready 신호 전 사라짐(current 연결 — 훅 없는 빌드면 panic 추정)"
                     );
                 } else {
                     tracing::debug!(
@@ -818,6 +821,7 @@ impl DaemonClient {
     // ★둘째가 「좁은 경합」이라고만 읽지 말 것★: `main_loop` 가 패닉하면 창구를 닫는 자리를 아무도 지나지
     // 않아 `cmd_tx` 도 `Connected` 도 그대로 남는다 — 그 뒤 **모든** 명령이 창구를 통과한 뒤 죽은 수신단에
     // 부딪혀 둘째 문구를 영구히 받는다. 결말 자체는 옳다(즉시 실패 · hang 없음)므로 여기서 고치지 않는다.
+    // 운영 셸에선 그 패닉을 훅이 셸 종료로 만들어 이 모양은 훅 없는 시험 빌드에서만 선다(ADR-0292).
     //
     // ★ADR-0006(락 across await 금지)★: `current_cmd_tx()` 는 락을 잡았다 즉시 풀고 Sender clone +
     // 표식만 돌려준다 — 이후 `tx.send().await`·`rx.await` 는 락 미보유 상태다(Sender 는 lifecycle 락과

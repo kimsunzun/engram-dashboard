@@ -314,11 +314,10 @@ impl ControlRegistry {
     ///   삼키고(warn 만 남김) record_delivery 는 항상 정상 반환한다. RwLock 보유 중이 아니라 clone 후
     ///   lock 밖에서 잡으므로 poison 도 전파하지 않는다(락 규율과도 정합).
     ///
-    /// ★catch_unwind 는 unwind 프로파일 의존(FIX-R2-3)★: `catch_unwind` 는 unwinding panic 만 잡는다 —
-    ///   workspace `[profile.release] panic = "abort"`(루트 Cargo.toml)에선 panic 이 unwind 하지 않고
-    ///   즉시 abort 하므로 이 격리는 사실상 **테스트/디버그 프로파일 한정**이다. 지금은 무해하다: 운영은
-    ///   observer 를 설치하지 않아(observer=None) 아래 `if let Some(sink)` 가 catch_unwind 전에 단락된다.
-    ///   운영 observer 를 언젠가 붙인다면 이 보장이 release 에서 사라진다는 점을 재검토해야 한다.
+    /// ★운영 프로세스에서 이 catch_unwind 는 닿지 않는다(FIX-R2-3 · ADR-0292)★: 이 호출은 가둠 표시 밖이라
+    ///   panic 은 되감기 전에 훅이 프로세스를 끝내므로 이 격리는 **훅 없는 시험 빌드 한정**이다. 지금은
+    ///   무해하다: 운영은 observer 를 설치하지 않아(observer=None) 아래 `if let Some(sink)` 가 catch_unwind
+    ///   전에 단락된다. 운영 observer 를 언젠가 붙인다면 그 panic 이 데몬 종료라는 점을 재검토해야 한다.
     pub fn record_delivery(&self, obs: DeliveryObservation) {
         let sink = self
             .delivery_observer

@@ -710,20 +710,20 @@ pub async fn run() -> Result<(), i32> {
         loop {
             ticker.tick().await;
             let now = std::time::Instant::now();
-            // ★틱 본체 패닉 격리(리뷰 fix 9 · load-bearing)★: 이 루프가 죽으면 **두 안전장치가 동시에**
-            //   멈춘다 — 파킹 TTL 만료 처리와 busy 상한 fail-open(멈춘 턴 깨우기). 즉 한 번의 패닉이
-            //   "그 뒤로 아무도 배달을 못 받는" 조용한 정지로 번진다. 그래서 틱 본체를 unwind 경계로 감싸
-            //   경고만 남기고 다음 틱을 계속 돈다.
-            //   ★release 빌드는 panic=abort 라 여기 Err 갈래가 아예 도달 불가하다★(워크스페이스 Cargo.toml
-            //   `[profile.release] panic = "abort"` — 패닉하면 프로세스가 즉시 죽는다). 이 가드가 실제로
-            //   의미 있는 건 **debug/테스트 빌드**이고, 거기서 조용한 정지를 막는 게 목적이다.
+            // ★틱 본체 패닉 그물(리뷰 fix 9) — 지금 어느 빌드에서도 Err 갈래에 닿지 않는다★: 이 태스크를
+            //   띄우는 것은 `run()` 하나이고 `run()` 은 0.1) 에서 패닉 훅을 먼저 건다. 틱 본체의 패닉은 가둠
+            //   표시 밖이라 훅이 되감기 전에 데몬을 끝낸다(ADR-0292). 시험 서버는 이 태스크를 띄우지 않는다.
+            //   가드는 훅 없이 이 루프를 도는 실행이 생길 때의 그물로 남긴다 — 그런 실행에서 이 루프가 죽으면
+            //   **두 안전장치가 동시에** 멈춘다(파킹 TTL 만료 처리와 busy 상한 fail-open — 멈춘 턴 깨우기).
+            //   한 번의 패닉이 "그 뒤로 아무도 배달을 못 받는" 조용한 정지로 번지지 않게 경고만 남기고 다음
+            //   틱을 계속 돈다.
             let ticked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 sweep_messaging.sweep(now);
                 sweep_busy.sweep_stale_busy(now);
             }));
             if ticked.is_err() {
                 tracing::warn!(
-                    "sweep 틱이 패닉했다 — 이번 틱만 건너뛰고 계속(다음 주기에 재시도). TTL 만료·busy fail-open 이 함께 멈추지 않게 하는 격리(debug 빌드 한정 — release 는 panic=abort)"
+                    "sweep 틱이 패닉했다 — 이번 틱만 건너뛰고 계속(다음 주기에 재시도). TTL 만료·busy fail-open 이 함께 멈추지 않게 하는 격리(패닉 훅이 없는 실행에서만 닿는다)"
                 );
             }
         }

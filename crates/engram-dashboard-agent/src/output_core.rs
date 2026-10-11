@@ -1126,8 +1126,9 @@ mod diagnostic_tests {
     /// 상한을 넘겨도 **최신 줄이 남고**, 멀티바이트 문자를 쪼개지 않는다.
     ///
     /// ★후자가 panic 회귀다★: 바이트 위치로 그냥 자르면 `String` 불변식이 깨져 `drain` 이 panic 한다 —
-    ///   claude 진단에 한글·이모지가 섞이면 실제로 걸린다. 그 패닉은 stderr drain 스레드에서 나므로
-    ///   조용히 진단 캡처만 죽는다(런타임에 거의 무신호).
+    ///   claude 진단에 한글·이모지가 섞이면 실제로 걸린다. 그 패닉은 stderr drain 스레드(가둠 표시 밖)에서
+    ///   나므로 운영 프로세스에서는 훅이 데몬을 끝낸다(ADR-0292) — 훅 없는 시험 빌드에서는 조용히 진단 캡처만
+    ///   죽는다.
     #[test]
     fn the_diagnostic_buffer_is_bounded_and_utf8_safe() {
         let core = core();
