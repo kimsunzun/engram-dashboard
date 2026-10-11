@@ -1,9 +1,16 @@
-# 핸드오프: 패닉 정책 구현 — U1 완료(744c060b · push) · U2 코더 진행 중
+# 핸드오프: 패닉 정책 구현 — U1 · U2 완료(push) · 다음 = U3 훅 설치
 
 ## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD = 이 핸드오프 커밋(그 앞 U1 `744c060b` — push 완료 · CI 확인 안 함). ★U2 코더 둘(agent 쪽 · daemon 쪽 — 파일 안 겹침)이 워킹트리에서 작업 중이었다 — 세션이 끊겼으면 미커밋 워킹트리 변경이 남아 있을 수 있다(git status 로 확인 · 리뷰 전 상태로 간주)★.
-★다음 첫 액션 = U2 코더 결과 회수(끊겼으면 워킹트리 diff 를 보고 `/review code full` 부터) → FIX 반영 → `/qa standard` → 로컬 커밋 → U3.★
-사용자 지시(2026-10-12): 「쭉쭉 진행」(자율 모드) · ★단위마다 로컬 커밋, push 는 적당한 때 몰아서(매번 X)★ · master 머지 · 태그는 사용자 확인.
+브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD = 이 핸드오프 커밋(push 완료) · 워킹트리 깨끗. U1 `744c060b`(CI 초록) · U2 `76c8031e`(CI = 이 push 로 뜸 — 확인 안 함).
+★다음 첫 액션 = ① 이 push 의 CI 결과 확인(`gh run list --branch v0.3.3/refactor/crate-boundaries --workflow ci.yml --limit 1`) ② U3 착수 — `/implement` standard 이상(훅 설치는 프로세스 수명이 걸려 critical 검토): 데몬 기존 훅(`daemon/src/lib.rs:129-151` · 설치 `:458`)을 base `install_hook` 으로 **교체**(겹치지 말 것 — 사유 줄 두 번) · 셸 `run()` 머리(`src-tauri/src/lib.rs:28`)에 설치 · TRD §5 U3 확인 거리(debug 데몬이 tokio 가 격리하던 패닉에 끝난다 — `usage_service/mod.rs:320-322` · `agent_conn.rs:108` → `/qa full` · `stop_smoke` 먼저) · 자식 프로세스 시험(TRD §6 — 데몬 crate · 선례 없는 새 꼴).★
+사용자 지시(2026-10-12): 「쭉쭉 진행」(자율 모드) · ★단위마다 로컬 커밋, push 는 적당한 때 몰아서★ · master 머지 · 태그는 사용자 확인.
+
+## U2 결과
+- `76c8031e` — agent 펌프 셋(PTY · stdio · codex) · 라이터 drain = `contain`(finish 는 밖 · 펌프별 실프로세스 시험으로 「finish 표시 없음」 확인) · `uncontained` 넷(codex 첫 턴 sink · report_usage · on_written · claude decoder 문) · 데몬 허용 목록 `PANIC_CONTAINED`(agent.list · agent.listQueuedInputs) — 표 호출 + 본문(`call_and_drive`)을 가둠(리뷰어 대립 → 안전 쪽 잠정 채택: codex = 넓혀라 / Claude = 인자 변환은 효과 없어 수용 가능 · 사용자 재판정 거리).
+- 게이트: `/review code full` 2 라운드 PASS · `/qa standard` PASS(59 · 4360 · 0 · 30 · 실 claude 6 제외 · lib_unit 826 · 격리 전부 · tsc · npm 2021).
+- 결정(메인): 라이터 drain 바깥 `tracing::error!` 유지(라이터 스레드 이름에 agent id 가 없어 훅 줄만으론 귀속이 안 선다 · contain doc 에 「귀속은 남긴다」 단서).
+- ★사고 1건★: U2 데몬 코더의 1 라운드 시험이 필터 없이 돌아 실 claude 시험 5개가 실행됐다(코더 자진 보고 · 영향 미확인). 이후 코더 · QA 지시서에 CI `--skip` 6건 명시. ★다음 코더 · QA 지시서에도 반드시 명시★(U1 QA 의 워크스페이스 회귀도 `--skip` 없이 돌았을 수 있다 — 무시 31 vs U2 30). CLAUDE.md 는 「실 claude 시험 = 로컬 몫」이라 적지만 이전 핸드오프 주의는 「금지」 — 다음 세션이 사용자에게 확인할 것.
+- U4 낡은 주석 목록(코더 · 리뷰어 수집): `pty.rs` 펌프 주석 「(b) tokio 격리」(U3 뒤 거짓) · `input_queue.rs` OnWritten doc · drain doc 「unwind 빌드에서만」 · 시험 doc · `codex/transport.rs:~84` · `~2380` · `command/src/route.rs:17-19` · `command_delivery.rs:1562` · `:1581` 의 없는 `run_locally`(→ `spawn_local`) · `reaper.rs:65-70` · base `sync.rs` 계약 3 · 페이로드 사본(command crate 는 의존 0 이라 유지).
 
 ## U1 결과
 - `744c060b` — base `panic`(contain · uncontained · is_contained · Caught · payload_text · hook · install_hook(Once · 미호출)) · logging 재진입 표지 + 패닉 중 파일 락 상한 대기(try_lock 100 ms — codex 리뷰 지적) · 게이트 ③ 정규식 `panic`.
