@@ -128,7 +128,7 @@ pub trait UsageProbe: Send + Sync {
     ///   재시도([`super::ScratchDir`] 의 drop — 약 0.2초) 안에 돌아온다(마지막 몫 = 자식 drop 의 종료 대기와 그
     ///   뒤의 폴더 지우기). 더 긴 마감을 스스로 만들지 않는다.
     /// - 답을 받으면 자식을 [`finish_after_answer`] 로 끝낸다.
-    /// - 외부 데이터에 패닉하지 않는다(릴리즈는 `panic = "abort"`).
+    /// - 외부 데이터에 패닉하지 않는다 — 조회는 가둠 표시 밖이라 패닉이 곧 데몬 종료다(ADR-0292).
     fn query(&self, env: &ProbeEnv<'_>) -> Result<UsageObservation, ProbeFailure>;
 }
 

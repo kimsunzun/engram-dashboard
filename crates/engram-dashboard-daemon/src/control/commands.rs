@@ -149,9 +149,15 @@ impl UsageCommandHost for NoUsageLimits {
 ///
 /// ★blocking 함수다(호출자 계약)★: 이 표의 핸들러는 전부 blocking 이다 — resume 모드의 조기 종료를 약
 ///   3초 폴링하고, 이름 변경·계층 이동은 프로필 락을 쥔 채 디스크에 저장한다(agent `make_table` doc).
-///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 제어 라우트는
-///   `mcp_server::control_agent_handler` 의 `spawn_blocking`, 배달은 `command_delivery::run_locally` 가
-///   그 자리다.
+///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 제어 라우트 둘은
+///   `mcp_server` 의 `control_agent_handler` · `control_call_handler` 의 `spawn_blocking`, 배달은
+///   `command_delivery::spawn_local` 이 그 자리다.
+/// ★어느 이름도 패닉을 가두지 않는다(ADR-0293)★: 표 호출(인자 보정 · future 만들기)과 본문 몰기는 가둠 표시
+///   밖이라, 운영 프로세스에서는 그 패닉에 훅이 사유 줄을 남기고 데몬을 끝낸다(훅 없는 시험 빌드에선 본문
+///   패닉을 도구 crate 의 본문 그물이 `INTERNAL` 로 접는다). 이름 하나를 다시 가두는 것은 새 결정이고, 그때의
+///   조건은 둘이다: 본문에 효과가 없을 것(가둔 패닉을 `INTERNAL` 로 접는 근거 — 효과가 있는 본문이면 그 접기가
+///   `OUTCOME_UNKNOWN` 이어야 한다 · `command_delivery::fold_local`) · 선언된 효과로 가르지 않을 것(`usage.get` 은
+///   `Read` 인데 공유 사용량 책을 바꾼다).
 /// ★`entrance` 는 로그 라벨이다★ — 아래 계약 위반(async 핸들러 반입)은 오류 답장 하나로만 보이므로,
 ///   어느 표면에서 났는지가 로그에 없으면 원인을 못 찾는다.
 /// ★입력 임대 검문도 여기 하나다(ADR-0231)★: [`INPUT_AFFECTING`] 명령은 인자 검문 다음에 `admit_input` 을
@@ -160,6 +166,7 @@ impl UsageCommandHost for NoUsageLimits {
 // ADR-0155
 // ADR-0157
 // ADR-0231
+// ADR-0293
 pub fn call_daemon_command(
     table: &DaemonTable,
     name: &str,
@@ -1106,5 +1113,64 @@ mod tests {
                 "{name}: {err}"
             );
         }
+    }
+
+    /// ★어느 이름의 본문도 가둠 표시 밖에서 돈다(ADR-0293)★ — ADR-0292 가 가두던 두 조회(`agent.list` ·
+    /// `agent.listQueuedInputs`)도 같다 — 다시 가두면 이 시험이 빨개진다. 훅 없는 이 시험 빌드에선 본문 패닉을 본문 그물이 `INTERNAL` 로 접는다
+    /// (운영 프로세스에선 훅이 데몬을 끝낸다). 본문은 운영과 같은 `blocking_handler` 다.
+    // ADR-0293
+    #[test]
+    fn no_command_body_runs_under_the_containment_mark() {
+        let mut table = CommandTable::new(engram_dashboard_agent::commands::COMMAND_SPECS);
+        for name in ["agent.listQueuedInputs", "usage.get", "agent.rename"] {
+            table
+                .insert(
+                    name,
+                    engram_dashboard_command::blocking_handler(|_: serde_json::Value| {
+                        Ok::<_, CommandError>(engram_dashboard_base::panic::is_contained())
+                    }),
+                )
+                .expect("선언된 이름");
+        }
+        table
+            .insert(
+                "agent.list",
+                engram_dashboard_command::blocking_handler(
+                    |_: serde_json::Value| -> Result<bool, CommandError> {
+                        panic!(
+                            "본문 패닉 · 표시 {}",
+                            engram_dashboard_base::panic::is_contained()
+                        )
+                    },
+                ),
+            )
+            .expect("선언된 이름");
+        let table = DaemonTable {
+            table,
+            roster: manager(),
+            lease: Arc::new(NoInputLeases),
+        };
+
+        for (name, mut args) in [
+            ("agent.listQueuedInputs", json!({ "target": "alpha" })),
+            ("usage.get", json!({ "backend": "Claude" })),
+            ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+        ] {
+            let contained = call_daemon_command(&table, name, &mut args, "test", None)
+                .expect("이 표의 이름")
+                .expect("본문의 답");
+            assert_eq!(contained, json!(false), "{name}");
+        }
+
+        let err = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
+            call_daemon_command(&table, "agent.list", &mut json!({}), "test", None)
+                .expect("이 표의 이름")
+                .expect_err("본문 패닉")
+        });
+        assert_eq!(err.code(), ErrorCode::Internal);
+        assert_eq!(
+            err.message(),
+            "command handler panicked: 본문 패닉 · 표시 false"
+        );
     }
 }

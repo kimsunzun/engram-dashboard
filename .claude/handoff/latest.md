@@ -1,34 +1,35 @@
-# 핸드오프: A(데이터 파일 처리 통일) U1 · U8 · U2 · U7 · U3 · U4 착지 — 다음 = U5a → U6 → U5b-1 → U5b-2 → U9 → 패닉 정책
+# 핸드오프: 패닉 정책 구현 U1~U5 + ADR-0293 완료 · 실 claude 통과 · 남은 = 사용자 판단 1건(ADR 개정 링크)
 
 ## 한 줄 상태 · 다음 첫 액션
-브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD `a7376042`(push 됨 · 트리 깨끗). 착지: U1 `66765fb5` · U8 `fa6cb2f3` · U2 `bfd96dbc` · U7 `4e4fa543` · U3 `caed0f13` · U4 `a7376042`. TRD = `docs/process/S21-crate-boundaries/trd-A-data-file-unification.md`(6판 + U7 개정) · ADR-0291.
-★다음 첫 액션 = U5a(agent 저장소 채택 — agents · presets · 레지스트리는 아직 지금 꼴) 코더 스폰.★ 그다음 U6(작음 · 파일럿 먼저 — TRD §8-2 1) → U5b-1(레지스트리 · manager · reaper · PtyError — 정지 지점 안전) → U5b-2(버스 · WS 표면 · agent catalog 6 → 7 · 도움말) → U9(문서 정리) → 패닉 정책 구현(TRD 부터).
-단위 흐름: 코더 worker-senior → /review code(standard = full: worker-reviewer + codex:codex-rescue · critical = deep: + reviewer-deep 전문 렌즈) → /qa(worker-scout · TRD 행의 QA 칸 강도) → 커밋 · push. 리뷰 2 라운드가 흔하다.
+브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD = ADR-0293 철거 `17a91520` 뒤 문서 커밋(push) · 워킹트리 깨끗. 패닉 정책 구현(TRD `docs/process/S21-panic-policy/trd.md` · ADR-0292) U1~U5 전부 착지.
+★다음 첫 액션 = 아래 「사용자 판단 거리」를 하나씩 묻는다(5번 — 1~4번은 해소).★ 그다음 순서(옛 핸드오프 · step-log): 우편 주소 id 통일(T-29) → 3단계 transport.
+사용자 지시: 자율 모드 · 단위마다 로컬 커밋 · push 는 몰아서 · master 머지 · 태그는 사용자 확인.
 
-## 사용자 결정 (2026-10-10)
-- 「딱히 이슈 없으면 쭉 진행」 · 막히면 간단한 건 메인이 정하고 「잠정 — 사용자 확인 대기」. 리뷰어 정면 대립은 사용자에게.
-- 「잠정」 다섯 묶음(ADR-0291 약한 기각 셋 · 결정 13 제자리 개정 · U7 kill 방식 · TRD 리뷰 메인 결정들 · U1 sync_dir → U3)은 브리핑했고 사용자 「잘 모르겠다 — 이슈 없으면 진행」 → 기본안 유지.
-- U3 리뷰 대립(codex BLOCK 2) 사용자 판정: ① 폴더 동기화 실패 무시 → tracking T-55 기록만(macOS 이식 때) ② 소수점 거대 버전 → 무시.
-- 패닉 unwind 범위 = 워크스페이스 전체 + 셸에도 같은 훅 ★패닉 구현 ADR(0292)에 박을 것★. master 머지 · 태그 · panic-policy 머지 = 안 함.
+## 이번 세션 커밋
+U3 `f03dd10c`(훅 설치) · U4-C `c9d15023`(주석 40 파일) · U4-T `06c23844`(CLI 정리 실프로세스 시험 · CLAUDE.md 수치 60 · 4371) · U4 문서 `37e58f9a` · U5 `40b8a08e`(`panic = "abort"` 삭제 + step-log 항목). 상세 = step-log 끝 항목.
+- 결정 A 성립: 가둔 펌프 패닉 뒤 CLI 트리가 명시 종료 없이 수 ms~20 ms 에 사라짐(세 펌프 · Windows).
+- U5 크기(abort → unwind · 같은 빌드 명령): 데몬 +51% · 셸 +76% · CLI +19% — 사용자에게 보고함, 문제 삼을지 미답.
+- 배포판 셸 + 데몬 실 창 실측 PASS · graceful 종료 exit 0/0.
+
+## 사용자 판단 거리 (하나씩 묻기)
+1. ~~실 claude 시험 6건~~ — ★해소(사용자 승인 2026-10-12)★: U5 커밋 뒤 qa 바인딩 실 claude 레인으로 6/6 통과(claude 2.1.284). 옛 「실 claude 시험 금지」 주의는 걷는다 — CLAUDE.md · qa 바인딩대로 로컬에서 돌린다.
+2. ~~U2 허용 목록 범위~~ — ★해소(사용자 결정 2026-10-12)★: 허용 목록 명령 둘의 가둠을 걷었다(ADR-0293 `fcebe727` · 코드 `17a91520`). 가둠 = 에이전트 펌프 셋 + 입력 라이터뿐.
+3. ~~데몬 sweep 의 catch 갈래~~ — ★해소(사용자 결정 2026-10-12)★: 걷었다(step-log 해소 줄의 커밋).
+4. ~~로그 초기화 실패 시 기동 거부~~ — ★해소(사용자 결정 2026-10-12)★: 두지 않는다(TRD §7 잔여).
+5. 근거가 「release=abort」에 기대던 ADR(0199:46 · 0226:43,75 · 0233:46 · 0262:105 K7 · 0275:16,52,87 S2 · 0281:46 · 0142:57)의 개정 링크(ADR 근거 수정 = 결정 날조 금지라 사용자 확인). ADR-0275 S2 는 근거가 실효로도 거짓(가둔 펌프에서 운영 오염 가능 — base `sync` 계약 3 은 고침).
+- 손대지 않은 이력 TRD 의 같은 서술: usage-limit-slot:67 · storage:301,918 · codex-backend resume-after-first-turn:101-103,298,529 · crate-boundaries 1-1:64,201,325,556 · chat-ux t40:262 · S20:629.
 
 ## 검증 상태
-- U4 QA full: 워크스페이스 59 결과 줄 · 4281 통과 · 0 실패 · 31 무시 · 셸 lib_unit 826 · layout_commands 91 · tsc · npm test 2021 · 실 앱: 새 판 state.json(바이트 불변 · 안내 문구 · restore.status newer · saves=false) · 새 판 settings.json(CONFLICT · 불변) · 빈 데이터 폴더 첫 실행(폴더 · 파일 생성).
-- 선재 실패: T-56(codex 터미널 실 CLI 계약 시험 5건) · T-52(graceful 데몬 끄기 Timeout).
-- 수락한 잔여(U4 codex r2 · C1 범위): 부팅 ③~⑤ 수 ms 안 바깥 편집 때 상태 표시 두 건(인코딩 오류 경로가 재판정 전에 돌아감 · 늦은 손상 떠 두기가 state_file 에 안 실림) — U9 에 한 줄 기록 후보.
-
-## U5a 지시서에 넣을 것
-- TRD §6-1 U5a 행 · §3-4(모양 검사 = 명부 · 프리셋 칸 역직렬화 — 읽기 쪽은 버전 키를 필수로 두지 말 것 · `persistence/mod.rs:27-30` · `presets.rs:24-27`) · §3-9(저장소 상태 칸 잎 락 · 트레이트 `save -> Result` + `status` · 가짜 16개 — 실제 18 impl, `manager.rs:3073 · 5016` 포함) · D7(적재 읽기 예산 ~1 초 — 운영 `OsHooks` 둘) · 옛 `agents.json.tmp` 직접 지우기 · 락 순서 문장 다섯 자리.
-- serde 오류 문자열이 값을 실을 수 있다(U3 리뷰) — 모양 실패 사유를 어떻게 담을지 U5a 에서 정한다(지금 agent 도 이미 값을 로그한다 — 회귀 아님).
-- base `file` API: `Spec{version_key,current,cap,shape}` · `parse` · `classify` · `load` · `Claim` · `write_policy` · `judge` · `check_cap` · `write_atomic(_unless)` · `copy_atomic` · `copy_aside` · `sweep_temps` · `OsHooks{retry,sync_dir}`(fn 포인터) · 상수 `BUSY_RETRIES`/`BUSY_PAUSE`. 셸 운영 값 = `src-tauri/src/file_hooks.rs`(선례).
+- 돌린 것: 단위마다 `/review code`(deep · full · light) · `/qa`(full · standard). 마지막 `/qa full`(U5) = 60 결과 줄 · 4371 · 0 · 30 · 격리 · tsc · npm 2021 · 배포판 GUI.
+- 실 claude 6건: 따로 돌려 6/6 통과(5 건 9.7 s · `c1_park_then_spawn_auto_delivers` 20 s).
+- 안 돌린 것: `real_wmi` · real-claude/usage/backend_contract 레인 · 비-Windows. `stop_smoke` 의 `send_stop_makes_real_daemon_self_exit` = T-52 선재 실패(Timeout).
+- 미측정(TRD · 시험 헤더에 적음): 활성화 판정 창 · codex 핸드셰이크 중 패닉.
 
 ## do-not / 주의
-- Git Bash 에 `rg` 없음 → `C:\Users\kimsunzun\AppData\Local\OpenAI\Codex\bin\ada252862d154cdd\` 를 PATH 앞에(모든 워커 지시서). `bash` 가 WSL 이면 거짓 FAIL.
-- 줄끝 파일마다 다름 → `git ls-files --eol <경로>` 로 확인 · `sed -i` 금지 · `node -e`. `cargo fmt` 가 CRLF 파일을 LF 로 바꿀 수 있다(U4 실발생).
-- `lib_unit` 실행이 `src-tauri/bindings/*.ts` 전부를 LF 로 다시 쓴다 → 커밋 전 `for f in $(git diff --name-only -- src-tauri/bindings); do git diff --ignore-cr-at-eol --quiet -- "$f" && git checkout -- "$f"; done`.
-- QA GUI 정리에 `taskkill /T` 금지(T-54) — 이번 실행이 띄운 PID 만 /F. 앱은 `quit_app` 으로 닫는 게 깔끔했다.
-- 새 파일은 리뷰 diff 전 `git add -N`. 다음 ADR 번호 = 0292(/adr 스크립트는 로컬 최대로 채번 — 자리채움 우회 필요했다).
-- U9 문서 몫 누적: ADR-0275 결정 2 · 6 → 0291 링크 · 0266 · 0269(결정 6 셋째 줄 포함) · 0274 · 0275 의 fsutil 언급 · S21-storage TRD §6-5 · §12 R3 · :263 · TRD-1-1 :161 · §8 D2 · `docs/reference/structure/session-path-ownership.md` · 메모 :38 · :88 · :308 · CLAUDE.md 수치(워크스페이스 4281 · lib_unit 826) · platform `retry_busy_with` doc · TRD A §3-6 줄 번호 · U4 C1 잔여 한 줄.
+- Git Bash 에 `rg` 없음(QA 워커는 scratchpad `qa/bin/rg.exe` 를 썼다 — 다음 세션엔 없을 수 있음). python 은 스토어 바로가기라 실행 안 됨.
+- 시험 · tauri build 가 `crates/engram-dashboard-agent/bindings/*.ts` · `src-tauri/Cargo.toml` 을 줄끝만 바꿔 ` M` — `git diff --numstat` 0 이면 `git checkout -- <경로>`.
+- 재리뷰는 리뷰어 resume. codex 병렬 두 개 뒤 `--resume` 금지. codex blind 지시서엔 단계 순서 같은 범위 사실을 처음부터.
+- 실프로세스 시험 지시서엔 정리 안전 요건(신원 대조 handle 로만 끄기 · guard 를 spawn 전 · 자식이 자기 신원 알림 · 실패 갈래 도달 증명)을 처음부터(implement feedback 적립).
 
 ## 정지 조건
-- 단위 재수정 하드캡 3 초과 · 리뷰어 정면 대립(설계 방향) · 사용자 눈에 보이는 새 갈림길(U5b 의 화면 표시 · 오류 문구는 관행대로 메인이 정하고 잠정).
-- master 머지 · 태그.
+- 리뷰 BLOCK · 정면 대립 · 하드캡 초과 → 사용자에게. master 머지 · 태그 · ADR 근거 수정 → 사용자 확인.

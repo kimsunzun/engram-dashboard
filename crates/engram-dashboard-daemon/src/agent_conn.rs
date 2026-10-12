@@ -490,7 +490,8 @@ impl ConnectionHandler for AgentConnection {
         //   `handle_subscribe` 는 코어에 sink 를 등록한 **뒤** `subs` 에 기록한다. 그 두 단계 사이엔
         //   `.await` 가 없어 *취소*는 못 끼어들지만, ① 다른 워커에서 도는 read_task 가 아직 그 구간에
         //   있는 동안 이 정리가 스냅샷을 뜨거나(`ConnectionHandler::on_disconnect` 문서의 abort-겹침
-        //   경쟁) ② 그 구간에서 패닉하면(debug 빌드) 코어에만 남고 여기엔 안 잡힌다.
+        //   경쟁) ② 그 구간에서 패닉하면(훅 없는 시험 빌드 — 운영 프로세스에서는 훅이 데몬을 끝낸다 ·
+        //   ADR-0292) 코어에만 남고 여기엔 안 잡힌다.
         // ★결과 2가지★: (a) 좀비 sink 가 다음 emit 까지 잔존(코어의 dead-sink 제거로 자연 회복)
         //   (b) 그 sink 가 `Sender<Frame>` 사본을 붙들어 **write_task 의 송신단-드롭 자기종료가 깨진다**
         //   — `handle_connection` 의 select! 가 write 쪽 `abort()` 를 지워선 안 되는 이유(거기 주석).

@@ -53,7 +53,7 @@ impl LabelSource for PopupCounter {
 
     // label 형식(`slot-popup-<n>`)을 아는 쪽이 짓는다 — "slot-popup-3" → "Popup 3".
     // ★바이트 슬라이싱 금지★: 이건 공개 포트라 어떤 `&str` 이든 들어올 수 있고, 인덱스로 자르면 문자
-    //   경계가 아닌 자리에서 패닉한다 — 릴리즈는 `panic = "abort"` 라 받아 줄 그물이 없다.
+    //   경계가 아닌 자리에서 패닉한다 — 셸은 아무것도 가두지 않아 그 패닉이 곧 셸 종료다(훅 · ADR-0292).
     fn tab_name(&self, label: &str) -> String {
         format!(
             "Popup {}",

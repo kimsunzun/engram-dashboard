@@ -8,6 +8,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use engram_dashboard_base::panic::{contain, Caught};
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -152,7 +153,7 @@ fn build_pty_command(spec: &CommandSpec) -> CommandBuilder {
 
 /// pump 가 **어떤 길로 끝나든** 입력 큐를 닫아 라이터 스레드를 거둔다.
 ///
-/// ★`Drop` 인 것이 요점이다★ — EOF 로 정상 종료하든 pump 본체가 panic 하든(그 갈래는 `catch_unwind` 가
+/// ★`Drop` 인 것이 요점이다★ — EOF 로 정상 종료하든 pump 본체가 panic 하든(그 갈래는 `contain` 이
 ///   흡수한다) 이 자리는 반드시 지난다. codex 통로의 `ReaderExit` 와 같은 규율이고, 같은 이유로 필요하다:
 ///   ★빠뜨리면 **자연 종료한 에이전트마다 라이터 스레드가 영영 남는다**★. `shutdown()` 은 reaper 경로에서
 ///   불리지 않으므로 그 스레드를 깨울 다른 자리가 없고, 그 스레드는 큐와 PTY writer 핸들을 문 채 남는다.
@@ -166,17 +167,10 @@ impl Drop for WriterStop {
 
 /// B-2. pump 클로저에서 분리해 둔 이유: 이 매핑이 load-bearing(panic→Failed 전이)이라 실제 PTY
 /// child 없이 단위테스트로 직접 검증할 수 있게 한다.
-fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
+fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            TerminalReason::Error(format!("pump panicked: {msg}"))
-        }
+        Err(caught) => TerminalReason::Error(format!("pump panicked: {caught}")),
     }
 }
 
@@ -268,11 +262,11 @@ impl AgentTransport for PtyTransport {
 
         let handle = std::thread::spawn(move || {
             // ★pump 가 끝나면 라이터도 끝난다 — 이 guard 가 그 한 몸을 만든다(`WriterStop` doc).★
-            //   `catch_unwind` 바깥에 둬 정상·panic 두 갈래 모두에서 drop 이 지나게 한다.
+            //   `contain` 바깥에 둬 정상·panic 두 갈래 모두에서 drop 이 지나게 한다.
             let _writer_stop = writer_stop;
-            // ── B-2: pump 본체를 catch_unwind로 감싼다 ──
+            // ── B-2: pump 본체를 contain으로 감싼다 ──
             // pump 스레드가 panic하면(emit/read/try_wait 어디서든) 그 agent 출력이 영구 silent
-            // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 catch_unwind로 잡아, panic이면
+            // 정지하는데 감지·상태전이가 없었다(§5 위반). 본체를 contain으로 잡아, panic이면
             // core.finish(Error)로 Failed 전이시켜 사용자/LLM에게 가시화한다.
             //
             // ★UnwindSafe★: 클로저가 잡는 reader/buf/child/shutdown은 panic 후 더
@@ -288,14 +282,13 @@ impl AgentTransport for PtyTransport {
             //   (`sync::lock`)하게 다룬다 — child는 이 transport(=이 agent) 전용이라 그 poison이
             //   다른 agent로 전파되지 않는다.
             //   단 panic이 pump_core.emit() 내부(replay/subscribers lock 보유 중)에서 터지면 그
-            //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 이후 그 agent에 새 구독/조회가
-            //   오면 subscribe_from/status/snapshot의 .expect("...poisoned")가 재-panic한다. 그러나
-            //   (a) core는 agent 전용이라 다른 agent로 전파 안 되고, (b) 그 재-panic은 연결 task
-            //   (read_task) 안이라 tokio가 그 task만 격리(데몬·타 agent 무사)한다. 또 현재 emit
-            //   경로에는 실제 panic 원이 없다(데몬 출력 sink의 send는 panic 대신 Err 반환). 그래서
-            //   core lock은 의도적으로 fail-fast(expect) 유지 — poison은 "데이터 불일치 가능"의
-            //   신호라 무시(into_inner)보다 그 agent를 죽이는 게 안전하다.
-            let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            //   core Mutex들은 poison되고 poison-tolerant가 아니다 → 다음에 그 락을 잡는
+            //   .expect("...poisoned")가 재-panic한다. 바로 아래 표시 밖 finish 가 replay 를 먼저 잡으므로
+            //   대개 거기서 훅이 데몬을 끝낸다. 현재 emit 경로에는 실제 panic 원이 없다(데몬 출력 sink의
+            //   send는 panic 대신 Err 반환). 그래서 core lock은 의도적으로 fail-fast(expect) 유지 —
+            //   poison은 "데이터 불일치 가능"의 신호라 무시(into_inner)하고 이어 쓰기보다 끝내는 게 안전하다.
+            // ADR-0292
+            let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 let mut reader = reader;
                 let mut buf = [0u8; 4096];
 
@@ -333,17 +326,18 @@ impl AgentTransport for PtyTransport {
                 }
             }));
 
-            // ★finalize 1회 보존★: panic 경로의 finish와 (정상 EOF 직후 race로) 중복 호출돼도
-            //   OutputCore.finalized.swap(AcqRel)가 정확히 1회만 통과시킨다. catch_unwind는 한
-            //   클로저가 panic하면 그 안의 정상 finish는 도달 못 하므로, 여기서 정확히 한 번만
-            //   finish가 불린다(panic→Error 또는 정상→reason). 이중 호출 자체가 발생하지 않는다.
+            // ★finalize 1회 보존★: finish 는 클로저 밖 이 한 곳에서만 불린다 — 정상 · panic 두 갈래가
+            //   reason 하나로 모이고(정상 → 클로저가 낸 reason · panic → Error), 그래도 겹쳐 불리면
+            //   OutputCore.finalized.swap(AcqRel) 이 정확히 1회만 통과시킨다(ADR-0005).
             let reason = resolve_pump_reason(normal_reason);
 
+            // ADR-0292: ★finish 를 위 클로저 안으로 옮기지 말 것★ — 표시 안에서 난 finish 의 panic 은 가둬지고, 다시
+            //   부른 finish 는 finalize 게이트에 막혀 끝 전이 없는 `Running` 이 남는다(ADR-0005). 여기선 표시 밖이다.
             pump_core.finish(reason);
 
             // G-1: 완료 신호. core.join_pump의 recv_timeout가 받는다. 수신측이 이미
             // 사라졌어도(타임아웃 후 detach) 무시. ★panic 경로에서도 반드시 보낸다★ —
-            // catch_unwind로 panic을 흡수했으므로 이 send에 도달한다(join_pump가 5s 안 멈춤).
+            // contain으로 panic을 흡수했으므로 이 send에 도달한다(join_pump가 5s 안 멈춤).
             let _ = done_tx.send(());
         });
 
@@ -547,13 +541,12 @@ mod tests {
         );
     }
 
-    // ── B-2: panic catch_unwind 결과가 Error reason 으로 매핑되는지 ──
+    // ── B-2: panic contain 결과가 Error reason 으로 매핑되는지 ──
     #[test]
     fn resolve_pump_reason_panic_becomes_error() {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
-                panic!("boom in pump");
-            }));
+        let result = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            panic!("boom in pump");
+        }));
         let reason = resolve_pump_reason(result);
         match reason {
             TerminalReason::Error(msg) => {
@@ -570,17 +563,16 @@ mod tests {
     // ── B-2: 정상 종료 reason 은 그대로 passthrough ──
     #[test]
     fn resolve_pump_reason_normal_passthrough() {
-        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+        let ok = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
             TerminalReason::Exited { code: Some(0) }
         }));
         assert!(matches!(
             resolve_pump_reason(ok),
             TerminalReason::Exited { code: Some(0) }
         ));
-        let killed =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
-                TerminalReason::Killed
-            }));
+        let killed = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            TerminalReason::Killed
+        }));
         assert!(matches!(
             resolve_pump_reason(killed),
             TerminalReason::Killed
@@ -598,10 +590,9 @@ mod tests {
             crate::output_core::TurnWiring::detached(),
         ));
 
-        let panicked =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
-                panic!("simulated pump panic")
-            }));
+        let panicked = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            panic!("simulated pump panic")
+        }));
         let reason = resolve_pump_reason(panicked);
         core.finish(reason);
         // (race 모사) 정상 EOF finish 가 뒤늦게 와도 finalize 1회로 무시.
@@ -639,10 +630,9 @@ mod tests {
             crate::output_core::TurnWiring::detached(),
         ));
 
-        let panicked =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
-                panic!("A panic")
-            }));
+        let panicked = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            panic!("A panic")
+        }));
         core_a.finish(resolve_pump_reason(panicked));
 
         core_b.emit(OutputEvent::TerminalBytes(b"alive".to_vec()));
@@ -875,5 +865,32 @@ mod conpty_wedge {
             std::thread::sleep(Duration::from_millis(10));
         }
         core.join_pump(Duration::from_secs(5));
+    }
+}
+
+/// 가둔 pump panic 의 끝 — ★실 자식 프로세스를 띄운다★(위 `mod tests` 는 프로세스를 안 띄우는 모듈이라 섞지 않는다).
+/// 운영 `start()` 의 pump 클로저를 그대로 돌려, 본체가 표시 안에서 돌고 `finish` 가 표시 밖에서 도는지 잰다.
+// ADR-0292
+#[cfg(all(test, windows))]
+mod contained_pump {
+    use super::*;
+    use crate::transport::pump_marks::{self, Marks};
+
+    #[test]
+    fn a_contained_pump_panic_fails_the_agent_and_finish_runs_unmarked() {
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo".into(), "x".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, _pid) = PtyTransport::open(&spec, 80, 24).expect("open");
+        let marks = Arc::new(Marks::default());
+        let core = pump_marks::core(&marks);
+        transport.start(core.clone());
+        core.join_pump(Duration::from_secs(10));
+
+        pump_marks::assert_contained_body_and_unmarked_finish(&marks);
+        transport.shutdown();
     }
 }

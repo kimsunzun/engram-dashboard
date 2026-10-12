@@ -16,6 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use engram_dashboard_base::panic::uncontained;
+
 use crate::backend::TurnClassifier;
 use crate::inputs_pending::InputsPendingTable;
 use crate::queued_input::{QueuedInputs, RowPhase};
@@ -391,9 +393,12 @@ impl OutputCore {
     /// ★링·seq·구독자·턴 관측을 건드리지 않는다★ — 사용량은 이 화신의 출력이 아니라 계정 단위 상태다.
     /// ★락을 하나도 쥐지 않고 부른다★ — sink 계약(논블록·비재진입)을 믿는 쪽이 여기다.
     pub(crate) fn report_usage(&self, observations: Vec<crate::usage::UsageObservation>) {
-        for obs in observations {
-            self.status_sink.usage_observed(obs);
-        }
+        // ADR-0292 결정 3: 관측은 계정 단위 공유 책을 고친다 — 펌프의 가둠 안에서 불려도 표시를 끈다.
+        uncontained(|| {
+            for obs in observations {
+                self.status_sink.usage_observed(obs);
+            }
+        });
     }
 
     fn emit_inner(&self, event: OutputEvent, observe_turn: bool) {
@@ -1121,8 +1126,9 @@ mod diagnostic_tests {
     /// 상한을 넘겨도 **최신 줄이 남고**, 멀티바이트 문자를 쪼개지 않는다.
     ///
     /// ★후자가 panic 회귀다★: 바이트 위치로 그냥 자르면 `String` 불변식이 깨져 `drain` 이 panic 한다 —
-    ///   claude 진단에 한글·이모지가 섞이면 실제로 걸린다. 그 패닉은 stderr drain 스레드에서 나므로
-    ///   조용히 진단 캡처만 죽는다(런타임에 거의 무신호).
+    ///   claude 진단에 한글·이모지가 섞이면 실제로 걸린다. 그 패닉은 stderr drain 스레드(가둠 표시 밖)에서
+    ///   나므로 운영 프로세스에서는 훅이 데몬을 끝낸다(ADR-0292) — 훅 없는 시험 빌드에서는 조용히 진단 캡처만
+    ///   죽는다.
     #[test]
     fn the_diagnostic_buffer_is_bounded_and_utf8_safe() {
         let core = core();
@@ -1469,6 +1475,44 @@ mod tests {
 
     fn new_core(status_sink: Arc<dyn StatusSink>) -> OutputCore {
         OutputCore::new(uuid::Uuid::new_v4(), 0, status_sink, TurnWiring::detached())
+    }
+
+    // ── ADR-0292: 사용량 관측은 가둠 표시 밖에서 sink 에 닿는다 ─────────────────────────
+
+    #[test]
+    fn report_usage_reaches_the_sink_outside_the_contain_mark() {
+        use crate::usage::{UsageObservation, UsageSource, UsageVendorKey};
+        use engram_dashboard_base::panic::{contain, is_contained};
+
+        struct MarkAtUsage(Mutex<Vec<bool>>);
+        impl StatusSink for MarkAtUsage {
+            fn status_changed(&self, _id: AgentId, _status: AgentStatus, _epoch: u32) {}
+            fn agent_list_updated(&self, _agents: Vec<AgentInfo>) {}
+            fn usage_observed(&self, _obs: UsageObservation) {
+                self.0.lock().unwrap().push(is_contained());
+            }
+        }
+
+        let sink = Arc::new(MarkAtUsage(Mutex::new(Vec::new())));
+        let core = new_core(sink.clone());
+        let observation = || UsageObservation {
+            vendor: UsageVendorKey::new("test-vendor"),
+            five_hour: None,
+            weekly: None,
+            model_scoped: None,
+            plan: None,
+            source: UsageSource::Passive,
+            limits_unavailable: None,
+        };
+
+        let after = contain(std::panic::AssertUnwindSafe(|| {
+            core.report_usage(vec![observation(), observation()]);
+            is_contained()
+        }))
+        .expect("panic 없음");
+
+        assert_eq!(*sink.0.lock().unwrap(), vec![false, false]);
+        assert!(after, "관측을 넘긴 뒤 펌프의 표시가 되살아나지 않았다");
     }
 
     // ── ADR-0113: emit → 턴 관측 표 + 턴 종료 push ───────────────────────────────────

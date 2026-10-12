@@ -621,7 +621,8 @@ pub async fn run_flush_worker(
                 //   `let _ =` 는 **모든 배달이 영구 정지**한 사실을 감춘다(파킹만 쌓이다 TTL 로 만료 —
                 //   메시징 최악 실패 모드인데 로그 한 줄도 없다). 그래서 warn 으로 표면화한다. 여기서
                 //   복구(레인 재기동)는 하지 않는다 — 레인은 개별 flush 의 패닉을 격리하므로(run_flush_lane,
-                //   단 **debug 한정** — release 는 panic=abort 라 패닉 = 프로세스 종료다) 이 실패는
+                //   단 **훅 없는 시험 빌드 한정** — 운영 프로세스에서는 표시 밖 패닉이라 훅이 데몬을 끝낸다 ·
+                //   ADR-0292) 이 실패는
                 //   "종료 중" 이거나 진짜 버그이고, 후자면 로그가 유일한 단서다.
                 if let Err(e) = lane_tx.send(other) {
                     tracing::warn!("flush 레인 forward 실패(레인 종료/패닉 — 이후 배달 정지): {e}");
@@ -733,9 +734,9 @@ fn flush_recipient(msg: &FlushMsg) -> AgentId {
 ///   묶여 head-of-line blocking 이 그대로 되살아난다(그게 이 디스패처가 없애는 것이다). 그래서 완료 신호가
 ///   클로저 안에 있고, Drop 이라 패닉 언와인딩에서도 발화한다. ★이 신호가 빠지면 증상★: 그 AgentId 의
 ///   대기열이 영원히 안 열려 그 수신자 앞 우편이 **조용히** 멈춘다(로그도 없다).
-/// ★패닉 격리는 **debug 한정**이다★: 워크스페이스 `[profile.release] panic = "abort"` 라 release 에선
-///   패닉 = 프로세스 즉사다(언와인딩이 없어 이 Drop 도 안 돈다). "패닉해도 운영에서 레인이 살아남는다" 로
-///   읽지 말 것.
+/// ★패닉 격리는 **훅 없는 시험 빌드 한정**이다★: 배달 클로저는 가둠 표시 밖이라 운영 프로세스에서는
+///   패닉 = 프로세스 즉사다(훅이 되감기 전에 끝내 이 Drop 도 안 돈다 · ADR-0292). "패닉해도 운영에서 레인이
+///   살아남는다" 로 읽지 말 것.
 struct DeliveryDone {
     id: AgentId,
     tx: mpsc::UnboundedSender<AgentId>,
@@ -744,14 +745,14 @@ struct DeliveryDone {
 
 /// 배달 클로저가 어디까지 갔나 — `DeliveryDone` 의 Drop 이 남길 말을 가른다.
 ///
-/// ★두 미완 갈래를 반드시 갈라야 한다★: 하나로 뭉치면 **release 에서 항상 거짓말**이 된다 — 그 빌드에는
-///   패닉 언와인딩 자체가 없으므로(`panic = "abort"`) Drop 이 미완으로 도는 유일한 경우가 아래
-///   `NotStarted` 다. "패닉했다" 로 찍으면 종료 때마다 없는 버그를 보고한다.
+/// ★두 미완 갈래를 반드시 갈라야 한다★: 하나로 뭉치면 **운영 프로세스에서 항상 거짓말**이 된다 — 거기서는
+///   배달 클로저의 패닉이 되감기 전에 프로세스를 끝내므로(훅 · ADR-0292) Drop 이 미완으로 도는 유일한 경우가
+///   아래 `NotStarted` 다. "패닉했다" 로 찍으면 종료 때마다 없는 버그를 보고한다.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DeliveryStage {
     /// blocking pool 이 클로저를 **한 번도 실행하지 않았다** — 런타임 종료 중 큐에서 취소된 경우.
     NotStarted,
-    /// 실행에는 들어갔으나 끝내지 못했다 = 언와인딩(debug/테스트 빌드에서만 가능).
+    /// 실행에는 들어갔으나 끝내지 못했다 = 언와인딩(훅 없는 시험 빌드에서만 가능).
     Started,
     Finished,
 }
@@ -766,7 +767,7 @@ impl Drop for DeliveryDone {
             ),
             DeliveryStage::Started => tracing::warn!(
                 agent = %self.id,
-                "flush 배달이 완료 전에 언와인딩됐다(그 수신자 레인은 계속 — 이 갈래는 debug 한정, release=abort)"
+                "flush 배달이 완료 전에 언와인딩됐다(그 수신자 레인은 계속 — 이 갈래는 패닉 훅이 없는 실행에서만 닿는다)"
             ),
         }
         // 채널이 닫혔으면(디스패처 종료) 버린다 — 그 시점엔 데몬이 내려가는 중이다.

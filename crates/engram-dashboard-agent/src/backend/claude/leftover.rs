@@ -19,7 +19,6 @@
 //! 명세 = `docs/process/S21-chat-ux/trd-t40.md` §3-2 · §3-3 · §3-4 · §3-5 · §3-7.
 // ADR-0262
 
-use std::any::Any;
 use std::fmt;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
@@ -28,6 +27,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use engram_dashboard_base::panic::payload_text;
 use engram_dashboard_base::sync;
 use engram_dashboard_base::time::{Clock, SystemClock};
 
@@ -708,9 +708,10 @@ impl fmt::Display for Failure {
 ///   올 때까지 꺼내 버리기만 한다(붙은 포트를 아무도 안 꺼내면 커널 큐가 커진다). 그 사이 꺼내기마저 실패하면 비울 수
 ///   없으니 끝난다.
 ///
-/// ★차례마다 `catch_unwind` 를 두르지만 릴리스는 `panic = "abort"` 다★ — 그래서 몸통은 패닉하지 않게 짠다(풀기 ·
-/// 첨자 없음 · 독 견딤). 두른 것은 unwind 빌드(개발 · 시험)의 안전망이다.
+/// ★차례마다 `catch_unwind` 를 두르지만 이 스레드는 가둠 표시 밖이다★ — 운영 프로세스에서는 패닉을 훅이 끝내므로
+/// 몸통은 패닉하지 않게 짠다(풀기 · 첨자 없음 · 독 견딤). 두른 것은 훅 없는 시험 빌드의 안전망이다.
 // ADR-0262
+// ADR-0292
 fn listen<G: Group>(l: Listener<G>) {
     if let Ok(false) = l.attached.recv() {
         return;
@@ -729,7 +730,7 @@ fn listen<G: Group>(l: Listener<G>) {
                 return;
             }
             Ok(Err(e)) => Failure::Take(e),
-            Err(payload) => Failure::Panic(panic_text(&*payload).to_owned()),
+            Err(payload) => Failure::Panic(payload_text(&*payload)),
         };
         if draining {
             tracing::debug!(
@@ -890,16 +891,6 @@ impl<G: Group> Listener<G> {
             ),
         }
         detached
-    }
-}
-
-fn panic_text(payload: &(dyn Any + Send)) -> &str {
-    if let Some(text) = payload.downcast_ref::<&str>() {
-        text
-    } else if let Some(text) = payload.downcast_ref::<String>() {
-        text
-    } else {
-        "알 수 없는 패닉"
     }
 }
 
@@ -1978,10 +1969,11 @@ impl<G: Group> GateCell<G> {
 
 /// 일꾼 몸통 — 에피소드가 없거나 · 쓰이지 않았거나 · `Done` 이 되거나 물러날 때까지 걷는다. 쥐는 것은 문과 정리기뿐이다.
 ///
-/// ★패닉 가드는 unwind 빌드(개발 · 시험)에서만 선다 — 릴리스는 `panic = "abort"` 다★. 그래서 몸통은 패닉하지 않게
-/// 짠다(풀기 · 첨자 없음 · 독 견딤). 되감기면 지금 에피소드를 `Done` 으로 내리고 쥔 것을 놓는다 — 일꾼 없이 쓰인
-/// 에피소드가 남지 않게.
+/// ★패닉 가드는 훅 없는 시험 빌드에서만 선다 — 이 스레드는 가둠 표시 밖이라 운영 프로세스에서는 훅이 끝낸다★.
+/// 그래서 몸통은 패닉하지 않게 짠다(풀기 · 첨자 없음 · 독 견딤). 되감기면 지금 에피소드를 `Done` 으로 내리고 쥔 것을
+/// 놓는다 — 일꾼 없이 쓰인 에피소드가 남지 않게.
 // ADR-0262
+// ADR-0292
 fn run_worker<G: Group>(cell: &Arc<GateCell<G>>, cleaner: &Arc<Cleaner<G>>) {
     let mut guard = WorkerGuard { cell, armed: true };
     while worker_turn(cell, cleaner) {}

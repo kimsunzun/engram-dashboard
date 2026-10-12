@@ -38,7 +38,10 @@ members = [
 
 # profile 은 workspace 루트에만 둘 수 있다(멤버에 두면 무시+경고). src-tauri 에서 이동.
 [profile.release]
-panic = "abort"
+# panic 은 기본(unwind) — 가둔 자리(에이전트 펌프 셋 · 입력 라이터 — ADR-0293)가 되감기로 실패에 접히고,
+# 표시 밖 패닉은 데몬 · 셸의 패닉 훅이 즉시 끝낸다(ADR-0292). `panic = "abort"` 로 되돌리면 가둔 자리의 패닉도
+# 프로세스 종료가 된다 — 되돌림은 ADR-0292 결정 7 의 비상 경로이고, 그때 `rg "ADR-0292" crates src-tauri/src`
+# 의 가둔 자리 서술도 고친다(TRD S21-panic-policy §4-7).
 codegen-units = 1
 lto = true
 opt-level = "s"

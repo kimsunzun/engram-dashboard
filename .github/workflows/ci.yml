@@ -665,7 +665,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file)" crates/engram-dashboard-base/src/)
+          hits=$(rg "(crate|super)::(logging|text|time|path|sync|testing|writable|file|panic)" crates/engram-dashboard-base/src/)
           rc=$?
           set -e
           case "$rc" in
@@ -928,6 +928,7 @@ jobs:
           crates/engram-dashboard-agent/tests/activation.rs
           crates/engram-dashboard-agent/tests/backend_contract.rs
           crates/engram-dashboard-agent/tests/canonical_name_wiring.rs
+          crates/engram-dashboard-agent/tests/pump_panic_cli_cleanup.rs
           crates/engram-dashboard-agent/tests/reaper.rs
           crates/engram-dashboard-agent/tests/stdio_physical_pipe.rs
           crates/engram-dashboard-agent/tests/stdio_smoke.rs

@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
+use engram_dashboard_base::panic::{contain, Caught};
 use engram_dashboard_base::sync;
 use engram_dashboard_platform::group::GroupOwner;
 
@@ -167,17 +168,10 @@ impl Drop for WriterStop {
 }
 
 /// pump 스레드가 어디서든 panic하면 그 agent가 영구 silent 정지하므로 Failed로 가시화한다(§5).
-fn resolve_pump_reason(result: std::thread::Result<TerminalReason>) -> TerminalReason {
+fn resolve_pump_reason(result: Result<TerminalReason, Caught>) -> TerminalReason {
     match result {
         Ok(reason) => reason,
-        Err(payload) => {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| payload.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            TerminalReason::Error(format!("pump panicked: {msg}"))
-        }
+        Err(caught) => TerminalReason::Error(format!("pump panicked: {caught}")),
     }
 }
 
@@ -234,11 +228,12 @@ impl AgentTransport for StdioTransport {
         let writer_stop = WriterStop(self.input.clone());
 
         let handle = std::thread::spawn(move || {
-            // ★pump 가 끝나면 라이터도 끝난다★ — `catch_unwind` 바깥이라 정상·panic 두 갈래 모두 지난다.
+            // ★pump 가 끝나면 라이터도 끝난다★ — `contain` 바깥이라 정상·panic 두 갈래 모두 지난다.
             let _writer_stop = writer_stop;
             // ★UnwindSafe★: 잡은 stdout/buf/child/shutdown은 panic 후 버려지므로(스레드 종료)
             //   논리 불변 깨짐 없음 → AssertUnwindSafe.
-            let normal_reason = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // ADR-0292
+            let normal_reason = contain(std::panic::AssertUnwindSafe(|| {
                 let mut reader = stdout;
                 let mut buf = [0u8; 4096];
 
@@ -305,6 +300,7 @@ impl AgentTransport for StdioTransport {
 
             let reason = resolve_pump_reason(normal_reason);
 
+            // ADR-0292: finish 는 표시 밖이다 — 클로저 안으로 옮기지 말 것(사유 = `pty.rs` 의 같은 자리).
             pump_core.finish(reason);
 
             // G-1: 완료 신호(core.join_pump의 recv_timeout가 받는다). 수신측이 사라졌어도 무시.
@@ -438,10 +434,9 @@ mod tests {
     // ── resolve_pump_reason: panic → Error 매핑(pty.rs와 동일 규칙) ──
     #[test]
     fn resolve_pump_reason_panic_becomes_error() {
-        let result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
-                panic!("boom in stdio pump");
-            }));
+        let result = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+            panic!("boom in stdio pump");
+        }));
         match resolve_pump_reason(result) {
             TerminalReason::Error(msg) => {
                 assert!(msg.starts_with("pump panicked:"), "Error prefix: {msg}");
@@ -453,7 +448,7 @@ mod tests {
 
     #[test]
     fn resolve_pump_reason_normal_passthrough() {
-        let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> TerminalReason {
+        let ok = contain(std::panic::AssertUnwindSafe(|| -> TerminalReason {
             TerminalReason::Exited { code: Some(0) }
         }));
         assert!(matches!(
@@ -495,6 +490,28 @@ mod tests {
         assert!(matches!(json.interrupt(), Err(PtyError::Unsupported(_))));
         assert!(matches!(json.resize(80, 24), Err(PtyError::Unsupported(_))));
         json.shutdown();
+    }
+
+    // ── 가둔 pump panic: 운영 pump 클로저에서 본체는 표시 안 · `finish` 는 표시 밖(ADR-0292) ──
+    #[cfg(windows)]
+    #[test]
+    fn a_contained_pump_panic_fails_the_agent_and_finish_runs_unmarked() {
+        use crate::transport::pump_marks::{self, Marks};
+
+        let spec = CommandSpec {
+            program: "cmd.exe".into(),
+            args: vec!["/c".into(), "echo pump-probe".into()],
+            env: vec![],
+            cwd: std::path::PathBuf::from("."),
+        };
+        let (transport, _pid) = StdioTransport::open(&spec, false, None).expect("open");
+        let marks = Arc::new(Marks::default());
+        let core = pump_marks::core(&marks);
+        transport.start(core.clone());
+        core.join_pump(std::time::Duration::from_secs(10));
+
+        pump_marks::assert_contained_body_and_unmarked_finish(&marks);
+        transport.shutdown();
     }
 
     // ── 끊기 줄 주입(ADR-0238): 함수가 `Some` 이면 그 줄 한 벌이 부를 것과 함께 큐에 · `None` 이면 `Unsupported` 에 큐 무변경 ──

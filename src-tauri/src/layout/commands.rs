@@ -773,7 +773,8 @@ where
                         .await
                         .map_err(|e| {
                             // 버스 경로의 패닉 그물(`handler_panicked`)과 같은 문구 — 본문이 블로킹
-                            //   풀에서 터지면 그 그물이 못 보고 여기로 온다.
+                            //   풀에서 터지면 그 그물이 못 보고 여기로 온다. 운영 셸에선 훅이 먼저 셸을
+                            //   끝내 `is_panic` 갈래에 닿지 않는다 — 훅 없는 시험 빌드에서만 산다(ADR-0292).
                             let what = if e.is_panic() {
                                 "panicked"
                             } else {

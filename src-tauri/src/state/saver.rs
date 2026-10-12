@@ -45,8 +45,8 @@ pub const REPLY_DEADLINE: Duration = Duration::from_secs(2);
 
 /// 스냅숏 원천 — 운영은 `ViewManager` 다([`super::boot_plugin::LiveSource`]). 기록기 스레드에서 불린다.
 ///
-/// - ★패닉하지 않는다★ — 릴리스는 `panic = "abort"`(워크스페이스 `Cargo.toml`)라 이 스레드의 패닉이 앱을
-///   통째로 죽인다. 독 든 락은 되살리거나(`engram_dashboard_base::sync`) [`Self::snapshot`] 이 `Err` 를 돌려준다.
+/// - ★패닉하지 않는다★ — 셸은 아무것도 가두지 않아 이 스레드의 패닉은 훅이 앱을 통째로 끝낸다(ADR-0292).
+///   독 든 락은 되살리거나(`engram_dashboard_base::sync`) [`Self::snapshot`] 이 `Err` 를 돌려준다.
 /// - ★[`SaverHandle::finish`] · [`SaverHandle::resolve`] 를 부른 스레드를 기다리지 않는다★ — 그 스레드는 답을
 ///   기다리며 서 있다. 그 스레드가 쥔 락을 잡으려 들면 기록기가 마감까지 서 있게 되고, `finish` 면 정상 종료가
 ///   매번 마감을 넘겨 모든 정상 종료가 비정상 종료로 읽힌다.
@@ -347,8 +347,8 @@ where
     }
 }
 
-/// 기록기 스레드가 패닉으로 풀릴 때 한 줄 남긴다. ★디버그 · 시험 빌드에서만 닿는다★ — 릴리스는
-/// `panic = "abort"` 라 패닉이 이 줄 없이 프로세스째 끝낸다.
+/// 기록기 스레드가 패닉으로 풀릴 때 한 줄 남긴다. ★훅 없는 시험 빌드에서만 닿는다★ — 셸은 훅이 되감기 전에
+/// 사유 줄을 남기고 프로세스째 끝내 이 줄까지 오지 않는다(ADR-0292).
 struct PanicNote;
 
 impl Drop for PanicNote {

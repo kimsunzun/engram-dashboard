@@ -22,6 +22,8 @@ mod file_hooks;
 #[cfg(test)]
 mod log_capture;
 pub mod messaging_host;
+#[cfg(test)]
+mod panic_hook_tests;
 pub mod status_fanout;
 #[cfg(test)]
 mod test_doubles;
@@ -122,32 +124,24 @@ fn locate_send_exe() -> Option<PathBuf> {
     None
 }
 
-// ── panic hook (B-1) ──────────────────────────────────────────────────────────────
+// ── 파일 로그 · 패닉 훅 ───────────────────────────────────────────────────────────
 
-/// ★멱등(테스트 안전)★: 여러 테스트가 run()/이 함수를 반복 호출해도 hook 이 무한 중첩되지
-///   않도록 Once 로 1회만 설치한다. 설치된 hook 은 프로세스 수명 동안 유지된다.
-fn install_panic_hook() {
-    use std::sync::Once;
-    static HOOK: Once = Once::new();
-    HOOK.call_once(|| {
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let thread = std::thread::current();
-            let name = thread.name().unwrap_or("<unnamed>");
-            let msg = info
-                .payload()
-                .downcast_ref::<&str>()
-                .map(|s| s.to_string())
-                .or_else(|| info.payload().downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "<non-string panic payload>".to_string());
-            let location = info
-                .location()
-                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
-                .unwrap_or_else(|| "<unknown>".to_string());
-            tracing::error!(thread = name, location, "스레드 panic: {msg}");
-            prev(info);
-        }));
-    });
+/// 이 뒤로 모든 패닉은 사유 줄(스레드 · 문장 · 자리)을 이 로그에 남기고, 가둠 표시(base `panic::contain`) 밖이면
+/// 데몬 프로세스를 그 자리에서 끝낸다 — 가둔 자리(에이전트 펌프 셋 · 입력 라이터 배수)의 패닉만 그 자리의 실패
+/// 표면으로 접힌다. 버스 명령 실행은 가두지 않는다(ADR-0293). ★tokio 가 태스크 패닉을 그 태스크에 가두는 일은
+/// 여기서 일어나지 않는다★ — 훅이 되감기 전에 끝낸다.
+///
+/// 로그 자리를 하나도 못 열어도(`None`) 훅은 그대로 끝낸다. 데이터 폴더를 못 쓰면 `run()` 이 바로 뒤
+/// (`ensure_data_dir_writable`)에서 기동을 멈추므로, 이 경우는 「폴더는 쓸 수 있는데 그 `logs` 와 `%TEMP%` 폴백을
+/// 둘 다 못 열 때」뿐이다. 그때 사유 줄은 stdout(로그 필터가 ERROR 를 막으면 그마저 없다)과 이전 훅의 stderr 에만
+/// 간다 — 셸이 띄운 데몬엔 남는 곳이 없다(릴리즈는 콘솔이 없고 디버그 콘솔 창은 프로세스와 함께 닫힌다. 손으로
+/// 띄운 디버그 데몬이나 표준 핸들을 넘겨받은 데몬엔 남는다). 물러날 다른 자리가 없고, 배포판은 이전에도 같았다(TRD
+/// S21-panic-policy §7).
+// ADR-0292
+fn init_logging_and_panic_hook(layout: &DataLayout) -> Option<PathBuf> {
+    let log_file = logging::init_logging_with_file(&layout.logs_dir(), logging::LogKind::Daemon);
+    engram_dashboard_base::panic::install_hook();
+    log_file
 }
 
 // ── AgentManager 배선 (src-tauri lib.rs setup 미러) ───────────────────────────────
@@ -448,14 +442,11 @@ pub async fn run() -> Result<(), i32> {
     let layout = DataLayout::new(resolve_data_dir());
     let data_dir = layout.root().to_path_buf();
 
-    // 0.1) ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
+    // 0.1) 파일 로그 → 패닉 훅.
+    //    ★마스킹은 미포함★ — init_logging 은 키를 가리지 않는다. mask_secrets 는 헬퍼만 제공하고
     //    적용은 호출자 책임이다(민감 출력 로깅 시 명시 적용). 근거: docs/reference/logging-conventions.md.
-    let log_file = logging::init_logging_with_file(&layout.logs_dir(), logging::LogKind::Daemon);
-
-    // 0.5) panic hook 설치(B-1). 데몬 내부 스레드(pump 등)가 panic 하면 silent 정지로
-    //   넘어가기 쉬우므로(§5 "죽음 감지는 백엔드가 판단") 가시화한다. ★데몬 전체는 죽이지 않는다★ —
-    //   연결 task panic 은 tokio 가 이미 격리하고, pump panic 은 B-2 가 Failed 로 전이시킨다.
-    install_panic_hook();
+    // ADR-0292
+    let log_file = init_logging_and_panic_hook(&layout);
 
     // 1) data_dir 생성 + 쓰기 가능 확인.
     //    ★폴백 없음(ADR-0134 결정 4)★: 못 쓰는 폴더면 여기서 멈춘다. 다른 곳으로 흘려보내면
@@ -719,22 +710,9 @@ pub async fn run() -> Result<(), i32> {
         loop {
             ticker.tick().await;
             let now = std::time::Instant::now();
-            // ★틱 본체 패닉 격리(리뷰 fix 9 · load-bearing)★: 이 루프가 죽으면 **두 안전장치가 동시에**
-            //   멈춘다 — 파킹 TTL 만료 처리와 busy 상한 fail-open(멈춘 턴 깨우기). 즉 한 번의 패닉이
-            //   "그 뒤로 아무도 배달을 못 받는" 조용한 정지로 번진다. 그래서 틱 본체를 unwind 경계로 감싸
-            //   경고만 남기고 다음 틱을 계속 돈다.
-            //   ★release 빌드는 panic=abort 라 여기 Err 갈래가 아예 도달 불가하다★(워크스페이스 Cargo.toml
-            //   `[profile.release] panic = "abort"` — 패닉하면 프로세스가 즉시 죽는다). 이 가드가 실제로
-            //   의미 있는 건 **debug/테스트 빌드**이고, 거기서 조용한 정지를 막는 게 목적이다.
-            let ticked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                sweep_messaging.sweep(now);
-                sweep_busy.sweep_stale_busy(now);
-            }));
-            if ticked.is_err() {
-                tracing::warn!(
-                    "sweep 틱이 패닉했다 — 이번 틱만 건너뛰고 계속(다음 주기에 재시도). TTL 만료·busy fail-open 이 함께 멈추지 않게 하는 격리(debug 빌드 한정 — release 는 panic=abort)"
-                );
-            }
+            // 틱 본체의 패닉은 가둠 표시 밖이라 0.1) 의 패닉 훅이 데몬을 끝낸다(ADR-0292).
+            sweep_messaging.sweep(now);
+            sweep_busy.sweep_stale_busy(now);
         }
     });
 

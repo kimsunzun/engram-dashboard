@@ -319,7 +319,7 @@ impl UsageService {
     /// 버스(`usage.*` — blocking 풀 스레드)의 요청 하나 — 판정·답은 [`UsageService::request`] 와 같다.
     ///
     /// 기다림은 std 채널의 `recv_timeout` 이다 — ★tokio 타이머를 쓰지 않는다★: 종료 중 런타임이 시간 드라이버를
-    ///   내리면 타이머 poll 이 패닉할 수 있고 릴리즈에서는 곧 abort 다(§3 #17).
+    ///   내리면 타이머 poll 이 패닉할 수 있고 그 패닉은 가둠 표시 밖이라 곧 데몬 종료다(훅 · ADR-0292 · §3 #17).
     pub fn request_blocking(
         &self,
         vendor: UsageVendorKey,
@@ -446,8 +446,8 @@ impl UsageService {
     /// 놓고 부른다. 논블록이다.
     ///
     /// ★끝은 반드시 한 번 온다★ — 완료 가드를 띄우기 **전에** 만들어 칸에 두고, 일은 돌기 시작할 때 칸에서 꺼내
-    ///   간다. 스레드를 못 띄우면 여기서 꺼내 놓고(띄우기 실패로 닫힘) · 조회가 패닉하면 풀리며 놓인다(시험 빌드.
-    ///   릴리즈는 abort). 가드는 하나라 어느 쪽이 꺼내든 닫힘은 한 번이다. 조회는 늦어도 마감 + `KILL_WAIT` + 임시
+    ///   간다. 스레드를 못 띄우면 여기서 꺼내 놓고(띄우기 실패로 닫힘) · 조회가 패닉하면 풀리며 놓인다(훅 없는
+    ///   시험 빌드. 운영 프로세스에서는 표시 밖 패닉이라 훅이 끝낸다 · ADR-0292). 가드는 하나라 어느 쪽이 꺼내든 닫힘은 한 번이다. 조회는 늦어도 마감 + `KILL_WAIT` + 임시
     ///   폴더 지우기 재시도(약 0.2초) 안에 돌아온다([`UsageProbe::query`] 의 계약).
     fn start_probe(&self, key: UsageKey) {
         let vendor = key.vendor;
@@ -553,8 +553,9 @@ impl UsageService {
     }
 
     fn desk(&self) -> MutexGuard<'_, Desk> {
-        // poison 을 견딘다 — 여기서 패닉하면 부른 pump 스레드가 죽는다. 책의 메서드는 패닉하지 않으므로 poison 은
-        //   debug·시험에서만 선다(릴리즈는 `panic = "abort"`).
+        // poison 을 견딘다 — 여기서 패닉하면 운영 프로세스에선 데몬이 끝난다. 책의 메서드는 패닉하지 않고, 이 락을 쥔
+        //   패닉은 가둠 표시 밖이라(pump 쪽은 표시 끔 안) 운영 프로세스에서는 훅이 되감기 전에 끝내므로 poison 은
+        //   훅 없는 시험 빌드에서만 선다(ADR-0292).
         sync::lock(&self.desk)
     }
 }

@@ -111,7 +111,7 @@ pub fn handle_list(mine: Vec<CommandDecl>, registered: Vec<RosterEntry>) -> Cont
     //   (`serialize_str` 이 `to_owned` 한다) `help` 블롭이 행마다 한 번 더 복제된다 — 명부 상한(4096 × 4 KiB)
     //   에서 요청마다 나는 그 사본이 이 응답의 가장 큰 비용이다. 손으로 조립하면 아래 String 은 **옮겨진다**.
     //   ★덤으로 실패 경로가 사라진다★: `to_value` 를 안 거치므로 `json!` 이 숨기는 `.unwrap()` 자체가 없다
-    //   (릴리스는 `panic = "abort"` 라 그 패닉은 500 이 아니라 데몬 종료다).
+    //   (가둠 표시 밖이라 그 패닉은 500 이 아니라 데몬 종료다 — 훅 · ADR-0292).
     let commands: Vec<serde_json::Value> = merge(mine, registered)
         .into_iter()
         .map(|entry| {
