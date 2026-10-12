@@ -1,8 +1,8 @@
-# 핸드오프: 패닉 정책 구현 U1~U5 완료(push · CI 초록) · 남은 = 사용자 판단 5건
+# 핸드오프: 패닉 정책 구현 U1~U5 완료 · 실 claude 6/6 통과 · 남은 = 사용자 판단 4건
 
 ## 한 줄 상태 · 다음 첫 액션
 브랜치 `v0.3.3/refactor/crate-boundaries` · HEAD `40b8a08e`(push · CI 초록) · 워킹트리 깨끗. 패닉 정책 구현(TRD `docs/process/S21-panic-policy/trd.md` · ADR-0292) U1~U5 전부 착지.
-★다음 첫 액션 = 아래 「사용자 판단 거리」를 하나씩 묻는다(1번부터).★ 그다음 순서(옛 핸드오프 · step-log): 우편 주소 id 통일(T-29) → 3단계 transport.
+★다음 첫 액션 = 아래 「사용자 판단 거리」를 하나씩 묻는다(2번부터 — 1번은 해소).★ 그다음 순서(옛 핸드오프 · step-log): 우편 주소 id 통일(T-29) → 3단계 transport.
 사용자 지시: 자율 모드 · 단위마다 로컬 커밋 · push 는 몰아서 · master 머지 · 태그는 사용자 확인.
 
 ## 이번 세션 커밋
@@ -12,7 +12,7 @@ U3 `f03dd10c`(훅 설치) · U4-C `c9d15023`(주석 40 파일) · U4-T `06c23844
 - 배포판 셸 + 데몬 실 창 실측 PASS · graceful 종료 exit 0/0.
 
 ## 사용자 판단 거리 (하나씩 묻기)
-1. 실 claude 시험 6건(CI `--skip` 목록) — 로컬에서 돌릴지. CLAUDE.md · qa 바인딩은 「로컬 standard 에서 돈다(의도)」, 옛 핸드오프는 「금지」. 패닉 U1~U5 는 전부 빼고 돌렸다 → 실 claude `control_send` 축(U2 가 바꾼 펌프 · 라이터를 끝까지 재는 축) 미검증. 이전 A 세션(4336)은 돌렸다(그 수에 실 claude 통과 5건 포함).
+1. ~~실 claude 시험 6건~~ — ★해소(사용자 승인 2026-10-12)★: U5 커밋 뒤 qa 바인딩 실 claude 레인으로 6/6 통과(claude 2.1.284). 옛 「실 claude 시험 금지」 주의는 걷는다 — CLAUDE.md · qa 바인딩대로 로컬에서 돌린다.
 2. U2 허용 목록 범위(리뷰어 대립 → 안전 쪽 잠정) 재판정.
 3. 데몬 sweep(`daemon/src/lib.rs` 6.6)의 catch 갈래 — 어느 빌드에서도 닿지 않음. 걷을지.
 4. 로그 초기화 통째 실패 시 기동 거부 정책(지금은 TRD §7 잔여로 문서화만).
@@ -21,7 +21,8 @@ U3 `f03dd10c`(훅 설치) · U4-C `c9d15023`(주석 40 파일) · U4-T `06c23844
 
 ## 검증 상태
 - 돌린 것: 단위마다 `/review code`(deep · full · light) · `/qa`(full · standard). 마지막 `/qa full`(U5) = 60 결과 줄 · 4371 · 0 · 30 · 격리 · tsc · npm 2021 · 배포판 GUI.
-- 안 돌린 것: 실 claude 6건 · `real_wmi` · real-claude/usage/backend_contract 레인 · 비-Windows. `stop_smoke` 의 `send_stop_makes_real_daemon_self_exit` = T-52 선재 실패(Timeout).
+- 실 claude 6건: 따로 돌려 6/6 통과(5 건 9.7 s · `c1_park_then_spawn_auto_delivers` 20 s).
+- 안 돌린 것: `real_wmi` · real-claude/usage/backend_contract 레인 · 비-Windows. `stop_smoke` 의 `send_stop_makes_real_daemon_self_exit` = T-52 선재 실패(Timeout).
 - 미측정(TRD · 시험 헤더에 적음): 활성화 판정 창 · codex 핸드셰이크 중 패닉.
 
 ## do-not / 주의
