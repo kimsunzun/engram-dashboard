@@ -9,18 +9,18 @@
 ## 시연 영상
 
 <p align="center">
-  <a href="https://youtu.be/qK6lqWbdRrc">
-    <img src="https://img.youtube.com/vi/qK6lqWbdRrc/hqdefault.jpg" alt="Engram Dashboard 시연 영상" width="640">
+  <a href="https://youtu.be/khL5L42PTcY">
+    <img src="https://img.youtube.com/vi/khL5L42PTcY/hqdefault.jpg" alt="Engram Dashboard 시연 영상" width="640">
   </a>
   <br>
-  <em>▶ 시연 영상 (약 5분 31초)</em>
+  <em>▶ 시연 영상 (약 5분 15초)</em>
 </p>
 
 | 구간 | 내용 |
 |---|---|
-| [0:00](https://youtu.be/qK6lqWbdRrc) | 에이전트 띄우기와 화면 배치 — Claude Code와 Codex를 터미널·채팅 두 방식으로 띄우고, 창을 열어 슬롯을 나눠 배치 |
-| [2:45](https://youtu.be/qK6lqWbdRrc?t=165) | 데몬 테스트 |
-| [3:37](https://youtu.be/qK6lqWbdRrc?t=217) | 오케스트레이션 |
+| [0:00](https://youtu.be/khL5L42PTcY) | 에이전트 띄우기와 화면 배치 — Claude Code와 Codex를 터미널·채팅 두 방식으로 띄우고, 창을 열어 슬롯을 나눠 배치 |
+| [2:34](https://youtu.be/khL5L42PTcY?t=154) | 데몬 테스트 |
+| [3:37](https://youtu.be/khL5L42PTcY?t=217) | 오케스트레이션 |
 
 ## 주요 기능
 
