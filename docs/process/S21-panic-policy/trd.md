@@ -1,6 +1,7 @@
 # TRD — 패닉 정책 구현: 좁은 가둠 · 즉시 종료 훅 · unwind 전환 (S21)
 
 > **상태: 11판 개정 4(2026-10-12 · 사용자 결정 A) · 구현 U1~U5 착지(2026-10-12 — 커밋은 step-log).** 사용자 결정 전부 끝(§3) · `/review trd full` 3 라운드 끝(1 = FIX · FIX → 2 = blind PASS · doc-aware FIX → 3 = doc-aware PASS · 마지막 경미 1 건 반영). 개정 2(리뷰 1) = `usage.get` 을 가둠에서 뺌(허용 목록 둘) · 표시 끔 원시와 그 자리 넷 · 「표시 범위 ⊆ catch 클로저」 불변식 · U3 확인 거리. 개정 3(리뷰 2) = 허용 목록에 「효과 없음」 조건 · 표시를 끄지 않는 것에 Idle 합침 더함. 개정 4 = 펌프 패닉 때 명시 종료를 걷고 기존 정리 경로 + 시험(사용자 결정 A — §4-2).
+> **철회 — ADR-0293(2026-10-12):** 명령 쪽 가둠(§4-2 B1 — 허용 목록 읽기 명령 둘)을 걷었다. 가두는 자리는 에이전트 쪽 넷(A1~A4)뿐이고 버스 명령 실행 구간은 가두지 않는다. 이 문서의 허용 목록 · B1 · 명령의 `INTERNAL` 접기 · 「읽기 명령 둘」 · 「다섯 자리」 서술은 이력이다(§0 ① · §1 · §3 (마) · §4-2 · §4-3 · §4-6 ① · ② · §5 U2 · §7 · §8 — 찾는 법 = `rg "허용 목록|B1|INTERNAL|다섯" docs/process/S21-panic-policy/trd.md`).
 > **이력:** 10판 = `git show a722a879:docs/process/S21-panic-policy/trd.md`(종료 꼬리 · 감시 스레드 · 결정 (다)(바)(바′)(라′) · 컴파일 가드는 새 방향에서 무효) · 11판 초안 = `bedda3f3`((가) 락 오염 · (나) 여러 걸음 구간 · 요청 쪽 입구 R1~R7 — 사용자 결정 ② 로 걷힘).
 > **틀:** ADR-0288 · ADR-0290 + 사용자 결정 2026-10-10 · 2026-10-11~12 · 2026-10-12 ②(§1). ★세 ADR(0288 ~ 0290)은 브랜치 `origin/v0.3.3/feat/panic-policy` 에만 있다★ — 이 TRD 를 커밋하기 전에 그 브랜치를 들여야 링크가 선다. 구현 ADR = ADR-0292(예정).
 > **대체하는 옛 기록:** `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 `panic = "abort"` 유지」. 그 절의 규약(명령 핸들러는 값으로 실패한다)은 산다.
@@ -104,10 +105,10 @@
 | A2 | stdio 펌프(`agent/src/transport/stdio.rs:241`) | 에이전트 하나 | `Failed` | 같음 |
 | A3 | codex 리더 펌프(`agent/src/backend/codex/transport.rs:4018` · 스레드 `:4017`) | 에이전트 하나 | `Failed` | 같음 |
 | A4 | 라이터 `input_queue::drain`(`agent/src/transport/input_queue.rs:288` — PTY · stdio 라이터 스레드가 부른다 `pty.rs:208` · `stdio.rs:208`) | 그 에이전트의 입력 | 큐 닫힘 · 입력 거절 사유(`:273-279`) | `catch_unwind` → `contain` |
-| B1 | 허용 목록 명령 본문 — `agent.list` · `agent.listQueuedInputs` | 명령 하나 | `INTERNAL` | `call_daemon_command` 의 표 호출 + 본문 몰기(`CommandTable::call` + `drive_to_completion` — `daemon/src/control/commands.rs` `call_and_drive`)를 `contain` 으로 감싼다 — 이름이 허용 목록에 있을 때만 · 인자 검사(`check_args` · `admit_input`)는 표시 밖(U2 리뷰 1 라운드에서 표 호출까지 넓혔다) |
+| B1 **철회 — ADR-0293** | ~~허용 목록 명령 본문 — `agent.list` · `agent.listQueuedInputs`~~ — 걷었다: 버스 명령 실행 구간은 가두지 않는다(이 줄 나머지 칸은 이력) | 명령 하나 | `INTERNAL` | `call_daemon_command` 의 표 호출 + 본문 몰기(`CommandTable::call` + `drive_to_completion` — `daemon/src/control/commands.rs` `call_and_drive`)를 `contain` 으로 감싼다 — 이름이 허용 목록에 있을 때만 · 인자 검사(`check_args` · `admit_input`)는 표시 밖(U2 리뷰 1 라운드에서 표 호출까지 넓혔다) |
 
-- **B1 = 이름 허용 목록이지 효과 술어가 아니다.** `usage.get` 은 `Read` 로 선언됐지만 공유 사용량 책을 바꾼다(§2) — 가두면 판정(`Start`) 뒤 패닉이 `in_flight` 를 영영 남긴다. `effect == Read` 로 가르면 앞으로 더해지는 `Read` 명령이 말없이 가둬진다. 목록은 데몬 쪽 상수 하나이고, 시험이 그 목록을 못 박는다(§5 U2). ★목록에 드는 조건 = 본문에 효과가 없을 것★ — 아래 B1 의 얇은 구간 접기가 `INTERNAL`(「확실히 실패」)인 것은 두 본문이 아무것도 바꾸지 않아서다. 본문 뒤 패닉은 일의 일부가 적용됐을 수 있어 `OUTCOME_UNKNOWN` 이라는 것이 1단계의 규칙이다(`daemon/src/command_delivery.rs:1387-1391` · `fold_local` `:1401`). 효과가 있는 명령을 목록에 넣으려면 그 접기부터 다시 정한다.
-- **B1 의 범위:** 표시가 명령 본문을 부르는 한 자리에 서므로 같은 명령이 제어 HTTP(`/control/agent` · `/control/call`)로 와도 본문은 같이 가둬진다. 그 HTTP 처리기 자체 · 다른 명령 · 2단계 전달(`daemon/src/command_delivery.rs:1820` 의 `route`)은 표시 밖이다. 처리기 패닉은 안쪽 `guard_panic` 이 먼저 `INTERNAL` 로 답하고, 그 바깥 얇은 구간(`now_or_never` 기계)의 패닉은 우리 `contain` 이 같은 `INTERNAL` 로 접는다 — 그래서 표시와 잡는 자리 사이에 빈틈이 없다. 이것은 1단계 경로의 셋째 그물이라 `command_delivery.rs:1397` 의 「세 번째 그물을 세우지 않는다」 주석을 U2 에서 고친다.
+- **[철회 — ADR-0293 · 이 항목과 다음 항목은 이력]** **B1 = 이름 허용 목록이지 효과 술어가 아니다.** `usage.get` 은 `Read` 로 선언됐지만 공유 사용량 책을 바꾼다(§2) — 가두면 판정(`Start`) 뒤 패닉이 `in_flight` 를 영영 남긴다. `effect == Read` 로 가르면 앞으로 더해지는 `Read` 명령이 말없이 가둬진다. 목록은 데몬 쪽 상수 하나이고, 시험이 그 목록을 못 박는다(§5 U2). ★목록에 드는 조건 = 본문에 효과가 없을 것★ — 아래 B1 의 얇은 구간 접기가 `INTERNAL`(「확실히 실패」)인 것은 두 본문이 아무것도 바꾸지 않아서다. 본문 뒤 패닉은 일의 일부가 적용됐을 수 있어 `OUTCOME_UNKNOWN` 이라는 것이 1단계의 규칙이다(`daemon/src/command_delivery.rs:1387-1391` · `fold_local` `:1401`). 효과가 있는 명령을 목록에 넣으려면 그 접기부터 다시 정한다.
+- **[철회 — ADR-0293]** **B1 의 범위:** 표시가 명령 본문을 부르는 한 자리에 서므로 같은 명령이 제어 HTTP(`/control/agent` · `/control/call`)로 와도 본문은 같이 가둬진다. 그 HTTP 처리기 자체 · 다른 명령 · 2단계 전달(`daemon/src/command_delivery.rs:1820` 의 `route`)은 표시 밖이다. 처리기 패닉은 안쪽 `guard_panic` 이 먼저 `INTERNAL` 로 답하고, 그 바깥 얇은 구간(`now_or_never` 기계)의 패닉은 우리 `contain` 이 같은 `INTERNAL` 로 접는다 — 그래서 표시와 잡는 자리 사이에 빈틈이 없다. 이것은 1단계 경로의 셋째 그물이라 `command_delivery.rs:1397` 의 「세 번째 그물을 세우지 않는다」 주석을 U2 에서 고친다.
 - **펌프 패닉 때 CLI 끝내기(A1~A3) — 명시 종료 없음:** 패닉 갈래는 `finish` 만 부른다. CLI 는 기존 길로 끝난다 — `finish` → `Failed` → reaper 가 세션을 뺀다 → 마지막 `Arc` drop → 통로 drop → 무리 주인 drop → `KILL_ON_JOB_CLOSE`(§2). ★리뷰어 대립(blind = 명시 종료 / doc-aware = 기존 정리 경로로 충분) → 사용자 결정 A(2026-10-12): 기존 경로 · 시험으로 확인 · 실패 시 B★. U4 가 펌프 종류마다 잰다. **B(시험이 실패할 때만):** platform `GroupRef::terminate` 를 더해 패닉 갈래에서 무리를 끄고, ADR-0199 의 「통로는 죽이지 않는다」(`codex/transport.rs:118-125`)에서 그 갈래를 뺀다.
 
 **표시 끔(`uncontained`) — 가둔 코드가 부르는 공유 상태 고침:** 그 안 패닉 = 즉시 종료.
@@ -155,7 +156,7 @@
 
 ### 4-6. 확인 · 감사 거리 (결정 아님 — U4)
 
-1. **허용 목록 두 명령의 본문이 정말 상태를 바꾸지 않는가** — 한 번 본다. 선언은 계약이고 어긋남을 코드가 못 잡는다(`daemon/src/control/commands.rs:286-291`).
+1. **[철회 — ADR-0293 · B1 과 함께 걷혔다 — U4-C 의 감사 결과(두 본문 모두 상태를 안 바꾼다)는 그 ADR 의 근거로 남았다]** **허용 목록 두 명령의 본문이 정말 상태를 바꾸지 않는가** — 한 번 본다. 선언은 계약이고 어긋남을 코드가 못 잡는다(`daemon/src/control/commands.rs:286-291`).
 2. **abort 전제 감사** — 표시 밖 코드는 「패닉 = 프로세스 끝」이 그대로 참이다(훅이 끝낸다). 전제가 무너지는 것은 가두는 다섯 자리의 몸통과 그 몸통이 되감기 때 도는 `Drop` 뿐이다. 볼 것:
    - base `sync` 계약 3(`base/src/sync.rs:10-11` — 「운영 빌드는 오염에 닿지 않는다」) — 펌프가 `sync` 로 락을 되찾으므로(`pty.rs:322` 등) 다시 쓴다.
    - **출력 코어의 오염 길** — `emit` 은 `replay` 를 쥔 채 적고(`agent/src/output_core.rs:422-429` · 목록 사건의 `.expect("한 줄 이상")` `:614` 도 그 안이다) 거기서 난 패닉은 `replay` 를 오염시킨다 → 표시 없는 `finish` 의 `replay.lock().expect`(`:692`)가 다시 패닉해 데몬이 끝난다(안전한 쪽).

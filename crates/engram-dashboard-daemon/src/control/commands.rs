@@ -15,7 +15,6 @@
 //! tauri import 0(daemon crate).
 // ADR-0155
 
-use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use engram_dashboard_agent::commands::{
@@ -24,7 +23,6 @@ use engram_dashboard_agent::commands::{
 };
 use engram_dashboard_agent::manager::AgentManager;
 use engram_dashboard_agent::types::AgentId;
-use engram_dashboard_base::panic::{contain, Caught};
 use engram_dashboard_command::{
     CommandDecl, CommandError, CommandFuture, CommandSpec, CommandTable, Effect, ErrorCode,
 };
@@ -154,10 +152,12 @@ impl UsageCommandHost for NoUsageLimits {
 ///   그래서 async 런타임 스레드가 아니라 blocking 풀에서 불러야 한다 — 제어 라우트 둘은
 ///   `mcp_server` 의 `control_agent_handler` · `control_call_handler` 의 `spawn_blocking`, 배달은
 ///   `command_delivery::spawn_local` 이 그 자리다.
-/// ★[`PANIC_CONTAINED`] 의 이름은 표 호출(인자 보정 · future 만들기)과 본문 몰기를 패닉 가둠 표시 안에서
-///   한다(ADR-0292)★: 표시는 스레드 지역이라 본문이 이 호출 안에서 이 스레드로 끝나야 그 패닉이 가둬진다 — 위
-///   blocking 계약(본문이 첫 poll 에서 끝까지 돈다)이 그 전제다. 본문이 띄운 스레드 · 태스크는 표시 밖이다.
-///   검문(`check_args` · `admit_input`)은 표시 밖이다.
+/// ★어느 이름도 패닉을 가두지 않는다(ADR-0293)★: 표 호출(인자 보정 · future 만들기)과 본문 몰기는 가둠 표시
+///   밖이라, 운영 프로세스에서는 그 패닉에 훅이 사유 줄을 남기고 데몬을 끝낸다(훅 없는 시험 빌드에선 본문
+///   패닉을 도구 crate 의 본문 그물이 `INTERNAL` 로 접는다). 이름 하나를 다시 가두는 것은 새 결정이고, 그때의
+///   조건은 둘이다: 본문에 효과가 없을 것(가둔 패닉을 `INTERNAL` 로 접는 근거 — 효과가 있는 본문이면 그 접기가
+///   `OUTCOME_UNKNOWN` 이어야 한다 · `command_delivery::fold_local`) · 선언된 효과로 가르지 않을 것(`usage.get` 은
+///   `Read` 인데 공유 사용량 책을 바꾼다).
 /// ★`entrance` 는 로그 라벨이다★ — 아래 계약 위반(async 핸들러 반입)은 오류 답장 하나로만 보이므로,
 ///   어느 표면에서 났는지가 로그에 없으면 원인을 못 찾는다.
 /// ★입력 임대 검문도 여기 하나다(ADR-0231)★: [`INPUT_AFFECTING`] 명령은 인자 검문 다음에 `admit_input` 을
@@ -166,7 +166,7 @@ impl UsageCommandHost for NoUsageLimits {
 // ADR-0155
 // ADR-0157
 // ADR-0231
-// ADR-0292
+// ADR-0293
 pub fn call_daemon_command(
     table: &DaemonTable,
     name: &str,
@@ -185,51 +185,9 @@ pub fn call_daemon_command(
     if let Err(refusal) = admit_input(table, name, args, caller) {
         return Some(Err(refusal));
     }
-    if !PANIC_CONTAINED.contains(&name) {
-        return call_and_drive(&table.table, name, args, entrance);
-    }
-    contain(AssertUnwindSafe(|| {
-        call_and_drive(&table.table, name, args, entrance)
-    }))
-    .unwrap_or_else(|caught| Some(Err(handler_panicked(&caught))))
-}
-
-/// 표 호출(인자 보정 · future 만들기)과 본문 몰기 — 가둘 때 둘을 함께 감싸도록 한 몸으로 둔다.
-fn call_and_drive(
-    table: &CommandTable,
-    name: &str,
-    args: &mut serde_json::Value,
-    entrance: &'static str,
-) -> Option<Result<serde_json::Value, CommandError>> {
-    // 부르는 쪽이 `contains` 를 먼저 봤고 표는 이 호출 동안 불변이라 `None` 갈래에 닿지 않는다.
-    let future = table.call(name, args)?;
+    // 바로 위 `contains` 를 통과했고 표는 이 호출 동안 불변이라 `None` 갈래에 닿지 않는다.
+    let future = table.table.call(name, args)?;
     Some(drive_to_completion(future, name, entrance))
-}
-
-/// 본문 패닉을 그 명령 하나의 `INTERNAL` 로 가두는 이름 — [`call_daemon_command`] 가 정확한 이름으로 대조한다.
-/// 그 밖의 이름은 가두지 않는다(ADR-0292).
-///
-/// ★드는 조건 = 본문에 효과가 없을 것★: 잡은 패닉을 「이 홉에서 확실히 실패」(`INTERNAL` — ADR-0159)로 접는
-///   근거가 그것이다. 효과가 있는 본문의 패닉은 일의 일부가 적용됐을 수 있어 `OUTCOME_UNKNOWN` 이라는 것이
-///   1단계의 규칙이다(`command_delivery::fold_local`). 효과가 있는 명령을 넣으려면 그 접기부터 다시 정한다.
-/// ★선언된 효과(`Effect::Read`)로 가르지 않는다★: `usage.get` 은 `Read` 로 선언됐지만 공유 사용량 책을
-///   바꾼다 — 가두면 조회 판정 뒤의 패닉이 `in_flight` 를 영영 남긴다. 효과로 가르면 앞으로 더해지는 `Read`
-///   명령이 말없이 가둬진다.
-// ADR-0292
-const PANIC_CONTAINED: [&str; 2] = ["agent.list", "agent.listQueuedInputs"];
-
-/// 가둔 패닉의 답 — 도구 crate 의 본문 그물(`guard_panic`)이 내는 것과 같은 코드 · 문구다(ADR-0159).
-///
-/// 본문 안의 패닉은 그 그물이 먼저 접고, 이것은 그 바깥 얇은 구간(`CommandTable::call` 의 인자 보정 · future
-/// 만들기 · 첫 poll 기계)의 패닉을 접는다 — 어느 쪽에서 났든 호출자는 같은 답을 받는다. 문장이 다른 것은
-/// 페이로드가 문자열이 아닐 때(그쪽 `unknown payload` · 이쪽 `<non-string panic payload>`)와 문자열을 한 겹 더
-/// 상자에 싼 페이로드일 때(이쪽만 벗겨 그 문자열을 싣는다)뿐이다.
-// ADR-0292
-fn handler_panicked(caught: &Caught) -> CommandError {
-    CommandError::of(
-        ErrorCode::Internal,
-        format!("command handler panicked: {caught}"),
-    )
 }
 
 /// 입력 영향 명령의 임대 검문 — 통과하면 `args.target` 을 **푼 id** 로 바꿔 둔다.
@@ -1157,33 +1115,14 @@ mod tests {
         }
     }
 
-    // ── 패닉 가둠 허용 목록(ADR-0292) ─────────────────────────────────────────────────────────────────
-
-    /// ★목록이 늘면 여기서 멈춘다★ — 넣을 때마다 그 본문에 효과가 없는지와 `INTERNAL` 접기가 맞는지를 다시
-    /// 정해야 한다([`PANIC_CONTAINED`] doc). 이름이 표에서 사라지거나 바뀌면 목록이 아무것도 안 가둔다.
+    /// ★어느 이름의 본문도 가둠 표시 밖에서 돈다(ADR-0293)★ — ADR-0292 가 가두던 두 조회(`agent.list` ·
+    /// `agent.listQueuedInputs`)도 같다 — 다시 가두면 이 시험이 빨개진다. 훅 없는 이 시험 빌드에선 본문 패닉을 본문 그물이 `INTERNAL` 로 접는다
+    /// (운영 프로세스에선 훅이 데몬을 끝낸다). 본문은 운영과 같은 `blocking_handler` 다.
+    // ADR-0293
     #[test]
-    fn the_panic_allowlist_is_exactly_the_two_listings_and_both_are_held_reads() {
-        assert_eq!(PANIC_CONTAINED, ["agent.list", "agent.listQueuedInputs"]);
-        let table = make_daemon_table(
-            manager(),
-            Arc::new(RosterBroadcastSlot::new()),
-            Arc::new(NoInputLeases),
-            Arc::new(NoUsageLimits),
-        );
-        for name in PANIC_CONTAINED {
-            let spec = table
-                .specs()
-                .find(|spec| spec.name == name)
-                .unwrap_or_else(|| panic!("표에 없는 허용 목록 이름: {name}"));
-            assert_eq!(spec.effect, Effect::Read, "{name}");
-        }
-    }
-
-    /// `names` 자리마다 본문에서 패닉 가둠 표시를 읽어 답하는 핸들러를 꽂은 표 — 선언은 agent 실물이라 인자
-    /// 검문이 실물 스키마를 탄다. 본문 그물은 운영과 같은 `blocking_handler` 다.
-    fn mark_reporting_slot(names: &[&'static str]) -> Arc<CommandTableSlot> {
+    fn no_command_body_runs_under_the_containment_mark() {
         let mut table = CommandTable::new(engram_dashboard_agent::commands::COMMAND_SPECS);
-        for &name in names {
+        for name in ["agent.listQueuedInputs", "usage.get", "agent.rename"] {
             table
                 .insert(
                     name,
@@ -1193,180 +1132,17 @@ mod tests {
                 )
                 .expect("선언된 이름");
         }
-        let slot = Arc::new(CommandTableSlot::new());
-        slot.set(Arc::new(DaemonTable {
-            table,
-            roster: manager(),
-            lease: Arc::new(NoInputLeases),
-        }));
-        slot
-    }
-
-    /// ★표시는 허용 목록 이름의 본문에서만 선다★ — `usage.get` 은 `Read` 지만 목록 밖이고(효과 술어가 아니다),
-    /// 명부 동사는 상태를 바꾼다. 부른 뒤엔 표시가 내려가 있어야 한다.
-    #[test]
-    fn only_allowlisted_bodies_run_under_the_mark() {
-        let slot = mark_reporting_slot(&[
-            "agent.list",
-            "agent.listQueuedInputs",
-            "usage.get",
-            "agent.rename",
-        ]);
-        let table = slot.get().expect("표");
-        let cases = [
-            ("agent.list", json!({}), true),
-            ("agent.listQueuedInputs", json!({ "target": "alpha" }), true),
-            ("usage.get", json!({ "backend": "Claude" }), false),
-            (
-                "agent.rename",
-                json!({ "target": "alpha", "name": "beta" }),
-                false,
-            ),
-        ];
-        for (name, mut args, wanted) in cases {
-            let seen = call_daemon_command(table, name, &mut args, "test", None)
-                .expect("이 표의 이름")
-                .expect("본문의 답");
-            assert_eq!(seen, json!(wanted), "{name}");
-            assert!(!engram_dashboard_base::panic::is_contained(), "{name}");
-        }
-    }
-
-    /// ★표시는 세 입구에서 다 선다★ — 공통 입구 하나에 서므로 제어 라우트 둘(`/control/agent` · `/control/call`)로
-    /// 와도 같은 본문이 가둬진다.
-    #[test]
-    fn the_mark_stands_through_all_three_entrances() {
-        let slot = mark_reporting_slot(&["agent.list"]);
-        let bus = DaemonLocalCommands::new(slot.clone());
-
-        let over_bus = bus
-            .run("agent.list", &mut json!({}), "bus", Some(2))
-            .expect("이 표의 이름")
-            .expect("본문의 답");
-        let over_call = match super::super::catalog::handle_call(
-            &bus,
-            &crate::command_roster::CommandRoster::new(),
-            super::super::catalog::CallRequest {
-                name: "agent.list".to_string(),
-                args: command_args(json!({})),
-                request_id: None,
-            },
-        ) {
-            super::super::catalog::CallOutcome::Answered(result) => flatten(result),
-            super::super::catalog::CallOutcome::Relay { .. } => {
-                panic!("데몬 자기 이름은 중계되지 않는다")
-            }
-        };
-        let over_agent = flatten(super::super::agent::handle_agent(
-            slot.get().expect("표"),
-            super::super::agent::AgentRequest {
-                verb: "list".to_string(),
-                args: command_args(json!({})),
-            },
-        ));
-
-        assert_eq!(over_bus, json!(true));
-        assert_eq!(over_call, ("OK".to_string(), "true".to_string()));
-        assert_eq!(over_agent, ("OK".to_string(), "true".to_string()));
-    }
-
-    const THIN_LAYER_PANIC: &str = "본문 그물 밖 패닉";
-
-    /// 첫 poll 에서 본문 그물(`guard_panic`) **밖**에서 터지는 핸들러 — 그 그물 바깥 얇은 구간의 패닉을 흉내 낸다.
-    struct PanicsOnFirstPoll;
-
-    impl engram_dashboard_command::CommandHandler for PanicsOnFirstPoll {
-        fn call(&self, _args: serde_json::Value) -> CommandFuture {
-            Box::pin(std::future::poll_fn(
-                |_| -> std::task::Poll<Result<serde_json::Value, CommandError>> {
-                    panic!("{THIN_LAYER_PANIC}")
-                },
-            ))
-        }
-    }
-
-    /// 허용 목록 이름과 목록 밖 이름에 그물 밖 패닉 핸들러를, 다른 이름 하나에 본문 그물 안에서 터지는 핸들러를 꽂은 표.
-    fn panicking_table() -> DaemonTable {
-        let mut table = CommandTable::new(engram_dashboard_agent::commands::COMMAND_SPECS);
-        table
-            .insert("agent.list", Arc::new(PanicsOnFirstPoll))
-            .expect("선언된 이름");
-        table
-            .insert("usage.get", Arc::new(PanicsOnFirstPoll))
-            .expect("선언된 이름");
         table
             .insert(
-                "agent.rename",
+                "agent.list",
                 engram_dashboard_command::blocking_handler(
                     |_: serde_json::Value| -> Result<bool, CommandError> {
-                        panic!("{THIN_LAYER_PANIC}")
+                        panic!(
+                            "본문 패닉 · 표시 {}",
+                            engram_dashboard_base::panic::is_contained()
+                        )
                     },
                 ),
-            )
-            .expect("선언된 이름");
-        DaemonTable {
-            table,
-            roster: manager(),
-            lease: Arc::new(NoInputLeases),
-        }
-    }
-
-    /// ★가둔 패닉은 본문 그물이 내는 것과 **같은 답**이다★ — 코드 · 문구 · 재시도 규약이 갈리면 같은 사고가 패닉 자리에
-    /// 따라 다른 확실성으로 읽힌다(ADR-0159). 본문 그물의 문구가 바뀌면 여기서 갈린다.
-    #[test]
-    fn a_panic_outside_the_body_net_of_an_allowlisted_command_folds_like_the_body_net() {
-        let table = panicking_table();
-
-        let (contained, body_net) =
-            engram_dashboard_command::testing::with_quiet_panic_hook(|| {
-                let contained =
-                    call_daemon_command(&table, "agent.list", &mut json!({}), "test", None)
-                        .expect("이 표의 이름")
-                        .expect_err("가둔 패닉");
-                let body_net = call_daemon_command(
-                    &table,
-                    "agent.rename",
-                    &mut json!({ "target": "alpha", "name": "beta" }),
-                    "test",
-                    None,
-                )
-                .expect("이 표의 이름")
-                .expect_err("본문 그물이 접은 패닉");
-                (contained, body_net)
-            });
-
-        assert_eq!(contained.code(), ErrorCode::Internal);
-        assert_eq!(
-            contained.message(),
-            format!("command handler panicked: {THIN_LAYER_PANIC}")
-        );
-        assert_eq!(contained.code(), body_net.code());
-        assert_eq!(contained.message(), body_net.message());
-        assert_eq!(contained.retry(), body_net.retry());
-        assert!(!engram_dashboard_base::panic::is_contained());
-    }
-
-    /// `call` 에서 바로 터지는 핸들러 — future 를 만들기 전(첫 poll 전)의 패닉이다. 터지기 전에 표시를 적는다.
-    struct PanicsOnCall(Arc<Mutex<Option<bool>>>);
-
-    impl engram_dashboard_command::CommandHandler for PanicsOnCall {
-        fn call(&self, _args: serde_json::Value) -> CommandFuture {
-            *self.0.lock().expect("recorder poisoned") =
-                Some(engram_dashboard_base::panic::is_contained());
-            panic!("{THIN_LAYER_PANIC}")
-        }
-    }
-
-    /// ★표 호출 단계(인자 보정 · future 만들기)의 패닉도 가둔다★ — 표시가 그 단계에도 서 있어야 훅이 끝내지
-    /// 않는다. 답은 본문 그물과 같은 `INTERNAL` 이다.
-    #[test]
-    fn a_panic_while_an_allowlisted_command_is_called_is_contained_too() {
-        let saw_mark = Arc::new(Mutex::new(None));
-        let mut table = CommandTable::new(engram_dashboard_agent::commands::COMMAND_SPECS);
-        table
-            .insert(
-                "agent.listQueuedInputs",
-                Arc::new(PanicsOnCall(saw_mark.clone())),
             )
             .expect("선언된 이름");
         let table = DaemonTable {
@@ -1375,54 +1151,26 @@ mod tests {
             lease: Arc::new(NoInputLeases),
         };
 
-        let err = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
-            call_daemon_command(
-                &table,
-                "agent.listQueuedInputs",
-                &mut json!({ "target": "alpha" }),
-                "test",
-                None,
-            )
-            .expect("이 표의 이름")
-            .expect_err("가둔 패닉")
-        });
+        for (name, mut args) in [
+            ("agent.listQueuedInputs", json!({ "target": "alpha" })),
+            ("usage.get", json!({ "backend": "Claude" })),
+            ("agent.rename", json!({ "target": "alpha", "name": "beta" })),
+        ] {
+            let contained = call_daemon_command(&table, name, &mut args, "test", None)
+                .expect("이 표의 이름")
+                .expect("본문의 답");
+            assert_eq!(contained, json!(false), "{name}");
+        }
 
+        let err = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
+            call_daemon_command(&table, "agent.list", &mut json!({}), "test", None)
+                .expect("이 표의 이름")
+                .expect_err("본문 패닉")
+        });
         assert_eq!(err.code(), ErrorCode::Internal);
         assert_eq!(
             err.message(),
-            format!("command handler panicked: {THIN_LAYER_PANIC}")
+            "command handler panicked: 본문 패닉 · 표시 false"
         );
-        assert_eq!(
-            *saw_mark.lock().expect("recorder poisoned"),
-            Some(true),
-            "표 호출 단계에서 표시가 서 있어야 한다"
-        );
-        assert!(!engram_dashboard_base::panic::is_contained());
-    }
-
-    /// ★목록 밖 이름은 그 패닉을 가두지 않는다★ — 정확한 이름으로 가르므로 `Read` 인 `usage.get` 도 되감기가 이 함수 밖으로
-    /// 나간다(운영에서는 부른 blocking 태스크의 죽음이다).
-    #[test]
-    fn a_panic_of_a_command_off_the_list_is_not_contained() {
-        let table = panicking_table();
-
-        let unwound = engram_dashboard_command::testing::with_quiet_panic_hook(|| {
-            std::panic::catch_unwind(AssertUnwindSafe(|| {
-                call_daemon_command(
-                    &table,
-                    "usage.get",
-                    &mut json!({ "backend": "Claude" }),
-                    "test",
-                    None,
-                )
-            }))
-        });
-
-        let payload = unwound.expect_err("되감기가 밖으로 나온다");
-        assert_eq!(
-            engram_dashboard_base::panic::payload_text(&*payload),
-            THIN_LAYER_PANIC
-        );
-        assert!(!engram_dashboard_base::panic::is_contained());
     }
 }
