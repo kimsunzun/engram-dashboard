@@ -1,7 +1,7 @@
 # ADR-0292: 패닉 정책 구현 — 가둠은 에이전트 펌프와 라이터와 허용 목록 읽기 명령 둘뿐이고 가두지 못한 패닉은 로그 뒤 abort 하며 셸은 훅만 둔다
 
-- 상태: 확정 (2026-10-12, 근거: 사용자 결정 2026-10-11~12 · TRD `docs/process/S21-panic-policy/trd.md` 11판 §3 · 조사 `docs/research/panic-practice-peers-2026-10-12.md`)
-- 관련: Amends ADR-0288 (결정 1과 2의 가둠 범위 및 결정 3) · Amends ADR-0290 (결정 1의 정상 종료 복귀와 결정 2) · ADR-0159(버스 명령 패닉 = `INTERNAL`) · ADR-0262(claude 잔여물 정리기 K7 — abort 에 기댄 막) · ADR-0199(통로는 스스로 끄지 않는다) · ADR-0005(finalize 1회) · ADR-0001(kill 인과)
+- 상태: 확정 (2026-10-12, 근거: 사용자 결정 2026-10-11~12 · TRD `docs/process/S21-panic-policy/trd.md` 11판 §3 · 조사 `docs/research/panic-practice-peers-2026-10-12.md`) · 부분 폐기 by ADR-0293 (결정 2의 명령 쪽 허용 목록)
+- 관련: Amends ADR-0288 (결정 1과 2의 가둠 범위 및 결정 3) · Amends ADR-0290 (결정 1의 정상 종료 복귀와 결정 2) · ADR-0159(버스 명령 패닉 = `INTERNAL`) · ADR-0262(claude 잔여물 정리기 K7 — abort 에 기댄 막) · ADR-0199(통로는 스스로 끄지 않는다) · ADR-0005(finalize 1회) · ADR-0001(kill 인과) · Amended by ADR-0293 (결정 2의 명령 쪽 허용 목록)
 
 ## 맥락
 
