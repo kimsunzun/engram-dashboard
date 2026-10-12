@@ -1,6 +1,6 @@
 [package]
 name = "engram-dashboard"
-version = "0.3.2"
+version = "0.4.0"
 description = "Engram Dashboard"
 authors = []
 edition = "2021"
