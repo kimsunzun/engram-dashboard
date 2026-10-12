@@ -19,7 +19,7 @@ U1~U5 · ADR-0293(허용 목록 가둠 철거 — 가둠 = 에이전트 펌프 �
 
 ## 열린 것
 - tracking T-59 — platform Job 멤버 명단 flake(CI 1 회 · 재실행 초록 · claude 잔여물 정리가 같은 함수를 쓴다 · 상한 늘려 맞추지 말 것).
-- master 머지 CI = 이 핸드오프를 쓸 때 진행 중(확인 안 됨) — 다음 세션 첫머리에 `gh run list --branch master --workflow ci.yml --limit 1` 로 본다.
+- master 머지 CI = 초록(`ba39a080` · 2026-10-12 확인).
 
 ## do-not / 주의
 - 실 claude 시험은 이제 로컬에서 돌린다(사용자 승인 · CLAUDE.md · qa 바인딩대로). 옛 「금지」는 걷었다.
