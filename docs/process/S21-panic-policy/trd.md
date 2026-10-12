@@ -1,6 +1,6 @@
 # TRD — 패닉 정책 구현: 좁은 가둠 · 즉시 종료 훅 · unwind 전환 (S21)
 
-> **상태: 11판 개정 4(2026-10-12 · 사용자 결정 A).** 코드 변경 0 · 사용자 결정 전부 끝(§3) · `/review trd full` 3 라운드 끝(1 = FIX · FIX → 2 = blind PASS · doc-aware FIX → 3 = doc-aware PASS · 마지막 경미 1 건 반영). 개정 2(리뷰 1) = `usage.get` 을 가둠에서 뺌(허용 목록 둘) · 표시 끔 원시와 그 자리 넷 · 「표시 범위 ⊆ catch 클로저」 불변식 · U3 확인 거리. 개정 3(리뷰 2) = 허용 목록에 「효과 없음」 조건 · 표시를 끄지 않는 것에 Idle 합침 더함. 개정 4 = 펌프 패닉 때 명시 종료를 걷고 기존 정리 경로 + 시험(사용자 결정 A — §4-2).
+> **상태: 11판 개정 4(2026-10-12 · 사용자 결정 A) · 구현 U1~U5 착지(2026-10-12 — 커밋은 step-log).** 사용자 결정 전부 끝(§3) · `/review trd full` 3 라운드 끝(1 = FIX · FIX → 2 = blind PASS · doc-aware FIX → 3 = doc-aware PASS · 마지막 경미 1 건 반영). 개정 2(리뷰 1) = `usage.get` 을 가둠에서 뺌(허용 목록 둘) · 표시 끔 원시와 그 자리 넷 · 「표시 범위 ⊆ catch 클로저」 불변식 · U3 확인 거리. 개정 3(리뷰 2) = 허용 목록에 「효과 없음」 조건 · 표시를 끄지 않는 것에 Idle 합침 더함. 개정 4 = 펌프 패닉 때 명시 종료를 걷고 기존 정리 경로 + 시험(사용자 결정 A — §4-2).
 > **이력:** 10판 = `git show a722a879:docs/process/S21-panic-policy/trd.md`(종료 꼬리 · 감시 스레드 · 결정 (다)(바)(바′)(라′) · 컴파일 가드는 새 방향에서 무효) · 11판 초안 = `bedda3f3`((가) 락 오염 · (나) 여러 걸음 구간 · 요청 쪽 입구 R1~R7 — 사용자 결정 ② 로 걷힘).
 > **틀:** ADR-0288 · ADR-0290 + 사용자 결정 2026-10-10 · 2026-10-11~12 · 2026-10-12 ②(§1). ★세 ADR(0288 ~ 0290)은 브랜치 `origin/v0.3.3/feat/panic-policy` 에만 있다★ — 이 TRD 를 커밋하기 전에 그 브랜치를 들여야 링크가 선다. 구현 ADR = ADR-0292(예정).
 > **대체하는 옛 기록:** `docs/process/S20-command-bus/trd.md` §4 ⑨ 「릴리즈 `panic = "abort"` 유지」. 그 절의 규약(명령 핸들러는 값으로 실패한다)은 산다.
@@ -122,7 +122,7 @@
 - c · d 의 까닭: 잔여물 정리(ADR-0262)는 막 둘이 abort 에 기댄다(그 ADR 의 K7) — 가두면 그 전제가 깨진다. c 의 안쪽 catch 는 운영에서 닿지 않게 된다(시험 빌드엔 훅이 없어 산다).
 - **표시를 끄지 않는 것:** 펌프의 `emit` 이 부르는 여러 에이전트 공유 자리 — 턴 관측 표 · 대기 목록 표(`agent/src/turn.rs:94` · `agent/src/inputs_pending.rs:21` — `output_core.rs:432`) · 턴 끝 · 목록 비움 통지가 닿는 Idle 합침(`IdleCoalescer::claim` `daemon/src/messaging_host.rs:384-389`) — 은 임계 구역이 그 에이전트 항목 하나의 평범한 `HashMap` 조작이라 패닉원이 없다(리뷰 확인).
 
-**가두지 않는 것(= 즉시 종료):** WS 명령 처리기 몸통 · 떼어 낸 명령 태스크(`daemon/src/agent_conn.rs:314` · `:375` · `:336` — 기본은 상태를 바꾼다고 본다 · 읽기 전용 WS 명령이 확인되면 그때 더한다) · 활성화(`daemon/src/connection_core.rs:1366` · `:1760`) · 허용 목록 밖 버스 명령(`usage.get` 포함) · 제어 HTTP · MCP 도구(`daemon/src/control/mcp_server.rs`) · codex 라이터와 그 세션 id 기록(`record_session_id` `codex/transport.rs:2393` · 그 catch `:2420` — `writer_loop` `:2484` 가 `:2521` 에서 부른다 · 위 a 와 다른 길) · PTY 감시 · stderr 배수 · claude 잔여물 정리 스레드 · 메시징 배달 · reaper · sweep · 세션 추적 · 사용량 · accept 루프 · 메인 future · net · rmcp · hyper 내부 · 셸 전부. 이 자리의 기존 `catch_unwind`(reaper `agent/src/reaper.rs:208` · sweep `daemon/src/lib.rs:729` 등)는 운영에서 닿지 않는 코드가 되지만 시험 빌드에는 훅이 없어 살아 있으므로 걷지 않는다(§4-6 ②).
+**가두지 않는 것(= 즉시 종료):** WS 명령 처리기 몸통 · 떼어 낸 명령 태스크(`daemon/src/agent_conn.rs:314` · `:375` · `:336` — 기본은 상태를 바꾼다고 본다 · 읽기 전용 WS 명령이 확인되면 그때 더한다) · 활성화(`daemon/src/connection_core.rs:1366` · `:1760`) · 허용 목록 밖 버스 명령(`usage.get` 포함) · 제어 HTTP · MCP 도구(`daemon/src/control/mcp_server.rs`) · codex 라이터와 그 세션 id 기록(`record_session_id` `codex/transport.rs:2393` · 그 catch `:2420` — `writer_loop` `:2484` 가 `:2521` 에서 부른다 · 위 a 와 다른 길) · PTY 감시 · stderr 배수 · claude 잔여물 정리 스레드 · 메시징 배달 · reaper · sweep · 세션 추적 · 사용량 · accept 루프 · 메인 future · net · rmcp · hyper 내부 · 셸 전부. 이 자리의 기존 `catch_unwind`(reaper `agent/src/reaper.rs:208` 등)는 운영에서 닿지 않는 코드가 되지만 시험 빌드에는 훅이 없어 살아 있으므로 걷지 않는다(§4-6 ②). ★예외 — 데몬 sweep(`daemon/src/lib.rs` 6.6)의 catch 는 시험 빌드에서도 닿지 않는다★: 그 태스크는 훅을 먼저 거는 `run()` 만 띄우고 시험 서버는 띄우지 않는다(U4-C 리뷰 확인 · 코드는 그물로 남김 — 걷을지는 사용자 판단 거리).
 
 ### 4-3. 표시 — base 새 입주자 `panic`(가안)
 
@@ -159,13 +159,13 @@
 2. **abort 전제 감사** — 표시 밖 코드는 「패닉 = 프로세스 끝」이 그대로 참이다(훅이 끝낸다). 전제가 무너지는 것은 가두는 다섯 자리의 몸통과 그 몸통이 되감기 때 도는 `Drop` 뿐이다. 볼 것:
    - base `sync` 계약 3(`base/src/sync.rs:10-11` — 「운영 빌드는 오염에 닿지 않는다」) — 펌프가 `sync` 로 락을 되찾으므로(`pty.rs:322` 등) 다시 쓴다.
    - **출력 코어의 오염 길** — `emit` 은 `replay` 를 쥔 채 적고(`agent/src/output_core.rs:422-429` · 목록 사건의 `.expect("한 줄 이상")` `:614` 도 그 안이다) 거기서 난 패닉은 `replay` 를 오염시킨다 → 표시 없는 `finish` 의 `replay.lock().expect`(`:692`)가 다시 패닉해 데몬이 끝난다(안전한 쪽).
-   - **틀리게 되는 주석** — `pty.rs:283-297` 의 「(b) 그 재-panic 은 연결 task 안이라 tokio 가 그 task 만 격리」는 훅이 들어오면 거짓이다. 「release=abort」 정규식으로는 안 잡히므로 따로 적는다. 같은 부류 — `agent/src/reaper.rs:65-70` 의 「즉 자식 프로세스는 이미 죽어 있다」는 사용자 결정 A 아래 펌프 패닉 경로에서 거짓이다(그 경로는 CLI 가 산 채 reaper 에 닿고, 세션 해제가 Job 을 닫아 끝낸다) — U4 에서 고쳐 쓴다.
-   - 「release=abort」를 글자 그대로 적은 주석 · 로그 문장(예: `daemon/src/messaging_host.rs:769`)은 「표시 밖 패닉 = 즉시 종료」로 고친다.
+   - **틀리게 되는 주석**(U4-C `c9d15023` 에서 고쳤다 — 이 항목의 줄 번호는 그 전 기준) — `pty.rs:283-297` 의 「(b) 그 재-panic 은 연결 task 안이라 tokio 가 그 task 만 격리」는 훅이 들어오면 거짓이다. 「release=abort」 정규식으로는 안 잡히므로 따로 적는다. 같은 부류 — `agent/src/reaper.rs:65-70` 의 「즉 자식 프로세스는 이미 죽어 있다」는 사용자 결정 A 아래 펌프 패닉 경로에서 거짓이다(그 경로는 CLI 가 산 채 reaper 에 닿고, 세션 해제가 Job 을 닫아 끝낸다) — U4 에서 고쳐 쓴다.
+   - 「release=abort」를 글자 그대로 적은 주석 · 로그 문장(예: `daemon/src/messaging_host.rs:769` — 지금 `:770`)은 「표시 밖 패닉 = 즉시 종료」로 고친다(U4-C `c9d15023` 에서 고쳤다).
    - ADR-0262 K7 · 메시징 커널의 되돌림 `Drop` 은 가두지 않는 코드(또는 표시 끔 c · d)에서 돌아 전제가 그대로 참이다 — 범위 밖.
 
 ### 4-7. 프로필 전환
 
-`Cargo.toml:40` `panic = "abort"` 한 줄을 지운다(기본 unwind). 앞 단위가 전부 abort 아래 무동작이라 되돌림 = 이 한 줄. 그래서 「abort 면 빌드를 멈추는」 컴파일 가드는 두지 않는다. 실행 파일 크기 변화를 이 단위에서 잰다(ADR-0288 「영향」이 재지 않았다고 적었다).
+`Cargo.toml:40` `panic = "abort"` 한 줄을 지운다(기본 unwind). 앞 단위가 전부 abort 아래 무동작이라 되돌림 = 이 한 줄. 그래서 「abort 면 빌드를 멈추는」 컴파일 가드는 두지 않는다. 실행 파일 크기 변화를 이 단위에서 잰다(ADR-0288 「영향」이 재지 않았다고 적었다). ★단 되돌리면 U4 가 고쳐 쓴 주석 중 가둔 자리 서술(「실패로 접힌다」)이 배포판에서 다시 거짓이 된다 — 찾는 법 = `rg "ADR-0292" crates src-tauri/src`★(U4-C 리뷰 권고).
 
 ---
 

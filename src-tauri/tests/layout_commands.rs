@@ -3019,8 +3019,8 @@ async fn spawn_into_still_refuses_a_backend_word_it_does_not_know() {
 
 // ── (B) 터져서 죽지 않는다 ───────────────────────────────────────────────────
 
-/// ★명령 핸들러는 터져서 죽지 않는다 — 오류를 값으로 돌려준다★(TRD §4-⑨). 이 그물은 개발·테스트
-/// 빌드에서만 실효가 있고(릴리즈는 `panic = "abort"`), 그래서 규약이 그물보다 앞이다.
+/// ★명령 핸들러는 터져서 죽지 않는다 — 오류를 값으로 돌려준다★(TRD §4-⑨). 이 그물은 훅 없는
+/// 시험 빌드에서만 실효가 있고(운영 셸은 아무것도 가두지 않아 패닉 훅이 끝낸다 · ADR-0292), 그래서 규약이 그물보다 앞이다.
 #[tokio::test]
 async fn a_panicking_handler_answers_instead_of_taking_the_process_down() {
     let mut table = CommandTable::new(COMMAND_SPECS);
