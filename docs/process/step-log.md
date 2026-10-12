@@ -2762,3 +2762,7 @@
   - **결정(사용자 2026-10-12)** — 로그 초기화가 통째로 실패해도 기동 거부 정책은 두지 않는다(TRD §7 잔여로 둔다).
   - **ADR 개정 링크(사용자 결정 2026-10-12 · `/adr link` partial · `/review doc light` PASS)** — 근거가 「release=abort」에 기대던 ADR 일곱(0142 · 0199 · 0226 · 0233 · 0262 · 0275 · 0281)을 ADR-0292 에 잇고, 0292 「영향」에 각 결론이 무엇으로 서는지 적었다(0233 의 첫 턴 포트 패닉 = 데몬 종료 · 0275 맥락 서술은 가둔 펌프에서 거짓). 이력 TRD 의 같은 서술(usage-limit-slot · storage · codex-backend · crate-boundaries 1-1 · chat-ux t40 · S20)은 그 시점 기록이라 손대지 않았다.
   - **남은 것 = 없음(패닉 정책 끝).** 다음 = 3단계 transport → 우편 주소 id 통일(T-29) — ★순서 바꿈(사용자 결정 2026-10-12: T-29 는 급하지 않다 · 둘은 파일 · 계약이 안 겹친다)★.
+- **[조사 2026-10-12 · 브랜치 `v0.3.3/refactor/transport-attach` · 결정 없음] S21 — 3단계 transport 착수 전 조사: 전송 보안은 층마다 빌린다 · 화면 공유는 transport 밖**
+  - **조사** — `docs/research/transport-security-build-vs-adopt-2026-10-12.md`(/research medium · 갈래 넷 · codex 적대 리뷰 FIX 8 반영 · 재판정 미실행) · `docs/research/screen-sharing-oss-2026-10-12.md`(medium · 적대 리뷰 · 메인 대조 생략 — 그 문서 상태 줄).
+  - **요지** — 보안을 통째로 주는 라이브러리는 없다. 암호화 · 원격 구간은 기성 보안 채널(rustls · iroh · 사용자 VPN)을 transport `Dialer`/`Link` 아래 끼우고, Origin 검사 · 인가 · 페어링 · 자원 상한은 우리 몫이다(`net` 의 것을 옮긴다).
+  - **방향(사용자 2026-10-12)** — 클라는 데몬 여럿에 붙고 데몬끼리도 통신하는 구조를 3단계에서 선제적으로 잡는다(실제 원격 적용 · 시험은 그 뒤 별도 트랙 — 이 세션에서 이어 갈 수 있음). 3단계 순서 = 메모 10절 3-1 → 3-2 → 3-3 유지.
