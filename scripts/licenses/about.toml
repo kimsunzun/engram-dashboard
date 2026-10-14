@@ -1,0 +1,38 @@
+# cargo-about 설정 — THIRD_PARTY_LICENSES.txt 의 Rust 부분을 뽑는다. 부르는 쪽 = scripts/gen-third-party-licenses.mjs
+#   (`-c` 로 이 파일을 넘긴다 — 워크스페이스 루트에 about.toml 을 두지 않는다).
+
+# 배포는 Windows 하나뿐이다 — 다른 OS 에서만 끌려오는 의존을 고지에 싣지 않는다.
+targets = ["x86_64-pc-windows-msvc"]
+# 배포 바이너리에 링크되지 않는 의존. proc-macro 는 build 의존이 아니라 일반 의존이라 그대로 남는다.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# chrono 는 MIT 와 Apache-2.0 전문을 LICENSE.txt 한 파일에 담아, 그대로는 cargo-about 이 본문을 못 찾고 표준 본문으로
+#   대신한다. 내장 우회가 그 파일을 두 라이선스로 잘라 준다(0.9.2 에서 실측 — 구간 체크섬이 어긋나면 우회가 빠지고
+#   생성 스크립트의 파일 보정이 뒤를 받는다).
+workarounds = ["chrono"]
+
+# 허용 목록이자 우선순위다 — `MIT OR Apache-2.0` 처럼 고를 수 있으면 앞의 것을 고른다(MIT 를 앞에 둔 것은 Apache-2.0
+#   을 고르면 그 crate 의 NOTICE 를 실어야 할 의무가 붙어서다).
+# 생성 스크립트도 이 목록을 읽는다 — Rust 의 OR 대안 고르기와 npm 패키지 허용 판정이 같은 목록을 쓴다.
+# 목록 밖 라이선스를 쓰는 crate 가 그래프에 들어오면 cargo about 이 실패한다(`--fail` 과 무관하게).
+# ★GPL · LGPL · AGPL 은 여기 더하지 말 것★ — 받아들일지는 사용자 결정이다. 실패하면 그 crate 를 끌고 온 경로부터
+#   보고한다(`cargo tree -i <crate> -e normal --target x86_64-pc-windows-msvc`).
+# MPL-2.0(파일 단위 약한 copyleft)은 배포 그래프가 요구해서 넣었다 — option-ext(dirs-sys → dirs → tauri) ·
+#   cssparser · cssparser-macros · selectors · dtoa-short(dom_query → tauri-utils). npm 쪽은 lightningcss 가 같은 칸으로
+#   통과한다(빌드 도구 — package.json 이 @tailwindcss/vite 를 dependencies 에 둬서 운영 의존으로 잡힌다). 실측 2026-10-15.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "BSL-1.0",
+    "0BSD",
+    "MIT-0",
+    "CC0-1.0",
+    "Unlicense",
+    "MPL-2.0",
+]

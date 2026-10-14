@@ -83,6 +83,9 @@
   cargo tree --locked -p engram-dashboard-cli -e normal --prefix none --target all                      # → 0줄 PASS (CLI)
   cargo tree --locked -p engram-dashboard-net -e normal --prefix none --target all                      # 기본 feature → 0줄 PASS
   cargo tree --locked -p engram-dashboard-net --features server -e normal --prefix none --target all    # 짝 → 1줄 이상 PASS(0줄이면 패턴이 눈멀었다)
+  # 서드파티 고지 생성(ADR-0294) — 전제: cargo-about 0.9.2 · `npm ci`. 판정 = 종료 0(산출은 버린다). 정본 = ci.yml gates 잡의
+  #   `Gate: third-party license notice generates` 스텝
+  node scripts/gen-third-party-licenses.mjs "$TEMP/tpl.txt"
   ```
   ★**`git add -N`(intent-to-add)를 빼지 말 것**★ — `git diff`는 **untracked 파일을 보지 않는다.** 처음 생성되는 `.ts`는 비교 대상 자체가 없어 매치 없이 조용히 통과했다(`SlotContent.ts` 사건 — `docs/process/S20-command-bus/trd.md` §5). intent-to-add로 세 디렉터리를 **내용 없이** 인덱스에 올려 두면 신규 파일도 "전체가 추가된 diff"로 잡힌다 — 빈 blob 등록일 뿐이라 이후 커밋 내용에는 영향이 없다. ★**`-f`도 빼지 말 것**★ — `git add`는 무시된 경로를 조용히 건너뛰므로, 어느 crate의 `.gitignore`에 `bindings/`·`*.ts` 같은 넓은 줄이 생기면 생성물이 인덱스에 안 올라가 **게이트가 소리 없이 해제된다**(지금은 세 디렉터리 다 무시 대상이 아니다). ★**경로를 줄이지 말 것**★ — 선언이 crate마다로 흩어져 생성 지점이 셋이고, 새 생성 지점이 생기면 이 목록도 함께 늘어난다.
 

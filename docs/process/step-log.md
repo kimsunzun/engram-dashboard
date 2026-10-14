@@ -2762,3 +2762,10 @@
   - **결정(사용자 2026-10-12)** — 로그 초기화가 통째로 실패해도 기동 거부 정책은 두지 않는다(TRD §7 잔여로 둔다).
   - **ADR 개정 링크(사용자 결정 2026-10-12 · `/adr link` partial · `/review doc light` PASS)** — 근거가 「release=abort」에 기대던 ADR 일곱(0142 · 0199 · 0226 · 0233 · 0262 · 0275 · 0281)을 ADR-0292 에 잇고, 0292 「영향」에 각 결론이 무엇으로 서는지 적었다(0233 의 첫 턴 포트 패닉 = 데몬 종료 · 0275 맥락 서술은 가둔 펌프에서 거짓). 이력 TRD 의 같은 서술(usage-limit-slot · storage · codex-backend · crate-boundaries 1-1 · chat-ux t40 · S20)은 그 시점 기록이라 손대지 않았다.
   - **남은 것 = 없음(패닉 정책 끝).** 다음 = 3단계 transport → 우편 주소 id 통일(T-29) — ★순서 바꿈(사용자 결정 2026-10-12: T-29 는 급하지 않다 · 둘은 파일 · 계약이 안 겹친다)★.
+- **[✅ 구현 2026-10-15 · 브랜치 `v0.4.1/chore/third-party-licenses` · 번호 선점 `3d94259a` · 게이트 = `/review code full` 6 라운드(doc-aware + codex blind · 마지막 PASS/PASS) · `/qa` standard + full(실 릴리즈 빌드 · 배포판 GUI 스모크) PASS · CI = push 뒤] S21 — 서드파티 라이선스 고지를 배포 zip 에 싣는다(T-62)** — 결정 = **ADR-0294**(릴리즈 빌드 때 생성 · 커밋 안 함 · 평소 CI 에서도 같은 생성) · ADR-0100 결정 2 부분 개정 — 여기 베끼지 않는다.
+  - **경위** — 오전 결정 「손으로 뽑아 커밋」(T-62)을 사용자가 같은 날 「릴리즈 뽑을 때 생성」으로 바꿨다. 「잘못 뽑힐 위험 · 다른 곳은 어떻게 하나」 질문에 조사 = `docs/research/third-party-license-notice-generation-practice-2026-10-15.md`(medium · codex 적대 리뷰 BLOCK → 반영).
+  - **한 것** — `scripts/gen-third-party-licenses.mjs` + `scripts/licenses/**`(cargo-about 0.9.2 · generate-license-file 4.2.5 devDependency) · `scripts/build-release.ps1` 단계 (0) · `ci.yml` `gates` 생성 검사 + `release-build` cargo-about 고정 설치 · 문서(CLAUDE.md 한 구 · README · scripts/README · qa 바인딩).
+  - **결과 수치(2026-10-15)** — Rust crate 322(파일 보정 39 · OR 대안 2 · 상류 교체 파일 16 · synthesized 1 = siphasher) · npm 236(lock 대조 236) · Rust 고지 파일 8 · 손 부록 1(WebView2 로더 SDK 1.0.3650.58). 릴리즈 폴더 `THIRD_PARTY_LICENSES.txt` 약 620 KB.
+  - **리뷰가 잡은 것** — cargo-about 이 `LICENSE_MIT` · `license-mit` 를 못 읽어 54 crate 가 자리표시 저작권으로 실리던 것 · 정적 링크되는 WebView2 로더 누락 · npm peer 누락 경로 · 손 교체의 버전 고정 · 선언 라이선스와 본문 대조.
+  - **메인 실수 1 건** — 조사 보고서에 적대 리뷰 지적을 반영했다고 보고했으나 쓴 `python` 이 Windows 스토어 껍데기라 아무것도 안 바뀌었다(출력 미확인). doc-aware 리뷰가 잡아 node 로 다시 반영했다.
+  - **남은 것** — ADR-0294 「거부한 대안」 셋째 줄(커밋 + CI 최신 검사)의 사용자 기각 사유 미수령 · T-62 와 도구 조사 문서는 `v0.3.3/chore/misc`(`249d92cb`)에만 있어, 그 브랜치가 master 에 들어오면 T-62 를 닫는다.

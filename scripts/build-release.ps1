@@ -47,9 +47,13 @@ if (-not [string]::IsNullOrWhiteSpace($OutDir)) {
 $PromptsSrc  = Join-Path $ProjectRoot 'prompts'
 # $TargetRel(cargo 산출 release 디렉토리)은 하드코딩하지 않는다 — 아래에서 cargo metadata 로 실측 확정(FIX-2).
 
-# ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서. ──
+# ── manifest: 릴리즈 폴더에 들어가는 정확한 집합(단일 출처). exe = target/release 에서, prompt = prompts/ 에서, doc = (0) 단계 산출에서. ──
 $ExpectedExes    = @('engram-dashboard.exe', 'engram-dashboard-daemon.exe', 'engram.exe')
 $ExpectedPrompts = @('agent-priming.md', 'engram-help.md')
+# ADR-0294 · ADR-0100: 서드파티 라이선스 고지 — 런타임은 읽지 않으므로 위 동거 불변식과 무관하고, exe 옆 최상위에 함께
+#   싣기만 한다(manifest tripwire 는 다른 항목과 같이 본다). 저장소에 두지 않는다 — 아래 (0) 단계가 빌드마다 새로 만든다.
+$NoticeName      = 'THIRD_PARTY_LICENSES.txt'
+$ExpectedDocs    = @($NoticeName)
 
 function Fail([string]$msg) {
     Write-Host "[build-release] 실패: $msg" -ForegroundColor Red
@@ -103,6 +107,18 @@ if (-not [string]::IsNullOrWhiteSpace($BuildTargetTriple)) {
     $TargetRel = Join-Path $TargetDir 'release'
 }
 Write-Host "[build-release] cargo target release dir = $TargetRel" -ForegroundColor Gray
+
+# ── (0) 서드파티 고지 생성 — 긴 빌드보다 먼저 (ADR-0294) ────────────────────────────────────
+#   허용 밖 라이선스 · 본문 없는 패키지 같은 실패가 수십 분 빌드 뒤가 아니라 여기서 멈춘다. 전제(cargo-about ·
+#   `npm ci` 를 마친 node_modules)와 실패 조건의 정본은 생성기 헤더다. CI 는 같은 생성기를 push 마다 gates 잡에서도 돌린다.
+#   산출은 cargo 산출 디렉토리 아래(저장소 밖 · 빌드마다 새로). ★지난 판을 먼저 지운다★ — 생성이 그 파일을 고치지
+#   못한 채 끝나도 낡은 고지가 존재 검사를 통과해 배송되지 않게(아래 exe 의 stale 구멍과 같은 부류).
+$DocsSrc    = Join-Path $TargetDir 'third-party-licenses'
+$NoticeFile = Join-Path $DocsSrc $NoticeName
+if (Test-Path -LiteralPath $NoticeFile) { Remove-Item -Force -LiteralPath $NoticeFile }
+Invoke-Step 'generate third-party notice (gen-third-party-licenses.mjs)' {
+    & node (Join-Path $ScriptDir 'gen-third-party-licenses.mjs') $NoticeFile
+}
 
 # ── (a) UI 앱: Tauri CLI production 빌드로 dist/ 를 embed (FIX-5, ADR-0100) ──────────────────
 #   ★프로덕션 컨텍스트 불변식★: 순수 `cargo build --release -p engram-dashboard`(구 Option A)는 Tauri 를
@@ -158,6 +174,10 @@ foreach ($md in $ExpectedPrompts) {
     $p = Join-Path $PromptsSrc $md
     if (-not (Test-Path $p)) { Fail "프라이밍 원본 부재: $p" }
 }
+foreach ($doc in $ExpectedDocs) {
+    $p = Join-Path $DocsSrc $doc
+    if (-not (Test-Path $p)) { Fail "고지 산출 부재: $p ((0) 단계가 이 파일을 안 만들었다)" }
+}
 
 # ── (b) release/ clean 재생성 ────────────────────────────────────────────────────────────
 #
@@ -206,20 +226,22 @@ New-Item -ItemType Directory -Path $ReleasePrompts | Out-Null
 # ── (c) manifest 그대로만 복사(그 외 아무것도) ───────────────────────────────────────────
 foreach ($exe in $ExpectedExes)    { Copy-Item (Join-Path $TargetRel $exe) $ReleaseDir }
 foreach ($md in $ExpectedPrompts)  { Copy-Item (Join-Path $PromptsSrc $md) $ReleasePrompts }
+foreach ($doc in $ExpectedDocs)    { Copy-Item (Join-Path $DocsSrc $doc) $ReleaseDir }
 
 # ── (d) manifest 검증(tripwire): release/ 가 정확히 기대 집합인지 — 부족/여분 모두 실패 ───────
 $errors = @()
 
-# 최상위: 정확히 3 exe + prompts/ 디렉토리 하나. 그 외 파일·디렉토리는 stray.
+# 최상위: 정확히 $ExpectedExes + $ExpectedDocs 파일 + prompts/ 디렉토리 하나. 그 외 파일·디렉토리는 stray.
 # FIX-3: -Force 로 숨김/시스템 항목까지 열거해야 tripwire 의 엄격성이 실제로 성립한다(숨은 stray 회피 방지).
 $topFiles = @(Get-ChildItem -Force -File      -Path $ReleaseDir | ForEach-Object Name)
 $topDirs  = @(Get-ChildItem -Force -Directory -Path $ReleaseDir | ForEach-Object Name)
+$ExpectedTopFiles = @($ExpectedExes + $ExpectedDocs)
 
-foreach ($exe in $ExpectedExes) {
-    if ($topFiles -notcontains $exe) { $errors += "누락(top): $exe" }
+foreach ($top in $ExpectedTopFiles) {
+    if ($topFiles -notcontains $top) { $errors += "누락(top): $top" }
 }
 foreach ($f in $topFiles) {
-    if ($ExpectedExes -notcontains $f) { $errors += "여분(top file): $f" }
+    if ($ExpectedTopFiles -notcontains $f) { $errors += "여분(top file): $f" }
 }
 foreach ($d in $topDirs) {
     if ($d -ne 'prompts') { $errors += "여분(top dir): $d" }
