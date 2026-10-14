@@ -1,0 +1,568 @@
+<title>Engram 프리셋 화면</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+KR:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one column; every section = short heading + a mock window drawn in the app palette + a few numbered one-line captions. */
+:root{
+  --bg:#f3f4f6; --paper:#ffffff; --ink:#16181d; --muted:#5b6170; --line:#d9dce3;
+  --accent:#0066cc; --accent-soft:#e3eefb;
+  --ok:#1a7f37; --warn:#9a6700; --warn-soft:#fff4d6; --err:#cf222e; --err-soft:#fde8ea; --gone:#6e7381;
+  --app-bg:#f5f5f5; --app-panel:#ffffff; --app-raised:#ffffff; --app-line:#ccc; --app-text:#1a1a1a; --app-muted:#666; --app-chip:#eef0f3;
+  --claude:#d97757; --codex:#6b6f78;
+  --f-body:"IBM Plex Sans KR","Malgun Gothic","Apple SD Gothic Neo",system-ui,sans-serif;
+  --f-mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0e0f12; --paper:#16181d; --ink:#e4e6eb; --muted:#9aa0ad; --line:#2a2d35;
+  --accent:#4a9eff; --accent-soft:#132438;
+  --ok:#3fb950; --warn:#d29922; --warn-soft:#2b2312; --err:#f85149; --err-soft:#2f1517; --gone:#8b909c;
+  --app-bg:#0a0a0a; --app-panel:#141414; --app-raised:#1c1c1c; --app-line:#2a2a2a; --app-text:#e0e0e0; --app-muted:#888; --app-chip:#202226;
+  --claude:#d97757; --codex:#c9c9c9; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0e0f12; --paper:#16181d; --ink:#e4e6eb; --muted:#9aa0ad; --line:#2a2d35;
+  --accent:#4a9eff; --accent-soft:#132438;
+  --ok:#3fb950; --warn:#d29922; --warn-soft:#2b2312; --err:#f85149; --err-soft:#2f1517; --gone:#8b909c;
+  --app-bg:#0a0a0a; --app-panel:#141414; --app-raised:#1c1c1c; --app-line:#2a2a2a; --app-text:#e0e0e0; --app-muted:#888; --app-chip:#202226;
+  --claude:#d97757; --codex:#c9c9c9; color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:15px;line-height:1.65;margin:0}
+.wrap{max-width:980px;margin:0 auto;padding-inline:16px;padding-block:36px 80px;display:flex;flex-direction:column;gap:48px}
+h1,h2,h3{text-wrap:balance;line-height:1.3;margin:0}
+h1{font-size:30px;font-weight:700;letter-spacing:-.01em}
+h2{font-size:21px;font-weight:700}
+h3{font-size:15px;font-weight:600}
+p{margin:0;max-width:68ch}
+.eyebrow{font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600}
+section{display:flex;flex-direction:column;gap:14px;min-width:0}
+.lead{color:var(--muted);max-width:70ch}
+code,.mono{font-family:var(--f-mono);font-size:.88em}
+.tag{display:inline-block;font-size:11.5px;font-weight:600;padding:1px 8px;border-radius:99px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.tag.rec{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.tag.ok{border-color:var(--ok);color:var(--ok)}
+.tag.unv{border-style:dashed}
+/* section heading row: number + title + status badge */
+.sh{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.sh .no{font-family:var(--f-mono);font-size:13px;font-weight:600;color:var(--muted)}
+/* numbered markers on mocks and their one-line captions */
+.n{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:50%;background:var(--accent);color:var(--paper);font-family:var(--f-body);font-size:10.5px;font-weight:700;line-height:1;flex:none;vertical-align:middle;letter-spacing:0;text-transform:none}
+.caps{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:6px 18px;font-size:13px;color:var(--muted)}
+.caps>span{display:flex;gap:7px;align-items:flex-start;min-width:0}
+.caps .n{margin-top:2px}
+.pend{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;font-size:13.5px;color:var(--muted)}
+/* structure chain */
+.chain{display:flex;flex-wrap:wrap;align-items:stretch;gap:10px}
+.chain .node{flex:1 1 200px;min-width:0;background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px}
+.chain .arrow{align-self:center;color:var(--muted);font-family:var(--f-mono)}
+.node b{font-size:15px}
+.parts{display:flex;flex-direction:column;gap:5px}
+.part{display:flex;align-items:center;gap:6px;font-size:13.5px;color:var(--muted);min-width:0;flex-wrap:wrap}
+.defp{border:1px dashed var(--accent);background:var(--accent-soft);border-radius:8px;padding:10px 14px;display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;font-size:13.5px}
+.defp .eq{font-weight:600}
+.strip{display:flex;flex-wrap:wrap;gap:6px}
+.strip span{font-size:12.5px;padding:3px 10px;border-radius:99px;background:var(--paper);border:1px solid var(--line);color:var(--muted)}
+.fact{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:12px 14px;font-size:14px;min-width:0}
+/* mock window */
+.win{background:var(--app-bg);border:1px solid var(--app-line);border-radius:10px;overflow:hidden;color:var(--app-text);font-size:13px;line-height:1.5;min-width:0}
+.win-bar{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--app-line);background:var(--app-panel);font-size:12px;color:var(--app-muted);white-space:nowrap;overflow:hidden}
+.win-bar .dots{display:flex;gap:5px}.win-bar .dots i{width:9px;height:9px;border-radius:50%;background:var(--app-line);display:block}
+.win-body{display:grid;gap:0;min-height:0}
+.cols-3{grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)}
+.cols-lib{grid-template-columns:190px minmax(0,1.25fr) minmax(0,1fr)}
+.ab{grid-template-columns:minmax(0,.8fr) minmax(0,1.2fr)}
+.pane{padding:12px;min-width:0;display:flex;flex-direction:column;gap:8px}
+.pane+.pane{border-left:1px solid var(--app-line)}
+.side{background:var(--app-panel)}
+.side .grp{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--app-muted);margin-top:6px;display:flex;align-items:center;gap:6px}
+.pth{font-family:var(--f-mono);font-size:10.5px;color:var(--app-muted);padding:0 6px;overflow-wrap:anywhere}
+.row{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--app-line);border-radius:6px;background:var(--app-raised);min-width:0}
+.row .grip{color:var(--app-muted);font-family:var(--f-mono);cursor:grab}
+.row .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.kind{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:4px;background:var(--app-chip);color:var(--app-muted);white-space:nowrap}
+.kind.p{color:var(--accent)}
+.btn{font:inherit;font-size:12px;padding:3px 10px;border-radius:5px;border:1px solid var(--app-line);background:var(--app-panel);color:var(--app-text);cursor:pointer;white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.x{color:var(--app-muted);cursor:pointer}
+.msg{border-radius:6px;padding:6px 10px;font-size:12.5px;display:flex;gap:8px;align-items:flex-start}
+.msg.err{background:var(--err-soft);color:var(--err)}
+.msg.warn{background:var(--warn-soft);color:var(--warn)}
+.msg b{white-space:nowrap}
+.msg span{flex:1;min-width:0}
+.head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.head .t{font-size:15px;font-weight:600}
+.head .sp{flex:1}
+.fold{font-size:12px;color:var(--app-muted);border-top:1px dashed var(--app-line);padding-top:6px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.final{display:flex;flex-direction:column;gap:6px}
+.final .k{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--app-muted);display:flex;align-items:center;gap:6px}
+.final .v{font-family:var(--f-mono);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
+.chip{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:99px;background:var(--app-chip);border:1px solid var(--app-line);font-size:12px;white-space:nowrap}
+.chip.gone{border-style:dashed;color:var(--gone)}
+.vend{width:8px;height:8px;border-radius:2px;display:inline-block}
+.vend.c{background:var(--claude)}.vend.x{background:var(--codex)}
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.pop{border:1px solid var(--app-line);background:var(--app-raised);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:4px;box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.pop input{font:inherit;font-size:12.5px;padding:4px 8px;border-radius:5px;border:1px solid var(--app-line);background:var(--app-panel);color:var(--app-text);width:100%}
+.opt{display:flex;justify-content:space-between;gap:8px;padding:4px 6px;border-radius:5px;font-size:12.5px;min-width:0}
+.opt>span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.opt.on{background:var(--app-chip)}
+.opt.dis{opacity:.45}
+.opt small{color:var(--app-muted);white-space:nowrap}
+.effort{display:flex;gap:4px;flex-wrap:wrap}
+.effort span{font-size:11.5px;padding:1px 8px;border-radius:4px;border:1px solid var(--app-line)}
+.effort span.on{border-color:var(--accent);color:var(--accent)}
+.dialog{max-width:520px;margin:0;border:1px solid var(--app-line);border-radius:8px;background:var(--app-raised);display:flex;flex-direction:column}
+.dialog .dh{padding:10px 14px;border-bottom:1px solid var(--app-line);font-weight:600;display:flex;align-items:center;gap:8px}
+.dialog .db{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.dialog .df{padding:10px 14px;border-top:1px solid var(--app-line);display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;align-items:center}
+.path{font-family:var(--f-mono);font-size:12px;padding:5px 8px;border:1px solid var(--app-line);border-radius:5px;background:var(--app-panel);overflow-wrap:anywhere}
+.callout{font-size:12px;color:var(--app-muted)}
+.ref{font-size:12.5px;color:var(--muted);overflow-wrap:anywhere}
+.cli{background:var(--app-bg);color:var(--app-text);border:1px solid var(--app-line);border-radius:8px;padding:12px 14px;font-family:var(--f-mono);font-size:12.5px;overflow-x:auto;white-space:pre;line-height:1.7}
+.cli .c{color:var(--app-muted)}
+.cli .k{color:var(--accent)}
+.win .cli{border:0;border-radius:0}
+.legend{display:flex;flex-wrap:wrap;gap:10px 18px;font-size:13px}
+.legend span{display:inline-flex;align-items:center}
+.legend i{display:inline-block;width:14px;height:14px;border-radius:3px;margin-right:6px;flex:none}
+.legend i.e{background:var(--err-soft);border:1px solid var(--err)}
+.legend i.w{background:var(--warn-soft);border:1px solid var(--warn)}
+.legend i.g{border:1px dashed var(--gone)}
+.legend i.r{background:var(--err)}
+.legend i.d{background:var(--app-line);opacity:.5}
+.legend i.s{outline:2px solid var(--accent);outline-offset:-2px}
+.search{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--app-line);border-radius:6px;background:var(--app-panel);min-width:0}
+.search .mag{color:var(--app-muted)}
+.search .ph{color:var(--app-muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.search.focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
+.caret{display:inline-block;width:1px;height:14px;background:var(--app-text);margin-left:-6px;animation:blink 1s steps(1) infinite}
+@keyframes blink{50%{opacity:0}}
+.fbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px}
+.fbar .sp{flex:1}
+.fchip{font-size:12px;padding:2px 10px;border-radius:99px;border:1px solid var(--app-line);color:var(--app-muted);white-space:nowrap}
+.sel{font-size:12px;padding:2px 8px;border-radius:5px;border:1px solid var(--app-line);background:var(--app-panel);white-space:nowrap}
+.lst{display:flex;flex-direction:column;gap:2px}
+.li{display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:5px;min-width:0}
+.li.on{background:var(--app-chip)}
+.li .name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Library list columns: kind / name / used-by sit at fixed x positions so rows line up. */
+.lst.cols{container-type:inline-size}
+.lst.cols .kind{width:44px;text-align:center;flex:none}
+.lst.cols .use{width:128px;flex:none;color:var(--app-muted);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lst.cols .li.hd{padding-block:2px;font-size:11px;color:var(--app-muted)}
+.lst.cols .li.hd .kind{background:none;font-weight:400;padding:0}
+@container (max-width:300px){.lst.cols .use{width:84px}}
+.li.gone{border:1px dashed var(--app-line)}
+.li.gone .name,.li.gone .use{color:var(--gone)}
+.li.err .name,.li.err .use{color:var(--err)}
+.star{width:14px;text-align:center;color:var(--app-muted);flex:none}
+.star.on{color:var(--warn)}
+.tr{display:flex;align-items:center;gap:4px;padding:2px 6px;border-radius:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tr.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+.tr .tw{width:10px;color:var(--app-muted);flex:none}
+.tr.l1{padding-left:16px}.tr.l2{padding-left:28px}
+.tr small{color:var(--app-muted);margin-left:auto}
+.dropzone{font-size:12px;color:var(--accent);border:2px dashed var(--accent);border-radius:6px;padding:8px;text-align:center;background:var(--accent-soft)}
+.foot{display:flex;gap:6px;flex-wrap:wrap;margin-top:auto;padding-top:6px}
+.cb{display:inline-block;width:13px;height:13px;border:1px solid var(--app-line);border-radius:3px;font-size:10px;line-height:11px;text-align:center;color:transparent;vertical-align:-2px}
+.cb.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.sel-ol{outline:2px solid var(--accent);outline-offset:-2px}
+.two-slots{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:10px}
+.popwrap{display:grid;grid-template-columns:minmax(0,380px) minmax(0,1fr);gap:16px;align-items:start}
+.cfg{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;align-items:start}
+.cfg .caps{grid-template-columns:minmax(0,1fr)}
+.open{display:flex;flex-wrap:wrap;gap:8px}
+.open .tag{font-size:12.5px;font-weight:500;padding:3px 10px;white-space:normal;color:var(--ink)}
+@media (max-width:860px){.cols-lib{grid-template-columns:minmax(0,1fr)}.cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}}
+@media (max-width:720px){
+  .cols-3,.ab,.two-slots,.popwrap,.cfg{grid-template-columns:minmax(0,1fr)}
+  .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
+  h1{font-size:25px}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+
+<div class="wrap">
+
+<header style="display:flex;flex-direction:column;gap:10px">
+  <span class="eyebrow">스킬 프리셋 · UI 러프 브리핑 · 2026-10-14</span>
+  <h1>Engram 프리셋 화면</h1>
+  <p class="lead">지시서 · 스킬 · 설정을 프리셋으로 묶어 claude · codex 에이전트에 붙이는 화면 — 지금 정한 상태만 그림으로.</p>
+</header>
+
+<!-- 1 -->
+<section>
+  <div class="sh"><span class="no">1</span><h2>구조 한눈에</h2><span class="tag ok">확정</span></div>
+  <div class="chain">
+    <div class="node"><b>부품</b>
+      <div class="parts">
+        <span class="part"><span class="kind">지시서</span><code>.md</code></span>
+        <span class="part"><span class="kind">스킬</span><code>SKILL.md</code> 폴더</span>
+        <span class="part"><span class="kind">설정</span><code>.yaml</code></span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node"><b>프리셋</b>
+      <div class="parts">
+        <span class="part"><span class="kind p">프리셋</span><code>.yaml</code></span>
+        <span class="part">↳ 프리셋 안에 프리셋 (중첩 가능)</span>
+      </div>
+    </div>
+    <div class="arrow">→</div>
+    <div class="node"><b>에이전트</b>
+      <div class="parts">
+        <span class="part">깡통</span>
+        <span class="part">프리셋 여러 개</span>
+      </div>
+    </div>
+  </div>
+  <div class="defp">
+    <span class="kind p">기본 프리셋</span>
+    <span>Engram 내장 · 에이전트 만들 때 자동으로 붙음 · 뗄 수 있음</span>
+    <span class="eq">= 프라이밍 + 기본 설정 (claude: <code>DISABLE_AUTOUPDATER=1</code>)</span>
+  </div>
+  <div class="strip">
+    <span>라이브러리 = 폴더 하나</span><span>프리셋도 그 안 파일(에셋)</span><span>남에게 줄 땐 폴더째</span><span>데이터는 데몬</span><span>클라와 데몬은 같은 PC(지금)</span>
+  </div>
+</section>
+
+<!-- 2 -->
+<section id="list-shape">
+  <div class="sh"><span class="no">2</span><h2>라이브러리 슬롯</h2><span class="tag ok">확정</span></div>
+  <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 묶음 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
+  <div class="win" role="img" aria-label="라이브러리 슬롯 화면 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯</div>
+    <div class="win-body cols-lib">
+      <div class="pane side">
+        <div class="grp">라이브러리 폴더 <span class="n">1</span></div>
+        <span class="pth">D:\engram-library</span>
+        <div class="tr"><span class="tw">▸</span>지시서</div>
+        <div class="tr"><span class="tw">▾</span>스킬</div>
+        <div class="tr l1 on"><span class="tw">▾</span>리뷰</div>
+        <div class="tr l2">보안</div>
+        <div class="tr l1">글쓰기</div>
+        <div class="tr"><span class="tw">▸</span>설정</div>
+        <div class="tr"><span class="tw">▸</span>프리셋</div>
+        <div class="tr"><span class="tw">▸</span>받은-규칙 <span class="n">3</span></div>
+        <div class="grp">즐겨찾기 묶음 · 이 PC <span class="n">2</span></div>
+        <div class="tr"><span class="tw">·</span>즐겨찾기 <small>9</small></div>
+        <div class="tr" style="outline:1px dashed var(--warn);outline-offset:-1px"><span class="star on">★</span>리뷰할 때 <span class="tag" style="font-size:10px;padding:0 5px;border-color:var(--warn);color:var(--warn)">★ 대상</span><small>5</small></div>
+        <div class="tr"><span class="tw">·</span>실험 중 <small>3</small></div>
+        <button class="btn" type="button" style="margin-top:4px">+ 새 묶음</button>
+      </div>
+      <div class="pane">
+        <div class="search"><span class="mag">⌕</span><span class="ph">검색 — 스킬 › 리뷰 (하위 폴더까지)</span></div>
+        <div class="fbar">
+          <span class="callout">스킬 › 리뷰</span><span class="tag" style="border-color:var(--warn);color:var(--warn)">★ = 리뷰할 때</span>
+          <span class="sp"></span>
+          <span class="fchip">쓰는 중</span>
+          <span class="fchip">최근 사용</span>
+          <span class="sel">종류: 전체 ▾</span>
+        </div>
+        <div class="lst cols">
+          <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲ <span class="n">4</span></span><span class="use">쓰는 곳</span></div>
+          <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 보안</span><span class="use">항목 2</span></div>
+          <div class="li on"><span class="star on">★</span><span class="kind">스킬</span><span class="name">review</span><span class="use">프리셋 2</span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-review</span><span class="use">프리셋 1</span></div>
+          <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name">pr-check</span><span class="use">—</span></div>
+        </div>
+        <div class="foot"><button class="btn" type="button">+ 새로 만들기 ▾</button></div>
+      </div>
+      <div class="pane side">
+        <div class="head"><span class="kind">스킬</span><span class="t" style="font-size:14px">review</span><span class="sp"></span><span class="star on" title="즐겨찾기">★</span></div>
+        <div class="final">
+          <span class="k">설명 (SKILL.md)</span>
+          <span class="v">코드 변경을 2인 적대 리뷰로 검증한다.</span>
+          <span class="k">위치</span>
+          <span class="v">스킬/리뷰/review/SKILL.md</span>
+          <span class="k">쓰는 곳</span>
+          <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u> <span class="n">5</span></span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>폴더 고르면 바로 안의 것만 (검색은 하위까지)</span>
+    <span><span class="n">2</span>★ = 대상 묶음에 넣고 빼기 · 묶음 더블클릭/우클릭 = 대상</span>
+    <span><span class="n">3</span>목록 = 지금 폴더를 훑은 것 (따로 저장 안 함)</span>
+    <span><span class="n">4</span>머리 클릭 정렬 (★ 칸 제외)</span>
+    <span><span class="n">5</span>쓰는 곳의 이름을 누르면 그 프리셋으로 이동 · 선택 (오른쪽이 편집 칸)</span>
+  </div>
+</section>
+
+<!-- 3 -->
+<section id="preset-edit">
+  <div class="sh"><span class="no">3</span><h2>프리셋 편집 = 라이브러리 오른쪽 칸</h2><span class="tag ok">확정</span><span class="tag unv">최종 구성 보기 방식 미정</span></div>
+  <p class="lead">가운데서 프리셋을 누르면 오른쪽 상세 칸이 그대로 편집 칸이 된다.</p>
+  <div class="win" role="img" aria-label="라이브러리 슬롯에서 프리셋을 고르면 오른쪽이 편집 칸이 되는 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 — 프리셋/리뷰어.yaml</div>
+    <div class="win-body cols-lib">
+      <div class="pane side">
+        <div class="grp">라이브러리 폴더</div>
+        <div class="tr"><span class="tw">▸</span>지시서</div>
+        <div class="tr"><span class="tw">▸</span>스킬</div>
+        <div class="tr"><span class="tw">▸</span>설정</div>
+        <div class="tr on"><span class="tw">▾</span>프리셋</div>
+        <div class="tr l1">실험</div>
+        <div class="tr"><span class="tw">▸</span>받은-규칙</div>
+      </div>
+      <div class="pane">
+        <div class="lst cols">
+          <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲</span><span class="use">쓰는 곳</span></div>
+          <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 실험</span><span class="use">항목 2</span></div>
+          <div class="li"><span class="star">☆</span><span class="kind p">프리셋</span><span class="name">공용 규칙</span><span class="use">프리셋 2</span></div>
+          <div class="li err"><span class="star">☆</span><span class="kind p">프리셋</span><span class="name">깨진-초안</span><span class="use">오류 · YAML 3줄</span></div>
+          <div class="li on sel-ol"><span class="star on">★</span><span class="kind p">프리셋</span><span class="name">리뷰어 <span class="n">1</span></span><span class="use">에이전트 3</span></div>
+          <div class="li"><span class="star">☆</span><span class="kind p">프리셋</span><span class="name">야간 점검</span><span class="use">에이전트 1</span></div>
+        </div>
+      </div>
+      <div class="pane side">
+        <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">+ 담기</button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="kind p">프리셋</span><span class="name">공용 규칙</span><span class="n">2</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="kind">지시서</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="kind">스킬</span><span class="name">review</span><span class="x">×</span></div>
+        <div class="row" style="border-style:dashed;color:var(--gone)"><span class="grip">⋮⋮</span><span class="kind">스킬</span><span class="name">nightly — 찾을 수 없음 · <u>다시 잇기</u></span><span class="n">5</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="kind">설정</span><span class="name">codex 기본</span><span class="x">×</span></div>
+        <div class="msg err"><b>충돌</b><span>백엔드 정하는 설정이 둘 — codex 기본 · 공용 규칙 › claude 기본</span><span class="n" style="flex:none">3</span></div>
+        <div class="msg warn"><b>경고</b><span>codex 터미널 + 사용자 폴더 → 실행 때 파일 만들지 물음</span></div>
+        <div class="fold">쓰는 에이전트 3 — 리뷰봇 · PR 감시 · 야간 점검</div>
+        <div class="fold">최종 구성 ▸ <span class="tag unv">미정</span><span class="n">4</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>프리셋을 누르면 오른쪽 = 편집 칸</span>
+    <span><span class="n">2</span>⋮⋮ 끌어 순서 · × 빼기 · 저장 단추 없이 바로 저장</span>
+    <span><span class="n">3</span>빨강 = 충돌(그대로는 못 씀) · 노랑 = 알리기만</span>
+    <span><span class="n">4</span>중첩을 펼친 최종 구성 — 보기 방식 미정</span>
+    <span><span class="n">5</span>가리키던 파일이 없음 → 같은 이름이 있으면 저절로 다시 잇고, 없거나 겹치면 사용자가 고름</span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>따로 된 프리셋 편집 슬롯 — 없앨지 미정 (추천: 없앰)</p>
+</section>
+
+<!-- 4 -->
+<section id="add-main">
+  <div class="sh"><span class="no">4</span><h2>담기</h2><span class="tag ok">확정</span></div>
+  <p class="lead">메인 = “← 선택한 것 담기”(옆 라이브러리 슬롯에서 고름) · 보조 = “+ 담기”(검색).</p>
+  <div class="two-slots">
+    <div class="win" role="img" aria-label="라이브러리 슬롯 A — 프리셋 편집">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 A — 프리셋 “리뷰어” 편집</div>
+      <div class="win-body ab">
+        <div class="pane">
+          <div class="fbar"><span class="callout">프리셋</span></div>
+          <div class="lst cols">
+            <div class="li on"><span class="star">☆</span><span class="kind p">프리셋</span><span class="name">리뷰어 <span class="n">1</span></span></div>
+            <div class="li"><span class="star">☆</span><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
+            <div class="li"><span class="star">☆</span><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
+          </div>
+        </div>
+        <div class="pane side">
+          <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span></div>
+          <div class="row"><span class="grip">⋮⋮</span><span class="kind">지시서</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
+          <div class="row sel-ol"><span class="grip">⋮⋮</span><span class="kind">스킬</span><span class="name">review</span><span class="x">×</span></div>
+          <div class="dropzone" style="padding:4px;font-size:11.5px">↳ 고른 줄 뒤에 들어감 <span class="n">3</span></div>
+          <div class="row"><span class="grip">⋮⋮</span><span class="kind">설정</span><span class="name">codex 기본</span><span class="x">×</span></div>
+          <div class="head" style="margin-top:4px"><button class="btn pri" type="button">← 선택한 것 담기 (2)</button><button class="btn" type="button">+ 담기</button></div>
+        </div>
+      </div>
+    </div>
+    <div class="win" role="img" aria-label="라이브러리 슬롯 B — 담을 것 고르기">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 B — 고르기</div>
+      <div class="win-body" style="grid-template-columns:minmax(0,1fr)">
+        <div class="pane">
+          <div class="fbar"><span class="callout">스킬 › 리뷰</span><span class="sp"></span><span class="callout">2개 선택 <span class="n">2</span></span></div>
+          <div class="lst cols">
+            <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 보안</span></div>
+            <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name">review</span><span class="use">담김</span></div>
+            <div class="li on sel-ol"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-review</span></div>
+            <div class="li on sel-ol"><span class="star on">★</span><span class="kind">스킬</span><span class="name">pr-check</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>프리셋을 누르면 오른쪽이 편집 칸</span>
+    <span><span class="n">2</span>옆 슬롯에서 담을 것 고름 (Ctrl · Shift 여러 개)</span>
+    <span><span class="n">3</span>고른 줄 뒤에 · 안 골랐으면 맨 끝</span>
+    <span><span class="n">4</span>쓰는 선택 = 다른 라이브러리 슬롯 중 마지막으로 만진 것</span>
+  </div>
+
+  <h3>보조 — “+ 담기” 검색</h3>
+  <div class="popwrap">
+    <div class="win" role="img" aria-label="+ 담기 검색 팝오버 예시">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>리뷰어 에 담기</div>
+      <div class="win-body"><div class="pane">
+        <div class="pop">
+          <div class="search focus"><span class="mag">⌕</span><span>review</span><span class="caret"></span><span class="n" style="margin-left:auto">1</span></div>
+          <div class="opt on"><span><span class="cb on">✓</span> <span class="kind">스킬</span> code-review</span><small>스킬/리뷰/ <span class="n">2</span></small></div>
+          <div class="opt"><span><span class="cb"></span> <span class="kind">스킬</span> pr-review</span><small>스킬/</small></div>
+          <div class="opt dis"><span><span class="cb"></span> <span class="kind">스킬</span> review</span><small>담김 <span class="n">3</span></small></div>
+          <div class="opt dis"><span><span class="cb"></span> <span class="kind">스킬</span> 보안/review</span><small>충돌 · 같은 이름 스킬</small></div>
+        </div>
+      </div></div>
+    </div>
+    <div class="caps" style="grid-template-columns:minmax(0,1fr)">
+      <span><span class="n">1</span>열면 검색칸에 커서 · 하위 폴더까지 찾음</span>
+      <span><span class="n">2</span>체크 = 바로 담김 (여러 개)</span>
+      <span><span class="n">3</span>흐림 = 담김 · 못 담는 이유(순환 · 충돌)</span>
+    </div>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>슬롯 B 띄우기 방식 — 추천: 편집 칸의 ‘라이브러리 옆에 열기’가 칸을 나눠 띄움</p>
+  <p class="pend"><span class="tag unv">미정</span>라이브러리 우클릭 ‘프리셋에 추가’(어느 프리셋에 넣을지 고르기) — 남길지 미정</p>
+</section>
+
+<!-- 5 -->
+<section>
+  <div class="sh"><span class="no">5</span><h2>설정 에셋</h2><span class="tag ok">확정</span></div>
+  <p class="lead">설정도 라이브러리 안의 파일 하나(<code>.yaml</code>).</p>
+  <div class="cfg">
+    <div class="win" role="img" aria-label="설정 에셋 YAML 예시">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>설정/기본.yaml</div>
+<div class="cli"><span class="c"># 설정/기본.yaml</span>
+<span class="k">backend</span>: claude     <span class="n">1</span>
+<span class="k">model</span>: opus
+<span class="k">claude</span>:              <span class="n">2</span>
+  settings:            <span class="c"># claude 설정 형식 그대로 (--settings 로 넘김)</span>
+    env:
+      DISABLE_AUTOUPDATER: "1"
+<span class="k">codex</span>:               <span class="n">2</span>
+  config:              <span class="c"># codex -c 형식 그대로</span>
+    - model_reasoning_summary="detailed"</div>
+    </div>
+    <div class="caps">
+      <span><span class="n">1</span>정식 칸 = backend · model 뿐</span>
+      <span><span class="n">2</span>나머지는 백엔드별 원문 그대로 (Engram은 해석 안 함)</span>
+      <span><span class="n">3</span>여러 설정은 담은 순서대로 이어 붙음 · 백엔드 정하는 설정은 하나만</span>
+      <span><span class="tag unv">미측정</span>DISABLE_AUTOUPDATER 가 settings env 로 먹히는지</span>
+    </div>
+  </div>
+</section>
+
+<!-- 6 -->
+<section>
+  <div class="sh"><span class="no">6</span><h2>에이전트에 붙이기</h2><span class="tag unv">미정</span></div>
+  <p class="lead">에이전트는 프리셋만 고른다 — 부품은 프리셋에서 담는다.</p>
+  <div class="win" role="img" aria-label="에이전트 프리셋 붙이기 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 — 리뷰봇</div>
+    <div class="win-body cols-3">
+      <div class="pane">
+        <div class="head"><span class="vend x"></span><span class="t">리뷰봇</span><span class="kind">codex · JSON</span><span class="n">3</span><span class="sp"></span><button class="btn" type="button">실행</button></div>
+        <div class="chips">
+          <span class="chip"><span class="kind p">기본</span>Engram 내장 <span class="n">2</span> <span class="x">×</span></span>
+          <span class="chip"><span class="kind p">프리셋</span>리뷰어 <span class="x">×</span></span>
+          <span class="chip"><span class="kind">폴더</span>D:\work\engram <span class="x">×</span></span>
+          <span class="chip gone">night-rules · 찾을 수 없음 <span class="x">×</span></span>
+          <button class="btn" type="button">+ 프리셋 <span class="n">1</span></button>
+        </div>
+        <div class="msg warn"><b>찾을 수 없음</b><span><code>프리셋/실험/night-rules</code> — 다시 잇거나 빼야 실행</span></div>
+        <div class="fold">최종 구성 ▸</div>
+      </div>
+      <div class="pane side">
+        <div class="pop">
+          <input id="pick-search" type="text" value="리뷰" aria-label="프리셋 검색">
+          <div class="opt on"><span><span class="kind p">프리셋</span> 리뷰어</span><small>프리셋/</small></div>
+          <div class="opt"><span><span class="kind p">프리셋</span> 리뷰어(엄격)</span><small>프리셋/실험/</small></div>
+          <div class="opt"><span><span class="kind p">프리셋</span> 공용 규칙</span><small>프리셋/</small></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>프리셋만 고르는 피커</span>
+    <span><span class="n">2</span>기본 프리셋도 처음부터 붙어 있음 (보이는 자리 미정)</span>
+    <span><span class="n">3</span>색 점 = 붙은 설정의 백엔드</span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>어디서 붙이나 — 추천: 에이전트 설정 창 칩 줄 + 트리 우클릭</p>
+</section>
+
+<!-- 7 -->
+<section>
+  <div class="sh"><span class="no">7</span><h2>실행</h2><span class="tag ok">확정</span><span class="tag unv">일부 미정</span></div>
+  <p class="lead">워크스페이스가 없으면 폴더를 묻고, JSON 모드는 첫 메시지 전에 모델 · 강도를 고른다.</p>
+  <div class="win" role="img" aria-label="실행 시 폴더 선택과 모델 선택 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>실행 — 리뷰봇</div>
+    <div class="win-body cols-3">
+      <div class="pane">
+        <div class="dialog">
+          <div class="dh">어디서 일할까요? <span class="n">1</span></div>
+          <div class="db">
+            <span class="callout">이 에이전트에는 워크스페이스가 없습니다.</span>
+            <div class="path">D:\work\engram-dashboard</div>
+          </div>
+          <div class="df"><button class="btn" type="button">Engram 폴더 자동 생성</button><button class="btn" type="button">찾아보기…</button><span class="tag unv">같은 PC 전용</span><button class="btn pri" type="button">실행</button></div>
+        </div>
+      </div>
+      <div class="pane side">
+        <div class="pop">
+          <input id="model-search" type="text" placeholder="모델 검색" aria-label="모델 검색">
+          <div class="final"><span class="k"><span class="vend c"></span> claude <span class="n">2</span></span></div>
+          <div class="opt on"><span>Default <small>· Opus 5.5</small></span><small>추천</small></div>
+          <div class="opt"><span>Sonnet</span><small></small></div>
+          <div class="opt"><span>Haiku</span><small>강도 없음</small></div>
+          <div class="final"><span class="k"><span class="vend x"></span> codex</span></div>
+          <div class="opt"><span>gpt-6-sol</span><small>기본</small></div>
+          <div class="final"><span class="k">강도</span></div>
+          <div class="effort"><span>low</span><span>medium</span><span class="on">high</span><span>xhigh</span><span>max</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>고른 폴더는 그 에이전트에 저장 · 다음엔 안 물음</span>
+    <span><span class="n">2</span>JSON 모드 목록 = claude <code>initialize</code> · codex <code>model/list</code></span>
+    <span><span class="n">3</span>터미널 모드 = CLI 기본값, 안에서 <code>/model</code></span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>고른 모델 · 강도 저장 위치 — 추천: 그 에이전트에만</p>
+</section>
+
+<!-- 8 -->
+<section>
+  <div class="sh"><span class="no">8</span><h2>LLM 조작 — <code>engram</code> CLI</h2><span class="tag ok">확정 원칙</span></div>
+  <p class="lead">프리셋 · 라이브러리 조작은 전부 데몬 명령 — 화면 버튼과 LLM이 같은 것을 부른다. 명령 이름은 자리표시.</p>
+  <div class="cli"><span class="c"># 라이브러리 · 프리셋</span>
+engram preset list --folder 프리셋/
+engram preset show 프리셋/리뷰어 --final          <span class="c"># 펼친 최종 구성 · 충돌 · 경고</span>
+<span class="c"># 에이전트</span>
+engram agent create --name 리뷰봇 --preset 프리셋/리뷰어
+engram agent preset add 리뷰봇 프리셋/실험/night-rules</div>
+  <p class="pend"><span class="tag">나중</span>원격 데몬(나중)에서는 화면은 붙이기만, 편집은 LLM 명령으로</p>
+</section>
+
+<!-- 9 -->
+<section>
+  <div class="sh"><span class="no">9</span><h2>상태 색</h2></div>
+  <div class="legend">
+    <span><i class="e"></i>충돌 — 그대로는 못 씀</span>
+    <span><i class="w"></i>경고 — 알리기만</span>
+    <span><i class="g"></i>찾을 수 없음 — 다시 잇기</span>
+    <span><i class="r"></i>오류 — 파일을 못 읽음</span>
+    <span><i class="d"></i>흐림 — 담김 · 못 담음</span>
+    <span><i class="s"></i>고른 것</span>
+  </div>
+</section>
+
+<!-- 10 -->
+<section>
+  <div class="sh"><span class="no">10</span><h2>열린 것</h2><span class="tag unv">미정</span></div>
+  <div class="open">
+    <span class="tag unv">따로 된 편집 슬롯 없앨지</span>
+    <span class="tag unv">최종 구성 보기 방식</span>
+    <span class="tag unv">슬롯 B 띄우기</span>
+    <span class="tag unv">라이브러리 우클릭 ‘프리셋에 추가’ 남길지</span>
+    <span class="tag unv">에이전트에 붙이는 곳</span>
+    <span class="tag unv">모델 · 강도 저장 위치</span>
+    <span class="tag unv">+ 새로 만들기 범위 (추천: 폴더 · 프리셋 · 설정)</span>
+    <span class="tag unv">라이브러리 폴더 미지정 시</span>
+    <span class="tag unv">기본 프리셋 떼면 경고</span>
+    <span class="tag unv">돌고 있는 에이전트 프리셋 변경 시 반영</span>
+    <span class="tag unv">다중 데몬 (나중)</span>
+  </div>
+</section>
+
+<!-- 11 -->
+<section>
+  <div class="sh"><span class="no">11</span><h2>근거</h2></div>
+  <p class="ref"><code>docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md</code> · <code>docs/research/agent-preset-components-survey-2026-10-11.md</code> · <code>docs/research/library-multi-root-display-survey-2026-10-14.md</code> · <code>docs/research/favorite-star-vs-collections-survey-2026-10-14.md</code> · <code>docs/research/settings-preset-file-format-survey-2026-10-14.md</code> · <code>docs/research/library-to-bundle-add-patterns-survey-2026-10-14.md</code></p>
+</section>
+
+</div>
