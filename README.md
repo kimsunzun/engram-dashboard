@@ -51,6 +51,8 @@
 
 Node.js 22.12+(테스트가 플래그 없는 `require(ESM)`에 의존합니다) · Rust stable · Windows가 필요합니다.
 
+릴리즈 빌드(`launch\빌드.bat` · `scripts/build-release.ps1`)에는 cargo-about 0.9.2(`cargo install cargo-about --locked --features cli --version 0.9.2`)와 `npm install` 이 더 필요합니다 — [scripts/README.md](scripts/README.md) 참고. Node 는 22.22.2+ 또는 24.15+ 를 권합니다(그보다 낮으면 설치 때 엔진 경고만 납니다).
+
 ```bash
 git clone https://github.com/kimsunzun/engram-dashboard.git
 cd engram-dashboard

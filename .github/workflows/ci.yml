@@ -86,6 +86,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # 서드파티 고지 생성기(scripts/gen-third-party-licenses.mjs)가 부르는 cargo-about — gates · release-build 두 잡이 같은
+  # 핀으로 깐다(값을 두 번 적지 않으려고 여기 둔다). SHA-256 = GitHub 릴리스의 x86_64-pc-windows-msvc.tar.gz 에셋 값이고
+  # 같은 릴리스의 .sha256 파일과 같다(2026-10-15 확인). 버전을 올리면 생성기의 CARGO_ABOUT_VERSION 도 함께 — 어긋나면
+  # 생성기가 버전 단언에서 실패한다. `CARGO_` 로 시작하는 이름을 피한 것은 cargo 설정 환경변수 이름공간이라서다.
+  PIN_CARGO_ABOUT_VERSION: '0.9.2'
+  PIN_CARGO_ABOUT_SHA256: '1c03e5890238562497c2d89a3b75b02560af349c1fc3e713d3284f532a5cd748'
 
 jobs:
   # ── 백엔드 회귀 ──────────────────────────────────────────────────────────────
@@ -1281,6 +1287,48 @@ jobs:
           async_ingress zero -p engram-dashboard-net
           async_ingress some -p engram-dashboard-net --features server
 
+      # ── 서드파티 고지 — release-build 가 부르는 것과 같은 생성기를 push 마다 돌리고 결과는 버린다 ──
+      # 허용 밖 라이선스 · 본문 없는 패키지 · 목록에 없는 synthesized crate 같은 실패가 태그를 찍은 뒤 release-build 에서
+      # 처음 터지지 않게 여기서 먼저 잡는다(실패 조건의 정본 = scripts/gen-third-party-licenses.mjs 헤더와 본문).
+      # 이 잡에 두는 이유: 툴체인 단언 · 레지스트리 캐시가 이미 있고, 위 cargo tree 게이트들이 crate 소스를 받아 둔 뒤라
+      #   cargo-about 이 다시 받을 것이 없다. 새 잡을 세우지 않으므로 release-build 의 needs 도 그대로다(이 잡이 이미 든다).
+      #   생성기가 npm 운영 의존도 읽어 node_modules 가 필요하다 — setup-node + npm ci 를 이 잡에도 둔다.
+      # 설치 스텝은 release-build 의 같은 이름 스텝과 같은 몸이다 — 하나를 고치면 둘 다 고친다(핀 값은 최상위 env).
+      - name: Install cargo-about (pinned, checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:PIN_CARGO_ABOUT_VERSION
+          $sha = $env:PIN_CARGO_ABOUT_SHA256
+          $url = "https://github.com/EmbarkStudios/cargo-about/releases/download/$ver/cargo-about-$ver-x86_64-pc-windows-msvc.tar.gz"
+          $archive = "$env:RUNNER_TEMP\cargo-about.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
+          if ($actual -ne $sha) { throw "cargo-about archive checksum mismatch: expected $sha, got $actual" }
+          $dest = "$env:RUNNER_TEMP\cargo-about"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # Windows 내장 bsdtar 를 경로로 집는다 — PATH 의 GNU tar(Git)가 잡히면 `D:\…` 를 원격 호스트로 읽고 실패한다.
+          & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $dest
+          if ($LASTEXITCODE -ne 0) { throw "tar exited $LASTEXITCODE" }
+          $exe = Get-ChildItem $dest -Recurse -Filter cargo-about.exe | Select-Object -First 1
+          if (-not $exe) { throw "cargo-about.exe not found in the extracted archive" }
+          # GITHUB_PATH 는 기존 PATH 앞에 붙으므로 러너에 다른 cargo-about 이 있어도 이쪽이 이긴다. 버전 단언은 생성기가 한다.
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: npm ci
+        shell: bash
+        run: npm ci
+
+      # ADR-0294
+      - name: 'Gate: third-party license notice generates (output discarded)'
+        shell: bash
+        run: node scripts/gen-third-party-licenses.mjs "$RUNNER_TEMP/THIRD_PARTY_LICENSES.txt"
+
   # ── 프론트 ───────────────────────────────────────────────────────────────────
   frontend:
     name: frontend (vitest + tsc)
@@ -1491,6 +1539,30 @@ jobs:
           fi
           echo "PASS — toolchain $actual matches rust-toolchain.toml"
 
+      # build-release.ps1 의 (0) 단계(서드파티 고지 생성)가 부른다. 받아서 펴기만 하고 여기서는 실행하지 않는다.
+      # gates 잡의 같은 이름 스텝과 같은 몸이다 — 하나를 고치면 둘 다 고친다(핀 값은 최상위 env).
+      # ADR-0294
+      - name: Install cargo-about (pinned, checksum-verified)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:PIN_CARGO_ABOUT_VERSION
+          $sha = $env:PIN_CARGO_ABOUT_SHA256
+          $url = "https://github.com/EmbarkStudios/cargo-about/releases/download/$ver/cargo-about-$ver-x86_64-pc-windows-msvc.tar.gz"
+          $archive = "$env:RUNNER_TEMP\cargo-about.tar.gz"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash.ToLower()
+          if ($actual -ne $sha) { throw "cargo-about archive checksum mismatch: expected $sha, got $actual" }
+          $dest = "$env:RUNNER_TEMP\cargo-about"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # Windows 내장 bsdtar 를 경로로 집는다 — PATH 의 GNU tar(Git)가 잡히면 `D:\…` 를 원격 호스트로 읽고 실패한다.
+          & "$env:SystemRoot\System32\tar.exe" -xzf $archive -C $dest
+          if ($LASTEXITCODE -ne 0) { throw "tar exited $LASTEXITCODE" }
+          $exe = Get-ChildItem $dest -Recurse -Filter cargo-about.exe | Select-Object -First 1
+          if (-not $exe) { throw "cargo-about.exe not found in the extracted archive" }
+          # GITHUB_PATH 는 기존 PATH 앞에 붙으므로 러너에 다른 cargo-about 이 있어도 이쪽이 이긴다. 버전 단언은 생성기가 한다.
+          $exe.DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
       # ★rust-cache 를 일부러 쓰지 않는다★ — 컴파일 산출물(target/)은 아무것도 복원하지 않고 매번
       # cold 로 굽는다. 캐시는 검증 잡처럼 자주 도는 레인에서 값이 나오는 것이고, 태그당 한 번 도는
       # 이 잡에서는 절약분보다 "복원된 오브젝트가 배포 바이너리에 섞였는가"를 사람이 배제할 수 없게
@@ -1502,7 +1574,8 @@ jobs:
 
       # build-release.ps1 은 `npm run tauri -- build --no-bundle` 을 부르고, 그 tauri build 가
       # tauri.conf.json 의 beforeBuildCommand(`npm run build`)로 프론트를 굽는다 → node_modules 가
-      # 반드시 있어야 한다(@tauri-apps/cli · vite · tsc 전부 여기서 온다).
+      # 반드시 있어야 한다(@tauri-apps/cli · vite · tsc 전부 여기서 온다). 그보다 앞선 단계 (0)의 고지 생성기도
+      # node_modules 의 generate-license-file 을 부르고 운영 의존 목록을 읽는다.
       # ※여기부터가 서드파티 코드가 도는 구간이다 — 위 게이트·커밋 기록은 전부 이 앞에서 끝났다.
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
