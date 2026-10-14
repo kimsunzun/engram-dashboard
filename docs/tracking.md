@@ -2,6 +2,8 @@
 
 코드 구현 중 발견된, 나중에 반드시 다시 다뤄야 할 열린 항목. 셋으로 나눈다(사용자 결정 2026-10-01) — **메인**(큰 기능·방향·보안) · **버그**(겪은 결함 먼저, 이론상 경로는 뒤) · **사소한 기능·정리**(작은 기능·테스트·CI·인프라·문서 위생). 메인과 사소한 기능·정리 절 안은 번호 내림차순.
 
+**트리거 대기 = 어떤 사건(예: 스킬 · CLAUDE.md 개편)이 오면 꺼낼 항목** — 상태 칸에 「트리거 대기 — <사건>」으로 적고, 꺼낼 땐 `rg -n "트리거 대기" docs/tracking.md` 한 번으로 전부 본다(사용자 2026-10-14 — 사용자가 「트래킹에서 트리거 대기 꺼내」라고 하면 이것을 돌린다).
+
 해결되면 여기서 뺀다 — 다른 문서·코드가 그 번호를 가리키면 [`tracking-archive.md`](tracking-archive.md) 에 한 줄로 옮기고, 아니면 지운다(해결 기록은 ADR·step-log·커밋이 진다).
 
 간소화 전 전문(조사 기록·되돌린 시도·실측 상세) = `git show 8671e5c:docs/tracking.md`
@@ -36,6 +38,8 @@
 | T-32 | 명부 방송 직렬화 없음 | 버그 | 미착수 · T-16 선결 |
 | T-33 | `agents.json` 새 kind 하위호환 | 버그 | 트리거 충족 추정 · 사용자 판단 대기 |
 | T-19 | 우편 CLI 빈 응답 = 성공 | 버그 | 보류 |
+| T-62 | 오픈소스 라이선스 고지 파일 — 배포판에 넣기 | 사소한 기능·정리 | 할 일 — 조사 · 결정 끝 · 생성 · 커밋 남음 |
+| T-61 | 서드파티 라이브러리 감싸기 기준 — CLAUDE.md 반영 · 기존 코드 점검 | 사소한 기능·정리 | 트리거 대기 — CLAUDE.md 개편 · 리팩토링 때 |
 | T-51 | 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) | 사소한 기능·정리 | 보류 — 필요해질 때 |
 | T-43 | claude 도구 결과 중립 사건화 | 사소한 기능·정리 | 보류 |
 | T-37 | `todo` 폐기·합치기 | 사소한 기능·정리 | 트리거 대기 |
@@ -227,6 +231,24 @@
 - **근거:** ADR-0132 슬라이스 ① 리뷰(2026-08-11)
 
 ## 사소한 기능·정리
+
+### T-62. 오픈소스 라이선스 고지 파일 — 배포판에 넣기
+- **상태:** 할 일(사용자 2026-10-15) — 프리셋 일과 별개 · 프로젝트 전체.
+- **사실:** 지금 저장소에 제3자 라이선스 고지 파일도, 빌드 때 라이선스를 모으는 단계도 없다(파일 목록 · 워크플로 검색 2026-10-15). 프리셋 라이브러리 슬롯에 들일 부품(TanStack Table · Virtual · Query · react-selecto · @dnd-kit)과 기존 react-arborist 는 전부 MIT(`npm view` 2026-10-15). MIT 조건 = "The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software."
+- **할 것:** ① 같은 부류(Tauri · Rust + React 데스크톱 앱 — 예: Spacedrive · 받아 둔 클론들)가 고지 파일을 어떻게 만드나 조사(`/research`) — 자동 수집 도구(Rust 쪽 · JS 쪽) · 파일 자리 · 화면 노출 여부 ② 의존성 전체 라이선스 목록 뽑기 — MIT 말고(Apache-2.0 NOTICE 등) 조건이 다른 것이 섞였는지 ③ 피어 방식에 맞춰 릴리즈 빌드에 넣기.
+- **메모:** 개인 프로젝트라 사내 법무 경유 대상 아님(사용자).
+- **조사:** `docs/research/third-party-license-notice-survey-2026-10-15.md`
+- **결정(사용자 2026-10-15):** 지금은 **손으로** — 도구(Rust = cargo-about · npm = generate-license-file)로 한 번 뽑아 `THIRD_PARTY_LICENSES.txt` 를 커밋하고 `scripts/build-release.ps1` manifest 에 더해 zip 에 싣는다. 갱신도 손으로 — 「얘기 나올 때마다」. 릴리즈 빌드 자동 생성 · CI 최신 검사는 나중에 다시 생각한다(사용자 「지금은 손으로 하고 나중에 생각하자」).
+- **범위 결정(사용자 2026-10-15):** **의존성 전체 목록**을 싣는다(Windows Terminal · PowerToys `NOTICE.md` · Zed · VS Code 쪽) — 「외부에서 쓰는 것 표시도 해 놓을 겸」. 버린 안 = 에이전트 도구 쪽 최소 표시(Codex CLI `NOTICE` = 가져와 고친 Ratatui 코드만 · herdr = 같이 싣는 ConPTY 바이너리만 · t3code = 들여온 libghostty 만 · Goose = `deny.toml` 검사만 · orca · paseo · vibe-kanban · cline · zellij = 없음 — 2026-10-15 클론 · GitHub 직접 확인).
+- **다음 할 일:** cargo-about 설치(`cargo install cargo-about`) → `about.toml`(개발 · 빌드 의존 제외 · 허용 목록) + 템플릿 → Rust 몫 생성 · `npx generate-license-file` 로 npm 운영 의존 몫 생성 → 한 파일 `THIRD_PARTY_LICENSES.txt` 로 합쳐 커밋 → `scripts/build-release.ps1` manifest · 복사에 추가 → NOTICE 파일 가진 의존 따로 확인 → QA. 규모 참고: `Cargo.lock` 패키지 572 · npm 운영 의존 약 250(2026-10-15).
+- **작업 메모(세션 2026-10-15 — 착수 직전 멈춤 · 아무 파일도 안 바뀜 · cargo-about 미설치):** `about.toml` 에 `targets = ["x86_64-pc-windows-msvc"]`(Windows 만 배송) · 우리 워크스페이스 crate 제외(비공개 crate 무시 옵션 — 출력에 `engram-dashboard*` 가 없어야) · GPL/LGPL/AGPL 이 나오면 허용하지 말고 멈춰 보고 · 템플릿은 라이선스별로 묶기(라이선스 전문 한 번 + 쓰는 crate 목록) · HTML 엔티티(`&quot;` 등) 확인(Zed 가 후처리한다) · `build-release.ps1` 은 manifest 정확 일치 tripwire(ADR-0100)라 manifest · 복사 · 검증 세 곳에 더한다 · 검증 = `pwsh scripts/build-release.ps1 -OutDir <임시폴더>`(전체 릴리즈 빌드 — 10분 이상).
+
+### T-61. 서드파티 라이브러리 감싸기 기준 — CLAUDE.md 에 올리고 기존 코드를 그 기준으로 점검
+- **상태:** 트리거 대기 — 바깥(스킬 쪽)에서 진행 중인 리팩토링 뒤 CLAUDE.md 를 고칠 때 · 다음 리팩토링 라운드 때(사용자 2026-10-14 「나중에 리팩토링할 때 언급」). 그때까지 새 설계는 이 기준을 따른다.
+- **기준(세션 정리 · 사용자 동의 2026-10-14):** 셋 중 **하나라도 「예」면 목적 인터페이스 뒤에, 셋 다 「아니오」면 그냥 쓴다** — ① 바깥(디스크 · 네트워크 · 프로세스 · OS · 외부 서비스)과 닿나 ② 바뀔 가능성이 큰가(RC · 관리자 적음 · 선택에 자신 없음) ③ 그 타입이 여러 곳 · 여러 crate 로 퍼지나. 감싸는 단위는 **라이브러리가 아니라 목적**(Cockburn 포트) — 1:1 얇은 래퍼는 세부가 새어 비용만 든다. 언어 표준 · 기반(serde · tokio · React · Zustand) · 한 곳에서만 쓰는 순수 도우미는 감싸지 않는다(사용자 「stl 랩핑은 쓸데없는 짓」).
+- **첫 적용:** 프리셋 라이브러리 — walkdir · serde-saphyr · `std::fs` 는 데몬 「라이브러리 저장소」(목록 · 읽기 · 쓰기) 하나로 묶고, 화면 부품 라이브러리(react-arborist · TanStack Table · react-selecto)는 따로 감싸지 않고 라이브러리 트리 · 목록 부품 안에서 쓴다(`.claude/handoff/attachments/20261012-preset-decisions.md` 2026-10-14 절).
+- **할 것:** ① CLAUDE.md 「아키텍처 원칙」에 이 기준을 짧게(또는 ADR 로 박고 그 번호를 가리키게 — 거부한 대안 = 「모든 라이브러리 감싸기」 · 「전혀 안 감싸기」) ② 기존 코드 점검 — 예: react-arborist 는 지금 `src/components/agent/AgentList.tsx` 한 곳뿐이라 ③ 이 「아니오」 → 지금은 그대로, 라이브러리 트리가 두 번째로 쓰는 순간 공용 부품으로.
+- **근거:** `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`
 
 ### T-51. 슬롯 보기 모드 덮어쓰기 영속(옛 P3e) — 지금은 프론트 메모리뿐이다
 - **상태:** 보류 — 사용자가 S21-storage 에서 뺐다(사용자 결정 2026-10-07 — 「json · 터미널에서 값을 주고 있는데 아직은 필요없어 보임」). 트리거 = 손으로 바꾼 보기 모드가 재시작 뒤에도 남아야 할 필요가 실제로 생길 때.
