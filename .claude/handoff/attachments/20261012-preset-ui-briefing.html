@@ -227,12 +227,21 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 .dash-tree .tr .stg{color:var(--ok);font-size:10px}
 .dash-tree .pop.ctx{margin:2px 0 4px 20px;max-width:170px}
 .dash-tree .detov{top:40px;left:calc(10px + (100% - 30px) * 1 / 2.6);width:min(300px,55%)}
+/* agent slot: library slot with only the edit pane on; built-in default preset in its own tinted section */
+.dash.dash-agent{grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);align-items:start}
+.dash-agent .tree-body{padding:8px;display:flex;flex-direction:column;gap:2px;font-size:12.5px}
+.dash-agent .tr .stg{color:var(--ok);font-size:10px}
+.dash-agent .pop.ctx{margin:2px 0 4px 20px;max-width:170px}
+.defsec{border:1px solid var(--app-line);border-left:3px solid var(--accent);background:var(--accent-soft);border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.defsec .callout{overflow-wrap:anywhere}
+.agdlg{margin-top:12px}
+.agdlg .db label{display:flex;align-items:center;gap:6px;font-size:12.5px}
 @media (max-width:860px){.cols-lib{grid-template-columns:minmax(0,1fr)}.cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}}
 @media (max-width:720px){
   .cols-3,.ab,.two-slots,.popwrap,.cfg,.dash,.dash .cols-lib{grid-template-columns:minmax(0,1fr)}
   .dash .cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
   .detov{position:static;width:auto;border-radius:8px}
-  .dash.dash-tree{grid-template-columns:minmax(0,1fr)}
+  .dash.dash-tree,.dash.dash-agent{grid-template-columns:minmax(0,1fr)}
   .dash-tree .term-body{min-height:160px}
   .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
   h1{font-size:25px}
@@ -863,7 +872,53 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 
 <!-- 9 -->
 <section>
-  <div class="sh"><span class="no">9</span><h2>에이전트에 붙이기</h2><span class="tag unv">미정</span></div>
+  <div class="sh"><span class="no">9</span><h2>에이전트에 붙이기</h2><span class="tag ok">확정</span></div>
+  <div class="sh"><h3>에이전트 슬롯 = 편집 칸만 켠 라이브러리</h3><span class="tag ok">확정</span></div>
+  <div class="dash dash-agent" role="img" aria-label="에이전트 트리에서 리뷰봇을 우클릭해 프리셋을 고르면 편집 칸만 켠 에이전트 슬롯이 열리는 예시">
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 트리</div>
+      <div class="tree-body">
+        <div class="tr on"><span class="vend x"></span><span class="stg">●</span>리뷰봇</div>
+        <div class="pop ctx">
+          <div class="opt"><span>열기</span></div>
+          <div class="opt"><span>이름 바꾸기</span></div>
+          <div class="opt on"><span>프리셋…</span><span class="n">1</span></div>
+          <div class="opt"><span>종료</span></div>
+          <div class="opt"><span>지우기</span></div>
+        </div>
+        <div class="tr"><span class="vend c"></span><span class="stg">●</span>야간 점검</div>
+        <div class="tr"><span class="vend x"></span><span class="stg">●</span>PR 감시</div>
+      </div>
+    </div>
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>리뷰봇 — 프리셋</div>
+      <div class="pane">
+        <div class="head"><span class="vend x"></span><span class="t" style="font-size:14px">리뷰봇</span><span class="kind">codex · JSON</span></div>
+        <div class="defsec">
+          <div class="grp ksec">기본<span class="n">2</span></div>
+          <div class="row"><span class="name">기본</span><span class="kind">내장</span><span class="x">×</span></div>
+          <span class="callout">Engram 사용 안내 · claude 자동 업데이트 끄기</span>
+        </div>
+        <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="tw">▸</span><span class="name">리뷰어</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="tw">▸</span><span class="name">야간 규칙</span><span class="x">×</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="dialog agdlg" role="img" aria-label="기본 프리셋을 뗄 때의 확인 창 예시">
+    <div class="dh">기본 프리셋 떼기</div>
+    <div class="db">
+      <span>기본 프리셋을 떼면 Engram 사용 안내와 claude 자동 업데이트 끄기가 빠집니다.</span>
+      <label><span class="cb"></span>다시 묻지 않기<span class="n">3</span></label>
+    </div>
+    <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">떼기</button></div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>에이전트 트리 우클릭 → 프리셋… = 그 에이전트 슬롯이 열림(편집 칸만 켠 라이브러리) · 다시 누르면 하나 더 · 팝아웃해서 OS 창으로 띄우고 도킹 가능</span>
+    <span><span class="n">2</span>기본 칸 = 내장 기본 프리셋만 · 따로 구분 · 무엇을 하는지 한 줄</span>
+    <span><span class="n">3</span>기본 프리셋을 떼면 확인 · 다시 묻지 않기</span>
+  </div>
+  <p class="pend"><span class="tag ok">확정</span>모델 · 강도는 설정 에셋 값으로 고정(공유) · 에이전트별 기억 없음 · 돌고 있는 에이전트에 바꾼 프리셋은 다음 실행부터(안내 없음)</p>
   <p class="lead">에이전트는 프리셋만 고른다 — 부품은 프리셋에서 담는다.</p>
   <div class="win" role="img" aria-label="에이전트 프리셋 붙이기 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 — 리뷰봇</div>
@@ -896,8 +951,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">2</span>기본 프리셋도 처음부터 붙어 있음 (보이는 자리 미정)</span>
     <span><span class="n">3</span>색 점 = 붙은 설정의 백엔드</span>
   </div>
-  <p class="pend"><span class="tag unv">미정</span>어디서 붙이나 — 추천: 에이전트 설정 창 칩 줄 + 트리 우클릭</p>
-  <div class="sh"><h3>초안 — 트리 우클릭 → 옆으로 펼친 프리셋 칸</h3><span class="tag unv">초안 · 미정</span></div>
+  <div class="sh"><h3>초안 — 트리 우클릭 → 옆으로 펼친 프리셋 칸</h3><span class="tag">버린 안</span><span class="tag unv">초안 · 미정</span></div>
   <div class="dash dash-tree" role="img" aria-label="에이전트 트리에서 리뷰봇을 우클릭해 프리셋을 고르면 트리 슬롯 오른쪽 가장자리에 프리셋 칸이 붙어 옆 터미널 슬롯 위로 펼쳐지는 예시">
     <div class="win">
       <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 트리</div>
@@ -927,7 +981,6 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
           <div class="row"><span class="name">codex 기본</span></div>
         </div>
         <div class="row" style="border-style:dashed;color:var(--gone)"><span class="grip">⋮⋮</span><span class="name">night-rules — 찾을 수 없음 · <u>다시 잇기</u></span><span class="n">4</span><span class="x">×</span></div>
-        <div class="msg warn"><span>바뀐 프리셋은 다음 실행부터 적용됩니다</span><span class="n" style="flex:none">5</span></div>
       </div>
     </div>
     <div class="win">
@@ -945,9 +998,8 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">2</span>안의 편집 칸은 프리셋 편집 칸과 같은 부품 — 에이전트는 프리셋 칸만 있고 + · ⇐ · 폴더 돋보기로 담음</span>
     <span><span class="n">3</span>붙은 프리셋은 그 자리에서 펼쳐 보기만 · 고치려면 폴더 돋보기로 그 프리셋에 감</span>
     <span><span class="n">4</span>가리키던 프리셋이 없으면 찾을 수 없음 표시</span>
-    <span><span class="n">5</span>돌고 있는 에이전트에 바꾼 것은 다음 실행부터(제안 — 미정)</span>
   </div>
-  <div class="sh"><h3>대안 — 라이브러리 슬롯 오른쪽 칸에서 에이전트 편집</h3><span class="tag unv">대안 · 미정</span></div>
+  <div class="sh"><h3>대안 — 라이브러리 슬롯 오른쪽 칸에서 에이전트 편집</h3><span class="tag">버린 안</span><span class="tag unv">대안 · 미정</span></div>
   <div class="dash dash-tree" role="img" aria-label="에이전트 트리에서 리뷰봇을 우클릭해 프리셋을 고르면 옆 라이브러리 슬롯 오른쪽 칸에 그 에이전트가 떠서 같은 슬롯 목록의 프리셋을 담는 예시">
     <div class="win">
       <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 트리</div>
@@ -1005,9 +1057,6 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">4</span>⇐ 로 담음 — 라이브러리와 편집이 한 슬롯 안이라 왔다 갔다 없음 (+ 검색 · 폴더 돋보기도 그대로)</span>
   </div>
   <p class="pend"><span class="tag unv">미정</span>목록에서 고른 것을 ⇐ 로 담을 때 같은 슬롯의 목록을 쓰는지(지금 규칙 = 다른 라이브러리 슬롯) — 에이전트 편집일 땐 같은 슬롯 목록을 써야 함</p>
-  <p class="pend"><span class="tag unv">미정</span>기본 프리셋을 떼면 경고할지</p>
-  <p class="pend"><span class="tag unv">미정</span>고른 모델 · 강도 저장 위치</p>
-  <p class="pend"><span class="tag unv">미정</span>돌고 있는 에이전트에 바꾼 것을 언제 반영할지</p>
 </section>
 
 <!-- 10 -->
@@ -1047,7 +1096,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">2</span>JSON 모드 목록 = claude <code>initialize</code> · codex <code>model/list</code></span>
     <span><span class="n">3</span>터미널 모드 = CLI 기본값, 안에서 <code>/model</code></span>
   </div>
-  <p class="pend"><span class="tag unv">미정</span>고른 모델 · 강도 저장 위치 — 추천: 그 에이전트에만</p>
+  <p class="pend"><span class="tag ok">확정</span>모델 · 강도 = 설정 에셋 값으로 고정(공유) · 에이전트별 기억 없음 · 바꿔 쓰려면 프리셋에 모델을 넣지 않음</p>
 </section>
 
 <!-- 11 -->
@@ -1085,11 +1134,7 @@ engram agent preset add 리뷰봇 프리셋/실험/night-rules</div>
   <div class="sh"><span class="no">13</span><h2>열린 것</h2><span class="tag unv">미정</span></div>
   <div class="open">
     <span class="tag unv">실제로 받는 전체 보기 (필요한지)</span>
-    <span class="tag unv">에이전트에 붙이는 곳</span>
-    <span class="tag unv">모델 · 강도 저장 위치</span>
     <span class="tag unv">배포판 기본 내용이 고친 파일을 덮을 때</span>
-    <span class="tag unv">기본 프리셋 떼면 경고</span>
-    <span class="tag unv">돌고 있는 에이전트 프리셋 변경 시 반영</span>
     <span class="tag unv">다중 데몬 (나중)</span>
   </div>
 </section>
