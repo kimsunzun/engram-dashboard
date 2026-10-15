@@ -2,7 +2,7 @@
 
 | 항목 | 값 |
 |---|---|
-| **상태** | 4판 — 3판 `/review trd full` 의 작은 FIX 여섯 반영(3판 = 2판 FIX 반영) · 재리뷰 전 · 사용자 확인 대상 5건(§11-1) · 스파이크 5건(§8 — S2 는 진행 중이고 결과는 메인이 접어 넣는다) |
+| **상태** | 4.1판 — 정합(구조 브리핑을 쓰며 찾은 어긋남 여섯 · 4판 = 3판 `/review trd full` 의 작은 FIX 여섯 반영) · 사용자 확인 대상 5건(§11-1) · 스파이크 5건(§8 — S2 는 진행 중이고 결과는 메인이 접어 넣는다) |
 | **날짜** | 2026-10-15 |
 | **스텝** | S21 |
 | **브랜치** | `v0.4.1/feat/slot-docking` |
@@ -13,7 +13,7 @@
 ## 0. 결론 요약
 
 - **세 층으로 가른다.** ① 레이아웃 연산(셸 `layout` — OS 무관 · 단독 시험) ② 끌기 세션(셸 신설 `dock` — 상태 기계는 순수, Tauri 는 구동 껍데기에만) ③ OS 층(`platform` — 목적 단위 함수: 「이 점의 맨 위 창이 후보 중 어느 것인가」 · 「포인터가 지금 어디이고 주 버튼이 눌려 있나(믿을 수 있을 때만)」).
-- **탭을 끌면 그 자리에서 떼어진다 — 단 모델은 놓을 때 한 번만 바뀐다.** 끄는 동안 출처 창은 그 탭을 그리지만 않고(탭이 하나뿐인 팝아웃은 창째 안 보이게), 작은 딱지 창이 커서를 따라간다. 모델 · 저장은 끌기 전 그대로다(PRD R2 · R11a).
+- **탭을 끌면 그 자리에서 떼어진다 — 단 끌린 탭의 배치는 놓을 때 한 번만 바뀐다.** 끄는 동안 출처 창은 그 탭을 그리지만 않고(탭이 하나뿐인 팝아웃은 창째 안 보이게), 작은 딱지 창이 커서를 따라간다. 끌린 탭의 배치(어느 창 · 어느 자리 · 그 안 슬롯)는 놓을 때까지 모델 · 저장 모두 끌기 전 그대로다(PRD R2 · R11a). ★끄는 동안 모델이 바뀌는 유일한 경우 = R6b 탭 전환★ — 탭 머리 위에 머물면 그 창의 활성 탭이 모델에서 바뀌고(사람 탭 클릭과 같은 쓰기 · `version` +1) 저장에도 실린다. 끌기가 무변경으로 끝나도 되돌리지 않는다(§11-1 #5).
 - **끌기는 웹뷰에서 시작하고 셸이 몬다.** 탭을 4px 넘게 끌면 웹뷰가 시작을 알리고, 그 뒤로는 셸의 끌기 스레드가 마감 기반 틱으로 전경 · 포인터를 읽어 판정 · 딱지 이동 · 가이드 지시 · 놓기를 한다. 웹뷰는 시작 · 떼기 힌트를 알리고 가이드를 그릴 뿐이다(R18). 네이티브 이동 루프 · 창 서브클래스는 쓰지 않는다.
 - **놓으면 셋 중 하나 — 이음새 · 탭바는 「보인 것과 같을 때만」.** 이음새(R7) · 탭바(R21) · 그 밖(R22 새 창). 떼는 순간 그 점을 새 스냅숏으로 한 번 판정한다. 결과가 「가이드 없음」(슬롯 가운데 · 우리 창 밖 · 다른 앱 위)이면 무엇을 보냈든 **R22 새 창**이다(PRD R22 그대로). 결과가 이음새 · 탭바면 **마지막으로 보낸 가이드와 같을 때만** 적용하고, 다르면 무변경(`TargetChanged`)이다. 사용자가 못 본 가이드에 놓이는 일이 없다(§1-3 「놓기 판정」).
 - **붙이기는 명령 하나, 적용 함수 하나.** 버스 `tab.dock`(모드 셋 — 이음새 · 탭바 · 새 창)과 마우스 놓기가 같은 `apply::dock_tab` 에 떨어진다(R16 · ADR-0081 결정 3). 마우스와 명령의 차이는 호출자 중립 사전조건(`DockGuard`)과 포커스 정책(`FocusPolicy`) 두 값뿐이다.
@@ -54,7 +54,7 @@ platform ─ window::{NativeWindow, native_window, topmost_at, Foreground, foreg
 | 창 포트 `WindowHost::{open_at, move_window}` — ★기본 본문 없음★ | `src/layout/apply.rs`(trait) · `src/commands/popout.rs` `TauriWindowHost`(:70) · **`src/commands/layout.rs` `OwnedWindowHost`(:172-193 — 버스 경로의 포트 · 둘을 그대로 넘긴다)** · 시험 가짜 넷(`tests/layout_apply.rs:162` · `tests/layout_commands.rs:106` · `daemon_client/tests.rs:5350` · `:5749`) | §1-2 「적용 서비스」 |
 | `placement::place` · `land` 공개(`pub(crate)`) | `src/state/placement.rs` | 새 창 자리 · 버스 x/y 검증 |
 | invoke 껍데기 `dock_tab` · `dock_drag_begin` · `dock_drag_end` · `report_dock_chrome` | `src/commands/dock.rs`(신설) | `lib.rs` `generate_handler!` 등록 · 창을 만들 수 있는 둘(`dock_tab` · `dock_drag_begin`)은 `async fn`(창 빌드 교착 — `popout.rs:183-185` 선례) |
-| 판정 `dock::hit` · 세션 `dock::session` · 구동 `dock::driver` · 딱지 창 `dock::chip` · 페이로드 타입(ts-rs) `dock::types` | `src/dock/`(신설) | 앞 둘은 순수. 타입은 `src-tauri/bindings/` 로 굽는다(CI 생성물 sync 게이트) |
+| 판정 `dock::hit` · 세션 `dock::session` · 구동 `dock::driver` · 딱지 창 `dock::chip` · 페이로드 타입(ts-rs) `dock::types` | `src/dock/`(신설) | 앞 둘은 순수 · platform 무의존 — 세션은 자기 입력 enum(`ForegroundSeen` · `PointerSeen` · `TopSeen`)을 두고 driver 가 platform 값을 거기로 옮긴다(§1-3). 타입은 `src-tauri/bindings/` 로 굽는다(CI 생성물 sync 게이트) |
 | 창 사건 연결 | `src/lib.rs` `on_window_event`(:299–:338) | `CloseRequested`(팝아웃 → 모델 먼저 · §1-2) · `Destroyed` · `Focused` · `Moved` · `Resized` · `ScaleFactorChanged` → driver 채널. 딱지 창의 `Moved` · `Resized` 는 `placement::record` 앞에서 거른다 |
 | 끄는 동안 출처 창 자리 기록 멈춤 | `src/state/placement.rs` `record`(:804) | 같은 함수의 `DeferredMaximize` 거름(:807–:815)과 같은 꼴 |
 | OS 함수 | platform `src/window.rs` · `src/input.rs`(신설) · (조건부) `src/timer.rs` | §1-4 |
@@ -115,6 +115,7 @@ pub enum DockError {
     MainLastTab, SelfTarget, ZeroArea, Dragging,          // ← R16 의 실패 사유
     WindowClosed(String),                                 // ← NewWindow phase C 의 label 에 묘비(그 새 창이 닫힘) — NewWindow 만
     StaleLease, SourceChanged, TargetChanged,             // ← 사전조건을 단 요청만 — 명령 경로에서는 안 난다
+    WindowExists(String),                                 // ← NewWindow label 이 이미 모델에 있음 — 닿지 않는 방어(INTERNAL)
     WindowOpen(String),                                   // ← 적용 서비스(새 창 열기 실패)
 }
 pub fn dock(&mut self, view: ViewId, to: DockTo, guard: &DockGuard, focus: FocusPolicy) -> Result<Docked, DockError>;
@@ -128,7 +129,7 @@ pub(crate) fn mark_closed(&mut self, label: &str);                        // 묘
 **판정 순서가 계약이다**(앞에서 걸리면 뒤는 안 본다 · 걸리면 무변경 — `manager.rs:9` 의 「no-op + Err」):
 
 1. 출처 View 가 있나 → `TabNotFound`.
-2. 목적지 — Seam 의 대상 View 없음 = `TabNotFound` · TabBar 의 창 없음 = `WindowNotFound` · NewWindow 의 label 에 묘비가 있음 = `WindowClosed` · 그 label 이 이미 모델에 있음 = `WindowNotFound`(발급기가 단조라 실제로는 안 난다 — `attach_view_as_new_window` 와 같은 방어).
+2. 목적지 — Seam 의 대상 View 없음 = `TabNotFound` · TabBar 의 창 없음 = `WindowNotFound` · NewWindow 의 label 에 묘비가 있음 = `WindowClosed` · 그 label 이 이미 모델에 있음 = `WindowExists`(발급기가 단조라 닿지 않는 방어 — 닿으면 셸 결함이다. 옛 `attach_view_as_new_window` 는 같은 자리에서 `WindowNotFound` 를 내지만, 「창이 있다」를 「창 없음」으로 말하지 않으려고 새 이름을 쓴다).
 3. Seam 의 대상 = 출처 → `SelfTarget`. (TabBar 의 대상 창 = 출처 창은 자리 옮기기로 허용한다 — R21 「원래 창 탭바에 놓으면 그 창의 탭으로」.)
 4. Seam 의 기준 슬롯이 대상 탭에 있나 — 다른 탭에 있으면 `SlotNotInTab`, 어디에도 없으면 `SlotNotFound`.
 5. 결과가 main 의 마지막 탭을 main 에서 빼면 → `MainLastTab`(불변식 4 — `manager.rs:23-24`).
@@ -200,7 +201,7 @@ pub fn dock_tab(state, subs, events, host, labels, req: DockRequest) -> Result<D
 
 1. **값싼 거절(부수 효과 0)** — 부른 창(Tauri 가 넣어 준 창)이 그 탭의 주인인가(읽기 락) · 끌기가 이미 있나 · main 의 마지막 탭인가.
 2. **준비(부수 효과 0 — 실패하면 그냥 돌아간다)** — 딱지 창 확보(없으면 숨긴 채 만든다 — §4-2) · 후보 창마다 `NativeWindow` 와 창 기하(안쪽 원점 · 배율 · 보임 · 최소화). 출처 창 것을 못 읽으면 실패, 그 밖의 창 것을 못 읽으면 그 창을 후보에서 빼고 debug · 끌기 스레드를 띄워 「시작」 신호를 기다리게 한다(신호 없이 보내는 쪽이 떨어지면 그대로 끝난다).
-3. **확정(락 한 번)** — `lease_tab(view)` · 출처 배치 복제(`expect_source`) · 출처 창 label · 탭 수 · 탭 이름 · 떼어진 표시용 승계 탭(출처가 활성이면 `succession` · 아니면 없음). ★여기서부터 되감기 가드가 선다★ — `BeginGuard` 가 해제되지 않은 채 떨어지면: 숨긴 출처 창 되보이기 · 자리 기록 재개 · `dock:session Ended` · `release_lease` · 스레드에 「중단」.
+3. **확정(락 한 번)** — `lease_tab(view)` · 출처 배치 복제(`expect_source`) · 출처 창 label · 탭 수 · 탭 이름 · 떼어진 표시용 승계 탭(출처가 활성이면 `succession` · 아니면 없음). ★여기서부터 되감기 가드가 선다★ — `BeginGuard` 가 해제되지 않은 채 떨어지면 **이 순서로**(정상 끝 · §7 #29 와 같은 순서): ① `dock:session Ended` 방송 ② 숨긴 출처 창 되보이기(숨겼으면) ③ 딱지 숨김(보였으면) ④ 자리 기록 재개(멈췄으면) ⑤ `release_lease` ⑥ 스레드에 「중단」. 아직 하지 않은 부수 효과의 되감기는 건너뛴다.
 4. **부수 효과** — 출처가 탭 하나뿐인 팝아웃이면 그 창을 안 보이게(방법 = 스파이크 S1 · §4-1) + 그 label 의 자리 기록 멈춤 · `dock:session Started` 방송 · 딱지 `dock:chip` + 보이기.
 5. 스레드에 「시작」 → 가드 해제 → `{session}` 반환.
 
@@ -239,6 +240,14 @@ pub fn dock_tab(state, subs, events, host, labels, req: DockRequest) -> Result<D
 
 #### 상태 기계 — `session.rs` (순수)
 
+★세션은 platform 을 모른다 — 입력 타입을 자기가 정의한다★. 세션은 6 단계(스파이크 · platform 앞)에 짓고 platform 의 새 타입은 7 단계에 생기므로, 세션이 platform 타입을 받으면 순서가 거꾸로 선다. 그래서 `session.rs` 가 자기 입력 enum 을 두고, 9 단계의 driver 가 platform 값을 이 타입으로 옮긴다(옮기는 함수 = driver 의 순수 조각 · 시험 대상).
+
+```
+ForegroundSeen = Ours | Other | Indeterminate | Unsupported            // ← platform window::foreground()
+PointerSeen    = Read { at: (i32, i32) /* 물리 px */, primary_down } | Unavailable | Unsupported   // ← input::pointer()
+TopSeen        = Candidate(WindowLabel) | Other | Unknown              // ← window::topmost_at() (driver 가 후보 순번을 label 로)
+```
+
 ```
 Session { id, seq, source_label, source_view, title, expect_source, source_hidden: bool, source_stale: bool,
           display_active: Option<Uuid>, shown: Shown, dwell: Option<(label, Uuid, Instant)>, last_pointer, unavailable_since }
@@ -250,7 +259,8 @@ DropTarget = Seam { window, view, anchor, side } | TabBar { window, index } | No
 |---|---|
 | 틱 1 의 `Other` | **비정상 끝**(곧바로) |
 | 틱 1 의 `Indeterminate` · 틱 2 의 `Unavailable` 이 합쳐 500ms 초과 | **비정상 끝** |
-| 틱 3(`Read` 에서 뗌) · `End{Released}` | **놓기** |
+| 틱 3(`Read` 에서 뗌) | **놓기**(떼는 점 = 그 `Read`) |
+| `End{Released}`(어느 틱보다 먼저 옴) | **놓기**(떼는 점 = 그 사건을 처리할 때 새로 읽은 포인터 — 「놓기 판정」 첫 항) |
 | 틱 4 | 딱지 이동 · 판정 → 가이드 · 머물기 |
 | `End{Lost}`(웹뷰 `pointercancel` · `blur`) | `pointer()` 가 `Unsupported` 가 아니면 무시(힌트) · `Unsupported` 면 **비정상 끝** |
 | `Destroyed(출처 창)` · 스냅숏에 출처 View 없음 | **중단** — 무변경(탭은 그 닫기와 함께 사라졌다 · R13b 끝 문장 · R13c) |
@@ -260,12 +270,13 @@ DropTarget = Seam { window, view, anchor, side } | TabBar { window, index } | No
 
 #### 놓기 판정 — 가이드 없음이면 새 창 · 이음새 · 탭바는 보인 것과 같을 때만 (3판 결정 M1 · 4판 정정 · 2판 리뷰 A1 · 3판 리뷰 F4)
 
-- **판정 재료 = 떼는 순간 새로 뜬 스냅숏(3판 리뷰 N4)** — 마지막 틱의 재료를 다시 쓰지 않는다. 떼는 점(`Read` 의 `at` — `Unsupported` 면 Tauri 커서)으로 `topmost_at` 를 새로 부르고, ViewManager 짧은 락으로 판정 재료(보이는 탭 · 탭 목록 · 캔버스 · 크롬 · 그 탭 배치)를 새로 복사한다. 창 기하(안쪽 원점 · 배율)는 캐시를 쓴다 — 기하 사건이 오면 루프가 그 창을 다시 읽어 두므로 처리한 사건까지는 최신이다. 그 재료로 **한 번** 판정한다(§2 — 틱과 같은 함수).
+- **판정 재료 = 떼는 순간 새로 뜬 스냅숏(3판 리뷰 N4)** — 마지막 틱의 재료를 다시 쓰지 않는다. 떼는 점 = 틱 3 이면 그 틱 `Read` 의 `at`, 웹뷰 `End{Released}` 가 어느 틱보다 먼저 왔으면 **그 사건을 처리할 때 `pointer()` 를 새로 읽은 값**(`Read` 면 그 `at` · `Unsupported` 면 Tauri `cursor_position` · `Unavailable` 이면 떼는 자리를 믿을 수 없으므로 판정 없이 비정상 끝 — 이유 `InputLost`). 그 점으로 `topmost_at` 를 새로 부르고, ViewManager 짧은 락으로 판정 재료(보이는 탭 · 탭 목록 · 캔버스 · 크롬 · 그 탭 배치)를 새로 복사한다. 창 기하(안쪽 원점 · 배율)는 캐시를 쓴다 — 기하 사건이 오면 루프가 그 창을 다시 읽어 두므로 처리한 사건까지는 최신이다. 그 재료로 **한 번** 판정한다(§2 — 틱과 같은 함수).
 - **`source_stale` 이면 판정 없이 무변경 — 아래 두 갈래보다 먼저 본다**(4판 리뷰 약한 지적). 새 창 요청도 `DockGuard{ lease, expect_source }` 를 싣고 가므로 모델 판정 7(`SourceChanged`)이 한 번 더 막는다.
 - **지금 결과가 「가이드 없음」이면 → R22 새 창**(무엇을 보냈든 · `Unset` 이어도). 슬롯 가운데 · 면적 0 이라 칠하지 않은 띠 · 우리 창 밖 · 다른 앱 위 · 바탕화면이 여기다(PRD R6 · R8 · R22). `NewWindow{ at: 딱지 왼쪽 위 }`(크기는 적용 서비스가 R22 규칙으로 채운다 · 출처 사전조건 `lease` · `expect_source` 는 싣고 대상 사전조건은 없음).
 - **지금 결과가 이음새 · 탭바면 `shown.target`(마지막으로 보낸 오버레이가 보인 것)과 대조한다.** 같음 = 같은 창 + 같은 띠(대상 View · 기준 · 변) 또는 같은 탭바 자리(창 · 자리).
   - **같으면 적용** — `apply::dock_tab(DockGuard{ lease, expect_source, expect_target: shown.expect }, Reveal)`. 가이드를 보낸 뒤 대상 배치가 바뀌었으면 모델 판정 7 이 `TargetChanged` 로 무변경을 낸다(R13c).
-  - **다르면(`Unset` 포함) 무변경** — 이유 = `TargetChanged` 로 로그 · 탭은 출처 탭바에 다시 보인다. 사용자가 못 본 이음새 · 탭바에 놓이지 않는다.
+  - **다르면 무변경** — 이유 = `TargetChanged` 로 로그 · 탭은 출처 탭바에 다시 보인다. 사용자가 못 본 이음새 · 탭바에 놓이지 않는다.
+- **`Unset`(오버레이를 아직 하나도 안 보냄)도 위 두 갈래 그대로다 — 따로 다루지 않는다.** 지금 결과가 가이드 없음이면(우리 창 안의 슬롯 가운데 포함) **R22 새 창**, 지금 결과가 이음새 · 탭바면 `Unset` 은 어떤 이음새 · 탭바와도 같지 않으므로 **무변경**(`TargetChanged`).
 - **적용 결말** — 성공: 대상(또는 새 · 재사용) 창을 `set_focus()`(R11b — 첫 슬롯 포커스는 적용 서비스가 같은 락에서 끝냈다) · 재사용이면 그 창을 다시 보인다. 실패(사유 무관): **무변경**.
 - **무변경 · 비정상 끝 = 같은 일** — 모델은 끌기 전 그대로이므로 R13b 의 「출처 창 탭바의 원래 자리로 넣기」는 모델로는 아무 일도 아니다. 떼어진 표시를 거두고 숨긴 출처 창을 원래대로 보인다.
 
@@ -277,7 +288,7 @@ DropTarget = Seam { window, view, anchor, side } | TabBar { window, index } | No
 
 #### 그 밖
 
-- **R6b 탭 전환** — 판정이 「보이지 않는 탭의 머리」를 내놓은 채 `HOVER_SWITCH_MS`(500ms) 머물면 적용 서비스 `switch_tab`(사람 탭 클릭과 같은 경로 — `apply.rs:258`)을 부르고 대기를 비운다. ★끄는 동안 모델을 바꾸는 유일한 동작이다 — 도킹의 변경이 아니라 PRD R6b 가 정한 탭 전환이고, 무변경 · 비정상 끝이어도 되돌리지 않는다(§11-1 #5)★. 탭바 오버레이가 대기 중인 탭에 진행 표시를 한다.
+- **R6b 탭 전환** — 판정이 「보이지 않는 탭의 머리」를 내놓은 채 `HOVER_SWITCH_MS`(500ms) 머물면 적용 서비스 `switch_tab`(사람 탭 클릭과 같은 경로 — `apply.rs:258`)을 부르고 대기를 비운다. ★끄는 동안 모델을 바꾸는 유일한 동작이다 — 그 창의 활성 탭만 바뀌고(`version` +1 · 기록기가 저장한다) 끌린 탭의 배치는 그대로다. 도킹의 변경이 아니라 PRD R6b 가 정한 탭 전환이고, 무변경 · 비정상 끝이어도 되돌리지 않는다(§11-1 #5)★. 출처 창 안의 전환이면 모델 활성이 출처 탭에서 벗어나므로 떼어진 표시의 `display_active` 도 더는 쓰이지 않는다(§1-6). 탭바 오버레이가 대기 중인 탭에 진행 표시를 한다.
 - **R14** — `lease_tab` 이 main 의 마지막 탭을 거절한다. 웹뷰도 같은 조건을 미리 보고 시작 요청 없이 커서를 「안 됨」으로 바꾼다(즉시 반응용 · 판정 권위는 셸).
 
 ### 1-4. ③ OS 층 (`platform`) — 목적 단위 함수만
@@ -501,6 +512,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 | NewWindow 의 새 창이 phase C 전에 닫힘(★NewWindow 만 — Seam · TabBar 에서는 안 난다★) | `WindowClosed` | `CONFLICT` |
 | (명령 경로에선 안 남) | `StaleLease` · `SourceChanged` · `TargetChanged` | `CONFLICT` |
 | 새 창을 못 엶 | `WindowOpen` | `INTERNAL`(표 공통 코드 — `macros.rs:76`) |
+| (닿지 않는 방어) NewWindow label 이 이미 모델에 있음 | `WindowExists` | `INTERNAL`(셸 결함 — 호출자가 고칠 수 있는 상태가 아니다) |
 | id 형식 불량 · 모드 칸 조합 불량 | (핸들러 파싱) | `INVALID_ARGUMENT`(기존 `uuid_arg` · `:1385`) |
 
 실패면 아무것도 바뀌지 않는다 — 판정이 전부 변경 앞에 있고(§1-2 판정 순서) 변경은 락 한 번(새 창은 phase C 한 번)이다. 새 창 열기 실패 · phase C 실패는 모델 무변경이다.
@@ -548,7 +560,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 
 기존 장치가 그대로 덮는다 — 이 기능이 새로 짓는 저장 · 라우팅 장치는 없다.
 
-- **끄는 동안 저장되는 것 없음** — 표식 · 묘비는 메모리에만, 떼어진 표시는 웹뷰에만 있다. 숨긴 출처 팝아웃의 자리 기록은 멈춘다(§4-1). 그래서 끄는 동안 앱이 꺼지면 다음 부팅은 끌기 전 배치(탭은 출처 한 곳 · 팝아웃은 원래 자리)다.
+- **끄는 동안 저장되는 것 = R6b 탭 전환 하나** — 표식 · 묘비는 메모리에만, 떼어진 표시는 웹뷰에만 있고, 숨긴 출처 팝아웃의 자리 기록은 멈춘다(§4-1). 끄는 동안 모델을 바꾸는 것은 R6b 탭 전환(`apply::switch_tab` — 창의 활성 탭 · `version` +1)뿐이고, 기록기는 그것을 여느 탭 클릭처럼 저장한다. 그래서 끄는 동안 앱이 꺼지면 다음 부팅은 끌기 전 배치(끌린 탭은 출처 한 곳 · 팝아웃은 원래 자리)에 그 사이 R6b 로 바뀐 활성 탭만 반영된 판이다.
 - **원자성(R11a 앞 절반)** — 출처 탭 빼기 · 대상(이음새 · 탭바 · 새 창 항목)에 넣기 · 빈 팝아웃 항목 지우기 · 곁표 옮기기가 `ViewManager::dock` 한 번(= 락 한 번 · `version` 한 번)이다. 새 창은 OS 창을 먼저 열고(phase B) 모델 변경은 phase C 한 번이다. 그 락을 거치지 않고 모델을 보는 관찰자는 없다 — 프론트는 그 뒤의 알림 · pull 로만 보고(`apply.rs` 머리 「락 규율」), 버스 조회도 같은 락을 잡는다.
 - **저장(R11a 뒤 절반)** — 기록기는 변경 번호(`version` · `attrs_rev`)가 바뀌면 스냅숏을 **같은 락 안에서 통째로 복사**해 쓴다(`state/convert.rs:24-40` `StateRevision` · `to_persisted` 는 락 안에서 부른다 — `:43` · `state/saver.rs:20` 「기록기는 락을 쥐지 않는다」). 그래서 `state.json` 에 실리는 것은 도킹 전이거나 도킹 뒤이고, 탭이 두 곳이거나 어디에도 없는 판은 생길 수 없다. 원자 쓰기(base `file`)라 디스크 쓰기 도중 꺼져도 이전 판이 남는다 — 「정확히 한 곳」(AC11)은 어느 쪽이든 선다. 새 창 phase B 와 C 사이에 꺼지면 OS 창만 있고 모델은 도킹 전이라 다음 부팅에 그 창은 없다.
 - **OS 창 닫기는 모델 뒤 — 이제 모든 경로가** — 빈 팝아웃은 모델에서 먼저 지우고(락 안) 락 밖에서 OS 창을 destroy 한다(`close_tab` 의 `WindowClosed` 갈래와 같다 — `apply.rs:303-306`). 사용자 X 도 닫기 요청에서 모델을 먼저 지운다(§1-2 「닫히는 창」) — 그래서 「OS 창은 사라졌는데 모델에 남은 창」과 「모델에서 지운 뒤 붙은 탭」이 어느 경로에도 없다. destroy 는 기다리지 않는다.
@@ -561,7 +573,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 
 - **제목줄 = 창 이동만, 탭 = 도킹**(R1 · R2) — 제목줄은 OS 기본 이동이고 이 기능은 끼어들지 않는다.
 - **탭을 끌면 곧바로 떼어지고 작은 딱지가 따라간다 · 창은 따라오지 않는다 · 「원래대로」는 없다**(R2 · Q1) — §4.
-- **모델은 놓을 때만 바뀐다 · 끄는 동안 떼어진 모습은 화면 표시다**(R2 아래 줄 · R11a) — §1-3 · §4-1.
+- **끌린 탭의 배치는 놓을 때만 바뀐다 · 끄는 동안 떼어진 모습은 화면 표시다**(R2 아래 줄 · R11a) — §1-3 · §4-1. 끄는 동안의 R6b 탭 전환(창의 활성 탭)은 PRD R6b 가 정한 별개의 모델 변경이다(§0 · §5).
 - **가이드 = 슬롯 상하좌우 띠(1/3) + 정확한 결과 사각형 + 창 바깥 테두리 띠, 가운데는 없음**(R3 · R4 · R5 · R6) — §2.
 - **놓으면 셋 중 하나 — 이음새 · 탭바 · 그 밖은 새 창**(R7 · R21 · R22 · Q3 · Q4) — §1-2 · §1-3.
 - **크기 = 새것 1/3 · 기존 2/3 하나로, 예외 없음 · 막는 것은 면적 0 뿐**(R7 · R8) — §1-2.
@@ -590,7 +602,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 **구조**
 1. **끌기 세션을 `layout` 밖 신설 `dock` 모듈에 둔다** — 세션은 레이아웃 권위를 부르는 손님이다.
 2. **네이티브 이동 루프 · 창 서브클래스를 쓰지 않는다** — 끌기가 웹뷰에서 시작하므로 OS 루프의 시작 · 끝 감지가 필요 없다.
-3. **세션 = 순수 `step(상태, 사건, 스냅숏) → 할 일`** — 가짜 시계 · 포인터 · 창으로 단독 시험이 선다(ADR-0012).
+3. **세션 = 순수 `step(상태, 사건, 스냅숏) → 할 일`** — 가짜 시계 · 포인터 · 창으로 단독 시험이 선다(ADR-0012). 입력 enum(`ForegroundSeen` · `PointerSeen` · `TopSeen`)은 세션이 스스로 정의하고 platform 을 의존하지 않는다 — 세션(6 단계)이 platform 의 새 타입(7 단계)보다 먼저 서야 하고, platform 값의 옮김은 driver(9 단계) 한 곳에 모인다.
 4. **끌기 스레드 하나 · 무제한 채널 · 마감 기반 틱** — 세션 상태에 뮤텍스가 없고, 제어 사건을 버리지 않으며, 사건이 틱을 밀지 않는다.
 5. **틱 8ms(목표) · 실제 주기는 스파이크가 적고, 모자라면 platform `fine_timer` 를 끌기 동안만 쥔다** — 요구를 바꾸지 않는 조정(3판 리뷰 F6).
 6. **`close_tab` 의 「목록에서 빼기 · 활성 승계 · 빈 창 판정」을 도우미로 뽑아 도킹과 나눠 쓰고, 승계는 순수 함수로도 내보낸다** — 승계 규칙이 모델 · 떼어진 표시 · 판정에서 한 벌이다.
@@ -615,13 +627,13 @@ enum DockMode { Seam, TabBar, NewWindow }
 21. **포인터는 platform `pointer()` 로 직접 읽고, 결과를 `Read` · `Unavailable` · `Unsupported` 셋으로 가른다** — Tauri `cursor_position` 은 메인 스레드 왕복(`tauri-runtime-wry` `lib.rs:2815-2820`)이고, 「지금 못 읽음」과 「이 OS 에 없음」을 한 값으로 접으면 보안 데스크톱의 0 이 떼기로 읽힌다(3판 리뷰 F7).
 22. **틱 순서 = 전경 → 포인터 → 떼기 판정 · 전경은 새 함수 `foreground()` 의 세 갈래로** — 전경이 확실히 다른 프로세스면 곧바로 비정상 끝, 전경 불명(빈 전경 · 읽는 사이 사라짐)은 유예. 출처 팝아웃을 숨기거나 딱지를 보이는 순간의 빈 전경을 「다른 앱」으로 읽어 끌기를 끊지 않는다(3판 리뷰 N2). 옛 `foreground_is_current_process` 는 답을 바꾸지 않는 감싸기로 남긴다 — 그 호출자에게는 「불명 = 아니다」가 맞다.
 23. **`Unavailable` · 전경 `Indeterminate` 가 한 시계로 500ms 이어지면 비정상 끝** — 끝나지 않는 끌기를 막는다.
-24. **놓기 신호 = `Read` 의 떼기 ∨ 웹뷰 `Released`, 먼저 온 것 · 웹뷰 `Lost` 는 힌트** — 숨긴 창 · 캡처 흔들림이 끌기를 끊지 않는다.
+24. **놓기 신호 = `Read` 의 떼기 ∨ 웹뷰 `Released`, 먼저 온 것 · 웹뷰 `Lost` 는 힌트** — 숨긴 창 · 캡처 흔들림이 끌기를 끊지 않는다. 웹뷰 `Released` 가 먼저 오면 떼는 점은 그 사건을 처리할 때 새로 읽은 포인터다 — 마지막 틱 위치는 최대 한 틱 늦다.
 25. **탭 전환 대기 500ms · 끝이 무변경이어도 전환은 되돌리지 않는다** — §11-1 #5.
 26. **출처가 바뀌면 그 뒤로 띠 · 탭바 자리를 그리지 않고 딱지에 「안 됨」**.
 27. **출처 View 가 사라지면 놓기를 기다리지 않고 끝낸다** — 없는 탭의 딱지가 남지 않게.
 28. **끌기 문턱 4px** — Windows 기본 끌기 문턱(`SM_CXDRAG` 4)과 같은 크기다.
 29. **`Ended` 는 적용 알림 뒤에 · 숨긴 출처 창은 `Ended` 뒤에 되보인다 · `dock:session` 은 세션 안 `seq` 로 순서를 판정** — 탭이 한 번 비쳤다 사라지거나, 옛 `Display` 가 새 표시를 덮지 않게.
-30. **시작은 「실패할 수 있는 준비 → 표식 → 부수 효과」 순서 + 되감기 가드** — 어떤 단계에서 실패해도 표식 · 숨긴 창 · 멈춘 자리 기록이 남지 않는다(3판 리뷰 F1).
+30. **시작은 「실패할 수 있는 준비 → 표식 → 부수 효과」 순서 + 되감기 가드** — 어떤 단계에서 실패해도 표식 · 숨긴 창 · 멈춘 자리 기록이 남지 않는다(3판 리뷰 F1). 가드의 되감기 순서는 정상 끝(#29 · §1-3 「끝」)과 같다 — `Ended` → 되보이기 → 딱지 숨김 → 자리 기록 재개 → `release_lease` → 스레드 중단.
 
 **판정 재료 · 그리기**
 31. **크롬(탭바 · 탭 머리 · 캔버스 원점)은 평소 보고하고 창 항목에 측정으로 둔다 · 판정은 출처 탭을 id 로 거른다** — 보고가 떼어진 표시보다 늦어도 틀리지 않는다(3판 리뷰 F9).
@@ -658,14 +670,14 @@ enum DockMode { Seam, TabBar, NewWindow }
 | 층 | 무엇 | 어디(타깃) |
 |---|---|---|
 | 트리 연산 | `docked_tree` — 네 변 × (슬롯 · 바깥) 모양 · 비율 1/3 · 2/3 · 감싼 쪽 안쪽 비율 보존(AC4 · AC5) · 슬롯 id · 분할 id 보존 · 없는 슬롯 · **새** 면적 0(깊은 자식 · 반복 도킹으로 표현 한계에 닿는 칸) · 원래부터 면적 0 인 칸은 거절 사유가 아님 · `incoming_rect` 가 결과 기하의 외접 사각형과 비트 단위로 같음 | `src/layout/dock.rs` `#[cfg(test)]` → `cargo test -p engram-dashboard --test lib_unit` |
-| 모델 | `dock` 세 모드 — 판정 순서(앞 사유가 이김) · 사유마다 무변경(`version` 그대로) · 성공마다 `version` +1 한 번 · Seam 곁표가 대상 View 로 따라감 · 탭바 자리(넘침 = 맨 뒤 · 같은 창 자리 옮기기 · 같은 자리 무변경) · 출처 창 활성 승계 · 빈 팝아웃 항목 제거 · main 마지막 탭 거절 · `Keep` 은 대상 활성 · 포커스 그대로 · ★같은 창에서 출처가 활성이면 대상이 활성★ · `Reveal` 은 대상 활성 + 첫 슬롯 포커스 · 표식(`Dragging` · `StaleLease` · 성공이 표식을 내림 · `release_lease` 의 다른 번호 무동작) · `SourceChanged` · `TargetChanged`(배치 · 탭 목록) · 묘비(`mark_closed` 뒤 NewWindow = `WindowClosed` · `attach_view_as_new_window` 도 거절) · `plan_new_window`(재사용 · 크기 · main = None) · `succession` 이 `close_tab` 과 같은 답. **매 시험 뒤 기존 `assert_invariants`**(`manager.rs:1305` — ADR-0057 ①–④) | `src/layout/manager.rs` `#[cfg(test)]` → `lib_unit` |
+| 모델 | `dock` 세 모드 — 판정 순서(앞 사유가 이김) · 사유마다 무변경(`version` 그대로) · 성공마다 `version` +1 한 번 · Seam 곁표가 대상 View 로 따라감 · 탭바 자리(넘침 = 맨 뒤 · 같은 창 자리 옮기기 · 같은 자리 무변경) · 출처 창 활성 승계 · 빈 팝아웃 항목 제거 · main 마지막 탭 거절 · `Keep` 은 대상 활성 · 포커스 그대로 · ★같은 창에서 출처가 활성이면 대상이 활성★ · `Reveal` 은 대상 활성 + 첫 슬롯 포커스 · 표식(`Dragging` · `StaleLease` · 성공이 표식을 내림 · `release_lease` 의 다른 번호 무동작) · `SourceChanged` · `TargetChanged`(배치 · 탭 목록) · 묘비(`mark_closed` 뒤 NewWindow = `WindowClosed` · `attach_view_as_new_window` 도 거절) · 이미 있는 label 로 NewWindow = `WindowExists` · `plan_new_window`(재사용 · 크기 · main = None) · `succession` 이 `close_tab` 과 같은 답. **매 시험 뒤 기존 `assert_invariants`**(`manager.rs:1305` — ADR-0057 ①–④) | `src/layout/manager.rs` `#[cfg(test)]` → `lib_unit` |
 | 리팩터 회귀 | `close_tab` 에서 뽑은 도우미 — 기존 `close_*` 시험(`manager.rs:1498-1631`)이 그대로 초록 | `lib_unit` |
 | 닫기 요청 | `drop_window_in_model` 을 닫기 요청 계기로 부른 뒤: 그 창 탭이 모델에서 사라짐 · 묘비 · 뒤이은 `Destroyed` 정리가 멱등 · 그 뒤 Seam(`TabNotFound`) · TabBar(`WindowNotFound`) · 새 창(`WindowClosed`) · 팝아웃 기존 창 타깃(롤백) · 팝아웃 새 창 타깃(롤백) 전부 무변경 | `src/commands/popout.rs` `#[cfg(test)]`(창 없이 서는 모델 몫 — 그 파일 머리) → `lib_unit` |
 | 적용 서비스 | 가짜 포트로: Seam · TabBar 의 변경 · 스냅숏 · `resync` 가 한 락 안 · 알림은 락 밖 · 출처 창이 닫히면 `host.close` 가 알림 뒤 한 번 · 실패면 알림 0 · `resync` 0 / NewWindow — 열기 실패 = 모델 무변경 · phase C 실패(묘비 포함) = 연 창을 닫고 탭은 출처 · 재사용 = `move_window` · 모델 무변경 · `activate` 가 `FocusPolicy` 를 따름 · 어느 모니터에도 안 걸치는 자리 = 기본 자리 | `tests/layout_apply.rs` → `cargo test -p engram-dashboard --test layout_apply` |
 | 버스 | `tab.dock` 선언(이름 · 인자 · 답 · 오류 목록) · 모드 칸 조합 불량 = `INVALID_ARGUMENT` · 사유 → 코드 표(§3-2) 전부 · id 형식 불량 · `DockSide` · `DockMode` 두 표면 철자 맞대기 · `catalog_version` 18 · ★NewWindow 가 x · y · 크기 · `activate = false` 를 창 포트 `open_at` 에 그대로 넘김(3판 리뷰 F2 — 가짜 `Windows` 가 받은 인자를 적는다)★ | `tests/layout_commands.rs` → `--test layout_commands` |
 | 판정 | `locate` · `choose_band` — 각 변의 띠 · 가운데(R6 → `Nothing`) · 모서리 정규화 거리(R6a ②) · 바깥 띠가 이김(R6a ① · AC4) · 경계선 위 결정성(R6a ③) · 탭바 자리(가운데 x 규칙 · ★크롬에 출처 탭 머리가 남아 있어도 id 로 걸러 같은 자리★) · 탭 머리 `over` · 캔버스 밖 · 배율 1.0 / 1.5 / 걸친 창(W4) · 빠진 띠(면적 0)에서는 안 붙음(AC15) | `src/dock/hit.rs` `#[cfg(test)]` → `lib_unit` |
-| 세션 | 가짜 전경 · 포인터 · 시계 · 맨 위 창 · 스냅숏으로 `step` 의 할 일을 단언: 시작 → 띠 → 놓기 = 적용 1회(`Reveal` · 표식 · 기대값) + `set_focus` · **(M1 · 4판) 지금 결과가 가이드 없음(슬롯 가운데 · 칠하지 않은 띠 · 우리 창 밖 · 다른 앱 위) → 보낸 것이 이음새 · 탭바 · 가이드 없음 · `Unset` 어느 것이든 새 창 · 지금 결과가 이음새 · 탭바이고 보낸 것과 같음 → 적용 · 다름 → 무변경(`TargetChanged`) · `Unset` 에서 이음새 · 탭바 → 무변경** · **(N4) 판정은 떼는 순간 스냅숏을 씀 — 마지막 틱 스냅숏과 다른 떼기 스냅숏(그 사이 대상 칸이 닫힘 · 탭이 바뀜)을 먹이면 결과가 떼기 스냅숏을 따른다** · **(F7 · N2) `Other` 틱의 버튼 0 = 곧바로 비정상 끝(놓기 아님) · `Indeterminate` 는 유예 — 그 사이의 버튼 0 은 떼기가 아님 · 유예 안에 `Ours` 로 돌아오면 이어짐 · `Indeterminate` 와 `Unavailable` 이 섞여 합쳐 500ms 면 비정상 끝 · `Unsupported` 는 웹뷰 `Released` 에만** · `Lost` 갈래 · 출처 창 `Destroyed` = 무변경 · 되보이기 없음(AC16) · 대상 창 `Destroyed` = 가이드 지움 · 출처 변경 → 띠 사라짐 · 놓아도 무변경(AC16 둘째 문장) · 대상 변경 → 가이드 다시 그림 · 전환 대기 500ms(R6b · AC14) · 출처 탭 목록 변경 → `Display{seq}` · 끝마다 `Ended` → 되보이기 → `release_lease` 순서 · 늦은 세션 번호 버림 · 마감 계산(사건이 틱을 안 밂 · 밀렸을 때 몰아치지 않음) | `src/dock/session.rs` `#[cfg(test)]` → `lib_unit` |
-| 구동 | 채널이 제어 사건을 버리지 않음(기하 사건을 몰아넣은 뒤 `End` 가 처리됨) · 기하 사건 합치기 · **시작 되감기(F1) — 준비 단계 실패마다 표식 0 · 숨김 0 / 부수 효과 뒤 실패마다 가드가 표식 해제 · 되보이기 · 자리 기록 재개 · `Ended` 를 함** | `src/dock/driver.rs` 의 순수 조각(가짜 포트) `#[cfg(test)]` → `lib_unit` |
+| 세션 | 가짜 전경 · 포인터 · 시계 · 맨 위 창 · 스냅숏으로 `step` 의 할 일을 단언: 시작 → 띠 → 놓기 = 적용 1회(`Reveal` · 표식 · 기대값) + `set_focus` · **(M1 · 4판) 지금 결과가 가이드 없음(슬롯 가운데 · 칠하지 않은 띠 · 우리 창 밖 · 다른 앱 위) → 보낸 것이 이음새 · 탭바 · 가이드 없음 · `Unset` 어느 것이든 새 창 · 지금 결과가 이음새 · 탭바이고 보낸 것과 같음 → 적용 · 다름 → 무변경(`TargetChanged`) · ★`Unset` + 우리 창 안 슬롯 가운데 → 새 창 · `Unset` + 우리 창 밖 → 새 창 · `Unset` + 이음새 · 탭바 → 무변경(`TargetChanged`)★** · **(4.1) 틱보다 먼저 온 `End{Released}` — 그 사건을 처리할 때 새로 읽은 포인터로 판정(`Read` · `Unsupported` 면 Tauri 커서 · `Unavailable` 이면 비정상 끝 `InputLost`) · 마지막 틱 위치가 아니라 그 새 위치를 따른다** · **R6b 전환은 활성 탭 쓰기 한 번(`switch_tab`)을 할 일로 내고 끌린 탭의 배치는 건드리지 않음 · 무변경 끝에서도 되돌리는 할 일이 없음** · **(N4) 판정은 떼는 순간 스냅숏을 씀 — 마지막 틱 스냅숏과 다른 떼기 스냅숏(그 사이 대상 칸이 닫힘 · 탭이 바뀜)을 먹이면 결과가 떼기 스냅숏을 따른다** · **(F7 · N2) `Other` 틱의 버튼 0 = 곧바로 비정상 끝(놓기 아님) · `Indeterminate` 는 유예 — 그 사이의 버튼 0 은 떼기가 아님 · 유예 안에 `Ours` 로 돌아오면 이어짐 · `Indeterminate` 와 `Unavailable` 이 섞여 합쳐 500ms 면 비정상 끝 · `Unsupported` 는 웹뷰 `Released` 에만** · `Lost` 갈래 · 출처 창 `Destroyed` = 무변경 · 되보이기 없음(AC16) · 대상 창 `Destroyed` = 가이드 지움 · 출처 변경 → 띠 사라짐 · 놓아도 무변경(AC16 둘째 문장) · 대상 변경 → 가이드 다시 그림 · 전환 대기 500ms(R6b · AC14) · 출처 탭 목록 변경 → `Display{seq}` · 끝마다 `Ended` → 되보이기 → `release_lease` 순서 · 늦은 세션 번호 버림 · 마감 계산(사건이 틱을 안 밂 · 밀렸을 때 몰아치지 않음) | `src/dock/session.rs` `#[cfg(test)]` → `lib_unit` |
+| 구동 | 채널이 제어 사건을 버리지 않음(기하 사건을 몰아넣은 뒤 `End` 가 처리됨) · 기하 사건 합치기 · **시작 되감기(F1) — 준비 단계 실패마다 표식 0 · 숨김 0 / 부수 효과 뒤 실패마다 가드가 **`Ended` → 되보이기 → 딱지 숨김 → 자리 기록 재개 → `release_lease` → 스레드 중단** 순서로 거둠(포트 호출 순서를 적는 가짜로 단언 · 하지 않은 부수 효과는 건너뜀)** · platform 값 → 세션 입력 enum 옮김(`Foreground` · `PointerRead` · `TopmostAt` 의 모든 갈래) | `src/dock/driver.rs` 의 순수 조각(가짜 포트) `#[cfg(test)]` → `lib_unit` |
 | OS 층 | `topmost_at` 의 z 순서 걷기를 내부 함수로 떼어 가짜 창 목록으로(투과 · 최소화 · 가림 · 입력 투과 · 사각형 밖 · 후보 아님 = `Other`). 실 창 시험: 창 둘을 만들어 겹쳐 놓고 실제 답 대조 · `pointer()` 가 Windows 에서 `Unsupported` 가 아님 · 그 밖에서 `Unsupported`(짝 시험) · `foreground()` 의 갈래 판정을 PID 입력의 순수 함수로 떼어(무효 핸들 · PID 0 = `Indeterminate` · 같은 PID = `Ours` · 다른 PID = `Other`) · 옛 `foreground_is_current_process` 가 같은 입력에 옛 답(`Indeterminate` → `Some(false)`)을 그대로 줌 · `NativeWindow: Send + Sync`(컴파일 단언). `#[cfg(windows)]` 는 그 시험 함수에만(파일째 막지 않는다 — CLAUDE.md 「플랫폼 중립」). **★실 창 시험은 `-- --test-threads=4` 에서 겹친다★** — 그 시험들끼리 프로세스 안 `static` 락 하나로 줄 세우고, 다른 앱 창과 겹치지 않게 주 모니터 밖 먼 가상 좌표(예: (-20000, -20000) 근처 · 시험마다 다른 칸)에 창을 둔다. CI 러너에서 창 만들기가 서는지는 **모른다** — 첫 CI 실행에서 보고, 안 서면 그 시험만 `#[ignore]` + 로컬 `/qa` 몫으로 돌린다. 창 만들기용 `windows` feature(예: `Win32_System_LibraryLoader`)는 dev 의존에만 켠다(「의존」 규칙은 운영 의존만 본다) | platform `src/window.rs` · `src/input.rs` `#[cfg(test)]` → `cargo test -p engram-dashboard-platform -- --test-threads=4` |
 | 프론트 | `TabBar` — 4px 문턱 · 끌기 뒤 click 삼킴 · main 마지막 탭은 시작 요청 없이 「안 됨」 커서 · `pointerup` = `Released` · `pointercancel` · `blur` = `Lost` · `lostpointercapture` · Esc 는 보내지 않음 · 시작 거절이면 누름 상태를 버림 / ★떼어진 표시(F3) — 끄는 동안 스토어의 `win.tabs` 가 그대로 · 0탭 자가닫힘이 불리지 않음 · 탭 하나 팝아웃은 표시를 안 함 · 탭 머리 숨김 · `displayActive` 로 캔버스 · 오래된 `seq` 버림 · `Ended` 로 거둠★ / `DockOverlay` — 페이로드대로 그림 · 세션이 다르면 무시 · `Ended` 면 지움 / `dockChromeReport` — 한 번에 하나 · 마지막 값이 덮음 / 딱지 페이지 — `dock:chip` 대로 글자 · 테마 · 「안 됨」 / 레지스트리 `tab.dock` 인자 · invoke 이름 | vitest(`npm test`) + `npx tsc --noEmit` |
 | 생성물 | 새 ts-rs 타입(`src-tauri/bindings/`) | CI 생성물 sync 게이트(`lib_unit` 이 굽는다) |
@@ -686,11 +698,11 @@ enum DockMode { Seam, TabBar, NewWindow }
 | **3** | ★닫히는 창 조정(M2) — 4 단계와 `tab.dock` 의 어떤 출시보다도 먼저인 **필수 선행**★: `drop_window_in_model` 이 `mark_closed` 를 부르고, `lib.rs` `CloseRequested` 가 팝아웃이면 그것을 부른다(되돌려지지 않는다는 전제와 그 점검 명령을 그 자리에 주석으로 — §9 「게이트」) · `apply.rs:105-118` 주석 갱신 + 시험. §11-1 #2 에서 사용자가 M2 를 거절하면 이 단계 대신 2판의 두 검사(Seam · TabBar 의 `is_open` 사전 확인 · NewWindow 의 확정 뒤 `is_open` 확인과 모델 정리)를 4 단계에 되살린다 — 둘 중 하나 없이는 출시하지 않는다 | 없음 | 팝아웃 닫기의 기존 틈이 닫힌 셸(도킹 없이도 값어치) |
 | **4** | ★3 단계(또는 그 대체 검사)가 들어간 뒤에만★ 적용 서비스 `apply::dock_tab`(Seam · TabBar 한 락 · NewWindow 세 phase · 재사용) + `WindowHost::{open_at, move_window}`(★기본 본문 없이 — 구현자 여섯을 같은 커밋에서 닫는다★) + Tauri 구현(`popout.rs` · `OwnedWindowHost` 넘기기 · `placement::place` · `land` 공개) + invoke `dock_tab`(async · `commands/dock.rs` · `generate_handler!`) + 버스 `tab.dock`(세 모드 한 번에 · `catalog_version` 18) + `commands.rs` 머리 갱신 + 프론트 레지스트리 · `viewStore.dockTab` + 시험(`layout_apply` · `layout_commands` · vitest) | 없음 | **LLM 도킹이 끝까지 된다(AC10 · AC13 · AC18 의 명령판)** — 마우스 없이도 출시 가능한 덩어리 |
 | **5** | `dock/hit.rs` + `dock/types.rs`(ts-rs) + 시험 | 없음 | 순수 판정 |
-| **6** | 크롬 보고 — `DockChrome` 측정 칸(`WindowTabs`) · `set_dock_chrome` · invoke `report_dock_chrome` · `dockChromeReport.ts` + 시험. `WindowTabs::new` 에 `chrome: None`, `state/convert.rs:75-83` 의 구조 분해에 `chrome: _`(측정은 저장하지 않는다) · 그다음 `dock/session.rs` 순수 상태 기계 + 시험 | 없음 | 평소 보고 · 순수 세션 |
+| **6** | 크롬 보고 — `DockChrome` 측정 칸(`WindowTabs`) · `set_dock_chrome` · invoke `report_dock_chrome` · `dockChromeReport.ts` + 시험. `WindowTabs::new` 에 `chrome: None`, `state/convert.rs:75-83` 의 구조 분해에 `chrome: _`(측정은 저장하지 않는다) · 그다음 `dock/session.rs` 순수 상태 기계 + 시험 — ★platform 을 의존하지 않는다★: 입력 enum(`ForegroundSeen` · `PointerSeen` · `TopSeen`)을 이 파일이 정의하고, platform 타입으로의 옮김은 9 단계 driver 몫이다(§1-3) | 없음 | 평소 보고 · 순수 세션 |
 | — | **스파이크 S1–S5**(§8) — 결과를 이 문서에 개정으로 적는다. 불합격이면 여기서 멈추고 사용자에게 올린다 | — | — |
 | **7** | platform — `raw-window-handle` 운영 의존(★§11-1 #3 사용자 확인 뒤★) + `windows` feature + `window::{NativeWindow, native_window, ScreenPoint, TopmostAt, topmost_at}` · `input::{Pointer, PointerRead, pointer}`(+ S1 · S4 가 OS 함수를 고르면 그것 · S2 · S4 가 요구하면 `timer::fine_timer`) + 시험 + platform `src/lib.rs` 헤더(입주자 · 의존 규칙) · `Cargo.toml` 주석 · CLAUDE.md 「의존성」. ADR-C 를 같은 단계에서 박는다 | S1 · S2 · S4 | 부르는 쪽 없는 OS 함수 |
 | **8** | 딱지 창 — `dock-chip.html` · `src/dockChip/main.ts` · Vite 입력 · `capabilities/dock-chip.json` · `dock/chip.rs`(빌더 — `WebviewEnv::finish`) · `lib.rs` 의 자리 기록 거름 + 시험 · CLAUDE.md 「창 구성」(런타임 창에 딱지 한 줄 — `/review doc`) | S4 | 쓰는 쪽 없는 숨은 창 빌더 |
-| **9** | `dock/driver.rs` — 끌기 스레드 · 시작 되감기 가드 · invoke `dock_drag_begin` · `dock_drag_end` · 창 사건 연결(`lib.rs`) · 출처 숨기기(S1 방법) · 자리 기록 멈춤(`placement.rs`) · emit · 계측(§1-7) + 프론트 `TabBar` 끌기 · 떼어진 표시 · `DockOverlay` — **마우스 도킹이 끝까지 된다** | S1 · S2 · S3 · S5 | 마우스 도킹 |
+| **9** | `dock/driver.rs` — 끌기 스레드 · platform 값 → 세션 입력 enum 옮김(순수 조각 + 시험) · 시작 되감기 가드 · invoke `dock_drag_begin` · `dock_drag_end` · 창 사건 연결(`lib.rs`) · 출처 숨기기(S1 방법) · 자리 기록 멈춤(`placement.rs`) · emit · 계측(§1-7) + 프론트 `TabBar` 끌기 · 떼어진 표시 · `DockOverlay` — **마우스 도킹이 끝까지 된다** | S1 · S2 · S3 · S5 | 마우스 도킹 |
 | **10** | 문서 — ADR(§12) · step-log · `/qa full` 화면 실측(AC 전부) | — | — |
 
 - 매 단계 게이트 = `/implement`(구현 → `/review code` → `/qa`) — CLAUDE.md 「구현 실행 규약」.
@@ -742,7 +754,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 
 결정 날조 금지 — 아래 「거부한 대안」은 PRD · 조사 · 사용자 대화 · 리뷰에서 나온 것만 적었다. 사용자 결정분은 사용자 확인 뒤 박는다.
 
-- **ADR-A 도킹 모델 = 탭 끌기 · 즉시 떼기 · 셸이 모는 앱 주도 끌기 · 모델은 놓을 때 한 번 · 보인 것과 같을 때만 적용 · 붙는 단위는 탭 하나의 배치 통째**(사용자 결정 R1 · R2 · R9 · R18 · Q1 + 이 TRD 의 구현 선택)
+- **ADR-A 도킹 모델 = 탭 끌기 · 즉시 떼기 · 셸이 모는 앱 주도 끌기 · 끌린 탭의 배치는 놓을 때 한 번 · 보인 것과 같을 때만 적용 · 붙는 단위는 탭 하나의 배치 통째**(사용자 결정 R1 · R2 · R9 · R18 · Q1 + 이 TRD 의 구현 선택)
   - 결정: 제목줄은 OS 이동만, 탭을 끌면 그 자리에서 떼어진다(화면 표시)고 딱지 창이 따라간다. 끌기는 웹뷰에서 시작하고 셸이 전경 · 포인터 · 판정 · 딱지 · 레이아웃 변경을 몬다. 놓으면 이음새 · 탭바 · 새 창 셋 중 하나이고, 떼는 점의 판정이 마지막으로 보낸 가이드와 같을 때만 적용한다. 붙이기는 모델 이동(웹뷰 이전 아님)이고 마우스와 명령이 한 적용 함수를 지난다.
   - 거부한 대안: ① **제목줄(네이티브 이동 루프) 도킹** — 조사 §4 의 전제였다. 창 이동이 기본이고 도킹은 선택이어야 한다는 사용자 정정(R1)으로 뒤집혔고, 이동 루프 끝 감지에 서브클래스가 필요했다. ② **창이 커서를 따라오는 끌기(1판의 Follow)** — 사용자 결정(Q1 — 언리얼식 딱지). ③ **끄는 동안 모델을 바꾸고 취소 때 되돌리기** — 사용자 결정(R2 아래 줄 · R11a — 놓을 때만 바꾼다). ④ **놓는 순간의 판정만으로 적용(1판)** · **마지막으로 보낸 가이드만으로 적용(2판)** · **보낸 가이드와 다르면 우리 창 위에서는 늘 무변경(3판)** — 1판은 사용자가 못 본 가이드에 놓이고(2판 리뷰 A1), 2판은 문턱 직후 뗀 손이나 마지막 틱 사이에 움직인 손이 엉뚱한 결과를 내며(2판 리뷰), 3판은 슬롯 가운데처럼 가이드가 없는 자리에 놓아도 새 창이 안 떠 PRD R22(「이음새 · 탭바가 아닌 곳에 놓으면 새 창」)를 어긴다(3판 리뷰 재검). 그래서 4판은 「가이드 없음」을 늘 새 창으로, 이음새 · 탭바만 보인 것과 대조한다. ⑤ **웹뷰 reparent(`Webview::reparent`)로 화면을 옮기기** — 슬롯 내용은 모델 데이터라 팝아웃처럼 모델을 옮기면 된다(조사 §4 리뷰). ⑥ **슬롯 하나를 직접 끌기** — 사용자 결정(PRD §2 비목표). ⑦ **DOM 끌기 라이브러리 · OLE 끌기**(pragmatic-drag-and-drop · dnd-kit · react-dnd · crabnebula `drag-rs`) — 앞 셋은 문서 하나 안에서만 돌고, `drag-rs` 는 데이터 전달 모델이다(조사 §9). ⑧ **도킹 라이브러리 채택**(dockview · FlexLayout · golden-layout · Lumino) — 자기 레이아웃 모델을 소유해 셸 권위(ADR-0035)와 겹친다(조사 §5).
 - **ADR-B 크기 규칙 = 새것 1/3 하나 · 면적 0 만 거절**(사용자 결정 R7 · R8)
