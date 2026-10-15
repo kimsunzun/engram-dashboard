@@ -9,7 +9,7 @@
 | **입력** | [PRD](prd.md)(R1–R42 · D1–D11 · E1–E6) + PRD 리뷰 델타 1차 10건(Δ1–Δ10) · 2차 9건(Δa–Δi) · 3차(「3차 델타」 — 내장 백엔드는 떼지 않고 쉰다 · 버스 실행 기본값 저장 · JSON 고르기 칸은 막지 않는다)(2026-10-15 · PRD 개정 진행 중) + 결정 메모 [`20261012-preset-decisions.md`](../../../.claude/handoff/attachments/20261012-preset-decisions.md) |
 | **줄 포인터 기준** | HEAD `477d9b7a` + 미커밋 문서 |
 | **표기** | (Dn) = 이 부분은 PRD 추천값 Dn 에 기댄다 · (Δn · Δx) = PRD 리뷰 델타를 반영 · 확신도 = 확실 / 가능성 높음 / 불확실 · 「T번호」 = §2-2 의 TRD 결정 |
-| **화면 그림** | [briefing-ui.html](briefing-ui.html) — 여기선 그리지 않는다 |
+| **화면 그림** | [briefing.html](briefing.html) — 여기선 그리지 않는다 |
 
 ## 0. 한 문단 요약 — 흐름
 

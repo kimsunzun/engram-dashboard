@@ -301,6 +301,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 <!-- 2 -->
 <section id="list-shape">
   <div class="sh"><span class="no">2</span><h2>라이브러리 슬롯</h2><span class="tag ok">확정</span></div>
+  <p class="pend"><span class="tag ok">확정 2026-10-16</span>슬롯 이름 = 「라이브러리 1~4」 — 뒤에 브라우저 · 에디터를 붙이지 않음(범용: 나중에 커맨드 묶음 · 스크립트 종류도 담는다)</p>
   <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 묶음 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
   <div class="win" role="img" aria-label="라이브러리 슬롯 화면 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯</div>
@@ -397,7 +398,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
         <div class="msg err"><b>충돌</b><span>백엔드 정하는 설정이 둘 — codex 기본 · 공용 규칙 › claude 기본</span><span class="n" style="flex:none">3</span></div>
         <div class="msg warn"><b>경고</b><span>codex 터미널 + 사용자 폴더 → 실행 때 파일 만들지 물음</span></div>
         <div class="fold">쓰는 에이전트 3 — 리뷰봇 · PR 감시 · 야간 점검</div>
-        <div class="fold">최종 구성 ▸ <span class="tag unv">미정</span><span class="n">4</span></div>
+        <div class="fold"><s>최종 구성 ▸</s> <span class="tag ok">없앰</span></div>
       </div>
     </div>
   </div>
@@ -442,7 +443,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">4</span>위 + 담기 = 전체 검색 · 담으면 종류 보고 자기 칸으로</span>
     <span><span class="n">5</span>지시서 · 설정만 끌어서 순서 — 그 순서대로 이어 붙음 · 스킬은 이름순</span>
   </div>
-  <p class="pend"><span class="tag unv">미정</span>겹친 것을 한 번만 센 ‘에이전트가 실제로 받는 전체’ 보기 — 필요할지 · 어디에 둘지 미정</p>
+  <p class="pend"><span class="tag ok">확정</span>‘에이전트가 실제로 받는 전체’ 평평한 보기는 만들지 않음 — 안에 든 프리셋은 그 자리에서 펼쳐 본다</p>
   <div class="sh"><h3>편집 칸의 줄 누르기</h3><span class="tag ok">확정</span><span class="tag">일부 제안</span></div>
   <div class="dash" role="img" aria-label="편집 칸에서 지시서 줄을 누르면 상세 패널이 라이브러리 슬롯 오른쪽 가장자리에 붙어 옆 터미널 슬롯 위로 겹쳐 나오는 예시">
     <div class="win">
@@ -570,7 +571,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">4</span>줄에 마우스를 올리면 폴더 돋보기 — 누르거나 줄을 더블클릭하면 그 항목 자리로 이동</span>
     <span><span class="n">5</span>이동한 곳에선 그 프리셋을 고칠 수 있음 · ← 로 리뷰어로 돌아감</span>
   </div>
-  <p class="pend"><span class="tag unv">미정</span>칸 폭 기억(슬롯마다 · PC마다)</p>
+  <p class="pend"><span class="tag ok">확정</span>칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록은 번호(1~4)마다 저장</p>
   <p class="pend"><span class="tag ok">확정</span>따로 된 프리셋 편집 슬롯은 만들지 않음 — 편집은 라이브러리 슬롯 오른쪽 칸 하나 · 옛 프리셋(작업 폴더 즐겨찾기) 슬롯도 없앰</p>
 </section>
 
@@ -1137,7 +1138,6 @@ engram agent preset add 리뷰봇 프리셋/실험/night-rules</div>
 <section>
   <div class="sh"><span class="no">13</span><h2>열린 것</h2><span class="tag unv">미정</span></div>
   <div class="open">
-    <span class="tag unv">실제로 받는 전체 보기 (필요한지)</span>
     <span class="tag unv">배포판 기본 내용이 고친 파일을 덮을 때</span>
     <span class="tag unv">다중 데몬 (나중)</span>
   </div>
