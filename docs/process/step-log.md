@@ -2768,4 +2768,4 @@
   - **결과 수치(2026-10-15)** — Rust crate 322(파일 보정 39 · OR 대안 2 · 상류 교체 파일 16 · synthesized 1 = siphasher) · npm 236(lock 대조 236) · Rust 고지 파일 8 · 손 부록 1(WebView2 로더 SDK 1.0.3650.58). 릴리즈 폴더 `THIRD_PARTY_LICENSES.txt` 약 620 KB.
   - **리뷰가 잡은 것** — cargo-about 이 `LICENSE_MIT` · `license-mit` 를 못 읽어 54 crate 가 자리표시 저작권으로 실리던 것 · 정적 링크되는 WebView2 로더 누락 · npm peer 누락 경로 · 손 교체의 버전 고정 · 선언 라이선스와 본문 대조.
   - **메인 실수 1 건** — 조사 보고서에 적대 리뷰 지적을 반영했다고 보고했으나 쓴 `python` 이 Windows 스토어 껍데기라 아무것도 안 바뀌었다(출력 미확인). doc-aware 리뷰가 잡아 node 로 다시 반영했다.
-  - **남은 것** — ADR-0294 「거부한 대안」 셋째 줄(커밋 + CI 최신 검사)의 사용자 기각 사유 미수령 · T-62 와 도구 조사 문서는 `v0.3.3/chore/misc`(`249d92cb`)에만 있어, 그 브랜치가 master 에 들어오면 T-62 를 닫는다.
+  - **남은 것** — T-62 와 도구 조사 문서는 `v0.3.3/chore/misc`(`249d92cb`)에만 있어, 그 브랜치가 master 에 들어오면 T-62 를 닫는다.
