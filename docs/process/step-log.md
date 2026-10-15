@@ -2753,3 +2753,5 @@
   - **후속 서베이(2026-10-15)** — 프리셋 편집 칸에서 직접 담은 것 대 안에 든 프리셋의 것 · 종류별 칸 · 순서 · 칸마다 담기: `docs/research/preset-editor-nested-items-layout-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
   - **후속 서베이(2026-10-15)** — 옆 상세 패널을 덮나 칸을 끼워 넣나: `docs/research/side-detail-panel-push-vs-overlay-survey-2026-10-15.md`(`/research` light).
   - **후속 서베이(2026-10-15)** — 가장자리에 붙은 펼침 패널의 방향 · 창 끝일 때: `docs/research/edge-attached-flyout-direction-survey-2026-10-15.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 라이브러리 폴더를 아직 안 골랐을 때의 빈 화면 안내: `docs/research/library-empty-state-first-run-survey-2026-10-15.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 라이브러리 항목을 라이브러리 밖 대상(에이전트)에 붙이는 화면: `docs/research/attach-library-items-to-entity-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).

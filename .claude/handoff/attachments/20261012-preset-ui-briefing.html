@@ -220,11 +220,20 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 .cgrp{font-size:12px;letter-spacing:.04em;color:var(--muted);font-weight:600}
 .open{display:flex;flex-wrap:wrap;gap:8px}
 .open .tag{font-size:12.5px;font-weight:500;padding:3px 10px;white-space:normal;color:var(--ink)}
+/* agent attach draft: tree slot on the left, preset editor flyout attached to its right edge over the terminal slot */
+.dash.dash-tree{grid-template-columns:minmax(0,1fr) minmax(0,1.6fr)}
+.dash-tree .term-body{min-height:540px}
+.dash-tree .tree-body{padding:8px;display:flex;flex-direction:column;gap:2px;font-size:12.5px}
+.dash-tree .tr .stg{color:var(--ok);font-size:10px}
+.dash-tree .pop.ctx{margin:2px 0 4px 20px;max-width:170px}
+.dash-tree .detov{top:40px;left:calc(10px + (100% - 30px) * 1 / 2.6);width:min(300px,55%)}
 @media (max-width:860px){.cols-lib{grid-template-columns:minmax(0,1fr)}.cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}}
 @media (max-width:720px){
   .cols-3,.ab,.two-slots,.popwrap,.cfg,.dash,.dash .cols-lib{grid-template-columns:minmax(0,1fr)}
   .dash .cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
   .detov{position:static;width:auto;border-radius:8px}
+  .dash.dash-tree{grid-template-columns:minmax(0,1fr)}
+  .dash-tree .term-body{min-height:160px}
   .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
   h1{font-size:25px}
 }
@@ -881,12 +890,124 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
       </div>
     </div>
   </div>
+  <p class="pend"><span class="tag">이전 안</span>위 칩 줄 그림</p>
   <div class="caps">
     <span><span class="n">1</span>프리셋만 고르는 피커</span>
     <span><span class="n">2</span>기본 프리셋도 처음부터 붙어 있음 (보이는 자리 미정)</span>
     <span><span class="n">3</span>색 점 = 붙은 설정의 백엔드</span>
   </div>
   <p class="pend"><span class="tag unv">미정</span>어디서 붙이나 — 추천: 에이전트 설정 창 칩 줄 + 트리 우클릭</p>
+  <div class="sh"><h3>초안 — 트리 우클릭 → 옆으로 펼친 프리셋 칸</h3><span class="tag unv">초안 · 미정</span></div>
+  <div class="dash dash-tree" role="img" aria-label="에이전트 트리에서 리뷰봇을 우클릭해 프리셋을 고르면 트리 슬롯 오른쪽 가장자리에 프리셋 칸이 붙어 옆 터미널 슬롯 위로 펼쳐지는 예시">
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 트리</div>
+      <div class="tree-body">
+        <div class="tr on"><span class="vend x"></span><span class="stg">●</span>리뷰봇</div>
+        <div class="pop ctx">
+          <div class="opt"><span>열기</span></div>
+          <div class="opt"><span>이름 바꾸기</span></div>
+          <div class="opt on"><span>프리셋…</span><span class="n">1</span></div>
+          <div class="opt"><span>종료</span></div>
+          <div class="opt"><span>지우기</span></div>
+        </div>
+        <div class="tr"><span class="vend c"></span><span class="stg">●</span>야간 점검</div>
+        <div class="tr"><span class="vend x"></span><span class="stg">●</span>PR 감시</div>
+      </div>
+      <div class="detov">
+        <div class="head"><span class="vend x"></span><span class="t" style="font-size:14px">리뷰봇</span><span class="kind">codex · JSON</span><span class="sp"></span><span class="x" aria-label="닫기">×</span></div>
+        <div class="grp ksec">프리셋<span class="sp"></span><span class="n">2</span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="tw">▸</span><span class="name">기본</span><span class="kind">내장</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="tw">▾</span><span class="n">3</span><span class="name">리뷰어</span><span class="x">×</span></div>
+        <div class="nestv">
+          <div class="grp ksec">지시서</div>
+          <div class="row"><span class="name">리뷰 규율</span></div>
+          <div class="grp ksec">스킬</div>
+          <div class="row"><span class="name">review</span></div>
+          <div class="grp ksec">설정</div>
+          <div class="row"><span class="name">codex 기본</span></div>
+        </div>
+        <div class="row" style="border-style:dashed;color:var(--gone)"><span class="grip">⋮⋮</span><span class="name">night-rules — 찾을 수 없음 · <u>다시 잇기</u></span><span class="n">4</span><span class="x">×</span></div>
+        <div class="msg warn"><span>바뀐 프리셋은 다음 실행부터 적용됩니다</span><span class="n" style="flex:none">5</span></div>
+      </div>
+    </div>
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>터미널 — 리뷰봇</div>
+      <div class="term-body"><span class="pr">$</span> codex
+<span class="pr">&gt;</span> 리뷰 중…
+<span class="dim">● Read src/agent/session.rs</span>
+<span class="dim">● Grep "input_order"</span>
+  락 순서를 확인했습니다.
+<span class="pr">&gt;</span> </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>에이전트 트리에서 우클릭 → 프리셋… 을 누르면 트리 슬롯 가장자리에 붙어 옆 슬롯 위로 펼쳐짐(상세 패널과 같은 방식)</span>
+    <span><span class="n">2</span>안의 편집 칸은 프리셋 편집 칸과 같은 부품 — 에이전트는 프리셋 칸만 있고 + · ⇐ · 폴더 돋보기로 담음</span>
+    <span><span class="n">3</span>붙은 프리셋은 그 자리에서 펼쳐 보기만 · 고치려면 폴더 돋보기로 그 프리셋에 감</span>
+    <span><span class="n">4</span>가리키던 프리셋이 없으면 찾을 수 없음 표시</span>
+    <span><span class="n">5</span>돌고 있는 에이전트에 바꾼 것은 다음 실행부터(제안 — 미정)</span>
+  </div>
+  <div class="sh"><h3>대안 — 라이브러리 슬롯 오른쪽 칸에서 에이전트 편집</h3><span class="tag unv">대안 · 미정</span></div>
+  <div class="dash dash-tree" role="img" aria-label="에이전트 트리에서 리뷰봇을 우클릭해 프리셋을 고르면 옆 라이브러리 슬롯 오른쪽 칸에 그 에이전트가 떠서 같은 슬롯 목록의 프리셋을 담는 예시">
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 트리</div>
+      <div class="tree-body">
+        <div class="tr on"><span class="vend x"></span><span class="stg">●</span>리뷰봇</div>
+        <div class="pop ctx">
+          <div class="opt"><span>열기</span></div>
+          <div class="opt"><span>이름 바꾸기</span></div>
+          <div class="opt on"><span>프리셋…</span><span class="n">1</span></div>
+          <div class="opt"><span>종료</span></div>
+          <div class="opt"><span>지우기</span></div>
+        </div>
+        <div class="tr"><span class="vend c"></span><span class="stg">●</span>야간 점검</div>
+        <div class="tr"><span class="vend x"></span><span class="stg">●</span>PR 감시</div>
+      </div>
+    </div>
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
+      <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>프리셋</u></span></div>
+      <div class="win-body cols-lib">
+        <div class="pane side">
+          <div class="tr"><span class="tw">▸</span>지시서</div>
+          <div class="tr"><span class="tw">▸</span>스킬</div>
+          <div class="tr"><span class="tw">▸</span>설정</div>
+          <div class="tr on"><span class="tw">▾</span>프리셋</div>
+        </div>
+        <div class="pane">
+          <div class="lst">
+            <div class="li"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
+            <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span><span class="n">3</span></div>
+            <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
+          </div>
+        </div>
+        <div class="pane">
+          <div class="head"><span class="vend x"></span><span class="t" style="font-size:14px">리뷰봇</span><span class="kind">codex · JSON</span><span class="chip">에이전트</span><span class="n">2</span></div>
+          <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="같은 슬롯 목록에서 고른 것 담기">⇐</button><span class="n">4</span><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="row"><span class="grip">⋮⋮</span><span class="tw">▸</span><span class="name">기본</span><span class="kind">내장</span><span class="x">×</span></div>
+          <div class="row"><span class="grip">⋮⋮</span><span class="tw">▾</span><span class="name">리뷰어</span><span class="x">×</span></div>
+          <div class="nestv">
+            <div class="grp ksec">지시서</div>
+            <div class="row"><span class="name">리뷰 규율</span></div>
+            <div class="grp ksec">스킬</div>
+            <div class="row"><span class="name">review</span></div>
+            <div class="grp ksec">설정</div>
+            <div class="row"><span class="name">codex 기본</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>에이전트 트리 우클릭 → 프리셋… = 라이브러리 슬롯을 열고(이미 열려 있으면 그 슬롯) 오른쪽 칸에 그 에이전트를 띄움</span>
+    <span><span class="n">2</span>오른쪽 칸 = 프리셋 편집 칸과 같은 부품 · 머리에 에이전트 표시 · 에이전트는 프리셋 칸만</span>
+    <span><span class="n">3</span>같은 슬롯의 목록에서 프리셋을 고르고</span>
+    <span><span class="n">4</span>⇐ 로 담음 — 라이브러리와 편집이 한 슬롯 안이라 왔다 갔다 없음 (+ 검색 · 폴더 돋보기도 그대로)</span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>목록에서 고른 것을 ⇐ 로 담을 때 같은 슬롯의 목록을 쓰는지(지금 규칙 = 다른 라이브러리 슬롯) — 에이전트 편집일 땐 같은 슬롯 목록을 써야 함</p>
+  <p class="pend"><span class="tag unv">미정</span>기본 프리셋을 떼면 경고할지</p>
+  <p class="pend"><span class="tag unv">미정</span>고른 모델 · 강도 저장 위치</p>
+  <p class="pend"><span class="tag unv">미정</span>돌고 있는 에이전트에 바꾼 것을 언제 반영할지</p>
 </section>
 
 <!-- 10 -->
