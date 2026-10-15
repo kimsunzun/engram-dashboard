@@ -726,9 +726,10 @@ pub fn move_slot_to_window(
             mgr.insert_tab_into(&target_label, tmp_view)
         };
         if let Err(e) = inserted {
-            // ★이 롤백은 실질적으로 기존 창 `insert_tab_into` 실패(phase B 언락 중 대상 창 소멸)만 가드한다★:
-            //   새 창 경로는 fresh label(단조 발급 — 재사용 충돌 없음) + 방금 만든 tmp_view 라 실패 불가다.
-            //   그래도 새 창일 때 close 를 남기는 건 방어다(미래에 attach 가 실패 가능해지면 유령 창이 남는다).
+            // ★롤백 갈래는 둘이다★: 기존 창 타깃은 phase B(언락) 동안 대상 창이 모델에서 사라지면
+            //   `insert_tab_into` 가 실패한다. 새 창 타깃은 label 이 단조 발급이라 겹치지 않지만, phase B 동안 그 새
+            //   창이 닫혀 묘비가 섰으면(`ViewManager::mark_closed`) `attach_view_as_new_window` 가 `WindowClosed` 로
+            //   실패한다 — 그때 아래 `host.close` 가 방금 연 창을 거둔다(이미 닫혔으면 무동작).
             mgr.drop_detached_view(tmp_view);
             subs.resync(&mgr);
             drop(mgr);

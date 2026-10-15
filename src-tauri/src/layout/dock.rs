@@ -11,7 +11,7 @@ use std::collections::HashSet;
 
 use uuid::Uuid;
 
-use super::geometry::{self, LayoutGeometry, RectF64, SlotRect};
+use super::geometry::{self, has_area, LayoutGeometry, RectF64};
 use super::tree;
 use super::types::{LayoutNode, SlotContent, SplitDir};
 
@@ -166,13 +166,10 @@ fn slot_node_mut(node: &mut LayoutNode, slot_id: Uuid) -> Option<&mut LayoutNode
     }
 }
 
-fn has_area(r: &SlotRect) -> bool {
-    r.x0 < r.x1 && r.y0 < r.y1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::geometry::SlotRect;
 
     const SIDES: [DockSide; 4] = [
         DockSide::Left,

@@ -23,13 +23,8 @@
 
 use uuid::Uuid;
 
-use super::geometry::{self, SlotRect};
+use super::geometry::{self, has_area, SlotRect};
 use super::types::LayoutNode;
-
-// ADR-0227
-fn has_area(r: &SlotRect) -> bool {
-    r.x0 < r.x1 && r.y0 < r.y1
-}
 
 fn center_x(r: &SlotRect) -> f64 {
     (r.x0 + r.x1) / 2.0

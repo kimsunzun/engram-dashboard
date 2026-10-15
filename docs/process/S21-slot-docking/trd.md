@@ -2,7 +2,7 @@
 
 | 항목 | 값 |
 |---|---|
-| **상태** | 4.1판 — 정합(구조 브리핑을 쓰며 찾은 어긋남 여섯 · 4판 = 3판 `/review trd full` 의 작은 FIX 여섯 반영) · 사용자 확인 대상 6건(§11-1) · 스파이크 5건(§8 — S2 는 진행 중이고 결과는 메인이 접어 넣는다) |
+| **상태** | 4.1판 — 정합(구조 브리핑을 쓰며 찾은 어긋남 여섯 · 4판 = 3판 `/review trd full` 의 작은 FIX 여섯 반영) · 사용자 확인 대상 7건(§11-1) · 스파이크 5건(§8 — S2 는 진행 중이고 결과는 메인이 접어 넣는다) |
 | **날짜** | 2026-10-15 |
 | **스텝** | S21 |
 | **브랜치** | `v0.4.1/feat/slot-docking` |
@@ -117,6 +117,7 @@ pub enum DockError {
     WindowClosed(String),                                 // ← NewWindow phase C 의 label 에 묘비(그 새 창이 닫힘) — NewWindow 만
     StaleLease, SourceChanged, TargetChanged,             // ← 사전조건을 단 요청만 — 명령 경로에서는 안 난다
     WindowExists(String),                                 // ← NewWindow label 이 이미 모델에 있음 — 닿지 않는 방어(INTERNAL)
+    SlotIdOverlap,                                        // ← 트리 연산 `SlotIdOverlap` — 닿지 않는 방어(INTERNAL · §3-2 끝 줄)
     WindowOpen(String),                                   // ← 적용 서비스(새 창 열기 실패)
 }
 pub fn dock(&mut self, view: ViewId, to: DockTo, guard: &DockGuard, focus: FocusPolicy) -> Result<Docked, DockError>;
@@ -124,35 +125,36 @@ pub fn plan_new_window(&self, view: ViewId, guard: &DockGuard) -> Result<NewWind
 pub enum NewWindowPlan { Reuse { label: WindowLabel }, Create { size: Option<(f64, f64)> } }
 pub fn lease_tab(&mut self, view: ViewId) -> Result<LeaseId, DockError>;  // 끌기 시작
 pub fn release_lease(&mut self, id: LeaseId);                             // 끌기 끝 — 다른 표식이면 무동작
-pub(crate) fn mark_closed(&mut self, label: &str);                        // 묘비 — 「닫히는 창」 절
+pub fn mark_closed(&mut self, label: &str);                               // 묘비 — 「닫히는 창」 절 · 2 단계는 부르는 쪽이 시험뿐이라 `pub`(미사용 경고 회피) — 3 단계에서 `pub(crate)` 로 좁힌다
+// attach_view_as_new_window(label, ..) 도 묘비를 보고 LayoutError::WindowClosed(label) 로 거절한다(「닫히는 창」 (b))
 ```
 
 **판정 순서가 계약이다**(앞에서 걸리면 뒤는 안 본다 · 걸리면 무변경 — `manager.rs:9` 의 「no-op + Err」):
 
 1. 출처 View 가 있나 → `TabNotFound`.
-2. 목적지 — Seam 의 대상 View 없음 = `TabNotFound` · TabBar 의 창 없음 = `WindowNotFound` · NewWindow 의 label 에 묘비가 있음 = `WindowClosed` · 그 label 이 이미 모델에 있음 = `WindowExists`(발급기가 단조라 닿지 않는 방어 — 닿으면 셸 결함이다. 옛 `attach_view_as_new_window` 는 같은 자리에서 `WindowNotFound` 를 내지만, 「창이 있다」를 「창 없음」으로 말하지 않으려고 새 이름을 쓴다).
+2. 목적지 — Seam 의 대상 View 없음 = `TabNotFound` · TabBar 의 창 없음 = `WindowNotFound`(둘 다 대상 창에 묘비가 있어도 같은 사유 — 묘비는 모델 삭제 뒤에 서므로 방어 갈래다) · NewWindow 의 label 에 묘비가 있음 = `WindowClosed` · 그 label 이 이미 모델에 있음 = `WindowExists`(발급기가 단조라 닿지 않는 방어 — 닿으면 셸 결함이다. 옛 `attach_view_as_new_window` 는 같은 자리에서 `WindowNotFound` 를 내지만, 「창이 있다」를 「창 없음」으로 말하지 않으려고 새 이름을 쓴다).
 3. Seam 의 대상 = 출처 → `SelfTarget`. (TabBar 의 대상 창 = 출처 창은 자리 옮기기로 허용한다 — R21 「원래 창 탭바에 놓으면 그 창의 탭으로」.)
 4. Seam 의 기준 슬롯이 대상 탭에 있나 — 다른 탭에 있으면 `SlotNotInTab`, 어디에도 없으면 `SlotNotFound`.
 5. 결과가 main 의 마지막 탭을 main 에서 빼면 → `MainLastTab`(불변식 4 — `manager.rs:23-24`).
 6. 표식 — 출처에 표식이 섰는데 `guard.lease` 가 없으면 `Dragging`(R13c · D9). `guard.lease` 가 있는데 지금 표식과 다르거나 표식이 없으면 `StaleLease`(지난 끌기의 늦은 놓기).
 7. `expect_source` 와 다르면 `SourceChanged` · `expect_target` 과 다르면 `TargetChanged`(R13c).
-8. Seam 이면 `docked_tree` → `ZeroArea`.
+8. Seam 이면 `docked_tree` → `SlotIdOverlap`(닿지 않는 방어) · `ZeroArea` — 트리 연산의 판정 순서 그대로.
 
 적용(전부 `&mut self` 안 — 락은 부르는 쪽 한 번 · `bump_version` 한 번):
 
 - **Seam** — 대상 View 의 `layout` 을 결과 트리로 바꾼다. **모르는 내용 곁표**(`unknown_content` · `manager.rs:294-297`)의 출처 View 항목을 슬롯 id 째 대상 View 키로 옮긴다 — 안 옮기면 `remove_view`(`:600-604`)가 원문을 같이 지워 새 판이 쓴 슬롯이 다음 저장에서 사라진다(`prepare_detached_view` 가 원문을 따라 옮기는 것과 같은 이유 — `:973-994`). 출처 탭을 출처 창 탭 목록에서 빼고(아래 도우미) `remove_view(출처)`.
-- **TabBar** — 출처 창 탭 목록에서 빼고(도우미) 대상 창 목록의 `min(index, 길이)` 자리에 넣고 `view_owner` 를 바꾼다. View 를 통째 옮기므로 id · 곁표가 그대로 따라간다(곁표는 뷰 키 — `manager.rs:291-296` 주석). 같은 창이면 자리만 바뀐다 — 같은 자리면 무변경 · `version` 불변 · `Ok`.
+- **TabBar** — 출처 창 탭 목록에서 빼고(도우미) 대상 창 목록의 `min(index, 길이)` 자리에 넣고 `view_owner` 를 바꾼다. View 를 통째 옮기므로 id · 곁표가 그대로 따라간다(곁표는 뷰 키 — `manager.rs:291-296` 주석). 같은 창이면 자리만 바뀐다 — 같은 자리면 무변경 · `version` 불변 · `Ok`. 단 `Reveal` 이고 그 탭이 그 창의 보이는 탭이 아니면 보이게만 한다(목록 그대로 · `version` +1 · 잠정 — §7 #16 · §11-1 #7).
 - **NewWindow** — 출처 창에서 빼고(도우미) `WindowTabs::new_popout(view)` 로 새 창 항목을 만든다(`attach_view_as_new_window` 와 같은 꼴 · `:1022-1040`).
 - **탭 목록에서 빼기 도우미** — 활성 승계는 `close_tab` 과 같은 규칙(오른쪽 우선 · 없으면 왼쪽 — `:688-692`). 팝아웃이 비면 창 항목을 지우고 `source_window_closed = true`(R10 · ADR-0057 D-3). `close_tab` 과 나눠 쓰도록 뽑는다 — 기존 `close_*` 시험(`manager.rs:1498-1631`)이 리팩터를 지킨다. 승계 계산은 순수 함수(`succession(tabs, removed) -> Option<ViewId>`)로도 내보낸다 — 끄는 동안의 「떼어진 표시」(§4-1)가 같은 규칙을 쓴다.
 - **보이는 탭(R16 · 2판 리뷰 D1/A9)** — 대상 창의 활성 탭은 손대지 않는다. ★예외 하나: 출처가 대상 창의 활성 탭이었으면(같은 창 안 도킹) 출처가 사라져 「보이는 탭 그대로」가 성립할 수 없다 — 그때는 대상이 보이는 탭이 된다★(Seam = 대상 탭 · TabBar = 옮긴 그 탭이 그대로 활성). 사용자가 보던 내용이 그 탭에 있으므로 보던 것이 화면에 남는다(사용자 확인 대상 — §11-1 #1). `Reveal` 이면 늘 대상(Seam = 대상 탭 · TabBar · NewWindow = 옮긴 탭)을 활성으로 한다.
 - **포커스** — `Reveal` 이면 Seam 은 대상 View 의 `focused_slot_id` = 끼운 첫 슬롯, TabBar · NewWindow 는 그 탭의 포커스 그대로(R11b). `Keep` 이면 손대지 않는다 — 기준 슬롯 id 는 감싼 뒤에도 그대로라 기존 포커스가 유효하다.
 - **표식** — `guard.lease` 가 지금 표식이면 내린다.
 
-`plan_new_window`(R22 phase A) — 판정 1 · 5 · 6 · 7(출처만)을 본 뒤, 출처가 **탭이 그것 하나뿐인 팝아웃**이면 `Reuse{그 창}`(새 창을 만들지 않고 그 창을 옮긴다 — §7 #8), 아니면 `Create{size}` — size = 출처가 팝아웃이면 그 창 `attrs.bounds` 의 논리 크기(보통 자리 — 최대화 중이어도 · §11-1 #4), main 이면 `None`(창 포트의 팝아웃 기본 크기 — `popout.rs:143` 720×500)(R22 · D12).
+`plan_new_window`(R22 phase A) — 판정 1 · 5 · 6 · 7 을 본 뒤(7 의 대상 쪽은 NewWindow 규칙 그대로 — `expect_target` 이 있으면 `TargetChanged` · 창을 열기 전에 phase C 와 같은 답), 출처가 **탭이 그것 하나뿐인 팝아웃**이면 `Reuse{그 창}`(새 창을 만들지 않고 그 창을 옮긴다 — §7 #8), 아니면 `Create{size}` — size = 출처가 팝아웃이면 그 창 `attrs.bounds` 의 논리 크기(보통 자리 — 최대화 중이어도 · §11-1 #4), main 이면 `None`(창 포트의 팝아웃 기본 크기 — `popout.rs:143` 720×500)(R22 · D12).
 
 #### 표식(lease) — 「이 탭은 지금 끄는 중」
 
-`ViewManager.lease: Option<(LeaseId, ViewId)>` — 한 번에 하나(끌기는 하나씩이다). `lease_tab` 은 판정 1 · main 의 마지막 탭(= `MainLastTab` — R14) · 「이미 표식이 있음」(= `Dragging`)을 보고 세운다. 모델 안에 두는 이유: 「끄는 중인 탭을 옮기는 명령은 실패」(R13c)의 판정이 그 명령의 변경과 **같은 락 안에서** 서야 한다 — 따로 두면 판정과 적용 사이에 끌기가 시작될 수 있다. 표식 번호 = 끌기 세션 번호다 — 모델은 그 번호의 뜻(마우스 · 세션)을 모르고 같은지만 본다. 메모리에만 있고 저장하지 않는다.
+`ViewManager.lease: Option<(LeaseId, ViewId)>` — 한 번에 하나(끌기는 하나씩이다). `lease_tab` 은 판정 1 · main 의 마지막 탭(= `MainLastTab` — R14) · 「이미 표식이 있음」(= `Dragging`)을 보고 세운다. 모델 안에 두는 이유: 「끄는 중인 탭을 옮기는 명령은 실패」(R13c)의 판정이 그 명령의 변경과 **같은 락 안에서** 서야 한다 — 따로 두면 판정과 적용 사이에 끌기가 시작될 수 있다. 표식 번호 = 끌기 세션 번호다 — 모델은 그 번호의 뜻(마우스 · 세션)을 모르고 같은지만 본다. 메모리에만 있고 저장하지 않는다. 표식이 선 탭이 모델에서 지워지면(탭 닫기 · 창 닫기 · 복원 수락 — View 를 지우는 유일한 자리 `remove_view`) 표식도 함께 내려간다 — 다음 끌기가 막히지 않고, 지난 세션의 `release_lease` 는 무동작 · 그 표식을 쥔 늦은 놓기는 `StaleLease` 다.
 
 #### 닫히는 창 — 모델 먼저 · 묘비 (2판 리뷰 D3/A5 · 3판 결정 M2)
 
@@ -627,7 +629,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 13. **명령 하나(`tab.dock`) + 모드 · 선택 칸** — PRD R16 그대로. 매크로가 필드 있는 enum 을 못 실어 선택 칸 + 조합 검사로 받는다(`layout.setSlotContent` 선례).
 14. **레이아웃 적용 서비스의 첫 타입드 오류 · 거절은 ok 의 결말 칸이 아니라 오류** — 버스가 `NOT_FOUND` / `CONFLICT` 를 가르고, `ok` 만 보는 호출자가 거절을 성공으로 읽지 않는다.
 15. **`DockSide` 는 serde rename 없이 두 표면이 같은 철자** — 맞대기 시험을 둔다.
-16. **탭바 `index` 가 넘치면 맨 뒤로 자른다(오류 아님) · 같은 창 같은 자리면 무변경 `Ok`**.
+16. **탭바 `index` 가 넘치면 맨 뒤로 자른다(오류 아님) · 같은 창 같은 자리면 무변경 `Ok` — 단 `Reveal` 이고 그 탭이 안 보이던 탭이면 그 탭을 보인다(`version` +1 한 번)** · `Keep` 이거나 이미 보이는 탭이면 진짜 무변경(`version` 그대로)이고, 어느 쪽이든 `Ok` 라 표식을 내린다. 잠정 — 2 단계 코드 리뷰에서 리뷰어 둘이 「무변경」과 「보임」으로 갈렸고 메인이 무거운 쪽(보임)을 잠정으로 골랐다(§11-1 #7).
 17. **창 포트의 새 메서드는 기본 본문 없이** — 버스 경로 `OwnedWindowHost` 가 말없이 기본 동작으로 떨어지는 것을 컴파일러가 막는다(3판 리뷰 F2).
 18. **버스 NewWindow 의 x/y 는 `placement::land` 로 검증하고 안 걸치면 기본 자리** — 저장 자리 복원과 같은 규칙(3판 리뷰 F10).
 19. **(M2) 팝아웃 닫기 요청에서 모델을 먼저 지우고 label 에 묘비** — 닫히는 창으로의 확정을 타입드 오류로 막고, 새 창 phase C 는 묘비 앞에서 멈춘다. 팝아웃의 닫기 요청은 되돌려지지 않는다는 것이 근거다(§1-2). 팝아웃 `slot.popout` 의 같은 틈도 함께 닫는다. 사용자 확인 대상(§11-1 #2) · ADR-E.
@@ -685,7 +687,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 | 층 | 무엇 | 어디(타깃) |
 |---|---|---|
 | 트리 연산 | `docked_tree` — 네 변 × (슬롯 · 바깥) 모양 · 비율 1/3 · 2/3 · 감싼 쪽 안쪽 비율 보존(AC4 · AC5) · 슬롯 id · 분할 id 보존 · 없는 슬롯 · **새** 면적 0(깊은 자식 · 반복 도킹으로 표현 한계에 닿는 칸) · 원래부터 면적 0 인 칸은 거절 사유가 아님 · `incoming_rect` 가 결과 기하의 외접 사각형과 비트 단위로 같음 | `src/layout/dock.rs` `#[cfg(test)]` → `cargo test -p engram-dashboard --test lib_unit` |
-| 모델 | `dock` 세 모드 — 판정 순서(앞 사유가 이김) · 사유마다 무변경(`version` 그대로) · 성공마다 `version` +1 한 번 · Seam 곁표가 대상 View 로 따라감 · 탭바 자리(넘침 = 맨 뒤 · 같은 창 자리 옮기기 · 같은 자리 무변경) · 출처 창 활성 승계 · 빈 팝아웃 항목 제거 · main 마지막 탭 거절 · `Keep` 은 대상 활성 · 포커스 그대로 · ★같은 창에서 출처가 활성이면 대상이 활성★ · `Reveal` 은 대상 활성 + 첫 슬롯 포커스 · 표식(`Dragging` · `StaleLease` · 성공이 표식을 내림 · `release_lease` 의 다른 번호 무동작) · `SourceChanged` · `TargetChanged`(배치 · 탭 목록) · 묘비(`mark_closed` 뒤 NewWindow = `WindowClosed` · `attach_view_as_new_window` 도 거절) · 이미 있는 label 로 NewWindow = `WindowExists` · `plan_new_window`(재사용 · 크기 · main = None) · `succession` 이 `close_tab` 과 같은 답. **매 시험 뒤 기존 `assert_invariants`**(`manager.rs:1305` — ADR-0057 ①–④) | `src/layout/manager.rs` `#[cfg(test)]` → `lib_unit` |
+| 모델 | `dock` 세 모드 — 판정 순서(앞 사유가 이김) · 사유마다 무변경(`version` 그대로) · 성공마다 `version` +1 한 번 · Seam 곁표가 대상 View 로 따라감 · 탭바 자리(넘침 = 맨 뒤 · 같은 창 자리 옮기기 · 같은 자리 무변경 · 같은 자리 + `Reveal` + 안 보이던 탭 = 보이기만) · 출처 창 활성 승계 · 빈 팝아웃 항목 제거 · main 마지막 탭 거절 · `Keep` 은 대상 활성 · 포커스 그대로 · ★같은 창에서 출처가 활성이면 대상이 활성★ · `Reveal` 은 대상 활성 + 첫 슬롯 포커스 · 표식(`Dragging` · `StaleLease` · 성공이 표식을 내림 · `release_lease` 의 다른 번호 무동작) · `SourceChanged` · `TargetChanged`(배치 · 탭 목록) · 묘비(`mark_closed` 뒤 NewWindow = `WindowClosed` · `attach_view_as_new_window` 도 거절) · 이미 있는 label 로 NewWindow = `WindowExists` · `plan_new_window`(재사용 · 크기 · main = None) · `succession` 이 `close_tab` 과 같은 답. **매 시험 뒤 기존 `assert_invariants`**(`manager.rs:1305` — ADR-0057 ①–④) | `src/layout/manager.rs` `#[cfg(test)]` → `lib_unit` |
 | 리팩터 회귀 | `close_tab` 에서 뽑은 도우미 — 기존 `close_*` 시험(`manager.rs:1498-1631`)이 그대로 초록 | `lib_unit` |
 | 닫기 요청 | `drop_window_in_model` 을 닫기 요청 계기로 부른 뒤: 그 창 탭이 모델에서 사라짐 · 묘비 · 뒤이은 `Destroyed` 정리가 멱등 · 그 뒤 Seam(`TabNotFound`) · TabBar(`WindowNotFound`) · 새 창(`WindowClosed`) · 팝아웃 기존 창 타깃(롤백) · 팝아웃 새 창 타깃(롤백) 전부 무변경 | `src/commands/popout.rs` `#[cfg(test)]`(창 없이 서는 모델 몫 — 그 파일 머리) → `lib_unit` |
 | 적용 서비스 | 가짜 포트로: Seam · TabBar 의 변경 · 스냅숏 · `resync` 가 한 락 안 · 알림은 락 밖 · 출처 창이 닫히면 `host.close` 가 알림 뒤 한 번 · 실패면 알림 0 · `resync` 0 / NewWindow — 열기 실패 = 모델 무변경 · phase C 실패(묘비 포함) = 연 창을 닫고 탭은 출처 · 재사용 = `move_window` · 모델 무변경 · `activate` 가 `FocusPolicy` 를 따름 · 어느 모니터에도 안 걸치는 자리 = 기본 자리 | `tests/layout_apply.rs` → `cargo test -p engram-dashboard --test layout_apply` |
@@ -735,6 +737,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 4. **R22 새 창 크기 — 출처 창이 최대화였을 때** — 기본값 = 그 창의 보통(최대화 전) 크기로 연다(화면 크기만 한 최대화 아닌 창이 되지 않게). 다른 안 = 최대화 상태 그대로.
 5. **R6b 로 바꾼 탭은 끌기가 무변경으로 끝나도 그대로 둔다** — 기본값 = 되돌리지 않음(브라우저 · VS Code). 다른 안 = 끌기 시작 때 탭으로 되돌림.
 6. **칠하지 않은(면적 0) 바깥 띠 위에 놓으면**(§2-4 · §7 #40) — PRD R8 괄호 「거기 놓으면 R22」 와 다름. 기본값 = 밑 슬롯 띠로 넘김(그 칸 띠에 들면 그 이음새, 안 들면 R22). 거절하면 무효 바깥 띠 = 새 창(R22 — 그 아래 칸 띠는 그 자리에서 고를 수 없다).
+7. **같은 자리 탭바 놓기 + Reveal = 그 탭을 보인다(잠정 — 리뷰어 대립: 무변경 vs 보임)**(§1-2 TabBar · §7 #16) — 안 보이던 탭을 끌어 자기 창 탭바의 원래 자리에 놓으면 기본값 = 그 탭을 보인다(목록 그대로 · `version` +1). 다른 안 = 진짜 무변경(그 탭은 여전히 안 보인다 · `version` 그대로). 명령(`Keep`)과 이미 보이는 탭은 어느 안이든 무변경이다.
 
 **PRD 와 다른 점** — R18 의 Esc · R16 의 반환 id · R13b 의 닿지 않는 갈래는 PRD 4.1 에서 문구를 맞췄다. 남은 셋:
 - R21 「원래 창 탭바에 놓으면 그 창의 탭으로 돌아간다」는 놓은 자리로 옮겨 넣으므로 탭 순서 바꾸기도 함께 된다.
@@ -757,7 +760,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 | 15 | R22 새 창이 웹뷰를 띄우는 동안(수백 ms 추정) 화면에 아무것도 없음 | 가능성 높음 · 탭 하나 팝아웃은 재사용이라 해당 없음. 거슬리면 새 창이 보일 때까지 딱지를 놓은 자리에 남긴다(QA 에서 판단) |
 | 16 | 닫기 요청 계기의 모델 정리가 기존 팝아웃 닫기 동작을 바꿈(정리가 OS 창 소멸보다 한 이벤트 앞선다) | 가능성 낮음 · 바뀌는 것은 정리 시점뿐이고 같은 함수 · 같은 락이다. 팝아웃 닫기를 막을 수 있게 되는 날 이 근거가 무너진다 — 처리기 주석과 §1-2 가 그 조건을 적는다 |
 | 17 | 사용자가 X 를 누른 직후 먼저 확정된 명령 도킹의 탭이 그 창과 함께 닫힘 | 확실(닫기 의미 그대로) · 잔해는 없다(§1-2 (c)) |
-| 18 | 문턱(4px)을 막 넘기고 캔버스 쪽에서 바로 떼면 새 창이 뜸 | 확실(PRD R22 그대로 — 가이드 없는 자리는 새 창) · 탭바 위에서 떼면 자리 옮기기(같은 자리 = 무변경)라 대부분 무해. QA 에서 거슬리면 문턱 값만 조정한다(요구는 그대로) |
+| 18 | 문턱(4px)을 막 넘기고 캔버스 쪽에서 바로 떼면 새 창이 뜸 | 확실(PRD R22 그대로 — 가이드 없는 자리는 새 창) · 탭바 위에서 떼면 자리 옮기기(같은 자리 = 무변경 · 단 숨은 탭을 Reveal 로 놓으면 그 탭을 보인다 — §11-1 #7 잠정)라 대부분 무해. QA 에서 거슬리면 문턱 값만 조정한다(요구는 그대로) |
 | 19 | 전경 불명 유예(500ms) 동안 사용자가 실제로 다른 앱으로 옮겨 가 있었음 | 가능성 낮음 · 그 사이의 버튼 0 은 떼기로 치지 않으므로 잘못된 놓기는 없고, 유예가 끝나거나 `Other` 가 보이면 비정상 끝(무변경)이다 |
 
 ### 11-3. 범위에서 뺀 것 (1판에 있었고 PRD 4판으로 빠짐)
