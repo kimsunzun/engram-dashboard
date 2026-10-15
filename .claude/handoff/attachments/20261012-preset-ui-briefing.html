@@ -133,6 +133,9 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 .search{display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--app-line);border-radius:6px;background:var(--app-panel);min-width:0}
 .search .mag{color:var(--app-muted)}
 .search .ph{color:var(--app-muted);font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.navrow{display:flex;align-items:center;gap:6px;padding:6px 12px;border-bottom:1px solid var(--app-line);background:var(--app-panel);font-size:12px;min-width:0}
+.navrow .crumb{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--app-muted)}
+.navrow .crumb u{color:var(--accent);text-decoration:none;cursor:pointer}
 .search.focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)}
 .caret{display:inline-block;width:1px;height:14px;background:var(--app-text);margin-left:-6px;animation:blink 1s steps(1) infinite}
 @keyframes blink{50%{opacity:0}}
@@ -170,21 +173,69 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
 .popwrap{display:grid;grid-template-columns:minmax(0,380px) minmax(0,1fr);gap:16px;align-items:start}
 .cfg{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:16px;align-items:start}
 .cfg .caps{grid-template-columns:minmax(0,1fr)}
+/* edit pane by kind: section heading with its own + ; nested preset contents shown in place, dimmed and read-only */
+.ksec .sp{flex:1}
+.ksec .kh{text-transform:none;letter-spacing:0;font-size:11px}
+.btn.kadd{padding:0 7px;font-size:11.5px;line-height:1.4}
+.ksec .btn.kadd+.btn.kadd{margin-left:3px}
+.ic{width:14px;height:14px;vertical-align:-2px}
+.row .tw{width:10px;color:var(--app-muted);flex:none}
+.nestv{margin-left:18px;padding-left:8px;border-left:1px dashed var(--app-line);color:var(--app-muted)}
+.nestv .grp,.nestv .row{color:var(--app-muted);background:transparent}
+/* row clicks in the edit pane: detail panel attached to the library slot's right edge, floating over the neighbouring slot */
+.dash{position:relative;display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:10px;padding:10px;border:1px solid var(--app-line);border-radius:12px;background:var(--app-panel)}
+.dash .cols-lib{grid-template-columns:96px minmax(0,.9fr) minmax(0,1.2fr)}
+.dash .cols-lib .pane+.pane{border-top:0;border-left:1px solid var(--app-line)}
+.dash .cols-lib .side .tr{font-size:12px}
+.detov{position:absolute;z-index:2;top:196px;left:calc(10px + (100% - 30px) * 1.6 / 2.6);width:min(250px,38%);border:1px solid var(--app-line);background:var(--app-raised);border-radius:0 8px 8px 0;padding:10px;display:flex;flex-direction:column;gap:8px;box-shadow:0 6px 18px rgba(0,0,0,.12);color:var(--app-text)}
+.term-body{background:#0c0c0c;color:#d4d4d4;font-family:var(--f-mono);font-size:12px;line-height:1.6;padding:10px 12px;min-height:260px;white-space:pre;overflow:hidden}
+.term-body .pr{color:#7fd17f}.term-body .dim{color:#8a8a8a}
+.row.on{border-color:var(--accent);background:var(--accent-soft);outline:1px solid var(--accent);outline-offset:-1px}
+.row .ico{color:var(--app-muted);font-size:11px}
+.navrow .btn.hi{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+/* file ops: context menu hanging under a tree row; tree row as drop target */
+.pop.ctx{margin:2px 0 4px 28px;max-width:180px}
+.tr.drop{outline:2px dashed var(--accent);outline-offset:-2px;background:var(--accent-soft);color:var(--accent)}
+.side-col{display:flex;flex-direction:column;gap:10px;min-width:0}
+/* part map: our component = dashed accent box with its name; third-party library = solid chip inside it */
+.wrapc{border:1.5px dashed var(--accent);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-width:0}
+.wrapc .wn{font-family:var(--f-mono);font-size:11.5px;font-weight:600;color:var(--accent);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.lib{display:flex;flex-direction:column;padding:5px 8px;border:1px solid var(--app-line);border-radius:6px;background:var(--app-raised);min-width:0}
+.lib b{font-size:12.5px;overflow-wrap:anywhere}
+.lib small{font-size:11.5px;color:var(--app-muted)}
+.sw{display:inline-block;width:16px;height:12px;border:1.5px dashed var(--accent);border-radius:3px;flex:none;margin-top:4px}
+/* library cards: one per third-party library; the .n in "우리 역할" points back to the region on the schematic */
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr));gap:8px}
+.card{background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:10px 12px;display:flex;flex-direction:column;gap:5px;min-width:0;font-size:12.5px;line-height:1.5}
+.card .ct{display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0}
+.card .ct b{font-family:var(--f-mono);font-size:13px;flex-basis:100%;overflow-wrap:anywhere}
+.card .pkg{font-family:var(--f-mono);font-size:10.5px;color:var(--muted);overflow-wrap:anywhere;flex-basis:100%;margin-top:-5px}
+.card .cl{display:grid;grid-template-columns:62px minmax(0,1fr);gap:6px;align-items:start}
+.card .cl>.k{font-size:11px;color:var(--muted);padding-top:1px}
+.card .cl code{font-size:11.5px}
+.card .cl .n{margin-right:3px}
+.mini{font-size:10.5px;font-weight:600;padding:0 6px;border-radius:4px;border:1px solid var(--line);color:var(--muted);white-space:nowrap}
+.mini.lic{border-color:var(--ok);color:var(--ok)}
+.mini.dir{border-style:dashed}
+.cgrp{font-size:12px;letter-spacing:.04em;color:var(--muted);font-weight:600}
 .open{display:flex;flex-wrap:wrap;gap:8px}
 .open .tag{font-size:12.5px;font-weight:500;padding:3px 10px;white-space:normal;color:var(--ink)}
 @media (max-width:860px){.cols-lib{grid-template-columns:minmax(0,1fr)}.cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}}
 @media (max-width:720px){
-  .cols-3,.ab,.two-slots,.popwrap,.cfg{grid-template-columns:minmax(0,1fr)}
+  .cols-3,.ab,.two-slots,.popwrap,.cfg,.dash,.dash .cols-lib{grid-template-columns:minmax(0,1fr)}
+  .dash .cols-lib .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
+  .detov{position:static;width:auto;border-radius:8px}
   .pane+.pane{border-left:0;border-top:1px solid var(--app-line)}
   h1{font-size:25px}
 }
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><symbol id="ic-folder-search" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13H2.5a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h3.2l1.4 1.6h6.4a1 1 0 0 1 1 1V7.5"/><circle cx="11.3" cy="10.8" r="2.3"/><path d="M13 12.5l1.8 1.8"/></symbol></svg>
 <div class="wrap">
 
 <header style="display:flex;flex-direction:column;gap:10px">
-  <span class="eyebrow">스킬 프리셋 · UI 러프 브리핑 · 2026-10-14</span>
+  <span class="eyebrow">스킬 프리셋 · UI 러프 브리핑 · 2026-10-15</span>
   <h1>Engram 프리셋 화면</h1>
   <p class="lead">지시서 · 스킬 · 설정을 프리셋으로 묶어 claude · codex 에이전트에 붙이는 화면 — 지금 정한 상태만 그림으로.</p>
 </header>
@@ -221,7 +272,7 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span class="eq">= 프라이밍 + 기본 설정 (claude: <code>DISABLE_AUTOUPDATER=1</code>)</span>
   </div>
   <div class="strip">
-    <span>라이브러리 = 폴더 하나</span><span>프리셋도 그 안 파일(에셋)</span><span>남에게 줄 땐 폴더째</span><span>데이터는 데몬</span><span>클라와 데몬은 같은 PC(지금)</span>
+    <span>라이브러리 = 폴더 하나</span><span>프리셋도 그 안 파일(에셋)</span><span>남에게 줄 땐 폴더째</span><span>데이터는 데몬</span><span>클라와 데몬은 같은 PC(지금)</span><span>기본 라이브러리 폴더 = 배포판 폴더 안 <code>library\</code></span>
   </div>
 </section>
 
@@ -231,10 +282,11 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
   <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 묶음 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
   <div class="win" role="img" aria-label="라이브러리 슬롯 화면 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯</div>
+    <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>스킬</u> › <u>리뷰</u></span><span class="n">1</span></div>
     <div class="win-body cols-lib">
       <div class="pane side">
-        <div class="grp">라이브러리 폴더 <span class="n">1</span></div>
-        <span class="pth">D:\engram-library</span>
+        <div class="grp">라이브러리 폴더 <span class="n">2</span></div>
+        <span class="pth">D:\Engram\library</span>
         <div class="tr"><span class="tw">▸</span>지시서</div>
         <div class="tr"><span class="tw">▾</span>스킬</div>
         <div class="tr l1 on"><span class="tw">▾</span>리뷰</div>
@@ -243,29 +295,25 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
         <div class="tr"><span class="tw">▸</span>설정</div>
         <div class="tr"><span class="tw">▸</span>프리셋</div>
         <div class="tr"><span class="tw">▸</span>받은-규칙 <span class="n">3</span></div>
-        <div class="grp">즐겨찾기 묶음 · 이 PC <span class="n">2</span></div>
+        <div class="grp">즐겨찾기 묶음 · 이 PC <span class="n">4</span></div>
         <div class="tr"><span class="tw">·</span>즐겨찾기 <small>9</small></div>
         <div class="tr" style="outline:1px dashed var(--warn);outline-offset:-1px"><span class="star on">★</span>리뷰할 때 <span class="tag" style="font-size:10px;padding:0 5px;border-color:var(--warn);color:var(--warn)">★ 대상</span><small>5</small></div>
         <div class="tr"><span class="tw">·</span>실험 중 <small>3</small></div>
         <button class="btn" type="button" style="margin-top:4px">+ 새 묶음</button>
       </div>
       <div class="pane">
-        <div class="search"><span class="mag">⌕</span><span class="ph">검색 — 스킬 › 리뷰 (하위 폴더까지)</span></div>
         <div class="fbar">
-          <span class="callout">스킬 › 리뷰</span><span class="tag" style="border-color:var(--warn);color:var(--warn)">★ = 리뷰할 때</span>
-          <span class="sp"></span>
-          <span class="fchip">쓰는 중</span>
-          <span class="fchip">최근 사용</span>
-          <span class="sel">종류: 전체 ▾</span>
+          <span class="sel">필터 ▾</span><span class="n">5</span>
+          <div class="search" style="flex:1 1 160px"><span class="mag">⌕</span><span class="ph">검색 — 스킬 › 리뷰 (하위 폴더까지)</span></div>
+          <span class="tag" style="border-color:var(--warn);color:var(--warn)">★ = 리뷰할 때</span>
         </div>
         <div class="lst cols">
-          <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲ <span class="n">4</span></span><span class="use">쓰는 곳</span></div>
+          <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲ <span class="n">6</span></span><span class="use">쓰는 곳</span></div>
           <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 보안</span><span class="use">항목 2</span></div>
           <div class="li on"><span class="star on">★</span><span class="kind">스킬</span><span class="name">review</span><span class="use">프리셋 2</span></div>
           <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-review</span><span class="use">프리셋 1</span></div>
           <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name">pr-check</span><span class="use">—</span></div>
         </div>
-        <div class="foot"><button class="btn" type="button">+ 새로 만들기 ▾</button></div>
       </div>
       <div class="pane side">
         <div class="head"><span class="kind">스킬</span><span class="t" style="font-size:14px">review</span><span class="sp"></span><span class="star on" title="즐겨찾기">★</span></div>
@@ -275,23 +323,25 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
           <span class="k">위치</span>
           <span class="v">스킬/리뷰/review/SKILL.md</span>
           <span class="k">쓰는 곳</span>
-          <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u> <span class="n">5</span></span>
+          <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u> <span class="n">7</span></span>
         </div>
       </div>
     </div>
   </div>
   <div class="caps">
-    <span><span class="n">1</span>폴더 고르면 바로 안의 것만 (검색은 하위까지)</span>
-    <span><span class="n">2</span>★ = 대상 묶음에 넣고 빼기 · 묶음 더블클릭/우클릭 = 대상</span>
-    <span><span class="n">3</span>목록 = 지금 폴더를 훑은 것 (따로 저장 안 함)</span>
-    <span><span class="n">4</span>머리 클릭 정렬 (★ 칸 제외)</span>
-    <span><span class="n">5</span>쓰는 곳의 이름을 누르면 그 프리셋으로 이동 · 선택 (오른쪽이 편집 칸)</span>
+    <span><span class="n">1</span>← → 와 경로는 한 줄 · 슬롯 전체 폭 — 자리가 바뀔 때만 기록(폴더 · 쓰는 곳 링크 · 묶음 보기) · 같은 폴더 안 클릭 · 편집은 기록 안 함 · 슬롯마다 따로</span>
+    <span><span class="n">2</span>폴더 고르면 바로 안의 것만 (검색은 하위까지)</span>
+    <span><span class="n">3</span>목록 = 화면이 데몬에 요청해 받음 (슬롯 열기 · 포커스 · 새로고침 · 폴더 이동 때) · 실시간 감지 없음 · 실행 직전 데몬이 다시 확인</span>
+    <span><span class="n">4</span>★ = 대상 묶음에 넣고 빼기 · 묶음 더블클릭/우클릭 = 대상</span>
+    <span><span class="n">5</span>필터 ▾ = 종류 고르기(지시서 · 스킬 · 설정 · 프리셋 체크박스 · 필터 리셋) — 상태 필터는 첫 판에서 뺌</span>
+    <span><span class="n">6</span>머리 클릭 정렬 (★ 칸 제외)</span>
+    <span><span class="n">7</span>쓰는 곳의 이름을 누르면 그 프리셋으로 이동 · 선택 (오른쪽이 편집 칸)</span>
   </div>
 </section>
 
 <!-- 3 -->
 <section id="preset-edit">
-  <div class="sh"><span class="no">3</span><h2>프리셋 편집 = 라이브러리 오른쪽 칸</h2><span class="tag ok">확정</span><span class="tag unv">최종 구성 보기 방식 미정</span></div>
+  <div class="sh"><span class="no">3</span><h2>프리셋 편집 = 라이브러리 오른쪽 칸</h2><span class="tag ok">확정</span><span class="tag unv">실제로 받는 전체 보기 미정</span></div>
   <p class="lead">가운데서 프리셋을 누르면 오른쪽 상세 칸이 그대로 편집 칸이 된다.</p>
   <div class="win" role="img" aria-label="라이브러리 슬롯에서 프리셋을 고르면 오른쪽이 편집 칸이 되는 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 — 프리셋/리뷰어.yaml</div>
@@ -333,15 +383,379 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
     <span><span class="n">1</span>프리셋을 누르면 오른쪽 = 편집 칸</span>
     <span><span class="n">2</span>⋮⋮ 끌어 순서 · × 빼기 · 저장 단추 없이 바로 저장</span>
     <span><span class="n">3</span>빨강 = 충돌(그대로는 못 씀) · 노랑 = 알리기만</span>
-    <span><span class="n">4</span>중첩을 펼친 최종 구성 — 보기 방식 미정</span>
+    <span><span class="n">4</span>안에 든 프리셋은 아래 「편집 칸」 그림처럼 그 자리에서 펼침</span>
     <span><span class="n">5</span>가리키던 파일이 없음 → 같은 이름이 있으면 저절로 다시 잇고, 없거나 겹치면 사용자가 고름</span>
   </div>
-  <p class="pend"><span class="tag unv">미정</span>따로 된 프리셋 편집 슬롯 — 없앨지 미정 (추천: 없앰)</p>
+  <div class="sh"><h3>편집 칸 = 종류별 칸 · 안에 든 프리셋은 그 자리에서 펼침</h3><span class="tag ok">확정</span></div>
+  <div class="win" role="img" aria-label="프리셋 리뷰어의 오른쪽 편집 칸 — 종류별 칸으로 나뉘고 안에 든 프리셋은 그 자리에서 펼쳐진 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 — 오른쪽 칸 · 프리셋 리뷰어</div>
+    <div class="win-body">
+      <div class="pane side">
+        <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">+ 담기</button><span class="n">4</span></div>
+        <div class="grp ksec">프리셋<span class="sp"></span><span class="n">3</span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="tw">▾</span><span class="n">1</span><span class="name">공용 규칙</span><span class="x">×</span></div>
+        <div class="nestv">
+          <div class="grp ksec">프리셋<span class="n">2</span></div>
+          <div class="row"><span class="tw">▸</span><span class="name">기본 원칙</span></div>
+          <div class="grp ksec">지시서</div>
+          <div class="row"><span class="name">공용 원칙</span></div>
+          <div class="grp ksec">스킬</div>
+          <div class="row"><span class="name">pr-check</span></div>
+        </div>
+        <div class="grp ksec">지시서<span class="kh">순서대로 이어 붙음</span><span class="n">5</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
+        <div class="grp ksec">스킬<span class="kh">이름순</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="name">review</span><span class="x">×</span></div>
+        <div class="grp ksec">설정<span class="kh">순서대로 이어 붙음</span><span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">codex 기본</span><span class="x">×</span></div>
+        <div class="msg err"><b>충돌</b><span>백엔드 정하는 설정이 둘 — codex 기본 · 공용 규칙 › claude 기본</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>안에 든 프리셋은 ▸/▾ 로 그 자리에서 펼침 — 바깥과 같은 레이아웃을 한 단 들여서 (안쪽의 안쪽도 같은 식)</span>
+    <span><span class="n">2</span>펼친 안쪽은 흐리게 · 보기만(+ · × · 순서 없음) — 고치려면 그 프리셋을 연다 · 바깥에서 그 줄 자체를 빼는 건 됨</span>
+    <span><span class="n">3</span>칸 제목마다 + = 그 종류만 검색해 담기 · ⇐ = 옆 라이브러리 슬롯에서 고른 것 중 그 종류만 담기 · 폴더 돋보기 = 그 종류 폴더로 라이브러리를 열어 둘러보기</span>
+    <span><span class="n">4</span>위 + 담기 = 전체 검색 · 담으면 종류 보고 자기 칸으로</span>
+    <span><span class="n">5</span>지시서 · 설정만 끌어서 순서 — 그 순서대로 이어 붙음 · 스킬은 이름순</span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>겹친 것을 한 번만 센 ‘에이전트가 실제로 받는 전체’ 보기 — 필요할지 · 어디에 둘지 미정</p>
+  <div class="sh"><h3>편집 칸의 줄 누르기</h3><span class="tag ok">확정</span><span class="tag">일부 제안</span></div>
+  <div class="dash" role="img" aria-label="편집 칸에서 지시서 줄을 누르면 상세 패널이 라이브러리 슬롯 오른쪽 가장자리에 붙어 옆 터미널 슬롯 위로 겹쳐 나오는 예시">
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯</div>
+      <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>프리셋</u> › <u>리뷰어</u></span></div>
+      <div class="win-body cols-lib">
+        <div class="pane side">
+          <div class="tr"><span class="tw">▸</span>지시서</div>
+          <div class="tr"><span class="tw">▸</span>스킬</div>
+          <div class="tr"><span class="tw">▸</span>설정</div>
+          <div class="tr on"><span class="tw">▾</span>프리셋</div>
+        </div>
+        <div class="pane">
+          <div class="lst">
+            <div class="li"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
+            <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
+            <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
+          </div>
+        </div>
+        <div class="pane">
+          <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">+ 담기</button></div>
+          <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="row"><span class="tw">▸</span><span class="name">공용 규칙</span><span class="x">×</span></div>
+          <div class="grp ksec">지시서<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="row on"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="n">1</span><span class="x">×</span></div>
+          <div class="detov">
+            <div class="head"><span class="kind">지시서</span><span class="t" style="font-size:14px">리뷰 규율</span><span class="sp"></span><span class="n">2</span><span class="x" aria-label="닫기">×</span></div>
+            <div class="final">
+              <span class="k">설명</span>
+              <span class="v">리뷰할 때 지킬 규율.</span>
+              <span class="k">위치</span>
+              <span class="v">지시서/리뷰 규율.md</span>
+              <span class="k">쓰는 곳</span>
+              <span class="v"><u style="color:var(--accent);cursor:pointer">프리셋 리뷰어</u> · <u style="color:var(--accent);cursor:pointer">프리셋 야간 점검</u></span>
+            </div>
+          </div>
+          <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
+          <div class="grp ksec">스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+          <div class="row"><span class="name">review</span><span class="x">×</span></div>
+        </div>
+      </div>
+    </div>
+    <div class="win">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>터미널 — 리뷰봇</div>
+      <div class="term-body"><span class="pr">$</span> claude
+<span class="pr">&gt;</span> 리뷰 중…
+<span class="dim">● Read src/agent/session.rs</span>
+<span class="dim">● Read src/agent/manager.rs</span>
+<span class="dim">● Grep "input_order"</span>
+  세션 입력 경로의 락 순서를 확인했습니다.
+  1. replay 락을 쥔 채 emit 하는 곳 1건
+  2. 시험이 빠진 분기 2건
+<span class="pr">&gt;</span> </div>
+    </div>
+  </div>
+  <div class="win" role="img" aria-label="편집 칸에서 안에 든 프리셋 줄을 눌러 그 자리에서 펼친 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯</div>
+    <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>프리셋</u> › <u>리뷰어</u></span></div>
+    <div class="win-body cols-lib">
+      <div class="pane side">
+        <div class="tr"><span class="tw">▸</span>지시서</div>
+        <div class="tr"><span class="tw">▸</span>스킬</div>
+        <div class="tr"><span class="tw">▸</span>설정</div>
+        <div class="tr on"><span class="tw">▾</span>프리셋</div>
+      </div>
+      <div class="pane">
+        <div class="lst">
+          <div class="li"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
+          <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
+        </div>
+      </div>
+      <div class="pane side">
+        <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">리뷰어</span><span class="sp"></span><button class="btn" type="button">+ 담기</button></div>
+        <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="tw">▾</span><span class="n">3</span><span class="name">공용 규칙</span><span class="ico" aria-label="그 자리로 이동"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></span><span class="n">4</span><span class="x">×</span></div>
+        <div class="nestv">
+          <div class="grp ksec">프리셋</div>
+          <div class="row"><span class="tw">▸</span><span class="name">기본 원칙</span></div>
+          <div class="grp ksec">지시서</div>
+          <div class="row"><span class="name">공용 원칙</span></div>
+          <div class="grp ksec">스킬</div>
+          <div class="row"><span class="name">pr-check</span></div>
+        </div>
+        <div class="grp ksec">지시서<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">리뷰 규율</span><span class="x">×</span></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">보고 형식</span><span class="x">×</span></div>
+        <div class="grp ksec">스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="name">review</span><span class="x">×</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="win" role="img" aria-label="안에 든 프리셋 공용 규칙으로 이동해 그 프리셋을 편집하는 예시">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯</div>
+    <div class="navrow"><button class="btn hi" type="button" aria-label="뒤로">←</button><span class="n">5</span><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>프리셋</u> › <u>공용 규칙</u></span></div>
+    <div class="win-body cols-lib">
+      <div class="pane side">
+        <div class="tr"><span class="tw">▸</span>지시서</div>
+        <div class="tr"><span class="tw">▸</span>스킬</div>
+        <div class="tr"><span class="tw">▸</span>설정</div>
+        <div class="tr on"><span class="tw">▾</span>프리셋</div>
+      </div>
+      <div class="pane">
+        <div class="lst">
+          <div class="li on sel-ol"><span class="kind p">프리셋</span><span class="name">공용 규칙</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">리뷰어</span></div>
+          <div class="li"><span class="kind p">프리셋</span><span class="name">야간 점검</span></div>
+        </div>
+      </div>
+      <div class="pane side">
+        <div class="head"><span class="kind p">프리셋</span><span class="t" style="font-size:14px">공용 규칙</span><span class="sp"></span><button class="btn" type="button">+ 담기</button></div>
+        <div class="grp ksec">프리셋<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="tw">▸</span><span class="name">기본 원칙</span><span class="x">×</span></div>
+        <div class="grp ksec">지시서<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="grip">⋮⋮</span><span class="name">공용 원칙</span><span class="x">×</span></div>
+        <div class="grp ksec">스킬<span class="sp"></span><button class="btn kadd" type="button" aria-label="이 종류 검색해 담기">+</button><button class="btn kadd" type="button" aria-label="옆 슬롯에서 고른 것 담기">⇐</button><button class="btn kadd" type="button" aria-label="이 종류 폴더 열기"><svg class="ic" aria-hidden="true"><use href="#ic-folder-search"/></svg></button></div>
+        <div class="row"><span class="name">pr-check</span><span class="x">×</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>지시서 · 스킬 · 설정 줄을 누르면 상세가 슬롯 가장자리에 붙어 옆 슬롯 위로 겹쳐 나옴 — 옆 슬롯 크기 · 내용은 그대로 · 같은 줄을 다시 누르면 닫힘</span>
+    <span><span class="n">2</span>슬롯이 창 끝이면 패널은 창에 걸려 잘림 — 더 보려면 창 · 슬롯을 넓힘 · 칸 사이 선은 기본으로 전부 끌어서 폭 조절</span>
+    <span><span class="n">3</span>프리셋 줄을 한 번 누르면 그 자리에서 펼침(안쪽은 보기만)</span>
+    <span><span class="n">4</span>줄에 마우스를 올리면 폴더 돋보기 — 누르거나 줄을 더블클릭하면 그 항목 자리로 이동</span>
+    <span><span class="n">5</span>이동한 곳에선 그 프리셋을 고칠 수 있음 · ← 로 리뷰어로 돌아감</span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span>칸 폭 기억(슬롯마다 · PC마다)</p>
+  <p class="pend"><span class="tag ok">확정</span>따로 된 프리셋 편집 슬롯은 만들지 않음 — 편집은 라이브러리 슬롯 오른쪽 칸 하나 · 옛 프리셋(작업 폴더 즐겨찾기) 슬롯도 없앰</p>
 </section>
 
 <!-- 4 -->
+<section id="file-ops">
+  <div class="sh"><span class="no">4</span><h2>파일 조작</h2><span class="tag ok">확정</span></div>
+  <p class="lead">새로 만들기는 폴더 우클릭으로 — 가운데 목록의 ‘+ 새로 만들기’는 없앰.</p>
+  <div class="cfg">
+    <div class="win" role="img" aria-label="라이브러리 트리의 폴더 우클릭 메뉴와 목록에서 트리로 끌어 옮기기 예시">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 — 스킬 › 리뷰</div>
+      <div class="win-body ab">
+        <div class="pane side">
+          <div class="grp">라이브러리 폴더</div>
+          <div class="tr"><span class="tw">▸</span>지시서</div>
+          <div class="tr"><span class="tw">▾</span>스킬</div>
+          <div class="tr l1 on"><span class="tw">▾</span>리뷰<small>우클릭 <span class="n">1</span></small></div>
+          <div class="pop ctx">
+            <div class="opt on"><span>새 폴더</span></div>
+            <div class="opt"><span>새 프리셋</span></div>
+            <div class="opt"><span>이름 바꾸기</span></div>
+            <div class="opt"><span>지우기</span></div>
+          </div>
+          <div class="tr l1 drop"><span class="tw">▸</span>공용<small>여기 놓기 <span class="n">2</span></small></div>
+          <div class="tr l1">글쓰기</div>
+          <div class="tr"><span class="tw">▸</span>설정</div>
+          <div class="tr"><span class="tw">▸</span>프리셋</div>
+        </div>
+        <div class="pane">
+          <div class="lst cols">
+            <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름 ▲</span><span class="use">쓰는 곳</span></div>
+            <div class="li"><span class="star"></span><span class="kind">폴더</span><span class="name">📁 보안</span><span class="use">항목 2</span></div>
+            <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name">review</span><span class="use">프리셋 2</span></div>
+            <div class="li on sel-ol"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-review</span><span class="use">↖ 끄는 중</span></div>
+            <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name">pr-check</span><span class="use">—</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="side-col">
+      <div class="dialog" role="img" aria-label="쓰는 프리셋이 있는 항목을 지울 때의 확인 창 예시">
+        <div class="dh">‘review’ 지우기 <span class="n">3</span></div>
+        <div class="db">
+          <div class="msg warn"><b>경고</b><span>프리셋 2개가 씁니다 — 리뷰어 · 야간 점검</span></div>
+          <span class="callout">휴지통으로 갑니다</span>
+        </div>
+        <div class="df"><button class="btn" type="button">취소</button><button class="btn pri" type="button">휴지통으로</button></div>
+      </div>
+<div class="cli"><span class="c"># 에이전트 — 명령 이름은 자리표시</span>  <span class="n">4</span>
+<span class="k">내용</span>    → 파일 직접 고침
+<span class="k">옮기기</span>  → engram library move
+<span class="k">이름</span>    → engram library rename
+<span class="k">지우기</span>  → engram library delete</div>
+      <span class="callout">프리셋 리뷰어 안 — 탐색기에서 review 를 옮긴 뒤</span>
+      <div class="row" style="border-style:dashed;color:var(--gone)"><span class="kind">스킬</span><span class="name">review — 찾을 수 없음 · <u>이름으로 다시 잇기</u></span><span class="n">5</span></div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>첫 판 = 옮기기 · 이름 바꾸기 · 지우기 · 새 폴더 · 새 프리셋 (새 마크다운 · 새 스킬은 없음 — 내용 쓰기는 편집기 · 에이전트 몫)</span>
+    <span><span class="n">2</span>옮기기 = 목록에서 트리로 끌어 놓기 · 옮기거나 이름을 바꾸면 데몬이 프리셋 속 경로를 같이 고침</span>
+    <span><span class="n">3</span>지우기 = 항상 OS 휴지통 (데몬 PC) · 쓰는 프리셋이 있으면 먼저 경고</span>
+    <span><span class="n">4</span><span>에이전트: 파일 내용은 직접 고침 · 옮기기 · 이름 · 지우기는 <code>engram</code> 명령으로</span></span>
+    <span><span class="n">5</span>바깥(탐색기)에서 옮기면 → 이름으로 다시 잇기</span>
+  </div>
+</section>
+
+<!-- 5 -->
+<section id="ref-paths">
+  <div class="sh"><span class="no">5</span><h2>참조 경로 · 라이브러리 폴더</h2><span class="tag ok">확정</span></div>
+  <div class="cfg">
+    <div class="win" role="img" aria-label="프리셋 파일 안의 참조 경로 예시">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>프리셋/리뷰어.yaml</div>
+<div class="cli"><span class="c"># 프리셋/리뷰어.yaml — 키 이름은 자리표시</span>
+<span class="k">includes</span>:                <span class="n">1</span>
+  - 프리셋/공용 규칙.yaml
+  - 지시서/리뷰 규율.md
+  - 스킬/리뷰/review       <span class="n">2</span>
+  - 설정/codex 기본.yaml</div>
+    </div>
+    <div class="win" role="img" aria-label="배포판 폴더 구조 예시">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>배포판 폴더</div>
+      <div class="win-body"><div class="pane side">
+        <div class="tr"><span class="tw">▾</span>Engram\<small>zip 을 푼 곳 <span class="n">4</span></small></div>
+        <div class="tr l1"><span class="tw">·</span>engram-dashboard.exe</div>
+        <div class="tr l1"><span class="tw">▸</span>data\</div>
+        <div class="tr l1 on"><span class="tw">▾</span>library\<small><span class="kind p">기본 라이브러리 폴더</span> <span class="n">3</span></small></div>
+        <div class="tr l2">프리셋\</div>
+        <div class="tr l2">지시서\</div>
+        <div class="tr l2">스킬\</div>
+        <div class="tr l2">설정\</div>
+      </div></div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span class="n">1</span>프리셋 안의 경로 = 라이브러리 폴더 맨 위부터 (한 가지 꼴 · 범위 제한 없음)</span>
+    <span><span class="n">2</span>스킬은 여러 프리셋이 나눠 씀 → 프리셋 옆이 아니라 라이브러리 어디든</span>
+    <span><span class="n">3</span><span>기본 라이브러리 폴더 = 배포판 폴더 안 <code>library\</code> (<code>data\</code> 옆)</span></span>
+    <span><span class="n">4</span>zip 을 덮어 풀어도 남음 (같은 이름 파일만 덮임)</span>
+  </div>
+  <p class="pend"><span class="tag unv">미정</span><span>나중에 배포판에 기본 내용을 <code>library\</code> 로 실으면 사용자가 고친 같은 이름 파일이 덮일 수 있음</span></p>
+</section>
+
+<!-- 6 -->
+<section id="ui-parts">
+  <div class="sh"><span class="no">6</span><h2>화면 부품 · 감싸기</h2><span class="tag ok">확정</span><span class="tag">데이터 받아 오기 = 방향 · TRD 확정</span></div>
+  <p class="lead">점선 = 우리 부품 (이름은 자리표시) · 그 안의 칸 = 남의 라이브러리.</p>
+  <div class="win" role="img" aria-label="라이브러리 슬롯의 영역별 화면 부품 지도">
+    <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 슬롯 — 부품 지도</div>
+    <div class="win-body cols-lib">
+      <div class="pane side">
+        <span class="callout">왼쪽 · 트리</span>
+        <div class="wrapc"><span class="wn">LibraryTree <span class="n">1</span></span>
+          <div class="lib"><b>react-arborist</b><small>폴더 트리 · 이미 씀</small></div>
+        </div>
+      </div>
+      <div class="pane">
+        <span class="callout">가운데 · 목록</span>
+        <div class="wrapc"><span class="wn">LibraryList <span class="n">2</span></span>
+          <div class="lib"><b>TanStack Table + TanStack Virtual</b><small>많아도 보이는 줄만 그림</small></div>
+          <div class="lib"><b>react-selecto</b><small>박스로 여러 개 고르기</small></div>
+          <div class="lib"><b>dnd-kit</b><small>목록 → 트리 끌어 놓기</small></div>
+        </div>
+      </div>
+      <div class="pane side">
+        <span class="callout">오른쪽 · 상세</span>
+        <span class="callout">—</span>
+      </div>
+    </div>
+    <div class="pane" style="border-top:1px solid var(--app-line)">
+      <div class="wrapc"><span class="wn">슬롯 데이터 훅 <span class="n">3</span><span class="mini dir">방향</span></span>
+        <div class="lib"><b>TanStack Query</b><small>데이터 받아 오기 (데몬에 요청)</small></div>
+      </div>
+    </div>
+  </div>
+  <span class="cgrp">화면 · 라이브러리 6</span>
+  <div class="cards">
+    <div class="card">
+      <div class="ct"><b>react-arborist</b><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span></div>
+      <div class="cl"><span class="k">무엇</span><span>React 트리 보기 부품</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">1</span>왼쪽 폴더 트리 · 이미 씀</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><code>LibraryTree</code></div>
+    </div>
+    <div class="card">
+      <div class="ct"><b>TanStack Table</b><span class="pkg">@tanstack/react-table</span><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span></div>
+      <div class="cl"><span class="k">무엇</span><span>표 · 그리드 로직만 주는 도구 (모양은 우리가 그림)</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>가운데 목록의 표</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><code>LibraryList</code></div>
+    </div>
+    <div class="card">
+      <div class="ct"><b>TanStack Virtual</b><span class="pkg">@tanstack/react-virtual</span><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span></div>
+      <div class="cl"><span class="k">무엇</span><span>긴 목록에서 화면에 보이는 줄만 그리는 도구</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>항목이 많아도 목록이 가볍게</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><code>LibraryList</code></div>
+    </div>
+    <div class="card">
+      <div class="ct"><b>react-selecto</b><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span></div>
+      <div class="cl"><span class="k">무엇</span><span>마우스 · 터치로 끌어 그린 영역 안의 것을 고르는 부품</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>박스로 여러 개 고르기</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><code>LibraryList</code></div>
+    </div>
+    <div class="card">
+      <div class="ct"><b>dnd-kit</b><span class="pkg">@dnd-kit/core</span><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span></div>
+      <div class="cl"><span class="k">무엇</span><span>가볍고 접근성 좋은 끌어 놓기 라이브러리</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">2</span>목록 → <span class="n">1</span>트리 끌어 놓기 = 옮기기</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><code>LibraryList</code></div>
+    </div>
+    <div class="card">
+      <div class="ct"><b>TanStack Query</b><span class="pkg">@tanstack/react-query</span><span class="mini">화면</span><span class="mini">npm</span><span class="mini lic">MIT</span><span class="mini dir">방향 · TRD 확정</span></div>
+      <div class="cl"><span class="k">무엇</span><span>원격 데이터를 받아 오고 캐시 · 동기화하는 훅</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">3</span>데몬에서 목록 받아 오기</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><code>슬롯 데이터 훅</code></div>
+    </div>
+  </div>
+  <h3>데몬 쪽</h3>
+  <div class="chain">
+    <div class="node"><b>화면 요청</b><div class="parts"><span class="part">슬롯 데이터 훅에서</span></div></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>데몬 라이브러리 저장소 모듈 <span class="n">4</span></b><div class="parts"><span class="part">trait: 목록 · 읽기 · 쓰기</span></div></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>walkdir · serde-saphyr</b><div class="parts"><span class="part">walkdir — 폴더 훑기</span><span class="part">serde-saphyr — YAML 읽기 · 쓰기</span></div></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>디스크</b><div class="parts"><span class="part">라이브러리 폴더</span></div></div>
+  </div>
+  <span class="cgrp">데몬 · 라이브러리 2</span>
+  <div class="cards">
+    <div class="card">
+      <div class="ct"><b>walkdir</b><span class="mini">데몬</span><span class="mini">crate</span><span class="mini lic">Unlicense/MIT</span></div>
+      <div class="cl"><span class="k">무엇</span><span>폴더를 하위까지 훑는 도구</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">4</span>라이브러리 폴더 훑기 → 목록</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><span>데몬 라이브러리 저장소 모듈</span></div>
+    </div>
+    <div class="card">
+      <div class="ct"><b>serde-saphyr</b><span class="mini">데몬</span><span class="mini">crate</span><span class="mini lic">MIT OR Apache-2.0</span></div>
+      <div class="cl"><span class="k">무엇</span><span>Serde 용 YAML 읽기 · 쓰기 (패닉 없는 파싱 · 오류 보고 강조)</span></div>
+      <div class="cl"><span class="k">우리 역할</span><span><span class="n">4</span>프리셋 · 설정 YAML 읽기 · 쓰기</span></div>
+      <div class="cl"><span class="k">감싸는 부품</span><span>데몬 라이브러리 저장소 모듈</span></div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><i class="sw"></i>남의 라이브러리는 항상 우리 부품 안에 감쌈 → 바꿔 끼울 수 있게</span>
+    <span><span class="n">4</span>데몬 저장소 = 데몬 안 따로 된 모듈 · 시험 땐 메모리 가짜로 갈아 끼움</span>
+    <span><span class="mini">조합</span>Spacedrive 를 따름</span>
+  </div>
+</section>
+
+<!-- 7 -->
 <section id="add-main">
-  <div class="sh"><span class="no">4</span><h2>담기</h2><span class="tag ok">확정</span></div>
+  <div class="sh"><span class="no">7</span><h2>담기</h2><span class="tag ok">확정</span></div>
   <p class="lead">메인 = “← 선택한 것 담기”(옆 라이브러리 슬롯에서 고름) · 보조 = “+ 담기”(검색).</p>
   <div class="two-slots">
     <div class="win" role="img" aria-label="라이브러리 슬롯 A — 프리셋 편집">
@@ -407,13 +821,13 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
       <span><span class="n">3</span>흐림 = 담김 · 못 담는 이유(순환 · 충돌)</span>
     </div>
   </div>
-  <p class="pend"><span class="tag unv">미정</span>슬롯 B 띄우기 방식 — 추천: 편집 칸의 ‘라이브러리 옆에 열기’가 칸을 나눠 띄움</p>
-  <p class="pend"><span class="tag unv">미정</span>라이브러리 우클릭 ‘프리셋에 추가’(어느 프리셋에 넣을지 고르기) — 남길지 미정</p>
+  <p class="pend"><span class="tag ok">확정</span>슬롯 B 띄우기 = 편집 칸의 칸 제목에 있는 폴더 돋보기 — 그 종류 폴더로 라이브러리를 열어 둘러보고 ⇐ 로 담음</p>
+  <p class="pend"><span class="tag ok">확정</span>라이브러리 우클릭 ‘프리셋에 추가’는 두지 않음 — 담기는 프리셋 편집 칸에서만</p>
 </section>
 
-<!-- 5 -->
+<!-- 8 -->
 <section>
-  <div class="sh"><span class="no">5</span><h2>설정 에셋</h2><span class="tag ok">확정</span></div>
+  <div class="sh"><span class="no">8</span><h2>설정 에셋</h2><span class="tag ok">확정</span></div>
   <p class="lead">설정도 라이브러리 안의 파일 하나(<code>.yaml</code>).</p>
   <div class="cfg">
     <div class="win" role="img" aria-label="설정 에셋 YAML 예시">
@@ -438,9 +852,9 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
   </div>
 </section>
 
-<!-- 6 -->
+<!-- 9 -->
 <section>
-  <div class="sh"><span class="no">6</span><h2>에이전트에 붙이기</h2><span class="tag unv">미정</span></div>
+  <div class="sh"><span class="no">9</span><h2>에이전트에 붙이기</h2><span class="tag unv">미정</span></div>
   <p class="lead">에이전트는 프리셋만 고른다 — 부품은 프리셋에서 담는다.</p>
   <div class="win" role="img" aria-label="에이전트 프리셋 붙이기 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>에이전트 — 리뷰봇</div>
@@ -475,9 +889,9 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
   <p class="pend"><span class="tag unv">미정</span>어디서 붙이나 — 추천: 에이전트 설정 창 칩 줄 + 트리 우클릭</p>
 </section>
 
-<!-- 7 -->
+<!-- 10 -->
 <section>
-  <div class="sh"><span class="no">7</span><h2>실행</h2><span class="tag ok">확정</span><span class="tag unv">일부 미정</span></div>
+  <div class="sh"><span class="no">10</span><h2>실행</h2><span class="tag ok">확정</span><span class="tag unv">일부 미정</span></div>
   <p class="lead">워크스페이스가 없으면 폴더를 묻고, JSON 모드는 첫 메시지 전에 모델 · 강도를 고른다.</p>
   <div class="win" role="img" aria-label="실행 시 폴더 선택과 모델 선택 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>실행 — 리뷰봇</div>
@@ -515,22 +929,26 @@ code,.mono{font-family:var(--f-mono);font-size:.88em}
   <p class="pend"><span class="tag unv">미정</span>고른 모델 · 강도 저장 위치 — 추천: 그 에이전트에만</p>
 </section>
 
-<!-- 8 -->
+<!-- 11 -->
 <section>
-  <div class="sh"><span class="no">8</span><h2>LLM 조작 — <code>engram</code> CLI</h2><span class="tag ok">확정 원칙</span></div>
+  <div class="sh"><span class="no">11</span><h2>LLM 조작 — <code>engram</code> CLI</h2><span class="tag ok">확정 원칙</span></div>
   <p class="lead">프리셋 · 라이브러리 조작은 전부 데몬 명령 — 화면 버튼과 LLM이 같은 것을 부른다. 명령 이름은 자리표시.</p>
   <div class="cli"><span class="c"># 라이브러리 · 프리셋</span>
 engram preset list --folder 프리셋/
 engram preset show 프리셋/리뷰어 --final          <span class="c"># 펼친 최종 구성 · 충돌 · 경고</span>
+<span class="c"># 라이브러리 파일 조작</span>
+engram library move 스킬/리뷰/review 스킬/공용/
+engram library rename …
+engram library delete 스킬/리뷰/pr-check   <span class="c"># 휴지통 · 쓰는 프리셋 있으면 경고</span>
 <span class="c"># 에이전트</span>
 engram agent create --name 리뷰봇 --preset 프리셋/리뷰어
 engram agent preset add 리뷰봇 프리셋/실험/night-rules</div>
   <p class="pend"><span class="tag">나중</span>원격 데몬(나중)에서는 화면은 붙이기만, 편집은 LLM 명령으로</p>
 </section>
 
-<!-- 9 -->
+<!-- 12 -->
 <section>
-  <div class="sh"><span class="no">9</span><h2>상태 색</h2></div>
+  <div class="sh"><span class="no">12</span><h2>상태 색</h2></div>
   <div class="legend">
     <span><i class="e"></i>충돌 — 그대로는 못 씀</span>
     <span><i class="w"></i>경고 — 알리기만</span>
@@ -541,28 +959,24 @@ engram agent preset add 리뷰봇 프리셋/실험/night-rules</div>
   </div>
 </section>
 
-<!-- 10 -->
+<!-- 13 -->
 <section>
-  <div class="sh"><span class="no">10</span><h2>열린 것</h2><span class="tag unv">미정</span></div>
+  <div class="sh"><span class="no">13</span><h2>열린 것</h2><span class="tag unv">미정</span></div>
   <div class="open">
-    <span class="tag unv">따로 된 편집 슬롯 없앨지</span>
-    <span class="tag unv">최종 구성 보기 방식</span>
-    <span class="tag unv">슬롯 B 띄우기</span>
-    <span class="tag unv">라이브러리 우클릭 ‘프리셋에 추가’ 남길지</span>
+    <span class="tag unv">실제로 받는 전체 보기 (필요한지)</span>
     <span class="tag unv">에이전트에 붙이는 곳</span>
     <span class="tag unv">모델 · 강도 저장 위치</span>
-    <span class="tag unv">+ 새로 만들기 범위 (추천: 폴더 · 프리셋 · 설정)</span>
-    <span class="tag unv">라이브러리 폴더 미지정 시</span>
+    <span class="tag unv">배포판 기본 내용이 고친 파일을 덮을 때</span>
     <span class="tag unv">기본 프리셋 떼면 경고</span>
     <span class="tag unv">돌고 있는 에이전트 프리셋 변경 시 반영</span>
     <span class="tag unv">다중 데몬 (나중)</span>
   </div>
 </section>
 
-<!-- 11 -->
+<!-- 14 -->
 <section>
-  <div class="sh"><span class="no">11</span><h2>근거</h2></div>
-  <p class="ref"><code>docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md</code> · <code>docs/research/agent-preset-components-survey-2026-10-11.md</code> · <code>docs/research/library-multi-root-display-survey-2026-10-14.md</code> · <code>docs/research/favorite-star-vs-collections-survey-2026-10-14.md</code> · <code>docs/research/settings-preset-file-format-survey-2026-10-14.md</code> · <code>docs/research/library-to-bundle-add-patterns-survey-2026-10-14.md</code></p>
+  <div class="sh"><span class="no">14</span><h2>근거</h2></div>
+  <p class="ref"><code>docs/research/external-skill-dir-loading-claude-codex-2026-10-10.md</code> · <code>docs/research/agent-preset-components-survey-2026-10-11.md</code> · <code>docs/research/library-multi-root-display-survey-2026-10-14.md</code> · <code>docs/research/favorite-star-vs-collections-survey-2026-10-14.md</code> · <code>docs/research/settings-preset-file-format-survey-2026-10-14.md</code> · <code>docs/research/library-to-bundle-add-patterns-survey-2026-10-14.md</code> · <code>docs/research/browser-back-forward-history-survey-2026-10-14.md</code> · <code>docs/research/library-browser-building-blocks-survey-2026-10-14.md</code> · <code>docs/research/library-folder-change-sync-survey-2026-10-14.md</code> · <code>docs/research/preset-asset-reference-base-survey-2026-10-14.md</code> · <code>docs/research/third-party-wrapping-criteria-survey-2026-10-14.md</code></p>
 </section>
 
 </div>
