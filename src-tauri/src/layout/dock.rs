@@ -18,7 +18,8 @@ use super::types::{LayoutNode, SlotContent, SplitDir};
 /// 붙일 쪽 — 이름이 결과 배치를 말한다. `Left` = 기준의 왼쪽에 새것 · `Right` = 오른쪽 · `Top` = 위 · `Bottom` = 아래.
 // ★`#[serde(rename_all)]` 을 달지 말 것★ — 버스 선언 매크로는 rename 을 못 달아 variant 이름이 그대로 wire 값이
 // 된다. invoke 와 버스가 같은 철자(`Left` …)를 쓰게 둔다(TRD S21-slot-docking §3-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub enum DockSide {
     Left,
     Right,

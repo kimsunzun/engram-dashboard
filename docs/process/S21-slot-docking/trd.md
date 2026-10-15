@@ -2,7 +2,7 @@
 
 | 항목 | 값 |
 |---|---|
-| **상태** | 4.1판 — 정합(구조 브리핑을 쓰며 찾은 어긋남 여섯 · 4판 = 3판 `/review trd full` 의 작은 FIX 여섯 반영) · 사용자 확인 대상 5건(§11-1) · 스파이크 5건(§8 — S2 는 진행 중이고 결과는 메인이 접어 넣는다) |
+| **상태** | 4.1판 — 정합(구조 브리핑을 쓰며 찾은 어긋남 여섯 · 4판 = 3판 `/review trd full` 의 작은 FIX 여섯 반영) · 사용자 확인 대상 6건(§11-1) · 스파이크 5건(§8 — S2 는 진행 중이고 결과는 메인이 접어 넣는다) |
 | **날짜** | 2026-10-15 |
 | **스텝** | S21 |
 | **브랜치** | `v0.4.1/feat/slot-docking` |
@@ -54,7 +54,8 @@ platform ─ window::{NativeWindow, native_window, topmost_at, Foreground, foreg
 | 창 포트 `WindowHost::{open_at, move_window}` — ★기본 본문 없음★ | `src/layout/apply.rs`(trait) · `src/commands/popout.rs` `TauriWindowHost`(:70) · **`src/commands/layout.rs` `OwnedWindowHost`(:172-193 — 버스 경로의 포트 · 둘을 그대로 넘긴다)** · 시험 가짜 넷(`tests/layout_apply.rs:162` · `tests/layout_commands.rs:106` · `daemon_client/tests.rs:5350` · `:5749`) | §1-2 「적용 서비스」 |
 | `placement::place` · `land` 공개(`pub(crate)`) | `src/state/placement.rs` | 새 창 자리 · 버스 x/y 검증 |
 | invoke 껍데기 `dock_tab` · `dock_drag_begin` · `dock_drag_end` · `report_dock_chrome` | `src/commands/dock.rs`(신설) | `lib.rs` `generate_handler!` 등록 · 창을 만들 수 있는 둘(`dock_tab` · `dock_drag_begin`)은 `async fn`(창 빌드 교착 — `popout.rs:183-185` 선례) |
-| 판정 `dock::hit` · 세션 `dock::session` · 구동 `dock::driver` · 딱지 창 `dock::chip` · 페이로드 타입(ts-rs) `dock::types` | `src/dock/`(신설) | 앞 둘은 순수 · platform 무의존 — 세션은 자기 입력 enum(`ForegroundSeen` · `PointerSeen` · `TopSeen`)을 두고 driver 가 platform 값을 거기로 옮긴다(§1-3). 타입은 `src-tauri/bindings/` 로 굽는다(CI 생성물 sync 게이트) |
+| 크롬 측정 타입(ts-rs) `DockChrome` · `PointCss` · `RectCss` · `TabHeader` | `src/layout/chrome.rs`(신설) | 웹뷰가 보고하는 측정 — 6 단계가 `WindowTabs` 에 둔다. `dock` 이 아니라 `layout` 에 두는 이유 = 창 항목이 이 값을 들고 있어 `dock` 에 두면 `layout` → `dock` 의존이 생긴다(5 단계 리뷰) |
+| 판정 `dock::hit` · 세션 `dock::session` · 구동 `dock::driver` · 딱지 창 `dock::chip` · 가이드 페이로드 타입(ts-rs) `dock::types` | `src/dock/`(신설) | 앞 둘은 순수 · platform 무의존 — 세션은 자기 입력 enum(`ForegroundSeen` · `PointerSeen` · `TopSeen`)을 두고 driver 가 platform 값을 거기로 옮긴다(§1-3). 타입은 `src-tauri/bindings/` 로 굽는다(CI 생성물 sync 게이트) |
 | 창 사건 연결 | `src/lib.rs` `on_window_event`(:299–:338) | `CloseRequested`(팝아웃 → 모델 먼저 · §1-2) · `Destroyed` · `Focused` · `Moved` · `Resized` · `ScaleFactorChanged` → driver 채널. 딱지 창의 `Moved` · `Resized` 는 `placement::record` 앞에서 거른다 |
 | 끄는 동안 출처 창 자리 기록 멈춤 | `src/state/placement.rs` `record`(:804) | 같은 함수의 `DeferredMaximize` 거름(:807–:815)과 같은 꼴 |
 | OS 함수 | platform `src/window.rs` · `src/input.rs`(신설) · (조건부) `src/timer.rs` | §1-4 |
@@ -272,7 +273,7 @@ DropTarget = Seam { window, view, anchor, side } | TabBar { window, index } | No
 
 - **판정 재료 = 떼는 순간 새로 뜬 스냅숏(3판 리뷰 N4)** — 마지막 틱의 재료를 다시 쓰지 않는다. 떼는 점 = 틱 3 이면 그 틱 `Read` 의 `at`, 웹뷰 `End{Released}` 가 어느 틱보다 먼저 왔으면 **그 사건을 처리할 때 `pointer()` 를 새로 읽은 값**(`Read` 면 그 `at` · `Unsupported` 면 Tauri `cursor_position` · `Unavailable` 이면 떼는 자리를 믿을 수 없으므로 판정 없이 비정상 끝 — 이유 `InputLost`). 그 점으로 `topmost_at` 를 새로 부르고, ViewManager 짧은 락으로 판정 재료(보이는 탭 · 탭 목록 · 캔버스 · 크롬 · 그 탭 배치)를 새로 복사한다. 창 기하(안쪽 원점 · 배율)는 캐시를 쓴다 — 기하 사건이 오면 루프가 그 창을 다시 읽어 두므로 처리한 사건까지는 최신이다. 그 재료로 **한 번** 판정한다(§2 — 틱과 같은 함수).
 - **`source_stale` 이면 판정 없이 무변경 — 아래 두 갈래보다 먼저 본다**(4판 리뷰 약한 지적). 새 창 요청도 `DockGuard{ lease, expect_source }` 를 싣고 가므로 모델 판정 7(`SourceChanged`)이 한 번 더 막는다.
-- **지금 결과가 「가이드 없음」이면 → R22 새 창**(무엇을 보냈든 · `Unset` 이어도). 슬롯 가운데 · 면적 0 이라 칠하지 않은 띠 · 우리 창 밖 · 다른 앱 위 · 바탕화면이 여기다(PRD R6 · R8 · R22). `NewWindow{ at: 딱지 왼쪽 위 }`(크기는 적용 서비스가 R22 규칙으로 채운다 · 출처 사전조건 `lease` · `expect_source` 는 싣고 대상 사전조건은 없음).
+- **지금 결과가 「가이드 없음」이면 → R22 새 창**(무엇을 보냈든 · `Unset` 이어도). 슬롯 가운데 · 면적 0 이라 칠하지 않은 띠(바깥 띠라면 그 밑에 칠해진 칸 띠도 없는 자리 — 있으면 그 칸 띠로 넘어간다 · §2-4 · §7 #40) · 우리 창 밖 · 다른 앱 위 · 바탕화면이 여기다(PRD R6 · R8 · R22). `NewWindow{ at: 딱지 왼쪽 위 }`(크기는 적용 서비스가 R22 규칙으로 채운다 · 출처 사전조건 `lease` · `expect_source` 는 싣고 대상 사전조건은 없음).
 - **지금 결과가 이음새 · 탭바면 `shown.target`(마지막으로 보낸 오버레이가 보인 것)과 대조한다.** 같음 = 같은 창 + 같은 띠(대상 View · 기준 · 변) 또는 같은 탭바 자리(창 · 자리).
   - **같으면 적용** — `apply::dock_tab(DockGuard{ lease, expect_source, expect_target: shown.expect }, Reveal)`. 가이드를 보낸 뒤 대상 배치가 바뀌었으면 모델 판정 7 이 `TargetChanged` 로 무변경을 낸다(R13c).
   - **다르면 무변경** — 이유 = `TargetChanged` 로 로그 · 탭은 출처 탭바에 다시 보인다. 사용자가 못 본 이음새 · 탭바에 놓이지 않는다.
@@ -398,12 +399,12 @@ struct TabBarHint { insert_x: Option<f64> /* 끼울 자리(탭바 CSS px) — R2
 ### 2-1. 입력 · 출력
 
 ```rust
-pub const OUTER_BAND_PX: f64 = 32.0;                          // R5 — 바깥 띠 두께(CSS px)
+pub const OUTER_BAND_PX: u32 = 32;                            // R5 — 바깥 띠 두께(CSS px 정수 — 그린 띠와 판정이 같은 정수 사각형)
 pub const SIDE_ORDER: [DockSide; 4] = [Left, Right, Top, Bottom];  // 동률 깨기 — 고정 순서
 
 pub struct WindowFrame<'a> {                                  // 맨 위 창 하나(셸이 platform 으로 골랐다)
     pub label: &'a str,
-    pub inner_origin: (f64, f64),                             // 안쪽(클라이언트) 왼쪽 위 — 물리 px
+    pub inner_origin: (f64, f64),                             // 웹뷰 클라이언트 영역 왼쪽 위 — 물리 px(Tauri inner_position() · 바깥 틀 아님)
     pub scale: f64,                                           // 그 창의 배율(Tauri scale_factor)
     pub chrome: &'a DockChrome,                               // 캔버스 원점 · 탭바 · 탭 머리(CSS px — 보고 그대로)
     pub canvas: CanvasPx,                                     // 캔버스 크기(CSS px 정수 — ADR-0227 보고)
@@ -413,12 +414,20 @@ pub struct WindowFrame<'a> {                                  // 맨 위 창 하
 pub enum Locate {                                             // 1 단계 — 어디 위인가
     Nothing,                                                  // 가이드 없음
     TabBar { label, index: usize, over: Option<Uuid> },       // R21 끼울 자리 · over = 머리 위의 탭(R6b 대기)
-    Outer { label, view, side: DockSide },                    // 바깥 띠(R5 · R6a ①)
+    Outer { label, view, sides: Vec<DockSide>, slot: Option<(Uuid, PxRect)>, p: (f64, f64) },  // 바깥 띠(R5 · R6a ①) — 품은 변 전부(가까운 것 먼저) + 그 밑 칸
     Slot { label, view, slot: Uuid, frame: PxRect, p: (f64, f64) },  // 칸 위 — 띠 고르기는 2 단계
 }
 pub fn locate(cursor: (f64, f64), top: Option<&WindowFrame>, source_view: Uuid) -> Locate;
-/// 2 단계 — 칸 안에서 어느 띠인가. `bands` = 그 칸의 유효한 띠와 그 결과 사각형(세션이 docked_tree 로 계산).
-pub fn choose_band(p: (f64, f64), frame: PxRect, bands: &[(DockSide, PxRect)]) -> Option<DockSide>;
+impl Locate { pub fn slot(&self) -> Option<Uuid>; }           // 커서 밑 칸(바깥 띠 위여도) — 2 단계에 줄 띠를 고른다
+/// 2 단계 — 놓을 이음새. `outer` = 대상의 유효한 바깥 변 · `bands` = 커서 밑 칸의 유효한 띠(둘 다 세션이 docked_tree 로
+/// 계산 · `valid_bands`). 바깥 띠 위면 품은 변 중 유효한 첫 변 · 품은 변이 전부 무효일 때만 밑 칸의 띠로 넘어간다(§2-4).
+pub fn choose_seam(loc: &Locate, outer: &[(DockSide, PxRect)], bands: &[(DockSide, PxRect)]) -> Option<(DockAnchor, DockSide)>;
+pub fn choose_band(p: (f64, f64), frame: PxRect, bands: &[(DockSide, PxRect)]) -> Option<DockSide>;  // 칸 안의 띠
+// 띠 재료 · 그림 재료(같은 모듈 — 판정 규칙과 한 곳에)
+pub fn landing_rect(target, anchor, side, incoming, canvas) -> Option<PxRect>;  // 띠 = 놓았을 때 끼운 것의 px 사각형(R3)
+pub fn valid_bands(target, anchor, incoming, canvas) -> Vec<(DockSide, PxRect)>; // 면적 0 변은 빠진다(R8)
+pub fn outer_strips(canvas) -> [(DockSide, PxRect); 4];        // 바깥 띠 — 그림과 규칙 6 의 판정이 같은 사각형
+pub fn tab_insert_x(chrome, source_view, index) -> f64;        // 탭바 끼울 자리(탭바 상자 왼쪽 기준 CSS px)
 ```
 
 두 단계로 가른 이유: 띠의 사각형 = 놓았을 때의 결과 사각형(R3)이고 그 값은 `docked_tree` 를 돌려야 나온다. 1 단계는 칸만 찾고, 세션이 그 칸의 결과를 (캐시해) 계산한 뒤 2 단계가 **그려진 띠 그대로** 고른다 — 칠하지 않은 띠(면적 0 · R8)에서는 붙지 않는다는 것이 따로 검사 없이 선다.
@@ -426,15 +435,15 @@ pub fn choose_band(p: (f64, f64), frame: PxRect, bands: &[(DockSide, PxRect)]) -
 ### 2-2. 규칙
 
 1. **맨 위 창 없음**(`topmost_at` 이 `Other`) → `Nothing`(R15 — 다른 앱 창에 가려진 자리 · 바탕화면 · 최소화된 창).
-2. **창 안쪽 좌표** — `css = (cursor − inner_origin) / scale`. 커서 · 창 원점은 물리 px(PMv2 가상 화면 좌표), 배율은 **그 창의** 것이다. 창 하나엔 배율 하나라(두 모니터에 걸쳐도 Windows 는 한 DPI 를 준다) 이 나눗셈이 그 웹뷰가 그리는 CSS px 와 맞는다(W4 · AC12).
-3. **탭바** — `css` 가 `chrome.tab_bar` 안이면 `TabBar`. ★탭 머리 목록에서 `view_id == source_view` 인 것을 먼저 뺀다(3판 리뷰 F9)★ — 크롬 보고는 떼어진 표시보다 늦게 올 수 있어 그 보고를 믿지 않는다. 그렇게 거른 목록 = 결과 목록이므로, `index` = 그 목록에서 가운데 x 가 커서보다 왼쪽인 머리의 수다. `over` = 커서를 품은 머리(거른 목록에서).
+2. **창 안쪽 좌표** — `css = (cursor − inner_origin) / scale`. 커서 · 창 원점은 물리 px(PMv2 가상 화면 좌표), 배율은 **그 창의** 것이다. `inner_origin` = 웹뷰 클라이언트 영역의 원점(Tauri `inner_position()`) — 바깥 틀 원점(`outer_position()`)을 주면 제목줄 · 테두리 두께만큼 판정이 밀린다. 9 단계 driver 가 창 기하 캐시에서 `inner_position()` 을 준다(5 단계 리뷰). 창 하나엔 배율 하나라(두 모니터에 걸쳐도 Windows 는 한 DPI 를 준다) 이 나눗셈이 그 웹뷰가 그리는 CSS px 와 맞는다(W4 · AC12).
+3. **탭바** — `css` 가 `chrome.tab_bar` 안이면 `TabBar`. ★탭 머리 목록에서 `view_id == source_view` 인 것을 먼저 뺀다(3판 리뷰 F9)★ — 크롬 보고는 떼어진 표시보다 늦게 올 수 있어 그 보고를 믿지 않는다. 그렇게 거른 목록 = 결과 목록이므로, `index` = 그 목록에서 가운데 x 가 커서보다 왼쪽인 머리의 수다. `over` = 커서를 품은 머리(거른 목록에서). ★id 로 거르는 것은 목록만 고친다 — 기하는 못 고친다(5 단계 리뷰)★: 떼어진 표시가 그 머리를 숨기면 웹뷰 탭바가 당겨지지만 다음 보고 전까지 크롬은 옛 자리라 같은 커서가 다른 자리를 낸다. 그래서 **세션은 떼어진 표시가 시작된 뒤 그 창의 첫 크롬 보고가 올 때까지 그 창 탭바 힌트(끼울 자리 · 전환 대기)를 내지 않는다**(6 단계 몫). 그동안 그 탭바에 놓으면 보낸 가이드와 다르므로 무변경(`TargetChanged` — §1-3 「놓기 판정」)이다.
 4. **캔버스** — `p = css − chrome.canvas_origin`. `p ∉ [0, W) × [0, H)` 면 `Nothing`.
 5. **끄는 탭 자신** — `visible_view == source_view` 면 `Nothing`(떼어진 표시로 실제로는 안 생긴다 — 방어).
-6. **바깥 띠(R5 · R6a ①)** — 거리 `d = (p.x, W − p.x, p.y, H − p.y)`(L · R · T · B). `d < OUTER_BAND_PX` 인 변이 있으면 그중 가장 작은 `d` 의 변(동률은 `SIDE_ORDER`)으로 `Outer`. 슬롯 띠보다 먼저 보므로 창 변에 붙은 작은 칸 위에서도 바깥 띠가 이긴다(AC4).
+6. **바깥 띠(R5 · R6a ①)** — 바깥 띠 = `outer_strips` 의 반열림 사각형(`[0, 32)` · `[W − 32, W)` · `[0, 32)` · `[H − 32, H)` — 그리는 사각형과 같은 것). 점이 든 띠가 있으면 `Outer` — 품은 띠 **전부**를 캔버스 변까지 거리 `d = (p.x, W − p.x, p.y, H − p.y)`(L · R · T · B)가 작은 순(동률은 `SIDE_ORDER`)으로 `sides` 에 싣는다(모서리에서 가까운 변이 무효여도 같이 품은 유효한 변을 고를 수 있게 — 5 단계 재리뷰). 왼쪽 · 위는 `d < 32`, 오른쪽 · 아래는 `d ≤ 32` 가 되어 네 변 모두 그린 픽셀 그대로 판정한다(5 단계 리뷰 — 옛 「`d < 32`」는 오른쪽 · 아래 띠의 안쪽 경계 한 줄이 그림과 어긋났다). `Outer` 는 그 밑 칸(규칙 7)과 `p` 도 싣는다 — 품은 변이 전부 무효면 2 단계가 그 칸 띠로 넘어간다(§2-4). 슬롯 띠보다 먼저 보므로 창 변에 붙은 작은 칸 위에서도 바깥 띠가 이긴다(AC4).
 7. **칸 찾기** — 칸 틀은 반열림 `[x0, x1) × [y0, y1)`. 이웃 칸은 같은 정수 경계를 나누므로(`geometry.rs` 머리 불변식 · `px_edge` · `:159`) 점 하나에 칸 하나다. 못 찾으면 `Nothing`.
-8. **띠 고르기(2 단계)** — 띠 사각형은 칸 바깥쪽 변에 붙어 있다. 점이 띠 사각형 안이면(칸 **안쪽으로 향한 변은 제외** — 그 선 위는 가운데 몫) 후보다. 후보가 없으면 `None`(가운데 — R6). 둘 이상이면(모서리) **정규화 거리** = 그 띠의 칸 변까지 거리 ÷ 그 띠의 두께가 가장 작은 띠(R6a ②), 동률은 `SIDE_ORDER`.
+8. **띠 고르기(2 단계 · `choose_seam`)** — `Outer` 면 `sides` 중 유효한 첫 변(바깥 변)이고, 품은 변이 전부 무효일 때만 그 밑 칸으로 넘어간다(§2-4). 칸에서는: 띠 사각형은 칸 바깥쪽 변에 붙어 있고, 점이 띠 사각형(반열림 — 그린 사각형 그대로) 안이면 후보다. 칸 틀 밖으로 삐져나간 띠 사각형은 다른 칸(또는 바깥 변)의 띠를 잘못 짝지은 것이라 보지 않는다(5 단계 재리뷰). 그래서 왼쪽 · 위 띠의 안쪽 경계선은 가운데 몫이고 오른쪽 · 아래 띠의 안쪽 경계선은 띠에 든다(5 단계 리뷰 — 옛 「안쪽 변은 늘 가운데 몫」은 오른쪽 · 아래 띠에서 그린 픽셀 한 줄을 빼 1px 띠가 그 유일한 픽셀에서 안 잡혔다). 후보가 없으면 `None`(가운데 — R6). 둘 이상이면(모서리) **정규화 거리** = 그 띠의 칸 변까지 거리 ÷ 그 띠의 두께가 가장 작은 띠(R6a ②), 동률은 `SIDE_ORDER`.
 
-**경계 포함 규칙 한 줄(R6a ③)** — 반열림 사각형(왼쪽 · 위 포함, 오른쪽 · 아래 제외) · 바깥 띠는 `d < 두께` · 띠도 안쪽 경계선은 띠 밖 · 탭바 자리는 가운데 x 와 같으면 오른쪽 · 동률은 언제나 `Left → Right → Top → Bottom`. 부동소수 비교만 하고 반올림하지 않는다.
+**경계 포함 규칙 한 줄(R6a ③)** — 칸 · 탭바 · 바깥 띠 · 칸 띠 전부 **그린 사각형 그대로의 반열림**(왼쪽 · 위 포함, 오른쪽 · 아래 제외) · 탭바 자리는 가운데 x 와 같으면 오른쪽 · 동률은 언제나 `Left → Right → Top → Bottom`. 부동소수 비교만 하고 반올림하지 않는다.
 
 ### 2-3. 바깥 띠 두께 = 32 CSS px
 
@@ -444,7 +453,7 @@ pub fn choose_band(p: (f64, f64), frame: PxRect, bands: &[(DockSide, PxRect)]) -
 ### 2-4. 세션이 판정 앞뒤로 하는 일
 
 - **후보 · 투과** — 후보 = 모델의 창 중 보이고 최소화 안 된 것에서 안 보이게 한 출처 창을 뺀 것, 투과 = 딱지 창(R15 「딱지를 빼고 본」).
-- **유효 띠 캐시** — 키 = (대상 View, 전역 `version`, 칸 id). 그 칸의 네 변 · 대상 바깥 네 변 = 최대 여덟 번 `docked_tree`(끼울 것 = `expect_source`). 칸이나 `version` 이 바뀔 때만 다시 한다. `Outer` 도 그 변의 결과가 면적 0 이면 칠하지 않고 `Nothing` 으로 친다(R8).
+- **유효 띠 캐시** — 키 = (대상 View, 전역 `version`, 칸 id). 그 칸의 네 변 · 대상 바깥 네 변 = 최대 여덟 번 `docked_tree`(끼울 것 = `expect_source`). 칸이나 `version` 이 바뀔 때만 다시 한다. 결과가 면적 0 인 바깥 변은 칠하지 않고(`GuideView.outer` 에서 빠진다 · R8), 커서가 품은 바깥 띠 중 칠해진(유효한) 것이 있으면 그중 가까운 변이고, 품은 바깥 띠가 **전부** 칠하지 않은 띠면 판정은 **그 밑 칸의 띠로 넘어간다** — 그 칸 띠에 들면 그 이음새, 안 들면 가이드 없음(놓으면 R22). 틱과 놓기가 같은 `choose_seam` 을 쓴다(메인 결정 — §7 #40 · 사용자 확인 대상 §11-1 #6).
 - **보낸 가이드의 기대값** — Seam · Outer 는 `TargetExpect::Layout(그 계산에 쓴 대상 배치)`, TabBar 는 `TargetExpect::Tabs(그 창 탭 목록)`. 이 값이 놓기의 `expect_target` 이다(§1-3).
 - **`source_stale`** 이면 띠 · 탭바 자리를 하나도 내지 않는다.
 - **출처 창** — 그 창도 대상이다: 보이는 탭(`display_active` 또는 모델 활성)의 칸에 붙거나(같은 창 합치기 · AC14), 그 창 탭바에 놓아 자리를 옮긴다(R21).
@@ -649,6 +658,11 @@ enum DockMode { Seam, TabBar, NewWindow }
 38. **핸들 = platform 이 소유한 `NativeWindow(isize)` · 들어오는 문은 `raw-window-handle` 하나** — Send 라 끌기 스레드로 옮길 수 있고, 셸이 OS 변형을 열어 보지 않는다(사용자 확인 대상 — §11-1 #3).
 39. **Windows 밖 `Unknown` → 최근 포커스 순 근사 · `Unsupported` → 웹뷰 신호** — 부르는 쪽에 OS 분기 없이 macOS 구현 전까지 돈다.
 
+**5 단계 리뷰 반영 (2026-10-15)**
+40. **(메인 결정 · 사용자 확인 대상 §11-1 #6) 커서가 품은 바깥 띠가 전부 칠하지 않은(면적 0) 것이면 그 밑 칸의 띠로 넘어간다** — 칠하지 않은 바깥 띠가 그 아래 칠해진 칸 띠를 가리지 않는다. 모서리에서 품은 바깥 띠 중 하나라도 칠해져 있으면 그 바깥 변이 이긴다(가까운 변 먼저). 칸 띠에도 안 들면 가이드 없음(놓으면 R22). 틱과 놓기가 같은 `choose_seam` 을 써 보인 것과 놓은 것이 갈리지 않는다(§2-2 규칙 6 · 8 · §2-4). 옛 판(「`Nothing` 으로 친다」)은 그 자리의 칸 띠를 통째로 막았다.
+41. **그린 사각형 = 판정 사각형** — 바깥 띠 · 칸 띠 네 변 모두 그린 정수 사각형의 반열림 포함으로 판정한다. 오른쪽 · 아래 띠의 안쪽 경계선이 띠에 든다(§2-2 규칙 6 · 8). 바깥 띠 두께는 정수 상수(`OUTER_BAND_PX: u32`)라 그림과 판정이 같은 사각형을 쓴다.
+42. **크롬 측정 타입은 `layout::chrome`** — 창 항목(`WindowTabs`)이 들고 있으므로 `layout` → `dock` 의존을 만들지 않는다(§1-1).
+
 ## 8. 스파이크 계획
 
 - **어디서** — 버리는 스파이크 브랜치(예: `v0.4.1/spike/dock-*`)에서 앱을 런처로 띄워(CLAUDE.md 「GUI 실측」 — 셸에서 직접 띄우지 않는다) 잰다. 코드는 머지하지 않고 결과만 이 문서 개정으로 남긴다.
@@ -676,7 +690,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 | 닫기 요청 | `drop_window_in_model` 을 닫기 요청 계기로 부른 뒤: 그 창 탭이 모델에서 사라짐 · 묘비 · 뒤이은 `Destroyed` 정리가 멱등 · 그 뒤 Seam(`TabNotFound`) · TabBar(`WindowNotFound`) · 새 창(`WindowClosed`) · 팝아웃 기존 창 타깃(롤백) · 팝아웃 새 창 타깃(롤백) 전부 무변경 | `src/commands/popout.rs` `#[cfg(test)]`(창 없이 서는 모델 몫 — 그 파일 머리) → `lib_unit` |
 | 적용 서비스 | 가짜 포트로: Seam · TabBar 의 변경 · 스냅숏 · `resync` 가 한 락 안 · 알림은 락 밖 · 출처 창이 닫히면 `host.close` 가 알림 뒤 한 번 · 실패면 알림 0 · `resync` 0 / NewWindow — 열기 실패 = 모델 무변경 · phase C 실패(묘비 포함) = 연 창을 닫고 탭은 출처 · 재사용 = `move_window` · 모델 무변경 · `activate` 가 `FocusPolicy` 를 따름 · 어느 모니터에도 안 걸치는 자리 = 기본 자리 | `tests/layout_apply.rs` → `cargo test -p engram-dashboard --test layout_apply` |
 | 버스 | `tab.dock` 선언(이름 · 인자 · 답 · 오류 목록) · 모드 칸 조합 불량 = `INVALID_ARGUMENT` · 사유 → 코드 표(§3-2) 전부 · id 형식 불량 · `DockSide` · `DockMode` 두 표면 철자 맞대기 · `catalog_version` 18 · ★NewWindow 가 x · y · 크기 · `activate = false` 를 창 포트 `open_at` 에 그대로 넘김(3판 리뷰 F2 — 가짜 `Windows` 가 받은 인자를 적는다)★ | `tests/layout_commands.rs` → `--test layout_commands` |
-| 판정 | `locate` · `choose_band` — 각 변의 띠 · 가운데(R6 → `Nothing`) · 모서리 정규화 거리(R6a ②) · 바깥 띠가 이김(R6a ① · AC4) · 경계선 위 결정성(R6a ③) · 탭바 자리(가운데 x 규칙 · ★크롬에 출처 탭 머리가 남아 있어도 id 로 걸러 같은 자리★) · 탭 머리 `over` · 캔버스 밖 · 배율 1.0 / 1.5 / 걸친 창(W4) · 빠진 띠(면적 0)에서는 안 붙음(AC15) | `src/dock/hit.rs` `#[cfg(test)]` → `lib_unit` |
+| 판정 | `locate` · `choose_seam` · `choose_band` — 각 변의 띠 · 가운데(R6 → `Nothing`) · 모서리 정규화 거리(R6a ②) · 바깥 띠가 이김(R6a ① · AC4) · 경계선 위 결정성(R6a ③) · ★그린 사각형 = 판정(바깥 띠 · 칸 띠 네 변의 경계 픽셀 교차 검사 · 1px 오른쪽 띠)★ · ★무효 바깥 변 → 밑 칸 띠로 넘어감(§7 #40)★ · 탭바 자리(가운데 x 규칙 · ★크롬에 출처 탭 머리가 남아 있어도 id 로 걸러 같은 자리 · 당겨진 탭바의 옛 기하는 못 고침(규칙 3)★) · 탭 머리 `over` · 캔버스 밖 · 캔버스 원점(가로 · 세로) · ★클라이언트 원점(바깥 틀 아님)★ · 배율 1.0 / 1.5 / 걸친 창(W4) · 빠진 띠(면적 0)에서는 안 붙음(AC15) · 띠 = 놓은 뒤 그려질 사각형(R3) | `src/dock/hit.rs` `#[cfg(test)]` → `lib_unit` |
 | 세션 | 가짜 전경 · 포인터 · 시계 · 맨 위 창 · 스냅숏으로 `step` 의 할 일을 단언: 시작 → 띠 → 놓기 = 적용 1회(`Reveal` · 표식 · 기대값) + `set_focus` · **(M1 · 4판) 지금 결과가 가이드 없음(슬롯 가운데 · 칠하지 않은 띠 · 우리 창 밖 · 다른 앱 위) → 보낸 것이 이음새 · 탭바 · 가이드 없음 · `Unset` 어느 것이든 새 창 · 지금 결과가 이음새 · 탭바이고 보낸 것과 같음 → 적용 · 다름 → 무변경(`TargetChanged`) · ★`Unset` + 우리 창 안 슬롯 가운데 → 새 창 · `Unset` + 우리 창 밖 → 새 창 · `Unset` + 이음새 · 탭바 → 무변경(`TargetChanged`)★** · **(4.1) 틱보다 먼저 온 `End{Released}` — 그 사건을 처리할 때 새로 읽은 포인터로 판정(`Read` · `Unsupported` 면 Tauri 커서 · `Unavailable` 이면 비정상 끝 `InputLost`) · 마지막 틱 위치가 아니라 그 새 위치를 따른다** · **R6b 전환은 활성 탭 쓰기 한 번(`switch_tab`)을 할 일로 내고 끌린 탭의 배치는 건드리지 않음 · 무변경 끝에서도 되돌리는 할 일이 없음** · **(N4) 판정은 떼는 순간 스냅숏을 씀 — 마지막 틱 스냅숏과 다른 떼기 스냅숏(그 사이 대상 칸이 닫힘 · 탭이 바뀜)을 먹이면 결과가 떼기 스냅숏을 따른다** · **(F7 · N2) `Other` 틱의 버튼 0 = 곧바로 비정상 끝(놓기 아님) · `Indeterminate` 는 유예 — 그 사이의 버튼 0 은 떼기가 아님 · 유예 안에 `Ours` 로 돌아오면 이어짐 · `Indeterminate` 와 `Unavailable` 이 섞여 합쳐 500ms 면 비정상 끝 · `Unsupported` 는 웹뷰 `Released` 에만** · `Lost` 갈래 · 출처 창 `Destroyed` = 무변경 · 되보이기 없음(AC16) · 대상 창 `Destroyed` = 가이드 지움 · 출처 변경 → 띠 사라짐 · 놓아도 무변경(AC16 둘째 문장) · 대상 변경 → 가이드 다시 그림 · 전환 대기 500ms(R6b · AC14) · 출처 탭 목록 변경 → `Display{seq}` · 끝마다 `Ended` → 되보이기 → `release_lease` 순서 · 늦은 세션 번호 버림 · 마감 계산(사건이 틱을 안 밂 · 밀렸을 때 몰아치지 않음) | `src/dock/session.rs` `#[cfg(test)]` → `lib_unit` |
 | 구동 | 채널이 제어 사건을 버리지 않음(기하 사건을 몰아넣은 뒤 `End` 가 처리됨) · 기하 사건 합치기 · **시작 되감기(F1) — 준비 단계 실패마다 표식 0 · 숨김 0 / 부수 효과 뒤 실패마다 가드가 **`Ended` → 되보이기 → 딱지 숨김 → 자리 기록 재개 → `release_lease` → 스레드 중단** 순서로 거둠(포트 호출 순서를 적는 가짜로 단언 · 하지 않은 부수 효과는 건너뜀)** · platform 값 → 세션 입력 enum 옮김(`Foreground` · `PointerRead` · `TopmostAt` 의 모든 갈래) | `src/dock/driver.rs` 의 순수 조각(가짜 포트) `#[cfg(test)]` → `lib_unit` |
 | OS 층 | `topmost_at` 의 z 순서 걷기를 내부 함수로 떼어 가짜 창 목록으로(투과 · 최소화 · 가림 · 입력 투과 · 사각형 밖 · 후보 아님 = `Other`). 실 창 시험: 창 둘을 만들어 겹쳐 놓고 실제 답 대조 · `pointer()` 가 Windows 에서 `Unsupported` 가 아님 · 그 밖에서 `Unsupported`(짝 시험) · `foreground()` 의 갈래 판정을 PID 입력의 순수 함수로 떼어(무효 핸들 · PID 0 = `Indeterminate` · 같은 PID = `Ours` · 다른 PID = `Other`) · 옛 `foreground_is_current_process` 가 같은 입력에 옛 답(`Indeterminate` → `Some(false)`)을 그대로 줌 · `NativeWindow: Send + Sync`(컴파일 단언). `#[cfg(windows)]` 는 그 시험 함수에만(파일째 막지 않는다 — CLAUDE.md 「플랫폼 중립」). **★실 창 시험은 `-- --test-threads=4` 에서 겹친다★** — 그 시험들끼리 프로세스 안 `static` 락 하나로 줄 세우고, 다른 앱 창과 겹치지 않게 주 모니터 밖 먼 가상 좌표(예: (-20000, -20000) 근처 · 시험마다 다른 칸)에 창을 둔다. CI 러너에서 창 만들기가 서는지는 **모른다** — 첫 CI 실행에서 보고, 안 서면 그 시험만 `#[ignore]` + 로컬 `/qa` 몫으로 돌린다. 창 만들기용 `windows` feature(예: `Win32_System_LibraryLoader`)는 dev 의존에만 켠다(「의존」 규칙은 운영 의존만 본다) | platform `src/window.rs` · `src/input.rs` `#[cfg(test)]` → `cargo test -p engram-dashboard-platform -- --test-threads=4` |
@@ -720,10 +734,12 @@ enum DockMode { Seam, TabBar, NewWindow }
 3. **platform 에 `raw-window-handle` 운영 의존을 들이기**(§1-4 · ADR-C) — platform 의 「운영 의존 서드파티 = `windows` · `tracing` 만」(TRD 1-3 §0 ① · ADR-0266 계열 규칙)을 고친다. 타입만 있는 crate · 새 패키지 0 · OS 바인딩 아님. 거부한 대안은 §12 ADR-C.
 4. **R22 새 창 크기 — 출처 창이 최대화였을 때** — 기본값 = 그 창의 보통(최대화 전) 크기로 연다(화면 크기만 한 최대화 아닌 창이 되지 않게). 다른 안 = 최대화 상태 그대로.
 5. **R6b 로 바꾼 탭은 끌기가 무변경으로 끝나도 그대로 둔다** — 기본값 = 되돌리지 않음(브라우저 · VS Code). 다른 안 = 끌기 시작 때 탭으로 되돌림.
+6. **칠하지 않은(면적 0) 바깥 띠 위에 놓으면**(§2-4 · §7 #40) — PRD R8 괄호 「거기 놓으면 R22」 와 다름. 기본값 = 밑 슬롯 띠로 넘김(그 칸 띠에 들면 그 이음새, 안 들면 R22). 거절하면 무효 바깥 띠 = 새 창(R22 — 그 아래 칸 띠는 그 자리에서 고를 수 없다).
 
-**PRD 와 다른 점** — R18 의 Esc · R16 의 반환 id · R13b 의 닿지 않는 갈래는 PRD 4.1 에서 문구를 맞췄다. 남은 둘:
+**PRD 와 다른 점** — R18 의 Esc · R16 의 반환 id · R13b 의 닿지 않는 갈래는 PRD 4.1 에서 문구를 맞췄다. 남은 셋:
 - R21 「원래 창 탭바에 놓으면 그 창의 탭으로 돌아간다」는 놓은 자리로 옮겨 넣으므로 탭 순서 바꾸기도 함께 된다.
 - R13b 의 「앱이 포커스를 잃음」은 출처 창을 숨기는 방법이 전경을 다른 앱으로 넘기면 끌기 시작마다 걸린다 — S1 이 전경을 지키는 방법을 못 찾으면 이 갈래나 R2 의 「창이 사라진다」를 고쳐야 한다(§8 S1).
+- R8 괄호 「거기 놓으면 R22」 — 칠하지 않은 바깥 띠는 그 밑에 칠해진 칸 띠가 있으면 그 띠로 넘어간다(#6 · §7 #40). PRD 는 고치지 않았다 — #6 의 답을 받은 뒤 맞춘다.
 
 ### 11-2. 기술 위험
 

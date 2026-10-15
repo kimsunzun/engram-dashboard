@@ -1,6 +1,7 @@
 pub mod commands;
 pub mod daemon_client;
 pub mod discovery;
+pub mod dock;
 mod file_hooks;
 pub mod layout;
 pub mod output_channel;
