@@ -78,7 +78,7 @@ impl SlotContent {
 #[serde(tag = "type", rename_all = "snake_case")]
 #[ts(export)]
 pub enum LayoutNode {
-    /// id = 창 간 전역 고유(UUID). // ADR-0060
+    /// id = 창 간 전역 고유(UUID). // ADR-0035
     Slot {
         #[ts(type = "string")]
         id: Uuid,

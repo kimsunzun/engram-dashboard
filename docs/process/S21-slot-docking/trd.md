@@ -75,7 +75,7 @@ pub const DOCK_NEW_SHARE: f64 = 1.0 / 3.0;          // R7 — 새것의 몫
 /// 대상 트리에 끼운 **결과 트리**를 새로 만든다(제자리 변경 아님 — 가이드 · 판정 · 적용이 같은 함수를 쓴다).
 pub fn docked_tree(target: &LayoutNode, anchor: DockAnchor, side: DockSide, incoming: &LayoutNode)
     -> Result<LayoutNode, DockTreeError>;
-pub enum DockTreeError { SlotNotFound(Uuid), ZeroArea }
+pub enum DockTreeError { SlotNotFound(Uuid), SlotIdOverlap, ZeroArea }   // 판정 순서 = 기준 칸 → 겹침 → 면적
 /// 결과 기하에서 끼운 서브트리가 차지하는 정규화 사각형(그 슬롯들의 외접 사각형) — 가이드의 「정확한 사각형」(R4).
 pub fn incoming_rect(result: &LayoutGeometry, incoming_slots: &[Uuid]) -> Option<RectF64>;
 ```
@@ -513,6 +513,7 @@ enum DockMode { Seam, TabBar, NewWindow }
 | (명령 경로에선 안 남) | `StaleLease` · `SourceChanged` · `TargetChanged` | `CONFLICT` |
 | 새 창을 못 엶 | `WindowOpen` | `INTERNAL`(표 공통 코드 — `macros.rs:76`) |
 | (닿지 않는 방어) NewWindow label 이 이미 모델에 있음 | `WindowExists` | `INTERNAL`(셸 결함 — 호출자가 고칠 수 있는 상태가 아니다) |
+| (닿지 않는 방어) 대상 · 끼울 트리가 슬롯 id 를 함께 가짐 — 트리 연산 `SlotIdOverlap`(`SelfTarget` 뒤라 슬롯 id 전역 고유(ADR-0035)가 깨졌을 때만) | `WindowExists` 와 같은 줄기 | `INTERNAL` |
 | id 형식 불량 · 모드 칸 조합 불량 | (핸들러 파싱) | `INVALID_ARGUMENT`(기존 `uuid_arg` · `:1385`) |
 
 실패면 아무것도 바뀌지 않는다 — 판정이 전부 변경 앞에 있고(§1-2 판정 순서) 변경은 락 한 번(새 창은 phase C 한 번)이다. 새 창 열기 실패 · phase C 실패는 모델 무변경이다.
