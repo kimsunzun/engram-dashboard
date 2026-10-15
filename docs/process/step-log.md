@@ -2749,3 +2749,7 @@
   - **후속 서베이(2026-10-14)** — 서드파티 라이브러리를 언제 감싸나: `docs/research/third-party-wrapping-criteria-survey-2026-10-14.md`(`/research` light).
   - **후속 서베이(2026-10-14)** — 폴더 목록이 디스크 변경을 따라가는 법(감시 대 앱 활성화 때 훑기 · 보이는 동안 폴링): `docs/research/library-folder-change-sync-survey-2026-10-14.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
   - **후속 서베이(2026-10-14)** — 프리셋이 같이 든 에셋을 가리키는 경로 기준(파일 기준 · 루트 기준 · ID): `docs/research/preset-asset-reference-base-survey-2026-10-14.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 라이브러리 여러 개일 때 참조 꼴(루트 이름 + 경로 · id · 검색 경로) · 여러 루트의 문제 여섯 · 같은 형태의 선례(Skills Manager · AgentsRoom): `docs/research/multi-library-reference-paths-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-15)** — 프리셋 편집 칸에서 직접 담은 것 대 안에 든 프리셋의 것 · 종류별 칸 · 순서 · 칸마다 담기: `docs/research/preset-editor-nested-items-layout-survey-2026-10-15.md`(`/research` medium · codex 적대 리뷰 FIX → 반영).
+  - **후속 서베이(2026-10-15)** — 옆 상세 패널을 덮나 칸을 끼워 넣나: `docs/research/side-detail-panel-push-vs-overlay-survey-2026-10-15.md`(`/research` light).
+  - **후속 서베이(2026-10-15)** — 가장자리에 붙은 펼침 패널의 방향 · 창 끝일 때: `docs/research/edge-attached-flyout-direction-survey-2026-10-15.md`(`/research` light).
