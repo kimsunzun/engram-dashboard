@@ -409,6 +409,8 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 
 ## 3. 내가 정한 내부 선택 (보고)
 
+- **로컬라이제이션(PRD R49 · 2026-10-16)** — 화면 문자열은 `src/i18n` 키(`t()` · `ko.ts`)로만. 데몬 → 화면 사유 · 상태는 `{code, args}` 꼴(예 `{code:"conflict.backend_twice", args:{a, b}}`)로 답하고 화면이 `t(code, args)` 로 그린다 — `Resolution` · `LaunchBlocked` · `CONFLICT` 답 · 다시 잇기 표시가 해당. CLI 사람용 출력은 지금처럼 한국어(T-64 에서 정책 결정). 내장 프리셋 표시 이름 = 화면 키, 저장 값 = `engram:/…`.
+
 본문에 근거가 있는 것은 자리만 가리킨다.
 
 - **명령 선언 = agent crate 블록 + 포트**(§1-5) — `usage.*` 선례. 데몬 자기 블록 + 표 합성은 거부.
