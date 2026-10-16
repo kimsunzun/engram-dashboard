@@ -24,8 +24,12 @@ use uuid::Uuid;
 
 use crate::commands::layout::{RouterSubs, TauriEvents};
 use crate::daemon_client::DaemonClient;
-use crate::layout::{apply, LabelSource, LayoutState, SlotMove, WindowHost, MAIN_WINDOW_LABEL};
+use crate::layout::{
+    apply, LabelSource, LayoutState, MoveFailed, SlotMove, WindowHost, WindowPlace,
+    MAIN_WINDOW_LABEL,
+};
 use crate::output_router::OutputRouter;
+use crate::state::placement::{self, Fallback};
 use crate::webview_env::WebviewEnv;
 
 // 팝업/런타임 창 label prefix. capabilities/popup.json·usage-links.json 의 `"slot-popup-*"` glob 과 짝(변경 시
@@ -72,12 +76,20 @@ impl WindowHost for TauriWindowHost<'_> {
         build_runtime_window(self.app, label, None).map(drop)
     }
 
+    fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
+        open_runtime_window_at(self.app, label, at, activate)
+    }
+
     fn close(&self, label: &str) {
         destroy_window(self.app, label);
     }
 
     fn is_open(&self, label: &str) -> bool {
         self.app.get_webview_window(label).is_some()
+    }
+
+    fn move_window(&self, label: &str, at: &WindowPlace) -> Result<(), MoveFailed> {
+        placement::move_window(self.app, label, at)
     }
 
     fn record_placement(&self, label: &str) {
@@ -119,7 +131,7 @@ pub(crate) fn build_runtime_window(
     label: &str,
     at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
 ) -> Result<WebviewWindow, String> {
-    build_window(app, label, at, true)
+    build_window(app, label, at, true, true)
 }
 
 /// [`build_runtime_window`] 와 같되 숨긴 채 만든다 — 보이기는 부르는 쪽 몫이다(런타임 복원 수락이 모델에 넣은
@@ -129,18 +141,86 @@ pub(crate) fn build_hidden_runtime_window(
     label: &str,
     at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
 ) -> Result<WebviewWindow, String> {
-    build_window(app, label, at, false)
+    build_window(app, label, at, false, true)
 }
 
+/// 팝아웃 기본 크기(논리) — 자리 없이 여는 런타임 창과, 크기를 고르지 않은 도킹 새 창.
+pub(crate) const POPOUT_DEFAULT_SIZE: (f64, f64) = (720.0, 500.0);
+
+// 도킹의 새 창(창 포트 `open_at`) — `at` 이 어느 모니터에 걸치면 빌더에 첫 자리를 주고 만든 뒤 그 자리를 다시
+//   정확히 입힌다(위치 먼저 — 그 까닭 = [`placement::place`] · [`build_runtime_window`] 머리). 안 걸치거나 위치가 없으면
+//   label 의 계단 자리다. 크기가 없거나 쓸 수 없는 값이면 기본 크기다.
+// TRD S21-slot-docking §1-2 「적용 서비스」
+fn open_runtime_window_at(
+    app: &AppHandle,
+    label: &str,
+    at: &WindowPlace,
+    activate: bool,
+) -> Result<(), String> {
+    let monitors = match at.pos {
+        Some(_) => placement::monitors(app),
+        None => Vec::new(),
+    };
+    match placement::resolve_place(
+        label,
+        at,
+        POPOUT_DEFAULT_SIZE,
+        &monitors,
+        Fallback::DefaultPlace,
+    ) {
+        Some(landed) => {
+            let window = build_window(
+                app,
+                label,
+                Some(placement::first_place(landed)),
+                true,
+                activate,
+            )?;
+            let (bounds, landing) = landed;
+            // 고른 자리를 못 입혔으면 그 창을 거두고 실패로 답한다 — 남기면 도킹이 엉뚱한 자리의 창에 탭을 붙인다(창 포트
+            //   `open_at` 계약).
+            let placed = placement::move_steps(
+                &window.as_ref().window(),
+                Some((landing.x, landing.y)),
+                Some((bounds.w(), bounds.h())),
+            );
+            if let Err(failed) = placed {
+                let gone = match try_destroy_window(app, label) {
+                    Ok(()) => "거뒀다".to_string(),
+                    Err(e) => format!("거두기도 실패: {e}"),
+                };
+                return Err(format!(
+                    "새 창 자리를 못 입혔다({:?}: {}) — {gone}",
+                    failed.step, failed.error
+                ));
+            }
+        }
+        None => {
+            let (w, h) = placement::usable_size(at.size).unwrap_or(POPOUT_DEFAULT_SIZE);
+            let (x, y) = cascade_position(label);
+            build_window(
+                app,
+                label,
+                Some((LogicalPosition::new(x, y), LogicalSize::new(w, h))),
+                true,
+                activate,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// `focused = false` = 만들되 포커스를 가져가지 않는다(도킹 새 창의 `FocusPolicy::Keep`).
 fn build_window(
     app: &AppHandle,
     label: &str,
     at: Option<(LogicalPosition<f64>, LogicalSize<f64>)>,
     visible: bool,
+    focused: bool,
 ) -> Result<WebviewWindow, String> {
     let ((x, y), (w, h)) = match at {
         Some((at, size)) => ((at.x, at.y), (size.width, size.height)),
-        None => (cascade_position(label), (720.0, 500.0)),
+        None => (cascade_position(label), POPOUT_DEFAULT_SIZE),
     };
     // 웹뷰 환경 없이 만들지 않는다 — 마무리를 건너뛴 창은 다른 창과 환경이 갈린다(ADR-0054).
     let env = app
@@ -151,7 +231,8 @@ fn build_window(
             .title(format!("Engram — {label}"))
             .inner_size(w, h)
             .position(x, y)
-            .visible(visible),
+            .visible(visible)
+            .focused(focused),
     )
     .build()
     .map_err(|e| format!("런타임 창 생성 실패: {e}"))
@@ -370,8 +451,8 @@ mod close_request_tests {
     use crate::layout::dock::{DockAnchor, DockSide};
     use crate::layout::manager::{DockError, DockGuard, DockTo, FocusPolicy};
     use crate::layout::{
-        tree, LayoutError, LayoutEvents, SlotContent, SubscriptionSync, ViewManager, ViewSnapshot,
-        WindowTabsPayload,
+        tree, DockDest, DockRequest, LayoutError, LayoutEvents, SlotContent, SubscriptionSync,
+        ViewManager, ViewSnapshot, WindowBounds, WindowPlacement, WindowTabsPayload,
     };
 
     const POPUP: &str = "slot-popup-7";
@@ -392,6 +473,7 @@ mod close_request_tests {
     impl LayoutEvents for NoEvents {
         fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
         fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+        fn settled(&self) {}
     }
 
     struct Rig {
@@ -501,10 +583,14 @@ mod close_request_tests {
         }
     }
 
+    // 새 창 · 재사용 옮기기도 같은 틈이다 — 열거나 옮긴 바로 뒤에 닫힌다.
     impl WindowHost for ClosingHost<'_> {
         fn open(&self, label: &str) -> Result<(), String> {
             self.user_closes(label);
             Ok(())
+        }
+        fn open_at(&self, label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+            self.open(label)
         }
         fn close(&self, label: &str) {
             self.closed.lock().unwrap().push(label.to_string());
@@ -512,6 +598,10 @@ mod close_request_tests {
         fn is_open(&self, label: &str) -> bool {
             self.user_closes(label);
             true
+        }
+        fn move_window(&self, label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
+            self.user_closes(label);
+            Ok(())
         }
     }
 
@@ -572,7 +662,6 @@ mod close_request_tests {
     #[tokio::test]
     async fn after_a_close_request_docking_into_that_window_is_refused_unchanged() {
         let rig = Rig::new();
-        // main 의 마지막 탭이 아닌 출처 — 다른 사유(`MainLastTab`)가 끼지 않게.
         let source = rig.add_tab(MAIN_WINDOW_LABEL);
         let q = rig.add_tab(POPUP);
         rig.close_requested(POPUP);
@@ -740,5 +829,75 @@ mod close_request_tests {
                 FocusPolicy::Keep,
             )
             .unwrap();
+    }
+
+    fn dock_to_new_window(rig: &Rig, host: &ClosingHost, view: Uuid) -> Result<(), DockError> {
+        apply::dock_tab(
+            &rig.state,
+            &rig.subs(),
+            &NoEvents,
+            host,
+            &PopupCounter::default(),
+            DockRequest {
+                view,
+                to: DockDest::NewWindow {
+                    at: WindowPlace {
+                        pos: Some((300, 200)),
+                        size: None,
+                    },
+                },
+                guard: DockGuard::NONE,
+                focus: FocusPolicy::Reveal,
+            },
+        )
+        .map(drop)
+    }
+
+    // 도킹 새 창이 열린 바로 뒤 사용자가 닫는다 — phase C 가 묘비를 만나 연 창을 거두고 탭은 출처에 남는다.
+    #[tokio::test]
+    async fn a_close_request_before_the_attach_closes_the_new_dock_window_and_keeps_the_tab() {
+        let rig = Rig::new();
+        let agent = Uuid::new_v4();
+        let src = rig.add_tab(MAIN_WINDOW_LABEL);
+        rig.seat(src, agent);
+        let host = ClosingHost::new(&rig);
+        let before = rig.fingerprint();
+
+        let fresh = "slot-popup-1";
+        assert_eq!(
+            dock_to_new_window(&rig, &host, src),
+            Err(DockError::WindowClosed(fresh.into()))
+        );
+        assert_eq!(*host.closed.lock().unwrap(), [fresh], "방금 연 창을 거둔다");
+        assert_eq!(rig.fingerprint(), before, "탭은 출처에");
+        assert_eq!(rig.routed(agent), [MAIN_WINDOW_LABEL]);
+    }
+
+    // 재사용으로 옮긴 바로 뒤 사용자가 그 창을 닫는다 — 놓기는 그대로 끝나고(다시 판정하지 않는다) 모델은 닫기가 남긴
+    // 그대로다. 연 창이 없으니 닫을 것도 없다.
+    #[tokio::test]
+    async fn a_close_request_during_a_reuse_move_lets_the_drop_finish() {
+        let rig = Rig::new();
+        let q = rig.add_tab(POPUP);
+        rig.state
+            .0
+            .lock()
+            .unwrap()
+            .observe_window_placement(
+                POPUP,
+                WindowPlacement {
+                    minimized: false,
+                    maximized: false,
+                    bounds: WindowBounds::new(10.0, 20.0, 640.0, 480.0),
+                },
+            )
+            .unwrap();
+        let host = ClosingHost::new(&rig);
+
+        assert_eq!(dock_to_new_window(&rig, &host, q), Ok(()));
+        assert!(host.closed.lock().unwrap().is_empty());
+        let mgr = rig.state.0.lock().unwrap();
+        assert_owned(&mgr);
+        assert!(!mgr.windows.contains_key(POPUP), "닫기 요청이 지웠다");
     }
 }

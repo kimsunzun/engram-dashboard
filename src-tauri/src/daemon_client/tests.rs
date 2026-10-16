@@ -5330,7 +5330,8 @@ use crate::commands::layout::{OwnedSubs, RouterSubs};
 use crate::commands::popout::{close_requested_popup_window, drop_window_in_model, PopupCounter};
 use crate::layout::commands::{make_table, LayoutPorts, CATALOG_VERSION};
 use crate::layout::{
-    apply, AgentSpawner, LayoutEvents, LayoutState, ViewSnapshot, WindowHost, WindowTabsPayload,
+    apply, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, MoveStep, ViewSnapshot, WindowHost,
+    WindowPlace, WindowTabsPayload,
 };
 use crate::settings::{SettingsEvents, SettingsService, SettingsSnapshot};
 use crate::theme::{EffectiveThemes, ThemeControl, ThemeWindows, UiSettingsPayload};
@@ -5343,17 +5344,29 @@ struct NoLayoutEvents;
 impl LayoutEvents for NoLayoutEvents {
     fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
     fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+    fn settled(&self) {}
 }
 
 struct NoWindows;
 
+const NO_OS_WINDOW: &str = "이 시험에는 OS 창이 없다";
+
 impl WindowHost for NoWindows {
     fn open(&self, _label: &str) -> Result<(), String> {
-        Err("이 시험에는 OS 창이 없다".to_string())
+        Err(NO_OS_WINDOW.to_string())
+    }
+    fn open_at(&self, _label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+        Err(NO_OS_WINDOW.to_string())
     }
     fn close(&self, _label: &str) {}
     fn is_open(&self, _label: &str) -> bool {
         false
+    }
+    fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
+        Err(MoveFailed {
+            step: MoveStep::Position,
+            error: NO_OS_WINDOW.to_string(),
+        })
     }
 }
 
@@ -5850,9 +5863,15 @@ impl WindowHost for OpenWindows {
     fn open(&self, _label: &str) -> Result<(), String> {
         Ok(())
     }
+    fn open_at(&self, _label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+        Ok(())
+    }
     fn close(&self, _label: &str) {}
     fn is_open(&self, _label: &str) -> bool {
         true
+    }
+    fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
+        Ok(())
     }
 }
 

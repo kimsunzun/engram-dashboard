@@ -56,9 +56,9 @@ use engram_dashboard_lib::layout::commands::{
 };
 use engram_dashboard_lib::layout::geometry::Insets;
 use engram_dashboard_lib::layout::{
-    tree, AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
-    SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowBounds,
-    WindowHost, WindowTabsPayload, MAIN_WINDOW_LABEL,
+    tree, AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SplitDir,
+    SplitRatioApplied, SplitRatioOutcome, SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot,
+    WindowBounds, WindowHost, WindowPlace, WindowTabsPayload, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::settings::{
     SettingItem, SettingsEvents, SettingsService, SettingsSnapshot, THEME_DEFAULT,
@@ -88,6 +88,7 @@ struct Events;
 impl LayoutEvents for Events {
     fn layout_updated(&self, _snapshot: &ViewSnapshot) {}
     fn window_tabs_updated(&self, _tabs: &WindowTabsPayload) {}
+    fn settled(&self) {}
 }
 
 #[derive(Default)]
@@ -109,6 +110,10 @@ impl WindowHost for Windows {
         Ok(())
     }
 
+    fn open_at(&self, label: &str, _at: &WindowPlace, _activate: bool) -> Result<(), String> {
+        self.open(label)
+    }
+
     fn close(&self, label: &str) {
         self.closed.lock().unwrap().push(label.to_string());
     }
@@ -118,6 +123,10 @@ impl WindowHost for Windows {
         label == MAIN_WINDOW_LABEL
             || (self.opened.lock().unwrap().iter().any(|l| l == label)
                 && !self.closed.lock().unwrap().iter().any(|l| l == label))
+    }
+
+    fn move_window(&self, _label: &str, _at: &WindowPlace) -> Result<(), MoveFailed> {
+        Ok(())
     }
 }
 

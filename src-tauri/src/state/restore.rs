@@ -814,12 +814,7 @@ impl RestoreCoordinator {
             tabs,
         } = committed;
         let monitors = desktop.monitors.as_slice();
-        for snapshot in &layouts {
-            ports.events.layout_updated(snapshot);
-        }
-        for payload in &tabs {
-            ports.events.window_tabs_updated(payload);
-        }
+        crate::layout::apply::announce(ports.events.as_ref(), &layouts, &tabs);
 
         let windows = ports.windows.as_ref();
         let main_at = main.bounds.and_then(|bounds| {
@@ -1680,35 +1675,41 @@ mod tests {
         }
     }
 
-    /// 알림 — 첫 알림 순간에 레이아웃 락이 비었는지 적는다.
+    /// 알림 — 첫 알림 순간에 레이아웃 락이 비었는지 적는다. `order` = 알림 · 묶음 끝이 온 차례.
     struct FakeEvents {
         layout: LayoutState,
         layouts: Mutex<Vec<Uuid>>,
         tabs: Mutex<Vec<(String, u64)>>,
         first_seen: Mutex<Option<bool>>,
+        order: Mutex<Vec<&'static str>>,
     }
 
     impl FakeEvents {
-        fn note(&self) {
+        fn note(&self, what: &'static str) {
             let mut first = self.first_seen.lock().unwrap();
             if first.is_none() {
                 *first = Some(self.layout.0.try_lock().is_ok());
             }
+            self.order.lock().unwrap().push(what);
         }
     }
 
     impl LayoutEvents for FakeEvents {
         fn layout_updated(&self, snapshot: &ViewSnapshot) {
-            self.note();
+            self.note("layout");
             self.layouts.lock().unwrap().push(snapshot.view_id);
         }
 
         fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
-            self.note();
+            self.note("tabs");
             self.tabs
                 .lock()
                 .unwrap()
                 .push((tabs.label.clone(), tabs.version));
+        }
+
+        fn settled(&self) {
+            self.note("settled");
         }
     }
 
@@ -1802,6 +1803,7 @@ mod tests {
                 layouts: Mutex::default(),
                 tabs: Mutex::default(),
                 first_seen: Mutex::default(),
+                order: Mutex::default(),
             });
             let subs = Arc::new(FakeSubs::default());
             let slot = Arc::new(SubsSlot {
@@ -1989,6 +1991,11 @@ mod tests {
             rig.events.layouts.lock().unwrap().len(),
             2,
             "탭마다 레이아웃"
+        );
+        assert_eq!(
+            *rig.events.order.lock().unwrap(),
+            ["layout", "layout", "tabs", "tabs", "settled"],
+            "묶음 끝은 알림을 다 낸 뒤 한 번"
         );
 
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Answered);
@@ -2271,6 +2278,10 @@ mod tests {
         );
         assert_eq!(rig.fingerprint(), before, "모델은 그대로");
         assert!(rig.events.tabs.lock().unwrap().is_empty());
+        assert!(
+            rig.events.order.lock().unwrap().is_empty(),
+            "알리지 않은 실패는 묶음 끝도 없다"
+        );
         assert_eq!(rig.service.status().crash_copy, CrashCopyStatus::Awaiting);
         assert_eq!(
             rig.notices.seen(),

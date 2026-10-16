@@ -39,12 +39,17 @@ use uuid::Uuid;
 
 use engram_dashboard_lib::commands::popout::PopupCounter;
 use engram_dashboard_lib::layout::apply::{
-    self, AgentSpawner, LabelSource, LayoutEvents, SubscriptionSync, WindowHost, WindowTabsPayload,
+    self, AgentSpawner, DockDest, DockOutcome, DockRequest, LabelSource, LayoutEvents, MoveFailed,
+    MoveStep, SubscriptionSync, WindowHost, WindowPlace, WindowTabsPayload,
 };
+use engram_dashboard_lib::layout::dock::{DockAnchor, DockSide};
 use engram_dashboard_lib::layout::geometry::{Insets, PxRect};
+use engram_dashboard_lib::layout::manager::{
+    DockError, DockGuard, FocusPolicy, LeaseId, TargetExpect,
+};
 use engram_dashboard_lib::layout::{
     tree, LayoutNode, LayoutState, SlotContent, SplitDir, SplitRatioOutcome, UiMetrics,
-    ViewManager, ViewSnapshot, MAIN_WINDOW_LABEL,
+    ViewManager, ViewSnapshot, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL,
 };
 use engram_dashboard_lib::output_router::OutputRouter;
 
@@ -79,6 +84,8 @@ struct Recorder {
     probe: Probe,
     layout: Mutex<Vec<ViewSnapshot>>,
     tabs: Mutex<Vec<WindowTabsPayload>>,
+    /// 알림 · 묶음 끝이 온 차례 — `"layout"` · `"tabs"` · `"settled"`.
+    order: Mutex<Vec<&'static str>>,
 }
 
 impl Recorder {
@@ -87,7 +94,13 @@ impl Recorder {
             probe: Probe::new(state),
             layout: Mutex::new(Vec::new()),
             tabs: Mutex::new(Vec::new()),
+            order: Mutex::new(Vec::new()),
         }
+    }
+
+    /// 지금까지 온 차례를 비우며 돌려준다.
+    fn take_order(&self) -> Vec<&'static str> {
+        std::mem::take(&mut *self.order.lock().unwrap())
     }
 }
 
@@ -95,12 +108,19 @@ impl LayoutEvents for Recorder {
     fn layout_updated(&self, snapshot: &ViewSnapshot) {
         self.probe.assert_outside("LayoutEvents::layout_updated");
         self.layout.lock().unwrap().push(snapshot.clone());
+        self.order.lock().unwrap().push("layout");
     }
 
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         self.probe
             .assert_outside("LayoutEvents::window_tabs_updated");
         self.tabs.lock().unwrap().push(tabs.clone());
+        self.order.lock().unwrap().push("tabs");
+    }
+
+    fn settled(&self) {
+        self.probe.assert_outside("LayoutEvents::settled");
+        self.order.lock().unwrap().push("settled");
     }
 }
 
@@ -135,15 +155,27 @@ impl SubscriptionSync for Subs {
 }
 
 /// `open` 이 락 밖에서 한 번 부르는 끼어들기 — 창 빌드(phase B) 사이 다른 명령이 모델을 바꾼 상태를 세운다.
+/// `move_window` 의 끼어들기(`during_move`)도 같은 꼴이다.
 type DuringOpen = Box<dyn FnOnce(&LayoutState) + Send>;
 
 struct Host {
     probe: Probe,
+    /// `open` · `open_at` 둘 다 실패한다.
     fail_open: bool,
+    /// 연 창 label — `open` · `open_at` 둘 다.
     opened: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     placed: Mutex<Vec<String>>,
     during_open: Mutex<Option<DuringOpen>>,
+    /// `open_at` 이 받은 `(label, 자리, 활성)`.
+    opened_at: Mutex<Vec<(String, WindowPlace, bool)>>,
+    /// `move_window` 이 받은 `(label, 자리)`.
+    moves: Mutex<Vec<(String, WindowPlace)>>,
+    /// `move_window` 가 실제로 부른 세터 걸음(순서대로) — 실패는 `fail_steps` 로 심는다.
+    steps: Mutex<Vec<MoveStep>>,
+    fail_steps: Mutex<Vec<MoveStep>>,
+    /// `move_window` 가 세터를 부르기 전 락 밖에서 한 번 — 옮기는 사이 다른 경로가 출처를 바꾼 상태를 세운다.
+    during_move: Mutex<Option<DuringOpen>>,
 }
 
 impl Host {
@@ -155,7 +187,31 @@ impl Host {
             closed: Mutex::new(Vec::new()),
             placed: Mutex::new(Vec::new()),
             during_open: Mutex::new(None),
+            opened_at: Mutex::new(Vec::new()),
+            moves: Mutex::new(Vec::new()),
+            steps: Mutex::new(Vec::new()),
+            fail_steps: Mutex::new(Vec::new()),
+            during_move: Mutex::new(None),
         }
+    }
+
+    fn fail_step(&self, step: MoveStep) {
+        self.fail_steps.lock().unwrap().push(step);
+    }
+
+    fn steps(&self) -> Vec<MoveStep> {
+        self.steps.lock().unwrap().clone()
+    }
+
+    fn setter(&self, step: MoveStep) -> Result<(), MoveFailed> {
+        self.steps.lock().unwrap().push(step);
+        if self.fail_steps.lock().unwrap().contains(&step) {
+            return Err(MoveFailed {
+                step,
+                error: format!("{step:?} 세터 실패(테스트)"),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -168,6 +224,31 @@ impl WindowHost for Host {
         self.opened.lock().unwrap().push(label.to_string());
         if self.fail_open {
             return Err("창 생성 실패(테스트)".to_string());
+        }
+        Ok(())
+    }
+
+    fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
+        self.probe.assert_outside("WindowHost::open_at");
+        self.opened_at
+            .lock()
+            .unwrap()
+            .push((label.to_string(), *at, activate));
+        self.open(label)
+    }
+
+    // 계약 = 포트 문서 — 위치 → 크기, 첫 실패에서 멈춘다. 빈 칸은 그 걸음을 건너뛴다.
+    fn move_window(&self, label: &str, at: &WindowPlace) -> Result<(), MoveFailed> {
+        self.probe.assert_outside("WindowHost::move_window");
+        self.moves.lock().unwrap().push((label.to_string(), *at));
+        if let Some(hook) = self.during_move.lock().unwrap().take() {
+            hook(&self.probe.0);
+        }
+        if at.pos.is_some() {
+            self.setter(MoveStep::Position)?;
+        }
+        if at.size.is_some() {
+            self.setter(MoveStep::Size)?;
         }
         Ok(())
     }
@@ -384,6 +465,48 @@ fn probe_fires_on_both_sides_of_the_lock() {
         "락 보유 중인데 「밖」이라 주장하면 프로브가 터져야 한다"
     );
     drop(guard);
+}
+
+// 도킹 시험이 이 가짜의 걸음 기록 · 실패 심기에 기대므로, 가짜가 포트 계약(옮기기 = 첫 실패에서 멈춤 · 빈 칸은
+// 건너뜀)을 흉내 내는지 먼저 못 박는다.
+#[test]
+fn the_fake_window_host_keeps_the_port_contract() {
+    let w = World::new();
+    let label = w.popup();
+    let at = WindowPlace {
+        pos: Some((10, 20)),
+        size: Some((300.0, 200.0)),
+    };
+
+    w.host.fail_step(MoveStep::Position);
+    let err = w.host.move_window(&label, &at).unwrap_err();
+    assert_eq!(err.step, MoveStep::Position);
+    assert_eq!(
+        w.host.steps(),
+        [MoveStep::Position],
+        "첫 실패 뒤 크기 걸음은 안 불린다"
+    );
+    let size_only = WindowPlace {
+        pos: None,
+        size: Some((300.0, 200.0)),
+    };
+    *w.host.during_move.lock().unwrap() = Some(Box::new(|state: &LayoutState| {
+        assert!(state.0.try_lock().is_ok(), "끼어들기는 락 밖");
+    }));
+    w.host.move_window(&label, &size_only).unwrap();
+    assert_eq!(
+        w.host.steps()[1..],
+        [MoveStep::Size],
+        "빈 칸은 그 걸음을 건너뛴다"
+    );
+    assert_eq!(w.host.moves.lock().unwrap().len(), 2);
+
+    w.host.open_at("slot-popup-99", &at, false).unwrap();
+    assert!(w.host.is_open("slot-popup-99"), "open_at 도 연 창이다");
+    assert_eq!(
+        w.host.opened_at.lock().unwrap().last(),
+        Some(&("slot-popup-99".to_string(), at, false))
+    );
 }
 
 // ── create_tab ───────────────────────────────────────────────────────────────
@@ -1719,6 +1842,10 @@ impl LayoutEvents for Meddler {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         self.inner.window_tabs_updated(tabs);
     }
+
+    fn settled(&self) {
+        self.inner.settled();
+    }
 }
 
 #[test]
@@ -1745,6 +1872,118 @@ fn set_split_ratio_returns_the_notified_snapshots_version_not_a_later_one() {
         w.snapshot(view).version > got.version,
         "전제: 끼어든 쓰기가 전역 카운터를 올렸다"
     );
+}
+
+// ── 알림 묶음 끝(`LayoutEvents::settled` — TRD S21-slot-docking §1-2) ──────────
+
+// 쓰기 하나가 낸 차례 — 알림이 하나 이상이고 묶음 끝은 그 뒤에 정확히 한 번(맨 끝).
+fn assert_one_batch(w: &World, write: &str) {
+    let order = w.ev.take_order();
+    let (last, notes) = order.split_last().expect("알림이 있어야 한다");
+    assert_eq!(*last, "settled", "{write}: 묶음 끝은 알림 뒤 — {order:?}");
+    assert!(
+        !notes.is_empty() && !notes.contains(&"settled"),
+        "{write}: 알림 하나 이상 · 묶음 끝 한 번 — {order:?}"
+    );
+}
+
+#[tokio::test]
+async fn every_notifying_write_ends_its_notifications_with_one_settled() {
+    let w = World::new();
+    let main = w.main_active();
+    let slot = w.empty_slot(main);
+
+    let tab = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    assert_one_batch(&w, "create_tab");
+    apply::switch_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, main).unwrap();
+    assert_one_batch(&w, "switch_tab");
+    let added =
+        apply::split_slot(&w.state, &w.subs, &w.ev, main, slot, SplitDir::LeftRight).unwrap();
+    assert_one_batch(&w, "split_slot");
+    apply::focus_slot(&w.state, &w.ev, main, added).unwrap();
+    assert_one_batch(&w, "focus_slot");
+    let split = w.snapshot(main).split_rects[0].split_id;
+    let ratio = apply::set_split_ratio(&w.state, &w.ev, main, split, 0.3).unwrap();
+    assert_eq!(ratio.outcome, SplitRatioOutcome::Applied);
+    assert_one_batch(&w, "set_split_ratio");
+    apply::rename_tab(&w.state, &w.ev, main, "이름".to_string()).unwrap();
+    assert_one_batch(&w, "rename_tab");
+    apply::assign_agent(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        main,
+        slot,
+        Uuid::new_v4().to_string(),
+    )
+    .unwrap();
+    assert_one_batch(&w, "assign_agent");
+    apply::set_slot_content(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        main,
+        added,
+        SlotContent::AgentList,
+    )
+    .unwrap();
+    assert_one_batch(&w, "set_slot_content");
+    apply::set_usage_slot(&w.state, &w.subs, &w.ev, main, added, Some(false), None).unwrap();
+    assert_one_batch(&w, "set_usage_slot");
+    apply::close_slot(&w.state, &w.subs, &w.ev, main, added).unwrap();
+    assert_one_batch(&w, "close_slot");
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, MAIN_WINDOW_LABEL, tab).unwrap();
+    assert_one_batch(&w, "close_tab");
+    apply::move_slot_to_window(
+        &w.state, &w.subs, &w.ev, &w.host, &w.labels, main, slot, None,
+    )
+    .unwrap();
+    assert_one_batch(&w, "move_slot_to_window");
+    let spawner = Spawner::ok(&w.state, Uuid::new_v4());
+    apply::spawn_into(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &spawner,
+        MAIN_WINDOW_LABEL,
+        None,
+        None,
+        None,
+        "C:/tmp".to_string(),
+    )
+    .await
+    .unwrap();
+    assert_one_batch(&w, "spawn_into");
+}
+
+#[test]
+fn writes_that_notify_nothing_never_settle() {
+    let w = World::new();
+    let (view, split) = w.split_view();
+    let label = w.popup();
+    let popup_tab = apply::list_tabs(&w.state, &label).unwrap().active;
+    w.ev.take_order();
+
+    apply::create_tab(&w.state, &w.subs, &w.ev, "no-such", None).unwrap_err();
+    apply::rename_tab(&w.state, &w.ev, Uuid::new_v4(), "x".to_string()).unwrap_err();
+    apply::focus_slot(&w.state, &w.ev, view, Uuid::new_v4()).unwrap_err();
+    let same = apply::set_split_ratio(&w.state, &w.ev, view, split, 0.5).unwrap();
+    assert_eq!(same.outcome, SplitRatioOutcome::Unchanged);
+    apply::move_slot_to_window(
+        &w.state,
+        &w.subs,
+        &w.ev,
+        &w.host,
+        &w.labels,
+        view,
+        Uuid::new_v4(),
+        None,
+    )
+    .unwrap_err();
+    // 마지막 탭을 닫아 창째 사라짐 — 알릴 창이 없다.
+    apply::close_tab(&w.state, &w.subs, &w.ev, &w.host, &label, popup_tab).unwrap();
+
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new());
 }
 
 // ── 측정 보고 2종 (ADR-0227) ─────────────────────────────────────────────────
@@ -1965,5 +2204,1044 @@ fn reads_observe_writes_immediately() {
         apply::resolve_spatial(&w.state, "right", None, Some(tab)).unwrap(),
         None,
         "새 탭은 단일 슬롯 — 오른쪽 이웃 없음"
+    );
+}
+
+// ── dock_tab (TRD S21-slot-docking §1-2 「적용 서비스」) ──────────────────────
+//
+// 여기서 안 재는 것: 새 창 자리가 어느 모니터에도 안 걸치면 기본 자리로 가는 규칙은 창 포트의 Tauri 구현 몫이라
+// `state::placement` 의 `resolve_place` 단위 시험(`lib_unit`)이 잰다. 새 창이 붙기 전에 닫혀 묘비가 선 갈래 · 재사용
+// 옮기기 중에 창이 닫힌 갈래는 닫기 요청의 모델 몫이 crate 안 함수라 `commands::popout` 의 시험(`lib_unit`)이 잰다.
+
+// ADR-0057 ①–④ — 소유 쌍이 양쪽에서 맞고 · View 마다 소유 창 하나 · 활성은 그 창의 탭 · main 탭 ≥ 1.
+fn assert_invariants(w: &World) {
+    let mgr = w.state.0.lock().unwrap();
+    let mut tabs = 0;
+    for (label, wt) in &mgr.windows {
+        assert!(
+            wt.tabs.contains(&wt.active),
+            "③ {label} 의 활성이 그 창 탭이 아니다"
+        );
+        for view in &wt.tabs {
+            assert_eq!(mgr.view_owner.get(view), Some(label), "① 탭 {view}");
+            assert!(mgr.views.contains_key(view), "① 탭 {view} 의 View 가 없다");
+        }
+        tabs += wt.tabs.len();
+    }
+    assert_eq!(mgr.views.len(), tabs, "② 창 없는 View 나 두 창의 탭");
+    assert_eq!(mgr.view_owner.len(), tabs, "① 남은 소유 쌍");
+    assert!(
+        mgr.windows
+            .get(MAIN_WINDOW_LABEL)
+            .is_some_and(|w| !w.tabs.is_empty()),
+        "④ main 탭 ≥ 1"
+    );
+}
+
+const AT: WindowPlace = WindowPlace {
+    pos: Some((300, 200)),
+    size: None,
+};
+
+fn bounds(x: f64, y: f64, w: f64, h: f64) -> Option<WindowBounds> {
+    WindowBounds::new(x, y, w, h)
+}
+
+// 알림마다 창이 아직 안 닫혔나 본다 — 빈 출처 팝아웃 닫기가 알림 묶음(끝 포함) 뒤인지 재는 눈.
+struct ClosesAfter<'a> {
+    inner: &'a Recorder,
+    host: &'a Host,
+}
+
+impl ClosesAfter<'_> {
+    fn not_closed_yet(&self) {
+        assert!(
+            self.host.closed.lock().unwrap().is_empty(),
+            "빈 출처 팝아웃은 알림을 다 낸 뒤에 닫는다"
+        );
+    }
+}
+
+impl LayoutEvents for ClosesAfter<'_> {
+    fn layout_updated(&self, snapshot: &ViewSnapshot) {
+        self.not_closed_yet();
+        self.inner.layout_updated(snapshot);
+    }
+
+    fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
+        self.not_closed_yet();
+        self.inner.window_tabs_updated(tabs);
+    }
+
+    fn settled(&self) {
+        self.not_closed_yet();
+        self.inner.settled();
+    }
+}
+
+impl World {
+    fn version(&self) -> u64 {
+        self.state.0.lock().unwrap().version
+    }
+
+    fn layout_of(&self, view: Uuid) -> LayoutNode {
+        self.snapshot(view).layout
+    }
+
+    fn owner(&self, view: Uuid) -> Option<String> {
+        self.state.0.lock().unwrap().owner_of(view).cloned()
+    }
+
+    fn tabs_of(&self, label: &str) -> Vec<Uuid> {
+        apply::list_tabs(&self.state, label)
+            .map(|t| t.tabs.iter().map(|m| m.id).collect())
+            .unwrap_or_default()
+    }
+
+    fn window_exists(&self, label: &str) -> bool {
+        self.state.0.lock().unwrap().windows.contains_key(label)
+    }
+
+    // 빈 탭 `n` 개짜리 팝아웃 — 반환 = (label, 탭 순서). 마지막 탭이 활성이다.
+    fn popup_with(&self, n: usize) -> (String, Vec<Uuid>) {
+        let label = self.popup();
+        let mut tabs = vec![apply::list_tabs(&self.state, &label).unwrap().active];
+        for _ in 1..n {
+            tabs.push(apply::create_tab(&self.state, &self.subs, &self.ev, &label, None).unwrap());
+        }
+        (label, tabs)
+    }
+
+    // 창의 모델 자리를 적는다 — 운영의 `Moved` · `Resized` 처리기와 같은 길.
+    fn observe(&self, label: &str, maximized: bool, bounds: Option<WindowBounds>) {
+        self.state
+            .0
+            .lock()
+            .unwrap()
+            .observe_window_placement(
+                label,
+                WindowPlacement {
+                    minimized: false,
+                    maximized,
+                    bounds,
+                },
+            )
+            .unwrap();
+    }
+
+    fn lease(&self, view: Uuid) -> LeaseId {
+        self.state.0.lock().unwrap().lease_tab(view).unwrap()
+    }
+
+    // 표식이 하나라도 서 있나 — 세워 보고 서면 곧바로 내린다.
+    fn lease_held(&self) -> bool {
+        let main = self.main_active();
+        let mut mgr = self.state.0.lock().unwrap();
+        match mgr.lease_tab(main) {
+            Ok(id) => {
+                mgr.release_lease(id);
+                false
+            }
+            Err(DockError::Dragging) => true,
+            Err(e) => panic!("표식 확인: {e}"),
+        }
+    }
+
+    // 끌기가 싣는 사전조건 — 표식 + 출처 배치.
+    fn drag_guard(&self, view: Uuid) -> DockGuard {
+        DockGuard {
+            lease: Some(self.lease(view)),
+            expect_source: Some(self.layout_of(view)),
+            expect_target: None,
+        }
+    }
+
+    // 준비 쓰기가 남긴 기록을 비운다 — 뒤의 단언은 도킹 한 번만 본다. ★연 창 목록(`opened`)은 남긴다★ — 이 가짜의
+    // `is_open` · 되돌리기가 그것으로 창이 떠 있는지 본다.
+    fn forget(&self) {
+        self.ev.take_order();
+        self.ev.layout.lock().unwrap().clear();
+        self.ev.tabs.lock().unwrap().clear();
+        let h = &self.host;
+        h.closed.lock().unwrap().clear();
+        h.placed.lock().unwrap().clear();
+        h.opened_at.lock().unwrap().clear();
+        h.moves.lock().unwrap().clear();
+        h.steps.lock().unwrap().clear();
+    }
+
+    fn dock(
+        &self,
+        view: Uuid,
+        to: DockDest,
+        guard: DockGuard,
+        focus: FocusPolicy,
+    ) -> Result<DockOutcome, DockError> {
+        self.dock_via(&self.ev, view, to, guard, focus)
+    }
+
+    fn dock_via(
+        &self,
+        events: &dyn LayoutEvents,
+        view: Uuid,
+        to: DockDest,
+        guard: DockGuard,
+        focus: FocusPolicy,
+    ) -> Result<DockOutcome, DockError> {
+        apply::dock_tab(
+            &self.state,
+            &self.subs,
+            events,
+            &self.host,
+            &self.labels,
+            DockRequest {
+                view,
+                to,
+                guard,
+                focus,
+            },
+        )
+    }
+
+    fn notified_views(&self) -> Vec<Uuid> {
+        self.ev
+            .layout
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.view_id)
+            .collect()
+    }
+
+    fn notified_windows(&self) -> Vec<String> {
+        self.ev
+            .tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|t| t.label.clone())
+            .collect()
+    }
+
+    fn notified_tabs_of(&self, label: &str) -> WindowTabsPayload {
+        self.ev
+            .tabs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|t| t.label == label)
+            .cloned()
+            .unwrap_or_else(|| panic!("{label} 탭 알림"))
+    }
+
+    // 낸 스냅숏 · 탭 목록이 전부 지금 `version` 이다 — 변경과 같은 임계 구역에서 떴다.
+    fn assert_notified_at_current_version(&self) {
+        let version = self.version();
+        for s in self.ev.layout.lock().unwrap().iter() {
+            assert_eq!(s.version, version, "스냅숏 {}", s.view_id);
+        }
+        for t in self.ev.tabs.lock().unwrap().iter() {
+            assert_eq!(t.version, version, "탭 목록 {}", t.label);
+        }
+    }
+}
+
+// ── dock_tab: 이음새 · 탭바 ──
+
+#[test]
+fn dock_tab_seam_moves_the_tab_under_one_lock_and_notifies_after_it() {
+    let w = World::new();
+    let target = w.main_active();
+    let (label, tabs) = w.popup_with(2);
+    let source = tabs[1];
+    let slot = w.empty_slot(source);
+    let agent = Uuid::new_v4();
+    apply::assign_agent(&w.state, &w.subs, &w.ev, source, slot, agent.to_string()).unwrap();
+    let guard = DockGuard {
+        lease: Some(w.lease(source)),
+        expect_source: Some(w.layout_of(source)),
+        expect_target: Some(TargetExpect::Seam {
+            layout: w.layout_of(target),
+            active: target,
+        }),
+    };
+    let resyncs = w.resyncs();
+    w.forget();
+
+    let out = w
+        .dock(
+            source,
+            DockDest::Seam {
+                target,
+                anchor: DockAnchor::Outer,
+                side: DockSide::Left,
+            },
+            guard,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+
+    assert_eq!(
+        out,
+        DockOutcome {
+            window: MAIN_WINDOW_LABEL.to_string(),
+            slot_ids: vec![slot],
+            closed_window: None,
+            reused: false,
+        }
+    );
+    assert_eq!(w.resyncs(), resyncs + 1, "재동기 한 번 — 락 안(프로브)");
+    assert_eq!(
+        w.subs.router.targets(agent).to_vec(),
+        [MAIN_WINDOW_LABEL.to_string()],
+        "옮긴 에이전트의 출력은 대상 창으로"
+    );
+    assert!(w.unsubscribed().is_empty(), "구독은 끊기지 않는다");
+    assert!(w.slots(target).contains(&slot), "대상 탭에 끼웠다");
+    assert_eq!(w.owner(source), None, "출처 View 는 지워진다");
+    assert_eq!(
+        w.notified_views(),
+        [target, tabs[0]],
+        "대상 배치 + 출처 창의 새 활성 배치"
+    );
+    assert_eq!(w.notified_windows(), [MAIN_WINDOW_LABEL, label.as_str()]);
+    assert_eq!(w.notified_tabs_of(&label).active, tabs[0]);
+    w.assert_notified_at_current_version();
+    assert_one_batch(&w, "dock_tab(seam)");
+    assert!(w.host.closed.lock().unwrap().is_empty());
+    assert!(!w.lease_held(), "성공하면 표식이 내려간다");
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_tab_bar_moves_the_tab_and_notifies_both_windows() {
+    let w = World::new();
+    let main_tab = w.main_active();
+    let (label, tabs) = w.popup_with(2);
+    let source = tabs[1];
+    let guard = DockGuard {
+        lease: Some(w.lease(source)),
+        expect_source: Some(w.layout_of(source)),
+        expect_target: Some(TargetExpect::Tabs(vec![main_tab])),
+    };
+    let resyncs = w.resyncs();
+    w.forget();
+
+    let out = w
+        .dock(
+            source,
+            DockDest::TabBar {
+                window: MAIN_WINDOW_LABEL.to_string(),
+                index: Some(0),
+            },
+            guard,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+
+    assert_eq!(out.window, MAIN_WINDOW_LABEL);
+    assert_eq!(out.closed_window, None);
+    assert_eq!(w.resyncs(), resyncs + 1);
+    assert_eq!(w.tabs_of(MAIN_WINDOW_LABEL), [source, main_tab]);
+    assert_eq!(w.owner(source).as_deref(), Some(MAIN_WINDOW_LABEL));
+    let main = w.notified_tabs_of(MAIN_WINDOW_LABEL);
+    assert_eq!(main.active, source, "Reveal — 옮긴 탭이 보인다");
+    assert_eq!(
+        main.tabs.iter().map(|m| m.id).collect::<Vec<_>>(),
+        [source, main_tab]
+    );
+    assert_eq!(w.notified_tabs_of(&label).active, tabs[0]);
+    assert_eq!(w.notified_views(), [source, tabs[0]]);
+    w.assert_notified_at_current_version();
+    assert_one_batch(&w, "dock_tab(tab_bar)");
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_closes_an_emptied_source_popout_once_after_its_notifications() {
+    let w = World::new();
+    let target = w.main_active();
+    let (label, tabs) = w.popup_with(1);
+    let source = tabs[0];
+    let guard = w.drag_guard(source);
+    w.forget();
+    let events = ClosesAfter {
+        inner: &w.ev,
+        host: &w.host,
+    };
+
+    let out = w
+        .dock_via(
+            &events,
+            source,
+            DockDest::Seam {
+                target,
+                anchor: DockAnchor::Outer,
+                side: DockSide::Right,
+            },
+            guard,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+
+    assert_eq!(out.closed_window.as_deref(), Some(label.as_str()));
+    assert_eq!(&*w.host.closed.lock().unwrap(), &[label.clone()], "한 번");
+    assert!(!w.window_exists(&label), "모델에서 먼저 지웠다");
+    assert_eq!(
+        w.notified_windows(),
+        [MAIN_WINDOW_LABEL],
+        "지운 창의 탭 목록은 없다"
+    );
+    assert_one_batch(&w, "dock_tab(빈 출처)");
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_refusals_change_nothing_and_notify_nothing() {
+    let w = World::new();
+    let target = w.main_active();
+    let (_, tabs) = w.popup_with(2);
+    let source = tabs[1];
+    let outer = |target| DockDest::Seam {
+        target,
+        anchor: DockAnchor::Outer,
+        side: DockSide::Top,
+    };
+    let stale_active = DockGuard {
+        expect_target: Some(TargetExpect::Seam {
+            layout: w.layout_of(target),
+            active: source,
+        }),
+        ..DockGuard::default()
+    };
+    let to_new_window = DockGuard {
+        expect_target: Some(TargetExpect::Tabs(vec![target])),
+        ..DockGuard::default()
+    };
+    let cases = [
+        (outer(source), DockGuard::NONE, DockError::SelfTarget),
+        (
+            DockDest::TabBar {
+                window: "no-such".into(),
+                index: None,
+            },
+            DockGuard::NONE,
+            DockError::WindowNotFound("no-such".into()),
+        ),
+        (outer(target), stale_active, DockError::TargetChanged),
+        (
+            DockDest::NewWindow { at: AT },
+            to_new_window,
+            DockError::TargetChanged,
+        ),
+    ];
+    let version = w.version();
+    let resyncs = w.resyncs();
+    w.forget();
+
+    for (to, guard, want) in cases {
+        assert_eq!(w.dock(source, to, guard, FocusPolicy::Reveal), Err(want));
+    }
+    w.lease(source);
+    assert_eq!(
+        w.dock(source, outer(target), DockGuard::NONE, FocusPolicy::Keep),
+        Err(DockError::Dragging),
+        "끄는 중인 탭은 표식 없이 못 옮긴다"
+    );
+
+    assert_eq!(w.version(), version);
+    assert_eq!(w.resyncs(), resyncs, "실패 = 재동기 없음");
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알림 · 묶음 끝 0");
+    assert!(
+        w.host.opened_at.lock().unwrap().is_empty(),
+        "새 창도 안 연다"
+    );
+    assert!(w.host.closed.lock().unwrap().is_empty());
+    assert!(w.lease_held(), "거절은 표식을 건드리지 않는다");
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_onto_the_same_place_is_ok_and_silent() {
+    let w = World::new();
+    let (label, tabs) = w.popup_with(2);
+    let version = w.version();
+    let resyncs = w.resyncs();
+    w.forget();
+
+    let out = w
+        .dock(
+            tabs[1],
+            DockDest::TabBar {
+                window: label.clone(),
+                index: Some(1),
+            },
+            DockGuard::NONE,
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+
+    assert_eq!(out.window, label);
+    assert_eq!(w.version(), version);
+    assert_eq!(w.resyncs(), resyncs);
+    assert_eq!(
+        w.ev.take_order(),
+        Vec::<&str>::new(),
+        "무변경 결말은 알리지 않는다"
+    );
+}
+
+#[test]
+fn dock_tab_of_mains_last_tab_announces_the_fresh_empty_tab() {
+    // 탭바(다른 창) · 새 창 — 둘 다 main 에 빈 탭이 생기고 그 배치 · 탭 목록이 알림에 실린다.
+    for to_new_window in [false, true] {
+        let w = World::new();
+        let only = w.main_active();
+        let (label, _) = w.popup_with(1);
+        w.forget();
+        let to = if to_new_window {
+            DockDest::NewWindow { at: AT }
+        } else {
+            DockDest::TabBar {
+                window: label.clone(),
+                index: None,
+            }
+        };
+
+        w.dock(only, to, DockGuard::NONE, FocusPolicy::Keep)
+            .unwrap();
+
+        let main = w.tabs_of(MAIN_WINDOW_LABEL);
+        assert_eq!(main.len(), 1, "main 에 빈 탭 하나");
+        let fresh = main[0];
+        assert_ne!(fresh, only);
+        let payload = w.notified_tabs_of(MAIN_WINDOW_LABEL);
+        assert_eq!(payload.active, fresh, "빈 탭이 main 의 활성");
+        assert_eq!(
+            payload.tabs.iter().map(|m| m.id).collect::<Vec<_>>(),
+            [fresh]
+        );
+        assert!(
+            w.notified_views().contains(&fresh),
+            "빈 탭의 배치도 싣는다 — 탭 id 만 받으면 그릴 배치가 없다"
+        );
+        w.assert_notified_at_current_version();
+        assert_one_batch(&w, "dock_tab(main 마지막 탭)");
+        assert_invariants(&w);
+    }
+}
+
+// ── dock_tab: 새 창 ──
+
+#[test]
+fn dock_tab_new_window_opens_then_attaches_and_records_the_placement() {
+    let w = World::new();
+    let first = w.main_active();
+    let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let guard = w.drag_guard(source);
+    let resyncs = w.resyncs();
+    w.forget();
+
+    let out = w
+        .dock(
+            source,
+            DockDest::NewWindow { at: AT },
+            guard,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+
+    let label = out.window.clone();
+    assert!(!out.reused);
+    assert_eq!(out.closed_window, None);
+    assert_eq!(
+        &*w.host.opened_at.lock().unwrap(),
+        &[(label.clone(), AT, true)],
+        "main 출처 = 크기 없음(팝아웃 기본)"
+    );
+    assert_eq!(&*w.host.placed.lock().unwrap(), &[label.clone()]);
+    assert!(w.host.closed.lock().unwrap().is_empty());
+    assert_eq!(w.tabs_of(&label), [source]);
+    assert_eq!(w.owner(source).as_deref(), Some(label.as_str()));
+    assert_eq!(w.resyncs(), resyncs + 1);
+    assert_eq!(w.notified_views(), [source, first]);
+    assert_eq!(w.notified_windows(), [label.as_str(), MAIN_WINDOW_LABEL]);
+    w.assert_notified_at_current_version();
+    assert_one_batch(&w, "dock_tab(새 창)");
+    assert!(!w.lease_held());
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_new_window_activates_only_when_revealing() {
+    let w = World::new();
+    let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    w.forget();
+
+    let out = w
+        .dock(
+            source,
+            DockDest::NewWindow { at: AT },
+            DockGuard::NONE,
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+
+    assert_eq!(
+        &*w.host.opened_at.lock().unwrap(),
+        &[(out.window, AT, false)],
+        "Keep = 포커스를 가져가지 않는다"
+    );
+}
+
+#[test]
+fn dock_tab_new_window_takes_the_source_popouts_normal_size_unless_given_one() {
+    let w = World::new();
+    let (label, tabs) = w.popup_with(3);
+    w.observe(&label, false, bounds(50.0, 60.0, 640.0, 480.0));
+    w.forget();
+
+    w.dock(
+        tabs[2],
+        DockDest::NewWindow { at: AT },
+        DockGuard::NONE,
+        FocusPolicy::Reveal,
+    )
+    .unwrap();
+    let given = WindowPlace {
+        pos: AT.pos,
+        size: Some((400.0, 300.0)),
+    };
+    w.dock(
+        tabs[1],
+        DockDest::NewWindow { at: given },
+        DockGuard::NONE,
+        FocusPolicy::Reveal,
+    )
+    .unwrap();
+
+    let sizes: Vec<_> = w
+        .host
+        .opened_at
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(_, at, _)| (at.pos, at.size))
+        .collect();
+    assert_eq!(
+        sizes,
+        [
+            (AT.pos, Some((640.0, 480.0))),
+            (AT.pos, Some((400.0, 300.0)))
+        ]
+    );
+}
+
+#[test]
+fn dock_tab_new_window_open_failure_changes_nothing() {
+    let w = World::failing_host();
+    let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let guard = w.drag_guard(source);
+    let version = w.version();
+    let resyncs = w.resyncs();
+    w.forget();
+
+    let out = w.dock(
+        source,
+        DockDest::NewWindow { at: AT },
+        guard,
+        FocusPolicy::Reveal,
+    );
+
+    assert!(matches!(out, Err(DockError::WindowOpen(_))), "{out:?}");
+    assert_eq!(w.version(), version);
+    assert_eq!(w.resyncs(), resyncs);
+    assert_eq!(w.owner(source).as_deref(), Some(MAIN_WINDOW_LABEL));
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new());
+    assert!(
+        w.host.closed.lock().unwrap().is_empty(),
+        "못 연 창은 닫을 것도 없다"
+    );
+    assert!(w.host.placed.lock().unwrap().is_empty());
+    assert!(w.lease_held(), "표식은 부른 쪽이 내린다");
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_new_window_closes_the_opened_window_when_phase_c_refuses() {
+    let w = World::new();
+    let source = apply::create_tab(&w.state, &w.subs, &w.ev, MAIN_WINDOW_LABEL, None).unwrap();
+    let slot = w.empty_slot(source);
+    let guard = w.drag_guard(source);
+    w.forget();
+    // 창을 여는 사이 다른 경로가 출처 탭을 나눈다.
+    *w.host.during_open.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
+        state
+            .0
+            .lock()
+            .unwrap()
+            .split_slot(source, slot, SplitDir::LeftRight)
+            .unwrap();
+    }));
+    let resyncs = w.resyncs();
+
+    let out = w.dock(
+        source,
+        DockDest::NewWindow { at: AT },
+        guard,
+        FocusPolicy::Reveal,
+    );
+
+    assert_eq!(out, Err(DockError::SourceChanged));
+    let opened: Vec<String> = w
+        .host
+        .opened_at
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(label, _, _)| label.clone())
+        .collect();
+    assert_eq!(opened.len(), 1);
+    assert_eq!(
+        &*w.host.closed.lock().unwrap(),
+        &opened,
+        "방금 연 창을 거둔다"
+    );
+    assert!(!w.window_exists(&opened[0]));
+    assert_eq!(
+        w.owner(source).as_deref(),
+        Some(MAIN_WINDOW_LABEL),
+        "탭은 출처에"
+    );
+    assert!(w.host.placed.lock().unwrap().is_empty());
+    assert_eq!(w.resyncs(), resyncs);
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new());
+    assert!(w.lease_held());
+    assert_invariants(&w);
+}
+
+// ── dock_tab: 재사용 ──
+
+impl World {
+    // 탭 하나뿐인 팝아웃 — 새 창이 아니라 그 창을 옮긴다(`plan_new_window`). 보통 자리도 적어 둔다. 반환 = (label, 탭).
+    fn lone_popout(&self) -> (String, Uuid) {
+        let (label, tabs) = self.popup_with(1);
+        self.observe(&label, false, bounds(40.0, 30.0, 800.0, 600.0));
+        (label, tabs[0])
+    }
+}
+
+#[test]
+fn dock_tab_reuse_moves_the_source_window_once_and_keeps_the_model() {
+    let w = World::new();
+    let (label, view) = w.lone_popout();
+    let slot = w.empty_slot(view);
+    let guard = w.drag_guard(view);
+    let version = w.version();
+    let resyncs = w.resyncs();
+    w.forget();
+
+    let out = w
+        .dock(
+            view,
+            DockDest::NewWindow { at: AT },
+            guard,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+
+    assert_eq!(
+        out,
+        DockOutcome {
+            window: label.clone(),
+            slot_ids: vec![slot],
+            closed_window: None,
+            reused: true,
+        }
+    );
+    assert_eq!(&*w.host.moves.lock().unwrap(), &[(label.clone(), AT)]);
+    assert!(w.host.opened_at.lock().unwrap().is_empty(), "새 창 없음");
+    assert_eq!(&*w.host.placed.lock().unwrap(), &[label.clone()], "한 번");
+    assert_eq!(w.version(), version, "모델 변경 0");
+    assert_eq!(w.resyncs(), resyncs);
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "알릴 것이 없다");
+    assert!(!w.lease_held(), "표식을 내린다");
+    assert_eq!(w.owner(view).as_deref(), Some(label.as_str()));
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_a_lone_popout_without_a_normal_place_is_reused_too() {
+    let w = World::new();
+    let (label, tabs) = w.popup_with(1);
+    let view = tabs[0];
+    assert_eq!(
+        w.state
+            .0
+            .lock()
+            .unwrap()
+            .window_attrs(&label)
+            .unwrap()
+            .bounds,
+        None,
+        "전제: 보통 자리를 아직 못 봤다"
+    );
+    let guard = w.drag_guard(view);
+    let version = w.version();
+    w.forget();
+
+    let out = w
+        .dock(
+            view,
+            DockDest::NewWindow { at: AT },
+            guard,
+            FocusPolicy::Reveal,
+        )
+        .unwrap();
+
+    assert!(out.reused);
+    assert_eq!(out.window, label);
+    assert_eq!(out.closed_window, None);
+    assert_eq!(&*w.host.moves.lock().unwrap(), &[(label.clone(), AT)]);
+    assert!(w.host.opened_at.lock().unwrap().is_empty(), "새 창 없음");
+    assert!(w.host.closed.lock().unwrap().is_empty());
+    assert_eq!(&*w.host.placed.lock().unwrap(), &[label.clone()]);
+    assert_eq!(w.version(), version);
+    assert_eq!(w.ev.take_order(), Vec::<&str>::new());
+    assert!(!w.lease_held());
+    assert_invariants(&w);
+}
+
+#[test]
+fn dock_tab_reuse_finishes_the_drop_even_if_the_source_changes_during_the_move() {
+    // 사용자 결정(2026-10-16) — 끄기가 서면 놓은 자리에 둔다. 옮기는 사이의 쓰기는 다시 판정하지 않고 되돌리지도 않는다:
+    // 그 쓰기가 남긴 모델 그대로 끝난다. (무엇, 끼어든 쓰기, 그 창이 모델에 남나)
+    type Meddle = fn(&mut ViewManager, &str, Uuid, Uuid);
+    let cases: [(&str, Meddle, bool); 3] = [
+        (
+            "출처 탭에 슬롯 더함",
+            |mgr, _, view, slot| {
+                mgr.split_slot(view, slot, SplitDir::TopBottom).unwrap();
+            },
+            true,
+        ),
+        (
+            "그 팝아웃에 탭 더함",
+            |mgr, label, _, _| {
+                mgr.create_tab(label, None).unwrap();
+            },
+            true,
+        ),
+        (
+            "출처 탭 닫음(창째 사라짐)",
+            |mgr, label, view, _| {
+                mgr.close_tab(label, view).unwrap();
+            },
+            false,
+        ),
+    ];
+    for (what, meddle, kept) in cases {
+        let w = World::new();
+        let (label, view) = w.lone_popout();
+        let slot = w.empty_slot(view);
+        let guard = w.drag_guard(view);
+        w.forget();
+        let hooked = label.clone();
+        *w.host.during_move.lock().unwrap() = Some(Box::new(move |state: &LayoutState| {
+            meddle(&mut state.0.lock().unwrap(), &hooked, view, slot);
+        }));
+
+        let out = w
+            .dock(
+                view,
+                DockDest::NewWindow { at: AT },
+                guard,
+                FocusPolicy::Reveal,
+            )
+            .unwrap_or_else(|e| panic!("{what}: {e}"));
+
+        assert!(out.reused, "{what}");
+        assert_eq!(out.window, label, "{what}");
+        assert_eq!(w.host.moves.lock().unwrap().len(), 1, "{what}");
+        assert!(w.host.opened_at.lock().unwrap().is_empty(), "{what}");
+        assert!(
+            w.host.closed.lock().unwrap().is_empty(),
+            "{what}: 거두지 않는다"
+        );
+        assert_eq!(w.window_exists(&label), kept, "{what}");
+        let placed = w.host.placed.lock().unwrap().clone();
+        assert_eq!(
+            placed,
+            if kept { vec![label.clone()] } else { vec![] },
+            "{what}: 모델에 남은 창만 자리를 적는다"
+        );
+        assert!(!w.lease_held(), "{what}: 표식은 내려가 있다");
+        assert_eq!(w.ev.take_order(), Vec::<&str>::new(), "{what}");
+        assert_invariants(&w);
+    }
+}
+
+#[test]
+fn dock_tab_reuse_move_failure_is_window_open_and_undoes_nothing() {
+    let at = WindowPlace {
+        pos: AT.pos,
+        size: Some((500.0, 400.0)),
+    };
+    for (failing, called) in [
+        (MoveStep::Position, vec![MoveStep::Position]),
+        (MoveStep::Size, vec![MoveStep::Position, MoveStep::Size]),
+    ] {
+        let w = World::new();
+        let (label, view) = w.lone_popout();
+        let guard = w.drag_guard(view);
+        let version = w.version();
+        w.forget();
+        w.host.fail_step(failing);
+        let captured = Captured::default();
+
+        let out = tracing::subscriber::with_default(captured.clone(), || {
+            w.dock(view, DockDest::NewWindow { at }, guard, FocusPolicy::Reveal)
+        });
+
+        assert!(
+            matches!(out, Err(DockError::WindowOpen(_))),
+            "{failing:?}: {out:?}"
+        );
+        let lines = captured.0.lock().unwrap().clone();
+        let ends: Vec<&Line> = lines
+            .iter()
+            .filter(|l| l.message.contains("출처 창을 못 옮겼다"))
+            .collect();
+        assert_eq!(ends.len(), 1, "{failing:?}: 끝 줄 하나 — {lines:?}");
+        assert_eq!(ends[0].level, tracing::Level::WARN, "{failing:?}");
+        let step = format!("{failing:?}");
+        assert_eq!(ends[0].field("step"), Some(step.as_str()));
+        assert_eq!(ends[0].field("label"), Some(label.as_str()));
+        assert_eq!(w.host.steps(), called, "{failing:?}: 첫 실패에서 멈춘다");
+        assert_eq!(
+            w.host.moves.lock().unwrap().len(),
+            1,
+            "{failing:?}: 다시 옮기지 않는다"
+        );
+        assert!(w.host.placed.lock().unwrap().is_empty());
+        assert!(w.host.closed.lock().unwrap().is_empty());
+        assert_eq!(w.version(), version);
+        assert_eq!(w.owner(view).as_deref(), Some(label.as_str()));
+        assert!(w.lease_held(), "표식은 부른 쪽이 내린다");
+        assert_invariants(&w);
+    }
+}
+
+// ── dock_tab: 끝 로그 ──
+
+#[derive(Debug, Clone)]
+struct Line {
+    level: tracing::Level,
+    message: String,
+    fields: Vec<(String, String)>,
+}
+
+/// 이 스레드에서 낸 이벤트를 전부 모은다(`settings` 시험의 같은 이름 가짜와 같은 꼴).
+#[derive(Clone, Default)]
+struct Captured(std::sync::Arc<Mutex<Vec<Line>>>);
+
+impl Line {
+    fn field(&self, name: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|(field, _)| field == name)
+            .map(|(_, value)| value.as_str())
+    }
+}
+
+struct Fields<'a>(&'a mut Line);
+
+impl tracing::field::Visit for Fields<'_> {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.0
+            .fields
+            .push((field.name().to_string(), value.to_string()));
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let text = format!("{value:?}");
+        if field.name() == "message" {
+            self.0.message = text;
+        } else {
+            self.0.fields.push((field.name().to_string(), text));
+        }
+    }
+}
+
+impl tracing::Subscriber for Captured {
+    fn register_callsite(
+        &self,
+        _: &'static tracing::Metadata<'static>,
+    ) -> tracing::subscriber::Interest {
+        tracing::subscriber::Interest::sometimes()
+    }
+    fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+        true
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut line = Line {
+            level: *event.metadata().level(),
+            message: String::new(),
+            fields: Vec::new(),
+        };
+        event.record(&mut Fields(&mut line));
+        self.0.lock().unwrap().push(line);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
+#[test]
+fn dock_tab_onto_the_same_place_logs_that_nothing_changed() {
+    let w = World::new();
+    let (label, tabs) = w.popup_with(2);
+    let captured = Captured::default();
+
+    tracing::subscriber::with_default(captured.clone(), || {
+        w.dock(
+            tabs[1],
+            DockDest::TabBar {
+                window: label.clone(),
+                index: Some(1),
+            },
+            DockGuard::NONE,
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+        w.dock(
+            tabs[1],
+            DockDest::TabBar {
+                window: label.clone(),
+                index: Some(0),
+            },
+            DockGuard::NONE,
+            FocusPolicy::Keep,
+        )
+        .unwrap();
+    });
+
+    let lines = captured.0.lock().unwrap().clone();
+    let applied: Vec<(tracing::Level, Option<&str>)> = lines
+        .iter()
+        .filter(|l| l.message.contains("도킹 적용"))
+        .map(|l| (l.level, l.field("changed")))
+        .collect();
+    assert_eq!(
+        applied,
+        [
+            (tracing::Level::INFO, Some("false")),
+            (tracing::Level::INFO, None)
+        ],
+        "무변경 결말만 그것을 적는다"
     );
 }

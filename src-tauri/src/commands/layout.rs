@@ -22,8 +22,9 @@ use crate::commands::settings::TauriSettingsEvents;
 use crate::daemon_client::DaemonClient;
 use crate::layout::apply;
 use crate::layout::{
-    AgentSpawner, LayoutEvents, LayoutState, SlotContent, SplitDir, SplitRatioApplied,
-    SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowTabsPayload,
+    AgentSpawner, LayoutEvents, LayoutState, MoveFailed, SlotContent, SplitDir, SplitRatioApplied,
+    SubscriptionSync, UiMetrics, ViewManager, ViewSnapshot, WindowHost, WindowPlace,
+    WindowTabsPayload,
 };
 use crate::output_router::{OutputRouter, SubscriptionDelta};
 use crate::settings::SettingsService;
@@ -68,6 +69,9 @@ impl LayoutEvents for TauriEvents<'_> {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         emit_window_tabs(self.app, tabs);
     }
+
+    // 빈 몸 — 끌기 장부의 스냅숏 계기는 아직 없다(TRD S21-slot-docking §10 6 단계가 단다).
+    fn settled(&self) {}
 }
 
 pub(crate) struct RouterSubs<'a> {
@@ -134,6 +138,10 @@ impl LayoutEvents for OwnedEvents {
     fn window_tabs_updated(&self, tabs: &WindowTabsPayload) {
         TauriEvents { app: &self.app }.window_tabs_updated(tabs);
     }
+
+    fn settled(&self) {
+        TauriEvents { app: &self.app }.settled();
+    }
 }
 
 // 셸 단위 시험이 버스 경로(표 → 적용 서비스 → 이 어댑터 → 실 소켓)를 창 없이 세우려고 crate 안에 연다.
@@ -178,12 +186,20 @@ impl WindowHost for OwnedWindowHost {
         TauriWindowHost { app: &self.app }.open(label)
     }
 
+    fn open_at(&self, label: &str, at: &WindowPlace, activate: bool) -> Result<(), String> {
+        TauriWindowHost { app: &self.app }.open_at(label, at, activate)
+    }
+
     fn close(&self, label: &str) {
         TauriWindowHost { app: &self.app }.close(label);
     }
 
     fn is_open(&self, label: &str) -> bool {
         TauriWindowHost { app: &self.app }.is_open(label)
+    }
+
+    fn move_window(&self, label: &str, at: &WindowPlace) -> Result<(), MoveFailed> {
+        TauriWindowHost { app: &self.app }.move_window(label, at)
     }
 
     fn record_placement(&self, label: &str) {

@@ -23,7 +23,11 @@ use tauri::{
 };
 
 use super::restore::RestoreWindows;
-use crate::layout::{LayoutState, WindowAttrs, WindowBounds, WindowPlacement, MAIN_WINDOW_LABEL};
+use crate::commands::popout::POPOUT_DEFAULT_SIZE;
+use crate::layout::{
+    LayoutState, MoveFailed, MoveStep, WindowAttrs, WindowBounds, WindowPlace, WindowPlacement,
+    MAIN_WINDOW_LABEL,
+};
 use crate::theme::ThemeControl;
 use crate::webview_env::WebviewEnv;
 
@@ -426,7 +430,9 @@ fn open_popout(
 
 // 팝아웃 빌더의 첫 자리 — 고른 모니터의 배율로 푼 논리 위치 · 논리 크기. 정확한 자리는 만든 뒤 [`place`] 가 놓는다
 //   (`build_runtime_window` 의 `at` 인자).
-fn first_place((bounds, at): (WindowBounds, Landing)) -> (LogicalPosition<f64>, LogicalSize<f64>) {
+pub(crate) fn first_place(
+    (bounds, at): (WindowBounds, Landing),
+) -> (LogicalPosition<f64>, LogicalSize<f64>) {
     (
         LogicalPosition::new(f64::from(at.x) / at.scale, f64::from(at.y) / at.scale),
         LogicalSize::new(bounds.w(), bounds.h()),
@@ -435,7 +441,7 @@ fn first_place((bounds, at): (WindowBounds, Landing)) -> (LogicalPosition<f64>, 
 
 /// 저장된 자리를 버리면 창이 어디로 가나 — [`land`] 의 로그 문구만 가른다.
 #[derive(Debug, Clone, Copy)]
-pub(super) enum Fallback {
+pub(crate) enum Fallback {
     /// 새로 여는 창 — 기본 자리로 연다(팝아웃 = label 의 계단 자리 · 부팅의 정적 창 = 설정의 자리).
     DefaultPlace,
     /// 이미 있는 창(런타임 복원 수락의 main) — 지금 자리에 남는다.
@@ -443,7 +449,7 @@ pub(super) enum Fallback {
 }
 
 /// [`locate`] 에 로그 한 줄을 더한 것 — 어느 모니터에도 안 걸쳐 버린 자리를 info 로 남긴다.
-pub(super) fn land(
+pub(crate) fn land(
     label: &str,
     bounds: WindowBounds,
     monitors: &[MonitorArea],
@@ -467,7 +473,7 @@ pub(super) fn land(
     at
 }
 
-fn place(window: &Window, bounds: WindowBounds, at: Landing) {
+pub(crate) fn place(window: &Window, bounds: WindowBounds, at: Landing) {
     let label = window.label();
     // 위치를 먼저, 크기를 뒤에 — tao 는 논리 크기를 창이 그때 가진 배율로 풀고(`set_inner_size`) 그 배율은
     //   WM_DPICHANGED 처리에서 갈린다. 크기를 뒤에 놓아야 도착한 모니터의 배율로 풀린다. tauri-plugin-window-state
@@ -492,6 +498,116 @@ fn maximize(window: &Window) -> bool {
             false
         }
     }
+}
+
+// ── 결과를 돌려주는 자리 입히기 — 도킹의 창 포트 몫(TRD S21-slot-docking §1-2 「적용 서비스」) ──────────
+//
+// [`place`] 는 실패를 로그로만 남긴다 — 부팅 · 복원은 거기서 더 할 것이 없다. 도킹은 못 입힌 걸음을 알아야 새 창을
+// 거두거나 옮기기 실패로 답하므로 세터마다 결과를 돌려준다. 순서는 같다 — 위치 → 크기(까닭 = [`place`]).
+
+/// 창 세터 둘 — [`move_steps`] 가 창 없이 시험되게 끊은 자리. 위치 = 물리 바깥 왼쪽 위 · 크기 = 논리 안쪽(모듈 머리).
+pub(crate) trait Setters {
+    fn set_position(&self, x: i32, y: i32) -> Result<(), String>;
+    fn set_size(&self, w: f64, h: f64) -> Result<(), String>;
+}
+
+impl Setters for Window {
+    fn set_position(&self, x: i32, y: i32) -> Result<(), String> {
+        Window::set_position(self, PhysicalPosition::new(x, y)).map_err(|e| e.to_string())
+    }
+
+    fn set_size(&self, w: f64, h: f64) -> Result<(), String> {
+        Window::set_size(self, LogicalSize::new(w, h)).map_err(|e| e.to_string())
+    }
+}
+
+/// 위치 → 크기 — ★첫 실패에서 멈추고★ 그 걸음을 돌려준다. `None` 인 걸음은 건너뛴다.
+pub(crate) fn move_steps(
+    window: &impl Setters,
+    pos: Option<(i32, i32)>,
+    size: Option<(f64, f64)>,
+) -> Result<(), MoveFailed> {
+    if let Some((x, y)) = pos {
+        window.set_position(x, y).map_err(|error| MoveFailed {
+            step: MoveStep::Position,
+            error,
+        })?;
+    }
+    if let Some((w, h)) = size {
+        window.set_size(w, h).map_err(|error| MoveFailed {
+            step: MoveStep::Size,
+            error,
+        })?;
+    }
+    Ok(())
+}
+
+/// 유한한 양수 둘인 논리 크기만 — 아니면 `None`(부르는 쪽의 기본 크기 · 크기 걸음 없음).
+pub(crate) fn usable_size(size: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    size.filter(|&(w, h)| WindowBounds::new(0.0, 0.0, w, h).is_some())
+}
+
+/// 도킹이 고른 자리를 모니터에 대 본다 — `at.pos` 에 크기(`at.size` · 쓸 수 없으면 `default_size`)를 붙인 사각형이
+/// 어느 모니터에 걸치면 그 보통 자리와 착지([`locate`]). 위치가 없거나 어디에도 안 걸치면 `None` 이고, 안 걸친 것은
+/// [`land`] 가 `fallback` 문구로 남긴다.
+pub(crate) fn resolve_place(
+    label: &str,
+    at: &WindowPlace,
+    default_size: (f64, f64),
+    monitors: &[MonitorArea],
+    fallback: Fallback,
+) -> Option<(WindowBounds, Landing)> {
+    let (x, y) = at.pos?;
+    let (w, h) = usable_size(at.size).unwrap_or(default_size);
+    let bounds = WindowBounds::new(f64::from(x), f64::from(y), w, h)?;
+    land(label, bounds, monitors, fallback).map(|landing| (bounds, landing))
+}
+
+/// 창 포트 `move_window` 의 Tauri 실물(계약 = `layout::apply::WindowHost`). 위치가 어느 모니터에도 안 걸치면 그
+/// 걸음을 건너뛴다 — 떠 있는 창을 기본 자리로 옮기지 않는다.
+pub(crate) fn move_window(
+    app: &AppHandle,
+    label: &str,
+    at: &WindowPlace,
+) -> Result<(), MoveFailed> {
+    let Some(window) = app.get_webview_window(label) else {
+        return Err(MoveFailed {
+            step: MoveStep::Position,
+            error: "옮길 창이 없다".to_string(),
+        });
+    };
+    let window = window.as_ref().window();
+    let size = usable_size(at.size);
+    let pos = match at.pos {
+        Some(_) => {
+            let landing_size = size
+                .or_else(|| kept_size(app, &window, label))
+                .unwrap_or(POPOUT_DEFAULT_SIZE);
+            resolve_place(label, at, landing_size, &monitors(app), Fallback::StayPut)
+                .map(|(_, landing)| (landing.x, landing.y))
+        }
+        None => None,
+    };
+    move_steps(&window, pos, size)
+}
+
+// 크기를 고르지 않은 옮기기가 걸침을 잴 크기(논리) — 그 창이 옮긴 뒤 가질 크기다. 팝아웃 기본 크기로 재면 그보다 작은
+//   창이 걸친다고 판정된 채 화면 밖에 놓인다. 모델의 보통 자리 크기가 먼저다 — 최대화된 창의 게터는 최대화 크기인데
+//   위치 세터가 최대화를 풀면 보통 크기로 돌아간다(F8). 모델에 없으면 지금 안쪽 크기. ★레이아웃 락은 값만 읽고
+//   곧바로 놓는다★ — 게터는 그 밖이다(모듈 머리).
+fn kept_size(app: &AppHandle, window: &Window, label: &str) -> Option<(f64, f64)> {
+    if let Some(layout) = app.try_state::<LayoutState>() {
+        let modeled = sync::lock(&layout.0)
+            .window_attrs(label)
+            .ok()
+            .and_then(|attrs| attrs.bounds);
+        if let Some(bounds) = modeled {
+            return Some((bounds.w(), bounds.h()));
+        }
+    }
+    let scale = window.scale_factor().ok()?;
+    let size = window.inner_size().ok()?;
+    saved_bounds(0, 0, size.width, size.height, scale).map(|b| (b.w(), b.h()))
 }
 
 // main 에 보통 자리와 최대화를 입힌다 — 계약은 `RestoreWindows::place_main`(부팅 ⑧ 도 같은 길). 보임 여부를 못
@@ -733,7 +849,7 @@ fn foreground_is_ours(app: &AppHandle) -> bool {
     })
 }
 
-fn monitors(app: &AppHandle) -> Vec<MonitorArea> {
+pub(crate) fn monitors(app: &AppHandle) -> Vec<MonitorArea> {
     match app.available_monitors() {
         Ok(list) => list
             .iter()
@@ -1474,5 +1590,187 @@ mod tests {
             "창 소멸도 같은 거두기다 — 거둔 뒤 집합이 빈다"
         );
         assert!(deferred.labels().is_empty());
+    }
+
+    // ── 결과를 돌려주는 자리 입히기(도킹의 창 포트) ──
+
+    /// 세터 가짜 — 부른 걸음을 적고 `fail` 에 든 걸음은 실패한다.
+    #[derive(Default)]
+    struct FakeSetters {
+        calls: Mutex<Vec<String>>,
+        fail: Vec<MoveStep>,
+    }
+
+    impl FakeSetters {
+        fn failing(fail: &[MoveStep]) -> Self {
+            FakeSetters {
+                fail: fail.to_vec(),
+                ..FakeSetters::default()
+            }
+        }
+
+        fn call(&self, step: MoveStep, what: String) -> Result<(), String> {
+            self.calls.lock().unwrap().push(what);
+            if self.fail.contains(&step) {
+                return Err(format!("{step:?} 실패(시험)"));
+            }
+            Ok(())
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Setters for FakeSetters {
+        fn set_position(&self, x: i32, y: i32) -> Result<(), String> {
+            self.call(MoveStep::Position, format!("position {x},{y}"))
+        }
+
+        fn set_size(&self, w: f64, h: f64) -> Result<(), String> {
+            self.call(MoveStep::Size, format!("size {w}x{h}"))
+        }
+    }
+
+    #[test]
+    fn moving_sets_the_position_before_the_size() {
+        let window = FakeSetters::default();
+        assert_eq!(
+            move_steps(&window, Some((10, -20)), Some((300.0, 200.5))),
+            Ok(())
+        );
+        assert_eq!(window.calls(), ["position 10,-20", "size 300x200.5"]);
+    }
+
+    #[test]
+    fn moving_stops_at_the_first_failed_step() {
+        let window = FakeSetters::failing(&[MoveStep::Position]);
+        let err = move_steps(&window, Some((10, 20)), Some((300.0, 200.0))).unwrap_err();
+        assert_eq!(err.step, MoveStep::Position);
+        assert!(err.error.contains("Position"), "{err:?}");
+        assert_eq!(window.calls(), ["position 10,20"], "크기는 안 불린다");
+
+        let window = FakeSetters::failing(&[MoveStep::Size]);
+        let err = move_steps(&window, Some((10, 20)), Some((300.0, 200.0))).unwrap_err();
+        assert_eq!(err.step, MoveStep::Size);
+        assert_eq!(window.calls().len(), 2);
+    }
+
+    #[test]
+    fn moving_skips_a_step_without_a_value() {
+        let window = FakeSetters::failing(&[MoveStep::Position]);
+        assert_eq!(move_steps(&window, None, Some((300.0, 200.0))), Ok(()));
+        assert_eq!(window.calls(), ["size 300x200"]);
+
+        let window = FakeSetters::default();
+        assert_eq!(move_steps(&window, None, None), Ok(()));
+        assert!(window.calls().is_empty());
+    }
+
+    #[test]
+    fn only_finite_positive_sizes_are_usable() {
+        assert_eq!(usable_size(Some((300.0, 200.0))), Some((300.0, 200.0)));
+        for bad in [
+            (0.0, 200.0),
+            (300.0, -1.0),
+            (f64::NAN, 200.0),
+            (300.0, f64::INFINITY),
+        ] {
+            assert_eq!(usable_size(Some(bad)), None, "{bad:?}");
+        }
+        assert_eq!(usable_size(None), None);
+    }
+
+    #[test]
+    fn a_dock_place_on_a_monitor_lands_with_its_size_or_the_default() {
+        let at = WindowPlace {
+            pos: Some((1700, 100)),
+            size: Some((400.0, 300.0)),
+        };
+        assert_eq!(
+            resolve_place(
+                "slot-popup-1",
+                &at,
+                (720.0, 500.0),
+                &[PRIMARY, RIGHT],
+                Fallback::DefaultPlace
+            ),
+            Some((
+                rect(1700.0, 100.0, 400.0, 300.0),
+                Landing {
+                    x: 1700,
+                    y: 100,
+                    scale: 1.5
+                }
+            ))
+        );
+        for size in [None, Some((0.0, 300.0))] {
+            let at = WindowPlace {
+                pos: Some((80, 60)),
+                size,
+            };
+            assert_eq!(
+                resolve_place(
+                    "slot-popup-1",
+                    &at,
+                    (720.0, 500.0),
+                    &[PRIMARY],
+                    Fallback::DefaultPlace
+                ),
+                Some((
+                    rect(80.0, 60.0, 720.0, 500.0),
+                    Landing {
+                        x: 80,
+                        y: 60,
+                        scale: 1.0
+                    }
+                )),
+                "{size:?} — 기본 크기"
+            );
+        }
+    }
+
+    // 크기를 고르지 않은 옮기기는 창이 갖고 갈 크기로 걸침을 잰다(`move_window` 의 `kept_size`) — 팝아웃 기본 크기로
+    //   재면 그보다 작은 창이 걸친다고 판정된 채 화면 밖에 놓인다.
+    #[test]
+    fn a_small_window_left_of_the_monitor_does_not_land_though_the_default_size_would() {
+        let at = WindowPlace {
+            pos: Some((-650, 100)),
+            size: None,
+        };
+        let land_with =
+            |size| resolve_place("slot-popup-1", &at, size, &[PRIMARY], Fallback::StayPut);
+        assert_eq!(land_with((300.0, 200.0)), None, "창 크기로 재면 화면 밖");
+        assert!(
+            land_with((720.0, 500.0)).is_some(),
+            "전제: 기본 크기로 재면 걸친다"
+        );
+    }
+
+    #[test]
+    fn a_dock_place_off_every_monitor_or_without_a_position_does_not_land() {
+        let off = WindowPlace {
+            pos: Some((-3000, 100)),
+            size: Some((400.0, 300.0)),
+        };
+        let unplaced = WindowPlace {
+            pos: None,
+            size: Some((400.0, 300.0)),
+        };
+        for at in [off, unplaced] {
+            for fallback in [Fallback::DefaultPlace, Fallback::StayPut] {
+                assert_eq!(
+                    resolve_place(
+                        "slot-popup-1",
+                        &at,
+                        (720.0, 500.0),
+                        &[PRIMARY, RIGHT],
+                        fallback
+                    ),
+                    None,
+                    "{at:?}"
+                );
+            }
+        }
     }
 }
