@@ -318,7 +318,7 @@ codex:                   # codex 원문 — 실행 때 -c 로 하나씩 넘길 �
 | `components/library/LibrarySlot.tsx` | 번호 슬롯 · 에이전트 슬롯 공용 껍데기 · `mode = 'full' \| 'editor-only'` — 에이전트 슬롯은 트리 · 목록을 **마운트하지 않는다**(훑기 없음 — R30 의 성능 걱정을 마운트 단위로 푼다) | — |
 | `LibraryTopBar` | ← → · 누르는 경로(R11) · 새로고침 키(F5)와 트리 머리 메뉴의 「새로고침」(E6) | — |
 | `LibraryTree` | 폴더 트리 · 루트 머리(이름 + 경로 · 「라이브러리 폴더 바꾸기…」) · 빈/없음 안내(R8) · 놓기 대상 | react-arborist(통제형 데이터) |
-| `CollectionsPane` | 「즐겨찾기 묶음 · 이 PC」(R16) | — |
+| `CollectionsPane` | 「즐겨찾기」 머리 · 첫 줄 「기본」(지울 수 없음) · 「+ 새 묶음」(R16) | — |
 | `LibraryList` | 탐색기식 목록 · 열 ★ · 종류 · 이름 · 쓰는 곳 · 정렬(R12) · 📁 줄 · 다중 선택 · 끌기 시작 · 필터 ▾ · 검색 · ★ 대상 칩 | @tanstack/react-table · @tanstack/react-virtual · react-selecto |
 | `LibraryDetail` | 부품 상세(설명 · 위치 · 쓰는 곳 링크 — 단추 없음 · R15) | — |
 | `components/preset/PresetEditor.tsx` | **공용 편집 부품 하나**(R21) — 대상 = 프리셋 또는 에이전트 · 칸 = (에이전트면 「기본」 +) 프리셋 · 지시서 · 스킬 · 설정 · `readOnly` · `depth` 를 받아 안에 든 프리셋을 **같은 부품으로 재귀** 렌더(R27) · 칸 아래 충돌/경고 줄 · 「에이전트 N개가 씀」 · 백엔드 바뀜 경고(Δ4) | — |

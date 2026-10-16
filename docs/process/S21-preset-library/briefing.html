@@ -321,7 +321,7 @@ a{color:var(--accent)}
   <div class="sh"><span class="no">2</span><h2>라이브러리 1~4</h2><span class="tag ok">확정</span></div>
   <p class="pend"><span class="tag ok">확정 2026-10-16</span>슬롯 이름 = 「라이브러리 1~4」 — 뒤에 브라우저 · 에디터를 붙이지 않음(범용: 나중에 커맨드 묶음 · 스크립트 종류도 담는다)</p>
   <p class="pend"><span class="tag ok">확정</span>번호 1~4 고정 · 빈 슬롯 메뉴 「새 콘텐츠 ▸ 라이브러리 ▸ 1~4」 · 열린 번호를 고르면 그 슬롯으로(중복 없음) · 닫힌 번호는 그 번호의 보기 상태(칸 폭 · 마지막 폴더 · 뒤로/앞으로 기록)로 다시 열림</p>
-  <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 묶음 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
+  <p class="lead">왼쪽 = 폴더 트리 + 즐겨찾기 · 가운데 = 탐색기식 목록 · 오른쪽 = 상세.</p>
   <div class="win" role="img" aria-label="라이브러리 화면 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1</div>
     <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>스킬</u> › <u>리뷰</u></span><span class="n">1</span></div>
@@ -337,8 +337,8 @@ a{color:var(--accent)}
         <div class="tr"><span class="tw">▸</span>설정</div>
         <div class="tr"><span class="tw">▸</span>프리셋</div>
         <div class="tr"><span class="tw">▸</span>받은-규칙 <span class="n">3</span></div>
-        <div class="grp">즐겨찾기 묶음 · 이 PC <span class="n">4</span></div>
-        <div class="tr"><span class="tw">·</span>즐겨찾기 <small>9</small></div>
+        <div class="grp" title="이 PC 에만 저장">즐겨찾기 <span class="n">4</span></div>
+        <div class="tr"><span class="tw">·</span>기본 <small>9</small></div>
         <div class="tr" style="outline:1px dashed var(--warn);outline-offset:-1px"><span class="star on">★</span>리뷰할 때 <span class="tag" style="font-size:10px;padding:0 5px;border-color:var(--warn);color:var(--warn)">★ 대상</span><small>5</small></div>
         <div class="tr"><span class="tw">·</span>실험 중 <small>3</small></div>
         <button class="btn" type="button" style="margin-top:4px">+ 새 묶음</button>
@@ -374,7 +374,7 @@ a{color:var(--accent)}
     <span><span class="n">1</span>← → 와 경로는 한 줄 · 슬롯 전체 폭 — 자리가 바뀔 때만 기록(폴더 이동 · 쓰는 곳 링크 · 묶음 보기 · 항목 자리로 가기) · 같은 폴더 안 클릭 · 편집은 기록 안 함 · 번호마다 따로</span>
     <span><span class="n">2</span>폴더 고르면 바로 안의 것만 (검색은 하위까지) · 트리 맨 위 머리 = 라이브러리 폴더 이름 + 경로 — 누르면 「라이브러리 폴더 바꾸기…」(§5)</span>
     <span><span class="n">3</span>목록 = 데몬이 들고 있는 목록 · Engram 안 변경은 바로 반영 · 바깥 변경은 <b>F5</b>(이 슬롯에 포커스 · 지금 폴더) 또는 <code>library.refresh</code> 로 들임 · 전체 훑기는 처음 · 폴더 바꾸기 때만 · 실행 직전 데몬이 다시 확인 (2026-10-16)</span>
-    <span><span class="n">4</span>★ = 대상 묶음에 넣고 빼기 · 묶음 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상으로」 = 대상 · ★ 대상은 PC 마다 하나(슬롯마다 아님) · 묶음은 이 PC 에만 저장</span>
+    <span><span class="n">4</span><span>머리 「즐겨찾기」 · 첫 줄 「기본」(처음부터 있음 · 지울 수 없음 · ★ 기본 대상) · 「+ 새 묶음」 · 이 PC 에만 저장(머리 툴팁) — 2026-10-16</span> · ★ = 대상 묶음에 넣고 빼기 · 묶음 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상으로」 = 대상 · ★ 대상은 PC 마다 하나(슬롯마다 아님) · 묶음은 이 PC 에만 저장</span>
     <span><span class="n">5</span>필터 ▾ = 종류 고르기(지시서 · 스킬 · 설정 · 프리셋 체크박스 · 필터 리셋) — 상태 필터는 첫 판에서 뺌</span>
     <span><span class="n">6</span>폴더 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ 칸 제외)</span>
     <span><span class="n">7</span>쓰는 곳 = 그 항목을 쓰는 프리셋과 에이전트, 직접 + 건너서(「… 통해」) · 프리셋 이름 = 그 자리로 가 고름(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶</span>
