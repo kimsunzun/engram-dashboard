@@ -2,6 +2,7 @@
 
 | 항목 | 값 |
 |---|---|
+| **범위 조정** | 2026-10-16 사용자 결정 — 작업 폴더(워크스페이스) 정리는 다음 구현으로 미룬다. 이번엔 지금 동작 그대로(만들 때 폴더를 고름 · 작업 폴더 필수). 미룬 것 = R34 · D3 · T4 · R31 · R48 · E15 의 워크스페이스 부분 · TRD 의 `workspace` 선택값 · `launched_workspace` · Unattended Engram 폴더 기본값 · `agent.setWorkspace` · 「만들 때 폴더를 묻지 않음」(TRD 해석이었고 사용자 결정 아님). 근거 = 결정 메모 2026-10-16 |
 | **상태** | **초안(사용자 미확정)** — `/review trd` 3회차 반영본 · §2 의 결정을 사용자가 고르기 전 |
 | **작성일** | 2026-10-15 |
 | **리뷰 기록** | 2026-10-15 `/review trd` 1회차 — Claude doc-aware(Architect-breaker) **FIX** 12건 + codex blind(Designer) **FIX** 2건 · 상충 없음. 반영: 실행 전처리 순서 · 백엔드별 인자 · JSON 고르기 칸의 길 · T10 · 어휘 소유 · `merge_preserving_live` · `cwd` 키 유지 · `display_name` 고정 · 일지 판정 · `std::sync::RwLock` · `libraryView.*` 셸 명령 · 실행 재료 가드 · 배치 포트 · codex 생성물 · `AGENTS.override.md` 위험 · `trash` 거부 · `Library{n}` 유일성 · 셸 세대 · `DataLayout` 기본 경로 · snapshot off 범위 · **2회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 전처리를 예약 · 떠 있음 확인 바로 뒤로 + 명부 변경 mutate 한 번(비교-교체) + Engram 폴더 = 에이전트 id(멱등) + `SpawnByCwd` 를 `spawn_blocking` 으로 · JSON 고르기 칸의 재기동 대체안 삭제(모델 · 강도 둘 다 backend 요청 — 미지원 처리는 3회차가 멈춤 조건으로 바꿈) · 휴지통 = 전용 STA 스레드 · `trash` 거부 사유 정정 · codex 생성물 소유 표식(표식 + 내용 일치일 때만 걷기 · 떠 있는 동안 미룸) · §3 의 `allowedMcpServers` 문장을 T10 에 맞춤 · `DataLayout` 루트 출처 · `backend_args` 권위 · **3회차(같은 날)** — 두 리뷰어 FIX(좁음) · 반영: 명부에 없는 id(`SpawnByCwd` · 스모크 bin)를 전처리 앞에 넣기(`ensure_registered`) + 기본 프리셋을 다는 생성자 하나(`backend::builtin_backend_preset`) + 그 길에서도 Noop 회귀 · 점검은 명부 값을 읽고 mutate 는 그 뒤 안 바뀌었을 때만(한 번 다시 시도) · JSON 고르기 칸 확인을 14 단계 수용 관문 · 멈춤 조건으로 |

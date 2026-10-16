@@ -985,7 +985,7 @@ a{color:var(--accent)}
     <span><span class="n">5</span>에이전트는 프리셋 칸만 고침(+ · ⇐ · 폴더 돋보기 · ×) — + 검색은 프리셋만 + 맨 위 고정 「내장」 묶음(기본 · claude 기본 · codex 기본) · 다른 종류는 건너뜀 · 폴더 돋보기 · 더블클릭 = 라이브러리이 그 자리로 가고 에이전트 슬롯은 그대로</span>
     <span><span class="n">6</span>만들 때 고른 백엔드의 내장 백엔드 프리셋이 붙음 · 펼친 구성에 사용자 백엔드 설정이 있으면 흐린 「쉼」, 사라지면 다시 깸 · 내장 백엔드는 하나만 — 「내장」 묶음에서 다른 쪽을 고르면 「바꾸기」(새 대화 알림)</span>
   </div>
-  <p class="pend"><span class="tag ok">확정</span><span class="tag wait">결정 대기 D4 · D5</span>만들기 = 에이전트 트리 판 메뉴 「에이전트 생성 ▸ claude/codex × JSON/터미널」 그대로(옛 작업 폴더 즐겨찾기 피커만 없앰 · 만들 때 폴더를 묻지 않음) · 기본 + 내장 백엔드 프리셋이 붙어 바로 실행 · 기존 에이전트도 같은 모양으로 이전(지금 작업 폴더 = 워크스페이스) · 모드 = 만들 때 고르는 에이전트 값</p>
+  <p class="pend"><span class="tag ok">확정</span><span class="tag wait">결정 대기 D4 · D5</span>만들기 = 에이전트 트리 판 메뉴 「에이전트 생성 ▸ claude/codex × JSON/터미널」 그대로(옛 작업 폴더 즐겨찾기 피커만 없앰 · <b>만들 때 폴더를 고르는 것은 지금 그대로</b> — 2026-10-16) · 기본 + 내장 백엔드 프리셋이 붙어 바로 실행 · 기존 에이전트도 같은 모양으로 이전(지금 작업 폴더 = 워크스페이스) · 모드 = 만들 때 고르는 에이전트 값</p>
   <p class="pend"><span class="tag ok">확정</span>모델 · 강도는 설정 에셋 값으로 고정(공유) · 에이전트별 기억 없음 · 돌고 있는 에이전트에 바꾼 프리셋은 다음 실행부터(돌고 있는 쪽엔 안내 없음 — 편집 화면에만 「에이전트 N개가 씀」 · 백엔드가 바뀌면 「새 대화」 경고)</p>
   <p class="lead">에이전트는 프리셋만 고른다 — 부품은 프리셋에서 담는다.</p>
   <details class="old"><summary><span class="tag">이전 안</span>칩 줄로 프리셋을 붙이던 에이전트 화면(실행 단추 · 「+ 프리셋」 피커 · 최종 구성 ▸) — 지금은 위 「에이전트 슬롯」</summary><div class="oldb">
@@ -1135,8 +1135,9 @@ a{color:var(--accent)}
 
 <!-- 10 -->
 <section>
-  <div class="sh"><span class="no">10</span><h2>실행</h2><span class="tag ok">확정</span><span class="tag wait">결정 대기 D3 · D6 · T4 · T8</span></div>
-  <p class="lead">화면에서 실행할 때 워크스페이스가 없으면 폴더를 묻는다(CLI · 버스 실행은 묻지 않음). JSON 모드는 새 대화마다 첫 메시지 전에 모델 · 강도 칸이 골라진 채 뜬다 — 막지 않는다.</p>
+  <div class="sh"><span class="no">10</span><h2>실행</h2><span class="tag ok">확정</span><span class="tag wait">결정 대기 D6 · T8</span></div>
+  <p class="pend"><span class="tag">다음 구현으로 미룸 2026-10-16</span><span>작업 폴더(워크스페이스) 정리 — 아래 「어디서 일할까요?」 · Engram 폴더 자동 생성 · 경로 없이 만들기 · 프리셋에 폴더 넣기는 프리셋 구현 뒤 따로 한다. 이번엔 지금 동작 그대로(만들 때 폴더를 고르고 작업 폴더는 필수).</span></p>
+  <p class="lead">(아래 폴더 그림은 다음 구현 참고용.) JSON 모드는 새 대화마다 첫 메시지 전에 모델 · 강도 칸이 골라진 채 뜬다 — 막지 않는다.</p>
   <div class="win" role="img" aria-label="실행 시 폴더 선택과 모델 선택 예시">
     <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>실행 — 리뷰봇</div>
     <div class="win-body cols-3">
@@ -1328,11 +1329,11 @@ engram agent.spawn --target 리뷰봇                  <span class="c"># 대화�
 <div class="d"><b>T10</b><span>프리셋 claude 설정을 <code>--settings</code> 하나에 합침 — ADR-0109 결정 9 대체. <code>allowedMcpServers</code> 는 Engram 값이 이김.</span></div>
 </div>
 <details class="more44"><summary>나머지 D1–D9 · T1–T9 (추천값)</summary><ul>
-<li>D1 안에 든 프리셋 지시서 = 자기 것 앞</li><li>D2 프리셋 칸도 끌어서 순서</li><li>D3 워크스페이스 = 에이전트 값 · 슬롯 머리에서 바꿈</li>
+<li>D1 안에 든 프리셋 지시서 = 자기 것 앞</li><li>D2 프리셋 칸도 끌어서 순서</li><li>D3 워크스페이스 — 다음 구현으로 미룸</li>
 <li>D4 내장 프리셋 셋 · 만들 때 기본 + 내장 백엔드 · 기존 에이전트 이전</li><li>D5 JSON/터미널 = 만들 때 고르는 에이전트 값</li><li>D6 강도 = 백엔드 원문 칸</li>
 <li>D7 설정/프리셋 구분 = 파일 안 <code>kind</code></li><li>D8 뗀 기본 프리셋을 빈 「기본」 칸에서도 다시 붙임 (<code>+</code> 검색 「내장」 묶음 길은 정해짐)</li><li>D9 세션 해석 넷 그대로</li>
 <li>T1 TanStack Query 한 파일</li><li>T2 프리셋 파일 손 주석은 고칠 때 사라짐</li><li>T3 <code>model</code> 둘 = 충돌</li>
-<li>T4 Engram 폴더 = <code>workspaces\&lt;agent-id&gt;</code></li><li>T5 설정 창 없음 → 트리 머리 메뉴 · 명령만</li><li>T6 codex 이어받기 = 바뀐 때만 <code>additionalContext</code></li>
+<li>T4 Engram 폴더 위치 — 다음 구현으로 미룸</li><li>T5 설정 창 없음 → 트리 머리 메뉴 · 명령만</li><li>T6 codex 이어받기 = 바뀐 때만 <code>additionalContext</code></li>
 <li>T7 claude 스킬 = <code>--plugin-dir</code></li><li>T8 JSON 모델 · 강도 칸 = 마지막 단계 · 안 되면 멈추고 여쭘</li><li>T9 codex 압축 뒤 재주입 = 첫 판 제외</li>
 </ul></details></section>
 </div>
