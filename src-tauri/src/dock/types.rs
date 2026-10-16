@@ -1,6 +1,7 @@
 //! 도킹 wire 페이로드(TRD S21-slot-docking §1-5) — 셸 → 웹뷰 영역([`DockRegions`] · `dock:regions`) · 세션 사건
-//! ([`SessionEvent`] · `dock:session`), 웹뷰 → 셸 보고([`DragOverReport`] · [`DropReport`]). ts-rs 로
-//! `src-tauri/bindings/` 에 굽는다. 웹뷰 → 셸 측정(크롬)은 레이아웃 창 항목에 두므로 `layout::chrome` 에 있다.
+//! ([`SessionEvent`] · `dock:session`), 웹뷰 → 셸 보고([`DragOverReport`] · [`DropReport`] · [`DragEffect`]).
+//! ts-rs 로 `src-tauri/bindings/` 에 굽는다. 웹뷰 → 셸 측정(크롬)은 레이아웃 창 항목에 두므로 `layout::chrome` 에
+//! 있다.
 //!
 //! 칸 · 띠 사각형은 [`PxRectWire`] = 그 창 캔버스의 CSS px 정수(캔버스 왼쪽 위 원점), 탭바 · 점은 그 창 뷰포트의
 //! CSS px 다. 셸이 계산하고 웹뷰는 좌표 계산 없이 그대로 점-사각형 검사를 하고 그린다(ADR-0227 결정 3).
@@ -228,6 +229,17 @@ pub struct DropReport {
     pub point: PointCss,
 }
 
+/// `dock_drag_end` 의 `effect` — 출처 `dragend` 의 `dropEffect`. `move` · `other`(copy · link) = 받은 창이 있다 ·
+/// `none` = 받은 창이 없다(창 밖 · 틈 · 바탕화면에서 뗌 · Esc · 시스템 취소).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum DragEffect {
+    Move,
+    None,
+    Other,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,6 +458,18 @@ mod tests {
         );
         let left: DragOverReport = serde_json::from_value(json!({ "type": "left" })).unwrap();
         assert_eq!(left, DragOverReport::Left);
+
+        for (effect, wire) in [
+            (DragEffect::Move, "move"),
+            (DragEffect::None, "none"),
+            (DragEffect::Other, "other"),
+        ] {
+            assert_eq!(serde_json::to_value(effect).unwrap(), json!(wire));
+            assert_eq!(
+                serde_json::from_value::<DragEffect>(json!(wire)).unwrap(),
+                effect
+            );
+        }
 
         let drop: DropReport = serde_json::from_value(json!({
             "drag_id": "d-1",
