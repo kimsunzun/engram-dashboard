@@ -327,8 +327,8 @@ a{color:var(--accent)}
     <div class="navrow"><button class="btn" type="button" aria-label="뒤로">←</button><button class="btn" type="button" aria-label="앞으로">→</button><span class="crumb"><u>라이브러리</u> › <u>스킬</u> › <u>리뷰</u></span><span class="n">1</span></div>
     <div class="win-body cols-lib">
       <div class="pane side">
-        <style>.sec44{text-transform:none;letter-spacing:0;display:flex;align-items:center;gap:6px;background:var(--app-chip);border-radius:4px;padding:2px 6px;margin-top:2px}.seam44{text-align:center;font-size:11px;color:var(--app-muted);border-top:1px solid var(--app-line);margin-top:6px;line-height:1.2}</style>
-        <div class="grp sec44">▾ library <small style="margin-left:auto;font-weight:400">D:\Engram\library</small> <span title="라이브러리 폴더 바꾸기 — 폴더 고르기 창" style="padding:0 5px;border:1px solid var(--app-line);border-radius:3px">…</span> <span class="n">2</span></div>
+        <style>.side .grp.sec44,.sec44{text-transform:none;letter-spacing:0;display:flex;align-items:center;gap:6px;background:var(--app-chip);border-radius:4px;padding:2px 6px;margin-top:2px}.seam44{text-align:center;font-size:11px;color:var(--app-muted);border-top:1px solid var(--app-line);margin-top:6px;line-height:1.2}</style>
+        <div class="grp sec44">▾ library <span title="라이브러리 폴더 바꾸기 — 폴더 고르기 창" style="margin-left:auto;padding:0 5px;border:1px solid var(--app-line);border-radius:3px">…</span> <span class="n">2</span></div><span class="pth">D:\Engram\library</span>
         <div class="tr"><span class="tw">▸</span>지시서</div>
         <div class="tr"><span class="tw">▾</span>스킬</div>
         <div class="tr l1 on"><span class="tw">▾</span>리뷰</div>
@@ -371,13 +371,46 @@ a{color:var(--accent)}
     </div>
   </div>
   <div class="caps">
-    <span><span class="n">1</span>← → 와 경로는 한 줄 · 슬롯 전체 폭 — 자리가 바뀔 때만 기록(폴더 이동 · 쓰는 곳 링크 · 묶음 보기 · 항목 자리로 가기) · 같은 폴더 안 클릭 · 편집은 기록 안 함 · 번호마다 따로</span>
-    <span><span class="n">2</span>폴더 고르면 바로 안의 것만 (검색은 하위까지) · 트리 맨 위 머리 = 라이브러리 폴더 이름 + 경로 — 머리 줄 누름 = 접기 · 펼치기 · 경로 옆 「…」 = 바로 Windows 폴더 고르기 창 → 라이브러리 폴더 바꾸기(메뉴 없음)(§5)</span>
-    <span><span class="n">3</span>목록 = 데몬이 들고 있는 목록 · Engram 안 변경은 바로 반영 · 바깥 변경은 <b>F5</b>(이 슬롯에 포커스 · 지금 폴더) 또는 <code>library.refresh</code> 로 들임 · 전체 훑기는 처음 · 폴더 바꾸기 때만 · 실행 직전 데몬이 다시 확인 (2026-10-16)</span>
-    <span><span class="n">4</span><span>왼쪽 칸 = 머리 붙은 칸 둘(언리얼 Content Browser 꼴) — 위 「▾ 라이브러리 폴더 이름 · 경로 …」(트리 · 「…」 = 폴더 고르기 창으로 바꾸기) · 아래 「▾ 즐겨찾기 ＋」(＋ = 새 묶음 · 첫 줄 「기본」 = 처음부터 있음 · 지울 수 없음 · ★ 기본 대상). 칸마다 따로 스크롤 · ▾ 로 접기(머리 줄은 남음) · 칸 사이 경계를 끌어 높이 조절(번호마다 기억) · 이 PC 에만 저장 = 머리 툴팁 — 2026-10-16</span> · ★ = 대상 묶음에 넣고 빼기 · 묶음 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상으로」 = 대상 · ★ 대상은 PC 마다 하나(슬롯마다 아님) · 묶음은 이 PC 에만 저장</span>
-    <span><span class="n">5</span>필터 ▾ = 종류 고르기(지시서 · 스킬 · 설정 · 프리셋 체크박스 · 필터 리셋) — 상태 필터는 첫 판에서 뺌</span>
-    <span><span class="n">6</span>폴더 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ 칸 제외)</span>
-    <span><span class="n">7</span>쓰는 곳 = 그 항목을 쓰는 프리셋과 에이전트, 직접 + 건너서(「… 통해」) · 프리셋 이름 = 그 자리로 가 고름(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶</span>
+    <span><span class="n">1</span><span>← → 와 경로는 한 줄 · 슬롯 전체 폭 — 자리가 바뀔 때만 기록(폴더 이동 · 쓰는 곳 링크 · 묶음 보기 · 항목 자리로 가기) · 같은 폴더 안 클릭 · 편집은 기록 안 함 · 번호마다 따로</span></span>
+    <span><span class="n">2</span><span>폴더 고르면 바로 안의 것만 (검색은 하위까지) · 트리 맨 위 머리 = 라이브러리 폴더 이름 + 경로 — 머리 줄 누름 = 접기 · 펼치기 · 경로 옆 「…」 = 바로 Windows 폴더 고르기 창 → 라이브러리 폴더 바꾸기(메뉴 없음)(§5)</span></span>
+    <span><span class="n">3</span><span>목록 = 데몬이 들고 있는 목록 · Engram 안 변경은 바로 반영 · 바깥 변경은 <b>F5</b>(이 슬롯에 포커스 · 지금 폴더) 또는 <code>library.refresh</code> 로 들임 · 전체 훑기는 처음 · 폴더 바꾸기 때만 · 실행 직전 데몬이 다시 확인 (2026-10-16)</span></span>
+    <span><span class="n">4</span><span>왼쪽 칸 = 머리 붙은 칸 둘(언리얼 Content Browser 꼴) — 위 「▾ 라이브러리 폴더 이름 · 경로 …」(트리 · 「…」 = 폴더 고르기 창으로 바꾸기) · 아래 「▾ 즐겨찾기 ＋」(＋ = 새 묶음 · 첫 줄 「기본」 = 처음부터 있음 · 지울 수 없음 · ★ 기본 대상). 칸마다 따로 스크롤 · ▾ 로 접기(머리 줄은 남음) · 칸 사이 경계를 끌어 높이 조절(번호마다 기억) · 이 PC 에만 저장 = 머리 툴팁 — 2026-10-16 · ★ = 대상 묶음에 넣고 빼기 · 묶음 한 번 누름 = 보기 · 더블클릭/우클릭 「★ 대상으로」 = 대상 · ★ 대상은 PC 마다 하나(슬롯마다 아님) · 묶음은 이 PC 에만 저장</span></span>
+    <span><span class="n">5</span><span>필터 ▾ = 종류 고르기(지시서 · 스킬 · 설정 · 프리셋 체크박스 · 필터 리셋) — 상태 필터는 첫 판에서 뺌</span></span>
+    <span><span class="n">6</span><span>폴더 먼저, 다음 이름 · 머리 클릭 = 그 열로 정렬 · 다시 = 거꾸로 (★ 칸 제외)</span></span>
+    <span><span class="n">7</span><span>쓰는 곳 = 그 항목을 쓰는 프리셋과 에이전트, 직접 + 건너서(「… 통해」) · 프리셋 이름 = 그 자리로 가 고름(오른쪽이 편집 칸) · 에이전트 이름 = 그 에이전트 프리셋 슬롯을 엶</span></span>
+  </div>
+
+  <div class="sh"><h3>필터 · 검색</h3><span class="tag ok">확정 2026-10-16</span></div>
+  <style>.pair44{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:14px}.pair44 mark{background:var(--warn-soft);color:var(--app-text);border-radius:2px;padding:0 1px}.flt44{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--app-line);border-radius:6px;background:var(--app-raised);width:max-content;margin-top:4px;font-size:12.5px}.flt44 hr{border:0;border-top:1px solid var(--app-line);margin:2px 0}.x44{color:var(--app-muted);margin-right:6px}</style>
+  <div class="pair44">
+    <div class="win" role="img" aria-label="필터를 펼친 모습">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 필터 펼침</div>
+      <div class="win-body"><div class="pane">
+        <div class="fbar"><span class="sel">필터 ▾</span><div class="search" style="flex:1 1 140px"><span class="mag">⌕</span><span class="ph">검색</span></div></div>
+        <div class="flt44">
+          <span>☐ 지시서</span><span>☑ 스킬</span><span>☐ 설정</span><span>☐ 프리셋</span>
+          <hr><span style="color:var(--accent)">필터 리셋</span>
+        </div>
+      </div></div>
+    </div>
+    <div class="win" role="img" aria-label="검색어를 치면 하위 폴더까지 찾은 결과가 목록 하나로 보이는 모습">
+      <div class="win-bar"><span class="dots"><i></i><i></i><i></i></span>라이브러리 1 — 「스킬」 에서 검색</div>
+      <div class="win-body"><div class="pane">
+        <div class="fbar"><span class="sel">필터 ▾</span><div class="search" style="flex:1 1 140px;border-color:var(--accent)"><span class="x44">×</span><span>review</span></div></div>
+        <div class="lst cols">
+          <div class="li hd"><span class="star"></span><span class="kind">종류</span><span class="name">이름</span><span class="use">위치</span></div>
+          <div class="li"><span class="star on">★</span><span class="kind">스킬</span><span class="name"><mark>review</mark></span><span class="use"><u>스킬/리뷰</u></span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">code-<mark>review</mark></span><span class="use"><u>스킬/리뷰</u></span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name"><mark>review</mark>-security</span><span class="use"><u>스킬/리뷰/보안</u></span></div>
+          <div class="li"><span class="star">☆</span><span class="kind">스킬</span><span class="name">pr-<mark>review</mark>-lite</span><span class="use"><u>스킬/공용</u></span></div>
+        </div>
+      </div></div>
+    </div>
+  </div>
+  <div class="caps">
+    <span><span>필터 ▾ = 종류 체크박스 넷 + 「필터 리셋」 — 예: 스킬만 체크하면 스킬만 보인다 · 검색과 겹쳐 걸린다</span></span>
+    <span><span>검색 = 치는 즉시 지금 폴더 + 하위 폴더 전부에서 찾아 목록 하나로 · 맞은 글자 강조 · 하위 폴더 줄(📁)은 숨김 · 「위치」 열(누르면 그 폴더로 — ← 기록에 남음)</span></span>
+    <span><span>검색칸 왼쪽 × = 지우고 원래 폴더 목록으로 · 검색어 치기는 ← 기록을 늘리지 않음 · 고르기 · 더블클릭 · ★ · 끌기는 평소와 같다</span></span>
   </div>
 </section>
 
